@@ -1,0 +1,33 @@
+[Unit]
+Description=pocketctl Relay Server
+After=network.target postgresql.service
+Wants=postgresql.service
+
+[Service]
+Type=simple
+User=pocketctl
+Group=pocketctl
+WorkingDirectory=/opt/pocketctl/relay
+ExecStart=/usr/bin/node dist/server.js
+Restart=on-failure
+RestartSec=5
+StartLimitBurst=5
+StartLimitIntervalSec=60
+
+# 环境变量
+EnvironmentFile=/opt/pocketctl/relay/.env
+
+# 安全限制
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/pocketctl/relay/logs
+PrivateTmp=true
+
+# 日志
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=pocketctl-relay
+
+[Install]
+WantedBy=multi-user.target

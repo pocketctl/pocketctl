@@ -1,0 +1,214 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>pocketctl — 新建会话</title>
+<link rel="stylesheet" href="../css/shared.css">
+<style>
+  /* Overlay */
+  .overlay {
+    position: absolute;
+    inset: 0;
+    background: rgba(1, 4, 9, 0.6);
+    z-index: 50;
+  }
+
+  /* Bottom sheet */
+  .bottom-sheet {
+    position: absolute;
+    bottom: 0;
+    left: 0;
+    right: 0;
+    background: var(--surface);
+    border-radius: var(--radius-xl) var(--radius-xl) 0 0;
+    padding: var(--space-md) var(--space-lg) var(--space-3xl);
+    z-index: 60;
+    animation: slide-up 0.3s ease;
+  }
+  @keyframes slide-up {
+    from { transform: translateY(100%); }
+    to { transform: translateY(0); }
+  }
+  .drag-handle {
+    width: 36px;
+    height: 5px;
+    background: var(--fg-tertiary);
+    border-radius: 3px;
+    margin: 0 auto var(--space-lg);
+  }
+  .sheet-title {
+    font-family: var(--font-display);
+    font-size: 20px;
+    font-weight: 600;
+    color: var(--fg);
+    margin-bottom: var(--space-xl);
+  }
+
+  /* Agent type pills */
+  .agent-pills {
+    display: flex;
+    gap: var(--space-sm);
+    margin-bottom: var(--space-xl);
+  }
+  .agent-pill {
+    padding: 10px 20px;
+    border-radius: var(--radius-full);
+    font-size: 15px;
+    font-weight: 500;
+    border: none;
+    cursor: pointer;
+    transition: all 0.2s;
+    font-family: var(--font-body);
+  }
+  .agent-pill.selected {
+    background: var(--accent);
+    color: #0d1117;
+  }
+  .agent-pill.unselected {
+    background: var(--hover-input);
+    color: var(--fg-secondary);
+  }
+
+  /* Form fields */
+  .form-group {
+    margin-bottom: var(--space-lg);
+  }
+  .form-label {
+    font-size: 13px;
+    color: var(--fg-secondary);
+    margin-bottom: var(--space-sm);
+    display: flex;
+    align-items: center;
+    gap: var(--space-xs);
+  }
+  .form-label svg { color: var(--fg-tertiary); }
+
+  .dir-input {
+    display: flex;
+    align-items: center;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-md);
+    padding: 12px var(--space-md);
+    gap: var(--space-sm);
+  }
+  .dir-input input {
+    flex: 1;
+    background: none;
+    border: none;
+    color: var(--fg);
+    font-family: var(--font-mono);
+    font-size: 14px;
+    outline: none;
+  }
+  .dir-input input::placeholder { color: var(--fg-tertiary); }
+
+  .prompt-area {
+    width: 100%;
+    min-height: 90px;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-md);
+    padding: 12px var(--space-md);
+    color: var(--fg);
+    font-family: var(--font-body);
+    font-size: 15px;
+    outline: none;
+    resize: vertical;
+    line-height: 1.5;
+  }
+  .prompt-area:focus {
+    border-color: var(--accent);
+    box-shadow: 0 0 0 3px var(--accent-muted);
+  }
+  .prompt-area::placeholder { color: var(--fg-tertiary); }
+
+  .start-btn {
+    width: 100%;
+    padding: 16px;
+    background: var(--primary-btn);
+    color: #fff;
+    border: none;
+    border-radius: var(--radius-md);
+    font-family: var(--font-display);
+    font-size: 17px;
+    font-weight: 600;
+    cursor: pointer;
+    margin-top: var(--space-sm);
+    transition: background 0.15s;
+  }
+  .start-btn:hover { background: var(--primary-btn-hover); }
+</style>
+</head>
+<body>
+<div class="iphone-frame">
+  <div class="dynamic-island"></div>
+  <div class="status-bar">
+    <span class="time">9:41</span>
+    <span class="icons">
+      <svg viewBox="0 0 16 16" width="16" height="16"><path fill="#fff" d="M1 11.5h1v3H1zm3-2h1v5H4zm3-3h1v8H7zm3-2h1v10h-1zm3-2h1v12h-1z"/></svg>
+      <svg viewBox="0 0 16 16" width="16" height="16"><path fill="#fff" d="M8 2a6 6 0 100 12A6 6 0 008 2z"/></svg>
+      <svg viewBox="0 0 16 16" width="16" height="16"><rect x="1" y="4" width="14" height="9" rx="2" fill="none" stroke="#fff" stroke-width="1.5"/><rect x="3" y="6" width="8" height="5" rx="1" fill="#fff"/></svg>
+    </span>
+  </div>
+
+  <!-- Background (dimmed session list) -->
+  <div class="screen-content" style="opacity:0.3;filter:blur(2px);">
+    <div style="padding:var(--space-lg);">
+      <div style="height:80px;background:var(--surface);border-radius:var(--radius-md);margin-bottom:8px;border:1px solid var(--border);"></div>
+      <div style="height:80px;background:var(--surface);border-radius:var(--radius-md);margin-bottom:8px;border:1px solid var(--border);"></div>
+      <div style="height:80px;background:var(--surface);border-radius:var(--radius-md);margin-bottom:8px;border:1px solid var(--border);"></div>
+    </div>
+  </div>
+
+  <!-- Overlay -->
+  <div class="overlay"></div>
+
+  <!-- Bottom Sheet -->
+  <div class="bottom-sheet">
+    <div class="drag-handle"></div>
+    <div class="sheet-title">新建会话</div>
+
+    <!-- Agent Type Selector -->
+    <div class="agent-pills">
+      <button class="agent-pill selected" onclick="selectAgent(this)">Claude Code</button>
+      <button class="agent-pill unselected" onclick="selectAgent(this)">Codex</button>
+    </div>
+
+    <!-- Working Directory -->
+    <div class="form-group">
+      <div class="form-label">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 19a2 2 0 01-2 2H4a2 2 0 01-2-2V5a2 2 0 012-2h5l2 3h9a2 2 0 012 2z"/></svg>
+        工作目录
+      </div>
+      <div class="dir-input">
+        <input type="text" placeholder="/path/to/project" value="/Users/dev/my-project">
+      </div>
+    </div>
+
+    <!-- Initial Prompt -->
+    <div class="form-group">
+      <div class="form-label">初始提示</div>
+      <textarea class="prompt-area" placeholder="描述你想要 AI 完成的任务..."></textarea>
+    </div>
+
+    <!-- Start Button -->
+    <button class="start-btn">开始会话</button>
+  </div>
+
+  <div class="home-indicator"></div>
+</div>
+
+<script>
+function selectAgent(el) {
+  document.querySelectorAll('.agent-pill').forEach(p => {
+    p.classList.remove('selected');
+    p.classList.add('unselected');
+  });
+  el.classList.remove('unselected');
+  el.classList.add('selected');
+}
+</script>
+</body>
+</html>

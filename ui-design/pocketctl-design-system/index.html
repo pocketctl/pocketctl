@@ -1,0 +1,549 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>pocketctl — 设计系统总览</title>
+<style>
+  :root {
+    --bg: #000;
+    --surface: #161b22;
+    --surface-hover: #1c2129;
+    --border: #21262d;
+    --accent: #58a6ff;
+    --fg: #e6edf3;
+    --fg-secondary: #8b949e;
+    --fg-tertiary: #484f58;
+    --success: #3fb950;
+    --primary-btn: #238636;
+  }
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  html { -webkit-font-smoothing: antialiased; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Text', 'Segoe UI', system-ui, sans-serif;
+    background: var(--bg);
+    color: var(--fg);
+    line-height: 1.6;
+    min-height: 100vh;
+  }
+
+  /* Header */
+  .header {
+    padding: 40px clamp(24px, 5vw, 60px) 20px;
+    border-bottom: 1px solid var(--border);
+  }
+  .header-inner {
+    max-width: 1200px;
+    margin: 0 auto;
+    display: flex;
+    align-items: center;
+    gap: 16px;
+  }
+  .logo-mark {
+    width: 48px; height: 48px;
+    border-radius: 12px;
+    background: rgba(88,166,255,0.1);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+  .header-text h1 {
+    font-size: 28px;
+    font-weight: 800;
+    color: var(--fg);
+    letter-spacing: -0.02em;
+  }
+  .header-text p {
+    font-size: 15px;
+    color: var(--fg-secondary);
+  }
+
+  /* Brand colors bar */
+  .colors-bar {
+    display: flex;
+    gap: 0;
+    max-width: 1200px;
+    margin: 24px auto;
+    padding: 0 clamp(24px, 5vw, 60px);
+  }
+  .color-swatch {
+    flex: 1;
+    height: 48px;
+    display: flex;
+    align-items: flex-end;
+    padding: 4px 8px;
+    font-size: 10px;
+    font-family: 'SF Mono', monospace;
+    color: rgba(255,255,255,0.5);
+  }
+
+  /* Navigation flow */
+  .flow-section {
+    max-width: 1200px;
+    margin: 0 auto;
+    padding: 32px clamp(24px, 5vw, 60px);
+  }
+  .section-label {
+    font-size: 13px;
+    color: var(--accent);
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    font-weight: 600;
+    margin-bottom: 8px;
+  }
+  .section-title {
+    font-size: 22px;
+    font-weight: 700;
+    margin-bottom: 20px;
+  }
+  .flow-diagram {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+    font-size: 14px;
+    margin-bottom: 40px;
+  }
+  .flow-node {
+    padding: 6px 14px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    color: var(--fg);
+    white-space: nowrap;
+  }
+  .flow-arrow { color: var(--fg-tertiary); font-size: 16px; }
+  .flow-branch { color: var(--fg-tertiary); font-size: 12px; }
+
+  /* Screen cards grid */
+  .screens-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+    gap: 20px;
+    max-width: 1200px;
+    margin: 0 auto;
+    padding: 0 clamp(24px, 5vw, 60px) 60px;
+  }
+  .screen-card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 16px;
+    overflow: hidden;
+    transition: border-color 0.2s, transform 0.2s;
+    cursor: pointer;
+  }
+  .screen-card:hover {
+    border-color: rgba(88,166,255,0.4);
+    transform: translateY(-2px);
+  }
+  .screen-card a {
+    display: block;
+    color: inherit;
+    text-decoration: none;
+  }
+  .screen-card .preview {
+    height: 200px;
+    background: #0d1117;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    position: relative;
+    overflow: hidden;
+  }
+  .screen-card .preview .mini-phone {
+    width: 100px;
+    height: 200px;
+    background: var(--surface);
+    border-radius: 16px;
+    border: 2px solid #2d2d44;
+    overflow: hidden;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 20px 8px 8px;
+    gap: 4px;
+  }
+  .screen-card .preview .mini-phone .mp-bar {
+    width: 50px; height: 4px; background: #000; border-radius: 2px; margin-bottom: 8px;
+  }
+  .screen-card .preview .mini-phone .mp-line {
+    width: 80%;
+    height: 3px;
+    border-radius: 2px;
+    background: var(--border);
+  }
+  .screen-card .preview .mini-phone .mp-line.accent { background: var(--accent); width: 50%; }
+  .screen-card .preview .mini-phone .mp-block {
+    width: 85%;
+    height: 16px;
+    border-radius: 4px;
+    background: var(--bg);
+    border: 1px solid var(--border);
+  }
+  .screen-card .info {
+    padding: 16px 20px;
+  }
+  .screen-card .info .card-label {
+    font-size: 11px;
+    color: var(--fg-tertiary);
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    margin-bottom: 4px;
+  }
+  .screen-card .info h3 {
+    font-size: 16px;
+    font-weight: 600;
+    margin-bottom: 4px;
+  }
+  .screen-card .info p {
+    font-size: 13px;
+    color: var(--fg-secondary);
+    line-height: 1.4;
+  }
+  .screen-card .info .states {
+    display: flex;
+    gap: 6px;
+    margin-top: 8px;
+    flex-wrap: wrap;
+  }
+  .screen-card .info .state-tag {
+    padding: 2px 8px;
+    background: rgba(88,166,255,0.08);
+    border-radius: 4px;
+    font-size: 11px;
+    color: var(--accent);
+  }
+
+  /* Extra section for non-iOS screens */
+  .extras-section {
+    max-width: 1200px;
+    margin: 0 auto;
+    padding: 0 clamp(24px, 5vw, 60px) 60px;
+  }
+  .extra-links {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+    gap: 16px;
+  }
+  .extra-link {
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    padding: 20px 24px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    text-decoration: none;
+    color: inherit;
+    transition: border-color 0.2s;
+  }
+  .extra-link:hover { border-color: rgba(88,166,255,0.4); }
+  .extra-link .el-icon {
+    width: 40px; height: 40px;
+    border-radius: 10px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 18px;
+    flex-shrink: 0;
+  }
+  .extra-link h3 { font-size: 16px; font-weight: 600; margin-bottom: 2px; }
+  .extra-link p { font-size: 13px; color: var(--fg-secondary); }
+
+  /* Footer */
+  .footer {
+    padding: 24px clamp(24px, 5vw, 60px);
+    border-top: 1px solid var(--border);
+    font-size: 13px;
+    color: var(--fg-tertiary);
+    text-align: center;
+  }
+</style>
+</head>
+<body>
+
+<!-- Header -->
+<div class="header">
+  <div class="header-inner">
+    <div class="logo-mark">
+      <svg width="28" height="28" viewBox="0 0 512 512" fill="none">
+        <rect x="128" y="48" width="256" height="416" rx="48" ry="48" stroke="#58a6ff" stroke-width="18" fill="none"/>
+        <path d="M208 200 L304 256 L208 312" stroke="#58a6ff" stroke-width="24" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+        <rect x="320" y="296" width="8" height="24" rx="4" fill="#58a6ff" opacity="0.7"/>
+      </svg>
+    </div>
+    <div class="header-text">
+      <h1>pocketctl 设计系统</h1>
+      <p>iOS App · 响应式落地页 · iOS Widget · 完整交互原型</p>
+    </div>
+  </div>
+</div>
+
+<!-- Color Palette -->
+<div class="colors-bar">
+  <div class="color-swatch" style="background:#0d1117;">#0d1117</div>
+  <div class="color-swatch" style="background:#161b22;">#161b22</div>
+  <div class="color-swatch" style="background:#21262d;">#21262d</div>
+  <div class="color-swatch" style="background:#58a6ff;color:rgba(0,0,0,0.6);">#58a6ff</div>
+  <div class="color-swatch" style="background:#238636;">#238636</div>
+  <div class="color-swatch" style="background:#e6edf3;color:rgba(0,0,0,0.5);">#e6edf3</div>
+  <div class="color-swatch" style="background:#8b949e;">#8b949e</div>
+  <div class="color-swatch" style="background:#f85149;">#f85149</div>
+  <div class="color-swatch" style="background:#d29922;">#d29922</div>
+</div>
+
+<!-- Navigation Flow -->
+<div class="flow-section">
+  <div class="section-label">导航流程</div>
+  <div class="section-title">用户旅程</div>
+  <div class="flow-diagram">
+    <span class="flow-node">启动页</span>
+    <span class="flow-arrow">→</span>
+    <span class="flow-node">登录页</span>
+    <span class="flow-arrow">→</span>
+    <span class="flow-node">Daemon 列表</span>
+    <span class="flow-arrow">→</span>
+    <span class="flow-node">Session 列表</span>
+    <span class="flow-arrow">→</span>
+    <span class="flow-node">Session 详情</span>
+    <div style="width:100%;margin-top:8px;"></div>
+    <span class="flow-branch">分⽀：</span>
+    <span class="flow-node">空状态引导</span>
+    <span class="flow-arrow">·</span>
+    <span class="flow-node">新建会话弹窗</span>
+    <span class="flow-arrow">·</span>
+    <span class="flow-node">设置页</span>
+  </div>
+</div>
+
+<!-- iOS Screens -->
+<div class="flow-section" style="padding-bottom:0;">
+  <div class="section-label">iOS App 屏幕</div>
+  <div class="section-title">核心界面（iPhone 15 Pro · iOS 17+）</div>
+</div>
+
+<div class="screens-grid">
+  <!-- Splash -->
+  <div class="screen-card">
+    <a href="screens/splash.html">
+      <div class="preview">
+        <div class="mini-phone">
+          <div class="mp-bar"></div>
+          <div class="mp-line accent" style="margin-top:24px;width:40%;"></div>
+          <div class="mp-line" style="width:60%;margin-top:4px;"></div>
+          <div class="mp-line" style="width:35%;margin-top:2px;"></div>
+        </div>
+      </div>
+      <div class="info">
+        <div class="card-label">页面 0</div>
+        <h3>启动页 / Splash</h3>
+        <p>Logo 展示 + 加载动画</p>
+      </div>
+    </a>
+  </div>
+
+  <!-- Login -->
+  <div class="screen-card">
+    <a href="screens/login.html">
+      <div class="preview">
+        <div class="mini-phone">
+          <div class="mp-bar"></div>
+          <div class="mp-block" style="height:10px;"></div>
+          <div class="mp-block" style="height:10px;"></div>
+          <div class="mp-line accent" style="height:6px;width:30%;"></div>
+          <div class="mp-block" style="height:14px;background:var(--primary-btn);border:none;"></div>
+        </div>
+      </div>
+      <div class="info">
+        <div class="card-label">页面 1</div>
+        <h3>登录/注册</h3>
+        <p>手机号验证码 + 社交登录</p>
+        <div class="states">
+          <span class="state-tag">正常</span>
+          <span class="state-tag">错误</span>
+          <span class="state-tag">倒计时</span>
+          <span class="state-tag">加载中</span>
+        </div>
+      </div>
+    </a>
+  </div>
+
+  <!-- Daemon List -->
+  <div class="screen-card">
+    <a href="screens/daemon-list.html">
+      <div class="preview">
+        <div class="mini-phone">
+          <div class="mp-bar"></div>
+          <div class="mp-line accent" style="width:45%;margin-top:8px;"></div>
+          <div class="mp-block"></div>
+          <div class="mp-block" style="opacity:0.5;"></div>
+        </div>
+      </div>
+      <div class="info">
+        <div class="card-label">页面 2</div>
+        <h3>Daemon 列表</h3>
+        <p>主机仪表盘 + 在线/离线状态</p>
+        <div class="states">
+          <span class="state-tag">正常</span>
+          <span class="state-tag">空状态</span>
+        </div>
+      </div>
+    </a>
+  </div>
+
+  <!-- Session List -->
+  <div class="screen-card">
+    <a href="screens/session-list.html">
+      <div class="preview">
+        <div class="mini-phone">
+          <div class="mp-bar"></div>
+          <div class="mp-block" style="height:8px;background:var(--success-bg);"></div>
+          <div class="mp-block"></div>
+          <div class="mp-block"></div>
+          <div class="mp-block" style="opacity:0.6;"></div>
+        </div>
+      </div>
+      <div class="info">
+        <div class="card-label">页面 3</div>
+        <h3>Session 列表</h3>
+        <p>会话列表 + 多状态指示器</p>
+        <div class="states">
+          <span class="state-tag">正常</span>
+          <span class="state-tag">空状态</span>
+        </div>
+      </div>
+    </a>
+  </div>
+
+  <!-- Session Detail -->
+  <div class="screen-card">
+    <a href="screens/session-detail.html">
+      <div class="preview">
+        <div class="mini-phone">
+          <div class="mp-bar"></div>
+          <div class="mp-line accent" style="width:55%;height:4px;"></div>
+          <div class="mp-line" style="width:70%;height:6px;background:var(--accent);opacity:0.3;border-radius:8px;"></div>
+          <div class="mp-block" style="height:24px;"></div>
+          <div class="mp-line" style="width:60%;"></div>
+        </div>
+      </div>
+      <div class="info">
+        <div class="card-label">页面 4</div>
+        <h3>Session 详情</h3>
+        <p>聊天监控 + 工具调用 + 流式消息</p>
+      </div>
+    </a>
+  </div>
+
+  <!-- New Session -->
+  <div class="screen-card">
+    <a href="screens/new-session.html">
+      <div class="preview">
+        <div class="mini-phone" style="justify-content:flex-end;">
+          <div class="mp-bar"></div>
+          <div style="flex:1;"></div>
+          <div style="width:85%;background:var(--surface);border-radius:12px 12px 0 0;padding:8px;border:1px solid var(--border);">
+            <div class="mp-line accent" style="width:40%;height:4px;"></div>
+            <div class="mp-block" style="height:8px;margin-top:4px;"></div>
+            <div class="mp-block" style="height:12px;margin-top:4px;"></div>
+          </div>
+        </div>
+      </div>
+      <div class="info">
+        <div class="card-label">页面 5</div>
+        <h3>新建会话</h3>
+        <p>底部弹窗 · Agent 选择 + 表单</p>
+      </div>
+    </a>
+  </div>
+
+  <!-- Settings -->
+  <div class="screen-card">
+    <a href="screens/settings.html">
+      <div class="preview">
+        <div class="mini-phone">
+          <div class="mp-bar"></div>
+          <div style="width:24px;height:24px;border-radius:50%;background:var(--border);margin-top:4px;"></div>
+          <div class="mp-block" style="height:6px;margin-top:4px;"></div>
+          <div class="mp-block" style="height:8px;"></div>
+          <div class="mp-block" style="height:8px;"></div>
+          <div class="mp-block" style="height:8px;"></div>
+        </div>
+      </div>
+      <div class="info">
+        <div class="card-label">页面 6</div>
+        <h3>设置/个人中心</h3>
+        <p>账户管理 + 订阅 + 主机管理</p>
+      </div>
+    </a>
+  </div>
+</div>
+
+<!-- Extras -->
+<div class="extras-section">
+  <div class="section-label">附加页面</div>
+  <div class="section-title" style="margin-bottom:20px;">落地页 & iOS Widget</div>
+  <div class="extra-links">
+    <a href="landing.html" class="extra-link">
+      <div class="el-icon" style="background:rgba(88,166,255,0.1);">🌐</div>
+      <div>
+        <h3>落地页</h3>
+        <p>响应式营销页面 · Hero + 功能 + 定价 + CTA</p>
+      </div>
+    </a>
+    <a href="screens/ios-widget.html" class="extra-link">
+      <div class="el-icon" style="background:rgba(63,185,80,0.1);">📱</div>
+      <div>
+        <h3>iOS 桌面 Widget</h3>
+        <p>小/中/大三种尺寸 · 状态监控 + 快捷入口</p>
+      </div>
+    </a>
+  </div>
+</div>
+
+<!-- Design Spec Summary -->
+<div class="flow-section" style="padding-bottom:40px;">
+  <div class="section-label">设计规范</div>
+  <div class="section-title" style="margin-bottom:16px;">速查参考</div>
+  <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(240px,1fr));gap:16px;font-size:14px;">
+    <div style="padding:16px;background:var(--surface);border-radius:12px;border:1px solid var(--border);">
+      <div style="font-weight:600;margin-bottom:8px;">字体栈</div>
+      <div style="color:var(--fg-secondary);line-height:1.8;">
+        Display: SF Pro Display<br>
+        Body: SF Pro Text<br>
+        Mono: SF Mono
+      </div>
+    </div>
+    <div style="padding:16px;background:var(--surface);border-radius:12px;border:1px solid var(--border);">
+      <div style="font-weight:600;margin-bottom:8px;">圆角系统</div>
+      <div style="color:var(--fg-secondary);line-height:1.8;">
+        小: 6-8px<br>
+        中: 12px<br>
+        大: 16-20px
+      </div>
+    </div>
+    <div style="padding:16px;background:var(--surface);border-radius:12px;border:1px solid var(--border);">
+      <div style="font-weight:600;margin-bottom:8px;">设备参数</div>
+      <div style="color:var(--fg-secondary);line-height:1.8;">
+        iPhone 15 Pro: 390×844<br>
+        Dynamic Island: 126×37<br>
+        Home Indicator: 134×5
+      </div>
+    </div>
+    <div style="padding:16px;background:var(--surface);border-radius:12px;border:1px solid var(--border);">
+      <div style="font-weight:600;margin-bottom:8px;">设计原则</div>
+      <div style="color:var(--fg-secondary);line-height:1.8;">
+        深色优先 · 信息密度<br>
+        无阴影 · 边框分隔<br>
+        状态驱动 · 真实数据
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Footer -->
+<div class="footer">
+  pocketctl Design System · 7 个 App 屏幕 · 落地页 · iOS Widget · 2025
+</div>
+</body>
+</html>

@@ -1,0 +1,298 @@
+package watcher
+
+import (
+	"bufio"
+	"context"
+	"encoding/json"
+	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
+	"sync"
+	"time"
+
+	"github.com/pocketctl/pocketctl/internal/adapter"
+	"github.com/pocketctl/pocketctl/internal/protocol"
+)
+
+// SubAgentMeta holds metadata parsed from a sub-agent's .meta.json file.
+type SubAgentMeta struct {
+	AgentID     string // extracted from filename: agent-<id>.meta.json
+	AgentType   string `json:"agentType"`
+	Description string `json:"description"`
+	ToolUseID   string `json:"toolUseId"`
+}
+
+// DiscoverSubAgents scans the subagents/ directory adjacent to a parent JSONL file.
+// parentJSONLPath is the full path to the parent session's .jsonl file.
+func DiscoverSubAgents(parentJSONLPath string) ([]SubAgentMeta, error) {
+	// Derive subagents directory: /path/<session-id>.jsonl → /path/<session-id>/subagents/
+	dir := filepath.Dir(parentJSONLPath)
+	sessionDir := strings.TrimSuffix(filepath.Base(parentJSONLPath), ".jsonl")
+	subagentsDir := filepath.Join(dir, sessionDir, "subagents")
+
+	entries, err := os.ReadDir(subagentsDir)
+	if err != nil {
+		return nil, nil // directory doesn't exist yet — not an error
+	}
+
+	var metas []SubAgentMeta
+	for _, entry := range entries {
+		name := entry.Name()
+		if !strings.HasPrefix(name, "agent-") || !strings.HasSuffix(name, ".meta.json") {
+			continue
+		}
+		// Extract agent ID from filename: agent-<id>.meta.json
+		agentID := strings.TrimPrefix(name, "agent-")
+		agentID = strings.TrimSuffix(agentID, ".meta.json")
+
+		data, err := os.ReadFile(filepath.Join(subagentsDir, name))
+		if err != nil {
+			continue
+		}
+
+		var meta SubAgentMeta
+		if err := json.Unmarshal(data, &meta); err != nil {
+			continue
+		}
+		meta.AgentID = agentID
+		metas = append(metas, meta)
+	}
+	return metas, nil
+}
+
+// SubAgentJSONLPath returns the JSONL file path for a sub-agent.
+func SubAgentJSONLPath(parentJSONLPath string, agentID string) string {
+	dir := filepath.Dir(parentJSONLPath)
+	sessionDir := strings.TrimSuffix(filepath.Base(parentJSONLPath), ".jsonl")
+	return filepath.Join(dir, sessionDir, "subagents", "agent-"+agentID+".jsonl")
+}
+
+// JSONLTailer tracks and reads new lines from a Claude Code JSONL session file.
+type JSONLTailer struct {
+	mu       sync.Mutex
+	filePath string
+	offset   int64
+}
+
+// NewJSONLTailer creates a tailer for the given JSONL file path.
+// It starts from the end of the file (no historical replay).
+func NewJSONLTailer(filePath string) (*JSONLTailer, error) {
+	info, err := os.Stat(filePath)
+	if err != nil {
+		return nil, fmt.Errorf("stat jsonl file: %w", err)
+	}
+	return &JSONLTailer{
+		filePath: filePath,
+		offset:   info.Size(), // Start from end
+	}, nil
+}
+
+// NewJSONLTailerFromStart creates a tailer that reads from the beginning.
+func NewJSONLTailerFromStart(filePath string) (*JSONLTailer, error) {
+	if _, err := os.Stat(filePath); err != nil {
+		return nil, fmt.Errorf("stat jsonl file: %w", err)
+	}
+	return &JSONLTailer{
+		filePath: filePath,
+		offset:   0,
+	}, nil
+}
+
+// TailNewLines reads any new lines appended since last call.
+// Returns parsed DaemonEvents and any new lines (raw) for title extraction.
+func (t *JSONLTailer) TailNewLines() ([]protocol.DaemonEvent, []string, error) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	info, err := os.Stat(t.filePath)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	if info.Size() <= t.offset {
+		return nil, nil, nil // No new data
+	}
+
+	f, err := os.Open(t.filePath)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer f.Close()
+
+	// Seek to last read position
+	if _, err := f.Seek(t.offset, 0); err != nil {
+		return nil, nil, err
+	}
+
+	var allEvents []protocol.DaemonEvent
+	var rawLines []string
+	scanner := bufio.NewScanner(f)
+	scanner.Buffer(make([]byte, 1024*1024), 1024*1024)
+
+	for scanner.Scan() {
+		line := scanner.Text()
+		rawLines = append(rawLines, line)
+
+		events, err := adapter.ParseJSONLLine(line)
+		if err != nil {
+			continue // Skip unparseable lines
+		}
+		allEvents = append(allEvents, events...)
+	}
+
+	// Update offset to current position
+	newOffset, _ := f.Seek(0, 1)
+	t.offset = newOffset
+
+	return allEvents, rawLines, nil
+}
+
+// Run starts a periodic tail loop, sending events to outputCh.
+// It also checks for the first user message to generate a title.
+func (t *JSONLTailer) Run(ctx context.Context, outputCh chan<- protocol.DaemonEvent, titleCb func(title string)) {
+	ticker := time.NewTicker(1 * time.Second)
+	defer ticker.Stop()
+
+	titleSent := false
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			events, rawLines, err := t.TailNewLines()
+			if err != nil {
+				continue
+			}
+
+			// Send events
+			for _, evt := range events {
+				outputCh <- evt
+			}
+
+			// Check for title from first user message
+			if !titleSent && titleCb != nil && len(rawLines) > 0 {
+				title := adapter.ExtractFirstUserMessage(rawLines, 60)
+				if title != "" {
+					titleCb(title)
+					titleSent = true
+				}
+			}
+		}
+	}
+}
+
+// ResolveJSONLPath returns the JSONL file path for a given session and cwd.
+// Claude Code stores sessions at ~/.claude/projects/<encoded-path>/<session-id>.jsonl
+func ResolveJSONLPath(sessionID string, cwd string) (string, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", err
+	}
+
+	// Encode cwd: replace / with -
+	encoded := "-" + strings.ReplaceAll(strings.TrimPrefix(cwd, "/"), "/", "-")
+	dir := filepath.Join(home, ".claude", "projects", encoded)
+	filePath := filepath.Join(dir, sessionID+".jsonl")
+
+	if _, err := os.Stat(filePath); err != nil {
+		// Try finding the file by searching for session ID across all project dirs
+		return findJSONLBySessionID(home, sessionID)
+	}
+
+	return filePath, nil
+}
+
+// ExtractTitleFromJSONL reads the beginning of a JSONL file to extract a title
+// from the first user message. Returns "Terminal Session" if no user message found.
+func ExtractTitleFromJSONL(filePath string) string {
+	f, err := os.Open(filePath)
+	if err != nil {
+		return "Terminal Session"
+	}
+	defer f.Close()
+
+	var lines []string
+	scanner := bufio.NewScanner(f)
+	scanner.Buffer(make([]byte, 1024*1024), 1024*1024)
+	// Read up to 500 lines looking for the first user message
+	for i := 0; i < 500 && scanner.Scan(); i++ {
+		lines = append(lines, scanner.Text())
+	}
+
+	title := adapter.ExtractFirstUserMessage(lines, 60)
+	if title == "" {
+		return "Terminal Session"
+	}
+	return title
+}
+
+func findJSONLBySessionID(home string, sessionID string) (string, error) {
+	projectsDir := filepath.Join(home, ".claude", "projects")
+	entries, err := os.ReadDir(projectsDir)
+	if err != nil {
+		return "", fmt.Errorf("read projects dir: %w", err)
+	}
+
+	target := sessionID + ".jsonl"
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		candidate := filepath.Join(projectsDir, entry.Name(), target)
+		if _, err := os.Stat(candidate); err == nil {
+			return candidate, nil
+		}
+	}
+
+	return "", fmt.Errorf("jsonl file not found for session %s", sessionID)
+}
+
+// SubAgentTailer wraps a JSONLTailer for a sub-agent, stamping events with AgentID.
+type SubAgentTailer struct {
+	tailer   *JSONLTailer
+	agentID  string
+}
+
+// NewSubAgentTailer creates a tailer for a sub-agent JSONL file that reads from the start.
+func NewSubAgentTailer(filePath string, agentID string) (*SubAgentTailer, error) {
+	tailer, err := NewJSONLTailerFromStart(filePath)
+	if err != nil {
+		return nil, fmt.Errorf("create sub-agent tailer: %w", err)
+	}
+	return &SubAgentTailer{tailer: tailer, agentID: agentID}, nil
+}
+
+// TailNewLines reads new lines and stamps each event with the sub-agent's AgentID.
+func (t *SubAgentTailer) TailNewLines() ([]protocol.DaemonEvent, error) {
+	events, _, err := t.tailer.TailNewLines()
+	if err != nil {
+		return nil, err
+	}
+	for i := range events {
+		events[i].AgentID = t.agentID
+	}
+	return events, nil
+}
+
+// Run starts a periodic tail loop for a sub-agent, sending stamped events to outputCh.
+func (t *SubAgentTailer) Run(ctx context.Context, outputCh chan<- protocol.DaemonEvent) {
+	ticker := time.NewTicker(1 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			events, err := t.TailNewLines()
+			if err != nil {
+				continue
+			}
+			for _, evt := range events {
+				outputCh <- evt
+			}
+		}
+	}
+}

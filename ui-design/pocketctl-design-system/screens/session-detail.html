@@ -1,0 +1,445 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>pocketctl — Session 详情</title>
+<link rel="stylesheet" href="../css/shared.css">
+<style>
+  .chat-area {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-md);
+    padding: var(--space-md) var(--space-lg);
+  }
+
+  /* Status badge in toolbar */
+  .status-pill {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    padding: 4px 10px;
+    border-radius: var(--radius-full);
+    font-size: 12px;
+    font-weight: 600;
+  }
+  .status-pill.running { background: var(--success-bg); color: var(--success); }
+  .status-pill .pulse {
+    width: 6px; height: 6px;
+    border-radius: 50%;
+    background: currentColor;
+    animation: pulse-green 1.5s infinite;
+  }
+
+  /* Banners */
+  .top-banner {
+    display: flex;
+    align-items: center;
+    gap: var(--space-sm);
+    padding: var(--space-sm) var(--space-lg);
+    font-size: 13px;
+  }
+  .top-banner.daemon-offline { background: var(--accent-muted); color: var(--accent); }
+  .top-banner.session-exited { background: var(--warning-bg); color: var(--warning); }
+  .top-banner .banner-btn {
+    margin-left: auto;
+    background: none;
+    border: none;
+    color: var(--accent);
+    font-size: 13px;
+    font-weight: 500;
+    cursor: pointer;
+  }
+
+  /* Message bubbles */
+  .msg { max-width: 85%; animation: fade-in 0.2s ease; }
+  .msg-user {
+    align-self: flex-end;
+    background: var(--user-bubble);
+    color: #fff;
+    padding: 10px 14px;
+    border-radius: 16px 16px 4px 16px;
+    font-size: 15px;
+    line-height: 1.5;
+  }
+  .msg-agent {
+    align-self: flex-start;
+    background: #21262d;
+    color: var(--fg);
+    padding: 10px 14px;
+    border-radius: 16px 16px 16px 4px;
+    font-size: 15px;
+    line-height: 1.5;
+  }
+  .msg-agent.streaming .blink-cursor::after {
+    content: '▎';
+    animation: blink-cursor 0.8s step-end infinite;
+    color: var(--accent);
+  }
+  .msg-error {
+    align-self: flex-start;
+    background: var(--error-bg);
+    color: var(--error);
+    padding: 10px 14px;
+    border-radius: 16px 16px 16px 4px;
+    font-size: 14px;
+    line-height: 1.5;
+  }
+
+  /* Tool call cards */
+  .tool-card {
+    align-self: flex-start;
+    background: #21262d;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-md);
+    width: 92%;
+    max-width: 340px;
+    overflow: hidden;
+    animation: fade-in 0.2s ease;
+  }
+  .tool-card .tool-header {
+    display: flex;
+    align-items: center;
+    gap: var(--space-sm);
+    padding: var(--space-md);
+    cursor: pointer;
+  }
+  .tool-card .tool-icon { font-size: 16px; flex-shrink: 0; }
+  .tool-card .tool-name {
+    font-weight: 600;
+    font-size: 14px;
+    color: var(--accent);
+    flex: 1;
+  }
+  .tool-card .tool-args {
+    font-size: 12px;
+    color: var(--fg-tertiary);
+    font-family: var(--font-mono);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    max-width: 140px;
+  }
+  .tool-card .tool-status { flex-shrink: 0; }
+  .tool-card .tool-status .check {
+    color: var(--success);
+    font-size: 14px;
+  }
+  .tool-card .tool-status .spinner {
+    width: 14px; height: 14px;
+    border-width: 2px;
+    border-top-color: var(--fg-secondary);
+  }
+  .tool-card .tool-chevron {
+    color: var(--fg-tertiary);
+    font-size: 12px;
+    transition: transform 0.15s;
+  }
+  .tool-card.expanded .tool-chevron { transform: rotate(180deg); }
+
+  .tool-card .tool-body {
+    border-top: 1px solid var(--border);
+    display: none;
+  }
+  .tool-card.expanded .tool-body { display: block; }
+
+  .tool-body .tool-section {
+    padding: var(--space-sm) var(--space-md);
+  }
+  .tool-body .tool-label {
+    font-size: 11px;
+    color: var(--fg-tertiary);
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    margin-bottom: 4px;
+  }
+  .tool-body .tool-input {
+    background: #0d1117;
+    padding: var(--space-sm) var(--space-md);
+    font-family: var(--font-mono);
+    font-size: 12px;
+    color: var(--success);
+    border-radius: 4px;
+    margin: 0 var(--space-sm);
+  }
+  .tool-body .tool-output {
+    background: #0d1117;
+    padding: var(--space-sm) var(--space-md);
+    font-family: var(--font-mono);
+    font-size: 12px;
+    color: var(--fg-secondary);
+    border-radius: 4px;
+    margin: var(--space-sm);
+    max-height: 80px;
+    overflow: hidden;
+    line-height: 1.5;
+  }
+  .tool-body .toggle-expand {
+    background: none;
+    border: none;
+    color: var(--accent);
+    font-size: 12px;
+    padding: 4px var(--space-md) var(--space-sm);
+    cursor: pointer;
+    font-family: var(--font-body);
+  }
+
+  /* Sub-agent card */
+  .sub-agent-card {
+    margin: var(--space-sm) var(--space-sm) var(--space-sm);
+    background: var(--sub-agent-bg);
+    border: 1px solid rgba(192, 132, 252, 0.2);
+    border-radius: var(--radius-sm);
+    overflow: hidden;
+  }
+  .sub-agent-card .tool-header { padding: var(--space-sm) var(--space-md); }
+  .sub-agent-card .tool-name { color: var(--sub-agent); }
+
+  /* Timeline milestones */
+  .timeline {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: var(--space-md) var(--space-lg);
+    margin: 0 var(--space-lg);
+    background: var(--surface);
+    border-radius: var(--radius-sm);
+    border: 1px solid var(--border);
+    margin-bottom: var(--space-md);
+  }
+  .timeline .milestone {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 4px;
+  }
+  .timeline .milestone .dot {
+    width: 8px; height: 8px;
+    border-radius: 50%;
+    background: var(--border);
+  }
+  .timeline .milestone .dot.active { background: var(--success); }
+  .timeline .milestone .dot.current { background: var(--success); animation: pulse-green 1.5s infinite; }
+  .timeline .milestone .label {
+    font-size: 11px;
+    color: var(--fg-tertiary);
+  }
+  .timeline .milestone .label.active { color: var(--fg-secondary); }
+  .timeline .milestone .time {
+    font-size: 10px;
+    color: var(--fg-tertiary);
+    font-family: var(--font-mono);
+  }
+  .timeline .line {
+    flex: 1;
+    height: 1px;
+    background: var(--border);
+    margin: 0 8px;
+    align-self: flex-start;
+    margin-top: 4px;
+  }
+  .timeline .line.done { background: var(--success); }
+
+  /* Bottom input */
+  .bottom-input {
+    position: absolute;
+    bottom: 34px;
+    left: 0;
+    right: 0;
+    padding: var(--space-sm) var(--space-lg);
+    display: flex;
+    gap: var(--space-sm);
+    background: var(--bg);
+    border-top: 1px solid var(--border);
+  }
+  .bottom-input .input-wrap {
+    flex: 1;
+    display: flex;
+    align-items: center;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-xl);
+    padding: 0 var(--space-md);
+    min-height: 40px;
+  }
+  .bottom-input .input-wrap input {
+    flex: 1;
+    background: none;
+    border: none;
+    color: var(--fg);
+    font-size: 15px;
+    font-family: var(--font-body);
+    outline: none;
+    padding: 8px 0;
+  }
+  .bottom-input .input-wrap input::placeholder { color: var(--fg-tertiary); }
+  .bottom-input .send-btn {
+    width: 32px; height: 32px;
+    border-radius: 50%;
+    background: var(--accent);
+    border: none;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+    flex-shrink: 0;
+    align-self: center;
+  }
+  .bottom-input .ended-text {
+    color: var(--fg-tertiary);
+    font-size: 14px;
+    text-align: center;
+    width: 100%;
+    padding: 10px 0;
+  }
+</style>
+</head>
+<body>
+<div class="iphone-frame">
+  <div class="dynamic-island"></div>
+  <div class="status-bar">
+    <span class="time">9:41</span>
+    <span class="icons">
+      <svg viewBox="0 0 16 16" width="16" height="16"><path fill="#fff" d="M1 11.5h1v3H1zm3-2h1v5H4zm3-3h1v8H7zm3-2h1v10h-1zm3-2h1v12h-1z"/></svg>
+      <svg viewBox="0 0 16 16" width="16" height="16"><path fill="#fff" d="M8 2a6 6 0 100 12A6 6 0 008 2z"/></svg>
+      <svg viewBox="0 0 16 16" width="16" height="16"><rect x="1" y="4" width="14" height="9" rx="2" fill="none" stroke="#fff" stroke-width="1.5"/><rect x="3" y="6" width="8" height="5" rx="1" fill="#fff"/></svg>
+    </span>
+  </div>
+
+  <!-- Toolbar -->
+  <div class="nav-bar" style="padding:var(--space-sm) var(--space-lg);">
+    <button class="back-btn" style="font-size:15px;">
+      <svg width="10" height="18" viewBox="0 0 12 20" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><path d="M10 2L2 10L10 18"/></svg>
+      MacBook-Pro
+    </button>
+    <span class="nav-title mono" style="font-size:12px;">sess_7a3f…重构认证模块</span>
+    <span class="status-pill running"><span class="pulse"></span>运行中</span>
+  </div>
+
+  <div class="screen-content has-bottom-input" style="padding-top:0;">
+    <!-- Timeline -->
+    <div style="padding:var(--space-sm) var(--space-lg) 0;">
+      <div class="timeline">
+        <div class="milestone">
+          <div class="dot active"></div>
+          <span class="label active">创建</span>
+          <span class="time">14:32</span>
+        </div>
+        <div class="line done"></div>
+        <div class="milestone">
+          <div class="dot current"></div>
+          <span class="label active">运行</span>
+          <span class="time">14:33</span>
+        </div>
+        <div class="line"></div>
+        <div class="milestone">
+          <div class="dot"></div>
+          <span class="label">完成</span>
+          <span class="time">—</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- Chat Messages -->
+    <div class="chat-area">
+      <!-- User message -->
+      <div class="msg msg-user">重构 src/auth 目录下的认证模块，把 JWT 逻辑拆成独立中间件</div>
+
+      <!-- Agent message -->
+      <div class="msg msg-agent">好的，我来分析现有的认证代码结构。先看看目录和当前实现：</div>
+
+      <!-- Tool card: Read (expanded) -->
+      <div class="tool-card expanded" onclick="this.classList.toggle('expanded')">
+        <div class="tool-header">
+          <span class="tool-icon">📖</span>
+          <span class="tool-name">Read</span>
+          <span class="tool-args">src/auth/index.ts:1-48</span>
+          <span class="tool-status"><span class="check">✓</span></span>
+          <span class="tool-chevron">▼</span>
+        </div>
+        <div class="tool-body">
+          <div class="tool-section">
+            <div class="tool-label">输入</div>
+          </div>
+          <div class="tool-input">src/auth/index.ts:1-48</div>
+          <div class="tool-section" style="padding-top:var(--space-sm);">
+            <div class="tool-label">输出</div>
+          </div>
+          <div class="tool-output"> 1│ import jwt from 'jsonwebtoken';
+ 2│ import { RequestHandler } from 'express';
+ 3│
+ 4│ const SECRET = process.env.JWT_SECRET!;
+ 5│
+ 6│ export function signToken(userId: string): string {
+ 7│   return jwt.sign({ sub: userId }, SECRET, {
+ 8│     expiresIn: '7d',
+ 9│   });
+10│ }
+...</div>
+          <button class="toggle-expand">展开全部 (48 行)</button>
+        </div>
+      </div>
+
+      <!-- Agent message -->
+      <div class="msg msg-agent">看到目前所有 JWT 逻辑都在 index.ts 中。我会把它拆分为：jwt.ts（签名/验证）、middleware.ts（Express 中间件）、types.ts（类型定义）。</div>
+
+      <!-- Tool card: Bash (collapsed, running) -->
+      <div class="tool-card" onclick="this.classList.toggle('expanded')">
+        <div class="tool-header">
+          <span class="tool-icon">⚡</span>
+          <span class="tool-name">Bash</span>
+          <span class="tool-args">mkdir -p src/auth/…</span>
+          <span class="tool-status"><span class="spinner"></span></span>
+          <span class="tool-chevron">▼</span>
+        </div>
+        <div class="tool-body">
+          <div class="tool-section">
+            <div class="tool-label">执行中…</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Tool card: Agent (collapsed, with sub-agent) -->
+      <div class="tool-card">
+        <div class="tool-header" onclick="this.parentElement.classList.toggle('expanded')">
+          <span class="tool-icon">🤖</span>
+          <span class="tool-name">Agent</span>
+          <span class="tool-args">编写类型定义</span>
+          <span class="tool-status"><span class="check">✓</span></span>
+          <span class="tool-chevron">▼</span>
+        </div>
+        <div class="tool-body">
+          <div class="sub-agent-card">
+            <div class="tool-header">
+              <span class="tool-icon">✏️</span>
+              <span class="tool-name">Write</span>
+              <span class="tool-args">src/auth/types.ts</span>
+              <span class="tool-status"><span class="check">✓</span></span>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Agent streaming message -->
+      <div class="msg msg-agent streaming">
+        中间件已创建完毕，正在运行测试<span class="blink-cursor"></span>
+      </div>
+    </div>
+  </div>
+
+  <!-- Bottom Input -->
+  <div class="bottom-input">
+    <div class="input-wrap">
+      <input type="text" placeholder="发送消息...">
+    </div>
+    <button class="send-btn">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="#0d1117">
+        <path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z"/>
+      </svg>
+    </button>
+  </div>
+
+  <div class="home-indicator"></div>
+</div>
+</body>
+</html>

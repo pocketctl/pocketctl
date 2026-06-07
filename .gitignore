@@ -1,0 +1,35 @@
+# Build artifacts
+pocketctl
+dist/
+*.exe
+
+# Dependencies
+node_modules/
+vendor/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+
+# Environment
+.env
+.env.local
+.env.production
+
+# Logs
+*.log
+
+# Test
+coverage/
+
+# Vite
+.vite/
+
+# Claude
+.claude/
+
+# Test reports
+test-report-*.html

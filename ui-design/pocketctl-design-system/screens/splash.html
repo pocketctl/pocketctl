@@ -1,0 +1,68 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>pocketctl — 启动页</title>
+<link rel="stylesheet" href="../css/shared.css">
+</head>
+<body>
+<div class="iphone-frame">
+  <!-- Dynamic Island -->
+  <div class="dynamic-island"></div>
+
+  <!-- Status Bar -->
+  <div class="status-bar">
+    <span class="time">9:41</span>
+    <span class="icons">
+      <svg viewBox="0 0 16 16"><path d="M1 11.5h1v3H1zm3-2h1v5H4zm3-3h1v8H7zm3-2h1v10h-1zm3-2h1v12h-1z"/></svg>
+      <svg viewBox="0 0 16 16"><path d="M8 2a6 6 0 100 12A6 6 0 008 2zm0 1a5 5 0 013.54 8.54l-.82-.82a.5.5 0 00-.7.7l.82.82A5 5 0 018 14a5 5 0 01-3.54-8.54l.82.82a.5.5 0 10.7-.7l-.82-.82A5 5 0 018 3z"/></svg>
+      <svg viewBox="0 0 16 16"><rect x="1" y="4" width="14" height="9" rx="2" fill="none" stroke="#fff" stroke-width="1.5"/><rect x="3" y="6" width="8" height="5" rx="1" fill="#fff"/><rect x="14" y="6" width="1.5" height="3" rx=".5" fill="#fff"/></svg>
+    </span>
+  </div>
+
+  <!-- Splash Content -->
+  <div class="screen-content" style="display:flex;flex-direction:column;align-items:center;justify-content:center;height:calc(844px - 54px - 34px);">
+    <!-- Logo Mark -->
+    <div style="margin-bottom:24px;">
+      <svg width="88" height="88" viewBox="0 0 512 512" fill="none">
+        <rect x="128" y="48" width="256" height="416" rx="48" ry="48"
+              stroke="#58a6ff" stroke-width="18" fill="none"/>
+        <rect x="216" y="430" width="80" height="6" rx="3" fill="#58a6ff" opacity="0.5"/>
+        <path d="M208 200 L304 256 L208 312" stroke="#58a6ff" stroke-width="24"
+              stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+        <rect x="320" y="296" width="8" height="24" rx="4" fill="#58a6ff" opacity="0.7"/>
+      </svg>
+    </div>
+
+    <!-- Wordmark -->
+    <div style="font-family:var(--font-display);font-size:32px;font-weight:700;color:var(--accent);letter-spacing:-0.5px;margin-bottom:12px;">
+      pocketctl
+    </div>
+
+    <!-- Tagline -->
+    <div style="font-family:var(--font-body);font-size:15px;color:var(--fg-secondary);text-align:center;">
+      Your coding agents, in your pocket.
+    </div>
+
+    <!-- Loading indicator -->
+    <div style="position:absolute;bottom:80px;display:flex;flex-direction:column;align-items:center;gap:12px;">
+      <div style="width:120px;height:3px;background:var(--border);border-radius:2px;overflow:hidden;">
+        <div style="width:40%;height:100%;background:var(--accent);border-radius:2px;animation:splash-progress 2s ease-in-out infinite;"></div>
+      </div>
+    </div>
+  </div>
+
+  <style>
+    @keyframes splash-progress {
+      0% { width: 0; transform: translateX(0); }
+      50% { width: 60%; transform: translateX(60px); }
+      100% { width: 0; transform: translateX(120px); }
+    }
+  </style>
+
+  <!-- Home Indicator -->
+  <div class="home-indicator"></div>
+</div>
+</body>
+</html>

@@ -1,0 +1,21 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" fill="none">
+  <!-- pocketctl iOS App Icon — dark gradient background -->
+  <defs>
+    <radialGradient id="bg-grad" cx="50%" cy="50%" r="70%">
+      <stop offset="0%" stop-color="#0d1117"/>
+      <stop offset="100%" stop-color="#010409"/>
+    </radialGradient>
+  </defs>
+  <!-- Rounded square background -->
+  <rect width="1024" height="1024" rx="224" fill="url(#bg-grad)"/>
+  <!-- Phone silhouette -->
+  <rect x="336" y="160" width="352" height="640" rx="72" ry="72"
+        stroke="#58a6ff" stroke-width="28" fill="none"/>
+  <!-- Home indicator -->
+  <rect x="440" y="720" width="144" height="10" rx="5" fill="#58a6ff" opacity="0.4"/>
+  <!-- Terminal prompt ">" -->
+  <path d="M384 400 L560 512 L384 624" stroke="#58a6ff" stroke-width="40"
+        stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+  <!-- Cursor bar -->
+  <rect x="588" y="576" width="14" height="40" rx="7" fill="#58a6ff" opacity="0.6"/>
+</svg>

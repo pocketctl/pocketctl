@@ -1,0 +1,233 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>pocketctl — Daemon 列表</title>
+<link rel="stylesheet" href="../css/shared.css">
+<style>
+  .daemon-card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-lg);
+    padding: var(--space-lg);
+    margin-bottom: var(--space-sm);
+    cursor: pointer;
+    transition: background 0.1s;
+  }
+  .daemon-card:active { background: var(--hover-input); }
+  .daemon-card .card-top {
+    display: flex;
+    align-items: center;
+    gap: var(--space-sm);
+    margin-bottom: var(--space-sm);
+  }
+  .daemon-card .hostname {
+    font-family: var(--font-body);
+    font-weight: 600;
+    font-size: 17px;
+    color: var(--fg);
+    flex: 1;
+  }
+  .daemon-card .card-info {
+    display: flex;
+    align-items: center;
+    gap: var(--space-md);
+    margin-bottom: var(--space-sm);
+    flex-wrap: wrap;
+  }
+  .daemon-card .agent-tags {
+    font-size: 14px;
+    color: var(--fg-tertiary);
+  }
+  .daemon-card .session-count {
+    font-size: 14px;
+    color: var(--accent);
+    font-weight: 500;
+  }
+  .daemon-card .card-bottom {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+  }
+  .daemon-card .last-active {
+    font-size: 13px;
+    color: var(--fg-secondary);
+  }
+  .daemon-card .chevron-right {
+    color: var(--fg-tertiary);
+    font-size: 14px;
+  }
+  .install-code {
+    background: #010409;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    padding: var(--space-md);
+    font-family: var(--font-mono);
+    font-size: 12px;
+    color: var(--fg-secondary);
+    text-align: left;
+    line-height: 1.8;
+    width: 100%;
+    margin-bottom: var(--space-md);
+  }
+  .install-code .cmd { color: var(--success); }
+  .copy-btn {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    color: var(--accent);
+    font-family: var(--font-body);
+    font-size: 14px;
+    padding: var(--space-sm) var(--space-lg);
+    border-radius: var(--radius-sm);
+    cursor: pointer;
+    display: inline-flex;
+    align-items: center;
+    gap: var(--space-xs);
+  }
+  .state-switcher {
+    position: absolute;
+    top: 60px;
+    right: 8px;
+    z-index: 200;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+  }
+  .state-switcher button {
+    background: rgba(88,166,255,0.15);
+    border: 1px solid rgba(88,166,255,0.3);
+    color: var(--accent);
+    font-size: 10px;
+    padding: 4px 8px;
+    border-radius: 6px;
+    cursor: pointer;
+    font-family: var(--font-mono);
+  }
+  .state-switcher button.active-state {
+    background: var(--accent);
+    color: var(--bg);
+  }
+  .state-panel { display: none; }
+  .state-panel.active { display: block; }
+  .avatar-btn {
+    width: 36px;
+    height: 36px;
+    border-radius: 50%;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: var(--fg-secondary);
+    font-size: 15px;
+    font-weight: 600;
+    cursor: pointer;
+  }
+  .header-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: var(--space-md) var(--space-lg);
+  }
+</style>
+</head>
+<body>
+<div class="iphone-frame">
+  <div class="dynamic-island"></div>
+  <div class="status-bar">
+    <span class="time">9:41</span>
+    <span class="icons">
+      <svg viewBox="0 0 16 16" width="16" height="16"><path fill="#fff" d="M1 11.5h1v3H1zm3-2h1v5H4zm3-3h1v8H7zm3-2h1v10h-1zm3-2h1v12h-1z"/></svg>
+      <svg viewBox="0 0 16 16" width="16" height="16"><path fill="#fff" d="M8 2a6 6 0 100 12A6 6 0 008 2z"/></svg>
+      <svg viewBox="0 0 16 16" width="16" height="16"><rect x="1" y="4" width="14" height="9" rx="2" fill="none" stroke="#fff" stroke-width="1.5"/><rect x="3" y="6" width="8" height="5" rx="1" fill="#fff"/></svg>
+    </span>
+  </div>
+
+  <div class="state-switcher">
+    <button onclick="showState('normal')" class="active-state" id="btn-normal">正常</button>
+    <button onclick="showState('empty')" id="btn-empty">空状态</button>
+  </div>
+
+  <div class="screen-content">
+    <!-- Header -->
+    <div class="large-title">我的主机</div>
+    <div class="header-row" style="padding-top:0;margin-top:-8px;">
+      <div style="font-size:13px;color:var(--fg-secondary);">2 台主机 · 1 台在线</div>
+      <div class="avatar-btn">M</div>
+    </div>
+
+    <!-- ===== NORMAL STATE ===== -->
+    <div class="state-panel active" id="panel-normal" style="padding:0 var(--space-lg);">
+      <!-- Online daemon -->
+      <div class="daemon-card">
+        <div class="card-top">
+          <span class="status-dot online"></span>
+          <span class="hostname">MacBook-Pro</span>
+          <span class="chip chip-online">在线</span>
+        </div>
+        <div class="card-info">
+          <span class="agent-tags">Claude Code, Codex</span>
+          <span class="session-count">3 个活跃会话</span>
+        </div>
+        <div class="card-bottom">
+          <span class="last-active">最后活跃: 2 分钟前</span>
+          <span class="chevron-right">›</span>
+        </div>
+      </div>
+
+      <!-- Offline daemon -->
+      <div class="daemon-card">
+        <div class="card-top">
+          <span class="status-dot offline"></span>
+          <span class="hostname">Dev-Server</span>
+          <span class="chip chip-offline">离线</span>
+        </div>
+        <div class="card-info">
+          <span class="agent-tags">Claude Code</span>
+          <span class="session-count" style="color:var(--fg-tertiary);">0 个会话</span>
+        </div>
+        <div class="card-bottom">
+          <span class="last-active">最后活跃: 3 天前</span>
+          <span class="chevron-right">›</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- ===== EMPTY STATE ===== -->
+    <div class="state-panel" id="panel-empty">
+      <div class="empty-state" style="padding-top:48px;">
+        <div class="empty-icon">
+          <svg width="64" height="64" viewBox="0 0 24 24" fill="none" stroke="#484f58" stroke-width="1.5">
+            <rect x="3" y="3" width="18" height="18" rx="3"/>
+            <path d="M8 12h8M12 8v8"/>
+          </svg>
+        </div>
+        <div class="empty-title">还没有注册主机</div>
+        <div class="empty-subtitle" style="margin-bottom:var(--space-xl);">在你的开发机上运行以下命令安装 Daemon</div>
+        <div class="install-code">
+          <div><span class="cmd">curl</span> -fsSL https://pocketctl.com/install.sh | bash</div>
+          <div><span class="cmd">pocketctl</span> login</div>
+          <div><span class="cmd">pocketctl</span> daemon start</div>
+        </div>
+        <button class="copy-btn">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"/></svg>
+          复制命令
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <div class="home-indicator"></div>
+</div>
+
+<script>
+function showState(state) {
+  document.querySelectorAll('.state-switcher button').forEach(b => b.classList.remove('active-state'));
+  document.getElementById('btn-' + state).classList.add('active-state');
+  document.querySelectorAll('.state-panel').forEach(p => p.classList.remove('active'));
+  document.getElementById('panel-' + state).classList.add('active');
+}
+</script>
+</body>
+</html>
