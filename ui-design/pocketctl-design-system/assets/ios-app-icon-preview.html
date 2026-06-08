@@ -1,0 +1,549 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>pocketctl — iOS App Icon Preview</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
+
+  :root {
+    --bg: #0d1117;
+    --surface: #161b22;
+    --border: #21262d;
+    --border-light: #30363d;
+    --accent: #58a6ff;
+    --accent-muted: rgba(88,166,255,0.15);
+    --fg: #e6edf3;
+    --fg-secondary: #8b949e;
+    --fg-tertiary: #484f58;
+  }
+
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  body {
+    font-family: 'Inter', -apple-system, BlinkMacSystemFont, system-ui, sans-serif;
+    background: var(--bg);
+    color: var(--fg);
+    min-height: 100vh;
+  }
+
+  .container {
+    max-width: 960px;
+    margin: 0 auto;
+    padding: 48px 32px;
+  }
+
+  header {
+    margin-bottom: 48px;
+    text-align: center;
+  }
+
+  header .label {
+    font-size: 12px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: var(--accent);
+    margin-bottom: 12px;
+  }
+
+  header h1 {
+    font-size: 32px;
+    font-weight: 700;
+    margin-bottom: 8px;
+  }
+
+  header p {
+    color: var(--fg-secondary);
+    font-size: 15px;
+    line-height: 1.6;
+  }
+
+  /* === Main showcase === */
+  .hero-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 32px;
+    margin-bottom: 56px;
+  }
+
+  @media (max-width: 640px) {
+    .hero-grid { grid-template-columns: 1fr; }
+  }
+
+  .hero-card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 20px;
+    padding: 40px;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 20px;
+  }
+
+  .hero-card .card-label {
+    font-size: 11px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+    color: var(--fg-tertiary);
+    align-self: flex-start;
+  }
+
+  .icon-frame {
+    border-radius: 22%;
+    overflow: hidden;
+    box-shadow: 0 4px 24px rgba(0,0,0,0.4);
+    line-height: 0;
+  }
+
+  .icon-frame img, .icon-frame object {
+    display: block;
+    width: 100%;
+    height: 100%;
+  }
+
+  /* === Size grid === */
+  .section-label {
+    font-size: 12px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+    color: var(--fg-tertiary);
+    margin-bottom: 8px;
+  }
+
+  .section-title {
+    font-size: 22px;
+    font-weight: 600;
+    margin-bottom: 24px;
+  }
+
+  .sizes-grid {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 32px;
+    align-items: flex-end;
+    margin-bottom: 56px;
+    padding: 40px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 16px;
+  }
+
+  .size-item {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 10px;
+  }
+
+  .size-item .icon-frame {
+    border-radius: 22%;
+    overflow: hidden;
+  }
+
+  .size-item .size-label {
+    font-size: 11px;
+    color: var(--fg-secondary);
+    font-weight: 500;
+    text-align: center;
+    line-height: 1.3;
+  }
+
+  .size-item .size-label strong {
+    display: block;
+    color: var(--fg);
+    font-size: 12px;
+  }
+
+  /* === Background variants === */
+  .bg-variants {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 32px;
+    margin-bottom: 56px;
+  }
+
+  @media (max-width: 640px) {
+    .bg-variants { grid-template-columns: 1fr; }
+  }
+
+  .bg-card {
+    border-radius: 16px;
+    padding: 40px;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 16px;
+  }
+
+  .bg-card.light-bg {
+    background: #f0f0f0;
+  }
+
+  .bg-card.dark-bg {
+    background: #1a1a1a;
+    border: 1px solid #333;
+  }
+
+  .bg-card .card-label {
+    font-size: 11px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+  }
+
+  .bg-card.light-bg .card-label { color: #666; }
+  .bg-card.dark-bg .card-label { color: #666; }
+
+  /* === Spec table === */
+  .spec-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 14px;
+  }
+
+  .spec-table th, .spec-table td {
+    text-align: left;
+    padding: 12px 16px;
+    border-bottom: 1px solid var(--border);
+  }
+
+  .spec-table th {
+    color: var(--fg-secondary);
+    font-weight: 500;
+    font-size: 12px;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+  }
+
+  .spec-table td code {
+    font-family: 'SF Mono', 'JetBrains Mono', ui-monospace, Menlo, monospace;
+    background: rgba(88,166,255,0.08);
+    padding: 2px 8px;
+    border-radius: 4px;
+    font-size: 13px;
+    color: var(--accent);
+  }
+
+  /* === Color swatches === */
+  .swatches {
+    display: flex;
+    gap: 12px;
+    flex-wrap: wrap;
+    margin-bottom: 56px;
+  }
+
+  .swatch {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 10px 16px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+  }
+
+  .swatch .dot {
+    width: 28px;
+    height: 28px;
+    border-radius: 8px;
+    flex-shrink: 0;
+  }
+
+  .swatch .swatch-info {
+    font-size: 12px;
+    line-height: 1.4;
+  }
+
+  .swatch .swatch-info strong {
+    display: block;
+    color: var(--fg);
+    font-size: 13px;
+  }
+
+  .swatch .swatch-info span {
+    color: var(--fg-secondary);
+    font-family: 'SF Mono', 'JetBrains Mono', ui-monospace, Menlo, monospace;
+  }
+
+  /* === Comparison === */
+  .comparison {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 32px;
+    margin-bottom: 56px;
+    align-items: center;
+  }
+
+  @media (max-width: 640px) {
+    .comparison { grid-template-columns: 1fr; }
+  }
+
+  .comparison-card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 16px;
+    padding: 32px;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 16px;
+  }
+
+  .comparison-card .card-label {
+    font-size: 11px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+    color: var(--fg-tertiary);
+  }
+
+  .comparison-card .note {
+    font-size: 12px;
+    color: var(--fg-secondary);
+    text-align: center;
+    line-height: 1.4;
+  }
+
+  footer {
+    text-align: center;
+    padding: 32px 0;
+    color: var(--fg-tertiary);
+    font-size: 13px;
+    border-top: 1px solid var(--border);
+    margin-top: 24px;
+  }
+</style>
+</head>
+<body>
+<div class="container">
+
+  <header>
+    <div class="label">pocketctl Brand Asset</div>
+    <h1>iOS App Icon</h1>
+    <p>终端提示符 <code style="background:var(--accent-muted);padding:2px 8px;border-radius:4px;color:var(--accent);">&gt;</code> 为核心符号，深色背景 + 蓝色辉光，开发者的口袋控制台。</p>
+  </header>
+
+  <!-- Hero: large preview -->
+  <div class="hero-grid">
+    <div class="hero-card">
+      <div class="card-label">App Store (1024 × 1024)</div>
+      <div class="icon-frame" style="width:320px;height:320px;">
+        <img src="ios-app-icon.svg" alt="pocketctl icon" width="320" height="320">
+      </div>
+      <p style="font-size:13px;color:var(--fg-secondary);text-align:center;">App Store 提交用 · 无圆角裁切<br>iOS 系统自动添加 Squircle 蒙版</p>
+    </div>
+    <div class="hero-card">
+      <div class="card-label">iOS Home Screen 模拟 (180 × 180)</div>
+      <div class="icon-frame" style="width:180px;height:180px;">
+        <img src="ios-app-icon.svg" alt="pocketctl icon" width="180" height="180">
+      </div>
+      <p style="font-size:13px;color:var(--fg-secondary);text-align:center;margin-top:8px;">主屏图标 @3x · 用户实际看到的尺寸</p>
+      <div style="display:flex;gap:8px;align-items:center;margin-top:8px;">
+        <span style="font-size:11px;color:var(--fg-secondary);background:var(--surface);padding:6px 12px;border-radius:6px;border:1px solid var(--border);">pocketctl</span>
+        <span style="font-size:11px;color:var(--fg-tertiary);">← App 名称标签</span>
+      </div>
+    </div>
+  </div>
+
+  <!-- All sizes -->
+  <div class="section-label">iOS 尺寸系统</div>
+  <div class="section-title">全部所需尺寸</div>
+  <div class="sizes-grid">
+    <div class="size-item">
+      <div class="icon-frame" style="width:102px;height:102px;">
+        <img src="ios-app-icon.svg" width="102" height="102" alt="">
+      </div>
+      <div class="size-label"><strong>1024 pt</strong>App Store</div>
+    </div>
+    <div class="size-item">
+      <div class="icon-frame" style="width:120px;height:120px;">
+        <img src="ios-app-icon.svg" width="120" height="120" alt="">
+      </div>
+      <div class="size-label"><strong>180 pt</strong>iPhone @3x</div>
+    </div>
+    <div class="size-item">
+      <div class="icon-frame" style="width:80px;height:80px;">
+        <img src="ios-app-icon.svg" width="80" height="80" alt="">
+      </div>
+      <div class="size-label"><strong>120 pt</strong>iPhone @2x</div>
+    </div>
+    <div class="size-item">
+      <div class="icon-frame" style="width:58px;height:58px;">
+        <img src="ios-app-icon.svg" width="58" height="58" alt="">
+      </div>
+      <div class="size-label"><strong>87 pt</strong>设置 @3x</div>
+    </div>
+    <div class="size-item">
+      <div class="icon-frame" style="width:54px;height:54px;">
+        <img src="ios-app-icon.svg" width="54" height="54" alt="">
+      </div>
+      <div class="size-label"><strong>80 pt</strong>搜索 @2x</div>
+    </div>
+    <div class="size-item">
+      <div class="icon-frame" style="width:40px;height:40px;">
+        <img src="ios-app-icon.svg" width="40" height="40" alt="">
+      </div>
+      <div class="size-label"><strong>60 pt</strong>通知 @3x</div>
+    </div>
+    <div class="size-item">
+      <div class="icon-frame" style="width:27px;height:27px;">
+        <img src="ios-app-icon.svg" width="27" height="27" alt="">
+      </div>
+      <div class="size-label"><strong>29 pt</strong>设置 @2x</div>
+    </div>
+    <div class="size-item">
+      <div class="icon-frame" style="width:18px;height:18px;">
+        <img src="ios-app-icon.svg" width="18" height="18" alt="">
+      </div>
+      <div class="size-label"><strong>20 pt</strong>通知 @2x</div>
+    </div>
+  </div>
+
+  <!-- Background variants -->
+  <div class="section-label">环境适应性</div>
+  <div class="section-title">亮色 / 深色壁纸</div>
+  <div class="bg-variants">
+    <div class="bg-card light-bg">
+      <div class="card-label">浅色壁纸</div>
+      <div class="icon-frame" style="width:120px;height:120px;">
+        <img src="ios-app-icon.svg" width="120" height="120" alt="">
+      </div>
+      <div class="note" style="color:#666;">深色图标在浅色背景上对比强烈，辨识度极佳</div>
+    </div>
+    <div class="bg-card dark-bg">
+      <div class="card-label">深色壁纸</div>
+      <div class="icon-frame" style="width:120px;height:120px;">
+        <img src="ios-app-icon.svg" width="120" height="120" alt="">
+      </div>
+      <div class="note" style="color:#888;">蓝色辉光在深色背景上形成自发光效果</div>
+    </div>
+  </div>
+
+  <!-- New vs Old comparison -->
+  <div class="section-label">版本对比</div>
+  <div class="section-title">新版 vs 旧版</div>
+  <div class="comparison">
+    <div class="comparison-card">
+      <div class="card-label">新版 (ios-app-icon.svg)</div>
+      <div class="icon-frame" style="width:160px;height:160px;">
+        <img src="ios-app-icon.svg" width="160" height="160" alt="">
+      </div>
+      <div class="note">渐变背景 · 辉光效果 · 角标装饰<br>渐变描边 · 终端网格纹理</div>
+    </div>
+    <div class="comparison-card">
+      <div class="card-label">旧版 (logo-app-icon.svg)</div>
+      <div class="icon-frame" style="width:160px;height:160px;">
+        <img src="logo-app-icon.svg" width="160" height="160" alt="">
+      </div>
+      <div class="note">纯色背景 · 手机轮廓 · 无装饰<br>基础版本</div>
+    </div>
+  </div>
+
+  <!-- Color palette -->
+  <div class="section-label">图标色彩</div>
+  <div class="section-title">色板速查</div>
+  <div class="swatches">
+    <div class="swatch">
+      <div class="dot" style="background:#0d1117;"></div>
+      <div class="swatch-info"><strong>背景</strong><span>#0d1117</span></div>
+    </div>
+    <div class="swatch">
+      <div class="dot" style="background:linear-gradient(135deg,#1a1f2b,#010409);"></div>
+      <div class="swatch-info"><strong>背景渐变</strong><span>#1a1f2b → #010409</span></div>
+    </div>
+    <div class="swatch">
+      <div class="dot" style="background:#58a6ff;"></div>
+      <div class="swatch-info"><strong>主色</strong><span>#58a6ff</span></div>
+    </div>
+    <div class="swatch">
+      <div class="dot" style="background:#79c0ff;"></div>
+      <div class="swatch-info"><strong>亮色</strong><span>#79c0ff</span></div>
+    </div>
+    <div class="swatch">
+      <div class="dot" style="background:#388bfd;"></div>
+      <div class="swatch-info"><strong>深蓝</strong><span>#388bfd</span></div>
+    </div>
+    <div class="swatch">
+      <div class="dot" style="background:#c9e1ff;"></div>
+      <div class="swatch-info"><strong>高光</strong><span>#c9e1ff</span></div>
+    </div>
+  </div>
+
+  <!-- Spec table -->
+  <div class="section-label">导出规格</div>
+  <div class="section-title">iOS 图标资源清单</div>
+  <div style="overflow-x:auto;background:var(--surface);border:1px solid var(--border);border-radius:16px;margin-bottom:48px;">
+    <table class="spec-table">
+      <thead>
+        <tr>
+          <th>用途</th>
+          <th>尺寸 (px)</th>
+          <th>文件名</th>
+          <th>倍率</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>App Store</td>
+          <td><code>1024 × 1024</code></td>
+          <td><code>AppStore.png</code></td>
+          <td>1×</td>
+        </tr>
+        <tr>
+          <td>iPhone 主屏</td>
+          <td><code>180 × 180</code></td>
+          <td><code>Icon-60@3x.png</code></td>
+          <td>3×</td>
+        </tr>
+        <tr>
+          <td>iPhone 主屏</td>
+          <td><code>120 × 120</code></td>
+          <td><code>Icon-60@2x.png</code></td>
+          <td>2×</td>
+        </tr>
+        <tr>
+          <td>iPhone 通知</td>
+          <td><code>60 × 60</code></td>
+          <td><code>Icon-20@3x.png</code></td>
+          <td>3×</td>
+        </tr>
+        <tr>
+          <td>iPhone 通知</td>
+          <td><code>40 × 40</code></td>
+          <td><code>Icon-20@2x.png</code></td>
+          <td>2×</td>
+        </tr>
+        <tr>
+          <td>设置</td>
+          <td><code>87 × 87</code></td>
+          <td><code>Icon-29@3x.png</code></td>
+          <td>3×</td>
+        </tr>
+        <tr>
+          <td>设置</td>
+          <td><code>58 × 58</code></td>
+          <td><code>Icon-29@2x.png</code></td>
+          <td>2×</td>
+        </tr>
+        <tr>
+          <td>搜索</td>
+          <td><code>80 × 80</code></td>
+          <td><code>Icon-40@2x.png</code></td>
+          <td>2×</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <footer>
+    pocketctl iOS App Icon · 基于品牌色 <span style="color:#58a6ff;">#58a6ff</span> · 1024 × 1024 SVG 源文件
+  </footer>
+
+</div>
+</body>
+</html>

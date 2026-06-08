@@ -1,0 +1,93 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024">
+  <defs>
+    <!-- Background: deep dark with subtle diagonal depth -->
+    <linearGradient id="bg" x1="0.25" y1="0" x2="0.75" y2="1">
+      <stop offset="0%" stop-color="#1a1f2b"/>
+      <stop offset="40%" stop-color="#0d1117"/>
+      <stop offset="100%" stop-color="#010409"/>
+    </linearGradient>
+
+    <!-- Atmospheric blue glow behind the prompt -->
+    <radialGradient id="atmos" cx="0.44" cy="0.44" r="0.46">
+      <stop offset="0%" stop-color="#58a6ff" stop-opacity="0.16"/>
+      <stop offset="50%" stop-color="#1f6feb" stop-opacity="0.06"/>
+      <stop offset="100%" stop-color="#010409" stop-opacity="0"/>
+    </radialGradient>
+
+    <!-- Secondary subtle glow for depth -->
+    <radialGradient id="atmos2" cx="0.6" cy="0.65" r="0.35">
+      <stop offset="0%" stop-color="#388bfd" stop-opacity="0.06"/>
+      <stop offset="100%" stop-color="#010409" stop-opacity="0"/>
+    </radialGradient>
+
+    <!-- Chevron gradient: bright top-left to deeper blue -->
+    <linearGradient id="chev-grad" x1="0" y1="0" x2="0.7" y2="1">
+      <stop offset="0%" stop-color="#c9e1ff"/>
+      <stop offset="30%" stop-color="#79c0ff"/>
+      <stop offset="100%" stop-color="#388bfd"/>
+    </linearGradient>
+
+    <!-- Cursor bar gradient -->
+    <linearGradient id="cur-grad" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#a5d6ff"/>
+      <stop offset="100%" stop-color="#58a6ff"/>
+    </linearGradient>
+
+    <!-- Soft glow filter for the chevron -->
+    <filter id="glow" x="-15%" y="-15%" width="130%" height="130%">
+      <feGaussianBlur in="SourceAlpha" stdDeviation="12" result="blur"/>
+      <feFlood flood-color="#58a6ff" flood-opacity="0.35" result="color"/>
+      <feComposite in="color" in2="blur" operator="in" result="shadow"/>
+      <feMerge>
+        <feMergeNode in="shadow"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+
+    <!-- Clip for iOS squircle preview (optional) -->
+    <clipPath id="ios-mask">
+      <path d="M224,0 L800,0 C923.6,0 1024,100.4 1024,224 L1024,800 C1024,923.6 923.6,1024 800,1024 L224,1024 C100.4,1024 0,923.6 0,800 L0,224 C0,100.4 100.4,0 224,0 Z"/>
+    </clipPath>
+  </defs>
+
+  <!-- ===== BACKGROUND ===== -->
+  <rect width="1024" height="1024" fill="url(#bg)"/>
+
+  <!-- Subtle terminal grid dots — very faint, for texture -->
+  <g opacity="0.04">
+    <line x1="0" y1="256" x2="1024" y2="256" stroke="#58a6ff" stroke-width="1"/>
+    <line x1="0" y1="512" x2="1024" y2="512" stroke="#58a6ff" stroke-width="1"/>
+    <line x1="0" y1="768" x2="1024" y2="768" stroke="#58a6ff" stroke-width="1"/>
+    <line x1="256" y1="0" x2="256" y2="1024" stroke="#58a6ff" stroke-width="1"/>
+    <line x1="512" y1="0" x2="512" y2="1024" stroke="#58a6ff" stroke-width="1"/>
+    <line x1="768" y1="0" x2="768" y2="1024" stroke="#58a6ff" stroke-width="1"/>
+  </g>
+
+  <!-- Atmospheric glows -->
+  <ellipse cx="460" cy="460" rx="440" ry="420" fill="url(#atmos)"/>
+  <ellipse cx="600" cy="640" rx="320" ry="300" fill="url(#atmos2)"/>
+
+  <!-- ===== CORNER ACCENTS — terminal window frame ===== -->
+  <!-- Top-left corner bracket -->
+  <path d="M140 200 L140 140 L200 140" stroke="#58a6ff" stroke-width="4" fill="none" opacity="0.12"/>
+  <!-- Top-right corner bracket -->
+  <path d="M824 140 L884 140 L884 200" stroke="#58a6ff" stroke-width="4" fill="none" opacity="0.12"/>
+  <!-- Bottom-left corner bracket -->
+  <path d="M140 824 L140 884 L200 884" stroke="#58a6ff" stroke-width="4" fill="none" opacity="0.12"/>
+  <!-- Bottom-right corner bracket -->
+  <path d="M824 884 L884 884 L884 824" stroke="#58a6ff" stroke-width="4" fill="none" opacity="0.12"/>
+
+  <!-- ===== MAIN PROMPT SYMBOL ===== -->
+  <g filter="url(#glow)">
+    <path d="M320 330 L620 512 L320 694"
+          stroke="url(#chev-grad)" stroke-width="60"
+          stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+  </g>
+
+  <!-- Cursor bar — slightly below the chevron's lower point -->
+  <rect x="664" y="596" width="24" height="60" rx="12" fill="url(#cur-grad)" opacity="0.88"/>
+
+  <!-- ===== SUBTLE HIGHLIGHT EDGE — top-left light source ===== -->
+  <rect x="0" y="0" width="1024" height="1024" rx="0" fill="none"
+        stroke="#58a6ff" stroke-width="1" opacity="0.06"/>
+</svg>
