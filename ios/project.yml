@@ -1,0 +1,27 @@
+name: Pocketctl
+options:
+  bundleIdPrefix: com.pocketctl
+  deploymentTarget:
+    iOS: "17.0"
+  xcodeVersion: "26.0"
+  swiftVersion: "6.0"
+
+settings:
+  base:
+    SWIFT_VERSION: "6.0"
+    TARGETED_DEVICE_FAMILY: "1"
+    INFOPLIST_FILE: Pocketctl/Info.plist
+    PRODUCT_BUNDLE_IDENTIFIER: com.pocketctl.app
+    MARKETING_VERSION: "1.0.0"
+    CURRENT_PROJECT_VERSION: "1"
+
+targets:
+  Pocketctl:
+    type: application
+    platform: iOS
+    sources:
+      - Pocketctl
+    settings:
+      base:
+        INFOPLIST_FILE: Pocketctl/Info.plist
+        PRODUCT_BUNDLE_IDENTIFIER: com.pocketctl.app

@@ -1,9 +1,10 @@
 import Fastify from 'fastify';
 import fastifyWebsocket from '@fastify/websocket';
 import fastifyCors from '@fastify/cors';
-import { createPool, initDB, parseDBUrl, createUser, getUserByEmail, getUserById } from './db.js';
+import { createPool, initDB, parseDBUrl, createUser, getUserByEmail, getUserById, getUserByPhone, createUserByPhone, registerDevice, removeDevice } from './db.js';
 import { Router } from './router.js';
 import { hashPassword, verifyPassword, signAccessToken, signRefreshToken, verifyAccessToken, verifyRefreshToken } from './auth.js';
+import { notifyUser, sessionStatusPush, daemonOfflinePush } from './push.js';
 
 const API_KEY = process.env.POCKETCTL_API_KEY || '';
 const DB_URL = process.env.DATABASE_URL || 'postgresql://localhost:5432/pocketctl';
@@ -15,6 +16,10 @@ const RATE_LIMIT_WINDOW_MS = parseInt(process.env.RATE_LIMIT_WINDOW_MS || '60000
 const RATE_LIMIT_MAX_CONNECTIONS = parseInt(process.env.RATE_LIMIT_MAX_CONNECTIONS || '30', 10);
 
 const wsDaemonMap = new Map<any, string>();
+
+// Dev-mode SMS verification code store: phone -> { code, expiresAt }
+const smsCodeStore = new Map<string, { code: string; expiresAt: number }>();
+const DEV_SMS_CODE = process.env.DEV_SMS_CODE || '000000';
 
 // Simple rate limiter: IP -> { count, resetAt }
 const rateLimiter = new Map<string, { count: number; resetAt: number }>();
@@ -112,6 +117,97 @@ async function main() {
       refresh_token: newRefreshToken,
       user: { id: user.id, email: user.email, display_name: user.display_name },
     };
+  });
+
+  // ---- REST API: SMS Auth (Phase 3) ----
+
+  // Send SMS verification code
+  app.post('/api/auth/sms/send', async (req, reply) => {
+    const { phone } = req.body as any;
+    if (!phone) {
+      reply.code(400); return { error: 'phone is required' };
+    }
+    // Normalize phone: remove spaces
+    const normalizedPhone = phone.replace(/\s+/g, '');
+    // Generate 6-digit code (or use dev code)
+    const code = NODE_ENV === 'production' ? String(Math.floor(100000 + Math.random() * 900000)) : DEV_SMS_CODE;
+    const expiresAt = Date.now() + 5 * 60 * 1000; // 5 minutes
+    smsCodeStore.set(normalizedPhone, { code, expiresAt });
+    console.log(`[sms] code for ${normalizedPhone}: ${code} (expires in 5m)`);
+    // TODO: In production, send via SMS provider (Alibaba Cloud / Tencent Cloud SMS)
+    return { success: true, message: 'verification code sent' };
+  });
+
+  // Verify SMS code and login/register
+  app.post('/api/auth/sms/verify', async (req, reply) => {
+    const { phone, code } = req.body as any;
+    if (!phone || !code) {
+      reply.code(400); return { error: 'phone and code are required' };
+    }
+    const normalizedPhone = phone.replace(/\s+/g, '');
+    const stored = smsCodeStore.get(normalizedPhone);
+    if (!stored || stored.code !== code || Date.now() > stored.expiresAt) {
+      reply.code(400); return { error: 'invalid or expired verification code' };
+    }
+    smsCodeStore.delete(normalizedPhone);
+    // Find or create user by phone
+    let user = await getUserByPhone(pool, normalizedPhone);
+    if (!user) {
+      user = await createUserByPhone(pool, normalizedPhone);
+    }
+    const accessToken = signAccessToken(user.id, user.email, user.phone);
+    const refreshToken = signRefreshToken(user.id);
+    return {
+      access_token: accessToken,
+      refresh_token: refreshToken,
+      user: { id: user.id, email: user.email, phone: user.phone, display_name: user.display_name },
+    };
+  });
+
+  // Apple Sign In (Phase 3)
+  app.post('/api/auth/apple/signin', async (req, reply) => {
+    const { identityToken } = req.body as any;
+    if (!identityToken) {
+      reply.code(400); return { error: 'identityToken is required' };
+    }
+    // TODO: Verify Apple identity token with Apple's public keys
+    // For now, return a placeholder error
+    reply.code(501); return { error: 'Apple Sign In not yet implemented' };
+  });
+
+  // ---- REST API: Device Registration (Phase 3) ----
+
+  // Register device for push notifications
+  app.post('/api/devices/register', async (req, reply) => {
+    const authHeader = req.headers.authorization;
+    if (!authHeader?.startsWith('Bearer ')) {
+      reply.code(401); return { error: 'authorization required' };
+    }
+    const payload = verifyAccessToken(authHeader.slice(7));
+    if (!payload) {
+      reply.code(401); return { error: 'invalid token' };
+    }
+    const { deviceToken, platform, deviceName } = req.body as any;
+    if (!deviceToken) {
+      reply.code(400); return { error: 'deviceToken is required' };
+    }
+    await registerDevice(pool, payload.userId, deviceToken, platform || 'ios', deviceName);
+    return { success: true };
+  });
+
+  // Unregister device
+  app.delete('/api/devices/:token', async (req, reply) => {
+    const authHeader = req.headers.authorization;
+    if (!authHeader?.startsWith('Bearer ')) {
+      reply.code(401); return { error: 'authorization required' };
+    }
+    const payload = verifyAccessToken(authHeader.slice(7));
+    if (!payload) {
+      reply.code(401); return { error: 'invalid token' };
+    }
+    const { token } = req.params as any;
+    await removeDevice(pool, token);
+    return { success: true };
   });
 
   // ---- Health check ----

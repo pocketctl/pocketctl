@@ -69,10 +69,13 @@ func SubAgentJSONLPath(parentJSONLPath string, agentID string) string {
 }
 
 // JSONLTailer tracks and reads new lines from a Claude Code JSONL session file.
+// The file handle and scanner buffer are reused across calls to minimize allocations.
 type JSONLTailer struct {
 	mu       sync.Mutex
 	filePath string
 	offset   int64
+	file     *os.File
+	scanBuf  []byte // reusable 1MB scanner buffer
 }
 
 // NewJSONLTailer creates a tailer for the given JSONL file path.
@@ -82,9 +85,15 @@ func NewJSONLTailer(filePath string) (*JSONLTailer, error) {
 	if err != nil {
 		return nil, fmt.Errorf("stat jsonl file: %w", err)
 	}
+	f, err := os.Open(filePath)
+	if err != nil {
+		return nil, fmt.Errorf("open jsonl file: %w", err)
+	}
 	return &JSONLTailer{
 		filePath: filePath,
 		offset:   info.Size(), // Start from end
+		file:     f,
+		scanBuf:  make([]byte, 1024*1024),
 	}, nil
 }
 
@@ -93,10 +102,39 @@ func NewJSONLTailerFromStart(filePath string) (*JSONLTailer, error) {
 	if _, err := os.Stat(filePath); err != nil {
 		return nil, fmt.Errorf("stat jsonl file: %w", err)
 	}
+	f, err := os.Open(filePath)
+	if err != nil {
+		return nil, fmt.Errorf("open jsonl file: %w", err)
+	}
 	return &JSONLTailer{
 		filePath: filePath,
 		offset:   0,
+		file:     f,
+		scanBuf:  make([]byte, 1024*1024),
 	}, nil
+}
+
+// Close releases the file handle.
+func (t *JSONLTailer) Close() {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.file != nil {
+		t.file.Close()
+		t.file = nil
+	}
+}
+
+// reopenFile reopens the file handle. Must be called with mu held.
+func (t *JSONLTailer) reopenFile() error {
+	if t.file != nil {
+		t.file.Close()
+	}
+	f, err := os.Open(t.filePath)
+	if err != nil {
+		return err
+	}
+	t.file = f
+	return nil
 }
 
 // TailNewLines reads any new lines appended since last call.
@@ -105,8 +143,17 @@ func (t *JSONLTailer) TailNewLines() ([]protocol.DaemonEvent, []string, error) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 
-	info, err := os.Stat(t.filePath)
+	// Reopen if file handle was lost (e.g. after error)
+	if t.file == nil {
+		if err := t.reopenFile(); err != nil {
+			return nil, nil, err
+		}
+	}
+
+	info, err := t.file.Stat()
 	if err != nil {
+		t.file.Close()
+		t.file = nil
 		return nil, nil, err
 	}
 
@@ -114,21 +161,20 @@ func (t *JSONLTailer) TailNewLines() ([]protocol.DaemonEvent, []string, error) {
 		return nil, nil, nil // No new data
 	}
 
-	f, err := os.Open(t.filePath)
-	if err != nil {
-		return nil, nil, err
+	// File was truncated (rotated) — reset to beginning
+	if info.Size() < t.offset {
+		t.offset = 0
 	}
-	defer f.Close()
 
-	// Seek to last read position
-	if _, err := f.Seek(t.offset, 0); err != nil {
+	if _, err := t.file.Seek(t.offset, 0); err != nil {
 		return nil, nil, err
 	}
 
 	var allEvents []protocol.DaemonEvent
 	var rawLines []string
-	scanner := bufio.NewScanner(f)
-	scanner.Buffer(make([]byte, 1024*1024), 1024*1024)
+	// Reuse the pre-allocated 1MB buffer instead of allocating a new one each call
+	scanner := bufio.NewScanner(t.file)
+	scanner.Buffer(t.scanBuf, cap(t.scanBuf))
 
 	for scanner.Scan() {
 		line := scanner.Text()
@@ -141,8 +187,8 @@ func (t *JSONLTailer) TailNewLines() ([]protocol.DaemonEvent, []string, error) {
 		allEvents = append(allEvents, events...)
 	}
 
-	// Update offset to current position
-	newOffset, _ := f.Seek(0, 1)
+	// Update offset to current file position
+	newOffset, _ := t.file.Seek(0, 1)
 	t.offset = newOffset
 
 	return allEvents, rawLines, nil
@@ -150,7 +196,10 @@ func (t *JSONLTailer) TailNewLines() ([]protocol.DaemonEvent, []string, error) {
 
 // Run starts a periodic tail loop, sending events to outputCh.
 // It also checks for the first user message to generate a title.
+// Closes the file handle on exit.
 func (t *JSONLTailer) Run(ctx context.Context, outputCh chan<- protocol.DaemonEvent, titleCb func(title string)) {
+	defer t.Close()
+
 	ticker := time.NewTicker(1 * time.Second)
 	defer ticker.Stop()
 
@@ -277,7 +326,10 @@ func (t *SubAgentTailer) TailNewLines() ([]protocol.DaemonEvent, error) {
 }
 
 // Run starts a periodic tail loop for a sub-agent, sending stamped events to outputCh.
+// Closes the inner tailer on exit.
 func (t *SubAgentTailer) Run(ctx context.Context, outputCh chan<- protocol.DaemonEvent) {
+	defer t.tailer.Close()
+
 	ticker := time.NewTicker(1 * time.Second)
 	defer ticker.Stop()
 

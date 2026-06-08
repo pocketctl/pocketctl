@@ -1,0 +1,15 @@
+# Vue
+*.vue linguist-language=Vue
+
+# Swift
+*.swift linguist-language=Swift
+
+# TypeScript
+*.ts linguist-language=TypeScript
+*.tsx linguist-language=TypeScript
+
+# Go
+*.go linguist-language=Go
+
+# SQL migrations
+*.sql linguist-language=SQL

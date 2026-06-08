@@ -39,8 +39,9 @@
       <span v-if="lastActivityAt" class="last-activity">· 最后活跃 {{ formatRelativeTime(lastActivityAt) }}</span>
     </div>
 
-    <div class="messages" ref="messagesEl">
-      <div v-for="msg in messages" :key="msg.id" class="message" :class="msg.role">
+    <div class="messages-wrapper">
+      <div class="messages" ref="messagesEl" @scroll="onMessagesScroll">
+        <div v-for="msg in messages" :key="msg.id" class="message" :class="msg.role">
         <div v-if="msg.role === 'user'" class="msg-bubble user">{{ msg.content }}</div>
         <div v-else-if="msg.type === 'agent_text'" class="msg-bubble agent">
           <span>{{ msg.content }}</span>
@@ -84,6 +85,8 @@
         </div>
         <div v-else-if="msg.type === 'error'" class="msg-bubble error">{{ msg.content }}</div>
       </div>
+      </div>
+      <button v-if="showScrollBtn" class="scroll-to-bottom" @click="scrollToBottom">⬇</button>
     </div>
 
     <!-- Session lifecycle timeline -->
@@ -132,6 +135,7 @@ const timelineMilestones = ref<Milestone[]>([])
 const inputText = ref('')
 const messagesEl = ref<HTMLElement | null>(null)
 const inputEl = ref<HTMLInputElement | null>(null)
+const showScrollBtn = ref(false)
 let msgCounter = 0
 let replayDone = false
 let replayTimer: ReturnType<typeof setTimeout> | null = null
@@ -154,6 +158,12 @@ function scrollToBottom() {
 function scheduleScroll() {
   if (!replayDone) return
   nextTick(scrollToBottom)
+}
+
+function onMessagesScroll() {
+  if (!messagesEl.value) return
+  const { scrollTop, scrollHeight, clientHeight } = messagesEl.value
+  showScrollBtn.value = scrollTop + clientHeight < scrollHeight - 60
 }
 
 // Computed: effective status
@@ -475,7 +485,10 @@ function countLines(output: string): number {
 .timestamp-row { padding: 2px 20px 6px; font-size: 12px; color: #484f58; }
 .last-activity { margin-left: 4px; }
 
-.messages { flex: 1; overflow-y: auto; padding: 20px; -webkit-overflow-scrolling: touch; }
+.messages-wrapper { flex: 1; position: relative; overflow: hidden; }
+.messages { flex: 1; overflow-y: auto; padding: 20px; -webkit-overflow-scrolling: touch; height: 100%; }
+.scroll-to-bottom { position: absolute; bottom: 16px; right: 24px; width: 36px; height: 36px; border-radius: 50%; border: 1px solid #30363d; background: #21262d; color: #e6edf3; font-size: 16px; cursor: pointer; display: flex; align-items: center; justify-content: center; box-shadow: 0 2px 8px rgba(0,0,0,0.3); transition: background 0.15s; z-index: 10; }
+.scroll-to-bottom:hover { background: #30363d; }
 .message { margin-bottom: 16px; display: flex; }
 .message.user { justify-content: flex-end; }
 .msg-bubble { max-width: 70%; padding: 12px 16px; border-radius: 12px; font-size: 14px; line-height: 1.5; white-space: pre-wrap; word-break: break-word; }

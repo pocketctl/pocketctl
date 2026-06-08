@@ -45,23 +45,24 @@ describe('Notification logic (unit)', () => {
 
   test('shouldSendNotification logic', () => {
     const permissionGranted = true
-    const currentRouteSessionId = 'session-1'
+    const currentRouteSessionId: string = 'session-1'
+    const otherSessionId: string = 'session-2'
 
     // Should send: terminal state + different session
-    const shouldSend1 = TERMINAL_STATES.has('exited') && 'session-2' !== currentRouteSessionId
+    const shouldSend1 = TERMINAL_STATES.has('exited') && otherSessionId !== currentRouteSessionId
     expect(shouldSend1).toBe(true)
 
     // Should NOT send: viewing the same session
-    const shouldSend2 = TERMINAL_STATES.has('exited') && 'session-1' !== currentRouteSessionId
+    const shouldSend2 = TERMINAL_STATES.has('exited') && currentRouteSessionId !== currentRouteSessionId
     expect(shouldSend2).toBe(false)
 
     // Should NOT send: non-terminal state
-    const shouldSend3 = TERMINAL_STATES.has('running') && 'session-2' !== currentRouteSessionId
+    const shouldSend3 = TERMINAL_STATES.has('running') && otherSessionId !== currentRouteSessionId
     expect(shouldSend3).toBe(false)
 
     // Should NOT send: permission not granted
     const permissionGranted2 = false
-    const shouldSend4 = permissionGranted2 && TERMINAL_STATES.has('exited') && 'session-2' !== currentRouteSessionId
+    const shouldSend4 = permissionGranted2 && TERMINAL_STATES.has('exited') && otherSessionId !== currentRouteSessionId
     expect(shouldSend4).toBe(false)
   })
 

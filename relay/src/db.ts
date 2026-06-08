@@ -69,6 +69,25 @@ export async function initDB(pool: pg.Pool): Promise<void> {
   await pool.query(`ALTER TABLE sessions ADD COLUMN IF NOT EXISTS user_id INT`);
   await pool.query(`ALTER TABLE daemons ADD COLUMN IF NOT EXISTS user_id INT`);
   await pool.query(`CREATE INDEX IF NOT EXISTS idx_sessions_user_id ON sessions(user_id)`);
+
+  // Phase 3: devices table for push notifications
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS devices (
+      id SERIAL PRIMARY KEY,
+      user_id INT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      device_token VARCHAR(512) NOT NULL,
+      platform VARCHAR(16) DEFAULT 'ios',
+      device_name VARCHAR(255),
+      created_at TIMESTAMPTZ DEFAULT NOW(),
+      last_seen_at TIMESTAMPTZ DEFAULT NOW(),
+      UNIQUE(user_id, device_token)
+    )
+  `);
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_devices_user ON devices(user_id)`);
+
+  // Phase 3: add phone column to users for SMS auth
+  await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS phone VARCHAR(32)`);
+  await pool.query(`CREATE UNIQUE INDEX IF NOT EXISTS idx_users_phone ON users(phone) WHERE phone IS NOT NULL`);
 }
 
 export async function upsertDaemon(pool: pg.Pool, daemonId: string, hostname: string, agents: string[]): Promise<void> {
@@ -211,6 +230,49 @@ export async function listSessionsByUser(pool: pg.Pool, userId: number): Promise
     daemon_online: row.daemon_status === 'online',
     daemon_status: undefined,
   }));
+}
+
+// --- Phase 3: Device management for push notifications ---
+
+export async function registerDevice(pool: pg.Pool, userId: number, deviceToken: string, platform: string, deviceName?: string): Promise<void> {
+  await pool.query(
+    `INSERT INTO devices (user_id, device_token, platform, device_name, last_seen_at)
+     VALUES ($1, $2, $3, $4, NOW())
+     ON CONFLICT (user_id, device_token) DO UPDATE SET last_seen_at = NOW(), device_name = COALESCE($4, devices.device_name)`,
+    [userId, deviceToken, platform, deviceName || null]
+  );
+}
+
+export async function removeDevice(pool: pg.Pool, deviceToken: string): Promise<void> {
+  await pool.query(`DELETE FROM devices WHERE device_token = $1`, [deviceToken]);
+}
+
+export async function getDevicesByUser(pool: pg.Pool, userId: number): Promise<any[]> {
+  const result = await pool.query(
+    `SELECT id, user_id, device_token, platform, device_name, created_at, last_seen_at FROM devices WHERE user_id = $1`,
+    [userId]
+  );
+  return result.rows;
+}
+
+// --- Phase 3: Phone-based user management for SMS auth ---
+
+export async function getUserByPhone(pool: pg.Pool, phone: string): Promise<any | null> {
+  const result = await pool.query(
+    `SELECT id, email, phone, password_hash, display_name, created_at FROM users WHERE phone = $1`,
+    [phone]
+  );
+  return result.rows[0] || null;
+}
+
+export async function createUserByPhone(pool: pg.Pool, phone: string, displayName?: string): Promise<any> {
+  const result = await pool.query(
+    `INSERT INTO users (email, phone, password_hash, display_name)
+     VALUES ($1, $1, '', $2)
+     RETURNING id, email, phone, display_name, created_at`,
+    [phone, displayName || null]
+  );
+  return result.rows[0];
 }
 
 export function parseDBUrl(url: string): DBConfig {

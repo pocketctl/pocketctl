@@ -127,6 +127,15 @@ func (sm *SessionManager) RegisterTerminalSession(sessionID, cwd string, pid int
 		Pid:       pid,
 		TTY:       ttyPath,
 	}
+
+		// Emit session_discovered event to relay so it knows about this session
+		sm.outputCh <- protocol.DaemonEvent{
+			Type:      "session_discovered",
+			SessionID: sessionID,
+			Cwd:       cwd,
+			Status:    status,
+			Source:    "terminal",
+		}
 }
 
 // UpdateSessionTitle updates the title for a session and emits an event.

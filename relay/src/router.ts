@@ -1,6 +1,7 @@
 import type { WebSocket } from 'ws';
 import type pg from 'pg';
 import * as db from './db.js';
+import { notifyUser, sessionStatusPush, daemonOfflinePush } from './push.js';
 
 interface DaemonConnection { ws: WebSocket; daemonId: string; hostname: string; agents: string[]; userId: number | null }
 interface ClientConnection { ws: WebSocket; subscribedSessions: Set<string>; userId: number | null }
@@ -15,14 +16,16 @@ export class Router {
 
   constructor(pool: pg.Pool) { this.pool = pool; }
 
-  registerDaemon(ws: WebSocket, msg: any, userId: number | null): void {
+  async registerDaemon(ws: WebSocket, msg: any, userId: number | null): Promise<void> {
     const daemonId = msg.daemon_id;
     const hostname = msg.hostname || 'unknown';
     const agents = msg.agents || [];
-    db.cleanStaleSessions(this.pool).catch(console.error);
     this.daemons.set(daemonId, { ws, daemonId, hostname, agents, userId });
-    db.upsertDaemon(this.pool, daemonId, hostname, agents).catch(console.error);
-    if (userId) db.bindDaemonToUser(this.pool, daemonId, userId).catch(console.error);
+    // Await daemon upsert BEFORE sending ack, so FK constraints on subsequent
+    // session_discovered events won't fail (daemon row must exist first).
+    try { await db.upsertDaemon(this.pool, daemonId, hostname, agents); } catch (e) { console.error('upsertDaemon:', e); }
+    if (userId) { try { await db.bindDaemonToUser(this.pool, daemonId, userId); } catch (e) { console.error('bindDaemon:', e); } }
+    db.cleanStaleSessions(this.pool).catch(console.error);
     this.send(ws, { type: 'register_ack', status: 'ok', connection_id: daemonId });
 
     // Broadcast daemon online to clients with same userId (or all for legacy)
@@ -39,6 +42,11 @@ export class Router {
     const userId = daemon?.userId ?? null;
     this.daemons.delete(daemonId);
     db.setDaemonOffline(this.pool, daemonId).catch(console.error);
+
+    // Push notification for daemon offline
+    if (userId) {
+      notifyUser(this.pool, userId, daemonOfflinePush(hostname, daemonId)).catch(console.error);
+    }
 
     for (const [clientWs, client] of this.clients) {
       if (clientWs.readyState === 1 && this.sameUser(client.userId, userId)) {
@@ -144,6 +152,10 @@ export class Router {
     db.insertEvent(this.pool, sessionId, msg.type, msg).catch(console.error);
     if (msg.type === 'session_status') {
       db.upsertSession(this.pool, sessionId, daemonId, '', '', msg.status || 'unknown', undefined, undefined, msg.exit_reason).catch(console.error);
+      // Push notification for terminal states
+      if (userId && ['completed', 'error', 'killed', 'exited'].includes(msg.status)) {
+        notifyUser(this.pool, userId, sessionStatusPush(msg.title || '', msg.status, sessionId)).catch(console.error);
+      }
     }
     for (const [clientWs, client] of this.clients) {
       if (client.subscribedSessions.has(sessionId) && clientWs.readyState === 1) this.send(clientWs, msg);

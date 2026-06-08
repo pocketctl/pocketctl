@@ -97,16 +97,34 @@ func parseUserJSONL(entry JSONLEntry, sid string) ([]protocol.DaemonEvent, error
 		return nil, nil
 	}
 
-	// Content might be a string (plain user message) or array (tool_result)
+	// Content might be a string (plain user message) or array (tool_result + text)
 	var blocks []JSONLContentBlock
 	if err := json.Unmarshal(entry.Message.Content, &blocks); err != nil {
-		// Plain string content — this is a user text message, skip for events
+		// Plain string content — this is a user text message
+		var textStr string
+		if err2 := json.Unmarshal(entry.Message.Content, &textStr); err2 == nil && textStr != "" {
+			return []protocol.DaemonEvent{{
+				Type:      "user_text",
+				SessionID: sid,
+				Text:      textStr,
+			}}, nil
+		}
 		return nil, nil
 	}
 
 	var events []protocol.DaemonEvent
 	for _, b := range blocks {
-		if b.Type == "tool_result" {
+		switch b.Type {
+		case "text":
+			// User text message
+			if b.Text != "" {
+				events = append(events, protocol.DaemonEvent{
+					Type:      "user_text",
+					SessionID: sid,
+					Text:      b.Text,
+				})
+			}
+		case "tool_result":
 			output := b.Content
 			if output == "" {
 				output = b.Text
