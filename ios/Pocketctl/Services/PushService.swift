@@ -1,7 +1,10 @@
 import Foundation
 import UserNotifications
+import UIKit
 
-/// Push notification service — uses local notifications for development
+/// Push notification service
+@Observable
+@MainActor
 final class PushService {
     var isAuthorized = false
 
@@ -34,15 +37,23 @@ final class PushService {
         UNUserNotificationCenter.current().add(request)
     }
 
-    /// Register for remote notifications (APNs) — called from AppDelegate or SceneDelegate
+    /// Register for remote notifications (APNs)
     func registerForRemoteNotifications() {
-        // UIApplication.shared.registerForRemoteNotifications()
-        // Requires UIKit import; call from app entry point
+        UIApplication.shared.registerForRemoteNotifications()
     }
 
     /// Handle received device token from APNs
     func handleDeviceToken(_ deviceToken: Data) {
         let token = deviceToken.map { String(format: "%02.2hhx", $0) }.joined()
         print("[push] device token: \(token)")
+        Task {
+            let api = APIClient()
+            do {
+                _ = try await api.registerDevice(token: token, platform: "ios", deviceName: UIDevice.current.name)
+                KeychainStorage.notificationsEnabled = true
+            } catch {
+                print("[push] failed to register device: \(error)")
+            }
+        }
     }
 }

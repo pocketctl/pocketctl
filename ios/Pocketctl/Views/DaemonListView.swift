@@ -84,7 +84,13 @@ struct DaemonListView: View {
             Spacer()
 
             Button { showSettings = true } label: {
-                Text("M")
+                let user = KeychainStorage.currentUser
+                let initial: String = {
+                    let name = KeychainStorage.localDisplayName ?? user?.displayName ?? user?.phone
+                    if let name, !name.isEmpty { return String(name.prefix(1)).uppercased() }
+                    return "?"
+                }()
+                Text(initial)
                     .font(PCFont.body(16, weight: .semibold))
                     .foregroundStyle(Color.pcFgSecondary)
                     .frame(width: 36, height: 36)

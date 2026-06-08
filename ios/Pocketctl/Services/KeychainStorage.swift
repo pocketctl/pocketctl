@@ -69,9 +69,40 @@ enum KeychainStorage {
         set { UserDefaults.standard.set(newValue, forKey: "pocketctl_relay_url") }
     }
 
+    static var currentUser: User? {
+        get {
+            guard let json = load(key: "current_user") else { return nil }
+            guard let data = json.data(using: .utf8) else { return nil }
+            return try? JSONDecoder().decode(User.self, from: data)
+        }
+        set {
+            if let user = newValue {
+                if let data = try? JSONEncoder().encode(user),
+                   let json = String(data: data, encoding: .utf8) {
+                    save(key: "current_user", value: json)
+                }
+            } else {
+                delete(key: "current_user")
+            }
+        }
+    }
+
+    static var notificationsEnabled: Bool {
+        get { UserDefaults.standard.bool(forKey: "pocketctl_notifications_enabled") }
+        set { UserDefaults.standard.set(newValue, forKey: "pocketctl_notifications_enabled") }
+    }
+
+    static var localDisplayName: String? {
+        get { UserDefaults.standard.string(forKey: "pocketctl_local_display_name") }
+        set { UserDefaults.standard.set(newValue, forKey: "pocketctl_local_display_name") }
+    }
+
     static func clearAll() {
         accessToken = nil
         refreshToken = nil
+        currentUser = nil
         UserDefaults.standard.removeObject(forKey: "pocketctl_relay_url")
+        UserDefaults.standard.removeObject(forKey: "pocketctl_notifications_enabled")
+        UserDefaults.standard.removeObject(forKey: "pocketctl_local_display_name")
     }
 }

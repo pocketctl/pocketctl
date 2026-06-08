@@ -289,6 +289,7 @@ struct LoginView: View {
             let resp = try await apiClient.verifySMS(phone: phone, code: codeDigits.joined())
             KeychainStorage.accessToken = resp.access_token
             KeychainStorage.refreshToken = resp.refresh_token
+            KeychainStorage.currentUser = resp.user
             isLoggedIn = true
         } catch {
             self.error = error.localizedDescription

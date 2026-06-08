@@ -50,6 +50,7 @@ struct SessionDetailView: View {
                             .padding(.top, PCSpacing.md)
                             .padding(.bottom, PCSpacing.md)
                         }
+                        .defaultScrollAnchor(.bottom)
                         .onChange(of: vm.scrollTick) { _, _ in
                             DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
                                 withAnimation {
