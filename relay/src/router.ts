@@ -116,7 +116,8 @@ export class Router {
       if (originClient && originClient.readyState === 1) {
         const client = this.clients.get(originClient);
         if (client) client.subscribedSessions.add(sessionId);
-        this.send(originClient, msg);
+        const enriched = { ...msg, daemon_id: daemonId, hostname: daemon?.hostname || 'unknown' };
+        this.send(originClient, enriched);
       }
       this.pendingSessionCreate.delete(daemonId);
       db.insertEvent(this.pool, sessionId, msg.type, msg).catch(console.error);
