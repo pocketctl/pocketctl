@@ -208,10 +208,15 @@ func cmdDaemonStart(args []string) {
 		os.Exit(1)
 	}
 
-	// Generate daemon ID
+	// Generate daemon ID — reuse persisted ID if available
 	id := *daemonID
 	if id == "" {
-		id = "daemon-" + uuid.New().String()[:8]
+		if existing, err := daemon.ReadState(); err == nil && existing.DaemonID != "" {
+			id = existing.DaemonID
+		}
+		if id == "" {
+			id = "daemon-" + uuid.New().String()[:8]
+		}
 	}
 
 	// Setup logging to file
