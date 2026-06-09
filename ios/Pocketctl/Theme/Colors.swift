@@ -13,6 +13,7 @@ extension Color {
     static let pcAccent = Color(hex: 0x58A6FF)
     static let pcAccentHover = Color(hex: 0x79C0FF)
     static let pcAccentMuted = Color(red: 0.345, green: 0.651, blue: 1.0, opacity: 0.15)
+    static let pcAccentSubtle = Color(red: 0.345, green: 0.651, blue: 1.0, opacity: 0.10)
 
     // Primary button
     static let pcPrimaryBtn = Color(hex: 0x238636)

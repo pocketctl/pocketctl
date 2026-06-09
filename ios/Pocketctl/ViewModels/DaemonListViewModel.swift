@@ -146,6 +146,31 @@ final class DaemonListViewModel {
         sessions.filter { $0.daemonId == daemonId && !$0.isTerminal }.count
     }
 
+    /// Get unique agent type display names for a daemon's active sessions
+    func agentTags(for daemonId: String) -> [String] {
+        let types = Set(
+            sessions
+                .filter { $0.daemonId == daemonId && !$0.isTerminal }
+                .map(\.agentType)
+                .filter { !$0.isEmpty }
+        )
+        return types.sorted().map { Self.displayAgentName($0) }
+    }
+
+    /// Map raw agent_type to human-readable display name
+    static func displayAgentName(_ raw: String) -> String {
+        switch raw.lowercased() {
+        case "claude-code", "claude_code": return "Claude Code"
+        case "codex": return "Codex"
+        case "opencode", "open_code": return "OpenCode"
+        default:
+            // Capitalize first letter of each word as fallback
+            return raw.split(separator: "-")
+                .map { $0.prefix(1).uppercased() + $0.dropFirst() }
+                .joined(separator: " ")
+        }
+    }
+
     /// Get last activity time for a daemon
     func lastActivity(for daemonId: String) -> String? {
         sessions
@@ -153,6 +178,40 @@ final class DaemonListViewModel {
             .compactMap { $0.lastActivityAt ?? $0.createdAt }
             .max()
             .map { RelativeTime.format($0) }
+    }
+
+    /// Set alias for a daemon (optimistic update + API call)
+    func setAlias(daemonId: String, alias: String?) {
+        // Optimistic local update
+        guard let index = daemons.firstIndex(where: { $0.daemonId == daemonId }) else { return }
+        let trimmedAlias = alias?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let finalAlias = (trimmedAlias?.isEmpty ?? true) ? nil : trimmedAlias
+        daemons[index].alias = finalAlias
+
+        // Update local cache
+        var cached = KeychainStorage.daemonAliases
+        if let a = finalAlias {
+            cached[daemonId] = a
+        } else {
+            cached.removeValue(forKey: daemonId)
+        }
+        KeychainStorage.daemonAliases = cached
+
+        // Re-sort with new display name
+        daemons.sort { ($0.alias ?? $0.hostname) < ($1.alias ?? $1.hostname) }
+
+        // API call in background
+        Task {
+            do {
+                _ = try await apiClient.setDaemonAlias(daemonId: daemonId, alias: finalAlias)
+            } catch {
+                print("[alias] failed to save alias: \(error)")
+                // Roll back on failure
+                var rollbackCached = KeychainStorage.daemonAliases
+                rollbackCached.removeValue(forKey: daemonId)
+                KeychainStorage.daemonAliases = rollbackCached
+            }
+        }
     }
 
     // MARK: - Event handling
@@ -236,7 +295,7 @@ final class DaemonListViewModel {
             }
             daemonMap[id] = daemon
         }
-        daemons = Array(daemonMap.values).sorted { $0.hostname < $1.hostname }
+        daemons = Array(daemonMap.values).sorted { ($0.alias ?? $0.hostname) < ($1.alias ?? $1.hostname) }
     }
 
     /// Merge new sessions into existing list with minimal changes.

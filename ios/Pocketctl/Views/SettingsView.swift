@@ -31,50 +31,7 @@ struct SettingsView: View {
                         .padding(.horizontal, PCSpacing.lg)
                         .padding(.bottom, 24)
 
-                        // Server section
-                        sectionHeader("服务器")
-                        settingsGroup {
-                            VStack(alignment: .leading, spacing: 8) {
-                                HStack(spacing: 8) {
-                                    TextField("http://localhost:8080", text: $viewModel.relayURLText)
-                                        .font(PCFont.mono(14))
-                                        .foregroundStyle(Color.pcFg)
-                                        .autocorrectionDisabled()
-                                        .textInputAutocapitalization(.never)
-                                        .textFieldStyle(.plain)
-
-                                    Button { Task { await viewModel.testConnection() } } label: {
-                                        if viewModel.isTestingConnection {
-                                            ProgressView()
-                                                .frame(width: 20, height: 20)
-                                        } else {
-                                            Text("测试")
-                                                .font(PCFont.body(14))
-                                                .foregroundStyle(Color.pcAccent)
-                                        }
-                                    }
-                                    .disabled(viewModel.isTestingConnection)
-                                }
-
-                                HStack(spacing: 6) {
-                                    Circle()
-                                        .fill(connectionStatusColor)
-                                        .frame(width: 8, height: 8)
-                                    Text(connectionStatusText)
-                                        .font(PCFont.body(12))
-                                        .foregroundStyle(Color.pcFgTertiary)
-                                }
-
-                                if let msg = viewModel.relayURLValidationMessage {
-                                    Text(msg)
-                                        .font(PCFont.body(12))
-                                        .foregroundStyle(Color.pcError)
-                                }
-                            }
-                            .padding(PCSpacing.lg)
-                        }
-                        .padding(.horizontal, PCSpacing.lg)
-                        .padding(.bottom, 24)
+                        // Server section — hidden for now
 
                         // My Hosts section
                         sectionHeader("我的主机")

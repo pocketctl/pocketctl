@@ -30,9 +30,10 @@ export class Router {
     this.send(ws, { type: 'register_ack', status: 'ok', connection_id: daemonId });
 
     // Broadcast daemon online to clients with same userId (or all for legacy)
+    const alias = await db.getDaemonAlias(this.pool, daemonId);
     for (const [clientWs, client] of this.clients) {
       if (clientWs.readyState === 1 && this.sameUser(client.userId, userId)) {
-        this.send(clientWs, { type: 'daemon_status', daemon_id: daemonId, status: 'online', hostname, agents });
+        this.send(clientWs, { type: 'daemon_status', daemon_id: daemonId, status: 'online', hostname, agents, alias });
       }
     }
   }
@@ -49,11 +50,14 @@ export class Router {
       notifyUser(this.pool, userId, daemonOfflinePush(hostname, daemonId)).catch(console.error);
     }
 
-    for (const [clientWs, client] of this.clients) {
-      if (clientWs.readyState === 1 && this.sameUser(client.userId, userId)) {
-        this.send(clientWs, { type: 'daemon_status', daemon_id: daemonId, status: 'offline', hostname, last_seen_at: new Date().toISOString() });
+    // Broadcast offline status with alias (async fetch)
+    db.getDaemonAlias(this.pool, daemonId).then((alias) => {
+      for (const [clientWs, client] of this.clients) {
+        if (clientWs.readyState === 1 && this.sameUser(client.userId, userId)) {
+          this.send(clientWs, { type: 'daemon_status', daemon_id: daemonId, status: 'offline', hostname, last_seen_at: new Date().toISOString(), alias });
+        }
       }
-    }
+    }).catch(console.error);
 
     const affectedSessions: string[] = [];
     for (const [sessionId, dId] of this.sessionToDaemon) {

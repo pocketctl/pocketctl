@@ -14,6 +14,8 @@ settings:
     PRODUCT_BUNDLE_IDENTIFIER: com.pocketctl.app
     MARKETING_VERSION: "1.0.0"
     CURRENT_PROJECT_VERSION: "1"
+    CODE_SIGN_STYLE: Automatic
+    DEVELOPMENT_TEAM: 48V2SNGX85
 
 targets:
   Pocketctl:

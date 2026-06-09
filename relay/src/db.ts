@@ -93,6 +93,9 @@ export async function initDB(pool: pg.Pool): Promise<void> {
   await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS phone VARCHAR(32)`);
   await pool.query(`CREATE UNIQUE INDEX IF NOT EXISTS idx_users_phone ON users(phone) WHERE phone IS NOT NULL`);
 
+  // Daemon alias column
+  await pool.query(`ALTER TABLE daemons ADD COLUMN IF NOT EXISTS alias VARCHAR(64)`);
+
   // Session delete tombstone table
   await pool.query(`
     CREATE TABLE IF NOT EXISTS deleted_sessions (
@@ -113,6 +116,20 @@ export async function upsertDaemon(pool: pg.Pool, daemonId: string, hostname: st
 
 export async function setDaemonOffline(pool: pg.Pool, daemonId: string): Promise<void> {
   await pool.query(`UPDATE daemons SET status = 'offline' WHERE daemon_id = $1`, [daemonId]);
+}
+
+export async function upsertDaemonAlias(pool: pg.Pool, userId: number, daemonId: string, alias: string | null): Promise<string | null> {
+  // Verify daemon belongs to user
+  const check = await pool.query(`SELECT 1 FROM daemons WHERE daemon_id = $1 AND user_id = $2`, [daemonId, userId]);
+  if ((check.rowCount ?? 0) === 0) return undefined as any; // not found or not owned
+  const normalizedAlias = alias && alias.trim() ? alias.trim().slice(0, 64) : null;
+  await pool.query(`UPDATE daemons SET alias = $1 WHERE daemon_id = $2`, [normalizedAlias, daemonId]);
+  return normalizedAlias;
+}
+
+export async function getDaemonAlias(pool: pg.Pool, daemonId: string): Promise<string | null> {
+  const result = await pool.query(`SELECT alias FROM daemons WHERE daemon_id = $1`, [daemonId]);
+  return result.rows[0]?.alias ?? null;
 }
 
 export async function updateHeartbeat(pool: pg.Pool, daemonId: string): Promise<void> {
@@ -148,7 +165,7 @@ export async function listSessions(pool: pg.Pool): Promise<any[]> {
   const result = await pool.query(
     `SELECT s.session_id, s.daemon_id, s.agent_type, s.cwd, s.title, s.source, s.status,
             s.created_at, s.updated_at, s.last_activity_at, s.exit_reason, s.subagent_count,
-            d.status AS daemon_status, d.hostname AS hostname
+            d.status AS daemon_status, d.hostname AS hostname, d.alias AS daemon_alias
      FROM sessions s
      LEFT JOIN daemons d ON s.daemon_id = d.daemon_id
      WHERE s.status NOT IN ('completed', 'error', 'killed')
@@ -158,6 +175,7 @@ export async function listSessions(pool: pg.Pool): Promise<any[]> {
   return result.rows.map((row: any) => ({
     ...row,
     daemon_online: row.daemon_status === 'online',
+    daemon_alias: row.daemon_alias ?? null,
     daemon_status: undefined,
   }));
 }
@@ -247,6 +265,7 @@ export async function listSessionsByUser(pool: pg.Pool, userId: number): Promise
   return result.rows.map((row: any) => ({
     ...row,
     daemon_online: row.daemon_status === 'online',
+    daemon_alias: row.daemon_alias ?? null,
     daemon_status: undefined,
   }));
 }

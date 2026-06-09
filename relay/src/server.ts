@@ -1,7 +1,7 @@
 import Fastify from 'fastify';
 import fastifyWebsocket from '@fastify/websocket';
 import fastifyCors from '@fastify/cors';
-import { createPool, initDB, parseDBUrl, createUser, getUserByEmail, getUserById, getUserByPhone, createUserByPhone, registerDevice, removeDevice, cleanStaleTombstones } from './db.js';
+import { createPool, initDB, parseDBUrl, createUser, getUserByEmail, getUserById, getUserByPhone, createUserByPhone, registerDevice, removeDevice, cleanStaleTombstones, upsertDaemonAlias } from './db.js';
 import { Router } from './router.js';
 import { hashPassword, verifyPassword, signAccessToken, signRefreshToken, verifyAccessToken, verifyRefreshToken } from './auth.js';
 import { notifyUser, sessionStatusPush, daemonOfflinePush } from './push.js';
@@ -208,6 +208,25 @@ async function main() {
     const { token } = req.params as any;
     await removeDevice(pool, token);
     return { success: true };
+  });
+
+  // Set daemon alias
+  app.put('/api/daemons/:daemonId/alias', async (req, reply) => {
+    const authHeader = req.headers.authorization;
+    if (!authHeader?.startsWith('Bearer ')) {
+      reply.code(401); return { error: 'authorization required' };
+    }
+    const payload = verifyAccessToken(authHeader.slice(7));
+    if (!payload) {
+      reply.code(401); return { error: 'invalid token' };
+    }
+    const { daemonId } = req.params as any;
+    const { alias } = req.body as any;
+    const result = await upsertDaemonAlias(pool, payload.userId, daemonId, alias ?? null);
+    if (result === undefined) {
+      reply.code(403); return { error: 'daemon not found or not owned by user' };
+    }
+    return { success: true, alias: result };
   });
 
   // ---- Health check ----

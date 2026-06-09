@@ -105,6 +105,11 @@ enum KeychainStorage {
         set { UserDefaults.standard.set(newValue, forKey: "pocketctl_local_display_name") }
     }
 
+    static var daemonAliases: [String: String] {
+        get { UserDefaults.standard.dictionary(forKey: "pocketctl_daemon_aliases") as? [String: String] ?? [:] }
+        set { UserDefaults.standard.set(newValue, forKey: "pocketctl_daemon_aliases") }
+    }
+
     static func clearAll() {
         accessToken = nil
         refreshToken = nil

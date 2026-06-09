@@ -55,6 +55,12 @@ final class APIClient: @unchecked Sendable {
         try await authorizedDelete(path: "/api/devices/\(token)")
     }
 
+    // MARK: - Daemon Alias
+
+    func setDaemonAlias(daemonId: String, alias: String?) async throws -> AliasResponse {
+        try await authorizedPut(path: "/api/daemons/\(daemonId)/alias", body: ["alias": alias as Any])
+    }
+
     // MARK: - Internal
 
     private func authorizedHeaders() -> [String: String] {
@@ -100,6 +106,18 @@ final class APIClient: @unchecked Sendable {
         return try JSONDecoder().decode(T.self, from: data)
     }
 
+    private func authorizedPut<T: Decodable>(path: String, body: [String: Any]) async throws -> T {
+        guard let url = URL(string: baseURL + path) else { throw APIError.invalidURL }
+        var request = URLRequest(url: url)
+        request.httpMethod = "PUT"
+        request.allHTTPHeaderFields = authorizedHeaders()
+        request.httpBody = try JSONSerialization.data(withJSONObject: body)
+
+        let (data, response) = try await URLSession.shared.data(for: request)
+        try checkResponse(response, data: data)
+        return try JSONDecoder().decode(T.self, from: data)
+    }
+
     private func checkResponse(_ response: URLResponse, data: Data) throws {
         guard let http = response as? HTTPURLResponse else { throw APIError.invalidResponse }
         if http.statusCode >= 400 {
@@ -129,6 +147,11 @@ struct SMSResponse: Decodable {
 
 struct SuccessResponse: Decodable {
     let success: Bool
+}
+
+struct AliasResponse: Decodable {
+    let success: Bool
+    let alias: String?
 }
 
 // MARK: - Errors
