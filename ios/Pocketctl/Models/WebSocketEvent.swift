@@ -21,6 +21,10 @@ enum WebSocketEventType: String, Sendable {
     case toolResult = "tool_result"
     case subagentDiscovered = "subagent_discovered"
 
+    // Replay control (relay → client)
+    case replayBatch = "replay_batch"
+    case replayEnd = "replay_end"
+
     // Errors
     case error
 
@@ -64,4 +68,9 @@ struct WebSocketEvent {
 
     var subagentDesc: String? { raw["subagent_desc"] as? String }
     var subagentType: String? { raw["subagent_type"] as? String }
+
+    // Replay control accessors
+    var events: [[String: Any]]? { raw["events"] as? [[String: Any]] }
+    var lastSeq: Int? { raw["last_seq"] as? Int }
+    var count: Int? { raw["count"] as? Int }
 }

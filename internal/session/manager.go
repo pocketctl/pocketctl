@@ -26,6 +26,7 @@ type ProcessState struct {
 	Pid       int    // terminal session's original PID
 	TTY       string // terminal session's TTY device (e.g. /dev/ttys002)
 	ExitReason string // reason for process exit (terminal sessions only)
+	TitleGenerated bool // true once generate_title_request has been sent
 }
 
 // NotifyFunc is called after a web→terminal message completes.
@@ -37,6 +38,7 @@ type SessionManager struct {
 	outputCh chan protocol.DaemonEvent
 	childPids map[int]bool // PIDs of daemon-spawned processes
 	OnNotifyTerminal NotifyFunc // callback after --resume on terminal session
+	OnSessionIDResolved func(realSessionID, cwd string) // callback when daemon session gets real ID
 }
 
 func NewSessionManager(outputCh chan protocol.DaemonEvent) *SessionManager {
@@ -167,6 +169,30 @@ func (sm *SessionManager) UpdateSessionTitle(sessionID, title string) {
 	}
 }
 
+// GenerateTitle sends a generate_title_request event to the relay for LLM-based
+// title generation. Sends at most once per session (guarded by TitleGenerated flag).
+func (sm *SessionManager) GenerateTitle(sessionID, userMessage, assistantMessage string) {
+	sm.mu.Lock()
+	ps, ok := sm.sessions[sessionID]
+	if !ok {
+		sm.mu.Unlock()
+		return
+	}
+	if ps.TitleGenerated {
+		sm.mu.Unlock()
+		return
+	}
+	ps.TitleGenerated = true
+	sm.mu.Unlock()
+
+	sm.outputCh <- protocol.DaemonEvent{
+		Type:             "generate_title_request",
+		SessionID:        sessionID,
+		UserMessage:      userMessage,
+		AssistantMessage: assistantMessage,
+	}
+}
+
 // SetSessionExited marks a terminal session as exited (process died).
 func (sm *SessionManager) SetSessionExited(sessionID string, exitReason string) {
 	sm.mu.Lock()
@@ -227,9 +253,14 @@ func (sm *SessionManager) readOutput(ctx context.Context, cmd *exec.Cmd, stdout 
 				delete(sm.sessions, ps.SessionID)
 				ps.SessionID = sid
 				sm.sessions[sid] = ps
+				cwd := ps.Cwd
 				sm.mu.Unlock()
 				sm.outputCh <- protocol.DaemonEvent{
 					Type: "session_id_changed", SessionID: sid, OldSessionID: oldID,
+				}
+				// Trigger title extraction from JSONL for daemon-created sessions
+				if sm.OnSessionIDResolved != nil {
+					sm.OnSessionIDResolved(sid, cwd)
 				}
 			} else {
 				sm.mu.Unlock()

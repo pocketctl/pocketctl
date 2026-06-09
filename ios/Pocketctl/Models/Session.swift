@@ -1,7 +1,7 @@
 import Foundation
 
 struct Session: Identifiable, Sendable, Hashable, Equatable {
-    let sessionId: String
+    var sessionId: String  // var to support session_id_changed updates
     let daemonId: String
     let agentType: String
     let cwd: String
@@ -32,7 +32,7 @@ struct Session: Identifiable, Sendable, Hashable, Equatable {
     func contentEquals(_ other: Session) -> Bool {
         sessionId == other.sessionId &&
         status == other.status &&
-        title == other.title &&
+        (title ?? "") == (other.title ?? "") &&
         lastActivityAt == other.lastActivityAt &&
         exitReason == other.exitReason &&
         subagentCount == other.subagentCount &&
@@ -45,8 +45,11 @@ struct Session: Identifiable, Sendable, Hashable, Equatable {
     }
 
     var displayTitle: String {
-        if let title = title, !title.isEmpty { return title }
-        return String(sessionId.prefix(8))
+        guard let title = title, !title.isEmpty else {
+            return String(sessionId.prefix(8))
+        }
+        // If title still matches the default pattern, show as-is (includes "Terminal Session-{suffix}")
+        return title
     }
 
     var isTerminal: Bool {

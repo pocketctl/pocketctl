@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"flag"
 	"fmt"
@@ -13,6 +14,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/pocketctl/pocketctl/internal/adapter"
 	"github.com/pocketctl/pocketctl/internal/api"
 	"github.com/pocketctl/pocketctl/internal/config"
 	"github.com/pocketctl/pocketctl/internal/daemon"
@@ -255,6 +257,31 @@ func cmdDaemonStart(args []string) {
 	// Create session manager
 	sm := session.NewSessionManager(outputCh)
 
+	// When a daemon-created session resolves its real ID, wait for assistant
+	// reply then send generate_title_request to relay for LLM-based title generation.
+	sm.OnSessionIDResolved = func(realSessionID, cwd string) {
+		go func() {
+			for i := 0; i < 30; i++ {
+				time.Sleep(1 * time.Second)
+				jsonlPath, err := watcher.ResolveJSONLPath(realSessionID, cwd)
+				if err != nil {
+					continue
+				}
+				if _, err := os.Stat(jsonlPath); err != nil {
+					continue // file not created yet
+				}
+				// Read lines looking for both user and assistant messages
+				lines := readJSONLLines(jsonlPath, 500)
+				userMsg := adapter.ExtractFirstUserMessage(lines, 200)
+				assistantMsg := adapter.ExtractFirstAssistantMessage(lines, 200)
+				if userMsg != "" && assistantMsg != "" {
+					sm.GenerateTitle(realSessionID, userMsg, assistantMsg)
+					return
+				}
+			}
+		}()
+	}
+
 	// Create session watcher
 	sw, err := watcher.NewSessionWatcher()
 	if err != nil {
@@ -471,17 +498,15 @@ func handleWatcherEvents(ctx context.Context, sw *watcher.SessionWatcher, sm *se
 					}
 					defer tailer.Close()
 
-					// Extract title from first user message
-					title := watcher.ExtractTitleFromJSONL(jsonlPath)
-					if title == "Terminal Session" {
-						// Append session ID suffix for disambiguation
-						sid := evt.Session.SessionID
-						if len(sid) > 8 {
-							sid = sid[len(sid)-8:]
-						}
-						title = "Terminal Session-" + sid
+					// Set default title immediately
+					sid := evt.Session.SessionID
+					if len(sid) > 8 {
+						sid = sid[len(sid)-8:]
 					}
-					sm.UpdateSessionTitle(evt.Session.SessionID, title)
+					sm.UpdateSessionTitle(evt.Session.SessionID, "Terminal Session-"+sid)
+
+					// Track whether title generation request has been sent
+					titleGenSent := false
 
 					// Tail loop: send parsed events with session_id stamped
 					ticker := time.NewTicker(1 * time.Second)
@@ -491,7 +516,7 @@ func handleWatcherEvents(ctx context.Context, sw *watcher.SessionWatcher, sm *se
 						case <-ctx.Done():
 							return
 						case <-ticker.C:
-							events, _, err := tailer.TailNewLines()
+							events, rawLines, err := tailer.TailNewLines()
 							if err != nil {
 								continue
 							}
@@ -500,6 +525,15 @@ func handleWatcherEvents(ctx context.Context, sw *watcher.SessionWatcher, sm *se
 									events[i].SessionID = evt.Session.SessionID
 								}
 								outputCh <- events[i]
+							}
+							// Check for title generation trigger (user + assistant messages ready)
+							if !titleGenSent && len(rawLines) > 0 {
+								userMsg := adapter.ExtractFirstUserMessage(rawLines, 200)
+								assistantMsg := adapter.ExtractFirstAssistantMessage(rawLines, 200)
+								if userMsg != "" && assistantMsg != "" {
+									sm.GenerateTitle(evt.Session.SessionID, userMsg, assistantMsg)
+									titleGenSent = true
+								}
 							}
 						}
 					}
@@ -592,4 +626,21 @@ func handleCommands(ctx context.Context, client *ws.Client, sm *session.SessionM
 			}
 		}
 	}
+}
+
+// readJSONLLines reads up to maxLines from a JSONL file and returns them as a slice.
+func readJSONLLines(path string, maxLines int) []string {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil
+	}
+	defer f.Close()
+
+	var lines []string
+	scanner := bufio.NewScanner(f)
+	scanner.Buffer(make([]byte, 1024*1024), 1024*1024)
+	for i := 0; i < maxLines && scanner.Scan(); i++ {
+		lines = append(lines, scanner.Text())
+	}
+	return lines
 }

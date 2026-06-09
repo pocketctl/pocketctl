@@ -16,29 +16,31 @@ type ClientMessage struct {
 
 // Daemon → Client events
 type DaemonEvent struct {
-	Type           string          `json:"type"`
-	SessionID      string          `json:"session_id"`
-	OldSessionID   string          `json:"old_session_id,omitempty"`
-	Text           string          `json:"text,omitempty"`
-	Streaming      bool            `json:"streaming,omitempty"`
-	CallID         string          `json:"call_id,omitempty"`
-	Tool           string          `json:"tool,omitempty"`
-	Input          json.RawMessage `json:"input,omitempty"`
-	Output         string          `json:"output,omitempty"`
-	Status         string          `json:"status,omitempty"`
-	Error          string          `json:"error,omitempty"`
-	CostUSD        float64         `json:"cost_usd,omitempty"`
-	Turns          int             `json:"turns,omitempty"`
-	RiskLevel      string          `json:"risk_level,omitempty"`
-	RequestID      string          `json:"request_id,omitempty"`
-	Title          string          `json:"title,omitempty"`
-	Cwd            string          `json:"cwd,omitempty"`
-	Source         string          `json:"source,omitempty"`
-	ExitReason     string          `json:"exit_reason,omitempty"`
-	LastActivityAt string          `json:"last_activity_at,omitempty"`
-	AgentID        string          `json:"agent_id,omitempty"`       // sub-agent identifier (e.g. "afa8314e6e3f6e552")
-	SubAgentDesc   string          `json:"subagent_desc,omitempty"`  // sub-agent task description
-	SubAgentType   string          `json:"subagent_type,omitempty"`  // sub-agent type (Explore, general-purpose, etc.)
+	Type             string          `json:"type"`
+	SessionID        string          `json:"session_id"`
+	OldSessionID     string          `json:"old_session_id,omitempty"`
+	Text             string          `json:"text,omitempty"`
+	Streaming        bool            `json:"streaming,omitempty"`
+	CallID           string          `json:"call_id,omitempty"`
+	Tool             string          `json:"tool,omitempty"`
+	Input            json.RawMessage `json:"input,omitempty"`
+	Output           string          `json:"output,omitempty"`
+	Status           string          `json:"status,omitempty"`
+	Error            string          `json:"error,omitempty"`
+	CostUSD          float64         `json:"cost_usd,omitempty"`
+	Turns            int             `json:"turns,omitempty"`
+	RiskLevel        string          `json:"risk_level,omitempty"`
+	RequestID        string          `json:"request_id,omitempty"`
+	Title            string          `json:"title,omitempty"`
+	Cwd              string          `json:"cwd,omitempty"`
+	Source           string          `json:"source,omitempty"`
+	ExitReason       string          `json:"exit_reason,omitempty"`
+	LastActivityAt   string          `json:"last_activity_at,omitempty"`
+	AgentID          string          `json:"agent_id,omitempty"`       // sub-agent identifier (e.g. "afa8314e6e3f6e552")
+	SubAgentDesc     string          `json:"subagent_desc,omitempty"`  // sub-agent task description
+	SubAgentType     string          `json:"subagent_type,omitempty"`  // sub-agent type (Explore, general-purpose, etc.)
+	UserMessage      string          `json:"user_message,omitempty"`   // for generate_title_request
+	AssistantMessage string          `json:"assistant_message,omitempty"` // for generate_title_request
 }
 
 // Control messages

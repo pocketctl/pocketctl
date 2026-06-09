@@ -133,6 +133,13 @@ final class SessionListViewModel {
                 }
             }
 
+        case .sessionIdChanged:
+            if let newId = event.sessionId,
+               let oldId = dict["old_session_id"] as? String,
+               let index = sessions.firstIndex(where: { $0.sessionId == oldId }) {
+                sessions[index].sessionId = newId
+            }
+
         case .sessionDiscovered:
             if let session = Session.from(dict: dict) {
                 if !sessions.contains(where: { $0.sessionId == session.sessionId }) {

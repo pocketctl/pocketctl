@@ -140,6 +140,36 @@ func parseUserJSONL(entry JSONLEntry, sid string) ([]protocol.DaemonEvent, error
 	return events, nil
 }
 
+// ExtractFirstAssistantMessage returns the text of the first assistant message from JSONL lines.
+// Filters out tool_use, tool_result, thinking, and empty responses.
+// Truncated to maxLen characters. Returns empty string if no assistant response found.
+func ExtractFirstAssistantMessage(lines []string, maxLen int) string {
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		var entry JSONLEntry
+		if err := json.Unmarshal([]byte(line), &entry); err != nil {
+			continue
+		}
+		if entry.Type != "assistant" || entry.Message == nil || entry.Message.Role != "assistant" {
+			continue
+		}
+
+		var blocks []JSONLContentBlock
+		if err := json.Unmarshal(entry.Message.Content, &blocks); err != nil {
+			continue
+		}
+		for _, b := range blocks {
+			if b.Type == "text" && b.Text != "" {
+				return truncate(b.Text, maxLen)
+			}
+		}
+	}
+	return ""
+}
+
 // ExtractFirstUserMessage returns the text of the first user message from JSONL lines.
 // Truncated to maxLen characters.
 func ExtractFirstUserMessage(lines []string, maxLen int) string {

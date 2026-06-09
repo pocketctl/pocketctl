@@ -125,6 +125,40 @@ func TestBuildClaudeArgs_NewSession(t *testing.T) {
 	}
 }
 
+func TestExtractFirstAssistantMessage(t *testing.T) {
+	lines := []string{
+		`{"type":"user","sessionId":"s1","message":{"role":"user","content":[{"type":"text","text":"帮我写一个React组件"}]}}`,
+		`{"type":"assistant","sessionId":"s1","message":{"role":"assistant","content":[{"type":"text","text":"好的，我来帮你创建一个React组件"}]}}`,
+		`{"type":"assistant","sessionId":"s1","message":{"role":"assistant","content":[{"type":"tool_use","id":"t1","name":"Write","input":{}}]}}`,
+	}
+	result := ExtractFirstAssistantMessage(lines, 60)
+	if result != "好的，我来帮你创建一个React组件" {
+		t.Errorf("unexpected result: %s", result)
+	}
+}
+
+func TestExtractFirstAssistantMessage_ToolUseOnly(t *testing.T) {
+	lines := []string{
+		`{"type":"user","sessionId":"s1","message":{"role":"user","content":[{"type":"text","text":"test"}]}}`,
+		`{"type":"assistant","sessionId":"s1","message":{"role":"assistant","content":[{"type":"tool_use","id":"t1","name":"Read","input":{}}]}}`,
+		`{"type":"assistant","sessionId":"s1","message":{"role":"assistant","content":[{"type":"text","text":"文件内容如下"}]}}`,
+	}
+	result := ExtractFirstAssistantMessage(lines, 60)
+	if result != "文件内容如下" {
+		t.Errorf("expected '文件内容如下', got: %s", result)
+	}
+}
+
+func TestExtractFirstAssistantMessage_NoAssistant(t *testing.T) {
+	lines := []string{
+		`{"type":"user","sessionId":"s1","message":{"role":"user","content":[{"type":"text","text":"test"}]}}`,
+	}
+	result := ExtractFirstAssistantMessage(lines, 60)
+	if result != "" {
+		t.Errorf("expected empty, got: %s", result)
+	}
+}
+
 func TestBuildClaudeArgs_ResumeSession(t *testing.T) {
 	args := BuildClaudeArgs("continue", "abc-123", protocol.SessionConfig{})
 	found := false

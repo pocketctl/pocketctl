@@ -1,6 +1,7 @@
 import type { WebSocket } from 'ws';
 import type pg from 'pg';
 import * as db from './db.js';
+import { generateTitle } from './title.js';
 import { notifyUser, sessionStatusPush, daemonOfflinePush } from './push.js';
 
 interface DaemonConnection { ws: WebSocket; daemonId: string; hostname: string; agents: string[]; userId: number | null }
@@ -150,6 +151,35 @@ export class Router {
       }
       return;
     }
+    if (msg.type === 'generate_title_request') {
+      const { user_message: userMsg, assistant_message: assistantMsg } = msg;
+      if (!userMsg || !assistantMsg) {
+        console.warn('[router] generate_title_request missing user_message or assistant_message');
+        return;
+      }
+      // Layer 2: skip if title is no longer default
+      db.hasDefaultTitle(this.pool, sessionId).then((isDefault) => {
+        if (!isDefault) {
+          console.log(`[router] skipping title generation for ${sessionId} — title already custom`);
+          return;
+        }
+        generateTitle(userMsg, assistantMsg).then((title) => {
+          if (!title) return;
+          // Layer 3: conditional update in DB
+          db.updateTitleIfDefault(this.pool, sessionId, title).then((updated) => {
+            if (updated) {
+              console.log(`[router] title generated for ${sessionId}: ${title}`);
+              for (const [clientWs, client] of this.clients) {
+                if (client.subscribedSessions.has(sessionId) && clientWs.readyState === 1) {
+                  this.send(clientWs, { type: 'session_title_update', session_id: sessionId, title });
+                }
+              }
+            }
+          }).catch(console.error);
+        }).catch(console.error);
+      }).catch(console.error);
+      return;
+    }
     if (msg.type === 'session_title_update') {
       this.pool.query('UPDATE sessions SET title = $1 WHERE session_id = $2', [msg.title || '', sessionId]).catch(console.error);
       for (const [clientWs, client] of this.clients) {
@@ -222,8 +252,33 @@ export class Router {
   private async handleReplay(clientWs: WebSocket, sessionId: string, lastSeq: number): Promise<void> {
     try {
       const events = await db.getEventsAfter(this.pool, sessionId, lastSeq);
-      for (const evt of events) this.send(clientWs, evt.payload);
-    } catch (err) { console.error('replay error:', err); }
+      if (events.length === 0) {
+        this.send(clientWs, { type: 'replay_end', session_id: sessionId, count: 0, last_seq: lastSeq });
+        return;
+      }
+      // Send events in batches of 50 to reduce WebSocket frame overhead
+      const BATCH = 50;
+      for (let i = 0; i < events.length; i += BATCH) {
+        const slice = events.slice(i, i + BATCH);
+        this.send(clientWs, {
+          type: 'replay_batch',
+          session_id: sessionId,
+          events: slice.map(e => e.payload),
+          last_seq: slice[slice.length - 1].id,
+        });
+      }
+      // Signal completion with final seq for incremental replay
+      this.send(clientWs, {
+        type: 'replay_end',
+        session_id: sessionId,
+        count: events.length,
+        last_seq: events[events.length - 1].id,
+      });
+    } catch (err) {
+      console.error('replay error:', err);
+      // Always send replay_end so the client doesn't hang on isLoading
+      this.send(clientWs, { type: 'replay_end', session_id: sessionId, count: 0, last_seq: lastSeq });
+    }
   }
 
   private async handleListSessions(clientWs: WebSocket, userId: number | null): Promise<void> {

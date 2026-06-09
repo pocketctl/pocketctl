@@ -1,4 +1,5 @@
 import pg from 'pg';
+import { createHash } from 'crypto';
 const { Pool } = pg;
 
 export interface DBConfig {
@@ -46,6 +47,9 @@ export async function initDB(pool: pg.Pool): Promise<void> {
     CREATE INDEX IF NOT EXISTS idx_sessions_daemon ON sessions(daemon_id);
     CREATE INDEX IF NOT EXISTS idx_events_session_id ON events(session_id, id);
   `);
+  // Migration: add event_hash for deduplication
+  await pool.query(`ALTER TABLE events ADD COLUMN IF NOT EXISTS event_hash VARCHAR(32)`);
+  await pool.query(`CREATE UNIQUE INDEX IF NOT EXISTS idx_events_dedup ON events(session_id, event_hash)`);
   // Migration: add title and source columns to existing sessions table
   await pool.query(`ALTER TABLE sessions ADD COLUMN IF NOT EXISTS title TEXT`);
   await pool.query(`ALTER TABLE sessions ADD COLUMN IF NOT EXISTS source VARCHAR(16) DEFAULT 'daemon'`);
@@ -116,13 +120,20 @@ export async function updateHeartbeat(pool: pg.Pool, daemonId: string): Promise<
 }
 
 export async function insertEvent(pool: pg.Pool, sessionId: string, eventType: string, payload: any): Promise<number> {
+  const payloadStr = JSON.stringify(payload);
+  const hash = createHash('md5').update(`${sessionId}:${eventType}:${payloadStr}`).digest('hex').slice(0, 16);
   const result = await pool.query(
-    `INSERT INTO events (session_id, event_type, payload) VALUES ($1, $2, $3) RETURNING id`,
-    [sessionId, eventType, JSON.stringify(payload)]
+    `INSERT INTO events (session_id, event_type, payload, event_hash)
+     VALUES ($1, $2, $3, $4)
+     ON CONFLICT (session_id, event_hash) DO NOTHING
+     RETURNING id`,
+    [sessionId, eventType, payloadStr, hash]
   );
-  // Update last_activity_at for the session
-  pool.query(`UPDATE sessions SET last_activity_at = NOW(), updated_at = NOW() WHERE session_id = $1`, [sessionId]).catch(console.error);
-  return result.rows[0].id;
+  if (result.rows.length > 0) {
+    pool.query(`UPDATE sessions SET last_activity_at = NOW(), updated_at = NOW() WHERE session_id = $1`, [sessionId]).catch(console.error);
+    return result.rows[0].id;
+  }
+  return 0; // deduplicated
 }
 
 export async function getEventsAfter(pool: pg.Pool, sessionId: string, lastSeq: number): Promise<any[]> {
@@ -253,6 +264,26 @@ export async function deleteSession(pool: pg.Pool, sessionId: string): Promise<v
 
 export async function isSessionDeleted(pool: pg.Pool, sessionId: string): Promise<boolean> {
   const result = await pool.query(`SELECT 1 FROM deleted_sessions WHERE session_id = $1`, [sessionId]);
+  return (result.rowCount ?? 0) > 0;
+}
+
+// --- Title generation ---
+
+/** Check if a session still has a default-generated title (Terminal Session-*) */
+export async function hasDefaultTitle(pool: pg.Pool, sessionId: string): Promise<boolean> {
+  const result = await pool.query(
+    `SELECT 1 FROM sessions WHERE session_id = $1 AND title LIKE 'Terminal Session-%'`,
+    [sessionId]
+  );
+  return (result.rowCount ?? 0) > 0;
+}
+
+/** Update session title only if it still has the default pattern. Returns true if updated. */
+export async function updateTitleIfDefault(pool: pg.Pool, sessionId: string, newTitle: string): Promise<boolean> {
+  const result = await pool.query(
+    `UPDATE sessions SET title = $1, updated_at = NOW() WHERE session_id = $2 AND title LIKE 'Terminal Session-%'`,
+    [newTitle, sessionId]
+  );
   return (result.rowCount ?? 0) > 0;
 }
 

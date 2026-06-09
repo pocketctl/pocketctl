@@ -12,11 +12,15 @@ final class SessionDetailViewModel {
     /// Incremented when initial replay completes — triggers scroll-to-bottom
     var scrollTick = 0
 
-    let session: Session
+    var session: Session  // var to support session_id_changed updates
     private let wsService: WebSocketService
     private let apiClient: APIClient
     private var msgCounter = 0
     private var eventListenerId: String?
+    /// Tracks the last event sequence number for incremental replay
+    private var lastEventSeq: Int = 0
+    /// True while processing a replay_batch — suppresses per-event scrollTick updates
+    private var isBatchProcessing = false
 
     init(session: Session, wsService: WebSocketService, apiClient: APIClient) {
         self.session = session
@@ -25,6 +29,7 @@ final class SessionDetailViewModel {
         self.exitReason = session.exitReason
         self.wsService = wsService
         self.apiClient = apiClient
+        self.lastEventSeq = Self.loadLastSeq(for: session.sessionId)
     }
 
     /// Whether the session is actively executing (running/busy)
@@ -43,7 +48,10 @@ final class SessionDetailViewModel {
         return "发送消息..."
     }
 
-    /// Connect and replay history
+    // MARK: - Connect / Refresh
+
+    /// Connect and replay history using incremental replay.
+    /// No polling — relay sends `replay_end` when done.
     func connect() async {
         guard KeychainStorage.accessToken != nil else { return }
 
@@ -76,7 +84,7 @@ final class SessionDetailViewModel {
             wsService.connect(url: wsURL, token: token)
         }
 
-        // Wait for connection to be established (ping verification)
+        // Wait for WebSocket connection (ping verification)
         for _ in 0..<20 {
             if wsService.isConnected { break }
             try? await Task.sleep(for: .milliseconds(200))
@@ -87,24 +95,23 @@ final class SessionDetailViewModel {
             return
         }
 
-        // Subscribe to this session and replay
-        wsService.send(["type": "replay", "session_id": session.sessionId, "last_seq": 0])
+        // Incremental replay: only load events after lastEventSeq
+        wsService.send([
+            "type": "replay",
+            "session_id": session.sessionId,
+            "last_seq": lastEventSeq,
+        ])
+        // isLoading will be set to false when replay_end arrives
 
-        // Wait for replay events to stabilize (500ms of no new messages)
-        var stableCount = 0
-        var lastCount = -1
-        for _ in 0..<60 { // max 6 seconds
-            try? await Task.sleep(for: .milliseconds(100))
-            if messages.count == lastCount {
-                stableCount += 1
-                if stableCount >= 5 { break } // 500ms stable
-            } else {
-                stableCount = 0
+        // Safety timeout: if replay_end never arrives (network drop, relay crash),
+        // unblock the UI after 10 seconds so the user isn't stuck forever.
+        Task {
+            try? await Task.sleep(for: .seconds(10))
+            if isLoading {
+                isLoading = false
+                scrollTick += 1
             }
-            lastCount = messages.count
         }
-        isLoading = false
-        scrollTick += 1
     }
 
     func disconnect() {
@@ -122,24 +129,18 @@ final class SessionDetailViewModel {
                 self?.handleEvent(dict)
             }
         }
-        wsService.send(["type": "replay", "session_id": session.sessionId, "last_seq": 0])
+        // Clear and do full replay
+        messages.removeAll(keepingCapacity: true)
+        subAgents.removeAll(keepingCapacity: true)
+        msgCounter = 0
+        lastEventSeq = 0
 
-        // Same stabilization logic as connect()
-        Task {
-            var stableCount = 0
-            var lastCount = -1
-            for _ in 0..<60 {
-                try? await Task.sleep(for: .milliseconds(100))
-                if messages.count == lastCount {
-                    stableCount += 1
-                    if stableCount >= 5 { break }
-                } else {
-                    stableCount = 0
-                }
-                lastCount = messages.count
-            }
-            scrollTick += 1
-        }
+        wsService.send([
+            "type": "replay",
+            "session_id": session.sessionId,
+            "last_seq": 0,
+        ])
+        // isLoading set to false by replay_end
     }
 
     /// Send a user message (will appear when relay echoes it back as userText)
@@ -156,7 +157,56 @@ final class SessionDetailViewModel {
 
     private func handleEvent(_ dict: [String: Any]) {
         guard let event = WebSocketEvent(dict: dict) else { return }
-        guard event.sessionId == session.sessionId else { return }
+
+        // ── Replay control events (no session ID filter) ──
+
+        if event.type == .replayBatch {
+            isBatchProcessing = true
+            if let batchEvents = event.events {
+                for evtDict in batchEvents {
+                    handleEvent(evtDict)
+                }
+            }
+            if let seq = event.lastSeq {
+                lastEventSeq = seq
+            }
+            isBatchProcessing = false
+            scrollTick += 1
+            return
+        }
+
+        if event.type == .replayEnd {
+            if let seq = event.lastSeq {
+                lastEventSeq = seq
+                Self.saveLastSeq(seq, for: session.sessionId)
+            }
+            isLoading = false
+            scrollTick += 1
+            return
+        }
+
+        // ── Session ID change (must be handled before the filter) ──
+
+        if event.type == .sessionIdChanged {
+            if let newId = event.sessionId,
+               let oldId = dict["old_session_id"] as? String,
+               oldId == session.sessionId {
+                // Migrate persisted seq to new ID
+                let oldSeq = Self.loadLastSeq(for: oldId)
+                Self.saveLastSeq(oldSeq, for: newId)
+                Self.removeLastSeq(for: oldId)
+                session.sessionId = newId
+                lastEventSeq = oldSeq
+            }
+            return
+        }
+
+        // ── Session-scoped events ──
+        // Skip session ID filter during batch replay — DB payloads may carry
+        // old pre-change session IDs that don't match the current session.
+        if !isBatchProcessing {
+            guard event.sessionId == session.sessionId else { return }
+        }
 
         // Sub-agent events
         if let agentId = event.agentId {
@@ -202,6 +252,8 @@ final class SessionDetailViewModel {
         }
     }
 
+    // MARK: - Individual event handlers
+
     private func handleAgentText(_ event: WebSocketEvent) {
         guard let text = event.text else { return }
 
@@ -227,11 +279,21 @@ final class SessionDetailViewModel {
         if !event.streaming, let last = messages.last, last.streaming {
             messages[messages.count - 1].streaming = false
         }
-        scrollTick += 1
+        if !isBatchProcessing { scrollTick += 1 }
     }
 
     private func handleUserText(_ event: WebSocketEvent) {
-        guard let text = event.text, !text.isEmpty else { return }
+        guard var text = event.text, !text.isEmpty else { return }
+
+        // Sanitize command tags for clean display
+        text = sanitizeUserMessage(text)
+        guard !text.isEmpty else { return }
+
+        // Deduplicate: skip if last message has identical content
+        if let last = messages.last, last.role == .user, last.content == text {
+            return
+        }
+
         msgCounter += 1
         messages.append(ChatMessage(
             id: msgCounter,
@@ -240,7 +302,7 @@ final class SessionDetailViewModel {
             content: text,
             streaming: false
         ))
-        scrollTick += 1
+        if !isBatchProcessing { scrollTick += 1 }
     }
 
     private func handleToolCall(_ event: WebSocketEvent, dict: [String: Any]) {
@@ -340,6 +402,68 @@ final class SessionDetailViewModel {
         default:
             break
         }
+    }
+
+    // MARK: - User message sanitization
+
+    /// Sanitize user message content: extract slash command name or strip XML tags
+    private func sanitizeUserMessage(_ text: String) -> String {
+        // Check if this is a slash command message
+        if let cmdName = extractTagContent(text, tag: "command-name") {
+            var clean = cmdName
+            // Also extract command message if present
+            if let cmdMsg = extractTagContent(text, tag: "command-message"), !cmdMsg.isEmpty {
+                clean += "\n" + cmdMsg
+            }
+            return clean
+        }
+
+        // Not a command — strip all command-related tags
+        return stripAllCommandTags(text)
+    }
+
+    /// Extract the inner content of the first occurrence of an XML tag
+    private func extractTagContent(_ text: String, tag: String) -> String? {
+        let pattern = #"<\#(tag)[^>]*>(.*?)</\#(tag)>"#
+        guard let range = text.range(of: pattern, options: .regularExpression) else { return nil }
+        let match = String(text[range])
+        // Strip all XML tags from the match to get inner content
+        let content = match.replacingOccurrences(of: #"<[^>]+>"#, with: "", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return content.isEmpty ? nil : content
+    }
+
+    /// Strip all command-related XML tags, keeping the text content
+    private func stripAllCommandTags(_ text: String) -> String {
+        var result = text
+        for tag in ["local-command-caveat", "local-command-stdout", "command-name", "command-message"] {
+            result = result.replacingOccurrences(of: #"<\#(tag)[^>]*>"#, with: "", options: .regularExpression)
+            result = result.replacingOccurrences(of: #"</\#(tag)>"#, with: "", options: .regularExpression)
+        }
+        result = result.replacingOccurrences(of: #"<command-args>.*?</command-args>"#, with: "", options: .regularExpression)
+        result = result.replacingOccurrences(of: #"\n{3,}"#, with: "\n\n", options: .regularExpression)
+        return result.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    // MARK: - Last sequence persistence (UserDefaults)
+
+    private static let seqDefaultsKey = "pocketctl_last_event_seq"
+
+    static func loadLastSeq(for sessionId: String) -> Int {
+        let dict = UserDefaults.standard.dictionary(forKey: seqDefaultsKey) as? [String: Int] ?? [:]
+        return dict[sessionId] ?? 0
+    }
+
+    static func saveLastSeq(_ seq: Int, for sessionId: String) {
+        var dict = UserDefaults.standard.dictionary(forKey: seqDefaultsKey) as? [String: Int] ?? [:]
+        dict[sessionId] = seq
+        UserDefaults.standard.set(dict, forKey: seqDefaultsKey)
+    }
+
+    static func removeLastSeq(for sessionId: String) {
+        var dict = UserDefaults.standard.dictionary(forKey: seqDefaultsKey) as? [String: Int] ?? [:]
+        dict.removeValue(forKey: sessionId)
+        UserDefaults.standard.set(dict, forKey: seqDefaultsKey)
     }
 
     // MARK: - Helpers
