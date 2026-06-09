@@ -95,25 +95,26 @@ func (sm *SessionManager) CreateSession(ctx context.Context, config protocol.Ses
 }
 
 // RegisterTerminalSession registers a session discovered from the terminal.
-func (sm *SessionManager) RegisterTerminalSession(sessionID, cwd string, pid int, ttyPath string, status string) {
+// Returns true if newly registered, false if session already existed.
+func (sm *SessionManager) RegisterTerminalSession(sessionID, cwd string, pid int, ttyPath string, status string) bool {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
 
 	// Don't register if this is a daemon-spawned process
 	if sm.childPids[pid] {
-		return
+		return false
 	}
 
 	// Don't re-register if we already know about this session
 	if _, ok := sm.sessions[sessionID]; ok {
-		return
+		return false
 	}
 
 	// Check if any existing daemon session matches this session ID
 	// (handles race where watcher discovers session before session_id_changed fires)
 	for _, ps := range sm.sessions {
 		if ps.SessionID == sessionID && ps.Source == "daemon" {
-			return
+			return false
 		}
 	}
 
@@ -136,6 +137,8 @@ func (sm *SessionManager) RegisterTerminalSession(sessionID, cwd string, pid int
 			Status:    status,
 			Source:    "terminal",
 		}
+
+	return true
 }
 
 // UpdateSessionTitle updates the title for a session and emits an event.

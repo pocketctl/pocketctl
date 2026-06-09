@@ -436,7 +436,7 @@ func handleWatcherEvents(ctx context.Context, sw *watcher.SessionWatcher, sm *se
 			switch evt.Action {
 			case "discovered":
 				logger.Info("session discovered", "session", evt.Session.SessionID, "pid", evt.Session.Pid)
-				sm.RegisterTerminalSession(evt.Session.SessionID, evt.Session.Cwd, evt.Session.Pid, "", evt.Session.Status)
+				registered := sm.RegisterTerminalSession(evt.Session.SessionID, evt.Session.Cwd, evt.Session.Pid, "", evt.Session.Status)
 				// Register with process monitor
 				if evt.Session.Pid > 0 {
 					pm.Register(evt.Session.Pid, evt.Session.SessionID)
@@ -444,8 +444,14 @@ func handleWatcherEvents(ctx context.Context, sw *watcher.SessionWatcher, sm *se
 				// Try to get TTY for notifications
 				if evt.Session.Pid > 0 {
 					if ttyPath, err := notify.GetTTYForPID(evt.Session.Pid); err == nil {
+						// Update TTY info (returns false if already registered, that is fine)
 						sm.RegisterTerminalSession(evt.Session.SessionID, evt.Session.Cwd, evt.Session.Pid, ttyPath, evt.Session.Status)
 					}
+				}
+				// Only start JSONL tailer if this is a genuinely new session
+				if !registered {
+					logger.Debug("session already known, skipping tailer", "session", evt.Session.SessionID)
+					break
 				}
 				// Start JSONL tailer from beginning to replay history and tail new events
 				go func() {
