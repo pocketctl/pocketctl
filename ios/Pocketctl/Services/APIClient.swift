@@ -11,7 +11,11 @@ final class APIClient: @unchecked Sendable {
                 .replacingOccurrences(of: "ws://", with: "http://")
                 .replacingOccurrences(of: "/ws", with: "")
         } else {
+            #if targetEnvironment(simulator)
             self.baseURL = "http://localhost:8080"
+            #else
+            self.baseURL = "http://192.168.0.141:8080"
+            #endif
         }
     }
 

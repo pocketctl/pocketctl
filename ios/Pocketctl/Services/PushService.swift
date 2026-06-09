@@ -51,6 +51,7 @@ final class PushService {
             do {
                 _ = try await api.registerDevice(token: token, platform: "ios", deviceName: UIDevice.current.name)
                 KeychainStorage.notificationsEnabled = true
+                KeychainStorage.deviceToken = token
             } catch {
                 print("[push] failed to register device: \(error)")
             }

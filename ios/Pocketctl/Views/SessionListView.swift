@@ -126,8 +126,19 @@ struct SessionListView: View {
         ScrollView {
             LazyVStack(spacing: PCSpacing.sm) {
                 ForEach(vm.filteredSessions) { session in
-                    SessionCard(session: session, daemonOnline: daemon.online) {
-                        navigateToDetail = session
+                    if session.status == "exited" || session.status == "completed" || session.status == "error" || session.status == "killed" {
+                        // Swipe-to-delete for terminal sessions
+                        SwipeToDelete {
+                            SessionCard(session: session, daemonOnline: daemon.online) {
+                                navigateToDetail = session
+                            }
+                        } onDelete: {
+                            vm.deleteSession(session.sessionId)
+                        }
+                    } else {
+                        SessionCard(session: session, daemonOnline: daemon.online) {
+                            navigateToDetail = session
+                        }
                     }
                     // Exited session banner
                     if session.status == "exited" {
@@ -255,5 +266,90 @@ struct SessionCard: View {
     private var effectiveStatus: String {
         if !daemonOnline && !session.isTerminal { return "disconnected" }
         return session.status
+    }
+}
+
+// MARK: - Swipe to Delete (WeChat-style)
+
+struct SwipeToDelete<Content: View>: View {
+    let content: Content
+    let onDelete: () -> Void
+
+    @State private var offset: CGFloat = 0
+    @State private var isOpen = false
+
+    private let buttonWidth: CGFloat = 76
+
+    init(@ViewBuilder content: () -> Content, onDelete: @escaping () -> Void) {
+        self.content = content()
+        self.onDelete = onDelete
+    }
+
+    var body: some View {
+        ZStack(alignment: .trailing) {
+            // Delete button — always behind content
+            Button {
+                withAnimation(.spring(response: 0.3, dampingFraction: 1)) {
+                    onDelete()
+                }
+            } label: {
+                Text("删除")
+                    .font(PCFont.body(15, weight: .medium))
+                    .foregroundStyle(.white)
+                    .frame(width: buttonWidth)
+                    .frame(maxHeight: .infinity)
+                    .background(Color.pcError)
+            }
+
+            // Main content — slides left to reveal delete
+            content
+                .offset(x: offset)
+                .highPriorityGesture(
+                    DragGesture(minimumDistance: 10)
+                        .onChanged { value in
+                            let translation = value.translation.width
+                            if isOpen {
+                                // Already open: allow right swipe to close
+                                offset = max(-buttonWidth + translation, -buttonWidth)
+                                offset = min(offset, 0)
+                            } else {
+                                // Closed: only allow left swipe
+                                offset = min(translation, 0)
+                                offset = max(offset, -buttonWidth)
+                            }
+                        }
+                        .onEnded { value in
+                            let velocity = value.predictedEndLocation.x - value.location.x
+                            withAnimation(.spring(response: 0.3, dampingFraction: 1)) {
+                                if isOpen {
+                                    // Swiping right to close
+                                    if value.translation.width > 40 || velocity > 100 {
+                                        offset = 0
+                                        isOpen = false
+                                    } else {
+                                        offset = -buttonWidth
+                                    }
+                                } else {
+                                    // Swiping left to open
+                                    if value.translation.width < -40 || velocity < -100 {
+                                        offset = -buttonWidth
+                                        isOpen = true
+                                    } else {
+                                        offset = 0
+                                    }
+                                }
+                            }
+                        }
+                )
+                .onTapGesture {
+                    if isOpen {
+                        withAnimation(.spring(response: 0.3, dampingFraction: 1)) {
+                            offset = 0
+                            isOpen = false
+                        }
+                    }
+                }
+        }
+        .clipShape(RoundedRectangle(cornerRadius: PCRadius.md))
     }
 }

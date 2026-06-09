@@ -92,6 +92,14 @@ enum KeychainStorage {
         set { UserDefaults.standard.set(newValue, forKey: "pocketctl_notifications_enabled") }
     }
 
+    static var deviceToken: String? {
+        get { load(key: "device_token") }
+        set {
+            if let v = newValue { save(key: "device_token", value: v) }
+            else { delete(key: "device_token") }
+        }
+    }
+
     static var localDisplayName: String? {
         get { UserDefaults.standard.string(forKey: "pocketctl_local_display_name") }
         set { UserDefaults.standard.set(newValue, forKey: "pocketctl_local_display_name") }

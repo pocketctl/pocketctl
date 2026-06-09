@@ -14,6 +14,7 @@ final class SessionListViewModel {
     let daemon: Daemon
     private let wsService: WebSocketService
     private let apiClient: APIClient
+    private var eventListenerId: String?
 
     init(daemon: Daemon, wsService: WebSocketService, apiClient: APIClient, initialSessions: [Session] = []) {
         self.daemon = daemon
@@ -55,7 +56,7 @@ final class SessionListViewModel {
             .replacingOccurrences(of: "http://", with: "ws://")
             + "/ws"
 
-        wsService.onEvent = { [weak self] dict in
+        eventListenerId = wsService.addEventListener { [weak self] dict in
             self?.handleEvent(dict)
         }
 
@@ -71,16 +72,28 @@ final class SessionListViewModel {
     }
 
     func disconnect() {
-        wsService.onEvent = nil
+        if let id = eventListenerId {
+            wsService.removeEventListener(id)
+            eventListenerId = nil
+        }
     }
 
     /// Re-register event handler and request fresh session list.
     /// Called on .onAppear when returning from a child view.
     func refresh() {
-        wsService.onEvent = { [weak self] dict in
-            self?.handleEvent(dict)
+        if eventListenerId == nil {
+            eventListenerId = wsService.addEventListener { [weak self] dict in
+                self?.handleEvent(dict)
+            }
         }
         wsService.send(["type": "list_sessions"])
+    }
+
+    /// Delete a session (only for exited/completed sessions)
+    func deleteSession(_ sessionId: String) {
+        wsService.send(["type": "session_delete", "session_id": sessionId])
+        // Optimistically remove from local list
+        sessions.removeAll { $0.sessionId == sessionId }
     }
 
     /// Create a new session
@@ -131,6 +144,11 @@ final class SessionListViewModel {
             if let sid = event.sessionId,
                let index = sessions.firstIndex(where: { $0.sessionId == sid }) {
                 sessions[index].title = event.title
+            }
+
+        case .sessionDeleted:
+            if let sid = event.sessionId {
+                sessions.removeAll { $0.sessionId == sid }
             }
 
         case .error:

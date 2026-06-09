@@ -34,6 +34,25 @@ struct ContentView: View {
                 .onChange(of: isLoggedIn) { _, newValue in
                     if !newValue { appState = .login }
                 }
+                .onOpenURL { url in
+                    // Handle pocketctl://session/<id> deep links
+                    handleDeepLink(url)
+                }
+                .onChange(of: notificationRouter.navigateToSessionId) { _, sessionId in
+                    if sessionId != nil {
+                        // Clear after a delay to allow navigation
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 1) {
+                            notificationRouter.navigateToSessionId = nil
+                        }
+                    }
+                }
         }
+    }
+
+    private func handleDeepLink(_ url: URL) {
+        guard url.scheme == "pocketctl",
+              url.host == "session",
+              let sessionId = url.pathComponents.dropFirst().first else { return }
+        notificationRouter.navigateToSessionId = sessionId
     }
 }

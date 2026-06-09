@@ -113,7 +113,8 @@ struct MarkdownContentView: View {
     }
 
     private func parseSegments() -> [Segment] {
-        let lines = content.components(separatedBy: "\n")
+        let sanitized = sanitizeCommandTags(content)
+        let lines = sanitized.components(separatedBy: "\n")
         var segments: [Segment] = []
         var currentText: [String] = []
         var tableLines: [String] = []
@@ -236,6 +237,47 @@ struct MarkdownContentView: View {
         return trimmed.components(separatedBy: "|").map {
             $0.trimmingCharacters(in: .whitespaces)
         }
+    }
+
+    // MARK: - Command tag sanitization
+
+    /// Strip Claude Code command tags and convert to terminal-like display
+    private func sanitizeCommandTags(_ text: String) -> String {
+        var result = text
+
+        // Remove local-command-caveat wrapper, keep inner content
+        result = stripTag(result, tag: "local-command-caveat")
+
+        // Remove command-name tag, show as clean text
+        result = stripTag(result, tag: "command-name")
+
+        // Remove command-message tag
+        result = stripTag(result, tag: "command-message")
+
+        // Remove empty command-args
+        result = result.replacingOccurrences(
+            of: #"<command-args>.*?</command-args>"#,
+            with: "",
+            options: .regularExpression
+        )
+
+        // Remove local-command-stdout wrapper, keep inner content
+        result = stripTag(result, tag: "local-command-stdout")
+
+        // Clean up excessive blank lines left by tag removal
+        result = result.replacingOccurrences(of: #"\n{3,}"#, with: "\n\n", options: .regularExpression)
+
+        return result.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    /// Remove opening and closing tags, keep the content between them
+    private func stripTag(_ text: String, tag: String) -> String {
+        let openPattern = #"<\#(tag)[^>]*>"#
+        let closePattern = #"</\#(tag)>"#
+        var result = text
+        result = result.replacingOccurrences(of: openPattern, with: "", options: .regularExpression)
+        result = result.replacingOccurrences(of: closePattern, with: "", options: .regularExpression)
+        return result
     }
 }
 

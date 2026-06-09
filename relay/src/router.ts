@@ -124,15 +124,22 @@ export class Router {
       return;
     }
     if (msg.type === 'session_discovered') {
-      const title = msg.title || 'Terminal Session';
-      const cwd = msg.cwd || '';
-      db.upsertSession(this.pool, sessionId, daemonId, 'claude-code', cwd, msg.status || 'busy', title, 'terminal', undefined, userId ?? undefined).catch(console.error);
-      db.insertEvent(this.pool, sessionId, msg.type, msg).catch(console.error);
-      const enriched = { ...msg, daemon_id: daemonId, hostname: daemon?.hostname || 'unknown' };
-      // Broadcast only to clients with same userId
-      for (const [clientWs, client] of this.clients) {
-        if (clientWs.readyState === 1 && this.sameUser(client.userId, userId)) this.send(clientWs, enriched);
-      }
+      // Tombstone check: skip if session was deleted by user
+      db.isSessionDeleted(this.pool, sessionId).then((deleted) => {
+        if (deleted) {
+          console.log(`[router] skipping tombstoned session: ${sessionId}`);
+          return;
+        }
+        // Use provided title, or generate fallback with session ID suffix
+        const title = msg.title || `Terminal Session-${sessionId.slice(-8)}`;
+        const cwd = msg.cwd || '';
+        db.upsertSession(this.pool, sessionId, daemonId, 'claude-code', cwd, msg.status || 'busy', title, 'terminal', undefined, userId ?? undefined).catch(console.error);
+        db.insertEvent(this.pool, sessionId, msg.type, msg).catch(console.error);
+        const enriched = { ...msg, daemon_id: daemonId, hostname: daemon?.hostname || 'unknown' };
+        for (const [clientWs, client] of this.clients) {
+          if (clientWs.readyState === 1 && this.sameUser(client.userId, userId)) this.send(clientWs, enriched);
+        }
+      }).catch(console.error);
       return;
     }
     if (msg.type === 'subagent_discovered') {
@@ -169,6 +176,23 @@ export class Router {
     if (msg.session_id) client.subscribedSessions.add(msg.session_id);
     if (msg.type === 'replay') { this.handleReplay(clientWs, msg.session_id, msg.last_seq); return; }
     if (msg.type === 'list_sessions') { this.handleListSessions(clientWs, client.userId); return; }
+
+    if (msg.type === 'session_delete') {
+      const sessionId = msg.session_id;
+      if (!sessionId) { this.send(clientWs, { type: 'error', error: 'session_id required' }); return; }
+      // Delete session, events from DB, write tombstone
+      db.deleteSession(this.pool, sessionId).catch(console.error);
+      // Clean up session-to-daemon mapping
+      this.sessionToDaemon.delete(sessionId);
+      // Broadcast session_deleted to all clients of the same user
+      for (const [ws, c] of this.clients) {
+        if (ws.readyState === 1 && this.sameUser(c.userId, client.userId)) {
+          c.subscribedSessions.delete(sessionId);
+          this.send(ws, { type: 'session_deleted', session_id: sessionId });
+        }
+      }
+      return;
+    }
 
     if (msg.type === 'session_create') {
       // Route to a daemon owned by the same user

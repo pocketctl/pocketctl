@@ -24,7 +24,7 @@ import (
 	"github.com/pocketctl/pocketctl/internal/ws"
 )
 
-var version = "dev"
+var version = "0.1.0"
 
 func main() {
 	if len(os.Args) < 2 {
@@ -266,6 +266,7 @@ func cmdDaemonStart(args []string) {
 	// Create process monitor
 	pm := watcher.NewProcessMonitor()
 
+
 	// Create WebSocket client
 	client := ws.NewClient(url, tok, id, agentTypes, outputCh, logger)
 
@@ -472,9 +473,15 @@ func handleWatcherEvents(ctx context.Context, sw *watcher.SessionWatcher, sm *se
 
 					// Extract title from first user message
 					title := watcher.ExtractTitleFromJSONL(jsonlPath)
-					if title != "Terminal Session" {
-						sm.UpdateSessionTitle(evt.Session.SessionID, title)
+					if title == "Terminal Session" {
+						// Append session ID suffix for disambiguation
+						sid := evt.Session.SessionID
+						if len(sid) > 8 {
+							sid = sid[len(sid)-8:]
+						}
+						title = "Terminal Session-" + sid
 					}
+					sm.UpdateSessionTitle(evt.Session.SessionID, title)
 
 					// Tail loop: send parsed events with session_id stamped
 					ticker := time.NewTicker(1 * time.Second)

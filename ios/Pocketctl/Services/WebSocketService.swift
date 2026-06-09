@@ -17,8 +17,32 @@ final class WebSocketService: @unchecked Sendable {
     /// Daemon tracking
     var daemons: [String: Daemon] = [:]
 
-    /// Event callback
-    var onEvent: (([String: Any]) -> Void)?
+    /// Event callbacks — multiple listeners supported
+    private var eventListeners: [String: ([String: Any]) -> Void] = [:]
+    private var listenerCounter = 0
+
+    /// Register an event listener, returns a cleanup ID
+    func addEventListener(_ handler: @escaping ([String: Any]) -> Void) -> String {
+        listenerCounter += 1
+        let id = "listener_\(listenerCounter)"
+        eventListeners[id] = handler
+        return id
+    }
+
+    /// Remove an event listener by ID
+    func removeEventListener(_ id: String) {
+        eventListeners.removeValue(forKey: id)
+    }
+
+    /// Legacy single callback (deprecated, use addEventListener)
+    var onEvent: (([String: Any]) -> Void)? {
+        get { nil }
+        set {
+            if let handler = newValue {
+                _ = addEventListener(handler)
+            }
+        }
+    }
 
     /// Auth failure callback — fired when relay rejects the token (4001)
     var onAuthFailure: (() -> Void)?
@@ -114,7 +138,10 @@ final class WebSocketService: @unchecked Sendable {
         }
 
         DispatchQueue.main.async { [weak self] in
-            self?.onEvent?(dict)
+            guard let self else { return }
+            for (_, handler) in self.eventListeners {
+                handler(dict)
+            }
         }
     }
 

@@ -88,6 +88,14 @@ export async function initDB(pool: pg.Pool): Promise<void> {
   // Phase 3: add phone column to users for SMS auth
   await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS phone VARCHAR(32)`);
   await pool.query(`CREATE UNIQUE INDEX IF NOT EXISTS idx_users_phone ON users(phone) WHERE phone IS NOT NULL`);
+
+  // Session delete tombstone table
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS deleted_sessions (
+      session_id VARCHAR(64) PRIMARY KEY,
+      deleted_at TIMESTAMPTZ DEFAULT NOW()
+    )
+  `);
 }
 
 export async function upsertDaemon(pool: pg.Pool, daemonId: string, hostname: string, agents: string[]): Promise<void> {
@@ -230,6 +238,28 @@ export async function listSessionsByUser(pool: pg.Pool, userId: number): Promise
     daemon_online: row.daemon_status === 'online',
     daemon_status: undefined,
   }));
+}
+
+// --- Session deletion ---
+
+export async function deleteSession(pool: pg.Pool, sessionId: string): Promise<void> {
+  await pool.query(`DELETE FROM events WHERE session_id = $1`, [sessionId]);
+  await pool.query(`DELETE FROM sessions WHERE session_id = $1`, [sessionId]);
+  await pool.query(
+    `INSERT INTO deleted_sessions (session_id) VALUES ($1) ON CONFLICT (session_id) DO UPDATE SET deleted_at = NOW()`,
+    [sessionId]
+  );
+}
+
+export async function isSessionDeleted(pool: pg.Pool, sessionId: string): Promise<boolean> {
+  const result = await pool.query(`SELECT 1 FROM deleted_sessions WHERE session_id = $1`, [sessionId]);
+  return (result.rowCount ?? 0) > 0;
+}
+
+/// Clean up tombstones older than 30 days
+export async function cleanStaleTombstones(pool: pg.Pool): Promise<number> {
+  const result = await pool.query(`DELETE FROM deleted_sessions WHERE deleted_at < NOW() - INTERVAL '30 days'`);
+  return result.rowCount ?? 0;
 }
 
 // --- Phase 3: Device management for push notifications ---

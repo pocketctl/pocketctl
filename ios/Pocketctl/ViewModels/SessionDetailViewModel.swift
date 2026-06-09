@@ -16,6 +16,7 @@ final class SessionDetailViewModel {
     private let wsService: WebSocketService
     private let apiClient: APIClient
     private var msgCounter = 0
+    private var eventListenerId: String?
 
     init(session: Session, wsService: WebSocketService, apiClient: APIClient) {
         self.session = session
@@ -67,7 +68,7 @@ final class SessionDetailViewModel {
             .replacingOccurrences(of: "http://", with: "ws://")
             + "/ws"
 
-        wsService.onEvent = { [weak self] dict in
+        eventListenerId = wsService.addEventListener { [weak self] dict in
             self?.handleEvent(dict)
         }
 
@@ -89,44 +90,61 @@ final class SessionDetailViewModel {
         // Subscribe to this session and replay
         wsService.send(["type": "replay", "session_id": session.sessionId, "last_seq": 0])
 
-        try? await Task.sleep(for: .milliseconds(500))
+        // Wait for replay events to stabilize (500ms of no new messages)
+        var stableCount = 0
+        var lastCount = -1
+        for _ in 0..<60 { // max 6 seconds
+            try? await Task.sleep(for: .milliseconds(100))
+            if messages.count == lastCount {
+                stableCount += 1
+                if stableCount >= 5 { break } // 500ms stable
+            } else {
+                stableCount = 0
+            }
+            lastCount = messages.count
+        }
         isLoading = false
         scrollTick += 1
     }
 
     func disconnect() {
-        wsService.onEvent = nil
+        if let id = eventListenerId {
+            wsService.removeEventListener(id)
+            eventListenerId = nil
+        }
     }
 
     /// Re-register event handler and replay session history.
     /// Called on .onAppear when returning to this view.
     func refresh() {
-        wsService.onEvent = { [weak self] dict in
-            self?.handleEvent(dict)
+        if eventListenerId == nil {
+            eventListenerId = wsService.addEventListener { [weak self] dict in
+                self?.handleEvent(dict)
+            }
         }
         wsService.send(["type": "replay", "session_id": session.sessionId, "last_seq": 0])
 
-        // Scroll to bottom after replay completes
+        // Same stabilization logic as connect()
         Task {
-            try? await Task.sleep(for: .milliseconds(600))
+            var stableCount = 0
+            var lastCount = -1
+            for _ in 0..<60 {
+                try? await Task.sleep(for: .milliseconds(100))
+                if messages.count == lastCount {
+                    stableCount += 1
+                    if stableCount >= 5 { break }
+                } else {
+                    stableCount = 0
+                }
+                lastCount = messages.count
+            }
             scrollTick += 1
         }
     }
 
-    /// Send a user message
+    /// Send a user message (will appear when relay echoes it back as userText)
     func sendMessage(_ text: String) {
         guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
-
-        msgCounter += 1
-        let userMsg = ChatMessage(
-            id: msgCounter,
-            role: .user,
-            type: nil,
-            content: text,
-            streaming: false
-        )
-        messages.append(userMsg)
-
         wsService.send([
             "type": "user_message",
             "session_id": session.sessionId,
@@ -138,7 +156,7 @@ final class SessionDetailViewModel {
 
     private func handleEvent(_ dict: [String: Any]) {
         guard let event = WebSocketEvent(dict: dict) else { return }
-        guard event.sessionId == session.sessionId || event.sessionId == nil else { return }
+        guard event.sessionId == session.sessionId else { return }
 
         // Sub-agent events
         if let agentId = event.agentId {
@@ -209,6 +227,7 @@ final class SessionDetailViewModel {
         if !event.streaming, let last = messages.last, last.streaming {
             messages[messages.count - 1].streaming = false
         }
+        scrollTick += 1
     }
 
     private func handleUserText(_ event: WebSocketEvent) {
@@ -221,6 +240,7 @@ final class SessionDetailViewModel {
             content: text,
             streaming: false
         ))
+        scrollTick += 1
     }
 
     private func handleToolCall(_ event: WebSocketEvent, dict: [String: Any]) {

@@ -19,6 +19,7 @@ final class SettingsViewModel {
     var showPrivacyPolicy = false
     var showUserAgreement = false
     var showAbout = false
+    var showHelp = false
 
     var editDisplayName: String = ""
 
@@ -66,9 +67,8 @@ final class SettingsViewModel {
     }
 
     var appVersion: String {
-        let version = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "1.0.0"
-        let build = Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "1"
-        return "pocketctl v\(version) (\(build))"
+        let version = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "0.1.0"
+        return "v\(version)"
     }
 
     // MARK: - Init
@@ -166,8 +166,16 @@ final class SettingsViewModel {
                 }
             }
         } else {
+            // Unregister device from server
+            if let token = KeychainStorage.deviceToken {
+                Task {
+                    let api = APIClient()
+                    _ = try? await api.removeDevice(token: token)
+                }
+            }
             notificationsEnabled = false
             KeychainStorage.notificationsEnabled = false
+            KeychainStorage.deviceToken = nil
         }
     }
 

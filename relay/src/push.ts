@@ -1,11 +1,14 @@
 /**
  * Push notification service.
  * Development mode: logs to console.
- * Production: integrates with APNs (iOS) via HTTP/2.
+ * Production: sends via APNs HTTP/2 with .p8 token authentication.
  */
 
 import type pg from 'pg';
-import { getDevicesByUser } from './db.js';
+import * as http2 from 'node:http2';
+import * as fs from 'node:fs';
+import * as crypto from 'node:crypto';
+import { getDevicesByUser, removeDevice } from './db.js';
 
 export interface PushPayload {
   title: string;
@@ -13,25 +16,136 @@ export interface PushPayload {
   data?: Record<string, string>;
 }
 
+// APNs configuration from environment
+const APNS_KEY_PATH = process.env.APNS_KEY_PATH || '';
+const APNS_KEY_ID = process.env.APNS_KEY_ID || '';
+const APNS_TEAM_ID = process.env.APNS_TEAM_ID || '';
+const APNS_BUNDLE_ID = process.env.APNS_BUNDLE_ID || 'com.pocketctl.app';
+const APNS_ENVIRONMENT = process.env.APNS_ENVIRONMENT || 'development';
+
+const APNS_HOST = APNS_ENVIRONMENT === 'production'
+  ? 'https://api.push.apple.com'
+  : 'https://api.sandbox.push.apple.com';
+
+// Cached JWT token for APNs auth
+let cachedToken = '';
+let tokenExpiresAt = 0;
+
+/**
+ * Generate APNs JWT token using .p8 key.
+ * Token is valid for 1 hour; cached and regenerated as needed.
+ */
+function generateAPNsToken(): string {
+  const now = Math.floor(Date.now() / 1000);
+  if (cachedToken && now < tokenExpiresAt - 60) {
+    return cachedToken;
+  }
+
+  if (!APNS_KEY_PATH || !APNS_KEY_ID || !APNS_TEAM_ID) {
+    throw new Error('APNs not configured: missing APNS_KEY_PATH, APNS_KEY_ID, or APNS_TEAM_ID');
+  }
+
+  const privateKey = fs.readFileSync(APNS_KEY_PATH, 'utf8');
+  const header = { alg: 'ES256', kid: APNS_KEY_ID };
+  const payload = { iss: APNS_TEAM_ID, iat: now };
+
+  const headerB64 = Buffer.from(JSON.stringify(header)).toString('base64url');
+  const payloadB64 = Buffer.from(JSON.stringify(payload)).toString('base64url');
+  const signInput = `${headerB64}.${payloadB64}`;
+
+  const signature = crypto
+    .createSign('SHA256')
+    .update(signInput)
+    .sign(privateKey, 'base64url');
+
+  cachedToken = `${signInput}.${signature}`;
+  tokenExpiresAt = now + 3500; // ~1 hour
+  return cachedToken;
+}
+
+/**
+ * Send a push notification to a single device via APNs HTTP/2.
+ * Returns true on success, false on failure.
+ */
+async function sendAPNs(deviceToken: string, payload: PushPayload): Promise<{ ok: boolean; statusCode?: number }> {
+  const token = generateAPNsToken();
+  const path = `/3/device/${deviceToken}`;
+
+  const apnsPayload = JSON.stringify({
+    aps: {
+      alert: { title: payload.title, body: payload.body },
+      sound: 'default',
+      badge: 1,
+    },
+    ...payload.data,
+  });
+
+  return new Promise((resolve) => {
+    const session = http2.connect(APNS_HOST);
+    const req = session.request({
+      ':method': 'POST',
+      ':path': path,
+      'authorization': `bearer ${token}`,
+      'apns-topic': APNS_BUNDLE_ID,
+      'apns-push-type': 'alert',
+      'apns-priority': '10',
+      'content-type': 'application/json',
+    });
+
+    let responseBody = '';
+    let statusCode = 0;
+
+    req.on('response', (headers) => {
+      statusCode = (headers[':status'] as number) || 0;
+    });
+    req.on('data', (chunk) => { responseBody += chunk; });
+    req.on('end', () => {
+      session.close();
+      if (statusCode === 200) {
+        resolve({ ok: true, statusCode });
+      } else {
+        console.error(`[push] APNs error ${statusCode}: ${responseBody}`);
+        resolve({ ok: false, statusCode });
+      }
+    });
+    req.on('error', (err) => {
+      session.close();
+      console.error(`[push] APNs connection error: ${err.message}`);
+      resolve({ ok: false });
+    });
+
+    req.setEncoding('utf8');
+    req.write(apnsPayload);
+    req.end();
+  });
+}
+
 /**
  * Send a push notification to a single device token.
- * Currently logs to console; replace with APNs HTTP/2 in production.
+ * Development mode: logs to console.
+ * Production: sends via APNs HTTP/2.
  */
 export async function sendPushNotification(
+  pool: pg.Pool,
   deviceToken: string,
   platform: string,
   payload: PushPayload,
 ): Promise<void> {
-  // Development mode: log instead of sending
-  console.log(`[push] ${platform} → ${deviceToken.slice(0, 16)}... | ${payload.title}: ${payload.body}`);
-  if (payload.data) {
-    console.log(`[push] data:`, JSON.stringify(payload.data));
+  if (!APNS_KEY_PATH) {
+    // Development mode: log only
+    console.log(`[push] ${platform} → ${deviceToken.slice(0, 16)}... | ${payload.title}: ${payload.body}`);
+    if (payload.data) console.log(`[push] data:`, JSON.stringify(payload.data));
+    return;
   }
 
-  // TODO: Production APNs integration
-  // if (platform === 'ios') {
-  //   await sendAPNs(deviceToken, payload);
-  // }
+  if (platform === 'ios') {
+    const result = await sendAPNs(deviceToken, payload);
+    // APNs 410 = token no longer valid, 400 = bad request with bad token
+    if (result.statusCode === 410 || result.statusCode === 400) {
+      console.log(`[push] removing invalid device token: ${deviceToken.slice(0, 16)}...`);
+      await removeDevice(pool, deviceToken).catch(() => {});
+    }
+  }
 }
 
 /**
@@ -47,7 +161,7 @@ export async function notifyUser(
     if (devices.length === 0) return;
 
     const promises = devices.map((device: any) =>
-      sendPushNotification(device.device_token, device.platform, payload).catch((err) =>
+      sendPushNotification(pool, device.device_token, device.platform, payload).catch((err) =>
         console.error(`[push] failed for device ${device.id}:`, err.message)
       )
     );

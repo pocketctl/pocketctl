@@ -185,11 +185,7 @@ struct SettingsView: View {
                         // Other section
                         sectionHeader("其他")
                         settingsGroup {
-                            Button {
-                                if let url = URL(string: "mailto:support@pocketctl.com?subject=pocketctl%20%E5%8F%8D%E9%A6%88") {
-                                    UIApplication.shared.open(url)
-                                }
-                            } label: {
+                            Button { viewModel.showHelp = true } label: {
                                 settingsRow(icon: "questionmark.circle", iconBg: .pcHoverInput, iconFg: .pcFgSecondary,
                                             label: "帮助与反馈", value: nil)
                             }
@@ -250,6 +246,7 @@ struct SettingsView: View {
             .sheet(isPresented: $viewModel.showPrivacyPolicy) { privacyPolicySheet }
             .sheet(isPresented: $viewModel.showUserAgreement) { userAgreementSheet }
             .sheet(isPresented: $viewModel.showAbout) { aboutSheet }
+            .sheet(isPresented: $viewModel.showHelp) { helpSheet }
             .onDisappear {
                 viewModel.validateAndSaveRelayURL()
             }
@@ -561,6 +558,98 @@ struct SettingsView: View {
             .toolbar {
                 ToolbarItem(placement: .navigationBarTrailing) {
                     Button("完成") { viewModel.showAbout = false }
+                        .foregroundStyle(Color.pcAccent)
+                }
+            }
+        }
+    }
+
+    private var helpSheet: some View {
+        NavigationStack {
+            ZStack {
+                Color.pcBackground.ignoresSafeArea()
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 20) {
+                        // Daemon installation guide
+                        Text("安装 Daemon")
+                            .font(PCFont.body(16, weight: .semibold))
+                            .foregroundStyle(Color.pcFg)
+
+                        Text("在你的 Mac 或 Linux 开发机上运行以下命令，安装并启动 Daemon 守护进程：")
+                            .font(PCFont.body(15))
+                            .foregroundStyle(Color.pcFgSecondary)
+
+                        VStack(alignment: .leading, spacing: 4) {
+                            codeLine("# 1. 安装 Daemon")
+                            codeLine("curl -fsSL https://pocketctl.com/install.sh | bash")
+                            codeLine("")
+                            codeLine("# 2. 登录（使用 App 注册的手机号）")
+                            codeLine("pocketctl login")
+                            codeLine("")
+                            codeLine("# 3. 启动守护进程")
+                            codeLine("pocketctl daemon start")
+                            codeLine("")
+                            codeLine("# 4. 查看状态")
+                            codeLine("pocketctl daemon status")
+                        }
+                        .padding(PCSpacing.md)
+                        .background(Color.pcCodeBg)
+                        .cornerRadius(PCRadius.sm)
+
+                        Button {
+                            UIPasteboard.general.string = "curl -fsSL https://pocketctl.com/install.sh | bash\npocketctl login\npocketctl daemon start"
+                        } label: {
+                            HStack(spacing: 6) {
+                                Image(systemName: "doc.on.doc")
+                                Text("复制命令")
+                            }
+                            .font(PCFont.body(14))
+                            .foregroundStyle(Color.pcAccent)
+                            .padding(.horizontal, 16)
+                            .padding(.vertical, 8)
+                            .background(Color.pcSurface)
+                            .cornerRadius(PCRadius.sm)
+                            .overlay(RoundedRectangle(cornerRadius: PCRadius.sm).stroke(Color.pcBorder, lineWidth: 1))
+                        }
+
+                        Divider()
+                            .background(Color.pcBorder)
+
+                        // Feedback section
+                        Text("意见反馈")
+                            .font(PCFont.body(16, weight: .semibold))
+                            .foregroundStyle(Color.pcFg)
+
+                        Text("遇到问题或有建议？欢迎通过邮件联系我们：")
+                            .font(PCFont.body(15))
+                            .foregroundStyle(Color.pcFgSecondary)
+
+                        Button {
+                            if let url = URL(string: "mailto:james_2001_2001@163.com?subject=pocketctl%20%E5%8F%8D%E9%A6%88") {
+                                UIApplication.shared.open(url)
+                            }
+                        } label: {
+                            HStack(spacing: 8) {
+                                Image(systemName: "envelope.fill")
+                                    .font(.system(size: 14))
+                                    .foregroundStyle(Color.pcAccent)
+                                Text("james_2001_2001@163.com")
+                                    .font(PCFont.body(15))
+                                    .foregroundStyle(Color.pcAccent)
+                            }
+                            .padding(.vertical, 4)
+                        }
+
+                        Spacer()
+                    }
+                    .padding(PCSpacing.lg)
+                }
+            }
+            .navigationTitle("帮助与反馈")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .navigationBarTrailing) {
+                    Button("完成") { viewModel.showHelp = false }
                         .foregroundStyle(Color.pcAccent)
                 }
             }

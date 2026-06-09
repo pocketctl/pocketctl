@@ -1,7 +1,7 @@
 import Fastify from 'fastify';
 import fastifyWebsocket from '@fastify/websocket';
 import fastifyCors from '@fastify/cors';
-import { createPool, initDB, parseDBUrl, createUser, getUserByEmail, getUserById, getUserByPhone, createUserByPhone, registerDevice, removeDevice } from './db.js';
+import { createPool, initDB, parseDBUrl, createUser, getUserByEmail, getUserById, getUserByPhone, createUserByPhone, registerDevice, removeDevice, cleanStaleTombstones } from './db.js';
 import { Router } from './router.js';
 import { hashPassword, verifyPassword, signAccessToken, signRefreshToken, verifyAccessToken, verifyRefreshToken } from './auth.js';
 import { notifyUser, sessionStatusPush, daemonOfflinePush } from './push.js';
@@ -291,6 +291,14 @@ async function main() {
     await app.listen({ port: PORT, host: '0.0.0.0' });
     console.log(`pocketctl relay listening on port ${PORT} [${NODE_ENV}]`);
   } catch (err) { console.error('failed to start:', err); process.exit(1); }
+
+  // Periodic cleanup: remove tombstones older than 30 days (every 6 hours)
+  setInterval(async () => {
+    try {
+      const count = await cleanStaleTombstones(pool);
+      if (count > 0) console.log(`[cleanup] removed ${count} stale tombstones`);
+    } catch (err) { console.error('[cleanup] tombstone cleanup error:', (err as Error).message); }
+  }, 6 * 60 * 60 * 1000);
 }
 
 main();

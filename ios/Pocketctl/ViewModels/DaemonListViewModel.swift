@@ -16,7 +16,7 @@ final class DaemonListViewModel {
 
     private let wsService: WebSocketService
     private let apiClient: APIClient
-    private var eventCleanup: (() -> Void)?
+    private var eventListenerId: String?
 
     init(wsService: WebSocketService, apiClient: APIClient) {
         self.wsService = wsService
@@ -59,12 +59,13 @@ final class DaemonListViewModel {
             .replacingOccurrences(of: "http://", with: "ws://")
             + "/ws"
 
-        // Register event handler
-        let handler: ([String: Any]) -> Void = { [weak self] dict in
+        // Register event listener (multi-listener, won't be overwritten by child views)
+        if let existingId = eventListenerId {
+            wsService.removeEventListener(existingId)
+        }
+        eventListenerId = wsService.addEventListener { [weak self] dict in
             self?.handleEvent(dict)
         }
-        wsService.onEvent = handler
-        eventCleanup = { [weak self] in self?.wsService.onEvent = nil }
 
         // Register auth failure handler for WebSocket-level token rejection
         wsService.onAuthFailure = { [weak self] in
@@ -106,17 +107,33 @@ final class DaemonListViewModel {
     }
 
     func disconnect() {
-        eventCleanup?()
+        if let id = eventListenerId {
+            wsService.removeEventListener(id)
+            eventListenerId = nil
+        }
         wsService.disconnect()
     }
 
     /// Re-register event handler and request fresh session list.
     /// Called on .onAppear when returning from a child view.
     func refresh() {
-        wsService.onEvent = { [weak self] dict in
-            self?.handleEvent(dict)
+        // Re-register if needed (e.g. after child view overwrote handler)
+        if eventListenerId == nil {
+            eventListenerId = wsService.addEventListener { [weak self] dict in
+                self?.handleEvent(dict)
+            }
         }
-        wsService.send(["type": "list_sessions"])
+        wsService.onAuthFailure = { [weak self] in
+            self?.handleAuthFailure()
+        }
+        if wsService.isConnected {
+            wsService.send(["type": "list_sessions"])
+        } else {
+            // Connection lost — reconnect, then request sessions
+            Task { [weak self] in
+                await self?.connect()
+            }
+        }
     }
 
     /// Number of online daemons

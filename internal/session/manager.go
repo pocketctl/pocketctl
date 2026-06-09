@@ -95,7 +95,8 @@ func (sm *SessionManager) CreateSession(ctx context.Context, config protocol.Ses
 }
 
 // RegisterTerminalSession registers a session discovered from the terminal.
-// Returns true if newly registered, false if session already existed.
+// Returns true if newly registered or upgraded from daemon→terminal (teller should start).
+// Returns false if already a terminal session (skip).
 func (sm *SessionManager) RegisterTerminalSession(sessionID, cwd string, pid int, ttyPath string, status string) bool {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
@@ -105,19 +106,27 @@ func (sm *SessionManager) RegisterTerminalSession(sessionID, cwd string, pid int
 		return false
 	}
 
-	// Don't re-register if we already know about this session
-	if _, ok := sm.sessions[sessionID]; ok {
-		return false
-	}
-
-	// Check if any existing daemon session matches this session ID
-	// (handles race where watcher discovers session before session_id_changed fires)
-	for _, ps := range sm.sessions {
-		if ps.SessionID == sessionID && ps.Source == "daemon" {
+	// Check if session already exists
+	if ps, ok := sm.sessions[sessionID]; ok {
+		if ps.Source == "terminal" {
+			// Already a terminal session — skip
 			return false
 		}
+		// Daemon-created session appeared in watcher — user resumed it in terminal.
+		// Upgrade source and start tailer.
+		ps.Source = "terminal"
+		ps.Pid = pid
+		if cwd != "" {
+			ps.Cwd = cwd
+		}
+		ps.Status = status
+		if ttyPath != "" {
+			ps.TTY = ttyPath
+		}
+		return true
 	}
 
+	// New session — register it
 	sm.sessions[sessionID] = &ProcessState{
 		SessionID: sessionID,
 		Status:    status,
@@ -129,14 +138,14 @@ func (sm *SessionManager) RegisterTerminalSession(sessionID, cwd string, pid int
 		TTY:       ttyPath,
 	}
 
-		// Emit session_discovered event to relay so it knows about this session
-		sm.outputCh <- protocol.DaemonEvent{
-			Type:      "session_discovered",
-			SessionID: sessionID,
-			Cwd:       cwd,
-			Status:    status,
-			Source:    "terminal",
-		}
+	// Emit session_discovered event to relay so it knows about this session
+	sm.outputCh <- protocol.DaemonEvent{
+		Type:      "session_discovered",
+		SessionID: sessionID,
+		Cwd:       cwd,
+		Status:    status,
+		Source:    "terminal",
+	}
 
 	return true
 }

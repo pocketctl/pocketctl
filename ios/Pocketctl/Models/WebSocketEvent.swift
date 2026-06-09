@@ -12,6 +12,7 @@ enum WebSocketEventType: String, Sendable {
     case sessionStatus = "session_status"
     case sessionIdChanged = "session_id_changed"
     case sessionTitleUpdate = "session_title_update"
+    case sessionDeleted = "session_deleted"
 
     // Agent streaming
     case agentText = "agent_text"

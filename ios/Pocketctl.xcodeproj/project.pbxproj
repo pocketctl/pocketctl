@@ -7,8 +7,6 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
-		A1B2C3D4E5F6000100000001 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = A1B2C3D4E5F6000100000002 /* Assets.xcassets */; };
-		B1C2D3E4F5A6000100000001 /* SettingsViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1C2D3E4F5A6000100000002 /* SettingsViewModel.swift */; };
 		09BB3DCEEFAB4EB871820C62 /* WebSocketEvent.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2B0D5F07793DB161309765EA /* WebSocketEvent.swift */; };
 		0A4D2E1C56479351D3E2D063 /* Session.swift in Sources */ = {isa = PBXBuildFile; fileRef = 79D24DADEABC184440BA91AB /* Session.swift */; };
 		193C07020A003A322FE97348 /* ChatMessage.swift in Sources */ = {isa = PBXBuildFile; fileRef = 47C7704DCF9EF55CF3602109 /* ChatMessage.swift */; };
@@ -35,8 +33,10 @@
 		96E4153A0BD5C6A079556CBC /* DaemonListView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A6CB2EA28F7E93B23655A152 /* DaemonListView.swift */; };
 		991987469EB64DA5011FE4DB /* KeychainStorage.swift in Sources */ = {isa = PBXBuildFile; fileRef = 62547E14DAAC6CA37C1AAF22 /* KeychainStorage.swift */; };
 		A0F41EB04B09F512792D4524 /* RelativeTime.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3839B929BAD18609D7D833A2 /* RelativeTime.swift */; };
+		A1B2C3D4E5F6000100000001 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = A1B2C3D4E5F6000100000002 /* Assets.xcassets */; };
 		A5A0763AF501CDAED5782201 /* SessionListView.swift in Sources */ = {isa = PBXBuildFile; fileRef = EE9D163591786B65153DF7C4 /* SessionListView.swift */; };
 		A8D3B9FD32FC93B297619DF1 /* User.swift in Sources */ = {isa = PBXBuildFile; fileRef = A6914225C6BDA7BAFB45F6B6 /* User.swift */; };
+		B1C2D3E4F5A6000100000001 /* SettingsViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1C2D3E4F5A6000100000002 /* SettingsViewModel.swift */; };
 		B35FCCCF703CCBEFA3BD2461 /* SubAgent.swift in Sources */ = {isa = PBXBuildFile; fileRef = B80EDC4AAE35AB265037E32D /* SubAgent.swift */; };
 		B8118F0CE086840C30B77AFB /* Daemon.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9FC559EB54B2A1371D77C9A3 /* Daemon.swift */; };
 		BF66AEF2806384A99CDAA27D /* StatusDot.swift in Sources */ = {isa = PBXBuildFile; fileRef = 56EC9B30663A9B86C37B662C /* StatusDot.swift */; };
@@ -49,9 +49,7 @@
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
-		A1B2C3D4E5F6000100000002 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		17725F3C27EED9D26C29B384 /* LoginView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LoginView.swift; sourceTree = "<group>"; };
-		B1C2D3E4F5A6000100000002 /* SettingsViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsViewModel.swift; sourceTree = "<group>"; };
 		1C8BC23DF09CD613D48363A0 /* AuthViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AuthViewModel.swift; sourceTree = "<group>"; };
 		2B0D5F07793DB161309765EA /* WebSocketEvent.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WebSocketEvent.swift; sourceTree = "<group>"; };
 		2BDE251682A379256D6A0EAF /* Extensions.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Extensions.swift; sourceTree = "<group>"; };
@@ -75,8 +73,10 @@
 		9932C9EA25A7869D5FFFF737 /* ContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContentView.swift; sourceTree = "<group>"; };
 		9E2A895A4F67741DE7F0CE8B /* NewSessionSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NewSessionSheet.swift; sourceTree = "<group>"; };
 		9FC559EB54B2A1371D77C9A3 /* Daemon.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Daemon.swift; sourceTree = "<group>"; };
+		A1B2C3D4E5F6000100000002 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		A6914225C6BDA7BAFB45F6B6 /* User.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = User.swift; sourceTree = "<group>"; };
 		A6CB2EA28F7E93B23655A152 /* DaemonListView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DaemonListView.swift; sourceTree = "<group>"; };
+		B1C2D3E4F5A6000100000002 /* SettingsViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsViewModel.swift; sourceTree = "<group>"; };
 		B80EDC4AAE35AB265037E32D /* SubAgent.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SubAgent.swift; sourceTree = "<group>"; };
 		C1040499582D1E3CFB58142D /* SubAgentCard.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SubAgentCard.swift; sourceTree = "<group>"; };
 		C8D64F4203196DA7D36D74DA /* Typography.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Typography.swift; sourceTree = "<group>"; };
@@ -178,7 +178,6 @@
 				1C8BC23DF09CD613D48363A0 /* AuthViewModel.swift */,
 				3F73919F4B3E6E8615B2C9B7 /* DaemonListViewModel.swift */,
 				CE7372FB580B4F3DDFF5A9D2 /* SessionDetailViewModel.swift */,
-				8F3D31F29AC46551DACB21AA /* SessionListViewModel.swift */,
 				B1C2D3E4F5A6000100000002 /* SettingsViewModel.swift */,
 				8F3D31F29AC46551DACB21AA /* SessionListViewModel.swift */,
 			);
@@ -269,6 +268,17 @@
 		};
 /* End PBXProject section */
 
+/* Begin PBXResourcesBuildPhase section */
+		A1B2C3D4E5F6000100000003 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				A1B2C3D4E5F6000100000001 /* Assets.xcassets in Resources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXResourcesBuildPhase section */
+
 /* Begin PBXSourcesBuildPhase section */
 		8C1EA1C0DD29CBC406C4331C /* Sources */ = {
 			isa = PBXSourcesBuildPhase;
@@ -316,17 +326,6 @@
 			runOnlyForDeploymentPostprocessing = 0;
 		};
 /* End PBXSourcesBuildPhase section */
-
-/* Begin PBXResourcesBuildPhase section */
-		A1B2C3D4E5F6000100000003 /* Resources */ = {
-			isa = PBXResourcesBuildPhase;
-			buildActionMask = 2147483647;
-			files = (
-				A1B2C3D4E5F6000100000001 /* Assets.xcassets in Resources */,
-			);
-			runOnlyForDeploymentPostprocessing = 0;
-		};
-/* End PBXResourcesBuildPhase section */
 
 /* Begin XCBuildConfiguration section */
 		ABD77C45592B29BCC1E4AF9B /* Release */ = {
@@ -377,7 +376,7 @@
 				GCC_WARN_UNUSED_VARIABLE = YES;
 				INFOPLIST_FILE = Pocketctl/Info.plist;
 				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
-				MARKETING_VERSION = 1.0.0;
+				MARKETING_VERSION = 0.1.0;
 				MTL_ENABLE_DEBUG_INFO = NO;
 				MTL_FAST_MATH = YES;
 				PRODUCT_BUNDLE_IDENTIFIER = com.pocketctl.app;
@@ -444,7 +443,7 @@
 				GCC_WARN_UNUSED_VARIABLE = YES;
 				INFOPLIST_FILE = Pocketctl/Info.plist;
 				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
-				MARKETING_VERSION = 1.0.0;
+				MARKETING_VERSION = 0.1.0;
 				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
 				MTL_FAST_MATH = YES;
 				ONLY_ACTIVE_ARCH = YES;
@@ -469,7 +468,7 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				PRODUCT_BUNDLE_IDENTIFIER = com.pocketctl.app;
+				PRODUCT_BUNDLE_IDENTIFIER = com.happyhappy.pocketctl;
 				SDKROOT = iphoneos;
 				TARGETED_DEVICE_FAMILY = "1,2";
 			};
@@ -486,7 +485,7 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				PRODUCT_BUNDLE_IDENTIFIER = com.pocketctl.app;
+				PRODUCT_BUNDLE_IDENTIFIER = com.happyhappy.pocketctl;
 				SDKROOT = iphoneos;
 				TARGETED_DEVICE_FAMILY = "1,2";
 			};
