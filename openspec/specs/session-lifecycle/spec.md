@@ -3,6 +3,8 @@
 ### Requirement: Session lifecycle state machine
 The system SHALL define a session lifecycle state machine with 8 states: `running`, `waiting_approval`, `idle`, `exited`, `disconnected`, `completed`, `error`, `killed`. The state machine SHALL define valid transitions between states.
 
+When a session is created or discovered, its initial title SHALL be set to `Terminal Session-{sessionID后8位}` (e.g., "Terminal Session-1def4567"). This replaces the previous behavior of setting title to null or "Terminal Session" without a suffix.
+
 #### Scenario: Terminal session full lifecycle
 - **WHEN** a terminal session is discovered with a running Claude Code process
 - **THEN** state transitions follow: `running` → `idle` → `running` → `idle` → `exited`
@@ -16,6 +18,15 @@ The system SHALL define a session lifecycle state machine with 8 states: `runnin
 #### Scenario: Invalid state transition rejected
 - **WHEN** a session is in `exited` state and an event attempts to set it to `running` without a resume
 - **THEN** the transition is rejected and an error is logged
+
+#### Scenario: Terminal session default title
+- **WHEN** a terminal session is discovered via `session_discovered` event
+- **THEN** the session title is set to `Terminal Session-{sessionID后8位}`
+
+#### Scenario: Daemon session default title
+- **WHEN** a daemon session is created via `session_created` event with a title from config.Prompt
+- **THEN** the session title is set to the provided prompt value
+- **AND** if no title is provided, the title is set to `Terminal Session-{sessionID后8位}`
 
 ### Requirement: Valid state transitions
 The system SHALL enforce the following valid state transitions:
