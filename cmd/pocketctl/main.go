@@ -97,12 +97,17 @@ func cmdDaemon(args []string) {
 
 func cmdLogin(args []string) {
 	fs := flag.NewFlagSet("login", flag.ExitOnError)
-	relayURL := fs.String("relay", "", "Relay base URL (default: http://localhost:8080)")
+	relayURL := fs.String("relay", "", "Relay WebSocket URL (default: ws://localhost:8080/ws)")
+	production := fs.Bool("prod", false, "Use production relay (wss://pocketctl.muwb.com/ws) instead of local dev")
 	fs.Parse(args)
 
 	baseURL := *relayURL
 	if baseURL == "" {
-		baseURL = "http://localhost:8080"
+		if *production {
+			baseURL = "wss://pocketctl.muwb.com/ws"
+		} else {
+			baseURL = "ws://localhost:8080/ws"
+		}
 	}
 
 	fmt.Println("pocketctl login")
@@ -169,6 +174,7 @@ func cmdLogin(args []string) {
 func cmdDaemonStart(args []string) {
 	fs := flag.NewFlagSet("daemon start", flag.ExitOnError)
 	relayURL := fs.String("relay", "", "Relay WebSocket URL (or POCKETCTL_RELAY_URL env)")
+	production := fs.Bool("prod", false, "Use production relay (wss://pocketctl.muwb.com/ws)")
 	token := fs.String("token", "", "JWT token (or POCKETCTL_TOKEN env)")
 	daemonID := fs.String("id", "", "Daemon ID (auto-generated if empty)")
 	fs.Parse(args)
@@ -183,6 +189,9 @@ func cmdDaemonStart(args []string) {
 		if storedURL, _, _, err := config.LoadAuth(); err == nil && storedURL != "" {
 			url = storedURL
 		}
+	}
+	if url == "" && *production {
+		url = "wss://pocketctl.muwb.com/ws"
 	}
 	if url == "" {
 		url = "ws://localhost:8080/ws"

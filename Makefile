@@ -31,7 +31,9 @@ build-all:
 	GOOS=darwin GOARCH=amd64 go build $(LDFLAGS) -o dist/pocketctl_darwin_amd64 ./cmd/pocketctl
 	GOOS=linux  GOARCH=amd64 go build $(LDFLAGS) -o dist/pocketctl_linux_amd64 ./cmd/pocketctl
 	GOOS=linux  GOARCH=arm64 go build $(LDFLAGS) -o dist/pocketctl_linux_arm64 ./cmd/pocketctl
-	@echo "✅ 全平台构建完成: dist/"
+	@echo "✅ 全平台构建完成，正在生成 SHA256 校验和..."
+	@cd dist && for f in pocketctl_*; do if [ -f "$$f" ]; then shasum -a 256 "$$f" | awk '{print $$1}' > "$${f}.sha256"; fi; done
+	@echo "✅ SHA256 校验和已生成: dist/*.sha256"
 
 # ---------- 开发 ----------
 

@@ -31,7 +31,65 @@ struct SettingsView: View {
                         .padding(.horizontal, PCSpacing.lg)
                         .padding(.bottom, 24)
 
-                        // Server section — hidden for now
+                        // Relay 环境切换
+                        sectionHeader("服务器")
+                        settingsGroup {
+                            VStack(spacing: 0) {
+                                HStack(spacing: 12) {
+                                    Image(systemName: "antenna.radiowaves.left.and.right")
+                                        .font(.system(size: 14))
+                                        .foregroundStyle(Color.pcAccent)
+                                        .frame(width: 28, height: 28)
+                                        .background(Color.pcAccentMuted)
+                                        .cornerRadius(PCRadius.sm)
+
+                                    Text("环境")
+                                        .font(PCFont.body(15))
+                                        .foregroundStyle(Color.pcFg)
+
+                                    Spacer()
+
+                                    Text(viewModel.currentEnvironment.displayName)
+                                        .font(PCFont.body(14, weight: .medium))
+                                        .foregroundStyle(Color.pcAccent)
+
+                                    Toggle("", isOn: Binding(
+                                        get: { viewModel.currentEnvironment == .staging },
+                                        set: { production in
+                                            let newEnv: RelayEnvironment = production ? .staging : .production
+                                            withAnimation {
+                                                viewModel.switchEnvironment(to: newEnv)
+                                            }
+                                        }
+                                    ))
+                                    .labelsHidden()
+                                    .tint(Color.pcPrimaryBtn)
+                                }
+                                .padding(.horizontal, PCSpacing.lg)
+                                .frame(minHeight: 44)
+
+                                // 显示当前环境 URL
+                                HStack(spacing: 12) {
+                                    Color.clear
+                                        .frame(width: 28, height: 28)
+
+                                    Text(viewModel.currentEnvironment.relayURLText)
+                                        .font(PCFont.mono(11))
+                                        .foregroundStyle(Color.pcFgTertiary)
+                                        .textSelection(.enabled)
+
+                                    Spacer()
+
+                                    Circle()
+                                        .fill(connectionStatusColor)
+                                        .frame(width: 6, height: 6)
+                                }
+                                .padding(.horizontal, PCSpacing.lg)
+                                .padding(.bottom, PCSpacing.sm)
+                            }
+                        }
+                        .padding(.horizontal, PCSpacing.lg)
+                        .padding(.bottom, 24)
 
                         // My Hosts section
                         sectionHeader("我的主机")
@@ -165,6 +223,14 @@ struct SettingsView: View {
                                             label: "用户协议", value: nil)
                             }
                             .buttonStyle(.plain)
+                        }
+                        .padding(.horizontal, PCSpacing.lg)
+                        .padding(.bottom, 24)
+
+                        // 关于
+                        sectionHeader("其他")
+                        settingsGroup {
+                            aboutRow
                         }
                         .padding(.horizontal, PCSpacing.lg)
                         .padding(.bottom, 24)
@@ -431,16 +497,26 @@ struct SettingsView: View {
                         .frame(maxWidth: .infinity, alignment: .leading)
 
                     VStack(alignment: .leading, spacing: 4) {
-                        codeLine("curl -fsSL https://pocketctl.com/install.sh | bash")
-                        codeLine("pocketctl login")
-                        codeLine("pocketctl daemon start")
+                        codeLine("curl -fsSL \(RelayEnvironmentManager.shared.current.installURL) | bash")
+                        if RelayEnvironmentManager.shared.current == .production {
+                            codeLine("pocketctl login --prod")
+                        } else {
+                            codeLine("pocketctl login")
+                        }
+                        if RelayEnvironmentManager.shared.current == .production {
+                            codeLine("pocketctl daemon start --prod")
+                        } else {
+                            codeLine("pocketctl daemon start")
+                        }
                     }
                     .padding(PCSpacing.md)
                     .background(Color.pcCodeBg)
                     .cornerRadius(PCRadius.sm)
 
                     Button {
-                        UIPasteboard.general.string = "curl -fsSL https://pocketctl.com/install.sh | bash\npocketctl login\npocketctl daemon start"
+                        let loginCmd = RelayEnvironmentManager.shared.current == .production ? "pocketctl login --prod" : "pocketctl login"
+                        let startCmd = RelayEnvironmentManager.shared.current == .production ? "pocketctl daemon start --prod" : "pocketctl daemon start"
+                        UIPasteboard.general.string = "curl -fsSL \(RelayEnvironmentManager.shared.current.installURL) | bash\n\(loginCmd)\n\(startCmd)"
                     } label: {
                         HStack(spacing: 6) {
                             Image(systemName: "doc.on.doc")
@@ -538,13 +614,21 @@ struct SettingsView: View {
 
                         VStack(alignment: .leading, spacing: 4) {
                             codeLine("# 1. 安装 Daemon")
-                            codeLine("curl -fsSL https://pocketctl.com/install.sh | bash")
+                            codeLine("curl -fsSL \(viewModel.currentEnvironment.installURL) | bash")
                             codeLine("")
                             codeLine("# 2. 登录（使用 App 注册的手机号）")
-                            codeLine("pocketctl login")
+                            if viewModel.currentEnvironment == .production {
+                                codeLine("pocketctl login --prod")
+                            } else {
+                                codeLine("pocketctl login")
+                            }
                             codeLine("")
                             codeLine("# 3. 启动守护进程")
-                            codeLine("pocketctl daemon start")
+                            if viewModel.currentEnvironment == .production {
+                                codeLine("pocketctl daemon start --prod")
+                            } else {
+                                codeLine("pocketctl daemon start")
+                            }
                             codeLine("")
                             codeLine("# 4. 查看状态")
                             codeLine("pocketctl daemon status")
@@ -655,6 +739,120 @@ struct SettingsView: View {
                         .foregroundStyle(Color.pcAccent)
                 }
             }
+        }
+    }
+
+    // MARK: - About row
+
+    private var aboutRow: some View {
+        VStack(spacing: 0) {
+            Button {
+                viewModel.showAbout = true
+            } label: {
+                HStack(spacing: 12) {
+                    Image(systemName: "info.circle.fill")
+                        .font(.system(size: 14))
+                        .foregroundStyle(Color.pcAccent)
+                        .frame(width: 28, height: 28)
+                        .background(Color.pcAccentMuted)
+                        .cornerRadius(PCRadius.sm)
+
+                    Text("关于")
+                        .font(PCFont.body(15))
+                        .foregroundStyle(Color.pcFg)
+
+                    Spacer()
+
+                    Text(viewModel.appVersion)
+                        .font(PCFont.body(14))
+                        .foregroundStyle(Color.pcFgTertiary)
+
+                    Image(systemName: "chevron.right")
+                        .font(.system(size: 14))
+                        .foregroundStyle(Color.pcFgTertiary)
+                }
+                .padding(.horizontal, PCSpacing.lg)
+                .frame(minHeight: 44)
+            }
+            .buttonStyle(.plain)
+
+            Button {
+                viewModel.showHelp = true
+            } label: {
+                HStack(spacing: 12) {
+                    Image(systemName: "questionmark.circle.fill")
+                        .font(.system(size: 14))
+                        .foregroundStyle(Color.pcAccent)
+                        .frame(width: 28, height: 28)
+                        .background(Color.pcAccentMuted)
+                        .cornerRadius(PCRadius.sm)
+
+                    Text("帮助与反馈")
+                        .font(PCFont.body(15))
+                        .foregroundStyle(Color.pcFg)
+
+                    Spacer()
+
+                    Image(systemName: "chevron.right")
+                        .font(.system(size: 14))
+                        .foregroundStyle(Color.pcFgTertiary)
+                }
+                .padding(.horizontal, PCSpacing.lg)
+                .frame(minHeight: 44)
+            }
+            .buttonStyle(.plain)
+
+            Button {
+                viewModel.showPrivacyPolicy = true
+            } label: {
+                HStack(spacing: 12) {
+                    Image(systemName: "lock.fill")
+                        .font(.system(size: 14))
+                        .foregroundStyle(Color.pcAccent)
+                        .frame(width: 28, height: 28)
+                        .background(Color.pcAccentMuted)
+                        .cornerRadius(PCRadius.sm)
+
+                    Text("隐私政策")
+                        .font(PCFont.body(15))
+                        .foregroundStyle(Color.pcFg)
+
+                    Spacer()
+
+                    Image(systemName: "chevron.right")
+                        .font(.system(size: 14))
+                        .foregroundStyle(Color.pcFgTertiary)
+                }
+                .padding(.horizontal, PCSpacing.lg)
+                .frame(minHeight: 44)
+            }
+            .buttonStyle(.plain)
+
+            Button {
+                viewModel.showUserAgreement = true
+            } label: {
+                HStack(spacing: 12) {
+                    Image(systemName: "doc.text.fill")
+                        .font(.system(size: 14))
+                        .foregroundStyle(Color.pcAccent)
+                        .frame(width: 28, height: 28)
+                        .background(Color.pcAccentMuted)
+                        .cornerRadius(PCRadius.sm)
+
+                    Text("用户协议")
+                        .font(PCFont.body(15))
+                        .foregroundStyle(Color.pcFg)
+
+                    Spacer()
+
+                    Image(systemName: "chevron.right")
+                        .font(.system(size: 14))
+                        .foregroundStyle(Color.pcFgTertiary)
+                }
+                .padding(.horizontal, PCSpacing.lg)
+                .frame(minHeight: 44)
+            }
+            .buttonStyle(.plain)
         }
     }
 

@@ -270,6 +270,9 @@ struct SessionCard: View {
 }
 
 // MARK: - Swipe to Delete (WeChat-style)
+//
+// 增强：增加垂直方向判断，当用户上下滑动（垂直距离 > 水平距离）时
+// 忽略左滑手势，避免上下滚动时触发删除按钮。
 
 struct SwipeToDelete<Content: View>: View {
     let content: Content
@@ -277,8 +280,14 @@ struct SwipeToDelete<Content: View>: View {
 
     @State private var offset: CGFloat = 0
     @State private var isOpen = false
+    /// 当次拖拽是否为垂直滚动（上下滑动），是则忽略左滑
+    @State private var isVerticalScroll = false
 
     private let buttonWidth: CGFloat = 76
+    /// 垂直/水平分量判定阈值，超过此比例视为垂直滚动
+    private let verticalRatioThreshold: CGFloat = 0.6
+    /// 最小垂直距离（绝对值）超过此值才判定为垂直滚动，避免细微抖动误判
+    private let minVerticalDistance: CGFloat = 8
 
     init(@ViewBuilder content: () -> Content, onDelete: @escaping () -> Void) {
         self.content = content()
@@ -291,6 +300,7 @@ struct SwipeToDelete<Content: View>: View {
             Button {
                 withAnimation(.spring(response: 0.3, dampingFraction: 1)) {
                     onDelete()
+                    close()
                 }
             } label: {
                 Text("删除")
@@ -307,25 +317,45 @@ struct SwipeToDelete<Content: View>: View {
                 .highPriorityGesture(
                     DragGesture(minimumDistance: 10)
                         .onChanged { value in
-                            let translation = value.translation.width
+                            let h = value.translation.width
+                            let v = abs(value.translation.height)
+
+                            // 判定是否为垂直滚动
+                            if !isOpen {
+                                // 未打开状态下，竖向分量明显大 → 忽略
+                                if v > minVerticalDistance && (h == 0 || CGFloat(v) / CGFloat(abs(h) + 0.01) > verticalRatioThreshold) {
+                                    isVerticalScroll = true
+                                    return
+                                }
+                            }
+                            isVerticalScroll = false
+
                             if isOpen {
                                 // Already open: allow right swipe to close
-                                offset = max(-buttonWidth + translation, -buttonWidth)
+                                offset = max(-buttonWidth + h, -buttonWidth)
                                 offset = min(offset, 0)
                             } else {
                                 // Closed: only allow left swipe
-                                offset = min(translation, 0)
+                                offset = min(h, 0)
                                 offset = max(offset, -buttonWidth)
                             }
                         }
                         .onEnded { value in
+                            // 如果是垂直滚动，不做任何事，恢复初始状态
+                            if isVerticalScroll {
+                                isVerticalScroll = false
+                                withAnimation(.spring(response: 0.3, dampingFraction: 1)) {
+                                    close()
+                                }
+                                return
+                            }
+
                             let velocity = value.predictedEndLocation.x - value.location.x
                             withAnimation(.spring(response: 0.3, dampingFraction: 1)) {
                                 if isOpen {
                                     // Swiping right to close
                                     if value.translation.width > 40 || velocity > 100 {
-                                        offset = 0
-                                        isOpen = false
+                                        close()
                                     } else {
                                         offset = -buttonWidth
                                     }
@@ -335,7 +365,7 @@ struct SwipeToDelete<Content: View>: View {
                                         offset = -buttonWidth
                                         isOpen = true
                                     } else {
-                                        offset = 0
+                                        close()
                                     }
                                 }
                             }
@@ -344,12 +374,17 @@ struct SwipeToDelete<Content: View>: View {
                 .onTapGesture {
                     if isOpen {
                         withAnimation(.spring(response: 0.3, dampingFraction: 1)) {
-                            offset = 0
-                            isOpen = false
+                            close()
                         }
                     }
                 }
         }
         .clipShape(RoundedRectangle(cornerRadius: PCRadius.md))
+    }
+
+    private func close() {
+        offset = 0
+        isOpen = false
+        isVerticalScroll = false
     }
 }

@@ -147,11 +147,16 @@
 ### 2.4 Daemon 认证改造
 
 - [ ] Daemon 连接时使用 JWT（替代 API Key）
-  - `pocketctl daemon start --token <JWT>`
-  - 或 `pocketctl login` 先登录获取 token 并存储
+  - `pocketctl login --phone 138xxxx --code <SMS_CODE>` 先登录获取 token 并存储
+  - `pocketctl daemon start --token <JWT>` 或 `POCKETCTL_TOKEN` 环境变量
+- [ ] **登录流程追加短信验证码**：`pocketctl login` 交互式输入手机号 → 发验证码 → 输入验证码 → 验证并保存 token
+  - API: `POST /api/auth/sms/send` 发送验证码
+  - API: `POST /api/auth/sms/verify` 验证并返回 access/refresh token
+  - Daemon 侧：交互式 CLI 输入 + `internal/api/client.go` 已有 SendSMS/VerifySMS 实现
 
 **改动文件：**
-- `cmd/pocketctl/main.go`（新增 `login` 子命令）
+- `cmd/pocketctl/main.go`（`login` 子命令完善：手机号输入、验证码发送验证、token 持久化）
+- `internal/api/client.go`（已实现 SendSMS/VerifySMS）
 - `internal/ws/client.go`（JWT 替代 API Key）
 
 ---

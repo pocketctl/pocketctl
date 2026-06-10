@@ -48,11 +48,15 @@ final class WebSocketService: @unchecked Sendable {
     var onAuthFailure: (() -> Void)?
 
     /// Connect to the relay WebSocket
-    func connect(url: String, token: String) {
+    /// - Parameters:
+    ///   - url: WebSocket URL（可选，不传则使用 RelayEnvironmentManager 的默认环境 URL）
+    ///   - token: 认证 Token
+    func connect(url: String? = nil, token: String) {
         currentURL = url
         currentToken = token
 
-        let fullURL = "\(url)?type=client&token=\(token.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? token)"
+        let resolvedURL = url ?? RelayEnvironmentManager.shared.current.wsBaseURL
+        let fullURL = "\(resolvedURL)?type=client&token=\(token.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? token)"
         guard let wsURL = URL(string: fullURL) else { return }
 
         let config = URLSessionConfiguration.default

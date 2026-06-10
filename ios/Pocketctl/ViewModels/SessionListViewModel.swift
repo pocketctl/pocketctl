@@ -51,10 +51,7 @@ final class SessionListViewModel {
         isLoading = true
         error = nil
 
-        let wsURL = apiClient.baseURL
-            .replacingOccurrences(of: "https://", with: "wss://")
-            .replacingOccurrences(of: "http://", with: "ws://")
-            + "/ws"
+        let wsURL = RelayEnvironmentManager.shared.current.wsBaseURL
 
         eventListenerId = wsService.addEventListener { [weak self] dict in
             self?.handleEvent(dict)

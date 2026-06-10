@@ -1,7 +1,19 @@
 class Pocketctl < Formula
   desc "Remote AI coding agent control system"
   homepage "https://github.com/pocketctl/pocketctl"
+  license "MIT"
   version "0.1.0"
+
+  # Usage:
+  #   brew tap pocketctl/tap
+  #   brew install pocketctl
+  #
+  # To upgrade:
+  #   brew upgrade pocketctl
+  #
+  # For production relay:
+  #   pocketctl login --prod
+  #   pocketctl daemon start --prod
 
   on_macos do
     if Hardware::CPU.arm?
@@ -24,10 +36,37 @@ class Pocketctl < Formula
   end
 
   def install
-    bin.install "pocketctl_darwin_arm64" => "pocketctl" if Hardware::CPU.arm? && OS.mac?
-    bin.install "pocketctl_darwin_amd64" => "pocketctl" if !Hardware::CPU.arm? && OS.mac?
-    bin.install "pocketctl_linux_arm64" => "pocketctl" if Hardware::CPU.arm? && OS.linux?
-    bin.install "pocketctl_linux_amd64" => "pocketctl" if !Hardware::CPU.arm? && OS.linux?
+    # Homebrew handles binary naming automatically from the downloaded file
+    if OS.mac?
+      if Hardware::CPU.arm?
+        bin.install "pocketctl_darwin_arm64" => "pocketctl"
+      else
+        bin.install "pocketctl_darwin_amd64" => "pocketctl"
+      end
+    elsif OS.linux?
+      if Hardware::CPU.arm?
+        bin.install "pocketctl_linux_arm64" => "pocketctl"
+      else
+        bin.install "pocketctl_linux_amd64" => "pocketctl"
+      end
+    end
+  end
+
+  # Add shell completion and man page support
+  def caveats
+    <<~EOS
+      pocketctl has been installed!
+
+      Quick start:
+        pocketctl login
+        pocketctl daemon start
+
+      For production environment:
+        pocketctl login --prod
+        pocketctl daemon start --prod
+
+      See https://github.com/pocketctl/pocketctl for more info.
+    EOS
   end
 
   test do

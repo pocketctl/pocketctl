@@ -53,11 +53,18 @@ jobs:
         with:
           path: artifacts
 
-      - name: Prepare release assets
+      - name: Prepare release assets (with SHA256 checksums)
         run: |
           mkdir -p release
           find artifacts -type f -exec cp {} release/ \;
-          ls -la release/
+          # Generate SHA256 checksum files
+          cd release
+          for f in pocketctl_*; do
+            if [ -f "$f" ] && [ "${f##*.}" != "sha256" ]; then
+              shasum -a 256 "$f" | awk '{print $1}' > "${f}.sha256"
+            fi
+          done
+          ls -la
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2

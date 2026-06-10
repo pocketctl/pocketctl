@@ -34,6 +34,10 @@ final class SettingsViewModel {
 
     // MARK: - Computed
 
+    var currentEnvironment: RelayEnvironment {
+        RelayEnvironmentManager.shared.current
+    }
+
     var effectiveDisplayName: String {
         KeychainStorage.localDisplayName
             ?? user?.displayName
@@ -92,6 +96,17 @@ final class SettingsViewModel {
         relayURLText = ""
     }
 
+    // MARK: - Relay Environment
+
+    func switchEnvironment(to env: RelayEnvironment) {
+        RelayEnvironmentManager.shared.current = env
+        // 清除自定义 relayURL（切换环境时不再使用旧的自定义 URL）
+        KeychainStorage.relayURL = nil
+        relayURLText = ""
+        // 重新加载
+        loadFromStorage()
+    }
+
     // MARK: - Relay URL
 
     func validateAndSaveRelayURL() {
@@ -125,7 +140,7 @@ final class SettingsViewModel {
         let baseURL: String
         let trimmed = relayURLText.trimmingCharacters(in: .whitespacesAndNewlines)
         if trimmed.isEmpty {
-            baseURL = "http://localhost:8080"
+            baseURL = RelayEnvironmentManager.shared.current.httpBaseURL
         } else {
             baseURL = trimmed
                 .replacingOccurrences(of: "wss://", with: "https://")

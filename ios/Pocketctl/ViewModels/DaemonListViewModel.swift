@@ -53,11 +53,8 @@ final class DaemonListViewModel {
             token = t
         }
 
-        // Build WebSocket URL
-        let wsURL = apiClient.baseURL
-            .replacingOccurrences(of: "https://", with: "wss://")
-            .replacingOccurrences(of: "http://", with: "ws://")
-            + "/ws"
+        // Build WebSocket URL from environment manager
+        let wsURL = RelayEnvironmentManager.shared.current.wsBaseURL
 
         // Register event listener (multi-listener, won't be overwritten by child views)
         if let existingId = eventListenerId {
@@ -91,10 +88,7 @@ final class DaemonListViewModel {
                 KeychainStorage.accessToken = resp.access_token
                 KeychainStorage.refreshToken = resp.refresh_token
                 // Reconnect with fresh token
-                let wsURL = apiClient.baseURL
-                    .replacingOccurrences(of: "https://", with: "wss://")
-                    .replacingOccurrences(of: "http://", with: "ws://")
-                    + "/ws"
+                let wsURL = RelayEnvironmentManager.shared.current.wsBaseURL
                 wsService.connect(url: wsURL, token: resp.access_token)
                 try? await Task.sleep(for: .milliseconds(800))
                 wsService.send(["type": "list_sessions"])
