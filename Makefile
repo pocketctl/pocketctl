@@ -62,6 +62,20 @@ test-go:
 test-e2e:
 	go test -v -tags=e2e ./internal/e2e/...
 
+# ---------- iOS ----------
+
+## iOS Debug 构建
+ios:
+	bash scripts/ios-build.sh debug
+
+## iOS Archive + IPA
+ios-archive:
+	bash scripts/ios-build.sh release
+
+## iOS 上传到 TestFlight
+ios-beta:
+	bash scripts/ios-beta.sh
+
 # ---------- 发布 ----------
 
 ## 创建 GitHub Release
@@ -99,6 +113,9 @@ help:
 	@echo "  make relay       构建 Relay"
 	@echo "  make web         构建 Web UI"
 	@echo "  make build-all   构建全平台二进制"
+	@echo "  make ios         iOS Debug 构建"
+	@echo "  make ios-archive iOS Release Archive + IPA"
+	@echo "  make ios-beta    iOS 上传到 TestFlight"
 	@echo ""
 	@echo "开发:"
 	@echo "  make dev         启动本地开发环境"
