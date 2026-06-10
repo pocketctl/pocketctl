@@ -58,7 +58,7 @@ struct NewSessionSheet: View {
                         .foregroundStyle(Color.pcFgSecondary)
                 }
 
-                TextField("/path/to/project", text: $workingDir)
+                TextField("~（默认 home 目录）", text: $workingDir)
                     .font(PCFont.mono(14))
                     .foregroundStyle(Color.pcFg)
                     .padding(PCSpacing.md)
