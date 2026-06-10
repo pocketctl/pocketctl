@@ -179,14 +179,14 @@ struct LoginView: View {
                         }
                 }
             }
-            Spacer()
+            Spacer(minLength: 8)
             Button {
                 Task { await doSendCode() }
             } label: {
-                Text(countdown > 0 ? "\(countdown)s 后重发" : "获取验证码")
+                Text(countdown > 0 ? "\(countdown)s" : "获取验证码")
                     .font(PCFont.body(14))
                     .foregroundStyle(canSendCode ? Color.pcAccent : Color.pcFgTertiary)
-                    .padding(.horizontal, 4)
+                    .frame(width: 72, height: 48, alignment: .center)
             }
             .disabled(!canSendCode)
         }
