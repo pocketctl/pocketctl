@@ -10,6 +10,7 @@ import (
 // authFile holds the persisted authentication data.
 type authFile struct {
 	RelayURL     string `json:"relay_url"`
+	ProdRelayURL string `json:"prod_relay_url,omitempty"`
 	AccessToken  string `json:"access_token"`
 	RefreshToken string `json:"refresh_token"`
 }
@@ -37,17 +38,20 @@ func AuthPath() (string, error) {
 	return filepath.Join(dir, "auth.json"), nil
 }
 
-// SaveAuth persists relay URL and tokens to disk.
+// SaveAuth persists relay URL and tokens to disk, preserving prod_relay_url if present.
 func SaveAuth(relayURL, accessToken, refreshToken string) error {
 	path, err := AuthPath()
 	if err != nil {
 		return err
 	}
-	data := authFile{
-		RelayURL:     relayURL,
-		AccessToken:  accessToken,
-		RefreshToken: refreshToken,
+	// Read existing data to preserve prod_relay_url
+	data := authFile{}
+	if raw, err := os.ReadFile(path); err == nil {
+		json.Unmarshal(raw, &data)
 	}
+	data.RelayURL = relayURL
+	data.AccessToken = accessToken
+	data.RefreshToken = refreshToken
 	raw, err := json.MarshalIndent(data, "", "  ")
 	if err != nil {
 		return fmt.Errorf("marshal auth: %w", err)
@@ -82,4 +86,45 @@ func LoadToken() (string, error) {
 		return "", err
 	}
 	return accessToken, nil
+}
+
+// LoadProdRelayURL reads the prod_relay_url from the auth config file.
+// Returns empty string if not set, error only on file read/parse failure.
+func LoadProdRelayURL() (string, error) {
+	path, err := AuthPath()
+	if err != nil {
+		return "", err
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return "", fmt.Errorf("read auth: %w", err)
+	}
+	var data authFile
+	if err := json.Unmarshal(raw, &data); err != nil {
+		return "", fmt.Errorf("parse auth: %w", err)
+	}
+	return data.ProdRelayURL, nil
+}
+
+// SaveProdRelayURL writes the prod_relay_url to the auth config file,
+// preserving all other fields.
+func SaveProdRelayURL(relayURL string) error {
+	path, err := AuthPath()
+	if err != nil {
+		return err
+	}
+	// Read existing data to preserve all fields
+	data := authFile{}
+	if raw, err := os.ReadFile(path); err == nil {
+		json.Unmarshal(raw, &data)
+	}
+	data.ProdRelayURL = relayURL
+	raw, err := json.MarshalIndent(data, "", "  ")
+	if err != nil {
+		return fmt.Errorf("marshal auth: %w", err)
+	}
+	if err := os.WriteFile(path, raw, 0600); err != nil {
+		return fmt.Errorf("write auth: %w", err)
+	}
+	return nil
 }

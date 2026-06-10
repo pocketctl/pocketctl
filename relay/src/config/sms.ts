@@ -19,10 +19,22 @@ function getClient() {
 }
 
 export async function sendSmsCode(phone: string, code: string): Promise<void> {
+  const templateId = process.env.SMS_TEMPLATE_ID;
+  if (!templateId) {
+    throw new Error('SMS_TEMPLATE_ID environment variable is required');
+  }
+  const signName = process.env.SMS_SIGN_NAME;
+  if (!signName) {
+    throw new Error('SMS_SIGN_NAME environment variable is required');
+  }
+  const sdkAppId = process.env.SMS_SDK_APP_ID;
+  if (!sdkAppId) {
+    throw new Error('SMS_SDK_APP_ID environment variable is required');
+  }
   const params = {
-    SmsSdkAppId: process.env.SMS_SDK_APP_ID || '',
-    SignName: process.env.SMS_SIGN_NAME || '',
-    TemplateId: process.env.SMS_TEMPLATE_ID || '2661504',
+    SmsSdkAppId: sdkAppId,
+    SignName: signName,
+    TemplateId: templateId,
     TemplateParamSet: [code],
     PhoneNumberSet: [`+86${phone}`],
   };

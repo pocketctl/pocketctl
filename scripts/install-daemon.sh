@@ -6,14 +6,14 @@ set -euo pipefail
 # 用法: curl -fsSL https://pocketctl.com/install.sh | bash
 #
 # 支持参数:
-#   --prod      安装生产版本（连接 ws://39.106.218.47/ws）
+#   --prod      安装生产版本（写入 prod_relay_url 到配置，需设置 POCKETCTL_PROD_RELAY_URL）
 #   --version   指定版本号（默认最新）
 # ============================================
 
 GITHUB_REPO="pocketctl/pocketctl"
 INSTALL_DIR="/usr/local/bin"
 BINARY_NAME="pocketctl"
-PROD_RELAY="ws://39.106.218.47/ws"
+PROD_RELAY="${POCKETCTL_PROD_RELAY_URL:-}"
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -62,6 +62,9 @@ esac
 info "系统: ${OS}/${ARCH}"
 
 if $IS_PRODUCTION; then
+  if [[ -z "$PROD_RELAY" ]]; then
+    error "--prod requires POCKETCTL_PROD_RELAY_URL env var. Example: POCKETCTL_PROD_RELAY_URL=ws://your-relay:8080/ws bash install-daemon.sh --prod"
+  fi
   info "模式: 生产环境 (relay: ${PROD_RELAY})"
 else
   info "模式: 测试环境 (本地开发)"
@@ -144,6 +147,44 @@ else
 fi
 
 chmod +x "${INSTALL_DIR}/${BINARY_NAME}"
+
+# ---------- 5.5 写入生产配置（--prod 模式） ----------
+if $IS_PRODUCTION; then
+  CONFIG_DIR="${HOME}/.pocketctl"
+  AUTH_FILE="${CONFIG_DIR}/auth.json"
+  mkdir -p "$CONFIG_DIR"
+
+  # Read existing auth.json or start fresh
+  if [[ -f "$AUTH_FILE" ]]; then
+    # Use python to update prod_relay_url while preserving other fields
+    if command -v python3 &>/dev/null; then
+      python3 -c "
+import json, sys
+with open('${AUTH_FILE}', 'r') as f:
+    data = json.load(f)
+data['prod_relay_url'] = '${PROD_RELAY}'
+with open('${AUTH_FILE}', 'w') as f:
+    json.dump(data, f, indent=2)
+"
+    elif command -v node &>/dev/null; then
+      node -e "
+const fs = require('fs');
+const path = '${AUTH_FILE}';
+let data = {};
+try { data = JSON.parse(fs.readFileSync(path, 'utf8')); } catch {}
+data.prod_relay_url = '${PROD_RELAY}';
+fs.writeFileSync(path, JSON.stringify(data, null, 2));
+"
+    else
+      # Fallback: write minimal JSON
+      echo "{\"prod_relay_url\":\"${PROD_RELAY}\"}" > "$AUTH_FILE"
+    fi
+  else
+    echo "{\"prod_relay_url\":\"${PROD_RELAY}\"}" > "$AUTH_FILE"
+  fi
+  chmod 600 "$AUTH_FILE"
+  info "生产配置已写入 ${AUTH_FILE}"
+fi
 
 # ---------- 6. 验证 ----------
 INSTALLED_VERSION=$(${INSTALL_DIR}/${BINARY_NAME} version 2>/dev/null || echo "unknown")

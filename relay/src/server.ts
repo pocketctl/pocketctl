@@ -20,8 +20,8 @@ const wsDaemonMap = new Map<any, string>();
 
 // Dev-mode SMS verification code store: phone -> { code, expiresAt }
 const smsCodeStore = new Map<string, { code: string; expiresAt: number }>();
-const DEV_SMS_CODE = process.env.DEV_SMS_CODE || '000000';
-const DEV_SMS_PHONE = process.env.DEV_SMS_PHONE || '13800138000';
+const DEV_SMS_CODE = process.env.DEV_SMS_CODE || '';
+const DEV_SMS_PHONE = process.env.DEV_SMS_PHONE || '';
 
 // Simple rate limiter: IP -> { count, resetAt }
 const rateLimiter = new Map<string, { count: number; resetAt: number }>();
@@ -131,13 +131,21 @@ async function main() {
     }
     // Normalize phone: remove spaces
     const normalizedPhone = phone.replace(/\s+/g, '');
-    // Dev mode: only allow test phone number
-    if (NODE_ENV !== 'production' && normalizedPhone !== DEV_SMS_PHONE) {
+    // Dev mode: only allow test phone number (if configured)
+    if (NODE_ENV !== 'production' && DEV_SMS_PHONE) {
+      if (normalizedPhone !== DEV_SMS_PHONE) {
+        reply.code(400);
+        return { error: `开发模式仅支持测试手机号 ${DEV_SMS_PHONE}` };
+      }
+    }
+    if (NODE_ENV !== 'production' && !DEV_SMS_PHONE) {
       reply.code(400);
-      return { error: `开发模式仅支持测试手机号 ${DEV_SMS_PHONE}` };
+      return { error: '开发模式快捷登录未配置，请设置 DEV_SMS_PHONE 和 DEV_SMS_CODE 环境变量' };
     }
     // Generate 6-digit code
-    const code = NODE_ENV === 'production' ? String(Math.floor(100000 + Math.random() * 900000)) : DEV_SMS_CODE;
+    const code = (NODE_ENV === 'production' || !DEV_SMS_CODE)
+      ? String(Math.floor(100000 + Math.random() * 900000))
+      : DEV_SMS_CODE;
     const expireMinutes = NODE_ENV === 'production' ? 1 : 5;
     const expiresAt = Date.now() + expireMinutes * 60 * 1000;
     smsCodeStore.set(normalizedPhone, { code, expiresAt });

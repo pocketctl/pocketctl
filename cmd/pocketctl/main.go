@@ -109,17 +109,25 @@ func cmdDaemon(args []string) {
 
 func cmdLogin(args []string) {
 	fs := flag.NewFlagSet("login", flag.ExitOnError)
-	relayURL := fs.String("relay", "", "Relay WebSocket URL (default: ws://localhost:8080/ws)")
-	production := fs.Bool("prod", false, "Use production relay (ws://39.106.218.47/ws) instead of local dev")
+	relayURL := fs.String("relay", "", "Relay WebSocket URL (or POCKETCTL_RELAY_URL env)")
+	production := fs.Bool("prod", false, "Use production relay (reads prod_relay_url from config)")
 	fs.Parse(args)
 
+	// Resolve relay URL: --relay > env var > --prod from config > default dev
 	baseURL := *relayURL
 	if baseURL == "" {
-		if *production {
-			baseURL = "ws://39.106.218.47/ws"
+		baseURL = os.Getenv("POCKETCTL_RELAY_URL")
+	}
+	if baseURL == "" && *production {
+		if prodURL, err := config.LoadProdRelayURL(); err == nil && prodURL != "" {
+			baseURL = prodURL
 		} else {
-			baseURL = "ws://localhost:8080/ws"
+			fmt.Fprintln(os.Stderr, "error: --prod requires prod_relay_url in config. Run the install script with --prod first, or set POCKETCTL_RELAY_URL.")
+			os.Exit(1)
 		}
+	}
+	if baseURL == "" {
+		baseURL = "ws://localhost:8080/ws"
 	}
 
 	fmt.Println("pocketctl login")
@@ -186,27 +194,26 @@ func cmdLogin(args []string) {
 func cmdDaemonStart(args []string) {
 	fs := flag.NewFlagSet("daemon start", flag.ExitOnError)
 	relayURL := fs.String("relay", "", "Relay WebSocket URL (or POCKETCTL_RELAY_URL env)")
-	production := fs.Bool("prod", false, "Use production relay (ws://39.106.218.47/ws)")
+	production := fs.Bool("prod", false, "Use production relay (reads prod_relay_url from config)")
 	token := fs.String("token", "", "JWT token (or POCKETCTL_TOKEN env)")
 	daemonID := fs.String("id", "", "Daemon ID (auto-generated if empty)")
 	fs.Parse(args)
 
-	// Resolve relay URL
+	// Resolve relay URL: --relay > env var > --prod from config > default dev
 	url := *relayURL
 	if url == "" {
 		url = os.Getenv("POCKETCTL_RELAY_URL")
 	}
-	if url == "" {
-		// Try stored config
-		if storedURL, _, _, err := config.LoadAuth(); err == nil && storedURL != "" {
-			url = storedURL
+	if url == "" && *production {
+		if prodURL, err := config.LoadProdRelayURL(); err == nil && prodURL != "" {
+			url = prodURL
+		} else {
+			fmt.Fprintln(os.Stderr, "error: --prod requires prod_relay_url in config. Run the install script with --prod first, or set POCKETCTL_RELAY_URL.")
+			os.Exit(1)
 		}
 	}
-	if url == "" && *production {
-		url = "ws://39.106.218.47/ws"
-	}
 	if url == "" {
-		url = "ws://39.106.218.47/ws"
+		url = "ws://localhost:8080/ws"
 	}
 
 	// Resolve token
@@ -525,7 +532,12 @@ func cmdDoctor() {
 	// Derive base URL from relay URL
 	baseURL := relayURL
 	if baseURL == "" {
-		baseURL = "http://39.106.218.47"
+		// No relay URL configured — report partial results
+		fmt.Println()
+		fmt.Println("════════════════════════════════════")
+		fmt.Printf("  结果: %d/%d 通过（未配置 relay URL，无法检查网络）\n", pass, total)
+		fmt.Println("════════════════════════════════════")
+		os.Exit(1)
 	}
 	// Strip /ws suffix for HTTP calls
 	baseURL = strings.TrimSuffix(baseURL, "/ws")

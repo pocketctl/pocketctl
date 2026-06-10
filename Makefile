@@ -93,8 +93,8 @@ release:
 	@if [ "$(VERSION)" = "dev" ]; then echo "❌ 请指定版本: make release VERSION=v0.1.0"; exit 1; fi
 	@echo "发布 $(VERSION)..."
 	git tag -a $(VERSION) -m "Release $(VERSION)"
-	git push origin $(VERSION)
-	@echo "✅ Tag 已推送，GitHub Actions 将自动构建和发布"
+	git push github $(VERSION)
+	@echo "✅ Tag 已推送到 GitHub，GitHub Actions 将自动构建和发布"
 
 # ---------- 清理 ----------
 
