@@ -76,6 +76,14 @@ ios-archive:
 ios-beta:
 	bash scripts/ios-beta.sh
 
+## iOS 版本管理
+ios-version:
+	bash scripts/ios-version.sh
+
+## iOS 版本递增（patch/minor/major）
+ios-bump:
+	bash scripts/ios-version.sh $(filter-out $@,$(MAKECMDGOALS))
+
 # ---------- 发布 ----------
 
 ## 创建 GitHub Release

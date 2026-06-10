@@ -32,7 +32,15 @@ VERSION=$(cd "$IOS_DIR" && xcodebuild -showBuildSettings -scheme "$SCHEME" -conf
 BUILD=$(cd "$IOS_DIR" && xcodebuild -showBuildSettings -scheme "$SCHEME" -configuration Release 2>/dev/null | grep CURRENT_PROJECT_VERSION | awk '{print $3}' | tr -d '"')
 echo -e "版本: ${GREEN}$VERSION ($BUILD)${NC}"
 
-# ─── 2. 清理 ───
+# ─── 2. 自动递增 build number ───
+if [ "$CONFIG" != "debug" ]; then
+    CURRENT_BUILD=$(grep "CURRENT_PROJECT_VERSION" "$IOS_DIR/Pocketctl.xcodeproj/project.pbxproj" | head -1 | awk '{print $3}' | tr -d ';')
+    NEW_BUILD=$((CURRENT_BUILD + 1))
+    sed -i '' "s/CURRENT_PROJECT_VERSION = .*/CURRENT_PROJECT_VERSION = $NEW_BUILD;/g" "$IOS_DIR/Pocketctl.xcodeproj/project.pbxproj"
+    echo -e "构建号: ${YELLOW}$CURRENT_BUILD → $NEW_BUILD${NC}"
+fi
+
+# ─── 3. 清理 ───
 echo -e "${YELLOW}[1/4] 清理...${NC}"
 rm -rf "$BUILD_DIR"
 mkdir -p "$BUILD_DIR"
@@ -83,7 +91,7 @@ cat > "$BUILD_DIR/ExportOptions.plist" << 'PLIST'
     <key>method</key>
     <string>app-store</string>
     <key>teamID</key>
-    <string>48V2SNGX85</string>
+    <string>4M8BRH2MYC</string>
     <key>uploadBitcode</key>
     <false/>
     <key>uploadSymbols</key>
