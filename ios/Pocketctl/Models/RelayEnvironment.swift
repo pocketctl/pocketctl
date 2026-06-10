@@ -18,7 +18,7 @@ enum RelayEnvironment: String, CaseIterable, Codable, Sendable {
     var httpBaseURL: String {
         switch self {
         case .production:
-            return "https://pocketctl.muwb.com"
+            return "http://39.106.218.47"
         case .staging:
             return "http://localhost:8080"
         }
@@ -28,7 +28,7 @@ enum RelayEnvironment: String, CaseIterable, Codable, Sendable {
     var wsBaseURL: String {
         switch self {
         case .production:
-            return "wss://pocketctl.muwb.com/ws"
+            return "ws://39.106.218.47/ws"
         case .staging:
             return "ws://localhost:8080/ws"
         }

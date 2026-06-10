@@ -3,7 +3,7 @@ import SwiftUI
 struct LoginView: View {
     @Binding var isLoggedIn: Bool
 
-    @State private var phoneText = ""
+    @State private var phoneText = RelayEnvironmentManager.shared.current == .staging ? "13800138000" : ""
     private let apiClient = APIClient()
     @FocusState private var phoneFocused: Bool
     @FocusState private var focusedCodeIndex: Int?

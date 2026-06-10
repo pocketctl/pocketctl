@@ -5,6 +5,7 @@ import { createPool, initDB, parseDBUrl, createUser, getUserByEmail, getUserById
 import { Router } from './router.js';
 import { hashPassword, verifyPassword, signAccessToken, signRefreshToken, verifyAccessToken, verifyRefreshToken } from './auth.js';
 import { notifyUser, sessionStatusPush, daemonOfflinePush } from './push.js';
+import { sendSmsCode } from './config/sms.js';
 
 const API_KEY = process.env.POCKETCTL_API_KEY || '';
 const DB_URL = process.env.DATABASE_URL || 'postgresql://localhost:5432/pocketctl';
@@ -20,6 +21,7 @@ const wsDaemonMap = new Map<any, string>();
 // Dev-mode SMS verification code store: phone -> { code, expiresAt }
 const smsCodeStore = new Map<string, { code: string; expiresAt: number }>();
 const DEV_SMS_CODE = process.env.DEV_SMS_CODE || '000000';
+const DEV_SMS_PHONE = process.env.DEV_SMS_PHONE || '13800138000';
 
 // Simple rate limiter: IP -> { count, resetAt }
 const rateLimiter = new Map<string, { count: number; resetAt: number }>();
@@ -129,13 +131,32 @@ async function main() {
     }
     // Normalize phone: remove spaces
     const normalizedPhone = phone.replace(/\s+/g, '');
-    // Generate 6-digit code (or use dev code)
+    // Dev mode: only allow test phone number
+    if (NODE_ENV !== 'production' && normalizedPhone !== DEV_SMS_PHONE) {
+      reply.code(400);
+      return { error: `开发模式仅支持测试手机号 ${DEV_SMS_PHONE}` };
+    }
+    // Generate 6-digit code
     const code = NODE_ENV === 'production' ? String(Math.floor(100000 + Math.random() * 900000)) : DEV_SMS_CODE;
-    const expiresAt = Date.now() + 5 * 60 * 1000; // 5 minutes
+    const expireMinutes = NODE_ENV === 'production' ? 1 : 5;
+    const expiresAt = Date.now() + expireMinutes * 60 * 1000;
     smsCodeStore.set(normalizedPhone, { code, expiresAt });
-    console.log(`[sms] code for ${normalizedPhone}: ${code} (expires in 5m)`);
-    // TODO: In production, send via SMS provider (Alibaba Cloud / Tencent Cloud SMS)
-    return { success: true, message: 'verification code sent' };
+    console.log(`[sms] code for ${normalizedPhone}: ${code} (expires in ${expireMinutes}m)`);
+
+    // Production: send via Tencent Cloud SMS
+    if (NODE_ENV === 'production') {
+      try {
+        await sendSmsCode(normalizedPhone, code);
+      } catch (err: any) {
+        console.error(`[sms] send failed for ${normalizedPhone}:`, err.message);
+        reply.code(500);
+        return { error: '验证码发送失败，请稍后重试' };
+      }
+      return { success: true, message: 'verification code sent' };
+    }
+
+    // Dev mode: return code in response for testing
+    return { success: true, message: 'verification code sent', code };
   });
 
   // Verify SMS code and login/register

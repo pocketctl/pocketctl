@@ -831,6 +831,7 @@ struct SettingsView: View {
                 .frame(minHeight: 44)
             }
             .buttonStyle(.plain)
+        }
     }
 
     private func privacySection(_ title: String, _ content: String) -> some View {
@@ -841,8 +842,6 @@ struct SettingsView: View {
             Text(content)
                 .font(PCFont.body(15))
                 .foregroundStyle(Color.pcFg)
-        }
-    }
         }
     }
 

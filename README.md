@@ -91,20 +91,38 @@ Relay 集成了智谱 GLM-4.6 API，可自动为每个 Session 生成简洁的�
 ## CLI 命令
 
 ```
-pocketctl daemon start   --relay <URL> --api-key <KEY>   启动代理守护进程
+pocketctl login          [--relay <URL>] [--prod]           手机号短信验证登录
+pocketctl daemon start   [--relay <URL>] [--prod] [--token] 启动代理守护进程
 pocketctl daemon stop                                     停止运行中的守护进程
 pocketctl daemon status                                   查看守护进程状态和已发现的代理
 pocketctl daemon logs                                     查看日志（提示 tail 命令）
+pocketctl daemon doctor                                   诊断连接和配置问题
+pocketctl daemon update  [--version <TAG>] [--no-restart]  自更新到最新版本
 pocketctl version                                         显示版本号
 ```
+
+### `login` 参数
+
+| 参数 | 必需 | 说明 |
+|------|------|------|
+| `--relay` | 否 | Relay WebSocket 地址（默认 `ws://localhost:8080/ws`） |
+| `--prod` | 否 | 连接生产环境 |
 
 ### `daemon start` 参数
 
 | 参数 | 必需 | 说明 |
 |------|------|------|
 | `--relay` | 否 | Relay WebSocket 地址（默认从 `~/.pocketctl/auth.json` 读取） |
+| `--prod` | 否 | 连接生产环境 |
 | `--token` | 否 | JWT 认证 Token（默认从 `~/.pocketctl/auth.json` 读取） |
 | `--id` | 否 | Daemon ID（默认自动生成，重启后复用） |
+
+### `daemon update` 参数
+
+| 参数 | 必需 | 说明 |
+|------|------|------|
+| `--version` | 否 | 指定升级版本（如 `v0.2.0`，默认升级到 latest） |
+| `--no-restart` | 否 | 仅替换二进制，不重启 daemon |
 
 ## 配置
 
@@ -115,7 +133,15 @@ pocketctl version                                         显示版本号
 | `POCKETCTL_API_KEY` | `""`（空=无认证） | WebSocket 认证密钥 |
 | `DATABASE_URL` | `postgresql://localhost:5432/pocketctl` | PostgreSQL 连接地址 |
 | `PORT` | `8080` | 监听端口 |
+| `NODE_ENV` | `development` | 运行环境（`development` / `production`） |
 | `ZHIPU_API_KEY` | 空 | 智谱 AI API Key（用于 Session 标题自动生成，未设置则跳过） |
+| `COS_SECRET_ID` | 空 | 腾讯云 API 密钥 ID（用于短信发送） |
+| `COS_SECRET_KEY` | 空 | 腾讯云 API 密钥 Key（用于短信发送） |
+| `SMS_SDK_APP_ID` | 空 | 腾讯云短信应用 SDK AppID |
+| `SMS_SIGN_NAME` | `北京乐呵乐呵信息` | 短信签名名称 |
+| `SMS_TEMPLATE_ID` | `2661504` | 短信模板 ID |
+| `DEV_SMS_PHONE` | `13800138000` | 开发模式测试手机号 |
+| `DEV_SMS_CODE` | `000000` | 开发模式测试验证码 |
 
 ### Docker Compose 默认值
 
@@ -247,6 +273,7 @@ pocketctl/
 │   ├── notify/                    # 终端通知
 │   ├── protocol/types.go          # WebSocket 消息类型定义
 │   ├── session/manager.go         # 会话生命周期管理（含标题生成触发）
+│   ├── update/updater.go          # Daemon 自更新（版本检测、下载、校验、替换）
 │   ├── watcher/
 │   │   ├── watcher.go             # Session 文件监控（fsnotify）
 │   │   ├── tailer.go              # JSONL 文件尾随（实时事件流）
@@ -259,7 +286,9 @@ pocketctl/
 │       ├── db.ts                  # PostgreSQL 连接和查询
 │       ├── title.ts               # GLM-4.6 标题生成服务
 │       ├── auth.ts                # JWT 认证
-│       └── push.ts                # iOS 推送通知（APNs）
+│       ├── push.ts                # iOS 推送通知（APNs）
+│       └── config/
+│           └── sms.ts             # 腾讯云短信发送服务
 ├── ios/
 │   └── Pocketctl/
 │       ├── App/                   # SwiftUI App 入口

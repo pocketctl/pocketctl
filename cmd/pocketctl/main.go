@@ -18,6 +18,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/gorilla/websocket"
+	"runtime"
 	"github.com/pocketctl/pocketctl/internal/adapter"
 	"github.com/pocketctl/pocketctl/internal/api"
 	"github.com/pocketctl/pocketctl/internal/config"
@@ -26,6 +27,7 @@ import (
 	"github.com/pocketctl/pocketctl/internal/notify"
 	"github.com/pocketctl/pocketctl/internal/protocol"
 	"github.com/pocketctl/pocketctl/internal/session"
+	"github.com/pocketctl/pocketctl/internal/update"
 	"github.com/pocketctl/pocketctl/internal/watcher"
 	"github.com/pocketctl/pocketctl/internal/ws"
 )
@@ -67,6 +69,7 @@ Commands:
   daemon status  Show daemon status
   daemon logs    Show daemon logs
   daemon doctor  Diagnose connection and configuration issues
+  daemon update  Update daemon to the latest version
   version        Print version
   help           Show this help
 
@@ -77,7 +80,7 @@ Environment:
 
 func cmdDaemon(args []string) {
 	if len(args) == 0 {
-		fmt.Fprintln(os.Stderr, "usage: pocketctl daemon <start|stop|status|logs|doctor>")
+		fmt.Fprintln(os.Stderr, "usage: pocketctl daemon <start|stop|status|logs|doctor|update>")
 		os.Exit(1)
 	}
 
@@ -92,6 +95,8 @@ func cmdDaemon(args []string) {
 		cmdDaemonLogs()
 	case "doctor":
 		cmdDoctor()
+	case "update":
+		cmdDaemonUpdate(args[1:])
 	default:
 		fmt.Fprintf(os.Stderr, "unknown daemon subcommand: %s\n", args[0])
 		os.Exit(1)
@@ -105,13 +110,13 @@ func cmdDaemon(args []string) {
 func cmdLogin(args []string) {
 	fs := flag.NewFlagSet("login", flag.ExitOnError)
 	relayURL := fs.String("relay", "", "Relay WebSocket URL (default: ws://localhost:8080/ws)")
-	production := fs.Bool("prod", false, "Use production relay (wss://pocketctl.muwb.com/ws) instead of local dev")
+	production := fs.Bool("prod", false, "Use production relay (ws://39.106.218.47/ws) instead of local dev")
 	fs.Parse(args)
 
 	baseURL := *relayURL
 	if baseURL == "" {
 		if *production {
-			baseURL = "wss://pocketctl.muwb.com/ws"
+			baseURL = "ws://39.106.218.47/ws"
 		} else {
 			baseURL = "ws://localhost:8080/ws"
 		}
@@ -181,7 +186,7 @@ func cmdLogin(args []string) {
 func cmdDaemonStart(args []string) {
 	fs := flag.NewFlagSet("daemon start", flag.ExitOnError)
 	relayURL := fs.String("relay", "", "Relay WebSocket URL (or POCKETCTL_RELAY_URL env)")
-	production := fs.Bool("prod", false, "Use production relay (wss://pocketctl.muwb.com/ws)")
+	production := fs.Bool("prod", false, "Use production relay (ws://39.106.218.47/ws)")
 	token := fs.String("token", "", "JWT token (or POCKETCTL_TOKEN env)")
 	daemonID := fs.String("id", "", "Daemon ID (auto-generated if empty)")
 	fs.Parse(args)
@@ -198,10 +203,10 @@ func cmdDaemonStart(args []string) {
 		}
 	}
 	if url == "" && *production {
-		url = "wss://pocketctl.muwb.com/ws"
+		url = "ws://39.106.218.47/ws"
 	}
 	if url == "" {
-		url = "wss://pocketctl.me/ws"
+		url = "ws://39.106.218.47/ws"
 	}
 
 	// Resolve token
@@ -520,7 +525,7 @@ func cmdDoctor() {
 	// Derive base URL from relay URL
 	baseURL := relayURL
 	if baseURL == "" {
-		baseURL = "https://pocketctl.me"
+		baseURL = "http://39.106.218.47"
 	}
 	// Strip /ws suffix for HTTP calls
 	baseURL = strings.TrimSuffix(baseURL, "/ws")
@@ -834,4 +839,100 @@ func readJSONLLines(path string, maxLines int) []string {
 		lines = append(lines, scanner.Text())
 	}
 	return lines
+}
+
+// ---------- daemon update ----------
+
+func cmdDaemonUpdate(args []string) {
+	fs := flag.NewFlagSet("daemon update", flag.ExitOnError)
+	versionFlag := fs.String("version", "", "Specific version to update to (e.g. v0.1.0, default: latest)")
+	noRestart := fs.Bool("no-restart", false, "Download and replace binary without restarting daemon")
+	fs.Parse(args)
+
+	fmt.Println()
+	fmt.Println("  🔍 pocketctl 自更新")
+	fmt.Println(strings.Repeat("─", 40))
+	fmt.Printf("  当前版本: %s\n", version)
+	fmt.Printf("  运行平台: %s/%s\n", runtime.GOOS, runtime.GOARCH)
+
+	// 1. Check latest version
+	var tag string
+	var err error
+	if *versionFlag != "" {
+		fmt.Printf("  指定版本: %s\n", *versionFlag)
+		tag, err = update.CheckVersion(*versionFlag)
+	} else {
+		fmt.Println("  查询最新版本...")
+		tag, err = update.CheckLatest()
+	}
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "\n  ❌ 版本查询失败: %v\n", err)
+		os.Exit(1)
+	}
+
+	fmt.Printf("  目标版本: %s\n", tag)
+
+	// Strip 'v' prefix for comparison
+	currentVer := strings.TrimPrefix(version, "v")
+	targetVer := strings.TrimPrefix(tag, "v")
+
+	if *versionFlag == "" && currentVer == targetVer {
+		fmt.Println()
+		fmt.Println("  ✅ 已经是最新版本!")
+		return
+	}
+
+	// 2. Resolve binary + checksum
+	fmt.Println()
+	fmt.Println("  📦 解析下载地址...")
+	binInfo, err := update.ResolveBinary(tag)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "\n  ❌ 解析失败: %v\n", err)
+		os.Exit(1)
+	}
+	fmt.Printf("  下载: %s\n", binInfo.Name)
+	if binInfo.SHA != "" {
+		fmt.Printf("  校验: SHA256 = %s...%s\n", binInfo.SHA[:16], binInfo.SHA[len(binInfo.SHA)-16:])
+	}
+
+	// 3. Download
+	fmt.Println()
+	fmt.Println("  ⬇️  下载中...")
+	tmpPath, err := update.DownloadAndVerify(binInfo)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "\n  ❌ 下载失败: %v\n", err)
+		os.Exit(1)
+	}
+	fmt.Println("  ✅ 下载完成，SHA256 校验通过")
+
+	// 4. Replace binary
+	fmt.Println()
+	fmt.Println("  🔧 替换二进制...")
+	if err := update.ReplaceBinary(tmpPath); err != nil {
+		fmt.Fprintf(os.Stderr, "\n  ❌ 替换失败: %v\n", err)
+		fmt.Println()
+		fmt.Println("  💡 提示: 如果权限不足，请使用 sudo 运行:")
+		fmt.Printf("     sudo pocketctl daemon update")
+		if *versionFlag != "" {
+			fmt.Printf(" --version %s", *versionFlag)
+		}
+		fmt.Println()
+		os.Exit(1)
+	}
+	fmt.Println("  ✅ 二进制已更新")
+
+	// 5. Restart daemon (unless --no-restart)
+	if !*noRestart {
+		fmt.Println()
+		fmt.Println("  🔄 检查 Daemon 运行状态...")
+		if err := update.RestartDaemon(); err != nil {
+			fmt.Fprintf(os.Stderr, "  ⚠️  重启失败: %v (请手动重启)\n", err)
+		}
+	}
+
+	fmt.Println()
+	fmt.Println(strings.Repeat("─", 40))
+	fmt.Println("  🎉 更新完成!")
+	fmt.Printf("  版本: %s → %s\n", version, tag)
+	fmt.Println()
 }

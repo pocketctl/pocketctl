@@ -6,14 +6,14 @@ set -euo pipefail
 # 用法: curl -fsSL https://pocketctl.com/install.sh | bash
 #
 # 支持参数:
-#   --prod      安装生产版本（连接 wss://pocketctl.muwb.com/ws）
+#   --prod      安装生产版本（连接 ws://39.106.218.47/ws）
 #   --version   指定版本号（默认最新）
 # ============================================
 
 GITHUB_REPO="pocketctl/pocketctl"
 INSTALL_DIR="/usr/local/bin"
 BINARY_NAME="pocketctl"
-PROD_RELAY="wss://pocketctl.muwb.com/ws"
+PROD_RELAY="ws://39.106.218.47/ws"
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'

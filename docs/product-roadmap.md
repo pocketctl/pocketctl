@@ -237,6 +237,21 @@
 - `internal/api/client.go`（已实现 SendSMS/VerifySMS）
 - `internal/ws/client.go`（JWT 替代 API Key）
 
+### 2.5 Daemon 自更新
+
+- [ ] `pocketctl daemon update` 命令
+  - 自动检测当前版本，从 release 下载最新版
+  - 支持 `--version <tag>` 指定版本
+  - 下载后验证 SHA256，自动替换二进制并重启
+  - 支持 `--prod` 参数切换到生产下载源
+  - 支持 macOS 和 Linux，自动识别架构
+  - **优先级较高**：方便发布后快速迭代 daemon
+
+**改动文件：**
+- `cmd/pocketctl/main.go`（新增 `daemon update` 子命令）
+- `internal/update/checker.go`（新建，版本检测/下载/校验）
+- `Makefile`（可选：增加版本号注入 tag 信息）
+
 ---
 
 ## Phase 3：移动端 APP（2-3 周）
