@@ -3,9 +3,12 @@ package main
 import (
 	"bufio"
 	"context"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"log/slog"
+	"net"
+	"net/url"
 	"os"
 	"os/signal"
 	"strings"
@@ -14,6 +17,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/gorilla/websocket"
 	"github.com/pocketctl/pocketctl/internal/adapter"
 	"github.com/pocketctl/pocketctl/internal/api"
 	"github.com/pocketctl/pocketctl/internal/config"
@@ -62,6 +66,7 @@ Commands:
   daemon stop    Stop the running daemon
   daemon status  Show daemon status
   daemon logs    Show daemon logs
+  daemon doctor  Diagnose connection and configuration issues
   version        Print version
   help           Show this help
 
@@ -72,7 +77,7 @@ Environment:
 
 func cmdDaemon(args []string) {
 	if len(args) == 0 {
-		fmt.Fprintln(os.Stderr, "usage: pocketctl daemon <start|stop|status|logs>")
+		fmt.Fprintln(os.Stderr, "usage: pocketctl daemon <start|stop|status|logs|doctor>")
 		os.Exit(1)
 	}
 
@@ -85,6 +90,8 @@ func cmdDaemon(args []string) {
 		cmdDaemonStatus()
 	case "logs":
 		cmdDaemonLogs()
+	case "doctor":
+		cmdDoctor()
 	default:
 		fmt.Fprintf(os.Stderr, "unknown daemon subcommand: %s\n", args[0])
 		os.Exit(1)
@@ -458,7 +465,182 @@ func cmdDaemonLogs() {
 	os.Stdout.Write(data)
 }
 
-// ---------- Event handlers ----------
+// ---------- daemon doctor ----------
+
+func cmdDoctor() {
+	fmt.Println("pocketctl doctor")
+	fmt.Println("════════════════════════════════════")
+
+	pass := 0
+	total := 0
+
+	// Helper: print check result
+	check := func(name string, ok bool, detail string) {
+		total++
+		if ok {
+			pass++
+			fmt.Printf("  ✅ %s: %s\n", name, detail)
+		} else {
+			fmt.Printf("  ❌ %s: %s\n", name, detail)
+		}
+	}
+
+	// 1. Config file
+	relayURL, accessToken, _, err := config.LoadAuth()
+	check("配置文件", err == nil, func() string {
+		if err != nil {
+			return "未登录，请运行 pocketctl login"
+		}
+		return "~/.pocketctl/auth.json 存在"
+	}())
+
+	// 2. Token validity
+	if accessToken != "" {
+		exp, err := api.ParseJWTExpiry(accessToken)
+		if err != nil {
+			check("认证令牌", false, "Token 格式无效")
+		} else if time.Now().After(exp) {
+			check("认证令牌", false, "Token 已过期，请重新登录")
+		} else {
+			check("认证令牌", true, fmt.Sprintf("有效，过期时间 %s", exp.Format("2006-01-02 15:04")))
+		}
+	} else {
+		check("认证令牌", false, "无 Token，请运行 pocketctl login")
+	}
+
+	// Derive base URL from relay URL
+	baseURL := relayURL
+	if baseURL == "" {
+		baseURL = "https://pocketctl.me"
+	}
+	// Strip /ws suffix for HTTP calls
+	baseURL = strings.TrimSuffix(baseURL, "/ws")
+	baseURL = strings.TrimSuffix(baseURL, "/")
+	// Convert ws:// to http:// and wss:// to https:// for HTTP calls
+	baseURL = strings.Replace(baseURL, "wss://", "https://", 1)
+	baseURL = strings.Replace(baseURL, "ws://", "http://", 1)
+
+	// 3. DNS resolution
+	hostname := ""
+	if u, err := url.Parse(baseURL); err == nil {
+		hostname = u.Hostname()
+	}
+	if hostname != "" {
+		addrs, err := net.LookupHost(hostname)
+		check("DNS 解析", err == nil, func() string {
+			if err != nil {
+				return fmt.Sprintf("无法解析域名: %s", hostname)
+			}
+			return fmt.Sprintf("%s → %s", hostname, addrs[0])
+		}())
+	} else {
+		check("DNS 解析", false, "无法从 URL 提取域名")
+	}
+
+	// 4. HTTP health check
+	start := time.Now()
+	healthBody, healthErr := api.HealthCheck(baseURL)
+	elapsed := time.Since(start).Milliseconds()
+	check("HTTP 连通", healthErr == nil, func() string {
+		if healthErr != nil {
+			return fmt.Sprintf("无法连接 %s: %v", baseURL, healthErr)
+		}
+		return fmt.Sprintf("HTTP 200 (%dms)", elapsed)
+	}())
+
+	// 5. Relay health status
+	if healthErr == nil {
+		var parsed map[string]any
+		if json.Unmarshal([]byte(healthBody), &parsed) == nil {
+			status, _ := parsed["status"].(string)
+			check("Relay 健康", status == "ok", func() string {
+				if status == "ok" {
+					return fmt.Sprintf("status: ok")
+				}
+				return fmt.Sprintf("status: %s", status)
+			}())
+		}
+	} else {
+		check("Relay 健康", false, "无法检查（HTTP 连接失败）")
+	}
+
+	// 6. WebSocket + 7. Auth + 8. Daemon limit (combined in one WS probe)
+	if relayURL != "" && accessToken != "" {
+		wsURL := relayURL
+		if !strings.HasSuffix(wsURL, "/ws") {
+			wsURL = strings.TrimRight(wsURL, "/") + "/ws"
+		}
+		wsURL += "?token=" + accessToken + "&type=daemon"
+
+		wsConn, _, wsErr := websocket.DefaultDialer.Dial(wsURL, nil)
+		if wsErr != nil {
+			check("WebSocket 连接", false, wsErr.Error())
+			check("认证通过", false, "WebSocket 连接失败")
+			check("Daemon 限制", false, "WebSocket 连接失败")
+		} else {
+			check("WebSocket 连接", true, "连接成功")
+
+			// Send register message
+			hostname, _ := os.Hostname()
+			registerMsg, _ := json.Marshal(map[string]any{
+				"type":     "register",
+				"daemon_id": "doctor-probe",
+				"hostname":  hostname,
+				"agents":    []string{"claude-code"},
+			})
+			wsConn.WriteMessage(websocket.TextMessage, registerMsg)
+
+			// Wait for response (5s timeout)
+			wsConn.SetReadDeadline(time.Now().Add(5 * time.Second))
+			_, resp, readErr := wsConn.ReadMessage()
+			wsConn.Close()
+
+			if readErr != nil {
+				check("认证通过", false, fmt.Sprintf("读取响应超时: %v", readErr))
+				check("Daemon 限制", false, "无法检查")
+			} else {
+				var result map[string]any
+				json.Unmarshal(resp, &result)
+				msgType, _ := result["type"].(string)
+				code, _ := result["code"].(string)
+
+				if msgType == "register_ack" {
+					check("认证通过", true, "register_ack 收到")
+					check("Daemon 限制", true, "未达限制")
+				} else if code == "DAEMON_LIMIT_REACHED" {
+					errMsg, _ := result["error"].(string)
+					check("认证通过", true, "认证成功")
+					check("Daemon 限制", false, errMsg)
+				} else if msgType == "error" {
+					errMsg, _ := result["error"].(string)
+					check("认证通过", false, errMsg)
+					check("Daemon 限制", false, "认证失败")
+				} else {
+					check("认证通过", false, fmt.Sprintf("未知响应: %s", msgType))
+					check("Daemon 限制", false, "无法检查")
+				}
+			}
+		}
+	} else {
+		check("WebSocket 连接", false, "缺少 relay URL 或 token")
+		check("认证通过", false, "缺少配置")
+		check("Daemon 限制", false, "缺少配置")
+	}
+
+	// Summary
+	fmt.Println()
+	fmt.Println("════════════════════════════════════")
+	if pass == total {
+		fmt.Printf("  结果: 全部通过 (%d/%d)\n", pass, total)
+	} else {
+		fmt.Printf("  结果: %d/%d 通过，%d 项需要修复\n", pass, total, total-pass)
+	}
+	fmt.Println("════════════════════════════════════")
+
+	if pass < total {
+		os.Exit(1)
+	}
+}
 
 func handleWatcherEvents(ctx context.Context, sw *watcher.SessionWatcher, sm *session.SessionManager, pm *watcher.ProcessMonitor, outputCh chan protocol.DaemonEvent, logger *slog.Logger, stateDirty *atomic.Bool) {
 	for {
