@@ -5,7 +5,10 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"os"
 	"os/exec"
+	"path/filepath"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -49,18 +52,65 @@ func NewSessionManager(outputCh chan protocol.DaemonEvent) *SessionManager {
 	}
 }
 
+// resolveCwd resolves the working directory path:
+// - "" or "~" → os.UserHomeDir()
+// - "~/xxx" → join(home, "xxx")
+// - other → as-is
+func resolveCwd(cwd string) string {
+	if cwd == "" || cwd == "~" {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return cwd
+		}
+		return home
+	}
+	if strings.HasPrefix(cwd, "~/") {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return cwd
+		}
+		return filepath.Join(home, cwd[2:])
+	}
+	return cwd
+}
+
+// validateCwd checks that the directory exists, is a directory, and is accessible.
+func validateCwd(cwd string) error {
+	info, err := os.Stat(cwd)
+	if os.IsNotExist(err) {
+		return fmt.Errorf("工作目录不存在: %s", cwd)
+	}
+	if err != nil {
+		return fmt.Errorf("工作目录无法访问: %s (%w)", cwd, err)
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("工作目录不是目录: %s", cwd)
+	}
+	// Test read access by opening the directory
+	f, err := os.Open(cwd)
+	if err != nil {
+		return fmt.Errorf("工作目录无权限: %s", cwd)
+	}
+	f.Close()
+	return nil
+}
+
 func (sm *SessionManager) CreateSession(ctx context.Context, config protocol.SessionConfig) (string, error) {
 	cliPath, err := findAgentCLI(config.Agent)
 	if err != nil {
 		return "", err
 	}
 
+	// Resolve and validate working directory
+	resolvedCwd := resolveCwd(config.Cwd)
+	if err := validateCwd(resolvedCwd); err != nil {
+		return "", err
+	}
+
 	args := adapter.BuildClaudeArgs(config.Prompt, "", config)
 	ctx, cancel := context.WithCancel(ctx)
 	cmd := exec.CommandContext(ctx, cliPath, args...)
-	if config.Cwd != "" {
-		cmd.Dir = config.Cwd
-	}
+	cmd.Dir = resolvedCwd
 
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
@@ -79,7 +129,7 @@ func (sm *SessionManager) CreateSession(ctx context.Context, config protocol.Ses
 		Cancel:    cancel,
 		Status:    protocol.StatusRunning,
 		StartedAt: time.Now(),
-		Cwd:       config.Cwd,
+		Cwd:       resolvedCwd,
 		Agent:     config.Agent,
 		Source:    "daemon",
 	}

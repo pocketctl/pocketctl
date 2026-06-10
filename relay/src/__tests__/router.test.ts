@@ -63,9 +63,9 @@ describe('Router - daemon disconnect', () => {
     router = new Router(pool)
   })
 
-  test('unregisterDaemon broadcasts daemon_status: offline with hostname', () => {
+  test('unregisterDaemon broadcasts daemon_status: offline with hostname', async () => {
     const daemonWs = createMockWs()
-    router.registerDaemon(daemonWs, {
+    await router.registerDaemon(daemonWs, {
       type: 'register',
       daemon_id: 'daemon-1',
       hostname: 'test-macbook',
@@ -76,6 +76,8 @@ describe('Router - daemon disconnect', () => {
     router.registerClient(clientWs, null)
 
     router.unregisterDaemon('daemon-1')
+    // unregisterDaemon broadcasts inside db.getDaemonAlias().then() — wait for microtask
+    await new Promise(r => setTimeout(r, 10))
 
     const offlineEvent = clientWs._sent.find((m: any) => m.type === 'daemon_status' && m.status === 'offline')
     expect(offlineEvent).toBeDefined()
@@ -127,12 +129,12 @@ describe('Router - daemon reconnect', () => {
     router = new Router(pool)
   })
 
-  test('registerDaemon broadcasts daemon_status: online with hostname and agents', () => {
+  test('registerDaemon broadcasts daemon_status: online with hostname and agents', async () => {
     const clientWs = createMockWs()
     router.registerClient(clientWs, null)
 
     const daemonWs = createMockWs()
-    router.registerDaemon(daemonWs, {
+    await router.registerDaemon(daemonWs, {
       type: 'register', daemon_id: 'daemon-2', hostname: 'mac-pro', agents: ['claude-code', 'opencode'],
     }, null)
 

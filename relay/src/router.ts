@@ -21,6 +21,40 @@ export class Router {
     const daemonId = msg.daemon_id;
     const hostname = msg.hostname || 'unknown';
     const agents = msg.agents || [];
+
+    // Daemon limit check for authenticated users
+    if (userId) {
+      try {
+        const { plan, whitelist } = await db.getUserPlanAndWhitelist(this.pool, userId);
+        if (!whitelist && plan === 'free') {
+          // Count online daemons for this user
+          let onlineCount = 0;
+          let currentHost = '';
+          for (const [, d] of this.daemons) {
+            if (d.userId === userId) {
+              onlineCount++;
+              currentHost = d.hostname;
+            }
+          }
+          if (onlineCount >= 1) {
+            this.send(ws, {
+              type: 'error',
+              error: `免费版仅支持1台主机。当前在线: ${currentHost}。请先在 ${currentHost} 上运行 pocketctl daemon stop`,
+              code: 'DAEMON_LIMIT_REACHED',
+              limit: 1,
+              plan: 'free',
+              current_host: currentHost,
+            });
+            ws.close();
+            return;
+          }
+        }
+      } catch (e) {
+        console.error('daemon limit check:', e);
+        // Proceed with registration on error (don't block on check failure)
+      }
+    }
+
     this.daemons.set(daemonId, { ws, daemonId, hostname, agents, userId });
     // Await daemon upsert BEFORE sending ack, so FK constraints on subsequent
     // session_discovered events won't fail (daemon row must exist first).

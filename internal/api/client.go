@@ -2,10 +2,13 @@ package api
 
 import (
 	"bytes"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
+	"time"
 )
 
 // SendSMS requests a verification code for the given phone number.
@@ -55,6 +58,50 @@ func RefreshToken(baseURL, refreshToken string) (accessToken, newRefreshToken st
 		return "", "", fmt.Errorf("refresh failed")
 	}
 	return at, rt, nil
+}
+
+// HealthCheck sends a GET request to the relay's /health endpoint.
+// Returns the response body string or an error.
+func HealthCheck(baseURL string) (string, error) {
+	resp, err := http.Get(baseURL + "/health")
+	if err != nil {
+		return "", fmt.Errorf("request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	data, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", fmt.Errorf("read response: %w", err)
+	}
+
+	if resp.StatusCode >= 400 {
+		return string(data), fmt.Errorf("HTTP %d", resp.StatusCode)
+	}
+	return string(data), nil
+}
+
+// ParseJWTExpiry parses the exp claim from a JWT token without verifying the signature.
+// Returns the expiry time or an error if the token is malformed.
+func ParseJWTExpiry(tokenStr string) (time.Time, error) {
+	parts := strings.Split(tokenStr, ".")
+	if len(parts) != 3 {
+		return time.Time{}, fmt.Errorf("invalid JWT format")
+	}
+	// Decode the payload (second part)
+	payload, err := base64.RawURLEncoding.DecodeString(parts[1])
+	if err != nil {
+		return time.Time{}, fmt.Errorf("decode payload: %w", err)
+	}
+	var claims struct {
+		Exp int64 `json:"exp"`
+	}
+	if err := json.Unmarshal(payload, &claims); err != nil {
+		return time.Time{}, fmt.Errorf("parse claims: %w", err)
+	}
+	if claims.Exp == 0 {
+		return time.Time{}, fmt.Errorf("no exp claim in token")
+	}
+	return time.Unix(claims.Exp, 0), nil
 }
 
 // postJSON sends a POST request with a JSON body and returns the parsed response.

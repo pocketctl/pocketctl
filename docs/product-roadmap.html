@@ -134,6 +134,8 @@
 
     .p1 .phase-num, .p1 .phase-header { background: #dbeafe; }
     .p1 .phase-num { background: #3b82f6; }
+    .p15 .phase-header { background: #cffafe; }
+    .p15 .phase-num { background: #06b6d4; }
     .p2 .phase-header { background: #fef3c7; }
     .p2 .phase-num { background: #f59e0b; }
     .p3 .phase-header { background: #d1fae5; }
@@ -185,7 +187,7 @@
 <div class="header">
   <h1>🚀 pocketctl 产品化路线图</h1>
   <div class="subtitle">从开源工具到 App Store 订阅产品的完整规划</div>
-  <div class="meta">📅 更新日期：2026-06-07 · 预计 2.5-3 个月上架</div>
+  <div class="meta">📅 更新日期：2026-06-10 · 预计 3-3.5 个月上架</div>
 </div>
 
 <div class="container">
@@ -202,6 +204,7 @@
         <tr><td>Daemon 安装</td><td>手动编译</td><td>一行命令安装</td></tr>
         <tr><td>部署</td><td>本地 Docker Compose</td><td>云端生产环境</td></tr>
         <tr><td>CI/CD</td><td>无</td><td>GitHub Actions 自动构建发布</td></tr>
+        <tr><td>代理支持</td><td>仅 Claude Code</td><td>Claude Code + Codex + OpenCode</td></tr>
       </tbody>
     </table>
   </div>
@@ -211,6 +214,7 @@
     <h2>📅 时间线总览</h2>
     <div class="timeline-bar">
       <div style="flex:2; background:#3b82f6;">Phase 1 云部署</div>
+      <div style="flex:3; background:#06b6d4;">Phase 1.5 多代理</div>
       <div style="flex:3; background:#f59e0b;">Phase 2 用户系统</div>
       <div style="flex:3; background:#10b981;">Phase 3 移动 APP</div>
       <div style="flex:2; background:#8b5cf6;">Phase 4 订阅付费</div>
@@ -218,10 +222,11 @@
     </div>
     <div class="timeline-legend">
       <span><span class="dot" style="background:#3b82f6;"></span> Week 1-2</span>
-      <span><span class="dot" style="background:#f59e0b;"></span> Week 3-5</span>
-      <span><span class="dot" style="background:#10b981;"></span> Week 6-8</span>
-      <span><span class="dot" style="background:#8b5cf6;"></span> Week 9-10</span>
-      <span><span class="dot" style="background:#64748b;"></span> Week 11+</span>
+      <span><span class="dot" style="background:#06b6d4;"></span> Week 3-5</span>
+      <span><span class="dot" style="background:#f59e0b;"></span> Week 6-8</span>
+      <span><span class="dot" style="background:#10b981;"></span> Week 9-11</span>
+      <span><span class="dot" style="background:#8b5cf6;"></span> Week 12-13</span>
+      <span><span class="dot" style="background:#64748b;"></span> Week 14+</span>
     </div>
   </div>
 
@@ -262,6 +267,58 @@
         <li>消息发送后自动滚到底部</li>
       </ul>
       <p><span class="label">改动文件：</span> <code>web/src/views/LoginView.vue</code>（新建）、<code>SessionList.vue</code>、<code>SessionDetail.vue</code></p>
+    </div>
+  </div>
+
+  <!-- Phase 1.5 -->
+  <div class="phase-card p15">
+    <div class="phase-header">
+      <div class="phase-num">1.5</div>
+      <div class="phase-info">
+        <h3>多代理支持</h3>
+        <p>Week 3-5 · 目标：支持 Codex 和 OpenCode，与 Claude Code 并行工作</p>
+      </div>
+    </div>
+    <div class="phase-body">
+
+      <h3>1.5.1 代理适配器架构重构</h3>
+      <p>当前架构完全硬编码为 Claude Code，需要重构为可插拔的适配器模式。三个代理都支持 NDJSON 流式输出，可用统一接口处理。</p>
+      <table>
+        <thead><tr><th>代理</th><th>CLI 无头模式</th><th>流式 JSON</th><th>会话恢复</th><th>会话存储</th></tr></thead>
+        <tbody>
+          <tr><td>Claude Code</td><td><code>claude -p "..." --output-format stream-json</code></td><td>✅</td><td><code>--resume &lt;id&gt;</code></td><td><code>~/.claude/sessions/</code> JSONL</td></tr>
+          <tr><td>Codex</td><td><code>codex exec --json "..."</code></td><td>✅</td><td><code>codex exec resume &lt;id&gt;</code></td><td><code>~/.codex/sessions/</code> JSONL</td></tr>
+          <tr><td>OpenCode</td><td><code>opencode run --format json "..."</code></td><td>✅</td><td><code>--session &lt;id&gt;</code></td><td><code>XDG_DATA_HOME/opencode/storage/</code> JSON</td></tr>
+        </tbody>
+      </table>
+      <ul class="checklist">
+        <li>定义 <code>AgentAdapter</code> 接口（BuildArgs / ParseStreamLine / ParseJSONLLine / SessionDir / DiscoverSessions）</li>
+        <li>将现有 <code>ClaudeAdapter</code> 重构为接口实现</li>
+        <li>更新 <code>SessionManager</code> 按 agent 类型选择 adapter</li>
+        <li>更新 watcher 支持多目录监听</li>
+      </ul>
+      <p><span class="label">改动文件：</span> <code>internal/adapter/adapter.go</code>（新建）、<code>claude.go</code>（重构）、<code>session/manager.go</code>、<code>watcher/watcher.go</code></p>
+
+      <h3>1.5.2 Codex Adapter</h3>
+      <ul class="checklist">
+        <li><code>internal/adapter/codex.go</code>（新建）— 解析 NDJSON stdout</li>
+        <li><code>internal/watcher/codex_watcher.go</code>（新建）— 扫描 <code>~/.codex/sessions/</code> 发现终端会话</li>
+        <li>Codex JSONL 文件解析（<code>rollout-*.jsonl</code>）</li>
+      </ul>
+
+      <h3>1.5.3 OpenCode Adapter</h3>
+      <ul class="checklist">
+        <li><code>internal/adapter/opencode.go</code>（新建）— 解析 NDJSON stdout</li>
+        <li><code>internal/watcher/opencode_watcher.go</code>（新建）— 扫描 <code>XDG_DATA_HOME/opencode/storage/session/</code></li>
+        <li>OpenCode JSON 文件解析</li>
+      </ul>
+
+      <h3>1.5.4 iOS 适配</h3>
+      <ul class="checklist">
+        <li>NewSessionSheet 代理选择器支持 claude-code / codex / opencode</li>
+        <li>Session 列表显示代理类型图标</li>
+        <li>验证所有代理的 title 生成流程正常工作</li>
+      </ul>
     </div>
   </div>
 
@@ -450,9 +507,10 @@ npx cap add android</code></pre>
       <thead><tr><th>优先级</th><th>阶段</th><th>理由</th></tr></thead>
       <tbody>
         <tr><td><span class="badge badge-new">P0</span></td><td>Phase 1 · 先能跑</td><td>线上可访问是一切的基础</td></tr>
-        <tr><td><span class="badge badge-todo">P1</span></td><td>Phase 2 · 先能用</td><td>多用户隔离才能做 SaaS</td></tr>
-        <tr><td><span class="badge badge-done">P2</span></td><td>Phase 3+4 · 先能卖</td><td>APP + 订阅 = 收入</td></tr>
-        <tr><td><span class="badge" style="background:#f1f5f9;color:#64748b;">P3</span></td><td>Phase 5 · 再优化</td><td>自动化运维提升效率</td></tr>
+        <tr><td><span class="badge" style="background:#cffafe;color:#0891b2;">P1</span></td><td>Phase 1.5 · 先能扩</td><td>多代理支持，扩大用户群</td></tr>
+        <tr><td><span class="badge badge-todo">P2</span></td><td>Phase 2 · 先能用</td><td>多用户隔离才能做 SaaS</td></tr>
+        <tr><td><span class="badge badge-done">P3</span></td><td>Phase 3+4 · 先能卖</td><td>APP + 订阅 = 收入</td></tr>
+        <tr><td><span class="badge" style="background:#f1f5f9;color:#64748b;">P4</span></td><td>Phase 5 · 再优化</td><td>自动化运维提升效率</td></tr>
       </tbody>
     </table>
   </div>
@@ -460,7 +518,7 @@ npx cap add android</code></pre>
 </div>
 
 <div class="footer">
-  <p>pocketctl 产品化路线图 · 2026-06-07</p>
+  <p>pocketctl 产品化路线图 · 2026-06-10</p>
   <p style="margin-top:4px;">Your coding agents, in your pocket. 🚀</p>
 </div>
 

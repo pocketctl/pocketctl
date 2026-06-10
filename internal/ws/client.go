@@ -120,10 +120,24 @@ func (c *Client) readPump(done chan struct{}) {
 	for {
 		_, msg, err := conn.ReadMessage()
 		if err != nil { return }
-		var base protocol.ClientMessage
+		var base struct {
+			Type  string `json:"type"`
+			Error string `json:"error"`
+			Code  string `json:"code"`
+		}
 		if err := json.Unmarshal(msg, &base); err != nil { continue }
+
+		// Handle DAEMON_LIMIT_REACHED: print error and exit
+		if base.Type == "error" && base.Code == "DAEMON_LIMIT_REACHED" {
+			fmt.Fprintf(os.Stderr, "\n❌ %s\n\n", base.Error)
+			os.Exit(1)
+		}
+
+		// Forward all other messages to command channel
+		var cmdMsg protocol.ClientMessage
+		if err := json.Unmarshal(msg, &cmdMsg); err != nil { continue }
 		select {
-		case c.CommandCh <- base:
+		case c.CommandCh <- cmdMsg:
 		default:
 		}
 	}

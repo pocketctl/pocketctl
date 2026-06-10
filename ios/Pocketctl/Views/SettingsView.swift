@@ -165,36 +165,6 @@ struct SettingsView: View {
                                 .padding(.bottom, PCSpacing.md)
                         }
                         .padding(.horizontal, PCSpacing.lg)
-                        .padding(.bottom, 12)
-
-                        // Upgrade card
-                        settingsGroup {
-                            HStack(spacing: 12) {
-                                Image(systemName: "star.fill")
-                                    .font(.system(size: 16))
-                                    .foregroundStyle(Color.pcAccent)
-                                    .frame(width: 28, height: 28)
-                                    .background(Color.pcAccentMuted)
-                                    .cornerRadius(PCRadius.sm)
-
-                                VStack(alignment: .leading, spacing: 2) {
-                                    Text("升级专业版 ¥48/月")
-                                        .font(PCFont.body(16, weight: .medium))
-                                        .foregroundStyle(Color.pcAccent)
-                                    Text("无限主机 · 推送通知 · 实时消息")
-                                        .font(PCFont.body(12))
-                                        .foregroundStyle(Color.pcFgTertiary)
-                                }
-
-                                Spacer()
-
-                                Image(systemName: "chevron.right")
-                                    .font(.system(size: 14))
-                                    .foregroundStyle(Color.pcAccent)
-                            }
-                            .padding(PCSpacing.lg)
-                        }
-                        .padding(.horizontal, PCSpacing.lg)
                         .padding(.bottom, 24)
 
                         // Other section
@@ -706,27 +676,35 @@ struct SettingsView: View {
                         Text("隐私政策")
                             .font(PCFont.display(20, weight: .semibold))
                             .foregroundStyle(Color.pcFg)
-                        Text("更新日期：2025年1月1日")
+                        Text("更新日期：2026年6月10日")
                             .font(PCFont.body(13))
                             .foregroundStyle(Color.pcFgTertiary)
 
                         Group {
-                            Text("一、信息收集").font(PCFont.body(16, weight: .semibold))
-                            Text("我们收集以下信息用于提供服务：手机号码（用于登录验证）、设备信息（用于推送通知）、主机连接数据（用于远程管理）。").font(PCFont.body(15))
+                            privacySection("一、信息收集",
+                                "pocketctl（以下简称'我们'）在提供服务过程中，可能收集以下信息：\n\n1. 账户信息：手机号码，用于登录验证和账户识别。\n2. 设备信息：设备型号、操作系统版本、设备标识符，用于推送通知和安全认证。\n3. 使用数据：功能使用频率、操作日志，用于服务改进和问题排查。\n4. 主机连接数据：主机名、IP 地址（仅在连接时临时使用），用于远程管理功能。")
 
-                            Text("二、信息使用").font(PCFont.body(16, weight: .semibold))
-                            Text("收集的信息仅用于：账户认证、推送通知、服务改进。我们不会将您的个人信息出售或分享给第三方。").font(PCFont.body(15))
+                            privacySection("二、信息使用",
+                                "我们收集的信息仅用于以下目的：\n\n1. 提供核心服务：账户认证、会话管理、远程控制。\n2. 推送通知：任务完成、错误提醒、主机状态变更。\n3. 服务改进：分析使用模式，优化产品体验。\n4. 安全保障：异常登录检测、欺诈防范。\n\n我们不会将您的个人信息出售给第三方。")
 
-                            Text("三、数据安全").font(PCFont.body(16, weight: .semibold))
-                            Text("我们采用行业标准的加密技术保护您的数据。所有通信均通过加密通道进行，敏感信息使用安全存储。").font(PCFont.body(15))
+                            privacySection("三、第三方服务",
+                                "本应用使用以下第三方服务：\n\n1. 智谱 AI（GLM-4.6）：用于自动生成会话标题，仅传输会话首条消息摘要，不传输完整对话内容。\n2. Apple Push Notification Service（APNs）：用于 iOS 推送通知。\n\n上述第三方服务有独立的隐私政策，我们建议您查阅其相关政策。")
 
-                            Text("四、用户权利").font(PCFont.body(16, weight: .semibold))
-                            Text("您有权随时查看、修改或删除您的个人信息。如需行使上述权利，请通过应用内反馈功能联系我们。").font(PCFont.body(15))
+                            privacySection("四、数据存储与安全",
+                                "1. 数据存储在位于中国的云服务器上。\n2. 所有网络通信均通过 HTTPS/WSS 加密传输。\n3. 敏感信息（如认证令牌）使用 iOS Keychain 安全存储。\n4. 数据库采用加密存储，定期备份。")
 
-                            Text("五、Cookie 政策").font(PCFont.body(16, weight: .semibold))
-                            Text("本应用不使用 Cookie 进行用户追踪。").font(PCFont.body(15))
+                            privacySection("五、用户权利",
+                                "您享有以下权利：\n\n1. 查看权：随时查看您的账户信息和使用数据。\n2. 删除权：请求删除您的账户和所有相关数据。\n3. 导出权：请求导出您的会话历史数据。\n4. 撤回同意权：随时撤回对数据处理的同意。\n\n行使上述权利，请通过应用内「帮助与反馈」联系我们。")
+
+                            privacySection("六、未成年人保护",
+                                "本服务不面向 14 岁以下未成年人。如您为未成年人，请在监护人指导下使用本服务。")
+
+                            privacySection("七、政策更新",
+                                "我们可能不时更新本隐私政策。重大变更将通过应用内通知或电子邮件告知您。继续使用本服务即表示您同意更新后的政策。")
+
+                            privacySection("八、联系我们",
+                                "如您对本隐私政策有任何疑问，请通过以下方式联系我们：\n\n邮箱：james_2001_2001@163.com")
                         }
-                        .foregroundStyle(Color.pcFg)
                     }
                     .padding(PCSpacing.lg)
                 }
@@ -853,6 +831,18 @@ struct SettingsView: View {
                 .frame(minHeight: 44)
             }
             .buttonStyle(.plain)
+    }
+
+    private func privacySection(_ title: String, _ content: String) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text(title)
+                .font(PCFont.body(16, weight: .semibold))
+                .foregroundStyle(Color.pcFg)
+            Text(content)
+                .font(PCFont.body(15))
+                .foregroundStyle(Color.pcFg)
+        }
+    }
         }
     }
 
@@ -865,27 +855,38 @@ struct SettingsView: View {
                         Text("用户协议")
                             .font(PCFont.display(20, weight: .semibold))
                             .foregroundStyle(Color.pcFg)
-                        Text("更新日期：2025年1月1日")
+                        Text("更新日期：2026年6月10日")
                             .font(PCFont.body(13))
                             .foregroundStyle(Color.pcFgTertiary)
 
                         Group {
-                            Text("一、服务说明").font(PCFont.body(16, weight: .semibold))
-                            Text("pocketctl 是一款远程 AI 编程助手管理工具。通过本服务，您可以远程监控和管理运行在开发机上的 AI 编程会话。").font(PCFont.body(15))
+                            privacySection("一、服务说明",
+                                "pocketctl 是一款远程 AI 编程助手管理工具。通过本服务，您可以：\n\n1. 远程监控运行在开发机上的 AI 编程会话（如 Claude Code、Codex）。\n2. 查看会话状态、消息历史、工具调用详情。\n3. 通过移动设备发送消息和管理会话。\n4. 接收任务完成和错误提醒的推送通知。")
 
-                            Text("二、用户责任").font(PCFont.body(16, weight: .semibold))
-                            Text("您应当妥善保管账户信息，对账户下的所有活动负责。不得利用本服务从事违法活动或侵犯他人权益。").font(PCFont.body(15))
+                            privacySection("二、账户注册与安全",
+                                "1. 您需要通过手机号码验证注册账户。\n2. 您应妥善保管账户信息，不得将账户转让或借给他人使用。\n3. 您对账户下的所有活动承担责任。\n4. 如发现账户被盗用，请立即联系我们。")
 
-                            Text("三、服务变更").font(PCFont.body(16, weight: .semibold))
-                            Text("我们保留随时修改或中断服务的权利。重大变更将提前通知用户。").font(PCFont.body(15))
+                            privacySection("三、使用规范",
+                                "您同意在使用本服务时：\n\n1. 遵守中华人民共和国法律法规。\n2. 不利用本服务从事违法活动或侵犯他人权益。\n3. 不尝试攻击、干扰或破坏服务的正常运行。\n4. 不利用本服务对他人计算机系统进行未授权访问。")
 
-                            Text("四、免责声明").font(PCFont.body(16, weight: .semibold))
-                            Text("本服务按「现状」提供，不做任何明示或暗示的保证。对于因使用本服务造成的任何直接或间接损失，我们不承担责任。").font(PCFont.body(15))
+                            privacySection("四、知识产权",
+                                "1. pocketctl 软件、界面设计、商标等知识产权归我们所有。\n2. 您通过本服务创建的内容（如会话记录）归您所有。\n3. 您授予我们在提供服务范围内使用您内容的必要许可。")
 
-                            Text("五、适用法律").font(PCFont.body(16, weight: .semibold))
-                            Text("本协议受中华人民共和国法律管辖。如有争议，双方应友好协商解决。").font(PCFont.body(15))
+                            privacySection("五、付费条款",
+                                "1. 本服务目前提供免费使用。\n2. 未来可能推出付费订阅计划，届时将另行公告。\n3. 付费服务的具体条款将在订阅页面明确说明。")
+
+                            privacySection("六、服务变更与中断",
+                                "1. 我们保留随时修改或中断服务的权利。\n2. 重大变更将提前 30 天通知用户。\n3. 因不可抗力导致的服务中断，我们不承担责任。")
+
+                            privacySection("七、免责声明",
+                                "1. 本服务按「现状」提供，不做任何明示或暗示的保证。\n2. 对于因使用本服务造成的任何直接或间接损失，我们的赔偿责任不超过您在过去 12 个月内支付的费用总额。\n3. 您应自行备份重要数据，我们不对数据丢失承担责任。")
+
+                            privacySection("八、协议终止",
+                                "1. 您可随时通过应用内「退出登录」并联系客服删除账户来终止本协议。\n2. 我们保留在您违反本协议时终止服务的权利。\n3. 协议终止后，我们将在合理期限内删除您的数据。")
+
+                            privacySection("九、适用法律与争议解决",
+                                "1. 本协议受中华人民共和国法律管辖。\n2. 如有争议，双方应友好协商解决。\n3. 协商不成的，任何一方可向我们所在地人民法院提起诉讼。")
                         }
-                        .foregroundStyle(Color.pcFg)
                     }
                     .padding(PCSpacing.lg)
                 }

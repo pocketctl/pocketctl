@@ -1,0 +1,408 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>pocketctl 上线计划</title>
+  <style>
+    :root {
+      --primary: #6366f1;
+      --primary-light: #818cf8;
+      --primary-bg: #eef2ff;
+      --bg: #ffffff;
+      --surface: #f8fafc;
+      --surface-alt: #f1f5f9;
+      --text: #1e293b;
+      --text-secondary: #64748b;
+      --border: #e2e8f0;
+      --success: #10b981;
+      --warning: #f59e0b;
+      --danger: #ef4444;
+      --info: #3b82f6;
+      --code-bg: #1e293b;
+      --code-text: #e2e8f0;
+    }
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', sans-serif;
+      background: var(--surface);
+      color: var(--text);
+      line-height: 1.7;
+      font-size: 15px;
+    }
+    .header {
+      background: linear-gradient(135deg, #4f46e5, #7c3aed, #6366f1);
+      color: white;
+      padding: 50px 40px 40px;
+      text-align: center;
+    }
+    .header h1 { font-size: 2.2em; font-weight: 800; margin-bottom: 8px; }
+    .header .subtitle { font-size: 1.1em; opacity: 0.9; font-weight: 300; }
+    .header .meta { margin-top: 14px; font-size: 0.85em; opacity: 0.7; }
+    .container { max-width: 1100px; margin: 0 auto; padding: 28px 24px 80px; }
+    .section {
+      background: white;
+      border-radius: 14px;
+      box-shadow: 0 1px 6px rgba(0,0,0,0.04);
+      padding: 32px 36px;
+      margin-bottom: 22px;
+    }
+    .section h2 {
+      font-size: 1.5em; color: var(--primary); margin-bottom: 18px;
+      padding-bottom: 10px; border-bottom: 2px solid var(--primary-bg);
+      display: flex; align-items: center; gap: 10px;
+    }
+    .section h2 .icon {
+      width: 34px; height: 34px; background: var(--primary-bg);
+      border-radius: 9px; display: flex; align-items: center; justify-content: center; font-size: 1.05em;
+    }
+    .section h3 {
+      font-size: 1.15em; color: var(--text); margin: 22px 0 10px;
+      padding-left: 12px; border-left: 3px solid var(--primary-light);
+    }
+    .section p { margin-bottom: 10px; }
+    table { width: 100%; border-collapse: collapse; margin: 14px 0; font-size: 0.92em; }
+    thead th {
+      background: var(--primary); color: white; padding: 10px 14px;
+      text-align: left; font-weight: 600; font-size: 0.9em;
+    }
+    thead th:first-child { border-radius: 8px 0 0 0; }
+    thead th:last-child { border-radius: 0 8px 0 0; }
+    tbody td { padding: 10px 14px; border-bottom: 1px solid var(--border); vertical-align: top; }
+    tbody tr:hover { background: var(--primary-bg); }
+    .badge {
+      display: inline-block; padding: 2px 9px; border-radius: 10px;
+      font-size: 0.78em; font-weight: 600; white-space: nowrap;
+    }
+    .badge-a { background: #dbeafe; color: #2563eb; }
+    .badge-b { background: #fef3c7; color: #d97706; }
+    .badge-c { background: #d1fae5; color: #059669; }
+    .badge-d { background: #ede9fe; color: #7c3aed; }
+    .checklist { list-style: none; padding: 0; }
+    .checklist li {
+      padding: 6px 0 6px 28px; position: relative; font-size: 0.93em;
+    }
+    .checklist li::before {
+      content: '☐'; position: absolute; left: 4px; top: 6px;
+      color: var(--text-secondary); font-size: 1em;
+    }
+    code {
+      background: var(--surface-alt); padding: 2px 6px; border-radius: 4px;
+      font-family: 'SF Mono', 'Fira Code', monospace; font-size: 0.87em; color: #7c3aed;
+    }
+    pre {
+      background: var(--code-bg); color: var(--code-text); border-radius: 10px;
+      padding: 18px 22px; margin: 12px 0; overflow-x: auto;
+      font-family: 'SF Mono', 'Fira Code', monospace; font-size: 0.86em; line-height: 1.6;
+    }
+    pre code { background: none; padding: 0; color: inherit; }
+    .phase-card {
+      border: 2px solid var(--border); border-radius: 12px; padding: 0; margin-bottom: 22px;
+      overflow: hidden;
+    }
+    .phase-header {
+      display: flex; align-items: center; gap: 14px; padding: 16px 24px; cursor: default;
+    }
+    .phase-header .phase-num {
+      width: 44px; height: 44px; border-radius: 12px; display: flex;
+      align-items: center; justify-content: center; font-weight: 800;
+      font-size: 1.2em; color: white; flex-shrink: 0;
+    }
+    .phase-header .phase-info h3 { margin: 0; padding: 0; border: none; font-size: 1.15em; color: var(--text); }
+    .phase-header .phase-info p { margin: 2px 0 0; color: var(--text-secondary); font-size: 0.88em; }
+    .phase-body { padding: 0 24px 20px; }
+    .pa .phase-header { background: #dbeafe; }
+    .pa .phase-num { background: #3b82f6; }
+    .pb .phase-header { background: #fef3c7; }
+    .pb .phase-num { background: #f59e0b; }
+    .pc .phase-header { background: #d1fae5; }
+    .pc .phase-num { background: #10b981; }
+    .pd .phase-header { background: #ede9fe; }
+    .pd .phase-num { background: #8b5cf6; }
+    .timeline {
+      background: white; border-radius: 14px; box-shadow: 0 1px 6px rgba(0,0,0,0.04);
+      padding: 32px 36px; margin-bottom: 22px;
+    }
+    .timeline h2 {
+      font-size: 1.5em; color: var(--primary); margin-bottom: 20px;
+      padding-bottom: 10px; border-bottom: 2px solid var(--primary-bg);
+    }
+    .timeline-bar {
+      display: flex; border-radius: 10px; overflow: hidden; height: 44px; margin: 16px 0;
+      font-size: 0.78em; font-weight: 600; color: white;
+    }
+    .timeline-bar div {
+      display: flex; align-items: center; justify-content: center; padding: 0 12px;
+      white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    }
+    .timeline-legend {
+      display: flex; flex-wrap: wrap; gap: 16px; margin-top: 12px; font-size: 0.88em;
+    }
+    .timeline-legend span { display: flex; align-items: center; gap: 6px; }
+    .timeline-legend .dot { width: 12px; height: 12px; border-radius: 4px; flex-shrink: 0; }
+    .risk-card {
+      border: 1px solid var(--border); border-radius: 10px; padding: 16px 20px; margin: 10px 0;
+      display: flex; gap: 14px; align-items: flex-start;
+    }
+    .risk-card .risk-icon {
+      width: 36px; height: 36px; border-radius: 9px; display: flex;
+      align-items: center; justify-content: center; font-size: 1.1em; flex-shrink: 0;
+    }
+    .risk-high .risk-icon { background: #fef2f2; }
+    .risk-med .risk-icon { background: #fffbeb; }
+    .risk-card .risk-title { font-weight: 600; margin-bottom: 4px; }
+    .risk-card .risk-desc { font-size: 0.9em; color: var(--text-secondary); }
+    .footer { text-align: center; padding: 28px; color: var(--text-secondary); font-size: 0.85em; }
+    @media (max-width: 768px) {
+      .header { padding: 32px 20px 28px; }
+      .header h1 { font-size: 1.7em; }
+      .section, .timeline { padding: 20px 18px; }
+      .phase-header { padding: 12px 16px; }
+      .phase-body { padding: 0 16px 16px; }
+    }
+  </style>
+</head>
+<body>
+
+<div class="header">
+  <h1>🚀 pocketctl 上线计划</h1>
+  <div class="subtitle">服务端上线 + Apple Store 上架完整工作清单</div>
+  <div class="meta">📅 生成日期：2026-06-10 · 预计 1.5-2 周完成</div>
+</div>
+
+<div class="container">
+
+  <!-- Timeline -->
+  <div class="timeline">
+    <h2>📅 时间线总览</h2>
+    <div class="timeline-bar">
+      <div style="flex:1; background:#3b82f6;">Day 1 云部署</div>
+      <div style="flex:3; background:#f59e0b;">Day 2-4 iOS 完善</div>
+      <div style="flex:1; background:#10b981;">Day 5 安装脚本</div>
+      <div style="flex:1; background:#8b5cf6;">Day 6 TestFlight</div>
+      <div style="flex:1; background:#6366f1;">Day 7 提交审核</div>
+      <div style="flex:2; background:#64748b;">Day 8-10 等待审核</div>
+    </div>
+    <div class="timeline-legend">
+      <span><span class="dot" style="background:#3b82f6;"></span> Phase A: 服务端上线</span>
+      <span><span class="dot" style="background:#f59e0b;"></span> Phase B: iOS 上架准备</span>
+      <span><span class="dot" style="background:#10b981;"></span> Phase C: Daemon 分发</span>
+      <span><span class="dot" style="background:#8b5cf6;"></span> Phase D: 提交审核</span>
+    </div>
+  </div>
+
+  <!-- Phase A -->
+  <div class="phase-card pa">
+    <div class="phase-header">
+      <div class="phase-num">A</div>
+      <div class="phase-info">
+        <h3>服务端上线</h3>
+        <p>Day 1 · 没有线上服务，iOS App 连不上</p>
+      </div>
+    </div>
+    <div class="phase-body">
+      <h3>A1. 云服务器准备</h3>
+      <ul class="checklist">
+        <li>购买腾讯云/阿里云 ECS（2C4G 足够）</li>
+        <li>安装 Docker + Docker Compose</li>
+        <li>域名解析（如 <code>relay.pocketctl.com</code>）</li>
+      </ul>
+
+      <h3>A2. 生产环境配置</h3>
+      <ul class="checklist">
+        <li>创建 <code>docker-compose.prod.yml</code>
+          <ul style="margin-top:4px; padding-left:20px; font-size:0.9em; color:var(--text-secondary);">
+            <li>PostgreSQL 强密码</li>
+            <li><code>POCKETCTL_API_KEY</code> 随机生成</li>
+            <li><code>ZHIPU_API_KEY</code> 配置</li>
+            <li>端口不对外暴露（只暴露 Nginx）</li>
+          </ul>
+        </li>
+        <li>Nginx 反向代理 + WSS（WebSocket 升级 + 86400s 超时）</li>
+        <li>HTTPS 证书（Let's Encrypt / 腾讯云免费证书）</li>
+      </ul>
+
+      <h3>A3. 部署验证</h3>
+      <ul class="checklist">
+        <li><code>docker compose up -d</code> 启动服务</li>
+        <li>验证 <code>/health</code> 端点返回 200</li>
+        <li>验证 WSS 连接正常</li>
+        <li>Daemon 远程连接测试</li>
+      </ul>
+      <p><span class="badge badge-a">预估 1 天</span></p>
+    </div>
+  </div>
+
+  <!-- Phase B -->
+  <div class="phase-card pb">
+    <div class="phase-header">
+      <div class="phase-num">B</div>
+      <div class="phase-info">
+        <h3>iOS App 上架准备</h3>
+        <p>Day 2-4 · 最耗时——苹果审核需要各种材料</p>
+      </div>
+    </div>
+    <div class="phase-body">
+      <h3>B1. Apple Developer 配置</h3>
+      <ul class="checklist">
+        <li>Apple Developer Program（$99/年）</li>
+        <li>App ID（<code>com.pocketctl.app</code>）</li>
+        <li>APNs 推送证书</li>
+        <li>Provisioning Profile（Development + Distribution）</li>
+      </ul>
+
+      <h3>B2. App 功能完善</h3>
+      <ul class="checklist">
+        <li>登录/注册页面（当前是手动输入 token？）</li>
+        <li>Codex「即将开通」标签确认（苹果可能不允许）</li>
+        <li>确保无 debug 日志、无测试数据</li>
+        <li>空状态引导（未连接 Daemon 时的提示）</li>
+        <li>错误处理（网络断开、token 过期）</li>
+      </ul>
+
+      <h3>B3. App Store Connect 配置</h3>
+      <ul class="checklist">
+        <li>App 名称：<code>pocketctl</code></li>
+        <li>副标题：Your coding agents, in your pocket</li>
+        <li>分类：开发者工具 / 效率</li>
+        <li>截图：iPhone 6.7" + 6.1"（至少 3 张）</li>
+        <li>App Icon（已有 ✅）</li>
+        <li>隐私政策 URL</li>
+        <li>用户协议 URL</li>
+        <li>描述文案</li>
+      </ul>
+
+      <h3>B4. 隐私与合规</h3>
+      <ul class="checklist">
+        <li>隐私政策页面（部署到公网）</li>
+        <li>用户协议页面</li>
+        <li>App 隐私声明（App Store Connect 中填写）</li>
+      </ul>
+      <p><span class="badge badge-b">预估 3 天（不含审核等待）</span></p>
+    </div>
+  </div>
+
+  <!-- Phase C -->
+  <div class="phase-card pc">
+    <div class="phase-header">
+      <div class="phase-num">C</div>
+      <div class="phase-info">
+        <h3>Daemon 分发</h3>
+        <p>Day 5 · 用户需要能方便地安装 Daemon</p>
+      </div>
+    </div>
+    <div class="phase-body">
+      <h3>C1. 安装脚本</h3>
+      <ul class="checklist">
+        <li>创建 <code>install.sh</code>
+          <pre><code>curl -fsSL https://pocketctl.com/install.sh | bash</code></pre>
+        </li>
+        <li>检测 OS/架构（macOS arm64/amd64, Linux）</li>
+        <li>下载对应二进制到 <code>/usr/local/bin/pocketctl</code></li>
+        <li>部署到公网（Nginx 托管或 GitHub Pages）</li>
+      </ul>
+
+      <h3>C2. 文档</h3>
+      <ul class="checklist">
+        <li>README 更新（安装方式、使用说明）</li>
+        <li>快速开始指南</li>
+      </ul>
+      <p><span class="badge badge-c">预估 1 天</span></p>
+    </div>
+  </div>
+
+  <!-- Phase D -->
+  <div class="phase-card pd">
+    <div class="phase-header">
+      <div class="phase-num">D</div>
+      <div class="phase-info">
+        <h3>提交审核 + 上线</h3>
+        <p>Day 6-10 · TestFlight 测试 → 提交 → 等待审核</p>
+      </div>
+    </div>
+    <div class="phase-body">
+      <h3>D1. TestFlight 测试</h3>
+      <ul class="checklist">
+        <li>Archive → Upload to App Store Connect</li>
+        <li>TestFlight 内部测试（自己 + 1-2 个朋友）</li>
+        <li>验证完整流程：注册→登录→安装 Daemon→创建会话→推送</li>
+      </ul>
+
+      <h3>D2. 提交审核</h3>
+      <ul class="checklist">
+        <li>填写审核信息（Demo 账号）</li>
+        <li>提交 App Review</li>
+        <li>等待审核（通常 1-3 天，首次可能更久）</li>
+      </ul>
+
+      <h3>D3. 上架后</h3>
+      <ul class="checklist">
+        <li>监控崩溃报告</li>
+        <li>收集用户反馈</li>
+        <li>准备第一版更新</li>
+      </ul>
+      <p><span class="badge badge-d">预估 1 天操作 + 1-3 天审核等待</span></p>
+    </div>
+  </div>
+
+  <!-- 关键卡点 -->
+  <div class="section">
+    <h2><span class="icon">⚠️</span> 关键卡点</h2>
+    <table>
+      <thead><tr><th>卡点</th><th>影响</th><th>建议</th></tr></thead>
+      <tbody>
+        <tr>
+          <td>Apple Developer 账号</td>
+          <td>没有就无法上架</td>
+          <td><strong>立即注册</strong>（审核可能需要几天）</td>
+        </tr>
+        <tr>
+          <td>隐私政策/用户协议</td>
+          <td>苹果审核必须</td>
+          <td>先写最简版本，部署到公网</td>
+        </tr>
+        <tr>
+          <td>登录注册流程</td>
+          <td>当前 iOS 是手动输入 token？</td>
+          <td>需要改为标准登录页</td>
+        </tr>
+        <tr>
+          <td>推送证书</td>
+          <td>APNs 不工作就收不到推送</td>
+          <td>在 Apple Developer 创建</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <!-- 当前完成度 -->
+  <div class="section">
+    <h2><span class="icon">✅</span> 当前完成度</h2>
+    <table>
+      <thead><tr><th>功能</th><th>状态</th><th>说明</th></tr></thead>
+      <tbody>
+        <tr><td>Daemon（Go CLI）</td><td><span class="badge" style="background:#d1fae5;color:#059669;">已完成</span></td><td>会话管理、事件监听、cwd 校验</td></tr>
+        <tr><td>Relay Server</td><td><span class="badge" style="background:#d1fae5;color:#059669;">已完成</span></td><td>WebSocket 路由、DB 持久化、JWT 认证</td></tr>
+        <tr><td>iOS App</td><td><span class="badge" style="background:#d1fae5;color:#059669;">已完成</span></td><td>会话列表、详情、推送通知</td></tr>
+        <tr><td>Session 标题生成</td><td><span class="badge" style="background:#d1fae5;color:#059669;">已完成</span></td><td>GLM-4.6 LLM 标题生成</td></tr>
+        <tr><td>CWD 默认值</td><td><span class="badge" style="background:#d1fae5;color:#059669;">已完成</span></td><td>~ 支持、权限校验</td></tr>
+        <tr><td>Session 删除</td><td><span class="badge" style="background:#d1fae5;color:#059669;">已完成</span></td><td>墓碑机制、防重复发现</td></tr>
+        <tr><td>CI/CD</td><td><span class="badge" style="background:#d1fae5;color:#059669;">已完成</span></td><td>GitHub Actions 自动构建</td></tr>
+        <tr><td>生产环境部署</td><td><span class="badge" style="background:#fef3c7;color:#d97706;">待完成</span></td><td>docker-compose.prod.yml + Nginx + SSL</td></tr>
+        <tr><td>Daemon 安装脚本</td><td><span class="badge" style="background:#fef3c7;color:#d97706;">待完成</span></td><td>install.sh</td></tr>
+        <tr><td>iOS 登录页</td><td><span class="badge" style="background:#fef3c7;color:#d97706;">待完成</span></td><td>标准登录/注册流程</td></tr>
+        <tr><td>隐私政策</td><td><span class="badge" style="background:#fef3c7;color:#d97706;">待完成</span></td><td>隐私政策 + 用户协议页面</td></tr>
+        <tr><td>App Store 提交</td><td><span class="badge" style="background:#fef3c7;color:#d97706;">待完成</span></td><td>截图、描述、审核材料</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+</div>
+
+<div class="footer">
+  <p>pocketctl 上线计划 · 2026-06-10</p>
+  <p style="margin-top:4px;">Your coding agents, in your pocket. 🚀</p>
+</div>
+
+</body>
+</html>

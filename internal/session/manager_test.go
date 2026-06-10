@@ -211,6 +211,61 @@ func TestSendMessage_ExitedSession_InvalidPID(t *testing.T) {
 	}
 }
 
+func TestResolveCwd(t *testing.T) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Fatalf("cannot get home dir: %v", err)
+	}
+
+	tests := []struct {
+		name     string
+		input    string
+		expected string
+	}{
+		{"empty string", "", home},
+		{"tilde", "~", home},
+		{"tilde-relative", "~/projects", home + "/projects"},
+		{"absolute path", "/opt/workspace", "/opt/workspace"},
+		{"another absolute", "/tmp", "/tmp"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := resolveCwd(tt.input)
+			if result != tt.expected {
+				t.Errorf("resolveCwd(%q) = %q, want %q", tt.input, result, tt.expected)
+			}
+		})
+	}
+}
+
+func TestValidateCwd(t *testing.T) {
+	// Create a temp directory for testing
+	tmpDir := t.TempDir()
+
+	// Valid directory should pass
+	if err := validateCwd(tmpDir); err != nil {
+		t.Errorf("validateCwd(%q) should pass, got: %v", tmpDir, err)
+	}
+
+	// Non-existent path should fail
+	if err := validateCwd("/nonexistent/path/xyz"); err == nil {
+		t.Error("validateCwd for non-existent path should return error")
+	}
+
+	// Create a temp file (not a directory)
+	tmpFile, err := os.CreateTemp("", "test-validate-cwd")
+	if err != nil {
+		t.Fatalf("cannot create temp file: %v", err)
+	}
+	tmpFile.Close()
+	defer os.Remove(tmpFile.Name())
+
+	if err := validateCwd(tmpFile.Name()); err == nil {
+		t.Error("validateCwd for file should return error")
+	}
+}
+
 func TestKillSession_SetsKilledStatus(t *testing.T) {
 	outputCh := make(chan protocol.DaemonEvent, 32)
 	sm := NewSessionManager(outputCh)
