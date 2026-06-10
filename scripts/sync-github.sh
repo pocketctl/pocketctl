@@ -145,6 +145,22 @@ info "Initializing git repo in sync directory..."
 
 cd "$SYNC_DIR"
 git init
+
+# Copy credential helper from main repo so GitHub auth works
+CRED_HELPER=$("$REPO_ROOT/.git" config --get credential.helper 2>/dev/null || true)
+if [[ -n "$CRED_HELPER" ]]; then
+  git config credential.helper "$CRED_HELPER"
+fi
+# Also try copying osxkeychain or store if available
+for helper in osxkeychain store cache; do
+  if git config --global --get credential.helper | grep -q "$helper" 2>/dev/null; then
+    git config credential.helper "$helper"
+    break
+  fi
+done
+
+git config user.email "pocketctl-bot@users.noreply.github.com"
+git config user.name "pocketctl-bot"
 git checkout -b "$GITHUB_BRANCH"
 
 # Add all files
