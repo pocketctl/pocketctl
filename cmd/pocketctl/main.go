@@ -185,7 +185,7 @@ func cmdDaemonStart(args []string) {
 		}
 	}
 	if url == "" {
-		url = "ws://localhost:8080/ws"
+		url = "wss://pocketctl.me/ws"
 	}
 
 	// Resolve token

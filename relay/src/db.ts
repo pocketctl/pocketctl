@@ -96,6 +96,10 @@ export async function initDB(pool: pg.Pool): Promise<void> {
   // Daemon alias column
   await pool.query(`ALTER TABLE daemons ADD COLUMN IF NOT EXISTS alias VARCHAR(64)`);
 
+  // User plan and whitelist for daemon limit control
+  await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS plan VARCHAR(16) DEFAULT 'free'`);
+  await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS whitelist BOOLEAN DEFAULT false`);
+
   // Session delete tombstone table
   await pool.query(`
     CREATE TABLE IF NOT EXISTS deleted_sessions (
@@ -243,6 +247,21 @@ export async function getUserById(pool: pg.Pool, id: number): Promise<any | null
     [id]
   );
   return result.rows[0] || null;
+}
+
+/** Get user's plan and whitelist status for daemon limit control */
+export async function getUserPlanAndWhitelist(pool: pg.Pool, userId: number): Promise<{ plan: string; whitelist: boolean }> {
+  const result = await pool.query(
+    `SELECT plan, whitelist FROM users WHERE id = $1`,
+    [userId]
+  );
+  if (result.rows.length === 0) {
+    return { plan: 'free', whitelist: false };
+  }
+  return {
+    plan: result.rows[0].plan || 'free',
+    whitelist: result.rows[0].whitelist || false,
+  };
 }
 
 export async function bindDaemonToUser(pool: pg.Pool, daemonId: string, userId: number): Promise<void> {
