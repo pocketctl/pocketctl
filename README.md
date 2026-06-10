@@ -268,6 +268,8 @@ pocketctl/
 │       ├── Views/                 # UI 视图组件
 │       └── Services/              # WebSocket、API、Keychain、Push
 ├── web/                           # Vue 3 Web UI（可选）
+├── docs/                          # 文档（路线图、测试报告、上线计划）
+├── .claude/skills/                # Claude Code 技能（自动化工作流）
 ├── docker-compose.yml
 ├── go.mod
 └── go.sum

@@ -10,6 +10,84 @@
 | Daemon 安装 | 手动编译 | 一行命令安装 |
 | 部署 | 本地 Docker Compose | 云端生产环境 |
 | CI/CD | 无 | GitHub Actions 自动构建发布 |
+| 代理支持 | 仅 Claude Code | Claude Code + Codex + OpenCode |
+
+---
+
+## Phase 1.5：多代理支持（2-3 周）
+
+> 目标：支持 Codex 和 OpenCode 代理，与 Claude Code 并行工作。
+
+### 1.5.1 代理适配器架构重构
+
+当前架构完全硬编码为 Claude Code，需要重构为可插拔的适配器模式。
+
+**现状分析：**
+
+| 代理 | CLI | 流式 JSON | 会话恢复 | 会话存储 | pocketctl 集成 |
+|------|-----|-----------|----------|----------|---------------|
+| Claude Code | `claude -p "..." --output-format stream-json` | ✅ | `--resume <id>` | `~/.claude/sessions/` JSONL | ✅ 完整 |
+| Codex | `codex exec --json "..."` | ✅ | `codex exec resume <id>` | `~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl` | ❌ 仅 discovery |
+| OpenCode | `opencode run --format json "..."` | ✅ | `--session <id>` / `--continue` | `XDG_DATA_HOME/opencode/storage/session/{pid}/{sid}.json` | ❌ 仅 discovery |
+
+**好消息：三个代理都支持 NDJSON 流式输出，可以用统一接口处理。**
+
+- [ ] 定义 `AgentAdapter` 接口
+  ```go
+  type AgentAdapter interface {
+      // 构建 CLI 参数
+      BuildArgs(prompt, sessionID string, config SessionConfig) []string
+      // 解析 stdout 流式 JSON 行
+      ParseStreamLine(line string) ([]protocol.DaemonEvent, error)
+      // 解析 JSONL 会话文件行（可选，用于终端会话监听）
+      ParseJSONLLine(line string) ([]protocol.DaemonEvent, error)
+      // 会话文件目录
+      SessionDir() string
+      // 发现已有会话
+      DiscoverSessions() ([]DiscoveredSession, error)
+  }
+  ```
+- [ ] 将现有 `ClaudeAdapter` 重构为接口实现
+- [ ] 更新 `SessionManager.CreateSession()` 按 agent 类型选择 adapter
+- [ ] 更新 `watcher` 支持多目录监听（`~/.claude/sessions/` + `~/.codex/sessions/` + XDG）
+
+**改动文件：**
+- `internal/adapter/adapter.go`（新建，接口定义）
+- `internal/adapter/claude.go`（重构为接口实现）
+- `internal/session/manager.go`（adapter 注册与选择）
+- `internal/watcher/watcher.go`（多目录支持）
+
+### 1.5.2 Codex Adapter
+
+- [ ] `internal/adapter/codex.go`（新建）
+  - `codex exec --json --sandbox workspace-write -a never "prompt"` 启动
+  - 解析 NDJSON stdout 事件（事件类型待抓取样本分析）
+  - `codex exec resume <id>` 恢复会话
+- [ ] `internal/watcher/codex_watcher.go`（新建）
+  - 扫描 `~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl` 发现终端会话
+  - 解析 JSONL 文件提取事件
+- [ ] `cmd/pocketctl/main.go` 注册 Codex watcher
+
+### 1.5.3 OpenCode Adapter
+
+- [ ] `internal/adapter/opencode.go`（新建）
+  - `opencode run --format json --dangerously-skip-permissions "prompt"` 启动
+  - 解析 NDJSON stdout 事件（text/tool_use/step_start/step_finish/reasoning/error）
+  - `opencode run --session <id> "prompt"` 恢复会话
+- [ ] `internal/watcher/opencode_watcher.go`（新建）
+  - 扫描 `XDG_DATA_HOME/opencode/storage/session/` 目录
+  - 解析 JSON 文件提取会话和消息
+- [ ] `cmd/pocketctl/main.go` 注册 OpenCode watcher
+
+### 1.5.4 iOS 适配
+
+- [ ] NewSessionSheet 代理选择器支持 claude-code / codex / opencode
+- [ ] Session 列表显示代理类型图标
+- [ ] 验证所有代理的 title 生成流程正常工作
+
+**改动文件：**
+- `ios/Pocketctl/Views/NewSessionSheet.swift`
+- `ios/Pocketctl/Views/SessionListView.swift`
 
 ---
 
@@ -313,17 +391,19 @@
 
 ```
 Week 1-2   Phase 1: 云部署 + 体验优化
-Week 3-5   Phase 2: 用户系统 + 多租户
-Week 6-8   Phase 3: 移动端 APP + 推送
-Week 9-10  Phase 4: 订阅付费
-Week 11+   Phase 5: 持续运维 + 迭代
+Week 3-5   Phase 1.5: 多代理支持（Codex + OpenCode）
+Week 6-8   Phase 2: 用户系统 + 多租户
+Week 9-11  Phase 3: 移动端 APP + 推送
+Week 12-13 Phase 4: 订阅付费
+Week 14+   Phase 5: 持续运维 + 迭代
            ──────────────────────────
-           约 2.5-3 个月上架 App Store
+           约 3-3.5 个月上架 App Store
 ```
 
 ## 优先级排序原则
 
 1. **先能跑**（Phase 1）→ 线上可访问
-2. **先能用**（Phase 2）→ 多用户隔离
-3. **先能卖**（Phase 3+4）→ APP + 订阅
-4. **再优化**（Phase 5）→ 自动化运维
+2. **先能扩**（Phase 1.5）→ 多代理支持，扩大用户群
+3. **先能用**（Phase 2）→ 多用户隔离
+4. **先能卖**（Phase 3+4）→ APP + 订阅
+5. **再优化**（Phase 5）→ 自动化运维

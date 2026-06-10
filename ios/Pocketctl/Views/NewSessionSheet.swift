@@ -11,6 +11,10 @@ struct NewSessionSheet: View {
 
     private let agents = ["claude-code", "codex"]
 
+    private var isAgentAvailable: Bool {
+        selectedAgent == "claude-code"
+    }
+
     var body: some View {
         VStack(spacing: 0) {
             // Drag handle
@@ -34,7 +38,18 @@ struct NewSessionSheet: View {
                     Button {
                         selectedAgent = agent
                     } label: {
-                        Text(agent == "claude-code" ? "Claude Code" : "Codex")
+                        HStack(spacing: 4) {
+                            Text(agent == "claude-code" ? "Claude Code" : "Codex")
+                            if agent != "claude-code" {
+                                Text("即将开通")
+                                    .font(PCFont.body(10, weight: .medium))
+                                    .padding(.horizontal, 5)
+                                    .padding(.vertical, 2)
+                                    .background(Color.pcWarning.opacity(0.2))
+                                    .foregroundStyle(Color.pcWarning)
+                                    .cornerRadius(4)
+                            }
+                        }
                             .font(PCFont.body(15, weight: .medium))
                             .foregroundStyle(selectedAgent == agent ? Color.pcBackground : Color.pcFgSecondary)
                             .padding(.horizontal, 20)
@@ -93,19 +108,35 @@ struct NewSessionSheet: View {
             .padding(.horizontal, PCSpacing.xxl)
             .padding(.bottom, 24)
 
+            // Coming soon notice for unavailable agents
+            if !isAgentAvailable {
+                HStack(spacing: 6) {
+                    Image(systemName: "clock.fill")
+                        .font(.system(size: 13))
+                        .foregroundStyle(Color.pcWarning)
+                    Text("Codex 代理即将开通，敬请期待")
+                        .font(PCFont.body(13))
+                        .foregroundStyle(Color.pcFgSecondary)
+                }
+                .padding(.horizontal, PCSpacing.xxl)
+                .padding(.bottom, 16)
+            }
+
             // Start button
             Button {
-                onCreate(selectedAgent, workingDir, prompt)
+                if isAgentAvailable {
+                    onCreate(selectedAgent, workingDir, prompt)
+                }
             } label: {
-                Text("开始会话")
+                Text(isAgentAvailable ? "开始会话" : "即将开通")
                     .font(PCFont.display(17, weight: .semibold))
                     .foregroundStyle(.white)
                     .frame(maxWidth: .infinity)
                     .padding(.vertical, 16)
-                    .background(prompt.isEmpty ? Color.pcPrimaryBtn.opacity(0.5) : Color.pcPrimaryBtn)
+                    .background(isAgentAvailable ? (prompt.isEmpty ? Color.pcPrimaryBtn.opacity(0.5) : Color.pcPrimaryBtn) : Color.pcFgTertiary)
                     .cornerRadius(PCRadius.md)
             }
-            .disabled(prompt.isEmpty)
+            .disabled(!isAgentAvailable || prompt.isEmpty)
             .padding(.horizontal, PCSpacing.xxl)
             .padding(.bottom, 32)
         }
