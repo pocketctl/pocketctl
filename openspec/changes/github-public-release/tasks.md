@@ -26,9 +26,9 @@
 
 ## 4. 首次 Release 验证
 
-- [ ] 4.1 在 develop 分支完成所有改动，本地测试通过
-- [ ] 4.2 合并 develop → master（Gitee）
-- [ ] 4.3 运行同步脚本更新 GitHub 仓库
-- [ ] 4.4 打 tag `v0.1.0` 并推送到 GitHub：`git tag v0.1.0 && git push github v0.1.0`
-- [ ] 4.5 验证 GitHub Actions 构建成功，Release 页面包含 4 个平台二进制 + SHA256 校验文件
-- [ ] 4.6 测试安装：`curl -fsSL .../install-daemon.sh | bash` 并验证 `pocketctl version` 输出 v0.1.0
+- [x] 4.1 在 develop 分支完成所有改动，本地测试通过
+- [x] 4.2 合并 develop → master（Gitee）
+- [x] 4.3 运行同步脚本更新 GitHub 仓库
+- [x] 4.4 打 tag `v0.1.0` 并推送到 GitHub：`git tag v0.1.0 && git push github v0.1.0`
+- [x] 4.5 验证 GitHub Actions 构建成功，Release 页面包含 4 个平台二进制 + SHA256 校验文件
+- [x] 4.6 测试安装：`curl -fsSL .../install-daemon.sh | bash` 并验证 `pocketctl version` 输出 v0.1.0
