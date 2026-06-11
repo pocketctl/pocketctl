@@ -226,51 +226,50 @@ struct SessionCard: View {
     let onTap: () -> Void
 
     var body: some View {
-        Button(action: onTap) {
-            HStack(spacing: PCSpacing.md) {
-                StatusDot(status: effectiveStatus)
-                    .frame(width: 10, height: 10)
+        HStack(spacing: PCSpacing.md) {
+            StatusDot(status: effectiveStatus)
+                .frame(width: 10, height: 10)
 
-                VStack(alignment: .leading, spacing: 4) {
-                    HStack(spacing: 6) {
-                        Text(session.displayTitle)
-                            .font(PCFont.body(16, weight: .semibold))
-                            .foregroundStyle(Color.pcFg)
-                            .lineLimit(1)
+            VStack(alignment: .leading, spacing: 4) {
+                HStack(spacing: 6) {
+                    Text(session.displayTitle)
+                        .font(PCFont.body(16, weight: .semibold))
+                        .foregroundStyle(Color.pcFg)
+                        .lineLimit(1)
 
-                        if session.source == "terminal" {
-                            StatusChip(text: "终端", style: .terminal)
-                        } else if session.source == "web" {
-                            StatusChip(text: "Web", style: .web)
-                        }
-
-                        if session.subagentCount > 0 {
-                            StatusChip(text: "\(session.subagentCount) 子智能体", style: .subAgent)
-                        }
+                    if session.source == "terminal" {
+                        StatusChip(text: "终端", style: .terminal)
+                    } else if session.source == "web" {
+                        StatusChip(text: "Web", style: .web)
                     }
 
-                    HStack {
-                        if let hostname = session.hostname {
-                            Text(hostname)
-                                .font(PCFont.body(12))
-                                .foregroundStyle(Color.pcFgTertiary)
-                        }
-                        Spacer()
-                        Text(RelativeTime.format(session.lastActivityAt ?? session.createdAt))
-                            .font(PCFont.body(13))
-                            .foregroundStyle(Color.pcFgTertiary)
+                    if session.subagentCount > 0 {
+                        StatusChip(text: "\(session.subagentCount) 子智能体", style: .subAgent)
                     }
                 }
+
+                HStack {
+                    if let hostname = session.hostname {
+                        Text(hostname)
+                            .font(PCFont.body(12))
+                            .foregroundStyle(Color.pcFgTertiary)
+                    }
+                    Spacer()
+                    Text(RelativeTime.format(session.lastActivityAt ?? session.createdAt))
+                        .font(PCFont.body(13))
+                        .foregroundStyle(Color.pcFgTertiary)
+                }
             }
-            .padding(PCSpacing.md)
-            .background(Color.pcSurface)
-            .cornerRadius(PCRadius.md)
-            .overlay(
-                RoundedRectangle(cornerRadius: PCRadius.md)
-                    .stroke(Color.pcBorder, lineWidth: 1)
-            )
         }
-        .buttonStyle(.plain)
+        .padding(PCSpacing.md)
+        .background(Color.pcSurface)
+        .cornerRadius(PCRadius.md)
+        .overlay(
+            RoundedRectangle(cornerRadius: PCRadius.md)
+                .stroke(Color.pcBorder, lineWidth: 1)
+        )
+        .contentShape(Rectangle())
+        .onTapGesture(perform: onTap)
     }
 
     private var effectiveStatus: String {
@@ -292,8 +291,6 @@ struct SwipeToDelete<Content: View>: View {
     @State private var isOpen = false
     /// 当次拖拽是否为垂直滚动（上下滑动），是则忽略左滑
     @State private var isVerticalScroll = false
-    /// 拖拽中或刚结束，阻止内部 Button 响应点击
-    @State private var isDragging = false
 
     private let buttonWidth: CGFloat = 76
     /// 垂直/水平分量判定阈值，超过此比例视为垂直滚动
@@ -324,15 +321,16 @@ struct SwipeToDelete<Content: View>: View {
             }
 
             // Main content — slides left to reveal delete
+            // 内容不再是 Button，用 .gesture() 让 DragGesture 优先于 onTapGesture
+            // 拖拽时 DragGesture 赢 → 不触发 onTapGesture（不会导航）
+            // 点击时 DragGesture 失败 → onTapGesture 赢 → 正常导航或关闭滑开
             content
                 .frame(maxHeight: .infinity)
                 .background(Color.pcBackground)
-                .allowsHitTesting(!isDragging)             // 拖拽期间禁用内部 Button，滑开时保持可交互以支持右滑关闭
                 .offset(x: offset)
-                .simultaneousGesture(
+                .gesture(
                     DragGesture(minimumDistance: 6)
                         .onChanged { value in
-                            isDragging = true
                             let h = value.translation.width
                             let v = abs(value.translation.height)
 
@@ -361,7 +359,6 @@ struct SwipeToDelete<Content: View>: View {
                                 withAnimation(.spring(response: 0.3, dampingFraction: 1)) {
                                     close()
                                 }
-                                scheduleDragReset()
                                 return
                             }
 
@@ -382,7 +379,6 @@ struct SwipeToDelete<Content: View>: View {
                                     }
                                 }
                             }
-                            scheduleDragReset()
                         }
                 )
                 .onTapGesture {
@@ -394,13 +390,6 @@ struct SwipeToDelete<Content: View>: View {
                 }
         }
         .clipShape(RoundedRectangle(cornerRadius: PCRadius.md))
-    }
-
-    /// 延迟重置拖拽标记，等待关闭动画完成后才恢复 Button 点击
-    private func scheduleDragReset() {
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
-            isDragging = false
-        }
     }
 
     private func close() {
