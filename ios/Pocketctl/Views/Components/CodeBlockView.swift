@@ -6,6 +6,19 @@ struct CodeBlockView: View {
     let language: String?
 
     @State private var isCopied = false
+    @State private var isExpanded = false
+
+    private let collapsedLineLimit = 50
+
+    private var isLong: Bool {
+        code.components(separatedBy: "\n").count > collapsedLineLimit
+    }
+
+    private var displayCode: String {
+        guard isLong, !isExpanded else { return code }
+        let lines = code.components(separatedBy: "\n")
+        return lines.prefix(collapsedLineLimit).joined(separator: "\n")
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -14,11 +27,30 @@ struct CodeBlockView: View {
 
             // Code content with syntax highlighting
             ScrollView(.horizontal, showsIndicators: false) {
-                Text(SyntaxHighlighter.highlight(code, language: language))
+                Text(SyntaxHighlighter.highlight(displayCode, language: language))
                     .font(PCFont.mono(13))
                     .padding(.horizontal, 12)
                     .padding(.vertical, 10)
                     .frame(maxWidth: .infinity, alignment: .leading)
+            }
+
+            // Expand/collapse toggle for long code
+            if isLong {
+                Button {
+                    withAnimation(.easeInOut(duration: 0.2)) {
+                        isExpanded.toggle()
+                    }
+                } label: {
+                    HStack(spacing: 4) {
+                        Text(isExpanded ? "收起" : "展开全部 (\(code.components(separatedBy: "\n").count) 行)")
+                            .font(PCFont.body(12))
+                        Image(systemName: isExpanded ? "chevron.up" : "chevron.down")
+                            .font(.system(size: 10))
+                    }
+                    .foregroundStyle(Color.pcAccent)
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 6)
+                }
             }
         }
         .background(Color.pcCodeBg)

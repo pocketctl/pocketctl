@@ -4,9 +4,18 @@ import SwiftUI
 struct MarkdownContentView: View {
     let content: String
 
+    /// Pre-computed parsed segments — computed once in init, not on every body call
+    private let segments: [Segment]
+
+    init(content: String) {
+        self.content = content
+        let sanitized = Self.sanitizeCommandTags(content)
+        self.segments = Self.parseSegments(sanitized)
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
-            ForEach(Array(parseSegments().enumerated()), id: \.offset) { _, segment in
+            ForEach(Array(segments.enumerated()), id: \.offset) { _, segment in
                 switch segment {
                 case .text(let text):
                     renderText(text)
@@ -25,7 +34,7 @@ struct MarkdownContentView: View {
 
     @ViewBuilder
     private func renderText(_ text: String) -> some View {
-        let parts = parseInlineFormatting(text)
+        let parts = Self.parseInlineFormatting(text)
         InlineFormattedText(parts: parts)
     }
 
@@ -56,7 +65,7 @@ struct MarkdownContentView: View {
         }
     }
 
-    private func parseInlineFormatting(_ text: String) -> [InlinePart] {
+    private static func parseInlineFormatting(_ text: String) -> [InlinePart] {
         var parts: [InlinePart] = []
         var current = ""
         var i = text.startIndex
@@ -112,8 +121,7 @@ struct MarkdownContentView: View {
         case codeBlock(language: String?, code: String)
     }
 
-    private func parseSegments() -> [Segment] {
-        let sanitized = sanitizeCommandTags(content)
+    private static func parseSegments(_ sanitized: String) -> [Segment] {
         let lines = sanitized.components(separatedBy: "\n")
         var segments: [Segment] = []
         var currentText: [String] = []
@@ -212,13 +220,13 @@ struct MarkdownContentView: View {
         return segments
     }
 
-    private func isTableLine(_ line: String) -> Bool {
+    private static func isTableLine(_ line: String) -> Bool {
         guard line.hasPrefix("|") || line.contains("|") else { return false }
         let pipeCount = line.filter({ $0 == "|" }).count
         return pipeCount >= 2
     }
 
-    private func isSeparatorLine(_ line: String) -> Bool {
+    private static func isSeparatorLine(_ line: String) -> Bool {
         let stripped = line.replacingOccurrences(of: "|", with: "")
             .replacingOccurrences(of: "-", with: "")
             .replacingOccurrences(of: " ", with: "")
@@ -226,7 +234,7 @@ struct MarkdownContentView: View {
         return stripped.isEmpty
     }
 
-    private func parseTableRow(_ line: String) -> [String] {
+    private static func parseTableRow(_ line: String) -> [String] {
         var trimmed = line.trimmingCharacters(in: .whitespaces)
         if trimmed.hasPrefix("|") {
             trimmed = String(trimmed.dropFirst())
@@ -242,7 +250,10 @@ struct MarkdownContentView: View {
     // MARK: - Command tag sanitization
 
     /// Strip Claude Code command tags and convert to terminal-like display
-    private func sanitizeCommandTags(_ text: String) -> String {
+    private static func sanitizeCommandTags(_ text: String) -> String {
+        // Fast path: skip all regex if no XML tags present
+        guard text.contains("<") else { return text }
+
         var result = text
 
         // Remove local-command-caveat wrapper, keep inner content
@@ -271,7 +282,7 @@ struct MarkdownContentView: View {
     }
 
     /// Remove opening and closing tags, keep the content between them
-    private func stripTag(_ text: String, tag: String) -> String {
+    private static func stripTag(_ text: String, tag: String) -> String {
         let openPattern = #"<\#(tag)[^>]*>"#
         let closePattern = #"</\#(tag)>"#
         var result = text

@@ -84,9 +84,8 @@ struct ToolCallCard: View {
                             .textCase(.uppercase)
                             .kerning(0.5)
 
-                        let lines = output.components(separatedBy: "\n")
-                        let showToggle = lines.count > 20 || output.count > 2000
-                        let displayOutput = isOutputExpanded || !showToggle ? output : lines.prefix(20).joined(separator: "\n")
+                        let isLong = message.isOutputLong
+                        let displayOutput = isOutputExpanded ? output : (message.truncatedOutput ?? output)
 
                         ScrollView(.horizontal, showsIndicators: false) {
                             Text(SyntaxHighlighter.highlight(displayOutput, language: outputLanguage))
@@ -97,11 +96,11 @@ struct ToolCallCard: View {
                         .background(Color.pcCodeBg)
                         .cornerRadius(PCRadius.sm)
 
-                        if showToggle {
+                        if isLong {
                             Button {
                                 isOutputExpanded.toggle()
                             } label: {
-                                Text(isOutputExpanded ? "收起" : "展开全部 (\(lines.count) 行)")
+                                Text(isOutputExpanded ? "收起" : "展开全部 (\(output.components(separatedBy: "\n").count) 行)")
                                     .font(PCFont.body(12))
                                     .foregroundStyle(Color.pcAccent)
                             }

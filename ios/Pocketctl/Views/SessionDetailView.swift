@@ -115,7 +115,7 @@ struct SessionDetailView: View {
         }
         .onAppear {
             if let vm = viewModel {
-                vm.refresh()
+                vm.onReturn()
             }
         }
     }

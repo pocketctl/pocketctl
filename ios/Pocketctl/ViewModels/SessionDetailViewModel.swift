@@ -118,15 +118,34 @@ final class SessionDetailViewModel {
         }
     }
 
-    /// Re-register event handler and replay session history.
-    /// Called on .onAppear when returning to this view.
-    func refresh() {
+    /// Incremental refresh — called on .onAppear when returning to this view.
+    /// Only fetches events after lastEventSeq, does NOT clear existing messages.
+    func onReturn() {
         if eventListenerId == nil {
             eventListenerId = wsService.addEventListener { [weak self] dict in
                 self?.handleEvent(dict)
             }
         }
-        // Clear and do full replay
+        guard wsService.isConnected, lastEventSeq > 0 else {
+            // No previous data or not connected — do full replay
+            forceRefresh()
+            return
+        }
+        isLoading = true
+        wsService.send([
+            "type": "replay",
+            "session_id": session.sessionId,
+            "last_seq": lastEventSeq,
+        ])
+    }
+
+    /// Full refresh — clears all messages and replays from seq 0.
+    func forceRefresh() {
+        if eventListenerId == nil {
+            eventListenerId = wsService.addEventListener { [weak self] dict in
+                self?.handleEvent(dict)
+            }
+        }
         messages.removeAll(keepingCapacity: true)
         subAgents.removeAll(keepingCapacity: true)
         msgCounter = 0
@@ -137,7 +156,6 @@ final class SessionDetailViewModel {
             "session_id": session.sessionId,
             "last_seq": 0,
         ])
-        // isLoading set to false by replay_end
     }
 
     /// Send a user message (will appear when relay echoes it back as userText)
@@ -158,16 +176,25 @@ final class SessionDetailViewModel {
         // ── Replay control events (no session ID filter) ──
 
         if event.type == .replayBatch {
+            // Buffer all batch events into local variables to avoid
+            // triggering @Observable notification on every append.
+            var bufMessages = messages
+            var bufSubAgents = subAgents
+
             isBatchProcessing = true
             if let batchEvents = event.events {
                 for evtDict in batchEvents {
-                    handleEvent(evtDict)
+                    handleEventDirect(evtDict, messages: &bufMessages, subAgents: &bufSubAgents)
                 }
             }
             if let seq = event.lastSeq {
                 lastEventSeq = seq
             }
             isBatchProcessing = false
+
+            // Single assignment triggers one SwiftUI view update
+            messages = bufMessages
+            subAgents = bufSubAgents
             scrollTick += 1
             return
         }
@@ -249,7 +276,199 @@ final class SessionDetailViewModel {
         }
     }
 
-    // MARK: - Individual event handlers
+    // MARK: - Direct event handling (batch mode — operates on inout buffers)
+
+    private func handleEventDirect(_ dict: [String: Any], messages: inout [ChatMessage], subAgents: inout [String: SubAgent]) {
+        guard let event = WebSocketEvent(dict: dict) else { return }
+
+        // Sub-agent events
+        if let agentId = event.agentId {
+            handleSubAgentEventDirect(agentId: agentId, event: event, dict: dict, subAgents: &subAgents)
+            return
+        }
+
+        switch event.type {
+        case .agentText:
+            handleAgentTextDirect(event, messages: &messages)
+
+        case .userText:
+            handleUserTextDirect(event, messages: &messages)
+
+        case .toolCall:
+            handleToolCallDirect(event, dict: dict, messages: &messages)
+
+        case .toolResult:
+            handleToolResultDirect(event, messages: &messages)
+
+        case .subagentDiscovered:
+            handleSubagentDiscoveredDirect(event, dict: dict, messages: &messages, subAgents: &subAgents)
+
+        case .sessionStatus:
+            status = event.status ?? status
+            exitReason = event.exitReason ?? exitReason
+
+        case .sessionTitleUpdate:
+            title = event.title
+
+        case .error:
+            msgCounter += 1
+            messages.append(ChatMessage(
+                id: msgCounter,
+                role: .agent,
+                type: .error,
+                content: event.error ?? "未知错误",
+                streaming: false
+            ))
+
+        default:
+            break
+        }
+    }
+
+    // MARK: - Individual event handlers (direct mode for batch)
+
+    private func handleAgentTextDirect(_ event: WebSocketEvent, messages: inout [ChatMessage]) {
+        guard let text = event.text else { return }
+
+        if event.streaming,
+           let last = messages.last,
+           last.type == .agentText,
+           last.streaming {
+            messages[messages.count - 1].content += text
+        } else {
+            msgCounter += 1
+            messages.append(ChatMessage(
+                id: msgCounter,
+                role: .agent,
+                type: .agentText,
+                content: text,
+                streaming: event.streaming
+            ))
+        }
+
+        if !event.streaming, let last = messages.last, last.streaming {
+            messages[messages.count - 1].streaming = false
+        }
+        // No scrollTick during batch — handled by caller
+    }
+
+    private func handleUserTextDirect(_ event: WebSocketEvent, messages: inout [ChatMessage]) {
+        guard var text = event.text, !text.isEmpty else { return }
+
+        text = sanitizeUserMessage(text)
+        guard !text.isEmpty else { return }
+
+        if let last = messages.last, last.role == .user, last.content == text {
+            return
+        }
+
+        msgCounter += 1
+        messages.append(ChatMessage(
+            id: msgCounter,
+            role: .user,
+            type: nil,
+            content: text,
+            streaming: false
+        ))
+    }
+
+    private func handleToolCallDirect(_ event: WebSocketEvent, dict: [String: Any], messages: inout [ChatMessage]) {
+        msgCounter += 1
+        let inputDesc = formatToolInput(tool: event.tool, input: event.input)
+        messages.append(ChatMessage(
+            id: msgCounter,
+            role: .agent,
+            type: .toolCall,
+            content: "",
+            streaming: false,
+            tool: event.tool,
+            callId: event.callId,
+            inputDescription: inputDesc
+        ))
+    }
+
+    private func handleToolResultDirect(_ event: WebSocketEvent, messages: inout [ChatMessage]) {
+        guard let callId = event.callId else { return }
+        if let index = messages.lastIndex(where: { $0.type == .toolCall && $0.callId == callId }) {
+            messages[index].output = event.output ?? ""
+
+            if messages[index].tool == "Agent" && messages[index].subAgentId != nil {
+                messages[index].output = "子智能体已完成"
+            }
+        }
+    }
+
+    private func handleSubagentDiscoveredDirect(_ event: WebSocketEvent, dict: [String: Any], messages: inout [ChatMessage], subAgents: inout [String: SubAgent]) {
+        guard let agentId = event.agentId else { return }
+        let subAgent = SubAgent(
+            agentId: agentId,
+            description: event.subagentDesc ?? "",
+            agentType: event.subagentType ?? "",
+            messages: [],
+            status: "completed"
+        )
+        subAgents[agentId] = subAgent
+
+        if let callId = event.callId,
+           let index = messages.lastIndex(where: { $0.type == .toolCall && $0.callId == callId }) {
+            messages[index].subAgentId = agentId
+        }
+    }
+
+    private func handleSubAgentEventDirect(agentId: String, event: WebSocketEvent, dict: [String: Any], subAgents: inout [String: SubAgent]) {
+        guard subAgents[agentId] != nil else { return }
+
+        switch event.type {
+        case .agentText:
+            if let text = event.text {
+                var agent = subAgents[agentId]!
+                if event.streaming, let last = agent.messages.last, last.streaming {
+                    agent.messages[agent.messages.count - 1].content += text
+                } else {
+                    msgCounter += 1
+                    agent.messages.append(ChatMessage(
+                        id: msgCounter,
+                        role: .agent,
+                        type: .agentText,
+                        content: text,
+                        streaming: event.streaming
+                    ))
+                }
+                if !event.streaming, let last = agent.messages.last, last.streaming {
+                    agent.messages[agent.messages.count - 1].streaming = false
+                }
+                subAgents[agentId] = agent
+            }
+
+        case .toolCall:
+            var agent = subAgents[agentId]!
+            msgCounter += 1
+            agent.messages.append(ChatMessage(
+                id: msgCounter,
+                role: .agent,
+                type: .toolCall,
+                content: "",
+                streaming: false,
+                tool: event.tool,
+                callId: event.callId,
+                inputDescription: formatToolInput(tool: event.tool, input: event.input)
+            ))
+            subAgents[agentId] = agent
+
+        case .toolResult:
+            var agent = subAgents[agentId]!
+            if let callId = event.callId,
+               let index = agent.messages.lastIndex(where: { $0.type == .toolCall && $0.callId == callId }) {
+                agent.messages[index].output = event.output ?? ""
+            }
+            subAgents[agentId] = agent
+
+        default:
+            break
+        }
+    }
+
+    // MARK: - Individual event handlers (live mode — operates on self)
 
     private func handleAgentText(_ event: WebSocketEvent) {
         guard let text = event.text else { return }
@@ -405,6 +624,9 @@ final class SessionDetailViewModel {
 
     /// Sanitize user message content: extract slash command name or strip XML tags
     private func sanitizeUserMessage(_ text: String) -> String {
+        // Fast path: skip regex if no XML tags present
+        guard text.contains("<command-") || text.contains("<local-command") else { return text }
+
         // Check if this is a slash command message
         if let cmdName = extractTagContent(text, tag: "command-name") {
             var clean = cmdName

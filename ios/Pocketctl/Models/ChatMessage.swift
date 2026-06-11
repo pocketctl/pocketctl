@@ -33,6 +33,19 @@ struct ChatMessage: Identifiable, Sendable {
     var isRunning: Bool {
         type == .toolCall && output == nil
     }
+
+    /// Truncated output for display (first 2000 chars)
+    var truncatedOutput: String? {
+        guard let output else { return nil }
+        if output.count <= 2000 { return output }
+        return String(output.prefix(2000))
+    }
+
+    /// Whether the output is long enough to need truncation
+    var isOutputLong: Bool {
+        guard let output else { return false }
+        return output.count > 2000 || output.components(separatedBy: "\n").count > 50
+    }
 }
 
 extension ChatMessage {
