@@ -43,6 +43,38 @@ func VerifySMS(baseURL, phone, code string) (accessToken, refreshToken string, e
 	return at, rt, nil
 }
 
+// SendEmailCode requests a verification code for the given email address.
+func SendEmailCode(baseURL, email string) error {
+	resp, err := postJSON(baseURL+"/api/auth/email/send", map[string]string{"email": email})
+	if err != nil {
+		return err
+	}
+	if resp["success"] == true {
+		return nil
+	}
+	if msg, ok := resp["error"].(string); ok {
+		return fmt.Errorf("%s", msg)
+	}
+	return fmt.Errorf("unexpected response")
+}
+
+// VerifyEmailCode verifies the email code and returns access/refresh tokens.
+func VerifyEmailCode(baseURL, email, code string) (accessToken, refreshToken string, err error) {
+	resp, err := postJSON(baseURL+"/api/auth/email/verify", map[string]string{"email": email, "code": code})
+	if err != nil {
+		return "", "", err
+	}
+	at, _ := resp["access_token"].(string)
+	rt, _ := resp["refresh_token"].(string)
+	if at == "" {
+		if msg, ok := resp["error"].(string); ok {
+			return "", "", fmt.Errorf("%s", msg)
+		}
+		return "", "", fmt.Errorf("verification failed")
+	}
+	return at, rt, nil
+}
+
 // RefreshToken refreshes an access token using a refresh token.
 func RefreshToken(baseURL, refreshToken string) (accessToken, newRefreshToken string, err error) {
 	resp, err := postJSON(baseURL+"/api/auth/refresh", map[string]string{"refresh_token": refreshToken})

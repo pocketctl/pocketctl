@@ -2,19 +2,21 @@ import { createApp } from 'vue'
 import { createRouter, createWebHistory } from 'vue-router'
 import App from './App.vue'
 import LoginView from './views/LoginView.vue'
-import SessionList from './views/SessionList.vue'
+import DashboardView from './views/DashboardView.vue'
 import SessionDetail from './views/SessionDetail.vue'
+import SettingsView from './views/SettingsView.vue'
 
 const router = createRouter({
   history: createWebHistory(),
   routes: [
     { path: '/login', component: LoginView },
-    { path: '/', component: SessionList, meta: { requiresAuth: true } },
+    { path: '/', component: DashboardView, meta: { requiresAuth: true } },
     { path: '/session/:id', component: SessionDetail, props: true, meta: { requiresAuth: true } },
+    { path: '/settings', component: SettingsView, meta: { requiresAuth: true } },
   ],
 })
 
-// 路由守卫：未登录时跳转登录页
+// Route guard: redirect to login if not authenticated
 router.beforeEach((to) => {
   const token = localStorage.getItem('pocketctl_access_token')
   if (to.meta.requiresAuth && !token) {

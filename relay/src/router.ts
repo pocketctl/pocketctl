@@ -244,6 +244,7 @@ export class Router {
     if (msg.session_id) client.subscribedSessions.add(msg.session_id);
     if (msg.type === 'replay') { this.handleReplay(clientWs, msg.session_id, msg.last_seq); return; }
     if (msg.type === 'list_sessions') { this.handleListSessions(clientWs, client.userId); return; }
+    if (msg.type === 'list_daemons') { console.log('[router] list_daemons from user', client.userId, 'daemons in map:', this.daemons.size); this.handleListDaemons(clientWs, client.userId); return; }
 
     if (msg.type === 'session_delete') {
       const sessionId = msg.session_id;
@@ -329,6 +330,47 @@ export class Router {
   }
 
   /** Check if two user IDs match (both null = legacy, same ID = same user) */
+  private async handleListDaemons(clientWs: WebSocket, userId: number | null): Promise<void> {
+    try {
+      const daemonList: any[] = [];
+      for (const [, daemon] of this.daemons) {
+        console.log('[router] list_daemons iterating daemon', daemon.daemonId, 'daemon.userId:', daemon.userId, 'request.userId:', userId);
+        if (!this.sameUser(daemon.userId, userId)) continue;
+        const alias = await db.getDaemonAlias(this.pool, daemon.daemonId);
+        daemonList.push({
+          daemon_id: daemon.daemonId,
+          hostname: daemon.hostname,
+          agents: daemon.agents,
+          daemon_online: true,
+          daemon_alias: alias,
+          status: 'online',
+        });
+      }
+      // Also include offline daemons from DB for this user
+      if (userId) {
+        try {
+          const result = await this.pool.query(
+            `SELECT daemon_id, hostname, agents, alias, status, last_heartbeat FROM daemons WHERE user_id = $1 AND status = 'offline'`,
+            [userId]
+          );
+          for (const row of result.rows) {
+            daemonList.push({
+              daemon_id: row.daemon_id,
+              hostname: row.hostname,
+              agents: row.agents || [],
+              daemon_online: false,
+              daemon_alias: row.alias,
+              status: 'offline',
+              last_seen_at: row.last_heartbeat,
+            });
+          }
+        } catch (e) { console.error('list_daemons offline:', e); }
+      }
+      console.log('[router] list_daemons sending', daemonList.length, 'daemons to user', userId);
+    this.send(clientWs, { type: 'daemon_list', daemons: daemonList });
+    } catch (err) { console.error('list_daemons error:', err); }
+  }
+
   private sameUser(a: number | null, b: number | null): boolean {
     if (a === null && b === null) return true;  // both legacy
     return a === b;

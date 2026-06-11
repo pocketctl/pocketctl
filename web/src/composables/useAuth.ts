@@ -2,7 +2,8 @@ import { ref, computed } from 'vue'
 
 export interface UserInfo {
   id: number
-  email: string
+  email: string | null
+  phone: string | null
   display_name: string | null
 }
 
@@ -18,7 +19,6 @@ if (savedUser && accessToken.value) {
 
 function getRelayOrigin(): string {
   const relayWs = localStorage.getItem('pocketctl_relay_url') || (window as any).__RELAY_WS__ || ''
-  // Extract origin from WebSocket URL: wss://host/ws -> https://host
   try {
     const url = new URL(relayWs)
     return url.origin.replace(/^ws/, 'http')
@@ -43,6 +43,38 @@ async function apiRequest(path: string, body: any): Promise<{ ok: boolean; data:
   }
 }
 
+// --- Phone SMS Auth ---
+
+async function sendSmsCode(phone: string): Promise<string | null> {
+  const { ok, data } = await apiRequest('/api/auth/sms/send', { phone })
+  if (!ok) return data.error || '发送失败'
+  return null
+}
+
+async function loginViaPhone(phone: string, code: string): Promise<string | null> {
+  const { ok, data } = await apiRequest('/api/auth/sms/verify', { phone, code })
+  if (!ok) return data.error || '验证失败'
+  saveTokens(data)
+  return null
+}
+
+// --- Email Verification Code Auth ---
+
+async function sendEmailCode(email: string): Promise<string | null> {
+  const { ok, data } = await apiRequest('/api/auth/email/send', { email })
+  if (!ok) return data.error || '发送失败'
+  return null
+}
+
+async function loginViaEmail(email: string, code: string): Promise<string | null> {
+  const { ok, data } = await apiRequest('/api/auth/email/verify', { email, code })
+  if (!ok) return data.error || '验证失败'
+  saveTokens(data)
+  return null
+}
+
+// --- Legacy (deprecated) ---
+
 async function login(email: string, password: string): Promise<string | null> {
   const { ok, data } = await apiRequest('/api/auth/login', { email, password })
   if (!ok) return data.error || '登录失败'
@@ -56,6 +88,8 @@ async function register(email: string, password: string, displayName?: string): 
   saveTokens(data)
   return null
 }
+
+// --- Token Management ---
 
 function saveTokens(data: any) {
   accessToken.value = data.access_token
@@ -89,5 +123,11 @@ function logout() {
 const isLoggedIn = computed(() => !!accessToken.value && !!user.value)
 
 export function useAuth() {
-  return { user, accessToken, refreshToken, isLoggedIn, login, register, doRefreshToken, logout }
+  return {
+    user, accessToken, refreshToken, isLoggedIn,
+    login, register,                        // legacy (deprecated)
+    sendSmsCode, loginViaPhone,             // phone SMS
+    sendEmailCode, loginViaEmail,           // email verification code
+    doRefreshToken, logout,
+  }
 }

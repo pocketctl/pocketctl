@@ -41,17 +41,33 @@ const handlers = new Set<EventHandler>()
 let reconnectTimer: ReturnType<typeof setTimeout> | null = null
 let reconnectAttempt = 0
 let currentUrl = ''
+let pendingMessages: any[] = []
 
 // Daemon online tracking
 const daemons = ref<Map<string, DaemonInfo>>(new Map())
 
-function connect(url: string) {
-  if (ws.value && ws.value.readyState === WebSocket.OPEN) return
-  currentUrl = url
-  reconnecting.value = true
-  ws.value = new WebSocket(url)
+function getRelayWsUrl(): string {
+  const base = localStorage.getItem('pocketctl_relay_url') || (window as any).__RELAY_WS__ || 'ws://localhost:8080/ws'
+  const token = localStorage.getItem('pocketctl_access_token')
+  if (!token) return base
+  const sep = base.includes('?') ? '&' : '?'
+  return `${base}${sep}token=${encodeURIComponent(token)}&type=client`
+}
 
-  ws.value.onopen = () => { connected.value = true; reconnecting.value = false; reconnectAttempt = 0 }
+function connect(url?: string) {
+  if (ws.value && ws.value.readyState === WebSocket.OPEN) return
+  currentUrl = url || getRelayWsUrl()
+  reconnecting.value = true
+  ws.value = new WebSocket(currentUrl)
+
+  ws.value.onopen = () => {
+    connected.value = true; reconnecting.value = false; reconnectAttempt = 0
+    // Flush pending messages
+    if (pendingMessages.length > 0) {
+      const msgs = pendingMessages; pendingMessages = []
+      msgs.forEach(m => send(m))
+    }
+  }
   ws.value.onmessage = (event) => {
     try {
       const data = JSON.parse(event.data)
@@ -108,10 +124,28 @@ function scheduleReconnect() {
 }
 
 function send(data: any) {
-  if (ws.value && ws.value.readyState === WebSocket.OPEN) ws.value.send(JSON.stringify(data))
+  if (ws.value && ws.value.readyState === WebSocket.OPEN) {
+    ws.value.send(JSON.stringify(data))
+  } else if (ws.value && ws.value.readyState === WebSocket.CONNECTING) {
+    // Buffer until connected
+    pendingMessages.push(data)
+  }
 }
 
-function onEvent(handler: EventHandler) { handlers.add(handler); return () => handlers.delete(handler) }
+function onEvent(typeOrHandler: string | EventHandler, maybeHandler?: EventHandler) {
+  if (typeof typeOrHandler === 'function') {
+    handlers.add(typeOrHandler)
+    return () => handlers.delete(typeOrHandler)
+  }
+  if (maybeHandler) {
+    const wrapped: EventHandler = (data: any) => {
+      if (data.type === typeOrHandler) maybeHandler(data)
+    }
+    handlers.add(wrapped)
+    return () => handlers.delete(wrapped)
+  }
+  throw new Error('onEvent requires a handler function or (type, handler)')
+}
 
 export function useWebSocket() {
   return { ws, connected, reconnecting, daemons, isDaemonOnline, effectiveStatus, connect, send, onEvent }

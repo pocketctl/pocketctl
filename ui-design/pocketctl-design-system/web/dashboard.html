@@ -1,0 +1,653 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="dark">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>pocketctl — 仪表盘</title>
+<link rel="stylesheet" href="../css/web-shared.css">
+<style>
+  /* ---- Daemon Cards ---- */
+  .daemon-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(360px, 1fr));
+    gap: 16px;
+    margin-bottom: 32px;
+  }
+
+  .daemon-card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-lg);
+    padding: 20px;
+    transition: all 0.2s;
+    cursor: pointer;
+  }
+
+  .daemon-card:hover {
+    border-color: var(--border-light);
+    box-shadow: var(--shadow-sm);
+  }
+
+  .daemon-card .card-header {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin-bottom: 12px;
+  }
+
+  .daemon-card .daemon-icon {
+    width: 40px;
+    height: 40px;
+    border-radius: var(--radius-md);
+    background: var(--surface-active);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+  }
+
+  .daemon-card .daemon-icon svg { width: 20px; height: 20px; color: var(--fg-secondary); }
+
+  .daemon-card .daemon-name {
+    flex: 1;
+    min-width: 0;
+  }
+
+  .daemon-card .daemon-name h3 {
+    font-size: 15px;
+    font-weight: 600;
+    color: var(--fg);
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+
+  .daemon-card .daemon-name h3 .alias-badge {
+    font-size: 10px;
+    font-weight: 500;
+    color: var(--accent);
+    background: var(--accent-muted);
+    padding: 1px 6px;
+    border-radius: 4px;
+    display: none;
+  }
+
+  .daemon-card .daemon-name h3 .alias-badge.visible { display: inline-block; }
+
+  .daemon-card .daemon-name .daemon-host {
+    font-size: 12px;
+    color: var(--fg-tertiary);
+    font-family: var(--font-mono);
+    margin-top: 2px;
+  }
+
+  .daemon-card .card-stats {
+    display: flex;
+    gap: 16px;
+    margin-bottom: 12px;
+    padding-top: 12px;
+    border-top: 1px solid var(--border);
+  }
+
+  .daemon-card .stat {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+  }
+
+  .daemon-card .stat .stat-value {
+    font-size: 20px;
+    font-weight: 700;
+    color: var(--fg);
+    font-family: var(--font-display);
+  }
+
+  .daemon-card .stat .stat-label {
+    font-size: 12px;
+    color: var(--fg-tertiary);
+  }
+
+  .daemon-card .stat .stat-value.accent { color: var(--accent); }
+
+  .daemon-card .card-meta {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    font-size: 12px;
+    color: var(--fg-tertiary);
+  }
+
+  .daemon-card .card-meta .agents {
+    display: flex;
+    gap: 6px;
+  }
+
+  .daemon-card .edit-name-btn {
+    background: none;
+    border: none;
+    color: var(--fg-tertiary);
+    cursor: pointer;
+    padding: 4px;
+    border-radius: 4px;
+    display: flex;
+    align-items: center;
+    opacity: 0;
+    transition: opacity 0.15s, color 0.15s;
+  }
+
+  .daemon-card:hover .edit-name-btn { opacity: 1; }
+  .daemon-card .edit-name-btn:hover { color: var(--accent); }
+
+  .daemon-card .reset-name-btn {
+    background: none;
+    border: none;
+    color: var(--fg-tertiary);
+    font-size: 11px;
+    cursor: pointer;
+    padding: 2px 6px;
+    border-radius: 4px;
+    display: none;
+    transition: color 0.15s;
+  }
+
+  .daemon-card .reset-name-btn.visible { display: inline-block; }
+  .daemon-card .reset-name-btn:hover { color: var(--accent); }
+
+  .daemon-card .rename-row {
+    display: none;
+    align-items: center;
+    gap: 6px;
+    margin-bottom: 8px;
+    animation: fade-in 0.15s ease;
+  }
+
+  .daemon-card .rename-row.visible { display: flex; }
+
+  .daemon-card .rename-input {
+    flex: 1;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 6px 10px;
+    font-family: var(--font-body);
+    font-size: 14px;
+    color: var(--fg);
+    outline: none;
+    transition: border-color 0.15s;
+  }
+
+  .daemon-card .rename-input:focus { border-color: var(--accent); }
+
+  .rename-action {
+    background: none;
+    border: none;
+    cursor: pointer;
+    padding: 4px;
+    border-radius: 4px;
+    display: flex;
+    align-items: center;
+    color: var(--fg-tertiary);
+    transition: color 0.15s;
+  }
+
+  .rename-action.confirm:hover { color: var(--success); }
+  .rename-action.cancel:hover { color: var(--error); }
+
+  /* ---- Session Table ---- */
+  .session-table {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-lg);
+    overflow: hidden;
+    transition: background var(--transition), border-color var(--transition);
+  }
+
+  .session-table-header {
+    display: grid;
+    grid-template-columns: 2fr 1fr 1fr 120px;
+    padding: 12px 20px;
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--fg-tertiary);
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    border-bottom: 1px solid var(--border);
+    background: var(--surface-hover);
+  }
+
+  .session-row {
+    display: grid;
+    grid-template-columns: 2fr 1fr 1fr 120px;
+    padding: 14px 20px;
+    align-items: center;
+    border-bottom: 1px solid var(--border);
+    cursor: pointer;
+    transition: background 0.1s;
+  }
+
+  .session-row:last-child { border-bottom: none; }
+  .session-row:hover { background: var(--surface-hover); }
+
+  .session-row .session-info {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
+
+  .session-row .session-info .session-title {
+    font-size: 14px;
+    font-weight: 500;
+    color: var(--fg);
+  }
+
+  .session-row .session-info .session-title.mono {
+    font-family: var(--font-mono);
+    font-size: 13px;
+    color: var(--accent);
+  }
+
+  .session-row .session-daemon {
+    font-size: 13px;
+    color: var(--fg-secondary);
+  }
+
+  .session-row .session-time {
+    font-size: 13px;
+    color: var(--fg-tertiary);
+  }
+
+  .session-row .session-actions {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    justify-content: flex-end;
+  }
+
+  /* ---- Quick Stats Bar ---- */
+  .quick-stats {
+    display: flex;
+    gap: 12px;
+    margin-bottom: 24px;
+  }
+
+  .quick-stat {
+    flex: 1;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-lg);
+    padding: 16px 20px;
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    transition: background var(--transition), border-color var(--transition);
+  }
+
+  .quick-stat .stat-icon {
+    width: 40px;
+    height: 40px;
+    border-radius: var(--radius-md);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 20px;
+  }
+
+  .quick-stat .stat-icon.blue { background: var(--accent-muted); color: var(--accent); }
+  .quick-stat .stat-icon.green { background: var(--success-bg); color: var(--success); }
+  .quick-stat .stat-icon.amber { background: var(--warning-bg); color: var(--warning); }
+
+  .quick-stat .stat-text .stat-number {
+    font-size: 24px;
+    font-weight: 700;
+    color: var(--fg);
+    font-family: var(--font-display);
+    line-height: 1;
+  }
+
+  .quick-stat .stat-text .stat-desc {
+    font-size: 12px;
+    color: var(--fg-tertiary);
+    margin-top: 2px;
+  }
+
+  /* Empty state for sessions */
+  .session-empty {
+    padding: 48px;
+    text-align: center;
+  }
+
+  @media (max-width: 768px) {
+    .daemon-grid { grid-template-columns: 1fr; }
+    .quick-stats { flex-direction: column; }
+    .session-table-header, .session-row { grid-template-columns: 1fr; }
+    .session-table-header .col-daemon,
+    .session-table-header .col-time,
+    .session-table-header .col-actions,
+    .session-row .session-daemon,
+    .session-row .session-time,
+    .session-row .session-actions { display: none; }
+  }
+</style>
+</head>
+<body>
+<div class="app-layout">
+  <!-- Sidebar -->
+  <nav class="sidebar" id="sidebar">
+    <a href="dashboard.html" class="sidebar-logo">
+      <img id="sidebar-logo" src="../assets/logo-github-org.svg" alt="pocketctl">
+      <span class="brand-name">pocketctl</span>
+    </a>
+
+    <div class="sidebar-nav">
+      <div class="sidebar-section-label">概览</div>
+      <a href="dashboard.html" class="sidebar-link active">
+        <span class="link-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg></span>
+        <span class="link-text">仪表盘</span>
+      </a>
+      <a href="session-detail.html" class="sidebar-link">
+        <span class="link-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15a2 2 0 01-2 2H7l-4 4V5a2 2 0 012-2h14a2 2 0 012 2z"/></svg></span>
+        <span class="link-text">会话</span>
+        <span class="badge">5</span>
+      </a>
+
+      <div class="sidebar-section-label">管理</div>
+      <a href="#" class="sidebar-link">
+        <span class="link-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="2" width="20" height="20" rx="3"/><path d="M7 2v20M17 2v20M2 12h20"/></svg></span>
+        <span class="link-text">主机</span>
+        <span class="badge">2</span>
+      </a>
+      <a href="settings.html" class="sidebar-link">
+        <span class="link-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M12 1v2M12 21v2M4.22 4.22l1.42 1.42M18.36 18.36l1.42 1.42M1 12h2M21 12h2M4.22 19.78l1.42-1.42M18.36 5.64l1.42-1.42"/></svg></span>
+        <span class="link-text">设置</span>
+      </a>
+    </div>
+
+    <div class="sidebar-footer">
+      <div class="sidebar-user" onclick="location.href='settings.html'">
+        <div class="user-avatar">M</div>
+        <div class="user-info">
+          <div class="user-name">138****8888</div>
+          <div class="user-plan">免费版</div>
+        </div>
+      </div>
+    </div>
+  </nav>
+
+  <!-- Main Content -->
+  <main class="main-content">
+    <!-- Topbar -->
+    <header class="topbar">
+      <div class="topbar-breadcrumb">
+        <span>概览</span>
+      </div>
+      <div class="topbar-actions">
+        <button class="btn btn-secondary" onclick="showNewSession()">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 5v14M5 12h14"/></svg>
+          新建会话
+        </button>
+        <button class="theme-toggle" onclick="toggleTheme()" title="切换主题" id="theme-btn">
+          <svg id="icon-moon" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 12.79A9 9 0 1111.21 3 7 7 0 0021 12.79z"/></svg>
+          <svg id="icon-sun" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="display:none;"><circle cx="12" cy="12" r="5"/><path d="M12 1v2M12 21v2M4.22 4.22l1.42 1.42M18.36 18.36l1.42 1.42M1 12h2M21 12h2M4.22 19.78l1.42-1.42M18.36 5.64l1.42-1.42"/></svg>
+        </button>
+      </div>
+    </header>
+
+    <div class="page-container">
+      <!-- Quick Stats -->
+      <div class="quick-stats">
+        <div class="quick-stat">
+          <div class="stat-icon blue">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="2" width="20" height="20" rx="3"/><path d="M7 2v20"/></svg>
+          </div>
+          <div class="stat-text">
+            <div class="stat-number">2</div>
+            <div class="stat-desc">注册主机</div>
+          </div>
+        </div>
+        <div class="quick-stat">
+          <div class="stat-icon green">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/></svg>
+          </div>
+          <div class="stat-text">
+            <div class="stat-number">3</div>
+            <div class="stat-desc">活跃会话</div>
+          </div>
+        </div>
+        <div class="quick-stat">
+          <div class="stat-icon amber">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg>
+          </div>
+          <div class="stat-text">
+            <div class="stat-number">1</div>
+            <div class="stat-desc">离线主机</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Daemon Section -->
+      <div class="page-header">
+        <div>
+          <h2 class="page-title">我的主机</h2>
+          <div class="page-subtitle">管理和监控你的开发主机</div>
+        </div>
+        <button class="btn btn-secondary">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 5v14M5 12h14"/></svg>
+          注册主机
+        </button>
+      </div>
+
+      <div class="daemon-grid" id="daemon-grid">
+        <!-- Online Daemon -->
+        <div class="daemon-card" id="daemon-0" data-default-name="MacBook-Pro">
+          <div class="card-header">
+            <div class="daemon-icon">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8M12 17v4"/></svg>
+            </div>
+            <div class="daemon-name">
+              <h3>
+                <span id="display-name-0">MacBook-Pro</span>
+                <span class="alias-badge" id="alias-badge-0">别名</span>
+                <button class="edit-name-btn" onclick="event.stopPropagation();startRename(0)" title="编辑别名">
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M11 4H4a2 2 0 00-2 2v14a2 2 0 002 2h14a2 2 0 002-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 013 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>
+                </button>
+                <button class="reset-name-btn" id="reset-0" onclick="event.stopPropagation();resetName(0)">恢复默认</button>
+                <span class="chip chip-online" style="margin-left:auto;">在线</span>
+              </h3>
+              <div class="daemon-host">192.168.1.100 · macOS</div>
+            </div>
+          </div>
+          <div class="rename-row" id="rename-row-0">
+            <input class="rename-input" id="rename-input-0" type="text" placeholder="输入别名…" maxlength="32" onkeydown="handleRenameKey(event, 0)">
+            <button class="rename-action confirm" onclick="event.stopPropagation();confirmRename(0)">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M20 6L9 17l-5-5"/></svg>
+            </button>
+            <button class="rename-action cancel" onclick="event.stopPropagation();cancelRename(0)">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M18 6L6 18M6 6l12 12"/></svg>
+            </button>
+          </div>
+          <div class="card-stats">
+            <div class="stat">
+              <div class="stat-value accent">3</div>
+              <div class="stat-label">活跃会话</div>
+            </div>
+            <div class="stat">
+              <div class="stat-value">12</div>
+              <div class="stat-label">总会话数</div>
+            </div>
+            <div class="stat">
+              <div class="stat-value">2m</div>
+              <div class="stat-label">最后心跳</div>
+            </div>
+          </div>
+          <div class="card-meta">
+            <div class="agents">
+              <span class="chip chip-terminal">Claude Code</span>
+              <span class="chip chip-web">Codex</span>
+            </div>
+            <span>2 分钟前活跃</span>
+          </div>
+        </div>
+
+        <!-- Offline Daemon -->
+        <div class="daemon-card" id="daemon-1" data-default-name="Dev-Server">
+          <div class="card-header">
+            <div class="daemon-icon">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="2" width="20" height="8" rx="2"/><rect x="2" y="14" width="20" height="8" rx="2"/><circle cx="6" cy="6" r="1" fill="currentColor"/><circle cx="6" cy="18" r="1" fill="currentColor"/></svg>
+            </div>
+            <div class="daemon-name">
+              <h3>
+                <span id="display-name-1">Dev-Server</span>
+                <span class="alias-badge" id="alias-badge-1">别名</span>
+                <button class="edit-name-btn" onclick="event.stopPropagation();startRename(1)" title="编辑别名">
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M11 4H4a2 2 0 00-2 2v14a2 2 0 002 2h14a2 2 0 002-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 013 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>
+                </button>
+                <button class="reset-name-btn" id="reset-1" onclick="event.stopPropagation();resetName(1)">恢复默认</button>
+                <span class="chip chip-offline" style="margin-left:auto;">离线</span>
+              </h3>
+              <div class="daemon-host">10.0.0.50 · Ubuntu 22.04</div>
+            </div>
+          </div>
+          <div class="rename-row" id="rename-row-1">
+            <input class="rename-input" id="rename-input-1" type="text" placeholder="输入别名…" maxlength="32" onkeydown="handleRenameKey(event, 1)">
+            <button class="rename-action confirm" onclick="event.stopPropagation();confirmRename(1)">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M20 6L9 17l-5-5"/></svg>
+            </button>
+            <button class="rename-action cancel" onclick="event.stopPropagation();cancelRename(1)">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M18 6L6 18M6 6l12 12"/></svg>
+            </button>
+          </div>
+          <div class="card-stats">
+            <div class="stat">
+              <div class="stat-value" style="color:var(--fg-tertiary);">0</div>
+              <div class="stat-label">活跃会话</div>
+            </div>
+            <div class="stat">
+              <div class="stat-value">5</div>
+              <div class="stat-label">总会话数</div>
+            </div>
+            <div class="stat">
+              <div class="stat-value">3d</div>
+              <div class="stat-label">最后心跳</div>
+            </div>
+          </div>
+          <div class="card-meta">
+            <div class="agents">
+              <span class="chip chip-terminal">Claude Code</span>
+            </div>
+            <span>3 天前活跃</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- Sessions Section -->
+      <div class="page-header" style="margin-top:16px;">
+        <div>
+          <h2 class="page-title">最近会话</h2>
+          <div class="page-subtitle">跨所有主机的会话活动</div>
+        </div>
+      </div>
+
+      <div class="session-table">
+        <div class="session-table-header">
+          <span>会话</span>
+          <span class="col-daemon">主机</span>
+          <span class="col-time">时间</span>
+          <span class="col-actions" style="text-align:right;">状态</span>
+        </div>
+        <div class="session-row" onclick="location.href='session-detail.html'">
+          <div class="session-info">
+            <span class="status-dot running"></span>
+            <span class="session-title">重构用户认证模块</span>
+          </div>
+          <div class="session-daemon">MacBook-Pro</div>
+          <div class="session-time">3 分钟前</div>
+          <div class="session-actions"><span class="chip chip-running">运行中</span></div>
+        </div>
+        <div class="session-row" onclick="location.href='session-detail.html'">
+          <div class="session-info">
+            <span class="status-dot busy"></span>
+            <span class="session-title">修复 CI 构建错误</span>
+          </div>
+          <div class="session-daemon">MacBook-Pro</div>
+          <div class="session-time">8 分钟前</div>
+          <div class="session-actions"><span class="chip chip-busy">繁忙</span></div>
+        </div>
+        <div class="session-row" onclick="location.href='session-detail.html'">
+          <div class="session-info">
+            <span class="status-dot completed"></span>
+            <span class="session-title mono">sess_a3f7b2c1</span>
+          </div>
+          <div class="session-daemon">MacBook-Pro</div>
+          <div class="session-time">1 小时前</div>
+          <div class="session-actions"><span class="chip chip-terminal">已完成</span></div>
+        </div>
+        <div class="session-row" onclick="location.href='session-detail.html'">
+          <div class="session-info">
+            <span class="status-dot error"></span>
+            <span class="session-title">部署生产环境</span>
+          </div>
+          <div class="session-daemon">MacBook-Pro</div>
+          <div class="session-time">2 小时前</div>
+          <div class="session-actions"><span class="chip chip-offline" style="background:rgba(248,81,73,0.1);color:var(--error);">错误</span></div>
+        </div>
+        <div class="session-row" onclick="location.href='session-detail.html'">
+          <div class="session-info">
+            <span class="status-dot idle"></span>
+            <span class="session-title">编写 API 文档</span>
+          </div>
+          <div class="session-daemon">MacBook-Pro</div>
+          <div class="session-time">3 小时前</div>
+          <div class="session-actions"><span class="chip chip-busy" style="background:rgba(234,179,8,0.1);color:#eab308;">空闲</span></div>
+        </div>
+      </div>
+    </div>
+  </main>
+</div>
+
+<script>
+  /* ---- Theme ---- */
+  function getTheme() { return document.documentElement.getAttribute('data-theme') || 'dark'; }
+  function setTheme(t) {
+    document.documentElement.setAttribute('data-theme', t);
+    localStorage.setItem('pocketctl-theme', t);
+    updateThemeUI(t); updateLogo(t);
+  }
+  function toggleTheme() { setTheme(getTheme() === 'dark' ? 'light' : 'dark'); }
+  function updateThemeUI(t) {
+    document.getElementById('icon-sun').style.display = t === 'dark' ? 'none' : 'block';
+    document.getElementById('icon-moon').style.display = t === 'dark' ? 'block' : 'none';
+  }
+  function updateLogo(t) {
+    document.getElementById('sidebar-logo').src = t === 'dark' ? '../assets/logo-github-org.svg' : '../assets/logo-github-org-light.svg';
+  }
+  const saved = localStorage.getItem('pocketctl-theme');
+  if (saved) setTheme(saved); else { updateThemeUI(getTheme()); updateLogo(getTheme()); }
+
+  /* ---- Alias ---- */
+  const aliases = {};
+  function getCard(i) {
+    return {
+      card: document.getElementById('daemon-' + i),
+      display: document.getElementById('display-name-' + i),
+      badge: document.getElementById('alias-badge-' + i),
+      reset: document.getElementById('reset-' + i),
+      row: document.getElementById('rename-row-' + i),
+      input: document.getElementById('rename-input-' + i),
+    };
+  }
+  function renderAlias(i) {
+    const c = getCard(i);
+    const alias = aliases[i] || null;
+    const defaultName = c.card.dataset.defaultName;
+    c.display.textContent = alias || defaultName;
+    if (alias) { c.badge.classList.add('visible'); c.reset.classList.add('visible'); }
+    else { c.badge.classList.remove('visible'); c.reset.classList.remove('visible'); }
+  }
+  function startRename(i) { const c = getCard(i); c.row.classList.add('visible'); c.input.value = aliases[i] || ''; c.input.focus(); }
+  function confirmRename(i) { const c = getCard(i); const v = c.input.value.trim(); if (v) aliases[i] = v; else delete aliases[i]; c.row.classList.remove('visible'); renderAlias(i); }
+  function cancelRename(i) { getCard(i).row.classList.remove('visible'); }
+  function resetName(i) { delete aliases[i]; renderAlias(i); }
+  function handleRenameKey(e, i) { if (e.key === 'Enter') confirmRename(i); if (e.key === 'Escape') cancelRename(i); }
+</script>
+</body>
+</html>

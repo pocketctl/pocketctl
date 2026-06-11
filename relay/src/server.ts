@@ -6,6 +6,8 @@ import { Router } from './router.js';
 import { hashPassword, verifyPassword, signAccessToken, signRefreshToken, verifyAccessToken, verifyRefreshToken } from './auth.js';
 import { notifyUser, sessionStatusPush, daemonOfflinePush } from './push.js';
 import { sendSmsCode } from './config/sms.js';
+import { sendEmailCode } from './config/email.js';
+import { generateCode, storeCode, verifyCode, hasPendingCode } from './config/verification.js';
 
 const API_KEY = process.env.POCKETCTL_API_KEY || '';
 const DB_URL = process.env.DATABASE_URL || 'postgresql://localhost:5432/pocketctl';
@@ -18,8 +20,6 @@ const RATE_LIMIT_MAX_CONNECTIONS = parseInt(process.env.RATE_LIMIT_MAX_CONNECTIO
 
 const wsDaemonMap = new Map<any, string>();
 
-// Dev-mode SMS verification code store: phone -> { code, expiresAt }
-const smsCodeStore = new Map<string, { code: string; expiresAt: number }>();
 const DEV_SMS_CODE = process.env.DEV_SMS_CODE || '';
 const DEV_SMS_PHONE = process.env.DEV_SMS_PHONE || '';
 
@@ -79,15 +79,17 @@ async function main() {
     };
   });
 
-  // Login
+  // Login (DEPRECATED — use /api/auth/email/verify or /api/auth/sms/verify)
   app.post('/api/auth/login', async (req, reply) => {
+    reply.header('Deprecation', 'true');
+    reply.header('Sunset', 'Sat, 01 Nov 2026 00:00:00 GMT');
     const { email, password } = req.body as any;
     if (!email || !password) {
-      reply.code(400); return { error: 'email and password are required' };
+      reply.code(400); return { error: 'email and password are required. This endpoint is deprecated — use /api/auth/email/verify instead.' };
     }
     const user = await getUserByEmail(pool, email);
     if (!user || !verifyPassword(password, user.password_hash)) {
-      reply.code(401); return { error: 'invalid email or password' };
+      reply.code(401); return { error: 'invalid email or password. This endpoint is deprecated — use /api/auth/email/verify instead.' };
     }
     const accessToken = signAccessToken(user.id, user.email);
     const refreshToken = signRefreshToken(user.id);
@@ -95,6 +97,7 @@ async function main() {
       access_token: accessToken,
       refresh_token: refreshToken,
       user: { id: user.id, email: user.email, display_name: user.display_name },
+      _warning: 'This endpoint is deprecated and will be removed. Use /api/auth/email/verify for email-based login.',
     };
   });
 
@@ -129,8 +132,13 @@ async function main() {
     if (!phone) {
       reply.code(400); return { error: 'phone is required' };
     }
-    // Normalize phone: remove spaces
     const normalizedPhone = phone.replace(/\s+/g, '');
+
+    // Rate limit: prevent rapid re-send
+    if (hasPendingCode(normalizedPhone)) {
+      reply.code(429); return { error: '请等待 60 秒后再重新获取验证码' };
+    }
+
     // Dev mode: only allow test phone number (if configured)
     if (NODE_ENV !== 'production' && DEV_SMS_PHONE) {
       if (normalizedPhone !== DEV_SMS_PHONE) {
@@ -142,13 +150,13 @@ async function main() {
       reply.code(400);
       return { error: '开发模式快捷登录未配置，请设置 DEV_SMS_PHONE 和 DEV_SMS_CODE 环境变量' };
     }
-    // Generate 6-digit code
+
+    // Generate and store 6-digit code
     const code = (NODE_ENV === 'production' || !DEV_SMS_CODE)
-      ? String(Math.floor(100000 + Math.random() * 900000))
+      ? generateCode()
       : DEV_SMS_CODE;
     const expireMinutes = NODE_ENV === 'production' ? 1 : 5;
-    const expiresAt = Date.now() + expireMinutes * 60 * 1000;
-    smsCodeStore.set(normalizedPhone, { code, expiresAt });
+    storeCode(normalizedPhone, code, expireMinutes * 60 * 1000);
     console.log(`[sms] code for ${normalizedPhone}: ${code} (expires in ${expireMinutes}m)`);
 
     // Production: send via Tencent Cloud SMS
@@ -174,11 +182,9 @@ async function main() {
       reply.code(400); return { error: 'phone and code are required' };
     }
     const normalizedPhone = phone.replace(/\s+/g, '');
-    const stored = smsCodeStore.get(normalizedPhone);
-    if (!stored || stored.code !== code || Date.now() > stored.expiresAt) {
+    if (!verifyCode(normalizedPhone, code)) {
       reply.code(400); return { error: 'invalid or expired verification code' };
     }
-    smsCodeStore.delete(normalizedPhone);
     // Find or create user by phone
     let user = await getUserByPhone(pool, normalizedPhone);
     if (!user) {
@@ -194,6 +200,76 @@ async function main() {
   });
 
   // Apple Sign In (Phase 3)
+
+  // ---- REST API: Email Verification Code Auth ----
+
+  // Send email verification code
+  app.post('/api/auth/email/send', async (req, reply) => {
+    const { email } = req.body as any;
+    if (!email) {
+      reply.code(400); return { error: 'email is required' };
+    }
+    const normalizedEmail = email.trim().toLowerCase();
+    if (!normalizedEmail.includes('@')) {
+      reply.code(400); return { error: 'invalid email format' };
+    }
+
+    // Rate limit: prevent rapid re-send
+    if (hasPendingCode(normalizedEmail)) {
+      reply.code(429); return { error: '请等待 60 秒后再重新获取验证码' };
+    }
+
+    // Generate and store 6-digit code
+    const code = NODE_ENV === 'production' ? generateCode() : (DEV_SMS_CODE || generateCode());
+    const expireMinutes = NODE_ENV === 'production' ? 1 : 5;
+    storeCode(normalizedEmail, code, expireMinutes * 60 * 1000);
+    console.log(`[email] code for ${normalizedEmail}: ${code} (expires in ${expireMinutes}m)`);
+
+    // Send via Tencent Cloud SES (production) or log in dev
+    if (NODE_ENV === 'production') {
+      try {
+        await sendEmailCode(normalizedEmail, code);
+      } catch (err: any) {
+        console.error(`[email] send failed for ${normalizedEmail}:`, err.message);
+        reply.code(500);
+        return { error: '验证码发送失败，请稍后重试' };
+      }
+      return { success: true, message: 'verification code sent' };
+    }
+
+    // Dev mode: return code in response for testing
+    return { success: true, message: 'verification code sent', code };
+  });
+
+  // Verify email code and login/register
+  app.post('/api/auth/email/verify', async (req, reply) => {
+    const { email, code } = req.body as any;
+    if (!email || !code) {
+      reply.code(400); return { error: 'email and code are required' };
+    }
+    const normalizedEmail = email.trim().toLowerCase();
+    if (!verifyCode(normalizedEmail, code)) {
+      reply.code(400); return { error: 'invalid or expired verification code' };
+    }
+    // Find or create user by email
+    let user = await getUserByEmail(pool, normalizedEmail);
+    if (!user) {
+      // Create new user (email-only, no phone, no password)
+      const displayName = normalizedEmail.split('@')[0];
+      try {
+        user = await createUser(pool, normalizedEmail, '', displayName);
+      } catch (e: any) {
+        reply.code(500); return { error: '创建用户失败' };
+      }
+    }
+    const accessToken = signAccessToken(user.id, user.email, user.phone);
+    const refreshToken = signRefreshToken(user.id);
+    return {
+      access_token: accessToken,
+      refresh_token: refreshToken,
+      user: { id: user.id, email: user.email, phone: user.phone, display_name: user.display_name },
+    };
+  });
   app.post('/api/auth/apple/signin', async (req, reply) => {
     const { identityToken } = req.body as any;
     if (!identityToken) {
