@@ -30,6 +30,14 @@ final class SessionDetailViewModel {
         self.wsService = wsService
         self.apiClient = apiClient
         self.lastEventSeq = Self.loadLastSeq(for: session.sessionId)
+
+        // 从内存缓存恢复消息，实现秒开 + 保留滚动位置
+        if let cached = Self.messagesCache[session.sessionId] {
+            self.messages = cached.messages
+            self.subAgents = cached.subAgents
+            self.msgCounter = cached.msgCounter
+            self.isLoading = false
+        }
     }
 
     /// Whether the session is actively executing (running/busy)
@@ -686,6 +694,23 @@ final class SessionDetailViewModel {
     }
 
     // MARK: - Helpers
+
+    // MARK: - Messages memory cache (preserves scroll position across navigation)
+
+    private static var messagesCache: [String: (messages: [ChatMessage], subAgents: [String: SubAgent], msgCounter: Int)] = [:]
+
+    static func saveToCache(_ sessionId: String, messages: [ChatMessage], subAgents: [String: SubAgent], msgCounter: Int) {
+        messagesCache[sessionId] = (messages, subAgents, msgCounter)
+    }
+
+    /// 保存当前 ViewModel 的消息到内存缓存
+    func persistToCache() {
+        Self.messagesCache[session.sessionId] = (messages, subAgents, msgCounter)
+    }
+
+    static func clearCache(_ sessionId: String) {
+        messagesCache.removeValue(forKey: sessionId)
+    }
 
     private func formatToolInput(tool: String?, input: Any?) -> String {
         guard let input else { return "" }
