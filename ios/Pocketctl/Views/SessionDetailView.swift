@@ -118,6 +118,12 @@ struct SessionDetailView: View {
                 vm.onReturn()
             }
         }
+        .onDisappear {
+            if let vm = viewModel {
+                vm.persistToCache()
+                vm.disconnect()
+            }
+        }
     }
 
     // MARK: - Nav bar

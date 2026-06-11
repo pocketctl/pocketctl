@@ -126,21 +126,28 @@ struct SessionListView: View {
     private func sessionList(vm: SessionListViewModel) -> some View {
         ScrollView {
             LazyVStack(spacing: PCSpacing.sm) {
-                ForEach(vm.filteredSessions) { session in
-                    if session.status == "exited" || session.status == "completed" || session.status == "error" || session.status == "killed" {
-                        // Swipe-to-delete for terminal sessions
-                        SwipeToDelete {
+                ForEach(Array(vm.displayedSessions.enumerated()), id: \.element.sessionId) { index, session in
+                    Group {
+                        if session.status == "exited" || session.status == "completed" || session.status == "error" || session.status == "killed" {
+                            // Swipe-to-delete for terminal sessions
+                            SwipeToDelete {
+                                SessionCard(session: session, daemonOnline: daemon.online) {
+                                    navigateToDetail = session
+                                }
+                            } onDelete: {
+                                vm.deleteSession(session.sessionId)
+                            }
+                        } else {
                             SessionCard(session: session, daemonOnline: daemon.online) {
                                 navigateToDetail = session
                             }
-                        } onDelete: {
-                            vm.deleteSession(session.sessionId)
-                        }
-                    } else {
-                        SessionCard(session: session, daemonOnline: daemon.online) {
-                            navigateToDetail = session
                         }
                     }
+                    .frame(height: 68)
+                    .onAppear {
+                        vm.loadMoreIfNeeded(currentIndex: index)
+                    }
+
                     // Exited session banner
                     if session.status == "exited" {
                         exitedBanner(session: session)
@@ -151,7 +158,7 @@ struct SessionListView: View {
             .padding(.top, PCSpacing.sm)
             .padding(.bottom, PCSpacing.md)
         }
-        .frame(maxHeight: .infinity)
+        .scrollDismissesKeyboard(.interactively)
     }
 
     // MARK: - Session card
@@ -219,51 +226,50 @@ struct SessionCard: View {
     let onTap: () -> Void
 
     var body: some View {
-        Button(action: onTap) {
-            HStack(spacing: PCSpacing.md) {
-                StatusDot(status: effectiveStatus)
-                    .frame(width: 10, height: 10)
+        HStack(spacing: PCSpacing.md) {
+            StatusDot(status: effectiveStatus)
+                .frame(width: 10, height: 10)
 
-                VStack(alignment: .leading, spacing: 4) {
-                    HStack(spacing: 6) {
-                        Text(session.displayTitle)
-                            .font(PCFont.body(16, weight: .semibold))
-                            .foregroundStyle(Color.pcFg)
-                            .lineLimit(1)
+            VStack(alignment: .leading, spacing: 4) {
+                HStack(spacing: 6) {
+                    Text(session.displayTitle)
+                        .font(PCFont.body(16, weight: .semibold))
+                        .foregroundStyle(Color.pcFg)
+                        .lineLimit(1)
 
-                        if session.source == "terminal" {
-                            StatusChip(text: "终端", style: .terminal)
-                        } else if session.source == "web" {
-                            StatusChip(text: "Web", style: .web)
-                        }
-
-                        if session.subagentCount > 0 {
-                            StatusChip(text: "\(session.subagentCount) 子智能体", style: .subAgent)
-                        }
+                    if session.source == "terminal" {
+                        StatusChip(text: "终端", style: .terminal)
+                    } else if session.source == "web" {
+                        StatusChip(text: "Web", style: .web)
                     }
 
-                    HStack {
-                        if let hostname = session.hostname {
-                            Text(hostname)
-                                .font(PCFont.body(12))
-                                .foregroundStyle(Color.pcFgTertiary)
-                        }
-                        Spacer()
-                        Text(RelativeTime.format(session.lastActivityAt ?? session.createdAt))
-                            .font(PCFont.body(13))
-                            .foregroundStyle(Color.pcFgTertiary)
+                    if session.subagentCount > 0 {
+                        StatusChip(text: "\(session.subagentCount) 子智能体", style: .subAgent)
                     }
                 }
+
+                HStack {
+                    if let hostname = session.hostname {
+                        Text(hostname)
+                            .font(PCFont.body(12))
+                            .foregroundStyle(Color.pcFgTertiary)
+                    }
+                    Spacer()
+                    Text(RelativeTime.format(session.lastActivityAt ?? session.createdAt))
+                        .font(PCFont.body(13))
+                        .foregroundStyle(Color.pcFgTertiary)
+                }
             }
-            .padding(PCSpacing.md)
-            .background(Color.pcSurface)
-            .cornerRadius(PCRadius.md)
-            .overlay(
-                RoundedRectangle(cornerRadius: PCRadius.md)
-                    .stroke(Color.pcBorder, lineWidth: 1)
-            )
         }
-        .buttonStyle(.plain)
+        .padding(PCSpacing.md)
+        .background(Color.pcSurface)
+        .cornerRadius(PCRadius.md)
+        .overlay(
+            RoundedRectangle(cornerRadius: PCRadius.md)
+                .stroke(Color.pcBorder, lineWidth: 1)
+        )
+        .contentShape(Rectangle())
+        .onTapGesture(perform: onTap)
     }
 
     private var effectiveStatus: String {
@@ -315,36 +321,39 @@ struct SwipeToDelete<Content: View>: View {
             }
 
             // Main content — slides left to reveal delete
+            // 内容不再是 Button，用 .gesture() 让 DragGesture 优先于 onTapGesture
+            // 拖拽时 DragGesture 赢 → 不触发 onTapGesture（不会导航）
+            // 点击时 DragGesture 失败 → onTapGesture 赢 → 正常导航或关闭滑开
             content
+                .frame(maxHeight: .infinity)
+                .background(Color.pcBackground)
                 .offset(x: offset)
-                .highPriorityGesture(
-                    DragGesture(minimumDistance: 10)
+                .gesture(
+                    DragGesture(minimumDistance: 6)
                         .onChanged { value in
                             let h = value.translation.width
                             let v = abs(value.translation.height)
 
                             // 判定是否为垂直滚动
                             if !isOpen {
-                                // 未打开状态下，竖向分量明显大 → 忽略
                                 if v > minVerticalDistance && (h == 0 || CGFloat(v) / CGFloat(abs(h) + 0.01) > verticalRatioThreshold) {
                                     isVerticalScroll = true
                                     return
                                 }
                             }
+
+                            guard !isVerticalScroll else { return }
                             isVerticalScroll = false
 
                             if isOpen {
-                                // Already open: allow right swipe to close
                                 offset = max(-buttonWidth + h, -buttonWidth)
                                 offset = min(offset, 0)
                             } else {
-                                // Closed: only allow left swipe
                                 offset = min(h, 0)
                                 offset = max(offset, -buttonWidth)
                             }
                         }
                         .onEnded { value in
-                            // 如果是垂直滚动，不做任何事，恢复初始状态
                             if isVerticalScroll {
                                 isVerticalScroll = false
                                 withAnimation(.spring(response: 0.3, dampingFraction: 1)) {
@@ -356,14 +365,12 @@ struct SwipeToDelete<Content: View>: View {
                             let velocity = value.predictedEndLocation.x - value.location.x
                             withAnimation(.spring(response: 0.3, dampingFraction: 1)) {
                                 if isOpen {
-                                    // Swiping right to close
                                     if value.translation.width > 40 || velocity > 100 {
                                         close()
                                     } else {
                                         offset = -buttonWidth
                                     }
                                 } else {
-                                    // Swiping left to open
                                     if value.translation.width < -40 || velocity < -100 {
                                         offset = -buttonWidth
                                         isOpen = true
