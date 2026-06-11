@@ -323,8 +323,10 @@ struct SwipeToDelete<Content: View>: View {
 
             // Main content — slides left to reveal delete
             content
+                .frame(maxHeight: .infinity)           // 填满 ZStack 高度，消除间隙
+                .background(Color.pcBackground)         // 用页面背景色覆盖后方红色
                 .offset(x: offset)
-                .gesture(
+                .simultaneousGesture(
                     DragGesture(minimumDistance: 6)
                         .onChanged { value in
                             let h = value.translation.width
