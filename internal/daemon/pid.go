@@ -20,7 +20,8 @@ func LogPath() string {
 }
 
 func StatePath() string {
-	return filepath.Join(pidDir, "daemon.state")
+	home, _ := os.UserHomeDir()
+	return filepath.Join(home, ".pocketctl", "daemon.state")
 }
 
 func WritePID(pid int) error {

@@ -3,6 +3,7 @@ package daemon
 import (
 	"encoding/json"
 	"os"
+	"path/filepath"
 	"time"
 )
 
@@ -28,14 +29,15 @@ type SessionState struct {
 
 // WriteState persists the daemon state to the state file.
 func WriteState(s *DaemonState) error {
-	if err := os.MkdirAll(pidDir, 0755); err != nil {
+	statePath := StatePath()
+	if err := os.MkdirAll(filepath.Dir(statePath), 0755); err != nil {
 		return err
 	}
 	data, err := json.Marshal(s)
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(StatePath(), data, 0644)
+	return os.WriteFile(statePath, data, 0644)
 }
 
 // ReadState reads the daemon state from the state file.
