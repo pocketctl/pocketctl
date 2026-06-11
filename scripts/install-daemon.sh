@@ -11,6 +11,7 @@ set -euo pipefail
 # ============================================
 
 GITHUB_REPO="pocketctl/pocketctl"
+GITEE_REPO="muwb123/pocketctl"
 INSTALL_DIR="/usr/local/bin"
 BINARY_NAME="pocketctl"
 PROD_RELAY="${POCKETCTL_PROD_RELAY_URL:-}"
@@ -77,8 +78,14 @@ if [[ -z "$LATEST_VERSION" ]]; then
   info "获取最新版本..."
 
   if command -v curl &>/dev/null; then
+    # Try GitHub API first
     LATEST_VERSION=$(curl -fsSL "https://api.github.com/repos/${GITHUB_REPO}/releases/latest" 2>/dev/null \
-      | grep '"tag_name"' | head -1 | sed -E 's/.*"tag_name":\s*"([^"]+)".*/\1/' || true)
+      | grep -oE '"tag_name"\s*:\s*"[^"]+"' | head -1 | grep -oE '"[^"]+"\s*$' | tr -d '"' | tr -d ' ' || true)
+    # Fallback: try Gitee API
+    if [[ -z "$LATEST_VERSION" ]]; then
+      LATEST_VERSION=$(curl -fsSL "https://gitee.com/api/v5/repos/muwb123/pocketctl/releases/latest" 2>/dev/null \
+        | grep -oE '"tag_name"\s*:\s*"[^"]+"' | head -1 | grep -oE '"[^"]+"\s*$' | tr -d '"' | tr -d ' ' || true)
+    fi
   fi
 
   if [[ -z "$LATEST_VERSION" ]]; then
@@ -91,25 +98,33 @@ fi
 
 # ---------- 3. 下载二进制 ----------
 BINARY_FILENAME="pocketctl_${OS}_${ARCH}"
-BINARY_URL="https://github.com/${GITHUB_REPO}/releases/download/${LATEST_VERSION}/${BINARY_FILENAME}"
 TEMP_FILE=$(mktemp)
 EXPECTED_SHA=""
 
 info "下载 ${BINARY_FILENAME}..."
 
-if command -v curl &>/dev/null; then
-  # 同时获取 SHA256 校验和
-  SHA_URL="${BINARY_URL}.sha256"
-  EXPECTED_SHA=$(curl -fsSL "$SHA_URL" 2>/dev/null | awk '{print $1}' || true)
+download_binary() {
+  local url="$1"
+  if command -v curl &>/dev/null; then
+    curl -fsSL -o "$TEMP_FILE" "$url" 2>/dev/null
+  elif command -v wget &>/dev/null; then
+    wget -q -O "$TEMP_FILE" "$url" 2>/dev/null
+  else
+    error "需要 curl 或 wget"
+  fi
+}
 
-  curl -fsSL -o "$TEMP_FILE" "$BINARY_URL" || error "下载失败: $BINARY_URL"
-elif command -v wget &>/dev/null; then
-  SHA_URL="${BINARY_URL}.sha256"
-  EXPECTED_SHA=$(wget -q -O - "$SHA_URL" 2>/dev/null | awk '{print $1}' || true)
+# Try GitHub releases first, then Gitee
+GITHUB_URL="https://github.com/${GITHUB_REPO}/releases/download/${LATEST_VERSION}/${BINARY_FILENAME}"
+GITEE_URL="https://gitee.com/${GITEE_REPO}/releases/download/${LATEST_VERSION}/${BINARY_FILENAME}"
 
-  wget -q -O "$TEMP_FILE" "$BINARY_URL" || error "下载失败: $BINARY_URL"
+if download_binary "$GITHUB_URL"; then
+  info "从 GitHub 下载成功"
+elif download_binary "$GITEE_URL"; then
+  info "从 Gitee 下载成功"
 else
-  error "需要 curl 或 wget"
+  rm -f "$TEMP_FILE"
+  error "下载失败: 尝试了 GitHub 和 Gitee 源"
 fi
 
 # ---------- 4. 校验（如果存在 SHA256 文件） ----------
