@@ -292,6 +292,8 @@ struct SwipeToDelete<Content: View>: View {
     @State private var isOpen = false
     /// 当次拖拽是否为垂直滚动（上下滑动），是则忽略左滑
     @State private var isVerticalScroll = false
+    /// 拖拽中或刚结束，阻止内部 Button 响应点击
+    @State private var isDragging = false
 
     private let buttonWidth: CGFloat = 76
     /// 垂直/水平分量判定阈值，超过此比例视为垂直滚动
@@ -323,59 +325,55 @@ struct SwipeToDelete<Content: View>: View {
 
             // Main content — slides left to reveal delete
             content
-                .frame(maxHeight: .infinity)           // 填满 ZStack 高度，消除间隙
-                .background(Color.pcBackground)         // 用页面背景色覆盖后方红色
+                .frame(maxHeight: .infinity)
+                .background(Color.pcBackground)
+                .allowsHitTesting(!isDragging && !isOpen)   // 拖拽中/滑开时禁用内部 Button
                 .offset(x: offset)
                 .simultaneousGesture(
                     DragGesture(minimumDistance: 6)
                         .onChanged { value in
+                            isDragging = true
                             let h = value.translation.width
                             let v = abs(value.translation.height)
 
                             // 判定是否为垂直滚动
                             if !isOpen {
-                                // 未打开状态下，竖向分量明显大 → 忽略
                                 if v > minVerticalDistance && (h == 0 || CGFloat(v) / CGFloat(abs(h) + 0.01) > verticalRatioThreshold) {
                                     isVerticalScroll = true
                                     return
                                 }
                             }
 
-                            // 垂直滚动中，不处理水平偏移
                             guard !isVerticalScroll else { return }
                             isVerticalScroll = false
 
                             if isOpen {
-                                // Already open: allow right swipe to close
                                 offset = max(-buttonWidth + h, -buttonWidth)
                                 offset = min(offset, 0)
                             } else {
-                                // Closed: only allow left swipe
                                 offset = min(h, 0)
                                 offset = max(offset, -buttonWidth)
                             }
                         }
                         .onEnded { value in
-                            // 如果是垂直滚动，不做任何事，恢复初始状态
                             if isVerticalScroll {
                                 isVerticalScroll = false
                                 withAnimation(.spring(response: 0.3, dampingFraction: 1)) {
                                     close()
                                 }
+                                scheduleDragReset()
                                 return
                             }
 
                             let velocity = value.predictedEndLocation.x - value.location.x
                             withAnimation(.spring(response: 0.3, dampingFraction: 1)) {
                                 if isOpen {
-                                    // Swiping right to close
                                     if value.translation.width > 40 || velocity > 100 {
                                         close()
                                     } else {
                                         offset = -buttonWidth
                                     }
                                 } else {
-                                    // Swiping left to open
                                     if value.translation.width < -40 || velocity < -100 {
                                         offset = -buttonWidth
                                         isOpen = true
@@ -384,6 +382,7 @@ struct SwipeToDelete<Content: View>: View {
                                     }
                                 }
                             }
+                            scheduleDragReset()
                         }
                 )
                 .onTapGesture {
@@ -395,6 +394,13 @@ struct SwipeToDelete<Content: View>: View {
                 }
         }
         .clipShape(RoundedRectangle(cornerRadius: PCRadius.md))
+    }
+
+    /// 延迟重置拖拽标记，等待关闭动画完成后才恢复 Button 点击
+    private func scheduleDragReset() {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
+            isDragging = false
+        }
     }
 
     private func close() {
