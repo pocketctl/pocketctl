@@ -20,11 +20,12 @@ type DaemonState struct {
 
 // SessionState is a snapshot of a single session's status.
 type SessionState struct {
-	SessionID string    `json:"session_id"`
-	Agent     string    `json:"agent"`
-	Cwd       string    `json:"cwd"`
-	Status    string    `json:"status"`
-	StartedAt time.Time `json:"started_at"`
+	SessionID      string    `json:"session_id"`
+	Agent          string    `json:"agent"`
+	Cwd            string    `json:"cwd"`
+	Status         string    `json:"status"`
+	StartedAt      time.Time `json:"started_at"`
+	LastActivityAt time.Time `json:"last_activity_at"`
 }
 
 // WriteState persists the daemon state to the state file.

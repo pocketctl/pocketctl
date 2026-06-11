@@ -408,11 +408,12 @@ func cmdDaemonStart(args []string) {
 				stateSessions := make([]daemon.SessionState, len(sessions))
 				for i, s := range sessions {
 					stateSessions[i] = daemon.SessionState{
-						SessionID: s.SessionID,
-						Agent:     s.Agent,
-						Cwd:       s.Cwd,
-						Status:    s.Status,
-						StartedAt: s.StartedAt,
+						SessionID:      s.SessionID,
+						Agent:          s.Agent,
+						Cwd:            s.Cwd,
+						Status:         s.Status,
+						StartedAt:      s.StartedAt,
+						LastActivityAt: s.LastActivityAt,
 					}
 				}
 				state := &daemon.DaemonState{
@@ -732,6 +733,10 @@ func handleWatcherEvents(ctx context.Context, sw *watcher.SessionWatcher, sm *se
 							events, rawLines, err := tailer.TailNewLines()
 							if err != nil {
 								continue
+							}
+							// Update last activity when events are received from terminal session
+							if len(events) > 0 {
+								sm.UpdateLastActivity(evt.Session.SessionID)
 							}
 							for i := range events {
 								if events[i].SessionID == "" {

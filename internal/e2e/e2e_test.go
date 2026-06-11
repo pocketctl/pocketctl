@@ -820,16 +820,19 @@ func TestSessionExited_ReadOutputLastActivityAt(t *testing.T) {
 	// Wait for session_status event with last_activity_at
 	// Note: adapter emits session_status first (without last_activity_at),
 	// then readOutput emits the final one (with last_activity_at).
-	// We need the one from readOutput.
+	// CreateSession returns a pending-xxx ID; the real session_id is set
+	// when the adapter parses the agent's init event. So we accept either ID.
+	mockSessionID := "la-test-session"
 	deadline := time.After(10 * time.Second)
 	for {
 		select {
 		case evt := <-outputCh:
-			if evt.Type == "session_status" && evt.SessionID == sid && evt.LastActivityAt != "" {
+			isMatch := evt.SessionID == sid || evt.SessionID == mockSessionID
+			if evt.Type == "session_status" && isMatch && evt.LastActivityAt != "" {
 				if _, err := time.Parse(time.RFC3339, evt.LastActivityAt); err != nil {
 					t.Errorf("last_activity_at not valid ISO 8601: %q", evt.LastActivityAt)
 				}
-				t.Logf("✓ session %s status=%s with last_activity_at=%s", sid, evt.Status, evt.LastActivityAt)
+				t.Logf("✓ session %s status=%s with last_activity_at=%s", evt.SessionID, evt.Status, evt.LastActivityAt)
 				return
 			}
 		case <-deadline:
