@@ -151,7 +151,7 @@ struct SessionListView: View {
             .padding(.top, PCSpacing.sm)
             .padding(.bottom, PCSpacing.md)
         }
-        .frame(maxHeight: .infinity)
+        .scrollDismissesKeyboard(.interactively)
     }
 
     // MARK: - Session card
@@ -317,8 +317,8 @@ struct SwipeToDelete<Content: View>: View {
             // Main content — slides left to reveal delete
             content
                 .offset(x: offset)
-                .highPriorityGesture(
-                    DragGesture(minimumDistance: 10)
+                .gesture(
+                    DragGesture(minimumDistance: 6)
                         .onChanged { value in
                             let h = value.translation.width
                             let v = abs(value.translation.height)
@@ -331,6 +331,9 @@ struct SwipeToDelete<Content: View>: View {
                                     return
                                 }
                             }
+
+                            // 垂直滚动中，不处理水平偏移
+                            guard !isVerticalScroll else { return }
                             isVerticalScroll = false
 
                             if isOpen {
