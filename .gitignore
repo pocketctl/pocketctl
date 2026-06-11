@@ -41,3 +41,4 @@ app-connect/
 AuthKey_95HSWCLC89.p8
 AuthKey*.p8
 distribution.cer
+build/

@@ -1,0 +1,108 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>部署报告 — 2026-06-11</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #0d1117; color: #c9d1d9; line-height: 1.6; padding: 32px; }
+  .container { max-width: 800px; margin: 0 auto; }
+  h1 { color: #58a6ff; font-size: 24px; margin-bottom: 8px; }
+  .subtitle { color: #8b949e; font-size: 14px; margin-bottom: 32px; }
+  .section { background: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 20px; margin-bottom: 16px; }
+  .section h2 { color: #58a6ff; font-size: 16px; margin-bottom: 12px; display: flex; align-items: center; gap: 8px; }
+  .badge { display: inline-block; padding: 2px 8px; border-radius: 12px; font-size: 12px; font-weight: 600; }
+  .badge-ok { background: #1b4332; color: #3fb950; }
+  .badge-warn { background: #3d2e00; color: #d29922; }
+  .badge-info { background: #0c2d6b; color: #58a6ff; }
+  table { width: 100%; border-collapse: collapse; margin-top: 8px; }
+  th, td { padding: 8px 12px; text-align: left; border-bottom: 1px solid #21262d; font-size: 14px; }
+  th { color: #8b949e; font-weight: 500; }
+  .commit-hash { font-family: 'SF Mono', monospace; color: #58a6ff; font-size: 13px; }
+  .commit-msg { color: #c9d1d9; }
+  .status-row { display: flex; gap: 24px; flex-wrap: wrap; }
+  .status-item { flex: 1; min-width: 200px; }
+  .status-label { color: #8b949e; font-size: 12px; text-transform: uppercase; letter-spacing: 0.5px; }
+  .status-value { font-size: 18px; font-weight: 600; margin-top: 4px; }
+  .status-value.ok { color: #3fb950; }
+  .sql { font-family: 'SF Mono', monospace; background: #0d1117; padding: 12px; border-radius: 6px; font-size: 13px; color: #c9d1d9; overflow-x: auto; margin-top: 8px; }
+</style>
+</head>
+<body>
+<div class="container">
+  <h1>🚀 部署报告</h1>
+  <p class="subtitle">pocketctl relay — 2026-06-11 12:13 CST</p>
+
+  <div class="section">
+    <h2>📊 概览</h2>
+    <div class="status-row">
+      <div class="status-item">
+        <div class="status-label">起始 Commit</div>
+        <div class="status-value"><code class="commit-hash">b169882</code></div>
+      </div>
+      <div class="status-item">
+        <div class="status-label">目标 Commit</div>
+        <div class="status-value"><code class="commit-hash">c7e7d68</code></div>
+      </div>
+      <div class="status-item">
+        <div class="status-label">变更 Commit</div>
+        <div class="status-value">17 个</div>
+      </div>
+      <div class="status-item">
+        <div class="status-label">变更文件</div>
+        <div class="status-value">74 个</div>
+      </div>
+    </div>
+  </div>
+
+  <div class="section">
+    <h2>📝 Commit 列表</h2>
+    <table>
+      <tr><th>Hash</th><th>Message</th></tr>
+      <tr><td><code class="commit-hash">c7e7d68</code></td><td class="commit-msg">fix: relay auth.ts JWT_SECRET 类型安全 + 安装缺失依赖</td></tr>
+      <tr><td><code class="commit-hash">dd7aa27</code></td><td class="commit-msg">perf: iOS session 详情页性能优化 — 批量通知抑制 + Markdown 缓存 + 消息截断 + 增量刷新</td></tr>
+      <tr><td><code class="commit-hash">08a59fc</code></td><td class="commit-msg">chore: archive github-public-release change, sync specs to main</td></tr>
+      <tr><td><code class="commit-hash">e3e6b35</code></td><td class="commit-msg">feat: GitHub 公开发布准备 — Relay URL 配置化 + 敏感数据清理 + 同步基础设施</td></tr>
+      <tr><td><code class="commit-hash">0bd4783</code></td><td class="commit-msg">feat: daemon 自更新 + 腾讯云短信 + iOS ATS/编译修复 + 域名统一</td></tr>
+      <tr><td><code class="commit-hash">eccca85</code></td><td class="commit-msg">feat: relay 环境区分 + SwipeToDelete 误触修复 + 安装脚本完善</td></tr>
+      <tr><td><code class="commit-hash">f387a00</code></td><td class="commit-msg">feat: 新增 pocketctl daemon doctor 诊断命令</td></tr>
+      <tr><td><code class="commit-hash">def86dc</code></td><td class="commit-msg">feat: 免费用户 daemon 数量限制 + 白名单机制</td></tr>
+      <tr><td><code class="commit-hash">fbcdb02</code></td><td class="commit-msg">fix: 添加 iPad 方向声明，修复 TestFlight 上传错误</td></tr>
+      <tr><td><code class="commit-hash">67e87f4</code></td><td class="commit-msg">feat: iOS 版本号管理</td></tr>
+      <tr><td><code class="commit-hash">5795fc3</code></td><td class="commit-msg">feat: iOS 自动构建脚本 + Fastlane 配置</td></tr>
+      <tr><td><code class="commit-hash">c8394a4</code></td><td class="commit-msg">feat: CI 测试流水线 + 修复 relay 测试</td></tr>
+    </table>
+  </div>
+
+  <div class="section">
+    <h2>🗄️ 数据库变更</h2>
+    <p style="margin-bottom: 8px;"><span class="badge badge-info">users 表</span> 新增 2 列</p>
+    <div class="sql">ALTER TABLE users ADD COLUMN IF NOT EXISTS plan VARCHAR(16) DEFAULT 'free';
+ALTER TABLE users ADD COLUMN IF NOT EXISTS whitelist BOOLEAN DEFAULT false;</div>
+    <p style="margin-top: 12px; color: #8b949e; font-size: 13px;">✓ 已执行，列已确认存在</p>
+  </div>
+
+  <div class="section">
+    <h2>✅ 服务状态</h2>
+    <table>
+      <tr><th>检查项</th><th>状态</th></tr>
+      <tr><td>pocketctl-relay</td><td><span class="badge badge-ok">active</span></td></tr>
+      <tr><td>pocketctl-deploy</td><td><span class="badge badge-ok">active</span></td></tr>
+      <tr><td>健康检查 /health</td><td><span class="badge badge-ok">{"status":"ok"}</span></td></tr>
+      <tr><td>users.plan 列</td><td><span class="badge badge-ok">存在</span></td></tr>
+      <tr><td>users.whitelist 列</td><td><span class="badge badge-ok">存在</span></td></tr>
+    </table>
+  </div>
+
+  <div class="section">
+    <h2>🔄 回滚方案</h2>
+    <p style="font-size: 14px;">如需回滚：</p>
+    <div class="sql">git checkout master
+git revert HEAD --no-edit
+git push origin master</div>
+    <p style="margin-top: 8px; color: #8b949e; font-size: 13px;">数据库变更（新增列）使用 IF NOT EXISTS，回滚代码不影响已有数据。</p>
+  </div>
+</div>
+</body>
+</html>
