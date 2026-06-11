@@ -126,21 +126,28 @@ struct SessionListView: View {
     private func sessionList(vm: SessionListViewModel) -> some View {
         ScrollView {
             LazyVStack(spacing: PCSpacing.sm) {
-                ForEach(vm.filteredSessions) { session in
-                    if session.status == "exited" || session.status == "completed" || session.status == "error" || session.status == "killed" {
-                        // Swipe-to-delete for terminal sessions
-                        SwipeToDelete {
+                ForEach(Array(vm.displayedSessions.enumerated()), id: \.element.sessionId) { index, session in
+                    Group {
+                        if session.status == "exited" || session.status == "completed" || session.status == "error" || session.status == "killed" {
+                            // Swipe-to-delete for terminal sessions
+                            SwipeToDelete {
+                                SessionCard(session: session, daemonOnline: daemon.online) {
+                                    navigateToDetail = session
+                                }
+                            } onDelete: {
+                                vm.deleteSession(session.sessionId)
+                            }
+                        } else {
                             SessionCard(session: session, daemonOnline: daemon.online) {
                                 navigateToDetail = session
                             }
-                        } onDelete: {
-                            vm.deleteSession(session.sessionId)
-                        }
-                    } else {
-                        SessionCard(session: session, daemonOnline: daemon.online) {
-                            navigateToDetail = session
                         }
                     }
+                    .frame(height: 68)
+                    .onAppear {
+                        vm.loadMoreIfNeeded(currentIndex: index)
+                    }
+
                     // Exited session banner
                     if session.status == "exited" {
                         exitedBanner(session: session)
