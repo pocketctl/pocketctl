@@ -467,26 +467,19 @@ struct SettingsView: View {
                         .frame(maxWidth: .infinity, alignment: .leading)
 
                     VStack(alignment: .leading, spacing: 4) {
-                        codeLine("curl -fsSL \(RelayEnvironmentManager.shared.current.installURL) | bash")
-                        if RelayEnvironmentManager.shared.current == .production {
-                            codeLine("pocketctl login --prod")
-                        } else {
-                            codeLine("pocketctl login")
-                        }
-                        if RelayEnvironmentManager.shared.current == .production {
-                            codeLine("pocketctl daemon start --prod")
-                        } else {
-                            codeLine("pocketctl daemon start")
-                        }
+                        let env = RelayEnvironmentManager.shared.current
+                        codeLine("curl -fsSL \(env.installURL) -o /tmp/install-daemon.sh")
+                        codeLine("sudo POCKETCTL_PROD_RELAY_URL=\(env.wsBaseURL) bash /tmp/install-daemon.sh --prod")
+                        codeLine("pocketctl login")
+                        codeLine("pocketctl daemon start")
                     }
                     .padding(PCSpacing.md)
                     .background(Color.pcCodeBg)
                     .cornerRadius(PCRadius.sm)
 
                     Button {
-                        let loginCmd = RelayEnvironmentManager.shared.current == .production ? "pocketctl login --prod" : "pocketctl login"
-                        let startCmd = RelayEnvironmentManager.shared.current == .production ? "pocketctl daemon start --prod" : "pocketctl daemon start"
-                        UIPasteboard.general.string = "curl -fsSL \(RelayEnvironmentManager.shared.current.installURL) | bash\n\(loginCmd)\n\(startCmd)"
+                        let env = RelayEnvironmentManager.shared.current
+                        UIPasteboard.general.string = "curl -fsSL \(env.installURL) -o /tmp/install-daemon.sh\nsudo POCKETCTL_PROD_RELAY_URL=\(env.wsBaseURL) bash /tmp/install-daemon.sh --prod\npocketctl login\npocketctl daemon start"
                     } label: {
                         HStack(spacing: 6) {
                             Image(systemName: "doc.on.doc")
@@ -584,23 +577,17 @@ struct SettingsView: View {
 
                         VStack(alignment: .leading, spacing: 4) {
                             codeLine("# 1. 安装 Daemon")
-                            codeLine("curl -fsSL \(viewModel.currentEnvironment.installURL) | bash")
+                            let env = viewModel.currentEnvironment
+                            codeLine("curl -fsSL \(env.installURL) -o /tmp/install-daemon.sh")
+                            codeLine("sudo POCKETCTL_PROD_RELAY_URL=\(env.wsBaseURL) bash /tmp/install-daemon.sh --prod")
                             codeLine("")
-                            codeLine("# 2. 登录（使用 App 注册的手机号）")
-                            if viewModel.currentEnvironment == .production {
-                                codeLine("pocketctl login --prod")
-                            } else {
-                                codeLine("pocketctl login")
-                            }
+                            codeLine("# 登录（使用 App 注册的手机号）")
+                            codeLine("pocketctl login")
                             codeLine("")
-                            codeLine("# 3. 启动守护进程")
-                            if viewModel.currentEnvironment == .production {
-                                codeLine("pocketctl daemon start --prod")
-                            } else {
-                                codeLine("pocketctl daemon start")
-                            }
+                            codeLine("# 启动守护进程")
+                            codeLine("pocketctl daemon start")
                             codeLine("")
-                            codeLine("# 4. 查看状态")
+                            codeLine("# 查看状态")
                             codeLine("pocketctl daemon status")
                         }
                         .padding(PCSpacing.md)
@@ -608,7 +595,8 @@ struct SettingsView: View {
                         .cornerRadius(PCRadius.sm)
 
                         Button {
-                            UIPasteboard.general.string = "curl -fsSL https://pocketctl.com/install.sh | bash\npocketctl login\npocketctl daemon start"
+                            let env = viewModel.currentEnvironment
+                            UIPasteboard.general.string = "curl -fsSL \(env.installURL) -o /tmp/install-daemon.sh\nsudo POCKETCTL_PROD_RELAY_URL=\(env.wsBaseURL) bash /tmp/install-daemon.sh --prod\npocketctl login\npocketctl daemon start"
                         } label: {
                             HStack(spacing: 6) {
                                 Image(systemName: "doc.on.doc")

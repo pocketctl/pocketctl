@@ -134,7 +134,11 @@ struct DaemonListView: View {
             )
 
             VStack(alignment: .leading, spacing: 4) {
-                codeLine("curl -fsSL https://pocketctl.com/install.sh | bash")
+                let env = RelayEnvironmentManager.shared.current
+                let wsURL = env.wsBaseURL
+                let installURL = env.installURL
+                codeLine("curl -fsSL \(installURL) -o /tmp/install-daemon.sh")
+                codeLine("sudo POCKETCTL_PROD_RELAY_URL=\(wsURL) bash /tmp/install-daemon.sh --prod")
                 codeLine("pocketctl login")
                 codeLine("pocketctl daemon start")
             }
@@ -144,8 +148,10 @@ struct DaemonListView: View {
             .padding(.horizontal, PCSpacing.xxl)
 
             Button {
+                let env = RelayEnvironmentManager.shared.current
                 UIPasteboard.general.string = """
-                curl -fsSL https://pocketctl.com/install.sh | bash
+                curl -fsSL \(env.installURL) -o /tmp/install-daemon.sh
+                sudo POCKETCTL_PROD_RELAY_URL=\(env.wsBaseURL) bash /tmp/install-daemon.sh --prod
                 pocketctl login
                 pocketctl daemon start
                 """
