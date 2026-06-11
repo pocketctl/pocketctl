@@ -130,6 +130,11 @@ func cmdLogin(args []string) {
 		baseURL = "ws://localhost:8080/ws"
 	}
 
+	// Convert WebSocket URL to HTTP URL for API calls
+	apiURL := strings.Replace(baseURL, "wss://", "https://", 1)
+	apiURL = strings.Replace(apiURL, "ws://", "http://", 1)
+	apiURL = strings.TrimSuffix(apiURL, "/ws")
+
 	fmt.Println("pocketctl login")
 	fmt.Println("---------------")
 
@@ -146,7 +151,7 @@ func cmdLogin(args []string) {
 
 	// Send verification code
 	fmt.Print("正在发送验证码...")
-	if err := api.SendSMS(baseURL, phone); err != nil {
+	if err := api.SendSMS(apiURL, phone); err != nil {
 		fmt.Fprintf(os.Stderr, "\n发送失败: %v\n", err)
 		os.Exit(1)
 	}
@@ -165,7 +170,7 @@ func cmdLogin(args []string) {
 
 	// Verify
 	fmt.Print("正在验证...")
-	accessToken, refreshToken, err := api.VerifySMS(baseURL, phone, code)
+	accessToken, refreshToken, err := api.VerifySMS(apiURL, phone, code)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "\n验证失败: %v\n", err)
 		os.Exit(1)
