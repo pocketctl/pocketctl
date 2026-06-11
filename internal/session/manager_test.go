@@ -9,12 +9,27 @@ import (
 	"github.com/pocketctl/pocketctl/internal/protocol"
 )
 
+// drainDiscovered drains session_discovered events from outputCh.
+// RegisterTerminalSession now emits a session_discovered event.
+func drainDiscovered(t *testing.T, ch <-chan protocol.DaemonEvent) {
+	t.Helper()
+	select {
+	case evt := <-ch:
+		if evt.Type != "session_discovered" {
+			t.Errorf("expected session_discovered, got %q", evt.Type)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for session_discovered")
+	}
+}
+
 func TestSetSessionExited(t *testing.T) {
 	outputCh := make(chan protocol.DaemonEvent, 16)
 	sm := NewSessionManager(outputCh)
 
 	// Register a terminal session
 	sm.RegisterTerminalSession("test-sid", "/tmp", 12345, "/dev/ttys001", protocol.StatusRunning)
+	drainDiscovered(t, outputCh)
 
 	// Set exited
 	sm.SetSessionExited("test-sid", protocol.ExitReasonNormalExit)
@@ -106,10 +121,14 @@ func TestSetSessionStatusIncludesLastActivityAt(t *testing.T) {
 	sm := NewSessionManager(outputCh)
 
 	sm.RegisterTerminalSession("test-sid", "/tmp", 12345, "/dev/ttys001", protocol.StatusRunning)
+	drainDiscovered(t, outputCh)
 	sm.SetSessionStatus("test-sid", protocol.StatusIdle)
 
 	select {
 	case evt := <-outputCh:
+		if evt.Type != "session_status" {
+			t.Errorf("expected session_status, got %q", evt.Type)
+		}
 		if evt.LastActivityAt == "" {
 			t.Error("expected last_activity_at to be set in session_status event")
 		}
@@ -123,6 +142,7 @@ func TestSetSessionExited_StatusTransition(t *testing.T) {
 	sm := NewSessionManager(outputCh)
 
 	sm.RegisterTerminalSession("test-sid", "/tmp", 12345, "/dev/ttys001", protocol.StatusRunning)
+	drainDiscovered(t, outputCh)
 
 	// Transition: running → exited
 	sm.SetSessionExited("test-sid", protocol.ExitReasonNormalExit)
@@ -293,5 +313,61 @@ func TestKillSession_SetsKilledStatus(t *testing.T) {
 
 	if ps.Status != protocol.StatusKilled {
 		t.Errorf("expected status killed, got %q", ps.Status)
+	}
+}
+
+func TestUpdateLastActivity(t *testing.T) {
+	outputCh := make(chan protocol.DaemonEvent, 16)
+	sm := NewSessionManager(outputCh)
+
+	sm.RegisterTerminalSession("test-sid", "/tmp", 12345, "/dev/ttys001", protocol.StatusRunning)
+	drainDiscovered(t, outputCh)
+
+	sm.mu.RLock()
+	before := sm.sessions["test-sid"].LastActivityAt
+	sm.mu.RUnlock()
+
+	time.Sleep(10 * time.Millisecond)
+
+	sm.UpdateLastActivity("test-sid")
+
+	sm.mu.RLock()
+	after := sm.sessions["test-sid"].LastActivityAt
+	sm.mu.RUnlock()
+
+	if !after.After(before) {
+		t.Errorf("expected LastActivityAt to be updated (before=%v after=%v)", before, after)
+	}
+}
+
+func TestUpdateLastActivity_NonexistentSession(t *testing.T) {
+	outputCh := make(chan protocol.DaemonEvent, 16)
+	sm := NewSessionManager(outputCh)
+
+	// should not panic
+	sm.UpdateLastActivity("nonexistent")
+}
+
+func TestListSessions_SortedByLastActivity(t *testing.T) {
+	outputCh := make(chan protocol.DaemonEvent, 16)
+	sm := NewSessionManager(outputCh)
+
+	sm.RegisterTerminalSession("old-sid", "/tmp", 100, "", protocol.StatusIdle)
+	drainDiscovered(t, outputCh)
+	time.Sleep(10 * time.Millisecond)
+	sm.RegisterTerminalSession("new-sid", "/tmp", 101, "", protocol.StatusRunning)
+	drainDiscovered(t, outputCh)
+
+	// new-sid should have more recent LastActivityAt
+	sessions := sm.ListSessions()
+	if len(sessions) < 2 {
+		t.Fatalf("expected at least 2 sessions, got %d", len(sessions))
+	}
+	// Active sessions sorted by last activity (most recent first)
+	if sessions[0].SessionID != "new-sid" {
+		t.Errorf("expected new-sid first, got %s", sessions[0].SessionID)
+	}
+	if sessions[1].SessionID != "old-sid" {
+		t.Errorf("expected old-sid second, got %s", sessions[1].SessionID)
 	}
 }

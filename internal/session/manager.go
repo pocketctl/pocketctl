@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"syscall"
@@ -23,6 +24,7 @@ type ProcessState struct {
 	Cancel    context.CancelFunc
 	Status    string
 	StartedAt time.Time
+	LastActivityAt time.Time // last activity timestamp (status change, message, etc.)
 	Cwd       string
 	Agent     string
 	Source    string // "daemon" or "terminal"
@@ -124,14 +126,16 @@ func (sm *SessionManager) CreateSession(ctx context.Context, config protocol.Ses
 	}
 
 	adp := adapter.NewClaudeAdapter()
+	now := time.Now()
 	ps := &ProcessState{
-		Cmd:       cmd,
-		Cancel:    cancel,
-		Status:    protocol.StatusRunning,
-		StartedAt: time.Now(),
-		Cwd:       resolvedCwd,
-		Agent:     config.Agent,
-		Source:    "daemon",
+		Cmd:            cmd,
+		Cancel:         cancel,
+		Status:         protocol.StatusRunning,
+		StartedAt:      now,
+		LastActivityAt: now,
+		Cwd:            resolvedCwd,
+		Agent:          config.Agent,
+		Source:         "daemon",
 	}
 	ps.SessionID = fmt.Sprintf("pending-%d", time.Now().UnixNano())
 	sm.mu.Lock()
@@ -179,15 +183,17 @@ func (sm *SessionManager) RegisterTerminalSession(sessionID, cwd string, pid int
 	}
 
 	// New session — register it
+	now := time.Now()
 	sm.sessions[sessionID] = &ProcessState{
-		SessionID: sessionID,
-		Status:    status,
-		StartedAt: time.Now(),
-		Cwd:       cwd,
-		Agent:     "claude-code",
-		Source:    "terminal",
-		Pid:       pid,
-		TTY:       ttyPath,
+		SessionID:      sessionID,
+		Status:         status,
+		StartedAt:      now,
+		LastActivityAt: now,
+		Cwd:            cwd,
+		Agent:          "claude-code",
+		Source:         "terminal",
+		Pid:            pid,
+		TTY:            ttyPath,
 	}
 
 	// Emit session_discovered event to relay so it knows about this session
@@ -251,8 +257,10 @@ func (sm *SessionManager) SetSessionExited(sessionID string, exitReason string) 
 		sm.mu.Unlock()
 		return
 	}
+	now := time.Now()
 	ps.Status = protocol.StatusExited
 	ps.ExitReason = exitReason
+	ps.LastActivityAt = now
 	sm.mu.Unlock()
 
 	sm.outputCh <- protocol.DaemonEvent{
@@ -260,7 +268,7 @@ func (sm *SessionManager) SetSessionExited(sessionID string, exitReason string) 
 		SessionID:      sessionID,
 		Status:         protocol.StatusExited,
 		ExitReason:     exitReason,
-		LastActivityAt: time.Now().UTC().Format(time.RFC3339),
+		LastActivityAt: now.UTC().Format(time.RFC3339),
 	}
 }
 
@@ -272,14 +280,16 @@ func (sm *SessionManager) SetSessionStatus(sessionID, status string) {
 		sm.mu.Unlock()
 		return
 	}
+	now := time.Now()
 	ps.Status = status
+	ps.LastActivityAt = now
 	sm.mu.Unlock()
 
 	sm.outputCh <- protocol.DaemonEvent{
 		Type:           "session_status",
 		SessionID:      sessionID,
 		Status:         status,
-		LastActivityAt: time.Now().UTC().Format(time.RFC3339),
+		LastActivityAt: now.UTC().Format(time.RFC3339),
 	}
 }
 
@@ -316,6 +326,12 @@ func (sm *SessionManager) readOutput(ctx context.Context, cmd *exec.Cmd, stdout 
 				sm.mu.Unlock()
 			}
 		}
+		// Update last activity on each received event
+		if len(events) > 0 {
+			sm.mu.Lock()
+			ps.LastActivityAt = time.Now()
+			sm.mu.Unlock()
+		}
 		for _, evt := range events {
 			if evt.SessionID == "" {
 				evt.SessionID = ps.SessionID
@@ -325,6 +341,7 @@ func (sm *SessionManager) readOutput(ctx context.Context, cmd *exec.Cmd, stdout 
 	}
 
 	exitErr := cmd.Wait()
+	now := time.Now()
 	status := protocol.StatusCompleted
 	if exitErr != nil {
 		if ctx.Err() == context.Canceled {
@@ -335,12 +352,13 @@ func (sm *SessionManager) readOutput(ctx context.Context, cmd *exec.Cmd, stdout 
 	}
 	sm.mu.Lock()
 	ps.Status = status
+	ps.LastActivityAt = now
 	sm.mu.Unlock()
 	sm.outputCh <- protocol.DaemonEvent{
 		Type:           "session_status",
 		SessionID:      ps.SessionID,
 		Status:         status,
-		LastActivityAt: time.Now().UTC().Format(time.RFC3339),
+		LastActivityAt: now.UTC().Format(time.RFC3339),
 	}
 }
 
@@ -357,6 +375,10 @@ func (sm *SessionManager) SendMessage(ctx context.Context, sessionID string, con
 	if !ok {
 		return fmt.Errorf("session not found: %s", sessionID)
 	}
+	// Update last activity — user sent a message
+	sm.mu.Lock()
+	ps.LastActivityAt = time.Now()
+	sm.mu.Unlock()
 
 	// Terminal session: check if process is still alive
 	if source == "terminal" && pid > 0 {
@@ -439,10 +461,12 @@ func (sm *SessionManager) sendToIdleTerminal(ctx context.Context, ps *ProcessSta
 		return fmt.Errorf("start --resume: %w", err)
 	}
 
+	now := time.Now()
 	sm.mu.Lock()
 	ps.Cmd = cmd
 	ps.Cancel = cancel
 	ps.Status = protocol.StatusRunning
+	ps.LastActivityAt = now
 	sm.mu.Unlock()
 
 	// Notify web that session is now running
@@ -456,9 +480,11 @@ func (sm *SessionManager) sendToIdleTerminal(ctx context.Context, ps *ProcessSta
 	// Wait for --resume to finish in background
 	go func() {
 		cmd.Wait()
+		resumeNow := time.Now()
 		sm.mu.Lock()
 		// Terminal process is still alive, so go back to idle
 		ps.Status = protocol.StatusIdle
+		ps.LastActivityAt = resumeNow
 		sm.mu.Unlock()
 
 		sm.outputCh <- protocol.DaemonEvent{
@@ -515,6 +541,7 @@ func (sm *SessionManager) KillSession(sessionID string) error {
 			}
 			sm.mu.Lock()
 			ps.Status = protocol.StatusKilled
+			ps.LastActivityAt = time.Now()
 			sm.mu.Unlock()
 			return nil
 		}
@@ -525,19 +552,50 @@ func (sm *SessionManager) KillSession(sessionID string) error {
 func (sm *SessionManager) ListSessions() []SessionInfo {
 	sm.mu.RLock()
 	defer sm.mu.RUnlock()
-	var infos []SessionInfo
+	var active, exited []SessionInfo
 	for id, ps := range sm.sessions {
-		infos = append(infos, SessionInfo{
-			SessionID: id, Status: ps.Status, StartedAt: ps.StartedAt, Agent: ps.Agent, Cwd: ps.Cwd,
-		})
+		info := SessionInfo{
+			SessionID: id,
+			Status:    ps.Status,
+			StartedAt: ps.StartedAt,
+			LastActivityAt: ps.LastActivityAt,
+			Agent:     ps.Agent,
+			Cwd:       ps.Cwd,
+		}
+		if ps.Status == protocol.StatusExited || ps.Status == protocol.StatusCompleted ||
+			ps.Status == protocol.StatusError || ps.Status == protocol.StatusKilled {
+			exited = append(exited, info)
+		} else {
+			active = append(active, info)
+		}
 	}
-	return infos
+
+	// Active sessions first (most recently active first), then exited (most recently exited first)
+	sort.Slice(active, func(i, j int) bool {
+		return active[i].LastActivityAt.After(active[j].LastActivityAt)
+	})
+	sort.Slice(exited, func(i, j int) bool {
+		return exited[i].LastActivityAt.After(exited[j].LastActivityAt)
+	})
+
+	return append(active, exited...)
+}
+
+// UpdateLastActivity updates the LastActivityAt timestamp for a session.
+// Used by terminal session JSONL tailer to track when events are received.
+func (sm *SessionManager) UpdateLastActivity(sessionID string) {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+	if ps, ok := sm.sessions[sessionID]; ok {
+		ps.LastActivityAt = time.Now()
+	}
 }
 
 type SessionInfo struct {
 	SessionID string    `json:"session_id"`
 	Status    string    `json:"status"`
 	StartedAt time.Time `json:"started_at"`
+	LastActivityAt time.Time `json:"last_activity_at"`
 	Agent     string    `json:"agent"`
 	Cwd       string    `json:"cwd"`
 }

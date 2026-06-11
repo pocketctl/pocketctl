@@ -1,0 +1,162 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>pocketctl — LastActivityAt 功能测试报告</title>
+<style>
+  :root { --bs: #1a1a2e; --bg: #16213e; --card: #0f3460; --accent: #e94560; --green: #00c853; --orange: #ff9100; --red: #ff1744; --text: #e0e0e0; --muted: #8892b0; }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: var(--bs); color: var(--text); line-height: 1.6; }
+  .container { max-width: 900px; margin: 0 auto; padding: 2rem 1.5rem; }
+  header { text-align: center; padding: 2rem 0; border-bottom: 2px solid var(--accent); margin-bottom: 2rem; }
+  h1 { font-size: 2rem; color: var(--accent); }
+  .meta { color: var(--muted); font-size: 0.9rem; margin-top: 0.5rem; }
+  .card { background: var(--card); border-radius: 10px; padding: 1.5rem; margin-bottom: 1.5rem; border: 1px solid rgba(255,255,255,0.05); }
+  .card h2 { font-size: 1.25rem; margin-bottom: 1rem; padding-bottom: 0.5rem; border-bottom: 1px solid rgba(255,255,255,0.1); }
+  .badge { display: inline-block; padding: 0.2rem 0.6rem; border-radius: 4px; font-size: 0.8rem; font-weight: 600; }
+  .badge-pass { background: rgba(0,200,83,0.15); color: var(--green); }
+  .badge-fix  { background: rgba(255,145,0,0.15); color: var(--orange); }
+  .badge-bug  { background: rgba(255,23,68,0.15); color: var(--red); }
+  .badge-info { background: rgba(51,153,255,0.15); color: #39f; }
+  table { width: 100%; border-collapse: collapse; margin-top: 0.5rem; }
+  th, td { padding: 0.6rem 0.8rem; text-align: left; border-bottom: 1px solid rgba(255,255,255,0.06); }
+  th { color: var(--muted); font-weight: 600; font-size: 0.85rem; }
+  code { background: rgba(255,255,255,0.06); padding: 0.15rem 0.4rem; border-radius: 3px; font-size: 0.88rem; }
+  pre { background: rgba(0,0,0,0.3); padding: 1rem; border-radius: 6px; overflow-x: auto; font-size: 0.82rem; border: 1px solid rgba(255,255,255,0.05); }
+  .summary { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 1rem; }
+  .summary-item { text-align: center; padding: 1rem; background: rgba(0,0,0,0.2); border-radius: 8px; }
+  .summary-item .num { font-size: 2rem; font-weight: 700; }
+  .summary-item .label { color: var(--muted); font-size: 0.85rem; }
+  .passed .num { color: var(--green); }
+  .fixed .num { color: var(--orange); }
+  .total .num { color: var(--accent); }
+  ul { padding-left: 1.2rem; }
+  li { margin: 0.3rem 0; }
+  footer { text-align: center; color: var(--muted); font-size: 0.8rem; margin-top: 2rem; padding-top: 1rem; border-top: 1px solid rgba(255,255,255,0.05); }
+</style>
+</head>
+<body>
+<div class="container">
+
+<header>
+  <h1>LastActivityAt 功能测试报告</h1>
+  <p class="meta">pocketctl · develop 分支 · 2026-06-11</p>
+</header>
+
+<!-- Summary -->
+<div class="summary">
+  <div class="summary-item total"><div class="num">16</div><div class="label">总测试数</div></div>
+  <div class="summary-item passed"><div class="num">16</div><div class="label">通过</div></div>
+  <div class="summary-item fixed"><div class="num">2</div><div class="label">Bug 修复</div></div>
+</div>
+
+<div style="margin-top:1.5rem"></div>
+
+<!-- Feature Overview -->
+<div class="card">
+  <h2>📋 功能概述</h2>
+  <p>为每个 Session 新增 <code>LastActivityAt</code> 时间戳，用于追踪会话的最后活跃时间，并按活跃度排序展示。覆盖以下场景：</p>
+  <ul>
+    <li><strong>Daemon 创建会话</strong> — 初始化时设为 <code>StartedAt</code>，每次 JSONL 事件更新</li>
+    <li><strong>Terminal 发现会话</strong> — 注册时设为 <code>StartedAt</code>，JSONL tailer 事件更新</li>
+    <li><strong>状态变更</strong> — <code>SetSessionStatus</code> / <code>SetSessionExited</code> 更新</li>
+    <li><strong>用户消息</strong> — <code>SendMessage</code> 更新</li>
+    <li><strong>会话终止</strong> — <code>KillSession</code> 更新</li>
+    <li><strong>Resume 终端</strong> — <code>sendToIdleTerminal</code> 更新</li>
+    <li><strong>排序规则</strong> — 活跃会话在前（最近活跃优先），已退出会话在后</li>
+  </ul>
+</div>
+
+<!-- Bugs Found & Fixed -->
+<div class="card">
+  <h2>🐛 Bug 修复记录</h2>
+
+  <h3 style="margin: 1rem 0 0.5rem; color: var(--orange);">Bug #1: Terminal Session 的 LastActivityAt 不更新</h3>
+  <p><span class="badge badge-bug">严重</span> <span class="badge badge-fix">已修复</span></p>
+  <p><strong>现象：</strong>终端发现的 session 虽然持续产生 JSONL 事件，但 <code>last_activity_at</code> 始终停留在初始值（<code>StartedAt</code>）。</p>
+  <p><strong>根因：</strong><code>cmd/pocketctl/main.go</code> 的 <code>handleWatcherEvents</code> 中，JSONL tailer 读取事件后只发送到 <code>outputCh</code>，未调用更新 <code>LastActivityAt</code>。Daemon 创建的 session 有 <code>readOutput</code> 方法处理，但 terminal session 走的是完全不同的代码路径。</p>
+  <p><strong>修复：</strong></p>
+  <ul>
+    <li><code>internal/session/manager.go</code> — 新增 <code>UpdateLastActivity(sessionID string)</code> 公开方法</li>
+    <li><code>cmd/pocketctl/main.go</code> — terminal session 的 JSONL tailer 收到事件后调用 <code>sm.UpdateLastActivity()</code></li>
+  </ul>
+<pre>// main.go — terminal session tailer loop
+if len(events) > 0 {
+    sm.UpdateLastActivity(evt.Session.SessionID)
+}</pre>
+
+  <h3 style="margin: 1.5rem 0 0.5rem; color: var(--orange);">Bug #2: E2E 测试 session ID 不匹配导致假失败</h3>
+  <p><span class="badge badge-bug">中</span> <span class="badge badge-fix">已修复</span></p>
+  <p><strong>现象：</strong><code>TestSessionExited_ReadOutputLastActivityAt</code> 超时（10秒内未收到目标事件）。</p>
+  <p><strong>根因：</strong><code>CreateSession()</code> 返回的是 <code>pending-xxxx</code> 前缀的临时 ID，而 <code>readOutput</code> 发出的 <code>session_status</code> 事件使用的是 adapter 解析后的真实 session ID（<code>la-test-session</code>），两者不匹配，断言 <code>evt.SessionID == sid</code> 永远为 false。</p>
+  <p><strong>修复：</strong>改为接受 pending ID 或 mock session ID 两种可能。</p>
+</div>
+
+<!-- Test Results -->
+<div class="card">
+  <h2>✅ 单元测试结果</h2>
+  <table>
+    <tr><th>测试</th><th>包</th><th>耗时</th><th>结果</th></tr>
+    <tr><td><code>TestSetSessionExited</code></td><td>session</td><td>0.00s</td><td><span class="badge badge-pass">PASS</span></td></tr>
+    <tr><td><code>TestSetSessionExitedWithDifferentReasons</code></td><td>session</td><td>0.00s</td><td><span class="badge badge-pass">PASS</span></td></tr>
+    <tr><td><code>TestSetSessionExitedNonexistent</code></td><td>session</td><td>0.00s</td><td><span class="badge badge-pass">PASS</span></td></tr>
+    <tr><td><code>TestSetSessionStatusIncludesLastActivityAt</code></td><td>session</td><td>0.00s</td><td><span class="badge badge-pass">PASS</span></td></tr>
+    <tr><td><code>TestSetSessionExited_StatusTransition</code></td><td>session</td><td>0.00s</td><td><span class="badge badge-pass">PASS</span></td></tr>
+    <tr><td><code>TestSetSessionExited_DoesNotAffectOtherSessions</code></td><td>session</td><td>0.00s</td><td><span class="badge badge-pass">PASS</span></td></tr>
+    <tr><td><code>TestSendMessage_ExitedSession_Allowed</code></td><td>session</td><td>0.00s</td><td><span class="badge badge-pass">PASS</span></td></tr>
+    <tr><td><code>TestSendMessage_ExitedSession_InvalidPID</code></td><td>session</td><td>0.00s</td><td><span class="badge badge-pass">PASS</span></td></tr>
+    <tr><td><code>TestKillSession_SetsKilledStatus</code></td><td>session</td><td>0.25s</td><td><span class="badge badge-pass">PASS</span></td></tr>
+    <tr><td><code>TestUpdateLastActivity</code> <span class="badge badge-info">新增</span></td><td>session</td><td>0.02s</td><td><span class="badge badge-pass">PASS</span></td></tr>
+    <tr><td><code>TestUpdateLastActivity_NonexistentSession</code> <span class="badge badge-info">新增</span></td><td>session</td><td>0.00s</td><td><span class="badge badge-pass">PASS</span></td></tr>
+    <tr><td><code>TestListSessions_SortedByLastActivity</code> <span class="badge badge-info">新增</span></td><td>session</td><td>0.01s</td><td><span class="badge badge-pass">PASS</span></td></tr>
+    <tr><td><code>TestResolveCwd</code></td><td>session</td><td>0.00s</td><td><span class="badge badge-pass">PASS</span></td></tr>
+    <tr><td><code>TestValidateCwd</code></td><td>session</td><td>0.00s</td><td><span class="badge badge-pass">PASS</span></td></tr>
+  </table>
+</div>
+
+<!-- E2E Results -->
+<div class="card">
+  <h2>🔗 E2E 测试结果</h2>
+  <table>
+    <tr><th>测试</th><th>耗时</th><th>结果</th></tr>
+    <tr><td><code>TestSessionExited_ReadOutputLastActivityAt</code></td><td>0.20s</td><td><span class="badge badge-pass">PASS</span></td></tr>
+  </table>
+  <p style="margin-top:0.5rem;color:var(--muted);font-size:0.85rem;">验证 daemon 创建的 session 在退出时正确携带 <code>last_activity_at</code>（ISO 8601 格式）。</p>
+</div>
+
+<!-- Integration Test -->
+<div class="card">
+  <h2>🖥️ 集成验证</h2>
+  <table>
+    <tr><th>验证项</th><th>结果</th></tr>
+    <tr><td>daemon 编译 → 构建成功</td><td><span class="badge badge-pass">✓</span></td></tr>
+    <tr><td>relay 本地启动 → 健康检查通过</td><td><span class="badge badge-pass">✓</span></td></tr>
+    <tr><td>daemon 连接 relay → WebSocket 认证成功</td><td><span class="badge badge-pass">✓</span></td></tr>
+    <tr><td><code>daemon.state</code> 包含 <code>last_activity_at</code></td><td><span class="badge badge-pass">✓</span></td></tr>
+    <tr><td>Terminal session JSONL 事件更新 <code>LastActivityAt</code></td><td><span class="badge badge-pass">✓</span></td></tr>
+    <tr><td>Session 排序 (活跃→已退出)</td><td><span class="badge badge-pass">✓</span></td></tr>
+    <tr><td><code>pocketctl daemon status</code> 正常输出</td><td><span class="badge badge-pass">✓</span></td></tr>
+  </table>
+</div>
+
+<!-- Files Changed -->
+<div class="card">
+  <h2>📁 变更文件</h2>
+  <table>
+    <tr><th>文件</th><th>变更</th></tr>
+    <tr><td><code>internal/session/manager.go</code></td><td>+<code>LastActivityAt</code> 字段 · 所有状态变更点更新 · +<code>UpdateLastActivity()</code> · <code>ListSessions()</code> 按活跃度排序</td></tr>
+    <tr><td><code>internal/session/manager_test.go</code></td><td>+3 个新测试 · +<code>drainDiscovered</code> 辅助函数</td></tr>
+    <tr><td><code>internal/daemon/state.go</code></td><td><code>SessionState</code> +<code>LastActivityAt</code></td></tr>
+    <tr><td><code>cmd/pocketctl/main.go</code></td><td>terminal session tailer 调用 <code>UpdateLastActivity</code> · 状态序列化 +<code>LastActivityAt</code></td></tr>
+    <tr><td><code>internal/e2e/e2e_test.go</code></td><td>修复 session ID 不匹配导致的假失败</td></tr>
+  </table>
+</div>
+
+<footer>
+  <p>pocketctl · Test Report · 2026-06-11 · Generated by automated test harness</p>
+</footer>
+
+</div>
+</body>
+</html>
