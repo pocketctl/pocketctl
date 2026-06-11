@@ -33,12 +33,13 @@ struct SessionListView: View {
                 if let vm = viewModel {
                     if vm.filteredSessions.isEmpty && !vm.isLoading {
                         emptyState
+                        Spacer()
                     } else {
                         sessionList(vm: vm)
                     }
+                } else {
+                    Spacer()
                 }
-
-                Spacer()
             }
         }
         .navigationBarHidden(true)
@@ -148,7 +149,9 @@ struct SessionListView: View {
             }
             .padding(.horizontal, PCSpacing.lg)
             .padding(.top, PCSpacing.sm)
+            .padding(.bottom, PCSpacing.md)
         }
+        .frame(maxHeight: .infinity)
     }
 
     // MARK: - Session card
