@@ -194,7 +194,7 @@ export async function upsertSession(pool: pg.Pool, sessionId: string, daemonId: 
        title = COALESCE($5, sessions.title),
        source = COALESCE($6, sessions.source),
        exit_reason = COALESCE($8, sessions.exit_reason),
-       user_id = COALESCE($9, sessions.user_id),
+       user_id = CASE WHEN $9 IS NOT NULL THEN $9 ELSE sessions.user_id END,
        updated_at = NOW()`,
     [sessionId, daemonId, agentType, cwd, title || null, source || 'daemon', status, exitReason || null, userId || null]
   );
