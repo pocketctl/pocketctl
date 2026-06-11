@@ -327,7 +327,7 @@ struct SwipeToDelete<Content: View>: View {
             content
                 .frame(maxHeight: .infinity)
                 .background(Color.pcBackground)
-                .allowsHitTesting(!isDragging && !isOpen)   // 拖拽中/滑开时禁用内部 Button
+                .allowsHitTesting(!isDragging)             // 拖拽期间禁用内部 Button，滑开时保持可交互以支持右滑关闭
                 .offset(x: offset)
                 .simultaneousGesture(
                     DragGesture(minimumDistance: 6)
