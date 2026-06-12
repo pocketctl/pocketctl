@@ -1,0 +1,574 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="dark">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>pocketctl — Session 详情</title>
+<link rel="stylesheet" href="../css/web-shared.css">
+<style>
+  /* ---- Three-Column Layout ---- */
+  .app-layout { display: flex; min-height: 100vh; }
+
+  .session-layout {
+    display: flex;
+    flex: 1;
+    margin-left: var(--sidebar-w);
+    height: 100vh;
+    overflow: hidden;
+  }
+
+  /* Session list panel */
+  .session-panel {
+    width: 300px;
+    background: var(--sidebar-bg);
+    border-right: 1px solid var(--sidebar-border);
+    display: flex;
+    flex-direction: column;
+    flex-shrink: 0;
+    transition: background var(--transition), border-color var(--transition);
+  }
+
+  .session-panel-header {
+    padding: 16px;
+    border-bottom: 1px solid var(--sidebar-border);
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+  }
+
+  .session-panel-header h3 {
+    font-size: 14px;
+    font-weight: 600;
+    color: var(--fg);
+  }
+
+  .session-list {
+    flex: 1;
+    overflow-y: auto;
+    padding: 8px;
+  }
+
+  .session-list-item {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 10px 12px;
+    border-radius: var(--radius-md);
+    cursor: pointer;
+    transition: background 0.1s;
+    margin-bottom: 2px;
+  }
+
+  .session-list-item:hover { background: var(--surface-hover); }
+  .session-list-item.active { background: var(--sidebar-active); }
+
+  .session-list-item .sl-info { flex: 1; min-width: 0; }
+  .session-list-item .sl-title { font-size: 13px; font-weight: 500; color: var(--fg); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .session-list-item .sl-meta { font-size: 11px; color: var(--fg-tertiary); margin-top: 2px; }
+
+  /* Chat area */
+  .chat-area {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+    background: var(--bg);
+    transition: background var(--transition);
+  }
+
+  /* Chat toolbar */
+  .chat-toolbar {
+    height: 52px;
+    border-bottom: 1px solid var(--border);
+    display: flex;
+    align-items: center;
+    padding: 0 20px;
+    gap: 12px;
+    background: var(--surface);
+    transition: background var(--transition), border-color var(--transition);
+  }
+
+  .chat-toolbar .session-label {
+    font-size: 14px;
+    font-weight: 600;
+    color: var(--fg);
+    flex: 1;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+
+  .chat-toolbar .session-label .daemon-name {
+    font-size: 12px;
+    color: var(--fg-tertiary);
+    font-weight: 400;
+  }
+
+  .status-pill {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    padding: 4px 10px;
+    border-radius: var(--radius-full);
+    font-size: 12px;
+    font-weight: 600;
+  }
+
+  .status-pill.running { background: var(--success-bg); color: var(--success); }
+
+  .status-pill .pulse {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: currentColor;
+    animation: pulse-green 1.5s infinite;
+  }
+
+  /* Messages */
+  .chat-messages {
+    flex: 1;
+    overflow-y: auto;
+    padding: 20px;
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+  }
+
+  .msg { max-width: 75%; animation: fade-in 0.2s ease; }
+
+  .msg-user {
+    align-self: flex-end;
+    background: var(--user-bubble);
+    color: #fff;
+    padding: 10px 16px;
+    border-radius: 16px 16px 4px 16px;
+    font-size: 14px;
+    line-height: 1.6;
+  }
+
+  .msg-agent {
+    align-self: flex-start;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    color: var(--fg);
+    padding: 10px 16px;
+    border-radius: 16px 16px 16px 4px;
+    font-size: 14px;
+    line-height: 1.6;
+  }
+
+  .msg-agent.streaming .blink-cursor::after {
+    content: '▎';
+    animation: blink-cursor 0.8s step-end infinite;
+    color: var(--accent);
+  }
+
+  .msg-error {
+    align-self: flex-start;
+    background: var(--error-bg);
+    color: var(--error);
+    padding: 10px 16px;
+    border-radius: 16px 16px 16px 4px;
+    font-size: 13px;
+    line-height: 1.6;
+  }
+
+  /* Tool cards */
+  .tool-card {
+    align-self: flex-start;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-lg);
+    width: 90%;
+    max-width: 560px;
+    overflow: hidden;
+    animation: fade-in 0.2s ease;
+  }
+
+  .tool-card .tool-header {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 12px 16px;
+    cursor: pointer;
+  }
+
+  .tool-card .tool-icon { font-size: 16px; flex-shrink: 0; }
+  .tool-card .tool-name { font-weight: 600; font-size: 13px; color: var(--accent); flex: 1; }
+  .tool-card .tool-args {
+    font-size: 12px; color: var(--fg-tertiary);
+    font-family: var(--font-mono);
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    max-width: 200px;
+  }
+  .tool-card .tool-status { flex-shrink: 0; }
+  .tool-card .tool-status .check { color: var(--success); font-size: 14px; }
+  .tool-card .tool-status .spinner {
+    width: 14px; height: 14px;
+    border: 2px solid transparent;
+    border-top-color: var(--fg-secondary);
+    border-radius: 50%;
+    animation: spin 0.8s linear infinite;
+    display: inline-block;
+  }
+  .tool-card .tool-chevron { color: var(--fg-tertiary); font-size: 12px; transition: transform 0.15s; }
+  .tool-card.expanded .tool-chevron { transform: rotate(180deg); }
+
+  .tool-card .tool-body {
+    border-top: 1px solid var(--border);
+    display: none;
+  }
+  .tool-card.expanded .tool-body { display: block; }
+
+  .tool-body .tool-section { padding: 8px 16px; }
+  .tool-body .tool-label {
+    font-size: 11px; color: var(--fg-tertiary);
+    text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 4px;
+  }
+  .tool-body .tool-input {
+    background: var(--code-bg);
+    padding: 8px 16px;
+    font-family: var(--font-mono);
+    font-size: 12px;
+    color: var(--success);
+    border-radius: 4px;
+    margin: 0 12px;
+  }
+  .tool-body .tool-output {
+    background: var(--code-bg);
+    padding: 8px 16px;
+    font-family: var(--font-mono);
+    font-size: 12px;
+    color: var(--fg-secondary);
+    border-radius: 4px;
+    margin: 8px 12px;
+    max-height: 120px;
+    overflow: hidden;
+    line-height: 1.6;
+  }
+  .tool-body .toggle-expand {
+    background: none; border: none; color: var(--accent);
+    font-size: 12px; padding: 4px 16px 8px; cursor: pointer; font-family: var(--font-body);
+  }
+
+  /* Sub-agent card */
+  .sub-agent-card {
+    margin: 8px 12px;
+    background: var(--sub-agent-bg);
+    border: 1px solid rgba(192,132,252,0.2);
+    border-radius: var(--radius-md);
+    overflow: hidden;
+  }
+  .sub-agent-card .tool-header { padding: 8px 12px; }
+  .sub-agent-card .tool-name { color: var(--sub-agent); }
+
+  /* Timeline */
+  .timeline {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 12px 20px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-md);
+    margin-bottom: 4px;
+  }
+
+  .timeline .milestone {
+    display: flex; flex-direction: column; align-items: center; gap: 4px;
+  }
+
+  .timeline .milestone .dot {
+    width: 8px; height: 8px; border-radius: 50%; background: var(--border);
+  }
+
+  .timeline .milestone .dot.active { background: var(--success); }
+  .timeline .milestone .dot.current { background: var(--success); animation: pulse-green 1.5s infinite; }
+  .timeline .milestone .label { font-size: 11px; color: var(--fg-tertiary); }
+  .timeline .milestone .label.active { color: var(--fg-secondary); }
+  .timeline .milestone .time { font-size: 10px; color: var(--fg-tertiary); font-family: var(--font-mono); }
+  .timeline .line { flex: 1; height: 1px; background: var(--border); margin: 0 12px; align-self: flex-start; margin-top: 4px; }
+  .timeline .line.done { background: var(--success); }
+
+  /* Chat input */
+  .chat-input-area {
+    border-top: 1px solid var(--border);
+    padding: 12px 20px;
+    background: var(--surface);
+    display: flex;
+    gap: 10px;
+    align-items: center;
+    transition: background var(--transition), border-color var(--transition);
+  }
+
+  .chat-input-wrap {
+    flex: 1;
+    display: flex;
+    align-items: center;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-xl);
+    padding: 0 16px;
+    min-height: 42px;
+    transition: border-color 0.15s, box-shadow 0.15s;
+  }
+
+  .chat-input-wrap:focus-within {
+    border-color: var(--border-focus);
+    box-shadow: 0 0 0 3px var(--accent-muted);
+  }
+
+  .chat-input-wrap input {
+    flex: 1; background: none; border: none; color: var(--fg);
+    font-size: 14px; font-family: var(--font-body); outline: none; padding: 8px 0;
+  }
+
+  .chat-input-wrap input::placeholder { color: var(--fg-tertiary); }
+
+  .send-btn {
+    width: 36px; height: 36px; border-radius: 50%;
+    background: var(--accent); border: none;
+    display: flex; align-items: center; justify-content: center;
+    cursor: pointer; flex-shrink: 0;
+    transition: background 0.15s;
+  }
+
+  .send-btn:hover { background: var(--accent-hover); }
+
+  .send-btn svg { width: 16px; height: 16px; fill: var(--bg); }
+
+  /* Responsive */
+  @media (max-width: 1024px) {
+    .session-layout { margin-left: 72px; }
+  }
+
+  @media (max-width: 768px) {
+    .session-layout { margin-left: 0; }
+    .session-panel { display: none; }
+    .msg { max-width: 90%; }
+  }
+</style>
+</head>
+<body>
+<div class="app-layout">
+  <!-- Sidebar -->
+  <nav class="sidebar" id="sidebar">
+    <a href="dashboard.html" class="sidebar-logo">
+      <img id="sidebar-logo" src="../assets/logo-github-org.svg" alt="pocketctl">
+      <span class="brand-name">pocketctl</span>
+    </a>
+    <div class="sidebar-nav">
+      <div class="sidebar-section-label">概览</div>
+      <a href="dashboard.html" class="sidebar-link">
+        <span class="link-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg></span>
+        <span class="link-text">仪表盘</span>
+      </a>
+      <a href="session-detail.html" class="sidebar-link active">
+        <span class="link-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15a2 2 0 01-2 2H7l-4 4V5a2 2 0 012-2h14a2 2 0 012 2z"/></svg></span>
+        <span class="link-text">会话</span>
+        <span class="badge">5</span>
+      </a>
+      <div class="sidebar-section-label">管理</div>
+      <a href="#" class="sidebar-link">
+        <span class="link-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="2" width="20" height="20" rx="3"/><path d="M7 2v20M17 2v20M2 12h20"/></svg></span>
+        <span class="link-text">主机</span>
+      </a>
+      <a href="settings.html" class="sidebar-link">
+        <span class="link-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M12 1v2M12 21v2M4.22 4.22l1.42 1.42M18.36 18.36l1.42 1.42M1 12h2M21 12h2M4.22 19.78l1.42-1.42M18.36 5.64l1.42-1.42"/></svg></span>
+        <span class="link-text">设置</span>
+      </a>
+    </div>
+    <div class="sidebar-footer">
+      <div class="sidebar-user" onclick="location.href='settings.html'">
+        <div class="user-avatar">M</div>
+        <div class="user-info"><div class="user-name">138****8888</div><div class="user-plan">免费版</div></div>
+      </div>
+    </div>
+  </nav>
+
+  <!-- Session Layout -->
+  <div class="session-layout">
+    <!-- Session List Panel -->
+    <div class="session-panel">
+      <div class="session-panel-header">
+        <h3>MacBook-Pro</h3>
+        <button class="btn-icon" style="width:28px;height:28px;border:none;background:var(--accent);color:#fff;" title="新建会话">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M12 5v14M5 12h14"/></svg>
+        </button>
+      </div>
+      <div style="padding:4px 8px;display:flex;align-items:center;gap:6px;">
+        <span class="status-dot online" style="width:6px;height:6px;"></span>
+        <span style="font-size:11px;color:var(--fg-tertiary);">在线 · 最后心跳 30秒前</span>
+      </div>
+      <div class="session-list">
+        <div class="session-list-item active">
+          <span class="status-dot running" style="width:7px;height:7px;"></span>
+          <div class="sl-info">
+            <div class="sl-title">重构用户认证模块</div>
+            <div class="sl-meta">3 分钟前 · 3 子智能体</div>
+          </div>
+        </div>
+        <div class="session-list-item">
+          <span class="status-dot busy" style="width:7px;height:7px;"></span>
+          <div class="sl-info">
+            <div class="sl-title">修复 CI 构建错误</div>
+            <div class="sl-meta">8 分钟前</div>
+          </div>
+        </div>
+        <div class="session-list-item">
+          <span class="status-dot completed" style="width:7px;height:7px;"></span>
+          <div class="sl-info">
+            <div class="sl-title" style="font-family:var(--font-mono);font-size:12px;color:var(--accent);">sess_a3f7b2c1</div>
+            <div class="sl-meta">1 小时前</div>
+          </div>
+        </div>
+        <div class="session-list-item">
+          <span class="status-dot error" style="width:7px;height:7px;"></span>
+          <div class="sl-info">
+            <div class="sl-title">部署生产环境</div>
+            <div class="sl-meta">2 小时前</div>
+          </div>
+        </div>
+        <div class="session-list-item">
+          <span class="status-dot idle" style="width:7px;height:7px;"></span>
+          <div class="sl-info">
+            <div class="sl-title">编写 API 文档</div>
+            <div class="sl-meta">3 小时前 · 1 子智能体</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Chat Main Area -->
+    <div class="chat-area">
+      <!-- Chat Toolbar -->
+      <div class="chat-toolbar">
+        <div class="session-label">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M15 18l-6-6 6-6"/></svg>
+          重构用户认证模块
+          <span class="daemon-name">· MacBook-Pro</span>
+        </div>
+        <span class="status-pill running"><span class="pulse"></span>运行中</span>
+        <button class="theme-toggle" onclick="toggleTheme()" title="切换主题">
+          <svg id="icon-moon" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 12.79A9 9 0 1111.21 3 7 7 0 0021 12.79z"/></svg>
+          <svg id="icon-sun" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="display:none;"><circle cx="12" cy="12" r="5"/><path d="M12 1v2M12 21v2M4.22 4.22l1.42 1.42M18.36 18.36l1.42 1.42M1 12h2M21 12h2M4.22 19.78l1.42-1.42M18.36 5.64l1.42-1.42"/></svg>
+        </button>
+      </div>
+
+      <!-- Messages -->
+      <div class="chat-messages">
+        <!-- Timeline -->
+        <div class="timeline">
+          <div class="milestone"><div class="dot active"></div><span class="label active">创建</span><span class="time">14:32</span></div>
+          <div class="line done"></div>
+          <div class="milestone"><div class="dot current"></div><span class="label active">运行</span><span class="time">14:33</span></div>
+          <div class="line"></div>
+          <div class="milestone"><div class="dot"></div><span class="label">完成</span><span class="time">—</span></div>
+        </div>
+
+        <!-- User message -->
+        <div class="msg msg-user">重构 src/auth 目录下的认证模块，把 JWT 逻辑拆成独立中间件</div>
+
+        <!-- Agent message -->
+        <div class="msg msg-agent">好的，我来分析现有的认证代码结构。先看看目录和当前实现：</div>
+
+        <!-- Tool card: Read (expanded) -->
+        <div class="tool-card expanded" onclick="this.classList.toggle('expanded')">
+          <div class="tool-header">
+            <span class="tool-icon">📖</span>
+            <span class="tool-name">Read</span>
+            <span class="tool-args">src/auth/index.ts:1-48</span>
+            <span class="tool-status"><span class="check">✓</span></span>
+            <span class="tool-chevron">▼</span>
+          </div>
+          <div class="tool-body">
+            <div class="tool-section"><div class="tool-label">输入</div></div>
+            <div class="tool-input">src/auth/index.ts:1-48</div>
+            <div class="tool-section" style="padding-top:8px;"><div class="tool-label">输出</div></div>
+            <div class="tool-output"> 1│ import jwt from 'jsonwebtoken';
+ 2│ import { RequestHandler } from 'express';
+ 3│
+ 4│ const SECRET = process.env.JWT_SECRET!;
+ 5│
+ 6│ export function signToken(userId: string): string {
+ 7│   return jwt.sign({ sub: userId }, SECRET, {
+ 8│     expiresIn: '7d',
+ 9│   });
+10│ }
+...</div>
+            <button class="toggle-expand">展开全部 (48 行)</button>
+          </div>
+        </div>
+
+        <!-- Agent message -->
+        <div class="msg msg-agent">看到目前所有 JWT 逻辑都在 index.ts 中。我会把它拆分为：jwt.ts（签名/验证）、middleware.ts（Express 中间件）、types.ts（类型定义）。</div>
+
+        <!-- Tool card: Bash (collapsed, running) -->
+        <div class="tool-card" onclick="this.classList.toggle('expanded')">
+          <div class="tool-header">
+            <span class="tool-icon">⚡</span>
+            <span class="tool-name">Bash</span>
+            <span class="tool-args">mkdir -p src/auth/jwt…</span>
+            <span class="tool-status"><span class="spinner"></span></span>
+            <span class="tool-chevron">▼</span>
+          </div>
+          <div class="tool-body">
+            <div class="tool-section"><div class="tool-label">执行中…</div></div>
+          </div>
+        </div>
+
+        <!-- Tool card: Agent (with sub-agent) -->
+        <div class="tool-card">
+          <div class="tool-header" onclick="this.parentElement.classList.toggle('expanded')">
+            <span class="tool-icon">🤖</span>
+            <span class="tool-name">Agent</span>
+            <span class="tool-args">编写类型定义</span>
+            <span class="tool-status"><span class="check">✓</span></span>
+            <span class="tool-chevron">▼</span>
+          </div>
+          <div class="tool-body">
+            <div class="sub-agent-card">
+              <div class="tool-header">
+                <span class="tool-icon">✏️</span>
+                <span class="tool-name">Write</span>
+                <span class="tool-args">src/auth/types.ts</span>
+                <span class="tool-status"><span class="check">✓</span></span>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Streaming agent message -->
+        <div class="msg msg-agent streaming">
+          中间件已创建完毕，正在运行测试<span class="blink-cursor"></span>
+        </div>
+      </div>
+
+      <!-- Chat Input -->
+      <div class="chat-input-area">
+        <div class="chat-input-wrap">
+          <input type="text" placeholder="发送消息...">
+        </div>
+        <button class="send-btn">
+          <svg viewBox="0 0 24 24"><path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z"/></svg>
+        </button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+  function getTheme() { return document.documentElement.getAttribute('data-theme') || 'dark'; }
+  function setTheme(t) {
+    document.documentElement.setAttribute('data-theme', t);
+    localStorage.setItem('pocketctl-theme', t);
+    document.getElementById('icon-sun').style.display = t === 'dark' ? 'none' : 'block';
+    document.getElementById('icon-moon').style.display = t === 'dark' ? 'block' : 'none';
+    document.getElementById('sidebar-logo').src = t === 'dark' ? '../assets/logo-github-org.svg' : '../assets/logo-github-org-light.svg';
+  }
+  function toggleTheme() { setTheme(getTheme() === 'dark' ? 'light' : 'dark'); }
+  const saved = localStorage.getItem('pocketctl-theme');
+  if (saved) setTheme(saved);
+</script>
+</body>
+</html>

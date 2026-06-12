@@ -11,12 +11,12 @@ import (
 	"net/url"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"syscall"
 	"time"
 
-	"github.com/google/uuid"
 	"github.com/gorilla/websocket"
 	"runtime"
 	"github.com/pocketctl/pocketctl/internal/adapter"
@@ -63,7 +63,7 @@ Usage:
   pocketctl <command> [options]
 
 Commands:
-  login          Login via phone number (SMS verification)
+  login          Login via phone or email (verification code)
   daemon start   Start the daemon (connects to relay)
   daemon stop    Stop the running daemon
   daemon status  Show daemon status
@@ -137,42 +137,29 @@ func cmdLogin(args []string) {
 
 	fmt.Println("pocketctl login")
 	fmt.Println("---------------")
+	fmt.Println("请选择登录方式:")
+	fmt.Println("  [1] 手机号 + 验证码")
+	fmt.Println("  [2] 邮箱 + 验证码")
 
-	// Prompt for phone number
-	fmt.Print("手机号: ")
-	var phone string
-	fmt.Scanln(&phone)
+	var choice string
+	fmt.Print("\n请输入选项 (1/2): ")
+	fmt.Scanln(&choice)
 
-	phone = strings.TrimSpace(phone)
-	if len(phone) != 11 || phone[0] != '1' {
-		fmt.Fprintln(os.Stderr, "错误: 请输入有效的11位手机号")
+	var accessToken, refreshToken string
+	var err error
+
+	switch strings.TrimSpace(choice) {
+	case "1":
+		accessToken, refreshToken, err = loginViaPhone(apiURL)
+	case "2":
+		accessToken, refreshToken, err = loginViaEmail(apiURL)
+	default:
+		fmt.Fprintln(os.Stderr, "错误: 无效选项，请输入 1 或 2")
 		os.Exit(1)
 	}
 
-	// Send verification code
-	fmt.Print("正在发送验证码...")
-	if err := api.SendSMS(apiURL, phone); err != nil {
-		fmt.Fprintf(os.Stderr, "\n发送失败: %v\n", err)
-		os.Exit(1)
-	}
-	fmt.Println(" 已发送")
-
-	// Prompt for verification code
-	fmt.Print("验证码: ")
-	var code string
-	fmt.Scanln(&code)
-
-	code = strings.TrimSpace(code)
-	if len(code) != 6 {
-		fmt.Fprintln(os.Stderr, "错误: 请输入6位验证码")
-		os.Exit(1)
-	}
-
-	// Verify
-	fmt.Print("正在验证...")
-	accessToken, refreshToken, err := api.VerifySMS(apiURL, phone, code)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "\n验证失败: %v\n", err)
+		fmt.Fprintf(os.Stderr, "\n登录失败: %v\n", err)
 		os.Exit(1)
 	}
 
@@ -192,6 +179,64 @@ func cmdLogin(args []string) {
 	fmt.Println(" 登录成功!")
 	fmt.Printf("Token 已保存到 ~/.pocketctl/auth.json\n")
 	fmt.Printf("现在可以运行 'pocketctl daemon start' 启动守护进程\n")
+}
+
+func loginViaPhone(apiURL string) (string, string, error) {
+	fmt.Print("手机号: ")
+	var phone string
+	fmt.Scanln(&phone)
+
+	phone = strings.TrimSpace(phone)
+	if len(phone) != 11 || phone[0] != '1' {
+		return "", "", fmt.Errorf("请输入有效的11位手机号")
+	}
+
+	fmt.Print("正在发送验证码...")
+	if err := api.SendSMS(apiURL, phone); err != nil {
+		return "", "", fmt.Errorf("发送失败: %w", err)
+	}
+	fmt.Println(" 已发送")
+
+	fmt.Print("验证码: ")
+	var code string
+	fmt.Scanln(&code)
+
+	code = strings.TrimSpace(code)
+	if len(code) != 6 {
+		return "", "", fmt.Errorf("请输入6位验证码")
+	}
+
+	fmt.Print("正在验证...")
+	return api.VerifySMS(apiURL, phone, code)
+}
+
+func loginViaEmail(apiURL string) (string, string, error) {
+	fmt.Print("邮箱地址: ")
+	var email string
+	fmt.Scanln(&email)
+
+	email = strings.TrimSpace(email)
+	if !strings.Contains(email, "@") {
+		return "", "", fmt.Errorf("请输入有效的邮箱地址")
+	}
+
+	fmt.Print("正在发送验证码...")
+	if err := api.SendEmailCode(apiURL, email); err != nil {
+		return "", "", fmt.Errorf("发送失败: %w", err)
+	}
+	fmt.Println(" 已发送")
+
+	fmt.Print("验证码: ")
+	var code string
+	fmt.Scanln(&code)
+
+	code = strings.TrimSpace(code)
+	if len(code) != 6 {
+		return "", "", fmt.Errorf("请输入6位验证码")
+	}
+
+	fmt.Print("正在验证...")
+	return api.VerifyEmailCode(apiURL, email, code)
 }
 
 // ---------- daemon start (continued) ----------
@@ -243,18 +288,19 @@ func cmdDaemonStart(args []string) {
 		os.Exit(1)
 	}
 
-	// Generate daemon ID — reuse persisted ID if available
+	// Generate daemon ID — reuse persisted ID, or derive from machine hardware
 	id := *daemonID
 	if id == "" {
 		if existing, err := daemon.ReadState(); err == nil && existing.DaemonID != "" {
 			id = existing.DaemonID
 		}
 		if id == "" {
-			id = "daemon-" + uuid.New().String()[:8]
+			id = daemon.MachineID()
 		}
 	}
 
 	// Setup logging to file
+	os.MkdirAll(filepath.Dir(daemon.LogPath()), 0755) // ensure /tmp/pocketctl exists
 	logFile, err := os.OpenFile(daemon.LogPath(), os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0644)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "open log file: %v\n", err)
@@ -698,6 +744,9 @@ func handleWatcherEvents(ctx context.Context, sw *watcher.SessionWatcher, sm *se
 				// Only start JSONL tailer if this is a genuinely new session
 				if !registered {
 					logger.Debug("session already known, skipping tailer", "session", evt.Session.SessionID)
+					// Re-discovered (e.g. --continue): tailer already running on same JSONL,
+					// but emit session_status so relay/DB updates from "exited" → current status.
+					sm.SetSessionStatus(evt.Session.SessionID, evt.Session.Status)
 					break
 				}
 				// Start JSONL tailer from beginning to replay history and tail new events

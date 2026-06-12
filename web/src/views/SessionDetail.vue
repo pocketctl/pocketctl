@@ -1,545 +1,586 @@
 <template>
-  <div class="session-detail">
-    <div class="toolbar">
-      <button class="btn" @click="$router.push('/')">&larr; Back</button>
-      <span class="session-title">{{ sessionTitle || sessionId.slice(0, 8) }}</span>
-      <span class="status-badge" :class="effectiveStatus">{{ statusLabel }}</span>
-    </div>
-
-    <!-- Daemon disconnected banner -->
-    <div v-if="effectiveStatus === 'disconnected'" class="info-banner disconnected-banner">
-      <span class="banner-icon">⚠️</span>
-      <span>Daemon 离线 — 等待恢复</span>
-    </div>
-
-    <!-- Session exited banner with resume -->
-    <div v-if="status === 'exited'" class="info-banner exit-banner">
-      <div class="exit-banner-content">
-        <span class="banner-icon">📤</span>
-        <span>Session 已退出</span>
-        <span v-if="exitReason" class="exit-reason-tag">{{ exitReasonLabel(exitReason) }}</span>
-        <span v-if="exitedAt" class="exit-time">{{ formatRelativeTime(exitedAt) }}退出</span>
+  <div class="session-layout">
+    <!-- Session List Panel -->
+    <div class="session-panel">
+      <div class="session-panel-header">
+        <h3>{{ daemonName }}</h3>
+        <button class="btn-icon" style="width:28px;height:28px;border:none;background:var(--accent);color:#fff;" title="新建会话" @click="emitNewSession">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M12 5v14M5 12h14"/></svg>
+        </button>
       </div>
-      <button
-        v-if="isDaemonOnline"
-        class="btn resume-btn"
-        @click="focusResumeInput"
-      >Resume Session</button>
-      <span v-else class="resume-disabled" title="需要 Daemon 在线才能恢复">Resume (Daemon 离线)</span>
-    </div>
-
-    <!-- Terminal state badge -->
-    <div v-if="terminalBadge" class="terminal-badge-row">
-      <span class="terminal-badge" :class="terminalBadge.class">{{ terminalBadge.text }}</span>
-    </div>
-
-    <!-- Timestamp info -->
-    <div class="timestamp-row">
-      <span v-if="startedAt">创建于 {{ formatRelativeTime(startedAt) }}</span>
-      <span v-if="lastActivityAt" class="last-activity">· 最后活跃 {{ formatRelativeTime(lastActivityAt) }}</span>
-    </div>
-
-    <div class="messages-wrapper">
-      <div class="messages" ref="messagesEl" @scroll="onMessagesScroll">
-        <div v-for="msg in messages" :key="msg.id" class="message" :class="msg.role">
-        <div v-if="msg.role === 'user'" class="msg-bubble user">{{ msg.content }}</div>
-        <div v-else-if="msg.type === 'agent_text'" class="msg-bubble agent">
-          <span>{{ msg.content }}</span>
-          <span v-if="msg.streaming" class="cursor">|</span>
+      <div style="padding:4px 8px;display:flex;align-items:center;gap:6px;">
+        <span :class="['status-dot', { online: isDaemonOnline }]" style="width:6px;height:6px;"></span>
+        <span style="font-size:11px;color:var(--fg-tertiary);">{{ isDaemonOnline ? '在线' : '离线' }} · {{ statusSubtext }}</span>
+      </div>
+      <div class="session-list">
+        <div v-for="s in allSessions" :key="s.session_id"
+          :class="['session-list-item', { active: s.session_id === sessionId }]"
+          @click="$router.push(`/session/${s.session_id}`)">
+          <span :class="['status-dot', s.statusEffective || s.status]" style="width:7px;height:7px;"></span>
+          <div class="sl-info">
+            <div :class="['sl-title', { mono: !s.title || s.title.startsWith('Terminal Session') }]">{{ s.title || s.session_id.slice(0, 8) }}</div>
+            <div class="sl-meta">{{ formatRelativeTime(s.last_activity_at || s.updated_at) }}<span v-if="s.subagent_count > 0"> · {{ s.subagent_count }} 子智能体</span></div>
+          </div>
         </div>
-        <div v-else-if="msg.type === 'tool_call'" class="msg-bubble tool" :class="{ open: msg.expanded }">
-          <!-- Agent tool with linked sub-agent: render SubAgentCard -->
-          <SubAgentCard
-            v-if="msg.tool === 'Agent' && msg.subAgentId && subAgents[msg.subAgentId]"
-            :agent-id="msg.subAgentId"
-            :description="subAgents[msg.subAgentId].description"
-            :agent-type="subAgents[msg.subAgentId].agentType"
-            :messages="subAgents[msg.subAgentId].messages"
-            :status="subAgents[msg.subAgentId].status"
-          />
-          <!-- Other tools: normal tool call rendering -->
-          <template v-else>
-            <div class="tool-header" @click="msg.expanded = !msg.expanded">
-              <span class="tool-chevron">{{ msg.expanded ? '▾' : '▸' }}</span>
-              <span class="tool-icon">{{ toolIcon(msg.tool) }}</span>
-              <span class="tool-name">{{ msg.tool }}</span>
-              <span class="tool-args">{{ toolSummary(msg.tool, msg.input) }}</span>
-              <span v-if="!msg.output" class="tool-spinner">⏳</span>
-              <span v-else class="tool-check">✓</span>
+      </div>
+    </div>
+
+    <!-- Chat Main Area -->
+    <div class="chat-area">
+      <!-- Chat Toolbar -->
+      <div class="chat-toolbar">
+        <div class="session-label">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="cursor:pointer;" @click="$router.push('/')"><path d="M15 18l-6-6 6-6"/></svg>
+          {{ sessionTitle || sessionId?.slice(0, 8) }}
+          <span class="daemon-name">· {{ daemonName }}</span>
+        </div>
+        <span :class="['status-pill', statusClass]"><span class="pulse"></span>{{ statusLabel }}</span>
+      </div>
+
+      <!-- Messages -->
+      <div class="chat-messages" ref="messagesEl" @scroll="onMessagesScroll">
+        <!-- Exit Banner -->
+        <div v-if="status === 'exited'" class="banner banner-info" style="flex-shrink:0;">
+          <span>📤 Session 已退出</span>
+          <span v-if="exitReason" style="margin-left:4px;">· {{ exitReasonLabel(exitReason) }}</span>
+          <button v-if="isDaemonOnline" class="btn btn-accent" style="margin-left:auto;padding:4px 12px;font-size:12px;" @click="focusResumeInput">Resume</button>
+        </div>
+
+        <!-- Disconnected Banner -->
+        <div v-if="isDisconnected" class="banner banner-warning" style="flex-shrink:0;">
+          <span>⚠️ Daemon 离线 — 等待恢复</span>
+        </div>
+
+        <!-- Timeline -->
+        <div class="timeline" v-if="milestones.length > 0">
+          <template v-for="(m, i) in milestones" :key="i">
+            <div class="milestone">
+              <div :class="['dot', m.state]"></div>
+              <span :class="['label', m.state === 'current' || m.state === 'active' ? 'active' : '']">{{ m.label }}</span>
+              <span class="time">{{ m.time }}</span>
             </div>
-            <div v-if="msg.expanded" class="tool-body">
-              <div class="tool-section" v-if="msg.input">
-                <div class="tool-section-label">Input</div>
-                <pre class="tool-input">{{ formatToolInput(msg.tool, msg.input) }}</pre>
-              </div>
-              <div class="tool-section" v-if="msg.output">
-                <div class="tool-section-label">Output</div>
-                <pre class="tool-output" :class="{ collapsed: !msg.outputExpanded && isLongOutput(msg.output) }">{{ msg.output }}</pre>
-                <button v-if="isLongOutput(msg.output)" class="tool-toggle" @click="msg.outputExpanded = !msg.outputExpanded">
-                  {{ msg.outputExpanded ? '收起' : `展开全部 (${countLines(msg.output)} 行)` }}
-                </button>
-              </div>
-              <div v-else class="tool-pending">Running...</div>
-            </div>
+            <div v-if="i < milestones.length - 1" :class="['line', { done: m.state === 'active' }]"></div>
           </template>
         </div>
-        <div v-else-if="msg.type === 'error'" class="msg-bubble error">{{ msg.content }}</div>
-      </div>
-      </div>
-      <button v-if="showScrollBtn" class="scroll-to-bottom" @click="scrollToBottom">⬇</button>
-    </div>
 
-    <!-- Session lifecycle timeline -->
-    <SessionTimeline v-if="timelineMilestones.length > 0" :milestones="timelineMilestones" />
+        <!-- Messages -->
+        <template v-for="msg in messages" :key="msg.id">
+          <!-- User message -->
+          <div v-if="msg.role === 'user'" class="msg msg-user">{{ cleanContent(msg.content) }}</div>
 
-    <!-- Input area: hidden for read-only terminals, shown for resumable -->
-    <div v-if="showInput" class="input-area">
-      <input
-        ref="inputEl"
-        v-model="inputText"
-        @keydown.enter="sendMessage"
-        :placeholder="inputPlaceholder"
-        :disabled="!connected || effectiveStatus === 'disconnected'"
-      />
-    </div>
-    <div v-else-if="showEndedMessage" class="input-area ended">
-      <span class="ended-text">Session 已结束</span>
+          <!-- Agent text message -->
+          <div v-else-if="msg.type === 'agent_text'" :class="['msg msg-agent', { streaming: msg.streaming }]">
+            <MarkdownRenderer :content="cleanContent(msg.content)" />
+            <span v-if="msg.streaming" class="blink-cursor"></span>
+          </div>
+
+          <!-- Tool call card -->
+          <div v-else-if="msg.type === 'tool_call' || msg.type === 'subagent'" :class="['tool-card', { expanded: msg.expanded }]" @click="msg.expanded = !msg.expanded">
+            <div class="tool-header">
+              <span class="tool-icon">{{ toolIcon(msg.tool) }}</span>
+              <span class="tool-name">{{ msg.tool }}</span>
+              <span class="tool-args">{{ toolArgs(msg) }}</span>
+              <span class="tool-status">
+                <span v-if="msg.status === 'completed'" class="check">✓</span>
+                <span v-else class="spinner"></span>
+              </span>
+              <span class="tool-chevron">▼</span>
+            </div>
+            <div class="tool-body">
+              <div class="tool-section"><div class="tool-label">输入</div></div>
+              <div class="tool-input">{{ toolInputText(msg) }}</div>
+              <div class="tool-section" style="padding-top:8px;"><div class="tool-label">输出</div></div>
+              <div class="tool-output" :class="{ collapsed: !msg.outputExpanded }" ref="outputEl">{{ msg.output || '执行中…' }}</div>
+              <button v-if="msg.output && msg.output.length > 300" class="toggle-expand" @click.stop="msg.outputExpanded = !msg.outputExpanded">{{ msg.outputExpanded ? '收起' : '展开全部' }}</button>
+            </div>
+          </div>
+
+          <!-- Error message -->
+          <div v-else-if="msg.type === 'error'" class="msg msg-error">{{ msg.content || msg.error }}</div>
+        </template>
+
+        <!-- Scroll to bottom -->
+        <button v-if="!autoScroll" class="scroll-to-bottom" @click="scrollToBottom">↓</button>
+      </div>
+
+      <!-- Chat Input -->
+      <div class="chat-input-area" :class="{ ended: isTerminal }">
+        <template v-if="!isTerminal">
+          <div class="chat-input-wrap">
+            <input type="text" v-model="messageInput" placeholder="发送消息..." @keydown.enter="sendMessage" :disabled="isDisconnected" ref="inputEl" />
+          </div>
+          <button class="send-btn" @click="sendMessage" :disabled="isDisconnected || !messageInput.trim()">
+            <svg viewBox="0 0 24 24"><path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z"/></svg>
+          </button>
+        </template>
+        <div v-else class="ended-text">Session 已结束</div>
+      </div>
     </div>
   </div>
 </template>
 
 <script setup lang="ts">
 import { ref, computed, onMounted, nextTick, watch } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
 import { useWebSocket } from '../composables/useWebSocket'
-import type { DaemonEvent } from '../composables/useWebSocket'
 import { formatRelativeTime } from '../composables/useRelativeTime'
-import SessionTimeline from '../components/SessionTimeline.vue'
-import type { Milestone } from '../components/SessionTimeline.vue'
-import SubAgentCard from '../components/SubAgentCard.vue'
-import { useNotifications } from '../composables/useNotifications'
+import MarkdownRenderer from '../components/MarkdownRenderer.vue'
 
-const props = defineProps<{ id: string }>()
-const { connect, send, onEvent, connected, ws, isDaemonOnline: checkDaemonOnline, effectiveStatus: computeEffectiveStatus } = useWebSocket()
-const { requestPermission, notifySessionStateChange } = useNotifications()
+const route = useRoute()
+const router = useRouter()
+const { connect, send, onEvent } = useWebSocket()
 
-const sessionId = ref(props.id)
-const sessionTitle = ref('')
+const sessionId = computed(() => route.params.id as string)
+const messages = ref<any[]>([])
+const allSessions = ref<any[]>([])
+const messageInput = ref('')
 const status = ref('running')
 const exitReason = ref('')
 const exitedAt = ref('')
-const startedAt = ref('')
-const lastActivityAt = ref('')
-const daemonId = ref('')
-const messages = ref<any[]>([])
-const timelineMilestones = ref<Milestone[]>([])
-const inputText = ref('')
-const messagesEl = ref<HTMLElement | null>(null)
+const autoScroll = ref(true)
+const messagesEl = ref<HTMLDivElement | null>(null)
 const inputEl = ref<HTMLInputElement | null>(null)
-const showScrollBtn = ref(false)
-let msgCounter = 0
-let replayDone = false
-let replayTimer: ReturnType<typeof setTimeout> | null = null
+const daemons = ref<Record<string, any>>({})
 
-// Sub-agent state: agentId -> { messages[], description, agentType, status }
-interface SubAgentInfo {
-  agentId: string
-  description: string
-  agentType: string
-  messages: any[]
-  status: string
+const statusClass = computed(() => {
+  const map: Record<string, string> = { running: 'running', busy: 'running', idle: 'running', completed: '', error: '', killed: '', disconnected: '', exited: '' }
+  return map[status.value] || ''
+})
+
+const statusLabel = computed(() => {
+  const map: Record<string, string> = { running: '运行中', busy: '繁忙', idle: '空闲', completed: '已完成', error: '错误', killed: '已终止', disconnected: '已断开', exited: '已退出' }
+  return map[status.value] || status.value
+})
+
+const isDaemonOnline = computed(() => {
+  const s = allSessions.value.find(s => s.session_id === sessionId.value)
+  return s?.daemon_online ?? true
+})
+
+const isDisconnected = computed(() => status.value === 'disconnected' || !isDaemonOnline.value)
+const isTerminal = computed(() => ['completed', 'error', 'killed'].includes(status.value))
+
+const daemonName = computed(() => {
+  const s = allSessions.value.find(s => s.session_id === sessionId.value)
+  return s?.daemon_alias || s?.hostname || s?.daemon_id?.slice(0, 8) || '未知'
+})
+
+const sessionTitle = computed(() => {
+  const s = allSessions.value.find(s => s.session_id === sessionId.value)
+  return s?.title
+})
+
+const statusSubtext = computed(() => isDaemonOnline.value ? '已连接' : '等待恢复')
+
+const milestones = computed(() => {
+  const ms: any[] = []
+  const s = allSessions.value.find(s => s.session_id === sessionId.value)
+  if (!s) return ms
+  if (s.created_at) ms.push({ label: '创建', time: formatTime(s.created_at), state: 'active' })
+  ms.push({ label: '运行', time: formatTime(s.last_activity_at || s.updated_at || s.created_at), state: status.value === 'running' || status.value === 'busy' ? 'current' : 'active' })
+  ms.push({ label: statusLabel.value === '运行中' ? '进行中' : statusLabel.value, time: '—', state: isTerminal.value || status.value === 'exited' ? 'active' : '' })
+  return ms
+})
+
+function formatTime(ts: string): string {
+  if (!ts) return '—'
+  const d = new Date(ts)
+  return d.getHours().toString().padStart(2, '0') + ':' + d.getMinutes().toString().padStart(2, '0')
 }
-const subAgents = ref<Record<string, SubAgentInfo>>({})
 
+function cleanContent(text: string): string {
+  if (!text) return ''
+  return text
+    .replace(/<command-name>.*?<\/command-name>\s*/gs, '')
+    .replace(/<command-message>.*?<\/command-message>\s*/gs, '')
+    .replace(/<command-args>.*?<\/command-args>\s*/gs, '')
+    .replace(/<local-command-stdout>(.*?)<\/local-command-stdout>/gs, '$1')
+    .replace(/<local-command-stderr>(.*?)<\/local-command-stderr>/gs, '$1')
+    .replace(/<[^>]+>/g, '')
+    .trim()
+}
+
+function toolIcon(tool: string): string {
+  const icons: Record<string, string> = { Read: '📖', Write: '✏️', Bash: '⚡', Edit: '✏️', Agent: '🤖', Glob: '🔍', Grep: '🔎', WebSearch: '🌐', WebFetch: '📡', Task: '📋' }
+  return icons[tool] || '🔧'
+}
+
+function toolArgs(msg: any): string {
+  return msg.inputDesc || msg.description || ''
+}
+
+function toolInputText(msg: any): string {
+  if (msg.inputDesc) return msg.inputDesc
+  if (msg.input) {
+    if (typeof msg.input === 'string') return msg.input
+    try { return JSON.stringify(msg.input, null, 2) } catch { return String(msg.input) }
+  }
+  return msg.description || ''
+}
+
+function exitReasonLabel(reason: string): string {
+  const labels: Record<string, string> = { user_interrupt: '用户中断', normal_exit: '正常退出', process_crash: '异常退出', signal_kill: '被终止', unknown: '已退出' }
+  return labels[reason] || reason
+}
+
+function emitNewSession() { router.push('/') }
 
 function scrollToBottom() {
-  if (messagesEl.value) messagesEl.value.scrollTop = messagesEl.value.scrollHeight
-}
-
-function scheduleScroll() {
-  if (!replayDone) return
-  nextTick(scrollToBottom)
+  if (messagesEl.value) { messagesEl.value.scrollTop = messagesEl.value.scrollHeight; autoScroll.value = true }
 }
 
 function onMessagesScroll() {
   if (!messagesEl.value) return
   const { scrollTop, scrollHeight, clientHeight } = messagesEl.value
-  showScrollBtn.value = scrollTop + clientHeight < scrollHeight - 60
+  autoScroll.value = scrollHeight - scrollTop - clientHeight < 60
 }
 
-// Computed: effective status
-const effectiveStatus = computed(() => {
-  return computeEffectiveStatus({ status: status.value, daemon_id: daemonId.value })
-})
-
-const isDaemonOnline = computed(() => checkDaemonOnline(daemonId.value))
-
-// Computed: status label
-const statusLabel = computed(() => {
-  const labels: Record<string, string> = {
-    running: 'Running',
-    busy: 'Running',
-    idle: 'Idle',
-    waiting_approval: 'Waiting',
-    exited: 'Exited',
-    disconnected: 'Disconnected',
-    completed: 'Completed',
-    error: 'Error',
-    killed: 'Killed',
-  }
-  return labels[effectiveStatus.value] || effectiveStatus.value
-})
-
-// Computed: terminal state badge
-const terminalBadge = computed(() => {
-  const s = effectiveStatus.value
-  if (s === 'exited' && isDaemonOnline.value) return { text: '可恢复', class: 'resumable' }
-  if (s === 'completed') return { text: '只读', class: 'readonly' }
-  if (s === 'error') return { text: '异常退出', class: 'errored' }
-  if (s === 'killed') return { text: '已终止', class: 'killed-badge' }
-  return null
-})
-
-// Computed: show input or ended message
-const showInput = computed(() => {
-  const s = effectiveStatus.value
-  return s === 'running' || s === 'busy' || s === 'idle' || s === 'waiting_approval' || (s === 'exited' && isDaemonOnline.value)
-})
-
-const showEndedMessage = computed(() => {
-  const s = effectiveStatus.value
-  return s === 'completed' || s === 'error' || s === 'killed' || (s === 'exited' && !isDaemonOnline.value)
-})
-
-const inputPlaceholder = computed(() => {
-  if (status.value === 'exited') return '输入消息以恢复 Session...'
-  return 'Send a message...'
-})
-
-function exitReasonLabel(reason: string): string {
-  const labels: Record<string, string> = {
-    user_interrupt: '用户中断',
-    normal_exit: '正常退出',
-    process_crash: '异常退出',
-    signal_kill: '被终止',
-    unknown: '已退出',
-  }
-  return labels[reason] || '已退出'
-}
-
-function focusResumeInput() {
-  nextTick(() => { inputEl.value?.focus() })
-}
-
-onMounted(() => {
-  // Request notification permission
-  requestPermission()
-
-  const relayWs = localStorage.getItem('pocketctl_relay_url') || (window as any).__RELAY_WS__ || `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/ws`
-  const token = localStorage.getItem('pocketctl_access_token') || ''
-  const wsUrl = `${relayWs}?type=client&token=${encodeURIComponent(token)}`
-  connect(wsUrl)
-
-  const sendReplay = () => {
-    send({ type: 'replay', session_id: sessionId.value, last_seq: 0 })
-    // Add initial milestone
-    if (startedAt.value) {
-      timelineMilestones.value.push({ status: 'running', time: startedAt.value })
-    }
-    replayTimer = setTimeout(() => { replayDone = true; scheduleScroll() }, 300)
-  }
-  if (connected.value) { sendReplay() } else { const stop = watch(connected, (v) => { if (v) { sendReplay(); stop() } }) }
-
-  // Sub-agent event router
-  function handleSubAgentEvent(evt: DaemonEvent) {
-    const agent = subAgents.value[evt.agent_id!]
-    if (!agent) return
-    switch (evt.type) {
-      case 'agent_text': {
-        const last = agent.messages[agent.messages.length - 1]
-        if (last && last.type === 'agent_text' && last.streaming) {
-          last.content += evt.text; last.streaming = evt.streaming
-        } else {
-          agent.messages.push({ id: msgCounter++, type: 'agent_text', content: evt.text, streaming: evt.streaming })
-        }
-        break
-      }
-      case 'tool_call':
-        agent.messages.push({ id: msgCounter++, type: 'tool_call', tool: evt.tool, input: evt.input, output: '', call_id: evt.call_id, expanded: false, outputExpanded: false })
-        break
-      case 'tool_result': {
-        const toolMsg = [...agent.messages].reverse().find((m: any) => m.type === 'tool_call' && m.call_id === evt.call_id)
-        if (toolMsg) toolMsg.output = evt.output
-        break
-      }
-    }
-  }
-
-  onEvent((evt: DaemonEvent) => {
-    if (evt.session_id !== sessionId.value) return
-
-    // Route sub-agent content events
-    if (evt.agent_id) {
-      handleSubAgentEvent(evt)
-      scheduleScroll()
-      return
-    }
-
-    switch (evt.type) {
-      case 'subagent_discovered': {
-        const aId = evt.agent_id!
-        const tId = evt.call_id
-        if (aId) {
-          subAgents.value[aId] = {
-            agentId: aId,
-            description: evt.subagent_desc || 'Sub-agent',
-            agentType: evt.subagent_type || 'general-purpose',
-            messages: [],
-            status: 'completed',
-          }
-          // Link to existing Agent tool_call in main messages
-          if (tId) {
-            const toolMsg = messages.value.find(m => m.type === 'tool_call' && m.call_id === tId)
-            if (toolMsg) toolMsg.subAgentId = aId
-          }
-        }
-        break
-      }
-      case 'agent_text': {
-        const last = messages.value[messages.value.length - 1]
-        if (last && last.type === 'agent_text' && last.streaming) {
-          last.content += evt.text; last.streaming = evt.streaming
-        } else {
-          messages.value.push({ id: msgCounter++, role: 'agent', type: 'agent_text', content: evt.text, streaming: evt.streaming })
-        }
-        break
-      }
-      case 'tool_call':
-        messages.value.push({ id: msgCounter++, role: 'agent', type: 'tool_call', tool: evt.tool, input: evt.input, output: '', call_id: evt.call_id, expanded: false, outputExpanded: false })
-        break
-      case 'tool_result': {
-        const toolMsg = [...messages.value].reverse().find(m => m.type === 'tool_call' && m.call_id === evt.call_id)
-        if (toolMsg) {
-          // For Agent tool calls, suppress raw output
-          if (toolMsg.tool === 'Agent' && toolMsg.subAgentId) {
-            toolMsg.output = 'Sub-agent completed'
-          } else {
-            toolMsg.output = evt.output
-          }
-        }
-        break
-      }
-      case 'session_status':
-        status.value = evt.status || 'unknown'
-        if (evt.exit_reason) exitReason.value = evt.exit_reason
-        if (evt.last_activity_at) {
-          lastActivityAt.value = evt.last_activity_at
-          if (evt.status === 'exited') exitedAt.value = evt.last_activity_at
-        }
-        // Add timeline milestone for state changes (exclude disconnected overlay)
-        if (evt.status && evt.status !== 'disconnected' && evt.last_activity_at) {
-          const last = timelineMilestones.value[timelineMilestones.value.length - 1]
-          if (!last || last.status !== evt.status) {
-            timelineMilestones.value.push({ status: evt.status, time: evt.last_activity_at })
-          }
-        }
-        // Browser notification for terminal states (if not on this page)
-        if (evt.status && ['exited', 'error', 'killed', 'completed'].includes(evt.status)) {
-          notifySessionStateChange(
-            sessionId.value,
-            sessionTitle.value,
-            evt.status,
-            props.id // current route session ID
-          )
-        }
-        break
-      case 'session_title_update':
-        sessionTitle.value = evt.title || sessionTitle.value
-        break
-      case 'error':
-        messages.value.push({ id: msgCounter++, role: 'agent', type: 'error', content: evt.error })
-        break
-    }
-    scheduleScroll()
-  })
-})
+function focusResumeInput() { if (inputEl.value) { inputEl.value.focus() } }
 
 function sendMessage() {
-  const text = inputText.value.trim()
-  if (!text || !connected.value) return
-  messages.value.push({ id: msgCounter++, role: 'user', content: text })
+  const text = messageInput.value.trim()
+  if (!text || isDisconnected.value) return
+  messages.value.push({ id: 'u' + Date.now(), role: 'user', content: text })
   send({ type: 'user_message', session_id: sessionId.value, content: text })
-  inputText.value = ''
-  scheduleScroll()
+  messageInput.value = ''
+  nextTick(scrollToBottom)
 }
 
-function toolIcon(tool: string): string {
-  const icons: Record<string, string> = {
-    'Read': '📖', 'Write': '✏️', 'Edit': '✏️', 'Bash': '⚡', 'Glob': '🔍',
-    'Grep': '🔍', 'WebSearch': '🌐', 'WebFetch': '🌐', 'Agent': '🤖',
-  }
-  return icons[tool] || '🔧'
-}
+const msgCounter = { value: 0 }
+function nextId(prefix: string) { return prefix + (++msgCounter.value) }
 
-function toolSummary(tool: string, input: any): string {
-  if (!input) return ''
-  if (tool === 'Read' || tool === 'Write' || tool === 'Edit') {
-    const path = input.file_path || input.path || ''
-    return path.length > 60 ? '…' + path.slice(-57) : path
-  }
-  if (tool === 'Bash') {
-    const cmd = input.command || input.description || ''
-    return cmd.length > 80 ? cmd.slice(0, 77) + '…' : cmd
-  }
-  if (tool === 'Grep') {
-    const pat = input.pattern || input.query || ''
-    const path = input.path || ''
-    return `${pat} ${path}`
-  }
-  if (tool === 'Glob') {
-    const pat = input.pattern || ''
-    const path = input.path || ''
-    return `${pat} ${path}`
-  }
-  const s = JSON.stringify(input)
-  return s.length > 80 ? s.slice(0, 77) + '…' : s
-}
-
+// Format tool input for display (matches iOS app logic)
 function formatToolInput(tool: string, input: any): string {
   if (!input) return ''
-  if (tool === 'Bash') {
-    const cmd = input.command || ''
-    const desc = input.description || ''
-    let result = `$ ${cmd}`
-    if (desc && desc !== cmd) result += `\n# ${desc}`
-    return result
+  if (typeof input === 'string') return input.slice(0, 80)
+  if (typeof input === 'object') {
+    switch (tool) {
+      case 'Read':
+      case 'Write':
+      case 'Edit':
+        return input.file_path || input.path || ''
+      case 'Bash':
+        return input.command || ''
+      case 'Glob':
+      case 'Grep':
+        return input.pattern || input.query || ''
+      case 'Agent':
+        return (input.prompt || '').slice(0, 60)
+      default:
+        break
+    }
+    // Fallback: first string value
+    const first = Object.values(input).find(v => typeof v === 'string')
+    if (first) return String(first).slice(0, 60)
   }
-  if (tool === 'Read') {
-    const path = input.file_path || ''
-    const offset = input.offset ? `:${input.offset}` : ''
-    const limit = input.limit ? `-${input.limit}` : ''
-    return `📖 ${path}${offset}${limit}`
-  }
-  if (tool === 'Write') {
-    const path = input.file_path || ''
-    const content = input.content || ''
-    const lines = content.split('\n').length
-    return `📝 ${path} (${lines} 行)`
-  }
-  if (tool === 'Edit') {
-    const path = input.file_path || ''
-    const old = (input.old_string || '').split('\n')[0]
-    return `✏️ ${path}\n替换: ${old.length > 80 ? old.slice(0, 77) + '…' : old}`
-  }
-  return JSON.stringify(input, null, 2)
+  return ''
 }
 
-function isLongOutput(output: string): boolean {
-  if (!output) return false
-  return output.split('\n').length > 20 || output.length > 2000
+function processEvent(evt: any) {
+  const type = evt.type || evt.event_type
+  if (type === 'user_text') {
+    const text = evt.text || evt.content || evt.payload?.text || evt.payload?.content || ''
+    if (text) messages.value.push({ id: nextId('u'), type: 'user_text', role: 'user', content: text })
+  } else if (type === 'agent_text') {
+    const content = evt.text || evt.content || evt.payload?.text || evt.payload?.content || ''
+    if (!content) return
+    const streaming = evt.streaming ?? evt.payload?.streaming ?? false
+    const last = messages.value[messages.value.length - 1]
+    if (last && last.type === 'agent_text' && last.streaming && !content.startsWith('\n')) {
+      last.content += content
+      if (!streaming) last.streaming = false
+    } else {
+      messages.value.push({ id: nextId('a'), type: 'agent_text', role: 'agent', content, streaming })
+    }
+  } else if (type === 'tool_call') {
+    const callId = evt.call_id || evt.payload?.call_id
+    if (!callId) return
+    const tool = evt.tool || evt.payload?.tool || ''
+    const input = evt.input || evt.payload?.input
+    const inputDesc = formatToolInput(tool, input)
+    // Always create new tool_call message (matches iOS app)
+    messages.value.push({
+      id: nextId('t'), type: 'tool_call', call_id: callId,
+      tool, input, inputDesc,
+      output: null, status: 'running',
+      expanded: false, outputExpanded: false,
+    })
+  } else if (type === 'tool_result') {
+    const callId = evt.call_id || evt.payload?.call_id
+    const output = evt.output || evt.payload?.output || evt.result || evt.payload?.result
+    if (!callId) return
+    // Find last matching tool_call (matches iOS app lastIndex logic)
+    let idx = -1
+    for (let i = messages.value.length - 1; i >= 0; i--) {
+      if (messages.value[i].type === 'tool_call' && messages.value[i].call_id === callId) {
+        idx = i
+        break
+      }
+    }
+    if (idx >= 0) {
+      if (output) messages.value[idx].output = output
+      messages.value[idx].status = 'completed'
+    }
+  } else if (type === 'session_status') {
+    const s = evt.status || evt.payload?.status
+    if (s) status.value = s
+    if (evt.exit_reason || evt.payload?.exit_reason) exitReason.value = evt.exit_reason || evt.payload.exit_reason
+    if (evt.exited_at || evt.payload?.exited_at) exitedAt.value = evt.exited_at || evt.payload.exited_at
+  }
 }
 
-function countLines(output: string): number {
-  return output.split('\n').length
-}
+// Watch for session switch — clear messages and replay new session
+watch(sessionId, (newId, oldId) => {
+  if (newId && newId !== oldId) {
+    messages.value = []
+    status.value = 'running'
+    exitReason.value = ''
+    exitedAt.value = ''
+    send({ type: 'replay', session_id: newId, last_seq: 0 })
+  }
+})
+
+onMounted(() => {
+  connect()
+  send({ type: 'list_sessions' })
+  // Fetch historical events for this session
+  send({ type: 'replay', session_id: sessionId.value, last_seq: 0 })
+
+  onEvent('session_list', (msg: any) => { allSessions.value = msg.sessions || [] })
+
+  // Handle historical events replay
+  onEvent('replay_batch', (msg: any) => {
+    if (msg.session_id !== sessionId.value) return
+    for (const evt of msg.events) {
+      processEvent(evt)
+    }
+    nextTick(scrollToBottom)
+  })
+
+  // Real-time events — use processEvent for consistent handling
+  onEvent('agent_text', (msg: any) => {
+    if (msg.session_id !== sessionId.value) return
+    processEvent(msg)
+    nextTick(scrollToBottom)
+  })
+
+  onEvent('tool_call', (msg: any) => {
+    if (msg.session_id !== sessionId.value) return
+    processEvent(msg)
+    nextTick(scrollToBottom)
+  })
+
+  onEvent('tool_result', (msg: any) => {
+    if (msg.session_id !== sessionId.value) return
+    processEvent(msg)
+  })
+
+  onEvent('subagent_discovered', (msg: any) => {
+    if (msg.session_id !== sessionId.value) return
+    messages.value.push({ id: nextId('sa'), type: 'subagent', tool: msg.agent_id || 'Agent', input: msg.subagent_desc, status: 'completed', expanded: true, outputExpanded: false })
+  })
+
+  onEvent('session_status', (msg: any) => {
+    if (msg.session_id === sessionId.value) { status.value = msg.status; if (msg.exit_reason) exitReason.value = msg.exit_reason; if (msg.exited_at) exitedAt.value = msg.exited_at }
+  })
+
+  onEvent('error', (msg: any) => {
+    if (msg.session_id && msg.session_id !== sessionId.value) return
+    messages.value.push({ id: nextId('e'), type: 'error', content: msg.error || '未知错误' })
+  })
+})
 </script>
 
-<style scoped>
-.session-detail { display: flex; flex-direction: column; height: 100vh; height: 100dvh; }
-.toolbar { display: flex; align-items: center; gap: 12px; padding: 10px 20px; border-bottom: 1px solid #21262d; background: #161b22; }
-.btn { padding: 6px 12px; border-radius: 6px; border: 1px solid #30363d; background: #21262d; color: #e6edf3; cursor: pointer; font-size: 13px; }
-.session-title { font-family: monospace; color: #58a6ff; font-size: 14px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; }
-.status-badge { font-size: 12px; padding: 2px 8px; border-radius: 10px; text-transform: uppercase; flex-shrink: 0; }
-.status-badge.running, .status-badge.busy { background: #238636; color: white; }
-.status-badge.idle { background: #484f58; color: #e6edf3; }
-.status-badge.waiting_approval { background: #F97316; color: white; }
-.status-badge.exited { background: #6B7280; color: white; }
-.status-badge.completed { background: #9CA3AF; color: white; }
-.status-badge.error { background: #da3633; color: white; }
-.status-badge.killed { background: #DC2626; color: white; }
-.status-badge.disconnected { background: #1e3a5f; color: #58a6ff; border: 1px dashed #3B82F6; }
+<style>
+.session-layout { display: flex; flex: 1; height: calc(100vh - var(--topbar-h)); overflow: hidden; }
 
-/* Info banners */
-.info-banner { padding: 10px 20px; font-size: 13px; display: flex; align-items: center; gap: 8px; }
-.disconnected-banner { background: #1e3a5f; color: #58a6ff; border-bottom: 1px solid #2d5a8e; }
-.exit-banner {
-  background: #1c2129; border-bottom: 1px solid #30363d; color: #e6edf3;
-  justify-content: space-between; flex-wrap: wrap; gap: 8px;
+/* Session Panel */
+.session-panel { width: 300px; background: var(--sidebar-bg); border-right: 1px solid var(--sidebar-border); display: flex; flex-direction: column; flex-shrink: 0; transition: background var(--transition), border-color var(--transition); }
+.session-panel-header { padding: 16px; border-bottom: 1px solid var(--sidebar-border); display: flex; align-items: center; justify-content: space-between; }
+.session-panel-header h3 { font-size: 14px; font-weight: 600; color: var(--fg); }
+.session-list { flex: 1; overflow-y: auto; padding: 8px; }
+.session-list-item { display: flex; align-items: center; gap: 10px; padding: 10px 12px; border-radius: var(--radius-md); cursor: pointer; transition: background 0.1s; margin-bottom: 2px; }
+.session-list-item:hover { background: var(--surface-hover); }
+.session-list-item.active { background: var(--sidebar-active); }
+.session-list-item .sl-info { flex: 1; min-width: 0; }
+.session-list-item .sl-title { font-size: 13px; font-weight: 500; color: var(--fg); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.session-list-item .sl-title.mono { font-family: var(--font-mono); font-size: 12px; color: var(--accent); }
+.session-list-item .sl-meta { font-size: 11px; color: var(--fg-tertiary); margin-top: 2px; }
+
+/* Chat Area */
+.chat-area { flex: 1; display: flex; flex-direction: column; min-width: 0; background: var(--bg); transition: background var(--transition); }
+
+/* Toolbar */
+.chat-toolbar { height: 52px; border-bottom: 1px solid var(--border); display: flex; align-items: center; padding: 0 20px; gap: 12px; background: var(--surface); transition: background var(--transition), border-color var(--transition); }
+.chat-toolbar .session-label { font-size: 14px; font-weight: 600; color: var(--fg); flex: 1; display: flex; align-items: center; gap: 8px; }
+.chat-toolbar .session-label .daemon-name { font-size: 12px; color: var(--fg-tertiary); font-weight: 400; }
+.status-pill { display: inline-flex; align-items: center; gap: 5px; padding: 4px 10px; border-radius: var(--radius-full); font-size: 12px; font-weight: 600; }
+.status-pill.running { background: var(--success-bg); color: var(--success); }
+.status-pill .pulse { width: 6px; height: 6px; border-radius: 50%; background: currentColor; animation: pulse-green 1.5s infinite; }
+
+/* Messages */
+.chat-messages { flex: 1; overflow-y: auto; padding: 20px; display: flex; flex-direction: column; gap: 16px; position: relative; }
+.scroll-to-bottom { position: absolute; bottom: 16px; right: 24px; width: 36px; height: 36px; border-radius: 50%; border: 1px solid var(--border); background: var(--surface); color: var(--fg); font-size: 16px; cursor: pointer; display: flex; align-items: center; justify-content: center; box-shadow: var(--shadow-sm); transition: background 0.15s; z-index: 10; }
+.scroll-to-bottom:hover { background: var(--surface-hover); }
+
+/* Messages — matches design spec exactly */
+.msg { max-width: 75%; animation: fade-in 0.2s ease; }
+
+.msg-user {
+  align-self: flex-end;
+  background: var(--user-bubble);
+  color: #fff;
+  padding: 10px 16px;
+  border-radius: 16px 16px 4px 16px;
+  font-size: 14px;
+  line-height: 1.6;
 }
-.exit-banner-content { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
-.banner-icon { font-size: 16px; }
-.exit-reason-tag { background: #30363d; padding: 1px 8px; border-radius: 10px; font-size: 12px; color: #8b949e; }
-.exit-time { font-size: 12px; color: #8b949e; }
-.resume-btn { background: #238636 !important; border-color: #238636 !important; color: white !important; }
-.resume-btn:hover { background: #2ea043 !important; }
-.resume-disabled { font-size: 12px; color: #484f58; }
 
-/* Terminal state badge row */
-.terminal-badge-row { padding: 4px 20px; }
-.terminal-badge { font-size: 11px; padding: 2px 10px; border-radius: 10px; }
-.terminal-badge.resumable { background: #1f3a5f; color: #79c0ff; }
-.terminal-badge.readonly { background: #30363d; color: #8b949e; }
-.terminal-badge.errored { background: #3d1214; color: #f85149; }
-.terminal-badge.killed-badge { background: #3d1214; color: #da3633; }
-
-/* Timestamp row */
-.timestamp-row { padding: 2px 20px 6px; font-size: 12px; color: #484f58; }
-.last-activity { margin-left: 4px; }
-
-.messages-wrapper { flex: 1; position: relative; overflow: hidden; }
-.messages { flex: 1; overflow-y: auto; padding: 20px; -webkit-overflow-scrolling: touch; height: 100%; }
-.scroll-to-bottom { position: absolute; bottom: 16px; right: 24px; width: 36px; height: 36px; border-radius: 50%; border: 1px solid #30363d; background: #21262d; color: #e6edf3; font-size: 16px; cursor: pointer; display: flex; align-items: center; justify-content: center; box-shadow: 0 2px 8px rgba(0,0,0,0.3); transition: background 0.15s; z-index: 10; }
-.scroll-to-bottom:hover { background: #30363d; }
-.message { margin-bottom: 16px; display: flex; }
-.message.user { justify-content: flex-end; }
-.msg-bubble { max-width: 70%; padding: 12px 16px; border-radius: 12px; font-size: 14px; line-height: 1.5; white-space: pre-wrap; word-break: break-word; }
-.msg-bubble.user { background: #1f6feb; color: white; border-bottom-right-radius: 4px; }
-.msg-bubble.agent { background: #21262d; color: #e6edf3; border-bottom-left-radius: 4px; }
-.msg-bubble.tool { background: #161b22; border: 1px solid #30363d; max-width: 85%; padding: 0; white-space: normal; }
-
-/* Tool header */
-.tool-header { display: flex; align-items: center; gap: 6px; padding: 10px 14px; cursor: pointer; font-family: monospace; font-size: 13px; user-select: none; }
-.tool-header:hover { background: #1c2129; border-radius: 12px; }
-.tool-chevron { color: #484f58; font-size: 11px; width: 12px; }
-.tool-icon { font-size: 14px; }
-.tool-name { color: #58a6ff; font-weight: 600; }
-.tool-args { color: #8b949e; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; }
-.tool-spinner { font-size: 12px; animation: spin 1s linear infinite; }
-.tool-check { color: #3fb950; font-size: 13px; }
-
-/* Tool body */
-.tool-body { padding: 0 14px 14px; }
-.tool-section { margin-bottom: 8px; }
-.tool-section-label { font-size: 11px; color: #484f58; text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 4px; font-weight: 600; }
-.tool-input { margin: 0; padding: 8px 10px; background: #0d1117; border-radius: 6px; font-size: 12px; overflow-x: auto; color: #79c0ff; border: 1px solid #1c2533; }
-.tool-output { margin: 0; padding: 8px 10px; background: #0d1117; border-radius: 6px; font-size: 12px; overflow-x: auto; color: #e6edf3; border: 1px solid #1c2533; white-space: pre-wrap; word-break: break-all; }
-.tool-output.collapsed { max-height: 200px; overflow: hidden; position: relative; }
-.tool-pending { color: #8b949e; font-style: italic; padding: 4px 0; }
-.tool-toggle { background: none; border: 1px solid #30363d; color: #58a6ff; padding: 4px 10px; border-radius: 4px; font-size: 12px; cursor: pointer; margin-top: 4px; }
-.tool-toggle:hover { background: #21262d; }
-
-.msg-bubble.error { background: #3d1214; color: #f85149; border: 1px solid #da3633; }
-.cursor { animation: blink 0.7s infinite; color: #58a6ff; }
-.input-area { padding: 12px 20px; border-top: 1px solid #21262d; background: #161b22; }
-.input-area input { width: 100%; padding: 10px 14px; border-radius: 8px; border: 1px solid #30363d; background: #0d1117; color: #e6edf3; font-size: 14px; outline: none; }
-.input-area input:focus { border-color: #58a6ff; }
-.input-area input:disabled { opacity: 0.5; }
-.input-area.ended { display: flex; align-items: center; justify-content: center; padding: 14px 20px; }
-.ended-text { color: #484f58; font-size: 13px; }
-@keyframes blink { 0%, 100% { opacity: 1; } 50% { opacity: 0; } }
-@keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
-
-/* Mobile */
-@media (max-width: 768px) {
-  .toolbar { padding: 10px 12px; gap: 8px; }
-  .session-title { max-width: 120px; font-size: 12px; }
-  .messages { padding: 12px; }
-  .msg-bubble { max-width: 90%; font-size: 13px; padding: 10px 12px; }
-  .msg-bubble.tool { max-width: 95%; }
-  .input-area { padding: 10px 12px; padding-bottom: max(10px, env(safe-area-inset-bottom)); }
-  .input-area input { font-size: 16px; padding: 12px; min-height: 44px; }
-  .btn { min-height: 44px; }
-  .tool-header { font-size: 12px; padding: 8px 10px; }
-  .tool-input, .tool-output { font-size: 11px; }
-  .info-banner { padding: 8px 12px; font-size: 12px; }
+.msg-agent {
+  align-self: flex-start;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  color: var(--fg);
+  padding: 10px 16px;
+  border-radius: 16px 16px 16px 4px;
+  font-size: 14px;
+  line-height: 1.6;
+  transition: background var(--transition), border-color var(--transition);
 }
+
+.msg-agent.streaming .blink-cursor::after {
+  content: '▎';
+  animation: blink-cursor 0.8s step-end infinite;
+  color: var(--accent);
+}
+
+.msg-error {
+  align-self: flex-start;
+  background: var(--error-bg);
+  color: var(--error);
+  padding: 10px 16px;
+  border-radius: 16px 16px 16px 4px;
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+/* Timeline */
+.timeline { display: flex; align-items: center; justify-content: space-between; padding: 12px 20px; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-md); margin-bottom: 4px; flex-shrink: 0; }
+.timeline .milestone { display: flex; flex-direction: column; align-items: center; gap: 4px; }
+.timeline .milestone .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--border); }
+.timeline .milestone .dot.active { background: var(--success); }
+.timeline .milestone .dot.current { background: var(--success); animation: pulse-green 1.5s infinite; }
+.timeline .milestone .label { font-size: 11px; color: var(--fg-tertiary); }
+.timeline .milestone .label.active { color: var(--fg-secondary); }
+.timeline .milestone .time { font-size: 10px; color: var(--fg-tertiary); font-family: var(--font-mono); }
+.timeline .line { flex: 1; height: 1px; background: var(--border); margin: 0 12px; align-self: flex-start; margin-top: 4px; }
+.timeline .line.done { background: var(--success); }
+
+/* Tool Cards — matches design spec */
+.tool-card {
+  align-self: flex-start;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  width: 90%;
+  max-width: 560px;
+  animation: fade-in 0.2s ease;
+  cursor: pointer;
+  transition: background var(--transition), border-color var(--transition);
+}
+.tool-card .tool-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 12px 16px;
+  cursor: pointer;
+}
+.tool-card .tool-icon { font-size: 16px; flex-shrink: 0; }
+.tool-card .tool-name { font-weight: 600; font-size: 13px; color: var(--accent); flex: 1; }
+.tool-card .tool-args {
+  font-size: 12px;
+  color: var(--fg-tertiary);
+  font-family: var(--font-mono);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 200px;
+}
+.tool-card .tool-status { flex-shrink: 0; }
+.tool-card .tool-status .check { color: var(--success); font-size: 14px; }
+.tool-card .tool-status .spinner {
+  width: 14px;
+  height: 14px;
+  border: 2px solid transparent;
+  border-top-color: var(--fg-secondary);
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+  display: inline-block;
+}
+.tool-card .tool-chevron {
+  color: var(--fg-tertiary);
+  font-size: 12px;
+  transition: transform 0.15s;
+  flex-shrink: 0;
+}
+.tool-card.expanded .tool-chevron { transform: rotate(180deg); }
+
+.tool-card .tool-body {
+  border-top: 1px solid var(--border);
+  display: none;
+}
+.tool-card.expanded .tool-body { display: block; }
+
+.tool-body .tool-section { padding: 8px 16px; }
+.tool-body .tool-label {
+  font-size: 11px;
+  color: var(--fg-tertiary);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  margin-bottom: 4px;
+}
+.tool-body .tool-input {
+  background: var(--code-bg);
+  padding: 8px 16px;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--success);
+  border-radius: 4px;
+  margin: 0 12px;
+  white-space: pre-wrap;
+}
+.tool-body .tool-output {
+  background: var(--code-bg);
+  padding: 8px 16px;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--fg-secondary);
+  border-radius: 4px;
+  margin: 8px 12px;
+  max-height: 120px;
+  overflow: hidden;
+  line-height: 1.6;
+}
+.tool-body .tool-output.collapsed {
+  max-height: 120px;
+  overflow: hidden;
+}
+.tool-body .toggle-expand { background: none; border: none; color: var(--accent); font-size: 12px; padding: 4px 16px 8px; cursor: pointer; font-family: var(--font-body); }
+
+/* Chat Input */
+.chat-input-area { border-top: 1px solid var(--border); padding: 12px 20px; background: var(--surface); display: flex; gap: 10px; align-items: center; transition: background var(--transition), border-color var(--transition); }
+.chat-input-area.ended { display: flex; align-items: center; justify-content: center; padding: 14px 20px; }
+.ended-text { color: var(--fg-tertiary); font-size: 13px; }
+.chat-input-wrap { flex: 1; display: flex; align-items: center; background: var(--bg); border: 1px solid var(--border); border-radius: var(--radius-xl); padding: 0 16px; min-height: 42px; transition: border-color 0.15s, box-shadow 0.15s; }
+.chat-input-wrap:focus-within { border-color: var(--border-focus); box-shadow: 0 0 0 3px var(--accent-muted); }
+.chat-input-wrap input { flex: 1; background: none; border: none; color: var(--fg); font-size: 14px; font-family: var(--font-body); outline: none; padding: 8px 0; }
+.chat-input-wrap input::placeholder { color: var(--fg-tertiary); }
+.chat-input-wrap input:disabled { opacity: 0.5; }
+.send-btn { width: 36px; height: 36px; border-radius: 50%; background: var(--accent); border: none; display: flex; align-items: center; justify-content: center; cursor: pointer; flex-shrink: 0; transition: background 0.15s; }
+.send-btn:hover:not(:disabled) { background: var(--accent-hover); }
+.send-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+.send-btn svg { width: 16px; height: 16px; fill: var(--bg); }
+
+@media (max-width: 1024px) { .session-layout { height: calc(100vh - var(--topbar-h)); } }
+@media (max-width: 768px) { .session-panel { display: none; } .msg { max-width: 90%; } }
 </style>

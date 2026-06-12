@@ -28,6 +28,101 @@
     font-size: 17px;
     color: var(--fg);
     flex: 1;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    min-width: 0;
+  }
+  .daemon-card .hostname-text {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .daemon-card .alias-badge {
+    display: none;
+    font-size: 11px;
+    font-weight: 500;
+    color: var(--accent);
+    background: rgba(88,166,255,0.1);
+    border-radius: 4px;
+    padding: 1px 5px;
+    white-space: nowrap;
+    flex-shrink: 0;
+  }
+  .daemon-card .hostname.has-alias .alias-badge { display: inline-block; }
+  .daemon-card .edit-name-btn {
+    background: none;
+    border: none;
+    color: var(--fg-tertiary);
+    cursor: pointer;
+    padding: 2px 4px;
+    border-radius: 4px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    opacity: 0;
+    transition: opacity 0.15s, color 0.15s;
+    flex-shrink: 0;
+  }
+  .daemon-card:hover .edit-name-btn,
+  .daemon-card .edit-name-btn:focus-visible { opacity: 1; }
+  .daemon-card .edit-name-btn:hover { color: var(--accent); }
+  /* Inline rename form */
+  .daemon-card .rename-row {
+    display: none;
+    align-items: center;
+    gap: 6px;
+    margin-bottom: var(--space-sm);
+    animation: fadeSlideIn 0.15s ease;
+  }
+  .daemon-card .rename-row.visible { display: flex; }
+  .daemon-card .rename-input {
+    flex: 1;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 6px 10px;
+    font-family: var(--font-body);
+    font-size: 15px;
+    color: var(--fg);
+    outline: none;
+    transition: border-color 0.15s;
+  }
+  .daemon-card .rename-input:focus { border-color: var(--accent); }
+  .daemon-card .rename-input::placeholder { color: var(--fg-tertiary); }
+  .rename-action {
+    background: none;
+    border: none;
+    cursor: pointer;
+    padding: 4px;
+    border-radius: 4px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: var(--fg-tertiary);
+    transition: color 0.15s;
+  }
+  .rename-action:hover { color: var(--fg); }
+  .rename-action.confirm:hover { color: var(--success); }
+  .rename-action.cancel:hover { color: var(--danger); }
+  .daemon-card .reset-name-btn {
+    background: none;
+    border: none;
+    color: var(--fg-tertiary);
+    font-size: 11px;
+    cursor: pointer;
+    padding: 2px 6px;
+    border-radius: 4px;
+    font-family: var(--font-body);
+    display: none;
+    transition: color 0.15s;
+  }
+  .daemon-card .hostname.has-alias + .edit-name-btn { display: flex; }
+  .daemon-card .reset-name-btn.visible { display: inline-block; }
+  .daemon-card .reset-name-btn:hover { color: var(--accent); }
+  @keyframes fadeSlideIn {
+    from { opacity: 0; transform: translateY(-4px); }
+    to   { opacity: 1; transform: translateY(0); }
   }
   .daemon-card .card-info {
     display: flex;
@@ -159,12 +254,28 @@
 
     <!-- ===== NORMAL STATE ===== -->
     <div class="state-panel active" id="panel-normal" style="padding:0 var(--space-lg);">
-      <!-- Online daemon -->
-      <div class="daemon-card">
+      <!-- Online daemon (with alias demo) -->
+      <div class="daemon-card" id="daemon-0" data-default-name="MacBook-Pro">
         <div class="card-top">
           <span class="status-dot online"></span>
-          <span class="hostname">MacBook-Pro</span>
+          <span class="hostname" id="hostname-0">
+            <span class="hostname-text" id="display-name-0">MacBook-Pro</span>
+            <span class="alias-badge" id="alias-badge-0">别名</span>
+          </span>
+          <button class="edit-name-btn" onclick="startRename(0)" title="编辑别名" aria-label="编辑别名">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M11 4H4a2 2 0 00-2 2v14a2 2 0 002 2h14a2 2 0 002-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 013 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>
+          </button>
+          <button class="reset-name-btn" id="reset-0" onclick="resetName(0)" title="恢复默认名称">恢复默认</button>
           <span class="chip chip-online">在线</span>
+        </div>
+        <div class="rename-row" id="rename-row-0">
+          <input class="rename-input" id="rename-input-0" type="text" placeholder="输入别名…" maxlength="32" onkeydown="handleRenameKey(event, 0)">
+          <button class="rename-action confirm" onclick="confirmRename(0)" title="确认">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M20 6L9 17l-5-5"/></svg>
+          </button>
+          <button class="rename-action cancel" onclick="cancelRename(0)" title="取消">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M18 6L6 18M6 6l12 12"/></svg>
+          </button>
         </div>
         <div class="card-info">
           <span class="agent-tags">Claude Code, Codex</span>
@@ -177,11 +288,27 @@
       </div>
 
       <!-- Offline daemon -->
-      <div class="daemon-card">
+      <div class="daemon-card" id="daemon-1" data-default-name="Dev-Server">
         <div class="card-top">
           <span class="status-dot offline"></span>
-          <span class="hostname">Dev-Server</span>
+          <span class="hostname" id="hostname-1">
+            <span class="hostname-text" id="display-name-1">Dev-Server</span>
+            <span class="alias-badge" id="alias-badge-1">别名</span>
+          </span>
+          <button class="edit-name-btn" onclick="startRename(1)" title="编辑别名" aria-label="编辑别名">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M11 4H4a2 2 0 00-2 2v14a2 2 0 002 2h14a2 2 0 002-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 013 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>
+          </button>
+          <button class="reset-name-btn" id="reset-1" onclick="resetName(1)" title="恢复默认名称">恢复默认</button>
           <span class="chip chip-offline">离线</span>
+        </div>
+        <div class="rename-row" id="rename-row-1">
+          <input class="rename-input" id="rename-input-1" type="text" placeholder="输入别名…" maxlength="32" onkeydown="handleRenameKey(event, 1)">
+          <button class="rename-action confirm" onclick="confirmRename(1)" title="确认">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M20 6L9 17l-5-5"/></svg>
+          </button>
+          <button class="rename-action cancel" onclick="cancelRename(1)" title="取消">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M18 6L6 18M6 6l12 12"/></svg>
+          </button>
         </div>
         <div class="card-info">
           <span class="agent-tags">Claude Code</span>
@@ -222,11 +349,77 @@
 </div>
 
 <script>
+/* ---- state switcher ---- */
 function showState(state) {
   document.querySelectorAll('.state-switcher button').forEach(b => b.classList.remove('active-state'));
   document.getElementById('btn-' + state).classList.add('active-state');
   document.querySelectorAll('.state-panel').forEach(p => p.classList.remove('active'));
   document.getElementById('panel-' + state).classList.add('active');
+}
+
+/* ---- alias storage ---- */
+// In-memory store; real app would persist via API
+const aliases = {};
+
+function getCard(idx) {
+  return {
+    card:    document.getElementById('daemon-' + idx),
+    host:    document.getElementById('hostname-' + idx),
+    display: document.getElementById('display-name-' + idx),
+    badge:   document.getElementById('alias-badge-' + idx),
+    reset:   document.getElementById('reset-' + idx),
+    row:     document.getElementById('rename-row-' + idx),
+    input:   document.getElementById('rename-input-' + idx),
+  };
+}
+
+function renderAlias(idx) {
+  const c = getCard(idx);
+  const alias = aliases[idx] || null;
+  const defaultName = c.card.dataset.defaultName;
+  c.display.textContent = alias || defaultName;
+  if (alias) {
+    c.host.classList.add('has-alias');
+    c.reset.classList.add('visible');
+  } else {
+    c.host.classList.remove('has-alias');
+    c.reset.classList.remove('visible');
+  }
+}
+
+/* ---- rename flow ---- */
+function startRename(idx) {
+  const c = getCard(idx);
+  c.row.classList.add('visible');
+  c.input.value = aliases[idx] || '';
+  c.input.focus();
+}
+
+function confirmRename(idx) {
+  const c = getCard(idx);
+  const val = c.input.value.trim();
+  if (val) {
+    aliases[idx] = val;
+  } else {
+    delete aliases[idx];
+  }
+  c.row.classList.remove('visible');
+  renderAlias(idx);
+}
+
+function cancelRename(idx) {
+  const c = getCard(idx);
+  c.row.classList.remove('visible');
+}
+
+function resetName(idx) {
+  delete aliases[idx];
+  renderAlias(idx);
+}
+
+function handleRenameKey(e, idx) {
+  if (e.key === 'Enter')  { e.preventDefault(); confirmRename(idx); }
+  if (e.key === 'Escape') { cancelRename(idx); }
 }
 </script>
 </body>

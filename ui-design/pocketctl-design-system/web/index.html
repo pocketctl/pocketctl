@@ -1,0 +1,599 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="dark">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>pocketctl — Web UI 设计稿</title>
+<link rel="stylesheet" href="../css/web-shared.css">
+<style>
+  .overview-page {
+    min-height: 100vh;
+    padding: 40px 24px;
+  }
+
+  .overview-header {
+    max-width: 960px;
+    margin: 0 auto 48px;
+    display: flex;
+    align-items: center;
+    gap: 20px;
+  }
+
+  .overview-logo {
+    width: 56px; height: 56px;
+    border-radius: 14px;
+    overflow: hidden;
+    box-shadow: var(--shadow-md);
+    flex-shrink: 0;
+  }
+
+  .overview-logo img { width: 100%; height: 100%; object-fit: cover; }
+
+  .overview-header h1 {
+    font-family: var(--font-display);
+    font-size: 28px;
+    font-weight: 700;
+    color: var(--fg);
+  }
+
+  .overview-header .subtitle {
+    font-size: 15px;
+    color: var(--fg-secondary);
+    margin-top: 2px;
+  }
+
+  .theme-toggle-float {
+    margin-left: auto;
+  }
+
+  .overview-body { max-width: 960px; margin: 0 auto; }
+
+  .section-label {
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--fg-tertiary);
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    margin-bottom: 8px;
+  }
+
+  .section-title {
+    font-family: var(--font-display);
+    font-size: 22px;
+    font-weight: 700;
+    color: var(--fg);
+    margin-bottom: 24px;
+  }
+
+  /* Screen Cards Grid */
+  .screen-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+    gap: 20px;
+    margin-bottom: 48px;
+  }
+
+  .screen-card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-xl);
+    overflow: hidden;
+    text-decoration: none;
+    color: inherit;
+    transition: border-color 0.2s, box-shadow 0.2s, transform 0.2s;
+  }
+
+  .screen-card:hover {
+    border-color: var(--border-light);
+    box-shadow: var(--shadow-md);
+    transform: translateY(-2px);
+  }
+
+  .screen-card .preview {
+    height: 180px;
+    background: var(--bg-secondary);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    overflow: hidden;
+    position: relative;
+    border-bottom: 1px solid var(--border);
+  }
+
+  /* Mini browser frame */
+  .mini-browser {
+    width: 85%;
+    height: 80%;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    overflow: hidden;
+    display: flex;
+    flex-direction: column;
+  }
+
+  .mini-browser .mb-bar {
+    height: 20px;
+    background: var(--surface-hover);
+    border-bottom: 1px solid var(--border);
+    display: flex;
+    align-items: center;
+    padding: 0 8px;
+    gap: 4px;
+  }
+
+  .mini-browser .mb-dot {
+    width: 6px; height: 6px; border-radius: 50%;
+  }
+
+  .mini-browser .mb-dot.red { background: #f85149; }
+  .mini-browser .mb-dot.yellow { background: #d29922; }
+  .mini-browser .mb-dot.green { background: #3fb950; }
+
+  .mini-browser .mb-content {
+    flex: 1;
+    padding: 12px;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    align-items: center;
+    justify-content: center;
+  }
+
+  .mb-line {
+    height: 4px;
+    border-radius: 2px;
+    background: var(--border);
+    width: 60%;
+  }
+
+  .mb-line.accent { background: var(--accent); width: 40%; }
+
+  .mb-block {
+    height: 8px;
+    border-radius: 3px;
+    background: var(--border);
+    width: 80%;
+  }
+
+  .mb-block.accent { background: var(--accent); opacity: 0.3; }
+
+  .screen-card .info {
+    padding: 16px 20px;
+  }
+
+  .screen-card .card-number {
+    font-size: 11px;
+    color: var(--fg-tertiary);
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    margin-bottom: 4px;
+  }
+
+  .screen-card h3 {
+    font-size: 16px;
+    font-weight: 600;
+    color: var(--fg);
+    margin-bottom: 4px;
+  }
+
+  .screen-card p {
+    font-size: 13px;
+    color: var(--fg-secondary);
+    line-height: 1.5;
+  }
+
+  .screen-card .tags {
+    display: flex;
+    gap: 6px;
+    margin-top: 8px;
+    flex-wrap: wrap;
+  }
+
+  .screen-card .tag {
+    font-size: 11px;
+    padding: 2px 8px;
+    border-radius: var(--radius-full);
+    background: var(--accent-muted);
+    color: var(--accent);
+  }
+
+  /* Features section */
+  .features-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+    gap: 16px;
+    margin-bottom: 48px;
+  }
+
+  .feature-item {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-lg);
+    padding: 20px;
+    transition: background var(--transition), border-color var(--transition);
+  }
+
+  .feature-item .fi-icon {
+    width: 36px; height: 36px;
+    border-radius: var(--radius-md);
+    display: flex; align-items: center; justify-content: center;
+    margin-bottom: 12px;
+    font-size: 18px;
+  }
+
+  .feature-item .fi-title {
+    font-size: 14px;
+    font-weight: 600;
+    color: var(--fg);
+    margin-bottom: 4px;
+  }
+
+  .feature-item .fi-desc {
+    font-size: 12px;
+    color: var(--fg-secondary);
+    line-height: 1.5;
+  }
+
+  /* Design spec */
+  .spec-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+    gap: 16px;
+    margin-bottom: 48px;
+  }
+
+  .spec-card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-lg);
+    padding: 16px;
+    transition: background var(--transition), border-color var(--transition);
+  }
+
+  .spec-card .spec-title {
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--fg);
+    margin-bottom: 8px;
+  }
+
+  .spec-card .spec-row {
+    display: flex;
+    justify-content: space-between;
+    font-size: 12px;
+    color: var(--fg-secondary);
+    padding: 3px 0;
+  }
+
+  .spec-card .spec-row .spec-value {
+    color: var(--fg);
+    font-family: var(--font-mono);
+    font-size: 11px;
+  }
+
+  .footer {
+    text-align: center;
+    padding: 40px 0;
+    font-size: 13px;
+    color: var(--fg-tertiary);
+    border-top: 1px solid var(--border);
+  }
+
+  @media (max-width: 640px) {
+    .overview-header { flex-direction: column; text-align: center; }
+    .theme-toggle-float { margin-left: 0; }
+    .screen-grid { grid-template-columns: 1fr; }
+  }
+</style>
+</head>
+<body>
+<div class="overview-page">
+  <div class="overview-header">
+    <div class="overview-logo">
+      <img id="overview-logo" src="../assets/logo-github-org.svg" alt="pocketctl">
+    </div>
+    <div>
+      <h1>pocketctl Web UI</h1>
+      <div class="subtitle">Web 端设计稿 · 深色 / 浅色双主题</div>
+    </div>
+    <div class="theme-toggle-float">
+      <button class="theme-toggle" onclick="toggleTheme()" title="切换主题" style="width:40px;height:40px;">
+        <svg id="icon-moon" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 12.79A9 9 0 1111.21 3 7 7 0 0021 12.79z"/></svg>
+        <svg id="icon-sun" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="display:none;"><circle cx="12" cy="12" r="5"/><path d="M12 1v2M12 21v2M4.22 4.22l1.42 1.42M18.36 18.36l1.42 1.42M1 12h2M21 12h2M4.22 19.78l1.42-1.42M18.36 5.64l1.42-1.42"/></svg>
+      </button>
+    </div>
+  </div>
+
+  <div class="overview-body">
+    <!-- Pages -->
+    <div class="section-label">页面</div>
+    <div class="section-title">Web 端界面</div>
+
+    <div class="screen-grid">
+      <a href="login.html" class="screen-card">
+        <div class="preview">
+          <div class="mini-browser" style="width:70%;height:90%;">
+            <div class="mb-bar">
+              <div class="mb-dot red"></div>
+              <div class="mb-dot yellow"></div>
+              <div class="mb-dot green"></div>
+            </div>
+            <div class="mb-content">
+              <div style="width:32px;height:32px;border-radius:8px;background:var(--accent-muted);margin-bottom:8px;"></div>
+              <div class="mb-line accent" style="width:50%;height:5px;"></div>
+              <div class="mb-line" style="width:70%;"></div>
+              <div style="margin-top:8px;width:100%;">
+                <div style="display:flex;gap:3px;margin-bottom:6px;">
+                  <div style="flex:1;height:16px;background:var(--accent);border-radius:4px;opacity:0.8;"></div>
+                  <div style="flex:1;height:16px;background:var(--border);border-radius:4px;"></div>
+                </div>
+                <div class="mb-block" style="width:100%;height:24px;"></div>
+                <div class="mb-block" style="width:60%;height:24px;margin-top:4px;"></div>
+                <div style="width:100%;height:20px;background:var(--success);border-radius:4px;margin-top:6px;opacity:0.7;"></div>
+              </div>
+            </div>
+          </div>
+        </div>
+        <div class="info">
+          <div class="card-number">页面 1</div>
+          <h3>登录</h3>
+          <p>手机号 + 邮箱双登录方式，验证码验证</p>
+          <div class="tags">
+            <span class="tag">深色/浅色</span>
+            <span class="tag">双 Logo</span>
+            <span class="tag">双登录方式</span>
+          </div>
+        </div>
+      </a>
+
+      <a href="dashboard.html" class="screen-card">
+        <div class="preview">
+          <div class="mini-browser" style="width:95%;height:90%;">
+            <div class="mb-bar">
+              <div class="mb-dot red"></div>
+              <div class="mb-dot yellow"></div>
+              <div class="mb-dot green"></div>
+            </div>
+            <div class="mb-content" style="align-items:stretch;padding:8px;">
+              <div style="display:flex;gap:8px;width:100%;height:100%;">
+                <div style="width:50px;background:var(--surface-hover);border-radius:4px;"></div>
+                <div style="flex:1;display:flex;flex-direction:column;gap:6px;">
+                  <div style="display:flex;gap:4px;">
+                    <div style="flex:1;height:28px;background:var(--surface-hover);border-radius:4px;"></div>
+                    <div style="flex:1;height:28px;background:var(--surface-hover);border-radius:4px;"></div>
+                    <div style="flex:1;height:28px;background:var(--surface-hover);border-radius:4px;"></div>
+                  </div>
+                  <div style="display:flex;gap:4px;flex:1;">
+                    <div style="flex:1;height:60px;background:var(--surface-hover);border-radius:4px;"></div>
+                    <div style="flex:1;height:60px;background:var(--surface-hover);border-radius:4px;opacity:0.6;"></div>
+                  </div>
+                  <div style="height:40px;background:var(--surface-hover);border-radius:4px;"></div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+        <div class="info">
+          <div class="card-number">页面 2</div>
+          <h3>仪表盘</h3>
+          <p>主机列表 + 会话列表 + 别名编辑 + 快捷统计</p>
+          <div class="tags">
+            <span class="tag">侧栏导航</span>
+            <span class="tag">统计卡片</span>
+            <span class="tag">表格视图</span>
+          </div>
+        </div>
+      </a>
+
+      <a href="session-detail.html" class="screen-card">
+        <div class="preview">
+          <div class="mini-browser" style="width:95%;height:90%;">
+            <div class="mb-bar">
+              <div class="mb-dot red"></div>
+              <div class="mb-dot yellow"></div>
+              <div class="mb-dot green"></div>
+            </div>
+            <div class="mb-content" style="align-items:stretch;padding:8px;">
+              <div style="display:flex;gap:8px;width:100%;height:100%;">
+                <div style="width:50px;background:var(--surface-hover);border-radius:4px;"></div>
+                <div style="width:40px;background:var(--bg-secondary);border-radius:4px;border:1px solid var(--border);"></div>
+                <div style="flex:1;display:flex;flex-direction:column;gap:4px;">
+                  <div style="display:flex;gap:4px;">
+                    <div style="height:4px;width:10%;background:var(--success);border-radius:2px;"></div>
+                    <div style="height:4px;flex:1;background:var(--success);border-radius:2px;"></div>
+                    <div style="height:4px;width:10%;background:var(--border);border-radius:2px;"></div>
+                  </div>
+                  <div style="align-self:flex-end;background:var(--accent);border-radius:6px 6px 2px 6px;padding:4px 8px;width:50%;height:10px;"></div>
+                  <div style="background:var(--surface-hover);border-radius:6px;border:1px solid var(--border);padding:4px;height:20px;"></div>
+                  <div style="align-self:flex-start;background:var(--surface-hover);border-radius:6px 6px 6px 2px;padding:4px 8px;width:60%;height:10px;"></div>
+                  <div style="flex:1;"></div>
+                  <div style="height:16px;background:var(--surface-hover);border-radius:8px;border:1px solid var(--border);"></div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+        <div class="info">
+          <div class="card-number">页面 3</div>
+          <h3>Session 详情</h3>
+          <p>三栏布局 · 会话列表 + 聊天监控 + 工具调用</p>
+          <div class="tags">
+            <span class="tag">实时聊天</span>
+            <span class="tag">工具卡片</span>
+            <span class="tag">流式消息</span>
+          </div>
+        </div>
+      </a>
+
+      <a href="settings.html" class="screen-card">
+        <div class="preview">
+          <div class="mini-browser" style="width:95%;height:90%;">
+            <div class="mb-bar">
+              <div class="mb-dot red"></div>
+              <div class="mb-dot yellow"></div>
+              <div class="mb-dot green"></div>
+            </div>
+            <div class="mb-content" style="align-items:stretch;padding:8px;">
+              <div style="display:flex;gap:8px;width:100%;height:100%;">
+                <div style="width:50px;background:var(--surface-hover);border-radius:4px;"></div>
+                <div style="flex:1;display:flex;gap:12px;">
+                  <div style="width:60px;display:flex;flex-direction:column;gap:4px;">
+                    <div style="height:12px;background:var(--accent-muted);border-radius:3px;"></div>
+                    <div style="height:12px;background:var(--surface-hover);border-radius:3px;"></div>
+                    <div style="height:12px;background:var(--surface-hover);border-radius:3px;"></div>
+                    <div style="height:12px;background:var(--surface-hover);border-radius:3px;"></div>
+                  </div>
+                  <div style="flex:1;display:flex;flex-direction:column;gap:4px;">
+                    <div style="display:flex;align-items:center;gap:6px;padding:6px;">
+                      <div style="width:20px;height:20px;border-radius:50%;background:var(--surface-hover);"></div>
+                      <div><div style="height:4px;width:40px;background:var(--fg);border-radius:2px;opacity:0.3;"></div><div style="height:3px;width:30px;background:var(--fg-tertiary);border-radius:2px;margin-top:2px;"></div></div>
+                    </div>
+                    <div style="height:40px;background:var(--surface-hover);border-radius:4px;"></div>
+                    <div style="height:40px;background:var(--surface-hover);border-radius:4px;"></div>
+                    <div style="height:40px;background:var(--accent-muted);border-radius:4px;opacity:0.5;"></div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+        <div class="info">
+          <div class="card-number">页面 4</div>
+          <h3>设置</h3>
+          <p>账户管理 · 主机管理 · 外观偏好 · 通知设置</p>
+          <div class="tags">
+            <span class="tag">双栏布局</span>
+            <span class="tag">主题选择</span>
+            <span class="tag">Toggle 开关</span>
+          </div>
+        </div>
+      </a>
+    </div>
+
+    <!-- Features -->
+    <div class="section-label">特性</div>
+    <div class="section-title">Web 端核心能力</div>
+
+    <div class="features-grid">
+      <div class="feature-item">
+        <div class="fi-icon" style="background:var(--accent-muted);color:var(--accent);">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="5"/><path d="M12 1v2M12 21v2M4.22 4.22l1.42 1.42M18.36 18.36l1.42 1.42M1 12h2M21 12h2"/></svg>
+        </div>
+        <div class="fi-title">深色 / 浅色主题</div>
+        <div class="fi-desc">CSS 变量驱动，一键切换，支持跟随系统，Logo 自动适配</div>
+      </div>
+      <div class="feature-item">
+        <div class="fi-icon" style="background:var(--success-bg);color:var(--success);">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="5" y="2" width="14" height="20" rx="2"/><circle cx="12" cy="18" r="1"/></svg>
+        </div>
+        <div class="fi-title">手机号 + 邮箱登录</div>
+        <div class="fi-desc">双登录方式 Tab 切换，验证码倒计时，社交登录</div>
+      </div>
+      <div class="feature-item">
+        <div class="fi-icon" style="background:var(--warning-bg);color:var(--warning);">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="2" width="20" height="20" rx="3"/><path d="M7 2v20"/></svg>
+        </div>
+        <div class="fi-title">主机别名管理</div>
+        <div class="fi-desc">内联编辑别名，一键恢复默认名，实时更新显示</div>
+      </div>
+      <div class="feature-item">
+        <div class="fi-icon" style="background:var(--sub-agent-bg);color:var(--sub-agent);">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15a2 2 0 01-2 2H7l-4 4V5a2 2 0 012-2h14a2 2 0 012 2z"/></svg>
+        </div>
+        <div class="fi-title">实时聊天监控</div>
+        <div class="fi-desc">三栏布局，消息气泡，工具调用卡片，流式输出</div>
+      </div>
+      <div class="feature-item">
+        <div class="fi-icon" style="background:rgba(88,166,255,0.1);color:var(--accent);">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg>
+        </div>
+        <div class="fi-title">响应式布局</div>
+        <div class="fi-desc">侧栏 260px → 图标 72px → 隐藏，三段式自适应</div>
+      </div>
+      <div class="feature-item">
+        <div class="fi-icon" style="background:rgba(63,185,80,0.1);color:var(--success);">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 11.08V12a10 10 0 11-5.93-9.14"/><path d="M22 4L12 14.01l-3-3"/></svg>
+        </div>
+        <div class="fi-title">完整交互</div>
+        <div class="fi-desc">Tab 切换、验证码倒计时、工具卡片展开、主题选择器</div>
+      </div>
+    </div>
+
+    <!-- Design Spec -->
+    <div class="section-label">规范</div>
+    <div class="section-title">设计系统速查</div>
+
+    <div class="spec-grid">
+      <div class="spec-card">
+        <div class="spec-title">颜色体系</div>
+        <div class="spec-row"><span>背景</span><span class="spec-value">--bg</span></div>
+        <div class="spec-row"><span>表面</span><span class="spec-value">--surface</span></div>
+        <div class="spec-row"><span>边框</span><span class="spec-value">--border</span></div>
+        <div class="spec-row"><span>强调</span><span class="spec-value">--accent</span></div>
+        <div class="spec-row"><span>主按钮</span><span class="spec-value">--primary-btn</span></div>
+        <div class="spec-row"><span>深色 tokens</span><span class="spec-value">30 个</span></div>
+        <div class="spec-row"><span>浅色 tokens</span><span class="spec-value">30 个</span></div>
+      </div>
+      <div class="spec-card">
+        <div class="spec-title">字体栈</div>
+        <div class="spec-row"><span>Display</span><span class="spec-value">SF Pro Display</span></div>
+        <div class="spec-row"><span>Body</span><span class="spec-value">SF Pro Text</span></div>
+        <div class="spec-row"><span>Mono</span><span class="spec-value">SF Mono</span></div>
+        <div class="spec-row"><span>备用</span><span class="spec-value">system-ui</span></div>
+      </div>
+      <div class="spec-card">
+        <div class="spec-title">圆角</div>
+        <div class="spec-row"><span>小</span><span class="spec-value">6px</span></div>
+        <div class="spec-row"><span>中</span><span class="spec-value">8px</span></div>
+        <div class="spec-row"><span>大</span><span class="spec-value">12px</span></div>
+        <div class="spec-row"><span>超大</span><span class="spec-value">16px</span></div>
+        <div class="spec-row"><span>全圆角</span><span class="spec-value">9999px</span></div>
+      </div>
+      <div class="spec-card">
+        <div class="spec-title">布局参数</div>
+        <div class="spec-row"><span>侧栏</span><span class="spec-value">260px</span></div>
+        <div class="spec-row"><span>侧栏折叠</span><span class="spec-value">72px</span></div>
+        <div class="spec-row"><span>顶栏</span><span class="spec-value">56px</span></div>
+        <div class="spec-row"><span>最大内容</span><span class="spec-value">1200px</span></div>
+        <div class="spec-row"><span>响应断点</span><span class="spec-value">1024/768px</span></div>
+      </div>
+      <div class="spec-card">
+        <div class="spec-title">Logo 适配</div>
+        <div class="spec-row"><span>深色模式</span><span class="spec-value">logo-github-org.svg</span></div>
+        <div class="spec-row"><span>浅色模式</span><span class="spec-value">logo-github-org-light.svg</span></div>
+        <div class="spec-row"><span>切换方式</span><span class="spec-value">JS + localStorage</span></div>
+        <div class="spec-row"><span>存储键</span><span class="spec-value">pocketctl-theme</span></div>
+      </div>
+      <div class="spec-card">
+        <div class="spec-title">文件清单</div>
+        <div class="spec-row"><span>样式系统</span><span class="spec-value">css/web-shared.css</span></div>
+        <div class="spec-row"><span>登录</span><span class="spec-value">web/login.html</span></div>
+        <div class="spec-row"><span>仪表盘</span><span class="spec-value">web/dashboard.html</span></div>
+        <div class="spec-row"><span>会话</span><span class="spec-value">web/session-detail.html</span></div>
+        <div class="spec-row"><span>设置</span><span class="spec-value">web/settings.html</span></div>
+        <div class="spec-row"><span>总览</span><span class="spec-value">web/index.html</span></div>
+      </div>
+    </div>
+
+    <div class="footer">
+      pocketctl Web UI Design System · 4 个页面 · 深色/浅色双主题 · 2025
+    </div>
+  </div>
+</div>
+
+<script>
+  function getTheme() { return document.documentElement.getAttribute('data-theme') || 'dark'; }
+  function setTheme(t) {
+    document.documentElement.setAttribute('data-theme', t);
+    localStorage.setItem('pocketctl-theme', t);
+    document.getElementById('icon-sun').style.display = t === 'dark' ? 'none' : 'block';
+    document.getElementById('icon-moon').style.display = t === 'dark' ? 'block' : 'none';
+    document.getElementById('overview-logo').src = t === 'dark' ? '../assets/logo-github-org.svg' : '../assets/logo-github-org-light.svg';
+  }
+  function toggleTheme() { setTheme(getTheme() === 'dark' ? 'light' : 'dark'); }
+  const saved = localStorage.getItem('pocketctl-theme');
+  if (saved) setTheme(saved);
+</script>
+</body>
+</html>

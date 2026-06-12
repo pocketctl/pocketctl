@@ -10,16 +10,17 @@ Monitor and manage Claude Code, Codex, and OpenCode sessions from your phone or 
 - 📱 **Mobile Control** — Send messages, create sessions, and manage agents from your phone
 - 🔔 **Push Notifications** — Get alerted when your agent needs attention
 - 🔄 **Self-updating** — One command to update to the latest version
-- 🔐 **Secure** — JWT authentication with phone number verification
+- 🌐 **Web Dashboard** — Full-featured web UI with dark/light theme, daemon & session management
+- 🔐 **Secure** — JWT authentication with phone SMS + email verification code
 - ⚡ **Lightweight** — Single binary, zero dependencies, runs on macOS and Linux
 
 ## Architecture
 
 ```
-┌─────────────┐     WebSocket      ┌─────────────┐     WebSocket      ┌─────────────┐
-│   iOS App   │◄──────────────────►│    Relay     │◄──────────────────►│   Daemon    │
-│  (Mobile)   │                    │   (Server)   │                    │  (Desktop)  │
-└─────────────┘                    └─────────────┘                    └─────────────┘
+┌─────────────┐   HTTP/WS   ┌─────────────┐     WebSocket      ┌─────────────┐
+│  iOS App +  │◄───────────►│    Relay     │◄──────────────────►│   Daemon    │
+│  Web App    │             │   (Server)   │                    │  (Desktop)  │
+└─────────────┘             └─────────────┘                    └─────────────┘
                                                                           │
                                                                     ┌─────┴─────┐
                                                                     │ AI Agents  │
@@ -66,7 +67,7 @@ pocketctl daemon status
 
 | Command | Description |
 |---------|-------------|
-| `pocketctl login [--prod]` | Login via phone number (SMS verification) |
+| `pocketctl login [--prod]` | Login via phone (SMS) or email (verification code) |
 | `pocketctl daemon start [--prod]` | Start the daemon |
 | `pocketctl daemon stop` | Stop the running daemon |
 | `pocketctl daemon status` | Show daemon status and active sessions |
@@ -81,6 +82,10 @@ pocketctl daemon status
 |----------|-------------|
 | `POCKETCTL_RELAY_URL` | Relay WebSocket URL (e.g. `wss://your-domain.com/ws`) |
 | `POCKETCTL_TOKEN` | JWT token for authentication |
+| `SES_FROM_EMAIL` | Sender email address for verification emails |
+| `SES_REGION` | Tencent Cloud SES region (default: `ap-hongkong`) |
+| `DEV_SMS_PHONE` | Dev mode test phone number |
+| `DEV_SMS_CODE` | Dev mode test verification code |
 
 ## Build from Source
 
@@ -118,8 +123,23 @@ pocketctl/
 │   ├── watcher/                   # Session file monitoring (fsnotify)
 │   └── ws/                        # WebSocket client with auto-reconnect
 ├── relay/
-│   └── src/                       # Fastify + WebSocket relay server
-├── web/                           # Vue 3 web dashboard
+│   └── src/
+│       ├── server.ts              # Fastify HTTP + WebSocket server
+│       ├── router.ts              # WebSocket message routing
+│       ├── auth.ts                # JWT sign/verify
+│       ├── db.ts                  # PostgreSQL queries
+│       ├── push.ts                # Push notification service
+│       ├── title.ts               # LLM title generation
+│       └── config/
+│           ├── sms.ts             # Tencent Cloud SMS client
+│           ├── email.ts           # Tencent Cloud SES email client
+│           └── verification.ts    # Shared verification code store
+├── web/                           # Vue 3 web dashboard (dark/light theme)
+│   └── src/
+│       ├── views/                 # DashboardView, SessionDetail, SettingsView, LoginView
+│       ├── composables/           # useAuth, useWebSocket, useCountdown, useRelativeTime
+│       ├── components/            # SubAgentCard, NewSessionDialog, etc.
+│       └── assets/               # web-shared.css (design system), logo SVGs
 ├── scripts/
 │   ├── install-daemon.sh          # One-line installer
 │   └── sync-github.sh             # Sync to GitHub

@@ -1,0 +1,517 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="dark">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>pocketctl — 设置</title>
+<link rel="stylesheet" href="../css/web-shared.css">
+<style>
+  .settings-grid {
+    display: grid;
+    grid-template-columns: 240px 1fr;
+    gap: 32px;
+  }
+
+  /* Settings nav */
+  .settings-nav {
+    position: sticky;
+    top: calc(var(--topbar-h) + 24px);
+    align-self: start;
+  }
+
+  .settings-nav-item {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 12px;
+    border-radius: var(--radius-md);
+    font-size: 14px;
+    color: var(--fg-secondary);
+    cursor: pointer;
+    transition: background 0.15s, color 0.15s;
+    margin-bottom: 2px;
+  }
+
+  .settings-nav-item:hover { background: var(--surface-hover); color: var(--fg); }
+  .settings-nav-item.active { background: var(--sidebar-active); color: var(--accent); font-weight: 500; }
+
+  .settings-nav-item svg { width: 16px; height: 16px; flex-shrink: 0; }
+
+  /* Settings sections */
+  .settings-section {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-lg);
+    overflow: hidden;
+    margin-bottom: 16px;
+    transition: background var(--transition), border-color var(--transition);
+  }
+
+  .settings-section-title {
+    font-size: 16px;
+    font-weight: 600;
+    color: var(--fg);
+    padding: 16px 20px;
+    border-bottom: 1px solid var(--border);
+  }
+
+  .settings-row {
+    display: flex;
+    align-items: center;
+    padding: 14px 20px;
+    gap: 12px;
+    border-bottom: 1px solid var(--border);
+    transition: background 0.1s;
+  }
+
+  .settings-row:last-child { border-bottom: none; }
+  .settings-row:hover { background: var(--surface-hover); }
+
+  .settings-row .row-icon {
+    width: 32px; height: 32px;
+    border-radius: var(--radius-sm);
+    display: flex; align-items: center; justify-content: center;
+    font-size: 16px; flex-shrink: 0;
+  }
+
+  .settings-row .row-label { flex: 1; font-size: 14px; color: var(--fg); }
+  .settings-row .row-value {
+    font-size: 14px; color: var(--fg-secondary);
+    display: flex; align-items: center; gap: 6px;
+  }
+
+  .settings-row .row-value .bound { color: var(--success); }
+  .settings-row .row-value .unbound { color: var(--fg-tertiary); }
+
+  .settings-row .chevron { color: var(--fg-tertiary); font-size: 13px; }
+
+  .settings-row.danger .row-label {
+    color: var(--error); font-weight: 500;
+  }
+
+  /* Profile card */
+  .profile-card {
+    display: flex;
+    align-items: center;
+    gap: 20px;
+    padding: 24px 20px;
+    border-bottom: 1px solid var(--border);
+  }
+
+  .profile-avatar {
+    width: 64px; height: 64px;
+    border-radius: 50%;
+    background: var(--surface-active);
+    border: 2px solid var(--border);
+    display: flex; align-items: center; justify-content: center;
+    font-size: 24px; font-weight: 600; color: var(--fg-secondary);
+    flex-shrink: 0;
+  }
+
+  .profile-info { flex: 1; }
+  .profile-info .profile-name { font-size: 18px; font-weight: 600; color: var(--fg); }
+  .profile-info .profile-email { font-size: 14px; color: var(--fg-secondary); margin-top: 2px; }
+  .profile-info .profile-edit { font-size: 13px; color: var(--accent); background: none; border: none; cursor: pointer; margin-top: 4px; }
+
+  /* Plan badge */
+  .plan-badge {
+    display: inline-flex; align-items: center;
+    padding: 3px 10px; border-radius: var(--radius-full);
+    font-size: 12px; font-weight: 600;
+  }
+
+  .plan-badge.free { background: rgba(72,79,88,0.2); color: var(--fg-tertiary); }
+  .plan-badge.pro { background: var(--accent-muted); color: var(--accent); }
+
+  /* Upgrade card */
+  .upgrade-card {
+    background: var(--accent-subtle);
+    border: 1px solid rgba(88,166,255,0.2);
+    border-radius: var(--radius-lg);
+    padding: 20px;
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    margin-bottom: 16px;
+  }
+
+  .upgrade-card .upgrade-icon {
+    width: 40px; height: 40px;
+    border-radius: var(--radius-md);
+    background: var(--accent-muted);
+    display: flex; align-items: center; justify-content: center;
+    color: var(--accent); flex-shrink: 0;
+  }
+
+  .upgrade-card .upgrade-text { flex: 1; }
+  .upgrade-card .upgrade-title { font-size: 15px; font-weight: 600; color: var(--accent); }
+  .upgrade-card .upgrade-desc { font-size: 13px; color: var(--fg-secondary); margin-top: 4px; }
+
+  /* Daemon mini list in settings */
+  .daemon-settings-row {
+    display: flex;
+    align-items: center;
+    padding: 12px 20px;
+    gap: 10px;
+    border-bottom: 1px solid var(--border);
+    cursor: pointer;
+    transition: background 0.1s;
+  }
+
+  .daemon-settings-row:last-child { border-bottom: none; }
+  .daemon-settings-row:hover { background: var(--surface-hover); }
+  .daemon-settings-row .daemon-name { flex: 1; font-size: 14px; color: var(--fg); }
+
+  .daemon-settings-row.add-daemon {
+    color: var(--accent);
+    font-size: 14px;
+    justify-content: center;
+  }
+
+  /* Theme section */
+  .theme-options {
+    display: flex;
+    gap: 12px;
+    padding: 16px 20px;
+  }
+
+  .theme-option {
+    flex: 1;
+    padding: 16px;
+    border: 2px solid var(--border);
+    border-radius: var(--radius-lg);
+    cursor: pointer;
+    text-align: center;
+    transition: border-color 0.15s, background 0.15s;
+  }
+
+  .theme-option:hover { border-color: var(--border-light); }
+  .theme-option.active { border-color: var(--accent); background: var(--accent-subtle); }
+
+  .theme-option .theme-preview {
+    width: 48px; height: 48px;
+    border-radius: var(--radius-md);
+    margin: 0 auto 8px;
+    border: 1px solid var(--border);
+  }
+
+  .theme-preview.dark-preview { background: linear-gradient(135deg, #0d1117, #161b22); }
+  .theme-preview.light-preview { background: linear-gradient(135deg, #ffffff, #f6f8fa); }
+
+  .theme-option .theme-label {
+    font-size: 13px; font-weight: 500; color: var(--fg);
+  }
+
+  .theme-option .theme-desc {
+    font-size: 11px; color: var(--fg-tertiary); margin-top: 2px;
+  }
+
+  /* Toggle switch */
+  .toggle-switch {
+    width: 44px; height: 24px;
+    border-radius: 12px;
+    background: var(--border);
+    cursor: pointer;
+    position: relative;
+    transition: background 0.2s;
+    flex-shrink: 0;
+  }
+
+  .toggle-switch.on { background: var(--accent); }
+
+  .toggle-switch::after {
+    content: '';
+    position: absolute;
+    width: 18px; height: 18px;
+    border-radius: 50%;
+    background: #fff;
+    top: 3px; left: 3px;
+    transition: transform 0.2s;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.2);
+  }
+
+  .toggle-switch.on::after { transform: translateX(20px); }
+
+  @media (max-width: 768px) {
+    .settings-grid { grid-template-columns: 1fr; }
+    .settings-nav { position: static; display: flex; gap: 4px; overflow-x: auto; padding-bottom: 8px; }
+    .settings-nav-item { white-space: nowrap; }
+  }
+</style>
+</head>
+<body>
+<div class="app-layout">
+  <!-- Sidebar -->
+  <nav class="sidebar" id="sidebar">
+    <a href="dashboard.html" class="sidebar-logo">
+      <img id="sidebar-logo" src="../assets/logo-github-org.svg" alt="pocketctl">
+      <span class="brand-name">pocketctl</span>
+    </a>
+    <div class="sidebar-nav">
+      <div class="sidebar-section-label">概览</div>
+      <a href="dashboard.html" class="sidebar-link">
+        <span class="link-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg></span>
+        <span class="link-text">仪表盘</span>
+      </a>
+      <a href="session-detail.html" class="sidebar-link">
+        <span class="link-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15a2 2 0 01-2 2H7l-4 4V5a2 2 0 012-2h14a2 2 0 012 2z"/></svg></span>
+        <span class="link-text">会话</span>
+      </a>
+      <div class="sidebar-section-label">管理</div>
+      <a href="#" class="sidebar-link">
+        <span class="link-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="2" width="20" height="20" rx="3"/><path d="M7 2v20M17 2v20M2 12h20"/></svg></span>
+        <span class="link-text">主机</span>
+      </a>
+      <a href="settings.html" class="sidebar-link active">
+        <span class="link-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M12 1v2M12 21v2M4.22 4.22l1.42 1.42M18.36 18.36l1.42 1.42M1 12h2M21 12h2M4.22 19.78l1.42-1.42M18.36 5.64l1.42-1.42"/></svg></span>
+        <span class="link-text">设置</span>
+      </a>
+    </div>
+    <div class="sidebar-footer">
+      <div class="sidebar-user">
+        <div class="user-avatar">M</div>
+        <div class="user-info"><div class="user-name">138****8888</div><div class="user-plan">免费版</div></div>
+      </div>
+    </div>
+  </nav>
+
+  <!-- Main -->
+  <main class="main-content">
+    <header class="topbar">
+      <div class="topbar-breadcrumb">
+        <span>设置</span>
+      </div>
+      <div class="topbar-actions">
+        <button class="theme-toggle" onclick="toggleTheme()" title="切换主题">
+          <svg id="icon-moon" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 12.79A9 9 0 1111.21 3 7 7 0 0021 12.79z"/></svg>
+          <svg id="icon-sun" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="display:none;"><circle cx="12" cy="12" r="5"/><path d="M12 1v2M12 21v2M4.22 4.22l1.42 1.42M18.36 18.36l1.42 1.42M1 12h2M21 12h2M4.22 19.78l1.42-1.42M18.36 5.64l1.42-1.42"/></svg>
+        </button>
+      </div>
+    </header>
+
+    <div class="page-container">
+      <div class="page-header">
+        <h1 class="page-title">设置</h1>
+      </div>
+
+      <div class="settings-grid">
+        <!-- Settings Nav -->
+        <div class="settings-nav">
+          <div class="settings-nav-item active" onclick="scrollToSection('profile')">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M20 21v-2a4 4 0 00-4-4H8a4 4 0 00-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>
+            账户
+          </div>
+          <div class="settings-nav-item" onclick="scrollToSection('daemons')">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="2" width="20" height="20" rx="3"/><path d="M7 2v20"/></svg>
+            主机
+          </div>
+          <div class="settings-nav-item" onclick="scrollToSection('appearance')">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="5"/><path d="M12 1v2M12 21v2M4.22 4.22l1.42 1.42M18.36 18.36l1.42 1.42"/></svg>
+            外观
+          </div>
+          <div class="settings-nav-item" onclick="scrollToSection('notifications')">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 8A6 6 0 006 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 01-3.46 0"/></svg>
+            通知
+          </div>
+          <div class="settings-nav-item" onclick="scrollToSection('about')">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M12 16v-4M12 8h.01"/></svg>
+            关于
+          </div>
+        </div>
+
+        <!-- Settings Content -->
+        <div>
+          <!-- Profile -->
+          <div id="section-profile" class="settings-section">
+            <div class="profile-card">
+              <div class="profile-avatar">M</div>
+              <div class="profile-info">
+                <div class="profile-name">用户</div>
+                <div class="profile-email">138****8888</div>
+                <button class="profile-edit">编辑资料</button>
+              </div>
+            </div>
+            <div class="settings-row">
+              <div class="row-icon" style="background:var(--accent-muted);color:var(--accent);">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="5" y="2" width="14" height="20" rx="2"/><circle cx="12" cy="18" r="1"/></svg>
+              </div>
+              <span class="row-label">手机号</span>
+              <span class="row-value">138****8888 <span class="chevron">›</span></span>
+            </div>
+            <div class="settings-row">
+              <div class="row-icon" style="background:rgba(7,193,96,0.1);color:#07C160;">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15a2 2 0 01-2 2H7l-4 4V5a2 2 0 012-2h14a2 2 0 012 2z"/></svg>
+              </div>
+              <span class="row-label">微信</span>
+              <span class="row-value"><span class="unbound">未绑定</span> <span class="chevron">›</span></span>
+            </div>
+            <div class="settings-row">
+              <div class="row-icon" style="background:rgba(255,255,255,0.1);color:#fff;">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M17.05 20.28c-.98.95-2.05.8-3.08.35-1.09-.46-2.09-.48-3.24 0-1.44.62-2.2.44-3.06-.35C2.79 15.25 3.51 7.59 9.05 7.31c1.35.07 2.29.74 3.08.8 1.18-.24 2.31-.93 3.57-.84 1.51.12 2.65.72 3.4 1.8-3.12 1.87-2.38 5.98.48 7.13-.57 1.5-1.31 2.99-2.54 4.09zM12.03 7.25c-.15-2.23 1.66-4.07 3.74-4.25.29 2.58-2.34 4.5-3.74 4.25z"/></svg>
+              </div>
+              <span class="row-label">Apple ID</span>
+              <span class="row-value"><span class="bound">已绑定</span> <span class="chevron">›</span></span>
+            </div>
+            <div class="settings-row">
+              <div class="row-icon" style="background:rgba(88,166,255,0.1);color:var(--accent);">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="4" width="20" height="16" rx="2"/><path d="M22 4L12 13 2 4"/></svg>
+              </div>
+              <span class="row-label">邮箱</span>
+              <span class="row-value"><span class="unbound">未绑定</span> <span class="chevron">›</span></span>
+            </div>
+          </div>
+
+          <!-- Subscription -->
+          <div class="upgrade-card">
+            <div class="upgrade-icon">
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2l3.09 6.26L22 9.27l-5 4.87L18.18 22 12 18.56 5.82 22 7 14.14l-5-4.87 6.91-1.01L12 2z"/></svg>
+            </div>
+            <div class="upgrade-text">
+              <div class="upgrade-title">升级专业版 ¥48/月</div>
+              <div class="upgrade-desc">无限主机 · 推送通知 · 实时消息 · 优先支持</div>
+            </div>
+            <button class="btn btn-accent">升级</button>
+          </div>
+
+          <!-- Daemons -->
+          <div id="section-daemons" class="settings-section">
+            <div class="settings-section-title">我的主机</div>
+            <div class="daemon-settings-row">
+              <span class="status-dot online" style="width:7px;height:7px;"></span>
+              <span class="daemon-name">MacBook-Pro</span>
+              <span class="chip chip-online" style="font-size:11px;">在线</span>
+              <span class="chevron">›</span>
+            </div>
+            <div class="daemon-settings-row">
+              <span class="status-dot offline" style="width:7px;height:7px;"></span>
+              <span class="daemon-name">Dev-Server</span>
+              <span class="chip chip-offline" style="font-size:11px;">离线</span>
+              <span class="chevron">›</span>
+            </div>
+            <div class="daemon-settings-row add-daemon">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 5v14M5 12h14"/></svg>
+              注册新主机
+            </div>
+          </div>
+
+          <!-- Appearance -->
+          <div id="section-appearance" class="settings-section">
+            <div class="settings-section-title">外观</div>
+            <div class="theme-options">
+              <div class="theme-option" id="theme-opt-dark" onclick="setTheme('dark')">
+                <div class="theme-preview dark-preview"></div>
+                <div class="theme-label">深色</div>
+                <div class="theme-desc">适合暗光环境</div>
+              </div>
+              <div class="theme-option" id="theme-opt-light" onclick="setTheme('light')">
+                <div class="theme-preview light-preview"></div>
+                <div class="theme-label">浅色</div>
+                <div class="theme-desc">清爽明亮</div>
+              </div>
+              <div class="theme-option" id="theme-opt-system" onclick="setTheme('system')">
+                <div class="theme-preview" style="background:linear-gradient(135deg, #0d1117 50%, #ffffff 50%);"></div>
+                <div class="theme-label">跟随系统</div>
+                <div class="theme-desc">自动切换</div>
+              </div>
+            </div>
+          </div>
+
+          <!-- Notifications -->
+          <div id="section-notifications" class="settings-section">
+            <div class="settings-section-title">通知偏好</div>
+            <div class="settings-row">
+              <span class="row-label">会话完成通知</span>
+              <div class="toggle-switch on" onclick="this.classList.toggle('on')"></div>
+            </div>
+            <div class="settings-row">
+              <span class="row-label">错误告警</span>
+              <div class="toggle-switch on" onclick="this.classList.toggle('on')"></div>
+            </div>
+            <div class="settings-row">
+              <span class="row-label">主机上下线通知</span>
+              <div class="toggle-switch on" onclick="this.classList.toggle('on')"></div>
+            </div>
+            <div class="settings-row">
+              <span class="row-label">产品更新</span>
+              <div class="toggle-switch" onclick="this.classList.toggle('on')"></div>
+            </div>
+          </div>
+
+          <!-- About -->
+          <div id="section-about" class="settings-section">
+            <div class="settings-section-title">关于</div>
+            <div class="settings-row">
+              <span class="row-label">帮助与反馈</span>
+              <span class="row-value"><span class="chevron">›</span></span>
+            </div>
+            <div class="settings-row">
+              <span class="row-label">关于 pocketctl</span>
+              <span class="row-value">v1.0.0 <span class="chevron">›</span></span>
+            </div>
+            <div class="settings-row">
+              <span class="row-label">隐私政策</span>
+              <span class="row-value"><span class="chevron">›</span></span>
+            </div>
+            <div class="settings-row">
+              <span class="row-label">用户协议</span>
+              <span class="row-value"><span class="chevron">›</span></span>
+            </div>
+          </div>
+
+          <!-- Logout -->
+          <div class="settings-section">
+            <div class="settings-row danger" style="justify-content:center;">
+              <span class="row-label" style="text-align:center;">退出登录</span>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </main>
+</div>
+
+<script>
+  function getTheme() { return document.documentElement.getAttribute('data-theme') || 'dark'; }
+  function setTheme(t) {
+    if (t === 'system') {
+      const prefersDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
+      document.documentElement.setAttribute('data-theme', prefersDark ? 'dark' : 'light');
+    } else {
+      document.documentElement.setAttribute('data-theme', t);
+    }
+    localStorage.setItem('pocketctl-theme', t);
+    updateThemeUI();
+    updateLogo();
+    updateThemeOptions(t);
+  }
+  function toggleTheme() {
+    const current = localStorage.getItem('pocketctl-theme') || 'dark';
+    setTheme(current === 'dark' ? 'light' : 'dark');
+  }
+  function updateThemeUI() {
+    const t = getTheme();
+    document.getElementById('icon-sun').style.display = t === 'dark' ? 'none' : 'block';
+    document.getElementById('icon-moon').style.display = t === 'dark' ? 'block' : 'none';
+  }
+  function updateLogo() {
+    document.getElementById('sidebar-logo').src = getTheme() === 'dark'
+      ? '../assets/logo-github-org.svg'
+      : '../assets/logo-github-org-light.svg';
+  }
+  function updateThemeOptions(t) {
+    document.querySelectorAll('.theme-option').forEach(o => o.classList.remove('active'));
+    const map = { dark: 'theme-opt-dark', light: 'theme-opt-light', system: 'theme-opt-system' };
+    const el = document.getElementById(map[t]);
+    if (el) el.classList.add('active');
+  }
+  function scrollToSection(id) {
+    const el = document.getElementById('section-' + id);
+    if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  }
+
+  const saved = localStorage.getItem('pocketctl-theme');
+  if (saved) setTheme(saved);
+  else { updateThemeUI(); updateLogo(); updateThemeOptions('dark'); }
+</script>
+</body>
+</html>

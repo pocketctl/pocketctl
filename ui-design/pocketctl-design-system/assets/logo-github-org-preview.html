@@ -1,0 +1,468 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>pocketctl — GitHub Org Logo v2 Preview</title>
+  <style>
+    /* Variant toggle */
+    .variant-bar { display: flex; gap: 8px; margin-bottom: 24px; justify-content: center; }
+    .variant-btn {
+      padding: 8px 20px; border-radius: 8px; border: 1px solid var(--border);
+      background: transparent; color: var(--fg); font-size: 13px; font-weight: 500;
+      cursor: pointer; transition: all 0.2s;
+    }
+    .variant-btn:hover { border-color: var(--accent); }
+    .variant-btn.active { background: var(--accent); color: #fff; border-color: var(--accent); }
+    .logo-dark, .logo-light { display: none; }
+    .logo-dark.visible, .logo-light.visible { display: block; }
+  </style>
+<style>
+  :root {
+    --bg: #0d1117;
+    --surface: #161b22;
+    --fg: #e6edf3;
+    --muted: #8b949e;
+    --border: #30363d;
+    --accent: #58a6ff;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Text', system-ui, sans-serif;
+    background: var(--bg);
+    color: var(--fg);
+    padding: 48px 24px 80px;
+    max-width: 960px;
+    margin: 0 auto;
+    line-height: 1.5;
+  }
+
+  /* Header */
+  .header { text-align: center; margin-bottom: 48px; }
+  .header h1 { font-size: 28px; font-weight: 700; letter-spacing: -0.02em; margin-bottom: 8px; }
+  .header p { color: var(--muted); font-size: 15px; }
+
+  /* Hero */
+  .hero {
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    gap: 48px;
+    padding: 48px;
+    background: var(--surface);
+    border-radius: 16px;
+    border: 1px solid var(--border);
+    margin-bottom: 40px;
+    flex-wrap: wrap;
+  }
+  .hero-logo {
+    width: 256px; height: 256px;
+    border-radius: 56px;
+    overflow: hidden;
+    box-shadow: 0 16px 48px rgba(0,0,0,0.5);
+  }
+  .hero-logo img { width: 100%; height: 100%; display: block; }
+  .hero-info h2 { font-size: 20px; font-weight: 600; margin-bottom: 12px; }
+  .hero-info p { color: var(--muted); font-size: 14px; max-width: 360px; line-height: 1.7; }
+  .design-notes { margin-top: 16px; display: flex; flex-direction: column; gap: 6px; }
+  .note { display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--muted); }
+  .note-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--accent); flex-shrink: 0; }
+
+  /* Section */
+  .section { margin-bottom: 48px; }
+  .section-title {
+    font-size: 14px; font-weight: 600;
+    text-transform: uppercase; letter-spacing: 0.08em;
+    color: var(--accent); margin-bottom: 20px;
+  }
+
+  /* Size grid */
+  .size-grid {
+    display: flex; flex-wrap: wrap;
+    gap: 32px; align-items: flex-end;
+    padding: 32px;
+    background: var(--surface);
+    border-radius: 12px; border: 1px solid var(--border);
+  }
+  .size-item { display: flex; flex-direction: column; align-items: center; gap: 10px; }
+  .size-item .avatar-circle {
+    border-radius: 50%; overflow: hidden; background: var(--bg);
+    display: flex; align-items: center; justify-content: center;
+  }
+  .size-item .avatar-circle img { width: 100%; height: 100%; }
+  .size-item .label { font-size: 12px; color: var(--muted); text-align: center; }
+  .size-item .label strong { color: var(--fg); display: block; }
+
+  /* GitHub simulation */
+  .gh-sim {
+    background: var(--surface);
+    border-radius: 12px; border: 1px solid var(--border);
+    overflow: hidden;
+  }
+  .gh-sim-header {
+    padding: 14px 20px;
+    border-bottom: 1px solid var(--border);
+    display: flex; align-items: center; gap: 8px;
+    font-size: 13px; color: var(--muted);
+  }
+  .gh-sim-header .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--border); }
+  .gh-sim-body { padding: 32px; display: flex; gap: 24px; align-items: flex-start; }
+  .gh-avatar {
+    width: 80px; height: 80px; border-radius: 50%;
+    overflow: hidden; border: 1px solid var(--border); flex-shrink: 0;
+  }
+  .gh-avatar img { width: 100%; height: 100%; display: block; }
+  .gh-profile h3 { font-size: 20px; font-weight: 600; margin-bottom: 4px; }
+  .gh-profile .gh-handle { font-size: 14px; color: var(--muted); margin-bottom: 12px; }
+  .gh-profile .gh-bio { font-size: 14px; color: var(--fg); margin-bottom: 16px; max-width: 400px; }
+  .gh-profile .gh-meta { display: flex; gap: 16px; font-size: 13px; color: var(--muted); flex-wrap: wrap; }
+  .gh-profile .gh-meta span { display: flex; align-items: center; gap: 4px; }
+
+  /* Background tests */
+  .bg-tests { display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 16px; }
+  .bg-test {
+    border-radius: 12px; padding: 32px;
+    display: flex; align-items: center; justify-content: center;
+    position: relative; overflow: hidden;
+  }
+  .bg-test .label { position: absolute; bottom: 8px; left: 12px; font-size: 11px; }
+  .bg-test.dark { background: #0d1117; }
+  .bg-test.darker { background: #010409; }
+  .bg-test.light { background: #ffffff; }
+  .bg-test.light .label { color: rgba(0,0,0,0.4); }
+  .bg-test.github { background: linear-gradient(135deg, #0d1117, #161b22); }
+  .bg-test.navy { background: linear-gradient(135deg, #0f172a, #1e293b); }
+  .bg-test:not(.light) .label { color: rgba(255,255,255,0.4); }
+  .bg-test img { border-radius: 50%; }
+
+  /* Comparison */
+  .comparison { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
+  .comp-card {
+    padding: 24px; background: var(--surface);
+    border-radius: 12px; border: 1px solid var(--border);
+  }
+  .comp-card.old { opacity: 0.55; }
+  .comp-card .comp-label {
+    font-size: 12px; text-transform: uppercase;
+    letter-spacing: 0.05em; color: var(--muted);
+    margin-bottom: 16px; font-weight: 500;
+  }
+  .comp-card .comp-logo {
+    width: 120px; height: 120px; border-radius: 28px;
+    margin: 0 auto 16px; display: block;
+  }
+  .comp-card .comp-desc { font-size: 13px; color: var(--muted); line-height: 1.6; }
+
+  /* Spec table */
+  .spec-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  .spec-table th {
+    text-align: left; padding: 10px 12px;
+    background: rgba(255,255,255,0.03); color: var(--muted);
+    font-weight: 500; border-bottom: 1px solid var(--border);
+  }
+  .spec-table td { padding: 10px 12px; border-bottom: 1px solid var(--border); }
+  .spec-table td:first-child {
+    color: var(--accent); font-family: 'SF Mono', ui-monospace, Menlo, monospace; font-size: 12px;
+  }
+
+  /* Color palette */
+  .palette-row { display: flex; gap: 8px; flex-wrap: wrap; }
+  .swatch {
+    display: flex; align-items: center; gap: 8px;
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: 8px; padding: 8px 14px; font-size: 12px;
+  }
+  .swatch .dot { width: 20px; height: 20px; border-radius: 50%; flex-shrink: 0; }
+  .swatch .hex { font-family: 'SF Mono', ui-monospace, Menlo, monospace; color: var(--fg); }
+</style>
+</head>
+<body>
+
+<div class="header">
+  <h1>pocketctl — GitHub Org Logo</h1>
+  <p>终端窗口概念 · v2 · 为小尺寸圆形裁切优化</p>
+</div>
+
+<!-- Variant toggle -->
+<div class="variant-bar">
+  <button class="variant-btn active" onclick="switchVariant('dark')">深色背景</button>
+  <button class="variant-btn" onclick="switchVariant('light')">白色背景</button>
+</div>
+
+<!-- Hero — Dark variant -->
+<div class="hero logo-dark visible">
+  <div class="hero-logo">
+    <img src="logo-github-org.svg" alt="pocketctl logo v2 dark">
+  </div>
+  <div class="hero-info">
+    <h2>设计概念：终端窗口 · 深色背景</h2>
+    <p>以 macOS 终端窗口为核心意象——三色窗口控件确立「终端」身份，粗壮的 <code style="color:var(--accent);background:rgba(88,166,255,0.1);padding:2px 6px;border-radius:4px;font-family:'SF Mono',ui-monospace,monospace;font-size:13px;">>_</code> 提示符传递「控制」含义。</p>
+    <div class="design-notes">
+      <div class="note"><span class="note-dot"></span>深色背景适合 GitHub 默认深色主题</div>
+      <div class="note"><span class="note-dot"></span>红黄绿三色控件 = 第一眼认出「终端」</div>
+      <div class="note"><span class="note-dot"></span>蓝色辉光渐变 = 脉动感，暗示活跃会话</div>
+    </div>
+  </div>
+</div>
+
+<!-- Hero — Light variant -->
+<div class="hero logo-light" style="background:#fff;border-color:#d0d7de;">
+  <div class="hero-logo" style="box-shadow: 0 16px 48px rgba(0,0,0,0.1);border-radius:50%;">
+    <img src="logo-github-org-light.svg" alt="pocketctl logo light">
+  </div>
+  <div class="hero-info">
+    <h2 style="color:#1f2328;">设计概念：浅色终端窗口 · 白色背景</h2>
+    <p style="color:#656d76;">全浅色版本——白色画布 + 浅色终端窗口，统一通透的视觉基调。深蓝色 <code style="color:#1f6feb;background:rgba(31,111,235,0.08);padding:2px 6px;border-radius:4px;font-family:'SF Mono',ui-monospace,monospace;font-size:13px;">>_</code> 提示符在浅色背景上形成鲜明焦点。适合 GitHub 浅色主题、README、文档站、社交媒体等场景。</p>
+    <div class="design-notes">
+      <div class="note" style="color:#656d76;"><span class="note-dot"></span>白色/浅灰渐变画布 + 浅灰终端窗口，整体轻盈</div>
+      <div class="note" style="color:#656d76;"><span class="note-dot"></span>深蓝色 > 提示符 + 浅灰背景 = 高对比度，聚焦核心符号</div>
+      <div class="note" style="color:#656d76;"><span class="note-dot"></span>柔和投影 (opacity 0.18) 让窗口自然浮起</div>
+    </div>
+  </div>
+</div>
+
+<!-- Size grid -->
+<div class="section">
+  <div class="section-title">多尺寸预览（圆形裁切）</div>
+  <div class="size-grid logo-dark visible" id="sizeGrid">
+    <div class="size-item">
+      <div class="avatar-circle" style="width:20px;height:20px;"><img src="logo-github-org.svg" alt=""></div>
+      <div class="label"><strong>20px</strong>侧边栏</div>
+    </div>
+    <div class="size-item">
+      <div class="avatar-circle" style="width:32px;height:32px;"><img src="logo-github-org.svg" alt=""></div>
+      <div class="label"><strong>32px</strong>提交记录</div>
+    </div>
+    <div class="size-item">
+      <div class="avatar-circle" style="width:40px;height:40px;"><img src="logo-github-org.svg" alt=""></div>
+      <div class="label"><strong>40px</strong>评论头像</div>
+    </div>
+    <div class="size-item">
+      <div class="avatar-circle" style="width:64px;height:64px;"><img src="logo-github-org.svg" alt=""></div>
+      <div class="label"><strong>64px</strong>成员列表</div>
+    </div>
+    <div class="size-item">
+      <div class="avatar-circle" style="width:96px;height:96px;"><img src="logo-github-org.svg" alt=""></div>
+      <div class="label"><strong>96px</strong>搜索结果</div>
+    </div>
+    <div class="size-item">
+      <div class="avatar-circle" style="width:128px;height:128px;"><img src="logo-github-org.svg" alt=""></div>
+      <div class="label"><strong>128px</strong>Profile</div>
+    </div>
+    <div class="size-item">
+      <div class="avatar-circle" style="width:200px;height:200px;"><img src="logo-github-org.svg" alt=""></div>
+      <div class="label"><strong>200px</strong>大尺寸</div>
+    </div>
+  </div>
+  <div class="size-grid logo-light" id="sizeGridLight" style="display:none;">
+    <div class="size-item">
+      <div class="avatar-circle" style="width:20px;height:20px;background:#fff;border:1px solid #d0d7de;"><img src="logo-github-org-light.svg" alt=""></div>
+      <div class="label"><strong>20px</strong>侧边栏</div>
+    </div>
+    <div class="size-item">
+      <div class="avatar-circle" style="width:32px;height:32px;background:#fff;border:1px solid #d0d7de;"><img src="logo-github-org-light.svg" alt=""></div>
+      <div class="label"><strong>32px</strong>提交记录</div>
+    </div>
+    <div class="size-item">
+      <div class="avatar-circle" style="width:40px;height:40px;background:#fff;border:1px solid #d0d7de;"><img src="logo-github-org-light.svg" alt=""></div>
+      <div class="label"><strong>40px</strong>评论头像</div>
+    </div>
+    <div class="size-item">
+      <div class="avatar-circle" style="width:64px;height:64px;background:#fff;border:1px solid #d0d7de;"><img src="logo-github-org-light.svg" alt=""></div>
+      <div class="label"><strong>64px</strong>成员列表</div>
+    </div>
+    <div class="size-item">
+      <div class="avatar-circle" style="width:96px;height:96px;background:#fff;border:1px solid #d0d7de;"><img src="logo-github-org-light.svg" alt=""></div>
+      <div class="label"><strong>96px</strong>搜索结果</div>
+    </div>
+    <div class="size-item">
+      <div class="avatar-circle" style="width:128px;height:128px;background:#fff;border:1px solid #d0d7de;"><img src="logo-github-org-light.svg" alt=""></div>
+      <div class="label"><strong>128px</strong>Profile</div>
+    </div>
+    <div class="size-item">
+      <div class="avatar-circle" style="width:200px;height:200px;background:#fff;border:1px solid #d0d7de;"><img src="logo-github-org-light.svg" alt=""></div>
+      <div class="label"><strong>200px</strong>大尺寸</div>
+    </div>
+  </div>
+</div>
+
+<!-- GitHub org simulation — Dark -->
+<div class="section">
+  <div class="section-title">GitHub 组织页模拟</div>
+  <div class="gh-sim logo-dark visible">
+    <div class="gh-sim-header">
+      <span class="dot"></span><span class="dot"></span><span class="dot"></span>
+      <span style="margin-left:8px;">github.com/pocketctl</span>
+    </div>
+    <div class="gh-sim-body">
+      <div class="gh-avatar">
+        <img src="logo-github-org.svg" alt="pocketctl">
+      </div>
+      <div class="gh-profile">
+        <h3>pocketctl</h3>
+        <div class="gh-handle">@pocketctl</div>
+        <div class="gh-bio">Your coding agents in your pocket. Remote control Claude Code, Codex, and more from your phone.</div>
+        <div class="gh-meta">
+          <span>🏢 Remote</span>
+          <span>📦 12 repositories</span>
+          <span>👥 8 members</span>
+          <span>📍 Open Source</span>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- GitHub org simulation — Light (phone outline style) -->
+<div class="gh-sim logo-light" style="background:#fff;border-color:#d0d7de;">
+    <div class="gh-sim-header" style="border-color:#d0d7de;color:#656d76;">
+      <span class="dot" style="background:#d0d7de;"></span><span class="dot" style="background:#d0d7de;"></span><span class="dot" style="background:#d0d7de;"></span>
+      <span style="margin-left:8px;">github.com/pocketctl</span>
+    </div>
+    <div class="gh-sim-body">
+      <div class="gh-avatar" style="border-color:#d0d7de;background:#fff;">
+        <img src="logo-github-org-light.svg" alt="pocketctl">
+      </div>
+      <div class="gh-profile">
+        <h3 style="color:#1f2328;">pocketctl</h3>
+        <div class="gh-handle" style="color:#656d76;">@pocketctl</div>
+        <div class="gh-bio" style="color:#1f2328;">Your coding agents in your pocket. Remote control Claude Code, Codex, and more from your phone.</div>
+        <div class="gh-meta" style="color:#656d76;">
+          <span>🏢 Remote</span>
+          <span>📦 12 repositories</span>
+          <span>👥 8 members</span>
+          <span>📍 Open Source</span>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+<div class="section">
+  <div class="section-title">背景适配测试</div>
+  <div class="bg-tests">
+    <div class="bg-test dark">
+      <img src="logo-github-org.svg" width="80" height="80" alt="">
+      <span class="label">#0d1117 深色</span>
+    </div>
+    <div class="bg-test darker">
+      <img src="logo-github-org.svg" width="80" height="80" alt="">
+      <span class="label">#010409 极深</span>
+    </div>
+    <div class="bg-test light">
+      <img src="logo-github-org-light.svg" width="80" height="80" alt="">
+      <span class="label">#ffffff 白底版（浅色终端窗口）</span>
+    </div>
+    <div class="bg-test github">
+      <img src="logo-github-org.svg" width="80" height="80" alt="">
+      <span class="label">GitHub 渐变</span>
+    </div>
+    <div class="bg-test navy">
+      <img src="logo-github-org.svg" width="80" height="80" alt="">
+      <span class="label">深蓝渐变</span>
+    </div>
+  </div>
+</div>
+
+<!-- Color palette -->
+<div class="section">
+  <div class="section-title">色彩规范</div>
+  <div class="palette-row">
+    <div class="swatch"><div class="dot" style="background:#0d1117;border:1px solid #30363d;"></div><span class="hex">#0d1117</span></div>
+    <div class="swatch"><div class="dot" style="background:#161b22;border:1px solid #30363d;"></div><span class="hex">#161b22</span></div>
+    <div class="swatch"><div class="dot" style="background:#58a6ff;"></div><span class="hex">#58a6ff</span></div>
+    <div class="swatch"><div class="dot" style="background:#c9e1ff;"></div><span class="hex">#c9e1ff</span></div>
+    <div class="swatch"><div class="dot" style="background:#388bfd;"></div><span class="hex">#388bfd</span></div>
+    <div class="swatch"><div class="dot" style="background:#f85149;"></div><span class="hex">#f85149</span></div>
+    <div class="swatch"><div class="dot" style="background:#d29922;"></div><span class="hex">#d29922</span></div>
+    <div class="swatch"><div class="dot" style="background:#3fb950;"></div><span class="hex">#3fb950</span></div>
+  </div>
+</div>
+
+<!-- Design spec -->
+<div class="section">
+  <div class="section-title">设计规格</div>
+  <div style="background:var(--surface);border-radius:12px;border:1px solid var(--border);overflow:hidden;">
+    <table class="spec-table">
+      <thead>
+        <tr><th>属性</th><th>值</th><th>说明</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>canvas</td><td>512 × 512px</td><td>GitHub 推荐 512×512</td></tr>
+        <tr><td>rx</td><td>112px</td><td>圆角半径，GitHub 自动裁切为圆形</td></tr>
+        <tr><td>terminal</td><td>336 × 312px, rx=24</td><td>居中终端窗口</td></tr>
+        <tr><td>title-bar</td><td>48px 高</td><td>macOS 风格标题栏 + 分隔线</td></tr>
+        <tr><td>dots</td><td>r=9, 间距 28px</td><td>红 #f85149 · 黄 #d29922 · 绿 #3fb950</td></tr>
+        <tr><td>chevron</td><td>stroke-width: 36</td><td>渐变 #c9e1ff → #79c0ff → #388bfd</td></tr>
+        <tr><td>cursor</td><td>11 × 32px</td><td>渐变 #a5d6ff → #58a6ff</td></tr>
+        <tr><td>glow</td><td>stdDeviation=14, 45%</td><td>蓝色辉光，增加终端脉动感</td></tr>
+        <tr><td>drop-shadow</td><td>dy=8, stdDeviation=14</td><td>窗口悬浮阴影，增加纵深感</td></tr>
+        <tr><td>min-readable</td><td>32px</td><td>32px 以上可辨识 > 形状和窗口</td></tr>
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<!-- v1 vs v2 comparison -->
+<div class="section">
+  <div class="section-title">v1 → v2 对比</div>
+  <div class="comparison">
+    <div class="comp-card old">
+      <div class="comp-label">v1 · 盾形口袋</div>
+      <!-- v1 inline for comparison -->
+      <img class="comp-logo" src="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 512 512'%3E%3Crect width='512' height='512' rx='112' fill='%230d1117'/%3E%3Cpath d='M160 140 L352 140 L352 300 L256 372 L160 300 Z' stroke='%2358a6ff' stroke-width='14' fill='none' stroke-linejoin='round' opacity='0.55'/%3E%3Cpath d='M210 220 L300 256 L210 292' stroke='%2358a6ff' stroke-width='32' stroke-linecap='round' stroke-linejoin='round' fill='none'/%3E%3Crect x='320' y='252' width='10' height='28' rx='5' fill='%2358a6ff' opacity='0.85'/%3E%3C/svg%3E" alt="v1">
+      <div class="comp-desc">盾形轮廓细弱 · 角落装饰噪点多 · > 偏小<br>缺乏辨识度，像"带箭头的多边形"</div>
+    </div>
+    <div class="comp-card">
+      <div class="comp-label">v2 · 终端窗口</div>
+      <img class="comp-logo" src="logo-github-org.svg" alt="v2">
+      <div class="comp-desc">终端窗口 = 直觉识别 · 三色控件 = 个性<br>> 粗壮 + 辉光 = 脉动感 · 简洁有力</div>
+    </div>
+  </div>
+</div>
+
+<!-- Design notes -->
+<div class="section">
+  <div class="section-title">设计说明</div>
+  <div style="background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:24px;font-size:14px;line-height:1.8;color:var(--muted);">
+    <p><strong style="color:var(--fg);">深色版设计说明：</strong></p>
+    <ul style="margin:8px 0 16px 20px;">
+      <li><strong style="color:var(--fg);">终端窗口</strong>：macOS 三色控件 + 标题栏，直觉传达"终端"含义</li>
+      <li><strong style="color:var(--fg);">> 提示符</strong>：stroke-width 36，确保 32px 仍可辨识</li>
+      <li><strong style="color:var(--fg);">窗口阴影</strong>：纵深感让终端从背景浮出</li>
+      <li><strong style="color:var(--fg);">三色控件</strong>：红黄绿提供彩色锚点，黑白主调不显单调</li>
+      <li>关键元素在圆形裁切安全区（70% 半径）内</li>
+    </ul>
+    <p><strong style="color:var(--fg);">白色版设计说明（浅色终端窗口）：</strong></p>
+    <ul style="margin:8px 0 0 20px;">
+      <li><strong style="color:var(--fg);">浅色终端窗口</strong>：白色/浅灰渐变窗口体 + 浅灰标题栏，整体轻盈通透</li>
+      <li><strong style="color:var(--fg);">深蓝 > 提示符</strong>：渐变从 #388bfd → #1f6feb → #0a5dc2，在浅色背景上对比度更高</li>
+      <li><strong style="color:var(--fg);">柔和投影</strong>：opacity 0.18，灰色调阴影（非黑色），白色背景上更自然</li>
+      <li><strong style="color:var(--fg);">减弱辉光</strong>：stdDeviation 降至 10，opacity 降至 0.25，浅色终端上不需过强辉光</li>
+      <li><strong style="color:var(--fg);">边框加粗</strong>：stroke-width 2.5（深色版为 2），浅色窗口边界更清晰</li>
+      <li><strong style="color:var(--fg);">分隔线/边框</strong>：统一使用 #d0d7de，GitHub 浅色主题标准灰</li>
+      <li>适合 GitHub 浅色主题、README、文档站、社交媒体头像</li>
+    </ul>
+  </div>
+</div>
+
+<script>
+function switchVariant(variant) {
+  const darks = document.querySelectorAll('.logo-dark');
+  const lights = document.querySelectorAll('.logo-light');
+  const btns = document.querySelectorAll('.variant-btn');
+
+  btns.forEach(b => b.classList.remove('active'));
+  if (variant === 'dark') {
+    btns[0].classList.add('active');
+    darks.forEach(el => el.classList.add('visible'));
+    lights.forEach(el => el.classList.remove('visible'));
+  } else {
+    btns[1].classList.add('active');
+    darks.forEach(el => el.classList.remove('visible'));
+    lights.forEach(el => el.classList.add('visible'));
+  }
+}
+</script>
+
+</body>
+</html>
