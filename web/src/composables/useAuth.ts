@@ -21,6 +21,8 @@ function getRelayOrigin(): string {
   const relayWs = localStorage.getItem('pocketctl_relay_url') || (window as any).__RELAY_WS__ || ''
   try {
     const url = new URL(relayWs)
+    // If relay URL is localhost, prefer relative paths (works behind nginx proxy)
+    if (url.hostname === 'localhost' || url.hostname === '127.0.0.1') return ''
     return url.origin.replace(/^ws/, 'http')
   } catch {
     return ''
@@ -29,9 +31,10 @@ function getRelayOrigin(): string {
 
 async function apiRequest(path: string, body: any): Promise<{ ok: boolean; data: any }> {
   const origin = getRelayOrigin()
-  if (!origin) return { ok: false, data: { error: 'Relay 地址未配置' } }
+  // Use relative URL when no external relay configured (nginx proxies /api/ to relay)
+  const url = origin ? `${origin}${path}` : path
   try {
-    const res = await fetch(`${origin}${path}`, {
+    const res = await fetch(url, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
