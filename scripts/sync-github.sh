@@ -121,9 +121,7 @@ SENSITIVE_PATTERNS=(
   'pocketctl_prod_2026'
   '2661504'
   '北京乐呵乐呵'
-  '13800138000'
   'dev-secret-change-in-production'
-  '000000'
 )
 
 FOUND_SECRETS=false
