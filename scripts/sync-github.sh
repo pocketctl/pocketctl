@@ -103,6 +103,15 @@ for pattern in "${EXCLUDE_PATTERNS[@]}"; do
   find "$SYNC_DIR" -type f -name "$pattern" -delete 2>/dev/null || true
 done
 
+# Strip landing page content from README (landing is not open-source)
+if [[ -f "${SYNC_DIR}/README.md" ]]; then
+  sed -i '' '/🏠 \*\*Landing Page\*\*/d' "${SYNC_DIR}/README.md" 2>/dev/null || sed -i '/🏠 \*\*Landing Page\*\*/d' "${SYNC_DIR}/README.md"
+  sed -i '' '/\*\*Landing\*\*/d' "${SYNC_DIR}/README.md" 2>/dev/null || sed -i '/\*\*Landing\*\*/d' "${SYNC_DIR}/README.md"
+  sed -i '' '/├── landing\//,/nginx-docker\.conf/d' "${SYNC_DIR}/README.md" 2>/dev/null || sed -i '/├── landing\//,/nginx-docker\.conf/d' "${SYNC_DIR}/README.md"
+  sed -i '' '/landing\//d' "${SYNC_DIR}/README.md" 2>/dev/null || sed -i '/landing\//d' "${SYNC_DIR}/README.md"
+  info "  stripped landing page content from README.md"
+fi
+
 # ---------- 2. Sensitive information scan ----------
 info "Scanning for sensitive information..."
 
