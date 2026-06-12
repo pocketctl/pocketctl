@@ -7,7 +7,7 @@ import SessionDetail from './views/SessionDetail.vue'
 import SettingsView from './views/SettingsView.vue'
 
 const router = createRouter({
-  history: createWebHistory(),
+  history: createWebHistory('/app/'),
   routes: [
     { path: '/login', component: LoginView },
     { path: '/', component: DashboardView, meta: { requiresAuth: true } },

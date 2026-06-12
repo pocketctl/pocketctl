@@ -107,6 +107,16 @@ export async function initDB(pool: pg.Pool): Promise<void> {
       deleted_at TIMESTAMPTZ DEFAULT NOW()
     )
   `);
+
+  // iOS waitlist table for landing page signups
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS ios_waitlist (
+      id SERIAL PRIMARY KEY,
+      email VARCHAR(255) NOT NULL,
+      created_at TIMESTAMPTZ DEFAULT NOW()
+    )
+  `);
+  await pool.query(`CREATE UNIQUE INDEX IF NOT EXISTS idx_ios_waitlist_email ON ios_waitlist(email)`);
 }
 
 export async function upsertDaemon(pool: pg.Pool, daemonId: string, hostname: string, agents: string[]): Promise<void> {
@@ -382,6 +392,24 @@ export async function createUserByPhone(pool: pg.Pool, phone: string, displayNam
     [phone, displayName || null]
   );
   return result.rows[0];
+}
+
+// --- iOS Waitlist ---
+
+export async function addToIOSWaitlist(pool: pg.Pool, email: string): Promise<{ inserted: boolean; message: string }> {
+  const normalizedEmail = email.trim().toLowerCase();
+  if (!normalizedEmail.includes('@')) {
+    return { inserted: false, message: '无效的邮箱地址' };
+  }
+  try {
+    await pool.query(
+      `INSERT INTO ios_waitlist (email) VALUES ($1) ON CONFLICT (email) DO NOTHING`,
+      [normalizedEmail]
+    );
+    return { inserted: true, message: '已加入等候列表' };
+  } catch {
+    return { inserted: false, message: '提交失败，请稍后再试' };
+  }
 }
 
 export function parseDBUrl(url: string): DBConfig {

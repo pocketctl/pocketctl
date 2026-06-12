@@ -38,5 +38,15 @@ services:
     ports:
       - "3000:3000"
 
+  landing:
+    build:
+      context: ./landing
+      dockerfile: Dockerfile
+    ports:
+      - "80:80"
+    depends_on:
+      - web
+      - relay
+
 volumes:
   pgdata:

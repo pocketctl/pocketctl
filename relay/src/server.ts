@@ -1,7 +1,7 @@
 import Fastify from 'fastify';
 import fastifyWebsocket from '@fastify/websocket';
 import fastifyCors from '@fastify/cors';
-import { createPool, initDB, parseDBUrl, createUser, getUserByEmail, getUserById, getUserByPhone, createUserByPhone, registerDevice, removeDevice, cleanStaleTombstones, upsertDaemonAlias, updateDisplayName, updateEmail } from './db.js';
+import { createPool, initDB, parseDBUrl, createUser, getUserByEmail, getUserById, getUserByPhone, createUserByPhone, registerDevice, removeDevice, cleanStaleTombstones, upsertDaemonAlias, updateDisplayName, updateEmail, addToIOSWaitlist } from './db.js';
 import { Router } from './router.js';
 import { hashPassword, verifyPassword, signAccessToken, signRefreshToken, verifyAccessToken, verifyRefreshToken } from './auth.js';
 import { notifyUser, sessionStatusPush, daemonOfflinePush } from './push.js';
@@ -375,6 +375,72 @@ async function main() {
       }
       throw err;
     }
+  });
+
+  // ---- iOS Waitlist (with anti-abuse) ----
+
+  // Rate limiter: per-IP (max 5 per hour) + global (max 50 per hour)
+  const waitlistIPLimiter = new Map<string, { count: number; resetAt: number }>();
+  const WAITLIST_IP_MAX = 5;
+  const WAITLIST_IP_WINDOW = 60 * 60 * 1000; // 1 hour
+  let waitlistGlobalCount = 0;
+  let waitlistGlobalResetAt = Date.now() + 60 * 60 * 1000;
+
+  app.post('/api/waitlist/ios', async (req, reply) => {
+    const clientIp = req.ip || req.socket.remoteAddress || 'unknown';
+    const now = Date.now();
+
+    // Global rate limit
+    if (now > waitlistGlobalResetAt) {
+      waitlistGlobalCount = 0;
+      waitlistGlobalResetAt = now + 60 * 60 * 1000;
+    }
+    if (waitlistGlobalCount >= 50) {
+      reply.code(429); return { error: '提交过于频繁，请稍后再试' };
+    }
+
+    // Per-IP rate limit
+    let entry = waitlistIPLimiter.get(clientIp);
+    if (!entry || now > entry.resetAt) {
+      entry = { count: 0, resetAt: now + WAITLIST_IP_WINDOW };
+      waitlistIPLimiter.set(clientIp, entry);
+    }
+    if (entry.count >= WAITLIST_IP_MAX) {
+      reply.code(429); return { error: '提交次数过多，请 1 小时后再试' };
+    }
+
+    // Periodic cleanup of expired entries
+    if (Math.random() < 0.05) {
+      for (const [key, val] of waitlistIPLimiter) {
+        if (now > val.resetAt) waitlistIPLimiter.delete(key);
+      }
+    }
+
+    const { email } = req.body as any;
+    if (!email) {
+      reply.code(400); return { error: 'email is required' };
+    }
+
+    // Email format validation
+    const normalizedEmail = email.trim().toLowerCase();
+    if (!normalizedEmail.includes('@') || normalizedEmail.length > 254) {
+      reply.code(400); return { error: '无效的邮箱地址' };
+    }
+    const emailParts = normalizedEmail.split('@');
+    if (emailParts.length !== 2 || !emailParts[0] || !emailParts[1].includes('.')) {
+      reply.code(400); return { error: '无效的邮箱地址' };
+    }
+
+    const result = await addToIOSWaitlist(pool, email);
+    if (!result.inserted) {
+      reply.code(400); return { error: result.message };
+    }
+
+    // Increment counters on successful submission
+    entry.count++;
+    waitlistGlobalCount++;
+
+    return { success: true, message: result.message };
   });
 
   // ---- Health check ----

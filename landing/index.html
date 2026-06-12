@@ -1,0 +1,502 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="dark">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="description" content="pocketctl — 远程掌控你的 AI 编程助手。从手机上实时监控和管理 Claude Code、Codex 等 AI 编程 Agent。">
+<link rel="icon" type="image/svg+xml" href="./assets/logo-github-org.svg">
+<title>pocketctl — 远程掌控你的 AI 编程助手</title>
+<link rel="stylesheet" href="./css/style.css">
+</head>
+<body>
+
+<!-- ============================================
+     NAVIGATION
+     ============================================ -->
+<nav class="nav">
+  <a href="#" class="nav-brand">
+    <img class="theme-logo-dark" src="./assets/logo-github-org.svg" width="32" height="32" alt="pocketctl">
+    <img class="theme-logo-light" src="./assets/logo-github-org-light.svg" width="32" height="32" alt="pocketctl">
+    <span>pocketctl</span>
+  </a>
+  <ul class="nav-links" id="navLinks">
+    <li><a href="#features" data-i18n="nav.features">功能</a></li>
+    <li><a href="#architecture" data-i18n="nav.architecture">架构</a></li>
+    <li><a href="#how-it-works" data-i18n="nav.how">使用方式</a></li>
+    <li><a href="#platforms" data-i18n="nav.platforms">平台</a></li>
+    <li><a href="#pricing" data-i18n="nav.pricing">定价</a></li>
+    <li><a href="/app/login" class="nav-cta" data-i18n="nav.webapp">🌐 打开 Web 客户端</a></li>
+  </ul>
+  <div style="display:flex;align-items:center;gap:8px;">
+    <div class="nav-controls">
+      <button class="nav-btn" id="langToggle" title="Switch Language" aria-label="Switch language">EN</button>
+      <button class="nav-btn" id="themeToggle" title="Toggle theme" aria-label="Toggle theme">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <circle cx="12" cy="12" r="5"/><path d="M12 1v2M12 21v2M4.22 4.22l1.42 1.42M18.36 18.36l1.42 1.42M1 12h2M21 12h2M4.22 19.78l1.42-1.42M18.36 5.64l1.42-1.42"/>
+        </svg>
+      </button>
+    </div>
+    <button class="nav-btn menu-toggle" id="menuToggle" aria-label="Menu">
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="18" x2="21" y2="18"/></svg>
+    </button>
+  </div>
+</nav>
+
+<!-- ============================================
+     HERO
+     ============================================ -->
+<section class="hero" id="hero">
+  <div class="container">
+    <div class="hero-badge">
+      <span class="dot"></span>
+      <span data-i18n="hero.badge">现已开放内测</span>
+    </div>
+    <h1>
+      <span data-i18n="hero.title1">你的</span>
+      <span class="gradient-text" data-i18n="hero.titleAccent">AI 编程助手</span><br>
+      <span data-i18n="hero.title2">尽在掌中</span>
+    </h1>
+    <p class="hero-desc" data-i18n="hero.desc">
+      pocketctl 让你从手机上远程监控和管理 Claude Code、Codex 等 AI 编程 Agent。实时查看进度、发送指令、随时掌控——无论你身在何处。
+    </p>
+    <div class="hero-actions">
+      <a href="javascript:void(0)" class="btn-hero btn-hero-primary ios-download-btn" data-i18n="hero.cta1">📱 下载 iOS App</a>
+      <a href="/app/login" class="btn-hero btn-hero-secondary" data-i18n="hero.cta2">🌐 打开 Web 客户端</a>
+    </div>
+    <div class="hero-showcase">
+      <!-- iPhone mockup -->
+      <div class="device-mockup">
+        <div class="dynamic-island"></div>
+        <div class="screen">
+          <div style="font-size:11px;font-weight:600;margin-bottom:6px;" data-i18n="mockup.daemons">我的主机</div>
+          <div class="mini-card">
+            <div class="mc-top">
+              <span class="mc-dot"></span>
+              <span class="mc-name">MacBook-Pro</span>
+              <span style="margin-left:auto;font-size:9px;color:var(--success);" data-i18n="mockup.online">在线</span>
+            </div>
+            <div class="mc-sub">Claude Code, Codex · 3 个活跃会话</div>
+          </div>
+          <div class="mini-card">
+            <div class="mc-top">
+              <span class="mc-dot" style="background:var(--fg-tertiary);animation:none;"></span>
+              <span class="mc-name">Dev-Server</span>
+              <span style="margin-left:auto;font-size:9px;color:var(--fg-tertiary);" data-i18n="mockup.offline">离线</span>
+            </div>
+            <div class="mc-sub">Claude Code · 0 个会话</div>
+          </div>
+          <div style="margin-top:auto;padding:8px;background:var(--surface);border-radius:10px;border:1px solid var(--border);display:flex;gap:6px;">
+            <div style="flex:1;background:var(--bg);border-radius:6px;height:24px;display:flex;align-items:center;padding:0 8px;">
+              <span style="font-size:9px;color:var(--fg-tertiary);" data-i18n="mockup.input">发送指令...</span>
+            </div>
+            <div style="width:24px;height:24px;border-radius:50%;background:var(--accent);display:flex;align-items:center;justify-content:center;">
+              <svg width="10" height="10" viewBox="0 0 24 24" fill="var(--bg)"><path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z"/></svg>
+            </div>
+          </div>
+        </div>
+        <div class="home-bar"></div>
+      </div>
+
+      <!-- Web dashboard preview -->
+      <div class="web-preview">
+        <div class="wp-topbar">
+          <span class="wp-dot r"></span><span class="wp-dot y"></span><span class="wp-dot g"></span>
+          <span class="wp-addr">app.pocketctl.com / dashboard</span>
+        </div>
+        <div class="wp-content">
+          <div class="wp-sidebar">
+            <div class="wp-sidebar-item ac"></div>
+            <div class="wp-sidebar-item"></div>
+            <div class="wp-sidebar-item"></div>
+            <div class="wp-sidebar-item"></div>
+            <div style="margin-top:auto;">
+              <div class="wp-sidebar-item" style="height:14px;border-radius:50%;width:14px;"></div>
+            </div>
+          </div>
+          <div class="wp-main">
+            <div style="display:flex;gap:8px;">
+              <div class="wp-card" style="flex:1;">
+                <div class="wp-line sm"></div>
+                <div class="wp-line accent"></div>
+              </div>
+              <div class="wp-card" style="flex:1;opacity:0.6;">
+                <div class="wp-line sm"></div>
+                <div class="wp-line"></div>
+              </div>
+            </div>
+            <div class="wp-card" style="flex:1;">
+              <div class="wp-line sm"></div>
+              <div class="wp-line"></div>
+              <div class="wp-line" style="width:60%;"></div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ============================================
+     TRUST BAR
+     ============================================ -->
+<section class="trust-bar">
+  <div class="container">
+    <p class="trust-text" data-i18n="trust.text">兼容主流 AI 编程助手</p>
+    <div class="trust-logos">
+      <span class="trust-logo">Claude Code</span>
+      <span class="trust-logo">Codex</span>
+      <span class="trust-logo">GitHub Copilot</span>
+      <span class="trust-logo">Cursor</span>
+      <span class="trust-logo">Aider</span>
+    </div>
+  </div>
+</section>
+
+<!-- ============================================
+     FEATURES
+     ============================================ -->
+<section class="features section-pad" id="features">
+  <div class="container">
+    <div class="section-label" data-i18n="features.label">功能特性</div>
+    <div class="section-title" data-i18n="features.title">为开发者打造的控制中心</div>
+    <p class="section-desc" data-i18n="features.desc">实时监控、即时干预，让 AI Agent 在你掌控之中运行</p>
+    <div class="features-grid">
+      <div class="feature-card reveal">
+        <div class="feature-icon" style="background:var(--accent-muted);">📡</div>
+        <h3 data-i18n="features.f1.title">实时会话监控</h3>
+        <p data-i18n="features.f1.desc">查看 AI Agent 的每一步操作——代码读写、命令执行、文件搜索、工具调用。流式消息实时同步，不错过任何细节。</p>
+      </div>
+      <div class="feature-card reveal">
+        <div class="feature-icon" style="background:var(--success-bg);">💬</div>
+        <h3 data-i18n="features.f2.title">即时消息交互</h3>
+        <p data-i18n="features.f2.desc">随时向 Agent 发送新指令或回复。无需回到电脑前，就能在手机上指导 AI 的下一步行动。</p>
+      </div>
+      <div class="feature-card reveal">
+        <div class="feature-icon" style="background:var(--warning-bg);">🔔</div>
+        <h3 data-i18n="features.f3.title">智能推送通知</h3>
+        <p data-i18n="features.f3.desc">Agent 完成任务、等待审批或遇到错误时，立即收到推送。自定义通知规则，只接收你关心的内容。</p>
+      </div>
+      <div class="feature-card reveal">
+        <div class="feature-icon" style="background:var(--sub-agent-bg);">🖥️</div>
+        <h3 data-i18n="features.f4.title">多主机统一管理</h3>
+        <p data-i18n="features.f4.desc">注册多台开发机，统一管理。工作电脑、CI 服务器、远程工作站——一个 App 全部掌握。支持自定义别名。</p>
+      </div>
+      <div class="feature-card reveal">
+        <div class="feature-icon" style="background:var(--accent-muted);">🤖</div>
+        <h3 data-i18n="features.f5.title">多 Agent 支持</h3>
+        <p data-i18n="features.f5.desc">兼容 Claude Code、Codex 等主流 AI 编程助手。统一的监控界面，无缝切换不同类型的 Agent 会话。</p>
+      </div>
+      <div class="feature-card reveal">
+        <div class="feature-icon" style="background:var(--success-bg);">🔒</div>
+        <h3 data-i18n="features.f6.title">端到端安全</h3>
+        <p data-i18n="features.f6.desc">端到端加密通信，Agent 仅在本地执行。你的代码永远不会离开你的机器。支持手机号/邮箱双重验证。</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ============================================
+     ARCHITECTURE
+     ============================================ -->
+<section class="arch-section section-pad" id="architecture">
+  <div class="container">
+    <div class="section-label" data-i18n="arch.label">系统架构</div>
+    <div class="section-title" data-i18n="arch.title">你的手机如何控制 AI Agent</div>
+    <p class="section-desc" data-i18n="arch.desc">轻量级 Daemon 运行在你的开发机上，通过加密通道与手机 App 实时通信</p>
+    <div class="arch-flow">
+      <div class="arch-node reveal">
+        <div class="an-icon" style="background:var(--accent-muted);">📱</div>
+        <h4 data-i18n="arch.node1.title">pocketctl App</h4>
+        <p class="an-sub" data-i18n="arch.node1.desc">iOS / Web 客户端<br>实时查看和控制</p>
+      </div>
+      <div class="arch-arrow">→</div>
+      <div class="arch-node reveal">
+        <div class="an-icon" style="background:var(--success-bg);">☁️</div>
+        <h4 data-i18n="arch.node2.title">Relay Server</h4>
+        <p class="an-sub" data-i18n="arch.node2.desc">加密消息中转<br>NAT 穿透</p>
+      </div>
+      <div class="arch-arrow">→</div>
+      <div class="arch-node reveal">
+        <div class="an-icon" style="background:var(--warning-bg);">💻</div>
+        <h4 data-i18n="arch.node3.title">pocketctl Daemon</h4>
+        <p class="an-sub" data-i18n="arch.node3.desc">运行在你的主机上<br>管理 Agent 生命周期</p>
+      </div>
+      <div class="arch-arrow">→</div>
+      <div class="arch-node reveal">
+        <div class="an-icon" style="background:var(--sub-agent-bg);">🧠</div>
+        <h4 data-i18n="arch.node4.title">AI Agent</h4>
+        <p class="an-sub" data-i18n="arch.node4.desc">Claude Code / Codex<br>本地执行代码任务</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ============================================
+     HOW IT WORKS
+     ============================================ -->
+<section class="how-it-works section-pad" id="how-it-works">
+  <div class="container">
+    <div class="section-label" data-i18n="how.label">快速开始</div>
+    <div class="section-title" data-i18n="how.title">三分钟完成配置</div>
+    <p class="section-desc" data-i18n="how.desc">无需复杂设置，几行命令即可将你的开发机接入 pocketctl</p>
+    <div class="steps-grid">
+      <div class="step-card reveal">
+        <div class="step-num">1</div>
+        <h3 data-i18n="how.step1.title">安装 Daemon</h3>
+        <p data-i18n="how.step1.desc">在你的开发机上运行一行命令，自动安装并配置 pocketctl Daemon</p>
+        <div class="code-snippet"><span class="cmd">curl</span> -fsSL https://pocketctl.com/install.sh | <span class="cmd">bash</span></div>
+      </div>
+      <div class="step-card reveal">
+        <div class="step-num">2</div>
+        <h3 data-i18n="how.step2.title">登录并启动</h3>
+        <p data-i18n="how.step2.desc">用手机号或邮箱注册账号，关联你的设备。Daemon 会在后台自动运行。</p>
+        <div class="code-snippet"><span class="cmd">pocketctl</span> login
+        <span class="cmd">pocketctl</span> daemon start</div>
+      </div>
+      <div class="step-card reveal">
+        <div class="step-num">3</div>
+        <h3 data-i18n="how.step3.title">随时掌控</h3>
+        <p data-i18n="how.step3.desc">打开手机 App 或 Web 客户端，实时查看你的 AI Agent 工作状态，随时发送指令。</p>
+        <div class="code-snippet"><span class="comment"># 在你的手机上</span>
+        打开 pocketctl → 选择主机 → 查看会话 ✓</div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ============================================
+     PLATFORMS
+     ============================================ -->
+<section class="section-pad" id="platforms" style="background:var(--gradient-section);">
+  <div class="container">
+    <div class="section-label" data-i18n="platforms.label">多平台支持</div>
+    <div class="section-title" data-i18n="platforms.title">选择你的使用方式</div>
+    <p class="section-desc" data-i18n="platforms.desc">iOS 原生 App 与 Web 客户端并行开发，数据实时同步</p>
+    <div class="platform-grid">
+      <div class="platform-card reveal">
+        <div class="pc-header">
+          <div class="pc-icon" style="background:var(--accent-muted);">📱</div>
+          <div>
+            <h3>iOS App</h3>
+            <span class="pc-badge ios">原生体验</span>
+          </div>
+        </div>
+        <p class="pc-desc" data-i18n="platforms.ios.desc">原生 iOS 应用，支持 Dynamic Island、推送通知、桌面 Widget。随时随地，一手掌控。</p>
+        <ul class="pc-features">
+          <li data-i18n="ios.feature1">实时推送通知，Agent 状态变化即时知晓</li>
+          <li data-i18n="ios.feature2">桌面 Widget 小组件，主屏速览主机状态</li>
+          <li data-i18n="ios.feature3">Dynamic Island 灵动岛显示活跃会话</li>
+          <li data-i18n="ios.feature4">Face ID / Touch ID 安全解锁</li>
+        </ul>
+      </div>
+      <a href="/app/login" class="platform-card reveal">
+        <div class="pc-header">
+          <div class="pc-icon" style="background:var(--success-bg);">🌐</div>
+          <div>
+            <h3>Web 客户端</h3>
+            <span class="pc-badge web">即时访问</span>
+          </div>
+        </div>
+        <p class="pc-desc" data-i18n="platforms.web.desc">浏览器即开即用，无需安装。深色/浅色双主题，大屏多面板布局，适合桌面端深度使用。</p>
+        <ul class="pc-features">
+          <li data-i18n="web.feature1">深色 / 浅色双主题，自动跟随系统</li>
+          <li data-i18n="web.feature2">三栏布局：侧栏 + 列表 + 详情</li>
+          <li data-i18n="web.feature3">代码高亮 + 工具调用展开</li>
+          <li data-i18n="web.feature4">响应式适配桌面 / 平板</li>
+        </ul>
+        <div style="margin-top:8px;color:var(--accent);font-weight:600;font-size:14px;display:flex;align-items:center;gap:4px;">
+          <span data-i18n="platforms.web.cta">立即体验 Web 客户端</span>
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M5 12h14M12 5l7 7-7 7"/></svg>
+        </div>
+      </a>
+    </div>
+  </div>
+</section>
+
+<!-- ============================================
+     PRICING
+     ============================================ -->
+<section class="pricing section-pad" id="pricing">
+  <div class="container">
+    <div class="section-label" data-i18n="pricing.label">定价方案</div>
+    <div class="section-title" data-i18n="pricing.title">适合每个开发者</div>
+    <p class="section-desc" data-i18n="pricing.desc">从免费开始，按需升级</p>
+    <div class="pricing-grid">
+      <div class="price-card reveal">
+        <h3 data-i18n="pricing.free.name">免费版</h3>
+        <div class="price">¥0 <span>/ 月</span></div>
+        <p class="price-desc" data-i18n="pricing.free.desc">个人开发者和小项目</p>
+        <ul>
+          <li><span class="check">✓</span> <span data-i18n="pricing.free.f1">1 台主机</span></li>
+          <li><span class="check">✓</span> <span data-i18n="pricing.free.f2">基础会话监控</span></li>
+          <li><span class="check">✓</span> <span data-i18n="pricing.free.f3">消息交互</span></li>
+          <li><span class="check">✓</span> <span data-i18n="pricing.free.f4">单个 Agent 类型</span></li>
+          <li><span class="cross">✕</span> <span data-i18n="pricing.free.f5">推送通知</span></li>
+          <li><span class="cross">✕</span> <span data-i18n="pricing.free.f6">Web 客户端</span></li>
+        </ul>
+        <a href="#" class="price-btn secondary" data-i18n="pricing.free.cta">免费开始</a>
+      </div>
+      <div class="price-card featured reveal">
+        <span class="popular-tag" data-i18n="pricing.pro.popular">推荐</span>
+        <h3 data-i18n="pricing.pro.name">专业版</h3>
+        <div class="price">¥48 <span>/ 月</span></div>
+        <p class="price-desc" data-i18n="pricing.pro.desc">专业开发者和团队</p>
+        <ul>
+          <li><span class="check">✓</span> <span data-i18n="pricing.pro.f1">无限主机</span></li>
+          <li><span class="check">✓</span> <span data-i18n="pricing.pro.f2">完整会话监控</span></li>
+          <li><span class="check">✓</span> <span data-i18n="pricing.pro.f3">消息交互 + 文件传输</span></li>
+          <li><span class="check">✓</span> <span data-i18n="pricing.pro.f4">全部 Agent 类型</span></li>
+          <li><span class="check">✓</span> <span data-i18n="pricing.pro.f5">即时推送通知</span></li>
+          <li><span class="check">✓</span> <span data-i18n="pricing.pro.f6">Web 客户端全功能</span></li>
+        </ul>
+        <a href="#" class="price-btn primary" data-i18n="pricing.pro.cta">尽情期待</a>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ============================================
+     FAQ
+     ============================================ -->
+<section class="section-pad" id="faq" style="background:var(--gradient-section);">
+  <div class="container">
+    <div class="section-label" data-i18n="faq.label">常见问题</div>
+    <div class="section-title" data-i18n="faq.title">你可能还想知道</div>
+    <div class="faq-list">
+      <div class="faq-item reveal">
+        <div class="faq-q">
+          <h4 data-i18n="faq.q1">pocketctl 如何保证我的代码安全？</h4>
+          <span class="faq-chevron">▾</span>
+        </div>
+        <div class="faq-a" data-i18n="faq.a1">
+          pocketctl 采用端到端加密通信。AI Agent 的代码读写、命令执行全部在你的本地机器上完成，不会上传到任何第三方服务器。Relay Server 仅做加密消息中转，无法解密你的会话内容。你的代码永远不会离开你的机器。
+        </div>
+      </div>
+      <div class="faq-item reveal">
+        <div class="faq-q">
+          <h4 data-i18n="faq.q2">支持哪些 AI 编程助手？</h4>
+          <span class="faq-chevron">▾</span>
+        </div>
+        <div class="faq-a" data-i18n="faq.a2">
+          目前支持 Claude Code、Codex、GitHub Copilot CLI 和 Cursor。我们持续扩展 Agent 兼容列表——如果你使用的工具尚未支持，欢迎在 GitHub 提交 Issue 或通过 Web 客户端反馈。
+        </div>
+      </div>
+      <div class="faq-item reveal">
+        <div class="faq-q">
+          <h4 data-i18n="faq.q3">需要在我的开发机上一直运行 Daemon 吗？</h4>
+          <span class="faq-chevron">▾</span>
+        </div>
+        <div class="faq-a" data-i18n="faq.a3">
+          是的，Daemon 需要在开发机上保持运行才能接收来自手机的指令。它占用的系统资源极少（通常 < 50MB 内存），不会影响你的正常工作。你可以在不需要时通过 <code>pocketctl daemon stop</code> 随时停止。
+        </div>
+      </div>
+      <div class="faq-item reveal">
+        <div class="faq-q">
+          <h4 data-i18n="faq.q4">iOS App 和 Web 客户端数据互通吗？</h4>
+          <span class="faq-chevron">▾</span>
+        </div>
+        <div class="faq-a" data-i18n="faq.a4">
+          完全互通。你的主机列表、会话记录、消息历史在同一账号下实时同步。在手机上发送的指令，在 Web 端也能看到完整的对话上下文。
+        </div>
+      </div>
+      <div class="faq-item reveal">
+        <div class="faq-q">
+          <h4 data-i18n="faq.q5">免费版有什么限制？</h4>
+          <span class="faq-chevron">▾</span>
+        </div>
+        <div class="faq-a" data-i18n="faq.a5">
+          免费版支持 1 台主机、基础会话监控、消息交互和单一 Agent 类型。如果需要管理多台主机、接收推送通知或使用 Web 客户端，可以升级到专业版（¥48/月）。
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ============================================
+     CTA
+     ============================================ -->
+<section class="cta-section section-pad">
+  <div class="container">
+    <div class="cta-card reveal">
+      <h2 data-i18n="cta.title">随时掌控你的 AI Agent</h2>
+      <p data-i18n="cta.desc">不再守在电脑前。pocketctl 让你的开发机随身携带——在咖啡厅、在地铁上、在任何地方。</p>
+      <div class="cta-actions">
+        <a href="#" class="btn-hero btn-hero-primary" data-i18n="cta.btn1">📱 下载 iOS App</a>
+        <a href="/app/login" class="btn-hero btn-hero-secondary" data-i18n="cta.btn2">🌐 打开 Web 客户端</a>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ============================================
+     FOOTER
+     ============================================ -->
+<footer class="footer">
+  <div class="container">
+    <div class="footer-grid">
+      <div class="footer-brand-col">
+        <div class="brand">
+          <img class="theme-logo-dark" src="./assets/logo-github-org.svg" width="24" height="24" alt="pocketctl">
+          <img class="theme-logo-light" src="./assets/logo-github-org-light.svg" width="24" height="24" alt="pocketctl">
+          <span>pocketctl</span>
+        </div>
+        <p data-i18n="footer.desc">远程掌控你的 AI 编程助手。iOS App + Web 客户端，实时监控、即时干预。</p>
+      </div>
+      <div class="footer-col">
+        <h5 data-i18n="footer.product">产品</h5>
+        <ul>
+          <li><a href="#features" data-i18n="footer.features">功能特性</a></li>
+          <li><a href="#pricing" data-i18n="footer.pricing">定价方案</a></li>
+          <li><a href="#platforms" data-i18n="footer.platforms">平台支持</a></li>
+          <li><a href="/app/login" data-i18n="footer.webapp">Web 客户端</a></li>
+        </ul>
+      </div>
+      <div class="footer-col">
+        <h5 data-i18n="footer.resources">资源</h5>
+        <ul>
+          <li><a href="#" data-i18n="footer.docs">使用文档</a></li>
+          <li><a href="#" data-i18n="footer.api">API 参考</a></li>
+          <li><a href="#" data-i18n="footer.github">GitHub</a></li>
+          <li><a href="#" data-i18n="footer.changelog">更新日志</a></li>
+        </ul>
+      </div>
+      <div class="footer-col">
+        <h5 data-i18n="footer.legal">法律</h5>
+        <ul>
+          <li><a href="#" data-i18n="footer.privacy">隐私政策</a></li>
+          <li><a href="#" data-i18n="footer.terms">用户协议</a></li>
+          <li><a href="#" data-i18n="footer.contact">联系我们</a></li>
+        </ul>
+      </div>
+    </div>
+    <div class="footer-bottom">
+      <span>© 2026 pocketctl</span>
+      <div class="footer-bottom-links">
+        <a href="#" data-i18n="footer.privacy">隐私政策</a>
+        <a href="#" data-i18n="footer.terms">用户协议</a>
+        <a href="#" data-i18n="footer.status">服务状态</a>
+      </div>
+    </div>
+  </div>
+</footer>
+
+<!-- ============================================
+     iOS 内测邀请弹窗
+     ============================================ -->
+<div class="modal-overlay" id="iosModal">
+  <div class="modal-card">
+    <button class="modal-close" id="iosModalClose" aria-label="关闭">✕</button>
+    <div class="modal-icon">🍎</div>
+    <h3 class="modal-title" data-i18n="modal.ios.title">iOS App 内邀测试中</h3>
+    <p class="modal-desc" data-i18n="modal.ios.desc">感谢你对 pocketctl 的关注！iOS App 目前处于内部测试阶段，预计即将开放。留下你的邮箱，我们会在第一时间通知你。</p>
+    <form class="modal-form" id="iosInviteForm">
+      <input type="email" class="modal-input" placeholder="your@email.com" required aria-label="邮箱地址" data-i18n-placeholder="modal.ios.placeholder">
+      <button type="submit" class="modal-submit" data-i18n="modal.ios.submit">📩 立即预约</button>
+    </form>
+    <p class="modal-success" id="iosInviteSuccess" data-i18n="modal.ios.success" style="display:none;">🎉 已收到！我们会在 TestFlight 开放时通知你。</p>
+  </div>
+</div>
+
+<script src="./js/main.js?v=2"></script>
+</body>
+</html>

@@ -11,6 +11,7 @@ Monitor and manage Claude Code, Codex, and OpenCode sessions from your phone or 
 - 🔔 **Push Notifications** — Get alerted when your agent needs attention
 - 🔄 **Self-updating** — One command to update to the latest version
 - 🌐 **Web Dashboard** — Full-featured web UI with dark/light theme, daemon & session management
+- 🏠 **Landing Page** — Marketing site at `pocketctl.com` with dual-theme, i18n (zh/en), iOS waitlist signup
 - 🔐 **Secure** — JWT authentication with phone SMS + email verification code
 - ⚡ **Lightweight** — Single binary, zero dependencies, runs on macOS and Linux
 
@@ -29,9 +30,10 @@ Monitor and manage Claude Code, Codex, and OpenCode sessions from your phone or 
                                                                     └───────────┘
 ```
 
+- **Landing** — Static marketing site served at root domain with theme/language switcher
 - **Daemon** — Runs on your development machine, discovers and monitors AI coding agent sessions
 - **Relay** — WebSocket server that bridges mobile clients with daemons
-- **Web** — Web dashboard for browser-based monitoring
+- **Web** — Vue 3 SPA dashboard for browser-based monitoring, served at `/app`
 
 ## Quick Start
 
@@ -134,7 +136,14 @@ pocketctl/
 │           ├── sms.ts             # Tencent Cloud SMS client
 │           ├── email.ts           # Tencent Cloud SES email client
 │           └── verification.ts    # Shared verification code store
-├── web/                           # Vue 3 web dashboard (dark/light theme)
+├── landing/                       # Static marketing site (pocketctl.com)
+│   ├── index.html                 # Landing page with dual-theme + i18n
+│   ├── css/style.css              # Design system CSS variables
+│   ├── js/main.js                 # i18n data + interactions
+│   ├── assets/                    # Logo SVGs (dark/light theme)
+│   ├── nginx.conf                 # Prod Nginx config (Landing + /app + API proxy)
+│   └── nginx-docker.conf          # Docker Nginx config
+├── web/                           # Vue 3 web dashboard (app.pocketctl.com → /app)
 │   └── src/
 │       ├── views/                 # DashboardView, SessionDetail, SettingsView, LoginView
 │       ├── composables/           # useAuth, useWebSocket, useCountdown, useRelativeTime
