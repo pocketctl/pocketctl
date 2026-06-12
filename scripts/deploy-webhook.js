@@ -38,10 +38,28 @@ function deploy(branch) {
     execSync(`cd ${REPO_DIR} && git pull origin ${branch}`, { encoding: 'utf8', timeout: 30000 });
 
     // 2. 构建 Relay
-    log('npm ci + build...');
+    log('npm ci + build relay...');
     execSync(`cd ${REPO_DIR}/relay && npm ci 2>/dev/null && npm run build && npm prune --production 2>/dev/null`, { encoding: 'utf8', timeout: 120000 });
 
-    // 3. 构建 Go Daemon
+    // 3. 构建 Web 客户端 (base: /app/)
+    log('npm build web...');
+    try {
+      execSync(`cd ${REPO_DIR}/web && npm ci 2>/dev/null && npm run build`, { encoding: 'utf8', timeout: 120000 });
+    } catch (e) {
+      log(`Web 构建失败: ${e.message}`);
+    }
+
+    // 4. 更新 Nginx 配置（从 repo 模板同步，保留线上路由）
+    if (fs.existsSync(`${REPO_DIR}/landing/nginx-online.conf`)) {
+      log('update nginx config...');
+      try {
+        execSync(`cp ${REPO_DIR}/landing/nginx-online.conf /etc/nginx/conf.d/pocketctl.conf && nginx -t && nginx -s reload`, { encoding: 'utf8', timeout: 10000 });
+      } catch (e) {
+        log(`Nginx 配置更新失败: ${e.message}`);
+      }
+    }
+
+    // 5. 构建 Go Daemon
     log('go build daemon...');
     try {
       execSync(`which go && cd ${REPO_DIR} && go build -o /usr/local/bin/pocketctl ./cmd/pocketctl/`, { encoding: 'utf8', timeout: 60000 });
@@ -49,11 +67,11 @@ function deploy(branch) {
       log('Go 未安装，跳过 daemon 构建');
     }
 
-    // 4. 重启 Relay 服务
+    // 6. 重启 Relay 服务（自动建表）
     log('restart relay...');
     execSync('systemctl restart pocketctl-relay', { encoding: 'utf8', timeout: 10000 });
 
-    // 5. 验证
+    // 7. 验证
     setTimeout(() => {
       try {
         const health = execSync('curl -s http://localhost/health', { encoding: 'utf8', timeout: 5000 });
