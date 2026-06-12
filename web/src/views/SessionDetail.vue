@@ -66,11 +66,12 @@
         <!-- Messages -->
         <template v-for="msg in messages" :key="msg.id">
           <!-- User message -->
-          <div v-if="msg.role === 'user'" class="msg msg-user">{{ msg.content }}</div>
+          <div v-if="msg.role === 'user'" class="msg msg-user">{{ cleanContent(msg.content) }}</div>
 
           <!-- Agent text message -->
           <div v-else-if="msg.type === 'agent_text'" :class="['msg msg-agent', { streaming: msg.streaming }]">
-            {{ msg.content }}<span v-if="msg.streaming" class="blink-cursor"></span>
+            <MarkdownRenderer :content="cleanContent(msg.content)" />
+            <span v-if="msg.streaming" class="blink-cursor"></span>
           </div>
 
           <!-- Tool call card -->
@@ -123,6 +124,7 @@ import { ref, computed, onMounted, nextTick, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useWebSocket } from '../composables/useWebSocket'
 import { formatRelativeTime } from '../composables/useRelativeTime'
+import MarkdownRenderer from '../components/MarkdownRenderer.vue'
 
 const route = useRoute()
 const router = useRouter()
@@ -186,20 +188,29 @@ function formatTime(ts: string): string {
   return d.getHours().toString().padStart(2, '0') + ':' + d.getMinutes().toString().padStart(2, '0')
 }
 
+function cleanContent(text: string): string {
+  if (!text) return ''
+  return text
+    .replace(/<command-name>.*?<\/command-name>\s*/gs, '')
+    .replace(/<command-message>.*?<\/command-message>\s*/gs, '')
+    .replace(/<command-args>.*?<\/command-args>\s*/gs, '')
+    .replace(/<local-command-stdout>(.*?)<\/local-command-stdout>/gs, '$1')
+    .replace(/<local-command-stderr>(.*?)<\/local-command-stderr>/gs, '$1')
+    .replace(/<[^>]+>/g, '')
+    .trim()
+}
+
 function toolIcon(tool: string): string {
   const icons: Record<string, string> = { Read: '📖', Write: '✏️', Bash: '⚡', Edit: '✏️', Agent: '🤖', Glob: '🔍', Grep: '🔎', WebSearch: '🌐', WebFetch: '📡', Task: '📋' }
   return icons[tool] || '🔧'
 }
 
 function toolArgs(msg: any): string {
-  if (msg.input) {
-    if (typeof msg.input === 'string') return msg.input.slice(0, 60)
-    try { return JSON.stringify(msg.input).slice(0, 60) } catch { return '' }
-  }
-  return msg.description || ''
+  return msg.inputDesc || msg.description || ''
 }
 
 function toolInputText(msg: any): string {
+  if (msg.inputDesc) return msg.inputDesc
   if (msg.input) {
     if (typeof msg.input === 'string') return msg.input
     try { return JSON.stringify(msg.input, null, 2) } catch { return String(msg.input) }
@@ -235,34 +246,138 @@ function sendMessage() {
   nextTick(scrollToBottom)
 }
 
+const msgCounter = { value: 0 }
+function nextId(prefix: string) { return prefix + (++msgCounter.value) }
+
+// Format tool input for display (matches iOS app logic)
+function formatToolInput(tool: string, input: any): string {
+  if (!input) return ''
+  if (typeof input === 'string') return input.slice(0, 80)
+  if (typeof input === 'object') {
+    switch (tool) {
+      case 'Read':
+      case 'Write':
+      case 'Edit':
+        return input.file_path || input.path || ''
+      case 'Bash':
+        return input.command || ''
+      case 'Glob':
+      case 'Grep':
+        return input.pattern || input.query || ''
+      case 'Agent':
+        return (input.prompt || '').slice(0, 60)
+      default:
+        break
+    }
+    // Fallback: first string value
+    const first = Object.values(input).find(v => typeof v === 'string')
+    if (first) return String(first).slice(0, 60)
+  }
+  return ''
+}
+
+function processEvent(evt: any) {
+  const type = evt.type || evt.event_type
+  if (type === 'user_text') {
+    const text = evt.text || evt.content || evt.payload?.text || evt.payload?.content || ''
+    if (text) messages.value.push({ id: nextId('u'), type: 'user_text', role: 'user', content: text })
+  } else if (type === 'agent_text') {
+    const content = evt.text || evt.content || evt.payload?.text || evt.payload?.content || ''
+    if (!content) return
+    const streaming = evt.streaming ?? evt.payload?.streaming ?? false
+    const last = messages.value[messages.value.length - 1]
+    if (last && last.type === 'agent_text' && last.streaming && !content.startsWith('\n')) {
+      last.content += content
+      if (!streaming) last.streaming = false
+    } else {
+      messages.value.push({ id: nextId('a'), type: 'agent_text', role: 'agent', content, streaming })
+    }
+  } else if (type === 'tool_call') {
+    const callId = evt.call_id || evt.payload?.call_id
+    if (!callId) return
+    const tool = evt.tool || evt.payload?.tool || ''
+    const input = evt.input || evt.payload?.input
+    const inputDesc = formatToolInput(tool, input)
+    // Always create new tool_call message (matches iOS app)
+    messages.value.push({
+      id: nextId('t'), type: 'tool_call', call_id: callId,
+      tool, input, inputDesc,
+      output: null, status: 'running',
+      expanded: false, outputExpanded: false,
+    })
+  } else if (type === 'tool_result') {
+    const callId = evt.call_id || evt.payload?.call_id
+    const output = evt.output || evt.payload?.output || evt.result || evt.payload?.result
+    if (!callId) return
+    // Find last matching tool_call (matches iOS app lastIndex logic)
+    let idx = -1
+    for (let i = messages.value.length - 1; i >= 0; i--) {
+      if (messages.value[i].type === 'tool_call' && messages.value[i].call_id === callId) {
+        idx = i
+        break
+      }
+    }
+    if (idx >= 0) {
+      if (output) messages.value[idx].output = output
+      messages.value[idx].status = 'completed'
+    }
+  } else if (type === 'session_status') {
+    const s = evt.status || evt.payload?.status
+    if (s) status.value = s
+    if (evt.exit_reason || evt.payload?.exit_reason) exitReason.value = evt.exit_reason || evt.payload.exit_reason
+    if (evt.exited_at || evt.payload?.exited_at) exitedAt.value = evt.exited_at || evt.payload.exited_at
+  }
+}
+
+// Watch for session switch — clear messages and replay new session
+watch(sessionId, (newId, oldId) => {
+  if (newId && newId !== oldId) {
+    messages.value = []
+    status.value = 'running'
+    exitReason.value = ''
+    exitedAt.value = ''
+    send({ type: 'replay', session_id: newId, last_seq: 0 })
+  }
+})
+
 onMounted(() => {
   connect()
   send({ type: 'list_sessions' })
+  // Fetch historical events for this session
+  send({ type: 'replay', session_id: sessionId.value, last_seq: 0 })
 
   onEvent('session_list', (msg: any) => { allSessions.value = msg.sessions || [] })
 
+  // Handle historical events replay
+  onEvent('replay_batch', (msg: any) => {
+    if (msg.session_id !== sessionId.value) return
+    for (const evt of msg.events) {
+      processEvent(evt)
+    }
+    nextTick(scrollToBottom)
+  })
+
+  // Real-time events — use processEvent for consistent handling
   onEvent('agent_text', (msg: any) => {
     if (msg.session_id !== sessionId.value) return
-    const last = messages.value[messages.value.length - 1]
-    if (last && last.type === 'agent_text' && last.streaming && !msg.content.startsWith('\n')) {
-      last.content += msg.content
-    } else {
-      messages.value.push({ id: 'a' + Date.now(), type: 'agent_text', role: 'agent', content: msg.content, streaming: msg.streaming })
-    }
-    if (!msg.streaming) nextTick(scrollToBottom)
+    processEvent(msg)
+    nextTick(scrollToBottom)
   })
 
   onEvent('tool_call', (msg: any) => {
     if (msg.session_id !== sessionId.value) return
-    const existing = messages.value.find(m => m.call_id === msg.call_id)
-    if (existing) { existing.output = msg.output; existing.status = msg.status; if (msg.status === 'completed') existing.expanded = true }
-    else messages.value.push({ id: 't' + Date.now(), type: 'tool_call', call_id: msg.call_id, tool: msg.tool, input: msg.input, output: msg.output, status: msg.status, expanded: false, outputExpanded: false })
+    processEvent(msg)
     nextTick(scrollToBottom)
   })
 
-  onEvent('SubAgentCard', (msg: any) => {
+  onEvent('tool_result', (msg: any) => {
     if (msg.session_id !== sessionId.value) return
-    messages.value.push({ id: 'sa' + Date.now(), type: 'subagent', tool: msg.agent_id || 'Agent', input: msg.subagent_desc, status: 'completed', expanded: true, outputExpanded: false })
+    processEvent(msg)
+  })
+
+  onEvent('subagent_discovered', (msg: any) => {
+    if (msg.session_id !== sessionId.value) return
+    messages.value.push({ id: nextId('sa'), type: 'subagent', tool: msg.agent_id || 'Agent', input: msg.subagent_desc, status: 'completed', expanded: true, outputExpanded: false })
   })
 
   onEvent('session_status', (msg: any) => {
@@ -271,7 +386,7 @@ onMounted(() => {
 
   onEvent('error', (msg: any) => {
     if (msg.session_id && msg.session_id !== sessionId.value) return
-    messages.value.push({ id: 'e' + Date.now(), type: 'error', content: msg.error || '未知错误' })
+    messages.value.push({ id: nextId('e'), type: 'error', content: msg.error || '未知错误' })
   })
 })
 </script>
@@ -308,10 +423,46 @@ onMounted(() => {
 .scroll-to-bottom { position: absolute; bottom: 16px; right: 24px; width: 36px; height: 36px; border-radius: 50%; border: 1px solid var(--border); background: var(--surface); color: var(--fg); font-size: 16px; cursor: pointer; display: flex; align-items: center; justify-content: center; box-shadow: var(--shadow-sm); transition: background 0.15s; z-index: 10; }
 .scroll-to-bottom:hover { background: var(--surface-hover); }
 
+/* Messages — matches design spec exactly */
 .msg { max-width: 75%; animation: fade-in 0.2s ease; }
-.msg-user { align-self: flex-end; background: var(--user-bubble); color: #fff; padding: 10px 16px; border-radius: 16px 16px 4px 16px; font-size: 14px; line-height: 1.6; }
-.msg-agent { align-self: flex-start; background: var(--surface); border: 1px solid var(--border); color: var(--fg); padding: 10px 16px; border-radius: 16px 16px 16px 4px; font-size: 14px; line-height: 1.6; }
-.msg-error { align-self: flex-start; background: var(--error-bg); color: var(--error); padding: 10px 16px; border-radius: 16px 16px 16px 4px; font-size: 13px; line-height: 1.6; }
+
+.msg-user {
+  align-self: flex-end;
+  background: var(--user-bubble);
+  color: #fff;
+  padding: 10px 16px;
+  border-radius: 16px 16px 4px 16px;
+  font-size: 14px;
+  line-height: 1.6;
+}
+
+.msg-agent {
+  align-self: flex-start;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  color: var(--fg);
+  padding: 10px 16px;
+  border-radius: 16px 16px 16px 4px;
+  font-size: 14px;
+  line-height: 1.6;
+  transition: background var(--transition), border-color var(--transition);
+}
+
+.msg-agent.streaming .blink-cursor::after {
+  content: '▎';
+  animation: blink-cursor 0.8s step-end infinite;
+  color: var(--accent);
+}
+
+.msg-error {
+  align-self: flex-start;
+  background: var(--error-bg);
+  color: var(--error);
+  padding: 10px 16px;
+  border-radius: 16px 16px 16px 4px;
+  font-size: 13px;
+  line-height: 1.6;
+}
 
 /* Timeline */
 .timeline { display: flex; align-items: center; justify-content: space-between; padding: 12px 20px; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-md); margin-bottom: 4px; flex-shrink: 0; }
@@ -325,24 +476,95 @@ onMounted(() => {
 .timeline .line { flex: 1; height: 1px; background: var(--border); margin: 0 12px; align-self: flex-start; margin-top: 4px; }
 .timeline .line.done { background: var(--success); }
 
-/* Tool Cards */
-.tool-card { align-self: flex-start; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-lg); width: 90%; max-width: 560px; overflow: hidden; animation: fade-in 0.2s ease; cursor: pointer; }
-.tool-card .tool-header { display: flex; align-items: center; gap: 8px; padding: 12px 16px; }
+/* Tool Cards — matches design spec */
+.tool-card {
+  align-self: flex-start;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  width: 90%;
+  max-width: 560px;
+  animation: fade-in 0.2s ease;
+  cursor: pointer;
+  transition: background var(--transition), border-color var(--transition);
+}
+.tool-card .tool-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 12px 16px;
+  cursor: pointer;
+}
 .tool-card .tool-icon { font-size: 16px; flex-shrink: 0; }
 .tool-card .tool-name { font-weight: 600; font-size: 13px; color: var(--accent); flex: 1; }
-.tool-card .tool-args { font-size: 12px; color: var(--fg-tertiary); font-family: var(--font-mono); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 200px; }
+.tool-card .tool-args {
+  font-size: 12px;
+  color: var(--fg-tertiary);
+  font-family: var(--font-mono);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 200px;
+}
 .tool-card .tool-status { flex-shrink: 0; }
 .tool-card .tool-status .check { color: var(--success); font-size: 14px; }
-.tool-card .tool-status .spinner { width: 14px; height: 14px; border: 2px solid transparent; border-top-color: var(--fg-secondary); border-radius: 50%; animation: spin 0.8s linear infinite; display: inline-block; }
-.tool-card .tool-chevron { color: var(--fg-tertiary); font-size: 12px; transition: transform 0.15s; flex-shrink: 0; }
+.tool-card .tool-status .spinner {
+  width: 14px;
+  height: 14px;
+  border: 2px solid transparent;
+  border-top-color: var(--fg-secondary);
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+  display: inline-block;
+}
+.tool-card .tool-chevron {
+  color: var(--fg-tertiary);
+  font-size: 12px;
+  transition: transform 0.15s;
+  flex-shrink: 0;
+}
 .tool-card.expanded .tool-chevron { transform: rotate(180deg); }
-.tool-card .tool-body { border-top: 1px solid var(--border); display: none; }
+
+.tool-card .tool-body {
+  border-top: 1px solid var(--border);
+  display: none;
+}
 .tool-card.expanded .tool-body { display: block; }
-.tool-body .tool-section { padding: 8px 16px 0; }
-.tool-body .tool-label { font-size: 11px; color: var(--fg-tertiary); text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 4px; }
-.tool-body .tool-input { background: var(--code-bg); padding: 8px 16px; font-family: var(--font-mono); font-size: 12px; color: var(--success); border-radius: 4px; margin: 0 12px; white-space: pre-wrap; }
-.tool-body .tool-output { background: var(--code-bg); padding: 8px 16px; font-family: var(--font-mono); font-size: 12px; color: var(--fg-secondary); border-radius: 4px; margin: 8px 12px; max-height: 300px; overflow: auto; line-height: 1.6; white-space: pre-wrap; word-break: break-all; }
-.tool-body .tool-output.collapsed { max-height: 120px; overflow: hidden; }
+
+.tool-body .tool-section { padding: 8px 16px; }
+.tool-body .tool-label {
+  font-size: 11px;
+  color: var(--fg-tertiary);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  margin-bottom: 4px;
+}
+.tool-body .tool-input {
+  background: var(--code-bg);
+  padding: 8px 16px;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--success);
+  border-radius: 4px;
+  margin: 0 12px;
+  white-space: pre-wrap;
+}
+.tool-body .tool-output {
+  background: var(--code-bg);
+  padding: 8px 16px;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--fg-secondary);
+  border-radius: 4px;
+  margin: 8px 12px;
+  max-height: 120px;
+  overflow: hidden;
+  line-height: 1.6;
+}
+.tool-body .tool-output.collapsed {
+  max-height: 120px;
+  overflow: hidden;
+}
 .tool-body .toggle-expand { background: none; border: none; color: var(--accent); font-size: 12px; padding: 4px 16px 8px; cursor: pointer; font-family: var(--font-body); }
 
 /* Chat Input */

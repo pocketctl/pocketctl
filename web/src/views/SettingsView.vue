@@ -38,7 +38,7 @@
             <div class="profile-info">
               <div class="profile-name">{{ userDisplayName }}</div>
               <div class="profile-email">{{ userMasked }}</div>
-              <button class="profile-edit">编辑资料</button>
+              <button class="profile-edit" @click="showEditProfile = true">编辑资料</button>
             </div>
           </div>
           <div class="settings-row">
@@ -46,30 +46,22 @@
               <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="5" y="2" width="14" height="20" rx="2"/><circle cx="12" cy="18" r="1"/></svg>
             </div>
             <span class="row-label">手机号</span>
-            <span class="row-value">{{ user?.phone ? maskPhone(user.phone) + ' ' : '' }}<span :class="user?.phone ? 'bound' : 'unbound'">{{ user?.phone ? '已绑定' : '未绑定' }}</span> <span class="chevron">›</span></span>
+            <span class="row-value">{{ user?.phone ? maskPhone(user.phone) + ' ' : '' }}<span :class="user?.phone ? 'bound' : 'unbound'">{{ user?.phone ? '已绑定' : '未绑定' }}</span></span>
           </div>
-          <div class="settings-row">
-            <div class="row-icon" style="background:rgba(7,193,96,0.1);color:#07C160;">
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15a2 2 0 01-2 2H7l-4 4V5a2 2 0 012-2h14a2 2 0 012 2z"/></svg>
-            </div>
-            <span class="row-label">微信</span>
-            <span class="row-value"><span class="unbound">未绑定</span> <span class="chevron">›</span></span>
-          </div>
-          <div class="settings-row">
-            <div class="row-icon" style="background:rgba(255,255,255,0.1);color:#fff;">
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M17.05 20.28c-.98.95-2.05.8-3.08.35-1.09-.46-2.09-.48-3.24 0-1.44.62-2.2.44-3.06-.35C2.79 15.25 3.51 7.59 9.05 7.31c1.35.07 2.29.74 3.08.8 1.18-.24 2.31-.93 3.57-.84 1.51.12 2.65.72 3.4 1.8-3.12 1.87-2.38 5.98.48 7.13-.57 1.5-1.31 2.99-2.54 4.09zM12.03 7.25c-.15-2.23 1.66-4.07 3.74-4.25.29 2.58-2.34 4.5-3.74 4.25z"/></svg>
-            </div>
-            <span class="row-label">Apple ID</span>
-            <span class="row-value"><span class="unbound">未绑定</span> <span class="chevron">›</span></span>
-          </div>
-          <div class="settings-row">
+          <div class="settings-row" @click="showBindEmail = true">
             <div class="row-icon" style="background:rgba(88,166,255,0.1);color:var(--accent);">
               <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="4" width="20" height="16" rx="2"/><path d="M22 4L12 13 2 4"/></svg>
             </div>
             <span class="row-label">邮箱</span>
-            <span class="row-value"><span :class="user?.email && !user.email.startsWith('1') ? 'bound' : 'unbound'">{{ user?.email && !user.email.startsWith('1') ? '已绑定' : '未绑定' }}</span> <span class="chevron">›</span></span>
+            <span class="row-value">{{ userEmail }} <span class="chevron">›</span></span>
           </div>
         </div>
+
+        <!-- Edit Profile Modal -->
+        <EditProfileModal v-if="showEditProfile" @close="showEditProfile = false" @saved="onProfileSaved" />
+
+        <!-- Bind Email Modal -->
+        <BindEmailModal v-if="showBindEmail" @close="showBindEmail = false" @saved="onEmailSaved" />
 
         <!-- Upgrade -->
         <div class="upgrade-card">
@@ -92,11 +84,13 @@
             <span :class="['chip', d.daemon_online ? 'chip-online' : 'chip-offline']" style="font-size:11px;">{{ d.daemon_online ? '在线' : '离线' }}</span>
             <span class="chevron">›</span>
           </div>
-          <div class="daemon-settings-row add-daemon">
+          <div class="daemon-settings-row add-daemon" @click="showRegisterDaemon = true">
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 5v14M5 12h14"/></svg>
             注册新主机
           </div>
         </div>
+
+        <RegisterDaemonDialog v-if="showRegisterDaemon" @close="showRegisterDaemon = false" />
 
         <!-- Appearance -->
         <div id="section-appearance" class="settings-section">
@@ -143,24 +137,42 @@
 
         <!-- About -->
         <div id="section-about" class="settings-section">
-          <div class="settings-section-title">关于</div>
-          <div class="settings-row">
-            <span class="row-label">帮助与反馈</span>
-            <span class="row-value"><span class="chevron">›</span></span>
-          </div>
-          <div class="settings-row">
+          <div class="settings-section-title">其他</div>
+          <div class="settings-row" @click="showAbout = true">
+            <div class="row-icon" style="background:var(--accent-muted);color:var(--accent);">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M12 16v-4M12 8h.01"/></svg>
+            </div>
             <span class="row-label">关于 pocketctl</span>
             <span class="row-value">v1.0.1 <span class="chevron">›</span></span>
           </div>
-          <div class="settings-row">
+          <div class="settings-row" @click="showHelp = true">
+            <div class="row-icon" style="background:var(--accent-muted);color:var(--accent);">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M9.09 9a3 3 0 015.83 1c0 2-3 3-3 3"/><path d="M12 17h.01"/></svg>
+            </div>
+            <span class="row-label">帮助与反馈</span>
+            <span class="row-value"><span class="chevron">›</span></span>
+          </div>
+          <div class="settings-row" @click="showPrivacy = true">
+            <div class="row-icon" style="background:var(--accent-muted);color:var(--accent);">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0110 0v4"/></svg>
+            </div>
             <span class="row-label">隐私政策</span>
             <span class="row-value"><span class="chevron">›</span></span>
           </div>
-          <div class="settings-row">
+          <div class="settings-row" @click="showAgreement = true">
+            <div class="row-icon" style="background:var(--accent-muted);color:var(--accent);">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/><path d="M14 2v6h6"/><path d="M16 13H8"/><path d="M16 17H8"/><path d="M10 9H8"/></svg>
+            </div>
             <span class="row-label">用户协议</span>
             <span class="row-value"><span class="chevron">›</span></span>
           </div>
         </div>
+
+        <!-- Modals -->
+        <AboutModal v-if="showAbout" @close="showAbout = false" />
+        <HelpModal v-if="showHelp" @close="showHelp = false" />
+        <PrivacyModal v-if="showPrivacy" @close="showPrivacy = false" />
+        <AgreementModal v-if="showAgreement" @close="showAgreement = false" />
 
         <!-- Logout -->
         <div class="settings-section">
@@ -178,6 +190,13 @@ import { ref, computed, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { useAuth } from '../composables/useAuth'
 import { useWebSocket } from '../composables/useWebSocket'
+import AboutModal from '../components/AboutModal.vue'
+import HelpModal from '../components/HelpModal.vue'
+import PrivacyModal from '../components/PrivacyModal.vue'
+import AgreementModal from '../components/AgreementModal.vue'
+import EditProfileModal from '../components/EditProfileModal.vue'
+import BindEmailModal from '../components/BindEmailModal.vue'
+import RegisterDaemonDialog from '../components/RegisterDaemonDialog.vue'
 
 const router = useRouter()
 const { user, logout } = useAuth()
@@ -189,6 +208,13 @@ const notifyCompleted = ref(true)
 const notifyErrors = ref(true)
 const notifyDaemon = ref(true)
 const notifyUpdates = ref(false)
+const showAbout = ref(false)
+const showHelp = ref(false)
+const showPrivacy = ref(false)
+const showAgreement = ref(false)
+const showEditProfile = ref(false)
+const showBindEmail = ref(false)
+const showRegisterDaemon = ref(false)
 
 const userInitial = computed(() => {
   const name = user.value?.display_name || user.value?.email || user.value?.phone || 'U'
@@ -203,6 +229,12 @@ const userMasked = computed(() => {
   const phone = user.value?.phone
   if (phone) return phone.slice(0, 3) + '****' + phone.slice(-4)
   return user.value?.email || ''
+})
+
+const userEmail = computed(() => {
+  const email = user.value?.email
+  if (email && !email.startsWith('1')) return email
+  return '未绑定'
 })
 
 function maskPhone(phone: string): string {
@@ -234,6 +266,16 @@ function scrollTo(id: string) {
 function handleLogout() {
   logout()
   router.push('/login')
+}
+
+function onProfileSaved(name: string) {
+  if (user.value) user.value.display_name = name
+  showEditProfile.value = false
+}
+
+function onEmailSaved(email: string) {
+  if (user.value) user.value.email = email
+  showBindEmail.value = false
 }
 
 onMounted(() => {

@@ -187,9 +187,11 @@ func (sw *SessionWatcher) handleRemovedFile(path string) {
 		}
 	}
 
-	// No other file tracks this session — it's truly gone
+	// No other file tracks this session — it's truly gone.
+	// Keep in knownSessions: the session may reappear via --continue with
+	// a new PID file but the same sessionId. knownSessions is per-daemon-process,
+	// so stale entries don't accumulate forever.
 	if sess, exists := sw.knownSessions[sessionId]; exists {
-		delete(sw.knownSessions, sessionId)
 		sw.eventsCh <- SessionEvent{
 			Action:   "removed",
 			Session:  sess,

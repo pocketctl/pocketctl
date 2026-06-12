@@ -151,8 +151,10 @@ func (sm *SessionManager) CreateSession(ctx context.Context, config protocol.Ses
 }
 
 // RegisterTerminalSession registers a session discovered from the terminal.
-// Returns true if newly registered or upgraded from daemon→terminal (teller should start).
-// Returns false if already a terminal session (skip).
+// Returns true if a tailer should be started (new session or daemon→terminal upgrade).
+// Returns false for: daemon-spawned processes (skip entirely) or existing terminal
+// sessions (--continue — PID/status updated in-place, but no new tailer needed since
+// the old one still tails the same JSONL file).
 func (sm *SessionManager) RegisterTerminalSession(sessionID, cwd string, pid int, ttyPath string, status string) bool {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
@@ -165,7 +167,17 @@ func (sm *SessionManager) RegisterTerminalSession(sessionID, cwd string, pid int
 	// Check if session already exists
 	if ps, ok := sm.sessions[sessionID]; ok {
 		if ps.Source == "terminal" {
-			// Already a terminal session — skip
+			// Re-discovered (e.g. --continue): update PID, status, cwd.
+			// Old tailer still works on same JSONL — no new tailer needed.
+			ps.Pid = pid
+			ps.Status = status
+			ps.ExitReason = ""
+			if cwd != "" {
+				ps.Cwd = cwd
+			}
+			if ttyPath != "" {
+				ps.TTY = ttyPath
+			}
 			return false
 		}
 		// Daemon-created session appeared in watcher — user resumed it in terminal.

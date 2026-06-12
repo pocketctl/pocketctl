@@ -11,12 +11,12 @@ import (
 	"net/url"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"syscall"
 	"time"
 
-	"github.com/google/uuid"
 	"github.com/gorilla/websocket"
 	"runtime"
 	"github.com/pocketctl/pocketctl/internal/adapter"
@@ -288,18 +288,19 @@ func cmdDaemonStart(args []string) {
 		os.Exit(1)
 	}
 
-	// Generate daemon ID — reuse persisted ID if available
+	// Generate daemon ID — reuse persisted ID, or derive from machine hardware
 	id := *daemonID
 	if id == "" {
 		if existing, err := daemon.ReadState(); err == nil && existing.DaemonID != "" {
 			id = existing.DaemonID
 		}
 		if id == "" {
-			id = "daemon-" + uuid.New().String()[:8]
+			id = daemon.MachineID()
 		}
 	}
 
 	// Setup logging to file
+	os.MkdirAll(filepath.Dir(daemon.LogPath()), 0755) // ensure /tmp/pocketctl exists
 	logFile, err := os.OpenFile(daemon.LogPath(), os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0644)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "open log file: %v\n", err)
@@ -743,6 +744,9 @@ func handleWatcherEvents(ctx context.Context, sw *watcher.SessionWatcher, sm *se
 				// Only start JSONL tailer if this is a genuinely new session
 				if !registered {
 					logger.Debug("session already known, skipping tailer", "session", evt.Session.SessionID)
+					// Re-discovered (e.g. --continue): tailer already running on same JSONL,
+					// but emit session_status so relay/DB updates from "exited" → current status.
+					sm.SetSessionStatus(evt.Session.SessionID, evt.Session.Status)
 					break
 				}
 				// Start JSONL tailer from beginning to replay history and tail new events

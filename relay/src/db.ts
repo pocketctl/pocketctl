@@ -249,6 +249,16 @@ export async function getUserById(pool: pg.Pool, id: number): Promise<any | null
   return result.rows[0] || null;
 }
 
+/** Update user's display name */
+export async function updateDisplayName(pool: pg.Pool, userId: number, displayName: string): Promise<void> {
+  await pool.query(`UPDATE users SET display_name = $1 WHERE id = $2`, [displayName, userId]);
+}
+
+/** Update user's email (bind email) */
+export async function updateEmail(pool: pg.Pool, userId: number, email: string): Promise<void> {
+  await pool.query(`UPDATE users SET email = $1 WHERE id = $2`, [email, userId]);
+}
+
 /** Get user's plan and whitelist status for daemon limit control */
 export async function getUserPlanAndWhitelist(pool: pg.Pool, userId: number): Promise<{ plan: string; whitelist: boolean }> {
   const result = await pool.query(

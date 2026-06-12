@@ -24,6 +24,9 @@ services:
     environment:
       DATABASE_URL: postgresql://pocketctl:pocketctl@postgres:5432/pocketctl
       PORT: 8080
+      JWT_SECRET: pocketctl-local-dev-secret-2024
+      DEV_SMS_PHONE: "13800138000"
+      DEV_SMS_CODE: "123456"
     depends_on:
       postgres:
         condition: service_healthy

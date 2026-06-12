@@ -79,26 +79,15 @@
         </div>
 
         <!-- Terms -->
-        <div class="terms-text">登录即同意<a href="#">《用户协议》</a>和<a href="#">《隐私政策》</a></div>
-
-        <!-- Social Login -->
-        <div class="divider-text">其他登录方式</div>
-        <div class="social-row">
-          <button class="social-btn" title="Apple 登录">
-            <svg viewBox="0 0 24 24" fill="var(--fg)"><path d="M17.05 20.28c-.98.95-2.05.8-3.08.35-1.09-.46-2.09-.48-3.24 0-1.44.62-2.2.44-3.06-.35C2.79 15.25 3.51 7.59 9.05 7.31c1.35.07 2.29.74 3.08.8 1.18-.24 2.31-.93 3.57-.84 1.51.12 2.65.72 3.4 1.8-3.12 1.87-2.38 5.98.48 7.13-.57 1.5-1.31 2.99-2.54 4.09zM12.03 7.25c-.15-2.23 1.66-4.07 3.74-4.25.29 2.58-2.34 4.5-3.74 4.25z"/></svg>
-          </button>
-          <button class="social-btn" title="GitHub 登录">
-            <svg viewBox="0 0 24 24" fill="var(--fg)"><path d="M12 2C6.477 2 2 6.484 2 12.017c0 4.425 2.865 8.18 6.839 9.504.5.092.682-.217.682-.483 0-.237-.008-.868-.013-1.703-2.782.605-3.369-1.343-3.369-1.343-.454-1.158-1.11-1.466-1.11-1.466-.908-.62.069-.608.069-.608 1.003.07 1.531 1.032 1.531 1.032.892 1.53 2.341 1.088 2.91.832.092-.647.35-1.088.636-1.338-2.22-.253-4.555-1.113-4.555-4.951 0-1.093.39-1.988 1.029-2.688-.103-.253-.446-1.272.098-2.65 0 0 .84-.27 2.75 1.026A9.564 9.564 0 0112 6.844c.85.004 1.705.115 2.504.337 1.909-1.296 2.747-1.027 2.747-1.027.546 1.379.202 2.398.1 2.651.64.7 1.028 1.595 1.028 2.688 0 3.848-2.339 4.695-4.566 4.943.359.309.678.92.678 1.855 0 1.338-.012 2.419-.012 2.747 0 .268.18.58.688.482A10.019 10.019 0 0022 12.017C22 6.484 17.522 2 12 2z"/></svg>
-          </button>
-          <button class="social-btn disabled" title="微信登录">
-            <svg viewBox="0 0 24 24" fill="#07C160"><path d="M8.69 2C4.34 2 .75 5.06.75 8.8c0 2.14 1.12 4.06 2.88 5.34l-.72 2.16 2.52-1.26c.82.23 1.68.36 2.58.36.32 0 .64-.02.95-.06A6.5 6.5 0 018.5 13c0-3.87 3.58-7 8-7 .37 0 .73.02 1.08.07C16.43 3.94 12.89 2 8.69 2zm-2.8 4.2a.9.9 0 110 1.8.9.9 0 010-1.8zm5.4 0a.9.9 0 110 1.8.9.9 0 010-1.8zM16.5 7c-3.87 0-7 2.69-7 6s3.13 6 7 6c.74 0 1.45-.1 2.12-.3l2.08 1.04-.6-1.8A5.6 5.6 0 0023.25 13c0-3.31-3.13-6-7-6zm-2.2 3.6a.75.75 0 110 1.5.75.75 0 010-1.5zm4.4 0a.75.75 0 110 1.5.75.75 0 010-1.5z"/></svg>
-            <span class="coming-soon">即将开通</span>
-          </button>
-        </div>
+        <div class="terms-text">登录即同意<a href="#" @click.prevent="showAgreement = true">《用户协议》</a>和<a href="#" @click.prevent="showPrivacy = true">《隐私政策》</a></div>
       </div>
 
       <!-- Footer -->
       <div class="login-footer">还没有账户？<a href="#">注册</a> · <a href="#">帮助中心</a></div>
+
+      <!-- Modals -->
+      <PrivacyModal v-if="showPrivacy" @close="showPrivacy = false" />
+      <AgreementModal v-if="showAgreement" @close="showAgreement = false" />
     </div>
   </div>
 </template>
@@ -109,6 +98,8 @@ import { useRouter } from 'vue-router'
 import { useAuth } from '../composables/useAuth'
 import logoDark from '../assets/logo-github-org.svg'
 import logoLight from '../assets/logo-github-org-light.svg'
+import PrivacyModal from '../components/PrivacyModal.vue'
+import AgreementModal from '../components/AgreementModal.vue'
 
 const router = useRouter()
 const { sendSmsCode, loginViaPhone, sendEmailCode, loginViaEmail } = useAuth()
@@ -122,11 +113,14 @@ const errorMsg = ref('')
 const loading = ref(false)
 const phoneCountdown = ref(0)
 const emailCountdown = ref(0)
+const showPrivacy = ref(false)
+const showAgreement = ref(false)
 
 let phoneTimer: ReturnType<typeof setInterval> | null = null
 let emailTimer: ReturnType<typeof setInterval> | null = null
 
-const isDark = computed(() => document.documentElement.getAttribute('data-theme') !== 'light')
+const currentTheme = ref(document.documentElement.getAttribute('data-theme') || 'dark')
+const isDark = computed(() => currentTheme.value !== 'light')
 const logoPath = computed(() => isDark.value ? logoDark : logoLight)
 const isValidPhone = computed(() => { const d = phone.value.replace(/\D/g, ''); return d.length === 11 && d.startsWith('1') })
 const isValidEmail = computed(() => emailLocal.value.trim().length > 0)
@@ -136,6 +130,7 @@ function getTheme(): string { return document.documentElement.getAttribute('data
 function setTheme(t: string) {
   document.documentElement.setAttribute('data-theme', t)
   localStorage.setItem('pocketctl-theme', t)
+  currentTheme.value = t
 }
 function toggleTheme() { setTheme(getTheme() === 'dark' ? 'light' : 'dark') }
 
@@ -252,15 +247,6 @@ async function doEmailLogin() {
 .terms-text a { color: var(--accent); text-decoration: none; }
 .terms-text a:hover { text-decoration: underline; }
 
-.divider-text { display: flex; align-items: center; gap: 12px; color: var(--fg-tertiary); font-size: 13px; padding: 8px 0; }
-.divider-text::before, .divider-text::after { content: ''; flex: 1; height: 1px; background: var(--border); }
-
-.social-row { display: flex; gap: 12px; justify-content: center; }
-.social-btn { width: 52px; height: 52px; border-radius: var(--radius-lg); border: 1px solid var(--border); background: var(--surface); display: flex; align-items: center; justify-content: center; cursor: pointer; transition: background 0.15s, border-color 0.15s; position: relative; }
-.social-btn:hover { background: var(--surface-hover); border-color: var(--border-light); }
-.social-btn svg { width: 24px; height: 24px; }
-.social-btn.disabled { opacity: 0.4; cursor: not-allowed; }
-.social-btn .coming-soon { position: absolute; bottom: -18px; font-size: 10px; color: var(--fg-tertiary); white-space: nowrap; }
 
 .error-banner { display: flex; align-items: center; gap: 8px; padding: 10px 14px; border-radius: var(--radius-md); background: var(--error-bg); color: var(--error); font-size: 13px; margin-bottom: 16px; }
 .error-banner svg { width: 16px; height: 16px; flex-shrink: 0; }

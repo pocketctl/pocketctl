@@ -28,7 +28,7 @@
         <h2 class="page-title">我的主机</h2>
         <div class="page-subtitle">管理和监控你的开发主机</div>
       </div>
-      <button class="btn btn-secondary" @click="showNewSession = true">
+      <button class="btn btn-secondary" @click="showRegisterDaemon = true">
         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 5v14M5 12h14"/></svg>
         注册主机
       </button>
@@ -53,7 +53,7 @@
 
     <!-- Daemon Cards Grid -->
     <div v-if="daemons.length > 0" class="daemon-grid">
-      <div v-for="(d, i) in daemons" :key="d.daemon_id" class="daemon-card" :data-default-name="d.hostname || d.daemon_id.slice(0,8)">
+      <div v-for="(d, i) in daemons" :key="d.daemon_id" class="daemon-card" :class="{ selected: selectedDaemon === d.daemon_id }" :data-default-name="d.hostname || d.daemon_id.slice(0,8)" @click="toggleDaemonFilter(d.daemon_id)">
         <div class="card-header">
           <div class="daemon-icon">
             <svg v-if="d.daemon_online" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8M12 17v4"/></svg>
@@ -110,19 +110,23 @@
     <!-- Sessions Section -->
     <div class="page-header" style="margin-top:16px;">
       <div>
-        <h2 class="page-title">最近会话</h2>
-        <div class="page-subtitle">跨所有主机的会话活动</div>
+        <h2 class="page-title">{{ selectedDaemon ? (getDisplayName(selectedDaemonObj) + ' 的会话') : '最近会话' }}</h2>
+        <div class="page-subtitle">{{ selectedDaemon ? '该主机关联的所有会话' : '跨所有主机的会话活动' }}</div>
       </div>
+      <button v-if="selectedDaemon" class="btn btn-secondary" @click="clearDaemonFilter">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6L6 18M6 6l12 12"/></svg>
+        清除筛选
+      </button>
     </div>
 
-    <div class="session-table" v-if="sessions.length > 0">
+    <div class="session-table" v-if="filteredSessions.length > 0">
       <div class="session-table-header">
         <span>会话</span>
         <span class="col-daemon">主机</span>
         <span class="col-time">时间</span>
         <span class="col-actions" style="text-align:right;">状态</span>
       </div>
-      <div v-for="s in sortedSessions" :key="s.session_id" class="session-row" @click="$router.push(`/session/${s.session_id}`)">
+      <div v-for="s in filteredSessions" :key="s.session_id" class="session-row" @click="$router.push(`/session/${s.session_id}`)">
         <div class="session-info">
           <span :class="['status-dot', getEffectiveStatus(s)]"></span>
           <span :class="['session-title', { mono: !s.title || s.title.startsWith('Terminal Session') }]">{{ s.title || s.session_id.slice(0, 8) }}</span>
@@ -136,12 +140,12 @@
     </div>
 
     <!-- No Sessions -->
-    <div v-if="sessions.length === 0 && daemons.length > 0" class="session-empty">
+    <div v-if="filteredSessions.length === 0 && daemons.length > 0" class="session-empty">
       <div class="empty-title" style="font-size:15px;">暂无活跃会话</div>
       <div class="empty-subtitle">点击"新建会话"开始一个 AI 编程会话</div>
     </div>
 
-    <NewSessionDialog v-if="showNewSession" @close="showNewSession = false" @create="handleCreate" />
+    <RegisterDaemonDialog v-if="showRegisterDaemon" @close="showRegisterDaemon = false" />
   </div>
 </template>
 
@@ -151,7 +155,7 @@ import { useRouter } from 'vue-router'
 import { useWebSocket } from '../composables/useWebSocket'
 import { formatRelativeTime } from '../composables/useRelativeTime'
 import { useAuth } from '../composables/useAuth'
-import NewSessionDialog from '../components/NewSessionDialog.vue'
+import RegisterDaemonDialog from '../components/RegisterDaemonDialog.vue'
 
 const { connect, send, onEvent, effectiveStatus } = useWebSocket()
 const { isLoggedIn, logout } = useAuth()
@@ -159,12 +163,13 @@ const router = useRouter()
 
 const daemons = ref<any[]>([])
 const sessions = ref<any[]>([])
-const showNewSession = ref(false)
+const showRegisterDaemon = ref(false)
 const lastError = ref('')
 const loading = ref(true)
 const renameIndex = ref<number | null>(null)
 const renameInput = ref('')
 const aliases = ref<Record<string, string>>({})
+const selectedDaemon = ref<string | null>(null)
 
 const onlineDaemonCount = computed(() => daemons.value.filter(d => d.daemon_online).length)
 const offlineDaemonCount = computed(() => daemons.value.filter(d => !d.daemon_online).length)
@@ -175,6 +180,21 @@ const sortedSessions = computed(() => [...sessions.value].sort((a, b) => {
   const tb = b.last_activity_at ? new Date(b.last_activity_at).getTime() : 0
   return tb - ta
 }))
+
+const filteredSessions = computed(() => {
+  if (!selectedDaemon.value) return sortedSessions.value
+  return sortedSessions.value.filter(s => s.daemon_id === selectedDaemon.value)
+})
+
+const selectedDaemonObj = computed(() => daemons.value.find(d => d.daemon_id === selectedDaemon.value))
+
+function toggleDaemonFilter(daemonId: string) {
+  selectedDaemon.value = selectedDaemon.value === daemonId ? null : daemonId
+}
+
+function clearDaemonFilter() {
+  selectedDaemon.value = null
+}
 
 function getDisplayName(d: any): string { return d.daemon_alias || d.hostname || d.daemon_id?.slice(0, 8) }
 function daemonSessionCount(daemonId: string): number { return sessions.value.filter(s => s.daemon_id === daemonId && (s.status === 'running' || s.status === 'busy')).length }
@@ -209,10 +229,8 @@ async function confirmRename(i: number) {
   const alias = renameInput.value.trim() || null
   try {
     const token = localStorage.getItem('pocketctl_access_token')
-    const relayWs = localStorage.getItem('pocketctl_relay_url') || (window as any).__RELAY_WS__ || ''
-    const origin = (() => { try { const u = new URL(relayWs); return u.origin.replace(/^ws/, 'http') } catch { return '' } })()
-    if (token && origin) {
-      await fetch(`${origin}/api/daemons/${d.daemon_id}/alias`, {
+    if (token) {
+      await fetch(`/api/daemons/${d.daemon_id}/alias`, {
         method: 'PUT', headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
         body: JSON.stringify({ alias }),
       })
@@ -225,7 +243,6 @@ async function confirmRename(i: number) {
 function cancelRename() { renameIndex.value = null; renameInput.value = '' }
 function resetAlias(i: number) { daemons.value[i].daemon_alias = null; confirmRename(i) }
 
-function handleCreate() { showNewSession.value = false }
 
 onMounted(() => {
   if (!isLoggedIn.value) { router.push('/login'); return }
@@ -284,6 +301,7 @@ onMounted(() => {
 
 .daemon-card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-lg); padding: 20px; transition: all 0.2s; cursor: pointer; }
 .daemon-card:hover { border-color: var(--border-light); box-shadow: var(--shadow-sm); }
+.daemon-card.selected { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
 .daemon-card .card-header { display: flex; align-items: center; gap: 10px; margin-bottom: 12px; }
 .daemon-card .daemon-icon { width: 40px; height: 40px; border-radius: var(--radius-md); background: var(--surface-active); display: flex; align-items: center; justify-content: center; flex-shrink: 0; }
 .daemon-card .daemon-icon svg { width: 20px; height: 20px; color: var(--fg-secondary); }

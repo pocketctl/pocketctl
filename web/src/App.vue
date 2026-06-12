@@ -1,5 +1,5 @@
 <template>
-  <div class="app-layout">
+  <div class="app-layout" :class="{ 'sidebar-collapsed': sidebarCollapsed }">
     <!-- Sidebar -->
     <nav class="sidebar" v-if="isLoggedIn">
       <router-link to="/" class="sidebar-logo">
@@ -37,6 +37,9 @@
             <div class="user-plan">免费版</div>
           </div>
         </div>
+        <button class="sidebar-toggle" @click="toggleSidebar" :title="sidebarCollapsed ? '展开侧栏' : '收起侧栏'">
+          <svg :class="{ rotated: sidebarCollapsed }" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M15 18l-6-6 6-6"/></svg>
+        </button>
       </div>
     </nav>
 
@@ -82,6 +85,7 @@ const currentTheme = ref(document.documentElement.getAttribute('data-theme') || 
 const isDark = computed(() => currentTheme.value !== 'light')
 const sidebarLogoSrc = computed(() => isDark.value ? logoDark : logoLight)
 const sessionCount = ref(0)
+const sidebarCollapsed = ref(localStorage.getItem('pocketctl_sidebar_collapsed') === 'true')
 
 const userInitial = computed(() => {
   const name = user.value?.display_name || user.value?.email || user.value?.phone || 'U'
@@ -123,6 +127,11 @@ function toggleTheme() {
   setTheme(saved === 'light' ? 'dark' : 'light')
 }
 
+function toggleSidebar() {
+  sidebarCollapsed.value = !sidebarCollapsed.value
+  localStorage.setItem('pocketctl_sidebar_collapsed', String(sidebarCollapsed.value))
+}
+
 // Watch system theme changes when in "system" mode
 if (window.matchMedia) {
   window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => {
@@ -149,4 +158,41 @@ if (typeof window !== 'undefined') {
 
 /* Login page specific: hide sidebar even if logged in (shouldn't happen but guard) */
 .no-sidebar ~ .sidebar { display: none; }
+
+/* Sidebar collapsed state */
+.sidebar-collapsed .sidebar { width: 72px; }
+.sidebar-collapsed .sidebar .brand-name,
+.sidebar-collapsed .sidebar .sidebar-section-label,
+.sidebar-collapsed .sidebar .link-text,
+.sidebar-collapsed .sidebar .badge,
+.sidebar-collapsed .sidebar .user-info { display: none; }
+.sidebar-collapsed .sidebar .sidebar-logo { justify-content: center; padding: 16px 8px; }
+.sidebar-collapsed .sidebar .sidebar-link { justify-content: center; padding: 10px; }
+.sidebar-collapsed .sidebar .sidebar-user { justify-content: center; padding: 12px 8px; }
+.sidebar-collapsed .sidebar .sidebar-user .user-avatar { margin: 0; }
+.sidebar-collapsed .sidebar .sidebar-toggle { justify-content: center; }
+.sidebar-collapsed .sidebar .sidebar-toggle svg { transform: rotate(180deg); }
+.sidebar-collapsed .main-content { margin-left: 72px; }
+
+/* Sidebar toggle button */
+.sidebar-toggle {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  padding: 10px;
+  background: none;
+  border: none;
+  border-top: 1px solid var(--sidebar-border);
+  color: var(--fg-tertiary);
+  cursor: pointer;
+  transition: color 0.15s, background 0.15s;
+}
+.sidebar-toggle:hover {
+  color: var(--fg);
+  background: var(--surface-hover);
+}
+.sidebar-toggle svg {
+  transition: transform 0.2s ease;
+}
 </style>

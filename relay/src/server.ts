@@ -1,7 +1,7 @@
 import Fastify from 'fastify';
 import fastifyWebsocket from '@fastify/websocket';
 import fastifyCors from '@fastify/cors';
-import { createPool, initDB, parseDBUrl, createUser, getUserByEmail, getUserById, getUserByPhone, createUserByPhone, registerDevice, removeDevice, cleanStaleTombstones, upsertDaemonAlias } from './db.js';
+import { createPool, initDB, parseDBUrl, createUser, getUserByEmail, getUserById, getUserByPhone, createUserByPhone, registerDevice, removeDevice, cleanStaleTombstones, upsertDaemonAlias, updateDisplayName, updateEmail } from './db.js';
 import { Router } from './router.js';
 import { hashPassword, verifyPassword, signAccessToken, signRefreshToken, verifyAccessToken, verifyRefreshToken } from './auth.js';
 import { notifyUser, sessionStatusPush, daemonOfflinePush } from './push.js';
@@ -332,6 +332,49 @@ async function main() {
       reply.code(403); return { error: 'daemon not found or not owned by user' };
     }
     return { success: true, alias: result };
+  });
+
+  // Update user display name
+  app.put('/api/user/profile', async (req, reply) => {
+    const authHeader = req.headers.authorization;
+    if (!authHeader?.startsWith('Bearer ')) {
+      reply.code(401); return { error: 'authorization required' };
+    }
+    const payload = verifyAccessToken(authHeader.slice(7));
+    if (!payload) {
+      reply.code(401); return { error: 'invalid token' };
+    }
+    const { display_name } = req.body as any;
+    if (!display_name || typeof display_name !== 'string' || display_name.trim().length === 0) {
+      reply.code(400); return { error: 'display_name is required' };
+    }
+    await updateDisplayName(pool, payload.userId, display_name.trim().slice(0, 100));
+    return { success: true };
+  });
+
+  // Bind email to user account
+  app.put('/api/user/email', async (req, reply) => {
+    const authHeader = req.headers.authorization;
+    if (!authHeader?.startsWith('Bearer ')) {
+      reply.code(401); return { error: 'authorization required' };
+    }
+    const payload = verifyAccessToken(authHeader.slice(7));
+    if (!payload) {
+      reply.code(401); return { error: 'invalid token' };
+    }
+    const { email } = req.body as any;
+    if (!email || typeof email !== 'string' || !email.includes('@')) {
+      reply.code(400); return { error: 'valid email is required' };
+    }
+    try {
+      await updateEmail(pool, payload.userId, email.trim().toLowerCase());
+      return { success: true };
+    } catch (err: any) {
+      if (err.code === '23505') {
+        reply.code(409); return { error: '该邮箱已被其他账号绑定' };
+      }
+      throw err;
+    }
   });
 
   // ---- Health check ----
