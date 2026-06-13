@@ -130,13 +130,15 @@
         <div class="session-info">
           <span :class="['status-dot', getEffectiveStatus(s)]"></span>
           <span v-if="s.pinned" class="pin-mark">📌</span>
-          <span :class="['session-title', { mono: !s.title || s.title.startsWith('Terminal Session') }]">{{ s.title || s.session_id.slice(0, 8) }}</span>
+          <input v-if="sessRenamingId === s.session_id" class="ss-rename-input" v-model="sessRenameInput" maxlength="60"
+            @click.stop @keydown.enter="sessCommitRename(s)" @keydown.escape="sessCancelRename" @blur="sessCommitRename(s)" />
+          <span v-else :class="['session-title', { mono: !s.title || s.title.startsWith('Terminal Session') }]">{{ s.title || s.session_id.slice(0, 8) }}</span>
         </div>
         <div class="session-daemon">{{ s.daemon_alias || s.hostname || s.daemon_id?.slice(0, 8) }}</div>
         <div class="session-time">{{ formatRelativeTime(s.last_activity_at || s.updated_at) }}</div>
         <div class="session-actions">
           <span :class="['chip', statusChip(s)]">{{ statusLabel(s) }}</span>
-          <SessionActions :session="s" @renamed="onRenamed" @deleted="onDeleted" @pinned="onPinned" />
+          <SessionActions :session="s" @startRename="sessStartRename" @deleted="onDeleted" @pinned="onPinned" />
         </div>
       </div>
     </div>
@@ -161,6 +163,9 @@ import { useAuth } from '../composables/useAuth'
 import NewSessionDialog from '../components/NewSessionDialog.vue'
 import RegisterDaemonDialog from '../components/RegisterDaemonDialog.vue'
 import SessionActions from '../components/SessionActions.vue'
+import { useSessionRename } from '../composables/useSessionRename'
+
+const { renamingId: sessRenamingId, renameInput: sessRenameInput, startRename: sessStartRename, commitRename: sessCommitRename, cancelRename: sessCancelRename } = useSessionRename()
 
 const { connect, send, onEvent, effectiveStatus } = useWebSocket()
 const { isLoggedIn, logout } = useAuth()
@@ -313,7 +318,6 @@ onMounted(() => {
 })
 
 // SessionActions handlers (optimistic local updates)
-function onRenamed(sessionId: string, title: string) { const s = sessions.value.find((s: any) => s.session_id === sessionId); if (s) s.title = title }
 function onDeleted(sessionId: string) { sessions.value = sessions.value.filter((s: any) => s.session_id !== sessionId) }
 function onPinned(sessionId: string, pinned: boolean) { const s = sessions.value.find((s: any) => s.session_id === sessionId); if (s) s.pinned = pinned }
 </script>
@@ -376,6 +380,7 @@ function onPinned(sessionId: string, pinned: boolean) { const s = sessions.value
 .session-row .session-info { display: flex; align-items: center; gap: 10px; }
 .session-row .session-info .session-title { font-size: 14px; font-weight: 500; color: var(--fg); }
 .session-row .session-info .session-title.mono { font-family: var(--font-mono); font-size: 13px; color: var(--accent); }
+.session-row .ss-rename-input { background: var(--bg); border: 1px solid var(--accent); border-radius: var(--radius-sm); box-shadow: 0 0 0 3px var(--accent-muted); color: var(--fg); font-family: var(--font-body); font-size: 14px; font-weight: 500; padding: 4px 8px; outline: none; width: 100%; max-width: 200px; }
 .session-row .session-daemon { font-size: 13px; color: var(--fg-secondary); }
 .session-row .session-time { font-size: 13px; color: var(--fg-tertiary); }
 .session-row .session-actions { display: flex; align-items: center; gap: 6px; justify-content: flex-end; }

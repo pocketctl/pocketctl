@@ -14,13 +14,19 @@
       </div>
       <div class="session-list">
         <div v-for="s in allSessions" :key="s.session_id"
-          :class="['session-list-item', { active: s.session_id === sessionId }]"
-          @click="$router.push(`/session/${s.session_id}`)">
+          :class="['session-list-item', { active: s.session_id === sessionId, 'pending-delete': (s as any).__pendingDelete }]"
+          @click="!(s as any).__pendingDelete && $router.push(`/session/${s.session_id}`)">
           <span :class="['status-dot', s.statusEffective || s.status]" style="width:7px;height:7px;"></span>
           <div class="sl-info">
-            <div :class="['sl-title', { mono: !s.title || s.title.startsWith('Terminal Session') }]">{{ s.title || s.session_id.slice(0, 8) }}</div>
+            <div :class="['sl-title', { mono: !s.title || s.title.startsWith('Terminal Session') }]">
+              <span v-if="s.pinned" style="color: var(--accent); margin-right: 4px;">📌</span>
+              <input v-if="renamingId === s.session_id" class="ss-rename-input" v-model="renameInput" maxlength="60"
+                @click.stop @keydown.enter="commitRename(s)" @keydown.escape="cancelRename" @blur="commitRename(s)" />
+              <template v-else>{{ s.title || s.session_id.slice(0, 8) }}</template>
+            </div>
             <div class="sl-meta">{{ formatRelativeTime(s.last_activity_at || s.updated_at) }}<span v-if="s.subagent_count > 0"> · {{ s.subagent_count }} 子智能体</span></div>
           </div>
+          <SessionActions :session="s" @startRename="startRename" @deleted="onDeleted" @pinned="onPinned" />
         </div>
       </div>
     </div>
@@ -132,6 +138,10 @@ import { useRoute, useRouter } from 'vue-router'
 import { useWebSocket } from '../composables/useWebSocket'
 import { formatRelativeTime } from '../composables/useRelativeTime'
 import MarkdownRenderer from '../components/MarkdownRenderer.vue'
+import SessionActions from '../components/SessionActions.vue'
+import { useSessionRename } from '../composables/useSessionRename'
+
+const { renamingId, renameInput, startRename, commitRename, cancelRename } = useSessionRename()
 
 const route = useRoute()
 const router = useRouter()
@@ -439,7 +449,32 @@ onMounted(() => {
     if (msg.session_id && msg.session_id !== sessionId.value) return
     messages.value.push({ id: nextId('e'), type: 'error', content: msg.error || '未知错误' })
   }))
+
+  cleanups.push(onEvent('session_deleted', (msg: any) => {
+    allSessions.value = allSessions.value.filter((s: any) => s.session_id !== msg.session_id)
+    if (msg.session_id === sessionId.value) {
+      const next = allSessions.value[0]
+      if (next) router.push(`/session/${next.session_id}`)
+    }
+  }))
+
+  cleanups.push(onEvent('session_pinned', (msg: any) => {
+    const s = allSessions.value.find((x: any) => x.session_id === msg.session_id)
+    if (s) (s as any).pinned = msg.pinned
+  }))
+
+  cleanups.push(onEvent('session_title_update', (msg: any) => {
+    const s = allSessions.value.find((x: any) => x.session_id === msg.session_id)
+    if (s) s.title = msg.title
+  }))
 })
+
+// SessionActions handlers (optimistic local updates)
+function onDeleted(_sessionId: string) { /* handled by session_deleted WS event */ }
+function onPinned(sessionId: string, pinned: boolean) {
+  const s = allSessions.value.find((x: any) => x.session_id === sessionId)
+  if (s) (s as any).pinned = pinned
+}
 
 onUnmounted(() => {
   for (const fn of cleanups) fn()
@@ -455,11 +490,13 @@ onUnmounted(() => {
 .session-panel-header { padding: 16px; border-bottom: 1px solid var(--sidebar-border); display: flex; align-items: center; justify-content: space-between; }
 .session-panel-header h3 { font-size: 14px; font-weight: 600; color: var(--fg); }
 .session-list { flex: 1; overflow-y: auto; padding: 8px; }
-.session-list-item { display: flex; align-items: center; gap: 10px; padding: 10px 12px; border-radius: var(--radius-md); cursor: pointer; transition: background 0.1s; margin-bottom: 2px; }
+.session-list-item { display: flex; align-items: center; gap: 10px; padding: 10px 12px; border-radius: var(--radius-md); cursor: pointer; transition: background 0.1s, opacity 0.25s ease; margin-bottom: 2px; }
 .session-list-item:hover { background: var(--surface-hover); }
+.session-list-item.pending-delete { opacity: 0.35; pointer-events: none; }
 .session-list-item.active { background: var(--sidebar-active); }
 .session-list-item .sl-info { flex: 1; min-width: 0; }
 .session-list-item .sl-title { font-size: 13px; font-weight: 500; color: var(--fg); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.session-list-item .ss-rename-input { background: var(--bg); border: 1px solid var(--accent); border-radius: var(--radius-sm); box-shadow: 0 0 0 3px var(--accent-muted); color: var(--fg); font-family: var(--font-body); font-size: 13px; font-weight: 500; padding: 3px 6px; outline: none; width: 100%; }
 .session-list-item .sl-title.mono { font-family: var(--font-mono); font-size: 12px; color: var(--accent); }
 .session-list-item .sl-meta { font-size: 11px; color: var(--fg-tertiary); margin-top: 2px; }
 

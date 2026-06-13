@@ -84,6 +84,25 @@ async function forceKickDaemon(daemonId: string, emailCode: string): Promise<str
   return null
 }
 
+// --- Session Rename ---
+
+async function renameSession(sessionId: string, title: string): Promise<string | null> {
+  const origin = getRelayOrigin()
+  const url = origin ? `${origin}/api/sessions/${sessionId}/title` : `/api/sessions/${sessionId}/title`
+  try {
+    const res = await fetch(url, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${accessToken.value}` },
+      body: JSON.stringify({ title }),
+    })
+    const data = await res.json()
+    if (!res.ok) return data.error || '重命名失败'
+    return null
+  } catch {
+    return '网络请求失败'
+  }
+}
+
 // --- Legacy (deprecated) ---
 
 async function login(email: string, password: string): Promise<string | null> {
@@ -133,6 +152,7 @@ export function useAuth() {
     sendEmailCode, loginViaEmail,     // email verification code
     confirmDeviceAuth,                // device authorization
     forceKickDaemon,                  // force kick daemon
+    renameSession,                    // session rename
     doRefreshToken, logout,
   }
 }

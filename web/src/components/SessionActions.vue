@@ -17,7 +17,7 @@
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 17v5"/><path d="M9 10.8V4h6v6.8l3 3.2v2H6v-2l3-3.2z"/></svg>
         <span>{{ session.pinned ? '取消固定' : '固定到顶部' }}</span>
       </button>
-      <button class="ss-menu-item" @click="startRename">
+      <button class="ss-menu-item" @click="emit('startRename', props.session.session_id, props.session.title || props.session.session_id?.slice(0, 8) || '')">
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M11 4H4a2 2 0 00-2 2v14a2 2 0 002 2h14a2 2 0 002-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 013 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>
         <span>重命名会话</span>
       </button>
@@ -31,10 +31,6 @@
         <span>删除会话</span>
       </button>
     </div>
-
-    <!-- Rename input (inline, rendered by parent via emit) -->
-    <input v-if="renaming" class="ss-rename-input" ref="renameEl" v-model="renameValue" maxlength="60"
-      @click.stop @keydown.enter="commitRename" @keydown.escape="cancelRename" @blur="commitRename" />
 
     <!-- Export dialog -->
     <div v-if="exportOpen" class="ss-overlay" @click.self.stop="exportOpen = false">
@@ -92,6 +88,7 @@ const emit = defineEmits<{
   renamed: [sessionId: string, title: string]
   deleted: [sessionId: string]
   pinned: [sessionId: string, pinned: boolean]
+  startRename: [sessionId: string, oldTitle: string]
 }>()
 
 const { send, onEvent } = useWebSocket()
@@ -101,9 +98,6 @@ const menuOpen = ref(false)
 const menuX = ref(0)
 const menuY = ref(0)
 const copied = ref(false)
-const renaming = ref(false)
-const renameValue = ref('')
-const renameEl = ref<HTMLInputElement | null>(null)
 const exportOpen = ref(false)
 const exportFmt = ref('md')
 const deleteOpen = ref(false)
@@ -169,48 +163,7 @@ function togglePin() {
   })
 }
 
-// 3. Rename
-function startRename() {
-  closeMenu()
-  renameValue.value = props.session.title || ''
-  renaming.value = true
-  nextTick(() => { renameEl.value?.focus(); renameEl.value?.select() })
-}
-
-async function commitRename() {
-  if (!renaming.value) return
-  const newTitle = renameValue.value.trim()
-  const oldTitle = props.session.title || ''
-  renaming.value = false
-  if (!newTitle || newTitle === oldTitle) return
-  try {
-    const origin = getRelayOrigin()
-    const res = await fetch(`${origin}/api/sessions/${props.session.session_id}/title`, {
-      method: 'PUT',
-      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${accessToken.value}` },
-      body: JSON.stringify({ title: newTitle }),
-    })
-    if (res.ok) {
-      props.session.title = newTitle
-      emit('renamed', props.session.session_id, newTitle)
-      showToast(`已重命名为「${newTitle}」`, () => doRename(oldTitle))
-    }
-  } catch {}
-}
-
-function cancelRename() { renaming.value = false }
-
-async function doRename(title: string) {
-  try {
-    const origin = getRelayOrigin()
-    await fetch(`${origin}/api/sessions/${props.session.session_id}/title`, {
-      method: 'PUT', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${accessToken.value}` },
-      body: JSON.stringify({ title }),
-    })
-    props.session.title = title
-    emit('renamed', props.session.session_id, title)
-  } catch {}
-}
+// 3. Rename — handled by parent (emit startRename); input renders inline at title position
 
 // 4. Export
 function openExport() { closeMenu(); exportFmt.value = 'md'; exportOpen.value = true }

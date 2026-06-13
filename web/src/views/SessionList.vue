@@ -25,7 +25,9 @@
       <div class="session-info">
         <div class="session-title">
           <span v-if="s.pinned" class="pin-mark" style="color: var(--accent); margin-right: 4px;">📌</span>
-          {{ s.title || s.session_id.slice(0, 8) }}
+          <input v-if="renamingId === s.session_id" class="ss-rename-input" v-model="renameInput" maxlength="60"
+            @click.stop @keydown.enter="commitRename(s)" @keydown.escape="cancelRename" @blur="commitRename(s)" />
+          <template v-else>{{ s.title || s.session_id.slice(0, 8) }}</template>
         </div>
         <div class="session-meta">
           <span class="source-badge" :class="s.source">{{ s.source === 'terminal' ? '📺 终端' : '🌐 Web' }}</span>
@@ -37,7 +39,7 @@
         </div>
       </div>
       <span class="session-time">{{ formatRelativeTime(s.last_activity_at || s.started_at) }}</span>
-      <SessionActions :session="s" @renamed="onRenamed" @deleted="onDeleted" @pinned="onPinned" />
+      <SessionActions :session="s" @startRename="startRename" @deleted="onDeleted" @pinned="onPinned" />
     </div>
     <NewSessionDialog v-if="showNewSession" @close="showNewSession = false" @create="handleCreate" />
   </div>
@@ -52,6 +54,9 @@ import { formatRelativeTime } from '../composables/useRelativeTime'
 import { useAuth } from '../composables/useAuth'
 import NewSessionDialog from '../components/NewSessionDialog.vue'
 import SessionActions from '../components/SessionActions.vue'
+import { useSessionRename } from '../composables/useSessionRename'
+
+const { renamingId, renameInput, startRename, commitRename, cancelRename } = useSessionRename()
 
 const { connect, send, onEvent, effectiveStatus } = useWebSocket()
 const { isLoggedIn, logout } = useAuth()
@@ -159,10 +164,6 @@ onMounted(() => {
 })
 
 // SessionActions handlers (local optimistic updates; WS events above keep multi-client in sync)
-function onRenamed(sessionId: string, title: string) {
-  const s = sessions.value.find(s => s.session_id === sessionId)
-  if (s) s.title = title
-}
 function onDeleted(sessionId: string) {
   sessions.value = sessions.value.filter(s => s.session_id !== sessionId)
 }
@@ -236,6 +237,7 @@ function handleLogout() {
 .session-time { margin-left: auto; color: #8b949e; font-size: 13px; white-space: nowrap; }
 .session-info { flex: 1; min-width: 0; }
 .session-title { font-size: 14px; color: #e6edf3; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin-bottom: 2px; }
+.ss-rename-input { background: var(--bg, #0d1117); border: 1px solid #58a6ff; border-radius: 6px; box-shadow: 0 0 0 3px rgba(88,166,255,0.15); color: #e6edf3; font-family: inherit; font-size: 14px; font-weight: 500; padding: 4px 8px; outline: none; width: 100%; max-width: 200px; }
 .session-meta { display: flex; align-items: center; gap: 8px; }
 .source-badge { font-size: 11px; padding: 1px 6px; border-radius: 8px; }
 .source-badge.terminal { background: #1f3a5f; color: #79c0ff; }
