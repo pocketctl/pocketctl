@@ -1,0 +1,75 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <title>pocketctl 上线报告 — v0.2.0 (2026-06-13)</title>
+  <style>
+    body { background: #0d1117; color: #e6edf3; font-family: -apple-system, sans-serif; padding: 40px; max-width: 1000px; margin: 0 auto; }
+    h1 { color: #58a6ff; font-size: 26px; }
+    h2 { color: #e6edf3; font-size: 18px; margin-top: 32px; border-bottom: 1px solid #30363d; padding-bottom: 8px; }
+    .meta { color: #8b949e; font-size: 13px; margin-bottom: 24px; }
+    .summary { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin: 20px 0; }
+    .card { background: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 16px; text-align: center; }
+    .card .icon { font-size: 24px; }
+    .card .status { font-size: 14px; font-weight: 600; margin-top: 4px; }
+    .ok { color: #3fb950; }
+    table { width: 100%; border-collapse: collapse; margin: 12px 0; }
+    th, td { padding: 8px 12px; text-align: left; border-bottom: 1px solid #21262d; font-size: 13px; }
+    th { color: #8b949e; font-size: 12px; text-transform: uppercase; }
+    code { background: #1c2128; padding: 2px 6px; border-radius: 4px; font-size: 12px; }
+    .verdict { background: #12261e; border: 1px solid #238636; border-radius: 8px; padding: 16px; text-align: center; margin-top: 24px; }
+    .verdict .big { font-size: 22px; font-weight: 700; color: #3fb950; }
+  </style>
+</head>
+<body>
+  <h1>🚀 pocketctl 上线报告</h1>
+  <p class="meta">版本：v0.2.0 · 部署时间：2026-06-13 22:30 CST · 服务器：39.106.218.47</p>
+
+  <h2>服务状态</h2>
+  <div class="summary">
+    <div class="card"><div class="icon">📦</div><div class="status ok">Relay ✓ 200</div></div>
+    <div class="card"><div class="icon">🌐</div><div class="status ok">Web ✓ 200</div></div>
+    <div class="card"><div class="icon">🏠</div><div class="status ok">Landing ✓ 200</div></div>
+    <div class="card"><div class="icon">🗄️</div><div class="status ok">DB ✓ 迁移完成</div></div>
+  </div>
+
+  <h2>部署内容</h2>
+  <table>
+    <tr><th>组件</th><th>变更</th></tr>
+    <tr><td>Relay Server</td><td>webhook 自动部署 (git pull + build + restart)</td></tr>
+    <tr><td>Web 客户端</td><td>git pull (nginx 静态，无需 docker)</td></tr>
+    <tr><td>Landing Page</td><td>git pull (nginx 静态)</td></tr>
+  </table>
+
+  <h2>数据库迁移报告</h2>
+  <table>
+    <tr><th>类型</th><th>SQL</th><th>结果</th></tr>
+    <tr><td>新增表</td><td><code>revoked_tokens</code></td><td>✅ CREATE TABLE</td></tr>
+    <tr><td>新增表</td><td><code>audit_log</code></td><td>✅ CREATE TABLE</td></tr>
+    <tr><td>新增列</td><td><code>sessions.pinned BOOLEAN</code></td><td>✅ ALTER TABLE</td></tr>
+    <tr><td>新增列</td><td><code>sessions.pinned_at TIMESTAMPTZ</code></td><td>✅ ALTER TABLE</td></tr>
+    <tr><td>新增列</td><td><code>daemons.active_token_jti</code></td><td>✅ ALTER TABLE</td></tr>
+    <tr><td>新增列</td><td><code>daemons.machine_id</code></td><td>✅ ALTER TABLE</td></tr>
+    <tr><td>新增列</td><td><code>daemons.last_login_at</code></td><td>✅ ALTER TABLE</td></tr>
+    <tr><td>新增列</td><td><code>users.max_daemons</code></td><td>✅ ALTER TABLE</td></tr>
+    <tr><td>新增索引</td><td><code>idx_sessions_pinned</code></td><td>✅ CREATE INDEX</td></tr>
+    <tr><td>新增索引</td><td><code>idx_revoked_tokens_user</code></td><td>✅ CREATE INDEX</td></tr>
+    <tr><td>新增索引</td><td><code>idx_audit_log_user / action</code></td><td>✅ CREATE INDEX</td></tr>
+  </table>
+
+  <h2>v0.2.0 主要功能</h2>
+  <table>
+    <tr><th>功能</th><th>说明</th></tr>
+    <tr><td>OAuth 2.0 Device Flow</td><td>CLI 登录改用 RFC 8628，移除 SMS</td></tr>
+    <tr><td>会话浮窗 5 功能</td><td>复制ID / 置顶 / 重命名 / 导出 / 删除</td></tr>
+    <tr><td>新建会话 loading 流程</td><td>状态机 + 失败提示 + daemon 续接</td></tr>
+    <tr><td>Token 管理</td><td>JWT jti 撤销 + 审计日志 + 刷新轮换</td></tr>
+    <tr><td>域名统一</td><td>pocketctl.me + Port 80 统一入口</td></tr>
+  </table>
+
+  <div class="verdict">
+    <div class="big">✅ v0.2.0 部署完成</div>
+    <p style="color:#8b949e;margin-top:4px;font-size:13px;">三服务在线 · DB 迁移完成 · 9 张表 · 无回滚</p>
+  </div>
+</body>
+</html>
