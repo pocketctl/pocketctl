@@ -1327,5 +1327,33 @@
     }, 1600);
   }
 </script>
+<script src="../js/web-session.js"></script>
+<script>
+  // 会话操作（⋯ 菜单：复制 ID / 固定 / 重命名 / 导出 / 删除，由 web-session.js 提供）
+  PocketctlSession.attach({
+    itemSelector: '.session-row',
+    actionsSelector: '.session-actions',
+    titleSelector: '.session-title',
+    getTitle: function (row) {
+      var t = row.querySelector('.session-title');
+      return t ? t.textContent.trim() : '该会话';
+    },
+    getId: function (row) { return row.dataset.id; },
+    getHostName: function (row) {
+      var d = row.querySelector('.session-daemon');
+      return d ? d.textContent.trim() : 'pocketctl 主机';
+    },
+    onDelete: function (row) {
+      var next = row.nextSibling;
+      var parent = row.parentNode;
+      row.classList.add('ss-removing');
+      setTimeout(function () { if (row.parentNode) row.remove(); }, 260);
+      return function undo() {
+        row.classList.remove('ss-removing');
+        parent.insertBefore(row, next);
+      };
+    }
+  });
+</script>
 </body>
 </html>

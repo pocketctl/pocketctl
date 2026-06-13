@@ -1,7 +1,7 @@
 import Fastify from 'fastify';
 import fastifyWebsocket from '@fastify/websocket';
 import fastifyCors from '@fastify/cors';
-import { createPool, initDB, parseDBUrl, createUser, getUserByEmail, getUserById, registerDevice, removeDevice, cleanStaleTombstones, upsertDaemonAlias, updateDisplayName, updateEmail, addToIOSWaitlist, revokeToken, isTokenRevoked, cleanRevokedTokens, insertAuditLog, bindTokenToDaemon } from './db.js';
+import { createPool, initDB, parseDBUrl, createUser, getUserByEmail, getUserById, registerDevice, removeDevice, cleanStaleTombstones, upsertDaemonAlias, updateDisplayName, updateEmail, addToIOSWaitlist, revokeToken, isTokenRevoked, cleanRevokedTokens, insertAuditLog, bindTokenToDaemon, updateSessionTitle, isSessionOwnedByUser, getSessionAllEvents } from './db.js';
 import { Router } from './router.js';
 import { hashPassword, verifyPassword, signAccessToken, signRefreshToken, verifyAccessToken, verifyRefreshToken, verifyAccessTokenWithRevocation } from './auth.js';
 import { notifyUser, sessionStatusPush, daemonOfflinePush } from './push.js';
@@ -335,6 +335,87 @@ async function main() {
     }, req.ip);
 
     return { success: true };
+  });
+
+  // ---- Session Actions (REST) ----
+
+  // Rename session
+  app.put('/api/sessions/:sessionId/title', async (req, reply) => {
+    const authHeader = req.headers.authorization;
+    if (!authHeader?.startsWith('Bearer ')) { reply.code(401); return { error: 'authorization required' }; }
+    const payload = verifyAccessToken(authHeader.slice(7));
+    if (!payload) { reply.code(401); return { error: 'invalid token' }; }
+    const { sessionId } = req.params as any;
+    const { title } = req.body as any;
+    if (!title || typeof title !== 'string' || title.trim().length === 0) {
+      reply.code(400); return { error: 'title is required' };
+    }
+    const cleanTitle = title.trim().slice(0, 60);
+    const ok = await updateSessionTitle(pool, payload.userId, sessionId, cleanTitle);
+    if (!ok) { reply.code(404); return { error: 'session not found or not owned' }; }
+    // Broadcast title update to same-user clients
+    router.broadcastToUser(payload.userId, { type: 'session_title_update', session_id: sessionId, title: cleanTitle });
+    return { success: true, title: cleanTitle };
+  });
+
+  // Export session record
+  app.get('/api/sessions/:sessionId/export', async (req, reply) => {
+    const authHeader = req.headers.authorization;
+    if (!authHeader?.startsWith('Bearer ')) { reply.code(401); return { error: 'authorization required' }; }
+    const payload = verifyAccessToken(authHeader.slice(7));
+    if (!payload) { reply.code(401); return { error: 'invalid token' }; }
+    const { sessionId } = req.params as any;
+    const format = ((req.query as any).format || 'md') as string;
+    const owned = await isSessionOwnedByUser(pool, payload.userId, sessionId);
+    if (!owned) { reply.code(404); return { error: 'session not found or not owned' }; }
+
+    const events = await getSessionAllEvents(pool, sessionId);
+    const sessRow = await pool.query('SELECT title, agent_type, created_at FROM sessions WHERE session_id = $1', [sessionId]);
+    const rawTitle = sessRow.rows[0]?.title || sessionId.slice(0, 8);
+    // ASCII-safe filename (fallback) + RFC 5987 for unicode
+    const asciiName = rawTitle.replace(/[^\w\-]/g, '_').slice(0, 40) || 'session';
+    const utf8Name = encodeURIComponent(rawTitle);
+    const makeDisposition = (ext: string) => `attachment; filename="${asciiName}.${ext}"; filename*=UTF-8''${utf8Name}.${ext}`;
+
+    if (format === 'json') {
+      reply.header('Content-Type', 'application/json');
+      reply.header('Content-Disposition', makeDisposition('json'));
+      return { session_id: sessionId, title: sessRow.rows[0]?.title || '', exported_at: new Date().toISOString(), events: events.map(e => e.payload) };
+    }
+
+    // Build markdown / text
+    const lines: string[] = [];
+    if (format === 'md') {
+      lines.push(`# ${sessRow.rows[0]?.title || sessionId.slice(0, 8)}`);
+      lines.push('');
+    }
+    for (const e of events) {
+      const p = e.payload;
+      if (p.type === 'user_text' || p.type === 'user_message') {
+        lines.push(format === 'md' ? `## 👤 User` : '[User]');
+        lines.push(p.text || p.content || '');
+        lines.push('');
+      } else if (p.type === 'agent_text') {
+        lines.push(format === 'md' ? `## 🤖 Assistant` : '[Assistant]');
+        lines.push(p.text || '');
+        lines.push('');
+      } else if (p.type === 'tool_call') {
+        const toolName = p.tool || 'tool';
+        lines.push(format === 'md' ? `<details><summary>🔧 ${toolName}</summary>` : `[Tool: ${toolName}]`);
+        if (p.input) lines.push('```json\n' + JSON.stringify(p.input, null, 2) + '\n```');
+        if (format === 'md') lines.push('</details>');
+        lines.push('');
+      } else if (p.type === 'tool_result') {
+        const out = (p.output || '').slice(0, 2000);
+        if (out) lines.push(format === 'md' ? `<details><summary>📋 Result</summary>\n\n\`\`\`\n${out}\n\`\`\`\n</details>` : `[Result] ${out.slice(0, 200)}`);
+        lines.push('');
+      }
+    }
+    const content = lines.join('\n');
+    const ext = format === 'md' ? 'md' : 'txt';
+    reply.header('Content-Type', format === 'md' ? 'text/markdown; charset=utf-8' : 'text/plain; charset=utf-8');
+    reply.header('Content-Disposition', makeDisposition(ext));
+    return content;
   });
 
   // Update user display name

@@ -126,15 +126,17 @@
         <span class="col-time">时间</span>
         <span class="col-actions" style="text-align:right;">状态</span>
       </div>
-      <div v-for="s in filteredSessions" :key="s.session_id" class="session-row" @click="$router.push(`/session/${s.session_id}`)">
+      <div v-for="s in filteredSessions" :key="s.session_id" :class="['session-row', { 'pending-delete': s.__pendingDelete }]" @click="!s.__pendingDelete && $router.push(`/session/${s.session_id}`)">
         <div class="session-info">
           <span :class="['status-dot', getEffectiveStatus(s)]"></span>
+          <span v-if="s.pinned" class="pin-mark">📌</span>
           <span :class="['session-title', { mono: !s.title || s.title.startsWith('Terminal Session') }]">{{ s.title || s.session_id.slice(0, 8) }}</span>
         </div>
         <div class="session-daemon">{{ s.daemon_alias || s.hostname || s.daemon_id?.slice(0, 8) }}</div>
         <div class="session-time">{{ formatRelativeTime(s.last_activity_at || s.updated_at) }}</div>
         <div class="session-actions">
           <span :class="['chip', statusChip(s)]">{{ statusLabel(s) }}</span>
+          <SessionActions :session="s" @renamed="onRenamed" @deleted="onDeleted" @pinned="onPinned" />
         </div>
       </div>
     </div>
@@ -158,6 +160,7 @@ import { formatRelativeTime } from '../composables/useRelativeTime'
 import { useAuth } from '../composables/useAuth'
 import NewSessionDialog from '../components/NewSessionDialog.vue'
 import RegisterDaemonDialog from '../components/RegisterDaemonDialog.vue'
+import SessionActions from '../components/SessionActions.vue'
 
 const { connect, send, onEvent, effectiveStatus } = useWebSocket()
 const { isLoggedIn, logout } = useAuth()
@@ -181,6 +184,8 @@ const offlineDaemonCount = computed(() => daemons.value.filter(d => !d.daemon_on
 const activeSessionCount = computed(() => sessions.value.filter(s => s.status === 'running' || s.status === 'busy').length)
 
 const sortedSessions = computed(() => [...sessions.value].sort((a, b) => {
+  if (a.pinned && !b.pinned) return -1
+  if (!a.pinned && b.pinned) return 1
   const ta = a.last_activity_at ? new Date(a.last_activity_at).getTime() : 0
   const tb = b.last_activity_at ? new Date(b.last_activity_at).getTime() : 0
   return tb - ta
@@ -303,8 +308,14 @@ onMounted(() => {
 
   onEvent('session_deleted', (msg: any) => { sessions.value = sessions.value.filter((s: any) => s.session_id !== msg.session_id) })
   onEvent('session_title_update', (msg: any) => { const s = sessions.value.find((s: any) => s.session_id === msg.session_id); if (s) s.title = msg.title })
+  onEvent('session_pinned', (msg: any) => { const s = sessions.value.find((s: any) => s.session_id === msg.session_id); if (s) s.pinned = msg.pinned })
   onEvent('error', (msg: any) => { lastError.value = msg.error || '未知错误' })
 })
+
+// SessionActions handlers (optimistic local updates)
+function onRenamed(sessionId: string, title: string) { const s = sessions.value.find((s: any) => s.session_id === sessionId); if (s) s.title = title }
+function onDeleted(sessionId: string) { sessions.value = sessions.value.filter((s: any) => s.session_id !== sessionId) }
+function onPinned(sessionId: string, pinned: boolean) { const s = sessions.value.find((s: any) => s.session_id === sessionId); if (s) s.pinned = pinned }
 </script>
 
 <style>
@@ -358,7 +369,8 @@ onMounted(() => {
 /* Session Table */
 .session-table { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-lg); overflow: hidden; transition: background var(--transition), border-color var(--transition); }
 .session-table-header { display: grid; grid-template-columns: 2fr 1fr 1fr 120px; padding: 12px 20px; font-size: 12px; font-weight: 600; color: var(--fg-tertiary); text-transform: uppercase; letter-spacing: 0.5px; border-bottom: 1px solid var(--border); background: var(--surface-hover); }
-.session-row { display: grid; grid-template-columns: 2fr 1fr 1fr 120px; padding: 14px 20px; align-items: center; border-bottom: 1px solid var(--border); cursor: pointer; transition: background 0.1s; }
+.session-row { display: grid; grid-template-columns: 2fr 1fr 1fr 120px; padding: 14px 20px; align-items: center; border-bottom: 1px solid var(--border); cursor: pointer; transition: background 0.1s, opacity 0.25s ease; }
+.session-row.pending-delete { opacity: 0.35; pointer-events: none; }
 .session-row:last-child { border-bottom: none; }
 .session-row:hover { background: var(--surface-hover); }
 .session-row .session-info { display: flex; align-items: center; gap: 10px; }

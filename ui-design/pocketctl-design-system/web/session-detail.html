@@ -670,5 +670,107 @@
     history.replaceState({}, '', location.pathname);
   })();
 </script>
+<script src="../js/web-session.js"></script>
+<script>
+  // 会话删除 / 切换功能（⋯ 菜单 / 确认弹窗 / 撤销 toast 由 web-session.js 提供）
+  var BACK_SVG = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M15 18l-6-6 6-6"/></svg>';
+  function ssEsc(s) {
+    return String(s).replace(/[&<>"']/g, function (c) {
+      return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c];
+    });
+  }
+
+  function selectSession(item, opts) {
+    var list = document.getElementById('session-list');
+    list.querySelectorAll('.session-list-item').forEach(function (i) { i.classList.remove('active'); });
+    var titleWrap = document.getElementById('chat-title-wrap');
+    var daemonText = '';
+    var dn = titleWrap.querySelector('.daemon-name');
+    if (dn) daemonText = dn.textContent;
+    if (item) {
+      item.classList.add('active');
+      var title = item.querySelector('.sl-title').textContent.trim();
+      titleWrap.innerHTML = BACK_SVG + ssEsc(title) + '<span class="daemon-name">' + daemonText + '</span>';
+      document.title = 'pocketctl — ' + title;
+      if (opts && opts.replaceMessages) {
+        document.getElementById('chat-messages').innerHTML =
+          '<div class="new-session-banner" style="background:var(--accent-muted);color:var(--accent);border-color:transparent;">' +
+          '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M5 12h14M12 5l7 7-7 7"/></svg>' +
+          '已切换到「' + ssEsc(title) + '」 · 正在加载会话内容…</div>';
+        var status = document.getElementById('chat-status');
+        if (status) { status.className = 'status-pill connecting'; status.innerHTML = '<span class="pulse"></span>连接中'; }
+      }
+    }
+  }
+
+  // 点击列表项切换会话（仅高亮 + 标题，保留主区消息演示）
+  document.querySelectorAll('#session-list .session-list-item').forEach(function (item) {
+    item.addEventListener('click', function () { selectSession(item); });
+  });
+
+  PocketctlSession.attach({
+    itemSelector: '.session-list-item',
+    titleSelector: '.sl-title',
+    getTitle: function (item) {
+      var t = item.querySelector('.sl-title');
+      return t ? t.textContent.trim() : '该会话';
+    },
+    getId: function (item) { return item.dataset.id; },
+    getHostName: function (item) {
+      var h = document.getElementById('panel-host');
+      return h ? h.textContent.trim() : 'pocketctl 主机';
+    },
+    // 导出时从主区提取当前会话的真实消息
+    getExportData: function (item) {
+      var msgs = [];
+      var nodes = document.getElementById('chat-messages').children;
+      for (var i = 0; i < nodes.length; i++) {
+        var n = nodes[i];
+        if (n.classList.contains('msg-user')) msgs.push({ role: 'user', content: n.textContent.trim(), time: '' });
+        else if (n.classList.contains('msg-agent') && !n.classList.contains('msg-connecting')) msgs.push({ role: 'assistant', content: n.textContent.trim(), time: '' });
+        else if (n.classList.contains('tool-card')) {
+          var nm = n.querySelector('.tool-name');
+          if (nm) msgs.push({ role: 'tool', content: nm.textContent.trim(), time: '' });
+        }
+      }
+      return {
+        title: (item.querySelector('.sl-title') || {}).textContent ? item.querySelector('.sl-title').textContent.trim() : '会话记录',
+        id: item.dataset.id,
+        host: (document.getElementById('panel-host') || {}).textContent ? document.getElementById('panel-host').textContent.trim() : '',
+        createdAt: '',
+        messages: msgs
+      };
+    },
+    onOpen: function (item) { selectSession(item); },
+    onDelete: function (item) {
+      var wasActive = item.classList.contains('active');
+      var next = item.nextSibling;
+      var list = document.getElementById('session-list');
+      item.classList.add('ss-removing');
+      setTimeout(function () {
+        if (item.parentNode) item.remove();
+        if (wasActive) {
+          var first = list.querySelector('.session-list-item');
+          if (first) {
+            selectSession(first, { replaceMessages: true });
+          } else {
+            document.getElementById('chat-title-wrap').innerHTML = BACK_SVG + '没有会话';
+            document.getElementById('chat-status').style.display = 'none';
+            document.getElementById('chat-messages').innerHTML =
+              '<div class="empty-state"><div class="empty-icon">—</div>' +
+              '<div class="empty-title">该主机暂无会话</div>' +
+              '<div class="empty-subtitle">从左上角新建一个会话开始吧。</div></div>';
+          }
+        }
+      }, 260);
+      return function undo() {
+        item.classList.remove('ss-removing');
+        list.insertBefore(item, next);
+        document.getElementById('chat-status').style.display = '';
+        if (wasActive) selectSession(item, { replaceMessages: true });
+      };
+    }
+  });
+</script>
 </body>
 </html>

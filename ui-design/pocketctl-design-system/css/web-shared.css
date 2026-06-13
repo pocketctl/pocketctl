@@ -729,3 +729,230 @@ body {
   .page-container { padding: 16px; }
   .page-title { font-size: 20px; }
 }
+
+/* ============================================
+   Session actions: ⋯ menu / delete dialog / undo toast
+   shared across web pages — js/web-session.js
+   ============================================ */
+
+/* ---- ⋯ trigger button (hover-reveal) ---- */
+.ss-more-btn {
+  width: 28px; height: 28px;
+  display: inline-flex; align-items: center; justify-content: center;
+  border: none; background: transparent;
+  color: var(--fg-tertiary);
+  border-radius: var(--radius-md);
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 0.15s, background 0.15s, color 0.15s;
+  flex-shrink: 0;
+}
+.session-row:hover .ss-more-btn,
+.session-list-item:hover .ss-more-btn { opacity: 1; }
+.ss-more-btn:hover { background: var(--surface-active); color: var(--fg); }
+.ss-more-btn:focus-visible { opacity: 1; outline: 2px solid var(--accent); outline-offset: 1px; }
+.session-list-item .ss-more-btn { margin-left: 4px; }
+
+/* ---- floating ⋯ menu ---- */
+.ss-menu {
+  position: fixed; z-index: 200;
+  min-width: 188px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-lg);
+  padding: 4px;
+  opacity: 0; visibility: hidden;
+  transform: translateY(-4px) scale(0.98);
+  transition: opacity 0.12s, transform 0.12s, visibility 0.12s;
+}
+.ss-menu.open { opacity: 1; visibility: visible; transform: translateY(0) scale(1); }
+
+.ss-menu-item {
+  width: 100%;
+  display: flex; align-items: center; gap: 10px;
+  padding: 8px 10px;
+  border: none; background: transparent;
+  color: var(--fg-secondary);
+  font-family: var(--font-body); font-size: 13px;
+  border-radius: var(--radius-sm);
+  cursor: pointer; text-align: left;
+  transition: background 0.12s, color 0.12s;
+}
+.ss-menu-item span { flex: 1; }
+.ss-menu-item:hover { background: var(--surface-hover); color: var(--fg); }
+.ss-menu-item.danger { color: var(--error); }
+.ss-menu-item.danger:hover { background: rgba(248, 81, 73, 0.12); }
+[data-theme="light"] .ss-menu-item.danger:hover { background: var(--error-bg); }
+.ss-menu-hint {
+  font-style: normal; font-size: 11px; color: var(--fg-tertiary);
+  font-family: var(--font-mono); max-width: 96px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.ss-menu-sep { height: 1px; background: var(--border); margin: 4px 2px; }
+
+/* ---- delete confirm dialog ---- */
+.ss-overlay {
+  position: fixed; inset: 0; z-index: 210;
+  background: rgba(1, 4, 9, 0.6);
+  backdrop-filter: blur(4px); -webkit-backdrop-filter: blur(4px);
+  display: flex; align-items: center; justify-content: center;
+  padding: 24px;
+  opacity: 0; visibility: hidden;
+  transition: opacity 0.15s, visibility 0.15s;
+}
+[data-theme="light"] .ss-overlay { background: rgba(31, 35, 40, 0.34); }
+.ss-overlay.open { opacity: 1; visibility: visible; }
+
+.ss-dialog {
+  width: 100%; max-width: 400px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-xl);
+  box-shadow: var(--shadow-lg);
+  padding: 26px 24px 22px;
+  text-align: center;
+  transform: translateY(8px) scale(0.97);
+  transition: transform 0.18s;
+}
+.ss-overlay.open .ss-dialog { transform: translateY(0) scale(1); }
+
+.ss-dialog-icon {
+  width: 44px; height: 44px;
+  margin: 0 auto 14px;
+  border-radius: 50%;
+  display: flex; align-items: center; justify-content: center;
+  background: rgba(248, 81, 73, 0.12); color: var(--error);
+}
+[data-theme="light"] .ss-dialog-icon { background: var(--error-bg); }
+
+.ss-dialog-title {
+  font-family: var(--font-display); font-size: 18px; font-weight: 700;
+  color: var(--fg); margin-bottom: 8px;
+}
+.ss-dialog-desc {
+  font-size: 13px; color: var(--fg-secondary); line-height: 1.6; margin-bottom: 12px;
+}
+.ss-dialog-target {
+  display: inline-block; max-width: 100%;
+  font-family: var(--font-mono); font-size: 12px;
+  color: var(--fg); background: var(--bg);
+  border: 1px solid var(--border);
+  padding: 4px 10px; border-radius: var(--radius-sm);
+  margin-bottom: 20px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+
+.ss-dialog-actions { display: flex; gap: 10px; }
+.ss-dialog-actions .btn { flex: 1; padding: 11px; font-size: 14px; font-weight: 600; justify-content: center; }
+.ss-confirm {
+  display: inline-flex; align-items: center; justify-content: center;
+  background: var(--error); color: #fff; border: 1px solid var(--error);
+  border-radius: var(--radius-md); cursor: pointer;
+  font-family: var(--font-body);
+}
+.ss-confirm:hover:not(.loading) { filter: brightness(1.08); }
+.ss-confirm .ss-confirm-loading { display: none; }
+.ss-confirm.loading { cursor: wait; opacity: 0.85; }
+.ss-confirm.loading .ss-confirm-label { display: none; }
+.ss-confirm.loading .ss-confirm-loading { display: inline-flex; align-items: center; gap: 8px; }
+.ss-confirm .spinner { width: 14px; height: 14px; border-top-color: #fff; }
+
+/* ---- undo toast ---- */
+.ss-toast {
+  position: fixed; left: 50%; bottom: 28px;
+  transform: translate(-50%, 16px);
+  z-index: 220;
+  display: flex; align-items: center; gap: 16px;
+  background: var(--surface-active);
+  border: 1px solid var(--border-light);
+  color: var(--fg);
+  padding: 11px 14px 11px 18px;
+  border-radius: var(--radius-full);
+  box-shadow: var(--shadow-lg);
+  font-size: 13px;
+  opacity: 0; visibility: hidden;
+  transition: opacity 0.2s, transform 0.2s, visibility 0.2s;
+  max-width: calc(100vw - 32px);
+}
+.ss-toast.show { opacity: 1; visibility: visible; transform: translate(-50%, 0); }
+.ss-toast-msg { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ss-toast-undo {
+  background: var(--accent); color: #fff; border: none;
+  font-family: var(--font-body); font-size: 12px; font-weight: 600;
+  padding: 6px 12px; border-radius: var(--radius-full);
+  cursor: pointer; white-space: nowrap; flex-shrink: 0;
+}
+.ss-toast-undo:hover { background: var(--accent-hover); }
+
+@media (max-width: 768px) {
+  .ss-more-btn { opacity: 1; } /* no hover on touch */
+}
+
+/* ---- removal animation ---- */
+.session-row.ss-removing,
+.session-list-item.ss-removing {
+  opacity: 0; transform: translateX(-8px);
+  transition: opacity 0.25s ease, transform 0.25s ease;
+}
+.session-list-item.ss-removing { max-height: 0; margin: 0; overflow: hidden; }
+
+/* ---- pin (固定到顶部) ---- */
+.ss-pin-mark {
+  display: inline-flex; align-items: center;
+  color: var(--accent);
+  margin-right: 6px;
+  vertical-align: middle;
+}
+.ss-pin-mark svg { width: 12px; height: 12px; display: block; }
+.session-list-item.pinned { background: var(--accent-subtle); }
+.session-list-item.pinned.active,
+.session-list-item.pinned:hover { background: var(--sidebar-active); }
+.session-row.pinned { background: var(--accent-subtle); }
+.session-row.pinned:hover { background: var(--accent-subtle); border-color: var(--accent-muted); }
+.ss-menu-item.active { color: var(--accent); }
+
+/* ---- rename inline editor ---- */
+.ss-rename-input {
+  background: var(--bg);
+  border: 1px solid var(--accent);
+  border-radius: var(--radius-sm);
+  padding: 1px 6px;
+  color: var(--fg);
+  outline: none;
+  box-shadow: 0 0 0 3px var(--accent-muted);
+  min-width: 0; max-width: 100%;
+}
+.session-row .session-info .ss-rename-input { font-size: 14px; font-weight: 500; }
+.session-list-item .ss-rename-input { font-size: 13px; font-weight: 500; }
+
+/* ---- export dialog ---- */
+.ss-export-overlay { z-index: 210; }
+.ss-export-dialog { max-width: 380px; }
+.ss-export-icon { background: var(--accent-muted); color: var(--accent); }
+.ss-format-group {
+  display: flex; flex-direction: column; gap: 8px;
+  margin-bottom: 20px; text-align: left;
+}
+.ss-format {
+  display: flex; flex-direction: column; gap: 2px;
+  width: 100%; text-align: left;
+  padding: 11px 14px;
+  border: 2px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--bg);
+  cursor: pointer;
+  transition: border-color 0.15s, background 0.15s;
+  font-family: var(--font-body);
+}
+.ss-format:hover { border-color: var(--border-light); }
+.ss-format.selected { border-color: var(--accent); background: var(--accent-subtle); }
+.ss-format-name { font-size: 14px; font-weight: 600; color: var(--fg); }
+.ss-format-desc { font-size: 12px; color: var(--fg-tertiary); }
+.ss-export-confirm {
+  display: inline-flex; align-items: center; justify-content: center;
+  background: var(--accent); color: #fff; border: 1px solid var(--accent);
+  border-radius: var(--radius-md); cursor: pointer;
+  font-family: var(--font-body); font-weight: 600;
+}
+.ss-export-confirm:hover { background: var(--accent-hover); border-color: var(--accent-hover); }

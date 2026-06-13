@@ -16,14 +16,17 @@
       <code class="empty-cmd">pocketctl daemon start --relay &lt;url&gt; --api-key &lt;key&gt;</code>
       <button class="btn primary empty-btn" @click="showNewSession = true">创建 Web 会话</button>
     </div>
-    <div v-for="s in sortedSessions" :key="s.session_id" class="session-row" @click="$router.push(`/session/${s.session_id}`)">
+    <div v-for="s in sortedSessions" :key="s.session_id" :class="['session-row', { 'pending-delete': s.__pendingDelete }]" @click="!s.__pendingDelete && $router.push(`/session/${s.session_id}`)">
       <span class="status-indicator" :class="getEffectiveStatus(s)">
         <span v-if="getEffectiveStatus(s) === 'running' || getEffectiveStatus(s) === 'busy'" class="pulse-ring"></span>
         <span v-if="getEffectiveStatus(s) === 'completed'" class="icon">✓</span>
         <span v-else-if="getEffectiveStatus(s) === 'killed'" class="icon">✕</span>
       </span>
       <div class="session-info">
-        <div class="session-title">{{ s.title || s.session_id.slice(0, 8) }}</div>
+        <div class="session-title">
+          <span v-if="s.pinned" class="pin-mark" style="color: var(--accent); margin-right: 4px;">📌</span>
+          {{ s.title || s.session_id.slice(0, 8) }}
+        </div>
         <div class="session-meta">
           <span class="source-badge" :class="s.source">{{ s.source === 'terminal' ? '📺 终端' : '🌐 Web' }}</span>
           <span v-if="s.hostname" class="hostname-badge">💻 {{ s.hostname }}</span>
@@ -34,6 +37,7 @@
         </div>
       </div>
       <span class="session-time">{{ formatRelativeTime(s.last_activity_at || s.started_at) }}</span>
+      <SessionActions :session="s" @renamed="onRenamed" @deleted="onDeleted" @pinned="onPinned" />
     </div>
     <NewSessionDialog v-if="showNewSession" @close="showNewSession = false" @create="handleCreate" />
   </div>
@@ -47,6 +51,7 @@ import type { DaemonEvent } from '../composables/useWebSocket'
 import { formatRelativeTime } from '../composables/useRelativeTime'
 import { useAuth } from '../composables/useAuth'
 import NewSessionDialog from '../components/NewSessionDialog.vue'
+import SessionActions from '../components/SessionActions.vue'
 
 const { connect, send, onEvent, effectiveStatus } = useWebSocket()
 const { isLoggedIn, logout } = useAuth()
@@ -57,6 +62,9 @@ const lastError = ref('')
 
 const sortedSessions = computed(() => {
   return [...sessions.value].sort((a, b) => {
+    // Pinned first
+    if (a.pinned && !b.pinned) return -1
+    if (!a.pinned && b.pinned) return 1
     const ta = a.last_activity_at ? new Date(a.last_activity_at).getTime() : (a.started_at ? new Date(a.started_at).getTime() : 0)
     const tb = b.last_activity_at ? new Date(b.last_activity_at).getTime() : (b.started_at ? new Date(b.started_at).getTime() : 0)
     return tb - ta
@@ -109,6 +117,7 @@ onMounted(() => {
           exit_reason: s.exit_reason,
           daemon_online: s.daemon_online,
           subagent_count: s.subagent_count || 0,
+          pinned: s.pinned || false,
         }))
       }
     }
@@ -139,8 +148,28 @@ onMounted(() => {
       const existing = sessions.value.find(s => s.session_id === evt.session_id)
       if (existing) existing.title = evt.title || existing.title
     }
+    if (evt.type === 'session_deleted' && evt.session_id) {
+      sessions.value = sessions.value.filter(s => s.session_id !== evt.session_id)
+    }
+    if (evt.type === 'session_pinned' && evt.session_id) {
+      const existing = sessions.value.find(s => s.session_id === evt.session_id)
+      if (existing) existing.pinned = (evt as any).pinned
+    }
   })
 })
+
+// SessionActions handlers (local optimistic updates; WS events above keep multi-client in sync)
+function onRenamed(sessionId: string, title: string) {
+  const s = sessions.value.find(s => s.session_id === sessionId)
+  if (s) s.title = title
+}
+function onDeleted(sessionId: string) {
+  sessions.value = sessions.value.filter(s => s.session_id !== sessionId)
+}
+function onPinned(sessionId: string, pinned: boolean) {
+  const s = sessions.value.find(s => s.session_id === sessionId)
+  if (s) s.pinned = pinned
+}
 
 function handleCreate(data: { agent: string; cwd: string; prompt: string }) {
   send({ type: 'session_create', agent: data.agent, cwd: data.cwd, prompt: data.prompt })
@@ -170,7 +199,8 @@ function handleLogout() {
 .empty-cmd { display: block; background: #0d1117; padding: 8px 12px; border-radius: 6px; font-size: 12px; color: #79c0ff; margin: 6px auto; max-width: 400px; word-break: break-all; }
 .empty-btn { margin-top: 20px; }
 .error-banner { background: #3d1214; border: 1px solid #da3633; color: #f85149; padding: 12px 16px; border-radius: 8px; margin-bottom: 12px; font-size: 14px; }
-.session-row { display: flex; align-items: center; gap: 12px; padding: 12px 16px; border: 1px solid #21262d; border-radius: 8px; margin-bottom: 8px; cursor: pointer; background: #161b22; }
+.session-row { display: flex; align-items: center; gap: 12px; padding: 12px 16px; border: 1px solid #21262d; border-radius: 8px; margin-bottom: 8px; cursor: pointer; background: #161b22; transition: opacity 0.25s ease; }
+.session-row.pending-delete { opacity: 0.35; pointer-events: none; }
 .session-row:hover { border-color: #30363d; background: #1c2129; }
 
 /* Status indicator — unified dot/icon system */

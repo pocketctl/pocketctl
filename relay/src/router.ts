@@ -299,7 +299,8 @@ export class Router {
       return;
     }
     if (msg.type === 'session_title_update') {
-      this.pool.query('UPDATE sessions SET title = $1 WHERE session_id = $2', [msg.title || '', sessionId]).catch(console.error);
+      // Only overwrite default titles — protect user-renamed titles
+      this.pool.query('UPDATE sessions SET title = $1 WHERE session_id = $2 AND (title LIKE \'Terminal Session-%\' OR title IS NULL)', [msg.title || '', sessionId]).catch(console.error);
       for (const [clientWs, client] of this.clients) {
         if (client.subscribedSessions.has(sessionId) && clientWs.readyState === 1) this.send(clientWs, msg);
       }
@@ -329,17 +330,33 @@ export class Router {
     if (msg.type === 'session_delete') {
       const sessionId = msg.session_id;
       if (!sessionId) { this.send(clientWs, { type: 'error', error: 'session_id required' }); return; }
-      // Delete session, events from DB, write tombstone
-      db.deleteSession(this.pool, sessionId).catch(console.error);
-      // Clean up session-to-daemon mapping
-      this.sessionToDaemon.delete(sessionId);
-      // Broadcast session_deleted to all clients of the same user
-      for (const [ws, c] of this.clients) {
-        if (ws.readyState === 1 && this.sameUser(c.userId, client.userId)) {
-          c.subscribedSessions.delete(sessionId);
-          this.send(ws, { type: 'session_deleted', session_id: sessionId });
+      // Ownership check
+      db.isSessionOwnedByUser(this.pool, client.userId!, sessionId).then((owned) => {
+        if (!owned) { this.send(clientWs, { type: 'error', error: 'session not found or not owned' }); return; }
+        db.deleteSession(this.pool, sessionId).catch(console.error);
+        this.sessionToDaemon.delete(sessionId);
+        for (const [ws, c] of this.clients) {
+          if (ws.readyState === 1 && this.sameUser(c.userId, client.userId)) {
+            c.subscribedSessions.delete(sessionId);
+            this.send(ws, { type: 'session_deleted', session_id: sessionId });
+          }
         }
-      }
+      }).catch(console.error);
+      return;
+    }
+
+    if (msg.type === 'session_pin') {
+      const sessionId = msg.session_id;
+      if (!sessionId) { this.send(clientWs, { type: 'error', error: 'session_id required' }); return; }
+      const pinned = !!msg.pinned;
+      db.setSessionPin(this.pool, client.userId!, sessionId, pinned).then((ok) => {
+        if (!ok) { this.send(clientWs, { type: 'error', error: 'session not found or not owned' }); return; }
+        for (const [ws, c] of this.clients) {
+          if (ws.readyState === 1 && this.sameUser(c.userId, client.userId)) {
+            this.send(ws, { type: 'session_pinned', session_id: sessionId, pinned });
+          }
+        }
+      }).catch(console.error);
       return;
     }
 
@@ -509,6 +526,15 @@ export class Router {
     db.setDaemonOffline(this.pool, daemonId).catch(console.error);
 
     return { success: true };
+  }
+
+  /** Broadcast a message to all clients of the given user. */
+  broadcastToUser(userId: number, data: any): void {
+    for (const [ws, c] of this.clients) {
+      if (ws.readyState === 1 && this.sameUser(c.userId, userId)) {
+        this.send(ws, data);
+      }
+    }
   }
 
   private sameUser(a: number | null, b: number | null): boolean {

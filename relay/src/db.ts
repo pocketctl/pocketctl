@@ -100,6 +100,11 @@ export async function initDB(pool: pg.Pool): Promise<void> {
   await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS plan VARCHAR(16) DEFAULT 'free'`);
   await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS whitelist BOOLEAN DEFAULT false`);
 
+  // Session pin (pinned to top)
+  await pool.query(`ALTER TABLE sessions ADD COLUMN IF NOT EXISTS pinned BOOLEAN NOT NULL DEFAULT false`);
+  await pool.query(`ALTER TABLE sessions ADD COLUMN IF NOT EXISTS pinned_at TIMESTAMPTZ`);
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_sessions_pinned ON sessions(user_id, pinned) WHERE pinned = true`);
+
   // Session delete tombstone table
   await pool.query(`
     CREATE TABLE IF NOT EXISTS deleted_sessions (
@@ -211,13 +216,12 @@ export async function getEventsAfter(pool: pg.Pool, sessionId: string, lastSeq: 
 export async function listSessions(pool: pg.Pool): Promise<any[]> {
   const result = await pool.query(
     `SELECT s.session_id, s.daemon_id, s.agent_type, s.cwd, s.title, s.source, s.status,
-            s.created_at, s.updated_at, s.last_activity_at, s.exit_reason, s.subagent_count,
+            s.created_at, s.updated_at, s.last_activity_at, s.exit_reason, s.subagent_count, s.pinned,
             d.status AS daemon_status, d.hostname AS hostname, d.alias AS daemon_alias
      FROM sessions s
      LEFT JOIN daemons d ON s.daemon_id = d.daemon_id
-     WHERE s.status NOT IN ('completed', 'error', 'killed')
-       AND s.session_id NOT LIKE 'pending-%'
-     ORDER BY COALESCE(s.last_activity_at, s.updated_at) DESC`
+     WHERE s.session_id NOT LIKE 'pending-%'
+     ORDER BY s.pinned DESC, s.pinned_at DESC NULLS LAST, COALESCE(s.last_activity_at, s.updated_at) DESC`
   );
   return result.rows.map((row: any) => ({
     ...row,
@@ -324,13 +328,13 @@ export async function bindDaemonToUser(pool: pg.Pool, daemonId: string, userId: 
 export async function listSessionsByUser(pool: pg.Pool, userId: number): Promise<any[]> {
   const result = await pool.query(
     `SELECT s.session_id, s.daemon_id, s.agent_type, s.cwd, s.title, s.source, s.status,
-            s.created_at, s.updated_at, s.last_activity_at, s.exit_reason, s.subagent_count,
-            d.status AS daemon_status, d.hostname AS hostname
+            s.created_at, s.updated_at, s.last_activity_at, s.exit_reason, s.subagent_count, s.pinned,
+            d.status AS daemon_status, d.hostname AS hostname, d.alias AS daemon_alias
      FROM sessions s
      LEFT JOIN daemons d ON s.daemon_id = d.daemon_id
      WHERE s.user_id = $1
        AND s.session_id NOT LIKE 'pending-%'
-     ORDER BY COALESCE(s.last_activity_at, s.updated_at) DESC`,
+     ORDER BY s.pinned DESC, s.pinned_at DESC NULLS LAST, COALESCE(s.last_activity_at, s.updated_at) DESC`,
     [userId]
   );
   return result.rows.map((row: any) => ({
@@ -376,6 +380,44 @@ export async function updateTitleIfDefault(pool: pg.Pool, sessionId: string, new
   );
   return (result.rowCount ?? 0) > 0;
 }
+
+/** Unconditionally update session title (user rename), with ownership check. Returns true if updated. */
+export async function updateSessionTitle(pool: pg.Pool, userId: number, sessionId: string, title: string): Promise<boolean> {
+  const result = await pool.query(
+    `UPDATE sessions SET title = $1, updated_at = NOW() WHERE session_id = $2 AND user_id = $3 AND session_id NOT LIKE 'pending-%'`,
+    [title, sessionId, userId]
+  );
+  return (result.rowCount ?? 0) > 0;
+}
+
+/** Set session pinned state, with ownership check. Returns true if updated. */
+export async function setSessionPin(pool: pg.Pool, userId: number, sessionId: string, pinned: boolean): Promise<boolean> {
+  const result = await pool.query(
+    `UPDATE sessions SET pinned = $1, pinned_at = CASE WHEN $1 THEN NOW() ELSE NULL END, updated_at = NOW()
+     WHERE session_id = $2 AND user_id = $3 AND session_id NOT LIKE 'pending-%'`,
+    [pinned, sessionId, userId]
+  );
+  return (result.rowCount ?? 0) > 0;
+}
+
+/** Check if a session belongs to the given user. */
+export async function isSessionOwnedByUser(pool: pg.Pool, userId: number, sessionId: string): Promise<boolean> {
+  const result = await pool.query(
+    `SELECT 1 FROM sessions WHERE session_id = $1 AND user_id = $2 AND session_id NOT LIKE 'pending-%'`,
+    [sessionId, userId]
+  );
+  return (result.rowCount ?? 0) > 0;
+}
+
+/** Get all events for a session (for export). */
+export async function getSessionAllEvents(pool: pg.Pool, sessionId: string): Promise<any[]> {
+  const result = await pool.query(
+    `SELECT id, session_id, event_type, payload, created_at FROM events WHERE session_id = $1 ORDER BY id ASC`,
+    [sessionId]
+  );
+  return result.rows;
+}
+
 
 /// Clean up tombstones older than 30 days
 export async function cleanStaleTombstones(pool: pg.Pool): Promise<number> {
