@@ -54,7 +54,7 @@ defineEmits<{ close: [] }>()
 const copied = ref(false)
 
 const relayWs = computed(() => {
-  return localStorage.getItem('pocketctl_relay_url') || (window as any).__RELAY_WS__ || 'ws://localhost:8080/ws'
+  return localStorage.getItem('pocketctl_relay_url') || (window as any).__RELAY_WS__ || 'ws://localhost/ws'
 })
 
 const installURL = computed(() => {
@@ -62,7 +62,7 @@ const installURL = computed(() => {
     const u = new URL(relayWs.value)
     return u.origin.replace(/^ws/, 'http') + '/install-daemon.sh'
   } catch {
-    return 'https://pocketctl.com/install-daemon.sh'
+    return 'https://pocketctl.me/install-daemon.sh'
   }
 })
 

@@ -4,7 +4,7 @@ import * as db from './db.js';
 import { generateTitle } from './title.js';
 import { notifyUser, sessionStatusPush, daemonOfflinePush } from './push.js';
 
-interface DaemonConnection { ws: WebSocket; daemonId: string; hostname: string; agents: string[]; userId: number | null }
+interface DaemonConnection { ws: WebSocket; daemonId: string; hostname: string; agents: string[]; userId: number | null; os?: string; ip?: string }
 interface ClientConnection { ws: WebSocket; subscribedSessions: Set<string>; userId: number | null }
 
 export class Router {
@@ -13,61 +13,95 @@ export class Router {
   private sessionToDaemon = new Map<string, string>();
   private pendingSessionCreate = new Map<string, WebSocket>();
   private pendingSessionMeta = new Map<string, { agent_type: string; cwd: string }>();
+  private takeoverTimers = new Map<string, { timer: ReturnType<typeof setTimeout>; newDaemonId: string; newHostname: string }>();
   private pool: pg.Pool;
 
   constructor(pool: pg.Pool) { this.pool = pool; }
 
-  async registerDaemon(ws: WebSocket, msg: any, userId: number | null): Promise<void> {
+  async registerDaemon(ws: WebSocket, msg: any, userId: number | null, tokenJti?: string, machineId?: string): Promise<void> {
     const daemonId = msg.daemon_id;
     const hostname = msg.hostname || 'unknown';
     const agents = msg.agents || [];
 
-    // Daemon limit check for authenticated users
+    // Soft eviction: check for existing daemon(s) for this user
     if (userId) {
       try {
         const { plan, whitelist } = await db.getUserPlanAndWhitelist(this.pool, userId);
-        if (!whitelist && plan === 'free') {
-          // Count online daemons for this user
-          let onlineCount = 0;
-          let currentHost = '';
-          for (const [, d] of this.daemons) {
-            if (d.userId === userId) {
-              onlineCount++;
-              currentHost = d.hostname;
-            }
+        const maxDaemons = whitelist ? Infinity : (plan === 'free' ? 1 : Infinity);
+
+        // Find existing online daemons for this user with different daemonId
+        const oldDaemons: { daemonId: string; daemon: DaemonConnection }[] = [];
+        for (const [dId, d] of this.daemons) {
+          if (d.userId === userId && dId !== daemonId) {
+            oldDaemons.push({ daemonId: dId, daemon: d });
           }
-          if (onlineCount >= 1) {
-            this.send(ws, {
-              type: 'error',
-              error: `免费版仅支持1台主机。当前在线: ${currentHost}。请先在 ${currentHost} 上运行 pocketctl daemon stop`,
-              code: 'DAEMON_LIMIT_REACHED',
-              limit: 1,
-              plan: 'free',
-              current_host: currentHost,
+        }
+
+        if (oldDaemons.length >= maxDaemons) {
+          // Soft eviction: notify old daemon(s) and set grace period
+          for (const { daemonId: oldId, daemon: oldDaemon } of oldDaemons) {
+            // Send kicked message with grace period
+            this.send(oldDaemon.ws, {
+              type: 'kicked',
+              reason: 'new_login',
+              message: `账号已在 ${hostname} 上登录，当前连接将在 5 分钟后断开`,
+              grace_period_seconds: 300,
+              new_hostname: hostname,
             });
-            ws.close();
-            return;
+
+            // Start grace period timer
+            const timer = setTimeout(() => {
+              // Revoke old daemon's token
+              if (oldDaemon.userId) {
+                db.revokeToken(this.pool, '', oldDaemon.userId, 'new_login').catch(console.error);
+                db.insertAuditLog(this.pool, oldDaemon.userId, 'daemon_replace', {
+                  old_daemon_id: oldId,
+                  new_daemon_id: daemonId,
+                  grace_period: 300,
+                }).catch(console.error);
+              }
+              // Close old daemon connection
+              if (oldDaemon.ws.readyState === 1) {
+                this.send(oldDaemon.ws, {
+                  type: 'kicked',
+                  reason: 'grace_period_expired',
+                  message: '5 分钟等待期已过，连接即将断开',
+                  grace_period_seconds: 0,
+                });
+                oldDaemon.ws.close();
+              }
+              this.daemons.delete(oldId);
+              db.setDaemonOffline(this.pool, oldId).catch(console.error);
+            }, 300_000); // 5 minutes
+
+            // Store timer reference for cancellation
+            this.takeoverTimers = this.takeoverTimers || new Map();
+            this.takeoverTimers.set(oldId, { timer, newDaemonId: daemonId, newHostname: hostname });
           }
         }
       } catch (e) {
         console.error('daemon limit check:', e);
-        // Proceed with registration on error (don't block on check failure)
       }
     }
 
-    this.daemons.set(daemonId, { ws, daemonId, hostname, agents, userId });
-    // Await daemon upsert BEFORE sending ack, so FK constraints on subsequent
-    // session_discovered events won't fail (daemon row must exist first).
+    const daemonOS = msg.os || 'unknown';
+    const daemonIP = msg.ip || 'unknown';
+    this.daemons.set(daemonId, { ws, daemonId, hostname, agents, userId, os: daemonOS, ip: daemonIP });
     try { await db.upsertDaemon(this.pool, daemonId, hostname, agents); } catch (e) { console.error('upsertDaemon:', e); }
-    if (userId) { try { await db.bindDaemonToUser(this.pool, daemonId, userId); } catch (e) { console.error('bindDaemon:', e); } }
+    if (userId) {
+      try { await db.bindDaemonToUser(this.pool, daemonId, userId); } catch (e) { console.error('bindDaemon:', e); }
+      if (tokenJti) {
+        db.bindTokenToDaemon(this.pool, daemonId, tokenJti, machineId).catch(console.error);
+      }
+    }
     db.cleanStaleSessions(this.pool).catch(console.error);
     this.send(ws, { type: 'register_ack', status: 'ok', connection_id: daemonId });
 
-    // Broadcast daemon online to clients with same userId (or all for legacy)
+    // Broadcast daemon online to clients with same userId
     const alias = await db.getDaemonAlias(this.pool, daemonId);
     for (const [clientWs, client] of this.clients) {
       if (clientWs.readyState === 1 && this.sameUser(client.userId, userId)) {
-        this.send(clientWs, { type: 'daemon_status', daemon_id: daemonId, status: 'online', hostname, agents, alias });
+        this.send(clientWs, { type: 'daemon_status', daemon_id: daemonId, status: 'online', hostname, agents, alias, os: daemonOS, ip: daemonIP });
       }
     }
   }
@@ -77,6 +111,14 @@ export class Router {
     const hostname = daemon?.hostname || 'unknown';
     const userId = daemon?.userId ?? null;
     this.daemons.delete(daemonId);
+
+    // Clean up any pending takeover timer
+    const takeover = this.takeoverTimers.get(daemonId);
+    if (takeover) {
+      clearTimeout(takeover.timer);
+      this.takeoverTimers.delete(daemonId);
+    }
+
     db.setDaemonOffline(this.pool, daemonId).catch(console.error);
 
     // Push notification for daemon offline
@@ -117,6 +159,18 @@ export class Router {
       if (daemon) { this.send(daemon.ws, { type: 'pong' }); db.updateHeartbeat(this.pool, daemonId).catch(console.error); }
       return;
     }
+
+    // Handle cancel_takeover: old daemon confirms it has stopped
+    if (msg.type === 'cancel_takeover') {
+      const takeover = this.takeoverTimers.get(daemonId);
+      if (takeover) {
+        clearTimeout(takeover.timer);
+        this.takeoverTimers.delete(daemonId);
+        console.log(`[router] takeover cancelled by ${daemonId} — new daemon ${takeover.newDaemonId} accepted immediately`);
+      }
+      return;
+    }
+
     const sessionId = msg.session_id;
     if (!sessionId) {
       if (msg.type === 'error') {
@@ -344,6 +398,8 @@ export class Router {
           daemon_online: true,
           daemon_alias: alias,
           status: 'online',
+          os: daemon.os || 'unknown',
+          ip: daemon.ip || 'unknown',
         });
       }
       // Also include offline daemons from DB for this user
@@ -369,6 +425,50 @@ export class Router {
       console.log('[router] list_daemons sending', daemonList.length, 'daemons to user', userId);
     this.send(clientWs, { type: 'daemon_list', daemons: daemonList });
     } catch (err) { console.error('list_daemons error:', err); }
+  }
+
+  /** Force-kick a daemon from the Web settings page. */
+  async handleForceKick(daemonId: string, userId: number): Promise<{ success: boolean; error?: string }> {
+    const daemon = this.daemons.get(daemonId);
+    if (!daemon) {
+      return { success: false, error: 'daemon not found or offline' };
+    }
+    if (daemon.userId !== userId) {
+      return { success: false, error: 'forbidden' };
+    }
+
+    // Cancel any pending takeover timer for this daemon
+    const takeover = this.takeoverTimers.get(daemonId);
+    if (takeover) {
+      clearTimeout(takeover.timer);
+      this.takeoverTimers.delete(daemonId);
+    }
+
+    // Send kicked message with 0 grace period
+    if (daemon.ws.readyState === 1) {
+      this.send(daemon.ws, {
+        type: 'kicked',
+        reason: 'force_kick',
+        message: '管理员已强制下线此设备',
+        grace_period_seconds: 0,
+      });
+      daemon.ws.close();
+    }
+
+    // Revoke token
+    try {
+      await db.revokeToken(this.pool, '', userId, 'force_kick');
+      await db.insertAuditLog(this.pool, userId, 'force_kick', {
+        daemon_id: daemonId,
+        hostname: daemon.hostname,
+      });
+    } catch (e) { console.error('force_kick revoke:', e); }
+
+    // Unregister
+    this.daemons.delete(daemonId);
+    db.setDaemonOffline(this.pool, daemonId).catch(console.error);
+
+    return { success: true };
   }
 
   private sameUser(a: number | null, b: number | null): boolean {

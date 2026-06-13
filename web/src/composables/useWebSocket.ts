@@ -88,9 +88,20 @@ function connect(url?: string) {
   ws.value.onmessage = (event) => {
     try {
       const data = JSON.parse(event.data)
-      // Handle daemon_status internally to track online state
+      // Handle daemon_status and daemon_list internally to track online state
       if (data.type === 'daemon_status') {
         handleDaemonStatus(data)
+      }
+      if (data.type === 'daemon_list' && data.daemons) {
+        for (const d of data.daemons) {
+          daemons.value.set(d.daemon_id, {
+            daemon_id: d.daemon_id,
+            hostname: d.hostname || d.daemon_alias || 'unknown',
+            agents: d.agents || [],
+            online: d.daemon_online || d.status === 'online',
+            last_seen_at: d.last_seen_at,
+          })
+        }
       }
       handlers.forEach(h => h(data))
     } catch {}

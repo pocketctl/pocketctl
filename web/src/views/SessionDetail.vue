@@ -35,6 +35,13 @@
           <span class="daemon-name">· {{ daemonName }}</span>
         </div>
         <span :class="['status-pill', statusClass]"><span class="pulse"></span>{{ statusLabel }}</span>
+        <div class="session-id-box">
+          <code class="session-id-text">{{ sessionId?.slice(0, 8) }}</code>
+          <button class="copy-btn" @click="copySessionId" :title="copied ? '已复制' : '复制会话ID'">
+            <svg v-if="!copied" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"/></svg>
+            <svg v-else width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M20 6L9 17l-5-5"/></svg>
+          </button>
+        </div>
       </div>
 
       <!-- Messages -->
@@ -138,6 +145,7 @@ const status = ref('running')
 const exitReason = ref('')
 const exitedAt = ref('')
 const autoScroll = ref(true)
+const copied = ref(false)
 const messagesEl = ref<HTMLDivElement | null>(null)
 const inputEl = ref<HTMLInputElement | null>(null)
 const daemons = ref<Record<string, any>>({})
@@ -181,6 +189,15 @@ const milestones = computed(() => {
   ms.push({ label: statusLabel.value === '运行中' ? '进行中' : statusLabel.value, time: '—', state: isTerminal.value || status.value === 'exited' ? 'active' : '' })
   return ms
 })
+
+let copyTimer: ReturnType<typeof setTimeout> | null = null
+function copySessionId() {
+  navigator.clipboard.writeText(sessionId.value).then(() => {
+    copied.value = true
+    if (copyTimer) clearTimeout(copyTimer)
+    copyTimer = setTimeout(() => { copied.value = false }, 2000)
+  }).catch(() => {})
+}
 
 function formatTime(ts: string): string {
   if (!ts) return '—'
@@ -358,6 +375,12 @@ onMounted(() => {
   })
 
   // Real-time events — use processEvent for consistent handling
+  onEvent('user_text', (msg: any) => {
+    if (msg.session_id !== sessionId.value) return
+    processEvent(msg)
+    nextTick(scrollToBottom)
+  })
+
   onEvent('agent_text', (msg: any) => {
     if (msg.session_id !== sessionId.value) return
     processEvent(msg)
@@ -417,6 +440,11 @@ onMounted(() => {
 .status-pill { display: inline-flex; align-items: center; gap: 5px; padding: 4px 10px; border-radius: var(--radius-full); font-size: 12px; font-weight: 600; }
 .status-pill.running { background: var(--success-bg); color: var(--success); }
 .status-pill .pulse { width: 6px; height: 6px; border-radius: 50%; background: currentColor; animation: pulse-green 1.5s infinite; }
+
+.session-id-box { display: flex; align-items: center; gap: 6px; padding: 3px 8px; background: var(--bg); border: 1px solid var(--border); border-radius: var(--radius-md); }
+.session-id-text { font-family: var(--font-mono); font-size: 12px; color: var(--fg-secondary); }
+.copy-btn { display: flex; align-items: center; justify-content: center; width: 22px; height: 22px; background: none; border: none; color: var(--fg-tertiary); cursor: pointer; border-radius: 4px; padding: 0; transition: color 0.15s, background 0.15s; }
+.copy-btn:hover { color: var(--accent); background: var(--accent-muted); }
 
 /* Messages */
 .chat-messages { flex: 1; overflow-y: auto; padding: 20px; display: flex; flex-direction: column; gap: 16px; position: relative; }

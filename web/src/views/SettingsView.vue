@@ -82,7 +82,28 @@
             <span :class="['status-dot', d.daemon_online ? 'online' : 'offline']" style="width:7px;height:7px;"></span>
             <span class="daemon-name">{{ d.daemon_alias || d.hostname || d.daemon_id?.slice(0,8) }}</span>
             <span :class="['chip', d.daemon_online ? 'chip-online' : 'chip-offline']" style="font-size:11px;">{{ d.daemon_online ? '在线' : '离线' }}</span>
+            <button v-if="d.daemon_online" class="kick-btn" @click.stop="startKickDaemon(d)" :disabled="kickRateLimited" :title="kickRateLimited ? '操作过于频繁，请 1 小时后再试' : '强制下线'">强制下线</button>
             <span class="chevron">›</span>
+          </div>
+          <!-- Force Kick Modal -->
+          <div v-if="kickTarget" class="modal-overlay" @click.self="kickTarget = null">
+            <div class="modal-card kick-modal">
+              <div class="modal-title">⚠️ 确认强制下线？</div>
+              <p>即将强制下线 <strong>{{ kickTarget.daemon_alias || kickTarget.hostname }}</strong></p>
+              <p style="font-size:12px;color:var(--fg-tertiary);">该主机上正在运行的 AI 任务可能丢失</p>
+              <div style="margin:12px 0;">
+                <div class="form-label">邮箱验证码</div>
+                <div class="code-row">
+                  <input type="text" class="input-field code-input" v-model="kickCode" placeholder="6 位验证码" maxlength="6" @input="(e: any) => kickCode = e.target.value.replace(/\D/g, '').slice(0, 6)" />
+                  <button class="get-code-btn" @click="sendKickCode" :disabled="kickCountdown > 0">{{ kickCountdown > 0 ? kickCountdown + 's' : '发送验证码' }}</button>
+                </div>
+              </div>
+              <p v-if="kickError" style="color:var(--error);font-size:12px;">{{ kickError }}</p>
+              <div class="modal-actions">
+                <button class="btn-secondary" @click="kickTarget = null; kickError = ''">取消</button>
+                <button class="btn-danger" @click="doKickDaemon" :disabled="kickCode.length !== 6">确认强制下线</button>
+              </div>
+            </div>
           </div>
           <div class="daemon-settings-row add-daemon" @click="showRegisterDaemon = true">
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 5v14M5 12h14"/></svg>
@@ -199,7 +220,7 @@ import BindEmailModal from '../components/BindEmailModal.vue'
 import RegisterDaemonDialog from '../components/RegisterDaemonDialog.vue'
 
 const router = useRouter()
-const { user, logout } = useAuth()
+const { user, logout, sendEmailCode, forceKickDaemon } = useAuth()
 const { connect, send, onEvent } = useWebSocket()
 
 const daemons = ref<any[]>([])
@@ -215,6 +236,14 @@ const showAgreement = ref(false)
 const showEditProfile = ref(false)
 const showBindEmail = ref(false)
 const showRegisterDaemon = ref(false)
+
+// Force-kick state
+const kickTarget = ref<any>(null)
+const kickCode = ref('')
+const kickError = ref('')
+const kickCountdown = ref(0)
+const kickRateLimited = ref(false)
+let kickTimer: ReturnType<typeof setInterval> | null = null
 
 const userInitial = computed(() => {
   const name = user.value?.display_name || user.value?.email || user.value?.phone || 'U'
@@ -292,6 +321,41 @@ onMounted(() => {
     }
   })
 })
+// Force-kick functions
+function startKickDaemon(d: any) {
+  kickTarget.value = d
+  kickCode.value = ''
+  kickError.value = ''
+}
+
+async function sendKickCode() {
+  if (!user.value?.email) {
+    kickError.value = '请先在账户设置中绑定邮箱'
+    return
+  }
+  kickError.value = ''
+  await sendEmailCode(user.value.email)
+  kickCountdown.value = 60
+  if (kickTimer) clearInterval(kickTimer)
+  kickTimer = setInterval(() => {
+    kickCountdown.value--
+    if (kickCountdown.value <= 0 && kickTimer) clearInterval(kickTimer)
+  }, 1000)
+}
+
+async function doKickDaemon() {
+  if (!kickTarget.value) return
+  kickError.value = ''
+  const err = await forceKickDaemon(kickTarget.value.daemon_id, kickCode.value)
+  if (err) {
+    kickError.value = err
+    return
+  }
+  const idx = daemons.value.findIndex((d: any) => d.daemon_id === kickTarget.value.daemon_id)
+  if (idx >= 0) daemons.value[idx].daemon_online = false
+  kickTarget.value = null
+}
+
 </script>
 
 <style>
@@ -354,4 +418,18 @@ onMounted(() => {
   .settings-nav { position: static; display: flex; gap: 4px; overflow-x: auto; padding-bottom: 8px; }
   .settings-nav-item { white-space: nowrap; }
 }
+.kick-btn { padding: 4px 10px; background: none; border: 1px solid var(--error); color: var(--error); border-radius: var(--radius-sm); font-size: 12px; cursor: pointer; transition: background 0.15s; }
+.kick-btn:hover:not(:disabled) { background: var(--error-bg); }
+.kick-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+.kick-modal { max-width: 400px; }
+.kick-modal p { margin: 4px 0; font-size: 14px; }
+.btn-danger { padding: 10px 20px; background: var(--error); color: #fff; border: none; border-radius: var(--radius-md); font-size: 14px; font-weight: 500; cursor: pointer; }
+.btn-danger:hover:not(:disabled) { opacity: 0.9; }
+.btn-danger:disabled { opacity: 0.5; cursor: not-allowed; }
+.code-row { display: flex; gap: 8px; }
+.code-row .input-field { flex: 1; }
+.code-input { font-family: var(--font-mono) !important; letter-spacing: 4px; font-size: 18px !important; text-align: center; padding: 10px 14px; border: 1px solid var(--border); border-radius: var(--radius-md); background: var(--bg); color: var(--fg); }
+.form-label { font-size: 13px; font-weight: 500; color: var(--fg-secondary); margin-bottom: 6px; }
+.get-code-btn { white-space: nowrap; padding: 10px 16px; background: none; border: 1px solid var(--border); border-radius: var(--radius-md); color: var(--accent); font-size: 13px; cursor: pointer; }
+.get-code-btn:disabled { color: var(--fg-tertiary); cursor: not-allowed; }
 </style>

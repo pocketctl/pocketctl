@@ -49,6 +49,8 @@ type RegisterMessage struct {
 	DaemonID string   `json:"daemon_id"`
 	Hostname string   `json:"hostname"`
 	Agents   []string `json:"agents"`
+	OS       string   `json:"os"`
+	IP       string   `json:"ip"`
 }
 
 type RegisterAckMessage struct {

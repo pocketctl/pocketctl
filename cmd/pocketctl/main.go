@@ -10,15 +10,16 @@ import (
 	"net"
 	"net/url"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync/atomic"
 	"syscall"
 	"time"
 
 	"github.com/gorilla/websocket"
-	"runtime"
 	"github.com/pocketctl/pocketctl/internal/adapter"
 	"github.com/pocketctl/pocketctl/internal/api"
 	"github.com/pocketctl/pocketctl/internal/config"
@@ -63,7 +64,7 @@ Usage:
   pocketctl <command> [options]
 
 Commands:
-  login          Login via phone or email (verification code)
+  login          Login via browser (OAuth 2.0 Device Flow) or email code
   daemon start   Start the daemon (connects to relay)
   daemon stop    Stop the running daemon
   daemon status  Show daemon status
@@ -72,6 +73,11 @@ Commands:
   daemon update  Update daemon to the latest version
   version        Print version
   help           Show this help
+
+Login Options:
+  --email        Use email verification code (for headless servers)
+  --relay <url>  Relay WebSocket URL
+  --prod         Use production relay from config
 
 Environment:
   POCKETCTL_RELAY_URL   Relay WebSocket URL (e.g. wss://your-domain.com/ws)
@@ -111,6 +117,7 @@ func cmdLogin(args []string) {
 	fs := flag.NewFlagSet("login", flag.ExitOnError)
 	relayURL := fs.String("relay", "", "Relay WebSocket URL (or POCKETCTL_RELAY_URL env)")
 	production := fs.Bool("prod", false, "Use production relay (reads prod_relay_url from config)")
+	emailMode := fs.Bool("email", false, "Force email verification code login (for headless servers)")
 	fs.Parse(args)
 
 	// Resolve relay URL: --relay > env var > --prod from config > default dev
@@ -127,41 +134,13 @@ func cmdLogin(args []string) {
 		}
 	}
 	if baseURL == "" {
-		baseURL = "ws://localhost:8080/ws"
+		baseURL = "ws://localhost/ws"
 	}
 
 	// Convert WebSocket URL to HTTP URL for API calls
 	apiURL := strings.Replace(baseURL, "wss://", "https://", 1)
 	apiURL = strings.Replace(apiURL, "ws://", "http://", 1)
 	apiURL = strings.TrimSuffix(apiURL, "/ws")
-
-	fmt.Println("pocketctl login")
-	fmt.Println("---------------")
-	fmt.Println("请选择登录方式:")
-	fmt.Println("  [1] 手机号 + 验证码")
-	fmt.Println("  [2] 邮箱 + 验证码")
-
-	var choice string
-	fmt.Print("\n请输入选项 (1/2): ")
-	fmt.Scanln(&choice)
-
-	var accessToken, refreshToken string
-	var err error
-
-	switch strings.TrimSpace(choice) {
-	case "1":
-		accessToken, refreshToken, err = loginViaPhone(apiURL)
-	case "2":
-		accessToken, refreshToken, err = loginViaEmail(apiURL)
-	default:
-		fmt.Fprintln(os.Stderr, "错误: 无效选项，请输入 1 或 2")
-		os.Exit(1)
-	}
-
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "\n登录失败: %v\n", err)
-		os.Exit(1)
-	}
 
 	// Convert relay base URL to WebSocket URL for storage
 	wsURL := strings.Replace(baseURL, "https://", "wss://", 1)
@@ -170,44 +149,142 @@ func cmdLogin(args []string) {
 		wsURL += "/ws"
 	}
 
+	fmt.Println("pocketctl login")
+	fmt.Println("---------------")
+
+	var accessToken, refreshToken string
+	var err error
+
+	// Choose login method
+	if *emailMode || !canOpenBrowser() {
+		// Headless mode: email verification code
+		if *emailMode {
+			fmt.Println("使用邮箱验证码登录 (--email)")
+		} else {
+			fmt.Println("检测到无浏览器环境，使用邮箱验证码登录")
+		}
+		accessToken, refreshToken, err = loginViaEmail(apiURL)
+	} else {
+		// GUI mode: OAuth 2.0 Device Authorization Grant
+		fmt.Println("使用浏览器授权登录 (OAuth 2.0 Device Flow)")
+		accessToken, refreshToken, err = loginViaDeviceFlow(apiURL)
+	}
+
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "\n登录失败: %v\n", err)
+		os.Exit(1)
+	}
+
 	// Save to config
 	if err := config.SaveAuth(wsURL, accessToken, refreshToken); err != nil {
 		fmt.Fprintf(os.Stderr, "\n保存失败: %v\n", err)
 		os.Exit(1)
 	}
 
-	fmt.Println(" 登录成功!")
+	fmt.Println("\n✅ 登录成功!")
 	fmt.Printf("Token 已保存到 ~/.pocketctl/auth.json\n")
 	fmt.Printf("现在可以运行 'pocketctl daemon start' 启动守护进程\n")
 }
 
-func loginViaPhone(apiURL string) (string, string, error) {
-	fmt.Print("手机号: ")
-	var phone string
-	fmt.Scanln(&phone)
+// canOpenBrowser checks if the current environment can open a browser.
+func canOpenBrowser() bool {
+	if os.Getenv("DISPLAY") != "" || os.Getenv("WAYLAND_DISPLAY") != "" {
+		return true
+	}
+	if runtime.GOOS == "darwin" && os.Getenv("SSH_TTY") == "" {
+		return true
+	}
+	if _, err := exec.LookPath("open"); err == nil {
+		return true
+	}
+	if _, err := exec.LookPath("xdg-open"); err == nil {
+		return true
+	}
+	return false
+}
 
-	phone = strings.TrimSpace(phone)
-	if len(phone) != 11 || phone[0] != '1' {
-		return "", "", fmt.Errorf("请输入有效的11位手机号")
+// loginViaDeviceFlow performs OAuth 2.0 Device Authorization Grant login.
+func loginViaDeviceFlow(apiURL string) (string, string, error) {
+	// Generate PKCE code verifier and challenge
+	codeVerifier, err := api.GenerateCodeVerifier()
+	if err != nil {
+		return "", "", fmt.Errorf("生成 PKCE 验证码失败: %w", err)
+	}
+	codeChallenge := api.ComputeCodeChallenge(codeVerifier)
+
+	// Get machine ID
+	machineID := daemon.MachineID()
+
+	// Request device authorization
+	fmt.Print("正在请求设备授权...")
+	authResp, err := api.DeviceAuthorize(apiURL, "pocketctl-cli", codeChallenge, machineID)
+	if err != nil {
+		return "", "", fmt.Errorf("请求授权失败: %w", err)
+	}
+	fmt.Println(" ✅")
+
+	// Open browser
+	fmt.Printf("\n正在打开浏览器进行授权...\n")
+	fmt.Printf("如果浏览器未自动打开，请手动访问:\n")
+	fmt.Printf("  %s\n\n", authResp.VerificationURIComplete)
+
+	openBrowser(authResp.VerificationURIComplete)
+
+	// Poll for token
+	interval := authResp.Interval
+	if interval < 5 {
+		interval = 5
 	}
 
-	fmt.Print("正在发送验证码...")
-	if err := api.SendSMS(apiURL, phone); err != nil {
-		return "", "", fmt.Errorf("发送失败: %w", err)
+	fmt.Print("等待授权")
+	startTime := time.Now()
+	for {
+		select {
+		case <-time.After(time.Duration(interval) * time.Second):
+			elapsed := int(time.Since(startTime).Seconds())
+			fmt.Printf("\r等待授权... (已等待 %ds)", elapsed)
+
+			result, err := api.DeviceToken(apiURL, authResp.DeviceCode, "pocketctl-cli", codeVerifier)
+			if err != nil {
+				continue // network error, retry
+			}
+
+			switch result.Error {
+			case "":
+				if result.AccessToken != "" {
+					fmt.Println("\n✅ 授权成功!")
+					return result.AccessToken, result.RefreshToken, nil
+				}
+			case "authorization_pending":
+				continue
+			case "slow_down":
+				interval += 5
+				continue
+			case "expired_token":
+				return "", "", fmt.Errorf("授权超时，请重新运行 pocketctl login")
+			default:
+				return "", "", fmt.Errorf("授权失败: %s", result.Error)
+			}
+
+			if elapsed > authResp.ExpiresIn {
+				return "", "", fmt.Errorf("授权超时，请重新运行 pocketctl login")
+			}
+		}
 	}
-	fmt.Println(" 已发送")
+}
 
-	fmt.Print("验证码: ")
-	var code string
-	fmt.Scanln(&code)
-
-	code = strings.TrimSpace(code)
-	if len(code) != 6 {
-		return "", "", fmt.Errorf("请输入6位验证码")
+// openBrowser opens the given URL in the default browser.
+func openBrowser(url string) {
+	var cmd *exec.Cmd
+	switch runtime.GOOS {
+	case "darwin":
+		cmd = exec.Command("open", url)
+	case "linux":
+		cmd = exec.Command("xdg-open", url)
+	default:
+		return
 	}
-
-	fmt.Print("正在验证...")
-	return api.VerifySMS(apiURL, phone, code)
+	cmd.Start()
 }
 
 func loginViaEmail(apiURL string) (string, string, error) {
@@ -224,7 +301,7 @@ func loginViaEmail(apiURL string) (string, string, error) {
 	if err := api.SendEmailCode(apiURL, email); err != nil {
 		return "", "", fmt.Errorf("发送失败: %w", err)
 	}
-	fmt.Println(" 已发送")
+	fmt.Println(" ✅ 已发送")
 
 	fmt.Print("验证码: ")
 	var code string
@@ -247,6 +324,7 @@ func cmdDaemonStart(args []string) {
 	production := fs.Bool("prod", false, "Use production relay (reads prod_relay_url from config)")
 	token := fs.String("token", "", "JWT token (or POCKETCTL_TOKEN env)")
 	daemonID := fs.String("id", "", "Daemon ID (auto-generated if empty)")
+	foreground := fs.Bool("foreground", false, "Run in foreground (don't daemonize)")
 	fs.Parse(args)
 
 	// Resolve relay URL: --relay > env var > --prod from config > default dev
@@ -263,7 +341,7 @@ func cmdDaemonStart(args []string) {
 		}
 	}
 	if url == "" {
-		url = "ws://localhost:8080/ws"
+		url = "ws://localhost/ws"
 	}
 
 	// Resolve token
@@ -284,8 +362,8 @@ func cmdDaemonStart(args []string) {
 
 	// Check if already running
 	if pid, running := daemon.IsRunning(); running {
-		fmt.Fprintf(os.Stderr, "daemon already running (PID %d)\n", pid)
-		os.Exit(1)
+		fmt.Printf("daemon already running (PID %d)\n", pid)
+		os.Exit(0)
 	}
 
 	// Generate daemon ID — reuse persisted ID, or derive from machine hardware
@@ -301,7 +379,13 @@ func cmdDaemonStart(args []string) {
 
 	// Setup logging to file
 	os.MkdirAll(filepath.Dir(daemon.LogPath()), 0755) // ensure /tmp/pocketctl exists
-	logFile, err := os.OpenFile(daemon.LogPath(), os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0644)
+	logFlags := os.O_CREATE | os.O_WRONLY
+	if os.Getenv("POCKETCTL_DAEMON_CHILD") == "1" {
+		logFlags |= os.O_APPEND // child appends after parent's startup message
+	} else {
+		logFlags |= os.O_TRUNC
+	}
+	logFile, err := os.OpenFile(daemon.LogPath(), logFlags, 0644)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "open log file: %v\n", err)
 		os.Exit(1)
@@ -479,6 +563,32 @@ func cmdDaemonStart(args []string) {
 	fmt.Printf("Relay: %s\n", url)
 	fmt.Printf("Agents: %s\n", strings.Join(agentTypes, ", "))
 	fmt.Printf("Logs: %s\n", daemon.LogPath())
+
+	// Daemonize: re-exec self in background
+	if !*foreground && os.Getenv("POCKETCTL_DAEMON_CHILD") != "1" {
+		childEnv := append(os.Environ(), "POCKETCTL_DAEMON_CHILD=1")
+		exe, err := os.Executable()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "failed to get executable path: %v\n", err)
+			os.Exit(1)
+		}
+		child := &exec.Cmd{
+			Path:   exe,
+			Args:   os.Args,
+			Env:    childEnv,
+			Stdin:  nil,
+			Stdout: nil,
+			Stderr: nil,
+			SysProcAttr: &syscall.SysProcAttr{
+				Setsid: true,
+			},
+		}
+		if err := child.Start(); err != nil {
+			fmt.Fprintf(os.Stderr, "failed to daemonize: %v\n", err)
+			os.Exit(1)
+		}
+		os.Exit(0)
+	}
 
 	// Wait for signal
 	<-sigCh
@@ -751,12 +861,28 @@ func handleWatcherEvents(ctx context.Context, sw *watcher.SessionWatcher, sm *se
 				}
 				// Start JSONL tailer from beginning to replay history and tail new events
 				go func() {
-					jsonlPath, err := watcher.ResolveJSONLPath(evt.Session.SessionID, evt.Session.Cwd)
-					if err != nil {
-						return
+					var tailer *watcher.JSONLTailer
+					// Retry: Claude Code may not have created the JSONL file yet
+					for retry := 0; retry < 30; retry++ {
+						jsonlPath, err := watcher.ResolveJSONLPath(evt.Session.SessionID, evt.Session.Cwd)
+						if err == nil {
+							tailer, err = watcher.NewJSONLTailerFromStart(jsonlPath)
+							if err == nil {
+								// Tailer started successfully — now emit session_discovered
+								outputCh <- protocol.DaemonEvent{
+									Type:      "session_discovered",
+									SessionID: evt.Session.SessionID,
+									Cwd:       evt.Session.Cwd,
+									Status:    evt.Session.Status,
+									Source:    "terminal",
+								}
+								break
+							}
+						}
+						time.Sleep(2 * time.Second)
 					}
-					tailer, err := watcher.NewJSONLTailerFromStart(jsonlPath)
-					if err != nil {
+					if tailer == nil {
+						logger.Error("tailer start failed after retries", "session", evt.Session.SessionID)
 						return
 					}
 					defer tailer.Close()

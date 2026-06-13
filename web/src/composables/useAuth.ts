@@ -21,7 +21,6 @@ function getRelayOrigin(): string {
   const relayWs = localStorage.getItem('pocketctl_relay_url') || (window as any).__RELAY_WS__ || ''
   try {
     const url = new URL(relayWs)
-    // If relay URL is localhost, prefer relative paths (works behind nginx proxy)
     if (url.hostname === 'localhost' || url.hostname === '127.0.0.1') return ''
     return url.origin.replace(/^ws/, 'http')
   } catch {
@@ -29,14 +28,17 @@ function getRelayOrigin(): string {
   }
 }
 
-async function apiRequest(path: string, body: any): Promise<{ ok: boolean; data: any }> {
+async function apiRequest(path: string, body: any, auth?: boolean): Promise<{ ok: boolean; data: any }> {
   const origin = getRelayOrigin()
-  // Use relative URL when no external relay configured (nginx proxies /api/ to relay)
   const url = origin ? `${origin}${path}` : path
+  const headers: Record<string, string> = { 'Content-Type': 'application/json' }
+  if (auth && accessToken.value) {
+    headers['Authorization'] = `Bearer ${accessToken.value}`
+  }
   try {
     const res = await fetch(url, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers,
       body: JSON.stringify(body),
     })
     const data = await res.json()
@@ -44,21 +46,6 @@ async function apiRequest(path: string, body: any): Promise<{ ok: boolean; data:
   } catch (e) {
     return { ok: false, data: { error: '网络请求失败' } }
   }
-}
-
-// --- Phone SMS Auth ---
-
-async function sendSmsCode(phone: string): Promise<string | null> {
-  const { ok, data } = await apiRequest('/api/auth/sms/send', { phone })
-  if (!ok) return data.error || '发送失败'
-  return null
-}
-
-async function loginViaPhone(phone: string, code: string): Promise<string | null> {
-  const { ok, data } = await apiRequest('/api/auth/sms/verify', { phone, code })
-  if (!ok) return data.error || '验证失败'
-  saveTokens(data)
-  return null
 }
 
 // --- Email Verification Code Auth ---
@@ -76,18 +63,32 @@ async function loginViaEmail(email: string, code: string): Promise<string | null
   return null
 }
 
+// --- Device Authorization ---
+
+async function confirmDeviceAuth(userCode: string): Promise<string | null> {
+  const { ok, data } = await apiRequest('/api/auth/device/confirm', { user_code: userCode }, true)
+  if (!ok) return data.error_description || data.error || '授权失败'
+  return null
+}
+
+// --- Force Kick Daemon ---
+
+async function forceKickDaemon(daemonId: string, emailCode: string): Promise<string | null> {
+  // First verify email code
+  const verifyResult = await apiRequest('/api/auth/email/verify', { email: user.value?.email, code: emailCode }, true)
+  if (!verifyResult.ok) return verifyResult.data.error || '验证码错误'
+
+  // Then force kick
+  const kickResult = await apiRequest(`/api/daemons/${daemonId}/forceKick`, {}, true)
+  if (!kickResult.ok) return kickResult.data.error || '踢下线失败'
+  return null
+}
+
 // --- Legacy (deprecated) ---
 
 async function login(email: string, password: string): Promise<string | null> {
   const { ok, data } = await apiRequest('/api/auth/login', { email, password })
   if (!ok) return data.error || '登录失败'
-  saveTokens(data)
-  return null
-}
-
-async function register(email: string, password: string, displayName?: string): Promise<string | null> {
-  const { ok, data } = await apiRequest('/api/auth/register', { email, password, displayName })
-  if (!ok) return data.error || '注册失败'
   saveTokens(data)
   return null
 }
@@ -128,9 +129,10 @@ const isLoggedIn = computed(() => !!accessToken.value && !!user.value)
 export function useAuth() {
   return {
     user, accessToken, refreshToken, isLoggedIn,
-    login, register,                        // legacy (deprecated)
-    sendSmsCode, loginViaPhone,             // phone SMS
-    sendEmailCode, loginViaEmail,           // email verification code
+    login,                            // legacy (deprecated)
+    sendEmailCode, loginViaEmail,     // email verification code
+    confirmDeviceAuth,                // device authorization
+    forceKickDaemon,                  // force kick daemon
     doRefreshToken, logout,
   }
 }

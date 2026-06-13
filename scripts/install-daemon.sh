@@ -3,7 +3,7 @@ set -euo pipefail
 
 # ============================================
 # pocketctl Daemon 一键安装脚本
-# 用法: curl -fsSL https://pocketctl.com/install.sh | bash
+# 用法: curl -fsSL https://pocketctl.me/install.sh | bash
 #
 # 支持参数:
 #   --prod      安装生产版本（写入 prod_relay_url 到配置，需设置 POCKETCTL_PROD_RELAY_URL）
@@ -35,7 +35,7 @@ while [[ $# -gt 0 ]]; do
     --prod) IS_PRODUCTION=true; shift ;;
     --version) CUSTOM_VERSION="$2"; shift 2 ;;
     --help|-h)
-      echo "用法: curl -fsSL https://pocketctl.com/install.sh | bash [--prod] [--version v0.1.0]"
+      echo "用法: curl -fsSL https://pocketctl.me/install.sh | bash [--prod] [--version v0.1.0]"
       exit 0
       ;;
     *) error "未知参数: $1 (支持: --prod, --version)" ;;
@@ -64,7 +64,7 @@ info "系统: ${OS}/${ARCH}"
 
 if $IS_PRODUCTION; then
   if [[ -z "$PROD_RELAY" ]]; then
-    error "--prod requires POCKETCTL_PROD_RELAY_URL env var. Example: POCKETCTL_PROD_RELAY_URL=ws://your-relay:8080/ws bash install-daemon.sh --prod"
+    error "--prod requires POCKETCTL_PROD_RELAY_URL env var. Example: POCKETCTL_PROD_RELAY_URL=ws://pocketctl.me/ws bash install-daemon.sh --prod"
   fi
   info "模式: 生产环境 (relay: ${PROD_RELAY})"
 else

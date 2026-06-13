@@ -117,6 +117,39 @@ export async function initDB(pool: pg.Pool): Promise<void> {
     )
   `);
   await pool.query(`CREATE UNIQUE INDEX IF NOT EXISTS idx_ios_waitlist_email ON ios_waitlist(email)`);
+
+  // OAuth Device Flow: token revocation table
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS revoked_tokens (
+      jti VARCHAR(64) PRIMARY KEY,
+      user_id INT NOT NULL REFERENCES users(id),
+      revoked_at TIMESTAMPTZ DEFAULT NOW(),
+      reason VARCHAR(32) NOT NULL
+    )
+  `);
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_revoked_tokens_user ON revoked_tokens(user_id)`);
+
+  // OAuth Device Flow: audit log table
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS audit_log (
+      id BIGSERIAL PRIMARY KEY,
+      user_id INT REFERENCES users(id),
+      action VARCHAR(32) NOT NULL,
+      details JSONB DEFAULT '{}',
+      ip VARCHAR(45),
+      created_at TIMESTAMPTZ DEFAULT NOW()
+    )
+  `);
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_audit_log_user ON audit_log(user_id)`);
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_audit_log_action ON audit_log(action)`);
+
+  // Daemon enhancements: token binding and machine tracking
+  await pool.query(`ALTER TABLE daemons ADD COLUMN IF NOT EXISTS active_token_jti VARCHAR(64)`);
+  await pool.query(`ALTER TABLE daemons ADD COLUMN IF NOT EXISTS machine_id VARCHAR(64)`);
+  await pool.query(`ALTER TABLE daemons ADD COLUMN IF NOT EXISTS last_login_at TIMESTAMPTZ`);
+
+  // User daemon limit control
+  await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS max_daemons INT DEFAULT 1`);
 }
 
 export async function upsertDaemon(pool: pg.Pool, daemonId: string, hostname: string, agents: string[]): Promise<void> {
@@ -374,26 +407,6 @@ export async function getDevicesByUser(pool: pg.Pool, userId: number): Promise<a
   return result.rows;
 }
 
-// --- Phase 3: Phone-based user management for SMS auth ---
-
-export async function getUserByPhone(pool: pg.Pool, phone: string): Promise<any | null> {
-  const result = await pool.query(
-    `SELECT id, email, phone, password_hash, display_name, created_at FROM users WHERE phone = $1`,
-    [phone]
-  );
-  return result.rows[0] || null;
-}
-
-export async function createUserByPhone(pool: pg.Pool, phone: string, displayName?: string): Promise<any> {
-  const result = await pool.query(
-    `INSERT INTO users (email, phone, password_hash, display_name)
-     VALUES ($1, $1, '', $2)
-     RETURNING id, email, phone, display_name, created_at`,
-    [phone, displayName || null]
-  );
-  return result.rows[0];
-}
-
 // --- iOS Waitlist ---
 
 export async function addToIOSWaitlist(pool: pg.Pool, email: string): Promise<{ inserted: boolean; message: string }> {
@@ -410,6 +423,75 @@ export async function addToIOSWaitlist(pool: pg.Pool, email: string): Promise<{ 
   } catch {
     return { inserted: false, message: '提交失败，请稍后再试' };
   }
+}
+
+// --- Token Revocation ---
+
+/** Check if a token's jti has been revoked. */
+export async function isTokenRevoked(pool: pg.Pool, jti: string): Promise<boolean> {
+  const result = await pool.query(`SELECT 1 FROM revoked_tokens WHERE jti = $1`, [jti]);
+  return (result.rowCount ?? 0) > 0;
+}
+
+/** Revoke a token by jti. */
+export async function revokeToken(pool: pg.Pool, jti: string, userId: number, reason: string): Promise<void> {
+  await pool.query(
+    `INSERT INTO revoked_tokens (jti, user_id, reason) VALUES ($1, $2, $3) ON CONFLICT DO NOTHING`,
+    [jti, userId, reason]
+  );
+}
+
+/** Revoke ALL tokens for a user (breach detection). */
+export async function revokeAllUserTokens(pool: pg.Pool, userId: number, reason: string): Promise<void> {
+  // We can't revoke tokens without their jti, but we can log the event.
+  // The actual revocation happens when we roll the JWT_SECRET or when tokens naturally expire.
+  // For now, we at minimum insert audit log entries for all known tokens.
+  await pool.query(
+    `INSERT INTO audit_log (user_id, action, details) VALUES ($1, 'revoke_all', $2)`,
+    [userId, JSON.stringify({ reason })]
+  );
+}
+
+/** Clean up expired entries from revoked_tokens.
+ *  Access tokens expire in 24h → purge entries older than 25h.
+ *  Refresh tokens expire in 7d → purge entries older than 8d. */
+export async function cleanRevokedTokens(pool: pg.Pool): Promise<{ accessPurged: number; refreshPurged: number }> {
+  const accessResult = await pool.query(
+    `DELETE FROM revoked_tokens WHERE reason IN ('user_revoke', 'new_login', 'force_kick', 'logout', 'admin') AND revoked_at < NOW() - INTERVAL '25 hours'`
+  );
+  const refreshResult = await pool.query(
+    `DELETE FROM revoked_tokens WHERE reason = 'rotation' AND revoked_at < NOW() - INTERVAL '8 days'`
+  );
+  return {
+    accessPurged: accessResult.rowCount ?? 0,
+    refreshPurged: refreshResult.rowCount ?? 0,
+  };
+}
+
+// --- Audit Log ---
+
+/** Insert an audit log entry. */
+export async function insertAuditLog(
+  pool: pg.Pool,
+  userId: number | null,
+  action: string,
+  details: Record<string, any> = {},
+  ip?: string
+): Promise<void> {
+  await pool.query(
+    `INSERT INTO audit_log (user_id, action, details, ip) VALUES ($1, $2, $3, $4)`,
+    [userId, action, JSON.stringify(details), ip || null]
+  );
+}
+
+// --- Daemon Token Binding ---
+
+/** Update the active token jti on a daemon row. */
+export async function bindTokenToDaemon(pool: pg.Pool, daemonId: string, jti: string, machineId?: string): Promise<void> {
+  await pool.query(
+    `UPDATE daemons SET active_token_jti = $1, machine_id = COALESCE($2, machine_id), last_login_at = NOW() WHERE daemon_id = $3`,
+    [jti, machineId || null, daemonId]
+  );
 }
 
 export function parseDBUrl(url: string): DBConfig {

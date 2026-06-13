@@ -11,8 +11,8 @@ Monitor and manage Claude Code, Codex, and OpenCode sessions from your phone or 
 - 🔔 **Push Notifications** — Get alerted when your agent needs attention
 - 🔄 **Self-updating** — One command to update to the latest version
 - 🌐 **Web Dashboard** — Full-featured web UI with dark/light theme, daemon & session management
-- 🏠 **Landing Page** — Marketing site at `pocketctl.com` with dual-theme, i18n (zh/en), iOS waitlist signup
-- 🔐 **Secure** — JWT authentication with phone SMS + email verification code
+- 🏠 **Landing Page** — Marketing site at `pocketctl.me` with dual-theme, i18n (zh/en), iOS waitlist signup
+- 🔐 **Secure** — OAuth 2.0 Device Authorization Grant (RFC 8628) + email verification fallback
 - ⚡ **Lightweight** — Single binary, zero dependencies, runs on macOS and Linux
 
 ## Architecture
@@ -50,7 +50,11 @@ curl -fsSL https://raw.githubusercontent.com/pocketctl/pocketctl/master/scripts/
 ### Login
 
 ```bash
+# Desktop: OAuth 2.0 Device Flow (opens browser)
 pocketctl login --prod
+
+# Headless server: email verification code
+pocketctl login --prod --email
 ```
 
 ### Start the Daemon
@@ -69,7 +73,7 @@ pocketctl daemon status
 
 | Command | Description |
 |---------|-------------|
-| `pocketctl login [--prod]` | Login via phone (SMS) or email (verification code) |
+| `pocketctl login [--prod]` | Login via browser (OAuth 2.0 Device Flow) or email code (`--email`) |
 | `pocketctl daemon start [--prod]` | Start the daemon |
 | `pocketctl daemon stop` | Stop the running daemon |
 | `pocketctl daemon status` | Show daemon status and active sessions |
@@ -86,8 +90,10 @@ pocketctl daemon status
 | `POCKETCTL_TOKEN` | JWT token for authentication |
 | `SES_FROM_EMAIL` | Sender email address for verification emails |
 | `SES_REGION` | Tencent Cloud SES region (default: `ap-hongkong`) |
-| `DEV_SMS_PHONE` | Dev mode test phone number |
-| `DEV_SMS_CODE` | Dev mode test verification code |
+| `DEV_EMAIL` | Dev mode test email address |
+| `DEV_EMAIL_CODE` | Dev mode test verification code |
+| `ZHIPU_API_KEY` | 智谱 GLM API key for session title generation |
+| `WEB_APP_URL` | Public base URL for OAuth device authorization redirect |
 
 ## Build from Source
 
@@ -133,17 +139,18 @@ pocketctl/
 │       ├── push.ts                # Push notification service
 │       ├── title.ts               # LLM title generation
 │       └── config/
-│           ├── sms.ts             # Tencent Cloud SMS client
+│           ├── clients.ts         # OAuth 2.0 client registry
+│           ├── auth-sessions.ts   # Device authorization session store
 │           ├── email.ts           # Tencent Cloud SES email client
 │           └── verification.ts    # Shared verification code store
-├── landing/                       # Static marketing site (pocketctl.com)
+├── landing/                       # Static marketing site (pocketctl.me)
 │   ├── index.html                 # Landing page with dual-theme + i18n
 │   ├── css/style.css              # Design system CSS variables
 │   ├── js/main.js                 # i18n data + interactions
 │   ├── assets/                    # Logo SVGs (dark/light theme)
 │   ├── nginx.conf                 # Prod Nginx config (Landing + /app + API proxy)
 │   └── nginx-docker.conf          # Docker Nginx config
-├── web/                           # Vue 3 web dashboard (app.pocketctl.com → /app)
+├── web/                           # Vue 3 web dashboard (app.pocketctl.me → /app)
 │   └── src/
 │       ├── views/                 # DashboardView, SessionDetail, SettingsView, LoginView
 │       ├── composables/           # useAuth, useWebSocket, useCountdown, useRelativeTime

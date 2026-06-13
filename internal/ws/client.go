@@ -5,8 +5,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/url"
 	"os"
+	"runtime"
 	"strings"
 	"sync"
 	"time"
@@ -30,12 +32,16 @@ type Client struct {
 	daemonID string
 	hostname string
 	agents   []string
+	osName   string
+	localIP  string
 	CommandCh chan protocol.ClientMessage
 	OnStateChange OnConnectStateChange
 }
 
 func NewClient(relayURL, token, daemonID string, agents []string, outputCh <-chan protocol.DaemonEvent, logger *slog.Logger) *Client {
 	hostname, _ := os.Hostname()
+	localIP := getLocalIP()
+	osName := runtime.GOOS
 	return &Client{
 		relayURL:  relayURL,
 		token:     token,
@@ -45,6 +51,8 @@ func NewClient(relayURL, token, daemonID string, agents []string, outputCh <-cha
 		daemonID:  daemonID,
 		hostname:  hostname,
 		agents:    agents,
+		osName:    osName,
+		localIP:   localIP,
 		CommandCh: make(chan protocol.ClientMessage, 64),
 	}
 }
@@ -90,9 +98,12 @@ func (c *Client) connectAndServe(ctx context.Context) error {
 
 	c.notifyState(true)
 
+	c.logger.Info("sending register", "daemonID", c.daemonID, "hostname", c.hostname)
 	c.SendMsg(protocol.RegisterMessage{
 		Type: "register", DaemonID: c.daemonID, Hostname: c.hostname, Agents: c.agents,
+		OS: c.osName, IP: c.localIP,
 	})
+	c.logger.Info("register sent")
 
 	done := make(chan struct{})
 	go c.readPump(done)
@@ -121,13 +132,34 @@ func (c *Client) readPump(done chan struct{}) {
 		_, msg, err := conn.ReadMessage()
 		if err != nil { return }
 		var base struct {
-			Type  string `json:"type"`
-			Error string `json:"error"`
-			Code  string `json:"code"`
+			Type               string `json:"type"`
+			Error              string `json:"error"`
+			Code               string `json:"code"`
+			Reason             string `json:"reason"`
+			Message            string `json:"message"`
+			GracePeriodSeconds int    `json:"grace_period_seconds"`
 		}
 		if err := json.Unmarshal(msg, &base); err != nil { continue }
 
-		// Handle DAEMON_LIMIT_REACHED: print error and exit
+		// Handle kicked message: daemon is being evicted
+		if base.Type == "kicked" {
+			fmt.Fprintf(os.Stderr, "\n⚠️  %s\n", base.Message)
+			if base.GracePeriodSeconds > 0 {
+				fmt.Fprintf(os.Stderr, "将在 %d 秒后断开连接...\n", base.GracePeriodSeconds)
+				// Grace period: wait then exit
+				go func() {
+					time.Sleep(time.Duration(base.GracePeriodSeconds) * time.Second)
+					fmt.Fprintf(os.Stderr, "连接已断开\n")
+					os.Exit(0)
+				}()
+				// Continue reading messages during grace period
+				continue
+			}
+			fmt.Fprintf(os.Stderr, "连接已断开\n")
+			os.Exit(0)
+		}
+
+		// Handle DAEMON_LIMIT_REACHED: print error and exit (legacy compat)
 		if base.Type == "error" && base.Code == "DAEMON_LIMIT_REACHED" {
 			fmt.Fprintf(os.Stderr, "\n❌ %s\n\n", base.Error)
 			os.Exit(1)
@@ -157,14 +189,22 @@ func (c *Client) pingPump(ctx context.Context, done chan struct{}) {
 
 func (c *Client) SendMsg(v any) {
 	data, err := json.Marshal(v)
-	if err != nil { return }
+	if err != nil {
+		c.logger.Error("send msg marshal error", "error", err)
+		return
+	}
 	c.connMu.Lock()
 	conn := c.conn
 	c.connMu.Unlock()
-	if conn == nil { return }
+	if conn == nil {
+		c.logger.Error("send msg: conn is nil")
+		return
+	}
 	c.writeMu.Lock()
 	defer c.writeMu.Unlock()
-	conn.WriteMessage(websocket.TextMessage, data)
+	if err := conn.WriteMessage(websocket.TextMessage, data); err != nil {
+		c.logger.Error("send msg write error", "error", err, "len", len(data))
+	}
 }
 
 func (c *Client) backoffSleep(ctx context.Context) bool {
@@ -183,4 +223,15 @@ func (c *Client) notifyState(connected bool) {
 	if c.OnStateChange != nil {
 		c.OnStateChange(connected)
 	}
+}
+
+// getLocalIP returns the preferred outbound IP of this machine.
+func getLocalIP() string {
+	conn, err := net.Dial("udp", "8.8.8.8:80")
+	if err != nil {
+		return "unknown"
+	}
+	defer conn.Close()
+	addr := conn.LocalAddr().(*net.UDPAddr)
+	return addr.IP.String()
 }

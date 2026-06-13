@@ -128,7 +128,7 @@ Empty state (no daemons registered):
 - "还没有注册主机" title
 - "在你的开发机上运行以下命令安装 Daemon" subtitle
 - Install command in copyable code block (dark bg, SF Mono font):
-  `curl -fsSL https://pocketctl.com/install.sh | bash`
+  `curl -fsSL https://pocketctl.me/install.sh | bash`
   followed by: `pocketctl login` and `pocketctl daemon start`
 - "复制命令" button next to the code block
 

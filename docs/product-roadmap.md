@@ -114,7 +114,7 @@
 
 - [ ] 创建安装脚本 `install.sh`
   ```bash
-  curl -fsSL https://pocketctl.com/install.sh | bash
+  curl -fsSL https://pocketctl.me/install.sh | bash
   ```
   - 检测 OS/架构（macOS arm64/amd64, Linux）
   - 下载对应二进制

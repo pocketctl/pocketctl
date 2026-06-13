@@ -5,8 +5,8 @@ services:
       POSTGRES_USER: pocketctl
       POSTGRES_PASSWORD: pocketctl
       POSTGRES_DB: pocketctl
-    ports:
-      - "5433:5432"
+    expose:
+      - "5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:
@@ -19,14 +19,16 @@ services:
     build:
       context: ./relay
       dockerfile: Dockerfile
-    ports:
-      - "8080:8080"
+    expose:
+      - "8080"
     environment:
       DATABASE_URL: postgresql://pocketctl:pocketctl@postgres:5432/pocketctl
       PORT: 8080
       JWT_SECRET: pocketctl-local-dev-secret-2024
-      DEV_SMS_PHONE: "13800138000"
-      DEV_SMS_CODE: "123456"
+      WEB_APP_URL: "http://localhost"
+      ZHIPU_API_KEY: "${ZHIPU_API_KEY:-}"
+      DEV_EMAIL: "test@pocketctl.me"
+      DEV_EMAIL_CODE: "123456"
     depends_on:
       postgres:
         condition: service_healthy
@@ -35,8 +37,8 @@ services:
     build:
       context: ./web
       dockerfile: Dockerfile
-    ports:
-      - "3000:3000"
+    expose:
+      - "3000"
 
   landing:
     build:

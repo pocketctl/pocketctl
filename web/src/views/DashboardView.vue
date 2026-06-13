@@ -46,7 +46,7 @@
       <div class="empty-title">暂无在线主机</div>
       <div class="empty-subtitle">在远程机器上安装并启动 Daemon 即可开始监控</div>
       <div class="code-block" style="margin-top:16px; max-width:500px; margin-left:auto;margin-right:auto;">
-        <span class="cmd">curl -fsSL https://pocketctl.com/install.sh | bash</span><br/>
+        <span class="cmd">curl -fsSL https://pocketctl.me/install.sh | bash</span><br/>
         <span class="cmd">pocketctl daemon start</span>
       </div>
     </div>
@@ -69,7 +69,7 @@
               <button class="reset-name-btn" :class="{ visible: !!d.daemon_alias }" @click.stop="resetAlias(i)">恢复默认</button>
               <span :class="['chip', d.daemon_online ? 'chip-online' : 'chip-offline']" style="margin-left:auto;">{{ d.daemon_online ? '在线' : '离线' }}</span>
             </h3>
-            <div class="daemon-host">{{ d.hostname || d.daemon_id }}</div>
+            <div class="daemon-host">{{ d.ip && d.ip !== 'unknown' ? d.ip + ' · ' : '' }}{{ d.os && d.os !== 'unknown' ? d.os : '' }}</div>
           </div>
         </div>
 
@@ -100,7 +100,7 @@
         </div>
         <div class="card-meta">
           <div class="agents">
-            <span v-for="agent in (d.agents || ['claude-code'])" :key="agent" :class="['chip', d.daemon_online ? 'chip-terminal' : 'chip-offline']">{{ agent }}</span>
+            <span v-for="agent in getActiveAgents(d.daemon_id)" :key="agent" :class="['chip', d.daemon_online ? 'chip-terminal' : 'chip-offline']">{{ agentLabel(agent) }}</span>
           </div>
           <span>{{ d.daemon_online ? '在线' : (d.last_seen_at ? '最后在线 ' + formatRelativeTime(d.last_seen_at) : '离线') }}</span>
         </div>
@@ -200,6 +200,21 @@ function getDisplayName(d: any): string { return d.daemon_alias || d.hostname ||
 function daemonSessionCount(daemonId: string): number { return sessions.value.filter(s => s.daemon_id === daemonId && (s.status === 'running' || s.status === 'busy')).length }
 function totalSessionCount(daemonId: string): number { return sessions.value.filter(s => s.daemon_id === daemonId).length }
 function getEffectiveStatus(s: any): string { return effectiveStatus({ status: s.status, daemon_id: s.daemon_id }) }
+
+function getActiveAgents(daemonId: string): string[] {
+  const agents = new Set<string>()
+  for (const s of sessions.value) {
+    if (s.daemon_id === daemonId && s.agent_type) {
+      agents.add(s.agent_type)
+    }
+  }
+  return agents.size > 0 ? [...agents] : ['claude-code'] // fallback if no sessions
+}
+
+function agentLabel(agent: string): string {
+  const labels: Record<string, string> = { 'claude-code': 'Claude Code', 'opencode': 'OpenCode', 'codex': 'Codex' }
+  return labels[agent] || agent
+}
 
 function statusChip(s: any): string {
   const st = getEffectiveStatus(s)
