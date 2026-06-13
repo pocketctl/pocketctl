@@ -463,6 +463,22 @@ func cmdDaemonStart(args []string) {
 	// Dirty flag for state persistence — only write when changed
 	var stateDirty atomic.Bool
 
+	// Re-sync sessions after (re)connection
+	client.OnReconnected = func() {
+		count := len(sm.ListSessions())
+		logger.Info(fmt.Sprintf("resyncing %d sessions after reconnect", count))
+		for _, s := range sm.ListSessions() {
+			client.SendMsg(protocol.DaemonEvent{
+				Type:      "session_discovered",
+				SessionID: s.SessionID,
+				Cwd:       s.Cwd,
+				Status:    s.Status,
+				Source:    "terminal",
+			})
+		}
+		logger.Info("resync done")
+	}
+
 	// Connection state tracking
 	client.OnStateChange = func(connected bool) {
 		stateDirty.Store(true)

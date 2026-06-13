@@ -707,10 +707,10 @@ async function main() {
 
     // Register message listener BEFORE async auth (avoid race condition)
     socket.on('message', (raw: Buffer) => {
-      console.log('[ws] message received, len:', raw.length, 'authDone:', authDone);
+      // debug log removed
       if (!authDone) {
         earlyMessages.push(raw);
-        console.log('[ws] buffered, queue size:', earlyMessages.length);
+        // debug log removed
         return;
       }
       processMessage(raw);
@@ -733,16 +733,17 @@ async function main() {
       }
       try {
         const msg = JSON.parse(raw.toString());
-        console.log('[ws] msg type:', msg.type, 'session:', msg.session_id?.slice(0,8) || 'N/A');
+        // debug log removed
         if (connType === 'daemon') {
           if (msg.type === 'register') {
-            console.log('[ws] REGISTER daemon', msg.daemon_id, 'hostname', msg.hostname);
             router.registerDaemon(socket, msg, userId, tokenJti, tokenMachineId);
             wsDaemonMap.set(socket, msg.daemon_id);
             console.log('[ws] daemon registered, total in map:', wsDaemonMap.size);
           } else {
             const daemonId = wsDaemonMap.get(socket);
-            if (daemonId) router.handleDaemonMessage(daemonId, msg);
+            if (daemonId) {
+              router.handleDaemonMessage(daemonId, msg);
+            }
             else console.log('[ws] message for unknown daemon, type:', msg.type);
           }
         } else {

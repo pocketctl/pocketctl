@@ -606,6 +606,22 @@ type SessionInfo struct {
 	Cwd       string    `json:"cwd"`
 }
 
+// ResyncSessions re-emits session_discovered for all tracked sessions.
+// Called after the daemon reconnects to the relay to rebuild sessionToDaemon mappings.
+func (sm *SessionManager) ResyncSessions() {
+	sm.mu.RLock()
+	defer sm.mu.RUnlock()
+	for sessionID, ps := range sm.sessions {
+		sm.outputCh <- protocol.DaemonEvent{
+			Type:      "session_discovered",
+			SessionID: sessionID,
+			Cwd:       ps.Cwd,
+			Status:    ps.Status,
+			Source:    ps.Source,
+		}
+	}
+}
+
 func findAgentCLI(agent string) (string, error) {
 	cliNames := map[string]string{"claude-code": "claude", "opencode": "opencode"}
 	name, ok := cliNames[agent]

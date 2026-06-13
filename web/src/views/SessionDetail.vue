@@ -127,7 +127,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted, nextTick, watch } from 'vue'
+import { ref, computed, onMounted, onUnmounted, nextTick, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useWebSocket } from '../composables/useWebSocket'
 import { formatRelativeTime } from '../composables/useRelativeTime'
@@ -257,14 +257,26 @@ function focusResumeInput() { if (inputEl.value) { inputEl.value.focus() } }
 function sendMessage() {
   const text = messageInput.value.trim()
   if (!text || isDisconnected.value) return
-  messages.value.push({ id: 'u' + Date.now(), role: 'user', content: text })
   send({ type: 'user_message', session_id: sessionId.value, content: text })
   messageInput.value = ''
-  nextTick(scrollToBottom)
 }
 
 const msgCounter = { value: 0 }
+const seenEvents = new Set<string>()
 function nextId(prefix: string) { return prefix + (++msgCounter.value) }
+
+// Dedup: skip events we've already seen (by content hash)
+function isDuplicate(type: string, text: string): boolean {
+  const key = type + ':' + text.slice(0, 80)
+  if (seenEvents.has(key)) return true
+  seenEvents.add(key)
+  // Keep set bounded
+  if (seenEvents.size > 500) {
+    const arr = [...seenEvents]; seenEvents.clear()
+    arr.slice(-200).forEach(k => seenEvents.add(k))
+  }
+  return false
+}
 
 // Format tool input for display (matches iOS app logic)
 function formatToolInput(tool: string, input: any): string {
@@ -297,10 +309,10 @@ function processEvent(evt: any) {
   const type = evt.type || evt.event_type
   if (type === 'user_text') {
     const text = evt.text || evt.content || evt.payload?.text || evt.payload?.content || ''
-    if (text) messages.value.push({ id: nextId('u'), type: 'user_text', role: 'user', content: text })
+    if (text && !isDuplicate('user_text', text)) messages.value.push({ id: nextId('u'), type: 'user_text', role: 'user', content: text })
   } else if (type === 'agent_text') {
     const content = evt.text || evt.content || evt.payload?.text || evt.payload?.content || ''
-    if (!content) return
+    if (!content || isDuplicate('agent_text', content)) return
     const streaming = evt.streaming ?? evt.payload?.streaming ?? false
     const last = messages.value[messages.value.length - 1]
     if (last && last.type === 'agent_text' && last.streaming && !content.startsWith('\n')) {
@@ -357,60 +369,64 @@ watch(sessionId, (newId, oldId) => {
   }
 })
 
+const cleanups: (() => void)[] = []
+
 onMounted(() => {
   connect()
   send({ type: 'list_sessions' })
-  // Fetch historical events for this session
   send({ type: 'replay', session_id: sessionId.value, last_seq: 0 })
 
-  onEvent('session_list', (msg: any) => { allSessions.value = msg.sessions || [] })
+  cleanups.push(onEvent('session_list', (msg: any) => { allSessions.value = msg.sessions || [] }))
 
-  // Handle historical events replay
-  onEvent('replay_batch', (msg: any) => {
+  cleanups.push(onEvent('replay_batch', (msg: any) => {
     if (msg.session_id !== sessionId.value) return
     for (const evt of msg.events) {
       processEvent(evt)
     }
     nextTick(scrollToBottom)
-  })
+  }))
 
-  // Real-time events — use processEvent for consistent handling
-  onEvent('user_text', (msg: any) => {
+  cleanups.push(onEvent('user_text', (msg: any) => {
     if (msg.session_id !== sessionId.value) return
     processEvent(msg)
     nextTick(scrollToBottom)
-  })
+  }))
 
-  onEvent('agent_text', (msg: any) => {
+  cleanups.push(onEvent('agent_text', (msg: any) => {
     if (msg.session_id !== sessionId.value) return
     processEvent(msg)
     nextTick(scrollToBottom)
-  })
+  }))
 
-  onEvent('tool_call', (msg: any) => {
+  cleanups.push(onEvent('tool_call', (msg: any) => {
     if (msg.session_id !== sessionId.value) return
     processEvent(msg)
     nextTick(scrollToBottom)
-  })
+  }))
 
-  onEvent('tool_result', (msg: any) => {
+  cleanups.push(onEvent('tool_result', (msg: any) => {
     if (msg.session_id !== sessionId.value) return
     processEvent(msg)
-  })
+  }))
 
-  onEvent('subagent_discovered', (msg: any) => {
+  cleanups.push(onEvent('subagent_discovered', (msg: any) => {
     if (msg.session_id !== sessionId.value) return
     messages.value.push({ id: nextId('sa'), type: 'subagent', tool: msg.agent_id || 'Agent', input: msg.subagent_desc, status: 'completed', expanded: true, outputExpanded: false })
-  })
+  }))
 
-  onEvent('session_status', (msg: any) => {
+  cleanups.push(onEvent('session_status', (msg: any) => {
     if (msg.session_id === sessionId.value) { status.value = msg.status; if (msg.exit_reason) exitReason.value = msg.exit_reason; if (msg.exited_at) exitedAt.value = msg.exited_at }
-  })
+  }))
 
-  onEvent('error', (msg: any) => {
+  cleanups.push(onEvent('error', (msg: any) => {
     if (msg.session_id && msg.session_id !== sessionId.value) return
     messages.value.push({ id: nextId('e'), type: 'error', content: msg.error || '未知错误' })
-  })
+  }))
+})
+
+onUnmounted(() => {
+  for (const fn of cleanups) fn()
+  cleanups.length = 0
 })
 </script>
 

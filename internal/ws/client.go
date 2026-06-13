@@ -34,8 +34,9 @@ type Client struct {
 	agents   []string
 	osName   string
 	localIP  string
-	CommandCh chan protocol.ClientMessage
+	CommandCh     chan protocol.ClientMessage
 	OnStateChange OnConnectStateChange
+	OnReconnected func() // called after successful (re)connection + register
 }
 
 func NewClient(relayURL, token, daemonID string, agents []string, outputCh <-chan protocol.DaemonEvent, logger *slog.Logger) *Client {
@@ -104,6 +105,10 @@ func (c *Client) connectAndServe(ctx context.Context) error {
 		OS: c.osName, IP: c.localIP,
 	})
 	c.logger.Info("register sent")
+
+	if c.OnReconnected != nil {
+		c.OnReconnected()
+	}
 
 	done := make(chan struct{})
 	go c.readPump(done)
