@@ -13,6 +13,7 @@ export class Router {
   private sessionToDaemon = new Map<string, string>();
   private pendingSessionCreate = new Map<string, WebSocket>();
   private pendingSessionMeta = new Map<string, { agent_type: string; cwd: string }>();
+  private pendingOriginClient = new Map<string, WebSocket>(); // pending session_id → origin client (for session_id_changed 补发)
   private takeoverTimers = new Map<string, { timer: ReturnType<typeof setTimeout>; newDaemonId: string; newHostname: string }>();
   private pool: pg.Pool;
 
@@ -119,6 +120,14 @@ export class Router {
       this.takeoverTimers.delete(daemonId);
     }
 
+    // If a session_create was in-flight on this daemon, notify the origin client of failure
+    const pendingOrigin = this.pendingSessionCreate.get(daemonId);
+    if (pendingOrigin && pendingOrigin.readyState === 1) {
+      this.send(pendingOrigin, { type: 'session_create_failed', reason: 'daemon_offline', error: 'daemon disconnected' });
+    }
+    this.pendingSessionCreate.delete(daemonId);
+    this.pendingSessionMeta?.delete(daemonId);
+
     db.setDaemonOffline(this.pool, daemonId).catch(console.error);
 
     // Push notification for daemon offline
@@ -179,6 +188,15 @@ export class Router {
           this.send(pendingClient, msg);
         }
       }
+      // session_create_failed (no session_id): forward to the originating client
+      if (msg.type === 'session_create_failed') {
+        const originClient = this.pendingSessionCreate.get(daemonId);
+        if (originClient && originClient.readyState === 1) {
+          this.send(originClient, { type: 'session_create_failed', reason: msg.reason || 'start_fail', error: msg.error });
+        }
+        this.pendingSessionCreate.delete(daemonId);
+        this.pendingSessionMeta?.delete(daemonId);
+      }
       return;
     }
     const daemon = this.daemons.get(daemonId);
@@ -199,6 +217,12 @@ export class Router {
           }
         }
         this.sessionToDaemon.delete(oldId);
+        // 主动向原始发起方补发 session_id_changed，确保即使订阅迁移有竞态也收到真实 ID
+        const origin = this.pendingOriginClient.get(oldId);
+        if (origin && origin.readyState === 1) {
+          this.send(origin, { type: 'session_id_changed', session_id: sessionId, old_session_id: oldId });
+        }
+        this.pendingOriginClient.delete(oldId);
       }
     }
     if (msg.type === 'session_created') {
@@ -209,6 +233,8 @@ export class Router {
       if (originClient && originClient.readyState === 1) {
         const client = this.clients.get(originClient);
         if (client) client.subscribedSessions.add(sessionId);
+        // 记录 origin client，供后续 session_id_changed 补发
+        this.pendingOriginClient.set(sessionId, originClient);
         const enriched = { ...msg, daemon_id: daemonId, hostname: daemon?.hostname || 'unknown' };
         this.send(originClient, enriched);
       }
@@ -223,8 +249,8 @@ export class Router {
           console.log(`[router] skipping tombstoned session: ${sessionId}`);
           return;
         }
-        // Use provided title, or generate fallback with session ID suffix
-        const title = msg.title || `Terminal Session-${sessionId.slice(-8)}`;
+        // Use provided title if present; otherwise leave existing title untouched
+        const title = msg.title || undefined;
         const cwd = msg.cwd || '';
         db.upsertSession(this.pool, sessionId, daemonId, 'claude-code', cwd, msg.status || 'busy', title, 'terminal', undefined, userId ?? undefined).catch(console.error);
         db.insertEvent(this.pool, sessionId, msg.type, msg).catch(console.error);
@@ -318,17 +344,31 @@ export class Router {
     }
 
     if (msg.type === 'session_create') {
-      // Route to a daemon owned by the same user
-      for (const [daemonId, daemon] of this.daemons) {
-        if (daemon.ws.readyState === 1 && this.sameUser(client.userId, daemon.userId)) {
-          this.pendingSessionCreate.set(daemonId, clientWs);
-          this.pendingSessionMeta = this.pendingSessionMeta || new Map();
-          this.pendingSessionMeta.set(daemonId, { agent_type: msg.agent || 'claude-code', cwd: msg.cwd || '' });
-          this.send(daemon.ws, msg);
-          return;
+      // Precise routing: prefer msg.daemon_id, validate ownership; fallback to first online same-user daemon
+      let targetDaemon: { id: string; daemon: DaemonConnection } | null = null;
+      if (msg.daemon_id) {
+        const d = this.daemons.get(msg.daemon_id);
+        if (d && d.ws.readyState === 1 && this.sameUser(client.userId, d.userId)) {
+          targetDaemon = { id: msg.daemon_id, daemon: d };
         }
       }
-      this.send(clientWs, { type: 'error', error: 'no daemons available' });
+      if (!targetDaemon) {
+        for (const [dId, d] of this.daemons) {
+          if (d.ws.readyState === 1 && this.sameUser(client.userId, d.userId)) {
+            targetDaemon = { id: dId, daemon: d };
+            break;
+          }
+        }
+      }
+      if (!targetDaemon) {
+        this.send(clientWs, { type: 'session_create_failed', reason: 'daemon_offline', error: 'no daemons available' });
+        return;
+      }
+      const { id: daemonId } = targetDaemon;
+      this.pendingSessionCreate.set(daemonId, clientWs);
+      this.pendingSessionMeta = this.pendingSessionMeta || new Map();
+      this.pendingSessionMeta.set(daemonId, { agent_type: msg.agent || 'claude-code', cwd: msg.cwd || '' });
+      this.send(targetDaemon.daemon.ws, msg);
       return;
     }
 

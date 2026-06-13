@@ -999,8 +999,11 @@ func handleCommands(ctx context.Context, client *ws.Client, sm *session.SessionM
 				sessionID, err := sm.CreateSession(ctx, config)
 				if err != nil {
 					logger.Error("create session failed", "error", err)
+					reason := classifyCreateError(err.Error())
 					client.SendMsg(protocol.DaemonEvent{
-						Type: "error", Error: err.Error(),
+						Type:   "session_create_failed",
+						Reason: reason,
+						Error:  err.Error(),
 					})
 					continue
 				}
@@ -1012,6 +1015,12 @@ func handleCommands(ctx context.Context, client *ws.Client, sm *session.SessionM
 					SessionID: sessionID,
 					Title:     config.Prompt,
 				})
+
+			case "abort_create":
+				logger.Info("abort create session", "session", cmd.SessionID)
+				if cmd.SessionID != "" {
+					sm.AbortSession(cmd.SessionID)
+				}
 
 			case "user_message":
 				logger.Info("user message", "session", cmd.SessionID)
@@ -1038,6 +1047,21 @@ func handleCommands(ctx context.Context, client *ws.Client, sm *session.SessionM
 }
 
 // readJSONLLines reads up to maxLines from a JSONL file and returns them as a slice.
+// classifyCreateError maps a CreateSession error message to a reason code
+// for the session_create_failed event (no_cli, bad_cwd, start_fail).
+func classifyCreateError(msg string) string {
+	if strings.Contains(msg, "agent CLI not found") {
+		return "no_cli"
+	}
+	if strings.HasPrefix(msg, "工作目录") {
+		return "bad_cwd"
+	}
+	if strings.Contains(msg, "start process") || strings.Contains(msg, "stdout pipe") {
+		return "start_fail"
+	}
+	return "start_fail"
+}
+
 func readJSONLLines(path string, maxLines int) []string {
 	f, err := os.Open(path)
 	if err != nil {

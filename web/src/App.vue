@@ -51,7 +51,7 @@
           <span class="current">{{ pageTitle }}</span>
         </div>
         <div class="topbar-actions">
-          <button class="btn btn-secondary" v-if="showNewSessionBtn" @click="emit('new-session')">
+          <button class="btn btn-secondary" v-if="showNewSessionBtn" @click="triggerNewSession++">
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 5v14M5 12h14"/></svg>
             新建会话
           </button>
@@ -70,7 +70,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, watch, onMounted } from 'vue'
+import { ref, computed, provide } from 'vue'
 import { useRoute } from 'vue-router'
 import { useAuth } from './composables/useAuth'
 import logoDark from './assets/logo-github-org.svg'
@@ -79,7 +79,8 @@ import logoLight from './assets/logo-github-org-light.svg'
 const route = useRoute()
 const { isLoggedIn, user } = useAuth()
 
-const emit = defineEmits(['new-session'])
+const triggerNewSession = ref(0)
+provide('triggerNewSession', triggerNewSession)
 
 const currentTheme = ref(document.documentElement.getAttribute('data-theme') || 'dark')
 const isDark = computed(() => currentTheme.value !== 'light')

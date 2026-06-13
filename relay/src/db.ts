@@ -258,11 +258,11 @@ export async function cleanStaleSessions(pool: pg.Pool): Promise<void> {
     WHERE status IN ('running', 'busy')
       AND daemon_id NOT IN (SELECT daemon_id FROM daemons WHERE status = 'online' AND last_heartbeat > NOW() - INTERVAL '5 minutes')
   `);
-  // Also purge ghost pending-* sessions older than 1 hour
+  // Also purge ghost pending-* sessions older than 10 minutes
   await pool.query(`
     DELETE FROM sessions
     WHERE session_id LIKE 'pending-%'
-      AND created_at < NOW() - INTERVAL '1 hour'
+      AND created_at < NOW() - INTERVAL '10 minutes'
   `);
 }
 
@@ -329,7 +329,6 @@ export async function listSessionsByUser(pool: pg.Pool, userId: number): Promise
      FROM sessions s
      LEFT JOIN daemons d ON s.daemon_id = d.daemon_id
      WHERE s.user_id = $1
-       AND s.status NOT IN ('completed', 'error', 'killed')
        AND s.session_id NOT LIKE 'pending-%'
      ORDER BY COALESCE(s.last_activity_at, s.updated_at) DESC`,
     [userId]

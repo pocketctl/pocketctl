@@ -3,6 +3,7 @@ package session
 import (
 	"bufio"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -76,6 +77,53 @@ func resolveCwd(cwd string) string {
 	return cwd
 }
 
+// stripModelSuffix removes any trailing "[...]" suffix that some config tools
+// (e.g. cc switch) append to model names (like "GLM-5.2[1M]"). Such suffixes
+// are not valid model identifiers and cause provider API errors.
+func stripModelSuffix(s string) string {
+	if idx := strings.Index(s, "["); idx > 0 {
+		return strings.TrimSpace(s[:idx])
+	}
+	return s
+}
+
+// resolveCleanModel reads ~/.claude/settings.json, resolves the active model
+// alias (opus/sonnet/haiku) to its concrete model name via the
+// ANTHROPIC_DEFAULT_*_MODEL env mapping, and strips any invalid [...] suffix.
+// Returns "" if settings.json is missing or unparseable (claude falls back to
+// its own defaults).
+func resolveCleanModel() string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+	data, err := os.ReadFile(filepath.Join(home, ".claude", "settings.json"))
+	if err != nil {
+		return ""
+	}
+	var cfg struct {
+		Model string            `json:"model"`
+		Env   map[string]string `json:"env"`
+	}
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		return ""
+	}
+
+	switch strings.ToLower(strings.TrimSpace(cfg.Model)) {
+	case "opus":
+		return stripModelSuffix(cfg.Env["ANTHROPIC_DEFAULT_OPUS_MODEL"])
+	case "sonnet":
+		return stripModelSuffix(cfg.Env["ANTHROPIC_DEFAULT_SONNET_MODEL"])
+	case "haiku":
+		return stripModelSuffix(cfg.Env["ANTHROPIC_DEFAULT_HAIKU_MODEL"])
+	default:
+		if cfg.Model == "" {
+			return ""
+		}
+		return stripModelSuffix(cfg.Model)
+	}
+}
+
 // validateCwd checks that the directory exists, is a directory, and is accessible.
 func validateCwd(cwd string) error {
 	info, err := os.Stat(cwd)
@@ -108,6 +156,9 @@ func (sm *SessionManager) CreateSession(ctx context.Context, config protocol.Ses
 	if err := validateCwd(resolvedCwd); err != nil {
 		return "", err
 	}
+
+	// Resolve clean model name (strip invalid [...] suffix from cc switch configs)
+	config.Model = resolveCleanModel()
 
 	args := adapter.BuildClaudeArgs(config.Prompt, "", config)
 	ctx, cancel := context.WithCancel(ctx)
@@ -144,6 +195,16 @@ func (sm *SessionManager) CreateSession(ctx context.Context, config protocol.Ses
 		sm.childPids[cmd.Process.Pid] = true
 	}
 	sm.mu.Unlock()
+
+	// claude -p (stream-json) does not echo the user's prompt, so emit it
+	// ourselves so the Web/iOS client can render the user message.
+	if config.Prompt != "" {
+		sm.outputCh <- protocol.DaemonEvent{
+			Type:      "user_text",
+			SessionID: ps.SessionID,
+			Text:      config.Prompt,
+		}
+	}
 
 	go sm.readOutput(ctx, cmd, stdout, adp, ps)
 	time.Sleep(200 * time.Millisecond)
@@ -256,6 +317,36 @@ func (sm *SessionManager) GenerateTitle(sessionID, userMessage, assistantMessage
 }
 
 // SetSessionExited marks a terminal session as exited (process died).
+// AbortSession cancels and cleans up a pending session, killing the claude subprocess.
+// Returns true if the session existed and was aborted, false if not found.
+// If the session has already resolved to a real ID (not pending-*), returns false
+// without killing (the session is already established and should not be aborted).
+func (sm *SessionManager) AbortSession(sessionID string) bool {
+	sm.mu.Lock()
+	ps, ok := sm.sessions[sessionID]
+	if !ok {
+		sm.mu.Unlock()
+		return false
+	}
+	// Don't abort sessions that have resolved to a real ID (not pending-*)
+	if !strings.HasPrefix(sessionID, "pending-") {
+		sm.mu.Unlock()
+		return false
+	}
+	delete(sm.sessions, sessionID)
+	if ps.Cancel != nil {
+		ps.Cancel()
+	}
+	if ps.Cmd != nil && ps.Cmd.Process != nil {
+		ps.Cmd.Process.Kill()
+	}
+	if ps.Cmd != nil && ps.Cmd.Process != nil {
+		delete(sm.childPids, ps.Cmd.Process.Pid)
+	}
+	sm.mu.Unlock()
+	return true
+}
+
 func (sm *SessionManager) SetSessionExited(sessionID string, exitReason string) {
 	sm.mu.Lock()
 	ps, ok := sm.sessions[sessionID]
@@ -442,6 +533,13 @@ func (sm *SessionManager) SendMessage(ctx context.Context, sessionID string, con
 	ps.Status = protocol.StatusRunning
 	ps.Source = source // Keep original source
 	sm.mu.Unlock()
+
+	// claude -p (stream-json) does not echo the user's message, so emit it ourselves.
+	sm.outputCh <- protocol.DaemonEvent{
+		Type:      "user_text",
+		SessionID: ps.SessionID,
+		Text:      content,
+	}
 	go sm.readOutput(ctx, cmd, stdout, adp, ps)
 	return nil
 }

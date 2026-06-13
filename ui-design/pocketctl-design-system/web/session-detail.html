@@ -347,6 +347,42 @@
     .session-panel { display: none; }
     .msg { max-width: 90%; }
   }
+
+  /* ---- New session (created via dashboard) ---- */
+  .status-pill.connecting { background: var(--warning-bg); color: var(--warning); }
+  .status-pill.connecting .pulse { background: currentColor; animation: pulse-amber 1.5s infinite; }
+
+  .new-session-banner {
+    display: flex; align-items: center; gap: 8px;
+    padding: 11px 14px; border-radius: var(--radius-md);
+    background: var(--success-bg); color: var(--success);
+    font-size: 13px; font-weight: 500;
+    border: 1px solid rgba(63, 185, 80, 0.28);
+    animation: fade-in 0.25s ease;
+  }
+  .new-session-banner .ns-meta {
+    margin-left: auto; font-weight: 400; color: var(--fg-tertiary);
+    font-family: var(--font-mono); font-size: 12px;
+  }
+
+  .msg-connecting {
+    align-self: flex-start;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    color: var(--fg-secondary);
+    padding: 10px 16px;
+    border-radius: 16px 16px 16px 4px;
+    font-size: 14px; line-height: 1.6; font-style: italic;
+    display: inline-flex; align-items: center; gap: 8px;
+  }
+  .msg-connecting .mini-spinner {
+    width: 13px; height: 13px;
+    border: 2px solid transparent;
+    border-top-color: var(--accent);
+    border-radius: 50%;
+    animation: spin 0.7s linear infinite;
+    display: inline-block;
+  }
 </style>
 </head>
 <body>
@@ -391,16 +427,16 @@
     <!-- Session List Panel -->
     <div class="session-panel">
       <div class="session-panel-header">
-        <h3>MacBook-Pro</h3>
-        <button class="btn-icon" style="width:28px;height:28px;border:none;background:var(--accent);color:#fff;" title="新建会话">
+        <h3 id="panel-host">MacBook-Pro</h3>
+        <button class="btn-icon" style="width:28px;height:28px;border:none;background:var(--accent);color:#fff;" title="新建会话" onclick="location.href='dashboard.html'">
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M12 5v14M5 12h14"/></svg>
         </button>
       </div>
-      <div style="padding:4px 8px;display:flex;align-items:center;gap:6px;">
+      <div id="panel-heartbeat" style="padding:4px 8px;display:flex;align-items:center;gap:6px;">
         <span class="status-dot online" style="width:6px;height:6px;"></span>
         <span style="font-size:11px;color:var(--fg-tertiary);">在线 · 最后心跳 30秒前</span>
       </div>
-      <div class="session-list">
+      <div class="session-list" id="session-list">
         <div class="session-list-item active">
           <span class="status-dot running" style="width:7px;height:7px;"></span>
           <div class="sl-info">
@@ -443,12 +479,12 @@
     <div class="chat-area">
       <!-- Chat Toolbar -->
       <div class="chat-toolbar">
-        <div class="session-label">
+        <div class="session-label" id="chat-title-wrap">
           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M15 18l-6-6 6-6"/></svg>
           重构用户认证模块
           <span class="daemon-name">· MacBook-Pro</span>
         </div>
-        <span class="status-pill running"><span class="pulse"></span>运行中</span>
+        <span class="status-pill running" id="chat-status"><span class="pulse"></span>运行中</span>
         <button class="theme-toggle" onclick="toggleTheme()" title="切换主题">
           <svg id="icon-moon" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 12.79A9 9 0 1111.21 3 7 7 0 0021 12.79z"/></svg>
           <svg id="icon-sun" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="display:none;"><circle cx="12" cy="12" r="5"/><path d="M12 1v2M12 21v2M4.22 4.22l1.42 1.42M18.36 18.36l1.42 1.42M1 12h2M21 12h2M4.22 19.78l1.42-1.42M18.36 5.64l1.42-1.42"/></svg>
@@ -456,7 +492,7 @@
       </div>
 
       <!-- Messages -->
-      <div class="chat-messages">
+      <div class="chat-messages" id="chat-messages">
         <!-- Timeline -->
         <div class="timeline">
           <div class="milestone"><div class="dot active"></div><span class="label active">创建</span><span class="time">14:32</span></div>
@@ -569,6 +605,70 @@
   function toggleTheme() { setTheme(getTheme() === 'dark' ? 'light' : 'dark'); }
   const saved = localStorage.getItem('pocketctl-theme');
   if (saved) setTheme(saved);
+
+  /* ---- Render a freshly created session (arrives from dashboard) ---- */
+  (function applyNewSession() {
+    const p = new URLSearchParams(location.search);
+    if (p.get('new') !== '1') return;
+
+    function esc(s) {
+      return String(s).replace(/[&<>"']/g, c => (
+        { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]
+      ));
+    }
+
+    const rawTitle = (p.get('title') || '新会话').trim();
+    const title = rawTitle.length > 24 ? rawTitle.slice(0, 24) + '…' : rawTitle;
+    const host = p.get('host') || '未知主机';
+    const agentLabel = p.get('agentLabel') || 'Claude Code';
+    const sessionId = p.get('session') || ('sess_' + Math.random().toString(36).slice(2, 10));
+    const workdir = p.get('workdir') || '/';
+
+    // 1. Prepend a new session to the list and clear any prior active state
+    const list = document.getElementById('session-list');
+    list.querySelectorAll('.session-list-item.active').forEach(it => it.classList.remove('active'));
+    const item = document.createElement('div');
+    item.className = 'session-list-item active';
+    item.innerHTML =
+      '<span class="status-dot running" style="width:7px;height:7px;"></span>' +
+      '<div class="sl-info">' +
+        '<div class="sl-title">' + esc(title) + '</div>' +
+        '<div class="sl-meta">刚刚创建 · ' + esc(agentLabel) + '</div>' +
+      '</div>';
+    list.insertBefore(item, list.firstChild);
+
+    // 2. Update the chat toolbar: title, daemon, status
+    document.getElementById('chat-title-wrap').innerHTML =
+      '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M15 18l-6-6 6-6"/></svg>' +
+      esc(title) +
+      '<span class="daemon-name">· ' + esc(host) + '</span>';
+    const status = document.getElementById('chat-status');
+    status.className = 'status-pill connecting';
+    status.innerHTML = '<span class="pulse"></span>连接中';
+
+    // 3. Panel header reflects the new host
+    document.getElementById('panel-host').textContent = host;
+    document.getElementById('panel-heartbeat').innerHTML =
+      '<span class="status-dot online" style="width:6px;height:6px;"></span>' +
+      '<span style="font-size:11px;color:var(--fg-tertiary);">在线 · 会话创建中…</span>';
+
+    // 4. Replace the message area with the new-session initial state
+    document.getElementById('chat-messages').innerHTML =
+      '<div class="new-session-banner">' +
+        '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M20 6L9 17l-5-5"/></svg>' +
+        '会话已创建 · 已在 ' + esc(host) + ' 上启动 ' + esc(agentLabel) +
+        '<span class="ns-meta">' + esc(sessionId) + '</span>' +
+      '</div>' +
+      '<div class="msg msg-user">' + esc(rawTitle) + '</div>' +
+      '<div class="msg msg-connecting">' +
+        '<span class="mini-spinner"></span>' +
+        '正在连接主机 ' + esc(host) + '（' + esc(workdir) + '），等待 ' + esc(agentLabel) + ' 响应…' +
+      '</div>';
+
+    // 5. Document title + clean the query string so a refresh won't re-trigger
+    document.title = 'pocketctl — ' + title;
+    history.replaceState({}, '', location.pathname);
+  })();
 </script>
 </body>
 </html>

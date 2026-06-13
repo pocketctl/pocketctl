@@ -41,6 +41,7 @@ type DaemonEvent struct {
 	SubAgentType     string          `json:"subagent_type,omitempty"`  // sub-agent type (Explore, general-purpose, etc.)
 	UserMessage      string          `json:"user_message,omitempty"`   // for generate_title_request
 	AssistantMessage string          `json:"assistant_message,omitempty"` // for generate_title_request
+	Reason           string          `json:"reason,omitempty"`          // failure reason code (no_cli, bad_cwd, start_fail, timeout, daemon_offline)
 }
 
 // Control messages
@@ -86,6 +87,7 @@ type SessionConfig struct {
 	Prompt         string   `json:"prompt"`
 	AllowedTools   []string `json:"allowed_tools,omitempty"`
 	PermissionMode string   `json:"permission_mode,omitempty"`
+	Model          string   `json:"model,omitempty"` // resolved clean model name (no [...] suffix)
 }
 
 // Session states

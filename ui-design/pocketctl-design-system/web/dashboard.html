@@ -327,6 +327,378 @@
     .session-row .session-time,
     .session-row .session-actions { display: none; }
   }
+
+  /* ============================================
+     New Session Modal
+     ============================================ */
+  .modal-overlay {
+    position: fixed;
+    inset: 0;
+    background: rgba(1, 4, 9, 0.6);
+    backdrop-filter: blur(4px);
+    -webkit-backdrop-filter: blur(4px);
+    z-index: 100;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 24px;
+    animation: modal-fade-in 0.2s ease;
+  }
+  [data-theme="light"] .modal-overlay {
+    background: rgba(31, 35, 40, 0.3);
+  }
+  @keyframes modal-fade-in {
+    from { opacity: 0; }
+    to { opacity: 1; }
+  }
+
+  .modal-dialog {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-2xl);
+    width: 100%;
+    max-width: 520px;
+    max-height: 90vh;
+    overflow-y: auto;
+    animation: modal-slide-up 0.25s ease;
+    box-shadow: var(--shadow-lg);
+    transition: background var(--transition), border-color var(--transition);
+  }
+  @keyframes modal-slide-up {
+    from { opacity: 0; transform: translateY(24px) scale(0.97); }
+    to { opacity: 1; transform: translateY(0) scale(1); }
+  }
+
+  .modal-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 20px 24px 0;
+  }
+
+  .modal-title {
+    font-family: var(--font-display);
+    font-size: 20px;
+    font-weight: 700;
+    color: var(--fg);
+  }
+
+  .modal-close {
+    width: 32px;
+    height: 32px;
+    border-radius: 50%;
+    border: 1px solid var(--border);
+    background: var(--surface-hover);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+    color: var(--fg-secondary);
+    transition: background 0.15s, color 0.15s;
+  }
+  .modal-close:hover { background: var(--surface-active); color: var(--fg); }
+
+  .modal-body {
+    padding: 20px 24px 24px;
+  }
+
+  /* ---- Host Selector ---- */
+  .field-label {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--fg-secondary);
+    margin-bottom: 10px;
+    text-transform: uppercase;
+    letter-spacing: 0.4px;
+  }
+  .field-label svg { color: var(--fg-tertiary); }
+
+  .host-selector {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    margin-bottom: 24px;
+  }
+
+  .host-option {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 12px 16px;
+    border: 2px solid var(--border);
+    border-radius: var(--radius-lg);
+    cursor: pointer;
+    transition: border-color 0.15s, background 0.15s, box-shadow 0.15s;
+    background: var(--bg);
+  }
+  .host-option:hover {
+    border-color: var(--border-light);
+    background: var(--surface-hover);
+  }
+  .host-option.selected {
+    border-color: var(--accent);
+    background: var(--accent-subtle);
+    box-shadow: 0 0 0 1px var(--accent-muted);
+  }
+  .host-option.disabled {
+    opacity: 0.45;
+    cursor: not-allowed;
+    pointer-events: none;
+  }
+
+  .host-option .host-radio {
+    width: 20px;
+    height: 20px;
+    border-radius: 50%;
+    border: 2px solid var(--border);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+    transition: border-color 0.15s, background 0.15s;
+  }
+  .host-option.selected .host-radio {
+    border-color: var(--accent);
+    background: var(--accent);
+  }
+  .host-option.selected .host-radio::after {
+    content: '';
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: #fff;
+  }
+
+  .host-option .host-icon {
+    width: 36px;
+    height: 36px;
+    border-radius: var(--radius-md);
+    background: var(--surface-active);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+  }
+  .host-option .host-icon svg { width: 18px; height: 18px; color: var(--fg-secondary); }
+
+  .host-option .host-info {
+    flex: 1;
+    min-width: 0;
+  }
+  .host-option .host-info .host-name {
+    font-size: 14px;
+    font-weight: 600;
+    color: var(--fg);
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+  .host-option .host-info .host-name .host-alias-tag {
+    font-size: 10px;
+    font-weight: 500;
+    color: var(--accent);
+    background: var(--accent-muted);
+    padding: 1px 6px;
+    border-radius: 4px;
+  }
+  .host-option .host-info .host-meta {
+    font-size: 11px;
+    color: var(--fg-tertiary);
+    font-family: var(--font-mono);
+    margin-top: 2px;
+  }
+
+  .host-option .host-status {
+    flex-shrink: 0;
+  }
+
+  .host-empty {
+    text-align: center;
+    padding: 16px;
+    font-size: 13px;
+    color: var(--fg-tertiary);
+  }
+
+  /* ---- Agent Type Pills ---- */
+  .agent-pills {
+    display: flex;
+    gap: 8px;
+    margin-bottom: 24px;
+  }
+  .agent-pill {
+    flex: 1;
+    padding: 11px 20px;
+    border-radius: var(--radius-md);
+    font-size: 14px;
+    font-weight: 600;
+    border: 2px solid var(--border);
+    cursor: pointer;
+    transition: all 0.15s;
+    font-family: var(--font-body);
+    text-align: center;
+    background: var(--bg);
+    color: var(--fg-secondary);
+  }
+  .agent-pill:hover {
+    border-color: var(--border-light);
+    color: var(--fg);
+  }
+  .agent-pill.selected {
+    border-color: var(--accent);
+    background: var(--accent-subtle);
+    color: var(--accent);
+  }
+
+  /* ---- Form Fields ---- */
+  .form-group {
+    margin-bottom: 20px;
+  }
+
+  .dir-input {
+    display: flex;
+    align-items: center;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-md);
+    padding: 0 14px;
+    gap: 10px;
+    transition: border-color 0.15s, box-shadow 0.15s;
+  }
+  .dir-input:focus-within {
+    border-color: var(--accent);
+    box-shadow: 0 0 0 3px var(--accent-muted);
+  }
+  .dir-input svg { flex-shrink: 0; color: var(--fg-tertiary); }
+  .dir-input input {
+    flex: 1;
+    background: none;
+    border: none;
+    color: var(--fg);
+    font-family: var(--font-mono);
+    font-size: 14px;
+    padding: 12px 0;
+    outline: none;
+  }
+  .dir-input input::placeholder { color: var(--fg-tertiary); }
+
+  .prompt-area {
+    width: 100%;
+    min-height: 100px;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-md);
+    padding: 12px 14px;
+    color: var(--fg);
+    font-family: var(--font-body);
+    font-size: 14px;
+    outline: none;
+    resize: vertical;
+    line-height: 1.6;
+    transition: border-color 0.15s, box-shadow 0.15s;
+  }
+  .prompt-area:focus {
+    border-color: var(--accent);
+    box-shadow: 0 0 0 3px var(--accent-muted);
+  }
+  .prompt-area::placeholder { color: var(--fg-tertiary); }
+
+  .char-count {
+    text-align: right;
+    font-size: 11px;
+    color: var(--fg-tertiary);
+    margin-top: 4px;
+  }
+
+  /* ---- Modal Footer ---- */
+  .modal-footer {
+    display: flex;
+    gap: 10px;
+    padding-top: 4px;
+  }
+  .modal-footer .btn { flex: 1; padding: 12px; font-size: 15px; }
+
+  .btn-start {
+    flex: 2 !important;
+    background: var(--primary-btn);
+    color: #fff;
+    border: none;
+    font-weight: 600;
+  }
+  .btn-start:hover:not(:disabled) { background: var(--primary-btn-hover); }
+  .btn-start:disabled { opacity: 0.4; cursor: not-allowed; }
+  .btn-start.is-loading {
+    opacity: 0.9;
+    cursor: wait;
+    background: var(--primary-btn-hover);
+  }
+  .btn-start .btn-content,
+  .btn-start .btn-loading { display: inline-flex; align-items: center; gap: 8px; }
+  .btn-start:not(.is-loading) .btn-loading { display: none; }
+  .btn-start.is-loading .btn-content { display: none; }
+  .btn-start .btn-loading .spinner {
+    width: 16px; height: 16px;
+    border: 2px solid rgba(255,255,255,0.35);
+    border-top-color: #fff;
+    border-radius: 50%;
+    animation: spin 0.7s linear infinite;
+    display: inline-block;
+  }
+
+  /* Dim the form while the request is in flight */
+  .modal-body.is-loading > :not(.modal-footer) { opacity: 0.5; pointer-events: none; transition: opacity 0.2s; }
+  .modal-body.is-loading .btn-cancel { opacity: 0.5; pointer-events: none; }
+
+  /* Inline error banner inside the modal */
+  .modal-error {
+    display: none;
+    align-items: flex-start;
+    gap: 10px;
+    padding: 12px 14px;
+    border-radius: var(--radius-md);
+    background: rgba(248, 81, 73, 0.1);
+    border: 1px solid rgba(248, 81, 73, 0.35);
+    margin-bottom: 16px;
+    animation: fade-in 0.2s ease;
+  }
+  [data-theme="light"] .modal-error { background: var(--error-bg); border-color: rgba(207, 34, 46, 0.3); }
+  .modal-error.visible { display: flex; }
+  .modal-error .err-icon { flex-shrink: 0; color: var(--error); margin-top: 1px; }
+  .modal-error .err-body { flex: 1; min-width: 0; }
+  .modal-error .err-title { font-size: 13px; font-weight: 600; color: var(--error); }
+  .modal-error .err-desc { font-size: 12px; color: var(--fg-secondary); margin-top: 3px; line-height: 1.5; }
+  .modal-error .err-close {
+    background: none; border: none; color: var(--fg-tertiary);
+    cursor: pointer; padding: 2px; line-height: 0;
+  }
+  .modal-error .err-close:hover { color: var(--fg); }
+
+  .btn-cancel {
+    background: var(--surface);
+    color: var(--fg-secondary);
+    border: 1px solid var(--border);
+    font-weight: 500;
+  }
+  .btn-cancel:hover { background: var(--surface-hover); color: var(--fg); }
+
+  /* ---- Mobile ---- */
+  @media (max-width: 520px) {
+    .modal-overlay { padding: 0; align-items: flex-end; }
+    .modal-dialog {
+      max-width: 100%;
+      max-height: 85vh;
+      border-radius: var(--radius-2xl) var(--radius-2xl) 0 0;
+      animation: modal-slide-up-mobile 0.3s ease;
+    }
+    @keyframes modal-slide-up-mobile {
+      from { transform: translateY(100%); }
+      to { transform: translateY(0); }
+    }
+    .agent-pills { flex-direction: column; }
+    .modal-footer { flex-direction: column; }
+  }
 </style>
 </head>
 <body>
@@ -381,7 +753,7 @@
         <span>概览</span>
       </div>
       <div class="topbar-actions">
-        <button class="btn btn-secondary" onclick="showNewSession()">
+        <button class="btn btn-secondary" id="btn-new-session-top" onclick="openNewSessionModal()">
           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 5v14M5 12h14"/></svg>
           新建会话
         </button>
@@ -604,6 +976,108 @@
   </main>
 </div>
 
+<!-- New Session Modal -->
+<div class="modal-overlay" id="new-session-modal" style="display:none;">
+  <div class="modal-dialog" id="modal-dialog">
+    <div class="modal-header">
+      <h2 class="modal-title">新建会话</h2>
+      <button class="modal-close" onclick="closeNewSession()" title="关闭">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M18 6L6 18M6 6l12 12"/></svg>
+      </button>
+    </div>
+    <div class="modal-body">
+      <!-- Error Banner -->
+      <div class="modal-error" id="modal-error">
+        <svg class="err-icon" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M12 8v4M12 16h.01"/></svg>
+        <div class="err-body">
+          <div class="err-title" id="err-title">会话创建失败</div>
+          <div class="err-desc" id="err-desc">主机连接超时，请稍后重试。</div>
+        </div>
+        <button class="err-close" onclick="hideError()" title="关闭">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M18 6L6 18M6 6l12 12"/></svg>
+        </button>
+      </div>
+
+      <!-- Host Selector -->
+      <div class="field-label">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="2" width="20" height="20" rx="3"/><path d="M7 2v20"/></svg>
+        选择目标主机
+      </div>
+      <div class="host-selector" id="host-selector">
+        <div class="host-option" data-host-id="0" onclick="selectHost(this)">
+          <div class="host-radio"></div>
+          <div class="host-icon">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8M12 17v4"/></svg>
+          </div>
+          <div class="host-info">
+            <div class="host-name">MacBook-Pro</div>
+            <div class="host-meta">192.168.1.100 · macOS</div>
+          </div>
+          <div class="host-status"><span class="chip chip-online">在线</span></div>
+        </div>
+        <div class="host-option disabled" data-host-id="1">
+          <div class="host-radio"></div>
+          <div class="host-icon">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="2" width="20" height="8" rx="2"/><rect x="2" y="14" width="20" height="8" rx="2"/><circle cx="6" cy="6" r="1" fill="currentColor"/><circle cx="6" cy="18" r="1" fill="currentColor"/></svg>
+          </div>
+          <div class="host-info">
+            <div class="host-name">Dev-Server</div>
+            <div class="host-meta">10.0.0.50 · Ubuntu 22.04</div>
+          </div>
+          <div class="host-status"><span class="chip chip-offline">离线 · 不可用</span></div>
+        </div>
+      </div>
+
+      <!-- Agent Type Pills -->
+      <div class="field-label">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M12 2a14.5 14.5 0 000 20 14.5 14.5 0 000-20"/><path d="M2 12h20"/></svg>
+        Agent 类型
+      </div>
+      <div class="agent-pills" id="agent-pills">
+        <button class="agent-pill selected" data-agent="claude" onclick="selectAgent(this)">Claude Code</button>
+        <button class="agent-pill" data-agent="codex" onclick="selectAgent(this)">Codex</button>
+      </div>
+
+      <!-- Working Directory -->
+      <div class="form-group">
+        <div class="field-label">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 19a2 2 0 01-2 2H4a2 2 0 01-2-2V5a2 2 0 012-2h5l2 3h9a2 2 0 012 2z"/></svg>
+          工作目录
+        </div>
+        <div class="dir-input">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 19a2 2 0 01-2 2H4a2 2 0 01-2-2V5a2 2 0 012-2h5l2 3h9a2 2 0 012 2z"/></svg>
+          <input type="text" id="session-workdir" placeholder="输入项目路径，如 ~/projects/my-app" value="/Users/dev/my-project">
+        </div>
+      </div>
+
+      <!-- Initial Prompt -->
+      <div class="form-group">
+        <div class="field-label">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15a2 2 0 01-2 2H7l-4 4V5a2 2 0 012-2h14a2 2 0 012 2z"/></svg>
+          初始提示
+        </div>
+        <textarea class="prompt-area" id="session-prompt" placeholder="描述你想让 AI 完成的任务…&#10;例如：帮我重构用户认证模块，从 JWT 迁移到 OAuth 2.0" maxlength="500" oninput="updateCharCount()"></textarea>
+        <div class="char-count"><span id="char-count">0</span> / 500</div>
+      </div>
+
+      <!-- Footer Actions -->
+      <div class="modal-footer">
+        <button class="btn btn-cancel" onclick="closeNewSession()">取消</button>
+        <button class="btn btn-start" id="btn-start-session" disabled onclick="startSession(event)">
+          <span class="btn-content">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M12 5v14M5 12h14"/></svg>
+            开始会话
+          </span>
+          <span class="btn-loading">
+            <span class="spinner"></span>
+            正在创建…
+          </span>
+        </button>
+      </div>
+    </div>
+  </div>
+</div>
+
 <script>
   /* ---- Theme ---- */
   function getTheme() { return document.documentElement.getAttribute('data-theme') || 'dark'; }
@@ -648,6 +1122,210 @@
   function cancelRename(i) { getCard(i).row.classList.remove('visible'); }
   function resetName(i) { delete aliases[i]; renderAlias(i); }
   function handleRenameKey(e, i) { if (e.key === 'Enter') confirmRename(i); if (e.key === 'Escape') cancelRename(i); }
+
+  /* ---- New Session Modal ---- */
+  let selectedHostId = null;
+  let selectedAgent = 'claude';
+
+  function openNewSessionModal() {
+    const modal = document.getElementById('new-session-modal');
+    modal.style.display = 'flex';
+    document.body.style.overflow = 'hidden';
+
+    // Reset any leftover loading / error state from a previous attempt
+    hideError();
+    setCreating(false);
+
+    // Sync alias from daemon cards
+    syncHostAliases();
+
+    // Reset selections
+    document.querySelectorAll('#host-selector .host-option').forEach(el => el.classList.remove('selected'));
+    selectedHostId = null;
+    document.getElementById('session-workdir').value = '/Users/dev/my-project';
+    document.getElementById('session-prompt').value = '';
+    document.getElementById('char-count').textContent = '0';
+    resetAgentPills();
+    updateStartButton();
+
+    // Focus workdir after a short delay for animation
+    setTimeout(() => {
+      document.getElementById('session-workdir').focus();
+      document.getElementById('session-workdir').select();
+    }, 250);
+
+    // Close on Escape
+    document.addEventListener('keydown', modalEscHandler);
+  }
+
+  function closeNewSession() {
+    document.getElementById('new-session-modal').style.display = 'none';
+    document.body.style.overflow = '';
+    document.removeEventListener('keydown', modalEscHandler);
+  }
+
+  function modalEscHandler(e) {
+    if (e.key === 'Escape') closeNewSession();
+  }
+
+  // Close on overlay click
+  document.getElementById('new-session-modal').addEventListener('click', function(e) {
+    if (e.target === this) closeNewSession();
+  });
+
+  function syncHostAliases() {
+    const hostOptions = document.querySelectorAll('#host-selector .host-option');
+    hostOptions.forEach(opt => {
+      const hostId = parseInt(opt.dataset.hostId);
+      const alias = aliases[hostId];
+      const nameEl = opt.querySelector('.host-name');
+      const existingTag = nameEl.querySelector('.host-alias-tag');
+
+      // Remove existing alias tag
+      if (existingTag) existingTag.remove();
+
+      // Get default name from card
+      const card = document.getElementById('daemon-' + hostId);
+      const defaultName = card ? card.dataset.defaultName : '';
+      const displayName = alias || defaultName;
+
+      // Update name text (keep status chip)
+      const textNode = nameEl.childNodes[0];
+      if (textNode && textNode.nodeType === 3) {
+        textNode.textContent = displayName;
+      } else {
+        // Fallback: insert before any existing children
+        nameEl.insertBefore(document.createTextNode(displayName), nameEl.firstChild);
+      }
+
+      // Add alias tag if alias exists
+      if (alias) {
+        const tag = document.createElement('span');
+        tag.className = 'host-alias-tag';
+        tag.textContent = '别名';
+        nameEl.appendChild(tag);
+      }
+    });
+  }
+
+  function selectHost(el) {
+    if (el.classList.contains('disabled')) return;
+
+    // Toggle selection off
+    const wasSelected = el.classList.contains('selected');
+
+    // Deselect all
+    document.querySelectorAll('#host-selector .host-option').forEach(o => o.classList.remove('selected'));
+
+    // Select the clicked one (unless toggling off)
+    if (!wasSelected) {
+      el.classList.add('selected');
+      selectedHostId = parseInt(el.dataset.hostId);
+    } else {
+      selectedHostId = null;
+    }
+
+    updateStartButton();
+  }
+
+  function selectAgent(el) {
+    document.querySelectorAll('#agent-pills .agent-pill').forEach(p => {
+      p.classList.remove('selected');
+    });
+    el.classList.add('selected');
+    selectedAgent = el.dataset.agent;
+  }
+
+  function resetAgentPills() {
+    document.querySelectorAll('#agent-pills .agent-pill').forEach(p => {
+      p.classList.remove('selected');
+    });
+    const defaultPill = document.querySelector('#agent-pills .agent-pill[data-agent="claude"]');
+    if (defaultPill) defaultPill.classList.add('selected');
+    selectedAgent = 'claude';
+  }
+
+  function updateCharCount() {
+    const textarea = document.getElementById('session-prompt');
+    document.getElementById('char-count').textContent = textarea.value.length;
+  }
+
+  function updateStartButton() {
+    const btn = document.getElementById('btn-start-session');
+    btn.disabled = selectedHostId === null;
+  }
+
+  /* ---- Session creation: loading → success redirect / failure banner ---- */
+  let isCreating = false;
+
+  function setCreating(loading) {
+    isCreating = loading;
+    const btn = document.getElementById('btn-start-session');
+    const body = document.querySelector('.modal-body');
+    if (loading) {
+      btn.classList.add('is-loading');
+      btn.disabled = true;
+      body.classList.add('is-loading');
+    } else {
+      btn.classList.remove('is-loading');
+      btn.disabled = (selectedHostId === null);
+      body.classList.remove('is-loading');
+    }
+  }
+
+  function showError(title, desc) {
+    document.getElementById('err-title').textContent = title;
+    document.getElementById('err-desc').textContent = desc;
+    document.getElementById('modal-error').classList.add('visible');
+  }
+
+  function hideError() {
+    document.getElementById('modal-error').classList.remove('visible');
+  }
+
+  function startSession(e) {
+    if (selectedHostId === null || isCreating) return;
+    hideError();
+
+    // Demo only: hold Shift (or Alt/Option) while clicking to simulate a
+    // creation failure so the error banner can be reviewed. No demo control
+    // is surfaced in the product UI.
+    const simulateFail = !!(e && (e.shiftKey || e.altKey));
+
+    const hostEl = document.querySelector('#host-selector .host-option[data-host-id="' + selectedHostId + '"]');
+    const hostName = hostEl ? hostEl.querySelector('.host-name').childNodes[0].textContent.trim() : 'Unknown';
+    const workdir = document.getElementById('session-workdir').value.trim() || '/';
+    const prompt = document.getElementById('session-prompt').value.trim() || '（无初始提示）';
+    const agentLabel = selectedAgent === 'claude' ? 'Claude Code' : 'Codex';
+    const sessionId = 'sess_' + Math.random().toString(36).substring(2, 10);
+
+    setCreating(true);
+
+    // Simulate the round-trip to the daemon host. Replace this block with the
+    // real API call (fetch/POST) once the backend is wired up.
+    setTimeout(function () {
+      if (simulateFail) {
+        setCreating(false);
+        showError(
+          '无法在「' + hostName + '」上创建会话',
+          '主机连接超时：daemon 未在 10 秒内响应。请确认主机在线、daemon 进程正在运行后重试。'
+        );
+        console.error('[pocketctl] 会话创建失败（模拟）', { hostId: selectedHostId, sessionId });
+        return;
+      }
+      // Success — hand off to the session module with the new session payload.
+      const params = new URLSearchParams({
+        new: '1',
+        session: sessionId,
+        title: prompt,
+        host: hostName,
+        agent: selectedAgent,
+        agentLabel: agentLabel,
+        workdir: workdir
+      });
+      location.href = 'session-detail.html?' + params.toString();
+    }, 1600);
+  }
 </script>
 </body>
 </html>

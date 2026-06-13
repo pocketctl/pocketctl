@@ -154,6 +154,11 @@ func BuildClaudeArgs(prompt string, sessionID string, config protocol.SessionCon
 
 	args = append(args, "--output-format", "stream-json", "--verbose")
 
+	// Use resolved clean model name (cc switch may append invalid [...] suffix)
+	if config.Model != "" {
+		args = append(args, "--model", config.Model)
+	}
+
 	if len(config.AllowedTools) > 0 {
 		args = append(args, "--allowedTools", strings.Join(config.AllowedTools, ","))
 	}

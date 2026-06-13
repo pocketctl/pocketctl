@@ -145,16 +145,18 @@
       <div class="empty-subtitle">点击"新建会话"开始一个 AI 编程会话</div>
     </div>
 
+    <NewSessionDialog v-if="showNewSession" :daemons="daemons" @close="showNewSession = false" />
     <RegisterDaemonDialog v-if="showRegisterDaemon" @close="showRegisterDaemon = false" />
   </div>
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted, nextTick, provide } from 'vue'
+import { ref, computed, onMounted, nextTick, inject, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { useWebSocket } from '../composables/useWebSocket'
 import { formatRelativeTime } from '../composables/useRelativeTime'
 import { useAuth } from '../composables/useAuth'
+import NewSessionDialog from '../components/NewSessionDialog.vue'
 import RegisterDaemonDialog from '../components/RegisterDaemonDialog.vue'
 
 const { connect, send, onEvent, effectiveStatus } = useWebSocket()
@@ -163,7 +165,10 @@ const router = useRouter()
 
 const daemons = ref<any[]>([])
 const sessions = ref<any[]>([])
+const showNewSession = ref(false)
 const showRegisterDaemon = ref(false)
+const triggerNewSession = inject<{ value: number }>('triggerNewSession', { value: 0 })
+watch(() => triggerNewSession.value, (v) => { if (v > 0) showNewSession.value = true })
 const lastError = ref('')
 const loading = ref(true)
 const renameIndex = ref<number | null>(null)

@@ -111,10 +111,10 @@
       </div>
 
       <!-- Chat Input -->
-      <div class="chat-input-area" :class="{ ended: isTerminal }">
-        <template v-if="!isTerminal">
+      <div class="chat-input-area" :class="{ ended: !canInput }">
+        <template v-if="canInput">
           <div class="chat-input-wrap">
-            <input type="text" v-model="messageInput" placeholder="发送消息..." @keydown.enter="sendMessage" :disabled="isDisconnected" ref="inputEl" />
+            <input type="text" v-model="messageInput" :placeholder="isDaemonSession && isTerminal ? '继续会话（将恢复历史上下文）...' : '发送消息...'" @keydown.enter="sendMessage" :disabled="isDisconnected" ref="inputEl" />
           </div>
           <button class="send-btn" @click="sendMessage" :disabled="isDisconnected || !messageInput.trim()">
             <svg viewBox="0 0 24 24"><path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z"/></svg>
@@ -167,6 +167,13 @@ const isDaemonOnline = computed(() => {
 
 const isDisconnected = computed(() => status.value === 'disconnected' || !isDaemonOnline.value)
 const isTerminal = computed(() => ['completed', 'error', 'killed'].includes(status.value))
+// Daemon-created sessions can be resumed (via claude --resume) even after completion,
+// so the input box stays available as long as the daemon is online.
+const isDaemonSession = computed(() => {
+  const s = allSessions.value.find((x: any) => x.session_id === sessionId.value)
+  return s?.source === 'daemon'
+})
+const canInput = computed(() => !isDisconnected.value && (!isTerminal.value || isDaemonSession.value))
 
 const daemonName = computed(() => {
   const s = allSessions.value.find(s => s.session_id === sessionId.value)
@@ -416,6 +423,16 @@ onMounted(() => {
 
   cleanups.push(onEvent('session_status', (msg: any) => {
     if (msg.session_id === sessionId.value) { status.value = msg.status; if (msg.exit_reason) exitReason.value = msg.exit_reason; if (msg.exited_at) exitedAt.value = msg.exited_at }
+  }))
+
+  // 兜底：URL 仍是 pending 时，session_id_changed 到达则替换为真实 ID 并重新 replay
+  cleanups.push(onEvent('session_id_changed', (msg: any) => {
+    if (msg.old_session_id && msg.old_session_id === sessionId.value) {
+      router.replace(`/session/${msg.session_id}`)
+      // 清空旧消息，重新拉取真实 ID 的历史
+      messages.value = []
+      send({ type: 'replay', session_id: msg.session_id, last_seq: 0 })
+    }
   }))
 
   cleanups.push(onEvent('error', (msg: any) => {
