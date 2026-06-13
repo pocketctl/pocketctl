@@ -166,13 +166,19 @@ async function main() {
       reply.code(400); return { error: 'invalid email format' };
     }
 
-    // Dev mode: restrict to test email (if configured)
-    if (NODE_ENV !== 'production' && DEV_EMAIL) {
-      if (normalizedEmail !== DEV_EMAIL.toLowerCase()) {
-        reply.code(400);
-        return { error: `开发模式仅支持测试邮箱 ${DEV_EMAIL}` };
+    // Dev/test email shortcut: if DEV_EMAIL configured and matches, use fixed code (skip SES)
+    // Works in any NODE_ENV — useful when SES unavailable (e.g. pre-ICP-filing)
+    if (DEV_EMAIL && normalizedEmail === DEV_EMAIL.toLowerCase()) {
+      if (hasPendingCode(normalizedEmail)) {
+        reply.code(429); return { error: '请等待 60 秒后再重新获取验证码' };
       }
+      const devCode = DEV_EMAIL_CODE || '123456';
+      storeCode(normalizedEmail, devCode, 5 * 60 * 1000);
+      console.log(`[email] dev code for ${normalizedEmail}: ${devCode} (expires in 5m)`);
+      return { success: true, message: 'verification code sent', code: devCode };
     }
+
+    // Dev mode without DEV_EMAIL configured
     if (NODE_ENV !== 'production' && !DEV_EMAIL) {
       reply.code(400);
       return { error: '开发模式邮箱登录未配置，请设置 DEV_EMAIL 和 DEV_EMAIL_CODE 环境变量' };
@@ -184,9 +190,7 @@ async function main() {
     }
 
     // Generate and store 6-digit code
-    const code = (NODE_ENV === 'production' || !DEV_EMAIL_CODE)
-      ? generateCode()
-      : DEV_EMAIL_CODE;
+    const code = generateCode();
     const expireMinutes = NODE_ENV === 'production' ? 1 : 5;
     storeCode(normalizedEmail, code, expireMinutes * 60 * 1000);
     console.log(`[email] code for ${normalizedEmail}: ${code} (expires in ${expireMinutes}m)`);
