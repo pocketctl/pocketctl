@@ -452,7 +452,7 @@ onMounted(() => {
 .scroll-to-bottom:hover { background: var(--surface-hover); }
 
 /* Messages — matches design spec exactly */
-.msg { max-width: 75%; animation: fade-in 0.2s ease; }
+.msg { max-width: 85%; animation: fade-in 0.2s ease; word-break: break-word; }
 
 .msg-user {
   align-self: flex-end;
@@ -510,8 +510,7 @@ onMounted(() => {
   background: var(--surface);
   border: 1px solid var(--border);
   border-radius: var(--radius-lg);
-  width: 90%;
-  max-width: 560px;
+  max-width: 100%;
   animation: fade-in 0.2s ease;
   cursor: pointer;
   transition: background var(--transition), border-color var(--transition);
@@ -588,6 +587,9 @@ onMounted(() => {
   max-height: 120px;
   overflow: hidden;
   line-height: 1.6;
+  white-space: pre-wrap;
+  word-break: break-all;
+  overflow-x: auto;
 }
 .tool-body .tool-output.collapsed {
   max-height: 120px;
