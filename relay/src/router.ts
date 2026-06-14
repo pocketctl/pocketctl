@@ -4,11 +4,13 @@ import * as db from './db.js';
 import { generateTitle } from './title.js';
 import { notifyUser, sessionStatusPush, daemonOfflinePush } from './push.js';
 
-interface DaemonConnection { ws: WebSocket; daemonId: string; hostname: string; agents: string[]; userId: number | null; os?: string; ip?: string }
+interface DaemonConnection { ws: WebSocket; daemonId: string; hostname: string; agents: string[]; userId: number | null; os?: string; ip?: string; arch?: string; version?: string; startedAt?: number }
 interface ClientConnection { ws: WebSocket; subscribedSessions: Set<string>; userId: number | null }
+interface DaemonMetrics { cpuPct: number; memPct: number; diskPct: number; updatedAt: number }
 
 export class Router {
   private daemons = new Map<string, DaemonConnection>();
+  private daemonMetrics = new Map<string, DaemonMetrics>();
   private clients = new Map<WebSocket, ClientConnection>();
   private sessionToDaemon = new Map<string, string>();
   private pendingSessionCreate = new Map<string, WebSocket>();
@@ -87,8 +89,11 @@ export class Router {
 
     const daemonOS = msg.os || 'unknown';
     const daemonIP = msg.ip || 'unknown';
-    this.daemons.set(daemonId, { ws, daemonId, hostname, agents, userId, os: daemonOS, ip: daemonIP });
-    try { await db.upsertDaemon(this.pool, daemonId, hostname, agents); } catch (e) { console.error('upsertDaemon:', e); }
+    const daemonArch = msg.arch || '';
+    const daemonVersion = msg.version || '';
+    const daemonStartedAt = msg.started_at || 0;
+    this.daemons.set(daemonId, { ws, daemonId, hostname, agents, userId, os: daemonOS, ip: daemonIP, arch: daemonArch, version: daemonVersion, startedAt: daemonStartedAt });
+    try { await db.upsertDaemon(this.pool, daemonId, hostname, agents, daemonArch, daemonVersion, daemonStartedAt); } catch (e) { console.error('upsertDaemon:', e); }
     if (userId) {
       try { await db.bindDaemonToUser(this.pool, daemonId, userId); } catch (e) { console.error('bindDaemon:', e); }
       if (tokenJti) {
@@ -165,7 +170,14 @@ export class Router {
   handleDaemonMessage(daemonId: string, msg: any): void {
     if (msg.type === 'ping') {
       const daemon = this.daemons.get(daemonId);
-      if (daemon) { this.send(daemon.ws, { type: 'pong' }); db.updateHeartbeat(this.pool, daemonId).catch(console.error); }
+      if (daemon) {
+        this.send(daemon.ws, { type: 'pong' });
+        db.updateHeartbeat(this.pool, daemonId).catch(console.error);
+        // Cache metrics if present
+        if (msg.cpu_pct !== undefined) {
+          this.daemonMetrics.set(daemonId, { cpuPct: msg.cpu_pct, memPct: msg.mem_pct, diskPct: msg.disk_pct, updatedAt: Date.now() });
+        }
+      }
       return;
     }
 
@@ -360,6 +372,22 @@ export class Router {
       return;
     }
 
+    if (msg.type === 'daemon_restart') {
+      const daemonId = msg.daemon_id;
+      if (!daemonId) { this.send(clientWs, { type: 'error', error: 'daemon_id required' }); return; }
+      const daemon = this.daemons.get(daemonId);
+      if (!daemon || !this.sameUser(daemon.userId, client.userId)) {
+        this.send(clientWs, { type: 'error', error: 'daemon not found or not owned' });
+        return;
+      }
+      // Send restart command to daemon
+      this.send(daemon.ws, { type: 'daemon_restart' });
+      // Update status to reconnecting
+      db.setDaemonReconnecting?.(this.pool, daemonId).catch(() => {});
+      this.broadcastToUser(client.userId!, { type: 'daemon_status', daemon_id: daemonId, status: 'reconnecting' });
+      return;
+    }
+
     if (msg.type === 'session_create') {
       // Precise routing: prefer msg.daemon_id, validate ownership; fallback to first online same-user daemon
       let targetDaemon: { id: string; daemon: DaemonConnection } | null = null;
@@ -448,6 +476,7 @@ export class Router {
         console.log('[router] list_daemons iterating daemon', daemon.daemonId, 'daemon.userId:', daemon.userId, 'request.userId:', userId);
         if (!this.sameUser(daemon.userId, userId)) continue;
         const alias = await db.getDaemonAlias(this.pool, daemon.daemonId);
+        const metrics = this.daemonMetrics.get(daemon.daemonId);
         daemonList.push({
           daemon_id: daemon.daemonId,
           hostname: daemon.hostname,
@@ -457,6 +486,12 @@ export class Router {
           status: 'online',
           os: daemon.os || 'unknown',
           ip: daemon.ip || 'unknown',
+          arch: daemon.arch || '',
+          version: daemon.version || '',
+          started_at: daemon.startedAt || 0,
+          cpu_pct: metrics?.cpuPct ?? null,
+          mem_pct: metrics?.memPct ?? null,
+          disk_pct: metrics?.diskPct ?? null,
         });
       }
       // Also include offline daemons from DB for this user

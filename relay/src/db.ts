@@ -152,22 +152,31 @@ export async function initDB(pool: pg.Pool): Promise<void> {
   await pool.query(`ALTER TABLE daemons ADD COLUMN IF NOT EXISTS active_token_jti VARCHAR(64)`);
   await pool.query(`ALTER TABLE daemons ADD COLUMN IF NOT EXISTS machine_id VARCHAR(64)`);
   await pool.query(`ALTER TABLE daemons ADD COLUMN IF NOT EXISTS last_login_at TIMESTAMPTZ`);
+  await pool.query(`ALTER TABLE daemons ADD COLUMN IF NOT EXISTS arch VARCHAR(32)`);
+  await pool.query(`ALTER TABLE daemons ADD COLUMN IF NOT EXISTS version VARCHAR(32)`);
+  await pool.query(`ALTER TABLE daemons ADD COLUMN IF NOT EXISTS started_at BIGINT`);
 
   // User daemon limit control
   await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS max_daemons INT DEFAULT 1`);
 }
 
-export async function upsertDaemon(pool: pg.Pool, daemonId: string, hostname: string, agents: string[]): Promise<void> {
+export async function upsertDaemon(pool: pg.Pool, daemonId: string, hostname: string, agents: string[], arch?: string, version?: string, startedAt?: number): Promise<void> {
   await pool.query(
-    `INSERT INTO daemons (daemon_id, hostname, agents, status, last_heartbeat)
-     VALUES ($1, $2, $3, 'online', NOW())
-     ON CONFLICT (daemon_id) DO UPDATE SET hostname = $2, agents = $3, status = 'online', last_heartbeat = NOW()`,
-    [daemonId, hostname, JSON.stringify(agents)]
+    `INSERT INTO daemons (daemon_id, hostname, agents, status, last_heartbeat, arch, version, started_at)
+     VALUES ($1, $2, $3, 'online', NOW(), $4, $5, $6)
+     ON CONFLICT (daemon_id) DO UPDATE SET
+       hostname = $2, agents = $3, status = 'online', last_heartbeat = NOW(),
+       arch = COALESCE($4, daemons.arch), version = COALESCE($5, daemons.version), started_at = COALESCE($6, daemons.started_at)`,
+    [daemonId, hostname, JSON.stringify(agents), arch || null, version || null, startedAt || null]
   );
 }
 
 export async function setDaemonOffline(pool: pg.Pool, daemonId: string): Promise<void> {
   await pool.query(`UPDATE daemons SET status = 'offline' WHERE daemon_id = $1`, [daemonId]);
+}
+
+export async function setDaemonReconnecting(pool: pg.Pool, daemonId: string): Promise<void> {
+  await pool.query(`UPDATE daemons SET status = 'reconnecting' WHERE daemon_id = $1`, [daemonId]);
 }
 
 export async function upsertDaemonAlias(pool: pg.Pool, userId: number, daemonId: string, alias: string | null): Promise<string | null> {

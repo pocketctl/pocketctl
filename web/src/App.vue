@@ -23,6 +23,11 @@
 
         <div class="sidebar-section-label">管理</div>
 
+        <router-link to="/hosts" class="sidebar-link" active-class="active" v-slot="{ isActive }">
+          <span class="link-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="2" width="20" height="20" rx="3"/><path d="M7 2v20M17 2v20M2 12h20"/></svg></span>
+          <span class="link-text">主机</span>
+        </router-link>
+
         <router-link to="/settings" class="sidebar-link" active-class="active" v-slot="{ isActive }">
           <span class="link-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M12 1v2M12 21v2M4.22 4.22l1.42 1.42M18.36 18.36l1.42 1.42M1 12h2M21 12h2M4.22 19.78l1.42-1.42M18.36 5.64l1.42-1.42"/></svg></span>
           <span class="link-text">设置</span>
@@ -103,6 +108,7 @@ const pageTitle = computed(() => {
   const titles: Record<string, string> = {
     '/': '概览',
     '/settings': '设置',
+    '/hosts': '主机',
   }
   if (route.path.startsWith('/session/')) return '会话详情'
   return titles[route.path] || '概览'

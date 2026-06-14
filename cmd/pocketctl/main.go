@@ -28,12 +28,13 @@ import (
 	"github.com/pocketctl/pocketctl/internal/notify"
 	"github.com/pocketctl/pocketctl/internal/protocol"
 	"github.com/pocketctl/pocketctl/internal/session"
+	"github.com/pocketctl/pocketctl/internal/sysinfo"
 	"github.com/pocketctl/pocketctl/internal/update"
 	"github.com/pocketctl/pocketctl/internal/watcher"
 	"github.com/pocketctl/pocketctl/internal/ws"
 )
 
-var version = "0.2.0"
+var version = "0.2.1"
 
 func main() {
 	if len(os.Args) < 2 {
@@ -459,6 +460,16 @@ func cmdDaemonStart(args []string) {
 
 	// Create WebSocket client
 	client := ws.NewClient(url, tok, id, agentTypes, outputCh, logger)
+	client.SetVersion(version)
+	client.SetStartedAt(time.Now().Unix())
+
+	// Start system metrics collector
+	sysinfo.Start()
+	defer sysinfo.Stop()
+	client.SetMetricsFn(func() (float64, float64, float64) {
+		m := sysinfo.Get()
+		return m.CpuPct, m.MemPct, m.DiskPct
+	})
 
 	// Dirty flag for state persistence — only write when changed
 	var stateDirty atomic.Bool
@@ -1021,6 +1032,29 @@ func handleCommands(ctx context.Context, client *ws.Client, sm *session.SessionM
 				if cmd.SessionID != "" {
 					sm.AbortSession(cmd.SessionID)
 				}
+
+			case "daemon_restart":
+				logger.Info("daemon restart requested")
+				go func() {
+					time.Sleep(500 * time.Millisecond) // allow ack to send
+					// Fork+exec: spawn a new daemon process before exiting
+					exe, err := os.Executable()
+					if err != nil {
+						logger.Error("daemon restart failed: get executable", "error", err)
+						return
+					}
+					cmd := exec.Command(exe, os.Args[1:]...)
+					cmd.Stdout = nil
+					cmd.Stderr = nil
+					cmd.Stdin = nil
+					cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+					if err := cmd.Start(); err != nil {
+						logger.Error("daemon restart failed: spawn", "error", err)
+						return
+					}
+					logger.Info("new daemon spawned, exiting", "newPID", cmd.Process.Pid)
+					os.Exit(0)
+				}()
 
 			case "user_message":
 				logger.Info("user message", "session", cmd.SessionID)

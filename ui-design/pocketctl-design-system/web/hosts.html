@@ -1,0 +1,733 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="dark">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>pocketctl — 主机</title>
+<link rel="stylesheet" href="../css/web-shared.css">
+<style>
+  /* ---- Hosts layout (列表 + 详情双栏) ---- */
+  .hosts-layout {
+    display: grid;
+    grid-template-columns: 380px 1fr;
+    gap: 20px;
+    align-items: start;
+  }
+
+  /* 左：列表面板 */
+  .hosts-list-panel {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-lg);
+    overflow: hidden;
+  }
+  .hosts-list-head { padding: 14px 16px; border-bottom: 1px solid var(--border); }
+  .hosts-toolbar { display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px; gap: 8px; }
+  .host-filter { display: flex; gap: 2px; background: var(--bg); border: 1px solid var(--border); border-radius: var(--radius-md); padding: 3px; }
+  .host-filter button {
+    padding: 5px 11px; border: none; background: none;
+    color: var(--fg-secondary); font-size: 13px; font-weight: 500;
+    font-family: var(--font-body); border-radius: 5px; cursor: pointer;
+    transition: background 0.12s, color 0.12s;
+  }
+  .host-filter button.active { background: var(--surface-active); color: var(--fg); }
+  .host-filter button .count { color: var(--fg-tertiary); margin-left: 4px; font-variant-numeric: tabular-nums; }
+
+  .host-search { position: relative; }
+  .host-search input {
+    width: 100%; background: var(--bg); border: 1px solid var(--border);
+    border-radius: var(--radius-md); padding: 8px 12px 8px 34px;
+    color: var(--fg); font-size: 13px; outline: none;
+    transition: border-color 0.15s, box-shadow 0.15s;
+  }
+  .host-search input:focus { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-muted); }
+  .host-search svg { position: absolute; left: 10px; top: 50%; transform: translateY(-50%); color: var(--fg-tertiary); pointer-events: none; }
+
+  .host-list { max-height: 600px; overflow-y: auto; }
+  .host-item {
+    display: flex; align-items: center; gap: 12px;
+    padding: 12px 16px; border-bottom: 1px solid var(--border);
+    cursor: pointer; transition: background 0.12s, padding-left 0.12s;
+    border-left: 3px solid transparent;
+  }
+  .host-item:last-child { border-bottom: none; }
+  .host-item:hover { background: var(--surface-hover); }
+  .host-item.selected { background: var(--sidebar-active); border-left-color: var(--accent); }
+  .host-item .hi-icon {
+    width: 36px; height: 36px; border-radius: var(--radius-md);
+    background: var(--surface-active); display: flex; align-items: center; justify-content: center;
+    flex-shrink: 0; color: var(--fg-secondary);
+  }
+  .host-item .hi-info { flex: 1; min-width: 0; }
+  .host-item .hi-name { font-size: 14px; font-weight: 600; color: var(--fg); display: flex; align-items: center; gap: 6px; }
+  .host-item .hi-meta { font-size: 12px; color: var(--fg-tertiary); font-family: var(--font-mono); margin-top: 2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .host-item .hi-right { text-align: right; flex-shrink: 0; }
+  .host-item .hi-sessions { font-size: 14px; font-weight: 600; color: var(--fg); font-variant-numeric: tabular-nums; }
+  .host-item .hi-sess-label { font-size: 11px; color: var(--fg-tertiary); }
+
+  /* 列表项也复用 ⋯ 按钮（hover 显示） */
+  .host-item:hover .ss-more-btn { opacity: 1; }
+
+  .host-list-empty { padding: 48px 16px; text-align: center; color: var(--fg-tertiary); font-size: 13px; }
+
+  /* 右：详情面板 */
+  .host-detail-panel {
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: var(--radius-lg); padding: 24px;
+    position: sticky; top: 80px;
+    transition: background var(--transition), border-color var(--transition);
+  }
+  .host-detail-panel.empty { text-align: center; padding: 72px 24px; }
+  .host-detail-panel.empty .empty-icon { font-size: 40px; color: var(--fg-tertiary); margin-bottom: 12px; }
+  .host-detail-panel.empty .empty-title { font-size: 16px; font-weight: 600; color: var(--fg-secondary); margin-bottom: 6px; }
+  .host-detail-panel.empty .empty-sub { font-size: 13px; color: var(--fg-tertiary); }
+
+  .hd-header { display: flex; align-items: flex-start; gap: 14px; margin-bottom: 4px; }
+  .hd-icon { width: 48px; height: 48px; border-radius: var(--radius-md); background: var(--surface-active); display: flex; align-items: center; justify-content: center; color: var(--fg-secondary); flex-shrink: 0; }
+  .hd-headinfo { flex: 1; min-width: 0; }
+  .hd-title { font-size: 20px; font-weight: 700; color: var(--fg); letter-spacing: -0.01em; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+  .hd-sub { font-size: 13px; color: var(--fg-tertiary); font-family: var(--font-mono); margin-top: 4px; }
+  .hd-status-row { margin: 16px 0 20px; }
+
+  .hd-actions { display: flex; gap: 8px; margin-bottom: 24px; flex-wrap: wrap; }
+
+  .btn-danger {
+    background: transparent; color: var(--error);
+    border: 1px solid rgba(248, 81, 73, 0.4);
+  }
+  .btn-danger:hover:not(:disabled) { background: rgba(248, 81, 73, 0.1); border-color: var(--error); }
+  [data-theme="light"] .btn-danger { border-color: rgba(207, 34, 46, 0.4); }
+  [data-theme="light"] .btn-danger:hover:not(:disabled) { background: var(--error-bg); }
+  .btn-danger:disabled { opacity: 0.4; cursor: not-allowed; }
+
+  .hd-section { margin-bottom: 24px; }
+  .hd-section:last-child { margin-bottom: 0; }
+  .hd-section-title { font-size: 12px; font-weight: 600; color: var(--fg-tertiary); text-transform: uppercase; letter-spacing: 0.08em; margin-bottom: 12px; }
+
+  /* 资源监控条 */
+  .resource-row { display: flex; align-items: center; gap: 12px; margin-bottom: 12px; }
+  .resource-row:last-child { margin-bottom: 0; }
+  .resource-row .r-label { width: 44px; font-size: 13px; color: var(--fg-secondary); }
+  .resource-row .r-bar { flex: 1; height: 6px; background: var(--bg); border-radius: 3px; overflow: hidden; }
+  .resource-row .r-fill { height: 100%; border-radius: 3px; transition: width 0.5s cubic-bezier(0.2, 0, 0, 1); }
+  .resource-row .r-fill.ok { background: var(--success); }
+  .resource-row .r-fill.warn { background: var(--warning); }
+  .resource-row .r-fill.high { background: var(--error); }
+  .resource-row .r-val { width: 44px; text-align: right; font-size: 13px; font-weight: 600; color: var(--fg); font-variant-numeric: tabular-nums; }
+  .resource-row.offline .r-bar { background: var(--surface-active); }
+  .resource-row.offline .r-val { color: var(--fg-tertiary); }
+
+  /* 连接信息网格 */
+  .conn-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 16px 24px; }
+  .conn-item .c-label { font-size: 11px; color: var(--fg-tertiary); text-transform: uppercase; letter-spacing: 0.06em; margin-bottom: 4px; }
+  .conn-item .c-val { font-size: 14px; color: var(--fg); font-family: var(--font-mono); }
+  .conn-item .c-val.muted { color: var(--fg-tertiary); }
+
+  /* 会话摘要 */
+  .sess-summary { display: flex; align-items: center; gap: 20px; padding: 16px; background: var(--bg); border: 1px solid var(--border); border-radius: var(--radius-md); }
+  .sess-summary .ss-block { display: flex; flex-direction: column; gap: 2px; }
+  .sess-summary .ss-num { font-size: 24px; font-weight: 700; color: var(--fg); font-variant-numeric: tabular-nums; line-height: 1; letter-spacing: -0.01em; }
+  .sess-summary .ss-num.accent { color: var(--accent); }
+  .sess-summary .ss-label { font-size: 12px; color: var(--fg-tertiary); }
+  .sess-summary .ss-divider { width: 1px; align-self: stretch; background: var(--border); }
+  .sess-summary .ss-link { margin-left: auto; }
+
+  /* 注册弹窗：安装命令 */
+  .install-cmd {
+    background: var(--code-bg); border: 1px solid var(--border);
+    border-radius: var(--radius-md); padding: 12px 14px;
+    font-family: var(--font-mono); font-size: 13px; color: var(--success);
+    margin: 12px 0; overflow-x: auto; white-space: nowrap;
+  }
+  .install-cmd .prompt { color: var(--fg-tertiary); user-select: none; margin-right: 6px; }
+  .install-note { font-size: 12px; color: var(--fg-tertiary); line-height: 1.6; }
+
+  @media (max-width: 900px) {
+    .hosts-layout { grid-template-columns: 1fr; }
+    .host-detail-panel { position: static; }
+    .conn-grid { grid-template-columns: 1fr; }
+    .host-list { max-height: 420px; }
+  }
+  @media (max-width: 520px) {
+    .hosts-toolbar { flex-direction: column; align-items: stretch; }
+    .host-filter { justify-content: space-between; }
+  }
+
+  /* a11y & polish（与 dashboard 一致的基础） */
+  .btn:focus-visible, .btn-icon:focus-visible, .theme-toggle:focus-visible,
+  .host-filter button:focus-visible, .host-item:focus-visible,
+  .ss-more-btn:focus-visible, .host-search input:focus-visible {
+    outline: 2px solid var(--accent); outline-offset: 2px;
+  }
+  .btn:active, .btn-icon:active, .theme-toggle:active,
+  .host-filter button:active, .ss-more-btn:active { transform: translateY(1px); }
+  @media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after {
+      animation-duration: 0.01ms !important; animation-iteration-count: 1 !important;
+      transition-duration: 0.01ms !important;
+    }
+  }
+</style>
+</head>
+<body>
+<div class="app-layout">
+  <!-- Sidebar -->
+  <nav class="sidebar" id="sidebar">
+    <a href="dashboard.html" class="sidebar-logo">
+      <img id="sidebar-logo" src="../assets/logo-github-org.svg" alt="pocketctl">
+      <span class="brand-name">pocketctl</span>
+    </a>
+    <div class="sidebar-nav">
+      <div class="sidebar-section-label">概览</div>
+      <a href="dashboard.html" class="sidebar-link">
+        <span class="link-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg></span>
+        <span class="link-text">仪表盘</span>
+      </a>
+      <a href="session-detail.html" class="sidebar-link">
+        <span class="link-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15a2 2 0 01-2 2H7l-4 4V5a2 2 0 012-2h14a2 2 0 012 2z"/></svg></span>
+        <span class="link-text">会话</span>
+        <span class="badge">5</span>
+      </a>
+      <div class="sidebar-section-label">管理</div>
+      <a href="hosts.html" class="sidebar-link active">
+        <span class="link-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="2" width="20" height="20" rx="3"/><path d="M7 2v20M17 2v20M2 12h20"/></svg></span>
+        <span class="link-text">主机</span>
+        <span class="badge" id="host-count-badge">4</span>
+      </a>
+      <a href="settings.html" class="sidebar-link">
+        <span class="link-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M12 1v2M12 21v2M4.22 4.22l1.42 1.42M18.36 18.36l1.42 1.42M1 12h2M21 12h2M4.22 19.78l1.42-1.42M18.36 5.64l1.42-1.42"/></svg></span>
+        <span class="link-text">设置</span>
+      </a>
+    </div>
+    <div class="sidebar-footer">
+      <div class="sidebar-user" onclick="location.href='settings.html'">
+        <div class="user-avatar">M</div>
+        <div class="user-info">
+          <div class="user-name">138****8888</div>
+          <div class="user-plan">免费版</div>
+        </div>
+      </div>
+    </div>
+  </nav>
+
+  <!-- Main -->
+  <main class="main-content">
+    <header class="topbar">
+      <div class="topbar-breadcrumb"><span>管理</span><span class="sep">/</span><span class="current">主机</span></div>
+      <div class="topbar-actions">
+        <button class="btn btn-secondary" onclick="openRegisterModal()">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 5v14M5 12h14"/></svg>
+          注册主机
+        </button>
+        <button class="theme-toggle" onclick="toggleTheme()" title="切换主题" aria-label="切换深色/浅色主题" id="theme-btn">
+          <svg id="icon-moon" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 12.79A9 9 0 1111.21 3 7 7 0 0021 12.79z"/></svg>
+          <svg id="icon-sun" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="display:none;"><circle cx="12" cy="12" r="5"/><path d="M12 1v2M12 21v2M4.22 4.22l1.42 1.42M18.36 18.36l1.42 1.42M1 12h2M21 12h2M4.22 19.78l1.42-1.42M18.36 5.64l1.42-1.42"/></svg>
+        </button>
+      </div>
+    </header>
+
+    <div class="page-container">
+      <div class="page-header">
+        <div>
+          <h2 class="page-title">主机</h2>
+          <div class="page-subtitle" id="host-summary">共 <span class="text-mono">4</span> 台 · <span class="text-success">3</span> 在线 · <span class="text-tertiary">1</span> 离线</div>
+        </div>
+      </div>
+
+      <div class="hosts-layout">
+        <!-- 左：主机列表 -->
+        <div class="hosts-list-panel">
+          <div class="hosts-list-head">
+            <div class="hosts-toolbar">
+              <div class="host-filter" role="tablist" aria-label="按状态筛选主机">
+                <button class="active" data-filter="all" role="tab" aria-selected="true">全部<span class="count" id="cnt-all">4</span></button>
+                <button data-filter="online" role="tab" aria-selected="false">在线<span class="count" id="cnt-online">3</span></button>
+                <button data-filter="offline" role="tab" aria-selected="false">离线<span class="count" id="cnt-offline">1</span></button>
+              </div>
+            </div>
+            <div class="host-search">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/></svg>
+              <input type="text" id="host-search-input" placeholder="搜索名称、IP 或系统…" aria-label="搜索主机">
+            </div>
+          </div>
+          <div class="host-list" id="host-list"></div>
+        </div>
+
+        <!-- 右：详情面板 -->
+        <div class="host-detail-panel empty" id="host-detail">
+          <div class="empty-icon">—</div>
+          <div class="empty-title">从左侧选择一台主机</div>
+          <div class="empty-sub">查看连接信息、资源占用，或执行强制踢下线、重启等操作。</div>
+        </div>
+      </div>
+    </div>
+  </main>
+</div>
+
+<script>
+  /* ---- 主题（与 dashboard 一致） ---- */
+  function getTheme() { return document.documentElement.getAttribute('data-theme') || 'dark'; }
+  function setTheme(t) {
+    document.documentElement.setAttribute('data-theme', t);
+    localStorage.setItem('pocketctl-theme', t);
+    updateThemeUI(t); updateLogo(t);
+  }
+  function toggleTheme() { setTheme(getTheme() === 'dark' ? 'light' : 'dark'); }
+  function updateThemeUI(t) {
+    document.getElementById('icon-sun').style.display = t === 'dark' ? 'none' : 'block';
+    document.getElementById('icon-moon').style.display = t === 'dark' ? 'block' : 'none';
+  }
+  function updateLogo(t) {
+    document.getElementById('sidebar-logo').src = t === 'dark' ? '../assets/logo-github-org.svg' : '../assets/logo-github-org-light.svg';
+  }
+  const saved = localStorage.getItem('pocketctl-theme');
+  if (saved) setTheme(saved); else { updateThemeUI(getTheme()); updateLogo(getTheme()); }
+
+  /* ---- 主机数据 ---- */
+  const HOSTS = [
+    { id:'h1', name:'MacBook-Pro', ip:'192.168.1.100', port:22, os:'macOS 14.4', arch:'arm64', status:'online',
+      agent:['Claude Code','Codex'], active:3, total:12, heartbeat:'2 分钟前', uptime:'14 天 3 小时', version:'0.8.2', cpu:34, mem:62, disk:47 },
+    { id:'h2', name:'Dev-Server', ip:'10.0.0.50', port:22, os:'Ubuntu 22.04', arch:'x86_64', status:'offline',
+      agent:['Claude Code'], active:0, total:5, heartbeat:'3 天前', uptime:'—', version:'0.8.0', cpu:null, mem:null, disk:58 },
+    { id:'h3', name:'CI-Runner', ip:'172.16.4.8', port:2222, os:'Arch Linux', arch:'x86_64', status:'online',
+      agent:['Codex'], active:1, total:8, heartbeat:'12 分钟前', uptime:'6 天 11 小时', version:'0.8.2', cpu:78, mem:45, disk:82 },
+    { id:'h4', name:'Home-NAS', ip:'192.168.1.20', port:22, os:'TrueNAS Scale', arch:'x86_64', status:'online',
+      agent:['Claude Code'], active:0, total:3, heartbeat:'1 分钟前', uptime:'48 天 2 小时', version:'0.7.9', cpu:12, mem:38, disk:91 }
+  ];
+
+  const STATUS = {
+    online: { label: '在线', chip: 'chip-online', dot: 'online' },
+    offline: { label: '离线', chip: 'chip-offline', dot: 'offline' },
+    reconnecting: { label: '重启中', chip: 'chip-busy', dot: 'busy' }
+  };
+
+  const HOST_ICONS = {
+    server: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="2" width="20" height="8" rx="2"/><rect x="2" y="14" width="20" height="8" rx="2"/><circle cx="6" cy="6" r="1" fill="currentColor"/><circle cx="6" cy="18" r="1" fill="currentColor"/></svg>',
+    laptop: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8M12 17v4"/></svg>',
+    nas: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M7 8h10M7 12h10M7 16h4"/></svg>'
+  };
+  function iconFor(h) {
+    if (/mac|win|laptop|book/i.test(h.name + h.os)) return HOST_ICONS.laptop;
+    if (/nas|true/i.test(h.name + h.os)) return HOST_ICONS.nas;
+    return HOST_ICONS.server;
+  }
+  function esc(s) { return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+
+  /* ---- 状态 ---- */
+  let selectedId = null;
+  let filter = 'all';
+  let query = '';
+
+  /* ---- 渲染列表 ---- */
+  function getFiltered() {
+    return HOSTS.filter(h => {
+      if (filter === 'online' && h.status !== 'online') return false;
+      if (filter === 'offline' && h.status === 'online') return false;
+      if (query) {
+        const q = query.toLowerCase();
+        if (!(h.name.toLowerCase().includes(q) || h.ip.includes(q) || h.os.toLowerCase().includes(q))) return false;
+      }
+      return true;
+    });
+  }
+
+  function renderList() {
+    const list = document.getElementById('host-list');
+    const items = getFiltered();
+    // 更新筛选计数
+    document.getElementById('cnt-all').textContent = HOSTS.length;
+    document.getElementById('cnt-online').textContent = HOSTS.filter(h => h.status === 'online').length;
+    document.getElementById('cnt-offline').textContent = HOSTS.filter(h => h.status !== 'online').length;
+    // 概要
+    const on = HOSTS.filter(h => h.status === 'online').length;
+    const off = HOSTS.length - on;
+    document.getElementById('host-summary').innerHTML =
+      '共 <span class="text-mono">' + HOSTS.length + '</span> 台 · <span class="text-success">' + on + '</span> 在线 · <span class="text-tertiary">' + off + '</span> 离线';
+    document.getElementById('host-count-badge').textContent = HOSTS.length;
+
+    if (!items.length) {
+      list.innerHTML = '<div class="host-list-empty">没有匹配的主机</div>';
+      return;
+    }
+    list.innerHTML = items.map(h => {
+      const st = STATUS[h.status] || STATUS.offline;
+      const sel = h.id === selectedId ? ' selected' : '';
+      return '<div class="host-item' + sel + '" data-id="' + h.id + '" tabindex="0" role="button" aria-label="' + esc(h.name) + ' ' + st.label + '">' +
+        '<span class="status-dot ' + st.dot + '"></span>' +
+        '<div class="hi-icon">' + iconFor(h) + '</div>' +
+        '<div class="hi-info">' +
+          '<div class="hi-name">' + esc(h.name) + '</div>' +
+          '<div class="hi-meta">' + esc(h.ip) + ' · ' + esc(h.os) + '</div>' +
+        '</div>' +
+        '<div class="hi-right">' +
+          '<div class="hi-sessions">' + h.active + '</div>' +
+          '<div class="hi-sess-label">活跃会话</div>' +
+        '</div>' +
+        '<button class="ss-more-btn" type="button" title="更多操作" aria-label="更多操作" data-id="' + h.id + '">' + ICON_MORE + '</button>' +
+      '</div>';
+    }).join('');
+  }
+
+  /* ---- 渲染详情 ---- */
+  function renderDetail() {
+    const panel = document.getElementById('host-detail');
+    if (!selectedId) {
+      panel.className = 'host-detail-panel empty';
+      panel.innerHTML = '<div class="empty-icon">—</div><div class="empty-title">从左侧选择一台主机</div><div class="empty-sub">查看连接信息、资源占用，或执行强制踢下线、重启等操作。</div>';
+      return;
+    }
+    const h = HOSTS.find(x => x.id === selectedId);
+    if (!h) return;
+    const st = STATUS[h.status] || STATUS.offline;
+    const isOnline = h.status === 'online';
+    const isRestarting = h.status === 'reconnecting';
+
+    function resRow(label, val) {
+      if (val == null) {
+        return '<div class="resource-row offline"><span class="r-label">' + label + '</span><div class="r-bar"></div><span class="r-val">—</span></div>';
+      }
+      const cls = val >= 80 ? 'high' : (val >= 60 ? 'warn' : 'ok');
+      return '<div class="resource-row"><span class="r-label">' + label + '</span>' +
+        '<div class="r-bar"><div class="r-fill ' + cls + '" style="width:' + val + '%"></div></div>' +
+        '<span class="r-val">' + val + '%</span></div>';
+    }
+
+    panel.className = 'host-detail-panel';
+    panel.innerHTML =
+      '<div class="hd-header">' +
+        '<div class="hd-icon">' + iconFor(h) + '</div>' +
+        '<div class="hd-headinfo">' +
+          '<div class="hd-title">' + esc(h.name) +
+            '<span class="status-pill" style="background:var(--' + (isOnline ? 'success' : (isRestarting ? 'warning' : 'fg-tertiary')) + '-bg);color:var(--' + (isOnline ? 'success' : (isRestarting ? 'warning' : 'fg-tertiary')) + ');">' +
+              (isOnline ? '<span class="pulse"></span>' : '') + st.label + '</span>' +
+          '</div>' +
+          '<div class="hd-sub">' + esc(h.ip) + ' · ' + esc(h.os) + ' · ' + esc(h.arch) + '</div>' +
+        '</div>' +
+      '</div>' +
+
+      '<div class="hd-actions">' +
+        (isOnline
+          ? '<button class="btn btn-secondary" onclick="restartHost(\'' + h.id + '\')">' + I_RESTART + '重启 daemon</button>' +
+            '<button class="btn btn-danger" onclick="forceOffline(\'' + h.id + '\')">' + I_POWER + '强制踢下线</button>'
+          : (isRestarting
+              ? '<button class="btn btn-secondary" disabled>' + I_SPIN + '正在重启…</button>'
+              : '<button class="btn btn-secondary" onclick="reconnectHost(\'' + h.id + '\')" title="等待主机端 daemon 重新连接">' + I_POWER + '等待重连</button>')) +
+        '<a class="btn btn-secondary" href="session-detail.html">查看会话</a>' +
+      '</div>' +
+
+      '<div class="hd-section">' +
+        '<div class="hd-section-title">资源占用' + (isOnline ? '' : '（主机离线）') + '</div>' +
+        resRow('CPU', h.cpu) + resRow('内存', h.mem) + resRow('磁盘', h.disk) +
+      '</div>' +
+
+      '<div class="hd-section">' +
+        '<div class="hd-section-title">连接信息</div>' +
+        '<div class="conn-grid">' +
+          connItem('IP 地址', h.ip) +
+          connItem('端口', h.port) +
+          connItem('daemon 版本', 'v' + h.version) +
+          connItem('系统', h.os) +
+          connItem('运行时长', h.uptime, !isOnline) +
+          connItem('最后心跳', h.heartbeat) +
+        '</div>' +
+      '</div>' +
+
+      '<div class="hd-section">' +
+        '<div class="hd-section-title">会话</div>' +
+        '<div class="sess-summary">' +
+          '<div class="ss-block"><span class="ss-num accent">' + h.active + '</span><span class="ss-label">活跃会话</span></div>' +
+          '<div class="ss-divider"></div>' +
+          '<div class="ss-block"><span class="ss-num">' + h.total + '</span><span class="ss-label">历史总数</span></div>' +
+          '<a class="btn btn-ghost ss-link" href="session-detail.html">查看全部 →</a>' +
+        '</div>' +
+      '</div>';
+
+    // 触发资源条动画
+    requestAnimationFrame(() => {
+      panel.querySelectorAll('.r-fill').forEach(f => {
+        const w = f.style.width; f.style.width = '0';
+        requestAnimationFrame(() => { f.style.width = w; });
+      });
+    });
+  }
+
+  function connItem(label, val, muted) {
+    return '<div class="conn-item"><div class="c-label">' + label + '</div><div class="c-val' + (muted ? ' muted' : '') + '">' + esc(val) + '</div></div>';
+  }
+
+  function selectHost(id) { selectedId = id; renderList(); renderDetail(); }
+
+  /* ---- 事件 ---- */
+  document.getElementById('host-list').addEventListener('click', e => {
+    const more = e.target.closest('.ss-more-btn');
+    if (more) { e.stopPropagation(); openHostMenu(more, more.dataset.id); return; }
+    const item = e.target.closest('.host-item');
+    if (item) selectHost(item.dataset.id);
+  });
+  document.getElementById('host-list').addEventListener('keydown', e => {
+    if (e.key === 'Enter' || e.key === ' ') {
+      const item = e.target.closest('.host-item');
+      if (item) { e.preventDefault(); selectHost(item.dataset.id); }
+    }
+  });
+  document.querySelectorAll('.host-filter button').forEach(b => {
+    b.addEventListener('click', () => {
+      document.querySelectorAll('.host-filter button').forEach(x => { x.classList.remove('active'); x.setAttribute('aria-selected', 'false'); });
+      b.classList.add('active'); b.setAttribute('aria-selected', 'true');
+      filter = b.dataset.filter; renderList();
+    });
+  });
+  document.getElementById('host-search-input').addEventListener('input', e => { query = e.target.value.trim(); renderList(); });
+
+  /* ---- 操作 ---- */
+  function forceOffline(id) {
+    const h = HOSTS.find(x => x.id === id);
+    confirmDanger({
+      title: '强制踢下线「' + h.name + '」？',
+      desc: '将立即断开该主机的 daemon 连接。所有运行中的会话会被中止，主机需要重新运行 pocketctl connect 才能恢复。',
+      confirmText: '强制踢下线',
+      onConfirm: () => {
+        const prev = { status: h.status, cpu: h.cpu, mem: h.mem, heartbeat: h.heartbeat };
+        h.status = 'offline'; h.cpu = null; h.mem = null; h.active = 0; h.heartbeat = '刚刚';
+        renderList(); renderDetail();
+        showToast('已将「' + h.name + '」踢下线', () => {
+          Object.assign(h, prev); renderList(); renderDetail();
+        });
+      }
+    });
+  }
+
+  function restartHost(id) {
+    const h = HOSTS.find(x => x.id === id);
+    confirmDanger({
+      title: '重启「' + h.name + '」上的 daemon？',
+      desc: '将向主机发送重启指令，daemon 会短暂断开后自动恢复（约 5-10 秒）。期间运行中的会话会暂停。',
+      confirmText: '重启 daemon',
+      onConfirm: () => {
+        h.status = 'reconnecting'; renderList(); renderDetail();
+        setTimeout(() => {
+          h.status = 'online'; h.heartbeat = '刚刚'; h.uptime = h.uptime; h.cpu = Math.max(5, (h.cpu||20) - 10);
+          renderList(); renderDetail();
+          showToast('「' + h.name + '」的 daemon 已重启');
+        }, 2600);
+      }
+    });
+  }
+
+  function reconnectHost(id) {
+    const h = HOSTS.find(x => x.id === id);
+    h.status = 'reconnecting'; renderList(); renderDetail();
+    setTimeout(() => {
+      h.status = 'online'; h.heartbeat = '刚刚'; h.cpu = 18; h.mem = 35;
+      renderList(); renderDetail();
+      showToast('「' + h.name + '」已重新连接');
+    }, 2200);
+  }
+
+  function copyConnection(id) {
+    const h = HOSTS.find(x => x.id === id);
+    const text = h.ip + (h.port === 22 ? '' : ':' + h.port);
+    if (navigator.clipboard) navigator.clipboard.writeText(text).catch(()=>{});
+    showToast('已复制 ' + text);
+  }
+
+  function exportReport(id) {
+    const h = HOSTS.find(x => x.id === id);
+    const md = ['# 主机报告：' + h.name, '',
+      '> **状态**：' + (STATUS[h.status]||STATUS.offline).label + '  ',
+      '> **IP**：`' + h.ip + '`  ',
+      '> **端口**：' + h.port + '  ',
+      '> **系统**：' + h.os + ' (' + h.arch + ')  ',
+      '> **daemon 版本**：v' + h.version + '  ',
+      '> **运行时长**：' + h.uptime + '  ',
+      '> **最后心跳**：' + h.heartbeat + '  ',
+      '> **Agent**：' + h.agent.join(', ') + '  ',
+      '> **会话**：' + h.active + ' 活跃 / ' + h.total + ' 历史  ',
+      '> **资源**：CPU ' + (h.cpu==null?'—':h.cpu+'%') + ' · 内存 ' + (h.mem==null?'—':h.mem+'%') + ' · 磁盘 ' + (h.disk==null?'—':h.disk+'%'), '',
+      '_由 pocketctl 导出 · ' + new Date().toLocaleString('zh-CN') + '_'].join('\n');
+    downloadFile((h.name || 'host') + '-report.md', md);
+    showToast('已导出 ' + h.name + '-report.md');
+  }
+
+  function unregister(id) {
+    const h = HOSTS.find(x => x.id === id);
+    const idx = HOSTS.indexOf(h);
+    confirmDanger({
+      title: '注销主机「' + h.name + '」？',
+      desc: '将从账户移除该主机。历史会话记录保留，但该主机需重新注册才能再次连接。此操作可在撤销提示内恢复。',
+      confirmText: '注销主机',
+      onConfirm: () => {
+        HOSTS.splice(idx, 1);
+        if (selectedId === id) selectedId = HOSTS.length ? HOSTS[0].id : null;
+        renderList(); renderDetail();
+        showToast('已注销「' + h.name + '」', () => {
+          HOSTS.splice(idx, 0, h);
+          if (!selectedId) selectedId = h.id;
+          renderList(); renderDetail();
+        });
+      }
+    });
+  }
+
+  /* ---- ⋯ 菜单 ---- */
+  function openHostMenu(btn, id) {
+    ensureShell();
+    const h = HOSTS.find(x => x.id === id);
+    const isOnline = h.status === 'online';
+    // 动态菜单项
+    menuEl.innerHTML =
+      mi('copy', I_COPY, '复制连接信息') +
+      mi('export', I_EXPORT, '导出主机报告') +
+      mi('alias', I_EDIT, '编辑别名') +
+      '<div class="ss-menu-sep"></div>' +
+      (isOnline ? mi('restart', I_RESTART, '重启 daemon') + mi('kick', I_POWER, '强制踢下线') : '') +
+      '<div class="ss-menu-sep"></div>' +
+      '<button class="ss-menu-item danger" data-act="unregister">' + I_TRASH + '<span>注销主机</span></button>';
+    currentHostId = id;
+    menuEl.classList.add('open');
+    const r = btn.getBoundingClientRect();
+    let left = r.right - menuEl.offsetWidth; if (left < 8) left = 8;
+    menuEl.style.left = left + 'px'; menuEl.style.top = (r.bottom + 6) + 'px';
+  }
+  function mi(act, icon, label) { return '<button class="ss-menu-item" data-act="' + act + '">' + icon + '<span>' + label + '</span></button>'; }
+
+  function onMenuClick(e) {
+    const item = e.target.closest('.ss-menu-item'); if (!item || !currentHostId) return;
+    const act = item.dataset.act, id = currentHostId;
+    closeMenu();
+    if (act === 'copy') copyConnection(id);
+    else if (act === 'export') exportReport(id);
+    else if (act === 'restart') restartHost(id);
+    else if (act === 'kick') forceOffline(id);
+    else if (act === 'unregister') unregister(id);
+    else if (act === 'alias') { selectHost(id); setTimeout(()=>startAliasEdit(id), 50); }
+  }
+
+  function startAliasEdit(id) {
+    // 简化：用 prompt 之外的内联方式 —— 直接在详情标题处替换为 input
+    const h = HOSTS.find(x => x.id === id);
+    const titleEl = document.querySelector('.hd-title');
+    if (!titleEl || titleEl.querySelector('input')) return;
+    const firstText = titleEl.firstChild;
+    if (!firstText || firstText.nodeType !== 3) return;
+    const old = firstText.textContent;
+    const input = document.createElement('input');
+    input.className = 'ss-rename-input'; input.value = old; input.maxLength = 32; input.style.marginRight = '6px';
+    firstText.replaceWith(input); input.focus(); input.select();
+    let done = false;
+    function commit() {
+      if (done) return; done = true;
+      const v = input.value.trim() || old;
+      if (v !== old) { h.name = v; showToast('已重命名为「' + v + '」', () => { h.name = old; renderList(); renderDetail(); }); }
+      renderList(); renderDetail();
+    }
+    input.addEventListener('keydown', e2 => { if (e2.key==='Enter'){e2.preventDefault();commit();} else if (e2.key==='Escape'){e2.preventDefault();input.value=old;commit();} });
+    input.addEventListener('blur', commit);
+  }
+
+  /* ---- 注册弹窗 ---- */
+  function openRegisterModal() {
+    ensureShell();
+    const d = dialogEl;
+    d.innerHTML =
+      '<div class="ss-dialog" style="text-align:left;max-width:460px;">' +
+        '<div class="modal-header" style="padding:0 0 12px;"><h2 class="modal-title" id="reg-title">注册新主机</h2></div>' +
+        '<p class="ss-dialog-desc" style="text-align:left;">在目标主机上执行以下命令安装并连接 daemon：</p>' +
+        '<div class="install-cmd"><span class="prompt">$</span>curl -fsSL https://pocketctl.io/install.sh | sh</div>' +
+        '<div class="install-cmd"><span class="prompt">$</span>pocketctl connect --token pct_a1b2·c3d4·e5f6</div>' +
+        '<p class="install-note">支持 macOS / Linux / Windows。安装后主机会自动出现在左侧列表，状态显示为「在线」。Token 可在 设置 → API 凭证 重新生成。</p>' +
+        '<div class="modal-footer" style="margin-top:16px;">' +
+          '<button class="btn btn-cancel" onclick="closeDialog()">关闭</button>' +
+          '<button class="btn btn-start" onclick="copyInstallCmd()">复制安装命令</button>' +
+        '</div>' +
+      '</div>';
+    d.classList.add('open');
+  }
+  function copyInstallCmd() {
+    const cmd = 'curl -fsSL https://pocketctl.io/install.sh | sh\npocketctl connect --token pct_a1b2·c3d4·e5f6';
+    if (navigator.clipboard) navigator.clipboard.writeText(cmd).catch(()=>{});
+    closeDialog(); showToast('已复制安装命令');
+  }
+
+  /* ---- 操作组件 DOM（复用 web-shared 的 .ss-* 样式） ---- */
+  let menuEl, dialogEl, toastEl, toastTimer, currentHostId;
+  const I_POWER = '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 3v9"/><path d="M6.4 6.4a8 8 0 106.6-2.3"/></svg>';
+  const I_RESTART = '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 12a9 9 0 019-9 9 9 0 016.7 3"/><path d="M21 3v5h-5"/><path d="M21 12a9 9 0 01-9 9 9 9 0 01-6.7-3"/><path d="M3 21v-5h5"/></svg>';
+  const I_COPY = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"/></svg>';
+  const I_EXPORT = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><path d="M7 10l5 5 5-5"/><path d="M12 15V3"/></svg>';
+  const I_EDIT = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M11 4H4a2 2 0 00-2 2v14a2 2 0 002 2h14a2 2 0 002-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 013 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>';
+  const I_TRASH = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 6h18"/><path d="M8 6V4a2 2 0 012-2h4a2 2 0 012 2v2"/><path d="M19 6l-1 14a2 2 0 01-2 2H8a2 2 0 01-2-2L5 6"/></svg>';
+  const I_SPIN = '<span class="spinner" style="width:14px;height:14px;border-top-color:currentColor;"></span>';
+  const ICON_MORE = '<svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><circle cx="12" cy="5" r="1.8"/><circle cx="12" cy="12" r="1.8"/><circle cx="12" cy="19" r="1.8"/></svg>';
+
+  function ensureShell() {
+    if (menuEl) return;
+    menuEl = document.createElement('div'); menuEl.className = 'ss-menu'; menuEl.id = 'ss-menu';
+    menuEl.addEventListener('click', onMenuClick);
+    dialogEl = document.createElement('div'); dialogEl.className = 'ss-overlay'; dialogEl.id = 'ss-overlay';
+    dialogEl.addEventListener('click', e => { if (e.target === dialogEl) closeDialog(); });
+    toastEl = document.createElement('div'); toastEl.className = 'ss-toast'; toastEl.id = 'ss-toast';
+    document.body.append(menuEl, dialogEl, toastEl);
+    document.addEventListener('click', e => { if (!menuEl.contains(e.target) && !e.target.closest('.ss-more-btn')) closeMenu(); });
+    document.addEventListener('keydown', e => { if (e.key === 'Escape') { closeMenu(); closeDialog(); } });
+    window.addEventListener('scroll', closeMenu, true); window.addEventListener('resize', closeMenu, true);
+  }
+  function closeMenu() { if (menuEl) menuEl.classList.remove('open'); }
+  function closeDialog() { if (dialogEl) dialogEl.classList.remove('open'); }
+
+  function confirmDanger(opts) {
+    ensureShell();
+    dialogEl.innerHTML =
+      '<div class="ss-dialog">' +
+        '<div class="ss-dialog-icon">' + I_WARN + '</div>' +
+        '<h3 class="ss-dialog-title">' + esc(opts.title) + '</h3>' +
+        '<p class="ss-dialog-desc">' + esc(opts.desc) + '</p>' +
+        '<div class="ss-dialog-actions">' +
+          '<button class="btn btn-secondary ss-cancel">取消</button>' +
+          '<button class="btn ss-confirm"><span class="ss-confirm-label">' + esc(opts.confirmText || '确认') + '</span><span class="ss-confirm-loading"><span class="spinner"></span>处理中</span></button>' +
+        '</div>' +
+      '</div>';
+    const confirmBtn = dialogEl.querySelector('.ss-confirm');
+    dialogEl.querySelector('.ss-cancel').addEventListener('click', closeDialog);
+    confirmBtn.addEventListener('click', () => {
+      confirmBtn.classList.add('loading');
+      setTimeout(() => { closeDialog(); opts.onConfirm && opts.onConfirm(); }, 600);
+    });
+    dialogEl.classList.add('open');
+  }
+  const I_WARN = '<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z"/><path d="M12 9v4M12 17h.01"/></svg>';
+
+  function showToast(text, undoFn) {
+    ensureShell();
+    clearTimeout(toastTimer);
+    toastEl.innerHTML = '';
+    toastEl.appendChild(toastSpan('ss-toast-msg', text));
+    if (typeof undoFn === 'function') {
+      const btn = document.createElement('button'); btn.className = 'ss-toast-undo';
+      let secs = 5; btn.textContent = '撤销 · ' + secs + 's';
+      const tick = setInterval(() => { secs--; if (secs <= 0) { clearInterval(tick); hideToast(); return; } btn.textContent = '撤销 · ' + secs + 's'; }, 1000);
+      btn.addEventListener('click', () => { clearInterval(tick); try { undoFn(); } catch(e){} hideToast(); });
+      toastEl.appendChild(btn); toastEl._tick = tick;
+    }
+    toastEl.classList.add('show');
+    toastTimer = setTimeout(hideToast, 5500);
+  }
+  function toastSpan(cls, text) { const s = document.createElement('span'); s.className = cls; s.textContent = text; return s; }
+  function hideToast() { clearTimeout(toastTimer); if (toastEl && toastEl._tick) { clearInterval(toastEl._tick); toastEl._tick = null; } if (toastEl) toastEl.classList.remove('show'); }
+
+  function downloadFile(filename, content) {
+    try {
+      const blob = new Blob([content], { type: 'text/plain;charset=utf-8' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a'); a.href = url; a.download = filename;
+      document.body.appendChild(a); a.click();
+      setTimeout(() => { a.remove(); URL.revokeObjectURL(url); }, 200);
+    } catch (e) {}
+  }
+
+  /* ---- 初始化 ---- */
+  renderList();
+  selectHost(HOSTS[0].id);
+</script>
+</body>
+</html>

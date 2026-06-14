@@ -34,6 +34,10 @@ type Client struct {
 	agents   []string
 	osName   string
 	localIP  string
+	arch     string
+	version  string
+	startedAt int64
+	metricsFn func() (float64, float64, float64) // cpu, mem, disk
 	CommandCh     chan protocol.ClientMessage
 	OnStateChange OnConnectStateChange
 	OnReconnected func() // called after successful (re)connection + register
@@ -54,9 +58,19 @@ func NewClient(relayURL, token, daemonID string, agents []string, outputCh <-cha
 		agents:    agents,
 		osName:    osName,
 		localIP:   localIP,
+		arch:      runtime.GOARCH,
 		CommandCh: make(chan protocol.ClientMessage, 64),
 	}
 }
+
+// SetVersion sets the daemon version for register messages.
+func (c *Client) SetVersion(v string) { c.version = v }
+
+// SetStartedAt sets the daemon start timestamp for register messages.
+func (c *Client) SetStartedAt(t int64) { c.startedAt = t }
+
+// SetMetricsFn sets the function used to collect system metrics for ping messages.
+func (c *Client) SetMetricsFn(fn func() (float64, float64, float64)) { c.metricsFn = fn }
 
 func (c *Client) Run(ctx context.Context) error {
 	for {
@@ -102,7 +116,7 @@ func (c *Client) connectAndServe(ctx context.Context) error {
 	c.logger.Info("sending register", "daemonID", c.daemonID, "hostname", c.hostname)
 	c.SendMsg(protocol.RegisterMessage{
 		Type: "register", DaemonID: c.daemonID, Hostname: c.hostname, Agents: c.agents,
-		OS: c.osName, IP: c.localIP,
+		OS: c.osName, IP: c.localIP, Arch: c.arch, Version: c.version, StartedAt: c.startedAt,
 	})
 	c.logger.Info("register sent")
 
@@ -181,11 +195,16 @@ func (c *Client) readPump(done chan struct{}) {
 }
 
 func (c *Client) pingPump(ctx context.Context, done chan struct{}) {
-	ticker := time.NewTicker(15 * time.Second)
+	ticker := time.NewTicker(10 * time.Second)
 	defer ticker.Stop()
 	for {
 		select {
-		case <-ticker.C: c.SendMsg(protocol.PingMessage{Type: "ping"})
+		case <-ticker.C:
+			ping := protocol.PingMessage{Type: "ping"}
+			if c.metricsFn != nil {
+				ping.CpuPct, ping.MemPct, ping.DiskPct = c.metricsFn()
+			}
+			c.SendMsg(ping)
 		case <-done: return
 		case <-ctx.Done(): return
 		}
