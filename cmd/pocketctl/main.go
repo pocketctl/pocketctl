@@ -28,6 +28,7 @@ import (
 	"github.com/pocketctl/pocketctl/internal/notify"
 	"github.com/pocketctl/pocketctl/internal/protocol"
 	"github.com/pocketctl/pocketctl/internal/session"
+	"github.com/pocketctl/pocketctl/internal/sysinfo"
 	"github.com/pocketctl/pocketctl/internal/update"
 	"github.com/pocketctl/pocketctl/internal/watcher"
 	"github.com/pocketctl/pocketctl/internal/ws"
@@ -459,6 +460,16 @@ func cmdDaemonStart(args []string) {
 
 	// Create WebSocket client
 	client := ws.NewClient(url, tok, id, agentTypes, outputCh, logger)
+	client.SetVersion(version)
+	client.SetStartedAt(time.Now().Unix())
+
+	// Start system metrics collector
+	sysinfo.Start()
+	defer sysinfo.Stop()
+	client.SetMetricsFn(func() (float64, float64, float64) {
+		m := sysinfo.Get()
+		return m.CpuPct, m.MemPct, m.DiskPct
+	})
 
 	// Dirty flag for state persistence — only write when changed
 	var stateDirty atomic.Bool
@@ -1021,6 +1032,15 @@ func handleCommands(ctx context.Context, client *ws.Client, sm *session.SessionM
 				if cmd.SessionID != "" {
 					sm.AbortSession(cmd.SessionID)
 				}
+
+			case "daemon_restart":
+				logger.Info("daemon restart requested")
+				go func() {
+					time.Sleep(500 * time.Millisecond) // allow ack to send
+					if err := update.RestartDaemon(); err != nil {
+						logger.Error("daemon restart failed", "error", err)
+					}
+				}()
 
 			case "user_message":
 				logger.Info("user message", "session", cmd.SessionID)

@@ -46,12 +46,15 @@ type DaemonEvent struct {
 
 // Control messages
 type RegisterMessage struct {
-	Type     string   `json:"type"`
-	DaemonID string   `json:"daemon_id"`
-	Hostname string   `json:"hostname"`
-	Agents   []string `json:"agents"`
-	OS       string   `json:"os"`
-	IP       string   `json:"ip"`
+	Type      string   `json:"type"`
+	DaemonID  string   `json:"daemon_id"`
+	Hostname  string   `json:"hostname"`
+	Agents    []string `json:"agents"`
+	OS        string   `json:"os"`
+	IP        string   `json:"ip"`
+	Arch      string   `json:"arch,omitempty"`
+	Version   string   `json:"version,omitempty"`
+	StartedAt int64    `json:"started_at,omitempty"`
 }
 
 type RegisterAckMessage struct {
@@ -61,7 +64,10 @@ type RegisterAckMessage struct {
 }
 
 type PingMessage struct {
-	Type string `json:"type"`
+	Type    string  `json:"type"`
+	CpuPct  float64 `json:"cpu_pct,omitempty"`
+	MemPct  float64 `json:"mem_pct,omitempty"`
+	DiskPct float64 `json:"disk_pct,omitempty"`
 }
 
 type PongMessage struct {

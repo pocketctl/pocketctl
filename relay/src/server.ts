@@ -761,6 +761,21 @@ async function main() {
     };
   });
 
+  // Restart daemon (remote control)
+  app.post('/api/daemons/:daemonId/restart', async (req, reply) => {
+    const authHeader = req.headers.authorization;
+    if (!authHeader?.startsWith('Bearer ')) { reply.code(401); return { error: 'authorization required' }; }
+    const payload = verifyAccessToken(authHeader.slice(7));
+    if (!payload) { reply.code(401); return { error: 'invalid token' }; }
+    const { daemonId } = req.params as any;
+    const daemon = (router as any).daemons.get(daemonId);
+    if (!daemon || daemon.ws.readyState !== 1 || !(router as any).sameUser(daemon.userId, payload.userId)) {
+      reply.code(404); return { error: 'daemon not found or offline' };
+    }
+    router['send'](daemon.ws, { type: 'daemon_restart' });
+    return { success: true };
+  });
+
   // ---- Health check ----
 
   app.get('/health', async () => {
