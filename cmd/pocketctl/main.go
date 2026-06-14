@@ -1037,9 +1037,23 @@ func handleCommands(ctx context.Context, client *ws.Client, sm *session.SessionM
 				logger.Info("daemon restart requested")
 				go func() {
 					time.Sleep(500 * time.Millisecond) // allow ack to send
-					if err := update.RestartDaemon(); err != nil {
-						logger.Error("daemon restart failed", "error", err)
+					// Fork+exec: spawn a new daemon process before exiting
+					exe, err := os.Executable()
+					if err != nil {
+						logger.Error("daemon restart failed: get executable", "error", err)
+						return
 					}
+					cmd := exec.Command(exe, os.Args[1:]...)
+					cmd.Stdout = nil
+					cmd.Stderr = nil
+					cmd.Stdin = nil
+					cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+					if err := cmd.Start(); err != nil {
+						logger.Error("daemon restart failed: spawn", "error", err)
+						return
+					}
+					logger.Info("new daemon spawned, exiting", "newPID", cmd.Process.Pid)
+					os.Exit(0)
 				}()
 
 			case "user_message":
