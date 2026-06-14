@@ -654,7 +654,7 @@ body {
   transition: background 0.15s, color 0.15s;
 }
 .modal-close:hover { background: var(--surface-hover); color: var(--fg); }
-.modal-icon { font-size: 48px; margin-bottom: 16px; }
+.modal-icon { margin-bottom: 16px; display: flex; justify-content: center; color: var(--fg); }
 .modal-title {
   font-family: var(--font-display); font-size: 22px;
   font-weight: 700; margin-bottom: 10px;
