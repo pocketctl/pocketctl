@@ -8,9 +8,11 @@ Monitor and manage Claude Code, Codex, and OpenCode sessions from your phone or 
 
 - 🖥️ **Real-time Monitoring** — Watch your AI coding sessions live from anywhere
 - 📱 **Mobile Control** — Send messages, create sessions, and manage agents from your phone
+- 🖧 **Hosts Dashboard** — System resource monitoring (CPU / Memory / Disk) with remote daemon restart
+- 📌 **Session Management** — Pin, rename, export, and delete sessions with inline editing
 - 🔔 **Push Notifications** — Get alerted when your agent needs attention
 - 🔄 **Self-updating** — One command to update to the latest version
-- 🌐 **Web Dashboard** — Full-featured web UI with dark/light theme, daemon & session management
+- 🌐 **Web Dashboard** — Full-featured Vue 3 SPA with dark/light theme, daemon & session management
 - 🏠 **Landing Page** — Marketing site at `pocketctl.me` with dual-theme, i18n (zh/en), iOS waitlist signup
 - 🔐 **Secure** — OAuth 2.0 Device Authorization Grant (RFC 8628) + email verification fallback
 - ⚡ **Lightweight** — Single binary, zero dependencies, runs on macOS and Linux
@@ -22,12 +24,12 @@ Monitor and manage Claude Code, Codex, and OpenCode sessions from your phone or 
 │  iOS App +  │◄───────────►│    Relay     │◄──────────────────►│   Daemon    │
 │  Web App    │             │   (Server)   │                    │  (Desktop)  │
 └─────────────┘             └─────────────┘                    └─────────────┘
-                                                                          │
-                                                                    ┌─────┴─────┐
-                                                                    │ AI Agents  │
-                                                                    │ (Claude,   │
-                                                                    │  Codex...) │
-                                                                    └───────────┘
+                                                                         │
+                                                                   ┌─────┴─────┐
+                                                                   │ AI Agents  │
+                                                                   │ (Claude,   │
+                                                                   │  Codex...) │
+                                                                   └───────────┘
 ```
 
 - **Landing** — Static marketing site served at root domain with theme/language switcher
@@ -120,24 +122,25 @@ pocketctl/
 ├── cmd/pocketctl/main.go          # CLI entry point
 ├── internal/
 │   ├── adapter/                   # Agent output parsers (Claude Code JSONL)
-│   ├── api/                       # HTTP API client (auth, SMS)
+│   ├── api/                       # HTTP API client (auth)
 │   ├── config/                    # Config management (~/.pocketctl/auth.json)
-│   ├── daemon/                    # PID file, daemon state management
+│   ├── daemon/                    # PID file, daemon state, machine ID
 │   ├── discovery/                 # Agent CLI auto-discovery
 │   ├── notify/                    # Terminal notifications
 │   ├── protocol/                  # WebSocket message type definitions
 │   ├── session/                   # Session lifecycle management
+│   ├── sysinfo/                   # System resource collection (CPU/Memory/Disk via gopsutil)
 │   ├── update/                    # Self-update (version check, download, verify)
-│   ├── watcher/                   # Session file monitoring (fsnotify)
+│   ├── watcher/                   # Session file monitoring (fsnotify, JSONL tailing)
 │   └── ws/                        # WebSocket client with auto-reconnect
 ├── relay/
 │   └── src/
 │       ├── server.ts              # Fastify HTTP + WebSocket server
 │       ├── router.ts              # WebSocket message routing
-│       ├── auth.ts                # JWT sign/verify
+│       ├── auth.ts                # JWT sign/verify with jti revocation
 │       ├── db.ts                  # PostgreSQL queries
 │       ├── push.ts                # Push notification service
-│       ├── title.ts               # LLM title generation
+│       ├── title.ts               # LLM title generation (智谱 GLM)
 │       └── config/
 │           ├── clients.ts         # OAuth 2.0 client registry
 │           ├── auth-sessions.ts   # Device authorization session store
@@ -150,12 +153,12 @@ pocketctl/
 │   ├── assets/                    # Logo SVGs (dark/light theme)
 │   ├── nginx.conf                 # Prod Nginx config (Landing + /app + API proxy)
 │   └── nginx-docker.conf          # Docker Nginx config
-├── web/                           # Vue 3 web dashboard (app.pocketctl.me → /app)
+├── web/                           # Vue 3 web dashboard
 │   └── src/
-│       ├── views/                 # DashboardView, SessionDetail, SettingsView, LoginView
-│       ├── composables/           # useAuth, useWebSocket, useCountdown, useRelativeTime
-│       ├── components/            # SubAgentCard, NewSessionDialog, etc.
-│       └── assets/               # web-shared.css (design system), logo SVGs
+│       ├── views/                 # DashboardView, SessionDetail, HostsView, SettingsView, LoginView, DeviceAuthView
+│       ├── composables/           # useAuth, useWebSocket, useCountdown, useRelativeTime, useSessionRename
+│       ├── components/            # SessionActions, SessionTimeline, NewSessionDialog, SubAgentCard, MarkdownRenderer, etc.
+│       └── assets/                # Design system CSS, logo SVGs
 ├── scripts/
 │   ├── install-daemon.sh          # One-line installer
 │   └── sync-github.sh             # Sync to GitHub
@@ -167,7 +170,7 @@ pocketctl/
 
 | Component | Technology |
 |-----------|------------|
-| Daemon | Go 1.25, gorilla/websocket, fsnotify |
+| Daemon | Go 1.25, gorilla/websocket, fsnotify, gopsutil |
 | Relay | TypeScript, Fastify v5, @fastify/websocket, PostgreSQL |
 | Web UI | Vue 3, Vue Router 4, Vite 6, TypeScript |
 
