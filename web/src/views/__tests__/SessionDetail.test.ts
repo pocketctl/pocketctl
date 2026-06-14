@@ -1,0 +1,217 @@
+import { describe, test, expect } from 'vitest'
+
+// Pure logic tests extracted from SessionDetail.vue
+
+describe('exitReasonLabel', () => {
+  const labels: Record<string, string> = {
+    user_interrupt: '用户中断',
+    normal_exit: '正常退出',
+    process_crash: '异常退出',
+    signal_kill: '被终止',
+    unknown: '已退出',
+  }
+
+  function exitReasonLabel(reason: string): string {
+    return labels[reason] || '已退出'
+  }
+
+  test('all known reasons mapped', () => {
+    expect(exitReasonLabel('user_interrupt')).toBe('用户中断')
+    expect(exitReasonLabel('normal_exit')).toBe('正常退出')
+    expect(exitReasonLabel('process_crash')).toBe('异常退出')
+    expect(exitReasonLabel('signal_kill')).toBe('被终止')
+    expect(exitReasonLabel('unknown')).toBe('已退出')
+  })
+
+  test('unknown reason falls back', () => {
+    expect(exitReasonLabel('something_else')).toBe('已退出')
+  })
+})
+
+describe('statusLabel', () => {
+  const labels: Record<string, string> = {
+    running: 'Running', busy: 'Running', idle: 'Idle',
+    waiting_approval: 'Waiting', exited: 'Exited', disconnected: 'Disconnected',
+    completed: 'Completed', error: 'Error', killed: 'Killed',
+  }
+
+  test('all statuses have labels', () => {
+    const statuses = ['running', 'busy', 'idle', 'waiting_approval', 'exited', 'disconnected', 'completed', 'error', 'killed']
+    for (const s of statuses) {
+      expect(labels[s]).toBeDefined()
+    }
+  })
+
+  test('busy shows as Running', () => {
+    expect(labels['busy']).toBe('Running')
+  })
+})
+
+describe('terminalBadge computed', () => {
+  function getTerminalBadge(effectiveStatus: string, isDaemonOnline: boolean) {
+    if (effectiveStatus === 'exited' && isDaemonOnline) return { text: '可恢复', class: 'resumable' }
+    if (effectiveStatus === 'completed') return { text: '只读', class: 'readonly' }
+    if (effectiveStatus === 'error') return { text: '异常退出', class: 'errored' }
+    if (effectiveStatus === 'killed') return { text: '已终止', class: 'killed-badge' }
+    return null
+  }
+
+  test('exited + online → 可恢复', () => {
+    expect(getTerminalBadge('exited', true)).toEqual({ text: '可恢复', class: 'resumable' })
+  })
+
+  test('exited + offline → null (shows disconnected)', () => {
+    expect(getTerminalBadge('disconnected', false)).toBeNull()
+  })
+
+  test('completed → 只读', () => {
+    expect(getTerminalBadge('completed', true)).toEqual({ text: '只读', class: 'readonly' })
+  })
+
+  test('error → 异常退出', () => {
+    expect(getTerminalBadge('error', true)).toEqual({ text: '异常退出', class: 'errored' })
+  })
+
+  test('killed → 已终止', () => {
+    expect(getTerminalBadge('killed', true)).toEqual({ text: '已终止', class: 'killed-badge' })
+  })
+
+  test('running → null', () => {
+    expect(getTerminalBadge('running', true)).toBeNull()
+  })
+
+  test('idle → null', () => {
+    expect(getTerminalBadge('idle', true)).toBeNull()
+  })
+})
+
+describe('showInput computed', () => {
+  function shouldShowInput(effectiveStatus: string, isDaemonOnline: boolean): boolean {
+    return ['running', 'busy', 'idle', 'waiting_approval'].includes(effectiveStatus) ||
+      (effectiveStatus === 'exited' && isDaemonOnline)
+  }
+
+  test('running → input visible', () => {
+    expect(shouldShowInput('running', true)).toBe(true)
+  })
+
+  test('completed → input hidden', () => {
+    expect(shouldShowInput('completed', true)).toBe(false)
+  })
+
+  test('exited + online → input visible (for resume)', () => {
+    expect(shouldShowInput('exited', true)).toBe(true)
+  })
+
+  test('exited + offline → input hidden', () => {
+    expect(shouldShowInput('exited', false)).toBe(false)
+  })
+
+  test('disconnected → input hidden', () => {
+    expect(shouldShowInput('disconnected', false)).toBe(false)
+  })
+
+  test('idle → input visible', () => {
+    expect(shouldShowInput('idle', true)).toBe(true)
+  })
+
+  test('waiting_approval → input visible', () => {
+    expect(shouldShowInput('waiting_approval', true)).toBe(true)
+  })
+})
+
+describe('showEndedMessage computed', () => {
+  function shouldShowEndedMessage(effectiveStatus: string, isDaemonOnline: boolean): boolean {
+    return ['completed', 'error', 'killed'].includes(effectiveStatus) ||
+      (effectiveStatus === 'exited' && !isDaemonOnline)
+  }
+
+  test('completed → ended message', () => {
+    expect(shouldShowEndedMessage('completed', true)).toBe(true)
+  })
+
+  test('error → ended message', () => {
+    expect(shouldShowEndedMessage('error', true)).toBe(true)
+  })
+
+  test('killed → ended message', () => {
+    expect(shouldShowEndedMessage('killed', true)).toBe(true)
+  })
+
+  test('exited + offline → ended message', () => {
+    expect(shouldShowEndedMessage('exited', false)).toBe(true)
+  })
+
+  test('exited + online → no ended message', () => {
+    expect(shouldShowEndedMessage('exited', true)).toBe(false)
+  })
+
+  test('running → no ended message', () => {
+    expect(shouldShowEndedMessage('running', true)).toBe(false)
+  })
+})
+
+describe('inputPlaceholder computed', () => {
+  function getPlaceholder(status: string): string {
+    if (status === 'exited') return '输入消息以恢复 Session...'
+    return 'Send a message...'
+  }
+
+  test('exited shows resume placeholder', () => {
+    expect(getPlaceholder('exited')).toBe('输入消息以恢复 Session...')
+  })
+
+  test('other statuses show normal placeholder', () => {
+    expect(getPlaceholder('running')).toBe('Send a message...')
+    expect(getPlaceholder('idle')).toBe('Send a message...')
+  })
+})
+
+describe('timeline milestone building', () => {
+  test('only adds milestones for non-disconnected status changes', () => {
+    const milestones: { status: string; time: string }[] = []
+    const events = [
+      { status: 'running', last_activity_at: '2026-06-07T10:00:00Z' },
+      { status: 'disconnected', last_activity_at: '2026-06-07T10:01:00Z' },
+      { status: 'running', last_activity_at: '2026-06-07T10:02:00Z' },
+      { status: 'idle', last_activity_at: '2026-06-07T10:03:00Z' },
+    ]
+
+    for (const evt of events) {
+      if (evt.status !== 'disconnected' && evt.last_activity_at) {
+        const last = milestones[milestones.length - 1]
+        if (!last || last.status !== evt.status) {
+          milestones.push({ status: evt.status, time: evt.last_activity_at })
+        }
+      }
+    }
+
+    // running → disconnected(skipped) → running(deduped, same as last) → idle
+    // So: running, idle (the second running is deduplicated)
+    expect(milestones.length).toBe(2)
+    expect(milestones[0].status).toBe('running')
+    expect(milestones[1].status).toBe('idle')
+  })
+
+  test('deduplicates consecutive same-status events', () => {
+    const milestones: { status: string; time: string }[] = []
+    const events = [
+      { status: 'running', last_activity_at: '2026-06-07T10:00:00Z' },
+      { status: 'running', last_activity_at: '2026-06-07T10:01:00Z' },
+      { status: 'idle', last_activity_at: '2026-06-07T10:02:00Z' },
+    ]
+
+    for (const evt of events) {
+      if (evt.status !== 'disconnected' && evt.last_activity_at) {
+        const last = milestones[milestones.length - 1]
+        if (!last || last.status !== evt.status) {
+          milestones.push({ status: evt.status, time: evt.last_activity_at })
+        }
+      }
+    }
+
+    expect(milestones.length).toBe(2)
+    expect(milestones[0].status).toBe('running')
+    expect(milestones[1].status).toBe('idle')
+  })
+})

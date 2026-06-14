@@ -1,0 +1,44 @@
+# Build artifacts
+/pocketctl
+dist/
+*.exe
+
+# Dependencies
+node_modules/
+vendor/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+xcuserdata/
+*.xcuserstate
+
+# Environment
+.env
+.env.local
+.env.production
+.env.prod
+
+# Logs
+*.log
+
+# Test
+coverage/
+
+# Vite
+.vite/
+
+# Claude
+.claude/
+
+# Test reports
+test-report-*.html
+
+app-connect/
+AuthKey_95HSWCLC89.p8
+AuthKey*.p8
+distribution.cer
+build/

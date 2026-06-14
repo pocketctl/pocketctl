@@ -1,0 +1,284 @@
+package watcher
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
+	"time"
+
+	"github.com/fsnotify/fsnotify"
+)
+
+// DiscoveredSession represents a Claude Code session found in ~/.claude/sessions/
+type DiscoveredSession struct {
+	Pid       int    `json:"pid"`
+	SessionID string `json:"sessionId"`
+	Cwd       string `json:"cwd"`
+	Status    string `json:"status"`
+	StartedAt int64  `json:"startedAt"`
+	Version   string `json:"version"`
+}
+
+// SessionEvent is emitted when a session is discovered or changes
+type SessionEvent struct {
+	Action   string             // "discovered", "changed", "removed"
+	Session  DiscoveredSession
+	Filepath string
+}
+
+// SessionWatcher monitors ~/.claude/sessions/ for new/changed/removed session files
+type SessionWatcher struct {
+	sessionsDir    string
+	watcher        *fsnotify.Watcher
+	eventsCh       chan SessionEvent
+	knownSessions  map[string]DiscoveredSession // sessionId → session
+	fileToSession  map[string]string            // filepath → sessionId
+}
+
+// NewSessionWatcher creates a watcher for Claude Code sessions directory
+func NewSessionWatcher() (*SessionWatcher, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return nil, fmt.Errorf("get home dir: %w", err)
+	}
+	sessionsDir := filepath.Join(home, ".claude", "sessions")
+
+	if err := os.MkdirAll(sessionsDir, 0755); err != nil {
+		return nil, fmt.Errorf("create sessions dir: %w", err)
+	}
+
+	fsw, err := fsnotify.NewWatcher()
+	if err != nil {
+		return nil, fmt.Errorf("create fsnotify watcher: %w", err)
+	}
+
+	return &SessionWatcher{
+		sessionsDir:   sessionsDir,
+		watcher:       fsw,
+		eventsCh:      make(chan SessionEvent, 32),
+		knownSessions: make(map[string]DiscoveredSession),
+		fileToSession: make(map[string]string),
+	}, nil
+}
+
+// Events returns the channel for session discovery events
+func (sw *SessionWatcher) Events() <-chan SessionEvent {
+	return sw.eventsCh
+}
+
+// Start begins watching. It first scans existing files, then listens for changes.
+func (sw *SessionWatcher) Start(ctx context.Context) error {
+	sw.scanExisting()
+
+	if err := sw.watcher.Add(sw.sessionsDir); err != nil {
+		return fmt.Errorf("watch sessions dir: %w", err)
+	}
+
+	go sw.loop(ctx)
+	return nil
+}
+
+// Close stops the watcher
+func (sw *SessionWatcher) Close() error {
+	return sw.watcher.Close()
+}
+
+func (sw *SessionWatcher) loop(ctx context.Context) {
+	ticker := time.NewTicker(30 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case event, ok := <-sw.watcher.Events:
+			if !ok {
+				return
+			}
+			sw.handleFsEvent(event)
+		case <-ticker.C:
+			sw.scanExisting()
+		}
+	}
+}
+
+func (sw *SessionWatcher) handleFsEvent(event fsnotify.Event) {
+	if !strings.HasSuffix(event.Name, ".json") {
+		return
+	}
+
+	switch {
+	case event.Op&fsnotify.Create == fsnotify.Create:
+		sw.handleNewFile(event.Name)
+	case event.Op&fsnotify.Write == fsnotify.Write:
+		sw.handleChangedFile(event.Name)
+	case event.Op&(fsnotify.Remove|fsnotify.Rename) != 0:
+		sw.handleRemovedFile(event.Name)
+	}
+}
+
+// handleNewFile processes a newly created session file.
+// If the sessionId is already known (e.g. from --continue creating a new PID file),
+// it updates the existing record and emits "changed" instead of "discovered".
+func (sw *SessionWatcher) handleNewFile(path string) {
+	sess, err := parseSessionFile(path)
+	if err != nil || sess.SessionID == "" {
+		return
+	}
+
+	sw.fileToSession[path] = sess.SessionID
+
+	if existing, ok := sw.knownSessions[sess.SessionID]; ok {
+		// Session already known — update filepath/PID/status
+		existing.Pid = sess.Pid
+		existing.Status = sess.Status
+		existing.Cwd = sess.Cwd
+		sw.knownSessions[sess.SessionID] = existing
+		sw.eventsCh <- SessionEvent{
+			Action:   "changed",
+			Session:  existing,
+			Filepath: path,
+		}
+		return
+	}
+
+	// Genuinely new session
+	sw.knownSessions[sess.SessionID] = sess
+	sw.eventsCh <- SessionEvent{
+		Action:   "discovered",
+		Session:  sess,
+		Filepath: path,
+	}
+}
+
+// handleChangedFile processes a modified session file (status update, etc.)
+func (sw *SessionWatcher) handleChangedFile(path string) {
+	sess, err := parseSessionFile(path)
+	if err != nil || sess.SessionID == "" {
+		return
+	}
+
+	sw.fileToSession[path] = sess.SessionID
+	sw.knownSessions[sess.SessionID] = sess
+	sw.eventsCh <- SessionEvent{
+		Action:   "changed",
+		Session:  sess,
+		Filepath: path,
+	}
+}
+
+// handleRemovedFile processes a deleted session file.
+// Only emits "removed" if no other file tracks the same sessionId.
+func (sw *SessionWatcher) handleRemovedFile(path string) {
+	sessionId, ok := sw.fileToSession[path]
+	if !ok {
+		return
+	}
+	delete(sw.fileToSession, path)
+
+	// Check if another file still tracks this sessionId
+	for otherPath, otherSid := range sw.fileToSession {
+		if otherSid == sessionId && otherPath != path {
+			// Still tracked by another file — don't emit removed
+			return
+		}
+	}
+
+	// No other file tracks this session — it's truly gone.
+	// Keep in knownSessions: the session may reappear via --continue with
+	// a new PID file but the same sessionId. knownSessions is per-daemon-process,
+	// so stale entries don't accumulate forever.
+	if sess, exists := sw.knownSessions[sessionId]; exists {
+		sw.eventsCh <- SessionEvent{
+			Action:   "removed",
+			Session:  sess,
+			Filepath: path,
+		}
+	}
+}
+
+// scanExisting reads all JSON files in the sessions directory.
+// Deduplicates by sessionId, keeping the most recently modified file per session.
+func (sw *SessionWatcher) scanExisting() {
+	entries, err := os.ReadDir(sw.sessionsDir)
+	if err != nil {
+		return
+	}
+
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".json") {
+			continue
+		}
+		path := filepath.Join(sw.sessionsDir, entry.Name())
+		sess, err := parseSessionFile(path)
+		if err != nil || sess.SessionID == "" {
+			continue
+		}
+
+		sw.fileToSession[path] = sess.SessionID
+
+		if existing, ok := sw.knownSessions[sess.SessionID]; ok {
+			// Already known — check if status changed
+			if existing.Status != sess.Status {
+				existing.Status = sess.Status
+				existing.Pid = sess.Pid
+				existing.Cwd = sess.Cwd
+				sw.knownSessions[sess.SessionID] = existing
+				sw.eventsCh <- SessionEvent{
+					Action:   "changed",
+					Session:  existing,
+					Filepath: path,
+				}
+			}
+			continue
+		}
+
+		// New session — emit discovered
+		sw.knownSessions[sess.SessionID] = sess
+		sw.eventsCh <- SessionEvent{
+			Action:   "discovered",
+			Session:  sess,
+			Filepath: path,
+		}
+	}
+
+	// Check for removed files (file was tracked but no longer on disk)
+	for path, sessionId := range sw.fileToSession {
+		if _, err := os.Stat(path); os.IsNotExist(err) {
+			delete(sw.fileToSession, path)
+			// Only emit removed if no other file tracks this session
+			stillTracked := false
+			for otherPath, otherSid := range sw.fileToSession {
+				if otherSid == sessionId && otherPath != path {
+					stillTracked = true
+					break
+				}
+			}
+			if !stillTracked {
+				if sess, exists := sw.knownSessions[sessionId]; exists {
+					delete(sw.knownSessions, sessionId)
+					sw.eventsCh <- SessionEvent{
+						Action:   "removed",
+						Session:  sess,
+						Filepath: path,
+					}
+				}
+			}
+		}
+	}
+}
+
+func parseSessionFile(path string) (DiscoveredSession, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return DiscoveredSession{}, err
+	}
+	var sess DiscoveredSession
+	if err := json.Unmarshal(data, &sess); err != nil {
+		return DiscoveredSession{}, err
+	}
+	return sess, nil
+}
