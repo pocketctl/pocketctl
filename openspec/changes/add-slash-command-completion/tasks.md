@@ -58,3 +58,13 @@
 - [ ] 8.1 逐条对照 `specs/slash-command-completion/spec.md` 与 `specs/stream-protocol/spec.md` 的 scenario 手测验证（重点：SKILL.md 小写、插件命名空间、enabledPlugins 覆盖、过期响应丢弃）
 - [x] 8.2 运行 `openspec validate add-slash-command-completion --strict` 通过
 - [x] 8.3 将 builtin 命令表清单与来源文档化（写入 design.md 的 Open Questions 回填或单独说明）
+
+## 9. 修订：命令列表改用 agent init.slash_commands（取代静态 builtin 表）
+
+> 手测发现 `/model` 在 -p 模式不可用却被静态表推荐。改为用 agent init 事件的 `slash_commands` 作权威命令名集（见 design D10）。
+
+- [x] 9.1 adapter 解析 init 事件的 `slash_commands` 字段，新增 `SlashCommands()` 方法
+- [x] 9.2 `ProcessState` 缓存 `SlashCommands`；`readOutput` 在 init 时提取；新增 `GetSessionSlashCommands`
+- [x] 9.3 `ListCommands(cwd, available)` 用 available 作权威 name 集，文件扫描补 description；无 available 时回退扫描
+- [x] 9.4 `main.go` 的 `list_commands` case 取 session 的 available 传入 `ListCommands`
+- [x] 9.5 测试：available 过滤掉 `/model`（即使静态表有）、无 available 时 fallback

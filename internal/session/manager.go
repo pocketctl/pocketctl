@@ -29,6 +29,7 @@ type ProcessState struct {
 	Cwd       string
 	Agent     string
 	Source    string // "daemon" or "terminal"
+	SlashCommands []string // slash commands the agent reported as available (init event)
 	Pid       int    // terminal session's original PID
 	TTY       string // terminal session's TTY device (e.g. /dev/ttys002)
 	ExitReason string // reason for process exit (terminal sessions only)
@@ -394,6 +395,7 @@ func (sm *SessionManager) readOutput(ctx context.Context, cmd *exec.Cmd, stdout 
 	scanner := bufio.NewScanner(stdout)
 	scanner.Buffer(make([]byte, 1024*1024), 1024*1024)
 
+	initSeen := false
 	for scanner.Scan() {
 		line := scanner.Text()
 		events, err := adp.ParseStreamLine(line)
@@ -422,6 +424,15 @@ func (sm *SessionManager) readOutput(ctx context.Context, cmd *exec.Cmd, stdout 
 			} else {
 				sm.mu.Unlock()
 			}
+		}
+		// Cache slash commands reported by the agent's init event (emitted once,
+		// alongside sessionID) — the authoritative list of commands available in
+		// the current (-p) environment.
+		if !initSeen && len(adp.SlashCommands()) > 0 {
+			initSeen = true
+			sm.mu.Lock()
+			ps.SlashCommands = adp.SlashCommands()
+			sm.mu.Unlock()
 		}
 		// Update last activity on each received event
 		if len(events) > 0 {
@@ -705,6 +716,20 @@ func (sm *SessionManager) GetSessionCwd(sessionID string) (string, bool) {
 		return "", false
 	}
 	return ps.Cwd, true
+}
+
+// GetSessionSlashCommands returns the slash commands the agent reported as
+// available in its init event for this session. Empty for terminal sessions
+// or sessions whose agent hasn't emitted init yet. The bool indicates whether
+// the session exists.
+func (sm *SessionManager) GetSessionSlashCommands(sessionID string) ([]string, bool) {
+	sm.mu.RLock()
+	defer sm.mu.RUnlock()
+	ps, ok := sm.sessions[sessionID]
+	if !ok {
+		return nil, false
+	}
+	return ps.SlashCommands, true
 }
 
 type SessionInfo struct {

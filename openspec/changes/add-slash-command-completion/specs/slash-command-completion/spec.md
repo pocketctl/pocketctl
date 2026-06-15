@@ -124,3 +124,15 @@ Web 客户端 SHALL 能为指定会话请求其当前可用的 slash command 清
 - **WHEN** 用户选中 `/clear` 并提交发送
 - **THEN** 发送 `{"type":"user_message","session_id":"abc","content":"/clear"}`
 - **AND** SHALL NOT 走特殊的命令执行通道，复用现有 `user_message` 机制
+
+### Requirement: 命令列表反映 agent 实际可用性
+当 daemon 能获取会话 agent 的 init 事件时，命令名集 SHALL 优先取自 init 报告的 `slash_commands` 字段——它反映 `-p` 环境下 agent 实际可用的命令（例如 `/model` 因不可用而被排除）。文件扫描结果仅用于补充 `description` 与 `arg_hint`。当无 init 数据可用时（如终端会话），SHALL 回退到纯文件扫描（含静态 builtin 表）。
+
+#### Scenario: 以 init 报告的命令为准
+- **WHEN** 会话 agent 的 init 事件 `slash_commands` 含 `clear`、`compact`、`codex:status`，且不含 `model`
+- **THEN** `command_list` SHALL 含 `clear`、`compact`、`codex:status`
+- **AND** SHALL NOT 含 `model`（即便静态 builtin 表中存在）
+
+#### Scenario: 无 init 数据时回退扫描
+- **WHEN** 会话没有 init 数据（如终端会话，或 agent 尚未发出 init）
+- **THEN** `command_list` SHALL 回退到文件扫描结果（含静态 builtin 表的命令）

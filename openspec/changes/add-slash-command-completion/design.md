@@ -95,6 +95,13 @@ daemon → client: { "type": "command_list", "session_id": "<id>", "commands": [
 **理由**：`.claude/commands`、`.claude/skills` 文件数通常极少，即时扫描开销可忽略；fsnotify 增量更新属 v2 优化。
 **备选**：daemon 侧 fsnotify 监听 + 主动推送 —— 复杂度高，v1 无必要。
 
+### D10. 命令名集改用 agent init 的 slash_commands（取代静态 builtin 表）
+**选择**：daemon 在 session 启动时解析 stream-json init 事件的 `slash_commands` 字段，作为命令名集的**权威来源**；文件扫描（D2）仅提供 `description` / `arg_hint`。
+**理由**：实测发现 init 的 `slash_commands` 是 agent 在当前 `-p` 环境**实际可用**的命令清单——准确反映可用性（`/model` `/config` `/help` 不在，`/clear` `/compact` 在）且命名空间正确（`codex:status`）。静态 builtin 表是猜测（曾误推 `/model`，用户选了执行失败），被取代。
+**实测**：`claude -p --output-format stream-json` 的 init 事件含 `slash_commands: [...]`，覆盖 builtin + 自定义 + 插件全部，且过滤掉 -p 不可用的交互命令。
+**备选**：保留静态 builtin 表 → 不准（列了不可用命令）；扫描 + 黑名单手工排除 → 维护负担且易漏。init 是唯一准确、零维护的来源。
+**遗留**：`builtinCommands()` 静态表保留，仅作"无 init 数据时"（如终端会话）的 fallback + 为 builtin 命令提供 description join。
+
 ## Risks / Trade-offs
 
 - **[内置命令表过时]** CLI 版本间会增减命令 → 标注 `source: builtin`；内置命令变动频率低；后续可加版本探测或随 release 维护。风险可接受。
@@ -115,6 +122,6 @@ daemon 与 web 可分别部署；无数据迁移、无需回滚策略。
 
 ## Open Questions
 
-1. **内置命令表 v1 收录清单**：候选 `/clear` `/compact` `/model` `/help` `/resume` `/cost` `/config` `/agents` `/init` `/status`……需对照当前 CLI 版本实测确认完整集合与描述文案（实现阶段定稿）。
+1. ~~**内置命令表 v1 收录清单**~~ **已解决（见 D10）**：builtin 命令不再用静态表，改用 agent init 的 `slash_commands` 权威列表（准确反映 -p 可用性，`/model` 等自动排除）。静态 `builtinCommands()` 仅作无 init 时的 fallback + 提供 description join。
 2. **补全 UI 视觉**：command / skill 的图标与分组样式（🔧 / 📘 或其它），交 UI 设计确认。
 3. **会话级缓存 TTL**：v1 是否需要"会话期间新增命令"的手动刷新入口或定时重扫，待性能实测后决定。

@@ -208,3 +208,65 @@ func TestDisabledPluginExcluded(t *testing.T) {
 		}
 	}
 }
+
+// ListCommands uses the agent's available list as the authoritative name set,
+// so commands not in it (e.g. /model, /config — unavailable in -p mode) are
+// excluded even though they exist in the static builtin table.
+func TestListCommandsFiltersByAvailable(t *testing.T) {
+	cwd := t.TempDir()
+	// project command + skill (provide descriptions via scan)
+	mustMkdir(t, filepath.Join(cwd, ".claude", "commands"))
+	writeFile(t, filepath.Join(cwd, ".claude", "commands", "optimize.md"),
+		"---\ndescription: optimize code\n---\n")
+	mustMkdir(t, filepath.Join(cwd, ".claude", "skills", "my-skill"))
+	writeFile(t, filepath.Join(cwd, ".claude", "skills", "my-skill", "SKILL.md"),
+		"---\nname: my-skill\ndescription: a skill\n---\n")
+
+	// available mimics the agent's init slash_commands: clear/compact present,
+	// but model/config ABSENT (not available in -p mode), plus our project items.
+	available := []string{"clear", "compact", "my-skill", "optimize"}
+
+	items := ListCommands(cwd, available)
+	got := map[string]protocol.CommandItem{}
+	for _, it := range items {
+		got[it.Name] = it
+	}
+
+	// builtin clear/compact surfaced (from available)
+	if _, ok := got["clear"]; !ok {
+		t.Fatal("clear should be present (in agent's available list)")
+	}
+	if _, ok := got["compact"]; !ok {
+		t.Fatal("compact should be present")
+	}
+	// project skill/command get description/kind from scan
+	if got["my-skill"].Kind != "skill" || got["my-skill"].Description != "a skill" {
+		t.Fatalf("my-skill wrong: %+v", got["my-skill"])
+	}
+	if got["optimize"].Kind != "command" || got["optimize"].Description != "optimize code" {
+		t.Fatalf("optimize wrong: %+v", got["optimize"])
+	}
+
+	// /model, /config are in the static builtin table but NOT in available -> excluded
+	if _, ok := got["model"]; ok {
+		t.Fatal("model must be excluded: agent reports it unavailable in -p mode")
+	}
+	if _, ok := got["config"]; ok {
+		t.Fatal("config must be excluded: not in agent's available list")
+	}
+}
+
+// ListCommands falls back to the full scan when no available list is provided
+// (e.g. terminal session that never emitted an init event).
+func TestListCommandsFallbackWithoutAvailable(t *testing.T) {
+	cwd := t.TempDir()
+	items := ListCommands(cwd, nil)
+	got := map[string]bool{}
+	for _, it := range items {
+		got[it.Name] = true
+	}
+	// fallback includes the static builtin table (model etc.)
+	if !got["clear"] {
+		t.Fatal("fallback should include builtin clear")
+	}
+}

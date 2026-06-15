@@ -19,9 +19,49 @@ import (
 // running in cwd, merging builtin + project + user + plugin sources. Results
 // are deduplicated by name (first source wins, in builtin > project > user >
 // plugin order) and sorted by name.
-func ListCommands(cwd string) []protocol.CommandItem {
+func ListCommands(cwd string, available []string) []protocol.CommandItem {
 	home, _ := os.UserHomeDir()
-	return listCommands(cwd, home)
+	scanned := listCommands(cwd, home)
+
+	// No authoritative list from the agent (e.g. terminal session without an
+	// init event): fall back to the full filesystem scan.
+	if len(available) == 0 {
+		return scanned
+	}
+
+	// Use the agent's init-reported slash_commands as the authoritative name
+	// set — it reflects what's actually available in the -p environment (so
+	// /model, /config etc. are correctly absent). Join descriptions/sources
+	// from the filesystem scan where available.
+	byName := make(map[string]protocol.CommandItem, len(scanned))
+	for _, c := range scanned {
+		byName[c.Name] = c
+	}
+
+	result := make([]protocol.CommandItem, 0, len(available))
+	for _, name := range available {
+		item := protocol.CommandItem{Name: name}
+		if s, ok := byName[name]; ok {
+			item.Source = s.Source
+			item.Kind = s.Kind
+			item.Description = s.Description
+			item.ArgHint = s.ArgHint
+			item.Namespace = s.Namespace
+		} else if i := strings.Index(name, ":"); i > 0 {
+			// namespaced command the scan didn't resolve (e.g. a plugin command
+			// whose installPath we missed) — still surface it from the agent's list.
+			item.Source = "plugin"
+			item.Kind = "command"
+			item.Namespace = name[:i]
+		} else {
+			// builtin reported by the agent but not in our static table.
+			item.Source = "builtin"
+			item.Kind = "command"
+		}
+		result = append(result, item)
+	}
+	sort.Slice(result, func(i, j int) bool { return result[i].Name < result[j].Name })
+	return result
 }
 
 // listCommands is the testable core of ListCommands, taking an explicit home

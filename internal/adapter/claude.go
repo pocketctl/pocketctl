@@ -18,6 +18,9 @@ type ClaudeStreamEvent struct {
 	Result    string         `json:"result,omitempty"`
 	NumTurns  int            `json:"num_turns,omitempty"`
 	TotalCost float64        `json:"total_cost_usd,omitempty"`
+	// SlashCommands is populated on the init event: the authoritative list of
+	// slash commands the agent reports as available in the current environment.
+	SlashCommands []string `json:"slash_commands,omitempty"`
 }
 
 type ClaudeMessage struct {
@@ -38,7 +41,8 @@ type ClaudeContent struct {
 }
 
 type ClaudeAdapter struct {
-	sessionID string
+	sessionID     string
+	slashCommands []string
 }
 
 func NewClaudeAdapter() *ClaudeAdapter {
@@ -58,6 +62,7 @@ func (a *ClaudeAdapter) ParseStreamLine(line string) ([]protocol.DaemonEvent, er
 
 	if raw.Type == "system" && raw.Subtype == "init" && raw.SessionID != "" {
 		a.sessionID = raw.SessionID
+		a.slashCommands = raw.SlashCommands
 	}
 
 	return a.convertEvent(raw)
@@ -65,6 +70,13 @@ func (a *ClaudeAdapter) ParseStreamLine(line string) ([]protocol.DaemonEvent, er
 
 func (a *ClaudeAdapter) SessionID() string {
 	return a.sessionID
+}
+
+// SlashCommands returns the slash commands reported by the agent in its init
+// event — the authoritative list of commands available in the current (-p)
+// environment. Empty before init is parsed, or for adapters that never saw one.
+func (a *ClaudeAdapter) SlashCommands() []string {
+	return a.slashCommands
 }
 
 func (a *ClaudeAdapter) convertEvent(raw ClaudeStreamEvent) ([]protocol.DaemonEvent, error) {
