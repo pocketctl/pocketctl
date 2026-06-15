@@ -330,7 +330,25 @@
     .session-row .session-daemon,
     .session-row .session-time,
     .session-row .session-actions { display: none; }
+    .token-strip { flex-wrap: wrap; }
   }
+
+  /* ---- Token 消耗概览条 ---- */
+  .token-strip {
+    display: flex; align-items: center; gap: 20px;
+    padding: 10px 18px; margin-bottom: 24px;
+    background: var(--bg); border: 1px solid var(--border);
+    border-radius: var(--radius-lg);
+    font-size: 13px; color: var(--fg-secondary);
+    transition: background var(--transition), border-color var(--transition);
+  }
+  .token-strip .ts-item { display: flex; align-items: baseline; gap: 6px; }
+  .token-strip .ts-num {
+    font-family: var(--font-display); font-size: 17px; font-weight: 600;
+    color: var(--fg); font-variant-numeric: tabular-nums; letter-spacing: -0.01em;
+  }
+  .token-strip .ts-prefix { font-size: 13px; font-weight: 600; color: var(--fg-secondary); letter-spacing: 0.01em; }
+  .token-strip .ts-sep { width: 1px; height: 18px; background: var(--border); }
 
   /* ============================================
      New Session Modal
@@ -830,6 +848,9 @@
           <span class="stat-lbl">活跃会话</span>
         </a>
       </div>
+
+      <!-- Token 消耗概览 -->
+      <div class="token-strip" id="token-strip"></div>
 
       <!-- Daemon Section -->
       <div class="page-header">
@@ -1389,6 +1410,27 @@
       };
     }
   });
+
+  /* ---- Token 消耗概览（与 hosts 模块数据一致） ---- */
+  (function () {
+    function fmtK(n) {
+      if (n >= 1000000) return (n / 1000000).toFixed(2) + 'M';
+      if (n >= 1000) return (n / 1000).toFixed(0) + 'K';
+      return String(n);
+    }
+    var total = 3330000, today = 92000, week = 248000, month = 764000;
+    document.getElementById('token-strip').innerHTML =
+      '<span class="ts-item"><span class="ts-prefix">Token 消耗</span></span>' +
+      '<span class="ts-sep"></span>' +
+      '<span class="ts-item"><span class="ts-num">' + fmtK(total) + '</span>总消耗</span>' +
+      '<span class="ts-sep"></span>' +
+      '<span class="ts-item"><span class="ts-num">' + fmtK(today) + '</span>今日</span>' +
+      '<span class="ts-sep"></span>' +
+      '<span class="ts-item"><span class="ts-num">' + fmtK(week) + '</span>本周</span>' +
+      '<span class="ts-sep"></span>' +
+      '<span class="ts-item"><span class="ts-num">' + fmtK(month) + '</span>本月</span>';
+  })();
 </script>
+<script src="../js/sidebar-toggle.js"></script>
 </body>
 </html>

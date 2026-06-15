@@ -139,7 +139,7 @@ body {
   left: 0;
   bottom: 0;
   z-index: 40;
-  transition: background var(--transition), border-color var(--transition);
+  transition: background var(--transition), border-color var(--transition), width 0.2s ease;
 }
 
 .sidebar-logo {
@@ -729,6 +729,34 @@ body {
   .page-container { padding: 16px; }
   .page-title { font-size: 20px; }
 }
+
+/* ---- Sidebar 手动折叠 ---- */
+.sidebar-collapsed .sidebar { width: 72px; }
+.sidebar-collapsed .sidebar .brand-name,
+.sidebar-collapsed .sidebar .sidebar-section-label,
+.sidebar-collapsed .sidebar .link-text,
+.sidebar-collapsed .sidebar .badge,
+.sidebar-collapsed .sidebar .user-info { display: none; }
+.sidebar-collapsed .sidebar .sidebar-logo { justify-content: center; padding: 16px; }
+.sidebar-collapsed .sidebar .sidebar-link { justify-content: center; padding: 10px; }
+.sidebar-collapsed .sidebar .sidebar-user { justify-content: center; padding: 10px; }
+.sidebar-collapsed .main-content { margin-left: 72px; }
+@media (max-width: 768px) {
+  .sidebar-collapsed .sidebar { display: flex; }
+}
+
+/* ---- 折叠按钮 ---- */
+.sidebar-toggle-btn {
+  display: flex; align-items: center; justify-content: flex-end;
+  width: 100%; padding: 8px 20px;
+  border: none; border-top: 1px solid var(--sidebar-border);
+  background: transparent; color: var(--fg-tertiary);
+  cursor: pointer; font-family: var(--font-body);
+  transition: background 0.15s, color 0.15s, padding 0.2s ease;
+}
+.sidebar-toggle-btn:hover { background: var(--surface-hover); color: var(--fg); }
+.sidebar-collapsed .sidebar-toggle-btn { justify-content: center; padding: 8px; }
+.main-content { transition: margin-left 0.2s ease; }
 
 /* ============================================
    Session actions: ⋯ menu / delete dialog / undo toast
