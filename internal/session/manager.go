@@ -695,6 +695,18 @@ func (sm *SessionManager) UpdateLastActivity(sessionID string) {
 	}
 }
 
+// GetSessionCwd returns the working directory for a session and whether the
+// session exists. Used to resolve which command sources to scan for a session.
+func (sm *SessionManager) GetSessionCwd(sessionID string) (string, bool) {
+	sm.mu.RLock()
+	defer sm.mu.RUnlock()
+	ps, ok := sm.sessions[sessionID]
+	if !ok {
+		return "", false
+	}
+	return ps.Cwd, true
+}
+
 type SessionInfo struct {
 	SessionID string    `json:"session_id"`
 	Status    string    `json:"status"`

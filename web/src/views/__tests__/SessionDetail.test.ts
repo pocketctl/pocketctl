@@ -1,4 +1,5 @@
 import { describe, test, expect } from 'vitest'
+import type { CommandItem } from '../../composables/useWebSocket'
 
 // Pure logic tests extracted from SessionDetail.vue
 
@@ -213,5 +214,52 @@ describe('timeline milestone building', () => {
     expect(milestones.length).toBe(2)
     expect(milestones[0].status).toBe('running')
     expect(milestones[1].status).toBe('idle')
+  })
+})
+
+// Slash command autocompletion filtering logic (mirrors SessionDetail.vue filteredCommands)
+describe('slash command filtering', () => {
+  const pool: CommandItem[] = [
+    { name: 'clear', source: 'builtin', kind: 'command', description: '' },
+    { name: 'compact', source: 'builtin', kind: 'command', description: '' },
+    { name: 'pocket-release', source: 'project', kind: 'skill', description: '' },
+    { name: 'codex:rescue', source: 'plugin', kind: 'skill', namespace: 'codex', description: '' },
+  ]
+
+  function filterCommands(input: string, pool: CommandItem[]): CommandItem[] {
+    if (!input.startsWith('/')) return []
+    const prefix = input.slice(1).toLowerCase()
+    if (prefix === '') return pool.slice(0, 50)
+    return pool.filter(c => c.name.toLowerCase().startsWith(prefix)).slice(0, 50)
+  }
+
+  test('non-slash input returns nothing', () => {
+    expect(filterCommands('hello', pool)).toEqual([])
+    expect(filterCommands('', pool)).toEqual([])
+  })
+
+  test('bare slash returns all', () => {
+    expect(filterCommands('/', pool).length).toBe(4)
+  })
+
+  test('prefix filters by name (matches full name including namespace)', () => {
+    // 'codex:rescue' also starts with 'c', so /c matches it along with clear/compact
+    expect(filterCommands('/c', pool).map(c => c.name)).toEqual(['clear', 'compact', 'codex:rescue'])
+  })
+
+  test('longer prefix narrows further', () => {
+    expect(filterCommands('/comp', pool).map(c => c.name)).toEqual(['compact'])
+  })
+
+  test('matches namespaced plugin command', () => {
+    expect(filterCommands('/codex', pool).map(c => c.name)).toEqual(['codex:rescue'])
+  })
+
+  test('prefix is case-insensitive', () => {
+    expect(filterCommands('/CLEAR', pool).map(c => c.name)).toEqual(['clear'])
+  })
+
+  test('no match returns empty', () => {
+    expect(filterCommands('/xyz', pool)).toEqual([])
   })
 })

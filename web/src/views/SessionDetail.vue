@@ -120,7 +120,14 @@
       <div class="chat-input-area" :class="{ ended: !canInput }">
         <template v-if="canInput">
           <div class="chat-input-wrap">
-            <input type="text" v-model="messageInput" :placeholder="isDaemonSession && isTerminal ? '继续会话（将恢复历史上下文）...' : '发送消息...'" @keydown.enter="sendMessage" :disabled="isDisconnected" ref="inputEl" />
+            <CommandPopover
+              v-if="showPopover"
+              :commands="filteredCommands"
+              :active-index="selectedIndex"
+              @select="applyCommand"
+              @hover="selectedIndex = $event"
+            />
+            <input type="text" v-model="messageInput" :placeholder="isDaemonSession && isTerminal ? '继续会话（将恢复历史上下文）...' : '发送消息...'" @keydown="onInputKeydown" :disabled="isDisconnected" ref="inputEl" />
           </div>
           <button class="send-btn" @click="sendMessage" :disabled="isDisconnected || !messageInput.trim()">
             <svg viewBox="0 0 24 24"><path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z"/></svg>
@@ -139,7 +146,9 @@ import { useWebSocket } from '../composables/useWebSocket'
 import { formatRelativeTime } from '../composables/useRelativeTime'
 import MarkdownRenderer from '../components/MarkdownRenderer.vue'
 import SessionActions from '../components/SessionActions.vue'
+import CommandPopover from '../components/CommandPopover.vue'
 import { useSessionRename } from '../composables/useSessionRename'
+import type { CommandItem } from '../composables/useWebSocket'
 
 const { renamingId, renameInput, startRename, commitRename, cancelRename } = useSessionRename()
 
@@ -151,6 +160,9 @@ const sessionId = computed(() => route.params.id as string)
 const messages = ref<any[]>([])
 const allSessions = ref<any[]>([])
 const messageInput = ref('')
+const commandsCache = ref<CommandItem[]>([])
+const selectedIndex = ref(0)
+const popoverDismissed = ref(false)
 const status = ref('running')
 const exitReason = ref('')
 const exitedAt = ref('')
@@ -278,6 +290,55 @@ function sendMessage() {
   messageInput.value = ''
 }
 
+// Slash command autocompletion
+const filteredCommands = computed(() => {
+  const input = messageInput.value
+  if (!input.startsWith('/')) return []
+  const prefix = input.slice(1).toLowerCase()
+  const pool = commandsCache.value
+  if (prefix === '') return pool.slice(0, 50)
+  return pool.filter(c => c.name.toLowerCase().startsWith(prefix)).slice(0, 50)
+})
+const showPopover = computed(() => !popoverDismissed.value && filteredCommands.value.length > 0)
+
+// Reset selection/dismissal whenever the input changes
+watch(messageInput, () => { selectedIndex.value = 0; popoverDismissed.value = false })
+
+function onInputKeydown(e: KeyboardEvent) {
+  if (showPopover.value) {
+    if (e.key === 'ArrowDown') {
+      e.preventDefault()
+      selectedIndex.value = (selectedIndex.value + 1) % filteredCommands.value.length
+      return
+    }
+    if (e.key === 'ArrowUp') {
+      e.preventDefault()
+      selectedIndex.value = (selectedIndex.value - 1 + filteredCommands.value.length) % filteredCommands.value.length
+      return
+    }
+    if (e.key === 'Tab' || e.key === 'Enter') {
+      e.preventDefault()
+      applyCommand(filteredCommands.value[selectedIndex.value])
+      return
+    }
+    if (e.key === 'Escape') {
+      e.preventDefault()
+      popoverDismissed.value = true
+      return
+    }
+  } else if (e.key === 'Enter') {
+    e.preventDefault()
+    sendMessage()
+  }
+}
+
+function applyCommand(item: CommandItem) {
+  if (!item) return
+  messageInput.value = '/' + item.name + ' '
+  popoverDismissed.value = true
+  nextTick(() => { inputEl.value?.focus() })
+}
+
 const msgCounter = { value: 0 }
 const seenEvents = new Set<string>()
 function nextId(prefix: string) { return prefix + (++msgCounter.value) }
@@ -382,7 +443,9 @@ watch(sessionId, (newId, oldId) => {
     status.value = 'running'
     exitReason.value = ''
     exitedAt.value = ''
+    commandsCache.value = []
     send({ type: 'replay', session_id: newId, last_seq: 0 })
+    send({ type: 'list_commands', session_id: newId })
   }
 })
 
@@ -392,8 +455,13 @@ onMounted(() => {
   connect()
   send({ type: 'list_sessions' })
   send({ type: 'replay', session_id: sessionId.value, last_seq: 0 })
+  send({ type: 'list_commands', session_id: sessionId.value })
 
   cleanups.push(onEvent('session_list', (msg: any) => { allSessions.value = msg.sessions || [] }))
+  cleanups.push(onEvent('command_list', (msg: any) => {
+    if (msg.session_id !== sessionId.value) return // discard stale responses from other sessions
+    commandsCache.value = msg.commands || []
+  }))
 
   cleanups.push(onEvent('replay_batch', (msg: any) => {
     if (msg.session_id !== sessionId.value) return
@@ -671,7 +739,7 @@ onUnmounted(() => {
 .chat-input-area { border-top: 1px solid var(--border); padding: 12px 20px; background: var(--surface); display: flex; gap: 10px; align-items: center; transition: background var(--transition), border-color var(--transition); }
 .chat-input-area.ended { display: flex; align-items: center; justify-content: center; padding: 14px 20px; }
 .ended-text { color: var(--fg-tertiary); font-size: 13px; }
-.chat-input-wrap { flex: 1; display: flex; align-items: center; background: var(--bg); border: 1px solid var(--border); border-radius: var(--radius-xl); padding: 0 16px; min-height: 42px; transition: border-color 0.15s, box-shadow 0.15s; }
+.chat-input-wrap { position: relative; flex: 1; display: flex; align-items: center; background: var(--bg); border: 1px solid var(--border); border-radius: var(--radius-xl); padding: 0 16px; min-height: 42px; transition: border-color 0.15s, box-shadow 0.15s; }
 .chat-input-wrap:focus-within { border-color: var(--border-focus); box-shadow: 0 0 0 3px var(--accent-muted); }
 .chat-input-wrap input { flex: 1; background: none; border: none; color: var(--fg); font-size: 14px; font-family: var(--font-body); outline: none; padding: 8px 0; }
 .chat-input-wrap input::placeholder { color: var(--fg-tertiary); }

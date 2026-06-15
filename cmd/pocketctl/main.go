@@ -22,6 +22,7 @@ import (
 	"github.com/gorilla/websocket"
 	"github.com/pocketctl/pocketctl/internal/adapter"
 	"github.com/pocketctl/pocketctl/internal/api"
+	"github.com/pocketctl/pocketctl/internal/commands"
 	"github.com/pocketctl/pocketctl/internal/config"
 	"github.com/pocketctl/pocketctl/internal/daemon"
 	"github.com/pocketctl/pocketctl/internal/discovery"
@@ -1072,6 +1073,25 @@ func handleCommands(ctx context.Context, client *ws.Client, sm *session.SessionM
 				if err := sm.KillSession(cmd.SessionID); err != nil {
 					logger.Error("kill session failed", "error", err)
 				}
+
+			case "list_commands":
+				logger.Debug("list commands", "session", cmd.SessionID)
+				cwd, ok := sm.GetSessionCwd(cmd.SessionID)
+				if !ok {
+					// Unknown session / no cwd: return an empty list so the client
+					// still gets a response and can degrade gracefully.
+					client.SendMsg(protocol.DaemonEvent{
+						Type:      "command_list",
+						SessionID: cmd.SessionID,
+						Commands:  []protocol.CommandItem{},
+					})
+					continue
+				}
+				client.SendMsg(protocol.DaemonEvent{
+					Type:      "command_list",
+					SessionID: cmd.SessionID,
+					Commands:  commands.ListCommands(cwd),
+				})
 
 			default:
 				logger.Debug("unknown command", "type", cmd.Type)
