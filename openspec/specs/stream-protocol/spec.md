@@ -13,7 +13,7 @@ The system SHALL use WebSocket as the transport layer between all components. Ev
 - **THEN** the receiving component SHALL ignore the message and log a warning
 
 ### Requirement: Client-to-daemon command messages
-The system SHALL define the following command message types sent from client (web/mobile) to daemon: `session_create`, `session_kill`, `user_message`, `approval_response`.
+The system SHALL define the following command message types sent from client (web/mobile) to daemon: `session_create`, `session_kill`, `user_message`, `approval_response`, `list_commands`.
 
 #### Scenario: Create a new agent session
 - **WHEN** client sends `{"type":"session_create","agent":"claude-code","cwd":"/path/to/project","prompt":"initial task"}`
@@ -30,8 +30,14 @@ The system SHALL define the following command message types sent from client (we
 - **THEN** daemon terminates the agent process for that session
 - **AND** daemon sends a `session_status` event with `status: "killed"`
 
+#### Scenario: Request available slash commands
+- **WHEN** client sends `{"type":"list_commands","session_id":"abc"}`
+- **THEN** daemon resolves the working directory (`cwd`) for session `abc`
+- **AND** daemon scans builtin/project/user/plugin command sources for that `cwd`
+- **AND** daemon responds with a `command_list` event carrying the resolved command list
+
 ### Requirement: Daemon-to-client event messages
-The system SHALL define the following event message types sent from daemon to client: `session_created`, `agent_text`, `tool_call`, `tool_result`, `session_status`, `error`. The `session_status` event SHALL support the expanded status values: `running`, `waiting_approval`, `idle`, `exited`, `disconnected`, `completed`, `error`, `killed`. The `session_status` event SHALL include optional fields `exit_reason` and `last_activity_at`.
+The system SHALL define the following event message types sent from daemon to client: `session_created`, `agent_text`, `tool_call`, `tool_result`, `session_status`, `error`, `command_list`. The `session_status` event SHALL support the expanded status values: `running`, `waiting_approval`, `idle`, `exited`, `disconnected`, `completed`, `error`, `killed`. The `session_status` event SHALL include optional fields `exit_reason` and `last_activity_at`. The `command_list` event SHALL carry a `commands` array of `CommandItem` objects (each with `name`, `source`, `kind`, `description`, and optional `arg_hint` / `namespace`) and SHALL echo the requesting `session_id`.
 
 #### Scenario: Agent produces streaming text
 - **WHEN** agent emits text output during execution
@@ -55,6 +61,11 @@ The system SHALL define the following event message types sent from daemon to cl
 - **WHEN** relay broadcasts session status update
 - **THEN** event includes `last_activity_at` field with ISO 8601 timestamp
 - **AND** web client uses this to display relative time
+
+#### Scenario: Command list returned for a session
+- **WHEN** daemon finishes resolving commands for session `abc` in response to `list_commands`
+- **THEN** daemon sends `{"type":"command_list","session_id":"abc","commands":[{"name":"clear","source":"builtin","kind":"command","description":"..."},{"name":"codex:rescue","source":"plugin","kind":"skill","namespace":"codex","description":"..."}]}`
+- **AND** each command object conforms to the `CommandItem` model
 
 ### Requirement: Control messages for connection lifecycle
 The system SHALL support `ping`/`pong` messages for connection keepalive, and `register`/`register_ack` for daemon identification.

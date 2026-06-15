@@ -55,7 +55,7 @@
 
 ## 8. 验收与收尾
 
-- [ ] 8.1 逐条对照 `specs/slash-command-completion/spec.md` 与 `specs/stream-protocol/spec.md` 的 scenario 手测验证（重点：SKILL.md 小写、插件命名空间、enabledPlugins 覆盖、过期响应丢弃）
+- [x] 8.1 逐条对照 `specs/slash-command-completion/spec.md` 与 `specs/stream-protocol/spec.md` 的 scenario 手测验证（重点：SKILL.md 小写、插件命名空间、enabledPlugins 覆盖、过期响应丢弃）
 - [x] 8.2 运行 `openspec validate add-slash-command-completion --strict` 通过
 - [x] 8.3 将 builtin 命令表清单与来源文档化（写入 design.md 的 Open Questions 回填或单独说明）
 
