@@ -43,6 +43,9 @@ type DaemonEvent struct {
 	AssistantMessage string          `json:"assistant_message,omitempty"` // for generate_title_request
 	Reason           string          `json:"reason,omitempty"`          // failure reason code (no_cli, bad_cwd, start_fail, timeout, daemon_offline)
 	Commands         []CommandItem   `json:"commands,omitempty"`        // for command_list
+	Command          string          `json:"command,omitempty"`         // for command_receipt (e.g. "/compact")
+	ReceiptStatus    string          `json:"receipt_status,omitempty"`  // for command_receipt: success/failed/unavailable
+	Message          string          `json:"message,omitempty"`         // for command_receipt message
 }
 
 // CommandItem represents a slash command or skill available in a session,

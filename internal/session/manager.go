@@ -177,7 +177,7 @@ func (sm *SessionManager) CreateSession(ctx context.Context, config protocol.Ses
 		return "", fmt.Errorf("start process: %w", err)
 	}
 
-	adp := adapter.NewClaudeAdapter()
+	adp := adapter.NewClaudeAdapter(config.Prompt)
 	now := time.Now()
 	ps := &ProcessState{
 		Cmd:            cmd,
@@ -537,7 +537,7 @@ func (sm *SessionManager) SendMessage(ctx context.Context, sessionID string, con
 		return fmt.Errorf("start process: %w", err)
 	}
 
-	adp := adapter.NewClaudeAdapter()
+	adp := adapter.NewClaudeAdapter(content)
 	sm.mu.Lock()
 	ps.Cmd = cmd
 	ps.Cancel = cancel

@@ -110,6 +110,9 @@
 
           <!-- Error message -->
           <div v-else-if="msg.type === 'error'" class="msg msg-error">{{ msg.content || msg.error }}</div>
+
+          <!-- Command execution receipt -->
+          <CommandReceiptCard v-else-if="msg.type === 'command_receipt'" :command="msg.command" :status="msg.receiptStatus" :message="msg.message" />
         </template>
 
         <!-- Scroll to bottom -->
@@ -147,6 +150,7 @@ import { formatRelativeTime } from '../composables/useRelativeTime'
 import MarkdownRenderer from '../components/MarkdownRenderer.vue'
 import SessionActions from '../components/SessionActions.vue'
 import CommandPopover from '../components/CommandPopover.vue'
+import CommandReceiptCard from '../components/CommandReceiptCard.vue'
 import { useSessionRename } from '../composables/useSessionRename'
 import type { CommandItem } from '../composables/useWebSocket'
 
@@ -240,6 +244,7 @@ function cleanContent(text: string): string {
     .replace(/<command-name>.*?<\/command-name>\s*/gs, '')
     .replace(/<command-message>.*?<\/command-message>\s*/gs, '')
     .replace(/<command-args>.*?<\/command-args>\s*/gs, '')
+    .replace(/<local-command-caveat>.*?<\/local-command-caveat>\s*/gs, '')
     .replace(/<local-command-stdout>(.*?)<\/local-command-stdout>/gs, '$1')
     .replace(/<local-command-stderr>(.*?)<\/local-command-stderr>/gs, '$1')
     .replace(/<[^>]+>/g, '')
@@ -433,6 +438,12 @@ function processEvent(evt: any) {
     if (s) status.value = s
     if (evt.exit_reason || evt.payload?.exit_reason) exitReason.value = evt.exit_reason || evt.payload.exit_reason
     if (evt.exited_at || evt.payload?.exited_at) exitedAt.value = evt.exited_at || evt.payload.exited_at
+  } else if (type === 'command_receipt') {
+    messages.value.push({
+      id: nextId('r'), type: 'command_receipt',
+      command: evt.command || '', receiptStatus: evt.receipt_status || 'success',
+      message: evt.message || '',
+    })
   }
 }
 
@@ -461,6 +472,11 @@ onMounted(() => {
   cleanups.push(onEvent('command_list', (msg: any) => {
     if (msg.session_id !== sessionId.value) return // discard stale responses from other sessions
     commandsCache.value = msg.commands || []
+  }))
+  cleanups.push(onEvent('command_receipt', (msg: any) => {
+    if (msg.session_id !== sessionId.value) return
+    processEvent(msg)
+    nextTick(scrollToBottom)
   }))
 
   cleanups.push(onEvent('replay_batch', (msg: any) => {

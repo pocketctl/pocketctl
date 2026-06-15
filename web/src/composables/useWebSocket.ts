@@ -23,6 +23,9 @@ export interface DaemonEvent {
   subagent_type?: string
   subagent_count?: number
   commands?: CommandItem[]
+  command?: string
+  receipt_status?: 'success' | 'failed' | 'unavailable'
+  message?: string
 }
 
 // CommandItem represents a slash command or skill available for autocompletion.
