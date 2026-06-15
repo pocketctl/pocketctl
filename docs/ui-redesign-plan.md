@@ -1,0 +1,58 @@
+# UI 重构计划 — 设计稿 1:1 还原
+
+> 目标：1:1 还原 `ui-design/web/` 设计稿的 6 个改动点。本文件是跨会话接力单，新会话读此 + 设计稿 + 现状代码即可继续。
+
+## 设计稿位置
+- `ui-design/web/dashboard.html`（仪表盘）
+- `ui-design/web/hosts.html`（主机模块 + 主机详情）
+- `ui-design/web/session-detail.html`（会话）
+- 设计稿的 `<style>` 段含全部 CSS 类名/样式，是 1:1 还原的样式依据
+
+## 进度
+- [x] **C1-1a 仪表盘**（commit `466f32d`）：`stats-strip` 三状态点击筛选（在线/离线/活跃会话）+ `token-strip` 占位 + "管理全部"入口
+- [ ] **C1-1b 主机模块**：`host-cards-grid` 卡片网格 ↔ `hosts-selecting` 胶囊横向（选中状态机）+ 详情面板 + 顶部 `token-global-strip` 占位 + Actions 三点菜单
+- [ ] **C1-1c 会话按 host 筛选**：`SessionList`/`SessionDetail` 路由 `?host=` / 顶部选中当前主机
+- [ ] **C1-1d sidebar 缩放对齐**（`App.vue`，已有 `.sidebar-toggle`，对齐设计稿样式）
+- [ ] **C2 Token 后端**：`sessions.cost_usd` migration + relay 持久化 + `GET /api/cost/summary` + `/api/cost/by-daemon/:id` + events 历史回填
+- [ ] **C3 Token 前端**：`token-strip` / `token-overview` / `session-token-list` 接 C2 真实数据
+- [ ] **C4 主机管理 + Agent 版本**：daemon alias/注销接口 + Actions 完整 + agent 版本探测/上报/升级
+
+## 6 个改动点（设计稿要的）
+1. **sidebar 缩放按钮**（取代旧版）
+2. **仪表盘三状态统计**：`.stats-strip` 点击筛选（在线→`/hosts?filter=online`，离线→`offline`，活跃→`/session`）
+3. **仪表盘 Token 消耗**：`.token-strip`（总/今日/本周/本月）
+4. **仪表盘"管理全部"入口**：跳 `/hosts`
+5. **主机模块**：卡片网格 ↔ 胶囊横向（`hosts-selecting` 状态机：点选→胶囊+详情，再点→恢复卡片）+ 顶部 token + 详情面板
+6. **主机详情**：Actions 三点（复制/导出/编辑别名/重启/踢下线/注销）+ Agent 运行状态（版本/消耗/升级按钮）+ Token（主机总/今日/本月 + 每 session 明细）+ 底部 session 摘要 + "查看全部"（跳 session 并选中当前主机）
+
+## 接口方案
+
+### 新增接口
+- `GET /api/cost/summary` — 用户级（总/今日/本周/本月）
+- `GET /api/cost/by-daemon/:id` — 主机级 + 每 session 明细
+- `PATCH /api/daemons/:id` — 编辑别名（daemons 表已有 alias 列）
+- `DELETE /api/daemons/:id` — 注销主机
+- agent 版本：daemon `register`/`daemon_status` 上报版本 + `GET /api/agents/latest`（可选，最新版查询）
+
+### 升级接口
+- `list_sessions` + `daemon_id` 筛选参数 + 返回 `cost_usd`
+- `list_daemons` + `active_sessions`/`total_sessions` + agent 版本
+
+### Token 数据（关键，已验证可获取）
+- daemon `result.total_cost_usd`（`internal/adapter/claude.go:267` 已解析）
+- relay `events` 表已存 `session_status`（含 cost，**可历史回填**）
+- `sessions` 表需加 `cost_usd` 列（migration）
+
+## 可行性（已验证）
+- **纯前端**（#1/2/4 + #5 胶囊交互 + #6 复制/导出/查看全部跳转）：✅ 完全能
+- **Token 消耗**（#3/5/6）：✅ 接口能实现（数据源真实 + events 已存），需后端新建全链路
+- **Agent 版本**（#6）：✅ `claude --version` 能探测（实测 `2.1.175`），需上报 + 升级机制
+
+## 测试流程（每步）
+实现 → `vue-tsc --noEmit`（web）/ `go test` / `go build` → 还原度对照设计稿 HTML → 修 bug → commit。
+全部完成：`/test-new-features` 全量 + 生成 `docs/test-report-YYYY-MM-DD.html`。
+
+## 新会话接手步骤
+1. 读本文件 + `ui-design/web/*.html`（设计稿，含 `<style>` CSS）+ `web/src/views/*`（现状）
+2. 从 **C1-1b** 继续（HostsView 卡片↔胶囊重构）
+3. 流程：实现一步 → 测试 → 修 bug → 无 bug → 下一步，循环到 C4 完成 → 全量测试 + HTML 报告
