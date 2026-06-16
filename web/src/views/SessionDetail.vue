@@ -368,20 +368,17 @@ function applyCommand(item: CommandItem) {
 }
 
 const msgCounter = { value: 0 }
-const seenEvents = new Set<string>()
 function nextId(prefix: string) { return prefix + (++msgCounter.value) }
 
-// Dedup: skip events we've already seen (by content hash)
+// Dedup: only skip an event if it's identical to the immediately preceding one
+// (guards against relay batch re-send / reconnect). We intentionally do NOT dedup
+// by content globally — claude -p's synthetic command replies (e.g. "No response
+// requested.", "/model isn't available...") share text across history and new
+// commands, so a global Set would wrongly swallow a new command's reply that
+// matches a historical one.
 function isDuplicate(type: string, text: string): boolean {
-  const key = type + ':' + text.slice(0, 80)
-  if (seenEvents.has(key)) return true
-  seenEvents.add(key)
-  // Keep set bounded
-  if (seenEvents.size > 500) {
-    const arr = [...seenEvents]; seenEvents.clear()
-    arr.slice(-200).forEach(k => seenEvents.add(k))
-  }
-  return false
+  const last = messages.value[messages.value.length - 1]
+  return !!last && last.type === type && (last.content || '') === text
 }
 
 // Format tool input for display (matches iOS app logic)
