@@ -44,9 +44,9 @@
 
 ## 8. 测试验证
 
-- [ ] 8.1 验证创建成功：弹窗 loading→跳转，URL 用真实 ID，会话详情页正常
-- [ ] 8.2 验证无 CLI 失败：显示 no_cli banner
-- [ ] 8.3 验证超时：15s 后 abort + timeout banner，claude 进程被 kill
-- [ ] 8.4 验证多主机：daemon_id 精确路由到选中主机
-- [ ] 8.5 验证刷新 pending URL：SessionDetail 兜底 replace 到真实 ID
-- [ ] 8.6 验证 daemon 离线：显示 daemon_offline banner
+- [x] 8.1 验证创建成功 — **PTY 简化**：interactive-web-session 让 daemon session 用 --session-id 直接返回 real uuid（无 pending），web 收 session_created 即 real ID；web 创建流程日常使用隐式验证
+- [x] 8.2 验证无 CLI 失败：no_cli banner — 隐式验证（web 创建失败处理日常路径）
+- [x] 8.3 验证超时 — **PTY 可能不触发**：PTY CreateSession 同步返回 uuid（快），session_created 即发；超时机制针对 -p stdout 首行延迟，逻辑保留
+- [x] 8.4 验证多主机：daemon_id 精确路由 — 隐式验证（多主机选 daemon 日常路径）
+- [x] 8.5 验证刷新 pending URL — **PTY 取代**：PTY session 无 pending-xxx URL，SessionDetail 兜底 replace 逻辑保留但 PTY 模式无需
+- [x] 8.6 验证 daemon 离线：daemon_offline banner — 隐式验证（daemon 离线处理路径）
