@@ -150,7 +150,7 @@
                   <div class="ag-name">{{ agentName(a) }} <span class="ag-version">{{ agentVersionLabel(a) }}</span></div>
                   <div class="ag-meta">{{ agentMetaLabel(a) }}</div>
                 </div>
-                <button v-if="selectedDaemon?.daemon_online && !isAgentLatest(a) && /claude/i.test(agentName(a))" class="ag-upgrade-btn" :class="{ upgrading: upgrading === agentName(a) }" :disabled="upgrading === agentName(a)" @click="upgradeAgent(agentName(a))">
+                <button v-if="selectedDaemon?.daemon_online && !isAgentLatest(a)" class="ag-upgrade-btn" :class="{ upgrading: upgrading === agentName(a) }" :disabled="upgrading === agentName(a)" @click="upgradeAgent(agentName(a))">
                   {{ upgrading === agentName(a) ? '升级中…' : '升级' }}
                 </button>
                 <span v-else-if="isAgentLatest(a)" class="ag-latest">✓ 最新</span>
@@ -420,7 +420,6 @@ function agentMetaLabel(a: any): string {
   return typeof a === 'object' && a?.version ? '已安装 · 可用' : '版本待上报'
 }
 async function upgradeAgent(name: string) {
-  if (!/claude/i.test(name)) { showToast('暂仅支持 Claude Code 一键升级'); return }
   if (upgrading.value) return
   const d = selectedDaemon.value
   if (!d) return
@@ -430,13 +429,13 @@ async function upgradeAgent(name: string) {
     const r = await fetch(`${origin}/api/daemons/${d.daemon_id}/upgrade-agent`, {
       method: 'POST',
       headers: { Authorization: `Bearer ${accessToken.value}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ agent: 'claude-code' }),
+      body: JSON.stringify({ agent: name }),
     })
     if (!r.ok) {
       showToast('升级请求发送失败')
       upgrading.value = ''
     }
-    // 成功后等待 upgrade_result 事件反馈（daemon 异步执行 claude update）
+    // 成功后等待 upgrade_result 事件反馈（daemon 异步执行升级命令）
   } catch {
     showToast('升级请求发送失败')
     upgrading.value = ''
@@ -615,7 +614,7 @@ onMounted(() => {
   }))
   cleanups.push(onEvent('upgrade_result', (msg: any) => {
     upgrading.value = ''
-    if (msg.status === 'success') showToast(`Claude Code 已升级${msg.message ? '到 v' + msg.message : ''}`)
+    if (msg.status === 'success') showToast(`${msg.agent || 'Agent'} 已升级${msg.message ? '到 v' + msg.message : ''}`)
     else showToast(`升级失败：${msg.error || '未知错误'}`)
   }))
 })

@@ -1114,28 +1114,36 @@ func handleCommands(ctx context.Context, client *ws.Client, sm *session.SessionM
 	}
 }
 
-// handleUpgradeAgent spawns `claude update` for the requested agent, then re-discovers
-// versions and pushes a fresh register + upgrade_result event. Only claude-code is supported.
+// handleUpgradeAgent upgrades the requested agent via its built-in command (claude update /
+// opencode upgrade) or `npm install -g <package>@latest` (codex). Re-discovers versions,
+// pushes a fresh register + upgrade_result event.
 func handleUpgradeAgent(client *ws.Client, logger *slog.Logger, agent string) {
 	agentName := agent
 	if agentName == "" {
 		agentName = "claude-code"
 	}
-	if agentName != "claude-code" {
-		client.SendMsg(protocol.DaemonEvent{Type: "upgrade_result", Agent: agentName, Status: "failed", Error: "仅支持 claude-code 升级"})
+	updateCmd, pkg, err := discovery.AgentUpgradeInfo(agentName)
+	if err != nil {
+		client.SendMsg(protocol.DaemonEvent{Type: "upgrade_result", Agent: agentName, Status: "failed", Error: err.Error()})
 		return
 	}
 	oldVer := ""
 	for _, a := range discovery.DiscoverAgents() {
-		if a.Type == "claude-code" {
+		if a.Type == agentName {
 			oldVer = a.Version
 		}
 	}
-	logger.Info("agent upgrade start", "agent", agentName, "old_version", oldVer)
+	logger.Info("agent upgrade start", "agent", agentName, "old_version", oldVer, "cmd", updateCmd)
 
-	upCtx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+	upCtx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 	defer cancel()
-	out, err := exec.CommandContext(upCtx, "claude", "update").CombinedOutput()
+	var out []byte
+	if updateCmd != "" {
+		parts := strings.Fields(updateCmd)
+		out, err = exec.CommandContext(upCtx, parts[0], parts[1:]...).CombinedOutput()
+	} else {
+		out, err = exec.CommandContext(upCtx, "npm", "install", "-g", pkg+"@latest").CombinedOutput()
+	}
 	if err != nil {
 		logger.Error("agent upgrade failed", "agent", agentName, "error", err, "output", string(out))
 		client.SendMsg(protocol.DaemonEvent{Type: "upgrade_result", Agent: agentName, Status: "failed", Error: fmt.Sprintf("%v: %s", err, strings.TrimSpace(string(out)))})
@@ -1152,7 +1160,7 @@ func handleUpgradeAgent(client *ws.Client, logger *slog.Logger, agent string) {
 		if a.Latest != "" {
 			agentLatests[a.Type] = a.Latest
 		}
-		if a.Type == "claude-code" {
+		if a.Type == agentName {
 			newVer = a.Version
 		}
 	}

@@ -16,14 +16,17 @@ type AgentInfo struct {
 	Latest  string `json:"latest,omitempty"`
 }
 
+// knownAgents: each agent's CLI name, npm package (for version check), and upgrade command.
+// UpdateCmd is the agent's built-in upgrade command; empty means fall back to `npm install -g <package>@latest`.
 var knownAgents = []struct {
-	Type    string
-	CLIName string
-	Package string
+	Type      string
+	CLIName   string
+	Package   string
+	UpdateCmd string
 }{
-	{"claude-code", "claude", "@anthropic-ai/claude-code"},
-	{"opencode", "opencode", "opencode-ai"},
-	{"codex", "codex", "@openai/codex"},
+	{"claude-code", "claude", "@anthropic-ai/claude-code", "claude update"},
+	{"opencode", "opencode", "opencode-ai", "opencode upgrade"},
+	{"codex", "codex", "@openai/codex", ""}, // no built-in update; npm install -g @openai/codex@latest
 }
 
 var versionRe = regexp.MustCompile(`\d+\.\d+(?:\.\d+)?`)
@@ -46,8 +49,17 @@ func DiscoverAgents() []AgentInfo {
 	return agents
 }
 
-// detectVersion runs `<cli> --version` and extracts the first version-number token.
-// e.g. "2.1.175 (Claude Code)" → "2.1.175", "codex-cli 0.124.0" → "0.124.0", "1.2.15" → "1.2.15".
+// AgentUpgradeInfo returns the upgrade command and npm package for an agent type.
+// updateCmd non-empty → run it directly; empty → run `npm install -g <package>@latest`.
+func AgentUpgradeInfo(agentType string) (updateCmd, pkg string, err error) {
+	for _, a := range knownAgents {
+		if a.Type == agentType {
+			return a.UpdateCmd, a.Package, nil
+		}
+	}
+	return "", "", fmt.Errorf("unknown agent type: %s", agentType)
+}
+
 func detectVersion(cli string) string {
 	out, err := exec.Command(cli, "--version").Output()
 	if err != nil || len(out) == 0 {
@@ -57,8 +69,6 @@ func detectVersion(cli string) string {
 }
 
 // detectLatest queries the npm registry for the latest published version (5s timeout).
-// Works for npm-distributed agents even when installed via the official script,
-// because the registry version mirrors the official release.
 func detectLatest(pkg string) string {
 	if pkg == "" {
 		return ""
