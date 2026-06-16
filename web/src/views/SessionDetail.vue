@@ -12,8 +12,13 @@
         <span :class="['status-dot', { online: isDaemonOnline }]" style="width:6px;height:6px;"></span>
         <span style="font-size:11px;color:var(--fg-tertiary);">{{ isDaemonOnline ? '在线' : '离线' }} · {{ statusSubtext }}</span>
       </div>
+      <div v-if="hostFilter" class="host-filter-chip">
+        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="2" width="20" height="20" rx="3"/><path d="M7 2v20M17 2v20M2 12h20"/></svg>
+        <span class="hfc-name">{{ daemonName }}</span>
+        <button class="hfc-clear" @click="clearHostFilter" title="显示全部主机会话">✕</button>
+      </div>
       <div class="session-list">
-        <div v-for="s in allSessions" :key="s.session_id"
+        <div v-for="s in visibleSessions" :key="s.session_id"
           :class="['session-list-item', { active: s.session_id === sessionId, 'pending-delete': (s as any).__pendingDelete }]"
           @click="!(s as any).__pendingDelete && $router.push(`/session/${s.session_id}`)">
           <span :class="['status-dot', s.statusEffective || s.status]" style="width:7px;height:7px;"></span>
@@ -175,6 +180,11 @@ const copied = ref(false)
 const messagesEl = ref<HTMLDivElement | null>(null)
 const inputEl = ref<HTMLInputElement | null>(null)
 const daemons = ref<Record<string, any>>({})
+const hostFilter = computed(() => (route.query.host as string) || '')
+const visibleSessions = computed(() => {
+  if (!hostFilter.value) return allSessions.value
+  return allSessions.value.filter((s: any) => s.daemon_id === hostFilter.value)
+})
 
 const statusClass = computed(() => {
   const map: Record<string, string> = { running: 'running', busy: 'running', idle: 'running', completed: '', error: '', killed: '', disconnected: '', exited: '' }
@@ -202,9 +212,18 @@ const isDaemonSession = computed(() => {
 const canInput = computed(() => !isDisconnected.value && (!isTerminal.value || isDaemonSession.value))
 
 const daemonName = computed(() => {
+  if (hostFilter.value) {
+    const d = daemons.value[hostFilter.value]
+    return d?.daemon_alias || d?.hostname || hostFilter.value.slice(0, 8)
+  }
   const s = allSessions.value.find(s => s.session_id === sessionId.value)
   return s?.daemon_alias || s?.hostname || s?.daemon_id?.slice(0, 8) || '未知'
 })
+function clearHostFilter() {
+  const q = { ...route.query }
+  delete q.host
+  router.replace({ query: q })
+}
 
 const sessionTitle = computed(() => {
   const s = allSessions.value.find(s => s.session_id === sessionId.value)
@@ -465,10 +484,23 @@ const cleanups: (() => void)[] = []
 onMounted(() => {
   connect()
   send({ type: 'list_sessions' })
+  send({ type: 'list_daemons' })
   send({ type: 'replay', session_id: sessionId.value, last_seq: 0 })
   send({ type: 'list_commands', session_id: sessionId.value })
 
-  cleanups.push(onEvent('session_list', (msg: any) => { allSessions.value = msg.sessions || [] }))
+  cleanups.push(onEvent('session_list', (msg: any) => {
+    allSessions.value = msg.sessions || []
+    // 从主机"查看全部"跳来（带 host query + default 哨兵）→ 自动落到该主机首个会话
+    if (hostFilter.value && sessionId.value === 'default') {
+      const first = allSessions.value.find((s: any) => s.daemon_id === hostFilter.value)
+      if (first) router.replace({ path: `/session/${first.session_id}`, query: { host: hostFilter.value } })
+    }
+  }))
+  cleanups.push(onEvent('daemon_list', (msg: any) => {
+    const map: Record<string, any> = {}
+    for (const d of (msg.daemons || [])) map[d.daemon_id] = d
+    daemons.value = map
+  }))
   cleanups.push(onEvent('command_list', (msg: any) => {
     if (msg.session_id !== sessionId.value) return // discard stale responses from other sessions
     commandsCache.value = msg.commands || []
@@ -573,6 +605,10 @@ onUnmounted(() => {
 .session-panel { width: 300px; background: var(--sidebar-bg); border-right: 1px solid var(--sidebar-border); display: flex; flex-direction: column; flex-shrink: 0; transition: background var(--transition), border-color var(--transition); }
 .session-panel-header { padding: 16px; border-bottom: 1px solid var(--sidebar-border); display: flex; align-items: center; justify-content: space-between; }
 .session-panel-header h3 { font-size: 14px; font-weight: 600; color: var(--fg); }
+.host-filter-chip { margin: 8px; padding: 6px 10px; background: var(--accent-muted); border: 1px solid var(--accent); border-radius: var(--radius-full); display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--accent); }
+.host-filter-chip .hfc-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; }
+.host-filter-chip .hfc-clear { flex-shrink: 0; width: 16px; height: 16px; border: none; background: none; color: var(--accent); cursor: pointer; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-size: 12px; line-height: 1; opacity: 0.7; }
+.host-filter-chip .hfc-clear:hover { opacity: 1; background: rgba(88,166,255,0.2); }
 .session-list { flex: 1; overflow-y: auto; padding: 8px; }
 .session-list-item { display: flex; align-items: center; gap: 10px; padding: 10px 12px; border-radius: var(--radius-md); cursor: pointer; transition: background 0.1s, opacity 0.25s ease; margin-bottom: 2px; }
 .session-list-item:hover { background: var(--surface-hover); }
