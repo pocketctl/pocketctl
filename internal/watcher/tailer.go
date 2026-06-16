@@ -227,8 +227,13 @@ func (t *JSONLTailer) Run(ctx context.Context, outputCh chan<- protocol.DaemonEv
 				continue
 			}
 
-			// Send events
+			// Send events. Stamp sessionID from the file name if the record didn't
+			// carry one (e.g. sidechain turn_duration records emitted at turn end).
+			sid := strings.TrimSuffix(filepath.Base(t.filePath), ".jsonl")
 			for _, evt := range events {
+				if evt.SessionID == "" {
+					evt.SessionID = sid
+				}
 				outputCh <- evt
 			}
 

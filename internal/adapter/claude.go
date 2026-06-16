@@ -297,3 +297,21 @@ func BuildClaudeArgs(prompt string, sessionID string, config protocol.SessionCon
 
 	return args
 }
+
+// BuildInteractiveArgs builds args for an interactive (non -p) claude session
+// driven via PTY stdin (interactive-web-session D1). No -p, no --output-format —
+// structured output is obtained via JSONL tailer, not stream-json stdout.
+func BuildInteractiveArgs(config protocol.SessionConfig) []string {
+	permMode := config.PermissionMode
+	if permMode == "" {
+		permMode = "acceptEdits"
+	}
+	args := []string{"--permission-mode", permMode}
+	if config.Model != "" {
+		args = append(args, "--model", config.Model)
+	}
+	if len(config.AllowedTools) > 0 {
+		args = append(args, "--allowedTools", strings.Join(config.AllowedTools, ","))
+	}
+	return args
+}
