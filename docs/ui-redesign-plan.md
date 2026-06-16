@@ -13,7 +13,7 @@
 - [x] **C1-1b 主机模块**：`HostsView.vue` 重构为单栏——`token-global-strip`（占位）+ `host-controls`（筛选/搜索）+ `host-cards-grid` 卡片网格 ↔ `.hosts-selecting` 胶囊横向（`selectHost` toggle 状态机 + `hosts-deselect-btn` ✕）+ 全宽 `host-detail-panel`（`host-detail-grid` 双栏：资源\|连接 / Agent\|Token / 会话全宽 + `hd-more-btn` 详情三点）。Agent/Token 占位待 C2/C3/C4。vue-tsc + vite build 通过。
 - [x] **C1-1c 会话按 host 筛选**：`SessionDetail` 接 `?host=` query——`visibleSessions` 按 daemon_id 前端过滤 + 顶部 `host-filter-chip`（主机名 + ✕ 清除）+ `list_daemons` 填充 daemons 字典供 daemonName 查询 + 从主机"查看全部"跳来（default 哨兵）自动落该主机首个会话。`HostsView.goSessionWithHost` 预埋跳转。vue-tsc + build 通过。
 - [x] **C1-1d sidebar 缩放对齐**：`App.vue` 缩放按钮对齐设计稿——单箭头 `‹` → **双箭头** `«`/`»`（v-if 按 collapsed 切换图标），位置从 footer 内移到 **footer 上方**独立区块，类名 `.sidebar-toggle` → `.sidebar-toggle-btn`（`justify-content: flex-end; padding: 8px 20px`），`.main-content` 加 `margin-left` transition 平滑收起。vue-tsc + build 通过。
-- [ ] **C2 Token 后端**：`sessions.cost_usd` migration + relay 持久化 + `GET /api/cost/summary` + `/api/cost/by-daemon/:id` + events 历史回填
+- [x] **C2 Token 后端**：`relay/src/db.ts` 加 `cost_usd` 列 migration + `updateSessionCost`/`backfillSessionCost`/`getCostSummary`/`getCostByDaemon`（时段用 LAG 窗口函数算每次 turn 增量）；`router.ts` session_status 时持久化 cost_usd；`server.ts` 启动时回填历史 + `GET /api/cost/summary`（总/今日/本周/本月）+ `GET /api/cost/by-daemon/:daemonId`（主机级 + 每 session 明细）。tsc 通过（除预先存在的 tencentcloud-sdk）。
 - [ ] **C3 Token 前端**：`token-strip` / `token-overview` / `session-token-list` 接 C2 真实数据
 - [ ] **C4 主机管理 + Agent 版本**：daemon alias/注销接口 + Actions 完整 + agent 版本探测/上报/升级
 

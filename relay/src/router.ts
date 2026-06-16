@@ -321,6 +321,10 @@ export class Router {
     db.insertEvent(this.pool, sessionId, msg.type, msg).catch(console.error);
     if (msg.type === 'session_status') {
       db.upsertSession(this.pool, sessionId, daemonId, '', '', msg.status || 'unknown', undefined, undefined, msg.exit_reason).catch(console.error);
+      // C2: persist cumulative cost_usd from result event
+      if (msg.cost_usd != null) {
+        db.updateSessionCost(this.pool, sessionId, parseFloat(msg.cost_usd)).catch(console.error);
+      }
       // Push notification for terminal states
       if (userId && ['completed', 'error', 'killed', 'exited'].includes(msg.status)) {
         notifyUser(this.pool, userId, sessionStatusPush(msg.title || '', msg.status, sessionId)).catch(console.error);
