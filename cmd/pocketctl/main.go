@@ -904,6 +904,8 @@ func handleWatcherEvents(ctx context.Context, sw *watcher.SessionWatcher, sm *se
 						if err == nil {
 							tailer, err = watcher.NewJSONLTailerFromStart(jsonlPath)
 							if err == nil {
+								// Associate tailer with session so sendToIdleTerminal can pause/resume it (D2)
+								sm.SetTailer(evt.Session.SessionID, tailer)
 								// Tailer started successfully — now emit session_discovered
 								outputCh <- protocol.DaemonEvent{
 									Type:      "session_discovered",
@@ -941,6 +943,9 @@ func handleWatcherEvents(ctx context.Context, sw *watcher.SessionWatcher, sm *se
 						case <-ctx.Done():
 							return
 						case <-ticker.C:
+							if tailer.IsPaused() {
+								continue // D2: paused during sendToIdleTerminal, skip forwarding
+							}
 							events, rawLines, err := tailer.TailNewLines()
 							if err != nil {
 								continue

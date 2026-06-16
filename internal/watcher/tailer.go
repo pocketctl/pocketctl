@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/pocketctl/pocketctl/internal/adapter"
@@ -76,7 +77,18 @@ type JSONLTailer struct {
 	offset   int64
 	file     *os.File
 	scanBuf  []byte // reusable 1MB scanner buffer
+	paused   atomic.Bool // D2: paused during sendToIdleTerminal to avoid double-forward
 }
+
+// Pause stops the tailer from forwarding new lines (used during sendToIdleTerminal
+// to avoid double-forwarding stdout-captured events via adapter).
+func (t *JSONLTailer) Pause() { t.paused.Store(true) }
+
+// Resume re-enables line forwarding after a Pause.
+func (t *JSONLTailer) Resume() { t.paused.Store(false) }
+
+// IsPaused reports whether the tailer is currently paused.
+func (t *JSONLTailer) IsPaused() bool { return t.paused.Load() }
 
 // NewJSONLTailer creates a tailer for the given JSONL file path.
 // It starts from the end of the file (no historical replay).

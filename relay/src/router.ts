@@ -351,7 +351,7 @@ export class Router {
     const client = this.clients.get(clientWs);
     if (!client) return;
     if (msg.session_id) client.subscribedSessions.add(msg.session_id);
-    if (msg.type === 'replay') { this.handleReplay(clientWs, msg.session_id, msg.last_seq); return; }
+    if (msg.type === 'replay') { this.handleReplay(clientWs, msg.session_id, msg.last_seq, msg.req_id); return; }
     if (msg.type === 'list_sessions') { this.handleListSessions(clientWs, client.userId); return; }
     if (msg.type === 'list_daemons') { console.log('[router] list_daemons from user', client.userId, 'daemons in map:', this.daemons.size); this.handleListDaemons(clientWs, client.userId); return; }
 
@@ -443,35 +443,36 @@ export class Router {
     this.send(clientWs, { type: 'error', error: 'session not found or daemon offline' });
   }
 
-  private async handleReplay(clientWs: WebSocket, sessionId: string, lastSeq: number): Promise<void> {
+  private async handleReplay(clientWs: WebSocket, sessionId: string, lastSeq: number, reqId?: number): Promise<void> {
+    const withReq = (obj: any) => reqId !== undefined ? { ...obj, req_id: reqId } : obj;
     try {
       const events = await db.getEventsAfter(this.pool, sessionId, lastSeq);
       if (events.length === 0) {
-        this.send(clientWs, { type: 'replay_end', session_id: sessionId, count: 0, last_seq: lastSeq });
+        this.send(clientWs, withReq({ type: 'replay_end', session_id: sessionId, count: 0, last_seq: lastSeq }));
         return;
       }
       // Send events in batches of 50 to reduce WebSocket frame overhead
       const BATCH = 50;
       for (let i = 0; i < events.length; i += BATCH) {
         const slice = events.slice(i, i + BATCH);
-        this.send(clientWs, {
+        this.send(clientWs, withReq({
           type: 'replay_batch',
           session_id: sessionId,
           events: slice.map(e => e.payload),
           last_seq: slice[slice.length - 1].id,
-        });
+        }));
       }
       // Signal completion with final seq for incremental replay
-      this.send(clientWs, {
+      this.send(clientWs, withReq({
         type: 'replay_end',
         session_id: sessionId,
         count: events.length,
         last_seq: events[events.length - 1].id,
-      });
+      }));
     } catch (err) {
       console.error('replay error:', err);
       // Always send replay_end so the client doesn't hang on isLoading
-      this.send(clientWs, { type: 'replay_end', session_id: sessionId, count: 0, last_seq: lastSeq });
+      this.send(clientWs, withReq({ type: 'replay_end', session_id: sessionId, count: 0, last_seq: lastSeq }));
     }
   }
 

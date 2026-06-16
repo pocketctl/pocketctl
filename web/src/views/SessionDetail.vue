@@ -135,9 +135,9 @@
               @select="applyCommand"
               @hover="selectedIndex = $event"
             />
-            <input type="text" v-model="messageInput" :placeholder="isDaemonSession && isTerminal ? '继续会话（将恢复历史上下文）...' : '发送消息...'" @keydown="onInputKeydown" :disabled="isDisconnected" ref="inputEl" />
+            <input type="text" v-model="messageInput" :placeholder="isPendingSession ? '会话创建中…' : (isDaemonSession && isTerminal ? '继续会话（将恢复历史上下文）...' : '发送消息...')" @keydown="onInputKeydown" :disabled="isDisconnected || isPendingSession || isLoading" ref="inputEl" />
           </div>
-          <button class="send-btn" @click="sendMessage" :disabled="isDisconnected || !messageInput.trim()">
+          <button class="send-btn" @click="sendMessage" :disabled="isDisconnected || isPendingSession || isLoading || !messageInput.trim()">
             <svg viewBox="0 0 24 24"><path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z"/></svg>
           </button>
         </template>
@@ -170,6 +170,9 @@ const messages = ref<any[]>([])
 const allSessions = ref<any[]>([])
 const messageInput = ref('')
 const commandsCache = ref<CommandItem[]>([])
+const replayReqId = ref(0)
+const isLoading = ref(false)
+const isPendingSession = computed(() => sessionId.value.startsWith('pending-'))
 const selectedIndex = ref(0)
 const popoverDismissed = ref(false)
 const status = ref('running')
@@ -310,6 +313,7 @@ function focusResumeInput() { if (inputEl.value) { inputEl.value.focus() } }
 function sendMessage() {
   const text = messageInput.value.trim()
   if (!text || isDisconnected.value) return
+  if (isPendingSession.value) return // D3: pending-id 窗口期不发命令（--resume pending-xxx 必失败）
   send({ type: 'user_message', session_id: sessionId.value, content: text })
   messageInput.value = ''
 }
@@ -474,7 +478,9 @@ watch(sessionId, (newId, oldId) => {
     exitReason.value = ''
     exitedAt.value = ''
     commandsCache.value = []
-    send({ type: 'replay', session_id: newId, last_seq: 0 })
+    replayReqId.value++
+    isLoading.value = true
+    send({ type: 'replay', session_id: newId, last_seq: 0, req_id: replayReqId.value })
     send({ type: 'list_commands', session_id: newId })
   }
 })
@@ -485,7 +491,9 @@ onMounted(() => {
   connect()
   send({ type: 'list_sessions' })
   send({ type: 'list_daemons' })
-  send({ type: 'replay', session_id: sessionId.value, last_seq: 0 })
+  replayReqId.value++
+  isLoading.value = true
+  send({ type: 'replay', session_id: sessionId.value, last_seq: 0, req_id: replayReqId.value })
   send({ type: 'list_commands', session_id: sessionId.value })
 
   cleanups.push(onEvent('session_list', (msg: any) => {
@@ -513,10 +521,16 @@ onMounted(() => {
 
   cleanups.push(onEvent('replay_batch', (msg: any) => {
     if (msg.session_id !== sessionId.value) return
+    if (msg.req_id !== undefined && msg.req_id !== replayReqId.value) return // D4: stale batch
     for (const evt of msg.events) {
       processEvent(evt)
     }
     nextTick(scrollToBottom)
+  }))
+  cleanups.push(onEvent('replay_end', (msg: any) => {
+    if (msg.session_id !== sessionId.value) return
+    if (msg.req_id !== undefined && msg.req_id !== replayReqId.value) return
+    isLoading.value = false
   }))
 
   cleanups.push(onEvent('user_text', (msg: any) => {
@@ -557,7 +571,9 @@ onMounted(() => {
       router.replace(`/session/${msg.session_id}`)
       // 清空旧消息，重新拉取真实 ID 的历史
       messages.value = []
-      send({ type: 'replay', session_id: msg.session_id, last_seq: 0 })
+      replayReqId.value++
+      isLoading.value = true
+      send({ type: 'replay', session_id: msg.session_id, last_seq: 0, req_id: replayReqId.value })
     }
   }))
 

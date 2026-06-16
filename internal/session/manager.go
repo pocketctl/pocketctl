@@ -17,6 +17,7 @@ import (
 
 	"github.com/pocketctl/pocketctl/internal/adapter"
 	"github.com/pocketctl/pocketctl/internal/protocol"
+	"github.com/pocketctl/pocketctl/internal/watcher"
 )
 
 type ProcessState struct {
@@ -34,6 +35,16 @@ type ProcessState struct {
 	TTY       string // terminal session's TTY device (e.g. /dev/ttys002)
 	ExitReason string // reason for process exit (terminal sessions only)
 	TitleGenerated bool // true once generate_title_request has been sent
+	Tailer *watcher.JSONLTailer // terminal session 的 JSONL tailer（D2: sendToIdleTerminal 期间 pause）
+}
+
+// SetTailer associates a JSONL tailer with a session (so sendToIdleTerminal can pause/resume it).
+func (sm *SessionManager) SetTailer(sessionID string, t *watcher.JSONLTailer) {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+	if ps, ok := sm.sessions[sessionID]; ok {
+		ps.Tailer = t
+	}
 }
 
 // NotifyFunc is called after a web→terminal message completes.
@@ -567,15 +578,19 @@ func (sm *SessionManager) sendToIdleTerminal(ctx context.Context, ps *ProcessSta
 	ctx, cancel := context.WithCancel(ctx)
 	cmd := exec.CommandContext(ctx, cliPath, args...)
 	cmd.Dir = ps.Cwd
-	// Discard stdout — the JSONL tailer picks up events instead, avoiding duplicates
-	cmd.Stdout = nil
-	cmd.Stderr = nil
+	// D1: capture stdout stream-json + adapter (unified command feedback path, like daemon sessions).
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		cancel()
+		return fmt.Errorf("stdout pipe: %w", err)
+	}
 
 	if err := cmd.Start(); err != nil {
 		cancel()
 		return fmt.Errorf("start --resume: %w", err)
 	}
 
+	adp := adapter.NewClaudeAdapter(content)
 	now := time.Now()
 	sm.mu.Lock()
 	ps.Cmd = cmd
@@ -592,8 +607,33 @@ func (sm *SessionManager) sendToIdleTerminal(ctx context.Context, ps *ProcessSta
 		LastActivityAt: time.Now().UTC().Format(time.RFC3339),
 	}
 
-	// Wait for --resume to finish in background
+	// D2: pause the JSONL tailer while this --resume runs to avoid double-forwarding
+	// (stdout adapter covers all events; tailer would re-read the same JSONL lines).
+	if ps.Tailer != nil {
+		ps.Tailer.Pause()
+	}
+
+	// Wait for --resume to finish in background; forward stdout events via adapter.
 	go func() {
+		defer func() {
+			if ps.Tailer != nil {
+				ps.Tailer.Resume()
+			}
+		}()
+		scanner := bufio.NewScanner(stdout)
+		scanner.Buffer(make([]byte, 1024*1024), 1024*1024)
+		for scanner.Scan() {
+			events, perr := adp.ParseStreamLine(scanner.Text())
+			if perr != nil {
+				continue
+			}
+			for _, evt := range events {
+				if evt.SessionID == "" {
+					evt.SessionID = ps.SessionID
+				}
+				sm.outputCh <- evt
+			}
+		}
 		cmd.Wait()
 		resumeNow := time.Now()
 		sm.mu.Lock()
