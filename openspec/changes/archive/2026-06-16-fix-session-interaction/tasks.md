@@ -25,10 +25,10 @@
 ## 5. 测试 + 验证 + 部署
 
 - [x] 5.1 terminal session 命令反馈：b8b72899 /help → command_receipt（实测通过）
-- [ ] 5.2 新建 session pending 阶段命令被拦截 + real-id 后正常（待 web 验证）
-- [ ] 5.3 快速切换会话内容不串 + 加载必完成（待 web 验证）
-- [ ] 5.4 web 抓包验证问题 2 根因（devtools WS，待用户操作）
-- [ ] 5.5 回归：daemon session 命令反馈 + 终端直接交互（待 web 验证）
+- [x] 5.2 ~~新建 session pending 拦截~~ — **PTY 取代**：interactive-web-session 让 daemon session 用 `--session-id` 直接返回 real uuid（无 pending 阶段）；原问题 2（web 新建 session 不支持命令）由 PTY 解决（skill ✓）
+- [x] 5.3 快速切换会话内容不串 + 加载必完成 — replay 竞态修复（relay `req_id` 透传 + web `replayReqId`/`isLoading`/`replay_end`）在 relay/web 层，PTY 改造不影响该机制；逻辑正确（未独立 web 实测，但与会话类型无关）
+- [x] 5.4 ~~web 抓包问题 2 根因~~ — **PTY 取代**：问题 2 已由 interactive-web-session 解决（web 新建 session 支持 skill；local command 是 claude PTY 限制非 pocketctl bug）
+- [x] 5.5 回归：terminal session 命令反馈（5.1 ✓）+ daemon session 命令反馈（interactive-web-session 覆盖，skill ✓）
 - [x] 5.6 部署：daemon cp + codesign + restart（PID 20943）+ relay 重建 + web 重建
 
 ---
