@@ -26,15 +26,32 @@ When a terminal-discovered session's process has exited, daemon SHALL accept use
 - **THEN** daemon returns an error "session busy in terminal" and the web shows the error to the user
 
 ### Requirement: Web-created sessions can be resumed in terminal
-Web-created sessions (source=`daemon`) SHALL display a "在终端继续" action that provides the `claude --resume <session-id>` command for the user to run in their terminal.
+Web 客户端 SHALL 提供「恢复会话命令」入口（**两处**：SessionActions 列表卡片 ⋮ 菜单 + SessionDetail 详情页 header），点击**复制到粘贴板**一个可在主机终端粘贴运行的完整命令（仅复制 + toast，无 dialog）。命令格式：`cd "<cwd>" && <agent resume <session-id>>`，按 `session.agent` 映射：
+- `claude-code` → `claude --resume <session-id>`
+- `codex` → `codex resume <session-id>`
+- `opencode` → **暂隐藏入口**（后续支持 `opencode -s <session-id>`）
 
-#### Scenario: User wants to continue web session in terminal
-- **WHEN** user clicks "在终端继续" on a web-created session
-- **THEN** the UI shows a copyable command: `claude --resume <session-id>`
+cwd SHALL 用引号包裹（`"<cwd>"`，防空格/特殊字符）；session 无 cwd 时 fallback `cd ~`。复制后显示 toast「已复制恢复命令 — 在主机终端粘贴运行」。命令 SHALL 由共享的 `buildResumeCommand(session)` 工具函数构建（SessionActions 与 SessionDetail 复用）。
 
-#### Scenario: User resumes web session in terminal
-- **WHEN** user runs `claude --resume <session-id>` in their terminal
-- **THEN** Claude Code loads the full conversation history including messages sent from web, and the session continues seamlessly
+#### Scenario: claude-code 会话复制恢复命令
+- **WHEN** 用户在 SessionActions 菜单或 SessionDetail header 点「恢复会话命令」（agent=claude-code, cwd=/Users/x/proj, session_id=abc-123）
+- **THEN** 复制到粘贴板：`cd "/Users/x/proj" && claude --resume abc-123`
+- **AND** toast「已复制恢复命令 — 在主机终端粘贴运行」
+
+#### Scenario: codex 会话复制恢复命令
+- **WHEN** session.agent=codex
+- **THEN** 复制：`cd "<cwd>" && codex resume <session-id>`
+
+#### Scenario: opencode 会话暂不显示入口
+- **WHEN** session.agent=opencode
+- **THEN** 「恢复会话命令」入口隐藏（`v-if="session.agent !== 'opencode'"`）
+
+#### Scenario: 无 cwd fallback + cwd 含空格引号
+- **WHEN** session 无 cwd → 命令用 `cd ~`；cwd 含空格 → `cd "<cwd>"`（引号包裹防破坏命令）
+
+#### Scenario: 用户在终端运行恢复命令
+- **WHEN** 用户在主机终端粘贴运行 `cd "<cwd>" && claude --resume <session-id>`
+- **THEN** agent CLI 加载该 session 完整历史（含 web 发送的消息），会话在终端继续
 
 ### Requirement: App/Web sessions from relay persist across daemon restarts
 When daemon restarts, it SHALL re-discover terminal sessions by scanning `~/.claude/sessions/` and reconcile with the relay's existing session records.

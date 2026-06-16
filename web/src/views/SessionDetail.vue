@@ -52,6 +52,10 @@
             <svg v-if="!copied" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"/></svg>
             <svg v-else width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M20 6L9 17l-5-5"/></svg>
           </button>
+          <button v-if="currentSessionAgent !== 'opencode'" class="copy-btn" style="margin-left:6px;" :title="resumeCopied ? '已复制恢复命令 — 在主机终端粘贴运行' : '恢复会话命令（复制到粘贴板）'" @click="copyResumeCmd">
+            <span v-if="!resumeCopied" style="font-size:13px;line-height:1;">🖥️</span>
+            <svg v-else width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M20 6L9 17l-5-5"/></svg>
+          </button>
         </div>
       </div>
 
@@ -156,6 +160,7 @@ import MarkdownRenderer from '../components/MarkdownRenderer.vue'
 import SessionActions from '../components/SessionActions.vue'
 import CommandPopover from '../components/CommandPopover.vue'
 import CommandReceiptCard from '../components/CommandReceiptCard.vue'
+import { buildResumeCommand } from '../utils/resumeCommand'
 import { useSessionRename } from '../composables/useSessionRename'
 import type { CommandItem } from '../composables/useWebSocket'
 
@@ -177,6 +182,8 @@ const pageSize = computed(() => 50)  // session-history-pagination: 一次加载
 const loadedMinId = ref(0)      // oldest loaded event id (backward cursor)
 const isLoadingBackward = ref(false)  // a pagination (scroll-up) request in flight
 const hasMore = ref(false)      // relay signaled older events exist
+const resumeCopied = ref(false)  // session-resume-command: 复制恢复命令反馈
+const currentSessionAgent = computed(() => allSessions.value.find((x: any) => x.session_id === sessionId.value)?.agent)
 const isPendingSession = computed(() => sessionId.value.startsWith('pending-'))
 const selectedIndex = ref(0)
 const popoverDismissed = ref(false)
@@ -256,6 +263,18 @@ function copySessionId() {
     copied.value = true
     if (copyTimer) clearTimeout(copyTimer)
     copyTimer = setTimeout(() => { copied.value = false }, 2000)
+  }).catch(() => {})
+}
+
+// session-resume-command: copy `cd "<cwd>" && <agent resume <sid>>` for terminal handoff
+function copyResumeCmd() {
+  const s = allSessions.value.find((x: any) => x.session_id === sessionId.value)
+  if (!s) return
+  const cmd = buildResumeCommand({ agent: (s as any).agent, cwd: (s as any).cwd, session_id: sessionId.value })
+  navigator.clipboard.writeText(cmd).then(() => {
+    resumeCopied.value = true
+    if (copyTimer) clearTimeout(copyTimer)
+    copyTimer = setTimeout(() => { resumeCopied.value = false }, 2000)
   }).catch(() => {})
 }
 
