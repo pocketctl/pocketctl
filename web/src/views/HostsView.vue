@@ -14,13 +14,13 @@
 
     <!-- 全局 Token 概览条（占位，待 C2/C3 接真实数据） -->
     <div class="token-global-strip">
-      <div class="tg-item"><span class="tg-num">—</span><span class="tg-label">总消耗</span></div>
+      <div class="tg-item"><span class="tg-num">{{ formatCost(tokenGlobal?.total) }}</span><span class="tg-label">总消耗</span></div>
       <div class="tg-sep"></div>
-      <div class="tg-item"><span class="tg-num">—</span><span class="tg-label">今日</span></div>
+      <div class="tg-item"><span class="tg-num">{{ formatCost(tokenGlobal?.today) }}</span><span class="tg-label">今日</span></div>
       <div class="tg-sep"></div>
-      <div class="tg-item"><span class="tg-num">—</span><span class="tg-label">本周</span></div>
+      <div class="tg-item"><span class="tg-num">{{ formatCost(tokenGlobal?.thisWeek) }}</span><span class="tg-label">本周</span></div>
       <div class="tg-sep"></div>
-      <div class="tg-item"><span class="tg-num">—</span><span class="tg-label">本月</span></div>
+      <div class="tg-item"><span class="tg-num">{{ formatCost(tokenGlobal?.thisMonth) }}</span><span class="tg-label">本月</span></div>
     </div>
 
     <!-- 筛选 + 搜索 -->
@@ -161,16 +161,22 @@
             </div>
           </div>
 
-          <!-- Token 消耗（占位，待 C2/C3 接真实数据） -->
+          <!-- Token 消耗（C2/C3 真实数据） -->
           <div class="hd-section">
             <div class="hd-section-title">Token 消耗</div>
             <div class="token-overview">
-              <div class="token-stat"><div class="tk-num">—</div><div class="tk-label">主机总计</div></div>
-              <div class="token-stat"><div class="tk-num accent">—</div><div class="tk-label">今日消耗</div></div>
-              <div class="token-stat"><div class="tk-num">—</div><div class="tk-label">本月消耗</div></div>
+              <div class="token-stat"><div class="tk-num">{{ formatCost(daemonCost?.total) }}</div><div class="tk-label">主机总计</div></div>
+              <div class="token-stat"><div class="tk-num accent">{{ formatCost(daemonCost?.today) }}</div><div class="tk-label">今日消耗</div></div>
+              <div class="token-stat"><div class="tk-num">{{ formatCost(daemonCost?.thisMonth) }}</div><div class="tk-label">本月消耗</div></div>
             </div>
             <div class="session-token-list">
-              <div class="session-token-row"><span class="st-title" style="color:var(--fg-tertiary);">Token 统计即将上线</span></div>
+              <template v-if="daemonCost?.sessions?.length">
+                <div class="session-token-row" v-for="s in daemonCost.sessions" :key="s.session_id">
+                  <span class="st-title">{{ s.title || s.session_id.slice(0, 8) }}</span>
+                  <span class="st-tokens">{{ formatCost(s.cost_usd) }}</span>
+                </div>
+              </template>
+              <div v-else class="session-token-row"><span class="st-title" style="color:var(--fg-tertiary);">暂无会话消耗记录</span></div>
             </div>
           </div>
 
@@ -262,7 +268,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted, onUnmounted } from 'vue'
+import { ref, computed, watch, onMounted, onUnmounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { useWebSocket } from '../composables/useWebSocket'
 import { useAuth } from '../composables/useAuth'
@@ -292,9 +298,38 @@ const menuX = ref(0)
 const menuY = ref(0)
 const menuTarget = ref<any>(null)
 
+// C3: Token cost data (from C2 backend — cost_usd in USD)
+const tokenGlobal = ref<{ total: number; today: number; thisWeek: number; thisMonth: number } | null>(null)
+const daemonCost = ref<{ total: number; today: number; thisMonth: number; sessions: Array<{ session_id: string; title: string; cost_usd: number }> } | null>(null)
+
+function formatCost(v: number | null | undefined): string {
+  if (v == null) return '—'
+  if (v > 0 && v < 0.01) return '<$0.01'
+  return '$' + v.toFixed(2)
+}
+async function fetchCostSummary() {
+  const origin = getRelayOrigin()
+  try {
+    const r = await fetch(`${origin}/api/cost/summary`, { headers: { Authorization: `Bearer ${accessToken.value}` } })
+    if (r.ok) tokenGlobal.value = await r.json()
+  } catch { /* ignore */ }
+}
+async function fetchCostByDaemon(id: string) {
+  const origin = getRelayOrigin()
+  try {
+    const r = await fetch(`${origin}/api/cost/by-daemon/${id}`, { headers: { Authorization: `Bearer ${accessToken.value}` } })
+    daemonCost.value = r.ok ? await r.json() : null
+  } catch { daemonCost.value = null }
+}
+
 const onlineCount = computed(() => daemons.value.filter(d => d.daemon_online).length)
 const offlineCount = computed(() => daemons.value.filter(d => !d.daemon_online).length)
 const selectedDaemon = computed(() => daemons.value.find(d => d.daemon_id === selectedId.value))
+
+watch(selectedDaemon, (d) => {
+  if (d?.daemon_id) fetchCostByDaemon(d.daemon_id)
+  else daemonCost.value = null
+})
 
 const filteredDaemons = computed(() => {
   let list = daemons.value
@@ -512,6 +547,7 @@ const onScroll = () => closeMenu()
 onMounted(() => {
   connect()
   send({ type: 'list_daemons' })
+  fetchCostSummary()
   document.addEventListener('click', onDocClick)
   document.addEventListener('keydown', onEsc)
   window.addEventListener('scroll', onScroll, true)

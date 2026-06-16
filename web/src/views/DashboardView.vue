@@ -22,13 +22,13 @@
     <div class="token-strip">
       <span class="ts-prefix">Token 消耗</span>
       <span class="ts-sep"></span>
-      <span class="ts-item"><span class="ts-num">{{ formatTokens(tokenSummary.total) }}</span>总消耗</span>
+      <span class="ts-item"><span class="ts-num">{{ formatCost(tokenSummary.total) }}</span>总消耗</span>
       <span class="ts-sep"></span>
-      <span class="ts-item"><span class="ts-num">{{ formatTokens(tokenSummary.today) }}</span>今日</span>
+      <span class="ts-item"><span class="ts-num">{{ formatCost(tokenSummary.today) }}</span>今日</span>
       <span class="ts-sep"></span>
-      <span class="ts-item"><span class="ts-num">{{ formatTokens(tokenSummary.week) }}</span>本周</span>
+      <span class="ts-item"><span class="ts-num">{{ formatCost(tokenSummary.week) }}</span>本周</span>
       <span class="ts-sep"></span>
-      <span class="ts-item"><span class="ts-num">{{ formatTokens(tokenSummary.month) }}</span>本月</span>
+      <span class="ts-item"><span class="ts-num">{{ formatCost(tokenSummary.month) }}</span>本月</span>
     </div>
 
     <!-- Daemon Section -->
@@ -182,7 +182,7 @@ import { useSessionRename } from '../composables/useSessionRename'
 const { renamingId: sessRenamingId, renameInput: sessRenameInput, startRename: sessStartRename, commitRename: sessCommitRename, cancelRename: sessCancelRename } = useSessionRename()
 
 const { connect, send, onEvent, effectiveStatus } = useWebSocket()
-const { isLoggedIn, logout } = useAuth()
+const { isLoggedIn, logout, accessToken } = useAuth()
 const router = useRouter()
 
 const daemons = ref<any[]>([])
@@ -198,12 +198,26 @@ const renameInput = ref('')
 const aliases = ref<Record<string, string>>({})
 const selectedDaemon = ref<string | null>(null)
 
-// Token summary — C3 will wire to /api/cost/summary; placeholder zeros for now
+// Token cost summary — wired to /api/cost/summary (cost_usd in USD)
 const tokenSummary = ref({ total: 0, today: 0, week: 0, month: 0 })
-function formatTokens(n: number): string {
-  if (n >= 1e6) return (n / 1e6).toFixed(2) + 'M'
-  if (n >= 1e3) return Math.round(n / 1e3) + 'K'
-  return String(n)
+function formatCost(v: number | null | undefined): string {
+  if (v == null) return '—'
+  if (v > 0 && v < 0.01) return '<$0.01'
+  return '$' + v.toFixed(2)
+}
+function getRelayOrigin(): string {
+  const relayWs = localStorage.getItem('pocketctl_relay_url') || (window as any).__RELAY_WS__ || ''
+  try { const url = new URL(relayWs); if (url.hostname === 'localhost' || url.hostname === '127.0.0.1') return ''; return url.origin.replace(/^ws/, 'http') } catch { return '' }
+}
+async function fetchCostSummary() {
+  const origin = getRelayOrigin()
+  try {
+    const r = await fetch(`${origin}/api/cost/summary`, { headers: { Authorization: `Bearer ${accessToken.value}` } })
+    if (r.ok) {
+      const d = await r.json()
+      tokenSummary.value = { total: d.total ?? 0, today: d.today ?? 0, week: d.thisWeek ?? 0, month: d.thisMonth ?? 0 }
+    }
+  } catch { /* ignore */ }
 }
 
 const onlineDaemonCount = computed(() => daemons.value.filter(d => d.daemon_online).length)
@@ -301,6 +315,7 @@ onMounted(() => {
   connect()
   send({ type: 'list_sessions' })
   send({ type: 'list_daemons' })
+  fetchCostSummary()
 
   onEvent('daemon_list', (msg: any) => {
     daemons.value = (msg.daemons || []).map((d: any) => ({ ...d }))
