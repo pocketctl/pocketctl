@@ -3,7 +3,7 @@
 - [x] 1.1 `relay/src/db.ts`: 新增 `getRecentEvents(pool, sessionId, limit)` —— `SELECT id, session_id, event_type, payload, created_at FROM events WHERE session_id = $1 ORDER BY id DESC LIMIT $2`
 - [x] 1.2 `relay/src/db.ts`: 新增 `getEventsBefore(pool, sessionId, cursor, limit)` —— `WHERE session_id = $1 AND id < $2 ORDER BY id DESC LIMIT $3`
 - [x] 1.3 确认 events 表 `(session_id, id)` 复合索引存在；若无，加 migration `CREATE INDEX IF NOT EXISTS idx_events_session_id ON events(session_id, id)`（支持 `id < cursor DESC LIMIT N` 快速）
-- [ ] 1.4 单元测试：getRecentEvents / getEventsBefore / 边界 — 待补（SQL + 编译已验证，单元测试待）
+- [x] 1.4 单元测试：getRecentEvents / getEventsBefore / 边界 — ✓ pagination.test.ts (4 tests)
 
 ## 2. relay handleReplay 方向分流（D1/D2/D7）
 
@@ -41,7 +41,7 @@
 
 - [x] 6.1 `cd relay && npx tsc --noEmit`（relay 类型通过）
 - [x] 6.2 `cd web && npx vue-tsc --noEmit`（web 类型通过）
-- [ ] 6.3 relay 单元测试：handleReplay 方向分流 — 待补（需 db mock）
+- [x] 6.3 relay 单元测试：handleReplay 方向分流 — ✓ pagination.test.ts (6 tests)
 - [x] 6.4 web 实测 — ✓ 用户实测翻页（反馈跳变 → 修复 overflow-anchor 错锚 + 手动 scrollTop + pageSize 50 + iOS 风格回底按钮 fixed 悬浮）
 - [x] 6.5 回归：旧客户端 `replay { last_seq: 0 }`（无 direction）→ relay forward 全量（代码保证：direction 默认 forward）
 - [x] 6.6 回归：实时与 backward 边界无重复 — 架构保证（subscribe 同消息生效，见 D3/D5）
