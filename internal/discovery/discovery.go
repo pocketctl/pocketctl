@@ -22,7 +22,7 @@ var knownAgents = []struct {
 	Package string
 }{
 	{"claude-code", "claude", "@anthropic-ai/claude-code"},
-	{"opencode", "opencode", "opencode"},
+	{"opencode", "opencode", "opencode-ai"},
 	{"codex", "codex", "@openai/codex"},
 }
 
