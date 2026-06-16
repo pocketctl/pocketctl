@@ -34,6 +34,10 @@
         </router-link>
       </div>
 
+      <button class="sidebar-toggle-btn" @click="toggleSidebar" :title="sidebarCollapsed ? '展开侧栏' : '收起侧栏'" :aria-label="sidebarCollapsed ? '展开侧栏' : '收起侧栏'">
+        <svg v-if="!sidebarCollapsed" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M11 19l-7-7 7-7"/><path d="M18 19l-7-7 7-7"/></svg>
+        <svg v-else width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M13 5l7 7-7 7"/><path d="M6 5l7 7-7 7"/></svg>
+      </button>
       <div class="sidebar-footer">
         <div class="sidebar-user" @click="$router.push('/settings')">
           <div class="user-avatar">{{ userInitial }}</div>
@@ -42,9 +46,6 @@
             <div class="user-plan">免费版</div>
           </div>
         </div>
-        <button class="sidebar-toggle" @click="toggleSidebar" :title="sidebarCollapsed ? '展开侧栏' : '收起侧栏'">
-          <svg :class="{ rotated: sidebarCollapsed }" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M15 18l-6-6 6-6"/></svg>
-        </button>
       </div>
     </nav>
 
@@ -177,29 +178,27 @@ if (typeof window !== 'undefined') {
 .sidebar-collapsed .sidebar .sidebar-link { justify-content: center; padding: 10px; }
 .sidebar-collapsed .sidebar .sidebar-user { justify-content: center; padding: 12px 8px; }
 .sidebar-collapsed .sidebar .sidebar-user .user-avatar { margin: 0; }
-.sidebar-collapsed .sidebar .sidebar-toggle { justify-content: center; }
-.sidebar-collapsed .sidebar .sidebar-toggle svg { transform: rotate(180deg); }
+.sidebar-collapsed .sidebar .sidebar-toggle-btn { justify-content: center; padding: 8px; }
 .sidebar-collapsed .main-content { margin-left: 72px; }
 
-/* Sidebar toggle button */
-.sidebar-toggle {
+/* Sidebar toggle button — 双箭头折叠/展开（对齐设计稿） */
+.sidebar-toggle-btn {
   display: flex;
   align-items: center;
-  justify-content: center;
+  justify-content: flex-end;
   width: 100%;
-  padding: 10px;
-  background: none;
+  padding: 8px 20px;
   border: none;
   border-top: 1px solid var(--sidebar-border);
+  background: transparent;
   color: var(--fg-tertiary);
   cursor: pointer;
-  transition: color 0.15s, background 0.15s;
+  font-family: var(--font-body);
+  transition: background 0.15s, color 0.15s, padding 0.2s ease;
 }
-.sidebar-toggle:hover {
+.sidebar-toggle-btn:hover {
   color: var(--fg);
   background: var(--surface-hover);
 }
-.sidebar-toggle svg {
-  transition: transform 0.2s ease;
-}
+.main-content { transition: margin-left 0.2s ease; }
 </style>

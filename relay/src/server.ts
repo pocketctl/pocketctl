@@ -1,7 +1,7 @@
 import Fastify from 'fastify';
 import fastifyWebsocket from '@fastify/websocket';
 import fastifyCors from '@fastify/cors';
-import { createPool, initDB, parseDBUrl, createUser, getUserByEmail, getUserById, registerDevice, removeDevice, cleanStaleTombstones, upsertDaemonAlias, updateDisplayName, updateEmail, addToIOSWaitlist, revokeToken, isTokenRevoked, cleanRevokedTokens, insertAuditLog, bindTokenToDaemon, updateSessionTitle, isSessionOwnedByUser, getSessionAllEvents } from './db.js';
+import { createPool, initDB, parseDBUrl, createUser, getUserByEmail, getUserById, registerDevice, removeDevice, cleanStaleTombstones, upsertDaemonAlias, deleteDaemon, updateDisplayName, updateEmail, addToIOSWaitlist, revokeToken, isTokenRevoked, cleanRevokedTokens, insertAuditLog, bindTokenToDaemon, updateSessionTitle, isSessionOwnedByUser, getSessionAllEvents, getCostSummary, getCostByDaemon, backfillSessionCost } from './db.js';
 import { Router } from './router.js';
 import { hashPassword, verifyPassword, signAccessToken, signRefreshToken, verifyAccessToken, verifyRefreshToken, verifyAccessTokenWithRevocation } from './auth.js';
 import { notifyUser, sessionStatusPush, daemonOfflinePush } from './push.js';
@@ -47,6 +47,11 @@ async function main() {
   const pool = createPool(parseDBUrl(DB_URL));
   await initDB(pool);
   console.log('Database initialized');
+  // C2: backfill sessions.cost_usd from historical session_status events
+  try {
+    const backfilled = await backfillSessionCost(pool);
+    if (backfilled > 0) console.log(`[cost] backfilled ${backfilled} sessions with cost_usd`);
+  } catch (e) { console.error('[cost] backfill failed:', e); }
 
   const router = new Router(pool);
   const app = Fastify({ logger: false });
@@ -338,6 +343,59 @@ async function main() {
       daemon_id: daemonId,
     }, req.ip);
 
+    return { success: true };
+  });
+
+  // ---- Cost Tracking (C2) ----
+
+  // User-level cost summary: total / today / thisWeek / thisMonth
+  app.get('/api/cost/summary', async (req, reply) => {
+    const authHeader = req.headers.authorization;
+    if (!authHeader?.startsWith('Bearer ')) { reply.code(401); return { error: 'authorization required' }; }
+    const payload = verifyAccessToken(authHeader.slice(7));
+    if (!payload) { reply.code(401); return { error: 'invalid token' }; }
+    return await getCostSummary(pool, payload.userId);
+  });
+
+  // Daemon-level cost: total / today / thisMonth + per-session breakdown
+  app.get('/api/cost/by-daemon/:daemonId', async (req, reply) => {
+    const authHeader = req.headers.authorization;
+    if (!authHeader?.startsWith('Bearer ')) { reply.code(401); return { error: 'authorization required' }; }
+    const payload = verifyAccessToken(authHeader.slice(7));
+    if (!payload) { reply.code(401); return { error: 'invalid token' }; }
+    const { daemonId } = req.params as any;
+    const data = await getCostByDaemon(pool, payload.userId, daemonId);
+    if (!data) { reply.code(404); return { error: 'daemon not found or not owned' }; }
+    return data;
+  });
+
+  // Unregister (delete) a daemon — sessions preserved with daemon_id nulled (C4)
+  app.delete('/api/daemons/:daemonId', async (req, reply) => {
+    const authHeader = req.headers.authorization;
+    if (!authHeader?.startsWith('Bearer ')) { reply.code(401); return { error: 'authorization required' }; }
+    const payload = verifyAccessToken(authHeader.slice(7));
+    if (!payload) { reply.code(401); return { error: 'invalid token' }; }
+    const { daemonId } = req.params as any;
+    const ok = await deleteDaemon(pool, payload.userId, daemonId);
+    if (!ok) { reply.code(404); return { error: 'daemon not found or not owned' }; }
+    // Notify same-user clients to remove the daemon from their list
+    router.broadcastToUser(payload.userId, { type: 'daemon_status', daemon_id: daemonId, status: 'unregistered' });
+    return { success: true };
+  });
+
+  // Upgrade agent on a daemon (C4c): web → relay → daemon `claude update`. Async, result via upgrade_result event.
+  app.post('/api/daemons/:daemonId/upgrade-agent', async (req, reply) => {
+    const authHeader = req.headers.authorization;
+    if (!authHeader?.startsWith('Bearer ')) { reply.code(401); return { error: 'authorization required' }; }
+    const payload = verifyAccessToken(authHeader.slice(7));
+    if (!payload) { reply.code(401); return { error: 'invalid token' }; }
+    const { daemonId } = req.params as any;
+    const { agent } = (req.body as any) || {};
+    const result = await router.handleUpgrade(daemonId, payload.userId, agent);
+    if (!result.success) {
+      reply.code(result.error === 'forbidden' ? 403 : 400);
+      return { error: result.error || 'failed' };
+    }
     return { success: true };
   });
 

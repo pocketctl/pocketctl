@@ -12,8 +12,13 @@
         <span :class="['status-dot', { online: isDaemonOnline }]" style="width:6px;height:6px;"></span>
         <span style="font-size:11px;color:var(--fg-tertiary);">{{ isDaemonOnline ? '在线' : '离线' }} · {{ statusSubtext }}</span>
       </div>
+      <div v-if="hostFilter" class="host-filter-chip">
+        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="2" width="20" height="20" rx="3"/><path d="M7 2v20M17 2v20M2 12h20"/></svg>
+        <span class="hfc-name">{{ daemonName }}</span>
+        <button class="hfc-clear" @click="clearHostFilter" title="显示全部主机会话">✕</button>
+      </div>
       <div class="session-list">
-        <div v-for="s in allSessions" :key="s.session_id"
+        <div v-for="s in visibleSessions" :key="s.session_id"
           :class="['session-list-item', { active: s.session_id === sessionId, 'pending-delete': (s as any).__pendingDelete }]"
           @click="!(s as any).__pendingDelete && $router.push(`/session/${s.session_id}`)">
           <span :class="['status-dot', s.statusEffective || s.status]" style="width:7px;height:7px;"></span>
@@ -110,19 +115,29 @@
 
           <!-- Error message -->
           <div v-else-if="msg.type === 'error'" class="msg msg-error">{{ msg.content || msg.error }}</div>
+
+          <!-- Command execution receipt -->
+          <CommandReceiptCard v-else-if="msg.type === 'command_receipt'" :command="msg.command" :status="msg.receiptStatus" :message="msg.message" />
         </template>
 
-        <!-- Scroll to bottom -->
-        <button v-if="!autoScroll" class="scroll-to-bottom" @click="scrollToBottom">↓</button>
+        <!-- Scroll to bottom (iOS-style floating button; always visible when there are messages) -->
+        <button v-if="messages.length > 0" class="scroll-to-bottom" :class="{ 'at-bottom': autoScroll }" title="回到底部" @click="scrollToBottom">↓</button>
       </div>
 
       <!-- Chat Input -->
       <div class="chat-input-area" :class="{ ended: !canInput }">
         <template v-if="canInput">
           <div class="chat-input-wrap">
-            <input type="text" v-model="messageInput" :placeholder="isDaemonSession && isTerminal ? '继续会话（将恢复历史上下文）...' : '发送消息...'" @keydown.enter="sendMessage" :disabled="isDisconnected" ref="inputEl" />
+            <CommandPopover
+              v-if="showPopover"
+              :commands="filteredCommands"
+              :active-index="selectedIndex"
+              @select="applyCommand"
+              @hover="selectedIndex = $event"
+            />
+            <input type="text" v-model="messageInput" :placeholder="isPendingSession ? '会话创建中…' : (isDaemonSession && isTerminal ? '继续会话（将恢复历史上下文）...' : '发送消息...')" @keydown="onInputKeydown" :disabled="isDisconnected || isPendingSession || isLoading" ref="inputEl" />
           </div>
-          <button class="send-btn" @click="sendMessage" :disabled="isDisconnected || !messageInput.trim()">
+          <button class="send-btn" @click="sendMessage" :disabled="isDisconnected || isPendingSession || isLoading || !messageInput.trim()">
             <svg viewBox="0 0 24 24"><path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z"/></svg>
           </button>
         </template>
@@ -139,7 +154,10 @@ import { useWebSocket } from '../composables/useWebSocket'
 import { formatRelativeTime } from '../composables/useRelativeTime'
 import MarkdownRenderer from '../components/MarkdownRenderer.vue'
 import SessionActions from '../components/SessionActions.vue'
+import CommandPopover from '../components/CommandPopover.vue'
+import CommandReceiptCard from '../components/CommandReceiptCard.vue'
 import { useSessionRename } from '../composables/useSessionRename'
+import type { CommandItem } from '../composables/useWebSocket'
 
 const { renamingId, renameInput, startRename, commitRename, cancelRename } = useSessionRename()
 
@@ -151,6 +169,17 @@ const sessionId = computed(() => route.params.id as string)
 const messages = ref<any[]>([])
 const allSessions = ref<any[]>([])
 const messageInput = ref('')
+const commandsCache = ref<CommandItem[]>([])
+const replayReqId = ref(0)
+const isLoading = ref(false)
+// session-history-pagination: backward pagination state
+const pageSize = computed(() => 50)  // session-history-pagination: 一次加载 50 条（平衡首屏/翻页性能）
+const loadedMinId = ref(0)      // oldest loaded event id (backward cursor)
+const isLoadingBackward = ref(false)  // a pagination (scroll-up) request in flight
+const hasMore = ref(false)      // relay signaled older events exist
+const isPendingSession = computed(() => sessionId.value.startsWith('pending-'))
+const selectedIndex = ref(0)
+const popoverDismissed = ref(false)
 const status = ref('running')
 const exitReason = ref('')
 const exitedAt = ref('')
@@ -159,6 +188,11 @@ const copied = ref(false)
 const messagesEl = ref<HTMLDivElement | null>(null)
 const inputEl = ref<HTMLInputElement | null>(null)
 const daemons = ref<Record<string, any>>({})
+const hostFilter = computed(() => (route.query.host as string) || '')
+const visibleSessions = computed(() => {
+  if (!hostFilter.value) return allSessions.value
+  return allSessions.value.filter((s: any) => s.daemon_id === hostFilter.value)
+})
 
 const statusClass = computed(() => {
   const map: Record<string, string> = { running: 'running', busy: 'running', idle: 'running', completed: '', error: '', killed: '', disconnected: '', exited: '' }
@@ -186,9 +220,18 @@ const isDaemonSession = computed(() => {
 const canInput = computed(() => !isDisconnected.value && (!isTerminal.value || isDaemonSession.value))
 
 const daemonName = computed(() => {
+  if (hostFilter.value) {
+    const d = daemons.value[hostFilter.value]
+    return d?.daemon_alias || d?.hostname || hostFilter.value.slice(0, 8)
+  }
   const s = allSessions.value.find(s => s.session_id === sessionId.value)
   return s?.daemon_alias || s?.hostname || s?.daemon_id?.slice(0, 8) || '未知'
 })
+function clearHostFilter() {
+  const q = { ...route.query }
+  delete q.host
+  router.replace({ query: q })
+}
 
 const sessionTitle = computed(() => {
   const s = allSessions.value.find(s => s.session_id === sessionId.value)
@@ -228,6 +271,7 @@ function cleanContent(text: string): string {
     .replace(/<command-name>.*?<\/command-name>\s*/gs, '')
     .replace(/<command-message>.*?<\/command-message>\s*/gs, '')
     .replace(/<command-args>.*?<\/command-args>\s*/gs, '')
+    .replace(/<local-command-caveat>.*?<\/local-command-caveat>\s*/gs, '')
     .replace(/<local-command-stdout>(.*?)<\/local-command-stdout>/gs, '$1')
     .replace(/<local-command-stderr>(.*?)<\/local-command-stderr>/gs, '$1')
     .replace(/<[^>]+>/g, '')
@@ -267,6 +311,12 @@ function onMessagesScroll() {
   if (!messagesEl.value) return
   const { scrollTop, scrollHeight, clientHeight } = messagesEl.value
   autoScroll.value = scrollHeight - scrollTop - clientHeight < 60
+  // session-history-pagination: scrolled to top → fetch older page (backward)
+  if (scrollTop < 60 && hasMore.value && !isLoadingBackward.value && !isLoading.value && loadedMinId.value > 0) {
+    isLoadingBackward.value = true
+    replayReqId.value++
+    send({ type: 'replay', session_id: sessionId.value, direction: 'backward', last_seq: loadedMinId.value, limit: pageSize.value, req_id: replayReqId.value })
+  }
 }
 
 function focusResumeInput() { if (inputEl.value) { inputEl.value.focus() } }
@@ -274,25 +324,72 @@ function focusResumeInput() { if (inputEl.value) { inputEl.value.focus() } }
 function sendMessage() {
   const text = messageInput.value.trim()
   if (!text || isDisconnected.value) return
+  if (isPendingSession.value) return // D3: pending-id 窗口期不发命令（--resume pending-xxx 必失败）
   send({ type: 'user_message', session_id: sessionId.value, content: text })
   messageInput.value = ''
 }
 
+// Slash command autocompletion
+const filteredCommands = computed(() => {
+  const input = messageInput.value
+  if (!input.startsWith('/')) return []
+  const prefix = input.slice(1).toLowerCase()
+  const pool = commandsCache.value
+  if (prefix === '') return pool.slice(0, 50)
+  return pool.filter(c => c.name.toLowerCase().startsWith(prefix)).slice(0, 50)
+})
+const showPopover = computed(() => !popoverDismissed.value && filteredCommands.value.length > 0)
+
+// Reset selection/dismissal whenever the input changes
+watch(messageInput, () => { selectedIndex.value = 0; popoverDismissed.value = false })
+
+function onInputKeydown(e: KeyboardEvent) {
+  if (showPopover.value) {
+    if (e.key === 'ArrowDown') {
+      e.preventDefault()
+      selectedIndex.value = (selectedIndex.value + 1) % filteredCommands.value.length
+      return
+    }
+    if (e.key === 'ArrowUp') {
+      e.preventDefault()
+      selectedIndex.value = (selectedIndex.value - 1 + filteredCommands.value.length) % filteredCommands.value.length
+      return
+    }
+    if (e.key === 'Tab' || e.key === 'Enter') {
+      e.preventDefault()
+      applyCommand(filteredCommands.value[selectedIndex.value])
+      return
+    }
+    if (e.key === 'Escape') {
+      e.preventDefault()
+      popoverDismissed.value = true
+      return
+    }
+  } else if (e.key === 'Enter') {
+    e.preventDefault()
+    sendMessage()
+  }
+}
+
+function applyCommand(item: CommandItem) {
+  if (!item) return
+  messageInput.value = '/' + item.name + ' '
+  popoverDismissed.value = true
+  nextTick(() => { inputEl.value?.focus() })
+}
+
 const msgCounter = { value: 0 }
-const seenEvents = new Set<string>()
 function nextId(prefix: string) { return prefix + (++msgCounter.value) }
 
-// Dedup: skip events we've already seen (by content hash)
-function isDuplicate(type: string, text: string): boolean {
-  const key = type + ':' + text.slice(0, 80)
-  if (seenEvents.has(key)) return true
-  seenEvents.add(key)
-  // Keep set bounded
-  if (seenEvents.size > 500) {
-    const arr = [...seenEvents]; seenEvents.clear()
-    arr.slice(-200).forEach(k => seenEvents.add(k))
-  }
-  return false
+// Dedup: only skip an event if it's identical to the immediately preceding one
+// (guards against relay batch re-send / reconnect). We intentionally do NOT dedup
+// by content globally — claude -p's synthetic command replies (e.g. "No response
+// requested.", "/model isn't available...") share text across history and new
+// commands, so a global Set would wrongly swallow a new command's reply that
+// matches a historical one.
+function isDuplicate(type: string, text: string, target = messages.value): boolean {
+  const last = target[target.length - 1]
+  return !!last && last.type === type && (last.content || '') === text
 }
 
 // Format tool input for display (matches iOS app logic)
@@ -322,21 +419,21 @@ function formatToolInput(tool: string, input: any): string {
   return ''
 }
 
-function processEvent(evt: any) {
+function processEvent(evt: any, target: any[] = messages.value) {
   const type = evt.type || evt.event_type
   if (type === 'user_text') {
     const text = evt.text || evt.content || evt.payload?.text || evt.payload?.content || ''
-    if (text && !isDuplicate('user_text', text)) messages.value.push({ id: nextId('u'), type: 'user_text', role: 'user', content: text })
+    if (text && !isDuplicate('user_text', text, target)) target.push({ id: nextId('u'), type: 'user_text', role: 'user', content: text })
   } else if (type === 'agent_text') {
     const content = evt.text || evt.content || evt.payload?.text || evt.payload?.content || ''
-    if (!content || isDuplicate('agent_text', content)) return
+    if (!content || isDuplicate('agent_text', content, target)) return
     const streaming = evt.streaming ?? evt.payload?.streaming ?? false
-    const last = messages.value[messages.value.length - 1]
+    const last = target[target.length - 1]
     if (last && last.type === 'agent_text' && last.streaming && !content.startsWith('\n')) {
       last.content += content
       if (!streaming) last.streaming = false
     } else {
-      messages.value.push({ id: nextId('a'), type: 'agent_text', role: 'agent', content, streaming })
+      target.push({ id: nextId('a'), type: 'agent_text', role: 'agent', content, streaming })
     }
   } else if (type === 'tool_call') {
     const callId = evt.call_id || evt.payload?.call_id
@@ -345,7 +442,7 @@ function processEvent(evt: any) {
     const input = evt.input || evt.payload?.input
     const inputDesc = formatToolInput(tool, input)
     // Always create new tool_call message (matches iOS app)
-    messages.value.push({
+    target.push({
       id: nextId('t'), type: 'tool_call', call_id: callId,
       tool, input, inputDesc,
       output: null, status: 'running',
@@ -357,21 +454,27 @@ function processEvent(evt: any) {
     if (!callId) return
     // Find last matching tool_call (matches iOS app lastIndex logic)
     let idx = -1
-    for (let i = messages.value.length - 1; i >= 0; i--) {
-      if (messages.value[i].type === 'tool_call' && messages.value[i].call_id === callId) {
+    for (let i = target.length - 1; i >= 0; i--) {
+      if (target[i].type === 'tool_call' && target[i].call_id === callId) {
         idx = i
         break
       }
     }
     if (idx >= 0) {
-      if (output) messages.value[idx].output = output
-      messages.value[idx].status = 'completed'
+      if (output) target[idx].output = output
+      target[idx].status = 'completed'
     }
   } else if (type === 'session_status') {
     const s = evt.status || evt.payload?.status
     if (s) status.value = s
     if (evt.exit_reason || evt.payload?.exit_reason) exitReason.value = evt.exit_reason || evt.payload.exit_reason
     if (evt.exited_at || evt.payload?.exited_at) exitedAt.value = evt.exited_at || evt.payload.exited_at
+  } else if (type === 'command_receipt') {
+    target.push({
+      id: nextId('r'), type: 'command_receipt',
+      command: evt.command || '', receiptStatus: evt.receipt_status || 'success',
+      message: evt.message || '',
+    })
   }
 }
 
@@ -382,7 +485,14 @@ watch(sessionId, (newId, oldId) => {
     status.value = 'running'
     exitReason.value = ''
     exitedAt.value = ''
-    send({ type: 'replay', session_id: newId, last_seq: 0 })
+    commandsCache.value = []
+    replayReqId.value++
+    isLoading.value = true
+    loadedMinId.value = 0
+    isLoadingBackward.value = false
+    hasMore.value = false
+    send({ type: 'replay', session_id: newId, direction: 'backward', limit: pageSize.value, req_id: replayReqId.value })
+    send({ type: 'list_commands', session_id: newId })
   }
 })
 
@@ -391,16 +501,73 @@ const cleanups: (() => void)[] = []
 onMounted(() => {
   connect()
   send({ type: 'list_sessions' })
-  send({ type: 'replay', session_id: sessionId.value, last_seq: 0 })
+  send({ type: 'list_daemons' })
+  replayReqId.value++
+  isLoading.value = true
+  loadedMinId.value = 0
+  isLoadingBackward.value = false
+  hasMore.value = false
+  send({ type: 'replay', session_id: sessionId.value, direction: 'backward', limit: pageSize.value, req_id: replayReqId.value })
+  send({ type: 'list_commands', session_id: sessionId.value })
 
-  cleanups.push(onEvent('session_list', (msg: any) => { allSessions.value = msg.sessions || [] }))
+  cleanups.push(onEvent('session_list', (msg: any) => {
+    allSessions.value = msg.sessions || []
+    // 从主机"查看全部"跳来（带 host query + default 哨兵）→ 自动落到该主机首个会话
+    if (hostFilter.value && sessionId.value === 'default') {
+      const first = allSessions.value.find((s: any) => s.daemon_id === hostFilter.value)
+      if (first) router.replace({ path: `/session/${first.session_id}`, query: { host: hostFilter.value } })
+    }
+  }))
+  cleanups.push(onEvent('daemon_list', (msg: any) => {
+    const map: Record<string, any> = {}
+    for (const d of (msg.daemons || [])) map[d.daemon_id] = d
+    daemons.value = map
+  }))
+  cleanups.push(onEvent('command_list', (msg: any) => {
+    if (msg.session_id !== sessionId.value) return // discard stale responses from other sessions
+    commandsCache.value = msg.commands || []
+  }))
+  cleanups.push(onEvent('command_receipt', (msg: any) => {
+    if (msg.session_id !== sessionId.value) return
+    processEvent(msg)
+    nextTick(scrollToBottom)
+  }))
 
   cleanups.push(onEvent('replay_batch', (msg: any) => {
     if (msg.session_id !== sessionId.value) return
-    for (const evt of msg.events) {
-      processEvent(evt)
+    if (msg.req_id !== undefined && msg.req_id !== replayReqId.value) return // D4: stale batch
+    const isBackward = msg.direction === 'backward'
+    // backward batches arrive in id DESC; reverse to ASC for chronological render/prepend
+    const evts = isBackward ? [...msg.events].reverse() : msg.events
+    if (isLoadingBackward.value && isBackward) {
+      // pagination: build page into a temp array, prepend in ONE shot, then manually
+      // restore scrollTop so the viewport stays on the exact same content.
+      // overflow-anchor is DISABLED (CSS) because it mis-anchors to the newly prepended
+      // top element and yanks the viewport to the oldest record. Manual restore is precise.
+      const oldScrollHeight = messagesEl.value?.scrollHeight || 0
+      const oldScrollTop = messagesEl.value?.scrollTop || 0
+      const tempMsgs: any[] = []
+      for (const evt of evts) processEvent(evt, tempMsgs)
+      if (tempMsgs.length) messages.value = [...tempMsgs, ...messages.value]
+      nextTick(() => {
+        if (!messagesEl.value) return
+        const delta = messagesEl.value.scrollHeight - oldScrollHeight
+        messagesEl.value.scrollTop = oldScrollTop + delta
+      })
+    } else {
+      // initial load (first backward page, or legacy forward full-load): render + scroll bottom
+      for (const evt of evts) processEvent(evt)
+      nextTick(scrollToBottom)
     }
-    nextTick(scrollToBottom)
+  }))
+  cleanups.push(onEvent('replay_end', (msg: any) => {
+    if (msg.session_id !== sessionId.value) return
+    if (msg.req_id !== undefined && msg.req_id !== replayReqId.value) return
+    isLoading.value = false
+    isLoadingBackward.value = false
+    if (msg.has_more !== undefined) hasMore.value = !!msg.has_more
+    // backward: last_seq is the oldest id of the returned page → next page cursor
+    if (msg.last_seq && (!loadedMinId.value || msg.last_seq < loadedMinId.value)) loadedMinId.value = msg.last_seq
   }))
 
   cleanups.push(onEvent('user_text', (msg: any) => {
@@ -441,7 +608,9 @@ onMounted(() => {
       router.replace(`/session/${msg.session_id}`)
       // 清空旧消息，重新拉取真实 ID 的历史
       messages.value = []
-      send({ type: 'replay', session_id: msg.session_id, last_seq: 0 })
+      replayReqId.value++
+      isLoading.value = true
+      send({ type: 'replay', session_id: msg.session_id, direction: 'backward', limit: pageSize.value, req_id: replayReqId.value })
     }
   }))
 
@@ -489,6 +658,10 @@ onUnmounted(() => {
 .session-panel { width: 300px; background: var(--sidebar-bg); border-right: 1px solid var(--sidebar-border); display: flex; flex-direction: column; flex-shrink: 0; transition: background var(--transition), border-color var(--transition); }
 .session-panel-header { padding: 16px; border-bottom: 1px solid var(--sidebar-border); display: flex; align-items: center; justify-content: space-between; }
 .session-panel-header h3 { font-size: 14px; font-weight: 600; color: var(--fg); }
+.host-filter-chip { margin: 8px; padding: 6px 10px; background: var(--accent-muted); border: 1px solid var(--accent); border-radius: var(--radius-full); display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--accent); }
+.host-filter-chip .hfc-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; }
+.host-filter-chip .hfc-clear { flex-shrink: 0; width: 16px; height: 16px; border: none; background: none; color: var(--accent); cursor: pointer; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-size: 12px; line-height: 1; opacity: 0.7; }
+.host-filter-chip .hfc-clear:hover { opacity: 1; background: rgba(88,166,255,0.2); }
 .session-list { flex: 1; overflow-y: auto; padding: 8px; }
 .session-list-item { display: flex; align-items: center; gap: 10px; padding: 10px 12px; border-radius: var(--radius-md); cursor: pointer; transition: background 0.1s, opacity 0.25s ease; margin-bottom: 2px; }
 .session-list-item:hover { background: var(--surface-hover); }
@@ -517,8 +690,12 @@ onUnmounted(() => {
 .copy-btn:hover { color: var(--accent); background: var(--accent-muted); }
 
 /* Messages */
-.chat-messages { flex: 1; overflow-y: auto; padding: 20px; display: flex; flex-direction: column; gap: 16px; position: relative; }
-.scroll-to-bottom { position: absolute; bottom: 16px; right: 24px; width: 36px; height: 36px; border-radius: 50%; border: 1px solid var(--border); background: var(--surface); color: var(--fg); font-size: 16px; cursor: pointer; display: flex; align-items: center; justify-content: center; box-shadow: var(--shadow-sm); transition: background 0.15s; z-index: 10; }
+.chat-messages { flex: 1; overflow-y: auto; padding: 20px; display: flex; flex-direction: column; gap: 16px; position: relative; overflow-anchor: none; }
+.scroll-to-bottom { position: fixed; bottom: 88px; right: 24px; width: 44px; height: 44px; border-radius: 50%; border: 1px solid var(--border); background: var(--surface); color: var(--fg); font-size: 20px; cursor: pointer; display: flex; align-items: center; justify-content: center; box-shadow: 0 4px 14px rgba(0,0,0,0.35); transition: transform 0.15s, background 0.15s, opacity 0.2s; z-index: 100; }
+.scroll-to-bottom:hover { background: var(--surface-hover); transform: scale(1.08); }
+.scroll-to-bottom:active { transform: scale(0.96); }
+.scroll-to-bottom.at-bottom { opacity: 0.35; }
+.scroll-to-bottom.at-bottom:hover { opacity: 1; }
 .scroll-to-bottom:hover { background: var(--surface-hover); }
 
 /* Messages — matches design spec exactly */
@@ -671,7 +848,7 @@ onUnmounted(() => {
 .chat-input-area { border-top: 1px solid var(--border); padding: 12px 20px; background: var(--surface); display: flex; gap: 10px; align-items: center; transition: background var(--transition), border-color var(--transition); }
 .chat-input-area.ended { display: flex; align-items: center; justify-content: center; padding: 14px 20px; }
 .ended-text { color: var(--fg-tertiary); font-size: 13px; }
-.chat-input-wrap { flex: 1; display: flex; align-items: center; background: var(--bg); border: 1px solid var(--border); border-radius: var(--radius-xl); padding: 0 16px; min-height: 42px; transition: border-color 0.15s, box-shadow 0.15s; }
+.chat-input-wrap { position: relative; flex: 1; display: flex; align-items: center; background: var(--bg); border: 1px solid var(--border); border-radius: var(--radius-xl); padding: 0 16px; min-height: 42px; transition: border-color 0.15s, box-shadow 0.15s; }
 .chat-input-wrap:focus-within { border-color: var(--border-focus); box-shadow: 0 0 0 3px var(--accent-muted); }
 .chat-input-wrap input { flex: 1; background: none; border: none; color: var(--fg); font-size: 14px; font-family: var(--font-body); outline: none; padding: 8px 0; }
 .chat-input-wrap input::placeholder { color: var(--fg-tertiary); }

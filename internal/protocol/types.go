@@ -36,25 +36,43 @@ type DaemonEvent struct {
 	Source           string          `json:"source,omitempty"`
 	ExitReason       string          `json:"exit_reason,omitempty"`
 	LastActivityAt   string          `json:"last_activity_at,omitempty"`
-	AgentID          string          `json:"agent_id,omitempty"`       // sub-agent identifier (e.g. "afa8314e6e3f6e552")
-	SubAgentDesc     string          `json:"subagent_desc,omitempty"`  // sub-agent task description
-	SubAgentType     string          `json:"subagent_type,omitempty"`  // sub-agent type (Explore, general-purpose, etc.)
+	AgentID          string          `json:"agent_id,omitempty"`        // sub-agent identifier (e.g. "afa8314e6e3f6e552)
+	Agent            string          `json:"agent,omitempty"`           // agent type for upgrade_result (claude-code, codex)
+	SubAgentDesc     string          `json:"subagent_desc,omitempty"`   // sub-agent task description
+	SubAgentType     string          `json:"subagent_type,omitempty"`   // sub-agent type (Explore, general-purpose, etc.)
 	UserMessage      string          `json:"user_message,omitempty"`   // for generate_title_request
 	AssistantMessage string          `json:"assistant_message,omitempty"` // for generate_title_request
 	Reason           string          `json:"reason,omitempty"`          // failure reason code (no_cli, bad_cwd, start_fail, timeout, daemon_offline)
+	Commands         []CommandItem   `json:"commands,omitempty"`        // for command_list
+	Command          string          `json:"command,omitempty"`         // for command_receipt (e.g. "/compact")
+	ReceiptStatus    string          `json:"receipt_status,omitempty"`  // for command_receipt: success/failed/unavailable
+	Message          string          `json:"message,omitempty"`         // for command_receipt message
+}
+
+// CommandItem represents a slash command or skill available in a session,
+// surfaced to the web client for input autocompletion.
+type CommandItem struct {
+	Name        string `json:"name"`                  // trigger name, e.g. "clear", "pocket-release", "codex:rescue"
+	Source      string `json:"source"`                // builtin | project | user | plugin
+	Kind        string `json:"kind"`                  // command | skill
+	Description string `json:"description,omitempty"`
+	ArgHint     string `json:"arg_hint,omitempty"`    // frontmatter argument-hint (mostly commands)
+	Namespace   string `json:"namespace,omitempty"`   // plugin name, only for source=plugin
 }
 
 // Control messages
 type RegisterMessage struct {
-	Type      string   `json:"type"`
-	DaemonID  string   `json:"daemon_id"`
-	Hostname  string   `json:"hostname"`
-	Agents    []string `json:"agents"`
-	OS        string   `json:"os"`
-	IP        string   `json:"ip"`
-	Arch      string   `json:"arch,omitempty"`
-	Version   string   `json:"version,omitempty"`
-	StartedAt int64    `json:"started_at,omitempty"`
+	Type          string            `json:"type"`
+	DaemonID      string            `json:"daemon_id"`
+	Hostname      string            `json:"hostname"`
+	Agents        []string          `json:"agents"`
+	AgentVersions map[string]string `json:"agent_versions,omitempty"`
+	AgentLatests  map[string]string `json:"agent_latests,omitempty"`
+	OS            string            `json:"os"`
+	IP            string            `json:"ip"`
+	Arch          string            `json:"arch,omitempty"`
+	Version       string            `json:"version,omitempty"`
+	StartedAt     int64             `json:"started_at,omitempty"`
 }
 
 type RegisterAckMessage struct {

@@ -12,61 +12,78 @@
       </button>
     </div>
 
-    <!-- Hosts Layout -->
-    <div class="hosts-layout">
-      <!-- Left: List Panel -->
-      <div class="hosts-list-panel">
-        <div class="hosts-list-head">
-          <div class="hosts-toolbar">
-            <div class="host-filter">
-              <button :class="{ active: filter === 'all' }" @click="filter = 'all'">全部<span class="count">{{ daemons.length }}</span></button>
-              <button :class="{ active: filter === 'online' }" @click="filter = 'online'">在线<span class="count">{{ onlineCount }}</span></button>
-              <button :class="{ active: filter === 'offline' }" @click="filter = 'offline'">离线<span class="count">{{ offlineCount }}</span></button>
-            </div>
-          </div>
-          <div class="host-search">
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/></svg>
-            <input type="text" v-model="searchQuery" placeholder="搜索名称、IP 或系统…" />
-          </div>
-        </div>
+    <!-- 全局 Token 概览条（占位，待 C2/C3 接真实数据） -->
+    <div class="token-global-strip">
+      <div class="tg-item"><span class="tg-num">{{ formatCost(tokenGlobal?.total) }}</span><span class="tg-label">总消耗</span></div>
+      <div class="tg-sep"></div>
+      <div class="tg-item"><span class="tg-num">{{ formatCost(tokenGlobal?.today) }}</span><span class="tg-label">今日</span></div>
+      <div class="tg-sep"></div>
+      <div class="tg-item"><span class="tg-num">{{ formatCost(tokenGlobal?.thisWeek) }}</span><span class="tg-label">本周</span></div>
+      <div class="tg-sep"></div>
+      <div class="tg-item"><span class="tg-num">{{ formatCost(tokenGlobal?.thisMonth) }}</span><span class="tg-label">本月</span></div>
+    </div>
 
-        <div class="host-list" id="host-list">
+    <!-- 筛选 + 搜索 -->
+    <div class="host-controls">
+      <div class="host-filter" role="tablist" aria-label="按状态筛选主机">
+        <button :class="{ active: filter === 'all' }" @click="filter = 'all'">全部<span class="count">{{ daemons.length }}</span></button>
+        <button :class="{ active: filter === 'online' }" @click="filter = 'online'">在线<span class="count">{{ onlineCount }}</span></button>
+        <button :class="{ active: filter === 'offline' }" @click="filter = 'offline'">离线<span class="count">{{ offlineCount }}</span></button>
+      </div>
+      <div class="host-search">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/></svg>
+        <input type="text" v-model="searchQuery" placeholder="搜索名称、IP 或系统…" aria-label="搜索主机" />
+      </div>
+    </div>
+
+    <!-- 主机布局（单栏：卡片网格 ↔ 胶囊横向 + 全宽详情） -->
+    <div class="hosts-layout" :class="{ 'hosts-selecting': !!selectedId }">
+      <div class="hosts-grid-wrap">
+        <div class="host-cards-grid" id="host-cards">
           <div v-for="d in filteredDaemons" :key="d.daemon_id"
-            :class="['host-item', { selected: selectedId === d.daemon_id }]"
+            :class="['host-card', { selected: selectedId === d.daemon_id }]"
             :data-id="d.daemon_id"
             tabindex="0"
+            role="button"
+            :aria-label="(d.daemon_alias || d.hostname || d.daemon_id?.slice(0,8)) + ' ' + statusLabel(d)"
             @click="selectHost(d.daemon_id)"
-            @keydown.enter="selectHost(d.daemon_id)">
-            <span :class="['status-dot', d.daemon_online ? 'online' : 'offline', { reconnecting: d.status === 'reconnecting' }]"></span>
-            <div class="hi-icon" v-html="hostIcon(d)"></div>
-            <div class="hi-info">
-              <div class="hi-name">{{ d.daemon_alias || d.hostname || d.daemon_id?.slice(0, 8) }}</div>
-              <div class="hi-meta">{{ d.ip && d.ip !== 'unknown' ? d.ip : '—' }} · {{ d.os || 'unknown' }}</div>
+            @keydown.enter.prevent="selectHost(d.daemon_id)">
+            <div class="hc-head">
+              <span :class="['status-dot', d.daemon_online ? 'online' : 'offline', { reconnecting: d.status === 'reconnecting' }]"></span>
+              <span class="hc-icon" v-html="hostIcon(d, 18)"></span>
+              <div class="hc-info">
+                <div class="hc-name">{{ d.daemon_alias || d.hostname || d.daemon_id?.slice(0, 8) }}</div>
+                <div class="hc-meta">{{ d.ip && d.ip !== 'unknown' ? d.ip : '—' }} · {{ d.os || 'unknown' }}</div>
+              </div>
             </div>
-            <div class="hi-right">
-              <span class="hi-sessions">{{ d.active_sessions || 0 }}</span>
-              <span class="hi-sess-label">活跃会话</span>
+            <div class="hc-foot">
+              <div><span class="hc-sessions">{{ d.active_sessions || 0 }}</span> <span class="hc-sess-label">活跃会话</span></div>
+              <span :class="['status-pill', 'mini', statusPillClass(d)]" :style="statusPillStyle(d)">{{ statusLabel(d) }}</span>
             </div>
-            <span class="ss-more-btn" title="更多操作" @click.stop="openMenu($event, d)">
+            <button class="ss-more-btn" type="button" title="更多操作" aria-label="更多操作" @click.stop="openMenu($event, d)">
               <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><circle cx="12" cy="5" r="1.8"/><circle cx="12" cy="12" r="1.8"/><circle cx="12" cy="19" r="1.8"/></svg>
-            </span>
+            </button>
           </div>
-          <div v-if="filteredDaemons.length === 0" class="host-list-empty">没有匹配的主机</div>
+          <div v-if="filteredDaemons.length === 0" class="host-cards-empty">没有匹配的主机</div>
         </div>
+        <button class="hosts-deselect-btn" type="button" title="取消选择，恢复全部卡片" aria-label="取消选择" @click="deselectAll">✕</button>
       </div>
 
-      <!-- Right: Detail Panel -->
-      <div class="host-detail-panel" v-if="selectedDaemon" :class="{ empty: false }">
+      <!-- 详情面板（全宽） -->
+      <div v-if="selectedDaemon" class="host-detail-panel">
         <div class="hd-header">
+          <button class="hd-more-btn" type="button" title="更多操作" aria-label="更多操作" @click.stop="openDetailMenu($event)">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><circle cx="12" cy="5" r="1.8"/><circle cx="12" cy="12" r="1.8"/><circle cx="12" cy="19" r="1.8"/></svg>
+          </button>
           <div class="hd-icon" v-html="hostIcon(selectedDaemon, 28)"></div>
           <div class="hd-headinfo">
             <div class="hd-title">
               {{ selectedDaemon.daemon_alias || selectedDaemon.hostname || selectedDaemon.daemon_id?.slice(0, 8) }}
               <span :class="['status-pill', statusPillClass(selectedDaemon)]" :style="statusPillStyle(selectedDaemon)">
-                <span class="pulse"></span>{{ statusLabel(selectedDaemon) }}
+                <span v-if="selectedDaemon.daemon_online || selectedDaemon.status === 'reconnecting'" class="pulse"></span>{{ statusLabel(selectedDaemon) }}
               </span>
             </div>
-            <div class="hd-sub">{{ selectedDaemon.ip || '—' }} · {{ selectedDaemon.os || 'unknown' }} · {{ selectedDaemon.arch || '—' }}</div>
+            <div class="hd-sub">{{ selectedDaemon.ip && selectedDaemon.ip !== 'unknown' ? selectedDaemon.ip : '—' }} · {{ selectedDaemon.os || 'unknown' }} · {{ selectedDaemon.arch || '—' }}</div>
           </div>
         </div>
 
@@ -85,66 +102,112 @@
             </button>
           </template>
           <template v-else>
-            <button class="btn btn-secondary" @click="reconnectHost(selectedDaemon)">等待重连</button>
+            <button class="btn btn-secondary" @click="reconnectHost(selectedDaemon)" title="等待主机端 daemon 重新连接">等待重连</button>
           </template>
-          <button class="btn btn-secondary" @click="$router.push('/session/default')">查看会话</button>
         </div>
 
-        <!-- Resource Monitoring -->
-        <div class="hd-section">
-          <div class="hd-section-title">{{ selectedDaemon.daemon_online ? '资源占用' : '资源占用（主机离线）' }}</div>
-          <div :class="['resource-row', { offline: !selectedDaemon.daemon_online }]">
-            <span class="r-label">CPU</span>
-            <div class="r-bar"><div :class="['r-fill', resourceClass(selectedDaemon.cpu_pct)]" :style="rFillStyle(selectedDaemon.cpu_pct)"></div></div>
-            <span class="r-val">{{ selectedDaemon.cpu_pct != null ? selectedDaemon.cpu_pct.toFixed(0) + '%' : '—' }}</span>
-          </div>
-          <div :class="['resource-row', { offline: !selectedDaemon.daemon_online }]">
-            <span class="r-label">内存</span>
-            <div class="r-bar"><div :class="['r-fill', resourceClass(selectedDaemon.mem_pct)]" :style="rFillStyle(selectedDaemon.mem_pct)"></div></div>
-            <span class="r-val">{{ selectedDaemon.mem_pct != null ? selectedDaemon.mem_pct.toFixed(0) + '%' : '—' }}</span>
-          </div>
-          <div :class="['resource-row', { offline: !selectedDaemon.daemon_online }]">
-            <span class="r-label">磁盘</span>
-            <div class="r-bar"><div :class="['r-fill', resourceClass(selectedDaemon.disk_pct)]" :style="rFillStyle(selectedDaemon.disk_pct)"></div></div>
-            <span class="r-val">{{ selectedDaemon.disk_pct != null ? selectedDaemon.disk_pct.toFixed(0) + '%' : '—' }}</span>
-          </div>
-        </div>
-
-        <!-- Connection Info Grid -->
-        <div class="hd-section">
-          <div class="hd-section-title">连接信息</div>
-          <div class="conn-grid">
-            <div class="conn-item"><div class="c-label">IP 地址</div><div class="c-val">{{ selectedDaemon.ip || '—' }}</div></div>
-            <div class="conn-item"><div class="c-label">端口</div><div class="c-val">{{ selectedDaemon.port || '—' }}</div></div>
-            <div class="conn-item"><div class="c-label">DAEMON 版本</div><div class="c-val">{{ selectedDaemon.version ? 'v' + selectedDaemon.version : '—' }}</div></div>
-            <div class="conn-item"><div class="c-label">系统</div><div class="c-val">{{ selectedDaemon.os || '—' }}</div></div>
-            <div class="conn-item"><div class="c-label">运行时长</div><div :class="['c-val', { muted: !selectedDaemon.daemon_online }]">{{ selectedDaemon.started_at ? formatUptime(selectedDaemon.started_at) : '—' }}</div></div>
-            <div class="conn-item"><div class="c-label">最后心跳</div><div :class="['c-val', { muted: !selectedDaemon.daemon_online }]">{{ selectedDaemon.last_heartbeat ? formatRelativeTime(selectedDaemon.last_heartbeat) : '—' }}</div></div>
-          </div>
-        </div>
-
-        <!-- Session Summary -->
-        <div class="hd-section">
-          <div class="sess-summary">
-            <div class="ss-block">
-              <span class="ss-num accent">{{ selectedDaemon.active_sessions || 0 }}</span>
-              <span class="ss-label">活跃会话</span>
+        <div class="host-detail-grid">
+          <!-- 资源占用 -->
+          <div class="hd-section">
+            <div class="hd-section-title">{{ selectedDaemon.daemon_online ? '资源占用' : '资源占用（主机离线）' }}</div>
+            <div :class="['resource-row', { offline: !selectedDaemon.daemon_online }]">
+              <span class="r-label">CPU</span>
+              <div class="r-bar"><div :class="['r-fill', resourceClass(selectedDaemon.cpu_pct)]" :style="rFillStyle(selectedDaemon.cpu_pct)"></div></div>
+              <span class="r-val">{{ selectedDaemon.cpu_pct != null ? selectedDaemon.cpu_pct.toFixed(0) + '%' : '—' }}</span>
             </div>
-            <div class="ss-divider"></div>
-            <div class="ss-block">
-              <span class="ss-num">{{ selectedDaemon.total_sessions || 0 }}</span>
-              <span class="ss-label">历史会话</span>
+            <div :class="['resource-row', { offline: !selectedDaemon.daemon_online }]">
+              <span class="r-label">内存</span>
+              <div class="r-bar"><div :class="['r-fill', resourceClass(selectedDaemon.mem_pct)]" :style="rFillStyle(selectedDaemon.mem_pct)"></div></div>
+              <span class="r-val">{{ selectedDaemon.mem_pct != null ? selectedDaemon.mem_pct.toFixed(0) + '%' : '—' }}</span>
             </div>
-            <a class="btn btn-ghost ss-link" @click="$router.push('/session/default')">查看全部 →</a>
+            <div :class="['resource-row', { offline: !selectedDaemon.daemon_online }]">
+              <span class="r-label">磁盘</span>
+              <div class="r-bar"><div :class="['r-fill', resourceClass(selectedDaemon.disk_pct)]" :style="rFillStyle(selectedDaemon.disk_pct)"></div></div>
+              <span class="r-val">{{ selectedDaemon.disk_pct != null ? selectedDaemon.disk_pct.toFixed(0) + '%' : '—' }}</span>
+            </div>
+          </div>
+
+          <!-- 连接信息 -->
+          <div class="hd-section">
+            <div class="hd-section-title">连接信息</div>
+            <div class="conn-grid">
+              <div class="conn-item"><div class="c-label">IP 地址</div><div class="c-val">{{ selectedDaemon.ip && selectedDaemon.ip !== 'unknown' ? selectedDaemon.ip : '—' }}</div></div>
+              <div class="conn-item"><div class="c-label">端口</div><div class="c-val">{{ selectedDaemon.port || '—' }}</div></div>
+              <div class="conn-item"><div class="c-label">DAEMON 版本</div><div class="c-val">{{ selectedDaemon.version ? 'v' + selectedDaemon.version : '—' }}</div></div>
+              <div class="conn-item"><div class="c-label">系统</div><div class="c-val">{{ selectedDaemon.os || '—' }}</div></div>
+              <div class="conn-item"><div class="c-label">运行时长</div><div :class="['c-val', { muted: !selectedDaemon.daemon_online }]">{{ selectedDaemon.started_at ? formatUptime(selectedDaemon.started_at) : '—' }}</div></div>
+              <div class="conn-item"><div class="c-label">最后心跳</div><div :class="['c-val', { muted: !selectedDaemon.daemon_online }]">{{ selectedDaemon.last_heartbeat ? formatRelativeTime(selectedDaemon.last_heartbeat) : '—' }}</div></div>
+            </div>
+          </div>
+
+          <!-- Agent 运行状态（C4b 版本上报 + C4c 升级占位） -->
+          <div class="hd-section">
+            <div class="hd-section-title">Agent 运行状态</div>
+            <template v-if="agentCards(selectedDaemon).length">
+              <div class="agent-card" v-for="(a, i) in agentCards(selectedDaemon)" :key="i">
+                <div :class="['ag-icon', agentIconClass(a)]">{{ agentShort(a) }}</div>
+                <div class="ag-info">
+                  <div class="ag-name">{{ agentName(a) }} <span class="ag-version">{{ agentVersionLabel(a) }}</span></div>
+                  <div class="ag-meta">{{ agentMetaLabel(a) }}</div>
+                </div>
+                <button v-if="selectedDaemon?.daemon_online && !isAgentLatest(a)" class="ag-upgrade-btn" :class="{ upgrading: upgrading === agentName(a) }" :disabled="upgrading === agentName(a)" @click="upgradeAgent(agentName(a))">
+                  {{ upgrading === agentName(a) ? '升级中…' : '升级' }}
+                </button>
+                <span v-else-if="isAgentLatest(a)" class="ag-latest">✓ 最新</span>
+              </div>
+            </template>
+            <div v-else class="agent-card">
+              <div class="ag-icon claude">CC</div>
+              <div class="ag-info">
+                <div class="ag-name">Claude Code <span class="ag-version">版本待上报</span></div>
+                <div class="ag-meta">等待 daemon 上报 Agent 信息</div>
+              </div>
+            </div>
+          </div>
+
+          <!-- Token 消耗（C2/C3 真实数据） -->
+          <div class="hd-section">
+            <div class="hd-section-title">Token 消耗</div>
+            <div class="token-overview">
+              <div class="token-stat"><div class="tk-num">{{ formatCost(daemonCost?.total) }}</div><div class="tk-label">主机总计</div></div>
+              <div class="token-stat"><div class="tk-num accent">{{ formatCost(daemonCost?.today) }}</div><div class="tk-label">今日消耗</div></div>
+              <div class="token-stat"><div class="tk-num">{{ formatCost(daemonCost?.thisMonth) }}</div><div class="tk-label">本月消耗</div></div>
+            </div>
+            <div class="session-token-list">
+              <template v-if="daemonCost?.sessions?.length">
+                <div class="session-token-row" v-for="s in daemonCost.sessions" :key="s.session_id">
+                  <span class="st-title">{{ s.title || s.session_id.slice(0, 8) }}</span>
+                  <span class="st-tokens">{{ formatCost(s.cost_usd) }}</span>
+                </div>
+              </template>
+              <div v-else class="session-token-row"><span class="st-title" style="color:var(--fg-tertiary);">暂无会话消耗记录</span></div>
+            </div>
+          </div>
+
+          <!-- 会话（全宽） -->
+          <div class="hd-section hd-section-full">
+            <div class="hd-section-title">会话</div>
+            <div class="sess-summary">
+              <div class="ss-block">
+                <span class="ss-num accent">{{ selectedDaemon.active_sessions || 0 }}</span>
+                <span class="ss-label">活跃会话</span>
+              </div>
+              <div class="ss-divider"></div>
+              <div class="ss-block">
+                <span class="ss-num">{{ selectedDaemon.total_sessions || 0 }}</span>
+                <span class="ss-label">历史总数</span>
+              </div>
+              <a class="btn btn-ghost ss-link" @click="goSessionWithHost(selectedDaemon)">查看全部 →</a>
+            </div>
           </div>
         </div>
       </div>
 
       <!-- Empty Detail -->
-      <div class="host-detail-panel empty" v-else>
+      <div v-else class="host-detail-panel empty">
         <div class="empty-icon">—</div>
-        <div class="empty-title">从左侧选择一台主机</div>
-        <div class="empty-sub">查看连接信息、资源占用，或执行强制踢下线、重启等操作。</div>
+        <div class="empty-title">请选择一台主机</div>
+        <div class="empty-sub">查看连接信息、资源占用、Agent 版本、Token 消耗，或执行强制踢下线、重启等操作。</div>
       </div>
     </div>
 
@@ -209,7 +272,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted, onUnmounted } from 'vue'
+import { ref, computed, watch, onMounted, onUnmounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { useWebSocket } from '../composables/useWebSocket'
 import { useAuth } from '../composables/useAuth'
@@ -239,9 +302,41 @@ const menuX = ref(0)
 const menuY = ref(0)
 const menuTarget = ref<any>(null)
 
+// C4c: agent upgrade (claude-code) in-flight state
+const upgrading = ref('')
+
+// C3: Token cost data (from C2 backend — cost_usd in USD)
+const tokenGlobal = ref<{ total: number; today: number; thisWeek: number; thisMonth: number } | null>(null)
+const daemonCost = ref<{ total: number; today: number; thisMonth: number; sessions: Array<{ session_id: string; title: string; cost_usd: number }> } | null>(null)
+
+function formatCost(v: number | null | undefined): string {
+  if (v == null) return '—'
+  if (v > 0 && v < 0.01) return '<$0.01'
+  return '$' + v.toFixed(2)
+}
+async function fetchCostSummary() {
+  const origin = getRelayOrigin()
+  try {
+    const r = await fetch(`${origin}/api/cost/summary`, { headers: { Authorization: `Bearer ${accessToken.value}` } })
+    if (r.ok) tokenGlobal.value = await r.json()
+  } catch { /* ignore */ }
+}
+async function fetchCostByDaemon(id: string) {
+  const origin = getRelayOrigin()
+  try {
+    const r = await fetch(`${origin}/api/cost/by-daemon/${id}`, { headers: { Authorization: `Bearer ${accessToken.value}` } })
+    daemonCost.value = r.ok ? await r.json() : null
+  } catch { daemonCost.value = null }
+}
+
 const onlineCount = computed(() => daemons.value.filter(d => d.daemon_online).length)
 const offlineCount = computed(() => daemons.value.filter(d => !d.daemon_online).length)
 const selectedDaemon = computed(() => daemons.value.find(d => d.daemon_id === selectedId.value))
+
+watch(selectedDaemon, (d) => {
+  if (d?.daemon_id) fetchCostByDaemon(d.daemon_id)
+  else daemonCost.value = null
+})
 
 const filteredDaemons = computed(() => {
   let list = daemons.value
@@ -304,6 +399,49 @@ function formatUptime(startedAt: number): string {
   return `${Math.floor(seconds / 86400)}天`
 }
 
+// Agent 字段兼容（字符串数组 / 对象数组）
+function agentCards(d: any): any[] {
+  if (d && Array.isArray(d.agents) && d.agents.length) return d.agents
+  return []
+}
+function agentName(a: any): string { return typeof a === 'string' ? a : (a?.name || a?.type || 'Agent') }
+function agentShort(a: any): string { return /codex/i.test(agentName(a)) ? 'Cx' : 'CC' }
+function agentIconClass(a: any): string { return /codex/i.test(agentName(a)) ? 'codex' : 'claude' }
+function agentVersionLabel(a: any): string {
+  if (typeof a !== 'object' || !a?.version) return '版本待上报'
+  const v = 'v' + a.version
+  if (a.latest && a.version !== a.latest) return v + ' → v' + a.latest
+  return v
+}
+function isAgentLatest(a: any): boolean {
+  return typeof a === 'object' && !!a?.latest && a?.version === a?.latest
+}
+function agentMetaLabel(a: any): string {
+  return typeof a === 'object' && a?.version ? '已安装 · 可用' : '版本待上报'
+}
+async function upgradeAgent(name: string) {
+  if (upgrading.value) return
+  const d = selectedDaemon.value
+  if (!d) return
+  upgrading.value = name
+  try {
+    const origin = getRelayOrigin()
+    const r = await fetch(`${origin}/api/daemons/${d.daemon_id}/upgrade-agent`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${accessToken.value}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ agent: name }),
+    })
+    if (!r.ok) {
+      showToast('升级请求发送失败')
+      upgrading.value = ''
+    }
+    // 成功后等待 upgrade_result 事件反馈（daemon 异步执行升级命令）
+  } catch {
+    showToast('升级请求发送失败')
+    upgrading.value = ''
+  }
+}
+
 function showToast(msg: string, undo?: () => void) {
   if (toastTimer) clearTimeout(toastTimer)
   toast.value = { show: true, msg, undo }
@@ -314,8 +452,18 @@ function showConfirm(opts: { title: string; desc: string; confirmText?: string; 
   confirm.value = { show: true, title: opts.title, desc: opts.desc, confirmText: opts.confirmText || '确认', danger: !!opts.danger, loading: false, action: opts.action }
 }
 
-// Host actions
-function selectHost(id: string) { selectedId.value = id }
+// 卡片 ↔ 胶囊 状态机
+function selectHost(id: string) {
+  selectedId.value = selectedId.value === id ? null : id
+}
+function deselectAll() {
+  if (selectedId.value) selectedId.value = null
+}
+
+function goSessionWithHost(d: any) {
+  // C1-1c: 跳会话列表并选中当前主机
+  router.push({ path: '/session/default', query: { host: d.daemon_id } })
+}
 
 function openMenu(e: MouseEvent, d: any) {
   menuTarget.value = d
@@ -323,6 +471,11 @@ function openMenu(e: MouseEvent, d: any) {
   menuX.value = Math.max(8, btn.right - 188)
   menuY.value = btn.bottom + 6
   menuOpen.value = true
+}
+
+function openDetailMenu(e: MouseEvent) {
+  if (!selectedDaemon.value) return
+  openMenu(e, selectedDaemon.value)
 }
 
 function closeMenu() { menuOpen.value = false }
@@ -380,7 +533,6 @@ function confirmKick(d: any) {
     action: () => {
       d.daemon_online = false; d.cpu_pct = null; d.mem_pct = null; d.disk_pct = null; d.active_sessions = 0
       confirm.value.show = false
-      // REST call
       const origin = getRelayOrigin()
       fetch(`${origin}/api/daemons/${d.daemon_id}/forceKick`, { method: 'POST', headers: { Authorization: `Bearer ${accessToken.value}` } }).catch(() => {})
       showToast(`已踢下线「${d.hostname || d.daemon_id?.slice(0, 8)}」`, () => { Object.assign(d, prev) })
@@ -400,7 +552,13 @@ function confirmUnregister(d: any) {
       const removed = daemons.value.splice(idx, 1)[0]
       if (selectedId.value === d.daemon_id) selectedId.value = daemons.value[0]?.daemon_id || null
       confirm.value.show = false
-      showToast(`已注销「${d.hostname || d.daemon_id?.slice(0, 8)}」`, () => { daemons.value.splice(idx, 0, removed) })
+      const origin = getRelayOrigin()
+      fetch(`${origin}/api/daemons/${d.daemon_id}`, { method: 'DELETE', headers: { Authorization: `Bearer ${accessToken.value}` } })
+        .then((r) => {
+          if (r.ok) showToast(`已注销「${d.hostname || d.daemon_id?.slice(0, 8)}」`)
+          else { daemons.value.splice(idx, 0, removed); showToast('注销失败，请重试') }
+        })
+        .catch(() => { daemons.value.splice(idx, 0, removed); showToast('注销失败，请重试') })
     }
   })
 }
@@ -425,26 +583,39 @@ function getRelayOrigin(): string {
 }
 
 // Global close for menu
-const onDocClick = (e: MouseEvent) => { if (menuOpen.value && !(e.target as HTMLElement).closest('.ss-more-btn')) closeMenu() }
+const onDocClick = (e: MouseEvent) => { if (menuOpen.value && !(e.target as HTMLElement).closest('.ss-more-btn') && !(e.target as HTMLElement).closest('.hd-more-btn')) closeMenu() }
 const onEsc = (e: KeyboardEvent) => { if (e.key === 'Escape') { closeMenu(); confirm.value.show && (confirm.value.show = false) } }
 const onScroll = () => closeMenu()
 
 onMounted(() => {
   connect()
   send({ type: 'list_daemons' })
+  fetchCostSummary()
   document.addEventListener('click', onDocClick)
   document.addEventListener('keydown', onEsc)
   window.addEventListener('scroll', onScroll, true)
   window.addEventListener('resize', onScroll, true)
 
-  cleanups.push(onEvent('daemon_list', (msg: any) => { daemons.value = msg.daemons || [] }))
+  cleanups.push(onEvent('daemon_list', (msg: any) => {
+    daemons.value = msg.daemons || []
+    // 首屏默认选中第一台（匹配设计稿 selectHost(HOSTS[0].id)）
+    if (!selectedId.value && daemons.value.length) {
+      selectedId.value = daemons.value[0].daemon_id
+    }
+  }))
   cleanups.push(onEvent('daemon_status', (msg: any) => {
     const idx = daemons.value.findIndex(d => d.daemon_id === msg.daemon_id)
     if (idx >= 0) {
+      if (msg.agents) daemons.value[idx].agents = msg.agents
       if (msg.status === 'online') { daemons.value[idx].daemon_online = true; daemons.value[idx].status = 'online'; if (msg.hostname) daemons.value[idx].hostname = msg.hostname; if (msg.os) daemons.value[idx].os = msg.os; if (msg.ip) daemons.value[idx].ip = msg.ip }
       else if (msg.status === 'offline') { daemons.value[idx].daemon_online = false; daemons.value[idx].status = 'offline' }
       else if (msg.status === 'reconnecting') { daemons.value[idx].status = 'reconnecting' }
     } else if (msg.status === 'online') { daemons.value.push({ daemon_id: msg.daemon_id, hostname: msg.hostname, agents: msg.agents, daemon_online: true, daemon_alias: msg.alias || null, os: msg.os, ip: msg.ip, status: 'online' }) }
+  }))
+  cleanups.push(onEvent('upgrade_result', (msg: any) => {
+    upgrading.value = ''
+    if (msg.status === 'success') showToast(`${msg.agent || 'Agent'} 已升级${msg.message ? '到 v' + msg.message : ''}`)
+    else showToast(`升级失败：${msg.error || '未知错误'}`)
   }))
 })
 
@@ -459,71 +630,97 @@ onUnmounted(() => {
 </script>
 
 <style scoped>
-/* Layout */
+/* Page Header */
 .page-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 24px; gap: 16px; }
 .page-title { font-size: 24px; font-weight: 700; color: var(--fg); font-family: var(--font-display); }
 .page-subtitle { font-size: 14px; color: var(--fg-secondary); margin-top: 4px; }
-.hosts-layout { display: grid; grid-template-columns: 380px 1fr; gap: 20px; align-items: start; }
 
-/* List Panel */
-.hosts-list-panel { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-lg); overflow: hidden; }
-.hosts-list-head { padding: 14px 16px; border-bottom: 1px solid var(--border); }
-.hosts-toolbar { display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px; }
+/* 全局 Token 概览条（占位） */
+.token-global-strip { display: flex; align-items: center; gap: 24px; padding: 10px 18px; background: var(--bg); border: 1px solid var(--border); border-radius: var(--radius-lg); margin-bottom: 20px; font-size: 13px; }
+.token-global-strip .tg-item { display: flex; align-items: baseline; gap: 6px; }
+.token-global-strip .tg-num { font-size: 18px; font-weight: 700; color: var(--fg); font-variant-numeric: tabular-nums; letter-spacing: -0.01em; }
+.token-global-strip .tg-label { color: var(--fg-tertiary); }
+.token-global-strip .tg-sep { width: 1px; height: 20px; background: var(--border); }
+
+/* 筛选 + 搜索 */
+.host-controls { display: flex; align-items: center; gap: 12px; margin-bottom: 16px; flex-wrap: wrap; }
 .host-filter { display: flex; gap: 2px; background: var(--bg); border: 1px solid var(--border); border-radius: var(--radius-md); padding: 3px; }
-.host-filter button { padding: 5px 11px; border: none; background: none; color: var(--fg-secondary); font-size: 13px; font-weight: 500; cursor: pointer; border-radius: 5px; transition: background 0.12s, color 0.12s; }
-.host-filter button.active { background: var(--surface); color: var(--fg); box-shadow: var(--shadow-sm); }
-.host-filter button .count { margin-left: 4px; color: var(--fg-tertiary); font-variant-numeric: tabular-nums; }
-.host-search { position: relative; }
-.host-search svg { position: absolute; left: 10px; top: 50%; transform: translateY(-50%); color: var(--fg-tertiary); pointer-events: none; }
+.host-filter button { padding: 5px 11px; border: none; background: none; color: var(--fg-secondary); font-size: 13px; font-weight: 500; font-family: var(--font-body); border-radius: 5px; cursor: pointer; transition: background 0.12s, color 0.12s; }
+.host-filter button.active { background: var(--surface-active); color: var(--fg); }
+.host-filter button .count { color: var(--fg-tertiary); margin-left: 4px; font-variant-numeric: tabular-nums; }
+.host-search { position: relative; flex: 1; max-width: 360px; min-width: 180px; }
 .host-search input { width: 100%; background: var(--bg); border: 1px solid var(--border); border-radius: var(--radius-md); padding: 8px 12px 8px 34px; color: var(--fg); font-size: 13px; outline: none; transition: border-color 0.15s, box-shadow 0.15s; box-sizing: border-box; }
 .host-search input:focus { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-muted); }
 .host-search input::placeholder { color: var(--fg-tertiary); }
+.host-search svg { position: absolute; left: 10px; top: 50%; transform: translateY(-50%); color: var(--fg-tertiary); pointer-events: none; }
 
-/* Host List */
-.host-list { max-height: 600px; overflow-y: auto; }
-.host-item { display: flex; align-items: center; gap: 12px; padding: 12px 16px; border-bottom: 1px solid var(--border); border-left: 3px solid transparent; cursor: pointer; transition: background 0.12s, padding-left 0.12s, border-left-color 0.12s; }
-.host-item:last-child { border-bottom: none; }
-.host-item:hover { background: var(--surface-hover); }
-.host-item.selected { background: var(--sidebar-active); border-left-color: var(--accent); }
-.host-item:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
-.status-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
-.status-dot.online { background: var(--success); animation: pulse-green 2s infinite; }
-.status-dot.offline { background: var(--fg-tertiary); }
-.status-dot.reconnecting { background: var(--warning); animation: pulse-amber 1.5s infinite; }
-.hi-icon { width: 36px; height: 36px; border-radius: var(--radius-md); background: var(--surface-active); display: flex; align-items: center; justify-content: center; color: var(--fg-secondary); flex-shrink: 0; }
-.hi-info { flex: 1; min-width: 0; }
-.hi-name { font-size: 14px; font-weight: 600; color: var(--fg); display: flex; align-items: center; gap: 6px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.hi-meta { font-size: 12px; color: var(--fg-tertiary); font-family: var(--font-mono); margin-top: 2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.hi-right { text-align: right; flex-shrink: 0; }
-.hi-sessions { font-size: 14px; font-weight: 600; color: var(--fg); font-variant-numeric: tabular-nums; }
-.hi-sess-label { font-size: 11px; color: var(--fg-tertiary); margin-left: 2px; }
-.host-list-empty { text-align: center; padding: 48px 16px; color: var(--fg-tertiary); font-size: 13px; }
+/* 主机布局（单栏） */
+.hosts-layout { display: flex; flex-direction: column; gap: 20px; }
+.hosts-grid-wrap { display: flex; align-items: center; gap: 6px; }
 
-/* ⋯ Button */
-.ss-more-btn { width: 28px; height: 28px; border: none; background: none; color: var(--fg-tertiary); cursor: pointer; border-radius: 6px; display: flex; align-items: center; justify-content: center; opacity: 0; transition: opacity 0.15s, background 0.15s, color 0.15s; flex-shrink: 0; }
-.host-item:hover .ss-more-btn { opacity: 1; }
-.ss-more-btn:hover { background: var(--surface-active); color: var(--fg); }
-.ss-more-btn:focus-visible { opacity: 1; outline: 2px solid var(--accent); outline-offset: -2px; }
+/* 卡片网格 */
+.host-cards-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 12px; flex: 1; min-width: 0; }
+.host-card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-lg); padding: 16px; cursor: pointer; transition: border-color 0.15s, background 0.15s, box-shadow 0.15s; position: relative; }
+.host-card:hover { border-color: var(--border-light); background: var(--surface-hover); }
+.host-card.selected { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent-muted); }
+.host-card:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.host-card .hc-head { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; }
+.host-card .hc-icon { width: 36px; height: 36px; border-radius: var(--radius-md); background: var(--surface-active); display: flex; align-items: center; justify-content: center; flex-shrink: 0; color: var(--fg-secondary); }
+.host-card .hc-icon :deep(svg) { width: 18px; height: 18px; }
+.host-card .hc-info { flex: 1; min-width: 0; }
+.host-card .hc-name { font-size: 14px; font-weight: 600; color: var(--fg); display: flex; align-items: center; gap: 6px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.host-card .hc-meta { font-size: 12px; color: var(--fg-tertiary); font-family: var(--font-mono); margin-top: 2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.host-card .hc-foot { display: flex; align-items: center; justify-content: space-between; padding-top: 10px; border-top: 1px solid var(--border); }
+.host-card .hc-sessions { font-size: 14px; font-weight: 600; color: var(--fg); font-variant-numeric: tabular-nums; }
+.host-card .hc-sess-label { font-size: 11px; color: var(--fg-tertiary); margin-left: 2px; }
+.host-card .ss-more-btn { position: absolute; top: 10px; right: 10px; }
+.host-card:hover .ss-more-btn { opacity: 1; }
+.host-cards-empty { padding: 48px 16px; text-align: center; color: var(--fg-tertiary); font-size: 13px; grid-column: 1 / -1; }
 
-/* Detail Panel */
-.host-detail-panel { position: sticky; top: 80px; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-lg); padding: 24px; transition: background var(--transition), border-color var(--transition); }
-.host-detail-panel.empty { display: flex; flex-direction: column; align-items: center; justify-content: center; text-align: center; padding: 72px 24px; color: var(--fg-tertiary); }
-.empty-icon { font-size: 40px; margin-bottom: 12px; }
-.empty-title { font-size: 16px; font-weight: 600; color: var(--fg-secondary); margin-bottom: 6px; }
-.empty-sub { font-size: 13px; max-width: 280px; }
-.hd-header { display: flex; align-items: flex-start; gap: 14px; margin-bottom: 4px; }
+/* 选中 → 胶囊横向 */
+.hosts-selecting .host-cards-grid { display: flex; flex-wrap: nowrap; overflow-x: auto; gap: 6px; padding: 4px 0; scrollbar-width: none; }
+.hosts-selecting .host-cards-grid::-webkit-scrollbar { display: none; }
+.hosts-selecting .host-card { flex: 0 0 auto; cursor: pointer; display: inline-flex; align-items: center; padding: 5px 12px; border-radius: var(--radius-full); font-size: 13px; min-width: 0; }
+.hosts-selecting .host-card .hc-head { margin: 0; gap: 6px; }
+.hosts-selecting .host-card .hc-icon,
+.hosts-selecting .host-card .hc-meta,
+.hosts-selecting .host-card .hc-foot,
+.hosts-selecting .host-card .ss-more-btn { display: none; }
+.hosts-selecting .host-card.selected { background: var(--accent-muted); border-color: var(--accent); color: var(--accent); }
+.hosts-selecting .host-card.selected .hc-name { color: var(--accent); }
+
+/* 取消选择按钮 */
+.hosts-deselect-btn { display: none; flex-shrink: 0; width: 28px; height: 28px; border-radius: 50%; border: 1px solid var(--border); background: var(--surface); color: var(--fg-tertiary); cursor: pointer; align-items: center; justify-content: center; font-size: 16px; line-height: 1; transition: background 0.15s, color 0.15s; }
+.hosts-deselect-btn:hover { background: var(--surface-hover); color: var(--fg); }
+.hosts-selecting .hosts-deselect-btn { display: inline-flex; }
+
+/* 详情面板（全宽） */
+.host-detail-panel { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-lg); padding: 28px; transition: background var(--transition), border-color var(--transition); }
+.host-detail-panel.empty { text-align: center; padding: 72px 24px; }
+.host-detail-panel.empty .empty-icon { font-size: 40px; color: var(--fg-tertiary); margin-bottom: 12px; }
+.host-detail-panel.empty .empty-title { font-size: 16px; font-weight: 600; color: var(--fg-secondary); margin-bottom: 6px; }
+.host-detail-panel.empty .empty-sub { font-size: 13px; color: var(--fg-tertiary); max-width: 360px; margin: 0 auto; }
+
+/* 详情双栏 */
+.host-detail-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 28px 36px; }
+.host-detail-grid .hd-section-full { grid-column: 1 / -1; }
+
+/* 详情头部 */
+.hd-header { display: flex; align-items: flex-start; gap: 14px; margin-bottom: 4px; position: relative; }
+.hd-more-btn { position: absolute; top: 0; right: 0; width: 30px; height: 30px; display: flex; align-items: center; justify-content: center; border: none; background: transparent; color: var(--fg-tertiary); border-radius: var(--radius-md); cursor: pointer; opacity: 0.4; transition: opacity 0.15s, background 0.15s, color 0.15s; }
+.hd-more-btn:hover, .hd-more-btn:focus-visible { opacity: 1; background: var(--surface-active); color: var(--fg); }
 .hd-icon { width: 48px; height: 48px; border-radius: var(--radius-md); background: var(--surface-active); display: flex; align-items: center; justify-content: center; color: var(--fg-secondary); flex-shrink: 0; }
-.hd-headinfo { flex: 1; min-width: 0; }
-.hd-title { font-size: 20px; font-weight: 700; color: var(--fg); display: flex; align-items: center; gap: 8px; letter-spacing: -0.01em; flex-wrap: wrap; }
+.hd-headinfo { flex: 1; min-width: 0; padding-right: 40px; }
+.hd-title { font-size: 20px; font-weight: 700; color: var(--fg); letter-spacing: -0.01em; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .hd-sub { font-size: 13px; color: var(--fg-tertiary); font-family: var(--font-mono); margin-top: 4px; }
 .status-pill { display: inline-flex; align-items: center; gap: 5px; padding: 4px 10px; border-radius: var(--radius-full); font-size: 12px; font-weight: 600; }
+.status-pill.mini { padding: 2px 8px; font-size: 11px; }
 .status-pill .pulse { width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
 
-.hd-actions { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 24px; }
+.hd-actions { display: flex; gap: 8px; flex-wrap: wrap; margin: 16px 0 24px; }
 
 /* Sections */
-.hd-section { margin-bottom: 24px; }
-.hd-section:last-child { margin-bottom: 0; }
+.hd-section { margin-bottom: 0; }
 .hd-section-title { font-size: 12px; font-weight: 600; color: var(--fg-tertiary); text-transform: uppercase; letter-spacing: 0.08em; margin-bottom: 12px; }
 
 /* Resource Rows */
@@ -545,15 +742,54 @@ onUnmounted(() => {
 .conn-item .c-val { font-size: 14px; color: var(--fg); font-family: var(--font-mono); }
 .conn-item .c-val.muted { color: var(--fg-tertiary); }
 
+/* Agent Card */
+.agent-card { display: flex; align-items: center; gap: 12px; padding: 12px 14px; background: var(--bg); border: 1px solid var(--border); border-radius: var(--radius-md); margin-bottom: 10px; transition: border-color 0.15s; }
+.agent-card:last-child { margin-bottom: 0; }
+.agent-card .ag-icon { width: 32px; height: 32px; border-radius: var(--radius-sm); display: flex; align-items: center; justify-content: center; flex-shrink: 0; font-size: 14px; font-weight: 700; }
+.agent-card .ag-icon.claude { background: rgba(88,166,255,0.15); color: var(--accent); }
+.agent-card .ag-icon.codex { background: rgba(63,185,80,0.15); color: var(--success); }
+.agent-card .ag-info { flex: 1; min-width: 0; }
+.agent-card .ag-name { font-size: 14px; font-weight: 600; color: var(--fg); display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.agent-card .ag-version { font-family: var(--font-mono); font-size: 12px; color: var(--fg-secondary); display: inline-flex; align-items: center; gap: 4px; }
+.agent-card .ag-meta { font-size: 12px; color: var(--fg-tertiary); margin-top: 3px; }
+.ag-upgrade-btn { flex-shrink: 0; padding: 5px 11px; border-radius: var(--radius-full); border: 1px solid var(--accent); background: var(--accent-muted); color: var(--accent); font-size: 12px; font-weight: 600; cursor: pointer; font-family: var(--font-body); transition: background 0.15s, color 0.15s; white-space: nowrap; }
+.ag-upgrade-btn:hover { background: var(--accent); color: #fff; }
+.ag-upgrade-btn:disabled { opacity: 0.6; cursor: wait; }
+.ag-upgrade-btn.upgrading { background: var(--accent); color: #fff; opacity: 0.75; }
+.ag-latest { flex-shrink: 0; color: var(--success); font-size: 12px; font-weight: 600; display: inline-flex; align-items: center; }
+
+/* Token Overview */
+.token-overview { display: flex; gap: 16px; align-items: flex-start; margin-bottom: 16px; flex-wrap: wrap; }
+.token-stat { flex: 1; min-width: 100px; padding: 12px; background: var(--bg); border: 1px solid var(--border); border-radius: var(--radius-md); }
+.token-stat .tk-num { font-size: 22px; font-weight: 700; color: var(--fg); font-variant-numeric: tabular-nums; letter-spacing: -0.01em; line-height: 1; }
+.token-stat .tk-num.accent { color: var(--accent); }
+.token-stat .tk-label { font-size: 11px; color: var(--fg-tertiary); margin-top: 4px; text-transform: uppercase; letter-spacing: 0.06em; }
+.session-token-list { background: var(--bg); border: 1px solid var(--border); border-radius: var(--radius-md); overflow: hidden; }
+.session-token-row { display: flex; align-items: center; gap: 12px; padding: 10px 14px; border-bottom: 1px solid var(--border); font-size: 13px; }
+.session-token-row:last-child { border-bottom: none; }
+.session-token-row .st-title { flex: 1; color: var(--fg); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.session-token-row .st-tokens { font-family: var(--font-mono); font-size: 13px; color: var(--fg-secondary); font-variant-numeric: tabular-nums; white-space: nowrap; }
+
 /* Session Summary */
 .sess-summary { display: flex; align-items: center; gap: 20px; padding: 16px; background: var(--bg); border: 1px solid var(--border); border-radius: var(--radius-md); }
-.ss-block { display: flex; flex-direction: column; gap: 2px; text-align: center; }
+.ss-block { display: flex; flex-direction: column; gap: 2px; }
 .ss-num { font-size: 24px; font-weight: 700; color: var(--fg); font-variant-numeric: tabular-nums; line-height: 1; letter-spacing: -0.01em; }
 .ss-num.accent { color: var(--accent); }
 .ss-label { font-size: 12px; color: var(--fg-tertiary); }
 .ss-divider { width: 1px; align-self: stretch; background: var(--border); }
-.ss-link { margin-left: auto; font-size: 13px; color: var(--accent); text-decoration: none; white-space: nowrap; }
+.ss-link { margin-left: auto; font-size: 13px; color: var(--accent); text-decoration: none; white-space: nowrap; cursor: pointer; }
 .ss-link:hover { text-decoration: underline; }
+
+/* ⋯ Button (card) */
+.ss-more-btn { width: 28px; height: 28px; border: none; background: none; color: var(--fg-tertiary); cursor: pointer; border-radius: 6px; display: flex; align-items: center; justify-content: center; opacity: 0; transition: opacity 0.15s, background 0.15s, color 0.15s; flex-shrink: 0; }
+.ss-more-btn:hover { background: var(--surface-active); color: var(--fg); }
+.ss-more-btn:focus-visible { opacity: 1; outline: 2px solid var(--accent); outline-offset: -2px; }
+
+/* status dot */
+.status-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
+.status-dot.online { background: var(--success); animation: pulse-green 2s infinite; }
+.status-dot.offline { background: var(--fg-tertiary); }
+.status-dot.reconnecting { background: var(--warning); animation: pulse-amber 1.5s infinite; }
 
 /* Floating Menu */
 .ss-menu { position: fixed; z-index: 200; min-width: 188px; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-md); box-shadow: var(--shadow-lg); padding: 4px; }
@@ -563,7 +799,7 @@ onUnmounted(() => {
 .ss-menu-item.danger:hover { background: rgba(248, 81, 73, 0.12); }
 .ss-menu-sep { height: 1px; background: var(--border); margin: 4px 2px; }
 
-/* Buttons — match web-shared.css */
+/* Buttons */
 .btn { padding: 8px 16px; border: none; border-radius: var(--radius-md); font-size: 14px; font-weight: 500; cursor: pointer; display: inline-flex; align-items: center; gap: 6px; transition: background 0.15s, border-color 0.15s, color 0.15s; }
 .btn-secondary { background: var(--surface); color: var(--fg); border: 1px solid var(--border); }
 .btn-secondary:hover:not(:disabled) { background: var(--surface-hover); border-color: var(--border-light); }
@@ -576,7 +812,7 @@ onUnmounted(() => {
 .btn-danger:disabled { opacity: 0.4; cursor: not-allowed; }
 [data-theme="light"] .btn-danger { border-color: rgba(207, 34, 46, 0.4); }
 
-/* Dialog (ss-prefix, matching web-shared.css) */
+/* Dialog */
 .ss-overlay { position: fixed; inset: 0; z-index: 210; background: rgba(1, 4, 9, 0.6); backdrop-filter: blur(4px); -webkit-backdrop-filter: blur(4px); display: flex; align-items: center; justify-content: center; padding: 24px; }
 [data-theme="light"] .ss-overlay { background: rgba(31, 35, 40, 0.34); }
 .ss-dialog { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-xl); box-shadow: var(--shadow-lg); max-width: 400px; width: 100%; padding: 26px 24px 22px; text-align: center; }
@@ -608,8 +844,8 @@ onUnmounted(() => {
 @keyframes pulse-amber { 0% { box-shadow: 0 0 0 0 rgba(210, 153, 34, 0.4); } 70% { box-shadow: 0 0 0 6px rgba(210, 153, 34, 0); } 100% { box-shadow: 0 0 0 0 rgba(210, 153, 34, 0); } }
 
 /* Responsive */
-@media (max-width: 900px) { .hosts-layout { grid-template-columns: 1fr; } .host-detail-panel { position: static; } .host-list { max-height: 420px; } .conn-grid { grid-template-columns: 1fr; } }
-@media (max-width: 520px) { .hosts-toolbar { flex-direction: column; gap: 8px; } .host-filter { justify-content: space-between; } }
-@media (max-width: 768px) { .ss-more-btn { opacity: 1; } }
+@media (max-width: 900px) { .host-cards-grid { grid-template-columns: repeat(auto-fill, minmax(160px, 1fr)); } .host-detail-grid { grid-template-columns: 1fr; } .conn-grid { grid-template-columns: 1fr; } }
+@media (max-width: 520px) { .host-controls { flex-direction: column; align-items: stretch; } .host-search { max-width: none; } .host-cards-grid { grid-template-columns: repeat(2, 1fr); } .host-filter { justify-content: space-between; } }
+@media (max-width: 768px) { .host-card .ss-more-btn { opacity: 1; } }
 @media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation-duration: 0.01ms !important; transition-duration: 0.01ms !important; } }
 </style>

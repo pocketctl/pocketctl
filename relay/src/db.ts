@@ -105,6 +105,9 @@ export async function initDB(pool: pg.Pool): Promise<void> {
   await pool.query(`ALTER TABLE sessions ADD COLUMN IF NOT EXISTS pinned_at TIMESTAMPTZ`);
   await pool.query(`CREATE INDEX IF NOT EXISTS idx_sessions_pinned ON sessions(user_id, pinned) WHERE pinned = true`);
 
+  // C2: Token cost tracking — per-session cumulative cost (USD) from result events
+  await pool.query(`ALTER TABLE sessions ADD COLUMN IF NOT EXISTS cost_usd DOUBLE PRECISION DEFAULT 0`);
+
   // Session delete tombstone table
   await pool.query(`
     CREATE TABLE IF NOT EXISTS deleted_sessions (
@@ -160,7 +163,7 @@ export async function initDB(pool: pg.Pool): Promise<void> {
   await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS max_daemons INT DEFAULT 1`);
 }
 
-export async function upsertDaemon(pool: pg.Pool, daemonId: string, hostname: string, agents: string[], arch?: string, version?: string, startedAt?: number): Promise<void> {
+export async function upsertDaemon(pool: pg.Pool, daemonId: string, hostname: string, agents: any[], arch?: string, version?: string, startedAt?: number): Promise<void> {
   await pool.query(
     `INSERT INTO daemons (daemon_id, hostname, agents, status, last_heartbeat, arch, version, started_at)
      VALUES ($1, $2, $3, 'online', NOW(), $4, $5, $6)
@@ -177,6 +180,15 @@ export async function setDaemonOffline(pool: pg.Pool, daemonId: string): Promise
 
 export async function setDaemonReconnecting(pool: pg.Pool, daemonId: string): Promise<void> {
   await pool.query(`UPDATE daemons SET status = 'reconnecting' WHERE daemon_id = $1`, [daemonId]);
+}
+
+/** Delete a daemon (unregister from account). Sessions are preserved with daemon_id nulled. */
+export async function deleteDaemon(pool: pg.Pool, userId: number, daemonId: string): Promise<boolean> {
+  const check = await pool.query(`SELECT 1 FROM daemons WHERE daemon_id = $1 AND user_id = $2`, [daemonId, userId]);
+  if ((check.rowCount ?? 0) === 0) return false;
+  await pool.query(`UPDATE sessions SET daemon_id = NULL WHERE daemon_id = $1`, [daemonId]);
+  await pool.query(`DELETE FROM daemons WHERE daemon_id = $1`, [daemonId]);
+  return true;
 }
 
 export async function upsertDaemonAlias(pool: pg.Pool, userId: number, daemonId: string, alias: string | null): Promise<string | null> {
@@ -218,6 +230,24 @@ export async function getEventsAfter(pool: pg.Pool, sessionId: string, lastSeq: 
   const result = await pool.query(
     `SELECT id, session_id, event_type, payload, created_at FROM events WHERE session_id = $1 AND id > $2 ORDER BY id ASC`,
     [sessionId, lastSeq]
+  );
+  return result.rows;
+}
+
+// session-history-pagination: backward queries (recent N / cursor-before N).
+// Returns rows in id DESC order (newest first); client reverses for rendering.
+export async function getRecentEvents(pool: pg.Pool, sessionId: string, limit: number): Promise<any[]> {
+  const result = await pool.query(
+    `SELECT id, session_id, event_type, payload, created_at FROM events WHERE session_id = $1 ORDER BY id DESC LIMIT $2`,
+    [sessionId, limit]
+  );
+  return result.rows;
+}
+
+export async function getEventsBefore(pool: pg.Pool, sessionId: string, cursor: number, limit: number): Promise<any[]> {
+  const result = await pool.query(
+    `SELECT id, session_id, event_type, payload, created_at FROM events WHERE session_id = $1 AND id < $2 ORDER BY id DESC LIMIT $3`,
+    [sessionId, cursor, limit]
   );
   return result.rows;
 }
@@ -542,6 +572,120 @@ export async function bindTokenToDaemon(pool: pg.Pool, daemonId: string, jti: st
     `UPDATE daemons SET active_token_jti = $1, machine_id = COALESCE($2, machine_id), last_login_at = NOW() WHERE daemon_id = $3`,
     [jti, machineId || null, daemonId]
   );
+}
+
+// --- C2: Token cost tracking ---
+
+/** Update session cumulative cost (called on session_status carrying cost_usd from result event). */
+export async function updateSessionCost(pool: pg.Pool, sessionId: string, costUsd: number): Promise<void> {
+  await pool.query(`UPDATE sessions SET cost_usd = $1, updated_at = NOW() WHERE session_id = $2`, [costUsd, sessionId]);
+}
+
+/** Backfill sessions.cost_usd from events (latest session_status payload with cost_usd per session). */
+export async function backfillSessionCost(pool: pg.Pool): Promise<number> {
+  const result = await pool.query(`
+    WITH latest AS (
+      SELECT DISTINCT ON (session_id) session_id,
+             COALESCE((payload->>'cost_usd')::float, 0) AS cost
+      FROM events
+      WHERE event_type = 'session_status' AND payload ? 'cost_usd'
+      ORDER BY session_id, id DESC
+    )
+    UPDATE sessions SET cost_usd = latest.cost
+    FROM latest WHERE sessions.session_id = latest.session_id
+  `);
+  return result.rowCount ?? 0;
+}
+
+/** User-level cost summary: cumulative total + today/week/month incremental deltas.
+ *  Deltas computed via LAG over per-session cost snapshots so multi-turn sessions
+ *  are attributed to the time bucket when each turn completed. */
+export async function getCostSummary(pool: pg.Pool, userId: number): Promise<{ total: number; today: number; thisWeek: number; thisMonth: number }> {
+  const result = await pool.query(`
+    WITH cost_events AS (
+      SELECT e.id, e.session_id, e.created_at, COALESCE((e.payload->>'cost_usd')::float, 0) AS cost
+      FROM events e JOIN sessions s ON s.session_id = e.session_id
+      WHERE e.event_type = 'session_status' AND e.payload ? 'cost_usd' AND s.user_id = $1
+    ),
+    deltas AS (
+      SELECT created_at,
+             cost - COALESCE(LAG(cost) OVER (PARTITION BY session_id ORDER BY id), 0) AS delta
+      FROM cost_events
+    )
+    SELECT
+      (SELECT COALESCE(SUM(cost_usd), 0) FROM sessions WHERE user_id = $1) AS total,
+      COALESCE(SUM(CASE WHEN created_at >= date_trunc('day', NOW()) THEN delta ELSE 0 END), 0) AS today,
+      COALESCE(SUM(CASE WHEN created_at >= date_trunc('week', NOW()) THEN delta ELSE 0 END), 0) AS this_week,
+      COALESCE(SUM(CASE WHEN created_at >= date_trunc('month', NOW()) THEN delta ELSE 0 END), 0) AS this_month
+    FROM deltas
+  `, [userId]);
+  const r = result.rows[0] || {};
+  return {
+    total: parseFloat(r.total ?? 0),
+    today: parseFloat(r.today ?? 0),
+    thisWeek: parseFloat(r.this_week ?? 0),
+    thisMonth: parseFloat(r.this_month ?? 0),
+  };
+}
+
+/** Daemon-level cost: cumulative total + today/month deltas + per-session breakdown. */
+export async function getCostByDaemon(pool: pg.Pool, userId: number, daemonId: string): Promise<{ total: number; today: number; thisMonth: number; sessions: Array<{ session_id: string; title: string; cost_usd: number }> } | null> {
+  const own = await pool.query(`SELECT 1 FROM daemons WHERE daemon_id = $1 AND user_id = $2`, [daemonId, userId]);
+  if ((own.rowCount ?? 0) === 0) return null;
+
+  const totals = await pool.query(`
+    WITH cost_events AS (
+      SELECT e.id, e.session_id, e.created_at, COALESCE((e.payload->>'cost_usd')::float, 0) AS cost
+      FROM events e JOIN sessions s ON s.session_id = e.session_id
+      WHERE e.event_type = 'session_status' AND e.payload ? 'cost_usd' AND s.user_id = $1 AND s.daemon_id = $2
+    ),
+    deltas AS (
+      SELECT created_at,
+             cost - COALESCE(LAG(cost) OVER (PARTITION BY session_id ORDER BY id), 0) AS delta
+      FROM cost_events
+    )
+    SELECT
+      (SELECT COALESCE(SUM(cost_usd), 0) FROM sessions WHERE user_id = $1 AND daemon_id = $2) AS total,
+      COALESCE(SUM(CASE WHEN created_at >= date_trunc('day', NOW()) THEN delta ELSE 0 END), 0) AS today,
+      COALESCE(SUM(CASE WHEN created_at >= date_trunc('month', NOW()) THEN delta ELSE 0 END), 0) AS this_month
+    FROM deltas
+  `, [userId, daemonId]);
+
+  const sess = await pool.query(`
+    SELECT session_id, COALESCE(title, '') AS title, cost_usd
+    FROM sessions
+    WHERE user_id = $1 AND daemon_id = $2 AND session_id NOT LIKE 'pending-%'
+    ORDER BY COALESCE(last_activity_at, updated_at) DESC
+  `, [userId, daemonId]);
+
+  const t = totals.rows[0] || {};
+  return {
+    total: parseFloat(t.total ?? 0),
+    today: parseFloat(t.today ?? 0),
+    thisMonth: parseFloat(t.this_month ?? 0),
+    sessions: (sess.rows as any[]).map((r) => ({
+      session_id: r.session_id,
+      title: r.title,
+      cost_usd: parseFloat(r.cost_usd ?? 0),
+    })),
+  };
+}
+
+/** Per-daemon session counts (active running/busy + total) for a user. */
+export async function getSessionCountsByUser(pool: pg.Pool, userId: number): Promise<Record<string, { active: number; total: number }>> {
+  const result = await pool.query(`
+    SELECT daemon_id,
+      COUNT(*)::int AS total,
+      COUNT(*) FILTER (WHERE status IN ('running','busy'))::int AS active
+    FROM sessions
+    WHERE user_id = $1 AND daemon_id IS NOT NULL AND session_id NOT LIKE 'pending-%'
+    GROUP BY daemon_id
+  `, [userId]);
+  const map: Record<string, { active: number; total: number }> = {};
+  for (const row of result.rows) {
+    map[row.daemon_id] = { active: row.active ?? 0, total: row.total ?? 0 };
+  }
+  return map;
 }
 
 export function parseDBUrl(url: string): DBConfig {

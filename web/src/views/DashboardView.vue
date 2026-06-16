@@ -1,32 +1,46 @@
 <template>
   <div class="page-container">
-    <!-- Quick Stats -->
-    <div class="quick-stats">
-      <div class="quick-stat">
-        <div class="stat-icon blue">
-          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="2" width="20" height="20" rx="3"/><path d="M7 2v20"/></svg>
-        </div>
-        <div class="stat-text"><div class="stat-number">{{ onlineDaemonCount }}</div><div class="stat-desc">注册主机</div></div>
-      </div>
-      <div class="quick-stat">
-        <div class="stat-icon green">
-          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/></svg>
-        </div>
-        <div class="stat-text"><div class="stat-number">{{ activeSessionCount }}</div><div class="stat-desc">活跃会话</div></div>
-      </div>
-      <div class="quick-stat">
-        <div class="stat-icon amber">
-          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg>
-        </div>
-        <div class="stat-text"><div class="stat-number">{{ offlineDaemonCount }}</div><div class="stat-desc">离线主机</div></div>
-      </div>
+    <!-- Stats Strip (三状态，点击筛选跳转) -->
+    <div class="stats-strip">
+      <router-link class="stat-cell" :to="{ path: '/hosts', query: { filter: 'online' } }">
+        <span class="stat-dot online"></span>
+        <span class="stat-num">{{ onlineDaemonCount }}</span>
+        <span class="stat-lbl">在线主机</span>
+      </router-link>
+      <router-link class="stat-cell" :to="{ path: '/hosts', query: { filter: 'offline' } }">
+        <span class="stat-dot offline"></span>
+        <span class="stat-num">{{ offlineDaemonCount }}</span>
+        <span class="stat-lbl">离线主机</span>
+      </router-link>
+      <router-link class="stat-cell" :to="'/session/default'">
+        <span class="stat-num">{{ activeSessionCount }}</span>
+        <span class="stat-lbl">活跃会话</span>
+      </router-link>
+    </div>
+
+    <!-- Token Strip (C3 接真实数据，现占位) -->
+    <div class="token-strip">
+      <span class="ts-prefix">Token 消耗</span>
+      <span class="ts-sep"></span>
+      <span class="ts-item"><span class="ts-num">{{ formatCost(tokenSummary.total) }}</span>总消耗</span>
+      <span class="ts-sep"></span>
+      <span class="ts-item"><span class="ts-num">{{ formatCost(tokenSummary.today) }}</span>今日</span>
+      <span class="ts-sep"></span>
+      <span class="ts-item"><span class="ts-num">{{ formatCost(tokenSummary.week) }}</span>本周</span>
+      <span class="ts-sep"></span>
+      <span class="ts-item"><span class="ts-num">{{ formatCost(tokenSummary.month) }}</span>本月</span>
     </div>
 
     <!-- Daemon Section -->
     <div class="page-header">
       <div>
         <h2 class="page-title">我的主机</h2>
-        <div class="page-subtitle">管理和监控你的开发主机</div>
+        <div class="page-subtitle">
+          <span class="text-mono">{{ daemons.length }}</span> 台 ·
+          <span class="text-success">{{ onlineDaemonCount }}</span> 在线 ·
+          <span class="text-tertiary">{{ offlineDaemonCount }}</span> 离线 ·
+          <router-link to="/hosts" class="manage-all-link">管理全部 →</router-link>
+        </div>
       </div>
       <button class="btn btn-secondary" @click="showRegisterDaemon = true">
         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 5v14M5 12h14"/></svg>
@@ -168,7 +182,7 @@ import { useSessionRename } from '../composables/useSessionRename'
 const { renamingId: sessRenamingId, renameInput: sessRenameInput, startRename: sessStartRename, commitRename: sessCommitRename, cancelRename: sessCancelRename } = useSessionRename()
 
 const { connect, send, onEvent, effectiveStatus } = useWebSocket()
-const { isLoggedIn, logout } = useAuth()
+const { isLoggedIn, logout, accessToken } = useAuth()
 const router = useRouter()
 
 const daemons = ref<any[]>([])
@@ -183,6 +197,28 @@ const renameIndex = ref<number | null>(null)
 const renameInput = ref('')
 const aliases = ref<Record<string, string>>({})
 const selectedDaemon = ref<string | null>(null)
+
+// Token cost summary — wired to /api/cost/summary (cost_usd in USD)
+const tokenSummary = ref({ total: 0, today: 0, week: 0, month: 0 })
+function formatCost(v: number | null | undefined): string {
+  if (v == null) return '—'
+  if (v > 0 && v < 0.01) return '<$0.01'
+  return '$' + v.toFixed(2)
+}
+function getRelayOrigin(): string {
+  const relayWs = localStorage.getItem('pocketctl_relay_url') || (window as any).__RELAY_WS__ || ''
+  try { const url = new URL(relayWs); if (url.hostname === 'localhost' || url.hostname === '127.0.0.1') return ''; return url.origin.replace(/^ws/, 'http') } catch { return '' }
+}
+async function fetchCostSummary() {
+  const origin = getRelayOrigin()
+  try {
+    const r = await fetch(`${origin}/api/cost/summary`, { headers: { Authorization: `Bearer ${accessToken.value}` } })
+    if (r.ok) {
+      const d = await r.json()
+      tokenSummary.value = { total: d.total ?? 0, today: d.today ?? 0, week: d.thisWeek ?? 0, month: d.thisMonth ?? 0 }
+    }
+  } catch { /* ignore */ }
+}
 
 const onlineDaemonCount = computed(() => daemons.value.filter(d => d.daemon_online).length)
 const offlineDaemonCount = computed(() => daemons.value.filter(d => !d.daemon_online).length)
@@ -279,6 +315,7 @@ onMounted(() => {
   connect()
   send({ type: 'list_sessions' })
   send({ type: 'list_daemons' })
+  fetchCostSummary()
 
   onEvent('daemon_list', (msg: any) => {
     daemons.value = (msg.daemons || []).map((d: any) => ({ ...d }))
@@ -323,14 +360,29 @@ function onPinned(sessionId: string, pinned: boolean) { const s = sessions.value
 </script>
 
 <style>
-.quick-stats { display: flex; gap: 12px; margin-bottom: 24px; }
-.quick-stat { flex: 1; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-lg); padding: 16px 20px; display: flex; align-items: center; gap: 14px; transition: background var(--transition), border-color var(--transition); }
-.quick-stat .stat-icon { width: 40px; height: 40px; border-radius: var(--radius-md); display: flex; align-items: center; justify-content: center; font-size: 20px; }
-.quick-stat .stat-icon.blue { background: var(--accent-muted); color: var(--accent); }
-.quick-stat .stat-icon.green { background: var(--success-bg); color: var(--success); }
-.quick-stat .stat-icon.amber { background: var(--warning-bg); color: var(--warning); }
-.quick-stat .stat-text .stat-number { font-size: 24px; font-weight: 700; color: var(--fg); font-family: var(--font-display); line-height: 1; }
-.quick-stat .stat-text .stat-desc { font-size: 12px; color: var(--fg-tertiary); margin-top: 2px; }
+/* Stats Strip — 三状态横条，可点击筛选 */
+.stats-strip { display: flex; align-items: stretch; border: 1px solid var(--border); border-radius: var(--radius-lg); overflow: hidden; margin-bottom: 16px; background: var(--surface); }
+.stat-cell { display: flex; align-items: center; gap: 9px; padding: 13px 18px; flex: 1; min-width: 0; text-decoration: none; color: var(--fg-secondary); transition: background 0.15s; cursor: pointer; }
+.stat-cell:hover { background: var(--surface-hover); }
+.stat-cell + .stat-cell { border-left: 1px solid var(--border); }
+.stat-dot { width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0; }
+.stat-dot.online { background: var(--success); }
+.stat-dot.offline { background: var(--fg-tertiary); }
+.stat-num { font-family: var(--font-display); font-size: 19px; font-weight: 600; color: var(--fg); font-variant-numeric: tabular-nums; letter-spacing: -0.01em; line-height: 1; }
+.stat-lbl { font-size: 12.5px; color: var(--fg-tertiary); white-space: nowrap; }
+
+/* Token Strip */
+.token-strip { display: flex; align-items: center; gap: 20px; padding: 10px 18px; margin-bottom: 24px; background: var(--bg); border: 1px solid var(--border); border-radius: var(--radius-lg); font-size: 13px; color: var(--fg-secondary); }
+.ts-prefix { font-size: 13px; font-weight: 600; color: var(--fg-secondary); }
+.ts-item { display: flex; align-items: baseline; gap: 6px; }
+.ts-num { font-family: var(--font-display); font-size: 17px; font-weight: 600; color: var(--fg); font-variant-numeric: tabular-nums; letter-spacing: -0.01em; }
+.ts-sep { width: 1px; height: 18px; background: var(--border); }
+
+.text-mono { font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
+.text-success { color: var(--success); }
+.text-tertiary { color: var(--fg-tertiary); }
+.manage-all-link { color: var(--accent); text-decoration: none; }
+.manage-all-link:hover { text-decoration: underline; }
 
 .daemon-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(360px, 1fr)); gap: 16px; margin-bottom: 32px; }
 

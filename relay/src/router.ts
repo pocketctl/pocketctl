@@ -4,7 +4,7 @@ import * as db from './db.js';
 import { generateTitle } from './title.js';
 import { notifyUser, sessionStatusPush, daemonOfflinePush } from './push.js';
 
-interface DaemonConnection { ws: WebSocket; daemonId: string; hostname: string; agents: string[]; userId: number | null; os?: string; ip?: string; arch?: string; version?: string; startedAt?: number }
+interface DaemonConnection { ws: WebSocket; daemonId: string; hostname: string; agents: any[]; userId: number | null; os?: string; ip?: string; arch?: string; version?: string; startedAt?: number }
 interface ClientConnection { ws: WebSocket; subscribedSessions: Set<string>; userId: number | null }
 interface DaemonMetrics { cpuPct: number; memPct: number; diskPct: number; updatedAt: number }
 
@@ -24,7 +24,11 @@ export class Router {
   async registerDaemon(ws: WebSocket, msg: any, userId: number | null, tokenJti?: string, machineId?: string): Promise<void> {
     const daemonId = msg.daemon_id;
     const hostname = msg.hostname || 'unknown';
-    const agents = msg.agents || [];
+    // Compose agents as [{type, version, latest}] objects (C4b: version; C4c: latest for upgrade UI)
+    const agentTypes: string[] = msg.agents || [];
+    const agentVersions: Record<string, string> = msg.agent_versions || {};
+    const agentLatests: Record<string, string> = msg.agent_latests || {};
+    const agents = agentTypes.map((t: string) => ({ type: t, version: agentVersions[t] || '', latest: agentLatests[t] || '' }));
 
     // Soft eviction: check for existing daemon(s) for this user
     if (userId) {
@@ -209,6 +213,14 @@ export class Router {
         this.pendingSessionCreate.delete(daemonId);
         this.pendingSessionMeta?.delete(daemonId);
       }
+      // upgrade_result: broadcast to same-user clients (no session_id)
+      if (msg.type === 'upgrade_result') {
+        const d = this.daemons.get(daemonId);
+        const uid = d?.userId ?? null;
+        for (const [clientWs, client] of this.clients) {
+          if (clientWs.readyState === 1 && this.sameUser(client.userId, uid)) this.send(clientWs, msg);
+        }
+      }
       return;
     }
     const daemon = this.daemons.get(daemonId);
@@ -321,6 +333,10 @@ export class Router {
     db.insertEvent(this.pool, sessionId, msg.type, msg).catch(console.error);
     if (msg.type === 'session_status') {
       db.upsertSession(this.pool, sessionId, daemonId, '', '', msg.status || 'unknown', undefined, undefined, msg.exit_reason).catch(console.error);
+      // C2: persist cumulative cost_usd from result event
+      if (msg.cost_usd != null) {
+        db.updateSessionCost(this.pool, sessionId, parseFloat(msg.cost_usd)).catch(console.error);
+      }
       // Push notification for terminal states
       if (userId && ['completed', 'error', 'killed', 'exited'].includes(msg.status)) {
         notifyUser(this.pool, userId, sessionStatusPush(msg.title || '', msg.status, sessionId)).catch(console.error);
@@ -335,7 +351,7 @@ export class Router {
     const client = this.clients.get(clientWs);
     if (!client) return;
     if (msg.session_id) client.subscribedSessions.add(msg.session_id);
-    if (msg.type === 'replay') { this.handleReplay(clientWs, msg.session_id, msg.last_seq); return; }
+    if (msg.type === 'replay') { this.handleReplay(clientWs, msg.session_id, msg.last_seq, msg.req_id, msg.direction, msg.limit); return; }
     if (msg.type === 'list_sessions') { this.handleListSessions(clientWs, client.userId); return; }
     if (msg.type === 'list_daemons') { console.log('[router] list_daemons from user', client.userId, 'daemons in map:', this.daemons.size); this.handleListDaemons(clientWs, client.userId); return; }
 
@@ -427,35 +443,51 @@ export class Router {
     this.send(clientWs, { type: 'error', error: 'session not found or daemon offline' });
   }
 
-  private async handleReplay(clientWs: WebSocket, sessionId: string, lastSeq: number): Promise<void> {
+  private async handleReplay(clientWs: WebSocket, sessionId: string, lastSeq: number, reqId?: number, direction?: string, limit?: number): Promise<void> {
+    const withReq = (obj: any) => reqId !== undefined ? { ...obj, req_id: reqId } : obj;
+    // session-history-pagination: backward direction paginates history (recent N / cursor-before N).
+    // Default forward (id > lastSeq ASC) preserves existing full-load behavior for old clients.
+    const isBackward = direction === 'backward';
+    const lim = isBackward && limit && limit > 0 ? limit : 100;
     try {
-      const events = await db.getEventsAfter(this.pool, sessionId, lastSeq);
+      let events: any[];
+      if (isBackward) {
+        events = (lastSeq && lastSeq > 0)
+          ? await db.getEventsBefore(this.pool, sessionId, lastSeq, lim)
+          : await db.getRecentEvents(this.pool, sessionId, lim);
+      } else {
+        events = await db.getEventsAfter(this.pool, sessionId, lastSeq);
+      }
+      // has_more (backward only, count-based heuristic): a full page implies older rows may exist.
+      const hasMore = isBackward ? events.length === lim : false;
       if (events.length === 0) {
-        this.send(clientWs, { type: 'replay_end', session_id: sessionId, count: 0, last_seq: lastSeq });
+        this.send(clientWs, withReq({ type: 'replay_end', session_id: sessionId, count: 0, last_seq: lastSeq, has_more: false }));
         return;
       }
-      // Send events in batches of 50 to reduce WebSocket frame overhead
+      // backward rows arrive in id DESC; forward rows in id ASC. Batches keep that order;
+      // the client reverses backward batches before render/prepend.
       const BATCH = 50;
       for (let i = 0; i < events.length; i += BATCH) {
         const slice = events.slice(i, i + BATCH);
-        this.send(clientWs, {
+        this.send(clientWs, withReq({
           type: 'replay_batch',
           session_id: sessionId,
           events: slice.map(e => e.payload),
           last_seq: slice[slice.length - 1].id,
-        });
+          direction: direction || 'forward',
+        }));
       }
-      // Signal completion with final seq for incremental replay
-      this.send(clientWs, {
+      this.send(clientWs, withReq({
         type: 'replay_end',
         session_id: sessionId,
         count: events.length,
         last_seq: events[events.length - 1].id,
-      });
+        has_more: hasMore,
+      }));
     } catch (err) {
       console.error('replay error:', err);
       // Always send replay_end so the client doesn't hang on isLoading
-      this.send(clientWs, { type: 'replay_end', session_id: sessionId, count: 0, last_seq: lastSeq });
+      this.send(clientWs, withReq({ type: 'replay_end', session_id: sessionId, count: 0, last_seq: lastSeq, has_more: false }));
     }
   }
 
@@ -472,11 +504,13 @@ export class Router {
   private async handleListDaemons(clientWs: WebSocket, userId: number | null): Promise<void> {
     try {
       const daemonList: any[] = [];
+      const sessionCounts = userId ? await db.getSessionCountsByUser(this.pool, userId) : {};
       for (const [, daemon] of this.daemons) {
         console.log('[router] list_daemons iterating daemon', daemon.daemonId, 'daemon.userId:', daemon.userId, 'request.userId:', userId);
         if (!this.sameUser(daemon.userId, userId)) continue;
         const alias = await db.getDaemonAlias(this.pool, daemon.daemonId);
         const metrics = this.daemonMetrics.get(daemon.daemonId);
+        const counts = sessionCounts[daemon.daemonId];
         daemonList.push({
           daemon_id: daemon.daemonId,
           hostname: daemon.hostname,
@@ -492,6 +526,8 @@ export class Router {
           cpu_pct: metrics?.cpuPct ?? null,
           mem_pct: metrics?.memPct ?? null,
           disk_pct: metrics?.diskPct ?? null,
+          active_sessions: counts?.active ?? 0,
+          total_sessions: counts?.total ?? 0,
         });
       }
       // Also include offline daemons from DB for this user
@@ -502,6 +538,7 @@ export class Router {
             [userId]
           );
           for (const row of result.rows) {
+            const counts = sessionCounts[row.daemon_id];
             daemonList.push({
               daemon_id: row.daemon_id,
               hostname: row.hostname,
@@ -510,6 +547,8 @@ export class Router {
               daemon_alias: row.alias,
               status: 'offline',
               last_seen_at: row.last_heartbeat,
+              active_sessions: counts?.active ?? 0,
+              total_sessions: counts?.total ?? 0,
             });
           }
         } catch (e) { console.error('list_daemons offline:', e); }
@@ -520,6 +559,19 @@ export class Router {
   }
 
   /** Force-kick a daemon from the Web settings page. */
+  // C4c: forward agent upgrade request to daemon. Result pushed back via upgrade_result event.
+  async handleUpgrade(daemonId: string, userId: number, agent: string): Promise<{ success: boolean; error?: string }> {
+    const daemon = this.daemons.get(daemonId);
+    if (!daemon || daemon.userId !== userId) {
+      return { success: false, error: 'forbidden' };
+    }
+    if (daemon.ws.readyState !== 1) {
+      return { success: false, error: 'daemon offline' };
+    }
+    this.send(daemon.ws, { type: 'upgrade_agent', agent: agent || 'claude-code' });
+    return { success: true };
+  }
+
   async handleForceKick(daemonId: string, userId: number): Promise<{ success: boolean; error?: string }> {
     const daemon = this.daemons.get(daemonId);
     if (!daemon) {

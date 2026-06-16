@@ -7,7 +7,7 @@ import (
 )
 
 func TestParseStreamLine_TextOutput(t *testing.T) {
-	a := NewClaudeAdapter()
+	a := NewClaudeAdapter("")
 	line := `{"type":"assistant","message":{"id":"msg_1","type":"message","role":"assistant","content":[{"type":"text","text":"Hello!"}]}}`
 	events, err := a.ParseStreamLine(line)
 	if err != nil {
@@ -25,7 +25,7 @@ func TestParseStreamLine_TextOutput(t *testing.T) {
 }
 
 func TestParseStreamLine_ToolUse(t *testing.T) {
-	a := NewClaudeAdapter()
+	a := NewClaudeAdapter("")
 	line := `{"type":"assistant","message":{"id":"msg_1","type":"message","role":"assistant","content":[{"type":"tool_use","id":"call_abc","name":"Read","input":{"file_path":"main.go"}}]}}`
 	events, err := a.ParseStreamLine(line)
 	if err != nil {
@@ -46,7 +46,7 @@ func TestParseStreamLine_ToolUse(t *testing.T) {
 }
 
 func TestParseStreamLine_Result(t *testing.T) {
-	a := NewClaudeAdapter()
+	a := NewClaudeAdapter("")
 	// Send init first to set session ID
 	a.ParseStreamLine(`{"type":"system","subtype":"init","session_id":"abc-123"}`)
 	line := `{"type":"result","subtype":"success","is_error":false,"num_turns":2,"total_cost_usd":0.05,"session_id":"abc-123"}`
@@ -69,7 +69,7 @@ func TestParseStreamLine_Result(t *testing.T) {
 }
 
 func TestParseStreamLine_InitEvent(t *testing.T) {
-	a := NewClaudeAdapter()
+	a := NewClaudeAdapter("")
 	line := `{"type":"system","subtype":"init","session_id":"test-session-1","tools":["Read","Edit"]}`
 	events, err := a.ParseStreamLine(line)
 	if err != nil {
@@ -84,7 +84,7 @@ func TestParseStreamLine_InitEvent(t *testing.T) {
 }
 
 func TestParseStreamLine_ResultError(t *testing.T) {
-	a := NewClaudeAdapter()
+	a := NewClaudeAdapter("")
 	line := `{"type":"result","subtype":"error","is_error":true,"num_turns":1,"total_cost_usd":0.01}`
 	events, err := a.ParseStreamLine(line)
 	if err != nil {
@@ -96,7 +96,7 @@ func TestParseStreamLine_ResultError(t *testing.T) {
 }
 
 func TestParseStreamLine_EmptyLine(t *testing.T) {
-	a := NewClaudeAdapter()
+	a := NewClaudeAdapter("")
 	events, err := a.ParseStreamLine("")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -172,5 +172,154 @@ func TestBuildClaudeArgs_ResumeSession(t *testing.T) {
 	}
 	if !found {
 		t.Error("expected --resume flag")
+	}
+}
+
+// --- command_receipt: synthetic reply conversion (design D1-D4) ---
+
+func TestSyntheticReplyBecomesReceipt_Unavailable(t *testing.T) {
+	a := NewClaudeAdapter("/model")
+	line := `{"type":"assistant","message":{"id":"m1","type":"message","role":"assistant","model":"<synthetic>","content":[{"type":"text","text":"/model isn't available in this environment."}]}}`
+	events, err := a.ParseStreamLine(line)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(events) != 1 {
+		t.Fatalf("expected 1 event, got %d", len(events))
+	}
+	if events[0].Type != "command_receipt" {
+		t.Fatalf("expected command_receipt (not agent_text), got %s", events[0].Type)
+	}
+	if events[0].ReceiptStatus != "unavailable" {
+		t.Fatalf("expected unavailable, got %s", events[0].ReceiptStatus)
+	}
+	if events[0].Command != "/model" {
+		t.Fatalf("expected /model, got %s", events[0].Command)
+	}
+}
+
+func TestCompactFailedBecomesReceipt_Failed(t *testing.T) {
+	a := NewClaudeAdapter("/compact")
+	// Feed the system status first (compact_result:failed)
+	if _, err := a.ParseStreamLine(`{"type":"system","subtype":"status","compact_result":"failed","compact_error":"Not enough messages to compact."}`); err != nil {
+		t.Fatal(err)
+	}
+	line := `{"type":"assistant","message":{"model":"<synthetic>","content":[{"type":"text","text":"Not enough messages to compact."}]}}`
+	events, _ := a.ParseStreamLine(line)
+	if len(events) != 1 || events[0].Type != "command_receipt" {
+		t.Fatalf("expected 1 command_receipt, got %v", events)
+	}
+	if events[0].ReceiptStatus != "failed" {
+		t.Fatalf("expected failed, got %s", events[0].ReceiptStatus)
+	}
+	if events[0].Message != "Not enough messages to compact." {
+		t.Fatalf("expected compact_error as message, got %s", events[0].Message)
+	}
+}
+
+func TestSyntheticReplyBecomesReceipt_Success(t *testing.T) {
+	a := NewClaudeAdapter("/context")
+	line := `{"type":"assistant","message":{"model":"<synthetic>","content":[{"type":"text","text":"## Context Usage\n**Model:** GLM-4.7"}]}}`
+	events, _ := a.ParseStreamLine(line)
+	if len(events) != 1 || events[0].Type != "command_receipt" {
+		t.Fatalf("expected 1 command_receipt, got %v", events)
+	}
+	if events[0].ReceiptStatus != "success" {
+		t.Fatalf("expected success, got %s", events[0].ReceiptStatus)
+	}
+	if events[0].Command != "/context" {
+		t.Fatalf("expected /context, got %s", events[0].Command)
+	}
+}
+
+func TestRealAssistantTextStillAgentText(t *testing.T) {
+	// Non-synthetic (real model) text must remain agent_text even when a slash
+	// command is pending — custom commands/skills reply as normal agent_text.
+	a := NewClaudeAdapter("/compact")
+	line := `{"type":"assistant","message":{"model":"glm-4.7","content":[{"type":"text","text":"real reply"}]}}`
+	events, _ := a.ParseStreamLine(line)
+	if len(events) != 1 || events[0].Type != "agent_text" {
+		t.Fatalf("expected agent_text for real model, got %v", events)
+	}
+}
+
+func TestExtractSlashCommand(t *testing.T) {
+	cases := map[string]string{
+		"/compact":        "compact",
+		"/model sonnet":   "model",
+		"/codex:status":   "codex:status",
+		"hello world":     "",
+		"":                "",
+		"  /compact arg ": "compact",
+	}
+	for prompt, want := range cases {
+		if got := extractSlashCommand(prompt); got != want {
+			t.Errorf("extractSlashCommand(%q) = %q, want %q", prompt, got, want)
+		}
+	}
+}
+
+// --- isMeta filtering (design D5) ---
+
+func TestIsMetaUserFiltered_StreamJSON(t *testing.T) {
+	a := NewClaudeAdapter("")
+	line := `{"type":"user","isMeta":true,"message":{"role":"user","content":[{"type":"text","text":"<local-command-caveat>noise</local-command-caveat>"}]}}`
+	events, _ := a.ParseStreamLine(line)
+	if len(events) != 0 {
+		t.Fatalf("expected isMeta user filtered from stream-json, got %v", events)
+	}
+}
+
+func TestParseJSONLLineIsMetaFiltered(t *testing.T) {
+	line := `{"type":"user","sessionId":"s1","isMeta":true,"message":{"role":"user","content":"<local-command-caveat>noise</local-command-caveat>"}}`
+	events, _ := ParseJSONLLine(line)
+	if len(events) != 0 {
+		t.Fatalf("expected isMeta user filtered from JSONL replay, got %v", events)
+	}
+}
+
+func TestParseJSONLLineNonMetaUserNotFiltered(t *testing.T) {
+	// A real user message (isMeta absent) must still be forwarded.
+	line := `{"type":"user","sessionId":"s1","message":{"role":"user","content":"hello"}}`
+	events, _ := ParseJSONLLine(line)
+	if len(events) != 1 || events[0].Type != "user_text" {
+		t.Fatalf("expected non-meta user_text forwarded, got %v", events)
+	}
+}
+
+// --- system local_command feedback (the real format on --resume sessions) ---
+
+func TestSystemLocalCommandBecomesReceipt(t *testing.T) {
+	a := NewClaudeAdapter("/model")
+	line := `{"type":"system","subtype":"local_command","content":"<local-command-stdout>/model isn't available in this environment.</local-command-stdout>"}`
+	events, _ := a.ParseStreamLine(line)
+	if len(events) != 1 || events[0].Type != "command_receipt" {
+		t.Fatalf("expected command_receipt from system local_command, got %v", events)
+	}
+	if events[0].ReceiptStatus != "unavailable" {
+		t.Fatalf("expected unavailable, got %s", events[0].ReceiptStatus)
+	}
+	if events[0].Message != "/model isn't available in this environment." {
+		t.Fatalf("expected message unwrapped from stdout tags, got %s", events[0].Message)
+	}
+}
+
+func TestParseJSONLLineSystemLocalCommand(t *testing.T) {
+	line := `{"type":"system","subtype":"local_command","sessionId":"s1","content":"<local-command-stdout>Not enough messages to compact.</local-command-stdout>"}`
+	events, _ := ParseJSONLLine(line)
+	if len(events) != 1 || events[0].Type != "command_receipt" {
+		t.Fatalf("expected command_receipt from JSONL system local_command, got %v", events)
+	}
+	if events[0].Message != "Not enough messages to compact." {
+		t.Fatalf("expected unwrapped message, got %s", events[0].Message)
+	}
+}
+
+func TestExtractLocalCommandOutput(t *testing.T) {
+	if got := extractLocalCommandOutput("<local-command-stdout>hello world</local-command-stdout>"); got != "hello world" {
+		t.Errorf("expected 'hello world', got %q", got)
+	}
+	if got := extractLocalCommandOutput("no tags here"); got != "" {
+		t.Errorf("expected empty for no tags, got %q", got)
 	}
 }

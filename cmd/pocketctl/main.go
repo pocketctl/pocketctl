@@ -22,6 +22,7 @@ import (
 	"github.com/gorilla/websocket"
 	"github.com/pocketctl/pocketctl/internal/adapter"
 	"github.com/pocketctl/pocketctl/internal/api"
+	"github.com/pocketctl/pocketctl/internal/commands"
 	"github.com/pocketctl/pocketctl/internal/config"
 	"github.com/pocketctl/pocketctl/internal/daemon"
 	"github.com/pocketctl/pocketctl/internal/discovery"
@@ -406,9 +407,17 @@ func cmdDaemonStart(args []string) {
 	// Discover agents
 	agents := discovery.DiscoverAgents()
 	agentTypes := make([]string, 0, len(agents))
+	agentVersions := make(map[string]string)
+	agentLatests := make(map[string]string)
 	for _, a := range agents {
 		agentTypes = append(agentTypes, a.Type)
-		logger.Info("discovered agent", "type", a.Type, "path", a.Path)
+		if a.Version != "" {
+			agentVersions[a.Type] = a.Version
+		}
+		if a.Latest != "" {
+			agentLatests[a.Type] = a.Latest
+		}
+		logger.Info("discovered agent", "type", a.Type, "path", a.Path, "version", a.Version, "latest", a.Latest)
 	}
 	if len(agentTypes) == 0 {
 		agentTypes = []string{"claude-code"} // default
@@ -459,7 +468,7 @@ func cmdDaemonStart(args []string) {
 
 
 	// Create WebSocket client
-	client := ws.NewClient(url, tok, id, agentTypes, outputCh, logger)
+	client := ws.NewClient(url, tok, id, agentTypes, agentVersions, agentLatests, outputCh, logger)
 	client.SetVersion(version)
 	client.SetStartedAt(time.Now().Unix())
 
@@ -895,6 +904,8 @@ func handleWatcherEvents(ctx context.Context, sw *watcher.SessionWatcher, sm *se
 						if err == nil {
 							tailer, err = watcher.NewJSONLTailerFromStart(jsonlPath)
 							if err == nil {
+								// Associate tailer with session so sendToIdleTerminal can pause/resume it (D2)
+								sm.SetTailer(evt.Session.SessionID, tailer)
 								// Tailer started successfully — now emit session_discovered
 								outputCh <- protocol.DaemonEvent{
 									Type:      "session_discovered",
@@ -932,6 +943,9 @@ func handleWatcherEvents(ctx context.Context, sw *watcher.SessionWatcher, sm *se
 						case <-ctx.Done():
 							return
 						case <-ticker.C:
+							if tailer.IsPaused() {
+								continue // D2: paused during sendToIdleTerminal, skip forwarding
+							}
 							events, rawLines, err := tailer.TailNewLines()
 							if err != nil {
 								continue
@@ -1073,11 +1087,93 @@ func handleCommands(ctx context.Context, client *ws.Client, sm *session.SessionM
 					logger.Error("kill session failed", "error", err)
 				}
 
+			case "list_commands":
+				logger.Debug("list commands", "session", cmd.SessionID)
+				cwd, ok := sm.GetSessionCwd(cmd.SessionID)
+				if !ok {
+					// Unknown session / no cwd: return an empty list so the client
+					// still gets a response and can degrade gracefully.
+					client.SendMsg(protocol.DaemonEvent{
+						Type:      "command_list",
+						SessionID: cmd.SessionID,
+						Commands:  []protocol.CommandItem{},
+					})
+					continue
+				}
+				// available = slash commands the agent reported in its init event
+				// (authoritative for the -p environment); empty falls back to scan.
+				available, _ := sm.GetSessionSlashCommands(cmd.SessionID)
+				client.SendMsg(protocol.DaemonEvent{
+					Type:      "command_list",
+					SessionID: cmd.SessionID,
+					Commands:  commands.ListCommands(cwd, available),
+				})
+
+			case "upgrade_agent":
+				go handleUpgradeAgent(client, logger, cmd.Agent)
+
 			default:
 				logger.Debug("unknown command", "type", cmd.Type)
 			}
 		}
 	}
+}
+
+// handleUpgradeAgent upgrades the requested agent via its built-in command (claude update /
+// opencode upgrade) or `npm install -g <package>@latest` (codex). Re-discovers versions,
+// pushes a fresh register + upgrade_result event.
+func handleUpgradeAgent(client *ws.Client, logger *slog.Logger, agent string) {
+	agentName := agent
+	if agentName == "" {
+		agentName = "claude-code"
+	}
+	updateCmd, pkg, err := discovery.AgentUpgradeInfo(agentName)
+	if err != nil {
+		client.SendMsg(protocol.DaemonEvent{Type: "upgrade_result", Agent: agentName, Status: "failed", Error: err.Error()})
+		return
+	}
+	oldVer := ""
+	for _, a := range discovery.DiscoverAgents() {
+		if a.Type == agentName {
+			oldVer = a.Version
+		}
+	}
+	logger.Info("agent upgrade start", "agent", agentName, "old_version", oldVer, "cmd", updateCmd)
+
+	upCtx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	defer cancel()
+	var out []byte
+	if updateCmd != "" {
+		parts := strings.Fields(updateCmd)
+		out, err = exec.CommandContext(upCtx, parts[0], parts[1:]...).CombinedOutput()
+	} else {
+		out, err = exec.CommandContext(upCtx, "npm", "install", "-g", pkg+"@latest").CombinedOutput()
+	}
+	if err != nil {
+		logger.Error("agent upgrade failed", "agent", agentName, "error", err, "output", string(out))
+		client.SendMsg(protocol.DaemonEvent{Type: "upgrade_result", Agent: agentName, Status: "failed", Error: fmt.Sprintf("%v: %s", err, strings.TrimSpace(string(out)))})
+		return
+	}
+
+	agentVersions := make(map[string]string)
+	agentLatests := make(map[string]string)
+	newVer := ""
+	for _, a := range discovery.DiscoverAgents() {
+		if a.Version != "" {
+			agentVersions[a.Type] = a.Version
+		}
+		if a.Latest != "" {
+			agentLatests[a.Type] = a.Latest
+		}
+		if a.Type == agentName {
+			newVer = a.Version
+		}
+	}
+	client.SetAgentVersions(agentVersions)
+	client.SetAgentLatests(agentLatests)
+	client.ResendRegister()
+	client.SendMsg(protocol.DaemonEvent{Type: "upgrade_result", Agent: agentName, Status: "success", Message: newVer})
+	logger.Info("agent upgrade done", "agent", agentName, "old", oldVer, "new", newVer)
 }
 
 // readJSONLLines reads up to maxLines from a JSONL file and returns them as a slice.

@@ -42,3 +42,6 @@ AuthKey_95HSWCLC89.p8
 AuthKey*.p8
 distribution.cer
 build/
+
+# GitHub sync (persistent local mirror — not for gitee)
+.github-sync/

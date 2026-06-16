@@ -17,6 +17,8 @@ import (
 
 	"github.com/pocketctl/pocketctl/internal/adapter"
 	"github.com/pocketctl/pocketctl/internal/protocol"
+	"github.com/pocketctl/pocketctl/internal/watcher"
+	"github.com/google/uuid"
 )
 
 type ProcessState struct {
@@ -29,10 +31,22 @@ type ProcessState struct {
 	Cwd       string
 	Agent     string
 	Source    string // "daemon" or "terminal"
+	SlashCommands []string // slash commands the agent reported as available (init event)
 	Pid       int    // terminal session's original PID
 	TTY       string // terminal session's TTY device (e.g. /dev/ttys002)
 	ExitReason string // reason for process exit (terminal sessions only)
 	TitleGenerated bool // true once generate_title_request has been sent
+	Tailer *watcher.JSONLTailer // terminal session 的 JSONL tailer（D2: sendToIdleTerminal 期间 pause）
+	PTY    *os.File             // interactive-web-session D1: daemon session 的 PTY master（写 stdin 驱动 interactive claude）
+}
+
+// SetTailer associates a JSONL tailer with a session (so sendToIdleTerminal can pause/resume it).
+func (sm *SessionManager) SetTailer(sessionID string, t *watcher.JSONLTailer) {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+	if ps, ok := sm.sessions[sessionID]; ok {
+		ps.Tailer = t
+	}
 }
 
 // NotifyFunc is called after a web→terminal message completes.
@@ -160,55 +174,159 @@ func (sm *SessionManager) CreateSession(ctx context.Context, config protocol.Ses
 	// Resolve clean model name (strip invalid [...] suffix from cc switch configs)
 	config.Model = resolveCleanModel()
 
-	args := adapter.BuildClaudeArgs(config.Prompt, "", config)
-	ctx, cancel := context.WithCancel(ctx)
-	cmd := exec.CommandContext(ctx, cliPath, args...)
-	cmd.Dir = resolvedCwd
+	// interactive-web-session D1: launch interactive claude under a PTY (not -p),
+	// with an explicit --session-id so the JSONL file path is known up front.
+	// Spike-verified: sanitized env + --session-id writes <uuid>.jsonl, and env
+	// sanitization is mandatory or claude runs ephemeral (no JSONL).
+	sessionID := uuid.New().String()
+	args := append([]string{"--session-id", sessionID}, adapter.BuildInteractiveArgs(config)...)
 
-	stdout, err := cmd.StdoutPipe()
+	ctx, cancel := context.WithCancel(ctx)
+	ptmx, cmd, err := startPTYCli(cliPath, args, resolvedCwd)
 	if err != nil {
 		cancel()
-		return "", fmt.Errorf("stdout pipe: %w", err)
+		return "", fmt.Errorf("start pty claude: %w", err)
 	}
 
-	if err := cmd.Start(); err != nil {
-		cancel()
-		return "", fmt.Errorf("start process: %w", err)
-	}
-
-	adp := adapter.NewClaudeAdapter()
 	now := time.Now()
 	ps := &ProcessState{
+		SessionID:      sessionID, // real id (not pending-): --session-id pins it
 		Cmd:            cmd,
 		Cancel:         cancel,
-		Status:         protocol.StatusRunning,
+		Status:         protocol.StatusIdle, // PTY up, awaiting first input
 		StartedAt:      now,
 		LastActivityAt: now,
 		Cwd:            resolvedCwd,
 		Agent:          config.Agent,
 		Source:         "daemon",
+		PTY:            ptmx,
 	}
-	ps.SessionID = fmt.Sprintf("pending-%d", time.Now().UnixNano())
 	sm.mu.Lock()
-	sm.sessions[ps.SessionID] = ps
+	sm.sessions[sessionID] = ps
 	if cmd.Process != nil {
 		sm.childPids[cmd.Process.Pid] = true
+		ps.Pid = cmd.Process.Pid
 	}
 	sm.mu.Unlock()
 
-	// claude -p (stream-json) does not echo the user's prompt, so emit it
-	// ourselves so the Web/iOS client can render the user message.
+	// Emit the initial prompt as user_text for immediate Web/iOS UI feedback.
+	// (PTY claude also writes the user record to JSONL; emitting early gives
+	// instant UI render while the PTY settles.)
 	if config.Prompt != "" {
 		sm.outputCh <- protocol.DaemonEvent{
 			Type:      "user_text",
-			SessionID: ps.SessionID,
+			SessionID: sessionID,
 			Text:      config.Prompt,
 		}
 	}
 
-	go sm.readOutput(ctx, cmd, stdout, adp, ps)
-	time.Sleep(200 * time.Millisecond)
-	return ps.SessionID, nil
+	// Background lifecycle: wait for JSONL → tailer (output) → initial prompt →
+	// crash monitor.
+	go sm.servePTYSession(ctx, ps, config.Prompt)
+	return sessionID, nil
+}
+
+// servePTYSession runs the background lifecycle for a daemon PTY session:
+// waits for the JSONL history file to appear, starts the JSONL tailer (the
+// structured output channel — interactive-web-session D2), writes the initial
+// prompt once the PTY has settled (D4), and monitors the process for exit (D7).
+func (sm *SessionManager) servePTYSession(ctx context.Context, ps *ProcessState, initialPrompt string) {
+	// Drain PTY stdout continuously. claude's TUI writes constantly (banner,
+	// spinner, …); if nobody reads the PTY master, its buffer fills and claude
+	// blocks. We discard the TUI bytes; structured output comes via JSONL (D2).
+	go func() {
+		_, _ = io.Copy(io.Discard, ps.PTY)
+	}()
+
+	// Submit the initial prompt after the TUI settles (~10s to render banner +
+	// plugins). IMPORTANT: do NOT wait for the JSONL file here — claude only
+	// writes JSONL after the first turn is processed, so gating the prompt on
+	// JSONL existence deadlocks (no message → no turn → no JSONL → no prompt).
+	if initialPrompt != "" {
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(10 * time.Second):
+		}
+		if ps.PTY != nil {
+			_, _ = ps.PTY.Write([]byte(initialPrompt + "\r"))
+		}
+	}
+
+	// Start the JSONL tailer once the file appears (after the first turn). Runs
+	// concurrently so it's ready whenever claude writes.
+	go func() {
+		var tailer *watcher.JSONLTailer
+		for i := 0; i < 120; i++ { // up to ~60s after the prompt
+			select {
+			case <-ctx.Done():
+				return
+			default:
+			}
+			// Re-resolve each iteration — the JSONL file only appears after
+			// claude's first turn, and ResolveJSONLPath returns err until then.
+			if jsonlPath, err := watcher.ResolveJSONLPath(ps.SessionID, ps.Cwd); err == nil {
+				if t, e := watcher.NewJSONLTailerFromStart(jsonlPath); e == nil {
+					tailer = t
+					break
+				}
+			}
+			time.Sleep(500 * time.Millisecond)
+		}
+		if tailer == nil {
+			return
+		}
+		sm.SetTailer(ps.SessionID, tailer)
+		go tailer.Run(ctx, sm.outputCh, nil)
+		if sm.OnSessionIDResolved != nil {
+			sm.OnSessionIDResolved(ps.SessionID, ps.Cwd)
+		}
+	}()
+
+	// Monitor process exit (crash detection, D7).
+	done := make(chan struct{})
+	go func() {
+		_ = ps.Cmd.Wait()
+		close(done)
+	}()
+	select {
+	case <-ctx.Done():
+		return
+	case <-done:
+		sm.handlePTYExit(ps)
+	}
+}
+
+// handlePTYExit records the exit status of a daemon PTY session and notifies
+// clients. interactive-web-session D7.
+func (sm *SessionManager) handlePTYExit(ps *ProcessState) {
+	sm.mu.Lock()
+	exitCode := -1
+	if ps.Cmd.ProcessState != nil {
+		exitCode = ps.Cmd.ProcessState.ExitCode()
+	}
+	if exitCode == 0 {
+		ps.Status = protocol.StatusExited
+		ps.ExitReason = protocol.ExitReasonNormalExit
+	} else {
+		ps.Status = protocol.StatusError
+		ps.ExitReason = protocol.ExitReasonProcessCrash
+	}
+	if ps.PTY != nil {
+		_ = ps.PTY.Close()
+		ps.PTY = nil
+	}
+	status := ps.Status
+	reason := ps.ExitReason
+	sid := ps.SessionID
+	sm.mu.Unlock()
+
+	sm.outputCh <- protocol.DaemonEvent{
+		Type:       "session_status",
+		SessionID:  sid,
+		Status:     status,
+		ExitReason: reason,
+	}
 }
 
 // RegisterTerminalSession registers a session discovered from the terminal.
@@ -394,6 +512,7 @@ func (sm *SessionManager) readOutput(ctx context.Context, cmd *exec.Cmd, stdout 
 	scanner := bufio.NewScanner(stdout)
 	scanner.Buffer(make([]byte, 1024*1024), 1024*1024)
 
+	initSeen := false
 	for scanner.Scan() {
 		line := scanner.Text()
 		events, err := adp.ParseStreamLine(line)
@@ -422,6 +541,15 @@ func (sm *SessionManager) readOutput(ctx context.Context, cmd *exec.Cmd, stdout 
 			} else {
 				sm.mu.Unlock()
 			}
+		}
+		// Cache slash commands reported by the agent's init event (emitted once,
+		// alongside sessionID) — the authoritative list of commands available in
+		// the current (-p) environment.
+		if !initSeen && len(adp.SlashCommands()) > 0 {
+			initSeen = true
+			sm.mu.Lock()
+			ps.SlashCommands = adp.SlashCommands()
+			sm.mu.Unlock()
 		}
 		// Update last activity on each received event
 		if len(events) > 0 {
@@ -465,7 +593,6 @@ func (sm *SessionManager) SendMessage(ctx context.Context, sessionID string, con
 	cwd := ps.Cwd
 	isRunning := ps.Status == protocol.StatusRunning || ps.Status == "busy"
 	isExited := ps.Status == protocol.StatusExited
-	cancelFn := ps.Cancel
 	source := ps.Source
 	pid := ps.Pid
 	sm.mu.RUnlock()
@@ -500,12 +627,34 @@ func (sm *SessionManager) SendMessage(ctx context.Context, sessionID string, con
 		// Will spawn claude --resume below
 	}
 
-	// Daemon session or dead terminal: cancel old process if still running
-	if source == "daemon" && isRunning && cancelFn != nil {
-		cancelFn()
-		time.Sleep(100 * time.Millisecond)
+	// interactive-web-session D1/D4: daemon (web-created) session writes the
+	// message to the persistent PTY claude's stdin (CR-terminated). No respawn —
+	// the same interactive process handles all messages, preserving context.
+	if source == "daemon" {
+		sm.mu.RLock()
+		ptyFile := ps.PTY
+		sm.mu.RUnlock()
+		if ptyFile == nil || !isProcessAlive(pid) {
+			return fmt.Errorf("daemon session interactive pty unavailable (process exited)")
+		}
+		// Emit user_text for UI (the tailer also forwards claude's own records).
+		sm.outputCh <- protocol.DaemonEvent{
+			Type:      "user_text",
+			SessionID: ps.SessionID,
+			Text:      content,
+		}
+		sm.mu.Lock()
+		ps.Status = protocol.StatusRunning
+		ps.LastActivityAt = time.Now()
+		sm.mu.Unlock()
+		if _, err := ptyFile.Write([]byte(content + "\r")); err != nil {
+			return fmt.Errorf("pty stdin write: %w", err)
+		}
+		return nil
 	}
 
+	// Below: terminal session in exited state — resume via a new claude --resume
+	// process. (daemon sessions no longer reach here — they return above.)
 	cliPath, err := findAgentCLI("claude-code")
 	if err != nil {
 		return err
@@ -526,7 +675,7 @@ func (sm *SessionManager) SendMessage(ctx context.Context, sessionID string, con
 		return fmt.Errorf("start process: %w", err)
 	}
 
-	adp := adapter.NewClaudeAdapter()
+	adp := adapter.NewClaudeAdapter(content)
 	sm.mu.Lock()
 	ps.Cmd = cmd
 	ps.Cancel = cancel
@@ -556,15 +705,19 @@ func (sm *SessionManager) sendToIdleTerminal(ctx context.Context, ps *ProcessSta
 	ctx, cancel := context.WithCancel(ctx)
 	cmd := exec.CommandContext(ctx, cliPath, args...)
 	cmd.Dir = ps.Cwd
-	// Discard stdout — the JSONL tailer picks up events instead, avoiding duplicates
-	cmd.Stdout = nil
-	cmd.Stderr = nil
+	// D1: capture stdout stream-json + adapter (unified command feedback path, like daemon sessions).
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		cancel()
+		return fmt.Errorf("stdout pipe: %w", err)
+	}
 
 	if err := cmd.Start(); err != nil {
 		cancel()
 		return fmt.Errorf("start --resume: %w", err)
 	}
 
+	adp := adapter.NewClaudeAdapter(content)
 	now := time.Now()
 	sm.mu.Lock()
 	ps.Cmd = cmd
@@ -581,8 +734,33 @@ func (sm *SessionManager) sendToIdleTerminal(ctx context.Context, ps *ProcessSta
 		LastActivityAt: time.Now().UTC().Format(time.RFC3339),
 	}
 
-	// Wait for --resume to finish in background
+	// D2: pause the JSONL tailer while this --resume runs to avoid double-forwarding
+	// (stdout adapter covers all events; tailer would re-read the same JSONL lines).
+	if ps.Tailer != nil {
+		ps.Tailer.Pause()
+	}
+
+	// Wait for --resume to finish in background; forward stdout events via adapter.
 	go func() {
+		defer func() {
+			if ps.Tailer != nil {
+				ps.Tailer.Resume()
+			}
+		}()
+		scanner := bufio.NewScanner(stdout)
+		scanner.Buffer(make([]byte, 1024*1024), 1024*1024)
+		for scanner.Scan() {
+			events, perr := adp.ParseStreamLine(scanner.Text())
+			if perr != nil {
+				continue
+			}
+			for _, evt := range events {
+				if evt.SessionID == "" {
+					evt.SessionID = ps.SessionID
+				}
+				sm.outputCh <- evt
+			}
+		}
 		cmd.Wait()
 		resumeNow := time.Now()
 		sm.mu.Lock()
@@ -622,6 +800,15 @@ func (sm *SessionManager) KillSession(sessionID string) error {
 	}
 	if ps.Cancel != nil {
 		ps.Cancel()
+	}
+	// interactive-web-session D7/6.2: for PTY daemon sessions, try a graceful
+	// /exit, then ensure the PTY master is closed on return.
+	sm.mu.RLock()
+	ptyFile := ps.PTY
+	sm.mu.RUnlock()
+	if ptyFile != nil {
+		_, _ = ptyFile.Write([]byte("/exit\r"))
+		defer ptyFile.Close()
 	}
 	// Wait for the process to exit (readOutput goroutine calls Wait),
 	// but with a timeout so we don't block forever.
@@ -693,6 +880,32 @@ func (sm *SessionManager) UpdateLastActivity(sessionID string) {
 	if ps, ok := sm.sessions[sessionID]; ok {
 		ps.LastActivityAt = time.Now()
 	}
+}
+
+// GetSessionCwd returns the working directory for a session and whether the
+// session exists. Used to resolve which command sources to scan for a session.
+func (sm *SessionManager) GetSessionCwd(sessionID string) (string, bool) {
+	sm.mu.RLock()
+	defer sm.mu.RUnlock()
+	ps, ok := sm.sessions[sessionID]
+	if !ok {
+		return "", false
+	}
+	return ps.Cwd, true
+}
+
+// GetSessionSlashCommands returns the slash commands the agent reported as
+// available in its init event for this session. Empty for terminal sessions
+// or sessions whose agent hasn't emitted init yet. The bool indicates whether
+// the session exists.
+func (sm *SessionManager) GetSessionSlashCommands(sessionID string) ([]string, bool) {
+	sm.mu.RLock()
+	defer sm.mu.RUnlock()
+	ps, ok := sm.sessions[sessionID]
+	if !ok {
+		return nil, false
+	}
+	return ps.SlashCommands, true
 }
 
 type SessionInfo struct {

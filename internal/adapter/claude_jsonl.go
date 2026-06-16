@@ -11,8 +11,11 @@ import (
 // JSONL entry structures — Claude Code's session history format
 type JSONLEntry struct {
 	Type      string          `json:"type"`
+	Subtype   string          `json:"subtype,omitempty"`
 	SessionID string          `json:"sessionId"`
 	Message   *JSONLMessage   `json:"message,omitempty"`
+	Content   string          `json:"content,omitempty"`
+	IsMeta    bool            `json:"isMeta,omitempty"` // true for meta messages (e.g. local-command-caveat) — filtered from replay
 }
 
 type JSONLMessage struct {
@@ -49,7 +52,26 @@ func ParseJSONLLine(line string) ([]protocol.DaemonEvent, error) {
 	case "assistant":
 		return parseAssistantJSONL(entry, sid)
 	case "user":
+		// Filter meta user messages (e.g. <local-command-caveat> injected by
+		// local commands) — they are not real user input and shouldn't reach web.
+		if entry.IsMeta {
+			return nil, nil
+		}
 		return parseUserJSONL(entry, sid)
+	case "system":
+		// Local command feedback in history arrives as system subtype "local_command"
+		// with content <local-command-stdout>...</local-command-stdout>.
+		if entry.Subtype == "local_command" && entry.Content != "" {
+			if msg := extractLocalCommandOutput(entry.Content); msg != "" {
+				return []protocol.DaemonEvent{{
+					Type:          "command_receipt",
+					SessionID:     sid,
+					ReceiptStatus: inferReceiptStatus(msg, ""),
+					Message:       msg,
+				}}, nil
+			}
+		}
+		return nil, nil
 	default:
 		// Skip: mode, permission-mode, file-history-snapshot, attachment, etc.
 		return nil, nil

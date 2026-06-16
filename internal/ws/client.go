@@ -32,6 +32,8 @@ type Client struct {
 	daemonID string
 	hostname string
 	agents   []string
+	agentVersions map[string]string
+	agentLatests  map[string]string
 	osName   string
 	localIP  string
 	arch     string
@@ -43,7 +45,7 @@ type Client struct {
 	OnReconnected func() // called after successful (re)connection + register
 }
 
-func NewClient(relayURL, token, daemonID string, agents []string, outputCh <-chan protocol.DaemonEvent, logger *slog.Logger) *Client {
+func NewClient(relayURL, token, daemonID string, agents []string, agentVersions map[string]string, agentLatests map[string]string, outputCh <-chan protocol.DaemonEvent, logger *slog.Logger) *Client {
 	hostname, _ := os.Hostname()
 	localIP := getLocalIP()
 	osName := runtime.GOOS
@@ -56,6 +58,8 @@ func NewClient(relayURL, token, daemonID string, agents []string, outputCh <-cha
 		daemonID:  daemonID,
 		hostname:  hostname,
 		agents:    agents,
+		agentVersions: agentVersions,
+		agentLatests:  agentLatests,
 		osName:    osName,
 		localIP:   localIP,
 		arch:      runtime.GOARCH,
@@ -65,6 +69,28 @@ func NewClient(relayURL, token, daemonID string, agents []string, outputCh <-cha
 
 // SetVersion sets the daemon version for register messages.
 func (c *Client) SetVersion(v string) { c.version = v }
+
+// SetAgentVersions updates the agent version map (e.g. after an agent upgrade).
+func (c *Client) SetAgentVersions(v map[string]string) { c.agentVersions = v }
+
+// SetAgentLatests updates the agent latest-version map (e.g. after re-checking npm registry).
+func (c *Client) SetAgentLatests(v map[string]string) { c.agentLatests = v }
+
+// ResendRegister re-sends the register message to push updated info (e.g. new agent versions after upgrade).
+func (c *Client) ResendRegister() {
+	c.connMu.Lock()
+	conn := c.conn
+	c.connMu.Unlock()
+	if conn == nil {
+		return
+	}
+	c.SendMsg(protocol.RegisterMessage{
+		Type: "register", DaemonID: c.daemonID, Hostname: c.hostname, Agents: c.agents,
+		AgentVersions: c.agentVersions,
+		AgentLatests:  c.agentLatests,
+		OS: c.osName, IP: c.localIP, Arch: c.arch, Version: c.version, StartedAt: c.startedAt,
+	})
+}
 
 // SetStartedAt sets the daemon start timestamp for register messages.
 func (c *Client) SetStartedAt(t int64) { c.startedAt = t }
@@ -116,6 +142,8 @@ func (c *Client) connectAndServe(ctx context.Context) error {
 	c.logger.Info("sending register", "daemonID", c.daemonID, "hostname", c.hostname)
 	c.SendMsg(protocol.RegisterMessage{
 		Type: "register", DaemonID: c.daemonID, Hostname: c.hostname, Agents: c.agents,
+		AgentVersions: c.agentVersions,
+		AgentLatests:  c.agentLatests,
 		OS: c.osName, IP: c.localIP, Arch: c.arch, Version: c.version, StartedAt: c.startedAt,
 	})
 	c.logger.Info("register sent")
