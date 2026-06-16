@@ -56,6 +56,12 @@
 实现 → `vue-tsc --noEmit`（web）/ `go test` / `go build` → 还原度对照设计稿 HTML → 修 bug → commit。
 全部完成：`/test-new-features` 全量 + 生成 `docs/test-report-YYYY-MM-DD.html`。
 
+## ✅ 全部完成（2026-06-16）
+- C1（1a/1b/1c/1d）、C2、C3、C4 全部实现，15 项测试通过，2 个类型错误即时修复。
+- 全量测试报告：`docs/test-report-2026-06-16.html`
+- 端点实测通过：`/api/cost/summary`、`/api/cost/by-daemon/:id`、`DELETE /api/daemons/:id`。
+- 唯一待办：Agent 版本上报（C4b）需用户重启本地 daemon 后生效。
+
 ## 新会话接手步骤
 1. 读本文件 + `ui-design/web/*.html`（设计稿，含 `<style>` CSS）+ `web/src/views/*`（现状）
 2. 从 **C1-1b** 继续（HostsView 卡片↔胶囊重构）
