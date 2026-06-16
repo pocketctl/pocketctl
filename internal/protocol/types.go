@@ -61,15 +61,16 @@ type CommandItem struct {
 
 // Control messages
 type RegisterMessage struct {
-	Type      string   `json:"type"`
-	DaemonID  string   `json:"daemon_id"`
-	Hostname  string   `json:"hostname"`
-	Agents    []string `json:"agents"`
-	OS        string   `json:"os"`
-	IP        string   `json:"ip"`
-	Arch      string   `json:"arch,omitempty"`
-	Version   string   `json:"version,omitempty"`
-	StartedAt int64    `json:"started_at,omitempty"`
+	Type          string            `json:"type"`
+	DaemonID      string            `json:"daemon_id"`
+	Hostname      string            `json:"hostname"`
+	Agents        []string          `json:"agents"`
+	AgentVersions map[string]string `json:"agent_versions,omitempty"`
+	OS            string            `json:"os"`
+	IP            string            `json:"ip"`
+	Arch          string            `json:"arch,omitempty"`
+	Version       string            `json:"version,omitempty"`
+	StartedAt     int64             `json:"started_at,omitempty"`
 }
 
 type RegisterAckMessage struct {

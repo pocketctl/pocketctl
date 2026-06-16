@@ -15,7 +15,11 @@
 - [x] **C1-1d sidebar 缩放对齐**：`App.vue` 缩放按钮对齐设计稿——单箭头 `‹` → **双箭头** `«`/`»`（v-if 按 collapsed 切换图标），位置从 footer 内移到 **footer 上方**独立区块，类名 `.sidebar-toggle` → `.sidebar-toggle-btn`（`justify-content: flex-end; padding: 8px 20px`），`.main-content` 加 `margin-left` transition 平滑收起。vue-tsc + build 通过。
 - [x] **C2 Token 后端**：`relay/src/db.ts` 加 `cost_usd` 列 migration + `updateSessionCost`/`backfillSessionCost`/`getCostSummary`/`getCostByDaemon`（时段用 LAG 窗口函数算每次 turn 增量）；`router.ts` session_status 时持久化 cost_usd；`server.ts` 启动时回填历史 + `GET /api/cost/summary`（总/今日/本周/本月）+ `GET /api/cost/by-daemon/:daemonId`（主机级 + 每 session 明细）。tsc 通过（除预先存在的 tencentcloud-sdk）。
 - [x] **C3 Token 前端**：`HostsView` 顶部 `token-global-strip` 接 `/api/cost/summary`，选中主机时详情 `token-overview` + `session-token-list` 接 `/api/cost/by-daemon/:id`（`watch(selectedDaemon)`）；`DashboardView` `token-strip` 接 summary。`formatCost`（USD 美元格式，`$0.09`/`<$0.01`）。数据语义为 cost_usd（后端只存美元，非 token 数）。vue-tsc + build 通过。
-- [ ] **C4 主机管理 + Agent 版本**：daemon alias/注销接口 + Actions 完整 + agent 版本探测/上报/升级
+- [x] **C4 主机管理 + Agent 版本**：
+  - **注销**（C4a）：`DELETE /api/daemons/:id`（db.deleteDaemon，sessions 保留 daemon_id 置空）+ 前端 confirmUnregister 调用（乐观删除+失败恢复，无撤销因永久操作）。
+  - **Agent 版本上报**（C4b）：`discovery.go` 探测 `claude/codex --version` → `RegisterMessage.AgentVersions map` → relay `registerDaemon` 构造 `[{type,version}]` 存 daemons.agents JSONB → list_daemons 返回 → 前端 agentCards（C1-1b 已兼容对象数组）展示版本。需 daemon 更新生效。
+  - **升级**（C4c）：agent-card 升级按钮，点击复制手动升级命令（`npm i -g @anthropic-ai/claude-code`），未实现 daemon 侧自动升级（安全风险）。
+  - go build + relay tsc + web vue-tsc + build 通过。
 
 ## 6 个改动点（设计稿要的）
 1. **sidebar 缩放按钮**（取代旧版）

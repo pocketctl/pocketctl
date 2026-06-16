@@ -407,9 +407,13 @@ func cmdDaemonStart(args []string) {
 	// Discover agents
 	agents := discovery.DiscoverAgents()
 	agentTypes := make([]string, 0, len(agents))
+	agentVersions := make(map[string]string)
 	for _, a := range agents {
 		agentTypes = append(agentTypes, a.Type)
-		logger.Info("discovered agent", "type", a.Type, "path", a.Path)
+		if a.Version != "" {
+			agentVersions[a.Type] = a.Version
+		}
+		logger.Info("discovered agent", "type", a.Type, "path", a.Path, "version", a.Version)
 	}
 	if len(agentTypes) == 0 {
 		agentTypes = []string{"claude-code"} // default
@@ -460,7 +464,7 @@ func cmdDaemonStart(args []string) {
 
 
 	// Create WebSocket client
-	client := ws.NewClient(url, tok, id, agentTypes, outputCh, logger)
+	client := ws.NewClient(url, tok, id, agentTypes, agentVersions, outputCh, logger)
 	client.SetVersion(version)
 	client.SetStartedAt(time.Now().Unix())
 

@@ -163,7 +163,7 @@ export async function initDB(pool: pg.Pool): Promise<void> {
   await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS max_daemons INT DEFAULT 1`);
 }
 
-export async function upsertDaemon(pool: pg.Pool, daemonId: string, hostname: string, agents: string[], arch?: string, version?: string, startedAt?: number): Promise<void> {
+export async function upsertDaemon(pool: pg.Pool, daemonId: string, hostname: string, agents: any[], arch?: string, version?: string, startedAt?: number): Promise<void> {
   await pool.query(
     `INSERT INTO daemons (daemon_id, hostname, agents, status, last_heartbeat, arch, version, started_at)
      VALUES ($1, $2, $3, 'online', NOW(), $4, $5, $6)
@@ -180,6 +180,15 @@ export async function setDaemonOffline(pool: pg.Pool, daemonId: string): Promise
 
 export async function setDaemonReconnecting(pool: pg.Pool, daemonId: string): Promise<void> {
   await pool.query(`UPDATE daemons SET status = 'reconnecting' WHERE daemon_id = $1`, [daemonId]);
+}
+
+/** Delete a daemon (unregister from account). Sessions are preserved with daemon_id nulled. */
+export async function deleteDaemon(pool: pg.Pool, userId: number, daemonId: string): Promise<boolean> {
+  const check = await pool.query(`SELECT 1 FROM daemons WHERE daemon_id = $1 AND user_id = $2`, [daemonId, userId]);
+  if ((check.rowCount ?? 0) === 0) return false;
+  await pool.query(`UPDATE sessions SET daemon_id = NULL WHERE daemon_id = $1`, [daemonId]);
+  await pool.query(`DELETE FROM daemons WHERE daemon_id = $1`, [daemonId]);
+  return true;
 }
 
 export async function upsertDaemonAlias(pool: pg.Pool, userId: number, daemonId: string, alias: string | null): Promise<string | null> {

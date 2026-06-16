@@ -32,6 +32,7 @@ type Client struct {
 	daemonID string
 	hostname string
 	agents   []string
+	agentVersions map[string]string
 	osName   string
 	localIP  string
 	arch     string
@@ -43,7 +44,7 @@ type Client struct {
 	OnReconnected func() // called after successful (re)connection + register
 }
 
-func NewClient(relayURL, token, daemonID string, agents []string, outputCh <-chan protocol.DaemonEvent, logger *slog.Logger) *Client {
+func NewClient(relayURL, token, daemonID string, agents []string, agentVersions map[string]string, outputCh <-chan protocol.DaemonEvent, logger *slog.Logger) *Client {
 	hostname, _ := os.Hostname()
 	localIP := getLocalIP()
 	osName := runtime.GOOS
@@ -56,6 +57,7 @@ func NewClient(relayURL, token, daemonID string, agents []string, outputCh <-cha
 		daemonID:  daemonID,
 		hostname:  hostname,
 		agents:    agents,
+		agentVersions: agentVersions,
 		osName:    osName,
 		localIP:   localIP,
 		arch:      runtime.GOARCH,
@@ -116,6 +118,7 @@ func (c *Client) connectAndServe(ctx context.Context) error {
 	c.logger.Info("sending register", "daemonID", c.daemonID, "hostname", c.hostname)
 	c.SendMsg(protocol.RegisterMessage{
 		Type: "register", DaemonID: c.daemonID, Hostname: c.hostname, Agents: c.agents,
+		AgentVersions: c.agentVersions,
 		OS: c.osName, IP: c.localIP, Arch: c.arch, Version: c.version, StartedAt: c.startedAt,
 	})
 	c.logger.Info("register sent")

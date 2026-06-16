@@ -140,7 +140,7 @@
             </div>
           </div>
 
-          <!-- Agent 运行状态（占位，待 C4 接版本探测/上报） -->
+          <!-- Agent 运行状态（C4b 版本上报 + C4c 升级占位） -->
           <div class="hd-section">
             <div class="hd-section-title">Agent 运行状态</div>
             <template v-if="agentCards(selectedDaemon).length">
@@ -148,15 +148,16 @@
                 <div :class="['ag-icon', agentIconClass(a)]">{{ agentShort(a) }}</div>
                 <div class="ag-info">
                   <div class="ag-name">{{ agentName(a) }} <span class="ag-version">{{ agentVersionLabel(a) }}</span></div>
-                  <div class="ag-meta">Token 统计即将上线</div>
+                  <div class="ag-meta">{{ agentMetaLabel(a) }}</div>
                 </div>
+                <button v-if="selectedDaemon?.daemon_online" class="ag-upgrade-btn" @click="upgradeAgentPrompt(agentName(a))">升级</button>
               </div>
             </template>
             <div v-else class="agent-card">
               <div class="ag-icon claude">CC</div>
               <div class="ag-info">
                 <div class="ag-name">Claude Code <span class="ag-version">版本待上报</span></div>
-                <div class="ag-meta">Agent 版本与 Token 统计即将上线</div>
+                <div class="ag-meta">等待 daemon 上报 Agent 信息</div>
               </div>
             </div>
           </div>
@@ -397,12 +398,20 @@ function agentCards(d: any): any[] {
   if (d && Array.isArray(d.agents) && d.agents.length) return d.agents
   return []
 }
-function agentName(a: any): string { return typeof a === 'string' ? a : (a?.name || 'Agent') }
+function agentName(a: any): string { return typeof a === 'string' ? a : (a?.name || a?.type || 'Agent') }
 function agentShort(a: any): string { return /codex/i.test(agentName(a)) ? 'Cx' : 'CC' }
 function agentIconClass(a: any): string { return /codex/i.test(agentName(a)) ? 'codex' : 'claude' }
 function agentVersionLabel(a: any): string {
   if (typeof a === 'object' && a?.version) return 'v' + a.version
   return '版本待上报'
+}
+function agentMetaLabel(a: any): string {
+  return typeof a === 'object' && a?.version ? '已安装 · 可用' : '版本待上报'
+}
+function upgradeAgentPrompt(name: string) {
+  const isCodex = /codex/i.test(name)
+  const cmd = isCodex ? 'npm i -g @openai/codex' : 'npm i -g @anthropic-ai/claude-code'
+  navigator.clipboard.writeText(cmd).then(() => showToast(`已复制升级命令，请在主机执行：${cmd}`)).catch(() => showToast(`请在主机执行：${cmd}`))
 }
 
 function showToast(msg: string, undo?: () => void) {
@@ -515,7 +524,13 @@ function confirmUnregister(d: any) {
       const removed = daemons.value.splice(idx, 1)[0]
       if (selectedId.value === d.daemon_id) selectedId.value = daemons.value[0]?.daemon_id || null
       confirm.value.show = false
-      showToast(`已注销「${d.hostname || d.daemon_id?.slice(0, 8)}」`, () => { daemons.value.splice(idx, 0, removed) })
+      const origin = getRelayOrigin()
+      fetch(`${origin}/api/daemons/${d.daemon_id}`, { method: 'DELETE', headers: { Authorization: `Bearer ${accessToken.value}` } })
+        .then((r) => {
+          if (r.ok) showToast(`已注销「${d.hostname || d.daemon_id?.slice(0, 8)}」`)
+          else { daemons.value.splice(idx, 0, removed); showToast('注销失败，请重试') }
+        })
+        .catch(() => { daemons.value.splice(idx, 0, removed); showToast('注销失败，请重试') })
     }
   })
 }
@@ -703,6 +718,8 @@ onUnmounted(() => {
 .agent-card .ag-name { font-size: 14px; font-weight: 600; color: var(--fg); display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .agent-card .ag-version { font-family: var(--font-mono); font-size: 12px; color: var(--fg-secondary); display: inline-flex; align-items: center; gap: 4px; }
 .agent-card .ag-meta { font-size: 12px; color: var(--fg-tertiary); margin-top: 3px; }
+.ag-upgrade-btn { flex-shrink: 0; padding: 5px 11px; border-radius: var(--radius-full); border: 1px solid var(--accent); background: var(--accent-muted); color: var(--accent); font-size: 12px; font-weight: 600; cursor: pointer; font-family: var(--font-body); transition: background 0.15s, color 0.15s; white-space: nowrap; }
+.ag-upgrade-btn:hover { background: var(--accent); color: #fff; }
 
 /* Token Overview */
 .token-overview { display: flex; gap: 16px; align-items: flex-start; margin-bottom: 16px; flex-wrap: wrap; }

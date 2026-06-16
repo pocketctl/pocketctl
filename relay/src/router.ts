@@ -4,7 +4,7 @@ import * as db from './db.js';
 import { generateTitle } from './title.js';
 import { notifyUser, sessionStatusPush, daemonOfflinePush } from './push.js';
 
-interface DaemonConnection { ws: WebSocket; daemonId: string; hostname: string; agents: string[]; userId: number | null; os?: string; ip?: string; arch?: string; version?: string; startedAt?: number }
+interface DaemonConnection { ws: WebSocket; daemonId: string; hostname: string; agents: any[]; userId: number | null; os?: string; ip?: string; arch?: string; version?: string; startedAt?: number }
 interface ClientConnection { ws: WebSocket; subscribedSessions: Set<string>; userId: number | null }
 interface DaemonMetrics { cpuPct: number; memPct: number; diskPct: number; updatedAt: number }
 
@@ -24,7 +24,10 @@ export class Router {
   async registerDaemon(ws: WebSocket, msg: any, userId: number | null, tokenJti?: string, machineId?: string): Promise<void> {
     const daemonId = msg.daemon_id;
     const hostname = msg.hostname || 'unknown';
-    const agents = msg.agents || [];
+    // Compose agents as [{type, version}] objects (C4b: agent version reporting)
+    const agentTypes: string[] = msg.agents || [];
+    const agentVersions: Record<string, string> = msg.agent_versions || {};
+    const agents = agentTypes.map((t: string) => ({ type: t, version: agentVersions[t] || '' }));
 
     // Soft eviction: check for existing daemon(s) for this user
     if (userId) {
