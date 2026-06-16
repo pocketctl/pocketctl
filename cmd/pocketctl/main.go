@@ -408,12 +408,16 @@ func cmdDaemonStart(args []string) {
 	agents := discovery.DiscoverAgents()
 	agentTypes := make([]string, 0, len(agents))
 	agentVersions := make(map[string]string)
+	agentLatests := make(map[string]string)
 	for _, a := range agents {
 		agentTypes = append(agentTypes, a.Type)
 		if a.Version != "" {
 			agentVersions[a.Type] = a.Version
 		}
-		logger.Info("discovered agent", "type", a.Type, "path", a.Path, "version", a.Version)
+		if a.Latest != "" {
+			agentLatests[a.Type] = a.Latest
+		}
+		logger.Info("discovered agent", "type", a.Type, "path", a.Path, "version", a.Version, "latest", a.Latest)
 	}
 	if len(agentTypes) == 0 {
 		agentTypes = []string{"claude-code"} // default
@@ -464,7 +468,7 @@ func cmdDaemonStart(args []string) {
 
 
 	// Create WebSocket client
-	client := ws.NewClient(url, tok, id, agentTypes, agentVersions, outputCh, logger)
+	client := ws.NewClient(url, tok, id, agentTypes, agentVersions, agentLatests, outputCh, logger)
 	client.SetVersion(version)
 	client.SetStartedAt(time.Now().Unix())
 
@@ -1139,16 +1143,21 @@ func handleUpgradeAgent(client *ws.Client, logger *slog.Logger, agent string) {
 	}
 
 	agentVersions := make(map[string]string)
+	agentLatests := make(map[string]string)
 	newVer := ""
 	for _, a := range discovery.DiscoverAgents() {
 		if a.Version != "" {
 			agentVersions[a.Type] = a.Version
+		}
+		if a.Latest != "" {
+			agentLatests[a.Type] = a.Latest
 		}
 		if a.Type == "claude-code" {
 			newVer = a.Version
 		}
 	}
 	client.SetAgentVersions(agentVersions)
+	client.SetAgentLatests(agentLatests)
 	client.ResendRegister()
 	client.SendMsg(protocol.DaemonEvent{Type: "upgrade_result", Agent: agentName, Status: "success", Message: newVer})
 	logger.Info("agent upgrade done", "agent", agentName, "old", oldVer, "new", newVer)

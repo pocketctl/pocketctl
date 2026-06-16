@@ -150,9 +150,10 @@
                   <div class="ag-name">{{ agentName(a) }} <span class="ag-version">{{ agentVersionLabel(a) }}</span></div>
                   <div class="ag-meta">{{ agentMetaLabel(a) }}</div>
                 </div>
-                <button v-if="selectedDaemon?.daemon_online" class="ag-upgrade-btn" :class="{ upgrading: upgrading === agentName(a) }" :disabled="upgrading === agentName(a)" @click="upgradeAgent(agentName(a))">
+                <button v-if="selectedDaemon?.daemon_online && !isAgentLatest(a) && /claude/i.test(agentName(a))" class="ag-upgrade-btn" :class="{ upgrading: upgrading === agentName(a) }" :disabled="upgrading === agentName(a)" @click="upgradeAgent(agentName(a))">
                   {{ upgrading === agentName(a) ? '升级中…' : '升级' }}
                 </button>
+                <span v-else-if="isAgentLatest(a)" class="ag-latest">✓ 最新</span>
               </div>
             </template>
             <div v-else class="agent-card">
@@ -407,8 +408,13 @@ function agentName(a: any): string { return typeof a === 'string' ? a : (a?.name
 function agentShort(a: any): string { return /codex/i.test(agentName(a)) ? 'Cx' : 'CC' }
 function agentIconClass(a: any): string { return /codex/i.test(agentName(a)) ? 'codex' : 'claude' }
 function agentVersionLabel(a: any): string {
-  if (typeof a === 'object' && a?.version) return 'v' + a.version
-  return '版本待上报'
+  if (typeof a !== 'object' || !a?.version) return '版本待上报'
+  const v = 'v' + a.version
+  if (a.latest && a.version !== a.latest) return v + ' → v' + a.latest
+  return v
+}
+function isAgentLatest(a: any): boolean {
+  return typeof a === 'object' && !!a?.latest && a?.version === a?.latest
 }
 function agentMetaLabel(a: any): string {
   return typeof a === 'object' && a?.version ? '已安装 · 可用' : '版本待上报'
@@ -751,6 +757,7 @@ onUnmounted(() => {
 .ag-upgrade-btn:hover { background: var(--accent); color: #fff; }
 .ag-upgrade-btn:disabled { opacity: 0.6; cursor: wait; }
 .ag-upgrade-btn.upgrading { background: var(--accent); color: #fff; opacity: 0.75; }
+.ag-latest { flex-shrink: 0; color: var(--success); font-size: 12px; font-weight: 600; display: inline-flex; align-items: center; }
 
 /* Token Overview */
 .token-overview { display: flex; gap: 16px; align-items: flex-start; margin-bottom: 16px; flex-wrap: wrap; }
