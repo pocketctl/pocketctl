@@ -10,7 +10,7 @@
 
 ## 进度
 - [x] **C1-1a 仪表盘**（commit `466f32d`）：`stats-strip` 三状态点击筛选（在线/离线/活跃会话）+ `token-strip` 占位 + "管理全部"入口
-- [ ] **C1-1b 主机模块**：`host-cards-grid` 卡片网格 ↔ `hosts-selecting` 胶囊横向（选中状态机）+ 详情面板 + 顶部 `token-global-strip` 占位 + Actions 三点菜单
+- [x] **C1-1b 主机模块**：`HostsView.vue` 重构为单栏——`token-global-strip`（占位）+ `host-controls`（筛选/搜索）+ `host-cards-grid` 卡片网格 ↔ `.hosts-selecting` 胶囊横向（`selectHost` toggle 状态机 + `hosts-deselect-btn` ✕）+ 全宽 `host-detail-panel`（`host-detail-grid` 双栏：资源\|连接 / Agent\|Token / 会话全宽 + `hd-more-btn` 详情三点）。Agent/Token 占位待 C2/C3/C4。vue-tsc + vite build 通过。
 - [ ] **C1-1c 会话按 host 筛选**：`SessionList`/`SessionDetail` 路由 `?host=` / 顶部选中当前主机
 - [ ] **C1-1d sidebar 缩放对齐**（`App.vue`，已有 `.sidebar-toggle`，对齐设计稿样式）
 - [ ] **C2 Token 后端**：`sessions.cost_usd` migration + relay 持久化 + `GET /api/cost/summary` + `/api/cost/by-daemon/:id` + events 历史回填
