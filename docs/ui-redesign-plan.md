@@ -18,7 +18,7 @@
 - [x] **C4 主机管理 + Agent 版本**：
   - **注销**（C4a）：`DELETE /api/daemons/:id`（db.deleteDaemon，sessions 保留 daemon_id 置空）+ 前端 confirmUnregister 调用（乐观删除+失败恢复，无撤销因永久操作）。
   - **Agent 版本上报**（C4b）：`discovery.go` 探测 `claude/codex --version` → `RegisterMessage.AgentVersions map` → relay `registerDaemon` 构造 `[{type,version}]` 存 daemons.agents JSONB → list_daemons 返回 → 前端 agentCards（C1-1b 已兼容对象数组）展示版本。需 daemon 更新生效。
-  - **升级**（C4c）：agent-card 升级按钮，点击复制手动升级命令（`npm i -g @anthropic-ai/claude-code`），未实现 daemon 侧自动升级（安全风险）。
+  - **升级**（C4c，已完整实现）：agent-card 升级按钮 → `POST /api/daemons/:id/upgrade-agent` → relay `handleUpgrade` 转发 `upgrade_agent` 到 daemon → daemon goroutine spawn `claude update`（90s timeout，不阻塞）→ 重新探测版本 + `ResendRegister` + 发 `upgrade_result` 事件。web 按钮 loading + 收 `upgrade_result` toast + `daemon_status` 自动刷新版本。仅 claude-code（官方 `claude update` 自管升级，不需 sudo）。**实测：2.1.175 → 2.1.178，链路全程通过**。
   - go build + relay tsc + web vue-tsc + build 通过。
 
 ## 6 个改动点（设计稿要的）

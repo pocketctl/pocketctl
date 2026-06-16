@@ -212,6 +212,14 @@ export class Router {
         this.pendingSessionCreate.delete(daemonId);
         this.pendingSessionMeta?.delete(daemonId);
       }
+      // upgrade_result: broadcast to same-user clients (no session_id)
+      if (msg.type === 'upgrade_result') {
+        const d = this.daemons.get(daemonId);
+        const uid = d?.userId ?? null;
+        for (const [clientWs, client] of this.clients) {
+          if (clientWs.readyState === 1 && this.sameUser(client.userId, uid)) this.send(clientWs, msg);
+        }
+      }
       return;
     }
     const daemon = this.daemons.get(daemonId);
@@ -527,6 +535,19 @@ export class Router {
   }
 
   /** Force-kick a daemon from the Web settings page. */
+  // C4c: forward agent upgrade request to daemon. Result pushed back via upgrade_result event.
+  async handleUpgrade(daemonId: string, userId: number, agent: string): Promise<{ success: boolean; error?: string }> {
+    const daemon = this.daemons.get(daemonId);
+    if (!daemon || daemon.userId !== userId) {
+      return { success: false, error: 'forbidden' };
+    }
+    if (daemon.ws.readyState !== 1) {
+      return { success: false, error: 'daemon offline' };
+    }
+    this.send(daemon.ws, { type: 'upgrade_agent', agent: agent || 'claude-code' });
+    return { success: true };
+  }
+
   async handleForceKick(daemonId: string, userId: number): Promise<{ success: boolean; error?: string }> {
     const daemon = this.daemons.get(daemonId);
     if (!daemon) {

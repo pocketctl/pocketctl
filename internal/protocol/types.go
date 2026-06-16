@@ -37,6 +37,7 @@ type DaemonEvent struct {
 	ExitReason       string          `json:"exit_reason,omitempty"`
 	LastActivityAt   string          `json:"last_activity_at,omitempty"`
 	AgentID          string          `json:"agent_id,omitempty"`        // sub-agent identifier (e.g. "afa8314e6e3f6e552)
+	Agent            string          `json:"agent,omitempty"`           // agent type for upgrade_result (claude-code, codex)
 	SubAgentDesc     string          `json:"subagent_desc,omitempty"`   // sub-agent task description
 	SubAgentType     string          `json:"subagent_type,omitempty"`   // sub-agent type (Explore, general-purpose, etc.)
 	UserMessage      string          `json:"user_message,omitempty"`   // for generate_title_request

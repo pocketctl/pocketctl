@@ -383,6 +383,22 @@ async function main() {
     return { success: true };
   });
 
+  // Upgrade agent on a daemon (C4c): web → relay → daemon `claude update`. Async, result via upgrade_result event.
+  app.post('/api/daemons/:daemonId/upgrade-agent', async (req, reply) => {
+    const authHeader = req.headers.authorization;
+    if (!authHeader?.startsWith('Bearer ')) { reply.code(401); return { error: 'authorization required' }; }
+    const payload = verifyAccessToken(authHeader.slice(7));
+    if (!payload) { reply.code(401); return { error: 'invalid token' }; }
+    const { daemonId } = req.params as any;
+    const { agent } = (req.body as any) || {};
+    const result = await router.handleUpgrade(daemonId, payload.userId, agent);
+    if (!result.success) {
+      reply.code(result.error === 'forbidden' ? 403 : 400);
+      return { error: result.error || 'failed' };
+    }
+    return { success: true };
+  });
+
   // ---- Session Actions (REST) ----
 
   // Rename session

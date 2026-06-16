@@ -1100,11 +1100,58 @@ func handleCommands(ctx context.Context, client *ws.Client, sm *session.SessionM
 					Commands:  commands.ListCommands(cwd, available),
 				})
 
+			case "upgrade_agent":
+				go handleUpgradeAgent(client, logger, cmd.Agent)
+
 			default:
 				logger.Debug("unknown command", "type", cmd.Type)
 			}
 		}
 	}
+}
+
+// handleUpgradeAgent spawns `claude update` for the requested agent, then re-discovers
+// versions and pushes a fresh register + upgrade_result event. Only claude-code is supported.
+func handleUpgradeAgent(client *ws.Client, logger *slog.Logger, agent string) {
+	agentName := agent
+	if agentName == "" {
+		agentName = "claude-code"
+	}
+	if agentName != "claude-code" {
+		client.SendMsg(protocol.DaemonEvent{Type: "upgrade_result", Agent: agentName, Status: "failed", Error: "仅支持 claude-code 升级"})
+		return
+	}
+	oldVer := ""
+	for _, a := range discovery.DiscoverAgents() {
+		if a.Type == "claude-code" {
+			oldVer = a.Version
+		}
+	}
+	logger.Info("agent upgrade start", "agent", agentName, "old_version", oldVer)
+
+	upCtx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+	defer cancel()
+	out, err := exec.CommandContext(upCtx, "claude", "update").CombinedOutput()
+	if err != nil {
+		logger.Error("agent upgrade failed", "agent", agentName, "error", err, "output", string(out))
+		client.SendMsg(protocol.DaemonEvent{Type: "upgrade_result", Agent: agentName, Status: "failed", Error: fmt.Sprintf("%v: %s", err, strings.TrimSpace(string(out)))})
+		return
+	}
+
+	agentVersions := make(map[string]string)
+	newVer := ""
+	for _, a := range discovery.DiscoverAgents() {
+		if a.Version != "" {
+			agentVersions[a.Type] = a.Version
+		}
+		if a.Type == "claude-code" {
+			newVer = a.Version
+		}
+	}
+	client.SetAgentVersions(agentVersions)
+	client.ResendRegister()
+	client.SendMsg(protocol.DaemonEvent{Type: "upgrade_result", Agent: agentName, Status: "success", Message: newVer})
+	logger.Info("agent upgrade done", "agent", agentName, "old", oldVer, "new", newVer)
 }
 
 // readJSONLLines reads up to maxLines from a JSONL file and returns them as a slice.

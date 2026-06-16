@@ -68,6 +68,24 @@ func NewClient(relayURL, token, daemonID string, agents []string, agentVersions 
 // SetVersion sets the daemon version for register messages.
 func (c *Client) SetVersion(v string) { c.version = v }
 
+// SetAgentVersions updates the agent version map (e.g. after an agent upgrade).
+func (c *Client) SetAgentVersions(v map[string]string) { c.agentVersions = v }
+
+// ResendRegister re-sends the register message to push updated info (e.g. new agent versions after upgrade).
+func (c *Client) ResendRegister() {
+	c.connMu.Lock()
+	conn := c.conn
+	c.connMu.Unlock()
+	if conn == nil {
+		return
+	}
+	c.SendMsg(protocol.RegisterMessage{
+		Type: "register", DaemonID: c.daemonID, Hostname: c.hostname, Agents: c.agents,
+		AgentVersions: c.agentVersions,
+		OS: c.osName, IP: c.localIP, Arch: c.arch, Version: c.version, StartedAt: c.startedAt,
+	})
+}
+
 // SetStartedAt sets the daemon start timestamp for register messages.
 func (c *Client) SetStartedAt(t int64) { c.startedAt = t }
 

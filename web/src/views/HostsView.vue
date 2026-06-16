@@ -150,7 +150,9 @@
                   <div class="ag-name">{{ agentName(a) }} <span class="ag-version">{{ agentVersionLabel(a) }}</span></div>
                   <div class="ag-meta">{{ agentMetaLabel(a) }}</div>
                 </div>
-                <button v-if="selectedDaemon?.daemon_online" class="ag-upgrade-btn" @click="upgradeAgentPrompt(agentName(a))">升级</button>
+                <button v-if="selectedDaemon?.daemon_online" class="ag-upgrade-btn" :class="{ upgrading: upgrading === agentName(a) }" :disabled="upgrading === agentName(a)" @click="upgradeAgent(agentName(a))">
+                  {{ upgrading === agentName(a) ? '升级中…' : '升级' }}
+                </button>
               </div>
             </template>
             <div v-else class="agent-card">
@@ -299,6 +301,9 @@ const menuX = ref(0)
 const menuY = ref(0)
 const menuTarget = ref<any>(null)
 
+// C4c: agent upgrade (claude-code) in-flight state
+const upgrading = ref('')
+
 // C3: Token cost data (from C2 backend — cost_usd in USD)
 const tokenGlobal = ref<{ total: number; today: number; thisWeek: number; thisMonth: number } | null>(null)
 const daemonCost = ref<{ total: number; today: number; thisMonth: number; sessions: Array<{ session_id: string; title: string; cost_usd: number }> } | null>(null)
@@ -408,10 +413,28 @@ function agentVersionLabel(a: any): string {
 function agentMetaLabel(a: any): string {
   return typeof a === 'object' && a?.version ? '已安装 · 可用' : '版本待上报'
 }
-function upgradeAgentPrompt(name: string) {
-  const isCodex = /codex/i.test(name)
-  const cmd = isCodex ? 'npm i -g @openai/codex' : 'npm i -g @anthropic-ai/claude-code'
-  navigator.clipboard.writeText(cmd).then(() => showToast(`已复制升级命令，请在主机执行：${cmd}`)).catch(() => showToast(`请在主机执行：${cmd}`))
+async function upgradeAgent(name: string) {
+  if (!/claude/i.test(name)) { showToast('暂仅支持 Claude Code 一键升级'); return }
+  if (upgrading.value) return
+  const d = selectedDaemon.value
+  if (!d) return
+  upgrading.value = name
+  try {
+    const origin = getRelayOrigin()
+    const r = await fetch(`${origin}/api/daemons/${d.daemon_id}/upgrade-agent`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${accessToken.value}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ agent: 'claude-code' }),
+    })
+    if (!r.ok) {
+      showToast('升级请求发送失败')
+      upgrading.value = ''
+    }
+    // 成功后等待 upgrade_result 事件反馈（daemon 异步执行 claude update）
+  } catch {
+    showToast('升级请求发送失败')
+    upgrading.value = ''
+  }
 }
 
 function showToast(msg: string, undo?: () => void) {
@@ -578,10 +601,16 @@ onMounted(() => {
   cleanups.push(onEvent('daemon_status', (msg: any) => {
     const idx = daemons.value.findIndex(d => d.daemon_id === msg.daemon_id)
     if (idx >= 0) {
+      if (msg.agents) daemons.value[idx].agents = msg.agents
       if (msg.status === 'online') { daemons.value[idx].daemon_online = true; daemons.value[idx].status = 'online'; if (msg.hostname) daemons.value[idx].hostname = msg.hostname; if (msg.os) daemons.value[idx].os = msg.os; if (msg.ip) daemons.value[idx].ip = msg.ip }
       else if (msg.status === 'offline') { daemons.value[idx].daemon_online = false; daemons.value[idx].status = 'offline' }
       else if (msg.status === 'reconnecting') { daemons.value[idx].status = 'reconnecting' }
     } else if (msg.status === 'online') { daemons.value.push({ daemon_id: msg.daemon_id, hostname: msg.hostname, agents: msg.agents, daemon_online: true, daemon_alias: msg.alias || null, os: msg.os, ip: msg.ip, status: 'online' }) }
+  }))
+  cleanups.push(onEvent('upgrade_result', (msg: any) => {
+    upgrading.value = ''
+    if (msg.status === 'success') showToast(`Claude Code 已升级${msg.message ? '到 v' + msg.message : ''}`)
+    else showToast(`升级失败：${msg.error || '未知错误'}`)
   }))
 })
 
@@ -720,6 +749,8 @@ onUnmounted(() => {
 .agent-card .ag-meta { font-size: 12px; color: var(--fg-tertiary); margin-top: 3px; }
 .ag-upgrade-btn { flex-shrink: 0; padding: 5px 11px; border-radius: var(--radius-full); border: 1px solid var(--accent); background: var(--accent-muted); color: var(--accent); font-size: 12px; font-weight: 600; cursor: pointer; font-family: var(--font-body); transition: background 0.15s, color 0.15s; white-space: nowrap; }
 .ag-upgrade-btn:hover { background: var(--accent); color: #fff; }
+.ag-upgrade-btn:disabled { opacity: 0.6; cursor: wait; }
+.ag-upgrade-btn.upgrading { background: var(--accent); color: #fff; opacity: 0.75; }
 
 /* Token Overview */
 .token-overview { display: flex; gap: 16px; align-items: flex-start; margin-bottom: 16px; flex-wrap: wrap; }
