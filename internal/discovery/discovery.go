@@ -3,7 +3,7 @@ package discovery
 import (
 	"fmt"
 	"os/exec"
-	"strings"
+	"regexp"
 )
 
 type AgentInfo struct {
@@ -22,6 +22,8 @@ var knownAgents = []struct {
 	{"codex", "codex"},
 }
 
+var versionRe = regexp.MustCompile(`\d+\.\d+(?:\.\d+)?`)
+
 func DiscoverAgents() []AgentInfo {
 	var agents []AgentInfo
 	for _, a := range knownAgents {
@@ -34,21 +36,14 @@ func DiscoverAgents() []AgentInfo {
 	return agents
 }
 
-// detectVersion runs `<cli> --version` and extracts the leading version token.
-// e.g. "2.1.175 (claude-code)" → "2.1.175". Returns "" if detection fails.
+// detectVersion runs `<cli> --version` and extracts the first version-number token.
+// e.g. "2.1.175 (Claude Code)" → "2.1.175", "codex-cli 0.124.0" → "0.124.0", "1.2.15" → "1.2.15".
 func detectVersion(cli string) string {
 	out, err := exec.Command(cli, "--version").Output()
-	if err != nil {
+	if err != nil || len(out) == 0 {
 		return ""
 	}
-	s := strings.TrimSpace(string(out))
-	if s == "" {
-		return ""
-	}
-	if i := strings.IndexAny(s, " \t\n"); i > 0 {
-		s = s[:i]
-	}
-	return s
+	return versionRe.FindString(string(out))
 }
 
 func AgentTypeToCLI(agentType string) (string, error) {
