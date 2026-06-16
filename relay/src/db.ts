@@ -653,6 +653,23 @@ export async function getCostByDaemon(pool: pg.Pool, userId: number, daemonId: s
   };
 }
 
+/** Per-daemon session counts (active running/busy + total) for a user. */
+export async function getSessionCountsByUser(pool: pg.Pool, userId: number): Promise<Record<string, { active: number; total: number }>> {
+  const result = await pool.query(`
+    SELECT daemon_id,
+      COUNT(*)::int AS total,
+      COUNT(*) FILTER (WHERE status IN ('running','busy'))::int AS active
+    FROM sessions
+    WHERE user_id = $1 AND daemon_id IS NOT NULL AND session_id NOT LIKE 'pending-%'
+    GROUP BY daemon_id
+  `, [userId]);
+  const map: Record<string, { active: number; total: number }> = {};
+  for (const row of result.rows) {
+    map[row.daemon_id] = { active: row.active ?? 0, total: row.total ?? 0 };
+  }
+  return map;
+}
+
 export function parseDBUrl(url: string): DBConfig {
   try {
     const parsed = new URL(url);

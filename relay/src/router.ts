@@ -488,11 +488,13 @@ export class Router {
   private async handleListDaemons(clientWs: WebSocket, userId: number | null): Promise<void> {
     try {
       const daemonList: any[] = [];
+      const sessionCounts = userId ? await db.getSessionCountsByUser(this.pool, userId) : {};
       for (const [, daemon] of this.daemons) {
         console.log('[router] list_daemons iterating daemon', daemon.daemonId, 'daemon.userId:', daemon.userId, 'request.userId:', userId);
         if (!this.sameUser(daemon.userId, userId)) continue;
         const alias = await db.getDaemonAlias(this.pool, daemon.daemonId);
         const metrics = this.daemonMetrics.get(daemon.daemonId);
+        const counts = sessionCounts[daemon.daemonId];
         daemonList.push({
           daemon_id: daemon.daemonId,
           hostname: daemon.hostname,
@@ -508,6 +510,8 @@ export class Router {
           cpu_pct: metrics?.cpuPct ?? null,
           mem_pct: metrics?.memPct ?? null,
           disk_pct: metrics?.diskPct ?? null,
+          active_sessions: counts?.active ?? 0,
+          total_sessions: counts?.total ?? 0,
         });
       }
       // Also include offline daemons from DB for this user
@@ -518,6 +522,7 @@ export class Router {
             [userId]
           );
           for (const row of result.rows) {
+            const counts = sessionCounts[row.daemon_id];
             daemonList.push({
               daemon_id: row.daemon_id,
               hostname: row.hostname,
@@ -526,6 +531,8 @@ export class Router {
               daemon_alias: row.alias,
               status: 'offline',
               last_seen_at: row.last_heartbeat,
+              active_sessions: counts?.active ?? 0,
+              total_sessions: counts?.total ?? 0,
             });
           }
         } catch (e) { console.error('list_daemons offline:', e); }
