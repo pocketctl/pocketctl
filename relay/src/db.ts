@@ -234,6 +234,24 @@ export async function getEventsAfter(pool: pg.Pool, sessionId: string, lastSeq: 
   return result.rows;
 }
 
+// session-history-pagination: backward queries (recent N / cursor-before N).
+// Returns rows in id DESC order (newest first); client reverses for rendering.
+export async function getRecentEvents(pool: pg.Pool, sessionId: string, limit: number): Promise<any[]> {
+  const result = await pool.query(
+    `SELECT id, session_id, event_type, payload, created_at FROM events WHERE session_id = $1 ORDER BY id DESC LIMIT $2`,
+    [sessionId, limit]
+  );
+  return result.rows;
+}
+
+export async function getEventsBefore(pool: pg.Pool, sessionId: string, cursor: number, limit: number): Promise<any[]> {
+  const result = await pool.query(
+    `SELECT id, session_id, event_type, payload, created_at FROM events WHERE session_id = $1 AND id < $2 ORDER BY id DESC LIMIT $3`,
+    [sessionId, cursor, limit]
+  );
+  return result.rows;
+}
+
 export async function listSessions(pool: pg.Pool): Promise<any[]> {
   const result = await pool.query(
     `SELECT s.session_id, s.daemon_id, s.agent_type, s.cwd, s.title, s.source, s.status,

@@ -351,7 +351,7 @@ export class Router {
     const client = this.clients.get(clientWs);
     if (!client) return;
     if (msg.session_id) client.subscribedSessions.add(msg.session_id);
-    if (msg.type === 'replay') { this.handleReplay(clientWs, msg.session_id, msg.last_seq, msg.req_id); return; }
+    if (msg.type === 'replay') { this.handleReplay(clientWs, msg.session_id, msg.last_seq, msg.req_id, msg.direction, msg.limit); return; }
     if (msg.type === 'list_sessions') { this.handleListSessions(clientWs, client.userId); return; }
     if (msg.type === 'list_daemons') { console.log('[router] list_daemons from user', client.userId, 'daemons in map:', this.daemons.size); this.handleListDaemons(clientWs, client.userId); return; }
 
@@ -443,15 +443,29 @@ export class Router {
     this.send(clientWs, { type: 'error', error: 'session not found or daemon offline' });
   }
 
-  private async handleReplay(clientWs: WebSocket, sessionId: string, lastSeq: number, reqId?: number): Promise<void> {
+  private async handleReplay(clientWs: WebSocket, sessionId: string, lastSeq: number, reqId?: number, direction?: string, limit?: number): Promise<void> {
     const withReq = (obj: any) => reqId !== undefined ? { ...obj, req_id: reqId } : obj;
+    // session-history-pagination: backward direction paginates history (recent N / cursor-before N).
+    // Default forward (id > lastSeq ASC) preserves existing full-load behavior for old clients.
+    const isBackward = direction === 'backward';
+    const lim = isBackward && limit && limit > 0 ? limit : 100;
     try {
-      const events = await db.getEventsAfter(this.pool, sessionId, lastSeq);
+      let events: any[];
+      if (isBackward) {
+        events = (lastSeq && lastSeq > 0)
+          ? await db.getEventsBefore(this.pool, sessionId, lastSeq, lim)
+          : await db.getRecentEvents(this.pool, sessionId, lim);
+      } else {
+        events = await db.getEventsAfter(this.pool, sessionId, lastSeq);
+      }
+      // has_more (backward only, count-based heuristic): a full page implies older rows may exist.
+      const hasMore = isBackward ? events.length === lim : false;
       if (events.length === 0) {
-        this.send(clientWs, withReq({ type: 'replay_end', session_id: sessionId, count: 0, last_seq: lastSeq }));
+        this.send(clientWs, withReq({ type: 'replay_end', session_id: sessionId, count: 0, last_seq: lastSeq, has_more: false }));
         return;
       }
-      // Send events in batches of 50 to reduce WebSocket frame overhead
+      // backward rows arrive in id DESC; forward rows in id ASC. Batches keep that order;
+      // the client reverses backward batches before render/prepend.
       const BATCH = 50;
       for (let i = 0; i < events.length; i += BATCH) {
         const slice = events.slice(i, i + BATCH);
@@ -460,19 +474,20 @@ export class Router {
           session_id: sessionId,
           events: slice.map(e => e.payload),
           last_seq: slice[slice.length - 1].id,
+          direction: direction || 'forward',
         }));
       }
-      // Signal completion with final seq for incremental replay
       this.send(clientWs, withReq({
         type: 'replay_end',
         session_id: sessionId,
         count: events.length,
         last_seq: events[events.length - 1].id,
+        has_more: hasMore,
       }));
     } catch (err) {
       console.error('replay error:', err);
       // Always send replay_end so the client doesn't hang on isLoading
-      this.send(clientWs, withReq({ type: 'replay_end', session_id: sessionId, count: 0, last_seq: lastSeq }));
+      this.send(clientWs, withReq({ type: 'replay_end', session_id: sessionId, count: 0, last_seq: lastSeq, has_more: false }));
     }
   }
 

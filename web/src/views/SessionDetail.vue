@@ -120,8 +120,8 @@
           <CommandReceiptCard v-else-if="msg.type === 'command_receipt'" :command="msg.command" :status="msg.receiptStatus" :message="msg.message" />
         </template>
 
-        <!-- Scroll to bottom -->
-        <button v-if="!autoScroll" class="scroll-to-bottom" @click="scrollToBottom">↓</button>
+        <!-- Scroll to bottom (iOS-style floating button; always visible when there are messages) -->
+        <button v-if="messages.length > 0" class="scroll-to-bottom" :class="{ 'at-bottom': autoScroll }" title="回到底部" @click="scrollToBottom">↓</button>
       </div>
 
       <!-- Chat Input -->
@@ -172,6 +172,11 @@ const messageInput = ref('')
 const commandsCache = ref<CommandItem[]>([])
 const replayReqId = ref(0)
 const isLoading = ref(false)
+// session-history-pagination: backward pagination state
+const pageSize = computed(() => 50)  // session-history-pagination: 一次加载 50 条（平衡首屏/翻页性能）
+const loadedMinId = ref(0)      // oldest loaded event id (backward cursor)
+const isLoadingBackward = ref(false)  // a pagination (scroll-up) request in flight
+const hasMore = ref(false)      // relay signaled older events exist
 const isPendingSession = computed(() => sessionId.value.startsWith('pending-'))
 const selectedIndex = ref(0)
 const popoverDismissed = ref(false)
@@ -306,6 +311,12 @@ function onMessagesScroll() {
   if (!messagesEl.value) return
   const { scrollTop, scrollHeight, clientHeight } = messagesEl.value
   autoScroll.value = scrollHeight - scrollTop - clientHeight < 60
+  // session-history-pagination: scrolled to top → fetch older page (backward)
+  if (scrollTop < 60 && hasMore.value && !isLoadingBackward.value && !isLoading.value && loadedMinId.value > 0) {
+    isLoadingBackward.value = true
+    replayReqId.value++
+    send({ type: 'replay', session_id: sessionId.value, direction: 'backward', last_seq: loadedMinId.value, limit: pageSize.value, req_id: replayReqId.value })
+  }
 }
 
 function focusResumeInput() { if (inputEl.value) { inputEl.value.focus() } }
@@ -376,8 +387,8 @@ function nextId(prefix: string) { return prefix + (++msgCounter.value) }
 // requested.", "/model isn't available...") share text across history and new
 // commands, so a global Set would wrongly swallow a new command's reply that
 // matches a historical one.
-function isDuplicate(type: string, text: string): boolean {
-  const last = messages.value[messages.value.length - 1]
+function isDuplicate(type: string, text: string, target = messages.value): boolean {
+  const last = target[target.length - 1]
   return !!last && last.type === type && (last.content || '') === text
 }
 
@@ -408,21 +419,21 @@ function formatToolInput(tool: string, input: any): string {
   return ''
 }
 
-function processEvent(evt: any) {
+function processEvent(evt: any, target: any[] = messages.value) {
   const type = evt.type || evt.event_type
   if (type === 'user_text') {
     const text = evt.text || evt.content || evt.payload?.text || evt.payload?.content || ''
-    if (text && !isDuplicate('user_text', text)) messages.value.push({ id: nextId('u'), type: 'user_text', role: 'user', content: text })
+    if (text && !isDuplicate('user_text', text, target)) target.push({ id: nextId('u'), type: 'user_text', role: 'user', content: text })
   } else if (type === 'agent_text') {
     const content = evt.text || evt.content || evt.payload?.text || evt.payload?.content || ''
-    if (!content || isDuplicate('agent_text', content)) return
+    if (!content || isDuplicate('agent_text', content, target)) return
     const streaming = evt.streaming ?? evt.payload?.streaming ?? false
-    const last = messages.value[messages.value.length - 1]
+    const last = target[target.length - 1]
     if (last && last.type === 'agent_text' && last.streaming && !content.startsWith('\n')) {
       last.content += content
       if (!streaming) last.streaming = false
     } else {
-      messages.value.push({ id: nextId('a'), type: 'agent_text', role: 'agent', content, streaming })
+      target.push({ id: nextId('a'), type: 'agent_text', role: 'agent', content, streaming })
     }
   } else if (type === 'tool_call') {
     const callId = evt.call_id || evt.payload?.call_id
@@ -431,7 +442,7 @@ function processEvent(evt: any) {
     const input = evt.input || evt.payload?.input
     const inputDesc = formatToolInput(tool, input)
     // Always create new tool_call message (matches iOS app)
-    messages.value.push({
+    target.push({
       id: nextId('t'), type: 'tool_call', call_id: callId,
       tool, input, inputDesc,
       output: null, status: 'running',
@@ -443,15 +454,15 @@ function processEvent(evt: any) {
     if (!callId) return
     // Find last matching tool_call (matches iOS app lastIndex logic)
     let idx = -1
-    for (let i = messages.value.length - 1; i >= 0; i--) {
-      if (messages.value[i].type === 'tool_call' && messages.value[i].call_id === callId) {
+    for (let i = target.length - 1; i >= 0; i--) {
+      if (target[i].type === 'tool_call' && target[i].call_id === callId) {
         idx = i
         break
       }
     }
     if (idx >= 0) {
-      if (output) messages.value[idx].output = output
-      messages.value[idx].status = 'completed'
+      if (output) target[idx].output = output
+      target[idx].status = 'completed'
     }
   } else if (type === 'session_status') {
     const s = evt.status || evt.payload?.status
@@ -459,7 +470,7 @@ function processEvent(evt: any) {
     if (evt.exit_reason || evt.payload?.exit_reason) exitReason.value = evt.exit_reason || evt.payload.exit_reason
     if (evt.exited_at || evt.payload?.exited_at) exitedAt.value = evt.exited_at || evt.payload.exited_at
   } else if (type === 'command_receipt') {
-    messages.value.push({
+    target.push({
       id: nextId('r'), type: 'command_receipt',
       command: evt.command || '', receiptStatus: evt.receipt_status || 'success',
       message: evt.message || '',
@@ -477,7 +488,10 @@ watch(sessionId, (newId, oldId) => {
     commandsCache.value = []
     replayReqId.value++
     isLoading.value = true
-    send({ type: 'replay', session_id: newId, last_seq: 0, req_id: replayReqId.value })
+    loadedMinId.value = 0
+    isLoadingBackward.value = false
+    hasMore.value = false
+    send({ type: 'replay', session_id: newId, direction: 'backward', limit: pageSize.value, req_id: replayReqId.value })
     send({ type: 'list_commands', session_id: newId })
   }
 })
@@ -490,7 +504,10 @@ onMounted(() => {
   send({ type: 'list_daemons' })
   replayReqId.value++
   isLoading.value = true
-  send({ type: 'replay', session_id: sessionId.value, last_seq: 0, req_id: replayReqId.value })
+  loadedMinId.value = 0
+  isLoadingBackward.value = false
+  hasMore.value = false
+  send({ type: 'replay', session_id: sessionId.value, direction: 'backward', limit: pageSize.value, req_id: replayReqId.value })
   send({ type: 'list_commands', session_id: sessionId.value })
 
   cleanups.push(onEvent('session_list', (msg: any) => {
@@ -519,15 +536,38 @@ onMounted(() => {
   cleanups.push(onEvent('replay_batch', (msg: any) => {
     if (msg.session_id !== sessionId.value) return
     if (msg.req_id !== undefined && msg.req_id !== replayReqId.value) return // D4: stale batch
-    for (const evt of msg.events) {
-      processEvent(evt)
+    const isBackward = msg.direction === 'backward'
+    // backward batches arrive in id DESC; reverse to ASC for chronological render/prepend
+    const evts = isBackward ? [...msg.events].reverse() : msg.events
+    if (isLoadingBackward.value && isBackward) {
+      // pagination: build page into a temp array, prepend in ONE shot, then manually
+      // restore scrollTop so the viewport stays on the exact same content.
+      // overflow-anchor is DISABLED (CSS) because it mis-anchors to the newly prepended
+      // top element and yanks the viewport to the oldest record. Manual restore is precise.
+      const oldScrollHeight = messagesEl.value?.scrollHeight || 0
+      const oldScrollTop = messagesEl.value?.scrollTop || 0
+      const tempMsgs: any[] = []
+      for (const evt of evts) processEvent(evt, tempMsgs)
+      if (tempMsgs.length) messages.value = [...tempMsgs, ...messages.value]
+      nextTick(() => {
+        if (!messagesEl.value) return
+        const delta = messagesEl.value.scrollHeight - oldScrollHeight
+        messagesEl.value.scrollTop = oldScrollTop + delta
+      })
+    } else {
+      // initial load (first backward page, or legacy forward full-load): render + scroll bottom
+      for (const evt of evts) processEvent(evt)
+      nextTick(scrollToBottom)
     }
-    nextTick(scrollToBottom)
   }))
   cleanups.push(onEvent('replay_end', (msg: any) => {
     if (msg.session_id !== sessionId.value) return
     if (msg.req_id !== undefined && msg.req_id !== replayReqId.value) return
     isLoading.value = false
+    isLoadingBackward.value = false
+    if (msg.has_more !== undefined) hasMore.value = !!msg.has_more
+    // backward: last_seq is the oldest id of the returned page → next page cursor
+    if (msg.last_seq && (!loadedMinId.value || msg.last_seq < loadedMinId.value)) loadedMinId.value = msg.last_seq
   }))
 
   cleanups.push(onEvent('user_text', (msg: any) => {
@@ -570,7 +610,7 @@ onMounted(() => {
       messages.value = []
       replayReqId.value++
       isLoading.value = true
-      send({ type: 'replay', session_id: msg.session_id, last_seq: 0, req_id: replayReqId.value })
+      send({ type: 'replay', session_id: msg.session_id, direction: 'backward', limit: pageSize.value, req_id: replayReqId.value })
     }
   }))
 
@@ -650,8 +690,12 @@ onUnmounted(() => {
 .copy-btn:hover { color: var(--accent); background: var(--accent-muted); }
 
 /* Messages */
-.chat-messages { flex: 1; overflow-y: auto; padding: 20px; display: flex; flex-direction: column; gap: 16px; position: relative; }
-.scroll-to-bottom { position: absolute; bottom: 16px; right: 24px; width: 36px; height: 36px; border-radius: 50%; border: 1px solid var(--border); background: var(--surface); color: var(--fg); font-size: 16px; cursor: pointer; display: flex; align-items: center; justify-content: center; box-shadow: var(--shadow-sm); transition: background 0.15s; z-index: 10; }
+.chat-messages { flex: 1; overflow-y: auto; padding: 20px; display: flex; flex-direction: column; gap: 16px; position: relative; overflow-anchor: none; }
+.scroll-to-bottom { position: fixed; bottom: 88px; right: 24px; width: 44px; height: 44px; border-radius: 50%; border: 1px solid var(--border); background: var(--surface); color: var(--fg); font-size: 20px; cursor: pointer; display: flex; align-items: center; justify-content: center; box-shadow: 0 4px 14px rgba(0,0,0,0.35); transition: transform 0.15s, background 0.15s, opacity 0.2s; z-index: 100; }
+.scroll-to-bottom:hover { background: var(--surface-hover); transform: scale(1.08); }
+.scroll-to-bottom:active { transform: scale(0.96); }
+.scroll-to-bottom.at-bottom { opacity: 0.35; }
+.scroll-to-bottom.at-bottom:hover { opacity: 1; }
 .scroll-to-bottom:hover { background: var(--surface-hover); }
 
 /* Messages — matches design spec exactly */
