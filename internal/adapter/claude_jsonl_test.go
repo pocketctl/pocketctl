@@ -177,3 +177,31 @@ func TestParseJSONLLineBackwardCompat(t *testing.T) {
 		t.Fatalf("ParseJSONLLine regression: expected agent_text, got %v", events)
 	}
 }
+
+func TestJSONLStreamParserUsageForwarded(t *testing.T) {
+	p := NewJSONLStreamParser()
+	line := `{"type":"assistant","sessionId":"s1","message":{"role":"assistant","model":"claude-sonnet-4","content":[{"type":"text","text":"Hi"}],"usage":{"input_tokens":500,"output_tokens":30,"cache_read_input_tokens":3000}}}`
+	events, _ := p.Parse(line)
+	if len(events) != 1 || events[0].Usage == nil {
+		t.Fatalf("expected agent_text with usage, got %v", events)
+	}
+	if events[0].Usage.InputTokens != 500 {
+		t.Errorf("expected 500 input tokens, got %d", events[0].Usage.InputTokens)
+	}
+}
+
+func TestJSONLResultEventForwarded(t *testing.T) {
+	// PTY path previously dropped result events — verify cost/turns now forwarded.
+	p := NewJSONLStreamParser()
+	line := `{"type":"result","sessionId":"s1","total_cost_usd":0.0878,"num_turns":1}`
+	events, _ := p.Parse(line)
+	if len(events) != 1 || events[0].Type != "session_status" {
+		t.Fatalf("expected session_status, got %v", events)
+	}
+	if events[0].CostUSD != 0.0878 {
+		t.Errorf("expected cost 0.0878, got %f", events[0].CostUSD)
+	}
+	if events[0].Turns != 1 {
+		t.Errorf("expected 1 turn, got %d", events[0].Turns)
+	}
+}

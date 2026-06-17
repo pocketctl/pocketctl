@@ -343,3 +343,19 @@ func TestExtractLocalCommandOutput(t *testing.T) {
 		t.Errorf("expected empty for no tags, got %q", got)
 	}
 }
+
+func TestAssistantUsageForwarded(t *testing.T) {
+	a := NewClaudeAdapter("hello")
+	line := `{"type":"assistant","message":{"role":"assistant","model":"claude-sonnet-4","content":[{"type":"text","text":"Hi"}],"usage":{"input_tokens":1200,"output_tokens":50,"cache_read_input_tokens":8000}}}`
+	events, _ := a.ParseStreamLine(line)
+	if len(events) != 1 || events[0].Type != "agent_text" {
+		t.Fatalf("expected 1 agent_text, got %v", events)
+	}
+	u := events[0].Usage
+	if u == nil {
+		t.Fatal("expected Usage non-nil")
+	}
+	if u.InputTokens != 1200 || u.OutputTokens != 50 || u.CacheRead != 8000 {
+		t.Errorf("unexpected usage: %+v", u)
+	}
+}

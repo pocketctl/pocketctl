@@ -46,6 +46,10 @@
           <span class="daemon-name">· {{ daemonName }}</span>
         </div>
         <span :class="['status-pill', statusClass]"><span class="pulse"></span>{{ statusLabel }}</span>
+        <span v-if="contextTokens" class="context-pill" title="当前 context 用量（输入 + 缓存 token）">
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/></svg>
+          {{ contextTokens }}
+        </span>
         <div class="session-id-box">
           <code class="session-id-text">{{ sessionId?.slice(0, 8) }}</code>
           <button class="copy-btn" @click="copySessionId" :title="copied ? '已复制' : '复制会话ID'">
@@ -245,6 +249,18 @@ const sessionTitle = computed(() => {
 
 const statusSubtext = computed(() => isDaemonOnline.value ? '已连接' : '等待恢复')
 
+// Context token usage — from the last agent_text message that carried usage.
+const contextTokens = computed(() => {
+  for (let i = messages.value.length - 1; i >= 0; i--) {
+    const u = (messages.value[i] as any).usage
+    if (u) {
+      const total = (u.input_tokens || 0) + (u.cache_read_tokens || 0) + (u.cache_create_tokens || 0)
+      return total > 1000 ? (total / 1000).toFixed(1) + 'K' : String(total)
+    }
+  }
+  return ''
+})
+
 const milestones = computed(() => {
   const ms: any[] = []
   const s = allSessions.value.find(s => s.session_id === sessionId.value)
@@ -400,12 +416,14 @@ function processEvent(evt: any, target: any[] = messages.value) {
     const content = evt.text || evt.content || evt.payload?.text || evt.payload?.content || ''
     if (!content || isDuplicate('agent_text', content, target)) return
     const streaming = evt.streaming ?? evt.payload?.streaming ?? false
+    const usage = evt.usage || evt.payload?.usage
     const last = target[target.length - 1]
     if (last && last.type === 'agent_text' && last.streaming && !content.startsWith('\n')) {
       last.content += content
       if (!streaming) last.streaming = false
+      if (usage) last.usage = usage
     } else {
-      target.push({ id: nextId('a'), type: 'agent_text', role: 'agent', content, streaming })
+      target.push({ id: nextId('a'), type: 'agent_text', role: 'agent', content, streaming, usage })
     }
   } else if (type === 'tool_call') {
     const callId = evt.call_id || evt.payload?.call_id
@@ -656,6 +674,7 @@ onUnmounted(() => {
 .status-pill { display: inline-flex; align-items: center; gap: 5px; padding: 4px 10px; border-radius: var(--radius-full); font-size: 12px; font-weight: 600; }
 .status-pill.running { background: var(--success-bg); color: var(--success); }
 .status-pill .pulse { width: 6px; height: 6px; border-radius: 50%; background: currentColor; animation: pulse-green 1.5s infinite; }
+.context-pill { display: inline-flex; align-items: center; gap: 4px; padding: 4px 10px; border-radius: var(--radius-full); font-size: 12px; font-weight: 500; background: var(--accent-muted); color: var(--accent); font-family: var(--font-mono); }
 
 .session-id-box { display: flex; align-items: center; gap: 6px; padding: 3px 8px; background: var(--bg); border: 1px solid var(--border); border-radius: var(--radius-md); }
 .session-id-text { font-family: var(--font-mono); font-size: 12px; color: var(--fg-secondary); }

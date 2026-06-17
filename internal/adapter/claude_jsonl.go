@@ -18,12 +18,15 @@ type JSONLEntry struct {
 	IsMeta        bool          `json:"isMeta,omitempty"`     // true for meta messages (e.g. local-command-caveat) — filtered from replay
 	CompactResult string        `json:"compact_result,omitempty"` // /compact outcome: "success" or "failed"
 	CompactError  string        `json:"compact_error,omitempty"`  // /compact failure reason
+	TotalCost     float64       `json:"total_cost_usd,omitempty"` // result event: aggregated cost
+	NumTurns      int           `json:"num_turns,omitempty"`      // result event: turn count
 }
 
 type JSONLMessage struct {
 	Role    string          `json:"role"`
 	Model   string          `json:"model,omitempty"` // "<synthetic>" marks local-command replies
 	Content json.RawMessage `json:"content"`
+	Usage   *TokenUsage     `json:"usage,omitempty"`
 }
 
 // For assistant messages: content is an array of blocks
@@ -75,6 +78,15 @@ func ParseJSONLLine(line string) ([]protocol.DaemonEvent, error) {
 			}
 		}
 		return nil, nil
+	case "result":
+		// End-of-turn summary with aggregated cost/turns.
+		return []protocol.DaemonEvent{{
+			Type:     "session_status",
+			SessionID: sid,
+			Status:   protocol.StatusCompleted,
+			CostUSD:  entry.TotalCost,
+			Turns:    entry.NumTurns,
+		}}, nil
 	default:
 		// Skip: mode, permission-mode, file-history-snapshot, attachment, etc.
 		return nil, nil
@@ -96,12 +108,21 @@ func parseAssistantJSONL(entry JSONLEntry, sid string) ([]protocol.DaemonEvent, 
 	for _, b := range blocks {
 		switch b.Type {
 		case "text":
-			events = append(events, protocol.DaemonEvent{
+			ev := protocol.DaemonEvent{
 				Type:      "agent_text",
 				SessionID: sid,
 				Text:      b.Text,
 				Streaming: false,
-			})
+			}
+			if u := entry.Message.Usage; u != nil {
+				ev.Usage = &protocol.ContextUsage{
+					InputTokens:  u.InputTokens,
+					OutputTokens: u.OutputTokens,
+					CacheRead:    u.CacheRead,
+					CacheCreate:  u.CacheCreation,
+				}
+			}
+			events = append(events, ev)
 		case "tool_use":
 			events = append(events, protocol.DaemonEvent{
 				Type:      "tool_call",
@@ -324,6 +345,16 @@ func (p *JSONLStreamParser) Parse(line string) ([]protocol.DaemonEvent, error) {
 		return parseUserJSONL(entry, sid)
 	case "system":
 		return p.parseSystem(entry, sid)
+	case "result":
+		// End-of-turn summary with aggregated cost/turns. Previously the PTY
+		// path dropped this — forwarding it lets daemon sessions report cost.
+		return []protocol.DaemonEvent{{
+			Type:     "session_status",
+			SessionID: sid,
+			Status:   protocol.StatusCompleted,
+			CostUSD:  entry.TotalCost,
+			Turns:    entry.NumTurns,
+		}}, nil
 	default:
 		return nil, nil
 	}
@@ -346,18 +377,27 @@ func (p *JSONLStreamParser) parseAssistant(entry JSONLEntry, sid string) ([]prot
 	var events []protocol.DaemonEvent
 	for _, b := range blocks {
 		switch b.Type {
-		case "text":
-			if isSynthetic {
-				// Local command reply → receipt (not a confusing plain bubble)
-				events = append(events, p.makeReceipt(sid, b.Text))
-			} else {
-				events = append(events, protocol.DaemonEvent{
-					Type:      "agent_text",
-					SessionID: sid,
-					Text:      b.Text,
-					Streaming: false,
-				})
-			}
+			case "text":
+				if isSynthetic {
+					// Local command reply → receipt (not a confusing plain bubble)
+					events = append(events, p.makeReceipt(sid, b.Text))
+				} else {
+					ev := protocol.DaemonEvent{
+						Type:      "agent_text",
+						SessionID: sid,
+						Text:      b.Text,
+						Streaming: false,
+					}
+					if u := entry.Message.Usage; u != nil {
+						ev.Usage = &protocol.ContextUsage{
+							InputTokens:  u.InputTokens,
+							OutputTokens: u.OutputTokens,
+							CacheRead:    u.CacheRead,
+							CacheCreate:  u.CacheCreation,
+						}
+					}
+					events = append(events, ev)
+				}
 		case "tool_use":
 			events = append(events, protocol.DaemonEvent{
 				Type:      "tool_call",
