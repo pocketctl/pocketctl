@@ -9,6 +9,7 @@ import { sendEmailCode } from './config/email.js';
 import { generateCode, storeCode, verifyCode, hasPendingCode } from './config/verification.js';
 import { validateClient } from './config/clients.js';
 import { createSession, getSessionByDeviceCode, getSessionByUserCode, authorizeSession, recordPoll, canPoll, deleteSession } from './config/auth-sessions.js';
+import { createQrSession, getQrSession, markScanned, confirmQrSession, deleteQrSession } from './config/qr-sessions.js';
 import { createHash } from 'crypto';
 
 const API_KEY = process.env.POCKETCTL_API_KEY || '';
@@ -794,6 +795,84 @@ async function main() {
 
     reply.code(200);
     return {};
+  });
+
+  // ---- QR Scan-Login (web displays QR → iOS scans → iOS confirms → web polls for token) ----
+
+  // Web creates a QR login session and renders the QR payload
+  app.post('/api/auth/qr/create', async (req, reply) => {
+    const result = createQrSession();
+    const webAppUrl = process.env.WEB_APP_URL || `http://${req.hostname}:${PORT}`;
+    // Payload written into the QR: a URL the iOS scanner parses to extract qr_token.
+    const qr_payload = `${webAppUrl}/login/qr?token=${result.qr_token}`;
+    reply.code(200);
+    return {
+      qr_token: result.qr_token,
+      qr_payload,
+      expires_in: result.expires_in,
+      interval: 2,
+    };
+  });
+
+  // Web polls the status of a QR login session
+  app.get('/api/auth/qr/status', async (req, reply) => {
+    const { qr_token } = req.query as any;
+    if (!qr_token) {
+      reply.code(400); return { error: 'qr_token is required' };
+    }
+    const session = getQrSession(qr_token);
+    if (!session) {
+      reply.code(200);
+      return { status: 'expired' as const };
+    }
+
+    // Once confirmed, issue JWTs and consume the session.
+    if (session.status === 'confirmed' && session.user_id != null) {
+      const user = await getUserById(pool, session.user_id);
+      deleteQrSession(qr_token); // single-use
+      if (!user) {
+        reply.code(200);
+        return { status: 'expired' as const };
+      }
+      const accessToken = await signAccessToken(user.id, user.email, user.phone, 'web-qr');
+      const refreshToken = await signRefreshToken(user.id);
+      insertAuditLog(pool, user.id, 'qr_login_issued', { via: 'web-qr' }, req.ip).catch(console.error);
+      reply.code(200);
+      return {
+        status: 'confirmed' as const,
+        access_token: accessToken,
+        refresh_token: refreshToken,
+        user: { id: user.id, email: user.email, phone: user.phone, display_name: user.display_name },
+      };
+    }
+
+    reply.code(200);
+    return { status: session.status };
+  });
+
+  // iOS (an already-authenticated device) confirms a QR login session
+  app.post('/api/auth/qr/confirm', async (req, reply) => {
+    const authHeader = req.headers.authorization;
+    if (!authHeader?.startsWith('Bearer ')) {
+      reply.code(401); return { error: 'authentication_required' };
+    }
+    const payload = verifyAccessToken(authHeader.slice(7));
+    if (!payload) {
+      reply.code(401); return { error: 'invalid_token' };
+    }
+
+    const { qr_token } = req.body as any;
+    if (!qr_token) {
+      reply.code(400); return { error: 'qr_token is required' };
+    }
+
+    const ok = confirmQrSession(qr_token, payload.userId);
+    if (!ok) {
+      reply.code(400); return { error: 'invalid_or_expired_qr_token' };
+    }
+
+    insertAuditLog(pool, payload.userId, 'qr_login_confirm', { via: 'ios-scan' }, req.ip).catch(console.error);
+    return { success: true };
   });
 
   // Device Authorization Page (served by relay, self-contained HTML)

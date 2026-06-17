@@ -41,13 +41,6 @@
               <button class="profile-edit" @click="showEditProfile = true">编辑资料</button>
             </div>
           </div>
-          <div class="settings-row">
-            <div class="row-icon" style="background:var(--accent-muted);color:var(--accent);">
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="5" y="2" width="14" height="20" rx="2"/><circle cx="12" cy="18" r="1"/></svg>
-            </div>
-            <span class="row-label">手机号</span>
-            <span class="row-value">{{ user?.phone ? maskPhone(user.phone) + ' ' : '' }}<span :class="user?.phone ? 'bound' : 'unbound'">{{ user?.phone ? '已绑定' : '未绑定' }}</span></span>
-          </div>
           <div class="settings-row" @click="showBindEmail = true">
             <div class="row-icon" style="background:rgba(88,166,255,0.1);color:var(--accent);">
               <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="4" width="20" height="16" rx="2"/><path d="M22 4L12 13 2 4"/></svg>
@@ -255,8 +248,6 @@ const userDisplayName = computed(() => {
 })
 
 const userMasked = computed(() => {
-  const phone = user.value?.phone
-  if (phone) return phone.slice(0, 3) + '****' + phone.slice(-4)
   return user.value?.email || ''
 })
 
@@ -265,10 +256,6 @@ const userEmail = computed(() => {
   if (email && !email.startsWith('1')) return email
   return '未绑定'
 })
-
-function maskPhone(phone: string): string {
-  return phone.slice(0, 3) + '****' + phone.slice(-4)
-}
 
 function setTheme(t: string) {
   if (t === 'system') {

@@ -4,6 +4,7 @@ struct SettingsView: View {
     @Binding var isLoggedIn: Bool
     @Environment(\.dismiss) private var dismiss
     @State private var viewModel = SettingsViewModel()
+    @State private var showScan = false
 
     var body: some View {
         NavigationStack {
@@ -19,14 +20,10 @@ struct SettingsView: View {
                         // Account section
                         sectionHeader("账户")
                         settingsGroup {
-                            settingsRow(icon: "phone.fill", iconBg: .pcAccentMuted, iconFg: .pcAccent,
-                                        label: "手机号",
-                                        value: viewModel.displayPhone,
-                                        valueColor: viewModel.isPhoneBound ? .pcFgSecondary : .pcFgTertiary)
-                            disabledRow(icon: "message.fill", iconBg: Color.green.opacity(0.15), iconFg: .green,
-                                        label: "微信", badge: "即将开通")
-                            disabledRow(icon: "apple.logo", iconBg: .white.opacity(0.1), iconFg: .white,
-                                        label: "Apple ID", badge: "即将开通")
+                            settingsRow(icon: "envelope.fill", iconBg: .pcAccentMuted, iconFg: .pcAccent,
+                                        label: "邮箱",
+                                        value: viewModel.displayEmail,
+                                        valueColor: viewModel.isEmailBound ? .pcFgSecondary : .pcFgTertiary)
                         }
                         .padding(.horizontal, PCSpacing.lg)
                         .padding(.bottom, 24)
@@ -233,6 +230,17 @@ struct SettingsView: View {
                             .foregroundStyle(Color.pcAccent)
                     }
                 }
+                ToolbarItem(placement: .navigationBarTrailing) {
+                    Button { showScan = true } label: {
+                        Image(systemName: "qrcode.viewfinder")
+                            .font(.system(size: 20, weight: .medium))
+                            .foregroundStyle(Color.pcAccent)
+                    }
+                    .accessibilityLabel("扫一扫，授权网页端登录")
+                }
+            }
+            .sheet(isPresented: $showScan) {
+                ScanLoginView()
             }
             .sheet(isPresented: $viewModel.showEditProfile) { editProfileSheet }
             .sheet(isPresented: $viewModel.showRegisterHost) { registerHostSheet }

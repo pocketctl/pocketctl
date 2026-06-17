@@ -39,6 +39,25 @@ final class APIClient: @unchecked Sendable {
         try await post(path: "/api/auth/sms/verify", body: ["phone": phone, "code": code])
     }
 
+    // MARK: - Email Verification Code Auth (current, backend-supported flow)
+
+    func sendEmailCode(email: String) async throws -> SMSResponse {
+        try await post(path: "/api/auth/email/send", body: ["email": email])
+    }
+
+    /// Verify email code → login-or-register → returns tokens + user.
+    func loginViaEmail(email: String, code: String) async throws -> AuthResponse {
+        try await post(path: "/api/auth/email/verify", body: ["email": email, "code": code])
+    }
+
+    // MARK: - QR Scan-Login (iOS is the confirming device)
+
+    /// Confirm a QR login session scanned from the web client. Requires the
+    /// iOS user to be already authenticated (Bearer token added automatically).
+    func confirmQrLogin(qrToken: String) async throws -> SuccessResponse {
+        try await authorizedPost(path: "/api/auth/qr/confirm", body: ["qr_token": qrToken])
+    }
+
     func refreshToken(_ token: String) async throws -> AuthResponse {
         try await post(path: "/api/auth/refresh", body: ["refresh_token": token])
     }

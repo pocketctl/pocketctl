@@ -24,7 +24,20 @@
           <span>{{ errorMsg }}</span>
         </div>
 
-        <div class="login-form">
+        <!-- Tab switcher -->
+        <div class="login-tabs">
+          <button :class="['login-tab', { active: tab === 'email' }]" @click="switchTab('email')">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="4" width="20" height="16" rx="2"/><path d="M22 6l-10 7L2 6"/></svg>
+            邮箱登录
+          </button>
+          <button :class="['login-tab', { active: tab === 'qr' }]" @click="switchTab('qr')">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><path d="M14 14h3v3h-3zM20 14v3M14 20h3M20 20v.01"/></svg>
+            扫码登录
+          </button>
+        </div>
+
+        <!-- Email login -->
+        <div v-if="tab === 'email'" class="login-form">
           <div>
             <div class="form-label">邮箱地址</div>
             <div class="email-input-group">
@@ -41,6 +54,30 @@
           <button class="login-btn" :disabled="loading || code.length !== 6" @click="doLogin">{{ loading ? '登录中...' : '登录' }}</button>
         </div>
 
+        <!-- QR login -->
+        <div v-else class="qr-box">
+          <div :class="['qr-status-bar', qrStatusClass]">
+            <span class="qr-dot"></span>
+            <span>{{ qrStatusText }}</span>
+          </div>
+          <div class="qr-frame">
+            <canvas ref="qrCanvas" width="176" height="176"></canvas>
+            <div class="qr-logo">
+              <svg width="20" height="20" viewBox="0 0 512 512" fill="none">
+                <path d="M208 200 L304 256 L208 312" stroke="#58a6ff" stroke-width="28" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+              </svg>
+            </div>
+            <div v-if="qrExpired" class="qr-refresh" @click="startQrLogin">
+              <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M23 4v6h-6M1 20v-6h6"/><path d="M3.51 9a9 9 0 0114.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0020.49 15"/></svg>
+              <span>点击刷新</span>
+            </div>
+          </div>
+          <div class="qr-hint">请使用 <strong>pocketctl App</strong> 扫描上方二维码登录</div>
+          <div class="qr-meta">
+            <span class="qr-timer">二维码 {{ qrCountdownText }} 后失效</span>
+          </div>
+        </div>
+
         <div class="terms-text">登录即同意<a href="#" @click.prevent="showAgreement = true">《用户协议》</a>和<a href="#" @click.prevent="showPrivacy = true">《隐私政策》</a></div>
       </div>
 
@@ -54,8 +91,9 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onUnmounted } from 'vue'
+import { ref, computed, onUnmounted, nextTick } from 'vue'
 import { useRouter } from 'vue-router'
+import QRCode from 'qrcode'
 import { useAuth } from '../composables/useAuth'
 import logoDark from '../assets/logo-github-org.svg'
 import logoLight from '../assets/logo-github-org-light.svg'
@@ -64,8 +102,9 @@ import AgreementModal from '../components/AgreementModal.vue'
 import HelpModal from '../components/HelpModal.vue'
 
 const router = useRouter()
-const { sendEmailCode, loginViaEmail } = useAuth()
+const { sendEmailCode, loginViaEmail, createQrLogin, pollQrLogin } = useAuth()
 
+// ---- shared ----
 const email = ref('')
 const code = ref('')
 const errorMsg = ref('')
@@ -74,7 +113,6 @@ const countdown = ref(0)
 const showPrivacy = ref(false)
 const showAgreement = ref(false)
 const showHelp = ref(false)
-
 let timer: ReturnType<typeof setInterval> | null = null
 
 const currentTheme = ref(document.documentElement.getAttribute('data-theme') || 'dark')
@@ -100,8 +138,6 @@ function startCountdown() {
   timer = setInterval(() => { countdown.value--; if (countdown.value <= 0 && timer) clearInterval(timer) }, 1000)
 }
 
-onUnmounted(() => { if (timer) clearInterval(timer) })
-
 async function sendCode() {
   errorMsg.value = ''
   const err = await sendEmailCode(email.value.trim())
@@ -115,6 +151,112 @@ async function doLogin() {
   if (err) { errorMsg.value = err; loading.value = false }
   else router.push('/')
 }
+
+// ---- tab switch ----
+const tab = ref<'email' | 'qr'>('email')
+
+function switchTab(t: 'email' | 'qr') {
+  if (tab.value === t) return
+  tab.value = t
+  errorMsg.value = ''
+  if (t === 'qr') startQrLogin()
+  else stopQrLogin()
+}
+
+// ---- QR login ----
+const qrCanvas = ref<HTMLCanvasElement | null>(null)
+const qrStatus = ref<'pending' | 'scanned' | 'confirmed' | 'expired'>('pending')
+const qrExpired = ref(false)
+const qrCountdown = ref(0)
+let qrToken = ''
+let pollTimer: ReturnType<typeof setInterval> | null = null
+let countdownTimer: ReturnType<typeof setInterval> | null = null
+
+const qrStatusClass = computed(() => qrStatus.value)
+const qrStatusText = computed(() => {
+  switch (qrStatus.value) {
+    case 'scanned': return '已扫描，请在 App 内确认'
+    case 'confirmed': return '已确认，正在登录…'
+    case 'expired': return '二维码已失效'
+    default: return '等待 App 扫码'
+  }
+})
+const qrCountdownText = computed(() => {
+  const m = Math.floor(qrCountdown.value / 60)
+  const s = qrCountdown.value % 60
+  return `${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`
+})
+
+async function startQrLogin() {
+  stopQrLogin()
+  qrStatus.value = 'pending'
+  qrExpired.value = false
+  errorMsg.value = ''
+
+  const { data, error } = await createQrLogin()
+  if (error || !data) {
+    errorMsg.value = error || '生成二维码失败'
+    return
+  }
+  qrToken = data.qr_token
+  qrCountdown.value = data.expires_in
+
+  // Render QR
+  await nextTick()
+  if (qrCanvas.value) {
+    try {
+      await QRCode.toCanvas(qrCanvas.value, data.qr_payload, {
+        width: 176,
+        margin: 1,
+        color: { dark: isDark.value ? '#0d1117' : '#1f2328', light: '#ffffff' },
+      })
+    } catch { /* ignore render error */ }
+  }
+
+  // Expiry countdown
+  countdownTimer = setInterval(() => {
+    qrCountdown.value--
+    if (qrCountdown.value <= 0) {
+      qrStatus.value = 'expired'
+      qrExpired.value = true
+      stopPolling()
+    }
+  }, 1000)
+
+  // Poll status
+  pollTimer = setInterval(async () => {
+    if (!qrToken) return
+    const result = await pollQrLogin(qrToken)
+    if (result === 'confirmed') {
+      stopQrLogin()
+      qrStatus.value = 'confirmed'
+      router.push('/')
+    } else if (result === 'expired') {
+      qrStatus.value = 'expired'
+      qrExpired.value = true
+      stopPolling()
+    } else if (result === 'scanned' || result === 'pending') {
+      qrStatus.value = result
+    } else {
+      // network/other error string — keep polling, don't spam banner
+    }
+  }, 2000)
+}
+
+function stopPolling() {
+  if (pollTimer) { clearInterval(pollTimer); pollTimer = null }
+}
+
+function stopQrLogin() {
+  stopPolling()
+  if (countdownTimer) { clearInterval(countdownTimer); countdownTimer = null }
+  qrToken = ''
+}
+
+onUnmounted(() => {
+  if (timer) clearInterval(timer)
+  stopQrLogin()
+})
 </script>
 
 <style>
@@ -142,6 +284,14 @@ async function doLogin() {
 .brand-tagline { font-size: 15px; color: var(--fg-secondary); text-align: center; }
 .login-card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-xl); padding: 32px; box-shadow: var(--shadow-lg); }
 .card-title { font-family: var(--font-display); font-size: 22px; font-weight: 600; color: var(--fg); text-align: center; margin-bottom: 24px; }
+
+/* Tabs */
+.login-tabs { display: flex; background: var(--bg); border: 1px solid var(--border); border-radius: var(--radius-md); padding: 3px; margin-bottom: 24px; }
+.login-tab { flex: 1; padding: 10px; border: none; border-radius: 6px; font-family: var(--font-body); font-size: 14px; font-weight: 500; cursor: pointer; transition: all 0.2s; background: transparent; color: var(--fg-secondary); display: flex; align-items: center; justify-content: center; gap: 6px; }
+.login-tab.active { background: var(--surface); color: var(--fg); box-shadow: var(--shadow-sm); }
+.login-tab:hover:not(.active) { color: var(--fg); }
+.login-tab svg { width: 16px; height: 16px; }
+
 .login-form { display: flex; flex-direction: column; gap: 16px; }
 .form-label { font-size: 13px; font-weight: 500; color: var(--fg-secondary); margin-bottom: 6px; }
 .code-row { display: flex; gap: 8px; }
@@ -157,6 +307,28 @@ async function doLogin() {
 .login-btn { width: 100%; padding: 14px; background: var(--primary-btn); color: #fff; border: none; border-radius: var(--radius-md); font-family: var(--font-display); font-size: 16px; font-weight: 600; cursor: pointer; transition: background 0.15s; margin-top: 4px; }
 .login-btn:hover:not(:disabled) { background: var(--primary-btn-hover); }
 .login-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+
+/* QR login */
+.qr-box { display: flex; flex-direction: column; align-items: center; gap: 14px; padding: 4px 0; }
+.qr-status-bar { display: inline-flex; align-items: center; gap: 8px; padding: 6px 14px; border-radius: var(--radius-full); font-size: 13px; font-weight: 500; background: var(--success-bg); color: var(--success); transition: background 0.2s, color 0.2s; }
+.qr-status-bar .qr-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--success); animation: pulse-green 1.5s infinite; }
+.qr-status-bar.scanned { background: var(--accent-muted); color: var(--accent); }
+.qr-status-bar.scanned .qr-dot { background: var(--accent); animation: none; }
+.qr-status-bar.confirmed { background: var(--accent-muted); color: var(--accent); }
+.qr-status-bar.confirmed .qr-dot { background: var(--accent); animation: none; }
+.qr-status-bar.expired { background: var(--error-bg); color: var(--error); }
+.qr-status-bar.expired .qr-dot { background: var(--error); animation: none; }
+@keyframes pulse-green { 0%, 100% { opacity: 1; } 50% { opacity: 0.35; } }
+.qr-frame { width: 200px; height: 200px; padding: 12px; background: #fff; border-radius: var(--radius-md); position: relative; display: flex; align-items: center; justify-content: center; }
+.qr-frame canvas { display: block; }
+.qr-logo { position: absolute; width: 40px; height: 40px; border-radius: 8px; background: #fff; display: flex; align-items: center; justify-content: center; box-shadow: 0 0 0 4px #fff, 0 0 0 5px rgba(0,0,0,0.06); }
+.qr-refresh { position: absolute; inset: 0; background: rgba(255,255,255,0.92); border-radius: var(--radius-md); display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 6px; color: var(--fg-secondary); font-size: 12px; cursor: pointer; }
+.qr-refresh:hover { color: var(--accent); }
+.qr-hint { font-size: 13px; color: var(--fg-secondary); text-align: center; line-height: 1.5; }
+.qr-hint strong { color: var(--accent); }
+.qr-meta { display: flex; align-items: center; gap: 12px; }
+.qr-timer { font-size: 12px; color: var(--fg-tertiary); font-family: var(--font-mono); }
+
 .terms-text { font-size: 12px; color: var(--fg-tertiary); text-align: center; line-height: 1.6; margin-top: 8px; }
 .terms-text a { color: var(--accent); text-decoration: none; }
 .terms-text a:hover { text-decoration: underline; }
