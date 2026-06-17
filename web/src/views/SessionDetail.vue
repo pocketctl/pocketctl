@@ -113,11 +113,6 @@
           <!-- Command execution receipt -->
           <CommandReceiptCard v-else-if="msg.type === 'command_receipt'" :command="msg.command" :status="msg.receiptStatus" :message="msg.message" />
         </template>
-
-        <!-- Scroll to bottom (iOS-style floating button; always visible when there are messages) -->
-        <button v-if="messages.length > 0" class="scroll-to-bottom" :class="{ 'at-bottom': autoScroll }" title="回到底部" @click="scrollToBottom">
-          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14"/><path d="M19 12l-7 7-7-7"/></svg>
-        </button>
       </div>
 
       <!-- Chat Input -->
@@ -139,6 +134,13 @@
         </template>
         <div v-else class="ended-text">Session 已结束</div>
       </div>
+
+      <!-- Scroll-to-bottom: fixed above the input bar, auto-hides when at bottom -->
+      <Transition name="scroll-btn">
+        <button v-if="messages.length > 0 && !autoScroll" class="scroll-to-bottom" title="回到底部" @click="scrollToBottom">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14"/><path d="M19 12l-7 7-7-7"/></svg>
+        </button>
+      </Transition>
     </div>
   </div>
 </template>
@@ -622,7 +624,7 @@ onUnmounted(() => {
 </script>
 
 <style>
-.session-layout { display: flex; flex: 1; height: calc(100vh - var(--topbar-h)); overflow: hidden; }
+.session-layout { display: flex; flex: 1; width: 100%; min-width: 0; height: calc(100vh - var(--topbar-h)); overflow: hidden; }
 
 /* Session Panel */
 .session-panel { width: 300px; background: var(--sidebar-bg); border-right: 1px solid var(--sidebar-border); display: flex; flex-direction: column; flex-shrink: 0; transition: background var(--transition), border-color var(--transition); }
@@ -645,7 +647,7 @@ onUnmounted(() => {
 .session-list-item .sl-meta { font-size: 11px; color: var(--fg-tertiary); margin-top: 2px; }
 
 /* Chat Area */
-.chat-area { flex: 1; display: flex; flex-direction: column; min-width: 0; background: var(--bg); transition: background var(--transition); }
+.chat-area { flex: 1; display: flex; flex-direction: column; position: relative; min-width: 0; max-width: 100%; overflow: hidden; background: var(--bg); transition: background var(--transition); }
 
 /* Toolbar */
 .chat-toolbar { height: 52px; border-bottom: 1px solid var(--border); display: flex; align-items: center; padding: 0 20px; gap: 12px; background: var(--surface); transition: background var(--transition), border-color var(--transition); }
@@ -667,12 +669,12 @@ onUnmounted(() => {
    explicit and prevents any shrink-to-fit). min-width:0 lets long content
    (code/URLs) wrap instead of overflowing horizontally. */
 .chat-messages > * { width: 100%; min-width: 0; }
-.scroll-to-bottom { position: fixed; bottom: 88px; right: 24px; width: 44px; height: 44px; border-radius: 50%; border: 1px solid var(--border); background: var(--surface); color: var(--fg); font-size: 20px; cursor: pointer; display: flex; align-items: center; justify-content: center; box-shadow: 0 4px 14px rgba(0,0,0,0.35); transition: transform 0.15s, background 0.15s, opacity 0.2s; z-index: 100; }
-.scroll-to-bottom:hover { background: var(--surface-hover); transform: scale(1.08); }
-.scroll-to-bottom:active { transform: scale(0.96); }
-.scroll-to-bottom.at-bottom { opacity: 0.35; }
-.scroll-to-bottom.at-bottom:hover { opacity: 1; }
+/* Scroll-to-bottom: floats centered above the input bar. Auto-hides (v-if)
+   when content is already scrolled to the bottom (autoScroll === true). */
+.scroll-to-bottom { position: absolute; bottom: 76px; left: 50%; transform: translateX(-50%); width: 36px; height: 36px; border-radius: 50%; border: 1px solid var(--border); background: var(--surface); color: var(--fg); cursor: pointer; display: flex; align-items: center; justify-content: center; box-shadow: 0 4px 14px rgba(0,0,0,0.35); transition: background 0.15s; z-index: 50; }
 .scroll-to-bottom:hover { background: var(--surface-hover); }
+.scroll-btn-enter-active, .scroll-btn-leave-active { transition: opacity 0.2s ease, transform 0.2s ease; }
+.scroll-btn-enter-from, .scroll-btn-leave-to { opacity: 0; transform: translate(-50%, 6px); }
 
 /* Messages — message type styles (msg-user/msg-agent/tool-card/msg-error)
    now live in their own components under components/messages/. The timeline

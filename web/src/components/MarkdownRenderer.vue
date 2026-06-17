@@ -5,7 +5,7 @@
     are stripped in a pre-pass (sanitizeCommandTags) before parsing.
   -->
   <div class="markdown-content" ref="rootEl">
-    <div v-for="(segment, idx) in segments" :key="idx">
+    <div v-for="(segment, idx) in segments" :key="idx" class="md-segment">
       <!-- Block code: rendered standalone with header (lang + copy) -->
       <div v-if="segment.type === 'code'" class="md-code-block">
         <div class="code-header">
@@ -269,6 +269,7 @@ DOMPurify.addHook('afterSanitizeAttributes', (node) => {
   min-width: 0;
   max-width: 100%;
 }
+.md-segment { min-width: 0; max-width: 100%; }
 
 /* Inline code within prose */
 .md-prose :deep(code:not(pre code)) {

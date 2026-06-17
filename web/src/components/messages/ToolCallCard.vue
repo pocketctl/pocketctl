@@ -113,6 +113,7 @@ function toggleOutput() { emit('toggleOutput') }
   align-items: center;
   gap: 8px;
   padding: 10px 14px;
+  min-width: 0;
 }
 .tool-icon { color: var(--accent); flex-shrink: 0; }
 .tool-name {
@@ -152,6 +153,11 @@ function toggleOutput() { emit('toggleOutput') }
 .tool-body {
   border-top: 1px solid var(--border);
   padding: 8px 14px 10px;
+  /* CRITICAL: allow body to shrink below its content's intrinsic min-width
+     (which equals the longest code line). Without this, long tool output
+     stretches the body → card → chat column. */
+  min-width: 0;
+  overflow: hidden;
 }
 .tool-section { padding: 4px 0; }
 .tool-label {

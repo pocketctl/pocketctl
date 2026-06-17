@@ -296,6 +296,7 @@ body {
 /* ---- Main Content ---- */
 .main-content {
   flex: 1;
+  min-width: 0;
   margin-left: var(--sidebar-w);
   min-height: 100vh;
   transition: margin-left var(--transition);
