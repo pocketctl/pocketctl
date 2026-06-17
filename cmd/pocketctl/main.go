@@ -1088,6 +1088,12 @@ func handleCommands(ctx context.Context, client *ws.Client, sm *session.SessionM
 					logger.Error("kill session failed", "error", err)
 				}
 
+			case "session_interrupt":
+				logger.Info("interrupt session", "session", cmd.SessionID)
+				if err := sm.InterruptSession(cmd.SessionID); err != nil {
+					logger.Error("interrupt session failed", "error", err)
+				}
+
 			case "set_permission_mode":
 				logger.Info("set permission mode", "session", cmd.SessionID, "mode", cmd.Content)
 				if err := sm.SetPermissionMode(ctx, cmd.SessionID, cmd.Content); err != nil {

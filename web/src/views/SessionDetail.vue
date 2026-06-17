@@ -50,12 +50,6 @@
           <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/></svg>
           {{ contextTokens }}
         </span>
-        <div class="perm-mode-group" v-if="canInput">
-          <button v-for="m in PERMISSION_MODES" :key="m.value"
-            :class="['perm-btn', { active: currentPermissionMode === m.value }]"
-            @click="setPermissionMode(m.value)"
-            :title="`切换到${m.label}模式`">{{ m.label }}</button>
-        </div>
         <div class="session-id-box">
           <code class="session-id-text">{{ sessionId?.slice(0, 8) }}</code>
           <button class="copy-btn" @click="copySessionId" :title="copied ? '已复制' : '复制会话ID'">
@@ -125,10 +119,11 @@
         </template>
       </div>
 
-      <!-- Chat Input -->
+      <!-- Chat Input — unified container with embedded controls -->
       <div class="chat-input-area" :class="{ ended: !canInput }">
         <template v-if="canInput">
-          <div class="chat-input-wrap">
+          <div class="chat-input-container" :class="{ focused: isInputFocused }">
+            <!-- Slash command popover -->
             <CommandPopover
               v-if="showPopover"
               :commands="filteredCommands"
@@ -136,11 +131,64 @@
               @select="applyCommand"
               @hover="selectedIndex = $event"
             />
-            <input type="text" v-model="messageInput" :placeholder="isPendingSession ? '会话创建中…' : (isDaemonSession && isTerminal ? '继续会话（将恢复历史上下文）...' : '发送消息...')" @keydown="onInputKeydown" :disabled="isDisconnected || isPendingSession || isLoading" ref="inputEl" />
+            <!-- Textarea (multi-line) -->
+            <textarea
+              v-model="messageInput"
+              class="chat-textarea"
+              :placeholder="isPendingSession ? '会话创建中…' : (isDaemonSession && isTerminal ? '继续会话（将恢复历史上下文）...' : '发送消息... (⌥+Enter 换行)')"
+              @keydown="onInputKeydown"
+              @focus="isInputFocused = true"
+              @blur="isInputFocused = false"
+              :disabled="isDisconnected || isPendingSession || isLoading"
+              ref="inputEl"
+              rows="3"
+            ></textarea>
+
+            <!-- Bottom control row -->
+            <div class="input-controls">
+              <!-- Left: permission mode dropdown -->
+              <div class="perm-dropdown" ref="permDropdownEl">
+                <button class="perm-trigger" @click="showPermMenu = !showPermMenu" :title="`当前: ${currentPermLabel}`">
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+                  <span class="perm-label">{{ currentPermLabel }}</span>
+                  <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M6 9l6 6 6-6"/></svg>
+                </button>
+                <Transition name="perm-menu">
+                  <div v-if="showPermMenu" class="perm-menu">
+                    <button v-for="m in PERMISSION_MODES" :key="m.value"
+                      :class="['perm-menu-item', { active: currentPermissionMode === m.value }]"
+                      @click="setPermissionMode(m.value); showPermMenu = false">
+                      <span class="perm-menu-name">{{ m.label }}</span>
+                      <svg v-if="currentPermissionMode === m.value" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M20 6L9 17l-5-5"/></svg>
+                    </button>
+                  </div>
+                </Transition>
+              </div>
+
+              <!-- Right: context usage + send/stop button -->
+              <div class="input-right">
+                <div v-if="contextTokens" class="ctx-indicator" :title="contextTooltip">
+                  <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/></svg>
+                  <span class="ctx-value">{{ contextTokens }}</span>
+                </div>
+
+                <!-- Send button (idle) -->
+                <button v-if="!isExecuting" class="action-btn send-btn"
+                  @click="sendMessage"
+                  :disabled="isDisconnected || isPendingSession || isLoading || !messageInput.trim()"
+                  title="发送 (Enter)">
+                  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5"/><path d="M5 12l7-7 7 7"/></svg>
+                </button>
+
+                <!-- Stop button (executing) -->
+                <button v-else class="action-btn stop-btn"
+                  @click="interruptSession"
+                  title="停止生成">
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="6" width="12" height="12" rx="2"/></svg>
+                </button>
+              </div>
+            </div>
           </div>
-          <button class="send-btn" @click="sendMessage" :disabled="isDisconnected || isPendingSession || isLoading || !messageInput.trim()">
-            <svg viewBox="0 0 24 24"><path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z"/></svg>
-          </button>
         </template>
         <div v-else class="ended-text">Session 已结束</div>
       </div>
@@ -198,16 +246,20 @@ const popoverDismissed = ref(false)
 const status = ref('running')
 const exitReason = ref('')
 const currentPermissionMode = ref('acceptEdits')
+const showPermMenu = ref(false)
 const PERMISSION_MODES = [
   { value: 'default', label: '默认' },
   { value: 'acceptEdits', label: '自动编辑' },
   { value: 'plan', label: '计划' },
 ]
+const PERM_LABELS: Record<string, string> = { default: '默认', acceptEdits: '自动编辑', plan: '计划' }
+const currentPermLabel = computed(() => PERM_LABELS[currentPermissionMode.value] || currentPermissionMode.value)
 const exitedAt = ref('')
 const autoScroll = ref(true)
 const copied = ref(false)
 const messagesEl = ref<HTMLDivElement | null>(null)
-const inputEl = ref<HTMLInputElement | null>(null)
+const inputEl = ref<HTMLTextAreaElement | null>(null)
+const permDropdownEl = ref<HTMLElement | null>(null)
 const daemons = ref<Record<string, any>>({})
 const hostFilter = computed(() => (route.query.host as string) || '')
 const visibleSessions = computed(() => {
@@ -239,6 +291,8 @@ const isDaemonSession = computed(() => {
   return s?.source === 'daemon'
 })
 const canInput = computed(() => !isDisconnected.value && (!isTerminal.value || isDaemonSession.value))
+// Agent is actively generating (send button → stop button)
+const isExecuting = computed(() => status.value === 'running' || status.value === 'busy')
 
 const daemonName = computed(() => {
   if (hostFilter.value) {
@@ -268,6 +322,21 @@ const contextTokens = computed(() => {
     if (u) {
       const total = (u.input_tokens || 0) + (u.cache_read_tokens || 0) + (u.cache_create_tokens || 0)
       return total > 1000 ? (total / 1000).toFixed(1) + 'K' : String(total)
+    }
+  }
+  return ''
+})
+
+const contextTooltip = computed(() => {
+  for (let i = messages.value.length - 1; i >= 0; i--) {
+    const u = (messages.value[i] as any).usage
+    if (u) {
+      const parts: string[] = []
+      if (u.input_tokens) parts.push(`输入: ${u.input_tokens.toLocaleString()}`)
+      if (u.output_tokens) parts.push(`输出: ${u.output_tokens.toLocaleString()}`)
+      if (u.cache_read_tokens) parts.push(`缓存读取: ${u.cache_read_tokens.toLocaleString()}`)
+      if (u.cache_create_tokens) parts.push(`缓存写入: ${u.cache_create_tokens.toLocaleString()}`)
+      return parts.length ? 'Context 用量\n' + parts.join('\n') : ''
     }
   }
   return ''
@@ -352,6 +421,10 @@ function setPermissionMode(mode: string) {
   send({ type: 'set_permission_mode', session_id: sessionId.value, content: mode })
 }
 
+function interruptSession() {
+  send({ type: 'session_interrupt', session_id: sessionId.value })
+}
+
 function sendMessage() {
   const text = messageInput.value.trim()
   if (!text || isDisconnected.value) return
@@ -396,9 +469,16 @@ function onInputKeydown(e: KeyboardEvent) {
       popoverDismissed.value = true
       return
     }
-  } else if (e.key === 'Enter') {
+    return // popover open: don't process Enter/Alt+Enter below
+  }
+  // Enter (no modifier) → send; Alt/Option+Enter (macOS/Windows) → newline
+  if (e.key === 'Enter' && !e.altKey && !e.shiftKey && !e.metaKey && !e.ctrlKey) {
     e.preventDefault()
     sendMessage()
+  }
+  // Alt/Option+Enter or Shift+Enter → insert newline (let default happen)
+  else if (e.key === 'Enter' && (e.altKey || e.shiftKey)) {
+    // default textarea behavior inserts \n — no preventDefault needed
   }
 }
 
