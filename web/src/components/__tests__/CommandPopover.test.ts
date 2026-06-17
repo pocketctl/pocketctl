@@ -8,13 +8,14 @@ const commands: CommandItem[] = [
   { name: 'compact', source: 'builtin', kind: 'command', description: '压缩历史' },
   { name: 'pocket-release', source: 'project', kind: 'skill', description: '发布流程' },
   { name: 'codex:rescue', source: 'plugin', kind: 'skill', namespace: 'codex', description: '救援' },
+  { name: 'my-skill', source: 'user', kind: 'skill', description: '我的' },
 ]
 
 describe('CommandPopover', () => {
   test('renders each command with leading slash', () => {
     const wrapper = mount(CommandPopover, { props: { commands, activeIndex: 0 } })
     const items = wrapper.findAll('.cmd-item')
-    expect(items.length).toBe(4)
+    expect(items.length).toBe(5)
     expect(wrapper.html()).toContain('/clear')
     expect(wrapper.html()).toContain('/pocket-release')
     expect(wrapper.html()).toContain('/codex:rescue')
@@ -27,11 +28,21 @@ describe('CommandPopover', () => {
     expect(items[2].classes()).toContain('active')
   })
 
-  test('distinguishes command (🔧) and skill (📘) icons', () => {
+  test('renders SVG icons by kind+source and grays out commands', () => {
     const wrapper = mount(CommandPopover, { props: { commands, activeIndex: 0 } })
     const html = wrapper.html()
-    expect(html).toContain('🔧') // command
-    expect(html).toContain('📘') // skill
+    // SVG icons present (no emoji)
+    expect(html).not.toContain('🔧')
+    expect(html).not.toContain('📘')
+    expect(wrapper.findAll('.cmd-icon svg').length).toBe(5)
+    // command items grayed out
+    const items = wrapper.findAll('.cmd-item')
+    expect(items[0].classes()).toContain('is-command') // clear (command)
+    expect(items[1].classes()).toContain('is-command') // compact (command)
+    expect(items[2].classes()).not.toContain('is-command') // pocket-release (skill)
+    expect(items[3].classes()).not.toContain('is-command') // codex:rescue (skill)
+    // command tooltip
+    expect(items[0].attributes('title')).toContain('web 不支持')
   })
 
   test('emits select with the command on click', async () => {
