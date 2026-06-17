@@ -121,6 +121,13 @@
 
       <!-- Chat Input — unified container with embedded controls -->
       <div class="chat-input-area" :class="{ ended: !canInput }">
+        <!-- Scroll-to-bottom: absolute child of chat-input-area, floats above
+             its top edge. Doesn't take up flex space in chat-messages. -->
+        <Transition name="scroll-btn">
+          <button v-if="messages.length > 0 && !autoScroll" class="scroll-to-bottom" title="回到底部" @click="scrollToBottom">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14"/><path d="M19 12l-7 7-7-7"/></svg>
+          </button>
+        </Transition>
         <template v-if="canInput">
           <div class="chat-input-container" :class="{ focused: isInputFocused }">
             <!-- Slash command popover -->
@@ -192,13 +199,6 @@
         </template>
         <div v-else class="ended-text">Session 已结束</div>
       </div>
-
-      <!-- Scroll-to-bottom: fixed above the input bar, auto-hides when at bottom -->
-      <Transition name="scroll-btn">
-        <button v-if="messages.length > 0 && !autoScroll" class="scroll-to-bottom" title="回到底部" @click="scrollToBottom">
-          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14"/><path d="M19 12l-7 7-7-7"/></svg>
-        </button>
-      </Transition>
     </div>
   </div>
 </template>
@@ -260,6 +260,7 @@ const copied = ref(false)
 const messagesEl = ref<HTMLDivElement | null>(null)
 const inputEl = ref<HTMLTextAreaElement | null>(null)
 const permDropdownEl = ref<HTMLElement | null>(null)
+const isInputFocused = ref(false)
 const daemons = ref<Record<string, any>>({})
 const hostFilter = computed(() => (route.query.host as string) || '')
 const visibleSessions = computed(() => {
@@ -445,9 +446,35 @@ const filteredCommands = computed(() => {
 const showPopover = computed(() => !popoverDismissed.value && filteredCommands.value.length > 0)
 
 // Reset selection/dismissal whenever the input changes
-watch(messageInput, () => { selectedIndex.value = 0; popoverDismissed.value = false })
+watch(messageInput, () => {
+  selectedIndex.value = 0
+  popoverDismissed.value = false
+  // Auto-resize textarea
+  if (inputEl.value) {
+    inputEl.value.style.height = 'auto'
+    inputEl.value.style.height = Math.min(inputEl.value.scrollHeight, 200) + 'px'
+  }
+})
 
 function onInputKeydown(e: KeyboardEvent) {
+  // Alt/Option+Enter or Shift+Enter → insert newline (checked first, even
+  // when popover is open, so /command<Alt+Enter> doesn't auto-apply).
+  if (e.key === 'Enter' && (e.altKey || e.shiftKey)) {
+    e.preventDefault()
+    const el = inputEl.value
+    if (el) {
+      const start = el.selectionStart
+      const end = el.selectionEnd
+      messageInput.value = messageInput.value.slice(0, start) + '\n' + messageInput.value.slice(end)
+      nextTick(() => {
+        el.selectionStart = el.selectionEnd = start + 1
+        el.style.height = 'auto'
+        el.style.height = Math.min(el.scrollHeight, 200) + 'px'
+      })
+    }
+    return
+  }
+
   if (showPopover.value) {
     if (e.key === 'ArrowDown') {
       e.preventDefault()
@@ -469,16 +496,13 @@ function onInputKeydown(e: KeyboardEvent) {
       popoverDismissed.value = true
       return
     }
-    return // popover open: don't process Enter/Alt+Enter below
+    return // popover open: don't process Enter below
   }
-  // Enter (no modifier) → send; Alt/Option+Enter (macOS/Windows) → newline
+
+  // Enter (no modifier) → send
   if (e.key === 'Enter' && !e.altKey && !e.shiftKey && !e.metaKey && !e.ctrlKey) {
     e.preventDefault()
     sendMessage()
-  }
-  // Alt/Option+Enter or Shift+Enter → insert newline (let default happen)
-  else if (e.key === 'Enter' && (e.altKey || e.shiftKey)) {
-    // default textarea behavior inserts \n — no preventDefault needed
   }
 }
 
@@ -739,6 +763,16 @@ function onPinned(sessionId: string, pinned: boolean) {
 onUnmounted(() => {
   for (const fn of cleanups) fn()
   cleanups.length = 0
+  document.removeEventListener('click', closePermMenu)
+})
+
+function closePermMenu(e: MouseEvent) {
+  if (permDropdownEl.value && !permDropdownEl.value.contains(e.target as Node)) {
+    showPermMenu.value = false
+  }
+}
+onMounted(() => {
+  document.addEventListener('click', closePermMenu)
 })
 </script>
 
@@ -775,11 +809,6 @@ onUnmounted(() => {
 .status-pill { display: inline-flex; align-items: center; gap: 5px; padding: 4px 10px; border-radius: var(--radius-full); font-size: 12px; font-weight: 600; }
 .status-pill.running { background: var(--success-bg); color: var(--success); }
 .status-pill .pulse { width: 6px; height: 6px; border-radius: 50%; background: currentColor; animation: pulse-green 1.5s infinite; }
-.context-pill { display: inline-flex; align-items: center; gap: 4px; padding: 4px 10px; border-radius: var(--radius-full); font-size: 12px; font-weight: 500; background: var(--accent-muted); color: var(--accent); font-family: var(--font-mono); }
-.perm-mode-group { display: inline-flex; gap: 2px; padding: 2px; background: var(--bg); border: 1px solid var(--border); border-radius: var(--radius-full); }
-.perm-btn { padding: 3px 10px; border: none; background: none; color: var(--fg-tertiary); font-size: 11px; cursor: pointer; border-radius: var(--radius-full); transition: all 0.15s; font-family: var(--font-body); }
-.perm-btn.active { background: var(--accent); color: #fff; font-weight: 600; }
-.perm-btn:hover:not(.active) { color: var(--fg); }
 
 .session-id-box { display: flex; align-items: center; gap: 6px; padding: 3px 8px; background: var(--bg); border: 1px solid var(--border); border-radius: var(--radius-md); }
 .session-id-text { font-family: var(--font-mono); font-size: 12px; color: var(--fg-secondary); }
@@ -794,10 +823,12 @@ onUnmounted(() => {
 .chat-messages > * { min-width: 0; }
 /* Scroll-to-bottom: floats centered above the input bar. Auto-hides (v-if)
    when content is already scrolled to the bottom (autoScroll === true). */
-.scroll-to-bottom { position: absolute; bottom: 76px; left: 50%; transform: translateX(-50%); width: 36px; height: 36px; border-radius: 50%; border: 1px solid var(--border); background: var(--surface); color: var(--fg); cursor: pointer; display: flex; align-items: center; justify-content: center; box-shadow: 0 4px 14px rgba(0,0,0,0.35); transition: background 0.15s; z-index: 50; }
-.scroll-to-bottom:hover { background: var(--surface-hover); }
-.scroll-btn-enter-active, .scroll-btn-leave-active { transition: opacity 0.2s ease, transform 0.2s ease; }
-.scroll-btn-enter-from, .scroll-btn-leave-to { opacity: 0; transform: translate(-50%, 6px); }
+/* Scroll-to-bottom: absolute child of chat-input-area, pinned above its top
+   edge. Takes zero flex space — doesn't shrink chat-messages. */
+.scroll-to-bottom { position: absolute; top: -40px; left: 50%; transform: translateX(-50%); width: 32px; height: 32px; border-radius: 50%; border: 1px solid var(--border); background: var(--surface); color: var(--fg-secondary); cursor: pointer; display: flex; align-items: center; justify-content: center; box-shadow: 0 2px 10px rgba(0,0,0,0.3); transition: background 0.15s, color 0.15s; z-index: 50; }
+.scroll-to-bottom:hover { background: var(--surface-hover); color: var(--fg); }
+.scroll-btn-enter-active, .scroll-btn-leave-active { transition: opacity 0.25s ease; }
+.scroll-btn-enter-from, .scroll-btn-leave-to { opacity: 0; }
 
 /* Messages — message type styles (msg-user/msg-agent/tool-card/msg-error)
    now live in their own components under components/messages/. The timeline
@@ -816,19 +847,44 @@ onUnmounted(() => {
 .timeline .line { flex: 1; height: 1px; background: var(--border); margin: 0 12px; align-self: flex-start; margin-top: 4px; }
 .timeline .line.done { background: var(--success); }
 
-/* Chat Input */
-.chat-input-area { border-top: 1px solid var(--border); padding: 12px 20px; background: var(--surface); display: flex; gap: 10px; align-items: center; transition: background var(--transition), border-color var(--transition); }
+/* Chat Input — unified container */
+.chat-input-area { position: relative; border-top: 1px solid var(--border); padding: 12px 20px; background: var(--surface); transition: background var(--transition), border-color var(--transition); }
 .chat-input-area.ended { display: flex; align-items: center; justify-content: center; padding: 14px 20px; }
 .ended-text { color: var(--fg-tertiary); font-size: 13px; }
-.chat-input-wrap { position: relative; flex: 1; display: flex; align-items: center; background: var(--bg); border: 1px solid var(--border); border-radius: var(--radius-xl); padding: 0 16px; min-height: 42px; transition: border-color 0.15s, box-shadow 0.15s; }
-.chat-input-wrap:focus-within { border-color: var(--border-focus); box-shadow: 0 0 0 3px var(--accent-muted); }
-.chat-input-wrap input { flex: 1; background: none; border: none; color: var(--fg); font-size: 14px; font-family: var(--font-body); outline: none; padding: 8px 0; }
-.chat-input-wrap input::placeholder { color: var(--fg-tertiary); }
-.chat-input-wrap input:disabled { opacity: 0.5; }
-.send-btn { width: 36px; height: 36px; border-radius: 50%; background: var(--accent); border: none; display: flex; align-items: center; justify-content: center; cursor: pointer; flex-shrink: 0; transition: background 0.15s; }
+
+.chat-input-container { position: relative; background: var(--bg); border: 1px solid var(--border); border-radius: var(--radius-xl); transition: border-color 0.15s, box-shadow 0.15s; }
+.chat-input-container.focused { border-color: var(--border-focus); box-shadow: 0 0 0 3px var(--accent-muted); }
+
+.chat-textarea { width: 100%; background: none; border: none; color: var(--fg); font-size: 14px; font-family: var(--font-body); line-height: 1.5; outline: none; resize: none; padding: 12px 16px 4px; min-height: 60px; max-height: 200px; }
+.chat-textarea::placeholder { color: var(--fg-tertiary); }
+.chat-textarea:disabled { opacity: 0.5; }
+
+/* Bottom control row */
+.input-controls { display: flex; align-items: center; justify-content: space-between; padding: 6px 8px 8px 12px; gap: 8px; }
+
+/* Permission dropdown (left) */
+.perm-dropdown { position: relative; }
+.perm-trigger { display: inline-flex; align-items: center; gap: 4px; padding: 4px 8px; background: none; border: none; color: var(--fg-secondary); font-size: 12px; cursor: pointer; border-radius: var(--radius-sm); transition: color 0.15s, background 0.15s; font-family: var(--font-body); }
+.perm-trigger:hover { color: var(--fg); background: var(--surface-hover); }
+.perm-label { font-weight: 500; }
+.perm-menu { position: absolute; bottom: calc(100% + 4px); left: 0; min-width: 140px; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-md); box-shadow: 0 4px 16px rgba(0,0,0,0.3); padding: 4px; z-index: 30; }
+.perm-menu-item { display: flex; align-items: center; justify-content: space-between; width: 100%; padding: 8px 10px; background: none; border: none; color: var(--fg); font-size: 13px; cursor: pointer; border-radius: var(--radius-sm); transition: background 0.1s; font-family: var(--font-body); }
+.perm-menu-item:hover { background: var(--surface-hover); }
+.perm-menu-item.active { color: var(--accent); }
+.perm-menu-item.active svg { color: var(--accent); }
+.perm-menu-enter-active, .perm-menu-leave-active { transition: opacity 0.15s, transform 0.15s; }
+.perm-menu-enter-from, .perm-menu-leave-to { opacity: 0; transform: translateY(4px); }
+
+/* Right side: context + action button */
+.input-right { display: flex; align-items: center; gap: 8px; }
+.ctx-indicator { display: inline-flex; align-items: center; gap: 4px; padding: 4px 8px; font-size: 11px; color: var(--fg-tertiary); font-family: var(--font-mono); cursor: help; white-space: pre-line; }
+
+.action-btn { width: 32px; height: 32px; border-radius: 50%; border: none; display: flex; align-items: center; justify-content: center; cursor: pointer; flex-shrink: 0; transition: background 0.15s, opacity 0.15s; }
+.send-btn { background: var(--accent); color: #fff; }
 .send-btn:hover:not(:disabled) { background: var(--accent-hover); }
-.send-btn:disabled { opacity: 0.5; cursor: not-allowed; }
-.send-btn svg { width: 16px; height: 16px; fill: var(--bg); }
+.send-btn:disabled { background: var(--border); color: var(--fg-tertiary); cursor: not-allowed; }
+.stop-btn { background: var(--fg); color: var(--bg); }
+.stop-btn:hover { opacity: 0.85; }
 
 @media (max-width: 1024px) { .session-layout { height: calc(100vh - var(--topbar-h)); } }
 @media (max-width: 768px) { .session-panel { display: none; } }
