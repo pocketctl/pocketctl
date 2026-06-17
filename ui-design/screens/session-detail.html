@@ -51,19 +51,97 @@
     cursor: pointer;
   }
 
-  /* Message area — hybrid layout:
-     user = right bubble; agent/tool/error = full-width block with left bar. */
+  /* Message bubbles */
+  .msg { max-width: 85%; animation: fade-in 0.2s ease; }
   .msg-user {
     align-self: flex-end;
-    max-width: 85%;
     background: var(--user-bubble);
     color: #fff;
     padding: 10px 14px;
     border-radius: 16px 16px 4px 16px;
     font-size: 15px;
     line-height: 1.5;
+  }
+  .msg-agent {
+    align-self: flex-start;
+    background: #21262d;
+    color: var(--fg);
+    padding: 10px 14px;
+    border-radius: 16px 16px 16px 4px;
+    font-size: 15px;
+    line-height: 1.5;
+  }
+  .msg-agent.streaming .blink-cursor::after {
+    content: '▎';
+    animation: blink-cursor 0.8s step-end infinite;
+    color: var(--accent);
+  }
+  .msg-error {
+    align-self: flex-start;
+    background: var(--error-bg);
+    color: var(--error);
+    padding: 10px 14px;
+    border-radius: 16px 16px 16px 4px;
+    font-size: 14px;
+    line-height: 1.5;
+  }
+
+  /* Tool call cards */
+  .tool-card {
+    align-self: flex-start;
+    background: #21262d;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-md);
+    width: 92%;
+    max-width: 340px;
+    overflow: hidden;
     animation: fade-in 0.2s ease;
   }
+  .tool-card .tool-header {
+    display: flex;
+    align-items: center;
+    gap: var(--space-sm);
+    padding: var(--space-md);
+    cursor: pointer;
+  }
+  .tool-card .tool-icon { font-size: 16px; flex-shrink: 0; }
+  .tool-card .tool-name {
+    font-weight: 600;
+    font-size: 14px;
+    color: var(--accent);
+    flex: 1;
+  }
+  .tool-card .tool-args {
+    font-size: 12px;
+    color: var(--fg-tertiary);
+    font-family: var(--font-mono);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    max-width: 140px;
+  }
+  .tool-card .tool-status { flex-shrink: 0; }
+  .tool-card .tool-status .check {
+    color: var(--success);
+    font-size: 14px;
+  }
+  .tool-card .tool-status .spinner {
+    width: 14px; height: 14px;
+    border-width: 2px;
+    border-top-color: var(--fg-secondary);
+  }
+  .tool-card .tool-chevron {
+    color: var(--fg-tertiary);
+    font-size: 12px;
+    transition: transform 0.15s;
+  }
+  .tool-card.expanded .tool-chevron { transform: rotate(180deg); }
+
+  .tool-card .tool-body {
+    border-top: 1px solid var(--border);
+    display: none;
+  }
+  .tool-card.expanded .tool-body { display: block; }
 
   .tool-body .tool-section {
     padding: var(--space-sm) var(--space-md);
@@ -106,7 +184,7 @@
     font-family: var(--font-body);
   }
 
-  /* Sub-agent card (nested inside tool-block body) */
+  /* Sub-agent card */
   .sub-agent-card {
     margin: var(--space-sm) var(--space-sm) var(--space-sm);
     background: var(--sub-agent-bg);
@@ -264,34 +342,30 @@
 
     <!-- Chat Messages -->
     <div class="chat-area">
-      <!-- User message (right bubble) -->
-      <div class="msg-user">重构 src/auth 目录下的认证模块，把 JWT 逻辑拆成独立中间件</div>
+      <!-- User message -->
+      <div class="msg msg-user">重构 src/auth 目录下的认证模块，把 JWT 逻辑拆成独立中间件</div>
 
-      <!-- Agent message (full-width block) -->
-      <div class="msg-block msg-agent-block" data-bar="agent">
-        <div class="block-role">assistant</div>
-        好的，我来分析现有的认证代码结构。先看看目录和当前实现：
-      </div>
+      <!-- Agent message -->
+      <div class="msg msg-agent">好的，我来分析现有的认证代码结构。先看看目录和当前实现：</div>
 
-      <!-- Tool block: Read (expanded) -->
-      <div class="msg-block" data-bar="tool">
-        <div class="tool-block expanded" onclick="this.classList.toggle('expanded')">
-          <div class="tool-header">
-            <span class="tool-icon">📖</span>
-            <span class="tool-name">Read</span>
-            <span class="tool-args">src/auth/index.ts:1-48</span>
-            <span class="tool-status"><span class="check">✓</span></span>
-            <span class="tool-chevron">▼</span>
+      <!-- Tool card: Read (expanded) -->
+      <div class="tool-card expanded" onclick="this.classList.toggle('expanded')">
+        <div class="tool-header">
+          <span class="tool-icon">📖</span>
+          <span class="tool-name">Read</span>
+          <span class="tool-args">src/auth/index.ts:1-48</span>
+          <span class="tool-status"><span class="check">✓</span></span>
+          <span class="tool-chevron">▼</span>
+        </div>
+        <div class="tool-body">
+          <div class="tool-section">
+            <div class="tool-label">输入</div>
           </div>
-          <div class="tool-body">
-            <div class="tool-section">
-              <div class="tool-label">输入</div>
-            </div>
-            <div class="tool-input">src/auth/index.ts:1-48</div>
-            <div class="tool-section" style="padding-top:var(--space-sm);">
-              <div class="tool-label">输出</div>
-            </div>
-            <div class="tool-output"> 1│ import jwt from 'jsonwebtoken';
+          <div class="tool-input">src/auth/index.ts:1-48</div>
+          <div class="tool-section" style="padding-top:var(--space-sm);">
+            <div class="tool-label">输出</div>
+          </div>
+          <div class="tool-output"> 1│ import jwt from 'jsonwebtoken';
  2│ import { RequestHandler } from 'express';
  3│
  4│ const SECRET = process.env.JWT_SECRET!;
@@ -302,61 +376,52 @@
  9│   });
 10│ }
 ...</div>
-            <button class="toggle-expand">展开全部 (48 行)</button>
+          <button class="toggle-expand">展开全部 (48 行)</button>
+        </div>
+      </div>
+
+      <!-- Agent message -->
+      <div class="msg msg-agent">看到目前所有 JWT 逻辑都在 index.ts 中。我会把它拆分为：jwt.ts（签名/验证）、middleware.ts（Express 中间件）、types.ts（类型定义）。</div>
+
+      <!-- Tool card: Bash (collapsed, running) -->
+      <div class="tool-card" onclick="this.classList.toggle('expanded')">
+        <div class="tool-header">
+          <span class="tool-icon">⚡</span>
+          <span class="tool-name">Bash</span>
+          <span class="tool-args">mkdir -p src/auth/…</span>
+          <span class="tool-status"><span class="spinner"></span></span>
+          <span class="tool-chevron">▼</span>
+        </div>
+        <div class="tool-body">
+          <div class="tool-section">
+            <div class="tool-label">执行中…</div>
           </div>
         </div>
       </div>
 
-      <!-- Agent message (full-width block) -->
-      <div class="msg-block msg-agent-block" data-bar="agent">
-        <div class="block-role">assistant</div>
-        看到目前所有 JWT 逻辑都在 index.ts 中。我会把它拆分为：jwt.ts（签名/验证）、middleware.ts（Express 中间件）、types.ts（类型定义）。
-      </div>
-
-      <!-- Tool block: Bash (collapsed, running) -->
-      <div class="msg-block" data-bar="tool">
-        <div class="tool-block" onclick="this.classList.toggle('expanded')">
-          <div class="tool-header">
-            <span class="tool-icon">⚡</span>
-            <span class="tool-name">Bash</span>
-            <span class="tool-args">mkdir -p src/auth/…</span>
-            <span class="tool-status"><span class="spinner"></span></span>
-            <span class="tool-chevron">▼</span>
-          </div>
-          <div class="tool-body">
-            <div class="tool-section">
-              <div class="tool-label">执行中…</div>
+      <!-- Tool card: Agent (collapsed, with sub-agent) -->
+      <div class="tool-card">
+        <div class="tool-header" onclick="this.parentElement.classList.toggle('expanded')">
+          <span class="tool-icon">🤖</span>
+          <span class="tool-name">Agent</span>
+          <span class="tool-args">编写类型定义</span>
+          <span class="tool-status"><span class="check">✓</span></span>
+          <span class="tool-chevron">▼</span>
+        </div>
+        <div class="tool-body">
+          <div class="sub-agent-card">
+            <div class="tool-header">
+              <span class="tool-icon">✏️</span>
+              <span class="tool-name">Write</span>
+              <span class="tool-args">src/auth/types.ts</span>
+              <span class="tool-status"><span class="check">✓</span></span>
             </div>
           </div>
         </div>
       </div>
 
-      <!-- Tool block: Agent (collapsed, with sub-agent) -->
-      <div class="msg-block" data-bar="tool">
-        <div class="tool-block">
-          <div class="tool-header" onclick="this.parentElement.classList.toggle('expanded')">
-            <span class="tool-icon">🤖</span>
-            <span class="tool-name">Agent</span>
-            <span class="tool-args">编写类型定义</span>
-            <span class="tool-status"><span class="check">✓</span></span>
-            <span class="tool-chevron">▼</span>
-          </div>
-          <div class="tool-body">
-            <div class="sub-agent-card">
-              <div class="tool-header">
-                <span class="tool-icon">✏️</span>
-                <span class="tool-name">Write</span>
-                <span class="tool-args">src/auth/types.ts</span>
-                <span class="tool-status"><span class="check">✓</span></span>
-              </div>
-            </div>
-          </div>
-        </div>
-      </div>
-
-      <!-- Agent streaming message (full-width block) -->
-      <div class="msg-block msg-agent-block streaming" data-bar="agent">
-        <div class="block-role">assistant</div>
+      <!-- Agent streaming message -->
+      <div class="msg msg-agent streaming">
         中间件已创建完毕，正在运行测试<span class="blink-cursor"></span>
       </div>
     </div>
