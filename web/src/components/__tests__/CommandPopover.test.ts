@@ -8,13 +8,14 @@ const commands: CommandItem[] = [
   { name: 'compact', source: 'builtin', kind: 'command', description: '压缩历史' },
   { name: 'pocket-release', source: 'project', kind: 'skill', description: '发布流程' },
   { name: 'codex:rescue', source: 'plugin', kind: 'skill', namespace: 'codex', description: '救援' },
+  { name: 'my-skill', source: 'user', kind: 'skill', description: '我的' },
 ]
 
 describe('CommandPopover', () => {
   test('renders each command with leading slash', () => {
     const wrapper = mount(CommandPopover, { props: { commands, activeIndex: 0 } })
     const items = wrapper.findAll('.cmd-item')
-    expect(items.length).toBe(4)
+    expect(items.length).toBe(5)
     expect(wrapper.html()).toContain('/clear')
     expect(wrapper.html()).toContain('/pocket-release')
     expect(wrapper.html()).toContain('/codex:rescue')
@@ -27,11 +28,16 @@ describe('CommandPopover', () => {
     expect(items[2].classes()).toContain('active')
   })
 
-  test('distinguishes command (🔧) and skill (📘) icons', () => {
+  test('renders SVG icons by kind+source (Terminal/Sparkles/Folder/User/Package)', () => {
     const wrapper = mount(CommandPopover, { props: { commands, activeIndex: 0 } })
     const html = wrapper.html()
-    expect(html).toContain('🔧') // command
-    expect(html).toContain('📘') // skill
+    // SVG icons present (no emoji)
+    expect(html).not.toContain('🔧')
+    expect(html).not.toContain('📘')
+    expect(wrapper.findAll('.cmd-icon svg').length).toBe(5)
+    // NOTE: command available-ness is runtime (claude PTY judges per-command:
+    // /clear /loop /compact work, /help /model don't). No gray-out — let the user
+    // try; isn't-available is surfaced via command_receipt (status unavailable).
   })
 
   test('emits select with the command on click', async () => {
