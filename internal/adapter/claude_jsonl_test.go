@@ -205,3 +205,15 @@ func TestJSONLResultEventForwarded(t *testing.T) {
 		t.Errorf("expected 1 turn, got %d", events[0].Turns)
 	}
 }
+
+func TestJSONLStreamParserPermissionMode(t *testing.T) {
+	p := NewJSONLStreamParser()
+	line := `{"type":"permission-mode","sessionId":"s1","content":"plan"}`
+	events, _ := p.Parse(line)
+	if len(events) != 1 || events[0].Type != "permission_mode_changed" {
+		t.Fatalf("expected permission_mode_changed, got %v", events)
+	}
+	if events[0].PermissionMode != "plan" {
+		t.Errorf("expected plan, got %s", events[0].PermissionMode)
+	}
+}

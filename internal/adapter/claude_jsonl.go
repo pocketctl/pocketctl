@@ -355,6 +355,18 @@ func (p *JSONLStreamParser) Parse(line string) ([]protocol.DaemonEvent, error) {
 			CostUSD:  entry.TotalCost,
 			Turns:    entry.NumTurns,
 		}}, nil
+	case "permission-mode":
+		// Claude writes this when the user cycles modes via Shift+Tab.
+		// Emit a feedback event so the daemon updates ProcessState and web UI syncs.
+		mode := strings.TrimSpace(entry.Content)
+		if mode == "" {
+			return nil, nil
+		}
+		return []protocol.DaemonEvent{{
+			Type:           "permission_mode_changed",
+			SessionID:      sid,
+			PermissionMode: mode,
+		}}, nil
 	default:
 		return nil, nil
 	}

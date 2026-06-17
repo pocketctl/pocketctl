@@ -1088,6 +1088,17 @@ func handleCommands(ctx context.Context, client *ws.Client, sm *session.SessionM
 					logger.Error("kill session failed", "error", err)
 				}
 
+			case "set_permission_mode":
+				logger.Info("set permission mode", "session", cmd.SessionID, "mode", cmd.Content)
+				if err := sm.SetPermissionMode(ctx, cmd.SessionID, cmd.Content); err != nil {
+					logger.Error("set permission mode failed", "error", err)
+					client.SendMsg(protocol.DaemonEvent{
+						Type:      "error",
+						SessionID: cmd.SessionID,
+						Error:     err.Error(),
+					})
+				}
+
 			case "list_commands":
 				logger.Debug("list commands", "session", cmd.SessionID)
 				cwd, ok := sm.GetSessionCwd(cmd.SessionID)

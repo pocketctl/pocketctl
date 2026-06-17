@@ -50,6 +50,12 @@
           <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/></svg>
           {{ contextTokens }}
         </span>
+        <div class="perm-mode-group" v-if="canInput">
+          <button v-for="m in PERMISSION_MODES" :key="m.value"
+            :class="['perm-btn', { active: currentPermissionMode === m.value }]"
+            @click="setPermissionMode(m.value)"
+            :title="`切换到${m.label}模式`">{{ m.label }}</button>
+        </div>
         <div class="session-id-box">
           <code class="session-id-text">{{ sessionId?.slice(0, 8) }}</code>
           <button class="copy-btn" @click="copySessionId" :title="copied ? '已复制' : '复制会话ID'">
@@ -191,6 +197,12 @@ const selectedIndex = ref(0)
 const popoverDismissed = ref(false)
 const status = ref('running')
 const exitReason = ref('')
+const currentPermissionMode = ref('acceptEdits')
+const PERMISSION_MODES = [
+  { value: 'default', label: '默认' },
+  { value: 'acceptEdits', label: '自动编辑' },
+  { value: 'plan', label: '计划' },
+]
 const exitedAt = ref('')
 const autoScroll = ref(true)
 const copied = ref(false)
@@ -335,6 +347,10 @@ function onMessagesScroll() {
 }
 
 function focusResumeInput() { if (inputEl.value) { inputEl.value.focus() } }
+
+function setPermissionMode(mode: string) {
+  send({ type: 'set_permission_mode', session_id: sessionId.value, content: mode })
+}
 
 function sendMessage() {
   const text = messageInput.value.trim()
@@ -592,6 +608,11 @@ onMounted(() => {
     if (msg.session_id === sessionId.value) { status.value = msg.status; if (msg.exit_reason) exitReason.value = msg.exit_reason; if (msg.exited_at) exitedAt.value = msg.exited_at }
   }))
 
+  cleanups.push(onEvent('permission_mode_changed', (msg: any) => {
+    if (msg.session_id !== sessionId.value) return
+    currentPermissionMode.value = msg.permission_mode || 'acceptEdits'
+  }))
+
   // 兜底：URL 仍是 pending 时，session_id_changed 到达则替换为真实 ID 并重新 replay
   cleanups.push(onEvent('session_id_changed', (msg: any) => {
     if (msg.old_session_id && msg.old_session_id === sessionId.value) {
@@ -675,6 +696,10 @@ onUnmounted(() => {
 .status-pill.running { background: var(--success-bg); color: var(--success); }
 .status-pill .pulse { width: 6px; height: 6px; border-radius: 50%; background: currentColor; animation: pulse-green 1.5s infinite; }
 .context-pill { display: inline-flex; align-items: center; gap: 4px; padding: 4px 10px; border-radius: var(--radius-full); font-size: 12px; font-weight: 500; background: var(--accent-muted); color: var(--accent); font-family: var(--font-mono); }
+.perm-mode-group { display: inline-flex; gap: 2px; padding: 2px; background: var(--bg); border: 1px solid var(--border); border-radius: var(--radius-full); }
+.perm-btn { padding: 3px 10px; border: none; background: none; color: var(--fg-tertiary); font-size: 11px; cursor: pointer; border-radius: var(--radius-full); transition: all 0.15s; font-family: var(--font-body); }
+.perm-btn.active { background: var(--accent); color: #fff; font-weight: 600; }
+.perm-btn:hover:not(.active) { color: var(--fg); }
 
 .session-id-box { display: flex; align-items: center; gap: 6px; padding: 3px 8px; background: var(--bg); border: 1px solid var(--border); border-radius: var(--radius-md); }
 .session-id-text { font-family: var(--font-mono); font-size: 12px; color: var(--fg-secondary); }

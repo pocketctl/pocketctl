@@ -38,6 +38,7 @@ type ProcessState struct {
 	TitleGenerated bool // true once generate_title_request has been sent
 	Tailer *watcher.JSONLTailer // terminal session 的 JSONL tailer（D2: sendToIdleTerminal 期间 pause）
 	PTY    *os.File             // interactive-web-session D1: daemon session 的 PTY master（写 stdin 驱动 interactive claude）
+	PermissionMode string // current permission mode (updated by JSONL permission-mode parser)
 }
 
 // SetTailer associates a JSONL tailer with a session (so sendToIdleTerminal can pause/resume it).
@@ -47,6 +48,73 @@ func (sm *SessionManager) SetTailer(sessionID string, t *watcher.JSONLTailer) {
 	if ps, ok := sm.sessions[sessionID]; ok {
 		ps.Tailer = t
 	}
+}
+
+// SetPermissionMode cycles the Claude TUI's permission mode via Shift+Tab.
+// Only works for daemon (PTY) sessions. The cycle order is default→acceptEdits→plan;
+// we calculate how many Shift+Tab presses are needed based on the current mode.
+func (sm *SessionManager) SetPermissionMode(ctx context.Context, sessionID, targetMode string) error {
+	sm.mu.RLock()
+	ps, ok := sm.sessions[sessionID]
+	sm.mu.RUnlock()
+	if !ok {
+		return fmt.Errorf("session not found")
+	}
+	if ps.Source != "daemon" || ps.PTY == nil {
+		return fmt.Errorf("only daemon (interactive) sessions support runtime mode switch")
+	}
+
+	cycle := []string{"default", "acceptEdits", "plan"}
+	currentIdx := indexOfString(cycle, ps.PermissionMode)
+	if currentIdx == -1 {
+		currentIdx = 1 // unknown → assume acceptEdits (the daemon default)
+	}
+	targetIdx := indexOfString(cycle, targetMode)
+	if targetIdx == -1 {
+		return fmt.Errorf("unsupported permission mode: %s (use default/acceptEdits/plan)", targetMode)
+	}
+
+	presses := (targetIdx - currentIdx + len(cycle)) % len(cycle)
+	for i := 0; i < presses; i++ {
+		if _, err := ps.PTY.Write([]byte("\x1b[Z")); err != nil { // Shift+Tab (CSI Z)
+			return fmt.Errorf("pty write shift+tab: %w", err)
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(150 * time.Millisecond): // let TUI process each press
+		}
+	}
+	return nil
+}
+
+// UpdatePermissionMode records the current permission mode (called when a
+// permission_mode_changed event is received from the JSONL tailer).
+func (sm *SessionManager) UpdatePermissionMode(sessionID, mode string) {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+	if ps, ok := sm.sessions[sessionID]; ok {
+		ps.PermissionMode = mode
+	}
+}
+
+// GetPermissionMode returns the current permission mode for a session.
+func (sm *SessionManager) GetPermissionMode(sessionID string) string {
+	sm.mu.RLock()
+	defer sm.mu.RUnlock()
+	if ps, ok := sm.sessions[sessionID]; ok {
+		return ps.PermissionMode
+	}
+	return ""
+}
+
+func indexOfString(slice []string, val string) int {
+	for i, v := range slice {
+		if v == val {
+			return i
+		}
+	}
+	return -1
 }
 
 // NotifyFunc is called after a web→terminal message completes.
@@ -189,6 +257,10 @@ func (sm *SessionManager) CreateSession(ctx context.Context, config protocol.Ses
 	}
 
 	now := time.Now()
+	permMode := config.PermissionMode
+	if permMode == "" {
+		permMode = "acceptEdits"
+	}
 	ps := &ProcessState{
 		SessionID:      sessionID, // real id (not pending-): --session-id pins it
 		Cmd:            cmd,
@@ -200,6 +272,7 @@ func (sm *SessionManager) CreateSession(ctx context.Context, config protocol.Ses
 		Agent:          config.Agent,
 		Source:         "daemon",
 		PTY:            ptmx,
+		PermissionMode: permMode,
 	}
 	sm.mu.Lock()
 	sm.sessions[sessionID] = ps
