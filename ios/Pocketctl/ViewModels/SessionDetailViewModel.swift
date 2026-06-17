@@ -5,6 +5,8 @@ import Foundation
 final class SessionDetailViewModel {
     var messages: [ChatMessage] = []
     var subAgents: [String: SubAgent] = [:]
+    /// Available slash commands for autocomplete (filled by command_list event)
+    var commands: [CommandItem] = []
     var status: String
     var title: String?
     var exitReason: String?
@@ -106,6 +108,13 @@ final class SessionDetailViewModel {
             "session_id": session.sessionId,
             "last_seq": lastEventSeq,
         ])
+
+        // Request the available slash commands for autocomplete (one-time per connect).
+        wsService.send([
+            "type": "list_commands",
+            "session_id": session.sessionId,
+        ])
+
         // isLoading will be set to false when replay_end arrives
 
         // Safety timeout: if replay_end never arrives (network drop, relay crash),
@@ -269,6 +278,12 @@ final class SessionDetailViewModel {
         case .sessionTitleUpdate:
             title = event.title
 
+        case .commandReceipt:
+            handleCommandReceipt(event)
+
+        case .commandList:
+            handleCommandList(event)
+
         case .error:
             msgCounter += 1
             messages.append(ChatMessage(
@@ -317,6 +332,9 @@ final class SessionDetailViewModel {
 
         case .sessionTitleUpdate:
             title = event.title
+
+        case .commandReceipt:
+            handleCommandReceiptDirect(event, messages: &messages)
 
         case .error:
             msgCounter += 1
@@ -574,6 +592,41 @@ final class SessionDetailViewModel {
             messages[index].subAgentId = agentId
         }
     }
+
+    // MARK: - Slash command handlers
+
+    private func handleCommandReceipt(_ event: WebSocketEvent) {
+        msgCounter += 1
+        messages.append(ChatMessage(
+            id: msgCounter,
+            role: .agent,
+            type: .commandReceipt,
+            content: event.receiptMessage ?? "",
+            streaming: false,
+            command: event.command ?? "",
+            receiptStatus: event.receiptStatus ?? "success"
+        ))
+        if !isBatchProcessing { scrollTick += 1 }
+    }
+
+    private func handleCommandList(_ event: WebSocketEvent) {
+        guard let cmds = event.commands else { commands = []; return }
+        commands = cmds.compactMap { CommandItem(dict: $0) }
+    }
+
+    private func handleCommandReceiptDirect(_ event: WebSocketEvent, messages: inout [ChatMessage]) {
+        msgCounter += 1
+        messages.append(ChatMessage(
+            id: msgCounter,
+            role: .agent,
+            type: .commandReceipt,
+            content: event.receiptMessage ?? "",
+            streaming: false,
+            command: event.command ?? "",
+            receiptStatus: event.receiptStatus ?? "success"
+        ))
+    }
+
 
     private func handleSubAgentEvent(agentId: String, event: WebSocketEvent, dict: [String: Any]) {
         guard subAgents[agentId] != nil else { return }

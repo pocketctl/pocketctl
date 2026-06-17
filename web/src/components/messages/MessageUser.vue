@@ -10,6 +10,8 @@ defineProps<{ content: string }>()
 
 <style scoped>
 .msg {
+  /* Width follows content; max-width caps it so long messages wrap. */
+  width: fit-content;
   max-width: 85%;
   align-self: flex-end;
   word-break: break-word;

@@ -21,6 +21,10 @@ enum WebSocketEventType: String, Sendable {
     case toolResult = "tool_result"
     case subagentDiscovered = "subagent_discovered"
 
+    // Slash commands (daemon → client)
+    case commandList = "command_list"
+    case commandReceipt = "command_receipt"
+
     // Replay control (relay → client)
     case replayBatch = "replay_batch"
     case replayEnd = "replay_end"
@@ -68,6 +72,16 @@ struct WebSocketEvent {
 
     var subagentDesc: String? { raw["subagent_desc"] as? String }
     var subagentType: String? { raw["subagent_type"] as? String }
+
+    // Slash command accessors
+    /// Command name for command_receipt (e.g. "/compact"). Empty if unknown.
+    var command: String? { raw["command"] as? String }
+    /// Receipt status: "success" | "failed" | "unavailable". Defaults to "success".
+    var receiptStatus: String? { raw["receipt_status"] as? String }
+    /// Receipt message (human-readable detail). May be empty.
+    var receiptMessage: String? { raw["message"] as? String }
+    /// Available commands for command_list.
+    var commands: [[String: Any]]? { raw["commands"] as? [[String: Any]] }
 
     // Replay control accessors
     var events: [[String: Any]]? { raw["events"] as? [[String: Any]] }

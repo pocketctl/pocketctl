@@ -212,6 +212,12 @@ func inferReceiptStatus(text, compactStatus string) string {
 		return "unavailable"
 	}
 	if compactStatus == "failed" {
+		// "Not enough messages to compact" is not a real failure — the command
+		// ran successfully, there was simply nothing to compact. Treat it as
+		// success so the receipt shows a neutral/success visual, not an error.
+		if strings.Contains(text, "Not enough messages") {
+			return "success"
+		}
 		return "failed"
 	}
 	return "success"

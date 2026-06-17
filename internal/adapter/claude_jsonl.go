@@ -10,16 +10,19 @@ import (
 
 // JSONL entry structures — Claude Code's session history format
 type JSONLEntry struct {
-	Type      string          `json:"type"`
-	Subtype   string          `json:"subtype,omitempty"`
-	SessionID string          `json:"sessionId"`
-	Message   *JSONLMessage   `json:"message,omitempty"`
-	Content   string          `json:"content,omitempty"`
-	IsMeta    bool            `json:"isMeta,omitempty"` // true for meta messages (e.g. local-command-caveat) — filtered from replay
+	Type          string        `json:"type"`
+	Subtype       string        `json:"subtype,omitempty"`
+	SessionID     string        `json:"sessionId"`
+	Message       *JSONLMessage `json:"message,omitempty"`
+	Content       string        `json:"content,omitempty"`
+	IsMeta        bool          `json:"isMeta,omitempty"`     // true for meta messages (e.g. local-command-caveat) — filtered from replay
+	CompactResult string        `json:"compact_result,omitempty"` // /compact outcome: "success" or "failed"
+	CompactError  string        `json:"compact_error,omitempty"`  // /compact failure reason
 }
 
 type JSONLMessage struct {
 	Role    string          `json:"role"`
+	Model   string          `json:"model,omitempty"` // "<synthetic>" marks local-command replies
 	Content json.RawMessage `json:"content"`
 }
 
@@ -268,4 +271,145 @@ func truncate(s string, maxLen int) string {
 		return s[:maxLen-3] + "..."
 	}
 	return s
+}
+
+// JSONLStreamParser is a stateful wrapper around JSONL parsing that tracks the
+// pending slash command (pendingCmd) and /compact outcome, so that synthetic
+// assistant replies and local-command feedback can be converted into
+// command_receipt events with the correct command name and status — mirroring
+// what ClaudeAdapter does for the -p (stream-json) path.
+//
+// It is held by the PTY session's JSONL tailer; SetPendingCmd is called from
+// SessionManager.SendMessage whenever the user sends a slash command via PTY.
+type JSONLStreamParser struct {
+	pendingCmd    string
+	compactStatus string
+	compactError  string
+}
+
+// NewJSONLStreamParser creates a parser with empty state.
+func NewJSONLStreamParser() *JSONLStreamParser {
+	return &JSONLStreamParser{}
+}
+
+// SetPendingCmd extracts the slash command name from a user message and stores
+// it for the next command_receipt. Pass the raw user content (e.g. "/compact"
+// or "/model sonnet"). Non-slash content clears the pending command.
+func (p *JSONLStreamParser) SetPendingCmd(content string) {
+	p.pendingCmd = extractSlashCommand(content)
+}
+
+// Parse converts a single JSONL line to DaemonEvents, applying the same
+// synthetic→receipt and compact-status logic as ClaudeAdapter.
+func (p *JSONLStreamParser) Parse(line string) ([]protocol.DaemonEvent, error) {
+	line = strings.TrimSpace(line)
+	if line == "" {
+		return nil, nil
+	}
+
+	var entry JSONLEntry
+	if err := json.Unmarshal([]byte(line), &entry); err != nil {
+		return nil, fmt.Errorf("parse jsonl: %w", err)
+	}
+
+	sid := entry.SessionID
+
+	switch entry.Type {
+	case "assistant":
+		return p.parseAssistant(entry, sid)
+	case "user":
+		if entry.IsMeta {
+			return nil, nil
+		}
+		return parseUserJSONL(entry, sid)
+	case "system":
+		return p.parseSystem(entry, sid)
+	default:
+		return nil, nil
+	}
+}
+
+// parseAssistant mirrors ClaudeAdapter.convertAssistant: synthetic text blocks
+// (model "<synthetic>") become command_receipt, real text becomes agent_text.
+func (p *JSONLStreamParser) parseAssistant(entry JSONLEntry, sid string) ([]protocol.DaemonEvent, error) {
+	if entry.Message == nil {
+		return nil, nil
+	}
+
+	isSynthetic := entry.Message.Model == "<synthetic>"
+
+	var blocks []JSONLContentBlock
+	if err := json.Unmarshal(entry.Message.Content, &blocks); err != nil {
+		return nil, nil
+	}
+
+	var events []protocol.DaemonEvent
+	for _, b := range blocks {
+		switch b.Type {
+		case "text":
+			if isSynthetic {
+				// Local command reply → receipt (not a confusing plain bubble)
+				events = append(events, p.makeReceipt(sid, b.Text))
+			} else {
+				events = append(events, protocol.DaemonEvent{
+					Type:      "agent_text",
+					SessionID: sid,
+					Text:      b.Text,
+					Streaming: false,
+				})
+			}
+		case "tool_use":
+			events = append(events, protocol.DaemonEvent{
+				Type:      "tool_call",
+				SessionID: sid,
+				CallID:    b.ID,
+				Tool:      b.Name,
+				Input:     b.Input,
+			})
+		case "thinking":
+			// Skip thinking blocks
+		}
+	}
+	return events, nil
+}
+
+// parseSystem caches /compact status and turns local_command feedback into a
+// command_receipt (mirrors ClaudeAdapter.convertSystem).
+func (p *JSONLStreamParser) parseSystem(entry JSONLEntry, sid string) ([]protocol.DaemonEvent, error) {
+	if entry.CompactResult != "" {
+		p.compactStatus = entry.CompactResult
+		p.compactError = entry.CompactError
+	}
+	if entry.Subtype == "local_command" && entry.Content != "" {
+		if msg := extractLocalCommandOutput(entry.Content); msg != "" {
+			return []protocol.DaemonEvent{p.makeReceipt(sid, msg)}, nil
+		}
+	}
+	return nil, nil
+}
+
+// makeReceipt builds a command_receipt from synthetic/local-command text,
+// inferring status from the text + cached compact status. Mirrors
+// ClaudeAdapter.makeReceipt but uses the parser's own pendingCmd.
+func (p *JSONLStreamParser) makeReceipt(sid, text string) protocol.DaemonEvent {
+	status := inferReceiptStatus(text, p.compactStatus)
+	msg := text
+	if status == "failed" && p.compactError != "" {
+		msg = p.compactError
+	}
+	cmd := ""
+	if p.pendingCmd != "" {
+		cmd = "/" + p.pendingCmd
+	}
+	// Consume the pending command — one receipt per slash invocation.
+	p.pendingCmd = ""
+	p.compactStatus = ""
+	p.compactError = ""
+	return protocol.DaemonEvent{
+		Type:          "command_receipt",
+		SessionID:     sid,
+		Command:       cmd,
+		ReceiptStatus: status,
+		Message:       msg,
+	}
 }

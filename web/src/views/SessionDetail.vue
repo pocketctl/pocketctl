@@ -664,11 +664,10 @@ onUnmounted(() => {
 
 /* Messages */
 .chat-messages { flex: 1; min-height: 0; width: 100%; overflow-y: auto; overflow-x: hidden; padding: 20px; display: flex; flex-direction: column; align-items: stretch; gap: 16px; position: relative; overflow-anchor: none; }
-/* Force every direct message child to fill the column width (flex column's
-   default align-items: stretch already does this, but width:100% makes it
-   explicit and prevents any shrink-to-fit). min-width:0 lets long content
-   (code/URLs) wrap instead of overflowing horizontally. */
-.chat-messages > * { width: 100%; min-width: 0; }
+/* min-width:0 lets long content (code/URLs) wrap instead of overflowing
+   horizontally. Width is controlled by each message component:
+   agent/tool/error use width:100%; user bubble uses width:fit-content. */
+.chat-messages > * { min-width: 0; }
 /* Scroll-to-bottom: floats centered above the input bar. Auto-hides (v-if)
    when content is already scrolled to the bottom (autoScroll === true). */
 .scroll-to-bottom { position: absolute; bottom: 76px; left: 50%; transform: translateX(-50%); width: 36px; height: 36px; border-radius: 50%; border: 1px solid var(--border); background: var(--surface); color: var(--fg); cursor: pointer; display: flex; align-items: center; justify-content: center; box-shadow: 0 4px 14px rgba(0,0,0,0.35); transition: background 0.15s; z-index: 50; }

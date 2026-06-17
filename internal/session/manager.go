@@ -277,6 +277,11 @@ func (sm *SessionManager) servePTYSession(ctx context.Context, ps *ProcessState,
 			return
 		}
 		sm.SetTailer(ps.SessionID, tailer)
+		// If the initial prompt is a slash command, record it so the first
+		// command_receipt (if any) carries the correct command name.
+		if initialPrompt != "" {
+			tailer.SetPendingCmd(initialPrompt)
+		}
 		go tailer.Run(ctx, sm.outputCh, nil)
 		if sm.OnSessionIDResolved != nil {
 			sm.OnSessionIDResolved(ps.SessionID, ps.Cwd)
@@ -649,6 +654,11 @@ func (sm *SessionManager) SendMessage(ctx context.Context, sessionID string, con
 		sm.mu.Unlock()
 		if _, err := ptyFile.Write([]byte(content + "\r")); err != nil {
 			return fmt.Errorf("pty stdin write: %w", err)
+		}
+		// Record the slash command (if any) so the tailer's JSONLStreamParser
+		// can attach it to the next command_receipt (e.g. /compact, /clear).
+		if ps.Tailer != nil {
+			ps.Tailer.SetPendingCmd(content)
 		}
 		return nil
 	}
