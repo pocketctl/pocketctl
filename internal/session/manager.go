@@ -88,6 +88,35 @@ func (sm *SessionManager) SetPermissionMode(ctx context.Context, sessionID, targ
 	return nil
 }
 
+// InterruptSession stops the agent's current generation without killing the
+// session. For daemon (PTY) sessions it writes Ctrl+C (\x03) to the PTY,
+// which Claude's TUI interprets as "interrupt current turn". For terminal
+// sessions it cancels the --resume subprocess. The session stays alive and
+// returns to idle state (driven by the JSONL tailer or the resume goroutine).
+func (sm *SessionManager) InterruptSession(sessionID string) error {
+	sm.mu.RLock()
+	ps, ok := sm.sessions[sessionID]
+	sm.mu.RUnlock()
+	if !ok {
+		return fmt.Errorf("session not found")
+	}
+
+	if ps.Source == "daemon" && ps.PTY != nil {
+		// Ctrl+C (ETX) — Claude TUI stops the current generation and returns
+		// to the input prompt. The JSONL tailer will push an idle status.
+		if _, err := ps.PTY.Write([]byte{0x03}); err != nil {
+			return fmt.Errorf("pty write ctrl+c: %w", err)
+		}
+		return nil
+	}
+
+	// Terminal session: cancel the --resume subprocess.
+	if ps.Cancel != nil {
+		ps.Cancel()
+	}
+	return nil
+}
+
 // UpdatePermissionMode records the current permission mode (called when a
 // permission_mode_changed event is received from the JSONL tailer).
 func (sm *SessionManager) UpdatePermissionMode(sessionID, mode string) {
