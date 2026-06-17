@@ -291,7 +291,7 @@ struct SessionDetailView: View {
         let s = viewModel?.status ?? session.status
         switch s {
         case "running", "busy": return .pcSuccess
-        case "idle": return Color(hex: 0xEAB308)
+        case "idle": return .pcIdle
         case "completed": return .pcAccent
         case "error": return .pcError
         case "killed", "exited": return .pcWarning

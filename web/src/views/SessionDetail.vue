@@ -24,7 +24,7 @@
           <span :class="['status-dot', s.statusEffective || s.status]" style="width:7px;height:7px;"></span>
           <div class="sl-info">
             <div :class="['sl-title', { mono: !s.title || s.title.startsWith('Terminal Session') }]">
-              <span v-if="s.pinned" style="color: var(--accent); margin-right: 4px;">📌</span>
+              <svg v-if="s.pinned" class="pin-icon" width="12" height="12" viewBox="0 0 24 24" fill="currentColor" style="margin-right: 4px;"><path d="M16 3l5 5-3 1-3 3-1 5-2-2-5 5-1-1 5-5-2-2 5-1 3-3z"/></svg>
               <input v-if="renamingId === s.session_id" class="ss-rename-input" v-model="renameInput" maxlength="60"
                 @click.stop @keydown.enter="commitRename(s)" @keydown.escape="cancelRename" @blur="commitRename(s)" />
               <template v-else>{{ s.title || s.session_id.slice(0, 8) }}</template>
@@ -53,7 +53,7 @@
             <svg v-else width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M20 6L9 17l-5-5"/></svg>
           </button>
           <button v-if="currentSessionAgent !== 'opencode'" class="copy-btn" style="margin-left:6px;" :title="resumeCopied ? '已复制恢复命令 — 在主机终端粘贴运行' : '恢复会话命令（复制到粘贴板）'" @click="copyResumeCmd">
-            <span v-if="!resumeCopied" style="font-size:13px;line-height:1;">🖥️</span>
+            <svg v-if="!resumeCopied" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8"/><path d="M12 17v4"/></svg>
             <svg v-else width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M20 6L9 17l-5-5"/></svg>
           </button>
         </div>
@@ -63,14 +63,16 @@
       <div class="chat-messages" ref="messagesEl" @scroll="onMessagesScroll">
         <!-- Exit Banner -->
         <div v-if="status === 'exited'" class="banner banner-info" style="flex-shrink:0;">
-          <span>📤 Session 已退出</span>
+          <svg class="banner-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><path d="M16 17l5-5-5-5"/><path d="M21 12H9"/></svg>
+          <span>Session 已退出</span>
           <span v-if="exitReason" style="margin-left:4px;">· {{ exitReasonLabel(exitReason) }}</span>
           <button v-if="isDaemonOnline" class="btn btn-accent" style="margin-left:auto;padding:4px 12px;font-size:12px;" @click="focusResumeInput">Resume</button>
         </div>
 
         <!-- Disconnected Banner -->
         <div v-if="isDisconnected" class="banner banner-warning" style="flex-shrink:0;">
-          <span>⚠️ Daemon 离线 — 等待恢复</span>
+          <svg class="banner-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><path d="M12 9v4"/><path d="M12 17h.01"/></svg>
+          <span>Daemon 离线 — 等待恢复</span>
         </div>
 
         <!-- Timeline -->
@@ -87,45 +89,35 @@
 
         <!-- Messages -->
         <template v-for="msg in messages" :key="msg.id">
-          <!-- User message -->
-          <div v-if="msg.role === 'user'" class="msg msg-user">{{ cleanContent(msg.content) }}</div>
+          <!-- User message (right bubble) -->
+          <MessageUser v-if="msg.role === 'user'" :content="cleanContent(msg.content)" />
 
-          <!-- Agent text message -->
-          <div v-else-if="msg.type === 'agent_text'" :class="['msg msg-agent', { streaming: msg.streaming }]">
-            <MarkdownRenderer :content="cleanContent(msg.content)" />
-            <span v-if="msg.streaming" class="blink-cursor"></span>
-          </div>
+          <!-- Agent text message (full-width block) -->
+          <MessageAgent
+            v-else-if="msg.type === 'agent_text'"
+            :content="cleanContent(msg.content)"
+            :streaming="msg.streaming"
+          />
 
-          <!-- Tool call card -->
-          <div v-else-if="msg.type === 'tool_call' || msg.type === 'subagent'" :class="['tool-card', { expanded: msg.expanded }]" @click="msg.expanded = !msg.expanded">
-            <div class="tool-header">
-              <span class="tool-icon">{{ toolIcon(msg.tool) }}</span>
-              <span class="tool-name">{{ msg.tool }}</span>
-              <span class="tool-args">{{ toolArgs(msg) }}</span>
-              <span class="tool-status">
-                <span v-if="msg.status === 'completed'" class="check">✓</span>
-                <span v-else class="spinner"></span>
-              </span>
-              <span class="tool-chevron">▼</span>
-            </div>
-            <div class="tool-body">
-              <div class="tool-section"><div class="tool-label">输入</div></div>
-              <div class="tool-input">{{ toolInputText(msg) }}</div>
-              <div class="tool-section" style="padding-top:8px;"><div class="tool-label">输出</div></div>
-              <div class="tool-output" :class="{ collapsed: !msg.outputExpanded }" ref="outputEl">{{ msg.output || '执行中…' }}</div>
-              <button v-if="msg.output && msg.output.length > 300" class="toggle-expand" @click.stop="msg.outputExpanded = !msg.outputExpanded">{{ msg.outputExpanded ? '收起' : '展开全部' }}</button>
-            </div>
-          </div>
+          <!-- Tool call / subagent (full-width block) -->
+          <ToolCallCard
+            v-else-if="msg.type === 'tool_call' || msg.type === 'subagent'"
+            :message="msg"
+            @toggleExpand="msg.expanded = !msg.expanded"
+            @toggleOutput="msg.outputExpanded = !msg.outputExpanded"
+          />
 
-          <!-- Error message -->
-          <div v-else-if="msg.type === 'error'" class="msg msg-error">{{ msg.content || msg.error }}</div>
+          <!-- Error message (full-width block) -->
+          <MessageError v-else-if="msg.type === 'error'" :content="msg.content || msg.error" />
 
           <!-- Command execution receipt -->
           <CommandReceiptCard v-else-if="msg.type === 'command_receipt'" :command="msg.command" :status="msg.receiptStatus" :message="msg.message" />
         </template>
 
         <!-- Scroll to bottom (iOS-style floating button; always visible when there are messages) -->
-        <button v-if="messages.length > 0" class="scroll-to-bottom" :class="{ 'at-bottom': autoScroll }" title="回到底部" @click="scrollToBottom">↓</button>
+        <button v-if="messages.length > 0" class="scroll-to-bottom" :class="{ 'at-bottom': autoScroll }" title="回到底部" @click="scrollToBottom">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14"/><path d="M19 12l-7 7-7-7"/></svg>
+        </button>
       </div>
 
       <!-- Chat Input -->
@@ -156,11 +148,15 @@ import { ref, computed, onMounted, onUnmounted, nextTick, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useWebSocket } from '../composables/useWebSocket'
 import { formatRelativeTime } from '../composables/useRelativeTime'
-import MarkdownRenderer from '../components/MarkdownRenderer.vue'
 import SessionActions from '../components/SessionActions.vue'
 import CommandPopover from '../components/CommandPopover.vue'
 import CommandReceiptCard from '../components/CommandReceiptCard.vue'
+import MessageUser from '../components/messages/MessageUser.vue'
+import MessageAgent from '../components/messages/MessageAgent.vue'
+import MessageError from '../components/messages/MessageError.vue'
+import ToolCallCard from '../components/messages/ToolCallCard.vue'
 import { buildResumeCommand } from '../utils/resumeCommand'
+import { formatToolInput } from '../utils/toolDisplay'
 import { useSessionRename } from '../composables/useSessionRename'
 import type { CommandItem } from '../composables/useWebSocket'
 
@@ -297,24 +293,6 @@ function cleanContent(text: string): string {
     .trim()
 }
 
-function toolIcon(tool: string): string {
-  const icons: Record<string, string> = { Read: '📖', Write: '✏️', Bash: '⚡', Edit: '✏️', Agent: '🤖', Glob: '🔍', Grep: '🔎', WebSearch: '🌐', WebFetch: '📡', Task: '📋' }
-  return icons[tool] || '🔧'
-}
-
-function toolArgs(msg: any): string {
-  return msg.inputDesc || msg.description || ''
-}
-
-function toolInputText(msg: any): string {
-  if (msg.inputDesc) return msg.inputDesc
-  if (msg.input) {
-    if (typeof msg.input === 'string') return msg.input
-    try { return JSON.stringify(msg.input, null, 2) } catch { return String(msg.input) }
-  }
-  return msg.description || ''
-}
-
 function exitReasonLabel(reason: string): string {
   const labels: Record<string, string> = { user_interrupt: '用户中断', normal_exit: '正常退出', process_crash: '异常退出', signal_kill: '被终止', unknown: '已退出' }
   return labels[reason] || reason
@@ -409,33 +387,6 @@ function nextId(prefix: string) { return prefix + (++msgCounter.value) }
 function isDuplicate(type: string, text: string, target = messages.value): boolean {
   const last = target[target.length - 1]
   return !!last && last.type === type && (last.content || '') === text
-}
-
-// Format tool input for display (matches iOS app logic)
-function formatToolInput(tool: string, input: any): string {
-  if (!input) return ''
-  if (typeof input === 'string') return input.slice(0, 80)
-  if (typeof input === 'object') {
-    switch (tool) {
-      case 'Read':
-      case 'Write':
-      case 'Edit':
-        return input.file_path || input.path || ''
-      case 'Bash':
-        return input.command || ''
-      case 'Glob':
-      case 'Grep':
-        return input.pattern || input.query || ''
-      case 'Agent':
-        return (input.prompt || '').slice(0, 60)
-      default:
-        break
-    }
-    // Fallback: first string value
-    const first = Object.values(input).find(v => typeof v === 'string')
-    if (first) return String(first).slice(0, 60)
-  }
-  return ''
 }
 
 function processEvent(evt: any, target: any[] = messages.value) {
@@ -688,6 +639,7 @@ onUnmounted(() => {
 .session-list-item.active { background: var(--sidebar-active); }
 .session-list-item .sl-info { flex: 1; min-width: 0; }
 .session-list-item .sl-title { font-size: 13px; font-weight: 500; color: var(--fg); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.session-list-item .pin-icon { color: var(--accent); flex-shrink: 0; vertical-align: middle; }
 .session-list-item .ss-rename-input { background: var(--bg); border: 1px solid var(--accent); border-radius: var(--radius-sm); box-shadow: 0 0 0 3px var(--accent-muted); color: var(--fg); font-family: var(--font-body); font-size: 13px; font-weight: 500; padding: 3px 6px; outline: none; width: 100%; }
 .session-list-item .sl-title.mono { font-family: var(--font-mono); font-size: 12px; color: var(--accent); }
 .session-list-item .sl-meta { font-size: 11px; color: var(--fg-tertiary); margin-top: 2px; }
@@ -709,7 +661,12 @@ onUnmounted(() => {
 .copy-btn:hover { color: var(--accent); background: var(--accent-muted); }
 
 /* Messages */
-.chat-messages { flex: 1; overflow-y: auto; padding: 20px; display: flex; flex-direction: column; gap: 16px; position: relative; overflow-anchor: none; }
+.chat-messages { flex: 1; min-height: 0; width: 100%; overflow-y: auto; overflow-x: hidden; padding: 20px; display: flex; flex-direction: column; align-items: stretch; gap: 16px; position: relative; overflow-anchor: none; }
+/* Force every direct message child to fill the column width (flex column's
+   default align-items: stretch already does this, but width:100% makes it
+   explicit and prevents any shrink-to-fit). min-width:0 lets long content
+   (code/URLs) wrap instead of overflowing horizontally. */
+.chat-messages > * { width: 100%; min-width: 0; }
 .scroll-to-bottom { position: fixed; bottom: 88px; right: 24px; width: 44px; height: 44px; border-radius: 50%; border: 1px solid var(--border); background: var(--surface); color: var(--fg); font-size: 20px; cursor: pointer; display: flex; align-items: center; justify-content: center; box-shadow: 0 4px 14px rgba(0,0,0,0.35); transition: transform 0.15s, background 0.15s, opacity 0.2s; z-index: 100; }
 .scroll-to-bottom:hover { background: var(--surface-hover); transform: scale(1.08); }
 .scroll-to-bottom:active { transform: scale(0.96); }
@@ -717,46 +674,10 @@ onUnmounted(() => {
 .scroll-to-bottom.at-bottom:hover { opacity: 1; }
 .scroll-to-bottom:hover { background: var(--surface-hover); }
 
-/* Messages — matches design spec exactly */
-.msg { max-width: 85%; animation: fade-in 0.2s ease; word-break: break-word; }
-
-.msg-user {
-  align-self: flex-end;
-  background: var(--user-bubble);
-  color: #fff;
-  padding: 10px 16px;
-  border-radius: 16px 16px 4px 16px;
-  font-size: 14px;
-  line-height: 1.6;
-}
-
-.msg-agent {
-  align-self: flex-start;
-  background: var(--surface);
-  border: 1px solid var(--border);
-  color: var(--fg);
-  padding: 10px 16px;
-  border-radius: 16px 16px 16px 4px;
-  font-size: 14px;
-  line-height: 1.6;
-  transition: background var(--transition), border-color var(--transition);
-}
-
-.msg-agent.streaming .blink-cursor::after {
-  content: '▎';
-  animation: blink-cursor 0.8s step-end infinite;
-  color: var(--accent);
-}
-
-.msg-error {
-  align-self: flex-start;
-  background: var(--error-bg);
-  color: var(--error);
-  padding: 10px 16px;
-  border-radius: 16px 16px 16px 4px;
-  font-size: 13px;
-  line-height: 1.6;
-}
+/* Messages — message type styles (msg-user/msg-agent/tool-card/msg-error)
+   now live in their own components under components/messages/. The timeline
+   and chat-input styles below remain here because they are layout concerns
+   of this view, not reusable message rendering. */
 
 /* Timeline */
 .timeline { display: flex; align-items: center; justify-content: space-between; padding: 12px 20px; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-md); margin-bottom: 4px; flex-shrink: 0; }
@@ -769,99 +690,6 @@ onUnmounted(() => {
 .timeline .milestone .time { font-size: 10px; color: var(--fg-tertiary); font-family: var(--font-mono); }
 .timeline .line { flex: 1; height: 1px; background: var(--border); margin: 0 12px; align-self: flex-start; margin-top: 4px; }
 .timeline .line.done { background: var(--success); }
-
-/* Tool Cards — matches design spec */
-.tool-card {
-  align-self: flex-start;
-  background: var(--surface);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-lg);
-  max-width: 100%;
-  animation: fade-in 0.2s ease;
-  cursor: pointer;
-  transition: background var(--transition), border-color var(--transition);
-}
-.tool-card .tool-header {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 12px 16px;
-  cursor: pointer;
-}
-.tool-card .tool-icon { font-size: 16px; flex-shrink: 0; }
-.tool-card .tool-name { font-weight: 600; font-size: 13px; color: var(--accent); flex: 1; }
-.tool-card .tool-args {
-  font-size: 12px;
-  color: var(--fg-tertiary);
-  font-family: var(--font-mono);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  max-width: 200px;
-}
-.tool-card .tool-status { flex-shrink: 0; }
-.tool-card .tool-status .check { color: var(--success); font-size: 14px; }
-.tool-card .tool-status .spinner {
-  width: 14px;
-  height: 14px;
-  border: 2px solid transparent;
-  border-top-color: var(--fg-secondary);
-  border-radius: 50%;
-  animation: spin 0.8s linear infinite;
-  display: inline-block;
-}
-.tool-card .tool-chevron {
-  color: var(--fg-tertiary);
-  font-size: 12px;
-  transition: transform 0.15s;
-  flex-shrink: 0;
-}
-.tool-card.expanded .tool-chevron { transform: rotate(180deg); }
-
-.tool-card .tool-body {
-  border-top: 1px solid var(--border);
-  display: none;
-}
-.tool-card.expanded .tool-body { display: block; }
-
-.tool-body .tool-section { padding: 8px 16px; }
-.tool-body .tool-label {
-  font-size: 11px;
-  color: var(--fg-tertiary);
-  text-transform: uppercase;
-  letter-spacing: 0.5px;
-  margin-bottom: 4px;
-}
-.tool-body .tool-input {
-  background: var(--code-bg);
-  padding: 8px 16px;
-  font-family: var(--font-mono);
-  font-size: 12px;
-  color: var(--success);
-  border-radius: 4px;
-  margin: 0 12px;
-  white-space: pre-wrap;
-}
-.tool-body .tool-output {
-  background: var(--code-bg);
-  padding: 8px 16px;
-  font-family: var(--font-mono);
-  font-size: 12px;
-  color: var(--fg-secondary);
-  border-radius: 4px;
-  margin: 8px 12px;
-  max-height: 120px;
-  overflow: hidden;
-  line-height: 1.6;
-  white-space: pre-wrap;
-  word-break: break-all;
-  overflow-x: auto;
-}
-.tool-body .tool-output.collapsed {
-  max-height: 120px;
-  overflow: hidden;
-}
-.tool-body .toggle-expand { background: none; border: none; color: var(--accent); font-size: 12px; padding: 4px 16px 8px; cursor: pointer; font-family: var(--font-body); }
 
 /* Chat Input */
 .chat-input-area { border-top: 1px solid var(--border); padding: 12px 20px; background: var(--surface); display: flex; gap: 10px; align-items: center; transition: background var(--transition), border-color var(--transition); }
@@ -878,5 +706,5 @@ onUnmounted(() => {
 .send-btn svg { width: 16px; height: 16px; fill: var(--bg); }
 
 @media (max-width: 1024px) { .session-layout { height: calc(100vh - var(--topbar-h)); } }
-@media (max-width: 768px) { .session-panel { display: none; } .msg { max-width: 90%; } }
+@media (max-width: 768px) { .session-panel { display: none; } }
 </style>

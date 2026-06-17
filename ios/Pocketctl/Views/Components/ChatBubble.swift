@@ -1,78 +1,97 @@
 import SwiftUI
 
+/// Renders a single chat message.
+///
+/// Layout is hybrid (matches the web client and codex/zcode clients):
+/// - **user**: right-aligned bubble with an asymmetric corner (tail).
+/// - **agent**: full-width block with a 3pt accent bar on the left and no
+///   bubble background — code, tables and lists get the full column width.
+/// - **error**: full-width block with a 3pt error bar and tinted background.
 struct ChatBubble: View {
     let message: ChatMessage
 
     var body: some View {
-        HStack {
-            if message.role == .user { Spacer(minLength: 15) }
-
-            contentView
-                .padding(.horizontal, 14)
-                .padding(.vertical, 10)
-                .background(bubbleBackground)
-                .cornerRadius(16)
-                .if(message.role == .user) { view in
-                    view.mask(
-                        RoundedCornerShape(radius: 16, corners: [.topLeft, .topRight, .bottomLeft])
-                    )
+        Group {
+            switch message.role {
+            case .user:
+                userBubble
+            case .agent:
+                if message.type == .error {
+                    errorBlock
+                } else {
+                    agentBlock
                 }
-                .if(message.role == .agent) { view in
-                    view.mask(
-                        RoundedCornerShape(radius: 16, corners: [.topLeft, .topRight, .bottomRight])
-                    )
-                }
-                .overlay(
-                    Group {
-                        if message.streaming {
-                            // Blinking cursor
-                            Text("▎")
-                                .font(PCFont.body(15))
-                                .foregroundStyle(Color.pcAccent)
-                                .opacity(blinkOpacity)
-                        }
-                    },
-                    alignment: .trailing
-                )
-
-            if message.role == .agent { Spacer(minLength: 15) }
+            }
         }
     }
 
-    @ViewBuilder
-    private var contentView: some View {
-        if message.role == .user {
+    // MARK: - User (right bubble, kept as-is)
+
+    private var userBubble: some View {
+        HStack {
+            Spacer(minLength: 15)
             Text(message.content)
                 .font(PCFont.body(15))
                 .foregroundStyle(.white)
-        } else {
-            // Agent messages: render with markdown support (tables, etc.)
-            MarkdownContentView(content: message.content)
-                .foregroundStyle(Color.pcFg)
+                .padding(.horizontal, 14)
+                .padding(.vertical, 10)
+                .background(Color.pcUserBubble)
+                .cornerRadius(16)
+                .mask(
+                    RoundedCornerShape(radius: 16, corners: [.topLeft, .topRight, .bottomLeft])
+                )
         }
     }
 
-    private var bubbleBackground: Color {
-        switch message.role {
-        case .user: return .pcUserBubble
-        case .agent:
-            if message.type == .error { return .pcErrorBg }
-            return Color(red: 0.133, green: 0.149, blue: 0.176) // #21262d
+    // MARK: - Agent (full-width block, no left bar — clean text flow)
+
+    private var agentBlock: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text("assistant")
+                .font(PCFont.body(11, weight: .semibold))
+                .foregroundStyle(Color.pcFgTertiary)
+                .textCase(.uppercase)
+                .kerning(0.6)
+
+            // Agent body: markdown rendering (tables, lists, code, etc.)
+            MarkdownContentView(content: message.content)
+                .foregroundStyle(Color.pcFg)
+
+            if message.streaming {
+                Text("▎")
+                    .font(PCFont.body(15))
+                    .foregroundStyle(Color.pcAccent)
+                    .opacity(blinkOpacity)
+                    .onAppear {
+                        withAnimation(.easeInOut(duration: 0.6).repeatForever(autoreverses: true)) {
+                            blinkOpacity = 0
+                        }
+                    }
+            }
         }
+    }
+
+    // MARK: - Error (full-width tinted block, no left bar)
+
+    private var errorBlock: some View {
+        HStack(alignment: .top, spacing: 8) {
+            Image(systemName: "exclamationmark.circle")
+                .font(.system(size: 13))
+                .foregroundStyle(Color.pcError)
+                .padding(.top, 2)
+
+            Text(message.content)
+                .font(PCFont.body(13))
+                .foregroundStyle(Color.pcError)
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 8)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Color.pcErrorBg.opacity(0.5))
+        .cornerRadius(PCRadius.sm)
     }
 
     @State private var blinkOpacity: Double = 1
-
-    private var cursorBlink: some View {
-        Text("▎")
-            .font(PCFont.body(15))
-            .foregroundStyle(Color.pcAccent)
-            .onAppear {
-                withAnimation(.easeInOut(duration: 0.6).repeatForever(autoreverses: true)) {
-                    blinkOpacity = 0
-                }
-            }
-    }
 }
 
 // MARK: - Rounded corner shape

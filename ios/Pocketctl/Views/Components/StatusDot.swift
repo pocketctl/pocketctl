@@ -17,8 +17,8 @@ struct StatusDot: View {
         switch status {
         case "online", "running": return .pcSuccess
         case "busy": return .pcWarning
-        case "idle": return Color(hex: 0xEAB308)
-        case "waiting", "waiting_approval": return Color(hex: 0xF97316)
+        case "idle": return .pcIdle
+        case "waiting", "waiting_approval": return .pcWaiting
         case "completed": return .pcAccent
         case "error": return .pcError
         case "offline", "disconnected": return .pcFgTertiary

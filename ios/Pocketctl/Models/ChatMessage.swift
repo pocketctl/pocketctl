@@ -49,16 +49,18 @@ struct ChatMessage: Identifiable, Sendable {
 }
 
 extension ChatMessage {
-    /// Tool icon emoji mapping
+    /// SF Symbol name for the tool (replaces previous emoji icons to match
+    /// the system's outline-icon visual language).
     var toolIcon: String {
         switch tool {
-        case "Read": return "📖"
-        case "Write", "Edit": return "✏️"
-        case "Bash": return "⚡"
-        case "Glob", "Grep": return "🔍"
-        case "WebSearch", "WebFetch": return "🌐"
-        case "Agent": return "🤖"
-        default: return "🔧"
+        case "Read": return "book"
+        case "Write", "Edit": return "pencil"
+        case "Bash": return "terminal"
+        case "Glob", "Grep": return "magnifyingglass"
+        case "WebSearch": return "globe"
+        case "WebFetch": return "arrow.down.circle"
+        case "Agent", "Task": return "sparkles"
+        default: return "wrench.and.screwdriver"
         }
     }
 
