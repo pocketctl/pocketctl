@@ -28,21 +28,16 @@ describe('CommandPopover', () => {
     expect(items[2].classes()).toContain('active')
   })
 
-  test('renders SVG icons by kind+source and grays out commands', () => {
+  test('renders SVG icons by kind+source (Terminal/Sparkles/Folder/User/Package)', () => {
     const wrapper = mount(CommandPopover, { props: { commands, activeIndex: 0 } })
     const html = wrapper.html()
     // SVG icons present (no emoji)
     expect(html).not.toContain('🔧')
     expect(html).not.toContain('📘')
     expect(wrapper.findAll('.cmd-icon svg').length).toBe(5)
-    // command items grayed out
-    const items = wrapper.findAll('.cmd-item')
-    expect(items[0].classes()).toContain('is-command') // clear (command)
-    expect(items[1].classes()).toContain('is-command') // compact (command)
-    expect(items[2].classes()).not.toContain('is-command') // pocket-release (skill)
-    expect(items[3].classes()).not.toContain('is-command') // codex:rescue (skill)
-    // command tooltip
-    expect(items[0].attributes('title')).toContain('web 不支持')
+    // NOTE: command available-ness is runtime (claude PTY judges per-command:
+    // /clear /loop /compact work, /help /model don't). No gray-out — let the user
+    // try; isn't-available is surfaced via command_receipt (status unavailable).
   })
 
   test('emits select with the command on click', async () => {

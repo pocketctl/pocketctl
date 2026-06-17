@@ -3,8 +3,7 @@
     <div
       v-for="(c, i) in commands"
       :key="c.name"
-      :class="['cmd-item', { active: i === activeIndex, 'is-command': c.kind === 'command' }]"
-      :title="c.kind === 'command' ? 'web 不支持，在终端使用' : undefined"
+      :class="['cmd-item', { active: i === activeIndex }]"
       @click="$emit('select', c)"
       @mouseenter="$emit('hover', i)"
     >
@@ -77,12 +76,6 @@ function commandIcon(c: CommandItem): string {
 .cmd-item:hover,
 .cmd-item.active {
   background: var(--surface-hover);
-}
-.cmd-item.is-command {
-  opacity: 0.4;
-}
-.cmd-item.is-command:hover {
-  opacity: 0.7;
 }
 .cmd-icon {
   flex-shrink: 0;

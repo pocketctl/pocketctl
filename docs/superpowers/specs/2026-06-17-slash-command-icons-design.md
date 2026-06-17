@@ -60,6 +60,7 @@ source: 'builtin' | 'project' | 'user' | 'plugin'
 
 - **SVG outline**（stroke-width 2），替换当前 emoji
 - **command 灰显**（`opacity: 0.4`）+ hover tooltip「web 不支持，在终端使用」
+  - ⚠️ **实现修正（2026-06-17，d7396c12 实测）**：移除灰显。claude 的 command 可用性是**运行时判断**（非所有 command 不可）：`/clear /loop /compact` 在 PTY **可执行**（compact 有 "Compacted" stdout），仅 `/help /model` 等 isn't available。web 无法预知（command_list 不标 available），故不灰显——Terminal icon 标识 command 类型即可，执行后 isn't-available 由 command_receipt（status unavailable）显示。
 - **plugin skill** 保留现有 namespace 徽章（`.cmd-source`）
 - icon 尺寸 14×14（与 SessionActions 菜单图标一致）
 
