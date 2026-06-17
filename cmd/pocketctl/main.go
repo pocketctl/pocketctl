@@ -1014,9 +1014,10 @@ func handleCommands(ctx context.Context, client *ws.Client, sm *session.SessionM
 				logger.Info("create session", "agent", cmd.Agent, "cwd", cmd.Cwd)
 				stateDirty.Store(true)
 				config := protocol.SessionConfig{
-					Agent: cmd.Agent,
-					Cwd:   cmd.Cwd,
-					Prompt: cmd.Prompt,
+					Agent:          cmd.Agent,
+					Cwd:            cmd.Cwd,
+					Prompt:         cmd.Prompt,
+					PermissionMode: cmd.PermissionMode,
 				}
 				if config.Agent == "" {
 					config.Agent = "claude-code"

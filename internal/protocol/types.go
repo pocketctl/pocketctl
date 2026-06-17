@@ -12,6 +12,9 @@ type ClientMessage struct {
 	Prompt    string `json:"prompt,omitempty"`
 	RequestID string `json:"request_id,omitempty"`
 	Approved  bool   `json:"approved,omitempty"`
+	// PermissionMode for session_create: "default" | "acceptEdits" | "plan" | "bypassPermissions".
+	// Empty falls back to "acceptEdits" (the daemon default).
+	PermissionMode string `json:"permission_mode,omitempty"`
 }
 
 // Daemon → Client events

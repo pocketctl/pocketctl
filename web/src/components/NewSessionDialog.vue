@@ -67,6 +67,28 @@
           </div>
         </div>
 
+        <!-- Permission Mode -->
+        <div class="form-group">
+          <div class="field-label">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+            权限模式
+          </div>
+          <div class="perm-options">
+            <button type="button" :class="['perm-option', { active: form.permissionMode === 'default' }]" @click="form.permissionMode = 'default'">
+              <span class="perm-name">默认</span>
+              <span class="perm-desc">每次操作需确认</span>
+            </button>
+            <button type="button" :class="['perm-option', { active: form.permissionMode === 'acceptEdits' }]" @click="form.permissionMode = 'acceptEdits'">
+              <span class="perm-name">自动编辑</span>
+              <span class="perm-desc">自动接受文件编辑</span>
+            </button>
+            <button type="button" :class="['perm-option', { active: form.permissionMode === 'plan' }]" @click="form.permissionMode = 'plan'">
+              <span class="perm-name">计划</span>
+              <span class="perm-desc">只读分析，不改文件</span>
+            </button>
+          </div>
+        </div>
+
         <!-- Initial Prompt -->
         <div class="form-group">
           <div class="field-label">
@@ -124,6 +146,7 @@ const form = reactive({
   agent: 'claude-code',
   cwd: localStorage.getItem('pocketctl_default_cwd') || '',
   prompt: '',
+  permissionMode: 'acceptEdits',  // default | acceptEdits | plan | bypassPermissions
 })
 const creating = ref(false)
 const phase = ref<'submitting' | 'connecting'>('submitting')
@@ -223,6 +246,7 @@ function startSession() {
     agent: form.agent,
     cwd: form.cwd || undefined,
     prompt: form.prompt || undefined,
+    permission_mode: form.permissionMode || undefined,
   })
 
   // Timeout 15s: abort + show failure
@@ -412,4 +436,13 @@ onUnmounted(() => {
   @keyframes slide-up-mobile { from { transform: translateY(100%); } to { transform: translateY(0); } }
   .modal-footer { flex-direction: column; }
 }
+
+/* Permission mode selector */
+.perm-options { display: flex; gap: 8px; }
+.perm-option { flex: 1; display: flex; flex-direction: column; gap: 2px; padding: 10px 8px; background: var(--bg); border: 1px solid var(--border); border-radius: var(--radius-md); cursor: pointer; transition: all 0.15s; text-align: left; }
+.perm-option:hover { border-color: var(--border-light); background: var(--surface-hover); }
+.perm-option.active { border-color: var(--accent); background: var(--accent-muted); }
+.perm-name { font-size: 13px; font-weight: 600; color: var(--fg); }
+.perm-option.active .perm-name { color: var(--accent); }
+.perm-desc { font-size: 11px; color: var(--fg-tertiary); line-height: 1.3; }
 </style>
