@@ -4,18 +4,18 @@
     <div class="session-panel">
       <div class="session-panel-header">
         <h3>{{ daemonName }}</h3>
-        <button class="btn-icon" style="width:28px;height:28px;border:none;background:var(--accent);color:#fff;" title="新建会话" @click="emitNewSession">
+        <button class="btn-icon" style="width:28px;height:28px;border:none;background:var(--accent);color:#fff;" :title="t('session.new_session')" @click="emitNewSession">
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M12 5v14M5 12h14"/></svg>
         </button>
       </div>
       <div style="padding:4px 8px;display:flex;align-items:center;gap:6px;">
         <span :class="['status-dot', { online: isDaemonOnline }]" style="width:6px;height:6px;"></span>
-        <span style="font-size:11px;color:var(--fg-tertiary);">{{ isDaemonOnline ? '在线' : '离线' }} · {{ statusSubtext }}</span>
+        <span style="font-size:11px;color:var(--fg-tertiary);">{{ isDaemonOnline ? t('dashboard.online') : t('dashboard.offline') }} · {{ statusSubtext }}</span>
       </div>
       <div v-if="hostFilter" class="host-filter-chip">
         <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="2" width="20" height="20" rx="3"/><path d="M7 2v20M17 2v20M2 12h20"/></svg>
         <span class="hfc-name">{{ daemonName }}</span>
-        <button class="hfc-clear" @click="clearHostFilter" title="显示全部主机会话">✕</button>
+        <button class="hfc-clear" @click="clearHostFilter" :title="t('session.show_all_hosts')">✕</button>
       </div>
       <div class="session-list">
         <div v-for="s in visibleSessions" :key="s.session_id"
@@ -29,7 +29,7 @@
                 @click.stop @keydown.enter="commitRename(s)" @keydown.escape="cancelRename" @blur="commitRename(s)" />
               <template v-else>{{ s.title || s.session_id.slice(0, 8) }}</template>
             </div>
-            <div class="sl-meta">{{ formatRelativeTime(s.last_activity_at || s.updated_at) }}<span v-if="s.subagent_count > 0"> · {{ s.subagent_count }} 子智能体</span></div>
+            <div class="sl-meta">{{ formatRelativeTime(s.last_activity_at || s.updated_at) }}<span v-if="s.subagent_count > 0"> · {{ t('session.sub_agents', { n: s.subagent_count }) }}</span></div>
           </div>
           <SessionActions :session="s" @startRename="startRename" @deleted="onDeleted" @pinned="onPinned" />
         </div>
@@ -52,11 +52,11 @@
         </span>
         <div class="session-id-box">
           <code class="session-id-text">{{ sessionId?.slice(0, 8) }}</code>
-          <button class="copy-btn" @click="copySessionId" :title="copied ? '已复制' : '复制会话ID'">
+          <button class="copy-btn" @click="copySessionId" :title="copied ? t('common.copied') : t('session.actions.copy_id')">
             <svg v-if="!copied" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"/></svg>
             <svg v-else width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M20 6L9 17l-5-5"/></svg>
           </button>
-          <button v-if="currentSessionAgent !== 'opencode'" class="copy-btn" style="margin-left:6px;" :title="resumeCopied ? '已复制恢复命令 — 在主机终端粘贴运行' : '恢复会话命令（复制到粘贴板）'" @click="copyResumeCmd">
+          <button v-if="currentSessionAgent !== 'opencode'" class="copy-btn" style="margin-left:6px;" :title="resumeCopied ? t('session.actions.resume_toast') : t('session.actions.resume') + t('session.actions.resume_hint')" @click="copyResumeCmd">
             <svg v-if="!resumeCopied" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8"/><path d="M12 17v4"/></svg>
             <svg v-else width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M20 6L9 17l-5-5"/></svg>
           </button>
@@ -68,7 +68,7 @@
         <!-- Exit Banner -->
         <div v-if="status === 'exited'" class="banner banner-info" style="flex-shrink:0;">
           <svg class="banner-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><path d="M16 17l5-5-5-5"/><path d="M21 12H9"/></svg>
-          <span>Session 已退出</span>
+          <span>{{ t('session.exited_banner') }}</span>
           <span v-if="exitReason" style="margin-left:4px;">· {{ exitReasonLabel(exitReason) }}</span>
           <button v-if="isDaemonOnline" class="btn btn-accent" style="margin-left:auto;padding:4px 12px;font-size:12px;" @click="focusResumeInput">Resume</button>
         </div>
@@ -76,7 +76,7 @@
         <!-- Disconnected Banner -->
         <div v-if="isDisconnected" class="banner banner-warning" style="flex-shrink:0;">
           <svg class="banner-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><path d="M12 9v4"/><path d="M12 17h.01"/></svg>
-          <span>Daemon 离线 — 等待恢复</span>
+          <span>{{ t('session.daemon_offline') }}</span>
         </div>
 
         <!-- Timeline -->
@@ -124,7 +124,7 @@
         <!-- Scroll-to-bottom: absolute child of chat-input-area, floats above
              its top edge. Doesn't take up flex space in chat-messages. -->
         <Transition name="scroll-btn">
-          <button v-if="messages.length > 0 && !autoScroll" class="scroll-to-bottom" title="回到底部" @click="scrollToBottom">
+          <button v-if="messages.length > 0 && !autoScroll" class="scroll-to-bottom" :title="t('session.scroll_to_bottom')" @click="scrollToBottom">
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14"/><path d="M19 12l-7 7-7-7"/></svg>
           </button>
         </Transition>
@@ -142,7 +142,7 @@
             <textarea
               v-model="messageInput"
               class="chat-textarea"
-              :placeholder="isPendingSession ? '会话创建中…' : (isDaemonSession && isTerminal ? '继续会话（将恢复历史上下文）...' : '发送消息... (⌥+Enter 换行)')"
+              :placeholder="isPendingSession ? t('session.input_creating') : (isDaemonSession && isTerminal ? t('session.input_resume') : t('session.input_send'))"
               @keydown="onInputKeydown"
               @focus="isInputFocused = true"
               @blur="isInputFocused = false"
@@ -155,9 +155,9 @@
             <div class="input-controls">
               <!-- Left: permission mode dropdown -->
               <div class="perm-dropdown" ref="permDropdownEl">
-                <button class="perm-trigger" @click="showPermMenu = !showPermMenu" :title="`当前: ${currentPermLabel}`">
+                <button class="perm-trigger" @click="showPermMenu = !showPermMenu" :title="`当前: ${t(currentPermLabel)}`">
                   <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
-                  <span class="perm-label">{{ currentPermLabel }}</span>
+                  <span class="perm-label">{{ t(currentPermLabel) }}</span>
                   <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M6 9l6 6 6-6"/></svg>
                 </button>
                 <Transition name="perm-menu">
@@ -165,7 +165,7 @@
                     <button v-for="m in PERMISSION_MODES" :key="m.value"
                       :class="['perm-menu-item', { active: currentPermissionMode === m.value }]"
                       @click="setPermissionMode(m.value); showPermMenu = false">
-                      <span class="perm-menu-name">{{ m.label }}</span>
+                      <span class="perm-menu-name">{{ t(m.label) }}</span>
                       <svg v-if="currentPermissionMode === m.value" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M20 6L9 17l-5-5"/></svg>
                     </button>
                   </div>
@@ -214,6 +214,7 @@ import CommandReceiptCard from '../components/CommandReceiptCard.vue'
 import MessageUser from '../components/messages/MessageUser.vue'
 import MessageAgent from '../components/messages/MessageAgent.vue'
 import MessageError from '../components/messages/MessageError.vue'
+import { useLocale } from '../composables/useLocale'
 import ToolCallCard from '../components/messages/ToolCallCard.vue'
 import { buildResumeCommand } from '../utils/resumeCommand'
 import { formatToolInput } from '../utils/toolDisplay'
@@ -225,6 +226,7 @@ const { renamingId, renameInput, startRename, commitRename, cancelRename } = use
 const route = useRoute()
 const router = useRouter()
 const { connect, send, onEvent } = useWebSocket()
+const { t } = useLocale()
 
 const sessionId = computed(() => route.params.id as string)
 const messages = ref<any[]>([])
@@ -248,11 +250,11 @@ const exitReason = ref('')
 const currentPermissionMode = ref('acceptEdits')
 const showPermMenu = ref(false)
 const PERMISSION_MODES = [
-  { value: 'default', label: '默认' },
-  { value: 'acceptEdits', label: '自动编辑' },
-  { value: 'plan', label: '计划' },
+  { value: 'default', label: 'session.perm_default' },
+  { value: 'acceptEdits', label: 'session.perm_accept_edits' },
+  { value: 'plan', label: 'session.perm_plan' },
 ]
-const PERM_LABELS: Record<string, string> = { default: '默认', acceptEdits: '自动编辑', plan: '计划' }
+const PERM_LABELS: Record<string, string> = { default: 'session.perm_default', acceptEdits: 'session.perm_accept_edits', plan: 'session.perm_plan' }
 const currentPermLabel = computed(() => PERM_LABELS[currentPermissionMode.value] || currentPermissionMode.value)
 const exitedAt = ref('')
 const autoScroll = ref(true)
@@ -274,8 +276,8 @@ const statusClass = computed(() => {
 })
 
 const statusLabel = computed(() => {
-  const map: Record<string, string> = { running: '运行中', busy: '繁忙', idle: '空闲', completed: '已完成', error: '错误', killed: '已终止', disconnected: '已断开', exited: '已退出' }
-  return map[status.value] || status.value
+  const STATUS_KEYS: Record<string, string> = { running: 'session.status.running', busy: 'session.status.busy', idle: 'session.status.idle', completed: 'session.status.completed', error: 'session.status.error', killed: 'session.status.killed', disconnected: 'session.status.disconnected', exited: 'session.status.exited' }
+  return t(STATUS_KEYS[status.value] || 'session.status.running')
 })
 
 const isDaemonOnline = computed(() => {
@@ -301,7 +303,7 @@ const daemonName = computed(() => {
     return d?.daemon_alias || d?.hostname || hostFilter.value.slice(0, 8)
   }
   const s = allSessions.value.find(s => s.session_id === sessionId.value)
-  return s?.daemon_alias || s?.hostname || s?.daemon_id?.slice(0, 8) || '未知'
+  return s?.daemon_alias || s?.hostname || s?.daemon_id?.slice(0, 8) || t('session.unknown_host')
 })
 function clearHostFilter() {
   const q = { ...route.query }
@@ -314,7 +316,7 @@ const sessionTitle = computed(() => {
   return s?.title
 })
 
-const statusSubtext = computed(() => isDaemonOnline.value ? '已连接' : '等待恢复')
+const statusSubtext = computed(() => isDaemonOnline.value ? t('session.status.connected') : t('session.status.waiting'))
 
 // Context token usage — from the last agent_text message that carried usage.
 const contextTokens = computed(() => {
@@ -333,11 +335,11 @@ const contextTooltip = computed(() => {
     const u = (messages.value[i] as any).usage
     if (u) {
       const parts: string[] = []
-      if (u.input_tokens) parts.push(`输入: ${u.input_tokens.toLocaleString()}`)
-      if (u.output_tokens) parts.push(`输出: ${u.output_tokens.toLocaleString()}`)
-      if (u.cache_read_tokens) parts.push(`缓存读取: ${u.cache_read_tokens.toLocaleString()}`)
-      if (u.cache_create_tokens) parts.push(`缓存写入: ${u.cache_create_tokens.toLocaleString()}`)
-      return parts.length ? 'Context 用量\n' + parts.join('\n') : ''
+      if (u.input_tokens) parts.push(`${t('session.context_input')}: ${u.input_tokens.toLocaleString()}`)
+      if (u.output_tokens) parts.push(`${t('session.context_output')}: ${u.output_tokens.toLocaleString()}`)
+      if (u.cache_read_tokens) parts.push(`${t('session.context_cache_read')}: ${u.cache_read_tokens.toLocaleString()}`)
+      if (u.cache_create_tokens) parts.push(`${t('session.context_cache_create')}: ${u.cache_create_tokens.toLocaleString()}`)
+      return parts.length ? t('session.context_usage') + '\n' + parts.join('\n') : ''
     }
   }
   return ''
@@ -347,9 +349,9 @@ const milestones = computed(() => {
   const ms: any[] = []
   const s = allSessions.value.find(s => s.session_id === sessionId.value)
   if (!s) return ms
-  if (s.created_at) ms.push({ label: '创建', time: formatTime(s.created_at), state: 'active' })
-  ms.push({ label: '运行', time: formatTime(s.last_activity_at || s.updated_at || s.created_at), state: status.value === 'running' || status.value === 'busy' ? 'current' : 'active' })
-  ms.push({ label: statusLabel.value === '运行中' ? '进行中' : statusLabel.value, time: '—', state: isTerminal.value || status.value === 'exited' ? 'active' : '' })
+  if (s.created_at) ms.push({ label: t('session.milestone_created'), time: formatTime(s.created_at), state: 'active' })
+  ms.push({ label: t('session.status.running'), time: formatTime(s.last_activity_at || s.updated_at || s.created_at), state: status.value === 'running' || status.value === 'busy' ? 'current' : 'active' })
+  ms.push({ label: statusLabel.value, time: '—', state: isTerminal.value || status.value === 'exited' ? 'active' : '' })
   return ms
 })
 

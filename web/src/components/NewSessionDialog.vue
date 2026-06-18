@@ -2,8 +2,8 @@
   <div class="modal-overlay" @click.self="$emit('close')">
     <div class="modal-dialog">
       <div class="modal-header">
-        <h2 class="modal-title">新建会话</h2>
-        <button class="modal-close" @click="$emit('close')" title="关闭">
+        <h2 class="modal-title">{{ t('new_session.title') }}</h2>
+        <button class="modal-close" @click="$emit('close')" :title="t('common.close')">
           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M18 6L6 18M6 6l12 12"/></svg>
         </button>
       </div>
@@ -11,10 +11,10 @@
         <!-- Host Selector -->
         <div class="field-label">
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="2" width="20" height="20" rx="3"/><path d="M7 2v20"/></svg>
-          选择目标主机
+          {{ t('new_session.select_host') }}
         </div>
         <div class="host-selector">
-          <div v-if="!daemons || daemons.length === 0" class="host-empty">暂无可用主机</div>
+          <div v-if="!daemons || daemons.length === 0" class="host-empty">{{ t('new_session.no_hosts') }}</div>
           <div v-for="d in daemons" :key="d.daemon_id"
             :class="['host-option', { selected: form.daemonId === d.daemon_id, disabled: !d.daemon_online }]"
             @click="selectHost(d)">
@@ -26,12 +26,12 @@
             <div class="host-info">
               <div class="host-name">
                 {{ d.daemon_alias || d.hostname || d.daemon_id?.slice(0, 8) }}
-                <span v-if="d.daemon_alias" class="host-alias-tag">别名</span>
+                <span v-if="d.daemon_alias" class="host-alias-tag">{{ t('dashboard.alias_badge') }}</span>
               </div>
               <div class="host-meta">{{ d.ip && d.ip !== 'unknown' ? d.ip + ' · ' : '' }}{{ d.os || 'unknown' }}</div>
             </div>
             <div class="host-status">
-              <span :class="['chip', d.daemon_online ? 'chip-online' : 'chip-offline']">{{ d.daemon_online ? '在线' : '离线 · 不可用' }}</span>
+              <span :class="['chip', d.daemon_online ? 'chip-online' : 'chip-offline']">{{ d.daemon_online ? t('dashboard.online') : t('dashboard.offline') + ' · ' + t('common.unavailable') }}</span>
             </div>
           </div>
         </div>
@@ -39,31 +39,31 @@
         <!-- Agent Type Pills -->
         <div class="field-label">
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M12 2a14.5 14.5 0 000 20 14.5 14.5 0 000-20"/><path d="M2 12h20"/></svg>
-          Agent 类型
+          {{ t('new_session.agent_label') }}
         </div>
         <div class="agent-pills">
           <button :class="['agent-pill', { selected: form.agent === 'claude-code' }]" @click="form.agent = 'claude-code'">Claude Code</button>
           <button :class="['agent-pill', { selected: form.agent === 'codex' }]" @click="form.agent = 'codex'">
             Codex
-            <span class="coming-badge">即将开通</span>
+            <span class="coming-badge">{{ t('new_session.coming_soon') }}</span>
           </button>
         </div>
 
         <!-- Codex Notice -->
         <div v-if="form.agent === 'codex'" class="codex-notice">
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M12 6v6M12 18h.01"/></svg>
-          Codex 代理即将开通，敬请期待
+          {{ t('new_session.codex_coming_soon') }}
         </div>
 
         <!-- Working Directory -->
         <div class="form-group">
           <div class="field-label">
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 19a2 2 0 01-2 2H4a2 2 0 01-2-2V5a2 2 0 012-2h5l2 3h9a2 2 0 012 2z"/></svg>
-            工作目录
+            {{ t('new_session.cwd_label') }}
           </div>
           <div class="dir-input">
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 19a2 2 0 01-2 2H4a2 2 0 01-2-2V5a2 2 0 012-2h5l2 3h9a2 2 0 012 2z"/></svg>
-            <input type="text" v-model="form.cwd" placeholder="输入项目路径，如 ~/projects/my-app" />
+            <input type="text" v-model="form.cwd" :placeholder="t('new_session.cwd_placeholder')" />
           </div>
         </div>
 
@@ -71,20 +71,20 @@
         <div class="form-group">
           <div class="field-label">
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
-            权限模式
+            {{ t('new_session.permission_mode') }}
           </div>
           <div class="perm-options">
             <button type="button" :class="['perm-option', { active: form.permissionMode === 'default' }]" @click="form.permissionMode = 'default'">
-              <span class="perm-name">默认</span>
-              <span class="perm-desc">每次操作需确认</span>
+              <span class="perm-name">{{ t('session.perm_default') }}</span>
+              <span class="perm-desc">{{ t('new_session.perm_confirm') }}</span>
             </button>
             <button type="button" :class="['perm-option', { active: form.permissionMode === 'acceptEdits' }]" @click="form.permissionMode = 'acceptEdits'">
-              <span class="perm-name">自动编辑</span>
-              <span class="perm-desc">自动接受文件编辑</span>
+              <span class="perm-name">{{ t('session.perm_accept_edits') }}</span>
+              <span class="perm-desc">{{ t('new_session.perm_auto_edit') }}</span>
             </button>
             <button type="button" :class="['perm-option', { active: form.permissionMode === 'plan' }]" @click="form.permissionMode = 'plan'">
-              <span class="perm-name">计划</span>
-              <span class="perm-desc">只读分析，不改文件</span>
+              <span class="perm-name">{{ t('session.perm_plan') }}</span>
+              <span class="perm-desc">{{ t('new_session.perm_plan_only') }}</span>
             </button>
           </div>
         </div>
@@ -93,9 +93,9 @@
         <div class="form-group">
           <div class="field-label">
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15a2 2 0 01-2 2H7l-4 4V5a2 2 0 012-2h14a2 2 0 012 2z"/></svg>
-            初始提示
+            {{ t('new_session.prompt_label') }}
           </div>
-          <textarea class="prompt-area" v-model="form.prompt" placeholder="描述你想让 AI 完成的任务…&#10;例如：帮我重构用户认证模块，从 JWT 迁移到 OAuth 2.0" maxlength="500" @input="updateCharCount" />
+          <textarea class="prompt-area" v-model="form.prompt" :placeholder="t('new_session.prompt_placeholder')" maxlength="500" @input="updateCharCount" />
           <div class="char-count">{{ charCount }} / 500</div>
         </div>
 
@@ -134,12 +134,14 @@
 import { ref, reactive, computed, onMounted, onUnmounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { useWebSocket } from '../composables/useWebSocket'
+import { useLocale } from '../composables/useLocale'
 
 const props = defineProps<{ daemons?: any[] }>()
 const emit = defineEmits<{ close: [] }>()
 
 const router = useRouter()
 const { connect, send, onEvent } = useWebSocket()
+const { t } = useLocale()
 
 const form = reactive({
   daemonId: '',
