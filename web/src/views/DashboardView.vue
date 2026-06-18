@@ -22,13 +22,13 @@
     <div class="token-strip">
       <span class="ts-prefix">{{ t('dashboard.token_usage') }}</span>
       <span class="ts-sep"></span>
-      <span class="ts-item"><span class="ts-num">{{ formatCost(tokenSummary.total) }}</span>{{ t('dashboard.token_total') }}</span>
+      <span class="ts-item"><span class="ts-num">{{ formatTokens(tokenSummary.total) }}</span>{{ t('dashboard.token_total') }}</span>
       <span class="ts-sep"></span>
-      <span class="ts-item"><span class="ts-num">{{ formatCost(tokenSummary.today) }}</span>{{ t('dashboard.token_today') }}</span>
+      <span class="ts-item"><span class="ts-num">{{ formatTokens(tokenSummary.today) }}</span>{{ t('dashboard.token_today') }}</span>
       <span class="ts-sep"></span>
-      <span class="ts-item"><span class="ts-num">{{ formatCost(tokenSummary.week) }}</span>{{ t('dashboard.token_week') }}</span>
+      <span class="ts-item"><span class="ts-num">{{ formatTokens(tokenSummary.week) }}</span>{{ t('dashboard.token_week') }}</span>
       <span class="ts-sep"></span>
-      <span class="ts-item"><span class="ts-num">{{ formatCost(tokenSummary.month) }}</span>{{ t('dashboard.token_month') }}</span>
+      <span class="ts-item"><span class="ts-num">{{ formatTokens(tokenSummary.month) }}</span>{{ t('dashboard.token_month') }}</span>
     </div>
 
     <!-- Daemon Section -->
@@ -202,10 +202,13 @@ const selectedDaemon = ref<string | null>(null)
 
 // Token cost summary
 const tokenSummary = ref({ total: 0, today: 0, week: 0, month: 0 })
-function formatCost(v: number | null | undefined): string {
+function formatTokens(v: number | null | undefined): string {
   if (v == null) return '—'
-  if (v > 0 && v < 0.01) return '<$0.01'
-  return '$' + v.toFixed(2)
+  if (v === 0) return '0'
+  if (v >= 1e9) return (v / 1e9).toFixed(2) + 'B'
+  if (v >= 1e6) return (v / 1e6).toFixed(2) + 'M'
+  if (v >= 1e3) return (v / 1e3).toFixed(1) + 'K'
+  return String(v)
 }
 function getRelayOrigin(): string {
   const relayWs = localStorage.getItem('pocketctl_relay_url') || (window as any).__RELAY_WS__ || ''
@@ -214,7 +217,7 @@ function getRelayOrigin(): string {
 async function fetchCostSummary() {
   const origin = getRelayOrigin()
   try {
-    const r = await fetch(`${origin}/api/cost/summary`, { headers: { Authorization: `Bearer ${accessToken.value}` } })
+    const r = await fetch(`${origin}/api/tokens/summary`, { headers: { Authorization: `Bearer ${accessToken.value}` } })
     if (r.ok) {
       const d = await r.json()
       tokenSummary.value = { total: d.total ?? 0, today: d.today ?? 0, week: d.thisWeek ?? 0, month: d.thisMonth ?? 0 }

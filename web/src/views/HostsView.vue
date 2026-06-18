@@ -14,13 +14,13 @@
 
     <!-- 全局 Token 概览条（占位，待 C2/C3 接真实数据） -->
     <div class="token-global-strip">
-      <div class="tg-item"><span class="tg-num">{{ formatCost(tokenGlobal?.total) }}</span><span class="tg-label">{{ t('dashboard.token_total') }}</span></div>
+      <div class="tg-item"><span class="tg-num">{{ formatTokens(tokenGlobal?.total) }}</span><span class="tg-label">{{ t('dashboard.token_total') }}</span></div>
       <div class="tg-sep"></div>
-      <div class="tg-item"><span class="tg-num">{{ formatCost(tokenGlobal?.today) }}</span><span class="tg-label">{{ t('dashboard.token_today') }}</span></div>
+      <div class="tg-item"><span class="tg-num">{{ formatTokens(tokenGlobal?.today) }}</span><span class="tg-label">{{ t('dashboard.token_today') }}</span></div>
       <div class="tg-sep"></div>
-      <div class="tg-item"><span class="tg-num">{{ formatCost(tokenGlobal?.thisWeek) }}</span><span class="tg-label">{{ t('dashboard.token_week') }}</span></div>
+      <div class="tg-item"><span class="tg-num">{{ formatTokens(tokenGlobal?.thisWeek) }}</span><span class="tg-label">{{ t('dashboard.token_week') }}</span></div>
       <div class="tg-sep"></div>
-      <div class="tg-item"><span class="tg-num">{{ formatCost(tokenGlobal?.thisMonth) }}</span><span class="tg-label">{{ t('dashboard.token_month') }}</span></div>
+      <div class="tg-item"><span class="tg-num">{{ formatTokens(tokenGlobal?.thisMonth) }}</span><span class="tg-label">{{ t('dashboard.token_month') }}</span></div>
     </div>
 
     <!-- 筛选 + 搜索 -->
@@ -168,16 +168,23 @@
           <div class="hd-section">
             <div class="hd-section-title">Token 消耗</div>
             <div class="token-overview">
-              <div class="token-stat"><div class="tk-num">{{ formatCost(daemonCost?.total) }}</div><div class="tk-label">主机总计</div></div>
-              <div class="token-stat"><div class="tk-num accent">{{ formatCost(daemonCost?.today) }}</div><div class="tk-label">今日消耗</div></div>
-              <div class="token-stat"><div class="tk-num">{{ formatCost(daemonCost?.thisMonth) }}</div><div class="tk-label">本月消耗</div></div>
+              <div class="token-stat"><div class="tk-num">{{ formatTokens(daemonCost?.total) }}</div><div class="tk-label">主机总计</div></div>
+              <div class="token-stat"><div class="tk-num accent">{{ formatTokens(daemonCost?.today) }}</div><div class="tk-label">今日消耗</div></div>
+              <div class="token-stat"><div class="tk-num">{{ formatTokens(daemonCost?.thisMonth) }}</div><div class="tk-label">本月消耗</div></div>
             </div>
             <div class="session-token-list">
               <template v-if="sortedCostSessions.length">
                 <div class="session-token-row" v-for="(s, i) in paginatedCostSessions" :key="s.session_id" @click="$router.push(`/session/${s.session_id}`)">
                   <span class="st-rank">{{ (costExpanded ? (costPage - 1) * 10 : 0) + i + 1 }}</span>
                   <span class="st-title">{{ s.title || s.session_id.slice(0, 8) }}</span>
-                  <span class="st-tokens">{{ formatCost(s.cost_usd) }}</span>
+                  <span class="st-tokens">{{ formatTokens(s.total_tokens) }}</span>
+                  <button class="st-expand" @click.stop="toggleTokenExpand(s.session_id)" :aria-expanded="expandedTokenSession === s.session_id">{{ expandedTokenSession === s.session_id ? '▾' : '▸' }}</button>
+                  <div v-if="expandedTokenSession === s.session_id" class="st-breakdown">
+                    <div class="stb-item"><span class="stb-label">{{ t('dashboard.token_input') }}</span><span class="stb-val">{{ formatTokens(s.tok_input) }}</span></div>
+                    <div class="stb-item"><span class="stb-label">{{ t('dashboard.token_output') }}</span><span class="stb-val">{{ formatTokens(s.tok_output) }}</span></div>
+                    <div class="stb-item"><span class="stb-label">{{ t('dashboard.token_cache_read') }}</span><span class="stb-val">{{ formatTokens(s.tok_cache_read) }}</span></div>
+                    <div class="stb-item"><span class="stb-label">{{ t('dashboard.token_cache_create') }}</span><span class="stb-val">{{ formatTokens(s.tok_cache_create) }}</span></div>
+                  </div>
                 </div>
                 <a v-if="sortedCostSessions.length > 5 && !costExpanded" class="st-more" @click="costExpanded = true">{{ t('common.all') }} {{ sortedCostSessions.length }} →</a>
                 <div v-if="costExpanded && costTotalPages > 1" class="st-pagination">
@@ -315,24 +322,27 @@ const upgrading = ref('')
 
 // C3: Token cost data (from C2 backend — cost_usd in USD)
 const tokenGlobal = ref<{ total: number; today: number; thisWeek: number; thisMonth: number } | null>(null)
-const daemonCost = ref<{ total: number; today: number; thisMonth: number; sessions: Array<{ session_id: string; title: string; cost_usd: number }> } | null>(null)
+const daemonCost = ref<{ total: number; today: number; thisMonth: number; sessions: Array<{ session_id: string; title: string; total_tokens: number; tok_input: number; tok_output: number; tok_cache_read: number; tok_cache_create: number }> } | null>(null)
 
-function formatCost(v: number | null | undefined): string {
+function formatTokens(v: number | null | undefined): string {
   if (v == null) return '—'
-  if (v > 0 && v < 0.01) return '<$0.01'
-  return '$' + v.toFixed(2)
+  if (v === 0) return '0'
+  if (v >= 1e9) return (v / 1e9).toFixed(2) + 'B'
+  if (v >= 1e6) return (v / 1e6).toFixed(2) + 'M'
+  if (v >= 1e3) return (v / 1e3).toFixed(1) + 'K'
+  return String(v)
 }
 async function fetchCostSummary() {
   const origin = getRelayOrigin()
   try {
-    const r = await fetch(`${origin}/api/cost/summary`, { headers: { Authorization: `Bearer ${accessToken.value}` } })
+    const r = await fetch(`${origin}/api/tokens/summary`, { headers: { Authorization: `Bearer ${accessToken.value}` } })
     if (r.ok) tokenGlobal.value = await r.json()
   } catch { /* ignore */ }
 }
 async function fetchCostByDaemon(id: string) {
   const origin = getRelayOrigin()
   try {
-    const r = await fetch(`${origin}/api/cost/by-daemon/${id}`, { headers: { Authorization: `Bearer ${accessToken.value}` } })
+    const r = await fetch(`${origin}/api/tokens/by-daemon/${id}`, { headers: { Authorization: `Bearer ${accessToken.value}` } })
     daemonCost.value = r.ok ? await r.json() : null
   } catch { daemonCost.value = null }
 }
@@ -503,7 +513,7 @@ const costPage = ref(1)
 const COST_PAGE_SIZE = 10
 const sortedCostSessions = computed(() => {
   if (!daemonCost.value?.sessions) return []
-  return [...daemonCost.value.sessions].sort((a, b) => (b.cost_usd || 0) - (a.cost_usd || 0))
+  return [...daemonCost.value.sessions].sort((a, b) => (b.total_tokens || 0) - (a.total_tokens || 0))
 })
 const costTotalPages = computed(() => Math.max(1, Math.ceil(sortedCostSessions.value.length / COST_PAGE_SIZE)))
 const paginatedCostSessions = computed(() => {
@@ -512,8 +522,13 @@ const paginatedCostSessions = computed(() => {
   const start = (costPage.value - 1) * COST_PAGE_SIZE
   return all.slice(start, start + COST_PAGE_SIZE)
 })
+// Expandable per-session token breakdown
+const expandedTokenSession = ref<string | null>(null)
+function toggleTokenExpand(sid: string) {
+  expandedTokenSession.value = expandedTokenSession.value === sid ? null : sid
+}
 // Reset pagination when daemon changes
-watch(selectedId, () => { costExpanded.value = false; costPage.value = 1 })
+watch(selectedId, () => { costExpanded.value = false; costPage.value = 1; expandedTokenSession.value = null })
 
 function sessionStatusLabel(s: any): string {
   const STATUS_KEYS: Record<string, string> = { running: 'session.status.running', busy: 'session.status.busy', idle: 'session.status.idle', completed: 'session.status.completed', error: 'session.status.error', killed: 'session.status.killed', disconnected: 'session.status.disconnected', exited: 'session.status.exited' }
@@ -828,7 +843,7 @@ onUnmounted(() => {
 .token-stat .tk-num.accent { color: var(--accent); }
 .token-stat .tk-label { font-size: 11px; color: var(--fg-tertiary); margin-top: 4px; text-transform: uppercase; letter-spacing: 0.06em; }
 .session-token-list { margin-top: 10px; border-radius: var(--radius-md); overflow: hidden; border: 1px solid var(--border); }
-.session-token-row { display: flex; align-items: center; gap: 10px; padding: 9px 12px; border-bottom: 1px solid var(--border); font-size: 13px; cursor: pointer; transition: background 0.1s; }
+.session-token-row { display: flex; align-items: flex-start; flex-wrap: wrap; gap: 10px; padding: 9px 12px; border-bottom: 1px solid var(--border); font-size: 13px; cursor: pointer; transition: background 0.1s; }
 .session-token-row:last-child { border-bottom: none; }
 .session-token-row:hover { background: var(--surface-hover); }
 .session-token-row .st-rank { width: 18px; height: 18px; border-radius: 50%; background: var(--surface-active); color: var(--fg-tertiary); font-size: 10px; font-weight: 700; display: flex; align-items: center; justify-content: center; flex-shrink: 0; font-family: var(--font-mono); }
@@ -837,6 +852,12 @@ onUnmounted(() => {
 .session-token-row:nth-child(3) .st-rank { background: rgba(88,166,255,0.3); color: var(--accent); }
 .session-token-row .st-title { flex: 1; color: var(--fg); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 500; }
 .session-token-row .st-tokens { font-family: var(--font-mono); font-size: 13px; font-weight: 600; color: var(--success); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.session-token-row .st-expand { background: none; border: none; color: var(--fg-tertiary); cursor: pointer; padding: 2px 4px; font-size: 11px; line-height: 1; flex-shrink: 0; border-radius: 4px; }
+.session-token-row .st-expand:hover { color: var(--accent); background: var(--surface-hover); }
+.session-token-row .st-breakdown { flex: 0 0 100%; display: grid; grid-template-columns: 1fr 1fr; gap: 6px 16px; padding: 8px 0 2px 28px; margin-top: 6px; border-top: 1px dashed var(--border); }
+.session-token-row .stb-item { display: flex; justify-content: space-between; align-items: center; font-size: 12px; }
+.session-token-row .stb-label { color: var(--fg-tertiary); }
+.session-token-row .stb-val { font-family: var(--font-mono); font-weight: 600; color: var(--fg); font-variant-numeric: tabular-nums; }
 
 /* Session Summary */
 .sess-summary { display: flex; align-items: center; gap: 20px; padding: 16px; background: var(--bg); border: 1px solid var(--border); border-radius: var(--radius-md); }

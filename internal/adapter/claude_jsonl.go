@@ -428,6 +428,8 @@ func (p *JSONLStreamParser) parseAssistant(entry JSONLEntry, sid string) ([]prot
 							CacheRead:    u.CacheRead,
 							CacheCreate:  u.CacheCreation,
 						}
+						// Compute per-turn cost delta from usage tokens (Sonnet pricing)
+						ev.CostUSD = computeTurnCost(u)
 					}
 					events = append(events, ev)
 				}

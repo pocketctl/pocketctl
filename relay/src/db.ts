@@ -108,6 +108,15 @@ export async function initDB(pool: pg.Pool): Promise<void> {
   // C2: Token cost tracking — per-session cumulative cost (USD) from result events
   await pool.query(`ALTER TABLE sessions ADD COLUMN IF NOT EXISTS cost_usd DOUBLE PRECISION DEFAULT 0`);
 
+  // Token usage tracking (model-agnostic raw token counts; replaces the USD cost estimate
+  // which was inaccurate across different models). Stores per-session cumulative totals
+  // broken down by token type so the UI can show total + composition breakdown.
+  await pool.query(`ALTER TABLE sessions ADD COLUMN IF NOT EXISTS total_tokens BIGINT DEFAULT 0`);
+  await pool.query(`ALTER TABLE sessions ADD COLUMN IF NOT EXISTS tok_input BIGINT DEFAULT 0`);
+  await pool.query(`ALTER TABLE sessions ADD COLUMN IF NOT EXISTS tok_output BIGINT DEFAULT 0`);
+  await pool.query(`ALTER TABLE sessions ADD COLUMN IF NOT EXISTS tok_cache_read BIGINT DEFAULT 0`);
+  await pool.query(`ALTER TABLE sessions ADD COLUMN IF NOT EXISTS tok_cache_create BIGINT DEFAULT 0`);
+
   // Session delete tombstone table
   await pool.query(`
     CREATE TABLE IF NOT EXISTS deleted_sessions (
@@ -586,78 +595,126 @@ export async function incrementSessionCost(pool: pg.Pool, sessionId: string, del
   await pool.query(`UPDATE sessions SET cost_usd = COALESCE(cost_usd, 0) + $1, updated_at = NOW() WHERE session_id = $2`, [delta, sessionId]);
 }
 
-/** Backfill sessions.cost_usd from events (latest session_status payload with cost_usd per session). */
-export async function backfillSessionCost(pool: pg.Pool): Promise<number> {
+/** Token usage breakdown carried by agent_text events (matches daemon ContextUsage JSON tags). */
+export interface TokenUsageDelta {
+  input_tokens?: number;
+  output_tokens?: number;
+  cache_read_tokens?: number;
+  cache_create_tokens?: number;
+}
+
+/** Accumulate per-turn token usage into sessions (total + per-type columns).
+ *  Model-agnostic raw token counts — no pricing assumptions. */
+export async function incrementSessionTokens(pool: pg.Pool, sessionId: string, u: TokenUsageDelta): Promise<void> {
+  const inp = Math.max(0, u.input_tokens || 0);
+  const out = Math.max(0, u.output_tokens || 0);
+  const cr = Math.max(0, u.cache_read_tokens || 0);
+  const cc = Math.max(0, u.cache_create_tokens || 0);
+  const total = inp + out + cr + cc;
+  if (total <= 0) return;
+  await pool.query(
+    `UPDATE sessions SET
+       total_tokens = COALESCE(total_tokens, 0) + $1,
+       tok_input = COALESCE(tok_input, 0) + $2,
+       tok_output = COALESCE(tok_output, 0) + $3,
+       tok_cache_read = COALESCE(tok_cache_read, 0) + $4,
+       tok_cache_create = COALESCE(tok_cache_create, 0) + $5,
+       updated_at = NOW()
+     WHERE session_id = $6`,
+    [total, inp, out, cr, cc, sessionId]
+  );
+}
+
+/** Backfill sessions token columns from agent_text usage events.
+ *  Sums input/output/cache_read/cache_create per session into the token columns.
+ *  Model-agnostic (raw token counts). Runs once on relay startup. */
+export async function backfillSessionTokens(pool: pg.Pool): Promise<number> {
   const result = await pool.query(`
-    WITH latest AS (
-      SELECT DISTINCT ON (session_id) session_id,
-             COALESCE((payload->>'cost_usd')::float, 0) AS cost
+    WITH agg AS (
+      SELECT session_id,
+             SUM(COALESCE((payload->'usage'->>'input_tokens')::bigint, 0)) AS inp,
+             SUM(COALESCE((payload->'usage'->>'output_tokens')::bigint, 0)) AS outp,
+             SUM(COALESCE((payload->'usage'->>'cache_read_tokens')::bigint, 0)) AS cr,
+             SUM(COALESCE((payload->'usage'->>'cache_create_tokens')::bigint, 0)) AS cc
       FROM events
-      WHERE event_type = 'session_status' AND payload ? 'cost_usd'
-      ORDER BY session_id, id DESC
+      WHERE event_type = 'agent_text' AND payload ? 'usage'
+      GROUP BY session_id
     )
-    UPDATE sessions SET cost_usd = latest.cost
-    FROM latest WHERE sessions.session_id = latest.session_id
+    UPDATE sessions SET
+      total_tokens = agg.inp + agg.outp + agg.cr + agg.cc,
+      tok_input = agg.inp,
+      tok_output = agg.outp,
+      tok_cache_read = agg.cr,
+      tok_cache_create = agg.cc,
+      updated_at = NOW()
+    FROM agg WHERE sessions.session_id = agg.session_id
   `);
   return result.rowCount ?? 0;
 }
 
-/** User-level cost summary: cumulative total + today/week/month incremental deltas.
- *  Deltas computed via LAG over per-session cost snapshots so multi-turn sessions
- *  are attributed to the time bucket when each turn completed. */
-export async function getCostSummary(pool: pg.Pool, userId: number): Promise<{ total: number; today: number; thisWeek: number; thisMonth: number }> {
+/** User-level token usage summary: cumulative total + today/week/month deltas.
+ *  All deltas come from per-turn agent_text usage (input+output+cache_read+cache_create),
+ *  so BOTH PTY/attach sessions and -p sessions are attributed correctly. Model-agnostic. */
+export async function getTokenSummary(pool: pg.Pool, userId: number): Promise<{ total: number; today: number; thisWeek: number; thisMonth: number }> {
   const result = await pool.query(`
-    WITH cost_events AS (
-      SELECT e.id, e.session_id, e.created_at, COALESCE((e.payload->>'cost_usd')::float, 0) AS cost
+    WITH turn_tokens AS (
+      SELECT e.created_at,
+             (COALESCE((e.payload->'usage'->>'input_tokens')::bigint, 0) +
+              COALESCE((e.payload->'usage'->>'output_tokens')::bigint, 0) +
+              COALESCE((e.payload->'usage'->>'cache_read_tokens')::bigint, 0) +
+              COALESCE((e.payload->'usage'->>'cache_create_tokens')::bigint, 0)) AS delta
       FROM events e JOIN sessions s ON s.session_id = e.session_id
-      WHERE e.event_type = 'session_status' AND e.payload ? 'cost_usd' AND s.user_id = $1
-    ),
-    deltas AS (
-      SELECT created_at,
-             cost - COALESCE(LAG(cost) OVER (PARTITION BY session_id ORDER BY id), 0) AS delta
-      FROM cost_events
+      WHERE e.event_type = 'agent_text' AND e.payload ? 'usage' AND s.user_id = $1
     )
     SELECT
-      (SELECT COALESCE(SUM(cost_usd), 0) FROM sessions WHERE user_id = $1) AS total,
+      COALESCE(SUM(delta), 0) AS total,
       COALESCE(SUM(CASE WHEN created_at >= date_trunc('day', NOW()) THEN delta ELSE 0 END), 0) AS today,
       COALESCE(SUM(CASE WHEN created_at >= date_trunc('week', NOW()) THEN delta ELSE 0 END), 0) AS this_week,
       COALESCE(SUM(CASE WHEN created_at >= date_trunc('month', NOW()) THEN delta ELSE 0 END), 0) AS this_month
-    FROM deltas
+    FROM turn_tokens
   `, [userId]);
   const r = result.rows[0] || {};
   return {
-    total: parseFloat(r.total ?? 0),
-    today: parseFloat(r.today ?? 0),
-    thisWeek: parseFloat(r.this_week ?? 0),
-    thisMonth: parseFloat(r.this_month ?? 0),
+    total: parseInt(r.total ?? 0, 10),
+    today: parseInt(r.today ?? 0, 10),
+    thisWeek: parseInt(r.this_week ?? 0, 10),
+    thisMonth: parseInt(r.this_month ?? 0, 10),
   };
 }
 
-/** Daemon-level cost: cumulative total + today/month deltas + per-session breakdown. */
-export async function getCostByDaemon(pool: pg.Pool, userId: number, daemonId: string): Promise<{ total: number; today: number; thisMonth: number; sessions: Array<{ session_id: string; title: string; cost_usd: number }> } | null> {
+/** Daemon-level token usage: cumulative total + today/month deltas + per-session breakdown
+ *  with full token composition (input/output/cache_read/cache_create). */
+export async function getTokensByDaemon(pool: pg.Pool, userId: number, daemonId: string): Promise<{
+  total: number; today: number; thisMonth: number;
+  sessions: Array<{ session_id: string; title: string; total_tokens: number; tok_input: number; tok_output: number; tok_cache_read: number; tok_cache_create: number }>;
+} | null> {
   const own = await pool.query(`SELECT 1 FROM daemons WHERE daemon_id = $1 AND user_id = $2`, [daemonId, userId]);
   if ((own.rowCount ?? 0) === 0) return null;
 
   const totals = await pool.query(`
-    WITH cost_events AS (
-      SELECT e.id, e.session_id, e.created_at, COALESCE((e.payload->>'cost_usd')::float, 0) AS cost
+    WITH turn_tokens AS (
+      SELECT e.created_at,
+             (COALESCE((e.payload->'usage'->>'input_tokens')::bigint, 0) +
+              COALESCE((e.payload->'usage'->>'output_tokens')::bigint, 0) +
+              COALESCE((e.payload->'usage'->>'cache_read_tokens')::bigint, 0) +
+              COALESCE((e.payload->'usage'->>'cache_create_tokens')::bigint, 0)) AS delta
       FROM events e JOIN sessions s ON s.session_id = e.session_id
-      WHERE e.event_type = 'session_status' AND e.payload ? 'cost_usd' AND s.user_id = $1 AND s.daemon_id = $2
-    ),
-    deltas AS (
-      SELECT created_at,
-             cost - COALESCE(LAG(cost) OVER (PARTITION BY session_id ORDER BY id), 0) AS delta
-      FROM cost_events
+      WHERE e.event_type = 'agent_text' AND e.payload ? 'usage' AND s.user_id = $1 AND s.daemon_id = $2
     )
     SELECT
-      (SELECT COALESCE(SUM(cost_usd), 0) FROM sessions WHERE user_id = $1 AND daemon_id = $2) AS total,
+      COALESCE(SUM(delta), 0) AS total,
       COALESCE(SUM(CASE WHEN created_at >= date_trunc('day', NOW()) THEN delta ELSE 0 END), 0) AS today,
       COALESCE(SUM(CASE WHEN created_at >= date_trunc('month', NOW()) THEN delta ELSE 0 END), 0) AS this_month
-    FROM deltas
+    FROM turn_tokens
   `, [userId, daemonId]);
 
   const sess = await pool.query(`
-    SELECT session_id, COALESCE(title, '') AS title, cost_usd
+    SELECT session_id, COALESCE(title, '') AS title,
+           COALESCE(total_tokens, 0) AS total_tokens,
+           COALESCE(tok_input, 0) AS tok_input,
+           COALESCE(tok_output, 0) AS tok_output,
+           COALESCE(tok_cache_read, 0) AS tok_cache_read,
+           COALESCE(tok_cache_create, 0) AS tok_cache_create
     FROM sessions
     WHERE user_id = $1 AND daemon_id = $2 AND session_id NOT LIKE 'pending-%'
     ORDER BY COALESCE(last_activity_at, updated_at) DESC
@@ -665,13 +722,17 @@ export async function getCostByDaemon(pool: pg.Pool, userId: number, daemonId: s
 
   const t = totals.rows[0] || {};
   return {
-    total: parseFloat(t.total ?? 0),
-    today: parseFloat(t.today ?? 0),
-    thisMonth: parseFloat(t.this_month ?? 0),
+    total: parseInt(t.total ?? 0, 10),
+    today: parseInt(t.today ?? 0, 10),
+    thisMonth: parseInt(t.this_month ?? 0, 10),
     sessions: (sess.rows as any[]).map((r) => ({
       session_id: r.session_id,
       title: r.title,
-      cost_usd: parseFloat(r.cost_usd ?? 0),
+      total_tokens: parseInt(r.total_tokens ?? 0, 10),
+      tok_input: parseInt(r.tok_input ?? 0, 10),
+      tok_output: parseInt(r.tok_output ?? 0, 10),
+      tok_cache_read: parseInt(r.tok_cache_read ?? 0, 10),
+      tok_cache_create: parseInt(r.tok_cache_create ?? 0, 10),
     })),
   };
 }
