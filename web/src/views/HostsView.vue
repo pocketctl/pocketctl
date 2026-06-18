@@ -186,19 +186,27 @@
 
           <!-- 会话（全宽） -->
           <div class="hd-section hd-section-full">
-            <div class="hd-section-title">会话</div>
+            <div class="hd-section-title">{{ t('nav.sessions') }}</div>
             <div class="sess-summary">
               <div class="ss-block">
                 <span class="ss-num accent">{{ selectedDaemon.active_sessions || 0 }}</span>
-                <span class="ss-label">活跃会话</span>
+                <span class="ss-label">{{ t('dashboard.active_sessions') }}</span>
               </div>
               <div class="ss-divider"></div>
               <div class="ss-block">
-                <span class="ss-num">{{ selectedDaemon.total_sessions || 0 }}</span>
-                <span class="ss-label">历史总数</span>
+                <span class="ss-num">{{ detailSessionTotal }}</span>
+                <span class="ss-label">{{ t('dashboard.total_sessions') }}</span>
               </div>
-              <a class="btn btn-ghost ss-link" @click="goSessionWithHost(selectedDaemon)">查看全部 →</a>
             </div>
+            <!-- Recent 3 sessions -->
+            <div class="detail-sess-list" v-if="detailSessions.length > 0">
+              <div class="detail-sess-row" v-for="s in detailSessions" :key="s.session_id" @click="$router.push(`/session/${s.session_id}`)">
+                <span class="ds-title">{{ s.title || s.session_id.slice(0, 8) }}</span>
+                <span class="ds-status" :class="s.status">{{ sessionStatusLabel(s) }}</span>
+              </div>
+              <a v-if="detailSessionTotal > 3" class="detail-sess-more" @click="goSessionWithHost(selectedDaemon)">{{ t('dashboard.view_all') }} →</a>
+            </div>
+            <div v-else class="detail-sess-empty">{{ t('hosts.no_sessions') }}</div>
           </div>
         </div>
       </div>
@@ -463,8 +471,29 @@ function deselectAll() {
 }
 
 function goSessionWithHost(d: any) {
-  // C1-1c: 跳会话列表并选中当前主机
   router.push({ path: '/session/default', query: { host: d.daemon_id } })
+}
+
+// Sessions for detail panel (recent 3)
+const allSessions = ref<any[]>([])
+const detailSessions = computed(() => {
+  if (!selectedId.value) return []
+  return allSessions.value
+    .filter(s => s.daemon_id === selectedId.value)
+    .sort((a, b) => {
+      const ta = a.last_activity_at ? new Date(a.last_activity_at).getTime() : 0
+      const tb = b.last_activity_at ? new Date(b.last_activity_at).getTime() : 0
+      return tb - ta
+    })
+    .slice(0, 3)
+})
+const detailSessionTotal = computed(() => {
+  if (!selectedId.value) return 0
+  return allSessions.value.filter(s => s.daemon_id === selectedId.value).length
+})
+function sessionStatusLabel(s: any): string {
+  const STATUS_KEYS: Record<string, string> = { running: 'session.status.running', busy: 'session.status.busy', idle: 'session.status.idle', completed: 'session.status.completed', error: 'session.status.error', killed: 'session.status.killed', disconnected: 'session.status.disconnected', exited: 'session.status.exited' }
+  return t(STATUS_KEYS[s.status] || 'session.status.running')
 }
 
 function openMenu(e: MouseEvent, d: any) {
@@ -592,6 +621,7 @@ const onScroll = () => closeMenu()
 onMounted(() => {
   connect()
   send({ type: 'list_daemons' })
+  send({ type: 'list_sessions' })
   fetchCostSummary()
   document.addEventListener('click', onDocClick)
   document.addEventListener('keydown', onEsc)
@@ -600,11 +630,18 @@ onMounted(() => {
 
   cleanups.push(onEvent('daemon_list', (msg: any) => {
     daemons.value = msg.daemons || []
-    // 首屏默认选中第一台（匹配设计稿 selectHost(HOSTS[0].id)）
     if (!selectedId.value && daemons.value.length) {
       selectedId.value = daemons.value[0].daemon_id
     }
   }))
+  cleanups.push(onEvent('session_list', (msg: any) => {
+    allSessions.value = msg.sessions || []
+  }))
+  cleanups.push(onEvent('session_status', (msg: any) => {
+    const idx = allSessions.value.findIndex((s: any) => s.session_id === msg.session_id)
+    if (idx >= 0) { allSessions.value[idx].status = msg.status }
+  }))
+  cleanups.push(onEvent('session_created', () => send({ type: 'list_sessions' })))
   cleanups.push(onEvent('daemon_status', (msg: any) => {
     const idx = daemons.value.findIndex(d => d.daemon_id === msg.daemon_id)
     if (idx >= 0) {
@@ -781,6 +818,20 @@ onUnmounted(() => {
 .ss-divider { width: 1px; align-self: stretch; background: var(--border); }
 .ss-link { margin-left: auto; font-size: 13px; color: var(--accent); text-decoration: none; white-space: nowrap; cursor: pointer; }
 .ss-link:hover { text-decoration: underline; }
+
+/* Detail session list (recent 3 + view all) */
+.detail-sess-list { margin-top: 8px; }
+.detail-sess-row { display: flex; align-items: center; justify-content: space-between; padding: 10px 14px; border-radius: var(--radius-sm); cursor: pointer; transition: background 0.1s; }
+.detail-sess-row:hover { background: var(--surface-hover); }
+.detail-sess-row .ds-title { font-size: 13px; font-weight: 500; color: var(--fg); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; min-width: 0; }
+.detail-sess-row .ds-status { font-size: 11px; font-weight: 600; padding: 2px 8px; border-radius: var(--radius-full); margin-left: 8px; flex-shrink: 0; }
+.detail-sess-row .ds-status.running, .detail-sess-row .ds-status.busy { background: var(--success-bg); color: var(--success); }
+.detail-sess-row .ds-status.completed, .detail-sess-row .ds-status.exited { background: var(--surface-active); color: var(--fg-tertiary); }
+.detail-sess-row .ds-status.error, .detail-sess-row .ds-status.killed { background: var(--error-bg); color: var(--error); }
+.detail-sess-row .ds-status.idle, .detail-sess-row .ds-status.disconnected { background: var(--accent-muted); color: var(--accent); }
+.detail-sess-more { display: block; text-align: center; padding: 10px; font-size: 13px; font-weight: 600; color: var(--accent); cursor: pointer; border-radius: var(--radius-sm); transition: background 0.1s; }
+.detail-sess-more:hover { background: var(--accent-muted); }
+.detail-sess-empty { padding: 20px; text-align: center; font-size: 13px; color: var(--fg-tertiary); }
 
 /* ⋯ Button (card) */
 .ss-more-btn { width: 28px; height: 28px; border: none; background: none; color: var(--fg-tertiary); cursor: pointer; border-radius: 6px; display: flex; align-items: center; justify-content: center; opacity: 0; transition: opacity 0.15s, background 0.15s, color 0.15s; flex-shrink: 0; }
