@@ -132,7 +132,6 @@
             <div class="hd-section-title">{{ t('hosts.connection_info') }}</div>
             <div class="conn-grid">
               <div class="conn-item"><div class="c-label">{{ t('hosts.ip_addr') }}</div><div class="c-val">{{ selectedDaemon.ip && selectedDaemon.ip !== 'unknown' ? selectedDaemon.ip : '—' }}</div></div>
-              <div class="conn-item"><div class="c-label">{{ t('hosts.port') }}</div><div class="c-val">{{ selectedDaemon.port || '—' }}</div></div>
               <div class="conn-item"><div class="c-label">{{ t('hosts.daemon_version') }}</div><div class="c-val">{{ selectedDaemon.version ? 'v' + selectedDaemon.version : '—' }}</div></div>
               <div class="conn-item"><div class="c-label">{{ t('hosts.os') }}</div><div class="c-val">{{ selectedDaemon.os || '—' }}</div></div>
               <div class="conn-item"><div class="c-label">{{ t('hosts.uptime') }}</div><div :class="['c-val', { muted: !selectedDaemon.daemon_online }]">{{ selectedDaemon.started_at ? formatUptime(selectedDaemon.started_at) : '—' }}</div></div>
