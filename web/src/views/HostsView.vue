@@ -175,7 +175,8 @@
             </div>
             <div class="session-token-list">
               <template v-if="sortedCostSessions.length">
-                <div class="session-token-row" v-for="s in paginatedCostSessions" :key="s.session_id" @click="$router.push(`/session/${s.session_id}`)">
+                <div class="session-token-row" v-for="(s, i) in paginatedCostSessions" :key="s.session_id" @click="$router.push(`/session/${s.session_id}`)">
+                  <span class="st-rank">{{ (costExpanded ? (costPage - 1) * 10 : 0) + i + 1 }}</span>
                   <span class="st-title">{{ s.title || s.session_id.slice(0, 8) }}</span>
                   <span class="st-tokens">{{ formatCost(s.cost_usd) }}</span>
                 </div>
@@ -819,11 +820,16 @@ onUnmounted(() => {
 .token-stat .tk-num { font-size: 22px; font-weight: 700; color: var(--fg); font-variant-numeric: tabular-nums; letter-spacing: -0.01em; line-height: 1; }
 .token-stat .tk-num.accent { color: var(--accent); }
 .token-stat .tk-label { font-size: 11px; color: var(--fg-tertiary); margin-top: 4px; text-transform: uppercase; letter-spacing: 0.06em; }
-.session-token-list { background: var(--bg); border: 1px solid var(--border); border-radius: var(--radius-md); overflow: hidden; }
-.session-token-row { display: flex; align-items: center; gap: 12px; padding: 10px 14px; border-bottom: 1px solid var(--border); font-size: 13px; }
+.session-token-list { margin-top: 10px; border-radius: var(--radius-md); overflow: hidden; border: 1px solid var(--border); }
+.session-token-row { display: flex; align-items: center; gap: 10px; padding: 9px 12px; border-bottom: 1px solid var(--border); font-size: 13px; cursor: pointer; transition: background 0.1s; }
 .session-token-row:last-child { border-bottom: none; }
-.session-token-row .st-title { flex: 1; color: var(--fg); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.session-token-row .st-tokens { font-family: var(--font-mono); font-size: 13px; color: var(--fg-secondary); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.session-token-row:hover { background: var(--surface-hover); }
+.session-token-row .st-rank { width: 18px; height: 18px; border-radius: 50%; background: var(--surface-active); color: var(--fg-tertiary); font-size: 10px; font-weight: 700; display: flex; align-items: center; justify-content: center; flex-shrink: 0; font-family: var(--font-mono); }
+.session-token-row:nth-child(1) .st-rank { background: var(--accent); color: #fff; }
+.session-token-row:nth-child(2) .st-rank { background: rgba(88,166,255,0.5); color: #fff; }
+.session-token-row:nth-child(3) .st-rank { background: rgba(88,166,255,0.3); color: var(--accent); }
+.session-token-row .st-title { flex: 1; color: var(--fg); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 500; }
+.session-token-row .st-tokens { font-family: var(--font-mono); font-size: 13px; font-weight: 600; color: var(--success); font-variant-numeric: tabular-nums; white-space: nowrap; }
 
 /* Session Summary */
 .sess-summary { display: flex; align-items: center; gap: 20px; padding: 16px; background: var(--bg); border: 1px solid var(--border); border-radius: var(--radius-md); }
@@ -850,15 +856,13 @@ onUnmounted(() => {
 .detail-sess-empty { padding: 20px; text-align: center; font-size: 13px; color: var(--fg-tertiary); }
 
 /* Cost session list (top 5 + expand + paginate) */
-.session-token-row { cursor: pointer; transition: background 0.1s; border-radius: var(--radius-sm); padding: 4px 8px; margin: 0 -8px; }
-.session-token-row:hover { background: var(--surface-hover); }
-.st-more { display: block; text-align: center; padding: 8px; font-size: 12px; font-weight: 600; color: var(--accent); cursor: pointer; border-radius: var(--radius-sm); margin-top: 4px; }
+.st-more { display: flex; align-items: center; justify-content: center; gap: 4px; padding: 8px; font-size: 12px; font-weight: 600; color: var(--accent); cursor: pointer; transition: background 0.1s; border-top: 1px solid var(--border); }
 .st-more:hover { background: var(--accent-muted); }
-.st-pagination { display: flex; align-items: center; justify-content: center; gap: 8px; padding: 8px 0 4px; }
-.st-page-btn { width: 28px; height: 28px; border: 1px solid var(--border); background: var(--surface); color: var(--fg-secondary); border-radius: var(--radius-sm); cursor: pointer; font-size: 14px; display: flex; align-items: center; justify-content: center; transition: all 0.1s; }
-.st-page-btn:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
-.st-page-btn:disabled { opacity: 0.4; cursor: not-allowed; }
-.st-page-info { font-size: 12px; color: var(--fg-tertiary); font-family: var(--font-mono); }
+.st-pagination { display: flex; align-items: center; justify-content: center; gap: 6px; padding: 8px; border-top: 1px solid var(--border); }
+.st-page-btn { width: 26px; height: 26px; border: 1px solid var(--border); background: var(--surface); color: var(--fg-secondary); border-radius: var(--radius-sm); cursor: pointer; font-size: 13px; display: flex; align-items: center; justify-content: center; transition: all 0.15s; }
+.st-page-btn:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); background: var(--accent-muted); }
+.st-page-btn:disabled { opacity: 0.35; cursor: not-allowed; }
+.st-page-info { font-size: 11px; color: var(--fg-tertiary); font-family: var(--font-mono); padding: 0 4px; }
 
 /* ⋯ Button (card) */
 .ss-more-btn { width: 28px; height: 28px; border: none; background: none; color: var(--fg-tertiary); cursor: pointer; border-radius: 6px; display: flex; align-items: center; justify-content: center; opacity: 0; transition: opacity 0.15s, background 0.15s, color 0.15s; flex-shrink: 0; }
