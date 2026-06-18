@@ -419,7 +419,7 @@ function agentName(a: any): string {
   const raw = agentRawName(a)
   return AGENT_DISPLAY_NAMES[raw] || raw
 }
-function agentShort(a: any): string { return /codex/i.test(agentName(a)) ? 'Cx' : 'CC' }
+function agentShort(a: any): string { const n = agentRawName(a); if (/codex/i.test(n)) return 'Cx'; if (/opencode/i.test(n)) return 'OC'; return 'CC' }
 function agentIconClass(a: any): string { return /codex/i.test(agentName(a)) ? 'codex' : 'claude' }
 function agentVersionLabel(a: any): string {
   if (typeof a !== 'object' || !a?.version) return '版本待上报'
