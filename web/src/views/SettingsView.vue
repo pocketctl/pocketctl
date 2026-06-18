@@ -1,7 +1,7 @@
 <template>
   <div class="page-container">
     <div class="page-header">
-      <h1 class="page-title">设置</h1>
+      <h1 class="page-title">{{ t('settings.title') }}</h1>
     </div>
 
     <div class="settings-grid">
@@ -9,23 +9,23 @@
       <div class="settings-nav">
         <div class="settings-nav-item active" @click="scrollTo('profile')">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M20 21v-2a4 4 0 00-4-4H8a4 4 0 00-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>
-          账户
+          {{ t('settings.profile') }}
         </div>
         <div class="settings-nav-item" @click="scrollTo('daemons')">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="2" width="20" height="20" rx="3"/><path d="M7 2v20"/></svg>
-          主机
+          {{ t('nav.hosts') }}
         </div>
         <div class="settings-nav-item" @click="scrollTo('appearance')">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="5"/><path d="M12 1v2M12 21v2M4.22 4.22l1.42 1.42M18.36 18.36l1.42 1.42"/></svg>
-          外观
+          {{ t('settings.appearance') }}
         </div>
         <div class="settings-nav-item" @click="scrollTo('notifications')">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 8A6 6 0 006 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 01-3.46 0"/></svg>
-          通知
+          {{ t('settings.notifications') }}
         </div>
         <div class="settings-nav-item" @click="scrollTo('about')">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M12 16v-4M12 8h.01"/></svg>
-          关于
+          {{ t('settings.about') }}
         </div>
       </div>
 
@@ -38,14 +38,14 @@
             <div class="profile-info">
               <div class="profile-name">{{ userDisplayName }}</div>
               <div class="profile-email">{{ userMasked }}</div>
-              <button class="profile-edit" @click="showEditProfile = true">编辑资料</button>
+              <button class="profile-edit" @click="showEditProfile = true">{{ t('settings.edit_profile') }}</button>
             </div>
           </div>
           <div class="settings-row" @click="showBindEmail = true">
             <div class="row-icon" style="background:rgba(88,166,255,0.1);color:var(--accent);">
               <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="4" width="20" height="16" rx="2"/><path d="M22 4L12 13 2 4"/></svg>
             </div>
-            <span class="row-label">邮箱</span>
+            <span class="row-label">{{ t('login.email_label') }}</span>
             <span class="row-value">{{ userEmail }} <span class="chevron">›</span></span>
           </div>
         </div>
@@ -62,39 +62,39 @@
             <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2l3.09 6.26L22 9.27l-5 4.87L18.18 22 12 18.56 5.82 22 7 14.14l-5-4.87 6.91-1.01L12 2z"/></svg>
           </div>
           <div class="upgrade-text">
-            <div class="upgrade-title">升级专业版 ¥48/月</div>
-            <div class="upgrade-desc">无限主机 · 推送通知 · 实时消息 · 优先支持</div>
+            <div class="upgrade-title">{{ t('settings.upgrade_pro') }}</div>
+            <div class="upgrade-desc">{{ t('settings.upgrade_desc') }}</div>
           </div>
-          <button class="btn btn-accent">升级</button>
+          <button class="btn btn-accent">{{ t('settings.upgrade_btn') }}</button>
         </div>
 
         <!-- Daemons -->
         <div id="section-daemons" class="settings-section">
-          <div class="settings-section-title">我的主机</div>
+          <div class="settings-section-title">{{ t('dashboard.my_hosts') }}</div>
           <div class="daemon-settings-row" v-for="d in daemons" :key="d.daemon_id">
             <span :class="['status-dot', d.daemon_online ? 'online' : 'offline']" style="width:7px;height:7px;"></span>
             <span class="daemon-name">{{ d.daemon_alias || d.hostname || d.daemon_id?.slice(0,8) }}</span>
-            <span :class="['chip', d.daemon_online ? 'chip-online' : 'chip-offline']" style="font-size:11px;">{{ d.daemon_online ? '在线' : '离线' }}</span>
-            <button v-if="d.daemon_online" class="kick-btn" @click.stop="startKickDaemon(d)" :disabled="kickRateLimited" :title="kickRateLimited ? '操作过于频繁，请 1 小时后再试' : '强制下线'">强制下线</button>
+            <span :class="['chip', d.daemon_online ? 'chip-online' : 'chip-offline']" style="font-size:11px;">{{ d.daemon_online ? t('dashboard.online') : t('dashboard.offline') }}</span>
+            <button v-if="d.daemon_online" class="kick-btn" @click.stop="startKickDaemon(d)" :disabled="kickRateLimited" :title="kickRateLimited ? t('settings.rate_limited') : t('settings.force_kick')">{{ t('settings.force_kick') }}</button>
             <span class="chevron">›</span>
           </div>
           <!-- Force Kick Modal -->
           <div v-if="kickTarget" class="modal-overlay" @click.self="kickTarget = null">
             <div class="modal-card kick-modal">
-              <div class="modal-title">⚠️ 确认强制下线？</div>
+              <div class="modal-title">⚠️ {{ t('settings.force_kick_confirm') }}</div>
               <p>即将强制下线 <strong>{{ kickTarget.daemon_alias || kickTarget.hostname }}</strong></p>
-              <p style="font-size:12px;color:var(--fg-tertiary);">该主机上正在运行的 AI 任务可能丢失</p>
+              <p style="font-size:12px;color:var(--fg-tertiary);">{{ t('settings.force_kick_desc') }}</p>
               <div style="margin:12px 0;">
-                <div class="form-label">邮箱验证码</div>
+                <div class="form-label">{{ t('settings.email_code') }}</div>
                 <div class="code-row">
-                  <input type="text" class="input-field code-input" v-model="kickCode" placeholder="6 位验证码" maxlength="6" @input="(e: any) => kickCode = e.target.value.replace(/\D/g, '').slice(0, 6)" />
-                  <button class="get-code-btn" @click="sendKickCode" :disabled="kickCountdown > 0">{{ kickCountdown > 0 ? kickCountdown + 's' : '发送验证码' }}</button>
+                  <input type="text" class="input-field code-input" v-model="kickCode" :placeholder="t('login.code_placeholder')" maxlength="6" @input="(e: any) => kickCode = e.target.value.replace(/\D/g, '').slice(0, 6)" />
+                  <button class="get-code-btn" @click="sendKickCode" :disabled="kickCountdown > 0">{{ kickCountdown > 0 ? kickCountdown + 's' : t('settings.send_code') }}</button>
                 </div>
               </div>
               <p v-if="kickError" style="color:var(--error);font-size:12px;">{{ kickError }}</p>
               <div class="modal-actions">
-                <button class="btn-secondary" @click="kickTarget = null; kickError = ''">取消</button>
-                <button class="btn-danger" @click="doKickDaemon" :disabled="kickCode.length !== 6">确认强制下线</button>
+                <button class="btn-secondary" @click="kickTarget = null; kickError = ''">{{ t('common.cancel') }}</button>
+                <button class="btn-danger" @click="doKickDaemon" :disabled="kickCode.length !== 6">{{ t('settings.force_kick_confirm') }}</button>
               </div>
             </div>
           </div>
@@ -204,6 +204,7 @@ import { ref, computed, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { useAuth } from '../composables/useAuth'
 import { useWebSocket } from '../composables/useWebSocket'
+import { useLocale } from '../composables/useLocale'
 import AboutModal from '../components/AboutModal.vue'
 import HelpModal from '../components/HelpModal.vue'
 import PrivacyModal from '../components/PrivacyModal.vue'
@@ -215,6 +216,7 @@ import RegisterDaemonDialog from '../components/RegisterDaemonDialog.vue'
 const router = useRouter()
 const { user, logout, sendEmailCode, forceKickDaemon } = useAuth()
 const { connect, send, onEvent } = useWebSocket()
+const { t } = useLocale()
 
 const daemons = ref<any[]>([])
 const currentTheme = ref(localStorage.getItem('pocketctl-theme') || 'dark')
