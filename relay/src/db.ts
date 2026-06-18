@@ -581,6 +581,11 @@ export async function updateSessionCost(pool: pg.Pool, sessionId: string, costUs
   await pool.query(`UPDATE sessions SET cost_usd = $1, updated_at = NOW() WHERE session_id = $2`, [costUsd, sessionId]);
 }
 
+/** Increment session cost by a delta (for per-turn cost accumulation from assistant usage). */
+export async function incrementSessionCost(pool: pg.Pool, sessionId: string, delta: number): Promise<void> {
+  await pool.query(`UPDATE sessions SET cost_usd = COALESCE(cost_usd, 0) + $1, updated_at = NOW() WHERE session_id = $2`, [delta, sessionId]);
+}
+
 /** Backfill sessions.cost_usd from events (latest session_status payload with cost_usd per session). */
 export async function backfillSessionCost(pool: pg.Pool): Promise<number> {
   const result = await pool.query(`

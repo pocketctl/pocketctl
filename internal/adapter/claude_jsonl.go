@@ -40,6 +40,25 @@ type JSONLContentBlock struct {
 	ToolUseID string          `json:"tool_use_id,omitempty"`
 }
 
+// computeTurnCost estimates per-turn cost from usage tokens.
+// Uses Sonnet-class pricing (most common model): input $3/M, output $15/M,
+// cache read $0.30/M, cache write $3.75/M. Approximate but far better than 0.
+func computeTurnCost(u *TokenUsage) float64 {
+	if u == nil {
+		return 0
+	}
+	const (
+		inputPerM    = 3.0
+		outputPerM   = 15.0
+		cacheReadM   = 0.30
+		cacheWriteM  = 3.75
+	)
+	return (float64(u.InputTokens)*inputPerM +
+		float64(u.OutputTokens)*outputPerM +
+		float64(u.CacheRead)*cacheReadM +
+		float64(u.CacheCreation)*cacheWriteM) / 1_000_000
+}
+
 // ParseJSONLLine converts a single JSONL line to DaemonEvents.
 func ParseJSONLLine(line string) ([]protocol.DaemonEvent, error) {
 	line = strings.TrimSpace(line)
@@ -121,6 +140,8 @@ func parseAssistantJSONL(entry JSONLEntry, sid string) ([]protocol.DaemonEvent, 
 					CacheRead:    u.CacheRead,
 					CacheCreate:  u.CacheCreation,
 				}
+				// Compute per-turn cost delta from usage tokens (Sonnet pricing)
+				ev.CostUSD = computeTurnCost(u)
 			}
 			events = append(events, ev)
 		case "tool_use":

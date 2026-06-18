@@ -9,14 +9,15 @@ const GLM_MODEL = 'glm-4.6';
 const GLM_TIMEOUT_MS = 3_000;
 const MAX_TITLE_LEN = 15;
 
-const SYSTEM_PROMPT = `你是一个标题生成器。根据用户的对话内容，生成一个简洁的 session 标题。
+const SYSTEM_PROMPT = `You are a session title generator. Based on the conversation, generate a concise session title.
 
-要求：
-- 不超过15个字
-- 概括核心任务/意图
-- 不要使用引号、标点符号结尾
-- 用用户消息的语言（中文/英文）回复
-- 只返回标题文本，不要解释`;
+Rules:
+- Maximum 15 characters
+- Summarize the core task/intent
+- No quotes, no trailing punctuation
+- Match the language of the user's message: if the user writes in English, the title MUST be in English; if in Chinese, in Chinese
+- Detect the language from the user message, NOT the assistant message
+- Return ONLY the title text, no explanation`;
 
 /**
  * Generate a concise session title using GLM-4.6.
@@ -35,7 +36,7 @@ export async function generateTitle(userMessage: string, assistantMessage: strin
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), GLM_TIMEOUT_MS);
 
-    const content = `用户消息: ${userMessage}\n\n助手回复: ${assistantMessage}`;
+    const content = `User message: ${userMessage}\n\nAssistant reply: ${assistantMessage}`;
 
     const response = await fetch(GLM_API_URL, {
       method: 'POST',

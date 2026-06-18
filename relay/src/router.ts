@@ -333,6 +333,10 @@ export class Router {
       return;
     }
     db.insertEvent(this.pool, sessionId, msg.type, msg).catch(console.error);
+    // Accumulate per-turn cost from any event with cost_usd > 0 (e.g. agent_text with usage)
+    if (msg.cost_usd != null && msg.cost_usd > 0) {
+      db.incrementSessionCost(this.pool, sessionId, parseFloat(msg.cost_usd)).catch(console.error);
+    }
     if (msg.type === 'session_status') {
       db.upsertSession(this.pool, sessionId, daemonId, '', '', msg.status || 'unknown', undefined, undefined, msg.exit_reason).catch(console.error);
       // C2: persist cumulative cost_usd from result event

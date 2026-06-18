@@ -278,12 +278,80 @@ func (c *Client) notifyState(connected bool) {
 }
 
 // getLocalIP returns the preferred outbound IP of this machine.
+// Tries UDP dial first, but excludes VPN/TUN/proxy virtual interfaces (198.18.x, 169.254.x, 172.1[6-9].x).
 func getLocalIP() string {
+	// Method 1: UDP dial to get default outbound IP
 	conn, err := net.Dial("udp", "8.8.8.8:80")
+	if err == nil {
+		ip := conn.LocalAddr().(*net.UDPAddr).IP.String()
+		conn.Close()
+		if !isVirtualIP(ip) {
+			return ip
+		}
+	}
+	// Method 2: Walk interfaces for first usable LAN IP
+	ifaces, err := net.Interfaces()
 	if err != nil {
 		return "unknown"
 	}
-	defer conn.Close()
-	addr := conn.LocalAddr().(*net.UDPAddr)
-	return addr.IP.String()
+	for _, iface := range ifaces {
+		if iface.Flags&net.FlagUp == 0 || iface.Flags&net.FlagLoopback != 0 {
+			continue
+		}
+		// Skip TUN/VPN/docker/bridge interfaces
+		name := strings.ToLower(iface.Name)
+		if strings.HasPrefix(name, "utun") || strings.HasPrefix(name, "tun") ||
+			strings.HasPrefix(name, "tap") || strings.HasPrefix(name, "docker") ||
+			strings.HasPrefix(name, "br-") || strings.HasPrefix(name, "veth") ||
+			strings.HasPrefix(name, "virbr") {
+			continue
+		}
+		addrs, err := iface.Addrs()
+		if err != nil {
+			continue
+		}
+		for _, addr := range addrs {
+			var ip net.IP
+			switch v := addr.(type) {
+			case *net.IPNet:
+				ip = v.IP
+			case *net.IPAddr:
+				ip = v.IP
+			}
+			if ip == nil || ip.IsLoopback() {
+				continue
+			}
+			ip4 := ip.To4()
+			if ip4 == nil {
+				continue // IPv6
+			}
+			str := ip4.String()
+			if !isVirtualIP(str) {
+				return str
+			}
+		}
+	}
+	return "unknown"
+}
+
+// isVirtualIP returns true for VPN/TUN/proxy/link-local/docker private ranges
+// that are not useful as the machine's LAN IP.
+func isVirtualIP(ip string) bool {
+	if strings.HasPrefix(ip, "198.18.") { // Clash/Surge TUN mode
+		return true
+	}
+	if strings.HasPrefix(ip, "169.254.") { // link-local
+		return true
+	}
+	if strings.HasPrefix(ip, "172.1") { // 172.16-31.x docker
+		parts := strings.Split(ip, ".")
+		if len(parts) >= 2 {
+			second := 0
+			fmt.Sscanf(parts[1], "%d", &second)
+			if second >= 16 && second <= 31 {
+				return true
+			}
+		}
+	}
+	return false
 }
