@@ -820,9 +820,14 @@ onMounted(() => {
 /* Messages */
 .chat-messages { flex: 1; min-height: 0; width: 100%; overflow-y: auto; overflow-x: hidden; padding: 20px; display: flex; flex-direction: column; align-items: stretch; gap: 16px; position: relative; overflow-anchor: none; }
 /* min-width:0 lets long content (code/URLs) wrap instead of overflowing
-   horizontally. Width is controlled by each message component:
-   agent/tool/error use width:100%; user bubble uses width:fit-content. */
-.chat-messages > * { min-width: 0; }
+   horizontally. max-width + center keeps lines readable on wide screens.
+   User bubbles are excluded (they use fit-content + right align). */
+/* Agent text: adaptive width — short replies stay narrow, long content grows to 720px.
+   Left-aligned (natural document flow), unlike centered tool cards. */
+.chat-messages > .agent-block { min-width: 0; max-width: 720px; width: fit-content; align-self: flex-start; }
+/* Tool cards / receipts / errors / banners: full width within 820px, centered. */
+.chat-messages > *:not(.msg):not(.agent-block) { min-width: 0; max-width: 820px; width: 100%; align-self: center; }
+.chat-messages > *.msg { min-width: 0; max-width: 85%; }
 /* Scroll-to-bottom: floats centered above the input bar. Auto-hides (v-if)
    when content is already scrolled to the bottom (autoScroll === true). */
 /* Scroll-to-bottom: absolute child of chat-input-area, pinned above its top
