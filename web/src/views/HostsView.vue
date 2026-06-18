@@ -137,7 +137,6 @@
               <div class="conn-item"><div class="c-label">{{ t('hosts.os') }}</div><div class="c-val">{{ selectedDaemon.os || '—' }}</div></div>
               <div class="conn-item"><div class="c-label">{{ t('hosts.uptime') }}</div><div :class="['c-val', { muted: !selectedDaemon.daemon_online }]">{{ selectedDaemon.started_at ? formatUptime(selectedDaemon.started_at) : '—' }}</div></div>
               <div class="conn-item"><div class="c-label">{{ t('hosts.last_heartbeat') }}</div><div :class="['c-val', { muted: !selectedDaemon.daemon_online }]">{{ selectedDaemon.last_heartbeat ? formatRelativeTime(selectedDaemon.last_heartbeat) : '—' }}</div></div>
-              <div class="conn-item"><div class="c-label">{{ t('hosts.port') }}</div><div class="c-val">{{ selectedDaemon.port || '—' }}</div></div>
             </div>
           </div>
 
