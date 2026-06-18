@@ -30,7 +30,7 @@
 
         <router-link to="/settings" class="sidebar-link" active-class="active" v-slot="{ isActive }">
           <span class="link-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M12 1v2M12 21v2M4.22 4.22l1.42 1.42M18.36 18.36l1.42 1.42M1 12h2M21 12h2M4.22 19.78l1.42-1.42M18.36 5.64l1.42-1.42"/></svg></span>
-          <span class="link-text">设置</span>
+          <span class="link-text">{{ t('nav.settings') }}</span>
         </router-link>
       </div>
 
@@ -59,9 +59,10 @@
         <div class="topbar-actions">
           <button class="btn btn-secondary" v-if="showNewSessionBtn" @click="triggerNewSession++">
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 5v14M5 12h14"/></svg>
-            新建会话
+            {{ t('session.new_session') }}
           </button>
-          <button class="theme-toggle" @click="toggleTheme" :title="isDark ? '切换浅色' : '切换深色'">
+          <button class="theme-toggle" @click="toggleLocale" :title="locale === 'zh' ? 'English' : '中文'" style="font-size:12px;font-weight:600;min-width:28px;">{{ locale === 'zh' ? 'EN' : '中' }}</button>
+          <button class="theme-toggle" @click="toggleTheme" :title="t('common.toggle_theme')">
             <svg v-if="isDark" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 12.79A9 9 0 1111.21 3 7 7 0 0021 12.79z"/></svg>
             <svg v-else width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="5"/><path d="M12 1v2M12 21v2M4.22 4.22l1.42 1.42M18.36 18.36l1.42 1.42M1 12h2M21 12h2M4.22 19.78l1.42-1.42M18.36 5.64l1.42-1.42"/></svg>
           </button>
@@ -79,11 +80,14 @@
 import { ref, computed, provide } from 'vue'
 import { useRoute } from 'vue-router'
 import { useAuth } from './composables/useAuth'
+import { useLocale } from './composables/useLocale'
 import logoDark from './assets/logo-github-org.svg'
 import logoLight from './assets/logo-github-org-light.svg'
 
 const route = useRoute()
 const { isLoggedIn, user } = useAuth()
+const { t, locale, setLocale } = useLocale()
+function toggleLocale() { setLocale(locale.value === 'zh' ? 'en' : 'zh') }
 
 const triggerNewSession = ref(0)
 provide('triggerNewSession', triggerNewSession)
