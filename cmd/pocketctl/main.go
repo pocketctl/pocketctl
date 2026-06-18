@@ -136,7 +136,7 @@ func cmdLogin(args []string) {
 		}
 	}
 	if baseURL == "" {
-		baseURL = "ws://localhost/ws"
+		baseURL = "ws://localhost:8080/ws"
 	}
 
 	// Convert WebSocket URL to HTTP URL for API calls
@@ -343,7 +343,7 @@ func cmdDaemonStart(args []string) {
 		}
 	}
 	if url == "" {
-		url = "ws://localhost/ws"
+		url = "ws://localhost:8080/ws"
 	}
 
 	// Resolve token

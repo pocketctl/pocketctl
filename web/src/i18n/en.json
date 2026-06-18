@@ -329,7 +329,32 @@
   "hosts.agent_status": "Agent Status",
   "hosts.filter_by_status": "Filter hosts by status",
   "hosts.search_hosts": "Search hosts",
+  "hosts.count_prefix": "",
   "hosts.host_unit": "hosts",
   "dashboard.online": "Online",
-  "dashboard.offline": "Offline"
+  "dashboard.offline": "Offline",
+
+  "hosts.status_online": "Online",
+  "hosts.status_offline": "Offline",
+  "hosts.agent_info_pending": "Waiting for daemon agent info",
+  "hosts.token_host_total": "Host Total",
+  "hosts.token_today_consumed": "Today",
+  "hosts.token_month_consumed": "This Month",
+  "hosts.token_no_records": "No session token records",
+  "hosts.kick_title": "Force kick \"{{name}}\"?",
+  "hosts.kick_desc": "Disconnect the daemon immediately. All running sessions will be terminated. Reconnect required to restore.",
+  "hosts.kick_confirm": "Force Kick",
+  "hosts.kick_toast": "Kicked \"{{name}}\"",
+  "hosts.unregister_title": "Unregister \"{{name}}\"?",
+  "hosts.unregister_desc": "Remove host from account. History sessions are preserved. Re-register required to reconnect.",
+  "hosts.unregister_confirm": "Unregister",
+  "hosts.unregister_toast": "Unregistered \"{{name}}\"",
+  "hosts.upgrade_failed": "Upgrade request failed",
+  "hosts.copy_toast": "Copied {{info}}",
+  "hosts.rename_toast": "Renamed to \"{{name}}\"",
+  "hosts.upgrade_success": "{{agent}} upgraded to v{{version}}",
+  "hosts.upgrade_error": "Upgrade failed: {{error}}",
+  "hosts.alias_prompt": "Enter new alias",
+
+  "common.processing": "Processing…"
 }

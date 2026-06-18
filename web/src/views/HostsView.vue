@@ -4,7 +4,7 @@
     <div class="page-header">
       <div>
         <h2 class="page-title">{{ t('nav.hosts') }}</h2>
-        <div class="page-subtitle">共 <span class="text-mono">{{ daemons.length }}</span> {{ t('hosts.host_unit') }} · <span class="text-success text-mono">{{ onlineCount }}</span> {{ t('dashboard.online') }} · <span class="text-tertiary text-mono">{{ offlineCount }}</span> {{ t('dashboard.offline') }}</div>
+        <div class="page-subtitle">{{ t('hosts.count_prefix') }} <span class="text-mono">{{ daemons.length }}</span> {{ t('hosts.host_unit') }} · <span class="text-success text-mono">{{ onlineCount }}</span> {{ t('dashboard.online') }} · <span class="text-tertiary text-mono">{{ offlineCount }}</span> {{ t('dashboard.offline') }}</div>
       </div>
       <button class="btn btn-secondary" @click="showRegister = true">
         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 5v14M5 12h14"/></svg>
@@ -158,19 +158,19 @@
             <div v-else class="agent-card">
               <div class="ag-icon claude">CC</div>
               <div class="ag-info">
-                <div class="ag-name">Claude Code <span class="ag-version">版本待上报</span></div>
-                <div class="ag-meta">等待 daemon 上报 Agent 信息</div>
+                <div class="ag-name">Claude Code <span class="ag-version">{{ t('settings.version_pending') }}</span></div>
+                <div class="ag-meta">{{ t('hosts.agent_info_pending') }}</div>
               </div>
             </div>
           </div>
 
           <!-- Token 消耗（C2/C3 真实数据） -->
           <div class="hd-section">
-            <div class="hd-section-title">Token 消耗</div>
+            <div class="hd-section-title">{{ t('dashboard.token_usage') }}</div>
             <div class="token-overview">
-              <div class="token-stat"><div class="tk-num">{{ formatTokens(daemonCost?.total) }}</div><div class="tk-label">主机总计</div></div>
-              <div class="token-stat"><div class="tk-num accent">{{ formatTokens(daemonCost?.today) }}</div><div class="tk-label">今日消耗</div></div>
-              <div class="token-stat"><div class="tk-num">{{ formatTokens(daemonCost?.thisMonth) }}</div><div class="tk-label">本月消耗</div></div>
+              <div class="token-stat"><div class="tk-num">{{ formatTokens(daemonCost?.total) }}</div><div class="tk-label">{{ t('hosts.token_host_total') }}</div></div>
+              <div class="token-stat"><div class="tk-num accent">{{ formatTokens(daemonCost?.today) }}</div><div class="tk-label">{{ t('hosts.token_today_consumed') }}</div></div>
+              <div class="token-stat"><div class="tk-num">{{ formatTokens(daemonCost?.thisMonth) }}</div><div class="tk-label">{{ t('hosts.token_month_consumed') }}</div></div>
             </div>
             <div class="session-token-list">
               <template v-if="sortedCostSessions.length">
@@ -193,7 +193,7 @@
                   <button class="st-page-btn" :disabled="costPage === costTotalPages" @click="costPage++">›</button>
                 </div>
               </template>
-              <div v-else class="session-token-row"><span class="st-title" style="color:var(--fg-tertiary);">暂无会话消耗记录</span></div>
+              <div v-else class="session-token-row"><span class="st-title" style="color:var(--fg-tertiary);">{{ t('hosts.token_no_records') }}</span></div>
             </div>
           </div>
 
@@ -268,9 +268,9 @@
         <h3 class="ss-dialog-title">{{ confirm.title }}</h3>
         <p class="ss-dialog-desc">{{ confirm.desc }}</p>
         <div class="ss-dialog-actions">
-          <button class="btn btn-cancel" @click="confirm.show = false">取消</button>
+          <button class="btn btn-cancel" @click="confirm.show = false">{{ t('common.cancel') }}</button>
           <button :class="['btn', confirm.danger ? 'ss-confirm' : 'btn-accent']" :disabled="confirm.loading" @click="confirm.action">
-            <span v-if="confirm.loading" class="mini-spinner"></span>{{ confirm.loading ? '处理中…' : confirm.confirmText }}
+            <span v-if="confirm.loading" class="mini-spinner"></span>{{ confirm.loading ? t('common.processing') : confirm.confirmText }}
           </button>
         </div>
       </div>
@@ -383,7 +383,7 @@ function hostIcon(d: any, size = 20): string {
 
 function statusLabel(d: any): string {
   if (d.status === 'reconnecting') return t('hosts.reconnecting')
-  return d.daemon_online ? '在线' : '离线'
+  return d.daemon_online ? t('hosts.status_online') : t('hosts.status_offline')
 }
 
 function statusPillClass(d: any): string {
@@ -431,7 +431,7 @@ function agentName(a: any): string {
 function agentShort(a: any): string { const n = agentRawName(a); if (/codex/i.test(n)) return 'Cx'; if (/opencode/i.test(n)) return 'OC'; return 'CC' }
 function agentIconClass(a: any): string { return /codex/i.test(agentName(a)) ? 'codex' : 'claude' }
 function agentVersionLabel(a: any): string {
-  if (typeof a !== 'object' || !a?.version) return '版本待上报'
+  if (typeof a !== 'object' || !a?.version) return t('settings.version_pending')
   const v = 'v' + a.version
   if (a.latest && a.version !== a.latest) return v + ' → v' + a.latest
   return v
@@ -441,9 +441,9 @@ function isAgentLatest(a: any): boolean {
 }
 function agentMetaLabel(a: any): string {
   if (typeof a === 'object' && a?.version) {
-    return a.latest && a.version !== a.latest ? t('settings.upgrade_available') || '有新版本可用' : t('settings.installed') || '已安装 · 最新'
+    return a.latest && a.version !== a.latest ? t('settings.upgrade_available') : t('settings.installed')
   }
-  return t('settings.version_pending') || '版本待上报'
+  return t('settings.version_pending')
 }
 async function upgradeAgent(name: string) {
   if (upgrading.value) return
@@ -458,12 +458,12 @@ async function upgradeAgent(name: string) {
       body: JSON.stringify({ agent: name }),
     })
     if (!r.ok) {
-      showToast('升级请求发送失败')
+      showToast(t('hosts.upgrade_failed'))
       upgrading.value = ''
     }
     // 成功后等待 upgrade_result 事件反馈（daemon 异步执行升级命令）
   } catch {
-    showToast('升级请求发送失败')
+    showToast(t('hosts.upgrade_failed'))
     upgrading.value = ''
   }
 }
@@ -567,7 +567,7 @@ function onMenuAct(act: string) {
 
 function copyConnection(d: any) {
   const conn = d.ip && d.ip !== 'unknown' ? d.ip : '—'
-  navigator.clipboard.writeText(conn).then(() => showToast(`已复制 ${conn}`)).catch(() => {})
+  navigator.clipboard.writeText(conn).then(() => showToast(t('hosts.copy_toast', { info: conn }))).catch(() => {})
 }
 
 function exportReport(d: any) {
@@ -599,13 +599,13 @@ function confirmRestart(d: any) {
 
 function confirmKick(d: any) {
   const prev = { daemon_online: d.daemon_online, cpu_pct: d.cpu_pct, mem_pct: d.mem_pct, disk_pct: d.disk_pct, active_sessions: d.active_sessions }
-  showConfirm({ title: `强制踢下线「${d.hostname || d.daemon_id?.slice(0, 8)}」？`, desc: '立即断开 daemon 连接，所有运行中会话被中止。需重新连接恢复。', confirmText: '强制踢下线', danger: true,
+  showConfirm({ title: t('hosts.kick_title', { name: d.hostname || d.daemon_id?.slice(0, 8) }), desc: t('hosts.kick_desc'), confirmText: t('hosts.kick_confirm'), danger: true,
     action: () => {
       d.daemon_online = false; d.cpu_pct = null; d.mem_pct = null; d.disk_pct = null; d.active_sessions = 0
       confirm.value.show = false
       const origin = getRelayOrigin()
       fetch(`${origin}/api/daemons/${d.daemon_id}/forceKick`, { method: 'POST', headers: { Authorization: `Bearer ${accessToken.value}` } }).catch(() => {})
-      showToast(`已踢下线「${d.hostname || d.daemon_id?.slice(0, 8)}」`, () => { Object.assign(d, prev) })
+      showToast(t('hosts.kick_toast', { name: d.hostname || d.daemon_id?.slice(0, 8) }), () => { Object.assign(d, prev) })
     }
   })
 }
@@ -616,7 +616,7 @@ function reconnectHost(d: any) {
 }
 
 function confirmUnregister(d: any) {
-  showConfirm({ title: `注销「${d.hostname || d.daemon_id?.slice(0, 8)}」？`, desc: '从账户移除主机，历史会话保留。需重新注册才能连接。', confirmText: '注销主机', danger: true,
+  showConfirm({ title: t('hosts.unregister_title', { name: d.hostname || d.daemon_id?.slice(0, 8) }), desc: t('hosts.unregister_desc'), confirmText: t('hosts.unregister_confirm'), danger: true,
     action: () => {
       const idx = daemons.value.findIndex(x => x.daemon_id === d.daemon_id)
       const removed = daemons.value.splice(idx, 1)[0]
@@ -634,7 +634,7 @@ function confirmUnregister(d: any) {
 }
 
 function startRename(d: any) {
-  const newName = prompt('输入新别名', d.daemon_alias || d.hostname || '')
+  const newName = prompt(t('hosts.alias_prompt'), d.daemon_alias || d.hostname || '')
   if (newName && newName.trim()) {
     const oldName = d.daemon_alias
     d.daemon_alias = newName.trim()
@@ -643,7 +643,7 @@ function startRename(d: any) {
       method: 'PUT', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${accessToken.value}` },
       body: JSON.stringify({ alias: newName.trim() })
     }).catch(() => {})
-    showToast(`已重命名为「${newName.trim()}」`, () => { d.daemon_alias = oldName })
+    showToast(t('hosts.rename_toast', { name: newName.trim() }), () => { d.daemon_alias = oldName })
   }
 }
 
@@ -692,8 +692,8 @@ onMounted(() => {
   }))
   cleanups.push(onEvent('upgrade_result', (msg: any) => {
     upgrading.value = ''
-    if (msg.status === 'success') showToast(`${msg.agent || 'Agent'} 已升级${msg.message ? '到 v' + msg.message : ''}`)
-    else showToast(`升级失败：${msg.error || '未知错误'}`)
+    if (msg.status === 'success') showToast(t('hosts.upgrade_success', { agent: msg.agent || 'Agent', version: msg.message || '' }))
+    else showToast(t('hosts.upgrade_error', { error: msg.error || t('dashboard.unknown_error') }))
   }))
 })
 

@@ -329,7 +329,32 @@
   "hosts.agent_status": "Agent 运行状态",
   "hosts.filter_by_status": "按状态筛选主机",
   "hosts.search_hosts": "搜索主机",
+  "hosts.count_prefix": "共",
   "hosts.host_unit": "台",
   "dashboard.online": "在线",
-  "dashboard.offline": "离线"
+  "dashboard.offline": "离线",
+
+  "hosts.status_online": "在线",
+  "hosts.status_offline": "离线",
+  "hosts.agent_info_pending": "等待 daemon 上报 Agent 信息",
+  "hosts.token_host_total": "主机总计",
+  "hosts.token_today_consumed": "今日消耗",
+  "hosts.token_month_consumed": "本月消耗",
+  "hosts.token_no_records": "暂无会话消耗记录",
+  "hosts.kick_title": "强制踢下线「{{name}}」？",
+  "hosts.kick_desc": "立即断开 daemon 连接，所有运行中会话被中止。需重新连接恢复。",
+  "hosts.kick_confirm": "强制踢下线",
+  "hosts.kick_toast": "已踢下线「{{name}}」",
+  "hosts.unregister_title": "注销「{{name}}」？",
+  "hosts.unregister_desc": "从账户移除主机，历史会话保留。需重新注册才能连接。",
+  "hosts.unregister_confirm": "注销主机",
+  "hosts.unregister_toast": "已注销「{{name}}」",
+  "hosts.upgrade_failed": "升级请求发送失败",
+  "hosts.copy_toast": "已复制 {{info}}",
+  "hosts.rename_toast": "已重命名为「{{name}}」",
+  "hosts.upgrade_success": "{{agent}} 已升级到 v{{version}}",
+  "hosts.upgrade_error": "升级失败：{{error}}",
+  "hosts.alias_prompt": "输入新别名",
+
+  "common.processing": "处理中…"
 }
