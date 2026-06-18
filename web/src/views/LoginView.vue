@@ -67,9 +67,13 @@
                 <path d="M208 200 L304 256 L208 312" stroke="#58a6ff" stroke-width="28" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
               </svg>
             </div>
-            <div v-if="qrExpired" class="qr-refresh" @click="startQrLogin">
-              <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M23 4v6h-6M1 20v-6h6"/><path d="M3.51 9a9 9 0 0114.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0020.49 15"/></svg>
-              <span>点击刷新</span>
+            <div v-if="qrExpired" class="qr-refresh">
+              <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2"><path d="M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
+              <span class="qr-expired-text">二维码已过期</span>
+              <span class="qr-refresh-btn" @click.stop="refreshQr" :class="{ refreshing: qrRefreshing }">
+                <span v-if="qrRefreshing" class="qr-mini-spinner"></span>
+                {{ qrRefreshing ? '刷新中…' : '请刷新' }}
+              </span>
             </div>
           </div>
           <div class="qr-hint">请使用 <strong>pocketctl App</strong> 扫描上方二维码登录</div>
@@ -167,6 +171,7 @@ function switchTab(t: 'email' | 'qr') {
 const qrCanvas = ref<HTMLCanvasElement | null>(null)
 const qrStatus = ref<'pending' | 'scanned' | 'confirmed' | 'expired'>('pending')
 const qrExpired = ref(false)
+const qrRefreshing = ref(false)
 const qrCountdown = ref(0)
 let qrToken = ''
 let pollTimer: ReturnType<typeof setInterval> | null = null
@@ -253,6 +258,13 @@ function stopQrLogin() {
   qrToken = ''
 }
 
+async function refreshQr() {
+  if (qrRefreshing.value) return
+  qrRefreshing.value = true
+  await startQrLogin()
+  qrRefreshing.value = false
+}
+
 onUnmounted(() => {
   if (timer) clearInterval(timer)
   stopQrLogin()
@@ -322,8 +334,14 @@ onUnmounted(() => {
 .qr-frame { width: 200px; height: 200px; padding: 12px; background: #fff; border-radius: var(--radius-md); position: relative; display: flex; align-items: center; justify-content: center; }
 .qr-frame canvas { display: block; }
 .qr-logo { position: absolute; width: 40px; height: 40px; border-radius: 8px; background: #fff; display: flex; align-items: center; justify-content: center; box-shadow: 0 0 0 4px #fff, 0 0 0 5px rgba(0,0,0,0.06); }
-.qr-refresh { position: absolute; inset: 0; background: rgba(255,255,255,0.92); border-radius: var(--radius-md); display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 6px; color: var(--fg-secondary); font-size: 12px; cursor: pointer; }
-.qr-refresh:hover { color: var(--accent); }
+.qr-refresh { position: absolute; inset: 0; background: rgba(128,128,128,0.55); border-radius: var(--radius-md); display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 4px; color: #fff; font-size: 12px; cursor: pointer; backdrop-filter: blur(2px); -webkit-backdrop-filter: blur(2px); }
+.qr-refresh:hover { background: rgba(128,128,128,0.65); }
+.qr-expired-text { font-size: 15px; font-weight: 600; color: #fff; }
+.qr-refresh-btn { margin-top: 6px; padding: 6px 20px; background: var(--accent); color: #fff; border-radius: var(--radius-md); font-size: 13px; font-weight: 600; cursor: pointer; transition: background 0.15s; display: inline-flex; align-items: center; gap: 6px; }
+.qr-refresh-btn:hover { background: var(--accent-hover); }
+.qr-refresh-btn.refreshing { opacity: 0.7; cursor: not-allowed; }
+.qr-mini-spinner { width: 12px; height: 12px; border: 2px solid rgba(255,255,255,0.35); border-top-color: #fff; border-radius: 50%; animation: qr-spin 0.7s linear infinite; display: inline-block; }
+@keyframes qr-spin { to { transform: rotate(360deg); } }
 .qr-hint { font-size: 13px; color: var(--fg-secondary); text-align: center; line-height: 1.5; }
 .qr-hint strong { color: var(--accent); }
 .qr-meta { display: flex; align-items: center; gap: 12px; }
