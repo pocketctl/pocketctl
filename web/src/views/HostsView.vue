@@ -4,7 +4,7 @@
     <div class="page-header">
       <div>
         <h2 class="page-title">{{ t('nav.hosts') }}</h2>
-        <div class="page-subtitle">共 <span class="text-mono">{{ daemons.length }}</span> 台 · <span class="text-success text-mono">{{ onlineCount }}</span> {{ t('dashboard.online') }} · <span class="text-tertiary text-mono">{{ offlineCount }}</span> {{ t('dashboard.offline') }}</div>
+        <div class="page-subtitle">共 <span class="text-mono">{{ daemons.length }}</span> {{ t('hosts.host_unit') }} · <span class="text-success text-mono">{{ onlineCount }}</span> {{ t('dashboard.online') }} · <span class="text-tertiary text-mono">{{ offlineCount }}</span> {{ t('dashboard.offline') }}</div>
       </div>
       <button class="btn btn-secondary" @click="showRegister = true">
         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 5v14M5 12h14"/></svg>
@@ -25,14 +25,14 @@
 
     <!-- 筛选 + 搜索 -->
     <div class="host-controls">
-      <div class="host-filter" role="tablist" aria-label="按状态筛选主机">
+      <div class="host-filter" role="tablist" :aria-label="t('hosts.filter_by_status')">
         <button :class="{ active: filter === 'all' }" @click="filter = 'all'">{{ t('common.all') }}<span class="count">{{ daemons.length }}</span></button>
         <button :class="{ active: filter === 'online' }" @click="filter = 'online'">{{ t('dashboard.online') }}<span class="count">{{ onlineCount }}</span></button>
         <button :class="{ active: filter === 'offline' }" @click="filter = 'offline'">{{ t('dashboard.offline') }}<span class="count">{{ offlineCount }}</span></button>
       </div>
       <div class="host-search">
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/></svg>
-        <input type="text" v-model="searchQuery" :placeholder="t('hosts.search_placeholder')" aria-label="搜索主机" />
+        <input type="text" v-model="searchQuery" :placeholder="t('hosts.search_placeholder')" :aria-label="t('hosts.search_hosts')" />
       </div>
     </div>
 
@@ -89,39 +89,39 @@
 
         <div class="hd-actions">
           <template v-if="selectedDaemon.status === 'reconnecting'">
-            <button class="btn btn-secondary" disabled><span class="mini-spinner"></span>正在重启…</button>
+            <button class="btn btn-secondary" disabled><span class="mini-spinner"></span>{{ t('hosts.restarting') }}</button>
           </template>
           <template v-else-if="selectedDaemon.daemon_online">
             <button class="btn btn-secondary" @click="confirmRestart(selectedDaemon)">
               <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 12a9 9 0 019-9 9 9 0 016.7 3"/><path d="M21 3v5h-5"/><path d="M21 12a9 9 0 01-9 9 9 9 0 01-6.7-3"/><path d="M3 21v-5h5"/></svg>
-              重启 daemon
+              {{ t('hosts.restart_daemon') }}
             </button>
             <button class="btn btn-danger" @click="confirmKick(selectedDaemon)">
               <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 3v9"/><path d="M6.4 6.4a8 8 0 106.6-2.3"/></svg>
-              强制踢下线
+              {{ t('hosts.force_kick_label') }}
             </button>
           </template>
           <template v-else>
-            <button class="btn btn-secondary" @click="reconnectHost(selectedDaemon)" title="等待主机端 daemon 重新连接">等待重连</button>
+            <button class="btn btn-secondary" @click="reconnectHost(selectedDaemon)" :title="t('hosts.wait_reconnect')">{{ t('hosts.wait_reconnect') }}</button>
           </template>
         </div>
 
         <div class="host-detail-grid">
           <!-- 资源占用 -->
           <div class="hd-section">
-            <div class="hd-section-title">{{ selectedDaemon.daemon_online ? '资源占用' : '资源占用（主机离线）' }}</div>
+            <div class="hd-section-title">{{ selectedDaemon.daemon_online ? t('hosts.resource_usage') : t('hosts.resource_offline') }}</div>
             <div :class="['resource-row', { offline: !selectedDaemon.daemon_online }]">
               <span class="r-label">CPU</span>
               <div class="r-bar"><div :class="['r-fill', resourceClass(selectedDaemon.cpu_pct)]" :style="rFillStyle(selectedDaemon.cpu_pct)"></div></div>
               <span class="r-val">{{ selectedDaemon.cpu_pct != null ? selectedDaemon.cpu_pct.toFixed(0) + '%' : '—' }}</span>
             </div>
             <div :class="['resource-row', { offline: !selectedDaemon.daemon_online }]">
-              <span class="r-label">内存</span>
+              <span class="r-label">{{ t('hosts.memory') }}</span>
               <div class="r-bar"><div :class="['r-fill', resourceClass(selectedDaemon.mem_pct)]" :style="rFillStyle(selectedDaemon.mem_pct)"></div></div>
               <span class="r-val">{{ selectedDaemon.mem_pct != null ? selectedDaemon.mem_pct.toFixed(0) + '%' : '—' }}</span>
             </div>
             <div :class="['resource-row', { offline: !selectedDaemon.daemon_online }]">
-              <span class="r-label">磁盘</span>
+              <span class="r-label">{{ t('hosts.disk') }}</span>
               <div class="r-bar"><div :class="['r-fill', resourceClass(selectedDaemon.disk_pct)]" :style="rFillStyle(selectedDaemon.disk_pct)"></div></div>
               <span class="r-val">{{ selectedDaemon.disk_pct != null ? selectedDaemon.disk_pct.toFixed(0) + '%' : '—' }}</span>
             </div>
@@ -129,20 +129,20 @@
 
           <!-- 连接信息 -->
           <div class="hd-section">
-            <div class="hd-section-title">连接信息</div>
+            <div class="hd-section-title">{{ t('hosts.connection_info') }}</div>
             <div class="conn-grid">
-              <div class="conn-item"><div class="c-label">IP 地址</div><div class="c-val">{{ selectedDaemon.ip && selectedDaemon.ip !== 'unknown' ? selectedDaemon.ip : '—' }}</div></div>
-              <div class="conn-item"><div class="c-label">端口</div><div class="c-val">{{ selectedDaemon.port || '—' }}</div></div>
-              <div class="conn-item"><div class="c-label">DAEMON 版本</div><div class="c-val">{{ selectedDaemon.version ? 'v' + selectedDaemon.version : '—' }}</div></div>
-              <div class="conn-item"><div class="c-label">系统</div><div class="c-val">{{ selectedDaemon.os || '—' }}</div></div>
-              <div class="conn-item"><div class="c-label">运行时长</div><div :class="['c-val', { muted: !selectedDaemon.daemon_online }]">{{ selectedDaemon.started_at ? formatUptime(selectedDaemon.started_at) : '—' }}</div></div>
-              <div class="conn-item"><div class="c-label">最后心跳</div><div :class="['c-val', { muted: !selectedDaemon.daemon_online }]">{{ selectedDaemon.last_heartbeat ? formatRelativeTime(selectedDaemon.last_heartbeat) : '—' }}</div></div>
+              <div class="conn-item"><div class="c-label">{{ t('hosts.ip_addr') }}</div><div class="c-val">{{ selectedDaemon.ip && selectedDaemon.ip !== 'unknown' ? selectedDaemon.ip : '—' }}</div></div>
+              <div class="conn-item"><div class="c-label">{{ t('hosts.port') }}</div><div class="c-val">{{ selectedDaemon.port || '—' }}</div></div>
+              <div class="conn-item"><div class="c-label">{{ t('hosts.daemon_version') }}</div><div class="c-val">{{ selectedDaemon.version ? 'v' + selectedDaemon.version : '—' }}</div></div>
+              <div class="conn-item"><div class="c-label">{{ t('hosts.os') }}</div><div class="c-val">{{ selectedDaemon.os || '—' }}</div></div>
+              <div class="conn-item"><div class="c-label">{{ t('hosts.uptime') }}</div><div :class="['c-val', { muted: !selectedDaemon.daemon_online }]">{{ selectedDaemon.started_at ? formatUptime(selectedDaemon.started_at) : '—' }}</div></div>
+              <div class="conn-item"><div class="c-label">{{ t('hosts.last_heartbeat') }}</div><div :class="['c-val', { muted: !selectedDaemon.daemon_online }]">{{ selectedDaemon.last_heartbeat ? formatRelativeTime(selectedDaemon.last_heartbeat) : '—' }}</div></div>
             </div>
           </div>
 
           <!-- Agent 运行状态（C4b 版本上报 + C4c 升级占位） -->
           <div class="hd-section">
-            <div class="hd-section-title">Agent 运行状态</div>
+            <div class="hd-section-title">{{ t('hosts.agent_status') }}</div>
             <template v-if="agentCards(selectedDaemon).length">
               <div class="agent-card" v-for="(a, i) in agentCards(selectedDaemon)" :key="i">
                 <div :class="['ag-icon', agentIconClass(a)]">{{ agentShort(a) }}</div>
