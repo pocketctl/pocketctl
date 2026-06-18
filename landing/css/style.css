@@ -141,6 +141,7 @@ body {
   background: var(--primary-btn); color: #fff !important;
   padding: 8px 18px; border-radius: 8px; font-weight: 600;
   margin-left: 8px;
+  display: inline-flex; align-items: center; gap: 6px;
 }
 .nav-links a.nav-cta:hover { background: var(--primary-btn-hover); }
 
@@ -367,7 +368,7 @@ body {
 .feature-icon {
   width: 48px; height: 48px; border-radius: 12px;
   display: flex; align-items: center; justify-content: center;
-  margin-bottom: 20px; font-size: 22px;
+  margin-bottom: 20px;
 }
 .feature-card h3 { font-size: 19px; font-weight: 600; margin-bottom: 10px; }
 .feature-card p { font-size: 15px; color: var(--fg-secondary); line-height: 1.6; }
@@ -388,7 +389,7 @@ body {
 .arch-node .an-icon {
   width: 52px; height: 52px; border-radius: 14px;
   display: flex; align-items: center; justify-content: center;
-  margin: 0 auto 14px; font-size: 24px;
+  margin: 0 auto 14px;
 }
 .arch-node h4 { font-size: 16px; font-weight: 600; margin-bottom: 6px; }
 .arch-node .an-sub { font-size: 13px; color: var(--fg-secondary); }
@@ -452,7 +453,7 @@ body {
 }
 .platform-card .pc-icon {
   width: 52px; height: 52px; border-radius: 14px;
-  display: flex; align-items: center; justify-content: center; font-size: 24px;
+  display: flex; align-items: center; justify-content: center;
 }
 .platform-card h3 { font-size: 22px; font-weight: 700; }
 .platform-card .pc-desc { font-size: 15px; color: var(--fg-secondary); line-height: 1.6; flex: 1; }
@@ -506,8 +507,8 @@ body {
   font-size: 15px; color: var(--fg-secondary);
   display: flex; align-items: center; gap: 10px;
 }
-.price-card li .check { color: var(--success); font-size: 14px; font-weight: 700; }
-.price-card li .cross { color: var(--fg-tertiary); font-size: 14px; }
+.price-card li .check { color: var(--success); display: inline-flex; align-items: center; }
+.price-card li .cross { color: var(--fg-tertiary); display: inline-flex; align-items: center; }
 .price-btn {
   width: 100%; padding: 15px; border-radius: 12px;
   font-size: 16px; font-weight: 600; cursor: pointer;
@@ -556,8 +557,8 @@ body {
 }
 .faq-item h4 { font-size: 17px; font-weight: 600; }
 .faq-item .faq-chevron {
-  font-size: 14px; color: var(--fg-tertiary); transition: transform 0.2s;
-  flex-shrink: 0;
+  color: var(--fg-tertiary); transition: transform 0.2s;
+  flex-shrink: 0; display: flex; align-items: center;
 }
 .faq-item.open .faq-chevron { transform: rotate(180deg); }
 .faq-item .faq-a {
@@ -649,7 +650,7 @@ body {
   position: absolute; top: 14px; right: 14px;
   width: 32px; height: 32px; border-radius: 8px;
   border: 1px solid var(--border); background: var(--surface);
-  color: var(--fg-secondary); font-size: 16px;
+  color: var(--fg-secondary);
   cursor: pointer; display: flex; align-items: center; justify-content: center;
   transition: background 0.15s, color 0.15s;
 }
@@ -678,12 +679,13 @@ body {
   font-size: 16px; font-weight: 600; cursor: pointer;
   font-family: var(--font-body);
   transition: background 0.15s, transform 0.1s;
+  display: inline-flex; align-items: center; justify-content: center; gap: 8px;
 }
 .modal-submit:hover { background: var(--primary-btn-hover); }
 .modal-submit:active { transform: scale(0.98); }
 .modal-success {
   margin-top: 16px; font-size: 15px; color: var(--success);
-  font-weight: 500;
+  font-weight: 500; display: flex; align-items: center; gap: 6px;
 }
 
 /* Scroll animation for stats */

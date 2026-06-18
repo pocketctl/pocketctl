@@ -11,6 +11,100 @@
 <body>
 
 <!-- ============================================
+     SVG ICON SPRITE SHEET
+     ============================================ -->
+<svg style="display:none" aria-hidden="true">
+  <defs>
+    <!-- Features -->
+    <symbol id="icon-activity" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M22 12h-4l-3 9L9 3l-3 9H2"/>
+    </symbol>
+    <symbol id="icon-message-square" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>
+    </symbol>
+    <symbol id="icon-bell-ring" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9"/>
+      <path d="M10.3 21a1.94 1.94 0 0 0 3.4 0"/>
+      <path d="M4 2C2.8 3.7 2 5.7 2 8"/>
+      <path d="M22 8c0-2.3-.8-4.3-2-6"/>
+    </symbol>
+    <symbol id="icon-monitor" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+      <rect x="2" y="3" width="20" height="14" rx="2"/>
+      <line x1="8" y1="21" x2="16" y2="21"/>
+      <line x1="12" y1="17" x2="12" y2="21"/>
+    </symbol>
+    <symbol id="icon-bot" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+      <rect x="3" y="11" width="18" height="10" rx="2"/>
+      <circle cx="12" cy="5" r="2"/>
+      <path d="M12 7v4"/>
+      <line x1="8" y1="16" x2="16" y2="16"/>
+      <line x1="8" y1="12" x2="10" y2="12"/>
+      <line x1="14" y1="12" x2="16" y2="12"/>
+    </symbol>
+    <symbol id="icon-lock" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+      <rect x="3" y="11" width="18" height="11" rx="2"/>
+      <path d="M7 11V7a5 5 0 0 1 10 0v4"/>
+    </symbol>
+
+    <!-- Architecture / Platforms -->
+    <symbol id="icon-apple" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M12 20.94c1.5 0 2.75 1.06 4 1.06 3 0 6-8 6-12.22A4.91 4.91 0 0 0 17 5c-2.22 0-4 1.44-5 2-1-.56-2.78-2-5-2a4.9 4.9 0 0 0-5 4.78C2 14 5 22 8 22c1.25 0 2.5-1.06 4-1.06Z"/>
+      <path d="M10 2c1 .5 2 2 2 5"/>
+    </symbol>
+    <symbol id="icon-cloud" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M17.5 19H9a7 7 0 1 1 6.71-9h1.79a4.5 4.5 0 1 1 0 9Z"/>
+    </symbol>
+    <symbol id="icon-terminal" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+      <polyline points="4 17 10 11 4 5"/>
+      <line x1="12" y1="19" x2="20" y2="19"/>
+    </symbol>
+    <symbol id="icon-brain-circuit" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M12 5a3 3 0 1 0-5.997.125 4 4 0 0 0-2.526 5.77 4 4 0 0 0 .556 6.588A4 4 0 1 0 12 18Z"/>
+      <path d="M12 5a3 3 0 1 1 5.997.125 4 4 0 0 1 2.526 5.77 4 4 0 0 1-.556 6.588A4 4 0 1 1 12 18Z"/>
+      <path d="M15 13a4.5 4.5 0 0 1-3-4 4.5 4.5 0 0 1-3 4"/>
+      <path d="M17.599 6.5a3 3 0 0 0 .399-1.375"/>
+      <path d="M6.003 5.125A3 3 0 0 0 6.401 6.5"/>
+      <path d="M3.477 10.896a4 4 0 0 1 .585-.396"/>
+      <path d="M19.938 10.5a4 4 0 0 1 .585.396"/>
+      <path d="M6 18a4 4 0 0 1-1.967-.516"/>
+      <path d="M19.967 17.484A4 4 0 0 1 18 18"/>
+    </symbol>
+    <symbol id="icon-globe" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+      <circle cx="12" cy="12" r="10"/>
+      <line x1="2" y1="12" x2="22" y2="12"/>
+      <path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/>
+    </symbol>
+
+    <!-- UI Elements -->
+    <symbol id="icon-check" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+      <polyline points="20 6 9 17 4 12"/>
+    </symbol>
+    <symbol id="icon-x" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+      <line x1="18" y1="6" x2="6" y2="18"/>
+      <line x1="6" y1="6" x2="18" y2="18"/>
+    </symbol>
+    <symbol id="icon-send" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+      <path d="m22 2-7 20-4-9-9-4Z"/>
+      <path d="M22 2 11 13"/>
+    </symbol>
+    <symbol id="icon-party-popper" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M5.8 11.3 2 22l10.7-3.79"/>
+      <path d="M4 3h.01"/>
+      <path d="M22 8h.01"/>
+      <path d="M15 2h.01"/>
+      <path d="M22 20h.01"/>
+      <path d="m22 2-2.24.75a2.9 2.9 0 0 0-1.96 3.12v0c.1.86-.57 1.63-1.45 1.63h-.38c-.86 0-1.6.6-1.76 1.44L14 10"/>
+      <path d="m22 13-.82-.33c-.86-.34-1.82.2-1.98 1.11v0c-.11.7-.72 1.22-1.43 1.22H17"/>
+      <path d="m11 2 .33.82c.34.86-.2 1.82-1.11 1.98v0C9.52 4.9 9 5.52 9 6.23V7"/>
+      <path d="M11 13c1.93 1.93 2.83 4.17 2 5-.83.83-3.07-.07-5-2-1.93-1.93-2.83-4.17-2-5 .83-.83 3.07.07 5 2Z"/>
+    </symbol>
+    <symbol id="icon-chevron-down" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+      <polyline points="6 9 12 15 18 9"/>
+    </symbol>
+  </defs>
+</svg>
+
+<!-- ============================================
      NAVIGATION
      ============================================ -->
 <nav class="nav">
@@ -25,7 +119,10 @@
     <li><a href="#how-it-works" data-i18n="nav.how">使用方式</a></li>
     <li><a href="#platforms" data-i18n="nav.platforms">平台</a></li>
     <li><a href="#pricing" data-i18n="nav.pricing">定价</a></li>
-    <li><a href="/app/login" class="nav-cta" target="_blank" rel="noopener" data-i18n="nav.webapp">🌐 打开 Web 客户端</a></li>
+    <li><a href="/app/login" class="nav-cta" target="_blank" rel="noopener">
+      <svg width="16" height="16" aria-hidden="true"><use href="#icon-globe"/></svg>
+      <span data-i18n="nav.webapp">打开 Web 客户端</span>
+    </a></li>
   </ul>
   <div style="display:flex;align-items:center;gap:8px;">
     <div class="nav-controls">
@@ -66,8 +163,14 @@
       pocketctl 让你从手机上远程监控和管理 Claude Code、Codex 等 AI 编程 Agent。实时查看进度、发送指令、随时掌控——无论你身在何处。
     </p>
     <div class="hero-actions">
-      <a href="javascript:void(0)" class="btn-hero btn-hero-primary ios-download-btn" data-i18n="hero.cta1">📱 下载 iOS App</a>
-      <a href="/app/login" class="btn-hero btn-hero-secondary" target="_blank" rel="noopener" data-i18n="hero.cta2">🌐 打开 Web 客户端</a>
+      <a href="javascript:void(0)" class="btn-hero btn-hero-primary ios-download-btn">
+        <svg width="18" height="18" aria-hidden="true"><use href="#icon-apple"/></svg>
+        <span data-i18n="hero.cta1">下载 iOS App</span>
+      </a>
+      <a href="/app/login" class="btn-hero btn-hero-secondary" target="_blank" rel="noopener">
+        <svg width="18" height="18" aria-hidden="true"><use href="#icon-globe"/></svg>
+        <span data-i18n="hero.cta2">打开 Web 客户端</span>
+      </a>
     </div>
     <div class="hero-showcase">
       <!-- iPhone mockup -->
@@ -168,32 +271,44 @@
     <p class="section-desc" data-i18n="features.desc">实时监控、即时干预，让 AI Agent 在你掌控之中运行</p>
     <div class="features-grid">
       <div class="feature-card reveal">
-        <div class="feature-icon" style="background:var(--accent-muted);">📡</div>
+        <div class="feature-icon" style="background:var(--accent-muted);color:var(--accent);">
+          <svg width="24" height="24" aria-hidden="true"><use href="#icon-activity"/></svg>
+        </div>
         <h3 data-i18n="features.f1.title">实时会话监控</h3>
         <p data-i18n="features.f1.desc">查看 AI Agent 的每一步操作——代码读写、命令执行、文件搜索、工具调用。流式消息实时同步，不错过任何细节。</p>
       </div>
       <div class="feature-card reveal">
-        <div class="feature-icon" style="background:var(--success-bg);">💬</div>
+        <div class="feature-icon" style="background:var(--success-bg);color:var(--success);">
+          <svg width="24" height="24" aria-hidden="true"><use href="#icon-message-square"/></svg>
+        </div>
         <h3 data-i18n="features.f2.title">即时消息交互</h3>
         <p data-i18n="features.f2.desc">随时向 Agent 发送新指令或回复。无需回到电脑前，就能在手机上指导 AI 的下一步行动。</p>
       </div>
       <div class="feature-card reveal">
-        <div class="feature-icon" style="background:var(--warning-bg);">🔔</div>
+        <div class="feature-icon" style="background:var(--warning-bg);color:var(--warning);">
+          <svg width="24" height="24" aria-hidden="true"><use href="#icon-bell-ring"/></svg>
+        </div>
         <h3 data-i18n="features.f3.title">智能推送通知</h3>
         <p data-i18n="features.f3.desc">Agent 完成任务、等待审批或遇到错误时，立即收到推送。自定义通知规则，只接收你关心的内容。</p>
       </div>
       <div class="feature-card reveal">
-        <div class="feature-icon" style="background:var(--sub-agent-bg);">🖥️</div>
+        <div class="feature-icon" style="background:var(--sub-agent-bg);color:var(--sub-agent);">
+          <svg width="24" height="24" aria-hidden="true"><use href="#icon-monitor"/></svg>
+        </div>
         <h3 data-i18n="features.f4.title">多主机统一管理</h3>
         <p data-i18n="features.f4.desc">注册多台开发机，统一管理。工作电脑、CI 服务器、远程工作站——一个 App 全部掌握。支持自定义别名。</p>
       </div>
       <div class="feature-card reveal">
-        <div class="feature-icon" style="background:var(--accent-muted);">🤖</div>
+        <div class="feature-icon" style="background:var(--accent-muted);color:var(--accent);">
+          <svg width="24" height="24" aria-hidden="true"><use href="#icon-bot"/></svg>
+        </div>
         <h3 data-i18n="features.f5.title">多 Agent 支持</h3>
         <p data-i18n="features.f5.desc">兼容 Claude Code、Codex 等主流 AI 编程助手。统一的监控界面，无缝切换不同类型的 Agent 会话。</p>
       </div>
       <div class="feature-card reveal">
-        <div class="feature-icon" style="background:var(--success-bg);">🔒</div>
+        <div class="feature-icon" style="background:var(--success-bg);color:var(--success);">
+          <svg width="24" height="24" aria-hidden="true"><use href="#icon-lock"/></svg>
+        </div>
         <h3 data-i18n="features.f6.title">端到端安全</h3>
         <p data-i18n="features.f6.desc">端到端加密通信，Agent 仅在本地执行。你的代码永远不会离开你的机器。支持手机号/邮箱双重验证。</p>
       </div>
@@ -211,25 +326,33 @@
     <p class="section-desc" data-i18n="arch.desc">轻量级 Daemon 运行在你的开发机上，通过加密通道与手机 App 实时通信</p>
     <div class="arch-flow">
       <div class="arch-node reveal">
-        <div class="an-icon" style="background:var(--accent-muted);">📱</div>
+        <div class="an-icon" style="background:var(--accent-muted);color:var(--accent);">
+          <svg width="26" height="26" aria-hidden="true"><use href="#icon-apple"/></svg>
+        </div>
         <h4 data-i18n="arch.node1.title">pocketctl App</h4>
         <p class="an-sub" data-i18n="arch.node1.desc">iOS / Web 客户端<br>实时查看和控制</p>
       </div>
       <div class="arch-arrow">→</div>
       <div class="arch-node reveal">
-        <div class="an-icon" style="background:var(--success-bg);">☁️</div>
+        <div class="an-icon" style="background:var(--success-bg);color:var(--success);">
+          <svg width="26" height="26" aria-hidden="true"><use href="#icon-cloud"/></svg>
+        </div>
         <h4 data-i18n="arch.node2.title">Relay Server</h4>
         <p class="an-sub" data-i18n="arch.node2.desc">加密消息中转<br>NAT 穿透</p>
       </div>
       <div class="arch-arrow">→</div>
       <div class="arch-node reveal">
-        <div class="an-icon" style="background:var(--warning-bg);">💻</div>
+        <div class="an-icon" style="background:var(--warning-bg);color:var(--warning);">
+          <svg width="26" height="26" aria-hidden="true"><use href="#icon-terminal"/></svg>
+        </div>
         <h4 data-i18n="arch.node3.title">pocketctl Daemon</h4>
         <p class="an-sub" data-i18n="arch.node3.desc">运行在你的主机上<br>管理 Agent 生命周期</p>
       </div>
       <div class="arch-arrow">→</div>
       <div class="arch-node reveal">
-        <div class="an-icon" style="background:var(--sub-agent-bg);">🧠</div>
+        <div class="an-icon" style="background:var(--sub-agent-bg);color:var(--sub-agent);">
+          <svg width="26" height="26" aria-hidden="true"><use href="#icon-brain-circuit"/></svg>
+        </div>
         <h4 data-i18n="arch.node4.title">AI Agent</h4>
         <p class="an-sub" data-i18n="arch.node4.desc">Claude Code / Codex<br>本地执行代码任务</p>
       </div>
@@ -281,7 +404,9 @@
     <div class="platform-grid">
       <div class="platform-card reveal">
         <div class="pc-header">
-          <div class="pc-icon" style="background:var(--accent-muted);">📱</div>
+          <div class="pc-icon" style="background:var(--accent-muted);color:var(--accent);">
+            <svg width="26" height="26" aria-hidden="true"><use href="#icon-apple"/></svg>
+          </div>
           <div>
             <h3>iOS App</h3>
             <span class="pc-badge ios">原生体验</span>
@@ -297,7 +422,9 @@
       </div>
       <a href="/app/login" class="platform-card reveal">
         <div class="pc-header">
-          <div class="pc-icon" style="background:var(--success-bg);">🌐</div>
+          <div class="pc-icon" style="background:var(--success-bg);color:var(--success);">
+            <svg width="26" height="26" aria-hidden="true"><use href="#icon-globe"/></svg>
+          </div>
           <div>
             <h3>Web 客户端</h3>
             <span class="pc-badge web">即时访问</span>
@@ -333,12 +460,12 @@
         <div class="price">¥0 <span>/ 月</span></div>
         <p class="price-desc" data-i18n="pricing.free.desc">个人开发者和小项目</p>
         <ul>
-          <li><span class="check">✓</span> <span data-i18n="pricing.free.f1">1 台主机</span></li>
-          <li><span class="check">✓</span> <span data-i18n="pricing.free.f2">基础会话监控</span></li>
-          <li><span class="check">✓</span> <span data-i18n="pricing.free.f3">消息交互</span></li>
-          <li><span class="check">✓</span> <span data-i18n="pricing.free.f4">单个 Agent 类型</span></li>
-          <li><span class="cross">✕</span> <span data-i18n="pricing.free.f5">推送通知</span></li>
-          <li><span class="cross">✕</span> <span data-i18n="pricing.free.f6">Web 客户端</span></li>
+          <li><span class="check"><svg width="14" height="14" aria-hidden="true"><use href="#icon-check"/></svg></span> <span data-i18n="pricing.free.f1">1 台主机</span></li>
+          <li><span class="check"><svg width="14" height="14" aria-hidden="true"><use href="#icon-check"/></svg></span> <span data-i18n="pricing.free.f2">基础会话监控</span></li>
+          <li><span class="check"><svg width="14" height="14" aria-hidden="true"><use href="#icon-check"/></svg></span> <span data-i18n="pricing.free.f3">消息交互</span></li>
+          <li><span class="check"><svg width="14" height="14" aria-hidden="true"><use href="#icon-check"/></svg></span> <span data-i18n="pricing.free.f4">单个 Agent 类型</span></li>
+          <li><span class="cross"><svg width="14" height="14" aria-hidden="true"><use href="#icon-x"/></svg></span> <span data-i18n="pricing.free.f5">推送通知</span></li>
+          <li><span class="cross"><svg width="14" height="14" aria-hidden="true"><use href="#icon-x"/></svg></span> <span data-i18n="pricing.free.f6">Web 客户端</span></li>
         </ul>
         <a href="#" class="price-btn secondary" data-i18n="pricing.free.cta">免费开始</a>
       </div>
@@ -348,12 +475,12 @@
         <div class="price">¥48 <span>/ 月</span></div>
         <p class="price-desc" data-i18n="pricing.pro.desc">专业开发者和团队</p>
         <ul>
-          <li><span class="check">✓</span> <span data-i18n="pricing.pro.f1">无限主机</span></li>
-          <li><span class="check">✓</span> <span data-i18n="pricing.pro.f2">完整会话监控</span></li>
-          <li><span class="check">✓</span> <span data-i18n="pricing.pro.f3">消息交互 + 文件传输</span></li>
-          <li><span class="check">✓</span> <span data-i18n="pricing.pro.f4">全部 Agent 类型</span></li>
-          <li><span class="check">✓</span> <span data-i18n="pricing.pro.f5">即时推送通知</span></li>
-          <li><span class="check">✓</span> <span data-i18n="pricing.pro.f6">Web 客户端全功能</span></li>
+          <li><span class="check"><svg width="14" height="14" aria-hidden="true"><use href="#icon-check"/></svg></span> <span data-i18n="pricing.pro.f1">无限主机</span></li>
+          <li><span class="check"><svg width="14" height="14" aria-hidden="true"><use href="#icon-check"/></svg></span> <span data-i18n="pricing.pro.f2">完整会话监控</span></li>
+          <li><span class="check"><svg width="14" height="14" aria-hidden="true"><use href="#icon-check"/></svg></span> <span data-i18n="pricing.pro.f3">消息交互 + 文件传输</span></li>
+          <li><span class="check"><svg width="14" height="14" aria-hidden="true"><use href="#icon-check"/></svg></span> <span data-i18n="pricing.pro.f4">全部 Agent 类型</span></li>
+          <li><span class="check"><svg width="14" height="14" aria-hidden="true"><use href="#icon-check"/></svg></span> <span data-i18n="pricing.pro.f5">即时推送通知</span></li>
+          <li><span class="check"><svg width="14" height="14" aria-hidden="true"><use href="#icon-check"/></svg></span> <span data-i18n="pricing.pro.f6">Web 客户端全功能</span></li>
         </ul>
         <a href="#" class="price-btn primary" data-i18n="pricing.pro.cta">尽情期待</a>
       </div>
@@ -372,7 +499,9 @@
       <div class="faq-item reveal">
         <div class="faq-q">
           <h4 data-i18n="faq.q1">pocketctl 如何保证我的代码安全？</h4>
-          <span class="faq-chevron">▾</span>
+          <span class="faq-chevron">
+            <svg width="14" height="14" aria-hidden="true"><use href="#icon-chevron-down"/></svg>
+          </span>
         </div>
         <div class="faq-a" data-i18n="faq.a1">
           pocketctl 采用端到端加密通信。AI Agent 的代码读写、命令执行全部在你的本地机器上完成，不会上传到任何第三方服务器。Relay Server 仅做加密消息中转，无法解密你的会话内容。你的代码永远不会离开你的机器。
@@ -381,7 +510,9 @@
       <div class="faq-item reveal">
         <div class="faq-q">
           <h4 data-i18n="faq.q2">支持哪些 AI 编程助手？</h4>
-          <span class="faq-chevron">▾</span>
+          <span class="faq-chevron">
+            <svg width="14" height="14" aria-hidden="true"><use href="#icon-chevron-down"/></svg>
+          </span>
         </div>
         <div class="faq-a" data-i18n="faq.a2">
           目前支持 Claude Code、Codex、GitHub Copilot CLI 和 Cursor。我们持续扩展 Agent 兼容列表——如果你使用的工具尚未支持，欢迎在 GitHub 提交 Issue 或通过 Web 客户端反馈。
@@ -390,7 +521,9 @@
       <div class="faq-item reveal">
         <div class="faq-q">
           <h4 data-i18n="faq.q3">需要在我的开发机上一直运行 Daemon 吗？</h4>
-          <span class="faq-chevron">▾</span>
+          <span class="faq-chevron">
+            <svg width="14" height="14" aria-hidden="true"><use href="#icon-chevron-down"/></svg>
+          </span>
         </div>
         <div class="faq-a" data-i18n="faq.a3">
           是的，Daemon 需要在开发机上保持运行才能接收来自手机的指令。它占用的系统资源极少（通常 < 50MB 内存），不会影响你的正常工作。你可以在不需要时通过 <code>pocketctl daemon stop</code> 随时停止。
@@ -399,7 +532,9 @@
       <div class="faq-item reveal">
         <div class="faq-q">
           <h4 data-i18n="faq.q4">iOS App 和 Web 客户端数据互通吗？</h4>
-          <span class="faq-chevron">▾</span>
+          <span class="faq-chevron">
+            <svg width="14" height="14" aria-hidden="true"><use href="#icon-chevron-down"/></svg>
+          </span>
         </div>
         <div class="faq-a" data-i18n="faq.a4">
           完全互通。你的主机列表、会话记录、消息历史在同一账号下实时同步。在手机上发送的指令，在 Web 端也能看到完整的对话上下文。
@@ -408,7 +543,9 @@
       <div class="faq-item reveal">
         <div class="faq-q">
           <h4 data-i18n="faq.q5">免费版有什么限制？</h4>
-          <span class="faq-chevron">▾</span>
+          <span class="faq-chevron">
+            <svg width="14" height="14" aria-hidden="true"><use href="#icon-chevron-down"/></svg>
+          </span>
         </div>
         <div class="faq-a" data-i18n="faq.a5">
           免费版支持 1 台主机、基础会话监控、消息交互和单一 Agent 类型。如果需要管理多台主机、接收推送通知或使用 Web 客户端，可以升级到专业版（¥48/月）。
@@ -427,8 +564,14 @@
       <h2 data-i18n="cta.title">随时掌控你的 AI Agent</h2>
       <p data-i18n="cta.desc">不再守在电脑前。pocketctl 让你的开发机随身携带——在咖啡厅、在地铁上、在任何地方。</p>
       <div class="cta-actions">
-        <a href="#" class="btn-hero btn-hero-primary" data-i18n="cta.btn1">📱 下载 iOS App</a>
-        <a href="/app/login" class="btn-hero btn-hero-secondary" target="_blank" rel="noopener" data-i18n="cta.btn2">🌐 打开 Web 客户端</a>
+        <a href="#" class="btn-hero btn-hero-primary">
+          <svg width="18" height="18" aria-hidden="true"><use href="#icon-apple"/></svg>
+          <span data-i18n="cta.btn1">下载 iOS App</span>
+        </a>
+        <a href="/app/login" class="btn-hero btn-hero-secondary" target="_blank" rel="noopener">
+          <svg width="18" height="18" aria-hidden="true"><use href="#icon-globe"/></svg>
+          <span data-i18n="cta.btn2">打开 Web 客户端</span>
+        </a>
       </div>
     </div>
   </div>
@@ -491,7 +634,9 @@
      ============================================ -->
 <div class="modal-overlay" id="iosModal">
   <div class="modal-card">
-    <button class="modal-close" id="iosModalClose" aria-label="关闭">✕</button>
+    <button class="modal-close" id="iosModalClose" aria-label="关闭">
+      <svg width="16" height="16" aria-hidden="true"><use href="#icon-x"/></svg>
+    </button>
     <div class="modal-icon">
       <svg width="48" height="56" viewBox="0 0 48 56" fill="none" xmlns="http://www.w3.org/2000/svg">
         <path d="M39.86 29.69c-.08-6.74 5.5-9.97 5.74-10.13-3.13-4.57-7.99-5.2-9.72-5.27-4.14-.42-8.08 2.44-10.18 2.44-2.1 0-5.34-2.38-8.78-2.32-4.51.07-8.67 2.62-10.99 6.67C1.24 29.41 3.76 39.23 8.2 45.6c2.15 3.12 4.72 6.61 8.09 6.48 3.25-.13 4.47-2.1 8.4-2.1 3.93 0 5.04 2.1 8.48 2.03 3.5-.05 5.72-3.18 7.86-6.3 2.48-3.62 3.5-7.13 3.56-7.31-.08-.04-6.83-2.63-6.73-10.51zM33.7 9.16c2.97-3.59 2.79-8.59 2.69-9.16-2.6.15-5.74 1.77-7.6 4-2.07 2.4-3.47 5.78-3.08 9.28 2.89.22 5.84-1.49 7.99-4.12z" fill="currentColor"/>
@@ -501,9 +646,15 @@
     <p class="modal-desc" data-i18n="modal.ios.desc">感谢你对 pocketctl 的关注！iOS App 目前处于内部测试阶段，预计即将开放。留下你的邮箱，我们会在第一时间通知你。</p>
     <form class="modal-form" id="iosInviteForm">
       <input type="email" class="modal-input" placeholder="your@email.com" required aria-label="邮箱地址" data-i18n-placeholder="modal.ios.placeholder">
-      <button type="submit" class="modal-submit" data-i18n="modal.ios.submit">📩 立即预约</button>
+      <button type="submit" class="modal-submit">
+        <svg width="18" height="18" aria-hidden="true"><use href="#icon-send"/></svg>
+        <span data-i18n="modal.ios.submit">立即预约</span>
+      </button>
     </form>
-    <p class="modal-success" id="iosInviteSuccess" data-i18n="modal.ios.success" style="display:none;">🎉 已收到！我们会在 TestFlight 开放时通知你。</p>
+    <p class="modal-success" id="iosInviteSuccess" style="display:none;">
+      <svg width="18" height="18" aria-hidden="true"><use href="#icon-party-popper"/></svg>
+      <span data-i18n="modal.ios.success">已收到！我们会在 TestFlight 开放时通知你。</span>
+    </p>
   </div>
 </div>
 
