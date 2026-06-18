@@ -245,6 +245,17 @@
   "dashboard.all_sessions_desc": "跨所有主机的会话活动",
   "dashboard.clear_filter": "清除筛选",
   "dashboard.unknown_error": "未知错误",
+  "hosts.search_placeholder": "搜索名称、IP 或系统…",
+  "hosts.no_match": "没有匹配的主机",
+  "hosts.deselect": "取消选择，恢复全部卡片",
+  "hosts.session_detail": "会话详情",
+  "hosts.column_session": "会话",
+  "hosts.column_agent": "Agent",
+  "hosts.column_time": "时间",
+  "hosts.column_status": "状态",
+  "hosts.no_sessions": "暂无会话",
+  "hosts.installing": "安装中…",
+  "hosts.alias_label": "别名",
   "dashboard.online": "在线",
   "dashboard.offline": "离线"
 }

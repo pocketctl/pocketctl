@@ -3,36 +3,36 @@
     <!-- Page Header -->
     <div class="page-header">
       <div>
-        <h2 class="page-title">主机</h2>
-        <div class="page-subtitle">共 <span class="text-mono">{{ daemons.length }}</span> 台 · <span class="text-success text-mono">{{ onlineCount }}</span> 在线 · <span class="text-tertiary text-mono">{{ offlineCount }}</span> 离线</div>
+        <h2 class="page-title">{{ t('nav.hosts') }}</h2>
+        <div class="page-subtitle">共 <span class="text-mono">{{ daemons.length }}</span> 台 · <span class="text-success text-mono">{{ onlineCount }}</span> {{ t('dashboard.online') }} · <span class="text-tertiary text-mono">{{ offlineCount }}</span> {{ t('dashboard.offline') }}</div>
       </div>
       <button class="btn btn-secondary" @click="showRegister = true">
         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 5v14M5 12h14"/></svg>
-        注册主机
+        {{ t('dashboard.register_host') }}
       </button>
     </div>
 
     <!-- 全局 Token 概览条（占位，待 C2/C3 接真实数据） -->
     <div class="token-global-strip">
-      <div class="tg-item"><span class="tg-num">{{ formatCost(tokenGlobal?.total) }}</span><span class="tg-label">总消耗</span></div>
+      <div class="tg-item"><span class="tg-num">{{ formatCost(tokenGlobal?.total) }}</span><span class="tg-label">{{ t('dashboard.token_total') }}</span></div>
       <div class="tg-sep"></div>
-      <div class="tg-item"><span class="tg-num">{{ formatCost(tokenGlobal?.today) }}</span><span class="tg-label">今日</span></div>
+      <div class="tg-item"><span class="tg-num">{{ formatCost(tokenGlobal?.today) }}</span><span class="tg-label">{{ t('dashboard.token_today') }}</span></div>
       <div class="tg-sep"></div>
-      <div class="tg-item"><span class="tg-num">{{ formatCost(tokenGlobal?.thisWeek) }}</span><span class="tg-label">本周</span></div>
+      <div class="tg-item"><span class="tg-num">{{ formatCost(tokenGlobal?.thisWeek) }}</span><span class="tg-label">{{ t('dashboard.token_week') }}</span></div>
       <div class="tg-sep"></div>
-      <div class="tg-item"><span class="tg-num">{{ formatCost(tokenGlobal?.thisMonth) }}</span><span class="tg-label">本月</span></div>
+      <div class="tg-item"><span class="tg-num">{{ formatCost(tokenGlobal?.thisMonth) }}</span><span class="tg-label">{{ t('dashboard.token_month') }}</span></div>
     </div>
 
     <!-- 筛选 + 搜索 -->
     <div class="host-controls">
       <div class="host-filter" role="tablist" aria-label="按状态筛选主机">
-        <button :class="{ active: filter === 'all' }" @click="filter = 'all'">全部<span class="count">{{ daemons.length }}</span></button>
-        <button :class="{ active: filter === 'online' }" @click="filter = 'online'">在线<span class="count">{{ onlineCount }}</span></button>
-        <button :class="{ active: filter === 'offline' }" @click="filter = 'offline'">离线<span class="count">{{ offlineCount }}</span></button>
+        <button :class="{ active: filter === 'all' }" @click="filter = 'all'">{{ t('common.all') }}<span class="count">{{ daemons.length }}</span></button>
+        <button :class="{ active: filter === 'online' }" @click="filter = 'online'">{{ t('dashboard.online') }}<span class="count">{{ onlineCount }}</span></button>
+        <button :class="{ active: filter === 'offline' }" @click="filter = 'offline'">{{ t('dashboard.offline') }}<span class="count">{{ offlineCount }}</span></button>
       </div>
       <div class="host-search">
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/></svg>
-        <input type="text" v-model="searchQuery" placeholder="搜索名称、IP 或系统…" aria-label="搜索主机" />
+        <input type="text" v-model="searchQuery" :placeholder="t('hosts.search_placeholder')" aria-label="搜索主机" />
       </div>
     </div>
 
@@ -57,22 +57,22 @@
               </div>
             </div>
             <div class="hc-foot">
-              <div><span class="hc-sessions">{{ d.active_sessions || 0 }}</span> <span class="hc-sess-label">活跃会话</span></div>
+              <div><span class="hc-sessions">{{ d.active_sessions || 0 }}</span> <span class="hc-sess-label">{{ t('dashboard.active_sessions') }}</span></div>
               <span :class="['status-pill', 'mini', statusPillClass(d)]" :style="statusPillStyle(d)">{{ statusLabel(d) }}</span>
             </div>
-            <button class="ss-more-btn" type="button" title="更多操作" aria-label="更多操作" @click.stop="openMenu($event, d)">
+            <button class="ss-more-btn" type="button" :title="t('session.actions.more')" :aria-label="t('session.actions.more')" @click.stop="openMenu($event, d)">
               <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><circle cx="12" cy="5" r="1.8"/><circle cx="12" cy="12" r="1.8"/><circle cx="12" cy="19" r="1.8"/></svg>
             </button>
           </div>
-          <div v-if="filteredDaemons.length === 0" class="host-cards-empty">没有匹配的主机</div>
+          <div v-if="filteredDaemons.length === 0" class="host-cards-empty">{{ t('hosts.no_match') }}</div>
         </div>
-        <button class="hosts-deselect-btn" type="button" title="取消选择，恢复全部卡片" aria-label="取消选择" @click="deselectAll">✕</button>
+        <button class="hosts-deselect-btn" type="button" :title="t('hosts.deselect')" :aria-label="t('hosts.deselect')" @click="deselectAll">✕</button>
       </div>
 
       <!-- 详情面板（全宽） -->
       <div v-if="selectedDaemon" class="host-detail-panel">
         <div class="hd-header">
-          <button class="hd-more-btn" type="button" title="更多操作" aria-label="更多操作" @click.stop="openDetailMenu($event)">
+          <button class="hd-more-btn" type="button" :title="t('session.actions.more')" :aria-label="t('session.actions.more')" @click.stop="openDetailMenu($event)">
             <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><circle cx="12" cy="5" r="1.8"/><circle cx="12" cy="12" r="1.8"/><circle cx="12" cy="19" r="1.8"/></svg>
           </button>
           <div class="hd-icon" v-html="hostIcon(selectedDaemon, 28)"></div>
@@ -277,12 +277,14 @@ import { useRouter } from 'vue-router'
 import { useWebSocket } from '../composables/useWebSocket'
 import { useAuth } from '../composables/useAuth'
 import { formatRelativeTime } from '../composables/useRelativeTime'
+import { useLocale } from '../composables/useLocale'
 import RegisterDaemonDialog from '../components/RegisterDaemonDialog.vue'
 
 const router = useRouter()
 const ws = useWebSocket()
 const { accessToken } = useAuth()
 const { connect, send, onEvent } = ws
+const { t } = useLocale()
 
 const daemons = ref<any[]>([])
 const selectedId = ref<string | null>(null)

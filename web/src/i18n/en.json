@@ -245,6 +245,17 @@
   "dashboard.all_sessions_desc": "Session activity across all hosts",
   "dashboard.clear_filter": "Clear Filter",
   "dashboard.unknown_error": "Unknown Error",
+  "hosts.search_placeholder": "Search name, IP or OS…",
+  "hosts.no_match": "No matching hosts",
+  "hosts.deselect": "Deselect, show all cards",
+  "hosts.session_detail": "Session Detail",
+  "hosts.column_session": "Session",
+  "hosts.column_agent": "Agent",
+  "hosts.column_time": "Time",
+  "hosts.column_status": "Status",
+  "hosts.no_sessions": "No sessions",
+  "hosts.installing": "Installing…",
+  "hosts.alias_label": "Alias",
   "dashboard.online": "Online",
   "dashboard.offline": "Offline"
 }
