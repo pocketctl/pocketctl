@@ -4,7 +4,7 @@ import * as db from './db.js';
 import { generateTitle } from './title.js';
 import { notifyUser, sessionStatusPush, daemonOfflinePush } from './push.js';
 
-interface DaemonConnection { ws: WebSocket; daemonId: string; hostname: string; agents: any[]; userId: number | null; os?: string; ip?: string; arch?: string; version?: string; startedAt?: number }
+interface DaemonConnection { ws: WebSocket; daemonId: string; hostname: string; agents: any[]; userId: number | null; os?: string; ip?: string; port?: string; arch?: string; version?: string; startedAt?: number }
 interface ClientConnection { ws: WebSocket; subscribedSessions: Set<string>; userId: number | null }
 interface DaemonMetrics { cpuPct: number; memPct: number; diskPct: number; updatedAt: number }
 
@@ -93,10 +93,11 @@ export class Router {
 
     const daemonOS = msg.os || 'unknown';
     const daemonIP = msg.ip || 'unknown';
+    const daemonPort = msg.port || '';
     const daemonArch = msg.arch || '';
     const daemonVersion = msg.version || '';
     const daemonStartedAt = msg.started_at || 0;
-    this.daemons.set(daemonId, { ws, daemonId, hostname, agents, userId, os: daemonOS, ip: daemonIP, arch: daemonArch, version: daemonVersion, startedAt: daemonStartedAt });
+    this.daemons.set(daemonId, { ws, daemonId, hostname, agents, userId, os: daemonOS, ip: daemonIP, port: daemonPort, arch: daemonArch, version: daemonVersion, startedAt: daemonStartedAt });
     console.log('[ws] daemon registered', daemonId, 'agents:', JSON.stringify(agents), 'userId:', userId);
     try { await db.upsertDaemon(this.pool, daemonId, hostname, agents, daemonArch, daemonVersion, daemonStartedAt); } catch (e) { console.error('upsertDaemon:', e); }
     if (userId) {
@@ -521,9 +522,11 @@ export class Router {
           status: 'online',
           os: daemon.os || 'unknown',
           ip: daemon.ip || 'unknown',
+          port: daemon.port || '',
           arch: daemon.arch || '',
           version: daemon.version || '',
           started_at: daemon.startedAt || 0,
+          last_heartbeat: Date.now(),
           cpu_pct: metrics?.cpuPct ?? null,
           mem_pct: metrics?.memPct ?? null,
           disk_pct: metrics?.diskPct ?? null,

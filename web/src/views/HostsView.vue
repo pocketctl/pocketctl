@@ -402,10 +402,10 @@ function rFillStyle(pct: number | null | undefined): Record<string, string> {
 function formatUptime(startedAt: number): string {
   if (!startedAt) return '—'
   const seconds = Math.floor(Date.now() / 1000 - startedAt)
-  if (seconds < 60) return `${seconds}秒`
-  if (seconds < 3600) return `${Math.floor(seconds / 60)}分钟`
-  if (seconds < 86400) return `${Math.floor(seconds / 3600)}小时`
-  return `${Math.floor(seconds / 86400)}天`
+  if (seconds < 60) return `${seconds}${t('hosts.uptime_s')}`
+  if (seconds < 3600) return `${Math.floor(seconds / 60)}${t('hosts.uptime_m')}`
+  if (seconds < 86400) return `${Math.floor(seconds / 3600)}${t('hosts.uptime_h')}`
+  return `${Math.floor(seconds / 86400)}${t('hosts.uptime_d')}`
 }
 
 // Agent 字段兼容（字符串数组 / 对象数组）
