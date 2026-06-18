@@ -82,7 +82,7 @@
           <div v-if="kickTarget" class="modal-overlay" @click.self="kickTarget = null">
             <div class="modal-card kick-modal">
               <div class="modal-title">⚠️ {{ t('settings.force_kick_confirm') }}</div>
-              <p>即将强制下线 <strong>{{ kickTarget.daemon_alias || kickTarget.hostname }}</strong></p>
+              <p>{{ t('settings.force_kick_warning') }} <strong>{{ kickTarget.daemon_alias || kickTarget.hostname }}</strong></p>
               <p style="font-size:12px;color:var(--fg-tertiary);">{{ t('settings.force_kick_desc') }}</p>
               <div style="margin:12px 0;">
                 <div class="form-label">{{ t('settings.email_code') }}</div>
@@ -100,7 +100,7 @@
           </div>
           <div class="daemon-settings-row add-daemon" @click="showRegisterDaemon = true">
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 5v14M5 12h14"/></svg>
-            注册新主机
+            {{ t('settings.register_new') }}
           </div>
         </div>
 
@@ -108,76 +108,76 @@
 
         <!-- Appearance -->
         <div id="section-appearance" class="settings-section">
-          <div class="settings-section-title">外观</div>
+          <div class="settings-section-title">{{ t('settings.appearance') }}</div>
           <div class="theme-options">
             <div :class="['theme-option', { active: currentTheme === 'dark' }]" @click="setTheme('dark')">
               <div class="theme-preview dark-preview"></div>
-              <div class="theme-label">深色</div>
-              <div class="theme-desc">适合暗光环境</div>
+              <div class="theme-label">{{ t('settings.theme_dark') }}</div>
+              <div class="theme-desc">{{ t('settings.theme_dark_desc') }}</div>
             </div>
             <div :class="['theme-option', { active: currentTheme === 'light' }]" @click="setTheme('light')">
               <div class="theme-preview light-preview"></div>
-              <div class="theme-label">浅色</div>
-              <div class="theme-desc">清爽明亮</div>
+              <div class="theme-label">{{ t('settings.theme_light') }}</div>
+              <div class="theme-desc">{{ t('settings.theme_light_desc') }}</div>
             </div>
             <div :class="['theme-option', { active: currentTheme === 'system' }]" @click="setTheme('system')">
               <div class="theme-preview" style="background:linear-gradient(135deg, #0d1117 50%, #ffffff 50%);"></div>
-              <div class="theme-label">跟随系统</div>
-              <div class="theme-desc">自动切换</div>
+              <div class="theme-label">{{ t('settings.theme_auto') }}</div>
+              <div class="theme-desc">{{ t('settings.theme_auto_desc') }}</div>
             </div>
           </div>
         </div>
 
         <!-- Notifications -->
         <div id="section-notifications" class="settings-section">
-          <div class="settings-section-title">通知偏好</div>
+          <div class="settings-section-title">{{ t('settings.notif_pref') }}</div>
           <div class="settings-row">
-            <span class="row-label">会话完成通知</span>
+            <span class="row-label">{{ t('settings.notif_session') }}</span>
             <div :class="['toggle-switch', { on: notifyCompleted }]" @click="notifyCompleted = !notifyCompleted"></div>
           </div>
           <div class="settings-row">
-            <span class="row-label">错误告警</span>
+            <span class="row-label">{{ t('settings.notif_error') }}</span>
             <div :class="['toggle-switch', { on: notifyErrors }]" @click="notifyErrors = !notifyErrors"></div>
           </div>
           <div class="settings-row">
-            <span class="row-label">主机上下线通知</span>
+            <span class="row-label">{{ t('settings.notif_host') }}</span>
             <div :class="['toggle-switch', { on: notifyDaemon }]" @click="notifyDaemon = !notifyDaemon"></div>
           </div>
           <div class="settings-row">
-            <span class="row-label">产品更新</span>
+            <span class="row-label">{{ t('settings.notif_product') }}</span>
             <div :class="['toggle-switch', { on: notifyUpdates }]" @click="notifyUpdates = !notifyUpdates"></div>
           </div>
         </div>
 
         <!-- About -->
         <div id="section-about" class="settings-section">
-          <div class="settings-section-title">其他</div>
+          <div class="settings-section-title">{{ t('settings.other') }}</div>
           <div class="settings-row" @click="showAbout = true">
             <div class="row-icon" style="background:var(--accent-muted);color:var(--accent);">
               <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M12 16v-4M12 8h.01"/></svg>
             </div>
-            <span class="row-label">关于 pocketctl</span>
+            <span class="row-label">{{ t('settings.about_pocketctl') }}</span>
             <span class="row-value">v1.0.1 <span class="chevron">›</span></span>
           </div>
           <div class="settings-row" @click="showHelp = true">
             <div class="row-icon" style="background:var(--accent-muted);color:var(--accent);">
               <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M9.09 9a3 3 0 015.83 1c0 2-3 3-3 3"/><path d="M12 17h.01"/></svg>
             </div>
-            <span class="row-label">帮助与反馈</span>
+            <span class="row-label">{{ t('settings.help_feedback') }}</span>
             <span class="row-value"><span class="chevron">›</span></span>
           </div>
           <div class="settings-row" @click="showPrivacy = true">
             <div class="row-icon" style="background:var(--accent-muted);color:var(--accent);">
               <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0110 0v4"/></svg>
             </div>
-            <span class="row-label">隐私政策</span>
+            <span class="row-label">{{ t('settings.privacy_policy') }}</span>
             <span class="row-value"><span class="chevron">›</span></span>
           </div>
           <div class="settings-row" @click="showAgreement = true">
             <div class="row-icon" style="background:var(--accent-muted);color:var(--accent);">
               <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/><path d="M14 2v6h6"/><path d="M16 13H8"/><path d="M16 17H8"/><path d="M10 9H8"/></svg>
             </div>
-            <span class="row-label">用户协议</span>
+            <span class="row-label">{{ t('settings.user_agreement') }}</span>
             <span class="row-value"><span class="chevron">›</span></span>
           </div>
         </div>
@@ -191,7 +191,7 @@
         <!-- Logout -->
         <div class="settings-section">
           <div class="settings-row danger" style="justify-content:center;">
-            <span class="row-label" style="text-align:center;" @click="handleLogout" role="button">退出登录</span>
+            <span class="row-label" style="text-align:center;" @click="handleLogout" role="button">{{ t('settings.logout') }}</span>
           </div>
         </div>
       </div>
@@ -246,7 +246,7 @@ const userInitial = computed(() => {
 })
 
 const userDisplayName = computed(() => {
-  return user.value?.display_name || '用户'
+  return user.value?.display_name || t('user.guest')
 })
 
 const userMasked = computed(() => {
@@ -256,7 +256,7 @@ const userMasked = computed(() => {
 const userEmail = computed(() => {
   const email = user.value?.email
   if (email && !email.startsWith('1')) return email
-  return '未绑定'
+  return t('settings.not_bound')
 })
 
 function setTheme(t: string) {
@@ -319,7 +319,7 @@ function startKickDaemon(d: any) {
 
 async function sendKickCode() {
   if (!user.value?.email) {
-    kickError.value = '请先在账户设置中绑定邮箱'
+    kickError.value = t('settings.bind_email_first')
     return
   }
   kickError.value = ''
