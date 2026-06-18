@@ -8,24 +8,24 @@
       </router-link>
 
       <div class="sidebar-nav">
-        <div class="sidebar-section-label">概览</div>
+        <div class="sidebar-section-label">{{ t('nav.overview') }}</div>
 
         <router-link to="/" class="sidebar-link" active-class="active" v-slot="{ isActive }">
           <span class="link-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg></span>
-          <span class="link-text">仪表盘</span>
+          <span class="link-text">{{ t('dashboard.title') }}</span>
         </router-link>
 
         <router-link to="/session/default" class="sidebar-link" active-class="active" v-slot="{ isActive }">
           <span class="link-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15a2 2 0 01-2 2H7l-4 4V5a2 2 0 012-2h14a2 2 0 012 2z"/></svg></span>
-          <span class="link-text">会话</span>
+          <span class="link-text">{{ t('nav.sessions') }}</span>
           <span class="badge" v-if="sessionCount > 0">{{ sessionCount }}</span>
         </router-link>
 
-        <div class="sidebar-section-label">管理</div>
+        <div class="sidebar-section-label">{{ t('nav.manage') }}</div>
 
         <router-link to="/hosts" class="sidebar-link" active-class="active" v-slot="{ isActive }">
           <span class="link-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="2" width="20" height="20" rx="3"/><path d="M7 2v20M17 2v20M2 12h20"/></svg></span>
-          <span class="link-text">主机</span>
+          <span class="link-text">{{ t('nav.hosts') }}</span>
         </router-link>
 
         <router-link to="/settings" class="sidebar-link" active-class="active" v-slot="{ isActive }">
@@ -34,7 +34,7 @@
         </router-link>
       </div>
 
-      <button class="sidebar-toggle-btn" @click="toggleSidebar" :title="sidebarCollapsed ? '展开侧栏' : '收起侧栏'" :aria-label="sidebarCollapsed ? '展开侧栏' : '收起侧栏'">
+      <button class="sidebar-toggle-btn" @click="toggleSidebar" :title="sidebarCollapsed ? t('nav.expand') : t('nav.collapse')" :aria-label="sidebarCollapsed ? t('nav.expand') : t('nav.collapse')">
         <svg v-if="!sidebarCollapsed" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M11 19l-7-7 7-7"/><path d="M18 19l-7-7 7-7"/></svg>
         <svg v-else width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M13 5l7 7-7 7"/><path d="M6 5l7 7-7 7"/></svg>
       </button>
@@ -43,7 +43,7 @@
           <div class="user-avatar">{{ userInitial }}</div>
           <div class="user-info">
             <div class="user-name">{{ userDisplayName }}</div>
-            <div class="user-plan">免费版</div>
+            <div class="user-plan">{{ t('user.free_plan') }}</div>
           </div>
         </div>
       </div>
@@ -106,17 +106,17 @@ const userInitial = computed(() => {
 const userDisplayName = computed(() => {
   const phone = user.value?.phone
   if (phone) return phone.slice(0, 3) + '****' + phone.slice(-4)
-  return user.value?.display_name || user.value?.email || '用户'
+  return user.value?.display_name || user.value?.email || t('user.guest')
 })
 
 const pageTitle = computed(() => {
   const titles: Record<string, string> = {
-    '/': '概览',
-    '/settings': '设置',
-    '/hosts': '主机',
+    '/': t('nav.overview'),
+    '/settings': t('nav.settings'),
+    '/hosts': t('nav.hosts'),
   }
-  if (route.path.startsWith('/session/')) return '会话详情'
-  return titles[route.path] || '概览'
+  if (route.path.startsWith('/session/')) return t('nav.session_detail')
+  return titles[route.path] || t('nav.overview')
 })
 
 const showNewSessionBtn = computed(() => {
