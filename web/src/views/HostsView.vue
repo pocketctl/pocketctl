@@ -174,10 +174,16 @@
               <div class="token-stat"><div class="tk-num">{{ formatCost(daemonCost?.thisMonth) }}</div><div class="tk-label">本月消耗</div></div>
             </div>
             <div class="session-token-list">
-              <template v-if="daemonCost?.sessions?.length">
-                <div class="session-token-row" v-for="s in daemonCost.sessions" :key="s.session_id">
+              <template v-if="sortedCostSessions.length">
+                <div class="session-token-row" v-for="s in paginatedCostSessions" :key="s.session_id" @click="$router.push(`/session/${s.session_id}`)">
                   <span class="st-title">{{ s.title || s.session_id.slice(0, 8) }}</span>
                   <span class="st-tokens">{{ formatCost(s.cost_usd) }}</span>
+                </div>
+                <a v-if="sortedCostSessions.length > 5 && !costExpanded" class="st-more" @click="costExpanded = true">{{ t('common.all') }} {{ sortedCostSessions.length }} →</a>
+                <div v-if="costExpanded && costTotalPages > 1" class="st-pagination">
+                  <button class="st-page-btn" :disabled="costPage === 1" @click="costPage--">‹</button>
+                  <span class="st-page-info">{{ costPage }} / {{ costTotalPages }}</span>
+                  <button class="st-page-btn" :disabled="costPage === costTotalPages" @click="costPage++">›</button>
                 </div>
               </template>
               <div v-else class="session-token-row"><span class="st-title" style="color:var(--fg-tertiary);">暂无会话消耗记录</span></div>
@@ -197,16 +203,8 @@
                 <span class="ss-num">{{ detailSessionTotal }}</span>
                 <span class="ss-label">{{ t('dashboard.total_sessions') }}</span>
               </div>
+              <a class="btn btn-ghost ss-link" @click="goSessionWithHost(selectedDaemon)">{{ t('dashboard.view_all') }} →</a>
             </div>
-            <!-- Recent 3 sessions -->
-            <div class="detail-sess-list" v-if="detailSessions.length > 0">
-              <div class="detail-sess-row" v-for="s in detailSessions" :key="s.session_id" @click="$router.push(`/session/${s.session_id}`)">
-                <span class="ds-title">{{ s.title || s.session_id.slice(0, 8) }}</span>
-                <span class="ds-status" :class="s.status">{{ sessionStatusLabel(s) }}</span>
-              </div>
-              <a v-if="detailSessionTotal > 3" class="detail-sess-more" @click="goSessionWithHost(selectedDaemon)">{{ t('dashboard.view_all') }} →</a>
-            </div>
-            <div v-else class="detail-sess-empty">{{ t('hosts.no_sessions') }}</div>
           </div>
         </div>
       </div>
@@ -491,6 +489,24 @@ const detailSessionTotal = computed(() => {
   if (!selectedId.value) return 0
   return allSessions.value.filter(s => s.daemon_id === selectedId.value).length
 })
+// Cost sessions: sorted by cost desc, top 5 default, expand + paginate
+const costExpanded = ref(false)
+const costPage = ref(1)
+const COST_PAGE_SIZE = 10
+const sortedCostSessions = computed(() => {
+  if (!daemonCost.value?.sessions) return []
+  return [...daemonCost.value.sessions].sort((a, b) => (b.cost_usd || 0) - (a.cost_usd || 0))
+})
+const costTotalPages = computed(() => Math.max(1, Math.ceil(sortedCostSessions.value.length / COST_PAGE_SIZE)))
+const paginatedCostSessions = computed(() => {
+  const all = sortedCostSessions.value
+  if (!costExpanded.value) return all.slice(0, 5)
+  const start = (costPage.value - 1) * COST_PAGE_SIZE
+  return all.slice(start, start + COST_PAGE_SIZE)
+})
+// Reset pagination when daemon changes
+watch(selectedId, () => { costExpanded.value = false; costPage.value = 1 })
+
 function sessionStatusLabel(s: any): string {
   const STATUS_KEYS: Record<string, string> = { running: 'session.status.running', busy: 'session.status.busy', idle: 'session.status.idle', completed: 'session.status.completed', error: 'session.status.error', killed: 'session.status.killed', disconnected: 'session.status.disconnected', exited: 'session.status.exited' }
   return t(STATUS_KEYS[s.status] || 'session.status.running')
@@ -832,6 +848,17 @@ onUnmounted(() => {
 .detail-sess-more { display: block; text-align: center; padding: 10px; font-size: 13px; font-weight: 600; color: var(--accent); cursor: pointer; border-radius: var(--radius-sm); transition: background 0.1s; }
 .detail-sess-more:hover { background: var(--accent-muted); }
 .detail-sess-empty { padding: 20px; text-align: center; font-size: 13px; color: var(--fg-tertiary); }
+
+/* Cost session list (top 5 + expand + paginate) */
+.session-token-row { cursor: pointer; transition: background 0.1s; border-radius: var(--radius-sm); padding: 4px 8px; margin: 0 -8px; }
+.session-token-row:hover { background: var(--surface-hover); }
+.st-more { display: block; text-align: center; padding: 8px; font-size: 12px; font-weight: 600; color: var(--accent); cursor: pointer; border-radius: var(--radius-sm); margin-top: 4px; }
+.st-more:hover { background: var(--accent-muted); }
+.st-pagination { display: flex; align-items: center; justify-content: center; gap: 8px; padding: 8px 0 4px; }
+.st-page-btn { width: 28px; height: 28px; border: 1px solid var(--border); background: var(--surface); color: var(--fg-secondary); border-radius: var(--radius-sm); cursor: pointer; font-size: 14px; display: flex; align-items: center; justify-content: center; transition: all 0.1s; }
+.st-page-btn:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
+.st-page-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+.st-page-info { font-size: 12px; color: var(--fg-tertiary); font-family: var(--font-mono); }
 
 /* ⋯ Button (card) */
 .ss-more-btn { width: 28px; height: 28px; border: none; background: none; color: var(--fg-tertiary); cursor: pointer; border-radius: 6px; display: flex; align-items: center; justify-content: center; opacity: 0; transition: opacity 0.15s, background 0.15s, color 0.15s; flex-shrink: 0; }
