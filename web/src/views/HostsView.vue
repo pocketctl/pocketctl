@@ -212,8 +212,8 @@
       <!-- Empty Detail -->
       <div v-else class="host-detail-panel empty">
         <div class="empty-icon">—</div>
-        <div class="empty-title">请选择一台主机</div>
-        <div class="empty-sub">查看连接信息、资源占用、Agent 版本、Token 消耗，或执行强制踢下线、重启等操作。</div>
+        <div class="empty-title">{{ t('hosts.empty_title') }}</div>
+        <div class="empty-sub">{{ t('hosts.empty_desc') }}</div>
       </div>
     </div>
 
@@ -221,31 +221,31 @@
     <div v-if="menuOpen" class="ss-menu" :style="{ left: menuX + 'px', top: menuY + 'px' }" @click.stop>
       <button class="ss-menu-item" @click="onMenuAct('copy')">
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"/></svg>
-        <span>复制连接信息</span>
+        <span>{{ t('hosts.menu_copy_info') }}</span>
       </button>
       <button class="ss-menu-item" @click="onMenuAct('export')">
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><path d="M7 10l5 5 5-5"/><path d="M12 15V3"/></svg>
-        <span>导出主机报告</span>
+        <span>{{ t('hosts.menu_export_report') }}</span>
       </button>
       <button class="ss-menu-item" @click="onMenuAct('alias')">
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M11 4H4a2 2 0 00-2 2v14a2 2 0 002 2h14a2 2 0 002-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 013 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>
-        <span>编辑别名</span>
+        <span>{{ t('hosts.menu_edit_alias') }}</span>
       </button>
       <div class="ss-menu-sep"></div>
       <template v-if="menuTarget?.daemon_online">
         <button class="ss-menu-item" @click="onMenuAct('restart')">
           <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 12a9 9 0 019-9 9 9 0 016.7 3"/><path d="M21 3v5h-5"/><path d="M21 12a9 9 0 01-9 9 9 9 0 01-6.7-3"/><path d="M3 21v-5h5"/></svg>
-          <span>重启 daemon</span>
+          <span>{{ t('hosts.restart_daemon') }}</span>
         </button>
         <button class="ss-menu-item" @click="onMenuAct('kick')">
           <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 3v9"/><path d="M6.4 6.4a8 8 0 106.6-2.3"/></svg>
-          <span>强制踢下线</span>
+          <span>{{ t('hosts.force_kick_label') }}</span>
         </button>
       </template>
       <div class="ss-menu-sep"></div>
       <button class="ss-menu-item danger" @click="onMenuAct('unregister')">
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 6h18"/><path d="M8 6V4a2 2 0 012-2h4a2 2 0 012 2v2"/><path d="M19 6l-1 14a2 2 0 01-2 2H8a2 2 0 01-2-2L5 6"/></svg>
-        <span>注销主机</span>
+        <span>{{ t('hosts.menu_unregister') }}</span>
       </button>
     </div>
 
@@ -372,7 +372,7 @@ function hostIcon(d: any, size = 20): string {
 }
 
 function statusLabel(d: any): string {
-  if (d.status === 'reconnecting') return '重启中'
+  if (d.status === 'reconnecting') return t('hosts.reconnecting')
   return d.daemon_online ? '在线' : '离线'
 }
 
@@ -567,15 +567,15 @@ function exportReport(d: any) {
 }
 
 function confirmRestart(d: any) {
-  showConfirm({ title: `重启「${d.hostname || d.daemon_id?.slice(0, 8)}」上的 daemon？`, desc: 'daemon 将短暂断开，约 5-10 秒后自动恢复。期间会话暂停。', confirmText: '重启 daemon',
+  showConfirm({ title: t('hosts.restart_confirm_title', { name: d.hostname || d.daemon_id?.slice(0, 8) }), desc: t('hosts.restart_confirm_desc'), confirmText: t('hosts.restart_daemon'),
     action: async () => {
       confirm.value.loading = true
       try {
         const origin = getRelayOrigin()
         await fetch(`${origin}/api/daemons/${d.daemon_id}/restart`, { method: 'POST', headers: { Authorization: `Bearer ${accessToken.value}` } })
         d.status = 'reconnecting'
-        showToast('重启指令已发送，等待重连…')
-      } catch { showToast('重启失败') }
+        showToast(t('hosts.restart_sent'))
+      } catch { showToast(t('hosts.restart_failed')) }
       confirm.value.show = false
       confirm.value.loading = false
     }
