@@ -150,10 +150,10 @@
                   <div class="ag-name">{{ agentName(a) }} <span class="ag-version">{{ agentVersionLabel(a) }}</span></div>
                   <div class="ag-meta">{{ agentMetaLabel(a) }}</div>
                 </div>
-                <button v-if="selectedDaemon?.daemon_online && !isAgentLatest(a)" class="ag-upgrade-btn" :class="{ upgrading: upgrading === agentName(a) }" :disabled="upgrading === agentName(a)" @click="upgradeAgent(agentName(a))">
-                  {{ upgrading === agentName(a) ? '升级中…' : '升级' }}
+                <button v-if="selectedDaemon?.daemon_online && !isAgentLatest(a)" class="ag-upgrade-btn" :class="{ upgrading: upgrading === agentRawName(a) }" :disabled="upgrading === agentRawName(a)" @click="upgradeAgent(agentRawName(a))">
+                  {{ upgrading === agentRawName(a) ? t('settings.upgrade_btn') : t('settings.upgrade_btn') }}
                 </button>
-                <span v-else-if="isAgentLatest(a)" class="ag-latest">✓ 最新</span>
+                <span v-else-if="isAgentLatest(a)" class="ag-latest">✓ {{ t('settings.installed') }}</span>
               </div>
             </template>
             <div v-else class="agent-card">
@@ -413,7 +413,12 @@ function agentCards(d: any): any[] {
   if (d && Array.isArray(d.agents) && d.agents.length) return d.agents
   return []
 }
-function agentName(a: any): string { return typeof a === 'string' ? a : (a?.name || a?.type || 'Agent') }
+const AGENT_DISPLAY_NAMES: Record<string, string> = { 'claude-code': 'Claude Code', 'opencode': 'OpenCode', 'codex': 'Codex' }
+function agentRawName(a: any): string { return typeof a === 'string' ? a : (a?.name || a?.type || 'Agent') }
+function agentName(a: any): string {
+  const raw = agentRawName(a)
+  return AGENT_DISPLAY_NAMES[raw] || raw
+}
 function agentShort(a: any): string { return /codex/i.test(agentName(a)) ? 'Cx' : 'CC' }
 function agentIconClass(a: any): string { return /codex/i.test(agentName(a)) ? 'codex' : 'claude' }
 function agentVersionLabel(a: any): string {
@@ -426,7 +431,10 @@ function isAgentLatest(a: any): boolean {
   return typeof a === 'object' && !!a?.latest && a?.version === a?.latest
 }
 function agentMetaLabel(a: any): string {
-  return typeof a === 'object' && a?.version ? '已安装 · 可用' : '版本待上报'
+  if (typeof a === 'object' && a?.version) {
+    return a.latest && a.version !== a.latest ? t('settings.upgrade_available') || '有新版本可用' : t('settings.installed') || '已安装 · 最新'
+  }
+  return t('settings.version_pending') || '版本待上报'
 }
 async function upgradeAgent(name: string) {
   if (upgrading.value) return

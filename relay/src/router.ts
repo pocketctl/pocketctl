@@ -97,6 +97,7 @@ export class Router {
     const daemonVersion = msg.version || '';
     const daemonStartedAt = msg.started_at || 0;
     this.daemons.set(daemonId, { ws, daemonId, hostname, agents, userId, os: daemonOS, ip: daemonIP, arch: daemonArch, version: daemonVersion, startedAt: daemonStartedAt });
+    console.log('[ws] daemon registered', daemonId, 'agents:', JSON.stringify(agents), 'userId:', userId);
     try { await db.upsertDaemon(this.pool, daemonId, hostname, agents, daemonArch, daemonVersion, daemonStartedAt); } catch (e) { console.error('upsertDaemon:', e); }
     if (userId) {
       try { await db.bindDaemonToUser(this.pool, daemonId, userId); } catch (e) { console.error('bindDaemon:', e); }
@@ -506,7 +507,7 @@ export class Router {
       const daemonList: any[] = [];
       const sessionCounts = userId ? await db.getSessionCountsByUser(this.pool, userId) : {};
       for (const [, daemon] of this.daemons) {
-        console.log('[router] list_daemons iterating daemon', daemon.daemonId, 'daemon.userId:', daemon.userId, 'request.userId:', userId);
+        console.log('[router] list_daemons iterating daemon', daemon.daemonId, 'daemon.userId:', daemon.userId, 'request.userId:', userId, 'agents:', JSON.stringify(daemon.agents));
         if (!this.sameUser(daemon.userId, userId)) continue;
         const alias = await db.getDaemonAlias(this.pool, daemon.daemonId);
         const metrics = this.daemonMetrics.get(daemon.daemonId);
