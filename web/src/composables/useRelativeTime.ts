@@ -1,16 +1,17 @@
 import { ref, computed } from 'vue'
+import { useLocale } from './useLocale'
 
 /**
- * Convert an ISO timestamp to a relative time string in Chinese.
- * - < 1min → "刚刚"
- * - 1-59min → "X分钟前"
- * - 1-23h → "X小时前"
- * - > 24h → "MM-DD HH:mm"
+ * Convert an ISO timestamp to a relative time string.
+ * Locale-aware: zh → "X分钟前", en → "Xm ago".
  */
 export function formatRelativeTime(isoOrDate: string | Date | undefined | null): string {
   if (!isoOrDate) return ''
   const date = isoOrDate instanceof Date ? isoOrDate : new Date(isoOrDate)
   if (isNaN(date.getTime())) return ''
+
+  const { locale } = useLocale()
+  const zh = locale.value === 'zh'
 
   const now = Date.now()
   const diff = now - date.getTime()
@@ -18,11 +19,10 @@ export function formatRelativeTime(isoOrDate: string | Date | undefined | null):
   const minutes = Math.floor(seconds / 60)
   const hours = Math.floor(minutes / 60)
 
-  if (minutes < 1) return '刚刚'
-  if (minutes < 60) return `${minutes}分钟前`
-  if (hours < 24) return `${hours}小时前`
+  if (minutes < 1) return zh ? '刚刚' : 'just now'
+  if (minutes < 60) return zh ? `${minutes}分钟前` : `${minutes}m ago`
+  if (hours < 24) return zh ? `${hours}小时前` : `${hours}h ago`
 
-  // Format as MM-DD HH:mm
   const mm = String(date.getMonth() + 1).padStart(2, '0')
   const dd = String(date.getDate()).padStart(2, '0')
   const hh = String(date.getHours()).padStart(2, '0')
@@ -35,12 +35,10 @@ export function formatRelativeTime(isoOrDate: string | Date | undefined | null):
  */
 export function useRelativeTime(isoTimestamp: () => string | Date | undefined | null) {
   const tick = ref(0)
-
-  // Update every 60 seconds
   let timer: ReturnType<typeof setInterval> | null = setInterval(() => { tick.value++ }, 60000)
 
   const display = computed(() => {
-    tick.value // dependency
+    tick.value
     return formatRelativeTime(isoTimestamp())
   })
 

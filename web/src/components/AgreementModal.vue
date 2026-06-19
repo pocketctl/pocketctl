@@ -2,14 +2,16 @@
   <div class="overlay" @click.self="$emit('close')">
     <div class="modal">
       <div class="modal-header">
-        <h3>用户协议</h3>
+        <h3>{{ locale === 'zh' ? '用户协议' : 'User Agreement' }}</h3>
         <button class="close-btn" @click="$emit('close')">
           <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6L6 18M6 6l12 12"/></svg>
         </button>
       </div>
       <div class="modal-body">
-        <div class="update-date">更新日期：2026年6月10日</div>
+        <div class="update-date">{{ locale === 'zh' ? '更新日期：2026年6月10日' : 'Updated: June 10, 2026' }}</div>
 
+        <!-- Chinese version -->
+        <template v-if="locale === 'zh'">
         <section>
           <h4>一、服务说明</h4>
           <p>pocketctl 是一款远程 AI 编程助手管理工具。通过本服务，您可以：</p>
@@ -20,7 +22,6 @@
             <li>接收任务完成和错误提醒的推送通知。</li>
           </ol>
         </section>
-
         <section>
           <h4>二、账户注册与安全</h4>
           <ol>
@@ -30,7 +31,6 @@
             <li>如发现账户被盗用，请立即联系我们。</li>
           </ol>
         </section>
-
         <section>
           <h4>三、使用规范</h4>
           <p>您同意在使用本服务时：</p>
@@ -41,7 +41,6 @@
             <li>不利用本服务对他人计算机系统进行未授权访问。</li>
           </ol>
         </section>
-
         <section>
           <h4>四、知识产权</h4>
           <ol>
@@ -50,7 +49,6 @@
             <li>您授予我们在提供服务范围内使用您内容的必要许可。</li>
           </ol>
         </section>
-
         <section>
           <h4>五、付费条款</h4>
           <ol>
@@ -59,7 +57,6 @@
             <li>付费服务的具体条款将在订阅页面明确说明。</li>
           </ol>
         </section>
-
         <section>
           <h4>六、服务变更与中断</h4>
           <ol>
@@ -68,7 +65,6 @@
             <li>因不可抗力导致的服务中断，我们不承担责任。</li>
           </ol>
         </section>
-
         <section>
           <h4>七、免责声明</h4>
           <ol>
@@ -77,7 +73,6 @@
             <li>您应自行备份重要数据，我们不对数据丢失承担责任。</li>
           </ol>
         </section>
-
         <section>
           <h4>八、协议终止</h4>
           <ol>
@@ -86,7 +81,6 @@
             <li>协议终止后，我们将在合理期限内删除您的数据。</li>
           </ol>
         </section>
-
         <section>
           <h4>九、适用法律与争议解决</h4>
           <ol>
@@ -95,13 +89,97 @@
             <li>协商不成的，任何一方可向我们所在地人民法院提起诉讼。</li>
           </ol>
         </section>
+        </template>
+
+        <!-- English version -->
+        <template v-else>
+        <section>
+          <h4>1. Service Description</h4>
+          <p>pocketctl is a remote AI coding assistant management tool. Through this service, you can:</p>
+          <ol>
+            <li>Remotely monitor AI coding sessions running on your development machine (e.g., Claude Code, Codex).</li>
+            <li>View session status, message history, and tool call details.</li>
+            <li>Send messages and manage sessions from your mobile device.</li>
+            <li>Receive push notifications for task completion and error alerts.</li>
+          </ol>
+        </section>
+        <section>
+          <h4>2. Account Registration & Security</h4>
+          <ol>
+            <li>You must register an account using phone number verification.</li>
+            <li>You must safeguard your account information and must not transfer or lend your account to others.</li>
+            <li>You are responsible for all activities under your account.</li>
+            <li>If you suspect your account has been compromised, contact us immediately.</li>
+          </ol>
+        </section>
+        <section>
+          <h4>3. Usage Guidelines</h4>
+          <p>You agree that when using this service, you will:</p>
+          <ol>
+            <li>Comply with applicable laws and regulations.</li>
+            <li>Not use this service for illegal activities or to infringe on others' rights.</li>
+            <li>Not attempt to attack, disrupt, or damage the normal operation of the service.</li>
+            <li>Not use this service for unauthorized access to others' computer systems.</li>
+          </ol>
+        </section>
+        <section>
+          <h4>4. Intellectual Property</h4>
+          <ol>
+            <li>The intellectual property of pocketctl software, interface design, trademarks, etc. belongs to us.</li>
+            <li>Content you create through this service (e.g., session records) belongs to you.</li>
+            <li>You grant us the necessary license to use your content within the scope of providing the service.</li>
+          </ol>
+        </section>
+        <section>
+          <h4>5. Paid Terms</h4>
+          <ol>
+            <li>This service is currently available for free.</li>
+            <li>Paid subscription plans may be introduced in the future, with separate announcements.</li>
+            <li>Specific terms for paid services will be clearly stated on the subscription page.</li>
+          </ol>
+        </section>
+        <section>
+          <h4>6. Service Changes & Interruptions</h4>
+          <ol>
+            <li>We reserve the right to modify or discontinue the service at any time.</li>
+            <li>Significant changes will be announced 30 days in advance.</li>
+            <li>We are not liable for service interruptions caused by force majeure.</li>
+          </ol>
+        </section>
+        <section>
+          <h4>7. Disclaimer</h4>
+          <ol>
+            <li>This service is provided "as is" without any express or implied warranties.</li>
+            <li>For any direct or indirect losses caused by using this service, our liability shall not exceed the total fees you paid in the past 12 months.</li>
+            <li>You should back up important data yourself. We are not liable for data loss.</li>
+          </ol>
+        </section>
+        <section>
+          <h4>8. Agreement Termination</h4>
+          <ol>
+            <li>You may terminate this agreement at any time by signing out and contacting customer support to delete your account.</li>
+            <li>We reserve the right to terminate the service if you violate this agreement.</li>
+            <li>After agreement termination, we will delete your data within a reasonable period.</li>
+          </ol>
+        </section>
+        <section>
+          <h4>9. Governing Law & Dispute Resolution</h4>
+          <ol>
+            <li>This agreement is governed by the laws of the People's Republic of China.</li>
+            <li>In case of disputes, both parties shall resolve them through friendly negotiation.</li>
+            <li>If negotiation fails, either party may file a lawsuit with the people's court at our location.</li>
+          </ol>
+        </section>
+        </template>
       </div>
     </div>
   </div>
 </template>
 
 <script setup lang="ts">
+import { useLocale } from '../composables/useLocale'
 defineEmits<{ close: [] }>()
+const { locale } = useLocale()
 </script>
 
 <style scoped>

@@ -2,7 +2,7 @@
   <div class="overlay" @click.self="$emit('close')">
     <div class="modal">
       <div class="modal-header">
-        <h3>关于</h3>
+        <h3>{{ t('about.title') }}</h3>
         <button class="close-btn" @click="$emit('close')">
           <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6L6 18M6 6l12 12"/></svg>
         </button>
@@ -13,10 +13,10 @@
         </div>
         <h2 class="about-name">pocketctl</h2>
         <div class="about-version">v1.0.1</div>
-        <div class="about-tagline">远程掌控你的 AI 编程助手</div>
+        <div class="about-tagline">{{ t('about.tagline') }}</div>
         <div class="about-server" v-if="relayUrl">
           <span class="status-dot" :class="connected ? 'online' : 'offline'"></span>
-          <span class="server-text">服务器: {{ relayUrl }}</span>
+          <span class="server-text">{{ t('about.server') }}: {{ relayUrl }}</span>
         </div>
       </div>
     </div>
@@ -25,8 +25,10 @@
 
 <script setup lang="ts">
 import { ref, onMounted } from 'vue'
+import { useLocale } from '../composables/useLocale'
 
 defineEmits<{ close: [] }>()
+const { t } = useLocale()
 
 const relayUrl = ref('')
 const connected = ref(false)

@@ -9,22 +9,28 @@ const GLM_MODEL = 'glm-4.6';
 const GLM_TIMEOUT_MS = 3_000;
 const MAX_TITLE_LEN = 15;
 
-const SYSTEM_PROMPT = `你是一个标题生成器。根据用户的对话内容，生成一个简洁的 session 标题。
+const SYSTEM_PROMPT = `You are a session title generator. Based on the conversation, generate a concise session title.
 
-要求：
-- 不超过15个字
-- 概括核心任务/意图
-- 不要使用引号、标点符号结尾
-- 用用户消息的语言（中文/英文）回复
-- 只返回标题文本，不要解释`;
+Rules:
+- Maximum 15 characters
+- Summarize the core task/intent
+- No quotes, no trailing punctuation
+- Detect the language from the user message, NOT the assistant message
+- Return ONLY the title text, no explanation`;
+
+const LOCALE_HINT = (locale: string) => `The user's UI language is ${locale}.
+- Prefer generating the title in ${locale}.
+- If the user message is already in ${locale}, keep that language.
+- If the user message is in a different language, generate the title in ${locale}.`;
 
 /**
  * Generate a concise session title using GLM-4.6.
  * @param userMessage - The first user message from the session
  * @param assistantMessage - The first assistant response from the session
+ * @param locale - Optional UI locale for language preference (e.g. "zh", "en")
  * @returns A title string (≤15 chars), or a fallback truncation
  */
-export async function generateTitle(userMessage: string, assistantMessage: string): Promise<string> {
+export async function generateTitle(userMessage: string, assistantMessage: string, locale?: string): Promise<string> {
   const apiKey = process.env.ZHIPU_API_KEY;
   if (!apiKey) {
     console.log('[title] ZHIPU_API_KEY not set, skipping LLM title generation');
@@ -35,7 +41,10 @@ export async function generateTitle(userMessage: string, assistantMessage: strin
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), GLM_TIMEOUT_MS);
 
-    const content = `用户消息: ${userMessage}\n\n助手回复: ${assistantMessage}`;
+    const content = `User message: ${userMessage}\n\nAssistant reply: ${assistantMessage}`;
+
+    // Build system prompt with locale hint when available
+    const systemContent = locale ? `${SYSTEM_PROMPT}\n\n${LOCALE_HINT(locale)}` : SYSTEM_PROMPT;
 
     const response = await fetch(GLM_API_URL, {
       method: 'POST',
@@ -49,7 +58,7 @@ export async function generateTitle(userMessage: string, assistantMessage: strin
         temperature: 0.3,
         stream: false,
         messages: [
-          { role: 'system', content: SYSTEM_PROMPT },
+          { role: 'system', content: systemContent },
           { role: 'user', content },
         ],
       }),

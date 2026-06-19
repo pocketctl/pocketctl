@@ -77,7 +77,7 @@ Daemon 会自动扫描 `PATH` 发现可用的代理 CLI，并注册到 Relay。
 
 ### 4. Session 标题自动生成
 
-Relay 集成了智谱 GLM-4.6 API，可自动为每个 Session 生成简洁的中文标题：
+Relay 集成了智谱 GLM-4.6 API，可自动为每个 Session 生成简洁的标题。标题语言跟随 Web 客户端 UI 语言设置（中文/英文），切换语言后新建的会话标题自动适配：
 
 ```
 新建 Session → "Terminal Session-1def4567"  (默认名称)

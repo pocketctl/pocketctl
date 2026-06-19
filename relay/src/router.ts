@@ -4,8 +4,8 @@ import * as db from './db.js';
 import { generateTitle } from './title.js';
 import { notifyUser, sessionStatusPush, daemonOfflinePush } from './push.js';
 
-interface DaemonConnection { ws: WebSocket; daemonId: string; hostname: string; agents: any[]; userId: number | null; os?: string; ip?: string; arch?: string; version?: string; startedAt?: number }
-interface ClientConnection { ws: WebSocket; subscribedSessions: Set<string>; userId: number | null }
+interface DaemonConnection { ws: WebSocket; daemonId: string; hostname: string; agents: any[]; userId: number | null; os?: string; ip?: string; port?: string; arch?: string; version?: string; startedAt?: number }
+interface ClientConnection { ws: WebSocket; subscribedSessions: Set<string>; userId: number | null; locale: string }
 interface DaemonMetrics { cpuPct: number; memPct: number; diskPct: number; updatedAt: number }
 
 export class Router {
@@ -93,10 +93,12 @@ export class Router {
 
     const daemonOS = msg.os || 'unknown';
     const daemonIP = msg.ip || 'unknown';
+    const daemonPort = msg.port || '';
     const daemonArch = msg.arch || '';
     const daemonVersion = msg.version || '';
     const daemonStartedAt = msg.started_at || 0;
-    this.daemons.set(daemonId, { ws, daemonId, hostname, agents, userId, os: daemonOS, ip: daemonIP, arch: daemonArch, version: daemonVersion, startedAt: daemonStartedAt });
+    this.daemons.set(daemonId, { ws, daemonId, hostname, agents, userId, os: daemonOS, ip: daemonIP, port: daemonPort, arch: daemonArch, version: daemonVersion, startedAt: daemonStartedAt });
+    console.log('[ws] daemon registered', daemonId, 'agents:', JSON.stringify(agents), 'userId:', userId);
     try { await db.upsertDaemon(this.pool, daemonId, hostname, agents, daemonArch, daemonVersion, daemonStartedAt); } catch (e) { console.error('upsertDaemon:', e); }
     if (userId) {
       try { await db.bindDaemonToUser(this.pool, daemonId, userId); } catch (e) { console.error('bindDaemon:', e); }
@@ -167,7 +169,7 @@ export class Router {
   }
 
   registerClient(ws: WebSocket, userId: number | null): void {
-    this.clients.set(ws, { ws, subscribedSessions: new Set(), userId });
+    this.clients.set(ws, { ws, subscribedSessions: new Set(), userId, locale: 'zh' });
   }
   unregisterClient(ws: WebSocket): void { this.clients.delete(ws); }
 
@@ -305,7 +307,16 @@ export class Router {
           console.log(`[router] skipping title generation for ${sessionId} — title already custom`);
           return;
         }
-        generateTitle(userMsg, assistantMsg).then((title) => {
+        // Resolve session owner locale for language-aware title generation
+        let ownerLocale: string | undefined;
+        // Find user clients subscribed to this session to get their locale
+        for (const [, client] of this.clients) {
+          if (client.subscribedSessions.has(sessionId) && client.userId) {
+            ownerLocale = client.locale;
+            break;
+          }
+        }
+        generateTitle(userMsg, assistantMsg, ownerLocale).then((title) => {
           if (!title) return;
           // Layer 3: conditional update in DB
           db.updateTitleIfDefault(this.pool, sessionId, title).then((updated) => {
@@ -331,6 +342,10 @@ export class Router {
       return;
     }
     db.insertEvent(this.pool, sessionId, msg.type, msg).catch(console.error);
+    // Accumulate per-turn token usage from agent_text events carrying usage (model-agnostic)
+    if (msg.usage != null) {
+      db.incrementSessionTokens(this.pool, sessionId, msg.usage).catch(console.error);
+    }
     if (msg.type === 'session_status') {
       db.upsertSession(this.pool, sessionId, daemonId, '', '', msg.status || 'unknown', undefined, undefined, msg.exit_reason).catch(console.error);
       // C2: persist cumulative cost_usd from result event
@@ -354,6 +369,10 @@ export class Router {
     if (msg.type === 'replay') { this.handleReplay(clientWs, msg.session_id, msg.last_seq, msg.req_id, msg.direction, msg.limit); return; }
     if (msg.type === 'list_sessions') { this.handleListSessions(clientWs, client.userId); return; }
     if (msg.type === 'list_daemons') { console.log('[router] list_daemons from user', client.userId, 'daemons in map:', this.daemons.size); this.handleListDaemons(clientWs, client.userId); return; }
+    if (msg.type === 'set_locale') {
+      if (msg.locale) { client.locale = msg.locale; }
+      return;
+    }
 
     if (msg.type === 'session_delete') {
       const sessionId = msg.session_id;
@@ -506,7 +525,7 @@ export class Router {
       const daemonList: any[] = [];
       const sessionCounts = userId ? await db.getSessionCountsByUser(this.pool, userId) : {};
       for (const [, daemon] of this.daemons) {
-        console.log('[router] list_daemons iterating daemon', daemon.daemonId, 'daemon.userId:', daemon.userId, 'request.userId:', userId);
+        console.log('[router] list_daemons iterating daemon', daemon.daemonId, 'daemon.userId:', daemon.userId, 'request.userId:', userId, 'agents:', JSON.stringify(daemon.agents));
         if (!this.sameUser(daemon.userId, userId)) continue;
         const alias = await db.getDaemonAlias(this.pool, daemon.daemonId);
         const metrics = this.daemonMetrics.get(daemon.daemonId);
@@ -520,9 +539,11 @@ export class Router {
           status: 'online',
           os: daemon.os || 'unknown',
           ip: daemon.ip || 'unknown',
+          port: daemon.port || '',
           arch: daemon.arch || '',
           version: daemon.version || '',
           started_at: daemon.startedAt || 0,
+          last_heartbeat: Date.now(),
           cpu_pct: metrics?.cpuPct ?? null,
           mem_pct: metrics?.memPct ?? null,
           disk_pct: metrics?.diskPct ?? null,

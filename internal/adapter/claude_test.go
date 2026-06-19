@@ -198,9 +198,12 @@ func TestSyntheticReplyBecomesReceipt_Unavailable(t *testing.T) {
 	}
 }
 
-func TestCompactFailedBecomesReceipt_Failed(t *testing.T) {
+func TestCompactNotEnoughMessagesBecomesSuccess(t *testing.T) {
+	// "Not enough messages to compact" is NOT a real failure — the command
+	// ran fine, there was just nothing to compact. It must map to success so
+	// the receipt shows a neutral tone, not an error.
 	a := NewClaudeAdapter("/compact")
-	// Feed the system status first (compact_result:failed)
+	// Feed the system status first (compact_result:failed + the benign message)
 	if _, err := a.ParseStreamLine(`{"type":"system","subtype":"status","compact_result":"failed","compact_error":"Not enough messages to compact."}`); err != nil {
 		t.Fatal(err)
 	}
@@ -209,11 +212,28 @@ func TestCompactFailedBecomesReceipt_Failed(t *testing.T) {
 	if len(events) != 1 || events[0].Type != "command_receipt" {
 		t.Fatalf("expected 1 command_receipt, got %v", events)
 	}
-	if events[0].ReceiptStatus != "failed" {
-		t.Fatalf("expected failed, got %s", events[0].ReceiptStatus)
+	if events[0].ReceiptStatus != "success" {
+		t.Fatalf("expected success (not a real failure), got %s", events[0].ReceiptStatus)
 	}
 	if events[0].Message != "Not enough messages to compact." {
-		t.Fatalf("expected compact_error as message, got %s", events[0].Message)
+		t.Fatalf("expected message, got %s", events[0].Message)
+	}
+}
+
+func TestCompactRealFailureBecomesFailed(t *testing.T) {
+	// A genuine compaction error (not the benign "not enough messages") must
+	// still map to failed.
+	a := NewClaudeAdapter("/compact")
+	if _, err := a.ParseStreamLine(`{"type":"system","subtype":"status","compact_result":"failed","compact_error":"Compaction engine error: out of memory."}`); err != nil {
+		t.Fatal(err)
+	}
+	line := `{"type":"assistant","message":{"model":"<synthetic>","content":[{"type":"text","text":"Compaction failed."}]}}`
+	events, _ := a.ParseStreamLine(line)
+	if len(events) != 1 || events[0].Type != "command_receipt" {
+		t.Fatalf("expected 1 command_receipt, got %v", events)
+	}
+	if events[0].ReceiptStatus != "failed" {
+		t.Fatalf("expected failed for real error, got %s", events[0].ReceiptStatus)
 	}
 }
 
@@ -321,5 +341,21 @@ func TestExtractLocalCommandOutput(t *testing.T) {
 	}
 	if got := extractLocalCommandOutput("no tags here"); got != "" {
 		t.Errorf("expected empty for no tags, got %q", got)
+	}
+}
+
+func TestAssistantUsageForwarded(t *testing.T) {
+	a := NewClaudeAdapter("hello")
+	line := `{"type":"assistant","message":{"role":"assistant","model":"claude-sonnet-4","content":[{"type":"text","text":"Hi"}],"usage":{"input_tokens":1200,"output_tokens":50,"cache_read_input_tokens":8000}}}`
+	events, _ := a.ParseStreamLine(line)
+	if len(events) != 1 || events[0].Type != "agent_text" {
+		t.Fatalf("expected 1 agent_text, got %v", events)
+	}
+	u := events[0].Usage
+	if u == nil {
+		t.Fatal("expected Usage non-nil")
+	}
+	if u.InputTokens != 1200 || u.OutputTokens != 50 || u.CacheRead != 8000 {
+		t.Errorf("unexpected usage: %+v", u)
 	}
 }

@@ -44,6 +44,13 @@
   --shadow-md:       0 4px 12px rgba(0,0,0,0.4);
   --shadow-lg:       0 12px 40px rgba(0,0,0,0.5);
   --logo-filter:     none;
+
+  /* Message block left bars (full-width agent/tool/error blocks) */
+  --bar-w:           3px;
+  --bar-accent:      var(--accent);
+  --bar-tool:        var(--sub-agent);
+  --bar-error:       var(--error);
+  --bar-success:     var(--success);
 }
 
 /* ---- LIGHT THEME ---- */
@@ -86,6 +93,13 @@
   --shadow-md:       0 4px 12px rgba(0,0,0,0.1);
   --shadow-lg:       0 12px 40px rgba(0,0,0,0.12);
   --logo-filter:     none;
+
+  /* Message block left bars (full-width agent/tool/error blocks) */
+  --bar-w:           3px;
+  --bar-accent:      var(--accent);
+  --bar-tool:        var(--sub-agent);
+  --bar-error:       var(--error);
+  --bar-success:     var(--success);
 }
 
 /* ---- Typography ---- */
@@ -282,6 +296,7 @@ body {
 /* ---- Main Content ---- */
 .main-content {
   flex: 1;
+  min-width: 0;
   margin-left: var(--sidebar-w);
   min-height: 100vh;
   transition: margin-left var(--transition);
@@ -626,6 +641,29 @@ body {
 
 .code-block .cmd { color: var(--success); }
 .code-block .comment { color: var(--fg-tertiary); }
+
+/* ---- highlight.js token theme (GitHub Dark inspired, fixed palette) ----
+   Syntax role colors are intentionally NOT driven by semantic theme tokens
+   (they represent language roles, not app semantics). Values mirror the
+   iOS SyntaxHighlighter palette (pcSyntax*) for cross-platform consistency. */
+[data-theme="dark"] .hljs { color: var(--fg); }
+[data-theme="light"] .hljs { color: var(--fg); }
+.hljs-comment, .hljs-quote { color: #8b949e; font-style: italic; }
+.hljs-keyword, .hljs-selector-tag, .hljs-literal, .hljs-type, .hljs-name { color: #ff7b72; }
+.hljs-string, .hljs-regexp, .hljs-addition, .hljs-attribute, .hljs-meta .hljs-string { color: #a5d6ff; }
+.hljs-number, .hljs-symbol, .hljs-bullet, .hljs-link, .hljs-template-variable, .hljs-variable { color: #79c0ff; }
+.hljs-title, .hljs-title.function_, .hljs-section, .hljs-built_in, .hljs-class .hljs-title { color: #d2a8ff; }
+.hljs-title.class_, .hljs-type.built_in { color: #ffa657; }
+.hljs-attr, .hljs-attribute, .hljs-property { color: #79c0ff; }
+.hljs-params { color: var(--fg); }
+.hljs-meta, .hljs-meta .hljs-keyword { color: #8b949e; }
+.hljs-deletion { color: #ffa657; }
+.hljs-emphasis { font-style: italic; }
+.hljs-strong { font-weight: 600; }
+.hljs-section { font-weight: 600; }
+/* diff additions/deletions (when language is `diff`) */
+.hljs-addition { background: rgba(63, 185, 80, 0.12); display: block; }
+.hljs-deletion { background: rgba(248, 81, 73, 0.12); display: block; }
 
 /* ---- Grid Helpers ---- */
 .grid-2 { display: grid; grid-template-columns: repeat(2, 1fr); gap: 16px; }

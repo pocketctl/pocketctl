@@ -136,7 +136,7 @@ func cmdLogin(args []string) {
 		}
 	}
 	if baseURL == "" {
-		baseURL = "ws://localhost/ws"
+		baseURL = "ws://localhost:8080/ws"
 	}
 
 	// Convert WebSocket URL to HTTP URL for API calls
@@ -343,7 +343,7 @@ func cmdDaemonStart(args []string) {
 		}
 	}
 	if url == "" {
-		url = "ws://localhost/ws"
+		url = "ws://localhost:8080/ws"
 	}
 
 	// Resolve token
@@ -1014,9 +1014,10 @@ func handleCommands(ctx context.Context, client *ws.Client, sm *session.SessionM
 				logger.Info("create session", "agent", cmd.Agent, "cwd", cmd.Cwd)
 				stateDirty.Store(true)
 				config := protocol.SessionConfig{
-					Agent: cmd.Agent,
-					Cwd:   cmd.Cwd,
-					Prompt: cmd.Prompt,
+					Agent:          cmd.Agent,
+					Cwd:            cmd.Cwd,
+					Prompt:         cmd.Prompt,
+					PermissionMode: cmd.PermissionMode,
 				}
 				if config.Agent == "" {
 					config.Agent = "claude-code"
@@ -1085,6 +1086,23 @@ func handleCommands(ctx context.Context, client *ws.Client, sm *session.SessionM
 				stateDirty.Store(true)
 				if err := sm.KillSession(cmd.SessionID); err != nil {
 					logger.Error("kill session failed", "error", err)
+				}
+
+			case "session_interrupt":
+				logger.Info("interrupt session", "session", cmd.SessionID)
+				if err := sm.InterruptSession(cmd.SessionID); err != nil {
+					logger.Error("interrupt session failed", "error", err)
+				}
+
+			case "set_permission_mode":
+				logger.Info("set permission mode", "session", cmd.SessionID, "mode", cmd.Content)
+				if err := sm.SetPermissionMode(ctx, cmd.SessionID, cmd.Content); err != nil {
+					logger.Error("set permission mode failed", "error", err)
+					client.SendMsg(protocol.DaemonEvent{
+						Type:      "error",
+						SessionID: cmd.SessionID,
+						Error:     err.Error(),
+					})
 				}
 
 			case "list_commands":

@@ -2,14 +2,16 @@
   <div class="overlay" @click.self="$emit('close')">
     <div class="modal">
       <div class="modal-header">
-        <h3>隐私政策</h3>
+        <h3>{{ t('settings.privacy_policy') }}</h3>
         <button class="close-btn" @click="$emit('close')">
           <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6L6 18M6 6l12 12"/></svg>
         </button>
       </div>
       <div class="modal-body">
-        <div class="update-date">更新日期：2026年6月10日</div>
+        <div class="update-date">{{ locale === 'zh' ? '更新日期：2026年6月10日' : 'Updated: June 10, 2026' }}</div>
 
+        <!-- Chinese version -->
+        <template v-if="locale === 'zh'">
         <section>
           <h4>一、信息收集</h4>
           <p>pocketctl（以下简称"我们"）在提供服务过程中，可能收集以下信息：</p>
@@ -20,7 +22,6 @@
             <li>主机连接数据：主机名、IP 地址（仅在连接时临时使用），用于远程管理功能。</li>
           </ol>
         </section>
-
         <section>
           <h4>二、信息使用</h4>
           <p>我们收集的信息仅用于以下目的：</p>
@@ -32,7 +33,6 @@
           </ol>
           <p>我们不会将您的个人信息出售给第三方。</p>
         </section>
-
         <section>
           <h4>三、第三方服务</h4>
           <p>本应用使用以下第三方服务：</p>
@@ -42,7 +42,6 @@
           </ol>
           <p>上述第三方服务有独立的隐私政策，我们建议您查阅其相关政策。</p>
         </section>
-
         <section>
           <h4>四、数据存储与安全</h4>
           <ol>
@@ -52,7 +51,6 @@
             <li>数据库采用加密存储，定期备份。</li>
           </ol>
         </section>
-
         <section>
           <h4>五、用户权利</h4>
           <p>您享有以下权利：</p>
@@ -64,29 +62,96 @@
           </ol>
           <p>行使上述权利，请通过应用内「帮助与反馈」联系我们。</p>
         </section>
-
         <section>
           <h4>六、未成年人保护</h4>
           <p>本服务不面向 14 岁以下未成年人。如您为未成年人，请在监护人指导下使用本服务。</p>
         </section>
-
         <section>
           <h4>七、政策更新</h4>
           <p>我们可能不时更新本隐私政策。重大变更将通过应用内通知或电子邮件告知您。继续使用本服务即表示您同意更新后的政策。</p>
         </section>
-
         <section>
           <h4>八、联系我们</h4>
           <p>如您对本隐私政策有任何疑问，请通过以下方式联系我们：</p>
           <p>邮箱：<a href="mailto:james_2001_2001@163.com">james_2001_2001@163.com</a></p>
         </section>
+        </template>
+
+        <!-- English version -->
+        <template v-else>
+        <section>
+          <h4>1. Information Collection</h4>
+          <p>pocketctl ("we") may collect the following information while providing our services:</p>
+          <ol>
+            <li>Account information: Phone number, used for login verification and account identification.</li>
+            <li>Device information: Device model, OS version, device identifiers, used for push notifications and security authentication.</li>
+            <li>Usage data: Feature usage frequency, operation logs, used for service improvement and troubleshooting.</li>
+            <li>Host connection data: Hostname, IP address (temporarily used during connection only), used for remote management.</li>
+          </ol>
+        </section>
+        <section>
+          <h4>2. Information Usage</h4>
+          <p>The information we collect is used solely for the following purposes:</p>
+          <ol>
+            <li>Core services: Account authentication, session management, remote control.</li>
+            <li>Push notifications: Task completion, error alerts, host status changes.</li>
+            <li>Service improvement: Analyze usage patterns, optimize product experience.</li>
+            <li>Security: Abnormal login detection, fraud prevention.</li>
+          </ol>
+          <p>We do not sell your personal information to third parties.</p>
+        </section>
+        <section>
+          <h4>3. Third-Party Services</h4>
+          <p>This application uses the following third-party services:</p>
+          <ol>
+            <li>Zhipu AI (GLM-4.6): Used to auto-generate session titles. Only the first message summary is transmitted, not the full conversation.</li>
+            <li>Apple Push Notification Service (APNs): Used for iOS push notifications.</li>
+          </ol>
+          <p>The above third-party services have their own privacy policies. We recommend reviewing them.</p>
+        </section>
+        <section>
+          <h4>4. Data Storage & Security</h4>
+          <ol>
+            <li>Data is stored on cloud servers located in China.</li>
+            <li>All network communication is encrypted via HTTPS/WSS.</li>
+            <li>Sensitive information (e.g., auth tokens) is securely stored using iOS Keychain.</li>
+            <li>Databases use encrypted storage with regular backups.</li>
+          </ol>
+        </section>
+        <section>
+          <h4>5. User Rights</h4>
+          <p>You have the following rights:</p>
+          <ol>
+            <li>Right to access: View your account information and usage data at any time.</li>
+            <li>Right to deletion: Request deletion of your account and all related data.</li>
+            <li>Right to export: Request export of your session history data.</li>
+            <li>Right to withdraw consent: Withdraw consent for data processing at any time.</li>
+          </ol>
+          <p>To exercise these rights, contact us via "Help & Feedback" in the app.</p>
+        </section>
+        <section>
+          <h4>6. Minors</h4>
+          <p>This service is not intended for users under 14. If you are a minor, please use this service under guardian supervision.</p>
+        </section>
+        <section>
+          <h4>7. Policy Updates</h4>
+          <p>We may update this privacy policy from time to time. Significant changes will be communicated via in-app notifications or email. Continued use of the service constitutes acceptance of the updated policy.</p>
+        </section>
+        <section>
+          <h4>8. Contact Us</h4>
+          <p>If you have any questions about this privacy policy, please contact us:</p>
+          <p>Email: <a href="mailto:james_2001_2001@163.com">james_2001_2001@163.com</a></p>
+        </section>
+        </template>
       </div>
     </div>
   </div>
 </template>
 
 <script setup lang="ts">
+import { useLocale } from '../composables/useLocale'
 defineEmits<{ close: [] }>()
+const { locale, t } = useLocale()
 </script>
 
 <style scoped>

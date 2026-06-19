@@ -93,6 +93,9 @@ function connect(url?: string) {
 
   ws.value.onopen = () => {
     connected.value = true; reconnecting.value = false; reconnectAttempt = 0
+    // Report current locale to relay for language-aware title generation
+    const locale = localStorage.getItem('pocketctl-locale') || 'zh'
+    send({ type: 'set_locale', locale })
     // Flush pending messages
     if (pendingMessages.length > 0) {
       const msgs = pendingMessages; pendingMessages = []
@@ -174,6 +177,18 @@ function send(data: any) {
   }
 }
 
+function reportLocale() {
+  const locale = localStorage.getItem('pocketctl-locale') || 'zh'
+  send({ type: 'set_locale', locale })
+}
+
+// Watch locale changes and re-report to relay
+if (typeof window !== 'undefined') {
+  window.addEventListener('pocketctl-locale-change', ((e: CustomEvent) => {
+    send({ type: 'set_locale', locale: e.detail.locale })
+  }) as EventListener)
+}
+
 function onEvent(typeOrHandler: string | EventHandler, maybeHandler?: EventHandler) {
   if (typeof typeOrHandler === 'function') {
     handlers.add(typeOrHandler)
@@ -190,5 +205,5 @@ function onEvent(typeOrHandler: string | EventHandler, maybeHandler?: EventHandl
 }
 
 export function useWebSocket() {
-  return { ws, connected, reconnecting, daemons, isDaemonOnline, effectiveStatus, connect, send, onEvent }
+  return { ws, connected, reconnecting, daemons, isDaemonOnline, effectiveStatus, connect, send, onEvent, reportLocale }
 }

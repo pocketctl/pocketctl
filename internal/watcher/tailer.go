@@ -78,6 +78,7 @@ type JSONLTailer struct {
 	file     *os.File
 	scanBuf  []byte // reusable 1MB scanner buffer
 	paused   atomic.Bool // D2: paused during sendToIdleTerminal to avoid double-forward
+	parser   *adapter.JSONLStreamParser // stateful parser: tracks pendingCmd + compact status for receipts
 }
 
 // Pause stops the tailer from forwarding new lines (used during sendToIdleTerminal
@@ -89,6 +90,16 @@ func (t *JSONLTailer) Resume() { t.paused.Store(false) }
 
 // IsPaused reports whether the tailer is currently paused.
 func (t *JSONLTailer) IsPaused() bool { return t.paused.Load() }
+
+// SetPendingCmd records the slash command from a user message so the parser
+// can attach it (e.g. "/compact") to the next command_receipt event.
+func (t *JSONLTailer) SetPendingCmd(content string) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.parser != nil {
+		t.parser.SetPendingCmd(content)
+	}
+}
 
 // NewJSONLTailer creates a tailer for the given JSONL file path.
 // It starts from the end of the file (no historical replay).
@@ -106,6 +117,7 @@ func NewJSONLTailer(filePath string) (*JSONLTailer, error) {
 		offset:   info.Size(), // Start from end
 		file:     f,
 		scanBuf:  make([]byte, 1024*1024),
+		parser:   adapter.NewJSONLStreamParser(),
 	}, nil
 }
 
@@ -123,6 +135,7 @@ func NewJSONLTailerFromStart(filePath string) (*JSONLTailer, error) {
 		offset:   0,
 		file:     f,
 		scanBuf:  make([]byte, 1024*1024),
+		parser:   adapter.NewJSONLStreamParser(),
 	}, nil
 }
 
@@ -192,7 +205,7 @@ func (t *JSONLTailer) TailNewLines() ([]protocol.DaemonEvent, []string, error) {
 		line := scanner.Text()
 		rawLines = append(rawLines, line)
 
-		events, err := adapter.ParseJSONLLine(line)
+		events, err := t.parser.Parse(line)
 		if err != nil {
 			continue // Skip unparseable lines
 		}

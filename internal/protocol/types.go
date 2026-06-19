@@ -12,6 +12,9 @@ type ClientMessage struct {
 	Prompt    string `json:"prompt,omitempty"`
 	RequestID string `json:"request_id,omitempty"`
 	Approved  bool   `json:"approved,omitempty"`
+	// PermissionMode for session_create: "default" | "acceptEdits" | "plan" | "bypassPermissions".
+	// Empty falls back to "acceptEdits" (the daemon default).
+	PermissionMode string `json:"permission_mode,omitempty"`
 }
 
 // Daemon → Client events
@@ -47,6 +50,16 @@ type DaemonEvent struct {
 	Command          string          `json:"command,omitempty"`         // for command_receipt (e.g. "/compact")
 	ReceiptStatus    string          `json:"receipt_status,omitempty"`  // for command_receipt: success/failed/unavailable
 	Message          string          `json:"message,omitempty"`         // for command_receipt message
+	Usage            *ContextUsage   `json:"usage,omitempty"`           // token usage for agent_text events
+	PermissionMode   string          `json:"permission_mode,omitempty"` // current mode (permission_mode_changed event)
+}
+
+// ContextUsage carries token consumption for a single assistant turn.
+type ContextUsage struct {
+	InputTokens  int `json:"input_tokens,omitempty"`
+	OutputTokens int `json:"output_tokens,omitempty"`
+	CacheRead    int `json:"cache_read_tokens,omitempty"`
+	CacheCreate  int `json:"cache_create_tokens,omitempty"`
 }
 
 // CommandItem represents a slash command or skill available in a session,
