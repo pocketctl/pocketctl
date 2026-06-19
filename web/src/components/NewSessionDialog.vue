@@ -113,15 +113,15 @@
 
         <!-- Footer Actions -->
         <div class="modal-footer">
-          <button class="btn btn-cancel" :disabled="creating" @click="$emit('close')">取消</button>
+          <button class="btn btn-cancel" :disabled="creating" @click="$emit('close')">{{ t('common.cancel') }}</button>
           <button class="btn btn-start" :class="{ 'is-loading': creating }" :disabled="!canStart || creating" @click="startSession">
             <span class="btn-content">
               <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M12 5v14M5 12h14"/></svg>
-              开始会话
+              {{ t('new_session.start_btn') }}
             </span>
             <span v-if="creating" class="btn-loading">
               <span class="spinner"></span>
-              {{ phase === 'connecting' ? '正在连接主机…' : '正在创建…' }}
+              {{ phase === 'connecting' ? t('new_session.connecting_phase') : t('new_session.creating') }}
             </span>
           </button>
         </div>
@@ -131,12 +131,12 @@
 </template>
 
 <script setup lang="ts">
-import { ref, reactive, computed, onMounted, onUnmounted } from 'vue'
+import { ref, reactive, computed, onMounted, onUnmounted, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { useWebSocket } from '../composables/useWebSocket'
 import { useLocale } from '../composables/useLocale'
 
-const props = defineProps<{ daemons?: any[] }>()
+const props = defineProps<{ daemons?: any[]; preSelectedDaemonId?: string }>()
 const emit = defineEmits<{ close: [] }>()
 
 const router = useRouter()
@@ -157,7 +157,7 @@ const errorDesc = ref('')
 const charCount = ref(0)
 const selectedDaemonName = computed(() => {
   const d = props.daemons?.find((x: any) => x.daemon_id === form.daemonId)
-  return d?.daemon_alias || d?.hostname || '主机'
+  return d?.daemon_alias || d?.hostname || t('nav.hosts')
 })
 
 const canStart = computed(() => !!(form.daemonId && form.agent === 'claude-code'))
@@ -178,14 +178,15 @@ function hideError() {
 }
 
 function showError(reason: string, err?: string) {
+  const host = selectedDaemonName.value
   const map: Record<string, { title: string; desc: string }> = {
-    no_cli: { title: `无法在「${selectedDaemonName.value}」上创建会话`, desc: '主机未安装 Claude Code CLI，请在主机上安装后重试' },
-    bad_cwd: { title: `无法在「${selectedDaemonName.value}」上创建会话`, desc: `工作目录不可用：${form.cwd || '/'}，请检查路径与权限` },
-    start_fail: { title: `无法在「${selectedDaemonName.value}」上创建会话`, desc: `Agent 进程启动失败：${err || '未知错误'}` },
-    timeout: { title: `无法在「${selectedDaemonName.value}」上创建会话`, desc: '主机连接超时：daemon 未在 15 秒内完成会话初始化。请确认主机在线、daemon 与 claude CLI 运行正常后重试' },
-    daemon_offline: { title: `无法在「${selectedDaemonName.value}」上创建会话`, desc: '主机离线或无可用的 daemon，请确认主机在线后重试' },
+    no_cli: { title: t('new_session.error_title', { host }), desc: t('new_session.failed_no_cli_desc') },
+    bad_cwd: { title: t('new_session.error_title', { host }), desc: t('new_session.failed_bad_cwd_desc', { cwd: form.cwd || '/' }) },
+    start_fail: { title: t('new_session.error_title', { host }), desc: t('new_session.failed_start_desc', { error: err || t('dashboard.unknown_error') }) },
+    timeout: { title: t('new_session.error_title', { host }), desc: t('new_session.failed_timeout_desc') },
+    daemon_offline: { title: t('new_session.error_title', { host }), desc: t('new_session.failed_offline_desc') },
   }
-  const e = map[reason] || { title: '创建失败', desc: err || '未知错误' }
+  const e = map[reason] || { title: t('new_session.failed'), desc: err || t('dashboard.unknown_error') }
   errorTitle.value = e.title
   errorDesc.value = e.desc
 }
@@ -205,11 +206,21 @@ function startSession() {
   // Save working directory for next time
   if (form.cwd) localStorage.setItem('pocketctl_default_cwd', form.cwd)
 
-  // ① session_created(pending): 切 CONNECTING 态，不跳转
+  // ① session_created: real ID → redirect; pending ID → wait for session_id_changed
   cleanupFns.push(onEvent('session_created', (msg: any) => {
     if (done) return
-    phase.value = 'connecting'
-    pendingSessionId = msg.session_id
+    const sid = msg.session_id as string
+    pendingSessionId = sid
+    if (sid && !sid.startsWith('pending')) {
+      // Real session ID — redirect immediately
+      done = true
+      if (timeoutTimer) clearTimeout(timeoutTimer)
+      creating.value = false
+      router.push(`/session/${sid}`)
+      emit('close')
+    } else {
+      phase.value = 'connecting'
+    }
   }))
 
   // ② session_id_changed(real): 跳转到真实 ID
@@ -261,6 +272,17 @@ function startSession() {
     showError('timeout')
   }, 15000)
 }
+
+// Auto-select daemon when a host filter was passed in
+let preSelectDone = false
+watch([() => props.daemons, () => props.preSelectedDaemonId], ([daemons, preId]) => {
+  if (preSelectDone || !preId || !daemons?.length) return
+  const target = daemons.find(d => d.daemon_id === preId)
+  if (target?.daemon_online) {
+    form.daemonId = preId
+    preSelectDone = true
+  }
+})
 
 onMounted(() => {
   connect()

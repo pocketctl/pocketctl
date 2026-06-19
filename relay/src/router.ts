@@ -5,7 +5,7 @@ import { generateTitle } from './title.js';
 import { notifyUser, sessionStatusPush, daemonOfflinePush } from './push.js';
 
 interface DaemonConnection { ws: WebSocket; daemonId: string; hostname: string; agents: any[]; userId: number | null; os?: string; ip?: string; port?: string; arch?: string; version?: string; startedAt?: number }
-interface ClientConnection { ws: WebSocket; subscribedSessions: Set<string>; userId: number | null }
+interface ClientConnection { ws: WebSocket; subscribedSessions: Set<string>; userId: number | null; locale: string }
 interface DaemonMetrics { cpuPct: number; memPct: number; diskPct: number; updatedAt: number }
 
 export class Router {
@@ -169,7 +169,7 @@ export class Router {
   }
 
   registerClient(ws: WebSocket, userId: number | null): void {
-    this.clients.set(ws, { ws, subscribedSessions: new Set(), userId });
+    this.clients.set(ws, { ws, subscribedSessions: new Set(), userId, locale: 'zh' });
   }
   unregisterClient(ws: WebSocket): void { this.clients.delete(ws); }
 
@@ -307,7 +307,16 @@ export class Router {
           console.log(`[router] skipping title generation for ${sessionId} — title already custom`);
           return;
         }
-        generateTitle(userMsg, assistantMsg).then((title) => {
+        // Resolve session owner locale for language-aware title generation
+        let ownerLocale: string | undefined;
+        // Find user clients subscribed to this session to get their locale
+        for (const [, client] of this.clients) {
+          if (client.subscribedSessions.has(sessionId) && client.userId) {
+            ownerLocale = client.locale;
+            break;
+          }
+        }
+        generateTitle(userMsg, assistantMsg, ownerLocale).then((title) => {
           if (!title) return;
           // Layer 3: conditional update in DB
           db.updateTitleIfDefault(this.pool, sessionId, title).then((updated) => {
@@ -360,6 +369,10 @@ export class Router {
     if (msg.type === 'replay') { this.handleReplay(clientWs, msg.session_id, msg.last_seq, msg.req_id, msg.direction, msg.limit); return; }
     if (msg.type === 'list_sessions') { this.handleListSessions(clientWs, client.userId); return; }
     if (msg.type === 'list_daemons') { console.log('[router] list_daemons from user', client.userId, 'daemons in map:', this.daemons.size); this.handleListDaemons(clientWs, client.userId); return; }
+    if (msg.type === 'set_locale') {
+      if (msg.locale) { client.locale = msg.locale; }
+      return;
+    }
 
     if (msg.type === 'session_delete') {
       const sessionId = msg.session_id;

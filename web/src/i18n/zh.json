@@ -174,6 +174,14 @@
   "new_session.perm_confirm": "每次操作需确认",
   "new_session.perm_auto_edit": "自动接受文件编辑",
   "new_session.perm_plan_only": "只读分析，不改文件",
+  "new_session.start_btn": "开始会话",
+  "new_session.connecting_phase": "正在连接主机…",
+  "new_session.error_title": "无法在「{{host}}」上创建会话",
+  "new_session.failed_timeout_desc": "主机连接超时：daemon 未在 15 秒内完成会话初始化。请确认主机在线、daemon 与 claude CLI 运行正常后重试",
+  "new_session.failed_no_cli_desc": "主机未安装 Claude Code CLI，请在主机上安装后重试",
+  "new_session.failed_bad_cwd_desc": "工作目录不可用：{{cwd}}，请检查路径与权限",
+  "new_session.failed_start_desc": "Agent 进程启动失败：{{error}}",
+  "new_session.failed_offline_desc": "主机离线或无可用的 daemon，请确认主机在线后重试",
   "settings.install_desc": "在你的开发机上运行以下命令安装 Daemon",
   "settings.install_step": "安装 Daemon",
   "settings.login_step": "登录账号",
@@ -252,8 +260,8 @@
   "dashboard.token_usage": "Token 消耗",
   "dashboard.token_total": "总消耗",
   "dashboard.token_today": "今日",
-  "dashboard.token_week": "本周",
-  "dashboard.token_month": "本月",
+  "dashboard.token_week": "近7天",
+  "dashboard.token_month": "近30天",
   "dashboard.token_input": "输入",
   "dashboard.token_output": "输出",
   "dashboard.token_cache_read": "缓存读取",
@@ -339,7 +347,7 @@
   "hosts.agent_info_pending": "等待 daemon 上报 Agent 信息",
   "hosts.token_host_total": "主机总计",
   "hosts.token_today_consumed": "今日消耗",
-  "hosts.token_month_consumed": "本月消耗",
+  "hosts.token_month_consumed": "近30天消耗",
   "hosts.token_no_records": "暂无会话消耗记录",
   "hosts.kick_title": "强制踢下线「{{name}}」？",
   "hosts.kick_desc": "立即断开 daemon 连接，所有运行中会话被中止。需重新连接恢复。",
@@ -356,5 +364,11 @@
   "hosts.upgrade_error": "升级失败：{{error}}",
   "hosts.alias_prompt": "输入新别名",
 
-  "common.processing": "处理中…"
+  "common.processing": "处理中…",
+
+  "dashboard.page_size": "每页显示",
+  "dashboard.page_total": "共 {{count}} 条",
+  "dashboard.page_size_unit": "条",
+  "dashboard.page_first": "首页",
+  "dashboard.page_last": "末页"
 }

@@ -25,14 +25,14 @@
       <div v-if="message.expanded" class="tool-body" @click.stop>
         <!-- Input -->
         <div class="tool-section">
-          <div class="tool-label">输入</div>
+          <div class="tool-label">{{ t('session.tool_input') }}</div>
         </div>
         <div class="tool-code tool-input">{{ inputText }}</div>
 
         <!-- Output -->
         <template v-if="fullOutput">
           <div class="tool-section">
-            <div class="tool-label">输出</div>
+            <div class="tool-label">{{ t('session.tool_output') }}</div>
           </div>
           <div class="tool-output-wrap">
             <!-- Fenced code block → MarkdownRenderer applies syntax highlight + copy -->
@@ -42,13 +42,13 @@
             v-if="isLongOutput"
             class="toggle-expand"
             @click.stop="toggleOutput"
-          >{{ message.outputExpanded ? '收起' : `展开全部 (${outputLineCount} 行)` }}</button>
+          >{{ message.outputExpanded ? t('session.tool_collapse') : `${t('session.tool_expand')} (${outputLineCount})` }}</button>
         </template>
 
         <!-- Running placeholder -->
         <div v-else-if="message.status !== 'completed'" class="tool-running">
           <span class="spinner"></span>
-          <span>执行中…</span>
+          <span>{{ t('session.tool_running') }}</span>
         </div>
       </div>
     </div>
@@ -57,9 +57,12 @@
 
 <script setup lang="ts">
 import { computed } from 'vue'
+import { useLocale } from '../../composables/useLocale'
 import MarkdownRenderer from '../MarkdownRenderer.vue'
 import ToolIcon from './ToolIcon.vue'
 import { toolArgs, toolInputText, inferOutputLanguage } from '../../utils/toolDisplay'
+
+const { t } = useLocale()
 
 const props = defineProps<{ message: any }>()
 const emit = defineEmits<{ (e: 'toggleExpand'): void; (e: 'toggleOutput'): void }>()

@@ -42,6 +42,7 @@ export function useLocale() {
   const setLocale = (lang: Locale) => {
     locale.value = lang
     localStorage.setItem(STORAGE_KEY, lang)
+    window.dispatchEvent(new CustomEvent('pocketctl-locale-change', { detail: { locale: lang } }))
   }
 
   return { locale, t, setLocale, SUPPORTED }

@@ -46,7 +46,7 @@
           <span class="daemon-name">· {{ daemonName }}</span>
         </div>
         <span :class="['status-pill', statusClass]"><span class="pulse"></span>{{ statusLabel }}</span>
-        <span v-if="contextTokens" class="context-pill" title="当前 context 用量（输入 + 缓存 token）">
+        <span v-if="contextTokens" class="context-pill" :title="t('session.context_usage')">
           <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/></svg>
           {{ contextTokens }}
         </span>
@@ -183,29 +183,37 @@
                 <button v-if="!isExecuting" class="action-btn send-btn"
                   @click="sendMessage"
                   :disabled="isDisconnected || isPendingSession || isLoading || !messageInput.trim()"
-                  title="发送 (Enter)">
+                  :title="t('session.send_enter')">
                   <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5"/><path d="M5 12l7-7 7 7"/></svg>
                 </button>
 
                 <!-- Stop button (executing) -->
                 <button v-else class="action-btn stop-btn"
                   @click="interruptSession"
-                  title="停止生成">
+                  :title="t('session.stop_gen')">
                   <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="6" width="12" height="12" rx="2"/></svg>
                 </button>
               </div>
             </div>
           </div>
         </template>
-        <div v-else class="ended-text">Session 已结束</div>
+        <div v-else class="ended-text">{{ t('session.ended') }}</div>
       </div>
     </div>
   </div>
+
+  <NewSessionDialog
+    v-if="showNewSession"
+    :daemons="daemonList"
+    :preSelectedDaemonId="hostFilter"
+    @close="showNewSession = false"
+  />
 </template>
 
 <script setup lang="ts">
 import { ref, computed, onMounted, onUnmounted, nextTick, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
+import NewSessionDialog from '../components/NewSessionDialog.vue'
 import { useWebSocket } from '../composables/useWebSocket'
 import { formatRelativeTime } from '../composables/useRelativeTime'
 import SessionActions from '../components/SessionActions.vue'
@@ -241,6 +249,8 @@ const loadedMinId = ref(0)      // oldest loaded event id (backward cursor)
 const isLoadingBackward = ref(false)  // a pagination (scroll-up) request in flight
 const hasMore = ref(false)      // relay signaled older events exist
 const resumeCopied = ref(false)  // session-resume-command: 复制恢复命令反馈
+const showNewSession = ref(false)
+const daemonList = computed(() => Object.values(daemons.value))
 const currentSessionAgent = computed(() => allSessions.value.find((x: any) => x.session_id === sessionId.value)?.agent)
 const isPendingSession = computed(() => sessionId.value.startsWith('pending-'))
 const selectedIndex = ref(0)
@@ -400,7 +410,7 @@ function exitReasonLabel(reason: string): string {
   return labels[reason] || reason
 }
 
-function emitNewSession() { router.push('/') }
+function emitNewSession() { showNewSession.value = true }
 
 function scrollToBottom() {
   if (messagesEl.value) { messagesEl.value.scrollTop = messagesEl.value.scrollHeight; autoScroll.value = true }

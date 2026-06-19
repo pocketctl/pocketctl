@@ -140,7 +140,7 @@
         <span class="col-time">{{ t('dashboard.column_time') }}</span>
         <span class="col-actions" style="text-align:right;">{{ t('dashboard.column_status') }}</span>
       </div>
-      <div v-for="s in filteredSessions" :key="s.session_id" :class="['session-row', { 'pending-delete': s.__pendingDelete }]" @click="!s.__pendingDelete && $router.push(`/session/${s.session_id}`)">
+      <div v-for="s in paginatedSessions" :key="s.session_id" :class="['session-row', { 'pending-delete': s.__pendingDelete }]" @click="!s.__pendingDelete && $router.push(`/session/${s.session_id}`)">
         <div class="session-info">
           <span :class="['status-dot', getEffectiveStatus(s)]"></span>
           <span v-if="s.pinned" class="pin-mark">📌</span>
@@ -154,6 +154,27 @@
           <span :class="['chip', statusChip(s)]">{{ statusLabel(s) }}</span>
           <SessionActions :session="s" @startRename="sessStartRename" @deleted="onDeleted" @pinned="onPinned" />
         </div>
+      </div>
+    </div>
+
+    <!-- Pagination -->
+    <div v-if="totalPages > 1 || pageSize < filteredSessions.length" class="sess-pagination">
+      <div class="page-info">
+        <span class="page-total">{{ t('dashboard.page_total', { count: filteredSessions.length }) }}</span>
+        <span class="page-sep">·</span>
+        <div class="page-size-wrap">
+          <select v-model.number="pageSize" class="page-size-select" :aria-label="t('dashboard.page_size')">
+            <option v-for="n in pageSizes" :key="n" :value="n">{{ n }} {{ t('dashboard.page_size_unit') }}</option>
+          </select>
+          <svg class="page-size-chevron" width="10" height="6" viewBox="0 0 10 6" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M1 1l4 4 4-4"/></svg>
+        </div>
+      </div>
+      <div class="page-controls">
+        <button class="st-page-btn" :disabled="currentPage === 1" @click="currentPage = 1" :title="t('dashboard.page_first')">«</button>
+        <button class="st-page-btn" :disabled="currentPage === 1" @click="currentPage--">‹</button>
+        <span class="st-page-info">{{ currentPage }} / {{ totalPages }}</span>
+        <button class="st-page-btn" :disabled="currentPage === totalPages" @click="currentPage++">›</button>
+        <button class="st-page-btn" :disabled="currentPage === totalPages" @click="currentPage = totalPages" :title="t('dashboard.page_last')">»</button>
       </div>
     </div>
 
@@ -241,6 +262,16 @@ const filteredSessions = computed(() => {
   if (!selectedDaemon.value) return sortedSessions.value
   return sortedSessions.value.filter(s => s.daemon_id === selectedDaemon.value)
 })
+
+const pageSize = ref(10)
+const pageSizes = [5, 10, 20]
+const currentPage = ref(1)
+const totalPages = computed(() => Math.max(1, Math.ceil(filteredSessions.value.length / pageSize.value)))
+const paginatedSessions = computed(() => {
+  const start = (currentPage.value - 1) * pageSize.value
+  return filteredSessions.value.slice(start, start + pageSize.value)
+})
+watch(selectedDaemon, () => { currentPage.value = 1 })
 
 const selectedDaemonObj = computed(() => daemons.value.find(d => d.daemon_id === selectedDaemon.value))
 
@@ -386,5 +417,96 @@ function onPinned(sessionId: string, pinned: boolean) { const s = sessions.value
 .session-row .session-time { font-size: 13px; color: var(--fg-tertiary); }
 .session-row .session-actions { display: flex; align-items: center; gap: 6px; justify-content: flex-end; }
 .session-empty { padding: 48px; text-align: center; }
+
+/* Pagination */
+.sess-pagination {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 20px;
+  border-top: 1px solid var(--border);
+  background: var(--surface);
+}
+.page-info {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--fg-tertiary);
+}
+.page-total {
+  color: var(--fg-secondary);
+}
+.page-sep {
+  color: var(--border);
+}
+.page-size-wrap {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+}
+.page-size-select {
+  padding: 4px 24px 4px 9px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+  color: var(--fg-secondary);
+  font-size: 12px;
+  font-family: var(--font-body);
+  cursor: pointer;
+  outline: none;
+  appearance: none;
+  -webkit-appearance: none;
+  transition: border-color 0.15s, box-shadow 0.15s;
+}
+.page-size-select:hover { border-color: var(--border-light); }
+.page-size-select:focus { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent-muted); }
+.page-size-chevron {
+  position: absolute;
+  right: 8px;
+  top: 50%;
+  transform: translateY(-50%);
+  pointer-events: none;
+  color: var(--fg-tertiary);
+}
+.page-controls {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+.st-page-btn {
+  width: 28px;
+  height: 28px;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--fg-secondary);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  font-size: 14px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: all 0.15s;
+  font-family: var(--font-body);
+  line-height: 1;
+}
+.st-page-btn:hover:not(:disabled) {
+  border-color: var(--accent);
+  color: var(--accent);
+  background: var(--accent-muted);
+}
+.st-page-btn:disabled {
+  opacity: 0.35;
+  cursor: not-allowed;
+}
+.st-page-info {
+  font-size: 12px;
+  color: var(--fg-tertiary);
+  font-family: var(--font-mono);
+  padding: 0 6px;
+  white-space: nowrap;
+  user-select: none;
+}
+
 @media (max-width: 768px) { .daemon-grid { grid-template-columns: 1fr; } .quick-stats { flex-direction: column; } .session-table-header, .session-row { grid-template-columns: 1fr; } .session-table-header .col-daemon, .session-table-header .col-time, .session-table-header .col-actions, .session-row .session-daemon, .session-row .session-time, .session-row .session-actions { display: none; } }
 </style>
