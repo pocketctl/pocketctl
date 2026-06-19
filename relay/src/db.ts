@@ -214,6 +214,14 @@ export async function getDaemonAlias(pool: pg.Pool, daemonId: string): Promise<s
   return result.rows[0]?.alias ?? null;
 }
 
+// getDaemonOwner returns the persisted owner (daemons.user_id) of a daemon, or
+// null if the daemon isn't bound to any user. Used by registerDaemon to recover
+// the owner when a reconnecting daemon's token doesn't carry a userId.
+export async function getDaemonOwner(pool: pg.Pool, daemonId: string): Promise<number | null> {
+  const result = await pool.query(`SELECT user_id FROM daemons WHERE daemon_id = $1`, [daemonId]);
+  return result.rows[0]?.user_id ?? null;
+}
+
 export async function updateHeartbeat(pool: pg.Pool, daemonId: string): Promise<void> {
   await pool.query(`UPDATE daemons SET last_heartbeat = NOW() WHERE daemon_id = $1`, [daemonId]);
 }

@@ -91,6 +91,16 @@ export class Router {
       }
     }
 
+    // Fallback: if the connecting token didn't carry a userId (e.g. a legacy or
+    // anonymous reconnection), recover the daemon's persisted owner from
+    // daemons.user_id. Without this, sessions created during this connection
+    // land with user_id NULL and vanish from the owner's web list (filtered by
+    // listSessionsByUser). Soft eviction above already ran on the original
+    // (null) userId, which is fine — an anonymous reconnect shouldn't evict.
+    if (!userId) {
+      try { userId = await db.getDaemonOwner(this.pool, daemonId); } catch (e) { /* leave null */ }
+    }
+
     const daemonOS = msg.os || 'unknown';
     const daemonIP = msg.ip || 'unknown';
     const daemonPort = msg.port || '';
@@ -362,7 +372,7 @@ export class Router {
       db.incrementSessionTokens(this.pool, sessionId, msg.usage).catch(console.error);
     }
     if (msg.type === 'session_status') {
-      db.upsertSession(this.pool, sessionId, daemonId, '', '', msg.status || 'unknown', undefined, undefined, msg.exit_reason).catch(console.error);
+      db.upsertSession(this.pool, sessionId, daemonId, '', '', msg.status || 'unknown', undefined, undefined, msg.exit_reason, userId ?? undefined).catch(console.error);
       // C2: persist cumulative cost_usd from result event
       if (msg.cost_usd != null) {
         db.updateSessionCost(this.pool, sessionId, parseFloat(msg.cost_usd)).catch(console.error);
