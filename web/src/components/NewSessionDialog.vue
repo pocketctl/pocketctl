@@ -206,31 +206,31 @@ function startSession() {
   // Save working directory for next time
   if (form.cwd) localStorage.setItem('pocketctl_default_cwd', form.cwd)
 
-  // ① session_created: real ID → redirect; pending ID → wait for session_id_changed
+  // ① session_created: redirect immediately, SessionDetail loading handles the wait
   cleanupFns.push(onEvent('session_created', (msg: any) => {
     if (done) return
     const sid = msg.session_id as string
+    if (!sid || sid.startsWith('pending')) { phase.value = 'connecting'; return }
+    done = true
     pendingSessionId = sid
-    if (sid && !sid.startsWith('pending')) {
-      // Real session ID — redirect immediately
-      done = true
-      if (timeoutTimer) clearTimeout(timeoutTimer)
-      creating.value = false
-      router.push(`/session/${sid}`)
-      emit('close')
-    } else {
-      phase.value = 'connecting'
-    }
+    if (timeoutTimer) clearTimeout(timeoutTimer)
+    creating.value = false
+    const daemonId = msg.daemon_id || form.daemonId
+    const query = daemonId ? { host: daemonId } : {}
+    router.push({ path: `/session/${sid}`, query })
+    emit('close')
   }))
 
-  // ② session_id_changed(real): 跳转到真实 ID
+  // ② session_id_changed(real): for discovered sessions
   cleanupFns.push(onEvent('session_id_changed', (msg: any) => {
     if (done) return
     if (msg.old_session_id && msg.old_session_id !== pendingSessionId) return
     done = true
     if (timeoutTimer) clearTimeout(timeoutTimer)
     creating.value = false
-    router.push(`/session/${msg.session_id}`)
+    const daemonId = msg.daemon_id || form.daemonId
+    const query = daemonId ? { host: daemonId } : {}
+    router.push({ path: `/session/${msg.session_id}`, query })
     emit('close')
   }))
 

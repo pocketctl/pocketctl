@@ -80,6 +80,7 @@
   "session.status.waiting": "等待恢复",
   "session.exited_banner": "Session 已退出",
   "session.daemon_offline": "Daemon 离线 — 等待恢复",
+  "session.creating": "模型正在工作中...",
   "session.ended": "Session 已结束",
   "session.input_creating": "会话创建中…",
   "session.input_resume": "继续会话（将恢复历史上下文）...",

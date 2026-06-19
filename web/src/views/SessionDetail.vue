@@ -121,6 +121,11 @@
 
       <!-- Chat Input — unified container with embedded controls -->
       <div class="chat-input-area" :class="{ ended: !canInput }">
+        <!-- Loading indicator: floats at bottom-left, above input area -->
+        <div v-if="showSessionLoading" class="session-loading">
+          <span class="loading-dot"></span>
+          <span>{{ t('session.creating') }}</span>
+        </div>
         <!-- Scroll-to-bottom: absolute child of chat-input-area, floats above
              its top edge. Doesn't take up flex space in chat-messages. -->
         <Transition name="scroll-btn">
@@ -306,6 +311,13 @@ const isDaemonSession = computed(() => {
 const canInput = computed(() => !isDisconnected.value && (!isTerminal.value || isDaemonSession.value))
 // Agent is actively generating (send button → stop button)
 const isExecuting = computed(() => status.value === 'running' || status.value === 'busy')
+const showSessionLoading = computed(() => {
+  if (isLoading.value) return false        // replay 加载中不显示（避免闪烁）
+  if (!isExecuting.value) return false     // 会话不在执行不显示
+  const last = messages.value[messages.value.length - 1]
+  const aiStreaming = last?.type === 'agent_text' && last?.streaming
+  return !aiStreaming                      // AI 正在流式输出时不显示
+})
 
 const daemonName = computed(() => {
   if (hostFilter.value) {
@@ -835,8 +847,10 @@ onMounted(() => {
 /* Agent text: adaptive width — short replies stay narrow, long content grows to 720px.
    Left-aligned (natural document flow), unlike centered tool cards. */
 .chat-messages > .agent-block { min-width: 0; max-width: 720px; width: fit-content; align-self: flex-start; }
-/* Tool cards / receipts / errors / banners: full width within 820px, centered. */
-.chat-messages > *:not(.msg):not(.agent-block) { min-width: 0; max-width: 820px; width: 100%; align-self: center; }
+/* Receipts / errors / banners: full width within 820px, centered. (tool-wrap excluded — left-aligned) */
+.chat-messages > *:not(.msg):not(.agent-block):not(.tool-wrap) { min-width: 0; max-width: 820px; width: 100%; align-self: center; }
+/* Tool cards: left-aligned, not centered. */
+.chat-messages > .tool-wrap { min-width: 0; max-width: 820px; width: 100%; align-self: flex-start; }
 .chat-messages > *.msg { min-width: 0; max-width: 85%; }
 /* Scroll-to-bottom: floats centered above the input bar. Auto-hides (v-if)
    when content is already scrolled to the bottom (autoScroll === true). */
@@ -902,6 +916,26 @@ onMounted(() => {
 .send-btn:disabled { background: var(--border); color: var(--fg-tertiary); cursor: not-allowed; }
 .stop-btn { background: var(--fg); color: var(--bg); }
 .stop-btn:hover { opacity: 0.85; }
+
+/* Session loading */
+.session-loading {
+  position: absolute; top: -30px; left: 20px;
+  display: flex; align-items: center; gap: 8px;
+  padding: 4px 10px; border-radius: var(--radius-full);
+  background: transparent; color: var(--fg-tertiary); font-size: 12px;
+  z-index: 5; pointer-events: none;
+  animation: fade-in 0.4s ease;
+}
+.loading-dot {
+  width: 8px; height: 8px; border-radius: 50%;
+  background: var(--accent);
+  animation: loading-bounce 1.2s ease-in-out infinite;
+}
+@keyframes loading-bounce {
+  0%, 80%, 100% { opacity: 0.3; transform: scale(0.8); }
+  40% { opacity: 1; transform: scale(1.2); }
+}
+@keyframes fade-in { from { opacity: 0; } to { opacity: 1; } }
 
 @media (max-width: 1024px) { .session-layout { height: calc(100vh - var(--topbar-h)); } }
 @media (max-width: 768px) { .session-panel { display: none; } }
