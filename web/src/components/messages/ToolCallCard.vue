@@ -13,6 +13,10 @@
           <svg v-if="message.status === 'completed'" class="status-check" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
             <path d="M20 6L9 17l-5-5" />
           </svg>
+          <!-- timeout: tool call never received a result (claude died / PTY lost) -->
+          <svg v-else-if="message.status === 'timeout'" class="status-timeout" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+            <circle cx="12" cy="12" r="10"/><path d="M12 8v4"/><path d="M12 16h.01"/>
+          </svg>
           <span v-else class="spinner"></span>
         </span>
         <!-- chevron icon -->
@@ -45,7 +49,10 @@
           >{{ message.outputExpanded ? t('session.tool_collapse') : `${t('session.tool_expand')} (${outputLineCount})` }}</button>
         </template>
 
-        <!-- Running placeholder -->
+        <!-- Running / timeout placeholder -->
+        <div v-else-if="message.status === 'timeout'" class="tool-running timeout">
+          <span class="status-timeout-text">{{ t('session.tool_timeout') }}</span>
+        </div>
         <div v-else-if="message.status !== 'completed'" class="tool-running">
           <span class="spinner"></span>
           <span>{{ t('session.tool_running') }}</span>
@@ -137,6 +144,9 @@ function toggleOutput() { emit('toggleOutput') }
 }
 .tool-status { flex-shrink: 0; display: flex; align-items: center; }
 .status-check { color: var(--success); }
+.status-timeout { color: #e5484d; }
+.status-timeout-text { color: #e5484d; font-size: 12px; }
+.tool-running.timeout { opacity: 0.8; }
 .tool-status .spinner {
   width: 13px;
   height: 13px;

@@ -454,8 +454,56 @@ function setPermissionMode(mode: string) {
   send({ type: 'set_permission_mode', session_id: sessionId.value, content: mode })
 }
 
+// Stop button escalation: 1st click sends PTY Ctrl+C (graceful). If clicked
+// again within 2.5s (Ctrl+C didn't reach claude — PTY disconnected), escalate
+// to session_kill (SIGKILL the claude process). This guarantees a stuck session
+// can always be stopped, even when the PTY master is disconnected from claude's
+// stdin (the c5813d2c incident: 11 Ctrl+C writes went into a void PTY).
+const stopEscalated = ref(false)
+let stopResetTimer: ReturnType<typeof setTimeout> | null = null
 function interruptSession() {
+  if (stopEscalated.value) {
+    // 2nd click within the window → force kill.
+    send({ type: 'session_kill', session_id: sessionId.value })
+    stopEscalated.value = false
+    return
+  }
+  // 1st click → graceful Ctrl+C; arm escalation window.
   send({ type: 'session_interrupt', session_id: sessionId.value })
+  stopEscalated.value = true
+  if (stopResetTimer) clearTimeout(stopResetTimer)
+  stopResetTimer = setTimeout(() => { stopEscalated.value = false }, 2500)
+}
+
+// Tool-call timeout guard (B2): a tool_call that never receives a matching
+// tool_result leaves its card spinning forever (e.g. the claude process died
+// mid-tool, or the PTY disconnected). For each live tool_call (not replayed),
+// arm a timeout; if no result arrives, mark the card as 'timeout' so it stops
+// spinning. Cleared on result, session switch, and unmount.
+const TOOL_TIMEOUT_MS = 5 * 60 * 1000 // 5 minutes
+const toolTimeouts = new Map<string, ReturnType<typeof setTimeout>>()
+// Out-of-order tool results: relay persists events with fire-and-forget
+// inserts, so DB row id doesn't always match send order — a tool_result can
+// land before its tool_call. On replay (ordered by id) the result then arrives
+// first and finds no tool_call to attach to. Buffer orphan results here and
+// apply them when the matching tool_call is created.
+const pendingToolResults = new Map<string, { output: string | null }>()
+function armToolTimeout(callId: string) {
+  if (toolTimeouts.has(callId)) clearTimeout(toolTimeouts.get(callId)!)
+  const timer = setTimeout(() => {
+    toolTimeouts.delete(callId)
+    const m = messages.value.find((x: any) => x.type === 'tool_call' && x.call_id === callId)
+    if (m && (m as any).status === 'running') (m as any).status = 'timeout'
+  }, TOOL_TIMEOUT_MS)
+  toolTimeouts.set(callId, timer)
+}
+function clearToolTimeout(callId: string) {
+  const t = toolTimeouts.get(callId)
+  if (t) { clearTimeout(t); toolTimeouts.delete(callId) }
+}
+function clearAllToolTimeouts() {
+  for (const t of toolTimeouts.values()) clearTimeout(t)
+  toolTimeouts.clear()
 }
 
 // Local-command whitelist: handled entirely in the browser, never sent to the
@@ -695,13 +743,17 @@ function processEvent(evt: any, target: any[] = messages.value) {
     const tool = evt.tool || evt.payload?.tool || ''
     const input = evt.input || evt.payload?.input
     const inputDesc = formatToolInput(tool, input)
-    // Always create new tool_call message (matches iOS app)
+    // Always create new tool_call message (matches iOS app). If a matching
+    // result arrived out of order (buffered in pendingToolResults), apply it
+    // now so the card renders completed instead of spinning forever.
+    const pending = pendingToolResults.get(callId)
     target.push({
       id: nextId('t'), type: 'tool_call', call_id: callId,
       tool, input, inputDesc,
-      output: null, status: 'running',
+      output: pending?.output ?? null, status: pending ? 'completed' : 'running',
       expanded: false, outputExpanded: false,
     })
+    if (pending) pendingToolResults.delete(callId)
   } else if (type === 'tool_result') {
     const callId = evt.call_id || evt.payload?.call_id
     const output = evt.output || evt.payload?.output || evt.result || evt.payload?.result
@@ -717,10 +769,21 @@ function processEvent(evt: any, target: any[] = messages.value) {
     if (idx >= 0) {
       if (output) target[idx].output = output
       target[idx].status = 'completed'
+    } else {
+      // tool_call hasn't been created yet (out-of-order replay) — buffer the
+      // result so it's applied when the matching tool_call arrives.
+      pendingToolResults.set(callId, { output: output ?? null })
     }
   } else if (type === 'session_status') {
     const s = evt.status || evt.payload?.status
     if (s) status.value = s
+    // During a session switch, capture the turn start time from the last
+    // executing status (busy/running/waiting) so the timer can resume the
+    // accumulated elapsed instead of restarting from zero.
+    if (sessionSwitching && (s === 'running' || s === 'busy' || s === 'waiting')) {
+      const ts = evt.last_activity_at || evt.payload?.last_activity_at
+      if (ts) resumeStartAt = new Date(ts).getTime()
+    }
     if (evt.exit_reason || evt.payload?.exit_reason) exitReason.value = evt.exit_reason || evt.payload.exit_reason
     if (evt.exited_at || evt.payload?.exited_at) exitedAt.value = evt.exited_at || evt.payload.exited_at
   } else if (type === 'command_receipt') {
@@ -735,6 +798,17 @@ function processEvent(evt: any, target: any[] = messages.value) {
 // Watch for session switch — clear messages and replay new session
 watch(sessionId, (newId, oldId) => {
   if (newId && newId !== oldId) {
+    clearAllToolTimeouts()   // reset tool timeout guards on session switch
+    pendingToolResults.clear() // discard buffered out-of-order results
+    // Gate the turn-timer watch: the placeholder status='running' below must
+    // not start the timer from zero. The real turn start (if executing) is
+    // recovered from the last executing session_status once replay completes.
+    sessionSwitching = true
+    resumeStartAt = null
+    if (turnTimer) { clearInterval(turnTimer); turnTimer = null }
+    turnStartTime.value = null
+    turnElapsed.value = 0
+    lastTurnDuration.value = null
     messages.value = []
     status.value = 'running'
     exitReason.value = ''
