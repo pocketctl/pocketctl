@@ -80,6 +80,7 @@
   "session.status.waiting": "Waiting",
   "session.exited_banner": "Session exited",
   "session.daemon_offline": "Daemon offline — waiting for reconnect",
+  "session.creating": "Model is working...",
   "session.ended": "Session ended",
   "session.input_creating": "Session creating…",
   "session.input_resume": "Resume session (history restored)...",
