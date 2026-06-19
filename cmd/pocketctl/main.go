@@ -1011,13 +1011,14 @@ func handleCommands(ctx context.Context, client *ws.Client, sm *session.SessionM
 		case cmd := <-client.CommandCh:
 			switch cmd.Type {
 			case "session_create":
-				logger.Info("create session", "agent", cmd.Agent, "cwd", cmd.Cwd)
+				logger.Info("create session", "agent", cmd.Agent, "cwd", cmd.Cwd, "model", cmd.Model)
 				stateDirty.Store(true)
 				config := protocol.SessionConfig{
 					Agent:          cmd.Agent,
 					Cwd:            cmd.Cwd,
 					Prompt:         cmd.Prompt,
 					PermissionMode: cmd.PermissionMode,
+					Model:          cmd.Model,
 				}
 				if config.Agent == "" {
 					config.Agent = "claude-code"
@@ -1033,14 +1034,17 @@ func handleCommands(ctx context.Context, client *ws.Client, sm *session.SessionM
 					})
 					continue
 				}
-				logger.Info("session created", "session", sessionID)
+			logger.Info("session created", "session", sessionID)
 
-				// Notify relay that session was created so it can link the originating client
-				client.SendMsg(protocol.DaemonEvent{
-					Type:      "session_created",
-					SessionID: sessionID,
-					Title:     config.Prompt,
-				})
+			// Notify relay that session was created so it can link the originating client.
+			// Carry the resolved model so the web client can show it (/model command).
+			model, _ := sm.GetSessionModel(sessionID)
+			client.SendMsg(protocol.DaemonEvent{
+				Type:      "session_created",
+				SessionID: sessionID,
+				Title:     config.Prompt,
+				Model:     model,
+			})
 
 			case "abort_create":
 				logger.Info("abort create session", "session", cmd.SessionID)
@@ -1125,6 +1129,46 @@ func handleCommands(ctx context.Context, client *ws.Client, sm *session.SessionM
 					Type:      "command_list",
 					SessionID: cmd.SessionID,
 					Commands:  commands.ListCommands(cwd, available),
+				})
+
+			case "get_session_meta":
+				// Web client queries a session's resolved model (for the /model
+				// command). Unlike session_created (one-shot, fired before the web
+				// subscribes), this is a request/response the client issues on mount.
+				model, exists := sm.GetSessionModel(cmd.SessionID)
+				if model == "" {
+					// Terminal sessions don't carry a model at discovery time — extract
+					// it from the JSONL history (last real assistant message) and cache.
+					cwd, cwdOk := sm.GetSessionCwd(cmd.SessionID)
+					if !cwdOk {
+						logger.Info("get_session_meta: not in memory", "session", cmd.SessionID, "exists", exists)
+					} else if path, perr := watcher.ResolveJSONLPath(cmd.SessionID, cwd); perr != nil {
+						logger.Info("get_session_meta: resolve path failed", "session", cmd.SessionID, "cwd", cwd, "error", perr)
+					} else if data, ferr := os.ReadFile(path); ferr != nil {
+						logger.Info("get_session_meta: read jsonl failed", "session", cmd.SessionID, "path", path, "error", ferr)
+					} else {
+						lines := strings.Split(string(data), "\n")
+						m := adapter.ExtractLastAssistantModel(lines)
+						logger.Info("get_session_meta: extracted", "session", cmd.SessionID, "lines", len(lines), "model", m)
+						if m != "" {
+							sm.SetSessionModel(cmd.SessionID, m)
+							model = m
+						}
+					}
+				}
+				logger.Info("get_session_meta", "session", cmd.SessionID, "model", model)
+				client.SendMsg(protocol.DaemonEvent{
+					Type:      "session_meta",
+					SessionID: cmd.SessionID,
+					Model:     model,
+				})
+
+			case "list_models":
+				// Web client queries the host's available models to populate the
+				// session-creation picker. Reads ~/.claude/settings.json alias map.
+				client.SendMsg(protocol.DaemonEvent{
+					Type:   "model_list",
+					Models: session.ListAvailableModels(),
 				})
 
 			case "upgrade_agent":

@@ -89,6 +89,16 @@
           </div>
         </div>
 
+        <!-- Model (dynamic: host's available models from ~/.claude/settings.json) -->
+        <div class="field-label">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5M2 12l10 5 10-5"/></svg>
+          {{ t('new_session.model_label') }}
+        </div>
+        <select v-model="form.model" class="model-select">
+          <option value="">{{ models.length ? t('new_session.model_default') : t('new_session.model_loading') }}</option>
+          <option v-for="m in models" :key="m.alias" :value="m.alias">{{ m.name }}</option>
+        </select>
+
         <!-- Initial Prompt -->
         <div class="form-group">
           <div class="field-label">
@@ -149,7 +159,10 @@ const form = reactive({
   cwd: localStorage.getItem('pocketctl_default_cwd') || '',
   prompt: '',
   permissionMode: 'acceptEdits',  // default | acceptEdits | plan | bypassPermissions
+  model: '',  // '' = follow host default | opus | sonnet | haiku alias
 })
+// Available models for the selected host (populated by list_models → model_list)
+const models = ref<Array<{ alias: string; name: string }>>([])
 const creating = ref(false)
 const phase = ref<'submitting' | 'connecting'>('submitting')
 const errorTitle = ref('')
@@ -260,6 +273,7 @@ function startSession() {
     cwd: form.cwd || undefined,
     prompt: form.prompt || undefined,
     permission_mode: form.permissionMode || undefined,
+    model: form.model || undefined,
   })
 
   // Timeout 15s: abort + show failure
@@ -291,8 +305,20 @@ watch([() => props.daemons, () => props.preSelectedDaemonId], ([daemons, preId])
   if (online.length === 1) { form.daemonId = online[0].daemon_id; autoSelectDone = true }
 }, { immediate: true })
 
+// Fetch available models whenever the selected host changes
+watch(() => form.daemonId, (id) => {
+  models.value = []
+  form.model = ''
+  if (id) send({ type: 'list_models', daemon_id: id })
+})
+
 onMounted(() => {
   connect()
+  // Receive available models for the selected host (model picker)
+  cleanupFns.push(onEvent('model_list', (msg: any) => {
+    models.value = msg.models || []
+  }))
+  if (form.daemonId) send({ type: 'list_models', daemon_id: form.daemonId })
   // Close on Escape
   const escHandler = (e: KeyboardEvent) => { if (e.key === 'Escape') emit('close') }
   document.addEventListener('keydown', escHandler)
@@ -388,6 +414,14 @@ onUnmounted(() => {
 
 /* Agent Pills */
 .agent-pills { display: flex; gap: 8px; margin-bottom: 24px; }
+.model-select {
+  width: 100%; padding: 10px 14px; margin-bottom: 24px;
+  background: var(--surface); border: 1px solid var(--border);
+  border-radius: var(--radius-lg); color: var(--fg); font-size: 13px;
+  cursor: pointer; transition: border-color 0.15s ease;
+}
+.model-select:hover { border-color: var(--border-light); }
+.model-select:focus { outline: none; border-color: var(--accent); }
 .agent-pill {
   flex: 1; padding: 11px 20px; border-radius: var(--radius-md);
   font-size: 14px; font-weight: 600; border: 2px solid var(--border);

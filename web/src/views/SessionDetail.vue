@@ -213,6 +213,11 @@
     :preSelectedDaemonId="hostFilter"
     @close="showNewSession = false"
   />
+  <CommandHelpModal
+    v-if="showHelpModal"
+    :commands="commandsCache"
+    @close="showHelpModal = false"
+  />
 </template>
 
 <script setup lang="ts">
@@ -224,6 +229,7 @@ import { formatRelativeTime } from '../composables/useRelativeTime'
 import SessionActions from '../components/SessionActions.vue'
 import CommandPopover from '../components/CommandPopover.vue'
 import CommandReceiptCard from '../components/CommandReceiptCard.vue'
+import CommandHelpModal from '../components/CommandHelpModal.vue'
 import MessageUser from '../components/messages/MessageUser.vue'
 import MessageAgent from '../components/messages/MessageAgent.vue'
 import MessageError from '../components/messages/MessageError.vue'
@@ -246,6 +252,8 @@ const messages = ref<any[]>([])
 const allSessions = ref<any[]>([])
 const messageInput = ref('')
 const commandsCache = ref<CommandItem[]>([])
+const currentModel = ref('')            // resolved model name from session_meta event
+const showHelpModal = ref(false)        // /help local command → full-screen modal
 const replayReqId = ref(0)
 const isLoading = ref(false)
 // session-history-pagination: backward pagination state
@@ -450,12 +458,124 @@ function interruptSession() {
   send({ type: 'session_interrupt', session_id: sessionId.value })
 }
 
+// Local-command whitelist: handled entirely in the browser, never sent to the
+// daemon PTY. NOT sourced from commandsCache — these builtins are filtered out
+// of command_list by the agent's init event in daemon sessions, so relying on
+// the cache would silently disable them. Hardcode the names instead.
+const LOCAL_COMMANDS = ['cost', 'status', 'help', 'model']
+
 function sendMessage() {
   const text = messageInput.value.trim()
   if (!text || isDisconnected.value) return
   if (isPendingSession.value) return // D3: pending-id 窗口期不发命令（--resume pending-xxx 必失败）
+  // Local command interception: /cost /status /help /model are answered from
+  // in-memory/relay data rather than the claude PTY (where they're unavailable).
+  if (text.startsWith('/')) {
+    const cmdName = text.slice(1).split(/\s/)[0]
+    if (LOCAL_COMMANDS.includes(cmdName)) {
+      messageInput.value = ''
+      handleLocalCommand(cmdName, text)
+      return
+    }
+  }
   send({ type: 'user_message', session_id: sessionId.value, content: text })
   messageInput.value = ''
+}
+
+// handleLocalCommand renders the user bubble + result locally (no daemon round
+// trip, so no user_text is relayed back — we construct both here).
+function handleLocalCommand(cmdName: string, text: string) {
+  messages.value.push({ id: nextId('u'), type: 'user_text', role: 'user', content: text })
+  const result = buildLocalCommandResult(cmdName, text)
+  if (result) {
+    messages.value.push(result)
+    // Persist the locally-generated user msg + receipt so they survive refresh and
+    // sync to other devices. Relay stores them as events and broadcasts to OTHER
+    // clients (origin keeps its local copy — no echo back, to avoid duplicates).
+    send({
+      type: 'local_command_log',
+      session_id: sessionId.value,
+      user_text: text,
+      command: result.command,
+      receipt_status: result.receiptStatus,
+      message: result.message,
+    })
+  }
+  nextTick(scrollToBottom)
+}
+
+// buildLocalCommandResult returns a command_receipt message for the given local
+// command, or null when the command opens a modal instead (/help).
+function buildLocalCommandResult(cmdName: string, text: string): any | null {
+  if (cmdName === 'help') {
+    showHelpModal.value = true
+    return null
+  }
+  if (cmdName === 'cost') {
+    return {
+      id: nextId('r'), type: 'command_receipt',
+      command: '/cost', receiptStatus: 'success', message: buildCostMessage(),
+    }
+  }
+  if (cmdName === 'status') {
+    return {
+      id: nextId('r'), type: 'command_receipt',
+      command: '/status', receiptStatus: 'success', message: buildStatusMessage(),
+    }
+  }
+  if (cmdName === 'model') {
+    const arg = text.slice(1).split(/\s/).slice(1).join(' ').trim()
+    return {
+      id: nextId('r'), type: 'command_receipt',
+      command: '/model', receiptStatus: 'success', message: buildModelMessage(arg),
+    }
+  }
+  return null
+}
+
+// buildCostMessage summarizes token usage accumulated in this session from the
+// last agent_text carrying usage (same source as the context-token pill).
+function buildCostMessage(): string {
+  let usage: any = null
+  for (let i = messages.value.length - 1; i >= 0; i--) {
+    const u = (messages.value[i] as any).usage
+    if (u) { usage = u; break }
+  }
+  if (!usage) return '当前会话暂无 token 用量记录'
+  const input = usage.input_tokens || 0
+  const output = usage.output_tokens || 0
+  const cacheRead = usage.cache_read_tokens || 0
+  const cacheCreate = usage.cache_create_tokens || 0
+  const total = input + output + cacheRead + cacheCreate
+  const fmt = (n: number) => n > 1000 ? (n / 1000).toFixed(1) + 'K' : String(n)
+  return `累计 ${fmt(total)} tokens（输入 ${fmt(input)} · 输出 ${fmt(output)} · 缓存 ${fmt(cacheRead + cacheCreate)}）`
+}
+
+// buildStatusMessage reports daemon online state + agent version, derived from
+// the current session's host. Account/login status is intentionally out of scope
+// (claude CLI does not expose it to pocketctl) — point users to the terminal.
+function buildStatusMessage(): string {
+  const s = allSessions.value.find((x: any) => x.session_id === sessionId.value) as any
+  if (!s) return '当前会话状态未知'
+  const online = s.daemon_online ? '在线' : '离线'
+  const parts = [`主机 ${online}`]
+  if (s.daemon_version) parts.push(`daemon v${s.daemon_version}`)
+  const agentVer = s.agent_version || s.agentVersion
+  if (agentVer) parts.push(`claude-code v${agentVer}`)
+  parts.push('账户登录状态请在终端运行 pocketctl status 查看')
+  return parts.join(' · ')
+}
+
+// buildModelMessage shows the active model, or a hint that switching requires a
+// restart (runtime switch isn't possible: --model is fixed at PTY launch, and
+// driving the TUI's model menu via key sequences is unreliable).
+function buildModelMessage(arg: string): string {
+  if (arg) {
+    return `运行时切换模型需要重启会话生效。请在终端使用 /model，或新建会话时选择目标模型。`
+  }
+  return currentModel.value
+    ? `当前模型：${currentModel.value}`
+    : '当前会话未上报模型信息'
 }
 
 // Slash command autocompletion
@@ -620,6 +740,7 @@ watch(sessionId, (newId, oldId) => {
     exitReason.value = ''
     exitedAt.value = ''
     commandsCache.value = []
+    currentModel.value = '' // clear; refilled by get_session_meta below
     replayReqId.value++
     isLoading.value = true
     loadedMinId.value = 0
@@ -627,6 +748,7 @@ watch(sessionId, (newId, oldId) => {
     hasMore.value = false
     send({ type: 'replay', session_id: newId, direction: 'backward', limit: pageSize.value, req_id: replayReqId.value })
     send({ type: 'list_commands', session_id: newId })
+    send({ type: 'get_session_meta', session_id: newId })
   }
 })
 
@@ -643,6 +765,10 @@ onMounted(() => {
   hasMore.value = false
   send({ type: 'replay', session_id: sessionId.value, direction: 'backward', limit: pageSize.value, req_id: replayReqId.value })
   send({ type: 'list_commands', session_id: sessionId.value })
+  // Query the resolved model on mount (authoritative, covers sessions opened
+  // directly rather than just-created — session_created is one-shot and fires
+  // before this component subscribes).
+  send({ type: 'get_session_meta', session_id: sessionId.value })
 
   cleanups.push(onEvent('session_list', (msg: any) => {
     allSessions.value = msg.sessions || []
@@ -676,6 +802,8 @@ onMounted(() => {
         daemon_online: true,
       })
     }
+    // session_created carries the daemon-resolved model (for the /model command).
+    if (sid === sessionId.value && msg.model) currentModel.value = msg.model
     send({ type: 'list_sessions' })
   }))
   cleanups.push(onEvent('daemon_list', (msg: any) => {
@@ -691,6 +819,12 @@ onMounted(() => {
     if (msg.session_id !== sessionId.value) return
     processEvent(msg)
     nextTick(scrollToBottom)
+  }))
+  // session_meta: authoritative model name, in response to get_session_meta.
+  // (session_created also carries model as an optimistic early fill below.)
+  cleanups.push(onEvent('session_meta', (msg: any) => {
+    if (msg.session_id !== sessionId.value) return
+    if (msg.model) currentModel.value = msg.model
   }))
 
   cleanups.push(onEvent('replay_batch', (msg: any) => {
@@ -873,8 +1007,8 @@ onMounted(() => {
 /* Agent text: adaptive width — short replies stay narrow, long content grows to 720px.
    Left-aligned (natural document flow), unlike centered tool cards. */
 .chat-messages > .agent-block { min-width: 0; max-width: 720px; width: fit-content; align-self: flex-start; }
-/* Receipts / errors / banners: full width within 820px, centered. (tool-wrap excluded — left-aligned) */
-.chat-messages > *:not(.msg):not(.agent-block):not(.tool-wrap) { min-width: 0; max-width: 820px; width: 100%; align-self: center; }
+/* Errors / banners: full width within 820px, centered. (tool-wrap + receipt-card excluded — left-aligned) */
+.chat-messages > *:not(.msg):not(.agent-block):not(.tool-wrap):not(.receipt-card) { min-width: 0; max-width: 820px; width: 100%; align-self: center; }
 /* Tool cards: left-aligned, not centered. */
 .chat-messages > .tool-wrap { min-width: 0; max-width: 820px; width: 100%; align-self: flex-start; }
 .chat-messages > *.msg { min-width: 0; max-width: 85%; }

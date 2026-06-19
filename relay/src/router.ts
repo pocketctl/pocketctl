@@ -200,6 +200,12 @@ export class Router {
 
     const sessionId = msg.session_id;
     if (!sessionId) {
+      // model_list (host-level response, no session_id): broadcast to the daemon owner's clients
+      if (msg.type === 'model_list') {
+        const daemon = this.daemons.get(daemonId);
+        if (daemon?.userId) this.broadcastToUser(daemon.userId, msg);
+        return;
+      }
       if (msg.type === 'error') {
         const pendingClient = this.pendingSessionCreate.get(daemonId);
         if (pendingClient && pendingClient.readyState === 1) {
@@ -383,6 +389,27 @@ export class Router {
       return;
     }
 
+    if (msg.type === 'local_command_log') {
+      // Locally-handled slash command (/model, /cost, /status): the user msg + receipt
+      // are built client-side (no daemon round-trip). Persist both as events so they
+      // survive refresh, and broadcast to OTHER same-user clients for multi-device sync.
+      // Origin already rendered both locally, so skip echoing back to avoid duplicates.
+      const sessionId = msg.session_id;
+      if (!sessionId) return;
+      const userEvt = { type: 'user_text', session_id: sessionId, text: msg.user_text };
+      const receiptEvt = { type: 'command_receipt', session_id: sessionId, command: msg.command, receipt_status: msg.receipt_status, message: msg.message };
+      db.insertEvent(this.pool, sessionId, 'user_text', userEvt).catch(console.error);
+      db.insertEvent(this.pool, sessionId, 'command_receipt', receiptEvt).catch(console.error);
+      for (const [ws, c] of this.clients) {
+        if (ws === clientWs || ws.readyState !== 1) continue;
+        if (this.sameUser(c.userId, client.userId)) {
+          this.send(ws, userEvt);
+          this.send(ws, receiptEvt);
+        }
+      }
+      return;
+    }
+
     if (msg.type === 'session_delete') {
       const sessionId = msg.session_id;
       if (!sessionId) { this.send(clientWs, { type: 'error', error: 'session_id required' }); return; }
@@ -429,6 +456,18 @@ export class Router {
       // Update status to reconnecting
       db.setDaemonReconnecting?.(this.pool, daemonId).catch(() => {});
       this.broadcastToUser(client.userId!, { type: 'daemon_status', daemon_id: daemonId, status: 'reconnecting' });
+      return;
+    }
+
+    if (msg.type === 'list_models') {
+      // Host-level query (no session_id): route to the target daemon by daemon_id.
+      // The reply (model_list) is broadcast back to the owner's clients below.
+      const daemonId = msg.daemon_id;
+      if (!daemonId) return;
+      const daemon = this.daemons.get(daemonId);
+      if (daemon && daemon.ws.readyState === 1 && this.sameUser(daemon.userId, client.userId)) {
+        this.send(daemon.ws, msg);
+      }
       return;
     }
 
