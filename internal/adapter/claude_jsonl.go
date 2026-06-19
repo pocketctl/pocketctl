@@ -237,6 +237,35 @@ func ExtractFirstAssistantMessage(lines []string, maxLen int) string {
 	return ""
 }
 
+// ExtractLastAssistantModel returns the model name from the last real (non-synthetic)
+// assistant message in the JSONL lines. Used to surface the active model for terminal
+// sessions, whose model isn't known at process-discovery time. Returns "" if none.
+func ExtractLastAssistantModel(lines []string) string {
+	model := ""
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		var entry JSONLEntry
+		if err := json.Unmarshal([]byte(line), &entry); err != nil {
+			continue
+		}
+		if entry.Type != "assistant" || entry.Message == nil || entry.Message.Role != "assistant" {
+			continue
+		}
+		m := strings.TrimSpace(entry.Message.Model)
+		if m == "" || m == "<synthetic>" {
+			continue
+		}
+		if idx := strings.Index(m, "["); idx > 0 { // strip [1M]-style suffix for clean display
+			m = strings.TrimSpace(m[:idx])
+		}
+		model = m // keep updating → ends as the last real assistant message's model
+	}
+	return model
+}
+
 // ExtractFirstUserMessage returns the text of the first user message from JSONL lines.
 // Truncated to maxLen characters.
 func ExtractFirstUserMessage(lines []string, maxLen int) string {

@@ -39,6 +39,7 @@ type ProcessState struct {
 	Tailer *watcher.JSONLTailer // terminal session 的 JSONL tailer（D2: sendToIdleTerminal 期间 pause）
 	PTY    *os.File             // interactive-web-session D1: daemon session 的 PTY master（写 stdin 驱动 interactive claude）
 	PermissionMode string // current permission mode (updated by JSONL permission-mode parser)
+	Model  string // resolved model name (for session_created, surfaced to web /model)
 }
 
 // SetTailer associates a JSONL tailer with a session (so sendToIdleTerminal can pause/resume it).
@@ -235,6 +236,58 @@ func resolveCleanModel() string {
 	}
 }
 
+// ListAvailableModels reads ~/.claude/settings.json and returns the opus/sonnet/haiku
+// alias→concrete-model mapping so the web client can populate its model picker with
+// the host's actual available models (not hardcoded aliases). Returns nil if
+// settings.json is missing/unparseable.
+func ListAvailableModels() []protocol.ModelOption {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return nil
+	}
+	data, err := os.ReadFile(filepath.Join(home, ".claude", "settings.json"))
+	if err != nil {
+		return nil
+	}
+	var cfg struct {
+		Env map[string]string `json:"env"`
+	}
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		return nil
+	}
+	type slot struct{ alias, nameKey, modelKey string }
+	slots := []slot{
+		{"opus", "ANTHROPIC_DEFAULT_OPUS_MODEL_NAME", "ANTHROPIC_DEFAULT_OPUS_MODEL"},
+		{"sonnet", "ANTHROPIC_DEFAULT_SONNET_MODEL_NAME", "ANTHROPIC_DEFAULT_SONNET_MODEL"},
+		{"haiku", "ANTHROPIC_DEFAULT_HAIKU_MODEL_NAME", "ANTHROPIC_DEFAULT_HAIKU_MODEL"},
+	}
+	var out []protocol.ModelOption
+	for _, s := range slots {
+		name := strings.TrimSpace(cfg.Env[s.nameKey])
+		if name == "" {
+			name = stripModelSuffix(cfg.Env[s.modelKey]) // fall back to raw key, strip any [...] suffix
+		}
+		if name == "" {
+			continue
+		}
+		out = append(out, protocol.ModelOption{Alias: s.alias, Name: name})
+	}
+	return out
+}
+
+// resolveModelAlias maps a claude alias (opus/sonnet/haiku) to its concrete model name
+// from ~/.claude/settings.json (e.g. haiku → glm-4.7). Used so /model shows the real
+// model, while the alias is still passed to claude's --model (which resolves via
+// ANTHROPIC_DEFAULT_*_MODEL, preserving e.g. [1M] context). Non-alias input is returned as-is.
+func resolveModelAlias(alias string) string {
+	for _, m := range ListAvailableModels() {
+		if m.Alias == alias {
+			return m.Name
+		}
+	}
+	return alias
+}
+
 // validateCwd checks that the directory exists, is a directory, and is accessible.
 func validateCwd(cwd string) error {
 	info, err := os.Stat(cwd)
@@ -268,8 +321,17 @@ func (sm *SessionManager) CreateSession(ctx context.Context, config protocol.Ses
 		return "", err
 	}
 
-	// Resolve clean model name (strip invalid [...] suffix from cc switch configs)
-	config.Model = resolveCleanModel()
+	// Resolve model: prefer the model the client explicitly chose (opus/sonnet/haiku
+	// alias or concrete name from session_create); fall back to the host's
+	// ~/.claude/settings.json default so legacy clients without a model picker
+	// still surface a value for the /model command.
+	if config.Model == "" {
+		config.Model = resolveCleanModel()
+	}
+	// config.Model is the alias/name passed to claude's --model (resolves via
+	// ANTHROPIC_DEFAULT_*_MODEL, preserving e.g. [1M]). Derive the concrete display
+	// name for /model (haiku → glm-4.7).
+	displayModel := resolveModelAlias(config.Model)
 
 	// interactive-web-session D1: launch interactive claude under a PTY (not -p),
 	// with an explicit --session-id so the JSONL file path is known up front.
@@ -302,6 +364,7 @@ func (sm *SessionManager) CreateSession(ctx context.Context, config protocol.Ses
 		Source:         "daemon",
 		PTY:            ptmx,
 		PermissionMode: permMode,
+		Model:          displayModel,
 	}
 	sm.mu.Lock()
 	sm.sessions[sessionID] = ps
@@ -1004,6 +1067,30 @@ func (sm *SessionManager) GetSessionCwd(sessionID string) (string, bool) {
 		return "", false
 	}
 	return ps.Cwd, true
+}
+
+// GetSessionModel returns the resolved model name for a session (the same value
+// passed to claude via --model at launch). Surfaced to the web client via the
+// session_created event so /model can show the active model. The bool indicates
+// whether the session exists.
+func (sm *SessionManager) GetSessionModel(sessionID string) (string, bool) {
+	sm.mu.RLock()
+	defer sm.mu.RUnlock()
+	ps, ok := sm.sessions[sessionID]
+	if !ok {
+		return "", false
+	}
+	return ps.Model, true
+}
+
+// SetSessionModel caches the resolved model for a session — e.g. a model extracted
+// from a terminal session's JSONL on first get_session_meta, so subsequent reads are free.
+func (sm *SessionManager) SetSessionModel(sessionID, model string) {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+	if ps, ok := sm.sessions[sessionID]; ok {
+		ps.Model = model
+	}
 }
 
 // GetSessionSlashCommands returns the slash commands the agent reported as
