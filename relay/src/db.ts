@@ -117,6 +117,29 @@ export async function initDB(pool: pg.Pool): Promise<void> {
   await pool.query(`ALTER TABLE sessions ADD COLUMN IF NOT EXISTS tok_cache_read BIGINT DEFAULT 0`);
   await pool.query(`ALTER TABLE sessions ADD COLUMN IF NOT EXISTS tok_cache_create BIGINT DEFAULT 0`);
 
+  // sessions.model — resolved model for the session (from session_created). Drives
+  // model-dimension aggregation (donut / top-model) on the token dashboard.
+  await pool.query(`ALTER TABLE sessions ADD COLUMN IF NOT EXISTS model VARCHAR(64)`);
+
+  // token_daily_stats — immutable per-day/per-model rollup. Powers the token
+  // dashboard's time-series/model/host aggregates without scanning events, and
+  // survives session deletion (deleteSession compensates into this table first).
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS token_daily_stats (
+      user_id INT NOT NULL,
+      daemon_id VARCHAR(64) NOT NULL,
+      date DATE NOT NULL,
+      model VARCHAR(64) NOT NULL,
+      input BIGINT NOT NULL DEFAULT 0,
+      output BIGINT NOT NULL DEFAULT 0,
+      cache_read BIGINT NOT NULL DEFAULT 0,
+      cache_create BIGINT NOT NULL DEFAULT 0,
+      requests INT NOT NULL DEFAULT 0,
+      PRIMARY KEY (user_id, daemon_id, date, model)
+    )
+  `);
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_token_daily_stats_user_date ON token_daily_stats(user_id, date)`);
+
   // Session delete tombstone table
   await pool.query(`
     CREATE TABLE IF NOT EXISTS deleted_sessions (
@@ -287,10 +310,10 @@ export async function listSessions(pool: pg.Pool): Promise<any[]> {
   }));
 }
 
-export async function upsertSession(pool: pg.Pool, sessionId: string, daemonId: string, agentType: string, cwd: string, status: string, title?: string, source?: string, exitReason?: string, userId?: number): Promise<void> {
+export async function upsertSession(pool: pg.Pool, sessionId: string, daemonId: string, agentType: string, cwd: string, status: string, title?: string, source?: string, exitReason?: string, userId?: number, model?: string): Promise<void> {
   await pool.query(
-    `INSERT INTO sessions (session_id, daemon_id, agent_type, cwd, title, source, status, exit_reason, user_id, created_at, updated_at)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, NOW(), NOW())
+    `INSERT INTO sessions (session_id, daemon_id, agent_type, cwd, title, source, status, exit_reason, user_id, model, created_at, updated_at)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NOW(), NOW())
      ON CONFLICT (session_id) DO UPDATE SET
        daemon_id = $2,
        status = $7,
@@ -298,8 +321,9 @@ export async function upsertSession(pool: pg.Pool, sessionId: string, daemonId: 
        source = COALESCE($6, sessions.source),
        exit_reason = COALESCE($8, sessions.exit_reason),
        user_id = CASE WHEN $9 IS NOT NULL THEN $9 ELSE sessions.user_id END,
+       model = COALESCE($10, sessions.model),
        updated_at = NOW()`,
-    [sessionId, daemonId, agentType, cwd, title || null, source || 'daemon', status, exitReason || null, userId || null]
+    [sessionId, daemonId, agentType, cwd, title || null, source || 'daemon', status, exitReason || null, userId || null, model || null]
   );
 }
 
@@ -404,12 +428,47 @@ export async function listSessionsByUser(pool: pg.Pool, userId: number): Promise
 // --- Session deletion ---
 
 export async function deleteSession(pool: pg.Pool, sessionId: string): Promise<void> {
-  await pool.query(`DELETE FROM events WHERE session_id = $1`, [sessionId]);
-  await pool.query(`DELETE FROM sessions WHERE session_id = $1`, [sessionId]);
-  await pool.query(
-    `INSERT INTO deleted_sessions (session_id) VALUES ($1) ON CONFLICT (session_id) DO UPDATE SET deleted_at = NOW()`,
-    [sessionId]
-  );
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    // Compensate: roll this session's TODAY usage into token_daily_stats before
+    // deleting events. Past days are already captured in stats by cron/backfill
+    // (independent of events, so deleting them is safe); only today (not yet rolled
+    // up) needs compensation — otherwise deleting the session shrinks today's total.
+    await client.query(`
+      INSERT INTO token_daily_stats (user_id, daemon_id, date, model, input, output, cache_read, cache_create, requests)
+      SELECT s.user_id, s.daemon_id, CURRENT_DATE,
+             COALESCE(s.model, 'unknown'),
+             SUM(COALESCE((e.payload->'usage'->>'input_tokens')::bigint, 0)),
+             SUM(COALESCE((e.payload->'usage'->>'output_tokens')::bigint, 0)),
+             SUM(COALESCE((e.payload->'usage'->>'cache_read_tokens')::bigint, 0)),
+             SUM(COALESCE((e.payload->'usage'->>'cache_create_tokens')::bigint, 0)),
+             COUNT(*)
+      FROM events e JOIN sessions s ON s.session_id = e.session_id
+      WHERE e.session_id = $1 AND e.event_type = 'agent_text' AND e.payload ? 'usage'
+        AND date_trunc('day', e.created_at) = CURRENT_DATE
+        AND s.user_id IS NOT NULL AND s.daemon_id IS NOT NULL
+      GROUP BY s.user_id, s.daemon_id, COALESCE(s.model, 'unknown')
+      ON CONFLICT (user_id, daemon_id, date, model) DO UPDATE SET
+        input = token_daily_stats.input + EXCLUDED.input,
+        output = token_daily_stats.output + EXCLUDED.output,
+        cache_read = token_daily_stats.cache_read + EXCLUDED.cache_read,
+        cache_create = token_daily_stats.cache_create + EXCLUDED.cache_create,
+        requests = token_daily_stats.requests + EXCLUDED.requests
+    `, [sessionId]);
+    await client.query(`DELETE FROM events WHERE session_id = $1`, [sessionId]);
+    await client.query(`DELETE FROM sessions WHERE session_id = $1`, [sessionId]);
+    await client.query(
+      `INSERT INTO deleted_sessions (session_id) VALUES ($1) ON CONFLICT (session_id) DO UPDATE SET deleted_at = NOW()`,
+      [sessionId]
+    );
+    await client.query('COMMIT');
+  } catch (e) {
+    await client.query('ROLLBACK');
+    throw e;
+  } finally {
+    client.release();
+  }
 }
 
 export async function isSessionDeleted(pool: pg.Pool, sessionId: string): Promise<boolean> {
@@ -658,6 +717,178 @@ export async function backfillSessionTokens(pool: pg.Pool): Promise<number> {
     FROM agg WHERE sessions.session_id = agg.session_id
   `);
   return result.rowCount ?? 0;
+}
+
+/** Backfill sessions.model from session_created events (idempotent). Run on startup. */
+export async function backfillSessionModel(pool: pg.Pool): Promise<number> {
+  const result = await pool.query(`
+    UPDATE sessions s SET model = sub.model
+    FROM (
+      SELECT session_id, payload->>'model' AS model
+      FROM events
+      WHERE event_type = 'session_created' AND payload ? 'model' AND payload->>'model' <> ''
+    ) sub
+    WHERE s.session_id = sub.session_id AND s.model IS NULL
+  `);
+  return result.rowCount ?? 0;
+}
+
+/** Backfill token_daily_stats from past-day events (idempotent: ON CONFLICT DO NOTHING,
+ *  since past days are immutable — cron already captured them). Run after
+ *  backfillSessionModel so sessions.model is populated. */
+export async function backfillTokenDailyStats(pool: pg.Pool): Promise<number> {
+  const result = await pool.query(`
+    INSERT INTO token_daily_stats (user_id, daemon_id, date, model, input, output, cache_read, cache_create, requests)
+    SELECT s.user_id, s.daemon_id, date_trunc('day', e.created_at)::date,
+           COALESCE(s.model, 'unknown'),
+           SUM(COALESCE((e.payload->'usage'->>'input_tokens')::bigint, 0)),
+           SUM(COALESCE((e.payload->'usage'->>'output_tokens')::bigint, 0)),
+           SUM(COALESCE((e.payload->'usage'->>'cache_read_tokens')::bigint, 0)),
+           SUM(COALESCE((e.payload->'usage'->>'cache_create_tokens')::bigint, 0)),
+           COUNT(*)
+    FROM events e JOIN sessions s ON s.session_id = e.session_id
+    WHERE e.event_type = 'agent_text' AND e.payload ? 'usage'
+      AND e.created_at < date_trunc('day', NOW())
+      AND s.user_id IS NOT NULL AND s.daemon_id IS NOT NULL
+    GROUP BY s.user_id, s.daemon_id, date_trunc('day', e.created_at)::date, COALESCE(s.model, 'unknown')
+    ON CONFLICT (user_id, daemon_id, date, model) DO NOTHING
+  `);
+  return result.rowCount ?? 0;
+}
+
+/** Aggregate one day's events into token_daily_stats (idempotent: DO NOTHING — a past
+ *  day's events are immutable once rolled up). pg advisory lock serializes multi-instance
+ *  relays so the same day isn't double-aggregated. */
+export async function aggregateDayIntoStats(pool: pg.Pool, date: Date): Promise<number> {
+  const client = await pool.connect();
+  try {
+    await client.query('SELECT pg_advisory_lock(98172634)');
+    const result = await client.query(`
+      INSERT INTO token_daily_stats (user_id, daemon_id, date, model, input, output, cache_read, cache_create, requests)
+      SELECT s.user_id, s.daemon_id, $1::date,
+             COALESCE(s.model, 'unknown'),
+             SUM(COALESCE((e.payload->'usage'->>'input_tokens')::bigint, 0)),
+             SUM(COALESCE((e.payload->'usage'->>'output_tokens')::bigint, 0)),
+             SUM(COALESCE((e.payload->'usage'->>'cache_read_tokens')::bigint, 0)),
+             SUM(COALESCE((e.payload->'usage'->>'cache_create_tokens')::bigint, 0)),
+             COUNT(*)
+      FROM events e JOIN sessions s ON s.session_id = e.session_id
+      WHERE e.event_type = 'agent_text' AND e.payload ? 'usage'
+        AND date_trunc('day', e.created_at) = $1::date
+        AND s.user_id IS NOT NULL AND s.daemon_id IS NOT NULL
+      GROUP BY s.user_id, s.daemon_id, COALESCE(s.model, 'unknown')
+      ON CONFLICT (user_id, daemon_id, date, model) DO NOTHING
+    `, [date.toISOString().slice(0, 10)]);
+    return result.rowCount ?? 0;
+  } finally {
+    await client.query('SELECT pg_advisory_unlock(98172634)');
+    client.release();
+  }
+}
+
+/** Delete events older than the retention window (default 90 days). token_daily_stats
+ *  preserves their rolled-up totals, so the dashboard stays complete. */
+export async function cleanStaleEvents(pool: pg.Pool, days = 90): Promise<number> {
+  const result = await pool.query(`DELETE FROM events WHERE created_at < NOW() - ($1 || ' days')::interval`, [days]);
+  return result.rowCount ?? 0;
+}
+
+// ---- Token dashboard aggregation ----
+// Query-time merge: past days from token_daily_stats + today from events
+// (deleted sessions still contribute via same-day compensation rows in stats).
+
+export async function getTokenDailySeries(pool: pg.Pool, userId: number, daemonId: string | null, days = 30): Promise<any[]> {
+  const useD = !!daemonId && daemonId !== 'all';
+  const params: any[] = [userId];
+  if (useD) params.push(daemonId);
+  params.push(days);
+  const dStats = useD ? 'AND daemon_id = $2' : '';
+  const dEvt = useD ? 'AND s.daemon_id = $2' : '';
+  const dp = useD ? '$3' : '$2';
+  const result = await pool.query(`
+    SELECT date, SUM(input) input, SUM(output) output, SUM(cache_read) cache_read, SUM(requests) requests
+    FROM (
+      SELECT date, input, output, cache_read, requests FROM token_daily_stats
+      WHERE user_id = $1 ${dStats} AND date >= CURRENT_DATE - (${dp}::int) AND date <= CURRENT_DATE
+      UNION ALL
+      SELECT date_trunc('day', e.created_at)::date,
+             SUM(COALESCE((e.payload->'usage'->>'input_tokens')::bigint,0)),
+             SUM(COALESCE((e.payload->'usage'->>'output_tokens')::bigint,0)),
+             SUM(COALESCE((e.payload->'usage'->>'cache_read_tokens')::bigint,0)),
+             COUNT(*)
+      FROM events e JOIN sessions s ON s.session_id = e.session_id
+      WHERE e.event_type='agent_text' AND e.payload ? 'usage' AND s.user_id = $1 ${dEvt}
+        AND date_trunc('day', e.created_at) = CURRENT_DATE
+      GROUP BY 1
+    ) t GROUP BY date ORDER BY date`, params);
+  return result.rows.map((r: any) => ({ date: r.date, input: +r.input, output: +r.output, cache_read: +r.cache_read, requests: +r.requests }));
+}
+
+export async function getTokenByModel(pool: pg.Pool, userId: number, daemonId: string | null): Promise<any[]> {
+  const useD = !!daemonId && daemonId !== 'all';
+  const params: any[] = [userId];
+  if (useD) params.push(daemonId);
+  const dStats = useD ? 'AND daemon_id = $2' : '';
+  const dEvt = useD ? 'AND s.daemon_id = $2' : '';
+  const result = await pool.query(`
+    SELECT model, SUM(input) input, SUM(output) output, SUM(cache_read) cache_read, SUM(requests) requests
+    FROM (
+      SELECT model, input, output, cache_read, requests FROM token_daily_stats WHERE user_id = $1 ${dStats}
+      UNION ALL
+      SELECT COALESCE(s.model,'unknown'),
+             SUM(COALESCE((e.payload->'usage'->>'input_tokens')::bigint,0)),
+             SUM(COALESCE((e.payload->'usage'->>'output_tokens')::bigint,0)),
+             SUM(COALESCE((e.payload->'usage'->>'cache_read_tokens')::bigint,0)),
+             COUNT(*)
+      FROM events e JOIN sessions s ON s.session_id = e.session_id
+      WHERE e.event_type='agent_text' AND e.payload ? 'usage' AND s.user_id = $1 ${dEvt}
+        AND date_trunc('day', e.created_at) = CURRENT_DATE
+      GROUP BY 1
+    ) t GROUP BY model ORDER BY SUM(input) DESC`, params);
+  const rows = result.rows.map((r: any) => ({ model: r.model, input: +r.input, output: +r.output, cache_read: +r.cache_read, requests: +r.requests, total: (+r.input) + (+r.output) }));
+  const tot = rows.reduce((s: number, r: any) => s + r.total, 0) || 1;
+  rows.forEach((r: any) => { r.pct = +(r.total / tot * 100).toFixed(1); });
+  return rows;
+}
+
+export async function getTokenByDaemon(pool: pg.Pool, userId: number): Promise<any[]> {
+  const result = await pool.query(`
+    SELECT daemon_id, SUM(input) input, SUM(output) output, SUM(cache_read) cache_read, SUM(requests) requests
+    FROM (
+      SELECT daemon_id, input, output, cache_read, requests FROM token_daily_stats WHERE user_id = $1
+      UNION ALL
+      SELECT s.daemon_id,
+             SUM(COALESCE((e.payload->'usage'->>'input_tokens')::bigint,0)),
+             SUM(COALESCE((e.payload->'usage'->>'output_tokens')::bigint,0)),
+             SUM(COALESCE((e.payload->'usage'->>'cache_read_tokens')::bigint,0)),
+             COUNT(*)
+      FROM events e JOIN sessions s ON s.session_id = e.session_id
+      WHERE e.event_type='agent_text' AND e.payload ? 'usage' AND s.user_id = $1
+        AND date_trunc('day', e.created_at) = CURRENT_DATE
+      GROUP BY 1
+    ) t GROUP BY daemon_id`, [userId]);
+  const ids = result.rows.map((r: any) => r.daemon_id);
+  let nameMap: Record<string, any> = {};
+  if (ids.length) {
+    const nm = await pool.query(`SELECT daemon_id, hostname, alias FROM daemons WHERE daemon_id = ANY($1)`, [ids]);
+    nameMap = Object.fromEntries(nm.rows.map((r: any) => [r.daemon_id, r]));
+  }
+  return result.rows.map((r: any) => ({ daemon_id: r.daemon_id, hostname: nameMap[r.daemon_id]?.hostname || '', alias: nameMap[r.daemon_id]?.alias || '', input: +r.input, output: +r.output, cache_read: +r.cache_read, requests: +r.requests, total: (+r.input) + (+r.output) }));
+}
+
+/** Per-session daily token trend (from events; only within the 90-day retention). */
+export async function getSessionTokenTrend(pool: pg.Pool, sessionId: string, days = 30): Promise<any[]> {
+  const result = await pool.query(`
+    SELECT date_trunc('day', created_at)::date AS date,
+           SUM(COALESCE((payload->'usage'->>'input_tokens')::bigint,0)) input,
+           SUM(COALESCE((payload->'usage'->>'output_tokens')::bigint,0)) output,
+           SUM(COALESCE((payload->'usage'->>'cache_read_tokens')::bigint,0)) cache_read,
+           COUNT(*) requests
+    FROM events
+    WHERE session_id = $1 AND event_type='agent_text' AND payload ? 'usage'
+      AND created_at >= NOW() - ($2 || ' days')::interval
+    GROUP BY 1 ORDER BY 1`, [sessionId, days]);
+  return result.rows.map((r: any) => ({ date: r.date, input: +r.input, output: +r.output, cache_read: +r.cache_read, requests: +r.requests }));
 }
 
 /** User-level token usage summary: cumulative total + today/week/month deltas.

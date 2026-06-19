@@ -269,7 +269,7 @@ export class Router {
     }
     if (msg.type === 'session_created') {
       const meta = this.pendingSessionMeta?.get(daemonId);
-      db.upsertSession(this.pool, sessionId, daemonId, meta?.agent_type || '', meta?.cwd || '', 'running', msg.title || undefined, 'daemon', undefined, userId ?? undefined).catch(console.error);
+      db.upsertSession(this.pool, sessionId, daemonId, meta?.agent_type || '', meta?.cwd || '', 'running', msg.title || undefined, 'daemon', undefined, userId ?? undefined, msg.model || undefined).catch(console.error);
       this.pendingSessionMeta?.delete(daemonId);
       const originClient = this.pendingSessionCreate.get(daemonId);
       const enriched = { ...msg, daemon_id: daemonId, hostname: daemon?.hostname || 'unknown' };
@@ -303,7 +303,7 @@ export class Router {
         // Use provided title if present; otherwise leave existing title untouched
         const title = msg.title || undefined;
         const cwd = msg.cwd || '';
-        db.upsertSession(this.pool, sessionId, daemonId, 'claude-code', cwd, msg.status || 'busy', title, 'terminal', undefined, userId ?? undefined).catch(console.error);
+        db.upsertSession(this.pool, sessionId, daemonId, 'claude-code', cwd, msg.status || 'busy', title, 'terminal', undefined, userId ?? undefined, msg.model || undefined).catch(console.error);
         db.insertEvent(this.pool, sessionId, msg.type, msg).catch(console.error);
         const enriched = { ...msg, daemon_id: daemonId, hostname: daemon?.hostname || 'unknown' };
         for (const [clientWs, client] of this.clients) {
