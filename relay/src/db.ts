@@ -925,7 +925,7 @@ export async function getTokenSummary(pool: pg.Pool, userId: number): Promise<{ 
  *  with full token composition (input/output/cache_read/cache_create). */
 export async function getTokensByDaemon(pool: pg.Pool, userId: number, daemonId: string): Promise<{
   total: number; today: number; thisMonth: number;
-  sessions: Array<{ session_id: string; title: string; total_tokens: number; tok_input: number; tok_output: number; tok_cache_read: number; tok_cache_create: number }>;
+  sessions: Array<{ session_id: string; title: string; total_tokens: number; tok_input: number; tok_output: number; tok_cache_read: number; tok_cache_create: number; model: string; agent_type: string; status: string; created_at: Date }>;
 } | null> {
   const own = await pool.query(`SELECT 1 FROM daemons WHERE daemon_id = $1 AND user_id = $2`, [daemonId, userId]);
   if ((own.rowCount ?? 0) === 0) return null;
@@ -953,7 +953,11 @@ export async function getTokensByDaemon(pool: pg.Pool, userId: number, daemonId:
            COALESCE(tok_input, 0) AS tok_input,
            COALESCE(tok_output, 0) AS tok_output,
            COALESCE(tok_cache_read, 0) AS tok_cache_read,
-           COALESCE(tok_cache_create, 0) AS tok_cache_create
+           COALESCE(tok_cache_create, 0) AS tok_cache_create,
+           COALESCE(model, '') AS model,
+           COALESCE(agent_type, '') AS agent_type,
+           COALESCE(status, '') AS status,
+           created_at
     FROM sessions
     WHERE user_id = $1 AND daemon_id = $2 AND session_id NOT LIKE 'pending-%'
     ORDER BY COALESCE(last_activity_at, updated_at) DESC
@@ -972,6 +976,10 @@ export async function getTokensByDaemon(pool: pg.Pool, userId: number, daemonId:
       tok_output: parseInt(r.tok_output ?? 0, 10),
       tok_cache_read: parseInt(r.tok_cache_read ?? 0, 10),
       tok_cache_create: parseInt(r.tok_cache_create ?? 0, 10),
+      model: r.model,
+      agent_type: r.agent_type,
+      status: r.status,
+      created_at: r.created_at,
     })),
   };
 }

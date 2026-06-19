@@ -402,5 +402,10 @@
   "token.empty_host": "No token usage sessions on this host",
   "token.archived": "Session detail archived (beyond 90-day retention)",
   "token.all_hosts": "All hosts",
-  "token.recent_days": "Last {{n}} days · {{host}}"
+  "token.recent_days": "Last {{n}} days · {{host}}",
+  "token.session_detail_prefix": "Session detail",
+  "token.created_on": "Created",
+  "token.in_out_ratio": "In/Out ratio",
+  "token.daily_avg_short": "Daily avg",
+  "token.trend_30d": "Daily token trend (30 days)"
 }

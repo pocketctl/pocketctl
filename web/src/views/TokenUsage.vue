@@ -99,22 +99,48 @@
       </div>
       <div v-else class="session-table">
         <div class="session-table-header"><span>{{ t('token.session') }}</span><span>{{ t('token.model') }}</span><span>{{ t('token.amount') }}</span><span>{{ t('token.in_out') }}</span><span style="text-align:right;">{{ t('token.time') }}</span></div>
-        <template v-for="s in sessions" :key="s.session_id">
+        <template v-for="s in pagedSessions" :key="s.session_id">
           <div class="session-row" :class="{ expanded: expanded === s.session_id }" @click="toggleSession(s)">
-            <span class="st-name"><span class="st-expand">▶</span>{{ s.session_id.slice(0, 8) }}</span>
+            <span class="st-name"><span class="st-expand">▶</span>{{ s.title || s.session_id.slice(0, 8) }}</span>
             <span class="st-num"><span class="st-model-dot" :style="{ background: modelColor(s.model) }"></span>{{ s.model || '—' }}</span>
             <span class="st-total">{{ fmt(s.total_tokens) }}</span>
             <span class="st-num">{{ fmt(s.tok_input) }} / {{ fmt(s.tok_output) }}</span>
-            <span class="st-num" style="text-align:right;">{{ s.title ? s.title.slice(0, 12) : '' }}</span>
+            <span class="st-num" style="text-align:right;">{{ formatDate(s.created_at) }}</span>
           </div>
           <div v-if="expanded === s.session_id" class="session-expand-row open">
             <div v-if="trendArchived" class="se-label" style="color:var(--fg-tertiary);">{{ t('token.archived') }}</div>
-            <div v-else class="se-mini-chart">
-              <span v-for="(tr, i) in sessionTrend" :key="i" :style="{ height: Math.max(2, (tr.input / sessionTrendMax) * 36) + 'px' }" :title="tr.date + ': ' + fmt(tr.input)"></span>
-            </div>
+            <template v-else>
+              <div class="se-detail-title">{{ t('token.session_detail_prefix') }} — <span :style="{ color: modelColor(s.model), fontWeight: 600 }">{{ s.model || '—' }}</span> · {{ s.agent_type || 'claude-code' }} · {{ statusLabel(s.status) }} · {{ t('token.created_on') }} {{ formatDate(s.created_at) }}</div>
+              <div class="se-grid">
+                <div class="se-item"><span class="se-label">{{ t('token.input') }}</span><span class="se-val">{{ fmt(s.tok_input) }}</span></div>
+                <div class="se-item"><span class="se-label">{{ t('token.output') }}</span><span class="se-val">{{ fmt(s.tok_output) }}</span></div>
+                <div class="se-item"><span class="se-label">{{ t('token.in_out_ratio') }}</span><span class="se-val">{{ pct(s.tok_input, s.total_tokens) }}% / {{ pct(s.tok_output, s.total_tokens) }}%</span></div>
+                <div class="se-item"><span class="se-label">{{ t('token.cache') }}</span><span class="se-val">{{ fmt(s.tok_cache_read) }}</span></div>
+                <div class="se-item"><span class="se-label">{{ t('token.amount') }}</span><span class="se-val">{{ fmt(s.total_tokens) }}</span></div>
+                <div class="se-item"><span class="se-label">{{ t('token.daily_avg_short') }}</span><span class="se-val">{{ fmt(Math.round((s.total_tokens || 0) / 30)) }}</span></div>
+              </div>
+              <div class="se-trend-label">{{ t('token.trend_30d') }}</div>
+              <div class="se-mini-chart">
+                <span v-for="(tr, i) in trendBars" :key="i" :style="{ height: Math.max(2, (tr.input / sessionTrendMax) * 36) + 'px' }" :title="tr.date + ': ' + fmt(tr.input)"></span>
+              </div>
+            </template>
           </div>
         </template>
         <div v-if="!sessions.length" class="st-empty">{{ t('token.empty_host') }}</div>
+      </div>
+      <div v-if="selectedHost !== 'all' && (totalPages > 1 || pageSize < sessions.length)" class="sess-pagination">
+        <span class="page-total">{{ t('dashboard.page_total', { count: sessions.length }) }}</span>
+        <span class="page-sep">·</span>
+        <select v-model.number="pageSize" class="page-size-select" @change="currentPage = 1">
+          <option v-for="n in pageSizes" :key="n" :value="n">{{ n }} {{ t('dashboard.page_size_unit') }}</option>
+        </select>
+        <div class="page-controls">
+          <button class="st-page-btn" :disabled="currentPage === 1" @click="goPage(1)" :title="t('dashboard.page_first')">«</button>
+          <button class="st-page-btn" :disabled="currentPage === 1" @click="goPage(currentPage - 1)">‹</button>
+          <span class="st-page-info">{{ currentPage }} / {{ totalPages }}</span>
+          <button class="st-page-btn" :disabled="currentPage === totalPages" @click="goPage(currentPage + 1)">›</button>
+          <button class="st-page-btn" :disabled="currentPage === totalPages" @click="goPage(totalPages)" :title="t('dashboard.page_last')">»</button>
+        </div>
       </div>
     </div>
 
@@ -189,7 +215,7 @@ async function loadSessions(daemonId: string) {
   } catch (e) { sessions.value = [] }
 }
 function selectHost(id: string) {
-  selectedHost.value = id; hostMenuOpen.value = false; expanded.value = null
+  selectedHost.value = id; hostMenuOpen.value = false; expanded.value = null; currentPage.value = 1
   loadDashboard()
 }
 async function toggleSession(s: any) {
@@ -252,6 +278,18 @@ const heatmapCols = computed(() => {
 })
 function heatmapCellData(cell: any) { return { date: cell.date, input: cell.value, output: 0, cache_read: 0, requests: 0 } }
 const sessionTrendMax = computed(() => Math.max(1, ...sessionTrend.value.map((tr) => +tr.input || 0)))
+
+// Pagination (single-host session detail)
+const currentPage = ref(1)
+const pageSize = ref(10)
+const pageSizes = [10, 20, 50]
+const totalPages = computed(() => Math.max(1, Math.ceil(sessions.value.length / pageSize.value)))
+const pagedSessions = computed(() => sessions.value.slice((currentPage.value - 1) * pageSize.value, currentPage.value * pageSize.value))
+const trendBars = computed(() => sessionTrend.value.slice(-30))
+function goPage(n: number) { currentPage.value = Math.max(1, Math.min(totalPages.value, n)); expanded.value = null }
+function formatDate(d: any) { if (!d) return ''; try { return new Date(d).toISOString().slice(0, 10) } catch { return '' } }
+function statusLabel(s: string) { const k = 'session.status.' + (s || 'idle'); const v = t(k); return v === k ? (s || '—') : v }
+function pct(a: number, b: number) { return b ? Math.round(((a || 0) / b) * 100) : 0 }
 
 onMounted(loadDashboard)
 </script>
@@ -345,9 +383,22 @@ onMounted(loadDashboard)
 .st-model-dot { width: 9px; height: 9px; border-radius: 50%; flex-shrink: 0; }
 .st-empty { padding: 48px 16px; text-align: center; font-size: 13px; color: var(--fg-tertiary); }
 .session-expand-row { padding: 12px 18px; background: var(--bg); border-bottom: 1px solid var(--border); }
+.session-expand-row .se-detail-title { font-size: 12px; color: var(--fg-secondary); margin-bottom: 10px; }
+.session-expand-row .se-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(120px, 1fr)); gap: 10px; }
+.session-expand-row .se-item { display: flex; flex-direction: column; gap: 2px; }
+.session-expand-row .se-label { font-size: 10px; color: var(--fg-tertiary); text-transform: uppercase; letter-spacing: 0.05em; }
+.session-expand-row .se-val { font-size: 13px; font-weight: 600; color: var(--fg); font-family: var(--font-mono); }
+.session-expand-row .se-trend-label { font-size: 10px; color: var(--fg-tertiary); text-transform: uppercase; letter-spacing: 0.05em; margin: 12px 0 4px; }
 .session-expand-row .se-mini-chart { display: flex; align-items: flex-end; gap: 2px; height: 40px; margin-top: 6px; }
 .session-expand-row .se-mini-chart span { flex: 1; background: var(--accent); opacity: 0.5; border-radius: 1px 1px 0 0; min-height: 2px; }
-.session-expand-row .se-label { font-size: 12px; }
+
+.sess-pagination { display: flex; align-items: center; gap: 10px; justify-content: flex-end; padding: 12px 18px; font-size: 12px; color: var(--fg-tertiary); }
+.sess-pagination .page-total { font-family: var(--font-mono); }
+.sess-pagination .page-size-select { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-sm); color: var(--fg-secondary); padding: 3px 6px; font-size: 12px; }
+.sess-pagination .page-controls { display: flex; align-items: center; gap: 4px; }
+.sess-pagination .st-page-btn { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-sm); color: var(--fg-secondary); padding: 3px 8px; cursor: pointer; font-size: 12px; }
+.sess-pagination .st-page-btn:disabled { opacity: 0.4; cursor: default; }
+.sess-pagination .st-page-info { font-family: var(--font-mono); padding: 0 4px; }
 
 .chart-tooltip { position: fixed; z-index: 100; pointer-events: none; background: var(--surface); border: 1px solid var(--border-light); border-radius: var(--radius-md); padding: 12px 14px; box-shadow: var(--shadow-lg); font-size: 13px; line-height: 1.7; min-width: 150px; }
 .chart-tooltip .ct-date { font-size: 11px; color: var(--fg-tertiary); margin-bottom: 6px; font-family: var(--font-mono); }

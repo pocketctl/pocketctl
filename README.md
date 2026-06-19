@@ -10,6 +10,7 @@ Monitor and manage Claude Code, Codex, and OpenCode sessions from your phone or 
 - 📱 **Mobile Control** — Send messages, create sessions, and manage agents from your phone
 - 🖧 **Hosts Dashboard** — System resource monitoring (CPU / Memory / Disk) with remote daemon restart
 - 📌 **Session Management** — Pin, rename, export, and delete sessions with inline editing
+- 📊 **Token Analytics** — Usage dashboard (daily / model / host breakdown); deleting a session never shrinks historical totals
 - 🔔 **Push Notifications** — Get alerted when your agent needs attention
 - 🔄 **Self-updating** — One command to update to the latest version
 - 🌐 **Web Dashboard** — Full-featured Vue 3 SPA with dark/light theme, daemon & session management
@@ -155,7 +156,7 @@ pocketctl/
 │   └── nginx-docker.conf          # Docker Nginx config
 ├── web/                           # Vue 3 web dashboard
 │   └── src/
-│       ├── views/                 # DashboardView, SessionDetail, HostsView, SettingsView, LoginView, DeviceAuthView
+│       ├── views/                 # DashboardView, SessionDetail, TokenUsage, HostsView, SettingsView, LoginView, DeviceAuthView
 │       ├── composables/           # useAuth, useWebSocket, useCountdown, useRelativeTime, useSessionRename
 │       ├── components/            # SessionActions, SessionTimeline, NewSessionDialog, SubAgentCard, MarkdownRenderer, etc.
 │       └── assets/                # Design system CSS, logo SVGs
