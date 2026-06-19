@@ -680,7 +680,28 @@ onMounted(() => {
     const idx = allSessions.value.findIndex((s: any) => s.session_id === msg.session_id)
     if (idx >= 0) { allSessions.value[idx].status = msg.status }
   }))
-  cleanups.push(onEvent('session_created', () => send({ type: 'list_sessions' })))
+  cleanups.push(onEvent('session_created', (msg: any) => {
+    const sid = msg.session_id
+    if (sid && !allSessions.value.find((s: any) => s.session_id === sid)) {
+      // 乐观插入：relay 的 session_created 早于 DB 落库，补刷的 list_sessions 可能拿不到
+      // 新会话，先插入占位，随后 session_list 整体覆盖保持一致。
+      allSessions.value.unshift({
+        session_id: sid,
+        status: 'running',
+        agent_type: 'claude-code',
+        source: 'daemon',
+        title: msg.title || '',
+        daemon_id: msg.daemon_id || '',
+        hostname: msg.hostname || '',
+        created_at: new Date().toISOString(),
+        last_activity_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+        subagent_count: 0,
+        pinned: false,
+      })
+    }
+    send({ type: 'list_sessions' })
+  }))
   cleanups.push(onEvent('daemon_status', (msg: any) => {
     const idx = daemons.value.findIndex(d => d.daemon_id === msg.daemon_id)
     if (idx >= 0) {

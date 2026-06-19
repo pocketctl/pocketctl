@@ -256,13 +256,22 @@ export class Router {
       db.upsertSession(this.pool, sessionId, daemonId, meta?.agent_type || '', meta?.cwd || '', 'running', msg.title || undefined, 'daemon', undefined, userId ?? undefined).catch(console.error);
       this.pendingSessionMeta?.delete(daemonId);
       const originClient = this.pendingSessionCreate.get(daemonId);
+      const enriched = { ...msg, daemon_id: daemonId, hostname: daemon?.hostname || 'unknown' };
       if (originClient && originClient.readyState === 1) {
         const client = this.clients.get(originClient);
         if (client) client.subscribedSessions.add(sessionId);
         // 记录 origin client，供后续 session_id_changed 补发
         this.pendingOriginClient.set(sessionId, originClient);
-        const enriched = { ...msg, daemon_id: daemonId, hostname: daemon?.hostname || 'unknown' };
         this.send(originClient, enriched);
+      }
+      // 广播给同用户的其他在线 client（多端：Web + iOS 等同时在线），
+      // 让非发起端也能即时看到新会话，不依赖轮询 list_sessions。
+      for (const [clientWs, client] of this.clients) {
+        if (clientWs === originClient) continue;
+        if (clientWs.readyState === 1 && this.sameUser(client.userId, userId)) {
+          if (client) client.subscribedSessions.add(sessionId);
+          this.send(clientWs, enriched);
+        }
       }
       this.pendingSessionCreate.delete(daemonId);
       db.insertEvent(this.pool, sessionId, msg.type, msg).catch(console.error);

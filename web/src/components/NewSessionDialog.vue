@@ -273,16 +273,23 @@ function startSession() {
   }, 15000)
 }
 
-// Auto-select daemon when a host filter was passed in
-let preSelectDone = false
+// Auto-select daemon: ① 若传入 preSelectedDaemonId（从某主机跳来带 host filter）则预选它；
+// ② 否则当可选（在线）主机恰好一台时，自动选中它，省去手动点击。
+// 用户手动切换/取消后（form.daemonId 非空），不再自动覆盖。
+// immediate: 必须立即执行一次——弹窗打开时 props.daemons 往往已就绪，惰性 watch 不会触发。
+let autoSelectDone = false
 watch([() => props.daemons, () => props.preSelectedDaemonId], ([daemons, preId]) => {
-  if (preSelectDone || !preId || !daemons?.length) return
-  const target = daemons.find(d => d.daemon_id === preId)
-  if (target?.daemon_online) {
-    form.daemonId = preId
-    preSelectDone = true
+  if (autoSelectDone || !daemons?.length) return
+  if (form.daemonId) { autoSelectDone = true; return }  // 用户已选择则锁定
+  const online = daemons.filter(d => d.daemon_online)
+  if (preId) {
+    const target = online.find(d => d.daemon_id === preId)
+    if (target) { form.daemonId = preId; autoSelectDone = true }
+    return
   }
-})
+  // 仅一台在线主机 → 自动选中
+  if (online.length === 1) { form.daemonId = online[0].daemon_id; autoSelectDone = true }
+}, { immediate: true })
 
 onMounted(() => {
   connect()

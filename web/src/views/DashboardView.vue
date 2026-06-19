@@ -330,7 +330,28 @@ onMounted(() => {
   connect(); send({ type: 'list_sessions' }); send({ type: 'list_daemons' }); fetchCostSummary()
   onEvent('daemon_list', (msg: any) => { daemons.value = (msg.daemons || []).map((d: any) => ({ ...d })); loading.value = false })
   onEvent('session_list', (msg: any) => { sessions.value = msg.sessions || []; loading.value = false; if ((window as any).__updateSessionCount) (window as any).__updateSessionCount(sessions.value.length) })
-  onEvent('session_created', () => send({ type: 'list_sessions' }))
+  onEvent('session_created', (msg: any) => {
+    const sid = msg.session_id
+    if (sid && !sessions.value.find((s: any) => s.session_id === sid)) {
+      // 乐观插入：relay 的 session_created 早于 DB 落库，挂载后的首次 list_sessions
+      // 拿不到新会话，先插入占位，随后 session_list 整体覆盖保持一致。
+      sessions.value.unshift({
+        session_id: sid,
+        status: 'running',
+        agent_type: 'claude-code',
+        source: 'daemon',
+        title: msg.title || '',
+        daemon_id: msg.daemon_id || '',
+        hostname: msg.hostname || '',
+        created_at: new Date().toISOString(),
+        last_activity_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+        subagent_count: 0,
+        pinned: false,
+      })
+    }
+    send({ type: 'list_sessions' })
+  })
   onEvent('session_status', (msg: any) => { const idx = sessions.value.findIndex((s: any) => s.session_id === msg.session_id); if (idx >= 0) { sessions.value[idx].status = msg.status; if (msg.exit_reason) sessions.value[idx].exit_reason = msg.exit_reason } })
   onEvent('daemon_status', (msg: any) => {
     const idx = daemons.value.findIndex((d: any) => d.daemon_id === msg.daemon_id)
