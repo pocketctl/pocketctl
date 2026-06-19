@@ -652,6 +652,32 @@ onMounted(() => {
       if (first) router.replace({ path: `/session/${first.session_id}`, query: { host: hostFilter.value } })
     }
   }))
+  // session_created: 新建会话到达时立即加入左侧列表（乐观插入），并补刷一次
+  // 权威 list_sessions 拿完整字段。relay 的 session_created 只发给 origin client
+  // 且早于 DB upsert 落库，挂载时的初次 list_sessions 拿不到新会话，必须靠事件补齐。
+  cleanups.push(onEvent('session_created', (msg: any) => {
+    const sid = msg.session_id
+    if (!sid) return
+    if (!allSessions.value.find((s: any) => s.session_id === sid)) {
+      allSessions.value.unshift({
+        session_id: sid,
+        status: 'running',
+        agent: 'claude-code',
+        source: 'daemon',
+        title: msg.title || '',
+        cwd: '',
+        daemon_id: msg.daemon_id || '',
+        hostname: msg.hostname || '',
+        created_at: new Date().toISOString(),
+        last_activity_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+        subagent_count: 0,
+        pinned: false,
+        daemon_online: true,
+      })
+    }
+    send({ type: 'list_sessions' })
+  }))
   cleanups.push(onEvent('daemon_list', (msg: any) => {
     const map: Record<string, any> = {}
     for (const d of (msg.daemons || [])) map[d.daemon_id] = d
