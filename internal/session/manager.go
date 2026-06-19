@@ -350,7 +350,12 @@ func (sm *SessionManager) CreateSession(ctx context.Context, config protocol.Ses
 	now := time.Now()
 	permMode := config.PermissionMode
 	if permMode == "" {
-		permMode = "acceptEdits"
+		// Web/iOS daemon sessions are unattended (no one at the PTY to approve
+		// tool prompts), so default to bypassing all permission checks —
+		// otherwise Bash/Write tools stall forever on a y/n prompt the UI can't
+		// surface (and Ctrl+C doesn't dismiss). Callers who want stricter modes
+		// can set PermissionMode explicitly.
+		permMode = "bypassPermissions"
 	}
 	ps := &ProcessState{
 		SessionID:      sessionID, // real id (not pending-): --session-id pins it

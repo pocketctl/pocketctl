@@ -329,7 +329,10 @@ func BuildClaudeArgs(prompt string, sessionID string, config protocol.SessionCon
 func BuildInteractiveArgs(config protocol.SessionConfig) []string {
 	permMode := config.PermissionMode
 	if permMode == "" {
-		permMode = "acceptEdits"
+		// Unattended daemon sessions: bypass all permission checks (see the
+		// matching default in CreateSession). acceptEdits would stall Bash
+		// tools on an unsurfaced approval prompt.
+		permMode = "bypassPermissions"
 	}
 	args := []string{"--permission-mode", permMode}
 	if config.Model != "" {
