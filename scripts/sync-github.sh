@@ -50,8 +50,8 @@ if [[ ! -d "$SYNC_DIR/.git" ]]; then
       git config credential.helper "$helper"; break
     fi
   done
-  git config user.email "pocketctl-bot@users.noreply.github.com"
-  git config user.name "pocketctl-bot"
+  git config user.email "muwb@users.noreply.github.com"
+  git config user.name "muwb"
   git checkout -b "$GITHUB_BRANCH" 2>/dev/null || git checkout "$GITHUB_BRANCH" 2>/dev/null || true
   git remote add origin "$GITHUB_URL"
   # Adopt existing GitHub history if present (keeps commit chain continuous)
@@ -124,7 +124,7 @@ for pattern in "${SENSITIVE_PATTERNS[@]}"; do
 done
 info "Security scan passed ✓"
 
-# ---------- 4. Stage changes (only what actually changed) ----------
+# ---------- 4. Stage changes (add + modify + delete) ----------
 git add -A
 
 if git diff --cached --quiet; then
