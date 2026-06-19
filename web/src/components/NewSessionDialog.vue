@@ -74,6 +74,10 @@
             {{ t('new_session.permission_mode') }}
           </div>
           <div class="perm-options">
+            <button type="button" :class="['perm-option', { active: form.permissionMode === 'bypassPermissions' }]" @click="form.permissionMode = 'bypassPermissions'">
+              <span class="perm-name">{{ t('session.perm_bypass') }}</span>
+              <span class="perm-desc">{{ t('new_session.perm_bypass') }}</span>
+            </button>
             <button type="button" :class="['perm-option', { active: form.permissionMode === 'default' }]" @click="form.permissionMode = 'default'">
               <span class="perm-name">{{ t('session.perm_default') }}</span>
               <span class="perm-desc">{{ t('new_session.perm_confirm') }}</span>
@@ -158,7 +162,7 @@ const form = reactive({
   agent: 'claude-code',
   cwd: localStorage.getItem('pocketctl_default_cwd') || '',
   prompt: '',
-  permissionMode: 'acceptEdits',  // default | acceptEdits | plan | bypassPermissions
+  permissionMode: 'bypassPermissions',  // Web 会话无人值守，默认跳过权限（acceptEdits 会卡在工具批准提示）
   model: '',  // '' = follow host default | opus | sonnet | haiku alias
 })
 // Available models for the selected host (populated by list_models → model_list)

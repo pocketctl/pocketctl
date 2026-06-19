@@ -1,7 +1,7 @@
 import Fastify from 'fastify';
 import fastifyWebsocket from '@fastify/websocket';
 import fastifyCors from '@fastify/cors';
-import { createPool, initDB, parseDBUrl, createUser, getUserByEmail, getUserById, registerDevice, removeDevice, cleanStaleTombstones, upsertDaemonAlias, deleteDaemon, updateDisplayName, updateEmail, addToIOSWaitlist, revokeToken, isTokenRevoked, cleanRevokedTokens, insertAuditLog, bindTokenToDaemon, updateSessionTitle, isSessionOwnedByUser, getSessionAllEvents, getTokenSummary, getTokensByDaemon, backfillSessionTokens } from './db.js';
+import { createPool, initDB, parseDBUrl, createUser, getUserByEmail, getUserById, registerDevice, removeDevice, cleanStaleTombstones, upsertDaemonAlias, deleteDaemon, updateDisplayName, updateEmail, addToIOSWaitlist, revokeToken, isTokenRevoked, cleanRevokedTokens, insertAuditLog, bindTokenToDaemon, updateSessionTitle, isSessionOwnedByUser, getSessionAllEvents, getTokenSummary, getTokensByDaemon, backfillSessionTokens, backfillSessionModel, backfillTokenDailyStats, aggregateDayIntoStats, cleanStaleEvents, getTokenDailySeries, getTokenByModel, getTokenByDaemon, getSessionTokenTrend } from './db.js';
 import { Router } from './router.js';
 import { hashPassword, verifyPassword, signAccessToken, signRefreshToken, verifyAccessToken, verifyRefreshToken, verifyAccessTokenWithRevocation } from './auth.js';
 import { notifyUser, sessionStatusPush, daemonOfflinePush } from './push.js';
@@ -52,6 +52,10 @@ async function main() {
   try {
     const backfilled = await backfillSessionTokens(pool);
     if (backfilled > 0) console.log(`[tokens] backfilled ${backfilled} sessions with token usage`);
+    const modelBf = await backfillSessionModel(pool);
+    if (modelBf > 0) console.log(`[tokens] backfilled ${modelBf} sessions with model`);
+    const statsBf = await backfillTokenDailyStats(pool);
+    if (statsBf > 0) console.log(`[tokens] backfilled ${statsBf} token_daily_stats rows`);
   } catch (e) { console.error('[tokens] backfill failed:', e); }
 
   const router = new Router(pool);
@@ -368,6 +372,38 @@ async function main() {
     const data = await getTokensByDaemon(pool, payload.userId, daemonId);
     if (!data) { reply.code(404); return { error: 'daemon not found or not owned' }; }
     return data;
+  });
+
+  // Token dashboard: aggregated daily series + model/host breakdowns (query-time merge
+  // of token_daily_stats history + today's events). Supports host filtering.
+  app.get('/api/tokens/dashboard', async (req, reply) => {
+    const authHeader = req.headers.authorization;
+    if (!authHeader?.startsWith('Bearer ')) { reply.code(401); return { error: 'authorization required' }; }
+    const payload = verifyAccessToken(authHeader.slice(7));
+    if (!payload) { reply.code(401); return { error: 'invalid token' }; }
+    const daemon = ((req.query as any).daemon as string) || 'all';
+    const days = Math.min(Math.max(parseInt((req.query as any).days as string) || 30, 1), 365);
+    const [summary, dailySeries, byModel, byDaemon] = await Promise.all([
+      getTokenSummary(pool, payload.userId),
+      getTokenDailySeries(pool, payload.userId, daemon, days),
+      getTokenByModel(pool, payload.userId, daemon),
+      getTokenByDaemon(pool, payload.userId),
+    ]);
+    return { summary, dailySeries, byModel, byDaemon };
+  });
+
+  // Per-session daily token trend (from events, within the 90-day retention).
+  app.get('/api/tokens/session/:sessionId/trend', async (req, reply) => {
+    const authHeader = req.headers.authorization;
+    if (!authHeader?.startsWith('Bearer ')) { reply.code(401); return { error: 'authorization required' }; }
+    const payload = verifyAccessToken(authHeader.slice(7));
+    if (!payload) { reply.code(401); return { error: 'invalid token' }; }
+    const { sessionId } = req.params as any;
+    const owned = await isSessionOwnedByUser(pool, payload.userId, sessionId);
+    if (!owned) { reply.code(404); return { error: 'session not found or not owned' }; }
+    const trend = await getSessionTokenTrend(pool, sessionId, 90);
+    // Archived: the session predates the 90-day retention (events purged) → no trend.
+    return { trend, archived: trend.length === 0 };
   });
 
   // Unregister (delete) a daemon — sessions preserved with daemon_id nulled (C4)
@@ -1038,6 +1074,17 @@ async function main() {
       if (totalPurged > 0) console.log(`[cleanup] removed ${tombstoneCount} tombstones, ${accessPurged} access tokens, ${refreshPurged} refresh tokens`);
     } catch (err) { console.error('[cleanup] cleanup error:', (err as Error).message); }
   }, 6 * 60 * 60 * 1000);
+
+  // Token daily stats rollup (yesterday) + old events retention. Idempotent
+  // (aggregateDayIntoStats uses ON CONFLICT DO NOTHING), so hourly is safe.
+  setInterval(async () => {
+    try {
+      const yesterday = new Date(Date.now() - 24 * 60 * 60 * 1000);
+      await aggregateDayIntoStats(pool, yesterday);
+      const purged = await cleanStaleEvents(pool);
+      if (purged > 0) console.log(`[tokens] purged ${purged} events older than 90 days`);
+    } catch (err) { console.error('[tokens] rollup error:', (err as Error).message); }
+  }, 60 * 60 * 1000);
 }
 
 // ---- Device Auth Page (self-contained HTML) ----

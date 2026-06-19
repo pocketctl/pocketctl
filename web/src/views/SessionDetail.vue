@@ -117,15 +117,31 @@
           <!-- Command execution receipt -->
           <CommandReceiptCard v-else-if="msg.type === 'command_receipt'" :command="msg.command" :status="msg.receiptStatus" :message="msg.message" />
         </template>
+
+        <!-- Turn status bar: lives inside the message stream (visually part of
+             it), below the last message. Live timer while working; on completion
+             shows total duration + output tokens + a copy button. -->
+        <div v-if="isExecuting || lastTurnDuration !== null || completedBarVisible" class="turn-status-bar" :class="{ done: lastTurnDuration !== null || completedBarVisible }">
+          <template v-if="isExecuting">
+            <span class="status-dot working"></span>
+            <span class="status-text">{{ t('session.creating') }}</span>
+            <span class="status-timer">{{ fmtDuration(turnElapsed) }}</span>
+          </template>
+          <template v-else>
+            <svg class="status-check" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6L9 17l-5-5"/></svg>
+            <span class="status-text">{{ t('session.completed') }}</span>
+            <span v-if="lastTurnDuration !== null" class="status-timer">{{ fmtDuration(lastTurnDuration) }}</span>
+            <span v-if="lastAgentUsage?.output_tokens" class="status-tokens">{{ t('session.output_tokens', { n: fmtTokens(lastAgentUsage.output_tokens) }) }}</span>
+            <button v-if="hasLastAgentReply" class="status-copy-btn" @click="copyLastReply">
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+              <span>{{ replyCopied ? t('common.copied') : t('common.copy') }}</span>
+            </button>
+          </template>
+        </div>
       </div>
 
       <!-- Chat Input — unified container with embedded controls -->
       <div class="chat-input-area" :class="{ ended: !canInput }">
-        <!-- Loading indicator: floats at bottom-left, above input area -->
-        <div v-if="showSessionLoading" class="session-loading">
-          <span class="loading-dot"></span>
-          <span>{{ t('session.creating') }}</span>
-        </div>
         <!-- Scroll-to-bottom: absolute child of chat-input-area, floats above
              its top edge. Doesn't take up flex space in chat-messages. -->
         <Transition name="scroll-btn">
@@ -192,10 +208,11 @@
                   <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5"/><path d="M5 12l7-7 7 7"/></svg>
                 </button>
 
-                <!-- Stop button (executing) -->
-                <button v-else class="action-btn stop-btn"
+                <!-- Stop button (executing). 1st click = graceful Ctrl+C;
+                     clicking again within 2.5s escalates to force-kill (SIGKILL). -->
+                <button v-else class="action-btn stop-btn" :class="{ escalated: stopEscalated }"
                   @click="interruptSession"
-                  :title="t('session.stop_gen')">
+                  :title="stopEscalated ? t('session.force_stop') : t('session.stop_gen')">
                   <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="6" width="12" height="12" rx="2"/></svg>
                 </button>
               </div>
@@ -270,14 +287,15 @@ const selectedIndex = ref(0)
 const popoverDismissed = ref(false)
 const status = ref('running')
 const exitReason = ref('')
-const currentPermissionMode = ref('acceptEdits')
+const currentPermissionMode = ref('bypassPermissions')
 const showPermMenu = ref(false)
 const PERMISSION_MODES = [
+  { value: 'bypassPermissions', label: 'session.perm_bypass' },
   { value: 'default', label: 'session.perm_default' },
   { value: 'acceptEdits', label: 'session.perm_accept_edits' },
   { value: 'plan', label: 'session.perm_plan' },
 ]
-const PERM_LABELS: Record<string, string> = { default: 'session.perm_default', acceptEdits: 'session.perm_accept_edits', plan: 'session.perm_plan' }
+const PERM_LABELS: Record<string, string> = { bypassPermissions: 'session.perm_bypass', default: 'session.perm_default', acceptEdits: 'session.perm_accept_edits', plan: 'session.perm_plan' }
 const currentPermLabel = computed(() => PERM_LABELS[currentPermissionMode.value] || currentPermissionMode.value)
 const exitedAt = ref('')
 const autoScroll = ref(true)
@@ -318,14 +336,102 @@ const isDaemonSession = computed(() => {
 })
 const canInput = computed(() => !isDisconnected.value && (!isTerminal.value || isDaemonSession.value))
 // Agent is actively generating (send button → stop button)
-const isExecuting = computed(() => status.value === 'running' || status.value === 'busy')
-const showSessionLoading = computed(() => {
-  if (isLoading.value) return false        // replay 加载中不显示（避免闪烁）
-  if (!isExecuting.value) return false     // 会话不在执行不显示
-  const last = messages.value[messages.value.length - 1]
-  const aiStreaming = last?.type === 'agent_text' && last?.streaming
-  return !aiStreaming                      // AI 正在流式输出时不显示
+// Agent is actively working — includes 'waiting' (tool execution in progress),
+// otherwise the timer would stop prematurely when a tool call is running.
+const isExecuting = computed(() => status.value === 'running' || status.value === 'busy' || status.value === 'waiting')
+
+// --- Turn timer (status bar above the input area) ---
+// Timer is driven entirely by isExecuting transitions: starts on false→true
+// (covers both sendMessage and new-session-with-prompt, which bypasses
+// sendMessage), stops on true→false (whole turn done, incl. tool calls).
+// sessionSwitching gates the watch during a session change: the placeholder
+// status='running' (set in the sessionId watcher before replay) must NOT start
+// the timer from zero. The real turn start is recovered from the last
+// executing session_status's last_activity_at once replay completes.
+const turnStartTime = ref<number | null>(null)   // 本轮开始时间戳
+const turnElapsed = ref(0)                        // 实时计时（秒）
+const lastTurnDuration = ref<number | null>(null) // 完成后的总耗时（秒）
+let turnTimer: ReturnType<typeof setInterval> | null = null
+let sessionSwitching = false                        // true while switching sessions (suppress timer)
+let resumeStartAt: number | null = null           // turn start recovered from replay (ms epoch)
+
+function startTurnTimer(startAt?: number) {
+  if (turnTimer) clearInterval(turnTimer)
+  // startAt (ms) recovers accumulated time when resuming a running turn on
+  // session switch; default (now) for a fresh turn triggered by sendMessage.
+  turnStartTime.value = startAt ?? Date.now()
+  lastTurnDuration.value = null
+  turnElapsed.value = Math.floor((Date.now() - turnStartTime.value) / 1000)
+  turnTimer = setInterval(() => {
+    if (turnStartTime.value) {
+      turnElapsed.value = Math.floor((Date.now() - turnStartTime.value) / 1000)
+    }
+  }, 1000)
+}
+function stopTurnTimer() {
+  if (turnTimer) { clearInterval(turnTimer); turnTimer = null }
+  if (turnStartTime.value) {
+    lastTurnDuration.value = Math.floor((Date.now() - turnStartTime.value) / 1000)
+  }
+}
+// Drive the timer from isExecuting: start on false→true (or when entering an
+// already-running session via immediate), stop on true→false. Gated by
+// sessionSwitching so the placeholder status during a switch doesn't fire it.
+watch(() => isExecuting.value, (exec, prev) => {
+  if (sessionSwitching) return
+  if (exec && !prev) startTurnTimer(resumeStartAt ?? undefined)
+  else if (!exec && prev) stopTurnTimer()
+}, { immediate: true })
+
+// Last agent_text usage (output tokens for the completed bar). Reuses the same
+// reverse-scan pattern as buildCostMessage.
+const lastAgentUsage = computed(() => {
+  for (let i = messages.value.length - 1; i >= 0; i--) {
+    const u = (messages.value[i] as any).usage
+    if (u) return u
+  }
+  return null
 })
+const hasLastAgentReply = computed(() =>
+  messages.value.some((m: any) => m.type === 'agent_text'))
+// Refresh recovery: a finished session (idle/completed/exited/…) loses
+// lastTurnDuration on reload (it's runtime-only, not in replay). Still surface
+// the "completed" bar — check + label + tokens + copy — as long as history has
+// an agent reply. Precise duration is omitted (not recomputed from events).
+const completedBarVisible = computed(() => {
+  if (isExecuting.value || lastTurnDuration.value !== null) return false
+  return ['idle', 'completed', 'exited', 'error', 'killed'].includes(status.value) && hasLastAgentReply.value
+})
+
+function fmtTokens(n: number): string {
+  if (n > 1000) return (n / 1000).toFixed(1) + 'K'
+  return String(n)
+}
+// Format a duration (seconds) as Xs / Xm Ys / Xh Ym Zs for the turn timer.
+function fmtDuration(sec: number): string {
+  if (sec < 60) return `${sec}s`
+  const h = Math.floor(sec / 3600)
+  const m = Math.floor((sec % 3600) / 60)
+  const s = sec % 60
+  return h > 0 ? `${h}h ${m}m ${s}s` : `${m}m ${s}s`
+}
+
+// Copy the last agent_text reply (already clean Markdown source) to clipboard.
+const replyCopied = ref(false)
+let replyCopyTimer: ReturnType<typeof setTimeout> | null = null
+function copyLastReply() {
+  for (let i = messages.value.length - 1; i >= 0; i--) {
+    const m = messages.value[i] as any
+    if (m.type === 'agent_text') {
+      navigator.clipboard.writeText(m.content).then(() => {
+        replyCopied.value = true
+        if (replyCopyTimer) clearTimeout(replyCopyTimer)
+        replyCopyTimer = setTimeout(() => { replyCopied.value = false }, 2000)
+      }).catch(() => {})
+      return
+    }
+  }
+}
 
 const daemonName = computed(() => {
   if (hostFilter.value) {
@@ -454,8 +560,56 @@ function setPermissionMode(mode: string) {
   send({ type: 'set_permission_mode', session_id: sessionId.value, content: mode })
 }
 
+// Stop button escalation: 1st click sends PTY Ctrl+C (graceful). If clicked
+// again within 2.5s (Ctrl+C didn't reach claude — PTY disconnected), escalate
+// to session_kill (SIGKILL the claude process). This guarantees a stuck session
+// can always be stopped, even when the PTY master is disconnected from claude's
+// stdin (the c5813d2c incident: 11 Ctrl+C writes went into a void PTY).
+const stopEscalated = ref(false)
+let stopResetTimer: ReturnType<typeof setTimeout> | null = null
 function interruptSession() {
+  if (stopEscalated.value) {
+    // 2nd click within the window → force kill.
+    send({ type: 'session_kill', session_id: sessionId.value })
+    stopEscalated.value = false
+    return
+  }
+  // 1st click → graceful Ctrl+C; arm escalation window.
   send({ type: 'session_interrupt', session_id: sessionId.value })
+  stopEscalated.value = true
+  if (stopResetTimer) clearTimeout(stopResetTimer)
+  stopResetTimer = setTimeout(() => { stopEscalated.value = false }, 2500)
+}
+
+// Tool-call timeout guard (B2): a tool_call that never receives a matching
+// tool_result leaves its card spinning forever (e.g. the claude process died
+// mid-tool, or the PTY disconnected). For each live tool_call (not replayed),
+// arm a timeout; if no result arrives, mark the card as 'timeout' so it stops
+// spinning. Cleared on result, session switch, and unmount.
+const TOOL_TIMEOUT_MS = 5 * 60 * 1000 // 5 minutes
+const toolTimeouts = new Map<string, ReturnType<typeof setTimeout>>()
+// Out-of-order tool results: relay persists events with fire-and-forget
+// inserts, so DB row id doesn't always match send order — a tool_result can
+// land before its tool_call. On replay (ordered by id) the result then arrives
+// first and finds no tool_call to attach to. Buffer orphan results here and
+// apply them when the matching tool_call is created.
+const pendingToolResults = new Map<string, { output: string | null }>()
+function armToolTimeout(callId: string) {
+  if (toolTimeouts.has(callId)) clearTimeout(toolTimeouts.get(callId)!)
+  const timer = setTimeout(() => {
+    toolTimeouts.delete(callId)
+    const m = messages.value.find((x: any) => x.type === 'tool_call' && x.call_id === callId)
+    if (m && (m as any).status === 'running') (m as any).status = 'timeout'
+  }, TOOL_TIMEOUT_MS)
+  toolTimeouts.set(callId, timer)
+}
+function clearToolTimeout(callId: string) {
+  const t = toolTimeouts.get(callId)
+  if (t) { clearTimeout(t); toolTimeouts.delete(callId) }
+}
+function clearAllToolTimeouts() {
+  for (const t of toolTimeouts.values()) clearTimeout(t)
+  toolTimeouts.clear()
 }
 
 // Local-command whitelist: handled entirely in the browser, never sent to the
@@ -480,6 +634,7 @@ function sendMessage() {
   }
   send({ type: 'user_message', session_id: sessionId.value, content: text })
   messageInput.value = ''
+  startTurnTimer()  // begin turn timer (stops when isExecuting → false)
 }
 
 // handleLocalCommand renders the user bubble + result locally (no daemon round
@@ -695,13 +850,17 @@ function processEvent(evt: any, target: any[] = messages.value) {
     const tool = evt.tool || evt.payload?.tool || ''
     const input = evt.input || evt.payload?.input
     const inputDesc = formatToolInput(tool, input)
-    // Always create new tool_call message (matches iOS app)
+    // Always create new tool_call message (matches iOS app). If a matching
+    // result arrived out of order (buffered in pendingToolResults), apply it
+    // now so the card renders completed instead of spinning forever.
+    const pending = pendingToolResults.get(callId)
     target.push({
       id: nextId('t'), type: 'tool_call', call_id: callId,
       tool, input, inputDesc,
-      output: null, status: 'running',
+      output: pending?.output ?? null, status: pending ? 'completed' : 'running',
       expanded: false, outputExpanded: false,
     })
+    if (pending) pendingToolResults.delete(callId)
   } else if (type === 'tool_result') {
     const callId = evt.call_id || evt.payload?.call_id
     const output = evt.output || evt.payload?.output || evt.result || evt.payload?.result
@@ -717,10 +876,21 @@ function processEvent(evt: any, target: any[] = messages.value) {
     if (idx >= 0) {
       if (output) target[idx].output = output
       target[idx].status = 'completed'
+    } else {
+      // tool_call hasn't been created yet (out-of-order replay) — buffer the
+      // result so it's applied when the matching tool_call arrives.
+      pendingToolResults.set(callId, { output: output ?? null })
     }
   } else if (type === 'session_status') {
     const s = evt.status || evt.payload?.status
     if (s) status.value = s
+    // During a session switch, capture the turn start time from the last
+    // executing status (busy/running/waiting) so the timer can resume the
+    // accumulated elapsed instead of restarting from zero.
+    if (sessionSwitching && (s === 'running' || s === 'busy' || s === 'waiting')) {
+      const ts = evt.last_activity_at || evt.payload?.last_activity_at
+      if (ts) resumeStartAt = new Date(ts).getTime()
+    }
     if (evt.exit_reason || evt.payload?.exit_reason) exitReason.value = evt.exit_reason || evt.payload.exit_reason
     if (evt.exited_at || evt.payload?.exited_at) exitedAt.value = evt.exited_at || evt.payload.exited_at
   } else if (type === 'command_receipt') {
@@ -735,6 +905,17 @@ function processEvent(evt: any, target: any[] = messages.value) {
 // Watch for session switch — clear messages and replay new session
 watch(sessionId, (newId, oldId) => {
   if (newId && newId !== oldId) {
+    clearAllToolTimeouts()   // reset tool timeout guards on session switch
+    pendingToolResults.clear() // discard buffered out-of-order results
+    // Gate the turn-timer watch: the placeholder status='running' below must
+    // not start the timer from zero. The real turn start (if executing) is
+    // recovered from the last executing session_status once replay completes.
+    sessionSwitching = true
+    resumeStartAt = null
+    if (turnTimer) { clearInterval(turnTimer); turnTimer = null }
+    turnStartTime.value = null
+    turnElapsed.value = 0
+    lastTurnDuration.value = null
     messages.value = []
     status.value = 'running'
     exitReason.value = ''
@@ -758,6 +939,10 @@ onMounted(() => {
   connect()
   send({ type: 'list_sessions' })
   send({ type: 'list_daemons' })
+  // Gate the timer watch for the initial load too: status defaults to 'running'
+  // (a placeholder) and would start the timer from zero before the real status
+  // arrives via replay. replay_end un-gates and resumes correctly.
+  sessionSwitching = true
   replayReqId.value++
   isLoading.value = true
   loadedMinId.value = 0
@@ -772,10 +957,17 @@ onMounted(() => {
 
   cleanups.push(onEvent('session_list', (msg: any) => {
     allSessions.value = msg.sessions || []
-    // 从主机"查看全部"跳来（带 host query + default 哨兵）→ 自动落到该主机首个会话
-    if (hostFilter.value && sessionId.value === 'default') {
-      const first = allSessions.value.find((s: any) => s.daemon_id === hostFilter.value)
-      if (first) router.replace({ path: `/session/${first.session_id}`, query: { host: hostFilter.value } })
+    // default 哨兵 → 自动落到首个会话（避免停在空白的 default 占位）：
+    //   - 带 host query（从主机"查看全部"跳来）：该主机的首个会话
+    //   - 无 host query（sidebar 直接进入会话模块）：整个列表的首个会话
+    // 落定后 daemonName 按当前 sessionId 解析，session-panel-header 与 chat-toolbar
+    // 都会显示这个会话所属的主机名。
+    if (sessionId.value === 'default') {
+      const first = visibleSessions.value[0]
+      if (first) {
+        const query = hostFilter.value ? { host: hostFilter.value } : {}
+        router.replace({ path: `/session/${first.session_id}`, query })
+      }
     }
   }))
   // session_created: 新建会话到达时立即加入左侧列表（乐观插入），并补刷一次
@@ -862,6 +1054,14 @@ onMounted(() => {
     if (msg.has_more !== undefined) hasMore.value = !!msg.has_more
     // backward: last_seq is the oldest id of the returned page → next page cursor
     if (msg.last_seq && (!loadedMinId.value || msg.last_seq < loadedMinId.value)) loadedMinId.value = msg.last_seq
+    // Session switch complete: ungate the timer watch. If the target session is
+    // executing, resume timing from the recovered turn start (last executing
+    // session_status's last_activity_at) so elapsed isn't reset to zero.
+    if (sessionSwitching) {
+      sessionSwitching = false
+      if (isExecuting.value) startTurnTimer(resumeStartAt ?? undefined)
+      resumeStartAt = null
+    }
   }))
 
   cleanups.push(onEvent('user_text', (msg: any) => {
@@ -879,12 +1079,18 @@ onMounted(() => {
   cleanups.push(onEvent('tool_call', (msg: any) => {
     if (msg.session_id !== sessionId.value) return
     processEvent(msg)
+    // Arm timeout guard: if no tool_result arrives in time, the card flips to
+    // 'timeout' instead of spinning forever (claude died / PTY disconnected).
+    const callId = msg.call_id || msg.payload?.call_id
+    if (callId) armToolTimeout(callId)
     nextTick(scrollToBottom)
   }))
 
   cleanups.push(onEvent('tool_result', (msg: any) => {
     if (msg.session_id !== sessionId.value) return
     processEvent(msg)
+    const callId = msg.call_id || msg.payload?.call_id
+    if (callId) clearToolTimeout(callId)
   }))
 
   cleanups.push(onEvent('subagent_discovered', (msg: any) => {
@@ -948,6 +1154,9 @@ onUnmounted(() => {
   for (const fn of cleanups) fn()
   cleanups.length = 0
   document.removeEventListener('click', closePermMenu)
+  if (turnTimer) { clearInterval(turnTimer); turnTimer = null }
+  if (stopResetTimer) { clearTimeout(stopResetTimer); stopResetTimer = null }
+  clearAllToolTimeouts()
 })
 
 function closePermMenu(e: MouseEvent) {
@@ -1008,7 +1217,7 @@ onMounted(() => {
    Left-aligned (natural document flow), unlike centered tool cards. */
 .chat-messages > .agent-block { min-width: 0; max-width: 720px; width: fit-content; align-self: flex-start; }
 /* Errors / banners: full width within 820px, centered. (tool-wrap + receipt-card excluded — left-aligned) */
-.chat-messages > *:not(.msg):not(.agent-block):not(.tool-wrap):not(.receipt-card) { min-width: 0; max-width: 820px; width: 100%; align-self: center; }
+.chat-messages > *:not(.msg):not(.agent-block):not(.tool-wrap):not(.receipt-card):not(.turn-status-bar) { min-width: 0; max-width: 820px; width: 100%; align-self: center; }
 /* Tool cards: left-aligned, not centered. */
 .chat-messages > .tool-wrap { min-width: 0; max-width: 820px; width: 100%; align-self: flex-start; }
 .chat-messages > *.msg { min-width: 0; max-width: 85%; }
@@ -1076,21 +1285,38 @@ onMounted(() => {
 .send-btn:disabled { background: var(--border); color: var(--fg-tertiary); cursor: not-allowed; }
 .stop-btn { background: var(--fg); color: var(--bg); }
 .stop-btn:hover { opacity: 0.85; }
+.stop-btn.escalated { background: #e5484d; animation: stop-pulse 1s ease-in-out infinite; }
+@keyframes stop-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.7; } }
 
-/* Session loading */
-.session-loading {
-  position: absolute; top: -30px; left: 20px;
-  display: flex; align-items: center; gap: 8px;
-  padding: 4px 10px; border-radius: var(--radius-full);
-  background: transparent; color: var(--fg-tertiary); font-size: 12px;
-  z-index: 5; pointer-events: none;
-  animation: fade-in 0.4s ease;
+/* Turn status bar: sits inside the message stream, visually part of it
+   (left-aligned, same width as agent replies, no separating border). */
+.turn-status-bar {
+  display: flex; align-items: center; gap: 10px;
+  align-self: flex-start;
+  max-width: 720px; width: fit-content;
+  padding: 6px 2px;
+  font-size: 12px; color: var(--fg-tertiary);
+  animation: fade-in 0.3s ease;
 }
-.loading-dot {
+.turn-status-bar .status-dot.working {
   width: 8px; height: 8px; border-radius: 50%;
   background: var(--accent);
   animation: loading-bounce 1.2s ease-in-out infinite;
 }
+.turn-status-bar .status-check { color: var(--accent); flex-shrink: 0; }
+.turn-status-bar .status-text { color: var(--fg-secondary); }
+.turn-status-bar .status-timer {
+  font-family: var(--font-mono); font-weight: 600; color: var(--fg);
+}
+.turn-status-bar .status-tokens { color: var(--fg-tertiary); }
+.turn-status-bar .status-copy-btn {
+  display: inline-flex; align-items: center; gap: 5px;
+  font-size: 11px; color: var(--fg-tertiary);
+  background: none; border: none; cursor: pointer;
+  border-radius: 4px; padding: 3px 8px;
+  transition: color 0.15s, background 0.15s;
+}
+.turn-status-bar .status-copy-btn:hover { color: var(--fg); background: var(--surface-hover); }
 @keyframes loading-bounce {
   0%, 80%, 100% { opacity: 0.3; transform: scale(0.8); }
   40% { opacity: 1; transform: scale(1.2); }

@@ -21,6 +21,11 @@
           <span class="badge" v-if="sessionCount > 0">{{ sessionCount }}</span>
         </router-link>
 
+        <router-link to="/tokens" class="sidebar-link" active-class="active">
+          <span class="link-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 20V10M12 20V4M6 20v-6"/></svg></span>
+          <span class="link-text">用量分析</span>
+        </router-link>
+
         <div class="sidebar-section-label">{{ t('nav.manage') }}</div>
 
         <router-link to="/hosts" class="sidebar-link" active-class="active" v-slot="{ isActive }">

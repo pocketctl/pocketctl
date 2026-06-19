@@ -350,7 +350,12 @@ func (sm *SessionManager) CreateSession(ctx context.Context, config protocol.Ses
 	now := time.Now()
 	permMode := config.PermissionMode
 	if permMode == "" {
-		permMode = "acceptEdits"
+		// Web/iOS daemon sessions are unattended (no one at the PTY to approve
+		// tool prompts), so default to bypassing all permission checks —
+		// otherwise Bash/Write tools stall forever on a y/n prompt the UI can't
+		// surface (and Ctrl+C doesn't dismiss). Callers who want stricter modes
+		// can set PermissionMode explicitly.
+		permMode = "bypassPermissions"
 	}
 	ps := &ProcessState{
 		SessionID:      sessionID, // real id (not pending-): --session-id pins it
@@ -760,15 +765,32 @@ func (sm *SessionManager) readOutput(ctx context.Context, cmd *exec.Cmd, stdout 
 func (sm *SessionManager) SendMessage(ctx context.Context, sessionID string, content string) error {
 	sm.mu.RLock()
 	ps, ok := sm.sessions[sessionID]
+	sm.mu.RUnlock()
+	if !ok {
+		// Not in memory. A daemon restart loses the in-memory map, but a session
+		// still shown in the web UI (persisted in the relay DB) usually has its
+		// JSONL history on disk. Resume it via `claude --resume` so the user can
+		// keep talking instead of hitting "session not found". Registered as
+		// source=terminal/status=exited, so the --resume path below drives it.
+		// Falls back to "session not found" only if no JSONL exists either.
+		if !sm.tryResumeHistorical(sessionID) {
+			return fmt.Errorf("session not found: %s", sessionID)
+		}
+		sm.mu.RLock()
+		ps, ok = sm.sessions[sessionID]
+		sm.mu.RUnlock()
+		if !ok {
+			return fmt.Errorf("session not found: %s", sessionID)
+		}
+	}
+	// ps is non-nil here — safe to read fields.
+	sm.mu.RLock()
 	cwd := ps.Cwd
 	isRunning := ps.Status == protocol.StatusRunning || ps.Status == "busy"
 	isExited := ps.Status == protocol.StatusExited
 	source := ps.Source
 	pid := ps.Pid
 	sm.mu.RUnlock()
-	if !ok {
-		return fmt.Errorf("session not found: %s", sessionID)
-	}
 	// Update last activity — user sent a message
 	sm.mu.Lock()
 	ps.LastActivityAt = time.Now()
@@ -866,6 +888,74 @@ func (sm *SessionManager) SendMessage(ctx context.Context, sessionID string, con
 	}
 	go sm.readOutput(ctx, cmd, stdout, adp, ps)
 	return nil
+}
+
+// tryResumeHistorical re-registers a session that exists on disk (JSONL
+// history) but isn't in the in-memory map — typically a session from before
+// the current daemon process started, still listed in the web UI from the
+// relay DB. It locates the JSONL, extracts the cwd, and registers the session
+// as terminal/exited so SendMessage's existing --resume path drives it.
+// Returns false only if no JSONL exists (genuinely unknown session).
+func (sm *SessionManager) tryResumeHistorical(sessionID string) bool {
+	jsonlPath, err := watcher.ResolveJSONLPath(sessionID, "")
+	if err != nil {
+		return false
+	}
+	cwd := extractCwdFromJSONL(jsonlPath)
+	if cwd == "" {
+		// Fallback: decode cwd from the projects dir name (-Users-foo-bar →
+		// /Users/foo/bar). Less reliable (collapses internal hyphens) but
+		// better than an empty cwd.
+		cwd = cwdFromProjectsDir(jsonlPath)
+	}
+	now := time.Now()
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+	// Re-check under lock: another goroutine may have registered it concurrently.
+	if _, exists := sm.sessions[sessionID]; exists {
+		return true
+	}
+	sm.sessions[sessionID] = &ProcessState{
+		SessionID:      sessionID,
+		Status:         protocol.StatusExited,
+		Source:         "terminal",
+		StartedAt:      now,
+		LastActivityAt: now,
+		Cwd:            cwd,
+		Agent:          "claude-code",
+	}
+	return true
+}
+
+// extractCwdFromJSONL reads the first records of a session's JSONL and returns
+// the cwd field. Each line is a JSON object; cwd is present on most records.
+func extractCwdFromJSONL(path string) string {
+	f, err := os.Open(path)
+	if err != nil {
+		return ""
+	}
+	defer f.Close()
+	scanner := bufio.NewScanner(f)
+	scanner.Buffer(make([]byte, 1024*1024), 1024*1024)
+	for i := 0; i < 200 && scanner.Scan(); i++ {
+		var rec struct {
+			Cwd string `json:"cwd"`
+		}
+		if json.Unmarshal(scanner.Bytes(), &rec) == nil && rec.Cwd != "" {
+			return rec.Cwd
+		}
+	}
+	return ""
+}
+
+// cwdFromProjectsDir decodes a cwd from a JSONL path's projects dir name
+// (~/.claude/projects/-Users-foo-bar/x.jsonl → /Users/foo/bar).
+func cwdFromProjectsDir(jsonlPath string) string {
+	dir := filepath.Base(filepath.Dir(jsonlPath))
+	if !strings.HasPrefix(dir, "-") {
+		return ""
+	}
+	return "/" + strings.ReplaceAll(dir[1:], "-", "/")
 }
 
 // sendToIdleTerminal sends a message to a terminal session that's idle (alive but waiting for input).
