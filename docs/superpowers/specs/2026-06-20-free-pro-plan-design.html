@@ -170,7 +170,10 @@
       <li><a href="#s4">权益检查点</a></li>
       <li><a href="#s5">实施步骤</a></li>
       <li><a href="#s6">扩展性分析</a></li>
-      <li><a href="#s7">边界与不做</a></li>
+      <li><a href="#s7">建议定价</a></li>
+      <li><a href="#s8">V1 边界</a></li>
+      <li><a href="#s9">同期讨论不做的事项</a></li>
+      <li><a href="#s10">产品定位结论</a></li>
     </ol>
   </div>
 
@@ -400,19 +403,37 @@ plans:
 
   <!-- Section 7 -->
   <div class="section" id="s7">
-    <h2><span class="icon">🚧</span> 边界与同期讨论不做的事项</h2>
+    <h2><span class="icon">💴</span> 建议定价</h2>
+    <p>国内 SaaS 模式，面向个人开发者：</p>
+    <table>
+      <thead><tr><th></th><th>月付</th><th>年付</th></tr></thead>
+      <tbody>
+        <tr>
+          <td>Pro</td>
+          <td><strong>¥19 / 月</strong></td>
+          <td><strong>¥149 / 年</strong>（≈¥12.4/月）</td>
+        </tr>
+      </tbody>
+    </table>
+    <p>定价逻辑：¥19 与微信读书等国内开发者常用订阅平齐，一杯奶茶钱。年费 ¥149 对标一个买断 App 的价格。出海时映射为 $8/月。</p>
+  </div>
 
-    <h3>V1 边界</h3>
+  <!-- Section 8 -->
+  <div class="section" id="s8">
+    <h2><span class="icon">🚧</span> V1 边界</h2>
     <table>
       <thead><tr><th>项</th><th>说明</th></tr></thead>
       <tbody>
-        <tr><td>定价</td><td>不涉及"多少钱/月"，只定义功能分界</td></tr>
         <tr><td>管理后台</td><td>改 plan 直接在 DB 操作</td></tr>
         <tr><td>计费系统</td><td>Stripe 等集成后续独立设计</td></tr>
+        <tr><td>自部署</td><td>始终享受 pro 权益</td></tr>
       </tbody>
     </table>
+  </div>
 
-    <h3>同期讨论不做的事项</h3>
+  <!-- Section 9 -->
+  <div class="section" id="s9">
+    <h2><span class="icon">❌</span> 同期讨论不做的事项</h2>
     <table>
       <thead><tr><th>方向</th><th style="width:70%">结论</th></tr></thead>
       <tbody>
@@ -438,6 +459,18 @@ plans:
         </tr>
       </tbody>
     </table>
+  </div>
+
+  <!-- Section 10 -->
+  <div class="section" id="s10">
+    <h2><span class="icon">📍</span> 产品定位结论</h2>
+    <div class="highlight-box" style="font-size: 1.05em; line-height: 1.8;">
+      <strong>一个好工具 + 小额副业。</strong><br><br>
+      开源 + 自部署模式下全功能可用，社区受益。<br>
+      SaaS ¥19/月 — 有人付费是惊喜，没人付费也不焦虑。<br>
+      不指望它成为规模化商业产品。
+    </div>
+    <p style="margin-top: 14px;">pocketctl 精准地解决了一个窄而真实的个人痛点——"离开电脑后保持对 AI Agent 的控制和交互"——这是它的核心价值。但该价值不具备自然的商业扩展空间，目标用户群体本身较小。商业野心将放在其他项目中。</p>
   </div>
 
 </div>
