@@ -1,0 +1,445 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>pocketctl 免费版 / 付费版 分界方案</title>
+  <style>
+    :root {
+      --primary: #6366f1;
+      --primary-light: #818cf8;
+      --primary-bg: #eef2ff;
+      --bg: #ffffff;
+      --surface: #f8fafc;
+      --surface-alt: #f1f5f9;
+      --text: #1e293b;
+      --text-secondary: #64748b;
+      --border: #e2e8f0;
+      --success: #10b981;
+      --warning: #f59e0b;
+      --danger: #ef4444;
+      --info: #3b82f6;
+      --code-bg: #1e293b;
+      --code-text: #e2e8f0;
+    }
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', sans-serif;
+      background: var(--surface);
+      color: var(--text);
+      line-height: 1.7;
+      font-size: 15px;
+    }
+
+    .header {
+      background: linear-gradient(135deg, #4f46e5, #7c3aed, #6366f1);
+      color: white;
+      padding: 50px 40px 40px;
+      text-align: center;
+    }
+    .header h1 { font-size: 2.2em; font-weight: 800; margin-bottom: 8px; }
+    .header .subtitle { font-size: 1.1em; opacity: 0.9; font-weight: 300; }
+    .header .meta { margin-top: 14px; font-size: 0.85em; opacity: 0.7; }
+
+    .container { max-width: 1100px; margin: 0 auto; padding: 28px 24px 80px; }
+
+    .section {
+      background: white;
+      border-radius: 14px;
+      box-shadow: 0 1px 6px rgba(0,0,0,0.04);
+      padding: 32px 36px;
+      margin-bottom: 22px;
+      scroll-margin-top: 20px;
+    }
+    .section h2 {
+      font-size: 1.5em; color: var(--primary); margin-bottom: 18px;
+      padding-bottom: 10px; border-bottom: 2px solid var(--primary-bg);
+      display: flex; align-items: center; gap: 10px;
+    }
+    .section h2 .icon {
+      width: 34px; height: 34px; background: var(--primary-bg);
+      border-radius: 9px; display: flex; align-items: center; justify-content: center; font-size: 1.05em;
+    }
+    .section h3 {
+      font-size: 1.15em; color: var(--text); margin: 22px 0 10px;
+      padding-left: 12px; border-left: 3px solid var(--primary-light);
+    }
+    .section p { margin-bottom: 10px; }
+
+    table { width: 100%; border-collapse: collapse; margin: 14px 0; font-size: 0.92em; }
+    thead th {
+      background: var(--primary); color: white; padding: 10px 14px;
+      text-align: left; font-weight: 600; font-size: 0.9em;
+    }
+    thead th:first-child { border-radius: 8px 0 0 0; }
+    thead th:last-child { border-radius: 0 8px 0 0; }
+    tbody td { padding: 10px 14px; border-bottom: 1px solid var(--border); vertical-align: top; }
+    tbody tr:hover { background: var(--primary-bg); }
+
+    .badge {
+      display: inline-block; padding: 2px 9px; border-radius: 10px;
+      font-size: 0.78em; font-weight: 600; white-space: nowrap;
+    }
+    .badge-free { background: #fef3c7; color: #d97706; }
+    .badge-pro { background: #d1fae5; color: #059669; }
+    .badge-both { background: #dbeafe; color: #2563eb; }
+    .badge-new { background: #dbeafe; color: #2563eb; }
+    .badge-no { background: #fee2e2; color: #dc2626; }
+
+    code {
+      background: var(--surface-alt); padding: 2px 6px; border-radius: 4px;
+      font-family: 'SF Mono', 'Fira Code', monospace; font-size: 0.87em; color: #7c3aed;
+    }
+    pre {
+      background: var(--code-bg); color: var(--code-text); border-radius: 10px;
+      padding: 18px 22px; margin: 12px 0; overflow-x: auto;
+      font-family: 'SF Mono', 'Fira Code', monospace; font-size: 0.86em; line-height: 1.6;
+    }
+    pre code { background: none; padding: 0; color: inherit; }
+
+    .yaml-block {
+      border-left: 3px solid #7c3aed; padding: 12px 16px; background: #f5f3ff;
+      border-radius: 0 8px 8px 0; margin: 10px 0; font-size: 0.9em; overflow-x: auto;
+    }
+    .yaml-block code { background: none; color: #5b21b6; }
+
+    .step-card {
+      border: 1px solid var(--border); border-radius: 10px; padding: 18px 22px; margin: 10px 0;
+      background: var(--surface);
+    }
+    .step-card .step-num {
+      display: inline-block; width: 28px; height: 28px; border-radius: 8px;
+      background: var(--primary); color: white; text-align: center; line-height: 28px;
+      font-weight: 700; font-size: 0.88em; margin-right: 10px;
+    }
+    .step-card .step-title { font-weight: 600; display: inline; }
+    .step-card .step-deps { color: var(--text-secondary); font-size: 0.85em; margin-top: 4px; }
+
+    .highlight-box {
+      background: rgba(99,102,241,0.06); border: 1px solid rgba(99,102,241,0.2);
+      border-radius: 10px; padding: 18px 22px; margin: 16px 0;
+    }
+
+    .toc {
+      background: white; border-radius: 14px; box-shadow: 0 1px 6px rgba(0,0,0,0.04);
+      padding: 24px 32px; margin-bottom: 22px;
+    }
+    .toc h3 { margin: 0 0 12px; color: var(--text); font-size: 1.05em; }
+    .toc ol { padding-left: 20px; line-height: 2; }
+    .toc a { color: var(--primary); text-decoration: none; }
+
+    .card-no {
+      background: #fff5f5; border-left: 3px solid var(--danger);
+      padding: 12px 16px; border-radius: 0 8px 8px 0; margin: 10px 0; font-size: 0.9em;
+    }
+    .card-no strong { color: var(--danger); }
+
+    .file-list {
+      display: grid; grid-template-columns: 1fr auto 1fr;
+      gap: 6px 16px; font-size: 0.9em; margin: 10px 0;
+    }
+    .file-list .file { font-family: 'SF Mono', 'Fira Code', monospace; }
+    .file-list .op { color: var(--text-secondary); }
+
+    @media (max-width: 768px) {
+      body { font-size: 14px; }
+      .header { padding: 36px 20px 28px; }
+      .header h1 { font-size: 1.6em; }
+      .section { padding: 20px; }
+      .container { padding: 16px 12px 60px; }
+    }
+  </style>
+</head>
+<body>
+
+<div class="header">
+  <h1>免费版 / 付费版 分界方案</h1>
+  <div class="subtitle">pocketctl SaaS 运营模式 · 权益体系设计</div>
+  <div class="meta">2026-06-20 · v1 · 方案已确认</div>
+</div>
+
+<div class="container">
+
+  <!-- TOC -->
+  <div class="toc">
+    <h3>📑 目录</h3>
+    <ol>
+      <li><a href="#s1">背景与运营模式</a></li>
+      <li><a href="#s2">权益分界线</a></li>
+      <li><a href="#s3">技术方案</a></li>
+      <li><a href="#s4">权益检查点</a></li>
+      <li><a href="#s5">实施步骤</a></li>
+      <li><a href="#s6">扩展性分析</a></li>
+      <li><a href="#s7">边界与不做</a></li>
+    </ol>
+  </div>
+
+  <!-- Section 1 -->
+  <div class="section" id="s1">
+    <h2><span class="icon">🎯</span> 背景与运营模式</h2>
+    <p>pocketctl 采用<strong>混合模式</strong>运营：</p>
+    <table>
+      <thead><tr><th>模式</th><th>说明</th><th>权益</th></tr></thead>
+      <tbody>
+        <tr>
+          <td><span class="badge badge-pro">SaaS</span></td>
+          <td>用户连接托管 Relay，由平台管理</td>
+          <td>按 <code>users.plan</code> 字段分层（free / pro）</td>
+        </tr>
+        <tr>
+          <td><span class="badge badge-pro">Self-hosted</span></td>
+          <td>用户自己 <code>docker compose up -d</code> 搭建</td>
+          <td>始终享受 pro 权益，全部功能可用</td>
+        </tr>
+      </tbody>
+    </table>
+    <div class="highlight-box">
+      参考 GitLab、Sentry 等开源项目验证过的模式：自部署用户获得完整产品，SaaS 用户按 tier 付费换取便利。
+    </div>
+  </div>
+
+  <!-- Section 2 -->
+  <div class="section" id="s2">
+    <h2><span class="icon">📊</span> 权益分界线</h2>
+    <table>
+      <thead>
+        <tr><th>维度</th><th style="text-align:center"><span class="badge badge-free">免费版</span></th><th style="text-align:center"><span class="badge badge-pro">付费版</span></th></tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>并发会话</td><td style="text-align:center"><strong>2</strong> 个</td><td style="text-align:center"><strong>10</strong> 个</td>
+        </tr>
+        <tr>
+          <td>历史记录保留</td><td style="text-align:center"><strong>7</strong> 天</td><td style="text-align:center"><strong>永久</strong></td>
+        </tr>
+        <tr>
+          <td>主机数</td><td style="text-align:center" colspan="2"><span class="badge badge-both">不限</span></td>
+        </tr>
+        <tr>
+          <td>推送通知</td><td style="text-align:center">仅 Agent 报错</td><td style="text-align:center">全量推送</td>
+        </tr>
+        <tr>
+          <td>数据导出</td><td style="text-align:center"><span class="badge badge-no">无</span></td><td style="text-align:center"><span class="badge badge-pro">✅</span></td>
+        </tr>
+        <tr>
+          <td>Agent 类型</td><td style="text-align:center" colspan="2"><span class="badge badge-both">全部可用</span></td>
+        </tr>
+        <tr>
+          <td>Token 看板</td><td style="text-align:center" colspan="2"><span class="badge badge-both">全部可用</span></td>
+        </tr>
+      </tbody>
+    </table>
+
+    <h3>设计要点</h3>
+    <ul>
+      <li>Agent 类型和 Token 看板不设限 — 属于核心产品体验，开放给所有用户降低试用门槛</li>
+      <li>主机数不限制 — 限制并发会话已足够对齐成本且用户体验更好</li>
+      <li>免费版 2 个并发 — "刚好够用但不爽"，保留自然升级动机</li>
+      <li>免费版 7 天保留 — 覆盖完整工作周，超过则自然转化为付费</li>
+    </ul>
+  </div>
+
+  <!-- Section 3 -->
+  <div class="section" id="s3">
+    <h2><span class="icon">🏗</span> 技术方案</h2>
+    <p><strong>选型：结构化权益配置</strong> — 权益定义在配置文件中，运行时根据 <code>users.plan</code> 字段匹配。Plan 变更即时生效。</p>
+
+    <h3>配置文件</h3>
+<div class="yaml-block"><pre><code># relay/plans.yaml
+mode: saas  # 'saas' | 'self-hosted'
+
+plans:
+  free:
+    max_concurrent_sessions: 2
+    retention_days: 7
+    push_notifications: error_only
+    data_export: false
+    max_daemons: 1
+
+  pro:
+    max_concurrent_sessions: 10
+    retention_days: -1        # -1 = 永久
+    push_notifications: all
+    data_export: true
+    max_daemons: 5</code></pre></div>
+
+    <h3>权益检查流程</h3>
+    <div class="highlight-box">
+      <code>请求到达 → JWT 验证（user.id） → 查 DB：SELECT plan FROM users WHERE id = ? → getPermissions(plan, mode) → 按权益 key 判断</code>
+    </div>
+
+    <table>
+      <thead><tr><th>设计决策</th><th>选择</th><th>理由</th></tr></thead>
+      <tbody>
+        <tr><td>Plan 存储位置</td><td>每次请求查 DB</td><td>主键查询 &lt;1ms，Plan 升级即时生效，无需重新登录</td></tr>
+        <tr><td>权益配置位置</td><td>YAML 文件</td><td>启动时加载，不额外查 DB；改权益不重启</td></tr>
+        <tr><td>自部署检测</td><td><code>POCKETCTL_MODE</code> 环境变量</td><td>简单可靠，无需数据库区分</td></tr>
+      </tbody>
+    </table>
+
+    <h3>数据库</h3>
+    <p><strong>无需新增字段或表。</strong>已有 <code>users.plan VARCHAR(16) DEFAULT 'free'</code> 字段（<code>db.ts:99</code>），已有 <code>getUserPlanAndWhitelist()</code> 函数。</p>
+  </div>
+
+  <!-- Section 4 -->
+  <div class="section" id="s4">
+    <h2><span class="icon">🔍</span> 权益检查点</h2>
+    <table>
+      <thead>
+        <tr><th>权益</th><th>检查位置</th><th>说明</th></tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><code>max_concurrent_sessions</code></td>
+          <td>Session 创建路由</td>
+          <td>查用户当前 <code>running</code> / <code>busy</code> 会话数 vs 上限</td>
+        </tr>
+        <tr>
+          <td><code>retention_days</code></td>
+          <td>定时清理 <code>cleanStaleEvents()</code></td>
+          <td>目前硬编码 90 天，改为按 plan 动态传入</td>
+        </tr>
+        <tr>
+          <td><code>push_notifications</code></td>
+          <td>推送逻辑</td>
+          <td><code>error_only</code> 时只推 Agent 报错类型</td>
+        </tr>
+        <tr>
+          <td><code>data_export</code></td>
+          <td>新增导出路由</td>
+          <td>检查权益后放行</td>
+        </tr>
+        <tr>
+          <td><code>max_daemons</code></td>
+          <td>Daemon 注册路由</td>
+          <td>已有逻辑，值改为从配置读取</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <!-- Section 5 -->
+  <div class="section" id="s5">
+    <h2><span class="icon">📋</span> 实施步骤</h2>
+
+    <div class="step-card">
+      <span class="step-num">1</span><span class="step-title">权益配置文件 + 加载模块</span>
+      <ul style="margin: 8px 0 0 40px;">
+        <li><strong>新增</strong> <code>relay/plans.yaml</code> — 权益定义</li>
+        <li><strong>新增</strong> <code>relay/src/plans.ts</code> — <code>getPermissions(plan, mode)</code></li>
+        <li><strong>改动</strong> <code>relay/src/index.ts</code> — 启动时加载</li>
+      </ul>
+      <div class="step-deps">依赖：—</div>
+    </div>
+
+    <div class="step-card">
+      <span class="step-num">2</span><span class="step-title">接入现有权益点</span>
+      <ul style="margin: 8px 0 0 40px;">
+        <li><code>max_daemons</code> — 已有逻辑，值改为从配置读取</li>
+        <li><code>max_concurrent_sessions</code> — <strong>新增</strong>并发检查逻辑</li>
+        <li><code>retention_days</code> — <code>cleanStaleEvents()</code> 改为动态天数</li>
+      </ul>
+      <div class="step-deps">依赖：步骤 1</div>
+    </div>
+
+    <div class="step-card">
+      <span class="step-num">3</span><span class="step-title">新增付费功能</span>
+      <ul style="margin: 8px 0 0 40px;">
+        <li>推送通知分级 — <code>error_only</code> / <code>all</code></li>
+        <li>数据导出 API — <code>GET /api/sessions/:id/export</code>，检查 <code>data_export</code></li>
+      </ul>
+      <div class="step-deps">依赖：步骤 2</div>
+    </div>
+
+    <div class="step-card">
+      <span class="step-num">4</span><span class="step-title">自部署模式检测</span>
+      <ul style="margin: 8px 0 0 40px;">
+        <li><code>POCKETCTL_MODE=self-hosted</code> 环境变量</li>
+        <li>self-hosted 模式下 <code>getPermissions()</code> 返回 pro</li>
+      </ul>
+      <div class="step-deps">依赖：步骤 1</div>
+    </div>
+
+    <h3>改动文件清单</h3>
+    <div class="file-list">
+      <span class="file"><code>relay/plans.yaml</code></span><span class="op">新增</span><span></span>
+      <span class="file"><code>relay/src/plans.ts</code></span><span class="op">新增</span><span></span>
+      <span class="file"><code>relay/src/index.ts</code></span><span class="op">改动</span><span>加载配置 + 并发检查 + 导出路由</span>
+      <span class="file"><code>relay/src/db.ts</code></span><span class="op">改动</span><span>cleanStaleEvents 动态天数</span>
+      <span class="file">推送逻辑文件</span><span class="op">改动</span><span>按 plan 过滤通知类型</span>
+    </div>
+
+    <p style="margin-top: 12px; color: var(--text-secondary);"><strong>不改：</strong>数据库 migration（字段已存在）、前端（上线后根据反馈决定）</p>
+  </div>
+
+  <!-- Section 6 -->
+  <div class="section" id="s6">
+    <h2><span class="icon">📈</span> 扩展性分析</h2>
+
+    <h3>新增套餐（如 Max）</h3>
+<div class="yaml-block"><pre><code>plans:
+  free:    { max_concurrent_sessions: 2,  ... }
+  pro:     { max_concurrent_sessions: 10, ... }
+  max:     { max_concurrent_sessions: 50, priority_support: true, ... }  # 新增</code></pre></div>
+    <ul>
+      <li><code>plans.yaml</code> 加一个 block</li>
+      <li><code>users.plan</code> 允许 <code>'max'</code> 值</li>
+      <li>消费端代码<strong>无改动</strong> — <code>getPermissions()</code> 根据 plan 自动匹配</li>
+    </ul>
+
+    <h3>新增权益项</h3>
+    <ul>
+      <li>配置文件每个 tier 加一行</li>
+      <li>消费端加对应 UI / 逻辑</li>
+    </ul>
+
+    <div class="highlight-box">
+      <strong>核心原则：权益定义和权益消费解耦。</strong>配置文件只管"什么套餐有什么"，代码不知道有几个套餐。
+    </div>
+  </div>
+
+  <!-- Section 7 -->
+  <div class="section" id="s7">
+    <h2><span class="icon">🚧</span> 边界与同期讨论不做的事项</h2>
+
+    <h3>V1 边界</h3>
+    <table>
+      <thead><tr><th>项</th><th>说明</th></tr></thead>
+      <tbody>
+        <tr><td>定价</td><td>不涉及"多少钱/月"，只定义功能分界</td></tr>
+        <tr><td>管理后台</td><td>改 plan 直接在 DB 操作</td></tr>
+        <tr><td>计费系统</td><td>Stripe 等集成后续独立设计</td></tr>
+      </tbody>
+    </table>
+
+    <h3>同期讨论不做的事项</h3>
+    <table>
+      <thead><tr><th>方向</th><th style="width:70%">结论</th></tr></thead>
+      <tbody>
+        <tr>
+          <td>会话记录搜索</td>
+          <td>ROI 低。用户通常只看结论，重复工作让 Agent 重新执行即可</td>
+        </tr>
+        <tr>
+          <td>Skill 跨会话/跨机器管理</td>
+          <td>真实但低频。本质是文件同步问题，与 pocketctl 核心价值无关</td>
+        </tr>
+        <tr>
+          <td>团队版</td>
+          <td>伪命题。核心价值是"个人远程监控自己的 Agent"，团队场景无真实痛点</td>
+        </tr>
+        <tr>
+          <td>会话 AI 总结</td>
+          <td>Claude Code 已自行完成总结 + 选项，额外加工无增量价值</td>
+        </tr>
+        <tr>
+          <td>代码 Diff</td>
+          <td>有用但不改变核心体验，可后续评估</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+</div>
+</body>
+</html>
