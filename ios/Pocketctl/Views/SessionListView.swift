@@ -12,6 +12,7 @@ struct SessionListView: View {
     @State private var didConnect = false
     @State private var navigateToDetail: Session?
     @State private var showNewSession = false
+    @State private var newSessionSheetHeight: CGFloat = 600
 
     var body: some View {
         ZStack {
@@ -47,10 +48,10 @@ struct SessionListView: View {
             SessionDetailView(session: session)
         }
         .sheet(isPresented: $showNewSession) {
-            NewSessionSheet(daemon: daemon) { agent, cwd, prompt in
-                viewModel?.createSession(agent: agent, cwd: cwd, prompt: prompt)
+            NewSessionSheet(daemon: daemon, wsService: wsService, onHeightChange: { newSessionSheetHeight = max($0 + 40, 400) }) { _ in
                 showNewSession = false
             }
+            .presentationDetents([.height(newSessionSheetHeight)])
         }
         .task {
             // Only create ViewModel and connect once

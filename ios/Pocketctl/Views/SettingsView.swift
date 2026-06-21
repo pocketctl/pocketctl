@@ -2,9 +2,13 @@ import SwiftUI
 
 struct SettingsView: View {
     @Binding var isLoggedIn: Bool
+    var daemons: [Daemon] = []
     @Environment(\.dismiss) private var dismiss
     @State private var viewModel = SettingsViewModel()
     @State private var showScan = false
+    @State private var showGlobalUsage = false
+    @State private var showUpgradeAlert = false
+    private let apiClient = APIClient()
 
     var body: some View {
         NavigationStack {
@@ -91,11 +95,39 @@ struct SettingsView: View {
                         // My Hosts section
                         sectionHeader("我的主机")
                         settingsGroup {
-                            Button { dismiss() } label: {
-                                settingsRow(icon: "desktopcomputer", iconBg: .pcAccentMuted, iconFg: .pcAccent,
-                                            label: "主机管理", value: nil)
+                            ForEach(daemons) { d in
+                                Button { dismiss() } label: {
+                                    HStack(spacing: 12) {
+                                        Image(systemName: "desktopcomputer")
+                                            .font(.system(size: 14))
+                                            .foregroundStyle(Color.pcAccent)
+                                            .frame(width: 28, height: 28)
+                                            .background(Color.pcAccentMuted)
+                                            .cornerRadius(PCRadius.sm)
+                                        Text(d.displayName)
+                                            .font(PCFont.body(15))
+                                            .foregroundStyle(Color.pcFg)
+                                        Spacer()
+                                        Text(d.online ? "在线" : "离线")
+                                            .font(PCFont.body(11, weight: .medium))
+                                            .foregroundStyle(d.online ? Color.pcSuccess : Color.pcFgTertiary)
+                                            .padding(.horizontal, 8).padding(.vertical, 2)
+                                            .background(d.online ? Color.pcSuccessBg : Color.pcHoverInput)
+                                            .cornerRadius(PCRadius.full)
+                                    }
+                                    .padding(.horizontal, PCSpacing.lg)
+                                    .frame(minHeight: 44)
+                                    .overlay(Rectangle().fill(Color.pcBorder).frame(height: 0.5).padding(.leading, 56), alignment: .bottom)
+                                }
+                                .buttonStyle(.plain)
                             }
-                            .buttonStyle(.plain)
+                            if daemons.isEmpty {
+                                Button { dismiss() } label: {
+                                    settingsRow(icon: "desktopcomputer", iconBg: .pcAccentMuted, iconFg: .pcAccent,
+                                                label: "主机管理", value: nil)
+                                }
+                                .buttonStyle(.plain)
+                            }
 
                             Button { viewModel.showRegisterHost = true } label: {
                                 settingsRow(icon: "plus.circle", iconBg: .pcSuccessBg, iconFg: .pcSuccess,
@@ -164,30 +196,31 @@ struct SettingsView: View {
                         .padding(.horizontal, PCSpacing.lg)
                         .padding(.bottom, 24)
 
-                        // Other section
-                        sectionHeader("其他")
+                        // Upgrade to Pro (placeholder — no payment backend yet)
                         settingsGroup {
-                            Button { viewModel.showHelp = true } label: {
-                                settingsRow(icon: "questionmark.circle", iconBg: .pcHoverInput, iconFg: .pcFgSecondary,
-                                            label: "帮助与反馈", value: nil)
-                            }
-                            .buttonStyle(.plain)
-
-                            Button { viewModel.showAbout = true } label: {
-                                settingsRow(icon: "info.circle", iconBg: .pcHoverInput, iconFg: .pcFgSecondary,
-                                            label: "关于 pocketctl", value: viewModel.appVersion)
-                            }
-                            .buttonStyle(.plain)
-
-                            Button { viewModel.showPrivacyPolicy = true } label: {
-                                settingsRow(icon: "doc.text", iconBg: .pcHoverInput, iconFg: .pcFgSecondary,
-                                            label: "隐私政策", value: nil)
-                            }
-                            .buttonStyle(.plain)
-
-                            Button { viewModel.showUserAgreement = true } label: {
-                                settingsRow(icon: "doc.plaintext", iconBg: .pcHoverInput, iconFg: .pcFgSecondary,
-                                            label: "用户协议", value: nil)
+                            Button { showUpgradeAlert = true } label: {
+                                HStack(spacing: 12) {
+                                    Image(systemName: "star.fill")
+                                        .font(.system(size: 14))
+                                        .foregroundStyle(Color.pcAccent)
+                                        .frame(width: 28, height: 28)
+                                        .background(Color.pcAccentMuted)
+                                        .cornerRadius(PCRadius.sm)
+                                    VStack(alignment: .leading, spacing: 2) {
+                                        Text("升级专业版 ¥48/月")
+                                            .font(PCFont.body(16, weight: .medium))
+                                            .foregroundStyle(Color.pcAccent)
+                                        Text("无限主机 · 推送通知 · 实时消息")
+                                            .font(PCFont.body(12))
+                                            .foregroundStyle(Color.pcFgTertiary)
+                                    }
+                                    Spacer()
+                                    Image(systemName: "chevron.right")
+                                        .font(.system(size: 14))
+                                        .foregroundStyle(Color.pcAccent)
+                                }
+                                .padding(.horizontal, PCSpacing.lg)
+                                .frame(minHeight: 44)
                             }
                             .buttonStyle(.plain)
                         }
@@ -223,6 +256,14 @@ struct SettingsView: View {
             }
             .navigationTitle("设置")
             .navigationBarTitleDisplayMode(.inline)
+            .navigationDestination(isPresented: $showGlobalUsage) {
+                TokenUsageView(daemonId: nil, apiClient: apiClient)
+            }
+            .alert("专业版即将上线", isPresented: $showUpgradeAlert) {
+                Button("好的", role: .cancel) {}
+            } message: {
+                Text("专业版订阅功能正在开发中，敬请期待。")
+            }
             .toolbar {
                 ToolbarItem(placement: .navigationBarLeading) {
                     Button { dismiss() } label: {
@@ -232,9 +273,7 @@ struct SettingsView: View {
                 }
                 ToolbarItem(placement: .navigationBarTrailing) {
                     Button { showScan = true } label: {
-                        Image(systemName: "qrcode.viewfinder")
-                            .font(.system(size: 20, weight: .medium))
-                            .foregroundStyle(Color.pcAccent)
+                        ScanIcon()
                     }
                     .accessibilityLabel("扫一扫，授权网页端登录")
                 }
@@ -720,6 +759,27 @@ struct SettingsView: View {
 
     private var aboutRow: some View {
         VStack(spacing: 0) {
+            Button { showGlobalUsage = true } label: {
+                HStack(spacing: 12) {
+                    Image(systemName: "chart.bar.fill")
+                        .font(.system(size: 14))
+                        .foregroundStyle(Color.pcAccent)
+                        .frame(width: 28, height: 28)
+                        .background(Color.pcAccentMuted)
+                        .cornerRadius(PCRadius.sm)
+                    Text("用量分析")
+                        .font(PCFont.body(15))
+                        .foregroundStyle(Color.pcFg)
+                    Spacer()
+                    Image(systemName: "chevron.right")
+                        .font(.system(size: 14))
+                        .foregroundStyle(Color.pcFgTertiary)
+                }
+                .padding(.horizontal, PCSpacing.lg)
+                .frame(minHeight: 44)
+            }
+            .buttonStyle(.plain)
+
             Button {
                 viewModel.showAbout = true
             } label: {
@@ -895,5 +955,28 @@ struct SettingsView: View {
                 }
             }
         }
+    }
+}
+
+// MARK: - Scan icon (custom, matches ui-design/screens/settings.html)
+
+private struct ScanIcon: View {
+    var body: some View {
+        Canvas { context, size in
+            let scale = size.width / 24
+            context.scaleBy(x: scale, y: scale)
+            var path = Path()
+            // Three corner brackets
+            path.addRoundedRect(in: CGRect(x: 3, y: 3, width: 7, height: 7), cornerSize: CGSize(width: 1, height: 1))
+            path.addRoundedRect(in: CGRect(x: 14, y: 3, width: 7, height: 7), cornerSize: CGSize(width: 1, height: 1))
+            path.addRoundedRect(in: CGRect(x: 3, y: 14, width: 7, height: 7), cornerSize: CGSize(width: 1, height: 1))
+            // Bottom-right QR marks
+            path.addRect(CGRect(x: 14, y: 14, width: 3, height: 3))
+            path.move(to: CGPoint(x: 20, y: 14)); path.addLine(to: CGPoint(x: 20, y: 17))
+            path.move(to: CGPoint(x: 14, y: 20)); path.addLine(to: CGPoint(x: 17, y: 20))
+            path.move(to: CGPoint(x: 20, y: 20)); path.addLine(to: CGPoint(x: 20, y: 20.01))
+            context.stroke(path, with: .color(Color.pcAccent), lineWidth: 2)
+        }
+        .frame(width: 22, height: 22)
     }
 }
