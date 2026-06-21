@@ -11,8 +11,8 @@ final class SessionListViewModel {
     /// Whether the initial connect() has completed successfully
     private(set) var isConnected = false
 
-    /// 分批渲染：当前可见的最大卡片数
-    private(set) var visibleCount = 5
+    /// 分批渲染：当前可见的最大卡片数（每页 15 条）
+    private(set) var visibleCount = 15
 
     let daemon: Daemon
     private let wsService: WebSocketService
@@ -44,11 +44,11 @@ final class SessionListViewModel {
         return Array(all.prefix(visibleCount))
     }
 
-    /// 滚动到底部附近时追加下一批
+    /// 滚动到底部附近时追加下一批（每批 15 条）
     func loadMoreIfNeeded(currentIndex: Int) {
         let total = filteredSessions.count
         guard currentIndex >= visibleCount - 2, visibleCount < total else { return }
-        visibleCount = min(visibleCount + 5, total)
+        visibleCount = min(visibleCount + 15, total)
     }
 
     var daemonStatusText: String {

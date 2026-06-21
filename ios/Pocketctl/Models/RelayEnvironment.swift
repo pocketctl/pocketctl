@@ -22,7 +22,7 @@ enum RelayEnvironment: String, CaseIterable, Codable, Sendable {
         case .production:
             return "http://39.106.218.47"
         case .staging:
-            return "http://192.168.0.141"
+            return "http://192.168.31.198"
         }
     }
 
@@ -32,7 +32,7 @@ enum RelayEnvironment: String, CaseIterable, Codable, Sendable {
         case .production:
             return "ws://39.106.218.47/ws"
         case .staging:
-            return "ws://192.168.0.141/ws"
+            return "ws://192.168.31.198/ws"
         }
     }
 
@@ -42,7 +42,7 @@ enum RelayEnvironment: String, CaseIterable, Codable, Sendable {
         case .production:
             return "https://raw.githubusercontent.com/pocketctl/pocketctl/master/scripts/install-daemon.sh"
         case .staging:
-            return "http://192.168.0.141/install.sh"
+            return "http://192.168.31.198/install.sh"
         }
     }
 

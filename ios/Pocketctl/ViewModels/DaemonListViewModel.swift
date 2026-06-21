@@ -75,9 +75,11 @@ final class DaemonListViewModel {
         // Wait a moment for connection, then request sessions
         try? await Task.sleep(for: .milliseconds(800))
         wsService.send(["type": "list_sessions"])
+        wsService.send(["type": "list_daemons"])
 
         isConnected = true
         isLoading = false
+        await loadTokenSummary()
     }
 
     /// Handle WebSocket-level auth failure — try refresh once more, then give up
@@ -92,6 +94,7 @@ final class DaemonListViewModel {
                 wsService.connect(url: wsURL, token: resp.access_token)
                 try? await Task.sleep(for: .milliseconds(800))
                 wsService.send(["type": "list_sessions"])
+                wsService.send(["type": "list_daemons"])
             } else {
                 // Everything failed — clear tokens and redirect to login
                 KeychainStorage.clearAll()
@@ -122,6 +125,7 @@ final class DaemonListViewModel {
         }
         if wsService.isConnected {
             wsService.send(["type": "list_sessions"])
+            wsService.send(["type": "list_daemons"])
         } else {
             // Connection lost — reconnect, then request sessions
             Task { [weak self] in
@@ -133,6 +137,47 @@ final class DaemonListViewModel {
     /// Number of online daemons
     var onlineCount: Int {
         daemons.filter { $0.online }.count
+    }
+
+    // MARK: - Overview & agent version data
+
+    /// User-level token summary (for the overview card's "today" figure).
+    private(set) var tokenSummary: TokenSummary?
+
+    /// Recent sessions across all daemons (newest first), capped for the list.
+    var recentSessions: [Session] {
+        sessions
+            .sorted { ($0.lastActivityAt ?? $0.createdAt) > ($1.lastActivityAt ?? $1.createdAt) }
+            .prefix(5)
+            .map { $0 }
+    }
+
+    /// Active session count per agent_type for a daemon (for AgentManageView).
+    func activeSessionsByAgent(for daemonId: String) -> [String: Int] {
+        var counts: [String: Int] = [:]
+        for s in sessions where s.daemonId == daemonId && !s.isTerminal && !s.agentType.isEmpty {
+            counts[s.agentType, default: 0] += 1
+        }
+        return counts
+    }
+
+    func loadTokenSummary() async {
+        tokenSummary = try? await apiClient.getTokenSummary()
+    }
+
+    // MARK: - Daemon operations (⋯ menu)
+
+    func restartDaemon(_ daemonId: String) async {
+        _ = try? await apiClient.restartDaemon(daemonId: daemonId)
+    }
+
+    func forceKickDaemon(_ daemonId: String) async throws {
+        _ = try await apiClient.forceKickDaemon(daemonId: daemonId)
+    }
+
+    func deleteDaemon(_ daemonId: String) async {
+        _ = try? await apiClient.deleteDaemon(daemonId: daemonId)
+        daemons.removeAll { $0.daemonId == daemonId }
     }
 
     /// Get active session count for a daemon
@@ -228,6 +273,16 @@ final class DaemonListViewModel {
                 } else {
                     daemons.append(daemon)
                 }
+            }
+
+        case .daemonList:
+            // Full daemon snapshot (with agents) — cache into wsService so the
+            // next buildDaemonList() preserves agent/version info.
+            if let daemonDicts = event.daemons {
+                for d in daemonDicts.compactMap({ Daemon.from(event: $0) }) {
+                    wsService.daemons[d.daemonId] = d
+                }
+                buildDaemonList()
             }
 
         case .sessionStatus:

@@ -1,5 +1,13 @@
 import SwiftUI
 
+/// Tracks the top sentinel's Y offset within the scroll view (for backward pagination).
+private struct ScrollTopOffsetKey: PreferenceKey {
+    static let defaultValue: CGFloat = .infinity
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+        value = min(value, nextValue())
+    }
+}
+
 struct SessionDetailView: View {
     let session: Session
 
@@ -25,6 +33,15 @@ struct SessionDetailView: View {
                     ScrollViewReader { proxy in
                         ScrollView {
                             LazyVStack(alignment: .leading, spacing: PCSpacing.md) {
+                                // Top sentinel: detect scroll-to-top for backward pagination
+                                GeometryReader { geo in
+                                    Color.clear.preference(
+                                        key: ScrollTopOffsetKey.self,
+                                        value: geo.frame(in: .named("sessionScroll")).minY
+                                    )
+                                }
+                                .frame(height: 0)
+
                                 ForEach(Array(vm.messages.enumerated()), id: \.element.id) { index, message in
                                     messageView(message: message, index: index, vm: vm)
                                         .id(message.id)
@@ -52,6 +69,11 @@ struct SessionDetailView: View {
                             .padding(.horizontal, PCSpacing.lg)
                             .padding(.top, PCSpacing.md)
                             .padding(.bottom, PCSpacing.md)
+                        }
+                        .coordinateSpace(name: "sessionScroll")
+                        .onPreferenceChange(ScrollTopOffsetKey.self) { offset in
+                            // offset = sentinel minY in scroll space; near top when > -50
+                            if offset > -50 { vm.loadOlder() }
                         }
                         .defaultScrollAnchor(.bottom)
                         .onChange(of: vm.scrollTick) { _, _ in
