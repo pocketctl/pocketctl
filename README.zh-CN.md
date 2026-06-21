@@ -290,12 +290,14 @@ pocketctl/
 │       └── config/
 │           └── sms.ts             # 腾讯云短信发送服务
 ├── ios/
-│   └── Pocketctl/
-│       ├── App/                   # SwiftUI App 入口
-│       ├── Models/                # Session、WebSocketEvent 数据模型
-│       ├── ViewModels/            # SessionList、SessionDetail、DaemonList
-│       ├── Views/                 # UI 视图组件
-│       └── Services/              # WebSocket、API、Keychain、Push
+│   └── Pocketctl/                 # SwiftUI 原生 App（iOS 17+）
+│       ├── App/                   # App 入口
+│       ├── Models/                # Daemon、Session、WebSocketEvent、ModelOption、ChatMessage、SubAgent 等
+│       ├── Services/              # APIClient、WebSocketService、KeychainStorage
+│       ├── ViewModels/            # DaemonListVM、SessionListVM、SessionDetailVM、AgentManageVM、TokenUsageVM
+│       ├── Views/                 # DaemonListView、SessionListView、SessionDetailView、NewSessionSheet、AgentManageView、TokenUsageView、SettingsView、LoginView、ScanLoginView
+│       ├── Theme/ Utils/          # 设计 token、AgentDefaultsStore
+│       └── Components/            # 通用 UI 组件
 ├── web/                           # Vue 3 Web UI（可选）
 ├── docs/                          # 文档（路线图、测试报告、上线计划）
 ├── .claude/skills/                # Claude Code 技能（自动化工作流）
