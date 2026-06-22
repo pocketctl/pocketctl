@@ -4,8 +4,8 @@ import * as db from './db.js';
 import { generateTitle } from './title.js';
 import { notifyUser, sessionStatusPush, daemonOfflinePush } from './push.js';
 
-interface DaemonConnection { ws: WebSocket; daemonId: string; hostname: string; agents: any[]; userId: number | null; os?: string; ip?: string; arch?: string; version?: string; startedAt?: number }
-interface ClientConnection { ws: WebSocket; subscribedSessions: Set<string>; userId: number | null }
+interface DaemonConnection { ws: WebSocket; daemonId: string; hostname: string; agents: any[]; userId: number | null; os?: string; ip?: string; port?: string; arch?: string; version?: string; startedAt?: number }
+interface ClientConnection { ws: WebSocket; subscribedSessions: Set<string>; userId: number | null; locale: string }
 interface DaemonMetrics { cpuPct: number; memPct: number; diskPct: number; updatedAt: number }
 
 export class Router {
@@ -91,12 +91,24 @@ export class Router {
       }
     }
 
+    // Fallback: if the connecting token didn't carry a userId (e.g. a legacy or
+    // anonymous reconnection), recover the daemon's persisted owner from
+    // daemons.user_id. Without this, sessions created during this connection
+    // land with user_id NULL and vanish from the owner's web list (filtered by
+    // listSessionsByUser). Soft eviction above already ran on the original
+    // (null) userId, which is fine — an anonymous reconnect shouldn't evict.
+    if (!userId) {
+      try { userId = await db.getDaemonOwner(this.pool, daemonId); } catch (e) { /* leave null */ }
+    }
+
     const daemonOS = msg.os || 'unknown';
     const daemonIP = msg.ip || 'unknown';
+    const daemonPort = msg.port || '';
     const daemonArch = msg.arch || '';
     const daemonVersion = msg.version || '';
     const daemonStartedAt = msg.started_at || 0;
-    this.daemons.set(daemonId, { ws, daemonId, hostname, agents, userId, os: daemonOS, ip: daemonIP, arch: daemonArch, version: daemonVersion, startedAt: daemonStartedAt });
+    this.daemons.set(daemonId, { ws, daemonId, hostname, agents, userId, os: daemonOS, ip: daemonIP, port: daemonPort, arch: daemonArch, version: daemonVersion, startedAt: daemonStartedAt });
+    console.log('[ws] daemon registered', daemonId, 'agents:', JSON.stringify(agents), 'userId:', userId);
     try { await db.upsertDaemon(this.pool, daemonId, hostname, agents, daemonArch, daemonVersion, daemonStartedAt); } catch (e) { console.error('upsertDaemon:', e); }
     if (userId) {
       try { await db.bindDaemonToUser(this.pool, daemonId, userId); } catch (e) { console.error('bindDaemon:', e); }
@@ -167,7 +179,7 @@ export class Router {
   }
 
   registerClient(ws: WebSocket, userId: number | null): void {
-    this.clients.set(ws, { ws, subscribedSessions: new Set(), userId });
+    this.clients.set(ws, { ws, subscribedSessions: new Set(), userId, locale: 'zh' });
   }
   unregisterClient(ws: WebSocket): void { this.clients.delete(ws); }
 
@@ -198,6 +210,12 @@ export class Router {
 
     const sessionId = msg.session_id;
     if (!sessionId) {
+      // model_list (host-level response, no session_id): broadcast to the daemon owner's clients
+      if (msg.type === 'model_list') {
+        const daemon = this.daemons.get(daemonId);
+        if (daemon?.userId) this.broadcastToUser(daemon.userId, msg);
+        return;
+      }
       if (msg.type === 'error') {
         const pendingClient = this.pendingSessionCreate.get(daemonId);
         if (pendingClient && pendingClient.readyState === 1) {
@@ -251,16 +269,25 @@ export class Router {
     }
     if (msg.type === 'session_created') {
       const meta = this.pendingSessionMeta?.get(daemonId);
-      db.upsertSession(this.pool, sessionId, daemonId, meta?.agent_type || '', meta?.cwd || '', 'running', msg.title || undefined, 'daemon', undefined, userId ?? undefined).catch(console.error);
+      db.upsertSession(this.pool, sessionId, daemonId, meta?.agent_type || '', meta?.cwd || '', 'running', msg.title || undefined, 'daemon', undefined, userId ?? undefined, msg.model || undefined).catch(console.error);
       this.pendingSessionMeta?.delete(daemonId);
       const originClient = this.pendingSessionCreate.get(daemonId);
+      const enriched = { ...msg, daemon_id: daemonId, hostname: daemon?.hostname || 'unknown' };
       if (originClient && originClient.readyState === 1) {
         const client = this.clients.get(originClient);
         if (client) client.subscribedSessions.add(sessionId);
         // 记录 origin client，供后续 session_id_changed 补发
         this.pendingOriginClient.set(sessionId, originClient);
-        const enriched = { ...msg, daemon_id: daemonId, hostname: daemon?.hostname || 'unknown' };
         this.send(originClient, enriched);
+      }
+      // 广播给同用户的其他在线 client（多端：Web + iOS 等同时在线），
+      // 让非发起端也能即时看到新会话，不依赖轮询 list_sessions。
+      for (const [clientWs, client] of this.clients) {
+        if (clientWs === originClient) continue;
+        if (clientWs.readyState === 1 && this.sameUser(client.userId, userId)) {
+          if (client) client.subscribedSessions.add(sessionId);
+          this.send(clientWs, enriched);
+        }
       }
       this.pendingSessionCreate.delete(daemonId);
       db.insertEvent(this.pool, sessionId, msg.type, msg).catch(console.error);
@@ -276,7 +303,7 @@ export class Router {
         // Use provided title if present; otherwise leave existing title untouched
         const title = msg.title || undefined;
         const cwd = msg.cwd || '';
-        db.upsertSession(this.pool, sessionId, daemonId, 'claude-code', cwd, msg.status || 'busy', title, 'terminal', undefined, userId ?? undefined).catch(console.error);
+        db.upsertSession(this.pool, sessionId, daemonId, 'claude-code', cwd, msg.status || 'busy', title, 'terminal', undefined, userId ?? undefined, msg.model || undefined).catch(console.error);
         db.insertEvent(this.pool, sessionId, msg.type, msg).catch(console.error);
         const enriched = { ...msg, daemon_id: daemonId, hostname: daemon?.hostname || 'unknown' };
         for (const [clientWs, client] of this.clients) {
@@ -305,7 +332,16 @@ export class Router {
           console.log(`[router] skipping title generation for ${sessionId} — title already custom`);
           return;
         }
-        generateTitle(userMsg, assistantMsg).then((title) => {
+        // Resolve session owner locale for language-aware title generation
+        let ownerLocale: string | undefined;
+        // Find user clients subscribed to this session to get their locale
+        for (const [, client] of this.clients) {
+          if (client.subscribedSessions.has(sessionId) && client.userId) {
+            ownerLocale = client.locale;
+            break;
+          }
+        }
+        generateTitle(userMsg, assistantMsg, ownerLocale).then((title) => {
           if (!title) return;
           // Layer 3: conditional update in DB
           db.updateTitleIfDefault(this.pool, sessionId, title).then((updated) => {
@@ -331,8 +367,12 @@ export class Router {
       return;
     }
     db.insertEvent(this.pool, sessionId, msg.type, msg).catch(console.error);
+    // Accumulate per-turn token usage from agent_text events carrying usage (model-agnostic)
+    if (msg.usage != null) {
+      db.incrementSessionTokens(this.pool, sessionId, msg.usage).catch(console.error);
+    }
     if (msg.type === 'session_status') {
-      db.upsertSession(this.pool, sessionId, daemonId, '', '', msg.status || 'unknown', undefined, undefined, msg.exit_reason).catch(console.error);
+      db.upsertSession(this.pool, sessionId, daemonId, '', '', msg.status || 'unknown', undefined, undefined, msg.exit_reason, userId ?? undefined).catch(console.error);
       // C2: persist cumulative cost_usd from result event
       if (msg.cost_usd != null) {
         db.updateSessionCost(this.pool, sessionId, parseFloat(msg.cost_usd)).catch(console.error);
@@ -354,6 +394,31 @@ export class Router {
     if (msg.type === 'replay') { this.handleReplay(clientWs, msg.session_id, msg.last_seq, msg.req_id, msg.direction, msg.limit); return; }
     if (msg.type === 'list_sessions') { this.handleListSessions(clientWs, client.userId); return; }
     if (msg.type === 'list_daemons') { console.log('[router] list_daemons from user', client.userId, 'daemons in map:', this.daemons.size); this.handleListDaemons(clientWs, client.userId); return; }
+    if (msg.type === 'set_locale') {
+      if (msg.locale) { client.locale = msg.locale; }
+      return;
+    }
+
+    if (msg.type === 'local_command_log') {
+      // Locally-handled slash command (/model, /cost, /status): the user msg + receipt
+      // are built client-side (no daemon round-trip). Persist both as events so they
+      // survive refresh, and broadcast to OTHER same-user clients for multi-device sync.
+      // Origin already rendered both locally, so skip echoing back to avoid duplicates.
+      const sessionId = msg.session_id;
+      if (!sessionId) return;
+      const userEvt = { type: 'user_text', session_id: sessionId, text: msg.user_text };
+      const receiptEvt = { type: 'command_receipt', session_id: sessionId, command: msg.command, receipt_status: msg.receipt_status, message: msg.message };
+      db.insertEvent(this.pool, sessionId, 'user_text', userEvt).catch(console.error);
+      db.insertEvent(this.pool, sessionId, 'command_receipt', receiptEvt).catch(console.error);
+      for (const [ws, c] of this.clients) {
+        if (ws === clientWs || ws.readyState !== 1) continue;
+        if (this.sameUser(c.userId, client.userId)) {
+          this.send(ws, userEvt);
+          this.send(ws, receiptEvt);
+        }
+      }
+      return;
+    }
 
     if (msg.type === 'session_delete') {
       const sessionId = msg.session_id;
@@ -401,6 +466,18 @@ export class Router {
       // Update status to reconnecting
       db.setDaemonReconnecting?.(this.pool, daemonId).catch(() => {});
       this.broadcastToUser(client.userId!, { type: 'daemon_status', daemon_id: daemonId, status: 'reconnecting' });
+      return;
+    }
+
+    if (msg.type === 'list_models') {
+      // Host-level query (no session_id): route to the target daemon by daemon_id.
+      // The reply (model_list) is broadcast back to the owner's clients below.
+      const daemonId = msg.daemon_id;
+      if (!daemonId) return;
+      const daemon = this.daemons.get(daemonId);
+      if (daemon && daemon.ws.readyState === 1 && this.sameUser(daemon.userId, client.userId)) {
+        this.send(daemon.ws, msg);
+      }
       return;
     }
 
@@ -506,7 +583,7 @@ export class Router {
       const daemonList: any[] = [];
       const sessionCounts = userId ? await db.getSessionCountsByUser(this.pool, userId) : {};
       for (const [, daemon] of this.daemons) {
-        console.log('[router] list_daemons iterating daemon', daemon.daemonId, 'daemon.userId:', daemon.userId, 'request.userId:', userId);
+        console.log('[router] list_daemons iterating daemon', daemon.daemonId, 'daemon.userId:', daemon.userId, 'request.userId:', userId, 'agents:', JSON.stringify(daemon.agents));
         if (!this.sameUser(daemon.userId, userId)) continue;
         const alias = await db.getDaemonAlias(this.pool, daemon.daemonId);
         const metrics = this.daemonMetrics.get(daemon.daemonId);
@@ -520,9 +597,11 @@ export class Router {
           status: 'online',
           os: daemon.os || 'unknown',
           ip: daemon.ip || 'unknown',
+          port: daemon.port || '',
           arch: daemon.arch || '',
           version: daemon.version || '',
           started_at: daemon.startedAt || 0,
+          last_heartbeat: Date.now(),
           cpu_pct: metrics?.cpuPct ?? null,
           mem_pct: metrics?.memPct ?? null,
           disk_pct: metrics?.diskPct ?? null,

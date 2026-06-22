@@ -39,6 +39,25 @@ final class APIClient: @unchecked Sendable {
         try await post(path: "/api/auth/sms/verify", body: ["phone": phone, "code": code])
     }
 
+    // MARK: - Email Verification Code Auth (current, backend-supported flow)
+
+    func sendEmailCode(email: String) async throws -> SMSResponse {
+        try await post(path: "/api/auth/email/send", body: ["email": email])
+    }
+
+    /// Verify email code → login-or-register → returns tokens + user.
+    func loginViaEmail(email: String, code: String) async throws -> AuthResponse {
+        try await post(path: "/api/auth/email/verify", body: ["email": email, "code": code])
+    }
+
+    // MARK: - QR Scan-Login (iOS is the confirming device)
+
+    /// Confirm a QR login session scanned from the web client. Requires the
+    /// iOS user to be already authenticated (Bearer token added automatically).
+    func confirmQrLogin(qrToken: String) async throws -> SuccessResponse {
+        try await authorizedPost(path: "/api/auth/qr/confirm", body: ["qr_token": qrToken])
+    }
+
     func refreshToken(_ token: String) async throws -> AuthResponse {
         try await post(path: "/api/auth/refresh", body: ["refresh_token": token])
     }
@@ -59,6 +78,42 @@ final class APIClient: @unchecked Sendable {
 
     func setDaemonAlias(daemonId: String, alias: String?) async throws -> AliasResponse {
         try await authorizedPut(path: "/api/daemons/\(daemonId)/alias", body: ["alias": alias as Any])
+    }
+
+    // MARK: - Token Usage
+
+    func getTokenSummary() async throws -> TokenSummary {
+        try await authorizedGet(path: "/api/tokens/summary")
+    }
+
+    func getTokenDashboard(daemon: String = "all", days: Int = 30) async throws -> TokenDashboard {
+        try await authorizedGet(path: "/api/tokens/dashboard?daemon=\(daemon)&days=\(days)")
+    }
+
+    func getTokensByDaemon(daemonId: String) async throws -> TokensByDaemon {
+        try await authorizedGet(path: "/api/tokens/by-daemon/\(daemonId)")
+    }
+
+    func getSessionTokenTrend(sessionId: String) async throws -> SessionTokenTrend {
+        try await authorizedGet(path: "/api/tokens/session/\(sessionId)/trend")
+    }
+
+    // MARK: - Daemon Operations
+
+    func upgradeAgent(daemonId: String, agent: String) async throws -> SuccessResponse {
+        try await authorizedPost(path: "/api/daemons/\(daemonId)/upgrade-agent", body: ["agent": agent])
+    }
+
+    func restartDaemon(daemonId: String) async throws -> SuccessResponse {
+        try await authorizedPost(path: "/api/daemons/\(daemonId)/restart", body: [:])
+    }
+
+    func forceKickDaemon(daemonId: String) async throws -> SuccessResponse {
+        try await authorizedPost(path: "/api/daemons/\(daemonId)/forceKick", body: [:])
+    }
+
+    func deleteDaemon(daemonId: String) async throws -> SuccessResponse {
+        try await authorizedDelete(path: "/api/daemons/\(daemonId)")
     }
 
     // MARK: - Internal
@@ -118,6 +173,21 @@ final class APIClient: @unchecked Sendable {
         return try JSONDecoder().decode(T.self, from: data)
     }
 
+    private func authorizedGet<T: Decodable>(path: String) async throws -> T {
+        guard let url = URL(string: baseURL + path) else { throw APIError.invalidURL }
+        var request = URLRequest(url: url)
+        request.httpMethod = "GET"
+        request.allHTTPHeaderFields = authorizedHeaders()
+
+        let (data, response) = try await URLSession.shared.data(for: request)
+        try checkResponse(response, data: data)
+        // Token API uses snake_case JSON keys (cache_read, daemon_id, …); decode
+        // with snake_case conversion so structs can use camelCase properties.
+        let decoder = JSONDecoder()
+        decoder.keyDecodingStrategy = .convertFromSnakeCase
+        return try decoder.decode(T.self, from: data)
+    }
+
     private func checkResponse(_ response: URLResponse, data: Data) throws {
         guard let http = response as? HTTPURLResponse else { throw APIError.invalidResponse }
         if http.statusCode >= 400 {
@@ -152,6 +222,76 @@ struct SuccessResponse: Decodable {
 struct AliasResponse: Decodable {
     let success: Bool
     let alias: String?
+}
+
+// MARK: - Token Usage Types
+
+struct TokenSummary: Decodable {
+    let total: Int
+    let today: Int
+    let thisWeek: Int
+    let thisMonth: Int
+}
+
+struct TokenDailyPoint: Decodable {
+    let date: String
+    let input: Int
+    let output: Int
+    let cacheRead: Int
+    let requests: Int
+}
+
+struct TokenModelRow: Decodable {
+    let model: String
+    let input: Int
+    let output: Int
+    let cacheRead: Int
+    let requests: Int
+    let total: Int
+    let pct: Double
+}
+
+struct TokenDaemonRow: Decodable {
+    let daemonId: String
+    let hostname: String
+    let alias: String?
+    let input: Int
+    let output: Int
+    let cacheRead: Int
+    let requests: Int
+    let total: Int
+}
+
+struct TokenDashboard: Decodable {
+    let summary: TokenSummary
+    let dailySeries: [TokenDailyPoint]
+    let byModel: [TokenModelRow]
+    let byDaemon: [TokenDaemonRow]
+}
+
+struct TokenSessionRow: Decodable {
+    let sessionId: String
+    let title: String
+    let totalTokens: Int
+    let tokInput: Int
+    let tokOutput: Int
+    let tokCacheRead: Int
+    let tokCacheCreate: Int
+    let model: String
+    let agentType: String
+    let status: String
+}
+
+struct TokensByDaemon: Decodable {
+    let total: Int
+    let today: Int
+    let thisMonth: Int
+    let sessions: [TokenSessionRow]
+}
+
+struct SessionTokenTrend: Decodable {
+    let trend: [TokenDailyPoint]
+    let archived: Bool
 }
 
 // MARK: - Errors

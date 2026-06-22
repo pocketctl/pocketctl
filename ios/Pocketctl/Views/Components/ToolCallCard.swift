@@ -9,6 +9,12 @@ struct ToolCallCard: View {
     @State private var isOutputExpanded = false
 
     var body: some View {
+        // Full-width tool card. No left bar (too noisy); the card itself
+        // (border + surface bg) is the visual container.
+        cardBody
+    }
+
+    private var cardBody: some View {
         VStack(alignment: .leading, spacing: 0) {
             // Header
             Button {
@@ -17,9 +23,11 @@ struct ToolCallCard: View {
                     messages[messageIndex].expanded = isExpanded
                 }
             } label: {
-                HStack(spacing: 12) {
-                    Text(message.toolIcon)
-                        .font(.system(size: 16))
+                HStack(spacing: 10) {
+                    Image(systemName: message.toolIcon)
+                        .font(.system(size: 14))
+                        .foregroundStyle(Color.pcAccent)
+                        .frame(width: 18)
 
                     Text(message.tool ?? "Unknown")
                         .font(PCFont.body(14, weight: .semibold))
@@ -119,7 +127,7 @@ struct ToolCallCard: View {
                 .padding(PCSpacing.md)
             }
         }
-        .background(Color(red: 0.133, green: 0.149, blue: 0.176)) // #21262d
+        .background(Color.pcSurface)
         .cornerRadius(PCRadius.md)
         .overlay(
             RoundedRectangle(cornerRadius: PCRadius.md)

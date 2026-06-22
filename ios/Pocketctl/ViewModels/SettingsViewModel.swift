@@ -65,6 +65,18 @@ final class SettingsViewModel {
         return "未绑定"
     }
 
+    var displayEmail: String {
+        if let email = user?.email, !email.isEmpty {
+            return email
+        }
+        return "未绑定"
+    }
+
+    var isEmailBound: Bool {
+        guard let email = user?.email else { return false }
+        return !email.isEmpty
+    }
+
     var isPhoneBound: Bool {
         guard let phone = user?.phone else { return false }
         return !phone.isEmpty

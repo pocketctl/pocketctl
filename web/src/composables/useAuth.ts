@@ -48,6 +48,19 @@ async function apiRequest(path: string, body: any, auth?: boolean): Promise<{ ok
   }
 }
 
+/** GET variant for endpoints like QR status polling (no body, no auth). */
+async function apiGet(path: string): Promise<{ ok: boolean; data: any }> {
+  const origin = getRelayOrigin()
+  const url = origin ? `${origin}${path}` : path
+  try {
+    const res = await fetch(url, { method: 'GET', headers: { 'Content-Type': 'application/json' } })
+    const data = await res.json()
+    return { ok: res.ok, data }
+  } catch (e) {
+    return { ok: false, data: { error: '网络请求失败' } }
+  }
+}
+
 // --- Email Verification Code Auth ---
 
 async function sendEmailCode(email: string): Promise<string | null> {
@@ -69,6 +82,39 @@ async function confirmDeviceAuth(userCode: string): Promise<string | null> {
   const { ok, data } = await apiRequest('/api/auth/device/confirm', { user_code: userCode }, true)
   if (!ok) return data.error_description || data.error || '授权失败'
   return null
+}
+
+// --- QR Scan-Login (web shows QR → iOS scans/confirms → web polls for token) ---
+
+export interface QrCreateResult {
+  qr_token: string
+  qr_payload: string
+  expires_in: number
+  interval: number
+}
+
+export type QrStatus = 'pending' | 'scanned' | 'confirmed' | 'expired'
+
+/** Web starts a QR login session. Returns the payload to render into the QR. */
+async function createQrLogin(): Promise<{ data: QrCreateResult | null; error: string | null }> {
+  const { ok, data } = await apiRequest('/api/auth/qr/create', {})
+  if (!ok) return { data: null, error: data.error || '生成二维码失败' }
+  return { data, error: null }
+}
+
+/**
+ * Web polls the QR session status. On 'confirmed' the tokens are already saved
+ * here (single call site) and the caller can redirect.
+ * Returns: 'pending' | 'scanned' | 'confirmed' (tokens saved) | 'expired' | '<error msg>'
+ */
+async function pollQrLogin(qrToken: string): Promise<QrStatus | string> {
+  const { ok, data } = await apiGet(`/api/auth/qr/status?qr_token=${encodeURIComponent(qrToken)}`)
+  if (!ok) return data.error || '查询失败'
+  if (data.status === 'confirmed') {
+    saveTokens(data)
+    return 'confirmed'
+  }
+  return data.status as QrStatus
 }
 
 // --- Force Kick Daemon ---
@@ -151,6 +197,7 @@ export function useAuth() {
     login,                            // legacy (deprecated)
     sendEmailCode, loginViaEmail,     // email verification code
     confirmDeviceAuth,                // device authorization
+    createQrLogin, pollQrLogin,       // QR scan-login (web side)
     forceKickDaemon,                  // force kick daemon
     renameSession,                    // session rename
     doRefreshToken, logout,

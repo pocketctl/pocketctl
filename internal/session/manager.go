@@ -38,6 +38,8 @@ type ProcessState struct {
 	TitleGenerated bool // true once generate_title_request has been sent
 	Tailer *watcher.JSONLTailer // terminal session 的 JSONL tailer（D2: sendToIdleTerminal 期间 pause）
 	PTY    *os.File             // interactive-web-session D1: daemon session 的 PTY master（写 stdin 驱动 interactive claude）
+	PermissionMode string // current permission mode (updated by JSONL permission-mode parser)
+	Model  string // resolved model name (for session_created, surfaced to web /model)
 }
 
 // SetTailer associates a JSONL tailer with a session (so sendToIdleTerminal can pause/resume it).
@@ -47,6 +49,102 @@ func (sm *SessionManager) SetTailer(sessionID string, t *watcher.JSONLTailer) {
 	if ps, ok := sm.sessions[sessionID]; ok {
 		ps.Tailer = t
 	}
+}
+
+// SetPermissionMode cycles the Claude TUI's permission mode via Shift+Tab.
+// Only works for daemon (PTY) sessions. The cycle order is default→acceptEdits→plan;
+// we calculate how many Shift+Tab presses are needed based on the current mode.
+func (sm *SessionManager) SetPermissionMode(ctx context.Context, sessionID, targetMode string) error {
+	sm.mu.RLock()
+	ps, ok := sm.sessions[sessionID]
+	sm.mu.RUnlock()
+	if !ok {
+		return fmt.Errorf("session not found")
+	}
+	if ps.Source != "daemon" || ps.PTY == nil {
+		return fmt.Errorf("only daemon (interactive) sessions support runtime mode switch")
+	}
+
+	cycle := []string{"default", "acceptEdits", "plan"}
+	currentIdx := indexOfString(cycle, ps.PermissionMode)
+	if currentIdx == -1 {
+		currentIdx = 1 // unknown → assume acceptEdits (the daemon default)
+	}
+	targetIdx := indexOfString(cycle, targetMode)
+	if targetIdx == -1 {
+		return fmt.Errorf("unsupported permission mode: %s (use default/acceptEdits/plan)", targetMode)
+	}
+
+	presses := (targetIdx - currentIdx + len(cycle)) % len(cycle)
+	for i := 0; i < presses; i++ {
+		if _, err := ps.PTY.Write([]byte("\x1b[Z")); err != nil { // Shift+Tab (CSI Z)
+			return fmt.Errorf("pty write shift+tab: %w", err)
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(150 * time.Millisecond): // let TUI process each press
+		}
+	}
+	return nil
+}
+
+// InterruptSession stops the agent's current generation without killing the
+// session. For daemon (PTY) sessions it writes Ctrl+C (\x03) to the PTY,
+// which Claude's TUI interprets as "interrupt current turn". For terminal
+// sessions it cancels the --resume subprocess. The session stays alive and
+// returns to idle state (driven by the JSONL tailer or the resume goroutine).
+func (sm *SessionManager) InterruptSession(sessionID string) error {
+	sm.mu.RLock()
+	ps, ok := sm.sessions[sessionID]
+	sm.mu.RUnlock()
+	if !ok {
+		return fmt.Errorf("session not found")
+	}
+
+	if ps.Source == "daemon" && ps.PTY != nil {
+		// Ctrl+C (ETX) — Claude TUI stops the current generation and returns
+		// to the input prompt. The JSONL tailer will push an idle status.
+		if _, err := ps.PTY.Write([]byte{0x03}); err != nil {
+			return fmt.Errorf("pty write ctrl+c: %w", err)
+		}
+		return nil
+	}
+
+	// Terminal session: cancel the --resume subprocess.
+	if ps.Cancel != nil {
+		ps.Cancel()
+	}
+	return nil
+}
+
+// UpdatePermissionMode records the current permission mode (called when a
+// permission_mode_changed event is received from the JSONL tailer).
+func (sm *SessionManager) UpdatePermissionMode(sessionID, mode string) {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+	if ps, ok := sm.sessions[sessionID]; ok {
+		ps.PermissionMode = mode
+	}
+}
+
+// GetPermissionMode returns the current permission mode for a session.
+func (sm *SessionManager) GetPermissionMode(sessionID string) string {
+	sm.mu.RLock()
+	defer sm.mu.RUnlock()
+	if ps, ok := sm.sessions[sessionID]; ok {
+		return ps.PermissionMode
+	}
+	return ""
+}
+
+func indexOfString(slice []string, val string) int {
+	for i, v := range slice {
+		if v == val {
+			return i
+		}
+	}
+	return -1
 }
 
 // NotifyFunc is called after a web→terminal message completes.
@@ -138,6 +236,58 @@ func resolveCleanModel() string {
 	}
 }
 
+// ListAvailableModels reads ~/.claude/settings.json and returns the opus/sonnet/haiku
+// alias→concrete-model mapping so the web client can populate its model picker with
+// the host's actual available models (not hardcoded aliases). Returns nil if
+// settings.json is missing/unparseable.
+func ListAvailableModels() []protocol.ModelOption {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return nil
+	}
+	data, err := os.ReadFile(filepath.Join(home, ".claude", "settings.json"))
+	if err != nil {
+		return nil
+	}
+	var cfg struct {
+		Env map[string]string `json:"env"`
+	}
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		return nil
+	}
+	type slot struct{ alias, nameKey, modelKey string }
+	slots := []slot{
+		{"opus", "ANTHROPIC_DEFAULT_OPUS_MODEL_NAME", "ANTHROPIC_DEFAULT_OPUS_MODEL"},
+		{"sonnet", "ANTHROPIC_DEFAULT_SONNET_MODEL_NAME", "ANTHROPIC_DEFAULT_SONNET_MODEL"},
+		{"haiku", "ANTHROPIC_DEFAULT_HAIKU_MODEL_NAME", "ANTHROPIC_DEFAULT_HAIKU_MODEL"},
+	}
+	var out []protocol.ModelOption
+	for _, s := range slots {
+		name := strings.TrimSpace(cfg.Env[s.nameKey])
+		if name == "" {
+			name = stripModelSuffix(cfg.Env[s.modelKey]) // fall back to raw key, strip any [...] suffix
+		}
+		if name == "" {
+			continue
+		}
+		out = append(out, protocol.ModelOption{Alias: s.alias, Name: name})
+	}
+	return out
+}
+
+// resolveModelAlias maps a claude alias (opus/sonnet/haiku) to its concrete model name
+// from ~/.claude/settings.json (e.g. haiku → glm-4.7). Used so /model shows the real
+// model, while the alias is still passed to claude's --model (which resolves via
+// ANTHROPIC_DEFAULT_*_MODEL, preserving e.g. [1M] context). Non-alias input is returned as-is.
+func resolveModelAlias(alias string) string {
+	for _, m := range ListAvailableModels() {
+		if m.Alias == alias {
+			return m.Name
+		}
+	}
+	return alias
+}
+
 // validateCwd checks that the directory exists, is a directory, and is accessible.
 func validateCwd(cwd string) error {
 	info, err := os.Stat(cwd)
@@ -171,8 +321,17 @@ func (sm *SessionManager) CreateSession(ctx context.Context, config protocol.Ses
 		return "", err
 	}
 
-	// Resolve clean model name (strip invalid [...] suffix from cc switch configs)
-	config.Model = resolveCleanModel()
+	// Resolve model: prefer the model the client explicitly chose (opus/sonnet/haiku
+	// alias or concrete name from session_create); fall back to the host's
+	// ~/.claude/settings.json default so legacy clients without a model picker
+	// still surface a value for the /model command.
+	if config.Model == "" {
+		config.Model = resolveCleanModel()
+	}
+	// config.Model is the alias/name passed to claude's --model (resolves via
+	// ANTHROPIC_DEFAULT_*_MODEL, preserving e.g. [1M]). Derive the concrete display
+	// name for /model (haiku → glm-4.7).
+	displayModel := resolveModelAlias(config.Model)
 
 	// interactive-web-session D1: launch interactive claude under a PTY (not -p),
 	// with an explicit --session-id so the JSONL file path is known up front.
@@ -189,6 +348,15 @@ func (sm *SessionManager) CreateSession(ctx context.Context, config protocol.Ses
 	}
 
 	now := time.Now()
+	permMode := config.PermissionMode
+	if permMode == "" {
+		// Web/iOS daemon sessions are unattended (no one at the PTY to approve
+		// tool prompts), so default to bypassing all permission checks —
+		// otherwise Bash/Write tools stall forever on a y/n prompt the UI can't
+		// surface (and Ctrl+C doesn't dismiss). Callers who want stricter modes
+		// can set PermissionMode explicitly.
+		permMode = "bypassPermissions"
+	}
 	ps := &ProcessState{
 		SessionID:      sessionID, // real id (not pending-): --session-id pins it
 		Cmd:            cmd,
@@ -200,6 +368,8 @@ func (sm *SessionManager) CreateSession(ctx context.Context, config protocol.Ses
 		Agent:          config.Agent,
 		Source:         "daemon",
 		PTY:            ptmx,
+		PermissionMode: permMode,
+		Model:          displayModel,
 	}
 	sm.mu.Lock()
 	sm.sessions[sessionID] = ps
@@ -277,6 +447,11 @@ func (sm *SessionManager) servePTYSession(ctx context.Context, ps *ProcessState,
 			return
 		}
 		sm.SetTailer(ps.SessionID, tailer)
+		// If the initial prompt is a slash command, record it so the first
+		// command_receipt (if any) carries the correct command name.
+		if initialPrompt != "" {
+			tailer.SetPendingCmd(initialPrompt)
+		}
 		go tailer.Run(ctx, sm.outputCh, nil)
 		if sm.OnSessionIDResolved != nil {
 			sm.OnSessionIDResolved(ps.SessionID, ps.Cwd)
@@ -590,15 +765,32 @@ func (sm *SessionManager) readOutput(ctx context.Context, cmd *exec.Cmd, stdout 
 func (sm *SessionManager) SendMessage(ctx context.Context, sessionID string, content string) error {
 	sm.mu.RLock()
 	ps, ok := sm.sessions[sessionID]
+	sm.mu.RUnlock()
+	if !ok {
+		// Not in memory. A daemon restart loses the in-memory map, but a session
+		// still shown in the web UI (persisted in the relay DB) usually has its
+		// JSONL history on disk. Resume it via `claude --resume` so the user can
+		// keep talking instead of hitting "session not found". Registered as
+		// source=terminal/status=exited, so the --resume path below drives it.
+		// Falls back to "session not found" only if no JSONL exists either.
+		if !sm.tryResumeHistorical(sessionID) {
+			return fmt.Errorf("session not found: %s", sessionID)
+		}
+		sm.mu.RLock()
+		ps, ok = sm.sessions[sessionID]
+		sm.mu.RUnlock()
+		if !ok {
+			return fmt.Errorf("session not found: %s", sessionID)
+		}
+	}
+	// ps is non-nil here — safe to read fields.
+	sm.mu.RLock()
 	cwd := ps.Cwd
 	isRunning := ps.Status == protocol.StatusRunning || ps.Status == "busy"
 	isExited := ps.Status == protocol.StatusExited
 	source := ps.Source
 	pid := ps.Pid
 	sm.mu.RUnlock()
-	if !ok {
-		return fmt.Errorf("session not found: %s", sessionID)
-	}
 	// Update last activity — user sent a message
 	sm.mu.Lock()
 	ps.LastActivityAt = time.Now()
@@ -650,6 +842,11 @@ func (sm *SessionManager) SendMessage(ctx context.Context, sessionID string, con
 		if _, err := ptyFile.Write([]byte(content + "\r")); err != nil {
 			return fmt.Errorf("pty stdin write: %w", err)
 		}
+		// Record the slash command (if any) so the tailer's JSONLStreamParser
+		// can attach it to the next command_receipt (e.g. /compact, /clear).
+		if ps.Tailer != nil {
+			ps.Tailer.SetPendingCmd(content)
+		}
 		return nil
 	}
 
@@ -691,6 +888,74 @@ func (sm *SessionManager) SendMessage(ctx context.Context, sessionID string, con
 	}
 	go sm.readOutput(ctx, cmd, stdout, adp, ps)
 	return nil
+}
+
+// tryResumeHistorical re-registers a session that exists on disk (JSONL
+// history) but isn't in the in-memory map — typically a session from before
+// the current daemon process started, still listed in the web UI from the
+// relay DB. It locates the JSONL, extracts the cwd, and registers the session
+// as terminal/exited so SendMessage's existing --resume path drives it.
+// Returns false only if no JSONL exists (genuinely unknown session).
+func (sm *SessionManager) tryResumeHistorical(sessionID string) bool {
+	jsonlPath, err := watcher.ResolveJSONLPath(sessionID, "")
+	if err != nil {
+		return false
+	}
+	cwd := extractCwdFromJSONL(jsonlPath)
+	if cwd == "" {
+		// Fallback: decode cwd from the projects dir name (-Users-foo-bar →
+		// /Users/foo/bar). Less reliable (collapses internal hyphens) but
+		// better than an empty cwd.
+		cwd = cwdFromProjectsDir(jsonlPath)
+	}
+	now := time.Now()
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+	// Re-check under lock: another goroutine may have registered it concurrently.
+	if _, exists := sm.sessions[sessionID]; exists {
+		return true
+	}
+	sm.sessions[sessionID] = &ProcessState{
+		SessionID:      sessionID,
+		Status:         protocol.StatusExited,
+		Source:         "terminal",
+		StartedAt:      now,
+		LastActivityAt: now,
+		Cwd:            cwd,
+		Agent:          "claude-code",
+	}
+	return true
+}
+
+// extractCwdFromJSONL reads the first records of a session's JSONL and returns
+// the cwd field. Each line is a JSON object; cwd is present on most records.
+func extractCwdFromJSONL(path string) string {
+	f, err := os.Open(path)
+	if err != nil {
+		return ""
+	}
+	defer f.Close()
+	scanner := bufio.NewScanner(f)
+	scanner.Buffer(make([]byte, 1024*1024), 1024*1024)
+	for i := 0; i < 200 && scanner.Scan(); i++ {
+		var rec struct {
+			Cwd string `json:"cwd"`
+		}
+		if json.Unmarshal(scanner.Bytes(), &rec) == nil && rec.Cwd != "" {
+			return rec.Cwd
+		}
+	}
+	return ""
+}
+
+// cwdFromProjectsDir decodes a cwd from a JSONL path's projects dir name
+// (~/.claude/projects/-Users-foo-bar/x.jsonl → /Users/foo/bar).
+func cwdFromProjectsDir(jsonlPath string) string {
+	dir := filepath.Base(filepath.Dir(jsonlPath))
+	if !strings.HasPrefix(dir, "-") {
+		return ""
+	}
+	return "/" + strings.ReplaceAll(dir[1:], "-", "/")
 }
 
 // sendToIdleTerminal sends a message to a terminal session that's idle (alive but waiting for input).
@@ -892,6 +1157,30 @@ func (sm *SessionManager) GetSessionCwd(sessionID string) (string, bool) {
 		return "", false
 	}
 	return ps.Cwd, true
+}
+
+// GetSessionModel returns the resolved model name for a session (the same value
+// passed to claude via --model at launch). Surfaced to the web client via the
+// session_created event so /model can show the active model. The bool indicates
+// whether the session exists.
+func (sm *SessionManager) GetSessionModel(sessionID string) (string, bool) {
+	sm.mu.RLock()
+	defer sm.mu.RUnlock()
+	ps, ok := sm.sessions[sessionID]
+	if !ok {
+		return "", false
+	}
+	return ps.Model, true
+}
+
+// SetSessionModel caches the resolved model for a session — e.g. a model extracted
+// from a terminal session's JSONL on first get_session_meta, so subsequent reads are free.
+func (sm *SessionManager) SetSessionModel(sessionID, model string) {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+	if ps, ok := sm.sessions[sessionID]; ok {
+		ps.Model = model
+	}
 }
 
 // GetSessionSlashCommands returns the slash commands the agent reported as

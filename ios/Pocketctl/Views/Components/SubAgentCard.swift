@@ -7,6 +7,12 @@ struct SubAgentCard: View {
     @State private var isExpanded = false
 
     var body: some View {
+        // Full-width sub-agent card. No left bar; the card itself is the
+        // visual container (border + sub-agent tinted bg).
+        cardBody
+    }
+
+    private var cardBody: some View {
         VStack(alignment: .leading, spacing: 0) {
             // Header
             Button {
@@ -15,8 +21,10 @@ struct SubAgentCard: View {
                 }
             } label: {
                 HStack(spacing: 10) {
-                    Text("🤖")
-                        .font(.system(size: 14))
+                    Image(systemName: "sparkles")
+                        .font(.system(size: 13))
+                        .foregroundStyle(Color.pcSubAgent)
+                        .frame(width: 18)
 
                     Text(subAgent.agentType)
                         .font(PCFont.body(12, weight: .medium))
@@ -65,8 +73,10 @@ struct SubAgentCard: View {
                                 .cornerRadius(PCRadius.sm)
                         } else if msg.type == .toolCall {
                             HStack(spacing: 8) {
-                                Text(msg.toolIcon)
-                                    .font(.system(size: 12))
+                                Image(systemName: msg.toolIcon)
+                                    .font(.system(size: 11))
+                                    .foregroundStyle(Color.pcAccent)
+                                    .frame(width: 14)
                                 Text(msg.tool ?? "")
                                     .font(PCFont.mono(12, weight: .medium))
                                     .foregroundStyle(Color.pcAccent)

@@ -3,9 +3,9 @@ import SwiftUI
 struct LoginView: View {
     @Binding var isLoggedIn: Bool
 
-    @State private var phoneText = RelayEnvironmentManager.shared.current == .staging ? "13800138000" : ""
+    @State private var emailText = RelayEnvironmentManager.shared.current == .staging ? "test@pocketctl.me" : ""
     private let apiClient = APIClient()
-    @FocusState private var phoneFocused: Bool
+    @FocusState private var emailFocused: Bool
     @FocusState private var focusedCodeIndex: Int?
     @State private var codeDigits: [String] = Array(repeating: "", count: 6)
     @State private var countdown = 0
@@ -43,7 +43,7 @@ struct LoginView: View {
                     .frame(maxWidth: .infinity, alignment: .center)
                     .padding(.bottom, 20)
 
-                phoneInputField.padding(.bottom, 16)
+                emailInputField.padding(.bottom, 16)
                 codeInputField.padding(.bottom, 16)
                 loginButton.padding(.bottom, 16)
                 termsView
@@ -51,22 +51,13 @@ struct LoginView: View {
             .frame(maxWidth: 340)
             .padding(.horizontal, PCSpacing.xxl)
 
-            socialSection.padding(.top, PCSpacing.xl)
             Spacer(minLength: 40)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(Color.pcBackground)
         .onAppear {
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) {
-                phoneFocused = true
-            }
-        }
-        .onChange(of: phoneText) { _, newValue in
-            let f = newValue.filter { $0.isNumber }
-            if f != newValue { phoneText = f }
-            if f.count > 11 { phoneText = String(f.prefix(11)) }
-            if phoneText.count == 11, phoneText.first == "1" {
-                focusedCodeIndex = 0
+                emailFocused = true
             }
         }
         .onReceive(countdownTimer) { _ in
@@ -103,15 +94,13 @@ struct LoginView: View {
         }
     }
 
-    // MARK: - Phone input
+    // MARK: - Email input
 
-    private var phoneInputField: some View {
+    private var emailInputField: some View {
         HStack(spacing: 0) {
             HStack(spacing: 4) {
-                Text("+86")
-                    .font(.system(size: 16, weight: .medium)).foregroundStyle(Color.pcFg)
-                Image(systemName: "chevron.down")
-                    .font(.system(size: 10, weight: .semibold)).foregroundStyle(Color.pcFgTertiary)
+                Image(systemName: "envelope")
+                    .font(.system(size: 16)).foregroundStyle(Color.pcFgTertiary)
             }
             .padding(.horizontal, 12).padding(.vertical, 14)
             .background(Color.pcSurface)
@@ -119,10 +108,11 @@ struct LoginView: View {
                 Rectangle().fill(Color.pcBorder).frame(width: 1).allowsHitTesting(false)
             }
 
-            TextField("请输入手机号", text: $phoneText)
+            TextField("请输入邮箱地址", text: $emailText)
                 .font(PCFont.body(17)).foregroundStyle(Color.pcFg)
-                .keyboardType(.numberPad).textContentType(.telephoneNumber)
-                .focused($phoneFocused).accentColor(Color.pcAccent)
+                .keyboardType(.emailAddress).textContentType(.emailAddress)
+                .textInputAutocapitalization(.never).autocorrectionDisabled()
+                .focused($emailFocused).accentColor(Color.pcAccent)
                 .padding(.horizontal, 12).padding(.vertical, 14)
         }
         .frame(height: 50)
@@ -130,14 +120,14 @@ struct LoginView: View {
         .cornerRadius(PCRadius.md)
         .overlay(
             RoundedRectangle(cornerRadius: PCRadius.md)
-                .stroke(phoneFocused ? Color.pcAccent : Color.pcBorder, lineWidth: 1)
+                .stroke(emailFocused ? Color.pcAccent : Color.pcBorder, lineWidth: 1)
                 .allowsHitTesting(false)
         )
         .overlay(
             RoundedRectangle(cornerRadius: PCRadius.md)
                 .stroke(Color.pcAccentMuted, lineWidth: 3).blur(radius: 1)
                 .allowsHitTesting(false)
-                .opacity(phoneFocused ? 1 : 0)
+                .opacity(emailFocused ? 1 : 0)
         )
     }
 
@@ -227,65 +217,17 @@ struct LoginView: View {
         .font(PCFont.body(12)).multilineTextAlignment(.center).frame(maxWidth: .infinity)
     }
 
-    // MARK: - Social
-
-    private var socialSection: some View {
-        VStack(spacing: PCSpacing.xl) {
-            // Divider with text — matches .divider-with-text in shared.css
-            HStack(spacing: PCSpacing.md) {
-                Rectangle().fill(Color.pcBorder).frame(height: 1)
-                Text("其他登录方式")
-                    .font(PCFont.body(13))
-                    .foregroundStyle(Color.pcFgSecondary)
-                Rectangle().fill(Color.pcBorder).frame(height: 1)
-            }
-            .padding(.horizontal, PCSpacing.xxl + PCSpacing.lg)
-
-            // Social buttons row — matches .social-row
-            HStack(spacing: PCSpacing.xl) {
-                // Apple Sign In — matches .social-btn
-                Button {} label: {
-                    Image(systemName: "apple.logo")
-                        .font(.system(size: 28))
-                        .foregroundStyle(.white)
-                        .frame(width: 56, height: 56)
-                        .background(Color.pcSurface)
-                        .cornerRadius(PCRadius.lg)
-                        .overlay(
-                            RoundedRectangle(cornerRadius: PCRadius.lg)
-                                .stroke(Color.pcBorder, lineWidth: 1)
-                                .allowsHitTesting(false)
-                        )
-                }
-
-                // WeChat — matches .social-btn.disabled
-                Image(systemName: "message.fill")
-                    .font(.system(size: 28))
-                    .foregroundStyle(Color(hex: 0x07C160))
-                    .frame(width: 56, height: 56)
-                    .background(Color.pcSurface)
-                    .cornerRadius(PCRadius.lg)
-                    .overlay(
-                        RoundedRectangle(cornerRadius: PCRadius.lg)
-                            .stroke(Color.pcBorder, lineWidth: 1)
-                            .allowsHitTesting(false)
-                    )
-                    .opacity(0.4)
-                    .overlay(alignment: .bottom) {
-                        Text("即将开通")
-                            .font(PCFont.body(10))
-                            .foregroundStyle(Color.pcFgTertiary)
-                            .offset(y: 16)
-                    }
-            }
-        }
-    }
-
     // MARK: - Actions
 
     private var canSendCode: Bool {
-        let digits = phoneText.filter { $0.isNumber }
-        return digits.count == 11 && digits.first == "1" && countdown == 0
+        isValidEmail && countdown == 0
+    }
+
+    private var isValidEmail: Bool {
+        let trimmed = emailText.trimmingCharacters(in: .whitespaces)
+        // Simple, lenient check: contains "@" with text on both sides.
+        guard let at = trimmed.firstIndex(of: "@") else { return false }
+        return at != trimmed.startIndex && at != trimmed.index(before: trimmed.endIndex)
     }
 
     private var canLogin: Bool {
@@ -293,9 +235,9 @@ struct LoginView: View {
     }
 
     private func doSendCode() async {
-        let phone = phoneText.filter { $0.isNumber }
+        let email = emailText.trimmingCharacters(in: .whitespaces)
         do {
-            _ = try await apiClient.sendSMS(phone: phone)
+            _ = try await apiClient.sendEmailCode(email: email)
             countdown = 60
         } catch {
             self.error = error.localizedDescription
@@ -306,9 +248,9 @@ struct LoginView: View {
         guard canLogin else { return }
         isLoading = true
         error = nil
-        let phone = phoneText.filter { $0.isNumber }
+        let email = emailText.trimmingCharacters(in: .whitespaces)
         do {
-            let resp = try await apiClient.verifySMS(phone: phone, code: codeDigits.joined())
+            let resp = try await apiClient.loginViaEmail(email: email, code: codeDigits.joined())
             KeychainStorage.accessToken = resp.access_token
             KeychainStorage.refreshToken = resp.refresh_token
             KeychainStorage.currentUser = resp.user

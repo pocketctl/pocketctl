@@ -6,6 +6,16 @@
 <title>pocketctl — 设置</title>
 <link rel="stylesheet" href="../css/shared.css">
 <style>
+  /* 右上角扫码按钮 */
+  .nav-scan-btn {
+    display: flex; align-items: center; justify-content: center;
+    width: 40px; height: 40px;
+    color: var(--accent); text-decoration: none;
+    border-radius: var(--radius-md);
+    transition: opacity 0.15s;
+  }
+  .nav-scan-btn:active { opacity: 0.55; }
+
   .profile-section {
     display: flex;
     flex-direction: column;
@@ -186,14 +196,16 @@
       <svg width="10" height="18" viewBox="0 0 12 20" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><path d="M10 2L2 10L10 18"/></svg>
     </button>
     <span class="nav-title">设置</span>
-    <div style="width:40px;"></div>
+    <a href="scan-login.html" class="nav-scan-btn" title="扫一扫" aria-label="扫一扫，授权网页端登录">
+      <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><path d="M14 14h3v3h-3zM20 14v3M14 20h3M20 20v.01"/></svg>
+    </a>
   </div>
 
   <div class="screen-content">
     <!-- Profile -->
     <div class="profile-section">
       <div class="profile-avatar">M</div>
-      <div class="profile-phone">138****8888</div>
+      <div class="profile-phone">dev@pocketctl.io</div>
       <button class="profile-edit">编辑资料</button>
     </div>
 
@@ -201,19 +213,11 @@
     <div class="section-title">账户</div>
     <div class="settings-group">
       <div class="settings-row">
-        <div class="row-icon" style="background:var(--accent-muted);color:var(--accent);">📱</div>
-        <span class="row-label">手机号</span>
-        <span class="row-value">138****8888 <span class="chevron">›</span></span>
-      </div>
-      <div class="settings-row">
-        <div class="row-icon" style="background:rgba(7,193,96,0.15);color:#07C160;">💬</div>
-        <span class="row-label">微信</span>
-        <span class="row-value"><span class="unbound">未绑定</span> <span class="chevron">›</span></span>
-      </div>
-      <div class="settings-row">
-        <div class="row-icon" style="background:rgba(255,255,255,0.1);color:#fff;">🍎</div>
-        <span class="row-label">Apple ID</span>
-        <span class="row-value"><span class="bound">已绑定</span> <span class="chevron">›</span></span>
+        <div class="row-icon" style="background:var(--accent-muted);color:var(--accent);">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="4" width="20" height="16" rx="2"/><path d="M22 6l-10 7L2 6"/></svg>
+        </div>
+        <span class="row-label">邮箱</span>
+        <span class="row-value">dev@pocketctl.io <span class="chevron">›</span></span>
       </div>
     </div>
 

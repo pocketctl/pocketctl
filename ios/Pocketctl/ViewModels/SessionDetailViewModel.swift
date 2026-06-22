@@ -5,20 +5,32 @@ import Foundation
 final class SessionDetailViewModel {
     var messages: [ChatMessage] = []
     var subAgents: [String: SubAgent] = [:]
+    /// Available slash commands for autocomplete (filled by command_list event)
+    var commands: [CommandItem] = []
     var status: String
     var title: String?
     var exitReason: String?
     var isLoading = true
     /// Incremented when initial replay completes — triggers scroll-to-bottom
     var scrollTick = 0
+    /// Relay signaled older events exist beyond the loaded page
+    var hasMore = false
+    /// A backward-pagination (scroll-up) request is in flight
+    var isLoadingBackward = false
 
     var session: Session  // var to support session_id_changed updates
     private let wsService: WebSocketService
     private let apiClient: APIClient
     private var msgCounter = 0
     private var eventListenerId: String?
-    /// Tracks the last event sequence number for incremental replay
-    private var lastEventSeq: Int = 0
+    /// Page size for replay pagination (matches web client)
+    private let pageSize = 50
+    /// Oldest loaded event seq — backward pagination cursor
+    private var loadedMinId = 0
+    /// Out-of-order tool results: relay persists events fire-and-forget, so a
+    /// tool_result can land before its tool_call (DB id ≠ send order). Buffer
+    /// orphan results and apply them when the matching tool_call is created.
+    private var pendingToolResults: [String: String] = [:]
     /// True while processing a replay_batch — suppresses per-event scrollTick updates
     private var isBatchProcessing = false
 
@@ -29,7 +41,6 @@ final class SessionDetailViewModel {
         self.exitReason = session.exitReason
         self.wsService = wsService
         self.apiClient = apiClient
-        self.lastEventSeq = Self.loadLastSeq(for: session.sessionId)
 
         // 从内存缓存恢复消息，实现秒开 + 保留滚动位置
         if let cached = Self.messagesCache[session.sessionId] {
@@ -100,12 +111,28 @@ final class SessionDetailViewModel {
             return
         }
 
-        // Incremental replay: only load events after lastEventSeq
+        // Backward pagination: load the most recent page (matches web client).
+        // If messages were restored from cache, skip replay (秒开); live events
+        // will append new messages after connect.
+        if messages.isEmpty {
+            loadedMinId = 0
+            hasMore = false
+            wsService.send([
+                "type": "replay",
+                "session_id": session.sessionId,
+                "direction": "backward",
+                "limit": pageSize,
+            ])
+        } else {
+            isLoading = false
+        }
+
+        // Request the available slash commands for autocomplete (one-time per connect).
         wsService.send([
-            "type": "replay",
+            "type": "list_commands",
             "session_id": session.sessionId,
-            "last_seq": lastEventSeq,
         ])
+
         // isLoading will be set to false when replay_end arrives
 
         // Safety timeout: if replay_end never arrives (network drop, relay crash),
@@ -127,27 +154,33 @@ final class SessionDetailViewModel {
     }
 
     /// Incremental refresh — called on .onAppear when returning to this view.
-    /// Only fetches events after lastEventSeq, does NOT clear existing messages.
     func onReturn() {
         if eventListenerId == nil {
             eventListenerId = wsService.addEventListener { [weak self] dict in
                 self?.handleEvent(dict)
             }
         }
-        guard wsService.isConnected, lastEventSeq > 0 else {
-            // No previous data or not connected — do full replay
+        guard !messages.isEmpty else {
             forceRefresh()
             return
         }
-        isLoading = true
+        // 有缓存消息 → 秒开（用户可下拉 forceRefresh 刷新最新页）
+    }
+
+    /// 向上滚到顶 → 加载更早一页历史（backward 分页，对齐 web）
+    func loadOlder() {
+        guard hasMore, !isLoadingBackward, loadedMinId > 0 else { return }
+        isLoadingBackward = true
         wsService.send([
             "type": "replay",
             "session_id": session.sessionId,
-            "last_seq": lastEventSeq,
+            "direction": "backward",
+            "last_seq": loadedMinId,
+            "limit": pageSize,
         ])
     }
 
-    /// Full refresh — clears all messages and replays from seq 0.
+    /// Full refresh — clears all messages and reloads the latest page.
     func forceRefresh() {
         if eventListenerId == nil {
             eventListenerId = wsService.addEventListener { [weak self] dict in
@@ -157,12 +190,16 @@ final class SessionDetailViewModel {
         messages.removeAll(keepingCapacity: true)
         subAgents.removeAll(keepingCapacity: true)
         msgCounter = 0
-        lastEventSeq = 0
+        loadedMinId = 0
+        hasMore = false
+        isLoadingBackward = false
+        isLoading = true
 
         wsService.send([
             "type": "replay",
             "session_id": session.sessionId,
-            "last_seq": 0,
+            "direction": "backward",
+            "limit": pageSize,
         ])
     }
 
@@ -184,23 +221,29 @@ final class SessionDetailViewModel {
         // ── Replay control events (no session ID filter) ──
 
         if event.type == .replayBatch {
-            // Buffer all batch events into local variables to avoid
-            // triggering @Observable notification on every append.
+            let isBackward = event.direction == "backward"
             var bufMessages = messages
             var bufSubAgents = subAgents
 
             isBatchProcessing = true
-            if let batchEvents = event.events {
-                for evtDict in batchEvents {
+            // backward batches arrive id DESC; reverse to ASC for chronological prepend
+            let ordered = isBackward ? (event.events ?? []).reversed() : (event.events ?? [])
+
+            if isLoadingBackward && isBackward {
+                // 向上滚分页：prepend 更早一页消息（对齐 web）
+                var prependMsgs: [ChatMessage] = []
+                for evtDict in ordered {
+                    handleEventDirect(evtDict, messages: &prependMsgs, subAgents: &bufSubAgents)
+                }
+                bufMessages = prependMsgs + bufMessages
+            } else {
+                // 初始加载 / forward：append
+                for evtDict in ordered {
                     handleEventDirect(evtDict, messages: &bufMessages, subAgents: &bufSubAgents)
                 }
             }
-            if let seq = event.lastSeq {
-                lastEventSeq = seq
-            }
             isBatchProcessing = false
 
-            // Single assignment triggers one SwiftUI view update
             messages = bufMessages
             subAgents = bufSubAgents
             scrollTick += 1
@@ -208,11 +251,15 @@ final class SessionDetailViewModel {
         }
 
         if event.type == .replayEnd {
-            if let seq = event.lastSeq {
-                lastEventSeq = seq
-                Self.saveLastSeq(seq, for: session.sessionId)
-            }
             isLoading = false
+            isLoadingBackward = false
+            if let hasMoreVal = event.hasMore {
+                hasMore = hasMoreVal
+            }
+            // backward: last_seq is the oldest id of the returned page → next cursor
+            if let seq = event.lastSeq, loadedMinId == 0 || seq < loadedMinId {
+                loadedMinId = seq
+            }
             scrollTick += 1
             return
         }
@@ -223,12 +270,7 @@ final class SessionDetailViewModel {
             if let newId = event.sessionId,
                let oldId = dict["old_session_id"] as? String,
                oldId == session.sessionId {
-                // Migrate persisted seq to new ID
-                let oldSeq = Self.loadLastSeq(for: oldId)
-                Self.saveLastSeq(oldSeq, for: newId)
-                Self.removeLastSeq(for: oldId)
                 session.sessionId = newId
-                lastEventSeq = oldSeq
             }
             return
         }
@@ -268,6 +310,12 @@ final class SessionDetailViewModel {
 
         case .sessionTitleUpdate:
             title = event.title
+
+        case .commandReceipt:
+            handleCommandReceipt(event)
+
+        case .commandList:
+            handleCommandList(event)
 
         case .error:
             msgCounter += 1
@@ -317,6 +365,9 @@ final class SessionDetailViewModel {
 
         case .sessionTitleUpdate:
             title = event.title
+
+        case .commandReceipt:
+            handleCommandReceiptDirect(event, messages: &messages)
 
         case .error:
             msgCounter += 1
@@ -393,6 +444,10 @@ final class SessionDetailViewModel {
             callId: event.callId,
             inputDescription: inputDesc
         ))
+        // Apply buffered out-of-order tool_result if present (result may precede call in DB id order)
+        if let callId = event.callId, let pending = pendingToolResults.removeValue(forKey: callId) {
+            messages[messages.count - 1].output = pending
+        }
     }
 
     private func handleToolResultDirect(_ event: WebSocketEvent, messages: inout [ChatMessage]) {
@@ -403,6 +458,9 @@ final class SessionDetailViewModel {
             if messages[index].tool == "Agent" && messages[index].subAgentId != nil {
                 messages[index].output = "子智能体已完成"
             }
+        } else {
+            // Out-of-order: tool_result arrived before tool_call — buffer for later
+            pendingToolResults[callId] = event.output ?? ""
         }
     }
 
@@ -542,6 +600,10 @@ final class SessionDetailViewModel {
             callId: event.callId,
             inputDescription: inputDesc
         ))
+        // Apply buffered out-of-order tool_result if present
+        if let callId = event.callId, let pending = pendingToolResults.removeValue(forKey: callId) {
+            messages[messages.count - 1].output = pending
+        }
     }
 
     private func handleToolResult(_ event: WebSocketEvent) {
@@ -554,6 +616,9 @@ final class SessionDetailViewModel {
             if messages[index].tool == "Agent" && messages[index].subAgentId != nil {
                 messages[index].output = "子智能体已完成"
             }
+        } else {
+            // Out-of-order: tool_result arrived before tool_call — buffer for later
+            pendingToolResults[callId] = event.output ?? ""
         }
     }
 
@@ -574,6 +639,41 @@ final class SessionDetailViewModel {
             messages[index].subAgentId = agentId
         }
     }
+
+    // MARK: - Slash command handlers
+
+    private func handleCommandReceipt(_ event: WebSocketEvent) {
+        msgCounter += 1
+        messages.append(ChatMessage(
+            id: msgCounter,
+            role: .agent,
+            type: .commandReceipt,
+            content: event.receiptMessage ?? "",
+            streaming: false,
+            command: event.command ?? "",
+            receiptStatus: event.receiptStatus ?? "success"
+        ))
+        if !isBatchProcessing { scrollTick += 1 }
+    }
+
+    private func handleCommandList(_ event: WebSocketEvent) {
+        guard let cmds = event.commands else { commands = []; return }
+        commands = cmds.compactMap { CommandItem(dict: $0) }
+    }
+
+    private func handleCommandReceiptDirect(_ event: WebSocketEvent, messages: inout [ChatMessage]) {
+        msgCounter += 1
+        messages.append(ChatMessage(
+            id: msgCounter,
+            role: .agent,
+            type: .commandReceipt,
+            content: event.receiptMessage ?? "",
+            streaming: false,
+            command: event.command ?? "",
+            receiptStatus: event.receiptStatus ?? "success"
+        ))
+    }
+
 
     private func handleSubAgentEvent(agentId: String, event: WebSocketEvent, dict: [String: Any]) {
         guard subAgents[agentId] != nil else { return }

@@ -9,6 +9,7 @@ enum ChatMessageType: Sendable {
     case agentText
     case toolCall
     case error
+    case commandReceipt
 }
 
 struct ChatMessage: Identifiable, Sendable {
@@ -29,6 +30,10 @@ struct ChatMessage: Identifiable, Sendable {
     var inputDescription: String = ""
     var output: String?
 
+    // Command receipt fields (slash command feedback)
+    var command: String = ""
+    var receiptStatus: String = "success"  // success | failed | unavailable
+
     /// Whether this tool call is still running (no output yet)
     var isRunning: Bool {
         type == .toolCall && output == nil
@@ -46,19 +51,33 @@ struct ChatMessage: Identifiable, Sendable {
         guard let output else { return false }
         return output.count > 2000 || output.components(separatedBy: "\n").count > 50
     }
+
+    /// SF Symbol for command receipt status.
+    /// success uses checkmark.circle (neutral), failed uses xmark.circle,
+    /// unavailable uses minus.circle — all in circles for visual consistency.
+    var receiptIcon: String {
+        switch receiptStatus {
+        case "success":     return "checkmark.circle"
+        case "failed":      return "xmark.circle"
+        case "unavailable": return "minus.circle"
+        default:            return "circle"
+        }
+    }
 }
 
 extension ChatMessage {
-    /// Tool icon emoji mapping
+    /// SF Symbol name for the tool (replaces previous emoji icons to match
+    /// the system's outline-icon visual language).
     var toolIcon: String {
         switch tool {
-        case "Read": return "📖"
-        case "Write", "Edit": return "✏️"
-        case "Bash": return "⚡"
-        case "Glob", "Grep": return "🔍"
-        case "WebSearch", "WebFetch": return "🌐"
-        case "Agent": return "🤖"
-        default: return "🔧"
+        case "Read": return "book"
+        case "Write", "Edit": return "pencil"
+        case "Bash": return "terminal"
+        case "Glob", "Grep": return "magnifyingglass"
+        case "WebSearch": return "globe"
+        case "WebFetch": return "arrow.down.circle"
+        case "Agent", "Task": return "sparkles"
+        default: return "wrench.and.screwdriver"
         }
     }
 

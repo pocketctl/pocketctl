@@ -2,18 +2,18 @@
   <div class="overlay" @click.self="$emit('close')">
     <div class="dialog">
       <div class="dialog-header">
-        <h3>注册主机</h3>
+        <h3>{{ t('dashboard.register_host') }}</h3>
         <button class="close-btn" @click="$emit('close')">
           <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6L6 18M6 6l12 12"/></svg>
         </button>
       </div>
-      <p class="dialog-subtitle">在你的开发机上运行以下命令安装 Daemon</p>
+      <p class="dialog-subtitle">{{ t('settings.install_desc') }}</p>
 
       <div class="steps">
         <div class="step">
           <div class="step-number">1</div>
           <div class="step-content">
-            <div class="step-label">安装 Daemon</div>
+            <div class="step-label">{{ t('settings.install_step') }}</div>
             <div class="code-block">
               <code>curl -fsSL {{ installURL }} -o /tmp/install-daemon.sh</code>
               <code>sudo bash /tmp/install-daemon.sh</code>
@@ -23,7 +23,7 @@
         <div class="step">
           <div class="step-number">2</div>
           <div class="step-content">
-            <div class="step-label">登录账号</div>
+            <div class="step-label">{{ t('settings.login_step') }}</div>
             <div class="code-block">
               <code>pocketctl login</code>
             </div>
@@ -32,7 +32,7 @@
         <div class="step">
           <div class="step-number">3</div>
           <div class="step-content">
-            <div class="step-label">启动 Daemon</div>
+            <div class="step-label">{{ t('settings.start_step') }}</div>
             <div class="code-block">
               <code>pocketctl daemon start --relay {{ relayWs }}</code>
             </div>
@@ -43,9 +43,9 @@
       <div class="dialog-actions">
         <button class="btn btn-copy" @click="copyCommands">
           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"/></svg>
-          {{ copied ? '已复制' : '复制命令' }}
+          {{ copied ? t('common.copied') : t('common.copy') }}
         </button>
-        <button class="btn btn-close" @click="$emit('close')">完成</button>
+        <button class="btn btn-close" @click="$emit('close')">{{ t('common.done') }}</button>
       </div>
     </div>
   </div>
@@ -53,8 +53,10 @@
 
 <script setup lang="ts">
 import { ref, computed } from 'vue'
+import { useLocale } from '../composables/useLocale'
 
 defineEmits<{ close: [] }>()
+const { t } = useLocale()
 
 const copied = ref(false)
 

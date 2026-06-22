@@ -1,0 +1,378 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>pocketctl — Agent 管理</title>
+<link rel="stylesheet" href="../css/shared.css">
+<style>
+  .nav-bar { display: flex; align-items: center; padding: var(--space-md) var(--space-lg); gap: var(--space-sm); }
+  .back-btn { background: none; border: none; color: var(--accent); font-size: 15px; cursor: pointer; display: flex; align-items: center; gap: 2px; padding: 0; text-decoration: none; }
+  .nav-title { font-family: var(--font-display); font-size: 17px; font-weight: 600; color: var(--fg); }
+  .content { padding: 0 var(--space-lg) var(--space-3xl); }
+
+  /* 主机信息条 */
+  .host-bar {
+    display: flex; align-items: center; gap: 8px;
+    padding: 10px 14px; background: var(--surface);
+    border: 1px solid var(--border); border-radius: var(--radius-lg);
+    margin-bottom: var(--space-lg);
+  }
+  .host-bar .hb-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
+  .host-bar .hb-dot.online { background: var(--success); }
+  .host-bar .hb-name { font-size: 15px; font-weight: 600; color: var(--fg); flex: 1; }
+  .host-bar .hb-meta { font-size: 12px; color: var(--fg-tertiary); font-family: var(--font-mono); }
+
+  /* Agent 卡片 */
+  .agent-card {
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: var(--radius-lg); padding: 16px; margin-bottom: 12px;
+  }
+  .agent-card .ac-head { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; }
+  .agent-card .ac-icon {
+    width: 36px; height: 36px; border-radius: 9px;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 13px; font-weight: 700; flex-shrink: 0;
+  }
+  .agent-card .ac-icon.claude { background: rgba(88,166,255,0.15); color: var(--accent); }
+  .agent-card .ac-icon.codex { background: rgba(63,185,80,0.15); color: var(--success); }
+  .agent-card .ac-icon.opencode { background: rgba(192,132,252,0.15); color: #c084fc; }
+  .agent-card .ac-icon.cursor { background: rgba(210,153,34,0.15); color: var(--warning); }
+  .agent-card .ac-info { flex: 1; min-width: 0; }
+  .agent-card .ac-name { font-size: 15px; font-weight: 600; color: var(--fg); }
+  .agent-card .ac-status { font-size: 12px; margin-top: 2px; display: flex; align-items: center; gap: 4px; }
+  .agent-card .ac-status .as-dot { width: 6px; height: 6px; border-radius: 50%; flex-shrink: 0; }
+  .agent-card .ac-status.running { color: var(--success); }
+  .agent-card .ac-status.running .as-dot { background: var(--success); }
+  .agent-card .ac-status.idle { color: var(--fg-tertiary); }
+  .agent-card .ac-status.idle .as-dot { background: var(--fg-tertiary); }
+
+  /* 版本信息行 — 两行布局 */
+  .ac-version-row {
+    padding: 8px 0; border-top: 1px solid var(--border);
+  }
+  .ac-version-row .vr-line { display: flex; align-items: center; gap: 6px; }
+  .ac-version-row .vr-line + .vr-line { margin-top: 4px; }
+  .ac-version-row .vr-label { font-size: 12px; color: var(--fg-tertiary); width: 56px; flex-shrink: 0; }
+  .ac-version-row .vr-value { font-size: 13px; color: var(--fg); font-family: var(--font-mono); font-weight: 500; }
+  .ac-version-row .vr-value.latest { color: var(--success); }
+  .ac-version-row .vr-arrow { color: var(--fg-tertiary); font-size: 11px; }
+  .ac-version-row .vr-outdated { font-size: 11px; color: var(--warning); font-weight: 600; margin-left: auto; }
+
+  /* 升级按钮 */
+  .ac-actions { display: flex; gap: 8px; margin-top: 12px; }
+  .ac-upgrade-btn {
+    flex: 1; padding: 10px; border: 1px solid var(--accent);
+    background: rgba(88,166,255,0.1); color: var(--accent);
+    font-size: 14px; font-weight: 600; border-radius: var(--radius-md);
+    cursor: pointer; text-align: center; font-family: var(--font-body);
+  }
+  .ac-upgrade-btn:active { background: var(--accent); color: var(--bg); }
+  .ac-upgrade-btn.upgrading { opacity: 0.6; pointer-events: none; }
+  .ac-upgrade-btn.disabled { opacity: 0.3; pointer-events: none; border-color: var(--border); color: var(--fg-tertiary); background: transparent; }
+  .ac-config-btn {
+    padding: 10px 14px; border: 1px solid var(--border);
+    background: var(--bg); color: var(--fg-secondary);
+    font-size: 14px; border-radius: var(--radius-md); cursor: pointer; font-family: var(--font-body);
+  }
+
+  /* Token 消耗 mini */
+  .ac-token {
+    display: flex; gap: 12px; padding: 8px 0; border-top: 1px solid var(--border);
+  }
+  .ac-token .at-item { display: flex; flex-direction: column; gap: 1px; }
+  .ac-token .at-num { font-size: 14px; font-weight: 600; color: var(--fg); font-family: var(--font-mono); }
+  .ac-token .at-lbl { font-size: 10px; color: var(--fg-tertiary); }
+
+  /* Section title */
+  .section-title { font-size: 13px; font-weight: 600; color: var(--fg-secondary); text-transform: uppercase; letter-spacing: 0.3px; padding: var(--space-sm) 0; }
+
+  /* 添加 Agent */
+  .add-agent-btn {
+    display: flex; align-items: center; justify-content: center; gap: 8px;
+    padding: 14px; border: 1px dashed var(--border); background: transparent;
+    color: var(--accent); font-size: 15px; font-weight: 500;
+    border-radius: var(--radius-lg); cursor: pointer; width: 100%;
+    font-family: var(--font-body); margin-top: var(--space-sm);
+  }
+  .add-agent-btn:active { background: var(--hover-input); }
+
+  .state-switcher { position: absolute; top: 60px; right: 8px; z-index: 200; display: flex; flex-direction: column; gap: 4px; }
+  .state-switcher button { background: rgba(88,166,255,0.15); border: 1px solid rgba(88,166,255,0.3); color: var(--accent); font-size: 10px; padding: 4px 8px; border-radius: 6px; cursor: pointer; font-family: var(--font-mono); }
+  .state-switcher button.active-state { background: var(--accent); color: var(--bg); }
+
+  /* ---- 配置弹窗 ---- */
+  .config-overlay { position: absolute; inset: 0; background: rgba(0,0,0,0.5); z-index: 90; display: none; }
+  .config-overlay.open { display: block; }
+  .config-sheet {
+    position: absolute; bottom: 0; left: 0; right: 0; z-index: 100;
+    background: var(--surface); border-radius: var(--radius-xl) var(--radius-xl) 0 0;
+    padding: var(--space-md) var(--space-lg) var(--space-3xl);
+    display: none; animation: cfgSlide 0.25s ease;
+  }
+  .config-sheet.open { display: block; }
+  @keyframes cfgSlide { from { transform: translateY(100%); } to { transform: translateY(0); } }
+  .config-sheet .cs-handle { width: 36px; height: 4px; background: var(--fg-tertiary); border-radius: 2px; margin: 0 auto var(--space-md); }
+  .config-sheet .cs-title { font-size: 17px; font-weight: 600; color: var(--fg); margin-bottom: var(--space-md); text-align: center; }
+  .config-sheet .cs-group { background: var(--bg); border: 1px solid var(--border); border-radius: var(--radius-md); overflow: hidden; margin-bottom: var(--space-md); }
+  .config-sheet .cs-row { padding: 12px 14px; border-bottom: 1px solid var(--border); }
+  .config-sheet .cs-row:last-child { border-bottom: none; }
+  .config-sheet .cs-label { font-size: 13px; color: var(--fg-tertiary); margin-bottom: 6px; }
+  .config-sheet .cs-models { display: flex; gap: 8px; flex-wrap: wrap; }
+  .config-sheet .cs-model {
+    padding: 6px 14px; border: 1px solid var(--border); border-radius: var(--radius-full);
+    font-size: 13px; font-weight: 500; color: var(--fg-secondary); background: var(--surface);
+    cursor: pointer; font-family: var(--font-body);
+  }
+  .config-sheet .cs-model.selected { border-color: var(--accent); background: rgba(88,166,255,0.1); color: var(--accent); font-weight: 600; }
+  .config-sheet .cs-input {
+    width: 100%; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-sm);
+    padding: 10px 12px; font-family: var(--font-mono); font-size: 14px; color: var(--fg); outline: none;
+  }
+  .config-sheet .cs-input:focus { border-color: var(--accent); }
+  .config-sheet .cs-save {
+    width: 100%; padding: 12px; background: var(--accent); color: var(--bg);
+    border: none; border-radius: var(--radius-md); font-size: 16px; font-weight: 600;
+    cursor: pointer; font-family: var(--font-body);
+  }
+  .config-sheet .cs-save:active { opacity: 0.8; }
+</style>
+</head>
+<body>
+<div class="iphone-frame">
+  <div class="dynamic-island"></div>
+  <div class="status-bar">
+    <span class="time">9:41</span>
+    <span class="icons">
+      <svg viewBox="0 0 16 16" width="16" height="16"><path fill="#fff" d="M1 11.5h1v3H1zm3-2h1v5H4zm3-3h1v8H7zm3-2h1v10h-1zm3-2h1v12h-1z"/></svg>
+      <svg viewBox="0 0 16 16" width="16" height="16"><path fill="#fff" d="M8 2a6 6 0 100 12A6 6 0 008 2z"/></svg>
+      <svg viewBox="0 0 16 16" width="16" height="16"><rect x="1" y="4" width="14" height="9" rx="2" fill="none" stroke="#fff" stroke-width="1.5"/><rect x="3" y="6" width="8" height="5" rx="1" fill="#fff"/></svg>
+    </span>
+  </div>
+
+  <div class="state-switcher">
+    <button onclick="showState('all')" class="active-state" id="btn-all">全部</button>
+    <button onclick="showState('upgrade')" id="btn-upgrade">可升级</button>
+  </div>
+
+  <div class="screen-content">
+    <!-- Nav -->
+    <div class="nav-bar">
+      <a href="daemon-list.html" class="back-btn"><svg width="10" height="18" viewBox="0 0 12 20" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><path d="M10 2L2 10L10 18"/></svg> 主机</a>
+      <span class="nav-title">Agent 管理</span>
+      <div style="width:40px;"></div>
+    </div>
+
+    <div class="content">
+      <!-- 主机信息 -->
+      <div class="host-bar">
+        <span class="hb-dot online"></span>
+        <span class="hb-name">MacBook-Pro</span>
+        <span class="hb-meta">192.168.1.100 · macOS</span>
+      </div>
+
+      <div class="section-title">已安装 Agent（4）</div>
+
+      <!-- ===== Agent: Claude Code ===== -->
+      <div class="agent-card state-all state-upgrade" id="agent-cc">
+        <div class="ac-head">
+          <div class="ac-icon claude">CC</div>
+          <div class="ac-info">
+            <div class="ac-name">Claude Code</div>
+            <div class="ac-status running"><span class="as-dot"></span>运行中 · 3 个活跃会话</div>
+          </div>
+        </div>
+        <div class="ac-version-row">
+          <div class="vr-line">
+            <span class="vr-label">当前版本</span>
+            <span class="vr-value">v2.3.1</span>
+          </div>
+          <div class="vr-line">
+            <span class="vr-label">最新版本</span>
+            <span class="vr-value" style="color:var(--success);">v2.4.0</span>
+            <span class="vr-outdated">可升级</span>
+          </div>
+        </div>
+        <div class="ac-token">
+          <div class="at-item"><span class="at-num">1.25M</span><span class="at-lbl">总 Token</span></div>
+          <div class="at-item"><span class="at-num">48K</span><span class="at-lbl">今日</span></div>
+          <div class="at-item"><span class="at-num">620K</span><span class="at-lbl">Cache 命中</span></div>
+        </div>
+        <div class="ac-actions">
+          <button class="ac-upgrade-btn" onclick="doUpgrade(this)">升级到 v2.4.0</button>
+          <button class="ac-config-btn" onclick="openConfig('Claude Code')">配置</button>
+        </div>
+      </div>
+
+      <!-- ===== Agent: Codex ===== -->
+      <div class="agent-card state-all" id="agent-cx">
+        <div class="ac-head">
+          <div class="ac-icon codex">Cx</div>
+          <div class="ac-info">
+            <div class="ac-name">Codex</div>
+            <div class="ac-status running"><span class="as-dot"></span>运行中 · 1 个活跃会话</div>
+          </div>
+        </div>
+        <div class="ac-version-row">
+          <div class="vr-line">
+            <span class="vr-label">当前版本</span>
+            <span class="vr-value latest">v1.8.0 ✓ 最新</span>
+          </div>
+        </div>
+        <div class="ac-token">
+          <div class="at-item"><span class="at-num">320K</span><span class="at-lbl">总 Token</span></div>
+          <div class="at-item"><span class="at-num">12K</span><span class="at-lbl">今日</span></div>
+          <div class="at-item"><span class="at-num">80K</span><span class="at-lbl">Cache 命中</span></div>
+        </div>
+        <div class="ac-actions">
+          <button class="ac-upgrade-btn disabled">已是最新</button>
+          <button class="ac-config-btn" onclick="openConfig('Codex')">配置</button>
+        </div>
+      </div>
+
+      <!-- ===== Agent: OpenCode ===== -->
+      <div class="agent-card state-all state-upgrade" id="agent-oc">
+        <div class="ac-head">
+          <div class="ac-icon opencode">OC</div>
+          <div class="ac-info">
+            <div class="ac-name">OpenCode</div>
+            <div class="ac-status idle"><span class="as-dot"></span>空闲 · 0 个活跃会话</div>
+          </div>
+        </div>
+        <div class="ac-version-row">
+          <div class="vr-line">
+            <span class="vr-label">当前版本</span>
+            <span class="vr-value">v0.5.2</span>
+          </div>
+          <div class="vr-line">
+            <span class="vr-label">最新版本</span>
+            <span class="vr-value" style="color:var(--success);">v0.6.0</span>
+            <span class="vr-outdated">可升级</span>
+          </div>
+        </div>
+        <div class="ac-token">
+          <div class="at-item"><span class="at-num">85K</span><span class="at-lbl">总 Token</span></div>
+          <div class="at-item"><span class="at-num" style="color:var(--fg-tertiary);">0</span><span class="at-lbl">今日</span></div>
+          <div class="at-item"><span class="at-num">15K</span><span class="at-lbl">Cache 命中</span></div>
+        </div>
+        <div class="ac-actions">
+          <button class="ac-upgrade-btn" onclick="doUpgrade(this)">升级到 v0.6.0</button>
+          <button class="ac-config-btn" onclick="openConfig('OpenCode')">配置</button>
+        </div>
+      </div>
+
+      <!-- ===== Agent: Cursor ===== -->
+      <div class="agent-card state-all" id="agent-cu">
+        <div class="ac-head">
+          <div class="ac-icon cursor">Cu</div>
+          <div class="ac-info">
+            <div class="ac-name">Cursor Agent</div>
+            <div class="ac-status idle"><span class="as-dot"></span>空闲 · 0 个活跃会话</div>
+          </div>
+        </div>
+        <div class="ac-version-row">
+          <div class="vr-line">
+            <span class="vr-label">当前版本</span>
+            <span class="vr-value latest">v0.42.1 ✓ 最新</span>
+          </div>
+        </div>
+        <div class="ac-token">
+          <div class="at-item"><span class="at-num">42K</span><span class="at-lbl">总 Token</span></div>
+          <div class="at-item"><span class="at-num" style="color:var(--fg-tertiary);">0</span><span class="at-lbl">今日</span></div>
+          <div class="at-item"><span class="at-num" style="color:var(--fg-tertiary);">—</span><span class="at-lbl">Cache 命中</span></div>
+        </div>
+        <div class="ac-actions">
+          <button class="ac-upgrade-btn disabled">已是最新</button>
+          <button class="ac-config-btn" onclick="openConfig('Cursor Agent')">配置</button>
+        </div>
+      </div>
+
+      <!-- 添加 Agent -->
+      <button class="add-agent-btn">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 5v14M5 12h14"/></svg>
+        添加 Agent
+      </button>
+    </div>
+  </div>
+
+  <!-- 配置弹窗 -->
+  <div class="config-overlay" id="cfg-overlay" onclick="closeConfig()"></div>
+  <div class="config-sheet" id="cfg-sheet">
+    <div class="cs-handle"></div>
+    <div class="cs-title" id="cfg-title">Claude Code 配置</div>
+    <div class="cs-group">
+      <div class="cs-row">
+        <div class="cs-label">默认模型</div>
+        <div class="cs-models" id="cfg-models">
+          <span class="cs-model selected" onclick="selectModel(this)">glm-5.2</span>
+          <span class="cs-model" onclick="selectModel(this)">glm-5-turbo</span>
+          <span class="cs-model" onclick="selectModel(this)">glm-4.7</span>
+        </div>
+      </div>
+      <div class="cs-row">
+        <div class="cs-label">工作目录</div>
+        <input class="cs-input" id="cfg-workdir" type="text" value="/Users/dev/my-project" placeholder="输入项目路径">
+      </div>
+    </div>
+    <button class="cs-save" onclick="saveConfig()">保存</button>
+  </div>
+
+  <div class="home-indicator"></div>
+</div>
+
+<script>
+function doUpgrade(btn) {
+  var card = btn.closest('.agent-card');
+  var verRow = card.querySelector('.vr-value:last-of-type');
+  var target = verRow ? verRow.textContent : '';
+  btn.classList.add('upgrading');
+  btn.textContent = '升级中…';
+  setTimeout(function() {
+    // 更新版本行
+    var vr = card.querySelector('.ac-version-row');
+    vr.innerHTML = '<span class="vr-label">当前版本</span><span class="vr-value latest">' + target + ' ✓ 最新</span>';
+    // 更新按钮
+    btn.classList.remove('upgrading');
+    btn.classList.add('disabled');
+    btn.textContent = '已是最新';
+    // 移除可升级标记
+    card.classList.remove('state-upgrade');
+    var outdated = card.querySelector('.vr-outdated');
+    if (outdated) outdated.remove();
+  }, 2000);
+}
+
+function showState(state) {
+  document.querySelectorAll('.state-switcher button').forEach(b => b.classList.remove('active-state'));
+  document.getElementById('btn-' + state).classList.add('active-state');
+  document.querySelectorAll('.agent-card').forEach(c => {
+    if (state === 'all') { c.style.display = ''; }
+    else { c.style.display = c.classList.contains('state-' + state) ? '' : 'none'; }
+  });
+}
+
+/* ---- 配置弹窗 ---- */
+var configAgent = null;
+function openConfig(agentName) {
+  configAgent = agentName;
+  document.getElementById('cfg-title').textContent = agentName + ' 配置';
+  document.getElementById('cfg-overlay').classList.add('open');
+  document.getElementById('cfg-sheet').classList.add('open');
+}
+function closeConfig() {
+  document.getElementById('cfg-overlay').classList.remove('open');
+  document.getElementById('cfg-sheet').classList.remove('open');
+}
+function selectModel(el) {
+  document.querySelectorAll('#cfg-models .cs-model').forEach(m => m.classList.remove('selected'));
+  el.classList.add('selected');
+}
+function saveConfig() {
+  var model = document.querySelector('#cfg-models .cs-model.selected');
+  var workdir = document.getElementById('cfg-workdir').value;
+  // 在实际应用中，这里会调用 API 保存配置
+  closeConfig();
+}
+</script>
+</body>
+</html>

@@ -1,13 +1,15 @@
 <template>
   <div :class="['receipt-card', `receipt-${status}`]">
-    <span class="receipt-icon">{{ icon }}</span>
+    <svg class="receipt-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+      <component :is="iconPath" />
+    </svg>
     <span class="receipt-cmd">{{ command }}</span>
     <span v-if="message" class="receipt-msg">{{ message }}</span>
   </div>
 </template>
 
 <script setup lang="ts">
-import { computed } from 'vue'
+import { computed, h } from 'vue'
 
 const props = defineProps<{
   command: string
@@ -15,12 +17,31 @@ const props = defineProps<{
   message?: string
 }>()
 
-const icon = computed(() => {
+// Icon paths per status. success uses an info-style circle-check (neutral,
+// not the loud green ✓), failed uses x-circle, unavailable uses minus-circle.
+const iconPath = computed(() => {
   switch (props.status) {
-    case 'success': return '✓'
-    case 'failed': return '✗'
-    case 'unavailable': return '⊘'
-    default: return '·'
+    case 'success':
+      // check-circle — neutral "done"
+      return () => [
+        h('path', { d: 'M22 11.08V12a10 10 0 1 1-5.93-9.14' }),
+        h('path', { d: 'M22 4L12 14.01l-3-3' }),
+      ]
+    case 'failed':
+      // x-circle — error
+      return () => [
+        h('circle', { cx: '12', cy: '12', r: '10' }),
+        h('path', { d: 'M15 9l-6 6' }),
+        h('path', { d: 'M9 9l6 6' }),
+      ]
+    case 'unavailable':
+      // minus-circle — not available
+      return () => [
+        h('circle', { cx: '12', cy: '12', r: '10' }),
+        h('path', { d: 'M8 12h8' }),
+      ]
+    default:
+      return () => [h('circle', { cx: '12', cy: '12', r: '10' })]
   }
 })
 </script>
@@ -40,14 +61,21 @@ const icon = computed(() => {
   animation: fade-in 0.2s ease;
   font-size: 13px;
 }
-.receipt-card.receipt-success { border-left-color: var(--success); }
-.receipt-card.receipt-failed { border-left-color: var(--error); }
-.receipt-card.receipt-unavailable { border-left-color: var(--fg-tertiary); }
 
-.receipt-icon { flex-shrink: 0; font-weight: 700; font-size: 14px; }
-.receipt-success .receipt-icon { color: var(--success); }
-.receipt-failed .receipt-icon { color: var(--error); }
-.receipt-unavailable .receipt-icon { color: var(--fg-tertiary); }
+/* success: neutral info tone (accent blue) — "command completed, here's the
+   result". Not a loud green ✓ that implies celebration. */
+.receipt-card.receipt-success { border-left-color: var(--accent); }
+.receipt-card.receipt-success .receipt-icon { color: var(--accent); }
+
+/* failed: error tone (red) — only for genuine failures. */
+.receipt-card.receipt-failed { border-left-color: var(--error); }
+.receipt-card.receipt-failed .receipt-icon { color: var(--error); }
+
+/* unavailable: muted tone (grey) — command not supported. */
+.receipt-card.receipt-unavailable { border-left-color: var(--fg-tertiary); }
+.receipt-card.receipt-unavailable .receipt-icon { color: var(--fg-tertiary); }
+
+.receipt-icon { flex-shrink: 0; }
 
 .receipt-cmd {
   font-family: var(--font-mono);

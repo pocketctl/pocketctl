@@ -1,7 +1,7 @@
 import Fastify from 'fastify';
 import fastifyWebsocket from '@fastify/websocket';
 import fastifyCors from '@fastify/cors';
-import { createPool, initDB, parseDBUrl, createUser, getUserByEmail, getUserById, registerDevice, removeDevice, cleanStaleTombstones, upsertDaemonAlias, deleteDaemon, updateDisplayName, updateEmail, addToIOSWaitlist, revokeToken, isTokenRevoked, cleanRevokedTokens, insertAuditLog, bindTokenToDaemon, updateSessionTitle, isSessionOwnedByUser, getSessionAllEvents, getCostSummary, getCostByDaemon, backfillSessionCost } from './db.js';
+import { createPool, initDB, parseDBUrl, createUser, getUserByEmail, getUserById, registerDevice, removeDevice, cleanStaleTombstones, upsertDaemonAlias, deleteDaemon, updateDisplayName, updateEmail, addToIOSWaitlist, revokeToken, isTokenRevoked, cleanRevokedTokens, insertAuditLog, bindTokenToDaemon, updateSessionTitle, isSessionOwnedByUser, getSessionAllEvents, getTokenSummary, getTokensByDaemon, backfillSessionTokens, backfillSessionModel, backfillTokenDailyStats, aggregateDayIntoStats, cleanStaleEvents, getTokenDailySeries, getTokenByModel, getTokenByDaemon, getSessionTokenTrend } from './db.js';
 import { Router } from './router.js';
 import { hashPassword, verifyPassword, signAccessToken, signRefreshToken, verifyAccessToken, verifyRefreshToken, verifyAccessTokenWithRevocation } from './auth.js';
 import { notifyUser, sessionStatusPush, daemonOfflinePush } from './push.js';
@@ -9,6 +9,7 @@ import { sendEmailCode } from './config/email.js';
 import { generateCode, storeCode, verifyCode, hasPendingCode } from './config/verification.js';
 import { validateClient } from './config/clients.js';
 import { createSession, getSessionByDeviceCode, getSessionByUserCode, authorizeSession, recordPoll, canPoll, deleteSession } from './config/auth-sessions.js';
+import { createQrSession, getQrSession, markScanned, confirmQrSession, deleteQrSession } from './config/qr-sessions.js';
 import { createHash } from 'crypto';
 
 const API_KEY = process.env.POCKETCTL_API_KEY || '';
@@ -47,11 +48,15 @@ async function main() {
   const pool = createPool(parseDBUrl(DB_URL));
   await initDB(pool);
   console.log('Database initialized');
-  // C2: backfill sessions.cost_usd from historical session_status events
+  // Backfill sessions token columns from agent_text usage events
   try {
-    const backfilled = await backfillSessionCost(pool);
-    if (backfilled > 0) console.log(`[cost] backfilled ${backfilled} sessions with cost_usd`);
-  } catch (e) { console.error('[cost] backfill failed:', e); }
+    const backfilled = await backfillSessionTokens(pool);
+    if (backfilled > 0) console.log(`[tokens] backfilled ${backfilled} sessions with token usage`);
+    const modelBf = await backfillSessionModel(pool);
+    if (modelBf > 0) console.log(`[tokens] backfilled ${modelBf} sessions with model`);
+    const statsBf = await backfillTokenDailyStats(pool);
+    if (statsBf > 0) console.log(`[tokens] backfilled ${statsBf} token_daily_stats rows`);
+  } catch (e) { console.error('[tokens] backfill failed:', e); }
 
   const router = new Router(pool);
   const app = Fastify({ logger: false });
@@ -346,27 +351,59 @@ async function main() {
     return { success: true };
   });
 
-  // ---- Cost Tracking (C2) ----
+  // ---- Token Usage Tracking ----
 
-  // User-level cost summary: total / today / thisWeek / thisMonth
-  app.get('/api/cost/summary', async (req, reply) => {
+  // User-level token usage summary: total / today / thisWeek / thisMonth
+  app.get('/api/tokens/summary', async (req, reply) => {
     const authHeader = req.headers.authorization;
     if (!authHeader?.startsWith('Bearer ')) { reply.code(401); return { error: 'authorization required' }; }
     const payload = verifyAccessToken(authHeader.slice(7));
     if (!payload) { reply.code(401); return { error: 'invalid token' }; }
-    return await getCostSummary(pool, payload.userId);
+    return await getTokenSummary(pool, payload.userId);
   });
 
-  // Daemon-level cost: total / today / thisMonth + per-session breakdown
-  app.get('/api/cost/by-daemon/:daemonId', async (req, reply) => {
+  // Daemon-level token usage: total / today / thisMonth + per-session breakdown
+  app.get('/api/tokens/by-daemon/:daemonId', async (req, reply) => {
     const authHeader = req.headers.authorization;
     if (!authHeader?.startsWith('Bearer ')) { reply.code(401); return { error: 'authorization required' }; }
     const payload = verifyAccessToken(authHeader.slice(7));
     if (!payload) { reply.code(401); return { error: 'invalid token' }; }
     const { daemonId } = req.params as any;
-    const data = await getCostByDaemon(pool, payload.userId, daemonId);
+    const data = await getTokensByDaemon(pool, payload.userId, daemonId);
     if (!data) { reply.code(404); return { error: 'daemon not found or not owned' }; }
     return data;
+  });
+
+  // Token dashboard: aggregated daily series + model/host breakdowns (query-time merge
+  // of token_daily_stats history + today's events). Supports host filtering.
+  app.get('/api/tokens/dashboard', async (req, reply) => {
+    const authHeader = req.headers.authorization;
+    if (!authHeader?.startsWith('Bearer ')) { reply.code(401); return { error: 'authorization required' }; }
+    const payload = verifyAccessToken(authHeader.slice(7));
+    if (!payload) { reply.code(401); return { error: 'invalid token' }; }
+    const daemon = ((req.query as any).daemon as string) || 'all';
+    const days = Math.min(Math.max(parseInt((req.query as any).days as string) || 30, 1), 365);
+    const [summary, dailySeries, byModel, byDaemon] = await Promise.all([
+      getTokenSummary(pool, payload.userId),
+      getTokenDailySeries(pool, payload.userId, daemon, days),
+      getTokenByModel(pool, payload.userId, daemon),
+      getTokenByDaemon(pool, payload.userId),
+    ]);
+    return { summary, dailySeries, byModel, byDaemon };
+  });
+
+  // Per-session daily token trend (from events, within the 90-day retention).
+  app.get('/api/tokens/session/:sessionId/trend', async (req, reply) => {
+    const authHeader = req.headers.authorization;
+    if (!authHeader?.startsWith('Bearer ')) { reply.code(401); return { error: 'authorization required' }; }
+    const payload = verifyAccessToken(authHeader.slice(7));
+    if (!payload) { reply.code(401); return { error: 'invalid token' }; }
+    const { sessionId } = req.params as any;
+    const owned = await isSessionOwnedByUser(pool, payload.userId, sessionId);
+    if (!owned) { reply.code(404); return { error: 'session not found or not owned' }; }
+    const trend = await getSessionTokenTrend(pool, sessionId, 90);
+    // Archived: the session predates the 90-day retention (events purged) → no trend.
+    return { trend, archived: trend.length === 0 };
   });
 
   // Unregister (delete) a daemon — sessions preserved with daemon_id nulled (C4)
@@ -796,6 +833,84 @@ async function main() {
     return {};
   });
 
+  // ---- QR Scan-Login (web displays QR → iOS scans → iOS confirms → web polls for token) ----
+
+  // Web creates a QR login session and renders the QR payload
+  app.post('/api/auth/qr/create', async (req, reply) => {
+    const result = createQrSession();
+    const webAppUrl = process.env.WEB_APP_URL || `http://${req.hostname}:${PORT}`;
+    // Payload written into the QR: a URL the iOS scanner parses to extract qr_token.
+    const qr_payload = `${webAppUrl}/login/qr?token=${result.qr_token}`;
+    reply.code(200);
+    return {
+      qr_token: result.qr_token,
+      qr_payload,
+      expires_in: result.expires_in,
+      interval: 2,
+    };
+  });
+
+  // Web polls the status of a QR login session
+  app.get('/api/auth/qr/status', async (req, reply) => {
+    const { qr_token } = req.query as any;
+    if (!qr_token) {
+      reply.code(400); return { error: 'qr_token is required' };
+    }
+    const session = getQrSession(qr_token);
+    if (!session) {
+      reply.code(200);
+      return { status: 'expired' as const };
+    }
+
+    // Once confirmed, issue JWTs and consume the session.
+    if (session.status === 'confirmed' && session.user_id != null) {
+      const user = await getUserById(pool, session.user_id);
+      deleteQrSession(qr_token); // single-use
+      if (!user) {
+        reply.code(200);
+        return { status: 'expired' as const };
+      }
+      const accessToken = await signAccessToken(user.id, user.email, user.phone, 'web-qr');
+      const refreshToken = await signRefreshToken(user.id);
+      insertAuditLog(pool, user.id, 'qr_login_issued', { via: 'web-qr' }, req.ip).catch(console.error);
+      reply.code(200);
+      return {
+        status: 'confirmed' as const,
+        access_token: accessToken,
+        refresh_token: refreshToken,
+        user: { id: user.id, email: user.email, phone: user.phone, display_name: user.display_name },
+      };
+    }
+
+    reply.code(200);
+    return { status: session.status };
+  });
+
+  // iOS (an already-authenticated device) confirms a QR login session
+  app.post('/api/auth/qr/confirm', async (req, reply) => {
+    const authHeader = req.headers.authorization;
+    if (!authHeader?.startsWith('Bearer ')) {
+      reply.code(401); return { error: 'authentication_required' };
+    }
+    const payload = verifyAccessToken(authHeader.slice(7));
+    if (!payload) {
+      reply.code(401); return { error: 'invalid_token' };
+    }
+
+    const { qr_token } = req.body as any;
+    if (!qr_token) {
+      reply.code(400); return { error: 'qr_token is required' };
+    }
+
+    const ok = confirmQrSession(qr_token, payload.userId);
+    if (!ok) {
+      reply.code(400); return { error: 'invalid_or_expired_qr_token' };
+    }
+
+    insertAuditLog(pool, payload.userId, 'qr_login_confirm', { via: 'ios-scan' }, req.ip).catch(console.error);
+    return { success: true };
+  });
+
   // Device Authorization Page (served by relay, self-contained HTML)
   app.get('/login/cli', async (req, reply) => {
     const userCode = (req.query as any).code || '';
@@ -959,6 +1074,17 @@ async function main() {
       if (totalPurged > 0) console.log(`[cleanup] removed ${tombstoneCount} tombstones, ${accessPurged} access tokens, ${refreshPurged} refresh tokens`);
     } catch (err) { console.error('[cleanup] cleanup error:', (err as Error).message); }
   }, 6 * 60 * 60 * 1000);
+
+  // Token daily stats rollup (yesterday) + old events retention. Idempotent
+  // (aggregateDayIntoStats uses ON CONFLICT DO NOTHING), so hourly is safe.
+  setInterval(async () => {
+    try {
+      const yesterday = new Date(Date.now() - 24 * 60 * 60 * 1000);
+      await aggregateDayIntoStats(pool, yesterday);
+      const purged = await cleanStaleEvents(pool);
+      if (purged > 0) console.log(`[tokens] purged ${purged} events older than 90 days`);
+    } catch (err) { console.error('[tokens] rollup error:', (err as Error).message); }
+  }, 60 * 60 * 1000);
 }
 
 // ---- Device Auth Page (self-contained HTML) ----

@@ -4,6 +4,7 @@ import Foundation
 enum WebSocketEventType: String, Sendable {
     // Daemon events
     case daemonStatus = "daemon_status"
+    case daemonList = "daemon_list"
 
     // Session lifecycle
     case sessionList = "session_list"
@@ -21,12 +22,22 @@ enum WebSocketEventType: String, Sendable {
     case toolResult = "tool_result"
     case subagentDiscovered = "subagent_discovered"
 
+    // Slash commands (daemon → client)
+    case commandList = "command_list"
+    case commandReceipt = "command_receipt"
+
     // Replay control (relay → client)
     case replayBatch = "replay_batch"
     case replayEnd = "replay_end"
 
     // Errors
     case error
+
+    // Agent management & model picker
+    case modelList = "model_list"
+    case upgradeResult = "upgrade_result"
+    case sessionCreateFailed = "session_create_failed"
+    case sessionMeta = "session_meta"
 
     // Server responses
     case registerAck = "register_ack"
@@ -66,11 +77,43 @@ struct WebSocketEvent {
         raw["sessions"] as? [[String: Any]]
     }
 
+    /// Daemon list — for `daemon_list` (response to `list_daemons`). Each element
+    /// carries `{daemon_id, hostname, agents:[{type,version,latest}], status, ...}`.
+    var daemons: [[String: Any]]? {
+        raw["daemons"] as? [[String: Any]]
+    }
+
     var subagentDesc: String? { raw["subagent_desc"] as? String }
     var subagentType: String? { raw["subagent_type"] as? String }
+
+    // Slash command accessors
+    /// Command name for command_receipt (e.g. "/compact"). Empty if unknown.
+    var command: String? { raw["command"] as? String }
+    /// Receipt status: "success" | "failed" | "unavailable". Defaults to "success".
+    var receiptStatus: String? { raw["receipt_status"] as? String }
+    /// Receipt message (human-readable detail). May be empty.
+    var receiptMessage: String? { raw["message"] as? String }
+    /// Available commands for command_list.
+    var commands: [[String: Any]]? { raw["commands"] as? [[String: Any]] }
 
     // Replay control accessors
     var events: [[String: Any]]? { raw["events"] as? [[String: Any]] }
     var lastSeq: Int? { raw["last_seq"] as? Int }
     var count: Int? { raw["count"] as? Int }
+    /// Replay direction — for replay_batch ('forward' | 'backward').
+    var direction: String? { raw["direction"] as? String }
+    /// Whether older events exist beyond the loaded page — for replay_end.
+    var hasMore: Bool? { raw["has_more"] as? Bool }
+
+    // Model picker & agent management
+    /// Available models — for model_list.
+    var models: [[String: Any]]? { raw["models"] as? [[String: Any]] }
+    /// Agent type (e.g. "claude-code") — for upgrade_result.
+    var agent: String? { raw["agent"] as? String }
+    /// Failure reason code (e.g. "no_cli", "bad_cwd") — for session_create_failed.
+    var reason: String? { raw["reason"] as? String }
+    /// Upgrade success flag — for upgrade_result.
+    var upgradeSuccess: Bool? { raw["success"] as? Bool }
+    /// Resolved model name — for session_meta.
+    var resolvedModel: String? { raw["model"] as? String }
 }

@@ -34,6 +34,8 @@ extension Color {
     static let pcSuccessBg = Color(red: 0.137, green: 0.525, blue: 0.216, opacity: 0.15)
     static let pcWarning = Color(hex: 0xD29922)
     static let pcWarningBg = Color(red: 0.824, green: 0.6, blue: 0.133, opacity: 0.15)
+    static let pcIdle = Color(hex: 0xEAB308)        // idle status (amber yellow)
+    static let pcWaiting = Color(hex: 0xF97316)     // waiting status (orange)
 
     // Sub-agent
     static let pcSubAgent = Color(hex: 0xC084FC)

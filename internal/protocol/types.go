@@ -12,6 +12,12 @@ type ClientMessage struct {
 	Prompt    string `json:"prompt,omitempty"`
 	RequestID string `json:"request_id,omitempty"`
 	Approved  bool   `json:"approved,omitempty"`
+	// PermissionMode for session_create: "default" | "acceptEdits" | "plan" | "bypassPermissions".
+	// Empty falls back to "acceptEdits" (the daemon default).
+	PermissionMode string `json:"permission_mode,omitempty"`
+	// Model for session_create: opus/sonnet/haiku alias (or concrete model name).
+	// Empty = follow the host's ~/.claude/settings.json default.
+	Model string `json:"model,omitempty"`
 }
 
 // Daemon → Client events
@@ -47,6 +53,24 @@ type DaemonEvent struct {
 	Command          string          `json:"command,omitempty"`         // for command_receipt (e.g. "/compact")
 	ReceiptStatus    string          `json:"receipt_status,omitempty"`  // for command_receipt: success/failed/unavailable
 	Message          string          `json:"message,omitempty"`         // for command_receipt message
+	Usage            *ContextUsage   `json:"usage,omitempty"`           // token usage for agent_text events
+	PermissionMode   string          `json:"permission_mode,omitempty"` // current mode (permission_mode_changed event)
+	Model            string          `json:"model,omitempty"`           // resolved model name (session_meta event)
+	Models           []ModelOption   `json:"models,omitempty"`          // available models (model_list event)
+}
+
+// ModelOption is one selectable model surfaced by a daemon for session creation.
+type ModelOption struct {
+	Alias string `json:"alias"` // claude alias (opus/sonnet/haiku) — passed to --model
+	Name  string `json:"name"`  // concrete display name (e.g. glm-5.2) — shown in the picker
+}
+
+// ContextUsage carries token consumption for a single assistant turn.
+type ContextUsage struct {
+	InputTokens  int `json:"input_tokens,omitempty"`
+	OutputTokens int `json:"output_tokens,omitempty"`
+	CacheRead    int `json:"cache_read_tokens,omitempty"`
+	CacheCreate  int `json:"cache_create_tokens,omitempty"`
 }
 
 // CommandItem represents a slash command or skill available in a session,

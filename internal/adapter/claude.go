@@ -38,6 +38,16 @@ type ClaudeMessage struct {
 	Role    string          `json:"role"`
 	Model   string          `json:"model,omitempty"` // "<synthetic>" marks local command output (not real LLM)
 	Content []ClaudeContent `json:"content"`
+	Usage   *TokenUsage     `json:"usage,omitempty"`
+}
+
+// TokenUsage mirrors Anthropic API's usage object (present on every assistant
+// message in both stream-json and JSONL output).
+type TokenUsage struct {
+	InputTokens   int `json:"input_tokens,omitempty"`
+	OutputTokens  int `json:"output_tokens,omitempty"`
+	CacheCreation int `json:"cache_creation_input_tokens,omitempty"`
+	CacheRead     int `json:"cache_read_input_tokens,omitempty"`
 }
 
 type ClaudeContent struct {
@@ -158,19 +168,28 @@ func (a *ClaudeAdapter) convertAssistant(raw ClaudeStreamEvent, sid string) ([]p
 	var events []protocol.DaemonEvent
 	for _, c := range raw.Message.Content {
 		switch c.Type {
-		case "text":
-			if isSynthetic {
-				// Local command feedback → command_receipt (not agent_text), so the
-				// web shows a receipt card instead of a confusing plain bubble.
-				events = append(events, a.makeReceipt(sid, c.Text))
-			} else {
-				events = append(events, protocol.DaemonEvent{
-					Type:      "agent_text",
-					SessionID: sid,
-					Text:      c.Text,
-					Streaming: false,
-				})
-			}
+			case "text":
+				if isSynthetic {
+					// Local command feedback → command_receipt (not agent_text), so the
+					// web shows a receipt card instead of a confusing plain bubble.
+					events = append(events, a.makeReceipt(sid, c.Text))
+				} else {
+					ev := protocol.DaemonEvent{
+						Type:      "agent_text",
+						SessionID: sid,
+						Text:      c.Text,
+						Streaming: false,
+					}
+					if u := raw.Message.Usage; u != nil {
+						ev.Usage = &protocol.ContextUsage{
+							InputTokens:  u.InputTokens,
+							OutputTokens: u.OutputTokens,
+							CacheRead:    u.CacheRead,
+							CacheCreate:  u.CacheCreation,
+						}
+					}
+					events = append(events, ev)
+				}
 		case "tool_use":
 			events = append(events, protocol.DaemonEvent{
 				Type:      "tool_call",
@@ -212,6 +231,12 @@ func inferReceiptStatus(text, compactStatus string) string {
 		return "unavailable"
 	}
 	if compactStatus == "failed" {
+		// "Not enough messages to compact" is not a real failure — the command
+		// ran successfully, there was simply nothing to compact. Treat it as
+		// success so the receipt shows a neutral/success visual, not an error.
+		if strings.Contains(text, "Not enough messages") {
+			return "success"
+		}
 		return "failed"
 	}
 	return "success"
@@ -304,7 +329,10 @@ func BuildClaudeArgs(prompt string, sessionID string, config protocol.SessionCon
 func BuildInteractiveArgs(config protocol.SessionConfig) []string {
 	permMode := config.PermissionMode
 	if permMode == "" {
-		permMode = "acceptEdits"
+		// Unattended daemon sessions: bypass all permission checks (see the
+		// matching default in CreateSession). acceptEdits would stall Bash
+		// tools on an unsurfaced approval prompt.
+		permMode = "bypassPermissions"
 	}
 	args := []string{"--permission-mode", permMode}
 	if config.Model != "" {

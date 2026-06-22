@@ -4,18 +4,18 @@
     <div class="session-panel">
       <div class="session-panel-header">
         <h3>{{ daemonName }}</h3>
-        <button class="btn-icon" style="width:28px;height:28px;border:none;background:var(--accent);color:#fff;" title="新建会话" @click="emitNewSession">
+        <button class="btn-icon" style="width:28px;height:28px;border:none;background:var(--accent);color:#fff;" :title="t('session.new_session')" @click="emitNewSession">
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M12 5v14M5 12h14"/></svg>
         </button>
       </div>
       <div style="padding:4px 8px;display:flex;align-items:center;gap:6px;">
         <span :class="['status-dot', { online: isDaemonOnline }]" style="width:6px;height:6px;"></span>
-        <span style="font-size:11px;color:var(--fg-tertiary);">{{ isDaemonOnline ? '在线' : '离线' }} · {{ statusSubtext }}</span>
+        <span style="font-size:11px;color:var(--fg-tertiary);">{{ isDaemonOnline ? t('dashboard.online') : t('dashboard.offline') }} · {{ statusSubtext }}</span>
       </div>
       <div v-if="hostFilter" class="host-filter-chip">
         <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="2" width="20" height="20" rx="3"/><path d="M7 2v20M17 2v20M2 12h20"/></svg>
         <span class="hfc-name">{{ daemonName }}</span>
-        <button class="hfc-clear" @click="clearHostFilter" title="显示全部主机会话">✕</button>
+        <button class="hfc-clear" @click="clearHostFilter" :title="t('session.show_all_hosts')">✕</button>
       </div>
       <div class="session-list">
         <div v-for="s in visibleSessions" :key="s.session_id"
@@ -24,12 +24,12 @@
           <span :class="['status-dot', s.statusEffective || s.status]" style="width:7px;height:7px;"></span>
           <div class="sl-info">
             <div :class="['sl-title', { mono: !s.title || s.title.startsWith('Terminal Session') }]">
-              <span v-if="s.pinned" style="color: var(--accent); margin-right: 4px;">📌</span>
+              <svg v-if="s.pinned" class="pin-icon" width="12" height="12" viewBox="0 0 24 24" fill="currentColor" style="margin-right: 4px;"><path d="M16 3l5 5-3 1-3 3-1 5-2-2-5 5-1-1 5-5-2-2 5-1 3-3z"/></svg>
               <input v-if="renamingId === s.session_id" class="ss-rename-input" v-model="renameInput" maxlength="60"
                 @click.stop @keydown.enter="commitRename(s)" @keydown.escape="cancelRename" @blur="commitRename(s)" />
               <template v-else>{{ s.title || s.session_id.slice(0, 8) }}</template>
             </div>
-            <div class="sl-meta">{{ formatRelativeTime(s.last_activity_at || s.updated_at) }}<span v-if="s.subagent_count > 0"> · {{ s.subagent_count }} 子智能体</span></div>
+            <div class="sl-meta">{{ formatRelativeTime(s.last_activity_at || s.updated_at) }}<span v-if="s.subagent_count > 0"> · {{ t('session.sub_agents', { n: s.subagent_count }) }}</span></div>
           </div>
           <SessionActions :session="s" @startRename="startRename" @deleted="onDeleted" @pinned="onPinned" />
         </div>
@@ -46,14 +46,18 @@
           <span class="daemon-name">· {{ daemonName }}</span>
         </div>
         <span :class="['status-pill', statusClass]"><span class="pulse"></span>{{ statusLabel }}</span>
+        <span v-if="contextTokens" class="context-pill" :title="t('session.context_usage')">
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/></svg>
+          {{ contextTokens }}
+        </span>
         <div class="session-id-box">
           <code class="session-id-text">{{ sessionId?.slice(0, 8) }}</code>
-          <button class="copy-btn" @click="copySessionId" :title="copied ? '已复制' : '复制会话ID'">
+          <button class="copy-btn" @click="copySessionId" :title="copied ? t('common.copied') : t('session.actions.copy_id')">
             <svg v-if="!copied" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"/></svg>
             <svg v-else width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M20 6L9 17l-5-5"/></svg>
           </button>
-          <button v-if="currentSessionAgent !== 'opencode'" class="copy-btn" style="margin-left:6px;" :title="resumeCopied ? '已复制恢复命令 — 在主机终端粘贴运行' : '恢复会话命令（复制到粘贴板）'" @click="copyResumeCmd">
-            <span v-if="!resumeCopied" style="font-size:13px;line-height:1;">🖥️</span>
+          <button v-if="currentSessionAgent !== 'opencode'" class="copy-btn" style="margin-left:6px;" :title="resumeCopied ? t('session.actions.resume_toast') : t('session.actions.resume') + t('session.actions.resume_hint')" @click="copyResumeCmd">
+            <svg v-if="!resumeCopied" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8"/><path d="M12 17v4"/></svg>
             <svg v-else width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M20 6L9 17l-5-5"/></svg>
           </button>
         </div>
@@ -63,14 +67,16 @@
       <div class="chat-messages" ref="messagesEl" @scroll="onMessagesScroll">
         <!-- Exit Banner -->
         <div v-if="status === 'exited'" class="banner banner-info" style="flex-shrink:0;">
-          <span>📤 Session 已退出</span>
+          <svg class="banner-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><path d="M16 17l5-5-5-5"/><path d="M21 12H9"/></svg>
+          <span>{{ t('session.exited_banner') }}</span>
           <span v-if="exitReason" style="margin-left:4px;">· {{ exitReasonLabel(exitReason) }}</span>
           <button v-if="isDaemonOnline" class="btn btn-accent" style="margin-left:auto;padding:4px 12px;font-size:12px;" @click="focusResumeInput">Resume</button>
         </div>
 
         <!-- Disconnected Banner -->
         <div v-if="isDisconnected" class="banner banner-warning" style="flex-shrink:0;">
-          <span>⚠️ Daemon 离线 — 等待恢复</span>
+          <svg class="banner-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><path d="M12 9v4"/><path d="M12 17h.01"/></svg>
+          <span>{{ t('session.daemon_offline') }}</span>
         </div>
 
         <!-- Timeline -->
@@ -87,51 +93,65 @@
 
         <!-- Messages -->
         <template v-for="msg in messages" :key="msg.id">
-          <!-- User message -->
-          <div v-if="msg.role === 'user'" class="msg msg-user">{{ cleanContent(msg.content) }}</div>
+          <!-- User message (right bubble) -->
+          <MessageUser v-if="msg.role === 'user'" :content="cleanContent(msg.content)" />
 
-          <!-- Agent text message -->
-          <div v-else-if="msg.type === 'agent_text'" :class="['msg msg-agent', { streaming: msg.streaming }]">
-            <MarkdownRenderer :content="cleanContent(msg.content)" />
-            <span v-if="msg.streaming" class="blink-cursor"></span>
-          </div>
+          <!-- Agent text message (full-width block) -->
+          <MessageAgent
+            v-else-if="msg.type === 'agent_text'"
+            :content="cleanContent(msg.content)"
+            :streaming="msg.streaming"
+          />
 
-          <!-- Tool call card -->
-          <div v-else-if="msg.type === 'tool_call' || msg.type === 'subagent'" :class="['tool-card', { expanded: msg.expanded }]" @click="msg.expanded = !msg.expanded">
-            <div class="tool-header">
-              <span class="tool-icon">{{ toolIcon(msg.tool) }}</span>
-              <span class="tool-name">{{ msg.tool }}</span>
-              <span class="tool-args">{{ toolArgs(msg) }}</span>
-              <span class="tool-status">
-                <span v-if="msg.status === 'completed'" class="check">✓</span>
-                <span v-else class="spinner"></span>
-              </span>
-              <span class="tool-chevron">▼</span>
-            </div>
-            <div class="tool-body">
-              <div class="tool-section"><div class="tool-label">输入</div></div>
-              <div class="tool-input">{{ toolInputText(msg) }}</div>
-              <div class="tool-section" style="padding-top:8px;"><div class="tool-label">输出</div></div>
-              <div class="tool-output" :class="{ collapsed: !msg.outputExpanded }" ref="outputEl">{{ msg.output || '执行中…' }}</div>
-              <button v-if="msg.output && msg.output.length > 300" class="toggle-expand" @click.stop="msg.outputExpanded = !msg.outputExpanded">{{ msg.outputExpanded ? '收起' : '展开全部' }}</button>
-            </div>
-          </div>
+          <!-- Tool call / subagent (full-width block) -->
+          <ToolCallCard
+            v-else-if="msg.type === 'tool_call' || msg.type === 'subagent'"
+            :message="msg"
+            @toggleExpand="msg.expanded = !msg.expanded"
+            @toggleOutput="msg.outputExpanded = !msg.outputExpanded"
+          />
 
-          <!-- Error message -->
-          <div v-else-if="msg.type === 'error'" class="msg msg-error">{{ msg.content || msg.error }}</div>
+          <!-- Error message (full-width block) -->
+          <MessageError v-else-if="msg.type === 'error'" :content="msg.content || msg.error" />
 
           <!-- Command execution receipt -->
           <CommandReceiptCard v-else-if="msg.type === 'command_receipt'" :command="msg.command" :status="msg.receiptStatus" :message="msg.message" />
         </template>
 
-        <!-- Scroll to bottom (iOS-style floating button; always visible when there are messages) -->
-        <button v-if="messages.length > 0" class="scroll-to-bottom" :class="{ 'at-bottom': autoScroll }" title="回到底部" @click="scrollToBottom">↓</button>
+        <!-- Turn status bar: lives inside the message stream (visually part of
+             it), below the last message. Live timer while working; on completion
+             shows total duration + output tokens + a copy button. -->
+        <div v-if="isExecuting || lastTurnDuration !== null || completedBarVisible" class="turn-status-bar" :class="{ done: lastTurnDuration !== null || completedBarVisible }">
+          <template v-if="isExecuting">
+            <span class="status-dot working"></span>
+            <span class="status-text">{{ t('session.creating') }}</span>
+            <span class="status-timer">{{ fmtDuration(turnElapsed) }}</span>
+          </template>
+          <template v-else>
+            <svg class="status-check" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6L9 17l-5-5"/></svg>
+            <span class="status-text">{{ t('session.completed') }}</span>
+            <span v-if="lastTurnDuration !== null" class="status-timer">{{ fmtDuration(lastTurnDuration) }}</span>
+            <span v-if="lastAgentUsage?.output_tokens" class="status-tokens">{{ t('session.output_tokens', { n: fmtTokens(lastAgentUsage.output_tokens) }) }}</span>
+            <button v-if="hasLastAgentReply" class="status-copy-btn" @click="copyLastReply">
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+              <span>{{ replyCopied ? t('common.copied') : t('common.copy') }}</span>
+            </button>
+          </template>
+        </div>
       </div>
 
-      <!-- Chat Input -->
+      <!-- Chat Input — unified container with embedded controls -->
       <div class="chat-input-area" :class="{ ended: !canInput }">
+        <!-- Scroll-to-bottom: absolute child of chat-input-area, floats above
+             its top edge. Doesn't take up flex space in chat-messages. -->
+        <Transition name="scroll-btn">
+          <button v-if="messages.length > 0 && !autoScroll" class="scroll-to-bottom" :title="t('session.scroll_to_bottom')" @click="scrollToBottom">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14"/><path d="M19 12l-7 7-7-7"/></svg>
+          </button>
+        </Transition>
         <template v-if="canInput">
-          <div class="chat-input-wrap">
+          <div class="chat-input-container" :class="{ focused: isInputFocused }">
+            <!-- Slash command popover -->
             <CommandPopover
               v-if="showPopover"
               :commands="filteredCommands"
@@ -139,28 +159,101 @@
               @select="applyCommand"
               @hover="selectedIndex = $event"
             />
-            <input type="text" v-model="messageInput" :placeholder="isPendingSession ? '会话创建中…' : (isDaemonSession && isTerminal ? '继续会话（将恢复历史上下文）...' : '发送消息...')" @keydown="onInputKeydown" :disabled="isDisconnected || isPendingSession || isLoading" ref="inputEl" />
+            <!-- Textarea (multi-line) -->
+            <textarea
+              v-model="messageInput"
+              class="chat-textarea"
+              :placeholder="isPendingSession ? t('session.input_creating') : (isDaemonSession && isTerminal ? t('session.input_resume') : t('session.input_send'))"
+              @keydown="onInputKeydown"
+              @focus="isInputFocused = true"
+              @blur="isInputFocused = false"
+              :disabled="isDisconnected || isPendingSession || isLoading"
+              ref="inputEl"
+              rows="3"
+            ></textarea>
+
+            <!-- Bottom control row -->
+            <div class="input-controls">
+              <!-- Left: permission mode dropdown -->
+              <div class="perm-dropdown" ref="permDropdownEl">
+                <button class="perm-trigger" @click="showPermMenu = !showPermMenu" :title="`当前: ${t(currentPermLabel)}`">
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+                  <span class="perm-label">{{ t(currentPermLabel) }}</span>
+                  <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M6 9l6 6 6-6"/></svg>
+                </button>
+                <Transition name="perm-menu">
+                  <div v-if="showPermMenu" class="perm-menu">
+                    <button v-for="m in PERMISSION_MODES" :key="m.value"
+                      :class="['perm-menu-item', { active: currentPermissionMode === m.value }]"
+                      @click="setPermissionMode(m.value); showPermMenu = false">
+                      <span class="perm-menu-name">{{ t(m.label) }}</span>
+                      <svg v-if="currentPermissionMode === m.value" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M20 6L9 17l-5-5"/></svg>
+                    </button>
+                  </div>
+                </Transition>
+              </div>
+
+              <!-- Right: context usage + send/stop button -->
+              <div class="input-right">
+                <div v-if="contextTokens" class="ctx-indicator" :title="contextTooltip">
+                  <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/></svg>
+                  <span class="ctx-value">{{ contextTokens }}</span>
+                </div>
+
+                <!-- Send button (idle) -->
+                <button v-if="!isExecuting" class="action-btn send-btn"
+                  @click="sendMessage"
+                  :disabled="isDisconnected || isPendingSession || isLoading || !messageInput.trim()"
+                  :title="t('session.send_enter')">
+                  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5"/><path d="M5 12l7-7 7 7"/></svg>
+                </button>
+
+                <!-- Stop button (executing). 1st click = graceful Ctrl+C;
+                     clicking again within 2.5s escalates to force-kill (SIGKILL). -->
+                <button v-else class="action-btn stop-btn" :class="{ escalated: stopEscalated }"
+                  @click="interruptSession"
+                  :title="stopEscalated ? t('session.force_stop') : t('session.stop_gen')">
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="6" width="12" height="12" rx="2"/></svg>
+                </button>
+              </div>
+            </div>
           </div>
-          <button class="send-btn" @click="sendMessage" :disabled="isDisconnected || isPendingSession || isLoading || !messageInput.trim()">
-            <svg viewBox="0 0 24 24"><path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z"/></svg>
-          </button>
         </template>
-        <div v-else class="ended-text">Session 已结束</div>
+        <div v-else class="ended-text">{{ t('session.ended') }}</div>
       </div>
     </div>
   </div>
+
+  <NewSessionDialog
+    v-if="showNewSession"
+    :daemons="daemonList"
+    :preSelectedDaemonId="hostFilter"
+    @close="showNewSession = false"
+  />
+  <CommandHelpModal
+    v-if="showHelpModal"
+    :commands="commandsCache"
+    @close="showHelpModal = false"
+  />
 </template>
 
 <script setup lang="ts">
 import { ref, computed, onMounted, onUnmounted, nextTick, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
+import NewSessionDialog from '../components/NewSessionDialog.vue'
 import { useWebSocket } from '../composables/useWebSocket'
 import { formatRelativeTime } from '../composables/useRelativeTime'
-import MarkdownRenderer from '../components/MarkdownRenderer.vue'
 import SessionActions from '../components/SessionActions.vue'
 import CommandPopover from '../components/CommandPopover.vue'
 import CommandReceiptCard from '../components/CommandReceiptCard.vue'
+import CommandHelpModal from '../components/CommandHelpModal.vue'
+import MessageUser from '../components/messages/MessageUser.vue'
+import MessageAgent from '../components/messages/MessageAgent.vue'
+import MessageError from '../components/messages/MessageError.vue'
+import { useLocale } from '../composables/useLocale'
+import ToolCallCard from '../components/messages/ToolCallCard.vue'
 import { buildResumeCommand } from '../utils/resumeCommand'
+import { formatToolInput } from '../utils/toolDisplay'
 import { useSessionRename } from '../composables/useSessionRename'
 import type { CommandItem } from '../composables/useWebSocket'
 
@@ -169,12 +262,15 @@ const { renamingId, renameInput, startRename, commitRename, cancelRename } = use
 const route = useRoute()
 const router = useRouter()
 const { connect, send, onEvent } = useWebSocket()
+const { t } = useLocale()
 
 const sessionId = computed(() => route.params.id as string)
 const messages = ref<any[]>([])
 const allSessions = ref<any[]>([])
 const messageInput = ref('')
 const commandsCache = ref<CommandItem[]>([])
+const currentModel = ref('')            // resolved model name from session_meta event
+const showHelpModal = ref(false)        // /help local command → full-screen modal
 const replayReqId = ref(0)
 const isLoading = ref(false)
 // session-history-pagination: backward pagination state
@@ -183,17 +279,31 @@ const loadedMinId = ref(0)      // oldest loaded event id (backward cursor)
 const isLoadingBackward = ref(false)  // a pagination (scroll-up) request in flight
 const hasMore = ref(false)      // relay signaled older events exist
 const resumeCopied = ref(false)  // session-resume-command: 复制恢复命令反馈
+const showNewSession = ref(false)
+const daemonList = computed(() => Object.values(daemons.value))
 const currentSessionAgent = computed(() => allSessions.value.find((x: any) => x.session_id === sessionId.value)?.agent)
 const isPendingSession = computed(() => sessionId.value.startsWith('pending-'))
 const selectedIndex = ref(0)
 const popoverDismissed = ref(false)
 const status = ref('running')
 const exitReason = ref('')
+const currentPermissionMode = ref('bypassPermissions')
+const showPermMenu = ref(false)
+const PERMISSION_MODES = [
+  { value: 'bypassPermissions', label: 'session.perm_bypass' },
+  { value: 'default', label: 'session.perm_default' },
+  { value: 'acceptEdits', label: 'session.perm_accept_edits' },
+  { value: 'plan', label: 'session.perm_plan' },
+]
+const PERM_LABELS: Record<string, string> = { bypassPermissions: 'session.perm_bypass', default: 'session.perm_default', acceptEdits: 'session.perm_accept_edits', plan: 'session.perm_plan' }
+const currentPermLabel = computed(() => PERM_LABELS[currentPermissionMode.value] || currentPermissionMode.value)
 const exitedAt = ref('')
 const autoScroll = ref(true)
 const copied = ref(false)
 const messagesEl = ref<HTMLDivElement | null>(null)
-const inputEl = ref<HTMLInputElement | null>(null)
+const inputEl = ref<HTMLTextAreaElement | null>(null)
+const permDropdownEl = ref<HTMLElement | null>(null)
+const isInputFocused = ref(false)
 const daemons = ref<Record<string, any>>({})
 const hostFilter = computed(() => (route.query.host as string) || '')
 const visibleSessions = computed(() => {
@@ -207,8 +317,8 @@ const statusClass = computed(() => {
 })
 
 const statusLabel = computed(() => {
-  const map: Record<string, string> = { running: '运行中', busy: '繁忙', idle: '空闲', completed: '已完成', error: '错误', killed: '已终止', disconnected: '已断开', exited: '已退出' }
-  return map[status.value] || status.value
+  const STATUS_KEYS: Record<string, string> = { running: 'session.status.running', busy: 'session.status.busy', idle: 'session.status.idle', completed: 'session.status.completed', error: 'session.status.error', killed: 'session.status.killed', disconnected: 'session.status.disconnected', exited: 'session.status.exited' }
+  return t(STATUS_KEYS[status.value] || 'session.status.running')
 })
 
 const isDaemonOnline = computed(() => {
@@ -225,6 +335,103 @@ const isDaemonSession = computed(() => {
   return s?.source === 'daemon'
 })
 const canInput = computed(() => !isDisconnected.value && (!isTerminal.value || isDaemonSession.value))
+// Agent is actively generating (send button → stop button)
+// Agent is actively working — includes 'waiting' (tool execution in progress),
+// otherwise the timer would stop prematurely when a tool call is running.
+const isExecuting = computed(() => status.value === 'running' || status.value === 'busy' || status.value === 'waiting')
+
+// --- Turn timer (status bar above the input area) ---
+// Timer is driven entirely by isExecuting transitions: starts on false→true
+// (covers both sendMessage and new-session-with-prompt, which bypasses
+// sendMessage), stops on true→false (whole turn done, incl. tool calls).
+// sessionSwitching gates the watch during a session change: the placeholder
+// status='running' (set in the sessionId watcher before replay) must NOT start
+// the timer from zero. The real turn start is recovered from the last
+// executing session_status's last_activity_at once replay completes.
+const turnStartTime = ref<number | null>(null)   // 本轮开始时间戳
+const turnElapsed = ref(0)                        // 实时计时（秒）
+const lastTurnDuration = ref<number | null>(null) // 完成后的总耗时（秒）
+let turnTimer: ReturnType<typeof setInterval> | null = null
+let sessionSwitching = false                        // true while switching sessions (suppress timer)
+let resumeStartAt: number | null = null           // turn start recovered from replay (ms epoch)
+
+function startTurnTimer(startAt?: number) {
+  if (turnTimer) clearInterval(turnTimer)
+  // startAt (ms) recovers accumulated time when resuming a running turn on
+  // session switch; default (now) for a fresh turn triggered by sendMessage.
+  turnStartTime.value = startAt ?? Date.now()
+  lastTurnDuration.value = null
+  turnElapsed.value = Math.floor((Date.now() - turnStartTime.value) / 1000)
+  turnTimer = setInterval(() => {
+    if (turnStartTime.value) {
+      turnElapsed.value = Math.floor((Date.now() - turnStartTime.value) / 1000)
+    }
+  }, 1000)
+}
+function stopTurnTimer() {
+  if (turnTimer) { clearInterval(turnTimer); turnTimer = null }
+  if (turnStartTime.value) {
+    lastTurnDuration.value = Math.floor((Date.now() - turnStartTime.value) / 1000)
+  }
+}
+// Drive the timer from isExecuting: start on false→true (or when entering an
+// already-running session via immediate), stop on true→false. Gated by
+// sessionSwitching so the placeholder status during a switch doesn't fire it.
+watch(() => isExecuting.value, (exec, prev) => {
+  if (sessionSwitching) return
+  if (exec && !prev) startTurnTimer(resumeStartAt ?? undefined)
+  else if (!exec && prev) stopTurnTimer()
+}, { immediate: true })
+
+// Last agent_text usage (output tokens for the completed bar). Reuses the same
+// reverse-scan pattern as buildCostMessage.
+const lastAgentUsage = computed(() => {
+  for (let i = messages.value.length - 1; i >= 0; i--) {
+    const u = (messages.value[i] as any).usage
+    if (u) return u
+  }
+  return null
+})
+const hasLastAgentReply = computed(() =>
+  messages.value.some((m: any) => m.type === 'agent_text'))
+// Refresh recovery: a finished session (idle/completed/exited/…) loses
+// lastTurnDuration on reload (it's runtime-only, not in replay). Still surface
+// the "completed" bar — check + label + tokens + copy — as long as history has
+// an agent reply. Precise duration is omitted (not recomputed from events).
+const completedBarVisible = computed(() => {
+  if (isExecuting.value || lastTurnDuration.value !== null) return false
+  return ['idle', 'completed', 'exited', 'error', 'killed'].includes(status.value) && hasLastAgentReply.value
+})
+
+function fmtTokens(n: number): string {
+  if (n > 1000) return (n / 1000).toFixed(1) + 'K'
+  return String(n)
+}
+// Format a duration (seconds) as Xs / Xm Ys / Xh Ym Zs for the turn timer.
+function fmtDuration(sec: number): string {
+  if (sec < 60) return `${sec}s`
+  const h = Math.floor(sec / 3600)
+  const m = Math.floor((sec % 3600) / 60)
+  const s = sec % 60
+  return h > 0 ? `${h}h ${m}m ${s}s` : `${m}m ${s}s`
+}
+
+// Copy the last agent_text reply (already clean Markdown source) to clipboard.
+const replyCopied = ref(false)
+let replyCopyTimer: ReturnType<typeof setTimeout> | null = null
+function copyLastReply() {
+  for (let i = messages.value.length - 1; i >= 0; i--) {
+    const m = messages.value[i] as any
+    if (m.type === 'agent_text') {
+      navigator.clipboard.writeText(m.content).then(() => {
+        replyCopied.value = true
+        if (replyCopyTimer) clearTimeout(replyCopyTimer)
+        replyCopyTimer = setTimeout(() => { replyCopied.value = false }, 2000)
+      }).catch(() => {})
+      return
+    }
+  }
+}
 
 const daemonName = computed(() => {
   if (hostFilter.value) {
@@ -232,7 +439,7 @@ const daemonName = computed(() => {
     return d?.daemon_alias || d?.hostname || hostFilter.value.slice(0, 8)
   }
   const s = allSessions.value.find(s => s.session_id === sessionId.value)
-  return s?.daemon_alias || s?.hostname || s?.daemon_id?.slice(0, 8) || '未知'
+  return s?.daemon_alias || s?.hostname || s?.daemon_id?.slice(0, 8) || t('session.unknown_host')
 })
 function clearHostFilter() {
   const q = { ...route.query }
@@ -245,15 +452,42 @@ const sessionTitle = computed(() => {
   return s?.title
 })
 
-const statusSubtext = computed(() => isDaemonOnline.value ? '已连接' : '等待恢复')
+const statusSubtext = computed(() => isDaemonOnline.value ? t('session.status.connected') : t('session.status.waiting'))
+
+// Context token usage — from the last agent_text message that carried usage.
+const contextTokens = computed(() => {
+  for (let i = messages.value.length - 1; i >= 0; i--) {
+    const u = (messages.value[i] as any).usage
+    if (u) {
+      const total = (u.input_tokens || 0) + (u.cache_read_tokens || 0) + (u.cache_create_tokens || 0)
+      return total > 1000 ? (total / 1000).toFixed(1) + 'K' : String(total)
+    }
+  }
+  return ''
+})
+
+const contextTooltip = computed(() => {
+  for (let i = messages.value.length - 1; i >= 0; i--) {
+    const u = (messages.value[i] as any).usage
+    if (u) {
+      const parts: string[] = []
+      if (u.input_tokens) parts.push(`${t('session.context_input')}: ${u.input_tokens.toLocaleString()}`)
+      if (u.output_tokens) parts.push(`${t('session.context_output')}: ${u.output_tokens.toLocaleString()}`)
+      if (u.cache_read_tokens) parts.push(`${t('session.context_cache_read')}: ${u.cache_read_tokens.toLocaleString()}`)
+      if (u.cache_create_tokens) parts.push(`${t('session.context_cache_create')}: ${u.cache_create_tokens.toLocaleString()}`)
+      return parts.length ? t('session.context_usage') + '\n' + parts.join('\n') : ''
+    }
+  }
+  return ''
+})
 
 const milestones = computed(() => {
   const ms: any[] = []
   const s = allSessions.value.find(s => s.session_id === sessionId.value)
   if (!s) return ms
-  if (s.created_at) ms.push({ label: '创建', time: formatTime(s.created_at), state: 'active' })
-  ms.push({ label: '运行', time: formatTime(s.last_activity_at || s.updated_at || s.created_at), state: status.value === 'running' || status.value === 'busy' ? 'current' : 'active' })
-  ms.push({ label: statusLabel.value === '运行中' ? '进行中' : statusLabel.value, time: '—', state: isTerminal.value || status.value === 'exited' ? 'active' : '' })
+  if (s.created_at) ms.push({ label: t('session.milestone_created'), time: formatTime(s.created_at), state: 'active' })
+  ms.push({ label: t('session.status.running'), time: formatTime(s.last_activity_at || s.updated_at || s.created_at), state: status.value === 'running' || status.value === 'busy' ? 'current' : 'active' })
+  ms.push({ label: statusLabel.value, time: '—', state: isTerminal.value || status.value === 'exited' ? 'active' : '' })
   return ms
 })
 
@@ -297,30 +531,12 @@ function cleanContent(text: string): string {
     .trim()
 }
 
-function toolIcon(tool: string): string {
-  const icons: Record<string, string> = { Read: '📖', Write: '✏️', Bash: '⚡', Edit: '✏️', Agent: '🤖', Glob: '🔍', Grep: '🔎', WebSearch: '🌐', WebFetch: '📡', Task: '📋' }
-  return icons[tool] || '🔧'
-}
-
-function toolArgs(msg: any): string {
-  return msg.inputDesc || msg.description || ''
-}
-
-function toolInputText(msg: any): string {
-  if (msg.inputDesc) return msg.inputDesc
-  if (msg.input) {
-    if (typeof msg.input === 'string') return msg.input
-    try { return JSON.stringify(msg.input, null, 2) } catch { return String(msg.input) }
-  }
-  return msg.description || ''
-}
-
 function exitReasonLabel(reason: string): string {
   const labels: Record<string, string> = { user_interrupt: '用户中断', normal_exit: '正常退出', process_crash: '异常退出', signal_kill: '被终止', unknown: '已退出' }
   return labels[reason] || reason
 }
 
-function emitNewSession() { router.push('/') }
+function emitNewSession() { showNewSession.value = true }
 
 function scrollToBottom() {
   if (messagesEl.value) { messagesEl.value.scrollTop = messagesEl.value.scrollHeight; autoScroll.value = true }
@@ -340,12 +556,181 @@ function onMessagesScroll() {
 
 function focusResumeInput() { if (inputEl.value) { inputEl.value.focus() } }
 
+function setPermissionMode(mode: string) {
+  send({ type: 'set_permission_mode', session_id: sessionId.value, content: mode })
+}
+
+// Stop button escalation: 1st click sends PTY Ctrl+C (graceful). If clicked
+// again within 2.5s (Ctrl+C didn't reach claude — PTY disconnected), escalate
+// to session_kill (SIGKILL the claude process). This guarantees a stuck session
+// can always be stopped, even when the PTY master is disconnected from claude's
+// stdin (the c5813d2c incident: 11 Ctrl+C writes went into a void PTY).
+const stopEscalated = ref(false)
+let stopResetTimer: ReturnType<typeof setTimeout> | null = null
+function interruptSession() {
+  if (stopEscalated.value) {
+    // 2nd click within the window → force kill.
+    send({ type: 'session_kill', session_id: sessionId.value })
+    stopEscalated.value = false
+    return
+  }
+  // 1st click → graceful Ctrl+C; arm escalation window.
+  send({ type: 'session_interrupt', session_id: sessionId.value })
+  stopEscalated.value = true
+  if (stopResetTimer) clearTimeout(stopResetTimer)
+  stopResetTimer = setTimeout(() => { stopEscalated.value = false }, 2500)
+}
+
+// Tool-call timeout guard (B2): a tool_call that never receives a matching
+// tool_result leaves its card spinning forever (e.g. the claude process died
+// mid-tool, or the PTY disconnected). For each live tool_call (not replayed),
+// arm a timeout; if no result arrives, mark the card as 'timeout' so it stops
+// spinning. Cleared on result, session switch, and unmount.
+const TOOL_TIMEOUT_MS = 5 * 60 * 1000 // 5 minutes
+const toolTimeouts = new Map<string, ReturnType<typeof setTimeout>>()
+// Out-of-order tool results: relay persists events with fire-and-forget
+// inserts, so DB row id doesn't always match send order — a tool_result can
+// land before its tool_call. On replay (ordered by id) the result then arrives
+// first and finds no tool_call to attach to. Buffer orphan results here and
+// apply them when the matching tool_call is created.
+const pendingToolResults = new Map<string, { output: string | null }>()
+function armToolTimeout(callId: string) {
+  if (toolTimeouts.has(callId)) clearTimeout(toolTimeouts.get(callId)!)
+  const timer = setTimeout(() => {
+    toolTimeouts.delete(callId)
+    const m = messages.value.find((x: any) => x.type === 'tool_call' && x.call_id === callId)
+    if (m && (m as any).status === 'running') (m as any).status = 'timeout'
+  }, TOOL_TIMEOUT_MS)
+  toolTimeouts.set(callId, timer)
+}
+function clearToolTimeout(callId: string) {
+  const t = toolTimeouts.get(callId)
+  if (t) { clearTimeout(t); toolTimeouts.delete(callId) }
+}
+function clearAllToolTimeouts() {
+  for (const t of toolTimeouts.values()) clearTimeout(t)
+  toolTimeouts.clear()
+}
+
+// Local-command whitelist: handled entirely in the browser, never sent to the
+// daemon PTY. NOT sourced from commandsCache — these builtins are filtered out
+// of command_list by the agent's init event in daemon sessions, so relying on
+// the cache would silently disable them. Hardcode the names instead.
+const LOCAL_COMMANDS = ['cost', 'status', 'help', 'model']
+
 function sendMessage() {
   const text = messageInput.value.trim()
   if (!text || isDisconnected.value) return
   if (isPendingSession.value) return // D3: pending-id 窗口期不发命令（--resume pending-xxx 必失败）
+  // Local command interception: /cost /status /help /model are answered from
+  // in-memory/relay data rather than the claude PTY (where they're unavailable).
+  if (text.startsWith('/')) {
+    const cmdName = text.slice(1).split(/\s/)[0]
+    if (LOCAL_COMMANDS.includes(cmdName)) {
+      messageInput.value = ''
+      handleLocalCommand(cmdName, text)
+      return
+    }
+  }
   send({ type: 'user_message', session_id: sessionId.value, content: text })
   messageInput.value = ''
+  startTurnTimer()  // begin turn timer (stops when isExecuting → false)
+}
+
+// handleLocalCommand renders the user bubble + result locally (no daemon round
+// trip, so no user_text is relayed back — we construct both here).
+function handleLocalCommand(cmdName: string, text: string) {
+  messages.value.push({ id: nextId('u'), type: 'user_text', role: 'user', content: text })
+  const result = buildLocalCommandResult(cmdName, text)
+  if (result) {
+    messages.value.push(result)
+    // Persist the locally-generated user msg + receipt so they survive refresh and
+    // sync to other devices. Relay stores them as events and broadcasts to OTHER
+    // clients (origin keeps its local copy — no echo back, to avoid duplicates).
+    send({
+      type: 'local_command_log',
+      session_id: sessionId.value,
+      user_text: text,
+      command: result.command,
+      receipt_status: result.receiptStatus,
+      message: result.message,
+    })
+  }
+  nextTick(scrollToBottom)
+}
+
+// buildLocalCommandResult returns a command_receipt message for the given local
+// command, or null when the command opens a modal instead (/help).
+function buildLocalCommandResult(cmdName: string, text: string): any | null {
+  if (cmdName === 'help') {
+    showHelpModal.value = true
+    return null
+  }
+  if (cmdName === 'cost') {
+    return {
+      id: nextId('r'), type: 'command_receipt',
+      command: '/cost', receiptStatus: 'success', message: buildCostMessage(),
+    }
+  }
+  if (cmdName === 'status') {
+    return {
+      id: nextId('r'), type: 'command_receipt',
+      command: '/status', receiptStatus: 'success', message: buildStatusMessage(),
+    }
+  }
+  if (cmdName === 'model') {
+    const arg = text.slice(1).split(/\s/).slice(1).join(' ').trim()
+    return {
+      id: nextId('r'), type: 'command_receipt',
+      command: '/model', receiptStatus: 'success', message: buildModelMessage(arg),
+    }
+  }
+  return null
+}
+
+// buildCostMessage summarizes token usage accumulated in this session from the
+// last agent_text carrying usage (same source as the context-token pill).
+function buildCostMessage(): string {
+  let usage: any = null
+  for (let i = messages.value.length - 1; i >= 0; i--) {
+    const u = (messages.value[i] as any).usage
+    if (u) { usage = u; break }
+  }
+  if (!usage) return '当前会话暂无 token 用量记录'
+  const input = usage.input_tokens || 0
+  const output = usage.output_tokens || 0
+  const cacheRead = usage.cache_read_tokens || 0
+  const cacheCreate = usage.cache_create_tokens || 0
+  const total = input + output + cacheRead + cacheCreate
+  const fmt = (n: number) => n > 1000 ? (n / 1000).toFixed(1) + 'K' : String(n)
+  return `累计 ${fmt(total)} tokens（输入 ${fmt(input)} · 输出 ${fmt(output)} · 缓存 ${fmt(cacheRead + cacheCreate)}）`
+}
+
+// buildStatusMessage reports daemon online state + agent version, derived from
+// the current session's host. Account/login status is intentionally out of scope
+// (claude CLI does not expose it to pocketctl) — point users to the terminal.
+function buildStatusMessage(): string {
+  const s = allSessions.value.find((x: any) => x.session_id === sessionId.value) as any
+  if (!s) return '当前会话状态未知'
+  const online = s.daemon_online ? '在线' : '离线'
+  const parts = [`主机 ${online}`]
+  if (s.daemon_version) parts.push(`daemon v${s.daemon_version}`)
+  const agentVer = s.agent_version || s.agentVersion
+  if (agentVer) parts.push(`claude-code v${agentVer}`)
+  parts.push('账户登录状态请在终端运行 pocketctl status 查看')
+  return parts.join(' · ')
+}
+
+// buildModelMessage shows the active model, or a hint that switching requires a
+// restart (runtime switch isn't possible: --model is fixed at PTY launch, and
+// driving the TUI's model menu via key sequences is unreliable).
+function buildModelMessage(arg: string): string {
+  if (arg) {
+    return `运行时切换模型需要重启会话生效。请在终端使用 /model，或新建会话时选择目标模型。`
+  }
+  return currentModel.value
+    ? `当前模型：${currentModel.value}`
+    : '当前会话未上报模型信息'
 }
 
 // Slash command autocompletion
@@ -360,9 +745,35 @@ const filteredCommands = computed(() => {
 const showPopover = computed(() => !popoverDismissed.value && filteredCommands.value.length > 0)
 
 // Reset selection/dismissal whenever the input changes
-watch(messageInput, () => { selectedIndex.value = 0; popoverDismissed.value = false })
+watch(messageInput, () => {
+  selectedIndex.value = 0
+  popoverDismissed.value = false
+  // Auto-resize textarea
+  if (inputEl.value) {
+    inputEl.value.style.height = 'auto'
+    inputEl.value.style.height = Math.min(inputEl.value.scrollHeight, 200) + 'px'
+  }
+})
 
 function onInputKeydown(e: KeyboardEvent) {
+  // Alt/Option+Enter or Shift+Enter → insert newline (checked first, even
+  // when popover is open, so /command<Alt+Enter> doesn't auto-apply).
+  if (e.key === 'Enter' && (e.altKey || e.shiftKey)) {
+    e.preventDefault()
+    const el = inputEl.value
+    if (el) {
+      const start = el.selectionStart
+      const end = el.selectionEnd
+      messageInput.value = messageInput.value.slice(0, start) + '\n' + messageInput.value.slice(end)
+      nextTick(() => {
+        el.selectionStart = el.selectionEnd = start + 1
+        el.style.height = 'auto'
+        el.style.height = Math.min(el.scrollHeight, 200) + 'px'
+      })
+    }
+    return
+  }
+
   if (showPopover.value) {
     if (e.key === 'ArrowDown') {
       e.preventDefault()
@@ -384,7 +795,11 @@ function onInputKeydown(e: KeyboardEvent) {
       popoverDismissed.value = true
       return
     }
-  } else if (e.key === 'Enter') {
+    return // popover open: don't process Enter below
+  }
+
+  // Enter (no modifier) → send
+  if (e.key === 'Enter' && !e.altKey && !e.shiftKey && !e.metaKey && !e.ctrlKey) {
     e.preventDefault()
     sendMessage()
   }
@@ -411,33 +826,6 @@ function isDuplicate(type: string, text: string, target = messages.value): boole
   return !!last && last.type === type && (last.content || '') === text
 }
 
-// Format tool input for display (matches iOS app logic)
-function formatToolInput(tool: string, input: any): string {
-  if (!input) return ''
-  if (typeof input === 'string') return input.slice(0, 80)
-  if (typeof input === 'object') {
-    switch (tool) {
-      case 'Read':
-      case 'Write':
-      case 'Edit':
-        return input.file_path || input.path || ''
-      case 'Bash':
-        return input.command || ''
-      case 'Glob':
-      case 'Grep':
-        return input.pattern || input.query || ''
-      case 'Agent':
-        return (input.prompt || '').slice(0, 60)
-      default:
-        break
-    }
-    // Fallback: first string value
-    const first = Object.values(input).find(v => typeof v === 'string')
-    if (first) return String(first).slice(0, 60)
-  }
-  return ''
-}
-
 function processEvent(evt: any, target: any[] = messages.value) {
   const type = evt.type || evt.event_type
   if (type === 'user_text') {
@@ -447,12 +835,14 @@ function processEvent(evt: any, target: any[] = messages.value) {
     const content = evt.text || evt.content || evt.payload?.text || evt.payload?.content || ''
     if (!content || isDuplicate('agent_text', content, target)) return
     const streaming = evt.streaming ?? evt.payload?.streaming ?? false
+    const usage = evt.usage || evt.payload?.usage
     const last = target[target.length - 1]
     if (last && last.type === 'agent_text' && last.streaming && !content.startsWith('\n')) {
       last.content += content
       if (!streaming) last.streaming = false
+      if (usage) last.usage = usage
     } else {
-      target.push({ id: nextId('a'), type: 'agent_text', role: 'agent', content, streaming })
+      target.push({ id: nextId('a'), type: 'agent_text', role: 'agent', content, streaming, usage })
     }
   } else if (type === 'tool_call') {
     const callId = evt.call_id || evt.payload?.call_id
@@ -460,13 +850,17 @@ function processEvent(evt: any, target: any[] = messages.value) {
     const tool = evt.tool || evt.payload?.tool || ''
     const input = evt.input || evt.payload?.input
     const inputDesc = formatToolInput(tool, input)
-    // Always create new tool_call message (matches iOS app)
+    // Always create new tool_call message (matches iOS app). If a matching
+    // result arrived out of order (buffered in pendingToolResults), apply it
+    // now so the card renders completed instead of spinning forever.
+    const pending = pendingToolResults.get(callId)
     target.push({
       id: nextId('t'), type: 'tool_call', call_id: callId,
       tool, input, inputDesc,
-      output: null, status: 'running',
+      output: pending?.output ?? null, status: pending ? 'completed' : 'running',
       expanded: false, outputExpanded: false,
     })
+    if (pending) pendingToolResults.delete(callId)
   } else if (type === 'tool_result') {
     const callId = evt.call_id || evt.payload?.call_id
     const output = evt.output || evt.payload?.output || evt.result || evt.payload?.result
@@ -482,10 +876,21 @@ function processEvent(evt: any, target: any[] = messages.value) {
     if (idx >= 0) {
       if (output) target[idx].output = output
       target[idx].status = 'completed'
+    } else {
+      // tool_call hasn't been created yet (out-of-order replay) — buffer the
+      // result so it's applied when the matching tool_call arrives.
+      pendingToolResults.set(callId, { output: output ?? null })
     }
   } else if (type === 'session_status') {
     const s = evt.status || evt.payload?.status
     if (s) status.value = s
+    // During a session switch, capture the turn start time from the last
+    // executing status (busy/running/waiting) so the timer can resume the
+    // accumulated elapsed instead of restarting from zero.
+    if (sessionSwitching && (s === 'running' || s === 'busy' || s === 'waiting')) {
+      const ts = evt.last_activity_at || evt.payload?.last_activity_at
+      if (ts) resumeStartAt = new Date(ts).getTime()
+    }
     if (evt.exit_reason || evt.payload?.exit_reason) exitReason.value = evt.exit_reason || evt.payload.exit_reason
     if (evt.exited_at || evt.payload?.exited_at) exitedAt.value = evt.exited_at || evt.payload.exited_at
   } else if (type === 'command_receipt') {
@@ -500,11 +905,23 @@ function processEvent(evt: any, target: any[] = messages.value) {
 // Watch for session switch — clear messages and replay new session
 watch(sessionId, (newId, oldId) => {
   if (newId && newId !== oldId) {
+    clearAllToolTimeouts()   // reset tool timeout guards on session switch
+    pendingToolResults.clear() // discard buffered out-of-order results
+    // Gate the turn-timer watch: the placeholder status='running' below must
+    // not start the timer from zero. The real turn start (if executing) is
+    // recovered from the last executing session_status once replay completes.
+    sessionSwitching = true
+    resumeStartAt = null
+    if (turnTimer) { clearInterval(turnTimer); turnTimer = null }
+    turnStartTime.value = null
+    turnElapsed.value = 0
+    lastTurnDuration.value = null
     messages.value = []
     status.value = 'running'
     exitReason.value = ''
     exitedAt.value = ''
     commandsCache.value = []
+    currentModel.value = '' // clear; refilled by get_session_meta below
     replayReqId.value++
     isLoading.value = true
     loadedMinId.value = 0
@@ -512,6 +929,7 @@ watch(sessionId, (newId, oldId) => {
     hasMore.value = false
     send({ type: 'replay', session_id: newId, direction: 'backward', limit: pageSize.value, req_id: replayReqId.value })
     send({ type: 'list_commands', session_id: newId })
+    send({ type: 'get_session_meta', session_id: newId })
   }
 })
 
@@ -521,6 +939,10 @@ onMounted(() => {
   connect()
   send({ type: 'list_sessions' })
   send({ type: 'list_daemons' })
+  // Gate the timer watch for the initial load too: status defaults to 'running'
+  // (a placeholder) and would start the timer from zero before the real status
+  // arrives via replay. replay_end un-gates and resumes correctly.
+  sessionSwitching = true
   replayReqId.value++
   isLoading.value = true
   loadedMinId.value = 0
@@ -528,14 +950,53 @@ onMounted(() => {
   hasMore.value = false
   send({ type: 'replay', session_id: sessionId.value, direction: 'backward', limit: pageSize.value, req_id: replayReqId.value })
   send({ type: 'list_commands', session_id: sessionId.value })
+  // Query the resolved model on mount (authoritative, covers sessions opened
+  // directly rather than just-created — session_created is one-shot and fires
+  // before this component subscribes).
+  send({ type: 'get_session_meta', session_id: sessionId.value })
 
   cleanups.push(onEvent('session_list', (msg: any) => {
     allSessions.value = msg.sessions || []
-    // 从主机"查看全部"跳来（带 host query + default 哨兵）→ 自动落到该主机首个会话
-    if (hostFilter.value && sessionId.value === 'default') {
-      const first = allSessions.value.find((s: any) => s.daemon_id === hostFilter.value)
-      if (first) router.replace({ path: `/session/${first.session_id}`, query: { host: hostFilter.value } })
+    // default 哨兵 → 自动落到首个会话（避免停在空白的 default 占位）：
+    //   - 带 host query（从主机"查看全部"跳来）：该主机的首个会话
+    //   - 无 host query（sidebar 直接进入会话模块）：整个列表的首个会话
+    // 落定后 daemonName 按当前 sessionId 解析，session-panel-header 与 chat-toolbar
+    // 都会显示这个会话所属的主机名。
+    if (sessionId.value === 'default') {
+      const first = visibleSessions.value[0]
+      if (first) {
+        const query = hostFilter.value ? { host: hostFilter.value } : {}
+        router.replace({ path: `/session/${first.session_id}`, query })
+      }
     }
+  }))
+  // session_created: 新建会话到达时立即加入左侧列表（乐观插入），并补刷一次
+  // 权威 list_sessions 拿完整字段。relay 的 session_created 只发给 origin client
+  // 且早于 DB upsert 落库，挂载时的初次 list_sessions 拿不到新会话，必须靠事件补齐。
+  cleanups.push(onEvent('session_created', (msg: any) => {
+    const sid = msg.session_id
+    if (!sid) return
+    if (!allSessions.value.find((s: any) => s.session_id === sid)) {
+      allSessions.value.unshift({
+        session_id: sid,
+        status: 'running',
+        agent: 'claude-code',
+        source: 'daemon',
+        title: msg.title || '',
+        cwd: '',
+        daemon_id: msg.daemon_id || '',
+        hostname: msg.hostname || '',
+        created_at: new Date().toISOString(),
+        last_activity_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+        subagent_count: 0,
+        pinned: false,
+        daemon_online: true,
+      })
+    }
+    // session_created carries the daemon-resolved model (for the /model command).
+    if (sid === sessionId.value && msg.model) currentModel.value = msg.model
+    send({ type: 'list_sessions' })
   }))
   cleanups.push(onEvent('daemon_list', (msg: any) => {
     const map: Record<string, any> = {}
@@ -550,6 +1011,12 @@ onMounted(() => {
     if (msg.session_id !== sessionId.value) return
     processEvent(msg)
     nextTick(scrollToBottom)
+  }))
+  // session_meta: authoritative model name, in response to get_session_meta.
+  // (session_created also carries model as an optimistic early fill below.)
+  cleanups.push(onEvent('session_meta', (msg: any) => {
+    if (msg.session_id !== sessionId.value) return
+    if (msg.model) currentModel.value = msg.model
   }))
 
   cleanups.push(onEvent('replay_batch', (msg: any) => {
@@ -587,6 +1054,14 @@ onMounted(() => {
     if (msg.has_more !== undefined) hasMore.value = !!msg.has_more
     // backward: last_seq is the oldest id of the returned page → next page cursor
     if (msg.last_seq && (!loadedMinId.value || msg.last_seq < loadedMinId.value)) loadedMinId.value = msg.last_seq
+    // Session switch complete: ungate the timer watch. If the target session is
+    // executing, resume timing from the recovered turn start (last executing
+    // session_status's last_activity_at) so elapsed isn't reset to zero.
+    if (sessionSwitching) {
+      sessionSwitching = false
+      if (isExecuting.value) startTurnTimer(resumeStartAt ?? undefined)
+      resumeStartAt = null
+    }
   }))
 
   cleanups.push(onEvent('user_text', (msg: any) => {
@@ -604,12 +1079,18 @@ onMounted(() => {
   cleanups.push(onEvent('tool_call', (msg: any) => {
     if (msg.session_id !== sessionId.value) return
     processEvent(msg)
+    // Arm timeout guard: if no tool_result arrives in time, the card flips to
+    // 'timeout' instead of spinning forever (claude died / PTY disconnected).
+    const callId = msg.call_id || msg.payload?.call_id
+    if (callId) armToolTimeout(callId)
     nextTick(scrollToBottom)
   }))
 
   cleanups.push(onEvent('tool_result', (msg: any) => {
     if (msg.session_id !== sessionId.value) return
     processEvent(msg)
+    const callId = msg.call_id || msg.payload?.call_id
+    if (callId) clearToolTimeout(callId)
   }))
 
   cleanups.push(onEvent('subagent_discovered', (msg: any) => {
@@ -619,6 +1100,11 @@ onMounted(() => {
 
   cleanups.push(onEvent('session_status', (msg: any) => {
     if (msg.session_id === sessionId.value) { status.value = msg.status; if (msg.exit_reason) exitReason.value = msg.exit_reason; if (msg.exited_at) exitedAt.value = msg.exited_at }
+  }))
+
+  cleanups.push(onEvent('permission_mode_changed', (msg: any) => {
+    if (msg.session_id !== sessionId.value) return
+    currentPermissionMode.value = msg.permission_mode || 'acceptEdits'
   }))
 
   // 兜底：URL 仍是 pending 时，session_id_changed 到达则替换为真实 ID 并重新 replay
@@ -667,11 +1153,24 @@ function onPinned(sessionId: string, pinned: boolean) {
 onUnmounted(() => {
   for (const fn of cleanups) fn()
   cleanups.length = 0
+  document.removeEventListener('click', closePermMenu)
+  if (turnTimer) { clearInterval(turnTimer); turnTimer = null }
+  if (stopResetTimer) { clearTimeout(stopResetTimer); stopResetTimer = null }
+  clearAllToolTimeouts()
+})
+
+function closePermMenu(e: MouseEvent) {
+  if (permDropdownEl.value && !permDropdownEl.value.contains(e.target as Node)) {
+    showPermMenu.value = false
+  }
+}
+onMounted(() => {
+  document.addEventListener('click', closePermMenu)
 })
 </script>
 
 <style>
-.session-layout { display: flex; flex: 1; height: calc(100vh - var(--topbar-h)); overflow: hidden; }
+.session-layout { display: flex; flex: 1; width: 100%; min-width: 0; height: calc(100vh - var(--topbar-h)); overflow: hidden; }
 
 /* Session Panel */
 .session-panel { width: 300px; background: var(--sidebar-bg); border-right: 1px solid var(--sidebar-border); display: flex; flex-direction: column; flex-shrink: 0; transition: background var(--transition), border-color var(--transition); }
@@ -688,12 +1187,13 @@ onUnmounted(() => {
 .session-list-item.active { background: var(--sidebar-active); }
 .session-list-item .sl-info { flex: 1; min-width: 0; }
 .session-list-item .sl-title { font-size: 13px; font-weight: 500; color: var(--fg); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.session-list-item .pin-icon { color: var(--accent); flex-shrink: 0; vertical-align: middle; }
 .session-list-item .ss-rename-input { background: var(--bg); border: 1px solid var(--accent); border-radius: var(--radius-sm); box-shadow: 0 0 0 3px var(--accent-muted); color: var(--fg); font-family: var(--font-body); font-size: 13px; font-weight: 500; padding: 3px 6px; outline: none; width: 100%; }
 .session-list-item .sl-title.mono { font-family: var(--font-mono); font-size: 12px; color: var(--accent); }
 .session-list-item .sl-meta { font-size: 11px; color: var(--fg-tertiary); margin-top: 2px; }
 
 /* Chat Area */
-.chat-area { flex: 1; display: flex; flex-direction: column; min-width: 0; background: var(--bg); transition: background var(--transition); }
+.chat-area { flex: 1; display: flex; flex-direction: column; position: relative; min-width: 0; max-width: 100%; overflow: hidden; background: var(--bg); transition: background var(--transition); }
 
 /* Toolbar */
 .chat-toolbar { height: 52px; border-bottom: 1px solid var(--border); display: flex; align-items: center; padding: 0 20px; gap: 12px; background: var(--surface); transition: background var(--transition), border-color var(--transition); }
@@ -709,54 +1209,31 @@ onUnmounted(() => {
 .copy-btn:hover { color: var(--accent); background: var(--accent-muted); }
 
 /* Messages */
-.chat-messages { flex: 1; overflow-y: auto; padding: 20px; display: flex; flex-direction: column; gap: 16px; position: relative; overflow-anchor: none; }
-.scroll-to-bottom { position: fixed; bottom: 88px; right: 24px; width: 44px; height: 44px; border-radius: 50%; border: 1px solid var(--border); background: var(--surface); color: var(--fg); font-size: 20px; cursor: pointer; display: flex; align-items: center; justify-content: center; box-shadow: 0 4px 14px rgba(0,0,0,0.35); transition: transform 0.15s, background 0.15s, opacity 0.2s; z-index: 100; }
-.scroll-to-bottom:hover { background: var(--surface-hover); transform: scale(1.08); }
-.scroll-to-bottom:active { transform: scale(0.96); }
-.scroll-to-bottom.at-bottom { opacity: 0.35; }
-.scroll-to-bottom.at-bottom:hover { opacity: 1; }
-.scroll-to-bottom:hover { background: var(--surface-hover); }
+.chat-messages { flex: 1; min-height: 0; width: 100%; overflow-y: auto; overflow-x: hidden; padding: 20px; display: flex; flex-direction: column; align-items: stretch; gap: 16px; position: relative; overflow-anchor: none; }
+/* min-width:0 lets long content (code/URLs) wrap instead of overflowing
+   horizontally. max-width + center keeps lines readable on wide screens.
+   User bubbles are excluded (they use fit-content + right align). */
+/* Agent text: adaptive width — short replies stay narrow, long content grows to 720px.
+   Left-aligned (natural document flow), unlike centered tool cards. */
+.chat-messages > .agent-block { min-width: 0; max-width: 720px; width: fit-content; align-self: flex-start; }
+/* Errors / banners: full width within 820px, centered. (tool-wrap + receipt-card excluded — left-aligned) */
+.chat-messages > *:not(.msg):not(.agent-block):not(.tool-wrap):not(.receipt-card):not(.turn-status-bar) { min-width: 0; max-width: 820px; width: 100%; align-self: center; }
+/* Tool cards: left-aligned, not centered. */
+.chat-messages > .tool-wrap { min-width: 0; max-width: 820px; width: 100%; align-self: flex-start; }
+.chat-messages > *.msg { min-width: 0; max-width: 85%; }
+/* Scroll-to-bottom: floats centered above the input bar. Auto-hides (v-if)
+   when content is already scrolled to the bottom (autoScroll === true). */
+/* Scroll-to-bottom: absolute child of chat-input-area, pinned above its top
+   edge. Takes zero flex space — doesn't shrink chat-messages. */
+.scroll-to-bottom { position: absolute; top: -40px; left: 50%; transform: translateX(-50%); width: 32px; height: 32px; border-radius: 50%; border: 1px solid var(--border); background: var(--surface); color: var(--fg-secondary); cursor: pointer; display: flex; align-items: center; justify-content: center; box-shadow: 0 2px 10px rgba(0,0,0,0.3); transition: background 0.15s, color 0.15s; z-index: 50; }
+.scroll-to-bottom:hover { background: var(--surface-hover); color: var(--fg); }
+.scroll-btn-enter-active, .scroll-btn-leave-active { transition: opacity 0.25s ease; }
+.scroll-btn-enter-from, .scroll-btn-leave-to { opacity: 0; }
 
-/* Messages — matches design spec exactly */
-.msg { max-width: 85%; animation: fade-in 0.2s ease; word-break: break-word; }
-
-.msg-user {
-  align-self: flex-end;
-  background: var(--user-bubble);
-  color: #fff;
-  padding: 10px 16px;
-  border-radius: 16px 16px 4px 16px;
-  font-size: 14px;
-  line-height: 1.6;
-}
-
-.msg-agent {
-  align-self: flex-start;
-  background: var(--surface);
-  border: 1px solid var(--border);
-  color: var(--fg);
-  padding: 10px 16px;
-  border-radius: 16px 16px 16px 4px;
-  font-size: 14px;
-  line-height: 1.6;
-  transition: background var(--transition), border-color var(--transition);
-}
-
-.msg-agent.streaming .blink-cursor::after {
-  content: '▎';
-  animation: blink-cursor 0.8s step-end infinite;
-  color: var(--accent);
-}
-
-.msg-error {
-  align-self: flex-start;
-  background: var(--error-bg);
-  color: var(--error);
-  padding: 10px 16px;
-  border-radius: 16px 16px 16px 4px;
-  font-size: 13px;
-  line-height: 1.6;
-}
+/* Messages — message type styles (msg-user/msg-agent/tool-card/msg-error)
+   now live in their own components under components/messages/. The timeline
+   and chat-input styles below remain here because they are layout concerns
+   of this view, not reusable message rendering. */
 
 /* Timeline */
 .timeline { display: flex; align-items: center; justify-content: space-between; padding: 12px 20px; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-md); margin-bottom: 4px; flex-shrink: 0; }
@@ -770,113 +1247,82 @@ onUnmounted(() => {
 .timeline .line { flex: 1; height: 1px; background: var(--border); margin: 0 12px; align-self: flex-start; margin-top: 4px; }
 .timeline .line.done { background: var(--success); }
 
-/* Tool Cards — matches design spec */
-.tool-card {
-  align-self: flex-start;
-  background: var(--surface);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-lg);
-  max-width: 100%;
-  animation: fade-in 0.2s ease;
-  cursor: pointer;
-  transition: background var(--transition), border-color var(--transition);
-}
-.tool-card .tool-header {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 12px 16px;
-  cursor: pointer;
-}
-.tool-card .tool-icon { font-size: 16px; flex-shrink: 0; }
-.tool-card .tool-name { font-weight: 600; font-size: 13px; color: var(--accent); flex: 1; }
-.tool-card .tool-args {
-  font-size: 12px;
-  color: var(--fg-tertiary);
-  font-family: var(--font-mono);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  max-width: 200px;
-}
-.tool-card .tool-status { flex-shrink: 0; }
-.tool-card .tool-status .check { color: var(--success); font-size: 14px; }
-.tool-card .tool-status .spinner {
-  width: 14px;
-  height: 14px;
-  border: 2px solid transparent;
-  border-top-color: var(--fg-secondary);
-  border-radius: 50%;
-  animation: spin 0.8s linear infinite;
-  display: inline-block;
-}
-.tool-card .tool-chevron {
-  color: var(--fg-tertiary);
-  font-size: 12px;
-  transition: transform 0.15s;
-  flex-shrink: 0;
-}
-.tool-card.expanded .tool-chevron { transform: rotate(180deg); }
-
-.tool-card .tool-body {
-  border-top: 1px solid var(--border);
-  display: none;
-}
-.tool-card.expanded .tool-body { display: block; }
-
-.tool-body .tool-section { padding: 8px 16px; }
-.tool-body .tool-label {
-  font-size: 11px;
-  color: var(--fg-tertiary);
-  text-transform: uppercase;
-  letter-spacing: 0.5px;
-  margin-bottom: 4px;
-}
-.tool-body .tool-input {
-  background: var(--code-bg);
-  padding: 8px 16px;
-  font-family: var(--font-mono);
-  font-size: 12px;
-  color: var(--success);
-  border-radius: 4px;
-  margin: 0 12px;
-  white-space: pre-wrap;
-}
-.tool-body .tool-output {
-  background: var(--code-bg);
-  padding: 8px 16px;
-  font-family: var(--font-mono);
-  font-size: 12px;
-  color: var(--fg-secondary);
-  border-radius: 4px;
-  margin: 8px 12px;
-  max-height: 120px;
-  overflow: hidden;
-  line-height: 1.6;
-  white-space: pre-wrap;
-  word-break: break-all;
-  overflow-x: auto;
-}
-.tool-body .tool-output.collapsed {
-  max-height: 120px;
-  overflow: hidden;
-}
-.tool-body .toggle-expand { background: none; border: none; color: var(--accent); font-size: 12px; padding: 4px 16px 8px; cursor: pointer; font-family: var(--font-body); }
-
-/* Chat Input */
-.chat-input-area { border-top: 1px solid var(--border); padding: 12px 20px; background: var(--surface); display: flex; gap: 10px; align-items: center; transition: background var(--transition), border-color var(--transition); }
+/* Chat Input — unified container */
+.chat-input-area { position: relative; border-top: 1px solid var(--border); padding: 12px 20px; background: var(--surface); transition: background var(--transition), border-color var(--transition); }
 .chat-input-area.ended { display: flex; align-items: center; justify-content: center; padding: 14px 20px; }
 .ended-text { color: var(--fg-tertiary); font-size: 13px; }
-.chat-input-wrap { position: relative; flex: 1; display: flex; align-items: center; background: var(--bg); border: 1px solid var(--border); border-radius: var(--radius-xl); padding: 0 16px; min-height: 42px; transition: border-color 0.15s, box-shadow 0.15s; }
-.chat-input-wrap:focus-within { border-color: var(--border-focus); box-shadow: 0 0 0 3px var(--accent-muted); }
-.chat-input-wrap input { flex: 1; background: none; border: none; color: var(--fg); font-size: 14px; font-family: var(--font-body); outline: none; padding: 8px 0; }
-.chat-input-wrap input::placeholder { color: var(--fg-tertiary); }
-.chat-input-wrap input:disabled { opacity: 0.5; }
-.send-btn { width: 36px; height: 36px; border-radius: 50%; background: var(--accent); border: none; display: flex; align-items: center; justify-content: center; cursor: pointer; flex-shrink: 0; transition: background 0.15s; }
+
+.chat-input-container { position: relative; background: var(--bg); border: 1px solid var(--border); border-radius: var(--radius-xl); transition: border-color 0.15s, box-shadow 0.15s; }
+.chat-input-container.focused { border-color: var(--border-focus); box-shadow: 0 0 0 3px var(--accent-muted); }
+
+.chat-textarea { width: 100%; background: none; border: none; color: var(--fg); font-size: 14px; font-family: var(--font-body); line-height: 1.5; outline: none; resize: none; padding: 12px 16px 4px; min-height: 60px; max-height: 200px; }
+.chat-textarea::placeholder { color: var(--fg-tertiary); }
+.chat-textarea:disabled { opacity: 0.5; }
+
+/* Bottom control row */
+.input-controls { display: flex; align-items: center; justify-content: space-between; padding: 6px 8px 8px 12px; gap: 8px; }
+
+/* Permission dropdown (left) */
+.perm-dropdown { position: relative; }
+.perm-trigger { display: inline-flex; align-items: center; gap: 4px; padding: 4px 8px; background: none; border: none; color: var(--fg-secondary); font-size: 12px; cursor: pointer; border-radius: var(--radius-sm); transition: color 0.15s, background 0.15s; font-family: var(--font-body); }
+.perm-trigger:hover { color: var(--fg); background: var(--surface-hover); }
+.perm-label { font-weight: 500; }
+.perm-menu { position: absolute; bottom: calc(100% + 4px); left: 0; min-width: 140px; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-md); box-shadow: 0 4px 16px rgba(0,0,0,0.3); padding: 4px; z-index: 30; }
+.perm-menu-item { display: flex; align-items: center; justify-content: space-between; width: 100%; padding: 8px 10px; background: none; border: none; color: var(--fg); font-size: 13px; cursor: pointer; border-radius: var(--radius-sm); transition: background 0.1s; font-family: var(--font-body); }
+.perm-menu-item:hover { background: var(--surface-hover); }
+.perm-menu-item.active { color: var(--accent); }
+.perm-menu-item.active svg { color: var(--accent); }
+.perm-menu-enter-active, .perm-menu-leave-active { transition: opacity 0.15s, transform 0.15s; }
+.perm-menu-enter-from, .perm-menu-leave-to { opacity: 0; transform: translateY(4px); }
+
+/* Right side: context + action button */
+.input-right { display: flex; align-items: center; gap: 8px; }
+.ctx-indicator { display: inline-flex; align-items: center; gap: 4px; padding: 4px 8px; font-size: 11px; color: var(--fg-tertiary); font-family: var(--font-mono); cursor: help; white-space: pre-line; }
+
+.action-btn { width: 32px; height: 32px; border-radius: 50%; border: none; display: flex; align-items: center; justify-content: center; cursor: pointer; flex-shrink: 0; transition: background 0.15s, opacity 0.15s; }
+.send-btn { background: var(--accent); color: #fff; }
 .send-btn:hover:not(:disabled) { background: var(--accent-hover); }
-.send-btn:disabled { opacity: 0.5; cursor: not-allowed; }
-.send-btn svg { width: 16px; height: 16px; fill: var(--bg); }
+.send-btn:disabled { background: var(--border); color: var(--fg-tertiary); cursor: not-allowed; }
+.stop-btn { background: var(--fg); color: var(--bg); }
+.stop-btn:hover { opacity: 0.85; }
+.stop-btn.escalated { background: #e5484d; animation: stop-pulse 1s ease-in-out infinite; }
+@keyframes stop-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.7; } }
+
+/* Turn status bar: sits inside the message stream, visually part of it
+   (left-aligned, same width as agent replies, no separating border). */
+.turn-status-bar {
+  display: flex; align-items: center; gap: 10px;
+  align-self: flex-start;
+  max-width: 720px; width: fit-content;
+  padding: 6px 2px;
+  font-size: 12px; color: var(--fg-tertiary);
+  animation: fade-in 0.3s ease;
+}
+.turn-status-bar .status-dot.working {
+  width: 8px; height: 8px; border-radius: 50%;
+  background: var(--accent);
+  animation: loading-bounce 1.2s ease-in-out infinite;
+}
+.turn-status-bar .status-check { color: var(--accent); flex-shrink: 0; }
+.turn-status-bar .status-text { color: var(--fg-secondary); }
+.turn-status-bar .status-timer {
+  font-family: var(--font-mono); font-weight: 600; color: var(--fg);
+}
+.turn-status-bar .status-tokens { color: var(--fg-tertiary); }
+.turn-status-bar .status-copy-btn {
+  display: inline-flex; align-items: center; gap: 5px;
+  font-size: 11px; color: var(--fg-tertiary);
+  background: none; border: none; cursor: pointer;
+  border-radius: 4px; padding: 3px 8px;
+  transition: color 0.15s, background 0.15s;
+}
+.turn-status-bar .status-copy-btn:hover { color: var(--fg); background: var(--surface-hover); }
+@keyframes loading-bounce {
+  0%, 80%, 100% { opacity: 0.3; transform: scale(0.8); }
+  40% { opacity: 1; transform: scale(1.2); }
+}
+@keyframes fade-in { from { opacity: 0; } to { opacity: 1; } }
 
 @media (max-width: 1024px) { .session-layout { height: calc(100vh - var(--topbar-h)); } }
-@media (max-width: 768px) { .session-panel { display: none; } .msg { max-width: 90%; } }
+@media (max-width: 768px) { .session-panel { display: none; } }
 </style>

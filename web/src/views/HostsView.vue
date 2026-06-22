@@ -3,36 +3,36 @@
     <!-- Page Header -->
     <div class="page-header">
       <div>
-        <h2 class="page-title">主机</h2>
-        <div class="page-subtitle">共 <span class="text-mono">{{ daemons.length }}</span> 台 · <span class="text-success text-mono">{{ onlineCount }}</span> 在线 · <span class="text-tertiary text-mono">{{ offlineCount }}</span> 离线</div>
+        <h2 class="page-title">{{ t('nav.hosts') }}</h2>
+        <div class="page-subtitle">{{ t('hosts.count_prefix') }} <span class="text-mono">{{ daemons.length }}</span> {{ t('hosts.host_unit') }} · <span class="text-success text-mono">{{ onlineCount }}</span> {{ t('dashboard.online') }} · <span class="text-tertiary text-mono">{{ offlineCount }}</span> {{ t('dashboard.offline') }}</div>
       </div>
       <button class="btn btn-secondary" @click="showRegister = true">
         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 5v14M5 12h14"/></svg>
-        注册主机
+        {{ t('dashboard.register_host') }}
       </button>
     </div>
 
     <!-- 全局 Token 概览条（占位，待 C2/C3 接真实数据） -->
     <div class="token-global-strip">
-      <div class="tg-item"><span class="tg-num">{{ formatCost(tokenGlobal?.total) }}</span><span class="tg-label">总消耗</span></div>
+      <div class="tg-item"><span class="tg-num">{{ formatTokens(tokenGlobal?.total) }}</span><span class="tg-label">{{ t('dashboard.token_total') }}</span></div>
       <div class="tg-sep"></div>
-      <div class="tg-item"><span class="tg-num">{{ formatCost(tokenGlobal?.today) }}</span><span class="tg-label">今日</span></div>
+      <div class="tg-item"><span class="tg-num">{{ formatTokens(tokenGlobal?.today) }}</span><span class="tg-label">{{ t('dashboard.token_today') }}</span></div>
       <div class="tg-sep"></div>
-      <div class="tg-item"><span class="tg-num">{{ formatCost(tokenGlobal?.thisWeek) }}</span><span class="tg-label">本周</span></div>
+      <div class="tg-item"><span class="tg-num">{{ formatTokens(tokenGlobal?.thisWeek) }}</span><span class="tg-label">{{ t('dashboard.token_week') }}</span></div>
       <div class="tg-sep"></div>
-      <div class="tg-item"><span class="tg-num">{{ formatCost(tokenGlobal?.thisMonth) }}</span><span class="tg-label">本月</span></div>
+      <div class="tg-item"><span class="tg-num">{{ formatTokens(tokenGlobal?.thisMonth) }}</span><span class="tg-label">{{ t('dashboard.token_month') }}</span></div>
     </div>
 
     <!-- 筛选 + 搜索 -->
     <div class="host-controls">
-      <div class="host-filter" role="tablist" aria-label="按状态筛选主机">
-        <button :class="{ active: filter === 'all' }" @click="filter = 'all'">全部<span class="count">{{ daemons.length }}</span></button>
-        <button :class="{ active: filter === 'online' }" @click="filter = 'online'">在线<span class="count">{{ onlineCount }}</span></button>
-        <button :class="{ active: filter === 'offline' }" @click="filter = 'offline'">离线<span class="count">{{ offlineCount }}</span></button>
+      <div class="host-filter" role="tablist" :aria-label="t('hosts.filter_by_status')">
+        <button :class="{ active: filter === 'all' }" @click="filter = 'all'">{{ t('common.all') }}<span class="count">{{ daemons.length }}</span></button>
+        <button :class="{ active: filter === 'online' }" @click="filter = 'online'">{{ t('dashboard.online') }}<span class="count">{{ onlineCount }}</span></button>
+        <button :class="{ active: filter === 'offline' }" @click="filter = 'offline'">{{ t('dashboard.offline') }}<span class="count">{{ offlineCount }}</span></button>
       </div>
       <div class="host-search">
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/></svg>
-        <input type="text" v-model="searchQuery" placeholder="搜索名称、IP 或系统…" aria-label="搜索主机" />
+        <input type="text" v-model="searchQuery" :placeholder="t('hosts.search_placeholder')" :aria-label="t('hosts.search_hosts')" />
       </div>
     </div>
 
@@ -57,22 +57,22 @@
               </div>
             </div>
             <div class="hc-foot">
-              <div><span class="hc-sessions">{{ d.active_sessions || 0 }}</span> <span class="hc-sess-label">活跃会话</span></div>
+              <div><span class="hc-sessions">{{ d.active_sessions || 0 }}</span> <span class="hc-sess-label">{{ t('dashboard.active_sessions') }}</span></div>
               <span :class="['status-pill', 'mini', statusPillClass(d)]" :style="statusPillStyle(d)">{{ statusLabel(d) }}</span>
             </div>
-            <button class="ss-more-btn" type="button" title="更多操作" aria-label="更多操作" @click.stop="openMenu($event, d)">
+            <button class="ss-more-btn" type="button" :title="t('session.actions.more')" :aria-label="t('session.actions.more')" @click.stop="openMenu($event, d)">
               <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><circle cx="12" cy="5" r="1.8"/><circle cx="12" cy="12" r="1.8"/><circle cx="12" cy="19" r="1.8"/></svg>
             </button>
           </div>
-          <div v-if="filteredDaemons.length === 0" class="host-cards-empty">没有匹配的主机</div>
+          <div v-if="filteredDaemons.length === 0" class="host-cards-empty">{{ t('hosts.no_match') }}</div>
         </div>
-        <button class="hosts-deselect-btn" type="button" title="取消选择，恢复全部卡片" aria-label="取消选择" @click="deselectAll">✕</button>
+        <button class="hosts-deselect-btn" type="button" :title="t('hosts.deselect')" :aria-label="t('hosts.deselect')" @click="deselectAll">✕</button>
       </div>
 
       <!-- 详情面板（全宽） -->
       <div v-if="selectedDaemon" class="host-detail-panel">
         <div class="hd-header">
-          <button class="hd-more-btn" type="button" title="更多操作" aria-label="更多操作" @click.stop="openDetailMenu($event)">
+          <button class="hd-more-btn" type="button" :title="t('session.actions.more')" :aria-label="t('session.actions.more')" @click.stop="openDetailMenu($event)">
             <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><circle cx="12" cy="5" r="1.8"/><circle cx="12" cy="12" r="1.8"/><circle cx="12" cy="19" r="1.8"/></svg>
           </button>
           <div class="hd-icon" v-html="hostIcon(selectedDaemon, 28)"></div>
@@ -89,39 +89,39 @@
 
         <div class="hd-actions">
           <template v-if="selectedDaemon.status === 'reconnecting'">
-            <button class="btn btn-secondary" disabled><span class="mini-spinner"></span>正在重启…</button>
+            <button class="btn btn-secondary" disabled><span class="mini-spinner"></span>{{ t('hosts.restarting') }}</button>
           </template>
           <template v-else-if="selectedDaemon.daemon_online">
             <button class="btn btn-secondary" @click="confirmRestart(selectedDaemon)">
               <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 12a9 9 0 019-9 9 9 0 016.7 3"/><path d="M21 3v5h-5"/><path d="M21 12a9 9 0 01-9 9 9 9 0 01-6.7-3"/><path d="M3 21v-5h5"/></svg>
-              重启 daemon
+              {{ t('hosts.restart_daemon') }}
             </button>
             <button class="btn btn-danger" @click="confirmKick(selectedDaemon)">
               <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 3v9"/><path d="M6.4 6.4a8 8 0 106.6-2.3"/></svg>
-              强制踢下线
+              {{ t('hosts.force_kick_label') }}
             </button>
           </template>
           <template v-else>
-            <button class="btn btn-secondary" @click="reconnectHost(selectedDaemon)" title="等待主机端 daemon 重新连接">等待重连</button>
+            <button class="btn btn-secondary" @click="reconnectHost(selectedDaemon)" :title="t('hosts.wait_reconnect')">{{ t('hosts.wait_reconnect') }}</button>
           </template>
         </div>
 
         <div class="host-detail-grid">
           <!-- 资源占用 -->
           <div class="hd-section">
-            <div class="hd-section-title">{{ selectedDaemon.daemon_online ? '资源占用' : '资源占用（主机离线）' }}</div>
+            <div class="hd-section-title">{{ selectedDaemon.daemon_online ? t('hosts.resource_usage') : t('hosts.resource_offline') }}</div>
             <div :class="['resource-row', { offline: !selectedDaemon.daemon_online }]">
               <span class="r-label">CPU</span>
               <div class="r-bar"><div :class="['r-fill', resourceClass(selectedDaemon.cpu_pct)]" :style="rFillStyle(selectedDaemon.cpu_pct)"></div></div>
               <span class="r-val">{{ selectedDaemon.cpu_pct != null ? selectedDaemon.cpu_pct.toFixed(0) + '%' : '—' }}</span>
             </div>
             <div :class="['resource-row', { offline: !selectedDaemon.daemon_online }]">
-              <span class="r-label">内存</span>
+              <span class="r-label">{{ t('hosts.memory') }}</span>
               <div class="r-bar"><div :class="['r-fill', resourceClass(selectedDaemon.mem_pct)]" :style="rFillStyle(selectedDaemon.mem_pct)"></div></div>
               <span class="r-val">{{ selectedDaemon.mem_pct != null ? selectedDaemon.mem_pct.toFixed(0) + '%' : '—' }}</span>
             </div>
             <div :class="['resource-row', { offline: !selectedDaemon.daemon_online }]">
-              <span class="r-label">磁盘</span>
+              <span class="r-label">{{ t('hosts.disk') }}</span>
               <div class="r-bar"><div :class="['r-fill', resourceClass(selectedDaemon.disk_pct)]" :style="rFillStyle(selectedDaemon.disk_pct)"></div></div>
               <span class="r-val">{{ selectedDaemon.disk_pct != null ? selectedDaemon.disk_pct.toFixed(0) + '%' : '—' }}</span>
             </div>
@@ -129,20 +129,19 @@
 
           <!-- 连接信息 -->
           <div class="hd-section">
-            <div class="hd-section-title">连接信息</div>
+            <div class="hd-section-title">{{ t('hosts.connection_info') }}</div>
             <div class="conn-grid">
-              <div class="conn-item"><div class="c-label">IP 地址</div><div class="c-val">{{ selectedDaemon.ip && selectedDaemon.ip !== 'unknown' ? selectedDaemon.ip : '—' }}</div></div>
-              <div class="conn-item"><div class="c-label">端口</div><div class="c-val">{{ selectedDaemon.port || '—' }}</div></div>
-              <div class="conn-item"><div class="c-label">DAEMON 版本</div><div class="c-val">{{ selectedDaemon.version ? 'v' + selectedDaemon.version : '—' }}</div></div>
-              <div class="conn-item"><div class="c-label">系统</div><div class="c-val">{{ selectedDaemon.os || '—' }}</div></div>
-              <div class="conn-item"><div class="c-label">运行时长</div><div :class="['c-val', { muted: !selectedDaemon.daemon_online }]">{{ selectedDaemon.started_at ? formatUptime(selectedDaemon.started_at) : '—' }}</div></div>
-              <div class="conn-item"><div class="c-label">最后心跳</div><div :class="['c-val', { muted: !selectedDaemon.daemon_online }]">{{ selectedDaemon.last_heartbeat ? formatRelativeTime(selectedDaemon.last_heartbeat) : '—' }}</div></div>
+              <div class="conn-item"><div class="c-label">{{ t('hosts.ip_addr') }}</div><div class="c-val">{{ selectedDaemon.ip && selectedDaemon.ip !== 'unknown' ? selectedDaemon.ip : '—' }}</div></div>
+              <div class="conn-item"><div class="c-label">{{ t('hosts.daemon_version') }}</div><div class="c-val">{{ selectedDaemon.version ? 'v' + selectedDaemon.version : '—' }}</div></div>
+              <div class="conn-item"><div class="c-label">{{ t('hosts.os') }}</div><div class="c-val">{{ selectedDaemon.os || '—' }}</div></div>
+              <div class="conn-item"><div class="c-label">{{ t('hosts.uptime') }}</div><div :class="['c-val', { muted: !selectedDaemon.daemon_online }]">{{ selectedDaemon.started_at ? formatUptime(selectedDaemon.started_at) : '—' }}</div></div>
+              <div class="conn-item"><div class="c-label">{{ t('hosts.last_heartbeat') }}</div><div :class="['c-val', { muted: !selectedDaemon.daemon_online }]">{{ selectedDaemon.last_heartbeat ? formatRelativeTime(selectedDaemon.last_heartbeat) : '—' }}</div></div>
             </div>
           </div>
 
           <!-- Agent 运行状态（C4b 版本上报 + C4c 升级占位） -->
           <div class="hd-section">
-            <div class="hd-section-title">Agent 运行状态</div>
+            <div class="hd-section-title">{{ t('hosts.agent_status') }}</div>
             <template v-if="agentCards(selectedDaemon).length">
               <div class="agent-card" v-for="(a, i) in agentCards(selectedDaemon)" :key="i">
                 <div :class="['ag-icon', agentIconClass(a)]">{{ agentShort(a) }}</div>
@@ -150,54 +149,68 @@
                   <div class="ag-name">{{ agentName(a) }} <span class="ag-version">{{ agentVersionLabel(a) }}</span></div>
                   <div class="ag-meta">{{ agentMetaLabel(a) }}</div>
                 </div>
-                <button v-if="selectedDaemon?.daemon_online && !isAgentLatest(a)" class="ag-upgrade-btn" :class="{ upgrading: upgrading === agentName(a) }" :disabled="upgrading === agentName(a)" @click="upgradeAgent(agentName(a))">
-                  {{ upgrading === agentName(a) ? '升级中…' : '升级' }}
+                <button v-if="selectedDaemon?.daemon_online && !isAgentLatest(a)" class="ag-upgrade-btn" :class="{ upgrading: upgrading === agentRawName(a) }" :disabled="upgrading === agentRawName(a)" @click="upgradeAgent(agentRawName(a))">
+                  {{ upgrading === agentRawName(a) ? t('settings.upgrade_btn') : t('settings.upgrade_btn') }}
                 </button>
-                <span v-else-if="isAgentLatest(a)" class="ag-latest">✓ 最新</span>
+                <span v-else-if="isAgentLatest(a)" class="ag-latest">✓ {{ t('settings.installed') }}</span>
               </div>
             </template>
             <div v-else class="agent-card">
               <div class="ag-icon claude">CC</div>
               <div class="ag-info">
-                <div class="ag-name">Claude Code <span class="ag-version">版本待上报</span></div>
-                <div class="ag-meta">等待 daemon 上报 Agent 信息</div>
+                <div class="ag-name">Claude Code <span class="ag-version">{{ t('settings.version_pending') }}</span></div>
+                <div class="ag-meta">{{ t('hosts.agent_info_pending') }}</div>
               </div>
             </div>
           </div>
 
           <!-- Token 消耗（C2/C3 真实数据） -->
           <div class="hd-section">
-            <div class="hd-section-title">Token 消耗</div>
+            <div class="hd-section-title">{{ t('dashboard.token_usage') }}</div>
             <div class="token-overview">
-              <div class="token-stat"><div class="tk-num">{{ formatCost(daemonCost?.total) }}</div><div class="tk-label">主机总计</div></div>
-              <div class="token-stat"><div class="tk-num accent">{{ formatCost(daemonCost?.today) }}</div><div class="tk-label">今日消耗</div></div>
-              <div class="token-stat"><div class="tk-num">{{ formatCost(daemonCost?.thisMonth) }}</div><div class="tk-label">本月消耗</div></div>
+              <div class="token-stat"><div class="tk-num">{{ formatTokens(daemonCost?.total) }}</div><div class="tk-label">{{ t('hosts.token_host_total') }}</div></div>
+              <div class="token-stat"><div class="tk-num accent">{{ formatTokens(daemonCost?.today) }}</div><div class="tk-label">{{ t('hosts.token_today_consumed') }}</div></div>
+              <div class="token-stat"><div class="tk-num">{{ formatTokens(daemonCost?.thisMonth) }}</div><div class="tk-label">{{ t('hosts.token_month_consumed') }}</div></div>
             </div>
             <div class="session-token-list">
-              <template v-if="daemonCost?.sessions?.length">
-                <div class="session-token-row" v-for="s in daemonCost.sessions" :key="s.session_id">
+              <template v-if="sortedCostSessions.length">
+                <div class="session-token-row" v-for="(s, i) in paginatedCostSessions" :key="s.session_id" @click="$router.push(`/session/${s.session_id}`)">
+                  <span class="st-rank">{{ (costExpanded ? (costPage - 1) * 10 : 0) + i + 1 }}</span>
                   <span class="st-title">{{ s.title || s.session_id.slice(0, 8) }}</span>
-                  <span class="st-tokens">{{ formatCost(s.cost_usd) }}</span>
+                  <span class="st-tokens">{{ formatTokens(s.total_tokens) }}</span>
+                  <button class="st-expand" @click.stop="toggleTokenExpand(s.session_id)" :aria-expanded="expandedTokenSession === s.session_id">{{ expandedTokenSession === s.session_id ? '▾' : '▸' }}</button>
+                  <div v-if="expandedTokenSession === s.session_id" class="st-breakdown">
+                    <div class="stb-item"><span class="stb-label">{{ t('dashboard.token_input') }}</span><span class="stb-val">{{ formatTokens(s.tok_input) }}</span></div>
+                    <div class="stb-item"><span class="stb-label">{{ t('dashboard.token_output') }}</span><span class="stb-val">{{ formatTokens(s.tok_output) }}</span></div>
+                    <div class="stb-item"><span class="stb-label">{{ t('dashboard.token_cache_read') }}</span><span class="stb-val">{{ formatTokens(s.tok_cache_read) }}</span></div>
+                    <div class="stb-item"><span class="stb-label">{{ t('dashboard.token_cache_create') }}</span><span class="stb-val">{{ formatTokens(s.tok_cache_create) }}</span></div>
+                  </div>
+                </div>
+                <a v-if="sortedCostSessions.length > 5 && !costExpanded" class="st-more" @click="costExpanded = true">{{ t('common.all') }} {{ sortedCostSessions.length }} →</a>
+                <div v-if="costExpanded && costTotalPages > 1" class="st-pagination">
+                  <button class="st-page-btn" :disabled="costPage === 1" @click="costPage--">‹</button>
+                  <span class="st-page-info">{{ costPage }} / {{ costTotalPages }}</span>
+                  <button class="st-page-btn" :disabled="costPage === costTotalPages" @click="costPage++">›</button>
                 </div>
               </template>
-              <div v-else class="session-token-row"><span class="st-title" style="color:var(--fg-tertiary);">暂无会话消耗记录</span></div>
+              <div v-else class="session-token-row"><span class="st-title" style="color:var(--fg-tertiary);">{{ t('hosts.token_no_records') }}</span></div>
             </div>
           </div>
 
           <!-- 会话（全宽） -->
           <div class="hd-section hd-section-full">
-            <div class="hd-section-title">会话</div>
+            <div class="hd-section-title">{{ t('nav.sessions') }}</div>
             <div class="sess-summary">
               <div class="ss-block">
                 <span class="ss-num accent">{{ selectedDaemon.active_sessions || 0 }}</span>
-                <span class="ss-label">活跃会话</span>
+                <span class="ss-label">{{ t('dashboard.active_sessions') }}</span>
               </div>
               <div class="ss-divider"></div>
               <div class="ss-block">
-                <span class="ss-num">{{ selectedDaemon.total_sessions || 0 }}</span>
-                <span class="ss-label">历史总数</span>
+                <span class="ss-num">{{ detailSessionTotal }}</span>
+                <span class="ss-label">{{ t('dashboard.total_sessions') }}</span>
               </div>
-              <a class="btn btn-ghost ss-link" @click="goSessionWithHost(selectedDaemon)">查看全部 →</a>
+              <a class="btn btn-ghost ss-link" @click="goSessionWithHost(selectedDaemon)">{{ t('dashboard.view_all') }} →</a>
             </div>
           </div>
         </div>
@@ -206,8 +219,8 @@
       <!-- Empty Detail -->
       <div v-else class="host-detail-panel empty">
         <div class="empty-icon">—</div>
-        <div class="empty-title">请选择一台主机</div>
-        <div class="empty-sub">查看连接信息、资源占用、Agent 版本、Token 消耗，或执行强制踢下线、重启等操作。</div>
+        <div class="empty-title">{{ t('hosts.empty_title') }}</div>
+        <div class="empty-sub">{{ t('hosts.empty_desc') }}</div>
       </div>
     </div>
 
@@ -215,31 +228,31 @@
     <div v-if="menuOpen" class="ss-menu" :style="{ left: menuX + 'px', top: menuY + 'px' }" @click.stop>
       <button class="ss-menu-item" @click="onMenuAct('copy')">
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"/></svg>
-        <span>复制连接信息</span>
+        <span>{{ t('hosts.menu_copy_info') }}</span>
       </button>
       <button class="ss-menu-item" @click="onMenuAct('export')">
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><path d="M7 10l5 5 5-5"/><path d="M12 15V3"/></svg>
-        <span>导出主机报告</span>
+        <span>{{ t('hosts.menu_export_report') }}</span>
       </button>
       <button class="ss-menu-item" @click="onMenuAct('alias')">
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M11 4H4a2 2 0 00-2 2v14a2 2 0 002 2h14a2 2 0 002-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 013 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>
-        <span>编辑别名</span>
+        <span>{{ t('hosts.menu_edit_alias') }}</span>
       </button>
       <div class="ss-menu-sep"></div>
       <template v-if="menuTarget?.daemon_online">
         <button class="ss-menu-item" @click="onMenuAct('restart')">
           <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 12a9 9 0 019-9 9 9 0 016.7 3"/><path d="M21 3v5h-5"/><path d="M21 12a9 9 0 01-9 9 9 9 0 01-6.7-3"/><path d="M3 21v-5h5"/></svg>
-          <span>重启 daemon</span>
+          <span>{{ t('hosts.restart_daemon') }}</span>
         </button>
         <button class="ss-menu-item" @click="onMenuAct('kick')">
           <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 3v9"/><path d="M6.4 6.4a8 8 0 106.6-2.3"/></svg>
-          <span>强制踢下线</span>
+          <span>{{ t('hosts.force_kick_label') }}</span>
         </button>
       </template>
       <div class="ss-menu-sep"></div>
       <button class="ss-menu-item danger" @click="onMenuAct('unregister')">
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 6h18"/><path d="M8 6V4a2 2 0 012-2h4a2 2 0 012 2v2"/><path d="M19 6l-1 14a2 2 0 01-2 2H8a2 2 0 01-2-2L5 6"/></svg>
-        <span>注销主机</span>
+        <span>{{ t('hosts.menu_unregister') }}</span>
       </button>
     </div>
 
@@ -255,9 +268,9 @@
         <h3 class="ss-dialog-title">{{ confirm.title }}</h3>
         <p class="ss-dialog-desc">{{ confirm.desc }}</p>
         <div class="ss-dialog-actions">
-          <button class="btn btn-cancel" @click="confirm.show = false">取消</button>
+          <button class="btn btn-cancel" @click="confirm.show = false">{{ t('common.cancel') }}</button>
           <button :class="['btn', confirm.danger ? 'ss-confirm' : 'btn-accent']" :disabled="confirm.loading" @click="confirm.action">
-            <span v-if="confirm.loading" class="mini-spinner"></span>{{ confirm.loading ? '处理中…' : confirm.confirmText }}
+            <span v-if="confirm.loading" class="mini-spinner"></span>{{ confirm.loading ? t('common.processing') : confirm.confirmText }}
           </button>
         </div>
       </div>
@@ -277,12 +290,14 @@ import { useRouter } from 'vue-router'
 import { useWebSocket } from '../composables/useWebSocket'
 import { useAuth } from '../composables/useAuth'
 import { formatRelativeTime } from '../composables/useRelativeTime'
+import { useLocale } from '../composables/useLocale'
 import RegisterDaemonDialog from '../components/RegisterDaemonDialog.vue'
 
 const router = useRouter()
 const ws = useWebSocket()
 const { accessToken } = useAuth()
 const { connect, send, onEvent } = ws
+const { t } = useLocale()
 
 const daemons = ref<any[]>([])
 const selectedId = ref<string | null>(null)
@@ -307,24 +322,27 @@ const upgrading = ref('')
 
 // C3: Token cost data (from C2 backend — cost_usd in USD)
 const tokenGlobal = ref<{ total: number; today: number; thisWeek: number; thisMonth: number } | null>(null)
-const daemonCost = ref<{ total: number; today: number; thisMonth: number; sessions: Array<{ session_id: string; title: string; cost_usd: number }> } | null>(null)
+const daemonCost = ref<{ total: number; today: number; thisMonth: number; sessions: Array<{ session_id: string; title: string; total_tokens: number; tok_input: number; tok_output: number; tok_cache_read: number; tok_cache_create: number }> } | null>(null)
 
-function formatCost(v: number | null | undefined): string {
+function formatTokens(v: number | null | undefined): string {
   if (v == null) return '—'
-  if (v > 0 && v < 0.01) return '<$0.01'
-  return '$' + v.toFixed(2)
+  if (v === 0) return '0'
+  if (v >= 1e9) return (v / 1e9).toFixed(2) + 'B'
+  if (v >= 1e6) return (v / 1e6).toFixed(2) + 'M'
+  if (v >= 1e3) return (v / 1e3).toFixed(1) + 'K'
+  return String(v)
 }
 async function fetchCostSummary() {
   const origin = getRelayOrigin()
   try {
-    const r = await fetch(`${origin}/api/cost/summary`, { headers: { Authorization: `Bearer ${accessToken.value}` } })
+    const r = await fetch(`${origin}/api/tokens/summary`, { headers: { Authorization: `Bearer ${accessToken.value}` } })
     if (r.ok) tokenGlobal.value = await r.json()
   } catch { /* ignore */ }
 }
 async function fetchCostByDaemon(id: string) {
   const origin = getRelayOrigin()
   try {
-    const r = await fetch(`${origin}/api/cost/by-daemon/${id}`, { headers: { Authorization: `Bearer ${accessToken.value}` } })
+    const r = await fetch(`${origin}/api/tokens/by-daemon/${id}`, { headers: { Authorization: `Bearer ${accessToken.value}` } })
     daemonCost.value = r.ok ? await r.json() : null
   } catch { daemonCost.value = null }
 }
@@ -364,8 +382,8 @@ function hostIcon(d: any, size = 20): string {
 }
 
 function statusLabel(d: any): string {
-  if (d.status === 'reconnecting') return '重启中'
-  return d.daemon_online ? '在线' : '离线'
+  if (d.status === 'reconnecting') return t('hosts.reconnecting')
+  return d.daemon_online ? t('hosts.status_online') : t('hosts.status_offline')
 }
 
 function statusPillClass(d: any): string {
@@ -393,10 +411,10 @@ function rFillStyle(pct: number | null | undefined): Record<string, string> {
 function formatUptime(startedAt: number): string {
   if (!startedAt) return '—'
   const seconds = Math.floor(Date.now() / 1000 - startedAt)
-  if (seconds < 60) return `${seconds}秒`
-  if (seconds < 3600) return `${Math.floor(seconds / 60)}分钟`
-  if (seconds < 86400) return `${Math.floor(seconds / 3600)}小时`
-  return `${Math.floor(seconds / 86400)}天`
+  if (seconds < 60) return `${seconds}${t('hosts.uptime_s')}`
+  if (seconds < 3600) return `${Math.floor(seconds / 60)}${t('hosts.uptime_m')}`
+  if (seconds < 86400) return `${Math.floor(seconds / 3600)}${t('hosts.uptime_h')}`
+  return `${Math.floor(seconds / 86400)}${t('hosts.uptime_d')}`
 }
 
 // Agent 字段兼容（字符串数组 / 对象数组）
@@ -404,11 +422,16 @@ function agentCards(d: any): any[] {
   if (d && Array.isArray(d.agents) && d.agents.length) return d.agents
   return []
 }
-function agentName(a: any): string { return typeof a === 'string' ? a : (a?.name || a?.type || 'Agent') }
-function agentShort(a: any): string { return /codex/i.test(agentName(a)) ? 'Cx' : 'CC' }
+const AGENT_DISPLAY_NAMES: Record<string, string> = { 'claude-code': 'Claude Code', 'opencode': 'OpenCode', 'codex': 'Codex' }
+function agentRawName(a: any): string { return typeof a === 'string' ? a : (a?.name || a?.type || 'Agent') }
+function agentName(a: any): string {
+  const raw = agentRawName(a)
+  return AGENT_DISPLAY_NAMES[raw] || raw
+}
+function agentShort(a: any): string { const n = agentRawName(a); if (/codex/i.test(n)) return 'Cx'; if (/opencode/i.test(n)) return 'OC'; return 'CC' }
 function agentIconClass(a: any): string { return /codex/i.test(agentName(a)) ? 'codex' : 'claude' }
 function agentVersionLabel(a: any): string {
-  if (typeof a !== 'object' || !a?.version) return '版本待上报'
+  if (typeof a !== 'object' || !a?.version) return t('settings.version_pending')
   const v = 'v' + a.version
   if (a.latest && a.version !== a.latest) return v + ' → v' + a.latest
   return v
@@ -417,7 +440,10 @@ function isAgentLatest(a: any): boolean {
   return typeof a === 'object' && !!a?.latest && a?.version === a?.latest
 }
 function agentMetaLabel(a: any): string {
-  return typeof a === 'object' && a?.version ? '已安装 · 可用' : '版本待上报'
+  if (typeof a === 'object' && a?.version) {
+    return a.latest && a.version !== a.latest ? t('settings.upgrade_available') : t('settings.installed')
+  }
+  return t('settings.version_pending')
 }
 async function upgradeAgent(name: string) {
   if (upgrading.value) return
@@ -432,12 +458,12 @@ async function upgradeAgent(name: string) {
       body: JSON.stringify({ agent: name }),
     })
     if (!r.ok) {
-      showToast('升级请求发送失败')
+      showToast(t('hosts.upgrade_failed'))
       upgrading.value = ''
     }
     // 成功后等待 upgrade_result 事件反馈（daemon 异步执行升级命令）
   } catch {
-    showToast('升级请求发送失败')
+    showToast(t('hosts.upgrade_failed'))
     upgrading.value = ''
   }
 }
@@ -461,8 +487,52 @@ function deselectAll() {
 }
 
 function goSessionWithHost(d: any) {
-  // C1-1c: 跳会话列表并选中当前主机
   router.push({ path: '/session/default', query: { host: d.daemon_id } })
+}
+
+// Sessions for detail panel (recent 3)
+const allSessions = ref<any[]>([])
+const detailSessions = computed(() => {
+  if (!selectedId.value) return []
+  return allSessions.value
+    .filter(s => s.daemon_id === selectedId.value)
+    .sort((a, b) => {
+      const ta = a.last_activity_at ? new Date(a.last_activity_at).getTime() : 0
+      const tb = b.last_activity_at ? new Date(b.last_activity_at).getTime() : 0
+      return tb - ta
+    })
+    .slice(0, 3)
+})
+const detailSessionTotal = computed(() => {
+  if (!selectedId.value) return 0
+  return allSessions.value.filter(s => s.daemon_id === selectedId.value).length
+})
+// Cost sessions: sorted by cost desc, top 5 default, expand + paginate
+const costExpanded = ref(false)
+const costPage = ref(1)
+const COST_PAGE_SIZE = 10
+const sortedCostSessions = computed(() => {
+  if (!daemonCost.value?.sessions) return []
+  return [...daemonCost.value.sessions].sort((a, b) => (b.total_tokens || 0) - (a.total_tokens || 0))
+})
+const costTotalPages = computed(() => Math.max(1, Math.ceil(sortedCostSessions.value.length / COST_PAGE_SIZE)))
+const paginatedCostSessions = computed(() => {
+  const all = sortedCostSessions.value
+  if (!costExpanded.value) return all.slice(0, 5)
+  const start = (costPage.value - 1) * COST_PAGE_SIZE
+  return all.slice(start, start + COST_PAGE_SIZE)
+})
+// Expandable per-session token breakdown
+const expandedTokenSession = ref<string | null>(null)
+function toggleTokenExpand(sid: string) {
+  expandedTokenSession.value = expandedTokenSession.value === sid ? null : sid
+}
+// Reset pagination when daemon changes
+watch(selectedId, () => { costExpanded.value = false; costPage.value = 1; expandedTokenSession.value = null })
+
+function sessionStatusLabel(s: any): string {
+  const STATUS_KEYS: Record<string, string> = { running: 'session.status.running', busy: 'session.status.busy', idle: 'session.status.idle', completed: 'session.status.completed', error: 'session.status.error', killed: 'session.status.killed', disconnected: 'session.status.disconnected', exited: 'session.status.exited' }
+  return t(STATUS_KEYS[s.status] || 'session.status.running')
 }
 
 function openMenu(e: MouseEvent, d: any) {
@@ -497,7 +567,7 @@ function onMenuAct(act: string) {
 
 function copyConnection(d: any) {
   const conn = d.ip && d.ip !== 'unknown' ? d.ip : '—'
-  navigator.clipboard.writeText(conn).then(() => showToast(`已复制 ${conn}`)).catch(() => {})
+  navigator.clipboard.writeText(conn).then(() => showToast(t('hosts.copy_toast', { info: conn }))).catch(() => {})
 }
 
 function exportReport(d: any) {
@@ -512,15 +582,15 @@ function exportReport(d: any) {
 }
 
 function confirmRestart(d: any) {
-  showConfirm({ title: `重启「${d.hostname || d.daemon_id?.slice(0, 8)}」上的 daemon？`, desc: 'daemon 将短暂断开，约 5-10 秒后自动恢复。期间会话暂停。', confirmText: '重启 daemon',
+  showConfirm({ title: t('hosts.restart_confirm_title', { name: d.hostname || d.daemon_id?.slice(0, 8) }), desc: t('hosts.restart_confirm_desc'), confirmText: t('hosts.restart_daemon'),
     action: async () => {
       confirm.value.loading = true
       try {
         const origin = getRelayOrigin()
         await fetch(`${origin}/api/daemons/${d.daemon_id}/restart`, { method: 'POST', headers: { Authorization: `Bearer ${accessToken.value}` } })
         d.status = 'reconnecting'
-        showToast('重启指令已发送，等待重连…')
-      } catch { showToast('重启失败') }
+        showToast(t('hosts.restart_sent'))
+      } catch { showToast(t('hosts.restart_failed')) }
       confirm.value.show = false
       confirm.value.loading = false
     }
@@ -529,13 +599,13 @@ function confirmRestart(d: any) {
 
 function confirmKick(d: any) {
   const prev = { daemon_online: d.daemon_online, cpu_pct: d.cpu_pct, mem_pct: d.mem_pct, disk_pct: d.disk_pct, active_sessions: d.active_sessions }
-  showConfirm({ title: `强制踢下线「${d.hostname || d.daemon_id?.slice(0, 8)}」？`, desc: '立即断开 daemon 连接，所有运行中会话被中止。需重新连接恢复。', confirmText: '强制踢下线', danger: true,
+  showConfirm({ title: t('hosts.kick_title', { name: d.hostname || d.daemon_id?.slice(0, 8) }), desc: t('hosts.kick_desc'), confirmText: t('hosts.kick_confirm'), danger: true,
     action: () => {
       d.daemon_online = false; d.cpu_pct = null; d.mem_pct = null; d.disk_pct = null; d.active_sessions = 0
       confirm.value.show = false
       const origin = getRelayOrigin()
       fetch(`${origin}/api/daemons/${d.daemon_id}/forceKick`, { method: 'POST', headers: { Authorization: `Bearer ${accessToken.value}` } }).catch(() => {})
-      showToast(`已踢下线「${d.hostname || d.daemon_id?.slice(0, 8)}」`, () => { Object.assign(d, prev) })
+      showToast(t('hosts.kick_toast', { name: d.hostname || d.daemon_id?.slice(0, 8) }), () => { Object.assign(d, prev) })
     }
   })
 }
@@ -546,7 +616,7 @@ function reconnectHost(d: any) {
 }
 
 function confirmUnregister(d: any) {
-  showConfirm({ title: `注销「${d.hostname || d.daemon_id?.slice(0, 8)}」？`, desc: '从账户移除主机，历史会话保留。需重新注册才能连接。', confirmText: '注销主机', danger: true,
+  showConfirm({ title: t('hosts.unregister_title', { name: d.hostname || d.daemon_id?.slice(0, 8) }), desc: t('hosts.unregister_desc'), confirmText: t('hosts.unregister_confirm'), danger: true,
     action: () => {
       const idx = daemons.value.findIndex(x => x.daemon_id === d.daemon_id)
       const removed = daemons.value.splice(idx, 1)[0]
@@ -564,7 +634,7 @@ function confirmUnregister(d: any) {
 }
 
 function startRename(d: any) {
-  const newName = prompt('输入新别名', d.daemon_alias || d.hostname || '')
+  const newName = prompt(t('hosts.alias_prompt'), d.daemon_alias || d.hostname || '')
   if (newName && newName.trim()) {
     const oldName = d.daemon_alias
     d.daemon_alias = newName.trim()
@@ -573,7 +643,7 @@ function startRename(d: any) {
       method: 'PUT', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${accessToken.value}` },
       body: JSON.stringify({ alias: newName.trim() })
     }).catch(() => {})
-    showToast(`已重命名为「${newName.trim()}」`, () => { d.daemon_alias = oldName })
+    showToast(t('hosts.rename_toast', { name: newName.trim() }), () => { d.daemon_alias = oldName })
   }
 }
 
@@ -590,6 +660,7 @@ const onScroll = () => closeMenu()
 onMounted(() => {
   connect()
   send({ type: 'list_daemons' })
+  send({ type: 'list_sessions' })
   fetchCostSummary()
   document.addEventListener('click', onDocClick)
   document.addEventListener('keydown', onEsc)
@@ -598,10 +669,38 @@ onMounted(() => {
 
   cleanups.push(onEvent('daemon_list', (msg: any) => {
     daemons.value = msg.daemons || []
-    // 首屏默认选中第一台（匹配设计稿 selectHost(HOSTS[0].id)）
     if (!selectedId.value && daemons.value.length) {
       selectedId.value = daemons.value[0].daemon_id
     }
+  }))
+  cleanups.push(onEvent('session_list', (msg: any) => {
+    allSessions.value = msg.sessions || []
+  }))
+  cleanups.push(onEvent('session_status', (msg: any) => {
+    const idx = allSessions.value.findIndex((s: any) => s.session_id === msg.session_id)
+    if (idx >= 0) { allSessions.value[idx].status = msg.status }
+  }))
+  cleanups.push(onEvent('session_created', (msg: any) => {
+    const sid = msg.session_id
+    if (sid && !allSessions.value.find((s: any) => s.session_id === sid)) {
+      // 乐观插入：relay 的 session_created 早于 DB 落库，补刷的 list_sessions 可能拿不到
+      // 新会话，先插入占位，随后 session_list 整体覆盖保持一致。
+      allSessions.value.unshift({
+        session_id: sid,
+        status: 'running',
+        agent_type: 'claude-code',
+        source: 'daemon',
+        title: msg.title || '',
+        daemon_id: msg.daemon_id || '',
+        hostname: msg.hostname || '',
+        created_at: new Date().toISOString(),
+        last_activity_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+        subagent_count: 0,
+        pinned: false,
+      })
+    }
+    send({ type: 'list_sessions' })
   }))
   cleanups.push(onEvent('daemon_status', (msg: any) => {
     const idx = daemons.value.findIndex(d => d.daemon_id === msg.daemon_id)
@@ -614,8 +713,8 @@ onMounted(() => {
   }))
   cleanups.push(onEvent('upgrade_result', (msg: any) => {
     upgrading.value = ''
-    if (msg.status === 'success') showToast(`${msg.agent || 'Agent'} 已升级${msg.message ? '到 v' + msg.message : ''}`)
-    else showToast(`升级失败：${msg.error || '未知错误'}`)
+    if (msg.status === 'success') showToast(t('hosts.upgrade_success', { agent: msg.agent || 'Agent', version: msg.message || '' }))
+    else showToast(t('hosts.upgrade_error', { error: msg.error || t('dashboard.unknown_error') }))
   }))
 })
 
@@ -764,11 +863,22 @@ onUnmounted(() => {
 .token-stat .tk-num { font-size: 22px; font-weight: 700; color: var(--fg); font-variant-numeric: tabular-nums; letter-spacing: -0.01em; line-height: 1; }
 .token-stat .tk-num.accent { color: var(--accent); }
 .token-stat .tk-label { font-size: 11px; color: var(--fg-tertiary); margin-top: 4px; text-transform: uppercase; letter-spacing: 0.06em; }
-.session-token-list { background: var(--bg); border: 1px solid var(--border); border-radius: var(--radius-md); overflow: hidden; }
-.session-token-row { display: flex; align-items: center; gap: 12px; padding: 10px 14px; border-bottom: 1px solid var(--border); font-size: 13px; }
+.session-token-list { margin-top: 10px; border-radius: var(--radius-md); overflow: hidden; border: 1px solid var(--border); }
+.session-token-row { display: flex; align-items: flex-start; flex-wrap: wrap; gap: 10px; padding: 9px 12px; border-bottom: 1px solid var(--border); font-size: 13px; cursor: pointer; transition: background 0.1s; }
 .session-token-row:last-child { border-bottom: none; }
-.session-token-row .st-title { flex: 1; color: var(--fg); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.session-token-row .st-tokens { font-family: var(--font-mono); font-size: 13px; color: var(--fg-secondary); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.session-token-row:hover { background: var(--surface-hover); }
+.session-token-row .st-rank { width: 18px; height: 18px; border-radius: 50%; background: var(--surface-active); color: var(--fg-tertiary); font-size: 10px; font-weight: 700; display: flex; align-items: center; justify-content: center; flex-shrink: 0; font-family: var(--font-mono); }
+.session-token-row:nth-child(1) .st-rank { background: var(--accent); color: #fff; }
+.session-token-row:nth-child(2) .st-rank { background: rgba(88,166,255,0.5); color: #fff; }
+.session-token-row:nth-child(3) .st-rank { background: rgba(88,166,255,0.3); color: var(--accent); }
+.session-token-row .st-title { flex: 1; color: var(--fg); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 500; }
+.session-token-row .st-tokens { font-family: var(--font-mono); font-size: 13px; font-weight: 600; color: var(--success); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.session-token-row .st-expand { background: none; border: none; color: var(--fg-tertiary); cursor: pointer; padding: 2px 4px; font-size: 11px; line-height: 1; flex-shrink: 0; border-radius: 4px; }
+.session-token-row .st-expand:hover { color: var(--accent); background: var(--surface-hover); }
+.session-token-row .st-breakdown { flex: 0 0 100%; display: grid; grid-template-columns: 1fr 1fr; gap: 6px 16px; padding: 8px 0 2px 28px; margin-top: 6px; border-top: 1px dashed var(--border); }
+.session-token-row .stb-item { display: flex; justify-content: space-between; align-items: center; font-size: 12px; }
+.session-token-row .stb-label { color: var(--fg-tertiary); }
+.session-token-row .stb-val { font-family: var(--font-mono); font-weight: 600; color: var(--fg); font-variant-numeric: tabular-nums; }
 
 /* Session Summary */
 .sess-summary { display: flex; align-items: center; gap: 20px; padding: 16px; background: var(--bg); border: 1px solid var(--border); border-radius: var(--radius-md); }
@@ -779,6 +889,29 @@ onUnmounted(() => {
 .ss-divider { width: 1px; align-self: stretch; background: var(--border); }
 .ss-link { margin-left: auto; font-size: 13px; color: var(--accent); text-decoration: none; white-space: nowrap; cursor: pointer; }
 .ss-link:hover { text-decoration: underline; }
+
+/* Detail session list (recent 3 + view all) */
+.detail-sess-list { margin-top: 8px; }
+.detail-sess-row { display: flex; align-items: center; justify-content: space-between; padding: 10px 14px; border-radius: var(--radius-sm); cursor: pointer; transition: background 0.1s; }
+.detail-sess-row:hover { background: var(--surface-hover); }
+.detail-sess-row .ds-title { font-size: 13px; font-weight: 500; color: var(--fg); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; min-width: 0; }
+.detail-sess-row .ds-status { font-size: 11px; font-weight: 600; padding: 2px 8px; border-radius: var(--radius-full); margin-left: 8px; flex-shrink: 0; }
+.detail-sess-row .ds-status.running, .detail-sess-row .ds-status.busy { background: var(--success-bg); color: var(--success); }
+.detail-sess-row .ds-status.completed, .detail-sess-row .ds-status.exited { background: var(--surface-active); color: var(--fg-tertiary); }
+.detail-sess-row .ds-status.error, .detail-sess-row .ds-status.killed { background: var(--error-bg); color: var(--error); }
+.detail-sess-row .ds-status.idle, .detail-sess-row .ds-status.disconnected { background: var(--accent-muted); color: var(--accent); }
+.detail-sess-more { display: block; text-align: center; padding: 10px; font-size: 13px; font-weight: 600; color: var(--accent); cursor: pointer; border-radius: var(--radius-sm); transition: background 0.1s; }
+.detail-sess-more:hover { background: var(--accent-muted); }
+.detail-sess-empty { padding: 20px; text-align: center; font-size: 13px; color: var(--fg-tertiary); }
+
+/* Cost session list (top 5 + expand + paginate) */
+.st-more { display: flex; align-items: center; justify-content: center; gap: 4px; padding: 8px; font-size: 12px; font-weight: 600; color: var(--accent); cursor: pointer; transition: background 0.1s; border-top: 1px solid var(--border); }
+.st-more:hover { background: var(--accent-muted); }
+.st-pagination { display: flex; align-items: center; justify-content: center; gap: 6px; padding: 8px; border-top: 1px solid var(--border); }
+.st-page-btn { width: 26px; height: 26px; border: 1px solid var(--border); background: var(--surface); color: var(--fg-secondary); border-radius: var(--radius-sm); cursor: pointer; font-size: 13px; display: flex; align-items: center; justify-content: center; transition: all 0.15s; }
+.st-page-btn:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); background: var(--accent-muted); }
+.st-page-btn:disabled { opacity: 0.35; cursor: not-allowed; }
+.st-page-info { font-size: 11px; color: var(--fg-tertiary); font-family: var(--font-mono); padding: 0 4px; }
 
 /* ⋯ Button (card) */
 .ss-more-btn { width: 28px; height: 28px; border: none; background: none; color: var(--fg-tertiary); cursor: pointer; border-radius: 6px; display: flex; align-items: center; justify-content: center; opacity: 0; transition: opacity 0.15s, background 0.15s, color 0.15s; flex-shrink: 0; }

@@ -77,7 +77,7 @@ Daemon 会自动扫描 `PATH` 发现可用的代理 CLI，并注册到 Relay。
 
 ### 4. Session 标题自动生成
 
-Relay 集成了智谱 GLM-4.6 API，可自动为每个 Session 生成简洁的中文标题：
+Relay 集成了智谱 GLM-4.6 API，可自动为每个 Session 生成简洁的标题。标题语言跟随 Web 客户端 UI 语言设置（中文/英文），切换语言后新建的会话标题自动适配：
 
 ```
 新建 Session → "Terminal Session-1def4567"  (默认名称)
@@ -290,12 +290,14 @@ pocketctl/
 │       └── config/
 │           └── sms.ts             # 腾讯云短信发送服务
 ├── ios/
-│   └── Pocketctl/
-│       ├── App/                   # SwiftUI App 入口
-│       ├── Models/                # Session、WebSocketEvent 数据模型
-│       ├── ViewModels/            # SessionList、SessionDetail、DaemonList
-│       ├── Views/                 # UI 视图组件
-│       └── Services/              # WebSocket、API、Keychain、Push
+│   └── Pocketctl/                 # SwiftUI 原生 App（iOS 17+）
+│       ├── App/                   # App 入口
+│       ├── Models/                # Daemon、Session、WebSocketEvent、ModelOption、ChatMessage、SubAgent 等
+│       ├── Services/              # APIClient、WebSocketService、KeychainStorage
+│       ├── ViewModels/            # DaemonListVM、SessionListVM、SessionDetailVM、AgentManageVM、TokenUsageVM
+│       ├── Views/                 # DaemonListView、SessionListView、SessionDetailView、NewSessionSheet、AgentManageView、TokenUsageView、SettingsView、LoginView、ScanLoginView
+│       ├── Theme/ Utils/          # 设计 token、AgentDefaultsStore
+│       └── Components/            # 通用 UI 组件
 ├── web/                           # Vue 3 Web UI（可选）
 ├── docs/                          # 文档（路线图、测试报告、上线计划）
 ├── .claude/skills/                # Claude Code 技能（自动化工作流）

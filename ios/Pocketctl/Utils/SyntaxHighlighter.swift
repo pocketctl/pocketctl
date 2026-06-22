@@ -38,8 +38,45 @@ enum SyntaxHighlighter {
     /// Highlight code and return an AttributedString
     static func highlight(_ code: String, language: String?) -> AttributedString {
         let lang = (language ?? "").lowercased()
+        // diff is line-oriented (add/delete/context), not token-oriented.
+        if lang == "diff" {
+            return highlightDiff(code)
+        }
         let tokens = tokenize(code, language: lang)
         return buildAttributedString(tokens)
+    }
+
+    /// Line-oriented highlighter for unified diff (```diff blocks).
+    /// Lines starting with '+' → success, '-' → deletion color,
+    /// '@' → accent (hunk header), others → secondary foreground.
+    private static func highlightDiff(_ code: String) -> AttributedString {
+        var result = AttributedString()
+        let lines = code.components(separatedBy: "\n")
+        for (i, line) in lines.enumerated() {
+            if i > 0 {
+                var nl = AttributedString("\n")
+                nl.font = PCFont.mono(13)
+                result.append(nl)
+            }
+            var attrStr = AttributedString(line)
+            attrStr.font = PCFont.mono(13)
+            if let first = line.first {
+                switch first {
+                case "+":
+                    attrStr.foregroundColor = .pcSuccess
+                case "-":
+                    attrStr.foregroundColor = .pcError
+                case "@":
+                    attrStr.foregroundColor = .pcAccent
+                default:
+                    attrStr.foregroundColor = .pcFgSecondary
+                }
+            } else {
+                attrStr.foregroundColor = .pcFgSecondary
+            }
+            result.append(attrStr)
+        }
+        return result
     }
 
     // MARK: - Tokenizer
@@ -213,6 +250,12 @@ enum SyntaxHighlighter {
             return ["DOCTYPE", "html", "head", "body", "div", "span", "p", "a", "img", "ul", "ol", "li", "table", "tr", "td", "th", "form", "input", "button", "script", "style", "link", "meta", "title", "h1", "h2", "h3", "h4", "h5", "h6", "br", "hr"]
         case "css":
             return ["color", "background", "margin", "padding", "border", "font", "display", "position", "width", "height", "top", "left", "right", "bottom", "flex", "grid", "transform", "transition", "animation", "opacity", "overflow", "z-index", "text-align", "font-size", "font-weight", "line-height", "box-shadow", "text-decoration", "cursor", "pointer"]
+        case "yaml", "yml":
+            return ["true", "false", "null", "yes", "no", "on", "off"]
+        case "rust", "rs":
+            return ["as", "async", "await", "break", "const", "continue", "crate", "dyn", "else", "enum", "extern", "false", "fn", "for", "if", "impl", "in", "let", "loop", "match", "mod", "move", "mut", "pub", "ref", "return", "self", "Self", "static", "struct", "super", "trait", "true", "type", "unsafe", "use", "where", "while", "box", "abstract", "become", "do", "final", "macro", "override", "priv", "typeof", "unsized", "virtual", "yield", "try", "union"]
+        case "markdown", "md":
+            return [] // markdown highlighting is handled by MarkdownContentView, not here
         default:
             return ["if", "else", "for", "while", "return", "function", "func", "def", "class", "struct", "var", "let", "const", "true", "false", "null", "nil", "None", "import", "package", "export", "from", "async", "await", "try", "catch", "throw", "new", "this", "self", "super"]
         }
@@ -230,6 +273,10 @@ enum SyntaxHighlighter {
             return ["Int", "Int8", "Int16", "Int32", "Int64", "UInt", "UInt8", "UInt16", "UInt32", "UInt64", "Float", "Float32", "Float64", "Double", "Bool", "String", "Character", "Array", "Dictionary", "Set", "Optional", "Error", "Result", "Any", "AnyObject", "Void", "Never", "Codable", "Identifiable", "Hashable", "Equatable", "Comparable", "Sendable"]
         case "sql":
             return ["INT", "INTEGER", "BIGINT", "SMALLINT", "TINYINT", "FLOAT", "DOUBLE", "DECIMAL", "NUMERIC", "VARCHAR", "CHAR", "TEXT", "BLOB", "CLOB", "DATE", "TIME", "TIMESTAMP", "DATETIME", "BOOLEAN", "BOOL", "JSON", "JSONB", "UUID", "SERIAL", "BIGSERIAL"]
+        case "rust", "rs":
+            return ["i8", "i16", "i32", "i64", "i128", "isize", "u8", "u16", "u32", "u64", "u128", "usize", "f32", "f64", "bool", "char", "str", "String", "Vec", "Option", "Result", "Box", "Rc", "Arc", "HashMap", "HashSet", "BTreeMap"]
+        case "yaml", "yml":
+            return ["int", "float", "str", "bool", "null", "list", "dict", "timestamp", "date"]
         default:
             return ["string", "int", "float", "bool", "error", "any", "void", "null", "undefined"]
         }

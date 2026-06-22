@@ -17,6 +17,9 @@ final class WebSocketService: @unchecked Sendable {
     /// Daemon tracking
     var daemons: [String: Daemon] = [:]
 
+    /// Available models per daemon (populated by model_list events)
+    var availableModels: [String: [ModelOption]] = [:]
+
     /// Event callbacks — multiple listeners supported
     private var eventListeners: [String: ([String: Any]) -> Void] = [:]
     private var listenerCounter = 0
@@ -79,6 +82,10 @@ final class WebSocketService: @unchecked Sendable {
                 }
             } else {
                 self.isConnectedInternal = true
+                // Report UI locale so relay generates language-aware auto titles
+                // (mirrors web client's set_locale on connect; see useWebSocket.ts).
+                let locale = Locale.current.language.languageCode?.identifier ?? "zh"
+                self.send(["type": "set_locale", "locale": locale])
                 DispatchQueue.global().async { [weak self] in
                     self?.receiveLoop()
                 }
@@ -91,6 +98,12 @@ final class WebSocketService: @unchecked Sendable {
         guard let data = try? JSONSerialization.data(withJSONObject: message),
               let string = String(data: data, encoding: .utf8) else { return }
         webSocket?.send(.string(string)) { _ in }
+    }
+
+    /// Request available models for a daemon (response arrives via model_list event,
+    /// stored in `availableModels`).
+    func requestModels(daemonId: String) {
+        send(["type": "list_models", "daemon_id": daemonId])
     }
 
     /// Disconnect
@@ -139,6 +152,13 @@ final class WebSocketService: @unchecked Sendable {
             if let daemon = Daemon.from(event: dict) {
                 daemons[daemonId] = daemon
             }
+        }
+
+        // Track available models per daemon (model_list is host-level)
+        if let type = dict["type"] as? String, type == "model_list",
+           let daemonId = dict["daemon_id"] as? String {
+            let models = (dict["models"] as? [[String: Any]] ?? []).compactMap { ModelOption(dict: $0) }
+            availableModels[daemonId] = models
         }
 
         DispatchQueue.main.async { [weak self] in

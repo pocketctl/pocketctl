@@ -2,40 +2,40 @@
   <div class="overlay" @click.self="$emit('close')">
     <div class="modal">
       <div class="modal-header">
-        <h3>帮助与反馈</h3>
+        <h3>{{ t('help.title') }}</h3>
         <button class="close-btn" @click="$emit('close')">
           <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6L6 18M6 6l12 12"/></svg>
         </button>
       </div>
       <div class="modal-body">
         <div class="section">
-          <h4>安装 Daemon</h4>
-          <p>在你的 Mac 或 Linux 开发机上运行以下命令，安装并启动 Daemon 守护进程：</p>
+          <h4>{{ t('help.install_daemon') }}</h4>
+          <p>{{ t('help.install_desc') }}</p>
           <div class="code-block">
-            <code># 1. 安装 Daemon</code>
+            <code>{{ t('help.cmd_install') }}</code>
             <code>curl -fsSL {{ installURL }} -o /tmp/install-daemon.sh</code>
             <code>sudo bash /tmp/install-daemon.sh</code>
             <code></code>
-            <code># 登录（使用 App 注册的手机号）</code>
+            <code>{{ t('help.cmd_login') }}</code>
             <code>pocketctl login</code>
             <code></code>
-            <code># 启动守护进程</code>
+            <code>{{ t('help.cmd_start') }}</code>
             <code>pocketctl daemon start</code>
             <code></code>
-            <code># 查看状态</code>
+            <code>{{ t('help.cmd_status') }}</code>
             <code>pocketctl daemon status</code>
           </div>
           <button class="btn btn-copy" @click="copyCommands">
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"/></svg>
-            {{ copied ? '已复制' : '复制命令' }}
+            {{ copied ? t('common.copied') : t('help.copy_commands') }}
           </button>
         </div>
 
         <div class="divider"></div>
 
         <div class="section">
-          <h4>意见反馈</h4>
-          <p>遇到问题或有建议？欢迎通过邮件联系我们：</p>
+          <h4>{{ t('help.feedback') }}</h4>
+          <p>{{ t('help.feedback_desc') }}</p>
           <a href="mailto:james_2001_2001@163.com?subject=pocketctl%20反馈" class="email-link">
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="4" width="20" height="16" rx="2"/><path d="M22 4L12 13 2 4"/></svg>
             james_2001_2001@163.com
@@ -48,8 +48,10 @@
 
 <script setup lang="ts">
 import { ref, computed } from 'vue'
+import { useLocale } from '../composables/useLocale'
 
 defineEmits<{ close: [] }>()
+const { t } = useLocale()
 
 const copied = ref(false)
 

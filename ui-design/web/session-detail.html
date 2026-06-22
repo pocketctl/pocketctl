@@ -293,13 +293,15 @@
   /* Chat input */
   .chat-input-area {
     border-top: 1px solid var(--border);
-    padding: 12px 20px;
+    padding: 12px 20px 10px;
     background: var(--surface);
     display: flex;
-    gap: 10px;
-    align-items: center;
+    flex-direction: column;
+    gap: 6px;
     transition: background var(--transition), border-color var(--transition);
   }
+
+  .chat-input-row { display: flex; gap: 10px; align-items: flex-end; }
 
   .chat-input-wrap {
     flex: 1;
@@ -318,12 +320,26 @@
     box-shadow: 0 0 0 3px var(--accent-muted);
   }
 
-  .chat-input-wrap input {
+  .chat-input-wrap textarea {
     flex: 1; background: none; border: none; color: var(--fg);
-    font-size: 14px; font-family: var(--font-body); outline: none; padding: 8px 0;
+    font-size: 14px; font-family: var(--font-body); outline: none;
+    padding: 10px 0; resize: none; line-height: 1.5;
+    min-height: 22px; max-height: 116px; overflow-y: auto;
   }
+  .chat-input-wrap textarea::placeholder { color: var(--fg-tertiary); }
+  .chat-input-wrap textarea::-webkit-scrollbar { width: 5px; }
 
-  .chat-input-wrap input::placeholder { color: var(--fg-tertiary); }
+  .chat-input-hint {
+    font-size: 11px; color: var(--fg-tertiary);
+    display: flex; align-items: center; gap: 4px; justify-content: flex-end;
+    padding: 0 4px;
+  }
+  .chat-input-hint kbd {
+    font-family: var(--font-mono); font-size: 10px;
+    padding: 1px 5px; border: 1px solid var(--border);
+    border-radius: 4px; background: var(--bg); color: var(--fg-secondary);
+    line-height: 1.4; white-space: nowrap;
+  }
 
   .send-btn {
     width: 36px; height: 36px; border-radius: 50%;
@@ -582,12 +598,17 @@
 
       <!-- Chat Input -->
       <div class="chat-input-area">
-        <div class="chat-input-wrap">
-          <input type="text" placeholder="发送消息...">
+        <div class="chat-input-row">
+          <div class="chat-input-wrap">
+            <textarea id="chat-input" rows="1" placeholder="发送消息..."></textarea>
+          </div>
+          <button class="send-btn" id="send-btn" aria-label="发送">
+            <svg viewBox="0 0 24 24"><path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z"/></svg>
+          </button>
         </div>
-        <button class="send-btn">
-          <svg viewBox="0 0 24 24"><path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z"/></svg>
-        </button>
+        <div class="chat-input-hint">
+          <kbd>Enter</kbd> 发送 · <kbd>⌥</kbd>/<kbd>Alt</kbd> + <kbd>Enter</kbd> 换行
+        </div>
       </div>
     </div>
   </div>
@@ -773,5 +794,35 @@
   });
 </script>
 <script src="../js/sidebar-toggle.js"></script>
+<script>
+  // 聊天输入框：自动增高 + Enter 发送 / Alt(Option)+Enter 换行
+  (function () {
+    var ta = document.getElementById('chat-input');
+    if (!ta) return;
+    var MAX = 116;
+    function autoGrow() {
+      ta.style.height = 'auto';
+      ta.style.height = Math.min(ta.scrollHeight, MAX) + 'px';
+    }
+    function send() {
+      var v = ta.value.trim();
+      if (!v) return;
+      // 演示：真实接入替换为发送消息到会话
+      console.log('[pocketctl] 发送消息:', v);
+      ta.value = ''; autoGrow(); ta.focus();
+    }
+    ta.addEventListener('input', autoGrow);
+    ta.addEventListener('keydown', function (e) {
+      // Enter 发送；Alt/Option+Enter（Mac ⌥ / Win Alt，均触发 altKey）换行
+      if (e.key === 'Enter' && !e.altKey && !e.metaKey && !e.shiftKey && !e.ctrlKey) {
+        e.preventDefault();
+        send();
+      }
+    });
+    var btn = document.getElementById('send-btn');
+    if (btn) btn.addEventListener('click', send);
+    autoGrow();
+  })();
+</script>
 </body>
 </html>

@@ -1,5 +1,13 @@
 import SwiftUI
 
+/// Tracks the top sentinel's Y offset within the scroll view (for backward pagination).
+private struct ScrollTopOffsetKey: PreferenceKey {
+    static let defaultValue: CGFloat = .infinity
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+        value = min(value, nextValue())
+    }
+}
+
 struct SessionDetailView: View {
     let session: Session
 
@@ -10,6 +18,9 @@ struct SessionDetailView: View {
     @State private var inputText = ""
     @FocusState private var isInputFocused: Bool
     @State private var showScrollToBottom = false
+    // Slash command autocomplete state
+    @State private var selectedCommandIndex = 0
+    @State private var popoverDismissed = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -22,6 +33,15 @@ struct SessionDetailView: View {
                     ScrollViewReader { proxy in
                         ScrollView {
                             LazyVStack(alignment: .leading, spacing: PCSpacing.md) {
+                                // Top sentinel: detect scroll-to-top for backward pagination
+                                GeometryReader { geo in
+                                    Color.clear.preference(
+                                        key: ScrollTopOffsetKey.self,
+                                        value: geo.frame(in: .named("sessionScroll")).minY
+                                    )
+                                }
+                                .frame(height: 0)
+
                                 ForEach(Array(vm.messages.enumerated()), id: \.element.id) { index, message in
                                     messageView(message: message, index: index, vm: vm)
                                         .id(message.id)
@@ -49,6 +69,11 @@ struct SessionDetailView: View {
                             .padding(.horizontal, PCSpacing.lg)
                             .padding(.top, PCSpacing.md)
                             .padding(.bottom, PCSpacing.md)
+                        }
+                        .coordinateSpace(name: "sessionScroll")
+                        .onPreferenceChange(ScrollTopOffsetKey.self) { offset in
+                            // offset = sentinel minY in scroll space; near top when > -50
+                            if offset > -50 { vm.loadOlder() }
                         }
                         .defaultScrollAnchor(.bottom)
                         .onChange(of: vm.scrollTick) { _, _ in
@@ -195,6 +220,9 @@ struct SessionDetailView: View {
         case .error:
             ChatBubble(message: message)
 
+        case .commandReceipt:
+            CommandReceiptCard(message: message)
+
         default:
             // User message
             ChatBubble(message: message)
@@ -204,35 +232,53 @@ struct SessionDetailView: View {
     // MARK: - Input bar
 
     private func inputBar(vm: SessionDetailViewModel) -> some View {
-        HStack(spacing: PCSpacing.sm) {
-            HStack {
-                TextField(vm.inputPlaceholder, text: $inputText, axis: .vertical)
-                    .font(PCFont.body(15))
-                    .foregroundStyle(Color.pcFg)
-                    .lineLimit(1...5)
-                    .focused($isInputFocused)
+        VStack(alignment: .leading, spacing: 0) {
+            // Slash command autocomplete popover (shown above the input)
+            if showCommandPopover(vm: vm) {
+                CommandPopoverView(
+                    commands: filteredCommands(vm: vm),
+                    selectedIndex: $selectedCommandIndex,
+                    onSelect: { cmd in applyCommand(cmd) }
+                )
+                .padding(.horizontal, PCSpacing.lg)
+                .padding(.bottom, 4)
             }
-            .padding(.horizontal, 12)
-            .padding(.vertical, 10)
-            .background(Color.pcSurface)
-            .cornerRadius(PCRadius.xl)
-            .overlay(
-                RoundedRectangle(cornerRadius: PCRadius.xl)
-                    .stroke(Color.pcBorder, lineWidth: 1)
-            )
 
-            Button {
-                vm.sendMessage(inputText)
-                inputText = ""
-            } label: {
-                Image(systemName: "arrow.up")
-                    .font(.system(size: 16, weight: .semibold))
-                    .foregroundStyle(Color.pcBackground)
-                    .frame(width: 32, height: 32)
-                    .background(Color.pcAccent)
-                    .clipShape(Circle())
+            HStack(spacing: PCSpacing.sm) {
+                HStack {
+                    TextField(vm.inputPlaceholder, text: $inputText, axis: .vertical)
+                        .font(PCFont.body(15))
+                        .foregroundStyle(Color.pcFg)
+                        .lineLimit(1...5)
+                        .focused($isInputFocused)
+                }
+                .padding(.horizontal, 12)
+                .padding(.vertical, 10)
+                .background(Color.pcSurface)
+                .cornerRadius(PCRadius.xl)
+                .overlay(
+                    RoundedRectangle(cornerRadius: PCRadius.xl)
+                        .stroke(Color.pcBorder, lineWidth: 1)
+                )
+
+                Button {
+                    vm.sendMessage(inputText)
+                    inputText = ""
+                    popoverDismissed = false
+                } label: {
+                    Image(systemName: "arrow.up")
+                        .font(.system(size: 16, weight: .semibold))
+                        .foregroundStyle(Color.pcBackground)
+                        .frame(width: 32, height: 32)
+                        .background(Color.pcAccent)
+                        .clipShape(Circle())
+                }
+                .disabled(inputText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
             }
-            .disabled(inputText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            .onChange(of: inputText) { _, _ in
+                selectedCommandIndex = 0
+                popoverDismissed = false
+            }
         }
         .padding(.horizontal, PCSpacing.lg)
         .padding(.vertical, PCSpacing.sm)
@@ -243,6 +289,29 @@ struct SessionDetailView: View {
                 .frame(height: 1),
             alignment: .top
         )
+    }
+
+    // MARK: - Slash command autocomplete helpers
+
+    /// Commands matching the current input prefix (e.g. "/co" → compact/cost).
+    private func filteredCommands(vm: SessionDetailViewModel) -> [CommandItem] {
+        guard inputText.hasPrefix("/") else { return [] }
+        let prefix = inputText.dropFirst().lowercased()
+        let pool = vm.commands
+        if prefix.isEmpty { return Array(pool.prefix(50)) }
+        return Array(pool.filter { $0.name.lowercased().hasPrefix(prefix) }.prefix(50))
+    }
+
+    /// Whether the autocomplete popover should be visible.
+    private func showCommandPopover(vm: SessionDetailViewModel) -> Bool {
+        !popoverDismissed && !filteredCommands(vm: vm).isEmpty
+    }
+
+    /// Insert "/<name> " into the input and keep focus.
+    private func applyCommand(_ cmd: CommandItem) {
+        inputText = "/" + cmd.name + " "
+        popoverDismissed = true
+        isInputFocused = true
     }
 
     // MARK: - Executing indicator
@@ -291,7 +360,7 @@ struct SessionDetailView: View {
         let s = viewModel?.status ?? session.status
         switch s {
         case "running", "busy": return .pcSuccess
-        case "idle": return Color(hex: 0xEAB308)
+        case "idle": return .pcIdle
         case "completed": return .pcAccent
         case "error": return .pcError
         case "killed", "exited": return .pcWarning

@@ -2,8 +2,8 @@
   <div class="modal-overlay" @click.self="$emit('close')">
     <div class="modal-dialog">
       <div class="modal-header">
-        <h2 class="modal-title">新建会话</h2>
-        <button class="modal-close" @click="$emit('close')" title="关闭">
+        <h2 class="modal-title">{{ t('new_session.title') }}</h2>
+        <button class="modal-close" @click="$emit('close')" :title="t('common.close')">
           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M18 6L6 18M6 6l12 12"/></svg>
         </button>
       </div>
@@ -11,10 +11,10 @@
         <!-- Host Selector -->
         <div class="field-label">
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="2" width="20" height="20" rx="3"/><path d="M7 2v20"/></svg>
-          选择目标主机
+          {{ t('new_session.select_host') }}
         </div>
         <div class="host-selector">
-          <div v-if="!daemons || daemons.length === 0" class="host-empty">暂无可用主机</div>
+          <div v-if="!daemons || daemons.length === 0" class="host-empty">{{ t('new_session.no_hosts') }}</div>
           <div v-for="d in daemons" :key="d.daemon_id"
             :class="['host-option', { selected: form.daemonId === d.daemon_id, disabled: !d.daemon_online }]"
             @click="selectHost(d)">
@@ -26,12 +26,12 @@
             <div class="host-info">
               <div class="host-name">
                 {{ d.daemon_alias || d.hostname || d.daemon_id?.slice(0, 8) }}
-                <span v-if="d.daemon_alias" class="host-alias-tag">别名</span>
+                <span v-if="d.daemon_alias" class="host-alias-tag">{{ t('dashboard.alias_badge') }}</span>
               </div>
               <div class="host-meta">{{ d.ip && d.ip !== 'unknown' ? d.ip + ' · ' : '' }}{{ d.os || 'unknown' }}</div>
             </div>
             <div class="host-status">
-              <span :class="['chip', d.daemon_online ? 'chip-online' : 'chip-offline']">{{ d.daemon_online ? '在线' : '离线 · 不可用' }}</span>
+              <span :class="['chip', d.daemon_online ? 'chip-online' : 'chip-offline']">{{ d.daemon_online ? t('dashboard.online') : t('dashboard.offline') + ' · ' + t('common.unavailable') }}</span>
             </div>
           </div>
         </div>
@@ -39,41 +39,77 @@
         <!-- Agent Type Pills -->
         <div class="field-label">
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M12 2a14.5 14.5 0 000 20 14.5 14.5 0 000-20"/><path d="M2 12h20"/></svg>
-          Agent 类型
+          {{ t('new_session.agent_label') }}
         </div>
         <div class="agent-pills">
           <button :class="['agent-pill', { selected: form.agent === 'claude-code' }]" @click="form.agent = 'claude-code'">Claude Code</button>
           <button :class="['agent-pill', { selected: form.agent === 'codex' }]" @click="form.agent = 'codex'">
             Codex
-            <span class="coming-badge">即将开通</span>
+            <span class="coming-badge">{{ t('new_session.coming_soon') }}</span>
           </button>
         </div>
 
         <!-- Codex Notice -->
         <div v-if="form.agent === 'codex'" class="codex-notice">
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M12 6v6M12 18h.01"/></svg>
-          Codex 代理即将开通，敬请期待
+          {{ t('new_session.codex_coming_soon') }}
         </div>
 
         <!-- Working Directory -->
         <div class="form-group">
           <div class="field-label">
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 19a2 2 0 01-2 2H4a2 2 0 01-2-2V5a2 2 0 012-2h5l2 3h9a2 2 0 012 2z"/></svg>
-            工作目录
+            {{ t('new_session.cwd_label') }}
           </div>
           <div class="dir-input">
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 19a2 2 0 01-2 2H4a2 2 0 01-2-2V5a2 2 0 012-2h5l2 3h9a2 2 0 012 2z"/></svg>
-            <input type="text" v-model="form.cwd" placeholder="输入项目路径，如 ~/projects/my-app" />
+            <input type="text" v-model="form.cwd" :placeholder="t('new_session.cwd_placeholder')" />
           </div>
         </div>
+
+        <!-- Permission Mode -->
+        <div class="form-group">
+          <div class="field-label">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+            {{ t('new_session.permission_mode') }}
+          </div>
+          <div class="perm-options">
+            <button type="button" :class="['perm-option', { active: form.permissionMode === 'bypassPermissions' }]" @click="form.permissionMode = 'bypassPermissions'">
+              <span class="perm-name">{{ t('session.perm_bypass') }}</span>
+              <span class="perm-desc">{{ t('new_session.perm_bypass') }}</span>
+            </button>
+            <button type="button" :class="['perm-option', { active: form.permissionMode === 'default' }]" @click="form.permissionMode = 'default'">
+              <span class="perm-name">{{ t('session.perm_default') }}</span>
+              <span class="perm-desc">{{ t('new_session.perm_confirm') }}</span>
+            </button>
+            <button type="button" :class="['perm-option', { active: form.permissionMode === 'acceptEdits' }]" @click="form.permissionMode = 'acceptEdits'">
+              <span class="perm-name">{{ t('session.perm_accept_edits') }}</span>
+              <span class="perm-desc">{{ t('new_session.perm_auto_edit') }}</span>
+            </button>
+            <button type="button" :class="['perm-option', { active: form.permissionMode === 'plan' }]" @click="form.permissionMode = 'plan'">
+              <span class="perm-name">{{ t('session.perm_plan') }}</span>
+              <span class="perm-desc">{{ t('new_session.perm_plan_only') }}</span>
+            </button>
+          </div>
+        </div>
+
+        <!-- Model (dynamic: host's available models from ~/.claude/settings.json) -->
+        <div class="field-label">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5M2 12l10 5 10-5"/></svg>
+          {{ t('new_session.model_label') }}
+        </div>
+        <select v-model="form.model" class="model-select">
+          <option value="">{{ models.length ? t('new_session.model_default') : t('new_session.model_loading') }}</option>
+          <option v-for="m in models" :key="m.alias" :value="m.alias">{{ m.name }}</option>
+        </select>
 
         <!-- Initial Prompt -->
         <div class="form-group">
           <div class="field-label">
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15a2 2 0 01-2 2H7l-4 4V5a2 2 0 012-2h14a2 2 0 012 2z"/></svg>
-            初始提示
+            {{ t('new_session.prompt_label') }}
           </div>
-          <textarea class="prompt-area" v-model="form.prompt" placeholder="描述你想让 AI 完成的任务…&#10;例如：帮我重构用户认证模块，从 JWT 迁移到 OAuth 2.0" maxlength="500" @input="updateCharCount" />
+          <textarea class="prompt-area" v-model="form.prompt" :placeholder="t('new_session.prompt_placeholder')" maxlength="500" @input="updateCharCount" />
           <div class="char-count">{{ charCount }} / 500</div>
         </div>
 
@@ -91,15 +127,15 @@
 
         <!-- Footer Actions -->
         <div class="modal-footer">
-          <button class="btn btn-cancel" :disabled="creating" @click="$emit('close')">取消</button>
+          <button class="btn btn-cancel" :disabled="creating" @click="$emit('close')">{{ t('common.cancel') }}</button>
           <button class="btn btn-start" :class="{ 'is-loading': creating }" :disabled="!canStart || creating" @click="startSession">
             <span class="btn-content">
               <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M12 5v14M5 12h14"/></svg>
-              开始会话
+              {{ t('new_session.start_btn') }}
             </span>
             <span v-if="creating" class="btn-loading">
               <span class="spinner"></span>
-              {{ phase === 'connecting' ? '正在连接主机…' : '正在创建…' }}
+              {{ phase === 'connecting' ? t('new_session.connecting_phase') : t('new_session.creating') }}
             </span>
           </button>
         </div>
@@ -109,22 +145,28 @@
 </template>
 
 <script setup lang="ts">
-import { ref, reactive, computed, onMounted, onUnmounted } from 'vue'
+import { ref, reactive, computed, onMounted, onUnmounted, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { useWebSocket } from '../composables/useWebSocket'
+import { useLocale } from '../composables/useLocale'
 
-const props = defineProps<{ daemons?: any[] }>()
+const props = defineProps<{ daemons?: any[]; preSelectedDaemonId?: string }>()
 const emit = defineEmits<{ close: [] }>()
 
 const router = useRouter()
 const { connect, send, onEvent } = useWebSocket()
+const { t } = useLocale()
 
 const form = reactive({
   daemonId: '',
   agent: 'claude-code',
   cwd: localStorage.getItem('pocketctl_default_cwd') || '',
   prompt: '',
+  permissionMode: 'bypassPermissions',  // Web 会话无人值守，默认跳过权限（acceptEdits 会卡在工具批准提示）
+  model: '',  // '' = follow host default | opus | sonnet | haiku alias
 })
+// Available models for the selected host (populated by list_models → model_list)
+const models = ref<Array<{ alias: string; name: string }>>([])
 const creating = ref(false)
 const phase = ref<'submitting' | 'connecting'>('submitting')
 const errorTitle = ref('')
@@ -132,7 +174,7 @@ const errorDesc = ref('')
 const charCount = ref(0)
 const selectedDaemonName = computed(() => {
   const d = props.daemons?.find((x: any) => x.daemon_id === form.daemonId)
-  return d?.daemon_alias || d?.hostname || '主机'
+  return d?.daemon_alias || d?.hostname || t('nav.hosts')
 })
 
 const canStart = computed(() => !!(form.daemonId && form.agent === 'claude-code'))
@@ -153,14 +195,15 @@ function hideError() {
 }
 
 function showError(reason: string, err?: string) {
+  const host = selectedDaemonName.value
   const map: Record<string, { title: string; desc: string }> = {
-    no_cli: { title: `无法在「${selectedDaemonName.value}」上创建会话`, desc: '主机未安装 Claude Code CLI，请在主机上安装后重试' },
-    bad_cwd: { title: `无法在「${selectedDaemonName.value}」上创建会话`, desc: `工作目录不可用：${form.cwd || '/'}，请检查路径与权限` },
-    start_fail: { title: `无法在「${selectedDaemonName.value}」上创建会话`, desc: `Agent 进程启动失败：${err || '未知错误'}` },
-    timeout: { title: `无法在「${selectedDaemonName.value}」上创建会话`, desc: '主机连接超时：daemon 未在 15 秒内完成会话初始化。请确认主机在线、daemon 与 claude CLI 运行正常后重试' },
-    daemon_offline: { title: `无法在「${selectedDaemonName.value}」上创建会话`, desc: '主机离线或无可用的 daemon，请确认主机在线后重试' },
+    no_cli: { title: t('new_session.error_title', { host }), desc: t('new_session.failed_no_cli_desc') },
+    bad_cwd: { title: t('new_session.error_title', { host }), desc: t('new_session.failed_bad_cwd_desc', { cwd: form.cwd || '/' }) },
+    start_fail: { title: t('new_session.error_title', { host }), desc: t('new_session.failed_start_desc', { error: err || t('dashboard.unknown_error') }) },
+    timeout: { title: t('new_session.error_title', { host }), desc: t('new_session.failed_timeout_desc') },
+    daemon_offline: { title: t('new_session.error_title', { host }), desc: t('new_session.failed_offline_desc') },
   }
-  const e = map[reason] || { title: '创建失败', desc: err || '未知错误' }
+  const e = map[reason] || { title: t('new_session.failed'), desc: err || t('dashboard.unknown_error') }
   errorTitle.value = e.title
   errorDesc.value = e.desc
 }
@@ -180,21 +223,31 @@ function startSession() {
   // Save working directory for next time
   if (form.cwd) localStorage.setItem('pocketctl_default_cwd', form.cwd)
 
-  // ① session_created(pending): 切 CONNECTING 态，不跳转
+  // ① session_created: redirect immediately, SessionDetail loading handles the wait
   cleanupFns.push(onEvent('session_created', (msg: any) => {
     if (done) return
-    phase.value = 'connecting'
-    pendingSessionId = msg.session_id
+    const sid = msg.session_id as string
+    if (!sid || sid.startsWith('pending')) { phase.value = 'connecting'; return }
+    done = true
+    pendingSessionId = sid
+    if (timeoutTimer) clearTimeout(timeoutTimer)
+    creating.value = false
+    const daemonId = msg.daemon_id || form.daemonId
+    const query = daemonId ? { host: daemonId } : {}
+    router.push({ path: `/session/${sid}`, query })
+    emit('close')
   }))
 
-  // ② session_id_changed(real): 跳转到真实 ID
+  // ② session_id_changed(real): for discovered sessions
   cleanupFns.push(onEvent('session_id_changed', (msg: any) => {
     if (done) return
     if (msg.old_session_id && msg.old_session_id !== pendingSessionId) return
     done = true
     if (timeoutTimer) clearTimeout(timeoutTimer)
     creating.value = false
-    router.push(`/session/${msg.session_id}`)
+    const daemonId = msg.daemon_id || form.daemonId
+    const query = daemonId ? { host: daemonId } : {}
+    router.push({ path: `/session/${msg.session_id}`, query })
     emit('close')
   }))
 
@@ -223,6 +276,8 @@ function startSession() {
     agent: form.agent,
     cwd: form.cwd || undefined,
     prompt: form.prompt || undefined,
+    permission_mode: form.permissionMode || undefined,
+    model: form.model || undefined,
   })
 
   // Timeout 15s: abort + show failure
@@ -236,8 +291,38 @@ function startSession() {
   }, 15000)
 }
 
+// Auto-select daemon: ① 若传入 preSelectedDaemonId（从某主机跳来带 host filter）则预选它；
+// ② 否则当可选（在线）主机恰好一台时，自动选中它，省去手动点击。
+// 用户手动切换/取消后（form.daemonId 非空），不再自动覆盖。
+// immediate: 必须立即执行一次——弹窗打开时 props.daemons 往往已就绪，惰性 watch 不会触发。
+let autoSelectDone = false
+watch([() => props.daemons, () => props.preSelectedDaemonId], ([daemons, preId]) => {
+  if (autoSelectDone || !daemons?.length) return
+  if (form.daemonId) { autoSelectDone = true; return }  // 用户已选择则锁定
+  const online = daemons.filter(d => d.daemon_online)
+  if (preId) {
+    const target = online.find(d => d.daemon_id === preId)
+    if (target) { form.daemonId = preId; autoSelectDone = true }
+    return
+  }
+  // 仅一台在线主机 → 自动选中
+  if (online.length === 1) { form.daemonId = online[0].daemon_id; autoSelectDone = true }
+}, { immediate: true })
+
+// Fetch available models whenever the selected host changes
+watch(() => form.daemonId, (id) => {
+  models.value = []
+  form.model = ''
+  if (id) send({ type: 'list_models', daemon_id: id })
+})
+
 onMounted(() => {
   connect()
+  // Receive available models for the selected host (model picker)
+  cleanupFns.push(onEvent('model_list', (msg: any) => {
+    models.value = msg.models || []
+  }))
+  if (form.daemonId) send({ type: 'list_models', daemon_id: form.daemonId })
   // Close on Escape
   const escHandler = (e: KeyboardEvent) => { if (e.key === 'Escape') emit('close') }
   document.addEventListener('keydown', escHandler)
@@ -333,6 +418,14 @@ onUnmounted(() => {
 
 /* Agent Pills */
 .agent-pills { display: flex; gap: 8px; margin-bottom: 24px; }
+.model-select {
+  width: 100%; padding: 10px 14px; margin-bottom: 24px;
+  background: var(--surface); border: 1px solid var(--border);
+  border-radius: var(--radius-lg); color: var(--fg); font-size: 13px;
+  cursor: pointer; transition: border-color 0.15s ease;
+}
+.model-select:hover { border-color: var(--border-light); }
+.model-select:focus { outline: none; border-color: var(--accent); }
 .agent-pill {
   flex: 1; padding: 11px 20px; border-radius: var(--radius-md);
   font-size: 14px; font-weight: 600; border: 2px solid var(--border);
@@ -412,4 +505,13 @@ onUnmounted(() => {
   @keyframes slide-up-mobile { from { transform: translateY(100%); } to { transform: translateY(0); } }
   .modal-footer { flex-direction: column; }
 }
+
+/* Permission mode selector */
+.perm-options { display: flex; gap: 8px; }
+.perm-option { flex: 1; display: flex; flex-direction: column; gap: 2px; padding: 10px 8px; background: var(--bg); border: 1px solid var(--border); border-radius: var(--radius-md); cursor: pointer; transition: all 0.15s; text-align: left; }
+.perm-option:hover { border-color: var(--border-light); background: var(--surface-hover); }
+.perm-option.active { border-color: var(--accent); background: var(--accent-muted); }
+.perm-name { font-size: 13px; font-weight: 600; color: var(--fg); }
+.perm-option.active .perm-name { color: var(--accent); }
+.perm-desc { font-size: 11px; color: var(--fg-tertiary); line-height: 1.3; }
 </style>

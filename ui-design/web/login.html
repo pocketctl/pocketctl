@@ -221,16 +221,6 @@
 
   .email-input-group input::placeholder { color: var(--fg-tertiary); }
 
-  .email-input-group .email-suffix {
-    display: flex;
-    align-items: center;
-    padding: 0 14px;
-    color: var(--fg-tertiary);
-    font-size: 14px;
-    background: var(--surface);
-    border-left: 1px solid var(--border);
-    white-space: nowrap;
-  }
 
   /* Login button */
   .login-btn {
@@ -336,6 +326,45 @@
   .tab-content { display: none; }
   .tab-content.active { display: flex; flex-direction: column; gap: 16px; }
 
+  /* ---- 扫码登录 ---- */
+  .qr-box { display: flex; flex-direction: column; align-items: center; gap: 14px; padding: 8px 0 4px; }
+  .qr-status-bar {
+    display: inline-flex; align-items: center; gap: 8px;
+    padding: 6px 14px; border-radius: var(--radius-full);
+    font-size: 13px; font-weight: 500;
+    background: var(--success-bg); color: var(--success);
+    transition: background 0.2s, color 0.2s;
+  }
+  .qr-status-bar .qr-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--success); animation: pulse-green 1.5s infinite; }
+  .qr-status-bar.scanned { background: var(--accent-muted); color: var(--accent); }
+  .qr-status-bar.scanned .qr-dot { background: var(--accent); animation: none; }
+  .qr-status-bar.confirmed { background: var(--accent-muted); color: var(--accent); }
+  .qr-status-bar.confirmed .qr-dot { background: var(--accent); animation: none; }
+  .qr-frame {
+    width: 188px; height: 188px; padding: 12px;
+    background: #fff; border-radius: var(--radius-md);
+    position: relative; display: flex; align-items: center; justify-content: center;
+  }
+  .qr-grid { width: 100%; height: 100%; display: grid; gap: 1px; }
+  .qr-cell { background: #fff; }
+  .qr-cell.on { background: #0d1117; }
+  [data-theme="light"] .qr-cell.on { background: #1f2328; }
+  .qr-logo {
+    position: absolute; width: 40px; height: 40px; border-radius: 8px;
+    background: #fff; display: flex; align-items: center; justify-content: center;
+    box-shadow: 0 0 0 4px #fff, 0 0 0 5px rgba(0,0,0,0.06);
+  }
+  .qr-hint { font-size: 13px; color: var(--fg-secondary); text-align: center; line-height: 1.5; }
+  .qr-hint strong { color: var(--accent); }
+  .qr-meta { display: flex; align-items: center; gap: 12px; }
+  .qr-timer { font-size: 12px; color: var(--fg-tertiary); font-family: var(--font-mono); }
+  .qr-state-btn {
+    background: none; border: 1px dashed var(--border); color: var(--fg-tertiary);
+    font-size: 11px; padding: 4px 10px; border-radius: var(--radius-full);
+    cursor: pointer; font-family: var(--font-body);
+  }
+  .qr-state-btn:hover { color: var(--fg-secondary); border-color: var(--border-light); }
+
   /* Footer */
   .login-footer {
     text-align: center;
@@ -389,42 +418,22 @@
 
         <!-- Login Tabs -->
         <div class="login-tabs">
-          <button class="login-tab active" onclick="switchTab('phone')" id="tab-phone">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="5" y="2" width="14" height="20" rx="2"/><circle cx="12" cy="18" r="1"/></svg>
-            手机号登录
-          </button>
-          <button class="login-tab" onclick="switchTab('email')" id="tab-email">
+          <button class="login-tab active" onclick="switchTab('email')" id="tab-email">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="4" width="20" height="16" rx="2"/><path d="M22 4L12 13 2 4"/></svg>
             邮箱登录
           </button>
-        </div>
-
-        <!-- Phone Login Form -->
-        <div class="tab-content active" id="content-phone">
-          <div>
-            <div class="form-label">手机号</div>
-            <div class="input-group">
-              <div class="input-prefix">+86 <span class="chevron">▼</span></div>
-              <input type="tel" placeholder="请输入手机号" id="phone-input">
-            </div>
-          </div>
-          <div>
-            <div class="form-label">验证码</div>
-            <div class="code-row">
-              <input type="text" class="input-field" placeholder="6 位验证码" id="phone-code" maxlength="6" style="font-family:var(--font-mono);letter-spacing:4px;">
-              <button class="get-code-btn" id="phone-code-btn" onclick="sendCode('phone')">获取验证码</button>
-            </div>
-          </div>
-          <button class="login-btn" id="phone-login-btn">登录</button>
+          <button class="login-tab" onclick="switchTab('qr')" id="tab-qr">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><path d="M14 14h3v3h-3zM20 14v3M14 20h3M20 20v.01"/></svg>
+            扫码登录
+          </button>
         </div>
 
         <!-- Email Login Form -->
-        <div class="tab-content" id="content-email">
+        <div class="tab-content active" id="content-email">
           <div>
             <div class="form-label">邮箱地址</div>
             <div class="email-input-group">
-              <input type="text" placeholder="name" id="email-input">
-              <div class="email-suffix">@gmail.com</div>
+              <input type="email" placeholder="you@example.com" id="email-input">
             </div>
           </div>
           <div>
@@ -437,36 +446,38 @@
           <button class="login-btn" id="email-login-btn">登录</button>
         </div>
 
+        <!-- QR Login -->
+        <div class="tab-content" id="content-qr">
+          <div class="qr-box">
+            <div class="qr-status-bar" id="qr-status-bar">
+              <span class="qr-dot"></span>
+              <span id="qr-status-text">等待 App 扫码</span>
+            </div>
+            <div class="qr-frame">
+              <div class="qr-grid" id="qr-grid"></div>
+              <div class="qr-logo">
+                <svg width="20" height="20" viewBox="0 0 512 512" fill="none">
+                  <path d="M208 200 L304 256 L208 312" stroke="#58a6ff" stroke-width="28" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+                </svg>
+              </div>
+            </div>
+            <div class="qr-hint">请使用 <strong>pocketctl App</strong> 扫描上方二维码登录</div>
+            <div class="qr-meta">
+              <span class="qr-timer">二维码 02:58 后失效</span>
+              <button class="qr-state-btn" onclick="cycleQrState()" title="设计审阅：切换扫码状态">演示状态</button>
+            </div>
+          </div>
+        </div>
+
         <!-- Terms -->
         <div class="terms-text" style="margin-top:8px;">
           登录即同意<a href="#">《用户协议》</a>和<a href="#">《隐私政策》</a>
-        </div>
-
-        <!-- Social Login -->
-        <div class="divider-text">其他登录方式</div>
-        <div class="social-row">
-          <button class="social-btn" title="Apple 登录">
-            <svg viewBox="0 0 24 24" fill="var(--fg)">
-              <path d="M17.05 20.28c-.98.95-2.05.8-3.08.35-1.09-.46-2.09-.48-3.24 0-1.44.62-2.2.44-3.06-.35C2.79 15.25 3.51 7.59 9.05 7.31c1.35.07 2.29.74 3.08.8 1.18-.24 2.31-.93 3.57-.84 1.51.12 2.65.72 3.4 1.8-3.12 1.87-2.38 5.98.48 7.13-.57 1.5-1.31 2.99-2.54 4.09zM12.03 7.25c-.15-2.23 1.66-4.07 3.74-4.25.29 2.58-2.34 4.5-3.74 4.25z"/>
-            </svg>
-          </button>
-          <button class="social-btn" title="GitHub 登录">
-            <svg viewBox="0 0 24 24" fill="var(--fg)">
-              <path d="M12 2C6.477 2 2 6.484 2 12.017c0 4.425 2.865 8.18 6.839 9.504.5.092.682-.217.682-.483 0-.237-.008-.868-.013-1.703-2.782.605-3.369-1.343-3.369-1.343-.454-1.158-1.11-1.466-1.11-1.466-.908-.62.069-.608.069-.608 1.003.07 1.531 1.032 1.531 1.032.892 1.53 2.341 1.088 2.91.832.092-.647.35-1.088.636-1.338-2.22-.253-4.555-1.113-4.555-4.951 0-1.093.39-1.988 1.029-2.688-.103-.253-.446-1.272.098-2.65 0 0 .84-.27 2.75 1.026A9.564 9.564 0 0112 6.844c.85.004 1.705.115 2.504.337 1.909-1.296 2.747-1.027 2.747-1.027.546 1.379.202 2.398.1 2.651.64.7 1.028 1.595 1.028 2.688 0 3.848-2.339 4.695-4.566 4.943.359.309.678.92.678 1.855 0 1.338-.012 2.419-.012 2.747 0 .268.18.58.688.482A10.019 10.019 0 0022 12.017C22 6.484 17.522 2 12 2z"/>
-            </svg>
-          </button>
-          <button class="social-btn disabled" title="微信登录">
-            <svg viewBox="0 0 24 24" fill="#07C160">
-              <path d="M8.69 2C4.34 2 .75 5.06.75 8.8c0 2.14 1.12 4.06 2.88 5.34l-.72 2.16 2.52-1.26c.82.23 1.68.36 2.58.36.32 0 .64-.02.95-.06A6.5 6.5 0 018.5 13c0-3.87 3.58-7 8-7 .37 0 .73.02 1.08.07C16.43 3.94 12.89 2 8.69 2zm-2.8 4.2a.9.9 0 110 1.8.9.9 0 010-1.8zm5.4 0a.9.9 0 110 1.8.9.9 0 010-1.8zM16.5 7c-3.87 0-7 2.69-7 6s3.13 6 7 6c.74 0 1.45-.1 2.12-.3l2.08 1.04-.6-1.8A5.6 5.6 0 0023.25 13c0-3.31-3.13-6-7-6zm-2.2 3.6a.75.75 0 110 1.5.75.75 0 010-1.5zm4.4 0a.75.75 0 110 1.5.75.75 0 010-1.5z"/>
-            </svg>
-            <span class="coming-soon">即将开通</span>
-          </button>
         </div>
       </div>
 
       <!-- Footer -->
       <div class="login-footer">
-        还没有账户？<a href="#">注册</a> · <a href="#">帮助中心</a>
+        <a href="#">帮助中心</a>
       </div>
     </div>
   </div>
@@ -520,7 +531,49 @@
     document.getElementById('content-' + tab).classList.add('active');
     // Hide error on tab switch
     document.getElementById('error-banner').classList.remove('visible');
+    if (tab === 'qr') buildQR();
   }
+
+  // ---- QR 生成（视觉示意：定位角 + 伪数据 + 中心 logo 位） ----
+  function inFinder(x, y, ox, oy) {
+    var dx = x - ox, dy = y - oy;
+    if (dx >= 0 && dx <= 6 && dy >= 0 && dy <= 6) {
+      var edge = (dx === 0 || dx === 6 || dy === 0 || dy === 6);
+      var core = (dx >= 2 && dx <= 4 && dy >= 2 && dy <= 4);
+      return edge || core;
+    }
+    return null;
+  }
+  function buildQR() {
+    var grid = document.getElementById('qr-grid');
+    if (!grid || grid.children.length) return; // 只生成一次
+    var size = 25, html = '';
+    for (var y = 0; y < size; y++) {
+      for (var x = 0; x < size; x++) {
+        var dark = false;
+        var f = inFinder(x, y, 0, 0) || inFinder(x, y, 18, 0) || inFinder(x, y, 0, 18);
+        if (f === true) dark = true;
+        else if (f === false) dark = false;
+        else dark = ((x * 3 + y * 7 + x * y * 2 + (x % 3)) % 5 < 2);
+        if (x >= 10 && x <= 14 && y >= 10 && y <= 14) dark = false; // 中心 logo 区
+        html += '<span class="qr-cell' + (dark ? ' on' : '') + '"></span>';
+      }
+    }
+    grid.style.gridTemplateColumns = 'repeat(' + size + ', 1fr)';
+    grid.innerHTML = html;
+  }
+  // ---- QR 状态切换（等待 → 已扫描 → 已确认） ----
+  var qrStates = ['waiting', 'scanned', 'confirmed'];
+  var qrIdx = 0;
+  function cycleQrState() {
+    qrIdx = (qrIdx + 1) % qrStates.length;
+    var s = qrStates[qrIdx];
+    var bar = document.getElementById('qr-status-bar');
+    var text = document.getElementById('qr-status-text');
+    bar.className = 'qr-status-bar ' + s;
+    text.textContent = s === 'waiting' ? '等待 App 扫码' : (s === 'scanned' ? '已扫描，请在 App 内确认' : '已确认，正在登录…');
+  }
+  buildQR();
 
   // ---- Send code ----
   function sendCode(type) {
