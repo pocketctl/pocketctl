@@ -33,6 +33,7 @@ services:
       ZHIPU_API_KEY: ${ZHIPU_API_KEY:-}
       NODE_ENV: production
       PORT: 8080
+      WEB_APP_URL: "https://www.pocketctl.me"
     expose:
       - "8080"
 
