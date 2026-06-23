@@ -141,7 +141,7 @@ SENSITIVE_PATTERNS=(
   'COS_SECRET_KEY=[[:space:]]*[^[:space:]]'
 )
 for pattern in "${SENSITIVE_PATTERNS[@]}"; do
-  matches=$(grep -rlE "$pattern" . 2>/dev/null || true)
+  matches=$(grep -rlE "$pattern" . --exclude-dir=.git 2>/dev/null || true)
   if [[ -n "$matches" ]]; then
     error "Sensitive data found! Pattern: ${pattern}\n${matches}"
   fi
