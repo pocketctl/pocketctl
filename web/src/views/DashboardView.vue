@@ -60,7 +60,7 @@
       <div class="empty-title">{{ t('dashboard.no_hosts_title') }}</div>
       <div class="empty-subtitle">{{ t('dashboard.no_hosts_desc') }}</div>
       <div class="code-block" style="margin-top:16px; max-width:500px; margin-left:auto;margin-right:auto;">
-        <span class="cmd">curl -fsSL https://pocketctl.me/install.sh | bash</span><br/>
+        <span class="cmd">{{ getInstallCommand() }}</span><br/>
         <span class="cmd">pocketctl daemon start</span>
       </div>
     </div>
@@ -199,6 +199,7 @@ import { useLocale } from '../composables/useLocale'
 import NewSessionDialog from '../components/NewSessionDialog.vue'
 import RegisterDaemonDialog from '../components/RegisterDaemonDialog.vue'
 import SessionActions from '../components/SessionActions.vue'
+import { getInstallCommand, getRelayOrigin } from '../composables/useEnv'
 import { useSessionRename } from '../composables/useSessionRename'
 
 const { renamingId: sessRenamingId, renameInput: sessRenameInput, startRename: sessStartRename, commitRename: sessCommitRename, cancelRename: sessCancelRename } = useSessionRename()
@@ -230,10 +231,6 @@ function formatTokens(v: number | null | undefined): string {
   if (v >= 1e6) return (v / 1e6).toFixed(2) + 'M'
   if (v >= 1e3) return (v / 1e3).toFixed(1) + 'K'
   return String(v)
-}
-function getRelayOrigin(): string {
-  const relayWs = localStorage.getItem('pocketctl_relay_url') || (window as any).__RELAY_WS__ || ''
-  try { const url = new URL(relayWs); if (url.hostname === 'localhost' || url.hostname === '127.0.0.1') return ''; return url.origin.replace(/^ws/, 'http') } catch { return '' }
 }
 async function fetchCostSummary() {
   const origin = getRelayOrigin()

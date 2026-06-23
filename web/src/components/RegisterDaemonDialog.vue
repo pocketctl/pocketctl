@@ -54,24 +54,15 @@
 <script setup lang="ts">
 import { ref, computed } from 'vue'
 import { useLocale } from '../composables/useLocale'
+import { getRelayWs, getInstallURL } from '../composables/useEnv'
 
 defineEmits<{ close: [] }>()
 const { t } = useLocale()
 
 const copied = ref(false)
 
-const relayWs = computed(() => {
-  return localStorage.getItem('pocketctl_relay_url') || (window as any).__RELAY_WS__ || 'ws://localhost/ws'
-})
-
-const installURL = computed(() => {
-  try {
-    const u = new URL(relayWs.value)
-    return u.origin.replace(/^ws/, 'http') + '/install-daemon.sh'
-  } catch {
-    return 'https://pocketctl.me/install-daemon.sh'
-  }
-})
+const relayWs = computed(() => getRelayWs())
+const installURL = computed(() => getInstallURL())
 
 const fullCommands = computed(() => {
   return `curl -fsSL ${installURL.value} -o /tmp/install-daemon.sh

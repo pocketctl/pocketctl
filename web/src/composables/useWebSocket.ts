@@ -1,4 +1,5 @@
 import { ref } from 'vue'
+import { getRelayWs } from './useEnv'
 
 export interface DaemonEvent {
   type: string
@@ -61,24 +62,7 @@ let pendingMessages: any[] = []
 const daemons = ref<Map<string, DaemonInfo>>(new Map())
 
 function getRelayWsUrl(): string {
-  const stored = localStorage.getItem('pocketctl_relay_url') || (window as any).__RELAY_WS__ || ''
-  // Use relative WebSocket URL when behind nginx proxy (production).
-  // Only use stored URL if it points to a non-localhost host (explicit external relay).
-  let base: string
-  if (stored) {
-    try {
-      const u = new URL(stored)
-      if (u.hostname === 'localhost' || u.hostname === '127.0.0.1') {
-        base = `${location.protocol === 'https:' ? 'wss:' : 'ws:'}//${location.host}/ws`
-      } else {
-        base = stored
-      }
-    } catch {
-      base = `${location.protocol === 'https:' ? 'wss:' : 'ws:'}//${location.host}/ws`
-    }
-  } else {
-    base = `${location.protocol === 'https:' ? 'wss:' : 'ws:'}//${location.host}/ws`
-  }
+  const base = getRelayWs()
   const token = localStorage.getItem('pocketctl_access_token')
   if (!token) return base
   const sep = base.includes('?') ? '&' : '?'

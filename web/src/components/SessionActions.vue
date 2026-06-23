@@ -85,6 +85,7 @@ import { ref, nextTick, onUnmounted } from 'vue'
 import { useWebSocket } from '../composables/useWebSocket'
 import { useAuth } from '../composables/useAuth'
 import { useLocale } from '../composables/useLocale'
+import { getRelayOrigin } from '../composables/useEnv'
 import { buildResumeCommand } from '../utils/resumeCommand'
 
 const props = defineProps<{ session: any }>()
@@ -205,10 +206,6 @@ function showToast(msg: string, undo?: () => void, undoLabel?: string) {
   if (toastTimer) clearTimeout(toastTimer)
   toast.value = { show: true, msg, undo, undoLabel }
   toastTimer = setTimeout(() => { toast.value = { show: false, msg: '' } }, 5000)
-}
-function getRelayOrigin(): string {
-  const relayWs = localStorage.getItem('pocketctl_relay_url') || (window as any).__RELAY_WS__ || ''
-  try { const url = new URL(relayWs); if (url.hostname === 'localhost' || url.hostname === '127.0.0.1') return ''; return url.origin.replace(/^ws/, 'http') } catch { return '' }
 }
 </script>
 

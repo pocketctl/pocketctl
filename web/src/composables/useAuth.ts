@@ -1,4 +1,5 @@
 import { ref, computed } from 'vue'
+import { getRelayOrigin } from './useEnv'
 
 export interface UserInfo {
   id: number
@@ -15,17 +16,6 @@ const refreshToken = ref(localStorage.getItem('pocketctl_refresh_token') || '')
 const savedUser = localStorage.getItem('pocketctl_user')
 if (savedUser && accessToken.value) {
   try { user.value = JSON.parse(savedUser) } catch {}
-}
-
-function getRelayOrigin(): string {
-  const relayWs = localStorage.getItem('pocketctl_relay_url') || (window as any).__RELAY_WS__ || ''
-  try {
-    const url = new URL(relayWs)
-    if (url.hostname === 'localhost' || url.hostname === '127.0.0.1') return ''
-    return url.origin.replace(/^ws/, 'http')
-  } catch {
-    return ''
-  }
 }
 
 async function apiRequest(path: string, body: any, auth?: boolean): Promise<{ ok: boolean; data: any }> {
