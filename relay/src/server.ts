@@ -964,7 +964,11 @@ async function main() {
   // ---- WebSocket endpoint ----
 
   app.get('/ws', { websocket: true }, (socket, req) => {
-    const clientIp = req.ip || req.socket.remoteAddress || 'unknown';
+    // Trust X-Forwarded-For from the nginx proxy so logs show the real client
+    // IP (without this, every connection appears as 127.0.0.1 behind nginx).
+    const clientIp = (req.headers['x-forwarded-for'] as string)?.split(',')[0]?.trim()
+      || (req.headers['x-real-ip'] as string)?.trim()
+      || req.ip || req.socket.remoteAddress || 'unknown';
 
     if (!checkRateLimit(clientIp)) {
       socket.close(4029, 'rate limit exceeded');
@@ -1038,6 +1042,7 @@ async function main() {
       if (token) {
         const payload = await verifyAccessTokenWithRevocation(token, pool);
         if (!payload) {
+          console.log(`WS rejected: type=${connType} ip=${clientIp} reason=invalid_token`);
           socket.close(4001, 'invalid token');
           return;
         }
@@ -1047,6 +1052,7 @@ async function main() {
       } else if (apiKey && API_KEY && apiKey === API_KEY) {
         userId = null;
       } else {
+        console.log(`WS rejected: type=${connType} ip=${clientIp} reason=auth_required`);
         socket.close(4001, 'authentication required');
         return;
       }
