@@ -13,14 +13,14 @@
           <p>{{ t('help.install_desc') }}</p>
           <div class="code-block">
             <code>{{ t('help.cmd_install') }}</code>
-            <code>curl -fsSL {{ installURL }} -o /tmp/install-daemon.sh</code>
-            <code>sudo bash /tmp/install-daemon.sh</code>
+            <code>curl -fsSL {{ installURL }} -o /tmp/install.sh</code>
+            <code>sudo bash /tmp/install.sh</code>
             <code></code>
             <code>{{ t('help.cmd_login') }}</code>
             <code>pocketctl login</code>
             <code></code>
             <code>{{ t('help.cmd_start') }}</code>
-            <code>pocketctl daemon start</code>
+            <code>pocketctl daemon start --relay {{ relayWs }}</code>
             <code></code>
             <code>{{ t('help.cmd_status') }}</code>
             <code>pocketctl daemon status</code>
@@ -60,10 +60,10 @@ const relayWs = computed(() => getRelayWs())
 const installURL = computed(() => getInstallURL())
 
 const fullCommands = computed(() => {
-  return `curl -fsSL ${installURL.value} -o /tmp/install-daemon.sh
-sudo bash /tmp/install-daemon.sh
+  return `curl -fsSL ${installURL.value} -o /tmp/install.sh
+sudo bash /tmp/install.sh
 pocketctl login
-pocketctl daemon start`
+pocketctl daemon start --relay ${relayWs.value}`
 })
 
 async function copyCommands() {

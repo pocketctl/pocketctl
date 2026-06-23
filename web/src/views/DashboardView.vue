@@ -61,7 +61,7 @@
       <div class="empty-subtitle">{{ t('dashboard.no_hosts_desc') }}</div>
       <div class="code-block" style="margin-top:16px; max-width:500px; margin-left:auto;margin-right:auto;">
         <span class="cmd">{{ getInstallCommand() }}</span><br/>
-        <span class="cmd">pocketctl daemon start</span>
+        <span class="cmd">pocketctl daemon start --relay {{ getRelayWs() }}</span>
       </div>
     </div>
 
@@ -199,7 +199,7 @@ import { useLocale } from '../composables/useLocale'
 import NewSessionDialog from '../components/NewSessionDialog.vue'
 import RegisterDaemonDialog from '../components/RegisterDaemonDialog.vue'
 import SessionActions from '../components/SessionActions.vue'
-import { getInstallCommand, getRelayOrigin } from '../composables/useEnv'
+import { getInstallCommand, getRelayOrigin, getRelayWs } from '../composables/useEnv'
 import { useSessionRename } from '../composables/useSessionRename'
 
 const { renamingId: sessRenamingId, renameInput: sessRenameInput, startRename: sessStartRename, commitRename: sessCommitRename, cancelRename: sessCancelRename } = useSessionRename()
