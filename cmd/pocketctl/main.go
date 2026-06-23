@@ -26,6 +26,7 @@ import (
 	"github.com/pocketctl/pocketctl/internal/config"
 	"github.com/pocketctl/pocketctl/internal/daemon"
 	"github.com/pocketctl/pocketctl/internal/discovery"
+	"github.com/pocketctl/pocketctl/internal/i18n"
 	"github.com/pocketctl/pocketctl/internal/notify"
 	"github.com/pocketctl/pocketctl/internal/protocol"
 	"github.com/pocketctl/pocketctl/internal/session"
@@ -36,6 +37,11 @@ import (
 )
 
 var version = "0.2.2"
+
+// DefaultRelayURL is the public production relay used when no --relay flag,
+// --prod config, or POCKETCTL_RELAY_URL env is provided. To target a local or
+// self-hosted relay instead, override with --relay <url> (see `pocketctl help`).
+const DefaultRelayURL = "wss://www.pocketctl.me/ws"
 
 func main() {
 	if len(os.Args) < 2 {
@@ -53,42 +59,19 @@ func main() {
 	case "help", "--help", "-h":
 		printUsage()
 	default:
-		fmt.Fprintf(os.Stderr, "unknown command: %s\n", os.Args[1])
+		fmt.Fprintln(os.Stderr, i18n.T("error.unknown_command", os.Args[1]))
 		printUsage()
 		os.Exit(1)
 	}
 }
 
 func printUsage() {
-	fmt.Println(`pocketctl - Remote AI coding agent control
-
-Usage:
-  pocketctl <command> [options]
-
-Commands:
-  login          Login via browser (OAuth 2.0 Device Flow) or email code
-  daemon start   Start the daemon (connects to relay)
-  daemon stop    Stop the running daemon
-  daemon status  Show daemon status
-  daemon logs    Show daemon logs
-  daemon doctor  Diagnose connection and configuration issues
-  daemon update  Update daemon to the latest version
-  version        Print version
-  help           Show this help
-
-Login Options:
-  --email        Use email verification code (for headless servers)
-  --relay <url>  Relay WebSocket URL
-  --prod         Use production relay from config
-
-Environment:
-  POCKETCTL_RELAY_URL   Relay WebSocket URL (e.g. wss://your-domain.com/ws)
-  POCKETCTL_TOKEN       JWT token for authentication`)
+	fmt.Println(i18n.T("help.body"))
 }
 
 func cmdDaemon(args []string) {
 	if len(args) == 0 {
-		fmt.Fprintln(os.Stderr, "usage: pocketctl daemon <start|stop|status|logs|doctor|update>")
+		fmt.Fprintln(os.Stderr, i18n.T("daemon.usage_sub"))
 		os.Exit(1)
 	}
 
@@ -106,7 +89,7 @@ func cmdDaemon(args []string) {
 	case "update":
 		cmdDaemonUpdate(args[1:])
 	default:
-		fmt.Fprintf(os.Stderr, "unknown daemon subcommand: %s\n", args[0])
+		fmt.Fprintln(os.Stderr, i18n.T("daemon.unknown_sub", args[0]))
 		os.Exit(1)
 	}
 }
@@ -122,7 +105,7 @@ func cmdLogin(args []string) {
 	emailMode := fs.Bool("email", false, "Force email verification code login (for headless servers)")
 	fs.Parse(args)
 
-	// Resolve relay URL: --relay > env var > --prod from config > default dev
+	// Resolve relay URL: --relay > env var > --prod from config > default production
 	baseURL := *relayURL
 	if baseURL == "" {
 		baseURL = os.Getenv("POCKETCTL_RELAY_URL")
@@ -131,12 +114,12 @@ func cmdLogin(args []string) {
 		if prodURL, err := config.LoadProdRelayURL(); err == nil && prodURL != "" {
 			baseURL = prodURL
 		} else {
-			fmt.Fprintln(os.Stderr, "error: --prod requires prod_relay_url in config. Run the install script with --prod first, or set POCKETCTL_RELAY_URL.")
+			fmt.Fprintln(os.Stderr, i18n.T("error.prod_requires_url"))
 			os.Exit(1)
 		}
 	}
 	if baseURL == "" {
-		baseURL = "ws://localhost:8080/ws"
+		baseURL = DefaultRelayURL
 	}
 
 	// Convert WebSocket URL to HTTP URL for API calls
@@ -151,8 +134,8 @@ func cmdLogin(args []string) {
 		wsURL += "/ws"
 	}
 
-	fmt.Println("pocketctl login")
-	fmt.Println("---------------")
+	fmt.Println(i18n.T("login.title"))
+	fmt.Println(i18n.T("login.separator"))
 
 	var accessToken, refreshToken string
 	var err error
@@ -161,31 +144,31 @@ func cmdLogin(args []string) {
 	if *emailMode || !canOpenBrowser() {
 		// Headless mode: email verification code
 		if *emailMode {
-			fmt.Println("使用邮箱验证码登录 (--email)")
+			fmt.Println(i18n.T("login.use_email"))
 		} else {
-			fmt.Println("检测到无浏览器环境，使用邮箱验证码登录")
+			fmt.Println(i18n.T("login.no_browser"))
 		}
 		accessToken, refreshToken, err = loginViaEmail(apiURL)
 	} else {
 		// GUI mode: OAuth 2.0 Device Authorization Grant
-		fmt.Println("使用浏览器授权登录 (OAuth 2.0 Device Flow)")
+		fmt.Println(i18n.T("login.use_oauth"))
 		accessToken, refreshToken, err = loginViaDeviceFlow(apiURL)
 	}
 
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "\n登录失败: %v\n", err)
+		fmt.Fprintln(os.Stderr, i18n.T("login.failed", err))
 		os.Exit(1)
 	}
 
 	// Save to config
 	if err := config.SaveAuth(wsURL, accessToken, refreshToken); err != nil {
-		fmt.Fprintf(os.Stderr, "\n保存失败: %v\n", err)
+		fmt.Fprintln(os.Stderr, i18n.T("login.save_failed", err))
 		os.Exit(1)
 	}
 
-	fmt.Println("\n✅ 登录成功!")
-	fmt.Printf("Token 已保存到 ~/.pocketctl/auth.json\n")
-	fmt.Printf("现在可以运行 'pocketctl daemon start' 启动守护进程\n")
+	fmt.Println(i18n.T("login.success"))
+	fmt.Println(i18n.T("login.token_saved"))
+	fmt.Println(i18n.T("login.next_step"))
 }
 
 // canOpenBrowser checks if the current environment can open a browser.
@@ -210,7 +193,7 @@ func loginViaDeviceFlow(apiURL string) (string, string, error) {
 	// Generate PKCE code verifier and challenge
 	codeVerifier, err := api.GenerateCodeVerifier()
 	if err != nil {
-		return "", "", fmt.Errorf("生成 PKCE 验证码失败: %w", err)
+		return "", "", fmt.Errorf("%s", i18n.T("login.pkce_failed", err))
 	}
 	codeChallenge := api.ComputeCodeChallenge(codeVerifier)
 
@@ -218,16 +201,16 @@ func loginViaDeviceFlow(apiURL string) (string, string, error) {
 	machineID := daemon.MachineID()
 
 	// Request device authorization
-	fmt.Print("正在请求设备授权...")
+	fmt.Print(i18n.T("login.requesting_auth"))
 	authResp, err := api.DeviceAuthorize(apiURL, "pocketctl-cli", codeChallenge, machineID)
 	if err != nil {
-		return "", "", fmt.Errorf("请求授权失败: %w", err)
+		return "", "", fmt.Errorf("%s", i18n.T("login.auth_req_failed", err))
 	}
-	fmt.Println(" ✅")
+	fmt.Println(i18n.T("login.check_ok"))
 
 	// Open browser
-	fmt.Printf("\n正在打开浏览器进行授权...\n")
-	fmt.Printf("如果浏览器未自动打开，请手动访问:\n")
+	fmt.Println(i18n.T("login.opening_browser"))
+	fmt.Println(i18n.T("login.manual_open"))
 	fmt.Printf("  %s\n\n", authResp.VerificationURIComplete)
 
 	openBrowser(authResp.VerificationURIComplete)
@@ -238,13 +221,13 @@ func loginViaDeviceFlow(apiURL string) (string, string, error) {
 		interval = 5
 	}
 
-	fmt.Print("等待授权")
+	fmt.Print(i18n.T("login.waiting"))
 	startTime := time.Now()
 	for {
 		select {
 		case <-time.After(time.Duration(interval) * time.Second):
 			elapsed := int(time.Since(startTime).Seconds())
-			fmt.Printf("\r等待授权... (已等待 %ds)", elapsed)
+			fmt.Printf(i18n.T("login.waiting_auth"), elapsed)
 
 			result, err := api.DeviceToken(apiURL, authResp.DeviceCode, "pocketctl-cli", codeVerifier)
 			if err != nil {
@@ -254,7 +237,7 @@ func loginViaDeviceFlow(apiURL string) (string, string, error) {
 			switch result.Error {
 			case "":
 				if result.AccessToken != "" {
-					fmt.Println("\n✅ 授权成功!")
+					fmt.Println(i18n.T("login.auth_ok"))
 					return result.AccessToken, result.RefreshToken, nil
 				}
 			case "authorization_pending":
@@ -263,13 +246,13 @@ func loginViaDeviceFlow(apiURL string) (string, string, error) {
 				interval += 5
 				continue
 			case "expired_token":
-				return "", "", fmt.Errorf("授权超时，请重新运行 pocketctl login")
+				return "", "", fmt.Errorf("%s", i18n.T("login.auth_timeout"))
 			default:
-				return "", "", fmt.Errorf("授权失败: %s", result.Error)
+				return "", "", fmt.Errorf("%s", i18n.T("login.auth_failed", result.Error))
 			}
 
 			if elapsed > authResp.ExpiresIn {
-				return "", "", fmt.Errorf("授权超时，请重新运行 pocketctl login")
+				return "", "", fmt.Errorf("%s", i18n.T("login.auth_timeout"))
 			}
 		}
 	}
@@ -290,31 +273,31 @@ func openBrowser(url string) {
 }
 
 func loginViaEmail(apiURL string) (string, string, error) {
-	fmt.Print("邮箱地址: ")
+	fmt.Print(i18n.T("login.email_prompt"))
 	var email string
 	fmt.Scanln(&email)
 
 	email = strings.TrimSpace(email)
 	if !strings.Contains(email, "@") {
-		return "", "", fmt.Errorf("请输入有效的邮箱地址")
+		return "", "", fmt.Errorf("%s", i18n.T("login.invalid_email"))
 	}
 
-	fmt.Print("正在发送验证码...")
+	fmt.Print(i18n.T("login.sending_code"))
 	if err := api.SendEmailCode(apiURL, email); err != nil {
-		return "", "", fmt.Errorf("发送失败: %w", err)
+		return "", "", fmt.Errorf("%s", i18n.T("login.send_failed", err))
 	}
-	fmt.Println(" ✅ 已发送")
+	fmt.Println(i18n.T("login.code_sent"))
 
-	fmt.Print("验证码: ")
+	fmt.Print(i18n.T("login.code_prompt"))
 	var code string
 	fmt.Scanln(&code)
 
 	code = strings.TrimSpace(code)
 	if len(code) != 6 {
-		return "", "", fmt.Errorf("请输入6位验证码")
+		return "", "", fmt.Errorf("%s", i18n.T("login.invalid_code"))
 	}
 
-	fmt.Print("正在验证...")
+	fmt.Print(i18n.T("login.verifying"))
 	return api.VerifyEmailCode(apiURL, email, code)
 }
 
@@ -329,7 +312,7 @@ func cmdDaemonStart(args []string) {
 	foreground := fs.Bool("foreground", false, "Run in foreground (don't daemonize)")
 	fs.Parse(args)
 
-	// Resolve relay URL: --relay > env var > --prod from config > default dev
+	// Resolve relay URL: --relay > env var > --prod from config > default production
 	url := *relayURL
 	if url == "" {
 		url = os.Getenv("POCKETCTL_RELAY_URL")
@@ -338,12 +321,12 @@ func cmdDaemonStart(args []string) {
 		if prodURL, err := config.LoadProdRelayURL(); err == nil && prodURL != "" {
 			url = prodURL
 		} else {
-			fmt.Fprintln(os.Stderr, "error: --prod requires prod_relay_url in config. Run the install script with --prod first, or set POCKETCTL_RELAY_URL.")
+			fmt.Fprintln(os.Stderr, i18n.T("error.prod_requires_url"))
 			os.Exit(1)
 		}
 	}
 	if url == "" {
-		url = "ws://localhost:8080/ws"
+		url = DefaultRelayURL
 	}
 
 	// Resolve token
@@ -358,13 +341,13 @@ func cmdDaemonStart(args []string) {
 		}
 	}
 	if tok == "" {
-		fmt.Fprintln(os.Stderr, "error: token required. Run 'pocketctl login' first, or set --token / POCKETCTL_TOKEN")
+		fmt.Fprintln(os.Stderr, i18n.T("error.token_required"))
 		os.Exit(1)
 	}
 
 	// Check if already running
 	if pid, running := daemon.IsRunning(); running {
-		fmt.Printf("daemon already running (PID %d)\n", pid)
+		fmt.Println(i18n.T("daemon.already_running", pid))
 		os.Exit(0)
 	}
 
@@ -595,17 +578,17 @@ func cmdDaemonStart(args []string) {
 		}
 	}()
 
-	fmt.Printf("pocketctl daemon started (ID: %s, PID: %d)\n", id, os.Getpid())
-	fmt.Printf("Relay: %s\n", url)
-	fmt.Printf("Agents: %s\n", strings.Join(agentTypes, ", "))
-	fmt.Printf("Logs: %s\n", daemon.LogPath())
+	fmt.Println(i18n.T("daemon.started", id, os.Getpid()))
+	fmt.Println(i18n.T("daemon.relay", url))
+	fmt.Println(i18n.T("daemon.agents", strings.Join(agentTypes, ", ")))
+	fmt.Println(i18n.T("daemon.logs", daemon.LogPath()))
 
 	// Daemonize: re-exec self in background
 	if !*foreground && os.Getenv("POCKETCTL_DAEMON_CHILD") != "1" {
 		childEnv := append(os.Environ(), "POCKETCTL_DAEMON_CHILD=1")
 		exe, err := os.Executable()
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "failed to get executable path: %v\n", err)
+			fmt.Fprintln(os.Stderr, i18n.T("error.executable_path", err))
 			os.Exit(1)
 		}
 		child := &exec.Cmd{
@@ -620,7 +603,7 @@ func cmdDaemonStart(args []string) {
 			},
 		}
 		if err := child.Start(); err != nil {
-			fmt.Fprintf(os.Stderr, "failed to daemonize: %v\n", err)
+			fmt.Fprintln(os.Stderr, i18n.T("error.daemonize", err))
 			os.Exit(1)
 		}
 		os.Exit(0)
@@ -629,7 +612,7 @@ func cmdDaemonStart(args []string) {
 	// Wait for signal
 	<-sigCh
 	logger.Info("shutting down")
-	fmt.Println("\nShutting down...")
+	fmt.Println(i18n.T("daemon.shutting_down"))
 	cancel()
 	time.Sleep(500 * time.Millisecond)
 }
@@ -638,10 +621,10 @@ func cmdDaemonStart(args []string) {
 
 func cmdDaemonStop() {
 	if err := daemon.Stop(); err != nil {
-		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		fmt.Fprintln(os.Stderr, i18n.T("error.generic", err))
 		os.Exit(1)
 	}
-	fmt.Println("Daemon stopped")
+	fmt.Println(i18n.T("daemon.stopped"))
 }
 
 // ---------- daemon status ----------
@@ -649,26 +632,27 @@ func cmdDaemonStop() {
 func cmdDaemonStatus() {
 	pid, running := daemon.IsRunning()
 	if !running {
-		fmt.Println("Daemon is not running")
+		fmt.Println(i18n.T("daemon.not_running"))
 		return
 	}
 
 	state, err := daemon.ReadState()
 	if err != nil {
-		fmt.Printf("Daemon running (PID %d), state unavailable\n", pid)
+		fmt.Println(i18n.T("daemon.running_no_state", pid))
 		return
 	}
 
-	fmt.Printf("Daemon: %s\n", state.DaemonID)
-	fmt.Printf("PID:    %d\n", state.PID)
-	fmt.Printf("Relay:  %s\n", state.RelayURL)
-	fmt.Printf("Status: %s\n", map[bool]string{true: "connected", false: "disconnected"}[state.Connected])
-	fmt.Printf("Started: %s\n", state.StartedAt.Format(time.RFC3339))
+	fmt.Println(i18n.T("status.daemon", state.DaemonID))
+	fmt.Println(i18n.T("status.pid", state.PID))
+	fmt.Println(i18n.T("status.relay", state.RelayURL))
+	conn := map[bool]string{true: i18n.T("status.connected"), false: i18n.T("status.disconnected")}[state.Connected]
+	fmt.Println(i18n.T("status.status_line", conn))
+	fmt.Println(i18n.T("status.started", state.StartedAt.Format(time.RFC3339)))
 
 	if len(state.Sessions) > 0 {
-		fmt.Printf("\nSessions (%d):\n", len(state.Sessions))
+		fmt.Println(i18n.T("status.sessions", len(state.Sessions)))
 		for _, s := range state.Sessions {
-			fmt.Printf("  %s  %-10s  %s\n", s.SessionID[:8], s.Status, s.Cwd)
+			fmt.Println(i18n.T("status.session_row", s.SessionID[:8], s.Status, s.Cwd))
 		}
 	}
 }
@@ -678,7 +662,7 @@ func cmdDaemonStatus() {
 func cmdDaemonLogs() {
 	data, err := os.ReadFile(daemon.LogPath())
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "error reading log: %v\n", err)
+		fmt.Fprintln(os.Stderr, i18n.T("error.read_log", err))
 		os.Exit(1)
 	}
 	os.Stdout.Write(data)
@@ -687,8 +671,8 @@ func cmdDaemonLogs() {
 // ---------- daemon doctor ----------
 
 func cmdDoctor() {
-	fmt.Println("pocketctl doctor")
-	fmt.Println("════════════════════════════════════")
+	fmt.Println(i18n.T("doctor.title"))
+	fmt.Println(i18n.T("doctor.rule"))
 
 	pass := 0
 	total := 0
@@ -698,33 +682,33 @@ func cmdDoctor() {
 		total++
 		if ok {
 			pass++
-			fmt.Printf("  ✅ %s: %s\n", name, detail)
+			fmt.Println(i18n.T("doctor.check_pass", name, detail))
 		} else {
-			fmt.Printf("  ❌ %s: %s\n", name, detail)
+			fmt.Println(i18n.T("doctor.check_fail", name, detail))
 		}
 	}
 
 	// 1. Config file
 	relayURL, accessToken, _, err := config.LoadAuth()
-	check("配置文件", err == nil, func() string {
+	check(i18n.T("doctor.check_config"), err == nil, func() string {
 		if err != nil {
-			return "未登录，请运行 pocketctl login"
+			return i18n.T("doctor.not_logged_in")
 		}
-		return "~/.pocketctl/auth.json 存在"
+		return i18n.T("doctor.config_exists")
 	}())
 
 	// 2. Token validity
 	if accessToken != "" {
 		exp, err := api.ParseJWTExpiry(accessToken)
 		if err != nil {
-			check("认证令牌", false, "Token 格式无效")
+			check(i18n.T("doctor.check_token"), false, i18n.T("doctor.token_invalid"))
 		} else if time.Now().After(exp) {
-			check("认证令牌", false, "Token 已过期，请重新登录")
+			check(i18n.T("doctor.check_token"), false, i18n.T("doctor.token_expired"))
 		} else {
-			check("认证令牌", true, fmt.Sprintf("有效，过期时间 %s", exp.Format("2006-01-02 15:04")))
+			check(i18n.T("doctor.check_token"), true, i18n.T("doctor.token_valid", exp.Format("2006-01-02 15:04")))
 		}
 	} else {
-		check("认证令牌", false, "无 Token，请运行 pocketctl login")
+		check(i18n.T("doctor.check_token"), false, i18n.T("doctor.no_token"))
 	}
 
 	// Derive base URL from relay URL
@@ -732,9 +716,9 @@ func cmdDoctor() {
 	if baseURL == "" {
 		// No relay URL configured — report partial results
 		fmt.Println()
-		fmt.Println("════════════════════════════════════")
-		fmt.Printf("  结果: %d/%d 通过（未配置 relay URL，无法检查网络）\n", pass, total)
-		fmt.Println("════════════════════════════════════")
+		fmt.Println(i18n.T("doctor.rule"))
+		fmt.Println(i18n.T("doctor.result_partial_no_relay", pass, total))
+		fmt.Println(i18n.T("doctor.rule"))
 		os.Exit(1)
 	}
 	// Strip /ws suffix for HTTP calls
@@ -751,25 +735,25 @@ func cmdDoctor() {
 	}
 	if hostname != "" {
 		addrs, err := net.LookupHost(hostname)
-		check("DNS 解析", err == nil, func() string {
+		check(i18n.T("doctor.check_dns"), err == nil, func() string {
 			if err != nil {
-				return fmt.Sprintf("无法解析域名: %s", hostname)
+				return i18n.T("doctor.dns_fail", hostname)
 			}
-			return fmt.Sprintf("%s → %s", hostname, addrs[0])
+			return i18n.T("doctor.dns_ok", hostname, addrs[0])
 		}())
 	} else {
-		check("DNS 解析", false, "无法从 URL 提取域名")
+		check(i18n.T("doctor.check_dns"), false, i18n.T("doctor.dns_no_host"))
 	}
 
 	// 4. HTTP health check
 	start := time.Now()
 	healthBody, healthErr := api.HealthCheck(baseURL)
 	elapsed := time.Since(start).Milliseconds()
-	check("HTTP 连通", healthErr == nil, func() string {
+	check(i18n.T("doctor.check_http"), healthErr == nil, func() string {
 		if healthErr != nil {
-			return fmt.Sprintf("无法连接 %s: %v", baseURL, healthErr)
+			return i18n.T("doctor.http_fail", baseURL, healthErr)
 		}
-		return fmt.Sprintf("HTTP 200 (%dms)", elapsed)
+		return i18n.T("doctor.http_ok", elapsed)
 	}())
 
 	// 5. Relay health status
@@ -777,15 +761,15 @@ func cmdDoctor() {
 		var parsed map[string]any
 		if json.Unmarshal([]byte(healthBody), &parsed) == nil {
 			status, _ := parsed["status"].(string)
-			check("Relay 健康", status == "ok", func() string {
+			check(i18n.T("doctor.check_relay"), status == "ok", func() string {
 				if status == "ok" {
-					return fmt.Sprintf("status: ok")
+					return i18n.T("doctor.relay_ok")
 				}
-				return fmt.Sprintf("status: %s", status)
+				return i18n.T("doctor.relay_status", status)
 			}())
 		}
 	} else {
-		check("Relay 健康", false, "无法检查（HTTP 连接失败）")
+		check(i18n.T("doctor.check_relay"), false, i18n.T("doctor.relay_no_http"))
 	}
 
 	// 6. WebSocket + 7. Auth + 8. Daemon limit (combined in one WS probe)
@@ -798,11 +782,11 @@ func cmdDoctor() {
 
 		wsConn, _, wsErr := websocket.DefaultDialer.Dial(wsURL, nil)
 		if wsErr != nil {
-			check("WebSocket 连接", false, wsErr.Error())
-			check("认证通过", false, "WebSocket 连接失败")
-			check("Daemon 限制", false, "WebSocket 连接失败")
+			check(i18n.T("doctor.check_ws"), false, wsErr.Error())
+			check(i18n.T("doctor.check_auth"), false, i18n.T("doctor.ws_fail"))
+			check(i18n.T("doctor.check_limit"), false, i18n.T("doctor.ws_fail"))
 		} else {
-			check("WebSocket 连接", true, "连接成功")
+			check(i18n.T("doctor.check_ws"), true, i18n.T("doctor.ws_ok"))
 
 			// Send register message
 			hostname, _ := os.Hostname()
@@ -820,8 +804,8 @@ func cmdDoctor() {
 			wsConn.Close()
 
 			if readErr != nil {
-				check("认证通过", false, fmt.Sprintf("读取响应超时: %v", readErr))
-				check("Daemon 限制", false, "无法检查")
+				check(i18n.T("doctor.check_auth"), false, i18n.T("doctor.ws_timeout", readErr))
+				check(i18n.T("doctor.check_limit"), false, i18n.T("doctor.cannot_check"))
 			} else {
 				var result map[string]any
 				json.Unmarshal(resp, &result)
@@ -829,37 +813,37 @@ func cmdDoctor() {
 				code, _ := result["code"].(string)
 
 				if msgType == "register_ack" {
-					check("认证通过", true, "register_ack 收到")
-					check("Daemon 限制", true, "未达限制")
+					check(i18n.T("doctor.check_auth"), true, i18n.T("doctor.auth_ack"))
+					check(i18n.T("doctor.check_limit"), true, i18n.T("doctor.limit_ok"))
 				} else if code == "DAEMON_LIMIT_REACHED" {
 					errMsg, _ := result["error"].(string)
-					check("认证通过", true, "认证成功")
-					check("Daemon 限制", false, errMsg)
+					check(i18n.T("doctor.check_auth"), true, i18n.T("doctor.auth_ok"))
+					check(i18n.T("doctor.check_limit"), false, errMsg)
 				} else if msgType == "error" {
 					errMsg, _ := result["error"].(string)
-					check("认证通过", false, errMsg)
-					check("Daemon 限制", false, "认证失败")
+					check(i18n.T("doctor.check_auth"), false, errMsg)
+					check(i18n.T("doctor.check_limit"), false, i18n.T("doctor.auth_fail"))
 				} else {
-					check("认证通过", false, fmt.Sprintf("未知响应: %s", msgType))
-					check("Daemon 限制", false, "无法检查")
+					check(i18n.T("doctor.check_auth"), false, i18n.T("doctor.auth_unknown", msgType))
+					check(i18n.T("doctor.check_limit"), false, i18n.T("doctor.cannot_check"))
 				}
 			}
 		}
 	} else {
-		check("WebSocket 连接", false, "缺少 relay URL 或 token")
-		check("认证通过", false, "缺少配置")
-		check("Daemon 限制", false, "缺少配置")
+		check(i18n.T("doctor.check_ws"), false, i18n.T("doctor.ws_missing"))
+		check(i18n.T("doctor.check_auth"), false, i18n.T("doctor.config_missing"))
+		check(i18n.T("doctor.check_limit"), false, i18n.T("doctor.config_missing"))
 	}
 
 	// Summary
 	fmt.Println()
-	fmt.Println("════════════════════════════════════")
+	fmt.Println(i18n.T("doctor.rule"))
 	if pass == total {
-		fmt.Printf("  结果: 全部通过 (%d/%d)\n", pass, total)
+		fmt.Println(i18n.T("doctor.result_all_pass", pass, total))
 	} else {
-		fmt.Printf("  结果: %d/%d 通过，%d 项需要修复\n", pass, total, total-pass)
+		fmt.Println(i18n.T("doctor.result_partial", pass, total, total-pass))
 	}
-	fmt.Println("════════════════════════════════════")
+	fmt.Println(i18n.T("doctor.rule"))
 
 	if pass < total {
 		os.Exit(1)
@@ -1279,27 +1263,27 @@ func cmdDaemonUpdate(args []string) {
 	fs.Parse(args)
 
 	fmt.Println()
-	fmt.Println("  🔍 pocketctl 自更新")
+	fmt.Println(i18n.T("update.title"))
 	fmt.Println(strings.Repeat("─", 40))
-	fmt.Printf("  当前版本: %s\n", version)
-	fmt.Printf("  运行平台: %s/%s\n", runtime.GOOS, runtime.GOARCH)
+	fmt.Println(i18n.T("update.current", version))
+	fmt.Println(i18n.T("update.platform", runtime.GOOS, runtime.GOARCH))
 
 	// 1. Check latest version
 	var tag string
 	var err error
 	if *versionFlag != "" {
-		fmt.Printf("  指定版本: %s\n", *versionFlag)
+		fmt.Println(i18n.T("update.pinned", *versionFlag))
 		tag, err = update.CheckVersion(*versionFlag)
 	} else {
-		fmt.Println("  查询最新版本...")
+		fmt.Println(i18n.T("update.query"))
 		tag, err = update.CheckLatest()
 	}
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "\n  ❌ 版本查询失败: %v\n", err)
+		fmt.Fprintln(os.Stderr, i18n.T("update.query_fail", err))
 		os.Exit(1)
 	}
 
-	fmt.Printf("  目标版本: %s\n", tag)
+	fmt.Println(i18n.T("update.target", tag))
 
 	// Strip 'v' prefix for comparison
 	currentVer := strings.TrimPrefix(version, "v")
@@ -1307,40 +1291,40 @@ func cmdDaemonUpdate(args []string) {
 
 	if *versionFlag == "" && currentVer == targetVer {
 		fmt.Println()
-		fmt.Println("  ✅ 已经是最新版本!")
+		fmt.Println(i18n.T("update.already_latest"))
 		return
 	}
 
 	// 2. Resolve binary + checksum
 	fmt.Println()
-	fmt.Println("  📦 解析下载地址...")
+	fmt.Println(i18n.T("update.resolving"))
 	binInfo, err := update.ResolveBinary(tag)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "\n  ❌ 解析失败: %v\n", err)
+		fmt.Fprintln(os.Stderr, i18n.T("update.resolve_fail", err))
 		os.Exit(1)
 	}
-	fmt.Printf("  下载: %s\n", binInfo.Name)
+	fmt.Println(i18n.T("update.download_name", binInfo.Name))
 	if binInfo.SHA != "" {
-		fmt.Printf("  校验: SHA256 = %s...%s\n", binInfo.SHA[:16], binInfo.SHA[len(binInfo.SHA)-16:])
+		fmt.Println(i18n.T("update.checksum", binInfo.SHA[:16], binInfo.SHA[len(binInfo.SHA)-16:]))
 	}
 
 	// 3. Download
 	fmt.Println()
-	fmt.Println("  ⬇️  下载中...")
+	fmt.Println(i18n.T("update.downloading"))
 	tmpPath, err := update.DownloadAndVerify(binInfo)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "\n  ❌ 下载失败: %v\n", err)
+		fmt.Fprintln(os.Stderr, i18n.T("update.download_fail", err))
 		os.Exit(1)
 	}
-	fmt.Println("  ✅ 下载完成，SHA256 校验通过")
+	fmt.Println(i18n.T("update.download_ok"))
 
 	// 4. Replace binary
 	fmt.Println()
-	fmt.Println("  🔧 替换二进制...")
+	fmt.Println(i18n.T("update.replacing"))
 	if err := update.ReplaceBinary(tmpPath); err != nil {
-		fmt.Fprintf(os.Stderr, "\n  ❌ 替换失败: %v\n", err)
+		fmt.Fprintln(os.Stderr, i18n.T("update.replace_fail", err))
 		fmt.Println()
-		fmt.Println("  💡 提示: 如果权限不足，请使用 sudo 运行:")
+		fmt.Println(i18n.T("update.permission_hint"))
 		fmt.Printf("     sudo pocketctl daemon update")
 		if *versionFlag != "" {
 			fmt.Printf(" --version %s", *versionFlag)
@@ -1348,20 +1332,20 @@ func cmdDaemonUpdate(args []string) {
 		fmt.Println()
 		os.Exit(1)
 	}
-	fmt.Println("  ✅ 二进制已更新")
+	fmt.Println(i18n.T("update.replaced"))
 
 	// 5. Restart daemon (unless --no-restart)
 	if !*noRestart {
 		fmt.Println()
-		fmt.Println("  🔄 检查 Daemon 运行状态...")
+		fmt.Println(i18n.T("update.check_daemon"))
 		if err := update.RestartDaemon(); err != nil {
-			fmt.Fprintf(os.Stderr, "  ⚠️  重启失败: %v (请手动重启)\n", err)
+			fmt.Fprintln(os.Stderr, i18n.T("update.restart_fail", err))
 		}
 	}
 
 	fmt.Println()
 	fmt.Println(strings.Repeat("─", 40))
-	fmt.Println("  🎉 更新完成!")
-	fmt.Printf("  版本: %s → %s\n", version, tag)
+	fmt.Println(i18n.T("update.done"))
+	fmt.Println(i18n.T("update.version_change", version, tag))
 	fmt.Println()
 }
