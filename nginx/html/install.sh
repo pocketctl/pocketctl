@@ -9,7 +9,7 @@ GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 NC='\033[0m'
 
-REPO="muwb123/pocketctl"
+REPO="pocketctl/pocketctl"
 RELAY_URL="wss://www.pocketctl.me/ws"
 
 echo -e "${GREEN}╔══════════════════════════════════════╗${NC}"
@@ -46,20 +46,29 @@ echo -e "检测到平台: ${GREEN}${PLATFORM}/${ARCH}${NC}"
 echo -e "${YELLOW}正在获取最新版本...${NC}"
 LATEST_URL="https://github.com/${REPO}/releases/latest/download/${BINARY}"
 
-# 下载
+# 下载到临时文件，再安装到 /usr/local/bin（需要时用 sudo）
 INSTALL_DIR="/usr/local/bin"
-echo -e "${YELLOW}正在下载 pocketctl...${NC}"
+TMP_FILE=$(mktemp)
+trap 'rm -f "$TMP_FILE"' EXIT
+echo -e "${YELLOW}正在从 GitHub 下载 pocketctl...${NC}"
 
 if command -v curl &> /dev/null; then
-    curl -fsSL "$LATEST_URL" -o "${INSTALL_DIR}/pocketctl"
+    curl -fsSL "$LATEST_URL" -o "$TMP_FILE"
 elif command -v wget &> /dev/null; then
-    wget -q "$LATEST_URL" -O "${INSTALL_DIR}/pocketctl"
+    wget -q "$LATEST_URL" -O "$TMP_FILE"
 else
     echo -e "${RED}需要 curl 或 wget，请先安装${NC}"
     exit 1
 fi
 
-chmod +x "${INSTALL_DIR}/pocketctl"
+# 写入 /usr/local/bin（目录不可写时用 sudo）
+if [ -w "$INSTALL_DIR" ]; then
+    SUDO=""
+else
+    echo -e "${YELLOW}安装到 ${INSTALL_DIR} 需要 root 权限，将使用 sudo（可能提示密码）${NC}"
+    SUDO="sudo"
+fi
+$SUDO install -m 0755 "$TMP_FILE" "${INSTALL_DIR}/pocketctl"
 
 echo -e "${GREEN}✓ pocketctl 已安装到 ${INSTALL_DIR}/pocketctl${NC}"
 echo ""
