@@ -26,16 +26,19 @@ error() { echo -e "${RED}[ERROR]${NC} $1"; exit 1; }
 
 # ---------- 参数解析 ----------
 DRY_RUN=false
+COMMIT_MSG_OVERRIDE=""  # --message: English commit subject for GitHub (gitee stays Chinese)
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --branch) GITHUB_BRANCH="$2"; shift 2 ;;
     --dry-run) DRY_RUN=true; shift ;;
+    --message) COMMIT_MSG_OVERRIDE="$2"; shift 2 ;;
     --help|-h)
-      echo "用法: bash scripts/sync-github.sh [--branch master|develop] [--dry-run]"
-      echo "白名单过滤后推送到指定 GitHub 分支（默认 master），develop 与 master 内容一致仅历史不同"
+      echo "用法: bash scripts/sync-github.sh [--branch master|develop] [--message <english-subject>] [--dry-run]"
+      echo "白名单过滤后推送到 GitHub。默认 commit subject 取 gitee 最新 subject；"
+      echo "传 --message 用英文 subject（gitee 保持中文，github 用英文）"
       exit 0
       ;;
-    *) error "未知参数: $1 (支持: --branch <name>, --dry-run)" ;;
+    *) error "未知参数: $1 (支持: --branch <name>, --message <msg>, --dry-run)" ;;
   esac
 done
 $DRY_RUN && info "Dry run mode — no push"
@@ -168,12 +171,13 @@ LAST_SYNC_TIME=$(git log -1 --format=%ci 2>/dev/null | awk '{print $1" "$2}' || 
 GITEE_COMMITS=$(cd "$REPO_ROOT" && git log --since="$LAST_SYNC_TIME" -50 --pretty=format:"%s" --no-merges 2>/dev/null || true)
 [[ -z "$GITEE_COMMITS" ]] && GITEE_COMMITS="sync: file drift (no new gitee commits matched)"
 
-# Use the first (most recent) gitee commit subject as the GitHub commit subject,
-# list all gitee commits in the body. This keeps commit messages consistent.
+# GitHub commit subject: --message override (English) takes priority; otherwise
+# fall back to the most recent gitee commit subject. Body always lists gitee commits.
 GITEE_FIRST_SUBJECT=$(echo "$GITEE_COMMITS" | head -1)
 GITEE_BODY=$(echo "$GITEE_COMMITS" | sed 's/^/- /')
 
-COMMIT_MSG="${GITEE_FIRST_SUBJECT}
+GH_SUBJECT="${COMMIT_MSG_OVERRIDE:-$GITEE_FIRST_SUBJECT}"
+COMMIT_MSG="${GH_SUBJECT}
 
 Gitee commits:
 ${GITEE_BODY}"

@@ -158,6 +158,7 @@ var messages = map[string]msg{
 	},
 	"error.unknown_command": {"unknown command: %s", "未知命令: %s"},
 	"error.read_log":        {"error reading log: %v", "读取日志失败: %v"},
+	"error.create_log_dir":  {"create log dir %s: %v (check if the path is occupied by a file)", "创建日志目录 %s 失败: %v（请检查该路径是否被文件占用）"},
 
 	// ---- login.* ---------------------------------------------------------
 	"login.title":           {"pocketctl login", "pocketctl 登录"},
