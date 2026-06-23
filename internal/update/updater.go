@@ -14,6 +14,8 @@ import (
 	"runtime"
 	"strings"
 	"time"
+
+	"github.com/pocketctl/pocketctl/internal/i18n"
 )
 
 const (
@@ -215,7 +217,7 @@ func ReplaceBinary(tmpPath string) error {
 func RestartDaemon() error {
 	// Check if daemon is running
 	if pid, running := isDaemonRunning(); running {
-		fmt.Printf("  🔄 检测到运行中的 Daemon (PID %d)，正在重启...\n", pid)
+		fmt.Println(i18n.T("update.daemon_restarting", pid))
 
 		// Kill the current daemon
 		if err := killDaemon(pid); err != nil {
@@ -235,9 +237,9 @@ func RestartDaemon() error {
 			return fmt.Errorf("restart daemon: %w", err)
 		}
 
-		fmt.Printf("  ✅ Daemon 已重启 (新 PID %d)\n", cmd.Process.Pid)
+		fmt.Println(i18n.T("update.daemon_restarted", cmd.Process.Pid))
 	} else {
-		fmt.Println("  ℹ️   Daemon 未在运行，新版本已就绪。运行 'pocketctl daemon start' 启动。")
+		fmt.Println(i18n.T("update.daemon_idle"))
 	}
 
 	return nil
