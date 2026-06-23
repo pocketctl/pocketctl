@@ -31,7 +31,7 @@ export function getRelayOrigin(): string {
 
 /** Full URL to the daemon install script, e.g. `https://www.pocketctl.me/install-daemon.sh`. */
 export function getInstallURL(): string {
-  return getAppBase() + '/install-daemon.sh'
+  return getAppBase() + '/install.sh'
 }
 
 /** CLI snippet shown in empty states: curl … | bash */

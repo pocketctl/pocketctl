@@ -363,7 +363,11 @@ func cmdDaemonStart(args []string) {
 	}
 
 	// Setup logging to file
-	os.MkdirAll(filepath.Dir(daemon.LogPath()), 0755) // ensure /tmp/pocketctl exists
+	logDir := filepath.Dir(daemon.LogPath())
+	if err := os.MkdirAll(logDir, 0755); err != nil {
+		fmt.Fprintln(os.Stderr, i18n.T("error.create_log_dir", logDir, err))
+		os.Exit(1)
+	}
 	logFlags := os.O_CREATE | os.O_WRONLY
 	if os.Getenv("POCKETCTL_DAEMON_CHILD") == "1" {
 		logFlags |= os.O_APPEND // child appends after parent's startup message

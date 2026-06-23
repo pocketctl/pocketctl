@@ -464,11 +464,89 @@ func (sm *SessionManager) servePTYSession(ctx context.Context, ps *ProcessState,
 		_ = ps.Cmd.Wait()
 		close(done)
 	}()
+
+	// Watchdog: if a busy session has no JSONL activity for >5 minutes, the
+	// agent is likely stuck (e.g. a long-running tool call blocked the PTY,
+	// or a daemon restart caused the tailer to miss the idle event). Recover
+	// by forcing the status back to idle so the UI is not stuck on "executing".
+	go sm.watchdogBusy(ctx, ps.SessionID)
+
 	select {
 	case <-ctx.Done():
 		return
 	case <-done:
 		sm.handlePTYExit(ps)
+	}
+}
+
+// watchdogBusy monitors a session for stuck "busy" state. If the session
+// remains busy with no JSONL file activity for longer than busyTimeout, it
+// forces the status back to idle and notifies clients — preventing the UI
+// from being permanently stuck on "executing" when the agent's idle event
+// was missed (daemon restart, long tool calls, PTY I/O blockage).
+//
+// "No activity" is determined by the JSONL file's last modification time,
+// NOT LastActivityAt (which is only updated on SendMessage for PTY sessions).
+// This correctly distinguishes "agent is thinking (JSONL growing)" from
+// "agent is truly stuck (JSONL not changing)".
+func (sm *SessionManager) watchdogBusy(ctx context.Context, sessionID string) {
+	const busyTimeout = 5 * time.Minute
+	const checkInterval = 30 * time.Second
+
+	ticker := time.NewTicker(checkInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			sm.mu.Lock()
+			ps, ok := sm.sessions[sessionID]
+			if !ok {
+				sm.mu.Unlock()
+				return
+			}
+			if ps.Status != protocol.StatusRunning {
+				sm.mu.Unlock()
+				continue // not busy — nothing to fix
+			}
+			cwd := ps.Cwd
+			sm.mu.Unlock()
+
+			// Check JSONL file modification time — the authoritative signal
+			// for whether the agent is still producing output.
+			jsonlPath, err := watcher.ResolveJSONLPath(sessionID, cwd)
+			if err != nil {
+				continue // can't determine — don't force
+			}
+			info, err := os.Stat(jsonlPath)
+			if err != nil {
+				continue // file gone — don't force (process exit handler covers this)
+			}
+			elapsed := time.Since(info.ModTime())
+			if elapsed < busyTimeout {
+				continue // JSONL still being written — agent is working normally
+			}
+
+			// Stuck: no JSONL activity for >5min while busy → force back to idle.
+			sm.mu.Lock()
+			ps, ok = sm.sessions[sessionID]
+			if !ok || ps.Status != protocol.StatusRunning {
+				sm.mu.Unlock()
+				continue
+			}
+			ps.Status = protocol.StatusIdle
+			ps.LastActivityAt = time.Now()
+			sm.mu.Unlock()
+
+			// Notify clients so the UI un-sticks from "executing".
+			sm.outputCh <- protocol.DaemonEvent{
+				Type:      "session_status",
+				SessionID: sessionID,
+				Status:    protocol.StatusIdle,
+			}
+		}
 	}
 }
 

@@ -49,7 +49,8 @@ export async function sendEmailCode(toEmail: string, code: string, lang: 'zh' | 
     ReplyToAddresses: fromEmail,
     Template: {
       TemplateID: templateId,
-      TemplateData: JSON.stringify({ code }),
+      // Template uses {{name}} as the placeholder for the verification code.
+      TemplateData: JSON.stringify({ name: code }),
     },
   };
 
