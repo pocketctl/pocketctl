@@ -1,6 +1,6 @@
 #!/bin/bash
 # pocketctl Daemon 安装脚本
-# 用法: curl -fsSL http://39.106.218.47/install.sh | bash
+# 用法: curl -fsSL https://www.pocketctl.me/install.sh | bash
 
 set -e
 
@@ -10,7 +10,7 @@ YELLOW='\033[1;33m'
 NC='\033[0m'
 
 REPO="muwb123/pocketctl"
-RELAY_URL="ws://39.106.218.47/ws"
+RELAY_URL="wss://www.pocketctl.me/ws"
 
 echo -e "${GREEN}╔══════════════════════════════════════╗${NC}"
 echo -e "${GREEN}║     pocketctl Daemon 安装程序        ║${NC}"

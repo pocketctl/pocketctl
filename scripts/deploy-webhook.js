@@ -12,7 +12,11 @@ const { execSync, exec } = require('child_process');
 const fs = require('fs');
 
 const PORT = 9000;
-const WEBHOOK_SECRET = process.env.WEBHOOK_SECRET || 'pocketctl-deploy-secret-2026';
+const WEBHOOK_SECRET = process.env.WEBHOOK_SECRET;
+if (!WEBHOOK_SECRET) {
+  console.error('FATAL: WEBHOOK_SECRET environment variable is required');
+  process.exit(1);
+}
 const REPO_DIR = '/opt/pocketctl';
 const LOG_FILE = '/var/log/pocketctl-deploy.log';
 
@@ -177,7 +181,7 @@ const server = http.createServer((req, res) => {
 
 server.listen(PORT, '0.0.0.0', () => {
   log(`部署 Webhook 服务启动，监听端口 ${PORT}`);
-  log(`  Gitee Webhook: POST http://39.106.218.47:${PORT}/webhook/deploy`);
-  log(`  手动部署:      POST http://39.106.218.47:${PORT}/deploy`);
-  log(`  健康检查:      GET  http://39.106.218.47:${PORT}/health`);
+  log(`  Gitee Webhook: POST http://pocketctl.me:${PORT}/webhook/deploy`);
+  log(`  手动部署:      POST http://pocketctl.me:${PORT}/deploy`);
+  log(`  健康检查:      GET  http://pocketctl.me:${PORT}/health`);
 });

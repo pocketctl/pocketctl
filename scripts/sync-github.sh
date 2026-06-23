@@ -6,8 +6,8 @@ set -euo pipefail
 #
 # 优化点（vs 旧版全量重建）:
 # 1. .github-sync 持久化（保留 .git 历史），git add -A 只 commit **改动文件**（非每次全量重建）
-# 2. commit message 标明实际更新内容（改动文件清单 + gitee commit subjects），
-#    不再用固定的 "sync: <date> from gitee"
+# 2. commit message 和 gitee 保持一致——subject 取 gitee 最新 commit subject，
+#    body 列出本次同步的所有 gitee commits
 #
 # 用法: bash scripts/sync-github.sh [--dry-run]
 # ============================================
@@ -115,6 +115,10 @@ SENSITIVE_PATTERNS=(
   '2661504'
   '北京乐呵乐呵'
   'dev-secret-change-in-production'
+  'SES_SECRET_ID='
+  'SES_SECRET_KEY='
+  'COS_SECRET_ID='
+  'COS_SECRET_KEY='
 )
 for pattern in "${SENSITIVE_PATTERNS[@]}"; do
   matches=$(grep -rlE "$pattern" . 2>/dev/null || true)
@@ -133,32 +137,26 @@ if git diff --cached --quiet; then
   exit 0
 fi
 
-# ---------- 5. Build meaningful commit message ----------
+# ---------- 5. Build commit message matching gitee ----------
 CHANGED_FILES=$(git diff --cached --name-only)
 CHANGED_COUNT=$(echo "$CHANGED_FILES" | wc -l | tr -d ' ')
-CHANGED_DIRS=$(echo "$CHANGED_FILES" | awk -F/ '{print $1}' | sort -u | tr '\n' ' ' | sed 's/ $//')
 
 # Gitee commits since last sync (last .github-sync commit timestamp).
 # Use `git log -20` (max-count) instead of `| head -20` — head closes the pipe early,
 # git log gets SIGPIPE, and `set -o pipefail` kills the script (was EXIT 141).
 LAST_SYNC_TIME=$(git log -1 --format=%ci 2>/dev/null | awk '{print $1" "$2}' || echo "1 week ago")
-GITEE_COMMITS=$(cd "$REPO_ROOT" && git log --since="$LAST_SYNC_TIME" -20 --pretty=format:"- %s" --no-merges 2>/dev/null || true)
-[[ -z "$GITEE_COMMITS" ]] && GITEE_COMMITS="- (whitelist/content drift, no new gitee commits matched)"
+GITEE_COMMITS=$(cd "$REPO_ROOT" && git log --since="$LAST_SYNC_TIME" -50 --pretty=format:"%s" --no-merges 2>/dev/null || true)
+[[ -z "$GITEE_COMMITS" ]] && GITEE_COMMITS="sync: file drift (no new gitee commits matched)"
 
-# File list (cap at 30 lines)
-FILES_LIST=$(echo "$CHANGED_FILES" | head -30 || true)
-if [[ $CHANGED_COUNT -gt 30 ]]; then
-  FILES_LIST="${FILES_LIST}
-... ($(($CHANGED_COUNT - 30)) more)"
-fi
+# Use the first (most recent) gitee commit subject as the GitHub commit subject,
+# list all gitee commits in the body. This keeps commit messages consistent.
+GITEE_FIRST_SUBJECT=$(echo "$GITEE_COMMITS" | head -1)
+GITEE_BODY=$(echo "$GITEE_COMMITS" | sed 's/^/- /')
 
-COMMIT_MSG="sync: ${CHANGED_COUNT} files (${CHANGED_DIRS}) from gitee
+COMMIT_MSG="${GITEE_FIRST_SUBJECT}
 
-Changed files:
-${FILES_LIST}
-
-Gitee commits since last sync:
-${GITEE_COMMITS}"
+Gitee commits:
+${GITEE_BODY}"
 
 info "Commit message preview:"
 echo "$COMMIT_MSG" | sed 's/^/  | /'

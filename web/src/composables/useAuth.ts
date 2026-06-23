@@ -64,7 +64,8 @@ async function apiGet(path: string): Promise<{ ok: boolean; data: any }> {
 // --- Email Verification Code Auth ---
 
 async function sendEmailCode(email: string): Promise<string | null> {
-  const { ok, data } = await apiRequest('/api/auth/email/send', { email })
+  const lang = localStorage.getItem('pocketctl-locale') || 'zh'
+  const { ok, data } = await apiRequest('/api/auth/email/send', { email, lang })
   if (!ok) return data.error || '发送失败'
   return null
 }

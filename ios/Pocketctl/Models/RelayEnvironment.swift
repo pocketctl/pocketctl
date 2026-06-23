@@ -13,14 +13,10 @@ enum RelayEnvironment: String, CaseIterable, Codable, Sendable {
     }
 
     /// 该环境的 HTTP/REST base URL
-    /// - Note: 生产地址在编译时通过 Info.plist 或构建配置注入，
-    ///         后续生产打 Release 包时替换为正式域名。
-    /// - Note: staging 走本地 Docker 的 nginx（80 端口），由 nginx 反代到 relay:8080。
-    ///         iPhone 真机用 Mac 局域网 IP；模拟器也可用此地址。
     var httpBaseURL: String {
         switch self {
         case .production:
-            return "http://39.106.218.47"
+            return "https://www.pocketctl.me"
         case .staging:
             return "http://192.168.31.198"
         }
@@ -30,7 +26,7 @@ enum RelayEnvironment: String, CaseIterable, Codable, Sendable {
     var wsBaseURL: String {
         switch self {
         case .production:
-            return "ws://39.106.218.47/ws"
+            return "wss://www.pocketctl.me/ws"
         case .staging:
             return "ws://192.168.31.198/ws"
         }
