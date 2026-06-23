@@ -919,7 +919,7 @@ async function main() {
   // Device Authorization Page (served by relay, self-contained HTML)
   app.get('/login/cli', async (req, reply) => {
     const userCode = (req.query as any).code || '';
-    const relayBaseUrl = `http://${req.hostname}:${PORT}`;
+    const relayBaseUrl = process.env.WEB_APP_URL || `http://${req.hostname}:${PORT}`;
     reply.header('Content-Type', 'text/html; charset=utf-8');
     return deviceAuthPage(userCode, relayBaseUrl);
   });
