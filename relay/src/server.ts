@@ -167,7 +167,7 @@ async function main() {
 
   // Send email verification code
   app.post('/api/auth/email/send', async (req, reply) => {
-    const { email } = req.body as any;
+    const { email, lang: bodyLang } = req.body as any;
     if (!email) {
       reply.code(400); return { error: 'email is required' };
     }
@@ -175,6 +175,11 @@ async function main() {
     if (!normalizedEmail.includes('@')) {
       reply.code(400); return { error: 'invalid email format' };
     }
+
+    // Determine language: body param > Accept-Language header > default zh
+    const acceptLang = (req.headers['accept-language'] || '').trim();
+    const isEn = bodyLang === 'en' || acceptLang.toLowerCase().startsWith('en');
+    const lang: 'zh' | 'en' = isEn ? 'en' : 'zh';
 
     // Dev/test email shortcut: if DEV_EMAIL configured and matches, use fixed code (skip SES)
     // Works in any NODE_ENV — useful when SES unavailable (e.g. pre-ICP-filing)
@@ -208,7 +213,7 @@ async function main() {
     // Send via Tencent Cloud SES (production) or return code in dev
     if (NODE_ENV === 'production') {
       try {
-        await sendEmailCode(normalizedEmail, code);
+        await sendEmailCode(normalizedEmail, code, lang);
       } catch (err: any) {
         console.error(`[email] send failed for ${normalizedEmail}:`, err.message);
         reply.code(500);

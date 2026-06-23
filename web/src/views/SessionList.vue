@@ -12,7 +12,7 @@
       <div class="empty-icon">📡</div>
       <p class="empty-title">还没有活跃的会话</p>
       <p class="empty-desc">在远程机器上安装并启动 Daemon 即可看到会话</p>
-      <code class="empty-cmd">curl -fsSL https://pocketctl.me/install.sh | bash</code>
+      <code class="empty-cmd">{{ getInstallCommand() }}</code>
       <code class="empty-cmd">pocketctl daemon start --relay &lt;url&gt; --api-key &lt;key&gt;</code>
       <button class="btn primary empty-btn" @click="showNewSession = true">创建 Web 会话</button>
     </div>
@@ -54,6 +54,7 @@ import { formatRelativeTime } from '../composables/useRelativeTime'
 import { useAuth } from '../composables/useAuth'
 import NewSessionDialog from '../components/NewSessionDialog.vue'
 import SessionActions from '../components/SessionActions.vue'
+import { getInstallCommand } from '../composables/useEnv'
 import { useSessionRename } from '../composables/useSessionRename'
 
 const { renamingId, renameInput, startRename, commitRename, cancelRename } = useSessionRename()

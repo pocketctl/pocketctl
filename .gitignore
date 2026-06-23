@@ -45,4 +45,5 @@ build/
 
 # GitHub sync (persistent local mirror — not for gitee)
 .github-sync/
+.github-sync-*/
 .deploy-local-hash

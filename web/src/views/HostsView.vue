@@ -292,6 +292,7 @@ import { useAuth } from '../composables/useAuth'
 import { formatRelativeTime } from '../composables/useRelativeTime'
 import { useLocale } from '../composables/useLocale'
 import RegisterDaemonDialog from '../components/RegisterDaemonDialog.vue'
+import { getRelayOrigin } from '../composables/useEnv'
 
 const router = useRouter()
 const ws = useWebSocket()
@@ -645,11 +646,6 @@ function startRename(d: any) {
     }).catch(() => {})
     showToast(t('hosts.rename_toast', { name: newName.trim() }), () => { d.daemon_alias = oldName })
   }
-}
-
-function getRelayOrigin(): string {
-  const relayWs = localStorage.getItem('pocketctl_relay_url') || (window as any).__RELAY_WS__ || ''
-  try { const url = new URL(relayWs); if (url.hostname === 'localhost' || url.hostname === '127.0.0.1') return ''; return url.origin.replace(/^ws/, 'http') } catch { return '' }
 }
 
 // Global close for menu

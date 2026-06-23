@@ -20,7 +20,10 @@
 </head>
 <body>
   <div id="app"></div>
-  <script>window.__RELAY_WS__ = (location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/ws';</script>
+  <script>
+    window.__APP_BASE__ = location.protocol + '//' + location.host;
+    window.__RELAY_WS__ = (location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/ws';
+  </script>
   <script type="module" src="/src/main.ts"></script>
 </body>
 </html>

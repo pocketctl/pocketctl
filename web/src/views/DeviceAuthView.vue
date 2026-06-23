@@ -98,6 +98,7 @@
 import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { useRoute } from 'vue-router'
 import { useAuth } from '../composables/useAuth'
+import { getRelayOrigin } from '../composables/useEnv'
 import logoDark from '../assets/logo-github-org.svg'
 import logoLight from '../assets/logo-github-org-light.svg'
 
@@ -212,14 +213,6 @@ async function confirmAuthorization() {
   }
 }
 
-function getRelayOrigin(): string {
-  const relayWs = localStorage.getItem('pocketctl_relay_url') || (window as any).__RELAY_WS__ || ''
-  try {
-    const url = new URL(relayWs)
-    if (url.hostname === 'localhost' || url.hostname === '127.0.0.1') return ''
-    return url.origin.replace(/^ws/, 'http')
-  } catch { return '' }
-}
 </script>
 
 <style scoped>
