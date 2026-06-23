@@ -26,6 +26,7 @@
   "nav.manage": "Manage",
   "nav.hosts": "Hosts",
   "nav.session_detail": "Session Detail",
+  "nav.tokens": "Usage",
   "nav.expand": "Expand sidebar",
   "nav.collapse": "Collapse sidebar",
   "user.free_plan": "Free Plan",
