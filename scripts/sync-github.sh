@@ -14,7 +14,6 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
-SYNC_DIR="${REPO_ROOT}/.github-sync"
 
 GITHUB_REMOTE="github"
 GITHUB_BRANCH="master"
@@ -25,8 +24,29 @@ info()  { echo -e "${GREEN}[INFO]${NC} $1"; }
 warn()  { echo -e "${YELLOW}[WARN]${NC} $1"; }
 error() { echo -e "${RED}[ERROR]${NC} $1"; exit 1; }
 
+# ---------- 参数解析 ----------
 DRY_RUN=false
-[[ "${1:-}" == "--dry-run" ]] && { DRY_RUN=true; info "Dry run mode — no push"; }
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --branch) GITHUB_BRANCH="$2"; shift 2 ;;
+    --dry-run) DRY_RUN=true; shift ;;
+    --help|-h)
+      echo "用法: bash scripts/sync-github.sh [--branch master|develop] [--dry-run]"
+      echo "白名单过滤后推送到指定 GitHub 分支（默认 master），develop 与 master 内容一致仅历史不同"
+      exit 0
+      ;;
+    *) error "未知参数: $1 (支持: --branch <name>, --dry-run)" ;;
+  esac
+done
+$DRY_RUN && info "Dry run mode — no push"
+
+# 按分支隔离 sync 目录：master 用 .github-sync，其他分支按名区分，避免 git 历史互相覆盖
+if [[ "$GITHUB_BRANCH" == "master" ]]; then
+  SYNC_DIR="${REPO_ROOT}/.github-sync"
+else
+  SYNC_DIR="${REPO_ROOT}/.github-sync-${GITHUB_BRANCH}"
+fi
+info "Target: github ${GITHUB_BRANCH} (sync dir: ${SYNC_DIR##*/})"
 
 # Whitelist
 SYNC_DIRS=(cmd/ internal/ relay/ web/ .github/ scripts/install-daemon.sh)
@@ -38,7 +58,7 @@ GITHUB_URL=$(cd "$REPO_ROOT" && git remote get-url "$GITHUB_REMOTE" 2>/dev/null 
 
 # ---------- 1. Prepare persistent sync dir (keep .git history) ----------
 if [[ ! -d "$SYNC_DIR/.git" ]]; then
-  info "First-time init of .github-sync"
+  info "First-time init of ${SYNC_DIR##*/}"
   rm -rf "$SYNC_DIR"
   mkdir -p "$SYNC_DIR"
   cd "$SYNC_DIR"
@@ -115,10 +135,10 @@ SENSITIVE_PATTERNS=(
   '2661504'
   '北京乐呵乐呵'
   'dev-secret-change-in-production'
-  'SES_SECRET_ID='
-  'SES_SECRET_KEY='
-  'COS_SECRET_ID='
-  'COS_SECRET_KEY='
+  'SES_SECRET_ID=[[:space:]]*[^[:space:]]'
+  'SES_SECRET_KEY=[[:space:]]*[^[:space:]]'
+  'COS_SECRET_ID=[[:space:]]*[^[:space:]]'
+  'COS_SECRET_KEY=[[:space:]]*[^[:space:]]'
 )
 for pattern in "${SENSITIVE_PATTERNS[@]}"; do
   matches=$(grep -rlE "$pattern" . 2>/dev/null || true)
