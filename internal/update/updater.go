@@ -195,6 +195,18 @@ func ReplaceBinary(tmpPath string) error {
 
 	// Try direct rename first
 	if err := os.Rename(tmpPath, realPath); err != nil {
+		errStr := err.Error()
+		// "text file busy" (EBUSY) can happen on NTFS/DrvFs (/mnt/c on WSL)
+		// when the running binary can't be overwritten. Retry a few times
+		// with a short delay — the OS may release the lock momentarily.
+		if strings.Contains(errStr, "text file busy") || strings.Contains(errStr, "resource busy") {
+			for i := 0; i < 3; i++ {
+				time.Sleep(500 * time.Millisecond)
+				if err := os.Rename(tmpPath, realPath); err == nil {
+					return nil
+				}
+			}
+		}
 		// If that fails (cross-device or permissions), try copy + remove
 		if isCrossDevice(err) || os.IsPermission(err) {
 			// Copy the new binary into place

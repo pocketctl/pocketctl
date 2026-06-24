@@ -444,6 +444,26 @@ func (sm *SessionManager) servePTYSession(ctx context.Context, ps *ProcessState,
 			time.Sleep(500 * time.Millisecond)
 		}
 		if tailer == nil {
+			// JSONL file never appeared within 60s — claude may be running
+			// ephemeral (env contamination) or crashed during startup. Notify
+			// clients instead of leaving the UI stuck on "no response".
+			sm.outputCh <- protocol.DaemonEvent{
+				Type:      "error",
+				SessionID: ps.SessionID,
+				Error:     "会话未生成输出（JSONL 文件未创建）。可能原因：claude 以临时模式运行或启动失败。请检查 claude 是否正确安装且环境变量无冲突。",
+			}
+			// Also mark the session as errored so the UI doesn't stay in
+			// "creating" / "running" limbo.
+			sm.mu.Lock()
+			if s, ok := sm.sessions[ps.SessionID]; ok {
+				s.Status = protocol.StatusError
+			}
+			sm.mu.Unlock()
+			sm.outputCh <- protocol.DaemonEvent{
+				Type:      "session_status",
+				SessionID: ps.SessionID,
+				Status:    protocol.StatusError,
+			}
 			return
 		}
 		sm.SetTailer(ps.SessionID, tailer)

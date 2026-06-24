@@ -87,7 +87,7 @@
           {{ t('new_session.model_label') }}
         </div>
         <select v-model="form.model" class="model-select">
-          <option value="">{{ models.length ? t('new_session.model_default') : t('new_session.model_loading') }}</option>
+          <option value="">{{ !modelsLoaded ? t('new_session.model_loading') : (models.length ? t('new_session.model_default') : t('new_session.model_none')) }}</option>
           <option v-for="m in models" :key="m.alias" :value="m.alias">{{ m.name }}</option>
         </select>
 
@@ -155,6 +155,7 @@ const form = reactive({
 })
 // Available models for the selected host (populated by list_models → model_list)
 const models = ref<Array<{ alias: string; name: string }>>([])
+const modelsLoaded = ref(false)  // true once model_list response received (even if empty)
 const creating = ref(false)
 const phase = ref<'submitting' | 'connecting'>('submitting')
 const errorTitle = ref('')
@@ -300,6 +301,7 @@ watch([() => props.daemons, () => props.preSelectedDaemonId], ([daemons, preId])
 // Fetch available models whenever the selected host changes
 watch(() => form.daemonId, (id) => {
   models.value = []
+  modelsLoaded.value = false
   form.model = ''
   if (id) send({ type: 'list_models', daemon_id: id })
 })
@@ -309,6 +311,7 @@ onMounted(() => {
   // Receive available models for the selected host (model picker)
   cleanupFns.push(onEvent('model_list', (msg: any) => {
     models.value = msg.models || []
+    modelsLoaded.value = true
   }))
   if (form.daemonId) send({ type: 'list_models', daemon_id: form.daemonId })
   // Close on Escape

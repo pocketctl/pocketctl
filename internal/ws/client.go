@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
+	"github.com/pocketctl/pocketctl/internal/daemon"
 	"github.com/pocketctl/pocketctl/internal/protocol"
 )
 
@@ -280,12 +281,17 @@ func (c *Client) notifyState(connected bool) {
 // getLocalIP returns the preferred outbound IP of this machine.
 // Tries UDP dial first, but excludes VPN/TUN/proxy virtual interfaces (198.18.x, 169.254.x, 172.1[6-9].x).
 func getLocalIP() string {
+	// On WSL, the default outbound IP is typically in the 172.x NAT range
+	// (Hyper-V virtual switch). The isVirtualIP filter would discard it,
+	// so detect WSL and skip that filter for the primary interface.
+	wsl := isWSLEnv()
+
 	// Method 1: UDP dial to get default outbound IP
 	conn, err := net.Dial("udp", "8.8.8.8:80")
 	if err == nil {
 		ip := conn.LocalAddr().(*net.UDPAddr).IP.String()
 		conn.Close()
-		if !isVirtualIP(ip) {
+		if wsl || !isVirtualIP(ip) {
 			return ip
 		}
 	}
@@ -326,13 +332,16 @@ func getLocalIP() string {
 				continue // IPv6
 			}
 			str := ip4.String()
-			if !isVirtualIP(str) {
+			if wsl || !isVirtualIP(str) {
 				return str
 			}
 		}
 	}
 	return "unknown"
 }
+
+// isWSLEnv delegates to daemon.IsWSL (shared implementation).
+func isWSLEnv() bool { return daemon.IsWSL() }
 
 // isVirtualIP returns true for VPN/TUN/proxy/link-local/docker private ranges
 // that are not useful as the machine's LAN IP.
