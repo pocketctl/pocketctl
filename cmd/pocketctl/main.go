@@ -179,14 +179,26 @@ func canOpenBrowser() bool {
 	if runtime.GOOS == "darwin" && os.Getenv("SSH_TTY") == "" {
 		return true
 	}
+	// WSL: cmd.exe can hand off to the Windows host browser
+	if runtime.GOOS == "linux" && isWSL() {
+		if _, err := exec.LookPath("cmd.exe"); err == nil {
+			return true
+		}
+	}
 	if _, err := exec.LookPath("open"); err == nil {
 		return true
 	}
 	if _, err := exec.LookPath("xdg-open"); err == nil {
 		return true
 	}
+	if _, err := exec.LookPath("wslview"); err == nil {
+		return true
+	}
 	return false
 }
+
+// isWSL delegates to daemon.IsWSL (shared implementation).
+func isWSL() bool { return daemon.IsWSL() }
 
 // loginViaDeviceFlow performs OAuth 2.0 Device Authorization Grant login.
 func loginViaDeviceFlow(apiURL string) (string, string, error) {
@@ -265,11 +277,25 @@ func openBrowser(url string) {
 	case "darwin":
 		cmd = exec.Command("open", url)
 	case "linux":
+		// WSL: prefer cmd.exe (hands off to Windows host browser)
+		if isWSL() {
+			if p, err := exec.LookPath("cmd.exe"); err == nil {
+				cmd = exec.Command(p, "/c", "start", "", url)
+				break
+			}
+		}
+		// wslview (from wslu package)
+		if _, err := exec.LookPath("wslview"); err == nil {
+			cmd = exec.Command("wslview", url)
+			break
+		}
 		cmd = exec.Command("xdg-open", url)
 	default:
 		return
 	}
-	cmd.Start()
+	if err := cmd.Start(); err != nil {
+		fmt.Fprintf(os.Stderr, "warning: failed to open browser: %v\n", err)
+	}
 }
 
 func loginViaEmail(apiURL string) (string, string, error) {

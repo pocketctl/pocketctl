@@ -186,6 +186,7 @@
   "new_session.model_label": "模型",
   "new_session.model_default": "默认（跟随主机）",
   "new_session.model_loading": "加载模型中…",
+  "new_session.model_none": "无可用模型",
   "new_session.start_btn": "开始会话",
   "new_session.connecting_phase": "正在连接主机…",
   "new_session.error_title": "无法在「{{host}}」上创建会话",
