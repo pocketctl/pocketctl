@@ -8,7 +8,7 @@
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M12 5v14M5 12h14"/></svg>
         </button>
       </div>
-      <div style="padding:4px 8px;display:flex;align-items:center;gap:6px;">
+      <div v-if="!hasNoSessions" style="padding:4px 8px;display:flex;align-items:center;gap:6px;">
         <span :class="['status-dot', { online: isDaemonOnline }]" style="width:6px;height:6px;"></span>
         <span style="font-size:11px;color:var(--fg-tertiary);">{{ isDaemonOnline ? t('dashboard.online') : t('dashboard.offline') }} · {{ statusSubtext }}</span>
       </div>
@@ -38,6 +38,18 @@
 
     <!-- Chat Main Area -->
     <div class="chat-area">
+      <!-- Full-area empty state when no sessions exist at all -->
+      <div v-if="hasNoSessions" class="chat-welcome">
+        <svg class="welcome-icon" width="64" height="64" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M12 2a10 10 0 1 0 10 10A10 10 0 0 0 12 2z"/><path d="M8 14s1.5 2 4 2 4-2 4-2"/><line x1="9" y1="9" x2="9.01" y2="9"/><line x1="15" y1="9" x2="15.01" y2="9"/>
+        </svg>
+        <h2 class="welcome-title">{{ isDaemonOnline ? t('session.empty_no_session_title') : t('session.empty_no_host_title') }}</h2>
+        <p class="welcome-desc">{{ isDaemonOnline ? t('session.empty_no_session_desc') : t('session.empty_no_host_desc') }}</p>
+        <button v-if="isDaemonOnline" class="btn btn-accent welcome-btn" @click="emitNewSession">{{ t('session.new_session') }}</button>
+      </div>
+
+      <!-- Normal chat UI (only when sessions exist) -->
+      <template v-else>
       <!-- Chat Toolbar -->
       <div class="chat-toolbar">
         <div class="session-label">
@@ -89,6 +101,15 @@
             </div>
             <div v-if="i < milestones.length - 1" :class="['line', { done: m.state === 'active' }]"></div>
           </template>
+        </div>
+
+        <!-- Empty state when no messages -->
+        <div v-if="messages.length === 0" class="chat-empty-state">
+          <svg class="empty-icon" width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>
+          </svg>
+          <div class="empty-title">{{ chatEmptyTitle }}</div>
+          <div class="empty-desc">{{ chatEmptyDesc }}</div>
         </div>
 
         <!-- Messages -->
@@ -221,6 +242,7 @@
         </template>
         <div v-else class="ended-text">{{ t('session.ended') }}</div>
       </div>
+      </template><!-- /v-else hasNoSessions -->
     </div>
   </div>
 
@@ -327,6 +349,21 @@ const isDaemonOnline = computed(() => {
 })
 
 const isDisconnected = computed(() => status.value === 'disconnected' || !isDaemonOnline.value)
+// True when there are zero sessions at all — the whole chat area should show
+// a welcoming empty state instead of "unknown host" / error messages.
+const hasNoSessions = computed(() => allSessions.value.length === 0)
+
+// Empty state copy — adapts to whether a host is connected and sessions exist.
+const chatEmptyTitle = computed(() => {
+  if (!isDaemonOnline.value && allSessions.value.length === 0) return t('session.empty_no_host_title')
+  if (allSessions.value.length === 0) return t('session.empty_no_session_title')
+  return t('session.empty_select_title')
+})
+const chatEmptyDesc = computed(() => {
+  if (!isDaemonOnline.value && allSessions.value.length === 0) return t('session.empty_no_host_desc')
+  if (allSessions.value.length === 0) return t('session.empty_no_session_desc')
+  return t('session.empty_select_desc')
+})
 const isTerminal = computed(() => ['completed', 'error', 'killed'].includes(status.value))
 // Daemon-created sessions can be resumed (via claude --resume) even after completion,
 // so the input box stays available as long as the daemon is online.
@@ -374,14 +411,19 @@ function stopTurnTimer() {
     lastTurnDuration.value = Math.floor((Date.now() - turnStartTime.value) / 1000)
   }
 }
-// Drive the timer from isExecuting: start on false→true (or when entering an
-// already-running session via immediate), stop on true→false. Gated by
-// sessionSwitching so the placeholder status during a switch doesn't fire it.
+// Drive the timer from isExecuting: start on false→true, stop on true→false.
+// Gated by sessionSwitching so the placeholder status during initial load /
+// session switch doesn't start the timer from zero. The real turn start is
+// recovered from the last executing session_status's last_activity_at once
+// replay completes (replay_end handler calls startTurnTimer directly).
+// NOTE: no { immediate: true } — that would fire before sessionSwitching is
+// set in onMounted, starting a zero-based timer that competes with the
+// replay_end recovery.
 watch(() => isExecuting.value, (exec, prev) => {
   if (sessionSwitching) return
   if (exec && !prev) startTurnTimer(resumeStartAt ?? undefined)
   else if (!exec && prev) stopTurnTimer()
-}, { immediate: true })
+})
 
 // Last agent_text usage (output tokens for the completed bar). Reuses the same
 // reverse-scan pattern as buildCostMessage.
@@ -1221,6 +1263,19 @@ onMounted(() => {
 /* Tool cards: left-aligned, not centered. */
 .chat-messages > .tool-wrap { min-width: 0; max-width: 820px; width: 100%; align-self: flex-start; }
 .chat-messages > *.msg { min-width: 0; max-width: 85%; }
+
+/* Empty state */
+.chat-empty-state { display: flex; flex-direction: column; align-items: center; justify-content: center; flex: 1; gap: 12px; padding: 40px 20px; text-align: center; }
+.chat-empty-state .empty-icon { color: var(--fg-tertiary); opacity: 0.4; }
+.chat-empty-state .empty-title { font-size: 16px; font-weight: 600; color: var(--fg-secondary); }
+.chat-empty-state .empty-desc { font-size: 13px; color: var(--fg-tertiary); line-height: 1.5; max-width: 360px; }
+
+/* Welcome empty state — fills entire chat-area when no sessions exist */
+.chat-welcome { display: flex; flex-direction: column; align-items: center; justify-content: center; flex: 1; gap: 16px; padding: 40px 20px; text-align: center; }
+.chat-welcome .welcome-icon { color: var(--fg-tertiary); opacity: 0.3; }
+.chat-welcome .welcome-title { font-size: 20px; font-weight: 600; color: var(--fg-secondary); margin: 0; }
+.chat-welcome .welcome-desc { font-size: 14px; color: var(--fg-tertiary); line-height: 1.6; max-width: 380px; margin: 0; }
+.chat-welcome .welcome-btn { margin-top: 8px; padding: 10px 24px; font-size: 14px; }
 /* Scroll-to-bottom: floats centered above the input bar. Auto-hides (v-if)
    when content is already scrolled to the bottom (autoScroll === true). */
 /* Scroll-to-bottom: absolute child of chat-input-area, pinned above its top

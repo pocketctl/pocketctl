@@ -1,0 +1,481 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>PocketCTL vs Orca 深度竞品调研报告（完整版）</title>
+<style>
+  :root { --bg: #0d1117; --surface: #161b22; --border: #30363d; --fg: #c9d1d9; --fg2: #8b949e; --accent: #58a6ff; --green: #3fb950; --red: #f85149; --yellow: #d2991d; --purple: #a371f7; --orange: #ff6b35; }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { background: var(--bg); color: var(--fg); font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, "PingFang SC", "Microsoft YaHei", sans-serif; line-height: 1.7; max-width: 1000px; margin: 0 auto; padding: 40px 24px; }
+  h1 { font-size: 30px; border-bottom: 2px solid var(--border); padding-bottom: 16px; margin-bottom: 8px; }
+  h2 { font-size: 22px; margin: 44px 0 16px; padding-bottom: 8px; border-bottom: 1px solid var(--border); color: var(--accent); }
+  h3 { font-size: 17px; margin: 28px 0 12px; }
+  p { margin: 12px 0; color: var(--fg2); }
+  strong { color: var(--fg); }
+  code { background: var(--surface); padding: 2px 6px; border-radius: 4px; font-size: 13px; border: 1px solid var(--border); }
+  pre { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 16px; overflow-x: auto; font-size: 13px; line-height: 1.5; margin: 16px 0; }
+  table { width: 100%; border-collapse: collapse; margin: 16px 0; font-size: 14px; }
+  th, td { border: 1px solid var(--border); padding: 10px 14px; text-align: left; vertical-align: top; }
+  th { background: var(--surface); font-weight: 600; }
+  tr:hover td { background: rgba(88,166,255,0.04); }
+  .tag-green { color: var(--green); font-weight: 600; }
+  .tag-red { color: var(--red); font-weight: 600; }
+  .tag-yellow { color: var(--yellow); font-weight: 600; }
+  .tag-purple { color: var(--purple); font-weight: 600; }
+  .tag-orange { color: var(--orange); font-weight: 600; }
+  .badge { display: inline-block; padding: 2px 8px; border-radius: 12px; font-size: 12px; font-weight: 600; }
+  .badge-red { background: rgba(248,81,73,0.15); color: var(--red); }
+  .badge-green { background: rgba(63,185,80,0.15); color: var(--green); }
+  .badge-yellow { background: rgba(210,153,29,0.15); color: var(--yellow); }
+  .badge-purple { background: rgba(163,113,247,0.15); color: var(--purple); }
+  .badge-orange { background: rgba(255,107,53,0.15); color: var(--orange); }
+  hr { border: none; border-top: 1px solid var(--border); margin: 32px 0; }
+  ul, ol { margin: 12px 0 12px 24px; color: var(--fg2); }
+  li { margin: 6px 0; }
+  .meta { color: var(--fg2); font-size: 13px; margin-bottom: 4px; }
+  .two-col { display: flex; gap: 20px; margin: 16px 0; }
+  .col-orca { flex: 1; padding: 18px; border-radius: 10px; background: rgba(88,166,255,0.08); border: 1px solid var(--border); }
+  .col-pctl { flex: 1; padding: 18px; border-radius: 10px; background: rgba(210,153,29,0.08); border: 1px solid var(--border); }
+  .col-label { font-weight: 700; font-size: 1.05em; margin-bottom: 10px; display: block; }
+  .strat-box { background: linear-gradient(135deg, #4361ee, #3a0ca3); color: #fff; padding: 24px 28px; border-radius: 12px; margin: 20px 0; font-size: 1.05em; line-height: 1.8; }
+  .risk-box { background: rgba(248,81,73,0.08); border: 1px solid rgba(248,81,73,0.3); border-radius: 8px; padding: 16px 20px; margin: 12px 0; }
+  .risk-box h4 { color: var(--red); margin-bottom: 6px; }
+  .roadmap-box { background: var(--surface); border: 1px solid var(--border); padding: 20px; border-radius: 10px; margin: 16px 0; line-height: 1.9; }
+  .roadmap-box .label { color: var(--green); font-weight: 700; }
+  .roadmap-box .label2 { color: var(--yellow); font-weight: 700; }
+  .roadmap-box .label3 { color: var(--red); font-weight: 700; }
+  .stats-row { display: flex; gap: 15px; margin: 20px 0; }
+  .stat-card { flex: 1; text-align: center; padding: 16px; background: var(--surface); border-radius: 10px; border: 1px solid var(--border); }
+  .stat-card .num { font-size: 2em; font-weight: 700; color: var(--accent); }
+  .stat-card .lbl { font-size: .8em; color: var(--fg2); }
+  .arch-box { background: var(--surface); color: var(--fg); padding: 18px; border-radius: 8px; font-family: "SF Mono", "Fira Code", monospace; font-size: .85em; line-height: 1.7; margin: 14px 0; border: 1px solid var(--border); }
+  .arch-box .hl { color: #4fc3f7; }
+  .arch-box .hl2 { color: #ffd54f; }
+  .idea-card { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 16px 20px; margin: 12px 0; }
+  .idea-card h3 { margin-bottom: 6px; }
+  .idea-card .how { background: rgba(88,166,255,0.06); border-left: 4px solid var(--accent); padding: 8px 12px; margin: 8px 0; font-size: .9em; border-radius: 0 4px 4px 0; }
+  .idea-card .est { color: var(--fg2); font-size: .85em; margin-top: 4px; }
+  @media (max-width: 768px) { .two-col, .stats-row { flex-direction: column; } }
+</style>
+</head>
+<body>
+
+<h1>PocketCTL vs Orca 深度竞品调研报告</h1>
+<p class="meta">完整版 · 2026-06-24</p>
+<p class="meta">融合三份材料：Web 深度调研 + 可借鉴功能清单 + 深度对比分析</p>
+
+<div class="stats-row">
+  <div class="stat-card"><div class="num">14</div><div class="lbl">可借鉴项</div></div>
+  <div class="stat-card"><div class="num">4</div><div class="lbl">竞品分析维度</div></div>
+  <div class="stat-card"><div class="num">1</div><div class="lbl">核心差异化（分布式 Worktree）</div></div>
+  <div class="stat-card"><div class="num">3</div><div class="lbl">阶段路线图</div></div>
+</div>
+
+<blockquote class="strat-box" style="margin:20px 0">
+<strong>一句话策略：</strong>不做 Orca 的平替，做 Orca 的互补。<br>
+Orca 做「单机并行写代码」—— PocketCTL 做<strong>「分布式并行管代码机器」</strong>。<br>
+如果 PocketCTL 能引入 Orca 的 Worktree 思路（分布式版），将形成<strong>独一无二的竞争力</strong>。
+</blockquote>
+
+<!-- ====== 一 ====== -->
+<h2>一、项目概览</h2>
+
+<div class="two-col">
+<div class="col-orca">
+<span class="col-label">🐳 Orca（stablyai/orca）</span>
+<table style="margin:0">
+<tr><td>GitHub Stars</td><td><strong>6,065</strong></td></tr>
+<tr><td>创建时间</td><td>2026-03-17（约 3 个月）</td></tr>
+<tr><td>更新频率</td><td>每日发版</td></tr>
+<tr><td>代码量</td><td>~175 MB</td></tr>
+<tr><td>技术栈</td><td>TypeScript (Electron), Swift, Kotlin</td></tr>
+<tr><td>团队</td><td>Stably（YC 2022，$7.7M 融资，8 人，旧金山）</td></tr>
+<tr><td>平台</td><td>macOS / Windows / Linux + iOS / Android</td></tr>
+<tr><td>许可证</td><td>MIT 开源</td></tr>
+</table>
+<p style="margin-top:10px"><strong>定位：</strong>「The AI Orchestrator for 100x builders」</p>
+<p><strong>一句话：</strong>运行多个 coding agent 并行写代码的桌面 IDE，开发者个体工具。</p>
+</div>
+<div class="col-pctl">
+<span class="col-label">📱 PocketCTL（pocketctl/pocketctl）</span>
+<table style="margin:0">
+<tr><td>GitHub Stars</td><td>3</td></tr>
+<tr><td>创建时间</td><td>2026-06-10（约 13 天）</td></tr>
+<tr><td>更新频率</td><td>每日迭代</td></tr>
+<tr><td>代码量</td><td>~1.8 MB</td></tr>
+<tr><td>技术栈</td><td>Go (Daemon), TS (Relay), Vue 3 (Web), Swift (iOS)</td></tr>
+<tr><td>团队</td><td>个人 / 小团队</td></tr>
+<tr><td>平台</td><td>macOS / Linux (Daemon) + Web + iOS</td></tr>
+<tr><td>许可证</td><td>私有（Gitee 完整 / GitHub 白名单开源）</td></tr>
+</table>
+<p style="margin-top:10px"><strong>定位：</strong>「Your AI coding agents, in your pocket」</p>
+<p><strong>一句话：</strong>通过手机 / 浏览器远程监控和管理 coding agent，同时管理多台机器。</p>
+</div>
+</div>
+
+<h3>本质差异：执行层 vs 管理层</h3>
+<div class="two-col">
+<div class="col-orca" style="text-align:center"><strong style="font-size:1.2em">执行层</strong><br>Agent 并行写代码</div>
+<div class="col-pctl" style="text-align:center"><strong style="font-size:1.2em">管理层</strong><br>Agent 生命周期管理</div>
+</div>
+<blockquote><strong>关键洞察：</strong>这两个项目<strong>不是竞品，而是互补的</strong>。Orca 管「怎么写代码」，PocketCTL 管「谁在跑、跑在哪、花了多少钱」。</blockquote>
+
+<!-- ====== 二 ====== -->
+<h2>二、技术架构对比</h2>
+
+<h3>🐳 Orca：单机桌面</h3>
+<div class="arch-box">
+Orca Desktop App (Electron + TypeScript)<br>
+├── Ghostty Terminal (WebGL 渲染)<br>
+├── <span class="hl">Git Worktree Manager</span>（核心隔离原语）<br>
+├── Mobile Companion (iOS / Android)<br>
+├── GitHub &amp; Linear 原生集成<br>
+├── Design Mode (Chromium 元素拾取)<br>
+├── AI Diff Annotator<br>
+├── SSH Worktrees（远程执行，本地管理输出）<br>
+└── CLI（orca worktree create / snapshot / click / fill）<br><br>
+<span class="hl">单机模式</span> | 本地文件存储 | 离线可用 | 25+ CLI Agent 零配置接入
+</div>
+
+<h3>📱 PocketCTL：分布式 C/S</h3>
+<div class="arch-box">
+iOS App + Web App  ←→  <span class="hl">Relay Server</span>  ←→  <span class="hl2">Daemon</span><br>
+&emsp;&emsp;&emsp;&emsp;&emsp;&emsp;&emsp;&emsp;&emsp;&emsp; ↓<br>
+&emsp;&emsp;&emsp;&emsp;&emsp;&emsp;&emsp;&emsp;&emsp; PostgreSQL<br>
+<br>
+<span class="hl">分布式模式</span> | 多 Daemon 水平扩展 | 始终在线 | JWT 认证 + 撤销
+</div>
+
+<table>
+<tr><th>维度</th><th>🐳 Orca</th><th>📱 PocketCTL</th></tr>
+<tr><td><strong>架构模式</strong></td><td>单机桌面</td><td><span class="tag-green">分布式 C/S</span></td></tr>
+<tr><td><strong>可扩展性</strong></td><td>单机限制</td><td><span class="tag-green">多 Daemon 水平扩展</span></td></tr>
+<tr><td><strong>离线能力</strong></td><td><span class="tag-green">✅ 完全离线</span></td><td><span class="tag-yellow">依赖 Relay</span></td></tr>
+<tr><td><strong>Headless 部署</strong></td><td><span class="tag-red">需要 GUI 桌面</span></td><td><span class="tag-green">✅ 完全 headless</span></td></tr>
+<tr><td><strong>会话持久化</strong></td><td><span class="tag-red">无</span></td><td><span class="tag-green">PostgreSQL 完整历史</span></td></tr>
+<tr><td><strong>多设备同步</strong></td><td><span class="tag-red">无</span></td><td><span class="tag-green">Web + iOS 实时同步</span></td></tr>
+<tr><td><strong>CI / CD</strong></td><td>理论可行（CLI）</td><td><span class="tag-green">GitHub Actions + daemon update 自更新</span></td></tr>
+</table>
+
+<!-- ====== 三 ====== -->
+<h2>三、功能逐项对比</h2>
+
+<h3>3.1 Agent 管理</h3>
+<table>
+<tr><th>功能</th><th>🐳 Orca</th><th>📱 PocketCTL</th></tr>
+<tr><td>Agent 支持数</td><td><span class="tag-green">30+ CLI agent</span>（Claude Code / Codex / Cursor / Grok / Pi / Gemini CLI / Copilot / OpenCode / Kimi / Qwen Code / Goose / Devin …）</td><td><span class="tag-red">1 个</span>（Claude Code 端到端；OpenCode / Codex 仅 discovery 层注册，<strong>无 adapter 适配</strong>）</td></tr>
+<tr><td>扩展方式</td><td><span class="tag-green">「Any CLI agent drops right in」</span>— 零配置</td><td>硬编码 agent 发现 + adapter 模式</td></tr>
+<tr><td>Agent 并行</td><td><span class="tag-green">✅ 多 Worktree 并行</span>（2–100 个）</td><td><span class="tag-red">单 session 模式</span></td></tr>
+<tr><td>版本管理</td><td><span class="tag-red">无</span></td><td><span class="tag-green">✅ 一键升级 + 版本追踪</span></td></tr>
+<tr><td>Agent 发现</td><td>手动启动</td><td><span class="tag-green">✅ 自动发现</span>（监听 JSONL）</td></tr>
+</table>
+
+<h3>3.2 会话管理</h3>
+<table>
+<tr><th>功能</th><th>🐳 Orca</th><th>📱 PocketCTL</th></tr>
+<tr><td>实时监控</td><td>✅ 终端内</td><td><span class="tag-green">✅ WebSocket 实时</span></td></tr>
+<tr><td>会话翻页 / 历史</td><td><span class="tag-red">无</span></td><td><span class="tag-green">✅</span></td></tr>
+<tr><td>恢复会话</td><td><span class="tag-red">无</span></td><td><span class="tag-green">✅</span></td></tr>
+<tr><td>Pin / 重命名 / 导出</td><td><span class="tag-red">无</span></td><td><span class="tag-green">✅ 全部支持</span></td></tr>
+<tr><td>标题自动生成</td><td><span class="tag-red">无</span></td><td><span class="tag-green">✅ 智谱 GLM</span></td></tr>
+</table>
+<p><span class="tag-green">PocketCTL 完胜</span> — 会话管理是核心强项。</p>
+
+<h3>3.3 代码执行与 IDE 体验</h3>
+<table>
+<tr><th>功能</th><th>🐳 Orca</th><th>📱 PocketCTL</th></tr>
+<tr><td>Git Worktree 隔离</td><td><span class="tag-green">✅ 一等公民</span></td><td><span class="tag-red">无</span></td></tr>
+<tr><td>代码 Diff 审查</td><td><span class="tag-green">✅ 标注 + AI 反馈</span></td><td><span class="tag-red">无</span></td></tr>
+<tr><td>代码编辑器</td><td><span class="tag-green">✅ VS Code 级</span></td><td><span class="tag-red">无</span></td></tr>
+<tr><td>Design Mode</td><td><span class="tag-green">✅ 浏览器元素拾取</span></td><td><span class="tag-red">无</span></td></tr>
+<tr><td>GitHub / Linear 原生集成</td><td><span class="tag-green">✅ 内嵌 PR / Issue / 项目看板</span></td><td><span class="tag-red">无</span></td></tr>
+</table>
+<p><span class="tag-red">Orca 的阵地</span> — 代码编辑器研发成本极高，PocketCTL 建议走差异化——从管理层切入。</p>
+
+<h3>3.4 远程与移动</h3>
+<table>
+<tr><th>功能</th><th>🐳 Orca</th><th>📱 PocketCTL</th></tr>
+<tr><td>远程执行</td><td><span class="tag-yellow">SSH Worktrees</span>（远程服务器执行）</td><td><span class="tag-green">Daemon-Relay-Web 三层</span>（天然远程）</td></tr>
+<tr><td>iOS</td><td><span class="tag-green">✅ App Store</span>（伴侣模式）</td><td><span class="tag-green">✅ App Store</span>（完整功能）</td></tr>
+<tr><td>Android</td><td><span class="tag-green">✅ APK</span></td><td><span class="tag-red">无</span></td></tr>
+<tr><td><strong>Web 管理面板</strong></td><td><span class="tag-red">无</span></td><td><span class="tag-green">✅ Vue 3 SPA 完整版</span></td></tr>
+<tr><td>扫码登录</td><td><span class="tag-red">无</span></td><td><span class="tag-green">✅</span></td></tr>
+<tr><td>多端实时同步</td><td><span class="tag-red">无</span></td><td><span class="tag-green">✅ Web + iOS</span></td></tr>
+</table>
+
+<h3>3.5 监控与统计</h3>
+<table>
+<tr><th>功能</th><th>🐳 Orca</th><th>📱 PocketCTL</th></tr>
+<tr><td>主机资源监控</td><td><span class="tag-red">无</span></td><td><span class="tag-green">✅ CPU / Memory / Disk</span></td></tr>
+<tr><td>Token 统计</td><td>简单用量</td><td><span class="tag-green">✅ 深度：按天 / 模型 / 主机</span></td></tr>
+<tr><td>历史保留</td><td>简单显示</td><td><span class="tag-green">✅ 删会话不丢统计</span></td></tr>
+<tr><td>用量追踪 + 账户切换</td><td><span class="tag-green">✅ rate-limit 重置倒计时</span></td><td><span class="tag-yellow">Token 看板（无 rate-limit）</span></td></tr>
+<tr><td>通知推送</td><td><span class="tag-green">终端内 + 未读标记</span></td><td><span class="tag-green">✅ Push Notification</span></td></tr>
+</table>
+
+<!-- ====== 四 ====== -->
+<h2>四、竞品格局</h2>
+
+<div class="arch-box" style="text-align:center; line-height:2.2">
+<strong style="font-size:.95em">代码 Agent 工具生态</strong><br>
+<span style="color:#8b949e">单个 Agent（执行层）</span>&emsp;&emsp;&emsp;&emsp;&emsp;&emsp;<span style="color:#8b949e">编排 / 管理（编排层）</span><br>
+<span class="hl">Claude Code · Codex · Cursor</span>&emsp;&emsp;&emsp;&emsp;<span class="hl2">🐳 Orca</span>（并行代码 IDE）<br>
+<span class="hl">OpenCode · Pi · Kimi · Qwen Code</span>&emsp;&emsp;<span class="hl2">📱 PocketCTL</span>（远程管理平台）<br>
+<span class="hl">Gemini CLI · Copilot · Grok</span>&emsp;&emsp;&emsp;&emsp;<span class="hl2" style="color:#f85149">Multica</span>（Managed Agents 平台）★<br>
+<span class="hl">Goose · Devin · Rovo Dev …</span>
+</div>
+
+<h3>关键竞品</h3>
+<table>
+<tr><th>项目</th><th>Stars</th><th>定位</th><th>与 PocketCTL 重合度</th></tr>
+<tr><td>🐳 Orca</td><td>6,065</td><td>并行代码 IDE（执行层）</td><td><span class="tag-green">低</span>（执行 vs 管理）</td></tr>
+<tr><td style="color:var(--red)"><strong>Multica</strong></td><td>~800+</td><td>Managed Agents 平台</td><td><span class="badge badge-red">高（直接竞品）</span></td></tr>
+</table>
+
+<ul>
+  <li><strong>Orca</strong> →「深度」路线：写 + 跑 + 对比 + 审查一站式 IDE。不做远程管理。</li>
+  <li><strong>PocketCTL</strong> →「广度」路线：不碰编辑器，专注管理和监控，天然分布式。</li>
+  <li><strong>Multica</strong> → <span class="tag-red">直接竞品</span>，同为管理层，侧重任务分配和技能复用。需持续关注。</li>
+</ul>
+
+<!-- ====== 五 ====== -->
+<h2>五、战略方向与盈利模式</h2>
+
+<h3>Orca（Stably）</h3>
+<table>
+<tr><th>维度</th><th>分析</th></tr>
+<tr><td><strong>筹资</strong></td><td>YC 2022 + $7.7M 种子轮</td></tr>
+<tr><td><strong>商业模式</strong></td><td>Orca 本身<strong>不赚钱</strong>（MIT 免费，BYO 订阅）。Stably 的营收来自<strong>另一条产品线</strong>：测试自动化 SaaS（credit-based 定价 $10–$250+/月，客户含 ClickHouse、Tesla、Samsara）</td></tr>
+<tr><td><strong>战略逻辑</strong></td><td>Orca 是<strong>获客漏斗</strong> → 品牌认知 → 交叉销售 Stably 测试平台</td></tr>
+<tr><td><strong>迭代方向</strong></td><td>每日发版；方向：更深 IDE 集成、企业团队功能、CI 脚本化</td></tr>
+<tr><td><strong>风险</strong></td><td>过于早期（无正式 release）；8 人团队维护两条产品线，Orca 可能被边缘化</td></tr>
+</table>
+
+<h3>PocketCTL</h3>
+<table>
+<tr><th>维度</th><th>分析</th></tr>
+<tr><td><strong>筹资</strong></td><td>自筹（独立开发者）</td></tr>
+<tr><td><strong>商业模式</strong></td><td>暂无明确盈利；可选方向：① 免费版 / 付费版 daemon 数量限制；② 企业 relay 托管（SaaS relay）；③ 高级分析 / 团队协作收费</td></tr>
+<tr><td><strong>当前优势</strong></td><td>已有完整 CI/CD、生产部署、多端实时同步——这些 Orca 没有</td></tr>
+<tr><td><strong>风险</strong></td><td>独立开发者 vs VC 团队；Stars=3 vs 6065 社区差距；Relay + PostgreSQL 运维成本</td></tr>
+</table>
+
+<!-- ====== 六 ====== -->
+<h2>六、优劣势总结</h2>
+
+<h3>Orca 优势（PocketCTL 需追赶）</h3>
+<ol>
+  <li><strong>Worktree 隔离是一等公民</strong> — 架构级优势，非功能点</li>
+  <li><strong>Agent 泛化能力极强</strong> — 30+ CLI agent 零配置接入</li>
+  <li><strong>全平台桌面 + 移动</strong> — macOS / Windows / Linux + iOS / Android</li>
+  <li><strong>IDE 级开发体验</strong> — Design Mode、Diff 审查、GitHub 原生集成</li>
+  <li><strong>VC 资金 + MIT 开源社区</strong> — 6,065 stars，每日发版</li>
+</ol>
+
+<h3>Orca 劣势（PocketCTL 机会）</h3>
+<ol>
+  <li><strong>早期不稳定</strong> — 无正式 release，API 随时变</li>
+  <li><strong>需要 GUI 桌面</strong> — 无法 headless / CI 集成</li>
+  <li><strong>无服务端持久化</strong> — 无会话历史、无多设备同步、无 Token 分析</li>
+  <li><strong>单机限制</strong> — 管不了多台机器上的 agent</li>
+  <li><strong>维护风险</strong> — Stably 主业是测试平台，Orca 可能被降级</li>
+</ol>
+
+<h3>PocketCTL 核心优势</h3>
+<ol>
+  <li><strong>完整远程管理架构</strong> — Daemon-Relay-Web-iOS 四层</li>
+  <li><strong>多端实时同步</strong> — Web + iOS，会话状态 + 消息 + Token</li>
+  <li><strong>Headless 优先</strong> — 适合服务器和 CI</li>
+  <li><strong>会话持久化</strong> — 完整历史、恢复、Pin——Orca 完全没有</li>
+  <li><strong>安全架构</strong> — Relay 中转 + JWT 认证 + 撤销</li>
+  <li><strong>成熟 CI/CD</strong> — v0.2.10，一键安装，daemon update 自更新</li>
+  <li><strong>Agent 生命周期管理</strong> — 一键升级、远程重启</li>
+</ol>
+
+<!-- ====== 七 ====== -->
+<h2>七、14 项可借鉴功能清单</h2>
+
+<h3><span class="badge badge-red">P1 · 高价值、低成本</span>（1–3 天）</h3>
+
+<div class="idea-card">
+  <h3><span class="badge badge-red">P1</span> 1. Agent 支持扩展到更多种类</h3>
+  <p>当前仅 Claude Code 端到端可用；OpenCode / Codex 已在 discovery 层注册但<strong>缺少 adapter</strong>（消息解析、JSONL 格式适配），无法接收消息。参考 Orca「any CLI agent drops right in」——但先从补齐 3 个已注册 Agent 的 adapter 开始。</p>
+  <div class="how"><strong>怎么做：</strong><br>① 先补齐已注册的 OpenCode / Codex 的 adapter（消息解析 + JSONL 格式适配 + PTY 交互），让 3 个全部端到端可用<br>② 新 Agent：分析 JSONL 格式 → adapter 新增 parser → discovery 注册。优先 Cursor、Grok、Pi、Kimi Code、Qwen Code。</div>
+  <div class="est">⏱ 3–5 天（先补齐 OpenCode + Codex 的 adapter，再加 2–3 个新 Agent）</div>
+</div>
+
+<div class="idea-card">
+  <h3><span class="badge badge-red">P1</span> 2. CLI 命令风格升级</h3>
+  <p>参考 Orca 的 <code>orca worktree create / snapshot / click</code> 语义化 CLI。</p>
+  <div class="how"><strong>怎么做：</strong>新增 <code>pocketctl agent spawn [model]</code>、<code>host stats</code>、<code>session broadcast "prompt"</code>。</div>
+  <div class="est">⏱ 1 天</div>
+</div>
+
+<div class="idea-card">
+  <h3><span class="badge badge-red">P1</span> 3. 用量限流重置倒计时</h3>
+  <p>借鉴 Orca 的 rate-limit 重置显示。PocketCTL 已有 Token 看板，加限流状态价值很高。</p>
+  <div class="how"><strong>怎么做：</strong>Token 页面增加「限流状态」栏——各模型请求剩余量 + 重置倒计时。接近上限时 Push Notification。</div>
+  <div class="est">⏱ 半天</div>
+</div>
+
+<h3><span class="badge badge-yellow">P2 · 高价值、中等成本</span>（3–7 天）</h3>
+
+<div class="idea-card" style="border-left:4px solid var(--red)">
+  <h3><span class="badge badge-yellow">P2</span> <strong style="color:var(--red)">💰 4. 分布式 Worktree 并行（最大差异化卖点）</strong></h3>
+  <p>Orca 单机 worktree 并行，PocketCTL 做<strong>分布式版本</strong>：一个 prompt 派给多个 Daemon，各自执行，结果汇总对比。这是 Orca 做不到的事。</p>
+  <div class="how"><strong>怎么做：</strong>Relay 新增 <code>task_broadcast</code> → 每个 Daemon 在自己的 worktree 执行 → 结果汇总 → Web 对比视图。</div>
+  <div class="est">⏱ 5–7 天</div>
+</div>
+
+<div class="idea-card">
+  <h3><span class="badge badge-yellow">P2</span> 5. AI Diff 审查</h3>
+  <p>参考 Orca 的 Diff 标注 + AI 反馈。先做非代码场景（prompt 版本对比、配置 diff）。</p>
+  <div class="how"><strong>怎么做：</strong>同项目不同 session 的 prompt / config 差异比较 → 扩展到 agent 输出 diff。</div>
+  <div class="est">⏱ 3–5 天</div>
+</div>
+
+<div class="idea-card">
+  <h3><span class="badge badge-yellow">P2</span> 6. Token 看板 UI 升级</h3>
+  <p>借鉴 Orca 简洁的用量可视化风格。当前 Token 统计功能完备但 UI 可增强。</p>
+  <div class="how"><strong>怎么做：</strong>增加每日消耗折线图、各模型占比饼图、7 天趋势、模型间对比视图。</div>
+  <div class="est">⏱ 2–3 天</div>
+</div>
+
+<div class="idea-card">
+  <h3><span class="badge badge-yellow">P2</span> 7. 会话间内容拖拽</h3>
+  <p>参考 Orca「拖文件到 agent prompt」。PocketCTL 做会话间上下文拖拽（Web + iOS）。</p>
+  <div class="how"><strong>怎么做：</strong>Web 端 HTML5 Drag and Drop API，iOS 端 DragInteraction。从会话选中内容拖到新 session 输入框。</div>
+  <div class="est">⏱ 2–3 天</div>
+</div>
+
+<h3><span class="badge badge-green">P3 · 高价值、高成本</span>（1–2 周）</h3>
+
+<div class="idea-card">
+  <h3><span class="badge badge-green">P3</span> 8. 「Agent 指令预览器」</h3>
+  <p>借鉴 Orca Design Mode 的交互逻辑，做指令分发前的预览面板。</p>
+  <div class="how"><strong>怎么做：</strong>Web UI 新增预览面板：输入 prompt → 展示路由路径（在线 Daemon）→ 预估 Token → 确认分发。</div>
+  <div class="est">⏱ 1–2 周</div>
+</div>
+
+<div class="idea-card">
+  <h3><span class="badge badge-green">P3</span> 9. GitHub / Linear 原生集成</h3>
+  <p>PocketCTL 作为管理层更适合做这件事——「看到 Issue → 开 session → 监控执行」闭环。</p>
+  <div class="how"><strong>怎么做：</strong>Web 集成 GitHub API：浏览 Issue →「用 Agent 处理」→ 自动创建 session → 完成后自动评论 Issue。</div>
+  <div class="est">⏱ 1–2 周</div>
+</div>
+
+<div class="idea-card">
+  <h3><span class="badge badge-green">P3</span> 10. 通知未读状态强化</h3>
+  <p>借鉴 Orca 的 unread state，完善通知系统。</p>
+  <div class="how"><strong>怎么做：</strong>Session 列表增加未读标记 → Agent 完成 / 报错 / 需输入时标记 → Web / iOS 同步未读状态。</div>
+  <div class="est">⏱ 3–5 天</div>
+</div>
+
+<h3><span class="badge badge-purple">P4 · 战略层面</span></h3>
+
+<div class="idea-card" style="border-left:4px solid var(--purple)">
+  <h3><span class="badge badge-purple">P4</span> 11. 「多 Daemon 并行，Web 对比结果」</h3>
+  <p>Orca 最核心卖点的分布式版本——不是帮写代码，而是帮选最优代码。<strong>目前没有任何竞品能做到。</strong></p>
+</div>
+
+<div class="idea-card" style="border-left:4px solid var(--purple)">
+  <h3><span class="badge badge-purple">P4</span> 12. 「每个 session 一个隔离沙箱」</h3>
+  <p>借鉴 Orca「万物皆 worktree」理念——session 的环境变量、配置、prompt 版本、依赖清单都独立管理，可继承、导出、复用。</p>
+</div>
+
+<div class="idea-card" style="border-left:4px solid var(--purple)">
+  <h3><span class="badge badge-purple">P4</span> 13. 「We ship daily」迭代节奏</h3>
+  <p>Orca 3 个月 6,000+ star 的核心原因之一。PocketCTL 13 天已保持高频更新——坚持。</p>
+</div>
+
+<div class="idea-card" style="border-left:4px solid var(--purple)">
+  <h3><span class="badge badge-purple">P4</span> 14. 开源 + 官网 + 社区三位一体</h3>
+  <p>建议：① Landing Page（显示 GIF 演示 + install 命令）；② Discord / 飞书社区；③ Product Hunt / HN 发布。</p>
+</div>
+
+<!-- ====== 八 ====== -->
+<h2>八、三阶段路线图</h2>
+
+<div class="roadmap-box">
+<span class="label">📅 本周</span>（1–2 天）<br>
+├── ⚡ Agent 扩展到 5+ 个（Cursor + Pi + Kimi）<br>
+├── ⚡ 用量限流倒计时提示<br>
+├── ⚡ CLI 升级（agent spawn / host stats）<br>
+└── ⚡ Landing Page（Vercel，几分钟）<br><br>
+
+<span class="label2">📅 下周</span>（3–5 天）<br>
+├── 🔥 <strong>分布式 Worktree MVP</strong>（核心差异化）<br>
+├── 🔥 Token 看板 UI 升级（折线图 + 饼图 + 趋势）<br>
+├── 🔥 通知未读状态 + Push Notification 完善<br>
+├── 代码 Diff 审查（prompt / config 对比先上）<br>
+└── Discord / 飞书社区搭建<br><br>
+
+<span class="label3">📅 下下周</span>（5–7 天）<br>
+├── 🔥🔥 GitHub / Linear 集成<br>
+├── 🔥🔥「Agent 指令预览器」<br>
+├── Android 端 MVP<br>
+├── 「一个 prompt 多 Daemon」发布到 Product Hunt / HN<br>
+└── 团队多租户模式 MVP<br><br>
+
+<span style="color:#a371f7">📅 长期</span>（3–6 个月）<br>
+├── 分布式 Worktree 成为核心卖点<br>
+├── 插件系统<br>
+├── 企业版（SSO、审计、RBAC）<br>
+└── 与 Orca 互补整合
+</div>
+
+<!-- ====== 九 ====== -->
+<h2>九、风险分析</h2>
+
+<div class="risk-box">
+<h4>1. Orca 做管理层</h4>
+<p>如果 Orca 从桌面往管理方向扩展（Web Panel、多 Daemon），将直接竞争。目前没有这个迹象。</p>
+</div>
+<div class="risk-box">
+<h4>2. Multica 竞争</h4>
+<p>Multica（~800+ stars，Managed Agents 平台）定位比 Orca 更接近 PocketCTL，同为管理层，侧重任务分配和技能复用。需持续关注，是直接竞品。</p>
+</div>
+<div class="risk-box">
+<h4>3. 社区影响力差距</h4>
+<p>PocketCTL Stars=3 vs Orca 6,065。建议尽快发布 Product Hunt / HN 获取初始用户。</p>
+</div>
+<div class="risk-box">
+<h4>4. 运维成本</h4>
+<p>Relay + PostgreSQL 的运维成本比 Orca 单机模式高。随着用户增长需要优化架构或提供托管版 Relay。</p>
+</div>
+<div class="risk-box">
+<h4>5. 团队规模</h4>
+<p>1 人维护 vs Orca 的 8 人 VC 支持团队。长期迭代速度有压力。需聚焦核心差异化，不求功能全集。</p>
+</div>
+
+<!-- ====== 十 ====== -->
+<h2>十、结论</h2>
+
+<div class="strat-box">
+<strong>一句话结论</strong><br><br>
+Orca 和 PocketCTL <strong>不是竞品，是互补品</strong>。<br>
+Orca 管「怎么写代码」，PocketCTL 管「谁在跑、跑在哪、花了多少钱」。两个产品可以配合使用。<br><br>
+如果 PocketCTL 引入 Orca 的 Worktree 思路（分布式版），将形成<strong>市场上没有任何产品能提供的独特能力</strong>：<strong style="color:#ffd54f">「一个 prompt，派给 N 台机器上的 N 个 Agent，Web 端一键对比结果」</strong>。
+</div>
+
+<h3>总结对比矩阵</h3>
+<table>
+<tr><th>维度</th><th>🐳 Orca</th><th>📱 PocketCTL</th><th>差距</th></tr>
+<tr><td>Agent 隔离</td><td><span class="tag-green">worktree 一等公民</span></td><td><span class="tag-red">无</span></td><td><span class="badge badge-red">大</span></td></tr>
+<tr><td>Agent 泛化</td><td><span class="tag-green">30+ CLI agent</span></td><td><span class="tag-red">1 个（端到端）</span></td><td>大</td></tr>
+<tr><td>远程管理</td><td><span class="tag-yellow">SSH worktree</span></td><td><span class="tag-green">Daemon + Relay 完整</span></td><td><span class="badge badge-green">PocketCTL 优势</span></td></tr>
+<tr><td>移动端</td><td><span class="tag-yellow">伴侣模式</span></td><td><span class="tag-green">完整功能</span></td><td><span class="badge badge-green">PocketCTL 优势</span></td></tr>
+<tr><td>会话持久化</td><td><span class="tag-red">无</span></td><td><span class="tag-green">完整历史 + Token 分析</span></td><td><span class="badge badge-green">PocketCTL 优势</span></td></tr>
+<tr><td>Web 面板</td><td><span class="tag-red">无</span></td><td><span class="tag-green">Vue 3 SPA</span></td><td><span class="badge badge-green">PocketCTL 优势</span></td></tr>
+<tr><td>IDE 体验</td><td><span class="tag-green">内置 Diff / Design Mode</span></td><td><span class="tag-red">无</span></td><td>大</td></tr>
+<tr><td>分布式架构</td><td><span class="tag-red">单机</span></td><td><span class="tag-green">多 Daemon 水平扩展</span></td><td><span class="badge badge-green">PocketCTL 优势</span></td></tr>
+<tr><td>生产成熟度</td><td><span class="tag-red">早期 / 无 release</span></td><td><span class="tag-green">v0.2.10 + CI/CD</span></td><td><span class="badge badge-green">PocketCTL 优势</span></td></tr>
+<tr><td>社区影响力</td><td><span class="tag-green">6,065 stars</span></td><td><span class="tag-red">3 stars</span></td><td><span class="badge badge-red">大</span></td></tr>
+</table>
+
+<hr>
+<p style="font-size:12px;color:var(--fg2)">Sources: GitHub stablyai/orca README, orca.stably.ai, Stably company profile, Multica GitHub, community discussions (May–Jun 2026)</p>
+
+</body>
+</html>

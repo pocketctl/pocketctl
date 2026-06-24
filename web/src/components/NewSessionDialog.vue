@@ -73,24 +73,12 @@
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
             {{ t('new_session.permission_mode') }}
           </div>
-          <div class="perm-options">
-            <button type="button" :class="['perm-option', { active: form.permissionMode === 'bypassPermissions' }]" @click="form.permissionMode = 'bypassPermissions'">
-              <span class="perm-name">{{ t('session.perm_bypass') }}</span>
-              <span class="perm-desc">{{ t('new_session.perm_bypass') }}</span>
-            </button>
-            <button type="button" :class="['perm-option', { active: form.permissionMode === 'default' }]" @click="form.permissionMode = 'default'">
-              <span class="perm-name">{{ t('session.perm_default') }}</span>
-              <span class="perm-desc">{{ t('new_session.perm_confirm') }}</span>
-            </button>
-            <button type="button" :class="['perm-option', { active: form.permissionMode === 'acceptEdits' }]" @click="form.permissionMode = 'acceptEdits'">
-              <span class="perm-name">{{ t('session.perm_accept_edits') }}</span>
-              <span class="perm-desc">{{ t('new_session.perm_auto_edit') }}</span>
-            </button>
-            <button type="button" :class="['perm-option', { active: form.permissionMode === 'plan' }]" @click="form.permissionMode = 'plan'">
-              <span class="perm-name">{{ t('session.perm_plan') }}</span>
-              <span class="perm-desc">{{ t('new_session.perm_plan_only') }}</span>
-            </button>
-          </div>
+          <select v-model="form.permissionMode" class="input-field">
+            <option value="bypassPermissions">{{ t('session.perm_bypass') }} — {{ t('new_session.perm_bypass') }}</option>
+            <option value="default">{{ t('session.perm_default') }} — {{ t('new_session.perm_confirm') }}</option>
+            <option value="acceptEdits">{{ t('session.perm_accept_edits') }} — {{ t('new_session.perm_auto_edit') }}</option>
+            <option value="plan">{{ t('session.perm_plan') }} — {{ t('new_session.perm_plan_only') }}</option>
+          </select>
         </div>
 
         <!-- Model (dynamic: host's available models from ~/.claude/settings.json) -->
@@ -506,12 +494,4 @@ onUnmounted(() => {
   .modal-footer { flex-direction: column; }
 }
 
-/* Permission mode selector */
-.perm-options { display: flex; gap: 8px; }
-.perm-option { flex: 1; display: flex; flex-direction: column; gap: 2px; padding: 10px 8px; background: var(--bg); border: 1px solid var(--border); border-radius: var(--radius-md); cursor: pointer; transition: all 0.15s; text-align: left; }
-.perm-option:hover { border-color: var(--border-light); background: var(--surface-hover); }
-.perm-option.active { border-color: var(--accent); background: var(--accent-muted); }
-.perm-name { font-size: 13px; font-weight: 600; color: var(--fg); }
-.perm-option.active .perm-name { color: var(--accent); }
-.perm-desc { font-size: 11px; color: var(--fg-tertiary); line-height: 1.3; }
 </style>
