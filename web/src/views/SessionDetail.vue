@@ -888,8 +888,10 @@ function onInputKeydown(e: KeyboardEvent) {
       messageInput.value = messageInput.value.slice(0, start) + '\n' + messageInput.value.slice(end)
       nextTick(() => {
         el.selectionStart = el.selectionEnd = start + 1
-        el.style.height = 'auto'
-        el.style.height = Math.min(el.scrollHeight, 200) + 'px'
+        // Grow to fit content (capped), driven through textareaHeight so the
+        // :style binding stays the single source of truth for the height.
+        const fit = Math.min(Math.max(el.scrollHeight, MIN_TEXTAREA_HEIGHT), MAX_TEXTAREA_HEIGHT)
+        textareaHeight.value = fit
       })
     }
     return
@@ -1397,8 +1399,12 @@ onMounted(() => {
 .timeline .line { flex: 1; height: 1px; background: var(--border); margin: 0 12px; align-self: flex-start; margin-top: 4px; }
 .timeline .line.done { background: var(--success); }
 
-/* Chat Input — unified container */
-.chat-input-area { position: relative; border-top: 1px solid var(--border); padding: 12px 20px; background: var(--surface); transition: background var(--transition), border-color var(--transition); }
+/* Chat Input — unified container.
+   flex-shrink:0 is essential: as the textarea grows (drag-resize), the input
+   area must expand to fit it so that .chat-messages (flex:1) shrinks in
+   tandem. Without it the flex column can compress the input area, letting the
+   textarea/controls overflow under the messages region. */
+.chat-input-area { position: relative; flex-shrink: 0; border-top: 1px solid var(--border); padding: 12px 20px; background: var(--surface); transition: background var(--transition), border-color var(--transition); }
 .chat-input-area.ended { display: flex; align-items: center; justify-content: center; padding: 14px 20px; }
 .ended-text { color: var(--fg-tertiary); font-size: 13px; }
 
