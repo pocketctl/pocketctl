@@ -190,6 +190,7 @@
             <textarea
               v-model="messageInput"
               class="chat-textarea"
+              :style="{ height: textareaHeight + 'px' }"
               :placeholder="isPendingSession ? t('session.input_creating') : (isDaemonSession && isTerminal ? t('session.input_resume') : t('session.input_send'))"
               @keydown="onInputKeydown"
               @focus="isInputFocused = true"
@@ -198,6 +199,9 @@
               ref="inputEl"
               rows="3"
             ></textarea>
+
+            <!-- Drag handle to resize textarea height -->
+            <div class="textarea-resize-handle" @mousedown="startResize"></div>
 
             <!-- Bottom control row -->
             <div class="input-controls">
@@ -333,6 +337,11 @@ const messagesEl = ref<HTMLDivElement | null>(null)
 const inputEl = ref<HTMLTextAreaElement | null>(null)
 const permDropdownEl = ref<HTMLElement | null>(null)
 const isInputFocused = ref(false)
+// Textarea height (user-adjustable via drag handle, resets on page refresh)
+const DEFAULT_TEXTAREA_HEIGHT = 72  // ~3 rows
+const MIN_TEXTAREA_HEIGHT = 60
+const MAX_TEXTAREA_HEIGHT = 400
+const textareaHeight = ref(DEFAULT_TEXTAREA_HEIGHT)
 const daemons = ref<Record<string, any>>({})
 const hostFilter = computed(() => (route.query.host as string) || '')
 const visibleSessions = computed(() => {
@@ -797,12 +806,29 @@ const showPopover = computed(() => !popoverDismissed.value && filteredCommands.v
 watch(messageInput, () => {
   selectedIndex.value = 0
   popoverDismissed.value = false
-  // Auto-resize textarea
-  if (inputEl.value) {
-    inputEl.value.style.height = 'auto'
-    inputEl.value.style.height = Math.min(inputEl.value.scrollHeight, 200) + 'px'
-  }
 })
+
+// --- Textarea resize via drag handle ---
+function startResize(e: MouseEvent) {
+  e.preventDefault()
+  const startY = e.clientY
+  const startHeight = textareaHeight.value
+  document.body.style.cursor = 'ns-resize'
+  document.body.style.userSelect = 'none'
+
+  function onMove(ev: MouseEvent) {
+    const delta = startY - ev.clientY // drag up = taller
+    textareaHeight.value = Math.min(MAX_TEXTAREA_HEIGHT, Math.max(MIN_TEXTAREA_HEIGHT, startHeight + delta))
+  }
+  function onUp() {
+    document.body.style.cursor = ''
+    document.body.style.userSelect = ''
+    document.removeEventListener('mousemove', onMove)
+    document.removeEventListener('mouseup', onUp)
+  }
+  document.addEventListener('mousemove', onMove)
+  document.addEventListener('mouseup', onUp)
+}
 
 function onInputKeydown(e: KeyboardEvent) {
   // Alt/Option+Enter or Shift+Enter → insert newline (checked first, even
@@ -1317,7 +1343,11 @@ onMounted(() => {
 .chat-input-container { position: relative; background: var(--bg); border: 1px solid var(--border); border-radius: var(--radius-xl); transition: border-color 0.15s, box-shadow 0.15s; }
 .chat-input-container.focused { border-color: var(--border-focus); box-shadow: 0 0 0 3px var(--accent-muted); }
 
-.chat-textarea { width: 100%; background: none; border: none; color: var(--fg); font-size: 14px; font-family: var(--font-body); line-height: 1.5; outline: none; resize: none; padding: 12px 16px 4px; min-height: 60px; max-height: 200px; }
+.chat-textarea { width: 100%; background: none; border: none; color: var(--fg); font-size: 14px; font-family: var(--font-body); line-height: 1.5; outline: none; resize: none; padding: 12px 16px 4px; min-height: 60px; max-height: 400px; overflow-y: auto; }
+/* Drag handle between textarea and controls — user drags up/down to resize */
+.textarea-resize-handle { height: 6px; margin: 0 8px; cursor: ns-resize; display: flex; align-items: center; justify-content: center; border-radius: 3px; transition: background 0.15s; }
+.textarea-resize-handle::after { content: ''; width: 32px; height: 3px; border-radius: 2px; background: var(--border-light); transition: background 0.15s; }
+.textarea-resize-handle:hover::after { background: var(--accent); }
 .chat-textarea::placeholder { color: var(--fg-tertiary); }
 .chat-textarea:disabled { opacity: 0.5; }
 
