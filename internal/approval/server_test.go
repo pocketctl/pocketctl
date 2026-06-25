@@ -159,3 +159,75 @@ func TestServerDrainSession(t *testing.T) {
 		t.Error("s2 should still be pending after draining s1")
 	}
 }
+
+// TestHookOutputs verifies the two Claude hook output shapes the hook can emit:
+// a continue (no opinion, used in bypassPermissions) and an allow/deny decision.
+// Both must be valid JSON Claude can parse.
+func TestHookOutputs(t *testing.T) {
+	t.Run("writeContinue emits a no-opinion continue", func(t *testing.T) {
+		var buf bytes.Buffer
+		orig := os.Stdout
+		r, w, _ := os.Pipe()
+		os.Stdout = w
+		writeContinue()
+		w.Close()
+		os.Stdout = orig
+		buf.ReadFrom(r)
+
+		var out map[string]any
+		if err := json.Unmarshal(buf.Bytes(), &out); err != nil {
+			t.Fatalf("writeContinue produced invalid JSON: %v (%s)", err, buf.String())
+		}
+		if cont, _ := out["continue"].(bool); !cont {
+			t.Errorf("expected continue=true, got %v", out["continue"])
+		}
+	})
+
+	t.Run("writeDecision emits allow with a reason", func(t *testing.T) {
+		var buf bytes.Buffer
+		orig := os.Stdout
+		r, w, _ := os.Pipe()
+		os.Stdout = w
+		writeDecision(true, "approved by user")
+		w.Close()
+		os.Stdout = orig
+		buf.ReadFrom(r)
+
+		var out struct {
+			HookSpecificOutput struct {
+				PermissionDecision       string `json:"permissionDecision"`
+				PermissionDecisionReason string `json:"permissionDecisionReason"`
+			} `json:"hookSpecificOutput"`
+		}
+		if err := json.Unmarshal(buf.Bytes(), &out); err != nil {
+			t.Fatalf("writeDecision produced invalid JSON: %v (%s)", err, buf.String())
+		}
+		if out.HookSpecificOutput.PermissionDecision != "allow" {
+			t.Errorf("expected allow, got %q", out.HookSpecificOutput.PermissionDecision)
+		}
+		if out.HookSpecificOutput.PermissionDecisionReason != "approved by user" {
+			t.Errorf("unexpected reason: %q", out.HookSpecificOutput.PermissionDecisionReason)
+		}
+	})
+
+	t.Run("writeDecision emits deny", func(t *testing.T) {
+		var buf bytes.Buffer
+		orig := os.Stdout
+		r, w, _ := os.Pipe()
+		os.Stdout = w
+		writeDecision(false, "denied")
+		w.Close()
+		os.Stdout = orig
+		buf.ReadFrom(r)
+
+		var out struct {
+			HookSpecificOutput struct {
+				PermissionDecision string `json:"permissionDecision"`
+			} `json:"hookSpecificOutput"`
+		}
+		_ = json.Unmarshal(buf.Bytes(), &out)
+		if out.HookSpecificOutput.PermissionDecision != "deny" {
+			t.Errorf("expected deny, got %q", out.HookSpecificOutput.PermissionDecision)
+		}
+	})
+}
