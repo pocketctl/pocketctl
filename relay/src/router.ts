@@ -514,7 +514,19 @@ export class Router {
       const daemonId = this.sessionToDaemon.get(msg.session_id);
       if (daemonId) {
         const daemon = this.daemons.get(daemonId);
-        if (daemon && daemon.ws.readyState === 1) { this.send(daemon.ws, msg); return; }
+        if (daemon && daemon.ws.readyState === 1) {
+          this.send(daemon.ws, msg);
+          // L2 (web-post-send-feedback): ack so the web client clears its ack-timeout.
+          if (msg.type === 'user_message' && msg.msg_id) {
+            this.send(clientWs, { type: 'user_message_ack', msg_id: msg.msg_id });
+          }
+          return;
+        }
+      }
+      // L2: daemon offline / session unknown — nack so web rolls back optimistic UI.
+      if (msg.type === 'user_message' && msg.msg_id) {
+        this.send(clientWs, { type: 'user_message_nack', msg_id: msg.msg_id, reason: 'daemon_offline' });
+        return;
       }
     }
     this.send(clientWs, { type: 'error', error: 'session not found or daemon offline' });

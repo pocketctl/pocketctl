@@ -86,6 +86,7 @@
   "session.daemon_offline": "Daemon 离线 — 等待恢复",
   "session.creating": "模型正在工作中...",
   "session.completed": "已完成",
+  "session.send_failed": "发送失败，请检查网络后重试",
   "session.output_tokens": "输出 {{n}}",
   "session.force_stop": "再次点击强制终止进程",
   "session.tool_timeout": "已超时（未收到结果）",

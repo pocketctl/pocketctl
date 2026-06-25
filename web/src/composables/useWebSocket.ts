@@ -152,12 +152,20 @@ function scheduleReconnect() {
   reconnectTimer = setTimeout(() => { reconnectTimer = null; connect(currentUrl) }, delay)
 }
 
-function send(data: any) {
-  if (ws.value && ws.value.readyState === WebSocket.OPEN) {
-    ws.value.send(JSON.stringify(data))
-  } else if (ws.value && ws.value.readyState === WebSocket.CONNECTING) {
-    // Buffer until connected
-    pendingMessages.push(data)
+function send(data: any): boolean {
+  try {
+    if (ws.value && ws.value.readyState === WebSocket.OPEN) {
+      ws.value.send(JSON.stringify(data))
+      return true
+    }
+    if (ws.value && ws.value.readyState === WebSocket.CONNECTING) {
+      // Buffer until connected
+      pendingMessages.push(data)
+      return true
+    }
+    return false // disconnected — caller should roll back optimistic UI
+  } catch {
+    return false
   }
 }
 

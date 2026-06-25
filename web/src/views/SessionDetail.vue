@@ -90,6 +90,11 @@
           <svg class="banner-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><path d="M12 9v4"/><path d="M12 17h.01"/></svg>
           <span>{{ t('session.daemon_offline') }}</span>
         </div>
+        <!-- L1: send failed (ws not open at send time) -->
+        <div v-if="sendError" class="banner banner-warning" style="flex-shrink:0;">
+          <svg class="banner-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><path d="M12 9v4"/><path d="M12 17h.01"/></svg>
+          <span>{{ t('session.send_failed') }}</span>
+        </div>
 
         <!-- Timeline -->
         <div class="timeline" v-if="milestones.length > 0">
@@ -148,8 +153,8 @@
         <!-- Turn status bar: lives inside the message stream (visually part of
              it), below the last message. Live timer while working; on completion
              shows total duration + output tokens + a copy button. -->
-        <div v-if="isExecuting || lastTurnDuration !== null || completedBarVisible" class="turn-status-bar" :class="{ done: lastTurnDuration !== null || completedBarVisible }">
-          <template v-if="isExecuting">
+        <div v-if="isExecuting || awaitingStart || lastTurnDuration !== null || completedBarVisible" class="turn-status-bar" :class="{ done: lastTurnDuration !== null || completedBarVisible }">
+          <template v-if="isExecuting || awaitingStart">
             <span class="status-dot working"></span>
             <span class="status-text">{{ t('session.creating') }}</span>
             <span class="status-timer">{{ fmtDuration(turnElapsed) }}</span>
@@ -319,6 +324,15 @@ const isPendingSession = computed(() => sessionId.value.startsWith('pending-'))
 const selectedIndex = ref(0)
 const popoverDismissed = ref(false)
 const status = ref('running')
+// A (web-post-send-feedback): transient flag set on sendMessage, cleared when
+// the first running/busy/waiting status or agent_text arrives. Bridges the
+// round-trip so the turn-bar shows "working" instantly instead of after daemon
+// echoes session_status.
+const awaitingStart = ref(false)
+// L1: transient "send failed" banner (ws not open at send time).
+const sendError = ref(false)
+// L2: pending ack-timeout timer for the last optimistic send.
+const pendingAckTimer = ref<ReturnType<typeof setTimeout> | null>(null)
 const exitReason = ref('')
 const currentPermissionMode = ref('bypassPermissions')
 const showPermMenu = ref(false)
@@ -690,9 +704,40 @@ function sendMessage() {
       return
     }
   }
-  send({ type: 'user_message', session_id: sessionId.value, content: text })
+  // C (web-post-send-feedback): optimistic echo — push user bubble immediately.
+  // Relay's user_text echo is deduped by isDuplicate (same pattern as
+  // handleLocalCommand), so no double bubble.
+  const bubbleId = nextId('u')
+  const msgId = `m-${bubbleId}`  // L2: correlate ack/nack with this optimistic bubble
+  messages.value.push({ id: bubbleId, type: 'user_text', role: 'user', content: text, __msg_id: msgId })
+  nextTick(scrollToBottom)
+  const sent = send({ type: 'user_message', session_id: sessionId.value, content: text, msg_id: msgId })
+  if (!sent) {
+    rollbackOptimistic(msgId)  // L1: WebSocket not open
+    return
+  }
   messageInput.value = ''
   startTurnTimer()  // begin turn timer (stops when isExecuting → false)
+  awaitingStart.value = true  // A: show turn-bar until first running/agent_text
+  armAckTimeout(msgId)  // L2: roll back if relay doesn't ack within 3s
+}
+
+// L1/L2 (web-post-send-feedback): remove the optimistic user bubble + reset
+// awaiting-start state + flash the send-failed banner. Used by the synchronous
+// send-failure path (ws not open), the relay nack, and the ack-timeout.
+function rollbackOptimistic(msgId?: string) {
+  if (pendingAckTimer.value) { clearTimeout(pendingAckTimer.value); pendingAckTimer.value = null }
+  const idx = msgId ? messages.value.findIndex((m: any) => m.__msg_id === msgId) : -1
+  if (idx >= 0) messages.value.splice(idx, 1)
+  awaitingStart.value = false
+  sendError.value = true
+  setTimeout(() => { sendError.value = false }, 3000)
+}
+
+// L2: arm a 3s timeout — if relay doesn't ack, assume loss and roll back.
+function armAckTimeout(msgId: string) {
+  if (pendingAckTimer.value) clearTimeout(pendingAckTimer.value)
+  pendingAckTimer.value = setTimeout(() => rollbackOptimistic(msgId), 3000)
 }
 
 // handleLocalCommand renders the user bubble + result locally (no daemon round
@@ -907,6 +952,9 @@ function processEvent(evt: any, target: any[] = messages.value) {
     const text = evt.text || evt.content || evt.payload?.text || evt.payload?.content || ''
     if (text && !isDuplicate('user_text', text, target)) target.push({ id: nextId('u'), type: 'user_text', role: 'user', content: text })
   } else if (type === 'agent_text') {
+    // A: model started responding — end optimistic window (fallback if the
+    // running status was missed, e.g. PTY race).
+    awaitingStart.value = false
     const content = evt.text || evt.content || evt.payload?.text || evt.payload?.content || ''
     if (!content || isDuplicate('agent_text', content, target)) return
     const streaming = evt.streaming ?? evt.payload?.streaming ?? false
@@ -959,6 +1007,8 @@ function processEvent(evt: any, target: any[] = messages.value) {
   } else if (type === 'session_status') {
     const s = evt.status || evt.payload?.status
     if (s) status.value = s
+    // A: first executing status from daemon ends the optimistic window.
+    if (s === 'running' || s === 'busy' || s === 'waiting') awaitingStart.value = false
     // During a session switch, capture the turn start time from the last
     // executing status (busy/running/waiting) so the timer can resume the
     // accumulated elapsed instead of restarting from zero.
@@ -993,6 +1043,7 @@ watch(sessionId, (newId, oldId) => {
     lastTurnDuration.value = null
     messages.value = []
     status.value = 'running'
+    awaitingStart.value = false  // A: reset optimistic window on session switch
     exitReason.value = ''
     exitedAt.value = ''
     commandsCache.value = []
@@ -1137,6 +1188,16 @@ onMounted(() => {
       if (isExecuting.value) startTurnTimer(resumeStartAt ?? undefined)
       resumeStartAt = null
     }
+  }))
+
+  cleanups.push(onEvent('user_message_ack', (msg: any) => {
+    // L2: relay received & forwarded — clear the ack-timeout (awaitingStart now
+    // waits for B's running/agent_text).
+    if (pendingAckTimer.value) { clearTimeout(pendingAckTimer.value); pendingAckTimer.value = null }
+  }))
+  cleanups.push(onEvent('user_message_nack', (msg: any) => {
+    // L2: daemon offline / unknown session — roll back the optimistic bubble.
+    rollbackOptimistic(msg.msg_id)
   }))
 
   cleanups.push(onEvent('user_text', (msg: any) => {
@@ -1383,6 +1444,7 @@ onMounted(() => {
 /* Turn status bar: sits inside the message stream, visually part of it
    (left-aligned, same width as agent replies, no separating border). */
 .turn-status-bar {
+  animation: bar-in 0.2s ease;
   display: flex; align-items: center; gap: 10px;
   align-self: flex-start;
   max-width: 720px; width: fit-content;
@@ -1414,6 +1476,7 @@ onMounted(() => {
   40% { opacity: 1; transform: scale(1.2); }
 }
 @keyframes fade-in { from { opacity: 0; } to { opacity: 1; } }
+@keyframes bar-in { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: translateY(0); } }
 
 @media (max-width: 1024px) { .session-layout { height: calc(100vh - var(--topbar-h)); } }
 @media (max-width: 768px) { .session-panel { display: none; } }

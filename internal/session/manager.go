@@ -937,7 +937,25 @@ func (sm *SessionManager) SendMessage(ctx context.Context, sessionID string, con
 		ps.Status = protocol.StatusRunning
 		ps.LastActivityAt = time.Now()
 		sm.mu.Unlock()
+		// B (web-post-send-feedback): notify web the turn is running. PTY interactive
+		// mode previously omitted this, so the UI had no "working" feedback until
+		// the adapter emitted Completed at turn end.
+		sm.outputCh <- protocol.DaemonEvent{
+			Type:           "session_status",
+			SessionID:      ps.SessionID,
+			Status:         protocol.StatusRunning,
+			LastActivityAt: time.Now().UTC().Format(time.RFC3339),
+		}
 		if _, err := ptyFile.Write([]byte(content + "\r")); err != nil {
+			// B: stdin write failed — roll back so web doesn't sit on "running" forever.
+			sm.mu.Lock()
+			ps.Status = protocol.StatusError
+			sm.mu.Unlock()
+			sm.outputCh <- protocol.DaemonEvent{
+				Type:      "session_status",
+				SessionID: ps.SessionID,
+				Status:    protocol.StatusError,
+			}
 			return fmt.Errorf("pty stdin write: %w", err)
 		}
 		// Record the slash command (if any) so the tailer's JSONLStreamParser
