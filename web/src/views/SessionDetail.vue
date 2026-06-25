@@ -191,6 +191,10 @@
               @select="applyCommand"
               @hover="selectedIndex = $event"
             />
+            <!-- Drag handle to resize textarea height (sits above the textarea;
+                 follows the container's top edge as the height changes) -->
+            <div class="textarea-resize-handle" @mousedown="startResize"></div>
+
             <!-- Textarea (multi-line) -->
             <textarea
               v-model="messageInput"
@@ -204,9 +208,6 @@
               ref="inputEl"
               rows="3"
             ></textarea>
-
-            <!-- Drag handle to resize textarea height -->
-            <div class="textarea-resize-handle" @mousedown="startResize"></div>
 
             <!-- Bottom control row -->
             <div class="input-controls">
@@ -1405,8 +1406,9 @@ onMounted(() => {
 .chat-input-container.focused { border-color: var(--border-focus); box-shadow: 0 0 0 3px var(--accent-muted); }
 
 .chat-textarea { width: 100%; background: none; border: none; color: var(--fg); font-size: 14px; font-family: var(--font-body); line-height: 1.5; outline: none; resize: none; padding: 12px 16px 4px; min-height: 60px; max-height: 400px; overflow-y: auto; }
-/* Drag handle between textarea and controls — user drags up/down to resize */
-.textarea-resize-handle { height: 6px; margin: 0 8px; cursor: ns-resize; display: flex; align-items: center; justify-content: center; border-radius: 3px; transition: background 0.15s; }
+/* Drag handle above the textarea — user drags up/down to resize; the handle
+   rides the container's top edge and moves with it as height changes. */
+.textarea-resize-handle { height: 6px; margin: 4px 8px 0; cursor: ns-resize; display: flex; align-items: center; justify-content: center; border-radius: 3px; transition: background 0.15s; }
 .textarea-resize-handle::after { content: ''; width: 32px; height: 3px; border-radius: 2px; background: var(--border-light); transition: background 0.15s; }
 .textarea-resize-handle:hover::after { background: var(--accent); }
 .chat-textarea::placeholder { color: var(--fg-tertiary); }

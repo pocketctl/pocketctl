@@ -50,7 +50,7 @@ describe('useAuth — Email Verification Code', () => {
       '/api/auth/email/send',
       expect.objectContaining({
         method: 'POST',
-        body: JSON.stringify({ email: 'test@example.com' }),
+        body: JSON.stringify({ email: 'test@example.com', lang: 'zh' }),
       }),
     )
   })
