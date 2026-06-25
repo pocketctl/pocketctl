@@ -9,9 +9,10 @@ GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 NC='\033[0m'
 
-# GitHub (global) + Gitee (domestic mirror, tried first)
-REPO_GITHUB="pocketctl/pocketctl"
-REPO_GITEE="muwb123/pocketctl"
+# GitHub 下载地址（国内自动走 gh-proxy.com 加速，不可用时降级直连）
+REPO="pocketctl/pocketctl"
+GH_DL="https://github.com/${REPO}/releases/latest/download"
+GH_PROXY="https://gh-proxy.com/"
 RELAY_URL="wss://www.pocketctl.me/ws"
 
 echo -e "${GREEN}╔══════════════════════════════════════╗${NC}"
@@ -60,15 +61,13 @@ download() {
     return 1
 }
 
-# 尝试 Gitee（国内镜像） → GitHub（全球）
-GITEE_URL="https://gitee.com/${REPO_GITEE}/releases/download/latest/${BINARY}"
-GITHUB_URL="https://github.com/${REPO_GITHUB}/releases/latest/download/${BINARY}"
-
+# 1) 国内加速代理 → 2) GitHub 直连
+GH_URL="${GH_DL}/${BINARY}"
 echo -e "${YELLOW}正在下载 pocketctl...${NC}"
-if ! download "$GITEE_URL"; then
-    echo -e "${YELLOW}Gitee 镜像不可用，尝试 GitHub...${NC}"
-    if ! download "$GITHUB_URL"; then
-        echo -e "${RED}下载失败：Gitee 和 GitHub 均无法访问，请检查网络${NC}"
+if ! download "${GH_PROXY}${GH_URL}"; then
+    echo -e "${YELLOW}加速代理不可用，尝试 GitHub 直连...${NC}"
+    if ! download "${GH_URL}"; then
+        echo -e "${RED}下载失败：请检查网络或稍后重试${NC}"
         exit 1
     fi
 fi
@@ -90,4 +89,4 @@ echo -e "${YELLOW}下一步:${NC}"
 echo -e "  1. 登录: ${GREEN}pocketctl login --relay ${RELAY_URL}${NC}"
 echo -e "  2. 启动: ${GREEN}pocketctl daemon start${NC}"
 echo ""
-echo -e "更多信息: https://github.com/${REPO_GITHUB}"
+echo -e "更多信息: https://github.com/${REPO}"

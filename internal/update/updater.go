@@ -25,8 +25,8 @@ const (
 
 	// Domestic acceleration proxies for GitHub Release downloads.
 	// Tried in order before falling back to direct GitHub.
-	// ghproxy mirrors the full GitHub URL path — fast in China, no size limit.
-	domesticProxies = "https://ghp.ci/"
+	// gh-proxy mirrors the full GitHub URL path — fast in China, no size limit.
+	domesticProxies = "https://gh-proxy.com/"
 
 	defaultBin = "pocketctl"
 )
