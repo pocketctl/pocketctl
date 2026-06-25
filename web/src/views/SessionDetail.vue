@@ -249,10 +249,14 @@
                 </button>
 
                 <!-- Stop button (executing). 1st click = graceful Ctrl+C;
-                     clicking again within 2.5s escalates to force-kill (SIGKILL). -->
+                     clicking again within 2.5s escalates to force-kill (SIGKILL).
+                     Disabled while disconnected so a stale "running" status
+                     (relay restart / daemon offline with no status echo) can't
+                     trigger an unroutable session_interrupt that errors out. -->
                 <button v-else class="action-btn stop-btn" :class="{ escalated: stopEscalated }"
                   @click="interruptSession"
-                  :title="stopEscalated ? t('session.force_stop') : t('session.stop_gen')">
+                  :disabled="isDisconnected"
+                  :title="isDisconnected ? t('session.daemon_offline') : (stopEscalated ? t('session.force_stop') : t('session.stop_gen'))">
                   <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="6" width="12" height="12" rx="2"/></svg>
                 </button>
               </div>
@@ -597,6 +601,23 @@ function formatTime(ts: string): string {
 
 function cleanContent(text: string): string {
   if (!text) return ''
+
+  // Slash command: Claude Code records the command as <command-name>/<command-message>/
+  // <command-args> tags — these wrap the whole user message. iOS's sanitizeUserMessage
+  // extracts command-name as the display text; mirror it here so the user bubble shows
+  // "/compact" instead of an empty shell (the old code stripped every tag → empty).
+  if (text.includes('<command-name>') || text.includes('<command-message>')) {
+    const nameMatch = text.match(/<command-name>([\s\S]*?)<\/command-name>/)
+    const msgMatch = text.match(/<command-message>([\s\S]*?)<\/command-message>/)
+    const name = (nameMatch?.[1] ?? '').trim()
+    const msg = (msgMatch?.[1] ?? '').trim()
+    // command-name is like "/compact", command-message is a short description.
+    if (name || msg) {
+      return [name, msg].filter(Boolean).join('\n').trim()
+    }
+  }
+
+  // Plain message: strip command/local-command tags, keep the body text.
   return text
     .replace(/<command-name>.*?<\/command-name>\s*/gs, '')
     .replace(/<command-message>.*?<\/command-message>\s*/gs, '')
@@ -645,6 +666,11 @@ function setPermissionMode(mode: string) {
 const stopEscalated = ref(false)
 let stopResetTimer: ReturnType<typeof setTimeout> | null = null
 function interruptSession() {
+  // Defensive guard: the stop button is :disabled while disconnected, but a
+  // stale "running" status (relay restart, missed session_status) could leave
+  // it clickable briefly. Bail instead of firing an unroutable interrupt that
+  // errors out as "session not found or daemon offline".
+  if (isDisconnected.value) return
   if (stopEscalated.value) {
     // 2nd click within the window → force kill.
     send({ type: 'session_kill', session_id: sessionId.value })
@@ -1475,7 +1501,8 @@ onMounted(() => {
 .send-btn:hover:not(:disabled) { background: var(--accent-hover); }
 .send-btn:disabled { background: var(--border); color: var(--fg-tertiary); cursor: not-allowed; }
 .stop-btn { background: var(--fg); color: var(--bg); }
-.stop-btn:hover { opacity: 0.85; }
+.stop-btn:hover:not(:disabled) { opacity: 0.85; }
+.stop-btn:disabled { background: var(--border); color: var(--fg-tertiary); cursor: not-allowed; }
 .stop-btn.escalated { background: #e5484d; animation: stop-pulse 1s ease-in-out infinite; }
 @keyframes stop-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.7; } }
 

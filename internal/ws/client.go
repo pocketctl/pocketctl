@@ -41,6 +41,11 @@ type Client struct {
 	version  string
 	startedAt int64
 	metricsFn func() (float64, float64, float64) // cpu, mem, disk
+	// activeSessionIDsFn returns the session IDs this daemon currently owns.
+	// Seeded into the register message so the relay can rebuild its
+	// session→daemon routing table after a relay restart or daemon reconnect,
+	// instead of losing every historical session to a cold in-memory map.
+	activeSessionIDsFn func() []string
 	CommandCh     chan protocol.ClientMessage
 	OnStateChange OnConnectStateChange
 	OnReconnected func() // called after successful (re)connection + register
@@ -85,12 +90,16 @@ func (c *Client) ResendRegister() {
 	if conn == nil {
 		return
 	}
-	c.SendMsg(protocol.RegisterMessage{
+	register := protocol.RegisterMessage{
 		Type: "register", DaemonID: c.daemonID, Hostname: c.hostname, Agents: c.agents,
 		AgentVersions: c.agentVersions,
 		AgentLatests:  c.agentLatests,
 		OS: c.osName, IP: c.localIP, Arch: c.arch, Version: c.version, StartedAt: c.startedAt,
-	})
+	}
+	if c.activeSessionIDsFn != nil {
+		register.ActiveSessionIDs = c.activeSessionIDsFn()
+	}
+	c.SendMsg(register)
 }
 
 // SetStartedAt sets the daemon start timestamp for register messages.
@@ -98,6 +107,10 @@ func (c *Client) SetStartedAt(t int64) { c.startedAt = t }
 
 // SetMetricsFn sets the function used to collect system metrics for ping messages.
 func (c *Client) SetMetricsFn(fn func() (float64, float64, float64)) { c.metricsFn = fn }
+
+// SetActiveSessionIDsFn sets the function used to collect this daemon's active
+// session IDs for the register message (rebuilds the relay's routing table).
+func (c *Client) SetActiveSessionIDsFn(fn func() []string) { c.activeSessionIDsFn = fn }
 
 func (c *Client) Run(ctx context.Context) error {
 	for {
@@ -141,12 +154,16 @@ func (c *Client) connectAndServe(ctx context.Context) error {
 	c.notifyState(true)
 
 	c.logger.Info("sending register", "daemonID", c.daemonID, "hostname", c.hostname)
-	c.SendMsg(protocol.RegisterMessage{
+	register := protocol.RegisterMessage{
 		Type: "register", DaemonID: c.daemonID, Hostname: c.hostname, Agents: c.agents,
 		AgentVersions: c.agentVersions,
 		AgentLatests:  c.agentLatests,
 		OS: c.osName, IP: c.localIP, Arch: c.arch, Version: c.version, StartedAt: c.startedAt,
-	})
+	}
+	if c.activeSessionIDsFn != nil {
+		register.ActiveSessionIDs = c.activeSessionIDsFn()
+	}
+	c.SendMsg(register)
 	c.logger.Info("register sent")
 
 	if c.OnReconnected != nil {

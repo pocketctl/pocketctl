@@ -476,6 +476,17 @@ export async function isSessionDeleted(pool: pg.Pool, sessionId: string): Promis
   return (result.rowCount ?? 0) > 0;
 }
 
+/**
+ * Resolve the owning daemon_id for a session from the DB. Used as a fallback
+ * when the in-memory sessionToDaemon map misses (relay restart, daemon
+ * reconnect with stale entries, …). Returns null for unknown / deleted sessions.
+ */
+export async function getSessionDaemonId(pool: pg.Pool, sessionId: string): Promise<string | null> {
+  const result = await pool.query(`SELECT daemon_id FROM sessions WHERE session_id = $1`, [sessionId]);
+  if ((result.rowCount ?? 0) === 0) return null;
+  return result.rows[0].daemon_id ?? null;
+}
+
 // --- Title generation ---
 
 /** Check if a session still has a default-generated title (Terminal Session-*) */

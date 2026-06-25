@@ -97,14 +97,20 @@ func Stop() error {
 				return fmt.Errorf("process did not exit after SIGTERM and SIGKILL failed: %w", err)
 			}
 			os.Remove(PIDPath())
-			os.Remove(StatePath())
+			// NOTE: do NOT remove StatePath() here — daemon.state carries the
+			// persisted daemon_id, which must survive stop/start so the same
+			// physical host keeps one stable ID. Removing it forces MachineID()
+			// to re-derive the ID on next start, and on WSL2/macOS/Docker that
+			// yields a DIFFERENT id (machine-id/MAC/hostname are unstable there),
+			// so the relay sees the same host as two daemons (old=offline, new=online).
 			return nil
 		case <-ticker.C:
 			// Check if process has exited
 			if err := proc.Signal(syscall.Signal(0)); err != nil {
 				// Process is gone — clean up
 				os.Remove(PIDPath())
-				os.Remove(StatePath())
+				// NOTE: keep StatePath() (see SIGKILL branch above) so the
+				// daemon_id survives restarts.
 				return nil
 			}
 		}

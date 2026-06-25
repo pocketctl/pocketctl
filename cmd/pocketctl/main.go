@@ -521,6 +521,17 @@ func cmdDaemonStart(args []string) {
 		m := sysinfo.Get()
 		return m.CpuPct, m.MemPct, m.DiskPct
 	})
+	// Seed this daemon's active session IDs into the register message so the
+	// relay can rebuild its session→daemon routing table synchronously on
+	// (re)connection, before any session_discovered events arrive.
+	client.SetActiveSessionIDsFn(func() []string {
+		sessions := sm.ListSessions()
+		ids := make([]string, 0, len(sessions))
+		for _, s := range sessions {
+			ids = append(ids, s.SessionID)
+		}
+		return ids
+	})
 
 	// Dirty flag for state persistence — only write when changed
 	var stateDirty atomic.Bool

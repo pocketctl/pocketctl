@@ -5,14 +5,27 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"path/filepath"
 	"strings"
 )
 
-// MachineID returns a deterministic daemon ID. It prefers stable system
-// identifiers (/etc/machine-id, hostname) over MAC addresses, because MAC
-// addresses can be unstable on virtualized platforms (WSL2, cloud VMs).
+// MachineID returns a deterministic daemon ID. The first time it is called on a
+// given host, it derives an ID from stable system identifiers and PERSISTS it to
+// ~/.pocketctl/machine.id; every subsequent call reads that cached value back.
 //
-// Resolution order:
+// Why the cache matters: the underlying sources (/etc/machine-id, hostname, MAC)
+// are NOT stable across reboots on virtualized platforms — WSL2 regenerates
+// /etc/machine-id and its MAC after `wsl --shutdown`; macOS has no machine-id
+// file at all and falls through to hostname/MAC; Docker changes everything per
+// container start. If we re-derive on every daemon start, the same physical host
+// ends up with two different daemon_ids after a reboot, and the relay shows it
+// as two hosts (the old one stuck "offline", a new "online" one).
+//
+// The file lives alongside daemon.state so it shares the same lifetime; unlike
+// daemon.state it is never deleted, so a machine keeps a single ID forever.
+//
+// Resolution order (first hit wins, used only for the INITIAL value):
+//  0. ~/.pocketctl/machine.id (cached — always wins once written)
 //  1. /etc/machine-id or /var/lib/dbus/machine-id (systemd — stable across reboots)
 //  2. Hostname (stable on physical machines, semi-stable on VMs)
 //  3. First non-loopback MAC address (fallback — unstable on WSL2/cloud)
@@ -20,6 +33,24 @@ import (
 //
 // Format: "daemon-<sha256(id)[:8]>"
 func MachineID() string {
+	// 0. Cached value wins — never re-derive once an ID is assigned to this host.
+	if cached := readMachineIDCache(); cached != "" {
+		return cached
+	}
+
+	// Miss → derive from system sources and persist so the next start reuses it.
+	id := deriveMachineID()
+	writeMachineIDCache(id)
+	return id
+}
+
+// deriveMachineID computes a fresh daemon id from system identifiers, WITHOUT
+// consulting the cache. Sources, in order of stability:
+//  1. /etc/machine-id or /var/lib/dbus/machine-id (systemd — stable across reboots)
+//  2. Hostname (stable on physical machines, semi-stable on VMs)
+//  3. First non-loopback MAC address (fallback — unstable on WSL2/cloud)
+//  4. "daemon-unknown" (last resort)
+func deriveMachineID() string {
 	// 1. Try /etc/machine-id (Linux systemd) — most stable on WSL2/cloud
 	if id := readMachineIDFile(); id != "" {
 		hash := sha256.Sum256([]byte("machineid:" + id))
@@ -43,6 +74,48 @@ func MachineID() string {
 	}
 
 	return "daemon-unknown"
+}
+
+// machineIDCachePath returns ~/.pocketctl/machine.id — the persisted host
+// identifier. Resolves $HOME directly to avoid importing the config package
+// (which would create a daemon→config dependency edge we don't need).
+func machineIDCachePath() string {
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		return "" // caller falls back to deriving each time
+	}
+	return filepath.Join(home, ".pocketctl", "machine.id")
+}
+
+// readMachineIDCache reads the persisted daemon id. Returns "" if missing,
+// unreadable, or malformed (any of which triggers a fresh derivation below).
+func readMachineIDCache() string {
+	path := machineIDCachePath()
+	if path == "" {
+		return ""
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return ""
+	}
+	id := strings.TrimSpace(string(data))
+	if id == "" || !strings.HasPrefix(id, "daemon-") {
+		return ""
+	}
+	return id
+}
+
+// writeMachineIDCache persists the first-derived daemon id so future starts
+// reuse it instead of re-deriving from an unstable source. Failures are
+// non-fatal — worst case the id is re-derived next start, which is no worse
+// than today's behavior.
+func writeMachineIDCache(id string) {
+	path := machineIDCachePath()
+	if path == "" || id == "" {
+		return
+	}
+	_ = os.MkdirAll(filepath.Dir(path), 0700)
+	_ = os.WriteFile(path, []byte(id), 0600)
 }
 
 // readMachineIDFile reads the machine ID from systemd's /etc/machine-id

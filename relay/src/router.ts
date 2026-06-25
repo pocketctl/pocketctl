@@ -119,6 +119,17 @@ export class Router {
     db.cleanStaleSessions(this.pool).catch(console.error);
     this.send(ws, { type: 'register_ack', status: 'ok', connection_id: daemonId });
 
+    // Rebuild the session→daemon routing table for this daemon. The in-memory
+    // map is volatile (lost on relay restart; stale entries survive disconnects),
+    // so historical sessions owned by this daemon would otherwise be unroutable
+    // until a fresh session_status/session_discovered event re-registers them.
+    // Two sources: (1) the active session IDs the daemon just reported in its
+    // register message, and (2) the DB-backed sessions.daemon_id column, which
+    // covers sessions created before this connection.
+    this.rebuildSessionRoutes(daemonId, msg.active_session_ids).catch((e) => {
+      console.error('rebuildSessionRoutes:', e);
+    });
+
     // Broadcast daemon online to clients with same userId
     const alias = await db.getDaemonAlias(this.pool, daemonId);
     for (const [clientWs, client] of this.clients) {
@@ -170,12 +181,43 @@ export class Router {
       if (dId === daemonId) affectedSessions.push(sessionId);
     }
     for (const sessionId of affectedSessions) {
+      // Drop now-unroutable entries: the daemon is gone, so leaving them would
+      // point future messages at a dead socket (resolved to "daemon offline").
+      // A daemon reconnect (or the DB fallback) repopulates them when needed.
+      this.sessionToDaemon.delete(sessionId);
       for (const [clientWs, client] of this.clients) {
         if (client.subscribedSessions.has(sessionId) && clientWs.readyState === 1) {
           this.send(clientWs, { type: 'session_status', session_id: sessionId, status: 'disconnected', daemon_id: daemonId });
         }
       }
     }
+  }
+
+  /**
+   * Rebuild session→daemon routing entries for a freshly (re)connected daemon.
+   * Merges two sources: the active session IDs the daemon reported in its
+   * register message, and every session the DB still attributes to this daemon.
+   * Idempotent — only adds entries, never removes unrelated ones.
+   */
+  private async rebuildSessionRoutes(daemonId: string, reportedIds?: string[]): Promise<void> {
+    const sessionIds = new Set<string>(reportedIds || []);
+    try {
+      const rows = await this.pool.query(
+        `SELECT session_id FROM sessions WHERE daemon_id = $1 AND session_id NOT LIKE 'pending-%'`,
+        [daemonId]
+      );
+      for (const r of rows.rows) sessionIds.add(r.session_id);
+    } catch (e) {
+      console.error('rebuildSessionRoutes query:', e);
+    }
+    let added = 0;
+    for (const sid of sessionIds) {
+      if (!this.sessionToDaemon.has(sid)) {
+        this.sessionToDaemon.set(sid, daemonId);
+        added++;
+      }
+    }
+    if (added) console.log(`[router] rebuilt routes for daemon ${daemonId}: +${added} sessions`);
   }
 
   registerClient(ws: WebSocket, userId: number | null): void {
@@ -387,7 +429,7 @@ export class Router {
     }
   }
 
-  handleClientMessage(clientWs: WebSocket, msg: any): void {
+  async handleClientMessage(clientWs: WebSocket, msg: any): Promise<void> {
     const client = this.clients.get(clientWs);
     if (!client) return;
     if (msg.session_id) client.subscribedSessions.add(msg.session_id);
@@ -511,7 +553,19 @@ export class Router {
     }
 
     if (msg.session_id) {
-      const daemonId = this.sessionToDaemon.get(msg.session_id);
+      // Route to the owning daemon. The in-memory sessionToDaemon map is the
+      // fast path, but it is volatile (cleared on relay restart, stale after a
+      // daemon reconnect with a new id, never pruned on disconnect). Fall back
+      // to the DB-backed daemon_id so historical sessions remain routable.
+      let daemonId = this.sessionToDaemon.get(msg.session_id) ?? null;
+      if (!daemonId) {
+        try { daemonId = await db.getSessionDaemonId(this.pool, msg.session_id); }
+        catch (e) { console.error('getSessionDaemonId:', e); }
+        if (daemonId) {
+          // Warm the cache so subsequent messages skip the DB round-trip.
+          this.sessionToDaemon.set(msg.session_id, daemonId);
+        }
+      }
       if (daemonId) {
         const daemon = this.daemons.get(daemonId);
         if (daemon && daemon.ws.readyState === 1) {
@@ -529,7 +583,7 @@ export class Router {
         return;
       }
     }
-    this.send(clientWs, { type: 'error', error: 'session not found or daemon offline' });
+    this.send(clientWs, { type: 'error', session_id: msg.session_id, error: 'session not found or daemon offline' });
   }
 
   private async handleReplay(clientWs: WebSocket, sessionId: string, lastSeq: number, reqId?: number, direction?: string, limit?: number): Promise<void> {
