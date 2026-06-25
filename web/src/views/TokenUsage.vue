@@ -19,8 +19,11 @@
     </div>
 
     <div v-if="error" class="token-error">
-      <div class="token-error-msg">{{ error }}
-        <a v-if="error === t('token.error_auth_expired')" href="/app/login" style="color:var(--accent);margin-left:8px;text-decoration:underline;">{{ t('token.relogin') }}</a>
+      <div>
+        <div class="token-error-msg">{{ error }}
+          <a v-if="error === t('token.error_auth_expired')" href="/app/login" style="color:var(--accent);margin-left:8px;text-decoration:underline;">{{ t('token.relogin') }}</a>
+        </div>
+        <div v-if="errorDetail" class="token-error-detail">{{ errorDetail }}</div>
       </div>
       <button class="token-error-retry" @click="loadDashboard">{{ t('common.retry') }}</button>
     </div>
@@ -187,6 +190,7 @@ async function apiGet(url: string) {
 
 const loading = ref(false)
 const error = ref('')
+const errorDetail = ref('')
 const summary = ref<any>({ total: 0, today: 0, thisWeek: 0, thisMonth: 0 })
 const dailySeries = ref<any[]>([])
 const byModel = ref<any[]>([])
@@ -213,7 +217,7 @@ function fmt(n: number) {
 }
 
 async function loadDashboard() {
-  loading.value = true; error.value = ''
+  loading.value = true; error.value = ''; errorDetail.value = ''
   try {
     const d = await apiGet(`/api/tokens/dashboard?daemon=${encodeURIComponent(selectedHost.value)}&days=270`)
     summary.value = d.summary || { total: 0, today: 0, thisWeek: 0, thisMonth: 0 }
@@ -225,6 +229,7 @@ async function loadDashboard() {
     if (msg === 'no_token') error.value = t('token.error_no_token')
     else if (msg === 'auth_expired') error.value = t('token.error_auth_expired')
     else error.value = t('token.error_load_failed')
+    errorDetail.value = msg
     console.error('[TokenUsage] dashboard load failed', e)
   } finally { loading.value = false }
   if (selectedHost.value !== 'all') await loadSessions(selectedHost.value)
@@ -322,7 +327,8 @@ onMounted(loadDashboard)
 .page-title { font-size: 22px; font-weight: 700; color: var(--fg); }
 .page-subtitle { font-size: 13px; color: var(--fg-tertiary); margin-top: 4px; }
 .token-error { display: flex; align-items: center; gap: 12px; background: rgba(248,81,73,0.1); border: 1px solid rgba(248,81,73,0.3); border-radius: var(--radius-md); padding: 12px 16px; margin-bottom: 16px; }
-.token-error-msg { flex: 1; font-size: 13px; color: var(--red); }
+.token-error-msg { font-size: 13px; color: var(--red); }
+.token-error-detail { font-size: 11px; color: var(--fg-tertiary); margin-top: 2px; word-break: break-all; font-family: var(--font-mono); }
 .token-error-retry { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-md); padding: 6px 14px; color: var(--accent); font-size: 12px; cursor: pointer; }
 .token-error-retry:hover { background: var(--accent-muted); }
 .token-loading { text-align: center; padding: 40px 20px; font-size: 14px; color: var(--fg-tertiary); }
