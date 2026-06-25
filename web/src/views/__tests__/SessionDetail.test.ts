@@ -284,3 +284,58 @@ describe('cleanContent strips local-command-caveat', () => {
     expect(cleanContent(input)).toBe('')
   })
 })
+
+// Turn timer resume logic — verifies replayed session_status events correctly
+// recover resumeStartAt so the timer doesn't restart from zero on switch/refresh.
+describe('turn timer resumeStartAt recovery', () => {
+  function processStatusEvent(evt: any, sessionSwitching: boolean): { status: string; resumeStartAt: number | null } {
+    const status = evt.status || evt.payload?.status
+    let resumeStartAt: number | null = null
+    if (sessionSwitching && (status === 'running' || status === 'busy' || status === 'waiting')) {
+      const ts = evt.last_activity_at || evt.payload?.last_activity_at
+      if (ts) resumeStartAt = new Date(ts).getTime()
+    }
+    return { status: status ?? '', resumeStartAt }
+  }
+
+  test('busy status with last_activity_at sets resumeStartAt', () => {
+    const r = processStatusEvent({ status: 'busy', last_activity_at: '2026-06-24T06:43:06Z' }, true)
+    expect(r.resumeStartAt).toBe(new Date('2026-06-24T06:43:06Z').getTime())
+  })
+
+  test('running status sets resumeStartAt', () => {
+    const r = processStatusEvent({ status: 'running', last_activity_at: '2026-06-24T06:42:00Z' }, true)
+    expect(r.resumeStartAt).toBe(new Date('2026-06-24T06:42:00Z').getTime())
+  })
+
+  test('idle status does NOT set resumeStartAt', () => {
+    expect(processStatusEvent({ status: 'idle', last_activity_at: '2026-06-24T06:43:06Z' }, true).resumeStartAt).toBeNull()
+  })
+
+  test('completed status does NOT set resumeStartAt', () => {
+    expect(processStatusEvent({ status: 'completed', last_activity_at: '2026-06-24T06:43:06Z' }, true).resumeStartAt).toBeNull()
+  })
+
+  test('sessionSwitching=false blocks resumeStartAt', () => {
+    expect(processStatusEvent({ status: 'busy', last_activity_at: '2026-06-24T06:43:06Z' }, false).resumeStartAt).toBeNull()
+  })
+
+  test('missing last_activity_at blocks resumeStartAt', () => {
+    expect(processStatusEvent({ status: 'busy' }, true).resumeStartAt).toBeNull()
+  })
+
+  test('ASC replay: last executing status wins', () => {
+    const events = [
+      { status: 'idle', last_activity_at: '2026-06-24T06:40:00Z' },
+      { status: 'busy', last_activity_at: '2026-06-24T06:41:00Z' },
+      { status: 'busy', last_activity_at: '2026-06-24T06:42:00Z' },
+      { status: 'waiting', last_activity_at: '2026-06-24T06:43:00Z' },
+    ]
+    let lastResume: number | null = null
+    for (const evt of events) {
+      const r = processStatusEvent(evt, true)
+      if (r.resumeStartAt !== null) lastResume = r.resumeStartAt
+    }
+    expect(lastResume).toBe(new Date('2026-06-24T06:43:00Z').getTime())
+  })
+})
