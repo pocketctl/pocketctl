@@ -28,12 +28,18 @@ const (
 	// gh-proxy mirrors the full GitHub URL path — fast in China, no size limit.
 	domesticProxies = "https://gh-proxy.com/"
 
-	defaultBin = "pocketctl"
+	defaultBin          = "pocketctl"
+	maxDownloadRetries  = 3 // retry count per URL on transient download errors
 )
 
-// apiClient has a short timeout so version checks won't hang when Gitee/GitHub
-// is unreachable. Downloads use http.DefaultClient (no timeout — big files).
+// apiClient has a short timeout so version checks won't hang when GitHub
+// is unreachable.
 var apiClient = &http.Client{Timeout: 10 * time.Second}
+
+// downloadClient has a generous timeout for large binary downloads (~10–50 MB).
+// Each attempt has its own deadline; the retry loop in downloadOne provides
+// additional resilience for transient failures.
+var downloadClient = &http.Client{Timeout: 10 * time.Minute}
 
 // CheckLatest queries the GitHub releases API for the latest version tag.
 func CheckLatest() (tag string, err error) {
@@ -93,11 +99,12 @@ func queryVersionTag(api, version string) (string, error) {
 
 // BinaryInfo describes a downloadable binary.
 type BinaryInfo struct {
-	OS   string
-	Arch string
-	URL  string
-	SHA  string
-	Name string // binary filename (e.g. pocketctl_darwin_arm64)
+	OS          string
+	Arch        string
+	URL         string   // primary download URL
+	FallbackURL string   // alternative URL if primary fails
+	SHA         string
+	Name        string   // binary filename (e.g. pocketctl_darwin_arm64)
 }
 
 // ResolveBinary constructs the download URL and fetches the SHA256 checksum.
@@ -119,79 +126,145 @@ func ResolveBinary(tag string) (*BinaryInfo, error) {
 	ghURL := fmt.Sprintf("%s/%s/%s", githubDL, tag, name)
 
 	// Try domestic proxy first (fast in China), then direct GitHub.
-	sources := []string{
-		domesticProxies + ghURL, // ghproxy mirror
-		ghURL,                    // direct GitHub
+	proxyURL := domesticProxies + ghURL
+	sources := []struct {
+		url      string
+		isProxy  bool
+	}{
+		{proxyURL, true},
+		{ghURL, false},
 	}
-	for _, url := range sources {
-		sha, err := fetchSHA256(url + ".sha256")
+	for _, src := range sources {
+		sha, err := fetchSHA256(src.url + ".sha256")
 		if err == nil && sha != "" {
-			return &BinaryInfo{
+			info := &BinaryInfo{
 				OS:   goos,
 				Arch: goarch,
-				URL:  url,
+				URL:  src.url,
 				SHA:  sha,
 				Name: name,
-			}, nil
+			}
+			// Set fallback to the other source so DownloadAndVerify can retry
+			if src.isProxy {
+				info.FallbackURL = ghURL
+			} else {
+				info.FallbackURL = proxyURL
+			}
+			return info, nil
 		}
 	}
 	return nil, fmt.Errorf("binary %s not found on any source (tag=%s)", name, tag)
 }
 
 // DownloadAndVerify downloads the binary, verifies SHA256, and returns the temp path.
+// Tries info.URL first, then info.FallbackURL. Retries up to maxDownloadRetries
+// per URL on transient errors (unexpected EOF, connection reset, timeout).
 func DownloadAndVerify(info *BinaryInfo) (tmpPath string, err error) {
-	tmpFile, err := os.CreateTemp("", "pocketctl-update-*")
-	if err != nil {
-		return "", fmt.Errorf("create temp file: %w", err)
-	}
-	tmpPath = tmpFile.Name()
-
-	// Download
-	resp, err := http.Get(info.URL)
-	if err != nil {
-		os.Remove(tmpPath)
-		return "", fmt.Errorf("download %s: %w", info.URL, err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		os.Remove(tmpPath)
-		return "", fmt.Errorf("download %s returned %s", info.URL, resp.Status)
+	urls := []string{info.URL}
+	if info.FallbackURL != "" && info.FallbackURL != info.URL {
+		urls = append(urls, info.FallbackURL)
 	}
 
-	written, err := io.Copy(tmpFile, resp.Body)
-	if err != nil {
-		tmpFile.Close()
-		os.Remove(tmpPath)
-		return "", fmt.Errorf("read response: %w", err)
+	var lastErr error
+	for _, url := range urls {
+		tmpPath, lastErr = downloadOne(url, info.SHA)
+		if lastErr == nil {
+			return tmpPath, nil
+		}
+		// Don't retry another URL for permanent errors (SHA mismatch, 404, etc.)
+		if isPermanent(lastErr) {
+			return "", lastErr
+		}
 	}
-	tmpFile.Close()
+	return "", lastErr
+}
 
-	if written == 0 {
-		os.Remove(tmpPath)
-		return "", fmt.Errorf("downloaded file is empty")
-	}
+// downloadOne downloads from a single URL with retries on transient errors.
+func downloadOne(url, expectedSHA string) (string, error) {
+	var lastErr error
+	for attempt := 0; attempt < maxDownloadRetries; attempt++ {
+		if attempt > 0 {
+			time.Sleep(time.Duration(attempt) * time.Second) // backoff: 1s, 2s
+		}
 
-	// SHA256 verification
-	if info.SHA != "" {
-		actual, err := fileSHA256(tmpPath)
+		tmpFile, err := os.CreateTemp("", "pocketctl-update-*")
 		if err != nil {
-			os.Remove(tmpPath)
-			return "", fmt.Errorf("compute SHA256: %w", err)
+			return "", fmt.Errorf("create temp file: %w", err)
 		}
-		if !strings.EqualFold(actual, info.SHA) {
+		tmpPath := tmpFile.Name()
+
+		// Use a fresh client per attempt (no connection reuse across retries)
+		resp, err := downloadClient.Get(url)
+		if err != nil {
+			tmpFile.Close()
 			os.Remove(tmpPath)
-			return "", fmt.Errorf("SHA256 mismatch: expected %s, got %s", info.SHA, actual)
+			lastErr = fmt.Errorf("download %s: %w", url, err)
+			continue
 		}
-	}
 
-	// Make executable
-	if err := os.Chmod(tmpPath, 0755); err != nil {
-		os.Remove(tmpPath)
-		return "", fmt.Errorf("chmod: %w", err)
-	}
+		if resp.StatusCode != http.StatusOK {
+			resp.Body.Close()
+			tmpFile.Close()
+			os.Remove(tmpPath)
+			lastErr = fmt.Errorf("download %s returned %s", url, resp.Status)
+			// 404 / 410 are permanent — don't retry
+			if resp.StatusCode == http.StatusNotFound || resp.StatusCode == http.StatusGone {
+				return "", lastErr
+			}
+			continue
+		}
 
-	return tmpPath, nil
+		written, copyErr := io.Copy(tmpFile, resp.Body)
+		resp.Body.Close()
+		tmpFile.Close()
+
+		if copyErr != nil {
+			os.Remove(tmpPath)
+			lastErr = fmt.Errorf("read response: %w", copyErr)
+			continue // transient — retry
+		}
+
+		if written == 0 {
+			os.Remove(tmpPath)
+			lastErr = fmt.Errorf("downloaded file is empty")
+			continue
+		}
+
+		// SHA256 verification
+		if expectedSHA != "" {
+			actual, err := fileSHA256(tmpPath)
+			if err != nil {
+				os.Remove(tmpPath)
+				lastErr = fmt.Errorf("compute SHA256: %w", err)
+				continue
+			}
+			if !strings.EqualFold(actual, expectedSHA) {
+				os.Remove(tmpPath)
+				return "", fmt.Errorf("SHA256 mismatch: expected %s, got %s", expectedSHA, actual)
+			}
+		}
+
+		// Make executable
+		if err := os.Chmod(tmpPath, 0755); err != nil {
+			os.Remove(tmpPath)
+			return "", fmt.Errorf("chmod: %w", err)
+		}
+
+		return tmpPath, nil
+	}
+	return "", lastErr
+}
+
+// isPermanent returns true for errors that won't be fixed by retrying another URL.
+func isPermanent(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "SHA256 mismatch") ||
+		strings.Contains(msg, "chmod") ||
+		strings.Contains(msg, "create temp file") ||
+		strings.Contains(msg, "compute SHA256")
 }
 
 // ReplaceBinary safely replaces the running binary with a new one at tmpPath.
