@@ -3,7 +3,7 @@
 	archiveVersion = 1;
 	classes = {
 	};
-	objectVersion = 77;
+	objectVersion = 63;
 	objects = {
 
 /* Begin PBXBuildFile section */
@@ -109,7 +109,7 @@
 		CEE691A95AC7906999D39322 /* PocketctlApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PocketctlApp.swift; sourceTree = "<group>"; };
 		CF6BD425D729C472BBA3BF52 /* Spacing.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Spacing.swift; sourceTree = "<group>"; };
 		D62BB57F114B7CFD5A866F6F /* SettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsView.swift; sourceTree = "<group>"; };
-		D6CC3FD24696AA730AA7B4DA /* Pocketctl.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = Pocketctl.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		D6CC3FD24696AA730AA7B4DA /* Pocketctl.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Pocketctl.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		DA61A703EB52322DF5EAFC29 /* MarkdownContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MarkdownContentView.swift; sourceTree = "<group>"; };
 		E8515437773747D762731920 /* SplashView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SplashView.swift; sourceTree = "<group>"; };
 		EE9D163591786B65153DF7C4 /* SessionListView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionListView.swift; sourceTree = "<group>"; };
@@ -287,7 +287,6 @@
 				LastUpgradeCheck = 2600;
 				TargetAttributes = {
 					373A6B2C13D61F51D165975C = {
-						DevelopmentTeam = 48V2SNGX85;
 						ProvisioningStyle = Automatic;
 					};
 				};
@@ -302,7 +301,6 @@
 			);
 			mainGroup = 197803B25D2EFE0957DFC391;
 			minimizedProjectReferenceProxies = 1;
-			preferredProjectObjectVersion = 77;
 			projectDirPath = "";
 			projectRoot = "";
 			targets = (
@@ -521,6 +519,7 @@
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGN_IDENTITY = "iPhone Developer";
+				DEVELOPMENT_TEAM = 4M8BRH2MYC;
 				INFOPLIST_FILE = Pocketctl/Info.plist;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
@@ -537,6 +536,7 @@
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGN_IDENTITY = "iPhone Developer";
+				DEVELOPMENT_TEAM = 4M8BRH2MYC;
 				INFOPLIST_FILE = Pocketctl/Info.plist;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
