@@ -32,7 +32,7 @@ struct NewSessionSheet: View {
     @Environment(\.dismiss) private var dismiss
     @State private var agent = "claude-code"
     @State private var model = ""
-    @State private var workdir = ""
+    @State private var workdir = "~/"
     @State private var prompt = ""
     @State private var permission = "acceptEdits"
     @State private var phase: CreatePhase = .idle
@@ -108,7 +108,7 @@ struct NewSessionSheet: View {
         .background(Color.pcSurface)
         .onPreferenceChange(NewSessionSheetHeightKey.self) { onHeightChange($0) }
         .onAppear {
-            workdir = AgentDefaultsStore.getCwd(daemonId: daemon.daemonId, agentType: agent) ?? ""
+            workdir = AgentDefaultsStore.getCwd(daemonId: daemon.daemonId, agentType: agent) ?? "~/"
             models = wsService.availableModels[daemon.daemonId] ?? []
             wsService.requestModels(daemonId: daemon.daemonId)
             startListening()
@@ -172,7 +172,7 @@ struct NewSessionSheet: View {
     private var cwdField: some View {
         VStack(alignment: .leading, spacing: 6) {
             fieldLabel("工作目录", icon: "folder")
-            TextField("~（默认 home 目录）", text: $workdir)
+            TextField("~/（默认 home 目录）", text: $workdir)
                 .font(PCFont.mono(14)).foregroundStyle(Color.pcFg).padding(12)
                 .background(Color.pcBackground)
                 .overlay(RoundedRectangle(cornerRadius: PCRadius.md).stroke(Color.pcBorder, lineWidth: 1))
@@ -384,7 +384,7 @@ struct NewSessionSheet: View {
             done = true
             timeoutTask?.cancel()
             phase = .idle
-            errorText = failedMessage(event.reason)
+            errorText = failedMessage(event.reason, errorDetail: event.error)
         case .modelList:
             // model_list 是对当前 daemon 的 list_models 响应；直接用 payload（对齐 web 的
             // `models.value = msg.models`），不依赖 daemon_id 字段——relay 原样转发 daemon 的
@@ -397,13 +397,26 @@ struct NewSessionSheet: View {
         }
     }
 
-    private func failedMessage(_ reason: String?) -> String {
+    private func failedMessage(_ reason: String?, errorDetail: String? = nil) -> String {
         switch reason {
         case "no_cli": return "主机未安装 Claude Code CLI，请在主机上安装后重试"
-        case "bad_cwd": return "工作目录不可用：\(workdir)，请检查路径与权限"
-        case "start_fail": return "Agent 进程启动失败"
+        case "bad_cwd":
+            let base = "工作目录不可用：\(workdir)"
+            if let detail = errorDetail, !detail.isEmpty {
+                return "\(base)\n\(detail)"
+            }
+            return "\(base)，请检查路径与权限"
+        case "start_fail":
+            if let detail = errorDetail, !detail.isEmpty {
+                return "Agent 进程启动失败：\(detail)"
+            }
+            return "Agent 进程启动失败"
         case "daemon_offline": return "主机离线或无可用 daemon，请确认主机在线后重试"
-        default: return "创建会话失败，请重试"
+        default:
+            if let detail = errorDetail, !detail.isEmpty {
+                return "创建会话失败：\(detail)"
+            }
+            return "创建会话失败，请重试"
         }
     }
 }
