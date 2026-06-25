@@ -148,7 +148,7 @@ const { t } = useLocale()
 const form = reactive({
   daemonId: '',
   agent: 'claude-code',
-  cwd: localStorage.getItem('pocketctl_default_cwd') || '',
+  cwd: localStorage.getItem('pocketctl_default_cwd') || '~/',
   prompt: '',
   permissionMode: 'bypassPermissions',  // Web 会话无人值守，默认跳过权限（acceptEdits 会卡在工具批准提示）
   model: '',  // '' = follow host default | opus | sonnet | haiku alias
@@ -187,7 +187,7 @@ function showError(reason: string, err?: string) {
   const host = selectedDaemonName.value
   const map: Record<string, { title: string; desc: string }> = {
     no_cli: { title: t('new_session.error_title', { host }), desc: t('new_session.failed_no_cli_desc') },
-    bad_cwd: { title: t('new_session.error_title', { host }), desc: t('new_session.failed_bad_cwd_desc', { cwd: form.cwd || '/' }) },
+    bad_cwd: { title: t('new_session.error_title', { host }), desc: err ? `${t('new_session.failed_bad_cwd_desc', { cwd: form.cwd || '/' })}\n${err}` : t('new_session.failed_bad_cwd_desc', { cwd: form.cwd || '/' }) },
     start_fail: { title: t('new_session.error_title', { host }), desc: t('new_session.failed_start_desc', { error: err || t('dashboard.unknown_error') }) },
     timeout: { title: t('new_session.error_title', { host }), desc: t('new_session.failed_timeout_desc') },
     daemon_offline: { title: t('new_session.error_title', { host }), desc: t('new_session.failed_offline_desc') },
