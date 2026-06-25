@@ -18,6 +18,17 @@
       </div>
     </div>
 
+    <div v-if="error" class="token-error">
+      <div class="token-error-msg">{{ error }}
+        <a v-if="error === t('token.error_auth_expired')" href="/app/login" style="color:var(--accent);margin-left:8px;text-decoration:underline;">{{ t('token.relogin') }}</a>
+      </div>
+      <button class="token-error-retry" @click="loadDashboard">{{ t('common.retry') }}</button>
+    </div>
+
+    <div v-if="loading" class="token-loading">{{ t('token.loading') }}</div>
+
+    <template v-if="!error">
+
     <div class="token-summary">
       <div class="tk-item"><div class="tk-num">{{ fmt(totalTokens) }}</div><div class="tk-label">{{ t('token.total') }}</div></div>
       <div class="tk-item"><div class="tk-num">{{ fmt(summary.today) }}</div><div class="tk-label">{{ t('token.today') }}</div></div>
@@ -151,6 +162,7 @@
       <div class="ct-row" v-if="tooltip.data.cache_read"><span class="ct-label">{{ t('token.cache') }}</span><span class="ct-val">{{ fmt(tooltip.data.cache_read) }}</span></div>
       <div class="ct-row" v-if="tooltip.data.requests"><span class="ct-label">{{ t('token.requests') }}</span><span class="ct-val">{{ tooltip.data.requests }}</span></div>
     </div>
+    </template>
   </div>
 </template>
 
@@ -159,13 +171,22 @@ import { ref, computed, onMounted } from 'vue'
 import { useLocale } from '../composables/useLocale'
 
 const { t } = useLocale()
-const token = localStorage.getItem('pocketctl_access_token') || ''
+
+const token = () => localStorage.getItem('pocketctl_access_token') || ''
+
 async function apiGet(url: string) {
-  const res = await fetch(url, { headers: { Authorization: `Bearer ${token}` } })
-  if (!res.ok) throw new Error(`${res.status}`)
+  const tok = token()
+  if (!tok) throw new Error('no_token')
+  const res = await fetch(url, { headers: { Authorization: `Bearer ${tok}` } })
+  if (!res.ok) {
+    if (res.status === 401) throw new Error('auth_expired')
+    throw new Error(`${res.status}`)
+  }
   return res.json()
 }
 
+const loading = ref(false)
+const error = ref('')
 const summary = ref<any>({ total: 0, today: 0, thisWeek: 0, thisMonth: 0 })
 const dailySeries = ref<any[]>([])
 const byModel = ref<any[]>([])
@@ -192,19 +213,20 @@ function fmt(n: number) {
 }
 
 async function loadDashboard() {
+  loading.value = true; error.value = ''
   try {
     const d = await apiGet(`/api/tokens/dashboard?daemon=${encodeURIComponent(selectedHost.value)}&days=270`)
-    console.log('[TokenUsage] dashboard', selectedHost.value, {
-      summary: d?.summary,
-      dailySeries: Array.isArray(d?.dailySeries) ? `array(${d.dailySeries.length})` : typeof d?.dailySeries,
-      byModel: Array.isArray(d?.byModel) ? `array(${d.byModel.length})` : typeof d?.byModel,
-      byDaemon: Array.isArray(d?.byDaemon) ? `array(${d.byDaemon.length})` : typeof d?.byDaemon,
-    })
     summary.value = d.summary || { total: 0, today: 0, thisWeek: 0, thisMonth: 0 }
     dailySeries.value = Array.isArray(d?.dailySeries) ? d.dailySeries : []
     byModel.value = Array.isArray(d?.byModel) ? d.byModel : []
     byDaemon.value = Array.isArray(d?.byDaemon) ? d.byDaemon : []
-  } catch (e) { console.error('[TokenUsage] dashboard load failed', e) }
+  } catch (e: any) {
+    const msg = e?.message || ''
+    if (msg === 'no_token') error.value = t('token.error_no_token')
+    else if (msg === 'auth_expired') error.value = t('token.error_auth_expired')
+    else error.value = t('token.error_load_failed')
+    console.error('[TokenUsage] dashboard load failed', e)
+  } finally { loading.value = false }
   if (selectedHost.value !== 'all') await loadSessions(selectedHost.value)
   else sessions.value = []
 }
@@ -299,6 +321,11 @@ onMounted(loadDashboard)
 .page-header { display: flex; justify-content: space-between; align-items: flex-end; margin-bottom: 24px; }
 .page-title { font-size: 22px; font-weight: 700; color: var(--fg); }
 .page-subtitle { font-size: 13px; color: var(--fg-tertiary); margin-top: 4px; }
+.token-error { display: flex; align-items: center; gap: 12px; background: rgba(248,81,73,0.1); border: 1px solid rgba(248,81,73,0.3); border-radius: var(--radius-md); padding: 12px 16px; margin-bottom: 16px; }
+.token-error-msg { flex: 1; font-size: 13px; color: var(--red); }
+.token-error-retry { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-md); padding: 6px 14px; color: var(--accent); font-size: 12px; cursor: pointer; }
+.token-error-retry:hover { background: var(--accent-muted); }
+.token-loading { text-align: center; padding: 40px 20px; font-size: 14px; color: var(--fg-tertiary); }
 .host-select-wrap { position: relative; }
 .host-select-btn { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-md); padding: 8px 14px; color: var(--fg); font-size: 13px; cursor: pointer; }
 .host-select-btn .chevron { color: var(--fg-tertiary); margin-left: 4px; }
