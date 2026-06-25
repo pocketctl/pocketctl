@@ -456,6 +456,7 @@ func (sm *SessionManager) CreateSession(ctx context.Context, config protocol.Ses
 			extraEnv = append(extraEnv,
 				"POCKETCTL_SESSION_ID="+sessionID,
 				"POCKETCTL_APPROVAL_SOCK="+sm.approvals.SocketPath(),
+				"POCKETCTL_PERM_MODE="+permMode,
 			)
 		}
 	}

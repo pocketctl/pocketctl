@@ -155,7 +155,7 @@ func writeContinue() {
 
 func orDefault(s, def string) string {
 	if s == "" {
-		return s
+		return def
 	}
 	return s
 }
