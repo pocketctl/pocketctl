@@ -124,6 +124,12 @@
             :streaming="msg.streaming"
           />
 
+          <!-- AskUserQuestion (question card, not a tool card) -->
+          <QuestionCard
+            v-if="msg.type === 'tool_call' && msg.tool === 'AskUserQuestion'"
+            :message="msg"
+          />
+
           <!-- Tool call / subagent (full-width block) -->
           <ToolCallCard
             v-else-if="msg.type === 'tool_call' || msg.type === 'subagent'"
@@ -274,6 +280,7 @@ import MessageAgent from '../components/messages/MessageAgent.vue'
 import MessageError from '../components/messages/MessageError.vue'
 import { useLocale } from '../composables/useLocale'
 import ToolCallCard from '../components/messages/ToolCallCard.vue'
+import QuestionCard from '../components/messages/QuestionCard.vue'
 import { buildResumeCommand } from '../utils/resumeCommand'
 import { formatToolInput } from '../utils/toolDisplay'
 import { useSessionRename } from '../composables/useSessionRename'

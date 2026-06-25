@@ -47,6 +47,8 @@ export function formatToolInput(tool: string, input: any): string {
         return input.pattern || input.query || ''
       case 'Agent':
         return (input.prompt || '').slice(0, 60)
+      case 'AskUserQuestion':
+        return input.questions?.[0]?.question?.slice(0, 60) || '提问'
       default:
         break
     }
