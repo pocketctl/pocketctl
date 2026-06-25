@@ -19,63 +19,76 @@ import (
 )
 
 const (
-	githubAPI    = "https://api.github.com/repos/pocketctl/pocketctl/releases"
-	githubDL     = "https://github.com/pocketctl/pocketctl/releases/download"
-	defaultBin   = "pocketctl"
+	// GitHub Release (global source for both API and download)
+	githubAPI  = "https://api.github.com/repos/pocketctl/pocketctl/releases"
+	githubDL   = "https://github.com/pocketctl/pocketctl/releases/download"
+
+	// Domestic acceleration proxies for GitHub Release downloads.
+	// Tried in order before falling back to direct GitHub.
+	// ghproxy mirrors the full GitHub URL path — fast in China, no size limit.
+	domesticProxies = "https://ghp.ci/"
+
+	defaultBin = "pocketctl"
 )
 
-// CheckLatest queries the GitHub API for the latest release tag.
-func CheckLatest() (tag string, err error) {
-	url := githubAPI + "/latest"
-	req, _ := http.NewRequest("GET", url, nil)
-	req.Header.Set("Accept", "application/json")
+// apiClient has a short timeout so version checks won't hang when Gitee/GitHub
+// is unreachable. Downloads use http.DefaultClient (no timeout — big files).
+var apiClient = &http.Client{Timeout: 10 * time.Second}
 
-	resp, err := http.DefaultClient.Do(req)
+// CheckLatest queries the GitHub releases API for the latest version tag.
+func CheckLatest() (tag string, err error) {
+	return queryLatest(githubAPI)
+}
+
+// queryLatest fetched the /latest release tag from a single API base URL.
+func queryLatest(api string) (string, error) {
+	req, _ := http.NewRequest("GET", api+"/latest", nil)
+	req.Header.Set("Accept", "application/json")
+	resp, err := apiClient.Do(req)
 	if err != nil {
-		return "", fmt.Errorf("query latest release: %w", err)
+		return "", err
 	}
 	defer resp.Body.Close()
-
 	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("GitHub API returned %s", resp.Status)
+		return "", fmt.Errorf("%s returned %s", api, resp.Status)
 	}
-
 	var rel struct {
 		TagName string `json:"tag_name"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&rel); err != nil {
-		return "", fmt.Errorf("decode response: %w", err)
+		return "", err
 	}
 	if rel.TagName == "" {
-		return "", fmt.Errorf("empty tag_name in response")
+		return "", fmt.Errorf("empty tag_name in response from %s", api)
 	}
 	return rel.TagName, nil
 }
 
-// CheckVersion queries for a specific version's release and returns its tag.
+// CheckVersion verifies a specific version tag exists on GitHub.
 func CheckVersion(version string) (tag string, err error) {
-	// If version looks like v0.1.0, use it directly. Otherwise try API.
-	if strings.HasPrefix(version, "v") {
-		// Verify the tag exists by fetching the release
-		url := fmt.Sprintf("%s/tags/%s", githubAPI, version)
-		req, _ := http.NewRequest("GET", url, nil)
-		req.Header.Set("Accept", "application/json")
-
-		resp, err := http.DefaultClient.Do(req)
-		if err != nil {
-			return "", fmt.Errorf("query version %s: %w", version, err)
-		}
-		defer resp.Body.Close()
-
-		if resp.StatusCode == http.StatusNotFound {
-			return "", fmt.Errorf("version %s not found on GitHub", version)
-		}
-		if resp.StatusCode != http.StatusOK {
-			return "", fmt.Errorf("GitHub API returned %s", resp.Status)
-		}
-		return version, nil
+	if !strings.HasPrefix(version, "v") {
+		return "", fmt.Errorf("version must start with 'v', got: %s", version)
 	}
-	return "", fmt.Errorf("version must start with 'v', got: %s", version)
+	return queryVersionTag(githubAPI, version)
+}
+
+// queryVersionTag verifies a specific version tag exists on a single API base URL.
+func queryVersionTag(api, version string) (string, error) {
+	url := fmt.Sprintf("%s/tags/%s", api, version)
+	req, _ := http.NewRequest("GET", url, nil)
+	req.Header.Set("Accept", "application/json")
+	resp, err := apiClient.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusNotFound {
+		return "", fmt.Errorf("version %s not found on %s", version, api)
+	}
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("%s returned %s", api, resp.Status)
+	}
+	return version, nil
 }
 
 // BinaryInfo describes a downloadable binary.
@@ -88,6 +101,8 @@ type BinaryInfo struct {
 }
 
 // ResolveBinary constructs the download URL and fetches the SHA256 checksum.
+// Tries domestic proxy (ghproxy) first for users in China, then falls back to
+// direct GitHub.
 func ResolveBinary(tag string) (*BinaryInfo, error) {
 	goos := runtime.GOOS
 	goarch := runtime.GOARCH
@@ -101,21 +116,26 @@ func ResolveBinary(tag string) (*BinaryInfo, error) {
 	}
 
 	name := fmt.Sprintf("pocketctl_%s_%s", goos, goarch)
-	url := fmt.Sprintf("%s/%s/%s", githubDL, tag, name)
+	ghURL := fmt.Sprintf("%s/%s/%s", githubDL, tag, name)
 
-	// Fetch SHA256
-	sha, err := fetchSHA256(url + ".sha256")
-	if err != nil {
-		return nil, fmt.Errorf("fetch checksum: %w", err)
+	// Try domestic proxy first (fast in China), then direct GitHub.
+	sources := []string{
+		domesticProxies + ghURL, // ghproxy mirror
+		ghURL,                    // direct GitHub
 	}
-
-	return &BinaryInfo{
-		OS:   goos,
-		Arch: goarch,
-		URL:  url,
-		SHA:  sha,
-		Name: name,
-	}, nil
+	for _, url := range sources {
+		sha, err := fetchSHA256(url + ".sha256")
+		if err == nil && sha != "" {
+			return &BinaryInfo{
+				OS:   goos,
+				Arch: goarch,
+				URL:  url,
+				SHA:  sha,
+				Name: name,
+			}, nil
+		}
+	}
+	return nil, fmt.Errorf("binary %s not found on any source (tag=%s)", name, tag)
 }
 
 // DownloadAndVerify downloads the binary, verifies SHA256, and returns the temp path.
@@ -193,12 +213,30 @@ func ReplaceBinary(tmpPath string) error {
 		return fmt.Errorf("stat %s: %w", realPath, err)
 	}
 
-	// Try direct rename first
+	// Try direct rename first (atomic, preferred on all platforms).
 	if err := os.Rename(tmpPath, realPath); err != nil {
 		errStr := err.Error()
-		// "text file busy" (EBUSY) can happen on NTFS/DrvFs (/mnt/c on WSL)
-		// when the running binary can't be overwritten. Retry a few times
-		// with a short delay — the OS may release the lock momentarily.
+		// "text file busy" (ETXTBSY) happens on Linux/WSL when the binary is
+		// currently running — you can't rename over a live executable.
+		// The standard workaround: delete the old file first (Linux keeps the
+		// inode alive until the process exits, but the path is freed), then
+		// rename the new one into place.
+		if strings.Contains(errStr, "text file busy") || strings.Contains(errStr, "resource busy") || strings.Contains(errStr, "permission denied") {
+			// Remove the old binary (safe on Linux: inode stays until process exits)
+			if rmErr := os.Remove(realPath); rmErr == nil {
+				// Now rename the new binary into the freed path
+				if renameErr := os.Rename(tmpPath, realPath); renameErr == nil {
+					return nil
+				}
+				// rename still failed — try copy to the freed path
+				if copyErr := copyFile(tmpPath, realPath, info.Mode()); copyErr == nil {
+					os.Remove(tmpPath)
+					return nil
+				}
+			}
+			// Remove didn't work either — fall through to retry/cross-device logic
+		}
+		// Retry for transient EBUSY on NTFS/DrvFs (/mnt/c on WSL)
 		if strings.Contains(errStr, "text file busy") || strings.Contains(errStr, "resource busy") {
 			for i := 0; i < 3; i++ {
 				time.Sleep(500 * time.Millisecond)
@@ -209,7 +247,9 @@ func ReplaceBinary(tmpPath string) error {
 		}
 		// If that fails (cross-device or permissions), try copy + remove
 		if isCrossDevice(err) || os.IsPermission(err) {
-			// Copy the new binary into place
+			// On Linux, copying over a running binary also gets ETXTBSY.
+			// Remove first, then copy (same trick as above).
+			os.Remove(realPath)
 			if err := copyFile(tmpPath, realPath, info.Mode()); err != nil {
 				os.Remove(tmpPath)
 				return fmt.Errorf("replace binary at %s: %w", realPath, err)
@@ -299,7 +339,20 @@ func copyFile(src, dst string, mode os.FileMode) error {
 	}
 	defer s.Close()
 
-	d, err := os.OpenFile(dst, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, mode)
+	// On Linux/WSL, opening a running binary with O_WRONLY|O_TRUNC returns
+	// ETXTBSY ("text file busy"). Retry a few times in case the OS releases
+	// the lock momentarily.
+	var d *os.File
+	for i := 0; i < 3; i++ {
+		d, err = os.OpenFile(dst, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, mode)
+		if err == nil {
+			break
+		}
+		if !strings.Contains(err.Error(), "text file busy") {
+			break // different error, don't retry
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
 	if err != nil {
 		return err
 	}

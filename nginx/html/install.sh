@@ -9,7 +9,9 @@ GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 NC='\033[0m'
 
-REPO="pocketctl/pocketctl"
+# GitHub (global) + Gitee (domestic mirror, tried first)
+REPO_GITHUB="pocketctl/pocketctl"
+REPO_GITEE="muwb123/pocketctl"
 RELAY_URL="wss://www.pocketctl.me/ws"
 
 echo -e "${GREEN}╔══════════════════════════════════════╗${NC}"
@@ -42,23 +44,33 @@ esac
 BINARY="pocketctl_${PLATFORM}_${ARCH}"
 echo -e "检测到平台: ${GREEN}${PLATFORM}/${ARCH}${NC}"
 
-# 获取最新版本
-echo -e "${YELLOW}正在获取最新版本...${NC}"
-LATEST_URL="https://github.com/${REPO}/releases/latest/download/${BINARY}"
-
 # 下载到临时文件，再安装到 /usr/local/bin（需要时用 sudo）
 INSTALL_DIR="/usr/local/bin"
 TMP_FILE=$(mktemp)
 trap 'rm -f "$TMP_FILE"' EXIT
-echo -e "${YELLOW}正在从 GitHub 下载 pocketctl...${NC}"
 
-if command -v curl &> /dev/null; then
-    curl -fsSL "$LATEST_URL" -o "$TMP_FILE"
-elif command -v wget &> /dev/null; then
-    wget -q "$LATEST_URL" -O "$TMP_FILE"
-else
-    echo -e "${RED}需要 curl 或 wget，请先安装${NC}"
-    exit 1
+# 下载函数：curl 优先，wget 兜底
+download() {
+    local url="$1"
+    if command -v curl &> /dev/null; then
+        curl --connect-timeout 10 --max-time 120 -fsSL "$url" -o "$TMP_FILE" 2>/dev/null && return 0
+    elif command -v wget &> /dev/null; then
+        wget --timeout=10 --tries=1 -q "$url" -O "$TMP_FILE" 2>/dev/null && return 0
+    fi
+    return 1
+}
+
+# 尝试 Gitee（国内镜像） → GitHub（全球）
+GITEE_URL="https://gitee.com/${REPO_GITEE}/releases/download/latest/${BINARY}"
+GITHUB_URL="https://github.com/${REPO_GITHUB}/releases/latest/download/${BINARY}"
+
+echo -e "${YELLOW}正在下载 pocketctl...${NC}"
+if ! download "$GITEE_URL"; then
+    echo -e "${YELLOW}Gitee 镜像不可用，尝试 GitHub...${NC}"
+    if ! download "$GITHUB_URL"; then
+        echo -e "${RED}下载失败：Gitee 和 GitHub 均无法访问，请检查网络${NC}"
+        exit 1
+    fi
 fi
 
 # 写入 /usr/local/bin（目录不可写时用 sudo）
@@ -78,4 +90,4 @@ echo -e "${YELLOW}下一步:${NC}"
 echo -e "  1. 登录: ${GREEN}pocketctl login --relay ${RELAY_URL}${NC}"
 echo -e "  2. 启动: ${GREEN}pocketctl daemon start${NC}"
 echo ""
-echo -e "更多信息: https://github.com/${REPO}"
+echo -e "更多信息: https://github.com/${REPO_GITHUB}"

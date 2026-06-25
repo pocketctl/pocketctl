@@ -53,23 +53,34 @@ docker compose up -d
 | Relay WebSocket | ws://localhost:8080/ws |
 | PostgreSQL | localhost:5432 |
 
-### 2. 编译并启动 Daemon
+### 2. 安装 Daemon（推荐一键脚本）
 
 在安装了 AI 代理的远程机器上：
 
 ```bash
+# 国内用户自动走 Gitee 镜像（更快），不可用时降级 GitHub
+curl -fsSL https://www.pocketctl.me/install.sh | bash
+```
+
+安装完成后，daemon 默认连接生产 relay（`wss://www.pocketctl.me/ws`），直接运行：
+
+```bash
+pocketctl daemon start --prod
+```
+
+如需连接本地 relay，参考：`pocketctl daemon start --relay ws://<host>:8080/ws`
+
+### 3. 编译并启动 Daemon（源码方式）
+
+```bash
 cd pocketctl
 go build -o pocketctl ./cmd/pocketctl
-
-# 启动 daemon，连接到 relay
-./pocketctl daemon start \
-  --relay ws://<relay-host>:8080 \
-  --token <your-jwt-token>
+./pocketctl daemon start --relay ws://<relay-host>:8080/ws --token <your-jwt-token>
 ```
 
 Daemon 会自动扫描 `PATH` 发现可用的代理 CLI，并注册到 Relay。
 
-### 3. 使用 iOS App
+### 4. 使用 iOS App
 
 1. 在 Xcode 中打开 `ios/Pocketctl.xcodeproj`
 2. 编译并安装到 iPhone/iPad
