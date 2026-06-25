@@ -806,7 +806,7 @@ export async function getTokenDailySeries(pool: pg.Pool, userId: number, daemonI
   const dEvt = useD ? 'AND s.daemon_id = $2' : '';
   const dp = useD ? '$3' : '$2';
   const result = await pool.query(`
-    SELECT date, SUM(input) input, SUM(output) output, SUM(cache_read) cache_read, SUM(requests) requests
+    SELECT date, SUM(input) AS input, SUM(output) AS output, SUM(cache_read) AS cache_read, SUM(requests) AS requests
     FROM (
       SELECT date, input, output, cache_read, requests FROM token_daily_stats
       WHERE user_id = $1 ${dStats} AND date >= CURRENT_DATE - (${dp}::int) AND date <= CURRENT_DATE
@@ -831,7 +831,7 @@ export async function getTokenByModel(pool: pg.Pool, userId: number, daemonId: s
   const dStats = useD ? 'AND daemon_id = $2' : '';
   const dEvt = useD ? 'AND s.daemon_id = $2' : '';
   const result = await pool.query(`
-    SELECT model, SUM(input) input, SUM(output) output, SUM(cache_read) cache_read, SUM(requests) requests
+    SELECT model, SUM(input) AS input, SUM(output) AS output, SUM(cache_read) AS cache_read, SUM(requests) AS requests
     FROM (
       SELECT model, input, output, cache_read, requests FROM token_daily_stats WHERE user_id = $1 ${dStats}
       UNION ALL
@@ -853,7 +853,7 @@ export async function getTokenByModel(pool: pg.Pool, userId: number, daemonId: s
 
 export async function getTokenByDaemon(pool: pg.Pool, userId: number): Promise<any[]> {
   const result = await pool.query(`
-    SELECT daemon_id, SUM(input) input, SUM(output) output, SUM(cache_read) cache_read, SUM(requests) requests
+    SELECT daemon_id, SUM(input) AS input, SUM(output) AS output, SUM(cache_read) AS cache_read, SUM(requests) AS requests
     FROM (
       SELECT daemon_id, input, output, cache_read, requests FROM token_daily_stats WHERE user_id = $1
       UNION ALL
@@ -880,10 +880,10 @@ export async function getTokenByDaemon(pool: pg.Pool, userId: number): Promise<a
 export async function getSessionTokenTrend(pool: pg.Pool, sessionId: string, days = 30): Promise<any[]> {
   const result = await pool.query(`
     SELECT date_trunc('day', created_at)::date AS date,
-           SUM(COALESCE((payload->'usage'->>'input_tokens')::bigint,0)) input,
-           SUM(COALESCE((payload->'usage'->>'output_tokens')::bigint,0)) output,
-           SUM(COALESCE((payload->'usage'->>'cache_read_tokens')::bigint,0)) cache_read,
-           COUNT(*) requests
+           SUM(COALESCE((payload->'usage'->>'input_tokens')::bigint,0)) AS input,
+           SUM(COALESCE((payload->'usage'->>'output_tokens')::bigint,0)) AS output,
+           SUM(COALESCE((payload->'usage'->>'cache_read_tokens')::bigint,0)) AS cache_read,
+           COUNT(*) AS requests
     FROM events
     WHERE session_id = $1 AND event_type='agent_text' AND payload ? 'usage'
       AND created_at >= NOW() - ($2 || ' days')::interval
