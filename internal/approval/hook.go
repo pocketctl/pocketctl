@@ -11,13 +11,27 @@ import (
 )
 
 // RunHook is the entry point for the `pocketctl __hook` subcommand invoked by
-// Claude's PreToolUse hook machinery. It reads Claude's hook payload from
-// stdin, forwards the tool-use details to the approval Unix socket, blocks for
-// the client's decision, and prints Claude's hookSpecificOutput JSON to stdout
-// (permissionDecision allow/deny).
+// Claude's PreToolUse hook machinery. It decides whether a tool-use needs
+// human approval, and if so, forwards the request to the approval Unix socket,
+// blocks for the client's decision, and prints Claude's hookSpecificOutput JSON
+// to stdout (permissionDecision allow/deny).
 //
-// The session id and socket path are passed via the POCKETCTL_SESSION_ID and
-// POCKETCTL_APPROVAL_SOCK env vars (set by the daemon when launching the PTY).
+// Mode handling (the crux of supporting bypassPermissions):
+//   - bypassPermissions: Claude auto-approves everything, so we return
+//     "continue" (no opinion) and never touch the socket. Our hook is only
+//     there to catch the exception — a host-side PreToolUse hook that returns
+//     permissionDecision:"ask", which overrides bypass. We CANNOT detect that
+//     here (our hook runs before the host hook), so for bypass we defer entirely
+//     to Claude and the host hooks. If a host hook forces "ask", Claude will
+//     render the prompt in the PTY; the daemon's watchdog + the user's Stop
+//     button are the escape hatches.
+//   - non-bypass (default/acceptEdits/plan): we ask the client via the socket.
+//     This surfaces the would-be PTY prompt as an inline card instead of
+//     stalling on discarded stdout.
+//
+// The session id, socket path, and effective permission mode are passed via
+// env vars (POCKETCTL_SESSION_ID, POCKETCTL_APPROVAL_SOCK,
+// POCKETCTL_PERM_MODE) set by the daemon when launching the PTY.
 func RunHook(logger *slog.Logger) error {
 	if logger == nil {
 		logger = slog.Default()
@@ -38,11 +52,23 @@ func RunHook(logger *slog.Logger) error {
 		return err
 	}
 
+	permMode := os.Getenv("POCKETCTL_PERM_MODE")
+
+	// In bypassPermissions, defer entirely to Claude + any host hooks. We never
+	// block: most tools auto-run. (If a host hook overrides bypass with "ask",
+	// that prompt is a separate problem — see the daemon's PTY-handling notes;
+	// it is not something this hook can intercept.)
+	if permMode == "bypassPermissions" {
+		writeContinue()
+		return nil
+	}
+
 	sessionID := os.Getenv("POCKETCTL_SESSION_ID")
 	sockPath := os.Getenv("POCKETCTL_APPROVAL_SOCK")
 	if sessionID == "" || sockPath == "" {
-		// Not wired (e.g. a bypassPermissions session shouldn't reach here, or
-		// the daemon didn't set env). Deny rather than silently allow.
+		// Non-bypass session but the approval socket isn't wired (e.g. daemon
+		// couldn't install hooks). Deny rather than silently allow a tool the
+		// user expected to approve.
 		writeDecision(false, "approval hook not configured (missing env)")
 		return nil
 	}
@@ -120,9 +146,16 @@ func writeDecision(allow bool, reason string) {
 	fmt.Println(string(b))
 }
 
+// writeContinue prints the "no opinion" hook output so Claude proceeds with its
+// own permission logic (and any other hooks). Used in bypassPermissions mode.
+func writeContinue() {
+	b, _ := json.Marshal(map[string]any{"continue": true})
+	fmt.Println(string(b))
+}
+
 func orDefault(s, def string) string {
 	if s == "" {
-		return def
+		return s
 	}
 	return s
 }

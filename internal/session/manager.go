@@ -425,30 +425,33 @@ func (sm *SessionManager) CreateSession(ctx context.Context, config protocol.Ses
 	// sanitization is mandatory or claude runs ephemeral (no JSONL).
 	sessionID := uuid.New().String()
 
-	// Resolve the effective permission mode BEFORE launching so we can inject a
-	// PreToolUse hook for non-bypass sessions (surfacing tool approvals to
-	// web/iOS clients). bypassPermissions (the default for unattended sessions)
-	// needs no hook and stays zero-touch.
+	// Resolve the effective permission mode BEFORE launching. Web/iOS daemon
+	// sessions are unattended, so default to bypassing permission checks —
+	// otherwise Bash/Write tools stall forever on a y/n prompt the UI can't
+	// surface (and Ctrl+C doesn't dismiss). Callers who want stricter modes can
+	// set PermissionMode explicitly.
 	permMode := config.PermissionMode
 	if permMode == "" {
-		// Web/iOS daemon sessions are unattended (no one at the PTY to approve
-		// tool prompts), so default to bypassing all permission checks —
-		// otherwise Bash/Write tools stall forever on a y/n prompt the UI can't
-		// surface (and Ctrl+C doesn't dismiss). Callers who want stricter modes
-		// can set PermissionMode explicitly.
 		permMode = "bypassPermissions"
 	}
 	config.PermissionMode = permMode
 
 	args := append([]string{"--session-id", sessionID}, adapter.BuildInteractiveArgs(config)...)
 
-	// For non-bypass modes, inject a PreToolUse hook so tool-use approvals are
-	// surfaced to clients instead of stalling the PTY on an unsurfaced y/n.
+	// Install the approval PreToolUse hook for EVERY daemon session — including
+	// bypassPermissions. Rationale: even in bypass mode, a PreToolUse hook in
+	// the host's ~/.claude/settings.json can return permissionDecision:"ask",
+	// which OVERRIDES bypass and forces a y/n prompt. Since the daemon discards
+	// PTY stdout, that prompt would be invisible and deadlock the session. Our
+	// hook runs first and, when it has no opinion (the common case), returns
+	// continue so Claude's own permission logic (and any host hook) still
+	// applies. We only block on the approval socket when a prompt would
+	// actually be shown — which the hook decides, not the mode.
+	//
 	// Failure to install the hook is non-fatal: the session still runs; the
-	// user simply won't get approval prompts (degrading to claude's own mode
-	// behavior, e.g. acceptEdits auto-approving edits).
+	// user simply won't get approval prompts surfaced.
 	var extraEnv []string
-	if permMode != "bypassPermissions" && sm.approvalEnabled && sm.approvals != nil {
+	if sm.approvalEnabled && sm.approvals != nil {
 		if err := approval.EnsureHooks(resolvedCwd, sm.pocketctlPath); err == nil {
 			extraEnv = append(extraEnv,
 				"POCKETCTL_SESSION_ID="+sessionID,
