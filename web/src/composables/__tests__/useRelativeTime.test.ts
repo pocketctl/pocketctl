@@ -1,5 +1,12 @@
-import { describe, test, expect } from 'vitest'
+import { describe, test, expect, beforeEach } from 'vitest'
 import { formatRelativeTime } from '../useRelativeTime'
+import { useLocale } from '../useLocale'
+
+// formatRelativeTime is locale-aware. Pin to zh so the expected Chinese
+// strings stay stable regardless of the test runner's navigator.language.
+beforeEach(() => {
+  useLocale().setLocale('zh')
+})
 
 describe('formatRelativeTime', () => {
   test('returns empty string for null', () => {
