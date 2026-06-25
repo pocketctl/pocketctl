@@ -203,7 +203,9 @@ struct SessionDetailView: View {
             ChatBubble(message: message)
 
         case .toolCall:
-            if let subId = message.subAgentId, vm.subAgents[subId] != nil {
+            if message.tool == "AskUserQuestion" {
+                QuestionCard(message: message)
+            } else if let subId = message.subAgentId, vm.subAgents[subId] != nil {
                 // Sub-agent card is rendered separately
                 EmptyView()
             } else {

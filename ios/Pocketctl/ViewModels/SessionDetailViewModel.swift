@@ -442,7 +442,8 @@ final class SessionDetailViewModel {
             streaming: false,
             tool: event.tool,
             callId: event.callId,
-            inputDescription: inputDesc
+            inputDescription: inputDesc,
+            rawInputJSON: Self.encodeInput(event.input)
         ))
         // Apply buffered out-of-order tool_result if present (result may precede call in DB id order)
         if let callId = event.callId, let pending = pendingToolResults.removeValue(forKey: callId) {
@@ -598,7 +599,8 @@ final class SessionDetailViewModel {
             streaming: false,
             tool: event.tool,
             callId: event.callId,
-            inputDescription: inputDesc
+            inputDescription: inputDesc,
+            rawInputJSON: Self.encodeInput(event.input)
         ))
         // Apply buffered out-of-order tool_result if present
         if let callId = event.callId, let pending = pendingToolResults.removeValue(forKey: callId) {
@@ -810,6 +812,16 @@ final class SessionDetailViewModel {
 
     static func clearCache(_ sessionId: String) {
         messagesCache.removeValue(forKey: sessionId)
+    }
+
+    /// Encode an Any? input to a JSON string (for rawInputJSON storage).
+    nonisolated private static func encodeInput(_ input: Any?) -> String? {
+        guard let input = input else { return nil }
+        if let data = try? JSONSerialization.data(withJSONObject: input, options: []),
+           let str = String(data: data, encoding: .utf8) {
+            return str
+        }
+        return nil
     }
 
     private func formatToolInput(tool: String?, input: Any?) -> String {

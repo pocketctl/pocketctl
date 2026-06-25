@@ -28,6 +28,7 @@ struct ChatMessage: Identifiable, Sendable {
 
     // Tool call input/output — stored as raw strings for flexibility
     var inputDescription: String = ""
+    var rawInputJSON: String?  // JSON-encoded input (for AskUserQuestion parsing)
     var output: String?
 
     // Command receipt fields (slash command feedback)
@@ -77,6 +78,7 @@ extension ChatMessage {
         case "WebSearch": return "globe"
         case "WebFetch": return "arrow.down.circle"
         case "Agent", "Task": return "sparkles"
+        case "AskUserQuestion": return "questionmark.bubble"
         default: return "wrench.and.screwdriver"
         }
     }
@@ -91,6 +93,8 @@ extension ChatMessage {
         case "Glob", "Grep":
             return inputDescription
         case "Agent":
+            return inputDescription
+        case "AskUserQuestion":
             return inputDescription
         default:
             return inputDescription
