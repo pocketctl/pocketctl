@@ -213,6 +213,22 @@ final class SessionDetailViewModel {
         ])
     }
 
+    /// Respond to a tool-use approval request (Yes/No). The matching card is
+    /// optimistically marked so the UI feels instant; the daemon's running
+    /// session_status event (sent on resolution) reconciles state.
+    func respondApproval(requestId: String, approved: Bool) {
+        // Optimistically update the matching card so its buttons disable.
+        if let idx = messages.lastIndex(where: { $0.type == .approvalRequest && $0.requestId == requestId }) {
+            messages[idx].approvalStatus = approved ? "allowed" : "denied"
+        }
+        wsService.send([
+            "type": "approval_response",
+            "session_id": session.sessionId,
+            "request_id": requestId,
+            "approved": approved,
+        ])
+    }
+
     // MARK: - Event handling
 
     private func handleEvent(_ dict: [String: Any]) {
@@ -317,6 +333,9 @@ final class SessionDetailViewModel {
         case .commandList:
             handleCommandList(event)
 
+        case .approvalRequest:
+            handleApprovalRequest(event)
+
         case .error:
             msgCounter += 1
             messages.append(ChatMessage(
@@ -368,6 +387,9 @@ final class SessionDetailViewModel {
 
         case .commandReceipt:
             handleCommandReceiptDirect(event, messages: &messages)
+
+        case .approvalRequest:
+            handleApprovalRequestDirect(event, messages: &messages)
 
         case .error:
             msgCounter += 1
@@ -663,6 +685,27 @@ final class SessionDetailViewModel {
         commands = cmds.compactMap { CommandItem(dict: $0) }
     }
 
+    /// Tool-use approval request — daemon surfaced a PreToolUse hook approval
+    /// (non-bypass session). Appends an inline Yes/No card.
+    private func handleApprovalRequest(_ event: WebSocketEvent) {
+        guard let requestId = event.requestId else { return }
+        msgCounter += 1
+        messages.append(ChatMessage(
+            id: msgCounter,
+            role: .agent,
+            type: .approvalRequest,
+            content: "",
+            streaming: false,
+            tool: event.tool,
+            callId: event.callId,
+            inputDescription: formatToolInput(tool: event.tool, input: event.input),
+            rawInputJSON: Self.encodeInput(event.input),
+            requestId: requestId,
+            approvalStatus: "pending"
+        ))
+        if !isBatchProcessing { scrollTick += 1 }
+    }
+
     private func handleCommandReceiptDirect(_ event: WebSocketEvent, messages: inout [ChatMessage]) {
         msgCounter += 1
         messages.append(ChatMessage(
@@ -673,6 +716,24 @@ final class SessionDetailViewModel {
             streaming: false,
             command: event.command ?? "",
             receiptStatus: event.receiptStatus ?? "success"
+        ))
+    }
+
+    private func handleApprovalRequestDirect(_ event: WebSocketEvent, messages: inout [ChatMessage]) {
+        guard let requestId = event.requestId else { return }
+        msgCounter += 1
+        messages.append(ChatMessage(
+            id: msgCounter,
+            role: .agent,
+            type: .approvalRequest,
+            content: "",
+            streaming: false,
+            tool: event.tool,
+            callId: event.callId,
+            inputDescription: formatToolInput(tool: event.tool, input: event.input),
+            rawInputJSON: Self.encodeInput(event.input),
+            requestId: requestId,
+            approvalStatus: "pending"
         ))
     }
 

@@ -43,7 +43,7 @@ func TestSanitizePTYEnvStripsClaudeCodeMarkers(t *testing.T) {
 // TestStartPTYCliStdinWriteRead (interactive-web-session 1.4) verifies the PTY
 // master round-trips: writing stdin surfaces on the read side (cat echoes).
 func TestStartPTYCliStdinWriteRead(t *testing.T) {
-	ptmx, cmd, err := startPTYCli("cat", nil, "")
+	ptmx, cmd, err := startPTYCli("cat", nil, "", nil)
 	if err != nil {
 		t.Skipf("pty unavailable in this environment: %v", err)
 	}

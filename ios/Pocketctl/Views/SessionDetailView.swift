@@ -225,6 +225,11 @@ struct SessionDetailView: View {
         case .commandReceipt:
             CommandReceiptCard(message: message)
 
+        case .approvalRequest:
+            ApprovalCard(message: message) { requestId, approved in
+                vm.respondApproval(requestId: requestId, approved: approved)
+            }
+
         default:
             // User message
             ChatBubble(message: message)
@@ -348,6 +353,7 @@ struct SessionDetailView: View {
         switch s {
         case "running": return "运行中"
         case "busy": return "运行中"
+        case "waiting_approval": return "等待审批"
         case "idle": return "空闲"
         case "completed": return "已完成"
         case "error": return "出错"

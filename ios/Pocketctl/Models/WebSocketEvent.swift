@@ -26,6 +26,9 @@ enum WebSocketEventType: String, Sendable {
     case commandList = "command_list"
     case commandReceipt = "command_receipt"
 
+    // Tool-use approval (daemon → client, non-bypass sessions)
+    case approvalRequest = "approval_request"
+
     // Replay control (relay → client)
     case replayBatch = "replay_batch"
     case replayEnd = "replay_end"
@@ -72,6 +75,9 @@ struct WebSocketEvent {
 
     var input: Any? { raw["input"] }
     var output: String? { raw["output"] as? String }
+
+    /// Approval request id — for approval_request events (PreToolUse hook).
+    var requestId: String? { raw["request_id"] as? String }
 
     var sessions: [[String: Any]]? {
         raw["sessions"] as? [[String: Any]]

@@ -10,6 +10,7 @@ enum ChatMessageType: Sendable {
     case toolCall
     case error
     case commandReceipt
+    case approvalRequest
 }
 
 struct ChatMessage: Identifiable, Sendable {
@@ -34,6 +35,10 @@ struct ChatMessage: Identifiable, Sendable {
     // Command receipt fields (slash command feedback)
     var command: String = ""
     var receiptStatus: String = "success"  // success | failed | unavailable
+
+    // Tool-use approval fields (PreToolUse hook → approval_request → approval_response)
+    var requestId: String?                 // daemon's approval request id (approval_request)
+    var approvalStatus: String = "pending" // pending | allowed | denied
 
     /// Whether this tool call is still running (no output yet)
     var isRunning: Bool {
