@@ -86,6 +86,7 @@
   "session.daemon_offline": "Daemon offline — waiting for reconnect",
   "session.creating": "Model is working...",
   "session.completed": "Done",
+  "session.send_failed": "Send failed — check your connection and retry",
   "session.output_tokens": "Output {{n}}",
   "session.force_stop": "Click again to force-kill",
   "session.tool_timeout": "Timed out (no result received)",

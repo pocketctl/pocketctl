@@ -104,9 +104,23 @@ func (sm *SessionManager) InterruptSession(sessionID string) error {
 
 	if ps.Source == "daemon" && ps.PTY != nil {
 		// Ctrl+C (ETX) — Claude TUI stops the current generation and returns
-		// to the input prompt. The JSONL tailer will push an idle status.
+		// to the input prompt.
 		if _, err := ps.PTY.Write([]byte{0x03}); err != nil {
 			return fmt.Errorf("pty write ctrl+c: %w", err)
+		}
+		// Some agents (non-Claude models, or while blocked on API I/O) don't
+		// respond immediately to Ctrl+C. Proactively push idle status so the
+		// UI is un-stuck — if the agent later resumes, it will push busy again.
+		now := time.Now()
+		sm.mu.Lock()
+		ps.Status = protocol.StatusIdle
+		ps.LastActivityAt = now
+		sm.mu.Unlock()
+		sm.outputCh <- protocol.DaemonEvent{
+			Type:           "session_status",
+			SessionID:      sessionID,
+			Status:         protocol.StatusIdle,
+			LastActivityAt: now.UTC().Format(time.RFC3339),
 		}
 		return nil
 	}
@@ -937,7 +951,25 @@ func (sm *SessionManager) SendMessage(ctx context.Context, sessionID string, con
 		ps.Status = protocol.StatusRunning
 		ps.LastActivityAt = time.Now()
 		sm.mu.Unlock()
+		// B (web-post-send-feedback): notify web the turn is running. PTY interactive
+		// mode previously omitted this, so the UI had no "working" feedback until
+		// the adapter emitted Completed at turn end.
+		sm.outputCh <- protocol.DaemonEvent{
+			Type:           "session_status",
+			SessionID:      ps.SessionID,
+			Status:         protocol.StatusRunning,
+			LastActivityAt: time.Now().UTC().Format(time.RFC3339),
+		}
 		if _, err := ptyFile.Write([]byte(content + "\r")); err != nil {
+			// B: stdin write failed — roll back so web doesn't sit on "running" forever.
+			sm.mu.Lock()
+			ps.Status = protocol.StatusError
+			sm.mu.Unlock()
+			sm.outputCh <- protocol.DaemonEvent{
+				Type:      "session_status",
+				SessionID: ps.SessionID,
+				Status:    protocol.StatusError,
+			}
 			return fmt.Errorf("pty stdin write: %w", err)
 		}
 		// Record the slash command (if any) so the tailer's JSONLStreamParser

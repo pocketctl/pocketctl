@@ -72,7 +72,7 @@ T4 completed（adapter）→ bar ✓已完成
 
 ## 边界与风险
 
-- **running 卡住不回退**：B 发 running 后，若 claude 写 stdin 成功但不响应（卡死），running 不会自动到 completed。现有 `watchdogBusy`（516）监控 busy 不监控 running。需评估加 running 超时保护（如 N 秒无 agent_text/completed → 回 idle/error）。列为风险，实现时定。
+- ~~running 卡住不回退~~：**已由 watchdogBusy 覆盖**（task 3 评估）。manager.go:492 在 PTY session 启动时起 watchdogBusy，监控 `StatusRunning`（行 530/555），JSONL 5min 无活动 → 强制回 idle + 通知 web。B 发的 running 同样受保护，无需额外超时代码。
 - **连续消息**：每条都发 running，幂等无害。
 - **L2 ack 语义边界**：ack 只到「relay 转发给 daemon」层（daemon 离线 relay 知道 → nack）；daemon 写 stdin 失败由 B 的 error 覆盖。ack 不保证 claude 真处理（那由后续 agent_text/completed 体现）。
 - **多端一致性**：乐观气泡仅 origin 显示；relay 广播 user_text 给其他端。origin 不重复（relay 不回弹 origin 约定 + `isDuplicate` 双保险），需实测确认与 `local_command_log` 行为一致。
