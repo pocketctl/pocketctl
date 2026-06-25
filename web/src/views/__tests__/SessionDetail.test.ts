@@ -339,3 +339,74 @@ describe('turn timer resumeStartAt recovery', () => {
     expect(lastResume).toBe(new Date('2026-06-24T06:43:00Z').getTime())
   })
 })
+
+// Tool-use approval flow (PreToolUse hook → approval_request → approval_response).
+// Mirrors SessionDetail.vue processEvent('approval_request') + onApprovalRespond.
+describe('tool-use approval flow', () => {
+  function processApprovalRequest(evt: any): any | null {
+    const type = evt.type
+    if (type !== 'approval_request') return null
+    const requestId = evt.request_id
+    if (!requestId) return null
+    const tool = evt.tool || ''
+    const input = evt.input
+    return {
+      id: 'ap-1', type: 'approval_request', request_id: requestId,
+      call_id: evt.call_id,
+      tool, input,
+      status: 'pending',
+    }
+  }
+
+  test('approval_request event builds a pending card message', () => {
+    const msg = processApprovalRequest({
+      type: 'approval_request', request_id: 'req-1', call_id: 'call_x',
+      tool: 'Bash', input: { command: 'rm -rf /tmp/x' },
+    })
+    expect(msg).not.toBeNull()
+    expect(msg.type).toBe('approval_request')
+    expect(msg.request_id).toBe('req-1')
+    expect(msg.tool).toBe('Bash')
+    expect(msg.status).toBe('pending')
+  })
+
+  test('approval_request without request_id is dropped', () => {
+    expect(processApprovalRequest({ type: 'approval_request', tool: 'Bash' })).toBeNull()
+  })
+
+  test('non-approval_request types are ignored', () => {
+    expect(processApprovalRequest({ type: 'tool_call', tool: 'Bash' })).toBeNull()
+    expect(processApprovalRequest({ type: 'agent_text', text: 'hi' })).toBeNull()
+  })
+
+  test('onApprovalRespond builds the correct approval_response payload', () => {
+    // Mirrors: send({ type:'approval_response', session_id, request_id, approved })
+    const sent: any[] = []
+    const send = (m: any) => sent.push(m)
+    const sessionId = 's-123'
+    function onApprovalRespond(msg: any, approved: boolean) {
+      if (!msg.request_id) return
+      send({ type: 'approval_response', session_id: sessionId, request_id: msg.request_id, approved })
+    }
+
+    onApprovalRespond({ request_id: 'req-1' }, true)
+    onApprovalRespond({ request_id: 'req-2' }, false)
+
+    expect(sent).toEqual([
+      { type: 'approval_response', session_id: 's-123', request_id: 'req-1', approved: true },
+      { type: 'approval_response', session_id: 's-123', request_id: 'req-2', approved: false },
+    ])
+  })
+
+  test('onApprovalRespond skips messages without request_id', () => {
+    const sent: any[] = []
+    const send = (m: any) => sent.push(m)
+    function onApprovalRespond(msg: any, approved: boolean) {
+      if (!msg.request_id) return
+      send({ type: 'approval_response', request_id: msg.request_id, approved })
+    }
+    onApprovalRespond({}, true)
+    expect(sent).toEqual([])
+  })
+})
+

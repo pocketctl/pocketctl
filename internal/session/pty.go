@@ -10,16 +10,20 @@ import (
 )
 
 // startPTYCli launches an interactive claude (or other CLI) under a PTY with a
-// sanitized environment. Returns the PTY master (*os.File, used for stdin writes
-// — write "<msg>\r" to submit) and the running *exec.Cmd.
+// sanitized environment. extraEnv is appended after sanitization (e.g. the
+// approval session id / socket path for non-bypass sessions). Returns the PTY
+// master (*os.File, used for stdin writes — write "<msg>\r" to submit) and the
+// running *exec.Cmd.
 //
 // interactive-web-session D1 (PTY interactive) + D3 (env sanitization).
-func startPTYCli(cliPath string, args []string, cwd string) (*os.File, *exec.Cmd, error) {
+func startPTYCli(cliPath string, args []string, cwd string, extraEnv []string) (*os.File, *exec.Cmd, error) {
 	cmd := exec.Command(cliPath, args...)
 	if cwd != "" {
 		cmd.Dir = cwd
 	}
-	cmd.Env = sanitizePTYEnv(os.Environ())
+	env := sanitizePTYEnv(os.Environ())
+	env = append(env, extraEnv...)
+	cmd.Env = env
 
 	// Start with a sane window size. Without this the PTY defaults to 0x0 and
 	// claude's Ink-based TUI stalls rendering into a zero-size screen — startup

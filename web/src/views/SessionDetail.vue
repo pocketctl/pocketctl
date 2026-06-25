@@ -148,6 +148,9 @@
 
           <!-- Command execution receipt -->
           <CommandReceiptCard v-else-if="msg.type === 'command_receipt'" :command="msg.command" :status="msg.receiptStatus" :message="msg.message" />
+
+          <!-- Tool-use approval request (non-bypass sessions) -->
+          <ApprovalCard v-else-if="msg.type === 'approval_request'" :message="msg" @respond="onApprovalRespond" />
         </template>
 
         <!-- Turn status bar: lives inside the message stream (visually part of
@@ -291,6 +294,7 @@ import MessageError from '../components/messages/MessageError.vue'
 import { useLocale } from '../composables/useLocale'
 import ToolCallCard from '../components/messages/ToolCallCard.vue'
 import QuestionCard from '../components/messages/QuestionCard.vue'
+import ApprovalCard from '../components/messages/ApprovalCard.vue'
 import { buildResumeCommand } from '../utils/resumeCommand'
 import { formatToolInput } from '../utils/toolDisplay'
 import { useSessionRename } from '../composables/useSessionRename'
@@ -691,6 +695,19 @@ function clearAllToolTimeouts() {
 // the cache would silently disable them. Hardcode the names instead.
 const LOCAL_COMMANDS = ['cost', 'status', 'help', 'model']
 
+// Send a tool-use approval decision back to the daemon. The ApprovalCard
+// already flipped its local status optimistically; here we just dispatch the
+// approval_response command, which the relay forwards to the owning daemon.
+function onApprovalRespond(msg: any, approved: boolean) {
+  if (!msg.request_id) return
+  send({
+    type: 'approval_response',
+    session_id: sessionId.value,
+    request_id: msg.request_id,
+    approved,
+  })
+}
+
 function sendMessage() {
   const text = messageInput.value.trim()
   if (!text || isDisconnected.value) return
@@ -1026,6 +1043,19 @@ function processEvent(evt: any, target: any[] = messages.value) {
       id: nextId('r'), type: 'command_receipt',
       command: evt.command || '', receiptStatus: evt.receipt_status || 'success',
       message: evt.message || '',
+    })
+  } else if (type === 'approval_request') {
+    // Daemon surfaced a PreToolUse approval (non-bypass session). Render an
+    // inline Yes/No card; the user's answer is sent back via approval_response.
+    const requestId = evt.request_id || evt.payload?.request_id
+    if (!requestId) return
+    const tool = evt.tool || evt.payload?.tool || ''
+    const input = evt.input || evt.payload?.input
+    target.push({
+      id: nextId('ap'), type: 'approval_request', request_id: requestId,
+      call_id: evt.call_id || evt.payload?.call_id,
+      tool, input, inputDesc: formatToolInput(tool, input),
+      status: 'pending',
     })
   }
 }

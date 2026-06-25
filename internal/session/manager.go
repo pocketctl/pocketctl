@@ -15,31 +15,33 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/pocketctl/pocketctl/internal/adapter"
+	"github.com/pocketctl/pocketctl/internal/approval"
 	"github.com/pocketctl/pocketctl/internal/protocol"
 	"github.com/pocketctl/pocketctl/internal/watcher"
-	"github.com/google/uuid"
 )
 
 type ProcessState struct {
-	SessionID string
-	Cmd       *exec.Cmd
-	Cancel    context.CancelFunc
-	Status    string
-	StartedAt time.Time
-	LastActivityAt time.Time // last activity timestamp (status change, message, etc.)
-	Cwd       string
-	Agent     string
-	Source    string // "daemon" or "terminal"
-	SlashCommands []string // slash commands the agent reported as available (init event)
-	Pid       int    // terminal session's original PID
-	TTY       string // terminal session's TTY device (e.g. /dev/ttys002)
-	ExitReason string // reason for process exit (terminal sessions only)
-	TitleGenerated bool // true once generate_title_request has been sent
-	Tailer *watcher.JSONLTailer // terminal session 的 JSONL tailer（D2: sendToIdleTerminal 期间 pause）
-	PTY    *os.File             // interactive-web-session D1: daemon session 的 PTY master（写 stdin 驱动 interactive claude）
-	PermissionMode string // current permission mode (updated by JSONL permission-mode parser)
-	Model  string // resolved model name (for session_created, surfaced to web /model)
+	SessionID        string
+	Cmd              *exec.Cmd
+	Cancel           context.CancelFunc
+	Status           string
+	StartedAt        time.Time
+	LastActivityAt   time.Time // last activity timestamp (status change, message, etc.)
+	Cwd              string
+	Agent            string
+	Source           string               // "daemon" or "terminal"
+	SlashCommands    []string             // slash commands the agent reported as available (init event)
+	Pid              int                  // terminal session's original PID
+	TTY              string               // terminal session's TTY device (e.g. /dev/ttys002)
+	ExitReason       string               // reason for process exit (terminal sessions only)
+	TitleGenerated   bool                 // true once generate_title_request has been sent
+	Tailer           *watcher.JSONLTailer // terminal session 的 JSONL tailer（D2: sendToIdleTerminal 期间 pause）
+	PTY              *os.File             // interactive-web-session D1: daemon session 的 PTY master（写 stdin 驱动 interactive claude）
+	PermissionMode   string               // current permission mode (updated by JSONL permission-mode parser)
+	Model            string               // resolved model name (for session_created, surfaced to web /model)
+	PendingRequestID string               // non-empty while a tool-use approval request awaits a client decision
 }
 
 // SetTailer associates a JSONL tailer with a session (so sendToIdleTerminal can pause/resume it).
@@ -151,12 +153,18 @@ func indexOfString(slice []string, val string) int {
 type NotifyFunc func(sessionID, ttyPath string)
 
 type SessionManager struct {
-	mu       sync.RWMutex
-	sessions map[string]*ProcessState
-	outputCh chan protocol.DaemonEvent
-	childPids map[int]bool // PIDs of daemon-spawned processes
-	OnNotifyTerminal NotifyFunc // callback after --resume on terminal session
+	mu                  sync.RWMutex
+	sessions            map[string]*ProcessState
+	outputCh            chan protocol.DaemonEvent
+	childPids           map[int]bool                    // PIDs of daemon-spawned processes
+	OnNotifyTerminal    NotifyFunc                      // callback after --resume on terminal session
 	OnSessionIDResolved func(realSessionID, cwd string) // callback when daemon session gets real ID
+
+	// approvals brokers PreToolUse hook approvals for non-bypass daemon sessions.
+	// nil on daemons that don't surface approvals (or before wiring).
+	approvals       *approval.Server
+	pocketctlPath   string // path to this binary, for the hook command
+	approvalEnabled bool   // set once an approval server is attached
 }
 
 func NewSessionManager(outputCh chan protocol.DaemonEvent) *SessionManager {
@@ -165,6 +173,84 @@ func NewSessionManager(outputCh chan protocol.DaemonEvent) *SessionManager {
 		outputCh:  outputCh,
 		childPids: make(map[int]bool),
 	}
+}
+
+// SetApprovalServer wires the in-process approval broker. The server's
+// OnRequest callback is set to forward each tool-use request to clients as an
+// approval_request event. Must be called before any non-bypass session is
+// created. pocketctlPath is the daemon binary path the PreToolUse hook invokes.
+func (sm *SessionManager) SetApprovalServer(srv *approval.Server, pocketctlPath string) {
+	sm.approvals = srv
+	sm.pocketctlPath = pocketctlPath
+	sm.approvalEnabled = true
+	srv.SetOnRequest(sm.handleApprovalRequest)
+}
+
+// handleApprovalRequest is the approval server's OnRequest callback. It flips
+// the session to waiting_approval and emits an approval_request event so the
+// web/iOS client renders an inline Yes/No card. Invoked from the server's
+// accept goroutine — must not block (it only emits events).
+func (sm *SessionManager) handleApprovalRequest(req approval.Request) {
+	sm.mu.Lock()
+	ps, ok := sm.sessions[req.SessionID]
+	if ok {
+		ps.Status = protocol.StatusWaitingApproval
+		ps.PendingRequestID = req.RequestID
+	}
+	sm.mu.Unlock()
+
+	if !ok {
+		// Session gone before the request was forwarded — deny immediately so
+		// the hook doesn't hang.
+		_ = sm.approvals.Resolve(req.RequestID, false)
+		return
+	}
+
+	sm.outputCh <- protocol.DaemonEvent{
+		Type:      "approval_request",
+		SessionID: req.SessionID,
+		RequestID: req.RequestID,
+		Tool:      req.Tool,
+		Input:     req.Input,
+	}
+	sm.outputCh <- protocol.DaemonEvent{
+		Type:           "session_status",
+		SessionID:      req.SessionID,
+		Status:         protocol.StatusWaitingApproval,
+		LastActivityAt: time.Now().UTC().Format(time.RFC3339),
+	}
+}
+
+// ResolveApproval delivers a client's approval decision to the blocked
+// PreToolUse hook and returns the session to running. Called from the
+// approval_response command handler.
+func (sm *SessionManager) ResolveApproval(sessionID, requestID string, approved bool) error {
+	if sm.approvals == nil {
+		return fmt.Errorf("approval not configured on this daemon")
+	}
+	sm.mu.Lock()
+	ps, ok := sm.sessions[sessionID]
+	if ok && ps.PendingRequestID == requestID {
+		ps.PendingRequestID = ""
+		ps.Status = protocol.StatusRunning
+		ps.LastActivityAt = time.Now()
+	}
+	sm.mu.Unlock()
+
+	if err := sm.approvals.Resolve(requestID, approved); err != nil {
+		return err
+	}
+
+	if ok {
+		// Hook resolved → Claude proceeds; reflect running state to clients.
+		sm.outputCh <- protocol.DaemonEvent{
+			Type:           "session_status",
+			SessionID:      sessionID,
+			Status:         protocol.StatusRunning,
+			LastActivityAt: time.Now().UTC().Format(time.RFC3339),
+		}
+	}
+	return nil
 }
 
 // resolveCwd resolves the working directory path:
@@ -338,25 +424,51 @@ func (sm *SessionManager) CreateSession(ctx context.Context, config protocol.Ses
 	// Spike-verified: sanitized env + --session-id writes <uuid>.jsonl, and env
 	// sanitization is mandatory or claude runs ephemeral (no JSONL).
 	sessionID := uuid.New().String()
+
+	// Resolve the effective permission mode BEFORE launching. Web/iOS daemon
+	// sessions are unattended, so default to bypassing permission checks —
+	// otherwise Bash/Write tools stall forever on a y/n prompt the UI can't
+	// surface (and Ctrl+C doesn't dismiss). Callers who want stricter modes can
+	// set PermissionMode explicitly.
+	permMode := config.PermissionMode
+	if permMode == "" {
+		permMode = "bypassPermissions"
+	}
+	config.PermissionMode = permMode
+
 	args := append([]string{"--session-id", sessionID}, adapter.BuildInteractiveArgs(config)...)
 
+	// Install the approval PreToolUse hook for EVERY daemon session — including
+	// bypassPermissions. Rationale: even in bypass mode, a PreToolUse hook in
+	// the host's ~/.claude/settings.json can return permissionDecision:"ask",
+	// which OVERRIDES bypass and forces a y/n prompt. Since the daemon discards
+	// PTY stdout, that prompt would be invisible and deadlock the session. Our
+	// hook runs first and, when it has no opinion (the common case), returns
+	// continue so Claude's own permission logic (and any host hook) still
+	// applies. We only block on the approval socket when a prompt would
+	// actually be shown — which the hook decides, not the mode.
+	//
+	// Failure to install the hook is non-fatal: the session still runs; the
+	// user simply won't get approval prompts surfaced.
+	var extraEnv []string
+	if sm.approvalEnabled && sm.approvals != nil {
+		if err := approval.EnsureHooks(resolvedCwd, sm.pocketctlPath); err == nil {
+			extraEnv = append(extraEnv,
+				"POCKETCTL_SESSION_ID="+sessionID,
+				"POCKETCTL_APPROVAL_SOCK="+sm.approvals.SocketPath(),
+				"POCKETCTL_PERM_MODE="+permMode,
+			)
+		}
+	}
+
 	ctx, cancel := context.WithCancel(ctx)
-	ptmx, cmd, err := startPTYCli(cliPath, args, resolvedCwd)
+	ptmx, cmd, err := startPTYCli(cliPath, args, resolvedCwd, extraEnv)
 	if err != nil {
 		cancel()
 		return "", fmt.Errorf("start pty claude: %w", err)
 	}
 
 	now := time.Now()
-	permMode := config.PermissionMode
-	if permMode == "" {
-		// Web/iOS daemon sessions are unattended (no one at the PTY to approve
-		// tool prompts), so default to bypassing all permission checks —
-		// otherwise Bash/Write tools stall forever on a y/n prompt the UI can't
-		// surface (and Ctrl+C doesn't dismiss). Callers who want stricter modes
-		// can set PermissionMode explicitly.
-		permMode = "bypassPermissions"
-	}
 	ps := &ProcessState{
 		SessionID:      sessionID, // real id (not pending-): --session-id pins it
 		Cmd:            cmd,
@@ -592,7 +704,17 @@ func (sm *SessionManager) handlePTYExit(ps *ProcessState) {
 	status := ps.Status
 	reason := ps.ExitReason
 	sid := ps.SessionID
+	cwd := ps.Cwd
 	sm.mu.Unlock()
+
+	// Drain any pending tool-use approval so the hook process exits promptly,
+	// and remove the PreToolUse hook we injected into the project settings.
+	if sm.approvals != nil {
+		sm.approvals.DrainSession(sid)
+	}
+	if cwd != "" {
+		_ = approval.RemoveHooks(cwd)
+	}
 
 	sm.outputCh <- protocol.DaemonEvent{
 		Type:       "session_status",
@@ -1175,12 +1297,20 @@ func isProcessAlive(pid int) bool {
 func (sm *SessionManager) KillSession(sessionID string) error {
 	sm.mu.Lock()
 	ps, ok := sm.sessions[sessionID]
+	cwd := ""
+	if ok {
+		cwd = ps.Cwd
+	}
 	sm.mu.Unlock()
 	if !ok {
 		return fmt.Errorf("session not found: %s", sessionID)
 	}
 	if ps.Cancel != nil {
 		ps.Cancel()
+	}
+	// Drain any pending tool-use approval so the hook process exits promptly.
+	if sm.approvals != nil {
+		sm.approvals.DrainSession(sessionID)
 	}
 	// interactive-web-session D7/6.2: for PTY daemon sessions, try a graceful
 	// /exit, then ensure the PTY master is closed on return.
@@ -1215,8 +1345,14 @@ func (sm *SessionManager) KillSession(sessionID string) error {
 			ps.Status = protocol.StatusKilled
 			ps.LastActivityAt = time.Now()
 			sm.mu.Unlock()
+			if cwd != "" {
+				_ = approval.RemoveHooks(cwd)
+			}
 			return nil
 		}
+	}
+	if cwd != "" {
+		_ = approval.RemoveHooks(cwd)
 	}
 	return nil
 }
@@ -1227,12 +1363,12 @@ func (sm *SessionManager) ListSessions() []SessionInfo {
 	var active, exited []SessionInfo
 	for id, ps := range sm.sessions {
 		info := SessionInfo{
-			SessionID: id,
-			Status:    ps.Status,
-			StartedAt: ps.StartedAt,
+			SessionID:      id,
+			Status:         ps.Status,
+			StartedAt:      ps.StartedAt,
 			LastActivityAt: ps.LastActivityAt,
-			Agent:     ps.Agent,
-			Cwd:       ps.Cwd,
+			Agent:          ps.Agent,
+			Cwd:            ps.Cwd,
 		}
 		if ps.Status == protocol.StatusExited || ps.Status == protocol.StatusCompleted ||
 			ps.Status == protocol.StatusError || ps.Status == protocol.StatusKilled {
@@ -1314,12 +1450,12 @@ func (sm *SessionManager) GetSessionSlashCommands(sessionID string) ([]string, b
 }
 
 type SessionInfo struct {
-	SessionID string    `json:"session_id"`
-	Status    string    `json:"status"`
-	StartedAt time.Time `json:"started_at"`
+	SessionID      string    `json:"session_id"`
+	Status         string    `json:"status"`
+	StartedAt      time.Time `json:"started_at"`
 	LastActivityAt time.Time `json:"last_activity_at"`
-	Agent     string    `json:"agent"`
-	Cwd       string    `json:"cwd"`
+	Agent          string    `json:"agent"`
+	Cwd            string    `json:"cwd"`
 }
 
 // ResyncSessions re-emits session_discovered for all tracked sessions.

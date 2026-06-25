@@ -22,6 +22,7 @@ import (
 	"github.com/gorilla/websocket"
 	"github.com/pocketctl/pocketctl/internal/adapter"
 	"github.com/pocketctl/pocketctl/internal/api"
+	"github.com/pocketctl/pocketctl/internal/approval"
 	"github.com/pocketctl/pocketctl/internal/commands"
 	"github.com/pocketctl/pocketctl/internal/config"
 	"github.com/pocketctl/pocketctl/internal/daemon"
@@ -54,6 +55,15 @@ func main() {
 		cmdDaemon(os.Args[2:])
 	case "login":
 		cmdLogin(os.Args[2:])
+	case "__hook":
+		// Hidden subcommand: invoked by Claude's PreToolUse hook (configured by
+		// the daemon for non-bypass sessions). Brokers a tool-use approval with
+		// the running daemon over a Unix socket, then prints Claude's hook
+		// output. Never advertised in help output.
+		if err := approval.RunHook(slog.Default()); err != nil {
+			os.Exit(0) // exit 0 so Claude renders our deny reason
+		}
+		os.Exit(0)
 	case "version":
 		fmt.Println("pocketctl", version)
 	case "help", "--help", "-h":
@@ -443,6 +453,26 @@ func cmdDaemonStart(args []string) {
 	// Create session manager
 	sm := session.NewSessionManager(outputCh)
 
+	// Start the in-process approval broker. The PreToolUse hook (configured per
+	// non-bypass session) connects here to surface tool-use approvals to
+	// web/iOS clients. Failures are non-fatal: sessions simply won't get
+	// approval prompts (they still default to bypassPermissions).
+	approvalSocket := ""
+	if cfgDir, derr := config.ConfigDir(); derr == nil {
+		approvalSocket = filepath.Join(cfgDir, "approval.sock")
+		pocketctlPath, _ := os.Executable()
+		if pocketctlPath == "" {
+			pocketctlPath = os.Args[0]
+		}
+		approvalSrv := approval.NewServer(approvalSocket, logger)
+		if err := approvalSrv.Start(); err != nil {
+			logger.Warn("approval server disabled", "error", err)
+		} else {
+			sm.SetApprovalServer(approvalSrv, pocketctlPath)
+			defer approvalSrv.Close()
+		}
+	}
+
 	// When a daemon-created session resolves its real ID, wait for assistant
 	// reply then send generate_title_request to relay for LLM-based title generation.
 	sm.OnSessionIDResolved = func(realSessionID, cwd string) {
@@ -478,7 +508,6 @@ func cmdDaemonStart(args []string) {
 
 	// Create process monitor
 	pm := watcher.NewProcessMonitor()
-
 
 	// Create WebSocket client
 	client := ws.NewClient(url, tok, id, agentTypes, agentVersions, agentLatests, outputCh, logger)
@@ -821,7 +850,7 @@ func cmdDoctor() {
 			// Send register message
 			hostname, _ := os.Hostname()
 			registerMsg, _ := json.Marshal(map[string]any{
-				"type":     "register",
+				"type":      "register",
 				"daemon_id": "doctor-probe",
 				"hostname":  hostname,
 				"agents":    []string{"claude-code"},
@@ -1048,17 +1077,17 @@ func handleCommands(ctx context.Context, client *ws.Client, sm *session.SessionM
 					})
 					continue
 				}
-			logger.Info("session created", "session", sessionID)
+				logger.Info("session created", "session", sessionID)
 
-			// Notify relay that session was created so it can link the originating client.
-			// Carry the resolved model so the web client can show it (/model command).
-			model, _ := sm.GetSessionModel(sessionID)
-			client.SendMsg(protocol.DaemonEvent{
-				Type:      "session_created",
-				SessionID: sessionID,
-				Title:     config.Prompt,
-				Model:     model,
-			})
+				// Notify relay that session was created so it can link the originating client.
+				// Carry the resolved model so the web client can show it (/model command).
+				model, _ := sm.GetSessionModel(sessionID)
+				client.SendMsg(protocol.DaemonEvent{
+					Type:      "session_created",
+					SessionID: sessionID,
+					Title:     config.Prompt,
+					Model:     model,
+				})
 
 			case "abort_create":
 				logger.Info("abort create session", "session", cmd.SessionID)
@@ -1187,6 +1216,20 @@ func handleCommands(ctx context.Context, client *ws.Client, sm *session.SessionM
 
 			case "upgrade_agent":
 				go handleUpgradeAgent(client, logger, cmd.Agent)
+
+			case "approval_response":
+				// Client answered a tool-use approval request (Yes/No). Resolves
+				// the blocked PreToolUse hook so Claude proceeds (allow) or is
+				// told to stop (deny).
+				logger.Info("approval response", "session", cmd.SessionID, "req", cmd.RequestID, "approved", cmd.Approved)
+				if err := sm.ResolveApproval(cmd.SessionID, cmd.RequestID, cmd.Approved); err != nil {
+					logger.Error("resolve approval failed", "error", err)
+					client.SendMsg(protocol.DaemonEvent{
+						Type:      "error",
+						SessionID: cmd.SessionID,
+						Error:     err.Error(),
+					})
+				}
 
 			default:
 				logger.Debug("unknown command", "type", cmd.Type)
