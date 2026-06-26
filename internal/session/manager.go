@@ -20,6 +20,7 @@ import (
 	"github.com/pocketctl/pocketctl/internal/approval"
 	"github.com/pocketctl/pocketctl/internal/filelock"
 	"github.com/pocketctl/pocketctl/internal/protocol"
+	"github.com/pocketctl/pocketctl/internal/ptyscan"
 	"github.com/pocketctl/pocketctl/internal/watcher"
 )
 
@@ -40,6 +41,7 @@ type ProcessState struct {
 	TitleGenerated   bool                 // true once generate_title_request has been sent
 	Tailer           *watcher.JSONLTailer // terminal session 的 JSONL tailer（D2: sendToIdleTerminal 期间 pause）
 	PTY              *os.File             // interactive-web-session D1: daemon session 的 PTY master（写 stdin 驱动 interactive claude）
+	PTYScanner       *ptyscan.Scanner     // daemon session 的 PTY 菜单扫描器（捕获 TUI 选择提示，转成 interactive_prompt 事件）
 	PermissionMode   string               // current permission mode (updated by JSONL permission-mode parser)
 	Model            string               // resolved model name (for session_created, surfaced to web /model)
 	Effort           string               // last-set thinking-effort level (low/medium/high/xhigh/max/ultracode)
@@ -753,10 +755,12 @@ func (sm *SessionManager) CreateSession(ctx context.Context, config protocol.Ses
 func (sm *SessionManager) servePTYSession(ctx context.Context, ps *ProcessState, initialPrompt string) {
 	// Drain PTY stdout continuously. claude's TUI writes constantly (banner,
 	// spinner, …); if nobody reads the PTY master, its buffer fills and claude
-	// blocks. We discard the TUI bytes; structured output comes via JSONL (D2).
-	go func() {
-		_, _ = io.Copy(io.Discard, ps.PTY)
-	}()
+	// blocks. Structured output still comes via JSONL (D2), but we also feed
+	// the bytes to a PTY menu scanner so inline selection prompts the TUI draws
+	// (e.g. a host PreToolUse hook's "Do you want to proceed? ❶ Yes ❷ No") are
+	// surfaced to clients as interactive_prompt cards instead of being lost.
+	ps.PTYScanner = ptyscan.NewScanner(ps.SessionID)
+	go sm.drainPTY(ctx, ps)
 
 	// Submit the initial prompt after the TUI settles (~10s to render banner +
 	// plugins). IMPORTANT: do NOT wait for the JSONL file here — claude only
@@ -847,6 +851,79 @@ func (sm *SessionManager) servePTYSession(ctx context.Context, ps *ProcessState,
 	case <-done:
 		sm.handlePTYExit(ps)
 	}
+}
+
+// drainPTY reads the PTY master until EOF, feeding every chunk to the session's
+// menu scanner. This keeps the PTY buffer drained (so the agent's TUI doesn't
+// block) AND lets the scanner surface inline selection prompts as
+// interactive_prompt events. Runs once per daemon session; exits when the PTY
+// master is closed (session exit / kill).
+func (sm *SessionManager) drainPTY(ctx context.Context, ps *ProcessState) {
+	buf := make([]byte, 4096)
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		default:
+		}
+		n, err := ps.PTY.Read(buf)
+		if n > 0 && ps.PTYScanner != nil {
+			// Forward a copy so the scanner can retain bytes across reads.
+			for _, ev := range ps.PTYScanner.Feed(append([]byte(nil), buf[:n]...)) {
+				select {
+				case sm.outputCh <- ev:
+				case <-ctx.Done():
+					return
+				}
+			}
+		}
+		if err != nil {
+			// EOF / closed master: session is exiting; handlePTYExit closes the fd.
+			return
+		}
+	}
+}
+
+// ResolveInteractivePrompt writes the user's menu choice back to the PTY so the
+// agent's blocking selection prompt proceeds. The choice is the on-screen option
+// index (e.g. "1"); we append a CR the same way SendMessage submits chat input.
+// requestID must match the scanner's currently-active prompt or the response is
+// rejected (stale/late answer for an already-resolved or superseded prompt).
+func (sm *SessionManager) ResolveInteractivePrompt(sessionID, requestID, choice string) error {
+	if choice == "" {
+		return fmt.Errorf("empty choice")
+	}
+
+	sm.mu.Lock()
+	ps, ok := sm.sessions[sessionID]
+	scanner := ps.PTYScanner
+	ptyFile := ps.PTY
+	// Validate and claim the pending prompt atomically: a matching requestID
+	// clears the scanner's active state so a concurrent/duplicate answer can't
+	// write twice.
+	if ok && (scanner == nil || scanner.ActiveRequestID() != requestID) {
+		active := ""
+		if scanner != nil {
+			active = scanner.ActiveRequestID()
+		}
+		sm.mu.Unlock()
+		return fmt.Errorf("interactive prompt %q not pending (active=%q)", requestID, active)
+	}
+	if scanner != nil {
+		scanner.Reset()
+	}
+	sm.mu.Unlock()
+
+	if !ok {
+		return fmt.Errorf("session not found: %s", sessionID)
+	}
+	if ptyFile == nil {
+		return fmt.Errorf("session %s PTY already closed", sessionID)
+	}
+	if _, err := ptyFile.Write([]byte(choice + "\r")); err != nil {
+		return fmt.Errorf("write choice to PTY: %w", err)
+	}
+	return nil
 }
 
 // watchdogBusy monitors a session for stuck "busy" state. If the session

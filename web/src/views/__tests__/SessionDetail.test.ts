@@ -444,6 +444,81 @@ describe('tool-use approval flow', () => {
   })
 })
 
+// PTY selection-menu flow (interactive_prompt → interactive_response).
+// Mirrors SessionDetail.vue processEvent('interactive_prompt') + onChoiceRespond.
+// The daemon scans the agent's PTY for a menu the TUI drew (e.g. a host
+// PreToolUse hook's "Do you want to proceed? ❶Yes ❷No") and surfaces it as a
+// numbered-choice card; the user's pick is written back to the PTY.
+describe('interactive prompt flow', () => {
+  function safeParseJSON(s: string): any {
+    try { return JSON.parse(s) } catch { return null }
+  }
+  function processInteractivePrompt(evt: any): any | null {
+    if (evt.type !== 'interactive_prompt') return null
+    const requestId = evt.request_id
+    if (!requestId) return null
+    const rawInput = evt.input
+    let promptText = ''
+    let options: any[] = []
+    if (rawInput) {
+      const inp = typeof rawInput === 'string' ? safeParseJSON(rawInput) : rawInput
+      promptText = inp?.prompt || ''
+      if (Array.isArray(inp?.options)) options = inp.options
+    }
+    return {
+      id: 'ip-1', type: 'interactive_prompt', request_id: requestId,
+      prompt: promptText, options, status: 'pending', selectedChoice: '',
+    }
+  }
+
+  test('interactive_prompt event builds a pending choice card', () => {
+    const msg = processInteractivePrompt({
+      type: 'interactive_prompt', request_id: 'req-x',
+      input: { prompt: 'Do you want to proceed?', options: [{ index: '1', label: 'Yes' }, { index: '2', label: 'No' }] },
+    })
+    expect(msg).not.toBeNull()
+    expect(msg.type).toBe('interactive_prompt')
+    expect(msg.status).toBe('pending')
+    expect(msg.prompt).toBe('Do you want to proceed?')
+    expect(msg.options).toHaveLength(2)
+    expect(msg.options[0]).toEqual({ index: '1', label: 'Yes' })
+  })
+
+  test('interactive_prompt with stringified input parses options', () => {
+    const msg = processInteractivePrompt({
+      type: 'interactive_prompt', request_id: 'req-y',
+      input: '{"prompt":"proceed?","options":[{"index":"1","label":"A"},{"index":"2","label":"B"}]}',
+    })
+    expect(msg.prompt).toBe('proceed?')
+    expect(msg.options[1].label).toBe('B')
+  })
+
+  test('interactive_prompt without request_id is dropped', () => {
+    expect(processInteractivePrompt({ type: 'interactive_prompt', input: { prompt: 'x' } })).toBeNull()
+  })
+
+  test('non-interactive_prompt types are ignored', () => {
+    expect(processInteractivePrompt({ type: 'agent_text', text: 'hi' })).toBeNull()
+    expect(processInteractivePrompt({ type: 'approval_request', request_id: 'r' })).toBeNull()
+  })
+
+  test('onChoiceRespond builds the correct interactive_response payload', () => {
+    const sent: any[] = []
+    const send = (m: any) => sent.push(m)
+    const sessionId = 's-123'
+    function onChoiceRespond(msg: any, choice: string) {
+      if (!msg.request_id) return
+      send({ type: 'interactive_response', session_id: sessionId, request_id: msg.request_id, choice })
+    }
+    onChoiceRespond({ request_id: 'req-1' }, '1')
+    onChoiceRespond({ request_id: 'req-2' }, '2')
+    expect(sent).toEqual([
+      { type: 'interactive_response', session_id: 's-123', request_id: 'req-1', choice: '1' },
+      { type: 'interactive_response', session_id: 's-123', request_id: 'req-2', choice: '2' },
+    ])
+  })
+})
+
 // Retry last prompt — mirrors SessionDetail.vue retryLastPrompt() +
 // hasLastUserPrompt. A retry re-sends the last user_text verbatim by routing
 // it through sendMessage (filling messageInput first), so the retried bubble is
