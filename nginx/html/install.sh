@@ -9,11 +9,18 @@ GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 NC='\033[0m'
 
-# GitHub 下载地址（国内自动走 gh-proxy.com 加速，不可用时降级直连）
+# GitHub 下载地址（国内自动走多个加速代理轮询，全部不可用时降级直连）
 REPO="pocketctl/pocketctl"
 GH_DL="https://github.com/${REPO}/releases/latest/download"
-GH_PROXY="https://gh-proxy.com/"
 RELAY_URL="wss://www.pocketctl.me/ws"
+
+# 国内加速代理（公益镜像，按顺序尝试；任一可用即可，避免单点故障）
+# 与 internal/update/updater.go 的 ghProxies 保持一致。
+GH_PROXIES=(
+    "https://gh-proxy.com/"
+    "https://ghfast.top/"
+    "https://ghproxy.net/"
+)
 
 echo -e "${GREEN}╔══════════════════════════════════════╗${NC}"
 echo -e "${GREEN}║     pocketctl Daemon 安装程序        ║${NC}"
@@ -51,25 +58,38 @@ TMP_FILE=$(mktemp)
 trap 'rm -f "$TMP_FILE"' EXIT
 
 # 下载函数：curl 优先，wget 兜底
+# 连接超时 8s，整体 60s —— 快速失败后立即切换下一个源，不让坏代理拖住整个安装。
 download() {
     local url="$1"
     if command -v curl &> /dev/null; then
-        curl --connect-timeout 10 --max-time 120 -fsSL "$url" -o "$TMP_FILE" 2>/dev/null && return 0
+        curl --connect-timeout 8 --max-time 60 -fsSL "$url" -o "$TMP_FILE" 2>/dev/null && return 0
     elif command -v wget &> /dev/null; then
-        wget --timeout=10 --tries=1 -q "$url" -O "$TMP_FILE" 2>/dev/null && return 0
+        wget --timeout=8 --tries=1 -q "$url" -O "$TMP_FILE" 2>/dev/null && return 0
     fi
     return 1
 }
 
-# 1) 国内加速代理 → 2) GitHub 直连
+# 按优先级依次尝试：各公益代理 → GitHub 直连
 GH_URL="${GH_DL}/${BINARY}"
+SOURCES=()
+for p in "${GH_PROXIES[@]}"; do
+    SOURCES+=("${p}${GH_URL}")
+done
+SOURCES+=("${GH_URL}")
+
 echo -e "${YELLOW}正在下载 pocketctl...${NC}"
-if ! download "${GH_PROXY}${GH_URL}"; then
-    echo -e "${YELLOW}加速代理不可用，尝试 GitHub 直连...${NC}"
-    if ! download "${GH_URL}"; then
-        echo -e "${RED}下载失败：请检查网络或稍后重试${NC}"
-        exit 1
+DOWNLOADED=0
+for url in "${SOURCES[@]}"; do
+    if download "$url"; then
+        DOWNLOADED=1
+        break
     fi
+    echo -e "${YELLOW}  ✗ 该源不可用，切换下一个...${NC}"
+done
+
+if [ "$DOWNLOADED" -ne 1 ]; then
+    echo -e "${RED}下载失败：所有源均不可用，请检查网络或稍后重试${NC}"
+    exit 1
 fi
 
 # 写入 /usr/local/bin（目录不可写时用 sudo）

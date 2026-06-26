@@ -52,6 +52,24 @@ func TestJSONLStreamParserRealAssistantStaysAgentText(t *testing.T) {
 	if events[0].Text != "Here is the answer." {
 		t.Errorf("unexpected text: %q", events[0].Text)
 	}
+	// The model Claude actually used must be surfaced on the event so the
+	// daemon can detect a /model switch.
+	if events[0].Model != "claude-sonnet-4" {
+		t.Errorf("expected model claude-sonnet-4, got %q", events[0].Model)
+	}
+}
+
+func TestJSONLStreamParserAgentTextModelSuffixStripped(t *testing.T) {
+	// A model id carrying a context-window suffix (e.g. [1M]) must be cleaned.
+	p := NewJSONLStreamParser()
+	line := `{"type":"assistant","sessionId":"s1","message":{"role":"assistant","model":"GLM-5.2[1M]","content":[{"type":"text","text":"hi"}]}}`
+	events, _ := p.Parse(line)
+	if len(events) != 1 || events[0].Type != "agent_text" {
+		t.Fatalf("expected agent_text, got %v", events)
+	}
+	if events[0].Model != "GLM-5.2" {
+		t.Errorf("expected stripped model GLM-5.2, got %q", events[0].Model)
+	}
 }
 
 func TestJSONLStreamParserCompactNotEnoughMessages(t *testing.T) {

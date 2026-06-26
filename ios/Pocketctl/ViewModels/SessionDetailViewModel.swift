@@ -10,6 +10,8 @@ final class SessionDetailViewModel {
     var status: String
     var title: String?
     var exitReason: String?
+    /// Resolved model name for this session (live-updated on /model switch).
+    var currentModel: String?
     var isLoading = true
     /// Incremented when initial replay completes — triggers scroll-to-bottom
     var scrollTick = 0
@@ -326,6 +328,16 @@ final class SessionDetailViewModel {
 
         case .sessionTitleUpdate:
             title = event.title
+
+        case .sessionMeta:
+            if let model = event.resolvedModel, !model.isEmpty {
+                currentModel = model
+            }
+
+        case .sessionModelChanged:
+            if let model = event.resolvedModel, !model.isEmpty {
+                currentModel = model
+            }
 
         case .commandReceipt:
             handleCommandReceipt(event)

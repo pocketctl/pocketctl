@@ -286,7 +286,7 @@ export class Router {
     const daemon = this.daemons.get(daemonId);
     const userId = daemon?.userId ?? null;
 
-    if (msg.type === 'session_created' || msg.type === 'session_status' || msg.type === 'session_id_changed' || msg.type === 'session_discovered' || msg.type === 'subagent_discovered') {
+    if (msg.type === 'session_created' || msg.type === 'session_status' || msg.type === 'session_id_changed' || msg.type === 'session_discovered' || msg.type === 'subagent_discovered' || msg.type === 'session_model_changed') {
       this.sessionToDaemon.set(sessionId, daemonId);
     }
     if (msg.type === 'session_id_changed') {
@@ -352,6 +352,18 @@ export class Router {
           if (clientWs.readyState === 1 && this.sameUser(client.userId, userId)) this.send(clientWs, enriched);
         }
       }).catch(console.error);
+      return;
+    }
+    if (msg.type === 'session_model_changed') {
+      // Mid-session model switch (e.g. /model in the terminal). Update the
+      // sessions.model column unconditionally (upsertSession's COALESCE cannot
+      // overwrite), persist as an event, and broadcast to all of the owner's
+      // clients so every device's model badge refreshes.
+      db.updateSessionModel(this.pool, sessionId, msg.model).catch(console.error);
+      db.insertEvent(this.pool, sessionId, msg.type, msg).catch(console.error);
+      for (const [clientWs, client] of this.clients) {
+        if (clientWs.readyState === 1 && this.sameUser(client.userId, userId)) this.send(clientWs, msg);
+      }
       return;
     }
     if (msg.type === 'subagent_discovered') {

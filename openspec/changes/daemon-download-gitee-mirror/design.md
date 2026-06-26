@@ -1,5 +1,18 @@
 ## Context
 
+> ⚠️ **已废弃 (2026-06-26)**：本方案的 Gitee 镜像路线经实测不可行。
+> - Gitee API `GET /repos/muwb123/pocketctl/releases/latest` 返回 `404 Not Found Project`
+> - Gitee Release 资产匿名下载返回 `403 Forbidden`（必须登录）
+> - 即便 CI 推送成功，用户也无法匿名下载，方案失去意义
+>
+> 实际落地的替代方案：**多公益代理轮询 + GitHub 直连兜底**（见
+> `internal/update/updater.go` 的 `ghProxies` 与 `nginx/html/install.sh`
+> 的下载源列表）。CI 中的 `upload-gitee-release` job 已删除。
+>
+> 下面的内容仅作历史记录保留。
+
+---
+
 `pocketctl daemon update` 和 `install.sh` 当前仅从 GitHub Releases 下载二进制。GitHub 在国内访问速度慢，国内用户需要 Gitee 镜像。GitHub Actions 已自动构建全平台二进制并发布 GitHub Release，但二进制不会自动出现在 Gitee Release。
 
 ## Goals / Non-Goals

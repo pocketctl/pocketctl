@@ -179,6 +179,7 @@ func (a *ClaudeAdapter) convertAssistant(raw ClaudeStreamEvent, sid string) ([]p
 						SessionID: sid,
 						Text:      c.Text,
 						Streaming: false,
+						Model:     CleanModelName(raw.Message.Model),
 					}
 					if u := raw.Message.Usage; u != nil {
 						ev.Usage = &protocol.ContextUsage{

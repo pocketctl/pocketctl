@@ -62,6 +62,10 @@
           <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/></svg>
           {{ contextTokens }}
         </span>
+        <span v-if="currentModel" class="model-pill" :title="'当前模型：' + currentModel">
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.6 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.6a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+          {{ currentModel }}
+        </span>
         <div class="session-id-box">
           <code class="session-id-text">{{ sessionId?.slice(0, 8) }}</code>
           <button class="copy-btn" @click="copySessionId" :title="copied ? t('common.copied') : t('session.actions.copy_id')">
@@ -233,8 +237,34 @@
                 </Transition>
               </div>
 
-              <!-- Right: context usage + send/stop button -->
+              <!-- Right: model + effort + context usage + send/stop button -->
               <div class="input-right">
+                <!-- Current model (resolved from session_meta) -->
+                <span v-if="currentModel" class="model-pill" :title="t('session.current_model')">
+                  <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M12 1v6M12 17v6M4.22 4.22l4.24 4.24M15.54 15.54l4.24 4.24M1 12h6M17 12h6M4.22 19.78l4.24-4.24M15.54 8.46l4.24-4.24"/></svg>
+                  <span class="model-name">{{ currentModel }}</span>
+                </span>
+
+                <!-- Effort level dropdown (Claude Code thinking strength) -->
+                <div v-if="canInput && currentSessionAgent !== 'opencode'" class="effort-dropdown" ref="effortDropdownEl">
+                  <button class="effort-trigger" @click="showEffortMenu = !showEffortMenu"
+                    :title="t('session.effort_level')">
+                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2a4 4 0 0 0-4 4v4a4 4 0 0 0 8 0V6a4 4 0 0 0-4-4z"/><path d="M6 10v2a6 6 0 0 0 12 0v-2"/><path d="M12 18v3"/></svg>
+                    <span class="effort-label">{{ currentEffort || t('session.effort_unknown') }}</span>
+                    <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M6 9l6 6 6-6"/></svg>
+                  </button>
+                  <Transition name="perm-menu">
+                    <div v-if="showEffortMenu" class="perm-menu">
+                      <button v-for="lvl in EFFORT_LEVELS" :key="lvl"
+                        :class="['perm-menu-item', { active: currentEffort === lvl }]"
+                        @click="setEffort(lvl)">
+                        <span class="perm-menu-name">{{ lvl }}</span>
+                        <svg v-if="currentEffort === lvl" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M20 6L9 17l-5-5"/></svg>
+                      </button>
+                    </div>
+                  </Transition>
+                </div>
+
                 <div v-if="contextTokens" class="ctx-indicator" :title="contextTooltip">
                   <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/></svg>
                   <span class="ctx-value">{{ contextTokens }}</span>
@@ -317,6 +347,13 @@ const allSessions = ref<any[]>([])
 const messageInput = ref('')
 const commandsCache = ref<CommandItem[]>([])
 const currentModel = ref('')            // resolved model name from session_meta event
+const currentEffort = ref('')           // thinking-effort level from session_meta (low/medium/high/xhigh/max/ultracode)
+const showEffortMenu = ref(false)       // effort dropdown visibility
+// Claude Code TUI exposes these effort levels via the /effort command.
+const EFFORT_LEVELS = ['low', 'medium', 'high', 'xhigh', 'max', 'ultracode'] as const
+// Persist the last-set effort per session so it survives refresh / session switch
+// (effort is a runtime TUI state, not stored in JSONL or settings.json).
+const effortStorageKey = (sid: string) => `pocketctl:effort:${sid}`
 const showHelpModal = ref(false)        // /help local command → full-screen modal
 const replayReqId = ref(0)
 const isLoading = ref(false)
@@ -359,6 +396,7 @@ const copied = ref(false)
 const messagesEl = ref<HTMLDivElement | null>(null)
 const inputEl = ref<HTMLTextAreaElement | null>(null)
 const permDropdownEl = ref<HTMLElement | null>(null)
+const effortDropdownEl = ref<HTMLElement | null>(null)
 const isInputFocused = ref(false)
 // Textarea height (user-adjustable via drag handle, resets on page refresh)
 const DEFAULT_TEXTAREA_HEIGHT = 72  // ~3 rows
@@ -658,6 +696,15 @@ function setPermissionMode(mode: string) {
   send({ type: 'set_permission_mode', session_id: sessionId.value, content: mode })
 }
 
+// Switch thinking-effort: inject `/effort <level>` into the PTY via the daemon,
+// then persist it locally so the pill stays in sync across refresh / session switch.
+function setEffort(level: string) {
+  currentEffort.value = level
+  showEffortMenu.value = false
+  try { localStorage.setItem(effortStorageKey(sessionId.value), level) } catch {}
+  send({ type: 'set_effort', session_id: sessionId.value, content: level })
+}
+
 // Stop button escalation: 1st click sends PTY Ctrl+C (graceful). If clicked
 // again within 2.5s (Ctrl+C didn't reach claude — PTY disconnected), escalate
 // to session_kill (SIGKILL the claude process). This guarantees a stuck session
@@ -868,12 +915,12 @@ function buildStatusMessage(): string {
   return parts.join(' · ')
 }
 
-// buildModelMessage shows the active model, or a hint that switching requires a
-// restart (runtime switch isn't possible: --model is fixed at PTY launch, and
-// driving the TUI's model menu via key sequences is unreliable).
+// buildModelMessage shows the active model. Terminal /model switches are now
+// reflected live (detected from the next assistant message's model field), so
+// no restart is required.
 function buildModelMessage(arg: string): string {
   if (arg) {
-    return `运行时切换模型需要重启会话生效。请在终端使用 /model，或新建会话时选择目标模型。`
+    return `请在终端使用 /model 切换模型，切换后将在下一条回复生效并自动同步到此处。`
   }
   return currentModel.value
     ? `当前模型：${currentModel.value}`
@@ -1107,6 +1154,8 @@ watch(sessionId, (newId, oldId) => {
     exitedAt.value = ''
     commandsCache.value = []
     currentModel.value = '' // clear; refilled by get_session_meta below
+    currentEffort.value = '' // clear; refilled by get_session_meta / localStorage
+    showEffortMenu.value = false
     replayReqId.value++
     isLoading.value = true
     loadedMinId.value = 0
@@ -1200,6 +1249,23 @@ onMounted(() => {
   // session_meta: authoritative model name, in response to get_session_meta.
   // (session_created also carries model as an optimistic early fill below.)
   cleanups.push(onEvent('session_meta', (msg: any) => {
+    if (msg.session_id !== sessionId.value) return
+    if (msg.model) currentModel.value = msg.model
+    // effort: prefer the daemon-reported value (reflects what pocketctl set);
+    // fall back to the last persisted local value when the daemon has none.
+    if (msg.effort) {
+      currentEffort.value = msg.effort
+    } else {
+      try {
+        const saved = localStorage.getItem(effortStorageKey(sessionId.value))
+        if (saved) currentEffort.value = saved
+      } catch {}
+    }
+  }))
+
+  // session_model_changed: the daemon detected a /model switch mid-session
+  // (from the next assistant message's model field). Refresh the badge live.
+  cleanups.push(onEvent('session_model_changed', (msg: any) => {
     if (msg.session_id !== sessionId.value) return
     if (msg.model) currentModel.value = msg.model
   }))
@@ -1358,6 +1424,9 @@ function closePermMenu(e: MouseEvent) {
   if (permDropdownEl.value && !permDropdownEl.value.contains(e.target as Node)) {
     showPermMenu.value = false
   }
+  if (effortDropdownEl.value && !effortDropdownEl.value.contains(e.target as Node)) {
+    showEffortMenu.value = false
+  }
 }
 onMounted(() => {
   document.addEventListener('click', closePermMenu)
@@ -1397,6 +1466,7 @@ onMounted(() => {
 .status-pill { display: inline-flex; align-items: center; gap: 5px; padding: 4px 10px; border-radius: var(--radius-full); font-size: 12px; font-weight: 600; }
 .status-pill.running { background: var(--success-bg); color: var(--success); }
 .status-pill .pulse { width: 6px; height: 6px; border-radius: 50%; background: currentColor; animation: pulse-green 1.5s infinite; }
+.model-pill { display: inline-flex; align-items: center; gap: 5px; padding: 4px 10px; border-radius: var(--radius-full); font-size: 12px; font-weight: 600; background: var(--accent-muted); color: var(--accent); max-width: 180px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 .session-id-box { display: flex; align-items: center; gap: 6px; padding: 3px 8px; background: var(--bg); border: 1px solid var(--border); border-radius: var(--radius-md); }
 .session-id-text { font-family: var(--font-mono); font-size: 12px; color: var(--fg-secondary); }
@@ -1484,6 +1554,17 @@ onMounted(() => {
 .perm-trigger { display: inline-flex; align-items: center; gap: 4px; padding: 4px 8px; background: none; border: none; color: var(--fg-secondary); font-size: 12px; cursor: pointer; border-radius: var(--radius-sm); transition: color 0.15s, background 0.15s; font-family: var(--font-body); }
 .perm-trigger:hover { color: var(--fg); background: var(--surface-hover); }
 .perm-label { font-weight: 500; }
+
+/* Current model pill (right) */
+.model-pill { display: inline-flex; align-items: center; gap: 4px; padding: 4px 8px; font-size: 11px; color: var(--fg-tertiary); font-family: var(--font-mono); cursor: default; max-width: 180px; }
+.model-pill svg { flex-shrink: 0; }
+.model-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* Effort dropdown (right) — mirrors .perm-dropdown */
+.effort-dropdown { position: relative; }
+.effort-trigger { display: inline-flex; align-items: center; gap: 4px; padding: 4px 8px; background: none; border: none; color: var(--fg-secondary); font-size: 12px; cursor: pointer; border-radius: var(--radius-sm); transition: color 0.15s, background 0.15s; font-family: var(--font-body); }
+.effort-trigger:hover { color: var(--fg); background: var(--surface-hover); }
+.effort-label { font-weight: 500; }
 .perm-menu { position: absolute; bottom: calc(100% + 4px); left: 0; min-width: 140px; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-md); box-shadow: 0 4px 16px rgba(0,0,0,0.3); padding: 4px; z-index: 30; }
 .perm-menu-item { display: flex; align-items: center; justify-content: space-between; width: 100%; padding: 8px 10px; background: none; border: none; color: var(--fg); font-size: 13px; cursor: pointer; border-radius: var(--radius-sm); transition: background 0.1s; font-family: var(--font-body); }
 .perm-menu-item:hover { background: var(--surface-hover); }

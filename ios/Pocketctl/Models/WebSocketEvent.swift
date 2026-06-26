@@ -41,6 +41,7 @@ enum WebSocketEventType: String, Sendable {
     case upgradeResult = "upgrade_result"
     case sessionCreateFailed = "session_create_failed"
     case sessionMeta = "session_meta"
+    case sessionModelChanged = "session_model_changed"
 
     // Server responses
     case registerAck = "register_ack"

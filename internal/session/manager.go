@@ -41,6 +41,7 @@ type ProcessState struct {
 	PTY              *os.File             // interactive-web-session D1: daemon session 的 PTY master（写 stdin 驱动 interactive claude）
 	PermissionMode   string               // current permission mode (updated by JSONL permission-mode parser)
 	Model            string               // resolved model name (for session_created, surfaced to web /model)
+	Effort           string               // last-set thinking-effort level (low/medium/high/xhigh/max/ultracode)
 	PendingRequestID string               // non-empty while a tool-use approval request awaits a client decision
 }
 
@@ -89,6 +90,66 @@ func (sm *SessionManager) SetPermissionMode(ctx context.Context, sessionID, targ
 		}
 	}
 	return nil
+}
+
+// ValidEffortLevels are the thinking-effort levels exposed by Claude Code's TUI
+// via the /effort command. Kept in the order shown by the TUI picker.
+var ValidEffortLevels = []string{"low", "medium", "high", "xhigh", "max", "ultracode"}
+
+// isValidEffort reports whether level is one of the TUI's accepted effort values.
+func isValidEffort(level string) bool {
+	for _, v := range ValidEffortLevels {
+		if v == level {
+			return true
+		}
+	}
+	return false
+}
+
+// SetEffort switches the Claude TUI's thinking-effort level for a daemon (PTY)
+// session by injecting `/effort <level>` followed by Enter, mirroring how a
+// user would type it in the terminal. Only daemon sessions support runtime
+// effort switching. The chosen level is recorded on ProcessState so a later
+// get_session_meta can surface it to the web/iOS client. Terminal sessions and
+// unknown sessions return an error.
+//
+// Note: claude's effort level is a pure runtime TUI state — it is NOT persisted
+// to JSONL or ~/.claude/settings.json, so this recorded value reflects only what
+// was set via pocketctl, not what a user may type directly in the terminal.
+func (sm *SessionManager) SetEffort(sessionID, level string) error {
+	if !isValidEffort(level) {
+		return fmt.Errorf("unsupported effort level: %s (use one of %v)", level, ValidEffortLevels)
+	}
+	sm.mu.RLock()
+	ps, ok := sm.sessions[sessionID]
+	sm.mu.RUnlock()
+	if !ok {
+		return fmt.Errorf("session not found")
+	}
+	if ps.Source != "daemon" || ps.PTY == nil {
+		return fmt.Errorf("only daemon (interactive) sessions support runtime effort switch")
+	}
+
+	if _, err := ps.PTY.Write([]byte("/effort " + level + "\r")); err != nil {
+		return fmt.Errorf("pty write /effort: %w", err)
+	}
+
+	sm.mu.Lock()
+	ps.Effort = level
+	sm.mu.Unlock()
+	return nil
+}
+
+// GetSessionEffort returns the last-set thinking-effort level for a session, or
+// "" if none has been set / the session is unknown. Used by get_session_meta.
+func (sm *SessionManager) GetSessionEffort(sessionID string) string {
+	sm.mu.RLock()
+	ps, ok := sm.sessions[sessionID]
+	sm.mu.RUnlock()
+	if !ok {
+		return ""
+	}
+	return ps.Effort
 }
 
 // InterruptSession stops the agent's current generation without killing the

@@ -56,6 +56,7 @@ type DaemonEvent struct {
 	Usage            *ContextUsage   `json:"usage,omitempty"`           // token usage for agent_text events
 	PermissionMode   string          `json:"permission_mode,omitempty"` // current mode (permission_mode_changed event)
 	Model            string          `json:"model,omitempty"`           // resolved model name (session_meta event)
+	Effort           string          `json:"effort,omitempty"`          // current thinking-effort level (session_meta event)
 	Models           []ModelOption   `json:"models,omitempty"`          // available models (model_list event)
 }
 

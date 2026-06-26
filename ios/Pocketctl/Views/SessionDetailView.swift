@@ -189,6 +189,19 @@ struct SessionDetailView: View {
             .padding(.vertical, 4)
             .background(statusColor.opacity(0.15))
             .cornerRadius(PCRadius.full)
+
+            // Model pill — reflects terminal /model switches live
+            if let model = viewModel?.currentModel, !model.isEmpty {
+                Text(model)
+                    .font(PCFont.body(12, weight: .semibold))
+                    .foregroundStyle(Color.pcAccent)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 4)
+                    .background(Color.pcAccent.opacity(0.12))
+                    .cornerRadius(PCRadius.full)
+            }
         }
         .padding(.horizontal, PCSpacing.md)
         .padding(.vertical, PCSpacing.sm)

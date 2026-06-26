@@ -668,6 +668,12 @@ export async function updateSessionCost(pool: pg.Pool, sessionId: string, costUs
   await pool.query(`UPDATE sessions SET cost_usd = $1, updated_at = NOW() WHERE session_id = $2`, [costUsd, sessionId]);
 }
 
+/** Update the session's resolved model (on a mid-session /model switch). Unlike
+ *  upsertSession (which uses COALESCE and cannot overwrite), this writes unconditionally. */
+export async function updateSessionModel(pool: pg.Pool, sessionId: string, model: string): Promise<void> {
+  await pool.query(`UPDATE sessions SET model = $1, updated_at = NOW() WHERE session_id = $2`, [model, sessionId]);
+}
+
 /** Increment session cost by a delta (for per-turn cost accumulation from assistant usage). */
 export async function incrementSessionCost(pool: pg.Pool, sessionId: string, delta: number): Promise<void> {
   await pool.query(`UPDATE sessions SET cost_usd = COALESCE(cost_usd, 0) + $1, updated_at = NOW() WHERE session_id = $2`, [delta, sessionId]);
