@@ -373,6 +373,8 @@
   "hosts.status_online": "Online",
   "hosts.status_offline": "Offline",
   "hosts.agent_info_pending": "Waiting for daemon agent info",
+  "hosts.agent_system_install": "System install — pocketctl can't auto-upgrade. Reinstall sudo-free on the host.",
+  "hosts.agent_none": "No coding agent detected. Install one (e.g. Claude Code) on the host and retry.",
   "hosts.token_host_total": "Host Total",
   "hosts.token_today_consumed": "Today",
   "hosts.token_month_consumed": "Last 30d",

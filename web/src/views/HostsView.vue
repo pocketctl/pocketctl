@@ -149,9 +149,10 @@
                   <div class="ag-name">{{ agentName(a) }} <span class="ag-version">{{ agentVersionLabel(a) }}</span></div>
                   <div class="ag-meta">{{ agentMetaLabel(a) }}</div>
                 </div>
-                <button v-if="selectedDaemon?.daemon_online && !isAgentLatest(a)" class="ag-upgrade-btn" :class="{ upgrading: upgrading === agentRawName(a) }" :disabled="upgrading === agentRawName(a)" @click="upgradeAgent(agentRawName(a))">
-                  {{ upgrading === agentRawName(a) ? t('settings.upgrade_btn') : t('settings.upgrade_btn') }}
+                <button v-if="selectedDaemon?.daemon_online && !isAgentLatest(a) && agentManageable(a)" class="ag-upgrade-btn" :class="{ upgrading: upgrading === agentRawName(a) }" :disabled="upgrading === agentRawName(a)" @click="upgradeAgent(agentRawName(a))">
+                  {{ t('settings.upgrade_btn') }}
                 </button>
+                <span v-else-if="!agentManageable(a)" class="ag-sysinstall" :title="t('hosts.agent_system_install')">{{ t('hosts.agent_system_install') }}</span>
                 <span v-else-if="isAgentLatest(a)" class="ag-latest">✓ {{ t('settings.installed') }}</span>
               </div>
             </template>
@@ -159,7 +160,7 @@
               <div class="ag-icon claude">CC</div>
               <div class="ag-info">
                 <div class="ag-name">Claude Code <span class="ag-version">{{ t('settings.version_pending') }}</span></div>
-                <div class="ag-meta">{{ t('hosts.agent_info_pending') }}</div>
+                <div class="ag-meta">{{ t('hosts.agent_none') }}</div>
               </div>
             </div>
           </div>
@@ -440,6 +441,7 @@ function agentVersionLabel(a: any): string {
 function isAgentLatest(a: any): boolean {
   return typeof a === 'object' && !!a?.latest && a?.version === a?.latest
 }
+function agentManageable(a: any): boolean { return typeof a !== 'object' || a?.manageable !== false }
 function agentMetaLabel(a: any): string {
   if (typeof a === 'object' && a?.version) {
     return a.latest && a.version !== a.latest ? t('settings.upgrade_available') : t('settings.installed')
@@ -853,6 +855,7 @@ onUnmounted(() => {
 .ag-upgrade-btn:disabled { opacity: 0.6; cursor: wait; }
 .ag-upgrade-btn.upgrading { background: var(--accent); color: #fff; opacity: 0.75; }
 .ag-latest { flex-shrink: 0; color: var(--success); font-size: 12px; font-weight: 600; display: inline-flex; align-items: center; }
+.ag-sysinstall { flex-shrink: 0; max-width: 220px; font-size: 11px; color: var(--fg-tertiary); text-align: right; line-height: 1.3; }
 
 /* Token Overview */
 .token-overview { display: flex; gap: 16px; align-items: flex-start; margin-bottom: 16px; flex-wrap: wrap; }
