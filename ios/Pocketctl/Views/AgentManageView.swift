@@ -211,6 +211,11 @@ private struct AgentCard: View {
         }
     }
 
+    /// 存在新版但为系统(root)安装、pocketctl 无法就地升级的场景。
+    private var isSystemInstall: Bool {
+        !agent.manageable && !agent.latest.isEmpty && !agent.version.isEmpty && agent.version != agent.latest
+    }
+
     @ViewBuilder
     private var versionRow: some View {
         if agent.canUpgrade {
@@ -223,6 +228,11 @@ private struct AgentCard: View {
                         .font(PCFont.body(11, weight: .semibold))
                         .foregroundStyle(Color.pcWarning)
                 }
+            }
+        } else if isSystemInstall {
+            VStack(alignment: .leading, spacing: 4) {
+                versionLine(label: "当前版本", value: "v\(agent.version)", color: .pcFg)
+                versionLine(label: "最新版本", value: "v\(agent.latest)", color: .pcWarning)
             }
         } else if !agent.version.isEmpty {
             versionLine(
@@ -287,6 +297,15 @@ private struct AgentCard: View {
                 .cornerRadius(PCRadius.md)
             }
             .disabled(isUpgrading)
+        } else if isSystemInstall {
+            Text("系统安装，无法自动升级，请在主机手动升级")
+                .font(PCFont.body(12))
+                .foregroundStyle(Color.pcWarning)
+                .multilineTextAlignment(.center)
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 10)
+                .overlay(RoundedRectangle(cornerRadius: PCRadius.md).stroke(Color.pcWarning.opacity(0.4), lineWidth: 1))
+                .cornerRadius(PCRadius.md)
         } else {
             Text("已是最新")
                 .font(PCFont.body(14))
