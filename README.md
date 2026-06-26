@@ -82,6 +82,7 @@ pocketctl daemon status
 | `pocketctl daemon logs` | View daemon logs |
 | `pocketctl daemon doctor` | Diagnose connection issues |
 | `pocketctl daemon update` | Update to the latest version |
+| `pocketctl uninstall [--yes] [--keep-binary]` | Remove daemon, config, and data directories |
 | `pocketctl version` | Print version |
 
 ## Environment Variables
