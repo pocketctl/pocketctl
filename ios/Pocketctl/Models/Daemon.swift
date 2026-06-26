@@ -6,12 +6,13 @@ struct AgentInfo: Identifiable, Sendable, Hashable {
     let type: String
     let version: String
     let latest: String
+    let manageable: Bool
 
     var id: String { type }
 
-    /// A newer version is available (current & latest both non-empty and different).
+    /// 存在新版且为用户本地可管理安装时才允许一键升级。
     var canUpgrade: Bool {
-        !version.isEmpty && !latest.isEmpty && version != latest
+        manageable && !version.isEmpty && !latest.isEmpty && version != latest
     }
 }
 
@@ -80,7 +81,8 @@ extension Daemon {
             return AgentInfo(
                 type: type,
                 version: dict["version"] as? String ?? "",
-                latest: dict["latest"] as? String ?? ""
+                latest: dict["latest"] as? String ?? "",
+                manageable: dict["manageable"] as? Bool ?? true
             )
         }
     }

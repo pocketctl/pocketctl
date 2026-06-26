@@ -124,7 +124,7 @@ final class AgentManageViewModel {
                 // If any upgrading agent now matches latest, clear its loading state.
                 if let agents = daemon?.agents {
                     upgradingAgents = upgradingAgents.filter { type in
-                        agents.first { $0.type == type }.map { $0.canUpgrade } ?? true
+                        agents.first { $0.type == type }.map { $0.canUpgrade } ?? false
                     }
                 }
             }
