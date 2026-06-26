@@ -1267,6 +1267,24 @@ async function doLogin() {
   await confirmAuth();
 }
 
+async function tryRefreshToken() {
+  const savedRefresh = localStorage.getItem('pocketctl_refresh_token');
+  if (!savedRefresh) return false;
+  const { ok, data } = await api('/api/auth/refresh', { refresh_token: savedRefresh });
+  if (!ok) {
+    localStorage.removeItem('pocketctl_access_token');
+    localStorage.removeItem('pocketctl_refresh_token');
+    localStorage.removeItem('pocketctl_user');
+    accessToken = '';
+    return false;
+  }
+  accessToken = data.access_token;
+  localStorage.setItem('pocketctl_access_token', data.access_token);
+  localStorage.setItem('pocketctl_refresh_token', data.refresh_token);
+  localStorage.setItem('pocketctl_user', JSON.stringify(data.user));
+  return true;
+}
+
 async function confirmAuth() {
   hideError();
   const btn = document.getElementById('auth-btn');
@@ -1277,6 +1295,20 @@ async function confirmAuth() {
     if (data.error === 'invalid_user_code') {
       document.querySelectorAll('[id^="step-"]').forEach(el => el.style.display = 'none');
       document.getElementById('step-invalid').style.display = 'block';
+      return;
+    }
+    // Token expired or invalid: try refresh, then fall back to login form
+    if (data.error === 'invalid_token' || data.error === 'authentication_required') {
+      const refreshed = await tryRefreshToken();
+      if (refreshed) {
+        await confirmAuth();
+        return;
+      }
+      // Refresh failed — clear "already logged in" and show login form
+      document.getElementById('step-already-logged-in').style.display = 'none';
+      document.getElementById('step-login').style.display = 'block';
+      document.getElementById('title').textContent = '登录以授权设备';
+      showError('登录已过期，请重新验证');
       return;
     }
     showError(data.error_description || data.error || '授权失败');
