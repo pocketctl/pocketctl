@@ -243,6 +243,11 @@ struct SessionDetailView: View {
                 vm.respondApproval(requestId: requestId, approved: approved)
             }
 
+        case .interactiveChoice:
+            InteractiveChoiceCard(message: message) { requestId, choice in
+                vm.respondChoice(requestId: requestId, choice: choice)
+            }
+
         default:
             // User message
             ChatBubble(message: message)

@@ -231,6 +231,22 @@ final class SessionDetailViewModel {
         ])
     }
 
+    /// Send the user's menu choice back to the daemon. The matching card is
+    /// optimistically marked so its chosen option highlights and the rest dim;
+    /// the daemon writes the chosen index to the agent's PTY so the blocking
+    /// selection prompt proceeds.
+    func respondChoice(requestId: String, choice: String) {
+        if let idx = messages.lastIndex(where: { $0.type == .interactiveChoice && $0.requestId == requestId }) {
+            messages[idx].selectedChoice = choice
+        }
+        wsService.send([
+            "type": "interactive_response",
+            "session_id": session.sessionId,
+            "request_id": requestId,
+            "choice": choice,
+        ])
+    }
+
     // MARK: - Event handling
 
     private func handleEvent(_ dict: [String: Any]) {
@@ -348,6 +364,9 @@ final class SessionDetailViewModel {
         case .approvalRequest:
             handleApprovalRequest(event)
 
+        case .interactivePrompt:
+            handleInteractivePrompt(event)
+
         case .error:
             msgCounter += 1
             messages.append(ChatMessage(
@@ -402,6 +421,9 @@ final class SessionDetailViewModel {
 
         case .approvalRequest:
             handleApprovalRequestDirect(event, messages: &messages)
+
+        case .interactivePrompt:
+            handleInteractivePromptDirect(event, messages: &messages)
 
         case .error:
             msgCounter += 1
@@ -746,6 +768,42 @@ final class SessionDetailViewModel {
             rawInputJSON: Self.encodeInput(event.input),
             requestId: requestId,
             approvalStatus: "pending"
+        ))
+    }
+
+    /// PTY selection menu — daemon scanned a menu the agent's TUI drew to the
+    /// PTY (e.g. a host PreToolUse hook's "❯1.Yes 2.No" prompt that never
+    /// reaches JSONL). Appends an inline numbered-choice card.
+    private func handleInteractivePrompt(_ event: WebSocketEvent) {
+        guard let requestId = event.requestId else { return }
+        msgCounter += 1
+        messages.append(ChatMessage(
+            id: msgCounter,
+            role: .agent,
+            type: .interactiveChoice,
+            content: "",
+            streaming: false,
+            requestId: requestId,
+            promptText: event.promptText ?? "",
+            promptOptions: event.promptOptions,
+            selectedChoice: nil
+        ))
+        if !isBatchProcessing { scrollTick += 1 }
+    }
+
+    private func handleInteractivePromptDirect(_ event: WebSocketEvent, messages: inout [ChatMessage]) {
+        guard let requestId = event.requestId else { return }
+        msgCounter += 1
+        messages.append(ChatMessage(
+            id: msgCounter,
+            role: .agent,
+            type: .interactiveChoice,
+            content: "",
+            streaming: false,
+            requestId: requestId,
+            promptText: event.promptText ?? "",
+            promptOptions: event.promptOptions,
+            selectedChoice: nil
         ))
     }
 

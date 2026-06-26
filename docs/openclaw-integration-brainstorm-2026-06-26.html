@@ -151,27 +151,46 @@
 <!-- ========================== 3 ========================== -->
 <h2>3. OpenClaw + 飞书<strong>做不好</strong>的事</h2>
 
-<div class="card card-red">
-  <h3>3.1 实时流式输出不可见</h3>
+<div class="verdict">
+  <p style="font-weight:600;">🔎 2026-06-26 联网核实修正</p>
   <p>
-    Agent 产生的 JSONL 流每秒几十条事件（thinking、tool_call、tool_result…），
-    飞书只能收到 OpenClaw 转发的摘要。用户看不到：
+    核对 OpenClaw 官方文档与<strong>官方飞书插件</strong>（<code>larksuite/openclaw-lark</code>，production-ready，WebSocket + webhook）后，
+    原 §3 有两条论断<strong>已过时/不准确</strong>，下面就地标注修正：
   </p>
   <ul>
-    <li>Agent 正在想什么（thinking 内容）</li>
-    <li>每个 tool call 的完整 input/output（可能几百行代码）</li>
-    <li>Sub-agent 的内部活动</li>
+    <li><strong>飞书插件已支持流式输出</strong>（卡片内实时刷新文本 + Thinking/Generating/Complete 状态）→ §3.1 不是"不可见"，而是"只到文本层"。</li>
+    <li><strong>飞书插件已支持敏感操作确认按钮</strong> → §3.2 不是"审批做不到"，而是"<u>富审批</u>（命令全文 / 风险分级 / diff / 改参再批 / 逐 hook 粒度）做不到"。</li>
+    <li><strong>OpenClaw 本身也是自托管</strong>（历史以 markdown/yaml 存 <code>~/.openclaw</code>），且自带 Web Control UI（含 session 监控）+ iOS/Android mobile nodes → 与 pocketctl 有重叠，差异点必须落在"深度 / 控制 / 分析"而非"有没有"。</li>
   </ul>
-  <p><strong>你要知道 agent "卡在哪"只能靠猜。</strong></p>
+  <p>§3.3 / §3.4 / §3.5 经核实<strong>仍然成立</strong>；§4 已按核实结果重写。</p>
 </div>
 
 <div class="card card-red">
-  <h3>3.2 Tool Use 审批无法做 ⚠️ 最硬伤</h3>
-  <p>Claude Code 的 PreToolUse hook 会在执行命令/写文件前暂停等待审批。飞书做不到：</p>
+  <h3>3.1 流式有了，但只到"文本层" <span class="tag tag-orange">已修正</span></h3>
+  <p>
+    <strong>原判断已修正：</strong>官方飞书插件<b>已支持流式</b>（卡片内实时刷新 assistant 文本 +
+    Thinking/Generating/Complete 状态）。真正的差距在<strong>深度</strong>——飞书流的是 agent 的<strong>文本回复</strong>，
+    不是底层 JSONL 事件流。仍然看不到：
+  </p>
   <ul>
-    <li>展示完整命令内容和风险等级</li>
-    <li><strong>只展示命令而不执行，等用户点 approve/deny</strong></li>
-    <li>用户改了参数再 approve（modify-then-approve）</li>
+    <li>每个 tool call 的完整 input/output（命令全文 / 可能几百行代码）</li>
+    <li>thinking 原始内容、token usage 等结构化事件</li>
+    <li>Sub-agent 的内部活动与独立时间线</li>
+  </ul>
+  <p><strong>看得到"它在说什么"，看不到"它具体在执行什么"。</strong></p>
+</div>
+
+<div class="card card-red">
+  <h3>3.2 "确认按钮"有了，但富审批做不到 <span class="tag tag-orange">已修正</span></h3>
+  <p>
+    <strong>原判断已修正：</strong>飞书插件<b>已支持"敏感操作确认按钮"</b>，generic 的 approve/deny 能做。
+    但 pocketctl 的 PreToolUse 富审批仍是飞书接不住的：
+  </p>
+  <ul>
+    <li>展示<strong>完整命令内容</strong>和<strong>风险分级</strong>（不是一句"是否执行敏感操作"）</li>
+    <li>渲染将要写入的<strong>代码 diff</strong> 再决定</li>
+    <li>用户<strong>改参数再 approve</strong>（modify-then-approve）</li>
+    <li>逐 <strong>PreToolUse hook 粒度</strong>拦截，而非整轮一个确认</li>
   </ul>
   <p>pocketctl 近期提交：<code>0d47a29 feat(approval): PreToolUse 审批代理 — daemon hook 代理 + web/iOS 审批卡片</code></p>
 </div>
@@ -201,8 +220,102 @@
   <p>按天/模型/host 的分维度 token 消耗，需要<strong>持续采集 JSONL 中的 usage 数据并聚合</strong>。飞书不是数据分析工具。</p>
 </div>
 
-<!-- ========================== 4 ========================== -->
-<h2>4. 核心洞察</h2>
+<!-- ========================== 4 NEW (verified) ========================== -->
+<h2>4. 核实后仍站得住的差异化用户场景</h2>
+<p>
+  <span class="tag tag-green">已按 OpenClaw + 官方飞书插件最新版核实</span>
+  前提先讲清：OpenClaw + 飞书<strong>已经能做</strong>流式输出、敏感操作确认按钮、多 agent 隔离 session、
+  自带 Web/iOS 控制面。所以这里<strong>只保留</strong>两类差异点：①"飞书做了但做不到位（深度差）"，②"OpenClaw 结构上根本不碰"。
+  每条都标了核实后的<strong>成色</strong>（强 / 中），文末单列<strong>已撤回</strong>的几条以示诚实。
+</p>
+
+<div class="card card-green">
+  <h3>4.1 PTY 级控制：中断 → 注入纠偏 → 续跑 <span class="tag tag-green">成色：强</span></h3>
+  <blockquote>"我想让它停下、纠正一句话、再接着<u>原 session</u>跑；顺手 <code>/compact</code> 压一下上下文、<code>/effort</code> 调思考深度、切到 plan 模式。"</blockquote>
+  <ul>
+    <li><strong>OpenClaw + 飞书：</strong>只<strong>路由消息</strong>给 agent，不驱动 agent 进程的 PTY；发条消息 ≠ 注入到正在跑的进程</li>
+    <li><strong>pocketctl：</strong>PTY 级中断 + 注入 + 续跑 + <code>/compact</code> / <code>/effort</code> / 切 permission mode，外加 Git Worktree 隔离（<code>520b2b9</code>）做安全回退</li>
+  </ul>
+  <p>这是 §3.4 的延伸，<strong>核实后最干净的护城河</strong>——OpenClaw 的能力边界止于消息收发。</p>
+</div>
+
+<div class="card card-green">
+  <h3>4.2 PreToolUse 富审批 + 跨 session 审批队列 <span class="tag tag-green">成色：强</span></h3>
+  <blockquote>"飞书弹了个'是否执行敏感操作'，可我想看<u>命令全文 + 风险分级 + 要写入的 diff</u>，还想改个参数再批；3 个 agent 同时卡着等我，我连还有几个在排队都不知道。"</blockquote>
+  <ul>
+    <li><strong>OpenClaw + 飞书：</strong>有 generic 确认按钮，但无命令全文/风险分级/diff 渲染、无 modify-then-approve、无跨 session 审批队列与待办计数</li>
+    <li><strong>pocketctl：</strong>逐 PreToolUse hook 富审批（<code>0d47a29</code>）+ 复用 DiffCard（<code>45225d7</code>）渲染改动 + 统一审批队列（待审计数 / 按风险排序 / 批量处理）</li>
+  </ul>
+  <p>差异在<strong>深度与并发治理</strong>，不是"有没有审批"。</p>
+</div>
+
+<div class="card card-green">
+  <h3>4.3 Token 多维分析 + 预算阈值熔断 <span class="tag tag-green">成色：强</span></h3>
+  <blockquote>"一个失控 agent 一晚上烧了几百块 token，飞书只会让我事后自己心算，没人在阈值处拦一下、也没人告诉我钱花在哪个模型/host 上。"</blockquote>
+  <ul>
+    <li><strong>OpenClaw + 飞书：</strong>聊天网关，不是数据工具，无 token 聚合 / 预算 / 熔断概念</li>
+    <li><strong>pocketctl：</strong>已持续采集 JSONL usage，按天/模型/host 分维度聚合 + 趋势；可加预算阈值告警 → 触发暂停/中断该 session</li>
+  </ul>
+</div>
+
+<div class="card card-info">
+  <h3>4.4 JSONL 全事件深度可观测（含 sub-agent） <span class="tag tag-blue">成色：中</span></h3>
+  <blockquote>"飞书能看到它在<u>说</u>什么，但看不到它具体<u>执行</u>了什么——某个 tool 的完整 input/output、sub-agent 在干嘛、它到底卡在哪一步。"</blockquote>
+  <ul>
+    <li><strong>OpenClaw + 飞书：</strong>流的是 agent <strong>文本回复</strong>（§3.1 已修正：流式是有的），但不暴露底层 JSONL 事件、tool 细节、sub-agent 内部时间线</li>
+    <li><strong>pocketctl：</strong>JSONL 深度解析，每个 tool call 完整 input/output + thinking + sub-agent 独立时间线</li>
+  </ul>
+</div>
+
+<div class="card card-info">
+  <h3>4.5 agent 卡死 / 死循环主动告警 <span class="tag tag-blue">成色：中</span></h3>
+  <blockquote>"agent 在某个 tool 上反复重试、或 thinking 卡了十分钟，飞书一片安静，我以为它在干活，其实早僵住了。"</blockquote>
+  <ul>
+    <li><strong>OpenClaw + 飞书：</strong>"没新消息"无法区分"在思考"还是"卡死"，无停滞检测</li>
+    <li><strong>pocketctl：</strong>daemon 持续解析 JSONL，可做停滞检测（无进展时长 / 重试循环）并主动推送告警</li>
+  </ul>
+</div>
+
+<div class="card card-info">
+  <h3>4.6 Host 资源监控（CPU / 内存 / 磁盘） <span class="tag tag-blue">成色：中</span></h3>
+  <blockquote>"OpenClaw 把任务分到了几台机器跑，我想知道哪台 CPU 飙了 / 磁盘要满了——它有 node 概念，但不告诉我机器健康。"</blockquote>
+  <ul>
+    <li><strong>OpenClaw + 飞书：</strong>有 Gateway / mobile node 概念，但<strong>不做</strong>主机资源监控</li>
+    <li><strong>pocketctl：</strong>已有 Host 资源监控 + 多 Agent 适配器（<code>520b2b9</code>），session 天然带 host 归属与资源画像</li>
+  </ul>
+</div>
+
+<div class="card card-info">
+  <h3>4.7 敏感 output 不出本地（飞书 leg 仍进飞书云） <span class="tag tag-blue">成色：中（已精确化）</span></h3>
+  <blockquote>"agent 跑部署脚本，<code>.env</code> / 密钥被当 tool output <u>转发进飞书</u>，撤不回、同事都看到、飞书云端存了一份。"</blockquote>
+  <ul>
+    <li><strong>修正：</strong>OpenClaw 本身<strong>也是自托管</strong>（数据存 <code>~/.openclaw</code>），所以泄露点不在 OpenClaw，而在<strong>飞书这一段传输</strong>——内容进了飞书（SaaS）云就不可控</li>
+    <li><strong>pocketctl：</strong>敏感 output 可留在本地 daemon + 私有受控 UI，可脱敏、可按 host/session 隔离可见性，<strong>不必经飞书转发</strong></li>
+  </ul>
+  <p>表述要精确：这是"<strong>选择不把敏感内容推给飞书通道</strong>"的能力，不是"OpenClaw 会泄露"。</p>
+</div>
+
+<div class="verdict">
+  <p style="font-weight:600;">🗑️ 核实后已撤回 / 降级的论断（诚实记录）</p>
+  <ul>
+    <li><strong>"代码 diff 飞书完全看不了"</strong> → 降级并入 4.2：飞书卡片能贴富文本，只是没有 side-by-side diff / 改参再批，差在审批深度。</li>
+    <li><strong>"断线后无法知道 agent 跑到哪"</strong> → <strong>撤回</strong>：OpenClaw 有 session 历史 + Web Control UI 的 session 监控。残留价值只剩"重新接管 <u>PTY 控制权</u>"，已并入 4.1。</li>
+    <li><strong>"Plan/Todo 无法原地刷新"</strong> → <strong>撤回</strong>：飞书卡片支持原地刷新（流式就是证据），不成立。</li>
+    <li><strong>"事后审计无从查起"</strong> → <strong>降级</strong>：OpenClaw 把历史存成可 grep 的 markdown/yaml，不是查不到。残留价值只剩"<u>step 级 tool-call 回放</u>"，并入 4.4。</li>
+  </ul>
+</div>
+
+<div class="highlight-box">
+  <p style="font-weight:600;">🎯 优先级建议（核实后）</p>
+  <p style="color: var(--text-muted);">
+    按"差异最硬 + 复用成本最低"排序：<strong>4.2 富审批 + 队列</strong>（复用 DiffCard <code>45225d7</code> / 审批代理 <code>0d47a29</code>，几乎现成）&gt;
+    <strong>4.1 PTY 控制</strong>（最干净的护城河，OpenClaw 结构上不碰）&gt;
+    <strong>4.3 Token 分析 + 熔断</strong>（已有采集，加阈值即可）&gt; 4.5 / 4.6 / 4.7 守护类。
+  </p>
+</div>
+
+<!-- ========================== 5 ========================== -->
+<h2>5. 核心洞察</h2>
 
 <div class="highlight-box">
   <p style="font-size: 1.1em; font-weight: 600;">
@@ -213,8 +326,8 @@
   </p>
 </div>
 
-<!-- ========================== 5 ========================== -->
-<h2>5. 推荐接入方向</h2>
+<!-- ========================== 6 ========================== -->
+<h2>6. 推荐接入方向</h2>
 
 <div class="card card-green">
   <h3>pocketctl 作为 OpenClaw 的"控制塔"</h3>
@@ -268,8 +381,8 @@
   </tr>
 </table>
 
-<!-- ========================== 6 ========================== -->
-<h2>6. 待进一步讨论</h2>
+<!-- ========================== 7 ========================== -->
+<h2>7. 待进一步讨论</h2>
 <ul>
   <li>pocketctl daemon 如何感知 OpenClaw 启动的 agent session？（通过文件系统？OpenClaw API？WebSocket？）</li>
   <li>OpenClaw 的 session 模型与 pocketctl 的 protocol 如何映射？</li>

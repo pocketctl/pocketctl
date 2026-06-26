@@ -30,6 +30,7 @@ Commands:
   daemon logs    Show daemon logs
   daemon doctor  Diagnose connection and configuration issues
   daemon update  Update daemon to the latest version
+  uninstall      Remove pocketctl binary and all local data
   version        Print version
   help           Show this help
 
@@ -73,6 +74,7 @@ const helpZh = `pocketctl - 远程 AI 编程代理控制
   daemon logs    查看 daemon 日志
   daemon doctor  诊断连接和配置问题
   daemon update  更新到最新版本
+  uninstall      卸载 pocketctl，删除二进制和所有本地数据
   version        打印版本号
   help           显示此帮助
 
@@ -116,6 +118,7 @@ var messages = map[string]msg{
 		"pocketctl 守护进程已启动 (ID: %s, PID: %d)",
 	},
 	"daemon.relay":          {"Relay: %s", "Relay: %s"},
+	"daemon.version":        {"Version: %s", "版本: %s"},
 	"daemon.agents":         {"Agents: %s", "Agents: %s"},
 	"daemon.logs":           {"Logs: %s", "日志: %s"},
 	"daemon.shutting_down":  {"\nShutting down...", "\n正在关闭..."},
@@ -282,4 +285,30 @@ var messages = map[string]msg{
 		"  ℹ️   Daemon not running, new version ready. Run 'pocketctl daemon start'.",
 		"  ℹ️   Daemon 未在运行，新版本已就绪。运行 'pocketctl daemon start' 启动。",
 	},
+
+	// ---- uninstall.* (cmdUninstall) --------------------------------------
+	"uninstall.title":          {"pocketctl uninstall", "pocketctl 卸载"},
+	"uninstall.will_remove":    {"The following will be removed:", "以下内容将被删除:"},
+	"uninstall.desc_config":    {"config & auth", "配置与登录凭证"},
+	"uninstall.desc_runtime":   {"runtime (pid/log)", "运行时文件 (pid/log)"},
+	"uninstall.desc_binary":    {"binary", "二进制程序"},
+	"uninstall.stop_daemon_note": {
+		"The running daemon (if any) will be stopped first.",
+		"运行中的 daemon（如有）将先被停止。",
+	},
+	"uninstall.confirm":        {"\nProceed? [y/N] ", "\n确认卸载? [y/N] "},
+	"uninstall.aborted":        {"Aborted, nothing was removed.", "已取消，未删除任何内容。"},
+	"uninstall.stopping_daemon": {"Stopping daemon (PID %d)...", "正在停止 daemon (PID %d)..."},
+	"uninstall.stop_fail":      {"warning: stop daemon failed: %v", "警告: 停止 daemon 失败: %v"},
+	"uninstall.removing":       {"Removing %s", "删除 %s"},
+	"uninstall.remove_fail":    {"warning: remove %s failed: %v", "警告: 删除 %s 失败: %v"},
+	"uninstall.binary_fail":    {
+		"warning: remove binary %s failed: %v",
+		"警告: 删除二进制 %s 失败: %v",
+	},
+	"uninstall.binary_hint":    {
+		"  💡 Tip: if permission denied, run with sudo: sudo rm -f %s",
+		"  💡 提示: 如果权限不足，请使用 sudo: sudo rm -f %s",
+	},
+	"uninstall.done":           {"✅ pocketctl has been uninstalled.", "✅ pocketctl 已卸载完成。"},
 }

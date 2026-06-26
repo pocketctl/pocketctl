@@ -11,6 +11,7 @@ enum ChatMessageType: Sendable {
     case error
     case commandReceipt
     case approvalRequest
+    case interactiveChoice
 }
 
 struct ChatMessage: Identifiable, Sendable {
@@ -39,6 +40,13 @@ struct ChatMessage: Identifiable, Sendable {
     // Tool-use approval fields (PreToolUse hook → approval_request → approval_response)
     var requestId: String?                 // daemon's approval request id (approval_request)
     var approvalStatus: String = "pending" // pending | allowed | denied
+
+    // PTY selection-menu fields (interactive_prompt → interactive_response).
+    // Surfaced when the daemon scans a menu the agent's TUI drew to the PTY
+    // (e.g. a host PreToolUse hook's "❯1.Yes 2.No" prompt that never reaches JSONL).
+    var promptText: String = ""            // the question phrase parsed from the menu
+    var promptOptions: [(index: String, label: String)] = []  // numbered options
+    var selectedChoice: String?            // the index the user picked (nil while pending)
 
     /// Whether this tool call is still running (no output yet)
     var isRunning: Bool {

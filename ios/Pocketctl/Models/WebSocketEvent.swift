@@ -29,6 +29,12 @@ enum WebSocketEventType: String, Sendable {
     // Tool-use approval (daemon → client, non-bypass sessions)
     case approvalRequest = "approval_request"
 
+    // PTY selection menu (daemon → client) — a menu the agent's TUI drew to the
+    // PTY that never reached the JSONL history (e.g. a host PreToolUse hook's
+    // "❯1.Yes 2.No" confirmation). The daemon scans the PTY and surfaces it as
+    // a numbered-choice card; the user's pick is written back to the PTY.
+    case interactivePrompt = "interactive_prompt"
+
     // Replay control (relay → client)
     case replayBatch = "replay_batch"
     case replayEnd = "replay_end"
@@ -79,6 +85,33 @@ struct WebSocketEvent {
 
     /// Approval request id — for approval_request events (PreToolUse hook).
     var requestId: String? { raw["request_id"] as? String }
+
+    /// Parsed interactive-prompt payload — for interactive_prompt events.
+    /// The daemon emits `{request_id, input:{prompt, options:[{index,label}]}}`.
+    var promptText: String? {
+        guard let input = promptInputDict else { return nil }
+        return input["prompt"] as? String
+    }
+    /// Numbered options for an interactive_prompt, as (index, label) tuples.
+    var promptOptions: [(index: String, label: String)] {
+        guard let input = promptInputDict,
+              let arr = input["options"] as? [[String: Any]] else { return [] }
+        return arr.compactMap { opt in
+            guard let idx = opt["index"] as? String, let label = opt["label"] as? String else { return nil }
+            return (index: idx, label: label)
+        }
+    }
+    /// Resolves the `input` field for an interactive_prompt, accepting either a
+    /// parsed dict or a JSON string (the relay may forward it either way).
+    private var promptInputDict: [String: Any]? {
+        if let dict = raw["input"] as? [String: Any] { return dict }
+        if let str = raw["input"] as? String,
+           let data = str.data(using: .utf8),
+           let parsed = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+            return parsed
+        }
+        return nil
+    }
 
     var sessions: [[String: Any]]? {
         raw["sessions"] as? [[String: Any]]

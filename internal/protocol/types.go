@@ -12,6 +12,10 @@ type ClientMessage struct {
 	Prompt    string `json:"prompt,omitempty"`
 	RequestID string `json:"request_id,omitempty"`
 	Approved  bool   `json:"approved,omitempty"`
+	// Choice carries the selected option index (e.g. "1") for an
+	// interactive_response — the user's answer to a PTY selection prompt
+	// surfaced as an interactive_prompt card.
+	Choice string `json:"choice,omitempty"`
 	// PermissionMode for session_create: "default" | "acceptEdits" | "plan" | "bypassPermissions".
 	// Empty falls back to "acceptEdits" (the daemon default).
 	PermissionMode string `json:"permission_mode,omitempty"`
