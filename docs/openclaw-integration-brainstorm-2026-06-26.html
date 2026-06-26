@@ -314,8 +314,243 @@
   </p>
 </div>
 
-<!-- ========================== 5 ========================== -->
-<h2>5. 核心洞察</h2>
+<!-- ========================== 5 NEW (expansion) ========================== -->
+<h2>5. 接入 OpenClaw 解锁的增量：新场景 × 新用户</h2>
+<p>
+  <span class="tag tag-green">2026-06-26 第二轮调研补充</span>
+  前面几节是"<strong>防守视角</strong>"（pocketctl 比 OpenClaw+飞书强在哪）。这一节换"<strong>进攻视角</strong>"：
+  pocketctl 现在只接管 <strong>coding agent</strong>（Claude Code / Codex / OpenCode），用户是<strong>终端里的开发者</strong>；
+  而 OpenClaw 本质是<strong>面向所有人的个人/团队 AI 助手网关</strong>。接它进来，是把 pocketctl 的<strong>场景边界</strong>和<strong>用户边界</strong>同时往外推。
+</p>
+
+<h3>5.0 四条边界，OpenClaw 把每条都往外推</h3>
+<table>
+  <tr><th>边界</th><th>pocketctl 现状（只接 coding agent）</th><th>接入 OpenClaw 后的增量</th></tr>
+  <tr><td>Agent 类型</td><td>编码 agent，观测单元 = 代码类 tool call</td><td>+ 通用 agent：收发邮件、日历、文件、网页抓取、数据报表、智能家居…… 观测单元 = <strong>任意 MCP / skill 动作</strong></td></tr>
+  <tr><td>用户</td><td>开发者（懂 terminal / JSONL）</td><td>+ 运营 / 销售 / 客服 / PM / FinOps / 个人 &amp; 家庭用户（<strong>不碰命令行</strong>）</td></tr>
+  <tr><td>入口</td><td>本机终端启动</td><td>+ 20+ 通道：飞书 / WhatsApp / Telegram / Slack / 微信生态…… 手机随时发起</td></tr>
+  <tr><td>信任</td><td>自己写的代码</td><td>+ 13,700+ 社区 skill（<strong>不可信、是攻击面</strong>）</td></tr>
+</table>
+<p>每一条往外推，都对应一类<strong>新用户场景</strong>；而这些场景里 pocketctl 的"监控 / 审批 / 分析"资产恰好仍然适用——只是对象从代码换成了更广的动作。</p>
+
+<div class="card card-green">
+  <h3>5.1 审批从"approve bash"泛化到"approve 任意高危动作" <span class="tag tag-green">最大增量</span></h3>
+  <p>coding agent 的危险动作是 <code>rm -rf</code> / 写文件；通用 agent 的危险动作是<strong>有现实副作用的</strong>：</p>
+  <ul>
+    <li>发邮件 / 发飞书消息给客户、对外发帖</li>
+    <li>转账 / 下单 / 退款</li>
+    <li>删日历事件、删云文档、改数据库</li>
+    <li>开门锁 / 控制智能家居设备</li>
+  </ul>
+  <p>pocketctl 的 PreToolUse 富审批（<code>0d47a29</code>）天然能拦这些——把"代码审批"升级成"<strong>AI 现实世界动作的人工闸门</strong>"。这是覆盖<strong>非开发者用户</strong>最直接的入口：运营不关心 diff，但一定关心"它要替我把这封邮件发出去了"。</p>
+</div>
+
+<div class="card card-red">
+  <h3>5.2 不可信社区 skill 的安全护栏 <span class="tag tag-red">供应链安全</span></h3>
+  <blockquote>"我装了个社区 skill 帮我抓数据，结果它在后台 <code>curl</code> 了一个陌生域名 / 读了我的 <code>~/.ssh</code>。"</blockquote>
+  <p>
+    OpenClaw 生态有 <strong>13,700+ 社区 skill</strong>，约 65% 包着 MCP server，安全研究已把它称作<strong>新的攻击面</strong>（1Password："from magic to malware"）。
+    OpenClaw 核心只有 per-agent allow/deny 列表。pocketctl 能补上<strong>运行时护栏</strong>：
+  </p>
+  <ul>
+    <li>逐 tool call 看到 skill 真正执行了什么命令 / 访问了什么网络与文件</li>
+    <li>高危动作（外联未知域名、读敏感路径）实时拦截 + 审批</li>
+    <li>事后审计：这个 skill 这次到底干了什么</li>
+  </ul>
+  <p>这把 pocketctl 从"开发者效率工具"扩成"<strong>AI agent 供应链安全工具</strong>"——一个完全不同的卖点与用户群（安全 / 合规团队）。</p>
+</div>
+
+<div class="card card-purple">
+  <h3>5.3 给非开发者的"人话监督面板" <span class="tag tag-purple">新用户群</span></h3>
+  <blockquote>"我是运营，不看 JSONL。我只想知道：我那几个 agent 现在在忙什么、今天替我花了多少钱、有没有在等我点确认。"</blockquote>
+  <ul>
+    <li><strong>现状面板：</strong>面向开发者——时间线 / token / tool 细节</li>
+    <li><strong>新增：</strong>面向非开发者的<strong>摘要视图</strong>——自然语言进度（"正在整理本周报表，3/5 完成"）、当日花费、待审批红点、一键 approve / 停止</li>
+  </ul>
+  <p>同一套 daemon 数据，换一层"人话"呈现，用户范围从开发者扩到<strong>全员</strong>。</p>
+</div>
+
+<div class="card card-info">
+  <h3>5.4 团队 / 多租户治理：补 OpenClaw 的核心空缺 <span class="tag tag-blue">企业市场</span></h3>
+  <p>
+    调研发现 OpenClaw <strong>核心框架今天就缺</strong>：per-user 成本归属、审计追踪、配置变更审批、跨实例 skill 白名单、RBAC——
+    "none exist in core framework today"，且单租户、VM-per-user 过 30–50 人就崩。
+  </p>
+  <p>pocketctl 已有的 <strong>token 多维分析 + 审计日志 + 审批代理</strong> 正好是这块拼图：</p>
+  <ul>
+    <li>按<strong>人 / agent / 通道</strong>的成本归属与配额（AI FinOps）</li>
+    <li>Auditor 只读视角：谁的 agent、什么时候、做了什么高危动作</li>
+    <li>对外动作的审批路由（运营发起 → 主管审批）</li>
+  </ul>
+  <p>新用户群：<strong>团队管理员 / 安全合规 / 财务 FinOps</strong>——从"个人开发者工具"迈进"企业治理"市场。</p>
+</div>
+
+<div class="card card-info">
+  <h3>5.5 多通道入口的统一过程视图 <span class="tag tag-blue">跨通道</span></h3>
+  <p>
+    任务可能从飞书、WhatsApp、Telegram、Slack、微信生态任意通道发起。OpenClaw 负责"从哪进来"，
+    pocketctl 提供<strong>与通道无关的统一过程面</strong>：不管你从哪个 App 丢的任务，都在一个地方看到"我所有 agent 此刻在干嘛"。
+  </p>
+</div>
+
+<div class="card card-info">
+  <h3>5.6 Lobster 多步工作流的展开与逐步审批 <span class="tag tag-blue">编排可观测</span></h3>
+  <p>
+    OpenClaw 的 <strong>Lobster</strong> 编排引擎支持多步 / 多 agent / sub-agent 委派，每步可换不同 agent、不同权限。
+    pocketctl 可把一条工作流<strong>展开成可视化 DAG</strong>，每步独立时间线 + 在关键步骤插入审批闸门，而不是只看到一句"工作流完成"。
+  </p>
+</div>
+
+<div class="verdict-green">
+  <p style="font-weight:600;">🔌 技术枢纽：ACP —— 把 OpenClaw 启动的 coding session 接回 pocketctl</p>
+  <p>
+    这也顺带回答了 §9 的"daemon 如何感知 OpenClaw 启动的 session"。核实 OpenClaw 文档：它通过
+    <strong>ACP（Agent Client Protocol）</strong>把 Claude Code / Codex / Gemini CLI 当<strong>受监督子进程</strong>跑，几个事实对接入很友好：
+  </p>
+  <ul>
+    <li><strong>跑在 host runtime、不在 OpenClaw 沙箱</strong> → 和 pocketctl daemon 同主机，<strong>本来就看得见</strong></li>
+    <li>每个 harness 有独立 <code>cwd</code> 工作目录、Codex 用隔离 <code>CODEX_HOME</code> → coding agent 仍写自己的 JSONL，pocketctl 现有 tailer 可复用，<strong>但要按 cwd / CODEX_HOME 动态发现</strong>（不能只盯默认路径）</li>
+    <li>session id 形如 <code>agent:&lt;agentId&gt;:acp:&lt;uuid&gt;</code>、支持 <code>session/load</code> 续跑、过 gateway 重启不丢 → 可与 pocketctl 的 session 模型对齐</li>
+    <li>OpenClaw 暴露 <code>/acp</code> 控制：<code>spawn / cancel / steer（注入指令不替换上下文）/ permissions</code> 等</li>
+  </ul>
+  <p>
+    <strong>但有一个反转：</strong>ACP 是 <strong>JSON-RPC over stdio</strong>，<u>不是 PTY</u>。pocketctl 现在的 PTY 操控（<code>/compact</code>、Ctrl+C）
+    在 ACP 模式下未必直接适用——可能要走 OpenClaw 的 <code>/acp</code> 接口（cancel / steer / permissions）来实现等价控制。
+    接入的真正工作量在 <strong>"控制路径适配"</strong>，而非"看不看得到"。
+  </p>
+</div>
+
+<div class="card card-red">
+  <h3>⚠️ 一个必须正视的架构前提</h3>
+  <p>
+    pocketctl 现在的深度监控<strong>依赖 coding agent 的 JSONL</strong>。但 OpenClaw 的<strong>通用 agent</strong>（发邮件、抓网页那类）
+    并不产出 Claude Code 式 JSONL——要监控它们，pocketctl 得新增一条数据通路：消费 <strong>OpenClaw 自身的事件流 / API</strong>，
+    或在 <strong>MCP 工具调用层</strong>做拦截。§5.1–5.6 的非编码场景能否落地，取决于这条通路是否打通，这是接入的<strong>第一性技术决策</strong>。
+  </p>
+</div>
+
+<div class="highlight-box">
+  <p style="font-size:1.05em; font-weight:600;">💡 一句话重定位</p>
+  <p style="color: var(--text-muted);">
+    只接 coding agent 时，pocketctl 是 <strong>"开发者的 agent 控制塔"</strong>；
+    接入 OpenClaw 后，它可以成为 <strong>"任何人、任何通道发起的 AI 动作的监控 · 审批 · 成本 · 安全中台"</strong>——
+    场景从写代码扩到日常工作流，用户从开发者扩到全员与团队。
+  </p>
+</div>
+
+<!-- ========================== 6 NEW (reality-check) ========================== -->
+<h2>6. 放进真实赛道再看：远程续作的对手、边界与真正的拓宽点</h2>
+<p>
+  <span class="tag tag-green">2026-06-26 第三轮调研（结合"远程续作"产品 DNA）</span>
+  先把 pocketctl 的核心讲准：它解决的是<strong>"人离开了 coding 机器，仍能用手机/网页继续推进工作"</strong>。
+  把这件事放进 2026 年的真实赛道看，结论会比 §5 更清醒——这块已经很挤，<strong>而且官方下场了</strong>。
+</p>
+
+<h3>6.1 现实检查：这个场景已被官方 + 一堆产品占住</h3>
+<table>
+  <tr><th>玩家</th><th>是什么</th><th>远程能力</th><th>缺口（= pocketctl × OpenClaw 的机会）</th></tr>
+  <tr>
+    <td><strong>Claude Code Channels</strong><br><span class="tag tag-red">Anthropic 官方</span></td>
+    <td>把 Telegram/Discord/iMessage 消息发进<strong>运行中的 CC session</strong>（2026-03-20 研究预览）</td>
+    <td>只<strong>收发消息</strong></td>
+    <td>核实：<strong>无审批系统 / 无 diff / 无审批队列 / 无 token 分析 / 无审计日志</strong>，只支持 CC + 3 通道、session 必须常驻</td>
+  </tr>
+  <tr>
+    <td>Codex Mobile（ChatGPT 内）<br><span class="tag tag-red">OpenAI 官方</span></td>
+    <td>手机里直接跑/看 Codex</td>
+    <td>移动发起、查看</td>
+    <td>锁死 Codex / OpenAI 生态</td>
+  </tr>
+  <tr>
+    <td><strong>CodeAgent Mobile</strong><br><span class="tag tag-orange">最像 pocketctl</span></td>
+    <td>手机监督多家 coding agent（CC/Cursor/Codex/Copilot/Windsurf/Gemini/Aider…）</td>
+    <td>approve diff、redirect tool call、终止失控、实时流、推送、<strong>跨设备续作</strong>、Team Spaces</td>
+    <td><strong>无多通道聊天入口</strong>（单 agent 取向）、<strong>无深度团队治理</strong>、prompt/输出<strong>走自家云中转</strong>（非自托管）</td>
+  </tr>
+  <tr>
+    <td>AgentsRoom Mobile</td>
+    <td>手机监控 CC</td>
+    <td>推送、喂输入给卡住的 agent、approve</td>
+    <td>单 agent、无多通道、无治理</td>
+  </tr>
+  <tr>
+    <td><strong>pocketctl（现状）</strong></td>
+    <td>自托管 daemon + iOS/Web，<strong>深度</strong>监督 CC/Codex/(OpenCode)</td>
+    <td>审批 / diff / token / PTY 操控 / 审计</td>
+    <td>入口只有自家 App/Web、面向<strong>单个开发者</strong>、尚无多通道、尚无团队治理</td>
+  </tr>
+</table>
+
+<div class="verdict">
+  <p style="font-weight:600;">两条必须正视的事实</p>
+  <ul>
+    <li><strong>好消息：</strong>连 Anthropic 官方的 Channels 都只是"把消息发进 session"——<u>无审批/diff/队列/token/审计</u>。这<strong>验证了 pocketctl 的"深度"路线是对的</strong>，浅层聊天入口正在被商品化。</li>
+    <li><strong>坏消息：</strong>"手机深度监督 coding agent"已经有 <strong>CodeAgent Mobile</strong> 这种近似克隆（approve diff / redirect / 推送 / 跨设备续作都有）。所以<strong>光有深度不够</strong>，pocketctl 正面单挑会拼成熟度。</li>
+  </ul>
+</div>
+
+<h3>6.2 因此：OpenClaw 不是用来"再做一个手机聊天 agent"</h3>
+<p>
+  那块（手机里跟 agent 聊天）已被官方 Channels + CodeAgent 占住。OpenClaw 的正确用法，是去补<strong>所有对手都缺的三个空白</strong>——
+  而这三个空白恰好是 OpenClaw 作为<strong>自托管 · 多通道 · 多租户网关</strong>的原生能力：
+</p>
+<div class="two-col">
+  <div class="card card-green">
+    <h4>① 多通道入口</h4>
+    <p>官方 Channels 锁 CC+3 通道；CodeAgent 是 app-only。OpenClaw 给 20+ 通道（飞书/WhatsApp/Telegram/微信生态…）。<strong>不用装新 App，从你已经在用的 IM 触达。</strong></p>
+  </div>
+  <div class="card card-green">
+    <h4>② 团队治理</h4>
+    <p>CodeAgent 明确"无团队治理"，官方 Channels 是个人功能。OpenClaw 多 agent 多人共用一个 Gateway，pocketctl 叠上 RBAC/成本归属/审计（见 §5.4）。</p>
+  </div>
+  <div class="card card-green">
+    <h4>③ 自托管 / 数据不出本地</h4>
+    <p>CodeAgent 的 prompt 与输出<strong>过自家云中转</strong>。OpenClaw + pocketctl <strong>都自托管</strong>——对"代码/输出不能进第三方 SaaS"的企业，这是直接的选型分水岭。</p>
+  </div>
+</div>
+
+<h3>6.3 对齐 DNA 的三个真正拓宽点（都仍围绕"离开 coding 机器后继续工作"）</h3>
+
+<div class="card card-info">
+  <h4>拓宽 WHO —— 从"单个开发者"到"团队 + 非开发利益相关者 + 不装 App 的人"</h4>
+  <p>PM/创始人/客户从不坐在 coding 机器旁，但他们有飞书/微信。"功能做完没？""这步能上吗？"——OpenClaw 让他们从已有 IM 里问到进度、点审批；pocketctl 提供人话摘要与对外动作闸门。<strong>把 coding 工作的"远程参与者"从开发者扩到整条协作链。</strong></p>
+</div>
+
+<div class="card card-info">
+  <h4>拓宽 HOW（模态）—— 从"看屏幕点按钮"到"语音 / 电话发起"（真·离屏、免手）</h4>
+  <p>核实：OpenClaw 支持<strong>语音条转写→当指令（含 slash 命令）</strong>，并有 ClawdTalk/Vapi/Telnyx <strong>电话呼入</strong>插件。开车/走路时口述"在家那台机子把这个 bug 修了"，回到有屏幕时用 pocketctl 审 diff。<strong>这是屏幕导向的对手（CodeAgent/Channels）覆盖不到的模态。</strong></p>
+</div>
+
+<div class="card card-info">
+  <h4>拓宽聚合 —— 跨 agent × 跨通道的"一个自托管深度面"</h4>
+  <p>官方方案天然碎片化（CC 只连自己、Codex 只连自己）。OpenClaw 经 ACP 统一驱动 CC/Codex/OpenCode/Gemini，pocketctl 在其上做<strong>唯一的深度监督面</strong>——对抗"每个厂商一个孤岛 App"。这也正是 pocketctl 已接 CC/Codex、即将接 OpenCode 的延长线。</p>
+</div>
+
+<div class="card card-red">
+  <h3>6.4 校准：别被 §5 的"广度"带偏 <span class="tag tag-orange">诚实提醒</span></h3>
+  <p>
+    §5 列了智能家居、通用邮件助手等很"宽"的场景。结合你的 DNA 再看：那些会把 pocketctl 推进
+    <strong>更挤、更不聚焦、且偏离"coding 远程续作"</strong>的战场（通用助手赛道还有 OpenClaw 自己、一堆大厂）。
+  </p>
+  <p>
+    建议的取舍：<strong>用 OpenClaw 拓宽 coding 续作的「人 / 模态 / 通道 / 部署形态」，而不要改变「做的是 coding 监督」这个内核。</strong>
+    §5.1（高危动作审批）、§5.2（不可信 skill 护栏）、§5.4（团队治理）与本节高度共振，优先；
+    §5 里偏通用助手的部分，建议<strong>暂缓</strong>。
+  </p>
+</div>
+
+<div class="highlight-box">
+  <p style="font-size:1.05em; font-weight:600;">💡 第三轮一句话结论</p>
+  <p style="color: var(--text-muted);">
+    "用手机监督 coding agent"已经被官方和 CodeAgent 占住，<strong>光做这个会卷</strong>。
+    接 OpenClaw 的意义不是多一个聊天入口，而是把 pocketctl 变成
+    <strong>"自托管 · 多通道 · 可治理"的团队级 coding 续作中枢</strong>——
+    用对手都缺的三块（多通道 / 团队治理 / 不出本地）+ 语音离屏模态，去拓宽<strong>人和场景</strong>，但内核仍是 coding。
+  </p>
+</div>
+
+<!-- ========================== 7 ========================== -->
+<h2>7. 核心洞察</h2>
 
 <div class="highlight-box">
   <p style="font-size: 1.1em; font-weight: 600;">
@@ -326,8 +561,8 @@
   </p>
 </div>
 
-<!-- ========================== 6 ========================== -->
-<h2>6. 推荐接入方向</h2>
+<!-- ========================== 8 ========================== -->
+<h2>8. 推荐接入方向</h2>
 
 <div class="card card-green">
   <h3>pocketctl 作为 OpenClaw 的"控制塔"</h3>
@@ -381,10 +616,10 @@
   </tr>
 </table>
 
-<!-- ========================== 7 ========================== -->
-<h2>7. 待进一步讨论</h2>
+<!-- ========================== 9 ========================== -->
+<h2>9. 待进一步讨论</h2>
 <ul>
-  <li>pocketctl daemon 如何感知 OpenClaw 启动的 agent session？（通过文件系统？OpenClaw API？WebSocket？）</li>
+  <li>pocketctl daemon 如何感知 OpenClaw 启动的 agent session？（通过文件系统？OpenClaw API？WebSocket？）<br><span class="tag tag-green">部分已答</span> coding agent 走 ACP，见 §5 技术枢纽；<strong>通用 agent</strong> 的数据通路（OpenClaw 事件流 / MCP 拦截）仍待定。</li>
   <li>OpenClaw 的 session 模型与 pocketctl 的 protocol 如何映射？</li>
   <li>iOS/Web 上是否需要增加"选择 agent 组合"的 UI？</li>
   <li>是否允许用户直接从 pocketctl 发起任务（不依赖飞书）？</li>
