@@ -109,6 +109,7 @@ pocketctl daemon status                                   查看守护进程状�
 pocketctl daemon logs                                     查看日志（提示 tail 命令）
 pocketctl daemon doctor                                   诊断连接和配置问题
 pocketctl daemon update  [--version <TAG>] [--no-restart]  自更新到最新版本
+pocketctl uninstall      [--yes] [--keep-binary]          卸载：停止 daemon + 清理配置与数据
 pocketctl version                                         显示版本号
 ```
 
