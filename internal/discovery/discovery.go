@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 )
@@ -106,17 +107,29 @@ func resolveFrom(candidates []string, statReal func(string) (string, bool), owne
 	return "", false, false
 }
 
+var (
+	npmPrefixOnce  sync.Once
+	npmPrefixValue string
+)
+
+// npmPrefix 返回 `npm config get prefix` 的结果,daemon 生命周期内只计算一次并缓存。
+// ResolveAgent 现在每次会话启动都会调用,不能每次都付出 npm 子进程(最高 3s 超时)的代价。
+func npmPrefix() string {
+	npmPrefixOnce.Do(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer cancel()
+		if out, err := exec.CommandContext(ctx, "npm", "config", "get", "prefix").Output(); err == nil {
+			npmPrefixValue = strings.TrimSpace(string(out))
+		}
+	})
+	return npmPrefixValue
+}
+
 // ResolveAgent 定位 agent 可执行文件。found=false 表示未安装;
 // manageable=true 表示真实二进制属当前 uid,可被就地升级。
 func ResolveAgent(cliName string) (string, bool, bool) {
 	home, _ := os.UserHomeDir()
-	npmPrefix := ""
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-	defer cancel()
-	if out, err := exec.CommandContext(ctx, "npm", "config", "get", "prefix").Output(); err == nil {
-		npmPrefix = strings.TrimSpace(string(out))
-	}
-	cands := candidatePaths(cliName, home, os.Getenv("PATH"), npmPrefix)
+	cands := candidatePaths(cliName, home, os.Getenv("PATH"), npmPrefix())
 	statReal := func(p string) (string, bool) {
 		if _, err := os.Lstat(p); err != nil {
 			return "", false
