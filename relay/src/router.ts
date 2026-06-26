@@ -345,7 +345,7 @@ export class Router {
         // Use provided title if present; otherwise leave existing title untouched
         const title = msg.title || undefined;
         const cwd = msg.cwd || '';
-        db.upsertSession(this.pool, sessionId, daemonId, 'claude-code', cwd, msg.status || 'busy', title, 'terminal', undefined, userId ?? undefined, msg.model || undefined).catch(console.error);
+        db.upsertSession(this.pool, sessionId, daemonId, msg.agent || 'claude-code', cwd, msg.status || 'busy', title, 'terminal', undefined, userId ?? undefined, msg.model || undefined).catch(console.error);
         db.insertEvent(this.pool, sessionId, msg.type, msg).catch(console.error);
         const enriched = { ...msg, daemon_id: daemonId, hostname: daemon?.hostname || 'unknown' };
         for (const [clientWs, client] of this.clients) {

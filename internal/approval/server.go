@@ -30,6 +30,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/pocketctl/pocketctl/internal/filelock"
 )
 
 // Request is the tool-use approval request delivered to the SessionManager
@@ -54,13 +55,17 @@ type hookRequest struct {
 	Tool      string          `json:"tool"`
 	Input     json.RawMessage `json:"input,omitempty"`
 	Cwd       string          `json:"cwd,omitempty"`
+	PermMode  string          `json:"perm_mode,omitempty"` // bypassPermissions | default | acceptEdits | plan
 }
 
 // hookResponse is the wire format written back to the hook. The hook maps
-// Allow → Claude's permissionDecision ("allow"/"deny").
+// Allow → Claude's permissionDecision ("allow"/"deny"). LockConflict is set
+// when the deny is due to a file-lock conflict (so bypass mode still reports
+// the conflict rather than continue).
 type hookResponse struct {
-	Allow  bool   `json:"allow"`
-	Reason string `json:"reason,omitempty"`
+	Allow        bool   `json:"allow"`
+	Reason       string `json:"reason,omitempty"`
+	LockConflict bool   `json:"lock_conflict,omitempty"`
 }
 
 // OnRequestFunc is invoked once per incoming hook connection, after the request
@@ -78,6 +83,12 @@ type Server struct {
 	mu      sync.Mutex
 	pending map[string]*pendingEntry // keyed by requestID
 	onReq   OnRequestFunc
+
+	// fileLocks (Scheme C) enforces per-file mutual exclusion across sessions.
+	// When non-nil, Edit/Write/MultiEdit/NotebookEdit on a file held by another
+	// session is denied before the request ever reaches a client. May be nil in
+	// tests that don't exercise file locking.
+	fileLocks *filelock.LockManager
 
 	closeMu sync.Mutex
 	closed  bool
@@ -116,6 +127,15 @@ func (s *Server) SetOnRequest(fn OnRequestFunc) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.onReq = fn
+}
+
+// SetFileLockManager wires the shared file-lock manager (Scheme C). When set,
+// the server denies file-writing tools on files held by other sessions. Must
+// be called before Start.
+func (s *Server) SetFileLockManager(fl *filelock.LockManager) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.fileLocks = fl
 }
 
 // Start binds the Unix socket and begins accepting hook connections. Removing
@@ -246,6 +266,46 @@ func (s *Server) handleConn(conn net.Conn) {
 		return
 	}
 
+	// --- Scheme C: file-lock pre-check -------------------------------------
+	// For file-writing tools, deny immediately if another session holds the
+	// file. This runs for ALL permission modes (including bypass) and never
+	// reaches the client — the deny reason is surfaced to the agent so it can
+	// back off or retry. On success the lock is acquired/renewed here for
+	// bypass mode (the tool is about to run); for non-bypass modes the lock is
+	// taken only after the client approves (see the post-approval section
+	// below).
+	s.mu.Lock()
+	fl := s.fileLocks
+	s.mu.Unlock()
+	if fl != nil {
+		if path, ok := extractFilePath(hr.Tool, hr.Input); ok {
+			absPath := normalizePath(hr.Cwd, path)
+			if held, holder := fl.IsLockedByOther(hr.SessionID, absPath); held {
+				reason := fmt.Sprintf("文件 %s 正被会话 %s 编辑，请等待其完成或切换会话后再试", path, holder)
+				out, _ := json.Marshal(hookResponse{Allow: false, Reason: reason, LockConflict: true})
+				_ = conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
+				_, _ = conn.Write(append(out, '\n'))
+				return
+			}
+			// Bypass mode: no client approval will follow, so take/refresh the
+			// lock now and let the hook continue.
+			if hr.PermMode == "bypassPermissions" {
+				fl.TryLock(hr.SessionID, absPath)
+			}
+			// Non-bypass: defer lock acquisition to post-approval (below).
+		}
+	}
+
+	// --- Scheme C bypass fast-path -----------------------------------------
+	// In bypass mode with no lock conflict, tell the hook "no opinion" so it
+	// writeContinue()s and Claude runs the tool under its own permission logic.
+	if hr.PermMode == "bypassPermissions" {
+		out, _ := json.Marshal(hookResponse{Allow: true, Reason: "no lock conflict"})
+		_ = conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
+		_, _ = conn.Write(append(out, '\n'))
+		return
+	}
+
 	reqID := uuid.New().String()
 	req := Request{
 		RequestID: reqID,
@@ -278,6 +338,14 @@ func (s *Server) handleConn(conn net.Conn) {
 		s.mu.Unlock()
 		resp = Response{Allow: false}
 		s.logger.Warn("approval timed out (auto-deny)", "request_id", reqID, "session", hr.SessionID, "tool", hr.Tool)
+	}
+
+	// Scheme C: now that the client approved a file write, acquire the lock so
+	// other sessions are blocked from racing the same file.
+	if resp.Allow && fl != nil {
+		if path, ok := extractFilePath(hr.Tool, hr.Input); ok {
+			fl.TryLock(hr.SessionID, normalizePath(hr.Cwd, path))
+		}
 	}
 
 	reason := "approved by user"

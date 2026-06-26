@@ -972,14 +972,16 @@ func handleWatcherEvents(ctx context.Context, sw *watcher.SessionWatcher, sm *se
 					sm.SetSessionStatus(evt.Session.SessionID, evt.Session.Status)
 					break
 				}
-				// Start JSONL tailer from beginning to replay history and tail new events
+				// Start JSONL tailer from beginning to replay history and tail new events.
+				// The session watcher only scans ~/.claude/sessions today, so discovered
+				// terminal sessions are Claude. (Codex terminal discovery is a follow-up.)
 				go func() {
 					var tailer *watcher.JSONLTailer
-					// Retry: Claude Code may not have created the JSONL file yet
+					// Retry: the agent may not have created the JSONL file yet
 					for retry := 0; retry < 30; retry++ {
-						jsonlPath, err := watcher.ResolveJSONLPath(evt.Session.SessionID, evt.Session.Cwd)
+						jsonlPath, err := adapter.ResolveJSONLPathFor(adapter.AgentClaude, evt.Session.SessionID, evt.Session.Cwd)
 						if err == nil {
-							tailer, err = watcher.NewJSONLTailerFromStart(jsonlPath)
+							tailer, err = watcher.NewJSONLTailerFromStart(jsonlPath, adapter.AgentClaude)
 							if err == nil {
 								// Associate tailer with session so sendToIdleTerminal can pause/resume it (D2)
 								sm.SetTailer(evt.Session.SessionID, tailer)
@@ -990,6 +992,7 @@ func handleWatcherEvents(ctx context.Context, sw *watcher.SessionWatcher, sm *se
 									Cwd:       evt.Session.Cwd,
 									Status:    evt.Session.Status,
 									Source:    "terminal",
+									Agent:     adapter.AgentClaude,
 								}
 								break
 							}
@@ -1088,7 +1091,8 @@ func handleCommands(ctx context.Context, client *ws.Client, sm *session.SessionM
 		case cmd := <-client.CommandCh:
 			switch cmd.Type {
 			case "session_create":
-				logger.Info("create session", "agent", cmd.Agent, "cwd", cmd.Cwd, "model", cmd.Model)
+				logger.Info("create session", "agent", cmd.Agent, "cwd", cmd.Cwd, "model", cmd.Model,
+					"worktree", cmd.Worktree, "auto_create_dir", cmd.AutoCreateDir, "force", cmd.Force)
 				stateDirty.Store(true)
 				config := protocol.SessionConfig{
 					Agent:          cmd.Agent,
@@ -1096,6 +1100,9 @@ func handleCommands(ctx context.Context, client *ws.Client, sm *session.SessionM
 					Prompt:         cmd.Prompt,
 					PermissionMode: cmd.PermissionMode,
 					Model:          cmd.Model,
+					Worktree:       cmd.Worktree,
+					AutoCreateDir:  cmd.AutoCreateDir,
+					Force:          cmd.Force,
 				}
 				if config.Agent == "" {
 					config.Agent = "claude-code"
@@ -1116,12 +1123,22 @@ func handleCommands(ctx context.Context, client *ws.Client, sm *session.SessionM
 				// Notify relay that session was created so it can link the originating client.
 				// Carry the resolved model so the web client can show it (/model command).
 				model, _ := sm.GetSessionModel(sessionID)
-				client.SendMsg(protocol.DaemonEvent{
+				evt := protocol.DaemonEvent{
 					Type:      "session_created",
 					SessionID: sessionID,
 					Title:     config.Prompt,
 					Model:     model,
-				})
+				}
+				// Scheme D: surface the worktree path/branch so clients can show it.
+				if wt, branch, ok := sm.GetWorktreeInfo(sessionID); ok {
+					evt.WorktreePath = wt
+					evt.WorktreeBranch = branch
+				}
+				// Scheme A: let the client know how many sessions now share this cwd.
+				if cwd, ok := sm.GetSessionCwd(sessionID); ok {
+					evt.CwdSessions = sm.CwdSessionCount(cwd)
+				}
+				client.SendMsg(evt)
 
 			case "abort_create":
 				logger.Info("abort create session", "session", cmd.SessionID)
@@ -1177,6 +1194,15 @@ func handleCommands(ctx context.Context, client *ws.Client, sm *session.SessionM
 
 			case "set_permission_mode":
 				logger.Info("set permission mode", "session", cmd.SessionID, "mode", cmd.Content)
+				agentType, _ := sm.GetSessionAgent(cmd.SessionID)
+				if !adapter.Capabilities(agentType).SupportsPermissionCycle {
+					client.SendMsg(protocol.DaemonEvent{
+						Type:      "error",
+						SessionID: cmd.SessionID,
+						Error:     "permission mode switching is not supported for " + agentType,
+					})
+					continue
+				}
 				if err := sm.SetPermissionMode(ctx, cmd.SessionID, cmd.Content); err != nil {
 					logger.Error("set permission mode failed", "error", err)
 					client.SendMsg(protocol.DaemonEvent{
@@ -1191,6 +1217,15 @@ func handleCommands(ctx context.Context, client *ws.Client, sm *session.SessionM
 				// `/effort <level>` into the PTY. Effort is a runtime-only TUI
 				// state, so the recorded value reflects only what pocketctl set.
 				logger.Info("set effort", "session", cmd.SessionID, "level", cmd.Content)
+				agentType, _ := sm.GetSessionAgent(cmd.SessionID)
+				if !adapter.Capabilities(agentType).SupportsEffort {
+					client.SendMsg(protocol.DaemonEvent{
+						Type:      "error",
+						SessionID: cmd.SessionID,
+						Error:     "effort switching is not supported for " + agentType,
+					})
+					continue
+				}
 				if err := sm.SetEffort(cmd.SessionID, cmd.Content); err != nil {
 					logger.Error("set effort failed", "error", err)
 					client.SendMsg(protocol.DaemonEvent{
@@ -1226,6 +1261,8 @@ func handleCommands(ctx context.Context, client *ws.Client, sm *session.SessionM
 				// Web client queries a session's resolved model (for the /model
 				// command). Unlike session_created (one-shot, fired before the web
 				// subscribes), this is a request/response the client issues on mount.
+				agentType, _ := sm.GetSessionAgent(cmd.SessionID)
+				storage := adapter.NewStorage(agentType)
 				model, exists := sm.GetSessionModel(cmd.SessionID)
 				if model == "" {
 					// Terminal sessions don't carry a model at discovery time — extract
@@ -1233,13 +1270,13 @@ func handleCommands(ctx context.Context, client *ws.Client, sm *session.SessionM
 					cwd, cwdOk := sm.GetSessionCwd(cmd.SessionID)
 					if !cwdOk {
 						logger.Info("get_session_meta: not in memory", "session", cmd.SessionID, "exists", exists)
-					} else if path, perr := watcher.ResolveJSONLPath(cmd.SessionID, cwd); perr != nil {
+					} else if path, perr := storage.ResolveJSONLPath(cmd.SessionID, cwd); perr != nil {
 						logger.Info("get_session_meta: resolve path failed", "session", cmd.SessionID, "cwd", cwd, "error", perr)
 					} else if data, ferr := os.ReadFile(path); ferr != nil {
 						logger.Info("get_session_meta: read jsonl failed", "session", cmd.SessionID, "path", path, "error", ferr)
 					} else {
 						lines := strings.Split(string(data), "\n")
-						m := adapter.ExtractLastAssistantModel(lines)
+						m := storage.ExtractModel(lines)
 						logger.Info("get_session_meta: extracted", "session", cmd.SessionID, "lines", len(lines), "model", m)
 						if m != "" {
 							sm.SetSessionModel(cmd.SessionID, m)
@@ -1247,20 +1284,21 @@ func handleCommands(ctx context.Context, client *ws.Client, sm *session.SessionM
 						}
 					}
 				}
-			logger.Info("get_session_meta", "session", cmd.SessionID, "model", model)
-			client.SendMsg(protocol.DaemonEvent{
-				Type:      "session_meta",
-				SessionID: cmd.SessionID,
-				Model:     model,
-				Effort:    sm.GetSessionEffort(cmd.SessionID),
-			})
+				logger.Info("get_session_meta", "session", cmd.SessionID, "model", model)
+				client.SendMsg(protocol.DaemonEvent{
+					Type:      "session_meta",
+					SessionID: cmd.SessionID,
+					Model:     model,
+					Effort:    sm.GetSessionEffort(cmd.SessionID),
+				})
 
 			case "list_models":
 				// Web client queries the host's available models to populate the
-				// session-creation picker. Reads ~/.claude/settings.json alias map.
+				// session-creation picker. Claude reads ~/.claude/settings.json;
+				// codex returns its own model list.
 				client.SendMsg(protocol.DaemonEvent{
 					Type:   "model_list",
-					Models: session.ListAvailableModels(),
+					Models: session.ListModelsForAgent(cmd.Agent),
 				})
 
 			case "upgrade_agent":
@@ -1287,6 +1325,29 @@ func handleCommands(ctx context.Context, client *ws.Client, sm *session.SessionM
 	}
 }
 
+// runAgentUpgrade executes the agent's built-in update command when present
+// (e.g. `claude update`, `opencode upgrade`), otherwise falls back to
+// `npm install -g <package>@latest` (used for codex and any agent without a
+// native updater). Returns combined stdout+stderr.
+func runAgentUpgrade(ctx context.Context, updateCmd, pkg string) ([]byte, error) {
+	if updateCmd != "" {
+		parts := strings.Fields(updateCmd)
+		return exec.CommandContext(ctx, parts[0], parts[1:]...).CombinedOutput()
+	}
+	return exec.CommandContext(ctx, "npm", "install", "-g", pkg+"@latest").CombinedOutput()
+}
+
+// isPermissionDenied reports whether an upgrade failure is a write-permission
+// problem rather than a real error (network, not-found, etc.). Matched against
+// the combined output of `claude update` / `npm install -g`.
+func isPermissionDenied(out string) bool {
+	s := strings.ToLower(out)
+	return strings.Contains(s, "insufficient permissions") ||
+		strings.Contains(s, "eacces") ||
+		strings.Contains(s, "eperm") ||
+		strings.Contains(s, "permission denied")
+}
+
 // handleUpgradeAgent upgrades the requested agent via its built-in command (claude update /
 // opencode upgrade) or `npm install -g <package>@latest` (codex). Re-discovers versions,
 // pushes a fresh register + upgrade_result event.
@@ -1310,12 +1371,27 @@ func handleUpgradeAgent(client *ws.Client, logger *slog.Logger, agent string) {
 
 	upCtx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 	defer cancel()
-	var out []byte
-	if updateCmd != "" {
-		parts := strings.Fields(updateCmd)
-		out, err = exec.CommandContext(upCtx, parts[0], parts[1:]...).CombinedOutput()
-	} else {
-		out, err = exec.CommandContext(upCtx, "npm", "install", "-g", pkg+"@latest").CombinedOutput()
+	out, err := runAgentUpgrade(upCtx, updateCmd, pkg)
+	// Permission-denied fallback: a globally npm-installed claude (e.g. via
+	// `sudo npm install -g`) lives in a root-owned prefix, so `claude update`
+	// can't write the new bits. Retry with `claude install`, which performs a
+	// user-local native install (~/.local/bin) and is sudo-free. Typical on
+	// WSL / Linux hosts where the user ran the initial install with sudo.
+	if err != nil && isPermissionDenied(string(out)) && agentName == "claude-code" {
+		logger.Warn("agent upgrade permission denied, retrying with native install", "agent", agentName)
+		out2, err2 := exec.CommandContext(upCtx, "claude", "install").CombinedOutput()
+		if err2 != nil {
+			logger.Error("agent native install also failed", "agent", agentName, "error", err2, "output", string(out2))
+			client.SendMsg(protocol.DaemonEvent{
+				Type:   "upgrade_result",
+				Agent:  agentName,
+				Status: "failed",
+				Reason: protocol.ReasonPermissionDenied,
+				Error:  fmt.Sprintf("%v: %s", err2, strings.TrimSpace(string(out2))),
+			})
+			return
+		}
+		out, err = out2, nil
 	}
 	if err != nil {
 		logger.Error("agent upgrade failed", "agent", agentName, "error", err, "output", string(out))
@@ -1347,9 +1423,14 @@ func handleUpgradeAgent(client *ws.Client, logger *slog.Logger, agent string) {
 // readJSONLLines reads up to maxLines from a JSONL file and returns them as a slice.
 // classifyCreateError maps a CreateSession error message to a reason code
 // for the session_create_failed event (no_cli, bad_cwd, start_fail).
+// classifyCreateError maps a CreateSession error message to a reason code
+// for the session_create_failed event (no_cli, bad_cwd, cwd_in_use, start_fail).
 func classifyCreateError(msg string) string {
 	if strings.Contains(msg, "agent CLI not found") {
 		return "no_cli"
+	}
+	if strings.HasPrefix(msg, "目录已被占用") {
+		return "cwd_in_use"
 	}
 	if strings.HasPrefix(msg, "工作目录") {
 		return "bad_cwd"
