@@ -1446,13 +1446,16 @@ func handleCommands(ctx context.Context, client *ws.Client, sm *session.SessionM
 }
 
 // runAgentUpgrade executes the agent's built-in update command when present
-// (e.g. `claude update`, `opencode upgrade`), otherwise falls back to
-// `npm install -g <package>@latest` (used for codex and any agent without a
-// native updater). Returns combined stdout+stderr.
-func runAgentUpgrade(ctx context.Context, updateCmd, pkg string) ([]byte, error) {
+// (e.g. `claude update`, `opencode upgrade`) against the resolved absolute
+// binary path, otherwise falls back to `npm install -g <package>@latest`
+// (used for codex and any agent without a native updater). Returns combined
+// stdout+stderr.
+func runAgentUpgrade(ctx context.Context, binPath, updateCmd, pkg string) ([]byte, error) {
 	if updateCmd != "" {
+		// updateCmd 形如 "claude update"；用解析出的绝对二进制替换裸名，保留子命令。
 		parts := strings.Fields(updateCmd)
-		return exec.CommandContext(ctx, parts[0], parts[1:]...).CombinedOutput()
+		args := parts[1:]
+		return exec.CommandContext(ctx, binPath, args...).CombinedOutput()
 	}
 	return exec.CommandContext(ctx, "npm", "install", "-g", pkg+"@latest").CombinedOutput()
 }
@@ -1469,13 +1472,38 @@ func isPermissionDenied(out string) bool {
 }
 
 // handleUpgradeAgent upgrades the requested agent via its built-in command (claude update /
-// opencode upgrade) or `npm install -g <package>@latest` (codex). Re-discovers versions,
+// opencode upgrade) or `npm install -g <package>@latest` (codex). Only manageable
+// (user-owned) installs are upgraded; a root-owned/system install is reported as
+// permission_denied so the UI can prompt the user to upgrade it themselves — pocketctl
+// must never perform a native install on the user's behalf. Re-discovers versions,
 // pushes a fresh register + upgrade_result event.
 func handleUpgradeAgent(client *ws.Client, logger *slog.Logger, agent string) {
 	agentName := agent
 	if agentName == "" {
 		agentName = "claude-code"
 	}
+	cli, err := discovery.AgentTypeToCLI(agentName)
+	if err != nil {
+		client.SendMsg(protocol.DaemonEvent{Type: "upgrade_result", Agent: agentName, Status: "failed", Error: err.Error()})
+		return
+	}
+	path, manageable, found := discovery.ResolveAgent(cli)
+	if !found {
+		client.SendMsg(protocol.DaemonEvent{Type: "upgrade_result", Agent: agentName, Status: "failed", Error: fmt.Sprintf("%s 未安装", agentName)})
+		return
+	}
+	if !manageable {
+		logger.Warn("agent upgrade refused: system (root-owned) install", "agent", agentName, "path", path)
+		client.SendMsg(protocol.DaemonEvent{
+			Type:   "upgrade_result",
+			Agent:  agentName,
+			Status: "failed",
+			Reason: protocol.ReasonPermissionDenied,
+			Error:  fmt.Sprintf("%s 为系统(root)安装，pocketctl 无法升级，请自行 sudo-free 升级", path),
+		})
+		return
+	}
+
 	updateCmd, pkg, err := discovery.AgentUpgradeInfo(agentName)
 	if err != nil {
 		client.SendMsg(protocol.DaemonEvent{Type: "upgrade_result", Agent: agentName, Status: "failed", Error: err.Error()})
@@ -1487,40 +1515,24 @@ func handleUpgradeAgent(client *ws.Client, logger *slog.Logger, agent string) {
 			oldVer = a.Version
 		}
 	}
-	logger.Info("agent upgrade start", "agent", agentName, "old_version", oldVer, "cmd", updateCmd)
+	logger.Info("agent upgrade start", "agent", agentName, "old_version", oldVer, "path", path, "cmd", updateCmd)
 
 	upCtx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 	defer cancel()
-	out, err := runAgentUpgrade(upCtx, updateCmd, pkg)
-	// Permission-denied fallback: a globally npm-installed claude (e.g. via
-	// `sudo npm install -g`) lives in a root-owned prefix, so `claude update`
-	// can't write the new bits. Retry with `claude install`, which performs a
-	// user-local native install (~/.local/bin) and is sudo-free. Typical on
-	// WSL / Linux hosts where the user ran the initial install with sudo.
-	if err != nil && isPermissionDenied(string(out)) && agentName == "claude-code" {
-		logger.Warn("agent upgrade permission denied, retrying with native install", "agent", agentName)
-		out2, err2 := exec.CommandContext(upCtx, "claude", "install").CombinedOutput()
-		if err2 != nil {
-			logger.Error("agent native install also failed", "agent", agentName, "error", err2, "output", string(out2))
-			client.SendMsg(protocol.DaemonEvent{
-				Type:   "upgrade_result",
-				Agent:  agentName,
-				Status: "failed",
-				Reason: protocol.ReasonPermissionDenied,
-				Error:  fmt.Sprintf("%v: %s", err2, strings.TrimSpace(string(out2))),
-			})
-			return
-		}
-		out, err = out2, nil
-	}
+	out, err := runAgentUpgrade(upCtx, path, updateCmd, pkg)
 	if err != nil {
+		reason := ""
+		if isPermissionDenied(string(out)) {
+			reason = protocol.ReasonPermissionDenied
+		}
 		logger.Error("agent upgrade failed", "agent", agentName, "error", err, "output", string(out))
-		client.SendMsg(protocol.DaemonEvent{Type: "upgrade_result", Agent: agentName, Status: "failed", Error: fmt.Sprintf("%v: %s", err, strings.TrimSpace(string(out)))})
+		client.SendMsg(protocol.DaemonEvent{Type: "upgrade_result", Agent: agentName, Status: "failed", Reason: reason, Error: fmt.Sprintf("%v: %s", err, strings.TrimSpace(string(out)))})
 		return
 	}
 
 	agentVersions := make(map[string]string)
 	agentLatests := make(map[string]string)
+	agentManageable := make(map[string]bool)
 	newVer := ""
 	for _, a := range discovery.DiscoverAgents() {
 		if a.Version != "" {
@@ -1529,12 +1541,14 @@ func handleUpgradeAgent(client *ws.Client, logger *slog.Logger, agent string) {
 		if a.Latest != "" {
 			agentLatests[a.Type] = a.Latest
 		}
+		agentManageable[a.Type] = a.Manageable
 		if a.Type == agentName {
 			newVer = a.Version
 		}
 	}
 	client.SetAgentVersions(agentVersions)
 	client.SetAgentLatests(agentLatests)
+	client.SetAgentManageable(agentManageable)
 	client.ResendRegister()
 	client.SendMsg(protocol.DaemonEvent{Type: "upgrade_result", Agent: agentName, Status: "success", Message: newVer})
 	logger.Info("agent upgrade done", "agent", agentName, "old", oldVer, "new", newVer)
