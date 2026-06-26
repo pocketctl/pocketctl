@@ -1477,6 +1477,22 @@ func isPermissionDenied(out string) bool {
 // permission_denied so the UI can prompt the user to upgrade it themselves — pocketctl
 // must never perform a native install on the user's behalf. Re-discovers versions,
 // pushes a fresh register + upgrade_result event.
+// upgradeGateDecision is the pure gating logic for handleUpgradeAgent: given the
+// resolution result (found/manageable), it decides whether to proceed with the
+// upgrade and, if not, returns the on-wire status/reason/error message.
+//   - !found      → not installed (no reason; empty)
+//   - !manageable → system (root-owned) install → permission_denied
+//   - otherwise   → proceed
+func upgradeGateDecision(found, manageable bool, agentName, path string) (proceed bool, status, reason, errMsg string) {
+	if !found {
+		return false, "failed", "", fmt.Sprintf("%s 未安装", agentName)
+	}
+	if !manageable {
+		return false, "failed", protocol.ReasonPermissionDenied, fmt.Sprintf("%s 为系统(root)安装，pocketctl 无法升级，请自行 sudo-free 升级", path)
+	}
+	return true, "", "", ""
+}
+
 func handleUpgradeAgent(client *ws.Client, logger *slog.Logger, agent string) {
 	agentName := agent
 	if agentName == "" {
@@ -1488,19 +1504,13 @@ func handleUpgradeAgent(client *ws.Client, logger *slog.Logger, agent string) {
 		return
 	}
 	path, manageable, found := discovery.ResolveAgent(cli)
-	if !found {
-		client.SendMsg(protocol.DaemonEvent{Type: "upgrade_result", Agent: agentName, Status: "failed", Error: fmt.Sprintf("%s 未安装", agentName)})
-		return
-	}
-	if !manageable {
-		logger.Warn("agent upgrade refused: system (root-owned) install", "agent", agentName, "path", path)
-		client.SendMsg(protocol.DaemonEvent{
-			Type:   "upgrade_result",
-			Agent:  agentName,
-			Status: "failed",
-			Reason: protocol.ReasonPermissionDenied,
-			Error:  fmt.Sprintf("%s 为系统(root)安装，pocketctl 无法升级，请自行 sudo-free 升级", path),
-		})
+	if proceed, status, reason, errMsg := upgradeGateDecision(found, manageable, agentName, path); !proceed {
+		if !found {
+			// not installed — no extra log
+		} else {
+			logger.Warn("agent upgrade refused: system (root-owned) install", "agent", agentName, "path", path)
+		}
+		client.SendMsg(protocol.DaemonEvent{Type: "upgrade_result", Agent: agentName, Status: status, Reason: reason, Error: errMsg})
 		return
 	}
 
