@@ -4,7 +4,12 @@ BINARY = pocketctl
 GOOS ?= $(shell uname -s | tr '[:upper:]' '[:lower:]')
 GOARCH ?= $(shell uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/')
 
-.PHONY: build build-all clean relay web dev test release
+.PHONY: build build-all clean relay web dev dev-relay test release
+
+-include .env
+export JWT_SECRET
+export DEV_EMAIL
+export DEV_EMAIL_CODE
 
 # ---------- 构建 ----------
 
@@ -20,7 +25,7 @@ relay:
 
 ## 构建 Web UI
 web:
-	cd web && npm run build
+	cd web && npm run build && rm -f vite.config.js vite.config.d.ts
 	@echo "✅ Web UI 构建完成"
 
 ## 构建所有平台二进制
@@ -37,16 +42,24 @@ build-all:
 
 # ---------- 开发 ----------
 
-## 启动本地开发环境（Relay + Web）
+## 启动本地开发环境（Landing + Web + Relay 统一走 80 端口）
 dev:
 	@echo "启动开发环境..."
-	@$(MAKE) -j2 _dev-relay _dev-web
+	@$(MAKE) web
+	@echo ""
+	@echo "重启 Docker 服务（volume mount 本地 web/dist/）..."
+	@docker compose up -d landing web relay
+	@echo ""
+	@echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+	@echo "  ✅ 开发环境已就绪"
+	@echo "  Landing Page:  http://localhost/"
+	@echo "  Web 客户端:    http://localhost/app/"
+	@echo "  Relay API:     http://localhost/api/"
+	@echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 
-_dev-relay:
+## 启动本地 Relay（tsx 直跑，快速迭代 relay 代码）
+dev-relay:
 	cd relay && DATABASE_URL="postgresql://pocketctl:pocketctl@localhost:5432/pocketctl" npx tsx src/server.ts
-
-_dev-web:
-	cd web && npx vite --port 3000
 
 # ---------- 测试 ----------
 

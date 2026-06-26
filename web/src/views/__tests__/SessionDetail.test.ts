@@ -285,6 +285,40 @@ describe('cleanContent strips local-command-caveat', () => {
   })
 })
 
+// cleanContent for slash commands: Claude Code records commands as
+// <command-name>/<command-message>/<command-args> tags. Only command-name
+// (e.g. "/model") is shown — command-message is a redundant command identifier
+// (e.g. "model"), so appending it produced "/model\nmodel". Mirrors the
+// command-name branch of SessionDetail.vue cleanContent.
+describe('cleanContent for slash commands', () => {
+  function cleanContent(text: string): string {
+    if (!text) return ''
+    if (text.includes('<command-name>') || text.includes('<command-message>')) {
+      const nameMatch = text.match(/<command-name>([\s\S]*?)<\/command-name>/)
+      const msgMatch = text.match(/<command-message>([\s\S]*?)<\/command-message>/)
+      const name = (nameMatch?.[1] ?? '').trim()
+      const msg = (msgMatch?.[1] ?? '').trim()
+      if (name || msg) return name || msg
+    }
+    return text.replace(/<[^>]+>/g, '').trim()
+  }
+
+  test('/model shows only "/model", not "/model\\nmodel"', () => {
+    const input = '<command-name>/model</command-name>\n            <command-message>model</command-message>\n            <command-args></command-args>'
+    expect(cleanContent(input)).toBe('/model')
+  })
+
+  test('/compact shows only "/compact"', () => {
+    const input = '<command-name>/compact</command-name>\n<command-message>compact</command-message>'
+    expect(cleanContent(input)).toBe('/compact')
+  })
+
+  test('falls back to command-message when command-name absent', () => {
+    const input = '<command-message>clear</command-message>'
+    expect(cleanContent(input)).toBe('clear')
+  })
+})
+
 // Turn timer resume logic — verifies replayed session_status events correctly
 // recover resumeStartAt so the timer doesn't restart from zero on switch/refresh.
 describe('turn timer resumeStartAt recovery', () => {
@@ -407,6 +441,96 @@ describe('tool-use approval flow', () => {
     }
     onApprovalRespond({}, true)
     expect(sent).toEqual([])
+  })
+})
+
+// Retry last prompt — mirrors SessionDetail.vue retryLastPrompt() +
+// hasLastUserPrompt. A retry re-sends the last user_text verbatim by routing
+// it through sendMessage (filling messageInput first), so the retried bubble is
+// treated exactly like a fresh send.
+describe('retry last prompt', () => {
+  function hasLastUserPrompt(messages: any[]): boolean {
+    return messages.some((m: any) => m.role === 'user' && m.content)
+  }
+
+  // Mirror of retryLastPrompt: sets messageInput to the last user message's
+  // raw content, then invokes sendMessage (stubbed here to record the dispatch).
+  function retryLastPrompt(messages: any[], canInput: boolean): { sent: string | null } {
+    const result = { sent: null as string | null }
+    if (!canInput) return result
+    const send = (text: string) => { result.sent = text }
+    let messageInput = ''
+    // sendMessage body: trim, guard, then dispatch user_message with the content
+    function sendMessage() {
+      const text = messageInput.trim()
+      if (!text) return
+      send(text)
+      messageInput = ''
+    }
+    for (let i = messages.length - 1; i >= 0; i--) {
+      const m = messages[i]
+      if (m.role === 'user' && m.content) {
+        messageInput = m.content
+        sendMessage()
+        return result
+      }
+    }
+    return result
+  }
+
+  test('hasLastUserPrompt true when a user message with content exists', () => {
+    const msgs = [
+      { type: 'agent_text', role: 'agent', content: 'hello' },
+      { type: 'user_text', role: 'user', content: 'hi' },
+    ]
+    expect(hasLastUserPrompt(msgs)).toBe(true)
+  })
+
+  test('hasLastUserPrompt false when no user message exists', () => {
+    const msgs = [
+      { type: 'agent_text', role: 'agent', content: 'hello' },
+      { type: 'tool_call', role: 'agent' },
+    ]
+    expect(hasLastUserPrompt(msgs)).toBe(false)
+  })
+
+  test('hasLastUserPrompt false when user message is empty', () => {
+    const msgs = [{ type: 'user_text', role: 'user', content: '' }]
+    expect(hasLastUserPrompt(msgs)).toBe(false)
+  })
+
+  test('retry sends the most recent user message verbatim', () => {
+    const msgs = [
+      { type: 'user_text', role: 'user', content: 'first question' },
+      { type: 'agent_text', role: 'agent', content: 'answer one' },
+      { type: 'user_text', role: 'user', content: 'second question' },
+      { type: 'agent_text', role: 'agent', content: 'answer two' },
+    ]
+    expect(retryLastPrompt(msgs, true).sent).toBe('second question')
+  })
+
+  test('retry uses raw content, not cleanContent', () => {
+    const raw = '<command-name>/compact</command-name>body text'
+    const msgs = [
+      { type: 'user_text', role: 'user', content: raw },
+      { type: 'agent_text', role: 'agent', content: 'done' },
+    ]
+    // Retry must preserve the original prompt exactly (user intent), including
+    // any command tags — NOT the cleaned-up bubble text.
+    expect(retryLastPrompt(msgs, true).sent).toBe(raw)
+  })
+
+  test('retry sends nothing when no user message exists', () => {
+    const msgs = [{ type: 'agent_text', role: 'agent', content: 'hi' }]
+    expect(retryLastPrompt(msgs, true).sent).toBeNull()
+  })
+
+  test('retry blocked when session cannot accept input (ended/disconnected)', () => {
+    const msgs = [
+      { type: 'user_text', role: 'user', content: 'hi' },
+      { type: 'agent_text', role: 'agent', content: 'done' },
+    ]
+    expect(retryLastPrompt(msgs, false).sent).toBeNull()
   })
 })
 

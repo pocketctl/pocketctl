@@ -14,13 +14,27 @@ func TestParseStreamLine_TextOutput(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if len(events) != 1 {
-		t.Fatalf("expected 1 event, got %d", len(events))
+		t.Fatalf("expected 1 event, got %d: %v", len(events), events)
 	}
 	if events[0].Type != "agent_text" {
 		t.Errorf("expected agent_text, got %s", events[0].Type)
 	}
 	if events[0].Text != "Hello!" {
 		t.Errorf("unexpected text: %s", events[0].Text)
+	}
+}
+
+func TestParseStreamLine_AgentTextCarriesModel(t *testing.T) {
+	// The model Claude actually used must be surfaced on agent_text so the
+	// daemon can detect a /model switch on --resume sessions.
+	a := NewClaudeAdapter("")
+	line := `{"type":"assistant","message":{"id":"msg_1","type":"message","role":"assistant","model":"claude-sonnet-4[1M]","content":[{"type":"text","text":"Hello!"}]}}`
+	events, _ := a.ParseStreamLine(line)
+	if len(events) != 1 || events[0].Type != "agent_text" {
+		t.Fatalf("expected agent_text, got %v", events)
+	}
+	if events[0].Model != "claude-sonnet-4" {
+		t.Errorf("expected stripped model claude-sonnet-4, got %q", events[0].Model)
 	}
 }
 

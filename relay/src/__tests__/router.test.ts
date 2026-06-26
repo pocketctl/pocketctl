@@ -244,3 +244,84 @@ describe('Router - list_sessions includes extended fields', () => {
     }
   })
 })
+
+describe('Router - session→daemon routing resilience', () => {
+  let pool: any
+  let router: Router
+
+  beforeEach(() => {
+    pool = createMockPool()
+    router = new Router(pool)
+  })
+
+  test('rebuildSessionRoutes rehydrates routes from reported + DB session IDs on register', async () => {
+    const daemonWs = createMockWs()
+    // Daemon reports two live sessions; DB mock additionally returns 'test-sid'.
+    await router.registerDaemon(daemonWs, {
+      type: 'register', daemon_id: 'daemon-1', hostname: 'test', agents: [],
+      active_session_ids: ['sess-a', 'sess-b'],
+    }, null)
+    // rebuildSessionRoutes fires async on register — let it settle.
+    await new Promise(r => setTimeout(r, 20))
+
+    const clientWs = createMockWs()
+    router.registerClient(clientWs, null)
+
+    // A session never seen in-memory this connection (sess-a) should now route
+    // to the daemon without hitting the "session not found" error.
+    daemonWs._sent.length = 0
+    await router.handleClientMessage(clientWs, { type: 'session_interrupt', session_id: 'sess-a' })
+
+    expect(daemonWs._sent.some((m: any) => m.type === 'session_interrupt' && m.session_id === 'sess-a')).toBe(true)
+    expect(clientWs._sent.some((m: any) => m.error === 'session not found or daemon offline')).toBe(false)
+  })
+
+  test('routing falls back to DB daemon_id when in-memory map misses', async () => {
+    const daemonWs = createMockWs()
+    await router.registerDaemon(daemonWs, { type: 'register', daemon_id: 'daemon-1', hostname: 'test', agents: [] }, null)
+    await new Promise(r => setTimeout(r, 20))
+
+    const clientWs = createMockWs()
+    router.registerClient(clientWs, null)
+
+    // 'test-sid' was NOT in active_session_ids, but the DB mock maps it to daemon-1.
+    daemonWs._sent.length = 0
+    await router.handleClientMessage(clientWs, { type: 'session_interrupt', session_id: 'test-sid' })
+
+    expect(daemonWs._sent.some((m: any) => m.type === 'session_interrupt')).toBe(true)
+  })
+
+  test('error for unroutable session includes session_id', async () => {
+    const clientWs = createMockWs()
+    router.registerClient(clientWs, null)
+
+    // Unknown session: DB returns no rows → falls through to the error.
+    await router.handleClientMessage(clientWs, { type: 'session_interrupt', session_id: 'no-such-session' })
+    await new Promise(r => setTimeout(r, 10))
+
+    const errEvent = clientWs._sent.find((m: any) => m.error === 'session not found or daemon offline')
+    expect(errEvent).toBeDefined()
+    expect(errEvent.session_id).toBe('no-such-session')
+  })
+
+  test('unregisterDaemon drops the daemon\'s session→daemon routes', async () => {
+    const daemonWs = createMockWs()
+    await router.registerDaemon(daemonWs, {
+      type: 'register', daemon_id: 'daemon-1', hostname: 'test', agents: [],
+      active_session_ids: ['sess-a'],
+    }, null)
+    await new Promise(r => setTimeout(r, 20))
+
+    router.unregisterDaemon('daemon-1')
+    await new Promise(r => setTimeout(r, 20))
+
+    // After disconnect, sess-a is no longer in the routing map (pruned), so a
+    // message to it does NOT get forwarded to the dead daemon socket.
+    const clientWs = createMockWs()
+    router.registerClient(clientWs, null)
+    daemonWs._sent.length = 0
+    await router.handleClientMessage(clientWs, { type: 'session_interrupt', session_id: 'sess-a' })
+
+    expect(daemonWs._sent.some((m: any) => m.type === 'session_interrupt')).toBe(false)
+  })
+})

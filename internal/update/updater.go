@@ -20,17 +20,26 @@ import (
 
 const (
 	// GitHub Release (global source for both API and download)
-	githubAPI  = "https://api.github.com/repos/pocketctl/pocketctl/releases"
-	githubDL   = "https://github.com/pocketctl/pocketctl/releases/download"
-
-	// Domestic acceleration proxies for GitHub Release downloads.
-	// Tried in order before falling back to direct GitHub.
-	// gh-proxy mirrors the full GitHub URL path — fast in China, no size limit.
-	domesticProxies = "https://gh-proxy.com/"
+	githubAPI = "https://api.github.com/repos/pocketctl/pocketctl/releases"
+	githubDL  = "https://github.com/pocketctl/pocketctl/releases/download"
 
 	defaultBin          = "pocketctl"
 	maxDownloadRetries  = 3 // retry count per URL on transient download errors
 )
+
+// ghProxies is the ordered list of public GitHub acceleration proxies for
+// users in mainland China. They mirror the full GitHub URL as a prefix.
+//
+// These are community-run and can go down at any time — we keep several and
+// try them in sequence so a single proxy outage no longer blocks downloads.
+// GitHub direct is always appended as the final fallback (see ResolveBinary).
+// Last health check: 2026-06-26 (gh-proxy.com, ghfast.top, ghproxy.net OK;
+// mirror.ghproxy.com and github.moeyy.xyz deprecated/removed).
+var ghProxies = []string{
+	"https://gh-proxy.com/",
+	"https://ghfast.top/",
+	"https://ghproxy.net/",
+}
 
 // apiClient has a short timeout so version checks won't hang when GitHub
 // is unreachable.
@@ -39,7 +48,10 @@ var apiClient = &http.Client{Timeout: 10 * time.Second}
 // downloadClient has a generous timeout for large binary downloads (~10–50 MB).
 // Each attempt has its own deadline; the retry loop in downloadOne provides
 // additional resilience for transient failures.
-var downloadClient = &http.Client{Timeout: 10 * time.Minute}
+//
+// Kept moderate (3 min, down from 10) so a hung proxy is abandoned fast enough
+// to fall through to the next candidate URL in DownloadAndVerify.
+var downloadClient = &http.Client{Timeout: 3 * time.Minute}
 
 // CheckLatest queries the GitHub releases API for the latest version tag.
 func CheckLatest() (tag string, err error) {
@@ -99,17 +111,27 @@ func queryVersionTag(api, version string) (string, error) {
 
 // BinaryInfo describes a downloadable binary.
 type BinaryInfo struct {
-	OS          string
-	Arch        string
-	URL         string   // primary download URL
-	FallbackURL string   // alternative URL if primary fails
-	SHA         string
-	Name        string   // binary filename (e.g. pocketctl_darwin_arm64)
+	OS   string
+	Arch string
+	// URL is the primary download URL (first source that returned a valid SHA).
+	URL string
+	// FallbackURLs are tried (in order) if URL fails to download or verify.
+	// They are constructed so the SHA256 fetched from URL's source still
+	// applies — all candidates below share the same binary bytes per release.
+	FallbackURLs []string
+	// SHA is the SHA256 checksum shared by every candidate URL (same release
+	// asset mirrored across proxies, so a single checksum covers them all).
+	SHA  string
+	Name string // binary filename (e.g. pocketctl_darwin_arm64)
 }
 
 // ResolveBinary constructs the download URL and fetches the SHA256 checksum.
-// Tries domestic proxy (ghproxy) first for users in China, then falls back to
-// direct GitHub.
+//
+// It probes sources in order: each public acceleration proxy, then GitHub
+// direct. The first source whose <url>.sha256 is fetchable becomes the primary
+// URL; the remaining sources are appended as fallbacks. Because every source
+// serves the identical release asset, the SHA256 from the primary source
+// transitively validates downloads from any fallback.
 func ResolveBinary(tag string) (*BinaryInfo, error) {
 	goos := runtime.GOOS
 	goarch := runtime.GOARCH
@@ -125,45 +147,62 @@ func ResolveBinary(tag string) (*BinaryInfo, error) {
 	name := fmt.Sprintf("pocketctl_%s_%s", goos, goarch)
 	ghURL := fmt.Sprintf("%s/%s/%s", githubDL, tag, name)
 
-	// Try domestic proxy first (fast in China), then direct GitHub.
-	proxyURL := domesticProxies + ghURL
-	sources := []struct {
-		url      string
-		isProxy  bool
-	}{
-		{proxyURL, true},
-		{ghURL, false},
+	// Build the full ordered candidate list: each proxy prefix + the GitHub
+	// direct URL as the final fallback. Deduplicate in case a proxy equals
+	// the direct URL (defensive; keeps the list clean).
+	candidates := make([]string, 0, len(ghProxies)+1)
+	for _, p := range ghProxies {
+		candidates = append(candidates, p+ghURL)
 	}
-	for _, src := range sources {
-		sha, err := fetchSHA256(src.url + ".sha256")
-		if err == nil && sha != "" {
-			info := &BinaryInfo{
-				OS:   goos,
-				Arch: goarch,
-				URL:  src.url,
-				SHA:  sha,
-				Name: name,
-			}
-			// Set fallback to the other source so DownloadAndVerify can retry
-			if src.isProxy {
-				info.FallbackURL = ghURL
-			} else {
-				info.FallbackURL = proxyURL
-			}
-			return info, nil
+	candidates = append(candidates, ghURL)
+
+	// Find the first source that can provide a SHA256 checksum. That checksum
+	// is valid for every candidate (identical bytes per release), so once we
+	// have it we can offer all sources as download candidates.
+	var sha string
+	primaryIdx := -1
+	for i, u := range candidates {
+		s, err := fetchSHA256(u + ".sha256")
+		if err == nil && s != "" {
+			sha = s
+			primaryIdx = i
+			break
 		}
 	}
-	return nil, fmt.Errorf("binary %s not found on any source (tag=%s)", name, tag)
+	if primaryIdx < 0 {
+		return nil, fmt.Errorf("binary %s not found on any source (tag=%s)", name, tag)
+	}
+
+	// Primary URL first; the rest become fallbacks (same checksum applies).
+	primary := candidates[primaryIdx]
+	fallbacks := make([]string, 0, len(candidates)-1)
+	for i, u := range candidates {
+		if i == primaryIdx {
+			continue
+		}
+		fallbacks = append(fallbacks, u)
+	}
+
+	return &BinaryInfo{
+		OS:           goos,
+		Arch:         goarch,
+		URL:          primary,
+		FallbackURLs: fallbacks,
+		SHA:          sha,
+		Name:         name,
+	}, nil
 }
 
 // DownloadAndVerify downloads the binary, verifies SHA256, and returns the temp path.
-// Tries info.URL first, then info.FallbackURL. Retries up to maxDownloadRetries
-// per URL on transient errors (unexpected EOF, connection reset, timeout).
+//
+// It tries info.URL first, then each entry in info.FallbackURLs. Retries up to
+// maxDownloadRetries per URL on transient errors (unexpected EOF, connection
+// reset, timeout) before moving to the next source. Permanent errors (SHA256
+// mismatch, 404) abort immediately — retrying another source won't help for a
+// checksum mismatch, and a 404 on one mirror usually means the asset genuinely
+// doesn't exist.
 func DownloadAndVerify(info *BinaryInfo) (tmpPath string, err error) {
-	urls := []string{info.URL}
-	if info.FallbackURL != "" && info.FallbackURL != info.URL {
-		urls = append(urls, info.FallbackURL)
-	}
+	urls := append([]string{info.URL}, info.FallbackURLs...)
 
 	var lastErr error
 	for _, url := range urls {
@@ -171,7 +210,7 @@ func DownloadAndVerify(info *BinaryInfo) (tmpPath string, err error) {
 		if lastErr == nil {
 			return tmpPath, nil
 		}
-		// Don't retry another URL for permanent errors (SHA mismatch, 404, etc.)
+		// Don't try another URL for permanent errors (SHA mismatch, 404, etc.)
 		if isPermanent(lastErr) {
 			return "", lastErr
 		}

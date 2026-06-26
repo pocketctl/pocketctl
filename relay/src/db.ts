@@ -476,6 +476,17 @@ export async function isSessionDeleted(pool: pg.Pool, sessionId: string): Promis
   return (result.rowCount ?? 0) > 0;
 }
 
+/**
+ * Resolve the owning daemon_id for a session from the DB. Used as a fallback
+ * when the in-memory sessionToDaemon map misses (relay restart, daemon
+ * reconnect with stale entries, …). Returns null for unknown / deleted sessions.
+ */
+export async function getSessionDaemonId(pool: pg.Pool, sessionId: string): Promise<string | null> {
+  const result = await pool.query(`SELECT daemon_id FROM sessions WHERE session_id = $1`, [sessionId]);
+  if ((result.rowCount ?? 0) === 0) return null;
+  return result.rows[0].daemon_id ?? null;
+}
+
 // --- Title generation ---
 
 /** Check if a session still has a default-generated title (Terminal Session-*) */
@@ -655,6 +666,12 @@ export async function bindTokenToDaemon(pool: pg.Pool, daemonId: string, jti: st
 /** Update session cumulative cost (called on session_status carrying cost_usd from result event). */
 export async function updateSessionCost(pool: pg.Pool, sessionId: string, costUsd: number): Promise<void> {
   await pool.query(`UPDATE sessions SET cost_usd = $1, updated_at = NOW() WHERE session_id = $2`, [costUsd, sessionId]);
+}
+
+/** Update the session's resolved model (on a mid-session /model switch). Unlike
+ *  upsertSession (which uses COALESCE and cannot overwrite), this writes unconditionally. */
+export async function updateSessionModel(pool: pg.Pool, sessionId: string, model: string): Promise<void> {
+  await pool.query(`UPDATE sessions SET model = $1, updated_at = NOW() WHERE session_id = $2`, [model, sessionId]);
 }
 
 /** Increment session cost by a delta (for per-turn cost accumulation from assistant usage). */

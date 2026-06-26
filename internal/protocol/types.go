@@ -56,6 +56,7 @@ type DaemonEvent struct {
 	Usage            *ContextUsage   `json:"usage,omitempty"`           // token usage for agent_text events
 	PermissionMode   string          `json:"permission_mode,omitempty"` // current mode (permission_mode_changed event)
 	Model            string          `json:"model,omitempty"`           // resolved model name (session_meta event)
+	Effort           string          `json:"effort,omitempty"`          // current thinking-effort level (session_meta event)
 	Models           []ModelOption   `json:"models,omitempty"`          // available models (model_list event)
 }
 
@@ -86,17 +87,18 @@ type CommandItem struct {
 
 // Control messages
 type RegisterMessage struct {
-	Type          string            `json:"type"`
-	DaemonID      string            `json:"daemon_id"`
-	Hostname      string            `json:"hostname"`
-	Agents        []string          `json:"agents"`
-	AgentVersions map[string]string `json:"agent_versions,omitempty"`
-	AgentLatests  map[string]string `json:"agent_latests,omitempty"`
-	OS            string            `json:"os"`
-	IP            string            `json:"ip"`
-	Arch          string            `json:"arch,omitempty"`
-	Version       string            `json:"version,omitempty"`
-	StartedAt     int64             `json:"started_at,omitempty"`
+	Type             string            `json:"type"`
+	DaemonID         string            `json:"daemon_id"`
+	Hostname         string            `json:"hostname"`
+	Agents           []string          `json:"agents"`
+	AgentVersions    map[string]string `json:"agent_versions,omitempty"`
+	AgentLatests     map[string]string `json:"agent_latests,omitempty"`
+	OS               string            `json:"os"`
+	IP               string            `json:"ip"`
+	Arch             string            `json:"arch,omitempty"`
+	Version          string            `json:"version,omitempty"`
+	StartedAt        int64             `json:"started_at,omitempty"`
+	ActiveSessionIDs []string          `json:"active_session_ids,omitempty"`
 }
 
 type RegisterAckMessage struct {

@@ -521,6 +521,17 @@ func cmdDaemonStart(args []string) {
 		m := sysinfo.Get()
 		return m.CpuPct, m.MemPct, m.DiskPct
 	})
+	// Seed this daemon's active session IDs into the register message so the
+	// relay can rebuild its session→daemon routing table synchronously on
+	// (re)connection, before any session_discovered events arrive.
+	client.SetActiveSessionIDsFn(func() []string {
+		sessions := sm.ListSessions()
+		ids := make([]string, 0, len(sessions))
+		for _, s := range sessions {
+			ids = append(ids, s.SessionID)
+		}
+		return ids
+	})
 
 	// Dirty flag for state persistence — only write when changed
 	var stateDirty atomic.Bool
@@ -559,6 +570,29 @@ func cmdDaemonStart(args []string) {
 		} else {
 			logger.Warn("disconnected from relay")
 		}
+	}
+
+	// Detect runtime model switches: every outgoing agent_text event now carries
+	// the model Claude actually used (filled by the adapters). When it differs
+	// from the session's cached model, update the cache and emit a
+	// session_model_changed event so the relay + Web/iOS clients reflect the
+	// /model switch in real time.
+	client.OnEvent = func(evt protocol.DaemonEvent) []protocol.DaemonEvent {
+		if evt.Type != "agent_text" || evt.Model == "" || evt.SessionID == "" {
+			return []protocol.DaemonEvent{evt}
+		}
+		current, _ := sm.GetSessionModel(evt.SessionID)
+		if evt.Model == current {
+			return []protocol.DaemonEvent{evt}
+		}
+		sm.SetSessionModel(evt.SessionID, evt.Model)
+		logger.Info("session model changed", "session", evt.SessionID, "model", evt.Model, "prev", current)
+		// Forward the original agent_text, then the derived change notification.
+		return []protocol.DaemonEvent{evt, {
+			Type:      "session_model_changed",
+			SessionID: evt.SessionID,
+			Model:     evt.Model,
+		}}
 	}
 
 	// Wire terminal notifications
@@ -1152,6 +1186,20 @@ func handleCommands(ctx context.Context, client *ws.Client, sm *session.SessionM
 					})
 				}
 
+			case "set_effort":
+				// Switch the Claude TUI's thinking-effort level by injecting
+				// `/effort <level>` into the PTY. Effort is a runtime-only TUI
+				// state, so the recorded value reflects only what pocketctl set.
+				logger.Info("set effort", "session", cmd.SessionID, "level", cmd.Content)
+				if err := sm.SetEffort(cmd.SessionID, cmd.Content); err != nil {
+					logger.Error("set effort failed", "error", err)
+					client.SendMsg(protocol.DaemonEvent{
+						Type:      "error",
+						SessionID: cmd.SessionID,
+						Error:     err.Error(),
+					})
+				}
+
 			case "list_commands":
 				logger.Debug("list commands", "session", cmd.SessionID)
 				cwd, ok := sm.GetSessionCwd(cmd.SessionID)
@@ -1199,12 +1247,13 @@ func handleCommands(ctx context.Context, client *ws.Client, sm *session.SessionM
 						}
 					}
 				}
-				logger.Info("get_session_meta", "session", cmd.SessionID, "model", model)
-				client.SendMsg(protocol.DaemonEvent{
-					Type:      "session_meta",
-					SessionID: cmd.SessionID,
-					Model:     model,
-				})
+			logger.Info("get_session_meta", "session", cmd.SessionID, "model", model)
+			client.SendMsg(protocol.DaemonEvent{
+				Type:      "session_meta",
+				SessionID: cmd.SessionID,
+				Model:     model,
+				Effort:    sm.GetSessionEffort(cmd.SessionID),
+			})
 
 			case "list_models":
 				// Web client queries the host's available models to populate the

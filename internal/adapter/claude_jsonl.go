@@ -132,6 +132,7 @@ func parseAssistantJSONL(entry JSONLEntry, sid string) ([]protocol.DaemonEvent, 
 				SessionID: sid,
 				Text:      b.Text,
 				Streaming: false,
+				Model:     CleanModelName(entry.Message.Model),
 			}
 			if u := entry.Message.Usage; u != nil {
 				ev.Usage = &protocol.ContextUsage{
@@ -237,6 +238,21 @@ func ExtractFirstAssistantMessage(lines []string, maxLen int) string {
 	return ""
 }
 
+// CleanModelName normalises a raw model identifier from an assistant message:
+// trims whitespace and strips a trailing "[...]" suffix (e.g. "GLM-5.2[1M]" →
+// "GLM-5.2"). Returns "" for synthetic/empty markers. Shared by the replay,
+// PTY-tailer, and --resume paths so agent_text events carry a consistent model.
+func CleanModelName(m string) string {
+	m = strings.TrimSpace(m)
+	if m == "" || m == "<synthetic>" {
+		return ""
+	}
+	if idx := strings.Index(m, "["); idx > 0 { // strip [1M]-style suffix for clean display
+		m = strings.TrimSpace(m[:idx])
+	}
+	return m
+}
+
 // ExtractLastAssistantModel returns the model name from the last real (non-synthetic)
 // assistant message in the JSONL lines. Used to surface the active model for terminal
 // sessions, whose model isn't known at process-discovery time. Returns "" if none.
@@ -254,14 +270,9 @@ func ExtractLastAssistantModel(lines []string) string {
 		if entry.Type != "assistant" || entry.Message == nil || entry.Message.Role != "assistant" {
 			continue
 		}
-		m := strings.TrimSpace(entry.Message.Model)
-		if m == "" || m == "<synthetic>" {
-			continue
+		if m := CleanModelName(entry.Message.Model); m != "" {
+			model = m // keep updating → ends as the last real assistant message's model
 		}
-		if idx := strings.Index(m, "["); idx > 0 { // strip [1M]-style suffix for clean display
-			m = strings.TrimSpace(m[:idx])
-		}
-		model = m // keep updating → ends as the last real assistant message's model
 	}
 	return model
 }
@@ -449,6 +460,7 @@ func (p *JSONLStreamParser) parseAssistant(entry JSONLEntry, sid string) ([]prot
 						SessionID: sid,
 						Text:      b.Text,
 						Streaming: false,
+						Model:     CleanModelName(entry.Message.Model),
 					}
 					if u := entry.Message.Usage; u != nil {
 						ev.Usage = &protocol.ContextUsage{
