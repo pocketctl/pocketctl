@@ -103,7 +103,7 @@ import logoDark from '../assets/logo-github-org.svg'
 import logoLight from '../assets/logo-github-org-light.svg'
 
 const route = useRoute()
-const { isLoggedIn, user, accessToken, sendEmailCode, loginViaEmail, confirmDeviceAuth } = useAuth()
+const { isLoggedIn, user, accessToken, sendEmailCode, loginViaEmail, confirmDeviceAuth, doRefreshToken } = useAuth()
 
 const userCode = ref((route.query.code as string) || '')
 const userCodeDisplay = computed(() => {
@@ -202,11 +202,23 @@ async function confirmAuthorization() {
     if (res.ok && data.success) {
       authorized.value = true
     } else {
-      confirmError.value = data.error_description || data.error || '授权失败'
       if (data.error === 'invalid_user_code') {
         invalidCode.value = true
         invalidReason.value = '此授权码已过期或无效'
+        return
       }
+      // Token expired or invalid: try refresh, then fall back to login form
+      if (data.error === 'invalid_token' || data.error === 'authentication_required') {
+        const refreshed = await doRefreshToken()
+        if (refreshed) {
+          await confirmAuthorization()
+          return
+        }
+        // Refresh failed — isLoggedIn becomes false, login form auto-shows via template
+        confirmError.value = '登录已过期，请重新验证'
+        return
+      }
+      confirmError.value = data.error_description || data.error || '授权失败'
     }
   } catch {
     confirmError.value = '网络请求失败'
