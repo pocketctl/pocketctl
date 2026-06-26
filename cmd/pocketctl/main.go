@@ -66,6 +66,8 @@ func main() {
 		os.Exit(0)
 	case "version":
 		fmt.Println("pocketctl", version)
+	case "uninstall":
+		cmdUninstall(os.Args[2:])
 	case "help", "--help", "-h":
 		printUsage()
 	default:
@@ -105,6 +107,106 @@ func cmdDaemon(args []string) {
 }
 
 // ---------- daemon start ----------
+
+// ---------- uninstall ----------
+
+// cmdUninstall removes the pocketctl binary, stops the running daemon, and
+// wipes the config/data directories (~/.pocketctl, /tmp/pocketctl). Requires
+// explicit --yes to actually delete anything; without it, prints a preview of
+// what would be removed and asks for confirmation.
+func cmdUninstall(args []string) {
+	fs := flag.NewFlagSet("uninstall", flag.ExitOnError)
+	yes := fs.Bool("yes", false, "Skip confirmation prompt and remove everything immediately")
+	keepBinary := fs.Bool("keep-binary", false, "Remove data/config only, keep the pocketctl binary")
+	fs.Parse(args)
+
+	// Collect everything that would be removed.
+	type removeTarget struct {
+		path string
+		desc string
+	}
+	var targets []removeTarget
+
+	home, _ := os.UserHomeDir()
+	if home != "" {
+		targets = append(targets, removeTarget{
+			filepath.Join(home, ".pocketctl"),
+			i18n.T("uninstall.desc_config"),
+		})
+	}
+	targets = append(targets, removeTarget{
+		"/tmp/pocketctl",
+		i18n.T("uninstall.desc_runtime"),
+	})
+
+	// Resolve the binary path.
+	exePath, exeErr := os.Executable()
+	if exeErr != nil {
+		exePath = ""
+	}
+
+	fmt.Println(i18n.T("uninstall.title"))
+	fmt.Println(i18n.T("doctor.rule"))
+	fmt.Println(i18n.T("uninstall.will_remove"))
+	for _, t := range targets {
+		if _, err := os.Stat(t.path); err == nil {
+			fmt.Printf("  • %s (%s)\n", t.path, t.desc)
+		}
+	}
+	if exeErr == nil && !*keepBinary {
+		fmt.Printf("  • %s (%s)\n", exePath, i18n.T("uninstall.desc_binary"))
+	}
+	fmt.Println(i18n.T("uninstall.stop_daemon_note"))
+	fmt.Println(i18n.T("doctor.rule"))
+
+	if !*yes {
+		fmt.Print(i18n.T("uninstall.confirm"))
+		reader := bufio.NewReader(os.Stdin)
+		answer, _ := reader.ReadString('\n')
+		answer = strings.ToLower(strings.TrimSpace(answer))
+		if answer != "y" && answer != "yes" {
+			fmt.Println(i18n.T("uninstall.aborted"))
+			return
+		}
+	}
+
+	// 1. Stop the daemon first so it isn't holding the binary / log files.
+	if pid, running := daemon.IsRunning(); running {
+		fmt.Println(i18n.T("uninstall.stopping_daemon", pid))
+		if err := daemon.Stop(); err != nil {
+			fmt.Fprintln(os.Stderr, i18n.T("uninstall.stop_fail", err))
+		} else {
+			fmt.Println(i18n.T("daemon.stopped"))
+		}
+	}
+
+	// 2. Remove data/config directories.
+	for _, t := range targets {
+		if _, err := os.Stat(t.path); err != nil {
+			continue
+		}
+		fmt.Println(i18n.T("uninstall.removing", t.path))
+		if err := os.RemoveAll(t.path); err != nil {
+			fmt.Fprintln(os.Stderr, i18n.T("uninstall.remove_fail", t.path, err))
+		}
+	}
+
+	// 3. Remove the binary (self-delete). On Linux this is straightforward; on
+	//    macOS the running binary can unlink itself fine too.
+	if exeErr == nil && !*keepBinary {
+		if _, err := os.Stat(exePath); err == nil {
+			fmt.Println(i18n.T("uninstall.removing", exePath))
+			if err := os.Remove(exePath); err != nil {
+				// Permission errors (e.g. /usr/local/bin) need sudo — tell the user.
+				fmt.Fprintln(os.Stderr, i18n.T("uninstall.binary_fail", exePath, err))
+				fmt.Println(i18n.T("uninstall.binary_hint", exePath))
+			}
+		}
+	}
+
+	fmt.Println()
+	fmt.Println(i18n.T("uninstall.done"))
+}
 
 // ---------- login ----------
 
@@ -672,6 +774,7 @@ func cmdDaemonStart(args []string) {
 	}()
 
 	fmt.Println(i18n.T("daemon.started", id, os.Getpid()))
+	fmt.Println(i18n.T("daemon.version", version))
 	fmt.Println(i18n.T("daemon.relay", url))
 	fmt.Println(i18n.T("daemon.agents", strings.Join(agentTypes, ", ")))
 	fmt.Println(i18n.T("daemon.logs", daemon.LogPath()))
@@ -1311,6 +1414,21 @@ func handleCommands(ctx context.Context, client *ws.Client, sm *session.SessionM
 				logger.Info("approval response", "session", cmd.SessionID, "req", cmd.RequestID, "approved", cmd.Approved)
 				if err := sm.ResolveApproval(cmd.SessionID, cmd.RequestID, cmd.Approved); err != nil {
 					logger.Error("resolve approval failed", "error", err)
+					client.SendMsg(protocol.DaemonEvent{
+						Type:      "error",
+						SessionID: cmd.SessionID,
+						Error:     err.Error(),
+					})
+				}
+
+			case "interactive_response":
+				// Client answered a PTY selection prompt (interactive_prompt card)
+				// — e.g. a host PreToolUse hook's "❯1.Yes 2.No" menu that the TUI
+				// rendered but never wrote to JSONL. Writes the chosen index back
+				// to the PTY so the agent's blocking prompt proceeds.
+				logger.Info("interactive response", "session", cmd.SessionID, "req", cmd.RequestID, "choice", cmd.Choice)
+				if err := sm.ResolveInteractivePrompt(cmd.SessionID, cmd.RequestID, cmd.Choice); err != nil {
+					logger.Error("resolve interactive prompt failed", "error", err)
 					client.SendMsg(protocol.DaemonEvent{
 						Type:      "error",
 						SessionID: cmd.SessionID,

@@ -56,6 +56,7 @@
 		DE013F1319AF19100BD47D5F /* CommandPopoverView.swift in Sources */ = {isa = PBXBuildFile; fileRef = FD0A3F68E4190D3E2E807B21 /* CommandPopoverView.swift */; };
 		F2EBB6AE6F89B58A3E2F7F90 /* QuestionCard.swift in Sources */ = {isa = PBXBuildFile; fileRef = B7A8A74C5B021C52A1F209FC /* QuestionCard.swift */; };
 		A1B2C3D4E5F6070810111213 /* ApprovalCard.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1B2C3D4E5F6070810111214 /* ApprovalCard.swift */; };
+		I8C4D5E6F7A8091011121315 /* InteractiveChoiceCard.swift in Sources */ = {isa = PBXBuildFile; fileRef = I8C4D5E6F7A8091011121314 /* InteractiveChoiceCard.swift */; };
 		F6BC0C0A3DE12A1CF43FB90B /* AgentManageViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = CCC0A152C59577B32057F5AE /* AgentManageViewModel.swift */; };
 		F80398131777141DF95B5ECD /* ChatBubble.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9026A8C3829346792A76FC15 /* ChatBubble.swift */; };
 		FC24814A4FE1B83D14BD4F0B /* NewSessionSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9E2A895A4F67741DE7F0CE8B /* NewSessionSheet.swift */; };
@@ -101,6 +102,7 @@
 		A6CB2EA28F7E93B23655A152 /* DaemonListView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DaemonListView.swift; sourceTree = "<group>"; };
 		B7A8A74C5B021C52A1F209FC /* QuestionCard.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = QuestionCard.swift; sourceTree = "<group>"; };
 		A1B2C3D4E5F6070810111214 /* ApprovalCard.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ApprovalCard.swift; sourceTree = "<group>"; };
+		I8C4D5E6F7A8091011121314 /* InteractiveChoiceCard.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = InteractiveChoiceCard.swift; sourceTree = "<group>"; };
 		B80EDC4AAE35AB265037E32D /* SubAgent.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SubAgent.swift; sourceTree = "<group>"; };
 		C1040499582D1E3CFB58142D /* SubAgentCard.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SubAgentCard.swift; sourceTree = "<group>"; };
 		C6BA47705710BD73F235D5E2 /* CommandItem.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CommandItem.swift; sourceTree = "<group>"; };
@@ -251,6 +253,7 @@
 				DA61A703EB52322DF5EAFC29 /* MarkdownContentView.swift */,
 				B7A8A74C5B021C52A1F209FC /* QuestionCard.swift */,
 				A1B2C3D4E5F6070810111214 /* ApprovalCard.swift */,
+				I8C4D5E6F7A8091011121314 /* InteractiveChoiceCard.swift */,
 				802A171E89C20ADD85902665 /* StatusChip.swift */,
 				56EC9B30663A9B86C37B662C /* StatusDot.swift */,
 				C1040499582D1E3CFB58142D /* SubAgentCard.swift */,
@@ -355,6 +358,7 @@
 				690AB6AC11321B9CD54A7EC8 /* PushService.swift in Sources */,
 				F2EBB6AE6F89B58A3E2F7F90 /* QuestionCard.swift in Sources */,
 				A1B2C3D4E5F6070810111213 /* ApprovalCard.swift in Sources */,
+				I8C4D5E6F7A8091011121315 /* InteractiveChoiceCard.swift in Sources */,
 				A0F41EB04B09F512792D4524 /* RelativeTime.swift in Sources */,
 				9DFEFDFC5802D0D2B7CFFB49 /* RelayEnvironment.swift in Sources */,
 				202B5279C90D27478BF100CA /* ScanLoginView.swift in Sources */,

@@ -161,6 +161,9 @@
 
           <!-- Tool-use approval request (non-bypass sessions) -->
           <ApprovalCard v-else-if="msg.type === 'approval_request'" :message="msg" @respond="onApprovalRespond" />
+
+          <!-- PTY selection menu (host-hook confirmation, TUI prompt, etc.) -->
+          <InteractiveChoiceCard v-else-if="msg.type === 'interactive_prompt'" :message="msg" @respond="onChoiceRespond" />
         </template>
 
         <!-- Turn status bar: lives inside the message stream (visually part of
@@ -339,6 +342,7 @@ import { useLocale } from '../composables/useLocale'
 import ToolCallCard from '../components/messages/ToolCallCard.vue'
 import QuestionCard from '../components/messages/QuestionCard.vue'
 import ApprovalCard from '../components/messages/ApprovalCard.vue'
+import InteractiveChoiceCard from '../components/messages/InteractiveChoiceCard.vue'
 import DiffCard from '../components/messages/DiffCard.vue'
 import { buildResumeCommand } from '../utils/resumeCommand'
 import { formatToolInput } from '../utils/toolDisplay'
@@ -817,6 +821,21 @@ function onApprovalRespond(msg: any, approved: boolean) {
   })
 }
 
+// Send the user's menu choice back to the daemon. The InteractiveChoiceCard
+// already marked its selection optimistically; here we dispatch the
+// interactive_response command, which the relay forwards to the owning daemon,
+// which writes the chosen index to the agent's PTY so the blocking prompt
+// proceeds.
+function onChoiceRespond(msg: any, choice: string) {
+  if (!msg.request_id) return
+  send({
+    type: 'interactive_response',
+    session_id: sessionId.value,
+    request_id: msg.request_id,
+    choice,
+  })
+}
+
 function sendMessage() {
   const text = messageInput.value.trim()
   if (!text || isDisconnected.value) return
@@ -1065,6 +1084,12 @@ function applyCommand(item: CommandItem) {
 const msgCounter = { value: 0 }
 function nextId(prefix: string) { return prefix + (++msgCounter.value) }
 
+// safeParseJSON parses a JSON string, returning null on failure (instead of
+// throwing). Used for event payloads whose input may be a stringified object.
+function safeParseJSON(s: string): any {
+  try { return JSON.parse(s) } catch { return null }
+}
+
 // Dedup: only skip an event if it's identical to the immediately preceding one
 // (guards against relay batch re-send / reconnect). We intentionally do NOT dedup
 // by content globally — claude -p's synthetic command replies (e.g. "No response
@@ -1166,6 +1191,25 @@ function processEvent(evt: any, target: any[] = messages.value) {
       call_id: evt.call_id || evt.payload?.call_id,
       tool, input, inputDesc: formatToolInput(tool, input),
       status: 'pending',
+    })
+  } else if (type === 'interactive_prompt') {
+    // Daemon scanned a selection menu the agent's TUI drew to the PTY (e.g. a
+    // host PreToolUse hook's "Do you want to proceed? ❶Yes ❷No" prompt that
+    // never reaches JSONL). Render an inline numbered-choice card; the user's
+    // selection is sent back via interactive_response.
+    const requestId = evt.request_id || evt.payload?.request_id
+    if (!requestId) return
+    const rawInput = evt.input || evt.payload?.input
+    let promptText = ''
+    let options: Array<{ index: string; label: string }> = []
+    if (rawInput) {
+      const inp = typeof rawInput === 'string' ? safeParseJSON(rawInput) : rawInput
+      promptText = inp?.prompt || ''
+      if (Array.isArray(inp?.options)) options = inp.options
+    }
+    target.push({
+      id: nextId('ip'), type: 'interactive_prompt', request_id: requestId,
+      prompt: promptText, options, status: 'pending', selectedChoice: '',
     })
   }
 }
