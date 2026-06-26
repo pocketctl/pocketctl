@@ -152,7 +152,7 @@
                 <button v-if="selectedDaemon?.daemon_online && !isAgentLatest(a) && agentManageable(a)" class="ag-upgrade-btn" :class="{ upgrading: upgrading === agentRawName(a) }" :disabled="upgrading === agentRawName(a)" @click="upgradeAgent(agentRawName(a))">
                   {{ t('settings.upgrade_btn') }}
                 </button>
-                <span v-else-if="!agentManageable(a)" class="ag-sysinstall" :title="t('hosts.agent_system_install')">{{ t('hosts.agent_system_install') }}</span>
+                <span v-else-if="!agentManageable(a)" class="ag-sysinstall">{{ t('hosts.agent_system_install') }}</span>
                 <span v-else-if="isAgentLatest(a)" class="ag-latest">✓ {{ t('settings.installed') }}</span>
               </div>
             </template>
