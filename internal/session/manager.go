@@ -18,6 +18,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/pocketctl/pocketctl/internal/adapter"
 	"github.com/pocketctl/pocketctl/internal/approval"
+	"github.com/pocketctl/pocketctl/internal/discovery"
 	"github.com/pocketctl/pocketctl/internal/filelock"
 	"github.com/pocketctl/pocketctl/internal/protocol"
 	"github.com/pocketctl/pocketctl/internal/ptyscan"
@@ -1876,8 +1877,8 @@ func agentCLIName(agentType string) string {
 
 func findAgentCLI(agent string) (string, error) {
 	name := agentCLIName(agent)
-	path, err := exec.LookPath(name)
-	if err != nil {
+	path, _, found := discovery.ResolveAgent(name)
+	if !found {
 		return "", fmt.Errorf("agent CLI not found: %s (%s)", agent, name)
 	}
 	return path, nil
