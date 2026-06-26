@@ -16,18 +16,14 @@ import (
 // blocks for the client's decision, and prints Claude's hookSpecificOutput JSON
 // to stdout (permissionDecision allow/deny).
 //
-// Mode handling (the crux of supporting bypassPermissions):
-//   - bypassPermissions: Claude auto-approves everything, so we return
-//     "continue" (no opinion) and never touch the socket. Our hook is only
-//     there to catch the exception — a host-side PreToolUse hook that returns
-//     permissionDecision:"ask", which overrides bypass. We CANNOT detect that
-//     here (our hook runs before the host hook), so for bypass we defer entirely
-//     to Claude and the host hooks. If a host hook forces "ask", Claude will
-//     render the prompt in the PTY; the daemon's watchdog + the user's Stop
-//     button are the escape hatches.
-//   - non-bypass (default/acceptEdits/plan): we ask the client via the socket.
-//     This surfaces the would-be PTY prompt as an inline card instead of
-//     stalling on discarded stdout.
+// Scheme C — file locking: for ALL permission modes (including bypass), if the
+// tool writes a file (Edit/Write/MultiEdit/NotebookEdit) we ask the server
+// whether the target file is locked by another session. The server:
+//   - denies with a human/agent-readable reason when the file is held by another
+//     session (we print permissionDecision:"deny" so Claude backs off);
+//   - for bypass mode with no conflict, returns allow and we writeContinue();
+//   - for non-bypass with no conflict, runs the normal client-approval flow and
+//     we print the client's allow/deny decision.
 //
 // The session id, socket path, and effective permission mode are passed via
 // env vars (POCKETCTL_SESSION_ID, POCKETCTL_APPROVAL_SOCK,
@@ -53,44 +49,55 @@ func RunHook(logger *slog.Logger) error {
 	}
 
 	permMode := os.Getenv("POCKETCTL_PERM_MODE")
-
-	// In bypassPermissions, defer entirely to Claude + any host hooks. We never
-	// block: most tools auto-run. (If a host hook overrides bypass with "ask",
-	// that prompt is a separate problem — see the daemon's PTY-handling notes;
-	// it is not something this hook can intercept.)
-	if permMode == "bypassPermissions" {
-		writeContinue()
-		return nil
-	}
-
 	sessionID := os.Getenv("POCKETCTL_SESSION_ID")
 	sockPath := os.Getenv("POCKETCTL_APPROVAL_SOCK")
+
+	// If the approval socket isn't wired (e.g. the daemon couldn't install
+	// hooks), fall back to Claude's own permission logic. In bypass this means
+	// writeContinue; in non-bypass we must deny (the user expected a prompt we
+	// can't surface) — but that's pre-existing behavior.
 	if sessionID == "" || sockPath == "" {
-		// Non-bypass session but the approval socket isn't wired (e.g. daemon
-		// couldn't install hooks). Deny rather than silently allow a tool the
-		// user expected to approve.
-		writeDecision(false, "approval hook not configured (missing env)")
+		if permMode == "bypassPermissions" {
+			writeContinue()
+		} else {
+			writeDecision(false, "approval hook not configured (missing env)")
+		}
 		return nil
 	}
 
-	resp, err := askSocket(sockPath, sessionID, payload.ToolName, payload.ToolInput, payload.Cwd)
+	// Ask the server. It performs the Scheme C file-lock check and, depending on
+	// perm mode, either short-circuits (bypass) or brokers client approval.
+	resp, err := askSocket(sockPath, sessionID, payload.ToolName, payload.ToolInput, payload.Cwd, permMode)
 	if err != nil {
 		logger.Error("approval hook socket", "error", err)
-		writeDecision(false, fmt.Sprintf("approval server unreachable: %v", err))
+		// Unreachable server: fail safe per mode.
+		if permMode == "bypassPermissions" {
+			writeContinue()
+		} else {
+			writeDecision(false, fmt.Sprintf("approval server unreachable: %v", err))
+		}
 		return nil
 	}
 
-	if resp.Allow {
-		writeDecision(true, "approved by user")
-	} else {
+	if !resp.Allow {
 		writeDecision(false, orDefault(resp.Reason, "denied by user"))
+		return nil
+	}
+
+	// Allowed. In bypass mode the server's allow means "no lock conflict" — we
+	// have no opinion so Claude proceeds under its own permission logic (and any
+	// host hooks). In non-bypass mode the allow is the client's explicit approval.
+	if permMode == "bypassPermissions" {
+		writeContinue()
+	} else {
+		writeDecision(true, orDefault(resp.Reason, "approved by user"))
 	}
 	return nil
 }
 
 // askSocket connects to the approval server, sends one JSON request, and blocks
 // for the decision line.
-func askSocket(sockPath, sessionID, tool string, input json.RawMessage, cwd string) (hookResponse, error) {
+func askSocket(sockPath, sessionID, tool string, input json.RawMessage, cwd, permMode string) (hookResponse, error) {
 	conn, err := net.DialTimeout("unix", sockPath, 5*time.Second)
 	if err != nil {
 		return hookResponse{}, fmt.Errorf("dial: %w", err)
@@ -102,6 +109,7 @@ func askSocket(sockPath, sessionID, tool string, input json.RawMessage, cwd stri
 		Tool:      tool,
 		Input:     input,
 		Cwd:       cwd,
+		PermMode:  permMode,
 	}
 	// Always include the input field key so the server sees consistent JSON.
 	body, err := json.Marshal(req)

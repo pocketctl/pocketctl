@@ -256,7 +256,7 @@
                 </span>
 
                 <!-- Effort level dropdown (Claude Code thinking strength) -->
-                <div v-if="canInput && currentSessionAgent !== 'opencode'" class="effort-dropdown" ref="effortDropdownEl">
+                <div v-if="canInput && currentSessionAgent === 'claude-code'" class="effort-dropdown" ref="effortDropdownEl">
                   <button class="effort-trigger" @click="showEffortMenu = !showEffortMenu"
                     :title="t('session.effort_level')">
                     <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2a4 4 0 0 0-4 4v4a4 4 0 0 0 8 0V6a4 4 0 0 0-4-4z"/><path d="M6 10v2a6 6 0 0 0 12 0v-2"/><path d="M12 18v3"/></svg>
@@ -946,7 +946,8 @@ function buildStatusMessage(): string {
   const parts = [`主机 ${online}`]
   if (s.daemon_version) parts.push(`daemon v${s.daemon_version}`)
   const agentVer = s.agent_version || s.agentVersion
-  if (agentVer) parts.push(`claude-code v${agentVer}`)
+  const agentLabel = s.agent_type === 'codex' ? 'Codex' : (s.agent_type === 'opencode' ? 'OpenCode' : 'Claude Code')
+  if (agentVer) parts.push(`${agentLabel} v${agentVer}`)
   parts.push('账户登录状态请在终端运行 pocketctl status 查看')
   return parts.join(' · ')
 }

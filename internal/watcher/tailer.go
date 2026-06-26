@@ -69,8 +69,9 @@ func SubAgentJSONLPath(parentJSONLPath string, agentID string) string {
 	return filepath.Join(dir, sessionDir, "subagents", "agent-"+agentID+".jsonl")
 }
 
-// JSONLTailer tracks and reads new lines from a Claude Code JSONL session file.
-// The file handle and scanner buffer are reused across calls to minimize allocations.
+// JSONLTailer tracks and reads new lines from an agent's JSONL session file.
+// The file handle and scanner buffer are reused across calls to minimize
+// allocations. The parser is agent-specific (Claude vs Codex schema).
 type JSONLTailer struct {
 	mu       sync.Mutex
 	filePath string
@@ -78,7 +79,7 @@ type JSONLTailer struct {
 	file     *os.File
 	scanBuf  []byte // reusable 1MB scanner buffer
 	paused   atomic.Bool // D2: paused during sendToIdleTerminal to avoid double-forward
-	parser   *adapter.JSONLStreamParser // stateful parser: tracks pendingCmd + compact status for receipts
+	parser   adapter.JSONLParser // agent-specific stateful parser
 }
 
 // Pause stops the tailer from forwarding new lines (used during sendToIdleTerminal
@@ -102,8 +103,9 @@ func (t *JSONLTailer) SetPendingCmd(content string) {
 }
 
 // NewJSONLTailer creates a tailer for the given JSONL file path.
-// It starts from the end of the file (no historical replay).
-func NewJSONLTailer(filePath string) (*JSONLTailer, error) {
+// It starts from the end of the file (no historical replay). agentType selects
+// the JSONL schema parser ("claude-code" / "codex").
+func NewJSONLTailer(filePath, agentType string) (*JSONLTailer, error) {
 	info, err := os.Stat(filePath)
 	if err != nil {
 		return nil, fmt.Errorf("stat jsonl file: %w", err)
@@ -117,12 +119,13 @@ func NewJSONLTailer(filePath string) (*JSONLTailer, error) {
 		offset:   info.Size(), // Start from end
 		file:     f,
 		scanBuf:  make([]byte, 1024*1024),
-		parser:   adapter.NewJSONLStreamParser(),
+		parser:   adapter.NewJSONLParser(agentType),
 	}, nil
 }
 
 // NewJSONLTailerFromStart creates a tailer that reads from the beginning.
-func NewJSONLTailerFromStart(filePath string) (*JSONLTailer, error) {
+// agentType selects the JSONL schema parser ("claude-code" / "codex").
+func NewJSONLTailerFromStart(filePath, agentType string) (*JSONLTailer, error) {
 	if _, err := os.Stat(filePath); err != nil {
 		return nil, fmt.Errorf("stat jsonl file: %w", err)
 	}
@@ -135,7 +138,7 @@ func NewJSONLTailerFromStart(filePath string) (*JSONLTailer, error) {
 		offset:   0,
 		file:     f,
 		scanBuf:  make([]byte, 1024*1024),
-		parser:   adapter.NewJSONLStreamParser(),
+		parser:   adapter.NewJSONLParser(agentType),
 	}, nil
 }
 
@@ -336,7 +339,7 @@ type SubAgentTailer struct {
 
 // NewSubAgentTailer creates a tailer for a sub-agent JSONL file that reads from the start.
 func NewSubAgentTailer(filePath string, agentID string) (*SubAgentTailer, error) {
-	tailer, err := NewJSONLTailerFromStart(filePath)
+	tailer, err := NewJSONLTailerFromStart(filePath, adapter.AgentClaude) // sub-agents are a Claude feature
 	if err != nil {
 		return nil, fmt.Errorf("create sub-agent tailer: %w", err)
 	}

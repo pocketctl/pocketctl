@@ -21,7 +21,7 @@ func TestSanitizePTYEnvStripsClaudeCodeMarkers(t *testing.T) {
 		"PATH=/usr/bin:/bin",
 		"HOME=/root",
 	}
-	got := sanitizePTYEnv(env)
+	got := sanitizePTYEnv(env, "claude-code")
 	for _, kv := range got {
 		eq := strings.IndexByte(kv, '=')
 		if eq < 0 {
@@ -43,7 +43,7 @@ func TestSanitizePTYEnvStripsClaudeCodeMarkers(t *testing.T) {
 // TestStartPTYCliStdinWriteRead (interactive-web-session 1.4) verifies the PTY
 // master round-trips: writing stdin surfaces on the read side (cat echoes).
 func TestStartPTYCliStdinWriteRead(t *testing.T) {
-	ptmx, cmd, err := startPTYCli("cat", nil, "", nil)
+	ptmx, cmd, err := startPTYCli("cat", nil, "", nil, "claude-code")
 	if err != nil {
 		t.Skipf("pty unavailable in this environment: %v", err)
 	}

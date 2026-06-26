@@ -18,6 +18,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/pocketctl/pocketctl/internal/adapter"
 	"github.com/pocketctl/pocketctl/internal/approval"
+	"github.com/pocketctl/pocketctl/internal/filelock"
 	"github.com/pocketctl/pocketctl/internal/protocol"
 	"github.com/pocketctl/pocketctl/internal/watcher"
 )
@@ -43,6 +44,8 @@ type ProcessState struct {
 	Model            string               // resolved model name (for session_created, surfaced to web /model)
 	Effort           string               // last-set thinking-effort level (low/medium/high/xhigh/max/ultracode)
 	PendingRequestID string               // non-empty while a tool-use approval request awaits a client decision
+	WorktreePath     string               // Scheme D: non-empty when the session runs inside a git worktree
+	WorktreeBranch   string               // Scheme D: the git branch backing the worktree
 }
 
 // SetTailer associates a JSONL tailer with a session (so sendToIdleTerminal can pause/resume it).
@@ -226,13 +229,23 @@ type SessionManager struct {
 	approvals       *approval.Server
 	pocketctlPath   string // path to this binary, for the hook command
 	approvalEnabled bool   // set once an approval server is attached
+
+	// Scheme A: cwd → active session ID set, for "directory already in use"
+	// awareness. Keyed by normalized absolute path (normalizeCwd).
+	cwdSessions map[string]map[string]struct{}
+
+	// Scheme C: file-level lock manager coordinating concurrent edits across
+	// sessions that share a working directory. Shared with the approval server.
+	fileLocks *filelock.LockManager
 }
 
 func NewSessionManager(outputCh chan protocol.DaemonEvent) *SessionManager {
 	return &SessionManager{
-		sessions:  make(map[string]*ProcessState),
-		outputCh:  outputCh,
-		childPids: make(map[int]bool),
+		sessions:    make(map[string]*ProcessState),
+		outputCh:    outputCh,
+		childPids:   make(map[int]bool),
+		cwdSessions: make(map[string]map[string]struct{}),
+		fileLocks:   filelock.New(),
 	}
 }
 
@@ -245,6 +258,9 @@ func (sm *SessionManager) SetApprovalServer(srv *approval.Server, pocketctlPath 
 	sm.pocketctlPath = pocketctlPath
 	sm.approvalEnabled = true
 	srv.SetOnRequest(sm.handleApprovalRequest)
+	// Share the file-lock manager so the approval server can deny Edit/Write on
+	// files held by other sessions (Scheme C), even in bypassPermissions mode.
+	srv.SetFileLockManager(sm.fileLocks)
 }
 
 // handleApprovalRequest is the approval server's OnRequest callback. It flips
@@ -336,6 +352,60 @@ func resolveCwd(cwd string) string {
 	return cwd
 }
 
+// normalizeCwd canonicalizes a path for use as a registry/lock key. It expands
+// to an absolute path and resolves symlinks when possible, falling back to
+// filepath.Clean so that "~/repo", "/Users/x/repo", and "/Users/x/./repo" all
+// collapse to a single key.
+func normalizeCwd(p string) string {
+	abs, err := filepath.Abs(p)
+	if err != nil {
+		return filepath.Clean(p)
+	}
+	if resolved, err := filepath.EvalSymlinks(abs); err == nil {
+		return resolved
+	}
+	return filepath.Clean(abs)
+}
+
+// registerCwd records (cwd, sessionID) in the cwd→sessions registry. Caller
+// must NOT hold sm.mu; this method acquires it.
+func (sm *SessionManager) registerCwd(sessionID, cwd string) {
+	key := normalizeCwd(cwd)
+	sm.mu.Lock()
+	set, ok := sm.cwdSessions[key]
+	if !ok {
+		set = make(map[string]struct{})
+		sm.cwdSessions[key] = set
+	}
+	set[sessionID] = struct{}{}
+	sm.mu.Unlock()
+}
+
+// unregisterCwd removes sessionID from its cwd's session set under the given
+// cwd. Safe to call multiple times. Caller must NOT hold sm.mu.
+func (sm *SessionManager) unregisterCwd(sessionID, cwd string) {
+	if cwd == "" {
+		return
+	}
+	key := normalizeCwd(cwd)
+	sm.mu.Lock()
+	if set, ok := sm.cwdSessions[key]; ok {
+		delete(set, sessionID)
+		if len(set) == 0 {
+			delete(sm.cwdSessions, key)
+		}
+	}
+	sm.mu.Unlock()
+}
+
+// CwdSessionCount returns how many active sessions share the given cwd.
+func (sm *SessionManager) CwdSessionCount(cwd string) int {
+	key := normalizeCwd(cwd)
+	sm.mu.RLock()
+	defer sm.mu.RUnlock()
+	return len(sm.cwdSessions[key])
+}
+
 // stripModelSuffix removes any trailing "[...]" suffix that some config tools
 // (e.g. cc switch) append to model names (like "GLM-5.2[1M]"). Such suffixes
 // are not valid model identifiers and cause provider API errors.
@@ -422,6 +492,64 @@ func ListAvailableModels() []protocol.ModelOption {
 	return out
 }
 
+// ListModelsForAgent dispatches model-listing to the right agent source.
+// Claude reads ~/.claude/settings.json; codex returns its default model list.
+func ListModelsForAgent(agentType string) []protocol.ModelOption {
+	switch agentType {
+	case adapter.AgentCodex:
+		return listCodexModels()
+	default:
+		return ListAvailableModels()
+	}
+}
+
+// listCodexModels returns the model options for the Codex agent. Codex has no
+// settings.json alias mechanism; the list comes from codex's known model ids.
+// If ~/.codex/config.toml sets a [model] we surface it first as the default.
+func listCodexModels() []protocol.ModelOption {
+	var out []protocol.ModelOption
+	preferred := codexConfigModel()
+	if preferred != "" {
+		out = append(out, protocol.ModelOption{Alias: "default", Name: preferred})
+	}
+	// Common codex model ids (shown as concrete names; the alias is passed to -m).
+	for _, m := range []string{"gpt-5.5", "gpt-5.5-codex", "o3"} {
+		if m != preferred {
+			out = append(out, protocol.ModelOption{Alias: m, Name: m})
+		}
+	}
+	return out
+}
+
+// codexConfigModel reads the model set in ~/.codex/config.toml (line `model = "x"`),
+// returning "" if not set or unreadable. Codex uses TOML, not JSON; we do a
+// lightweight scan rather than pulling a TOML dependency for one field.
+func codexConfigModel() string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+	data, err := os.ReadFile(filepath.Join(home, ".codex", "config.toml"))
+	if err != nil {
+		return ""
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		line = strings.TrimSpace(line)
+		if !strings.HasPrefix(line, "model") {
+			continue
+		}
+		// match: model = "gpt-5.5"  (top-level key)
+		if idx := strings.Index(line, "="); idx > 0 {
+			val := strings.TrimSpace(line[idx+1:])
+			val = strings.Trim(val, `"'`)
+			if val != "" && !strings.Contains(val, " ") {
+				return val
+			}
+		}
+	}
+	return ""
+}
+
 // resolveModelAlias maps a claude alias (opus/sonnet/haiku) to its concrete model name
 // from ~/.claude/settings.json (e.g. haiku → glm-4.7). Used so /model shows the real
 // model, while the alias is still passed to claude's --model (which resolves via
@@ -462,29 +590,61 @@ func (sm *SessionManager) CreateSession(ctx context.Context, config protocol.Ses
 		return "", err
 	}
 
-	// Resolve and validate working directory
+	// --- Working directory resolution --------------------------------------
+	// Order: resolve → (Scheme D worktree) → (auto-create) → validate →
+	// (Scheme A cwd-in-use) → register. Each step may redirect resolvedCwd.
 	resolvedCwd := resolveCwd(config.Cwd)
+
+	// We need the session id early so the worktree branch/path is deterministic
+	// and the cwd registry can record it before any concurrent CreateSession.
+	sessionID := uuid.New().String()
+
+	// Scheme D: isolate the session in a git worktree so concurrent sessions on
+	// the same repo never touch the same files. The worktree lives at
+	// <repo>/.pocketctl/wt-<short> on branch pocketctl/<short>. It is intentionally
+	// NOT cleaned up on exit (decision: preserve uncommitted work).
+	var worktreePath, worktreeBranch string
+	if config.Worktree {
+		wtPath, branch, werr := createWorktree(resolvedCwd, sessionID)
+		if werr != nil {
+			return "", fmt.Errorf("工作目录 worktree 创建失败: %w", werr)
+		}
+		worktreePath, worktreeBranch = wtPath, branch
+		resolvedCwd = wtPath // all downstream logic targets the worktree
+	} else if config.AutoCreateDir {
+		// Auto-create a missing cwd (only in non-worktree mode; worktrees are
+		// created by git). Best-effort: if the dir exists this is a no-op, and
+		// permission errors still surface via validateCwd below.
+		_ = os.MkdirAll(resolvedCwd, 0o755)
+	}
+
 	if err := validateCwd(resolvedCwd); err != nil {
 		return "", err
 	}
 
-	// Resolve model: prefer the model the client explicitly chose (opus/sonnet/haiku
-	// alias or concrete name from session_create); fall back to the host's
-	// ~/.claude/settings.json default so legacy clients without a model picker
-	// still surface a value for the /model command.
-	if config.Model == "" {
-		config.Model = resolveCleanModel()
+	// Scheme A: warn when the target cwd already has active sessions. Clients
+	// opt-in to ignoring the warning by sending Force=true (informed consent).
+	if !config.Force {
+		if n := sm.CwdSessionCount(resolvedCwd); n > 0 {
+			return "", fmt.Errorf("目录已被占用: %s (当前已有 %d 个活跃会话；如需继续请在客户端勾选\"强制创建\"后重试)", resolvedCwd, n)
+		}
 	}
-	// config.Model is the alias/name passed to claude's --model (resolves via
-	// ANTHROPIC_DEFAULT_*_MODEL, preserving e.g. [1M]). Derive the concrete display
-	// name for /model (haiku → glm-4.7).
-	displayModel := resolveModelAlias(config.Model)
 
-	// interactive-web-session D1: launch interactive claude under a PTY (not -p),
-	// with an explicit --session-id so the JSONL file path is known up front.
-	// Spike-verified: sanitized env + --session-id writes <uuid>.jsonl, and env
-	// sanitization is mandatory or claude runs ephemeral (no JSONL).
-	sessionID := uuid.New().String()
+	// Resolve model: prefer the model the client explicitly chose. For Claude,
+	// fall back to the host's ~/.claude/settings.json default (opus/sonnet/haiku
+	// alias resolution) so legacy clients without a model picker still surface a
+	// value. Other agents (codex) don't read ~/.claude — leave model empty and
+	// let the agent pick its own default.
+	displayModel := config.Model
+	if config.Agent == "" || config.Agent == adapter.AgentClaude {
+		if config.Model == "" {
+			config.Model = resolveCleanModel()
+		}
+		// config.Model is the alias/name passed to claude's --model (resolves via
+		// ANTHROPIC_DEFAULT_*_MODEL, preserving e.g. [1M]). Derive the concrete
+		// display name for /model (haiku → glm-4.7).
+		displayModel = resolveModelAlias(config.Model)
+	}
 
 	// Resolve the effective permission mode BEFORE launching. Web/iOS daemon
 	// sessions are unattended, so default to bypassing permission checks —
@@ -497,22 +657,33 @@ func (sm *SessionManager) CreateSession(ctx context.Context, config protocol.Ses
 	}
 	config.PermissionMode = permMode
 
-	args := append([]string{"--session-id", sessionID}, adapter.BuildInteractiveArgs(config)...)
+	// Build launch args via the agent-specific launcher. Claude takes a pinned
+	// --session-id so the JSONL filename is known up front; codex generates its
+	// own rollout filename (discovered later by globbing the sessions dir).
+	launcher := adapter.NewLauncher(config.Agent)
+	args := launcher.BuildInteractiveArgs(config)
+	if config.Agent == "" || config.Agent == adapter.AgentClaude {
+		args = append([]string{"--session-id", sessionID}, args...)
+	}
 
-	// Install the approval PreToolUse hook for EVERY daemon session — including
-	// bypassPermissions. Rationale: even in bypass mode, a PreToolUse hook in
-	// the host's ~/.claude/settings.json can return permissionDecision:"ask",
-	// which OVERRIDES bypass and forces a y/n prompt. Since the daemon discards
-	// PTY stdout, that prompt would be invisible and deadlock the session. Our
-	// hook runs first and, when it has no opinion (the common case), returns
-	// continue so Claude's own permission logic (and any host hook) still
-	// applies. We only block on the approval socket when a prompt would
-	// actually be shown — which the hook decides, not the mode.
+	// Install the approval PreToolUse hook for Claude daemon sessions only —
+	// including bypassPermissions. Rationale: even in bypass mode, a PreToolUse
+	// hook in the host's ~/.claude/settings.json can return
+	// permissionDecision:"ask", which OVERRIDES bypass and forces a y/n prompt.
+	// Since the daemon discards PTY stdout, that prompt would be invisible and
+	// deadlock the session. Our hook runs first and, when it has no opinion (the
+	// common case), returns continue so Claude's own permission logic (and any
+	// host hook) still applies. We only block on the approval socket when a
+	// prompt would actually be shown — which the hook decides, not the mode.
+	//
+	// Other agents (codex) don't have a PreToolUse hook mechanism, so this is
+	// skipped — they rely on their own --ask-for-approval flag instead.
 	//
 	// Failure to install the hook is non-fatal: the session still runs; the
 	// user simply won't get approval prompts surfaced.
 	var extraEnv []string
-	if sm.approvalEnabled && sm.approvals != nil {
+	caps := adapter.Capabilities(config.Agent)
+	if caps.SupportsApprovalHook && sm.approvalEnabled && sm.approvals != nil {
 		if err := approval.EnsureHooks(resolvedCwd, sm.pocketctlPath); err == nil {
 			extraEnv = append(extraEnv,
 				"POCKETCTL_SESSION_ID="+sessionID,
@@ -523,10 +694,10 @@ func (sm *SessionManager) CreateSession(ctx context.Context, config protocol.Ses
 	}
 
 	ctx, cancel := context.WithCancel(ctx)
-	ptmx, cmd, err := startPTYCli(cliPath, args, resolvedCwd, extraEnv)
+	ptmx, cmd, err := startPTYCli(cliPath, args, resolvedCwd, extraEnv, config.Agent)
 	if err != nil {
 		cancel()
-		return "", fmt.Errorf("start pty claude: %w", err)
+		return "", fmt.Errorf("start pty %s: %w", config.Agent, err)
 	}
 
 	now := time.Now()
@@ -543,6 +714,8 @@ func (sm *SessionManager) CreateSession(ctx context.Context, config protocol.Ses
 		PTY:            ptmx,
 		PermissionMode: permMode,
 		Model:          displayModel,
+		WorktreePath:   worktreePath,
+		WorktreeBranch: worktreeBranch,
 	}
 	sm.mu.Lock()
 	sm.sessions[sessionID] = ps
@@ -551,6 +724,10 @@ func (sm *SessionManager) CreateSession(ctx context.Context, config protocol.Ses
 		ps.Pid = cmd.Process.Pid
 	}
 	sm.mu.Unlock()
+
+	// Scheme A: register the session against its cwd so later CreateSession
+	// calls can warn. Worktree sessions register under their worktree path.
+	sm.registerCwd(sessionID, resolvedCwd)
 
 	// Emit the initial prompt as user_text for immediate Web/iOS UI feedback.
 	// (PTY claude also writes the user record to JSONL; emitting early gives
@@ -607,9 +784,9 @@ func (sm *SessionManager) servePTYSession(ctx context.Context, ps *ProcessState,
 			default:
 			}
 			// Re-resolve each iteration — the JSONL file only appears after
-			// claude's first turn, and ResolveJSONLPath returns err until then.
-			if jsonlPath, err := watcher.ResolveJSONLPath(ps.SessionID, ps.Cwd); err == nil {
-				if t, e := watcher.NewJSONLTailerFromStart(jsonlPath); e == nil {
+			// the agent's first turn, and the path resolver returns err until then.
+			if jsonlPath, err := adapter.ResolveJSONLPathFor(ps.Agent, ps.SessionID, ps.Cwd); err == nil {
+				if t, e := watcher.NewJSONLTailerFromStart(jsonlPath, ps.Agent); e == nil {
 					tailer = t
 					break
 				}
@@ -766,6 +943,8 @@ func (sm *SessionManager) handlePTYExit(ps *ProcessState) {
 	reason := ps.ExitReason
 	sid := ps.SessionID
 	cwd := ps.Cwd
+	wtPath := ps.WorktreePath
+	wtBranch := ps.WorktreeBranch
 	sm.mu.Unlock()
 
 	// Drain any pending tool-use approval so the hook process exits promptly,
@@ -776,12 +955,20 @@ func (sm *SessionManager) handlePTYExit(ps *ProcessState) {
 	if cwd != "" {
 		_ = approval.RemoveHooks(cwd)
 	}
+	// Scheme A/C: release the cwd registry slot and all file locks held by
+	// this session so other sessions on the same directory can proceed.
+	sm.unregisterCwd(sid, cwd)
+	if sm.fileLocks != nil {
+		sm.fileLocks.ReleaseAll(sid)
+	}
 
 	sm.outputCh <- protocol.DaemonEvent{
-		Type:       "session_status",
-		SessionID:  sid,
-		Status:     status,
-		ExitReason: reason,
+		Type:           "session_status",
+		SessionID:      sid,
+		Status:         status,
+		ExitReason:     reason,
+		WorktreePath:   wtPath,
+		WorktreeBranch: wtBranch,
 	}
 }
 
@@ -932,7 +1119,14 @@ func (sm *SessionManager) SetSessionExited(sessionID string, exitReason string) 
 	ps.Status = protocol.StatusExited
 	ps.ExitReason = exitReason
 	ps.LastActivityAt = now
+	cwd := ps.Cwd
 	sm.mu.Unlock()
+
+	// Scheme A/C: release cwd registry slot and file locks.
+	sm.unregisterCwd(sessionID, cwd)
+	if sm.fileLocks != nil {
+		sm.fileLocks.ReleaseAll(sessionID)
+	}
 
 	sm.outputCh <- protocol.DaemonEvent{
 		Type:           "session_status",
@@ -964,7 +1158,7 @@ func (sm *SessionManager) SetSessionStatus(sessionID, status string) {
 	}
 }
 
-func (sm *SessionManager) readOutput(ctx context.Context, cmd *exec.Cmd, stdout io.Reader, adp *adapter.ClaudeAdapter, ps *ProcessState) {
+func (sm *SessionManager) readOutput(ctx context.Context, cmd *exec.Cmd, stdout io.Reader, adp adapter.AgentAdapter, ps *ProcessState) {
 	scanner := bufio.NewScanner(stdout)
 	scanner.Buffer(make([]byte, 1024*1024), 1024*1024)
 
@@ -1149,13 +1343,19 @@ func (sm *SessionManager) SendMessage(ctx context.Context, sessionID string, con
 		return nil
 	}
 
-	// Below: terminal session in exited state — resume via a new claude --resume
-	// process. (daemon sessions no longer reach here — they return above.)
-	cliPath, err := findAgentCLI("claude-code")
+	// Below: terminal session in exited state — resume via a new one-shot process
+	// (claude -p --resume / codex exec resume). (daemon sessions no longer reach
+	// here — they return above.)
+	agentType := ps.Agent
+	if agentType == "" {
+		agentType = adapter.AgentClaude
+	}
+	cliPath, err := findAgentCLI(agentType)
 	if err != nil {
 		return err
 	}
-	args := adapter.BuildClaudeArgs(content, sessionID, protocol.SessionConfig{PermissionMode: "acceptEdits"})
+	launcher := adapter.NewLauncher(agentType)
+	args := launcher.BuildResumeArgs(content, sessionID, protocol.SessionConfig{PermissionMode: "acceptEdits"})
 	ctx, cancel := context.WithCancel(ctx)
 	cmd := exec.CommandContext(ctx, cliPath, args...)
 	if cwd != "" {
@@ -1171,7 +1371,7 @@ func (sm *SessionManager) SendMessage(ctx context.Context, sessionID string, con
 		return fmt.Errorf("start process: %w", err)
 	}
 
-	adp := adapter.NewClaudeAdapter(content)
+	adp := adapter.NewAdapter(agentType, content)
 	sm.mu.Lock()
 	ps.Cmd = cmd
 	ps.Cancel = cancel
@@ -1258,14 +1458,20 @@ func cwdFromProjectsDir(jsonlPath string) string {
 }
 
 // sendToIdleTerminal sends a message to a terminal session that's idle (alive but waiting for input).
-// Uses claude --resume without stdout capture — the JSONL tailer handles event forwarding.
+// Uses a one-shot resume (claude --resume / codex exec resume) without stdout capture — the JSONL
+// tailer handles event forwarding.
 func (sm *SessionManager) sendToIdleTerminal(ctx context.Context, ps *ProcessState, content string) error {
-	cliPath, err := findAgentCLI("claude-code")
+	agentType := ps.Agent
+	if agentType == "" {
+		agentType = adapter.AgentClaude
+	}
+	cliPath, err := findAgentCLI(agentType)
 	if err != nil {
 		return err
 	}
 
-	args := adapter.BuildClaudeArgs(content, ps.SessionID, protocol.SessionConfig{PermissionMode: "acceptEdits"})
+	launcher := adapter.NewLauncher(agentType)
+	args := launcher.BuildResumeArgs(content, ps.SessionID, protocol.SessionConfig{PermissionMode: "acceptEdits"})
 	ctx, cancel := context.WithCancel(ctx)
 	cmd := exec.CommandContext(ctx, cliPath, args...)
 	cmd.Dir = ps.Cwd
@@ -1281,7 +1487,7 @@ func (sm *SessionManager) sendToIdleTerminal(ctx context.Context, ps *ProcessSta
 		return fmt.Errorf("start --resume: %w", err)
 	}
 
-	adp := adapter.NewClaudeAdapter(content)
+	adp := adapter.NewAdapter(agentType, content)
 	now := time.Now()
 	sm.mu.Lock()
 	ps.Cmd = cmd
@@ -1409,11 +1615,22 @@ func (sm *SessionManager) KillSession(sessionID string) error {
 			if cwd != "" {
 				_ = approval.RemoveHooks(cwd)
 			}
+			// Scheme A/C: release cwd registry + file locks on forced kill.
+			sm.unregisterCwd(sessionID, cwd)
+			if sm.fileLocks != nil {
+				sm.fileLocks.ReleaseAll(sessionID)
+			}
 			return nil
 		}
 	}
 	if cwd != "" {
 		_ = approval.RemoveHooks(cwd)
+	}
+	// Scheme A/C: even on graceful kill, release the cwd slot and file locks.
+	// (handlePTYExit may also run for daemon sessions; double release is safe.)
+	sm.unregisterCwd(sessionID, cwd)
+	if sm.fileLocks != nil {
+		sm.fileLocks.ReleaseAll(sessionID)
 	}
 	return nil
 }
@@ -1470,6 +1687,35 @@ func (sm *SessionManager) GetSessionCwd(sessionID string) (string, bool) {
 		return "", false
 	}
 	return ps.Cwd, true
+}
+
+// GetWorktreeInfo returns the (path, branch) of a session's worktree (Scheme D).
+// The bool is false for non-worktree sessions or unknown session ids.
+func (sm *SessionManager) GetWorktreeInfo(sessionID string) (string, string, bool) {
+	sm.mu.RLock()
+	defer sm.mu.RUnlock()
+	ps, ok := sm.sessions[sessionID]
+	if !ok || ps.WorktreePath == "" {
+		return "", "", false
+	}
+	return ps.WorktreePath, ps.WorktreeBranch, true
+}
+
+// GetSessionAgent returns the agent type for a session (e.g. "claude-code",
+// "codex") and whether the session exists. Used by command handlers to pick the
+// right adapter / capability set. Returns ("claude-code", false) for unknown ids
+// so callers default to Claude behavior.
+func (sm *SessionManager) GetSessionAgent(sessionID string) (string, bool) {
+	sm.mu.RLock()
+	defer sm.mu.RUnlock()
+	ps, ok := sm.sessions[sessionID]
+	if !ok {
+		return adapter.AgentClaude, false
+	}
+	if ps.Agent == "" {
+		return adapter.AgentClaude, true
+	}
+	return ps.Agent, true
 }
 
 // GetSessionModel returns the resolved model name for a session (the same value
@@ -1535,12 +1781,24 @@ func (sm *SessionManager) ResyncSessions() {
 	}
 }
 
-func findAgentCLI(agent string) (string, error) {
-	cliNames := map[string]string{"claude-code": "claude", "opencode": "opencode"}
-	name, ok := cliNames[agent]
-	if !ok {
-		name = agent
+// agentCLIName maps pocketctl agent types to the CLI binary name they install.
+// Mirrors internal/discovery's knownAgents so there's a single source of truth
+// per agent (discovery is the canonical registry; this is the session layer's
+// lookup for spawning).
+func agentCLIName(agentType string) string {
+	switch agentType {
+	case adapter.AgentClaude:
+		return "claude"
+	case adapter.AgentCodex:
+		return "codex"
+	default:
+		// opencode / unknown → use the type as-is (its CLI usually matches).
+		return agentType
 	}
+}
+
+func findAgentCLI(agent string) (string, error) {
+	name := agentCLIName(agent)
 	path, err := exec.LookPath(name)
 	if err != nil {
 		return "", fmt.Errorf("agent CLI not found: %s (%s)", agent, name)

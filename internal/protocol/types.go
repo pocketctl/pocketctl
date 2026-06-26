@@ -18,6 +18,14 @@ type ClientMessage struct {
 	// Model for session_create: opus/sonnet/haiku alias (or concrete model name).
 	// Empty = follow the host's ~/.claude/settings.json default.
 	Model string `json:"model,omitempty"`
+	// Worktree enables git worktree isolation for session_create: the session
+	// runs inside a fresh worktree at <cwd>/.pocketctl/wt-<sid> instead of cwd.
+	Worktree bool `json:"worktree,omitempty"`
+	// AutoCreateDir creates cwd with os.MkdirAll when it doesn't exist.
+	AutoCreateDir bool `json:"auto_create_dir,omitempty"`
+	// Force overrides a cwd_in_use warning — create the session even though the
+	// cwd already has other active sessions. (Scheme A: informed consent.)
+	Force bool `json:"force,omitempty"`
 }
 
 // Daemon → Client events
@@ -42,22 +50,25 @@ type DaemonEvent struct {
 	Source           string          `json:"source,omitempty"`
 	ExitReason       string          `json:"exit_reason,omitempty"`
 	LastActivityAt   string          `json:"last_activity_at,omitempty"`
-	AgentID          string          `json:"agent_id,omitempty"`        // sub-agent identifier (e.g. "afa8314e6e3f6e552)
-	Agent            string          `json:"agent,omitempty"`           // agent type for upgrade_result (claude-code, codex)
-	SubAgentDesc     string          `json:"subagent_desc,omitempty"`   // sub-agent task description
-	SubAgentType     string          `json:"subagent_type,omitempty"`   // sub-agent type (Explore, general-purpose, etc.)
-	UserMessage      string          `json:"user_message,omitempty"`   // for generate_title_request
+	AgentID          string          `json:"agent_id,omitempty"`          // sub-agent identifier (e.g. "afa8314e6e3f6e552)
+	Agent            string          `json:"agent,omitempty"`             // agent type for upgrade_result (claude-code, codex)
+	SubAgentDesc     string          `json:"subagent_desc,omitempty"`     // sub-agent task description
+	SubAgentType     string          `json:"subagent_type,omitempty"`     // sub-agent type (Explore, general-purpose, etc.)
+	UserMessage      string          `json:"user_message,omitempty"`      // for generate_title_request
 	AssistantMessage string          `json:"assistant_message,omitempty"` // for generate_title_request
-	Reason           string          `json:"reason,omitempty"`          // failure reason code (no_cli, bad_cwd, start_fail, timeout, daemon_offline)
-	Commands         []CommandItem   `json:"commands,omitempty"`        // for command_list
-	Command          string          `json:"command,omitempty"`         // for command_receipt (e.g. "/compact")
-	ReceiptStatus    string          `json:"receipt_status,omitempty"`  // for command_receipt: success/failed/unavailable
-	Message          string          `json:"message,omitempty"`         // for command_receipt message
-	Usage            *ContextUsage   `json:"usage,omitempty"`           // token usage for agent_text events
-	PermissionMode   string          `json:"permission_mode,omitempty"` // current mode (permission_mode_changed event)
-	Model            string          `json:"model,omitempty"`           // resolved model name (session_meta event)
-	Effort           string          `json:"effort,omitempty"`          // current thinking-effort level (session_meta event)
-	Models           []ModelOption   `json:"models,omitempty"`          // available models (model_list event)
+	Reason           string          `json:"reason,omitempty"`            // failure reason code (no_cli, bad_cwd, start_fail, timeout, daemon_offline)
+	Commands         []CommandItem   `json:"commands,omitempty"`          // for command_list
+	Command          string          `json:"command,omitempty"`           // for command_receipt (e.g. "/compact")
+	ReceiptStatus    string          `json:"receipt_status,omitempty"`    // for command_receipt: success/failed/unavailable
+	Message          string          `json:"message,omitempty"`           // for command_receipt message
+	Usage            *ContextUsage   `json:"usage,omitempty"`             // token usage for agent_text events
+	PermissionMode   string          `json:"permission_mode,omitempty"`   // current mode (permission_mode_changed event)
+	Model            string          `json:"model,omitempty"`             // resolved model name (session_meta event)
+	Effort           string          `json:"effort,omitempty"`            // current thinking-effort level (session_meta event)
+	Models           []ModelOption   `json:"models,omitempty"`            // available models (model_list event)
+	CwdSessions      int             `json:"cwd_sessions,omitempty"`      // active session count on the same cwd (cwd_in_use/session_created)
+	WorktreePath     string          `json:"worktree_path,omitempty"`     // worktree absolute path when the session is isolated (Scheme D)
+	WorktreeBranch   string          `json:"worktree_branch,omitempty"`   // git branch backing the worktree (Scheme D)
 }
 
 // ModelOption is one selectable model surfaced by a daemon for session creation.
@@ -77,12 +88,12 @@ type ContextUsage struct {
 // CommandItem represents a slash command or skill available in a session,
 // surfaced to the web client for input autocompletion.
 type CommandItem struct {
-	Name        string `json:"name"`                  // trigger name, e.g. "clear", "pocket-release", "codex:rescue"
-	Source      string `json:"source"`                // builtin | project | user | plugin
-	Kind        string `json:"kind"`                  // command | skill
+	Name        string `json:"name"`   // trigger name, e.g. "clear", "pocket-release", "codex:rescue"
+	Source      string `json:"source"` // builtin | project | user | plugin
+	Kind        string `json:"kind"`   // command | skill
 	Description string `json:"description,omitempty"`
-	ArgHint     string `json:"arg_hint,omitempty"`    // frontmatter argument-hint (mostly commands)
-	Namespace   string `json:"namespace,omitempty"`   // plugin name, only for source=plugin
+	ArgHint     string `json:"arg_hint,omitempty"`  // frontmatter argument-hint (mostly commands)
+	Namespace   string `json:"namespace,omitempty"` // plugin name, only for source=plugin
 }
 
 // Control messages
@@ -138,6 +149,9 @@ type SessionConfig struct {
 	AllowedTools   []string `json:"allowed_tools,omitempty"`
 	PermissionMode string   `json:"permission_mode,omitempty"`
 	Model          string   `json:"model,omitempty"` // resolved clean model name (no [...] suffix)
+	Worktree       bool     `json:"worktree,omitempty"`
+	AutoCreateDir  bool     `json:"auto_create_dir,omitempty"`
+	Force          bool     `json:"force,omitempty"`
 }
 
 // Session states
@@ -159,4 +173,11 @@ const (
 	ExitReasonProcessCrash  = "process_crash"
 	ExitReasonSignalKill    = "signal_kill"
 	ExitReasonUnknown       = "unknown"
+)
+
+// Failure reason codes for upgrade_result (status="failed"). Sent alongside
+// `error` so clients can render actionable hints (e.g. permission_denied →
+// instruct the user to switch claude to a sudo-free native install).
+const (
+	ReasonPermissionDenied = "permission_denied"
 )

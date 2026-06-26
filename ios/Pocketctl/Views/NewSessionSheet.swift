@@ -42,10 +42,16 @@ struct NewSessionSheet: View {
     @State private var timeoutTask: Task<Void, Never>?
     @State private var done = false
     @State private var activePicker: PickerKind?
+    // Scheme A/C/D advanced options
+    @State private var autoCreateDir = true   // 目录不存在时自动创建
+    @State private var worktree = false       // Git Worktree 隔离
+    @State private var force = false          // 强制创建（cwd_in_use 确认）
+    @State private var showAdvanced = false   // 高级选项展开
+    @State private var cwdInUse = false       // 是否处于 cwd_in_use 确认状态
 
     private var isCreating: Bool { phase != .idle }
     private var canStart: Bool {
-        agent == "claude-code" && !prompt.trimmingCharacters(in: .whitespaces).isEmpty
+        (agent == "claude-code" || agent == "codex") && !prompt.trimmingCharacters(in: .whitespaces).isEmpty
     }
 
     var body: some View {
@@ -70,6 +76,10 @@ struct NewSessionSheet: View {
                     cwdField
                     permissionPicker
                     promptField
+                    advancedSection
+                    if cwdInUse {
+                        forceCreateSection
+                    }
                     if let errorText {
                         errorBanner(errorText)
                     }
@@ -120,22 +130,68 @@ struct NewSessionSheet: View {
         .animation(.easeInOut(duration: 0.2), value: activePicker)
     }
 
+    // MARK: - Advanced options (Scheme A/C/D)
+
+    private var advancedSection: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Button { withAnimation(.easeInOut(duration: 0.2)) { showAdvanced.toggle() } } label: {
+                HStack(spacing: 4) {
+                    Image(systemName: "chevron.right")
+                        .font(.system(size: 12))
+                        .foregroundStyle(Color.pcFgTertiary)
+                        .rotationEffect(.degrees(showAdvanced ? 90 : 0))
+                    Text("高级选项")
+                        .font(PCFont.body(12, weight: .semibold))
+                        .foregroundStyle(Color.pcFgSecondary)
+                    Spacer()
+                }
+            }
+            .buttonStyle(.plain)
+
+            if showAdvanced {
+                VStack(spacing: 12) {
+                    toggleRow(isOn: $autoCreateDir,
+                              title: "目录不存在时自动创建",
+                              hint: "工作目录不存在时自动创建，避免因路径缺失而创建失败")
+                    toggleRow(isOn: $worktree,
+                              title: "Git Worktree 隔离",
+                              hint: "在独立的 git 工作区中运行，避免多会话修改同一文件（需 git 仓库）")
+                }
+                .padding(12)
+                .background(Color.pcBackground)
+                .overlay(RoundedRectangle(cornerRadius: PCRadius.md).stroke(Color.pcBorder, lineWidth: 1))
+                .cornerRadius(PCRadius.md)
+            }
+        }
+    }
+
+    private var forceCreateSection: some View {
+        toggleRow(isOn: $force,
+                  title: "我已知晓风险，强制创建",
+                  hint: "强制在该目录创建会话，即使已有其他活跃会话。多个会话并发编辑同一文件将由文件锁协调，但建议谨慎操作")
+            .padding(12)
+            .background(Color.pcWarning.opacity(0.08))
+            .overlay(RoundedRectangle(cornerRadius: PCRadius.md).stroke(Color.pcWarning.opacity(0.3), lineWidth: 1))
+            .cornerRadius(PCRadius.md)
+    }
+
+    private func toggleRow(isOn: Binding<Bool>, title: String, hint: String) -> some View {
+        HStack(alignment: .top, spacing: 10) {
+            Toggle("", isOn: isOn).labelsHidden()
+            VStack(alignment: .leading, spacing: 2) {
+                Text(title).font(PCFont.body(13, weight: .medium)).foregroundStyle(Color.pcFg)
+                Text(hint).font(PCFont.body(11)).foregroundStyle(Color.pcFgTertiary)
+            }
+        }
+    }
+
     // MARK: - Fields
 
     private var agentPills: some View {
         HStack(spacing: PCSpacing.sm) {
             ForEach(["claude-code", "codex"], id: \.self) { a in
                 Button { agent = a } label: {
-                    HStack(spacing: 4) {
-                        Text(a == "claude-code" ? "Claude Code" : "Codex")
-                        if a != "claude-code" {
-                            Text("即将开通")
-                                .font(PCFont.body(10, weight: .medium))
-                                .padding(.horizontal, 5).padding(.vertical, 2)
-                                .background(Color.pcWarning.opacity(0.2))
-                                .foregroundStyle(Color.pcWarning).cornerRadius(4)
-                        }
-                    }
+                    Text(a == "claude-code" ? "Claude Code" : "Codex")
                     .font(PCFont.body(15, weight: .medium))
                     .foregroundStyle(agent == a ? Color.pcBackground : Color.pcFgSecondary)
                     .padding(.horizontal, 20).padding(.vertical, 10)
@@ -331,6 +387,7 @@ struct NewSessionSheet: View {
         guard canStart, !isCreating else { return }
         phase = .submitting
         errorText = nil
+        cwdInUse = false
         done = false
         AgentDefaultsStore.setCwd(daemonId: daemon.daemonId, agentType: agent, cwd: workdir)
 
@@ -343,6 +400,9 @@ struct NewSessionSheet: View {
         if !workdir.isEmpty { msg["cwd"] = workdir }
         if !prompt.isEmpty { msg["prompt"] = prompt }
         if !model.isEmpty { msg["model"] = model }
+        msg["worktree"] = worktree
+        msg["auto_create_dir"] = autoCreateDir
+        msg["force"] = force
         wsService.send(msg)
 
         timeoutTask = Task {
@@ -399,13 +459,22 @@ struct NewSessionSheet: View {
 
     private func failedMessage(_ reason: String?, errorDetail: String? = nil) -> String {
         switch reason {
-        case "no_cli": return "主机未安装 Claude Code CLI，请在主机上安装后重试"
+        case "no_cli":
+            let agentName = agent == "codex" ? "Codex" : "Claude Code"
+            return "主机未安装 \(agentName) CLI，请在主机上安装后重试"
         case "bad_cwd":
             let base = "工作目录不可用：\(workdir)"
             if let detail = errorDetail, !detail.isEmpty {
                 return "\(base)\n\(detail)"
             }
             return "\(base)，请检查路径与权限"
+        case "cwd_in_use":
+            // 进入强制创建确认状态
+            cwdInUse = true
+            if let detail = errorDetail, !detail.isEmpty {
+                return detail
+            }
+            return "工作目录已有活跃会话，多个会话同时操作同一目录可能产生冲突。如需继续，请开启「强制创建」"
         case "start_fail":
             if let detail = errorDetail, !detail.isEmpty {
                 return "Agent 进程启动失败：\(detail)"

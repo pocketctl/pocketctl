@@ -1,0 +1,286 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="dark">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>pocketctl × OpenClaw 接入方向讨论</title>
+<style>
+  :root {
+    --bg: #0d1117;
+    --card-bg: #161b22;
+    --border: #30363d;
+    --text: #c9d1d9;
+    --text-muted: #8b949e;
+    --accent: #58a6ff;
+    --green: #3fb950;
+    --orange: #d2991d;
+    --red: #f85149;
+    --purple: #a371f7;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: var(--bg); color: var(--text); line-height: 1.7;
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif;
+    max-width: 960px; margin: 0 auto; padding: 40px 24px;
+  }
+  h1 { font-size: 2em; border-bottom: 2px solid var(--border); padding-bottom: 12px; margin-bottom: 8px; }
+  h2 { font-size: 1.5em; margin-top: 48px; padding-bottom: 8px; border-bottom: 1px solid var(--border); color: var(--accent); }
+  h3 { font-size: 1.2em; margin-top: 32px; color: #e6edf3; }
+  h4 { font-size: 1.05em; margin-top: 20px; color: var(--purple); }
+  p, li { margin: 8px 0; }
+  .meta { color: var(--text-muted); font-size: 0.9em; margin-bottom: 24px; }
+  ul, ol { padding-left: 24px; }
+  a { color: var(--accent); }
+  table { width: 100%; border-collapse: collapse; margin: 16px 0; font-size: 0.9em; }
+  th, td { border: 1px solid var(--border); padding: 8px 12px; text-align: left; }
+  th { background: var(--card-bg); font-weight: 600; }
+  tr:nth-child(even) { background: rgba(255,255,255,0.02); }
+  .card {
+    background: var(--card-bg); border: 1px solid var(--border); border-radius: 8px;
+    padding: 20px; margin: 16px 0;
+  }
+  .card-green { border-left: 3px solid var(--green); }
+  .card-red { border-left: 3px solid var(--red); }
+  .card-info { border-left: 3px solid var(--accent); }
+  .card-purple { border-left: 3px solid var(--purple); }
+  .tag {
+    display: inline-block; padding: 2px 8px; border-radius: 12px; font-size: 0.78em;
+    font-weight: 600; margin-right: 4px;
+  }
+  .tag-green { background: rgba(63,185,80,0.15); color: var(--green); }
+  .tag-orange { background: rgba(210,153,29,0.15); color: var(--orange); }
+  .tag-red { background: rgba(248,81,73,0.15); color: var(--red); }
+  .tag-blue { background: rgba(88,166,255,0.15); color: var(--accent); }
+  .tag-purple { background: rgba(163,113,247,0.15); color: var(--purple); }
+  .highlight-box {
+    background: rgba(88,166,255,0.08); border: 1px solid rgba(88,166,255,0.3); border-radius: 8px;
+    padding: 20px; margin: 20px 0;
+  }
+  .highlight-box p { margin: 4px 0; }
+  .verdict {
+    background: rgba(248,81,73,0.08); border: 1px solid rgba(248,81,73,0.3); border-radius: 8px;
+    padding: 20px; margin: 20px 0; border-left: 3px solid var(--red);
+  }
+  .verdict-green {
+    background: rgba(63,185,80,0.08); border: 1px solid rgba(63,185,80,0.3); border-radius: 8px;
+    padding: 20px; margin: 20px 0; border-left: 3px solid var(--green);
+  }
+  .flow { text-align: center; padding: 16px; font-size: 0.95em; line-height: 2; }
+  .flow span { display: inline-block; background: var(--card-bg); border: 1px solid var(--border); border-radius: 4px; padding: 4px 10px; margin: 2px 4px; }
+  .flow .arrow { background: none; border: none; color: var(--text-muted); }
+  blockquote {
+    border-left: 3px solid var(--accent); padding: 8px 16px; margin: 16px 0;
+    background: rgba(88,166,255,0.05); border-radius: 0 6px 6px 0; color: var(--text-muted);
+  }
+  hr { border: none; border-top: 1px solid var(--border); margin: 32px 0; }
+  .badge {
+    display: inline-block; padding: 4px 12px; border-radius: 999px;
+    font-size: 0.8em; font-weight: 600; letter-spacing: 0.5px;
+  }
+  .badge-win { background: rgba(63,185,80,0.2); color: var(--green); }
+  .badge-lose { background: rgba(248,81,73,0.2); color: var(--red); }
+  .badge-draw { background: rgba(210,153,29,0.2); color: var(--orange); }
+  .two-col { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin: 16px 0; }
+  @media (max-width: 640px) { .two-col { grid-template-columns: 1fr; } }
+</style>
+</head>
+<body>
+
+<h1>pocketctl × OpenClaw 接入方向讨论</h1>
+<p class="meta">2026-06-26 · 头脑风暴 · <span class="tag tag-purple">方向探讨</span></p>
+
+<!-- ========================== 1 ========================== -->
+<h2>1. 背景</h2>
+
+<p>
+  <strong>pocketctl</strong> 目前接管 Claude Code、Codex、OpenCode 三个 agent 的 session 监控与管理。
+  <strong>OpenClaw</strong> 是一个自托管的 AI 助手网关，具备多 agent 编排能力和 20+ 消息通道（飞书、Discord、Telegram 等）接入能力。
+</p>
+
+<div class="two-col">
+  <div class="card card-info">
+    <h4>pocketctl 核心资产</h4>
+    <ul>
+      <li>JSONL 实时流解析</li>
+      <li>PTY 会话控制（/compact, /effort, 中断）</li>
+      <li>PreToolUse 审批卡片（web + iOS）</li>
+      <li>Token 分维度分析</li>
+      <li>Host 资源监控</li>
+      <li>iOS 原生 App</li>
+    </ul>
+  </div>
+  <div class="card card-purple">
+    <h4>OpenClaw 核心资产</h4>
+    <ul>
+      <li>多 agent 编排调度</li>
+      <li>20+ 消息通道（飞书/Discord/微信…）</li>
+      <li>Gateway 架构</li>
+      <li>Agent 路由</li>
+      <li>自托管、隐私优先</li>
+    </ul>
+  </div>
+</div>
+
+<!-- ========================== 2 ========================== -->
+<h2>2. 讨论过程</h2>
+
+<h3>2.1 第一轮：接入模式</h3>
+<p>三种可能的接入关系：</p>
+<ol>
+  <li><strong>OpenClaw 作为被监控的 agent</strong> — 类似现在的 claude/codex，发现 + 监控 session</li>
+  <li><strong>OpenClaw 作为 session 数据源</strong> — 通过 API 读取 OpenClaw 已有 session 列表</li>
+  <li><strong>深度集成 / 能力互补</strong> — pocketctl 触发 OpenClaw 的 agent 能力，或 OpenClaw 通知集成</li>
+</ol>
+
+<p><strong>结论：</strong>选方向 3，但不是"发起任务"，而是把 OpenClaw 作为编排层 — 用户选择 OpenClaw + 指定多个底层 agent，利用其多 agent 协作能力。</p>
+
+<h3>2.2 第二轮：Session 粒度</h3>
+<p>OpenClaw 驱动多个 agent 时，内部可能包含多个子 agent 调用：</p>
+<ul>
+  <li><strong>粗粒度：</strong>只看 OpenClaw 一层，显示"正在让 Claude Code 写代码"</li>
+  <li><strong>细粒度：</strong>展开内部，看到每个子 agent 的独立时间线、消息流、token 消耗</li>
+</ul>
+
+<h3>2.3 第三轮：结合飞书通道的优势</h3>
+<p>OpenClaw 已实现飞书/Discord 远程 chat，但经分析发现飞书通道存在硬伤（见 §3）。最终定位：</p>
+
+<div class="verdict-green">
+  <strong>核心定位：</strong>OpenClaw 管"入口"和"编排"，pocketctl 管"过程"和"审批"——互为补充，不是替代。
+</div>
+
+<!-- ========================== 3 ========================== -->
+<h2>3. OpenClaw + 飞书<strong>做不好</strong>的事</h2>
+
+<div class="card card-red">
+  <h3>3.1 实时流式输出不可见</h3>
+  <p>
+    Agent 产生的 JSONL 流每秒几十条事件（thinking、tool_call、tool_result…），
+    飞书只能收到 OpenClaw 转发的摘要。用户看不到：
+  </p>
+  <ul>
+    <li>Agent 正在想什么（thinking 内容）</li>
+    <li>每个 tool call 的完整 input/output（可能几百行代码）</li>
+    <li>Sub-agent 的内部活动</li>
+  </ul>
+  <p><strong>你要知道 agent "卡在哪"只能靠猜。</strong></p>
+</div>
+
+<div class="card card-red">
+  <h3>3.2 Tool Use 审批无法做 ⚠️ 最硬伤</h3>
+  <p>Claude Code 的 PreToolUse hook 会在执行命令/写文件前暂停等待审批。飞书做不到：</p>
+  <ul>
+    <li>展示完整命令内容和风险等级</li>
+    <li><strong>只展示命令而不执行，等用户点 approve/deny</strong></li>
+    <li>用户改了参数再 approve（modify-then-approve）</li>
+  </ul>
+  <p>pocketctl 近期提交：<code>0d47a29 feat(approval): PreToolUse 审批代理 — daemon hook 代理 + web/iOS 审批卡片</code></p>
+</div>
+
+<div class="card card-red">
+  <h3>3.3 多 Session 并行的混乱</h3>
+  <p>
+    用户从飞书发了 3 个任务 → 3 个 agent 同时跑。飞书里三个 session 的消息全部交织在同一个频道，
+    完全分不清谁是谁。pocketctl 有独立的 session 列表、状态、重命名、置顶。
+  </p>
+</div>
+
+<div class="card card-red">
+  <h3>3.4 PTY 级别的直接操控</h3>
+  <p>通过 PTY 向 agent 进程发送控制序列：</p>
+  <ul>
+    <li><code>/compact</code> 上下文压缩</li>
+    <li><code>/effort</code> 动态调整思考深度</li>
+    <li>切换 permission mode（default → acceptEdits → plan）</li>
+    <li><strong>中断正在运行的 session</strong>（Ctrl+C）</li>
+  </ul>
+  <p>OpenClaw 通过飞书无法传递这些 PTY 操作。</p>
+</div>
+
+<div class="card card-red">
+  <h3>3.5 Token 分析与成本追踪</h3>
+  <p>按天/模型/host 的分维度 token 消耗，需要<strong>持续采集 JSONL 中的 usage 数据并聚合</strong>。飞书不是数据分析工具。</p>
+</div>
+
+<!-- ========================== 4 ========================== -->
+<h2>4. 核心洞察</h2>
+
+<div class="highlight-box">
+  <p style="font-size: 1.1em; font-weight: 600;">
+    💡 OpenClaw + 飞书 = 你能<b>"跟 agent 聊天"</b>，但无法<b>"管理 agent 工作"</b>
+  </p>
+  <p style="color: var(--text-muted);">
+    pocketctl 的价值不在于"发消息"（飞书已经做了），而在于 agent 跑起来之后的<strong>完整生命周期管理</strong>——实时监控、审批、控制、分析。
+  </p>
+</div>
+
+<!-- ========================== 5 ========================== -->
+<h2>5. 推荐接入方向</h2>
+
+<div class="card card-green">
+  <h3>pocketctl 作为 OpenClaw 的"控制塔"</h3>
+  <p><strong>不做消息入口，做 agent 运行时的监控审批层。</strong></p>
+</div>
+
+<h4>典型工作流</h4>
+<div class="flow">
+  <span>📱 飞书</span>
+  <span class="arrow">→</span>
+  <span>🦞 OpenClaw Gateway<br><small>接收消息 + 编排 agent</small></span>
+  <span class="arrow">→</span>
+  <span>🤖 Claude Code<br>+ Codex<br><small>执行 coding 任务</small></span>
+  <span class="arrow">→</span>
+  <span>🖥️ pocketctl Daemon<br><small>深度监控 + 审批代理</small></span>
+  <span class="arrow">→</span>
+  <span>📱 iOS App / Web<br><small>实时查看 · 审批 · 控制</small></span>
+</div>
+
+<table>
+  <tr><th>环节</th><th>谁来做</th><th>为什么</th></tr>
+  <tr>
+    <td>发起任务</td>
+    <td><span class="tag tag-purple">OpenClaw + 飞书</span></td>
+    <td>飞书是多通道中最自然的入口，OpenClaw 负责路由和编排</td>
+  </tr>
+  <tr>
+    <td>Agent 编排</td>
+    <td><span class="tag tag-purple">OpenClaw</span></td>
+    <td>多 agent 协作是 OpenClaw 的原生能力</td>
+  </tr>
+  <tr>
+    <td>实时流监控</td>
+    <td><span class="tag tag-blue">pocketctl</span></td>
+    <td>JSONL 深度解析、sub-agent 追踪、实时时间线</td>
+  </tr>
+  <tr>
+    <td>Tool 审批</td>
+    <td><span class="tag tag-blue">pocketctl</span></td>
+    <td>PreToolUse hook + 审批卡片，飞书无法实现</td>
+  </tr>
+  <tr>
+    <td>Session 控制</td>
+    <td><span class="tag tag-blue">pocketctl</span></td>
+    <td>PTY 操控（/compact、/effort、中断、切模式）</td>
+  </tr>
+  <tr>
+    <td>Token 分析</td>
+    <td><span class="tag tag-blue">pocketctl</span></td>
+    <td>多维度聚合、历史趋势</td>
+  </tr>
+</table>
+
+<!-- ========================== 6 ========================== -->
+<h2>6. 待进一步讨论</h2>
+<ul>
+  <li>pocketctl daemon 如何感知 OpenClaw 启动的 agent session？（通过文件系统？OpenClaw API？WebSocket？）</li>
+  <li>OpenClaw 的 session 模型与 pocketctl 的 protocol 如何映射？</li>
+  <li>iOS/Web 上是否需要增加"选择 agent 组合"的 UI？</li>
+  <li>是否允许用户直接从 pocketctl 发起任务（不依赖飞书）？</li>
+</ul>
+
+<hr>
+<p style="color: var(--text-muted); font-size: 0.85em;">
+  生成时间：2026-06-26 · 状态：头脑风暴阶段 · 工具：Claude Code
+</p>
+
+</body>
+</html>

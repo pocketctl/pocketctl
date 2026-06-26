@@ -710,6 +710,7 @@ onMounted(() => {
   cleanups.push(onEvent('upgrade_result', (msg: any) => {
     upgrading.value = ''
     if (msg.status === 'success') showToast(t('hosts.upgrade_success', { agent: msg.agent || 'Agent', version: msg.message || '' }))
+    else if (msg.reason === 'permission_denied') showToast(t('hosts.upgrade_perm_denied'))
     else showToast(t('hosts.upgrade_error', { error: msg.error || t('dashboard.unknown_error') }))
   }))
 })

@@ -43,16 +43,7 @@
         </div>
         <div class="agent-pills">
           <button :class="['agent-pill', { selected: form.agent === 'claude-code' }]" @click="form.agent = 'claude-code'">Claude Code</button>
-          <button :class="['agent-pill', { selected: form.agent === 'codex' }]" @click="form.agent = 'codex'">
-            Codex
-            <span class="coming-badge">{{ t('new_session.coming_soon') }}</span>
-          </button>
-        </div>
-
-        <!-- Codex Notice -->
-        <div v-if="form.agent === 'codex'" class="codex-notice">
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M12 6v6M12 18h.01"/></svg>
-          {{ t('new_session.codex_coming_soon') }}
+          <button :class="['agent-pill', { selected: form.agent === 'codex' }]" @click="form.agent = 'codex'">Codex</button>
         </div>
 
         <!-- Working Directory -->
@@ -99,6 +90,44 @@
           </div>
           <textarea class="prompt-area" v-model="form.prompt" :placeholder="t('new_session.prompt_placeholder')" maxlength="500" @input="updateCharCount" />
           <div class="char-count">{{ charCount }} / 500</div>
+        </div>
+
+        <!-- Advanced Options (Scheme A/C/D) -->
+        <div class="advanced-section">
+          <button type="button" class="advanced-toggle" @click="showAdvanced = !showAdvanced">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+              :style="{ transform: showAdvanced ? 'rotate(90deg)' : 'rotate(0)', transition: 'transform 0.15s' }">
+              <path d="M9 18l6-6-6-6"/>
+            </svg>
+            {{ t('new_session.advanced_options') }}
+          </button>
+          <div v-if="showAdvanced" class="advanced-body">
+            <label class="advanced-option">
+              <input type="checkbox" v-model="form.autoCreateDir" />
+              <span class="option-text">
+                <span class="option-label">{{ t('new_session.option_auto_create_dir') }}</span>
+                <span class="option-hint">{{ t('new_session.option_auto_create_dir_hint') }}</span>
+              </span>
+            </label>
+            <label class="advanced-option">
+              <input type="checkbox" v-model="form.worktree" />
+              <span class="option-text">
+                <span class="option-label">{{ t('new_session.option_worktree') }}</span>
+                <span class="option-hint">{{ t('new_session.option_worktree_hint') }}</span>
+              </span>
+            </label>
+          </div>
+        </div>
+
+        <!-- cwd_in_use confirmation (Scheme A) -->
+        <div v-if="cwdInUse" class="cwd-in-use-confirm">
+          <label class="advanced-option">
+            <input type="checkbox" v-model="form.force" />
+            <span class="option-text">
+              <span class="option-label">{{ t('new_session.force_create_label') }}</span>
+              <span class="option-hint">{{ t('new_session.force_create_hint') }}</span>
+            </span>
+          </label>
         </div>
 
         <!-- Error Banner (设计稿 .modal-error) -->
@@ -152,7 +181,13 @@ const form = reactive({
   prompt: '',
   permissionMode: 'bypassPermissions',  // Web 会话无人值守，默认跳过权限（acceptEdits 会卡在工具批准提示）
   model: '',  // '' = follow host default | opus | sonnet | haiku alias
+  // Scheme A/C/D advanced options
+  autoCreateDir: true,   // 目录不存在时自动创建（默认开）
+  worktree: false,       // Git worktree 隔离（默认关）
+  force: false,          // 明知 cwd 被占用仍强制创建（cwd_in_use 错误后出现）
 })
+const showAdvanced = ref(false)  // 高级选项折叠状态
+const cwdInUse = ref(false)      // 是否处于 cwd_in_use 确认状态
 // Available models for the selected host (populated by list_models → model_list)
 const models = ref<Array<{ alias: string; name: string }>>([])
 const modelsLoaded = ref(false)  // true once model_list response received (even if empty)
@@ -166,8 +201,8 @@ const selectedDaemonName = computed(() => {
   return d?.daemon_alias || d?.hostname || t('nav.hosts')
 })
 
-const canStart = computed(() => !!(form.daemonId && form.agent === 'claude-code'))
-const isAgentAvailable = computed(() => form.agent === 'claude-code')
+const canStart = computed(() => !!(form.daemonId && (form.agent === 'claude-code' || form.agent === 'codex')))
+const isAgentAvailable = computed(() => form.agent === 'claude-code' || form.agent === 'codex')
 
 function selectHost(d: any) {
   if (!d.daemon_online) return
@@ -188,9 +223,14 @@ function showError(reason: string, err?: string) {
   const map: Record<string, { title: string; desc: string }> = {
     no_cli: { title: t('new_session.error_title', { host }), desc: t('new_session.failed_no_cli_desc') },
     bad_cwd: { title: t('new_session.error_title', { host }), desc: err ? `${t('new_session.failed_bad_cwd_desc', { cwd: form.cwd || '/' })}\n${err}` : t('new_session.failed_bad_cwd_desc', { cwd: form.cwd || '/' }) },
+    cwd_in_use: { title: t('new_session.error_title', { host }), desc: err || t('new_session.failed_cwd_in_use_desc', { cwd: form.cwd || '/' }) },
     start_fail: { title: t('new_session.error_title', { host }), desc: t('new_session.failed_start_desc', { error: err || t('dashboard.unknown_error') }) },
     timeout: { title: t('new_session.error_title', { host }), desc: t('new_session.failed_timeout_desc') },
     daemon_offline: { title: t('new_session.error_title', { host }), desc: t('new_session.failed_offline_desc') },
+  }
+  // Scheme A: cwd_in_use 进入"确认覆盖"状态，用户可勾选强制创建后重试
+  if (reason === 'cwd_in_use') {
+    cwdInUse.value = true
   }
   const e = map[reason] || { title: t('new_session.failed'), desc: err || t('dashboard.unknown_error') }
   errorTitle.value = e.title
@@ -207,6 +247,7 @@ function startSession() {
   creating.value = true
   phase.value = 'submitting'
   hideError()
+  cwdInUse.value = false
   done = false
 
   // Save working directory for next time
@@ -267,6 +308,9 @@ function startSession() {
     prompt: form.prompt || undefined,
     permission_mode: form.permissionMode || undefined,
     model: form.model || undefined,
+    worktree: form.worktree || undefined,
+    auto_create_dir: form.autoCreateDir || undefined,
+    force: form.force || undefined,
   })
 
   // Timeout 15s: abort + show failure
@@ -457,6 +501,37 @@ onUnmounted(() => {
 .prompt-area:focus { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-muted); }
 .prompt-area::placeholder { color: var(--fg-tertiary); }
 .char-count { text-align: right; font-size: 11px; color: var(--fg-tertiary); margin-top: 4px; }
+
+/* Advanced Options (Scheme A/C/D) */
+.advanced-section { margin-bottom: 16px; }
+.advanced-toggle {
+  display: flex; align-items: center; gap: 4px;
+  background: none; border: none; cursor: pointer;
+  font-size: 12px; font-weight: 600; color: var(--fg-secondary);
+  text-transform: uppercase; letter-spacing: 0.4px;
+  padding: 0; font-family: var(--font-body);
+}
+.advanced-toggle:hover { color: var(--fg); }
+.advanced-toggle svg { color: var(--fg-tertiary); flex-shrink: 0; }
+.advanced-body {
+  margin-top: 10px; padding: 12px 14px;
+  background: var(--bg); border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  display: flex; flex-direction: column; gap: 12px;
+}
+.advanced-option { display: flex; align-items: flex-start; gap: 10px; cursor: pointer; }
+.advanced-option input[type="checkbox"] {
+  margin-top: 2px; width: 16px; height: 16px; accent-color: var(--accent);
+  cursor: pointer; flex-shrink: 0;
+}
+.option-text { display: flex; flex-direction: column; gap: 2px; }
+.option-label { font-size: 13px; font-weight: 500; color: var(--fg); }
+.option-hint { font-size: 11px; color: var(--fg-tertiary); line-height: 1.4; }
+.cwd-in-use-confirm {
+  margin-bottom: 16px; padding: 12px 14px;
+  background: rgba(210,153,34,0.08); border: 1px solid rgba(210,153,34,0.3);
+  border-radius: var(--radius-md);
+}
 
 /* Error Banner (设计稿 .modal-error) */
 .modal-error { display: flex; align-items: flex-start; gap: 8px; padding: 12px 14px; border-radius: var(--radius-md); background: rgba(248,81,73,0.1); border: 1px solid rgba(248,81,73,0.35); margin-bottom: 16px; animation: fade-in 0.2s ease; }
