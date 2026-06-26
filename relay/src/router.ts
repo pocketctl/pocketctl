@@ -24,11 +24,17 @@ export class Router {
   async registerDaemon(ws: WebSocket, msg: any, userId: number | null, tokenJti?: string, machineId?: string): Promise<void> {
     const daemonId = msg.daemon_id;
     const hostname = msg.hostname || 'unknown';
-    // Compose agents as [{type, version, latest}] objects (C4b: version; C4c: latest for upgrade UI)
+    // Compose agents as [{type, version, latest, manageable}] objects.
     const agentTypes: string[] = msg.agents || [];
     const agentVersions: Record<string, string> = msg.agent_versions || {};
     const agentLatests: Record<string, string> = msg.agent_latests || {};
-    const agents = agentTypes.map((t: string) => ({ type: t, version: agentVersions[t] || '', latest: agentLatests[t] || '' }));
+    const agentManageable: Record<string, boolean> = msg.agent_manageable || {};
+    const agents = agentTypes.map((t: string) => ({
+      type: t,
+      version: agentVersions[t] || '',
+      latest: agentLatests[t] || '',
+      manageable: agentManageable[t] !== false, // 缺省 true，兼容旧 daemon
+    }));
 
     // Soft eviction: check for existing daemon(s) for this user
     if (userId) {

@@ -108,6 +108,7 @@ type RegisterMessage struct {
 	Agents           []string          `json:"agents"`
 	AgentVersions    map[string]string `json:"agent_versions,omitempty"`
 	AgentLatests     map[string]string `json:"agent_latests,omitempty"`
+	AgentManageable  map[string]bool   `json:"agent_manageable,omitempty"`
 	OS               string            `json:"os"`
 	IP               string            `json:"ip"`
 	Arch             string            `json:"arch,omitempty"`
