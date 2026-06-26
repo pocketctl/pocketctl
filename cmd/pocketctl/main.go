@@ -534,6 +534,7 @@ func cmdDaemonStart(args []string) {
 	agentTypes := make([]string, 0, len(agents))
 	agentVersions := make(map[string]string)
 	agentLatests := make(map[string]string)
+	agentManageable := make(map[string]bool)
 	for _, a := range agents {
 		agentTypes = append(agentTypes, a.Type)
 		if a.Version != "" {
@@ -542,11 +543,11 @@ func cmdDaemonStart(args []string) {
 		if a.Latest != "" {
 			agentLatests[a.Type] = a.Latest
 		}
+		agentManageable[a.Type] = a.Manageable
 		logger.Info("discovered agent", "type", a.Type, "path", a.Path, "version", a.Version, "latest", a.Latest)
 	}
 	if len(agentTypes) == 0 {
-		agentTypes = []string{"claude-code"} // default
-		logger.Warn("no agents discovered, defaulting to claude-code")
+		logger.Warn("no coding agent discovered; clients will be prompted to install one")
 	}
 
 	// Create shared event channel
@@ -613,6 +614,7 @@ func cmdDaemonStart(args []string) {
 
 	// Create WebSocket client
 	client := ws.NewClient(url, tok, id, agentTypes, agentVersions, agentLatests, outputCh, logger)
+	client.SetAgentManageable(agentManageable)
 	client.SetVersion(version)
 	client.SetStartedAt(time.Now().Unix())
 

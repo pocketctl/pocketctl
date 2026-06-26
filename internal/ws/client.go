@@ -29,34 +29,35 @@ type OnConnectStateChange func(connected bool)
 type OnEvent func(evt protocol.DaemonEvent) []protocol.DaemonEvent
 
 type Client struct {
-	relayURL string
-	token    string
-	conn     *websocket.Conn
-	connMu   sync.Mutex
-	writeMu  sync.Mutex // protects WriteMessage on conn
-	outputCh <-chan protocol.DaemonEvent
-	sendCh   chan []byte
-	logger   *slog.Logger
-	daemonID string
-	hostname string
-	agents   []string
-	agentVersions map[string]string
-	agentLatests  map[string]string
-	osName   string
-	localIP  string
-	arch     string
-	version  string
-	startedAt int64
-	metricsFn func() (float64, float64, float64) // cpu, mem, disk
+	relayURL        string
+	token           string
+	conn            *websocket.Conn
+	connMu          sync.Mutex
+	writeMu         sync.Mutex // protects WriteMessage on conn
+	outputCh        <-chan protocol.DaemonEvent
+	sendCh          chan []byte
+	logger          *slog.Logger
+	daemonID        string
+	hostname        string
+	agents          []string
+	agentVersions   map[string]string
+	agentLatests    map[string]string
+	agentManageable map[string]bool
+	osName          string
+	localIP         string
+	arch            string
+	version         string
+	startedAt       int64
+	metricsFn       func() (float64, float64, float64) // cpu, mem, disk
 	// activeSessionIDsFn returns the session IDs this daemon currently owns.
 	// Seeded into the register message so the relay can rebuild its
 	// session→daemon routing table after a relay restart or daemon reconnect,
 	// instead of losing every historical session to a cold in-memory map.
 	activeSessionIDsFn func() []string
-	CommandCh     chan protocol.ClientMessage
-	OnStateChange OnConnectStateChange
-	OnReconnected func() // called after successful (re)connection + register
-	OnEvent       OnEvent // optional hook: inspect/derive events before forwarding to relay
+	CommandCh          chan protocol.ClientMessage
+	OnStateChange      OnConnectStateChange
+	OnReconnected      func()  // called after successful (re)connection + register
+	OnEvent            OnEvent // optional hook: inspect/derive events before forwarding to relay
 }
 
 func NewClient(relayURL, token, daemonID string, agents []string, agentVersions map[string]string, agentLatests map[string]string, outputCh <-chan protocol.DaemonEvent, logger *slog.Logger) *Client {
@@ -64,20 +65,20 @@ func NewClient(relayURL, token, daemonID string, agents []string, agentVersions 
 	localIP := getLocalIP()
 	osName := runtime.GOOS
 	return &Client{
-		relayURL:  relayURL,
-		token:     token,
-		outputCh:  outputCh,
-		sendCh:    make(chan []byte, 256),
-		logger:    logger,
-		daemonID:  daemonID,
-		hostname:  hostname,
-		agents:    agents,
+		relayURL:      relayURL,
+		token:         token,
+		outputCh:      outputCh,
+		sendCh:        make(chan []byte, 256),
+		logger:        logger,
+		daemonID:      daemonID,
+		hostname:      hostname,
+		agents:        agents,
 		agentVersions: agentVersions,
 		agentLatests:  agentLatests,
-		osName:    osName,
-		localIP:   localIP,
-		arch:      runtime.GOARCH,
-		CommandCh: make(chan protocol.ClientMessage, 64),
+		osName:        osName,
+		localIP:       localIP,
+		arch:          runtime.GOARCH,
+		CommandCh:     make(chan protocol.ClientMessage, 64),
 	}
 }
 
@@ -90,6 +91,9 @@ func (c *Client) SetAgentVersions(v map[string]string) { c.agentVersions = v }
 // SetAgentLatests updates the agent latest-version map (e.g. after re-checking npm registry).
 func (c *Client) SetAgentLatests(v map[string]string) { c.agentLatests = v }
 
+// SetAgentManageable updates the per-agent manageable flag map (user-owned install).
+func (c *Client) SetAgentManageable(m map[string]bool) { c.agentManageable = m }
+
 // ResendRegister re-sends the register message to push updated info (e.g. new agent versions after upgrade).
 func (c *Client) ResendRegister() {
 	c.connMu.Lock()
@@ -100,9 +104,10 @@ func (c *Client) ResendRegister() {
 	}
 	register := protocol.RegisterMessage{
 		Type: "register", DaemonID: c.daemonID, Hostname: c.hostname, Agents: c.agents,
-		AgentVersions: c.agentVersions,
-		AgentLatests:  c.agentLatests,
-		OS: c.osName, IP: c.localIP, Arch: c.arch, Version: c.version, StartedAt: c.startedAt,
+		AgentVersions:   c.agentVersions,
+		AgentLatests:    c.agentLatests,
+		AgentManageable: c.agentManageable,
+		OS:              c.osName, IP: c.localIP, Arch: c.arch, Version: c.version, StartedAt: c.startedAt,
 	}
 	if c.activeSessionIDsFn != nil {
 		register.ActiveSessionIDs = c.activeSessionIDsFn()
@@ -164,9 +169,10 @@ func (c *Client) connectAndServe(ctx context.Context) error {
 	c.logger.Info("sending register", "daemonID", c.daemonID, "hostname", c.hostname)
 	register := protocol.RegisterMessage{
 		Type: "register", DaemonID: c.daemonID, Hostname: c.hostname, Agents: c.agents,
-		AgentVersions: c.agentVersions,
-		AgentLatests:  c.agentLatests,
-		OS: c.osName, IP: c.localIP, Arch: c.arch, Version: c.version, StartedAt: c.startedAt,
+		AgentVersions:   c.agentVersions,
+		AgentLatests:    c.agentLatests,
+		AgentManageable: c.agentManageable,
+		OS:              c.osName, IP: c.localIP, Arch: c.arch, Version: c.version, StartedAt: c.startedAt,
 	}
 	if c.activeSessionIDsFn != nil {
 		register.ActiveSessionIDs = c.activeSessionIDsFn()
@@ -185,7 +191,9 @@ func (c *Client) connectAndServe(ctx context.Context) error {
 	for {
 		select {
 		case evt, ok := <-c.outputCh:
-			if !ok { return nil }
+			if !ok {
+				return nil
+			}
 			// Give the daemon a chance to inspect the event and emit derived
 			// events (e.g. session_model_changed from an agent_text model change)
 			// before forwarding to the relay.
@@ -212,7 +220,9 @@ func (c *Client) readPump(done chan struct{}) {
 	c.connMu.Unlock()
 	for {
 		_, msg, err := conn.ReadMessage()
-		if err != nil { return }
+		if err != nil {
+			return
+		}
 		var base struct {
 			Type               string `json:"type"`
 			Error              string `json:"error"`
@@ -221,7 +231,9 @@ func (c *Client) readPump(done chan struct{}) {
 			Message            string `json:"message"`
 			GracePeriodSeconds int    `json:"grace_period_seconds"`
 		}
-		if err := json.Unmarshal(msg, &base); err != nil { continue }
+		if err := json.Unmarshal(msg, &base); err != nil {
+			continue
+		}
 
 		// Handle kicked message: daemon is being evicted
 		if base.Type == "kicked" {
@@ -249,7 +261,9 @@ func (c *Client) readPump(done chan struct{}) {
 
 		// Forward all other messages to command channel
 		var cmdMsg protocol.ClientMessage
-		if err := json.Unmarshal(msg, &cmdMsg); err != nil { continue }
+		if err := json.Unmarshal(msg, &cmdMsg); err != nil {
+			continue
+		}
 		select {
 		case c.CommandCh <- cmdMsg:
 		default:
@@ -268,8 +282,10 @@ func (c *Client) pingPump(ctx context.Context, done chan struct{}) {
 				ping.CpuPct, ping.MemPct, ping.DiskPct = c.metricsFn()
 			}
 			c.SendMsg(ping)
-		case <-done: return
-		case <-ctx.Done(): return
+		case <-done:
+			return
+		case <-ctx.Done():
+			return
 		}
 	}
 }
@@ -297,10 +313,14 @@ func (c *Client) SendMsg(v any) {
 func (c *Client) backoffSleep(ctx context.Context) bool {
 	for attempt := 0; attempt < 10; attempt++ {
 		delay := time.Duration(1<<uint(attempt)) * time.Second
-		if delay > 30*time.Second { delay = 30 * time.Second }
+		if delay > 30*time.Second {
+			delay = 30 * time.Second
+		}
 		select {
-		case <-time.After(delay): return true
-		case <-ctx.Done(): return false
+		case <-time.After(delay):
+			return true
+		case <-ctx.Done():
+			return false
 		}
 	}
 	return false
