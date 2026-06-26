@@ -812,12 +812,10 @@ final class SessionDetailViewModel {
 
         // Check if this is a slash command message
         if let cmdName = extractTagContent(text, tag: "command-name") {
-            var clean = cmdName
-            // Also extract command message if present
-            if let cmdMsg = extractTagContent(text, tag: "command-message"), !cmdMsg.isEmpty {
-                clean += "\n" + cmdMsg
-            }
-            return clean
+            // Show only command-name (e.g. "/model"). command-message is a redundant
+            // command identifier (e.g. "model"), not a useful description — appending
+            // it produced "/model\nmodel". Aligns with web cleanContent.
+            return cmdName
         }
 
         // Not a command — strip all command-related tags

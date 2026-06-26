@@ -47,3 +47,10 @@ build/
 .github-sync/
 .github-sync-*/
 .deploy-local-hash
+
+# Docker Compose override (local dev only)
+docker-compose.override.yml
+
+# Vite generated config files
+web/vite.config.js
+web/vite.config.d.ts

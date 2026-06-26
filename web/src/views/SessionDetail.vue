@@ -140,6 +140,12 @@
           />
 
           <!-- Tool call / subagent (full-width block) -->
+          <DiffCard
+            v-else-if="msg.type === 'tool_call' && isDiffTool(msg.tool)"
+            :message="msg"
+            @toggleExpand="msg.expanded = !msg.expanded"
+            @toggleOutput="msg.outputExpanded = !msg.outputExpanded"
+          />
           <ToolCallCard
             v-else-if="msg.type === 'tool_call' || msg.type === 'subagent'"
             :message="msg"
@@ -174,6 +180,10 @@
             <button v-if="hasLastAgentReply" class="status-copy-btn" @click="copyLastReply">
               <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
               <span>{{ replyCopied ? t('common.copied') : t('common.copy') }}</span>
+            </button>
+            <button v-if="hasLastUserPrompt && canInput" class="status-copy-btn" @click="retryLastPrompt" :title="t('common.retry')">
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 1 0 3-6.7L3 8"/><path d="M3 3v5h5"/></svg>
+              <span>{{ t('common.retry') }}</span>
             </button>
           </template>
         </div>
@@ -329,8 +339,10 @@ import { useLocale } from '../composables/useLocale'
 import ToolCallCard from '../components/messages/ToolCallCard.vue'
 import QuestionCard from '../components/messages/QuestionCard.vue'
 import ApprovalCard from '../components/messages/ApprovalCard.vue'
+import DiffCard from '../components/messages/DiffCard.vue'
 import { buildResumeCommand } from '../utils/resumeCommand'
 import { formatToolInput } from '../utils/toolDisplay'
+import { isDiffTool } from '../utils/diffRender'
 import { useSessionRename } from '../composables/useSessionRename'
 import type { CommandItem } from '../composables/useWebSocket'
 
@@ -513,6 +525,10 @@ const lastAgentUsage = computed(() => {
 })
 const hasLastAgentReply = computed(() =>
   messages.value.some((m: any) => m.type === 'agent_text'))
+// Whether a user prompt exists that can be retried. A retry re-sends the last
+// user message verbatim, so it's gated on a real user_text message existing.
+const hasLastUserPrompt = computed(() =>
+  messages.value.some((m: any) => m.role === 'user' && m.content))
 // Refresh recovery: a finished session (idle/completed/exited/…) loses
 // lastTurnDuration on reload (it's runtime-only, not in replay). Still surface
 // the "completed" bar — check + label + tokens + copy — as long as history has
@@ -547,6 +563,24 @@ function copyLastReply() {
         if (replyCopyTimer) clearTimeout(replyCopyTimer)
         replyCopyTimer = setTimeout(() => { replyCopied.value = false }, 2000)
       }).catch(() => {})
+      return
+    }
+  }
+}
+
+// Retry: re-send the last user prompt verbatim. Walks messages backward to the
+// most recent user_text and routes it through sendMessage() (filling messageInput
+// first), so it reuses the full optimistic-echo / ack-timeout / local-command
+// pipeline — the retried bubble is treated exactly like a fresh send. The
+// original content (pre-cleanContent) is used to preserve the user's intent.
+// Guarded in the template by canInput (no retry on ended/disconnected sessions).
+function retryLastPrompt() {
+  if (!canInput.value) return
+  for (let i = messages.value.length - 1; i >= 0; i--) {
+    const m = messages.value[i] as any
+    if (m.role === 'user' && m.content) {
+      messageInput.value = m.content
+      sendMessage()
       return
     }
   }
@@ -649,9 +683,11 @@ function cleanContent(text: string): string {
     const msgMatch = text.match(/<command-message>([\s\S]*?)<\/command-message>/)
     const name = (nameMatch?.[1] ?? '').trim()
     const msg = (msgMatch?.[1] ?? '').trim()
-    // command-name is like "/compact", command-message is a short description.
+    // Show only command-name (e.g. "/model"). command-message is a redundant
+    // command identifier (e.g. "model"), not a useful description — appending it
+    // produced "/model\nmodel". Aligns with iOS sanitizeUserMessage.
     if (name || msg) {
-      return [name, msg].filter(Boolean).join('\n').trim()
+      return name || msg
     }
   }
 
