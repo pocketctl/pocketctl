@@ -111,7 +111,9 @@ func resolveFrom(candidates []string, statReal func(string) (string, bool), owne
 func ResolveAgent(cliName string) (string, bool, bool) {
 	home, _ := os.UserHomeDir()
 	npmPrefix := ""
-	if out, err := exec.Command("npm", "config", "get", "prefix").Output(); err == nil {
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	if out, err := exec.CommandContext(ctx, "npm", "config", "get", "prefix").Output(); err == nil {
 		npmPrefix = strings.TrimSpace(string(out))
 	}
 	cands := candidatePaths(cliName, home, os.Getenv("PATH"), npmPrefix)
