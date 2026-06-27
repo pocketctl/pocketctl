@@ -30,6 +30,20 @@ pocketctl 是一个远程 AI 编码代理控制系统。它让你在远程机器
 - **iOS App** — SwiftUI 原生应用，提供会话列表、实时对话、工具调用查看等功能
 - **Web UI** — Vue 3 单页应用（可选）
 
+## 支持的 Agent
+
+| Agent | 类型 | 实时输出 | 终端会话发现 | 备注 |
+|---|---|---|---|---|
+| **Claude Code** (`claude`) | 子进程 | tail JSONL | `~/.claude/sessions/` sidecar | 支持权限审批 hook、Shift+Tab 模式、`/effort` |
+| **Codex** (`codex`) | 子进程 | tail JSONL | `~/.codex/sessions/` rollout | 审批走 `--ask-for-approval` |
+| **opencode** (`opencode`) | **服务** | serve API 轮询 | serve `GET /api/session` | DB 后端；详见下 |
+
+三种 agent 共用一套"零配置发现 + 实时同步 + 跨设备续聊"能力 —— 你在终端正常运行 agent，daemon 自动发现并同步到客户端，可在客户端接着对话。
+
+**opencode 的特殊性**：它是 client/server 架构（会话存在 SQLite，不是可 tail 的 JSONL 文件）。daemon 托管一个共享的 `opencode serve` 进程，通过其 HTTP API 驱动会话、轮询消息历史做实时同步、发现终端会话。由于 opencode 不向第三方 API 暴露权限请求，daemon 会话默认自动放行工具（等价 Claude 的 `bypassPermissions`）；终端里运行的 opencode 仍按其自身配置在终端应答权限。
+
+> 想接入新的 agent？见 [docs/adding-an-agent.md](docs/adding-an-agent.md)——注册一个 `Provider` 即可，无需改散落的 switch。
+
 ## 快速开始
 
 ### 前置条件
@@ -276,15 +290,24 @@ pocketctl/
 ├── cmd/pocketctl/main.go          # CLI 入口
 ├── internal/
 │   ├── adapter/
-│   │   ├── claude.go              # Claude Code stream-json 输出解析器
-│   │   └── claude_jsonl.go        # JSONL 文件解析（提取消息、标题）
+│   │   ├── registry.go           # 会话类型注册表（Provider）+ LiveChannel 接口
+│   │   ├── providers.go          # 注册 claude-code / codex / opencode
+│   │   ├── adapter.go            # agent 无关的 adapter 工厂（查注册表）
+│   │   ├── claude.go             # Claude Code stream-json 输出解析器
+│   │   ├── claude_jsonl.go       # JSONL 文件解析（提取消息、标题）
+│   │   ├── codex.go              # Codex 输出/JSONL 解析器
+│   │   ├── opencode.go           # opencode Part→事件映射 + 增量差分器
+│   │   └── opencode_serve.go     # 托管 opencode serve + HTTP/SSE 客户端
+│   ├── session/
+│   │   ├── manager.go            # 会话生命周期管理（含标题生成触发）
+│   │   ├── backend.go            # SessionBackend 接口（server-kind agent）
+│   │   └── opencode_backend.go   # opencode 协调器（serve 单例 + 发现 + 同步 + 续聊）
 │   ├── api/client.go              # HTTP API 客户端（认证、SMS）
 │   ├── config/config.go           # 配置管理（~/.pocketctl/auth.json）
 │   ├── daemon/                    # PID 文件、守护进程状态管理
 │   ├── discovery/discovery.go     # 代理 CLI 自动发现
 │   ├── notify/                    # 终端通知
 │   ├── protocol/types.go          # WebSocket 消息类型定义
-│   ├── session/manager.go         # 会话生命周期管理（含标题生成触发）
 │   ├── update/updater.go          # Daemon 自更新（版本检测、下载、校验、替换）
 │   ├── watcher/
 │   │   ├── watcher.go             # Session 文件监控（fsnotify）

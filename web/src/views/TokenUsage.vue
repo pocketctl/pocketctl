@@ -115,7 +115,7 @@
         <div class="session-table-header"><span>{{ t('token.session') }}</span><span>{{ t('token.model') }}</span><span>{{ t('token.amount') }}</span><span>{{ t('token.in_out') }}</span><span style="text-align:right;">{{ t('token.time') }}</span></div>
         <template v-for="s in pagedSessions" :key="s.session_id">
           <div class="session-row" :class="{ expanded: expanded === s.session_id }" @click="toggleSession(s)">
-            <span class="st-name"><span class="st-expand">▶</span>{{ s.title || s.session_id.slice(0, 8) }}</span>
+            <span class="st-name"><span class="st-expand">▶</span>{{ s.title || s.session_id.slice(0, 8) }}<AgentBadge :agent="s.agent_type" size="sm" /></span>
             <span class="st-num"><span class="st-model-dot" :style="{ background: modelColor(s.model) }"></span>{{ s.model || '—' }}</span>
             <span class="st-total">{{ fmt(s.total_tokens) }}</span>
             <span class="st-num">{{ fmt(s.tok_input) }} / {{ fmt(s.tok_output) }}</span>
@@ -124,7 +124,7 @@
           <div v-if="expanded === s.session_id" class="session-expand-row open">
             <div v-if="trendArchived" class="se-label" style="color:var(--fg-tertiary);">{{ t('token.archived') }}</div>
             <template v-else>
-              <div class="se-detail-title">{{ t('token.session_detail_prefix') }} — <span :style="{ color: modelColor(s.model), fontWeight: 600 }">{{ s.model || '—' }}</span> · {{ s.agent_type || 'claude-code' }} · {{ statusLabel(s.status) }} · {{ t('token.created_on') }} {{ formatDate(s.created_at) }}</div>
+              <div class="se-detail-title">{{ t('token.session_detail_prefix') }} — <span :style="{ color: modelColor(s.model), fontWeight: 600 }">{{ s.model || '—' }}</span> · <AgentBadge :agent="s.agent_type" size="md" /> · {{ statusLabel(s.status) }} · {{ t('token.created_on') }} {{ formatDate(s.created_at) }}</div>
               <div class="se-grid">
                 <div class="se-item"><span class="se-label">{{ t('token.input') }}</span><span class="se-val">{{ fmt(s.tok_input) }}</span></div>
                 <div class="se-item"><span class="se-label">{{ t('token.output') }}</span><span class="se-val">{{ fmt(s.tok_output) }}</span></div>
@@ -172,6 +172,7 @@
 <script setup lang="ts">
 import { ref, computed, onMounted } from 'vue'
 import { useLocale } from '../composables/useLocale'
+import AgentBadge from '../components/AgentBadge.vue'
 
 const { t } = useLocale()
 
@@ -283,21 +284,38 @@ const donutGradient = computed(() => {
 })
 const heatMax = computed(() => Math.max(1, ...dailySeries.value.map((d) => (+d.input || 0) + (+d.output || 0))))
 function heatLevel(v: number) { const p = v / heatMax.value; return p > 0.75 ? 4 : p > 0.5 ? 3 : p > 0.25 ? 2 : p > 0 ? 1 : 0 }
+// Normalize any date representation (Date object, "YYYY-MM-DD", or
+// "YYYY-MM-DDT00:00:00.000Z" from Postgres) to a stable "YYYY-MM-DD" calendar
+// string. Avoids reinterpreting the date through UTC, which previously broke the
+// heatmap cell lookup (map keys never matched the grid keys).
+function normDate(d: any): string { return String(d).slice(0, 10) }
+function fmtLocalDate(dt: Date): string {
+  const y = dt.getFullYear()
+  const m = String(dt.getMonth() + 1).padStart(2, '0')
+  const day = String(dt.getDate()).padStart(2, '0')
+  return `${y}-${m}-${day}`
+}
+// Fixed ~9-month window (≈ 39 weeks) ending today, aligned to calendar weeks
+// (Sun..Sat columns). Independent of how many days actually have data.
+const HEATMAP_WEEKS = 39
 const heatmapCols = computed(() => {
-  const map = new Map(dailySeries.value.map((d) => [d.date, d]))
+  const map = new Map(dailySeries.value.map((d) => [normDate(d.date), d]))
   const cols: any[] = []
   const today = new Date()
-  const total = dailySeries.value.length
-  const colsCount = Math.ceil(total / 7) + 1
-  for (let w = 0; w < colsCount; w++) {
+  today.setHours(0, 0, 0, 0)
+  const todayDow = today.getDay() // 0 = Sunday
+  const thisSunday = new Date(today)
+  thisSunday.setDate(today.getDate() - todayDow)
+  for (let w = HEATMAP_WEEKS - 1; w >= 0; w--) {
     const cells: any[] = []
     for (let d = 0; d < 7; d++) {
-      const offset = (colsCount - 1 - w) * 7 + (6 - d)
-      const dt = new Date(today); dt.setDate(today.getDate() - offset)
-      const ds = dt.toISOString().slice(0, 10)
-      const day = map.get(ds)
+      const dt = new Date(thisSunday)
+      dt.setDate(thisSunday.getDate() - w * 7 + d)
+      const future = dt > today
+      const ds = fmtLocalDate(dt)
+      const day = !future ? map.get(ds) : undefined
       const value = day ? (+day.input + +day.output) : 0
-      cells.push({ date: day ? ds : '', key: ds + w + d, value, level: day ? heatLevel(value) : 0 })
+      cells.push({ date: day ? ds : '', key: ds + w + d, value, level: day ? heatLevel(value) : 0, future })
     }
     cols.push({ key: 'col' + w, cells })
   }

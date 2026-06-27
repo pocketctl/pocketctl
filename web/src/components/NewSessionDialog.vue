@@ -42,8 +42,9 @@
           {{ t('new_session.agent_label') }}
         </div>
         <div class="agent-pills">
-          <button :class="['agent-pill', { selected: form.agent === 'claude-code' }]" @click="form.agent = 'claude-code'">Claude Code</button>
-          <button :class="['agent-pill', { selected: form.agent === 'codex' }]" @click="form.agent = 'codex'">Codex</button>
+          <button :class="['agent-pill', { selected: form.agent === 'claude-code' }]" @click="selectAgent('claude-code')">Claude Code</button>
+          <button :class="['agent-pill', { selected: form.agent === 'codex' }]" @click="selectAgent('codex')">Codex</button>
+          <button :class="['agent-pill', { selected: form.agent === 'opencode' }]" @click="selectAgent('opencode')">OpenCode</button>
         </div>
 
         <!-- Working Directory -->
@@ -58,8 +59,8 @@
           </div>
         </div>
 
-        <!-- Permission Mode -->
-        <div class="form-group">
+        <!-- Permission Mode (Claude/Codex only; opencode has no Shift+Tab/runtime mode) -->
+        <div v-if="form.agent !== 'opencode'" class="form-group">
           <div class="field-label">
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
             {{ t('new_session.permission_mode') }}
@@ -72,15 +73,18 @@
           </select>
         </div>
 
-        <!-- Model (dynamic: host's available models from ~/.claude/settings.json) -->
-        <div class="field-label">
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5M2 12l10 5 10-5"/></svg>
-          {{ t('new_session.model_label') }}
+        <!-- Model (dynamic: host's available models). All agents — including
+             opencode — surface their models via list_models → model_list. -->
+        <div>
+          <div class="field-label">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5M2 12l10 5 10-5"/></svg>
+            {{ t('new_session.model_label') }}
+          </div>
+          <select v-model="form.model" class="model-select">
+            <option value="">{{ !modelsLoaded ? t('new_session.model_loading') : (models.length ? t('new_session.model_default') : t('new_session.model_none')) }}</option>
+            <option v-for="m in models" :key="m.alias" :value="m.alias">{{ m.name }}</option>
+          </select>
         </div>
-        <select v-model="form.model" class="model-select">
-          <option value="">{{ !modelsLoaded ? t('new_session.model_loading') : (models.length ? t('new_session.model_default') : t('new_session.model_none')) }}</option>
-          <option v-for="m in models" :key="m.alias" :value="m.alias">{{ m.name }}</option>
-        </select>
 
         <!-- Initial Prompt -->
         <div class="form-group">
@@ -110,7 +114,7 @@
               </span>
             </label>
             <label class="advanced-option">
-              <input type="checkbox" v-model="form.worktree" />
+              <input type="checkbox" v-model="form.worktree" :disabled="form.agent === 'opencode'" />
               <span class="option-text">
                 <span class="option-label">{{ t('new_session.option_worktree') }}</span>
                 <span class="option-hint">{{ t('new_session.option_worktree_hint') }}</span>
@@ -201,12 +205,24 @@ const selectedDaemonName = computed(() => {
   return d?.daemon_alias || d?.hostname || t('nav.hosts')
 })
 
-const canStart = computed(() => !!(form.daemonId && (form.agent === 'claude-code' || form.agent === 'codex')))
-const isAgentAvailable = computed(() => form.agent === 'claude-code' || form.agent === 'codex')
+const canStart = computed(() => !!(form.daemonId && form.agent))
+const isAgentAvailable = computed(() => form.agent === 'claude-code' || form.agent === 'codex' || form.agent === 'opencode')
 
 function selectHost(d: any) {
   if (!d.daemon_online) return
   form.daemonId = form.daemonId === d.daemon_id ? '' : d.daemon_id
+}
+
+// selectAgent switches agent and re-queries that agent's available models for the
+// selected host (Claude/Codex). opencode models come from its serve API and are
+// not yet surfaced, so its picker stays hidden.
+function selectAgent(agent: string) {
+  if (form.agent === agent) return
+  form.agent = agent
+  models.value = []
+  modelsLoaded.value = false
+  form.model = ''
+  if (form.daemonId) send({ type: 'list_models', daemon_id: form.daemonId, agent })
 }
 
 function updateCharCount() {
@@ -347,7 +363,7 @@ watch(() => form.daemonId, (id) => {
   models.value = []
   modelsLoaded.value = false
   form.model = ''
-  if (id) send({ type: 'list_models', daemon_id: id })
+  if (id) send({ type: 'list_models', daemon_id: id, agent: form.agent })
 })
 
 onMounted(() => {
@@ -357,7 +373,7 @@ onMounted(() => {
     models.value = msg.models || []
     modelsLoaded.value = true
   }))
-  if (form.daemonId) send({ type: 'list_models', daemon_id: form.daemonId })
+  if (form.daemonId) send({ type: 'list_models', daemon_id: form.daemonId, agent: form.agent })
   // Close on Escape
   const escHandler = (e: KeyboardEvent) => { if (e.key === 'Escape') emit('close') }
   document.addEventListener('keydown', escHandler)
@@ -399,10 +415,10 @@ onUnmounted(() => {
 @keyframes slide-up { from { opacity: 0; transform: translateY(24px) scale(0.97); } to { opacity: 1; transform: translateY(0) scale(1); } }
 
 /* Header */
-.modal-header { display: flex; align-items: center; justify-content: space-between; padding: 20px 24px 0; }
-.modal-title { font-family: var(--font-display); font-size: 20px; font-weight: 700; color: var(--fg); }
+.modal-header { display: flex; align-items: center; justify-content: space-between; padding: 16px 20px 0; }
+.modal-title { font-family: var(--font-display); font-size: 18px; font-weight: 700; color: var(--fg); }
 .modal-close {
-  width: 32px; height: 32px; border-radius: 50%;
+  width: 28px; height: 28px; border-radius: 50%;
   border: 1px solid var(--border); background: var(--surface-hover);
   display: flex; align-items: center; justify-content: center;
   cursor: pointer; color: var(--fg-secondary);
@@ -411,20 +427,20 @@ onUnmounted(() => {
 .modal-close:hover { background: var(--surface-active); color: var(--fg); }
 
 /* Body */
-.modal-body { padding: 20px 24px 24px; }
+.modal-body { padding: 14px 20px 18px; }
 
 /* Labels */
 .field-label {
   display: flex; align-items: center; gap: 6px;
-  font-size: 13px; font-weight: 600; color: var(--fg-secondary);
-  margin-bottom: 10px; text-transform: uppercase; letter-spacing: 0.4px;
+  font-size: 12px; font-weight: 600; color: var(--fg-secondary);
+  margin-bottom: 7px; text-transform: uppercase; letter-spacing: 0.4px;
 }
 .field-label svg { color: var(--fg-tertiary); }
 
 /* Host Selector */
-.host-selector { display: flex; flex-direction: column; gap: 8px; margin-bottom: 24px; }
+.host-selector { display: flex; flex-direction: column; gap: 6px; margin-bottom: 16px; }
 .host-option {
-  display: flex; align-items: center; gap: 12px; padding: 12px 16px;
+  display: flex; align-items: center; gap: 12px; padding: 9px 14px;
   border: 2px solid var(--border); border-radius: var(--radius-lg);
   cursor: pointer; transition: border-color 0.15s, background 0.15s, box-shadow 0.15s;
   background: var(--bg);
@@ -452,9 +468,9 @@ onUnmounted(() => {
 .host-empty { text-align: center; padding: 16px; font-size: 13px; color: var(--fg-tertiary); }
 
 /* Agent Pills */
-.agent-pills { display: flex; gap: 8px; margin-bottom: 24px; }
+.agent-pills { display: flex; gap: 6px; margin-bottom: 16px; }
 .model-select {
-  width: 100%; padding: 10px 14px; margin-bottom: 24px;
+  width: 100%; padding: 9px 12px; margin-bottom: 16px;
   background: var(--surface); border: 1px solid var(--border);
   border-radius: var(--radius-lg); color: var(--fg); font-size: 13px;
   cursor: pointer; transition: border-color 0.15s ease;
@@ -462,8 +478,8 @@ onUnmounted(() => {
 .model-select:hover { border-color: var(--border-light); }
 .model-select:focus { outline: none; border-color: var(--accent); }
 .agent-pill {
-  flex: 1; padding: 11px 20px; border-radius: var(--radius-md);
-  font-size: 14px; font-weight: 600; border: 2px solid var(--border);
+  flex: 1; padding: 9px 14px; border-radius: var(--radius-md);
+  font-size: 13px; font-weight: 600; border: 2px solid var(--border);
   cursor: pointer; transition: all 0.15s; font-family: var(--font-body);
   text-align: center; background: var(--bg); color: var(--fg-secondary);
   display: flex; align-items: center; justify-content: center; gap: 6px;
@@ -477,25 +493,25 @@ onUnmounted(() => {
 .codex-notice svg { color: var(--warning, #d29922); flex-shrink: 0; }
 
 /* Form */
-.form-group { margin-bottom: 20px; }
+.form-group { margin-bottom: 14px; }
 .dir-input {
   display: flex; align-items: center; background: var(--bg);
   border: 1px solid var(--border); border-radius: var(--radius-md);
-  padding: 0 14px; gap: 10px; transition: border-color 0.15s, box-shadow 0.15s;
+  padding: 0 12px; gap: 10px; transition: border-color 0.15s, box-shadow 0.15s;
 }
 .dir-input:focus-within { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-muted); }
 .dir-input svg { flex-shrink: 0; color: var(--fg-tertiary); }
 .dir-input input {
   flex: 1; background: none; border: none; color: var(--fg);
-  font-family: var(--font-mono); font-size: 14px; padding: 12px 0; outline: none;
+  font-family: var(--font-mono); font-size: 13px; padding: 9px 0; outline: none;
 }
 .dir-input input::placeholder { color: var(--fg-tertiary); }
 
 .prompt-area {
-  width: 100%; min-height: 100px; background: var(--bg);
+  width: 100%; min-height: 80px; background: var(--bg);
   border: 1px solid var(--border); border-radius: var(--radius-md);
-  padding: 12px 14px; color: var(--fg); font-family: var(--font-body);
-  font-size: 14px; outline: none; resize: vertical; line-height: 1.6;
+  padding: 10px 12px; color: var(--fg); font-family: var(--font-body);
+  font-size: 13px; outline: none; resize: vertical; line-height: 1.6;
   transition: border-color 0.15s, box-shadow 0.15s; box-sizing: border-box;
 }
 .prompt-area:focus { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-muted); }
@@ -514,12 +530,14 @@ onUnmounted(() => {
 .advanced-toggle:hover { color: var(--fg); }
 .advanced-toggle svg { color: var(--fg-tertiary); flex-shrink: 0; }
 .advanced-body {
-  margin-top: 10px; padding: 12px 14px;
+  margin-top: 8px; padding: 10px 12px;
   background: var(--bg); border: 1px solid var(--border);
   border-radius: var(--radius-md);
-  display: flex; flex-direction: column; gap: 12px;
+  display: flex; flex-direction: column; gap: 10px;
 }
 .advanced-option { display: flex; align-items: flex-start; gap: 10px; cursor: pointer; }
+.advanced-option input[type="checkbox"]:disabled { opacity: 0.4; cursor: not-allowed; }
+.advanced-option:has(input[type="checkbox"]:disabled) { opacity: 0.6; cursor: not-allowed; }
 .advanced-option input[type="checkbox"] {
   margin-top: 2px; width: 16px; height: 16px; accent-color: var(--accent);
   cursor: pointer; flex-shrink: 0;
@@ -534,7 +552,7 @@ onUnmounted(() => {
 }
 
 /* Error Banner (设计稿 .modal-error) */
-.modal-error { display: flex; align-items: flex-start; gap: 8px; padding: 12px 14px; border-radius: var(--radius-md); background: rgba(248,81,73,0.1); border: 1px solid rgba(248,81,73,0.35); margin-bottom: 16px; animation: fade-in 0.2s ease; }
+.modal-error { display: flex; align-items: flex-start; gap: 8px; padding: 10px 12px; border-radius: var(--radius-md); background: rgba(248,81,73,0.1); border: 1px solid rgba(248,81,73,0.35); margin-bottom: 12px; animation: fade-in 0.2s ease; }
 [data-theme="light"] .modal-error { background: var(--error-bg); border-color: rgba(207,34,46,0.3); }
 .modal-error .err-icon { color: var(--error); margin-top: 1px; flex-shrink: 0; }
 .modal-error .err-body { flex: 1; min-width: 0; }
@@ -546,7 +564,7 @@ onUnmounted(() => {
 
 /* Footer */
 .modal-footer { display: flex; gap: 10px; padding-top: 4px; }
-.btn { padding: 12px; font-size: 15px; font-weight: 600; border-radius: var(--radius-md); cursor: pointer; border: none; font-family: var(--font-body); transition: background 0.15s; }
+.btn { padding: 10px; font-size: 14px; font-weight: 600; border-radius: var(--radius-md); cursor: pointer; border: none; font-family: var(--font-body); transition: background 0.15s; }
 .btn-cancel { flex: 1; background: var(--surface-hover); color: var(--fg-secondary); border: 1px solid var(--border); }
 .btn-cancel:hover:not(:disabled) { background: var(--surface-active); color: var(--fg); }
 .btn-cancel:disabled { opacity: 0.5; cursor: not-allowed; }

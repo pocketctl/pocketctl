@@ -520,6 +520,7 @@ func cmdDaemonStart(args []string) {
 	defer logFile.Close()
 
 	logger := slog.New(slog.NewJSONHandler(logFile, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	slog.SetDefault(logger) // so packages using slog.Default() (e.g. opencode coordinator) log to the daemon log
 	logger.Info("starting daemon", "version", version, "id", id, "relay", url)
 
 	// Write PID file
@@ -807,10 +808,24 @@ func cmdDaemonStart(args []string) {
 		os.Exit(0)
 	}
 
+	// Discover terminal-started opencode sessions via the shared `opencode serve`
+	// (current opencode is DB-backed; the daemon's serve sees terminal sessions
+	// over its HTTP API and the message poller syncs them). Started here — AFTER
+	// the daemonize gate — so only the real daemon process spawns `opencode
+	// serve`; otherwise the short-lived launcher process would orphan a second
+	// serve (PPID=1) that races the shared SQLite DB.
+	if err := sm.StartOpencodeDiscovery(); err != nil {
+		logger.Warn("opencode discovery not started", "error", err)
+	}
+
 	// Wait for signal
 	<-sigCh
 	logger.Info("shutting down")
 	fmt.Println(i18n.T("daemon.shutting_down"))
+	// Stop the shared opencode serve process (bound to its own context, not the
+	// daemon ctx) so it doesn't linger and race the next daemon's serve on the
+	// shared SQLite DB.
+	sm.ShutdownOpencode()
 	cancel()
 	time.Sleep(500 * time.Millisecond)
 }
@@ -1369,7 +1384,12 @@ func handleCommands(ctx context.Context, client *ws.Client, sm *session.SessionM
 				agentType, _ := sm.GetSessionAgent(cmd.SessionID)
 				storage := adapter.NewStorage(agentType)
 				model, exists := sm.GetSessionModel(cmd.SessionID)
-				if model == "" {
+				if model == "" && agentType == adapter.AgentOpencode {
+					// opencode terminal sessions carry no model at discovery and have no
+					// claude-style JSONL; fetch the model from the serve instead.
+					model = sm.OpencodeSessionModelFromServe(cmd.SessionID)
+				}
+				if model == "" && agentType != adapter.AgentOpencode {
 					// Terminal sessions don't carry a model at discovery time — extract
 					// it from the JSONL history (last real assistant message) and cache.
 					cwd, cwdOk := sm.GetSessionCwd(cmd.SessionID)
@@ -1403,7 +1423,7 @@ func handleCommands(ctx context.Context, client *ws.Client, sm *session.SessionM
 				// codex returns its own model list.
 				client.SendMsg(protocol.DaemonEvent{
 					Type:   "model_list",
-					Models: session.ListModelsForAgent(cmd.Agent),
+					Models: sm.ModelsForAgent(cmd.Agent),
 				})
 
 			case "upgrade_agent":

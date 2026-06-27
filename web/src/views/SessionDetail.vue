@@ -612,28 +612,38 @@ const sessionTitle = computed(() => {
 const statusSubtext = computed(() => isDaemonOnline.value ? t('session.status.connected') : t('session.status.waiting'))
 
 // Context token usage — from the last agent_text message that carried usage.
-const contextTokens = computed(() => {
+// lastUsage holds the most recent token usage seen for this session, set from
+// any event carrying usage (incl. usage-only carriers like opencode step-finish /
+// codex token_count that have no text and thus no message to attach to). Reset on
+// session switch. effectiveUsage prefers it, falling back to scanning messages.
+const lastUsage = ref<any>(null)
+function effectiveUsage(): any {
+  if (lastUsage.value) return lastUsage.value
   for (let i = messages.value.length - 1; i >= 0; i--) {
     const u = (messages.value[i] as any).usage
-    if (u) {
-      const total = (u.input_tokens || 0) + (u.cache_read_tokens || 0) + (u.cache_create_tokens || 0)
-      return total > 1000 ? (total / 1000).toFixed(1) + 'K' : String(total)
-    }
+    if (u) return u
+  }
+  return null
+}
+
+const contextTokens = computed(() => {
+  const u = effectiveUsage()
+  if (u) {
+    const total = (u.input_tokens || 0) + (u.cache_read_tokens || 0) + (u.cache_create_tokens || 0)
+    return total > 1000 ? (total / 1000).toFixed(1) + 'K' : String(total)
   }
   return ''
 })
 
 const contextTooltip = computed(() => {
-  for (let i = messages.value.length - 1; i >= 0; i--) {
-    const u = (messages.value[i] as any).usage
-    if (u) {
-      const parts: string[] = []
-      if (u.input_tokens) parts.push(`${t('session.context_input')}: ${u.input_tokens.toLocaleString()}`)
-      if (u.output_tokens) parts.push(`${t('session.context_output')}: ${u.output_tokens.toLocaleString()}`)
-      if (u.cache_read_tokens) parts.push(`${t('session.context_cache_read')}: ${u.cache_read_tokens.toLocaleString()}`)
-      if (u.cache_create_tokens) parts.push(`${t('session.context_cache_create')}: ${u.cache_create_tokens.toLocaleString()}`)
-      return parts.length ? t('session.context_usage') + '\n' + parts.join('\n') : ''
-    }
+  const u = effectiveUsage()
+  if (u) {
+    const parts: string[] = []
+    if (u.input_tokens) parts.push(`${t('session.context_input')}: ${u.input_tokens.toLocaleString()}`)
+    if (u.output_tokens) parts.push(`${t('session.context_output')}: ${u.output_tokens.toLocaleString()}`)
+    if (u.cache_read_tokens) parts.push(`${t('session.context_cache_read')}: ${u.cache_read_tokens.toLocaleString()}`)
+    if (u.cache_create_tokens) parts.push(`${t('session.context_cache_create')}: ${u.cache_create_tokens.toLocaleString()}`)
+    return parts.length ? t('session.context_usage') + '\n' + parts.join('\n') : ''
   }
   return ''
 })
@@ -1111,9 +1121,21 @@ function processEvent(evt: any, target: any[] = messages.value) {
     // running status was missed, e.g. PTY race).
     awaitingStart.value = false
     const content = evt.text || evt.content || evt.payload?.text || evt.payload?.content || ''
-    if (!content || isDuplicate('agent_text', content, target)) return
-    const streaming = evt.streaming ?? evt.payload?.streaming ?? false
     const usage = evt.usage || evt.payload?.usage
+    if (usage && target === messages.value) lastUsage.value = usage
+    // Usage-only carrier (opencode step-finish / codex token_count): no text,
+    // just token accounting. Attach it to the latest agent_text so the context
+    // pill picks it up, instead of dropping the event.
+    if (!content) {
+      if (usage) {
+        for (let i = target.length - 1; i >= 0; i--) {
+          if ((target[i] as any).type === 'agent_text') { (target[i] as any).usage = usage; break }
+        }
+      }
+      return
+    }
+    if (isDuplicate('agent_text', content, target)) return
+    const streaming = evt.streaming ?? evt.payload?.streaming ?? false
     const last = target[target.length - 1]
     if (last && last.type === 'agent_text' && last.streaming && !content.startsWith('\n')) {
       last.content += content
@@ -1228,6 +1250,7 @@ watch(sessionId, (newId, oldId) => {
     turnStartTime.value = null
     turnElapsed.value = 0
     lastTurnDuration.value = null
+    lastUsage.value = null  // reset context usage on session switch
     messages.value = []
     status.value = 'running'
     awaitingStart.value = false  // A: reset optimistic window on session switch
@@ -1391,6 +1414,26 @@ onMounted(() => {
     // session_status's last_activity_at) so elapsed isn't reset to zero.
     if (sessionSwitching) {
       sessionSwitching = false
+      // The placeholder status set on switch is 'running'; the relay does NOT
+      // replay session_status events (only message history), so correct it from
+      // the authoritative session list (DB status, kept current by the relay).
+      // Without this an idle session (e.g. opencode) would look "running" and
+      // start the turn timer from zero.
+      const meta = allSessions.value.find((s: any) => s.session_id === sessionId.value)
+      if (meta) {
+        let st = meta.statusEffective || meta.status
+        // A "running/busy" status that hasn't seen activity recently is stale:
+        // the daemon isn't actively syncing this session (an actively-running
+        // session refreshes last_activity_at every poll). Treat it as idle so the
+        // timer doesn't start from zero on a session that isn't really working
+        // (e.g. an opencode turn that was abandoned and fell out of the sync window).
+        if (st === 'running' || st === 'busy' || st === 'waiting') {
+          const la = meta.last_activity_at || meta.updated_at
+          const ageMs = la ? Date.now() - new Date(la).getTime() : Infinity
+          if (ageMs > 120000) st = 'idle'
+        }
+        if (st) status.value = st
+      }
       if (isExecuting.value) startTurnTimer(resumeStartAt ?? undefined)
       resumeStartAt = null
     }

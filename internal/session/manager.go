@@ -49,6 +49,7 @@ type ProcessState struct {
 	PendingRequestID string               // non-empty while a tool-use approval request awaits a client decision
 	WorktreePath     string               // Scheme D: non-empty when the session runs inside a git worktree
 	WorktreeBranch   string               // Scheme D: the git branch backing the worktree
+	Backend          SessionBackend       // non-nil only for server-kind agents (opencode); subprocess agents drive via the fields above
 }
 
 // SetTailer associates a JSONL tailer with a session (so sendToIdleTerminal can pause/resume it).
@@ -171,6 +172,11 @@ func (sm *SessionManager) InterruptSession(sessionID string) error {
 		return fmt.Errorf("session not found")
 	}
 
+	// Server-kind sessions (opencode) abort via their backend (HTTP), not a PTY.
+	if ps.Backend != nil {
+		return ps.Backend.Interrupt(sessionID)
+	}
+
 	if ps.Source == "daemon" && ps.PTY != nil {
 		// Ctrl+C (ETX) — Claude TUI stops the current generation and returns
 		// to the input prompt. The JSONL tailer will push an idle status.
@@ -240,6 +246,10 @@ type SessionManager struct {
 	// Scheme C: file-level lock manager coordinating concurrent edits across
 	// sessions that share a working directory. Shared with the approval server.
 	fileLocks *filelock.LockManager
+
+	// opencode coordinates the shared `opencode serve` process and its SSE demux
+	// for server-kind (opencode) sessions. Lazily created on first use.
+	opencode *opencodeCoordinator
 }
 
 func NewSessionManager(outputCh chan protocol.DaemonEvent) *SessionManager {
@@ -305,6 +315,20 @@ func (sm *SessionManager) handleApprovalRequest(req approval.Request) {
 // PreToolUse hook and returns the session to running. Called from the
 // approval_response command handler.
 func (sm *SessionManager) ResolveApproval(sessionID, requestID string, approved bool) error {
+	// opencode sessions answer permission prompts via the serve API, not the
+	// claude PreToolUse hook socket.
+	if b := sm.opencodeBackendFor(sessionID); b != nil {
+		decision := "reject"
+		if approved {
+			decision = "once"
+		}
+		sm.clearPendingApproval(sessionID, requestID)
+		if err := b.coord.server.ReplyPermission(context.Background(), sessionID, requestID, decision); err != nil {
+			return err
+		}
+		sm.outputCh <- protocol.DaemonEvent{Type: "session_status", SessionID: sessionID, Status: protocol.StatusRunning}
+		return nil
+	}
 	if sm.approvals == nil {
 		return fmt.Errorf("approval not configured on this daemon")
 	}
@@ -501,6 +525,13 @@ func ListModelsForAgent(agentType string) []protocol.ModelOption {
 	switch agentType {
 	case adapter.AgentCodex:
 		return listCodexModels()
+	case adapter.AgentOpencode:
+		// opencode models are provider/model and come from its serve API
+		// (GET /api/model); surfacing them through this stateless helper needs a
+		// running server, so it's deferred. Empty = the client shows no picker and
+		// opencode uses its own configured default. NOT the Claude list (which the
+		// default branch would wrongly return).
+		return nil
 	default:
 		return ListAvailableModels()
 	}
@@ -591,6 +622,12 @@ func (sm *SessionManager) CreateSession(ctx context.Context, config protocol.Ses
 	cliPath, err := findAgentCLI(config.Agent)
 	if err != nil {
 		return "", err
+	}
+
+	// Server-kind agents (opencode) are driven via a SessionBackend (shared
+	// `opencode serve` + SSE), not the PTY spawn flow below.
+	if adapter.BackendKindFor(config.Agent) == adapter.BackendServer {
+		return sm.createOpencodeSession(ctx, config)
 	}
 
 	// --- Working directory resolution --------------------------------------
@@ -893,6 +930,12 @@ func (sm *SessionManager) drainPTY(ctx context.Context, ps *ProcessState) {
 func (sm *SessionManager) ResolveInteractivePrompt(sessionID, requestID, choice string) error {
 	if choice == "" {
 		return fmt.Errorf("empty choice")
+	}
+
+	// opencode sessions answer questions via the serve API. choice is the
+	// selected option label; opencode expects answers as [[label]].
+	if b := sm.opencodeBackendFor(sessionID); b != nil {
+		return b.coord.server.ReplyQuestion(context.Background(), sessionID, requestID, [][]string{{choice}})
 	}
 
 	sm.mu.Lock()
@@ -1336,6 +1379,23 @@ func (sm *SessionManager) SendMessage(ctx context.Context, sessionID string, con
 			return fmt.Errorf("session not found: %s", sessionID)
 		}
 	}
+	// Server-kind sessions (opencode) are driven via their SessionBackend over
+	// HTTP; the reply is forwarded by the SSE demux (owned) or DirWatch (terminal).
+	if ps.Backend != nil {
+		sm.mu.Lock()
+		ps.LastActivityAt = time.Now()
+		src := ps.Source
+		sm.mu.Unlock()
+		// Echo the user's message for instant feedback only for owned sessions:
+		// the SSE demux skips the user echo, so we supply it here. Terminal
+		// sessions get their user_text from DirWatch (storage), so echoing here
+		// would duplicate.
+		if src != "terminal" {
+			sm.outputCh <- protocol.DaemonEvent{Type: "user_text", SessionID: sessionID, Text: content}
+		}
+		return ps.Backend.Send(ctx, sessionID, content)
+	}
+
 	// ps is non-nil here — safe to read fields.
 	sm.mu.RLock()
 	cwd := ps.Cwd

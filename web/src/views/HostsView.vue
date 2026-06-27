@@ -178,6 +178,7 @@
                 <div class="session-token-row" v-for="(s, i) in paginatedCostSessions" :key="s.session_id" @click="$router.push(`/session/${s.session_id}`)">
                   <span class="st-rank">{{ (costExpanded ? (costPage - 1) * 10 : 0) + i + 1 }}</span>
                   <span class="st-title">{{ s.title || s.session_id.slice(0, 8) }}</span>
+                  <AgentBadge :agent="s.agent_type" size="sm" />
                   <span class="st-tokens">{{ formatTokens(s.total_tokens) }}</span>
                   <button class="st-expand" @click.stop="toggleTokenExpand(s.session_id)" :aria-expanded="expandedTokenSession === s.session_id">{{ expandedTokenSession === s.session_id ? '▾' : '▸' }}</button>
                   <div v-if="expandedTokenSession === s.session_id" class="st-breakdown">
@@ -293,6 +294,7 @@ import { useAuth } from '../composables/useAuth'
 import { formatRelativeTime } from '../composables/useRelativeTime'
 import { useLocale } from '../composables/useLocale'
 import RegisterDaemonDialog from '../components/RegisterDaemonDialog.vue'
+import AgentBadge from '../components/AgentBadge.vue'
 import { getRelayOrigin } from '../composables/useEnv'
 
 const router = useRouter()
@@ -324,7 +326,7 @@ const upgrading = ref('')
 
 // C3: Token cost data (from C2 backend — cost_usd in USD)
 const tokenGlobal = ref<{ total: number; today: number; thisWeek: number; thisMonth: number } | null>(null)
-const daemonCost = ref<{ total: number; today: number; thisMonth: number; sessions: Array<{ session_id: string; title: string; total_tokens: number; tok_input: number; tok_output: number; tok_cache_read: number; tok_cache_create: number }> } | null>(null)
+const daemonCost = ref<{ total: number; today: number; thisMonth: number; sessions: Array<{ session_id: string; title: string; total_tokens: number; tok_input: number; tok_output: number; tok_cache_read: number; tok_cache_create: number; model: string; agent_type: string; status: string; created_at: Date }> } | null>(null)
 
 function formatTokens(v: number | null | undefined): string {
   if (v == null) return '—'
