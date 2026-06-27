@@ -35,7 +35,7 @@
           <span v-if="s.subagent_count > 0" class="subagent-badge">🤖 {{ s.subagent_count }}</span>
           <span v-if="s.exit_reason" class="exit-reason">{{ exitReasonLabel(s.exit_reason) }}</span>
           <span class="session-id">{{ s.session_id.slice(0, 8) }}</span>
-          <span class="session-agent">{{ s.agent || 'claude-code' }}</span>
+          <AgentBadge :agent="s.agent" size="sm" />
         </div>
       </div>
       <span class="session-time">{{ formatRelativeTime(s.last_activity_at || s.started_at) }}</span>
@@ -54,6 +54,7 @@ import { formatRelativeTime } from '../composables/useRelativeTime'
 import { useAuth } from '../composables/useAuth'
 import NewSessionDialog from '../components/NewSessionDialog.vue'
 import SessionActions from '../components/SessionActions.vue'
+import AgentBadge from '../components/AgentBadge.vue'
 import { getInstallCommand } from '../composables/useEnv'
 import { useSessionRename } from '../composables/useSessionRename'
 
@@ -234,7 +235,6 @@ function handleLogout() {
 
 .exit-reason { font-size: 11px; color: #6B7280; }
 .session-id { font-family: monospace; font-size: 12px; color: #58a6ff; }
-.session-agent { color: #8b949e; font-size: 12px; }
 .session-time { margin-left: auto; color: #8b949e; font-size: 13px; white-space: nowrap; }
 .session-info { flex: 1; min-width: 0; }
 .session-title { font-size: 14px; color: #e6edf3; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin-bottom: 2px; }
@@ -251,7 +251,6 @@ function handleLogout() {
   .session-list { padding: 12px; }
   .session-row { padding: 14px 12px; gap: 10px; min-height: 44px; }
   .session-id { font-size: 13px; }
-  .session-agent { display: none; }
   .session-time { font-size: 12px; }
   .header-row h2 { font-size: 17px; }
   .btn { padding: 10px 14px; font-size: 13px; min-height: 44px; }

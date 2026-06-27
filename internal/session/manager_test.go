@@ -9,8 +9,11 @@ import (
 	"github.com/pocketctl/pocketctl/internal/protocol"
 )
 
-// drainDiscovered drains session_discovered events from outputCh.
-// RegisterTerminalSession now emits a session_discovered event.
+// drainDiscovered consumes a session_discovered event if one is pending.
+// RegisterTerminalSession no longer emits session_discovered itself — it's
+// emitted later by handleWatcherEvents (cmd/pocketctl/main.go) once the JSONL
+// tailer confirms the file exists, and by the opencode discovery loop. So this
+// is a tolerant, non-blocking drain (nothing to consume in these unit tests).
 func drainDiscovered(t *testing.T, ch <-chan protocol.DaemonEvent) {
 	t.Helper()
 	select {
@@ -18,8 +21,8 @@ func drainDiscovered(t *testing.T, ch <-chan protocol.DaemonEvent) {
 		if evt.Type != "session_discovered" {
 			t.Errorf("expected session_discovered, got %q", evt.Type)
 		}
-	case <-time.After(time.Second):
-		t.Fatal("timed out waiting for session_discovered")
+	default:
+		// no pending event — expected
 	}
 }
 

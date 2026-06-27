@@ -84,64 +84,59 @@ type SessionStorage interface {
 
 // Agent types known to the daemon.
 const (
-	AgentClaude = "claude-code"
-	AgentCodex  = "codex"
+	AgentClaude   = "claude-code"
+	AgentCodex    = "codex"
+	AgentOpencode = "opencode"
 )
+
+// The factories below dispatch through the registry (see registry.go /
+// providers.go). When an agent type is unregistered, or registered without the
+// relevant factory (e.g. opencode before its session-driving code lands), they
+// fall back to the Claude implementation to preserve legacy behavior.
 
 // NewAdapter returns the streaming-stdout adapter for an agent type.
 func NewAdapter(agentType, prompt string) AgentAdapter {
-	switch agentType {
-	case AgentCodex:
-		return NewCodexAdapter()
-	default:
-		return NewClaudeAdapter(prompt)
+	if p, ok := Get(agentType); ok && p.NewAdapter != nil {
+		return p.NewAdapter(prompt)
 	}
+	return NewClaudeAdapter(prompt)
 }
 
 // NewJSONLParser returns the JSONL-history parser for an agent type.
 func NewJSONLParser(agentType string) JSONLParser {
-	switch agentType {
-	case AgentCodex:
-		return NewCodexJSONLParser()
-	default:
-		return NewJSONLStreamParser()
+	if p, ok := Get(agentType); ok && p.NewParser != nil {
+		return p.NewParser()
 	}
+	return NewJSONLStreamParser()
 }
 
 // NewLauncher returns the session launcher for an agent type.
 func NewLauncher(agentType string) SessionLauncher {
-	switch agentType {
-	case AgentCodex:
-		return CodexLauncher{}
-	default:
-		return ClaudeLauncher{}
+	if p, ok := Get(agentType); ok && p.NewLauncher != nil {
+		return p.NewLauncher()
 	}
+	return ClaudeLauncher{}
 }
 
 // NewStorage returns the session-storage resolver for an agent type.
 func NewStorage(agentType string) SessionStorage {
-	switch agentType {
-	case AgentCodex:
-		return CodexSessionStorage{}
-	default:
-		return ClaudeSessionStorage{}
+	if p, ok := Get(agentType); ok && p.NewStorage != nil {
+		return p.NewStorage()
 	}
+	return ClaudeSessionStorage{}
 }
 
-// Capabilities returns the runtime capabilities for an agent type.
+// Capabilities returns the runtime capabilities for an agent type. Unknown types
+// default to the Claude capability set (legacy behavior).
 func Capabilities(agentType string) AgentCapabilities {
-	switch agentType {
-	case AgentCodex:
-		// Codex has no PreToolUse hook, no Shift+Tab mode cycle, no /effort.
-		// Approval is handled via codex's own --ask-for-approval flag instead.
-		return AgentCapabilities{}
-	default:
-		return AgentCapabilities{
-			SupportsPermissionCycle: true,
-			SupportsEffort:          true,
-			SupportsApprovalHook:    true,
-			SlashCommandsFromInit:   true,
-		}
+	if p, ok := Get(agentType); ok {
+		return p.Capabilities
+	}
+	return AgentCapabilities{
+		SupportsPermissionCycle: true,
+		SupportsEffort:          true,
+		SupportsApprovalHook:    true,
+		SlashCommandsFromInit:   true,
 	}
 }
 

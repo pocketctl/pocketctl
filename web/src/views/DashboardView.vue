@@ -147,6 +147,7 @@
           <input v-if="sessRenamingId === s.session_id" class="ss-rename-input" v-model="sessRenameInput" maxlength="60"
             @click.stop @keydown.enter="sessCommitRename(s)" @keydown.escape="sessCancelRename" @blur="sessCommitRename(s)" />
           <span v-else :class="['session-title', { mono: !s.title || s.title.startsWith('Terminal Session') }]">{{ s.title || s.session_id.slice(0, 8) }}</span>
+          <AgentBadge :agent="s.agent_type" size="sm" />
         </div>
         <div class="session-daemon">{{ s.daemon_alias || s.hostname || s.daemon_id?.slice(0, 8) }}</div>
         <div class="session-time">{{ formatRelativeTime(s.last_activity_at || s.updated_at) }}</div>
@@ -199,6 +200,7 @@ import { useLocale } from '../composables/useLocale'
 import NewSessionDialog from '../components/NewSessionDialog.vue'
 import RegisterDaemonDialog from '../components/RegisterDaemonDialog.vue'
 import SessionActions from '../components/SessionActions.vue'
+import AgentBadge from '../components/AgentBadge.vue'
 import { getInstallCommand, getRelayOrigin, getRelayWs } from '../composables/useEnv'
 import { useSessionRename } from '../composables/useSessionRename'
 

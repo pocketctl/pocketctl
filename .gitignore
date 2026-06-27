@@ -54,3 +54,7 @@ docker-compose.override.yml
 # Vite generated config files
 web/vite.config.js
 web/vite.config.d.ts
+
+# Tool run artifacts (.omo continuation state) — anywhere in the tree
+.omo/
+**/.omo/

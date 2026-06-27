@@ -1,7 +1,7 @@
 ## Purpose
 daemon 发现用户在终端启动的 Claude Code session，解析 + tail 其 JSONL 历史，监控进程存活，生成标题——让终端 claude 能被 web/app 看到（session-bridge 的核心 capability）。
 
-## ADDED Requirements
+## Requirements
 
 ### Requirement: Daemon discovers terminal-started Claude Code sessions
 Daemon SHALL monitor `~/.claude/sessions/` directory for new or changed JSON files. Each file represents an active Claude Code session with fields: `pid`, `sessionId`, `cwd`, `status`, `startedAt`.
@@ -71,3 +71,58 @@ Daemon SHALL generate a readable title for each session by extracting the first 
 #### Scenario: Session with no user message yet
 - **WHEN** daemon discovers a session that has not yet written a user message to JSONL
 - **THEN** the title SHALL be "Terminal Session" as placeholder, updated when the first user message appears
+
+### Requirement: 终端会话发现按 agent 分发
+
+daemon 的终端会话发现 SHALL 按 agent 类型分发，而非仅 claude 的 `~/.claude/sessions/` 约定。
+claude-code 经 `SessionWatcher`（fsnotify sidecar）发现；opencode 经其专用发现器
+（见下）。现有 claude-code 的发现行为 SHALL 保持不变。
+
+#### Scenario: 多 agent 并存发现
+
+- **WHEN** 用户在不同终端分别运行 claude 与 opencode
+- **THEN** daemon SHALL 分别经各自发现器登记会话
+- **AND** 每个会话 SHALL 携带正确的 `agent` 类型与 `Source: terminal`
+
+### Requirement: daemon 发现终端启动的 opencode 会话
+
+daemon SHALL 经其托管的共享 `opencode serve` 轮询 `GET /api/session` 来发现终端启动的会话
+（opencode 会话存于 SQLite、事件总线为进程内，故不走文件监视），按 `time.updated` 新鲜度过滤
+（避免登记历史会话），登记为 `Source: terminal`、`agent: opencode`，cwd/title 取自会话记录。
+opencode 会话 SHALL NOT 依赖 pid sidecar（opencode 不提供）。
+
+#### Scenario: 用户在终端启动 opencode
+
+- **WHEN** 用户运行 `opencode` 并创建会话
+- **THEN** daemon SHALL 在数秒内经 `GET /api/session` 轮询发现并登记该会话（cwd/title 取自记录，source=`terminal`，agent=`opencode`）
+
+#### Scenario: daemon 启动时已有 opencode 会话
+
+- **WHEN** daemon 启动且 DB 中已存在 opencode 会话
+- **THEN** daemon SHALL 仅登记近期活跃（新鲜度窗口内）的会话，不 flood 历史会话
+
+### Requirement: daemon 经 serve API 轮询实时同步 opencode 会话
+
+daemon SHALL 对每个已发现的 opencode 终端会话轮询 `GET /session/{id}/message`，增量差分出新
+消息/part，转换为 DaemonEvent 实时转发（约 1 秒级，等价 claude/codex 的 JSONL tail 节奏）。
+
+#### Scenario: opencode 终端会话产生输出
+
+- **WHEN** 终端 opencode 进程为某会话产生新消息
+- **THEN** daemon SHALL 在约 1 秒内差分并转换为 `user_text` / `agent_text` / `tool_call` / `tool_result` / 用量事件转发到 relay
+
+### Requirement: opencode 会话存活判定不依赖 pid
+
+由于 opencode 不写 pid sidecar，daemon SHALL 依据会话消息历史（最新消息是否为未完成的
+assistant）推导其 `running` / `idle` 状态，并据此决定客户端能否续聊。掉出实时同步窗口的
+`running` 会话 SHALL 被一次性对账为 `idle`。
+
+#### Scenario: 终端会话活跃中
+
+- **WHEN** 某 opencode 会话的最新消息是未完成的 assistant（正在生成）
+- **THEN** 会话状态 SHALL 为 `running`，续聊请求被拒绝以避免撞车
+
+#### Scenario: 终端会话已空闲
+
+- **WHEN** 某 opencode 会话的最新消息是已完成的 assistant，或会话已掉出同步窗口
+- **THEN** 会话状态 SHALL 为 `idle`，可供跨设备续聊

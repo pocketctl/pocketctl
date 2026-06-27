@@ -11,6 +11,8 @@ import (
 	"sync"
 	"syscall"
 	"time"
+
+	"github.com/pocketctl/pocketctl/internal/adapter"
 )
 
 type AgentInfo struct {
@@ -22,24 +24,15 @@ type AgentInfo struct {
 	Manageable bool   `json:"manageable"`
 }
 
-// knownAgents: each agent's CLI name, npm package (for version check), and upgrade command.
-// UpdateCmd is the agent's built-in upgrade command; empty means fall back to `npm install -g <package>@latest`.
-var knownAgents = []struct {
-	Type      string
-	CLIName   string
-	Package   string
-	UpdateCmd string
-}{
-	{"claude-code", "claude", "@anthropic-ai/claude-code", "claude update"},
-	{"opencode", "opencode", "opencode-ai", "opencode upgrade"},
-	{"codex", "codex", "@openai/codex", ""}, // no built-in update; npm install -g @openai/codex@latest
-}
+// Known agents (CLI name, npm package, upgrade command) come from the adapter
+// registry — the single source of truth. UpdateCmd is the agent's built-in
+// upgrade command; empty means fall back to `npm install -g <package>@latest`.
 
 var versionRe = regexp.MustCompile(`\d+\.\d+(?:\.\d+)?`)
 
 func DiscoverAgents() []AgentInfo {
 	var agents []AgentInfo
-	for _, a := range knownAgents {
+	for _, a := range adapter.All() {
 		path, manageable, found := ResolveAgent(a.CLIName)
 		if !found {
 			continue
@@ -154,10 +147,8 @@ func ResolveAgent(cliName string) (string, bool, bool) {
 // AgentUpgradeInfo returns the upgrade command and npm package for an agent type.
 // updateCmd non-empty → run it directly; empty → run `npm install -g <package>@latest`.
 func AgentUpgradeInfo(agentType string) (updateCmd, pkg string, err error) {
-	for _, a := range knownAgents {
-		if a.Type == agentType {
-			return a.UpdateCmd, a.Package, nil
-		}
+	if a, ok := adapter.Get(agentType); ok {
+		return a.UpdateCmd, a.Package, nil
 	}
 	return "", "", fmt.Errorf("unknown agent type: %s", agentType)
 }
@@ -185,10 +176,8 @@ func detectLatest(pkg string) string {
 }
 
 func AgentTypeToCLI(agentType string) (string, error) {
-	for _, a := range knownAgents {
-		if a.Type == agentType {
-			return a.CLIName, nil
-		}
+	if a, ok := adapter.Get(agentType); ok {
+		return a.CLIName, nil
 	}
 	return "", fmt.Errorf("unknown agent type: %s", agentType)
 }
