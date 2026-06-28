@@ -489,6 +489,19 @@ func cmdDaemonStart(args []string) {
 		os.Exit(0)
 	}
 
+	// Determine daemon ID before forking so the launcher can print it and pass
+	// it to the child. This avoids the child re-deriving an ID that might differ
+	// if machine sources (hostname/MAC) changed since the last run.
+	preForkID := *daemonID
+	if preForkID == "" {
+		if existing, err := daemon.ReadState(); err == nil && existing.DaemonID != "" {
+			preForkID = existing.DaemonID
+		}
+		if preForkID == "" {
+			preForkID = daemon.MachineID()
+		}
+	}
+
 	// Daemonize: fork into the background BEFORE any initialization. Doing this
 	// early prevents the launcher process from transiently opening the approval
 	// socket, connecting to the relay, registering, then being torn down by
@@ -497,7 +510,7 @@ func cmdDaemonStart(args []string) {
 	// fresh connection, marking the host permanently offline). Only the child
 	// (or a --foreground run) performs the work below.
 	if !*foreground && os.Getenv("POCKETCTL_DAEMON_CHILD") != "1" {
-		childEnv := append(os.Environ(), "POCKETCTL_DAEMON_CHILD=1")
+		childEnv := append(os.Environ(), "POCKETCTL_DAEMON_CHILD=1", "POCKETCTL_DAEMON_ID="+preForkID)
 		exe, err := os.Executable()
 		if err != nil {
 			fmt.Fprintln(os.Stderr, i18n.T("error.executable_path", err))
@@ -518,19 +531,35 @@ func cmdDaemonStart(args []string) {
 			fmt.Fprintln(os.Stderr, i18n.T("error.daemonize", err))
 			os.Exit(1)
 		}
+		// Print startup banner from the launcher so the user sees it immediately.
+		// The child's stdout is nil (detached), so only the launcher can write here.
+		fmt.Println(i18n.T("daemon.started", preForkID, child.Process.Pid))
+		fmt.Println(i18n.T("daemon.relay", url))
+		fmt.Println(i18n.T("daemon.logs", daemon.LogPath()))
 		os.Exit(0)
 	}
 
-	// Generate daemon ID — reuse persisted ID, or derive from machine hardware
+	// Generate daemon ID — prefer the value passed by the launcher via env (set
+	// above) so both processes always use the same ID without re-deriving.
 	id := *daemonID
 	if id == "" {
-		if existing, err := daemon.ReadState(); err == nil && existing.DaemonID != "" {
+		if envID := os.Getenv("POCKETCTL_DAEMON_ID"); envID != "" {
+			id = envID
+		} else if existing, err := daemon.ReadState(); err == nil && existing.DaemonID != "" {
 			id = existing.DaemonID
 		}
 		if id == "" {
 			id = daemon.MachineID()
 		}
 	}
+
+	// Persist daemon_id immediately so the next start always reads the same ID,
+	// even if the process is killed before the relay connection fires OnStateChange.
+	_ = daemon.WriteState(&daemon.DaemonState{
+		DaemonID: id,
+		RelayURL: url,
+		PID:      os.Getpid(),
+	})
 
 	// Setup logging to file
 	logDir := filepath.Dir(daemon.LogPath())

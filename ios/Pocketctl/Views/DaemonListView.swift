@@ -51,6 +51,7 @@ struct DaemonListView: View {
                 }
             }
             .navigationBarHidden(true)
+            .enableSwipeBack()
             .navigationDestination(item: $navigateToSessionList) { daemon in
                 let initial = viewModel?.sessions.filter { $0.daemonId == daemon.daemonId } ?? []
                 SessionListView(daemon: daemon, isLoggedIn: $isLoggedIn, wsService: wsService, apiClient: apiClient, initialSessions: initial)
