@@ -11,13 +11,33 @@ struct StatusChip: View {
     }
 
     var body: some View {
-        Text(text)
-            .font(PCFont.body(12, weight: .medium))
-            .foregroundStyle(fgColor)
-            .padding(.horizontal, 10)
+        // Agent chip: brand abbreviation badge + name (e.g. [CC] Claude Code)
+        if case .agent(let t) = style {
+            let visual = agentVisual(t)
+            HStack(spacing: 4) {
+                Text(visual.abbrev)
+                    .font(PCFont.body(9, weight: .bold))
+                    .foregroundStyle(.white)
+                    .frame(width: 14, height: 14)
+                    .background(visual.color)
+                    .cornerRadius(3)
+                Text(text)
+                    .font(PCFont.body(12, weight: .medium))
+                    .foregroundStyle(visual.color)
+            }
+            .padding(.horizontal, 6)
             .padding(.vertical, 3)
-            .background(bgColor)
+            .background(visual.color.opacity(0.14))
             .cornerRadius(PCRadius.full)
+        } else {
+            Text(text)
+                .font(PCFont.body(12, weight: .medium))
+                .foregroundStyle(fgColor)
+                .padding(.horizontal, 10)
+                .padding(.vertical, 3)
+                .background(bgColor)
+                .cornerRadius(PCRadius.full)
+        }
     }
 
     private var fgColor: Color {

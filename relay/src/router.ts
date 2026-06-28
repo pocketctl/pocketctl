@@ -121,6 +121,14 @@ export class Router {
       if (tokenJti) {
         db.bindTokenToDaemon(this.pool, daemonId, tokenJti, machineId).catch(console.error);
       }
+      // Clean up stale offline entries for the same hostname belonging to this
+      // user. When daemon_id changes between runs (machine.id lost/re-derived),
+      // the old entry stays 'offline' in the DB indefinitely. Deleting it here
+      // on re-registration prevents the web client from showing duplicate entries.
+      this.pool.query(
+        `DELETE FROM daemons WHERE user_id = $1 AND hostname = $2 AND daemon_id != $3 AND status = 'offline'`,
+        [userId, hostname, daemonId]
+      ).catch((e: any) => console.error('cleanup stale daemons:', e));
     }
     db.cleanStaleSessions(this.pool).catch(console.error);
     this.send(ws, { type: 'register_ack', status: 'ok', connection_id: daemonId });
@@ -726,14 +734,19 @@ export class Router {
           total_sessions: counts?.total ?? 0,
         });
       }
-      // Also include offline daemons from DB for this user
+      // Also include offline daemons from DB for this user.
+      // Skip any entry whose hostname is already represented by an online daemon —
+      // this handles the case where the daemon_id changed between runs (machine.id
+      // lost or re-derived) while the machine is the same physical host.
       if (userId) {
         try {
+          const onlineHostnames = new Set(daemonList.map((d: any) => d.hostname));
           const result = await this.pool.query(
             `SELECT daemon_id, hostname, agents, alias, status, last_heartbeat FROM daemons WHERE user_id = $1 AND status = 'offline'`,
             [userId]
           );
           for (const row of result.rows) {
+            if (onlineHostnames.has(row.hostname)) continue;
             const counts = sessionCounts[row.daemon_id];
             daemonList.push({
               daemon_id: row.daemon_id,
