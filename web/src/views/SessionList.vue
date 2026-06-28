@@ -13,7 +13,7 @@
       <p class="empty-title">还没有活跃的会话</p>
       <p class="empty-desc">在远程机器上安装并启动 Daemon 即可看到会话</p>
       <code class="empty-cmd">{{ getInstallCommand() }}</code>
-      <code class="empty-cmd">pocketctl daemon start --relay &lt;url&gt; --api-key &lt;key&gt;</code>
+      <code class="empty-cmd">pocketctl daemon start</code>
       <button class="btn primary empty-btn" @click="showNewSession = true">创建 Web 会话</button>
     </div>
     <div v-for="s in sortedSessions" :key="s.session_id" :class="['session-row', { 'pending-delete': s.__pendingDelete }]" @click="!s.__pendingDelete && $router.push(`/session/${s.session_id}`)">
