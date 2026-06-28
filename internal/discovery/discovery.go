@@ -56,6 +56,9 @@ func candidatePaths(cliName, home, pathEnv, npmPrefix string) []string {
 		ordered = append(ordered,
 			filepath.Join(home, ".local", "bin", cliName),
 			filepath.Join(home, ".claude", "local", cliName),
+			// opencode self-installs here via `opencode upgrade` (takes priority over
+			// the older npm-installed version that may exist at /opt/homebrew/bin).
+			filepath.Join(home, ".opencode", "bin", cliName),
 		)
 	}
 	if npmPrefix != "" {

@@ -17,8 +17,17 @@ final class WebSocketService: @unchecked Sendable {
     /// Daemon tracking
     var daemons: [String: Daemon] = [:]
 
-    /// Available models per daemon (populated by model_list events)
+    /// Available models keyed by `"<daemonId>:<agent>"` (populated by model_list
+    /// events). The daemon answers `list_models` per-agent (Claude reads
+    /// ~/.claude/settings.json, codex returns its own list, opencode queries its
+    /// serve API), so the cache must be scoped per agent — otherwise switching
+    /// agent would show the wrong (stale) list.
     var availableModels: [String: [ModelOption]] = [:]
+
+    /// Builds the cache key shared by `requestModels` and the `model_list` handler.
+    static func modelsKey(daemonId: String, agent: String) -> String {
+        "\(daemonId):\(agent)"
+    }
 
     /// Event callbacks — multiple listeners supported
     private var eventListeners: [String: ([String: Any]) -> Void] = [:]
@@ -100,10 +109,16 @@ final class WebSocketService: @unchecked Sendable {
         webSocket?.send(.string(string)) { _ in }
     }
 
-    /// Request available models for a daemon (response arrives via model_list event,
-    /// stored in `availableModels`).
-    func requestModels(daemonId: String) {
-        send(["type": "list_models", "daemon_id": daemonId])
+    /// Request available models for a daemon (response arrives via model_list
+    /// event, stored in `availableModels` under `"<daemonId>:<agent>"`).
+    /// `agent` selects the daemon's model source (Claude settings.json / codex
+    /// list / opencode serve API) — mirroring web's `list_models` payload.
+    func requestModels(daemonId: String, agent: String) {
+        send([
+            "type": "list_models",
+            "daemon_id": daemonId,
+            "agent": agent,
+        ])
     }
 
     /// Disconnect
@@ -154,12 +169,11 @@ final class WebSocketService: @unchecked Sendable {
             }
         }
 
-        // Track available models per daemon (model_list is host-level)
-        if let type = dict["type"] as? String, type == "model_list",
-           let daemonId = dict["daemon_id"] as? String {
-            let models = (dict["models"] as? [[String: Any]] ?? []).compactMap { ModelOption(dict: $0) }
-            availableModels[daemonId] = models
-        }
+        // NOTE: model_list is host-level and may omit daemon_id (relay forwards the
+        // daemon's reply verbatim) and never carries `agent`. The owning view
+        // (NewSessionSheet) knows which agent it requested, so it writes the
+        // per-agent cache entry under "<daemonId>:<agent>" itself — we only fan the
+        // event out to listeners here.
 
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }

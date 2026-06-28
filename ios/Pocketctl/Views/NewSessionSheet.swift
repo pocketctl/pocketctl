@@ -51,7 +51,8 @@ struct NewSessionSheet: View {
 
     private var isCreating: Bool { phase != .idle }
     private var canStart: Bool {
-        (agent == "claude-code" || agent == "codex") && !prompt.trimmingCharacters(in: .whitespaces).isEmpty
+        (agent == "claude-code" || agent == "codex" || agent == "opencode")
+            && !prompt.trimmingCharacters(in: .whitespaces).isEmpty
     }
 
     var body: some View {
@@ -74,7 +75,11 @@ struct NewSessionSheet: View {
                     agentPills
                     modelPicker
                     cwdField
-                    permissionPicker
+                    // opencode 没有 Shift+Tab/runtime 权限模式（对齐 web
+                    // `v-if="form.agent !== 'opencode'"`），仅 Claude/Codex 显示。
+                    if agent != "opencode" {
+                        permissionPicker
+                    }
                     promptField
                     advancedSection
                     if cwdInUse {
@@ -119,15 +124,32 @@ struct NewSessionSheet: View {
         .onPreferenceChange(NewSessionSheetHeightKey.self) { onHeightChange($0) }
         .onAppear {
             workdir = AgentDefaultsStore.getCwd(daemonId: daemon.daemonId, agentType: agent) ?? "~/"
-            models = wsService.availableModels[daemon.daemonId] ?? []
-            wsService.requestModels(daemonId: daemon.daemonId)
+            loadModels(for: agent)
             startListening()
+        }
+        // Switching agent (or its absence in cache) re-queries that agent's models
+        // — the daemon answers list_models per-agent (Claude settings.json / codex
+        // list / opencode serve API), so the picker must refresh on switch (matches
+        // web selectAgent). Clears the stale selection too.
+        .onChange(of: agent) { newAgent in
+            model = ""
+            if newAgent == "opencode" { worktree = false }  // opencode 不支持 worktree
+            loadModels(for: newAgent)
         }
         .onDisappear {
             stopListening()
             timeoutTask?.cancel()
         }
         .animation(.easeInOut(duration: 0.2), value: activePicker)
+    }
+
+    /// Loads models for an agent into the picker: serves from cache if present,
+    /// otherwise requests `list_models` for that daemon+agent and waits for the
+    /// `model_list` reply (handler below writes the cache entry).
+    private func loadModels(for agentType: String) {
+        let key = WebSocketService.modelsKey(daemonId: daemon.daemonId, agent: agentType)
+        models = wsService.availableModels[key] ?? []
+        wsService.requestModels(daemonId: daemon.daemonId, agent: agentType)
     }
 
     // MARK: - Advanced options (Scheme A/C/D)
@@ -155,7 +177,8 @@ struct NewSessionSheet: View {
                               hint: "工作目录不存在时自动创建，避免因路径缺失而创建失败")
                     toggleRow(isOn: $worktree,
                               title: "Git Worktree 隔离",
-                              hint: "在独立的 git 工作区中运行，避免多会话修改同一文件（需 git 仓库）")
+                              hint: "在独立的 git 工作区中运行，避免多会话修改同一文件（需 git 仓库）",
+                              disabled: agent == "opencode")
                 }
                 .padding(12)
                 .background(Color.pcBackground)
@@ -175,11 +198,12 @@ struct NewSessionSheet: View {
             .cornerRadius(PCRadius.md)
     }
 
-    private func toggleRow(isOn: Binding<Bool>, title: String, hint: String) -> some View {
+    private func toggleRow(isOn: Binding<Bool>, title: String, hint: String, disabled: Bool = false) -> some View {
         HStack(alignment: .top, spacing: 10) {
-            Toggle("", isOn: isOn).labelsHidden()
+            Toggle("", isOn: isOn).labelsHidden().disabled(disabled)
             VStack(alignment: .leading, spacing: 2) {
-                Text(title).font(PCFont.body(13, weight: .medium)).foregroundStyle(Color.pcFg)
+                Text(title).font(PCFont.body(13, weight: .medium))
+                    .foregroundStyle(disabled ? Color.pcFgTertiary : Color.pcFg)
                 Text(hint).font(PCFont.body(11)).foregroundStyle(Color.pcFgTertiary)
             }
         }
@@ -189,9 +213,9 @@ struct NewSessionSheet: View {
 
     private var agentPills: some View {
         HStack(spacing: PCSpacing.sm) {
-            ForEach(["claude-code", "codex"], id: \.self) { a in
+            ForEach(["claude-code", "codex", "opencode"], id: \.self) { a in
                 Button { agent = a } label: {
-                    Text(a == "claude-code" ? "Claude Code" : "Codex")
+                    Text(agentDisplayName(a))
                     .font(PCFont.body(15, weight: .medium))
                     .foregroundStyle(agent == a ? Color.pcBackground : Color.pcFgSecondary)
                     .padding(.horizontal, 20).padding(.vertical, 10)
@@ -199,6 +223,16 @@ struct NewSessionSheet: View {
                     .cornerRadius(PCRadius.full)
                 }
             }
+        }
+    }
+
+    /// Display name for an agent type (mirrors DaemonListViewModel / AgentManageView).
+    private func agentDisplayName(_ a: String) -> String {
+        switch a {
+        case "claude-code": return "Claude Code"
+        case "codex": return "Codex"
+        case "opencode": return "OpenCode"
+        default: return a
         }
     }
 
@@ -449,8 +483,13 @@ struct NewSessionSheet: View {
             // model_list 是对当前 daemon 的 list_models 响应；直接用 payload（对齐 web 的
             // `models.value = msg.models`），不依赖 daemon_id 字段——relay 原样转发 daemon 的
             // model_list，未必携带 daemon_id，之前因此解析失败导致列表为空。
+            // 同时回写到 per-agent 缓存（key=daemonId:当前 agent），供再次打开或切换 agent
+            // 时秒出，避免每次都显示"加载中…"。
             if let modelDicts = event.models {
-                models = modelDicts.compactMap { ModelOption(dict: $0) }
+                let parsed = modelDicts.compactMap { ModelOption(dict: $0) }
+                models = parsed
+                let key = WebSocketService.modelsKey(daemonId: daemon.daemonId, agent: agent)
+                wsService.availableModels[key] = parsed
             }
         default:
             break
@@ -460,7 +499,7 @@ struct NewSessionSheet: View {
     private func failedMessage(_ reason: String?, errorDetail: String? = nil) -> String {
         switch reason {
         case "no_cli":
-            let agentName = agent == "codex" ? "Codex" : "Claude Code"
+            let agentName = agentDisplayName(agent)
             return "主机未安装 \(agentName) CLI，请在主机上安装后重试"
         case "bad_cwd":
             let base = "工作目录不可用：\(workdir)"
