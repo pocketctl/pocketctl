@@ -13,14 +13,13 @@
           <p>{{ t('help.install_desc') }}</p>
           <div class="code-block">
             <code>{{ t('help.cmd_install') }}</code>
-            <code>curl -fsSL {{ installURL }} -o /tmp/install.sh</code>
-            <code>sudo bash /tmp/install.sh</code>
+            <code>curl -fsSL {{ installURL }} | bash</code>
             <code></code>
             <code>{{ t('help.cmd_login') }}</code>
             <code>pocketctl login</code>
             <code></code>
             <code>{{ t('help.cmd_start') }}</code>
-            <code>pocketctl daemon start --relay {{ relayWs }}</code>
+            <code>pocketctl daemon start</code>
             <code></code>
             <code>{{ t('help.cmd_status') }}</code>
             <code>pocketctl daemon status</code>
@@ -49,21 +48,19 @@
 <script setup lang="ts">
 import { ref, computed } from 'vue'
 import { useLocale } from '../composables/useLocale'
-import { getRelayWs, getInstallURL } from '../composables/useEnv'
+import { getInstallURL } from '../composables/useEnv'
 
 defineEmits<{ close: [] }>()
 const { t } = useLocale()
 
 const copied = ref(false)
 
-const relayWs = computed(() => getRelayWs())
 const installURL = computed(() => getInstallURL())
 
 const fullCommands = computed(() => {
-  return `curl -fsSL ${installURL.value} -o /tmp/install.sh
-sudo bash /tmp/install.sh
+  return `curl -fsSL ${installURL.value} | bash
 pocketctl login
-pocketctl daemon start --relay ${relayWs.value}`
+pocketctl daemon start`
 })
 
 async function copyCommands() {
