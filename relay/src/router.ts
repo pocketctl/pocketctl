@@ -165,8 +165,21 @@ export class Router {
     }
   }
 
-  unregisterDaemon(daemonId: string): void {
+  /**
+   * Unregister a daemon. `closedWs` is the WebSocket whose 'close' event
+   * triggered this. We compare it against the registered connection BEFORE
+   * deleting: when a daemon reconnects (new socket registers the same
+   * daemonId), the OLD socket's delayed 'close' event must NOT evict the NEW
+   * connection — otherwise the relay permanently marks the daemon offline
+   * even though it is alive, because the daemon never re-sends register.
+   */
+  unregisterDaemon(daemonId: string, closedWs?: WebSocket): void {
     const daemon = this.daemons.get(daemonId);
+    // A close for a socket that no longer owns this daemonId belongs to a
+    // stale/previous connection — ignore it entirely.
+    if (closedWs && daemon && daemon.ws !== closedWs) {
+      return;
+    }
     const hostname = daemon?.hostname || 'unknown';
     const userId = daemon?.userId ?? null;
     this.daemons.delete(daemonId);

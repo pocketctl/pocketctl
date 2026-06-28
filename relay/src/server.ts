@@ -1001,7 +1001,7 @@ async function main() {
     socket.on('close', () => {
       if (connType === 'daemon') {
         const daemonId = wsDaemonMap.get(socket);
-        if (daemonId) { router.unregisterDaemon(daemonId); wsDaemonMap.delete(socket); }
+        if (daemonId) { router.unregisterDaemon(daemonId, socket); wsDaemonMap.delete(socket); }
       } else {
         router.unregisterClient(socket);
       }
