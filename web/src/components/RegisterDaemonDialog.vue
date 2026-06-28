@@ -15,8 +15,7 @@
           <div class="step-content">
             <div class="step-label">{{ t('settings.install_step') }}</div>
             <div class="code-block">
-              <code>curl -fsSL {{ installURL }} -o /tmp/install.sh</code>
-              <code>sudo bash /tmp/install.sh</code>
+              <code>curl -fsSL {{ installURL }} | bash</code>
             </div>
           </div>
         </div>
@@ -34,7 +33,7 @@
           <div class="step-content">
             <div class="step-label">{{ t('settings.start_step') }}</div>
             <div class="code-block">
-              <code>pocketctl daemon start --relay {{ relayWs }}</code>
+              <code>pocketctl daemon start</code>
             </div>
           </div>
         </div>
@@ -54,21 +53,19 @@
 <script setup lang="ts">
 import { ref, computed } from 'vue'
 import { useLocale } from '../composables/useLocale'
-import { getRelayWs, getInstallURL } from '../composables/useEnv'
+import { getInstallURL } from '../composables/useEnv'
 
 defineEmits<{ close: [] }>()
 const { t } = useLocale()
 
 const copied = ref(false)
 
-const relayWs = computed(() => getRelayWs())
 const installURL = computed(() => getInstallURL())
 
 const fullCommands = computed(() => {
-  return `curl -fsSL ${installURL.value} -o /tmp/install.sh
-sudo bash /tmp/install.sh
+  return `curl -fsSL ${installURL.value} | bash
 pocketctl login
-pocketctl daemon start --relay ${relayWs.value}`
+pocketctl daemon start`
 })
 
 async function copyCommands() {
