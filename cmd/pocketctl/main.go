@@ -489,6 +489,38 @@ func cmdDaemonStart(args []string) {
 		os.Exit(0)
 	}
 
+	// Daemonize: fork into the background BEFORE any initialization. Doing this
+	// early prevents the launcher process from transiently opening the approval
+	// socket, connecting to the relay, registering, then being torn down by
+	// os.Exit (which skips defers) — a sequence that orphaned resources and
+	// raced the real child's relay registration (stale 'close' evicted the
+	// fresh connection, marking the host permanently offline). Only the child
+	// (or a --foreground run) performs the work below.
+	if !*foreground && os.Getenv("POCKETCTL_DAEMON_CHILD") != "1" {
+		childEnv := append(os.Environ(), "POCKETCTL_DAEMON_CHILD=1")
+		exe, err := os.Executable()
+		if err != nil {
+			fmt.Fprintln(os.Stderr, i18n.T("error.executable_path", err))
+			os.Exit(1)
+		}
+		child := &exec.Cmd{
+			Path:   exe,
+			Args:   os.Args,
+			Env:    childEnv,
+			Stdin:  nil,
+			Stdout: nil,
+			Stderr: nil,
+			SysProcAttr: &syscall.SysProcAttr{
+				Setsid: true,
+			},
+		}
+		if err := child.Start(); err != nil {
+			fmt.Fprintln(os.Stderr, i18n.T("error.daemonize", err))
+			os.Exit(1)
+		}
+		os.Exit(0)
+	}
+
 	// Generate daemon ID — reuse persisted ID, or derive from machine hardware
 	id := *daemonID
 	if id == "" {
@@ -507,8 +539,11 @@ func cmdDaemonStart(args []string) {
 		os.Exit(1)
 	}
 	logFlags := os.O_CREATE | os.O_WRONLY
+	// Child process appends to the log opened by a --foreground launcher;
+	// a fresh foreground run truncates. (The background launcher forked before
+	// reaching here, so it never touches the log.)
 	if os.Getenv("POCKETCTL_DAEMON_CHILD") == "1" {
-		logFlags |= os.O_APPEND // child appends after parent's startup message
+		logFlags |= os.O_APPEND
 	} else {
 		logFlags |= os.O_TRUNC
 	}
@@ -781,32 +816,6 @@ func cmdDaemonStart(args []string) {
 	fmt.Println(i18n.T("daemon.relay", url))
 	fmt.Println(i18n.T("daemon.agents", strings.Join(agentTypes, ", ")))
 	fmt.Println(i18n.T("daemon.logs", daemon.LogPath()))
-
-	// Daemonize: re-exec self in background
-	if !*foreground && os.Getenv("POCKETCTL_DAEMON_CHILD") != "1" {
-		childEnv := append(os.Environ(), "POCKETCTL_DAEMON_CHILD=1")
-		exe, err := os.Executable()
-		if err != nil {
-			fmt.Fprintln(os.Stderr, i18n.T("error.executable_path", err))
-			os.Exit(1)
-		}
-		child := &exec.Cmd{
-			Path:   exe,
-			Args:   os.Args,
-			Env:    childEnv,
-			Stdin:  nil,
-			Stdout: nil,
-			Stderr: nil,
-			SysProcAttr: &syscall.SysProcAttr{
-				Setsid: true,
-			},
-		}
-		if err := child.Start(); err != nil {
-			fmt.Fprintln(os.Stderr, i18n.T("error.daemonize", err))
-			os.Exit(1)
-		}
-		os.Exit(0)
-	}
 
 	// Discover terminal-started opencode sessions via the shared `opencode serve`
 	// (current opencode is DB-backed; the daemon's serve sees terminal sessions
