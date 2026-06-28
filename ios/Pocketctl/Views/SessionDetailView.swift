@@ -160,7 +160,7 @@ struct SessionDetailView: View {
                 HStack(spacing: 4) {
                     Image(systemName: "chevron.left")
                         .font(.system(size: 15, weight: .medium))
-                    Text(session.hostname ?? "")
+                    Text(session.hostDisplayName ?? "")
                         .font(PCFont.body(15))
                 }
                 .foregroundStyle(Color.pcAccent)
@@ -221,6 +221,16 @@ struct SessionDetailView: View {
             } else if let subId = message.subAgentId, vm.subAgents[subId] != nil {
                 // Sub-agent card is rendered separately
                 EmptyView()
+            } else if isDiffTool(message.tool) {
+                // Edit/MultiEdit/Write → line-level diff view
+                DiffCard(
+                    message: message,
+                    messages: Binding(
+                        get: { vm.messages },
+                        set: { vm.messages = $0 }
+                    ),
+                    messageIndex: index
+                )
             } else {
                 ToolCallCard(
                     message: message,
