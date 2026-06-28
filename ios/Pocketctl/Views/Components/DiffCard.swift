@@ -7,6 +7,10 @@ struct DiffCard: View {
     let message: ChatMessage
     @Binding var messages: [ChatMessage]
     let messageIndex: Int
+    /// Whether the hosting session may still emit new tool events. When false
+    /// (terminal session), orphan tool_calls render as finished instead of
+    /// forever-spinning "执行中".
+    let sessionActive: Bool
 
     @State private var isExpanded = false
     @State private var isOutputExpanded = false
@@ -91,7 +95,7 @@ struct DiffCard: View {
 
                 Spacer()
 
-                if message.isRunning {
+                if message.isRunning(sessionActive: sessionActive) {
                     ProgressView().tint(.pcFgTertiary).scaleEffect(0.8)
                 } else {
                     Text("✓").font(.system(size: 14)).foregroundStyle(Color.pcSuccess)
@@ -115,7 +119,7 @@ struct DiffCard: View {
         // the tool_call arrives — it must not wait on the tool_result/output.
         // Only fall back to a running placeholder when there's no diff data yet.
         if blocks.isEmpty {
-            if message.isRunning {
+            if message.isRunning(sessionActive: sessionActive) {
                 HStack(spacing: 8) {
                     ProgressView().tint(.pcAccent).scaleEffect(0.8)
                     Text("执行中...")
@@ -123,6 +127,12 @@ struct DiffCard: View {
                         .foregroundStyle(Color.pcFgSecondary)
                 }
                 .padding(PCSpacing.md)
+            } else {
+                // Terminal session without diff data nor output (orphan tool_call).
+                Text("无输出")
+                    .font(PCFont.body(13))
+                    .foregroundStyle(Color.pcFgTertiary)
+                    .padding(PCSpacing.md)
             }
         } else {
             VStack(alignment: .leading, spacing: 8) {

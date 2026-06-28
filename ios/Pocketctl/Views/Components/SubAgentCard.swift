@@ -3,6 +3,9 @@ import SwiftUI
 struct SubAgentCard: View {
     let subAgent: SubAgent
     @Binding var messages: [ChatMessage]
+    /// Whether the hosting session may still emit new tool events. When false
+    /// (terminal session), orphan tool_calls render as finished.
+    let sessionActive: Bool
 
     @State private var isExpanded = false
 
@@ -85,7 +88,7 @@ struct SubAgentCard: View {
                                     .foregroundStyle(Color.pcFgTertiary)
                                     .lineLimit(1)
                                 Spacer()
-                                if msg.isRunning {
+                                if msg.isRunning(sessionActive: sessionActive) {
                                     ProgressView()
                                         .tint(.pcFgTertiary)
                                         .scaleEffect(0.7)

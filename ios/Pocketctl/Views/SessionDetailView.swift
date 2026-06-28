@@ -54,7 +54,8 @@ struct SessionDetailView: View {
                                         messages: Binding(
                                             get: { vm.subAgents[subAgent.agentId]?.messages ?? [] },
                                             set: { vm.subAgents[subAgent.agentId]?.messages = $0 }
-                                        )
+                                        ),
+                                        sessionActive: vm.isSessionActive
                                     )
                                     .id("subagent-\(subAgent.agentId)")
                                 }
@@ -229,7 +230,8 @@ struct SessionDetailView: View {
                         get: { vm.messages },
                         set: { vm.messages = $0 }
                     ),
-                    messageIndex: index
+                    messageIndex: index,
+                    sessionActive: vm.isSessionActive
                 )
             } else {
                 ToolCallCard(
@@ -238,7 +240,8 @@ struct SessionDetailView: View {
                         get: { vm.messages },
                         set: { vm.messages = $0 }
                     ),
-                    messageIndex: index
+                    messageIndex: index,
+                    sessionActive: vm.isSessionActive
                 )
             }
 

@@ -4,6 +4,10 @@ struct ToolCallCard: View {
     let message: ChatMessage
     @Binding var messages: [ChatMessage]
     let messageIndex: Int
+    /// Whether the hosting session may still emit new tool events. When false
+    /// (terminal session), orphan tool_calls render as finished instead of
+    /// forever-spinning "执行中".
+    let sessionActive: Bool
 
     @State private var isExpanded = false
     @State private var isOutputExpanded = false
@@ -41,7 +45,7 @@ struct ToolCallCard: View {
 
                     Spacer()
 
-                    if message.isRunning {
+                    if message.isRunning(sessionActive: sessionActive) {
                         ProgressView()
                             .tint(.pcFgTertiary)
                             .scaleEffect(0.8)
@@ -113,7 +117,7 @@ struct ToolCallCard: View {
                                     .foregroundStyle(Color.pcAccent)
                             }
                         }
-                    } else if message.isRunning {
+                    } else if message.isRunning(sessionActive: sessionActive) {
                         HStack(spacing: 8) {
                             ProgressView()
                                 .tint(.pcAccent)
@@ -122,6 +126,11 @@ struct ToolCallCard: View {
                                 .font(PCFont.body(14))
                                 .foregroundStyle(Color.pcFgSecondary)
                         }
+                    } else {
+                        // Terminal session with no captured output (orphan tool_call).
+                        Text("无输出")
+                            .font(PCFont.body(13))
+                            .foregroundStyle(Color.pcFgTertiary)
                     }
                 }
                 .padding(PCSpacing.md)

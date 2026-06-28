@@ -48,9 +48,16 @@ struct ChatMessage: Identifiable, Sendable {
     var promptOptions: [(index: String, label: String)] = []  // numbered options
     var selectedChoice: String?            // the index the user picked (nil while pending)
 
-    /// Whether this tool call is still running (no output yet)
-    var isRunning: Bool {
-        type == .toolCall && output == nil
+    /// Whether this tool call is still running (no output yet).
+    ///
+    /// A toolCall is only considered running while the hosting session is still
+    /// active (`sessionActive == true`) AND no `tool_result` has been received
+    /// (`output == nil`). Once the session reaches a terminal state, orphan
+    /// tool_calls (missing tool_result due to interrupted/forced-idle sessions,
+    /// dropped events, etc.) are treated as finished to avoid a forever-spinning
+    /// card that misleads users into thinking the call is still executing.
+    func isRunning(sessionActive: Bool) -> Bool {
+        type == .toolCall && output == nil && sessionActive
     }
 
     /// Truncated output for display (first 2000 chars)

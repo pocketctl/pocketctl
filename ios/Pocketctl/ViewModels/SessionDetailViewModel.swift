@@ -58,6 +58,13 @@ final class SessionDetailViewModel {
         ["running", "busy"].contains(status)
     }
 
+    /// Whether the session is still in a state that may produce new tool
+    /// events. Terminal states (`completed`/`exited`/`error`/`killed`/`crashed`)
+    /// return false — used to stop orphan tool_calls from showing as running.
+    var isSessionActive: Bool {
+        ["running", "busy", "idle", "waiting", "waiting_approval"].contains(status)
+    }
+
     /// Whether the input bar should be shown
     var canSendMessage: Bool {
         if status == "exited" && wsService.isDaemonOnline(session.daemonId) { return true }
