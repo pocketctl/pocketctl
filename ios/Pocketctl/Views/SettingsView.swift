@@ -515,8 +515,7 @@ struct SettingsView: View {
 
                     VStack(alignment: .leading, spacing: 4) {
                         let env = RelayEnvironmentManager.shared.current
-                        codeLine("curl -fsSL \(env.installURL) -o /tmp/install-daemon.sh")
-                        codeLine("sudo POCKETCTL_PROD_RELAY_URL=\(env.wsBaseURL) bash /tmp/install-daemon.sh --prod")
+                        codeLine("curl -fsSL \(env.installURL) | bash")
                         codeLine("pocketctl login")
                         codeLine("pocketctl daemon start")
                     }
@@ -526,7 +525,7 @@ struct SettingsView: View {
 
                     Button {
                         let env = RelayEnvironmentManager.shared.current
-                        UIPasteboard.general.string = "curl -fsSL \(env.installURL) -o /tmp/install-daemon.sh\nsudo POCKETCTL_PROD_RELAY_URL=\(env.wsBaseURL) bash /tmp/install-daemon.sh --prod\npocketctl login\npocketctl daemon start"
+                        UIPasteboard.general.string = "curl -fsSL \(env.installURL) | bash\npocketctl login\npocketctl daemon start"
                     } label: {
                         HStack(spacing: 6) {
                             Image(systemName: "doc.on.doc")
@@ -625,8 +624,7 @@ struct SettingsView: View {
                         VStack(alignment: .leading, spacing: 4) {
                             codeLine("# 1. 安装 Daemon")
                             let env = viewModel.currentEnvironment
-                            codeLine("curl -fsSL \(env.installURL) -o /tmp/install-daemon.sh")
-                            codeLine("sudo POCKETCTL_PROD_RELAY_URL=\(env.wsBaseURL) bash /tmp/install-daemon.sh --prod")
+                            codeLine("curl -fsSL \(env.installURL) | bash")
                             codeLine("")
                             codeLine("# 登录（使用 App 注册的手机号）")
                             codeLine("pocketctl login")
@@ -643,7 +641,7 @@ struct SettingsView: View {
 
                         Button {
                             let env = viewModel.currentEnvironment
-                            UIPasteboard.general.string = "curl -fsSL \(env.installURL) -o /tmp/install-daemon.sh\nsudo POCKETCTL_PROD_RELAY_URL=\(env.wsBaseURL) bash /tmp/install-daemon.sh --prod\npocketctl login\npocketctl daemon start"
+                            UIPasteboard.general.string = "curl -fsSL \(env.installURL) | bash\npocketctl login\npocketctl daemon start"
                         } label: {
                             HStack(spacing: 6) {
                                 Image(systemName: "doc.on.doc")

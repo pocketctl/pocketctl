@@ -3,19 +3,26 @@
     <!-- Session List Panel -->
     <div class="session-panel">
       <div class="session-panel-header">
-        <h3>{{ daemonName }}</h3>
+        <h3>{{ uniqueHosts.length > 1 ? t('nav.sessions') : daemonName }}</h3>
         <button class="btn-icon" style="width:28px;height:28px;border:none;background:var(--accent);color:#fff;" :title="t('session.new_session')" @click="emitNewSession">
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M12 5v14M5 12h14"/></svg>
+        </button>
+      </div>
+      <!-- Host selector tabs (only when multiple hosts have sessions) -->
+      <div v-if="uniqueHosts.length > 1" class="host-tabs">
+        <button
+          v-for="h in uniqueHosts"
+          :key="h.daemon_id"
+          :class="['host-tab', { active: selectedHostId === h.daemon_id }]"
+          @click="selectedHostId = h.daemon_id"
+        >
+          <span :class="['status-dot', { online: h.online }]" style="width:6px;height:6px;flex-shrink:0;"></span>
+          <span class="host-tab-name">{{ h.name }}</span>
         </button>
       </div>
       <div v-if="!hasNoSessions" style="padding:4px 8px;display:flex;align-items:center;gap:6px;">
         <span :class="['status-dot', { online: isDaemonOnline }]" style="width:6px;height:6px;"></span>
         <span style="font-size:11px;color:var(--fg-tertiary);">{{ isDaemonOnline ? t('dashboard.online') : t('dashboard.offline') }} · {{ statusSubtext }}</span>
-      </div>
-      <div v-if="hostFilter" class="host-filter-chip">
-        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="2" width="20" height="20" rx="3"/><path d="M7 2v20M17 2v20M2 12h20"/></svg>
-        <span class="hfc-name">{{ daemonName }}</span>
-        <button class="hfc-clear" @click="clearHostFilter" :title="t('session.show_all_hosts')">✕</button>
       </div>
       <div class="session-list">
         <div v-for="s in visibleSessions" :key="s.session_id"
@@ -315,7 +322,7 @@
   <NewSessionDialog
     v-if="showNewSession"
     :daemons="daemonList"
-    :preSelectedDaemonId="hostFilter"
+    :preSelectedDaemonId="selectedHostId"
     @close="showNewSession = false"
   />
   <CommandHelpModal
@@ -421,10 +428,43 @@ const MIN_TEXTAREA_HEIGHT = 60
 const MAX_TEXTAREA_HEIGHT = 400
 const textareaHeight = ref(DEFAULT_TEXTAREA_HEIGHT)
 const daemons = ref<Record<string, any>>({})
-const hostFilter = computed(() => (route.query.host as string) || '')
+// Local host selection state (initialized from URL ?host= for backward compat)
+const selectedHostId = ref((route.query.host as string) || '')
+// Unique hosts derived from sessions that have arrived
+const uniqueHosts = computed(() => {
+  const seen = new Set<string>()
+  const hosts: { daemon_id: string; name: string; online: boolean }[] = []
+  for (const s of allSessions.value) {
+    if (seen.has(s.daemon_id)) continue
+    seen.add(s.daemon_id)
+    const d = daemons.value[s.daemon_id]
+    hosts.push({
+      daemon_id: s.daemon_id,
+      name: d?.daemon_alias || d?.hostname || s.daemon_alias || s.hostname || s.daemon_id?.slice(0, 8) || '',
+      online: s.daemon_online ?? d?.online ?? false,
+    })
+  }
+  return hosts
+})
 const visibleSessions = computed(() => {
-  if (!hostFilter.value) return allSessions.value
-  return allSessions.value.filter((s: any) => s.daemon_id === hostFilter.value)
+  if (!selectedHostId.value) return allSessions.value
+  return allSessions.value.filter((s: any) => s.daemon_id === selectedHostId.value)
+})
+
+// Auto-select the first host when sessions first arrive and nothing is selected
+watch(uniqueHosts, (hosts) => {
+  if (hosts.length > 0 && !selectedHostId.value) {
+    selectedHostId.value = hosts[0].daemon_id
+  }
+}, { immediate: true })
+
+// When navigating directly to a session that belongs to a different host, follow it
+watch(() => sessionId.value, (sid) => {
+  if (!sid || sid.startsWith('pending-')) return
+  const s = allSessions.value.find((s: any) => s.session_id === sid)
+  if (s?.daemon_id && s.daemon_id !== selectedHostId.value) {
+    selectedHostId.value = s.daemon_id
+  }
 })
 
 const statusClass = computed(() => {
@@ -438,7 +478,12 @@ const statusLabel = computed(() => {
 })
 
 const isDaemonOnline = computed(() => {
-  const s = allSessions.value.find(s => s.session_id === sessionId.value)
+  if (selectedHostId.value) {
+    const d = daemons.value[selectedHostId.value]
+    if (d?.online !== undefined) return d.online
+    return allSessions.value.some((s: any) => s.daemon_id === selectedHostId.value && s.daemon_online)
+  }
+  const s = allSessions.value.find((s: any) => s.session_id === sessionId.value)
   return s?.daemon_online ?? true
 })
 
@@ -592,18 +637,16 @@ function retryLastPrompt() {
 }
 
 const daemonName = computed(() => {
-  if (hostFilter.value) {
-    const d = daemons.value[hostFilter.value]
-    return d?.daemon_alias || d?.hostname || hostFilter.value.slice(0, 8)
+  const id = selectedHostId.value
+  if (id) {
+    const d = daemons.value[id]
+    if (d) return d.daemon_alias || d.hostname || id.slice(0, 8)
+    const s = allSessions.value.find((s: any) => s.daemon_id === id)
+    return s?.daemon_alias || s?.hostname || id.slice(0, 8)
   }
-  const s = allSessions.value.find(s => s.session_id === sessionId.value)
+  const s = allSessions.value.find((s: any) => s.session_id === sessionId.value)
   return s?.daemon_alias || s?.hostname || s?.daemon_id?.slice(0, 8) || t('session.unknown_host')
 })
-function clearHostFilter() {
-  const q = { ...route.query }
-  delete q.host
-  router.replace({ query: q })
-}
 
 const sessionTitle = computed(() => {
   const s = allSessions.value.find(s => s.session_id === sessionId.value)
@@ -1304,8 +1347,7 @@ onMounted(() => {
     if (sessionId.value === 'default') {
       const first = visibleSessions.value[0]
       if (first) {
-        const query = hostFilter.value ? { host: hostFilter.value } : {}
-        router.replace({ path: `/session/${first.session_id}`, query })
+        router.replace({ path: `/session/${first.session_id}` })
       }
     }
   }))
@@ -1565,10 +1607,12 @@ onMounted(() => {
 .session-panel { width: 300px; background: var(--sidebar-bg); border-right: 1px solid var(--sidebar-border); display: flex; flex-direction: column; flex-shrink: 0; transition: background var(--transition), border-color var(--transition); }
 .session-panel-header { padding: 16px; border-bottom: 1px solid var(--sidebar-border); display: flex; align-items: center; justify-content: space-between; }
 .session-panel-header h3 { font-size: 14px; font-weight: 600; color: var(--fg); }
-.host-filter-chip { margin: 8px; padding: 6px 10px; background: var(--accent-muted); border: 1px solid var(--accent); border-radius: var(--radius-full); display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--accent); }
-.host-filter-chip .hfc-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; }
-.host-filter-chip .hfc-clear { flex-shrink: 0; width: 16px; height: 16px; border: none; background: none; color: var(--accent); cursor: pointer; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-size: 12px; line-height: 1; opacity: 0.7; }
-.host-filter-chip .hfc-clear:hover { opacity: 1; background: rgba(88,166,255,0.2); }
+.host-tabs { display: flex; gap: 4px; padding: 6px 8px; overflow-x: auto; scrollbar-width: none; border-bottom: 1px solid var(--sidebar-border); }
+.host-tabs::-webkit-scrollbar { display: none; }
+.host-tab { display: flex; align-items: center; gap: 5px; padding: 4px 10px; border-radius: var(--radius-full); border: 1px solid var(--sidebar-border); background: none; color: var(--fg-secondary); font-size: 12px; font-weight: 500; cursor: pointer; white-space: nowrap; transition: background 0.15s, border-color 0.15s, color 0.15s; flex-shrink: 0; }
+.host-tab:hover { background: var(--surface-hover); color: var(--fg); }
+.host-tab.active { background: var(--accent-muted); border-color: var(--accent); color: var(--accent); }
+.host-tab .host-tab-name { max-width: 100px; overflow: hidden; text-overflow: ellipsis; }
 .session-list { flex: 1; overflow-y: auto; padding: 8px; }
 .session-list-item { display: flex; align-items: center; gap: 10px; padding: 10px 12px; border-radius: var(--radius-md); cursor: pointer; transition: background 0.1s, opacity 0.25s ease; margin-bottom: 2px; }
 .session-list-item:hover { background: var(--surface-hover); }

@@ -204,8 +204,7 @@ struct DaemonListView: View {
             EmptyStateView(icon: "desktopcomputer", title: "还没有注册主机", subtitle: "在你的开发机上运行以下命令安装 Daemon")
             VStack(alignment: .leading, spacing: 4) {
                 let env = RelayEnvironmentManager.shared.current
-                codeLine("curl -fsSL \(env.installURL) -o /tmp/install-daemon.sh")
-                codeLine("sudo POCKETCTL_PROD_RELAY_URL=\(env.wsBaseURL) bash /tmp/install-daemon.sh --prod")
+                codeLine("curl -fsSL \(env.installURL) | bash")
                 codeLine("pocketctl login")
                 codeLine("pocketctl daemon start")
             }
@@ -217,8 +216,7 @@ struct DaemonListView: View {
             Button {
                 let env = RelayEnvironmentManager.shared.current
                 UIPasteboard.general.string = """
-                curl -fsSL \(env.installURL) -o /tmp/install-daemon.sh
-                sudo POCKETCTL_PROD_RELAY_URL=\(env.wsBaseURL) bash /tmp/install-daemon.sh --prod
+                curl -fsSL \(env.installURL) | bash
                 pocketctl login
                 pocketctl daemon start
                 """
