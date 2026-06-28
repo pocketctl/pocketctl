@@ -200,7 +200,7 @@
   "new_session.model_label": "Model",
   "new_session.model_default": "Default (follow host)",
   "new_session.model_loading": "Loading models…",
-  "new_session.model_none": "No models available",
+  "new_session.model_none": "Use default model",
   "new_session.start_btn": "Start Session",
   "new_session.connecting_phase": "Connecting to host…",
   "new_session.error_title": "Cannot create session on \"{{host}}\"",

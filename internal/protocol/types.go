@@ -114,7 +114,10 @@ type RegisterMessage struct {
 	Arch             string            `json:"arch,omitempty"`
 	Version          string            `json:"version,omitempty"`
 	StartedAt        int64             `json:"started_at,omitempty"`
-	ActiveSessionIDs []string          `json:"active_session_ids,omitempty"`
+	// Always emitted (no omitempty): an explicit empty list lets the relay
+	// distinguish "daemon has zero live sessions" (reconcile/close all its
+	// lingering running/busy rows) from a legacy daemon that never reports it.
+	ActiveSessionIDs []string          `json:"active_session_ids"`
 }
 
 type RegisterAckMessage struct {

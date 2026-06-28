@@ -76,8 +76,8 @@
               <div class="donut-center"><div class="dc-total">{{ fmt(donutTotal) }}</div><div class="dc-label">{{ t('token.token_total') }}</div></div>
             </div>
             <div class="donut-legend">
-              <div v-for="m in byModel" :key="m.model" class="dl-item">
-                <span class="dl-swatch" :style="{ background: modelColor(m.model) }"></span>{{ m.model }} {{ m.pct }}%
+              <div v-for="(m, i) in topModels" :key="m.model" class="dl-item">
+                <span class="dl-swatch" :style="{ background: rankColor(i) }"></span>{{ m.model }} {{ m.pct }}%
               </div>
             </div>
           </div>
@@ -176,6 +176,9 @@ import AgentBadge from '../components/AgentBadge.vue'
 
 const { t } = useLocale()
 
+// 柱状图单柱最大像素高度（双柱：input + output，需与 .bar-chart 容器高度协调）
+const BAR_CHART_MAX_H = 90
+
 const token = () => localStorage.getItem('pocketctl_access_token') || ''
 
 async function apiGet(url: string) {
@@ -273,13 +276,27 @@ const dailyAvgReq = computed(() => dailySeries.value.length ? Math.round(totalRe
 const cacheRate = computed(() => totalInput.value ? Math.round(totalCache.value / totalInput.value * 100) : 0)
 const topModel = computed(() => byModel.value[0])
 const barData = computed(() => dailySeries.value.slice(-30))
-const barMax = computed(() => Math.max(1, ...barData.value.map((d) => +d.input || 0)))
-function barHeight(v: number) { return Math.max(2, ((+v || 0) / barMax.value) * 160) }
+// 按单日 input+output 之和的最大值缩放，保证堆叠双柱总高不超过图表高度
+const barMax = computed(() => Math.max(1, ...barData.value.map((d) => (+d.input || 0) + (+d.output || 0))))
+function barHeight(v: number) { return Math.max(2, ((+v || 0) / barMax.value) * BAR_CHART_MAX_H) }
 function labelDate(d: string) { const dt = new Date(d); return (dt.getMonth() + 1) + '/' + dt.getDate() }
 const donutTotal = computed(() => byModel.value.reduce((s, m) => s + (+m.total || 0), 0))
+// 模型分布：用量前 6 单独显示并各配一种调色板颜色，其余合并为"其他"段（仅在饼图呈现用量）
+const topModels = computed(() => [...byModel.value].sort((a, b) => (+b.total || 0) - (+a.total || 0)).slice(0, 6))
+const otherTotal = computed(() => byModel.value.reduce((s, m) => s + (+m.total || 0), 0) - topModels.value.reduce((s, m) => s + (+m.total || 0), 0))
+function rankColor(idx: number) { return PALETTE[idx % PALETTE.length] }
 const donutGradient = computed(() => {
   let off = 0; const parts: string[] = []
-  byModel.value.forEach((m) => { const pct = (m.total / (donutTotal.value || 1)) * 100; parts.push(`${modelColor(m.model)} ${off}deg ${Math.round(off + pct * 3.6)}deg`); off += Math.round(pct * 3.6) })
+  const total = donutTotal.value || 1
+  topModels.value.forEach((m, i) => {
+    const pct = (m.total / total) * 100
+    parts.push(`${rankColor(i)} ${off}deg ${Math.round(off + pct * 3.6)}deg`)
+    off += Math.round(pct * 3.6)
+  })
+  if (otherTotal.value > 0) {
+    const pct = (otherTotal.value / total) * 100
+    parts.push(`var(--surface-active) ${off}deg ${Math.round(off + pct * 3.6)}deg`)
+  }
   return `conic-gradient(${parts.join(',')})`
 })
 const heatMax = computed(() => Math.max(1, ...dailySeries.value.map((d) => (+d.input || 0) + (+d.output || 0))))
@@ -379,7 +396,7 @@ onMounted(loadDashboard)
 .two-col { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; margin-bottom: 32px; }
 .two-col .chart-section { margin-bottom: 0; }
 
-.bar-chart { display: flex; align-items: flex-end; gap: 3px; height: 200px; padding: 0 2px; }
+.bar-chart { display: flex; align-items: flex-end; gap: 3px; height: 200px; padding: 0 2px; overflow: hidden; }
 .bar-day { flex: 1; display: flex; flex-direction: column; gap: 2px; justify-content: flex-end; }
 .bar-col { width: 100%; border-radius: 2px 2px 0 0; min-height: 2px; cursor: pointer; }
 .bar-col.input { background: var(--accent); opacity: 0.7; }

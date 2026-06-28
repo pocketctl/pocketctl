@@ -136,6 +136,26 @@ export class Router {
       console.error('rebuildSessionRoutes:', e);
     });
 
+    // Reconcile zombie sessions: the daemon's reported live set is authoritative.
+    // Any running/busy DB row this daemon owns but no longer has (agent ended
+    // mid-turn without a terminal status) gets closed and pushed to clients.
+    // Guard on Array so legacy daemons (no active_session_ids) are left untouched.
+    if (Array.isArray(msg.active_session_ids)) {
+      db.reconcileDaemonSessions(this.pool, daemonId, msg.active_session_ids)
+        .then((closed) => {
+          if (!closed.length) return;
+          console.log(`[router] reconciled ${closed.length} zombie session(s) for daemon ${daemonId}`);
+          for (const sid of closed) {
+            for (const [clientWs, client] of this.clients) {
+              if (clientWs.readyState === 1 && this.sameUser(client.userId, userId)) {
+                this.send(clientWs, { type: 'session_status', session_id: sid, status: 'completed' });
+              }
+            }
+          }
+        })
+        .catch((e) => console.error('reconcileDaemonSessions:', e));
+    }
+
     // Broadcast daemon online to clients with same userId
     const alias = await db.getDaemonAlias(this.pool, daemonId);
     for (const [clientWs, client] of this.clients) {
