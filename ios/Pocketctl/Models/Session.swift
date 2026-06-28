@@ -14,9 +14,16 @@ struct Session: Identifiable, Sendable, Hashable, Equatable {
     var exitReason: String?
     var subagentCount: Int
     var hostname: String?
+    var daemonAlias: String?
     var daemonOnline: Bool
 
     var id: String { sessionId }
+
+    /// Host label for display — alias if set, otherwise hostname.
+    var hostDisplayName: String? {
+        if let a = daemonAlias, !a.isEmpty { return a }
+        return hostname
+    }
 
     static func == (lhs: Session, rhs: Session) -> Bool {
         lhs.sessionId == rhs.sessionId
@@ -76,6 +83,7 @@ extension Session {
             exitReason: dict["exit_reason"] as? String,
             subagentCount: dict["subagent_count"] as? Int ?? 0,
             hostname: dict["hostname"] as? String,
+            daemonAlias: dict["daemon_alias"] as? String,
             daemonOnline: dict["daemon_online"] as? Bool ?? false
         )
     }

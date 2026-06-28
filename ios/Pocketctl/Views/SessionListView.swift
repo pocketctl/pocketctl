@@ -87,8 +87,8 @@ struct SessionListView: View {
 
             Spacer()
 
-            // Title
-            Text(daemon.hostname)
+            // Title — alias if set, otherwise hostname
+            Text(daemon.displayName)
                 .font(PCFont.display(17, weight: .semibold))
                 .foregroundStyle(Color.pcFg)
 
@@ -132,14 +132,14 @@ struct SessionListView: View {
                         if session.status == "exited" || session.status == "completed" || session.status == "error" || session.status == "killed" {
                             // Swipe-to-delete for terminal sessions
                             SwipeToDelete {
-                                SessionCard(session: session, daemonOnline: daemon.online) {
+                                SessionCard(session: session, daemonOnline: daemon.online, hostLabel: daemon.displayName) {
                                     navigateToDetail = session
                                 }
                             } onDelete: {
                                 vm.deleteSession(session.sessionId)
                             }
                         } else {
-                            SessionCard(session: session, daemonOnline: daemon.online) {
+                            SessionCard(session: session, daemonOnline: daemon.online, hostLabel: daemon.displayName) {
                                 navigateToDetail = session
                             }
                         }
@@ -224,6 +224,8 @@ struct SessionListView: View {
 struct SessionCard: View {
     let session: Session
     let daemonOnline: Bool
+    /// Host label to show on the card — alias if set, otherwise hostname.
+    let hostLabel: String
     let onTap: () -> Void
 
     var body: some View {
@@ -254,11 +256,9 @@ struct SessionCard: View {
                 }
 
                 HStack {
-                    if let hostname = session.hostname {
-                        Text(hostname)
-                            .font(PCFont.body(12))
-                            .foregroundStyle(Color.pcFgTertiary)
-                    }
+                    Text(hostLabel)
+                        .font(PCFont.body(12))
+                        .foregroundStyle(Color.pcFgTertiary)
                     Spacer()
                     Text(RelativeTime.format(session.lastActivityAt ?? session.createdAt))
                         .font(PCFont.body(13))
