@@ -238,6 +238,10 @@ struct SessionCard: View {
                         .foregroundStyle(Color.pcFg)
                         .lineLimit(1)
 
+                    if !session.agentType.isEmpty {
+                        StatusChip(text: displayAgentName(session.agentType), style: .agent(session.agentType))
+                    }
+
                     if session.source == "terminal" {
                         StatusChip(text: "终端", style: .terminal)
                     } else if session.source == "web" {

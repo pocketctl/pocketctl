@@ -29,7 +29,7 @@
                 @click.stop @keydown.enter="commitRename(s)" @keydown.escape="cancelRename" @blur="commitRename(s)" />
               <template v-else>{{ s.title || s.session_id.slice(0, 8) }}</template>
             </div>
-            <div class="sl-meta">{{ formatRelativeTime(s.last_activity_at || s.updated_at) }}<span v-if="s.subagent_count > 0"> · {{ t('session.sub_agents', { n: s.subagent_count }) }}</span></div>
+            <div class="sl-meta"><AgentBadge :agent="s.agent_type" size="sm" />{{ formatRelativeTime(s.last_activity_at || s.updated_at) }}<span v-if="s.subagent_count > 0"> · {{ t('session.sub_agents', { n: s.subagent_count }) }}</span></div>
           </div>
           <SessionActions :session="s" @startRename="startRename" @deleted="onDeleted" @pinned="onPinned" />
         </div>
@@ -332,6 +332,7 @@ import NewSessionDialog from '../components/NewSessionDialog.vue'
 import { useWebSocket } from '../composables/useWebSocket'
 import { formatRelativeTime } from '../composables/useRelativeTime'
 import SessionActions from '../components/SessionActions.vue'
+import AgentBadge from '../components/AgentBadge.vue'
 import CommandPopover from '../components/CommandPopover.vue'
 import CommandReceiptCard from '../components/CommandReceiptCard.vue'
 import CommandHelpModal from '../components/CommandHelpModal.vue'
@@ -1578,7 +1579,8 @@ onMounted(() => {
 .session-list-item .pin-icon { color: var(--accent); flex-shrink: 0; vertical-align: middle; }
 .session-list-item .ss-rename-input { background: var(--bg); border: 1px solid var(--accent); border-radius: var(--radius-sm); box-shadow: 0 0 0 3px var(--accent-muted); color: var(--fg); font-family: var(--font-body); font-size: 13px; font-weight: 500; padding: 3px 6px; outline: none; width: 100%; }
 .session-list-item .sl-title.mono { font-family: var(--font-mono); font-size: 12px; color: var(--accent); }
-.session-list-item .sl-meta { font-size: 11px; color: var(--fg-tertiary); margin-top: 2px; }
+.session-list-item .sl-meta { display: flex; align-items: center; gap: 6px; font-size: 11px; color: var(--fg-tertiary); margin-top: 2px; min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.session-list-item .sl-meta .agent-badge { flex-shrink: 0; }
 
 /* Chat Area */
 .chat-area { flex: 1; display: flex; flex-direction: column; position: relative; min-width: 0; max-width: 100%; overflow: hidden; background: var(--bg); transition: background var(--transition); }

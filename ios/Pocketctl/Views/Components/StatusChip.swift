@@ -7,6 +7,7 @@ struct StatusChip: View {
     enum ChipStyle {
         case terminal, web, subAgent
         case status(String) // status name
+        case agent(String)  // agent type → brand color
     }
 
     var body: some View {
@@ -24,6 +25,7 @@ struct StatusChip: View {
         case .terminal: return .pcAccent
         case .web: return .pcSuccess
         case .subAgent: return .pcSubAgent
+        case .agent(let t): return agentVisual(t).color
         case .status(let s):
             switch s {
             case "completed": return .pcAccent
@@ -39,6 +41,7 @@ struct StatusChip: View {
         case .terminal: return .pcAccentMuted
         case .web: return .pcSuccessBg
         case .subAgent: return .pcSubAgentBg
+        case .agent(let t): return agentVisual(t).color.opacity(0.14)
         case .status(let s):
             switch s {
             case "completed": return .pcAccentMuted
