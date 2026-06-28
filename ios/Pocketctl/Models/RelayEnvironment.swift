@@ -36,7 +36,7 @@ enum RelayEnvironment: String, CaseIterable, Codable, Sendable {
     var installURL: String {
         switch self {
         case .production:
-            return "https://raw.githubusercontent.com/pocketctl/pocketctl/master/scripts/install-daemon.sh"
+            return "https://www.pocketctl.me/install.sh"
         case .staging:
             return "http://192.168.31.198/install.sh"
         }
