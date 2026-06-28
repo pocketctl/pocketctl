@@ -350,6 +350,29 @@ export async function cleanStaleSessions(pool: pg.Pool): Promise<void> {
   `);
 }
 
+/**
+ * Reconcile a daemon's sessions against the live set it reports on (re)connect.
+ * Any session this daemon owns that is still 'running'/'busy' in the DB but NOT
+ * in `activeSessionIds` is a zombie: its agent process ended without a terminal
+ * session_status (daemon restart / machine sleep / crash mid-turn), so the row
+ * is frozen "executing" forever — cleanStaleSessions can't help while the daemon
+ * is online. Close them. An empty `activeSessionIds` (daemon has no live sessions)
+ * correctly closes all of this daemon's lingering running/busy rows.
+ * Returns the closed session IDs so the caller can notify clients.
+ */
+export async function reconcileDaemonSessions(pool: pg.Pool, daemonId: string, activeSessionIds: string[]): Promise<string[]> {
+  const res = await pool.query(
+    `UPDATE sessions SET status = 'completed', updated_at = NOW()
+     WHERE daemon_id = $1
+       AND status IN ('running', 'busy')
+       AND session_id NOT LIKE 'pending-%'
+       AND session_id <> ALL($2::text[])
+     RETURNING session_id`,
+    [daemonId, activeSessionIds]
+  );
+  return res.rows.map(r => r.session_id);
+}
+
 // --- Phase 2: User management ---
 
 export async function createUser(pool: pg.Pool, email: string, passwordHash: string, displayName?: string): Promise<any> {

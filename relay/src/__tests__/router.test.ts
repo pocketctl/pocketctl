@@ -276,6 +276,61 @@ describe('Router - session→daemon routing resilience', () => {
     expect(clientWs._sent.some((m: any) => m.error === 'session not found or daemon offline')).toBe(false)
   })
 
+  test('reconciles zombie sessions on register: closes running/busy rows not in active_session_ids and notifies clients', async () => {
+    // Custom pool: the reconcile UPDATE returns one zombie that the daemon no
+    // longer reports as live. Everything else falls through to empty results.
+    const reconcilePool: any = {
+      query: vi.fn((sql: string) => {
+        if (sql.includes("status = 'completed'") && sql.includes('RETURNING session_id')) {
+          return Promise.resolve({ rows: [{ session_id: 'zombie-1' }], rowCount: 1 })
+        }
+        return Promise.resolve({ rows: [], rowCount: 0 })
+      }),
+      connect: vi.fn(), end: vi.fn(),
+    }
+    const r = new Router(reconcilePool)
+
+    const clientWs = createMockWs()
+    r.registerClient(clientWs, null)
+
+    const daemonWs = createMockWs()
+    // Daemon reports only 'live-1' as active; 'zombie-1' is stale running/busy in DB.
+    await r.registerDaemon(daemonWs, {
+      type: 'register', daemon_id: 'daemon-1', hostname: 'test', agents: [],
+      active_session_ids: ['live-1'],
+    }, null)
+    await new Promise(res => setTimeout(res, 20))
+
+    // Reconcile UPDATE ran with the daemon's live set as the exclusion array.
+    const reconcileCall = reconcilePool.query.mock.calls.find(
+      (c: any[]) => typeof c[0] === 'string' && c[0].includes("status = 'completed'") && c[0].includes('RETURNING session_id')
+    )
+    expect(reconcileCall).toBeDefined()
+    expect(reconcileCall[1]).toEqual(['daemon-1', ['live-1']])
+
+    // The closed session is pushed to the client as completed.
+    const evt = clientWs._sent.find((m: any) => m.type === 'session_status' && m.session_id === 'zombie-1')
+    expect(evt).toBeDefined()
+    expect(evt.status).toBe('completed')
+  })
+
+  test('skips reconcile for legacy daemons that do not report active_session_ids', async () => {
+    const reconcilePool: any = {
+      query: vi.fn(() => Promise.resolve({ rows: [], rowCount: 0 })),
+      connect: vi.fn(), end: vi.fn(),
+    }
+    const r = new Router(reconcilePool)
+    const daemonWs = createMockWs()
+    // No active_session_ids field → must NOT run the reconcile UPDATE.
+    await r.registerDaemon(daemonWs, { type: 'register', daemon_id: 'daemon-1', hostname: 'test', agents: [] }, null)
+    await new Promise(res => setTimeout(res, 20))
+
+    const ranReconcile = reconcilePool.query.mock.calls.some(
+      (c: any[]) => typeof c[0] === 'string' && c[0].includes("status = 'completed'") && c[0].includes('RETURNING session_id')
+    )
+    expect(ranReconcile).toBe(false)
+  })
+
   test('routing falls back to DB daemon_id when in-memory map misses', async () => {
     const daemonWs = createMockWs()
     await router.registerDaemon(daemonWs, { type: 'register', daemon_id: 'daemon-1', hostname: 'test', agents: [] }, null)
