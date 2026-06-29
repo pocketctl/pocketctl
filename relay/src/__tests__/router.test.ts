@@ -667,3 +667,35 @@ describe('Router - WS authorization gate (P0-1)', () => {
     expect(err.error).toBe('forbidden')
   })
 })
+
+describe('Router - force kick revokes the daemon-specific token (P0-2)', () => {
+  test('handleForceKick revokes daemons.active_token_jti, not an empty jti', async () => {
+    const revokeInserts: any[][] = []
+    const pool: any = {
+      query: vi.fn((sql: string, params?: any[]) => {
+        if (sql.includes('SELECT active_token_jti')) {
+          return Promise.resolve({ rows: [{ active_token_jti: 'jti-abc' }], rowCount: 1 })
+        }
+        if (sql.includes('INSERT INTO revoked_tokens')) {
+          revokeInserts.push(params || [])
+          return Promise.resolve({ rows: [], rowCount: 1 })
+        }
+        return Promise.resolve({ rows: [], rowCount: 0 })
+      }),
+      connect: vi.fn(), end: vi.fn(),
+    }
+    const router = new Router(pool)
+    const daemonWs = createMockWs()
+    await router.registerDaemon(daemonWs, { type: 'register', daemon_id: 'daemon-1', hostname: 'h', agents: [] }, 7)
+
+    const res = await router.handleForceKick('daemon-1', 7)
+    expect(res.success).toBe(true)
+
+    // The revocation row must carry the daemon's real jti — the old code inserted
+    // an empty jti that isTokenRevoked (WHERE jti=$1) could never match.
+    expect(revokeInserts.length).toBe(1)
+    expect(revokeInserts[0][0]).toBe('jti-abc')      // jti
+    expect(revokeInserts[0][1]).toBe(7)              // userId
+    expect(revokeInserts[0][2]).toBe('force_kick')   // reason
+  })
+})

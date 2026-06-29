@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	mathrand "math/rand/v2"
 	"net"
+	"net/http"
 	"net/url"
 	"os"
 	"runtime"
@@ -235,13 +236,18 @@ func (c *Client) connectAndServe(ctx context.Context) error {
 		return fmt.Errorf("parse relay URL: %w", err)
 	}
 	q := u.Query()
-	// Use token (JWT) for authentication
-	q.Set("token", c.token)
 	q.Set("type", "daemon")
 	u.RawQuery = q.Encode()
 
+	// Send the JWT in the Authorization header rather than the URL query, so it
+	// never lands in proxy access logs / referrers. The relay accepts both, but
+	// must be deployed before daemons that send header-only (it is, in the same
+	// release; old daemons keep using ?token= against the new relay).
+	hdr := http.Header{}
+	hdr.Set("Authorization", "Bearer "+c.token)
+
 	c.logger.Info("connecting to relay", "url", u.Host)
-	conn, _, err := websocket.DefaultDialer.DialContext(ctx, u.String(), nil)
+	conn, _, err := websocket.DefaultDialer.DialContext(ctx, u.String(), hdr)
 	if err != nil {
 		return fmt.Errorf("dial: %w", err)
 	}

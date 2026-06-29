@@ -3,7 +3,7 @@ import fastifyWebsocket from '@fastify/websocket';
 import fastifyCors from '@fastify/cors';
 import { createPool, initDB, parseDBUrl, createUser, getUserByEmail, getUserById, getUserProfile, registerDevice, removeDevice, cleanStaleTombstones, upsertDaemonAlias, deleteDaemon, updateDisplayName, updateEmail, addToIOSWaitlist, revokeToken, isTokenRevoked, cleanRevokedTokens, insertAuditLog, bindTokenToDaemon, updateSessionTitle, isSessionOwnedByUser, getSessionAllEvents, getTokenSummary, getTokensByDaemon, backfillSessionTokens, backfillSessionModel, backfillTokenDailyStats, aggregateDayIntoStats, cleanStaleEvents, getTokenDailySeries, getTokenByModel, getTokenByDaemon, getSessionTokenTrend } from './db.js';
 import { Router } from './router.js';
-import { hashPassword, verifyPassword, signAccessToken, signRefreshToken, verifyAccessToken, verifyRefreshToken, verifyAccessTokenWithRevocation } from './auth.js';
+import { hashPassword, verifyPassword, signAccessToken, signRefreshToken, verifyRefreshToken, verifyAccessTokenWithRevocation } from './auth.js';
 import { notifyUser, sessionStatusPush, daemonOfflinePush } from './push.js';
 import { sendEmailCode } from './config/email.js';
 import { generateCode, storeCode, verifyCode, hasPendingCode } from './config/verification.js';
@@ -273,7 +273,7 @@ async function main() {
     if (!authHeader?.startsWith('Bearer ')) {
       reply.code(401); return { error: 'authorization required' };
     }
-    const payload = verifyAccessToken(authHeader.slice(7));
+    const payload = await verifyAccessTokenWithRevocation(authHeader.slice(7), pool);
     if (!payload) {
       reply.code(401); return { error: 'invalid token' };
     }
@@ -290,7 +290,7 @@ async function main() {
     if (!authHeader?.startsWith('Bearer ')) {
       reply.code(401); return { error: 'authorization required' };
     }
-    const payload = verifyAccessToken(authHeader.slice(7));
+    const payload = await verifyAccessTokenWithRevocation(authHeader.slice(7), pool);
     if (!payload) {
       reply.code(401); return { error: 'invalid token' };
     }
@@ -308,7 +308,7 @@ async function main() {
     if (!authHeader?.startsWith('Bearer ')) {
       reply.code(401); return { error: 'authorization required' };
     }
-    const payload = verifyAccessToken(authHeader.slice(7));
+    const payload = await verifyAccessTokenWithRevocation(authHeader.slice(7), pool);
     if (!payload) {
       reply.code(401); return { error: 'invalid token' };
     }
@@ -324,7 +324,7 @@ async function main() {
     if (!authHeader?.startsWith('Bearer ')) {
       reply.code(401); return { error: 'authorization required' };
     }
-    const payload = verifyAccessToken(authHeader.slice(7));
+    const payload = await verifyAccessTokenWithRevocation(authHeader.slice(7), pool);
     if (!payload) {
       reply.code(401); return { error: 'invalid token' };
     }
@@ -343,7 +343,7 @@ async function main() {
     if (!authHeader?.startsWith('Bearer ')) {
       reply.code(401); return { error: 'authorization required' };
     }
-    const payload = verifyAccessToken(authHeader.slice(7));
+    const payload = await verifyAccessTokenWithRevocation(authHeader.slice(7), pool);
     if (!payload) {
       reply.code(401); return { error: 'invalid token' };
     }
@@ -380,7 +380,7 @@ async function main() {
   app.get('/api/tokens/summary', async (req, reply) => {
     const authHeader = req.headers.authorization;
     if (!authHeader?.startsWith('Bearer ')) { reply.code(401); return { error: 'authorization required' }; }
-    const payload = verifyAccessToken(authHeader.slice(7));
+    const payload = await verifyAccessTokenWithRevocation(authHeader.slice(7), pool);
     if (!payload) { reply.code(401); return { error: 'invalid token' }; }
     return await getTokenSummary(pool, payload.userId);
   });
@@ -389,7 +389,7 @@ async function main() {
   app.get('/api/tokens/by-daemon/:daemonId', async (req, reply) => {
     const authHeader = req.headers.authorization;
     if (!authHeader?.startsWith('Bearer ')) { reply.code(401); return { error: 'authorization required' }; }
-    const payload = verifyAccessToken(authHeader.slice(7));
+    const payload = await verifyAccessTokenWithRevocation(authHeader.slice(7), pool);
     if (!payload) { reply.code(401); return { error: 'invalid token' }; }
     const { daemonId } = req.params as any;
     const data = await getTokensByDaemon(pool, payload.userId, daemonId);
@@ -402,7 +402,7 @@ async function main() {
   app.get('/api/tokens/dashboard', async (req, reply) => {
     const authHeader = req.headers.authorization;
     if (!authHeader?.startsWith('Bearer ')) { reply.code(401); return { error: 'authorization required' }; }
-    const payload = verifyAccessToken(authHeader.slice(7));
+    const payload = await verifyAccessTokenWithRevocation(authHeader.slice(7), pool);
     if (!payload) { reply.code(401); return { error: 'invalid token' }; }
     const daemon = ((req.query as any).daemon as string) || 'all';
     const days = Math.min(Math.max(parseInt((req.query as any).days as string) || 30, 1), 365);
@@ -419,7 +419,7 @@ async function main() {
   app.get('/api/tokens/session/:sessionId/trend', async (req, reply) => {
     const authHeader = req.headers.authorization;
     if (!authHeader?.startsWith('Bearer ')) { reply.code(401); return { error: 'authorization required' }; }
-    const payload = verifyAccessToken(authHeader.slice(7));
+    const payload = await verifyAccessTokenWithRevocation(authHeader.slice(7), pool);
     if (!payload) { reply.code(401); return { error: 'invalid token' }; }
     const { sessionId } = req.params as any;
     const owned = await isSessionOwnedByUser(pool, payload.userId, sessionId);
@@ -433,7 +433,7 @@ async function main() {
   app.delete('/api/daemons/:daemonId', async (req, reply) => {
     const authHeader = req.headers.authorization;
     if (!authHeader?.startsWith('Bearer ')) { reply.code(401); return { error: 'authorization required' }; }
-    const payload = verifyAccessToken(authHeader.slice(7));
+    const payload = await verifyAccessTokenWithRevocation(authHeader.slice(7), pool);
     if (!payload) { reply.code(401); return { error: 'invalid token' }; }
     const { daemonId } = req.params as any;
     const ok = await deleteDaemon(pool, payload.userId, daemonId);
@@ -447,7 +447,7 @@ async function main() {
   app.post('/api/daemons/:daemonId/upgrade-agent', async (req, reply) => {
     const authHeader = req.headers.authorization;
     if (!authHeader?.startsWith('Bearer ')) { reply.code(401); return { error: 'authorization required' }; }
-    const payload = verifyAccessToken(authHeader.slice(7));
+    const payload = await verifyAccessTokenWithRevocation(authHeader.slice(7), pool);
     if (!payload) { reply.code(401); return { error: 'invalid token' }; }
     const { daemonId } = req.params as any;
     const { agent } = (req.body as any) || {};
@@ -465,7 +465,7 @@ async function main() {
   app.put('/api/sessions/:sessionId/title', async (req, reply) => {
     const authHeader = req.headers.authorization;
     if (!authHeader?.startsWith('Bearer ')) { reply.code(401); return { error: 'authorization required' }; }
-    const payload = verifyAccessToken(authHeader.slice(7));
+    const payload = await verifyAccessTokenWithRevocation(authHeader.slice(7), pool);
     if (!payload) { reply.code(401); return { error: 'invalid token' }; }
     const { sessionId } = req.params as any;
     const { title } = req.body as any;
@@ -484,7 +484,7 @@ async function main() {
   app.get('/api/sessions/:sessionId/export', async (req, reply) => {
     const authHeader = req.headers.authorization;
     if (!authHeader?.startsWith('Bearer ')) { reply.code(401); return { error: 'authorization required' }; }
-    const payload = verifyAccessToken(authHeader.slice(7));
+    const payload = await verifyAccessTokenWithRevocation(authHeader.slice(7), pool);
     if (!payload) { reply.code(401); return { error: 'invalid token' }; }
     const { sessionId } = req.params as any;
     const format = ((req.query as any).format || 'md') as string;
@@ -546,7 +546,7 @@ async function main() {
     if (!authHeader?.startsWith('Bearer ')) {
       reply.code(401); return { error: 'authorization required' };
     }
-    const payload = verifyAccessToken(authHeader.slice(7));
+    const payload = await verifyAccessTokenWithRevocation(authHeader.slice(7), pool);
     if (!payload) {
       reply.code(401); return { error: 'invalid token' };
     }
@@ -564,7 +564,7 @@ async function main() {
     if (!authHeader?.startsWith('Bearer ')) {
       reply.code(401); return { error: 'authorization required' };
     }
-    const payload = verifyAccessToken(authHeader.slice(7));
+    const payload = await verifyAccessTokenWithRevocation(authHeader.slice(7), pool);
     if (!payload) {
       reply.code(401); return { error: 'invalid token' };
     }
@@ -699,7 +699,7 @@ async function main() {
       reply.code(401);
       return { error: 'authentication_required' };
     }
-    const payload = verifyAccessToken(authHeader.slice(7));
+    const payload = await verifyAccessTokenWithRevocation(authHeader.slice(7), pool);
     if (!payload) {
       reply.code(401);
       return { error: 'invalid_token' };
@@ -813,7 +813,7 @@ async function main() {
       reply.code(401);
       return { error: 'authorization required' };
     }
-    const payload = verifyAccessToken(authHeader.slice(7));
+    const payload = await verifyAccessTokenWithRevocation(authHeader.slice(7), pool);
     if (!payload) {
       reply.code(401);
       return { error: 'invalid token' };
@@ -915,7 +915,7 @@ async function main() {
     if (!authHeader?.startsWith('Bearer ')) {
       reply.code(401); return { error: 'authentication_required' };
     }
-    const payload = verifyAccessToken(authHeader.slice(7));
+    const payload = await verifyAccessTokenWithRevocation(authHeader.slice(7), pool);
     if (!payload) {
       reply.code(401); return { error: 'invalid_token' };
     }
@@ -961,7 +961,7 @@ async function main() {
   app.post('/api/daemons/:daemonId/restart', async (req, reply) => {
     const authHeader = req.headers.authorization;
     if (!authHeader?.startsWith('Bearer ')) { reply.code(401); return { error: 'authorization required' }; }
-    const payload = verifyAccessToken(authHeader.slice(7));
+    const payload = await verifyAccessTokenWithRevocation(authHeader.slice(7), pool);
     if (!payload) { reply.code(401); return { error: 'invalid token' }; }
     const { daemonId } = req.params as any;
     const daemon = (router as any).daemons.get(daemonId);
@@ -994,7 +994,13 @@ async function main() {
     }
 
     const query = req.query as any;
-    const token = query.token as string;
+    // Token resolution (P1-2: keep the JWT out of the URL where the client can
+    // manage it). Daemons (Go) send `Authorization: Bearer <jwt>`; the `?token=`
+    // query is kept as a legacy fallback for old daemons and for browsers, which
+    // cannot set WS request headers (its log-exposure is mitigated by the nginx
+    // access_log token redaction).
+    const authHeader = req.headers['authorization'] as string | undefined;
+    const token = (authHeader?.startsWith('Bearer ') ? authHeader.slice(7).trim() : (query.token as string));
     const apiKey = query.api_key as string;
     const connType = query.type as string;
 

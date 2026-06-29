@@ -78,13 +78,17 @@
 - `ALLOWED_ORIGINS` 在 `docker-compose.prod.yml` 内置默认 `https://www.pocketctl.me,https://pocketctl.me`，关闭 CORS `origin:true` 兜底；`.env.example` 同步推荐值。
 - nginx `access_log` 对 `?token=` 脱敏：新增 `map $request_uri $sanitized_uri` + `log_format pocketctl`，token 值替换为 `REDACTED`，其余参数保留（`deploy/nginx/pocketctl.conf`）。
 
-### C 档：能修但需排期（动协议 / 加迁移 / 碰客户端，需灰度 + 回归）
+### C 档：能修但需排期（动协议 / 碰客户端，需灰度 + 回归）—— ✅ 已实现
 
-| 编号 | 问题 | 卡点 |
-|---|---|---|
-| P0-2 | 吊销失效（forceKick / 踢人令牌未生效，比报告更严重） | 加 `user_token_revocations` 表 + 改 `isTokenRevoked` + token 带 `iat`。建议尽快 |
-| P1-2 | JWT 移出 URL（`client.go` 改子协议 / 头） | 需同时改 daemon 与 relay 解析，兼容老 daemon → 灰度 |
-| P1-3 | REST 统一查吊销 | 16 处收敛成 `preHandler`，需全量回归 |
+| 编号 | 问题 | 实现 | 状态 |
+|---|---|---|---|
+| P0-2 | 吊销失效（forceKick / 踢人令牌未生效，比报告更严重） | **无需加表**：复用已存在的 `daemons.active_token_jti`。新增 `revokeDaemonToken(daemonId,userId,reason)` 查出该 daemon 当前 jti 并精确吊销；`router.ts` 的 `new_login` / `force_kick` 两处由 `revokeToken(pool,'',...)`（空 jti 空操作）改为调它。**targeted 吊销，不波及用户 web/iOS 会话** | ✅ `db.ts`/`router.ts` |
+| P1-2 | JWT 移出 URL | daemon（`client.go`）改用 `Authorization: Bearer` 头握手，不再 `?token=`；relay WS 握手优先读 `Authorization` 头，`?token=` 保留为老 daemon / 浏览器的兜底（浏览器无法设 WS 头，其日志暴露已由 B 档 nginx 脱敏覆盖）。relay 先于 daemon 部署，无 new-daemon×old-relay 组合 | ✅ `client.go`/`server.ts` |
+| P1-3 | REST 统一查吊销 | server.ts 全部 19 处 REST `verifyAccessToken(...)` 改为 `await verifyAccessTokenWithRevocation(..., pool)`，吊销的 access token 不能再调 REST | ✅ `server.ts` |
+
+> 关键决策：P0-2 放弃了原计划的「`user_token_revocations` 表 + token 带 iat 的用户级时间切断」方案 —— 那会**过度吊销**（踢一个 daemon 连带踢掉用户 web/iOS）。改用 per-daemon jti 精确吊销，语义更准、改动更小、无新表无迁移。
+> 测试：`router.test.ts` 新增 1 条用例验证 forceKick 写入的是 daemon 真实 jti（非空串）。relay 全套 96 passed、tsc 通过；Go `go build ./...` + `go vet` 通过。
+> 残留（后续）：浏览器 Web 客户端仍走 `?token=`（受 WS API 限制），已由 nginx 脱敏兜底；如需彻底移除可改用 `Sec-WebSocket-Protocol` 子协议（需 relay 端协商回显，单独评估）。
 
 ### D 档：韧性投资（非漏洞，单独立项）
 

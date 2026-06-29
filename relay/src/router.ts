@@ -98,7 +98,7 @@ export class Router {
             const timer = setTimeout(() => {
               // Revoke old daemon's token
               if (oldDaemon.userId) {
-                db.revokeToken(this.pool, '', oldDaemon.userId, 'new_login').catch(console.error);
+                db.revokeDaemonToken(this.pool, oldId, oldDaemon.userId, 'new_login').catch(console.error);
                 db.insertAuditLog(this.pool, oldDaemon.userId, 'daemon_replace', {
                   old_daemon_id: oldId,
                   new_daemon_id: daemonId,
@@ -936,9 +936,9 @@ export class Router {
       daemon.ws.close();
     }
 
-    // Revoke token
+    // Revoke the daemon's specific token so it can't reconnect with the old one.
     try {
-      await db.revokeToken(this.pool, '', userId, 'force_kick');
+      await db.revokeDaemonToken(this.pool, daemonId, userId, 'force_kick');
       await db.insertAuditLog(this.pool, userId, 'force_kick', {
         daemon_id: daemonId,
         hostname: daemon.hostname,

@@ -664,6 +664,23 @@ export async function revokeToken(pool: pg.Pool, jti: string, userId: number, re
   );
 }
 
+/**
+ * Revoke the access token currently bound to a daemon (force_kick / new_login
+ * eviction). Looks up daemons.active_token_jti and revokes that specific jti, so
+ * the kicked daemon can't reconnect with its old token while the user's other
+ * sessions (web/iOS) stay valid.
+ *
+ * Replaces the previous `revokeToken(pool, '', userId, ...)` pattern, which
+ * inserted an empty-jti row that `isTokenRevoked` (WHERE jti = $1) could never
+ * match — making force_kick/new_login revocation a silent no-op.
+ */
+export async function revokeDaemonToken(pool: pg.Pool, daemonId: string, userId: number, reason: string): Promise<void> {
+  const r = await pool.query(`SELECT active_token_jti FROM daemons WHERE daemon_id = $1`, [daemonId]);
+  const jti = r.rows[0]?.active_token_jti as string | null | undefined;
+  if (!jti) return; // legacy/api-key daemon with no bound token — nothing to revoke
+  await revokeToken(pool, jti, userId, reason);
+}
+
 /** Revoke ALL tokens for a user (breach detection). */
 export async function revokeAllUserTokens(pool: pg.Pool, userId: number, reason: string): Promise<void> {
   // We can't revoke tokens without their jti, but we can log the event.
