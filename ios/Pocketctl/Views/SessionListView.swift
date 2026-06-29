@@ -44,7 +44,7 @@ struct SessionListView: View {
             }
         }
         .navigationBarHidden(true)
-        .enableSwipeBack()
+        .swipeToPop()
         .navigationDestination(item: $navigateToDetail) { session in
             SessionDetailView(session: session, wsService: wsService, apiClient: apiClient)
         }

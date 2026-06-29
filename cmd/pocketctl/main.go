@@ -30,6 +30,7 @@ import (
 	"github.com/pocketctl/pocketctl/internal/i18n"
 	"github.com/pocketctl/pocketctl/internal/notify"
 	"github.com/pocketctl/pocketctl/internal/protocol"
+	"github.com/pocketctl/pocketctl/internal/service"
 	"github.com/pocketctl/pocketctl/internal/session"
 	"github.com/pocketctl/pocketctl/internal/sysinfo"
 	"github.com/pocketctl/pocketctl/internal/update"
@@ -100,9 +101,125 @@ func cmdDaemon(args []string) {
 		cmdDoctor()
 	case "update":
 		cmdDaemonUpdate(args[1:])
+	case "service":
+		cmdDaemonService(args[1:])
 	default:
 		fmt.Fprintln(os.Stderr, i18n.T("daemon.unknown_sub", args[0]))
 		os.Exit(1)
+	}
+}
+
+// ---------- daemon service (native supervisor) ----------
+
+// cmdDaemonService installs/uninstalls/queries a native OS-supervised service
+// (launchd on macOS, systemd --user on Linux) that keeps the daemon running
+// across crashes, logout (Linux), and reboot.
+func cmdDaemonService(args []string) {
+	if len(args) == 0 {
+		fmt.Fprintln(os.Stderr, i18n.T("service.usage_sub"))
+		os.Exit(1)
+	}
+	switch args[0] {
+	case "install":
+		cmdServiceInstall(args[1:])
+	case "uninstall":
+		cmdServiceUninstall()
+	case "status":
+		cmdServiceStatus()
+	default:
+		fmt.Fprintln(os.Stderr, i18n.T("service.unknown_sub", args[0]))
+		os.Exit(1)
+	}
+}
+
+func cmdServiceInstall(args []string) {
+	fs := flag.NewFlagSet("daemon service install", flag.ExitOnError)
+	production := fs.Bool("prod", false, "Bake --prod into the supervised daemon (use production relay from config)")
+	relayURL := fs.String("relay", "", "Bake an explicit --relay URL into the supervised daemon")
+	fs.Parse(args)
+
+	// A token must already be stored — the supervised daemon resolves it from
+	// config at launch, exactly like `daemon start`. Fail fast with a clear
+	// message rather than installing a unit that will crash-loop on missing auth.
+	if tok, err := config.LoadToken(); err != nil || tok == "" {
+		fmt.Fprintln(os.Stderr, i18n.T("service.no_token"))
+		os.Exit(1)
+	}
+
+	exe, err := os.Executable()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, i18n.T("error.executable_path", err))
+		os.Exit(1)
+	}
+	if resolved, rerr := filepath.EvalSymlinks(exe); rerr == nil {
+		exe = resolved
+	}
+
+	// The supervised process runs in the foreground so the init system owns its
+	// lifecycle (no self-fork). Relay flags are baked in so the unit is explicit.
+	daemonArgs := []string{"daemon", "start", "--foreground"}
+	if *production {
+		daemonArgs = append(daemonArgs, "--prod")
+	}
+	if *relayURL != "" {
+		daemonArgs = append(daemonArgs, "--relay", *relayURL)
+	}
+
+	// Ensure the log dir exists; launchd/systemd open the boot log but won't
+	// create its parent directory.
+	_ = os.MkdirAll(daemon.LogDir(), 0755)
+	cfg := service.Config{ExePath: exe, Args: daemonArgs, LogPath: daemon.ServiceBootLogPath()}
+
+	// If the daemon is already running standalone, stop it so it doesn't fight
+	// the supervised instance for the relay registration / approval socket.
+	if pid, running := daemon.IsRunning(); running {
+		fmt.Println(i18n.T("service.stopping_standalone", pid))
+		_ = daemon.Stop()
+	}
+
+	if err := service.Install(cfg); err != nil {
+		fmt.Fprintln(os.Stderr, i18n.T("service.install_fail", err))
+		os.Exit(1)
+	}
+	fmt.Println(i18n.T("service.installed", strings.Join(append([]string{filepath.Base(exe)}, daemonArgs...), " ")))
+	info, _ := service.Status()
+	if info.UnitPath != "" {
+		fmt.Println(i18n.T("service.unit_path", info.UnitPath))
+	}
+	if runtime.GOOS == "linux" {
+		fmt.Println(i18n.T("service.linger_note"))
+	}
+}
+
+func cmdServiceUninstall() {
+	if err := service.Uninstall(); err != nil {
+		fmt.Fprintln(os.Stderr, i18n.T("service.uninstall_fail", err))
+		os.Exit(1)
+	}
+	fmt.Println(i18n.T("service.uninstalled"))
+}
+
+func cmdServiceStatus() {
+	info, err := service.Status()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, i18n.T("service.status_fail", err))
+		os.Exit(1)
+	}
+	installed := i18n.T("service.no")
+	if info.Installed {
+		installed = i18n.T("service.yes")
+	}
+	running := i18n.T("service.no")
+	if info.Running {
+		running = i18n.T("service.yes")
+	}
+	fmt.Println(i18n.T("service.status_installed", installed))
+	fmt.Println(i18n.T("service.status_running", running))
+	if info.UnitPath != "" {
+		fmt.Println(i18n.T("service.unit_path", info.UnitPath))
+	}
+	if info.Detail != "" {
+		fmt.Println(i18n.T("service.status_detail", info.Detail))
 	}
 }
 
@@ -448,7 +565,15 @@ func cmdDaemonStart(args []string) {
 	token := fs.String("token", "", "JWT token (or POCKETCTL_TOKEN env)")
 	daemonID := fs.String("id", "", "Daemon ID (auto-generated if empty)")
 	foreground := fs.Bool("foreground", false, "Run in foreground (don't daemonize)")
+	debug := fs.Bool("debug", false, "Verbose debug logging; with --foreground also streams logs to the console")
 	fs.Parse(args)
+
+	// --debug also implies running in the foreground so the operator sees logs
+	// live on the console (the whole point of debug mode is interactive
+	// troubleshooting). It still writes the full debug log to daemon.log.
+	if *debug {
+		*foreground = true
+	}
 
 	// Resolve relay URL: --relay > env var > --prod from config > default production
 	url := *relayURL
@@ -561,41 +686,56 @@ func cmdDaemonStart(args []string) {
 		PID:      os.Getpid(),
 	})
 
-	// Setup logging to file
-	logDir := filepath.Dir(daemon.LogPath())
-	if err := os.MkdirAll(logDir, 0755); err != nil {
-		fmt.Fprintln(os.Stderr, i18n.T("error.create_log_dir", logDir, err))
-		os.Exit(1)
-	}
-	logFlags := os.O_CREATE | os.O_WRONLY
-	// Child process appends to the log opened by a --foreground launcher;
-	// a fresh foreground run truncates. (The background launcher forked before
-	// reaching here, so it never touches the log.)
-	if os.Getenv("POCKETCTL_DAEMON_CHILD") == "1" {
-		logFlags |= os.O_APPEND
-	} else {
-		logFlags |= os.O_TRUNC
-	}
-	logFile, err := os.OpenFile(daemon.LogPath(), logFlags, 0644)
+	// Setup logging: a date-rotating writer under ~/.pocketctl/logs so logs are
+	// split by day (daemon-YYYY-MM-DD.log) for easier troubleshooting. The
+	// writer switches files automatically when the calendar date changes, and
+	// always appends (each day's file is naturally bounded; restarts within a
+	// day accumulate rather than truncate).
+	logWriter, err := daemon.NewRotatingLogWriter(daemon.LogDir(), daemon.LogPrefix())
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "open log file: %v\n", err)
+		fmt.Fprintln(os.Stderr, i18n.T("error.create_log_dir", daemon.LogDir(), err))
 		os.Exit(1)
 	}
-	defer logFile.Close()
+	defer logWriter.Close()
 
-	// Mirror stderr (and stdout) to the daemon log. The daemonized child runs
-	// with stdin/stdout/stderr = nil (→ /dev/null), so Go's runtime panic stack
-	// traces — which it prints via the raw fd 2 syscall, bypassing os.Stderr —
-	// would otherwise be silently discarded. Redirecting fd 1/2 to the log file
-	// at the OS level (dup2) ensures any panic not caught by our recover handlers
-	// (e.g. one in an unsupervised goroutine, or at the runtime level) lands in
-	// daemon.log instead of vanishing.
-	dupFileToFd(logFile, 1)
-	dupFileToFd(logFile, 2)
+	// In normal mode, mirror stderr (and stdout) to the current daemon log file.
+	// The daemonized child runs with stdin/stdout/stderr = nil (→ /dev/null), so
+	// Go's runtime panic stack traces — which it prints via the raw fd 2 syscall,
+	// bypassing os.Stderr — would otherwise be silently discarded. Redirecting
+	// fd 1/2 to the log file at the OS level (dup2) ensures any panic not caught
+	// by our recover handlers lands in the log instead of vanishing. Note: the
+	// dup targets the file open at startup, so a runtime panic after a midnight
+	// rotation lands in the start-day file; slog records (incl. our recover
+	// handlers) always follow the rotation since they go through logWriter.
+	//
+	// In --debug mode we DON'T redirect: the run is foreground and interactive,
+	// so we keep the operator's real terminal on fd 1/2 (panic traces + the
+	// streamed console logs below land on screen where they're being watched).
+	if !*debug {
+		if f := logWriter.File(); f != nil {
+			dupFileToFd(f, 1)
+			dupFileToFd(f, 2)
+		}
+	}
 
-	logger := slog.New(slog.NewJSONHandler(logFile, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	// --debug lowers the log level to Debug and, because it's foreground, also
+	// streams every record to the console in human-readable text — while still
+	// writing the full structured JSON to the dated log file for later inspection.
+	logLevel := slog.LevelInfo
+	if *debug {
+		logLevel = slog.LevelDebug
+	}
+	var handler slog.Handler = slog.NewJSONHandler(logWriter, &slog.HandlerOptions{Level: logLevel})
+	if *debug {
+		console := slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: logLevel})
+		handler = fanoutHandler{handlers: []slog.Handler{handler, console}}
+	}
+	logger := slog.New(handler)
 	slog.SetDefault(logger) // so packages using slog.Default() (e.g. opencode coordinator) log to the daemon log
-	logger.Info("starting daemon", "version", version, "id", id, "relay", url)
+	if *debug {
+		fmt.Fprintln(os.Stderr, i18n.T("daemon.debug_banner", logWriter.CurrentPath()))
+	}
+	logger.Info("starting daemon", "version", version, "id", id, "relay", url, "debug", *debug)
 
 	// Write PID file
 	if err := daemon.WritePID(os.Getpid()); err != nil {
@@ -603,6 +743,10 @@ func cmdDaemonStart(args []string) {
 		os.Exit(1)
 	}
 	defer os.Remove(daemon.PIDPath())
+
+	// Lower our OOM score (Linux) so the kernel OOM killer disfavors the daemon
+	// relative to its PTY children under memory pressure. No-op elsewhere.
+	_ = daemon.ProtectFromOOM(logger)
 
 	// Discover agents
 	agents := discovery.DiscoverAgents()
@@ -952,7 +1096,15 @@ func cmdDaemonStatus() {
 // ---------- daemon logs ----------
 
 func cmdDaemonLogs() {
-	data, err := os.ReadFile(daemon.LogPath())
+	// Prefer today's file; if the daemon last ran on an earlier day, fall back
+	// to the most recent dated log so `daemon logs` always shows something useful.
+	path := daemon.LogPath()
+	if _, err := os.Stat(path); err != nil {
+		if latest := daemon.LatestLogPath(); latest != "" {
+			path = latest
+		}
+	}
+	data, err := os.ReadFile(path)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, i18n.T("error.read_log", err))
 		os.Exit(1)
