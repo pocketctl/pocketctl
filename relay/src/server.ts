@@ -313,7 +313,8 @@ async function main() {
       reply.code(401); return { error: 'invalid token' };
     }
     const { token } = req.params as any;
-    await removeDevice(pool, token);
+    const ok = await removeDevice(pool, payload.userId, token);
+    if (!ok) { reply.code(404); return { error: 'device not found' }; }
     return { success: true };
   });
 

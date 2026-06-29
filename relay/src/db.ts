@@ -604,7 +604,21 @@ export async function registerDevice(pool: pg.Pool, userId: number, deviceToken:
   );
 }
 
-export async function removeDevice(pool: pg.Pool, deviceToken: string): Promise<void> {
+export async function removeDevice(pool: pg.Pool, userId: number, deviceToken: string): Promise<boolean> {
+  // Scope the delete to the caller's own devices — without the user_id predicate
+  // any authenticated user could delete another user's push device (DoS: victim
+  // stops receiving offline/session-complete pushes).
+  const r = await pool.query(`DELETE FROM devices WHERE device_token = $1 AND user_id = $2`, [deviceToken, userId]);
+  return (r.rowCount ?? 0) > 0;
+}
+
+/**
+ * System-internal removal of a device token reported invalid by APNs (410/400).
+ * Not user-scoped on purpose: the token is dead at the provider, so the owner is
+ * irrelevant and not available at the call site. Never reachable from a client
+ * request — only the push pipeline calls this.
+ */
+export async function removeInvalidDeviceToken(pool: pg.Pool, deviceToken: string): Promise<void> {
   await pool.query(`DELETE FROM devices WHERE device_token = $1`, [deviceToken]);
 }
 

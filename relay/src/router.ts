@@ -599,7 +599,27 @@ export class Router {
   async handleClientMessage(clientWs: WebSocket, msg: any): Promise<void> {
     const client = this.clients.get(clientWs);
     if (!client) return;
-    if (msg.session_id) client.subscribedSessions.add(msg.session_id);
+    // Authorization chokepoint: every client message that references an existing
+    // session_id must be owned by the requesting user. This single gate closes
+    // both the replay IDOR (越权读历史对话) and the generic client→daemon routing
+    // bypass (越权注入/控制他人会话) — previously authorization was scattered per
+    // command and the generic fall-through route checked nothing at all.
+    // Subscription is also deferred until after the check, so a non-owner can't
+    // silently attach to another user's live event stream.
+    if (msg.session_id) {
+      if (client.userId == null) {
+        // Anonymous/API-key connections (userId=null) may not act on a specific
+        // session. Real clients always carry a userId (prod requires a token).
+        this.send(clientWs, { type: 'error', session_id: msg.session_id, error: 'forbidden' });
+        return;
+      }
+      const owned = await db.isSessionOwnedByUser(this.pool, client.userId, msg.session_id).catch(() => false);
+      if (!owned) {
+        this.send(clientWs, { type: 'error', session_id: msg.session_id, error: 'session not found or not owned' });
+        return;
+      }
+      client.subscribedSessions.add(msg.session_id);
+    }
     if (msg.type === 'replay') { this.handleReplay(clientWs, msg.session_id, msg.last_seq, msg.req_id, msg.direction, msg.limit); return; }
     if (msg.type === 'list_sessions') { this.handleListSessions(clientWs, client.userId); return; }
     if (msg.type === 'list_daemons') { console.log('[router] list_daemons from user', client.userId, 'daemons in map:', this.daemons.size); this.handleListDaemons(clientWs, client.userId); return; }

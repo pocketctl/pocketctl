@@ -62,20 +62,21 @@
 
 ## 三、修复顺序（按「当前能落地」分档）
 
-### A 档：立即修，零兼容风险（核心）
+### A 档：立即修，零兼容风险（核心）—— ✅ 已实现
 
-| 编号 | 问题 | 改动 | 位置 |
+| 编号 | 问题 | 改动 | 状态 |
 |---|---|---|---|
-| P0-1 | 统一 WS 授权闸门：replay 越权 + 通用路由越权 + subscribe 越权 | `handleClientMessage` 入口加白名单 + 强制 `isSessionOwnedByUser`，且 `subscribedSessions.add` 移到校验之后 | `router.ts:599`、`602`、`722-753`、`756` |
-| P0-3 | `removeDevice` 属主校验 | SQL 加 `AND user_id=$2`；handler 传 `payload.userId` | `db.ts:607`、`server.ts:316` |
+| P0-1 | 统一 WS 授权闸门：replay 越权 + 通用路由越权 + subscribe 越权 | `handleClientMessage` 入口对任何带 `session_id` 的消息强制 `isSessionOwnedByUser`，匿名（userId=null）一律拒绝，`subscribedSessions.add` 移到校验之后 | ✅ `router.ts` |
+| P0-3 | `removeDevice` 属主校验 | SQL 加 `AND user_id=$2`，返回是否命中；handler 传 `payload.userId`，未命中返回 404。APNs 失效清理走独立 `removeInvalidDeviceToken`（非用户态） | ✅ `db.ts`/`server.ts`/`push.ts` |
 
-> A 档不动协议、不动客户端、无需迁移，老 web/daemon 无感。是当前唯一真实暴露的严重风险的最小修复。
+> 实现采用「全量闸门」而非白名单 SET：**所有**带 `session_id` 的 client 消息都过属主校验，比白名单更稳（不怕未列入的命令从通用路由漏过去）。
+> 测试：`router.test.ts` 新增 4 条授权用例（越权 replay 被拒/不泄露、越权控制命令不下发、被拒会话不订阅事件流、匿名禁操作），全套 94 passed。
 
-### B 档：改配置即可立即缓解（不改代码）
+### B 档：改配置即可立即缓解 —— ✅ 已实现
 
-- 保持 / 确认 `POCKETCTL_API_KEY` 留空（或删除该匿名分支），维持匿名泄露链关闭。
-- 设 `ALLOWED_ORIGINS=https://www.pocketctl.me`，关闭 CORS `origin:true` 兜底（REST 用 Bearer 头非 cookie，本就低危，顺手设上）。
-- nginx `access_log` 对 `?token=` 脱敏（`map $request_uri`），立即缓解 JWT-in-URL 日志泄露面。
+- `POCKETCTL_API_KEY` 保持留空（`docker-compose.prod.yml` 默认空），匿名泄露链关闭。
+- `ALLOWED_ORIGINS` 在 `docker-compose.prod.yml` 内置默认 `https://www.pocketctl.me,https://pocketctl.me`，关闭 CORS `origin:true` 兜底；`.env.example` 同步推荐值。
+- nginx `access_log` 对 `?token=` 脱敏：新增 `map $request_uri $sanitized_uri` + `log_format pocketctl`，token 值替换为 `REDACTED`，其余参数保留（`deploy/nginx/pocketctl.conf`）。
 
 ### C 档：能修但需排期（动协议 / 加迁移 / 碰客户端，需灰度 + 回归）
 

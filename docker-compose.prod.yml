@@ -34,6 +34,9 @@ services:
       NODE_ENV: production
       PORT: 8080
       WEB_APP_URL: "https://www.pocketctl.me"
+      # CORS 白名单：留空会 fallback 到 origin:true（允许任意站点带 token 调 REST）。
+      # 锁定到生产 Web 域名，关闭通配兜底。新增前端域名时在此追加（逗号分隔）。
+      ALLOWED_ORIGINS: ${ALLOWED_ORIGINS:-https://www.pocketctl.me,https://pocketctl.me}
     expose:
       - "8080"
 

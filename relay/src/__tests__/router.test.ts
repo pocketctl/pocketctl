@@ -13,6 +13,11 @@ function createMockPool() {
       let result: any = { rows: [], rowCount: 0 }
       if (sql.includes('SELECT column_name')) {
         result = { rows: [{ column_name: 'last_activity_at' }, { column_name: 'exit_reason' }] }
+      } else if (sql.includes('SELECT 1 FROM sessions')) {
+        // isSessionOwnedByUser: ownership gate. The mock treats every session as
+        // owned by the requesting user (auth-specific behaviour is exercised by
+        // a dedicated pool override in the authorization tests below).
+        result = { rows: [{ '?column?': 1 }], rowCount: 1 }
       } else if (sql.includes('ALTER TABLE')) {
         result = { rows: [] }
       } else if (sql.includes('FROM sessions') && sql.includes('SELECT')) {
@@ -99,14 +104,14 @@ describe('Router - daemon disconnect', () => {
     await router.registerDaemon(daemonWs, { type: 'register', daemon_id: 'daemon-1', hostname: 'test', agents: [] }, null)
 
     const clientWs = createMockWs()
-    router.registerClient(clientWs, null)
+    router.registerClient(clientWs, 1)
 
     router.handleDaemonMessage('daemon-1', {
       type: 'session_discovered', session_id: 'sess-1', cwd: '/tmp', status: 'running', source: 'terminal',
     })
 
     clientWs._sent.length = 0
-    router.handleClientMessage(clientWs, { type: 'replay', session_id: 'sess-1', last_seq: 0 })
+    await router.handleClientMessage(clientWs, { type: 'replay', session_id: 'sess-1', last_seq: 0 })
 
     router.unregisterDaemon('daemon-1')
     // Disconnected broadcast is deferred behind the grace window (20ms).
@@ -286,7 +291,7 @@ describe('Router - session→daemon routing resilience', () => {
     await new Promise(r => setTimeout(r, 20))
 
     const clientWs = createMockWs()
-    router.registerClient(clientWs, null)
+    router.registerClient(clientWs, 1)
 
     // A session never seen in-memory this connection (sess-a) should now route
     // to the daemon without hitting the "session not found" error.
@@ -358,7 +363,7 @@ describe('Router - session→daemon routing resilience', () => {
     await new Promise(r => setTimeout(r, 20))
 
     const clientWs = createMockWs()
-    router.registerClient(clientWs, null)
+    router.registerClient(clientWs, 1)
 
     // 'test-sid' was NOT in active_session_ids, but the DB mock maps it to daemon-1.
     daemonWs._sent.length = 0
@@ -369,7 +374,7 @@ describe('Router - session→daemon routing resilience', () => {
 
   test('error for unroutable session includes session_id', async () => {
     const clientWs = createMockWs()
-    router.registerClient(clientWs, null)
+    router.registerClient(clientWs, 1)
 
     // Unknown session: DB returns no rows → falls through to the error.
     await router.handleClientMessage(clientWs, { type: 'session_interrupt', session_id: 'no-such-session' })
@@ -395,7 +400,7 @@ describe('Router - session→daemon routing resilience', () => {
     // After disconnect, sess-a is no longer in the routing map (pruned), so a
     // message to it does NOT get forwarded to the dead daemon socket.
     const clientWs = createMockWs()
-    router.registerClient(clientWs, null)
+    router.registerClient(clientWs, 1)
     daemonWs._sent.length = 0
     await router.handleClientMessage(clientWs, { type: 'session_interrupt', session_id: 'sess-a' })
 
@@ -527,8 +532,8 @@ describe('Router - event delivery dedup + ack', () => {
     const daemonWs = createMockWs()
     await router.registerDaemon(daemonWs, { type: 'register', daemon_id: 'daemon-1', hostname: 'h', agents: [], started_at: 100 }, null)
     const clientWs = createMockWs()
-    router.registerClient(clientWs, null)
-    router.handleClientMessage(clientWs, { type: 'replay', session_id: 'sess-1', last_seq: 0 }) // subscribe
+    router.registerClient(clientWs, 1)
+    await router.handleClientMessage(clientWs, { type: 'replay', session_id: 'sess-1', last_seq: 0 }) // subscribe
 
     clientWs._sent.length = 0
     // First delivery (seq 1) forwards to the subscriber.
@@ -562,8 +567,8 @@ describe('Router - event delivery dedup + ack', () => {
     const ws1 = createMockWs()
     await router.registerDaemon(ws1, { type: 'register', daemon_id: 'daemon-1', hostname: 'h', agents: [], started_at: 100 }, null)
     const clientWs = createMockWs()
-    router.registerClient(clientWs, null)
-    router.handleClientMessage(clientWs, { type: 'replay', session_id: 'sess-1', last_seq: 0 })
+    router.registerClient(clientWs, 1)
+    await router.handleClientMessage(clientWs, { type: 'replay', session_id: 'sess-1', last_seq: 0 })
 
     router.handleDaemonMessage('daemon-1', { type: 'agent_text', session_id: 'sess-1', text: 'a', seq: 9 })
 
@@ -581,12 +586,84 @@ describe('Router - event delivery dedup + ack', () => {
     const daemonWs = createMockWs()
     await router.registerDaemon(daemonWs, { type: 'register', daemon_id: 'daemon-1', hostname: 'h', agents: [], started_at: 100 }, null)
     const clientWs = createMockWs()
-    router.registerClient(clientWs, null)
-    router.handleClientMessage(clientWs, { type: 'replay', session_id: 'sess-1', last_seq: 0 })
+    router.registerClient(clientWs, 1)
+    await router.handleClientMessage(clientWs, { type: 'replay', session_id: 'sess-1', last_seq: 0 })
 
     clientWs._sent.length = 0
     router.handleDaemonMessage('daemon-1', { type: 'agent_text', session_id: 'sess-1', text: 'x' })
     router.handleDaemonMessage('daemon-1', { type: 'agent_text', session_id: 'sess-1', text: 'y' })
     expect(clientWs._sent.filter((m: any) => m.type === 'agent_text').length).toBe(2)
+  })
+})
+
+describe('Router - WS authorization gate (P0-1)', () => {
+  // Pool whose ownership check always denies (SELECT 1 FROM sessions → no row),
+  // simulating a session that belongs to a different user than the caller.
+  function denyingPool(): any {
+    return {
+      query: vi.fn((sql: string) => {
+        if (sql.includes('SELECT 1 FROM sessions')) return Promise.resolve({ rows: [], rowCount: 0 })
+        if (sql.includes('FROM sessions') && sql.includes('SELECT')) {
+          return Promise.resolve({ rows: [{ daemon_id: 'daemon-1' }] })
+        }
+        return Promise.resolve({ rows: [], rowCount: 0 })
+      }),
+      connect: vi.fn(), end: vi.fn(),
+    }
+  }
+
+  test('replay on a non-owned session is rejected and leaks no events', async () => {
+    const router = new Router(denyingPool())
+    const clientWs = createMockWs()
+    router.registerClient(clientWs, 2) // attacker
+
+    await router.handleClientMessage(clientWs, { type: 'replay', session_id: 'victim-sess', last_seq: 0 })
+
+    const err = clientWs._sent.find((m: any) => m.type === 'error')
+    expect(err).toBeDefined()
+    expect(err.error).toBe('session not found or not owned')
+    expect(clientWs._sent.some((m: any) => m.type === 'replay_batch')).toBe(false)
+  })
+
+  test('a control command on a non-owned session is not forwarded to the daemon', async () => {
+    const router = new Router(denyingPool())
+    const daemonWs = createMockWs()
+    await router.registerDaemon(daemonWs, { type: 'register', daemon_id: 'daemon-1', hostname: 'h', agents: [] }, 1)
+
+    const clientWs = createMockWs()
+    router.registerClient(clientWs, 2) // different user
+    daemonWs._sent.length = 0
+
+    await router.handleClientMessage(clientWs, { type: 'set_permission_mode', session_id: 'victim-sess', mode: 'bypassPermissions' })
+
+    expect(daemonWs._sent.some((m: any) => m.type === 'set_permission_mode')).toBe(false)
+    expect(clientWs._sent.some((m: any) => m.error === 'session not found or not owned')).toBe(true)
+  })
+
+  test('a rejected non-owned session does not subscribe the attacker to its event stream', async () => {
+    const router = new Router(denyingPool())
+    const daemonWs = createMockWs()
+    await router.registerDaemon(daemonWs, { type: 'register', daemon_id: 'daemon-1', hostname: 'h', agents: [] }, 1)
+
+    const attackerWs = createMockWs()
+    router.registerClient(attackerWs, 2)
+    await router.handleClientMessage(attackerWs, { type: 'replay', session_id: 'victim-sess', last_seq: 0 })
+
+    attackerWs._sent.length = 0
+    // A live event for the victim's session must not reach the attacker.
+    router.handleDaemonMessage('daemon-1', { type: 'agent_text', session_id: 'victim-sess', text: 'secret' })
+    expect(attackerWs._sent.some((m: any) => m.type === 'agent_text')).toBe(false)
+  })
+
+  test('anonymous (userId=null) connection may not act on a specific session', async () => {
+    const router = new Router(denyingPool())
+    const clientWs = createMockWs()
+    router.registerClient(clientWs, null)
+
+    await router.handleClientMessage(clientWs, { type: 'replay', session_id: 'any-sess', last_seq: 0 })
+
+    const err = clientWs._sent.find((m: any) => m.type === 'error')
+    expect(err).toBeDefined()
+    expect(err.error).toBe('forbidden')
   })
 })
