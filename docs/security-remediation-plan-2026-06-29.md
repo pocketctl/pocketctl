@@ -97,9 +97,12 @@
 - ⬜ PG 定时 `pg_dump` + 异地备份（编排层，未做）。
 - ⬜ session 软删（`deleted_at`）替代物理删除（未做）。
 
-> 测试：`spool_test.go`（append/load/rewrite/corrupt-tail/restore-resume-seq）+ `persist.test.ts`（重试成功 / 耗尽返回 0 不抛）。relay 98 passed；`go test ./internal/ws` 通过。
+- ✅ **ack-after-persist**：event_ack 水位由「已接收 high」改为「最高**已持久化且连续**的 seq」（`daemonSeq.persistedHigh` + `pending` 乱序补洞）。`persistAndAck` 只在 `persistEvent` **持久化成功**后才推进水位；`persistEvent` 耗尽重试改为 **reject**，此时不 ack → daemon 保留事件、重连重放。无持久化的控制/标题/状态事件即时 ack 以免阻塞。彻底闭合「先 ack 后持久化失败」窗口。`relay/src/{db,router}.ts`
+  - 配套修复重连补洞：daemon 在 register 上报 `acked_seq`（崩溃重启时由 spool 最低 seq 推导），relay 据此 seed 水位；并在「首个收到的 seq」同步设地板（兼容不报 `acked_seq` 的老 daemon、以及 grace 窗口后我方条目已删的重连），杜绝「只重放未确认尾部 → 1..N 幽灵缺口卡死水位」。`internal/protocol/types.go`、`internal/ws/client.go`、`relay/src/router.ts`
+
+> 测试：`spool_test.go` + `persist.test.ts`（重试成功 / 耗尽 reject）+ `router.test.ts` 新增 ack-after-persist（持久化完成前不 ack、完成后 ack）、连续水位、`acked_seq` seed、老 daemon 首-seq 地板。relay 106 passed；`go test ./internal/ws + protocol` 通过。
 >
-> **残留缺口（建议单独立项）：ack-after-persist。** 当前 relay 仍在 `handleDaemonMessage` 顶部即推进 `daemonSeq.high`（= event_ack 水位），**先于** DB 持久化完成就可能 ack daemon → daemon trim（含 spool）。若此时持久化在 5 次重试后仍失败 **且**该事件未被任何 client 收到，则丢失。`persistEvent` 重试把这个窗口压到「持续 ~4s+ 的 DB 故障」才会触发，spool 也只挡进程崩溃、挡不住「已 ack 后才持久化失败」。彻底闭合需把 ack 水位改为「最高**已持久化**且连续的 seq」（contiguous persisted-high），涉及 `handleDaemonMessage` 热路径重构，单独排期 + 专项测试，避免在此次改动里动核心投递循环。
+> 残留：PG 备份、session 软删仍未做（编排层，单独立项）。
 
 ---
 

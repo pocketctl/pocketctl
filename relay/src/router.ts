@@ -25,12 +25,15 @@ export class Router {
   // Set during graceful shutdown to suppress offline pushes (the daemons are
   // about to reconnect to the new process — not genuinely offline).
   private shuttingDown = false;
-  // Per-daemon event delivery cursor for at-least-once dedup. `high` is the
-  // highest seq processed (events arrive contiguously per daemon, so seq <= high
-  // is a replayed duplicate — skip re-forwarding). `startedAt` detects a daemon
-  // process restart (seq resets to 0): when it changes we reset `high`. The DB
-  // row dedup is handled separately by the events.event_hash unique index.
-  private daemonSeq = new Map<string, { high: number; startedAt: number }>();
+  // Per-daemon event delivery cursor for at-least-once delivery. `persistedHigh`
+  // is the highest *contiguous* seq that has been durably persisted; it is what
+  // event_ack reports, so the daemon only trims its outbound buffer/spool once an
+  // event is safely in the DB (ack-after-persist). `pending` holds out-of-order
+  // persisted seqs above the mark, drained contiguously by markPersisted.
+  // `startedAt` detects a daemon process restart (seq resets): when it changes we
+  // reset the cursor. The DB row dedup is handled separately by the
+  // events.event_hash unique index.
+  private daemonSeq = new Map<string, { startedAt: number; persistedHigh: number; pending: Set<number>; baselineSet: boolean }>();
   private pool: pg.Pool;
 
   // Grace window before a disconnected daemon is declared offline.
@@ -170,7 +173,12 @@ export class Router {
     // are still recognised as duplicates.
     const prevSeq = this.daemonSeq.get(daemonId);
     if (!prevSeq || prevSeq.startedAt !== daemonStartedAt) {
-      this.daemonSeq.set(daemonId, { high: 0, startedAt: daemonStartedAt });
+      // Seed the persisted mark from the daemon's reported durable baseline. A
+      // daemon that reconnects (after the grace window dropped our entry) or
+      // restarts from its spool replays only its unacked tail; without this the
+      // contiguous mark would stall on the phantom gap before that tail.
+      const baseline = Math.max(0, Number(msg.acked_seq) || 0);
+      this.daemonSeq.set(daemonId, { startedAt: daemonStartedAt, persistedHigh: baseline, pending: new Set(), baselineSet: baseline > 0 });
     }
 
     // Advertise at-least-once delivery support so the daemon retains an unacked
@@ -347,16 +355,51 @@ export class Router {
   }
   unregisterClient(ws: WebSocket): void { this.clients.delete(ws); }
 
+  /**
+   * Advance the per-daemon ack water-mark to the highest *contiguous* persisted
+   * seq. event_ack reports this, so the daemon trims its outbound buffer/spool
+   * only once an event is durably stored. Out-of-order completions wait in
+   * `pending` until the gap before them fills. A missing seq (control message
+   * with no seq) is a no-op.
+   */
+  private markPersisted(daemonId: string, seq?: number): void {
+    if (!seq) return;
+    const st = this.daemonSeq.get(daemonId);
+    if (!st || seq <= st.persistedHigh) return;
+    st.pending.add(seq);
+    while (st.pending.delete(st.persistedHigh + 1)) st.persistedHigh++;
+  }
+
+  /**
+   * Persist a daemon event and advance the ack water-mark ONLY on durable
+   * success. If persistEvent exhausts its retries it rejects — we then withhold
+   * the ack so the daemon keeps the event buffered and replays it on reconnect
+   * (where it is re-persisted), rather than acking-then-losing it.
+   */
+  private persistAndAck(daemonId: string, seq: number | undefined, sessionId: string, type: string, payload: any): void {
+    db.persistEvent(this.pool, sessionId, type, payload)
+      .then(() => this.markPersisted(daemonId, seq))
+      .catch((e) => console.error('persistAndAck:', e));
+  }
+
   handleDaemonMessage(daemonId: string, msg: any): void {
-    // At-least-once dedup: events arrive contiguously per daemon, so a seq at or
-    // below the high-water mark is a replayed duplicate (already forwarded and
-    // persisted) — drop it to avoid client-visible double events. The events
-    // table's event_hash unique index independently prevents duplicate DB rows.
+    // At-least-once dedup keyed on the *persisted* water-mark: a seq at or below
+    // it has already been durably stored, so a reconnect replay of it is a
+    // duplicate — drop it. A seq above the mark (received before but its persist
+    // failed, or genuinely new) is (re)processed; the events.event_hash unique
+    // index independently prevents duplicate DB rows. The mark advances only via
+    // markPersisted (after the DB write), never synchronously on receipt.
     if (msg.seq) {
       const st = this.daemonSeq.get(daemonId);
       if (st) {
-        if (msg.seq <= st.high) return;
-        st.high = msg.seq;
+        if (msg.seq <= st.persistedHigh) return;
+        // Establish the contiguity floor from the FIRST seq seen on a fresh entry
+        // (set synchronously, in receive order, so it's the lowest). This covers
+        // legacy daemons that don't report acked_seq and any daemon that replays
+        // only its unacked tail (seq > 1) — without it the mark would stall on the
+        // phantom gap below that tail. Guarded by baselineSet so a burst arriving
+        // before the first persist can't mis-floor past an unpersisted seq.
+        if (!st.baselineSet) { st.persistedHigh = msg.seq - 1; st.baselineSet = true; }
       }
     }
 
@@ -370,9 +413,10 @@ export class Router {
           this.daemonMetrics.set(daemonId, { cpuPct: msg.cpu_pct, memPct: msg.mem_pct, diskPct: msg.disk_pct, updatedAt: Date.now() });
         }
         // Piggyback the delivery ack on the heartbeat so the daemon can trim its
-        // unacked outbound buffer (bounded ~one ping interval of events).
+        // unacked outbound buffer/spool — but only up to what we've durably
+        // persisted, so a crash after ack can't lose an unwritten event.
         const st = this.daemonSeq.get(daemonId);
-        if (st && st.high > 0) this.send(daemon.ws, { type: 'event_ack', up_to_seq: st.high });
+        if (st && st.persistedHigh > 0) this.send(daemon.ws, { type: 'event_ack', up_to_seq: st.persistedHigh });
       }
       return;
     }
@@ -419,6 +463,9 @@ export class Router {
           if (clientWs.readyState === 1 && this.sameUser(client.userId, uid)) this.send(clientWs, msg);
         }
       }
+      // These control/forward messages aren't persisted; ack the seq immediately
+      // (no-op if they carry none) so the daemon's buffer can't stall on them.
+      this.markPersisted(daemonId, msg.seq);
       return;
     }
     const daemon = this.daemons.get(daemonId);
@@ -470,7 +517,7 @@ export class Router {
         }
       }
       this.pendingSessionCreate.delete(daemonId);
-      db.persistEvent(this.pool, sessionId, msg.type, msg).catch(console.error);
+      this.persistAndAck(daemonId, msg.seq, sessionId, msg.type, msg);
       return;
     }
     if (msg.type === 'session_discovered') {
@@ -478,13 +525,16 @@ export class Router {
       db.isSessionDeleted(this.pool, sessionId).then((deleted) => {
         if (deleted) {
           console.log(`[router] skipping tombstoned session: ${sessionId}`);
+          // Intentionally not persisted, but ack it so the daemon stops
+          // re-discovering (replaying) a session the user already deleted.
+          this.markPersisted(daemonId, msg.seq);
           return;
         }
         // Use provided title if present; otherwise leave existing title untouched
         const title = msg.title || undefined;
         const cwd = msg.cwd || '';
         db.upsertSession(this.pool, sessionId, daemonId, msg.agent || 'claude-code', cwd, msg.status || 'busy', title, 'terminal', undefined, userId ?? undefined, msg.model || undefined).catch(console.error);
-        db.persistEvent(this.pool, sessionId, msg.type, msg).catch(console.error);
+        this.persistAndAck(daemonId, msg.seq, sessionId, msg.type, msg);
         const enriched = { ...msg, daemon_id: daemonId, hostname: daemon?.hostname || 'unknown' };
         for (const [clientWs, client] of this.clients) {
           if (clientWs.readyState === 1 && this.sameUser(client.userId, userId)) this.send(clientWs, enriched);
@@ -498,14 +548,14 @@ export class Router {
       // overwrite), persist as an event, and broadcast to all of the owner's
       // clients so every device's model badge refreshes.
       db.updateSessionModel(this.pool, sessionId, msg.model).catch(console.error);
-      db.persistEvent(this.pool, sessionId, msg.type, msg).catch(console.error);
+      this.persistAndAck(daemonId, msg.seq, sessionId, msg.type, msg);
       for (const [clientWs, client] of this.clients) {
         if (clientWs.readyState === 1 && this.sameUser(client.userId, userId)) this.send(clientWs, msg);
       }
       return;
     }
     if (msg.type === 'subagent_discovered') {
-      db.persistEvent(this.pool, sessionId, msg.type, msg).catch(console.error);
+      this.persistAndAck(daemonId, msg.seq, sessionId, msg.type, msg);
       db.incrementSubagentCount(this.pool, sessionId).catch(console.error);
       for (const [clientWs, client] of this.clients) {
         if (client.subscribedSessions.has(sessionId) && clientWs.readyState === 1) this.send(clientWs, msg);
@@ -513,6 +563,9 @@ export class Router {
       return;
     }
     if (msg.type === 'generate_title_request') {
+      // Not persisted as an event (it only triggers async title generation);
+      // ack the seq up-front so neither early return stalls the daemon buffer.
+      this.markPersisted(daemonId, msg.seq);
       const { user_message: userMsg, assistant_message: assistantMsg } = msg;
       if (!userMsg || !assistantMsg) {
         console.warn('[router] generate_title_request missing user_message or assistant_message');
@@ -551,6 +604,9 @@ export class Router {
       return;
     }
     if (msg.type === 'session_title_update') {
+      // Title is a best-effort, reconstructable UPDATE (not an event row); ack
+      // immediately so the daemon buffer doesn't stall on it.
+      this.markPersisted(daemonId, msg.seq);
       // Only overwrite default titles — protect user-renamed titles
       this.pool.query('UPDATE sessions SET title = $1 WHERE session_id = $2 AND (title LIKE \'Terminal Session-%\' OR title IS NULL)', [msg.title || '', sessionId]).catch(console.error);
       for (const [clientWs, client] of this.clients) {
@@ -558,7 +614,9 @@ export class Router {
       }
       return;
     }
-    db.persistEvent(this.pool, sessionId, msg.type, msg).catch(console.error);
+    // Generic data path (agent_text, tool_call/result, user_text, session_status,
+    // session_id_changed, …): persist with the ack gated on durability.
+    this.persistAndAck(daemonId, msg.seq, sessionId, msg.type, msg);
     // Accumulate per-turn token usage from agent_text events carrying usage (model-agnostic)
     if (msg.usage != null) {
       db.incrementSessionTokens(this.pool, sessionId, msg.usage).catch(console.error);

@@ -55,6 +55,10 @@ function createMockPool() {
   return mockPool as any
 }
 
+// Flush pending microtasks/timers so async persists (and the markPersisted that
+// follows them) settle before assertions on the ack water-mark.
+const tick = () => new Promise((r) => setTimeout(r, 20))
+
 // Mock WebSocket
 function createMockWs(): any {
   const sent: any[] = []
@@ -528,7 +532,7 @@ describe('Router - event delivery dedup + ack', () => {
     expect(ack.supports_event_ack).toBe(true)
   })
 
-  test('replayed event (seq <= high) is not forwarded to clients again', async () => {
+  test('an already-persisted seq is dropped on replay; a new seq is forwarded', async () => {
     const daemonWs = createMockWs()
     await router.registerDaemon(daemonWs, { type: 'register', daemon_id: 'daemon-1', hostname: 'h', agents: [], started_at: 100 }, null)
     const clientWs = createMockWs()
@@ -536,31 +540,69 @@ describe('Router - event delivery dedup + ack', () => {
     await router.handleClientMessage(clientWs, { type: 'replay', session_id: 'sess-1', last_seq: 0 }) // subscribe
 
     clientWs._sent.length = 0
-    // First delivery (seq 1) forwards to the subscriber.
+    // First delivery (seq 1) forwards, then (once persisted) advances the mark.
     router.handleDaemonMessage('daemon-1', { type: 'agent_text', session_id: 'sess-1', text: 'hi', seq: 1 })
-    const firstCount = clientWs._sent.filter((m: any) => m.type === 'agent_text').length
-    expect(firstCount).toBe(1)
+    await tick()
+    expect(clientWs._sent.filter((m: any) => m.type === 'agent_text').length).toBe(1)
 
-    // Replay of the same seq is dropped (not re-forwarded).
+    // Replay of the same (now-persisted) seq is dropped — not re-forwarded.
     router.handleDaemonMessage('daemon-1', { type: 'agent_text', session_id: 'sess-1', text: 'hi', seq: 1 })
-    const afterReplay = clientWs._sent.filter((m: any) => m.type === 'agent_text').length
-    expect(afterReplay).toBe(1)
+    await tick()
+    expect(clientWs._sent.filter((m: any) => m.type === 'agent_text').length).toBe(1)
 
     // A higher seq is a new event and is forwarded.
     router.handleDaemonMessage('daemon-1', { type: 'agent_text', session_id: 'sess-1', text: 'next', seq: 2 })
+    await tick()
     expect(clientWs._sent.filter((m: any) => m.type === 'agent_text').length).toBe(2)
   })
 
-  test('ping reply piggybacks event_ack with the high-water seq', async () => {
+  test('ping piggybacks event_ack with the highest CONTIGUOUS persisted seq', async () => {
     const daemonWs = createMockWs()
     await router.registerDaemon(daemonWs, { type: 'register', daemon_id: 'daemon-1', hostname: 'h', agents: [], started_at: 100 }, null)
-    router.handleDaemonMessage('daemon-1', { type: 'agent_text', session_id: 'sess-1', text: 'hi', seq: 5 })
+    router.handleDaemonMessage('daemon-1', { type: 'agent_text', session_id: 'sess-1', text: 'a', seq: 1 })
+    router.handleDaemonMessage('daemon-1', { type: 'agent_text', session_id: 'sess-1', text: 'b', seq: 2 })
+    router.handleDaemonMessage('daemon-1', { type: 'agent_text', session_id: 'sess-1', text: 'c', seq: 3 })
+    await tick() // let the three persists complete and advance persistedHigh
 
     daemonWs._sent.length = 0
     router.handleDaemonMessage('daemon-1', { type: 'ping' })
     const ack = daemonWs._sent.find((m: any) => m.type === 'event_ack')
     expect(ack).toBeDefined()
-    expect(ack.up_to_seq).toBe(5)
+    expect(ack.up_to_seq).toBe(3)
+  })
+
+  test('ack-after-persist: the mark does not advance until the DB write completes', async () => {
+    // Pool whose event INSERT stays pending until we release it, so the persist
+    // is in flight when we ping.
+    let releaseInsert: (() => void) | undefined
+    const pendingPool: any = {
+      query: vi.fn((sql: string) => {
+        if (sql.includes('INSERT INTO events')) {
+          return new Promise((res) => { releaseInsert = () => res({ rows: [{ id: 1 }] }) })
+        }
+        if (sql.includes('FROM daemons')) return Promise.resolve({ rows: [{ daemon_id: 'daemon-1', status: 'online' }] })
+        return Promise.resolve({ rows: [], rowCount: 0 })
+      }),
+      connect: vi.fn(), end: vi.fn(),
+    }
+    const r = new Router(pendingPool)
+    const daemonWs = createMockWs()
+    await r.registerDaemon(daemonWs, { type: 'register', daemon_id: 'daemon-1', hostname: 'h', agents: [], started_at: 100 }, null)
+
+    r.handleDaemonMessage('daemon-1', { type: 'agent_text', session_id: 'sess-1', text: 'x', seq: 1 })
+    // Persist still in flight → ack must NOT cover seq 1 yet.
+    daemonWs._sent.length = 0
+    r.handleDaemonMessage('daemon-1', { type: 'ping' })
+    expect(daemonWs._sent.find((m: any) => m.type === 'event_ack')).toBeUndefined()
+
+    // Release the DB write → the mark advances and the next ping acks it.
+    releaseInsert!()
+    await tick()
+    daemonWs._sent.length = 0
+    r.handleDaemonMessage('daemon-1', { type: 'ping' })
+    const ack = daemonWs._sent.find((m: any) => m.type === 'event_ack')
+    expect(ack).toBeDefined()
+    expect(ack.up_to_seq).toBe(1)
   })
 
   test('daemon restart (changed started_at) resets the seq cursor', async () => {
@@ -580,6 +622,37 @@ describe('Router - event delivery dedup + ack', () => {
     // seq 1 from the new process must NOT be treated as a duplicate of the old 9.
     router.handleDaemonMessage('daemon-1', { type: 'agent_text', session_id: 'sess-1', text: 'b', seq: 1 })
     expect(clientWs._sent.filter((m: any) => m.type === 'agent_text').length).toBe(1)
+  })
+
+  test('register acked_seq seeds the mark so a replayed tail acks without a phantom gap', async () => {
+    const daemonWs = createMockWs()
+    // Daemon reconnected after the grace window (our entry was dropped) reporting
+    // it already had seq 50 acked, and replays only its unacked tail 51,52.
+    await router.registerDaemon(daemonWs, { type: 'register', daemon_id: 'daemon-1', hostname: 'h', agents: [], started_at: 100, acked_seq: 50 }, null)
+    router.handleDaemonMessage('daemon-1', { type: 'agent_text', session_id: 'sess-1', text: 'a', seq: 51 })
+    router.handleDaemonMessage('daemon-1', { type: 'agent_text', session_id: 'sess-1', text: 'b', seq: 52 })
+    await tick()
+
+    daemonWs._sent.length = 0
+    router.handleDaemonMessage('daemon-1', { type: 'ping' })
+    const ack = daemonWs._sent.find((m: any) => m.type === 'event_ack')
+    expect(ack).toBeDefined()
+    expect(ack.up_to_seq).toBe(52) // advanced from the seeded baseline 50, no 1..50 stall
+  })
+
+  test('a legacy daemon (no acked_seq) replaying a tail still acks via the first-seq floor', async () => {
+    const daemonWs = createMockWs()
+    await router.registerDaemon(daemonWs, { type: 'register', daemon_id: 'daemon-1', hostname: 'h', agents: [], started_at: 100 }, null) // no acked_seq
+    // Replays its unacked tail 71,72 — nothing below was resent.
+    router.handleDaemonMessage('daemon-1', { type: 'agent_text', session_id: 'sess-1', text: 'a', seq: 71 })
+    router.handleDaemonMessage('daemon-1', { type: 'agent_text', session_id: 'sess-1', text: 'b', seq: 72 })
+    await tick()
+
+    daemonWs._sent.length = 0
+    router.handleDaemonMessage('daemon-1', { type: 'ping' })
+    const ack = daemonWs._sent.find((m: any) => m.type === 'event_ack')
+    expect(ack).toBeDefined()
+    expect(ack.up_to_seq).toBe(72) // floored at 70 from the first seq, no 1..70 stall
   })
 
   test('legacy events without seq are always processed', async () => {

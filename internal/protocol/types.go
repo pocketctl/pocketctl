@@ -120,6 +120,12 @@ type RegisterMessage struct {
 	Arch             string            `json:"arch,omitempty"`
 	Version          string            `json:"version,omitempty"`
 	StartedAt        int64             `json:"started_at,omitempty"`
+	// AckedSeq is the highest event seq the daemon considers durably delivered
+	// (acked + trimmed). On a fresh daemonSeq entry the relay seeds its persisted
+	// water-mark from this, so a daemon that reconnects/restarts and replays only
+	// its *unacked* tail (e.g. seq 51+) doesn't leave a phantom 1..50 gap that
+	// would stall the contiguous ack mark. 0 for a fresh daemon.
+	AckedSeq         int64             `json:"acked_seq,omitempty"`
 	// Always emitted (no omitempty): an explicit empty list lets the relay
 	// distinguish "daemon has zero live sessions" (reconcile/close all its
 	// lingering running/busy rows) from a legacy daemon that never reports it.

@@ -22,16 +22,14 @@ describe('db.persistEvent - retry on transient failure', () => {
     expect(insertCalls).toBe(2) // failed once, succeeded on retry
   })
 
-  test('gives up after the attempt budget and returns 0 (never throws)', async () => {
-    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+  test('rejects after exhausting the attempt budget (so callers can withhold the ack)', async () => {
     const pool: any = {
       query: vi.fn((sql: string) => {
         if (sql.includes('INSERT INTO events')) return Promise.reject(new Error('db down'))
         return Promise.resolve({ rows: [] })
       }),
     }
-    const id = await persistEvent(pool, 'sess-1', 'agent_text', {}, 2) // 2 attempts → ~100ms
-    expect(id).toBe(0)
-    errSpy.mockRestore()
+    // 2 attempts → one ~100ms backoff, then reject.
+    await expect(persistEvent(pool, 'sess-1', 'agent_text', {}, 2)).rejects.toThrow('db down')
   })
 })

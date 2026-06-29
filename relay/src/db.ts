@@ -272,7 +272,9 @@ export async function insertEvent(pool: pg.Pool, sessionId: string, eventType: s
  * (`insertEvent(...).catch(console.error)`) — a transient DB blip (e.g. a
  * Postgres restart during deploy) silently dropped the row, so the event
  * vanished on the next replay. Retrying across short backoffs rides out those
- * blips. Never throws; returns the inserted row id, or 0 if deduped / exhausted.
+ * blips. Resolves with the inserted row id (0 if deduped) on durable success;
+ * REJECTS after exhausting all attempts, so callers that gate a delivery ack on
+ * persistence can withhold the ack and let the daemon replay the event later.
  */
 export async function persistEvent(pool: pg.Pool, sessionId: string, eventType: string, payload: any, attempts = 5): Promise<number> {
   let delay = 100;
@@ -280,15 +282,12 @@ export async function persistEvent(pool: pg.Pool, sessionId: string, eventType: 
     try {
       return await insertEvent(pool, sessionId, eventType, payload);
     } catch (e) {
-      if (i === attempts - 1) {
-        console.error(`persistEvent: dropped event after ${attempts} attempts (session ${sessionId}, ${eventType}):`, e);
-        return 0;
-      }
+      if (i === attempts - 1) throw e; // exhausted → reject (caller withholds ack)
       await new Promise((r) => setTimeout(r, delay));
       delay *= 3; // 100 → 300 → 900 → 2700ms (~4s total budget)
     }
   }
-  return 0;
+  /* unreachable */ return 0;
 }
 
 export async function getEventsAfter(pool: pg.Pool, sessionId: string, lastSeq: number): Promise<any[]> {

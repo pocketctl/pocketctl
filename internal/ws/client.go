@@ -177,6 +177,10 @@ func (c *Client) InitSpool(path string) error {
 		}
 		c.outBytes = bytesN
 		c.seqCtr = maxSeq // resume numbering past the highest restored seq
+		// Everything below the lowest restored seq was already acked/trimmed before
+		// the crash; tell the relay so its fresh persisted mark starts there (no
+		// phantom gap before the replayed tail).
+		c.ackedSeq = restored[0].seq - 1
 		c.logger.Info("restored spooled events", "count", len(restored), "from_seq", restored[0].seq, "to_seq", maxSeq)
 	}
 	return nil
@@ -223,6 +227,9 @@ func (c *Client) ResendRegister() {
 	if c.activeSessionIDsFn != nil {
 		register.ActiveSessionIDs = c.activeSessionIDsFn()
 	}
+	c.outMu.Lock()
+	register.AckedSeq = c.ackedSeq // durable baseline so the relay seeds its persisted mark
+	c.outMu.Unlock()
 	c.SendMsg(register)
 }
 
@@ -313,6 +320,9 @@ func (c *Client) connectAndServe(ctx context.Context) error {
 	if c.activeSessionIDsFn != nil {
 		register.ActiveSessionIDs = c.activeSessionIDsFn()
 	}
+	c.outMu.Lock()
+	register.AckedSeq = c.ackedSeq // durable baseline so the relay seeds its persisted mark
+	c.outMu.Unlock()
 	c.SendMsg(register)
 	c.logger.Info("register sent")
 
