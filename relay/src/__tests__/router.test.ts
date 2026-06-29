@@ -1,4 +1,7 @@
 import { describe, test, expect, vi, beforeEach } from 'vitest'
+// Short the offline grace window so debounce tests run fast. Read by the Router
+// constructor, so this must be set before any `new Router(...)`.
+process.env.DAEMON_OFFLINE_GRACE_MS = '20'
 import { Router } from '../router.js'
 
 // Mock pg.Pool
@@ -80,8 +83,9 @@ describe('Router - daemon disconnect', () => {
     router.registerClient(clientWs, null)
 
     router.unregisterDaemon('daemon-1')
-    // unregisterDaemon broadcasts inside db.getDaemonAlias().then() — wait for microtask
-    await new Promise(r => setTimeout(r, 10))
+    // Offline is now deferred behind the grace window (20ms), then broadcast
+    // inside db.getDaemonAlias().then() — wait past the window + microtask.
+    await new Promise(r => setTimeout(r, 80))
 
     const offlineEvent = clientWs._sent.find((m: any) => m.type === 'daemon_status' && m.status === 'offline')
     expect(offlineEvent).toBeDefined()
@@ -90,9 +94,9 @@ describe('Router - daemon disconnect', () => {
     expect(offlineEvent.last_seen_at).toBeDefined()
   })
 
-  test('unregisterDaemon broadcasts session_status: disconnected to subscribed clients', () => {
+  test('unregisterDaemon broadcasts session_status: disconnected to subscribed clients', async () => {
     const daemonWs = createMockWs()
-    router.registerDaemon(daemonWs, { type: 'register', daemon_id: 'daemon-1', hostname: 'test', agents: [] }, null)
+    await router.registerDaemon(daemonWs, { type: 'register', daemon_id: 'daemon-1', hostname: 'test', agents: [] }, null)
 
     const clientWs = createMockWs()
     router.registerClient(clientWs, null)
@@ -105,6 +109,8 @@ describe('Router - daemon disconnect', () => {
     router.handleClientMessage(clientWs, { type: 'replay', session_id: 'sess-1', last_seq: 0 })
 
     router.unregisterDaemon('daemon-1')
+    // Disconnected broadcast is deferred behind the grace window (20ms).
+    await new Promise(r => setTimeout(r, 80))
 
     const discEvent = clientWs._sent.find((m: any) => m.type === 'session_status' && m.status === 'disconnected')
     expect(discEvent).toBeDefined()
@@ -112,10 +118,11 @@ describe('Router - daemon disconnect', () => {
     expect(discEvent.daemon_id).toBe('daemon-1')
   })
 
-  test('unregisterDaemon does NOT persist disconnected to DB', () => {
+  test('unregisterDaemon does NOT persist disconnected to DB', async () => {
     const daemonWs = createMockWs()
-    router.registerDaemon(daemonWs, { type: 'register', daemon_id: 'daemon-1', hostname: 'test', agents: [] }, null)
+    await router.registerDaemon(daemonWs, { type: 'register', daemon_id: 'daemon-1', hostname: 'test', agents: [] }, null)
     router.unregisterDaemon('daemon-1')
+    await new Promise(r => setTimeout(r, 80))
 
     const disconnectUpdate = pool._queries.find((q: any) =>
       q.sql.includes('UPDATE sessions') && q.params.includes('disconnected')
@@ -146,7 +153,9 @@ describe('Router - daemon reconnect', () => {
     expect(onlineEvent).toBeDefined()
     expect(onlineEvent.hostname).toBe('mac-pro')
     expect(onlineEvent.daemon_id).toBe('daemon-2')
-    expect(onlineEvent.agents).toEqual(['claude-code', 'opencode'])
+    // registerDaemon composes agents as objects {type,version,latest,manageable}
+    // (the web client consumes this shape), not a bare string array.
+    expect(onlineEvent.agents.map((a: any) => a.type)).toEqual(['claude-code', 'opencode'])
   })
 })
 
@@ -380,7 +389,8 @@ describe('Router - session→daemon routing resilience', () => {
     await new Promise(r => setTimeout(r, 20))
 
     router.unregisterDaemon('daemon-1')
-    await new Promise(r => setTimeout(r, 20))
+    // Routes are pruned when the offline transition finalizes (after grace).
+    await new Promise(r => setTimeout(r, 80))
 
     // After disconnect, sess-a is no longer in the routing map (pruned), so a
     // message to it does NOT get forwarded to the dead daemon socket.
@@ -390,5 +400,193 @@ describe('Router - session→daemon routing resilience', () => {
     await router.handleClientMessage(clientWs, { type: 'session_interrupt', session_id: 'sess-a' })
 
     expect(daemonWs._sent.some((m: any) => m.type === 'session_interrupt')).toBe(false)
+  })
+})
+
+describe('Router - offline debounce', () => {
+  let pool: any
+  let router: Router
+
+  beforeEach(() => {
+    pool = createMockPool()
+    // Longer grace so a reconnect can race inside the window deterministically.
+    process.env.DAEMON_OFFLINE_GRACE_MS = '80'
+    router = new Router(pool)
+  })
+
+  test('reconnect within the grace window cancels the offline transition', async () => {
+    const clientWs = createMockWs()
+    router.registerClient(clientWs, 42)
+
+    const ws1 = createMockWs()
+    await router.registerDaemon(ws1, { type: 'register', daemon_id: 'daemon-1', hostname: 'host', agents: [] }, 42)
+
+    clientWs._sent.length = 0
+    pool._queries.length = 0
+
+    // Disconnect, then reconnect well within the 80ms window.
+    router.unregisterDaemon('daemon-1', ws1)
+    await new Promise(r => setTimeout(r, 20))
+    const ws2 = createMockWs()
+    await router.registerDaemon(ws2, { type: 'register', daemon_id: 'daemon-1', hostname: 'host', agents: [] }, 42)
+
+    // Wait past where the original timer would have fired.
+    await new Promise(r => setTimeout(r, 120))
+
+    const offline = clientWs._sent.find((m: any) => m.type === 'daemon_status' && m.status === 'offline')
+    expect(offline).toBeUndefined()
+    // No offline push lookup happened either.
+    const pushQuery = pool._queries.find((q: any) => q.sql.includes('FROM devices'))
+    expect(pushQuery).toBeUndefined()
+  })
+
+  test('past the grace window the daemon is declared offline and pushed', async () => {
+    const clientWs = createMockWs()
+    router.registerClient(clientWs, 42)
+
+    const ws1 = createMockWs()
+    await router.registerDaemon(ws1, { type: 'register', daemon_id: 'daemon-1', hostname: 'host', agents: [] }, 42)
+
+    clientWs._sent.length = 0
+    pool._queries.length = 0
+
+    router.unregisterDaemon('daemon-1', ws1)
+    await new Promise(r => setTimeout(r, 160))
+
+    const offline = clientWs._sent.find((m: any) => m.type === 'daemon_status' && m.status === 'offline')
+    expect(offline).toBeDefined()
+    const pushQuery = pool._queries.find((q: any) => q.sql.includes('FROM devices'))
+    expect(pushQuery).toBeDefined()
+  })
+
+  test('graceful shutdown suppresses the offline push (but still broadcasts)', async () => {
+    const clientWs = createMockWs()
+    router.registerClient(clientWs, 42)
+
+    const ws1 = createMockWs()
+    await router.registerDaemon(ws1, { type: 'register', daemon_id: 'daemon-1', hostname: 'host', agents: [] }, 42)
+
+    clientWs._sent.length = 0
+    pool._queries.length = 0
+
+    router.beginShutdown()
+    router.unregisterDaemon('daemon-1', ws1)
+    await new Promise(r => setTimeout(r, 160))
+
+    // No APNs push lookup while shutting down...
+    const pushQuery = pool._queries.find((q: any) => q.sql.includes('FROM devices'))
+    expect(pushQuery).toBeUndefined()
+  })
+
+  test('stale-socket close does not schedule an offline transition for the live connection', async () => {
+    const clientWs = createMockWs()
+    router.registerClient(clientWs, 42)
+
+    const ws1 = createMockWs()
+    await router.registerDaemon(ws1, { type: 'register', daemon_id: 'daemon-1', hostname: 'host', agents: [] }, 42)
+    // Reconnect on a new socket BEFORE the old one's close arrives.
+    const ws2 = createMockWs()
+    await router.registerDaemon(ws2, { type: 'register', daemon_id: 'daemon-1', hostname: 'host', agents: [] }, 42)
+
+    clientWs._sent.length = 0
+    // Late close from the superseded socket — must be ignored.
+    router.unregisterDaemon('daemon-1', ws1)
+    await new Promise(r => setTimeout(r, 160))
+
+    const offline = clientWs._sent.find((m: any) => m.type === 'daemon_status' && m.status === 'offline')
+    expect(offline).toBeUndefined()
+  })
+
+  test('broadcastRelayRestarting notifies connected daemons', async () => {
+    const ws1 = createMockWs()
+    await router.registerDaemon(ws1, { type: 'register', daemon_id: 'daemon-1', hostname: 'host', agents: [] }, 42)
+    ws1._sent.length = 0
+    router.broadcastRelayRestarting()
+    expect(ws1._sent.some((m: any) => m.type === 'relay_restarting')).toBe(true)
+  })
+})
+
+describe('Router - event delivery dedup + ack', () => {
+  let pool: any
+  let router: Router
+
+  beforeEach(() => {
+    pool = createMockPool()
+    router = new Router(pool)
+  })
+
+  test('register_ack advertises supports_event_ack', async () => {
+    const daemonWs = createMockWs()
+    await router.registerDaemon(daemonWs, { type: 'register', daemon_id: 'daemon-1', hostname: 'h', agents: [], started_at: 100 }, null)
+    const ack = daemonWs._sent.find((m: any) => m.type === 'register_ack')
+    expect(ack).toBeDefined()
+    expect(ack.supports_event_ack).toBe(true)
+  })
+
+  test('replayed event (seq <= high) is not forwarded to clients again', async () => {
+    const daemonWs = createMockWs()
+    await router.registerDaemon(daemonWs, { type: 'register', daemon_id: 'daemon-1', hostname: 'h', agents: [], started_at: 100 }, null)
+    const clientWs = createMockWs()
+    router.registerClient(clientWs, null)
+    router.handleClientMessage(clientWs, { type: 'replay', session_id: 'sess-1', last_seq: 0 }) // subscribe
+
+    clientWs._sent.length = 0
+    // First delivery (seq 1) forwards to the subscriber.
+    router.handleDaemonMessage('daemon-1', { type: 'agent_text', session_id: 'sess-1', text: 'hi', seq: 1 })
+    const firstCount = clientWs._sent.filter((m: any) => m.type === 'agent_text').length
+    expect(firstCount).toBe(1)
+
+    // Replay of the same seq is dropped (not re-forwarded).
+    router.handleDaemonMessage('daemon-1', { type: 'agent_text', session_id: 'sess-1', text: 'hi', seq: 1 })
+    const afterReplay = clientWs._sent.filter((m: any) => m.type === 'agent_text').length
+    expect(afterReplay).toBe(1)
+
+    // A higher seq is a new event and is forwarded.
+    router.handleDaemonMessage('daemon-1', { type: 'agent_text', session_id: 'sess-1', text: 'next', seq: 2 })
+    expect(clientWs._sent.filter((m: any) => m.type === 'agent_text').length).toBe(2)
+  })
+
+  test('ping reply piggybacks event_ack with the high-water seq', async () => {
+    const daemonWs = createMockWs()
+    await router.registerDaemon(daemonWs, { type: 'register', daemon_id: 'daemon-1', hostname: 'h', agents: [], started_at: 100 }, null)
+    router.handleDaemonMessage('daemon-1', { type: 'agent_text', session_id: 'sess-1', text: 'hi', seq: 5 })
+
+    daemonWs._sent.length = 0
+    router.handleDaemonMessage('daemon-1', { type: 'ping' })
+    const ack = daemonWs._sent.find((m: any) => m.type === 'event_ack')
+    expect(ack).toBeDefined()
+    expect(ack.up_to_seq).toBe(5)
+  })
+
+  test('daemon restart (changed started_at) resets the seq cursor', async () => {
+    const ws1 = createMockWs()
+    await router.registerDaemon(ws1, { type: 'register', daemon_id: 'daemon-1', hostname: 'h', agents: [], started_at: 100 }, null)
+    const clientWs = createMockWs()
+    router.registerClient(clientWs, null)
+    router.handleClientMessage(clientWs, { type: 'replay', session_id: 'sess-1', last_seq: 0 })
+
+    router.handleDaemonMessage('daemon-1', { type: 'agent_text', session_id: 'sess-1', text: 'a', seq: 9 })
+
+    // Daemon process restarts: new started_at, seq counter back to 1.
+    const ws2 = createMockWs()
+    await router.registerDaemon(ws2, { type: 'register', daemon_id: 'daemon-1', hostname: 'h', agents: [], started_at: 200 }, null)
+
+    clientWs._sent.length = 0
+    // seq 1 from the new process must NOT be treated as a duplicate of the old 9.
+    router.handleDaemonMessage('daemon-1', { type: 'agent_text', session_id: 'sess-1', text: 'b', seq: 1 })
+    expect(clientWs._sent.filter((m: any) => m.type === 'agent_text').length).toBe(1)
+  })
+
+  test('legacy events without seq are always processed', async () => {
+    const daemonWs = createMockWs()
+    await router.registerDaemon(daemonWs, { type: 'register', daemon_id: 'daemon-1', hostname: 'h', agents: [], started_at: 100 }, null)
+    const clientWs = createMockWs()
+    router.registerClient(clientWs, null)
+    router.handleClientMessage(clientWs, { type: 'replay', session_id: 'sess-1', last_seq: 0 })
+
+    clientWs._sent.length = 0
+    router.handleDaemonMessage('daemon-1', { type: 'agent_text', session_id: 'sess-1', text: 'x' })
+    router.handleDaemonMessage('daemon-1', { type: 'agent_text', session_id: 'sess-1', text: 'y' })
+    expect(clientWs._sent.filter((m: any) => m.type === 'agent_text').length).toBe(2)
   })
 })

@@ -1093,6 +1093,22 @@ async function main() {
     console.log(`pocketctl relay listening on port ${PORT} [${NODE_ENV}]`);
   } catch (err) { console.error('failed to start:', err); process.exit(1); }
 
+  // Graceful shutdown: suppress offline pushes (daemons will reconnect to the
+  // new process — they are not genuinely offline), hint daemons to reconnect,
+  // then close the server. Guarded so double signals don't re-enter.
+  let shuttingDown = false;
+  const shutdown = async (signal: string) => {
+    if (shuttingDown) return;
+    shuttingDown = true;
+    console.log(`[shutdown] received ${signal}, draining...`);
+    router.beginShutdown();
+    router.broadcastRelayRestarting();
+    try { await app.close(); } catch (e) { console.error('[shutdown] close error:', e); }
+    process.exit(0);
+  };
+  process.on('SIGTERM', () => { shutdown('SIGTERM'); });
+  process.on('SIGINT', () => { shutdown('SIGINT'); });
+
   // Periodic cleanup: remove tombstones older than 30 days (every 6 hours)
   setInterval(async () => {
     try {

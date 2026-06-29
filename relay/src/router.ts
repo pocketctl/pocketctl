@@ -17,13 +17,45 @@ export class Router {
   private pendingSessionMeta = new Map<string, { agent_type: string; cwd: string }>();
   private pendingOriginClient = new Map<string, WebSocket>(); // pending session_id → origin client (for session_id_changed 补发)
   private takeoverTimers = new Map<string, { timer: ReturnType<typeof setTimeout>; newDaemonId: string; newHostname: string }>();
+  // Pending offline-transition timers, keyed by daemonId. On WS close we defer
+  // the offline side-effects (DB offline, push, broadcast) behind a grace window
+  // so a relay restart or brief network blip doesn't flap the daemon offline.
+  // A re-register for the same daemonId cancels the timer.
+  private pendingOfflineTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  // Set during graceful shutdown to suppress offline pushes (the daemons are
+  // about to reconnect to the new process — not genuinely offline).
+  private shuttingDown = false;
+  // Per-daemon event delivery cursor for at-least-once dedup. `high` is the
+  // highest seq processed (events arrive contiguously per daemon, so seq <= high
+  // is a replayed duplicate — skip re-forwarding). `startedAt` detects a daemon
+  // process restart (seq resets to 0): when it changes we reset `high`. The DB
+  // row dedup is handled separately by the events.event_hash unique index.
+  private daemonSeq = new Map<string, { high: number; startedAt: number }>();
   private pool: pg.Pool;
 
+  // Grace window before a disconnected daemon is declared offline.
+  private readonly offlineGraceMs = parseInt(process.env.DAEMON_OFFLINE_GRACE_MS || '30000', 10);
+
   constructor(pool: pg.Pool) { this.pool = pool; }
+
+  /** Mark the relay as shutting down so offline pushes are suppressed. */
+  beginShutdown(): void { this.shuttingDown = true; }
+
+  /** Notify all connected daemons that the relay is restarting (expected disconnect). */
+  broadcastRelayRestarting(): void {
+    for (const [, daemon] of this.daemons) {
+      if (daemon.ws.readyState === 1) this.send(daemon.ws, { type: 'relay_restarting' });
+    }
+  }
 
   async registerDaemon(ws: WebSocket, msg: any, userId: number | null, tokenJti?: string, machineId?: string): Promise<void> {
     const daemonId = msg.daemon_id;
     const hostname = msg.hostname || 'unknown';
+
+    // Cancel any pending offline transition — the daemon reconnected within the
+    // grace window, so it must not be flapped offline (no push, no broadcast).
+    const pendingOffline = this.pendingOfflineTimers.get(daemonId);
+    if (pendingOffline) { clearTimeout(pendingOffline); this.pendingOfflineTimers.delete(daemonId); }
     // Compose agents as [{type, version, latest, manageable}] objects.
     const agentTypes: string[] = msg.agents || [];
     const agentVersions: Record<string, string> = msg.agent_versions || {};
@@ -131,7 +163,19 @@ export class Router {
       ).catch((e: any) => console.error('cleanup stale daemons:', e));
     }
     db.cleanStaleSessions(this.pool).catch(console.error);
-    this.send(ws, { type: 'register_ack', status: 'ok', connection_id: daemonId });
+
+    // Initialise/reset the event delivery cursor. A changed started_at means the
+    // daemon process restarted (its seq counter reset to 0), so we reset `high`;
+    // a plain reconnect of the same process keeps the cursor so replayed events
+    // are still recognised as duplicates.
+    const prevSeq = this.daemonSeq.get(daemonId);
+    if (!prevSeq || prevSeq.startedAt !== daemonStartedAt) {
+      this.daemonSeq.set(daemonId, { high: 0, startedAt: daemonStartedAt });
+    }
+
+    // Advertise at-least-once delivery support so the daemon retains an unacked
+    // buffer and trims it on our event_ack (rather than legacy trim-on-write).
+    this.send(ws, { type: 'register_ack', status: 'ok', connection_id: daemonId, supports_event_ack: true });
 
     // Rebuild the session→daemon routing table for this daemon. The in-memory
     // map is volatile (lost on relay restart; stale entries survive disconnects),
@@ -188,9 +232,7 @@ export class Router {
     if (closedWs && daemon && daemon.ws !== closedWs) {
       return;
     }
-    const hostname = daemon?.hostname || 'unknown';
-    const userId = daemon?.userId ?? null;
-    this.daemons.delete(daemonId);
+    if (!daemon) return;
 
     // Clean up any pending takeover timer
     const takeover = this.takeoverTimers.get(daemonId);
@@ -199,7 +241,8 @@ export class Router {
       this.takeoverTimers.delete(daemonId);
     }
 
-    // If a session_create was in-flight on this daemon, notify the origin client of failure
+    // Immediate (not deferred): an in-flight session_create on this daemon has
+    // failed — the origin client must not wait out the grace window for it.
     const pendingOrigin = this.pendingSessionCreate.get(daemonId);
     if (pendingOrigin && pendingOrigin.readyState === 1) {
       this.send(pendingOrigin, { type: 'session_create_failed', reason: 'daemon_offline', error: 'daemon disconnected' });
@@ -207,10 +250,42 @@ export class Router {
     this.pendingSessionCreate.delete(daemonId);
     this.pendingSessionMeta?.delete(daemonId);
 
+    // Defer the offline declaration behind the grace window. The daemon entry
+    // stays in this.daemons (holding the dead socket; routing no-ops via the
+    // readyState guard) so a reconnect within the window restores it without a
+    // visible offline→online flap. registerDaemon cancels this timer on reconnect.
+    if (this.pendingOfflineTimers.has(daemonId)) return;
+    // The socket whose closure we're reacting to. When called without an explicit
+    // closedWs, fall back to the entry's current socket so the reconnect check
+    // below still works (a reconnect swaps in a different socket object).
+    const closedSocket = closedWs ?? daemon.ws;
+    const timer = setTimeout(() => {
+      this.pendingOfflineTimers.delete(daemonId);
+      // If the daemon reconnected on a new socket, the entry now holds a live
+      // socket different from the one that closed — do not declare it offline.
+      const current = this.daemons.get(daemonId);
+      if (current && current.ws !== closedSocket) return;
+      this.finalizeDaemonOffline(daemonId, daemon);
+    }, this.offlineGraceMs);
+    this.pendingOfflineTimers.set(daemonId, timer);
+  }
+
+  /**
+   * Finalize the offline transition for a daemon whose grace window elapsed
+   * without a reconnect: remove it from the map, persist offline, push (unless
+   * shutting down), broadcast offline, and drop/notify its routed sessions.
+   */
+  private finalizeDaemonOffline(daemonId: string, daemon: DaemonConnection): void {
+    const hostname = daemon.hostname || 'unknown';
+    const userId = daemon.userId ?? null;
+    this.daemons.delete(daemonId);
+    this.daemonSeq.delete(daemonId);
+
     db.setDaemonOffline(this.pool, daemonId).catch(console.error);
 
-    // Push notification for daemon offline
-    if (userId) {
+    // Push notification for daemon offline — suppressed during relay shutdown
+    // (the daemon is about to reconnect to the new process, not truly offline).
+    if (userId && !this.shuttingDown) {
       notifyUser(this.pool, userId, daemonOfflinePush(hostname, daemonId)).catch(console.error);
     }
 
@@ -273,6 +348,18 @@ export class Router {
   unregisterClient(ws: WebSocket): void { this.clients.delete(ws); }
 
   handleDaemonMessage(daemonId: string, msg: any): void {
+    // At-least-once dedup: events arrive contiguously per daemon, so a seq at or
+    // below the high-water mark is a replayed duplicate (already forwarded and
+    // persisted) — drop it to avoid client-visible double events. The events
+    // table's event_hash unique index independently prevents duplicate DB rows.
+    if (msg.seq) {
+      const st = this.daemonSeq.get(daemonId);
+      if (st) {
+        if (msg.seq <= st.high) return;
+        st.high = msg.seq;
+      }
+    }
+
     if (msg.type === 'ping') {
       const daemon = this.daemons.get(daemonId);
       if (daemon) {
@@ -282,6 +369,10 @@ export class Router {
         if (msg.cpu_pct !== undefined) {
           this.daemonMetrics.set(daemonId, { cpuPct: msg.cpu_pct, memPct: msg.mem_pct, diskPct: msg.disk_pct, updatedAt: Date.now() });
         }
+        // Piggyback the delivery ack on the heartbeat so the daemon can trim its
+        // unacked outbound buffer (bounded ~one ping interval of events).
+        const st = this.daemonSeq.get(daemonId);
+        if (st && st.high > 0) this.send(daemon.ws, { type: 'event_ack', up_to_seq: st.high });
       }
       return;
     }

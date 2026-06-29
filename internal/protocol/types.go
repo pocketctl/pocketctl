@@ -35,6 +35,12 @@ type ClientMessage struct {
 // Daemon → Client events
 type DaemonEvent struct {
 	Type             string          `json:"type"`
+	// Seq is a monotonically increasing per-connection sequence number stamped
+	// by the ws.Client just before the event is sent to the relay. It enables
+	// at-least-once delivery: the relay dedups by (daemon_id, seq) and acks the
+	// highest contiguous seq it has persisted so the daemon can trim its
+	// outbound replay buffer. Zero/omitted means a legacy event (no dedup).
+	Seq              int64           `json:"seq,omitempty"`
 	SessionID        string          `json:"session_id"`
 	OldSessionID     string          `json:"old_session_id,omitempty"`
 	Text             string          `json:"text,omitempty"`
@@ -124,6 +130,25 @@ type RegisterAckMessage struct {
 	Type         string `json:"type"`
 	Status       string `json:"status"`
 	ConnectionID string `json:"connection_id"`
+	// SupportsEventAck advertises that this relay dedups (daemon_id, seq) events
+	// and emits event_ack. When false/absent the daemon falls back to trimming
+	// its outbound buffer on successful write (best-effort, legacy behavior).
+	SupportsEventAck bool `json:"supports_event_ack,omitempty"`
+}
+
+// EventAckMessage is sent by the relay to acknowledge durable receipt of daemon
+// events up to and including UpToSeq (highest contiguous persisted seq). The
+// daemon trims acknowledged events from its outbound replay buffer.
+type EventAckMessage struct {
+	Type    string `json:"type"`
+	UpToSeq int64  `json:"up_to_seq"`
+}
+
+// RelayRestartingMessage hints daemons that the relay is shutting down for a
+// restart, so the imminent disconnect is expected (reconnect promptly, do not
+// surface an error).
+type RelayRestartingMessage struct {
+	Type string `json:"type"`
 }
 
 type PingMessage struct {
