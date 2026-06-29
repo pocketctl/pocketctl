@@ -473,15 +473,32 @@ export class Router {
       db.incrementSessionTokens(this.pool, sessionId, msg.usage).catch(console.error);
     }
     if (msg.type === 'session_status') {
-      db.upsertSession(this.pool, sessionId, daemonId, '', '', msg.status || 'unknown', undefined, undefined, msg.exit_reason, userId ?? undefined).catch(console.error);
-      // C2: persist cumulative cost_usd from result event
-      if (msg.cost_usd != null) {
-        db.updateSessionCost(this.pool, sessionId, parseFloat(msg.cost_usd)).catch(console.error);
-      }
-      // Push notification for terminal states
-      if (userId && ['completed', 'error', 'killed', 'exited'].includes(msg.status)) {
-        notifyUser(this.pool, userId, sessionStatusPush(msg.title || '', msg.status, sessionId)).catch(console.error);
-      }
+      // UPDATE-ONLY: never INSERT from a status event. A session_id that no
+      // session_created/session_discovered ever announced is a ghost (e.g. the
+      // transient sessions/<pid>.json Claude Code writes on --continue); insert-
+      // upserting it created phantom "status + time, no messages" rows. If the
+      // row doesn't exist, drop the status and its side-effects entirely.
+      db.updateSessionStatus(this.pool, sessionId, daemonId, msg.status || 'unknown', msg.exit_reason, userId ?? undefined)
+        .then((updated) => {
+          if (!updated) {
+            console.log(`[router] dropping session_status for unknown session ${sessionId} (no row — likely a ghost/transient session)`);
+            return;
+          }
+          // C2: persist cumulative cost_usd from result event
+          if (msg.cost_usd != null) {
+            db.updateSessionCost(this.pool, sessionId, parseFloat(msg.cost_usd)).catch(console.error);
+          }
+          // Push notification for terminal states
+          if (userId && ['completed', 'error', 'killed', 'exited'].includes(msg.status)) {
+            notifyUser(this.pool, userId, sessionStatusPush(msg.title || '', msg.status, sessionId)).catch(console.error);
+          }
+          // Forward to subscribed clients only for real sessions.
+          for (const [clientWs, client] of this.clients) {
+            if (client.subscribedSessions.has(sessionId) && clientWs.readyState === 1) this.send(clientWs, msg);
+          }
+        })
+        .catch(console.error);
+      return;
     }
     for (const [clientWs, client] of this.clients) {
       if (client.subscribedSessions.has(sessionId) && clientWs.readyState === 1) this.send(clientWs, msg);

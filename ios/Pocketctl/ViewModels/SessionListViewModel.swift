@@ -42,6 +42,8 @@ final class SessionListViewModel {
         let sorted = sessions
             .filter { $0.daemonId == daemon.daemonId }
             .sorted { lhs, rhs in
+                // 置顶会话优先
+                if lhs.pinned != rhs.pinned { return lhs.pinned }
                 let l = lhs.lastActivityAt ?? lhs.createdAt
                 let r = rhs.lastActivityAt ?? rhs.createdAt
                 return l > r
@@ -125,6 +127,19 @@ final class SessionListViewModel {
         sessions.removeAll { $0.sessionId == sessionId }
     }
 
+    /// 切换会话置顶状态（置顶/取消置顶）
+    func togglePin(_ sessionId: String) {
+        guard let index = sessions.firstIndex(where: { $0.sessionId == sessionId }) else { return }
+        let newPinned = !sessions[index].pinned
+        // 乐观更新本地状态
+        sessions[index].pinned = newPinned
+        wsService.send([
+            "type": "session_pin",
+            "session_id": sessionId,
+            "pinned": newPinned,
+        ])
+    }
+
     /// Create a new session
     func createSession(agent: String, cwd: String, prompt: String) {
         wsService.send([
@@ -185,6 +200,13 @@ final class SessionListViewModel {
         case .sessionDeleted:
             if let sid = event.sessionId {
                 sessions.removeAll { $0.sessionId == sid }
+            }
+
+        case .sessionPinned:
+            if let sid = event.sessionId,
+               let pinned = event.pinned,
+               let index = sessions.firstIndex(where: { $0.sessionId == sid }) {
+                sessions[index].pinned = pinned
             }
 
         case .error:

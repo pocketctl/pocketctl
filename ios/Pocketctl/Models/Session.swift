@@ -16,6 +16,7 @@ struct Session: Identifiable, Sendable, Hashable, Equatable {
     var hostname: String?
     var daemonAlias: String?
     var daemonOnline: Bool
+    var pinned: Bool = false
 
     var id: String { sessionId }
 
@@ -44,7 +45,8 @@ struct Session: Identifiable, Sendable, Hashable, Equatable {
         exitReason == other.exitReason &&
         subagentCount == other.subagentCount &&
         daemonOnline == other.daemonOnline &&
-        hostname == other.hostname
+        hostname == other.hostname &&
+        pinned == other.pinned
     }
 
     func hash(into hasher: inout Hasher) {
@@ -84,7 +86,8 @@ extension Session {
             subagentCount: dict["subagent_count"] as? Int ?? 0,
             hostname: dict["hostname"] as? String,
             daemonAlias: dict["daemon_alias"] as? String,
-            daemonOnline: dict["daemon_online"] as? Bool ?? false
+            daemonOnline: dict["daemon_online"] as? Bool ?? false,
+            pinned: dict["pinned"] as? Bool ?? false
         )
     }
 }

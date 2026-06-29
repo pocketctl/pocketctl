@@ -14,6 +14,7 @@ enum WebSocketEventType: String, Sendable {
     case sessionIdChanged = "session_id_changed"
     case sessionTitleUpdate = "session_title_update"
     case sessionDeleted = "session_deleted"
+    case sessionPinned = "session_pinned"
 
     // Agent streaming
     case agentText = "agent_text"
@@ -75,6 +76,8 @@ struct WebSocketEvent {
     var status: String? { raw["status"] as? String }
     var error: String? { raw["error"] as? String }
     var title: String? { raw["title"] as? String }
+    /// 置顶状态 — for session_pinned 事件
+    var pinned: Bool? { raw["pinned"] as? Bool }
     var agentId: String? { raw["agent_id"] as? String }
     var exitReason: String? { raw["exit_reason"] as? String }
     var hostname: String? { raw["hostname"] as? String }

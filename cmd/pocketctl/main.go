@@ -1356,7 +1356,17 @@ func handleWatcherEvents(ctx context.Context, events <-chan watcher.SessionEvent
 						time.Sleep(2 * time.Second)
 					}
 					if tailer == nil {
-						logger.Error("tailer start failed after retries", "session", evt.Session.SessionID)
+						// The JSONL never appeared — this is a ghost session id (e.g. the
+						// transient ~/.claude/sessions/<pid>.json Claude Code writes on
+						// --continue, whose conversation lands in the resumed <id>.jsonl).
+						// Drop it so it doesn't linger as a tailer-less entry that later
+						// emits a phantom session_status. No session_discovered was ever
+						// sent for it, so nothing on the relay/web side references it.
+						if sm.DropGhostSession(evt.Session.SessionID) {
+							logger.Info("dropped ghost session (jsonl never resolved)", "session", evt.Session.SessionID)
+						} else {
+							logger.Error("tailer start failed after retries", "session", evt.Session.SessionID)
+						}
 						return
 					}
 					defer tailer.Close()
@@ -1386,9 +1396,12 @@ func handleWatcherEvents(ctx context.Context, events <-chan watcher.SessionEvent
 							if err != nil {
 								continue
 							}
-							// Update last activity when events are received from terminal session
+							// Fresh tail output: refresh activity and, if the session had
+							// gone dormant (e.g. after `exit`), revive it so an `exit` →
+							// `claude --continue` resume reappears as live instead of staying
+							// frozen at "exited".
 							if len(events) > 0 {
-								sm.UpdateLastActivity(evt.Session.SessionID)
+								sm.ReviveTerminalSessionOnActivity(evt.Session.SessionID)
 							}
 							for i := range events {
 								if events[i].SessionID == "" {

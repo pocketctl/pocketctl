@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 )
 
 // HookMarker is the unique description tag stamped on every PreToolUse entry
@@ -75,14 +76,12 @@ func RemoveUserHook() error {
 func mergeHookEntry(settingsPath, pocketctlPath string) error {
 	settings := loadSettings(settingsPath)
 
-	// Build the command array. On Windows the binary runs directly; elsewhere
-	// the same binary handles the hidden __hook subcommand.
-	var command []string
-	if runtime.GOOS == "windows" {
-		command = []string{pocketctlPath, "__hook"}
-	} else {
-		command = []string{pocketctlPath, "__hook"}
-	}
+	// Claude Code's hook "command" is a single shell command STRING, not an argv
+	// array. Passing an array makes Claude reject the whole settings file
+	// ("hooks.PreToolUse.0.hooks.0.command: Expected string, but received array")
+	// and pop a blocking startup menu. Quote the binary path so paths containing
+	// spaces still execute as one argument; append the hidden __hook subcommand.
+	command := quoteCommandPath(pocketctlPath) + " __hook"
 
 	// The entry tags itself via "description" (a legitimate Claude settings
 	// field) with HookMarker so RemoveHooks can strip only our entries and
@@ -159,6 +158,18 @@ func RemoveHooks(cwd string) error {
 		return nil // nothing to clean
 	}
 	return stripHookEntry(settingsPath)
+}
+
+// quoteCommandPath quotes an executable path for embedding in a hook command
+// string so paths containing spaces are treated as a single argument by the
+// shell Claude Code uses to run hooks. POSIX shells get single-quote wrapping
+// (with embedded single quotes escaped); Windows gets double-quote wrapping.
+func quoteCommandPath(path string) string {
+	if runtime.GOOS == "windows" {
+		return `"` + path + `"`
+	}
+	// POSIX: 'foo'\''bar' style escaping for any embedded single quotes.
+	return "'" + strings.ReplaceAll(path, "'", `'\''`) + "'"
 }
 
 // loadSettings reads settings.local.json (if present) into a generic map. A
