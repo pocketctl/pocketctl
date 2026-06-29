@@ -470,7 +470,7 @@ export class Router {
         }
       }
       this.pendingSessionCreate.delete(daemonId);
-      db.insertEvent(this.pool, sessionId, msg.type, msg).catch(console.error);
+      db.persistEvent(this.pool, sessionId, msg.type, msg).catch(console.error);
       return;
     }
     if (msg.type === 'session_discovered') {
@@ -484,7 +484,7 @@ export class Router {
         const title = msg.title || undefined;
         const cwd = msg.cwd || '';
         db.upsertSession(this.pool, sessionId, daemonId, msg.agent || 'claude-code', cwd, msg.status || 'busy', title, 'terminal', undefined, userId ?? undefined, msg.model || undefined).catch(console.error);
-        db.insertEvent(this.pool, sessionId, msg.type, msg).catch(console.error);
+        db.persistEvent(this.pool, sessionId, msg.type, msg).catch(console.error);
         const enriched = { ...msg, daemon_id: daemonId, hostname: daemon?.hostname || 'unknown' };
         for (const [clientWs, client] of this.clients) {
           if (clientWs.readyState === 1 && this.sameUser(client.userId, userId)) this.send(clientWs, enriched);
@@ -498,14 +498,14 @@ export class Router {
       // overwrite), persist as an event, and broadcast to all of the owner's
       // clients so every device's model badge refreshes.
       db.updateSessionModel(this.pool, sessionId, msg.model).catch(console.error);
-      db.insertEvent(this.pool, sessionId, msg.type, msg).catch(console.error);
+      db.persistEvent(this.pool, sessionId, msg.type, msg).catch(console.error);
       for (const [clientWs, client] of this.clients) {
         if (clientWs.readyState === 1 && this.sameUser(client.userId, userId)) this.send(clientWs, msg);
       }
       return;
     }
     if (msg.type === 'subagent_discovered') {
-      db.insertEvent(this.pool, sessionId, msg.type, msg).catch(console.error);
+      db.persistEvent(this.pool, sessionId, msg.type, msg).catch(console.error);
       db.incrementSubagentCount(this.pool, sessionId).catch(console.error);
       for (const [clientWs, client] of this.clients) {
         if (client.subscribedSessions.has(sessionId) && clientWs.readyState === 1) this.send(clientWs, msg);
@@ -558,7 +558,7 @@ export class Router {
       }
       return;
     }
-    db.insertEvent(this.pool, sessionId, msg.type, msg).catch(console.error);
+    db.persistEvent(this.pool, sessionId, msg.type, msg).catch(console.error);
     // Accumulate per-turn token usage from agent_text events carrying usage (model-agnostic)
     if (msg.usage != null) {
       db.incrementSessionTokens(this.pool, sessionId, msg.usage).catch(console.error);
@@ -637,8 +637,8 @@ export class Router {
       if (!sessionId) return;
       const userEvt = { type: 'user_text', session_id: sessionId, text: msg.user_text };
       const receiptEvt = { type: 'command_receipt', session_id: sessionId, command: msg.command, receipt_status: msg.receipt_status, message: msg.message };
-      db.insertEvent(this.pool, sessionId, 'user_text', userEvt).catch(console.error);
-      db.insertEvent(this.pool, sessionId, 'command_receipt', receiptEvt).catch(console.error);
+      db.persistEvent(this.pool, sessionId, 'user_text', userEvt).catch(console.error);
+      db.persistEvent(this.pool, sessionId, 'command_receipt', receiptEvt).catch(console.error);
       for (const [ws, c] of this.clients) {
         if (ws === clientWs || ws.readyState !== 1) continue;
         if (this.sameUser(c.userId, client.userId)) {

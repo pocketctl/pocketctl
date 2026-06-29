@@ -266,6 +266,31 @@ export async function insertEvent(pool: pg.Pool, sessionId: string, eventType: s
   return 0; // deduplicated
 }
 
+/**
+ * Persist a daemon event with bounded retries. The relay forwards events to
+ * clients immediately, but the DB write was previously fire-and-forget
+ * (`insertEvent(...).catch(console.error)`) — a transient DB blip (e.g. a
+ * Postgres restart during deploy) silently dropped the row, so the event
+ * vanished on the next replay. Retrying across short backoffs rides out those
+ * blips. Never throws; returns the inserted row id, or 0 if deduped / exhausted.
+ */
+export async function persistEvent(pool: pg.Pool, sessionId: string, eventType: string, payload: any, attempts = 5): Promise<number> {
+  let delay = 100;
+  for (let i = 0; i < attempts; i++) {
+    try {
+      return await insertEvent(pool, sessionId, eventType, payload);
+    } catch (e) {
+      if (i === attempts - 1) {
+        console.error(`persistEvent: dropped event after ${attempts} attempts (session ${sessionId}, ${eventType}):`, e);
+        return 0;
+      }
+      await new Promise((r) => setTimeout(r, delay));
+      delay *= 3; // 100 → 300 → 900 → 2700ms (~4s total budget)
+    }
+  }
+  return 0;
+}
+
 export async function getEventsAfter(pool: pg.Pool, sessionId: string, lastSeq: number): Promise<any[]> {
   const result = await pool.query(
     `SELECT id, session_id, event_type, payload, created_at FROM events WHERE session_id = $1 AND id > $2 ORDER BY id ASC`,

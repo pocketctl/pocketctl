@@ -92,10 +92,14 @@
 
 ### D 档：韧性投资（非漏洞，单独立项）
 
-- 关键事件写库改 `await` + 重试（替代 fire-and-forget）。
-- daemon 端 `outputCh` 磁盘 spool + 重连按 seq 回放。
-- PG 定时 `pg_dump` + 异地备份。
-- session 软删（`deleted_at`）替代物理删除。
+- ✅ **关键事件写库重试**：新增 `db.persistEvent`（insertEvent + 5 次退避重试 100→300→900→2700ms，~4s 预算，永不抛），替换 router 中 7 处 `insertEvent(...).catch` 的 fire-and-forget。瞬时 DB 抖动（如部署时 PG 重启）不再静默丢事件。`relay/src/db.ts`/`router.ts`
+- ✅ **daemon 磁盘 spool**：新增 `internal/ws/spool.go`，把未确认的 `outBuf` 以 NDJSON 落盘（enqueue 追加、ack-trim 时原子重写、启动时回放并从最高 seq 续号）。daemon **进程崩溃**不再丢未确认事件，重连按 seq 回放、relay 按 (daemon_id,seq) + event_hash 去重。默认开启，`POCKETCTL_SPOOL=0` 关闭；路径 `~/.pocketctl/spool/<daemonID>.log`。`internal/ws/{spool,client}.go`/`cmd/pocketctl/main.go`
+- ⬜ PG 定时 `pg_dump` + 异地备份（编排层，未做）。
+- ⬜ session 软删（`deleted_at`）替代物理删除（未做）。
+
+> 测试：`spool_test.go`（append/load/rewrite/corrupt-tail/restore-resume-seq）+ `persist.test.ts`（重试成功 / 耗尽返回 0 不抛）。relay 98 passed；`go test ./internal/ws` 通过。
+>
+> **残留缺口（建议单独立项）：ack-after-persist。** 当前 relay 仍在 `handleDaemonMessage` 顶部即推进 `daemonSeq.high`（= event_ack 水位），**先于** DB 持久化完成就可能 ack daemon → daemon trim（含 spool）。若此时持久化在 5 次重试后仍失败 **且**该事件未被任何 client 收到，则丢失。`persistEvent` 重试把这个窗口压到「持续 ~4s+ 的 DB 故障」才会触发，spool 也只挡进程崩溃、挡不住「已 ack 后才持久化失败」。彻底闭合需把 ack 水位改为「最高**已持久化**且连续的 seq」（contiguous persisted-high），涉及 `handleDaemonMessage` 热路径重构，单独排期 + 专项测试，避免在此次改动里动核心投递循环。
 
 ---
 

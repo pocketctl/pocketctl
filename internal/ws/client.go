@@ -117,6 +117,9 @@ type Client struct {
 	ackSupported bool  // relay advertised supports_event_ack (else legacy trim-on-write)
 	maxOutCount  int
 	maxOutBytes  int
+	// spool durably mirrors outBuf to disk so a daemon process crash doesn't lose
+	// unacked events. nil when spooling is disabled (in-memory-only fallback).
+	spool *spool
 }
 
 func NewClient(relayURL, token, daemonID string, agents []string, agentVersions map[string]string, agentLatests map[string]string, outputCh <-chan protocol.DaemonEvent, logger *slog.Logger) *Client {
@@ -146,6 +149,37 @@ func NewClient(relayURL, token, daemonID string, agents []string, agentVersions 
 	}
 	c.outCond = sync.NewCond(&c.outMu)
 	return c
+}
+
+// InitSpool enables disk-backed durability for the unacked outbound buffer at
+// the given path, and restores any events spooled before a previous crash. Must
+// be called before Run (it seeds outBuf/seqCtr without locking). A load/open
+// failure degrades to in-memory-only delivery rather than aborting startup.
+func (c *Client) InitSpool(path string) error {
+	restored, err := loadSpool(path)
+	if err != nil {
+		return err
+	}
+	s, err := openSpool(path)
+	if err != nil {
+		return err
+	}
+	c.spool = s
+	if len(restored) > 0 {
+		c.outBuf = restored
+		var bytesN int
+		var maxSeq int64
+		for _, be := range restored {
+			bytesN += len(be.data)
+			if be.seq > maxSeq {
+				maxSeq = be.seq
+			}
+		}
+		c.outBytes = bytesN
+		c.seqCtr = maxSeq // resume numbering past the highest restored seq
+		c.logger.Info("restored spooled events", "count", len(restored), "from_seq", restored[0].seq, "to_seq", maxSeq)
+	}
+	return nil
 }
 
 // envInt reads a positive integer from env, falling back to def.
@@ -495,6 +529,7 @@ func (c *Client) appendOutbound(evt *protocol.DaemonEvent) (int64, []byte, bool)
 	}
 	c.outBuf = append(c.outBuf, bufferedEvent{seq: seq, data: data})
 	c.outBytes += len(data)
+	c.spool.append(data) // durable mirror (nil-safe, best-effort)
 	c.outMu.Unlock()
 	return seq, data, true
 }
@@ -567,6 +602,7 @@ func (c *Client) trimOutbound(uptoSeq int64) {
 	if i > 0 {
 		c.outBuf = append(c.outBuf[:0], c.outBuf[i:]...)
 		c.outCond.Broadcast()
+		c.spool.rewrite(c.outBuf) // shrink the durable mirror to the remaining unacked set
 	}
 	c.outMu.Unlock()
 }
