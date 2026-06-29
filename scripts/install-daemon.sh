@@ -105,10 +105,27 @@ info "下载 ${BINARY_FILENAME}..."
 
 download_binary() {
   local url="$1"
+  # Show a live percentage progress bar when stderr is a terminal; otherwise
+  # (e.g. `curl ... | bash`, or output redirected to a log) stay silent so we
+  # don't fill logs with hundreds of progress frames. curl writes its # bar to
+  # stderr and falls back to a plain meter automatically when not on a TTY.
+  local show_progress=""
+  if [[ -t 2 ]]; then
+    show_progress=1
+  fi
   if command -v curl &>/dev/null; then
-    curl -fsSL -o "$TEMP_FILE" "$url" 2>/dev/null
+    if [[ -n "$show_progress" ]]; then
+      curl -fL --progress-bar -o "$TEMP_FILE" "$url"
+    else
+      curl -fsSL -o "$TEMP_FILE" "$url" 2>/dev/null
+    fi
   elif command -v wget &>/dev/null; then
-    wget -q -O "$TEMP_FILE" "$url" 2>/dev/null
+    if [[ -n "$show_progress" ]]; then
+      # bar:force keeps the bar even when wget thinks it's not on a TTY
+      wget --show-progress --progress=bar:force -O "$TEMP_FILE" "$url"
+    else
+      wget -q -O "$TEMP_FILE" "$url" 2>/dev/null
+    fi
   else
     error "需要 curl 或 wget"
   fi

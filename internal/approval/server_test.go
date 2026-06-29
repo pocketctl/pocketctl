@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -62,6 +63,18 @@ func TestEnsureAndRemoveHooks(t *testing.T) {
 			cmds, _ := m["hooks"].([]any)
 			if len(cmds) != 1 {
 				t.Errorf("expected 1 hook command, got %d", len(cmds))
+			}
+			// Claude Code requires the hook "command" to be a STRING, not an
+			// argv array — an array makes Claude reject settings.json and pop a
+			// blocking startup menu. Lock that in.
+			if hc, _ := cmds[0].(map[string]any); hc != nil {
+				cmd, isStr := hc["command"].(string)
+				if !isStr {
+					t.Errorf("hook command must be a string, got %T (%v)", hc["command"], hc["command"])
+				}
+				if !strings.Contains(cmd, "__hook") {
+					t.Errorf("hook command missing __hook subcommand: %q", cmd)
+				}
 			}
 		}
 	}

@@ -16,40 +16,33 @@ struct DaemonListView: View {
     @State private var navigateToSessionDetail: Session?
     @State private var actionSheetHeight: CGFloat = 360
     @State private var newSessionSheetHeight: CGFloat = 600
+    @State private var settingsSnapshotEnv: String? = nil
+    @State private var hasFinishedLoading = false
+    @State private var loadingProgress: CGFloat = -120
 
     var body: some View {
         NavigationStack {
             ZStack {
                 Color.pcBackground.ignoresSafeArea()
 
-                ScrollView {
-                    VStack(spacing: 0) {
-                        headerSection
-                            .padding(.bottom, PCSpacing.md)
-
-                        if let vm = viewModel {
-                            if vm.daemons.isEmpty && !vm.isLoading {
-                                emptyState
-                            } else {
-                                OverviewCard(
-                                    online: vm.onlineCount,
-                                    offline: max(vm.daemons.count - vm.onlineCount, 0),
-                                    todayTokens: vm.tokenSummary?.today,
-                                    activeSessions: vm.sessions.filter { !$0.isTerminal }.count
-                                )
-                                .padding(.horizontal, PCSpacing.lg)
-                                .padding(.bottom, PCSpacing.md)
-
-                                daemonCards(vm: vm)
-
-                                if !vm.recentSessions.isEmpty {
-                                    recentSessionsSection(vm: vm)
-                                }
-                            }
-                        }
+                // 主内容：加载完成后根据有无主机分流
+                if hasFinishedLoading, let vm = viewModel {
+                    if vm.daemons.isEmpty {
+                        // 无连接主机 → 显示主机连接引导页
+                        connectGuideView
+                    } else {
+                        // 有连接主机 → 显示主机列表
+                        mainContentView(vm: vm)
                     }
                 }
+
+                // 加载过渡动画层（数据加载完成前覆盖在上层，淡出消失）
+                if !hasFinishedLoading {
+                    loadingOverlay
+                        .transition(.opacity)
+                }
             }
+            .animation(.easeInOut(duration: 0.35), value: hasFinishedLoading)
             .navigationBarHidden(true)
             .navigationDestination(item: $navigateToSessionList) { daemon in
                 let initial = viewModel?.sessions.filter { $0.daemonId == daemon.daemonId } ?? []
@@ -71,6 +64,22 @@ struct DaemonListView: View {
             }
             .sheet(isPresented: $showSettings) {
                 SettingsView(isLoggedIn: $isLoggedIn, daemons: viewModel?.daemons ?? [])
+                    .onAppear {
+                        // 记录打开设置页时的环境快照，dismiss 后用于判断是否需要重连
+                        settingsSnapshotEnv = RelayEnvironmentManager.shared.current.rawValue
+                            + "|" + (RelayEnvironmentManager.shared.customStagingHost ?? "")
+                    }
+                    .onDisappear {
+                        let now = RelayEnvironmentManager.shared.current.rawValue
+                            + "|" + (RelayEnvironmentManager.shared.customStagingHost ?? "")
+                        guard now != (settingsSnapshotEnv ?? "") else { return }
+                        // 环境或测试地址发生变化 → 断开旧连接并用新地址重连
+                        wsService.disconnect()
+                        Task {
+                            try? await Task.sleep(for: .milliseconds(300))
+                            await viewModel?.connect()
+                        }
+                    }
             }
             .sheet(item: $newSessionDaemon) { daemon in
                 NewSessionSheet(daemon: daemon, wsService: wsService, onHeightChange: { newSessionSheetHeight = max($0 + 40, 400) }) { _ in
@@ -91,16 +100,157 @@ struct DaemonListView: View {
             }
         }
         .task {
+            // 启动加载进度动画
+            withAnimation(.easeInOut(duration: 1.6).repeatForever(autoreverses: false)) {
+                loadingProgress = 120
+            }
             guard !didConnect else { return }
             let vm = DaemonListViewModel(wsService: wsService, apiClient: apiClient)
             vm.onAuthExpired = { isLoggedIn = false }
             viewModel = vm
             await vm.connect()
             didConnect = true
+            // 给数据一点渲染时间后淡出加载层，过渡更顺滑
+            try? await Task.sleep(for: .milliseconds(200))
+            hasFinishedLoading = true
         }
         .onAppear {
             if let vm = viewModel, vm.isConnected { vm.refresh() }
         }
+    }
+
+    // MARK: - Loading overlay
+
+    /// 加载过渡动画层（进入主机列表前的过渡，参照 SplashView 风格）
+    private var loadingOverlay: some View {
+        ZStack {
+            Color.pcBackground.ignoresSafeArea()
+
+            VStack(spacing: 12) {
+                Image(systemName: "terminal.fill")
+                    .font(.system(size: 44))
+                    .foregroundStyle(Color.pcAccent)
+
+                Text("pocketctl")
+                    .font(PCFont.display(32, weight: .bold))
+                    .foregroundStyle(Color.pcAccent)
+                    .kerning(-0.5)
+
+                Text("Your coding agents, in your pocket.")
+                    .font(PCFont.body(15))
+                    .foregroundStyle(Color.pcFgSecondary)
+            }
+
+            // 底部进度条
+            VStack {
+                Spacer()
+                ZStack(alignment: .leading) {
+                    RoundedRectangle(cornerRadius: 2)
+                        .fill(Color.pcBorder)
+                        .frame(width: 120, height: 3)
+                    RoundedRectangle(cornerRadius: 2)
+                        .fill(Color.pcAccent)
+                        .frame(width: 48, height: 3)
+                        .offset(x: loadingProgress)
+                }
+                .padding(.bottom, 80)
+            }
+        }
+    }
+
+    // MARK: - Connect guide (no daemons)
+
+    /// 无连接主机时显示的主机连接引导页
+    private var connectGuideView: some View {
+        VStack(spacing: 24) {
+            // 顶部留白，把内容推到视觉居中偏上
+            Spacer().frame(height: 60)
+
+            VStack(spacing: 12) {
+                Image(systemName: "desktopcomputer")
+                    .font(.system(size: 56))
+                    .foregroundStyle(Color.pcAccent)
+                    .opacity(0.7)
+
+                Text("连接你的第一台主机")
+                    .font(PCFont.display(22, weight: .semibold))
+                    .foregroundStyle(Color.pcFg)
+
+                Text("在你的 Mac 或 Linux 开发机上运行以下命令，\n安装并启动 Daemon 守护进程")
+                    .font(PCFont.body(15))
+                    .foregroundStyle(Color.pcFgSecondary)
+                    .multilineTextAlignment(.center)
+                    .frame(maxWidth: 300)
+            }
+
+            // 安装命令
+            VStack(alignment: .leading, spacing: 6) {
+                let env = RelayEnvironmentManager.shared.current
+                codeLine("# 1. 安装 Daemon")
+                codeLine("curl -fsSL \(env.installURL) | bash")
+                codeLine("")
+                codeLine("# 2. 登录（使用 App 注册的邮箱）")
+                codeLine("pocketctl login")
+                codeLine("")
+                codeLine("# 3. 启动守护进程")
+                codeLine("pocketctl daemon start")
+            }
+            .padding(PCSpacing.md)
+            .background(Color.pcCodeBg)
+            .cornerRadius(PCRadius.sm)
+            .padding(.horizontal, PCSpacing.lg)
+
+            Button {
+                let env = RelayEnvironmentManager.shared.current
+                UIPasteboard.general.string = "curl -fsSL \(env.installURL) | bash\npocketctl login\npocketctl daemon start"
+            } label: {
+                HStack(spacing: 6) {
+                    Image(systemName: "doc.on.doc").font(.system(size: 14))
+                    Text("复制全部命令").font(PCFont.body(14, weight: .medium))
+                }
+                .foregroundStyle(.white)
+                .padding(.horizontal, 20).padding(.vertical, 12)
+                .background(Color.pcPrimaryBtn)
+                .cornerRadius(PCRadius.sm)
+            }
+
+            // 连接成功提示
+            Text("启动后主机将自动出现在列表中")
+                .font(PCFont.body(13))
+                .foregroundStyle(Color.pcFgTertiary)
+
+            Spacer()
+        }
+        .padding(.horizontal, PCSpacing.lg)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    // MARK: - Main content (has daemons)
+
+    /// 有连接主机时显示的主机列表内容
+    private func mainContentView(vm: DaemonListViewModel) -> some View {
+        ScrollView {
+            VStack(spacing: 0) {
+                headerSection
+                    .padding(.bottom, PCSpacing.md)
+
+                OverviewCard(
+                    online: vm.onlineCount,
+                    offline: max(vm.daemons.count - vm.onlineCount, 0),
+                    todayTokens: vm.tokenSummary?.today,
+                    activeSessions: vm.sessions.filter { !$0.isTerminal }.count
+                )
+                .padding(.horizontal, PCSpacing.lg)
+                .padding(.bottom, PCSpacing.md)
+
+                daemonCards(vm: vm)
+
+                if !vm.recentSessions.isEmpty {
+                    recentSessionsSection(vm: vm)
+                }
+            }
+        }
+        .scrollDismissesKeyboard(.interactively)
     }
 
     // MARK: - Header
@@ -195,43 +345,6 @@ struct DaemonListView: View {
         }
         .padding(.horizontal, PCSpacing.lg)
         .padding(.top, PCSpacing.lg)
-    }
-
-    // MARK: - Empty state
-
-    private var emptyState: some View {
-        VStack(spacing: 16) {
-            EmptyStateView(icon: "desktopcomputer", title: "还没有注册主机", subtitle: "在你的开发机上运行以下命令安装 Daemon")
-            VStack(alignment: .leading, spacing: 4) {
-                let env = RelayEnvironmentManager.shared.current
-                codeLine("curl -fsSL \(env.installURL) | bash")
-                codeLine("pocketctl login")
-                codeLine("pocketctl daemon start")
-            }
-            .padding(PCSpacing.md)
-            .background(Color.pcCodeBg)
-            .cornerRadius(PCRadius.sm)
-            .padding(.horizontal, PCSpacing.xxl)
-
-            Button {
-                let env = RelayEnvironmentManager.shared.current
-                UIPasteboard.general.string = """
-                curl -fsSL \(env.installURL) | bash
-                pocketctl login
-                pocketctl daemon start
-                """
-            } label: {
-                HStack(spacing: 6) {
-                    Image(systemName: "doc.on.doc").font(.system(size: 14))
-                    Text("复制命令").font(PCFont.body(14))
-                }
-                .foregroundStyle(Color.pcAccent)
-                .padding(.horizontal, 16).padding(.vertical, 8)
-                .background(Color.pcSurface)
-                .cornerRadius(PCRadius.sm)
-                .overlay(RoundedRectangle(cornerRadius: PCRadius.sm).stroke(Color.pcBorder, lineWidth: 1))
-            }
-        }
     }
 
     private func codeLine(_ text: String) -> some View {

@@ -2,22 +2,12 @@ import Foundation
 
 /// HTTP REST client for relay server auth and device APIs
 final class APIClient: @unchecked Sendable {
-    let baseURL: String
-
-    init() {
-        // 始终使用 RelayEnvironmentManager 获取当前环境的 baseURL
-        // 不再依赖 KeychainStorage.relayURL（已废弃，仅用于向后兼容）
-        if let stored = KeychainStorage.relayURL, !stored.isEmpty {
-            // 如果用户手动设置了自定义 relay URL（旧版兼容），使用它
-            self.baseURL = stored
-                .replacingOccurrences(of: "wss://", with: "https://")
-                .replacingOccurrences(of: "ws://", with: "http://")
-                .replacingOccurrences(of: "/ws", with: "")
-        } else {
-            // 使用环境管理器的 baseURL
-            self.baseURL = RelayEnvironmentManager.shared.current.httpBaseURL
-        }
+    /// 当前环境的 HTTP base URL（每次请求动态读取，确保切换环境/修改测试地址后立即生效）
+    var baseURL: String {
+        RelayEnvironmentManager.shared.current.httpBaseURL
     }
+
+    init() {}
 
     // MARK: - Auth
 
@@ -72,6 +62,13 @@ final class APIClient: @unchecked Sendable {
 
     func removeDevice(token: String) async throws -> SuccessResponse {
         try await authorizedDelete(path: "/api/devices/\(token)")
+    }
+
+    // MARK: - User Profile
+
+    /// 获取当前用户资料（含订阅方案 plan）
+    func getUserProfile() async throws -> User {
+        try await authorizedGet(path: "/api/user/profile")
     }
 
     // MARK: - Daemon Alias

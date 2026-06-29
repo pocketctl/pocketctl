@@ -12,13 +12,16 @@ enum RelayEnvironment: String, CaseIterable, Codable, Sendable {
         }
     }
 
+    /// 测试环境的默认主机地址（可被用户在设置中覆盖）
+    static let defaultStagingHost = "192.168.31.198"
+
     /// 该环境的 HTTP/REST base URL
     var httpBaseURL: String {
         switch self {
         case .production:
             return "https://www.pocketctl.me"
         case .staging:
-            return "http://192.168.31.198"
+            return "http://\(stagingHost)"
         }
     }
 
@@ -28,7 +31,7 @@ enum RelayEnvironment: String, CaseIterable, Codable, Sendable {
         case .production:
             return "wss://www.pocketctl.me/ws"
         case .staging:
-            return "ws://192.168.31.198/ws"
+            return "ws://\(stagingHost)/ws"
         }
     }
 
@@ -38,7 +41,7 @@ enum RelayEnvironment: String, CaseIterable, Codable, Sendable {
         case .production:
             return "https://www.pocketctl.me/install.sh"
         case .staging:
-            return "http://192.168.31.198/install.sh"
+            return "http://\(stagingHost)/install.sh"
         }
     }
 
@@ -51,25 +54,34 @@ enum RelayEnvironment: String, CaseIterable, Codable, Sendable {
             return "本地开发 (\(httpBaseURL))"
         }
     }
+
+    /// 当前测试环境的主机地址：优先用户自定义，否则使用默认值
+    private var stagingHost: String {
+        let custom = RelayEnvironmentManager.shared.customStagingHost
+        return custom?.isEmpty == false ? custom! : Self.defaultStagingHost
+    }
 }
 
 /// 当前活跃的 Relay 环境（持久化在 UserDefaults 中）
 final class RelayEnvironmentManager: @unchecked Sendable {
     static let shared = RelayEnvironmentManager()
 
-    private let storageKey = "pocketctl_relay_environment"
+    /// 测试环境的自定义主机地址（IP 或域名）。持久化，为空时使用默认值 192.168.31.198
+    private let hostStorageKey = "pocketctl_relay_staging_host"
+
+    /// 当前环境（仅内存态）：每次 App 冷启动默认为生产环境，
+    /// 用户在设置页切换到测试环境后当次会话生效，重启后恢复为生产环境。
+    private var _current: RelayEnvironment = .production
 
     var current: RelayEnvironment {
-        get {
-            guard let raw = UserDefaults.standard.string(forKey: storageKey),
-                  let env = RelayEnvironment(rawValue: raw) else {
-                return .production // 默认生产环境
-            }
-            return env
-        }
-        set {
-            UserDefaults.standard.set(newValue.rawValue, forKey: storageKey)
-        }
+        get { _current }
+        set { _current = newValue }
+    }
+
+    /// 测试环境的自定义主机地址（IP 或域名）。为空时使用默认值 192.168.31.198
+    var customStagingHost: String? {
+        get { UserDefaults.standard.string(forKey: hostStorageKey) }
+        set { UserDefaults.standard.set(newValue, forKey: hostStorageKey) }
     }
 
     /// 切换环境（返回新的环境）

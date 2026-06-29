@@ -136,19 +136,18 @@ struct SessionListView: View {
             LazyVStack(spacing: PCSpacing.sm) {
                 ForEach(vm.displayedSessions) { session in
                     Group {
-                        if session.status == "exited" || session.status == "completed" || session.status == "error" || session.status == "killed" {
-                            // Swipe-to-delete for terminal sessions
-                            SwipeToDelete {
-                                SessionCard(session: session, daemonOnline: daemon.online, hostLabel: daemon.displayName) {
-                                    navigateToDetail = session
-                                }
-                            } onDelete: {
-                                vm.deleteSession(session.sessionId)
-                            }
-                        } else {
+                        // 所有会话都支持左滑：置顶/取消置顶；已退出会话额外有删除
+                        SwipeToDelete(
+                            isPinned: session.pinned,
+                            canDelete: session.isTerminal
+                        ) {
                             SessionCard(session: session, daemonOnline: daemon.online, hostLabel: daemon.displayName) {
                                 navigateToDetail = session
                             }
+                        } onPin: {
+                            vm.togglePin(session.sessionId)
+                        } onDelete: {
+                            vm.deleteSession(session.sessionId)
                         }
                     }
                     .frame(height: 68)
@@ -235,6 +234,8 @@ struct SessionCard: View {
     let hostLabel: String
     let onTap: () -> Void
 
+    @State private var copied = false
+
     var body: some View {
         HStack(spacing: PCSpacing.md) {
             StatusDot(status: effectiveStatus)
@@ -242,6 +243,11 @@ struct SessionCard: View {
 
             VStack(alignment: .leading, spacing: 4) {
                 HStack(spacing: 6) {
+                    if session.pinned {
+                        Image(systemName: "pin.fill")
+                            .font(.system(size: 12))
+                            .foregroundStyle(Color.pcAccent)
+                    }
                     Text(session.displayTitle)
                         .font(PCFont.body(16, weight: .semibold))
                         .foregroundStyle(Color.pcFg)
@@ -280,8 +286,28 @@ struct SessionCard: View {
             RoundedRectangle(cornerRadius: PCRadius.md)
                 .stroke(Color.pcBorder, lineWidth: 1)
         )
+        .overlay {
+            if copied {
+                Text("已复制会话 ID")
+                    .font(PCFont.body(12, weight: .medium))
+                    .foregroundStyle(Color.pcFg)
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 6)
+                    .background(Color.pcAccent)
+                    .cornerRadius(PCRadius.sm)
+                    .transition(.opacity.combined(with: .scale(scale: 0.9)))
+            }
+        }
         .contentShape(Rectangle())
         .onTapGesture(perform: onTap)
+        .onLongPressGesture(minimumDuration: 0.5) {
+            UIPasteboard.general.string = session.sessionId
+            withAnimation { copied = true }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) {
+                withAnimation { copied = false }
+            }
+        }
+        .sensoryFeedback(.success, trigger: copied)
     }
 
     private var effectiveStatus: String {
@@ -290,13 +316,18 @@ struct SessionCard: View {
     }
 }
 
-// MARK: - Swipe to Delete (WeChat-style)
+// MARK: - Swipe Actions (Pin + Delete, WeChat-style)
 //
 // 增强：增加垂直方向判断，当用户上下滑动（垂直距离 > 水平距离）时
-// 忽略左滑手势，避免上下滚动时触发删除按钮。
+// 忽略左滑手势，避免上下滚动时触发操作按钮。
+//
+// 支持双按钮：置顶/取消置顶（所有会话）+ 删除（仅已退出会话）。
 
 struct SwipeToDelete<Content: View>: View {
     let content: Content
+    let isPinned: Bool
+    let canDelete: Bool
+    let onPin: () -> Void
     let onDelete: () -> Void
 
     @State private var offset: CGFloat = 0
@@ -314,29 +345,61 @@ struct SwipeToDelete<Content: View>: View {
     /// 识别垂直滚动，左滑仍很灵敏。
     private let dragMinimumDistance: CGFloat = 12
 
-    init(@ViewBuilder content: () -> Content, onDelete: @escaping () -> Void) {
+    /// 操作按钮总宽度（置顶 + 可选删除）
+    private var maxOffset: CGFloat {
+        canDelete ? buttonWidth * 2 : buttonWidth
+    }
+
+    init(isPinned: Bool, canDelete: Bool, @ViewBuilder content: () -> Content, onPin: @escaping () -> Void, onDelete: @escaping () -> Void) {
+        self.isPinned = isPinned
+        self.canDelete = canDelete
         self.content = content()
+        self.onPin = onPin
         self.onDelete = onDelete
     }
 
     var body: some View {
         ZStack(alignment: .trailing) {
-            // Delete button — always behind content
-            Button {
-                withAnimation(.spring(response: 0.3, dampingFraction: 1)) {
-                    onDelete()
-                    close()
-                }
-            } label: {
-                Text("删除")
-                    .font(PCFont.body(15, weight: .medium))
+            // Action buttons — behind content, revealed on swipe
+            HStack(spacing: 0) {
+                Spacer()
+                // 置顶/取消置顶按钮（所有会话都有）
+                Button {
+                    withAnimation(.spring(response: 0.3, dampingFraction: 1)) {
+                        onPin()
+                        close()
+                    }
+                } label: {
+                    VStack(spacing: 4) {
+                        Image(systemName: isPinned ? "pin.slash.fill" : "pin.fill")
+                            .font(.system(size: 16))
+                        Text(isPinned ? "取消置顶" : "置顶")
+                            .font(PCFont.body(12, weight: .medium))
+                    }
                     .foregroundStyle(.white)
                     .frame(width: buttonWidth)
                     .frame(maxHeight: .infinity)
-                    .background(Color.pcError)
+                    .background(Color.pcAccent)
+                }
+                // 删除按钮（仅已退出会话）
+                if canDelete {
+                    Button {
+                        withAnimation(.spring(response: 0.3, dampingFraction: 1)) {
+                            onDelete()
+                            close()
+                        }
+                    } label: {
+                        Text("删除")
+                            .font(PCFont.body(15, weight: .medium))
+                            .foregroundStyle(.white)
+                            .frame(width: buttonWidth)
+                            .frame(maxHeight: .infinity)
+                            .background(Color.pcError)
+                    }
+                }
             }
 
-            // Main content — slides left to reveal delete
+            // Main content — slides left to reveal actions
             // 内容不再是 Button，用 .gesture() 让 DragGesture 优先于 onTapGesture
             // 拖拽时 DragGesture 赢 → 不触发 onTapGesture（不会导航）
             // 点击时 DragGesture 失败 → onTapGesture 赢 → 正常导航或关闭滑开
@@ -362,11 +425,11 @@ struct SwipeToDelete<Content: View>: View {
                             isVerticalScroll = false
 
                             if isOpen {
-                                offset = max(-buttonWidth + h, -buttonWidth)
+                                offset = max(-maxOffset + h, -maxOffset)
                                 offset = min(offset, 0)
                             } else {
                                 offset = min(h, 0)
-                                offset = max(offset, -buttonWidth)
+                                offset = max(offset, -maxOffset)
                             }
                         }
                         .onEnded { value in
@@ -384,11 +447,11 @@ struct SwipeToDelete<Content: View>: View {
                                     if value.translation.width > 40 || velocity > 100 {
                                         close()
                                     } else {
-                                        offset = -buttonWidth
+                                        offset = -maxOffset
                                     }
                                 } else {
                                     if value.translation.width < -40 || velocity < -100 {
-                                        offset = -buttonWidth
+                                        offset = -maxOffset
                                         isOpen = true
                                     } else {
                                         close()

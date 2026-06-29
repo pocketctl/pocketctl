@@ -19,7 +19,6 @@ struct SettingsView: View {
                     VStack(spacing: 0) {
                         // Profile section
                         profileSection
-                            .padding(.bottom, 24)
 
                         // Account section
                         sectionHeader("账户")
@@ -30,7 +29,6 @@ struct SettingsView: View {
                                         valueColor: viewModel.isEmailBound ? .pcFgSecondary : .pcFgTertiary)
                         }
                         .padding(.horizontal, PCSpacing.lg)
-                        .padding(.bottom, 24)
 
                         // Relay 环境切换
                         sectionHeader("服务器")
@@ -69,7 +67,7 @@ struct SettingsView: View {
                                 .padding(.horizontal, PCSpacing.lg)
                                 .frame(minHeight: 44)
 
-                                // 显示当前环境 URL
+                                // 显示当前环境 URL（测试环境可点击重新编辑地址）
                                 HStack(spacing: 12) {
                                     Color.clear
                                         .frame(width: 28, height: 28)
@@ -81,16 +79,26 @@ struct SettingsView: View {
 
                                     Spacer()
 
+                                    if viewModel.currentEnvironment == .staging {
+                                        Image(systemName: "pencil")
+                                            .font(.system(size: 11))
+                                            .foregroundStyle(Color.pcAccent)
+                                    }
+
                                     Circle()
                                         .fill(connectionStatusColor)
                                         .frame(width: 6, height: 6)
                                 }
                                 .padding(.horizontal, PCSpacing.lg)
                                 .padding(.bottom, PCSpacing.sm)
+                                .contentShape(Rectangle())
+                                .onTapGesture {
+                                    guard viewModel.currentEnvironment == .staging else { return }
+                                    viewModel.prepareStagingHostEdit()
+                                }
                             }
                         }
                         .padding(.horizontal, PCSpacing.lg)
-                        .padding(.bottom, 24)
 
                         // My Hosts section
                         sectionHeader("我的主机")
@@ -136,7 +144,6 @@ struct SettingsView: View {
                             .buttonStyle(.plain)
                         }
                         .padding(.horizontal, PCSpacing.lg)
-                        .padding(.bottom, 24)
 
                         // Notifications section
                         sectionHeader("通知")
@@ -166,7 +173,6 @@ struct SettingsView: View {
                             .frame(minHeight: 44)
                         }
                         .padding(.horizontal, PCSpacing.lg)
-                        .padding(.bottom, 24)
 
                         // Subscription section
                         sectionHeader("订阅")
@@ -176,25 +182,24 @@ struct SettingsView: View {
                                     .font(PCFont.body(15))
                                     .foregroundStyle(Color.pcFg)
                                 Spacer()
-                                Text("免费版")
+                                Text(viewModel.subscriptionPlan.displayName)
                                     .font(PCFont.body(12, weight: .semibold))
-                                    .foregroundStyle(Color.pcFgTertiary)
+                                    .foregroundStyle(viewModel.subscriptionPlan.isPro ? Color.pcAccent : Color.pcFgTertiary)
                                     .padding(.horizontal, 10)
                                     .padding(.vertical, 3)
-                                    .background(Color.pcHoverInput)
+                                    .background(viewModel.subscriptionPlan.isPro ? Color.pcAccentMuted : Color.pcHoverInput)
                                     .cornerRadius(PCRadius.full)
                             }
                             .padding(.horizontal, PCSpacing.lg)
-                            .padding(.vertical, PCSpacing.md)
-
-                            Text("免费版：1 台主机，基础监控")
-                                .font(PCFont.body(13))
-                                .foregroundStyle(Color.pcFgTertiary)
-                                .padding(.horizontal, PCSpacing.lg)
-                                .padding(.bottom, PCSpacing.md)
+                            .frame(minHeight: 44)
                         }
                         .padding(.horizontal, PCSpacing.lg)
-                        .padding(.bottom, 24)
+
+                        Text(viewModel.subscriptionPlan.description)
+                            .font(PCFont.body(13))
+                            .foregroundStyle(Color.pcFgTertiary)
+                            .padding(.horizontal, PCSpacing.lg)
+                            .padding(.top, 4)
 
                         // Upgrade to Pro (placeholder — no payment backend yet)
                         settingsGroup {
@@ -225,7 +230,7 @@ struct SettingsView: View {
                             .buttonStyle(.plain)
                         }
                         .padding(.horizontal, PCSpacing.lg)
-                        .padding(.bottom, 24)
+                        .padding(.top, PCSpacing.md)
 
                         // 关于
                         sectionHeader("其他")
@@ -233,7 +238,6 @@ struct SettingsView: View {
                             aboutRow
                         }
                         .padding(.horizontal, PCSpacing.lg)
-                        .padding(.bottom, 24)
 
                         // Logout
                         settingsGroup {
@@ -250,6 +254,7 @@ struct SettingsView: View {
                             }
                         }
                         .padding(.horizontal, PCSpacing.lg)
+                        .padding(.top, PCSpacing.xl)
                         .padding(.bottom, 32)
                     }
                 }
@@ -287,6 +292,7 @@ struct SettingsView: View {
             .sheet(isPresented: $viewModel.showUserAgreement) { userAgreementSheet }
             .sheet(isPresented: $viewModel.showAbout) { aboutSheet }
             .sheet(isPresented: $viewModel.showHelp) { helpSheet }
+            .sheet(isPresented: $viewModel.showStagingHostEdit) { stagingHostEditSheet }
             .onDisappear {
                 viewModel.validateAndSaveRelayURL()
             }
@@ -336,7 +342,7 @@ struct SettingsView: View {
             }
         }
         .padding(.top, 20)
-        .padding(.bottom, 24)
+        .padding(.bottom, PCSpacing.xxl)
     }
 
     // MARK: - Disabled row helper
@@ -380,7 +386,8 @@ struct SettingsView: View {
             .kerning(0.3)
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(.horizontal, PCSpacing.xxl)
-            .padding(.bottom, 8)
+            .padding(.top, PCSpacing.xxl)
+            .padding(.bottom, PCSpacing.sm)
     }
 
     private func settingsGroup<Content: View>(@ViewBuilder content: () -> Content) -> some View {
@@ -560,6 +567,61 @@ struct SettingsView: View {
             .font(PCFont.mono(12))
             .foregroundStyle(Color.pcSuccess)
             .textSelection(.enabled)
+    }
+
+    /// 测试环境服务器地址编辑（切到测试环境时弹出）
+    private var stagingHostEditSheet: some View {
+        NavigationStack {
+            ZStack {
+                Color.pcBackground.ignoresSafeArea()
+                VStack(spacing: 16) {
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text("测试服务器地址")
+                            .font(PCFont.body(13, weight: .medium))
+                            .foregroundStyle(Color.pcFgSecondary)
+                        TextField("192.168.31.198", text: $viewModel.editStagingHost)
+                            .font(PCFont.mono(16))
+                            .foregroundStyle(Color.pcFg)
+                            .keyboardType(.URL)
+                            .textInputAutocapitalization(.never)
+                            .autocorrectionDisabled()
+                            .padding(PCSpacing.md)
+                            .background(Color.pcSurface)
+                            .cornerRadius(PCRadius.md)
+                            .overlay(
+                                RoundedRectangle(cornerRadius: PCRadius.md)
+                                    .stroke(viewModel.stagingHostValidationMessage == nil ? Color.pcBorder : Color.pcError, lineWidth: 1)
+                            )
+
+                        if let msg = viewModel.stagingHostValidationMessage {
+                            Text(msg)
+                                .font(PCFont.body(12))
+                                .foregroundStyle(Color.pcError)
+                        } else {
+                            Text("输入测试环境的 IP 或域名，可带端口（如 10.0.0.2:8080）")
+                                .font(PCFont.body(12))
+                                .foregroundStyle(Color.pcFgTertiary)
+                        }
+                    }
+
+                    Spacer()
+                }
+                .padding(PCSpacing.lg)
+            }
+            .navigationTitle("测试环境")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .navigationBarLeading) {
+                    Button("取消") { viewModel.cancelStagingHostEdit() }
+                        .foregroundStyle(Color.pcAccent)
+                }
+                ToolbarItem(placement: .navigationBarTrailing) {
+                    Button("保存") { viewModel.saveStagingHost() }
+                        .foregroundStyle(Color.pcAccent)
+                        .font(PCFont.body(16, weight: .semibold))
+                }
+            }
+        }
     }
 
     private var aboutSheet: some View {

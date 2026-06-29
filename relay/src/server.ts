@@ -1,7 +1,7 @@
 import Fastify from 'fastify';
 import fastifyWebsocket from '@fastify/websocket';
 import fastifyCors from '@fastify/cors';
-import { createPool, initDB, parseDBUrl, createUser, getUserByEmail, getUserById, registerDevice, removeDevice, cleanStaleTombstones, upsertDaemonAlias, deleteDaemon, updateDisplayName, updateEmail, addToIOSWaitlist, revokeToken, isTokenRevoked, cleanRevokedTokens, insertAuditLog, bindTokenToDaemon, updateSessionTitle, isSessionOwnedByUser, getSessionAllEvents, getTokenSummary, getTokensByDaemon, backfillSessionTokens, backfillSessionModel, backfillTokenDailyStats, aggregateDayIntoStats, cleanStaleEvents, getTokenDailySeries, getTokenByModel, getTokenByDaemon, getSessionTokenTrend } from './db.js';
+import { createPool, initDB, parseDBUrl, createUser, getUserByEmail, getUserById, getUserProfile, registerDevice, removeDevice, cleanStaleTombstones, upsertDaemonAlias, deleteDaemon, updateDisplayName, updateEmail, addToIOSWaitlist, revokeToken, isTokenRevoked, cleanRevokedTokens, insertAuditLog, bindTokenToDaemon, updateSessionTitle, isSessionOwnedByUser, getSessionAllEvents, getTokenSummary, getTokensByDaemon, backfillSessionTokens, backfillSessionModel, backfillTokenDailyStats, aggregateDayIntoStats, cleanStaleEvents, getTokenDailySeries, getTokenByModel, getTokenByDaemon, getSessionTokenTrend } from './db.js';
 import { Router } from './router.js';
 import { hashPassword, verifyPassword, signAccessToken, signRefreshToken, verifyAccessToken, verifyRefreshToken, verifyAccessTokenWithRevocation } from './auth.js';
 import { notifyUser, sessionStatusPush, daemonOfflinePush } from './push.js';
@@ -266,6 +266,23 @@ async function main() {
   });
 
   // ---- REST API: Device Registration (Phase 3) ----
+
+  // Get current user profile (including subscription plan)
+  app.get('/api/user/profile', async (req, reply) => {
+    const authHeader = req.headers.authorization;
+    if (!authHeader?.startsWith('Bearer ')) {
+      reply.code(401); return { error: 'authorization required' };
+    }
+    const payload = verifyAccessToken(authHeader.slice(7));
+    if (!payload) {
+      reply.code(401); return { error: 'invalid token' };
+    }
+    const profile = await getUserProfile(pool, payload.userId);
+    if (!profile) {
+      reply.code(404); return { error: 'user not found' };
+    }
+    return profile;
+  });
 
   // Register device for push notifications
   app.post('/api/devices/register', async (req, reply) => {
