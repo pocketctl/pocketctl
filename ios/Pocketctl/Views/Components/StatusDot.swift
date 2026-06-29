@@ -5,12 +5,36 @@ struct StatusDot: View {
     var size: CGFloat = 10
 
     var body: some View {
-        Circle()
-            .fill(dotColor)
-            .frame(width: size, height: size)
-            .if(isPulsing) { view in
-                view.modifier(PulseEffect(color: dotColor))
+        if isPulsing {
+            // 活跃状态：用「缩放 + 透明度」的圆环扩散代替 shadow 脉冲。
+            // shadow 动画会触发逐帧离屏栅格化，列表里多张卡片同时跑会明显掉帧；
+            // 圆环只改 transform / opacity，是 GPU 友好的合成操作。
+            ZStack {
+                Circle()
+                    .fill(dotColor.opacity(0.35))
+                    .frame(width: size, height: size)
+                    .scaleEffect(pulsing ? 1.8 : 1.0)
+                    .opacity(pulsing ? 0 : 0.6)
+                Circle()
+                    .fill(dotColor)
+                    .frame(width: size, height: size)
             }
+            .onAppear { startPulse() }
+        } else {
+            Circle()
+                .fill(dotColor)
+                .frame(width: size, height: size)
+        }
+    }
+
+    @State private var pulsing = false
+
+    private func startPulse() {
+        // 触发一次，repeatForever 让它持续；避免 onAppear 重复调用时叠加动画。
+        guard !pulsing else { return }
+        withAnimation(.easeOut(duration: 1.4).repeatForever(autoreverses: false)) {
+            pulsing = true
+        }
     }
 
     private var dotColor: Color {
@@ -28,20 +52,5 @@ struct StatusDot: View {
 
     private var isPulsing: Bool {
         ["online", "running", "busy"].contains(status)
-    }
-}
-
-struct PulseEffect: ViewModifier {
-    let color: Color
-    @State private var pulsing = false
-
-    func body(content: Content) -> some View {
-        content
-            .shadow(color: color.opacity(pulsing ? 0.6 : 0), radius: pulsing ? 6 : 0)
-            .onAppear {
-                withAnimation(.easeInOut(duration: 1.5).repeatForever(autoreverses: true)) {
-                    pulsing = true
-                }
-            }
     }
 }

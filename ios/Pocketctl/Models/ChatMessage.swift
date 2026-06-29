@@ -5,6 +5,15 @@ enum ChatMessageRole: Sendable {
     case agent
 }
 
+/// Token usage carried by an `agent_text` event (the final chunk of a turn).
+/// Mirrors the web client's `usage` object — only the fields needed for the
+/// "已完成" status bar are kept (output tokens). Input is retained for parity
+/// and future cost displays.
+struct TokenUsage: Sendable {
+    var outputTokens: Int
+    var inputTokens: Int
+}
+
 enum ChatMessageType: Sendable {
     case agentText
     case toolCall
@@ -32,6 +41,11 @@ struct ChatMessage: Identifiable, Sendable {
     var inputDescription: String = ""
     var rawInputJSON: String?  // JSON-encoded input (for AskUserQuestion parsing)
     var output: String?
+
+    /// Token usage attached to the final chunk of an agent_text turn
+    /// (output_tokens for the "已完成" status bar). nil for non-agent or
+    /// streaming chunks that didn't carry usage.
+    var usage: TokenUsage?
 
     // Command receipt fields (slash command feedback)
     var command: String = ""
