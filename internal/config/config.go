@@ -38,6 +38,20 @@ func AuthPath() (string, error) {
 	return filepath.Join(dir, "auth.json"), nil
 }
 
+// ApprovalSocketPath returns the user-level fixed path to the approval Unix
+// domain socket (~/.pocketctl/approval.sock). This path is shared between the
+// daemon (which listens on it) and the PreToolUse hook (which connects to it),
+// so it MUST be a single, stable, user-global value — it is the contract that
+// lets a `claude` process the user launched in their own terminal reach the
+// running daemon. Returns "" only if the home dir cannot be resolved.
+func ApprovalSocketPath() string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+	return filepath.Join(home, ".pocketctl", "approval.sock")
+}
+
 // SaveAuth persists relay URL and tokens to disk, preserving prod_relay_url if present.
 func SaveAuth(relayURL, accessToken, refreshToken string) error {
 	path, err := AuthPath()

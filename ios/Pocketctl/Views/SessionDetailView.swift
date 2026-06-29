@@ -29,6 +29,9 @@ struct SessionDetailView: View {
     @State private var popoverDismissed = false
     // "已完成" status bar — brief checkmark feedback after copying the reply
     @State private var replyCopied = false
+    /// 键盘正在升起/收起的过渡期。此期间内冻结自动滚动的 withAnimation，
+    /// 避免滚动动画与键盘动画争抢主线程时间，造成内容上移卡顿。
+    @State private var isKeyboardAnimating = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -94,6 +97,9 @@ struct SessionDetailView: View {
                             .padding(.bottom, PCSpacing.md)
                         }
                         .coordinateSpace(name: "sessionScroll")
+                        // 让系统接管键盘交互：下拉可 interactive 地收起键盘，避免
+                        // 自定义焦点逻辑与布局抖动叠加导致的卡顿。
+                        .scrollDismissesKeyboard(.interactively)
                         .onPreferenceChange(ScrollTopOffsetKey.self) { offset in
                             // offset = sentinel minY in scroll space; near top when > -50
                             if offset > -50 { vm.loadOlder() }
@@ -101,16 +107,25 @@ struct SessionDetailView: View {
                         .defaultScrollAnchor(.bottom)
                         .onChange(of: vm.scrollTick) { _, _ in
                             DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
-                                withAnimation {
+                                // 键盘过渡期间用无动画滚动，避免与键盘动画竞争主线程。
+                                if isKeyboardAnimating {
                                     proxy.scrollTo("bottom-anchor", anchor: .bottom)
+                                } else {
+                                    withAnimation {
+                                        proxy.scrollTo("bottom-anchor", anchor: .bottom)
+                                    }
                                 }
                             }
                         }
                         .onChange(of: vm.messages.count) { _, _ in
                             // Auto-scroll for new messages during live streaming (not initial load)
                             if !vm.isLoading, let last = vm.messages.last {
-                                withAnimation {
+                                if isKeyboardAnimating {
                                     proxy.scrollTo(last.id, anchor: .bottom)
+                                } else {
+                                    withAnimation {
+                                        proxy.scrollTo(last.id, anchor: .bottom)
+                                    }
                                 }
                             }
                         }
@@ -143,20 +158,37 @@ struct SessionDetailView: View {
                     }
                 }
                 .frame(maxHeight: .infinity)
-            }
-
-            // Bottom bar: input or status indicator — in flow layout, not overlay
-            if let vm = viewModel {
-                if vm.canSendMessage {
-                    inputBar(vm: vm)
-                } else if vm.isExecuting {
-                    executingIndicator
+                // 底部输入栏作为安全区的一部分承载，键盘上抬时系统对 ScrollView
+                // 内容区做 content-inset 调整而非高度重算，减少 LazyVStack 重排。
+                .safeAreaInset(edge: .bottom, spacing: 0) {
+                    bottomBar(vm: vm)
                 }
             }
         }
         .background(Color.pcBackground.ignoresSafeArea())
         .navigationBarHidden(true)
         .enableSwipeBack()
+        // 监听键盘过渡：标记动画窗口，期间冻结自动滚动动画，抚平上移卡顿。
+        .onReceive(
+            NotificationCenter.default.publisher(for: UIResponder.keyboardWillShowNotification)
+        ) { _ in
+            isKeyboardAnimating = true
+        }
+        .onReceive(
+            NotificationCenter.default.publisher(for: UIResponder.keyboardDidShowNotification)
+        ) { _ in
+            isKeyboardAnimating = false
+        }
+        .onReceive(
+            NotificationCenter.default.publisher(for: UIResponder.keyboardWillHideNotification)
+        ) { _ in
+            isKeyboardAnimating = true
+        }
+        .onReceive(
+            NotificationCenter.default.publisher(for: UIResponder.keyboardDidHideNotification)
+        ) { _ in
+            isKeyboardAnimating = false
+        }
         .task {
             let vm = SessionDetailViewModel(session: session, wsService: wsService, apiClient: apiClient)
             viewModel = vm
@@ -317,6 +349,21 @@ struct SessionDetailView: View {
         default:
             // User message
             ChatBubble(message: message)
+        }
+    }
+
+    // MARK: - Bottom bar (input / executing indicator)
+
+    /// Bottom bar 承载在 `.safeAreaInset(.bottom)` 中：可发送时显示输入栏，
+    /// 执行态显示进度指示器，其它情况（如已完成）返回空。原实现把这部分作为
+    /// VStack 的流式子视图，键盘上抬时会触发整页高度重算 + LazyVStack 重排，
+    /// 改为 safeAreaInset 后系统对内容区做 content-inset 调整，显著减少重排。
+    @ViewBuilder
+    private func bottomBar(vm: SessionDetailViewModel) -> some View {
+        if vm.canSendMessage {
+            inputBar(vm: vm)
+        } else if vm.isExecuting {
+            executingIndicator
         }
     }
 

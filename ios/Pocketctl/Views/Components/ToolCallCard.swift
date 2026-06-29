@@ -1,5 +1,12 @@
 import SwiftUI
 
+/// Tool-call card (Bash / Read / Grep / ...). Edit/MultiEdit/Write are handled
+/// by `DiffCard`; AskUserQuestion by `QuestionCard`.
+///
+/// input/output 的语法高亮结果在 init 中一次性预算（折叠态 + 展开态各一份），
+/// body 只读取常量。这避免键盘动画期间 body 被反复求值时重复执行逐字符分词
+/// ——这是会话详情页唤起键盘卡顿的主要 CPU 来源之一。output 通常在 tool_result
+/// 到达后即终态，message 变化时会触发 init 重跑，因此高亮始终与最新内容一致。
 struct ToolCallCard: View {
     let message: ChatMessage
     @Binding var messages: [ChatMessage]
@@ -11,6 +18,61 @@ struct ToolCallCard: View {
 
     @State private var isExpanded = false
     @State private var isOutputExpanded = false
+
+    // MARK: - Pre-computed (init) highlight results
+
+    private let hasInput: Bool
+    private let highlightedInput: AttributedString
+
+    private let hasOutput: Bool
+    private let highlightedOutputCollapsed: AttributedString
+    private let highlightedOutputFull: AttributedString
+    private let isOutputLongCached: Bool
+    private let outputLineCount: Int
+
+    init(message: ChatMessage, messages: Binding<[ChatMessage]>, messageIndex: Int, sessionActive: Bool) {
+        self.message = message
+        self._messages = messages
+        self.messageIndex = messageIndex
+        self.sessionActive = sessionActive
+
+        // Input highlight (inputDescription is stable once the tool_call arrives)
+        let inputLang = Self.inferInputLanguage(tool: message.tool)
+        if !message.inputDescription.isEmpty {
+            self.hasInput = true
+            self.highlightedInput = SyntaxHighlighter.highlight(message.inputDescription, language: inputLang)
+        } else {
+            self.hasInput = false
+            self.highlightedInput = AttributedString()
+        }
+
+        // Output highlight (output is terminal after tool_result; re-highlight on
+        // message change via init re-run). Two flavors: collapsed (truncated) +
+        // full; identical when output isn't long.
+        let outputLang = Self.inferOutputLanguage(
+            tool: message.tool,
+            inputDescription: message.inputDescription,
+            output: message.output
+        )
+        if let output = message.output, !output.isEmpty {
+            self.hasOutput = true
+            self.isOutputLongCached = message.isOutputLong
+            self.outputLineCount = output.components(separatedBy: "\n").count
+            let truncated = message.truncatedOutput ?? output
+            self.highlightedOutputCollapsed = SyntaxHighlighter.highlight(truncated, language: outputLang)
+            if message.isOutputLong {
+                self.highlightedOutputFull = SyntaxHighlighter.highlight(output, language: outputLang)
+            } else {
+                self.highlightedOutputFull = self.highlightedOutputCollapsed
+            }
+        } else {
+            self.hasOutput = false
+            self.isOutputLongCached = false
+            self.outputLineCount = 0
+            self.highlightedOutputCollapsed = AttributedString()
+            self.highlightedOutputFull = AttributedString()
+        }
+    }
 
     var body: some View {
         // Full-width tool card. No left bar (too noisy); the card itself
@@ -71,7 +133,7 @@ struct ToolCallCard: View {
 
                 VStack(alignment: .leading, spacing: 8) {
                     // Input section
-                    if !message.inputDescription.isEmpty {
+                    if hasInput {
                         Text("输入")
                             .font(PCFont.body(11, weight: .medium))
                             .foregroundStyle(Color.pcFgTertiary)
@@ -79,7 +141,7 @@ struct ToolCallCard: View {
                             .kerning(0.5)
 
                         ScrollView(.horizontal, showsIndicators: false) {
-                            Text(SyntaxHighlighter.highlight(message.inputDescription, language: inputLanguage))
+                            Text(highlightedInput)
                                 .font(PCFont.mono(12))
                                 .padding(PCSpacing.sm)
                                 .frame(maxWidth: .infinity, alignment: .leading)
@@ -89,18 +151,15 @@ struct ToolCallCard: View {
                     }
 
                     // Output section
-                    if let output = message.output, !output.isEmpty {
+                    if hasOutput {
                         Text("输出")
                             .font(PCFont.body(11, weight: .medium))
                             .foregroundStyle(Color.pcFgTertiary)
                             .textCase(.uppercase)
                             .kerning(0.5)
 
-                        let isLong = message.isOutputLong
-                        let displayOutput = isOutputExpanded ? output : (message.truncatedOutput ?? output)
-
                         ScrollView(.horizontal, showsIndicators: false) {
-                            Text(SyntaxHighlighter.highlight(displayOutput, language: outputLanguage))
+                            Text(isOutputExpanded ? highlightedOutputFull : highlightedOutputCollapsed)
                                 .font(PCFont.mono(12))
                                 .padding(PCSpacing.sm)
                                 .frame(maxWidth: .infinity, alignment: .leading)
@@ -108,11 +167,11 @@ struct ToolCallCard: View {
                         .background(Color.pcCodeBg)
                         .cornerRadius(PCRadius.sm)
 
-                        if isLong {
+                        if isOutputLongCached {
                             Button {
                                 isOutputExpanded.toggle()
                             } label: {
-                                Text(isOutputExpanded ? "收起" : "展开全部 (\(output.components(separatedBy: "\n").count) 行)")
+                                Text(isOutputExpanded ? "收起" : "展开全部 (\(outputLineCount) 行)")
                                     .font(PCFont.body(12))
                                     .foregroundStyle(Color.pcAccent)
                             }
@@ -144,11 +203,11 @@ struct ToolCallCard: View {
         )
     }
 
-    // MARK: - Language inference
+    // MARK: - Language inference (static — used by init)
 
     /// Infer language for input based on tool type
-    private var inputLanguage: String? {
-        switch message.tool {
+    private static func inferInputLanguage(tool: String?) -> String? {
+        switch tool {
         case "Bash": return "bash"
         case "Read", "Write", "Edit": return nil // path description, not code
         case "Grep", "Glob": return nil // pattern, not code
@@ -157,20 +216,20 @@ struct ToolCallCard: View {
     }
 
     /// Infer language for output based on tool type and output content
-    private var outputLanguage: String? {
-        guard let output = message.output, !output.isEmpty else { return nil }
+    private static func inferOutputLanguage(tool: String?, inputDescription: String, output: String?) -> String? {
+        guard let output = output, !output.isEmpty else { return nil }
 
-        switch message.tool {
+        switch tool {
         case "Bash": return "bash"
-        case "Read", "Write": return detectLanguageFromPath(message.inputDescription) ?? detectLanguageFromContent(output)
-        case "Edit": return detectLanguageFromPath(message.inputDescription) ?? detectLanguageFromContent(output)
+        case "Read", "Write": return detectLanguageFromPath(inputDescription) ?? detectLanguageFromContent(output)
+        case "Edit": return detectLanguageFromPath(inputDescription) ?? detectLanguageFromContent(output)
         case "Grep": return detectLanguageFromContent(output)
         default: return detectLanguageFromContent(output)
         }
     }
 
     /// Detect language from file path extension
-    private func detectLanguageFromPath(_ path: String) -> String? {
+    private static func detectLanguageFromPath(_ path: String) -> String? {
         let extMap: [String: String] = [
             "swift": "swift", "go": "go", "ts": "typescript", "tsx": "typescript",
             "js": "javascript", "jsx": "javascript", "py": "python",
@@ -189,7 +248,7 @@ struct ToolCallCard: View {
     }
 
     /// Detect language from content heuristics
-    private func detectLanguageFromContent(_ content: String) -> String? {
+    private static func detectLanguageFromContent(_ content: String) -> String? {
         let trimmed = content.trimmingCharacters(in: .whitespacesAndNewlines)
         if trimmed.hasPrefix("{") || trimmed.hasPrefix("[") { return "json" }
         if trimmed.hasPrefix("#!") { return "bash" }

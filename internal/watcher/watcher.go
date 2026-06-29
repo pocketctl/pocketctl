@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -36,6 +37,7 @@ type SessionWatcher struct {
 	eventsCh       chan SessionEvent
 	knownSessions  map[string]DiscoveredSession // sessionId → session
 	fileToSession  map[string]string            // filepath → sessionId
+	dropped        uint64                       // events dropped because the consumer wasn't draining
 }
 
 // NewSessionWatcher creates a watcher for Claude Code sessions directory
@@ -67,6 +69,30 @@ func NewSessionWatcher() (*SessionWatcher, error) {
 // Events returns the channel for session discovery events
 func (sw *SessionWatcher) Events() <-chan SessionEvent {
 	return sw.eventsCh
+}
+
+// emit sends a session event without blocking. The events channel is buffered
+// (32) and normally drained by the daemon's watcher-event handler. But if that
+// consumer goroutine ever dies (e.g. an unrecovered panic before supervision
+// existed), a blocking send here would freeze the watcher's loop — including
+// the 30s scanExisting ticker — leaving session discovery permanently blind
+// (new session files, including --continue resumes, would never be noticed).
+// Non-blocking send means we may drop an event under backpressure, but a
+// dropped event is recoverable on the next fsnotify redraw or the next 30s
+// scan; a frozen watcher is not. Dropped events are counted + logged.
+func (sw *SessionWatcher) emit(evt SessionEvent) {
+	select {
+	case sw.eventsCh <- evt:
+	default:
+		sw.dropped++
+		// Throttle: only log every 16th drop to avoid spamming the daemon log
+		// when the consumer is gone for a while.
+		if sw.dropped%16 == 1 {
+			slog.Warn("session watcher event dropped (consumer not draining)",
+				"action", evt.Action, "session", evt.Session.SessionID,
+				"dropped_total", sw.dropped)
+		}
+	}
 }
 
 // Start begins watching. It first scans existing files, then listens for changes.
@@ -137,21 +163,21 @@ func (sw *SessionWatcher) handleNewFile(path string) {
 		existing.Status = sess.Status
 		existing.Cwd = sess.Cwd
 		sw.knownSessions[sess.SessionID] = existing
-		sw.eventsCh <- SessionEvent{
+		sw.emit(SessionEvent{
 			Action:   "changed",
 			Session:  existing,
 			Filepath: path,
-		}
+		})
 		return
 	}
 
 	// Genuinely new session
 	sw.knownSessions[sess.SessionID] = sess
-	sw.eventsCh <- SessionEvent{
+	sw.emit(SessionEvent{
 		Action:   "discovered",
 		Session:  sess,
 		Filepath: path,
-	}
+	})
 }
 
 // handleChangedFile processes a modified session file (status update, etc.)
@@ -163,11 +189,11 @@ func (sw *SessionWatcher) handleChangedFile(path string) {
 
 	sw.fileToSession[path] = sess.SessionID
 	sw.knownSessions[sess.SessionID] = sess
-	sw.eventsCh <- SessionEvent{
+	sw.emit(SessionEvent{
 		Action:   "changed",
 		Session:  sess,
 		Filepath: path,
-	}
+	})
 }
 
 // handleRemovedFile processes a deleted session file.
@@ -192,11 +218,11 @@ func (sw *SessionWatcher) handleRemovedFile(path string) {
 	// a new PID file but the same sessionId. knownSessions is per-daemon-process,
 	// so stale entries don't accumulate forever.
 	if sess, exists := sw.knownSessions[sessionId]; exists {
-		sw.eventsCh <- SessionEvent{
+		sw.emit(SessionEvent{
 			Action:   "removed",
 			Session:  sess,
 			Filepath: path,
-		}
+		})
 	}
 }
 
@@ -227,22 +253,22 @@ func (sw *SessionWatcher) scanExisting() {
 				existing.Pid = sess.Pid
 				existing.Cwd = sess.Cwd
 				sw.knownSessions[sess.SessionID] = existing
-				sw.eventsCh <- SessionEvent{
+				sw.emit(SessionEvent{
 					Action:   "changed",
 					Session:  existing,
 					Filepath: path,
-				}
+				})
 			}
 			continue
 		}
 
 		// New session — emit discovered
 		sw.knownSessions[sess.SessionID] = sess
-		sw.eventsCh <- SessionEvent{
+		sw.emit(SessionEvent{
 			Action:   "discovered",
 			Session:  sess,
 			Filepath: path,
-		}
+		})
 	}
 
 	// Check for removed files (file was tracked but no longer on disk)
@@ -260,11 +286,11 @@ func (sw *SessionWatcher) scanExisting() {
 			if !stillTracked {
 				if sess, exists := sw.knownSessions[sessionId]; exists {
 					delete(sw.knownSessions, sessionId)
-					sw.eventsCh <- SessionEvent{
+					sw.emit(SessionEvent{
 						Action:   "removed",
 						Session:  sess,
 						Filepath: path,
-					}
+					})
 				}
 			}
 		}
