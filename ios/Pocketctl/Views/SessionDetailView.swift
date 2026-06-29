@@ -167,7 +167,7 @@ struct SessionDetailView: View {
         }
         .background(Color.pcBackground.ignoresSafeArea())
         .navigationBarHidden(true)
-        .enableSwipeBack()
+        .swipeToPop()
         // 监听键盘过渡：标记动画窗口，期间冻结自动滚动动画，抚平上移卡顿。
         .onReceive(
             NotificationCenter.default.publisher(for: UIResponder.keyboardWillShowNotification)

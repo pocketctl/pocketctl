@@ -30,6 +30,7 @@ Commands:
   daemon logs    Show daemon logs
   daemon doctor  Diagnose connection and configuration issues
   daemon update  Update daemon to the latest version
+  daemon service Install/remove a native auto-restart service (launchd/systemd)
   uninstall      Remove pocketctl binary and all local data
   version        Print version
   help           Show this help
@@ -54,6 +55,7 @@ Options:
   --prod         Use production relay from config (prod_relay_url)
   --email        Login via email verification code (headless servers)
   --foreground   Run daemon in foreground (don't daemonize)
+  --debug        Verbose debug logs streamed to console (implies --foreground)
   --token <t>    JWT token (or POCKETCTL_TOKEN env)
   --id <id>      Daemon ID (auto-generated if empty)
 
@@ -74,6 +76,7 @@ const helpZh = `pocketctl - 远程 AI 编程代理控制
   daemon logs    查看 daemon 日志
   daemon doctor  诊断连接和配置问题
   daemon update  更新到最新版本
+  daemon service 安装/卸载原生自动重启服务（launchd/systemd）
   uninstall      卸载 pocketctl，删除二进制和所有本地数据
   version        打印版本号
   help           显示此帮助
@@ -98,6 +101,7 @@ Relay 连接（默认: 生产环境 wss://www.pocketctl.me/ws）:
   --prod         使用配置中的生产 relay（prod_relay_url）
   --email        通过邮箱验证码登录（无浏览器环境）
   --foreground   前台运行 daemon（不后台化）
+  --debug        调试日志实时输出到控制台（隐含 --foreground）
   --token <t>    JWT 令牌（或 POCKETCTL_TOKEN 环境变量）
   --id <id>      Daemon ID（为空则自动生成）
 
@@ -121,6 +125,10 @@ var messages = map[string]msg{
 	"daemon.version":        {"Version: %s", "版本: %s"},
 	"daemon.agents":         {"Agents: %s", "Agents: %s"},
 	"daemon.logs":           {"Logs: %s", "日志: %s"},
+	"daemon.debug_banner": {
+		"🐛 debug mode: streaming all logs to console (level=DEBUG); full log also at %s. Press Ctrl-C to stop.",
+		"🐛 调试模式：所有日志实时输出到控制台 (level=DEBUG)；完整日志同时写入 %s。按 Ctrl-C 停止。",
+	},
 	"daemon.shutting_down":  {"\nShutting down...", "\n正在关闭..."},
 	"daemon.stopped":        {"Daemon stopped", "Daemon 已停止"},
 	"daemon.not_running":    {"Daemon is not running", "Daemon 未运行"},
@@ -129,11 +137,44 @@ var messages = map[string]msg{
 		"Daemon 运行中 (PID %d)，状态不可用",
 	},
 	"daemon.usage_sub": {
-		"usage: pocketctl daemon <start|stop|status|logs|doctor|update>",
-		"用法: pocketctl daemon <start|stop|status|logs|doctor|update>",
+		"usage: pocketctl daemon <start|stop|status|logs|doctor|update|service>",
+		"用法: pocketctl daemon <start|stop|status|logs|doctor|update|service>",
 	},
 	"daemon.unknown_sub": {"unknown daemon subcommand: %s", "未知的 daemon 子命令: %s"},
 	"daemon.already_running": {"daemon already running (PID %d)", "守护进程已在运行 (PID %d)"},
+
+	// ---- service.* (native supervisor install/uninstall/status) ----------
+	"service.usage_sub": {
+		"usage: pocketctl daemon service <install|uninstall|status>",
+		"用法: pocketctl daemon service <install|uninstall|status>",
+	},
+	"service.unknown_sub": {"unknown service subcommand: %s", "未知的 service 子命令: %s"},
+	"service.no_token": {
+		"No stored auth token. Run 'pocketctl login' before installing the service.",
+		"未找到已保存的登录令牌。请先运行 'pocketctl login' 再安装服务。",
+	},
+	"service.stopping_standalone": {
+		"Stopping standalone daemon (PID %d) before handing off to the supervisor...",
+		"先停止独立运行的 daemon (PID %d)，再交由系统服务接管...",
+	},
+	"service.installed": {
+		"Service installed and started: %s",
+		"服务已安装并启动: %s",
+	},
+	"service.install_fail":   {"install service failed: %v", "安装服务失败: %v"},
+	"service.uninstalled":    {"Service uninstalled", "服务已卸载"},
+	"service.uninstall_fail": {"uninstall service failed: %v", "卸载服务失败: %v"},
+	"service.status_fail":    {"query service status failed: %v", "查询服务状态失败: %v"},
+	"service.unit_path":      {"Unit:      %s", "服务文件:  %s"},
+	"service.linger_note": {
+		"Tip: lingering was enabled so the daemon survives logout. If it was denied, run: loginctl enable-linger $USER",
+		"提示: 已尝试开启 linger 使 daemon 在登出后继续运行。若被拒绝，请手动运行: loginctl enable-linger $USER",
+	},
+	"service.status_installed": {"Installed:  %s", "已安装:    %s"},
+	"service.status_running":   {"Running:    %s", "运行中:    %s"},
+	"service.status_detail":    {"Detail:    %s", "详情:      %s"},
+	"service.yes":              {"yes", "是"},
+	"service.no":               {"no", "否"},
 
 	// ---- status.* (cmdDaemonStatus table; labels stay English to keep
 	// column alignment, only values localize) ------------------------------

@@ -15,8 +15,38 @@ func PIDPath() string {
 	return filepath.Join(pidDir, "daemon.pid")
 }
 
+// logPrefix is the filename prefix for dated daemon log files
+// (<prefix>-YYYY-MM-DD.log).
+const logPrefix = "daemon"
+
+// LogPrefix returns the dated-log filename prefix.
+func LogPrefix() string { return logPrefix }
+
+// LogDir returns the directory holding daemon log files, split by date:
+// ~/.pocketctl/logs. Falls back to /tmp/pocketctl/logs only if the home
+// directory can't be resolved.
+func LogDir() string {
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		return filepath.Join(pidDir, "logs")
+	}
+	return filepath.Join(home, ".pocketctl", "logs")
+}
+
+// LogPath returns the path of today's daemon log file
+// (~/.pocketctl/logs/daemon-YYYY-MM-DD.log). Kept for callers that want "the
+// current log" (status banner, `daemon logs`).
 func LogPath() string {
-	return filepath.Join(pidDir, "daemon.log")
+	return filepath.Join(LogDir(), logPrefix+"-"+time.Now().Format("2006-01-02")+".log")
+}
+
+// ServiceBootLogPath is a STATIC path (~/.pocketctl/logs/service-boot.log) used
+// as the launchd/systemd StandardOut/Error target. It must be static because a
+// service unit's log path is baked in at install time and can't rotate daily;
+// it only captures early-boot stdout/stderr before the daemon installs its own
+// date-rotating logger (which then owns fd 1/2 in foreground mode).
+func ServiceBootLogPath() string {
+	return filepath.Join(LogDir(), "service-boot.log")
 }
 
 func StatePath() string {
