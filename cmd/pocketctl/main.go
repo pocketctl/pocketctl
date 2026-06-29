@@ -1418,10 +1418,11 @@ func handleCommands(ctx context.Context, client *ws.Client, sm *session.SessionM
 				// available = slash commands the agent reported in its init event
 				// (authoritative for the -p environment); empty falls back to scan.
 				available, _ := sm.GetSessionSlashCommands(cmd.SessionID)
+				agentType, _ := sm.GetSessionAgent(cmd.SessionID)
 				client.SendMsg(protocol.DaemonEvent{
 					Type:      "command_list",
 					SessionID: cmd.SessionID,
-					Commands:  commands.ListCommands(cwd, available),
+					Commands:  commands.ListCommands(cwd, agentType, available),
 				})
 
 			case "get_session_meta":
