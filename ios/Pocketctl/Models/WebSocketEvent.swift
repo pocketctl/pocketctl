@@ -83,6 +83,18 @@ struct WebSocketEvent {
     var input: Any? { raw["input"] }
     var output: String? { raw["output"] as? String }
 
+    /// Token usage for `agent_text` events — the final turn chunk carries
+    /// `{output_tokens, input_tokens, ...}`. Accepts both top-level `usage`
+    /// and a nested `payload.usage` (relay may forward either way), matching
+    /// the web client.
+    var usage: TokenUsage? {
+        let u = (raw["usage"] as? [String: Any]) ?? ((raw["payload"] as? [String: Any])?["usage"] as? [String: Any])
+        guard let u else { return nil }
+        let out = (u["output_tokens"] as? Int) ?? Int(u["output_tokens"] as? String ?? "") ?? 0
+        let inp = (u["input_tokens"] as? Int) ?? Int(u["input_tokens"] as? String ?? "") ?? 0
+        return TokenUsage(outputTokens: out, inputTokens: inp)
+    }
+
     /// Approval request id — for approval_request events (PreToolUse hook).
     var requestId: String? { raw["request_id"] as? String }
 
@@ -156,4 +168,9 @@ struct WebSocketEvent {
     var upgradeSuccess: Bool? { raw["success"] as? Bool }
     /// Resolved model name — for session_meta.
     var resolvedModel: String? { raw["model"] as? String }
+
+    /// Last activity timestamp — for session_status. Used to recover the real
+    /// turn start when resuming a running session so the elapsed timer doesn't
+    /// restart from zero on re-entry.
+    var lastActivityAt: String? { raw["last_activity_at"] as? String }
 }

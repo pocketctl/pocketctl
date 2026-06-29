@@ -16,6 +16,14 @@ enum RelativeTime {
         return f
     }()
 
+    /// 输出 Formatter（"MM-dd HH:mm"）— 缓存为静态常量，避免每张卡片渲染时都 new。
+    private static let outputFormatter: DateFormatter = {
+        let f = DateFormatter()
+        f.dateFormat = "MM-dd HH:mm"
+        f.locale = Locale(identifier: "zh_CN")
+        return f
+    }()
+
     static func format(_ isoString: String?) -> String {
         guard let isoString, !isoString.isEmpty else { return "" }
 
@@ -34,9 +42,6 @@ enum RelativeTime {
         if interval < 3600 { return "\(Int(interval / 60))分钟前" }
         if interval < 86400 { return "\(Int(interval / 3600))小时前" }
 
-        let outputFmt = DateFormatter()
-        outputFmt.dateFormat = "MM-dd HH:mm"
-        outputFmt.locale = Locale(identifier: "zh_CN")
-        return outputFmt.string(from: date)
+        return outputFormatter.string(from: date)
     }
 }

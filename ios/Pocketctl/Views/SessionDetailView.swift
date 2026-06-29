@@ -13,14 +13,22 @@ struct SessionDetailView: View {
 
     @Environment(\.dismiss) private var dismiss
     @State private var viewModel: SessionDetailViewModel?
-    private let apiClient = APIClient()
-    private let wsService = WebSocketService()
+    private let apiClient: APIClient
+    private let wsService: WebSocketService
     @State private var inputText = ""
+
+    init(session: Session, wsService: WebSocketService, apiClient: APIClient) {
+        self.session = session
+        self.wsService = wsService
+        self.apiClient = apiClient
+    }
     @FocusState private var isInputFocused: Bool
     @State private var showScrollToBottom = false
     // Slash command autocomplete state
     @State private var selectedCommandIndex = 0
     @State private var popoverDismissed = false
+    // "已完成" status bar — brief checkmark feedback after copying the reply
+    @State private var replyCopied = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -42,6 +50,12 @@ struct SessionDetailView: View {
                                 }
                                 .frame(height: 0)
 
+                                // 首次加载骨架屏：replay 返回前避免整页空白，给出即时反馈。
+                                // 命中内存缓存时 messages 非空，不会走到这里。
+                                if vm.isLoading && vm.messages.isEmpty {
+                                    loadingSkeleton
+                                }
+
                                 ForEach(Array(vm.messages.enumerated()), id: \.element.id) { index, message in
                                     messageView(message: message, index: index, vm: vm)
                                         .id(message.id)
@@ -58,6 +72,14 @@ struct SessionDetailView: View {
                                         sessionActive: vm.isSessionActive
                                     )
                                     .id("subagent-\(subAgent.agentId)")
+                                }
+
+                                // "已完成" status bar — left-aligned, inside the
+                                // message stream (mirrors web's turn-status-bar).
+                                if vm.completedBarVisible {
+                                    completedStatusBar(vm: vm)
+                                        .padding(.top, PCSpacing.xs)
+                                        .transition(.opacity)
                                 }
 
                                 // Bottom anchor: scroll-to-bottom target + visibility detector
@@ -134,6 +156,7 @@ struct SessionDetailView: View {
         }
         .background(Color.pcBackground.ignoresSafeArea())
         .navigationBarHidden(true)
+        .enableSwipeBack()
         .task {
             let vm = SessionDetailViewModel(session: session, wsService: wsService, apiClient: apiClient)
             viewModel = vm
@@ -209,6 +232,36 @@ struct SessionDetailView: View {
     }
 
     // MARK: - Messages
+
+    /// 首屏加载占位：交替的 user/agent 气泡骨架，用 redacted 给出即时反馈，
+    /// 避免空白等待。replay 返回后 vm.messages 非空，骨架自动消失。
+    private var loadingSkeleton: some View {
+        VStack(alignment: .leading, spacing: PCSpacing.md) {
+            ForEach(0..<4, id: \.self) { i in
+                skeletonBubble(isUser: i % 2 == 1)
+            }
+        }
+        .padding(.top, PCSpacing.sm)
+    }
+
+    private func skeletonBubble(isUser: Bool) -> some View {
+        HStack {
+            if isUser { Spacer(minLength: 60) }
+            VStack(alignment: .leading, spacing: 6) {
+                RoundedRectangle(cornerRadius: PCRadius.sm)
+                    .fill(Color.pcSurface)
+                    .frame(width: isUser ? 140 : 200, height: 12)
+                RoundedRectangle(cornerRadius: PCRadius.sm)
+                    .fill(Color.pcSurface)
+                    .frame(width: isUser ? 100 : 160, height: 12)
+            }
+            .padding(PCSpacing.sm)
+            .background(Color.pcSurface.opacity(0.6))
+            .cornerRadius(PCRadius.lg)
+            .redacted(reason: .placeholder)
+            if !isUser { Spacer(minLength: 60) }
+        }
+    }
 
     @ViewBuilder
     private func messageView(message: ChatMessage, index: Int, vm: SessionDetailViewModel) -> some View {
@@ -364,6 +417,15 @@ struct SessionDetailView: View {
                 .font(PCFont.body(14))
                 .foregroundStyle(Color.pcFgSecondary)
 
+            if let elapsed = viewModel?.executionElapsedString {
+                Text("· \(elapsed)")
+                    .font(PCFont.mono(14))
+                    .foregroundStyle(Color.pcFgSecondary)
+                    .monospacedDigit()
+                    // Re-evaluate every tick while executing.
+                    .id(viewModel?.executionTick ?? 0)
+            }
+
             Spacer()
         }
         .padding(.horizontal, PCSpacing.lg)
@@ -375,6 +437,68 @@ struct SessionDetailView: View {
                 .frame(height: 1),
             alignment: .top
         )
+    }
+
+    // MARK: - "已完成" status bar
+
+    /// Mirrors the web client's `turn-status-bar` (done state): a left-aligned
+    /// row with a checkmark, "已完成", the frozen turn duration, output token
+    /// count, and icon-only copy / retry buttons.
+    @ViewBuilder
+    private func completedStatusBar(vm: SessionDetailViewModel) -> some View {
+        HStack(spacing: 6) {
+            Image(systemName: "checkmark")
+                .font(.system(size: 10, weight: .bold))
+                .foregroundStyle(Color.pcAccent)
+
+            Text("已完成")
+                .font(PCFont.body(12, weight: .medium))
+                .foregroundStyle(Color.pcFgSecondary)
+
+            if let duration = vm.lastTurnDuration {
+                Text("· \(duration)")
+                    .font(PCFont.mono(12))
+                    .foregroundStyle(Color.pcFgTertiary)
+                    .monospacedDigit()
+            }
+
+            if let usage = vm.lastAgentUsage, usage.outputTokens > 0 {
+                Text("· 输出 \(vm.fmtTokens(usage.outputTokens)) tokens")
+                    .font(PCFont.body(12))
+                    .foregroundStyle(Color.pcFgTertiary)
+            }
+
+            Spacer(minLength: 4)
+
+            // Copy last reply — icon only
+            Button {
+                if let text = vm.copyLastReply() {
+                    UIPasteboard.general.string = text
+                    replyCopied = true
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
+                        replyCopied = false
+                    }
+                }
+            } label: {
+                Image(systemName: replyCopied ? "checkmark" : "doc.on.doc")
+                    .font(.system(size: 13))
+                    .foregroundStyle(replyCopied ? Color.pcAccent : Color.pcFgTertiary)
+            }
+            .buttonStyle(.plain)
+            .disabled(!vm.hasLastAgentReply)
+
+            // Retry last prompt — icon only, gated by canRetry
+            if vm.canRetry && vm.hasLastUserPrompt {
+                Button {
+                    vm.retryLastPrompt()
+                } label: {
+                    Image(systemName: "arrow.clockwise")
+                        .font(.system(size: 13))
+                        .foregroundStyle(Color.pcFgTertiary)
+                }
+                .buttonStyle(.plain)
+            }
+        }
     }
 
     // MARK: - Helpers

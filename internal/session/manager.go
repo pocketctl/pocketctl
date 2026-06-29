@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -308,6 +309,74 @@ func (sm *SessionManager) handleApprovalRequest(req approval.Request) {
 		SessionID:      req.SessionID,
 		Status:         protocol.StatusWaitingApproval,
 		LastActivityAt: time.Now().UTC().Format(time.RFC3339),
+	}
+}
+
+// handleOpencodePermission surfaces an opencode permission.asked event as an
+// approval_request card (mirroring handleApprovalRequest for Claude) and arms a
+// fail-safe: if no client answers within opencodeApprovalTimeout, the permission
+// is auto-rejected so an unattended turn doesn't hang forever. The reply path is
+// ResolveApproval → ReplyPermission (already wired for opencode sessions).
+func (sm *SessionManager) handleOpencodePermission(sessionID, requestID, tool string, input json.RawMessage) {
+	if sessionID == "" || requestID == "" {
+		return
+	}
+	sm.mu.Lock()
+	ps, ok := sm.sessions[sessionID]
+	if !ok || ps.PendingRequestID == requestID { // unknown session, or already surfaced (SSE may repeat)
+		sm.mu.Unlock()
+		return
+	}
+	ps.Status = protocol.StatusWaitingApproval
+	ps.PendingRequestID = requestID
+	sm.mu.Unlock()
+
+	sm.outputCh <- protocol.DaemonEvent{
+		Type:      "approval_request",
+		SessionID: sessionID,
+		RequestID: requestID,
+		Tool:      tool,
+		Input:     input,
+	}
+	sm.outputCh <- protocol.DaemonEvent{
+		Type:           "session_status",
+		SessionID:      sessionID,
+		Status:         protocol.StatusWaitingApproval,
+		LastActivityAt: time.Now().UTC().Format(time.RFC3339),
+	}
+
+	// Fail-safe auto-reject (chosen policy: timeout → reject).
+	go func() {
+		time.Sleep(opencodeApprovalTimeout)
+		sm.mu.RLock()
+		p, ok := sm.sessions[sessionID]
+		stillPending := ok && p.PendingRequestID == requestID
+		sm.mu.RUnlock()
+		if stillPending {
+			slog.Info("opencode permission auto-rejected (no client response)", "session", sessionID, "req", requestID)
+			_ = sm.ResolveApproval(sessionID, requestID, false)
+		}
+	}()
+}
+
+// clearOpencodePermissionReplied clears a session's pending approval when its
+// permission was answered (e.g. via our reply, or directly), so the waiting state
+// doesn't linger.
+func (sm *SessionManager) clearOpencodePermissionReplied(sessionID, requestID string) {
+	if sessionID == "" {
+		return
+	}
+	sm.mu.Lock()
+	ps, ok := sm.sessions[sessionID]
+	cleared := ok && ps.PendingRequestID == requestID
+	if cleared {
+		ps.PendingRequestID = ""
+		ps.Status = protocol.StatusRunning
+		ps.LastActivityAt = time.Now()
+	}
+	sm.mu.Unlock()
+	if cleared {
+		sm.outputCh <- protocol.DaemonEvent{Type: "session_status", SessionID: sessionID, Status: protocol.StatusRunning}
 	}
 }
 

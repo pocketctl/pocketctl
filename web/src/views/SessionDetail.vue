@@ -1527,6 +1527,16 @@ onMounted(() => {
   }))
 
   cleanups.push(onEvent('session_status', (msg: any) => {
+    // Keep the session-list entry fresh: the switch-time correction (replay_end)
+    // reads meta.statusEffective/status from allSessions, so a stale mount-time
+    // snapshot would leave a just-finished session looking "running" after a
+    // switch (timer stuck/from zero). Update it on every status event.
+    const ls = allSessions.value.find((x: any) => x.session_id === msg.session_id)
+    if (ls) {
+      ls.status = msg.status
+      ls.statusEffective = msg.status
+      ls.last_activity_at = new Date().toISOString()
+    }
     if (msg.session_id === sessionId.value) { status.value = msg.status; if (msg.exit_reason) exitReason.value = msg.exit_reason; if (msg.exited_at) exitedAt.value = msg.exited_at }
   }))
 

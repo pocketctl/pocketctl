@@ -32,7 +32,7 @@ struct SessionListView: View {
 
                 // Content
                 if let vm = viewModel {
-                    if vm.filteredSessions.isEmpty && !vm.isLoading {
+                    if vm.sortedSessions.isEmpty && !vm.isLoading {
                         emptyState
                         Spacer()
                     } else {
@@ -44,8 +44,9 @@ struct SessionListView: View {
             }
         }
         .navigationBarHidden(true)
+        .enableSwipeBack()
         .navigationDestination(item: $navigateToDetail) { session in
-            SessionDetailView(session: session)
+            SessionDetailView(session: session, wsService: wsService, apiClient: apiClient)
         }
         .sheet(isPresented: $showNewSession) {
             NewSessionSheet(daemon: daemon, wsService: wsService, onHeightChange: { newSessionSheetHeight = max($0 + 40, 400) }) { _ in
@@ -63,9 +64,15 @@ struct SessionListView: View {
             didConnect = true
         }
         .onAppear {
-            // Incremental refresh only — data is already showing
+            // Incremental refresh only — data is already showing.
+            // 延迟到 pop 转场动画结束后再发 list_sessions，避免回包触发的
+            // sessions 重建与转场动画抢同一帧（返回时卡顿的主因）。
+            // 首次进入时 didConnect 尚未置位，不会触发。
             if let vm = viewModel, vm.isConnected {
-                vm.refresh()
+                Task { @MainActor in
+                    try? await Task.sleep(for: .milliseconds(400))
+                    vm.refresh()
+                }
             }
         }
     }
@@ -127,7 +134,7 @@ struct SessionListView: View {
     private func sessionList(vm: SessionListViewModel) -> some View {
         ScrollView {
             LazyVStack(spacing: PCSpacing.sm) {
-                ForEach(Array(vm.displayedSessions.enumerated()), id: \.element.sessionId) { index, session in
+                ForEach(vm.displayedSessions) { session in
                     Group {
                         if session.status == "exited" || session.status == "completed" || session.status == "error" || session.status == "killed" {
                             // Swipe-to-delete for terminal sessions
@@ -146,7 +153,7 @@ struct SessionListView: View {
                     }
                     .frame(height: 68)
                     .onAppear {
-                        vm.loadMoreIfNeeded(currentIndex: index)
+                        vm.loadMoreIfNeeded(currentSessionId: session.sessionId)
                     }
 
                     // Exited session banner
@@ -302,6 +309,10 @@ struct SwipeToDelete<Content: View>: View {
     private let verticalRatioThreshold: CGFloat = 0.6
     /// 最小垂直距离（绝对值）超过此值才判定为垂直滚动，避免细微抖动误判
     private let minVerticalDistance: CGFloat = 8
+    /// 手势触发门槛。太低（6pt）会让 ScrollView 的垂直 pan 与每张卡片的左滑
+    /// 手势长时间争夺事件所有权，滚动时掉帧。提到 12pt 让 ScrollView 优先
+    /// 识别垂直滚动，左滑仍很灵敏。
+    private let dragMinimumDistance: CGFloat = 12
 
     init(@ViewBuilder content: () -> Content, onDelete: @escaping () -> Void) {
         self.content = content()
@@ -334,7 +345,7 @@ struct SwipeToDelete<Content: View>: View {
                 .background(Color.pcBackground)
                 .offset(x: offset)
                 .gesture(
-                    DragGesture(minimumDistance: 6)
+                    DragGesture(minimumDistance: dragMinimumDistance)
                         .onChanged { value in
                             let h = value.translation.width
                             let v = abs(value.translation.height)

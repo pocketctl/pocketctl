@@ -15,13 +15,38 @@ import (
 	"github.com/pocketctl/pocketctl/internal/protocol"
 )
 
+// agentClaudeCode is the agent-type string for Claude Code sessions. It mirrors
+// adapter.AgentClaude; duplicated here to keep this package free of an adapter
+// dependency. The builtin slash-command table (clear/compact/model/…) is Claude
+// specific, so it is only injected for this agent type (and unknown/legacy
+// types, which default to the Claude code path). Codex and opencode have no
+// slash-command surface of their own and must not receive Claude's builtins.
+const agentClaudeCode = "claude-code"
+
+// useClaudeBuiltins reports whether the builtin Claude command table applies to
+// agentType. Unknown/empty agent types keep the legacy Claude behaviour so
+// terminal sessions without a resolved agent (and existing callers) are
+// unaffected; codex/opencode opt out.
+func useClaudeBuiltins(agentType string) bool {
+	switch agentType {
+	case "", agentClaudeCode:
+		return true
+	default:
+		return false
+	}
+}
+
 // ListCommands enumerates slash commands and skills available for a session
 // running in cwd, merging builtin + project + user + plugin sources. Results
 // are deduplicated by name (first source wins, in builtin > project > user >
 // plugin order) and sorted by name.
-func ListCommands(cwd string, available []string) []protocol.CommandItem {
+//
+// agentType selects the builtin command set: Claude Code (and unknown/legacy
+// types) get the Claude builtins; codex/opencode get none, since their CLIs
+// have no slash-command surface and surfacing Claude's would mislead.
+func ListCommands(cwd, agentType string, available []string) []protocol.CommandItem {
 	home, _ := os.UserHomeDir()
-	scanned := listCommands(cwd, home)
+	scanned := listCommands(cwd, home, agentType)
 
 	// No authoritative list from the agent (e.g. terminal session without an
 	// init event): fall back to the full filesystem scan.
@@ -66,9 +91,11 @@ func ListCommands(cwd string, available []string) []protocol.CommandItem {
 
 // listCommands is the testable core of ListCommands, taking an explicit home
 // directory so tests can inject a temp directory instead of reading the real one.
-func listCommands(cwd, home string) []protocol.CommandItem {
+func listCommands(cwd, home, agentType string) []protocol.CommandItem {
 	var all []protocol.CommandItem
-	all = append(all, builtinCommands()...)
+	if useClaudeBuiltins(agentType) {
+		all = append(all, builtinCommands()...)
+	}
 	if cwd != "" {
 		all = append(all, scanCommandsAndSkills(filepath.Join(cwd, ".claude"), "project", "")...)
 	}

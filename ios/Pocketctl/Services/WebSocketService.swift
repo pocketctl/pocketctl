@@ -17,8 +17,17 @@ final class WebSocketService: @unchecked Sendable {
     /// Daemon tracking
     var daemons: [String: Daemon] = [:]
 
-    /// Available models per daemon (populated by model_list events)
+    /// Available models keyed by `"<daemonId>:<agent>"` (populated by model_list
+    /// events). The daemon answers `list_models` per-agent (Claude reads
+    /// ~/.claude/settings.json, codex returns its own list, opencode queries its
+    /// serve API), so the cache must be scoped per agent — otherwise switching
+    /// agent would show the wrong (stale) list.
     var availableModels: [String: [ModelOption]] = [:]
+
+    /// Builds the cache key shared by `requestModels` and the `model_list` handler.
+    static func modelsKey(daemonId: String, agent: String) -> String {
+        "\(daemonId):\(agent)"
+    }
 
     /// Event callbacks — multiple listeners supported
     private var eventListeners: [String: ([String: Any]) -> Void] = [:]
@@ -50,7 +59,7 @@ final class WebSocketService: @unchecked Sendable {
     /// Auth failure callback — fired when relay rejects the token (4001)
     var onAuthFailure: (() -> Void)?
 
-    /// Connect to the relay WebSocket
+    /// Connect to the relay WebSocket (fire-and-forget, used by reconnects).
     /// - Parameters:
     ///   - url: WebSocket URL（可选，不传则使用 RelayEnvironmentManager 的默认环境 URL）
     ///   - token: 认证 Token
@@ -60,14 +69,7 @@ final class WebSocketService: @unchecked Sendable {
 
         let resolvedURL = url ?? RelayEnvironmentManager.shared.current.wsBaseURL
         let fullURL = "\(resolvedURL)?type=client&token=\(token.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? token)"
-        guard let wsURL = URL(string: fullURL) else { return }
-
-        let config = URLSessionConfiguration.default
-        config.waitsForConnectivity = true
-        session = URLSession(configuration: config)
-
-        webSocket = session?.webSocketTask(with: wsURL)
-        webSocket?.resume()
+        guard openWebSocket(fullURL: fullURL) else { return }
 
         isReconnectingInternal = false
         reconnectAttempt = 0
@@ -75,21 +77,74 @@ final class WebSocketService: @unchecked Sendable {
         // Send a ping to verify connection is actually accepted
         webSocket?.sendPing { [weak self] error in
             guard let self else { return }
-            if error != nil {
-                // Connection rejected — likely auth failure (4001)
-                DispatchQueue.main.async {
+            DispatchQueue.main.async {
+                if error != nil {
+                    // Connection rejected — likely auth failure (4001)
                     self.handleAuthFailure()
-                }
-            } else {
-                self.isConnectedInternal = true
-                // Report UI locale so relay generates language-aware auto titles
-                // (mirrors web client's set_locale on connect; see useWebSocket.ts).
-                let locale = Locale.current.language.languageCode?.identifier ?? "zh"
-                self.send(["type": "set_locale", "locale": locale])
-                DispatchQueue.global().async { [weak self] in
-                    self?.receiveLoop()
+                } else {
+                    self.onPingSuccess()
                 }
             }
+        }
+    }
+
+    /// Async connect that resolves once the WebSocket handshake (ping) completes.
+    /// Replaces the caller-side `for _ in 0..<20 { sleep 200ms }` poll loop —
+    /// the connection is driven by the ping callback, so there is no fixed-step
+    /// delay between the socket coming up and the replay request being sent.
+    /// - Returns: `true` if the handshake succeeded, `false` on auth failure.
+    @discardableResult
+    func connectAsync(url: String? = nil, token: String) async -> Bool {
+        currentURL = url
+        currentToken = token
+
+        let resolvedURL = url ?? RelayEnvironmentManager.shared.current.wsBaseURL
+        let fullURL = "\(resolvedURL)?type=client&token=\(token.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? token)"
+        guard openWebSocket(fullURL: fullURL) else { return false }
+
+        isReconnectingInternal = false
+        reconnectAttempt = 0
+
+        return await withCheckedContinuation { (continuation: CheckedContinuation<Bool, Never>) in
+            // Capture locally so the resume happens exactly once regardless of
+            // whether the ping or a deinit-race fires the callback.
+            webSocket?.sendPing { [weak self] error in
+                let ok = (error == nil)
+                DispatchQueue.main.async {
+                    guard let self else { continuation.resume(returning: false); return }
+                    if ok {
+                        self.onPingSuccess()
+                    } else {
+                        self.handleAuthFailure()
+                    }
+                    continuation.resume(returning: ok)
+                }
+            }
+        }
+    }
+
+    /// Create the URLSession + WebSocket task and resume it (shared by the
+    /// sync and async connect entry points).
+    @discardableResult
+    private func openWebSocket(fullURL: String) -> Bool {
+        guard let wsURL = URL(string: fullURL) else { return false }
+        let config = URLSessionConfiguration.default
+        config.waitsForConnectivity = true
+        session = URLSession(configuration: config)
+        webSocket = session?.webSocketTask(with: wsURL)
+        webSocket?.resume()
+        return true
+    }
+
+    /// Shared post-handshake wiring: flip the connected flag, report UI locale
+    /// (so relay generates language-aware auto titles — mirrors web's
+    /// set_locale; see useWebSocket.ts), and start the receive loop.
+    private func onPingSuccess() {
+        isConnectedInternal = true
+        let locale = Locale.current.language.languageCode?.identifier ?? "zh"
+        send(["type": "set_locale", "locale": locale])
+        DispatchQueue.global().async { [weak self] in
+            self?.receiveLoop()
         }
     }
 
@@ -100,10 +155,16 @@ final class WebSocketService: @unchecked Sendable {
         webSocket?.send(.string(string)) { _ in }
     }
 
-    /// Request available models for a daemon (response arrives via model_list event,
-    /// stored in `availableModels`).
-    func requestModels(daemonId: String) {
-        send(["type": "list_models", "daemon_id": daemonId])
+    /// Request available models for a daemon (response arrives via model_list
+    /// event, stored in `availableModels` under `"<daemonId>:<agent>"`).
+    /// `agent` selects the daemon's model source (Claude settings.json / codex
+    /// list / opencode serve API) — mirroring web's `list_models` payload.
+    func requestModels(daemonId: String, agent: String) {
+        send([
+            "type": "list_models",
+            "daemon_id": daemonId,
+            "agent": agent,
+        ])
     }
 
     /// Disconnect
@@ -154,12 +215,11 @@ final class WebSocketService: @unchecked Sendable {
             }
         }
 
-        // Track available models per daemon (model_list is host-level)
-        if let type = dict["type"] as? String, type == "model_list",
-           let daemonId = dict["daemon_id"] as? String {
-            let models = (dict["models"] as? [[String: Any]] ?? []).compactMap { ModelOption(dict: $0) }
-            availableModels[daemonId] = models
-        }
+        // NOTE: model_list is host-level and may omit daemon_id (relay forwards the
+        // daemon's reply verbatim) and never carries `agent`. The owning view
+        // (NewSessionSheet) knows which agent it requested, so it writes the
+        // per-agent cache entry under "<daemonId>:<agent>" itself — we only fan the
+        // event out to listeners here.
 
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }

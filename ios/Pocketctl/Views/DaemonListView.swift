@@ -68,7 +68,7 @@ struct DaemonListView: View {
                 )
             }
             .navigationDestination(item: $navigateToSessionDetail) { session in
-                SessionDetailView(session: session)
+                SessionDetailView(session: session, wsService: wsService, apiClient: apiClient)
             }
             .sheet(isPresented: $showSettings) {
                 SettingsView(isLoggedIn: $isLoggedIn, daemons: viewModel?.daemons ?? [])

@@ -15,6 +15,14 @@ final class SessionDetailViewModel {
     var isLoading = true
     /// Incremented when initial replay completes — triggers scroll-to-bottom
     var scrollTick = 0
+    /// Bumped every second while the agent is executing — drives the
+    /// "Agent 执行中... mm:ss" elapsed-time label in the footer.
+    var executionTick = 0
+    /// Wall-clock instant when the current execution run began.
+    private var executionStartDate: Date?
+    /// Frozen elapsed-time string captured when execution ends — drives the
+    /// "已完成 · <duration>" status bar. Reset to nil on the next run.
+    var lastTurnDuration: String?
     /// Relay signaled older events exist beyond the loaded page
     var hasMore = false
     /// A backward-pagination (scroll-up) request is in flight
@@ -25,8 +33,10 @@ final class SessionDetailViewModel {
     private let apiClient: APIClient
     private var msgCounter = 0
     private var eventListenerId: String?
-    /// Page size for replay pagination (matches web client)
-    private let pageSize = 50
+    /// Page size for replay pagination. Tuned down from 50 → 20 so the first
+    /// page renders faster (fewer messages to decode + render on entry); older
+    /// history loads on scroll-up via `loadOlder()`.
+    private let pageSize = 20
     /// Oldest loaded event seq — backward pagination cursor
     private var loadedMinId = 0
     /// Out-of-order tool results: relay persists events fire-and-forget, so a
@@ -51,11 +61,38 @@ final class SessionDetailViewModel {
             self.msgCounter = cached.msgCounter
             self.isLoading = false
         }
+
+        // 若进入时已在执行，从 last_activity_at 恢复真实开始时间，
+        // 避免重新进入会话详情时计时从 0 开始。
+        if isExecuting {
+            executionStartDate = parseDate(session.lastActivityAt) ?? Date()
+            startExecutionTimer()
+        }
     }
 
     /// Whether the session is actively executing (running/busy)
     var isExecuting: Bool {
         ["running", "busy"].contains(status)
+    }
+
+    /// Human-readable elapsed time of the current execution run.
+    /// Format: < 60s → "Ns"; < 1h → "M:SS"; otherwise → "H:MM:SS".
+    /// Returns nil when not executing.
+    var executionElapsedString: String? {
+        guard let start = executionStartDate else { return nil }
+        var interval = Date().timeIntervalSince(start)
+        if interval < 0 { interval = 0 }
+        let total = Int(interval)
+        let hours = total / 3600
+        let minutes = (total % 3600) / 60
+        let seconds = total % 60
+        if hours > 0 {
+            return String(format: "%d:%02d:%02d", hours, minutes, seconds)
+        } else if minutes > 0 {
+            return String(format: "%d:%02d", minutes, seconds)
+        } else {
+            return "\(seconds)s"
+        }
     }
 
     /// Whether the session is still in a state that may produce new tool
@@ -65,10 +102,150 @@ final class SessionDetailViewModel {
         ["running", "busy", "idle", "waiting", "waiting_approval"].contains(status)
     }
 
+    // MARK: - "已完成" status bar support
+
+    /// Most recent token usage across messages (reverse scan, like the web
+    /// client's `lastAgentUsage`). Drives the "输出 X tokens" label.
+    var lastAgentUsage: TokenUsage? {
+        for message in messages.reversed() {
+            if let usage = message.usage { return usage }
+        }
+        return nil
+    }
+
+    /// Whether any agent_text reply exists (gates the copy button).
+    var hasLastAgentReply: Bool {
+        messages.contains { $0.type == .agentText }
+    }
+
+    /// Whether a retryable user prompt exists (gates the retry button).
+    var hasLastUserPrompt: Bool {
+        messages.contains { $0.role == .user && !$0.content.isEmpty }
+    }
+
+    /// Content of the last agent_text reply (for copy-to-clipboard).
+    var lastAgentReplyContent: String? {
+        for message in messages.reversed() where message.type == .agentText {
+            return message.content
+        }
+        return nil
+    }
+
+    /// Whether the "已完成" status bar should show. Visible when not executing
+    /// and the session is in an idle/terminal state with at least one agent
+    /// reply. On a fresh replay (no frozen `lastTurnDuration`) the bar still
+    /// renders — just without the duration, matching the web client's
+    /// `completedBarVisible` refresh-recovery behavior.
+    var completedBarVisible: Bool {
+        if isExecuting { return false }
+        if lastTurnDuration != nil { return true }
+        let finishedStates: Set<String> = ["idle", "completed", "exited", "error", "killed"]
+        return finishedStates.contains(status) && hasLastAgentReply
+    }
+
+    /// Format a token count for compact display: > 1000 → "1.2K".
+    func fmtTokens(_ n: Int) -> String {
+        if n > 1000 { return String(format: "%.1fK", Double(n) / 1000) }
+        return String(n)
+    }
+
+    /// Copy the last agent reply to the pasteboard. Returns the copied text
+    /// (nil if nothing to copy). Call site handles the UI feedback state.
+    @discardableResult
+    func copyLastReply() -> String? {
+        lastAgentReplyContent
+    }
+
+    /// Retry: re-send the last user prompt verbatim. Gated by `canRetry`
+    /// (daemon sessions stay retryable after completion), matching the web
+    /// client's `retryLastPrompt` + `canInput` behavior.
+    func retryLastPrompt() {
+        guard canRetry else { return }
+        for message in messages.reversed() where message.role == .user && !message.content.isEmpty {
+            sendMessage(message.content)
+            return
+        }
+    }
+
     /// Whether the input bar should be shown
     var canSendMessage: Bool {
         if status == "exited" && wsService.isDaemonOnline(session.daemonId) { return true }
         return ["idle", "waiting_approval"].contains(status)
+    }
+
+    /// Whether a completed turn can be retried. Mirrors the web client's
+    /// `canInput`: a daemon-sourced session stays retryable in any terminal
+    /// state (`completed`/`error`/`killed`) as long as the daemon is online,
+    /// since it can be resumed. Disconnected sessions are never retryable.
+    var canRetry: Bool {
+        if status == "disconnected" { return false }
+        let isTerminal: Set<String> = ["completed", "error", "killed"]
+        if isTerminal.contains(status) {
+            return session.source == "daemon" && wsService.isDaemonOnline(session.daemonId)
+        }
+        // Non-terminal states (idle / running / busy / exited / waiting_approval)
+        // follow the same rule as the input bar.
+        return canSendMessage
+    }
+
+    /// Apply a status transition and start/stop the execution timer.
+    /// - Parameter lastActivityAt: ISO8601 timestamp of the last activity,
+    ///   carried by `session_status` events. When resuming a running turn
+    ///   (replay / re-entry), it anchors the timer to the real turn start so
+    ///   the elapsed doesn't restart from zero.
+    private func applyStatus(_ newStatus: String, lastActivityAt: String? = nil) {
+        let wasExecuting = isExecuting
+        status = newStatus
+        if isExecuting && !wasExecuting {
+            // Execution just started. Recover the real turn start from the
+            // event's last_activity_at when present (replay/live resume),
+            // otherwise stamp "now" for a fresh turn triggered by sendMessage.
+            executionStartDate = parseDate(lastActivityAt) ?? Date()
+            lastTurnDuration = nil
+            executionTick &+= 1
+            startExecutionTimer()
+        } else if !isExecuting && wasExecuting {
+            // Execution ended — freeze the label at the final elapsed value.
+            lastTurnDuration = executionElapsedString
+            executionStartDate = nil
+            stopExecutionTimer()
+        }
+    }
+
+    private static let isoFormatter: ISO8601DateFormatter = {
+        let f = ISO8601DateFormatter()
+        f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return f
+    }()
+
+    private static let isoFormatterNoFraction: ISO8601DateFormatter = {
+        let f = ISO8601DateFormatter()
+        f.formatOptions = [.withInternetDateTime]
+        return f
+    }()
+
+    /// Parse an ISO8601 string (with or without fractional seconds) to Date.
+    private func parseDate(_ s: String?) -> Date? {
+        guard let s, !s.isEmpty else { return nil }
+        return Self.isoFormatter.date(from: s) ?? Self.isoFormatterNoFraction.date(from: s)
+    }
+
+    private var executionTimer: Task<Void, Never>?
+
+    private func startExecutionTimer() {
+        executionTimer?.cancel()
+        executionTimer = Task { @MainActor [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(1))
+                guard let self, !Task.isCancelled else { return }
+                self.executionTick &+= 1
+            }
+        }
+    }
+
+    private func stopExecutionTimer() {
+        executionTimer?.cancel()
+        executionTimer = nil
     }
 
     var inputPlaceholder: String {
@@ -83,37 +260,23 @@ final class SessionDetailViewModel {
     func connect() async {
         guard KeychainStorage.accessToken != nil else { return }
 
-        // Refresh token before connecting
-        var token: String
-        if let refreshToken = KeychainStorage.refreshToken {
-            if let resp = try? await apiClient.refreshToken(refreshToken) {
-                KeychainStorage.accessToken = resp.access_token
-                KeychainStorage.refreshToken = resp.refresh_token
-                token = resp.access_token
-            } else {
-                guard let t = KeychainStorage.accessToken else { return }
-                token = t
-            }
-        } else {
-            guard let t = KeychainStorage.accessToken else { return }
-            token = t
-        }
-
-        let wsURL = RelayEnvironmentManager.shared.current.wsBaseURL
-
+        // ── Stage 1: register the event listener up front so no replay batch
+        // is dropped while we wait for the handshake / token refresh below.
         eventListenerId = wsService.addEventListener { [weak self] dict in
             self?.handleEvent(dict)
         }
 
-        if !wsService.isConnected {
-            wsService.connect(url: wsURL, token: token)
-        }
+        // ── Stage 2 (parallel): refresh the access token while the WebSocket
+        // handshake is in flight. Two independent round-trips overlap instead
+        // of running back-to-back, removing one RTT from the critical path.
+        // We may be reusing an already-connected socket (SessionList holds a
+        // long-lived one), so kick off the connect only if needed.
+        let wsURL = RelayEnvironmentManager.shared.current.wsBaseURL
+        async let tokenTask = resolveConnectToken()
+        async let connectTask: () = ensureWebSocketConnected(url: wsURL)
 
-        // Wait for WebSocket connection (ping verification)
-        for _ in 0..<20 {
-            if wsService.isConnected { break }
-            try? await Task.sleep(for: .milliseconds(200))
-        }
+        _ = await tokenTask
+        _ = await connectTask
 
         guard wsService.isConnected else {
             isLoading = false
@@ -155,11 +318,37 @@ final class SessionDetailViewModel {
         }
     }
 
+    /// Resolve the access token to use for this session, refreshing it if a
+    /// refresh token is available. Runs concurrently with the WebSocket
+    /// handshake in `connect()`.
+    private func resolveConnectToken() async -> String {
+        if let refreshToken = KeychainStorage.refreshToken {
+            if let resp = try? await apiClient.refreshToken(refreshToken) {
+                KeychainStorage.accessToken = resp.access_token
+                KeychainStorage.refreshToken = resp.refresh_token
+                return resp.access_token
+            }
+        }
+        return KeychainStorage.accessToken ?? ""
+    }
+
+    /// Ensure the shared WebSocket is connected. If it is already up (the
+    /// SessionList typically holds a long-lived socket), this is a no-op that
+    /// resolves immediately — the old 20×200ms poll loop is gone. Otherwise it
+    /// drives the handshake via the ping callback (event-driven, no polling).
+    private func ensureWebSocketConnected(url: String) async {
+        if wsService.isConnected { return }
+        let token = KeychainStorage.accessToken ?? ""
+        guard !token.isEmpty else { return }
+        await wsService.connectAsync(url: url, token: token)
+    }
+
     func disconnect() {
         if let id = eventListenerId {
             wsService.removeEventListener(id)
             eventListenerId = nil
         }
+        stopExecutionTimer()
     }
 
     /// Incremental refresh — called on .onAppear when returning to this view.
@@ -346,7 +535,7 @@ final class SessionDetailViewModel {
             handleSubagentDiscovered(event, dict: dict)
 
         case .sessionStatus:
-            status = event.status ?? status
+            applyStatus(event.status ?? status, lastActivityAt: event.lastActivityAt)
             exitReason = event.exitReason ?? exitReason
 
         case .sessionTitleUpdate:
@@ -417,7 +606,7 @@ final class SessionDetailViewModel {
             handleSubagentDiscoveredDirect(event, dict: dict, messages: &messages, subAgents: &subAgents)
 
         case .sessionStatus:
-            status = event.status ?? status
+            applyStatus(event.status ?? status, lastActivityAt: event.lastActivityAt)
             exitReason = event.exitReason ?? exitReason
 
         case .sessionTitleUpdate:
@@ -457,6 +646,9 @@ final class SessionDetailViewModel {
            last.type == .agentText,
            last.streaming {
             messages[messages.count - 1].content += text
+            if let usage = event.usage {
+                messages[messages.count - 1].usage = usage
+            }
         } else {
             msgCounter += 1
             messages.append(ChatMessage(
@@ -464,12 +656,16 @@ final class SessionDetailViewModel {
                 role: .agent,
                 type: .agentText,
                 content: text,
-                streaming: event.streaming
+                streaming: event.streaming,
+                usage: event.usage
             ))
         }
 
         if !event.streaming, let last = messages.last, last.streaming {
             messages[messages.count - 1].streaming = false
+            if let usage = event.usage {
+                messages[messages.count - 1].usage = usage
+            }
         }
         // No scrollTick during batch — handled by caller
     }
@@ -609,6 +805,9 @@ final class SessionDetailViewModel {
            last.streaming {
             // Append to existing streaming message
             messages[messages.count - 1].content += text
+            if let usage = event.usage {
+                messages[messages.count - 1].usage = usage
+            }
         } else {
             // New message
             msgCounter += 1
@@ -617,13 +816,18 @@ final class SessionDetailViewModel {
                 role: .agent,
                 type: .agentText,
                 content: text,
-                streaming: event.streaming
+                streaming: event.streaming,
+                usage: event.usage
             ))
         }
 
         // Mark as complete if not streaming
         if !event.streaming, let last = messages.last, last.streaming {
             messages[messages.count - 1].streaming = false
+            // Final non-streaming chunk may carry usage even when text repeats
+            if let usage = event.usage {
+                messages[messages.count - 1].usage = usage
+            }
         }
         if !isBatchProcessing { scrollTick += 1 }
     }

@@ -1,6 +1,7 @@
 package adapter
 
 import (
+	"bufio"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -10,6 +11,57 @@ import (
 
 	"github.com/pocketctl/pocketctl/internal/protocol"
 )
+
+// CodexHome returns Codex's home directory, honoring the CODEX_HOME environment
+// variable (set e.g. by launch proxies like moonbridge) and falling back to
+// ~/.codex. Returns "" only if the user home can't be resolved.
+func CodexHome() string {
+	if h := strings.TrimSpace(os.Getenv("CODEX_HOME")); h != "" {
+		return h
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+	return filepath.Join(home, ".codex")
+}
+
+// CodexSessionsDir returns the rollout sessions directory ($CODEX_HOME/sessions).
+func CodexSessionsDir() string {
+	h := CodexHome()
+	if h == "" {
+		return ""
+	}
+	return filepath.Join(h, "sessions")
+}
+
+// CodexRolloutMeta reads the head of a codex rollout file and returns the
+// session id and cwd from its session_meta record. ok is false if no usable
+// session_meta is found in the leading lines (e.g. the file was just created
+// and the record hasn't been flushed yet).
+func CodexRolloutMeta(path string) (sessionID, cwd string, ok bool) {
+	f, err := os.Open(path)
+	if err != nil {
+		return "", "", false
+	}
+	defer f.Close()
+	sc := bufio.NewScanner(f)
+	sc.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+	for i := 0; sc.Scan() && i < 40; i++ {
+		var raw codexLine
+		if json.Unmarshal(sc.Bytes(), &raw) != nil || raw.Type != "session_meta" {
+			continue
+		}
+		var p codexPayload
+		if json.Unmarshal(raw.Payload, &p) != nil {
+			continue
+		}
+		if p.ID != "" {
+			return p.ID, p.Cwd, true
+		}
+	}
+	return "", "", false
+}
 
 // Codex adapter — parses OpenAI Codex CLI output.
 //
@@ -285,11 +337,10 @@ func (CodexLauncher) BuildResumeArgs(prompt, sessionID string, config protocol.S
 type CodexSessionStorage struct{}
 
 func (CodexSessionStorage) ResolveJSONLPath(sessionID, cwd string) (string, error) {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return "", err
+	sessionsDir := CodexSessionsDir()
+	if sessionsDir == "" {
+		return "", fmt.Errorf("codex home not resolved")
 	}
-	sessionsDir := filepath.Join(home, ".codex", "sessions")
 	if _, err := os.Stat(sessionsDir); err != nil {
 		return "", fmt.Errorf("codex sessions dir: %w", err)
 	}

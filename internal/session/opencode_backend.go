@@ -35,6 +35,7 @@ const (
 	opencodeSyncInterval     = 1 * time.Second
 	opencodeFreshWindow      = 10 * time.Minute
 	opencodeReconcileWindow  = 2 * time.Hour // reconcile stuck "running" status for sessions active within this window
+	opencodeApprovalTimeout  = 5 * time.Minute // auto-reject a pending permission if no client answers
 )
 
 type opencodeCoordinator struct {
@@ -181,20 +182,60 @@ func (c *opencodeCoordinator) startDiscovery() error {
 	slog.Default().Info("opencode discovery started", "serve", c.srv().BaseURL())
 	go c.discoveryLoop(c.ctx)
 	go c.supervise(c.ctx)
+	go c.permissionLoop(c.ctx)
 	return nil
 }
 
-// NOTE on tool approval (7.1/7.2): opencode does NOT expose permission/question
-// requests to third-party API clients — verified empty on /event, /api/event,
-// GET /api/session/{id}/permission, and /api/permission/request, and a reply to
-// the per_ id from the serve log returns 404. There is therefore no way to
-// surface opencode approvals to the web. Instead, daemon-driven sessions run with
-// permissions auto-allowed (see OPENCODE_CONFIG_CONTENT in OpencodeServer.Start),
-// mirroring Claude daemon sessions' bypassPermissions default, so they never hang
-// on an unanswerable prompt. Terminal `opencode` keeps its own "ask" config and
-// answers in the terminal. The ReplyPermission/ReplyQuestion client methods and
-// the ResolveApproval/ResolveInteractivePrompt routing remain as dormant hooks in
-// case opencode later exposes these events.
+// Tool approval: opencode 1.17.x emits permission.asked / permission.replied SSE
+// events for sessions THIS serve drives. The daemon's serve forces edit/bash to
+// "ask" (OPENCODE_CONFIG_CONTENT in OpencodeServer.Start), so daemon-driven
+// sessions raise permission.asked, which permissionLoop surfaces as an
+// approval_request card (reply routed via ResolveApproval → ReplyPermission, and
+// auto-rejected on timeout so an unattended turn never hangs). Terminal `opencode`
+// sessions are driven by the user's own server, whose permission events this serve
+// never sees — those keep prompting in the user's terminal.
+
+// permissionLoop subscribes to the serve's SSE /event stream and turns
+// permission.asked / permission.replied events into approval cards. It reconnects
+// when the stream drops or the serve restarts.
+func (c *opencodeCoordinator) permissionLoop(ctx context.Context) {
+	for {
+		if ctx.Err() != nil {
+			return
+		}
+		srv := c.srv()
+		if srv == nil || srv.BaseURL() == "" {
+			time.Sleep(time.Second)
+			continue
+		}
+		evCh, err := srv.Events(ctx)
+		if err != nil {
+			time.Sleep(2 * time.Second)
+			continue
+		}
+		for ev := range evCh {
+			switch ev.Type {
+			case "permission.asked":
+				if pa, ok := adapter.ParsePermissionAsked(ev.Properties); ok {
+					tool := pa.Tool
+					if tool == "" {
+						tool = "permission"
+					}
+					c.sm.handleOpencodePermission(pa.SessionID, pa.ID, tool, pa.Metadata)
+				}
+			case "permission.replied":
+				if pa, ok := adapter.ParsePermissionAsked(ev.Properties); ok {
+					c.sm.clearOpencodePermissionReplied(pa.SessionID, pa.ID)
+				}
+			}
+		}
+		// Stream closed (serve restart / disconnect) — reconnect after a beat.
+		if ctx.Err() != nil {
+			return
+		}
+		time.Sleep(time.Second)
+	}
+}
 
 // discoveryLoop polls the shared serve for sessions and registers any
 // terminal-started ones that are fresh (recently active) and not already

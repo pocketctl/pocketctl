@@ -10,6 +10,7 @@ func TestCandidatePaths_UserLocalFirstAndDedup(t *testing.T) {
 	want := []string{
 		"/home/u/.local/bin/claude", // well-known 用户本地
 		"/home/u/.claude/local/claude",
+		"/home/u/.opencode/bin/claude",
 		"/usr/bin/claude", // 来自 PATH
 		// PATH 里的 /home/u/.local/bin/claude 被去重(已在首位)
 	}
@@ -24,6 +25,7 @@ func TestCandidatePaths_NpmPrefixIncluded(t *testing.T) {
 	want := []string{
 		"/home/u/.local/bin/codex",
 		"/home/u/.claude/local/codex",
+		"/home/u/.opencode/bin/codex",
 		"/home/u/.npm-global/bin/codex",
 		"/usr/bin/codex",
 	}

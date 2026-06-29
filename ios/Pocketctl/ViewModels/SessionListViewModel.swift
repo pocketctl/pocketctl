@@ -3,7 +3,9 @@ import Foundation
 @Observable
 @MainActor
 final class SessionListViewModel {
-    var sessions: [Session] = []
+    var sessions: [Session] = [] {
+        didSet { rebuildSortedSessions() }
+    }
     var isLoading = false
     var error: String?
     var showError = false
@@ -13,6 +15,14 @@ final class SessionListViewModel {
 
     /// 分批渲染：当前可见的最大卡片数（每页 15 条）
     private(set) var visibleCount = 15
+
+    /// 当前 daemon 过滤 + 按最近活动排序后的会话缓存。
+    /// 仅在 sessions 变化时重建一次，避免每次 body 求值都全量 filter+sort。
+    private(set) var sortedSessions: [Session] = []
+
+    /// 实际渲染的会话（sortedSessions 的前 visibleCount 条）。
+    /// visibleCount 变化时刷新，滚动时不再重排。
+    private(set) var displayedSessions: [Session] = []
 
     let daemon: Daemon
     private let wsService: WebSocketService
@@ -24,31 +34,36 @@ final class SessionListViewModel {
         self.wsService = wsService
         self.apiClient = apiClient
         self.sessions = initialSessions
+        rebuildSortedSessions()
     }
 
-    /// Filtered sessions for this daemon
-    var filteredSessions: [Session] {
-        sessions
+    /// 过滤 + 排序 + 切片缓存。仅当 `sessions` 或 `visibleCount` 变化时调用。
+    private func rebuildSortedSessions() {
+        let sorted = sessions
             .filter { $0.daemonId == daemon.daemonId }
             .sorted { lhs, rhs in
                 let l = lhs.lastActivityAt ?? lhs.createdAt
                 let r = rhs.lastActivityAt ?? rhs.createdAt
                 return l > r
             }
+        sortedSessions = sorted
+        displayedSessions = visibleCount < sorted.count ? Array(sorted.prefix(visibleCount)) : sorted
     }
 
-    /// 分批渲染：只返回当前可见数量的 session
-    var displayedSessions: [Session] {
-        let all = filteredSessions
-        guard visibleCount < all.count else { return all }
-        return Array(all.prefix(visibleCount))
-    }
-
-    /// 滚动到底部附近时追加下一批（每批 15 条）
+    /// 滚动到底部附近时追加下一批（每批 15 条）。
+    /// 只读缓存 count，不再每次都 filter+sort。
     func loadMoreIfNeeded(currentIndex: Int) {
-        let total = filteredSessions.count
+        let total = sortedSessions.count
         guard currentIndex >= visibleCount - 2, visibleCount < total else { return }
         visibleCount = min(visibleCount + 15, total)
+        rebuildSortedSessions()
+    }
+
+    /// 基于当前卡片 sessionId 触发分页（供 ForEach 无 index 时使用）。
+    /// 在已显示的全集里定位该 session，靠近末尾即加载下一批。
+    func loadMoreIfNeeded(currentSessionId: String) {
+        guard let index = sortedSessions.firstIndex(where: { $0.sessionId == currentSessionId }) else { return }
+        loadMoreIfNeeded(currentIndex: index)
     }
 
     var daemonStatusText: String {
