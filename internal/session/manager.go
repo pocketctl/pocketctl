@@ -284,18 +284,35 @@ func (sm *SessionManager) SetApprovalServer(srv *approval.Server, pocketctlPath 
 func (sm *SessionManager) handleApprovalRequest(req approval.Request) {
 	sm.mu.Lock()
 	ps, ok := sm.sessions[req.SessionID]
-	if ok {
-		ps.Status = protocol.StatusWaitingApproval
-		ps.PendingRequestID = req.RequestID
+	if !ok {
+		// Unknown session — this happens when a `claude` the user launched in
+		// their own terminal fired the user-global PreToolUse hook before the
+		// JSONL watcher registered it (or the daemon simply isn't tailing it).
+		// Rather than deny (which would block the user's terminal for no reason),
+		// register a lightweight terminal-sourced placeholder so the ApprovalCard
+		// can still surface. The real watcher-driven registration will upgrade it
+		// (RegisterTerminalSession reuses an existing entry by id) when it lands.
+		now := time.Now()
+		ps = &ProcessState{
+			SessionID:      req.SessionID,
+			Status:         protocol.StatusWaitingApproval,
+			StartedAt:      now,
+			LastActivityAt: now,
+			Cwd:            req.Cwd,
+			Agent:          "claude-code",
+			Source:         "terminal",
+		}
+		sm.sessions[req.SessionID] = ps
+		ok = true
 	}
+	ps.Status = protocol.StatusWaitingApproval
+	ps.PendingRequestID = req.RequestID
 	sm.mu.Unlock()
 
-	if !ok {
-		// Session gone before the request was forwarded — deny immediately so
-		// the hook doesn't hang.
-		_ = sm.approvals.Resolve(req.RequestID, false)
-		return
-	}
+	// ok is always true here (we created the placeholder above when missing);
+	// the guard is retained for clarity and future callers that may pass a
+	// non-creatable request.
+	_ = ok
 
 	sm.outputCh <- protocol.DaemonEvent{
 		Type:      "approval_request",

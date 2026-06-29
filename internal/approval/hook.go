@@ -8,6 +8,8 @@ import (
 	"net"
 	"os"
 	"time"
+
+	"github.com/pocketctl/pocketctl/internal/config"
 )
 
 // RunHook is the entry point for the `pocketctl __hook` subcommand invoked by
@@ -25,17 +27,30 @@ import (
 //   - for non-bypass with no conflict, runs the normal client-approval flow and
 //     we print the client's allow/deny decision.
 //
-// The session id, socket path, and effective permission mode are passed via
-// env vars (POCKETCTL_SESSION_ID, POCKETCTL_APPROVAL_SOCK,
-// POCKETCTL_PERM_MODE) set by the daemon when launching the PTY.
+// Session routing: Claude's hook payload includes `session_id` as a common
+// field on every event, so we read it from stdin FIRST. This lets a `claude`
+// process the user launched in their own terminal reach the daemon — no env
+// var injection required. The POCKETCTL_SESSION_ID env var is still honored as
+// a fallback for daemon-spawned sessions (and keeps older tests working).
+//
+// The socket path defaults to the user-global ~/.pocketctl/approval.sock (see
+// config.ApprovalSocketPath) so any terminal's hook connects to the single
+// running daemon; POCKETCTL_APPROVAL_SOCK overrides it if set.
+//
+// Failure policy: if the daemon isn't running (socket unreachable / missing),
+// we writeContinue() so Claude falls back to its OWN permission UI rather than
+// silently denying every tool — the user's terminal stays usable without the
+// daemon. Only when we successfully reach the daemon do we honor its decision.
 func RunHook(logger *slog.Logger) error {
 	if logger == nil {
 		logger = slog.Default()
 	}
 
-	// Claude's PreToolUse hook payload (simplified — we only need the tool name
-	// and input). Unknown fields are ignored.
+	// Claude's PreToolUse hook payload. `session_id` and `transcript_path` are
+	// common fields present on every hook event (see Claude Code hook docs);
+	// unknown fields are ignored.
 	var payload struct {
+		SessionID string          `json:"session_id"`
 		ToolName  string          `json:"tool_name"`
 		ToolInput json.RawMessage `json:"tool_input"`
 		Cwd       string          `json:"cwd"`
@@ -49,33 +64,47 @@ func RunHook(logger *slog.Logger) error {
 	}
 
 	permMode := os.Getenv("POCKETCTL_PERM_MODE")
-	sessionID := os.Getenv("POCKETCTL_SESSION_ID")
-	sockPath := os.Getenv("POCKETCTL_APPROVAL_SOCK")
 
-	// If the approval socket isn't wired (e.g. the daemon couldn't install
-	// hooks), fall back to Claude's own permission logic. In bypass this means
-	// writeContinue; in non-bypass we must deny (the user expected a prompt we
-	// can't surface) — but that's pre-existing behavior.
-	if sessionID == "" || sockPath == "" {
-		if permMode == "bypassPermissions" {
-			writeContinue()
-		} else {
-			writeDecision(false, "approval hook not configured (missing env)")
-		}
+	// Resolve session id: prefer the payload (external terminal sessions),
+	// fall back to the env var (daemon-spawned sessions, older tests).
+	sessionID := payload.SessionID
+	if sessionID == "" {
+		sessionID = os.Getenv("POCKETCTL_SESSION_ID")
+	}
+
+	// Resolve socket path: env override > user-global default. The user-global
+	// default is what lets an external terminal's hook find the daemon.
+	sockPath := os.Getenv("POCKETCTL_APPROVAL_SOCK")
+	if sockPath == "" {
+		sockPath = config.ApprovalSocketPath()
+	}
+
+	// External `claude` invocations don't carry POCKETCTL_PERM_MODE; treat the
+	// absence of explicit env as "default", which routes through client approval
+	// (i.e. surfaces an ApprovalCard). Daemon-spawned sessions still pass their
+	// real mode (bypassPermissions / acceptEdits / plan).
+	effectivePermMode := permMode
+	if effectivePermMode == "" {
+		effectivePermMode = "default"
+	}
+
+	// If we still can't determine a socket path or session id, fall back to
+	// Claude's own permission logic. writeContinue (vs deny) keeps the terminal
+	// usable when the daemon couldn't wire the socket.
+	if sockPath == "" || sessionID == "" {
+		writeContinue()
 		return nil
 	}
 
 	// Ask the server. It performs the Scheme C file-lock check and, depending on
 	// perm mode, either short-circuits (bypass) or brokers client approval.
-	resp, err := askSocket(sockPath, sessionID, payload.ToolName, payload.ToolInput, payload.Cwd, permMode)
+	resp, err := askSocket(sockPath, sessionID, payload.ToolName, payload.ToolInput, payload.Cwd, effectivePermMode)
 	if err != nil {
-		logger.Error("approval hook socket", "error", err)
-		// Unreachable server: fail safe per mode.
-		if permMode == "bypassPermissions" {
-			writeContinue()
-		} else {
-			writeDecision(false, fmt.Sprintf("approval server unreachable: %v", err))
-		}
+		// Daemon unreachable (not running, socket gone, etc.). Fall back to
+		// Claude's native permission UI so the terminal stays usable without the
+		// daemon — do NOT silently deny. We log but otherwise no-op.
+		logger.Debug("approval server unreachable, falling back to native UI", "error", err)
+		writeContinue()
 		return nil
 	}
 
@@ -87,7 +116,7 @@ func RunHook(logger *slog.Logger) error {
 	// Allowed. In bypass mode the server's allow means "no lock conflict" — we
 	// have no opinion so Claude proceeds under its own permission logic (and any
 	// host hooks). In non-bypass mode the allow is the client's explicit approval.
-	if permMode == "bypassPermissions" {
+	if effectivePermMode == "bypassPermissions" {
 		writeContinue()
 	} else {
 		writeDecision(true, orDefault(resp.Reason, "approved by user"))
