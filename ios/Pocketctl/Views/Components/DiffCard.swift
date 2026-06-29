@@ -3,6 +3,11 @@ import SwiftUI
 /// Diff card for Edit/MultiEdit/Write tool calls. Same full-width card shell as
 /// ToolCallCard, but the body renders a line-level diff (green additions / red
 /// deletions) computed from the tool input. Swift port of the web DiffCard.vue.
+///
+/// `blocks`/`summary`/`filePath`/`totalLines` 在 init 中一次性预算——它们依赖
+/// JSON 解析与 diff 计算（CPU 密集）。原实现把它们写成计算属性，导致键盘动画
+/// 期间 body 被反复求值时 diff 被重复计算，是会话详情页卡顿的主要来源之一。
+/// `visibleBlocks` 仍为计算属性，但它只做数组切片，成本可忽略。
 struct DiffCard: View {
     let message: ChatMessage
     @Binding var messages: [ChatMessage]
@@ -17,16 +22,29 @@ struct DiffCard: View {
 
     private let collapsedLines = 50
 
-    private var blocks: [DiffBlock] {
-        buildDiffBlocks(inputJSON: message.rawInputJSON, tool: message.tool)
-    }
-    private var summary: (additions: Int, deletions: Int) { sumChanges(blocks) }
-    private var filePath: String { diffFilePath(inputJSON: message.rawInputJSON) }
+    // MARK: - Pre-computed (init)
+
+    private let blocks: [DiffBlock]
+    private let summary: (additions: Int, deletions: Int)
+    private let filePath: String
+    private let totalLines: Int
     private var isNewFile: Bool { message.tool == "Write" && summary.deletions == 0 }
-    private var totalLines: Int { blocks.reduce(0) { $0 + $1.lines.count } }
     private var isLong: Bool { totalLines > collapsedLines }
 
+    init(message: ChatMessage, messages: Binding<[ChatMessage]>, messageIndex: Int, sessionActive: Bool) {
+        self.message = message
+        self._messages = messages
+        self.messageIndex = messageIndex
+        self.sessionActive = sessionActive
+
+        self.blocks = buildDiffBlocks(inputJSON: message.rawInputJSON, tool: message.tool)
+        self.summary = sumChanges(self.blocks)
+        self.filePath = diffFilePath(inputJSON: message.rawInputJSON)
+        self.totalLines = self.blocks.reduce(0) { $0 + $1.lines.count }
+    }
+
     /// Collapse: show only the first `collapsedLines` across all blocks.
+    /// Cheap array slicing — safe to keep as a computed property.
     private var visibleBlocks: [DiffBlock] {
         guard isLong, !isOutputExpanded else { return blocks }
         var remaining = collapsedLines

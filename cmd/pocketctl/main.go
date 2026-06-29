@@ -583,6 +583,16 @@ func cmdDaemonStart(args []string) {
 	}
 	defer logFile.Close()
 
+	// Mirror stderr (and stdout) to the daemon log. The daemonized child runs
+	// with stdin/stdout/stderr = nil (→ /dev/null), so Go's runtime panic stack
+	// traces — which it prints via the raw fd 2 syscall, bypassing os.Stderr —
+	// would otherwise be silently discarded. Redirecting fd 1/2 to the log file
+	// at the OS level (dup2) ensures any panic not caught by our recover handlers
+	// (e.g. one in an unsupervised goroutine, or at the runtime level) lands in
+	// daemon.log instead of vanishing.
+	dupFileToFd(logFile, 1)
+	dupFileToFd(logFile, 2)
+
 	logger := slog.New(slog.NewJSONHandler(logFile, &slog.HandlerOptions{Level: slog.LevelInfo}))
 	slog.SetDefault(logger) // so packages using slog.Default() (e.g. opencode coordinator) log to the daemon log
 	logger.Info("starting daemon", "version", version, "id", id, "relay", url)
@@ -621,30 +631,42 @@ func cmdDaemonStart(args []string) {
 	// Create session manager
 	sm := session.NewSessionManager(outputCh)
 
-	// Start the in-process approval broker. The PreToolUse hook (configured per
-	// non-bypass session) connects here to surface tool-use approvals to
-	// web/iOS clients. Failures are non-fatal: sessions simply won't get
-	// approval prompts (they still default to bypassPermissions).
-	approvalSocket := ""
-	if cfgDir, derr := config.ConfigDir(); derr == nil {
-		approvalSocket = filepath.Join(cfgDir, "approval.sock")
-		pocketctlPath, _ := os.Executable()
-		if pocketctlPath == "" {
-			pocketctlPath = os.Args[0]
-		}
+	// Start the in-process approval broker. The PreToolUse hook connects here
+	// to surface tool-use approvals to web/iOS clients. The socket lives at a
+	// user-global fixed path (config.ApprovalSocketPath) so that a `claude`
+	// process the user launched in their OWN terminal can reach this daemon —
+	// not just daemon-spawned sessions. Failures are non-fatal: sessions simply
+	// won't get approval prompts (they still default to bypassPermissions).
+	approvalSocket := config.ApprovalSocketPath()
+	pocketctlPath, _ := os.Executable()
+	if pocketctlPath == "" {
+		pocketctlPath = os.Args[0]
+	}
+	if approvalSocket != "" {
 		approvalSrv := approval.NewServer(approvalSocket, logger)
 		if err := approvalSrv.Start(); err != nil {
 			logger.Warn("approval server disabled", "error", err)
 		} else {
 			sm.SetApprovalServer(approvalSrv, pocketctlPath)
 			defer approvalSrv.Close()
+
+			// Install the user-global PreToolUse hook into ~/.claude/settings.json
+			// so EVERY `claude` invocation (including ones the user starts in their
+			// own terminal) routes permission prompts here. Idempotent; cleaned up
+			// on shutdown via RemoveUserHook so we don't leave a dangling entry.
+			if err := approval.EnsureUserHook(pocketctlPath); err != nil {
+				logger.Warn("user-global approval hook not installed", "error", err)
+			} else {
+				logger.Info("user-global approval hook installed", "settings", "~/.claude/settings.json")
+			}
+			defer approval.RemoveUserHook()
 		}
 	}
 
 	// When a daemon-created session resolves its real ID, wait for assistant
 	// reply then send generate_title_request to relay for LLM-based title generation.
 	sm.OnSessionIDResolved = func(realSessionID, cwd string) {
-		go func() {
+		daemon.Go("title-resolve", logger, func() {
 			for i := 0; i < 30; i++ {
 				time.Sleep(1 * time.Second)
 				jsonlPath, err := watcher.ResolveJSONLPath(realSessionID, cwd)
@@ -663,7 +685,7 @@ func cmdDaemonStart(args []string) {
 					return
 				}
 			}
-		}()
+		})
 	}
 
 	// Create session watcher
@@ -791,27 +813,38 @@ func cmdDaemonStart(args []string) {
 	}
 
 	// Start process monitor
-	go pm.Run(ctx)
+	daemon.RunLoop(ctx, "process-monitor", logger, func() { pm.Run(ctx) })
 
 	// Start WebSocket client
-	go func() {
+	daemon.RunLoop(ctx, "ws-client", logger, func() {
 		if err := client.Run(ctx); err != nil && ctx.Err() == nil {
 			logger.Error("ws client exited", "error", err)
 		}
-	}()
+	})
 
-	// Handle watcher events (Claude + Codex share the same discovery handler)
-	go handleWatcherEvents(ctx, sw.Events(), adapter.AgentClaude, sm, pm, outputCh, logger, &stateDirty)
-	go handleWatcherEvents(ctx, cw.Events(), adapter.AgentCodex, sm, pm, outputCh, logger, &stateDirty)
+	// Handle watcher events (Claude + Codex share the same discovery handler).
+	// These MUST be supervised: a panic here used to silently kill the goroutine,
+	// freeze the event channel, and leave session discovery (incl. --continue
+	// resumes) permanently blind. See internal/daemon/safego.go.
+	daemon.RunLoop(ctx, "watcher-claude", logger, func() {
+		handleWatcherEvents(ctx, sw.Events(), adapter.AgentClaude, sm, pm, outputCh, logger, &stateDirty)
+	})
+	daemon.RunLoop(ctx, "watcher-codex", logger, func() {
+		handleWatcherEvents(ctx, cw.Events(), adapter.AgentCodex, sm, pm, outputCh, logger, &stateDirty)
+	})
 
 	// Handle process monitor events
-	go handleProcessEvents(ctx, pm, sm, logger, &stateDirty)
+	daemon.RunLoop(ctx, "process-events", logger, func() {
+		handleProcessEvents(ctx, pm, sm, logger, &stateDirty)
+	})
 
 	// Handle commands from relay
-	go handleCommands(ctx, client, sm, logger, &stateDirty)
+	daemon.RunLoop(ctx, "commands", logger, func() {
+		handleCommands(ctx, client, sm, logger, &stateDirty)
+	})
 
 	// Periodic state update — only writes when stateDirty is true
-	go func() {
+	daemon.RunLoop(ctx, "state-persist", logger, func() {
 		ticker := time.NewTicker(10 * time.Second)
 		defer ticker.Stop()
 		for {
@@ -846,7 +879,7 @@ func cmdDaemonStart(args []string) {
 				daemon.WriteState(state)
 			}
 		}
-	}()
+	})
 
 	fmt.Println(i18n.T("daemon.started", id, os.Getpid()))
 	fmt.Println(i18n.T("daemon.version", version))
@@ -1142,7 +1175,11 @@ func handleWatcherEvents(ctx context.Context, events <-chan watcher.SessionEvent
 					break
 				}
 				// Start JSONL tailer from beginning to replay history and tail new events.
-				go func() {
+				// Supervised via RunLoop: if the tail loop ever panics it restarts (the
+				// tailer tracks its own offset, so a restart resumes safely) rather than
+				// silently dying and leaving the session — including a later --continue
+				// resume — with no message forwarding.
+				daemon.RunLoop(ctx, "tailer:"+evt.Session.SessionID, logger, func() {
 					var tailer *watcher.JSONLTailer
 					// Retry: the agent may not have created the JSONL file yet
 					for retry := 0; retry < 30; retry++ {
@@ -1218,7 +1255,7 @@ func handleWatcherEvents(ctx context.Context, events <-chan watcher.SessionEvent
 							}
 						}
 					}
-				}()
+				})
 
 			case "changed":
 				logger.Debug("session changed", "session", evt.Session.SessionID, "status", evt.Session.Status)
@@ -1315,7 +1352,7 @@ func handleCommands(ctx context.Context, client *ws.Client, sm *session.SessionM
 
 			case "daemon_restart":
 				logger.Info("daemon restart requested")
-				go func() {
+				daemon.Go("daemon-restart", logger, func() {
 					time.Sleep(500 * time.Millisecond) // allow ack to send
 					// Fork+exec: spawn a new daemon process before exiting
 					exe, err := os.Executable()
@@ -1334,7 +1371,7 @@ func handleCommands(ctx context.Context, client *ws.Client, sm *session.SessionM
 					}
 					logger.Info("new daemon spawned, exiting", "newPID", cmd.Process.Pid)
 					os.Exit(0)
-				}()
+				})
 
 			case "user_message":
 				logger.Info("user message", "session", cmd.SessionID)
@@ -1475,7 +1512,7 @@ func handleCommands(ctx context.Context, client *ws.Client, sm *session.SessionM
 				})
 
 			case "upgrade_agent":
-				go handleUpgradeAgent(client, logger, cmd.Agent)
+				daemon.Go("upgrade-agent", logger, func() { handleUpgradeAgent(client, logger, cmd.Agent) })
 
 			case "approval_response":
 				// Client answered a tool-use approval request (Yes/No). Resolves
