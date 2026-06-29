@@ -253,7 +253,11 @@ func downloadOne(url, expectedSHA string) (string, error) {
 			continue
 		}
 
-		written, copyErr := io.Copy(tmpFile, resp.Body)
+		// Stream through a progress bar so the user sees a live percentage
+		// (Content-Length known) or a spinner + running byte count (chunked).
+		bar := newProgressBar(resp.ContentLength)
+		written, copyErr := io.Copy(tmpFile, &progressReader{r: resp.Body, bar: bar})
+		bar.Done()
 		resp.Body.Close()
 		tmpFile.Close()
 
