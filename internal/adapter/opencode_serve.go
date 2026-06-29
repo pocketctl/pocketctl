@@ -73,17 +73,15 @@ func (s *OpencodeServer) Start(ctx context.Context) error {
 	}
 	runCtx, cancel := context.WithCancel(ctx)
 	cmd := exec.CommandContext(runCtx, s.cliPath, "serve", "--port", "0")
-	// Auto-allow tool permissions for daemon-driven sessions. opencode's
-	// permission requests are NOT exposed to third-party API clients through any
-	// channel (not /event, /api/event, GET .../permission — all verified empty),
-	// so an unattended daemon session would HANG forever on an edit/bash tool that
-	// the user's config marks "ask". This mirrors Claude daemon sessions defaulting
-	// to bypassPermissions. OPENCODE_CONFIG_CONTENT merges over the user's config
-	// (model/provider/etc. are preserved); it only affects THIS serve — terminal
-	// `opencode` runs its own server with the user's "ask" config intact.
+	// Force edit/bash to "ask" for daemon-driven sessions so this serve emits
+	// permission.asked SSE events, which the coordinator surfaces as approval_request
+	// cards for remote approval (and auto-rejects on timeout so an unattended turn
+	// never hangs forever). OPENCODE_CONFIG_CONTENT merges over the user's config
+	// (model/provider/etc. preserved); it only affects THIS serve — terminal
+	// `opencode` runs its own server with the user's own config.
 	cmd.Env = append(os.Environ(),
 		"OPENCODE_SERVER_PASSWORD="+s.password,
-		`OPENCODE_CONFIG_CONTENT={"permission":{"edit":{"*":"allow"},"bash":{"*":"allow"}}}`,
+		`OPENCODE_CONFIG_CONTENT={"permission":{"edit":{"*":"ask"},"bash":{"*":"ask"}}}`,
 	)
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
@@ -459,6 +457,86 @@ func (s *OpencodeServer) Events(ctx context.Context) (<-chan SSEEvent, error) {
 		}
 	}()
 	return out, nil
+}
+
+// PermissionAsked is the decoded payload of a "permission.asked" (or
+// "permission.replied") SSE event: enough to surface an approval card and route
+// a reply. ID is the request id used by the reply route
+// (POST /api/session/{sessionID}/permission/{ID}/reply).
+type PermissionAsked struct {
+	ID        string          // permission/request id
+	SessionID string          // owning session
+	Tool      string          // tool/permission type (e.g. "bash", "edit")
+	Title     string          // human-readable summary, if provided
+	Metadata  json.RawMessage // tool input / details (rendered in the card)
+}
+
+// ParsePermissionAsked decodes a permission event's properties. opencode has
+// nested the permission under a few shapes across versions, so we probe both the
+// flat object and a {permission:{...}} wrapper. ok is false unless both a request
+// id and a session id are found.
+func ParsePermissionAsked(props json.RawMessage) (PermissionAsked, bool) {
+	type perm struct {
+		ID           string          `json:"id"`
+		RequestID    string          `json:"requestID"`
+		PermissionID string          `json:"permissionID"`
+		SessionID    string          `json:"sessionID"`
+		Type         string          `json:"type"`
+		ToolName     string          `json:"toolName"`
+		Title        string          `json:"title"`
+		Metadata     json.RawMessage `json:"metadata"`
+	}
+	var flat struct {
+		perm
+		Permission json.RawMessage `json:"permission"`
+	}
+	if json.Unmarshal(props, &flat) != nil {
+		return PermissionAsked{}, false
+	}
+	merge := func(p perm) PermissionAsked {
+		return PermissionAsked{
+			ID:        firstNonEmpty(p.ID, p.RequestID, p.PermissionID),
+			SessionID: p.SessionID,
+			Tool:      firstNonEmpty(p.Type, p.ToolName),
+			Title:     p.Title,
+			Metadata:  p.Metadata,
+		}
+	}
+	pa := merge(flat.perm)
+	if (pa.ID == "" || pa.SessionID == "") && len(flat.Permission) > 0 {
+		var inner perm
+		if json.Unmarshal(flat.Permission, &inner) == nil {
+			nested := merge(inner)
+			if pa.ID == "" {
+				pa.ID = nested.ID
+			}
+			if pa.SessionID == "" {
+				pa.SessionID = nested.SessionID
+			}
+			if pa.Tool == "" {
+				pa.Tool = nested.Tool
+			}
+			if pa.Title == "" {
+				pa.Title = nested.Title
+			}
+			if len(pa.Metadata) == 0 {
+				pa.Metadata = nested.Metadata
+			}
+		}
+	}
+	if pa.ID == "" || pa.SessionID == "" {
+		return PermissionAsked{}, false
+	}
+	return pa, true
+}
+
+func firstNonEmpty(vals ...string) string {
+	for _, v := range vals {
+		if v != "" {
+			return v
+		}
+	}
+	return ""
 }
 
 // ---- HTTP helpers ----

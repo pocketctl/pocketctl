@@ -154,6 +154,16 @@ type OpencodeSync struct {
 	seenCalls  map[string]bool    // callID → tool_call already emitted
 	emitUser   bool               // whether to emit user_text parts
 	lastStatus string             // last emitted session_status (dedupe)
+
+	// Turn-completion tracking. opencode polls every ~1s and only emits a
+	// session_status on a derived-status change. A fast turn whose entire
+	// running window falls between two polls is never observed as "running",
+	// and its trailing "idle" is deduped away (lastStatus already idle) — so
+	// the turn emits zero session_status events and clients' optimistic timers
+	// never resolve. We detect such turns by watching the latest assistant
+	// completion timestamp and force an idle when it advances.
+	lastCompletedAt  int64 // greatest assistant Time.Completed seen so far
+	seededCompletion bool  // first Diff seeds lastCompletedAt without force-emitting
 }
 
 // NewOpencodeSync creates a differ for a session. emitUser controls whether user
@@ -208,20 +218,52 @@ func (s *OpencodeSync) Diff(msgs []OpencodeMessageWithParts) []protocol.DaemonEv
 		}
 	}
 
-	// Derive the session's working state from the latest message and emit a
-	// session_status transition on change. opencode never streams an explicit
-	// "turn done" event, so we infer it: an assistant message with time.completed
-	// set means the turn finished (idle/ready); otherwise (latest is a user
-	// message, or an assistant message still in progress) the model is working.
-	if status := s.deriveStatus(ordered); status != "" && status != s.lastStatus {
+	// Derive the session's working state and emit a session_status transition.
+	// opencode never streams an explicit "turn done" event, so we infer it.
+	// Two triggers:
+	//   1) the derived status changed (running<->idle) — the normal path, and
+	//      also fires on the first Diff (lastStatus == "").
+	//   2) a new assistant turn *completed* since the last poll even though the
+	//      derived status is still idle — a fast turn whose "running" window
+	//      fell between two polls. Without this it emits zero session_status.
+	status := s.deriveStatus(ordered)
+	completedAt := latestCompletedAssistant(ordered)
+	switch {
+	case status != "" && status != s.lastStatus:
 		s.lastStatus = status
 		out = append(out, protocol.DaemonEvent{
 			Type:      "session_status",
 			SessionID: s.sessionID,
 			Status:    status,
 		})
+	case s.seededCompletion && completedAt > s.lastCompletedAt && status == protocol.StatusIdle:
+		s.lastStatus = protocol.StatusIdle
+		out = append(out, protocol.DaemonEvent{
+			Type:      "session_status",
+			SessionID: s.sessionID,
+			Status:    protocol.StatusIdle,
+		})
 	}
+	if completedAt > s.lastCompletedAt {
+		s.lastCompletedAt = completedAt
+	}
+	s.seededCompletion = true
 	return out
+}
+
+// latestCompletedAssistant returns the greatest Time.Completed across assistant
+// messages (0 if none have completed). When this advances between polls an
+// assistant turn finished — used to force a terminal idle for turns whose
+// "running" window was missed.
+func latestCompletedAssistant(ordered []OpencodeMessageWithParts) int64 {
+	var latest int64
+	for i := range ordered {
+		info := ordered[i].Info
+		if strings.EqualFold(info.Role, "assistant") && info.Time.Completed > latest {
+			latest = info.Time.Completed
+		}
+	}
+	return latest
 }
 
 // OpencodeMessagesRunning reports whether a session has an assistant turn

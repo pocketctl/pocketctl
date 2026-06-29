@@ -153,7 +153,7 @@ func TestListCommandsIntegration(t *testing.T) {
 	writeFile(t, filepath.Join(home, ".claude", "settings.json"),
 		`{"enabledPlugins":{"myplug@mp":true}}`)
 
-	items := listCommands(cwd, home)
+	items := listCommands(cwd, home, "")
 	got := map[string]protocol.CommandItem{}
 	for _, it := range items {
 		got[it.Name] = it
@@ -202,7 +202,7 @@ func TestDisabledPluginExcluded(t *testing.T) {
 	// NOT enabled
 	writeFile(t, filepath.Join(home, ".claude", "settings.json"), `{}`)
 
-	for _, it := range listCommands("", home) {
+	for _, it := range listCommands("", home, "") {
 		if it.Name == "offplug:secret" {
 			t.Fatal("disabled plugin command should not appear")
 		}
@@ -226,7 +226,7 @@ func TestListCommandsFiltersByAvailable(t *testing.T) {
 	// but model/config ABSENT (not available in -p mode), plus our project items.
 	available := []string{"clear", "compact", "my-skill", "optimize"}
 
-	items := ListCommands(cwd, available)
+	items := ListCommands(cwd, "", available)
 	got := map[string]protocol.CommandItem{}
 	for _, it := range items {
 		got[it.Name] = it
@@ -260,7 +260,7 @@ func TestListCommandsFiltersByAvailable(t *testing.T) {
 // (e.g. terminal session that never emitted an init event).
 func TestListCommandsFallbackWithoutAvailable(t *testing.T) {
 	cwd := t.TempDir()
-	items := ListCommands(cwd, nil)
+	items := ListCommands(cwd, "", nil)
 	got := map[string]bool{}
 	for _, it := range items {
 		got[it.Name] = true
@@ -268,5 +268,44 @@ func TestListCommandsFallbackWithoutAvailable(t *testing.T) {
 	// fallback includes the static builtin table (model etc.)
 	if !got["clear"] {
 		t.Fatal("fallback should include builtin clear")
+	}
+}
+
+// ListCommands excludes Claude-specific builtins for non-Claude agents. Codex
+// and opencode have no slash-command surface, so when their init never reports
+// available commands the fallback must NOT surface Claude builtins like
+// /clear, /model, /config — only project/user/plugin disk-scanned commands.
+func TestListCommandsExcludesClaudeBuiltinsForCodex(t *testing.T) {
+	cwd := t.TempDir()
+	// a real project command should still appear
+	mustMkdir(t, filepath.Join(cwd, ".claude", "commands"))
+	writeFile(t, filepath.Join(cwd, ".claude", "commands", "optimize.md"),
+		"---\ndescription: optimize code\n---\n")
+
+	items := ListCommands(cwd, "codex", nil)
+	got := map[string]bool{}
+	for _, it := range items {
+		got[it.Name] = true
+	}
+
+	// Claude builtins must be absent for codex
+	for _, name := range []string{"clear", "compact", "model", "config", "agents", "help", "cost", "init", "resume", "status"} {
+		if got[name] {
+			t.Fatalf("Claude builtin /%s must be excluded for codex agent", name)
+		}
+	}
+	// project command survives
+	if !got["optimize"] {
+		t.Fatal("project command optimize should still appear for codex")
+	}
+}
+
+// opencode likewise must not receive Claude builtins.
+func TestListCommandsExcludesClaudeBuiltinsForOpencode(t *testing.T) {
+	items := ListCommands("", "opencode", nil)
+	for _, it := range items {
+		if it.Source == "builtin" {
+			t.Fatalf("opencode must not receive Claude builtins, got %+v", it)
+		}
 	}
 }

@@ -2,10 +2,63 @@ package adapter
 
 import (
 	"context"
+	"encoding/json"
 	"os/exec"
 	"testing"
 	"time"
 )
+
+func TestParsePermissionAsked(t *testing.T) {
+	cases := []struct {
+		name             string
+		props            string
+		wantOK           bool
+		wantID, wantSess string
+		wantTool         string
+	}{
+		{
+			name:     "flat shape",
+			props:    `{"id":"per_123","sessionID":"ses_abc","type":"bash","metadata":{"command":"ls"}}`,
+			wantOK:   true,
+			wantID:   "per_123",
+			wantSess: "ses_abc",
+			wantTool: "bash",
+		},
+		{
+			name:     "nested under permission",
+			props:    `{"permission":{"id":"per_9","sessionID":"ses_z","toolName":"edit","title":"Edit foo.go"}}`,
+			wantOK:   true,
+			wantID:   "per_9",
+			wantSess: "ses_z",
+			wantTool: "edit",
+		},
+		{
+			name:     "requestID alias",
+			props:    `{"requestID":"req_7","sessionID":"ses_q","type":"bash"}`,
+			wantOK:   true,
+			wantID:   "req_7",
+			wantSess: "ses_q",
+			wantTool: "bash",
+		},
+		{name: "missing id", props: `{"sessionID":"ses_x","type":"bash"}`, wantOK: false},
+		{name: "missing session", props: `{"id":"per_1","type":"bash"}`, wantOK: false},
+		{name: "garbage", props: `not json`, wantOK: false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			pa, ok := ParsePermissionAsked(json.RawMessage(c.props))
+			if ok != c.wantOK {
+				t.Fatalf("ok=%v want %v (pa=%+v)", ok, c.wantOK, pa)
+			}
+			if !c.wantOK {
+				return
+			}
+			if pa.ID != c.wantID || pa.SessionID != c.wantSess || pa.Tool != c.wantTool {
+				t.Fatalf("got %+v, want id=%s sess=%s tool=%s", pa, c.wantID, c.wantSess, c.wantTool)
+			}
+		})
+	}
+}
 
 // TestOpencodeServerSmoke exercises the serve-client lifecycle against a real
 // `opencode serve` process: start, create a session, fetch it back, stop. It is
