@@ -33,6 +33,10 @@ function createMockPool() {
         result = { rows: [{ daemon_id: 'daemon-1', status: 'online' }] }
       } else if (sql.includes('RETURNING id')) {
         result = { rows: [{ id: 1 }] }
+      } else if (sql.includes('UPDATE sessions')) {
+        // Existing-row update path: report one affected row so update-only
+        // helpers (updateSessionStatus) treat the session as real.
+        result = { rows: [], rowCount: 1 }
       }
       return Promise.resolve(result)
     }),
@@ -155,7 +159,7 @@ describe('Router - session_status with exit_reason', () => {
     router = new Router(pool)
   })
 
-  test('exit_reason is passed to upsertSession', () => {
+  test('session_status is UPDATE-only and never INSERTs a (phantom) session row', () => {
     const daemonWs = createMockWs()
     router.registerDaemon(daemonWs, { type: 'register', daemon_id: 'daemon-1', hostname: 'test', agents: [] }, null)
 
@@ -163,13 +167,19 @@ describe('Router - session_status with exit_reason', () => {
       type: 'session_status', session_id: 'sess-exit', status: 'exited', exit_reason: 'user_interrupt',
     })
 
-    const upsertCall = pool._queries.find((q: any) =>
-      q.sql.includes('INSERT INTO sessions') && q.params.includes('user_interrupt')
+    // The status + exit_reason go out as an UPDATE...
+    const updateCall = pool._queries.find((q: any) =>
+      q.sql.includes('UPDATE sessions') && q.sql.includes('exit_reason') && q.params.includes('user_interrupt')
     )
-    expect(upsertCall).toBeDefined()
+    expect(updateCall).toBeDefined()
+    // ...and crucially, no INSERT (which would materialise a phantom session).
+    const insertCall = pool._queries.find((q: any) =>
+      q.sql.includes('INSERT INTO sessions') && q.params.includes('sess-exit')
+    )
+    expect(insertCall).toBeUndefined()
   })
 
-  test('session_status without exit_reason does not null existing reason', () => {
+  test('session_status without exit_reason does not null existing reason (COALESCE)', () => {
     const daemonWs = createMockWs()
     router.registerDaemon(daemonWs, { type: 'register', daemon_id: 'daemon-1', hostname: 'test', agents: [] }, null)
 
@@ -181,11 +191,13 @@ describe('Router - session_status with exit_reason', () => {
       type: 'session_status', session_id: 'sess-2', status: 'running',
     })
 
-    const secondUpsert = pool._queries.filter((q: any) =>
-      q.sql.includes('INSERT INTO sessions') && q.params.includes('sess-2')
+    const statusUpdates = pool._queries.filter((q: any) =>
+      q.sql.includes('UPDATE sessions') && q.sql.includes('exit_reason') && q.params.includes('sess-2')
     )
-    expect(secondUpsert.length).toBeGreaterThanOrEqual(2)
-    expect(secondUpsert[1].params[7]).toBeNull()
+    expect(statusUpdates.length).toBeGreaterThanOrEqual(2)
+    // updateSessionStatus params: [sessionId, daemonId, status, exitReason||null, userId||null]
+    // The second call carried no exit_reason → null, and COALESCE keeps the old value.
+    expect(statusUpdates[1].params[3]).toBeNull()
   })
 })
 

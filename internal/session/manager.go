@@ -1344,6 +1344,64 @@ func (sm *SessionManager) SetSessionExited(sessionID string, exitReason string) 
 	}
 }
 
+// DropGhostSession removes a terminal session that was registered from a
+// ~/.claude/sessions/<pid>.json metadata file but whose JSONL never materialised
+// (so the tailer could never start). Claude Code writes such transient metadata
+// on `--continue` (a short-lived session id whose conversation actually lands in
+// the original/resumed <id>.jsonl), and pocketctl would otherwise leave a dangling
+// tailer-less entry in sm.sessions — the daemon-side seed of the "phantom session
+// with only status + time" symptom. Only drops if no tailer was ever attached and
+// the session is terminal-sourced (never daemon-spawned). Returns true if dropped.
+func (sm *SessionManager) DropGhostSession(sessionID string) bool {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+	ps, ok := sm.sessions[sessionID]
+	if !ok {
+		return false
+	}
+	// Guard: never drop a session that has a live tailer or a spawned process —
+	// those are real sessions, not ghosts.
+	if ps.Tailer != nil || ps.Source != "terminal" || ps.Cmd != nil {
+		return false
+	}
+	delete(sm.sessions, sessionID)
+	return true
+}
+
+// ReviveTerminalSessionOnActivity is called from the JSONL tail loop when fresh
+// events arrive. It always refreshes LastActivityAt; additionally, if the session
+// had gone dormant (exited/completed/error/killed) it flips it back to running and
+// emits session_status. This is what makes an `exit` → `claude --continue` resume
+// reappear as live: the original session's tailer stays alive across the exit, so
+// when --continue appends to the same <id>.jsonl the renewed output revives the
+// original card instead of leaving it frozen at "exited".
+func (sm *SessionManager) ReviveTerminalSessionOnActivity(sessionID string) {
+	sm.mu.Lock()
+	ps, ok := sm.sessions[sessionID]
+	if !ok {
+		sm.mu.Unlock()
+		return
+	}
+	now := time.Now()
+	ps.LastActivityAt = now
+	dormant := ps.Status == protocol.StatusExited || ps.Status == protocol.StatusCompleted ||
+		ps.Status == protocol.StatusError || ps.Status == protocol.StatusKilled
+	if !dormant {
+		sm.mu.Unlock()
+		return
+	}
+	ps.Status = protocol.StatusRunning
+	ps.ExitReason = ""
+	sm.mu.Unlock()
+
+	sm.outputCh <- protocol.DaemonEvent{
+		Type:           "session_status",
+		SessionID:      sessionID,
+		Status:         protocol.StatusRunning,
+		LastActivityAt: now.UTC().Format(time.RFC3339),
+	}
+}
+
 // SetSessionStatus updates a terminal session's status from watcher events.
 func (sm *SessionManager) SetSessionStatus(sessionID, status string) {
 	sm.mu.Lock()

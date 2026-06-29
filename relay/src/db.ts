@@ -317,6 +317,8 @@ export async function upsertSession(pool: pg.Pool, sessionId: string, daemonId: 
      ON CONFLICT (session_id) DO UPDATE SET
        daemon_id = $2,
        status = $7,
+       agent_type = COALESCE(NULLIF($3, ''), sessions.agent_type),
+       cwd = COALESCE(NULLIF($4, ''), sessions.cwd),
        title = COALESCE($5, sessions.title),
        source = COALESCE($6, sessions.source),
        exit_reason = COALESCE($8, sessions.exit_reason),
@@ -421,6 +423,23 @@ export async function getUserPlanAndWhitelist(pool: pg.Pool, userId: number): Pr
   return {
     plan: result.rows[0].plan || 'free',
     whitelist: result.rows[0].whitelist || false,
+  };
+}
+
+/** Get user profile including subscription plan */
+export async function getUserProfile(pool: pg.Pool, userId: number): Promise<{ id: number; email: string; phone: string | null; display_name: string | null; plan: string } | null> {
+  const result = await pool.query(
+    `SELECT id, email, phone, display_name, plan FROM users WHERE id = $1`,
+    [userId]
+  );
+  if (result.rows.length === 0) return null;
+  const row = result.rows[0];
+  return {
+    id: row.id,
+    email: row.email,
+    phone: row.phone ?? null,
+    display_name: row.display_name ?? null,
+    plan: row.plan || 'free',
   };
 }
 
@@ -685,6 +704,28 @@ export async function bindTokenToDaemon(pool: pg.Pool, daemonId: string, jti: st
 }
 
 // --- C2: Token cost tracking ---
+
+/** Update an existing session's status/exit_reason — UPDATE-ONLY (never INSERT).
+ *  session_status events must not materialise a session row: a session_id that
+ *  was never announced via session_created/session_discovered is a ghost (e.g.
+ *  Claude Code writes a transient ~/.claude/sessions/<pid>.json on --continue
+ *  whose <id>.jsonl never appears, so the daemon's tailer never resolves and no
+ *  session_discovered is ever emitted — only session_status). Upserting on those
+ *  produced phantom rows with empty cwd/agent/title showing "status + time, no
+ *  messages". Returns true if an existing row was updated. */
+export async function updateSessionStatus(pool: pg.Pool, sessionId: string, daemonId: string, status: string, exitReason?: string, userId?: number): Promise<boolean> {
+  const res = await pool.query(
+    `UPDATE sessions SET
+       daemon_id = $2,
+       status = $3,
+       exit_reason = COALESCE($4, sessions.exit_reason),
+       user_id = CASE WHEN $5 IS NOT NULL THEN $5 ELSE sessions.user_id END,
+       updated_at = NOW()
+     WHERE session_id = $1`,
+    [sessionId, daemonId, status, exitReason || null, userId || null]
+  );
+  return (res.rowCount ?? 0) > 0;
+}
 
 /** Update session cumulative cost (called on session_status carrying cost_usd from result event). */
 export async function updateSessionCost(pool: pg.Pool, sessionId: string, costUsd: number): Promise<void> {
