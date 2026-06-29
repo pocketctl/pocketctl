@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	mathrand "math/rand/v2"
 	"net"
 	"net/url"
 	"os"
@@ -16,6 +17,24 @@ import (
 	"github.com/gorilla/websocket"
 	"github.com/pocketctl/pocketctl/internal/daemon"
 	"github.com/pocketctl/pocketctl/internal/protocol"
+)
+
+const (
+	// pingInterval is how often the daemon sends an app-level ping to the relay
+	// (which replies with a pong, updating the relay's heartbeat).
+	pingInterval = 10 * time.Second
+	// pongWait is the read deadline: if NO message (pong, command, anything)
+	// arrives within this window the connection is treated as dead and the read
+	// loop returns so Run reconnects. It MUST be comfortably larger than
+	// pingInterval (relay pongs every ~10s on an idle link). This is the primary
+	// defense against silent half-open sockets, where ReadMessage would
+	// otherwise block until OS TCP keepalive (~2h).
+	pongWait = 30 * time.Second
+	// writeWait bounds a single WriteMessage so a stuck socket can't block the
+	// writer forever.
+	writeWait = 10 * time.Second
+	// maxBackoff caps the reconnect backoff delay.
+	maxBackoff = 30 * time.Second
 )
 
 // OnConnectStateChange is called when the relay connection state changes.
@@ -58,6 +77,18 @@ type Client struct {
 	OnStateChange      OnConnectStateChange
 	OnReconnected      func()  // called after successful (re)connection + register
 	OnEvent            OnEvent // optional hook: inspect/derive events before forwarding to relay
+
+	// reconnectAttempt counts consecutive failed/lost connections; it drives the
+	// exponential backoff and is reset to 0 on every successful connect. Only
+	// touched from the single Run goroutine (and the connect it calls), so it
+	// needs no lock.
+	reconnectAttempt int
+
+	// Connection liveness/timeouts. Default to the package consts; overridable
+	// (e.g. shortened by tests) without touching the timing logic.
+	pingInterval time.Duration
+	pongWait     time.Duration
+	writeWait    time.Duration
 }
 
 func NewClient(relayURL, token, daemonID string, agents []string, agentVersions map[string]string, agentLatests map[string]string, outputCh <-chan protocol.DaemonEvent, logger *slog.Logger) *Client {
@@ -79,6 +110,9 @@ func NewClient(relayURL, token, daemonID string, agents []string, agentVersions 
 		localIP:       localIP,
 		arch:          runtime.GOARCH,
 		CommandCh:     make(chan protocol.ClientMessage, 64),
+		pingInterval:  pingInterval,
+		pongWait:      pongWait,
+		writeWait:     writeWait,
 	}
 }
 
@@ -164,6 +198,10 @@ func (c *Client) connectAndServe(ctx context.Context) error {
 	c.conn = conn
 	c.connMu.Unlock()
 
+	// Connection established — reset backoff so the next disconnect starts from
+	// the shortest delay again.
+	c.reconnectAttempt = 0
+
 	c.notifyState(true)
 
 	c.logger.Info("sending register", "daemonID", c.daemonID, "hostname", c.hostname)
@@ -218,11 +256,27 @@ func (c *Client) readPump(done chan struct{}) {
 	c.connMu.Lock()
 	conn := c.conn
 	c.connMu.Unlock()
+
+	// Liveness: require some inbound traffic within pongWait. The relay replies
+	// to our 10s app-level ping with a pong, so a healthy idle link delivers a
+	// message every ~10s — well inside the 30s deadline. If the socket dies
+	// silently (no FIN/RST: NAT timeout, server crash, cable pull), no message
+	// arrives, the deadline fires, ReadMessage returns an error, and Run
+	// reconnects — instead of blocking until OS TCP keepalive (~2h).
+	_ = conn.SetReadDeadline(time.Now().Add(c.pongWait))
+	// Defensive: also refresh on WS protocol-level pongs, in case a future relay
+	// sends control-frame pongs in addition to the app-level pong message.
+	conn.SetPongHandler(func(string) error {
+		return conn.SetReadDeadline(time.Now().Add(c.pongWait))
+	})
+
 	for {
 		_, msg, err := conn.ReadMessage()
 		if err != nil {
 			return
 		}
+		// Any inbound message proves the link is alive — extend the deadline.
+		_ = conn.SetReadDeadline(time.Now().Add(c.pongWait))
 		var base struct {
 			Type               string `json:"type"`
 			Error              string `json:"error"`
@@ -272,7 +326,7 @@ func (c *Client) readPump(done chan struct{}) {
 }
 
 func (c *Client) pingPump(ctx context.Context, done chan struct{}) {
-	ticker := time.NewTicker(10 * time.Second)
+	ticker := time.NewTicker(c.pingInterval)
 	defer ticker.Stop()
 	for {
 		select {
@@ -305,25 +359,53 @@ func (c *Client) SendMsg(v any) {
 	}
 	c.writeMu.Lock()
 	defer c.writeMu.Unlock()
+	_ = conn.SetWriteDeadline(time.Now().Add(c.writeWait))
 	if err := conn.WriteMessage(websocket.TextMessage, data); err != nil {
 		c.logger.Error("send msg write error", "error", err, "len", len(data))
+		// On a half-open socket a write fails (TCP eventually gives up) while the
+		// read side stays blocked. Close the conn so readPump's ReadMessage
+		// errors out, closes `done`, and Run reconnects — otherwise a failed ping
+		// write would just be logged and the daemon would hang on a dead link.
+		// Closing the captured conn is safe even if it's already been replaced by
+		// a fresh connection (we only close this specific one).
+		conn.Close()
 	}
 }
 
+// backoffSleep waits before the next reconnect attempt. It returns true when
+// the wait elapsed (proceed to reconnect) or false if ctx was cancelled (stop).
+//
+// The delay grows exponentially with the number of consecutive failures
+// (reconnectAttempt, reset to 0 on every successful connect): 1s, 2s, 4s, 8s,
+// 16s, capped at maxBackoff. Full jitter (a random value in [delay/2, delay])
+// spreads out reconnects so a fleet of daemons doesn't stampede the relay in
+// lockstep after it restarts. The loop never gives up — a daemon must keep
+// retrying indefinitely until the relay comes back.
 func (c *Client) backoffSleep(ctx context.Context) bool {
-	for attempt := 0; attempt < 10; attempt++ {
-		delay := time.Duration(1<<uint(attempt)) * time.Second
-		if delay > 30*time.Second {
-			delay = 30 * time.Second
-		}
-		select {
-		case <-time.After(delay):
-			return true
-		case <-ctx.Done():
-			return false
-		}
+	delay := backoffDelay(c.reconnectAttempt)
+	c.reconnectAttempt++
+	select {
+	case <-time.After(delay):
+		return true
+	case <-ctx.Done():
+		return false
 	}
-	return false
+}
+
+// backoffDelay returns the jittered reconnect delay for the given consecutive
+// attempt count: an exponential base (1s, 2s, 4s, 8s, 16s, capped at maxBackoff)
+// with full jitter applied — the result is uniformly random in [base/2, base].
+// Pure (aside from the RNG) so the progression is unit-testable.
+func backoffDelay(attempt int) time.Duration {
+	// Cap the shift so 1<<attempt can't overflow; 1<<5 = 32s already exceeds the
+	// 30s cap, so attempts beyond 5 all clamp to maxBackoff.
+	shift := min(attempt, 5)
+	base := time.Duration(1<<uint(shift)) * time.Second
+	if base > maxBackoff {
+		base = maxBackoff
+	}
+	half := base / 2
+	return half + time.Duration(mathrand.Int64N(int64(half)+1))
 }
 
 func (c *Client) notifyState(connected bool) {

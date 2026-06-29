@@ -308,7 +308,7 @@ func isPermanent(err error) bool {
 
 // ReplaceBinary safely replaces the running binary with a new one at tmpPath.
 // On success it removes the temp file and returns nil.
-func ReplaceBinary(tmpPath string) error {
+func ReplaceBinary(tmpPath string) (err error) {
 	execPath, err := os.Executable()
 	if err != nil {
 		return fmt.Errorf("get executable path: %w", err)
@@ -319,6 +319,17 @@ func ReplaceBinary(tmpPath string) error {
 	if err != nil {
 		realPath = execPath
 	}
+
+	// On macOS, an ad-hoc/unsigned binary that re-execs itself (which the daemon
+	// does on `daemon start` and `daemon_restart`) is SIGKILL'd by Gatekeeper
+	// once its on-disk contents change. After we swap in the freshly downloaded
+	// binary its prior signature is invalid, so re-sign it ad-hoc here — every
+	// successful replacement path funnels through this deferred call.
+	defer func() {
+		if err == nil {
+			resignDarwin(realPath)
+		}
+	}()
 
 	info, err := os.Stat(realPath)
 	if err != nil {
