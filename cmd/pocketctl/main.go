@@ -777,10 +777,17 @@ func cmdDaemonStart(args []string) {
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 
-	// Start session watcher
+	// Start session watcher (Claude terminal sessions)
 	if err := sw.Start(ctx); err != nil {
 		logger.Error("start session watcher", "error", err)
 		os.Exit(1)
+	}
+
+	// Start codex terminal-session watcher (CODEX_HOME-aware rollout discovery).
+	// Non-fatal: a host without codex just yields no events.
+	cw := watcher.NewCodexSessionWatcher()
+	if err := cw.Start(ctx); err != nil {
+		logger.Warn("codex session watcher not started", "error", err)
 	}
 
 	// Start process monitor
@@ -793,8 +800,9 @@ func cmdDaemonStart(args []string) {
 		}
 	}()
 
-	// Handle watcher events
-	go handleWatcherEvents(ctx, sw, sm, pm, outputCh, logger, &stateDirty)
+	// Handle watcher events (Claude + Codex share the same discovery handler)
+	go handleWatcherEvents(ctx, sw.Events(), adapter.AgentClaude, sm, pm, outputCh, logger, &stateDirty)
+	go handleWatcherEvents(ctx, cw.Events(), adapter.AgentCodex, sm, pm, outputCh, logger, &stateDirty)
 
 	// Handle process monitor events
 	go handleProcessEvents(ctx, pm, sm, logger, &stateDirty)
@@ -1101,12 +1109,15 @@ func cmdDoctor() {
 	}
 }
 
-func handleWatcherEvents(ctx context.Context, sw *watcher.SessionWatcher, sm *session.SessionManager, pm *watcher.ProcessMonitor, outputCh chan protocol.DaemonEvent, logger *slog.Logger, stateDirty *atomic.Bool) {
+// handleWatcherEvents consumes session-discovery events from a watcher (Claude's
+// SessionWatcher or Codex's CodexSessionWatcher — both emit watcher.SessionEvent)
+// and registers/tails them under the given agentType.
+func handleWatcherEvents(ctx context.Context, events <-chan watcher.SessionEvent, agentType string, sm *session.SessionManager, pm *watcher.ProcessMonitor, outputCh chan protocol.DaemonEvent, logger *slog.Logger, stateDirty *atomic.Bool) {
 	for {
 		select {
 		case <-ctx.Done():
 			return
-		case evt := <-sw.Events():
+		case evt := <-events:
 			switch evt.Action {
 			case "discovered":
 				logger.Info("session discovered", "session", evt.Session.SessionID, "pid", evt.Session.Pid)
@@ -1131,15 +1142,13 @@ func handleWatcherEvents(ctx context.Context, sw *watcher.SessionWatcher, sm *se
 					break
 				}
 				// Start JSONL tailer from beginning to replay history and tail new events.
-				// The session watcher only scans ~/.claude/sessions today, so discovered
-				// terminal sessions are Claude. (Codex terminal discovery is a follow-up.)
 				go func() {
 					var tailer *watcher.JSONLTailer
 					// Retry: the agent may not have created the JSONL file yet
 					for retry := 0; retry < 30; retry++ {
-						jsonlPath, err := adapter.ResolveJSONLPathFor(adapter.AgentClaude, evt.Session.SessionID, evt.Session.Cwd)
+						jsonlPath, err := adapter.ResolveJSONLPathFor(agentType, evt.Session.SessionID, evt.Session.Cwd)
 						if err == nil {
-							tailer, err = watcher.NewJSONLTailerFromStart(jsonlPath, adapter.AgentClaude)
+							tailer, err = watcher.NewJSONLTailerFromStart(jsonlPath, agentType)
 							if err == nil {
 								// Associate tailer with session so sendToIdleTerminal can pause/resume it (D2)
 								sm.SetTailer(evt.Session.SessionID, tailer)
@@ -1150,7 +1159,7 @@ func handleWatcherEvents(ctx context.Context, sw *watcher.SessionWatcher, sm *se
 									Cwd:       evt.Session.Cwd,
 									Status:    evt.Session.Status,
 									Source:    "terminal",
-									Agent:     adapter.AgentClaude,
+									Agent:     agentType,
 								}
 								break
 							}
