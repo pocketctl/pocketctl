@@ -78,6 +78,52 @@ func TestOpencodeSync_IncrementalAndOrdering(t *testing.T) {
 	}
 }
 
+// A fast opencode turn can start and finish within a single poll window, so its
+// "running" state is never observed and (with lastStatus already idle) the
+// trailing idle is deduped away — leaving the turn with zero session_status
+// events and the client's optimistic timer stuck. Turn-completion detection must
+// force a terminal idle in that case.
+func TestOpencodeSync_FastTurnForcesIdle(t *testing.T) {
+	s := NewOpencodeSync("ses_z", true)
+
+	// Poll 1: turn 1 already finished (assistant completed). Seeds the completion
+	// tracker and reports idle.
+	snap1 := []OpencodeMessageWithParts{
+		mkMsg("msg_u1", "user", "", 1000, 0,
+			OpencodePart{ID: "p_u1", Type: "text", Text: "first"}),
+		mkMsg("msg_a1", "assistant", "glm-5", 2000, 2500,
+			OpencodePart{ID: "p_a1", Type: "text", Text: "reply one"}),
+	}
+	got := s.Diff(snap1)
+	if last := got[len(got)-1]; last.Type != "session_status" || last.Status != "idle" {
+		t.Fatalf("snap1 should end with session_status idle, got %+v", got)
+	}
+
+	// Poll 2: turn 2 started AND finished between polls — assistant already
+	// completed, "running" never observed, derived status still idle. Without
+	// turn-completion detection this emits no session_status.
+	snap2 := []OpencodeMessageWithParts{
+		mkMsg("msg_u1", "user", "", 1000, 0,
+			OpencodePart{ID: "p_u1", Type: "text", Text: "first"}),
+		mkMsg("msg_a1", "assistant", "glm-5", 2000, 2500,
+			OpencodePart{ID: "p_a1", Type: "text", Text: "reply one"}),
+		mkMsg("msg_u2", "user", "", 3000, 0,
+			OpencodePart{ID: "p_u2", Type: "text", Text: "second"}),
+		mkMsg("msg_a2", "assistant", "glm-5", 3500, 4000,
+			OpencodePart{ID: "p_a2", Type: "text", Text: "reply two"}),
+	}
+	got = s.Diff(snap2)
+	sawIdle := false
+	for _, ev := range got {
+		if ev.Type == "session_status" && ev.Status == "idle" {
+			sawIdle = true
+		}
+	}
+	if !sawIdle {
+		t.Fatalf("fast turn 2 should force a session_status idle, got %+v", got)
+	}
+}
+
 func TestOpencodeSync_EmitUserFalse(t *testing.T) {
 	// Owned sessions: user_text suppressed (echoed on Send instead).
 	s := NewOpencodeSync("ses_y", false)
