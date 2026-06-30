@@ -1258,6 +1258,21 @@ function processEvent(evt: any, target: any[] = messages.value) {
       tool, input, inputDesc: formatToolInput(tool, input),
       status: 'pending',
     })
+  } else if (type === 'approval_resolved') {
+    // The pending approval was answered ELSEWHERE — the user typed [y/n] in the
+    // terminal that owns this session. Flip the matching card out of 'pending'
+    // so its buttons disappear and it shows the terminal-side result, instead of
+    // lingering as a stale, re-answerable prompt on this device.
+    const requestId = evt.request_id || evt.payload?.request_id
+    if (!requestId) return
+    const approved = evt.approved ?? evt.payload?.approved
+    for (let i = target.length - 1; i >= 0; i--) {
+      const m = target[i] as any
+      if (m.type === 'approval_request' && m.request_id === requestId && m.status === 'pending') {
+        m.status = approved ? 'allowed' : 'denied'
+        break
+      }
+    }
   } else if (type === 'interactive_prompt') {
     // Daemon scanned a selection menu the agent's TUI drew to the PTY (e.g. a
     // host PreToolUse hook's "Do you want to proceed? ❶Yes ❷No" prompt that
@@ -1519,6 +1534,25 @@ onMounted(() => {
     processEvent(msg)
     const callId = msg.call_id || msg.payload?.call_id
     if (callId) clearToolTimeout(callId)
+  }))
+
+  // Tool-use approval + PTY selection cards. These render via processEvent (the
+  // replay path already does), but without a live handler the daemon's live
+  // events were dropped — the card only appeared after a refresh (replay). Wire
+  // them so they show in real time, matching the iOS app's single-dispatch path.
+  cleanups.push(onEvent('approval_request', (msg: any) => {
+    if (msg.session_id !== sessionId.value) return
+    processEvent(msg)
+    nextTick(scrollToBottom)
+  }))
+  cleanups.push(onEvent('approval_resolved', (msg: any) => {
+    if (msg.session_id !== sessionId.value) return
+    processEvent(msg)
+  }))
+  cleanups.push(onEvent('interactive_prompt', (msg: any) => {
+    if (msg.session_id !== sessionId.value) return
+    processEvent(msg)
+    nextTick(scrollToBottom)
   }))
 
   cleanups.push(onEvent('subagent_discovered', (msg: any) => {
