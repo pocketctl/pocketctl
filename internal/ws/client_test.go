@@ -2,6 +2,7 @@ package ws
 
 import (
 	"context"
+	"encoding/json"
 	"io"
 	"log/slog"
 	"net/http"
@@ -129,4 +130,276 @@ func waitForConns(t *testing.T, conns *int32, want int32, timeout time.Duration)
 		time.Sleep(10 * time.Millisecond)
 	}
 	t.Fatalf("expected >= %d connections within %v, got %d", want, timeout, atomic.LoadInt32(conns))
+}
+
+// --- Outbound delivery buffer (at-least-once) ---
+
+// TestAppendOutboundStampsSeq verifies enqueue assigns a contiguous, monotonic
+// seq and that the marshaled payload carries it.
+func TestAppendOutboundStampsSeq(t *testing.T) {
+	c := newTestClient("ws://example")
+	s1, d1, ok1 := c.appendOutbound(&protocol.DaemonEvent{Type: "a"})
+	s2, _, ok2 := c.appendOutbound(&protocol.DaemonEvent{Type: "b"})
+	if !ok1 || !ok2 {
+		t.Fatal("appendOutbound should succeed")
+	}
+	if s1 != 1 || s2 != 2 {
+		t.Fatalf("expected seq 1,2 got %d,%d", s1, s2)
+	}
+	if !strings.Contains(string(d1), `"seq":1`) {
+		t.Fatalf("payload missing seq: %s", d1)
+	}
+}
+
+// TestTrimOutboundRemovesPrefix verifies an ack trims the acknowledged prefix
+// and advances ackedSeq.
+func TestTrimOutboundRemovesPrefix(t *testing.T) {
+	c := newTestClient("ws://example")
+	for i := 0; i < 5; i++ {
+		c.appendOutbound(&protocol.DaemonEvent{Type: "e"})
+	}
+	c.trimOutbound(3)
+	c.outMu.Lock()
+	defer c.outMu.Unlock()
+	if c.ackedSeq != 3 {
+		t.Fatalf("ackedSeq = %d, want 3", c.ackedSeq)
+	}
+	if len(c.outBuf) != 2 || c.outBuf[0].seq != 4 || c.outBuf[1].seq != 5 {
+		t.Fatalf("unexpected buffer after trim: %+v", c.outBuf)
+	}
+}
+
+// TestOnRegisterAckLegacyTrims verifies a relay without ack support drains the
+// buffer (best-effort) so it can't grow unbounded.
+func TestOnRegisterAckLegacyTrims(t *testing.T) {
+	c := newTestClient("ws://example")
+	for i := 0; i < 3; i++ {
+		c.appendOutbound(&protocol.DaemonEvent{Type: "e"})
+	}
+	c.onRegisterAck(false)
+	c.outMu.Lock()
+	defer c.outMu.Unlock()
+	if len(c.outBuf) != 0 {
+		t.Fatalf("legacy relay should trim buffer, got %d", len(c.outBuf))
+	}
+	if !c.ackKnown || c.ackSupported {
+		t.Fatalf("flags: ackKnown=%v ackSupported=%v", c.ackKnown, c.ackSupported)
+	}
+}
+
+// TestOnRegisterAckSupportedKeepsBuffer verifies an ack-capable relay keeps the
+// buffer (delivery is confirmed only by event_ack).
+func TestOnRegisterAckSupportedKeepsBuffer(t *testing.T) {
+	c := newTestClient("ws://example")
+	c.appendOutbound(&protocol.DaemonEvent{Type: "e"})
+	c.onRegisterAck(true)
+	c.outMu.Lock()
+	defer c.outMu.Unlock()
+	if len(c.outBuf) != 1 {
+		t.Fatalf("ack-capable relay should keep buffer, got %d", len(c.outBuf))
+	}
+	if !c.ackSupported {
+		t.Fatal("ackSupported should be true")
+	}
+}
+
+// TestOutboundBackPressureAndAck verifies a full buffer blocks the producer and
+// an ack (trim) frees space to unblock it — zero loss, never silently dropped.
+func TestOutboundBackPressureAndAck(t *testing.T) {
+	c := newTestClient("ws://example")
+	c.maxOutCount = 2
+	for i := 0; i < 2; i++ {
+		if _, _, ok := c.appendOutbound(&protocol.DaemonEvent{Type: "x"}); !ok {
+			t.Fatal("append within cap should succeed")
+		}
+	}
+	done := make(chan bool, 1)
+	go func() {
+		_, _, ok := c.appendOutbound(&protocol.DaemonEvent{Type: "y"})
+		done <- ok
+	}()
+	select {
+	case <-done:
+		t.Fatal("append should block at cap")
+	case <-time.After(50 * time.Millisecond):
+	}
+	c.trimOutbound(1) // free one slot
+	select {
+	case ok := <-done:
+		if !ok {
+			t.Fatal("expected ok after space freed")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("append did not unblock after trim")
+	}
+}
+
+// TestOutboundDrainUnblocks verifies a producer parked on a full buffer returns
+// (ok=false) when the client is draining (ctx cancelled), rather than hanging.
+func TestOutboundDrainUnblocks(t *testing.T) {
+	c := newTestClient("ws://example")
+	c.maxOutCount = 1
+	c.appendOutbound(&protocol.DaemonEvent{Type: "a"})
+	done := make(chan bool, 1)
+	go func() {
+		_, _, ok := c.appendOutbound(&protocol.DaemonEvent{Type: "b"})
+		done <- ok
+	}()
+	time.Sleep(30 * time.Millisecond)
+	c.outMu.Lock()
+	c.draining = true
+	c.outCond.Broadcast()
+	c.outMu.Unlock()
+	select {
+	case ok := <-done:
+		if ok {
+			t.Fatal("expected ok=false while draining")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("drain did not unblock producer")
+	}
+}
+
+// TestReplaysUnackedEventsOnReconnect is the end-to-end durability test: an
+// event delivered on the first connection but never acked must be replayed
+// (same seq) after the daemon reconnects.
+func TestReplaysUnackedEventsOnReconnect(t *testing.T) {
+	received := make(chan int64, 16)
+	var connCount int32
+	upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
+	mux := http.NewServeMux()
+	mux.HandleFunc("/ws", func(w http.ResponseWriter, r *http.Request) {
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		n := atomic.AddInt32(&connCount, 1)
+		gotEvent := false
+		for {
+			_, msg, err := conn.ReadMessage()
+			if err != nil {
+				conn.Close()
+				return
+			}
+			var m map[string]any
+			if json.Unmarshal(msg, &m) != nil {
+				continue
+			}
+			switch m["type"] {
+			case "register":
+				_ = conn.WriteJSON(map[string]any{"type": "register_ack", "status": "ok", "supports_event_ack": true})
+			case "ping":
+				// ignore
+			default:
+				if seqF, ok := m["seq"].(float64); ok {
+					received <- int64(seqF)
+					gotEvent = true
+				}
+			}
+			// First connection: drop the link right after the first event arrives
+			// WITHOUT acking, forcing a replay on reconnect.
+			if n == 1 && gotEvent {
+				conn.Close()
+				return
+			}
+		}
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	out := make(chan protocol.DaemonEvent, 8)
+	c := NewClient(wsURL(srv.URL), "tok", "daemon-test", []string{"claude-code"}, nil, nil, out, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	c.pingInterval = 30 * time.Millisecond
+	c.pongWait = 150 * time.Millisecond
+	c.writeWait = 150 * time.Millisecond
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go c.Run(ctx)
+
+	out <- protocol.DaemonEvent{Type: "agent_text", SessionID: "s1", Text: "hi"}
+
+	first := waitSeq(t, received, 2*time.Second)
+	second := waitSeq(t, received, 3*time.Second)
+	if first != 1 || second != 1 {
+		t.Fatalf("expected seq 1 delivered then replayed as 1, got %d then %d", first, second)
+	}
+	if atomic.LoadInt32(&connCount) < 2 {
+		t.Fatalf("expected a reconnect, got %d connections", connCount)
+	}
+}
+
+// TestLegacyRelayTrimsOnWrite verifies a new daemon against an old relay (which
+// never advertises supports_event_ack and never sends event_ack) does not stall:
+// it trims its buffer on successful write so the buffer cannot grow unbounded.
+func TestLegacyRelayTrimsOnWrite(t *testing.T) {
+	received := make(chan int64, 16)
+	upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
+	mux := http.NewServeMux()
+	mux.HandleFunc("/ws", func(w http.ResponseWriter, r *http.Request) {
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		for {
+			_, msg, err := conn.ReadMessage()
+			if err != nil {
+				conn.Close()
+				return
+			}
+			var m map[string]any
+			if json.Unmarshal(msg, &m) != nil {
+				continue
+			}
+			switch m["type"] {
+			case "register":
+				// Legacy relay: register_ack WITHOUT supports_event_ack, no event_ack ever.
+				_ = conn.WriteJSON(map[string]any{"type": "register_ack", "status": "ok"})
+			case "ping":
+			default:
+				if seqF, ok := m["seq"].(float64); ok {
+					received <- int64(seqF)
+				}
+			}
+		}
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	out := make(chan protocol.DaemonEvent, 8)
+	c := NewClient(wsURL(srv.URL), "tok", "daemon-test", []string{"claude-code"}, nil, nil, out, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	c.pingInterval = 30 * time.Millisecond
+	c.pongWait = 150 * time.Millisecond
+	c.writeWait = 150 * time.Millisecond
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go c.Run(ctx)
+
+	for i := 0; i < 3; i++ {
+		out <- protocol.DaemonEvent{Type: "agent_text", SessionID: "s1", Text: "hi"}
+	}
+	for i := 0; i < 3; i++ {
+		waitSeq(t, received, 2*time.Second)
+	}
+
+	// Give the legacy trim-on-write a moment, then assert the buffer drained.
+	time.Sleep(100 * time.Millisecond)
+	c.outMu.Lock()
+	n := len(c.outBuf)
+	c.outMu.Unlock()
+	if n != 0 {
+		t.Fatalf("legacy relay: buffer should trim on write, got %d unacked", n)
+	}
+}
+
+func waitSeq(t *testing.T, ch <-chan int64, timeout time.Duration) int64 {
+	t.Helper()
+	select {
+	case s := <-ch:
+		return s
+	case <-time.After(timeout):
+		t.Fatalf("timed out waiting for a received seq")
+		return 0
+	}
 }

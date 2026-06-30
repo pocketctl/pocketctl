@@ -849,6 +849,18 @@ func cmdDaemonStart(args []string) {
 	client.SetVersion(version)
 	client.SetStartedAt(time.Now().Unix())
 
+	// Durable outbound spool: mirror unacked events to disk so a daemon process
+	// crash doesn't lose them (replayed on next start). Default on; disable with
+	// POCKETCTL_SPOOL=0. A setup failure is non-fatal — fall back to in-memory.
+	if os.Getenv("POCKETCTL_SPOOL") != "0" {
+		if cfgDir, err := config.ConfigDir(); err == nil {
+			spoolPath := filepath.Join(cfgDir, "spool", id+".log")
+			if err := client.InitSpool(spoolPath); err != nil {
+				logger.Warn("outbound spool disabled", "error", err)
+			}
+		}
+	}
+
 	// Start system metrics collector
 	sysinfo.Start()
 	defer sysinfo.Stop()

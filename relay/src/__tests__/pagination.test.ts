@@ -5,12 +5,20 @@ import { getRecentEvents, getEventsBefore } from '../db.js'
 // Reusable mocks (mirror router.test.ts patterns)
 function createMockPool() {
   const queries: { sql: string; params: any[] }[] = []
+  // Rows returned for the replay (events) query. The ownership gate now issues a
+  // `SELECT 1 FROM sessions` BEFORE the replay query, so tests can no longer use
+  // mockImplementationOnce (it would be consumed by the ownership check). Set the
+  // replay payload via _setReplayRows instead.
+  let replayRows: any[] = []
   const mockPool = {
     query: vi.fn((sql: string, params?: any[]) => {
       queries.push({ sql, params: params || [] })
+      if (sql.includes('SELECT 1 FROM sessions')) return Promise.resolve({ rows: [{ '?column?': 1 }], rowCount: 1 })
+      if (sql.includes('FROM events')) return Promise.resolve({ rows: replayRows })
       return Promise.resolve({ rows: [], rowCount: 0 })
     }),
     _queries: queries,
+    _setReplayRows: (rows: any[]) => { replayRows = rows },
     connect: vi.fn(),
     end: vi.fn(),
   }
@@ -81,8 +89,8 @@ describe('Router - replay pagination (session-history-pagination 6.3)', () => {
 
   test('forward replay (no direction, legacy) → getEventsAfter path, has_more=false', async () => {
     const clientWs = createMockWs()
-    router.registerClient(clientWs, null)
-    pool.query.mockImplementationOnce(async () => ({ rows: [{ id: 1, payload: { type: 'agent_text', text: 'hi' } }] }))
+    router.registerClient(clientWs, 1)
+    pool._setReplayRows([{ id: 1, payload: { type: 'agent_text', text: 'hi' } }])
     router.handleClientMessage(clientWs, { type: 'replay', session_id: 'sess-1', last_seq: 0 })
     await new Promise(r => setTimeout(r, 50))
 
@@ -95,9 +103,9 @@ describe('Router - replay pagination (session-history-pagination 6.3)', () => {
 
   test('backward replay (no last_seq) → getRecentEvents (recent N)', async () => {
     const clientWs = createMockWs()
-    router.registerClient(clientWs, null)
+    router.registerClient(clientWs, 1)
     const events = Array.from({ length: 50 }, (_, i) => ({ id: 50 - i, payload: { type: 'agent_text', text: 'm' + i } }))
-    pool.query.mockImplementationOnce(async () => ({ rows: events }))
+    pool._setReplayRows(events)
     router.handleClientMessage(clientWs, { type: 'replay', session_id: 'sess-1', direction: 'backward', limit: 50, req_id: 1 })
     await new Promise(r => setTimeout(r, 50))
 
@@ -112,9 +120,9 @@ describe('Router - replay pagination (session-history-pagination 6.3)', () => {
 
   test('backward replay (last_seq cursor) → getEventsBefore (id < cursor)', async () => {
     const clientWs = createMockWs()
-    router.registerClient(clientWs, null)
+    router.registerClient(clientWs, 1)
     // fewer than limit → has_more false
-    pool.query.mockImplementationOnce(async () => ({ rows: [{ id: 5420, payload: { type: 'agent_text' } }] }))
+    pool._setReplayRows([{ id: 5420, payload: { type: 'agent_text' } }])
     router.handleClientMessage(clientWs, { type: 'replay', session_id: 'sess-1', direction: 'backward', last_seq: 5424, limit: 50, req_id: 2 })
     await new Promise(r => setTimeout(r, 50))
 
@@ -129,9 +137,9 @@ describe('Router - replay pagination (session-history-pagination 6.3)', () => {
 
   test('backward full page (count = limit) → has_more=true', async () => {
     const clientWs = createMockWs()
-    router.registerClient(clientWs, null)
+    router.registerClient(clientWs, 1)
     const events = Array.from({ length: 50 }, (_, i) => ({ id: 100 - i, payload: {} }))
-    pool.query.mockImplementationOnce(async () => ({ rows: events }))
+    pool._setReplayRows(events)
     router.handleClientMessage(clientWs, { type: 'replay', session_id: 'sess-1', direction: 'backward', last_seq: 200, limit: 50 })
     await new Promise(r => setTimeout(r, 50))
     const end = clientWs._sent.find((m: any) => m.type === 'replay_end')
@@ -140,8 +148,8 @@ describe('Router - replay pagination (session-history-pagination 6.3)', () => {
 
   test('replay_batch carries direction field for backward', async () => {
     const clientWs = createMockWs()
-    router.registerClient(clientWs, null)
-    pool.query.mockImplementationOnce(async () => ({ rows: [{ id: 3, payload: { type: 'agent_text', text: 'a' } }] }))
+    router.registerClient(clientWs, 1)
+    pool._setReplayRows([{ id: 3, payload: { type: 'agent_text', text: 'a' } }])
     router.handleClientMessage(clientWs, { type: 'replay', session_id: 'sess-1', direction: 'backward', limit: 50 })
     await new Promise(r => setTimeout(r, 50))
     const batch = clientWs._sent.find((m: any) => m.type === 'replay_batch')
@@ -151,8 +159,8 @@ describe('Router - replay pagination (session-history-pagination 6.3)', () => {
 
   test('empty backward result → replay_end has_more=false, count=0', async () => {
     const clientWs = createMockWs()
-    router.registerClient(clientWs, null)
-    pool.query.mockImplementationOnce(async () => ({ rows: [] }))
+    router.registerClient(clientWs, 1)
+    pool._setReplayRows([])
     router.handleClientMessage(clientWs, { type: 'replay', session_id: 'sess-1', direction: 'backward', limit: 50 })
     await new Promise(r => setTimeout(r, 50))
     const end = clientWs._sent.find((m: any) => m.type === 'replay_end')

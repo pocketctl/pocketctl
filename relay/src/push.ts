@@ -8,7 +8,7 @@ import type pg from 'pg';
 import * as http2 from 'node:http2';
 import * as fs from 'node:fs';
 import * as crypto from 'node:crypto';
-import { getDevicesByUser, removeDevice } from './db.js';
+import { getDevicesByUser, removeInvalidDeviceToken } from './db.js';
 
 export interface PushPayload {
   title: string;
@@ -143,7 +143,7 @@ export async function sendPushNotification(
     // APNs 410 = token no longer valid, 400 = bad request with bad token
     if (result.statusCode === 410 || result.statusCode === 400) {
       console.log(`[push] removing invalid device token: ${deviceToken.slice(0, 16)}...`);
-      await removeDevice(pool, deviceToken).catch(() => {});
+      await removeInvalidDeviceToken(pool, deviceToken).catch(() => {});
     }
   }
 }

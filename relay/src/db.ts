@@ -266,6 +266,30 @@ export async function insertEvent(pool: pg.Pool, sessionId: string, eventType: s
   return 0; // deduplicated
 }
 
+/**
+ * Persist a daemon event with bounded retries. The relay forwards events to
+ * clients immediately, but the DB write was previously fire-and-forget
+ * (`insertEvent(...).catch(console.error)`) — a transient DB blip (e.g. a
+ * Postgres restart during deploy) silently dropped the row, so the event
+ * vanished on the next replay. Retrying across short backoffs rides out those
+ * blips. Resolves with the inserted row id (0 if deduped) on durable success;
+ * REJECTS after exhausting all attempts, so callers that gate a delivery ack on
+ * persistence can withhold the ack and let the daemon replay the event later.
+ */
+export async function persistEvent(pool: pg.Pool, sessionId: string, eventType: string, payload: any, attempts = 5): Promise<number> {
+  let delay = 100;
+  for (let i = 0; i < attempts; i++) {
+    try {
+      return await insertEvent(pool, sessionId, eventType, payload);
+    } catch (e) {
+      if (i === attempts - 1) throw e; // exhausted → reject (caller withholds ack)
+      await new Promise((r) => setTimeout(r, delay));
+      delay *= 3; // 100 → 300 → 900 → 2700ms (~4s total budget)
+    }
+  }
+  /* unreachable */ return 0;
+}
+
 export async function getEventsAfter(pool: pg.Pool, sessionId: string, lastSeq: number): Promise<any[]> {
   const result = await pool.query(
     `SELECT id, session_id, event_type, payload, created_at FROM events WHERE session_id = $1 AND id > $2 ORDER BY id ASC`,
@@ -604,7 +628,21 @@ export async function registerDevice(pool: pg.Pool, userId: number, deviceToken:
   );
 }
 
-export async function removeDevice(pool: pg.Pool, deviceToken: string): Promise<void> {
+export async function removeDevice(pool: pg.Pool, userId: number, deviceToken: string): Promise<boolean> {
+  // Scope the delete to the caller's own devices — without the user_id predicate
+  // any authenticated user could delete another user's push device (DoS: victim
+  // stops receiving offline/session-complete pushes).
+  const r = await pool.query(`DELETE FROM devices WHERE device_token = $1 AND user_id = $2`, [deviceToken, userId]);
+  return (r.rowCount ?? 0) > 0;
+}
+
+/**
+ * System-internal removal of a device token reported invalid by APNs (410/400).
+ * Not user-scoped on purpose: the token is dead at the provider, so the owner is
+ * irrelevant and not available at the call site. Never reachable from a client
+ * request — only the push pipeline calls this.
+ */
+export async function removeInvalidDeviceToken(pool: pg.Pool, deviceToken: string): Promise<void> {
   await pool.query(`DELETE FROM devices WHERE device_token = $1`, [deviceToken]);
 }
 
@@ -648,6 +686,23 @@ export async function revokeToken(pool: pg.Pool, jti: string, userId: number, re
     `INSERT INTO revoked_tokens (jti, user_id, reason) VALUES ($1, $2, $3) ON CONFLICT DO NOTHING`,
     [jti, userId, reason]
   );
+}
+
+/**
+ * Revoke the access token currently bound to a daemon (force_kick / new_login
+ * eviction). Looks up daemons.active_token_jti and revokes that specific jti, so
+ * the kicked daemon can't reconnect with its old token while the user's other
+ * sessions (web/iOS) stay valid.
+ *
+ * Replaces the previous `revokeToken(pool, '', userId, ...)` pattern, which
+ * inserted an empty-jti row that `isTokenRevoked` (WHERE jti = $1) could never
+ * match — making force_kick/new_login revocation a silent no-op.
+ */
+export async function revokeDaemonToken(pool: pg.Pool, daemonId: string, userId: number, reason: string): Promise<void> {
+  const r = await pool.query(`SELECT active_token_jti FROM daemons WHERE daemon_id = $1`, [daemonId]);
+  const jti = r.rows[0]?.active_token_jti as string | null | undefined;
+  if (!jti) return; // legacy/api-key daemon with no bound token — nothing to revoke
+  await revokeToken(pool, jti, userId, reason);
 }
 
 /** Revoke ALL tokens for a user (breach detection). */

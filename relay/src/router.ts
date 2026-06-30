@@ -17,13 +17,48 @@ export class Router {
   private pendingSessionMeta = new Map<string, { agent_type: string; cwd: string }>();
   private pendingOriginClient = new Map<string, WebSocket>(); // pending session_id → origin client (for session_id_changed 补发)
   private takeoverTimers = new Map<string, { timer: ReturnType<typeof setTimeout>; newDaemonId: string; newHostname: string }>();
+  // Pending offline-transition timers, keyed by daemonId. On WS close we defer
+  // the offline side-effects (DB offline, push, broadcast) behind a grace window
+  // so a relay restart or brief network blip doesn't flap the daemon offline.
+  // A re-register for the same daemonId cancels the timer.
+  private pendingOfflineTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  // Set during graceful shutdown to suppress offline pushes (the daemons are
+  // about to reconnect to the new process — not genuinely offline).
+  private shuttingDown = false;
+  // Per-daemon event delivery cursor for at-least-once delivery. `persistedHigh`
+  // is the highest *contiguous* seq that has been durably persisted; it is what
+  // event_ack reports, so the daemon only trims its outbound buffer/spool once an
+  // event is safely in the DB (ack-after-persist). `pending` holds out-of-order
+  // persisted seqs above the mark, drained contiguously by markPersisted.
+  // `startedAt` detects a daemon process restart (seq resets): when it changes we
+  // reset the cursor. The DB row dedup is handled separately by the
+  // events.event_hash unique index.
+  private daemonSeq = new Map<string, { startedAt: number; persistedHigh: number; pending: Set<number>; baselineSet: boolean }>();
   private pool: pg.Pool;
 
+  // Grace window before a disconnected daemon is declared offline.
+  private readonly offlineGraceMs = parseInt(process.env.DAEMON_OFFLINE_GRACE_MS || '30000', 10);
+
   constructor(pool: pg.Pool) { this.pool = pool; }
+
+  /** Mark the relay as shutting down so offline pushes are suppressed. */
+  beginShutdown(): void { this.shuttingDown = true; }
+
+  /** Notify all connected daemons that the relay is restarting (expected disconnect). */
+  broadcastRelayRestarting(): void {
+    for (const [, daemon] of this.daemons) {
+      if (daemon.ws.readyState === 1) this.send(daemon.ws, { type: 'relay_restarting' });
+    }
+  }
 
   async registerDaemon(ws: WebSocket, msg: any, userId: number | null, tokenJti?: string, machineId?: string): Promise<void> {
     const daemonId = msg.daemon_id;
     const hostname = msg.hostname || 'unknown';
+
+    // Cancel any pending offline transition — the daemon reconnected within the
+    // grace window, so it must not be flapped offline (no push, no broadcast).
+    const pendingOffline = this.pendingOfflineTimers.get(daemonId);
+    if (pendingOffline) { clearTimeout(pendingOffline); this.pendingOfflineTimers.delete(daemonId); }
     // Compose agents as [{type, version, latest, manageable}] objects.
     const agentTypes: string[] = msg.agents || [];
     const agentVersions: Record<string, string> = msg.agent_versions || {};
@@ -66,7 +101,7 @@ export class Router {
             const timer = setTimeout(() => {
               // Revoke old daemon's token
               if (oldDaemon.userId) {
-                db.revokeToken(this.pool, '', oldDaemon.userId, 'new_login').catch(console.error);
+                db.revokeDaemonToken(this.pool, oldId, oldDaemon.userId, 'new_login').catch(console.error);
                 db.insertAuditLog(this.pool, oldDaemon.userId, 'daemon_replace', {
                   old_daemon_id: oldId,
                   new_daemon_id: daemonId,
@@ -131,7 +166,24 @@ export class Router {
       ).catch((e: any) => console.error('cleanup stale daemons:', e));
     }
     db.cleanStaleSessions(this.pool).catch(console.error);
-    this.send(ws, { type: 'register_ack', status: 'ok', connection_id: daemonId });
+
+    // Initialise/reset the event delivery cursor. A changed started_at means the
+    // daemon process restarted (its seq counter reset to 0), so we reset `high`;
+    // a plain reconnect of the same process keeps the cursor so replayed events
+    // are still recognised as duplicates.
+    const prevSeq = this.daemonSeq.get(daemonId);
+    if (!prevSeq || prevSeq.startedAt !== daemonStartedAt) {
+      // Seed the persisted mark from the daemon's reported durable baseline. A
+      // daemon that reconnects (after the grace window dropped our entry) or
+      // restarts from its spool replays only its unacked tail; without this the
+      // contiguous mark would stall on the phantom gap before that tail.
+      const baseline = Math.max(0, Number(msg.acked_seq) || 0);
+      this.daemonSeq.set(daemonId, { startedAt: daemonStartedAt, persistedHigh: baseline, pending: new Set(), baselineSet: baseline > 0 });
+    }
+
+    // Advertise at-least-once delivery support so the daemon retains an unacked
+    // buffer and trims it on our event_ack (rather than legacy trim-on-write).
+    this.send(ws, { type: 'register_ack', status: 'ok', connection_id: daemonId, supports_event_ack: true });
 
     // Rebuild the session→daemon routing table for this daemon. The in-memory
     // map is volatile (lost on relay restart; stale entries survive disconnects),
@@ -188,9 +240,7 @@ export class Router {
     if (closedWs && daemon && daemon.ws !== closedWs) {
       return;
     }
-    const hostname = daemon?.hostname || 'unknown';
-    const userId = daemon?.userId ?? null;
-    this.daemons.delete(daemonId);
+    if (!daemon) return;
 
     // Clean up any pending takeover timer
     const takeover = this.takeoverTimers.get(daemonId);
@@ -199,7 +249,8 @@ export class Router {
       this.takeoverTimers.delete(daemonId);
     }
 
-    // If a session_create was in-flight on this daemon, notify the origin client of failure
+    // Immediate (not deferred): an in-flight session_create on this daemon has
+    // failed — the origin client must not wait out the grace window for it.
     const pendingOrigin = this.pendingSessionCreate.get(daemonId);
     if (pendingOrigin && pendingOrigin.readyState === 1) {
       this.send(pendingOrigin, { type: 'session_create_failed', reason: 'daemon_offline', error: 'daemon disconnected' });
@@ -207,10 +258,42 @@ export class Router {
     this.pendingSessionCreate.delete(daemonId);
     this.pendingSessionMeta?.delete(daemonId);
 
+    // Defer the offline declaration behind the grace window. The daemon entry
+    // stays in this.daemons (holding the dead socket; routing no-ops via the
+    // readyState guard) so a reconnect within the window restores it without a
+    // visible offline→online flap. registerDaemon cancels this timer on reconnect.
+    if (this.pendingOfflineTimers.has(daemonId)) return;
+    // The socket whose closure we're reacting to. When called without an explicit
+    // closedWs, fall back to the entry's current socket so the reconnect check
+    // below still works (a reconnect swaps in a different socket object).
+    const closedSocket = closedWs ?? daemon.ws;
+    const timer = setTimeout(() => {
+      this.pendingOfflineTimers.delete(daemonId);
+      // If the daemon reconnected on a new socket, the entry now holds a live
+      // socket different from the one that closed — do not declare it offline.
+      const current = this.daemons.get(daemonId);
+      if (current && current.ws !== closedSocket) return;
+      this.finalizeDaemonOffline(daemonId, daemon);
+    }, this.offlineGraceMs);
+    this.pendingOfflineTimers.set(daemonId, timer);
+  }
+
+  /**
+   * Finalize the offline transition for a daemon whose grace window elapsed
+   * without a reconnect: remove it from the map, persist offline, push (unless
+   * shutting down), broadcast offline, and drop/notify its routed sessions.
+   */
+  private finalizeDaemonOffline(daemonId: string, daemon: DaemonConnection): void {
+    const hostname = daemon.hostname || 'unknown';
+    const userId = daemon.userId ?? null;
+    this.daemons.delete(daemonId);
+    this.daemonSeq.delete(daemonId);
+
     db.setDaemonOffline(this.pool, daemonId).catch(console.error);
 
-    // Push notification for daemon offline
-    if (userId) {
+    // Push notification for daemon offline — suppressed during relay shutdown
+    // (the daemon is about to reconnect to the new process, not truly offline).
+    if (userId && !this.shuttingDown) {
       notifyUser(this.pool, userId, daemonOfflinePush(hostname, daemonId)).catch(console.error);
     }
 
@@ -272,7 +355,54 @@ export class Router {
   }
   unregisterClient(ws: WebSocket): void { this.clients.delete(ws); }
 
+  /**
+   * Advance the per-daemon ack water-mark to the highest *contiguous* persisted
+   * seq. event_ack reports this, so the daemon trims its outbound buffer/spool
+   * only once an event is durably stored. Out-of-order completions wait in
+   * `pending` until the gap before them fills. A missing seq (control message
+   * with no seq) is a no-op.
+   */
+  private markPersisted(daemonId: string, seq?: number): void {
+    if (!seq) return;
+    const st = this.daemonSeq.get(daemonId);
+    if (!st || seq <= st.persistedHigh) return;
+    st.pending.add(seq);
+    while (st.pending.delete(st.persistedHigh + 1)) st.persistedHigh++;
+  }
+
+  /**
+   * Persist a daemon event and advance the ack water-mark ONLY on durable
+   * success. If persistEvent exhausts its retries it rejects — we then withhold
+   * the ack so the daemon keeps the event buffered and replays it on reconnect
+   * (where it is re-persisted), rather than acking-then-losing it.
+   */
+  private persistAndAck(daemonId: string, seq: number | undefined, sessionId: string, type: string, payload: any): void {
+    db.persistEvent(this.pool, sessionId, type, payload)
+      .then(() => this.markPersisted(daemonId, seq))
+      .catch((e) => console.error('persistAndAck:', e));
+  }
+
   handleDaemonMessage(daemonId: string, msg: any): void {
+    // At-least-once dedup keyed on the *persisted* water-mark: a seq at or below
+    // it has already been durably stored, so a reconnect replay of it is a
+    // duplicate — drop it. A seq above the mark (received before but its persist
+    // failed, or genuinely new) is (re)processed; the events.event_hash unique
+    // index independently prevents duplicate DB rows. The mark advances only via
+    // markPersisted (after the DB write), never synchronously on receipt.
+    if (msg.seq) {
+      const st = this.daemonSeq.get(daemonId);
+      if (st) {
+        if (msg.seq <= st.persistedHigh) return;
+        // Establish the contiguity floor from the FIRST seq seen on a fresh entry
+        // (set synchronously, in receive order, so it's the lowest). This covers
+        // legacy daemons that don't report acked_seq and any daemon that replays
+        // only its unacked tail (seq > 1) — without it the mark would stall on the
+        // phantom gap below that tail. Guarded by baselineSet so a burst arriving
+        // before the first persist can't mis-floor past an unpersisted seq.
+        if (!st.baselineSet) { st.persistedHigh = msg.seq - 1; st.baselineSet = true; }
+      }
+    }
+
     if (msg.type === 'ping') {
       const daemon = this.daemons.get(daemonId);
       if (daemon) {
@@ -282,6 +412,11 @@ export class Router {
         if (msg.cpu_pct !== undefined) {
           this.daemonMetrics.set(daemonId, { cpuPct: msg.cpu_pct, memPct: msg.mem_pct, diskPct: msg.disk_pct, updatedAt: Date.now() });
         }
+        // Piggyback the delivery ack on the heartbeat so the daemon can trim its
+        // unacked outbound buffer/spool — but only up to what we've durably
+        // persisted, so a crash after ack can't lose an unwritten event.
+        const st = this.daemonSeq.get(daemonId);
+        if (st && st.persistedHigh > 0) this.send(daemon.ws, { type: 'event_ack', up_to_seq: st.persistedHigh });
       }
       return;
     }
@@ -328,6 +463,9 @@ export class Router {
           if (clientWs.readyState === 1 && this.sameUser(client.userId, uid)) this.send(clientWs, msg);
         }
       }
+      // These control/forward messages aren't persisted; ack the seq immediately
+      // (no-op if they carry none) so the daemon's buffer can't stall on them.
+      this.markPersisted(daemonId, msg.seq);
       return;
     }
     const daemon = this.daemons.get(daemonId);
@@ -379,7 +517,7 @@ export class Router {
         }
       }
       this.pendingSessionCreate.delete(daemonId);
-      db.insertEvent(this.pool, sessionId, msg.type, msg).catch(console.error);
+      this.persistAndAck(daemonId, msg.seq, sessionId, msg.type, msg);
       return;
     }
     if (msg.type === 'session_discovered') {
@@ -387,13 +525,16 @@ export class Router {
       db.isSessionDeleted(this.pool, sessionId).then((deleted) => {
         if (deleted) {
           console.log(`[router] skipping tombstoned session: ${sessionId}`);
+          // Intentionally not persisted, but ack it so the daemon stops
+          // re-discovering (replaying) a session the user already deleted.
+          this.markPersisted(daemonId, msg.seq);
           return;
         }
         // Use provided title if present; otherwise leave existing title untouched
         const title = msg.title || undefined;
         const cwd = msg.cwd || '';
         db.upsertSession(this.pool, sessionId, daemonId, msg.agent || 'claude-code', cwd, msg.status || 'busy', title, 'terminal', undefined, userId ?? undefined, msg.model || undefined).catch(console.error);
-        db.insertEvent(this.pool, sessionId, msg.type, msg).catch(console.error);
+        this.persistAndAck(daemonId, msg.seq, sessionId, msg.type, msg);
         const enriched = { ...msg, daemon_id: daemonId, hostname: daemon?.hostname || 'unknown' };
         for (const [clientWs, client] of this.clients) {
           if (clientWs.readyState === 1 && this.sameUser(client.userId, userId)) this.send(clientWs, enriched);
@@ -407,14 +548,14 @@ export class Router {
       // overwrite), persist as an event, and broadcast to all of the owner's
       // clients so every device's model badge refreshes.
       db.updateSessionModel(this.pool, sessionId, msg.model).catch(console.error);
-      db.insertEvent(this.pool, sessionId, msg.type, msg).catch(console.error);
+      this.persistAndAck(daemonId, msg.seq, sessionId, msg.type, msg);
       for (const [clientWs, client] of this.clients) {
         if (clientWs.readyState === 1 && this.sameUser(client.userId, userId)) this.send(clientWs, msg);
       }
       return;
     }
     if (msg.type === 'subagent_discovered') {
-      db.insertEvent(this.pool, sessionId, msg.type, msg).catch(console.error);
+      this.persistAndAck(daemonId, msg.seq, sessionId, msg.type, msg);
       db.incrementSubagentCount(this.pool, sessionId).catch(console.error);
       for (const [clientWs, client] of this.clients) {
         if (client.subscribedSessions.has(sessionId) && clientWs.readyState === 1) this.send(clientWs, msg);
@@ -422,6 +563,9 @@ export class Router {
       return;
     }
     if (msg.type === 'generate_title_request') {
+      // Not persisted as an event (it only triggers async title generation);
+      // ack the seq up-front so neither early return stalls the daemon buffer.
+      this.markPersisted(daemonId, msg.seq);
       const { user_message: userMsg, assistant_message: assistantMsg } = msg;
       if (!userMsg || !assistantMsg) {
         console.warn('[router] generate_title_request missing user_message or assistant_message');
@@ -460,6 +604,9 @@ export class Router {
       return;
     }
     if (msg.type === 'session_title_update') {
+      // Title is a best-effort, reconstructable UPDATE (not an event row); ack
+      // immediately so the daemon buffer doesn't stall on it.
+      this.markPersisted(daemonId, msg.seq);
       // Only overwrite default titles — protect user-renamed titles
       this.pool.query('UPDATE sessions SET title = $1 WHERE session_id = $2 AND (title LIKE \'Terminal Session-%\' OR title IS NULL)', [msg.title || '', sessionId]).catch(console.error);
       for (const [clientWs, client] of this.clients) {
@@ -467,7 +614,9 @@ export class Router {
       }
       return;
     }
-    db.insertEvent(this.pool, sessionId, msg.type, msg).catch(console.error);
+    // Generic data path (agent_text, tool_call/result, user_text, session_status,
+    // session_id_changed, …): persist with the ack gated on durability.
+    this.persistAndAck(daemonId, msg.seq, sessionId, msg.type, msg);
     // Accumulate per-turn token usage from agent_text events carrying usage (model-agnostic)
     if (msg.usage != null) {
       db.incrementSessionTokens(this.pool, sessionId, msg.usage).catch(console.error);
@@ -508,7 +657,27 @@ export class Router {
   async handleClientMessage(clientWs: WebSocket, msg: any): Promise<void> {
     const client = this.clients.get(clientWs);
     if (!client) return;
-    if (msg.session_id) client.subscribedSessions.add(msg.session_id);
+    // Authorization chokepoint: every client message that references an existing
+    // session_id must be owned by the requesting user. This single gate closes
+    // both the replay IDOR (越权读历史对话) and the generic client→daemon routing
+    // bypass (越权注入/控制他人会话) — previously authorization was scattered per
+    // command and the generic fall-through route checked nothing at all.
+    // Subscription is also deferred until after the check, so a non-owner can't
+    // silently attach to another user's live event stream.
+    if (msg.session_id) {
+      if (client.userId == null) {
+        // Anonymous/API-key connections (userId=null) may not act on a specific
+        // session. Real clients always carry a userId (prod requires a token).
+        this.send(clientWs, { type: 'error', session_id: msg.session_id, error: 'forbidden' });
+        return;
+      }
+      const owned = await db.isSessionOwnedByUser(this.pool, client.userId, msg.session_id).catch(() => false);
+      if (!owned) {
+        this.send(clientWs, { type: 'error', session_id: msg.session_id, error: 'session not found or not owned' });
+        return;
+      }
+      client.subscribedSessions.add(msg.session_id);
+    }
     if (msg.type === 'replay') { this.handleReplay(clientWs, msg.session_id, msg.last_seq, msg.req_id, msg.direction, msg.limit); return; }
     if (msg.type === 'list_sessions') { this.handleListSessions(clientWs, client.userId); return; }
     if (msg.type === 'list_daemons') { console.log('[router] list_daemons from user', client.userId, 'daemons in map:', this.daemons.size); this.handleListDaemons(clientWs, client.userId); return; }
@@ -526,8 +695,8 @@ export class Router {
       if (!sessionId) return;
       const userEvt = { type: 'user_text', session_id: sessionId, text: msg.user_text };
       const receiptEvt = { type: 'command_receipt', session_id: sessionId, command: msg.command, receipt_status: msg.receipt_status, message: msg.message };
-      db.insertEvent(this.pool, sessionId, 'user_text', userEvt).catch(console.error);
-      db.insertEvent(this.pool, sessionId, 'command_receipt', receiptEvt).catch(console.error);
+      db.persistEvent(this.pool, sessionId, 'user_text', userEvt).catch(console.error);
+      db.persistEvent(this.pool, sessionId, 'command_receipt', receiptEvt).catch(console.error);
       for (const [ws, c] of this.clients) {
         if (ws === clientWs || ws.readyState !== 1) continue;
         if (this.sameUser(c.userId, client.userId)) {
@@ -825,9 +994,9 @@ export class Router {
       daemon.ws.close();
     }
 
-    // Revoke token
+    // Revoke the daemon's specific token so it can't reconnect with the old one.
     try {
-      await db.revokeToken(this.pool, '', userId, 'force_kick');
+      await db.revokeDaemonToken(this.pool, daemonId, userId, 'force_kick');
       await db.insertAuditLog(this.pool, userId, 'force_kick', {
         daemon_id: daemonId,
         hostname: daemon.hostname,
