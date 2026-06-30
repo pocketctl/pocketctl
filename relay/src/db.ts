@@ -774,7 +774,7 @@ export async function updateSessionStatus(pool: pg.Pool, sessionId: string, daem
        daemon_id = $2,
        status = $3,
        exit_reason = COALESCE($4, sessions.exit_reason),
-       user_id = CASE WHEN $5 IS NOT NULL THEN $5 ELSE sessions.user_id END,
+       user_id = COALESCE($5::int, sessions.user_id),
        updated_at = NOW()
      WHERE session_id = $1`,
     [sessionId, daemonId, status, exitReason || null, userId || null]
