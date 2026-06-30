@@ -3,10 +3,13 @@ package approval
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // TestEnsureAndRemoveHooks verifies the daemon injects a tagged PreToolUse hook
@@ -170,6 +173,87 @@ func TestServerDrainSession(t *testing.T) {
 	srv.mu.Unlock()
 	if !s2pending {
 		t.Error("s2 should still be pending after draining s1")
+	}
+}
+
+// TestServerLocalResolveCancels verifies the terminal-race path: when the hook
+// answers locally it sends a {"resolved":...} line and closes; the server must
+// drop the pending entry and fire OnCancel with the local decision instead of
+// blocking on an App response that will never come.
+func TestServerLocalResolveCancels(t *testing.T) {
+	// Keep the socket path short: macOS caps sun_path at ~104 bytes, and the
+	// t.TempDir() path under /var/folders blows past that.
+	sock := fmt.Sprintf("/tmp/pctl-approval-test-%d.sock", os.Getpid())
+	defer os.Remove(sock)
+	srv := NewServer(sock, nil)
+
+	gotReq := make(chan Request, 1)
+	srv.SetOnRequest(func(req Request) { gotReq <- req })
+
+	type cancel struct {
+		reqID, sessionID string
+		allow            *bool
+	}
+	gotCancel := make(chan cancel, 1)
+	srv.SetOnCancel(func(reqID, sessionID string, allow *bool) {
+		gotCancel <- cancel{reqID, sessionID, allow}
+	})
+
+	if err := srv.Start(); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer srv.Close()
+
+	conn, err := net.Dial("unix", sock)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.Close()
+
+	// Send the request line, as the hook does.
+	req, _ := json.Marshal(hookRequest{SessionID: "s1", Tool: "Bash", PermMode: "default"})
+	if _, err := conn.Write(append(req, '\n')); err != nil {
+		t.Fatalf("write request: %v", err)
+	}
+
+	// Wait for the server to register + surface the request.
+	select {
+	case r := <-gotReq:
+		if r.SessionID != "s1" {
+			t.Fatalf("unexpected session: %q", r.SessionID)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("OnRequest never fired")
+	}
+
+	// Answer locally: send the resolved line, then close.
+	resolved, _ := json.Marshal(map[string]any{"resolved": true, "allow": true})
+	if _, err := conn.Write(append(resolved, '\n')); err != nil {
+		t.Fatalf("write resolved: %v", err)
+	}
+	conn.Close()
+
+	select {
+	case c := <-gotCancel:
+		if c.reqID == "" {
+			t.Errorf("cancel reqID empty")
+		}
+		if c.sessionID != "s1" {
+			t.Errorf("cancel session: got %q want s1", c.sessionID)
+		}
+		if c.allow == nil || !*c.allow {
+			t.Errorf("cancel allow: got %v want true", c.allow)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("OnCancel never fired after local resolve")
+	}
+
+	// The pending entry must be gone, so a late App response no-ops.
+	srv.mu.Lock()
+	n := len(srv.pending)
+	srv.mu.Unlock()
+	if n != 0 {
+		t.Errorf("pending not drained after local resolve: %d", n)
 	}
 }
 

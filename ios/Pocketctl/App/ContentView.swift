@@ -9,6 +9,8 @@ private enum AppState {
 struct ContentView: View {
     @State private var appState: AppState = .splash
     @State private var isLoggedIn = false
+    /// 整个生命周期内是否已预热过键盘（避免重复预热）
+    @State private var hasKeyboardWarmedUp = false
 
     var body: some View {
         switch appState {
@@ -44,6 +46,16 @@ struct ContentView: View {
                         DispatchQueue.main.asyncAfter(deadline: .now() + 1) {
                             notificationRouter.navigateToSessionId = nil
                         }
+                    }
+                }
+                .onAppear {
+                    // 键盘冷启动预热：自动登录路径下整个会话从未弹过键盘，
+                    // 进入主界面后延后约 0.3s（避开首屏渲染峰值）后台预热一次，
+                    // 让用户首次点 TextField（如设置→改测试环境 IP）时键盘已「热」。
+                    guard !hasKeyboardWarmedUp else { return }
+                    hasKeyboardWarmedUp = true
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+                        KeyboardWarmup.warmup()
                     }
                 }
         }

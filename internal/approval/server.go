@@ -73,6 +73,13 @@ type hookResponse struct {
 // out to clients); the blocking wait happens inside the server.
 type OnRequestFunc func(req Request)
 
+// OnCancelFunc is invoked when a pending request is resolved OUT-OF-BAND by the
+// hook itself — i.e. a user-launched terminal session answered the prompt with
+// a local [y/n] keypress (allow non-nil) or the hook process simply went away
+// (allow nil). The server has already dropped the pending entry; the callback
+// only tells clients to dismiss the now-stale approval card. Must not block.
+type OnCancelFunc func(requestID, sessionID string, allow *bool)
+
 // Server listens on a Unix domain socket and brokers approval requests.
 type Server struct {
 	socketPath string
@@ -80,9 +87,10 @@ type Server struct {
 
 	ln net.Listener
 
-	mu      sync.Mutex
-	pending map[string]*pendingEntry // keyed by requestID
-	onReq   OnRequestFunc
+	mu       sync.Mutex
+	pending  map[string]*pendingEntry // keyed by requestID
+	onReq    OnRequestFunc
+	onCancel OnCancelFunc
 
 	// fileLocks (Scheme C) enforces per-file mutual exclusion across sessions.
 	// When non-nil, Edit/Write/MultiEdit/NotebookEdit on a file held by another
@@ -127,6 +135,15 @@ func (s *Server) SetOnRequest(fn OnRequestFunc) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.onReq = fn
+}
+
+// SetOnCancel registers the callback fired when a pending request is resolved
+// by the hook out-of-band (local terminal keypress) or the hook disconnects.
+// Must be called before Start.
+func (s *Server) SetOnCancel(fn OnCancelFunc) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.onCancel = fn
 }
 
 // SetFileLockManager wires the shared file-lock manager (Scheme C). When set,
@@ -325,8 +342,34 @@ func (s *Server) handleConn(conn net.Conn) {
 		onReq(req)
 	}
 
+	// Watch for the hook resolving this request out-of-band. A user-launched
+	// terminal session races a local [y/n] keypress against the App; on a local
+	// answer the hook sends a {"resolved":true,"allow":bool} line and closes (a
+	// bare close — e.g. the hook/claude died — arrives as EOF). Either way we
+	// stop waiting on the App. The initial read above set a 10s deadline on the
+	// conn; clear it so this long-lived read isn't cut off after 10s.
+	cancelCh := make(chan *bool, 1) // &allow on a local answer; nil on bare disconnect
+	go func() {
+		_ = conn.SetReadDeadline(time.Time{})
+		line, err := reader.ReadBytes('\n')
+		if err != nil {
+			cancelCh <- nil
+			return
+		}
+		var m struct {
+			Resolved bool `json:"resolved"`
+			Allow    bool `json:"allow"`
+		}
+		if json.Unmarshal(line, &m) == nil && m.Resolved {
+			a := m.Allow
+			cancelCh <- &a
+		} else {
+			cancelCh <- nil
+		}
+	}()
+
 	// Block until the client answers, the session is drained, the server is
-	// closed, or the auto-deny deadline fires.
+	// closed, the hook resolves locally, or the auto-deny deadline fires.
 	timer := time.NewTimer(approvalTimeout)
 	defer timer.Stop()
 	var resp Response
@@ -338,6 +381,24 @@ func (s *Server) handleConn(conn net.Conn) {
 		s.mu.Unlock()
 		resp = Response{Allow: false}
 		s.logger.Warn("approval timed out (auto-deny)", "request_id", reqID, "session", hr.SessionID, "tool", hr.Tool)
+	case local := <-cancelCh:
+		// Hook answered locally (or went away). Drop the pending entry; the hook
+		// has already returned the decision to claude (or is gone), so there is
+		// nothing to write back. A local allow on a file write still takes the
+		// lock so concurrent sessions can't race the same file.
+		s.mu.Lock()
+		delete(s.pending, reqID)
+		onCancel := s.onCancel
+		s.mu.Unlock()
+		if local != nil && *local && fl != nil {
+			if path, ok := extractFilePath(hr.Tool, hr.Input); ok {
+				fl.TryLock(hr.SessionID, normalizePath(hr.Cwd, path))
+			}
+		}
+		if onCancel != nil {
+			onCancel(reqID, hr.SessionID, local)
+		}
+		return
 	}
 
 	// Scheme C: now that the client approved a file write, acquire the lock so

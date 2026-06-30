@@ -9,9 +9,23 @@ enum ChatMessageRole: Sendable {
 /// Mirrors the web client's `usage` object — only the fields needed for the
 /// "已完成" status bar are kept (output tokens). Input is retained for parity
 /// and future cost displays.
+///
+/// context 使用量（与 web 客户端 `contextTokens` 一致）= input + cacheRead + cacheCreate。
 struct TokenUsage: Sendable {
     var outputTokens: Int
     var inputTokens: Int
+    var cacheReadTokens: Int
+    var cacheCreateTokens: Int
+
+    init(outputTokens: Int, inputTokens: Int, cacheReadTokens: Int = 0, cacheCreateTokens: Int = 0) {
+        self.outputTokens = outputTokens
+        self.inputTokens = inputTokens
+        self.cacheReadTokens = cacheReadTokens
+        self.cacheCreateTokens = cacheCreateTokens
+    }
+
+    /// Context 使用量（输入侧总 token）：输入 + 缓存读取 + 缓存写入，与 web 客户端一致。
+    var contextTokens: Int { inputTokens + cacheReadTokens + cacheCreateTokens }
 }
 
 enum ChatMessageType: Sendable {

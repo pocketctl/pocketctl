@@ -1,0 +1,19 @@
+{
+  "version": 1,
+  "kind": "html",
+  "title": "screens/daemon-list.html",
+  "entry": "screens/daemon-list.html",
+  "renderer": "html",
+  "status": "complete",
+  "exports": [
+    "html",
+    "pdf",
+    "zip"
+  ],
+  "createdAt": "2026-06-30T00:16:13.165Z",
+  "updatedAt": "2026-06-30T00:16:13.165Z",
+  "metadata": {
+    "inferred": true,
+    "reconciled": true
+  }
+}

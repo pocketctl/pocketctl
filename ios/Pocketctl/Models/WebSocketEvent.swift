@@ -29,6 +29,9 @@ enum WebSocketEventType: String, Sendable {
 
     // Tool-use approval (daemon → client, non-bypass sessions)
     case approvalRequest = "approval_request"
+    // Pending approval was answered elsewhere (e.g. [y/n] typed in the terminal
+    // that owns the session) — dismiss the matching card on this device.
+    case approvalResolved = "approval_resolved"
 
     // PTY selection menu (daemon → client) — a menu the agent's TUI drew to the
     // PTY that never reached the JSONL history (e.g. a host PreToolUse hook's
@@ -95,11 +98,16 @@ struct WebSocketEvent {
         guard let u else { return nil }
         let out = (u["output_tokens"] as? Int) ?? Int(u["output_tokens"] as? String ?? "") ?? 0
         let inp = (u["input_tokens"] as? Int) ?? Int(u["input_tokens"] as? String ?? "") ?? 0
-        return TokenUsage(outputTokens: out, inputTokens: inp)
+        let cr = (u["cache_read_tokens"] as? Int) ?? Int(u["cache_read_tokens"] as? String ?? "") ?? 0
+        let cc = (u["cache_create_tokens"] as? Int) ?? Int(u["cache_create_tokens"] as? String ?? "") ?? 0
+        return TokenUsage(outputTokens: out, inputTokens: inp, cacheReadTokens: cr, cacheCreateTokens: cc)
     }
 
     /// Approval request id — for approval_request events (PreToolUse hook).
     var requestId: String? { raw["request_id"] as? String }
+
+    /// Terminal-side decision — for approval_resolved events. true = allowed.
+    var approved: Bool { raw["approved"] as? Bool ?? false }
 
     /// Parsed interactive-prompt payload — for interactive_prompt events.
     /// The daemon emits `{request_id, input:{prompt, options:[{index,label}]}}`.

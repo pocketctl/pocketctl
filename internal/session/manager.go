@@ -272,6 +272,7 @@ func (sm *SessionManager) SetApprovalServer(srv *approval.Server, pocketctlPath 
 	sm.pocketctlPath = pocketctlPath
 	sm.approvalEnabled = true
 	srv.SetOnRequest(sm.handleApprovalRequest)
+	srv.SetOnCancel(sm.handleApprovalCancel)
 	// Share the file-lock manager so the approval server can deny Edit/Write on
 	// files held by other sessions (Scheme C), even in bypassPermissions mode.
 	srv.SetFileLockManager(sm.fileLocks)
@@ -325,6 +326,48 @@ func (sm *SessionManager) handleApprovalRequest(req approval.Request) {
 		Type:           "session_status",
 		SessionID:      req.SessionID,
 		Status:         protocol.StatusWaitingApproval,
+		LastActivityAt: time.Now().UTC().Format(time.RFC3339),
+	}
+}
+
+// handleApprovalCancel is the approval server's OnCancel callback: a pending
+// tool-use request was resolved OUT-OF-BAND — a user-launched terminal session
+// answered the [y/n] prompt locally (allow non-nil), or the hook went away
+// (allow nil). The server has already dropped the pending entry; here we clear
+// the session's waiting_approval state and tell clients to dismiss the now-stale
+// approval card (with the terminal-side result when known) so a second device
+// can't re-answer it. Invoked from the server's accept goroutine — must not block.
+func (sm *SessionManager) handleApprovalCancel(requestID, sessionID string, allow *bool) {
+	sm.mu.Lock()
+	ps, ok := sm.sessions[sessionID]
+	cleared := ok && ps.PendingRequestID == requestID
+	if cleared {
+		ps.PendingRequestID = ""
+		if ps.Status == protocol.StatusWaitingApproval {
+			ps.Status = protocol.StatusRunning
+		}
+		ps.LastActivityAt = time.Now()
+	}
+	sm.mu.Unlock()
+	if !cleared {
+		return
+	}
+
+	// Dismiss the card on every client. Carry the decision when the terminal
+	// actually answered (allow non-nil) so the card shows allowed/denied rather
+	// than vanishing; a bare disconnect just clears it.
+	if allow != nil {
+		sm.outputCh <- protocol.DaemonEvent{
+			Type:      "approval_resolved",
+			SessionID: sessionID,
+			RequestID: requestID,
+			Approved:  *allow,
+		}
+	}
+	sm.outputCh <- protocol.DaemonEvent{
+		Type:           "session_status",
+		SessionID:      sessionID,
+		Status:         protocol.StatusRunning,
 		LastActivityAt: time.Now().UTC().Format(time.RFC3339),
 	}
 }
@@ -412,6 +455,9 @@ func (sm *SessionManager) ResolveApproval(sessionID, requestID string, approved 
 		if err := b.coord.server.ReplyPermission(context.Background(), sessionID, requestID, decision); err != nil {
 			return err
 		}
+		// Persist the decision so a refresh/replay (and other devices) reconstruct
+		// the answered card instead of re-rendering it as pending.
+		sm.outputCh <- protocol.DaemonEvent{Type: "approval_resolved", SessionID: sessionID, RequestID: requestID, Approved: approved}
 		sm.outputCh <- protocol.DaemonEvent{Type: "session_status", SessionID: sessionID, Status: protocol.StatusRunning}
 		return nil
 	}
@@ -430,6 +476,12 @@ func (sm *SessionManager) ResolveApproval(sessionID, requestID string, approved 
 	if err := sm.approvals.Resolve(requestID, approved); err != nil {
 		return err
 	}
+
+	// Persist the decision so a refresh/replay (and other devices) reconstruct
+	// the answered card instead of re-rendering it as pending. Keyed by
+	// request_id; the clicking client already flipped its card optimistically
+	// and the pending-only guard on the client makes this a no-op there.
+	sm.outputCh <- protocol.DaemonEvent{Type: "approval_resolved", SessionID: sessionID, RequestID: requestID, Approved: approved}
 
 	if ok {
 		// Hook resolved → Claude proceeds; reflect running state to clients.

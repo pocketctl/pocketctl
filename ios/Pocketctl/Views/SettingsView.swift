@@ -202,35 +202,38 @@ struct SettingsView: View {
                             .padding(.top, 4)
 
                         // Upgrade to Pro (placeholder — no payment backend yet)
-                        settingsGroup {
-                            Button { showUpgradeAlert = true } label: {
-                                HStack(spacing: 12) {
-                                    Image(systemName: "star.fill")
-                                        .font(.system(size: 14))
-                                        .foregroundStyle(Color.pcAccent)
-                                        .frame(width: 28, height: 28)
-                                        .background(Color.pcAccentMuted)
-                                        .cornerRadius(PCRadius.sm)
-                                    VStack(alignment: .leading, spacing: 2) {
-                                        Text("升级专业版 ¥48/月")
-                                            .font(PCFont.body(16, weight: .medium))
+                        // 已是专业版订阅用户时隐藏升级入口
+                        if !viewModel.subscriptionPlan.isPro {
+                            settingsGroup {
+                                Button { showUpgradeAlert = true } label: {
+                                    HStack(spacing: 12) {
+                                        Image(systemName: "star.fill")
+                                            .font(.system(size: 14))
                                             .foregroundStyle(Color.pcAccent)
-                                        Text("无限主机 · 推送通知 · 实时消息")
-                                            .font(PCFont.body(12))
-                                            .foregroundStyle(Color.pcFgTertiary)
+                                            .frame(width: 28, height: 28)
+                                            .background(Color.pcAccentMuted)
+                                            .cornerRadius(PCRadius.sm)
+                                        VStack(alignment: .leading, spacing: 2) {
+                                            Text("升级专业版 ¥48/月")
+                                                .font(PCFont.body(16, weight: .medium))
+                                                .foregroundStyle(Color.pcAccent)
+                                            Text("无限主机 · 推送通知 · 实时消息")
+                                                .font(PCFont.body(12))
+                                                .foregroundStyle(Color.pcFgTertiary)
+                                        }
+                                        Spacer()
+                                        Image(systemName: "chevron.right")
+                                            .font(.system(size: 14))
+                                            .foregroundStyle(Color.pcAccent)
                                     }
-                                    Spacer()
-                                    Image(systemName: "chevron.right")
-                                        .font(.system(size: 14))
-                                        .foregroundStyle(Color.pcAccent)
+                                    .padding(.horizontal, PCSpacing.lg)
+                                    .frame(minHeight: 44)
                                 }
-                                .padding(.horizontal, PCSpacing.lg)
-                                .frame(minHeight: 44)
+                                .buttonStyle(.plain)
                             }
-                            .buttonStyle(.plain)
+                            .padding(.horizontal, PCSpacing.lg)
+                            .padding(.top, PCSpacing.md)
                         }
-                        .padding(.horizontal, PCSpacing.lg)
-                        .padding(.top, PCSpacing.md)
 
                         // 关于
                         sectionHeader("其他")

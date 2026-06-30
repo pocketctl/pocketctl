@@ -6,90 +6,189 @@
 <title>pocketctl — 主机</title>
 <link rel="stylesheet" href="../css/shared.css">
 <style>
-  /* ---- 概览状态卡 ---- */
-  .overview-card {
-    background: var(--surface); border: 1px solid var(--border);
-    border-radius: var(--radius-lg); padding: 14px 16px; margin: 0 var(--space-lg) var(--space-md);
-    display: flex; align-items: center; gap: 0;
+  /* ============ 顶部标题区 ============ */
+  .large-title { padding-bottom: 0; }
+  .header-row {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 6px var(--space-lg) var(--space-sm);
   }
-  .overview-card .ov-item { flex: 1; display: flex; flex-direction: column; align-items: center; gap: 2px; }
-  .overview-card .ov-item + .ov-item { border-left: 1px solid var(--border); }
-  .overview-card .ov-num { font-size: 20px; font-weight: 700; color: var(--fg); line-height: 1.1; }
-  .overview-card .ov-num.accent { color: var(--accent); }
-  .overview-card .ov-num.success { color: var(--success); }
-  .overview-card .ov-label { font-size: 11px; color: var(--fg-tertiary); }
+  .subtitle { font-size: 13px; color: var(--fg-secondary); font-family: var(--font-body); }
+  .subtitle .sep { color: var(--fg-tertiary); margin: 0 6px; }
+  .subtitle .online-cnt { color: var(--success); font-weight: 600; font-variant-numeric: tabular-nums; }
+  .avatar-btn {
+    width: 34px; height: 34px; border-radius: 50%;
+    background: var(--accent); color: #fff;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 14px; font-weight: 700; font-family: var(--font-display);
+    text-decoration: none; flex-shrink: 0;
+  }
 
-  /* ---- 主机卡片 ---- */
+  /* ============ 概览统计卡 ============ */
+  .overview-card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-lg);
+    margin: var(--space-sm) var(--space-lg) var(--space-md);
+    padding: var(--space-md) 4px;
+    display: flex; position: relative; overflow: hidden;
+  }
+  .overview-card::before {
+    content: ''; position: absolute; top: 0; left: 10%; right: 10%; height: 1px;
+    background: linear-gradient(90deg, transparent, rgba(88,166,255,0.35), transparent);
+  }
+  .ov-item { flex: 1; display: flex; flex-direction: column; align-items: center; gap: 3px; padding: 2px 4px; }
+  .ov-item + .ov-item { border-left: 1px solid var(--border); }
+  .ov-num {
+    font-family: var(--font-mono); font-variant-numeric: tabular-nums;
+    font-size: 21px; font-weight: 700; color: var(--fg); line-height: 1.05; letter-spacing: -0.01em;
+  }
+  .ov-num.success { color: var(--success); }
+  .ov-num.muted { color: var(--fg-tertiary); }
+  .ov-num.accent { color: var(--accent); }
+  .ov-label { font-size: 10.5px; color: var(--fg-tertiary); letter-spacing: 0.2px; }
+
+  /* ============ 主机卡片 ============ */
   .daemon-card {
     background: var(--surface); border: 1px solid var(--border);
-    border-radius: var(--radius-lg); padding: var(--space-lg);
-    margin-bottom: var(--space-sm); transition: background 0.1s; position: relative;
+    border-radius: var(--radius-lg);
+    padding: var(--space-md) var(--space-lg);
+    margin: 0 var(--space-lg) var(--space-sm);
+    position: relative; transition: border-color 0.15s;
   }
-  .daemon-card:active { background: var(--hover-input); }
-  .daemon-card .card-top { display: flex; align-items: center; gap: var(--space-sm); margin-bottom: var(--space-sm); }
-  .daemon-card .hostname {
-    font-family: var(--font-body); font-weight: 600; font-size: 17px; color: var(--fg);
+  .daemon-card.online { border-color: var(--border); }
+  .daemon-card.offline { background: color-mix(in srgb, var(--surface) 82%, #000); }
+  .daemon-card .card-top {
+    display: flex; align-items: center; gap: var(--space-sm);
+    padding-bottom: var(--space-sm);
+  }
+  .device-icon { color: var(--fg-secondary); display: flex; flex-shrink: 0; }
+  .device-icon svg { width: 17px; height: 17px; }
+  .daemon-card.offline .device-icon { color: var(--fg-tertiary); }
+  .hostname {
+    font-family: var(--font-display); font-weight: 600; font-size: 17px; color: var(--fg);
     flex: 1; display: flex; align-items: center; gap: 6px; min-width: 0;
   }
-  .daemon-card .hostname-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .daemon-card .alias-badge {
-    display: none; font-size: 11px; font-weight: 500; color: var(--accent);
-    background: rgba(88,166,255,0.1); border-radius: 4px; padding: 1px 5px; white-space: nowrap; flex-shrink: 0;
+  .hostname-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .alias-badge {
+    display: none; font-size: 10px; font-weight: 500; color: var(--fg-tertiary);
+    background: var(--hover-input); border-radius: 4px; padding: 2px 6px;
+    white-space: nowrap; flex-shrink: 0; font-family: var(--font-mono);
   }
-  .daemon-card .hostname.has-alias .alias-badge { display: inline-block; }
-  .daemon-card .more-btn {
-    width: 28px; height: 28px; border: none; background: transparent;
-    color: var(--fg-tertiary); border-radius: 50%; cursor: pointer;
-    display: flex; align-items: center; justify-content: center; flex-shrink: 0;
+  .hostname.has-alias .alias-badge { display: inline-block; }
+  .edit-name-btn {
+    background: none; border: none; color: var(--fg-tertiary); cursor: pointer;
+    padding: 4px; border-radius: 6px; display: flex; align-items: center;
+    opacity: 0.5; transition: opacity 0.15s, color 0.15s; flex-shrink: 0;
   }
-  .daemon-card .more-btn:active { background: var(--hover-input); }
+  .edit-name-btn:hover { opacity: 1; color: var(--accent); }
+  .reset-name-btn {
+    background: none; border: none; color: var(--fg-tertiary); font-size: 11px;
+    cursor: pointer; padding: 2px 6px; border-radius: 4px; display: none; flex-shrink: 0;
+    font-family: var(--font-body);
+  }
+  .reset-name-btn.visible { display: inline-block; }
+  .more-btn {
+    width: 28px; height: 28px; border: none; background: transparent; color: var(--fg-tertiary);
+    border-radius: 50%; cursor: pointer; display: flex; align-items: center; justify-content: center; flex-shrink: 0;
+  }
+  .more-btn:active { background: var(--hover-input); }
 
-  /* ---- Agent 标签（紧凑横排） ---- */
-  .agent-tags { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 0; }
+  /* ============ Agent 标签 ============ */
+  .agent-tags { display: flex; gap: 6px; flex-wrap: wrap; padding-bottom: var(--space-sm); }
   .agent-tag {
-    display: inline-flex; align-items: center; gap: 4px;
-    padding: 3px 8px; border-radius: var(--radius-full);
-    font-size: 12px; font-weight: 500;
+    display: inline-flex; align-items: center; gap: 5px;
+    padding: 3px 9px; border-radius: var(--radius-full);
+    font-size: 11.5px; font-weight: 500;
   }
-  .agent-tag.claude { background: rgba(88,166,255,0.12); color: var(--accent); }
+  .agent-tag .at-dot { width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
+  .agent-tag .at-version { font-family: var(--font-mono); font-size: 10px; opacity: 0.65; margin-left: 1px; }
+  .agent-tag .at-upgrade {
+    display: inline-flex; align-items: center; gap: 1px; font-size: 9.5px; font-weight: 700;
+    color: var(--warning); background: var(--warning-bg); padding: 1px 5px; border-radius: 4px; margin-left: 3px;
+  }
+  .agent-tag.claude { background: rgba(88,166,255,0.12); color: var(--accent-hover); }
   .agent-tag.codex { background: rgba(63,185,80,0.12); color: var(--success); }
-  .agent-tag .at-dot { width: 6px; height: 6px; border-radius: 50%; }
-  .agent-tag.claude .at-dot { background: var(--accent); }
-  .agent-tag.codex .at-dot { background: var(--success); }
-  .agent-tag .at-update { font-size: 10px; color: var(--warning); font-weight: 600; }
+  .agent-tag.opencode { background: rgba(192,132,252,0.12); color: var(--sub-agent); }
 
-  /* ---- 功能列表行 ---- */
-  .feature-group {
-    margin-top: var(--space-sm); border-top: 1px solid var(--border);
-    padding-top: 2px;
-  }
+  /* ============ 功能列表行 ============ */
+  .feature-group { border-top: 1px solid var(--border); }
   .feature-row {
-    display: flex; align-items: center; gap: 10px;
-    padding: 11px 0; border-bottom: 1px solid var(--border);
+    display: flex; align-items: center; gap: 12px;
+    padding: 11px 2px; border-bottom: 1px solid var(--border);
     text-decoration: none; cursor: pointer;
   }
   .feature-row:last-child { border-bottom: none; }
-  .feature-row:active { background: var(--hover-input); }
-  .feature-row .fr-icon {
-    width: 28px; height: 28px; border-radius: 7px;
-    display: flex; align-items: center; justify-content: center;
-    flex-shrink: 0;
+  .feature-row:active { background: var(--hover-input); border-radius: 6px; }
+  .fr-icon {
+    width: 30px; height: 30px; border-radius: 8px;
+    display: flex; align-items: center; justify-content: center; flex-shrink: 0;
   }
-  .feature-row .fr-icon svg { width: 16px; height: 16px; }
-  .feature-row .fr-icon.blue { background: rgba(88,166,255,0.12); color: var(--accent); }
-  .feature-row .fr-icon.green { background: rgba(63,185,80,0.12); color: var(--success); }
-  .feature-row .fr-icon.purple { background: rgba(192,132,252,0.12); color: #c084fc; }
-  .feature-row .fr-icon.orange { background: rgba(210,153,34,0.12); color: var(--warning); }
-  .feature-row .fr-label { flex: 1; font-size: 15px; font-weight: 500; color: var(--fg); }
-  .feature-row .fr-value { font-size: 13px; color: var(--fg-tertiary); font-family: var(--font-mono); }
-  .feature-row .fr-value .warn { color: var(--warning); font-weight: 600; }
-  .feature-row .fr-chevron { color: var(--fg-tertiary); font-size: 14px; flex-shrink: 0; }
+  .fr-icon svg { width: 16px; height: 16px; }
+  .fr-icon.blue { background: rgba(88,166,255,0.12); color: var(--accent); }
+  .fr-icon.green { background: rgba(63,185,80,0.12); color: var(--success); }
+  .fr-icon.purple { background: rgba(192,132,252,0.12); color: var(--sub-agent); }
+  .fr-icon.orange { background: rgba(210,153,34,0.12); color: var(--warning); }
+  .fr-label { flex: 1; font-size: 15px; font-weight: 500; color: var(--fg); }
+  .fr-value { font-size: 12.5px; color: var(--fg-tertiary); font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
+  .fr-value .warn { color: var(--warning); font-weight: 600; }
+  .fr-chevron { color: var(--fg-tertiary); font-size: 15px; flex-shrink: 0; margin-left: 2px; }
+  .feature-row.disabled { opacity: 0.4; pointer-events: none; }
+  .feature-row.disabled .fr-label { color: var(--fg-secondary); }
 
-  /* ---- 卡片底部 ---- */
-  .daemon-card .card-bottom { display: flex; align-items: center; justify-content: space-between; padding-top: 6px; }
-  .daemon-card .last-active { font-size: 13px; color: var(--fg-secondary); }
+  /* ============ 卡片底部 ============ */
+  .card-bottom { display: flex; align-items: center; gap: 5px; padding-top: 10px; }
+  .card-bottom .cb-icon { color: var(--fg-tertiary); display: flex; }
+  .card-bottom .cb-icon svg { width: 12px; height: 12px; }
+  .last-active { font-size: 12px; color: var(--fg-tertiary); font-family: var(--font-mono); }
 
-  /* ---- ⋯ 操作菜单 ---- */
+  /* ============ 别名编辑行 ============ */
+  .rename-row { display: none; align-items: center; gap: 6px; margin-bottom: var(--space-sm); }
+  .rename-row.visible { display: flex; }
+  .rename-input {
+    flex: 1; background: var(--bg); border: 1px solid var(--border-light); border-radius: 8px;
+    padding: 8px 12px; font-family: var(--font-body); font-size: 15px; color: var(--fg); outline: none;
+  }
+  .rename-input:focus { border-color: var(--accent); }
+  .rename-action {
+    background: none; border: none; cursor: pointer; padding: 6px; border-radius: 6px;
+    display: flex; align-items: center; color: var(--fg-tertiary);
+  }
+  .rename-action.confirm { color: var(--success); }
+  .rename-action.cancel { color: var(--error); }
+
+  /* ============ 最近会话 ============ */
+  .recent-section { margin: var(--space-lg) var(--space-lg) 0; }
+  .recent-title {
+    font-size: 12px; font-weight: 600; color: var(--fg-secondary);
+    text-transform: uppercase; letter-spacing: 0.4px; margin-bottom: var(--space-sm);
+  }
+  .recent-item {
+    background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-md);
+    padding: 11px var(--space-md); margin-bottom: var(--space-xs);
+    display: flex; align-items: center; gap: 10px; cursor: pointer;
+  }
+  .recent-item:active { background: var(--hover-input); }
+  .recent-item .ri-dot { width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0; }
+  .recent-item .ri-dot.running { background: var(--success); box-shadow: 0 0 0 3px rgba(63,185,80,0.15); }
+  .recent-item .ri-dot.completed { background: var(--accent); }
+  .recent-item .ri-info { flex: 1; min-width: 0; }
+  .recent-item .ri-title { font-size: 14px; font-weight: 500; color: var(--fg); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .recent-item .ri-meta { font-size: 11.5px; color: var(--fg-tertiary); margin-top: 2px; font-family: var(--font-mono); }
+
+  /* ============ 空状态 ============ */
+  .install-code {
+    background: #010409; border: 1px solid var(--border); border-radius: var(--radius-sm);
+    padding: var(--space-md); font-family: var(--font-mono); font-size: 12px;
+    color: var(--fg-secondary); line-height: 1.9; width: 100%; margin-bottom: var(--space-md); text-align: left;
+  }
+  .install-code .cmd { color: var(--success); }
+  .copy-btn {
+    background: var(--surface); border: 1px solid var(--border-light); color: var(--accent);
+    font-family: var(--font-body); font-size: 14px; padding: var(--space-sm) var(--space-lg);
+    border-radius: var(--radius-sm); cursor: pointer; display: inline-flex; align-items: center; gap: var(--space-xs);
+  }
+
+  /* ============ ⋯ 操作菜单 ============ */
   .action-sheet {
     position: absolute; bottom: 0; left: 0; right: 0; z-index: 100;
     background: var(--surface); border-radius: var(--radius-xl) var(--radius-xl) 0 0;
@@ -98,61 +197,29 @@
   }
   .action-sheet.open { display: block; }
   .action-sheet .as-handle { width: 36px; height: 4px; background: var(--fg-tertiary); border-radius: 2px; margin: 0 auto var(--space-md); }
-  .action-sheet .as-title { font-size: 17px; font-weight: 600; color: var(--fg); margin-bottom: var(--space-md); text-align: center; }
+  .action-sheet .as-title { font-size: 17px; font-weight: 600; color: var(--fg); margin-bottom: var(--space-md); text-align: center; font-family: var(--font-display); }
   .action-sheet .as-item {
     display: flex; align-items: center; gap: 12px; padding: 14px var(--space-md);
     border: none; background: transparent; width: 100%; cursor: pointer;
     color: var(--fg); font-size: 16px; font-family: var(--font-body); border-radius: var(--radius-sm);
   }
   .action-sheet .as-item:active { background: var(--hover-input); }
-  .action-sheet .as-item.danger { color: var(--danger); }
+  .action-sheet .as-item.danger { color: var(--error); }
   .action-sheet .as-item svg { width: 20px; height: 20px; flex-shrink: 0; }
   .action-sheet .as-cancel { margin-top: var(--space-md); color: var(--fg-secondary); }
   .action-overlay { position: absolute; inset: 0; background: rgba(0,0,0,0.5); z-index: 90; display: none; }
   .action-overlay.open { display: block; }
   @keyframes slideUp { from { transform: translateY(100%); } to { transform: translateY(0); } }
 
-  /* ---- 最近会话区 ---- */
-  .recent-section { margin: var(--space-lg) 0 0; }
-  .recent-title { font-size: 13px; font-weight: 600; color: var(--fg-secondary); text-transform: uppercase; letter-spacing: 0.3px; margin-bottom: var(--space-sm); }
-  .recent-item {
-    background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-md);
-    padding: 12px var(--space-lg); margin-bottom: var(--space-xs); display: flex; align-items: center; gap: 10px;
-  }
-  .recent-item:active { background: var(--hover-input); }
-  .recent-item .ri-dot { width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0; }
-  .recent-item .ri-dot.running { background: var(--success); }
-  .recent-item .ri-dot.completed { background: var(--accent); }
-  .recent-item .ri-info { flex: 1; min-width: 0; }
-  .recent-item .ri-title { font-size: 15px; font-weight: 500; color: var(--fg); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .recent-item .ri-meta { font-size: 12px; color: var(--fg-tertiary); margin-top: 1px; }
-
-  /* ---- rename ---- */
-  .daemon-card .rename-row { display: none; align-items: center; gap: 6px; margin-bottom: var(--space-sm); }
-  .daemon-card .rename-row.visible { display: flex; }
-  .daemon-card .rename-input {
-    flex: 1; background: var(--bg); border: 1px solid var(--border); border-radius: 6px;
-    padding: 6px 10px; font-family: var(--font-body); font-size: 15px; color: var(--fg); outline: none;
-  }
-  .daemon-card .rename-input:focus { border-color: var(--accent); }
-  .rename-action { background: none; border: none; cursor: pointer; padding: 4px; border-radius: 4px; display: flex; align-items: center; color: var(--fg-tertiary); }
-  .rename-action.confirm:hover { color: var(--success); }
-  .rename-action.cancel:hover { color: var(--danger); }
-
-  /* ---- misc ---- */
-  .install-code { background: #010409; border: 1px solid var(--border); border-radius: var(--radius-sm); padding: var(--space-md); font-family: var(--font-mono); font-size: 12px; color: var(--fg-secondary); line-height: 1.8; width: 100%; margin-bottom: var(--space-md); }
-  .install-code .cmd { color: var(--success); }
-  .copy-btn { background: var(--surface); border: 1px solid var(--border); color: var(--accent); font-family: var(--font-body); font-size: 14px; padding: var(--space-sm) var(--space-lg); border-radius: var(--radius-sm); cursor: pointer; display: inline-flex; align-items: center; gap: var(--space-xs); }
+  /* ============ 状态切换器（预览辅助） ============ */
   .state-switcher { position: absolute; top: 60px; right: 8px; z-index: 200; display: flex; flex-direction: column; gap: 4px; }
-  .state-switcher button { background: rgba(88,166,255,0.15); border: 1px solid rgba(88,166,255,0.3); color: var(--accent); font-size: 10px; padding: 4px 8px; border-radius: 6px; cursor: pointer; font-family: var(--font-mono); }
+  .state-switcher button {
+    background: rgba(88,166,255,0.15); border: 1px solid rgba(88,166,255,0.3); color: var(--accent);
+    font-size: 10px; padding: 4px 8px; border-radius: 6px; cursor: pointer; font-family: var(--font-mono);
+  }
   .state-switcher button.active-state { background: var(--accent); color: var(--bg); }
-  .state-panel { display: none; } .state-panel.active { display: block; }
-  .avatar-btn { width: 36px; height: 36px; border-radius: 50%; background: var(--surface); border: 1px solid var(--border); display: flex; align-items: center; justify-content: center; color: var(--fg-secondary); font-size: 15px; font-weight: 600; cursor: pointer; }
-  .header-row { display: flex; align-items: center; justify-content: space-between; padding: var(--space-md) var(--space-lg); }
-  .edit-name-btn { background: none; border: none; color: var(--fg-tertiary); cursor: pointer; padding: 2px 4px; border-radius: 4px; display: flex; align-items: center; opacity: 0; transition: opacity 0.15s; flex-shrink: 0; }
-  .daemon-card:hover .edit-name-btn { opacity: 1; }
-  .reset-name-btn { background: none; border: none; color: var(--fg-tertiary); font-size: 11px; cursor: pointer; padding: 2px 6px; border-radius: 4px; display: none; }
-  .reset-name-btn.visible { display: inline-block; }
+  .state-panel { display: none; }
+  .state-panel.active { display: block; }
 </style>
 </head>
 <body>
@@ -174,31 +241,33 @@
 
   <div class="screen-content">
     <div class="large-title">我的主机</div>
-    <div class="header-row" style="padding-top:0;margin-top:-8px;">
-      <div style="font-size:13px;color:var(--fg-secondary);">2 台主机 · 1 台在线</div>
-      <a href="settings.html" class="avatar-btn" style="text-decoration:none;">M</a>
+    <div class="header-row">
+      <div class="subtitle">3 台主机 <span class="sep">·</span> <span class="online-cnt">2 在线</span></div>
+      <a href="settings.html" class="avatar-btn">M</a>
     </div>
 
-    <!-- ===== 概览状态卡 ===== -->
+    <!-- ===== 概览统计卡 ===== -->
     <div class="overview-card">
-      <div class="ov-item"><span class="ov-num success">1</span><span class="ov-label">在线</span></div>
-      <div class="ov-item"><span class="ov-num" style="color:var(--fg-tertiary);">1</span><span class="ov-label">离线</span></div>
-      <div class="ov-item"><span class="ov-num accent">92K</span><span class="ov-label">今日 Token</span></div>
-      <div class="ov-item"><span class="ov-num">3</span><span class="ov-label">活跃会话</span></div>
+      <div class="ov-item"><span class="ov-num success">2</span><span class="ov-label">在线</span></div>
+      <div class="ov-item"><span class="ov-num muted">1</span><span class="ov-label">离线</span></div>
+      <div class="ov-item"><span class="ov-num accent">88.1M</span><span class="ov-label">今日 Token</span></div>
+      <div class="ov-item"><span class="ov-num">11</span><span class="ov-label">活跃会话</span></div>
     </div>
 
     <!-- ===== NORMAL STATE ===== -->
-    <div class="state-panel active" id="panel-normal" style="padding:0 var(--space-lg);">
-      <!-- Online daemon -->
-      <div class="daemon-card" id="daemon-0" data-default-name="MacBook-Pro">
+    <div class="state-panel active" id="panel-normal">
+
+      <!-- ===== 主机 1：m3 pro（在线，带别名） ===== -->
+      <div class="daemon-card online" id="daemon-0" data-default-name="m3-pro">
         <div class="card-top">
           <span class="status-dot online"></span>
-          <span class="hostname" id="hostname-0">
-            <span class="hostname-text" id="display-name-0">MacBook-Pro</span>
-            <span class="alias-badge" id="alias-badge-0">别名</span>
+          <span class="device-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="4" y="5" width="16" height="11" rx="2"/><path d="M2 20h20"/></svg></span>
+          <span class="hostname has-alias" id="hostname-0">
+            <span class="hostname-text" id="display-name-0">主力机</span>
+            <span class="alias-badge" id="alias-badge-0">m3-pro</span>
           </span>
           <button class="edit-name-btn" onclick="startRename(0)" title="编辑别名"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M11 4H4a2 2 0 00-2 2v14a2 2 0 002 2h14a2 2 0 002-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 013 3L12 15l-4 1 1-4 9.5-9.5z"/></svg></button>
-          <button class="reset-name-btn" id="reset-0" onclick="resetName(0)">恢复默认</button>
+          <button class="reset-name-btn" id="reset-0" onclick="resetName(0)">恢复</button>
           <span class="chip chip-online">在线</span>
           <button class="more-btn" onclick="openActionSheet(0)"><svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor"><circle cx="12" cy="5" r="2"/><circle cx="12" cy="12" r="2"/><circle cx="12" cy="19" r="2"/></svg></button>
         </div>
@@ -207,17 +276,16 @@
           <button class="rename-action confirm" onclick="confirmRename(0)"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M20 6L9 17l-5-5"/></svg></button>
           <button class="rename-action cancel" onclick="cancelRename(0)"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M18 6L6 18M6 6l12 12"/></svg></button>
         </div>
-        <!-- Agent 标签 -->
         <div class="agent-tags">
-          <span class="agent-tag claude"><span class="at-dot"></span>Claude Code <span class="at-update">v2.4.0</span></span>
-          <span class="agent-tag codex"><span class="at-dot"></span>Codex v1.8.0</span>
+          <span class="agent-tag claude"><span class="at-dot"></span>Claude Code <span class="at-version">v2.1.195</span></span>
+          <span class="agent-tag codex"><span class="at-dot"></span>Codex <span class="at-version">v0.142.3</span><span class="at-upgrade">↑ 可升级</span></span>
+          <span class="agent-tag opencode"><span class="at-dot"></span>OpenCode <span class="at-version">v1.17.11</span></span>
         </div>
-        <!-- 功能列表 -->
         <div class="feature-group">
           <a class="feature-row" href="session-list.html">
             <div class="fr-icon blue"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15a2 2 0 01-2 2H7l-4 4V5a2 2 0 012-2h14a2 2 0 012 2z"/></svg></div>
             <span class="fr-label">会话列表</span>
-            <span class="fr-value">3 活跃 · 12 历史</span>
+            <span class="fr-value">10 活跃 · 229 历史</span>
             <span class="fr-chevron">›</span>
           </a>
           <a class="feature-row" href="new-session.html">
@@ -228,30 +296,34 @@
           <a class="feature-row" href="token-usage.html">
             <div class="fr-icon purple"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 20V10M12 20V4M6 20v-6"/></svg></div>
             <span class="fr-label">Token 消耗</span>
-            <span class="fr-value">1.57M 总 · 60K 今日</span>
+            <span class="fr-value">12.4M 总</span>
             <span class="fr-chevron">›</span>
           </a>
-          <div class="feature-row" onclick="location.href='agent-manage.html'">
+          <a class="feature-row" href="agent-manage.html">
             <div class="fr-icon orange"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14.7 6.3a1 1 0 000 1.4l1.6 1.6a1 1 0 001.4 0l3.77-3.77a6 6 0 01-7.94 7.94l-6.91 6.91a2.12 2.12 0 01-3-3l6.91-6.91a6 6 0 017.94-7.94l-3.76 3.76z"/></svg></div>
             <span class="fr-label">Agent 管理</span>
-            <span class="fr-value">4 个 · 2 可升级</span>
+            <span class="fr-value"><span class="warn">3 个 · 1 可升级</span></span>
             <span class="fr-chevron">›</span>
-          </div>
+          </a>
         </div>
-        <div class="card-bottom"><span class="last-active">最后活跃: 2 分钟前</span></div>
+        <div class="card-bottom">
+          <span class="cb-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg></span>
+          <span class="last-active">最后活跃 · 1 分钟前</span>
+        </div>
       </div>
 
-      <!-- Offline daemon -->
-      <div class="daemon-card" id="daemon-1" data-default-name="Dev-Server">
+      <!-- ===== 主机 2：macmini（在线） ===== -->
+      <div class="daemon-card online" id="daemon-1" data-default-name="macmini">
         <div class="card-top">
-          <span class="status-dot offline"></span>
+          <span class="status-dot online"></span>
+          <span class="device-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="3" y="4" width="18" height="7" rx="2"/><rect x="3" y="13" width="18" height="7" rx="2"/><path d="M7 7.5h.01M7 16.5h.01"/></svg></span>
           <span class="hostname" id="hostname-1">
-            <span class="hostname-text" id="display-name-1">Dev-Server</span>
-            <span class="alias-badge" id="alias-badge-1">别名</span>
+            <span class="hostname-text" id="display-name-1">macmini</span>
+            <span class="alias-badge" id="alias-badge-1">macmini</span>
           </span>
-          <button class="edit-name-btn" onclick="startRename(1)"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M11 4H4a2 2 0 00-2 2v14a2 2 0 002 2h14a2 2 0 002-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 013 3L12 15l-4 1 1-4 9.5-9.5z"/></svg></button>
-          <button class="reset-name-btn" id="reset-1" onclick="resetName(1)">恢复默认</button>
-          <span class="chip chip-offline">离线</span>
+          <button class="edit-name-btn" onclick="startRename(1)" title="编辑别名"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M11 4H4a2 2 0 00-2 2v14a2 2 0 002 2h14a2 2 0 002-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 013 3L12 15l-4 1 1-4 9.5-9.5z"/></svg></button>
+          <button class="reset-name-btn" id="reset-1" onclick="resetName(1)">恢复</button>
+          <span class="chip chip-online">在线</span>
           <button class="more-btn" onclick="openActionSheet(1)"><svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor"><circle cx="12" cy="5" r="2"/><circle cx="12" cy="12" r="2"/><circle cx="12" cy="19" r="2"/></svg></button>
         </div>
         <div class="rename-row" id="rename-row-1">
@@ -260,16 +332,71 @@
           <button class="rename-action cancel" onclick="cancelRename(1)"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M18 6L6 18M6 6l12 12"/></svg></button>
         </div>
         <div class="agent-tags">
-          <span class="agent-tag claude"><span class="at-dot"></span>Claude Code <span class="at-update">v2.1.0</span></span>
+          <span class="agent-tag claude"><span class="at-dot"></span>Claude Code <span class="at-version">v2.1.195</span></span>
+          <span class="agent-tag codex"><span class="at-dot"></span>Codex <span class="at-version">v0.130.0</span><span class="at-upgrade">↑ 可升级</span></span>
+          <span class="agent-tag opencode"><span class="at-dot"></span>OpenCode <span class="at-version">v1.2.27</span><span class="at-upgrade">↑ 可升级</span></span>
         </div>
         <div class="feature-group">
           <a class="feature-row" href="session-list.html">
             <div class="fr-icon blue"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15a2 2 0 01-2 2H7l-4 4V5a2 2 0 012-2h14a2 2 0 012 2z"/></svg></div>
             <span class="fr-label">会话列表</span>
-            <span class="fr-value" style="color:var(--fg-tertiary);">0 活跃 · 5 历史</span>
+            <span class="fr-value">1 活跃 · 1 历史</span>
             <span class="fr-chevron">›</span>
           </a>
-          <div class="feature-row" style="opacity:0.4;pointer-events:none;">
+          <a class="feature-row" href="new-session.html">
+            <div class="fr-icon green"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 5v14M5 12h14"/></svg></div>
+            <span class="fr-label">新建会话</span>
+            <span class="fr-chevron">›</span>
+          </a>
+          <a class="feature-row" href="token-usage.html">
+            <div class="fr-icon purple"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 20V10M12 20V4M6 20v-6"/></svg></div>
+            <span class="fr-label">Token 消耗</span>
+            <span class="fr-value">8.7M 总</span>
+            <span class="fr-chevron">›</span>
+          </a>
+          <a class="feature-row" href="agent-manage.html">
+            <div class="fr-icon orange"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14.7 6.3a1 1 0 000 1.4l1.6 1.6a1 1 0 001.4 0l3.77-3.77a6 6 0 01-7.94 7.94l-6.91 6.91a2.12 2.12 0 01-3-3l6.91-6.91a6 6 0 017.94-7.94l-3.76 3.76z"/></svg></div>
+            <span class="fr-label">Agent 管理</span>
+            <span class="fr-value"><span class="warn">3 个 · 2 可升级</span></span>
+            <span class="fr-chevron">›</span>
+          </a>
+        </div>
+        <div class="card-bottom">
+          <span class="cb-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg></span>
+          <span class="last-active">最后活跃 · 8 分钟前</span>
+        </div>
+      </div>
+
+      <!-- ===== 主机 3：muwenbindeMacBook-Pro（离线，部分降级） ===== -->
+      <div class="daemon-card offline" id="daemon-2" data-default-name="muwenbindeMacBook-Pro">
+        <div class="card-top">
+          <span class="status-dot offline"></span>
+          <span class="device-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="4" y="5" width="16" height="11" rx="2"/><path d="M2 20h20"/></svg></span>
+          <span class="hostname" id="hostname-2">
+            <span class="hostname-text" id="display-name-2">muwenbindeMacBook-Pro</span>
+            <span class="alias-badge" id="alias-badge-2">muwenbindeMacBook-Pro</span>
+          </span>
+          <button class="edit-name-btn" onclick="startRename(2)" title="编辑别名"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M11 4H4a2 2 0 00-2 2v14a2 2 0 002 2h14a2 2 0 002-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 013 3L12 15l-4 1 1-4 9.5-9.5z"/></svg></button>
+          <button class="reset-name-btn" id="reset-2" onclick="resetName(2)">恢复</button>
+          <span class="chip chip-offline">离线</span>
+          <button class="more-btn" onclick="openActionSheet(2)"><svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor"><circle cx="12" cy="5" r="2"/><circle cx="12" cy="12" r="2"/><circle cx="12" cy="19" r="2"/></svg></button>
+        </div>
+        <div class="rename-row" id="rename-row-2">
+          <input class="rename-input" id="rename-input-2" type="text" placeholder="输入别名…" maxlength="32" onkeydown="handleRenameKey(event, 2)">
+          <button class="rename-action confirm" onclick="confirmRename(2)"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M20 6L9 17l-5-5"/></svg></button>
+          <button class="rename-action cancel" onclick="cancelRename(2)"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M18 6L6 18M6 6l12 12"/></svg></button>
+        </div>
+        <div class="agent-tags">
+          <span class="agent-tag claude"><span class="at-dot"></span>Claude Code <span class="at-version">v2.1.195</span></span>
+        </div>
+        <div class="feature-group">
+          <a class="feature-row" href="session-list.html">
+            <div class="fr-icon blue"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15a2 2 0 01-2 2H7l-4 4V5a2 2 0 012-2h14a2 2 0 012 2z"/></svg></div>
+            <span class="fr-label">会话列表</span>
+            <span class="fr-value">0 活跃 · 4 历史</span>
+            <span class="fr-chevron">›</span>
+          </a>
+          <div class="feature-row disabled">
             <div class="fr-icon green"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 5v14M5 12h14"/></svg></div>
             <span class="fr-label">新建会话</span>
             <span class="fr-value">主机离线</span>
@@ -277,16 +404,19 @@
           <a class="feature-row" href="token-usage.html">
             <div class="fr-icon purple"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 20V10M12 20V4M6 20v-6"/></svg></div>
             <span class="fr-label">Token 消耗</span>
-            <span class="fr-value">540K 总</span>
+            <span class="fr-value">2.1M 总</span>
             <span class="fr-chevron">›</span>
           </a>
-          <div class="feature-row" style="opacity:0.4;pointer-events:none;">
+          <div class="feature-row disabled">
             <div class="fr-icon orange"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14.7 6.3a1 1 0 000 1.4l1.6 1.6a1 1 0 001.4 0l3.77-3.77a6 6 0 01-7.94 7.94l-6.91 6.91a2.12 2.12 0 01-3-3l6.91-6.91a6 6 0 017.94-7.94l-3.76 3.76z"/></svg></div>
             <span class="fr-label">Agent 管理</span>
-            <span class="fr-value"><span class="warn">1 个可升级</span></span>
+            <span class="fr-value">主机离线</span>
           </div>
         </div>
-        <div class="card-bottom"><span class="last-active">最后活跃: 3 天前</span></div>
+        <div class="card-bottom">
+          <span class="cb-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg></span>
+          <span class="last-active">最后活跃 · 06-24 11:18</span>
+        </div>
       </div>
 
       <!-- ===== 最近会话 ===== -->
@@ -294,15 +424,15 @@
         <div class="recent-title">最近会话</div>
         <div class="recent-item" onclick="location.href='session-detail.html'">
           <span class="ri-dot running"></span>
-          <div class="ri-info"><div class="ri-title">重构用户认证模块</div><div class="ri-meta">MacBook-Pro · 3 分钟前</div></div>
+          <div class="ri-info"><div class="ri-title">在 claudecode 终端一</div><div class="ri-meta">m3-pro · 1 分钟前</div></div>
         </div>
         <div class="recent-item" onclick="location.href='session-detail.html'">
           <span class="ri-dot completed"></span>
-          <div class="ri-info"><div class="ri-title">修复 CI 构建错误</div><div class="ri-meta">MacBook-Pro · 8 分钟前</div></div>
+          <div class="ri-info"><div class="ri-title">Terminal Session-a6465d5d</div><div class="ri-meta">macmini · 2 分钟前</div></div>
         </div>
         <div class="recent-item" onclick="location.href='session-detail.html'">
           <span class="ri-dot completed"></span>
-          <div class="ri-info"><div class="ri-title">sess_a3f7b2c1</div><div class="ri-meta">MacBook-Pro · 1 小时前</div></div>
+          <div class="ri-info"><div class="ri-title">5699016a</div><div class="ri-meta">m3-pro · 17 分钟前</div></div>
         </div>
       </div>
     </div>
@@ -314,7 +444,7 @@
         <div class="empty-title">还没有注册主机</div>
         <div class="empty-subtitle" style="margin-bottom:var(--space-xl);">在你的开发机上运行以下命令安装 Daemon</div>
         <div class="install-code"><div><span class="cmd">curl</span> -fsSL https://pocketctl.com/install.sh | bash</div><div><span class="cmd">pocketctl</span> login</div><div><span class="cmd">pocketctl</span> daemon start</div></div>
-        <button class="copy-btn"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"/></svg>复制命令</button>
+        <button class="copy-btn" onclick="copyInstall()"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"/></svg>复制命令</button>
       </div>
     </div>
   </div>
@@ -323,7 +453,7 @@
   <div class="action-overlay" id="action-overlay" onclick="closeActionSheet()"></div>
   <div class="action-sheet" id="action-sheet">
     <div class="as-handle"></div>
-    <div class="as-title" id="as-title">MacBook-Pro</div>
+    <div class="as-title" id="as-title">m3-pro</div>
     <button class="as-item" onclick="doAction('restart')"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 12a9 9 0 019-9 9 9 0 016.7 3"/><path d="M21 3v5h-5"/><path d="M21 12a9 9 0 01-9 9 9 9 0 01-6.7-3"/><path d="M3 21v-5h5"/></svg>重启 daemon</button>
     <button class="as-item" onclick="doAction('alias')"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M11 4H4a2 2 0 00-2 2v14a2 2 0 002 2h14a2 2 0 002-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 013 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>编辑别名</button>
     <button class="as-item danger" onclick="doAction('kick')"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 3v9"/><path d="M6.4 6.4a8 8 0 106.6-2.3"/></svg>强制踢下线</button>
@@ -335,7 +465,7 @@
 </div>
 
 <script>
-/* ---- state switcher ---- */
+/* ---- 状态切换 ---- */
 function showState(state) {
   document.querySelectorAll('.state-switcher button').forEach(b => b.classList.remove('active-state'));
   document.getElementById('btn-' + state).classList.add('active-state');
@@ -343,25 +473,55 @@ function showState(state) {
   document.getElementById('panel-' + state).classList.add('active');
 }
 
-/* ---- alias ---- */
-const aliases = {};
+/* ---- 别名管理 ---- */
+const aliases = { 0: '主力机' }; /* 预设：m3-pro 已设置别名，演示完整交互 */
 function getCard(idx) {
-  return { card: document.getElementById('daemon-'+idx), host: document.getElementById('hostname-'+idx), display: document.getElementById('display-name-'+idx), badge: document.getElementById('alias-badge-'+idx), reset: document.getElementById('reset-'+idx), row: document.getElementById('rename-row-'+idx), input: document.getElementById('rename-input-'+idx) };
+  return {
+    card: document.getElementById('daemon-' + idx),
+    host: document.getElementById('hostname-' + idx),
+    display: document.getElementById('display-name-' + idx),
+    badge: document.getElementById('alias-badge-' + idx),
+    reset: document.getElementById('reset-' + idx),
+    row: document.getElementById('rename-row-' + idx),
+    input: document.getElementById('rename-input-' + idx),
+  };
 }
-function renderAlias(idx) { const c=getCard(idx); const alias=aliases[idx]||null; const dn=c.card.dataset.defaultName; c.display.textContent=alias||dn; if(alias){c.host.classList.add('has-alias');c.reset.classList.add('visible')}else{c.host.classList.remove('has-alias');c.reset.classList.remove('visible')} }
-function startRename(idx) { const c=getCard(idx); c.row.classList.add('visible'); c.input.value=aliases[idx]||''; c.input.focus(); }
-function confirmRename(idx) { const c=getCard(idx); const val=c.input.value.trim(); if(val)aliases[idx]=val; else delete aliases[idx]; c.row.classList.remove('visible'); renderAlias(idx); }
+function renderAlias(idx) {
+  const c = getCard(idx);
+  if (!c.card) return;
+  const alias = aliases[idx] || null;
+  const dn = c.card.dataset.defaultName;
+  c.display.textContent = alias || dn;
+  c.badge.textContent = dn; /* 别名态：badge 显示真实主机名，便于识别 */
+  if (alias) { c.host.classList.add('has-alias'); c.reset.classList.add('visible'); }
+  else { c.host.classList.remove('has-alias'); c.reset.classList.remove('visible'); }
+}
+function startRename(idx) {
+  const c = getCard(idx);
+  c.row.classList.add('visible');
+  c.input.value = aliases[idx] || '';
+  setTimeout(() => c.input.focus(), 50);
+}
+function confirmRename(idx) {
+  const c = getCard(idx);
+  const val = c.input.value.trim();
+  if (val) aliases[idx] = val; else delete aliases[idx];
+  c.row.classList.remove('visible');
+  renderAlias(idx);
+}
 function cancelRename(idx) { getCard(idx).row.classList.remove('visible'); }
 function resetName(idx) { delete aliases[idx]; renderAlias(idx); }
-function handleRenameKey(e, idx) { if(e.key==='Enter'){e.preventDefault();confirmRename(idx)} if(e.key==='Escape')cancelRename(idx); }
+function handleRenameKey(e, idx) {
+  if (e.key === 'Enter') { e.preventDefault(); confirmRename(idx); }
+  if (e.key === 'Escape') cancelRename(idx);
+}
 
 /* ---- ⋯ Action Sheet ---- */
 var actionHostIdx = null;
 function openActionSheet(idx) {
   actionHostIdx = idx;
-  var card = document.getElementById('daemon-' + idx);
-  var name = card.dataset.defaultName;
-  if (aliases[idx]) name = aliases[idx];
+  const c = getCard(idx);
+  const name = aliases[idx] || c.card.dataset.defaultName;
   document.getElementById('as-title').textContent = name;
   document.getElementById('action-overlay').classList.add('open');
   document.getElementById('action-sheet').classList.add('open');
@@ -373,19 +533,20 @@ function closeActionSheet() {
 function doAction(act) {
   closeActionSheet();
   if (act === 'alias') { startRename(actionHostIdx); return; }
-  var name = document.getElementById('as-title').textContent;
-  alert('「' + name + '」' + (act==='kick'?'已强制踢下线':act==='restart'?'daemon 重启中…':act==='unregister'?'已注销主机':'') );
+  const name = document.getElementById('as-title').textContent;
+  const msg = act === 'kick' ? '已强制踢下线' : act === 'restart' ? 'daemon 重启中…' : act === 'unregister' ? '已注销主机' : '';
+  if (msg) alert('「' + name + '」' + msg);
 }
 
-/* ---- Agent 升级 ---- */
-function upgradeAgent(el) {
-  var val = el.querySelector('.fr-value');
-  if (val) val.innerHTML = '升级中…';
-  setTimeout(function() {
-    if (val) val.innerHTML = '全部最新';
-    el.querySelector('.fr-label').textContent = 'Agent 管理';
-  }, 2000);
+/* ---- 复制安装命令 ---- */
+function copyInstall() {
+  const code = 'curl -fsSL https://pocketctl.com/install.sh | bash';
+  if (navigator.clipboard) navigator.clipboard.writeText(code).catch(() => {});
+  alert('安装命令已复制');
 }
+
+/* ---- 初始化 ---- */
+[0, 1, 2].forEach(renderAlias);
 </script>
 </body>
 </html>

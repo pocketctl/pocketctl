@@ -320,6 +320,7 @@ export async function listSessions(pool: pg.Pool): Promise<any[]> {
   const result = await pool.query(
     `SELECT s.session_id, s.daemon_id, s.agent_type, s.cwd, s.title, s.source, s.status,
             s.created_at, s.updated_at, s.last_activity_at, s.exit_reason, s.subagent_count, s.pinned,
+            s.model,
             d.status AS daemon_status, d.hostname AS hostname, d.alias AS daemon_alias
      FROM sessions s
      LEFT JOIN daemons d ON s.daemon_id = d.daemon_id
@@ -475,6 +476,7 @@ export async function listSessionsByUser(pool: pg.Pool, userId: number): Promise
   const result = await pool.query(
     `SELECT s.session_id, s.daemon_id, s.agent_type, s.cwd, s.title, s.source, s.status,
             s.created_at, s.updated_at, s.last_activity_at, s.exit_reason, s.subagent_count, s.pinned,
+            s.model,
             d.status AS daemon_status, d.hostname AS hostname, d.alias AS daemon_alias
      FROM sessions s
      LEFT JOIN daemons d ON s.daemon_id = d.daemon_id
@@ -855,16 +857,38 @@ export async function backfillSessionTokens(pool: pg.Pool): Promise<number> {
   return result.rowCount ?? 0;
 }
 
-/** Backfill sessions.model from session_created events (idempotent). Run on startup. */
+/** Backfill sessions.model for sessions that have no model recorded. Sources,
+ *  in priority order:
+ *   1. session_created events (daemon-spawned sessions announce their model at create time)
+ *   2. session_model_changed events (a mid-session /model switch — authoritative for the
+ *      current model, and the ONLY signal for terminal sessions that never went through
+ *      session_created, since session_discovered carries no model)
+ *   3. agent_text events (last resort: the model id on the most recent assistant turn —
+ *      covers terminal sessions whose model was never explicitly announced)
+ *  Idempotent. Run on startup. */
 export async function backfillSessionModel(pool: pg.Pool): Promise<number> {
   const result = await pool.query(`
-    UPDATE sessions s SET model = sub.model
-    FROM (
-      SELECT session_id, payload->>'model' AS model
-      FROM events
-      WHERE event_type = 'session_created' AND payload ? 'model' AND payload->>'model' <> ''
-    ) sub
-    WHERE s.session_id = sub.session_id AND s.model IS NULL
+    WITH candidates AS (
+      SELECT session_id, model,
+             ROW_NUMBER() OVER (
+               PARTITION BY session_id
+               ORDER BY CASE source
+                          WHEN 'session_created'        THEN 1
+                          WHEN 'session_model_changed'   THEN 2
+                          WHEN 'agent_text'              THEN 3
+                        END,
+                        created_at DESC
+             ) AS rn
+      FROM (
+        SELECT session_id, payload->>'model' AS model, event_type AS source, created_at
+        FROM events
+        WHERE event_type IN ('session_created', 'session_model_changed', 'agent_text')
+          AND payload ? 'model' AND payload->>'model' <> ''
+      ) e
+    )
+    UPDATE sessions s SET model = c.model
+    FROM (SELECT session_id, model FROM candidates WHERE rn = 1) c
+    WHERE s.session_id = c.session_id AND s.model IS NULL
   `);
   return result.rowCount ?? 0;
 }

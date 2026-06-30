@@ -13,7 +13,7 @@
     padding: var(--space-md) var(--space-lg);
     margin-bottom: var(--space-sm);
     cursor: pointer;
-    transition: background 0.1s;
+    transition: background 0.1s, border-color 0.15s;
   }
   .session-card:active { background: var(--hover-input); }
   .session-card .card-main {
@@ -26,23 +26,58 @@
     font-weight: 600;
     font-size: 16px;
     color: var(--fg);
-    margin-bottom: 6px;
+    margin-bottom: 7px;
+    line-height: 1.3;
   }
   .session-card .session-title.mono {
     font-family: var(--font-mono);
     font-size: 14px;
     color: #79c0ff;
   }
+
+  /* ---- agent 类型 + 模型名（新增） ---- */
+  .session-meta {
+    display: flex; align-items: center; gap: 8px;
+    margin-bottom: 7px; flex-wrap: wrap;
+  }
+  .agent-pill {
+    display: inline-flex; align-items: center; gap: 5px;
+    padding: 2px 8px; border-radius: var(--radius-full);
+    font-size: 11px; font-weight: 600;
+  }
+  .agent-pill .ap-dot { width: 6px; height: 6px; border-radius: 50%; }
+  .agent-pill.claude { background: rgba(88,166,255,0.12); color: var(--accent-hover); }
+  .agent-pill.codex { background: rgba(63,185,80,0.12); color: var(--success); }
+  .agent-pill.opencode { background: rgba(192,132,252,0.12); color: var(--sub-agent); }
+  .agent-pill.claude .ap-dot { background: var(--accent); }
+  .agent-pill.codex .ap-dot { background: var(--success); }
+  .agent-pill.opencode .ap-dot { background: var(--sub-agent); }
+  .model-name {
+    font-family: var(--font-mono); font-size: 11px; color: var(--fg-tertiary);
+    display: inline-flex; align-items: center; gap: 6px;
+    font-variant-numeric: tabular-nums;
+  }
+  .model-name::before {
+    content: ''; width: 3px; height: 3px; border-radius: 50%;
+    background: var(--fg-tertiary); opacity: 0.5;
+  }
+
   .session-card .badges {
     display: flex;
     gap: 6px;
-    margin-bottom: 6px;
+    margin-bottom: 7px;
     flex-wrap: wrap;
   }
   .session-card .timestamp {
-    font-size: 13px;
+    font-size: 12px;
     color: var(--fg-tertiary);
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    font-family: var(--font-mono);
   }
+  .session-card .timestamp svg { width: 11px; height: 11px; opacity: 0.7; }
+
   .exited-banner {
     background: var(--warning-bg);
     border: 1px solid rgba(210, 153, 34, 0.3);
@@ -139,14 +174,14 @@
       <svg width="12" height="20" viewBox="0 0 12 20" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><path d="M10 2L2 10L10 18"/></svg>
       我的主机
     </button>
-    <span class="nav-title">MacBook-Pro</span>
+    <span class="nav-title">m3-pro</span>
     <button class="new-session-btn">+</button>
   </div>
 
   <!-- Daemon Status Bar -->
   <div class="daemon-status-bar">
     <span class="status-dot online" style="width:8px;height:8px;"></span>
-    在线 · 最后心跳 30秒前
+    在线 · 最后心跳 30 秒前
   </div>
 
   <div class="screen-content" style="height:calc(844px - 54px - 44px - 32px - 34px);">
@@ -165,11 +200,15 @@
           <span class="status-dot running" style="margin-top:5px;"></span>
           <div style="flex:1;">
             <div class="session-title">重构用户认证模块</div>
+            <div class="session-meta">
+              <span class="agent-pill claude"><span class="ap-dot"></span>Claude Code</span>
+              <span class="model-name">Sonnet 4.5</span>
+            </div>
             <div class="badges">
               <span class="chip chip-terminal">终端</span>
               <span class="chip chip-sub-agent">3 子智能体</span>
             </div>
-            <div class="timestamp">3 分钟前</div>
+            <div class="timestamp"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg>3 分钟前</div>
           </div>
         </div>
       </div>
@@ -180,10 +219,14 @@
           <span class="status-dot busy" style="margin-top:5px;"></span>
           <div style="flex:1;">
             <div class="session-title">修复 CI 构建错误</div>
+            <div class="session-meta">
+              <span class="agent-pill codex"><span class="ap-dot"></span>Codex</span>
+              <span class="model-name">GPT-5</span>
+            </div>
             <div class="badges">
               <span class="chip chip-terminal">终端</span>
             </div>
-            <div class="timestamp">8 分钟前</div>
+            <div class="timestamp"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg>8 分钟前</div>
           </div>
         </div>
       </div>
@@ -194,10 +237,14 @@
           <span class="status-dot completed" style="margin-top:5px;"></span>
           <div style="flex:1;">
             <div class="session-title mono">sess_a3f7b2c1</div>
+            <div class="session-meta">
+              <span class="agent-pill claude"><span class="ap-dot"></span>Claude Code</span>
+              <span class="model-name">Opus 4.8</span>
+            </div>
             <div class="badges">
               <span class="chip chip-web">Web</span>
             </div>
-            <div class="timestamp">1 小时前</div>
+            <div class="timestamp"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg>1 小时前</div>
           </div>
         </div>
       </div>
@@ -208,10 +255,14 @@
           <span class="status-dot error" style="margin-top:5px;"></span>
           <div style="flex:1;">
             <div class="session-title">部署生产环境</div>
+            <div class="session-meta">
+              <span class="agent-pill codex"><span class="ap-dot"></span>Codex</span>
+              <span class="model-name">GPT-5</span>
+            </div>
             <div class="badges">
               <span class="chip chip-terminal">终端</span>
             </div>
-            <div class="timestamp">2 小时前</div>
+            <div class="timestamp"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg>2 小时前</div>
           </div>
         </div>
       </div>
@@ -222,11 +273,15 @@
           <span class="status-dot idle" style="margin-top:5px;"></span>
           <div style="flex:1;">
             <div class="session-title">编写 API 文档</div>
+            <div class="session-meta">
+              <span class="agent-pill opencode"><span class="ap-dot"></span>OpenCode</span>
+              <span class="model-name">DeepSeek V3</span>
+            </div>
             <div class="badges">
               <span class="chip chip-web">Web</span>
               <span class="chip chip-sub-agent">1 子智能体</span>
             </div>
-            <div class="timestamp">3 小时前</div>
+            <div class="timestamp"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg>3 小时前</div>
           </div>
         </div>
       </div>
