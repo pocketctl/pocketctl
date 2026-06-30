@@ -199,3 +199,77 @@ export function daemonOfflinePush(hostname: string, daemonId: string): PushPaylo
     data: { type: 'daemon_offline', daemon_id: daemonId },
   };
 }
+
+/**
+ * Build push payload for a tool-use approval request.
+ * The agent is blocked waiting for a Yes/No; pushing to all of the owner's
+ * devices so the agent doesn't stall while the app is backgrounded/killed.
+ */
+export function approvalPush(
+  sessionTitle: string,
+  toolName: string,
+  summary: string,
+  sessionId: string,
+  requestId: string,
+): PushPayload {
+  const tool = toolName || '工具';
+  const body = summary ? `${tool} 想执行 ${summary}` : `${tool} 请求你的授权`;
+  return {
+    title: '需要你的审批',
+    body,
+    data: { type: 'approval', session_id: sessionId, request_id: requestId },
+  };
+}
+
+/**
+ * Build push payload for an interactive prompt (agent needs text input / a
+ * choice). Same attention-requiring class as approval.
+ */
+export function interactivePush(
+  sessionTitle: string,
+  prompt: string,
+  sessionId: string,
+  requestId: string,
+): PushPayload {
+  const body = truncate(prompt, 80) || '等待你的输入';
+  return {
+    title: 'Agent 需要你的输入',
+    body,
+    data: { type: 'interactive', session_id: sessionId, request_id: requestId },
+  };
+}
+
+/**
+ * Extract a human-readable summary from a tool's raw input payload.
+ * - Bash: the `command` field
+ * - Edit/Write/MultiEdit: the `file_path`
+ * - Others: a trimmed JSON snippet
+ * `input` may be an object, a JSON string, or undefined — parsed defensively.
+ */
+export function summarizeToolInput(tool: string, input: unknown): string {
+  let parsed: any = input;
+  if (typeof input === 'string') {
+    try { parsed = JSON.parse(input); } catch { return truncate(input, 80); }
+  }
+  if (!parsed || typeof parsed !== 'object') return '';
+
+  const lower = tool.toLowerCase();
+  if ((lower === 'bash' || lower === 'run') && typeof parsed.command === 'string') {
+    return truncate(parsed.command, 80);
+  }
+  if (typeof parsed.file_path === 'string') {
+    return truncate(parsed.file_path, 80);
+  }
+  if (typeof parsed.path === 'string') {
+    return truncate(parsed.path, 80);
+  }
+  // Fallback: compact JSON snippet
+  try { return truncate(JSON.stringify(parsed), 80); } catch { return ''; }
+}
+
+/** Truncate to `max` chars with an ellipsis, trimming whitespace. */
+function truncate(s: string, max: number): string {
+  const trimmed = s.trim().replace(/\s+/g, ' ');
+  if (trimmed.length <= max) return trimmed;
+  return trimmed.slice(0, max - 1) + '…';
+}

@@ -6,6 +6,11 @@ import UserNotifications
 @MainActor
 final class NotificationRouter {
     var navigateToSessionId: String?
+    /// 推送携带的通知类型(approval / interactive / session_status …),用于深链落地后
+    /// 做差异化处理(如审批类可优先滚动到审批卡)。P0 仅记录,落地行为后续打磨。
+    var pendingNotificationType: String?
+    /// 推送携带的 request_id(审批/交互),落地后可定位具体审批卡。
+    var pendingRequestId: String?
 }
 
 @MainActor
@@ -45,9 +50,17 @@ class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCenterDele
                                 didReceive response: UNNotificationResponse,
                                 withCompletionHandler completionHandler: @escaping () -> Void) {
         let userInfo = response.notification.request.content.userInfo
-        if let sessionId = userInfo["session_id"] as? String {
+        // Extract Sendable primitives before crossing into the @MainActor
+        // closure — Swift 6 strict concurrency disallows capturing the
+        // task-isolated `userInfo` dictionary across actors.
+        let sessionId = userInfo["session_id"] as? String
+        let type = userInfo["type"] as? String
+        let requestId = userInfo["request_id"] as? String
+        if let sessionId {
             Task { @MainActor in
                 notificationRouter.navigateToSessionId = sessionId
+                notificationRouter.pendingNotificationType = type
+                notificationRouter.pendingRequestId = requestId
             }
         }
         completionHandler()

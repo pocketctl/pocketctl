@@ -3,7 +3,7 @@
 	archiveVersion = 1;
 	classes = {
 	};
-	objectVersion = 63;
+	objectVersion = 77;
 	objects = {
 
 /* Begin PBXBuildFile section */
@@ -36,6 +36,7 @@
 		6B74AFB7C5CE46D15AF88EBA /* SwipeBackModifier.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0D26B48E43F3E46347A5BBC4 /* SwipeBackModifier.swift */; };
 		6E2D66D16D5DDB9D808CA17E /* EmptyStateView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 65C77E425E2ACCEC26A62734 /* EmptyStateView.swift */; };
 		6E4DAA67A2CCE66AFE5368BF /* StatusChip.swift in Sources */ = {isa = PBXBuildFile; fileRef = 802A171E89C20ADD85902665 /* StatusChip.swift */; };
+		740C075693CDB56539586253 /* NotificationCategory.swift in Sources */ = {isa = PBXBuildFile; fileRef = E3C8D887E3FA67EB5B0DE01F /* NotificationCategory.swift */; };
 		7BA9E23485EF8112D09DF615 /* ApprovalCard.swift in Sources */ = {isa = PBXBuildFile; fileRef = CED3732500679EA780EE5881 /* ApprovalCard.swift */; };
 		7CCBC9417382E86861C69C5D /* WebSocketService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3E0A5533960345923DFC95EE /* WebSocketService.swift */; };
 		8073E29EFE4EA0685BC27C7D /* Typography.swift in Sources */ = {isa = PBXBuildFile; fileRef = C8D64F4203196DA7D36D74DA /* Typography.swift */; };
@@ -123,8 +124,9 @@
 		CF6BD425D729C472BBA3BF52 /* Spacing.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Spacing.swift; sourceTree = "<group>"; };
 		D5D9B8851BD418575E3CB640 /* KeyboardWarmup.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KeyboardWarmup.swift; sourceTree = "<group>"; };
 		D62BB57F114B7CFD5A866F6F /* SettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsView.swift; sourceTree = "<group>"; };
-		D6CC3FD24696AA730AA7B4DA /* Pocketctl.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Pocketctl.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		D6CC3FD24696AA730AA7B4DA /* Pocketctl.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = Pocketctl.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		DA61A703EB52322DF5EAFC29 /* MarkdownContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MarkdownContentView.swift; sourceTree = "<group>"; };
+		E3C8D887E3FA67EB5B0DE01F /* NotificationCategory.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NotificationCategory.swift; sourceTree = "<group>"; };
 		E8515437773747D762731920 /* SplashView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SplashView.swift; sourceTree = "<group>"; };
 		EE9D163591786B65153DF7C4 /* SessionListView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionListView.swift; sourceTree = "<group>"; };
 		FD0A3F68E4190D3E2E807B21 /* CommandPopoverView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CommandPopoverView.swift; sourceTree = "<group>"; };
@@ -237,6 +239,7 @@
 				C6BA47705710BD73F235D5E2 /* CommandItem.swift */,
 				9FC559EB54B2A1371D77C9A3 /* Daemon.swift */,
 				A440C64CE0F35DBC364605B9 /* ModelOption.swift */,
+				E3C8D887E3FA67EB5B0DE01F /* NotificationCategory.swift */,
 				6FA80BF7E175F515AEB95DAD /* RelayEnvironment.swift */,
 				79D24DADEABC184440BA91AB /* Session.swift */,
 				B80EDC4AAE35AB265037E32D /* SubAgent.swift */,
@@ -308,6 +311,7 @@
 				LastUpgradeCheck = 2600;
 				TargetAttributes = {
 					373A6B2C13D61F51D165975C = {
+						DevelopmentTeam = 48V2SNGX85;
 						ProvisioningStyle = Automatic;
 					};
 				};
@@ -322,6 +326,7 @@
 			);
 			mainGroup = 197803B25D2EFE0957DFC391;
 			minimizedProjectReferenceProxies = 1;
+			preferredProjectObjectVersion = 77;
 			projectDirPath = "";
 			projectRoot = "";
 			targets = (
@@ -374,6 +379,7 @@
 				871FBC30CE04EAB4E10D124A /* MarkdownContentView.swift in Sources */,
 				15726995D9D40D896A6DC828 /* ModelOption.swift in Sources */,
 				FC24814A4FE1B83D14BD4F0B /* NewSessionSheet.swift in Sources */,
+				740C075693CDB56539586253 /* NotificationCategory.swift in Sources */,
 				281EBF100DA0A1133A8319B7 /* PocketctlApp.swift in Sources */,
 				690AB6AC11321B9CD54A7EC8 /* PushService.swift in Sources */,
 				F2EBB6AE6F89B58A3E2F7F90 /* QuestionCard.swift in Sources */,
@@ -547,7 +553,6 @@
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGN_IDENTITY = "iPhone Developer";
-				DEVELOPMENT_TEAM = 4M8BRH2MYC;
 				INFOPLIST_FILE = Pocketctl/Info.plist;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
@@ -564,7 +569,6 @@
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGN_IDENTITY = "iPhone Developer";
-				DEVELOPMENT_TEAM = 4M8BRH2MYC;
 				INFOPLIST_FILE = Pocketctl/Info.plist;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
