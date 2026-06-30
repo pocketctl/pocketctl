@@ -1,4 +1,7 @@
 import { describe, test, expect, vi, beforeEach } from 'vitest'
+// Short the offline grace window so debounce tests run fast. Read by the Router
+// constructor, so this must be set before any `new Router(...)`.
+process.env.DAEMON_OFFLINE_GRACE_MS = '20'
 import { Router } from '../router.js'
 
 // Mock pg.Pool
@@ -10,6 +13,11 @@ function createMockPool() {
       let result: any = { rows: [], rowCount: 0 }
       if (sql.includes('SELECT column_name')) {
         result = { rows: [{ column_name: 'last_activity_at' }, { column_name: 'exit_reason' }] }
+      } else if (sql.includes('SELECT 1 FROM sessions')) {
+        // isSessionOwnedByUser: ownership gate. The mock treats every session as
+        // owned by the requesting user (auth-specific behaviour is exercised by
+        // a dedicated pool override in the authorization tests below).
+        result = { rows: [{ '?column?': 1 }], rowCount: 1 }
       } else if (sql.includes('ALTER TABLE')) {
         result = { rows: [] }
       } else if (sql.includes('FROM sessions') && sql.includes('SELECT')) {
@@ -47,6 +55,10 @@ function createMockPool() {
   return mockPool as any
 }
 
+// Flush pending microtasks/timers so async persists (and the markPersisted that
+// follows them) settle before assertions on the ack water-mark.
+const tick = () => new Promise((r) => setTimeout(r, 20))
+
 // Mock WebSocket
 function createMockWs(): any {
   const sent: any[] = []
@@ -80,8 +92,9 @@ describe('Router - daemon disconnect', () => {
     router.registerClient(clientWs, null)
 
     router.unregisterDaemon('daemon-1')
-    // unregisterDaemon broadcasts inside db.getDaemonAlias().then() — wait for microtask
-    await new Promise(r => setTimeout(r, 10))
+    // Offline is now deferred behind the grace window (20ms), then broadcast
+    // inside db.getDaemonAlias().then() — wait past the window + microtask.
+    await new Promise(r => setTimeout(r, 80))
 
     const offlineEvent = clientWs._sent.find((m: any) => m.type === 'daemon_status' && m.status === 'offline')
     expect(offlineEvent).toBeDefined()
@@ -90,21 +103,23 @@ describe('Router - daemon disconnect', () => {
     expect(offlineEvent.last_seen_at).toBeDefined()
   })
 
-  test('unregisterDaemon broadcasts session_status: disconnected to subscribed clients', () => {
+  test('unregisterDaemon broadcasts session_status: disconnected to subscribed clients', async () => {
     const daemonWs = createMockWs()
-    router.registerDaemon(daemonWs, { type: 'register', daemon_id: 'daemon-1', hostname: 'test', agents: [] }, null)
+    await router.registerDaemon(daemonWs, { type: 'register', daemon_id: 'daemon-1', hostname: 'test', agents: [] }, null)
 
     const clientWs = createMockWs()
-    router.registerClient(clientWs, null)
+    router.registerClient(clientWs, 1)
 
     router.handleDaemonMessage('daemon-1', {
       type: 'session_discovered', session_id: 'sess-1', cwd: '/tmp', status: 'running', source: 'terminal',
     })
 
     clientWs._sent.length = 0
-    router.handleClientMessage(clientWs, { type: 'replay', session_id: 'sess-1', last_seq: 0 })
+    await router.handleClientMessage(clientWs, { type: 'replay', session_id: 'sess-1', last_seq: 0 })
 
     router.unregisterDaemon('daemon-1')
+    // Disconnected broadcast is deferred behind the grace window (20ms).
+    await new Promise(r => setTimeout(r, 80))
 
     const discEvent = clientWs._sent.find((m: any) => m.type === 'session_status' && m.status === 'disconnected')
     expect(discEvent).toBeDefined()
@@ -112,10 +127,11 @@ describe('Router - daemon disconnect', () => {
     expect(discEvent.daemon_id).toBe('daemon-1')
   })
 
-  test('unregisterDaemon does NOT persist disconnected to DB', () => {
+  test('unregisterDaemon does NOT persist disconnected to DB', async () => {
     const daemonWs = createMockWs()
-    router.registerDaemon(daemonWs, { type: 'register', daemon_id: 'daemon-1', hostname: 'test', agents: [] }, null)
+    await router.registerDaemon(daemonWs, { type: 'register', daemon_id: 'daemon-1', hostname: 'test', agents: [] }, null)
     router.unregisterDaemon('daemon-1')
+    await new Promise(r => setTimeout(r, 80))
 
     const disconnectUpdate = pool._queries.find((q: any) =>
       q.sql.includes('UPDATE sessions') && q.params.includes('disconnected')
@@ -146,7 +162,9 @@ describe('Router - daemon reconnect', () => {
     expect(onlineEvent).toBeDefined()
     expect(onlineEvent.hostname).toBe('mac-pro')
     expect(onlineEvent.daemon_id).toBe('daemon-2')
-    expect(onlineEvent.agents).toEqual(['claude-code', 'opencode'])
+    // registerDaemon composes agents as objects {type,version,latest,manageable}
+    // (the web client consumes this shape), not a bare string array.
+    expect(onlineEvent.agents.map((a: any) => a.type)).toEqual(['claude-code', 'opencode'])
   })
 })
 
@@ -277,7 +295,7 @@ describe('Router - session→daemon routing resilience', () => {
     await new Promise(r => setTimeout(r, 20))
 
     const clientWs = createMockWs()
-    router.registerClient(clientWs, null)
+    router.registerClient(clientWs, 1)
 
     // A session never seen in-memory this connection (sess-a) should now route
     // to the daemon without hitting the "session not found" error.
@@ -349,7 +367,7 @@ describe('Router - session→daemon routing resilience', () => {
     await new Promise(r => setTimeout(r, 20))
 
     const clientWs = createMockWs()
-    router.registerClient(clientWs, null)
+    router.registerClient(clientWs, 1)
 
     // 'test-sid' was NOT in active_session_ids, but the DB mock maps it to daemon-1.
     daemonWs._sent.length = 0
@@ -360,7 +378,7 @@ describe('Router - session→daemon routing resilience', () => {
 
   test('error for unroutable session includes session_id', async () => {
     const clientWs = createMockWs()
-    router.registerClient(clientWs, null)
+    router.registerClient(clientWs, 1)
 
     // Unknown session: DB returns no rows → falls through to the error.
     await router.handleClientMessage(clientWs, { type: 'session_interrupt', session_id: 'no-such-session' })
@@ -380,15 +398,377 @@ describe('Router - session→daemon routing resilience', () => {
     await new Promise(r => setTimeout(r, 20))
 
     router.unregisterDaemon('daemon-1')
-    await new Promise(r => setTimeout(r, 20))
+    // Routes are pruned when the offline transition finalizes (after grace).
+    await new Promise(r => setTimeout(r, 80))
 
     // After disconnect, sess-a is no longer in the routing map (pruned), so a
     // message to it does NOT get forwarded to the dead daemon socket.
     const clientWs = createMockWs()
-    router.registerClient(clientWs, null)
+    router.registerClient(clientWs, 1)
     daemonWs._sent.length = 0
     await router.handleClientMessage(clientWs, { type: 'session_interrupt', session_id: 'sess-a' })
 
     expect(daemonWs._sent.some((m: any) => m.type === 'session_interrupt')).toBe(false)
+  })
+})
+
+describe('Router - offline debounce', () => {
+  let pool: any
+  let router: Router
+
+  beforeEach(() => {
+    pool = createMockPool()
+    // Longer grace so a reconnect can race inside the window deterministically.
+    process.env.DAEMON_OFFLINE_GRACE_MS = '80'
+    router = new Router(pool)
+  })
+
+  test('reconnect within the grace window cancels the offline transition', async () => {
+    const clientWs = createMockWs()
+    router.registerClient(clientWs, 42)
+
+    const ws1 = createMockWs()
+    await router.registerDaemon(ws1, { type: 'register', daemon_id: 'daemon-1', hostname: 'host', agents: [] }, 42)
+
+    clientWs._sent.length = 0
+    pool._queries.length = 0
+
+    // Disconnect, then reconnect well within the 80ms window.
+    router.unregisterDaemon('daemon-1', ws1)
+    await new Promise(r => setTimeout(r, 20))
+    const ws2 = createMockWs()
+    await router.registerDaemon(ws2, { type: 'register', daemon_id: 'daemon-1', hostname: 'host', agents: [] }, 42)
+
+    // Wait past where the original timer would have fired.
+    await new Promise(r => setTimeout(r, 120))
+
+    const offline = clientWs._sent.find((m: any) => m.type === 'daemon_status' && m.status === 'offline')
+    expect(offline).toBeUndefined()
+    // No offline push lookup happened either.
+    const pushQuery = pool._queries.find((q: any) => q.sql.includes('FROM devices'))
+    expect(pushQuery).toBeUndefined()
+  })
+
+  test('past the grace window the daemon is declared offline and pushed', async () => {
+    const clientWs = createMockWs()
+    router.registerClient(clientWs, 42)
+
+    const ws1 = createMockWs()
+    await router.registerDaemon(ws1, { type: 'register', daemon_id: 'daemon-1', hostname: 'host', agents: [] }, 42)
+
+    clientWs._sent.length = 0
+    pool._queries.length = 0
+
+    router.unregisterDaemon('daemon-1', ws1)
+    await new Promise(r => setTimeout(r, 160))
+
+    const offline = clientWs._sent.find((m: any) => m.type === 'daemon_status' && m.status === 'offline')
+    expect(offline).toBeDefined()
+    const pushQuery = pool._queries.find((q: any) => q.sql.includes('FROM devices'))
+    expect(pushQuery).toBeDefined()
+  })
+
+  test('graceful shutdown suppresses the offline push (but still broadcasts)', async () => {
+    const clientWs = createMockWs()
+    router.registerClient(clientWs, 42)
+
+    const ws1 = createMockWs()
+    await router.registerDaemon(ws1, { type: 'register', daemon_id: 'daemon-1', hostname: 'host', agents: [] }, 42)
+
+    clientWs._sent.length = 0
+    pool._queries.length = 0
+
+    router.beginShutdown()
+    router.unregisterDaemon('daemon-1', ws1)
+    await new Promise(r => setTimeout(r, 160))
+
+    // No APNs push lookup while shutting down...
+    const pushQuery = pool._queries.find((q: any) => q.sql.includes('FROM devices'))
+    expect(pushQuery).toBeUndefined()
+  })
+
+  test('stale-socket close does not schedule an offline transition for the live connection', async () => {
+    const clientWs = createMockWs()
+    router.registerClient(clientWs, 42)
+
+    const ws1 = createMockWs()
+    await router.registerDaemon(ws1, { type: 'register', daemon_id: 'daemon-1', hostname: 'host', agents: [] }, 42)
+    // Reconnect on a new socket BEFORE the old one's close arrives.
+    const ws2 = createMockWs()
+    await router.registerDaemon(ws2, { type: 'register', daemon_id: 'daemon-1', hostname: 'host', agents: [] }, 42)
+
+    clientWs._sent.length = 0
+    // Late close from the superseded socket — must be ignored.
+    router.unregisterDaemon('daemon-1', ws1)
+    await new Promise(r => setTimeout(r, 160))
+
+    const offline = clientWs._sent.find((m: any) => m.type === 'daemon_status' && m.status === 'offline')
+    expect(offline).toBeUndefined()
+  })
+
+  test('broadcastRelayRestarting notifies connected daemons', async () => {
+    const ws1 = createMockWs()
+    await router.registerDaemon(ws1, { type: 'register', daemon_id: 'daemon-1', hostname: 'host', agents: [] }, 42)
+    ws1._sent.length = 0
+    router.broadcastRelayRestarting()
+    expect(ws1._sent.some((m: any) => m.type === 'relay_restarting')).toBe(true)
+  })
+})
+
+describe('Router - event delivery dedup + ack', () => {
+  let pool: any
+  let router: Router
+
+  beforeEach(() => {
+    pool = createMockPool()
+    router = new Router(pool)
+  })
+
+  test('register_ack advertises supports_event_ack', async () => {
+    const daemonWs = createMockWs()
+    await router.registerDaemon(daemonWs, { type: 'register', daemon_id: 'daemon-1', hostname: 'h', agents: [], started_at: 100 }, null)
+    const ack = daemonWs._sent.find((m: any) => m.type === 'register_ack')
+    expect(ack).toBeDefined()
+    expect(ack.supports_event_ack).toBe(true)
+  })
+
+  test('an already-persisted seq is dropped on replay; a new seq is forwarded', async () => {
+    const daemonWs = createMockWs()
+    await router.registerDaemon(daemonWs, { type: 'register', daemon_id: 'daemon-1', hostname: 'h', agents: [], started_at: 100 }, null)
+    const clientWs = createMockWs()
+    router.registerClient(clientWs, 1)
+    await router.handleClientMessage(clientWs, { type: 'replay', session_id: 'sess-1', last_seq: 0 }) // subscribe
+
+    clientWs._sent.length = 0
+    // First delivery (seq 1) forwards, then (once persisted) advances the mark.
+    router.handleDaemonMessage('daemon-1', { type: 'agent_text', session_id: 'sess-1', text: 'hi', seq: 1 })
+    await tick()
+    expect(clientWs._sent.filter((m: any) => m.type === 'agent_text').length).toBe(1)
+
+    // Replay of the same (now-persisted) seq is dropped — not re-forwarded.
+    router.handleDaemonMessage('daemon-1', { type: 'agent_text', session_id: 'sess-1', text: 'hi', seq: 1 })
+    await tick()
+    expect(clientWs._sent.filter((m: any) => m.type === 'agent_text').length).toBe(1)
+
+    // A higher seq is a new event and is forwarded.
+    router.handleDaemonMessage('daemon-1', { type: 'agent_text', session_id: 'sess-1', text: 'next', seq: 2 })
+    await tick()
+    expect(clientWs._sent.filter((m: any) => m.type === 'agent_text').length).toBe(2)
+  })
+
+  test('ping piggybacks event_ack with the highest CONTIGUOUS persisted seq', async () => {
+    const daemonWs = createMockWs()
+    await router.registerDaemon(daemonWs, { type: 'register', daemon_id: 'daemon-1', hostname: 'h', agents: [], started_at: 100 }, null)
+    router.handleDaemonMessage('daemon-1', { type: 'agent_text', session_id: 'sess-1', text: 'a', seq: 1 })
+    router.handleDaemonMessage('daemon-1', { type: 'agent_text', session_id: 'sess-1', text: 'b', seq: 2 })
+    router.handleDaemonMessage('daemon-1', { type: 'agent_text', session_id: 'sess-1', text: 'c', seq: 3 })
+    await tick() // let the three persists complete and advance persistedHigh
+
+    daemonWs._sent.length = 0
+    router.handleDaemonMessage('daemon-1', { type: 'ping' })
+    const ack = daemonWs._sent.find((m: any) => m.type === 'event_ack')
+    expect(ack).toBeDefined()
+    expect(ack.up_to_seq).toBe(3)
+  })
+
+  test('ack-after-persist: the mark does not advance until the DB write completes', async () => {
+    // Pool whose event INSERT stays pending until we release it, so the persist
+    // is in flight when we ping.
+    let releaseInsert: (() => void) | undefined
+    const pendingPool: any = {
+      query: vi.fn((sql: string) => {
+        if (sql.includes('INSERT INTO events')) {
+          return new Promise((res) => { releaseInsert = () => res({ rows: [{ id: 1 }] }) })
+        }
+        if (sql.includes('FROM daemons')) return Promise.resolve({ rows: [{ daemon_id: 'daemon-1', status: 'online' }] })
+        return Promise.resolve({ rows: [], rowCount: 0 })
+      }),
+      connect: vi.fn(), end: vi.fn(),
+    }
+    const r = new Router(pendingPool)
+    const daemonWs = createMockWs()
+    await r.registerDaemon(daemonWs, { type: 'register', daemon_id: 'daemon-1', hostname: 'h', agents: [], started_at: 100 }, null)
+
+    r.handleDaemonMessage('daemon-1', { type: 'agent_text', session_id: 'sess-1', text: 'x', seq: 1 })
+    // Persist still in flight → ack must NOT cover seq 1 yet.
+    daemonWs._sent.length = 0
+    r.handleDaemonMessage('daemon-1', { type: 'ping' })
+    expect(daemonWs._sent.find((m: any) => m.type === 'event_ack')).toBeUndefined()
+
+    // Release the DB write → the mark advances and the next ping acks it.
+    releaseInsert!()
+    await tick()
+    daemonWs._sent.length = 0
+    r.handleDaemonMessage('daemon-1', { type: 'ping' })
+    const ack = daemonWs._sent.find((m: any) => m.type === 'event_ack')
+    expect(ack).toBeDefined()
+    expect(ack.up_to_seq).toBe(1)
+  })
+
+  test('daemon restart (changed started_at) resets the seq cursor', async () => {
+    const ws1 = createMockWs()
+    await router.registerDaemon(ws1, { type: 'register', daemon_id: 'daemon-1', hostname: 'h', agents: [], started_at: 100 }, null)
+    const clientWs = createMockWs()
+    router.registerClient(clientWs, 1)
+    await router.handleClientMessage(clientWs, { type: 'replay', session_id: 'sess-1', last_seq: 0 })
+
+    router.handleDaemonMessage('daemon-1', { type: 'agent_text', session_id: 'sess-1', text: 'a', seq: 9 })
+
+    // Daemon process restarts: new started_at, seq counter back to 1.
+    const ws2 = createMockWs()
+    await router.registerDaemon(ws2, { type: 'register', daemon_id: 'daemon-1', hostname: 'h', agents: [], started_at: 200 }, null)
+
+    clientWs._sent.length = 0
+    // seq 1 from the new process must NOT be treated as a duplicate of the old 9.
+    router.handleDaemonMessage('daemon-1', { type: 'agent_text', session_id: 'sess-1', text: 'b', seq: 1 })
+    expect(clientWs._sent.filter((m: any) => m.type === 'agent_text').length).toBe(1)
+  })
+
+  test('register acked_seq seeds the mark so a replayed tail acks without a phantom gap', async () => {
+    const daemonWs = createMockWs()
+    // Daemon reconnected after the grace window (our entry was dropped) reporting
+    // it already had seq 50 acked, and replays only its unacked tail 51,52.
+    await router.registerDaemon(daemonWs, { type: 'register', daemon_id: 'daemon-1', hostname: 'h', agents: [], started_at: 100, acked_seq: 50 }, null)
+    router.handleDaemonMessage('daemon-1', { type: 'agent_text', session_id: 'sess-1', text: 'a', seq: 51 })
+    router.handleDaemonMessage('daemon-1', { type: 'agent_text', session_id: 'sess-1', text: 'b', seq: 52 })
+    await tick()
+
+    daemonWs._sent.length = 0
+    router.handleDaemonMessage('daemon-1', { type: 'ping' })
+    const ack = daemonWs._sent.find((m: any) => m.type === 'event_ack')
+    expect(ack).toBeDefined()
+    expect(ack.up_to_seq).toBe(52) // advanced from the seeded baseline 50, no 1..50 stall
+  })
+
+  test('a legacy daemon (no acked_seq) replaying a tail still acks via the first-seq floor', async () => {
+    const daemonWs = createMockWs()
+    await router.registerDaemon(daemonWs, { type: 'register', daemon_id: 'daemon-1', hostname: 'h', agents: [], started_at: 100 }, null) // no acked_seq
+    // Replays its unacked tail 71,72 — nothing below was resent.
+    router.handleDaemonMessage('daemon-1', { type: 'agent_text', session_id: 'sess-1', text: 'a', seq: 71 })
+    router.handleDaemonMessage('daemon-1', { type: 'agent_text', session_id: 'sess-1', text: 'b', seq: 72 })
+    await tick()
+
+    daemonWs._sent.length = 0
+    router.handleDaemonMessage('daemon-1', { type: 'ping' })
+    const ack = daemonWs._sent.find((m: any) => m.type === 'event_ack')
+    expect(ack).toBeDefined()
+    expect(ack.up_to_seq).toBe(72) // floored at 70 from the first seq, no 1..70 stall
+  })
+
+  test('legacy events without seq are always processed', async () => {
+    const daemonWs = createMockWs()
+    await router.registerDaemon(daemonWs, { type: 'register', daemon_id: 'daemon-1', hostname: 'h', agents: [], started_at: 100 }, null)
+    const clientWs = createMockWs()
+    router.registerClient(clientWs, 1)
+    await router.handleClientMessage(clientWs, { type: 'replay', session_id: 'sess-1', last_seq: 0 })
+
+    clientWs._sent.length = 0
+    router.handleDaemonMessage('daemon-1', { type: 'agent_text', session_id: 'sess-1', text: 'x' })
+    router.handleDaemonMessage('daemon-1', { type: 'agent_text', session_id: 'sess-1', text: 'y' })
+    expect(clientWs._sent.filter((m: any) => m.type === 'agent_text').length).toBe(2)
+  })
+})
+
+describe('Router - WS authorization gate (P0-1)', () => {
+  // Pool whose ownership check always denies (SELECT 1 FROM sessions → no row),
+  // simulating a session that belongs to a different user than the caller.
+  function denyingPool(): any {
+    return {
+      query: vi.fn((sql: string) => {
+        if (sql.includes('SELECT 1 FROM sessions')) return Promise.resolve({ rows: [], rowCount: 0 })
+        if (sql.includes('FROM sessions') && sql.includes('SELECT')) {
+          return Promise.resolve({ rows: [{ daemon_id: 'daemon-1' }] })
+        }
+        return Promise.resolve({ rows: [], rowCount: 0 })
+      }),
+      connect: vi.fn(), end: vi.fn(),
+    }
+  }
+
+  test('replay on a non-owned session is rejected and leaks no events', async () => {
+    const router = new Router(denyingPool())
+    const clientWs = createMockWs()
+    router.registerClient(clientWs, 2) // attacker
+
+    await router.handleClientMessage(clientWs, { type: 'replay', session_id: 'victim-sess', last_seq: 0 })
+
+    const err = clientWs._sent.find((m: any) => m.type === 'error')
+    expect(err).toBeDefined()
+    expect(err.error).toBe('session not found or not owned')
+    expect(clientWs._sent.some((m: any) => m.type === 'replay_batch')).toBe(false)
+  })
+
+  test('a control command on a non-owned session is not forwarded to the daemon', async () => {
+    const router = new Router(denyingPool())
+    const daemonWs = createMockWs()
+    await router.registerDaemon(daemonWs, { type: 'register', daemon_id: 'daemon-1', hostname: 'h', agents: [] }, 1)
+
+    const clientWs = createMockWs()
+    router.registerClient(clientWs, 2) // different user
+    daemonWs._sent.length = 0
+
+    await router.handleClientMessage(clientWs, { type: 'set_permission_mode', session_id: 'victim-sess', mode: 'bypassPermissions' })
+
+    expect(daemonWs._sent.some((m: any) => m.type === 'set_permission_mode')).toBe(false)
+    expect(clientWs._sent.some((m: any) => m.error === 'session not found or not owned')).toBe(true)
+  })
+
+  test('a rejected non-owned session does not subscribe the attacker to its event stream', async () => {
+    const router = new Router(denyingPool())
+    const daemonWs = createMockWs()
+    await router.registerDaemon(daemonWs, { type: 'register', daemon_id: 'daemon-1', hostname: 'h', agents: [] }, 1)
+
+    const attackerWs = createMockWs()
+    router.registerClient(attackerWs, 2)
+    await router.handleClientMessage(attackerWs, { type: 'replay', session_id: 'victim-sess', last_seq: 0 })
+
+    attackerWs._sent.length = 0
+    // A live event for the victim's session must not reach the attacker.
+    router.handleDaemonMessage('daemon-1', { type: 'agent_text', session_id: 'victim-sess', text: 'secret' })
+    expect(attackerWs._sent.some((m: any) => m.type === 'agent_text')).toBe(false)
+  })
+
+  test('anonymous (userId=null) connection may not act on a specific session', async () => {
+    const router = new Router(denyingPool())
+    const clientWs = createMockWs()
+    router.registerClient(clientWs, null)
+
+    await router.handleClientMessage(clientWs, { type: 'replay', session_id: 'any-sess', last_seq: 0 })
+
+    const err = clientWs._sent.find((m: any) => m.type === 'error')
+    expect(err).toBeDefined()
+    expect(err.error).toBe('forbidden')
+  })
+})
+
+describe('Router - force kick revokes the daemon-specific token (P0-2)', () => {
+  test('handleForceKick revokes daemons.active_token_jti, not an empty jti', async () => {
+    const revokeInserts: any[][] = []
+    const pool: any = {
+      query: vi.fn((sql: string, params?: any[]) => {
+        if (sql.includes('SELECT active_token_jti')) {
+          return Promise.resolve({ rows: [{ active_token_jti: 'jti-abc' }], rowCount: 1 })
+        }
+        if (sql.includes('INSERT INTO revoked_tokens')) {
+          revokeInserts.push(params || [])
+          return Promise.resolve({ rows: [], rowCount: 1 })
+        }
+        return Promise.resolve({ rows: [], rowCount: 0 })
+      }),
+      connect: vi.fn(), end: vi.fn(),
+    }
+    const router = new Router(pool)
+    const daemonWs = createMockWs()
+    await router.registerDaemon(daemonWs, { type: 'register', daemon_id: 'daemon-1', hostname: 'h', agents: [] }, 7)
+
+    const res = await router.handleForceKick('daemon-1', 7)
+    expect(res.success).toBe(true)
+
+    // The revocation row must carry the daemon's real jti — the old code inserted
+    // an empty jti that isTokenRevoked (WHERE jti=$1) could never match.
+    expect(revokeInserts.length).toBe(1)
+    expect(revokeInserts[0][0]).toBe('jti-abc')      // jti
+    expect(revokeInserts[0][1]).toBe(7)              // userId
+    expect(revokeInserts[0][2]).toBe('force_kick')   // reason
   })
 })
