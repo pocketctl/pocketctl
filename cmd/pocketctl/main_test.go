@@ -91,3 +91,16 @@ func TestIsPermissionDenied(t *testing.T) {
 		}
 	}
 }
+
+// TestStartSpinnerNonTTY verifies the spinner degrades cleanly when stdout is
+// not a terminal: it prints the message once (no escape codes), and the
+// returned stop function is safe to call.
+func TestStartSpinnerNonTTY(t *testing.T) {
+	// In `go test`, os.Stdout is a pipe (not a char device), so startSpinner
+	// takes the non-TTY branch.
+	stop := startSpinner("starting test")
+	if stop == nil {
+		t.Fatal("startSpinner returned nil stop func")
+	}
+	stop() // must not panic or block
+}

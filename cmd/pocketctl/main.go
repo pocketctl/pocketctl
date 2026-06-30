@@ -558,6 +558,43 @@ func loginViaEmail(apiURL string) (string, string, error) {
 
 // ---------- daemon start (continued) ----------
 
+// startSpinner renders an animated braille spinner with the given message to
+// stdout and returns a stop function that halts the animation and clears the
+// line. On a non-interactive stdout (piped / redirected) it prints the message
+// once and animates nothing, so captured output stays free of escape codes.
+func startSpinner(msg string) (stop func()) {
+	isTTY := false
+	if fi, err := os.Stdout.Stat(); err == nil && fi.Mode()&os.ModeCharDevice != 0 {
+		isTTY = true
+	}
+	if !isTTY {
+		fmt.Println(msg)
+		return func() {}
+	}
+
+	done := make(chan struct{})
+	finished := make(chan struct{})
+	go func() {
+		defer close(finished)
+		frames := []rune{'⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'}
+		ticker := time.NewTicker(90 * time.Millisecond)
+		defer ticker.Stop()
+		for i := 0; ; i++ {
+			select {
+			case <-done:
+				return
+			case <-ticker.C:
+				fmt.Printf("\r\033[36m%c\033[0m %s", frames[i%len(frames)], msg)
+			}
+		}
+	}()
+	return func() {
+		close(done)
+		<-finished
+		fmt.Print("\r\033[K") // carriage return + erase to end of line
+	}
+}
+
 func cmdDaemonStart(args []string) {
 	fs := flag.NewFlagSet("daemon start", flag.ExitOnError)
 	relayURL := fs.String("relay", "", "Relay WebSocket URL (or POCKETCTL_RELAY_URL env)")
@@ -656,10 +693,41 @@ func cmdDaemonStart(args []string) {
 			fmt.Fprintln(os.Stderr, i18n.T("error.daemonize", err))
 			os.Exit(1)
 		}
-		// Print startup banner from the launcher so the user sees it immediately.
-		// The child's stdout is nil (detached), so only the launcher can write here.
+
+		// Show a startup animation while the detached child boots. The child
+		// writes its PID file early and flips state.Connected=true once the relay
+		// handshake succeeds, so poll both: the spinner stops the moment the relay
+		// is connected, and the banner reflects real status instead of an
+		// optimistic "started" printed before anything actually came up.
+		stop := startSpinner(i18n.T("daemon.starting"))
+		var running, connected bool
+		deadline := time.Now().Add(12 * time.Second)
+		for time.Now().Before(deadline) {
+			time.Sleep(200 * time.Millisecond)
+			if _, ok := daemon.IsRunning(); !ok {
+				continue
+			}
+			running = true
+			if st, err := daemon.ReadState(); err == nil && st.Connected {
+				connected = true
+				break
+			}
+		}
+		stop()
+
+		// Print the startup banner from the launcher (the child's stdout is nil /
+		// detached, so only the launcher can write to the user's terminal).
+		if !running {
+			fmt.Println(i18n.T("daemon.start_failed", daemon.LogPath()))
+			os.Exit(1)
+		}
 		fmt.Println(i18n.T("daemon.started", preForkID, child.Process.Pid))
-		fmt.Println(i18n.T("daemon.relay", url))
+		fmt.Println(i18n.T("daemon.version", version))
+		if connected {
+			fmt.Println(i18n.T("daemon.relay_connected", url))
+		} else {
+			fmt.Println(i18n.T("daemon.relay_connecting", url))
+		}
 		fmt.Println(i18n.T("daemon.logs", daemon.LogPath()))
 		os.Exit(0)
 	}
