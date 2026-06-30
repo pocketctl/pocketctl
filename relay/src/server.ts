@@ -1111,6 +1111,7 @@ async function main() {
     router.beginShutdown();
     router.broadcastRelayRestarting();
     try { await app.close(); } catch (e) { console.error('[shutdown] close error:', e); }
+    router.stop();
     process.exit(0);
   };
   process.on('SIGTERM', () => { shutdown('SIGTERM'); });
