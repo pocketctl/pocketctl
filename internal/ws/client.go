@@ -13,6 +13,7 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -36,6 +37,13 @@ const (
 	writeWait = 10 * time.Second
 	// maxBackoff caps the reconnect backoff delay.
 	maxBackoff = 30 * time.Second
+	// authRejectStopThreshold is how many CONSECUTIVE auth rejections (relay close
+	// 4001 — invalid/revoked token) the daemon tolerates before it stops
+	// reconnecting and parks until shutdown. Retrying a revoked token is futile;
+	// once stopped, the user must re-login (`pocketctl login`) and restart the
+	// daemon. >1 so a transient 4001 during a relay deploy doesn't permanently
+	// park every daemon — a healthy register_ack resets the counter.
+	authRejectStopThreshold = 3
 	// defaultMaxOutCount / defaultMaxOutBytes bound the unacked outbound buffer.
 	// At the cap the producer blocks (back-pressure) rather than dropping events.
 	defaultMaxOutCount = 10000
@@ -89,11 +97,21 @@ type Client struct {
 	OnReconnected      func()  // called after successful (re)connection + register
 	OnEvent            OnEvent // optional hook: inspect/derive events before forwarding to relay
 
-	// reconnectAttempt counts consecutive failed/lost connections; it drives the
-	// exponential backoff and is reset to 0 on every successful connect. Only
-	// touched from the single Run goroutine (and the connect it calls), so it
-	// needs no lock.
-	reconnectAttempt int
+	// reconnectAttempt counts consecutive connections that never reached a
+	// successful registration; it drives the exponential backoff and is reset to
+	// 0 only once the relay confirms us with register_ack (NOT merely on a
+	// successful WS dial — the relay accepts the upgrade and only then closes with
+	// 4001 on a bad/revoked token, so a dial-time reset would let an invalid-token
+	// daemon hammer the relay at the minimum interval forever). Written from the
+	// readPump goroutine (onRegisterAck) and the Run goroutine (backoffSleep), so
+	// it is atomic.
+	reconnectAttempt atomic.Int64
+
+	// authRejectCount counts CONSECUTIVE relay auth rejections (close 4001). It is
+	// incremented in readPump on a 4001 close, reset to 0 in onRegisterAck (a
+	// healthy connection), and read in Run to decide when to stop reconnecting
+	// (authRejectStopThreshold). Atomic for the same cross-goroutine reason.
+	authRejectCount atomic.Int64
 
 	// Connection liveness/timeouts. Default to the package consts; overridable
 	// (e.g. shortened by tests) without touching the timing logic.
@@ -259,6 +277,18 @@ func (c *Client) Run(ctx context.Context) error {
 			return ctx.Err()
 		}
 		c.notifyState(false)
+		// Stop reconnecting once the relay has rejected our token
+		// authRejectStopThreshold times in a row — retrying a revoked/invalid
+		// token only spams the relay. Park until shutdown (returning here would let
+		// the RunLoop supervisor restart us and resume the loop); the user must
+		// re-login and restart the daemon. A healthy register_ack would have reset
+		// the counter, so this only trips on a genuinely bad token.
+		if c.authRejectCount.Load() >= authRejectStopThreshold {
+			c.logger.Error("relay auth rejected repeatedly; pausing reconnect until you run `pocketctl login` and restart the daemon",
+				"consecutive", c.authRejectCount.Load())
+			<-ctx.Done()
+			return ctx.Err()
+		}
 		c.logger.Error("connection lost, reconnecting", "error", err)
 		if !c.backoffSleep(ctx) {
 			return ctx.Err()
@@ -303,9 +333,10 @@ func (c *Client) connectAndServe(ctx context.Context) error {
 	c.ackSupported = false
 	c.outMu.Unlock()
 
-	// Connection established — reset backoff so the next disconnect starts from
-	// the shortest delay again.
-	c.reconnectAttempt = 0
+	// NOTE: do NOT reset reconnectAttempt here. A successful dial only means the
+	// relay accepted the WS upgrade — it may still close us with 4001 if the token
+	// is invalid/revoked (relay validates after upgrade). The backoff is reset in
+	// onRegisterAck, once the relay has actually confirmed our registration.
 
 	c.notifyState(true)
 
@@ -386,6 +417,14 @@ func (c *Client) readPump(done chan struct{}) {
 	for {
 		_, msg, err := conn.ReadMessage()
 		if err != nil {
+			// 4001 = relay rejected us on auth (invalid/revoked token or missing
+			// auth). Retrying won't help until the token is fixed: count it so Run
+			// can stop reconnecting after authRejectStopThreshold, and surface an
+			// actionable message instead of the generic "connection lost".
+			if ce, ok := err.(*websocket.CloseError); ok && ce.Code == 4001 {
+				n := c.authRejectCount.Add(1)
+				c.logger.Error("relay rejected the connection: token invalid or revoked — run `pocketctl login` to re-authenticate", "reason", ce.Text, "consecutive", n)
+			}
 			return
 		}
 		// Any inbound message proves the link is alive — extend the deadline.
@@ -621,6 +660,14 @@ func (c *Client) trimOutbound(uptoSeq int64) {
 // (no support) gets best-effort delivery: the current buffer is trimmed and
 // subsequent events are trimmed on successful write.
 func (c *Client) onRegisterAck(supports bool) {
+	// The relay confirmed our registration — this connection is genuinely usable
+	// (token valid, routes rebuilt), so reset the backoff. Until this point the
+	// connection could still be torn down with 4001 on a bad token, which must
+	// keep the backoff growing.
+	c.reconnectAttempt.Store(0)
+	// A confirmed registration means the token is good — clear any prior auth
+	// rejections so a later transient 4001 starts counting from scratch.
+	c.authRejectCount.Store(0)
 	c.outMu.Lock()
 	c.ackSupported = supports
 	c.ackKnown = true
@@ -636,15 +683,16 @@ func (c *Client) onRegisterAck(supports bool) {
 // backoffSleep waits before the next reconnect attempt. It returns true when
 // the wait elapsed (proceed to reconnect) or false if ctx was cancelled (stop).
 //
-// The delay grows exponentially with the number of consecutive failures
-// (reconnectAttempt, reset to 0 on every successful connect): 1s, 2s, 4s, 8s,
-// 16s, capped at maxBackoff. Full jitter (a random value in [delay/2, delay])
-// spreads out reconnects so a fleet of daemons doesn't stampede the relay in
-// lockstep after it restarts. The loop never gives up — a daemon must keep
-// retrying indefinitely until the relay comes back.
+// The delay grows exponentially with the number of consecutive connections that
+// never reached register_ack (reconnectAttempt, reset to 0 in onRegisterAck):
+// 1s, 2s, 4s, 8s, 16s, capped at maxBackoff. Full jitter (a random value in
+// [delay/2, delay]) spreads out reconnects so a fleet of daemons doesn't stampede
+// the relay in lockstep after it restarts. The loop never gives up — a daemon
+// must keep retrying indefinitely until the relay comes back (or the token is
+// fixed via re-login).
 func (c *Client) backoffSleep(ctx context.Context) bool {
-	delay := backoffDelay(c.reconnectAttempt)
-	c.reconnectAttempt++
+	delay := backoffDelay(int(c.reconnectAttempt.Load()))
+	c.reconnectAttempt.Add(1)
 	select {
 	case <-time.After(delay):
 		return true

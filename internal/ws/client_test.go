@@ -120,6 +120,43 @@ func TestReconnectsOnServerClose(t *testing.T) {
 	waitForConns(t, &conns, 2, 3*time.Second)
 }
 
+// TestStopsReconnectingAfterRepeatedAuthRejection verifies the daemon stops
+// dialing after authRejectStopThreshold consecutive 4001 closes (invalid/revoked
+// token), instead of hammering the relay forever. Mirrors the relay's real
+// behavior: accept the WS upgrade, then close with 4001.
+func TestStopsReconnectingAfterRepeatedAuthRejection(t *testing.T) {
+	var conns int32
+	upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
+	mux := http.NewServeMux()
+	mux.HandleFunc("/ws", func(w http.ResponseWriter, r *http.Request) {
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		atomic.AddInt32(&conns, 1)
+		_ = conn.WriteControl(websocket.CloseMessage,
+			websocket.FormatCloseMessage(4001, "invalid token"), time.Now().Add(time.Second))
+		conn.Close()
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	c := newTestClient(wsURL(srv.URL))
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go c.Run(ctx)
+
+	// Climbs to exactly the threshold, then must park (no further dials). Wait
+	// longer than the next backoff (backoffDelay(2) ≤ 4s) would have taken, then
+	// assert the connection count didn't grow past the threshold.
+	waitForConns(t, &conns, authRejectStopThreshold, 10*time.Second)
+	time.Sleep(4500 * time.Millisecond)
+	if got := atomic.LoadInt32(&conns); got != int32(authRejectStopThreshold) {
+		t.Fatalf("expected daemon to stop dialing at %d connections, got %d (still reconnecting?)",
+			authRejectStopThreshold, got)
+	}
+}
+
 func waitForConns(t *testing.T, conns *int32, want int32, timeout time.Duration) {
 	t.Helper()
 	deadline := time.Now().Add(timeout)
@@ -200,6 +237,30 @@ func TestOnRegisterAckSupportedKeepsBuffer(t *testing.T) {
 	}
 	if !c.ackSupported {
 		t.Fatal("ackSupported should be true")
+	}
+}
+
+// TestBackoffResetsOnlyOnRegisterAck verifies the reconnect backoff counter
+// advances across connects that never register and is cleared ONLY by
+// register_ack — not by a bare WS dial. This is what throttles an
+// invalid/revoked-token daemon: the relay accepts the upgrade then closes 4001
+// before any register_ack, so without this the counter would reset every dial
+// and the daemon would hammer the relay at the minimum interval forever.
+func TestBackoffResetsOnlyOnRegisterAck(t *testing.T) {
+	c := newTestClient("ws://example")
+	cancelled, cancel := context.WithCancel(context.Background())
+	cancel() // backoffSleep increments then returns immediately on a done ctx
+
+	for i := 0; i < 4; i++ {
+		c.backoffSleep(cancelled)
+	}
+	if got := c.reconnectAttempt.Load(); got != 4 {
+		t.Fatalf("reconnectAttempt = %d, want 4 (no register_ack → backoff keeps growing)", got)
+	}
+
+	c.onRegisterAck(true)
+	if got := c.reconnectAttempt.Load(); got != 0 {
+		t.Fatalf("reconnectAttempt = %d after register_ack, want 0 (reset on confirmed registration)", got)
 	}
 }
 
