@@ -107,21 +107,22 @@ func RunHook(logger *slog.Logger) error {
 		return nil
 	}
 
+	// User-launched terminal sessions defer to Claude's OWN native permission
+	// prompt. The hook runs WITHOUT a controlling terminal — Claude detaches hook
+	// stdio from /dev/tty (open /dev/tty → ENXIO "device not configured") — so it
+	// cannot draw or read a prompt itself, and the daemon cannot inject into an
+	// external `claude`'s stdin. Returning "ask" hands the decision back to
+	// Claude's in-terminal y/n prompt. Bypass terminal sessions fall through to
+	// the socket so the Scheme C file-lock check + no-card short-circuit still
+	// apply; daemon-spawned sessions keep brokering to the web/iOS app.
+	if isTerminalSession() && effectivePermMode != "bypassPermissions" {
+		writeAsk("请在终端确认该工具调用")
+		return nil
+	}
+
 	// Ask the server. It performs the Scheme C file-lock check and, depending on
 	// perm mode, either short-circuits (bypass) or brokers client approval.
-	//
-	// For a `claude` the user launched in their OWN terminal (no daemon env), we
-	// race the remote App decision against a local [y/n] keypress on /dev/tty so
-	// whoever answers first wins — otherwise a terminal-only user would never see
-	// that a tool is waiting. Daemon-spawned sessions (no human at the PTY) and
-	// bypass sessions keep the plain remote-only path.
-	var resp hookResponse
-	var err error
-	if isTerminalSession() && effectivePermMode != "bypassPermissions" {
-		resp, err = raceApproval(sockPath, sessionID, payload.ToolName, payload.ToolInput, payload.Cwd, effectivePermMode)
-	} else {
-		resp, err = askSocket(sockPath, sessionID, payload.ToolName, payload.ToolInput, payload.Cwd, effectivePermMode)
-	}
+	resp, err := askSocket(sockPath, sessionID, payload.ToolName, payload.ToolInput, payload.Cwd, effectivePermMode)
 	if err != nil {
 		// Daemon unreachable (not running, socket gone, etc.). Fall back to
 		// Claude's native permission UI so the terminal stays usable without the
@@ -195,105 +196,20 @@ func isTerminalSession() bool {
 	return os.Getenv("POCKETCTL_SESSION_ID") == ""
 }
 
-// raceApproval brokers a terminal session's approval by racing two answer
-// channels against each other:
-//   - the remote App (via the approval socket, exactly like askSocket); and
-//   - a local [y/n] keypress the user types into /dev/tty.
-//
-// Whichever lands first wins. On a local answer we tell the server (so it
-// dismisses the App card) and return the decision to claude. If /dev/tty can't
-// be opened (no controlling terminal) we degrade to the plain remote-only path.
-//
-// Note we deliberately do NOT touch the tty's termios: claude's TUI already
-// holds it in raw mode, so single keypresses arrive unbuffered; reshaping and
-// restoring termios here would race claude's own rendering.
-func raceApproval(sockPath, sessionID, tool string, input json.RawMessage, cwd, permMode string) (hookResponse, error) {
-	tty, err := os.OpenFile("/dev/tty", os.O_RDWR, 0)
-	if err != nil {
-		// No controlling terminal to prompt on — nothing to race.
-		return askSocket(sockPath, sessionID, tool, input, cwd, permMode)
+// writeAsk prints a PreToolUse hook output that hands the decision back to
+// Claude's OWN native in-terminal permission prompt (its y/n confirmation).
+// Used for user-launched terminal sessions, where the hook has no controlling
+// terminal to prompt on itself and the daemon can't inject into Claude's stdin.
+func writeAsk(reason string) {
+	out := map[string]any{
+		"hookSpecificOutput": map[string]any{
+			"hookEventName":            "PreToolUse",
+			"permissionDecision":       "ask",
+			"permissionDecisionReason": reason,
+		},
 	}
-	defer tty.Close()
-
-	conn, err := net.DialTimeout("unix", sockPath, 5*time.Second)
-	if err != nil {
-		return hookResponse{}, fmt.Errorf("dial: %w", err)
-	}
-	defer conn.Close()
-
-	req := hookRequest{SessionID: sessionID, Tool: tool, Input: input, Cwd: cwd, PermMode: permMode}
-	body, err := json.Marshal(req)
-	if err != nil {
-		return hookResponse{}, fmt.Errorf("marshal: %w", err)
-	}
-	body = append(body, '\n')
-	_ = conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
-	if _, err := conn.Write(body); err != nil {
-		return hookResponse{}, fmt.Errorf("write: %w", err)
-	}
-	_ = conn.SetWriteDeadline(time.Time{})
-
-	// Prompt on its own line; claude redraws over it once the hook returns.
-	fmt.Fprintf(tty, "\r\n\x1b[33m⏳ pocketctl\x1b[0m %s 需要审批  \x1b[1m[y]\x1b[0m 同意  \x1b[1m[n]\x1b[0m 拒绝  （或在 App 内处理） ", tool)
-
-	type outcome struct {
-		resp  hookResponse
-		local bool
-		allow bool
-	}
-	ch := make(chan outcome, 2)
-
-	// Remote decision: the App answered via approval_response → server writes
-	// the decision line back on the socket.
-	go func() {
-		_ = conn.SetReadDeadline(time.Now().Add(approvalTimeout + time.Minute))
-		line, rerr := bufio.NewReader(conn).ReadBytes('\n')
-		if rerr != nil {
-			return // conn closed by us after a local win — nothing to deliver
-		}
-		var r hookResponse
-		if json.Unmarshal(line, &r) != nil {
-			return
-		}
-		ch <- outcome{resp: r, local: false}
-	}()
-
-	// Local decision: a [y/n] keypress on the controlling terminal.
-	go func() {
-		buf := make([]byte, 1)
-		for {
-			n, rerr := tty.Read(buf)
-			if rerr != nil || n == 0 {
-				return
-			}
-			switch buf[0] {
-			case 'y', 'Y':
-				ch <- outcome{local: true, allow: true}
-				return
-			case 'n', 'N':
-				ch <- outcome{local: true, allow: false}
-				return
-			}
-		}
-	}()
-
-	out := <-ch
-	if !out.local {
-		fmt.Fprint(tty, "\x1b[2m已在 App 内处理\x1b[0m\r\n")
-		return out.resp, nil
-	}
-
-	// Local win: tell the server so it dismisses the App card and clears the
-	// session's waiting_approval state, then return the decision to claude.
-	notify, _ := json.Marshal(map[string]any{"resolved": true, "allow": out.allow})
-	_ = conn.SetWriteDeadline(time.Now().Add(2 * time.Second))
-	_, _ = conn.Write(append(notify, '\n'))
-	if out.allow {
-		fmt.Fprint(tty, "\x1b[32m✓ 已在终端同意\x1b[0m\r\n")
-		return hookResponse{Allow: true, Reason: "approved in terminal"}, nil
-	}
-	fmt.Fprint(tty, "\x1b[31m✗ 已在终端拒绝\x1b[0m\r\n")
-	return hookResponse{Allow: false, Reason: "denied in terminal"}, nil
+	b, _ := json.Marshal(out)
+	fmt.Println(string(b))
 }
 
 // writeDecision prints Claude's PreToolUse hook output JSON to stdout. Claude
