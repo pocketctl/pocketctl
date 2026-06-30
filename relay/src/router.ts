@@ -160,9 +160,22 @@ export class Router {
       // user. When daemon_id changes between runs (machine.id lost/re-derived),
       // the old entry stays 'offline' in the DB indefinitely. Deleting it here
       // on re-registration prevents the web client from showing duplicate entries.
+      // Reassign any sessions still owned by those stale daemons to the current
+      // daemon_id first — they belong to the same physical machine (hostname
+      // matches), and without this the sessions_daemon_id_fkey constraint blocks
+      // the delete.
       this.pool.query(
-        `DELETE FROM daemons WHERE user_id = $1 AND hostname = $2 AND daemon_id != $3 AND status = 'offline'`,
+        `UPDATE sessions SET daemon_id = $3
+         WHERE daemon_id IN (
+           SELECT daemon_id FROM daemons
+           WHERE user_id = $1 AND hostname = $2 AND daemon_id != $3 AND status = 'offline'
+         )`,
         [userId, hostname, daemonId]
+      ).then(() =>
+        this.pool.query(
+          `DELETE FROM daemons WHERE user_id = $1 AND hostname = $2 AND daemon_id != $3 AND status = 'offline'`,
+          [userId, hostname, daemonId]
+        )
       ).catch((e: any) => console.error('cleanup stale daemons:', e));
     }
     db.cleanStaleSessions(this.pool).catch(console.error);

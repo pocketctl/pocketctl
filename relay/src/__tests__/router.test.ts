@@ -195,6 +195,12 @@ describe('Router - session_status with exit_reason', () => {
       q.sql.includes('INSERT INTO sessions') && q.params.includes('sess-exit')
     )
     expect(insertCall).toBeUndefined()
+    // Regression guard: user_id must use an explicit cast (COALESCE($5::int)),
+    // NOT `CASE WHEN $5 IS NOT NULL` — that pattern left $5's type un-inferrable
+    // for Postgres ("could not determine data type of parameter $5") whenever a
+    // session_status arrived without a userId, silently dropping the status update.
+    expect(updateCall!.sql).not.toMatch(/CASE\s+WHEN\s+\$5/i)
+    expect(updateCall!.sql).toMatch(/COALESCE\(\$5::int/i)
   })
 
   test('session_status without exit_reason does not null existing reason (COALESCE)', () => {
