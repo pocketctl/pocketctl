@@ -55,6 +55,7 @@ type DaemonEvent struct {
 	Turns            int             `json:"turns,omitempty"`
 	RiskLevel        string          `json:"risk_level,omitempty"`
 	RequestID        string          `json:"request_id,omitempty"`
+	Approved         bool            `json:"approved,omitempty"` // for approval_resolved: how it was answered (terminal-side)
 	Title            string          `json:"title,omitempty"`
 	Cwd              string          `json:"cwd,omitempty"`
 	Source           string          `json:"source,omitempty"`

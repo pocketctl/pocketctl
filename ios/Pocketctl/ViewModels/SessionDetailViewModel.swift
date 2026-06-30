@@ -577,6 +577,9 @@ final class SessionDetailViewModel {
         case .approvalRequest:
             handleApprovalRequest(event)
 
+        case .approvalResolved:
+            resolveApprovalCard(requestId: event.requestId, approved: event.approved, messages: &messages)
+
         case .interactivePrompt:
             handleInteractivePrompt(event)
 
@@ -634,6 +637,9 @@ final class SessionDetailViewModel {
 
         case .approvalRequest:
             handleApprovalRequestDirect(event, messages: &messages)
+
+        case .approvalResolved:
+            resolveApprovalCard(requestId: event.requestId, approved: event.approved, messages: &messages)
 
         case .interactivePrompt:
             handleInteractivePromptDirect(event, messages: &messages)
@@ -1002,6 +1008,20 @@ final class SessionDetailViewModel {
             command: event.command ?? "",
             receiptStatus: event.receiptStatus ?? "success"
         ))
+    }
+
+    /// Pending approval was answered ELSEWHERE — the user typed [y/n] in the
+    /// terminal that owns this session. Flip the matching card out of "pending"
+    /// so its Yes/No buttons disappear and it shows the terminal-side result,
+    /// instead of lingering as a stale, re-answerable prompt on this device.
+    /// Shared by live and batch dispatch (operates on the supplied buffer).
+    private func resolveApprovalCard(requestId: String?, approved: Bool, messages: inout [ChatMessage]) {
+        guard let requestId else { return }
+        if let idx = messages.lastIndex(where: {
+            $0.type == .approvalRequest && $0.requestId == requestId && $0.approvalStatus == "pending"
+        }) {
+            messages[idx].approvalStatus = approved ? "allowed" : "denied"
+        }
     }
 
     private func handleApprovalRequestDirect(_ event: WebSocketEvent, messages: inout [ChatMessage]) {
