@@ -474,6 +474,15 @@ struct SessionDetailView: View {
             }
 
             Spacer()
+
+            // Context 使用量（输入侧总 token），右对齐，与计时同一行。
+            // 运行中显示「上一轮」的 context 用量作为参考。
+            if let ctx = viewModel?.contextUsageTokens {
+                Text("ctx \(viewModel?.fmtTokens(ctx) ?? "")")
+                    .font(PCFont.mono(12))
+                    .foregroundStyle(Color.pcFgTertiary)
+                    .monospacedDigit()
+            }
         }
         .padding(.horizontal, PCSpacing.lg)
         .padding(.vertical, PCSpacing.sm)
@@ -493,7 +502,7 @@ struct SessionDetailView: View {
     /// count, and icon-only copy / retry buttons.
     @ViewBuilder
     private func completedStatusBar(vm: SessionDetailViewModel) -> some View {
-        HStack(spacing: 6) {
+        HStack(spacing: 4) {
             Image(systemName: "checkmark")
                 .font(.system(size: 10, weight: .bold))
                 .foregroundStyle(Color.pcAccent)
@@ -510,9 +519,18 @@ struct SessionDetailView: View {
             }
 
             if let usage = vm.lastAgentUsage, usage.outputTokens > 0 {
-                Text("· 输出 \(vm.fmtTokens(usage.outputTokens)) tokens")
-                    .font(PCFont.body(12))
+                Text("· \(vm.fmtTokens(usage.outputTokens)) out")
+                    .font(PCFont.mono(12))
                     .foregroundStyle(Color.pcFgTertiary)
+                    .monospacedDigit()
+            }
+
+            // Context 使用量（输入侧总 token），紧随输出 token 量右侧。
+            if let ctx = vm.contextUsageTokens {
+                Text("· \(vm.fmtTokens(ctx)) ctx")
+                    .font(PCFont.mono(12))
+                    .foregroundStyle(Color.pcFgTertiary)
+                    .monospacedDigit()
             }
 
             Spacer(minLength: 4)

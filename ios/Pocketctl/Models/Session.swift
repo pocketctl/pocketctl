@@ -16,6 +16,7 @@ struct Session: Identifiable, Sendable, Hashable, Equatable {
     var hostname: String?
     var daemonAlias: String?
     var daemonOnline: Bool
+    var model: String?
     var pinned: Bool = false
 
     var id: String { sessionId }
@@ -46,6 +47,7 @@ struct Session: Identifiable, Sendable, Hashable, Equatable {
         subagentCount == other.subagentCount &&
         daemonOnline == other.daemonOnline &&
         hostname == other.hostname &&
+        model == other.model &&
         pinned == other.pinned
     }
 
@@ -59,6 +61,12 @@ struct Session: Identifiable, Sendable, Hashable, Equatable {
         }
         // If title still matches the default pattern, show as-is (includes "Terminal Session-{suffix}")
         return title
+    }
+
+    /// 解析后的当前模型名，用于列表展示。空字符串视为无模型（返回 nil，不渲染）。
+    var displayModel: String? {
+        guard let model, !model.isEmpty else { return nil }
+        return model
     }
 
     var isTerminal: Bool {
@@ -87,6 +95,7 @@ extension Session {
             hostname: dict["hostname"] as? String,
             daemonAlias: dict["daemon_alias"] as? String,
             daemonOnline: dict["daemon_online"] as? Bool ?? false,
+            model: dict["model"] as? String,
             pinned: dict["pinned"] as? Bool ?? false
         )
     }

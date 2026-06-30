@@ -12,6 +12,11 @@ final class SessionDetailViewModel {
     var exitReason: String?
     /// Resolved model name for this session (live-updated on /model switch).
     var currentModel: String?
+    /// 最近一次携带 usage 的事件的 token 用量（与 web `lastUsage` 对齐）。
+    /// 任何 agent_text 事件携带 usage 都会更新它，包括无文本的纯 usage 载体
+    /// （opencode step-finish / codex token_count）。会话切换时重置。
+    /// `contextUsageTokens` 优先用它，回退到反向扫描 messages。
+    private var lastUsage: TokenUsage?
     var isLoading = true
     /// Incremented when initial replay completes — triggers scroll-to-bottom
     var scrollTick = 0
@@ -111,6 +116,15 @@ final class SessionDetailViewModel {
             if let usage = message.usage { return usage }
         }
         return nil
+    }
+
+    /// Context 使用量（输入侧总 token = 输入 + 缓存读取 + 缓存写入），与 web 客户端
+    /// `contextTokens` 一致。优先用 `lastUsage`（覆盖纯 usage 载体事件），回退到
+    /// 反向扫描 messages。无 usage 记录时返回 nil（不渲染）。
+    var contextUsageTokens: Int? {
+        let usage = lastUsage ?? lastAgentUsage
+        guard let usage, usage.contextTokens > 0 else { return nil }
+        return usage.contextTokens
     }
 
     /// Whether any agent_text reply exists (gates the copy button).
@@ -259,6 +273,9 @@ final class SessionDetailViewModel {
     /// No polling — relay sends `replay_end` when done.
     func connect() async {
         guard KeychainStorage.accessToken != nil else { return }
+
+        // 重置会话级运行时状态（对应 web 切换会话时 lastUsage.value = null）。
+        lastUsage = nil
 
         // ── Stage 1: register the event listener up front so no replay batch
         // is dropped while we wait for the handshake / token refresh below.
@@ -639,7 +656,18 @@ final class SessionDetailViewModel {
     // MARK: - Individual event handlers (direct mode for batch)
 
     private func handleAgentTextDirect(_ event: WebSocketEvent, messages: inout [ChatMessage]) {
-        guard let text = event.text else { return }
+        // 与 web 对齐：任何 agent_text 事件携带 usage 都先更新 lastUsage。
+        if let usage = event.usage {
+            lastUsage = usage
+        }
+        // 纯 usage 载体（opencode step-finish / codex token_count）：无文本，
+        // 仅 token 统计。挂到最后一条 agent_text 上，不创建新消息。
+        guard let text = event.text, !text.isEmpty else {
+            if let usage = event.usage, let lastIdx = messages.lastIndex(where: { $0.type == .agentText }) {
+                messages[lastIdx].usage = usage
+            }
+            return
+        }
 
         if event.streaming,
            let last = messages.last,
@@ -797,7 +825,19 @@ final class SessionDetailViewModel {
     // MARK: - Individual event handlers (live mode — operates on self)
 
     private func handleAgentText(_ event: WebSocketEvent) {
-        guard let text = event.text else { return }
+        // 与 web 对齐：任何 agent_text 事件携带 usage 都先更新 lastUsage。
+        if let usage = event.usage {
+            lastUsage = usage
+        }
+        // 纯 usage 载体（opencode step-finish / codex token_count）：无文本，
+        // 仅 token 统计。挂到最后一条 agent_text 上（让反向扫描也能命中），
+        // 不创建新消息。（对应 web SessionDetail.vue:1173-1179）
+        guard let text = event.text, !text.isEmpty else {
+            if let usage = event.usage, let lastIdx = messages.lastIndex(where: { $0.type == .agentText }) {
+                messages[lastIdx].usage = usage
+            }
+            return
+        }
 
         if event.streaming,
            let last = messages.last,

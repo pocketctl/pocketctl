@@ -135,29 +135,40 @@ struct SessionListView: View {
         ScrollView {
             LazyVStack(spacing: PCSpacing.sm) {
                 ForEach(vm.displayedSessions) { session in
-                    Group {
-                        // 所有会话都支持左滑：置顶/取消置顶；已退出会话额外有删除
-                        SwipeToDelete(
-                            isPinned: session.pinned,
-                            canDelete: session.isTerminal
-                        ) {
-                            SessionCard(session: session, daemonOnline: daemon.online, hostLabel: daemon.displayName) {
-                                navigateToDetail = session
+                    // 主卡片 + （已退出时的）附属子卡片：立体叠放。
+                    // 主卡片浮在上方并盖住副卡片顶部，投影落在副卡上，形成层叠层次。
+                    VStack(spacing: 0) {
+                        Group {
+                            // 所有会话都支持左滑：置顶/取消置顶；已退出会话额外有删除
+                            SwipeToDelete(
+                                isPinned: session.pinned,
+                                canDelete: session.isTerminal
+                            ) {
+                                SessionCard(session: session, daemonOnline: daemon.online, hostLabel: daemon.displayName) {
+                                    navigateToDetail = session
+                                }
+                            } onPin: {
+                                vm.togglePin(session.sessionId)
+                            } onDelete: {
+                                vm.deleteSession(session.sessionId)
                             }
-                        } onPin: {
-                            vm.togglePin(session.sessionId)
-                        } onDelete: {
-                            vm.deleteSession(session.sessionId)
                         }
-                    }
-                    .frame(height: 68)
-                    .onAppear {
-                        vm.loadMoreIfNeeded(currentSessionId: session.sessionId)
-                    }
+                        .frame(minHeight: 76)
+                        .zIndex(session.status == "exited" ? 1 : 0)
+                        .shadow(color: session.status == "exited"
+                                ? Color.black.opacity(0.45)
+                                : Color.clear,
+                                radius: 5, x: 0, y: 3)
+                        .onAppear {
+                            vm.loadMoreIfNeeded(currentSessionId: session.sessionId)
+                        }
 
-                    // Exited session banner
-                    if session.status == "exited" {
-                        exitedBanner(session: session)
+                        // 已退出会话的附属子卡片：顶部上钻到主卡背后，被主卡盖住一部分
+                        if session.status == "exited" {
+                            exitedSubBanner(session: session)
+                                .padding(.top, -14)
+                                .zIndex(0)
+                        }
                     }
                 }
             }
@@ -170,31 +181,50 @@ struct SessionListView: View {
 
     // MARK: - Session card
 
-    private func exitedBanner(session: Session) -> some View {
+    /// 已退出会话的附属子卡片：立体叠放在主卡下方，顶部被主卡盖住一部分。
+    /// 全四角圆角 + 左右略窄于主卡 + 警告色调，形成「主卡浮于副卡之上」的层叠层次。
+    private func exitedSubBanner(session: Session) -> some View {
         HStack(spacing: 8) {
+            // 左侧警告色竖条（视觉锚点，强化附属关系）
+            Rectangle()
+                .fill(Color.pcWarning)
+                .frame(width: 3)
+                .padding(.vertical, -PCSpacing.sm)
+
             Image(systemName: "exclamationmark.triangle.fill")
-                .font(.system(size: 16))
+                .font(.system(size: 13))
                 .foregroundStyle(Color.pcWarning)
             Text("会话已退出：\(session.exitReason ?? "未知原因")")
-                .font(PCFont.body(14))
+                .font(PCFont.body(13))
                 .foregroundStyle(Color.pcWarning)
+                .lineLimit(1)
             Spacer()
             Button {
                 // Resume: navigate to detail and send message
                 navigateToDetail = session
             } label: {
                 Text("恢复会话")
-                    .font(PCFont.body(14, weight: .medium))
+                    .font(PCFont.body(13, weight: .medium))
                     .foregroundStyle(Color.pcAccent)
+                    .padding(.horizontal, PCSpacing.sm)
+                    .padding(.vertical, 4)
+                    .background(Color.pcAccent.opacity(0.12))
+                    .cornerRadius(PCRadius.full)
             }
         }
-        .padding(PCSpacing.md)
+        .padding(.horizontal, PCSpacing.md)
+        // 顶部多留空间，被主卡盖住后仍有足够内容区可读
+        .padding(.top, PCSpacing.lg)
+        .padding(.bottom, PCSpacing.sm)
         .background(Color.pcWarningBg)
-        .cornerRadius(PCRadius.md)
         .overlay(
+            // 全四角边框 + 圆角：作为独立层呈现
             RoundedRectangle(cornerRadius: PCRadius.md)
                 .stroke(Color.pcWarning.opacity(0.3), lineWidth: 1)
         )
+        .cornerRadius(PCRadius.md)
+        // 左右内缩 6pt，比主卡略窄，强化「垫在主卡下层」的视觉
+        .padding(.horizontal, 6)
     }
 
     // MARK: - Error banner
@@ -241,7 +271,8 @@ struct SessionCard: View {
             StatusDot(status: effectiveStatus)
                 .frame(width: 10, height: 10)
 
-            VStack(alignment: .leading, spacing: 4) {
+            VStack(alignment: .leading, spacing: 3) {
+                // 标题行：置顶图标 + 会话名称 + 来源标签（右对齐）
                 HStack(spacing: 6) {
                     if session.pinned {
                         Image(systemName: "pin.fill")
@@ -252,22 +283,51 @@ struct SessionCard: View {
                         .font(PCFont.body(16, weight: .semibold))
                         .foregroundStyle(Color.pcFg)
                         .lineLimit(1)
-
-                    if !session.agentType.isEmpty {
-                        StatusChip(text: displayAgentName(session.agentType), style: .agent(session.agentType))
-                    }
-
+                    Spacer(minLength: 4)
                     if session.source == "terminal" {
                         StatusChip(text: "终端", style: .terminal)
                     } else if session.source == "web" {
                         StatusChip(text: "Web", style: .web)
                     }
-
-                    if session.subagentCount > 0 {
-                        StatusChip(text: "\(session.subagentCount) 子智能体", style: .subAgent)
-                    }
                 }
 
+                // 元信息行：agent 类型 · 当前模型 · 子智能体标签
+                // 固定高度容器：无内容时保留等高占位（Color.clear），保证所有卡片
+                // 高度严格一致，与「有 agent 类型的卡片」对齐。
+                Group {
+                    if hasMetaLine {
+                        HStack(spacing: 6) {
+                            if !session.agentType.isEmpty {
+                                // agent 标签样式与主机列表（DaemonListView.agentTags）保持一致：
+                                // 品牌色小圆点 + 名称 + 品牌色 12% 底色胶囊
+                                HStack(spacing: 4) {
+                                    Circle().fill(agentVisual(session.agentType).color).frame(width: 6, height: 6)
+                                    Text(displayAgentName(session.agentType))
+                                }
+                                .font(PCFont.body(12, weight: .medium))
+                                .foregroundStyle(agentVisual(session.agentType).color)
+                                .padding(.horizontal, 8).padding(.vertical, 3)
+                                .background(agentVisual(session.agentType).color.opacity(0.12))
+                                .cornerRadius(PCRadius.full)
+                            }
+                            if let model = session.displayModel {
+                                Text(model)
+                                    .font(PCFont.mono(11))
+                                    .foregroundStyle(Color.pcFgTertiary)
+                                    .lineLimit(1)
+                            }
+                            if session.subagentCount > 0 {
+                                StatusChip(text: "\(session.subagentCount) 子智能体", style: .subAgent)
+                            }
+                        }
+                    } else {
+                        // 占位：保留元信息行的高度，让卡片高度统一
+                        Color.clear.frame(height: 18)
+                    }
+                }
+                .frame(height: 18, alignment: .leading)
+
+                // 时间/host 行
                 HStack {
                     Text(hostLabel)
                         .font(PCFont.body(12))
@@ -313,6 +373,14 @@ struct SessionCard: View {
     private var effectiveStatus: String {
         if !daemonOnline && !session.isTerminal { return "disconnected" }
         return session.status
+    }
+
+    /// 是否存在元信息行（agent 类型 / 模型 / 子智能体）。全部为空则不渲染该行。
+    /// 注：来源标签（终端/Web）已上移到标题行，不参与本行判断。
+    private var hasMetaLine: Bool {
+        !session.agentType.isEmpty ||
+        session.displayModel != nil ||
+        session.subagentCount > 0
     }
 }
 
@@ -370,18 +438,14 @@ struct SwipeToDelete<Content: View>: View {
                         close()
                     }
                 } label: {
-                    VStack(spacing: 4) {
-                        Image(systemName: isPinned ? "pin.slash.fill" : "pin.fill")
-                            .font(.system(size: 16))
-                        Text(isPinned ? "取消置顶" : "置顶")
-                            .font(PCFont.body(12, weight: .medium))
-                    }
-                    .foregroundStyle(.white)
-                    .frame(width: buttonWidth)
-                    .frame(maxHeight: .infinity)
-                    .background(Color.pcAccent)
+                    swipeButtonContent(
+                        icon: isPinned ? "pin.slash.fill" : "pin.fill",
+                        text: isPinned ? "取消置顶" : "置顶",
+                        color: Color.pcAccent
+                    )
                 }
-                // 删除按钮（仅已退出会话）
+                // 删除按钮（仅已退出会话）—— 与置顶按钮共用 swipeButtonContent，
+                // 图标/文字行高完全一致，视觉重心严格对齐。
                 if canDelete {
                     Button {
                         withAnimation(.spring(response: 0.3, dampingFraction: 1)) {
@@ -389,12 +453,11 @@ struct SwipeToDelete<Content: View>: View {
                             close()
                         }
                     } label: {
-                        Text("删除")
-                            .font(PCFont.body(15, weight: .medium))
-                            .foregroundStyle(.white)
-                            .frame(width: buttonWidth)
-                            .frame(maxHeight: .infinity)
-                            .background(Color.pcError)
+                        swipeButtonContent(
+                            icon: "trash.fill",
+                            text: "删除",
+                            color: Color.pcError
+                        )
                     }
                 }
             }
@@ -475,5 +538,25 @@ struct SwipeToDelete<Content: View>: View {
         offset = 0
         isOpen = false
         isVerticalScroll = false
+    }
+
+    /// 滑动操作按钮的统一内容（置顶 / 删除共用）。
+    /// 关键：图标用固定高度容器居中渲染，消除不同 SF Symbol（pin vs trash）
+    /// 字形 bbox 高度差异导致的视觉错位，确保两按钮图标/文字行严格水平对齐。
+    @ViewBuilder
+    private func swipeButtonContent(icon: String, text: String, color: Color) -> some View {
+        VStack(spacing: 4) {
+            Image(systemName: icon)
+                .font(.system(size: 16, weight: .regular))
+                .frame(height: 20, alignment: .center)
+            Text(text)
+                .font(PCFont.body(12, weight: .medium))
+                .lineLimit(1)
+                .fixedSize(horizontal: true, vertical: false)
+        }
+        .foregroundStyle(.white)
+        .frame(width: buttonWidth)
+        .frame(maxHeight: .infinity)
+        .background(color)
     }
 }

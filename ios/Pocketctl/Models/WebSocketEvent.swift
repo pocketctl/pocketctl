@@ -95,7 +95,9 @@ struct WebSocketEvent {
         guard let u else { return nil }
         let out = (u["output_tokens"] as? Int) ?? Int(u["output_tokens"] as? String ?? "") ?? 0
         let inp = (u["input_tokens"] as? Int) ?? Int(u["input_tokens"] as? String ?? "") ?? 0
-        return TokenUsage(outputTokens: out, inputTokens: inp)
+        let cr = (u["cache_read_tokens"] as? Int) ?? Int(u["cache_read_tokens"] as? String ?? "") ?? 0
+        let cc = (u["cache_create_tokens"] as? Int) ?? Int(u["cache_create_tokens"] as? String ?? "") ?? 0
+        return TokenUsage(outputTokens: out, inputTokens: inp, cacheReadTokens: cr, cacheCreateTokens: cc)
     }
 
     /// Approval request id — for approval_request events (PreToolUse hook).
