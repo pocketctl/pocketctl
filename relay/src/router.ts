@@ -2,7 +2,7 @@ import type { WebSocket } from 'ws';
 import type pg from 'pg';
 import * as db from './db.js';
 import { generateTitle } from './title.js';
-import { notifyUser, sessionStatusPush, daemonOfflinePush } from './push.js';
+import { notifyUser, sessionStatusPush, daemonOfflinePush, approvalPush, interactivePush, summarizeToolInput } from './push.js';
 
 interface DaemonConnection { ws: WebSocket; daemonId: string; hostname: string; agents: any[]; userId: number | null; os?: string; ip?: string; port?: string; arch?: string; version?: string; startedAt?: number }
 interface ClientConnection { ws: WebSocket; subscribedSessions: Set<string>; userId: number | null; locale: string }
@@ -633,6 +633,24 @@ export class Router {
     // Accumulate per-turn token usage from agent_text events carrying usage (model-agnostic)
     if (msg.usage != null) {
       db.incrementSessionTokens(this.pool, sessionId, msg.usage).catch(console.error);
+    }
+    // Push for attention-requiring events (agent blocked, needs user action).
+    // Both arrive via this generic path; push to all of the owner's devices so
+    // the agent doesn't stall while the app is backgrounded/killed. Fire-and-
+    // forget (never blocks the ack), mirroring session_status push below.
+    if (userId && (msg.type === 'approval_request' || msg.type === 'interactive_prompt')) {
+      const requestId = (msg.request_id as string | undefined) || '';
+      if (msg.type === 'approval_request') {
+        notifyUser(this.pool, userId, approvalPush(
+          msg.title || '', msg.tool || '', summarizeToolInput(msg.tool || '', msg.input),
+          sessionId, requestId,
+        )).catch(console.error);
+      } else {
+        const prompt = (msg.input?.prompt as string) || '';
+        notifyUser(this.pool, userId, interactivePush(
+          msg.title || '', prompt, sessionId, requestId,
+        )).catch(console.error);
+      }
     }
     if (msg.type === 'session_status') {
       // UPDATE-ONLY: never INSERT from a status event. A session_id that no
