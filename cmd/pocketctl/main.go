@@ -595,6 +595,37 @@ func startSpinner(msg string) (stop func()) {
 	}
 }
 
+// pruneOrphanSpools deletes spool files in spoolDir that don't belong to the
+// current daemon ID. The active spool is "<id>.log" (plus a transient
+// "<id>.log.tmp" during a rewrite); anything else is from a prior daemon whose
+// ID drifted (hostname/MAC change) and is never reclaimed otherwise. Best-effort:
+// removal errors are logged at debug and ignored.
+func pruneOrphanSpools(spoolDir, id string, logger *slog.Logger) {
+	entries, err := os.ReadDir(spoolDir)
+	if err != nil {
+		return
+	}
+	keep := id + ".log"
+	keepTmp := keep + ".tmp"
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		name := e.Name()
+		if name == keep || name == keepTmp {
+			continue
+		}
+		if !strings.HasSuffix(name, ".log") && !strings.HasSuffix(name, ".log.tmp") {
+			continue // don't touch unrelated files
+		}
+		if err := os.Remove(filepath.Join(spoolDir, name)); err != nil {
+			logger.Debug("prune orphan spool failed", "file", name, "error", err)
+		} else {
+			logger.Info("pruned orphan spool", "file", name)
+		}
+	}
+}
+
 func cmdDaemonStart(args []string) {
 	fs := flag.NewFlagSet("daemon start", flag.ExitOnError)
 	relayURL := fs.String("relay", "", "Relay WebSocket URL (or POCKETCTL_RELAY_URL env)")
@@ -922,10 +953,14 @@ func cmdDaemonStart(args []string) {
 	// POCKETCTL_SPOOL=0. A setup failure is non-fatal — fall back to in-memory.
 	if os.Getenv("POCKETCTL_SPOOL") != "0" {
 		if cfgDir, err := config.ConfigDir(); err == nil {
-			spoolPath := filepath.Join(cfgDir, "spool", id+".log")
+			spoolDir := filepath.Join(cfgDir, "spool")
+			spoolPath := filepath.Join(spoolDir, id+".log")
 			if err := client.InitSpool(spoolPath); err != nil {
 				logger.Warn("outbound spool disabled", "error", err)
 			}
+			// Remove orphan spool files left by a previous daemon whose ID changed
+			// (machine.id drift): each is bounded but never reclaimed otherwise.
+			pruneOrphanSpools(spoolDir, id, logger)
 		}
 	}
 
