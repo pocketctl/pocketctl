@@ -1,5 +1,6 @@
 import Foundation
 import SwiftUI
+import UIKit
 
 @Observable
 @MainActor
@@ -154,6 +155,10 @@ final class SettingsViewModel {
         let current = RelayEnvironmentManager.shared.customStagingHost
         editStagingHost = (current?.isEmpty == false ? current! : RelayEnvironment.defaultStagingHost)
         stagingHostValidationMessage = nil
+        // 在编辑框弹出前定向预热 .URL 键盘（与 IP 输入框键盘类型一致）：键盘资源
+        // 加载与 sheet 弹出动画并行，等输入框自动聚焦时键盘已「热」，消除首次
+        // 呼出键盘 1.5–2.5s 的冷启动延迟。
+        KeyboardWarmup.prewarm(.URL)
         showStagingHostEdit = true
     }
 

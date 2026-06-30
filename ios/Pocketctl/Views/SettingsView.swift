@@ -8,6 +8,8 @@ struct SettingsView: View {
     @State private var showScan = false
     @State private var showGlobalUsage = false
     @State private var showUpgradeAlert = false
+    /// 测试环境 IP 输入框聚焦态——sheet 出现时自动聚焦，让键盘呼出与弹窗动画并行。
+    @FocusState private var stagingHostFocused: Bool
     private let apiClient = APIClient()
 
     var body: some View {
@@ -588,6 +590,7 @@ struct SettingsView: View {
                             .keyboardType(.URL)
                             .textInputAutocapitalization(.never)
                             .autocorrectionDisabled()
+                            .focused($stagingHostFocused)
                             .padding(PCSpacing.md)
                             .background(Color.pcSurface)
                             .cornerRadius(PCRadius.md)
@@ -624,6 +627,12 @@ struct SettingsView: View {
                         .font(PCFont.body(16, weight: .semibold))
                 }
             }
+            // 自动聚焦 IP 输入框：与 prepareStagingHostEdit() 的 prewarm(.URL) 配合，
+            // 键盘在弹窗动画期间已预热，聚焦时直接「热」弹出，无需用户点击。async
+            // 让聚焦发生在视图入树后的下一轮 runloop，确保 @FocusState 可靠生效。
+            .onAppear { DispatchQueue.main.async { stagingHostFocused = true } }
+            // 重置聚焦态，保证下次再打开仍会触发自动聚焦（值无变化不会重新聚焦）。
+            .onDisappear { stagingHostFocused = false }
         }
     }
 
