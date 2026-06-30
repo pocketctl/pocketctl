@@ -92,6 +92,25 @@ enum KeychainStorage {
         set { UserDefaults.standard.set(newValue, forKey: "pocketctl_notifications_enabled") }
     }
 
+    /// 某个通知分类的开关偏好(按 NotificationCategory.storageKey 存储)。
+    /// 首次读取时无值,调用方应回退到 `defaultEnabled`。
+    static func notificationCategoryEnabled(_ category: NotificationCategory) -> Bool? {
+        // object(forKey:) 区分「未设置」与「显式设为 false」
+        if UserDefaults.standard.object(forKey: category.storageKey) == nil { return nil }
+        return UserDefaults.standard.bool(forKey: category.storageKey)
+    }
+
+    static func setNotificationCategoryEnabled(_ enabled: Bool, for category: NotificationCategory) {
+        UserDefaults.standard.set(enabled, forKey: category.storageKey)
+    }
+
+    /// 清除所有通知分类偏好(用于退出登录 / 重置)
+    static func clearAllNotificationCategories() {
+        for category in NotificationCategory.all {
+            UserDefaults.standard.removeObject(forKey: category.storageKey)
+        }
+    }
+
     static var deviceToken: String? {
         get { load(key: "device_token") }
         set {
@@ -117,5 +136,6 @@ enum KeychainStorage {
         UserDefaults.standard.removeObject(forKey: "pocketctl_relay_url")
         UserDefaults.standard.removeObject(forKey: "pocketctl_notifications_enabled")
         UserDefaults.standard.removeObject(forKey: "pocketctl_local_display_name")
+        clearAllNotificationCategories()
     }
 }

@@ -10,6 +10,9 @@ final class SettingsViewModel {
     var user: User?
     var relayURLText: String = ""
     var notificationsEnabled: Bool = false
+    /// 各通知分类的开关态,key = NotificationCategory.id。
+    /// UI 通过 `isCategoryEnabled(_)` / `toggleCategory(_:enabled:)` 访问,不直接读写此字典。
+    private(set) var notificationPreferences: [String: Bool] = [:]
     var relayURLValidationMessage: String? = nil
     var relayURLIsValid: Bool = true
     var isTestingConnection: Bool = false
@@ -110,6 +113,16 @@ final class SettingsViewModel {
         user = KeychainStorage.currentUser
         relayURLText = KeychainStorage.relayURL ?? ""
         notificationsEnabled = KeychainStorage.notificationsEnabled
+        loadNotificationPreferences()
+    }
+
+    /// 加载各通知分类开关偏好。未显式设置过的分类回退到其默认值。
+    private func loadNotificationPreferences() {
+        var prefs: [String: Bool] = [:]
+        for category in NotificationCategory.all {
+            prefs[category.id] = KeychainStorage.notificationCategoryEnabled(category) ?? category.defaultEnabled
+        }
+        notificationPreferences = prefs
     }
 
     /// 从后端拉取最新用户资料（含订阅方案），刷新本地缓存
@@ -131,6 +144,7 @@ final class SettingsViewModel {
         KeychainStorage.clearAll()
         user = nil
         notificationsEnabled = false
+        notificationPreferences = [:]
         relayURLText = ""
     }
 
@@ -299,6 +313,29 @@ final class SettingsViewModel {
             KeychainStorage.notificationsEnabled = false
             KeychainStorage.deviceToken = nil
         }
+    }
+
+    // MARK: - Notification Categories
+
+    /// 某个分类是否可交互(对免费用户,Pro 专属分类不可开关,UI 应灰置)。
+    func isCategoryInteractable(_ category: NotificationCategory) -> Bool {
+        guard category.requiresPro else { return true }
+        // Pro 专属分类:仅当用户已是 Pro(或内测 whitelist)才可操作
+        return subscriptionPlan.isPro
+    }
+
+    /// 读取某分类的当前开关态(仅用于 UI 展示,不受 Pro 限制)。
+    func isCategoryEnabled(_ category: NotificationCategory) -> Bool {
+        notificationPreferences[category.id] ?? category.defaultEnabled
+    }
+
+    /// 切换某分类开关。
+    /// - 对 Pro 专属分类 + 免费用户:忽略本次设置(`interactable` 为 false 时 View 不应调用此方法,
+    ///   这里再做一次防御性检查),由上层负责弹出升级提示。
+    func toggleCategory(_ category: NotificationCategory, enabled: Bool) {
+        guard isCategoryInteractable(category) else { return }
+        notificationPreferences[category.id] = enabled
+        KeychainStorage.setNotificationCategoryEnabled(enabled, for: category)
     }
 
     // MARK: - Edit Profile

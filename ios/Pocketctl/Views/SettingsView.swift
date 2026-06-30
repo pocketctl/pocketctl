@@ -8,6 +8,11 @@ struct SettingsView: View {
     @State private var showScan = false
     @State private var showGlobalUsage = false
     @State private var showUpgradeAlert = false
+    /// 通知分类列表展开态:总开关打开时展开,关闭时收起。
+    @State private var notificationCategoriesExpanded = true
+    /// 点击 Pro 专属分类(免费用户)时弹出升级提示。
+    @State private var showProCategoryAlert = false
+    @State private var proCategoryTapped: NotificationCategory?
     /// 测试环境 IP 输入框聚焦态——sheet 出现时自动聚焦，让键盘呼出与弹窗动画并行。
     @FocusState private var stagingHostFocused: Bool
     private let apiClient = APIClient()
@@ -150,29 +155,42 @@ struct SettingsView: View {
                         // Notifications section
                         sectionHeader("通知")
                         settingsGroup {
-                            HStack(spacing: 12) {
-                                Image(systemName: "bell.fill")
-                                    .font(.system(size: 14))
-                                    .foregroundStyle(Color.pcAccent)
-                                    .frame(width: 28, height: 28)
-                                    .background(Color.pcAccentMuted)
-                                    .cornerRadius(PCRadius.sm)
+                            VStack(spacing: 0) {
+                                // 总开关
+                                HStack(spacing: 12) {
+                                    Image(systemName: "bell.fill")
+                                        .font(.system(size: 14))
+                                        .foregroundStyle(Color.pcAccent)
+                                        .frame(width: 28, height: 28)
+                                        .background(Color.pcAccentMuted)
+                                        .cornerRadius(PCRadius.sm)
 
-                                Text("推送通知")
-                                    .font(PCFont.body(15))
-                                    .foregroundStyle(Color.pcFg)
+                                    Text("推送通知")
+                                        .font(PCFont.body(15))
+                                        .foregroundStyle(Color.pcFg)
 
-                                Spacer()
+                                    Spacer()
 
-                                Toggle("", isOn: Binding(
-                                    get: { viewModel.notificationsEnabled },
-                                    set: { viewModel.toggleNotifications($0) }
-                                ))
-                                .labelsHidden()
-                                .tint(Color.pcPrimaryBtn)
+                                    Toggle("", isOn: Binding(
+                                        get: { viewModel.notificationsEnabled },
+                                        set: { newValue in
+                                            viewModel.toggleNotifications(newValue)
+                                            withAnimation(.easeInOut(duration: 0.25)) {
+                                                notificationCategoriesExpanded = newValue
+                                            }
+                                        }
+                                    ))
+                                    .labelsHidden()
+                                    .tint(Color.pcPrimaryBtn)
+                                }
+                                .padding(.horizontal, PCSpacing.lg)
+                                .frame(minHeight: 44)
+
+                                // 分类开关列表:总开关打开时展开
+                                if notificationCategoriesExpanded && viewModel.notificationsEnabled {
+                                    notificationCategoryList
+                                }
                             }
-                            .padding(.horizontal, PCSpacing.lg)
-                            .frame(minHeight: 44)
                         }
                         .padding(.horizontal, PCSpacing.lg)
 
@@ -274,6 +292,13 @@ struct SettingsView: View {
             } message: {
                 Text("专业版订阅功能正在开发中，敬请期待。")
             }
+            .alert("「\(proCategoryTapped?.title ?? "增值洞察")」为专业版功能",
+                   isPresented: $showProCategoryAlert) {
+                Button("升级专业版") { showUpgradeAlert = true }
+                Button("稍后", role: .cancel) {}
+            } message: {
+                Text(proCategoryTapped?.subtitle ?? "升级专业版以解锁 Token 日报、周报与高危操作提醒。")
+            }
             .toolbar {
                 ToolbarItem(placement: .navigationBarLeading) {
                     Button { dismiss() } label: {
@@ -302,6 +327,92 @@ struct SettingsView: View {
                 viewModel.validateAndSaveRelayURL()
             }
         }
+    }
+
+    // MARK: - Notification categories
+
+    /// 通知分类开关列表。免费开放的 A/B/C 正常交互;Pro 专属的 D 灰置 + PRO 徽章,
+    /// 点击弹出升级提示。
+    private var notificationCategoryList: some View {
+        VStack(spacing: 0) {
+            ForEach(Array(NotificationCategory.all.enumerated()), id: \.element.id) { index, category in
+                notificationCategoryRow(category)
+                    .overlay(
+                        Rectangle()
+                            .fill(Color.pcBorder)
+                            .frame(height: 0.5)
+                            .padding(.leading, 56),
+                        alignment: .top
+                    )
+                // 最后一行不需要顶部分隔线
+                if index == NotificationCategory.all.count - 1 {
+                    Color.clear.frame(height: 0)
+                }
+            }
+        }
+    }
+
+    private func notificationCategoryRow(_ category: NotificationCategory) -> some View {
+        let interactable = viewModel.isCategoryInteractable(category)
+        return HStack(spacing: 12) {
+            Image(systemName: category.icon)
+                .font(.system(size: 14))
+                .foregroundStyle(interactable ? category.iconFg : Color.pcFgTertiary)
+                .frame(width: 28, height: 28)
+                .background(interactable ? category.iconBg : Color.pcHoverInput)
+                .cornerRadius(PCRadius.sm)
+
+            VStack(alignment: .leading, spacing: 2) {
+                HStack(spacing: 6) {
+                    Text(category.title)
+                        .font(PCFont.body(15))
+                        .foregroundStyle(interactable ? Color.pcFg : Color.pcFgSecondary)
+                    if category.requiresPro {
+                        proBadge
+                    }
+                }
+                Text(category.subtitle)
+                    .font(PCFont.body(11))
+                    .foregroundStyle(Color.pcFgTertiary)
+                    .lineLimit(1)
+            }
+
+            Spacer()
+
+            Toggle("", isOn: Binding(
+                get: { viewModel.isCategoryEnabled(category) },
+                set: { newValue in
+                    if interactable {
+                        viewModel.toggleCategory(category, enabled: newValue)
+                    }
+                }
+            ))
+            .labelsHidden()
+            .tint(Color.pcPrimaryBtn)
+            .disabled(!interactable)
+            .opacity(interactable ? 1.0 : 0.5)
+        }
+        .padding(.horizontal, PCSpacing.lg)
+        .frame(minHeight: 52)
+        .contentShape(Rectangle())
+        .onTapGesture {
+            // 免费用户点击 Pro 专属分类:弹出升级提示
+            if !interactable {
+                proCategoryTapped = category
+                showProCategoryAlert = true
+            }
+        }
+    }
+
+    /// PRO 徽章:小号圆角胶囊,贴在分类标题右侧。
+    private var proBadge: some View {
+        Text("PRO")
+            .font(PCFont.body(9, weight: .bold))
+            .foregroundStyle(Color.pcAccent)
+            .padding(.horizontal, 5)
+            .padding(.vertical, 1.5)
+            .background(Color.pcAccentMuted)
+            .cornerRadius(PCRadius.sm)
     }
 
     // MARK: - Connection status helpers
