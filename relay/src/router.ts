@@ -2,7 +2,8 @@ import type { WebSocket } from 'ws';
 import type pg from 'pg';
 import * as db from './db.js';
 import { generateTitle } from './title.js';
-import { notifyUser, sessionStatusPush, daemonOfflinePush } from './push.js';
+import { notifyUser, sessionStatusPush, daemonOfflinePush, approvalPush, interactivePush, summarizeToolInput } from './push.js';
+import { PushDeduper } from './push-deduper.js';
 
 interface DaemonConnection { ws: WebSocket; daemonId: string; hostname: string; agents: any[]; userId: number | null; os?: string; ip?: string; port?: string; arch?: string; version?: string; startedAt?: number }
 interface ClientConnection { ws: WebSocket; subscribedSessions: Set<string>; userId: number | null; locale: string }
@@ -39,10 +40,21 @@ export class Router {
   // Grace window before a disconnected daemon is declared offline.
   private readonly offlineGraceMs = parseInt(process.env.DAEMON_OFFLINE_GRACE_MS || '30000', 10);
 
-  constructor(pool: pg.Pool) { this.pool = pool; }
+  // Push dedup: same requestId pushed only once per TTL window. Guards the
+  // ack-async / no-seq / persist-retry gaps that seq dedup can't cover for the
+  // user-facing push side-effect.
+  private pushDeduper = new PushDeduper();
+
+  constructor(pool: pg.Pool) {
+    this.pool = pool;
+    this.pushDeduper.startSweeping();
+  }
 
   /** Mark the relay as shutting down so offline pushes are suppressed. */
   beginShutdown(): void { this.shuttingDown = true; }
+
+  /** Release background resources (push dedup sweeper). Call on shutdown. */
+  stop(): void { this.pushDeduper.stop(); }
 
   /** Notify all connected daemons that the relay is restarting (expected disconnect). */
   broadcastRelayRestarting(): void {
@@ -633,6 +645,35 @@ export class Router {
     // Accumulate per-turn token usage from agent_text events carrying usage (model-agnostic)
     if (msg.usage != null) {
       db.incrementSessionTokens(this.pool, sessionId, msg.usage).catch(console.error);
+    }
+    // Push for attention-requiring events (agent blocked, needs user action).
+    // Both arrive via this generic path; push to all of the owner's devices so
+    // the agent doesn't stall while the app is backgrounded/killed. Fire-and-
+    // forget (never blocks the ack), mirroring session_status push below.
+    //
+    // Dedup by requestId: WS reconnect/seq-replay gaps (ack async window,
+    // no-seq legacy daemons, persist retries) can reprocess an event and fire
+    // the push twice. Only the push side-effect is guarded here — event
+    // forwarding to subscribed clients below still runs regardless, so a
+    // reconnected foreground client stays in sync.
+    if (userId && (msg.type === 'approval_request' || msg.type === 'interactive_prompt')) {
+      const requestId = (msg.request_id as string | undefined) || '';
+      // Empty requestId can't be deduped (and shouldn't block the push) —
+      // accept the rare duplicate for such malformed events.
+      const shouldPush = requestId === '' || this.pushDeduper.shouldPush(requestId);
+      if (shouldPush) {
+        if (msg.type === 'approval_request') {
+          notifyUser(this.pool, userId, approvalPush(
+            msg.title || '', msg.tool || '', summarizeToolInput(msg.tool || '', msg.input),
+            sessionId, requestId,
+          )).catch(console.error);
+        } else {
+          const prompt = (msg.input?.prompt as string) || '';
+          notifyUser(this.pool, userId, interactivePush(
+            msg.title || '', prompt, sessionId, requestId,
+          )).catch(console.error);
+        }
+      }
     }
     if (msg.type === 'session_status') {
       // UPDATE-ONLY: never INSERT from a status event. A session_id that no

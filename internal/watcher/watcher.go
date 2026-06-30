@@ -155,7 +155,15 @@ func (sw *SessionWatcher) handleNewFile(path string) {
 		return
 	}
 
+	prevSid := sw.fileToSession[path]
 	sw.fileToSession[path] = sess.SessionID
+
+	// Fork: the same per-PID file now carries a different sessionId — Claude Code
+	// rewrote it because the conversation forked (e.g. /clear) within one process.
+	// Retire the superseded session before registering the new one below.
+	if prevSid != "" && prevSid != sess.SessionID {
+		sw.retireForkedSession(prevSid, path)
+	}
 
 	if existing, ok := sw.knownSessions[sess.SessionID]; ok {
 		// Session already known — update filepath/PID/status
@@ -187,10 +195,57 @@ func (sw *SessionWatcher) handleChangedFile(path string) {
 		return
 	}
 
+	prevSid := sw.fileToSession[path]
 	sw.fileToSession[path] = sess.SessionID
+
+	// Fork detection: Claude Code keeps one ~/.claude/sessions/<pid>.json per
+	// process and rewrites its sessionId *in place* when the conversation forks
+	// (e.g. /clear starts a fresh session id + fresh JSONL in the same process).
+	// That arrives here as a plain Write. Without special-casing it we'd emit
+	// "changed" — a no-op status update — so no JSONL tailer is ever started for
+	// the new session and its output silently stops reaching clients until the
+	// daemon restarts (cold scanExisting then re-discovers it). Instead, retire
+	// the old session and surface the new one as a fresh discovery so a tailer
+	// starts live.
+	if prevSid != "" && prevSid != sess.SessionID {
+		sw.retireForkedSession(prevSid, path)
+		if _, known := sw.knownSessions[sess.SessionID]; !known {
+			sw.knownSessions[sess.SessionID] = sess
+			sw.emit(SessionEvent{
+				Action:   "discovered",
+				Session:  sess,
+				Filepath: path,
+			})
+			return
+		}
+	}
+
 	sw.knownSessions[sess.SessionID] = sess
 	sw.emit(SessionEvent{
 		Action:   "changed",
+		Session:  sess,
+		Filepath: path,
+	})
+}
+
+// retireForkedSession emits a "removed" event for prevSid when the per-PID
+// session file at `path` has been rewritten to point at a different sessionId
+// (a /clear-style fork). It is skipped if another file still tracks prevSid
+// (e.g. a concurrent --continue). The caller must have already repointed
+// fileToSession[path] at the NEW sessionId before calling this.
+func (sw *SessionWatcher) retireForkedSession(prevSid, path string) {
+	for otherPath, sid := range sw.fileToSession {
+		if sid == prevSid && otherPath != path {
+			return // still tracked by another file — not actually gone
+		}
+	}
+	sess, ok := sw.knownSessions[prevSid]
+	if !ok {
+		return
+	}
+	delete(sw.knownSessions, prevSid)
+	sw.emit(SessionEvent{
+		Action:   "removed",
 		Session:  sess,
 		Filepath: path,
 	})
@@ -244,7 +299,15 @@ func (sw *SessionWatcher) scanExisting() {
 			continue
 		}
 
+		prevSid := sw.fileToSession[path]
 		sw.fileToSession[path] = sess.SessionID
+
+		// Fork detection (see handleChangedFile): a per-PID file whose sessionId
+		// changed means the conversation forked (/clear). Retire the old session;
+		// the new id falls through to the "discovered" emission below.
+		if prevSid != "" && prevSid != sess.SessionID {
+			sw.retireForkedSession(prevSid, path)
+		}
 
 		if existing, ok := sw.knownSessions[sess.SessionID]; ok {
 			// Already known — check if status changed

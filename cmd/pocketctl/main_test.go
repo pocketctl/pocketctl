@@ -1,6 +1,10 @@
 package main
 
 import (
+	"io"
+	"log/slog"
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/pocketctl/pocketctl/internal/protocol"
@@ -88,6 +92,52 @@ func TestIsPermissionDenied(t *testing.T) {
 	for _, s := range []string{"network timeout", "404 not found", ""} {
 		if isPermissionDenied(s) {
 			t.Errorf("unexpected permission-denied for %q", s)
+		}
+	}
+}
+
+// TestStartSpinnerNonTTY verifies the spinner degrades cleanly when stdout is
+// not a terminal: it prints the message once (no escape codes), and the
+// returned stop function is safe to call.
+func TestStartSpinnerNonTTY(t *testing.T) {
+	// In `go test`, os.Stdout is a pipe (not a char device), so startSpinner
+	// takes the non-TTY branch.
+	stop := startSpinner("starting test")
+	if stop == nil {
+		t.Fatal("startSpinner returned nil stop func")
+	}
+	stop() // must not panic or block
+}
+
+func TestPruneOrphanSpools(t *testing.T) {
+	dir := t.TempDir()
+	mk := func(name string) {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte("x"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	const id = "daemon-abc123"
+	mk(id + ".log")         // current — keep
+	mk(id + ".log.tmp")     // current's transient rewrite — keep
+	mk("daemon-old111.log") // orphan — remove
+	mk("daemon-old222.log") // orphan — remove
+	mk("notes.txt")         // unrelated — keep
+
+	pruneOrphanSpools(dir, id, slog.New(slog.NewTextHandler(io.Discard, nil)))
+
+	got := map[string]bool{}
+	entries, _ := os.ReadDir(dir)
+	for _, e := range entries {
+		got[e.Name()] = true
+	}
+	for _, want := range []string{id + ".log", id + ".log.tmp", "notes.txt"} {
+		if !got[want] {
+			t.Errorf("expected %q kept, but it was removed", want)
+		}
+	}
+	for _, gone := range []string{"daemon-old111.log", "daemon-old222.log"} {
+		if got[gone] {
+			t.Errorf("expected orphan %q removed, but it remains", gone)
 		}
 	}
 }
