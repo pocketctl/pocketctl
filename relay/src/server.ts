@@ -3,7 +3,7 @@ import fastifyWebsocket from '@fastify/websocket';
 import fastifyCors from '@fastify/cors';
 import { createPool, initDB, parseDBUrl, createUser, getUserByEmail, getUserById, getUserProfile, registerDevice, removeDevice, cleanStaleTombstones, upsertDaemonAlias, deleteDaemon, updateDisplayName, updateEmail, addToIOSWaitlist, revokeToken, isTokenRevoked, cleanRevokedTokens, insertAuditLog, bindTokenToDaemon, updateSessionTitle, isSessionOwnedByUser, getSessionAllEvents, getTokenSummary, getTokensByDaemon, backfillSessionTokens, backfillSessionModel, backfillTokenDailyStats, aggregateDayIntoStats, cleanStaleEvents, getTokenDailySeries, getTokenByModel, getTokenByDaemon, getSessionTokenTrend } from './db.js';
 import { Router } from './router.js';
-import { hashPassword, verifyPassword, signAccessToken, signRefreshToken, verifyRefreshToken, verifyAccessTokenWithRevocation } from './auth.js';
+import { hashPassword, verifyPassword, signAccessToken, signRefreshToken, verifyRefreshToken, verifyAccessToken, verifyAccessTokenWithRevocation } from './auth.js';
 import { notifyUser, sessionStatusPush, daemonOfflinePush } from './push.js';
 import { sendEmailCode } from './config/email.js';
 import { generateCode, storeCode, verifyCode, hasPendingCode } from './config/verification.js';
@@ -1065,8 +1065,16 @@ async function main() {
       if (token) {
         const payload = await verifyAccessTokenWithRevocation(token, pool);
         if (!payload) {
+          // Resolve the owner for diagnostics: a revoked/rotated token still has
+          // a valid signature, so verifyAccessToken (no revocation check) yields
+          // the user/daemon even though the connection is correctly rejected.
+          // "unverified" = bad signature/format (likely forged or garbled).
+          const signed = verifyAccessToken(token);
+          const owner = signed
+            ? `user=${signed.userId} daemon=${signed.machine_id} jti=${signed.jti.slice(0, 8)}`
+            : 'unverified';
           const banSec = rateLimiter.recordAuthFailure(clientIp);
-          console.log(`WS rejected: type=${connType} ip=${clientIp} reason=invalid_token${banSec ? ` banned=${banSec}s` : ''}`);
+          console.log(`WS rejected: type=${connType} ip=${clientIp} reason=invalid_token ${owner}${banSec ? ` banned=${banSec}s` : ''}`);
           socket.close(4001, 'invalid token');
           return;
         }
