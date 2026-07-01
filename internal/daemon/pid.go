@@ -5,8 +5,17 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
-	"syscall"
 	"time"
+
+	"github.com/pocketctl/pocketctl/internal/platform"
+)
+
+// PR2 platform defaults: daemon 进程控制 + 单实例锁走 platform interface
+// (was direct syscall signal / unix.Flock). 公共 API(IsRunning/Stop/
+// AcquireInstanceLock) 签名不变,main.go 调用点零改。
+var (
+	defaultProc   = platform.NewProcessController()
+	defaultLocker = platform.NewInstanceLocker()
 )
 
 const pidDir = "/tmp/pocketctl"
@@ -80,15 +89,8 @@ func IsRunning() (int, bool) {
 	if err != nil {
 		return 0, false
 	}
-	proc, err := os.FindProcess(pid)
-	if err != nil {
-		return pid, false
-	}
-	// Signal 0 does not send a signal but checks if the process exists
-	if err := proc.Signal(syscall.Signal(0)); err != nil {
-		return pid, false
-	}
-	return pid, true
+	// PR2: 进程存活检查走 platform.ProcessController（was syscall signal 0）
+	return pid, defaultProc.IsAlive(pid)
 }
 
 // Stop sends SIGTERM to the daemon, waits up to 5s for graceful exit,
@@ -98,19 +100,15 @@ func Stop() error {
 	if err != nil {
 		return err
 	}
-	proc, err := os.FindProcess(pid)
-	if err != nil {
-		return fmt.Errorf("find process: %w", err)
-	}
 
-	// Check if process is actually running
-	if err := proc.Signal(syscall.Signal(0)); err != nil {
+	// Check if process is actually running (PR2: via platform.ProcessController, was signal 0)
+	if !defaultProc.IsAlive(pid) {
 		os.Remove(PIDPath())
 		return fmt.Errorf("daemon process not running (stale pid file removed)")
 	}
 
-	// Send SIGTERM
-	if err := proc.Signal(syscall.SIGTERM); err != nil {
+	// Send SIGTERM (PR2: via platform.ProcessController.Terminate)
+	if err := defaultProc.Terminate(pid); err != nil {
 		return fmt.Errorf("send SIGTERM: %w", err)
 	}
 
@@ -122,8 +120,8 @@ func Stop() error {
 	for {
 		select {
 		case <-deadline:
-			// Process didn't exit in time, SIGKILL it
-			if err := proc.Signal(syscall.SIGKILL); err != nil {
+			// Process didn't exit in time, SIGKILL it (PR2: via platform.ProcessController.Kill)
+			if err := defaultProc.Kill(pid); err != nil {
 				return fmt.Errorf("process did not exit after SIGTERM and SIGKILL failed: %w", err)
 			}
 			os.Remove(PIDPath())
@@ -136,7 +134,7 @@ func Stop() error {
 			return nil
 		case <-ticker.C:
 			// Check if process has exited
-			if err := proc.Signal(syscall.Signal(0)); err != nil {
+			if !defaultProc.IsAlive(pid) {
 				// Process is gone — clean up
 				os.Remove(PIDPath())
 				// NOTE: keep StatePath() (see SIGKILL branch above) so the
