@@ -16,6 +16,11 @@ final class SettingsViewModel {
     var relayURLValidationMessage: String? = nil
     var relayURLIsValid: Bool = true
     var isTestingConnection: Bool = false
+
+    /// 设置页签名卡热力图数据（全局，近 5 个月）。独立于用量页，失败静默。
+    private(set) var heatmapSeries: [TokenDailyPoint] = []
+    private(set) var heatmapLoading: Bool = false
+
     var connectionStatus: ConnectionStatus = .unknown
 
     var showEditProfile = false
@@ -102,6 +107,16 @@ final class SettingsViewModel {
         return "v\(version)"
     }
 
+    /// 热力图全局最大单日 (input+output)，作为 5 级分级基准。无数据时返回 1 避免 除 0。
+    var heatmapMax: Int {
+        max(1, heatmapSeries.map { $0.input + $0.output }.max() ?? 1)
+    }
+
+    /// 签名卡近 5 个月总消耗（input+output 求和），用于底部 caption。
+    var heatmapTotal: Int {
+        heatmapSeries.reduce(0) { $0 + $1.input + $1.output }
+    }
+
     // MARK: - Init
 
     init() {
@@ -136,6 +151,14 @@ final class SettingsViewModel {
                 // 拉取失败时保持本地缓存的订阅状态，不阻塞 UI
             }
         }
+    }
+
+    /// 加载签名卡热力图（全局，近 5 个月 ≈ 150 天）。失败静默，不阻塞 UI。
+    /// 窗口与用量页 `TokenUsageViewModel.fetchHeatmap()` 的 days:150 一致，保证签名与完整页同源。
+    func loadHeatmap() async {
+        heatmapLoading = true
+        heatmapSeries = (try? await apiClient.getTokenDashboard(daemon: "all", days: 150))?.dailySeries ?? []
+        heatmapLoading = false
     }
 
     // MARK: - Actions
