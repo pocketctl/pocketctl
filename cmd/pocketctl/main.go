@@ -38,7 +38,7 @@ import (
 	"github.com/pocketctl/pocketctl/internal/ws"
 )
 
-var version = "0.2.33"
+var version = "0.2.34"
 
 // DefaultRelayURL is the public production relay used when no --relay flag,
 // --prod config, or POCKETCTL_RELAY_URL env is provided. To target a local or
