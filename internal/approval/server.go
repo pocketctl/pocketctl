@@ -31,6 +31,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/pocketctl/pocketctl/internal/filelock"
+	"github.com/pocketctl/pocketctl/internal/platform"
 )
 
 // Request is the tool-use approval request delivered to the SessionManager
@@ -80,10 +81,15 @@ type OnRequestFunc func(req Request)
 // only tells clients to dismiss the now-stale approval card. Must not block.
 type OnCancelFunc func(requestID, sessionID string, allow *bool)
 
+// defaultIPCListener is the platform IPC listener (unix domain socket on Unix,
+// named pipe on Windows). PR2: replaces approval's direct net.Listen("unix").
+var defaultIPCListener = platform.NewIPCListener()
+
 // Server listens on a Unix domain socket and brokers approval requests.
 type Server struct {
 	socketPath string
 	logger     *slog.Logger
+	ipc        platform.IPCListener // PR2: 本地 IPC 监听 (unix socket/named pipe)，替代 net.Listen("unix")
 
 	ln net.Listener
 
@@ -118,6 +124,7 @@ func NewServer(socketPath string, logger *slog.Logger) *Server {
 	return &Server{
 		socketPath: socketPath,
 		logger:     logger,
+		ipc:        defaultIPCListener,
 		pending:    make(map[string]*pendingEntry),
 	}
 }
@@ -159,17 +166,14 @@ func (s *Server) SetFileLockManager(fl *filelock.LockManager) {
 // any stale socket file at the path first. Returns an error if the socket
 // cannot be created; safe to call once.
 func (s *Server) Start() error {
-	// Clean up a stale socket from a previous daemon run.
-	if err := os.Remove(s.socketPath); err != nil && !os.IsNotExist(err) {
-		return fmt.Errorf("remove stale approval socket: %w", err)
-	}
-	ln, err := net.Listen("unix", s.socketPath)
+	// PR2: IPC listen via platform.IPCListener (unix socket on Unix, named pipe
+	// on Windows). platform.Listen handles stale-socket removal + 0600 chmod
+	// internally — replaces the old direct net.Listen("unix", ...) + os.Remove
+	// + os.Chmod trio.
+	ln, err := s.ipc.Listen(s.socketPath)
 	if err != nil {
-		return fmt.Errorf("listen approval socket: %w", err)
+		return err
 	}
-	// Restrict to the owning user — approval requests carry no secret, but the
-	// socket should not be world-writable.
-	_ = os.Chmod(s.socketPath, 0600)
 
 	s.ln = ln
 	s.wg.Add(1)
