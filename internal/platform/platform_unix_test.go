@@ -5,6 +5,7 @@ package platform
 import (
 	"io"
 	"net"
+	"os"
 	"os/exec"
 	"testing"
 )
@@ -83,5 +84,16 @@ func TestInstanceLocker_Exclusion(t *testing.T) {
 
 	if _, err := locker.Acquire(path); err == nil {
 		t.Fatal("second Acquire should fail (lock already held)")
+	}
+}
+
+func TestProcessController_IsAlive(t *testing.T) {
+	pc := NewProcessController()
+	if !pc.IsAlive(os.Getpid()) {
+		t.Fatal("current process should be alive")
+	}
+	// 999999 几乎不可能是真实 pid；仅作「不存在」判据。
+	if pc.IsAlive(999999) {
+		t.Fatal("pid 999999 should not be alive")
 	}
 }
