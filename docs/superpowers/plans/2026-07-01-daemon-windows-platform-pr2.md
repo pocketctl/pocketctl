@@ -481,3 +481,116 @@ Expected: **通过**（Task 2 删 creack/pty + Task 3 删 syscall → session �
 git add internal/session/manager.go
 git commit -m "feat(platform): session isProcessAlive/KillSession 接入 ProcessController,删 syscall (PR2/7)"
 ```
+
+---
+
+## Task 4: approval.Server 接入 platform.IPCListener
+
+**Files:**
+- Modify: `internal/approval/server.go`（import platform；package-level `defaultIPCListener`；Server 加 `ipc` 字段；NewServer 用 default；Start 的 os.Remove+net.Listen+os.Chmod 三行 → `s.ipc.Listen` 一行）
+
+**设计**：和 Task 2 同策略——`NewServer(socketPath, logger)` 签名不变，approval 包用 package-level `defaultIPCListener = platform.NewIPCListener()`，7 个 NewServer 调用点（main.go:902 + 6 test）零改。PR1 的 `unixIPCListener.Listen` 内部已含 stale-socket removal + net.Listen + 0600 chmod，所以 Start 的三步收敛为一行。
+
+**Interfaces:**
+- Consumes: `platform.IPCListener.Listen(name) (net.Listener, error)`
+- Produces: approval 包不再直接 `net.Listen("unix", ...)`
+
+- [ ] **Step 1: server.go 加 platform import + package default + Server 加 ipc 字段**
+
+import 块加 `"github.com/pocketctl/pocketctl/internal/platform"`。
+
+在 `type Server struct {...}`（:84）**之前**插入：
+
+```go
+// defaultIPCListener is the platform IPC listener (unix domain socket on Unix,
+// named pipe on Windows). PR2: replaces approval's direct net.Listen("unix").
+var defaultIPCListener = platform.NewIPCListener()
+```
+
+`Server` struct 加 `ipc` 字段（紧挨 `socketPath`/`logger`，或在 `ln` 前）：
+
+```go
+	ipc        platform.IPCListener  // PR2: 本地 IPC 监听 (unix socket/named pipe)，替代 net.Listen("unix")
+```
+
+- [ ] **Step 2: NewServer 用 default**
+
+当前（:114-123）：
+```go
+func NewServer(socketPath string, logger *slog.Logger) *Server {
+	if logger == nil {
+		logger = slog.Default()
+	}
+	return &Server{
+		socketPath: socketPath,
+		logger:     logger,
+		pending:    make(map[string]*pendingEntry),
+	}
+}
+```
+改为（签名不变，加 `ipc: defaultIPCListener`）：
+```go
+func NewServer(socketPath string, logger *slog.Logger) *Server {
+	if logger == nil {
+		logger = slog.Default()
+	}
+	return &Server{
+		socketPath: socketPath,
+		logger:     logger,
+		ipc:        defaultIPCListener,
+		pending:    make(map[string]*pendingEntry),
+	}
+}
+```
+
+- [ ] **Step 3: Start() 三行收敛为 s.ipc.Listen**
+
+当前（:161-172 的开头）：
+```go
+func (s *Server) Start() error {
+	// Clean up a stale socket from a previous daemon run.
+	if err := os.Remove(s.socketPath); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("remove stale approval socket: %w", err)
+	}
+	ln, err := net.Listen("unix", s.socketPath)
+	if err != nil {
+		return fmt.Errorf("listen approval socket: %w", err)
+	}
+	// Restrict to the owning user — approval requests carry no secret, but the
+	// socket should not be world-writable.
+	_ = os.Chmod(s.socketPath, 0600)
+
+	s.ln = ln
+```
+改为：
+```go
+func (s *Server) Start() error {
+	// PR2: IPC listen via platform.IPCListener (unix socket on Unix, named pipe
+	// on Windows). platform.Listen handles stale-socket removal + 0600 chmod
+	// internally — replaces the old direct net.Listen("unix", ...) + os.Remove
+	// + os.Chmod trio.
+	ln, err := s.ipc.Listen(s.socketPath)
+	if err != nil {
+		return err
+	}
+
+	s.ln = ln
+```
+
+> Start 后续（`s.wg.Add(1); go s.acceptLoop(); logger.Info(...); return nil`）不变。
+> 改后 server.go 仍 import `net`（:88 `ln net.Listener`、:264 `handleConn(conn net.Conn)`）和 `os`（Close :205 `os.Remove`）。`net.Listen` 调用消失但 `net` 包类型仍用，不要删 net import。
+
+- [ ] **Step 4: 验证 Unix 零回归 + approval Windows 编译**
+
+Run: `go build ./... && go vet ./... && go test ./...`
+Expected: 全绿。7 个 NewServer 调用点零改。
+
+Run: `GOOS=windows go build ./internal/approval/`
+Expected: 通过（approval 包 Windows 编译障碍清除）。
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add internal/approval/server.go
+git commit -m "feat(platform): approval.Server 接入 platform.IPCListener,net.Listen unix 收敛 (PR2/7)"
+```
