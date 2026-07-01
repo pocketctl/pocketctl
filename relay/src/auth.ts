@@ -109,7 +109,7 @@ export function verifyRefreshToken(token: string): { userId: number; jti: string
 }
 
 /** Extract JWT payload without verifying signature (for preview/inspection). */
-export function decodeToken(token: string): { userId?: number; jti?: string; type?: string } | null {
+export function decodeToken(token: string): { userId?: number; jti?: string; type?: string; machine_id?: string } | null {
   try {
     const parts = token.split('.');
     if (parts.length !== 3) return null;

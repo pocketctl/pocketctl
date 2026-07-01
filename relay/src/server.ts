@@ -3,7 +3,7 @@ import fastifyWebsocket from '@fastify/websocket';
 import fastifyCors from '@fastify/cors';
 import { createPool, initDB, parseDBUrl, createUser, getUserByEmail, getUserById, getUserProfile, registerDevice, removeDevice, cleanStaleTombstones, upsertDaemonAlias, deleteDaemon, updateDisplayName, updateEmail, addToIOSWaitlist, revokeToken, isTokenRevoked, cleanRevokedTokens, insertAuditLog, bindTokenToDaemon, updateSessionTitle, isSessionOwnedByUser, getSessionAllEvents, getTokenSummary, getTokensByDaemon, backfillSessionTokens, backfillSessionModel, backfillTokenDailyStats, aggregateDayIntoStats, cleanStaleEvents, getTokenDailySeries, getTokenByModel, getTokenByDaemon, getSessionTokenTrend } from './db.js';
 import { Router } from './router.js';
-import { hashPassword, verifyPassword, signAccessToken, signRefreshToken, verifyRefreshToken, verifyAccessToken, verifyAccessTokenWithRevocation } from './auth.js';
+import { hashPassword, verifyPassword, signAccessToken, signRefreshToken, verifyRefreshToken, decodeToken, verifyAccessTokenWithRevocation } from './auth.js';
 import { notifyUser, sessionStatusPush, daemonOfflinePush } from './push.js';
 import { sendEmailCode } from './config/email.js';
 import { generateCode, storeCode, verifyCode, hasPendingCode } from './config/verification.js';
@@ -1065,14 +1065,16 @@ async function main() {
       if (token) {
         const payload = await verifyAccessTokenWithRevocation(token, pool);
         if (!payload) {
-          // Resolve the owner for diagnostics: a revoked/rotated token still has
-          // a valid signature, so verifyAccessToken (no revocation check) yields
-          // the user/daemon even though the connection is correctly rejected.
-          // "unverified" = bad signature/format (likely forged or garbled).
-          const signed = verifyAccessToken(token);
-          const owner = signed
-            ? `user=${signed.userId} daemon=${signed.machine_id} jti=${signed.jti.slice(0, 8)}`
-            : 'unverified';
+          // Resolve the claimed owner for diagnostics. The token is rejected
+          // regardless (revoked/expired/bad sig), but a real zombie holds a
+          // structurally-intact expired token whose payload still decodes — so
+          // decodeToken (no signature/exp check) surfaces the user/daemon it
+          // belongs to. "claimed" because the payload is unsigned; a forged
+          // token could lie, but the connection is never authorized on it.
+          const decoded = decodeToken(token);
+          const owner = decoded && decoded.userId
+            ? `claimed user=${decoded.userId} daemon=${decoded.machine_id || '?'} jti=${(decoded.jti || '').slice(0, 8)}`
+            : 'malformed';
           const banSec = rateLimiter.recordAuthFailure(clientIp);
           console.log(`WS rejected: type=${connType} ip=${clientIp} reason=invalid_token ${owner}${banSec ? ` banned=${banSec}s` : ''}`);
           socket.close(4001, 'invalid token');
