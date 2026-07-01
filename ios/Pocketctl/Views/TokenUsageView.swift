@@ -334,9 +334,9 @@ struct TokenDonutChart: View {
 
 // MARK: - Heatmap（GitHub 风格消耗热力图，对齐 web `TokenUsage.vue` 的 heatmapCols/heatLevel）
 
-/// 22 周 × 7 天的日历对齐热力图（≈近 5 个月）。列=周（Sun..Sat），最右列=当前周。
+/// GitHub 风格日历对齐消耗热力图。列数（周数）/cell 尺寸/滚动/交互均可配置。
+/// 默认 22 周、cell 13pt、横向滚动默认靠右、可点击 tooltip（用量页）；签名卡可传更小 cell + 关闭滚动与交互。
 /// 5 级强度：level 0 = 无数据（中性灰），1–4 = `pcAccent` 透明度 0.22/0.42/0.66/0.92。
-/// 横向滚动，默认定位到最右侧（最近一周）。
 struct TokenHeatmap: View {
     let series: [TokenDailyPoint]
     let maxVal: Int
@@ -500,8 +500,9 @@ struct TokenHeatmap: View {
         }
     }
 
+    @ViewBuilder
     private func heatmapCell(_ cell: TokenHeatmapCell) -> some View {
-        RoundedRectangle(cornerRadius: 2)
+        let cellView = RoundedRectangle(cornerRadius: 2)
             .fill(TokenHeatmap.color(level: cell.level))
             .frame(width: cellSize, height: cellSize)
             .overlay(
@@ -509,11 +510,16 @@ struct TokenHeatmap: View {
                     .stroke(Color.pcAccent, lineWidth: 1)
                     .opacity(interactive && selected?.date == cell.date && cell.hasData ? 1 : 0)
             )
-            .contentShape(Rectangle())
-            .onTapGesture {
-                guard interactive, cell.hasData else { return }
-                selected = (selected?.date == cell.date) ? nil : cell
-            }
+        if interactive {
+            cellView
+                .contentShape(Rectangle())
+                .onTapGesture {
+                    guard cell.hasData else { return }
+                    selected = (selected?.date == cell.date) ? nil : cell
+                }
+        } else {
+            cellView
+        }
     }
 
     private func shortMonth(_ m: Int) -> String {
