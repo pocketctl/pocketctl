@@ -61,3 +61,12 @@ func (windowsDaemonizer) ForkDetached(string, []string, []string) (*os.Process, 
 	return nil, ErrUnsupported
 }
 func (windowsDaemonizer) Restart(string, []string) error { return ErrUnsupported }
+
+// NewServiceManager 返回 Windows 服务管理器（PR1 stub）。PR4 实现 Windows Service（SCM）。
+func NewServiceManager() ServiceManager { return windowsServiceManager{} }
+
+type windowsServiceManager struct{}
+
+func (windowsServiceManager) Install(ServiceOpts) error      { return ErrUnsupported }
+func (windowsServiceManager) Uninstall() error               { return ErrUnsupported }
+func (windowsServiceManager) Status() (ServiceStatus, error) { return ServiceStatus{}, ErrUnsupported }
