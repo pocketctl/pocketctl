@@ -4,6 +4,7 @@ package platform
 
 import (
 	"net"
+	"os"
 	"os/exec"
 )
 
@@ -49,3 +50,14 @@ type windowsProcessController struct{}
 func (windowsProcessController) IsAlive(int) bool    { return false }
 func (windowsProcessController) Terminate(int) error { return ErrUnsupported }
 func (windowsProcessController) Kill(int) error      { return ErrUnsupported }
+
+// NewDaemonizer 返回 Windows daemonizer（PR1 stub）。
+// PR4 实现：ForkDetached=CREATE_NO_WINDOW|DETACHED_PROCESS。
+func NewDaemonizer() Daemonizer { return windowsDaemonizer{} }
+
+type windowsDaemonizer struct{}
+
+func (windowsDaemonizer) ForkDetached(string, []string, []string) (*os.Process, error) {
+	return nil, ErrUnsupported
+}
+func (windowsDaemonizer) Restart(string, []string) error { return ErrUnsupported }

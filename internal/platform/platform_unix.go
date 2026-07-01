@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"syscall"
 
 	"github.com/creack/pty"
 	"golang.org/x/sys/unix"
@@ -119,4 +120,33 @@ func (unixProcessController) Kill(pid int) error {
 		return fmt.Errorf("find process: %w", err)
 	}
 	return proc.Signal(unix.SIGKILL)
+}
+
+// NewDaemonizer 返回基于 Setsid fork 的 Unix daemonizer。对齐现有 main.go 的
+// daemonize（719）与 restart（1688）逻辑（PR2 接入时替换）。
+func NewDaemonizer() Daemonizer { return unixDaemonizer{} }
+
+type unixDaemonizer struct{}
+
+func (unixDaemonizer) ForkDetached(self string, args []string, env []string) (*os.Process, error) {
+	cmd := &exec.Cmd{
+		Path: self,
+		Args: append([]string{self}, args...),
+		Env:  env,
+		// Setsid：新会话，脱离调用方终端。这是「后台化」的核心。
+		SysProcAttr: &syscall.SysProcAttr{Setsid: true},
+	}
+	if err := cmd.Start(); err != nil {
+		return nil, fmt.Errorf("fork detached: %w", err)
+	}
+	return cmd.Process, nil
+}
+
+func (unixDaemonizer) Restart(self string, args []string) error {
+	cmd := exec.Command(self, args...)
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+	if err := cmd.Start(); err != nil {
+		return fmt.Errorf("restart spawn: %w", err)
+	}
+	return nil
 }
