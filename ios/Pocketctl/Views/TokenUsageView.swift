@@ -340,13 +340,34 @@ struct TokenDonutChart: View {
 struct TokenHeatmap: View {
     let series: [TokenDailyPoint]
     let maxVal: Int
+    let weeks: Int
+    let cellSize: CGFloat
+    let cellGap: CGFloat
+    let interactive: Bool
+    let scrollable: Bool
 
     @State private var selected: TokenHeatmapCell?
 
-    private static let weeks = 22
-    /// cell 尺寸与间隙，对齐 web 的 12px/gap 3px（略放大到 13pt 以适合手指点击）。
-    private let cellSize: CGFloat = 13
-    private let cellGap: CGFloat = 3
+    /// - Parameters:
+    ///   - weeks: 列数（周数）。默认 22（≈近 5 个月）。
+    ///   - cellSize/cellGap: 单元格尺寸与间隙。默认 13/3（对齐 web 12px/gap 3px，略放大适合手指点击）。
+    ///   - interactive: 是否启用点击 tooltip。默认 true（用量页）。签名卡传 false。
+    ///   - scrollable: 是否横向滚动。默认 true（用量页）。签名卡传 false（cell 缩小后 22 周可铺满屏宽）。
+    init(series: [TokenDailyPoint],
+         maxVal: Int,
+         weeks: Int = 22,
+         cellSize: CGFloat = 13,
+         cellGap: CGFloat = 3,
+         interactive: Bool = true,
+         scrollable: Bool = true) {
+        self.series = series
+        self.maxVal = maxVal
+        self.weeks = weeks
+        self.cellSize = cellSize
+        self.cellGap = cellGap
+        self.interactive = interactive
+        self.scrollable = scrollable
+    }
 
     /// 预计算网格：与 web `heatmapCols` 完全同构。使用本地时区格式化日期，
     /// 不走 UTC（web 曾因此导致单元格查表失败，见 TokenUsage.vue:304-314 注释）。
@@ -359,7 +380,7 @@ struct TokenHeatmap: View {
         let thisSunday = cal.date(byAdding: .day, value: -(todayDow - 1), to: today)!
 
         var cols: [TokenHeatmapColumn] = []
-        for w in stride(from: TokenHeatmap.weeks - 1, through: 0, by: -1) {
+        for w in stride(from: weeks - 1, through: 0, by: -1) {
             var cells: [TokenHeatmapCell] = []
             for dow in 0..<7 {
                 let dt = cal.date(byAdding: .day, value: -w * 7 + dow, to: thisSunday)!
@@ -418,8 +439,8 @@ struct TokenHeatmap: View {
     var body: some View {
         let cols = columns
         return VStack(alignment: .leading, spacing: PCSpacing.xs) {
-            // 选中日的浮层提示
-            if let sel = selected, !sel.date.isEmpty {
+            // 选中日的浮层提示（仅 interactive）
+            if interactive, let sel = selected, !sel.date.isEmpty {
                 HStack(spacing: 6) {
                     Text(sel.date).font(PCFont.mono(12, weight: .semibold)).foregroundStyle(Color.pcFg)
                     Text("·").foregroundStyle(Color.pcFgTertiary)
@@ -431,16 +452,18 @@ struct TokenHeatmap: View {
                 .overlay(RoundedRectangle(cornerRadius: PCRadius.sm).stroke(Color.pcBorderLight, lineWidth: 1))
                 .cornerRadius(PCRadius.sm)
             }
-            // 横向滚动网格：默认滚到最右侧（最近一周）
+            grid(cols)
+        }
+    }
+
+    /// 网格：scrollable 时横向滚动并默认靠右；否则直接铺排（签名卡）。
+    @ViewBuilder
+    private func grid(_ cols: [TokenHeatmapColumn]) -> some View {
+        if scrollable {
             ScrollViewReader { proxy in
                 ScrollView(.horizontal, showsIndicators: false) {
-                    HStack(alignment: .top, spacing: cellGap) {
-                        ForEach(cols) { col in
-                            heatmapColumn(col)
-                                .id(col.id)
-                        }
-                    }
-                    .padding(.trailing, 2)
+                    heatmapRow(cols)
+                        .padding(.trailing, 2)
                 }
                 .onAppear {
                     // 定位到最右侧一列（最近一周 = id 0）；延迟一帧确保布局完成
@@ -448,6 +471,17 @@ struct TokenHeatmap: View {
                         withAnimation(nil) { proxy.scrollTo(0, anchor: .trailing) }
                     }
                 }
+            }
+        } else {
+            heatmapRow(cols)
+        }
+    }
+
+    private func heatmapRow(_ cols: [TokenHeatmapColumn]) -> some View {
+        HStack(alignment: .top, spacing: cellGap) {
+            ForEach(cols) { col in
+                heatmapColumn(col)
+                    .id(col.id)
             }
         }
     }
@@ -473,11 +507,11 @@ struct TokenHeatmap: View {
             .overlay(
                 RoundedRectangle(cornerRadius: 2)
                     .stroke(Color.pcAccent, lineWidth: 1)
-                    .opacity(selected?.date == cell.date && cell.hasData ? 1 : 0)
+                    .opacity(interactive && selected?.date == cell.date && cell.hasData ? 1 : 0)
             )
             .contentShape(Rectangle())
             .onTapGesture {
-                guard cell.hasData else { return }
+                guard interactive, cell.hasData else { return }
                 selected = (selected?.date == cell.date) ? nil : cell
             }
     }
