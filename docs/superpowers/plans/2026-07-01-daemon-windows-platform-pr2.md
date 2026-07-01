@@ -412,3 +412,72 @@ git commit -m "feat(platform): session PTY 接入 platform.PTYProvider,ProcessSt
 ```
 
 > 注意：Task 2 后 session 包 Windows 仍编译失败（manager.go :1894/:1943 的 syscall.Kill/SIGKILL 未清，那是 Task 3）。本 task 只保证 Unix 零回归 + session 不再依赖 creack/pty。
+
+---
+
+## Task 3: session isProcessAlive/KillSession 接入 ProcessController
+
+**Files:**
+- Modify: `internal/session/manager.go`（`isProcessAlive` 改用 `defaultProc.IsAlive`；`KillSession` 强杀改用 `defaultProc.Kill`；删 `"syscall"` import）
+
+**Interfaces:**
+- Consumes: `defaultProc`（Task 2 加的 package-level `platform.ProcessController`）的 `IsAlive(pid)`/`Kill(pid)`
+- Produces: session 包不再 import `syscall`；session 包 Windows 编译障碍清除（creack/pty Task2 清 + syscall Task3 清）
+
+- [ ] **Step 1: isProcessAlive 改用 defaultProc.IsAlive**
+
+当前（manager.go `isProcessAlive` func）：
+```go
+// isProcessAlive checks if a process with the given PID is running.
+func isProcessAlive(pid int) bool {
+	err := syscall.Kill(pid, 0)
+	return err == nil
+}
+```
+改为：
+```go
+// isProcessAlive checks if a process with the given PID is running.
+// PR2: delegates to the platform ProcessController (was syscall.Kill), so
+// session no longer imports syscall.
+func isProcessAlive(pid int) bool {
+	return defaultProc.IsAlive(pid)
+}
+```
+
+- [ ] **Step 2: KillSession 强杀改用 defaultProc.Kill**
+
+当前（`KillSession` 内 deadline 分支）：
+```go
+			case <-deadline:
+				// Force kill if still running
+				if ps.Cmd.Process != nil {
+					ps.Cmd.Process.Signal(syscall.SIGKILL)
+				}
+```
+改为：
+```go
+			case <-deadline:
+				// Force kill if still running (PR2: via platform ProcessController, was syscall.SIGKILL)
+				if ps.Cmd.Process != nil {
+					_ = defaultProc.Kill(ps.Cmd.Process.Pid)
+				}
+```
+
+- [ ] **Step 3: 删 manager.go 的 `"syscall"` import**
+
+Step 1/2 后 manager.go 不再用 `syscall`。删 import 块里的 `"syscall"`（先 `go build` 确认无 "imported and not used" 之外的错误；若 vet 报 unused 即删；若发现还有其它 syscall 用法，报告 DONE_WITH_CONCERNS 不要猜）。
+
+- [ ] **Step 4: 验证 Unix 零回归 + session 包 Windows 编译**
+
+Run: `go build ./... && go vet ./... && go test ./...`
+Expected: 全绿。`grep -n 'syscall' internal/session/manager.go` 应无命中。
+
+Run: `GOOS=windows go build ./internal/session/`
+Expected: **通过**（Task 2 删 creack/pty + Task 3 删 syscall → session 包 Windows 编译障碍清除，这是 PR2 的一个里程碑）。
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add internal/session/manager.go
+git commit -m "feat(platform): session isProcessAlive/KillSession 接入 ProcessController,删 syscall (PR2/7)"
+```
