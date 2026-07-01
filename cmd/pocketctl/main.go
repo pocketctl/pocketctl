@@ -15,7 +15,6 @@ import (
 	"runtime"
 	"strings"
 	"sync/atomic"
-	"syscall"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -28,6 +27,7 @@ import (
 	"github.com/pocketctl/pocketctl/internal/discovery"
 	"github.com/pocketctl/pocketctl/internal/i18n"
 	"github.com/pocketctl/pocketctl/internal/notify"
+	"github.com/pocketctl/pocketctl/internal/platform"
 	"github.com/pocketctl/pocketctl/internal/protocol"
 	"github.com/pocketctl/pocketctl/internal/service"
 	"github.com/pocketctl/pocketctl/internal/session"
@@ -38,6 +38,13 @@ import (
 )
 
 var version = "0.2.20"
+
+// PR2 platform defaults for the daemon entry: daemonize + service via platform
+// interface (was direct syscall.SysProcAttr{Setsid} + internal/service).
+var (
+	daemonizer = platform.NewDaemonizer()
+	serviceMgr = platform.NewServiceManager()
+)
 
 // DefaultRelayURL is the public production relay used when no --relay flag,
 // --prod config, or POCKETCTL_RELAY_URL env is provided. To target a local or
@@ -708,18 +715,9 @@ func cmdDaemonStart(args []string) {
 			fmt.Fprintln(os.Stderr, i18n.T("error.executable_path", err))
 			os.Exit(1)
 		}
-		child := &exec.Cmd{
-			Path:   exe,
-			Args:   os.Args,
-			Env:    childEnv,
-			Stdin:  nil,
-			Stdout: nil,
-			Stderr: nil,
-			SysProcAttr: &syscall.SysProcAttr{
-				Setsid: true,
-			},
-		}
-		if err := child.Start(); err != nil {
+		// PR2: daemonize fork via platform.Daemonizer (was direct exec.Cmd + SysProcAttr{Setsid}).
+		proc, err := daemonizer.ForkDetached(exe, os.Args[1:], childEnv)
+		if err != nil {
 			fmt.Fprintln(os.Stderr, i18n.T("error.daemonize", err))
 			os.Exit(1)
 		}
@@ -751,7 +749,7 @@ func cmdDaemonStart(args []string) {
 			fmt.Println(i18n.T("daemon.start_failed", daemon.LogPath()))
 			os.Exit(1)
 		}
-		fmt.Println(i18n.T("daemon.started", preForkID, child.Process.Pid))
+		fmt.Println(i18n.T("daemon.started", preForkID, proc.Pid))
 		fmt.Println(i18n.T("daemon.version", version))
 		if connected {
 			fmt.Println(i18n.T("daemon.relay_connected", url))
@@ -1680,16 +1678,12 @@ func handleCommands(ctx context.Context, client *ws.Client, sm *session.SessionM
 						logger.Error("daemon restart failed: get executable", "error", err)
 						return
 					}
-					cmd := exec.Command(exe, os.Args[1:]...)
-					cmd.Stdout = nil
-					cmd.Stderr = nil
-					cmd.Stdin = nil
-					cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
-					if err := cmd.Start(); err != nil {
+					// PR2: restart via platform.Daemonizer (was exec.Command + SysProcAttr{Setsid}).
+					if err := daemonizer.Restart(exe, os.Args[1:]); err != nil {
 						logger.Error("daemon restart failed: spawn", "error", err)
 						return
 					}
-					logger.Info("new daemon spawned, exiting", "newPID", cmd.Process.Pid)
+					logger.Info("new daemon spawned, exiting")
 					os.Exit(0)
 				})
 
