@@ -594,3 +594,174 @@ Expected: 通过（approval 包 Windows 编译障碍清除）。
 git add internal/approval/server.go
 git commit -m "feat(platform): approval.Server 接入 platform.IPCListener,net.Listen unix 收敛 (PR2/7)"
 ```
+
+---
+
+## Task 5: daemon pid/instance 内部委托 platform（公共 API 不变）
+
+**决策 1 落地**：`daemon.IsRunning`/`Stop`/`AcquireInstanceLock` 公共 API 签名不变（main.go 6 调用点零改），内部改委托 `platform.ProcessController`/`InstanceLocker`。删 `instance_unix.go`+`instance_windows.go`（其功能被 platform 接管），合并成无 build-tag 的 `instance.go`。
+
+**Files:**
+- Modify: `internal/daemon/pid.go`（加 platform import + package-level `defaultProc`/`defaultLocker`；IsRunning/Stop 改用 defaultProc；删 syscall import）
+- Delete: `internal/daemon/instance_unix.go`
+- Delete: `internal/daemon/instance_windows.go`
+- Create: `internal/daemon/instance.go`（`AcquireInstanceLock` 调 `defaultLocker.Acquire`，无 build tag）
+
+**Interfaces:**
+- Consumes: `platform.NewProcessController()`（IsAlive/Terminate/Kill）、`platform.NewInstanceLocker()`（Acquire）
+- Produces: daemon 包 IsRunning/Stop/AcquireInstanceLock 内部走 platform；main.go 6 调用点零改；daemon 不再用 syscall signal / unix.Flock
+
+- [ ] **Step 1: pid.go 加 platform import + package defaults**
+
+pid.go import 块：删 `"syscall"`，加 `"github.com/pocketctl/pocketctl/internal/platform"`。
+
+在 import 块后、`const pidDir` 前（或 pid.go 顶部常量区前）插入 package defaults：
+
+```go
+// PR2 platform defaults: daemon 进程控制 + 单实例锁走 platform interface
+// (was direct syscall signal / unix.Flock). 公共 API(IsRunning/Stop/
+// AcquireInstanceLock) 签名不变,main.go 调用点零改。
+var (
+	defaultProc   = platform.NewProcessController()
+	defaultLocker = platform.NewInstanceLocker()
+)
+```
+
+- [ ] **Step 2: pid.go IsRunning 改用 defaultProc.IsAlive**
+
+当前（:78-92）：
+```go
+func IsRunning() (int, bool) {
+	pid, err := ReadPID()
+	if err != nil {
+		return 0, false
+	}
+	proc, err := os.FindProcess(pid)
+	if err != nil {
+		return pid, false
+	}
+	// Signal 0 does not send a signal but checks if the process exists
+	if err := proc.Signal(syscall.Signal(0)); err != nil {
+		return pid, false
+	}
+	return pid, true
+}
+```
+改为：
+```go
+func IsRunning() (int, bool) {
+	pid, err := ReadPID()
+	if err != nil {
+		return 0, false
+	}
+	// PR2: 进程存活检查走 platform.ProcessController（was syscall signal 0）
+	return pid, defaultProc.IsAlive(pid)
+}
+```
+
+- [ ] **Step 3: pid.go Stop 改用 defaultProc（保留 SIGTERM→轮询5s→SIGKILL 组合逻辑）**
+
+当前（:96-148）整段 `Stop` 函数体替换。注意组合语义必须等价（Terminate=SIGTERM，Kill=SIGKILL，IsAlive=signal-0 probe）：
+
+```go
+func Stop() error {
+	pid, err := ReadPID()
+	if err != nil {
+		return err
+	}
+
+	// Check if process is actually running (PR2: via platform.ProcessController, was signal 0)
+	if !defaultProc.IsAlive(pid) {
+		os.Remove(PIDPath())
+		return fmt.Errorf("daemon process not running (stale pid file removed)")
+	}
+
+	// Send SIGTERM (PR2: via platform.ProcessController.Terminate)
+	if err := defaultProc.Terminate(pid); err != nil {
+		return fmt.Errorf("send SIGTERM: %w", err)
+	}
+
+	// Wait for process to exit with timeout
+	deadline := time.After(5 * time.Second)
+	ticker := time.NewTicker(100 * time.Millisecond)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-deadline:
+			// Process didn't exit in time, SIGKILL it (PR2: via platform.ProcessController.Kill)
+			if err := defaultProc.Kill(pid); err != nil {
+				return fmt.Errorf("process did not exit after SIGTERM and SIGKILL failed: %w", err)
+			}
+			os.Remove(PIDPath())
+			// NOTE: do NOT remove StatePath() here — daemon.state 持久化 daemon_id,
+			// 必须跨 stop/start 存活(同物理主机保持一个稳定 ID)。
+			return nil
+		case <-ticker.C:
+			// Check if process has exited
+			if !defaultProc.IsAlive(pid) {
+				// Process is gone — clean up
+				os.Remove(PIDPath())
+				return nil
+			}
+		}
+	}
+}
+```
+
+> 保留了原 Stop 关于 StatePath 的注释语义（虽然原代码注释在 SIGKILL 分支，这里移到 Kill 分支保持提醒）。逻辑等价：IsAlive↔signal-0、Terminate↔SIGTERM、Kill↔SIGKILL。
+
+- [ ] **Step 4: 删 instance_unix.go + instance_windows.go，建 instance.go**
+
+删除 `internal/daemon/instance_unix.go` 和 `internal/daemon/instance_windows.go`（git rm）。
+
+创建 `internal/daemon/instance.go`（**无 build tag**——platform 自己处理平台分支）：
+
+```go
+package daemon
+
+import (
+	"fmt"
+	"io"
+	"os"
+	"path/filepath"
+)
+
+// AcquireInstanceLock takes an exclusive, non-blocking lock ensuring only one
+// daemon process runs per host. PR2: delegates to platform.InstanceLocker
+// (was direct unix.Flock in the former instance_unix.go). The lock is released
+// when the returned Closer is closed — and, critically, is ALSO released
+// automatically by the OS the moment the process dies (even via SIGKILL or a
+// crash), making it race-free vs the PID-file check.
+//
+// Public API unchanged — main.go calls daemon.AcquireInstanceLock() with zero
+// modification. Replaces the former instance_unix.go / instance_windows.go
+// build-tag split (platform now owns the platform split).
+func AcquireInstanceLock() (io.Closer, error) {
+	if err := os.MkdirAll(pidDir, 0o755); err != nil {
+		return nil, fmt.Errorf("create %s: %w", pidDir, err)
+	}
+	path := filepath.Join(pidDir, "daemon.lock")
+	lock, err := defaultLocker.Acquire(path)
+	if err != nil {
+		return nil, err // platform 已包装 "another pocketctl daemon is already running..."
+	}
+	return lock, nil
+}
+```
+
+- [ ] **Step 5: 验证 Unix 零回归 + daemon Windows 编译**
+
+Run: `go build ./... && go vet ./... && go test ./...`
+Expected: 全绿。main.go 的 `daemon.IsRunning()`/`Stop()`/`AcquireInstanceLock()` 6 个调用点零改。pid.go 不再 import syscall。
+
+Run: `GOOS=windows go build ./internal/daemon/`
+Expected: 通过（pid.go 无 syscall；instance.go 无 build tag；platform_windows.go 的 stub 接管锁/进程）。若 machineid.go/wsl.go 等还有 Windows 障碍，报告 DONE_WITH_CONCERNS 列出（不硬堵，可在 Task 7 处理）。
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add internal/daemon/pid.go internal/daemon/instance.go
+git rm internal/daemon/instance_unix.go internal/daemon/instance_windows.go
+git commit -m "feat(platform): daemon pid/instance 内部委托 platform,公共 API 不变 (PR2/7)"
+```
