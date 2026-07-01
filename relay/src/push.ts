@@ -201,6 +201,18 @@ export function daemonOfflinePush(hostname: string, daemonId: string): PushPaylo
 }
 
 /**
+ * Build push payload for daemon online (reconnect after a genuine offline).
+ * Symmetric to daemonOfflinePush. Pro-only (gated in router via maybePushToPro).
+ */
+export function daemonOnlinePush(hostname: string, daemonId: string): PushPayload {
+  return {
+    title: '主机上线',
+    body: `${hostname} 已恢复连接`,
+    data: { type: 'daemon_online', daemon_id: daemonId },
+  };
+}
+
+/**
  * Build push payload for a tool-use approval request.
  * The agent is blocked waiting for a Yes/No; pushing to all of the owner's
  * devices so the agent doesn't stall while the app is backgrounded/killed.
@@ -272,4 +284,79 @@ function truncate(s: string, max: number): string {
   const trimmed = s.trim().replace(/\s+/g, ' ');
   if (trimmed.length <= max) return trimmed;
   return trimmed.slice(0, max - 1) + '…';
+}
+
+/**
+ * Build push payload for a high-risk tool-use approval (Pro-only, sent in
+ * addition to the regular approvalPush so Pro users get an extra warning).
+ */
+export function highRiskPush(
+  sessionTitle: string,
+  toolName: string,
+  summary: string,
+  sessionId: string,
+  requestId: string,
+): PushPayload {
+  const tool = toolName || '工具';
+  return {
+    title: '⚠️ 高危操作待审批',
+    body: `${tool}: ${truncate(summary, 60) || '检测到高危操作'}`,
+    data: { type: 'high_risk', session_id: sessionId, request_id: requestId },
+  };
+}
+
+/**
+ * Detect high-risk commands / targets from a tool's human-readable summary
+ * (the output of summarizeToolInput). Pure function, independently testable.
+ *
+ * Bash/Run: destructive shell patterns. Edit/Write: sensitive system paths.
+ * Returns true when the operation is high-risk (Pro users get an extra push).
+ */
+export function isHighRiskCommand(tool: string, summary: string): boolean {
+  const s = summary.toLowerCase();
+  if (!s) return false;
+  const lower = tool.toLowerCase();
+
+  // Shell commands — match destructive patterns.
+  if (lower === 'bash' || lower === 'run' || lower === 'sh') {
+    const dangerous = [
+      /\brm\s+-[a-z]*r[a-z]*f|\brm\s+-[a-z]*f[a-z]*r/, // rm -rf / rm -fr
+      /\bsudo\b/,
+      /\bchmod\s+777\b/,
+      /\bmkfs\b/,
+      /\bdd\s+if=/,
+      /\/dev\/sd[a-z]/,
+      /\bgit\s+push\s+(-f|--force)\b/,
+      /\bgit\s+push\s+.*--force/,
+      /\bcurl\b.*\|\s*(sh|bash)\b/,
+      /\bwget\b.*\|\s*(sh|bash)\b/,
+      /\bdrop\s+(table|database)\b/i,
+      /\btruncate\s+table\b/i,
+      /\bkill\s+-9\b/,
+      /\biptables\b/,
+      /\b:\(\)\s*\{.*\};:/, // fork bomb
+    ];
+    return dangerous.some((re) => re.test(s));
+  }
+
+  // File edits/writes — sensitive system paths.
+  if (typeof tool === 'string' && ['edit', 'write', 'multiedit', 'create'].includes(lower)) {
+    const sensitivePaths = [
+      '/etc/',
+      '/usr/',
+      '/system/',
+      '/library/',
+      '~/.ssh/',
+      '.ssh/',
+      '/etc/passwd',
+      '/etc/sudoers',
+      '~/.bashrc',
+      '~/.zshrc',
+      '~/.bash_profile',
+      '/boot/',
+    ];
+    return sensitivePaths.some((p) => s.includes(p));
+  }
+
+  return false;
 }
