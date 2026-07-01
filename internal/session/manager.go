@@ -13,7 +13,6 @@ import (
 	"sort"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
 
 	"github.com/google/uuid"
@@ -1914,9 +1913,10 @@ func (sm *SessionManager) sendToIdleTerminal(ctx context.Context, ps *ProcessSta
 }
 
 // isProcessAlive checks if a process with the given PID is running.
+// PR2: delegates to the platform ProcessController (was syscall.Kill), so
+// session no longer imports syscall.
 func isProcessAlive(pid int) bool {
-	err := syscall.Kill(pid, 0)
-	return err == nil
+	return defaultProc.IsAlive(pid)
 }
 
 func (sm *SessionManager) KillSession(sessionID string) error {
@@ -1962,9 +1962,9 @@ func (sm *SessionManager) KillSession(sessionID string) error {
 		case <-ticker.C:
 			// keep polling
 		case <-deadline:
-			// Force kill if still running
+			// Force kill if still running (PR2: via platform ProcessController, was syscall.SIGKILL)
 			if ps.Cmd.Process != nil {
-				ps.Cmd.Process.Signal(syscall.SIGKILL)
+				_ = defaultProc.Kill(ps.Cmd.Process.Pid)
 			}
 			sm.mu.Lock()
 			ps.Status = protocol.StatusKilled
