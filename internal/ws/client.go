@@ -69,6 +69,7 @@ type OnEvent func(evt protocol.DaemonEvent) []protocol.DaemonEvent
 type Client struct {
 	relayURL        string
 	token           string
+	tokenMu         sync.Mutex // protects token (refreshable at runtime via UpdateToken)
 	conn            *websocket.Conn
 	connMu          sync.Mutex
 	writeMu         sync.Mutex // protects WriteMessage on conn
@@ -96,6 +97,13 @@ type Client struct {
 	OnStateChange      OnConnectStateChange
 	OnReconnected      func()  // called after successful (re)connection + register
 	OnEvent            OnEvent // optional hook: inspect/derive events before forwarding to relay
+	// OnTokenRefresh is invoked when the relay rejects us with 4001 (invalid/expired
+	// access token). It must attempt a refresh-token exchange and return the new
+	// access token + true on success. On success the client reconnects with the new
+	// token (no backoff, no auth-reject escalation); on failure the rejection count
+	// keeps climbing and eventually the client parks. May be nil — without it the
+	// client behaves as if refresh always fails (stops after authRejectStopThreshold).
+	OnTokenRefresh func() (newAccessToken string, ok bool)
 
 	// reconnectAttempt counts consecutive connections that never reached a
 	// successful registration; it drives the exponential backoff and is reset to
@@ -107,11 +115,17 @@ type Client struct {
 	// it is atomic.
 	reconnectAttempt atomic.Int64
 
-	// authRejectCount counts CONSECUTIVE relay auth rejections (close 4001). It is
-	// incremented in readPump on a 4001 close, reset to 0 in onRegisterAck (a
-	// healthy connection), and read in Run to decide when to stop reconnecting
+	// authRejectCount counts CONSECUTIVE relay auth rejections (close 4001) that
+	// were NOT followed by a successful token refresh. Incremented in readPump on a
+	// 4001 close, reset in onRegisterAck (healthy connection) and after a successful
+	// OnTokenRefresh. Read in Run to decide when to stop reconnecting
 	// (authRejectStopThreshold). Atomic for the same cross-goroutine reason.
 	authRejectCount atomic.Int64
+
+	// lastCloseAuthReject is set true by readPump when the connection was closed
+	// with 4001, reset to false at the start of each connectAndServe. Read by Run
+	// to decide whether to attempt a token refresh before reconnecting.
+	lastCloseAuthReject atomic.Bool
 
 	// Connection liveness/timeouts. Default to the package consts; overridable
 	// (e.g. shortened by tests) without touching the timing logic.
@@ -257,6 +271,14 @@ func (c *Client) SetStartedAt(t int64) { c.startedAt = t }
 // SetMetricsFn sets the function used to collect system metrics for ping messages.
 func (c *Client) SetMetricsFn(fn func() (float64, float64, float64)) { c.metricsFn = fn }
 
+// UpdateToken replaces the access token used for future connections. Called after
+// a successful token refresh so the next reconnect dials with the fresh token.
+func (c *Client) UpdateToken(newToken string) {
+	c.tokenMu.Lock()
+	c.token = newToken
+	c.tokenMu.Unlock()
+}
+
 // SetActiveSessionIDsFn sets the function used to collect this daemon's active
 // session IDs for the register message (rebuilds the relay's routing table).
 func (c *Client) SetActiveSessionIDsFn(fn func() []string) { c.activeSessionIDsFn = fn }
@@ -277,14 +299,31 @@ func (c *Client) Run(ctx context.Context) error {
 			return ctx.Err()
 		}
 		c.notifyState(false)
-		// Stop reconnecting once the relay has rejected our token
-		// authRejectStopThreshold times in a row — retrying a revoked/invalid
-		// token only spams the relay. Park until shutdown (returning here would let
-		// the RunLoop supervisor restart us and resume the loop); the user must
-		// re-login and restart the daemon. A healthy register_ack would have reset
-		// the counter, so this only trips on a genuinely bad token.
+
+		// If the relay rejected our access token (4001), try to refresh it before
+		// anything else: a remote daemon whose 24h access token simply expired must
+		// self-heal via its refresh token — the user can't be expected to reach the
+		// machine to re-login. On success, reconnect immediately with the new token.
+		if c.lastCloseAuthReject.Load() && c.OnTokenRefresh != nil {
+			c.logger.Info("auth rejected; attempting token refresh")
+			newToken, ok := c.OnTokenRefresh()
+			if ok && newToken != "" {
+				c.UpdateToken(newToken)
+				c.authRejectCount.Store(0) // refresh worked — forgive prior rejections
+				c.reconnectAttempt.Store(0)
+				c.logger.Info("token refreshed; reconnecting")
+				continue // reconnect at once, no backoff
+			}
+			c.logger.Error("token refresh failed; refresh token may be expired — run `pocketctl login` on this machine")
+		}
+
+		// Refresh wasn't possible or failed, and the relay keeps rejecting us —
+		// stop hammering. Park until shutdown (returning would let RunLoop restart
+		// the loop); the user must re-login and restart the daemon. A healthy
+		// register_ack (or a successful refresh) resets the counter, so this only
+		// trips when the refresh token is genuinely dead.
 		if c.authRejectCount.Load() >= authRejectStopThreshold {
-			c.logger.Error("relay auth rejected repeatedly; pausing reconnect until you run `pocketctl login` and restart the daemon",
+			c.logger.Error("relay auth rejected repeatedly even after refresh attempts; pausing reconnect until you run `pocketctl login` and restart the daemon",
 				"consecutive", c.authRejectCount.Load())
 			<-ctx.Done()
 			return ctx.Err()
@@ -297,6 +336,9 @@ func (c *Client) Run(ctx context.Context) error {
 }
 
 func (c *Client) connectAndServe(ctx context.Context) error {
+	// New connection attempt — clear the "last close was auth reject" flag so a
+	// non-4001 close on this attempt isn't mistaken for an auth failure.
+	c.lastCloseAuthReject.Store(false)
 	relayURL := c.relayURL
 	// Ensure path ends with /ws
 	if !strings.HasSuffix(relayURL, "/ws") {
@@ -314,8 +356,11 @@ func (c *Client) connectAndServe(ctx context.Context) error {
 	// never lands in proxy access logs / referrers. The relay accepts both, but
 	// must be deployed before daemons that send header-only (it is, in the same
 	// release; old daemons keep using ?token= against the new relay).
+	c.tokenMu.Lock()
+	tok := c.token
+	c.tokenMu.Unlock()
 	hdr := http.Header{}
-	hdr.Set("Authorization", "Bearer "+c.token)
+	hdr.Set("Authorization", "Bearer "+tok)
 
 	c.logger.Info("connecting to relay", "url", u.Host)
 	conn, _, err := websocket.DefaultDialer.DialContext(ctx, u.String(), hdr)
@@ -417,13 +462,14 @@ func (c *Client) readPump(done chan struct{}) {
 	for {
 		_, msg, err := conn.ReadMessage()
 		if err != nil {
-			// 4001 = relay rejected us on auth (invalid/revoked token or missing
-			// auth). Retrying won't help until the token is fixed: count it so Run
-			// can stop reconnecting after authRejectStopThreshold, and surface an
-			// actionable message instead of the generic "connection lost".
+			// 4001 = relay rejected us on auth (invalid/revoked/expired token or
+			// missing auth). Flag it so Run attempts a token refresh before giving
+			// up; count it so Run can stop reconnecting after authRejectStopThreshold
+			// if refresh also keeps failing.
 			if ce, ok := err.(*websocket.CloseError); ok && ce.Code == 4001 {
+				c.lastCloseAuthReject.Store(true)
 				n := c.authRejectCount.Add(1)
-				c.logger.Error("relay rejected the connection: token invalid or revoked — run `pocketctl login` to re-authenticate", "reason", ce.Text, "consecutive", n)
+				c.logger.Error("relay rejected the connection: token invalid/expired/revoked", "reason", ce.Text, "consecutive", n)
 			}
 			return
 		}
