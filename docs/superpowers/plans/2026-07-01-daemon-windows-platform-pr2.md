@@ -765,3 +765,247 @@ git add internal/daemon/pid.go internal/daemon/instance.go
 git rm internal/daemon/instance_unix.go internal/daemon/instance_windows.go
 git commit -m "feat(platform): daemon pid/instance 内部委托 platform,公共 API 不变 (PR2/7)"
 ```
+
+---
+
+## Task 6: main.go 接入 Daemonizer/ServiceManager + signal 分文件
+
+PR2 最复杂 task（main.go 1695 行 × 4 处）。**分 3 个 step 组、每组独立 commit**（回归隔离）。每组后 `go build ./... && go test ./...` 全绿才进下一组。用 sonnet implementer。
+
+**Files (整个 Task 6):**
+- Create: `cmd/pocketctl/signal_unix.go`（`//go:build !windows`）
+- Create: `cmd/pocketctl/signal_windows.go`（`//go:build windows`）
+- Modify: `cmd/pocketctl/main.go`（package defaults daemonizer/serviceMgr；daemonize+restart 改 Daemonizer；signal 改 installSignalHandler；service 改 ServiceManager；import 演进：加 platform，B 后删 syscall，C 后删 service）
+
+### Step 组 A: signal 平台分文件
+
+- [ ] **A1: 创建 `cmd/pocketctl/signal_unix.go`**
+
+```go
+//go:build !windows
+
+package main
+
+import (
+	"os"
+	"syscall"
+)
+
+// installSignalHandler registers the daemon's graceful-shutdown signals. Unix:
+// SIGINT + SIGTERM. PR2: extracted from main.go to a build-tag split file so
+// main.go no longer references syscall.SIGTERM (absent on Windows).
+func installSignalHandler(sigCh chan<- os.Signal) {
+	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+}
+```
+
+> 需在 import 块加 `"os/signal"`（signal.Notify）。或 main.go 已 import signal——本文件独立 import。
+
+- [ ] **A2: 创建 `cmd/pocketctl/signal_windows.go`**
+
+```go
+//go:build windows
+
+package main
+
+import (
+	"os"
+	"os/signal"
+)
+
+// installSignalHandler on Windows: only os.Interrupt (Ctrl+C) is deliverable.
+// A detached daemon has no console, so this is a placeholder — real Windows
+// graceful stop uses the named-pipe control channel (PR4). Kept so main.go
+// compiles cross-platform without syscall.SIGTERM.
+func installSignalHandler(sigCh chan<- os.Signal) {
+	signal.Notify(sigCh, os.Interrupt)
+}
+```
+
+- [ ] **A3: main.go :1099-1100 改用 installSignalHandler**
+
+当前：
+```go
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+```
+改为：
+```go
+	sigCh := make(chan os.Signal, 1)
+	installSignalHandler(sigCh) // PR2: 平台分文件（Unix SIGINT/SIGTERM, Windows os.Interrupt）
+```
+
+> main.go 此时仍 import `syscall`（daemonize/restart 的 SysProcAttr 还在，Step 组 B 才删）+ `signal`（若 main.go 别处还用 signal 则保留；若仅 :1100 用，A3 后可删 signal import——确认后处理）。先 `go build` 看 vet 提示。
+
+- [ ] **A4: 验证 + commit A**
+
+Run: `go build ./... && go vet ./... && go test ./...` — 全绿。
+```bash
+git add cmd/pocketctl/signal_unix.go cmd/pocketctl/signal_windows.go cmd/pocketctl/main.go
+git commit -m "feat(platform): main signal 处理抽平台分文件 (PR2/7 A)"
+```
+
+### Step 组 B: daemonize + restart 接入 Daemonizer
+
+- [ ] **B1: main.go 加 platform import + package defaults**
+
+import 块加 `"github.com/pocketctl/pocketctl/internal/platform"`。在 import 后（或合适位置）加：
+
+```go
+// PR2 platform defaults for the daemon entry: daemonize + service via platform
+// interface (was direct syscall.SysProcAttr{Setsid} + internal/service).
+var (
+	daemonizer = platform.NewDaemonizer()
+	serviceMgr = platform.NewServiceManager()
+)
+```
+
+- [ ] **B2: daemonize fork 段（:712-722）改用 daemonizer.ForkDetached**
+
+当前：
+```go
+		child := &exec.Cmd{
+			Path:   exe,
+			Args:   os.Args,
+			Env:    childEnv,
+			Stdin:  nil,
+			Stdout: nil,
+			Stderr: nil,
+			SysProcAttr: &syscall.SysProcAttr{
+				Setsid: true,
+			},
+		}
+		if err := child.Start(); err != nil {
+			fmt.Fprintln(os.Stderr, i18n.T("error.daemonize", err))
+			os.Exit(1)
+		}
+```
+改为：
+```go
+		// PR2: daemonize fork via platform.Daemonizer (was direct exec.Cmd + SysProcAttr{Setsid}).
+		proc, err := daemonizer.ForkDetached(exe, os.Args[1:], childEnv)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, i18n.T("error.daemonize", err))
+			os.Exit(1)
+		}
+```
+
+> ForkDetached 内部 `Args: append([]string{self}, args...)`，传 `os.Args[1:]` + self=exe → 等价原 `Args: os.Args`。返回 `*os.Process`。
+
+- [ ] **B3: daemonize 启动动画里的 `child.Process.Pid`（:755）改 `proc.Pid`**
+
+当前（:755 附近）：
+```go
+		fmt.Println(i18n.T("daemon.started", preForkID, child.Process.Pid))
+```
+改为：
+```go
+		fmt.Println(i18n.T("daemon.started", preForkID, proc.Pid))
+```
+
+> 动画逻辑（spinner + 等 IsRunning/Connected，:728-754）不变——它用 `daemon.IsRunning()`/`daemon.ReadState()`，不碰 child 对象。
+
+- [ ] **B4: restart 段（:1684-1692）改用 daemonizer.Restart**
+
+当前：
+```go
+			cmd := exec.Command(exe, os.Args[1:]...)
+			cmd.Stdout = nil
+			cmd.Stderr = nil
+			cmd.Stdin = nil
+			cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+			if err := cmd.Start(); err != nil {
+				logger.Error("daemon restart failed: spawn", "error", err)
+				return
+			}
+			logger.Info("new daemon spawned, exiting", "newPID", cmd.Process.Pid)
+```
+改为：
+```go
+			// PR2: restart via platform.Daemonizer (was exec.Command + SysProcAttr{Setsid}).
+			if err := daemonizer.Restart(exe, os.Args[1:]); err != nil {
+				logger.Error("daemon restart failed: spawn", "error", err)
+				return
+			}
+			logger.Info("new daemon spawned, exiting")
+```
+
+> Restart 不返回 pid（platform 接口设计）；日志去掉 newPID 字段。可接受（info 级日志）。
+
+- [ ] **B5: 删 main.go 的 `"syscall"` import**
+
+B2/B4 后 main.go 不再用 `syscall.SysProcAttr`/`syscall.SIG*`（signal 已 A 组抽走）。`go build` 确认 syscall unused 后删 `"syscall"` import。若 main.go 还有 `runtime.GOOS` 等其它用法（不属 syscall 包），不受影响。
+
+- [ ] **B6: 验证 + commit B**
+
+Run: `go build ./... && go vet ./... && go test ./...` — 全绿。`grep -n 'syscall\.' cmd/pocketctl/main.go` → 无命中（注释除外）。
+```bash
+git add cmd/pocketctl/main.go
+git commit -m "feat(platform): main daemonize/restart 接入 Daemonizer,删 syscall (PR2/7 B)"
+```
+
+### Step 组 C: service 接入 ServiceManager
+
+- [ ] **C1: main.go service 调用改用 serviceMgr**
+
+:171 当前：
+```go
+	cfg := service.Config{ExePath: exe, Args: daemonArgs, LogPath: daemon.ServiceBootLogPath()}
+```
+改为：
+```go
+	cfg := platform.ServiceOpts{ExePath: exe, Args: daemonArgs, LogPath: daemon.ServiceBootLogPath()}
+```
+
+:180 当前：
+```go
+	if err := service.Install(cfg); err != nil {
+```
+改为：
+```go
+	if err := serviceMgr.Install(cfg); err != nil {
+```
+
+:185 当前：
+```go
+	info, _ := service.Status()
+```
+改为：
+```go
+	info, _ := serviceMgr.Status()
+```
+
+:195（cmdServiceUninstall）当前：
+```go
+	if err := service.Uninstall(); err != nil {
+```
+改为：
+```go
+	if err := serviceMgr.Uninstall(); err != nil {
+```
+
+:203（cmdServiceStatus）当前：
+```go
+	info, err := service.Status()
+```
+改为：
+```go
+	info, err := serviceMgr.Status()
+```
+
+> `info` 类型从 `service.Info` 变 `platform.ServiceStatus`——字段名相同（Installed/Running/UnitPath/Detail），main.go 后续用法（:186-190/:208-223）零改。
+
+- [ ] **C2: 删 main.go 的 `"github.com/pocketctl/pocketctl/internal/service"` import**
+
+C1 后 main.go 不再直接用 `service.*`（platform.ServiceManager 内部委托 service）。`go build` 确认 service unused 后删 import。
+
+- [ ] **C3: 验证 + commit C + Task 6 收尾**
+
+Run: `go build ./... && go vet ./... && go test ./...` — 全绿。
+Run: `GOOS=windows go build ./cmd/pocketctl/` — **应通过**（main.go 无 syscall、signal 分文件、daemonize/restart/service 走 platform stub）。这是 PR2「全项目 Windows build」的最后一块。
+```bash
+git add cmd/pocketctl/main.go
+git commit -m "feat(platform): main service 接入 ServiceManager,删 service import (PR2/7 C)"
+```
+
+> Task 6 完成后，全项目 `GOOS=windows go build ./...` 应通过（Task 7 验证）。
