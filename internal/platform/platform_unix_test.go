@@ -97,3 +97,19 @@ func TestProcessController_IsAlive(t *testing.T) {
 		t.Fatal("pid 999999 should not be alive")
 	}
 }
+
+func TestDaemonizer_ForkDetached(t *testing.T) {
+	if _, err := os.Stat("/bin/sleep"); err != nil {
+		t.Skip("/bin/sleep 不可用，跳过 detached 测试")
+	}
+	d := NewDaemonizer()
+	proc, err := d.ForkDetached("/bin/sleep", []string{"2"}, os.Environ())
+	if err != nil {
+		t.Fatalf("ForkDetached: %v", err)
+	}
+	if proc.Pid <= 0 {
+		t.Fatal("返回的 pid 无效")
+	}
+	// 清理：杀掉 detached sleep，避免泄漏。
+	_ = proc.Kill()
+}
