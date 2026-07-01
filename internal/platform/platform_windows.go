@@ -30,3 +30,12 @@ func (windowsIPCListener) Listen(string) (net.Listener, error) {
 func (windowsIPCListener) DefaultPath(name string) string {
 	return `\\.\pipe\pocketctl-` + name
 }
+
+// NewInstanceLocker 返回 Windows 单实例锁（PR1 stub）。PR4 用全局命名 Mutex 实现。
+func NewInstanceLocker() InstanceLocker { return windowsLocker{} }
+
+type windowsLocker struct{}
+
+func (windowsLocker) Acquire(string) (Lock, error) {
+	return nil, ErrUnsupported
+}

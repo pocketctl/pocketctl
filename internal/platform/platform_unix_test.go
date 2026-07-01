@@ -69,3 +69,19 @@ func TestIPCListener_DefaultPath(t *testing.T) {
 		t.Fatal("DefaultPath returned empty")
 	}
 }
+
+func TestInstanceLocker_Exclusion(t *testing.T) {
+	dir := t.TempDir()
+	path := dir + "/test.lock"
+	locker := NewInstanceLocker()
+
+	l1, err := locker.Acquire(path)
+	if err != nil {
+		t.Fatalf("first Acquire: %v", err)
+	}
+	defer l1.Close()
+
+	if _, err := locker.Acquire(path); err == nil {
+		t.Fatal("second Acquire should fail (lock already held)")
+	}
+}

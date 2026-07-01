@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 
 	"github.com/creack/pty"
+	"golang.org/x/sys/unix"
 )
 
 // NewPTYProvider 返回 Unix PTY provider（基于 creack/pty）。
@@ -61,3 +62,30 @@ func (unixIPCListener) Listen(name string) (net.Listener, error) {
 func (unixIPCListener) DefaultPath(name string) string {
 	return filepath.Join(os.TempDir(), "pocketctl", name+".sock")
 }
+
+// NewInstanceLocker 返回基于 flock 的单实例锁。行为对齐现有 daemon.AcquireInstanceLock
+// （PR2 接入时由 daemon 传入同样的锁文件路径，无缝替换）。
+func NewInstanceLocker() InstanceLocker { return unixLocker{} }
+
+type unixLocker struct{}
+
+func (unixLocker) Acquire(path string) (Lock, error) {
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return nil, fmt.Errorf("create %s: %w", filepath.Dir(path), err)
+	}
+	f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE, 0o644)
+	if err != nil {
+		return nil, fmt.Errorf("open lock file: %w", err)
+	}
+	// LOCK_EX|LOCK_NB：独占、非阻塞。拿不到立即失败，不等。
+	// 进程退出（含 SIGKILL/崩溃）时内核自动释放——race-free。
+	if err := unix.Flock(int(f.Fd()), unix.LOCK_EX|unix.LOCK_NB); err != nil {
+		f.Close()
+		return nil, fmt.Errorf("another pocketctl daemon is already running on this host")
+	}
+	return fileLock{f: f}, nil
+}
+
+type fileLock struct{ f *os.File }
+
+func (l fileLock) Close() error { return l.f.Close() }
