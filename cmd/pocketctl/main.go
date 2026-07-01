@@ -11,7 +11,6 @@ import (
 	"net/url"
 	"os"
 	"os/exec"
-	"os/signal"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -1097,7 +1096,7 @@ func cmdDaemonStart(args []string) {
 	defer cancel()
 
 	sigCh := make(chan os.Signal, 1)
-	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+	installSignalHandler(sigCh) // PR2: platform split (Unix SIGINT/SIGTERM, Windows os.Interrupt)
 
 	// Start session watcher (Claude terminal sessions)
 	if err := sw.Start(ctx); err != nil {
