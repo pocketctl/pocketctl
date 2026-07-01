@@ -12,6 +12,7 @@ import (
 
 	"github.com/creack/pty"
 	"golang.org/x/sys/unix"
+	"github.com/pocketctl/pocketctl/internal/service"
 )
 
 // NewPTYProvider 返回 Unix PTY provider（基于 creack/pty）。
@@ -149,4 +150,34 @@ func (unixDaemonizer) Restart(self string, args []string) error {
 		return fmt.Errorf("restart spawn: %w", err)
 	}
 	return nil
+}
+
+// NewServiceManager 返回委托 internal/service 的 Unix 服务管理器。
+// existing service 包按 darwin(launchd)/linux(systemd)/other(unsupported) 分文件，
+// 本套壳在所有 !windows 平台都可用。PR2 接入时替换 main.go 直接调用 service.* 的地方。
+func NewServiceManager() ServiceManager { return unixServiceManager{} }
+
+type unixServiceManager struct{}
+
+func (unixServiceManager) Install(opts ServiceOpts) error {
+	return service.Install(service.Config{
+		ExePath: opts.ExePath,
+		Args:    opts.Args,
+		LogPath: opts.LogPath,
+	})
+}
+
+func (unixServiceManager) Uninstall() error { return service.Uninstall() }
+
+func (unixServiceManager) Status() (ServiceStatus, error) {
+	info, err := service.Status()
+	if err != nil {
+		return ServiceStatus{}, err
+	}
+	return ServiceStatus{
+		Installed: info.Installed,
+		Running:   info.Running,
+		UnitPath:  info.UnitPath,
+		Detail:    info.Detail,
+	}, nil
 }
