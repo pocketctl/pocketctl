@@ -249,3 +249,166 @@ git commit -m "feat(platform): discovery/watcher syscall 抽平台分文件,清 
 ## Task 2-7: 待逐 task 展开
 
 执行到该 task 时,把完整改写代码(verbatim 当前→改后)写进本节,再 task-brief → implementer → review。
+
+---
+
+## Task 2: session PTY 接入 platform.PTYProvider（最高风险）
+
+**设计调整（偏离决策 2，已评估）：** 探索发现 `NewSessionManager` 有 **21 个调用点**（20 test + main.go:888，含 `internal/e2e/e2e_test.go` 4 处，e2e 有 pre-existing vet fail）。构造注入（加参数）要改 21 处 + 撞 e2e 风险。改用 **package-level default + `SetProviders` setter**：`NewSessionManager(outputCh)` 签名不变，session 包内部用 `defaultPTYProvider`/`defaultProc`（`platform.NewPTYProvider()`/`NewProcessController()`），main.go 与 21 个 test **零改动**。test 要 mock 时调 `sm.SetProviders(...)`。Unix 行为零变化（default provider 就是 creack/pty 包装）。
+
+**Files:**
+- Modify: `internal/session/manager.go`（import platform；`ProcessState.PTY: *os.File→platform.PTY`；SessionManager 加 `ptyProvider`/`proc` 字段；package-level defaults；`NewSessionManager` 用 default；新增 `SetProviders`；CreateSession :875 传 `sm.ptyProvider`）
+- Modify: `internal/session/pty.go`（`startPTYCli` 加 `provider` 参数、返回 `platform.PTY`、删 `creack/pty` import、内部改 `provider.Start`）
+- 不改：main.go（用 default，零改动）、9 处 PTY R/W/Close 调用点（类型改后 interface 自动适配）、所有 `_test.go`（21 调用点零改）
+
+**Interfaces:**
+- Consumes: `platform.PTYProvider.Start(cmd, *Size) (PTY, error)`、`platform.PTY`（io.ReadWriteCloser + SetSize）、`platform.Size`、`platform.ProcessController`（Task 3 用，本 task 一起注入）
+- Produces: `session.SessionManager.SetProviders(pty, proc)`；session 不再直接 import `creack/pty`
+
+- [ ] **Step 1: manager.go 加 platform import + package-level defaults + SessionManager 字段 + SetProviders**
+
+manager.go 顶部 import 块加 `"github.com/pocketctl/pocketctl/internal/platform"`。
+
+在 `type SessionManager struct {...}`（:229）**之前**插入 package-level defaults：
+
+```go
+// Platform providers used by default for new SessionManagers. Override per-
+// instance via SetProviders (e.g. tests inject mocks). Unix: real creack/pty
+// + signal backend; Windows: stubs returning ErrUnsupported (PR4 fills these).
+// PR2: replaces session's direct creack/pty + syscall dependency.
+var (
+	defaultPTYProvider = platform.NewPTYProvider()
+	defaultProc        = platform.NewProcessController()
+)
+```
+
+`SessionManager` struct 加两个字段（紧挨现有字段，建议放 `outputCh` 附近）：
+
+```go
+	ptyProvider platform.PTYProvider      // PR2: daemon-session PTY backend (was direct creack/pty)
+	proc        platform.ProcessController // PR2: process alive/kill (was syscall; used by Task 3)
+```
+
+- [ ] **Step 2: NewSessionManager 用 default + 新增 SetProviders**
+
+`NewSessionManager`（:256）签名不变，body 加 default 赋值：
+
+```go
+func NewSessionManager(outputCh chan protocol.DaemonEvent) *SessionManager {
+	return &SessionManager{
+		sessions:    make(map[string]*ProcessState),
+		outputCh:    outputCh,
+		childPids:   make(map[int]bool),
+		cwdSessions: make(map[string]map[string]struct{}),
+		fileLocks:   filelock.New(),
+		ptyProvider: defaultPTYProvider,
+		proc:        defaultProc,
+	}
+}
+
+// SetProviders overrides the platform providers, for tests injecting mocks.
+// Must be called before any session is created. Not needed in production
+// (NewSessionManager wires the real platform defaults).
+func (sm *SessionManager) SetProviders(pty platform.PTYProvider, proc platform.ProcessController) {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+	sm.ptyProvider = pty
+	sm.proc = proc
+}
+```
+
+- [ ] **Step 3: ProcessState.PTY 类型改 platform.PTY**
+
+`ProcessState`（:45）：
+
+当前：
+```go
+	PTY              *os.File             // interactive-web-session D1: daemon session 的 PTY master（写 stdin 驱动 interactive claude）
+```
+
+改为：
+```go
+	PTY              platform.PTY         // interactive-web-session D1: daemon session 的 PTY master（写 stdin 驱动 interactive claude）。PR2: platform.PTY interface (was *os.File)
+```
+
+> 注：9 处 `ps.PTY.Write/Read/Close`（:91/:141/:184/:952/:1045/:1198）和 `ptyFile := ps.PTY`（:1082/:1636/:1919）类型自动从 `*os.File` 变 `platform.PTY`，interface 的 Read/Write/Close 签名兼容，**这些调用点不用改代码**。`:892 PTY: ptmx` 也自动匹配（ptmx 现在是 platform.PTY）。
+
+- [ ] **Step 4: pty.go 改 startPTYCli**
+
+`internal/session/pty.go` import 块：删 `"github.com/creack/pty"`，加 `"github.com/pocketctl/pocketctl/internal/platform"`。
+
+`startPTYCli`（:20）当前：
+```go
+func startPTYCli(cliPath string, args []string, cwd string, extraEnv []string, agentType string) (*os.File, *exec.Cmd, error) {
+	cmd := exec.Command(cliPath, args...)
+	if cwd != "" {
+		cmd.Dir = cwd
+	}
+	env := sanitizePTYEnv(os.Environ(), agentType)
+	env = append(env, extraEnv...)
+	env = ensureTERM(env, "xterm-256color")
+	cmd.Env = env
+
+	ptmx, err := pty.StartWithSize(cmd, &pty.Winsize{Rows: 24, Cols: 80})
+	if err != nil {
+		return nil, nil, fmt.Errorf("pty start: %w", err)
+	}
+	return ptmx, cmd, nil
+}
+```
+
+改为：
+```go
+func startPTYCli(provider platform.PTYProvider, cliPath string, args []string, cwd string, extraEnv []string, agentType string) (platform.PTY, *exec.Cmd, error) {
+	cmd := exec.Command(cliPath, args...)
+	if cwd != "" {
+		cmd.Dir = cwd
+	}
+	env := sanitizePTYEnv(os.Environ(), agentType)
+	env = append(env, extraEnv...)
+	env = ensureTERM(env, "xterm-256color")
+	cmd.Env = env
+
+	// PR2: PTY 启动走 platform.PTYProvider（Unix=creack/pty, Windows=stub），
+	// 替代直接 pty.StartWithSize。env sanitize / TERM 仍是 session 业务逻辑。
+	ptmx, err := provider.Start(cmd, &platform.Size{Rows: 24, Cols: 80})
+	if err != nil {
+		return nil, nil, fmt.Errorf("pty start: %w", err)
+	}
+	return ptmx, cmd, nil
+}
+```
+
+> pty.go 的 `sanitizePTYEnv`/`ensureTERM` 不变（业务逻辑，不碰平台）。
+
+- [ ] **Step 5: manager.go CreateSession :875 传 provider**
+
+当前（:875）：
+```go
+		ptmx, cmd, err := startPTYCli(cliPath, args, resolvedCwd, extraEnv, config.Agent)
+```
+
+改为：
+```go
+		ptmx, cmd, err := startPTYCli(sm.ptyProvider, cliPath, args, resolvedCwd, extraEnv, config.Agent)
+```
+
+- [ ] **Step 6: 验证编译 + 全项目 Unix 零回归**
+
+Run: `go build ./... && go vet ./... && go test ./...`
+Expected: 全绿。21 个 `NewSessionManager(outputCh)` 调用点零改动（签名没变）；9 处 PTY 调用点类型自动适配；session 包不再 import creack/pty。
+
+- [ ] **Step 7: 端到端验证（PTY 改造高风险，必跑）**
+
+Run: `node test-all.js`（若环境支持真实 claude + relay）
+Expected: 通过——daemon 启动、创建 daemon session、发消息、PTY 驱动 claude 行为与改造前一致。
+> 若 test-all.js 因环境（无真实 claude/relay）跑不了，**必须**至少 `go test ./internal/session/...` 全绿 + 手动 `pocketctl daemon start`（codesign 后）创建一个 session 发条消息确认 PTY 仍工作。
+
+- [ ] **Step 8: Commit**
+
+```bash
+git add internal/session/manager.go internal/session/pty.go
+git commit -m "feat(platform): session PTY 接入 platform.PTYProvider,ProcessState.PTY 改 interface (PR2/7)"
+```
+
+> 注意：Task 2 后 session 包 Windows 仍编译失败（manager.go :1894/:1943 的 syscall.Kill/SIGKILL 未清，那是 Task 3）。本 task 只保证 Unix 零回归 + session 不再依赖 creack/pty。
