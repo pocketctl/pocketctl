@@ -89,3 +89,34 @@ func (unixLocker) Acquire(path string) (Lock, error) {
 type fileLock struct{ f *os.File }
 
 func (l fileLock) Close() error { return l.f.Close() }
+
+// NewProcessController 返回基于 Unix signal 的进程控制器。对齐现有 daemon.pid.go
+// 的 IsRunning/Stop 逻辑（PR2 接入时替换）。
+func NewProcessController() ProcessController { return unixProcessController{} }
+
+type unixProcessController struct{}
+
+func (unixProcessController) IsAlive(pid int) bool {
+	proc, err := os.FindProcess(pid)
+	if err != nil {
+		return false
+	}
+	// signal 0 不发信号，仅探测进程是否存在。
+	return proc.Signal(unix.Signal(0)) == nil
+}
+
+func (unixProcessController) Terminate(pid int) error {
+	proc, err := os.FindProcess(pid)
+	if err != nil {
+		return fmt.Errorf("find process: %w", err)
+	}
+	return proc.Signal(unix.SIGTERM)
+}
+
+func (unixProcessController) Kill(pid int) error {
+	proc, err := os.FindProcess(pid)
+	if err != nil {
+		return fmt.Errorf("find process: %w", err)
+	}
+	return proc.Signal(unix.SIGKILL)
+}

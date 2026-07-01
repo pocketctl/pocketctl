@@ -39,3 +39,13 @@ type windowsLocker struct{}
 func (windowsLocker) Acquire(string) (Lock, error) {
 	return nil, ErrUnsupported
 }
+
+// NewProcessController 返回 Windows 进程控制器（PR1 stub）。
+// PR4 实现：IsAlive=OpenProcess，Kill=TerminateProcess，Terminate=控制通道命令。
+func NewProcessController() ProcessController { return windowsProcessController{} }
+
+type windowsProcessController struct{}
+
+func (windowsProcessController) IsAlive(int) bool    { return false }
+func (windowsProcessController) Terminate(int) error { return ErrUnsupported }
+func (windowsProcessController) Kill(int) error      { return ErrUnsupported }
