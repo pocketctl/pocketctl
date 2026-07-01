@@ -18,6 +18,10 @@ final class TokenUsageViewModel {
     private(set) var isLoading = false
     private(set) var loadError: String?
 
+    /// 热力图独立数据源（近 9 个月，≈270 天）。与 30 天 dashboard 解耦：
+    /// 单独请求、单独容错，失败时静默（卡片显示「暂无数据」，不影响其他卡片）。
+    private(set) var heatmapDashboard: TokenDashboard?
+
     private var scope: String { daemonId ?? "all" }
     var isGlobal: Bool { daemonId == nil }
 
@@ -54,6 +58,13 @@ final class TokenUsageViewModel {
 
     var dailySeries: [TokenDailyPoint] { dashboard?.dailySeries ?? [] }
     var byModel: [TokenModelRow] { dashboard?.byModel ?? [] }
+
+    /// 热力图数据（近 5 个月）。独立于 30 天柱状图。
+    var heatmapSeries: [TokenDailyPoint] { heatmapDashboard?.dailySeries ?? [] }
+    /// 全局最大单日 (input+output)，作为 5 级热力分级的基准。
+    var heatmapMax: Int {
+        max(1, heatmapSeries.map { $0.input + $0.output }.max() ?? 1)
+    }
 
     var sessions: [TokenSessionRow] {
         if isGlobal { return mergedSessions }
@@ -92,6 +103,13 @@ final class TokenUsageViewModel {
             loadError = error.localizedDescription
         }
         isLoading = false
+        // 热力图独立加载：不阻塞主流程，失败静默。
+        await fetchHeatmap()
+    }
+
+    /// 热力图数据（近 5 个月，≈150 天）。独立窗口，对齐 web 端单独请求的思路。
+    private func fetchHeatmap() async {
+        heatmapDashboard = try? await apiClient.getTokenDashboard(daemon: scope, days: 150)
     }
 
     /// Yesterday total via a 2-day dashboard (series tail = today, prior = yesterday).
