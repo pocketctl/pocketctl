@@ -3,6 +3,7 @@
 package platform
 
 import (
+	"net"
 	"os/exec"
 )
 
@@ -14,4 +15,18 @@ type windowsPTYProvider struct{}
 
 func (windowsPTYProvider) Start(*exec.Cmd, *Size) (PTY, error) {
 	return nil, ErrUnsupported
+}
+
+// NewIPCListener 返回 Windows named pipe IPC listener（PR1 stub）。
+// PR4 用 github.com/Microsoft/go-winio 实现 named pipe。
+func NewIPCListener() IPCListener { return windowsIPCListener{} }
+
+type windowsIPCListener struct{}
+
+func (windowsIPCListener) Listen(string) (net.Listener, error) {
+	return nil, ErrUnsupported
+}
+
+func (windowsIPCListener) DefaultPath(name string) string {
+	return `\\.\pipe\pocketctl-` + name
 }
