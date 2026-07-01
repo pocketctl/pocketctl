@@ -152,6 +152,7 @@ var messages = map[string]msg{
 	},
 	"daemon.unknown_sub":     {"unknown daemon subcommand: %s", "未知的 daemon 子命令: %s"},
 	"daemon.already_running": {"daemon already running (PID %d)", "守护进程已在运行 (PID %d)"},
+	"daemon.lock_held":      {"another pocketctl daemon instance holds the single-instance lock; if this is wrong, stop it first with `pocketctl daemon stop`", "另一个 pocketctl 守护进程持有单实例锁;如属异常,请先用 `pocketctl daemon stop` 停止它"},
 
 	// ---- service.* (native supervisor install/uninstall/status) ----------
 	"service.usage_sub": {
