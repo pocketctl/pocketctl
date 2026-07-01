@@ -765,6 +765,19 @@ func cmdDaemonStart(args []string) {
 
 	// Generate daemon ID — prefer the value passed by the launcher via env (set
 	// above) so both processes always use the same ID without re-deriving.
+
+	// Acquire a single-instance flock as the race-free guard (this is the child
+	// or --foreground process — the launcher has already exited). IsRunning above
+	// is a fast pre-check, but it can't tell two simultaneous starts apart; this
+	// lock can. Without it, a second daemon could start, load a stale token, and
+	// become an invalid-token zombie when the token later rotates.
+	instanceLock, err := daemon.AcquireInstanceLock()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, i18n.T("daemon.lock_held"))
+		os.Exit(1)
+	}
+	defer instanceLock.Close()
+
 	id := *daemonID
 	if id == "" {
 		if envID := os.Getenv("POCKETCTL_DAEMON_ID"); envID != "" {
