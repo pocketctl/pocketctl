@@ -11,6 +11,7 @@ import { validateClient } from './config/clients.js';
 import { createSession, getSessionByDeviceCode, getSessionByUserCode, authorizeSession, recordPoll, canPoll, deleteSession } from './config/auth-sessions.js';
 import { createQrSession, getQrSession, markScanned, confirmQrSession, deleteQrSession } from './config/qr-sessions.js';
 import { createHash } from 'crypto';
+import { ConnectionRateLimiter } from './rate-limit.js';
 
 const API_KEY = process.env.POCKETCTL_API_KEY || '';
 const DB_URL = process.env.DATABASE_URL || 'postgresql://localhost:5432/pocketctl';
@@ -22,27 +23,23 @@ const DEV_EMAIL = process.env.DEV_EMAIL || '';
 const DEV_EMAIL_CODE = process.env.DEV_EMAIL_CODE || '';
 const RATE_LIMIT_WINDOW_MS = parseInt(process.env.RATE_LIMIT_WINDOW_MS || '60000', 10);
 const RATE_LIMIT_MAX_CONNECTIONS = parseInt(process.env.RATE_LIMIT_MAX_CONNECTIONS || '30', 10);
+const RATE_LIMIT_BURST_WINDOW_MS = parseInt(process.env.RATE_LIMIT_BURST_WINDOW_MS || '10000', 10);
+const RATE_LIMIT_BURST_MAX = parseInt(process.env.RATE_LIMIT_BURST_MAX || '5', 10);
+const RATE_LIMIT_AUTH_FAIL_THRESHOLD = parseInt(process.env.RATE_LIMIT_AUTH_FAIL_THRESHOLD || '3', 10);
 
 const wsDaemonMap = new Map<any, string>();
 
-// Simple rate limiter: IP -> { count, resetAt }
-const rateLimiter = new Map<string, { count: number; resetAt: number }>();
-
-function checkRateLimit(ip: string): boolean {
-  const now = Date.now();
-  let entry = rateLimiter.get(ip);
-  if (!entry || now > entry.resetAt) {
-    entry = { count: 0, resetAt: now + RATE_LIMIT_WINDOW_MS };
-    rateLimiter.set(ip, entry);
-  }
-  entry.count++;
-  if (Math.random() < 0.01) {
-    for (const [key, val] of rateLimiter) {
-      if (now > val.resetAt) rateLimiter.delete(key);
-    }
-  }
-  return entry.count <= RATE_LIMIT_MAX_CONNECTIONS;
-}
+// Connection rate limiter: burst + sustained window, plus an escalating ban for
+// IPs that repeatedly fail auth. The auth-fail ban is what silences a
+// revoked-token zombie regardless of the client version — it must fail auth on
+// every reconnect, so it climbs the ban ladder and goes quiet. See rate-limit.ts.
+const rateLimiter = new ConnectionRateLimiter({
+  burstWindowMs: RATE_LIMIT_BURST_WINDOW_MS,
+  burstMax: RATE_LIMIT_BURST_MAX,
+  windowMs: RATE_LIMIT_WINDOW_MS,
+  windowMax: RATE_LIMIT_MAX_CONNECTIONS,
+  authFailThreshold: RATE_LIMIT_AUTH_FAIL_THRESHOLD,
+});
 
 async function main() {
   const pool = createPool(parseDBUrl(DB_URL));
@@ -988,8 +985,10 @@ async function main() {
       || (req.headers['x-real-ip'] as string)?.trim()
       || req.ip || req.socket.remoteAddress || 'unknown';
 
-    if (!checkRateLimit(clientIp)) {
-      socket.close(4029, 'rate limit exceeded');
+    const decision = rateLimiter.check(clientIp);
+    if (Math.random() < 0.01) rateLimiter.gc(); // opportunistic cleanup
+    if (!decision.allowed) {
+      socket.close(4029, decision.reason || 'rate limit exceeded');
       return;
     }
 
@@ -1066,7 +1065,8 @@ async function main() {
       if (token) {
         const payload = await verifyAccessTokenWithRevocation(token, pool);
         if (!payload) {
-          console.log(`WS rejected: type=${connType} ip=${clientIp} reason=invalid_token`);
+          const banSec = rateLimiter.recordAuthFailure(clientIp);
+          console.log(`WS rejected: type=${connType} ip=${clientIp} reason=invalid_token${banSec ? ` banned=${banSec}s` : ''}`);
           socket.close(4001, 'invalid token');
           return;
         }
@@ -1076,11 +1076,15 @@ async function main() {
       } else if (apiKey && API_KEY && apiKey === API_KEY) {
         userId = null;
       } else {
-        console.log(`WS rejected: type=${connType} ip=${clientIp} reason=auth_required`);
+        const banSec = rateLimiter.recordAuthFailure(clientIp);
+        console.log(`WS rejected: type=${connType} ip=${clientIp} reason=auth_required${banSec ? ` banned=${banSec}s` : ''}`);
         socket.close(4001, 'authentication required');
         return;
       }
 
+      // Auth succeeded — this is a legitimate client. Forgive any prior
+      // fat-finger failures from this IP so a one-off bad token doesn't haunt.
+      rateLimiter.clearAuthFailure(clientIp);
       authDone = true;
       console.log(`WS connected: type=${connType} ip=${clientIp} user=${userId || 'legacy'}`);
 
