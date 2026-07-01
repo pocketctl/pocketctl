@@ -2,7 +2,7 @@ import type { WebSocket } from 'ws';
 import type pg from 'pg';
 import * as db from './db.js';
 import { generateTitle } from './title.js';
-import { notifyUser, sessionStatusPush, daemonOfflinePush, approvalPush, interactivePush, summarizeToolInput } from './push.js';
+import { notifyUser, sessionStatusPush, daemonOfflinePush, daemonOnlinePush, approvalPush, interactivePush, summarizeToolInput, highRiskPush, isHighRiskCommand } from './push.js';
 import { PushDeduper } from './push-deduper.js';
 
 interface DaemonConnection { ws: WebSocket; daemonId: string; hostname: string; agents: any[]; userId: number | null; os?: string; ip?: string; port?: string; arch?: string; version?: string; startedAt?: number }
@@ -45,6 +45,12 @@ export class Router {
   // user-facing push side-effect.
   private pushDeduper = new PushDeduper();
 
+  // Daemon ids that finalized a genuine offline (grace window elapsed). Used
+  // to push "online" only on a real offline→online transition, not on every
+  // WS reconnect (network flap / relay restart). In-memory, so a relay restart
+  // naturally suppresses the first online push — desirable.
+  private knownOffline = new Set<string>();
+
   constructor(pool: pg.Pool) {
     this.pool = pool;
     this.pushDeduper.startSweeping();
@@ -55,6 +61,21 @@ export class Router {
 
   /** Release background resources (push dedup sweeper). Call on shutdown. */
   stop(): void { this.pushDeduper.stop(); }
+
+  /**
+   * Push only to Pro/whitelisted users. Reads plan and skips free users.
+   * Used for Pro-gated pushes (daemon online, high-risk warning, reports).
+   * Regular approval/session-status pushes bypass this (free users get those).
+   */
+  private async maybePushToPro(userId: number, payload: import('./push.js').PushPayload): Promise<void> {
+    try {
+      const { plan, whitelist } = await db.getUserPlanAndWhitelist(this.pool, userId);
+      if (!whitelist && plan === 'free') return;
+      await notifyUser(this.pool, userId, payload);
+    } catch (e) {
+      console.error('maybePushToPro:', e);
+    }
+  }
 
   /** Notify all connected daemons that the relay is restarting (expected disconnect). */
   broadcastRelayRestarting(): void {
@@ -248,6 +269,16 @@ export class Router {
         this.send(clientWs, { type: 'daemon_status', daemon_id: daemonId, status: 'online', hostname, agents, alias, os: daemonOS, ip: daemonIP });
       }
     }
+
+    // Push "online" only on a genuine offline→online transition. A flap
+    // reconnect inside the grace window never ran finalize, so knownOffline
+    // has no entry → no push. A relay restart loses this set, so the first
+    // reconnect after restart also doesn't push (desirable — daemons aren't
+    // "back", they just reconnected to the new process). Pro-only.
+    const wasOffline = this.knownOffline.delete(daemonId);
+    if (wasOffline && userId && !this.shuttingDown) {
+      this.maybePushToPro(userId, daemonOnlinePush(hostname, daemonId)).catch(console.error);
+    }
   }
 
   /**
@@ -321,6 +352,10 @@ export class Router {
     if (userId && !this.shuttingDown) {
       notifyUser(this.pool, userId, daemonOfflinePush(hostname, daemonId)).catch(console.error);
     }
+    // Mark as genuinely offline so a subsequent reconnect can push "online".
+    // Only set when finalize actually ran — a grace-window flap reconnect
+    // never reaches here, so it won't trigger an online push (no false "back").
+    this.knownOffline.add(daemonId);
 
     // Broadcast offline status with alias (async fetch)
     db.getDaemonAlias(this.pool, daemonId).then((alias) => {
@@ -663,10 +698,19 @@ export class Router {
       const shouldPush = requestId === '' || this.pushDeduper.shouldPush(requestId);
       if (shouldPush) {
         if (msg.type === 'approval_request') {
+          const toolName = msg.tool || '';
+          const summary = summarizeToolInput(toolName, msg.input);
+          // Regular approval — free + Pro (product-critical, never gated).
           notifyUser(this.pool, userId, approvalPush(
-            msg.title || '', msg.tool || '', summarizeToolInput(msg.tool || '', msg.input),
-            sessionId, requestId,
+            msg.title || '', toolName, summary, sessionId, requestId,
           )).catch(console.error);
+          // D3 high-risk warning — Pro-only, layered on top of the regular
+          // push. Shares the same dedup decision (one requestId = one event).
+          if (isHighRiskCommand(toolName, summary)) {
+            this.maybePushToPro(userId, highRiskPush(
+              msg.title || '', toolName, summary, sessionId, requestId,
+            )).catch(console.error);
+          }
         } else {
           const prompt = (msg.input?.prompt as string) || '';
           notifyUser(this.pool, userId, interactivePush(
