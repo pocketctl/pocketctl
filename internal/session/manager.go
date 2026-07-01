@@ -41,7 +41,6 @@ type ProcessState struct {
 	Backend          SessionBackend       // non-nil only for server-kind agents (opencode); subprocess agents drive via the fields above
 }
 
-
 // NotifyFunc is called after a web→terminal message completes.
 type NotifyFunc func(sessionID, ttyPath string)
 

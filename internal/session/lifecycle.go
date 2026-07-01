@@ -289,8 +289,6 @@ func (sm *SessionManager) servePTYSession(ctx context.Context, ps *ProcessState,
 	}
 }
 
-
-
 // watchdogBusy monitors a session for stuck "busy" state. If the session
 // remains busy with no JSONL file activity for longer than busyTimeout, it
 // forces the status back to idle and notifies clients — preventing the UI
@@ -445,7 +443,6 @@ func (sm *SessionManager) AbortSession(sessionID string) bool {
 	return true
 }
 
-
 // tryResumeHistorical re-registers a session that exists on disk (JSONL
 // history) but isn't in the in-memory map — typically a session from before
 // the current daemon process started, still listed in the web UI from the
@@ -482,8 +479,6 @@ func (sm *SessionManager) tryResumeHistorical(sessionID string) bool {
 	}
 	return true
 }
-
-
 
 // isProcessAlive checks if a process with the given PID is running.
 // PR2: delegates to the platform ProcessController (was syscall.Kill), so
