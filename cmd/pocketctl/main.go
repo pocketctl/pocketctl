@@ -29,7 +29,6 @@ import (
 	"github.com/pocketctl/pocketctl/internal/notify"
 	"github.com/pocketctl/pocketctl/internal/platform"
 	"github.com/pocketctl/pocketctl/internal/protocol"
-	"github.com/pocketctl/pocketctl/internal/service"
 	"github.com/pocketctl/pocketctl/internal/session"
 	"github.com/pocketctl/pocketctl/internal/sysinfo"
 	"github.com/pocketctl/pocketctl/internal/update"
@@ -174,7 +173,7 @@ func cmdServiceInstall(args []string) {
 	// Ensure the log dir exists; launchd/systemd open the boot log but won't
 	// create its parent directory.
 	_ = os.MkdirAll(daemon.LogDir(), 0755)
-	cfg := service.Config{ExePath: exe, Args: daemonArgs, LogPath: daemon.ServiceBootLogPath()}
+	cfg := platform.ServiceOpts{ExePath: exe, Args: daemonArgs, LogPath: daemon.ServiceBootLogPath()}
 
 	// If the daemon is already running standalone, stop it so it doesn't fight
 	// the supervised instance for the relay registration / approval socket.
@@ -183,12 +182,12 @@ func cmdServiceInstall(args []string) {
 		_ = daemon.Stop()
 	}
 
-	if err := service.Install(cfg); err != nil {
+	if err := serviceMgr.Install(cfg); err != nil {
 		fmt.Fprintln(os.Stderr, i18n.T("service.install_fail", err))
 		os.Exit(1)
 	}
 	fmt.Println(i18n.T("service.installed", strings.Join(append([]string{filepath.Base(exe)}, daemonArgs...), " ")))
-	info, _ := service.Status()
+	info, _ := serviceMgr.Status()
 	if info.UnitPath != "" {
 		fmt.Println(i18n.T("service.unit_path", info.UnitPath))
 	}
@@ -198,7 +197,7 @@ func cmdServiceInstall(args []string) {
 }
 
 func cmdServiceUninstall() {
-	if err := service.Uninstall(); err != nil {
+	if err := serviceMgr.Uninstall(); err != nil {
 		fmt.Fprintln(os.Stderr, i18n.T("service.uninstall_fail", err))
 		os.Exit(1)
 	}
@@ -206,7 +205,7 @@ func cmdServiceUninstall() {
 }
 
 func cmdServiceStatus() {
-	info, err := service.Status()
+	info, err := serviceMgr.Status()
 	if err != nil {
 		fmt.Fprintln(os.Stderr, i18n.T("service.status_fail", err))
 		os.Exit(1)
