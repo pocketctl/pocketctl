@@ -948,6 +948,34 @@ func cmdDaemonStart(args []string) {
 	client.SetVersion(version)
 	client.SetStartedAt(time.Now().Unix())
 
+	// Auto-refresh the access token when the relay rejects it with 4001. Without
+	// this, a daemon whose 24h access token has simply expired would go permanently
+	// offline and spam the relay with invalid-token reconnects — and a remote user
+	// can't reach the machine to `pocketctl login`. The 7d refresh token lets the
+	// daemon self-heal; only when the refresh token itself is dead does the daemon
+	// park and ask the user to re-login.
+	client.OnTokenRefresh = func() (string, bool) {
+		relayURL, _, refreshToken, err := config.LoadAuth()
+		if err != nil || refreshToken == "" {
+			logger.Error("token refresh: no stored refresh token", "error", err)
+			return "", false
+		}
+		baseURL := strings.TrimSuffix(relayURL, "/ws")
+		baseURL = strings.TrimSuffix(baseURL, "/")
+		baseURL = strings.Replace(baseURL, "wss://", "https://", 1)
+		baseURL = strings.Replace(baseURL, "ws://", "http://", 1)
+		newAccess, newRefresh, err := api.RefreshToken(baseURL, refreshToken)
+		if err != nil {
+			logger.Error("token refresh failed; refresh token may be expired", "error", err)
+			return "", false
+		}
+		if err := config.SaveAuth(relayURL, newAccess, newRefresh); err != nil {
+			logger.Error("persist refreshed token failed", "error", err)
+		}
+		logger.Info("access token refreshed; reconnecting with new token")
+		return newAccess, true
+	}
+
 	// Durable outbound spool: mirror unacked events to disk so a daemon process
 	// crash doesn't lose them (replayed on next start). Default on; disable with
 	// POCKETCTL_SPOOL=0. A setup failure is non-fatal — fall back to in-memory.

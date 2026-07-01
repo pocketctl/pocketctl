@@ -157,6 +157,62 @@ func TestStopsReconnectingAfterRepeatedAuthRejection(t *testing.T) {
 	}
 }
 
+// TestRefreshesTokenOnAuthRejection verifies that a 4001 triggers OnTokenRefresh,
+// and that a successful refresh updates the token and keeps the daemon alive
+// (it does NOT count toward the stop-threshold). Only when refresh also fails
+// repeatedly does the daemon park — mirroring a real expired-access-token that
+// self-heals via the refresh token, and only parks when the refresh token is dead.
+func TestRefreshesTokenOnAuthRejection(t *testing.T) {
+	var conns int32
+	var refreshed int32
+	upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
+	mux := http.NewServeMux()
+	mux.HandleFunc("/ws", func(w http.ResponseWriter, r *http.Request) {
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		atomic.AddInt32(&conns, 1)
+		_ = conn.WriteControl(websocket.CloseMessage,
+			websocket.FormatCloseMessage(4001, "invalid token"), time.Now().Add(time.Second))
+		conn.Close()
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	c := newTestClient(wsURL(srv.URL))
+	// First two refreshes succeed (token self-heals); after that the refresh
+	// token is treated as dead, so auth rejections start counting toward stop.
+	c.OnTokenRefresh = func() (string, bool) {
+		if atomic.AddInt32(&refreshed, 1) <= 2 {
+			return "fresh-token", true
+		}
+		return "", false
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go c.Run(ctx)
+
+	// 2 successful refreshes (no backoff, immediate reconnect) + 3 failed ones
+	// (authRejectStopThreshold, with 1s/2s backoff between) before parking = 5 conns.
+	waitForConns(t, &conns, 5, 15*time.Second)
+
+	if got := atomic.LoadInt32(&refreshed); got < 3 {
+		t.Fatalf("expected OnTokenRefresh called >=3 times, got %d", got)
+	}
+	c.tokenMu.Lock()
+	tok := c.token
+	c.tokenMu.Unlock()
+	if tok != "fresh-token" {
+		t.Fatalf("expected token updated to 'fresh-token' after successful refresh, got %q", tok)
+	}
+	// Parked after the 5th connection — no further dialing.
+	time.Sleep(1500 * time.Millisecond)
+	if got := atomic.LoadInt32(&conns); got != 5 {
+		t.Fatalf("expected daemon parked at 5 connections, got %d (still reconnecting?)", got)
+	}
+}
+
 func waitForConns(t *testing.T, conns *int32, want int32, timeout time.Duration) {
 	t.Helper()
 	deadline := time.Now().Add(timeout)
