@@ -9,7 +9,6 @@ import (
 	"regexp"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
 
 	"github.com/pocketctl/pocketctl/internal/adapter"
@@ -136,15 +135,7 @@ func ResolveAgent(cliName string) (string, bool, bool) {
 		}
 		return real, true
 	}
-	owned := func(real string) bool {
-		info, err := os.Stat(real)
-		if err != nil {
-			return false
-		}
-		st, ok := info.Sys().(*syscall.Stat_t)
-		return ok && int(st.Uid) == os.Getuid()
-	}
-	return resolveFrom(cands, statReal, owned)
+	return resolveFrom(cands, statReal, fileOwnedByCurrentUser)
 }
 
 // AgentUpgradeInfo returns the upgrade command and npm package for an agent type.

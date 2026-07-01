@@ -2,7 +2,6 @@ package watcher
 
 import (
 	"context"
-	"syscall"
 	"time"
 )
 
@@ -13,11 +12,6 @@ type ProcessStateChange struct {
 	SessionID string
 }
 
-// IsProcessAlive checks if a process with the given PID is still running.
-func IsProcessAlive(pid int) bool {
-	err := syscall.Kill(pid, 0)
-	return err == nil
-}
 
 // ProcessMonitor periodically checks PID liveness and reports changes.
 type ProcessMonitor struct {
