@@ -335,7 +335,8 @@ struct TokenDonutChart: View {
 // MARK: - Heatmap（GitHub 风格消耗热力图，对齐 web `TokenUsage.vue` 的 heatmapCols/heatLevel）
 
 /// GitHub 风格日历对齐消耗热力图。列数（周数）/cell 尺寸/滚动/交互均可配置。
-/// 默认 22 周、cell 13pt、横向滚动默认靠右、可点击 tooltip（用量页）；签名卡可传更小 cell + 关闭滚动与交互。
+/// 默认 22 周、cell 13pt、横向滚动默认靠右、可点击 tooltip（用量页）；
+/// 签名卡传 scrollable=false：方格按容器宽度等分 + aspectRatio(1) 自适应填满，cellSize 此时无效。
 /// 5 级强度：level 0 = 无数据（中性灰），1–4 = `pcAccent` 透明度 0.22/0.42/0.66/0.92。
 struct TokenHeatmap: View {
     let series: [TokenDailyPoint]
@@ -482,18 +483,22 @@ struct TokenHeatmap: View {
             ForEach(cols) { col in
                 heatmapColumn(col)
                     .id(col.id)
+                    // 非滚动（签名卡）：每列等分容器宽度，配合方格 aspectRatio(1) 自适应填满，不依赖 cellSize；
+                    // 滚动（用量页）：列宽由内部 cellSize 决定，固定不变才能横向滚动。
+                    .frame(maxWidth: scrollable ? nil : .infinity, alignment: .topLeading)
             }
         }
     }
 
     /// 单列（一周）：顶部月份标签（仅该列周一所在月份首次出现时显示）+ 7 个 cell。
     private func heatmapColumn(_ col: TokenHeatmapColumn) -> some View {
-        VStack(spacing: cellGap) {
+        VStack(alignment: .leading, spacing: cellGap) {
             // 月份标签：取该列第一个 cell 的月份，简化为每列都标（与 web 行为接近）
+            // 滚动模式固定 cellSize 宽；非滚动模式跟随列宽（已被 heatmapRow 设为 .infinity）
             Text(shortMonth(col.cells.first?.month ?? 0))
                 .font(PCFont.body(9))
                 .foregroundStyle(Color.pcFgTertiary)
-                .frame(width: cellSize, alignment: .leading)
+                .frame(width: scrollable ? cellSize : nil, alignment: .leading)
             ForEach(col.cells) { cell in
                 heatmapCell(cell)
             }
@@ -502,23 +507,27 @@ struct TokenHeatmap: View {
 
     @ViewBuilder
     private func heatmapCell(_ cell: TokenHeatmapCell) -> some View {
-        let cellView = RoundedRectangle(cornerRadius: 2)
+        // 滚动（用量页）：固定 cellSize；非滚动（签名卡）：等分列宽 + aspectRatio(1) 自适应为正方形，填满容器宽度。
+        let shape = RoundedRectangle(cornerRadius: 2)
+        let fill = shape
             .fill(TokenHeatmap.color(level: cell.level))
-            .frame(width: cellSize, height: cellSize)
             .overlay(
-                RoundedRectangle(cornerRadius: 2)
+                shape
                     .stroke(Color.pcAccent, lineWidth: 1)
                     .opacity(interactive && selected?.date == cell.date && cell.hasData ? 1 : 0)
             )
+        let sized = scrollable
+            ? AnyView(fill.frame(width: cellSize, height: cellSize))
+            : AnyView(fill.frame(maxWidth: .infinity).aspectRatio(1, contentMode: .fit))
         if interactive {
-            cellView
+            sized
                 .contentShape(Rectangle())
                 .onTapGesture {
                     guard cell.hasData else { return }
                     selected = (selected?.date == cell.date) ? nil : cell
                 }
         } else {
-            cellView
+            sized
         }
     }
 

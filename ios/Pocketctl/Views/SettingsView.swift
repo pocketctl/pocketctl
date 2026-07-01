@@ -470,7 +470,7 @@ struct SettingsView: View {
     // MARK: - 签名卡热力图
 
     /// 设置页顶部消耗活动签名：22 周 × 7 天迷你热力图 + 底部 caption，整卡可点进完整用量页。
-    /// 非交互（格子不可点、无 tooltip）、不滚动（cell 9pt 下 22 周可铺满屏宽）。
+    /// 非交互（格子不可点、无 tooltip）、不滚动（scrollable=false 时方格按容器宽度等分自适应，铺满卡片内宽）。
     private var heatmapSignatureCard: some View {
         Button {
             showGlobalUsage = true
@@ -479,8 +479,6 @@ struct SettingsView: View {
                 TokenHeatmap(
                     series: viewModel.heatmapSeries,
                     maxVal: viewModel.heatmapMax,
-                    cellSize: 9,
-                    cellGap: 3,
                     interactive: false,
                     scrollable: false
                 )
