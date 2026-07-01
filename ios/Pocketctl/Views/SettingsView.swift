@@ -27,6 +27,11 @@ struct SettingsView: View {
                         // Profile section
                         profileSection
 
+                        // 签名卡热力图（消耗活动签名，点击进完整用量页）
+                        heatmapSignatureCard
+                            .padding(.horizontal, PCSpacing.lg)
+                            .padding(.bottom, PCSpacing.sm)
+
                         // Account section
                         sectionHeader("账户")
                         settingsGroup {
@@ -284,6 +289,7 @@ struct SettingsView: View {
             }
             .navigationTitle("设置")
             .navigationBarTitleDisplayMode(.inline)
+            .onAppear { Task { await viewModel.loadHeatmap() } }
             .navigationDestination(isPresented: $showGlobalUsage) {
                 TokenUsageView(daemonId: nil, apiClient: apiClient)
             }
@@ -459,6 +465,53 @@ struct SettingsView: View {
         }
         .padding(.top, 20)
         .padding(.bottom, PCSpacing.xxl)
+    }
+
+    // MARK: - 签名卡热力图
+
+    /// 设置页顶部消耗活动签名：22 周 × 7 天迷你热力图 + 底部 caption，整卡可点进完整用量页。
+    /// 非交互（格子不可点、无 tooltip）、不滚动（cell 9pt 下 22 周可铺满屏宽）。
+    private var heatmapSignatureCard: some View {
+        Button {
+            showGlobalUsage = true
+        } label: {
+            VStack(alignment: .leading, spacing: PCSpacing.sm) {
+                TokenHeatmap(
+                    series: viewModel.heatmapSeries,
+                    maxVal: viewModel.heatmapMax,
+                    cellSize: 9,
+                    cellGap: 3,
+                    interactive: false,
+                    scrollable: false
+                )
+
+                // 底部 caption：近 5 个月 · {total} tokens ›
+                HStack(spacing: 6) {
+                    Text("近 5 个月")
+                        .font(PCFont.body(11))
+                        .foregroundStyle(Color.pcFgTertiary)
+                    Text("·")
+                        .font(PCFont.body(11))
+                        .foregroundStyle(Color.pcFgTertiary)
+                    Text(formatTokens(viewModel.heatmapTotal))
+                        .font(PCFont.mono(11, weight: .semibold))
+                        .foregroundStyle(Color.pcAccent)
+                    Text("tokens")
+                        .font(PCFont.body(10))
+                        .foregroundStyle(Color.pcFgTertiary)
+                    Spacer()
+                    Image(systemName: "chevron.right")
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(Color.pcFgTertiary)
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(16)
+            .background(Color.pcSurface)
+            .overlay(RoundedRectangle(cornerRadius: PCRadius.lg).stroke(Color.pcBorder, lineWidth: 1))
+            .cornerRadius(PCRadius.lg)
+        }
+        .buttonStyle(.plain)
     }
 
     // MARK: - Disabled row helper
