@@ -52,6 +52,18 @@ func ApprovalSocketPath() string {
 	return filepath.Join(home, ".pocketctl", "approval.sock")
 }
 
+// ControlSocketPath 返回 daemon 本地控制 socket 路径（~/.pocketctl/control.sock）。
+// keep-awake on/off/status 等本地命令通过它与运行中的 daemon 通信（不经 relay）。
+// 与 ApprovalSocketPath 同置 ~/.pocketctl/ 下，权限由 IPCListener 设 0600。
+// 返回 "" 仅当 home 目录无法解析。
+func ControlSocketPath() string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+	return filepath.Join(home, ".pocketctl", "control.sock")
+}
+
 // SaveAuth persists relay URL and tokens to disk, preserving prod_relay_url if present.
 func SaveAuth(relayURL, accessToken, refreshToken string) error {
 	path, err := AuthPath()

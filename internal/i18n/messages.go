@@ -31,6 +31,7 @@ Commands:
   daemon doctor  Diagnose connection and configuration issues
   daemon update  Update daemon to the latest version
   daemon service Install/remove a native auto-restart service (launchd/systemd)
+  daemon keep-awake on|off|status   Prevent system sleep while agents run (auto-disables on battery)
   uninstall      Remove pocketctl binary and all local data
   version        Print version
   help           Show this help
@@ -77,6 +78,7 @@ const helpZh = `pocketctl - 远程 AI 编程代理控制
   daemon doctor  诊断连接和配置问题
   daemon update  更新到最新版本
   daemon service 安装/卸载原生自动重启服务（launchd/systemd）
+  daemon keep-awake on|off|status   阻止系统休眠（电池供电时自动关闭）
   uninstall      卸载 pocketctl，删除二进制和所有本地数据
   version        打印版本号
   help           显示此帮助
@@ -153,6 +155,30 @@ var messages = map[string]msg{
 	"daemon.unknown_sub":     {"unknown daemon subcommand: %s", "未知的 daemon 子命令: %s"},
 	"daemon.already_running": {"daemon already running (PID %d)", "守护进程已在运行 (PID %d)"},
 	"daemon.lock_held":      {"another pocketctl daemon instance holds the single-instance lock; if this is wrong, stop it first with `pocketctl daemon stop`", "另一个 pocketctl 守护进程持有单实例锁;如属异常,请先用 `pocketctl daemon stop` 停止它"},
+
+	// ---- keepawake.* (sleep prevention) ----------------------------------
+	// 用法: pocketctl daemon keep-awake on|off|status
+	// 开启后若检测到电池供电,daemon 会在下次轮询(≤60s)自动关闭以保护电量,
+	// 不推送通知,需手动 status 查看。
+	"keepawake.usage": {
+		"usage: pocketctl daemon keep-awake <on|off|status>   (prevent system sleep; auto-disables on battery)",
+		"用法: pocketctl daemon keep-awake <on|off|status>   (阻止系统休眠;电池供电时自动关闭)",
+	},
+	"keepawake.bad_action": {
+		"unknown keep-awake action: %s (expected on|off|status)",
+		"未知的 keep-awake 操作: %s (应为 on|off|status)",
+	},
+	"keepawake.connect_failed": {
+		"could not reach daemon",
+		"无法连接 daemon",
+	},
+	"keepawake.failed": {
+		"keep-awake failed: %s",
+		"keep-awake 失败: %s",
+	},
+	"keepawake.state_on":  {"state: ON (system sleep prevented)", "状态: 已开启 (阻止系统休眠)"},
+	"keepawake.state_off": {"state: OFF", "状态: 已关闭"},
+	"keepawake.reason":    {"reason: %s", "原因: %s"},
 
 	// ---- service.* (native supervisor install/uninstall/status) ----------
 	"service.usage_sub": {

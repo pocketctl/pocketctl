@@ -103,5 +103,23 @@ type ServiceManager interface {
 	Status() (ServiceStatus, error)
 }
 
+// SleepInhibitor 阻止系统进入休眠。Acquire 持有锁直到 Release 调用；
+// daemon 崩溃/退出时锁随进程或线程状态自动失效（race-free，无需显式清理）。
+// 仅 macOS/Windows 提供真实实现；其他平台返回 ErrUnsupported（受控降级）。
+type SleepInhibitor interface {
+	// Acquire 开始阻止休眠。幂等：重复 Acquire 由实现保证安全（no-op）。
+	Acquire() error
+	// Release 停止阻止休眠。幂等：未持有状态下 Release 不报错。
+	Release() error
+}
+
+// PowerSource 报告当前电源状态。用于 keep-awake 的电池保护逻辑：
+// 检测到电池供电时自动关闭抑制，避免电量耗尽导致强制关机。
+type PowerSource interface {
+	// IsOnBattery 返回 true 表示当前由电池供电；false 表示接外接电源。
+	// 无法判定时返回 error（调用方应保守处理，不触发自动关闭）。
+	IsOnBattery() (bool, error)
+}
+
 // 构造函数 New* 由 platform_unix.go / platform_windows.go 按平台实现，
 // 本文件不提供默认实现（任一实际构建总有一个平台文件在场）。

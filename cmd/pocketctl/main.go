@@ -26,6 +26,7 @@ import (
 	"github.com/pocketctl/pocketctl/internal/daemon"
 	"github.com/pocketctl/pocketctl/internal/discovery"
 	"github.com/pocketctl/pocketctl/internal/i18n"
+	"github.com/pocketctl/pocketctl/internal/keepawake"
 	"github.com/pocketctl/pocketctl/internal/notify"
 	"github.com/pocketctl/pocketctl/internal/platform"
 	"github.com/pocketctl/pocketctl/internal/protocol"
@@ -108,6 +109,8 @@ func cmdDaemon(args []string) {
 		cmdDaemonUpdate(args[1:])
 	case "service":
 		cmdDaemonService(args[1:])
+	case "keep-awake":
+		cmdDaemonKeepAwake(args[1:])
 	default:
 		fmt.Fprintln(os.Stderr, i18n.T("daemon.unknown_sub", args[0]))
 		os.Exit(1)
@@ -1108,6 +1111,22 @@ func cmdDaemonStart(args []string) {
 		logger.Warn("control channel not started", "error", err)
 	}
 
+	// keep-awake: 本地控制 socket + 休眠抑制管理器。用户经
+	// `pocketctl daemon keep-awake on/off/status` 显式控制;不默认开启。
+	// 平台不支持(macOS/Windows 之外)时 Manager 仍可用,仅抑制器返回 ErrUnsupported,
+	// socket 正常响应"not supported"。电池保护:WatchForBattery 在 active 且检测到
+	// 电池供电时自动 Disable,避免电量耗尽强制关机反而中断任务。
+	kaMgr := keepawake.NewManager(logger)
+	kaServer := keepawake.NewServer(config.ControlSocketPath(), kaMgr, logger)
+	if err := kaServer.Start(); err != nil {
+		logger.Warn("keep-awake control socket not started", "error", err)
+	} else {
+		logger.Info("keep-awake control socket listening", "path", kaServer.ListenPath())
+		daemon.RunLoop(ctx, "keep-awake-watch", logger, func() { kaMgr.WatchForBattery(ctx) })
+		daemon.Go("keep-awake-server", logger, func() { kaServer.Serve(ctx) })
+	}
+
+
 	// Start session watcher (Claude terminal sessions)
 	if err := sw.Start(ctx); err != nil {
 		logger.Error("start session watcher", "error", err)
@@ -1213,6 +1232,10 @@ func cmdDaemonStart(args []string) {
 	}
 	logger.Info("shutting down")
 	fmt.Println(i18n.T("daemon.shutting_down"))
+	// 释放 keep-awake 抑制:正常关闭时主动 Release(进程退出时 caffeinate -w
+	// 也会兜底,但显式释放更及时)。
+	_ = kaMgr.Disable(keepawake.ReasonShutdown)
+	_ = kaServer.Close()
 	// Stop the shared opencode serve process (bound to its own context, not the
 	// daemon ctx) so it doesn't linger and race the next daemon's serve on the
 	// shared SQLite DB.
@@ -1229,6 +1252,52 @@ func cmdDaemonStop() {
 		os.Exit(1)
 	}
 	fmt.Println(i18n.T("daemon.stopped"))
+}
+
+// ---------- daemon keep-awake ----------
+
+// cmdDaemonKeepAwake 实现 `pocketctl daemon keep-awake on|off|status`。
+// 通过本地控制 socket 与运行中的 daemon 通信(不经 relay)。daemon 未运行时
+// socket 不存在,返回可识别错误。开启后若检测到电池供电,daemon 会在下一次
+// 轮询自动关闭以保护电量(不推送通知,需手动 status 查看)。
+func cmdDaemonKeepAwake(args []string) {
+	if len(args) == 0 {
+		fmt.Fprintln(os.Stderr, i18n.T("keepawake.usage"))
+		os.Exit(1)
+	}
+	action := args[0]
+	switch action {
+	case "on", "off", "status":
+	default:
+		fmt.Fprintln(os.Stderr, i18n.T("keepawake.bad_action", action))
+		os.Exit(1)
+	}
+	resp, err := keepawake.Ask(config.ControlSocketPath(), keepawake.Request{
+		Cmd:    "keep-awake",
+		Action: action,
+	})
+	if err != nil {
+		fmt.Fprintln(os.Stderr, i18n.T("keepawake.connect_failed"))
+		fmt.Fprintln(os.Stderr, "  "+err.Error())
+		os.Exit(1)
+	}
+	if !resp.OK {
+		fmt.Fprintln(os.Stderr, i18n.T("keepawake.failed", resp.Error))
+		os.Exit(1)
+	}
+	// 成功:打印消息与状态摘要。
+	fmt.Println(resp.Msg)
+	switch {
+	case resp.OnBattery:
+		// 已在 msg 里附带电池提示,无需重复。
+	case resp.Enabled:
+		fmt.Println(i18n.T("keepawake.state_on"))
+	default:
+		fmt.Println(i18n.T("keepawake.state_off"))
+		if resp.Reason != "" {
+			fmt.Println(i18n.T("keepawake.reason", resp.Reason))
+		}
+	}
 }
 
 // ---------- daemon status ----------
