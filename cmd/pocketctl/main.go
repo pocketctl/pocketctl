@@ -956,6 +956,13 @@ func cmdDaemonStart(args []string) {
 	client.SetAgentManageable(agentManageable)
 	client.SetVersion(version)
 	client.SetStartedAt(time.Now().Unix())
+	// Optional TLS certificate pinning: when POCKETCTL_RELAY_PIN is set
+	// (base64 SHA-256 of the relay cert's SPKI), the daemon pins the relay's
+	// public key so a MITM with a trusted-but-malicious cert is rejected.
+	if pin := os.Getenv("POCKETCTL_RELAY_PIN"); pin != "" {
+		client.SetRelayPin(pin)
+		logger.Info("relay certificate pinning enabled")
+	}
 
 	// Auto-refresh the access token when the relay rejects it with 4001. Without
 	// this, a daemon whose 24h access token has simply expired would go permanently
@@ -1710,12 +1717,22 @@ func handleCommands(ctx context.Context, client *ws.Client, sm *session.SessionM
 				stateDirty.Store(true)
 				if err := sm.KillSession(cmd.SessionID); err != nil {
 					logger.Error("kill session failed", "error", err)
+					client.SendMsg(protocol.DaemonEvent{
+						Type:      "error",
+						SessionID: cmd.SessionID,
+						Error:     err.Error(),
+					})
 				}
 
 			case "session_interrupt":
 				logger.Info("interrupt session", "session", cmd.SessionID)
 				if err := sm.InterruptSession(cmd.SessionID); err != nil {
 					logger.Error("interrupt session failed", "error", err)
+					client.SendMsg(protocol.DaemonEvent{
+						Type:      "error",
+						SessionID: cmd.SessionID,
+						Error:     err.Error(),
+					})
 				}
 
 			case "set_permission_mode":

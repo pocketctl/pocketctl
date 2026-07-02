@@ -306,6 +306,44 @@ export function highRiskPush(
 }
 
 /**
+ * Format a token count compactly: 1234 → "1.2k", 1500000 → "1.5M".
+ * Used in daily/weekly report push bodies.
+ */
+function formatTokens(n: number): string {
+  if (n >= 1_000_000) return (n / 1_000_000).toFixed(1).replace(/\.0$/, '') + 'M';
+  if (n >= 1_000) return (n / 1_000).toFixed(1).replace(/\.0$/, '') + 'k';
+  return String(n);
+}
+
+/**
+ * Build the daily token-usage report push (Pro-only). Fires once per UTC day,
+ * covering the previous day's usage. `dateLabel` is a short label like "7月1日"
+ * for the body; the caller computes it from the reporting day.
+ */
+export function dailyReportPush(dateLabel: string, totalTokens: number, requests: number): PushPayload {
+  const tokens = formatTokens(totalTokens);
+  return {
+    title: '昨日 Token 用量',
+    body: `${dateLabel}：${tokens} tokens · ${requests} 次请求`,
+    data: { type: 'insights', subtype: 'daily_report' },
+  };
+}
+
+/**
+ * Build the weekly token-usage report push (Pro-only). Fires once per ISO week,
+ * covering the 7 days ending Sunday. `weekLabel` is a short label like
+ * "6/24–6/30" for the body.
+ */
+export function weeklyReportPush(weekLabel: string, totalTokens: number, requests: number): PushPayload {
+  const tokens = formatTokens(totalTokens);
+  return {
+    title: '本周 Token 用量',
+    body: `${weekLabel}：${tokens} tokens · ${requests} 次请求`,
+    data: { type: 'insights', subtype: 'weekly_report' },
+  };
+}
+
+/**
  * Detect high-risk commands / targets from a tool's human-readable summary
  * (the output of summarizeToolInput). Pure function, independently testable.
  *

@@ -140,6 +140,20 @@ export async function initDB(pool: pg.Pool): Promise<void> {
   `);
   await pool.query(`CREATE INDEX IF NOT EXISTS idx_token_daily_stats_user_date ON token_daily_stats(user_id, date)`);
 
+  // Report push dedup: tracks which daily/weekly report has been pushed to each
+  // user, so the hourly report job is idempotent across relay restarts. The
+  // PRIMARY KEY (user_id, report_type, period_key) makes the insert-and-push
+  // pattern atomic: ON CONFLICT DO NOTHING returns rowCount 0 → already sent.
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS report_sent (
+      user_id INT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      report_type VARCHAR(8) NOT NULL,
+      period_key CHAR(8) NOT NULL,
+      sent_at TIMESTAMPTZ DEFAULT NOW(),
+      PRIMARY KEY (user_id, report_type, period_key)
+    )
+  `);
+
   // Session delete tombstone table
   await pool.query(`
     CREATE TABLE IF NOT EXISTS deleted_sessions (
@@ -1159,6 +1173,78 @@ export async function getSessionCountsByUser(pool: pg.Pool, userId: number): Pro
     map[row.daemon_id] = { active: row.active ?? 0, total: row.total ?? 0 };
   }
   return map;
+}
+
+// ---- Report push (daily/weekly token-usage digest, Pro-only) ----
+
+/** List all user IDs eligible for Pro-only pushes (plan != 'free' OR whitelist).
+ *  Used by the hourly report job to fan out to every Pro user. */
+export async function listProUserIds(pool: pg.Pool): Promise<number[]> {
+  const result = await pool.query(
+    `SELECT id FROM users WHERE plan != 'free' OR whitelist = true`
+  );
+  return result.rows.map((r: any) => r.id);
+}
+
+/** A user's token totals for a single UTC day (input+output+cache_read+cache_create).
+ *  Merges rolled token_daily_stats with today's live events (same pattern as
+ *  getTokenDailySeries). Returns null if the user had no usage that day. */
+export async function getUserDailyTokens(pool: pg.Pool, userId: number, dateStr: string): Promise<{ total: number; requests: number } | null> {
+  // dateStr is 'YYYY-MM-DD' in UTC. token_daily_stats.date is a DATE column;
+  // today's events are matched by date_trunc('day', created_at).
+  const result = await pool.query(`
+    SELECT
+      COALESCE(SUM(input + output + cache_read + cache_create), 0) AS total,
+      COALESCE(SUM(requests), 0) AS requests
+    FROM (
+      SELECT input, output, cache_read, cache_create, requests
+      FROM token_daily_stats WHERE user_id = $1 AND date = $2::date
+      UNION ALL
+      SELECT
+        COALESCE((e.payload->'usage'->>'input_tokens')::bigint, 0),
+        COALESCE((e.payload->'usage'->>'output_tokens')::bigint, 0),
+        COALESCE((e.payload->'usage'->>'cache_read_tokens')::bigint, 0),
+        COALESCE((e.payload->'usage'->>'cache_create_tokens')::bigint, 0),
+        1
+      FROM events e JOIN sessions s ON s.session_id = e.session_id
+      WHERE s.user_id = $1
+        AND e.event_type = 'agent_text' AND e.payload ? 'usage'
+        AND date_trunc('day', e.created_at) = $2::date
+    ) merged
+  `, [userId, dateStr]);
+  const total = Number(result.rows[0]?.total ?? 0);
+  const requests = Number(result.rows[0]?.requests ?? 0);
+  if (total === 0 && requests === 0) return null;
+  return { total, requests };
+}
+
+/** A user's token totals for the 7-day window ending at the end of dateStr (inclusive).
+ *  dateStr is the last day of the ISO week (Sunday). Reads token_daily_stats only —
+ *  past days are fully rolled up, so no live-events merge needed for a weekly look-back. */
+export async function getUserWeeklyTokens(pool: pg.Pool, userId: number, weekEndDateStr: string): Promise<{ total: number; requests: number } | null> {
+  const result = await pool.query(`
+    SELECT
+      COALESCE(SUM(input + output + cache_read + cache_create), 0) AS total,
+      COALESCE(SUM(requests), 0) AS requests
+    FROM token_daily_stats
+    WHERE user_id = $1 AND date > ($2::date - 7) AND date <= $2::date
+  `, [userId, weekEndDateStr]);
+  const total = Number(result.rows[0]?.total ?? 0);
+  const requests = Number(result.rows[0]?.requests ?? 0);
+  if (total === 0 && requests === 0) return null;
+  return { total, requests };
+}
+
+/** Atomically record a report push. Returns true if this insert won (i.e. this is
+ *  the first push for this user/type/period — caller should proceed to notifyUser).
+ *  Returns false if a row already existed (already sent — skip, idempotent). */
+export async function markReportSent(pool: pg.Pool, userId: number, reportType: 'daily' | 'weekly', periodKey: string): Promise<boolean> {
+  const result = await pool.query(
+    `INSERT INTO report_sent (user_id, report_type, period_key) VALUES ($1, $2, $3)
+     ON CONFLICT (user_id, report_type, period_key) DO NOTHING`,
+    [userId, reportType, periodKey]
+  );
+  return (result.rowCount ?? 0) > 0;
 }
 
 export function parseDBUrl(url: string): DBConfig {

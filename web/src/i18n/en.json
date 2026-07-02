@@ -89,6 +89,8 @@
   "session.send_failed": "Send failed — check your connection and retry",
   "session.output_tokens": "Output {{n}}",
   "session.force_stop": "Click again to force-kill",
+  "session.stop_daemon_unreachable": "Daemon reconnecting — click again to force-kill",
+  "session.stop_session_not_found": "Session no longer exists (may have been purged)",
   "session.tool_timeout": "Timed out (no result received)",
   "session.ended": "Session ended",
   "session.input_creating": "Session creating…",
