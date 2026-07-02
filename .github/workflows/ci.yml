@@ -7,6 +7,12 @@ on:
 
 jobs:
   build-test:
+    # job 级 env: build/vet/test 三个 step 都继承(go-m1cpu 在 macos 的 cgo
+    # warning 出现在每个编译 step,不只 test)。
+    env:
+      # macos: gopsutil→go-m1cpu 的 C 代码 VLA warning(-Wgnu-folding-constant),
+      # macos runner 新 clang 当 error。-Wno-error 解除所有 -Werror 化。
+      CGO_CFLAGS: "-Wno-error"
     strategy:
       fail-fast: false
       matrix:
@@ -24,10 +30,6 @@ jobs:
         run: go vet ./...
       - name: Test
         # Windows 测试有 pre-existing 平台债(C+D: 环境依赖/ws 文件锁/时序),
-        # 容忍失败直到清理。build/vet 仍严格。ubuntu/macos 严格(continue-on-error=false)。
+        # 容忍失败直到清理。build/vet/ubuntu/macos 严格。
         continue-on-error: ${{ matrix.os == 'windows-latest' }}
-        env:
-          # macos: gopsutil→go-m1cpu 的 C 代码 VLA warning(-Wgnu-folding-constant),
-          # 新 clang 在 macos runner 上当 error。-Wno-error 解除 error 化。
-          CGO_CFLAGS: "-Wno-error -Wno-gnu-folding-constant"
         run: go test ./...
