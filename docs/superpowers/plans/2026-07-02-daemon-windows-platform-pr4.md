@@ -65,3 +65,88 @@
 
 ## 待展开（用户确认骨架后）
 每 task 写完整 Windows 实现代码（verbatim）+ 三平台编译验证 + review 要点。
+
+> Task 调整（vs 骨架表）：go-winio 延后到 Task 3（IPCListener 用时才加，YAGNI）；Task 1 聚焦 InstanceLocker（用 x/sys/windows，不需 go-winio）。
+
+---
+
+## Task 1: InstanceLocker（Mutex）
+
+**Files:** Modify `internal/platform/platform_windows.go`（windowsLocker.Acquire 真实实现 + 加 mutexLock type）
+
+**设计：** Windows 全局命名 Mutex `Global\pocketctl-daemon`。`CreateMutex(initialOwner=false)`：成功=新 mutex（获锁）；返回 `ERROR_ALREADY_EXISTS`=另一 daemon 已持有（失败，但 handle 仍返回需 Close）。进程退出 OS 自动释放 Mutex（race-free，等价 Unix flock）。path 参数忽略（Windows 单例是 per-machine，用固定 Global 名）。
+
+- [ ] **Step 1: 改 platform_windows.go 的 windowsLocker + 加 mutexLock**
+
+当前（PR1 stub）：
+```go
+// NewInstanceLocker 返回 Windows 单实例锁（PR1 stub）。PR4 用全局命名 Mutex 实现。
+func NewInstanceLocker() InstanceLocker { return windowsLocker{} }
+
+type windowsLocker struct{}
+
+func (windowsLocker) Acquire(string) (Lock, error) {
+	return nil, ErrUnsupported
+}
+```
+
+改为：
+```go
+// NewInstanceLocker 返回基于全局命名 Mutex 的单实例锁。
+// PR4: 替代 PR1 stub。Global\pocketctl-daemon 跨进程互斥,进程退出 OS 自动释放
+// (race-free,等价 Unix flock)。
+func NewInstanceLocker() InstanceLocker { return windowsLocker{} }
+
+type windowsLocker struct{}
+
+func (windowsLocker) Acquire(path string) (Lock, error) {
+	// path 是 Unix 锁文件路径语义;Windows 忽略它,用固定 Global mutex 名
+	// (pocketctl 单例是 per-machine,不 per-path)。
+	handle, err := windows.CreateMutex(nil, false, `Global\pocketctl-daemon`)
+	if err != nil {
+		if err == windows.ERROR_ALREADY_EXISTS {
+			// mutex 已存在(另一 daemon 持有);CreateMutex 仍返回现有 handle,关掉它。
+			if handle != 0 {
+				_ = windows.CloseHandle(handle)
+			}
+			return nil, fmt.Errorf("another pocketctl daemon is already running on this host")
+		}
+		return nil, fmt.Errorf("create mutex: %w", err)
+	}
+	return &mutexLock{handle: handle}, nil
+}
+
+// mutexLock 持有 Mutex handle。Close 关闭 handle;mutex 真正释放在进程退出时(OS 保证)。
+type mutexLock struct{ handle windows.Handle }
+
+func (l *mutexLock) Close() error {
+	return windows.CloseHandle(l.handle)
+}
+```
+
+platform_windows.go import 块加 `"fmt"` + `"golang.org/x/sys/windows"`（保留现有 net/os/os/exec）。
+
+- [ ] **Step 2: 三平台编译验证**
+
+Run: `GOOS=darwin go build ./... && GOOS=linux go build ./... && GOOS=windows go build ./...`
+Expected: 三平台全过。Unix 零影响（platform_unix.go 没动）；Windows InstanceLocker 现用 CreateMutex。
+
+- [ ] **Step 3: Unix 零回归确认**
+
+Run: `go build ./... && go vet ./... && go test ./...`（macOS）
+Expected: 全绿（Windows 代码 build tag 隔离）。
+
+- [ ] **Step 4: Commit**
+
+```bash
+git add internal/platform/platform_windows.go
+git commit -m "feat(platform): Windows InstanceLocker 真实实现(Mutex) (PR4/7)"
+```
+
+> **review 重点**: CreateMutex(initialOwner=false 不抢占)、ERROR_ALREADY_EXISTS 检测、handle 关闭(成功路径由 mutexLock.Close 负责;ALREADY_EXISTS 路径立即 Close)、错误消息与 Unix 一致("another pocketctl daemon...")。运行时验证(真起两个 daemon 看互斥)留 PR5 CI。
+
+---
+
+## Task 2-7: 待逐 task 展开
+
+Task 2(Daemonizer DETACHED) / Task 3(IPCListener named pipe + go-winio) / Task 4(ProcessController IsAlive/Kill) / Task 5(控制通道) / Task 6(ServiceManager SCM) / Task 7(集成验证)。执行到时写完整 Windows 代码。
