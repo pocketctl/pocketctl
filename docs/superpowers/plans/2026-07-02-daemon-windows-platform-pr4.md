@@ -300,3 +300,77 @@ git commit -m "feat(platform): Windows IPCListener 真实实现(named pipe, go-w
 ## Task 4-7: 待逐 task 展开
 
 Task 4(ProcessController IsAlive/Kill) / Task 5(控制通道) / Task 6(ServiceManager SCM) / Task 7(集成验证)。
+
+---
+
+## Task 4: ProcessController IsAlive/Kill（OpenProcess/TerminateProcess）
+
+**Files:** `internal/platform/platform_windows.go`（windowsProcessController.IsAlive/Kill 真实实现；**Terminate 暂留 stub**，Task 5 控制通道实现）
+
+**设计：**
+- `IsAlive(pid)` = `OpenProcess(SYNCHRONIZE, false, pid)` 成功即存活（进程退出 → OpenProcess 失败 → false）。立即 CloseHandle。Windows 无 Unix zombie 概念，进程退出即消失，OpenProcess 检测可靠。
+- `Kill(pid)` = `OpenProcess(PROCESS_TERMINATE)` + `TerminateProcess(handle, exitCode=1)` + CloseHandle。
+- `Terminate(pid)` = 保持 `ErrUnsupported`（Task 5 用控制通道实现——连 daemon 控制 pipe 发 stop）。
+
+- [ ] **Step 1: 改 platform_windows.go windowsProcessController**
+
+当前（PR1 stub，IsAlive 返回 false、Terminate/Kill 返回 ErrUnsupported）：
+```go
+func (windowsProcessController) IsAlive(int) bool    { return false }
+func (windowsProcessController) Terminate(int) error { return ErrUnsupported }
+func (windowsProcessController) Kill(int) error      { return ErrUnsupported }
+```
+
+改为（IsAlive/Kill 真实实现，Terminate 保持 stub）：
+```go
+func (windowsProcessController) IsAlive(pid int) bool {
+	// OpenProcess 成功即存活;进程已退出 → OpenProcess 失败 → false。
+	// Windows 无 Unix zombie(进程退出即消失),检测可靠。
+	handle, err := windows.OpenProcess(windows.SYNCHRONIZE, false, uint32(pid))
+	if err != nil {
+		return false
+	}
+	_ = windows.CloseHandle(handle)
+	return true
+}
+
+func (windowsProcessController) Kill(pid int) error {
+	handle, err := windows.OpenProcess(windows.PROCESS_TERMINATE, false, uint32(pid))
+	if err != nil {
+		return fmt.Errorf("open process: %w", err)
+	}
+	defer windows.CloseHandle(handle)
+	if err := windows.TerminateProcess(handle, 1); err != nil {
+		return fmt.Errorf("terminate process: %w", err)
+	}
+	return nil
+}
+
+// Terminate 仍 stub(PR1)——Task 5 控制通道实现(连 daemon control pipe 发 stop)。
+func (windowsProcessController) Terminate(int) error { return ErrUnsupported }
+```
+
+（windows 已在 import 块，无需新 import。）
+
+- [ ] **Step 2: 三平台编译验证**
+
+Run: `GOOS=darwin go build ./... && GOOS=linux go build ./... && GOOS=windows go build ./...`
+Expected: 三平台全过。Windows ProcessController.IsAlive/Kill 现真实实现。
+
+- [ ] **Step 3: Unix 零回归**
+
+Run: `go build ./... && go vet ./... && go test ./...`（macOS）— 全绿。
+
+- [ ] **Step 4: Commit**
+```bash
+git add internal/platform/platform_windows.go
+git commit -m "feat(platform): Windows ProcessController IsAlive/Kill(OpenProcess/TerminateProcess) (PR4/7)"
+```
+
+> review 重点: OpenProcess 访问权限(SYNCHRONIZE 存活检测/PROCESS_TERMINATE 强杀)、CloseHandle(IsAlive + Kill 都关)、TerminateProcess exitCode=1、Terminate 保持 stub(Task 5)。IsAlive 用 SYNCHRONIZE 是常见简化(对 daemon 自己的 pid 足够);若 reviewer 建议 PROCESS_QUERY_LIMITED_INFORMATION+GetExitCodeProcess 更精确,记 Minor(Task 5 或后续优化)。运行验证留 PR5。
+
+---
+
+## Task 5-7: 待逐 task 展开
+
+Task 5(控制通道: daemon 侧 named pipe server + ProcessController.Terminate client) / Task 6(ServiceManager SCM) / Task 7(集成验证)。
