@@ -373,4 +373,161 @@ git commit -m "feat(platform): Windows ProcessController IsAlive/Kill(OpenProces
 
 ## Task 5-7: 待逐 task 展开
 
-Task 5(控制通道: daemon 侧 named pipe server + ProcessController.Terminate client) / Task 6(ServiceManager SCM) / Task 7(集成验证)。
+Task 5(控制通道) / Task 6(ServiceManager SCM) / Task 7(集成验证)。
+
+---
+
+## Task 5: 控制通道（daemon stop 替代 SIGTERM）
+
+PR4 最复杂 task。Windows 无 SIGTERM,detached daemon 收不到信号——靠 named pipe 控制通道收 stop。**4 文件 + main.go 活代码改动。**
+
+**设计：**
+- pipe 名约定 `\\.\pipe\pocketctl-control-{pid}`（daemon 启动开 `os.Getpid()` 对应的 pipe；Terminate(pid) 连同名的 pipe）。
+- **依赖方向修正**：`ControlPipeName(pid)` 放 **platform_windows.go**（不放 daemon——daemon 已依赖 platform，放 daemon 会让 platform→daemon 循环）。daemon `StartControlChannel` 用 `platform.ControlPipeName`。
+- daemon 侧：`StartControlChannel(onStop func()) error`——Windows 开 pipe server + goroutine 监听 "stop" → onStop()；Unix no-op（SIGTERM 由 signal 处理）。
+- platform：`ProcessController.Terminate(pid)` 连 `ControlPipeName(pid)` 发 "stop"。
+- main.go：daemon 启动后调 `daemon.StartControlChannel(cancel)`；`:1197 <-sigCh` 改 `select { case <-sigCh: case <-ctx.Done(): }`（让控制通道的 cancel 也能唤醒 main）。
+
+**Files:**
+- Create `internal/daemon/control_windows.go`（`//go:build windows`：StartControlChannel pipe server）
+- Create `internal/daemon/control_unix.go`（`//go:build !windows`：StartControlChannel no-op）
+- Modify `internal/platform/platform_windows.go`（加 `ControlPipeName` + Terminate 连 pipe）
+- Modify `cmd/pocketctl/main.go`（:1096 后加 StartControlChannel(cancel)；:1197 改 select）
+
+- [ ] **Step 1: platform_windows.go 加 ControlPipeName + Terminate 实现**
+
+加（Windows-only helper，daemon 侧也用它）：
+```go
+// ControlPipeName 返回 daemon 控制通道 named pipe 名(基于 pid)。
+// daemon 启动开此 pipe;ProcessController.Terminate(pid) 连它发 stop。
+func ControlPipeName(pid int) string {
+	return fmt.Sprintf(`\\.\pipe\pocketctl-control-%d`, pid)
+}
+```
+
+改 windowsProcessController.Terminate（当前 `return ErrUnsupported`）：
+```go
+func (windowsProcessController) Terminate(pid int) error {
+	// 连 daemon 控制通道 named pipe,发 stop(优雅退出)。
+	// daemon 不在/pipe 不存在 → 错误(调用方 daemon.Stop 会 fallback Kill)。
+	conn, err := winio.DialPipe(ControlPipeName(pid), nil)
+	if err != nil {
+		return fmt.Errorf("dial control pipe (daemon not running?): %w", err)
+	}
+	defer conn.Close()
+	if _, err := conn.Write([]byte("stop\n")); err != nil {
+		return fmt.Errorf("send stop: %w", err)
+	}
+	return nil
+}
+```
+
+- [ ] **Step 2: 创建 daemon/control_windows.go**
+
+```go
+//go:build windows
+
+package daemon
+
+import (
+	"net"
+	"strings"
+	"time"
+
+	"github.com/Microsoft/go-winio"
+	"github.com/pocketctl/pocketctl/internal/platform"
+)
+
+// StartControlChannel 开 named pipe 控制通道,goroutine 监听 "stop" 命令。
+// 收到 stop 调 onStop(触发优雅退出)。Windows-only;Unix 用 SIGTERM(signal.Notify)。
+// 失败非致命:daemon 仍跑,只是 Windows 上不能被控制通道优雅停止(可强 kill 兜底)。
+func StartControlChannel(onStop func()) error {
+	name := platform.ControlPipeName(os.Getpid())
+	ln, err := winio.ListenPipe(name, nil)
+	if err != nil {
+		return fmt.Errorf("listen control pipe: %w", err)
+	}
+	go func() {
+		defer ln.Close()
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				return // listener closed
+			}
+			go handleControlConn(conn, onStop)
+		}
+	}()
+	return nil
+}
+
+func handleControlConn(conn net.Conn, onStop func()) {
+	defer conn.Close()
+	_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+	buf := make([]byte, 16)
+	n, err := conn.Read(buf)
+	if err != nil {
+		return
+	}
+	if strings.TrimSpace(string(buf[:n])) == "stop" {
+		_, _ = conn.Write([]byte("ok\n"))
+		onStop()
+	}
+}
+```
+
+> import 需 `"fmt"` + `"os"` + `"net"` + `"strings"` + `"time"` + `winio` + `platform`。pipe 名单一来源 `platform.ControlPipeName(os.Getpid())`——与 platform_windows.go 的 Terminate 连同一名字（`\\.\pipe\pocketctl-control-{pid}`）。
+
+- [ ] **Step 3: 创建 daemon/control_unix.go**
+
+```go
+//go:build !windows
+
+package daemon
+
+// StartControlChannel Unix no-op(SIGTERM 由 signal.Notify 处理,不需要控制通道)。
+func StartControlChannel(onStop func()) error {
+	return nil
+}
+```
+
+- [ ] **Step 4: main.go 集成**
+
+:1096 `installSignalHandler(sigCh)` 后加：
+```go
+	// PR4: Windows 控制通道(Unix no-op)。收 stop → cancel → 优雅退出。
+	// detached Windows daemon 收不到信号,靠控制 pipe 接收 daemon stop 命令。
+	if err := daemon.StartControlChannel(cancel); err != nil {
+		logger.Warn("control channel not started", "error", err)
+	}
+```
+
+:1197 当前 `<-sigCh` 改：
+```go
+	select {
+	case <-sigCh:
+	case <-ctx.Done(): // PR4: 控制通道 stop → cancel → 这里唤醒
+	}
+```
+
+- [ ] **Step 5: 三平台编译验证**
+
+Run: `GOOS=darwin go build ./... && GOOS=linux go build ./... && GOOS=windows go build ./...`
+Expected: 三平台全过。Windows: daemon 开控制 pipe + platform Terminate 连 pipe。Unix: control_unix.go no-op。
+
+- [ ] **Step 6: Unix 零回归**
+
+Run: `go build ./... && go vet ./... && go test ./...`（macOS）— 全绿。Unix 控制通道 no-op，行为不变。
+
+- [ ] **Step 7: Commit**
+```bash
+git add internal/daemon/control_windows.go internal/daemon/control_unix.go internal/platform/platform_windows.go cmd/pocketctl/main.go
+git commit -m "feat(platform): Windows 控制通道(daemon stop 替代 SIGTERM) (PR4/7)"
+```
+
+> **review 重点**: 依赖方向(platform.ControlPipeName,daemon→platform 不反向)、pipe 名约定一致、main.go select 改动(让 cancel 唤醒,不破坏 PR2 signal)、handleControlConn 超时+读/写、Terminate 失败时调用方 daemon.Stop fallback Kill(PR2 委托链)。**运行验证(真发 stop)留 PR5 CI**。
+
+---
+
+## Task 6-7: 待逐 task 展开
+
+Task 6(ServiceManager SCM) / Task 7(集成验证)。
