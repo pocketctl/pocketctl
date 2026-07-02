@@ -3,9 +3,12 @@
 package platform
 
 import (
+	"fmt"
 	"net"
 	"os"
 	"os/exec"
+
+	"golang.org/x/sys/windows"
 )
 
 // NewPTYProvider 返回 Windows PTY provider（PR1 stub）。
@@ -32,13 +35,36 @@ func (windowsIPCListener) DefaultPath(name string) string {
 	return `\\.\pipe\pocketctl-` + name
 }
 
-// NewInstanceLocker 返回 Windows 单实例锁（PR1 stub）。PR4 用全局命名 Mutex 实现。
+// NewInstanceLocker 返回基于全局命名 Mutex 的单实例锁。
+// PR4: 替代 PR1 stub。Global\pocketctl-daemon 跨进程互斥,进程退出 OS 自动释放
+// (race-free,等价 Unix flock)。
 func NewInstanceLocker() InstanceLocker { return windowsLocker{} }
 
 type windowsLocker struct{}
 
-func (windowsLocker) Acquire(string) (Lock, error) {
-	return nil, ErrUnsupported
+func (windowsLocker) Acquire(path string) (Lock, error) {
+	// path 是 Unix 锁文件路径语义;Windows 忽略它,用固定 Global mutex 名
+	// (pocketctl 单例是 per-machine,不 per-path)。
+	name := windows.StringToUTF16Ptr(`Global\pocketctl-daemon`)
+	handle, err := windows.CreateMutex(nil, false, name)
+	if err != nil {
+		if err == windows.ERROR_ALREADY_EXISTS {
+			// mutex 已存在(另一 daemon 持有);CreateMutex 仍返回现有 handle,关掉它。
+			if handle != 0 {
+				_ = windows.CloseHandle(handle)
+			}
+			return nil, fmt.Errorf("another pocketctl daemon is already running on this host")
+		}
+		return nil, fmt.Errorf("create mutex: %w", err)
+	}
+	return &mutexLock{handle: handle}, nil
+}
+
+// mutexLock 持有 Mutex handle。Close 关闭 handle;mutex 真正释放在进程退出时(OS 保证)。
+type mutexLock struct{ handle windows.Handle }
+
+func (l *mutexLock) Close() error {
+	return windows.CloseHandle(l.handle)
 }
 
 // NewProcessController 返回 Windows 进程控制器（PR1 stub）。
