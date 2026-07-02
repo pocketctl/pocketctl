@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"syscall"
 
+	"github.com/Microsoft/go-winio"
 	"golang.org/x/sys/windows"
 )
 
@@ -22,14 +23,18 @@ func (windowsPTYProvider) Start(*exec.Cmd, *Size) (PTY, error) {
 	return nil, ErrUnsupported
 }
 
-// NewIPCListener 返回 Windows named pipe IPC listener（PR1 stub）。
-// PR4 用 github.com/Microsoft/go-winio 实现 named pipe。
+// NewIPCListener 返回 Windows named pipe IPC listener。
+// PR4: 用 go-winio ListenPipe,语义对齐 unix socket(本地、ACL、不占端口)。
 func NewIPCListener() IPCListener { return windowsIPCListener{} }
 
 type windowsIPCListener struct{}
 
-func (windowsIPCListener) Listen(string) (net.Listener, error) {
-	return nil, ErrUnsupported
+func (windowsIPCListener) Listen(name string) (net.Listener, error) {
+	ln, err := winio.ListenPipe(name, nil)
+	if err != nil {
+		return nil, fmt.Errorf("listen named pipe: %w", err)
+	}
+	return ln, nil
 }
 
 func (windowsIPCListener) DefaultPath(name string) string {
