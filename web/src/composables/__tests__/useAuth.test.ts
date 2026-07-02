@@ -161,3 +161,53 @@ describe('useAuth — isLoggedIn', () => {
     expect(isLoggedIn.value).toBe(false)
   })
 })
+
+describe('useAuth — auth 请求 401 自动刷新重试', () => {
+  function fakeResponse(ok: boolean, status: number, data: any) {
+    return { ok, status, json: async () => data, text: async () => JSON.stringify(data) } as any
+  }
+
+  test('401 时刷新 token 并用新 token 重试一次成功', async () => {
+    const { confirmDeviceAuth, accessToken, refreshToken } = useAuth()
+    accessToken.value = 'old-expired'
+    refreshToken.value = 'refresh-x'
+    localStorageMock.setItem('pocketctl_access_token', 'old-expired')
+    localStorageMock.setItem('pocketctl_refresh_token', 'refresh-x')
+
+    const fetchSpy = vi.spyOn(globalThis, 'fetch')
+      // 1) confirm 携带旧 token → 401
+      .mockResolvedValueOnce(fakeResponse(false, 401, { error: 'invalid_token' }))
+      // 2) refresh → 200，下发新 token
+      .mockResolvedValueOnce(fakeResponse(true, 200, {
+        access_token: 'new-token',
+        refresh_token: 'refresh-2',
+        user: { id: 5, email: 'a@b.com', phone: null, display_name: 'A' },
+      }))
+      // 3) confirm 用新 token 重试 → 200
+      .mockResolvedValueOnce(fakeResponse(true, 200, { ok: true }))
+
+    const err = await confirmDeviceAuth('UserCode123')
+
+    expect(err).toBeNull()
+    expect(accessToken.value).toBe('new-token')
+    expect(fetchSpy).toHaveBeenCalledTimes(3)
+  })
+
+  test('refresh 失败时登出且不重试，返回错误', async () => {
+    const { confirmDeviceAuth, accessToken, refreshToken } = useAuth()
+    accessToken.value = 'old-expired'
+    refreshToken.value = 'bad-refresh'
+    localStorageMock.setItem('pocketctl_access_token', 'old-expired')
+    localStorageMock.setItem('pocketctl_refresh_token', 'bad-refresh')
+
+    const fetchSpy = vi.spyOn(globalThis, 'fetch')
+      .mockResolvedValueOnce(fakeResponse(false, 401, { error: 'invalid_token' }))
+      .mockResolvedValueOnce(fakeResponse(false, 401, { error: 'invalid_token' }))
+
+    const err = await confirmDeviceAuth('UserCode123')
+
+    expect(err).toBeTruthy()             // 返回错误信息
+    expect(accessToken.value).toBe('')   // 已登出，清空 token
+    expect(fetchSpy).toHaveBeenCalledTimes(2) // confirm + refresh，不重试
+  })
+})
