@@ -390,9 +390,12 @@ describe('Router - session→daemon routing resilience', () => {
     await router.handleClientMessage(clientWs, { type: 'session_interrupt', session_id: 'no-such-session' })
     await new Promise(r => setTimeout(r, 10))
 
-    const errEvent = clientWs._sent.find((m: any) => m.error === 'session not found or daemon offline')
+    // session_not_found code distinguishes "session doesn't exist" from
+    // "daemon unreachable" so the client can avoid pointless retries.
+    const errEvent = clientWs._sent.find((m: any) => m.code === 'session_not_found')
     expect(errEvent).toBeDefined()
     expect(errEvent.session_id).toBe('no-such-session')
+    expect(errEvent.error).toBe('session not found')
   })
 
   test('unregisterDaemon drops the daemon\'s session→daemon routes', async () => {

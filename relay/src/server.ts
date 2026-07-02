@@ -1,10 +1,10 @@
 import Fastify from 'fastify';
 import fastifyWebsocket from '@fastify/websocket';
 import fastifyCors from '@fastify/cors';
-import { createPool, initDB, parseDBUrl, createUser, getUserByEmail, getUserById, getUserProfile, registerDevice, removeDevice, cleanStaleTombstones, upsertDaemonAlias, deleteDaemon, updateDisplayName, updateEmail, addToIOSWaitlist, revokeToken, isTokenRevoked, cleanRevokedTokens, insertAuditLog, bindTokenToDaemon, updateSessionTitle, isSessionOwnedByUser, getSessionAllEvents, getTokenSummary, getTokensByDaemon, backfillSessionTokens, backfillSessionModel, backfillTokenDailyStats, aggregateDayIntoStats, cleanStaleEvents, getTokenDailySeries, getTokenByModel, getTokenByDaemon, getSessionTokenTrend } from './db.js';
+import { createPool, initDB, parseDBUrl, createUser, getUserByEmail, getUserById, getUserProfile, registerDevice, removeDevice, cleanStaleTombstones, upsertDaemonAlias, deleteDaemon, updateDisplayName, updateEmail, addToIOSWaitlist, revokeToken, isTokenRevoked, cleanRevokedTokens, insertAuditLog, bindTokenToDaemon, updateSessionTitle, isSessionOwnedByUser, getSessionAllEvents, getTokenSummary, getTokensByDaemon, backfillSessionTokens, backfillSessionModel, backfillTokenDailyStats, aggregateDayIntoStats, cleanStaleEvents, getTokenDailySeries, getTokenByModel, getTokenByDaemon, getSessionTokenTrend, listProUserIds, getUserDailyTokens, getUserWeeklyTokens, markReportSent } from './db.js';
 import { Router } from './router.js';
 import { hashPassword, verifyPassword, signAccessToken, signRefreshToken, verifyRefreshToken, decodeToken, verifyAccessTokenWithRevocation } from './auth.js';
-import { notifyUser, sessionStatusPush, daemonOfflinePush } from './push.js';
+import { notifyUser, sessionStatusPush, daemonOfflinePush, dailyReportPush, weeklyReportPush } from './push.js';
 import { sendEmailCode } from './config/email.js';
 import { generateCode, storeCode, verifyCode, hasPendingCode } from './config/verification.js';
 import { validateClient } from './config/clients.js';
@@ -1151,6 +1151,81 @@ async function main() {
       if (purged > 0) console.log(`[tokens] purged ${purged} events older than 90 days`);
     } catch (err) { console.error('[tokens] rollup error:', (err as Error).message); }
   }, 60 * 60 * 1000);
+
+  // Pro-only token-usage report push (daily + weekly). Runs hourly and checks
+  // whether the current UTC hour is inside the report window; the report_sent
+  // table makes it idempotent across relay restarts and multi-instance deploys.
+  //   - Daily: fires in the UTC 14:00 hour (22:00 Asia/Shanghai), reports the
+  //     PREVIOUS UTC day's usage.
+  //   - Weekly: fires in the UTC-Sunday 14:00 hour, reports the 7 days ending
+  //     the previous Saturday (last complete week).
+  // Both are Pro-gated (listProUserIds returns only plan!=free OR whitelist).
+  setInterval(async () => {
+    try {
+      await maybeSendReportPushes(pool);
+    } catch (err) { console.error('[report] push error:', (err as Error).message); }
+  }, 60 * 60 * 1000);
+}
+
+/**
+ * Check whether the current hour is a report window and, if so, push daily
+ * and/or weekly token reports to every Pro user. The report_sent table dedups:
+ * once a (user, type, period) row exists, subsequent hourly runs skip it.
+ */
+async function maybeSendReportPushes(pool: any): Promise<void> {
+  const now = new Date();
+  const utcHour = now.getUTCHours();
+  const utcDay = now.getUTCDay(); // 0=Sunday
+
+  // Daily report window: UTC 14:00-14:59 (22:00 Beijing).
+  if (utcHour === 14) {
+    // Report yesterday's (UTC) usage.
+    const yesterday = new Date(Date.now() - 24 * 60 * 60 * 1000);
+    const periodKey = yesterday.toISOString().slice(0, 10); // YYYY-MM-DD
+    const dateLabel = zhDateLabel(yesterday);
+    const proUsers = await listProUserIds(pool);
+    for (const userId of proUsers) {
+      const sent = await markReportSent(pool, userId, 'daily', periodKey);
+      if (!sent) continue; // already pushed this period
+      const usage = await getUserDailyTokens(pool, userId, periodKey);
+      if (!usage) continue; // no usage that day — don't spam idle users
+      await notifyUser(pool, userId, dailyReportPush(dateLabel, usage.total, usage.requests)).catch(() => {});
+      console.log(`[report] daily pushed to user ${userId}: ${usage.total} tokens, ${usage.requests} reqs`);
+    }
+  }
+
+  // Weekly report window: UTC Sunday 14:00-14:59 (Beijing Sunday 22:00).
+  if (utcDay === 0 && utcHour === 14) {
+    // Report the last complete ISO week (Mon–Sun of the previous week).
+    // periodKey = the Sunday of last week, the week's end boundary.
+    const lastSunday = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
+    // Snap to that day's Sunday: getUTCDay may not be 0 after subtracting 7d
+    // (it is the same weekday as today minus offset), so recompute.
+    const offsetToSunday = (lastSunday.getUTCDay() + 7) % 7;
+    lastSunday.setUTCDate(lastSunday.getUTCDate() - offsetToSunday);
+    const periodKey = lastSunday.toISOString().slice(0, 10);
+    const weekLabel = zhWeekLabel(lastSunday);
+    const proUsers = await listProUserIds(pool);
+    for (const userId of proUsers) {
+      const sent = await markReportSent(pool, userId, 'weekly', periodKey);
+      if (!sent) continue;
+      const usage = await getUserWeeklyTokens(pool, userId, periodKey);
+      if (!usage) continue;
+      await notifyUser(pool, userId, weeklyReportPush(weekLabel, usage.total, usage.requests)).catch(() => {});
+      console.log(`[report] weekly pushed to user ${userId}: ${usage.total} tokens, ${usage.requests} reqs`);
+    }
+  }
+}
+
+/** Format a Date as a short Chinese day label: "7月1日". Uses UTC. */
+function zhDateLabel(d: Date): string {
+  return `${d.getUTCMonth() + 1}月${d.getUTCDate()}日`;
+}
+
+/** Format a week (ending on Sunday d) as a short range label: "6/24–6/30". Uses UTC. */
+function zhWeekLabel(sunday: Date): string {
+  const monday = new Date(sunday.getTime() - 6 * 24 * 60 * 60 * 1000);
+  return `${monday.getUTCMonth() + 1}/${monday.getUTCDate()}–${sunday.getUTCMonth() + 1}/${sunday.getUTCDate()}`;
 }
 
 // ---- Device Auth Page (self-contained HTML) ----

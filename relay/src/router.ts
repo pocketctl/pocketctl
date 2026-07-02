@@ -919,14 +919,32 @@ export class Router {
           }
           return;
         }
-      }
-      // L2: daemon offline / session unknown — nack so web rolls back optimistic UI.
-      if (msg.type === 'user_message' && msg.msg_id) {
-        this.send(clientWs, { type: 'user_message_nack', msg_id: msg.msg_id, reason: 'daemon_offline' });
+        // daemon_id 已知但 daemon WS 不在线 → daemon 不可达(可重试/等待重连)。
+        // user_message 走 nack 让 web 回滚乐观 UI;其它命令回带 code 的 error。
+        if (msg.type === 'user_message' && msg.msg_id) {
+          this.send(clientWs, { type: 'user_message_nack', msg_id: msg.msg_id, reason: 'daemon_offline' });
+        } else {
+          this.send(clientWs, {
+            type: 'error', session_id: msg.session_id,
+            code: 'daemon_unreachable',
+            error: 'daemon offline or reconnecting',
+          });
+        }
         return;
       }
+      // daemon_id 查不到 → 会话不存在(历史已清/ID 错误),无需重试。
+      if (msg.type === 'user_message' && msg.msg_id) {
+        this.send(clientWs, { type: 'user_message_nack', msg_id: msg.msg_id, reason: 'session_not_found' });
+      } else {
+        this.send(clientWs, {
+          type: 'error', session_id: msg.session_id,
+          code: 'session_not_found',
+          error: 'session not found',
+        });
+      }
+      return;
     }
-    this.send(clientWs, { type: 'error', session_id: msg.session_id, error: 'session not found or daemon offline' });
+    this.send(clientWs, { type: 'error', error: 'session not found or daemon offline' });
   }
 
   private async handleReplay(clientWs: WebSocket, sessionId: string, lastSeq: number, reqId?: number, direction?: string, limit?: number): Promise<void> {
