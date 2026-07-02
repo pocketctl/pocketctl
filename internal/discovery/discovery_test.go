@@ -1,6 +1,7 @@
 package discovery
 
 import (
+	"os"
 	"path/filepath"
 	"reflect"
 	"testing"
@@ -8,7 +9,10 @@ import (
 
 func TestCandidatePaths_UserLocalFirstAndDedup(t *testing.T) {
 	home := "/home/u"
-	got := candidatePaths("claude", home, "/usr/bin:"+filepath.Join(home, ".local", "bin"), "")
+	// PATH 用平台分隔符(Unix ':' Windows ';'),否则 filepath.SplitList 在 Windows
+	// 不切割 → 整个 PATH 当一个目录。
+	pathEnv := filepath.Join("/usr", "bin") + string(os.PathListSeparator) + filepath.Join(home, ".local", "bin")
+	got := candidatePaths("claude", home, pathEnv, "")
 	want := []string{
 		filepath.Join(home, ".local", "bin", "claude"), // well-known 用户本地
 		filepath.Join(home, ".claude", "local", "claude"),
