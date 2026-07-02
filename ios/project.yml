@@ -16,14 +16,33 @@ settings:
     CURRENT_PROJECT_VERSION: "1"
     CODE_SIGN_STYLE: Automatic
     DEVELOPMENT_TEAM: 48V2SNGX85
+    # APNs entitlement — Debug 用沙盒环境,Release 用生产环境。
+    # XcodeGen 会把 CODE_SIGN_ENTITLEMENTS 写进生成的 .pbxproj,自动签名
+    # 时 Xcode 据此把 aps-environment 能力打进签名的应用。
+    CODE_SIGN_ENTITLEMENTS: Pocketctl/Pocketctl.entitlements
+  configs:
+    Debug:
+      CODE_SIGN_ENTITLEMENTS: Pocketctl/Pocketctl.entitlements
+    Release:
+      CODE_SIGN_ENTITLEMENTS: Pocketctl/Pocketctl.entitlements.release
 
 targets:
   Pocketctl:
     type: application
     platform: iOS
     sources:
-      - Pocketctl
+      - path: Pocketctl
+        excludes:
+          # .entitlements / .entitlements.release 仅签名阶段用,不打入 bundle。
+          - "Pocketctl.entitlements"
+          - "Pocketctl.entitlements.release"
     settings:
       base:
         INFOPLIST_FILE: Pocketctl/Info.plist
         PRODUCT_BUNDLE_IDENTIFIER: com.pocketctl.app
+        CODE_SIGN_ENTITLEMENTS: Pocketctl/Pocketctl.entitlements
+      configs:
+        Debug:
+          CODE_SIGN_ENTITLEMENTS: Pocketctl/Pocketctl.entitlements
+        Release:
+          CODE_SIGN_ENTITLEMENTS: Pocketctl/Pocketctl.entitlements.release

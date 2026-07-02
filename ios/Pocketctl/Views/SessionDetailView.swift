@@ -32,6 +32,14 @@ struct SessionDetailView: View {
     /// 键盘正在升起/收起的过渡期。此期间内冻结自动滚动的 withAnimation，
     /// 避免滚动动画与键盘动画争抢主线程时间，造成内容上移卡顿。
     @State private var isKeyboardAnimating = false
+    /// 推送深链携带的 request_id(approval/interactive)。进入会话后定位到
+    /// 对应审批卡片并滚动 + 高亮。消息未加载完时缓存 pending。
+    @State private var pendingScrollRequestId: String?
+    /// 当前高亮的 request_id,滚动到目标卡片后短暂高亮 2s 提示用户。
+    @State private var highlightRequestId: String?
+    /// 敏感内容发送确认:命中时暂存待发送内容,弹确认框。
+    @State private var pendingSensitiveSend: String?
+    @State private var sensitiveMatchReason: String = ""
 
     var body: some View {
         VStack(spacing: 0) {
@@ -128,6 +136,17 @@ struct SessionDetailView: View {
                                     }
                                 }
                             }
+                            // 推送深链兜底:消息加载完成后,定位到目标审批卡片。
+                            if let reqId = pendingScrollRequestId {
+                                tryScrollToRequestCard(reqId, in: vm, proxy: proxy)
+                            }
+                        }
+                        .onChange(of: notificationRouter.pendingRequestId) { _, reqId in
+                            // 热启动:会话已打开时收到审批/交互推送,立即定位。
+                            if let reqId, !reqId.isEmpty, let vm = viewModel {
+                                pendingScrollRequestId = reqId
+                                tryScrollToRequestCard(reqId, in: vm, proxy: proxy)
+                            }
                         }
                     }
 
@@ -193,6 +212,10 @@ struct SessionDetailView: View {
             let vm = SessionDetailViewModel(session: session, wsService: wsService, apiClient: apiClient)
             viewModel = vm
             await vm.connect()
+            // 推送深链:从审批/交互推送进入会话时,定位到对应卡片。
+            if let reqId = notificationRouter.pendingRequestId, !reqId.isEmpty {
+                pendingScrollRequestId = reqId
+            }
         }
         .onAppear {
             if let vm = viewModel {
@@ -204,6 +227,43 @@ struct SessionDetailView: View {
                 vm.persistToCache()
                 vm.disconnect()
             }
+            // 清理深链状态,避免下次进入其它会话时误触发。
+            pendingScrollRequestId = nil
+            highlightRequestId = nil
+            notificationRouter.pendingRequestId = nil
+            notificationRouter.pendingNotificationType = nil
+        }
+        // 敏感内容发送确认:命中疑似密码/密钥/token 时,要求用户二次确认。
+        .alert("⚠️ 检测到敏感内容", isPresented: Binding(
+            get: { pendingSensitiveSend != nil },
+            set: { if !$0 { pendingSensitiveSend = nil } }
+        )) {
+            Button("仍然发送", role: .destructive) {
+                if let text = pendingSensitiveSend {
+                    viewModel?.sendMessage(text)
+                    inputText = ""
+                    popoverDismissed = false
+                }
+                pendingSensitiveSend = nil
+            }
+            Button("取消", role: .cancel) { pendingSensitiveSend = nil }
+        } message: {
+            Text("消息中包含\(sensitiveMatchReason),发送给 AI 可能导致敏感信息泄露。确认要发送吗?")
+        }
+    }
+
+    // MARK: - Send with sensitive check
+
+    /// 发送前做敏感内容检测。命中则暂存内容弹确认,否则直接发送。
+    private func attemptSend(_ text: String) {
+        if let match = SensitiveContentDetector.detect(text) {
+            pendingSensitiveSend = text
+            sensitiveMatchReason = match.reason
+        } else {
+            guard let vm = viewModel else { return }
+            vm.sendMessage(text)
+            inputText = ""
+            popoverDismissed = false
         }
     }
 
@@ -340,11 +400,13 @@ struct SessionDetailView: View {
             ApprovalCard(message: message) { requestId, approved in
                 vm.respondApproval(requestId: requestId, approved: approved)
             }
+            .pushHighlight(messageId: message.requestId, activeId: highlightRequestId)
 
         case .interactiveChoice:
             InteractiveChoiceCard(message: message) { requestId, choice in
                 vm.respondChoice(requestId: requestId, choice: choice)
             }
+            .pushHighlight(messageId: message.requestId, activeId: highlightRequestId)
 
         default:
             // User message
@@ -400,9 +462,7 @@ struct SessionDetailView: View {
                 )
 
                 Button {
-                    vm.sendMessage(inputText)
-                    inputText = ""
-                    popoverDismissed = false
+                    attemptSend(inputText)
                 } label: {
                     Image(systemName: "arrow.up")
                         .font(.system(size: 16, weight: .semibold))
@@ -595,5 +655,56 @@ struct SessionDetailView: View {
         case "disconnected": return .pcFgTertiary
         default: return .pcFgSecondary
         }
+    }
+
+    // MARK: - Push deep-link scroll
+
+    /// 在消息列表里查找匹配 request_id 的卡片,滚动到该位置并短暂高亮。
+    /// 消息尚未加载(approval 还没到)时静默返回,由 messages.count 变化兜底重试。
+    private func tryScrollToRequestCard(_ requestId: String, in vm: SessionDetailViewModel, proxy: ScrollViewProxy) {
+        guard let target = vm.messages.first(where: { $0.requestId == requestId }) else {
+            return
+        }
+        pendingScrollRequestId = nil
+        withAnimation(.easeInOut(duration: 0.35)) {
+            proxy.scrollTo(target.id, anchor: .center)
+        }
+        // 触发高亮,2s 后淡出。
+        highlightRequestId = requestId
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
+            if highlightRequestId == requestId {
+                withAnimation(.easeOut(duration: 0.4)) {
+                    highlightRequestId = nil
+                }
+            }
+        }
+    }
+}
+
+// MARK: - Push deep-link highlight modifier
+
+/// 推送深链命中卡片时短暂高亮(强调色描边),2s 后由调用方清空 activeId 淡出。
+private struct PushHighlight: ViewModifier {
+    let messageId: String?
+    let activeId: String?
+
+    func body(content: Content) -> some View {
+        if let mid = messageId, let aid = activeId, mid == aid {
+            content
+                .padding(.vertical, 2)
+                .background(
+                    RoundedRectangle(cornerRadius: PCRadius.lg)
+                        .stroke(Color.pcAccent.opacity(0.7), lineWidth: 1.5)
+                )
+        } else {
+            content
+        }
+    }
+}
+
+extension View {
+    /// 推送深链高亮:当 messageId 命中 activeId 时给卡片加强调色描边。
+    fileprivate func pushHighlight(messageId: String?, activeId: String?) -> some View {
+        modifier(PushHighlight(messageId: messageId, activeId: activeId))
     }
 }

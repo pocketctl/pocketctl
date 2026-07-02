@@ -92,6 +92,12 @@ enum KeychainStorage {
         set { UserDefaults.standard.set(newValue, forKey: "pocketctl_notifications_enabled") }
     }
 
+    /// 生物认证(Face ID / Touch ID)启动锁屏开关,默认关闭。
+    static var biometricEnabled: Bool {
+        get { UserDefaults.standard.bool(forKey: "pocketctl_biometric_enabled") }
+        set { UserDefaults.standard.set(newValue, forKey: "pocketctl_biometric_enabled") }
+    }
+
     /// 某个通知分类的开关偏好(按 NotificationCategory.storageKey 存储)。
     /// 首次读取时无值,调用方应回退到 `defaultEnabled`。
     static func notificationCategoryEnabled(_ category: NotificationCategory) -> Bool? {
@@ -136,6 +142,7 @@ enum KeychainStorage {
         UserDefaults.standard.removeObject(forKey: "pocketctl_relay_url")
         UserDefaults.standard.removeObject(forKey: "pocketctl_notifications_enabled")
         UserDefaults.standard.removeObject(forKey: "pocketctl_local_display_name")
+        UserDefaults.standard.removeObject(forKey: "pocketctl_biometric_enabled")
         clearAllNotificationCategories()
     }
 }

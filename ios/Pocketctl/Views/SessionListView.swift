@@ -13,6 +13,8 @@ struct SessionListView: View {
     @State private var navigateToDetail: Session?
     @State private var showNewSession = false
     @State private var newSessionSheetHeight: CGFloat = 600
+    /// 删除确认:左滑删除时暂存目标会话,弹确认框后再执行。
+    @State private var pendingDeleteSession: Session?
 
     var body: some View {
         ZStack {
@@ -53,6 +55,21 @@ struct SessionListView: View {
                 showNewSession = false
             }
             .presentationDetents([.height(newSessionSheetHeight)])
+        }
+        // 删除确认:会话删除是不可逆操作,要求二次确认。
+        .alert("删除会话", isPresented: Binding(
+            get: { pendingDeleteSession != nil },
+            set: { if !$0 { pendingDeleteSession = nil } }
+        )) {
+            Button("删除", role: .destructive) {
+                if let s = pendingDeleteSession {
+                    viewModel?.deleteSession(s.sessionId)
+                }
+                pendingDeleteSession = nil
+            }
+            Button("取消", role: .cancel) { pendingDeleteSession = nil }
+        } message: {
+            Text("删除后将无法恢复该会话的历史记录,确定删除?")
         }
         .task {
             // Only create ViewModel and connect once
@@ -150,7 +167,7 @@ struct SessionListView: View {
                             } onPin: {
                                 vm.togglePin(session.sessionId)
                             } onDelete: {
-                                vm.deleteSession(session.sessionId)
+                                pendingDeleteSession = session
                             }
                         }
                         .frame(minHeight: 76)

@@ -157,6 +157,43 @@ struct SettingsView: View {
                         }
                         .padding(.horizontal, PCSpacing.lg)
 
+                        // Security section — 生物认证启动锁屏
+                        sectionHeader("安全")
+                        settingsGroup {
+                            VStack(spacing: 0) {
+                                HStack(spacing: 12) {
+                                    Image(systemName: BiometricAuthService.displayName == "Face ID" ? "faceid" : "touchid")
+                                        .font(.system(size: 14))
+                                        .foregroundStyle(Color.pcAccent)
+                                        .frame(width: 28, height: 28)
+                                        .background(Color.pcAccentMuted)
+                                        .cornerRadius(PCRadius.sm)
+
+                                    VStack(alignment: .leading, spacing: 2) {
+                                        Text("\(BiometricAuthService.displayName) 锁定")
+                                            .font(PCFont.body(15))
+                                            .foregroundStyle(Color.pcFg)
+                                        Text(viewModel.biometricAvailable ? "启动 App 时需通过生物认证" : "此设备不支持生物认证")
+                                            .font(PCFont.body(12))
+                                            .foregroundStyle(Color.pcFgTertiary)
+                                    }
+
+                                    Spacer()
+
+                                    Toggle("", isOn: Binding(
+                                        get: { viewModel.biometricEnabled },
+                                        set: { newValue in viewModel.toggleBiometric(newValue) }
+                                    ))
+                                    .labelsHidden()
+                                    .tint(Color.pcPrimaryBtn)
+                                    .disabled(!viewModel.biometricAvailable)
+                                }
+                                .padding(.horizontal, PCSpacing.lg)
+                                .frame(minHeight: 44)
+                            }
+                        }
+                        .padding(.horizontal, PCSpacing.lg)
+
                         // Notifications section
                         sectionHeader("通知")
                         settingsGroup {

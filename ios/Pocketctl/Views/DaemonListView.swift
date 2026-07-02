@@ -15,10 +15,18 @@ struct DaemonListView: View {
     @State private var actionDaemon: Daemon?
     @State private var navigateToSessionDetail: Session?
     @State private var actionSheetHeight: CGFloat = 360
+    /// 破坏性操作确认:暂存目标 daemon,弹确认框后再执行。
+    @State private var pendingDeleteDaemon: Daemon?
+    @State private var pendingKickDaemon: Daemon?
+    /// insights 推送深链:导航到全局用量统计页(daemonId=nil,跨所有主机)。
+    @State private var showGlobalUsage = false
     @State private var newSessionSheetHeight: CGFloat = 600
     @State private var settingsSnapshotEnv: String? = nil
     @State private var hasFinishedLoading = false
     @State private var loadingProgress: CGFloat = -120
+    /// 推送深链待处理的 session id。推送可能在冷启动时到达（此时 sessions
+    /// 还没加载完），先缓存,等 list_sessions 返回后再匹配导航。
+    @State private var pendingPushSessionId: String?
 
     var body: some View {
         NavigationStack {
@@ -62,6 +70,9 @@ struct DaemonListView: View {
             .navigationDestination(item: $navigateToSessionDetail) { session in
                 SessionDetailView(session: session, wsService: wsService, apiClient: apiClient)
             }
+            .navigationDestination(isPresented: $showGlobalUsage) {
+                TokenUsageView(daemonId: nil, apiClient: apiClient)
+            }
             .sheet(isPresented: $showSettings) {
                 SettingsView(isLoggedIn: $isLoggedIn, daemons: viewModel?.daemons ?? [])
                     .onAppear {
@@ -93,8 +104,8 @@ struct DaemonListView: View {
                     onHeightChange: { actionSheetHeight = max($0 + 40, 240) },
                     onRestart: { Task { await viewModel?.restartDaemon(daemon.daemonId) } },
                     onEditAliasConfirm: { alias in viewModel?.setAlias(daemonId: daemon.daemonId, alias: alias) },
-                    onForceKick: { Task { try? await viewModel?.forceKickDaemon(daemon.daemonId) } },
-                    onDelete: { Task { await viewModel?.deleteDaemon(daemon.daemonId) } }
+                    onForceKick: { pendingKickDaemon = daemon },
+                    onDelete: { pendingDeleteDaemon = daemon }
                 )
                 .presentationDetents([.height(actionSheetHeight)])
             }
@@ -113,9 +124,84 @@ struct DaemonListView: View {
             // 给数据一点渲染时间后淡出加载层，过渡更顺滑
             try? await Task.sleep(for: .milliseconds(200))
             hasFinishedLoading = true
+            // 冷启动推送兜底：sessions 已就绪后消费 pending 深链。
+            tryConsumePendingPush()
         }
         .onAppear {
             if let vm = viewModel, vm.isConnected { vm.refresh() }
+        }
+        .onChange(of: notificationRouter.navigateToSessionId) { _, sessionId in
+            // 推送深链落地：尝试导航到对应会话详情。匹配不到时缓存 pending，
+            // 等 sessions 加载完成后由 tryConsumePendingPush() 兜底。
+            guard let sessionId, !sessionId.isEmpty else { return }
+            tryNavigateToPushedSession(sessionId)
+        }
+        .onChange(of: notificationRouter.navigateToUsage) { _, shouldNavigate in
+            // insights 推送(日报/周报)深链:导航到全局用量统计页。
+            guard shouldNavigate else { return }
+            showGlobalUsage = true
+            notificationRouter.navigateToUsage = false
+        }
+        // 注销主机确认:不可逆操作,要求二次确认。
+        .alert("注销主机", isPresented: Binding(
+            get: { pendingDeleteDaemon != nil },
+            set: { if !$0 { pendingDeleteDaemon = nil } }
+        )) {
+            Button("注销", role: .destructive) {
+                if let d = pendingDeleteDaemon {
+                    Task { await viewModel?.deleteDaemon(d.daemonId) }
+                }
+                pendingDeleteDaemon = nil
+            }
+            Button("取消", role: .cancel) { pendingDeleteDaemon = nil }
+        } message: {
+            Text("注销后该主机的会话将无法再通过 App 访问,确定注销?")
+        }
+        // 强制踢下线确认:会中断该主机上正在进行的会话。
+        .alert("强制踢下线", isPresented: Binding(
+            get: { pendingKickDaemon != nil },
+            set: { if !$0 { pendingKickDaemon = nil } }
+        )) {
+            Button("强制下线", role: .destructive) {
+                if let d = pendingKickDaemon {
+                    Task { try? await viewModel?.forceKickDaemon(d.daemonId) }
+                }
+                pendingKickDaemon = nil
+            }
+            Button("取消", role: .cancel) { pendingKickDaemon = nil }
+        } message: {
+            Text("这会立即断开该主机的 daemon 连接,正在进行的会话将被中断。确定继续?")
+        }
+    }
+
+    // MARK: - Push deep-link navigation
+
+    /// 尝试导航到推送指定的会话。sessions 已加载且能匹配到时立即导航；
+    /// 否则缓存到 pendingPushSessionId,等 sessions 就绪后兜底消费。
+    private func tryNavigateToPushedSession(_ sessionId: String) {
+        if let vm = viewModel {
+            let matched = vm.matchSessionForDeepLink(sessionId)
+            if let matched {
+                pendingPushSessionId = nil
+                navigateToSessionDetail = matched
+                // 消费完毕后清空 router,避免重复触发。
+                notificationRouter.navigateToSessionId = nil
+                return
+            }
+        }
+        pendingPushSessionId = sessionId
+    }
+
+    /// sessions 加载完成后的兜底:消费冷启动期间缓存的 pending 深链。
+    private func tryConsumePendingPush() {
+        guard let pending = pendingPushSessionId else { return }
+        if let vm = viewModel {
+            let matched = vm.matchSessionForDeepLink(pending)
+            if let matched {
+                pendingPushSessionId = nil
+                navigateToSessionDetail = matched
+                notificationRouter.navigateToSessionId = nil
+            }
         }
     }
 

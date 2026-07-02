@@ -3,6 +3,7 @@ import SwiftUI
 private enum AppState {
     case splash
     case login
+    case locked       // 已登录但需通过生物认证才进入主界面
     case main
 }
 
@@ -20,12 +21,15 @@ struct ContentView: View {
                     DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
                         if let token = KeychainStorage.accessToken, !token.isEmpty {
                             isLoggedIn = true
-                            appState = .main
+                            // 已登录:若开启了生物认证,进入锁屏;否则直接进主界面。
+                            appState = KeychainStorage.biometricEnabled ? .locked : .main
                         } else {
                             appState = .login
                         }
                     }
                 }
+        case .locked:
+            BiometricLockView(onSuccess: { appState = .main })
         case .login:
             LoginView(isLoggedIn: $isLoggedIn)
                 .onChange(of: isLoggedIn) { _, newValue in
@@ -39,14 +43,6 @@ struct ContentView: View {
                 .onOpenURL { url in
                     // Handle pocketctl://session/<id> deep links
                     handleDeepLink(url)
-                }
-                .onChange(of: notificationRouter.navigateToSessionId) { _, sessionId in
-                    if sessionId != nil {
-                        // Clear after a delay to allow navigation
-                        DispatchQueue.main.asyncAfter(deadline: .now() + 1) {
-                            notificationRouter.navigateToSessionId = nil
-                        }
-                    }
                 }
                 .onAppear {
                     // 键盘冷启动预热：自动登录路径下整个会话从未弹过键盘，

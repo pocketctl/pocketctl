@@ -11,6 +11,9 @@ final class NotificationRouter {
     var pendingNotificationType: String?
     /// 推送携带的 request_id(审批/交互),落地后可定位具体审批卡。
     var pendingRequestId: String?
+    /// insights 类推送(日报/周报)的深链信号。置 true 后由 DaemonListView
+    /// 消费,导航到全局用量统计页,然后清空。
+    var navigateToUsage: Bool = false
 }
 
 @MainActor
@@ -56,13 +59,22 @@ class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCenterDele
         let sessionId = userInfo["session_id"] as? String
         let type = userInfo["type"] as? String
         let requestId = userInfo["request_id"] as? String
-        if let sessionId {
-            Task { @MainActor in
+        Task { @MainActor in
+            // insights 类推送(日报/周报)没有 session_id,路由到全局用量页。
+            if type == "insights" {
+                notificationRouter.navigateToUsage = true
+                notificationRouter.pendingNotificationType = type
+                return
+            }
+            // 会话类推送:靠 session_id 定位到具体会话详情。
+            if let sessionId {
                 notificationRouter.navigateToSessionId = sessionId
                 notificationRouter.pendingNotificationType = type
                 notificationRouter.pendingRequestId = requestId
             }
         }
+        // completionHandler 在 nonisolated 同步上下文调用,不跨 actor 边界
+        // (Swift 6 严格并发禁止将 @escaping closure 发送到 Task)。
         completionHandler()
     }
 }

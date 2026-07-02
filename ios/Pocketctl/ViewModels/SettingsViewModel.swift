@@ -10,6 +10,10 @@ final class SettingsViewModel {
     var user: User?
     var relayURLText: String = ""
     var notificationsEnabled: Bool = false
+    /// 生物认证(Face ID / Touch ID)启动锁屏开关,默认关闭。
+    /// `biometricAvailable` 反映设备是否支持,UI 据此决定开关是否可交互。
+    var biometricEnabled: Bool = false
+    var biometricAvailable: Bool = false
     /// 各通知分类的开关态,key = NotificationCategory.id。
     /// UI 通过 `isCategoryEnabled(_)` / `toggleCategory(_:enabled:)` 访问,不直接读写此字典。
     private(set) var notificationPreferences: [String: Bool] = [:]
@@ -128,6 +132,8 @@ final class SettingsViewModel {
         user = KeychainStorage.currentUser
         relayURLText = KeychainStorage.relayURL ?? ""
         notificationsEnabled = KeychainStorage.notificationsEnabled
+        biometricAvailable = BiometricAuthService.isAvailable
+        biometricEnabled = biometricAvailable && KeychainStorage.biometricEnabled
         loadNotificationPreferences()
     }
 
@@ -167,6 +173,7 @@ final class SettingsViewModel {
         KeychainStorage.clearAll()
         user = nil
         notificationsEnabled = false
+        biometricEnabled = false
         notificationPreferences = [:]
         relayURLText = ""
     }
@@ -336,6 +343,17 @@ final class SettingsViewModel {
             KeychainStorage.notificationsEnabled = false
             KeychainStorage.deviceToken = nil
         }
+    }
+
+    /// 切换生物认证启动锁屏开关。设备不支持时强制保持关闭。
+    func toggleBiometric(_ enabled: Bool) {
+        guard biometricAvailable else {
+            biometricEnabled = false
+            KeychainStorage.biometricEnabled = false
+            return
+        }
+        biometricEnabled = enabled
+        KeychainStorage.biometricEnabled = enabled
     }
 
     // MARK: - Notification Categories

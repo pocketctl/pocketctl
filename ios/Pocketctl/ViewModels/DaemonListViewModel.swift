@@ -219,6 +219,16 @@ final class DaemonListViewModel {
             .map { RelativeTime.format($0) }
     }
 
+    /// 推送深链匹配:按 session_id 在已加载的 sessions 里查找。
+    /// 返回最新的匹配项(按 lastActivity 倒序)用于导航到会话详情。
+    /// sessions 未加载或无匹配时返回 nil,由调用方缓存 pending 兜底。
+    func matchSessionForDeepLink(_ sessionId: String) -> Session? {
+        let matches = sessions.filter { $0.sessionId == sessionId }
+        guard !matches.isEmpty else { return nil }
+        if matches.count == 1 { return matches.first }
+        return matches.sorted { ($0.lastActivityAt ?? $0.createdAt) > ($1.lastActivityAt ?? $1.createdAt) }.first
+    }
+
     /// Set alias for a daemon (optimistic update + API call)
     func setAlias(daemonId: String, alias: String?) {
         // Optimistic local update
