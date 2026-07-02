@@ -1,6 +1,7 @@
 package commands
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"testing"
@@ -148,8 +149,14 @@ func TestListCommandsIntegration(t *testing.T) {
 	writeFile(t, filepath.Join(pluginPath, "commands", "deploy.md"),
 		"---\ndescription: deploy\n---\n")
 	mustMkdir(t, filepath.Join(home, ".claude", "plugins"))
+	// Use json.Marshal so Windows backslashes in pluginPath are properly escaped.
+	installedJSON, _ := json.Marshal(map[string]any{
+		"plugins": map[string]any{
+			"myplug@mp": []map[string]string{{"installPath": pluginPath}},
+		},
+	})
 	writeFile(t, filepath.Join(home, ".claude", "plugins", "installed_plugins.json"),
-		`{"plugins":{"myplug@mp":[{"installPath":"`+pluginPath+`"}]}}`)
+		string(installedJSON))
 	writeFile(t, filepath.Join(home, ".claude", "settings.json"),
 		`{"enabledPlugins":{"myplug@mp":true}}`)
 
@@ -197,8 +204,13 @@ func TestDisabledPluginExcluded(t *testing.T) {
 	mustMkdir(t, filepath.Join(pluginPath, "commands"))
 	writeFile(t, filepath.Join(pluginPath, "commands", "secret.md"), "---\ndescription: s\n---\n")
 	mustMkdir(t, filepath.Join(home, ".claude", "plugins"))
+	installedJSON, _ := json.Marshal(map[string]any{
+		"plugins": map[string]any{
+			"offplug@mp": []map[string]string{{"installPath": pluginPath}},
+		},
+	})
 	writeFile(t, filepath.Join(home, ".claude", "plugins", "installed_plugins.json"),
-		`{"plugins":{"offplug@mp":[{"installPath":"`+pluginPath+`"}]}}`)
+		string(installedJSON))
 	// NOT enabled
 	writeFile(t, filepath.Join(home, ".claude", "settings.json"), `{}`)
 

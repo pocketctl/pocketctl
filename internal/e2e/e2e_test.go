@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -510,7 +511,11 @@ func TestReconnection_DaemonReconnectsAfterRelayRestart(t *testing.T) {
 
 func TestBuild_BinaryAndBasicCommands(t *testing.T) {
 	projectRoot := filepath.Join("..", "..")
-	binPath := filepath.Join(t.TempDir(), "pocketctl")
+	binName := "pocketctl"
+	if runtime.GOOS == "windows" {
+		binName += ".exe"
+	}
+	binPath := filepath.Join(t.TempDir(), binName)
 
 	// Build the binary
 	cmd := exec.Command("go", "build", "-o", binPath, "./cmd/pocketctl/")

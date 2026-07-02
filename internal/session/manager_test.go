@@ -3,6 +3,7 @@ package session
 import (
 	"context"
 	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -247,7 +248,7 @@ func TestResolveCwd(t *testing.T) {
 	}{
 		{"empty string", "", home},
 		{"tilde", "~", home},
-		{"tilde-relative", "~/projects", home + "/projects"},
+		{"tilde-relative", "~/projects", filepath.Join(home, "projects")},
 		{"absolute path", "/opt/workspace", "/opt/workspace"},
 		{"another absolute", "/tmp", "/tmp"},
 	}

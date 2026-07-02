@@ -4,39 +4,38 @@ import (
 	"bufio"
 	"encoding/json"
 	"fmt"
-	"net"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 	"time"
 
 	"github.com/pocketctl/pocketctl/internal/filelock"
+	"github.com/pocketctl/pocketctl/internal/platform"
 )
 
-// shortSockDir returns a temp directory under /tmp whose path is short enough
-// for macOS's ~104-char Unix socket path limit (t.TempDir lives deep under
-// /var/folders and can exceed it).
-func shortSockDir(t *testing.T) string {
+// sockFor returns a cross-platform IPC address for the test approval server.
+// On Unix it uses a short path under os.TempDir() (macOS has ~104 char
+// sun_path limit). On Windows it uses a named pipe name (no filesystem path).
+func sockFor(t *testing.T, name string) string {
 	t.Helper()
-	d, err := os.MkdirTemp("/tmp", "pcfl")
+	if runtime.GOOS == "windows" {
+		return platform.NewIPCListener().DefaultPath(fmt.Sprintf("fl-%s-%d", name, os.Getpid()))
+	}
+	// On Unix, place the socket directly under TempDir to avoid parent-dir
+	// issues (the production Listen doesn't MkdirAll).
+	d, err := os.MkdirTemp("", "pcfl")
 	if err != nil {
 		t.Fatalf("mkdtemp: %v", err)
 	}
 	t.Cleanup(func() { os.RemoveAll(d) })
-	return d
-}
-
-func sockFor(t *testing.T, name string) string {
-	return filepath.Join(shortSockDir(t), fmt.Sprintf("%s.sock", name))
+	return filepath.Join(d, fmt.Sprintf("%s.sock", name))
 }
 
 // dialServer opens a connection, sends one JSON line, reads one response line.
 func dialServer(t *testing.T, sockPath string, req hookRequest) hookResponse {
 	t.Helper()
-	conn, err := net.DialTimeout("unix", sockPath, 2*time.Second)
-	if err != nil {
-		t.Fatalf("dial: %v", err)
-	}
+	conn := dialIPC(t, sockPath)
 	defer conn.Close()
 
 	body, _ := json.Marshal(req)

@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 
 	"github.com/pocketctl/pocketctl/internal/protocol"
@@ -15,7 +16,11 @@ import (
 // daemon offline" crash. HOME is isolated so tryResumeHistorical can't find a
 // real JSONL for the id.
 func TestSendMessage_UnknownSessionReturnsError(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
+	tmp := t.TempDir()
+	t.Setenv("HOME", tmp)
+	if runtime.GOOS == "windows" {
+		t.Setenv("USERPROFILE", tmp)
+	}
 
 	sm := NewSessionManager(make(chan protocol.DaemonEvent, 16))
 	err := sm.SendMessage(context.Background(), "00000000-0000-0000-0000-000000000000", "hi")
@@ -30,6 +35,9 @@ func TestSendMessage_UnknownSessionReturnsError(t *testing.T) {
 func TestTryResumeHistorical_RegistersFromJSONL(t *testing.T) {
 	tmp := t.TempDir()
 	t.Setenv("HOME", tmp)
+	if runtime.GOOS == "windows" {
+		t.Setenv("USERPROFILE", tmp)
+	}
 
 	sid := "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
 	dir := filepath.Join(tmp, ".claude", "projects", "-Users-foo-bar")
@@ -62,7 +70,11 @@ func TestTryResumeHistorical_RegistersFromJSONL(t *testing.T) {
 // TestTryResumeHistorical_NoJSONLReturnsFalse verifies an unknown session with
 // no JSONL on disk returns false (caller surfaces "session not found").
 func TestTryResumeHistorical_NoJSONLReturnsFalse(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
+	tmp := t.TempDir()
+	t.Setenv("HOME", tmp)
+	if runtime.GOOS == "windows" {
+		t.Setenv("USERPROFILE", tmp)
+	}
 
 	sm := NewSessionManager(make(chan protocol.DaemonEvent, 16))
 	if sm.tryResumeHistorical("ffffffff-0000-0000-0000-000000000000") {

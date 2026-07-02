@@ -88,6 +88,24 @@ func (s *spool) rewrite(events []bufferedEvent) {
 	}
 }
 
+// Close releases the spool's append handle. Nil-safe (matches append/rewrite).
+// PR5: added so callers can release the file handle — required on Windows where
+// an open handle blocks file deletion (TempDir cleanup). Was a prod gap found
+// during C+D test-debt cleanup.
+func (s *spool) Close() error {
+	if s == nil {
+		return nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.f == nil {
+		return nil
+	}
+	err := s.f.Close()
+	s.f = nil
+	return err
+}
+
 // loadSpool reads any previously-spooled unacked events from path, in seq order.
 // Unparseable lines (e.g. a partial final record from a crash mid-append) are
 // skipped. A missing file is not an error.

@@ -36,21 +36,31 @@ func TestExtractFilePath(t *testing.T) {
 }
 
 func TestNormalizePath(t *testing.T) {
-	// Relative path resolved against cwd.
+	// normalizePath 返回 canonical absolute key(走 filepath.Abs + Clean,
+	// EvalSymlinks 失败时 fallback Clean(abs))。期望用同样 Abs 构造,
+	// 跨平台一致(Unix /repo 绝对;Windows /repo 当前盘相对 → Abs 加盘符)。
+	expect := func(cwd, p string) string {
+		if !filepath.IsAbs(p) && cwd != "" {
+			p = filepath.Join(cwd, p)
+		}
+		abs, err := filepath.Abs(p)
+		if err != nil {
+			return filepath.Clean(p)
+		}
+		return filepath.Clean(abs)
+	}
+
 	got := normalizePath("/repo", "src/main.go")
-	want := filepath.Clean("/repo/src/main.go")
-	if got != want {
+	if want := expect("/repo", "src/main.go"); got != want {
 		t.Errorf("normalizePath relative: got %q, want %q", got, want)
 	}
 
-	// Absolute path stays absolute (cleaned).
 	got = normalizePath("/repo", "/abs/file.go")
-	if got != "/abs/file.go" {
-		t.Errorf("normalizePath absolute: got %q, want /abs/file.go", got)
+	if want := expect("/repo", "/abs/file.go"); got != want {
+		t.Errorf("normalizePath absolute: got %q, want %q", got, want)
 	}
 
-	// Empty cwd: relative path becomes absolute against process cwd, so just
-	// check it ends with the basename (platform-independent).
+	// Empty cwd: 相对路径变绝对(进程 cwd),只验 basename(平台无关)
 	got = normalizePath("", "rel.go")
 	if filepath.Base(got) != "rel.go" {
 		t.Errorf("normalizePath empty cwd: got %q, want basename rel.go", got)
