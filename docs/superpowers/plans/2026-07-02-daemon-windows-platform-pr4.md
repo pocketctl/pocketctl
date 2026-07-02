@@ -232,3 +232,71 @@ git commit -m "feat(platform): Windows Daemonizer 真实实现(DETACHED_PROCESS)
 ## Task 3-7: 待逐 task 展开
 
 Task 3(IPCListener named pipe + go-winio) / Task 4(ProcessController IsAlive/Kill) / Task 5(控制通道) / Task 6(ServiceManager SCM) / Task 7(集成验证)。
+
+---
+
+## Task 3: IPCListener（named pipe, go-winio）
+
+**Files:** `go.mod`/`go.sum`（加 `github.com/Microsoft/go-winio`）+ `internal/platform/platform_windows.go`（windowsIPCListener.Listen 真实实现）
+
+**设计：** `winio.ListenPipe(name, nil)` 创建 named pipe listener。返回 `net.Listener`（符合 IPCListener.Listen 签名）。语义对齐 unix socket（本地、ACL、不占端口）。DefaultPath 已在 PR1 stub（`\\.\pipe\pocketctl-` + name）。
+
+- [ ] **Step 1: 加 go-winio 依赖**
+
+Run: `go get github.com/Microsoft/go-winio`
+Expected: go.mod/go.sum 更新（加 go-winio）。macOS 上能 get（下载源码，build tag 隔离不影响 Unix 编译）。
+
+- [ ] **Step 2: 改 platform_windows.go windowsIPCListener.Listen**
+
+当前（PR1 stub，Listen 返回 ErrUnsupported）：
+```go
+func (windowsIPCListener) Listen(string) (net.Listener, error) {
+	return nil, ErrUnsupported
+}
+```
+改为：
+```go
+// NewIPCListener 返回 Windows named pipe IPC listener。
+// PR4: 用 go-winio ListenPipe,语义对齐 unix socket(本地、ACL、不占端口)。
+func NewIPCListener() IPCListener { return windowsIPCListener{} }
+
+type windowsIPCListener struct{}
+
+func (windowsIPCListener) Listen(name string) (net.Listener, error) {
+	ln, err := winio.ListenPipe(name, nil)
+	if err != nil {
+		return nil, fmt.Errorf("listen named pipe: %w", err)
+	}
+	return ln, nil
+}
+
+func (windowsIPCListener) DefaultPath(name string) string {
+	return `\\.\pipe\pocketctl-` + name
+}
+```
+
+platform_windows.go import 加 `"github.com/Microsoft/go-winio"`（包名 `winio`）。
+
+- [ ] **Step 3: 三平台编译验证**
+
+Run: `GOOS=darwin go build ./... && GOOS=linux go build ./... && GOOS=windows go build ./...`
+Expected: 三平台全过。Windows 的 IPCListener.Listen 现用 winio.ListenPipe。Unix 不 import go-winio（build tag 隔离）。
+
+- [ ] **Step 4: Unix 零回归 + go.mod 确认**
+
+Run: `go build ./... && go vet ./... && go test ./...`（macOS）— 全绿。
+Run: `go mod tidy && git diff go.mod` — 确认 go-winio 加入（直接依赖）。
+
+- [ ] **Step 5: Commit**
+```bash
+git add go.mod go.sum internal/platform/platform_windows.go
+git commit -m "feat(platform): Windows IPCListener 真实实现(named pipe, go-winio) (PR4/7)"
+```
+
+> review 重点: winio.ListenPipe 返回 net.Listener(接口匹配)、pipe 名格式(DefaultPath 已对)、go-winio 不影响 Unix(build tag)、go.mod 直接依赖。运行验证留 PR5。
+
+---
+
+## Task 4-7: 待逐 task 展开
+
+Task 4(ProcessController IsAlive/Kill) / Task 5(控制通道) / Task 6(ServiceManager SCM) / Task 7(集成验证)。
