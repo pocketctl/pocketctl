@@ -52,7 +52,7 @@ fi
 info "Target: github ${GITHUB_BRANCH} (sync dir: ${SYNC_DIR##*/})"
 
 # Whitelist
-SYNC_DIRS=(cmd/ internal/ relay/ web/ .github/ scripts/install-daemon.sh)
+SYNC_DIRS=(cmd/ internal/ relay/ web/ .github/ scripts/install-daemon.sh scripts/ci-windows-smoke.ps1)
 SYNC_FILES=(go.mod go.sum Makefile LICENSE README.md README.zh-CN.md .gitignore .github/workflows/release.yml)
 EXCLUDE_PATTERNS=(node_modules dist .vite '*.log')
 
