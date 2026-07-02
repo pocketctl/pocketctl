@@ -79,9 +79,31 @@ func NewProcessController() ProcessController { return windowsProcessController{
 
 type windowsProcessController struct{}
 
-func (windowsProcessController) IsAlive(int) bool    { return false }
+func (windowsProcessController) IsAlive(pid int) bool {
+	// OpenProcess 成功即存活;进程已退出 → OpenProcess 失败 → false。
+	// Windows 无 Unix zombie(进程退出即消失),检测可靠。
+	handle, err := windows.OpenProcess(windows.SYNCHRONIZE, false, uint32(pid))
+	if err != nil {
+		return false
+	}
+	_ = windows.CloseHandle(handle)
+	return true
+}
+
+func (windowsProcessController) Kill(pid int) error {
+	handle, err := windows.OpenProcess(windows.PROCESS_TERMINATE, false, uint32(pid))
+	if err != nil {
+		return fmt.Errorf("open process: %w", err)
+	}
+	defer windows.CloseHandle(handle)
+	if err := windows.TerminateProcess(handle, 1); err != nil {
+		return fmt.Errorf("terminate process: %w", err)
+	}
+	return nil
+}
+
+// Terminate 仍 stub(PR1)——Task 5 控制通道实现(连 daemon control pipe 发 stop)。
 func (windowsProcessController) Terminate(int) error { return ErrUnsupported }
-func (windowsProcessController) Kill(int) error      { return ErrUnsupported }
 
 // NewDaemonizer 返回 Windows daemonizer。
 // PR4: CREATE_NO_WINDOW|DETACHED_PROCESS 创建无窗口、脱离父控制台的子进程(等价 Unix Setsid)。
