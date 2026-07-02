@@ -34,6 +34,9 @@ coverage/
 # Claude
 .claude/
 
+# Superpowers SDD scratch (local session artifacts — ledger/brief/report/diff)
+.superpowers/
+
 # Test reports
 test-report-*.html
 

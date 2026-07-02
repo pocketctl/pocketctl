@@ -3,7 +3,6 @@ package session
 import (
 	"strings"
 	"testing"
-	"time"
 )
 
 // TestSanitizePTYEnvStripsClaudeCodeMarkers (interactive-web-session D3 / 7.2)
@@ -43,7 +42,7 @@ func TestSanitizePTYEnvStripsClaudeCodeMarkers(t *testing.T) {
 // TestStartPTYCliStdinWriteRead (interactive-web-session 1.4) verifies the PTY
 // master round-trips: writing stdin surfaces on the read side (cat echoes).
 func TestStartPTYCliStdinWriteRead(t *testing.T) {
-	ptmx, cmd, err := startPTYCli("cat", nil, "", nil, "claude-code")
+	ptmx, cmd, err := startPTYCli(defaultPTYProvider, "cat", nil, "", nil, "claude-code")
 	if err != nil {
 		t.Skipf("pty unavailable in this environment: %v", err)
 	}
@@ -53,7 +52,6 @@ func TestStartPTYCliStdinWriteRead(t *testing.T) {
 		_ = cmd.Wait()
 	}()
 
-	_ = ptmx.SetReadDeadline(time.Now().Add(3 * time.Second))
 	if _, err := ptmx.Write([]byte("hello-pty\r")); err != nil {
 		t.Fatalf("write stdin: %v", err)
 	}

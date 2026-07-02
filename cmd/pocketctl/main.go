@@ -11,12 +11,10 @@ import (
 	"net/url"
 	"os"
 	"os/exec"
-	"os/signal"
 	"path/filepath"
 	"runtime"
 	"strings"
 	"sync/atomic"
-	"syscall"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -29,8 +27,8 @@ import (
 	"github.com/pocketctl/pocketctl/internal/discovery"
 	"github.com/pocketctl/pocketctl/internal/i18n"
 	"github.com/pocketctl/pocketctl/internal/notify"
+	"github.com/pocketctl/pocketctl/internal/platform"
 	"github.com/pocketctl/pocketctl/internal/protocol"
-	"github.com/pocketctl/pocketctl/internal/service"
 	"github.com/pocketctl/pocketctl/internal/session"
 	"github.com/pocketctl/pocketctl/internal/sysinfo"
 	"github.com/pocketctl/pocketctl/internal/update"
@@ -39,6 +37,13 @@ import (
 )
 
 var version = "0.2.34"
+
+// PR2 platform defaults for the daemon entry: daemonize + service via platform
+// interface (was direct syscall.SysProcAttr{Setsid} + internal/service).
+var (
+	daemonizer = platform.NewDaemonizer()
+	serviceMgr = platform.NewServiceManager()
+)
 
 // DefaultRelayURL is the public production relay used when no --relay flag,
 // --prod config, or POCKETCTL_RELAY_URL env is provided. To target a local or
@@ -168,7 +173,7 @@ func cmdServiceInstall(args []string) {
 	// Ensure the log dir exists; launchd/systemd open the boot log but won't
 	// create its parent directory.
 	_ = os.MkdirAll(daemon.LogDir(), 0755)
-	cfg := service.Config{ExePath: exe, Args: daemonArgs, LogPath: daemon.ServiceBootLogPath()}
+	cfg := platform.ServiceOpts{ExePath: exe, Args: daemonArgs, LogPath: daemon.ServiceBootLogPath()}
 
 	// If the daemon is already running standalone, stop it so it doesn't fight
 	// the supervised instance for the relay registration / approval socket.
@@ -177,12 +182,12 @@ func cmdServiceInstall(args []string) {
 		_ = daemon.Stop()
 	}
 
-	if err := service.Install(cfg); err != nil {
+	if err := serviceMgr.Install(cfg); err != nil {
 		fmt.Fprintln(os.Stderr, i18n.T("service.install_fail", err))
 		os.Exit(1)
 	}
 	fmt.Println(i18n.T("service.installed", strings.Join(append([]string{filepath.Base(exe)}, daemonArgs...), " ")))
-	info, _ := service.Status()
+	info, _ := serviceMgr.Status()
 	if info.UnitPath != "" {
 		fmt.Println(i18n.T("service.unit_path", info.UnitPath))
 	}
@@ -192,7 +197,7 @@ func cmdServiceInstall(args []string) {
 }
 
 func cmdServiceUninstall() {
-	if err := service.Uninstall(); err != nil {
+	if err := serviceMgr.Uninstall(); err != nil {
 		fmt.Fprintln(os.Stderr, i18n.T("service.uninstall_fail", err))
 		os.Exit(1)
 	}
@@ -200,7 +205,7 @@ func cmdServiceUninstall() {
 }
 
 func cmdServiceStatus() {
-	info, err := service.Status()
+	info, err := serviceMgr.Status()
 	if err != nil {
 		fmt.Fprintln(os.Stderr, i18n.T("service.status_fail", err))
 		os.Exit(1)
@@ -709,18 +714,9 @@ func cmdDaemonStart(args []string) {
 			fmt.Fprintln(os.Stderr, i18n.T("error.executable_path", err))
 			os.Exit(1)
 		}
-		child := &exec.Cmd{
-			Path:   exe,
-			Args:   os.Args,
-			Env:    childEnv,
-			Stdin:  nil,
-			Stdout: nil,
-			Stderr: nil,
-			SysProcAttr: &syscall.SysProcAttr{
-				Setsid: true,
-			},
-		}
-		if err := child.Start(); err != nil {
+		// PR2: daemonize fork via platform.Daemonizer (was direct exec.Cmd + SysProcAttr{Setsid}).
+		proc, err := daemonizer.ForkDetached(exe, os.Args[1:], childEnv)
+		if err != nil {
 			fmt.Fprintln(os.Stderr, i18n.T("error.daemonize", err))
 			os.Exit(1)
 		}
@@ -752,7 +748,7 @@ func cmdDaemonStart(args []string) {
 			fmt.Println(i18n.T("daemon.start_failed", daemon.LogPath()))
 			os.Exit(1)
 		}
-		fmt.Println(i18n.T("daemon.started", preForkID, child.Process.Pid))
+		fmt.Println(i18n.T("daemon.started", preForkID, proc.Pid))
 		fmt.Println(i18n.T("daemon.version", version))
 		if connected {
 			fmt.Println(i18n.T("daemon.relay_connected", url))
@@ -1097,7 +1093,13 @@ func cmdDaemonStart(args []string) {
 	defer cancel()
 
 	sigCh := make(chan os.Signal, 1)
-	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+	installSignalHandler(sigCh) // PR2: platform split (Unix SIGINT/SIGTERM, Windows os.Interrupt)
+
+	// PR4: Windows 控制通道(Unix no-op)。收 stop → cancel → 优雅退出。
+	// detached Windows daemon 收不到信号,靠控制 pipe 接收 daemon stop 命令。
+	if err := daemon.StartControlChannel(cancel); err != nil {
+		logger.Warn("control channel not started", "error", err)
+	}
 
 	// Start session watcher (Claude terminal sessions)
 	if err := sw.Start(ctx); err != nil {
@@ -1198,7 +1200,10 @@ func cmdDaemonStart(args []string) {
 	}
 
 	// Wait for signal
-	<-sigCh
+	select {
+	case <-sigCh:
+	case <-ctx.Done(): // PR4: 控制通道 stop → cancel → 这里唤醒
+	}
 	logger.Info("shutting down")
 	fmt.Println(i18n.T("daemon.shutting_down"))
 	// Stop the shared opencode serve process (bound to its own context, not the
@@ -1681,16 +1686,12 @@ func handleCommands(ctx context.Context, client *ws.Client, sm *session.SessionM
 						logger.Error("daemon restart failed: get executable", "error", err)
 						return
 					}
-					cmd := exec.Command(exe, os.Args[1:]...)
-					cmd.Stdout = nil
-					cmd.Stderr = nil
-					cmd.Stdin = nil
-					cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
-					if err := cmd.Start(); err != nil {
+					// PR2: restart via platform.Daemonizer (was exec.Command + SysProcAttr{Setsid}).
+					if err := daemonizer.Restart(exe, os.Args[1:]); err != nil {
 						logger.Error("daemon restart failed: spawn", "error", err)
 						return
 					}
-					logger.Info("new daemon spawned, exiting", "newPID", cmd.Process.Pid)
+					logger.Info("new daemon spawned, exiting")
 					os.Exit(0)
 				})
 

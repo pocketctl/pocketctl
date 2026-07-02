@@ -6,7 +6,7 @@ import (
 	"os/exec"
 	"strings"
 
-	"github.com/creack/pty"
+	"github.com/pocketctl/pocketctl/internal/platform"
 )
 
 // startPTYCli launches an interactive agent (claude, codex, …) under a PTY with
@@ -17,7 +17,7 @@ import (
 // write "<msg>\r" to submit) and the running *exec.Cmd.
 //
 // interactive-web-session D1 (PTY interactive) + D3 (env sanitization).
-func startPTYCli(cliPath string, args []string, cwd string, extraEnv []string, agentType string) (*os.File, *exec.Cmd, error) {
+func startPTYCli(provider platform.PTYProvider, cliPath string, args []string, cwd string, extraEnv []string, agentType string) (platform.PTY, *exec.Cmd, error) {
 	cmd := exec.Command(cliPath, args...)
 	if cwd != "" {
 		cmd.Dir = cwd
@@ -30,11 +30,9 @@ func startPTYCli(cliPath string, args []string, cwd string, extraEnv []string, a
 	env = ensureTERM(env, "xterm-256color")
 	cmd.Env = env
 
-	// Start with a sane window size. Without this the PTY defaults to 0x0 and
-	// claude's Ink-based TUI stalls rendering into a zero-size screen — startup
-	// takes minutes and JSONL isn't written. (spike python inherited winsize
-	// from the real terminal; creack/pty does not.)
-	ptmx, err := pty.StartWithSize(cmd, &pty.Winsize{Rows: 24, Cols: 80})
+	// PR2: PTY 启动走 platform.PTYProvider（Unix=creack/pty, Windows=stub），
+	// 替代直接 pty.StartWithSize。env sanitize / TERM 仍是 session 业务逻辑。
+	ptmx, err := provider.Start(cmd, &platform.Size{Rows: 24, Cols: 80})
 	if err != nil {
 		return nil, nil, fmt.Errorf("pty start: %w", err)
 	}

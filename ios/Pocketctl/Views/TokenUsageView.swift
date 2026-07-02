@@ -24,6 +24,7 @@ struct TokenUsageView: View {
                             overviewGrid(vm)
                             breakdownCard(vm)
                             barChartCard(vm)
+                            heatmapCard(vm)
                             donutCard(vm)
                             sessionsSection(vm)
                         } else if let err = vm.loadError {
@@ -134,6 +135,40 @@ struct TokenUsageView: View {
                 Text("暂无数据").font(PCFont.body(13)).foregroundStyle(Color.pcFgTertiary).frame(maxWidth: .infinity, alignment: .center).padding(.vertical, 40)
             } else {
                 TokenBarChart(series: vm.dailySeries).frame(height: 120)
+            }
+        }
+        .padding(16)
+        .background(Color.pcSurface)
+        .overlay(RoundedRectangle(cornerRadius: PCRadius.lg).stroke(Color.pcBorder, lineWidth: 1))
+        .cornerRadius(PCRadius.lg)
+    }
+
+    // MARK: - Heatmap（消耗热力图，近 9 个月；对齐 web `TokenUsage.vue`）
+
+    private func heatmapCard(_ vm: TokenUsageViewModel) -> some View {
+        VStack(alignment: .leading, spacing: PCSpacing.sm) {
+            HStack {
+                sectionTitle("消耗热力图（近 5 个月）")
+                Spacer()
+                // 图例条：少 ▢▢▣▣■ 多（5 级，对齐 web `.heatmap-legend-bar`）
+                HStack(spacing: 4) {
+                    Text("少").font(PCFont.body(10)).foregroundStyle(Color.pcFgTertiary)
+                    ForEach(0..<5, id: \.self) { lv in
+                        RoundedRectangle(cornerRadius: 2)
+                            .fill(TokenHeatmap.color(level: lv))
+                            .frame(width: 10, height: 10)
+                    }
+                    Text("多").font(PCFont.body(10)).foregroundStyle(Color.pcFgTertiary)
+                }
+            }
+            if vm.heatmapSeries.isEmpty {
+                Text("暂无数据")
+                    .font(PCFont.body(13))
+                    .foregroundStyle(Color.pcFgTertiary)
+                    .frame(maxWidth: .infinity, alignment: .center)
+                    .padding(.vertical, 40)
+            } else {
+                TokenHeatmap(series: vm.heatmapSeries, maxVal: vm.heatmapMax)
             }
         }
         .padding(16)
@@ -295,4 +330,225 @@ struct TokenDonutChart: View {
             }
         }
     }
+}
+
+// MARK: - Heatmap（GitHub 风格消耗热力图，对齐 web `TokenUsage.vue` 的 heatmapCols/heatLevel）
+
+/// GitHub 风格日历对齐消耗热力图。列数（周数）/cell 尺寸/滚动/交互均可配置。
+/// 默认 22 周、cell 13pt、横向滚动默认靠右、可点击 tooltip（用量页）；
+/// 签名卡传 scrollable=false：方格按容器宽度等分 + aspectRatio(1) 自适应填满，cellSize 此时无效。
+/// 5 级强度：level 0 = 无数据（中性灰），1–4 = `pcAccent` 透明度 0.22/0.42/0.66/0.92。
+struct TokenHeatmap: View {
+    let series: [TokenDailyPoint]
+    let maxVal: Int
+    let weeks: Int
+    let cellSize: CGFloat
+    let cellGap: CGFloat
+    let interactive: Bool
+    let scrollable: Bool
+
+    @State private var selected: TokenHeatmapCell?
+
+    /// - Parameters:
+    ///   - weeks: 列数（周数）。默认 22（≈近 5 个月）。
+    ///   - cellSize/cellGap: 单元格尺寸与间隙。默认 13/3（对齐 web 12px/gap 3px，略放大适合手指点击）。
+    ///   - interactive: 是否启用点击 tooltip。默认 true（用量页）。签名卡传 false。
+    ///   - scrollable: 是否横向滚动。默认 true（用量页）。签名卡传 false（cell 缩小后 22 周可铺满屏宽）。
+    init(series: [TokenDailyPoint],
+         maxVal: Int,
+         weeks: Int = 22,
+         cellSize: CGFloat = 13,
+         cellGap: CGFloat = 3,
+         interactive: Bool = true,
+         scrollable: Bool = true) {
+        self.series = series
+        self.maxVal = maxVal
+        self.weeks = weeks
+        self.cellSize = cellSize
+        self.cellGap = cellGap
+        self.interactive = interactive
+        self.scrollable = scrollable
+    }
+
+    /// 预计算网格：与 web `heatmapCols` 完全同构。使用本地时区格式化日期，
+    /// 不走 UTC（web 曾因此导致单元格查表失败，见 TokenUsage.vue:304-314 注释）。
+    private var columns: [TokenHeatmapColumn] {
+        let cal = Calendar(identifier: .gregorian)
+        let map = Dictionary(uniqueKeysWithValues: series.map { (normDate($0.date), $0) })
+        let today = cal.startOfDay(for: Date())
+        // weekday: 1=Sunday ... 7=Saturday（与 web getFullYear/getDay 的 0=Sunday 对齐）
+        let todayDow = cal.component(.weekday, from: today)
+        let thisSunday = cal.date(byAdding: .day, value: -(todayDow - 1), to: today)!
+
+        var cols: [TokenHeatmapColumn] = []
+        for w in stride(from: weeks - 1, through: 0, by: -1) {
+            var cells: [TokenHeatmapCell] = []
+            for dow in 0..<7 {
+                let dt = cal.date(byAdding: .day, value: -w * 7 + dow, to: thisSunday)!
+                let future = dt > today
+                let ds = fmtLocalDate(dt)
+                let day = future ? nil : map[ds]
+                let value = day.map { $0.input + $0.output } ?? 0
+                let level = day != nil ? heatLevel(value) : 0
+                cells.append(TokenHeatmapCell(
+                    key: "w\(w)-d\(dow)",
+                    date: day != nil ? ds : "",
+                    value: value,
+                    level: level,
+                    hasData: day != nil,
+                    month: cal.component(.month, from: dt)
+                ))
+            }
+            cols.append(TokenHeatmapColumn(id: w, cells: cells))
+        }
+        return cols
+    }
+
+    /// web `heatLevel`: p=value/max; >0.75→4, >0.5→3, >0.25→2, >0→1, else 0
+    private func heatLevel(_ v: Int) -> Int {
+        let p = Double(v) / Double(maxVal)
+        if p > 0.75 { return 4 }
+        if p > 0.5 { return 3 }
+        if p > 0.25 { return 2 }
+        if v > 0 { return 1 }
+        return 0
+    }
+
+    /// 稳定的 "YYYY-MM-DD"（取前 10 字符），兼容后端可能返回的 ISO 时间戳。
+    private func normDate(_ s: String) -> String { String(s.prefix(10)) }
+
+    /// 本地时区日期格式化（与 web `fmtLocalDate` 一致，避免 UTC 偏移导致查表失败）。
+    private func fmtLocalDate(_ d: Date) -> String {
+        let f = DateFormatter()
+        f.locale = Locale(identifier: "en_US_POSIX")
+        f.timeZone = .current
+        f.dateFormat = "yyyy-MM-dd"
+        return f.string(from: d)
+    }
+
+    /// 5 级配色（level 0 = 无数据中性灰；1–4 = accent 渐增透明度）。
+    static func color(level: Int) -> Color {
+        switch level {
+        case 0: return Color.pcHoverInput
+        case 1: return Color.pcAccent.opacity(0.22)
+        case 2: return Color.pcAccent.opacity(0.42)
+        case 3: return Color.pcAccent.opacity(0.66)
+        default: return Color.pcAccent.opacity(0.92)
+        }
+    }
+
+    var body: some View {
+        let cols = columns
+        return VStack(alignment: .leading, spacing: PCSpacing.xs) {
+            // 选中日的浮层提示（仅 interactive）
+            if interactive, let sel = selected, !sel.date.isEmpty {
+                HStack(spacing: 6) {
+                    Text(sel.date).font(PCFont.mono(12, weight: .semibold)).foregroundStyle(Color.pcFg)
+                    Text("·").foregroundStyle(Color.pcFgTertiary)
+                    Text(formatTokens(sel.value)).font(PCFont.mono(12, weight: .semibold)).foregroundStyle(Color.pcAccent)
+                    Text("tokens").font(PCFont.body(10)).foregroundStyle(Color.pcFgTertiary)
+                }
+                .padding(.horizontal, 10).padding(.vertical, 5)
+                .background(Color.pcHoverInput)
+                .overlay(RoundedRectangle(cornerRadius: PCRadius.sm).stroke(Color.pcBorderLight, lineWidth: 1))
+                .cornerRadius(PCRadius.sm)
+            }
+            grid(cols)
+        }
+    }
+
+    /// 网格：scrollable 时横向滚动并默认靠右；否则直接铺排（签名卡）。
+    @ViewBuilder
+    private func grid(_ cols: [TokenHeatmapColumn]) -> some View {
+        if scrollable {
+            ScrollViewReader { proxy in
+                ScrollView(.horizontal, showsIndicators: false) {
+                    heatmapRow(cols)
+                        .padding(.trailing, 2)
+                }
+                .onAppear {
+                    // 定位到最右侧一列（最近一周 = id 0）；延迟一帧确保布局完成
+                    DispatchQueue.main.async {
+                        withAnimation(nil) { proxy.scrollTo(0, anchor: .trailing) }
+                    }
+                }
+            }
+        } else {
+            heatmapRow(cols)
+        }
+    }
+
+    private func heatmapRow(_ cols: [TokenHeatmapColumn]) -> some View {
+        HStack(alignment: .top, spacing: cellGap) {
+            ForEach(cols) { col in
+                heatmapColumn(col)
+                    .id(col.id)
+                    // 非滚动（签名卡）：每列等分容器宽度，配合方格 aspectRatio(1) 自适应填满，不依赖 cellSize；
+                    // 滚动（用量页）：列宽由内部 cellSize 决定，固定不变才能横向滚动。
+                    .frame(maxWidth: scrollable ? nil : .infinity, alignment: .topLeading)
+            }
+        }
+    }
+
+    /// 单列（一周）：顶部月份标签（仅该列周一所在月份首次出现时显示）+ 7 个 cell。
+    private func heatmapColumn(_ col: TokenHeatmapColumn) -> some View {
+        VStack(alignment: .leading, spacing: cellGap) {
+            // 月份标签：取该列第一个 cell 的月份，简化为每列都标（与 web 行为接近）
+            // 滚动模式固定 cellSize 宽；非滚动模式跟随列宽（已被 heatmapRow 设为 .infinity）
+            Text(shortMonth(col.cells.first?.month ?? 0))
+                .font(PCFont.body(9))
+                .foregroundStyle(Color.pcFgTertiary)
+                .frame(width: scrollable ? cellSize : nil, alignment: .leading)
+            ForEach(col.cells) { cell in
+                heatmapCell(cell)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func heatmapCell(_ cell: TokenHeatmapCell) -> some View {
+        // 滚动（用量页）：固定 cellSize；非滚动（签名卡）：等分列宽 + aspectRatio(1) 自适应为正方形，填满容器宽度。
+        let shape = RoundedRectangle(cornerRadius: 2)
+        let fill = shape
+            .fill(TokenHeatmap.color(level: cell.level))
+            .overlay(
+                shape
+                    .stroke(Color.pcAccent, lineWidth: 1)
+                    .opacity(interactive && selected?.date == cell.date && cell.hasData ? 1 : 0)
+            )
+        let sized = scrollable
+            ? AnyView(fill.frame(width: cellSize, height: cellSize))
+            : AnyView(fill.frame(maxWidth: .infinity).aspectRatio(1, contentMode: .fit))
+        if interactive {
+            sized
+                .contentShape(Rectangle())
+                .onTapGesture {
+                    guard cell.hasData else { return }
+                    selected = (selected?.date == cell.date) ? nil : cell
+                }
+        } else {
+            sized
+        }
+    }
+
+    private func shortMonth(_ m: Int) -> String {
+        let names = ["", "1月", "2月", "3月", "4月", "5月", "6月",
+                     "7月", "8月", "9月", "10月", "11月", "12月"]
+        return (1...12).contains(m) ? names[m] : ""
+    }
+}
+
+private struct TokenHeatmapColumn: Identifiable {
+    let id: Int               // 周序号（0 = 最近一周）
+    let cells: [TokenHeatmapCell]
+}
+
+private struct TokenHeatmapCell: Identifiable {
+    let key: String           // 稳定标识（"w{week}-d{dow}"），保证 ForEach 身份稳定
+    let date: String          // "YYYY-MM-DD"，无数据时为 ""
+    let value: Int            // input + output
+    let level: Int            // 0–4
+    let hasData: Bool
+    let month: Int
+    var id: String { key }
 }
