@@ -26,6 +26,7 @@ func TestSpoolAppendAndLoad(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	defer s.f.Close() // release handle so t.TempDir cleanup works on Windows
 	s.append(ev(1, "a").data)
 	s.append(ev(2, "b").data)
 
@@ -41,6 +42,7 @@ func TestSpoolAppendAndLoad(t *testing.T) {
 func TestSpoolRewriteShrinksAndReopens(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "d.log")
 	s, _ := openSpool(path)
+	defer s.f.Close() // release handle so t.TempDir cleanup works on Windows
 	s.append(ev(1, "a").data)
 	s.append(ev(2, "b").data)
 	s.append(ev(3, "c").data)
@@ -86,11 +88,13 @@ func TestInitSpoolRestoresBufferAndResumesSeq(t *testing.T) {
 	seed, _ := openSpool(path)
 	seed.append(ev(5, "a").data)
 	seed.append(ev(6, "b").data)
+	seed.f.Close() // release seed handle before InitSpool reopens the same file
 
 	c := NewClient("", "", "daemon-x", nil, nil, nil, nil, quietLogger())
 	if err := c.InitSpool(path); err != nil {
 		t.Fatal(err)
 	}
+	defer c.spool.f.Close() // release handle so t.TempDir cleanup works on Windows
 	if len(c.outBuf) != 2 {
 		t.Fatalf("want 2 restored events, got %d", len(c.outBuf))
 	}
