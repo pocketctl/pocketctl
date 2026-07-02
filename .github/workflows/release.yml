@@ -15,12 +15,22 @@ jobs:
         include:
           - os: darwin
             arch: arm64
+            ext: ""
           - os: darwin
             arch: amd64
+            ext: ""
           - os: linux
             arch: amd64
+            ext: ""
           - os: linux
             arch: arm64
+            ext: ""
+          - os: windows
+            arch: amd64
+            ext: ".exe"
+          - os: windows
+            arch: arm64
+            ext: ".exe"
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -35,12 +45,12 @@ jobs:
           GOARCH: ${{ matrix.arch }}
         run: |
           VERSION=${GITHUB_REF_NAME:-dev}
-          go build -ldflags "-X main.version=$VERSION" -o pocketctl_${{ matrix.os }}_${{ matrix.arch }} ./cmd/pocketctl
+          go build -ldflags "-X main.version=$VERSION" -o pocketctl_${{ matrix.os }}_${{ matrix.arch }}${{ matrix.ext }} ./cmd/pocketctl
 
       - uses: actions/upload-artifact@v4
         with:
-          name: pocketctl_${{ matrix.os }}_${{ matrix.arch }}
-          path: pocketctl_${{ matrix.os }}_${{ matrix.arch }}
+          name: pocketctl_${{ matrix.os }}_${{ matrix.arch }}${{ matrix.ext }}
+          path: pocketctl_${{ matrix.os }}_${{ matrix.arch }}${{ matrix.ext }}
 
   release:
     needs: build
