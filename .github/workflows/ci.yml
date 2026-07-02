@@ -12,7 +12,7 @@ jobs:
     env:
       # macos: gopsutil→go-m1cpu 的 C 代码 VLA warning(-Wgnu-folding-constant),
       # macos runner 新 clang 当 error。-Wno-error 解除所有 -Werror 化。
-      CGO_CFLAGS: "-Wno-error"
+      CGO_CFLAGS: "-Wno-error -Wno-gnu-folding-constant"
     strategy:
       fail-fast: false
       matrix:
