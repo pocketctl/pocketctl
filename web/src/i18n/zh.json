@@ -89,6 +89,8 @@
   "session.send_failed": "发送失败，请检查网络后重试",
   "session.output_tokens": "输出 {{n}}",
   "session.force_stop": "再次点击强制终止进程",
+  "session.stop_daemon_unreachable": "Daemon 正在重连，可再次点击强制终止",
+  "session.stop_session_not_found": "会话已不存在（可能已被清理）",
   "session.tool_timeout": "已超时（未收到结果）",
   "session.ended": "Session 已结束",
   "session.input_creating": "会话创建中…",

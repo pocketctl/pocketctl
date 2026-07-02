@@ -309,6 +309,11 @@
                   :title="isDisconnected ? t('session.daemon_offline') : (stopEscalated ? t('session.force_stop') : t('session.stop_gen'))">
                   <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="6" width="12" height="12" rx="2"/></svg>
                 </button>
+                <!-- 停止操作错误提示:relay 返回 daemon_unreachable/session_not_found
+                     时显示,3.5s 自动消失,不写入消息流。 -->
+                <Transition name="fade">
+                  <span v-if="stopError" class="stop-error-hint">{{ stopError }}</span>
+                </Transition>
               </div>
             </div>
           </div>
@@ -805,6 +810,10 @@ function setEffort(level: string) {
 // can always be stopped, even when the PTY master is disconnected from claude's
 // stdin (the c5813d2c incident: 11 Ctrl+C writes went into a void PTY).
 const stopEscalated = ref(false)
+/// 停止操作的错误提示（来自 relay 的 daemon_unreachable / session_not_found）。
+/// 区别于普通消息气泡：显示在停止按钮附近,3.5s 后自动消失,不污染消息流。
+const stopError = ref('')
+let stopErrorTimer: ReturnType<typeof setTimeout> | null = null
 let stopResetTimer: ReturnType<typeof setTimeout> | null = null
 function interruptSession() {
   // Defensive guard: the stop button is :disabled while disconnected, but a
@@ -1593,6 +1602,16 @@ onMounted(() => {
 
   cleanups.push(onEvent('error', (msg: any) => {
     if (msg.session_id && msg.session_id !== sessionId.value) return
+    // 带可区分 code 的错误(来自 relay 路由层):停止操作的失败显示为按钮旁的
+    // 临时提示,而非消息气泡 —— 避免把"daemon 重连中"这类可恢复状态写进消息流。
+    const code = msg.code
+    if (code === 'daemon_unreachable' || code === 'session_not_found') {
+      const key = code === 'daemon_unreachable' ? 'session.stop_daemon_unreachable' : 'session.stop_session_not_found'
+      stopError.value = t(key)
+      if (stopErrorTimer) clearTimeout(stopErrorTimer)
+      stopErrorTimer = setTimeout(() => { stopError.value = '' }, 3500)
+      return
+    }
     messages.value.push({ id: nextId('e'), type: 'error', content: msg.error || '未知错误' })
   }))
 
@@ -1800,6 +1819,17 @@ onMounted(() => {
 .stop-btn:disabled { background: var(--border); color: var(--fg-tertiary); cursor: not-allowed; }
 .stop-btn.escalated { background: #e5484d; animation: stop-pulse 1s ease-in-out infinite; }
 @keyframes stop-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.7; } }
+
+/* 停止操作错误提示:relay 返回 daemon_unreachable/session_not_found 时,
+   在停止按钮旁短暂提示,3.5s 自动消失。不写入消息流。 */
+.stop-error-hint {
+  font-size: 11px;
+  color: var(--fg-tertiary);
+  white-space: nowrap;
+  margin-right: 4px;
+}
+.fade-enter-active, .fade-leave-active { transition: opacity 0.25s ease; }
+.fade-enter-from, .fade-leave-to { opacity: 0; }
 
 /* Turn status bar: sits inside the message stream, visually part of it
    (left-aligned, same width as agent replies, no separating border). */
