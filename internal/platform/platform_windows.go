@@ -7,6 +7,7 @@ import (
 	"net"
 	"os"
 	"os/exec"
+	"syscall"
 
 	"golang.org/x/sys/windows"
 )
@@ -77,16 +78,37 @@ func (windowsProcessController) IsAlive(int) bool    { return false }
 func (windowsProcessController) Terminate(int) error { return ErrUnsupported }
 func (windowsProcessController) Kill(int) error      { return ErrUnsupported }
 
-// NewDaemonizer 返回 Windows daemonizer（PR1 stub）。
-// PR4 实现：ForkDetached=CREATE_NO_WINDOW|DETACHED_PROCESS。
+// NewDaemonizer 返回 Windows daemonizer。
+// PR4: CREATE_NO_WINDOW|DETACHED_PROCESS 创建无窗口、脱离父控制台的子进程(等价 Unix Setsid)。
 func NewDaemonizer() Daemonizer { return windowsDaemonizer{} }
 
 type windowsDaemonizer struct{}
 
-func (windowsDaemonizer) ForkDetached(string, []string, []string) (*os.Process, error) {
-	return nil, ErrUnsupported
+func (windowsDaemonizer) ForkDetached(self string, args []string, env []string) (*os.Process, error) {
+	cmd := &exec.Cmd{
+		Path: self,
+		Args: append([]string{self}, args...),
+		Env:  env,
+		SysProcAttr: &syscall.SysProcAttr{
+			CreationFlags: windows.CREATE_NO_WINDOW | windows.DETACHED_PROCESS,
+		},
+	}
+	if err := cmd.Start(); err != nil {
+		return nil, fmt.Errorf("fork detached: %w", err)
+	}
+	return cmd.Process, nil
 }
-func (windowsDaemonizer) Restart(string, []string) error { return ErrUnsupported }
+
+func (windowsDaemonizer) Restart(self string, args []string) error {
+	cmd := exec.Command(self, args...)
+	cmd.SysProcAttr = &syscall.SysProcAttr{
+		CreationFlags: windows.CREATE_NO_WINDOW | windows.DETACHED_PROCESS,
+	}
+	if err := cmd.Start(); err != nil {
+		return fmt.Errorf("restart spawn: %w", err)
+	}
+	return nil
+}
 
 // NewServiceManager 返回 Windows 服务管理器（PR1 stub）。PR4 实现 Windows Service（SCM）。
 func NewServiceManager() ServiceManager { return windowsServiceManager{} }
