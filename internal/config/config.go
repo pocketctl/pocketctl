@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 )
 
 // authFile holds the persisted authentication data.
@@ -48,6 +49,37 @@ func ApprovalSocketPath() string {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return ""
+	}
+	return approvalSocketPathFor(runtime.GOOS, home)
+}
+
+// ControlSocketPath 返回 daemon 本地控制 socket 路径（~/.pocketctl/control.sock）。
+// keep-awake on/off/status 等本地命令通过它与运行中的 daemon 通信（不经 relay）。
+// 与 ApprovalSocketPath 同置 ~/.pocketctl/ 下，权限由 IPCListener 设 0600。
+// 返回 "" 仅当 home 目录无法解析。
+func ControlSocketPath() string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+	return controlSocketPathFor(runtime.GOOS, home)
+}
+
+// controlSocketPathFor 是 ControlSocketPath 的纯函数核心（可注入 GOOS，便于单测）。
+// Windows 必须用 \\.\pipe\ 前缀的 named pipe 名（winio.CreateNamedPipe 要求），
+// 否则 listen/dial 失败（这是 keep-awake 与 approval 在 Windows 报
+// "Incorrect function" 的根因）。Unix 保持 ~/.pocketctl/control.sock 文件路径。
+func controlSocketPathFor(goos, home string) string {
+	if goos == "windows" {
+		return `\\.\pipe\pocketctl-control`
+	}
+	return filepath.Join(home, ".pocketctl", "control.sock")
+}
+
+// approvalSocketPathFor 是 ApprovalSocketPath 的纯函数核心（同上理由加平台分支）。
+func approvalSocketPathFor(goos, home string) string {
+	if goos == "windows" {
+		return `\\.\pipe\pocketctl-approval`
 	}
 	return filepath.Join(home, ".pocketctl", "approval.sock")
 }
