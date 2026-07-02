@@ -48,6 +48,11 @@ func NewIPCListener() IPCListener { return unixIPCListener{} }
 type unixIPCListener struct{}
 
 func (unixIPCListener) Listen(name string) (net.Listener, error) {
+	// 确保父目录存在(DefaultPath 嵌套 pocketctl/ 子目录,net.Listen 需父目录)。
+	// PR5 prod bugfix: PR1 Task3 遗漏 MkdirAll,子目录不存在时 net.Listen 失败。
+	if err := os.MkdirAll(filepath.Dir(name), 0o755); err != nil {
+		return nil, fmt.Errorf("create ipc socket dir: %w", err)
+	}
 	// 清理上次 daemon 残留的 socket 文件。
 	if err := os.Remove(name); err != nil && !os.IsNotExist(err) {
 		return nil, fmt.Errorf("remove stale ipc socket: %w", err)
