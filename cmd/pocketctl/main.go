@@ -1095,6 +1095,12 @@ func cmdDaemonStart(args []string) {
 	sigCh := make(chan os.Signal, 1)
 	installSignalHandler(sigCh) // PR2: platform split (Unix SIGINT/SIGTERM, Windows os.Interrupt)
 
+	// PR4: Windows 控制通道(Unix no-op)。收 stop → cancel → 优雅退出。
+	// detached Windows daemon 收不到信号,靠控制 pipe 接收 daemon stop 命令。
+	if err := daemon.StartControlChannel(cancel); err != nil {
+		logger.Warn("control channel not started", "error", err)
+	}
+
 	// Start session watcher (Claude terminal sessions)
 	if err := sw.Start(ctx); err != nil {
 		logger.Error("start session watcher", "error", err)
@@ -1194,7 +1200,10 @@ func cmdDaemonStart(args []string) {
 	}
 
 	// Wait for signal
-	<-sigCh
+	select {
+	case <-sigCh:
+	case <-ctx.Done(): // PR4: 控制通道 stop → cancel → 这里唤醒
+	}
 	logger.Info("shutting down")
 	fmt.Println(i18n.T("daemon.shutting_down"))
 	// Stop the shared opencode serve process (bound to its own context, not the

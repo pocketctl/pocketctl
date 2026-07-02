@@ -102,8 +102,25 @@ func (windowsProcessController) Kill(pid int) error {
 	return nil
 }
 
-// Terminate 仍 stub(PR1)——Task 5 控制通道实现(连 daemon control pipe 发 stop)。
-func (windowsProcessController) Terminate(int) error { return ErrUnsupported }
+// ControlPipeName 返回 daemon 控制通道 named pipe 名(基于 pid)。
+// daemon 启动开此 pipe;ProcessController.Terminate(pid) 连它发 stop。
+func ControlPipeName(pid int) string {
+	return fmt.Sprintf(`\\.\pipe\pocketctl-control-%d`, pid)
+}
+
+func (windowsProcessController) Terminate(pid int) error {
+	// 连 daemon 控制通道 named pipe,发 stop(优雅退出)。
+	// daemon 不在/pipe 不存在 → 错误(调用方 daemon.Stop 会 fallback Kill)。
+	conn, err := winio.DialPipe(ControlPipeName(pid), nil)
+	if err != nil {
+		return fmt.Errorf("dial control pipe (daemon not running?): %w", err)
+	}
+	defer conn.Close()
+	if _, err := conn.Write([]byte("stop\n")); err != nil {
+		return fmt.Errorf("send stop: %w", err)
+	}
+	return nil
+}
 
 // NewDaemonizer 返回 Windows daemonizer。
 // PR4: CREATE_NO_WINDOW|DETACHED_PROCESS 创建无窗口、脱离父控制台的子进程(等价 Unix Setsid)。
