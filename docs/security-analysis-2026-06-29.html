@@ -1,0 +1,357 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="dark">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>pocketctl 网络架构安全分析报告 (2026-06-29)</title>
+<style>
+  :root {
+    --bg: #0d1117;
+    --card-bg: #161b22;
+    --border: #30363d;
+    --text: #c9d1d9;
+    --text-muted: #8b949e;
+    --accent: #58a6ff;
+    --green: #3fb950;
+    --orange: #d29922;
+    --red: #f85149;
+    --purple: #a371f7;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: var(--bg); color: var(--text); line-height: 1.75;
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif;
+    max-width: 980px; margin: 0 auto; padding: 40px 24px 80px;
+  }
+  h1 { font-size: 2em; border-bottom: 2px solid var(--border); padding-bottom: 12px; margin-bottom: 8px; }
+  h2 { font-size: 1.45em; margin-top: 52px; padding-bottom: 8px; border-bottom: 1px solid var(--border); color: var(--accent); }
+  h3 { font-size: 1.18em; margin-top: 32px; color: #e6edf3; }
+  h4 { font-size: 1.02em; margin-top: 20px; color: var(--purple); }
+  p, li { margin: 8px 0; }
+  .meta { color: var(--text-muted); font-size: 0.9em; margin-bottom: 24px; }
+  ul, ol { padding-left: 24px; }
+  a { color: var(--accent); }
+  code {
+    font-family: 'SF Mono', 'Fira Code', Consolas, monospace;
+    font-size: 0.88em;
+    background: rgba(110,118,129,0.2);
+    padding: 2px 6px; border-radius: 4px;
+  }
+  pre {
+    background: #010409; border: 1px solid var(--border); border-radius: 8px;
+    padding: 16px; overflow-x: auto; font-size: 0.84em; line-height: 1.55; margin: 12px 0;
+  }
+  pre code { background: none; padding: 0; }
+  table { width: 100%; border-collapse: collapse; margin: 16px 0; font-size: 0.88em; }
+  th, td { border: 1px solid var(--border); padding: 9px 12px; text-align: left; vertical-align: top; }
+  th { background: var(--card-bg); font-weight: 600; color: #e6edf3; }
+  tr:nth-child(even) { background: rgba(255,255,255,0.02); }
+
+  .tag {
+    display: inline-block; padding: 2px 9px; border-radius: 12px; font-size: 0.76em;
+    font-weight: 700; margin-right: 4px; white-space: nowrap;
+  }
+  .tag-green  { background: rgba(63,185,80,0.15);  color: var(--green); }
+  .tag-orange { background: rgba(210,153,34,0.15); color: var(--orange); }
+  .tag-red    { background: rgba(248,81,73,0.15);  color: var(--red); }
+  .tag-blue   { background: rgba(88,166,255,0.15); color: var(--accent); }
+  .tag-purple { background: rgba(163,113,247,0.15);color: var(--purple); }
+
+  .card {
+    background: var(--card-bg); border: 1px solid var(--border); border-radius: 8px;
+    padding: 18px 22px; margin: 14px 0;
+  }
+  .card-red    { border-left: 4px solid var(--red); }
+  .card-orange { border-left: 4px solid var(--orange); }
+  .card-green  { border-left: 4px solid var(--green); }
+  .card-blue   { border-left: 4px solid var(--accent); }
+
+  .toc { background: var(--card-bg); border: 1px solid var(--border); border-radius: 8px; padding: 20px 28px; margin: 24px 0; }
+  .toc ol { padding-left: 22px; }
+  .toc a { text-decoration: none; }
+
+  .severity-badge {
+    display: inline-block; padding: 3px 12px; border-radius: 6px; font-weight: 700;
+    font-size: 0.95em; margin-left: 8px; vertical-align: middle;
+  }
+  .sev-low    { background: rgba(63,185,80,0.18);  color: var(--green); }
+  .sev-mid    { background: rgba(210,153,34,0.18); color: var(--orange); }
+  .sev-high   { background: rgba(248,81,73,0.22);  color: var(--red); }
+
+  .summary-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 14px; margin: 18px 0; }
+  .summary-item { background: var(--card-bg); border: 1px solid var(--border); border-radius: 8px; padding: 16px 18px; }
+  .summary-item h4 { margin-top: 0; }
+</style>
+</head>
+<body>
+
+<h1>🔐 pocketctl 网络架构安全分析报告</h1>
+<div class="meta">
+  分析对象：pocketctl（daemon ↔ relay ↔ web/iOS 通信架构） ·
+  分析方式：纯静态代码审查 ·
+  分析日期：2026-06-29 ·
+  分支：develop ·
+  <strong>结论状态：未改动任何代码，仅输出分析结论</strong>
+</div>
+
+<div class="card card-blue">
+  <strong>覆盖范围：</strong>
+  网络穿透 · 连接劫持 · 数据泄露 · 数据删除/破坏 · 数据丢失
+</div>
+
+<div class="toc">
+  <strong>📋 目录</strong>
+  <ol>
+    <li><a href="#arch">架构概览</a></li>
+    <li><a href="#penetrate">网络穿透风险</a></li>
+    <li><a href="#hijack">连接劫持风险</a></li>
+    <li><a href="#leak">数据泄露风险</a></li>
+    <li><a href="#destroy">数据删除/破坏风险</a></li>
+    <li><a href="#loss">数据丢失风险</a></li>
+    <li><a href="#matrix">风险矩阵总览</a></li>
+    <li><a href="#fix">修复优先级建议</a></li>
+    <li><a href="#conclusion">总体结论</a></li>
+  </ol>
+</div>
+
+<h2 id="arch">一、架构概览</h2>
+<pre><code>[Daemon (Go)]  ←──wss://──→  [Nginx 443 TLS]  ──proxy──→  [Relay (Fastify) :8080]  ──→  [PostgreSQL :5432]
+   ↕                              HTTP/301→HTTPS              ↕ JWT auth
+[本地 agent (claude/codex)]                                  [Web/iOS client WS]</code></pre>
+<p>生产部署形态（<code>docker-compose.prod.yml</code>）：<strong>仅 Nginx 对外暴露 80/443</strong>，Relay(8080) 和 PostgreSQL(5432) 均 <code>expose</code>（容器内部），不发布端口。</p>
+
+<h2 id="penetrate">二、网络穿透风险评估 <span class="severity-badge sev-low">🟢 低风险</span></h2>
+
+<h3>已有的防护（强项）</h3>
+<ol>
+  <li><strong>默认走公网中转，不是直连穿透。</strong>Daemon 连接公共 relay <code>wss://www.pocketctl.me/ws</code>（<code>internal/i18n/messages.go:39</code>），架构上是"客户端→中继服务器→客户端"模型，relay 本身不主动反向打洞到内网 daemon。<strong>不存在服务端向内网建立反向通道</strong>。</li>
+  <li><strong>数据库不对外暴露。</strong><code>docker-compose.prod.yml:19</code> postgres 仅 <code>expose: 5432</code>，只有同网络的 relay 容器可达。</li>
+  <li><strong>Relay 不对外暴露。</strong><code>docker-compose.prod.yml:37</code> relay 仅 <code>expose: 8080</code>，所有外部流量必须经 Nginx。</li>
+  <li><strong>Nginx 禁止访问隐藏文件</strong>（<code>deploy/nginx/pocketctl.conf:90</code>）。</li>
+</ol>
+
+<h3>需关注（非高危）</h3>
+<ul>
+  <li><strong><code>--relay</code> / <code>POCKETCTL_RELAY_URL</code> 可指向任意服务器</strong>（<code>messages.go:40-48</code>）。设计特性（自托管），但若用户被诱导设置恶意 relay URL，daemon 会主动连过去。属用户配置风险。</li>
+  <li><strong>approval hook 是本地 Unix socket</strong>（<code>main.go:784</code>），不跨网络，无穿透面。</li>
+</ul>
+
+<h2 id="hijack">三、Daemon↔Relay 连接劫持风险评估 <span class="severity-badge sev-mid">⚠️ 中低风险</span></h2>
+
+<h3>已有的防护（强项）</h3>
+<ol>
+  <li><strong>生产强制 TLS。</strong>Nginx 配置 <code>TLSv1.2 TLSv1.3</code> + <code>HSTS max-age=31536000</code>，HTTP→HTTPS 301（<code>pocketctl.conf:11-16,27</code>）。Daemon 默认用 <code>wss://</code>。</li>
+  <li><strong>TLS 证书校验未禁用。</strong>Go 端用 <code>websocket.DefaultDialer.DialContext</code>（<code>ws/client.go:193</code>）和 <code>http.DefaultClient</code>（<code>api/client.go:232</code>），<strong>全局无 <code>InsecureSkipVerify</code></strong>。MITM 需持有受信证书。</li>
+  <li><strong>WS 连接强制鉴权。</strong>relay 的 <code>/ws</code> 端点（<code>server.ts:1058-1075</code>）：无 token 或 API key 立即 <code>socket.close(4001)</code>。</li>
+  <li><strong>JWT 签名验证 + 吊销检查。</strong>WS 用 <code>verifyAccessTokenWithRevocation</code>（<code>server.ts:1060</code>）；refresh token 有轮换 + 重用检测（breach detection 会吊销该用户全部 token）。</li>
+</ol>
+
+<h3>劫持/冒充风险点（中低危）</h3>
+<table>
+  <thead><tr><th>#</th><th>风险点</th><th>代码位置</th><th>说明</th></tr></thead>
+  <tbody>
+    <tr><td>1</td><td><strong>JWT 在 URL query 传递</strong></td><td><code>ws/client.go:188</code></td><td>token 进 URL，会进入 Nginx access log、浏览器历史/referrer。服务端日志泄露 = token 泄露。建议改用 <code>Sec-WebSocket-Protocol</code> 子协议或首帧鉴权。</td></tr>
+    <tr><td>2</td><td><strong>REST <code>verifyAccessToken</code> 不查吊销</strong></td><td><code>auth.ts:61</code></td><td>只有 WS 和 refresh 走吊销检查；普通 REST 不查 jti 黑名单。已吊销的 access token 在 24h 过期前仍能用。</td></tr>
+    <tr><td>3</td><td><strong><code>sameUser(null,null)=true</code></strong></td><td><code>router.ts:905-907</code></td><td>两个 userId 都为 null 时被视为同用户。匿名 daemon 与匿名 client 互通，存在跨用户广播的理论窗口。</td></tr>
+    <tr><td>4</td><td><strong>CORS <code>origin: true</code> 兜底</strong></td><td><code>server.ts:64</code></td><td><code>ALLOWED_ORIGINS</code> 未配置时允许所有来源跨域。WS 不受 CORS 限制，但 REST 端点会被任意网站脚本调用。</td></tr>
+    <tr><td>5</td><td><strong>API key 明文比较</strong></td><td><code>server.ts:1069</code></td><td>非常量时间比较；API key 匿名连接能力受限。低危。</td></tr>
+    <tr><td>6</td><td><strong>无 daemon 身份绑定校验</strong></td><td><code>router.ts:45</code></td><td>daemon_id 由客户端自报，relay 不校验其是否真属于该机器。拿到他人 token 即可用任意 daemon_id 注册并接收其 session 流。</td></tr>
+  </tbody>
+</table>
+<div class="card card-orange">
+  <strong>综合：</strong>外网链路上劫持需打破 TLS（很难），<strong>传输层劫持风险低</strong>。真正风险是<strong>令牌泄露后的身份冒充</strong>（#1 日志泄露 + #2 吊销失效 + #6 无设备绑定）。
+</div>
+
+<h2 id="leak">四、数据泄露风险</h2>
+
+<div class="card card-red">
+  <h3 style="margin-top:0">🔴 严重 — <code>replay</code> 历史回放无授权校验（IDOR / 越权读取）</h3>
+  <p><strong>位置：</strong><code>relay/src/router.ts:564</code> → <code>handleReplay</code>（717-762 行）</p>
+  <p><code>handleReplay</code> 内部<strong>没有任何 <code>isSessionOwnedByUser</code> / <code>sameUser</code> 校验</strong>，直接 <code>getEventsAfter(sessionId)</code> 把该 session 的<strong>全部事件 payload</strong> 发给请求方。含完整对话：<code>user_text</code>、<code>agent_text</code>、<code>tool_call.input</code>（常含代码/命令）、<code>tool_result.output</code>（命令执行结果）。</p>
+  <ul>
+    <li><strong>利用前提：</strong>攻击者是<strong>已认证用户</strong>（任意账号），知道目标 session_id。</li>
+    <li><strong>session_id 是 UUID v4</strong>（<code>manager.go:726</code>），盲猜不可行；但存在多条泄露途径（日志、URL 分享、其他越权接口枚举）。</li>
+    <li><strong>对比：</strong>REST <code>/api/sessions/:id/export</code>（<code>server.ts:490</code>）做了 <code>isSessionOwnedByUser</code> 校验，而 WS <code>replay</code> 没有——<strong>同一份数据，REST 把关、WS 放行</strong>，明显疏漏。</li>
+  </ul>
+</div>
+
+<div class="card card-red">
+  <h3 style="margin-top:0">🔴 严重 — 通用 client→daemon 路由无 session 属主校验</h3>
+  <p><strong>位置：</strong><code>router.ts:683-714</code></p>
+  <p>凡带 <code>msg.session_id</code> 且未被前面分支显式拦截的命令，都走这段通用路由：仅查 session 归属哪个 daemon，<strong>不校验该 session/daemon 是否属于当前 client</strong>。受影响的破坏性/注入性命令：</p>
+  <table>
+    <thead><tr><th>命令</th><th>daemon 端行为</th><th>危害</th></tr></thead>
+    <tbody>
+      <tr><td><code>user_message</code></td><td>注入内容到他人 PTY</td><td>向受害者会话注入任意 prompt，诱导执行恶意操作（"请把 .env 内容打印出来"）</td></tr>
+      <tr><td><code>session_kill</code></td><td><code>KillSession</code></td><td>远程杀掉他人正在运行的会话</td></tr>
+      <tr><td><code>session_interrupt</code></td><td><code>InterruptSession</code></td><td>中断他人进行中的任务</td></tr>
+      <tr><td><code>set_permission_mode</code></td><td><code>SetPermissionMode</code></td><td><strong>把他人会话切到 <code>bypassPermissions</code></strong>，令其 agent 无确认执行危险工具</td></tr>
+      <tr><td><code>set_effort</code></td><td>注入 <code>/effort</code></td><td>干扰他人会话</td></tr>
+    </tbody>
+  </table>
+  <p>唯一做了属主校验的只有 <code>session_delete</code>、<code>session_pin</code>、<code>daemon_restart</code>、<code>list_models</code>、<code>session_create</code>。<strong>根因：WS 命令面太宽，授权分散在各 case 手工补，通用分支成了兜底漏洞。</strong></p>
+</div>
+
+<div class="card card-orange">
+  <h3 style="margin-top:0">🟠 高 — <code>listSessions</code>（无 userId）返回全库会话</h3>
+  <p><strong>位置：</strong><code>db.ts:295</code> + <code>router.ts:769</code></p>
+  <p>当 client 的 <code>userId === null</code>（API key 登录，<code>server.ts:1069</code> 设 null）时，<code>handleListSessions</code> 走 <code>listSessions</code> 分支，SQL <strong>无 user_id 过滤</strong>，返回<strong>所有用户的所有会话标题、daemon_id、hostname、cwd</strong>。结合上面的 replay 越权，等于一条完整泄露链：用 API key 拿到全部 session_id → 逐个 replay 取全文。</p>
+</div>
+
+<div class="card card-orange">
+  <h3 style="margin-top:0">🟠 高 — <code>removeDevice</code> 不校验属主</h3>
+  <p><strong>位置：</strong><code>db.ts:607</code> + REST <code>DELETE /api/devices/:token</code>（<code>server.ts:306</code>）</p>
+  <pre><code>export async function removeDevice(pool, deviceToken) {
+  await pool.query(`DELETE FROM devices WHERE device_token = $1`, [deviceToken]);
+}</code></pre>
+  <p>任意已认证用户，知道他人的 <code>deviceToken</code> 即可删除其推送设备。危害是<strong>拒绝服务</strong>：受害者收不到离线/会话完成推送。</p>
+</div>
+
+<div class="card card-orange">
+  <h3 style="margin-top:0">🟡 中 — JWT 走 URL query 进服务端日志</h3>
+  <p><strong>位置：</strong><code>ws/client.go:188</code> + nginx <code>access_log</code>（<code>pocketctl.conf:42</code>）。WS token 在 <code>?token=</code> 中，nginx 默认记录完整 <code>$request_uri</code>。access log 泄露 = 泄露 24h 有效 token。REST 用 <code>Authorization</code> header（不走日志），WS 没有。</p>
+</div>
+
+<div class="card card-orange">
+  <h3 style="margin-top:0">🟡 中 — REST access token 不查吊销</h3>
+  <p><strong>位置：</strong><code>auth.ts:61</code> <code>verifyAccessToken</code>（无 revocation）vs <code>verifyAccessTokenWithRevocation</code>（80）。REST handlers 全部用前者，<strong>不查 jti 黑名单</strong>。forceKick 吊销的 token 在 24h 内仍可读用户数据。</p>
+</div>
+
+<h2 id="destroy">五、数据删除/破坏风险</h2>
+
+<div class="card card-red">
+  <h3 style="margin-top:0">🔴 严重 — <code>user_message</code> + <code>set_permission_mode</code> = 远程代码执行前置链</h3>
+  <p>这是<strong>最危险的破坏面</strong>：攻击者通过通用路由越权（见第四节）向他人生会话：</p>
+  <ol>
+    <li><code>set_permission_mode</code> → <code>bypassPermissions</code></li>
+    <li><code>user_message</code> → 注入 prompt 让 agent 执行 <code>rm -rf</code>、<code>git push --force</code>、读取并外传密钥等</li>
+  </ol>
+  <p>agent 在受害者机器上以<strong>用户完整权限</strong>运行（daemon 启动 agent 不做沙箱），<code>bypassPermissions</code> 下无确认。等同于通过 relay 远程操控他人电脑。这是把"数据删除"风险推到最高的一条路径。</p>
+</div>
+
+<div class="card card-green">
+  <h3 style="margin-top:0">🟢 安全 — <code>session_delete</code> 有属主校验</h3>
+  <p><strong>位置：</strong><code>router.ts:597</code>，有 <code>isSessionOwnedByUser</code> 校验 ✅。删会话前校验属主，失败返回 error。但注意它<strong>物理删除 events</strong>（真删，非软删），<strong>删后无法恢复</strong>。</p>
+</div>
+
+<div class="card card-green">
+  <h3 style="margin-top:0">🟢 安全 — <code>deleteDaemon</code> 有属主校验</h3>
+  <p><strong>位置：</strong><code>db.ts:218</code>，有 <code>user_id = $2</code> 属主校验 ✅。会把该 daemon 的 sessions 的 <code>daemon_id</code> 置 NULL（不删会话数据），属设计行为。</p>
+</div>
+
+<div class="card card-orange">
+  <h3 style="margin-top:0">🟡 中 — <code>cleanStaleSessions</code> 自动改状态</h3>
+  <p><strong>位置：</strong><code>db.ts:341</code>。daemon 离线 &gt;5 分钟，relay 自动把其 running/busy 会话改为 completed。不删数据，但会造成<strong>状态错乱</strong>（会话实际还在 agent 端运行，relay 侧已显示结束）。</p>
+</div>
+
+<div class="card card-orange">
+  <h3 style="margin-top:0">🟡 中 — <code>forceKick</code> 可吊销他人全部 token</h3>
+  <p><strong>位置：</strong><code>router.ts:882</code> <code>revokeToken(pool, '', userId, 'force_kick')</code>。若空 jti 会吊销该 userId 的<strong>全部</strong> token，被盗 token 的攻击者可对受害者发起"吊销全部会话"的 DoS。已有"每小时 3 次"限流缓解。</p>
+</div>
+
+<h2 id="loss">六、数据丢失风险评估 <span class="severity-badge sev-mid">⚠️ 中风险</span></h2>
+
+<h3>已有的防护（强项）</h3>
+<ol>
+  <li><strong>事件幂等去重。</strong><code>insertEvent</code>（<code>db.ts:252</code>）用 <code>event_hash</code> + <code>ON CONFLICT DO NOTHING</code>。</li>
+  <li><strong>会话路由重建。</strong>relay 重启后 <code>rebuildSessionRoutes</code> 从 DB 重建映射，历史会话不变孤儿。</li>
+  <li><strong>僵尸会话对账。</strong><code>reconcileDaemonSessions</code> 把僵死的 running/busy 行标 completed。</li>
+  <li><strong>优雅关停。</strong>SIGTERM 先 <code>broadcastRelayRestarting</code> 提示 daemon 重连。</li>
+  <li><strong>token 统计永久保留。</strong><code>deleteSession</code> 先把当日用量补偿进 <code>token_daily_stats</code> 再删事件。</li>
+</ol>
+
+<h3>丢失风险点（中危）</h3>
+<table>
+  <thead><tr><th>#</th><th>场景</th><th>代码证据</th><th>影响</th></tr></thead>
+  <tbody>
+    <tr><td>1</td><td><strong>relay 写库 fire-and-forget</strong></td><td><code>router.ts:434,448,462,469,522</code> 全是 <code>db.insertEvent(...).catch(console.error)</code></td><td><strong>不 await</strong>。消息一收到就转发给 client，DB 写入异步且<strong>失败只打日志</strong>。DB 瞬时不可用时事件静默丢失，client 已显示但刷新后（走 replay）就没了。</td></tr>
+    <tr><td>2</td><td><strong>daemon 端无磁盘持久化</strong></td><td><code>main.go:773</code> <code>outputCh := make(chan protocol.DaemonEvent, 256)</code>；<code>OnReconnected</code> 只重发元数据（<code>main.go:875-884</code>），<strong>不重发断网期间事件流</strong></td><td>relay 断开期间 daemon 产生的消息事件<strong>不补传</strong>。256 缓冲满后 tailer 协程阻塞，但 daemon 进程崩溃 = 缓冲全丢。</td></tr>
+    <tr><td>3</td><td><strong>WS 写失败不缓存</strong></td><td><code>ws/client.go:363</code> <code>WriteMessage</code> 失败只 <code>conn.Close()</code> 触发重连</td><td>写失败的这批事件不会回灌队列重试。</td></tr>
+    <tr><td>4</td><td><strong>事件 90 天硬删除</strong></td><td><code>server.ts:1128</code> <code>cleanStaleEvents</code> 每小时跑 <code>DELETE FROM events WHERE created_at &lt; NOW()-90 days</code></td><td>历史 session 的<strong>对话正文 90 天后永久消失</strong>（token 统计保留，但 messages/replay 取不到）。</td></tr>
+    <tr><td>5</td><td><strong>无 WAL/备份配置可见</strong></td><td><code>docker-compose.prod.yml</code> 仅 <code>pgdata</code> 卷，无 <code>archive_mode</code>/PITR/定时备份</td><td>单卷 + <code>restart:always</code>，宿主机磁盘故障或卷误删 = 全量丢失。</td></tr>
+  </tbody>
+</table>
+<div class="card card-orange">
+  <strong>关键结论：</strong>在 <strong>relay↔DB 瞬时故障</strong>（#1）和 <strong>daemon↔relay 长断网</strong>（#2）两个场景下，存在<strong>静默丢消息</strong>的真实窗口。其中 #1（fire-and-forget 写库）是最隐蔽的——日志里看不到失败、客户端却丢数据。
+</div>
+
+<h2 id="matrix">七、风险矩阵总览</h2>
+<table>
+  <thead><tr><th>风险</th><th>等级</th><th>类型</th><th>根因</th><th>位置</th></tr></thead>
+  <tbody>
+    <tr><td>replay 越权读全对话</td><td><span class="tag tag-red">🔴 严重</span></td><td>数据泄露</td><td>WS handleReplay 无 owner 校验</td><td><code>router.ts:564,717</code></td></tr>
+    <tr><td>通用路由越权注入/控制他人会话</td><td><span class="tag tag-red">🔴 严重</span></td><td>泄露+破坏+RCE前置</td><td>通用分支无校验</td><td><code>router.ts:683-714</code></td></tr>
+    <tr><td>set_permission_mode 越权切 bypass</td><td><span class="tag tag-red">🔴 严重</span></td><td>RCE前置</td><td>同通用路由越权</td><td><code>router.ts:683</code> → <code>main.go:1564</code></td></tr>
+    <tr><td>user_message+permission RCE 链</td><td><span class="tag tag-red">🔴 严重</span></td><td>数据删除/破坏</td><td>同通用路由越权</td><td><code>main.go:1541,1564</code></td></tr>
+    <tr><td>listSessions 返回全库</td><td><span class="tag tag-orange">🟠 高</span></td><td>数据泄露</td><td>userId=null 时无过滤</td><td><code>db.ts:295</code> / <code>router.ts:769</code></td></tr>
+    <tr><td>removeDevice 无属主校验</td><td><span class="tag tag-orange">🟠 高</span></td><td>破坏/DoS</td><td>db 不过滤 user_id</td><td><code>db.ts:607</code></td></tr>
+    <tr><td>session 物理删除不可恢复</td><td><span class="tag tag-orange">🟠 高</span></td><td>数据丢失</td><td>deleteSession 真删+无备份</td><td><code>db.ts:472</code></td></tr>
+    <tr><td>JWT 进 URL 日志</td><td><span class="tag tag-blue">🟡 中</span></td><td>数据泄露</td><td>ws token 在 query string</td><td><code>ws/client.go:188</code></td></tr>
+    <tr><td>REST token 不查吊销</td><td><span class="tag tag-blue">🟡 中</span></td><td>数据泄露</td><td>verifyAccessToken 无黑名单</td><td><code>auth.ts:61</code></td></tr>
+    <tr><td>relay 写库 fire-and-forget</td><td><span class="tag tag-blue">🟡 中</span></td><td>数据丢失</td><td>insertEvent 不 await</td><td><code>router.ts:434</code> 等</td></tr>
+    <tr><td>daemon 无磁盘缓冲</td><td><span class="tag tag-blue">🟡 中</span></td><td>数据丢失</td><td>outputCh 仅内存 256</td><td><code>main.go:773</code></td></tr>
+    <tr><td>事件 90 天硬删</td><td><span class="tag tag-blue">🟡 中</span></td><td>数据丢失</td><td>cleanStaleEvents</td><td><code>db.ts:872</code></td></tr>
+    <tr><td>PG 无备份/单卷</td><td><span class="tag tag-blue">🟡 中</span></td><td>数据丢失</td><td>compose 无备份编排</td><td><code>docker-compose.prod.yml</code></td></tr>
+    <tr><td>daemon_id 无设备绑定</td><td><span class="tag tag-blue">🟡 中</span></td><td>身份冒充</td><td>registerDaemon 信任自报</td><td><code>router.ts:45</code></td></tr>
+    <tr><td>CORS origin:true 兜底</td><td><span class="tag tag-green">🟢 低</span></td><td>跨域滥用</td><td>ALLOWED_ORIGINS 默认空</td><td><code>server.ts:64</code></td></tr>
+  </tbody>
+</table>
+
+<h2 id="fix">八、修复优先级建议</h2>
+<div class="card card-red"><em>仅建议，未改动任何代码。</em></div>
+
+<h3>第一优先（堵越权 — 收益最高）</h3>
+<p>在 <code>handleClientMessage</code> 入口对<strong>所有</strong>带 <code>session_id</code> 的命令统一做 <code>isSessionOwnedByUser</code> 校验；<code>handleReplay</code> 开头加同样的 owner 检查；<code>removeDevice</code> 加 <code>user_id</code> 条件。这一类是"在 router 里加几行 sameUser/owned 判断"，收益最高。</p>
+
+<h3>第二优先（缩小泄露面）</h3>
+<p><code>listSessions</code> 的 null 分支要么删除（禁止匿名 list），要么仅返回摘要不返回 session_id/hostname/cwd。</p>
+
+<h3>第三优先（令牌安全）</h3>
+<p>WS token 改用 <code>Sec-WebSocket-Protocol</code> 子协议或鉴权首帧，移出 URL；REST 统一用 <code>verifyAccessTokenWithRevocation</code>。</p>
+
+<h3>第四优先（数据韧性）</h3>
+<p>编排层加定时 <code>pg_dump</code> + 异地存储；考虑 session 软删除（<code>deleted_at</code>）而非物理删，配合备份做可恢复。daemon 端可为 outputCh 增加本地磁盘 spool，重连后回放。</p>
+
+<h2 id="conclusion">九、总体结论</h2>
+<div class="summary-grid">
+  <div class="summary-item" style="border-left:4px solid var(--green)">
+    <h4>网络穿透</h4>
+    <span class="tag tag-green">🟢 低</span>
+    <p>纯出站中继模型，DB/Relay 不对外暴露，无反向打洞。</p>
+  </div>
+  <div class="summary-item" style="border-left:4px solid var(--green)">
+    <h4>连接劫持（传输层）</h4>
+    <span class="tag tag-green">🟢 低</span>
+    <p>生产强制 TLS1.2/1.3 + HSTS，证书校验未绕过，MITM 难度高。</p>
+  </div>
+  <div class="summary-item" style="border-left:4px solid var(--orange)">
+    <h4>身份冒充（令牌层）</h4>
+    <span class="tag tag-orange">🟡 中</span>
+    <p>JWT 走 URL、REST 不查吊销、daemon_id 无设备绑定。</p>
+  </div>
+  <div class="summary-item" style="border-left:4px solid var(--red)">
+    <h4>数据泄露（越权层）</h4>
+    <span class="tag tag-red">🔴 严重</span>
+    <p>WS replay 与通用命令路由缺属主校验，注册账号即可越权读全对话、控制他人会话。</p>
+  </div>
+  <div class="summary-item" style="border-left:4px solid var(--red)">
+    <h4>数据删除/破坏</h4>
+    <span class="tag tag-red">🔴 严重</span>
+    <p>越权 user_message + set_permission_mode 构成 RCE 前置链，可远程操控受害者机器。</p>
+  </div>
+  <div class="summary-item" style="border-left:4px solid var(--orange)">
+    <h4>数据丢失</h4>
+    <span class="tag tag-orange">🟡 中</span>
+    <p>fire-and-forget 写库 + daemon 无磁盘缓冲 + 90 天硬删 + 无备份，断网/崩溃下静默丢消息。</p>
+  </div>
+</div>
+
+<div class="card card-red">
+  <strong>最关键结论：</strong>当前代码在 <strong>WS 命令面的授权是不完整的</strong>——REST 接口普遍有属主校验，但 WS 的 replay 和通用 client→daemon 路由存在系统性缺口。一个注册账号（甚至 API key 匿名连接）即可越权读取他人完整对话、向他人会话注入内容、切换权限模式，这是比"传输劫持"更现实的攻击路径，建议优先处理。
+</div>
+
+<hr style="border:none;border-top:1px solid var(--border);margin:40px 0 20px">
+<p class="meta">报告基于纯静态代码分析，未做运行时验证。分析日期 2026-06-29。</p>
+
+</body>
+</html>
