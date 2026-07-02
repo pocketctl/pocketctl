@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 )
 
 // authFile holds the persisted authentication data.
@@ -49,7 +50,7 @@ func ApprovalSocketPath() string {
 	if err != nil {
 		return ""
 	}
-	return filepath.Join(home, ".pocketctl", "approval.sock")
+	return approvalSocketPathFor(runtime.GOOS, home)
 }
 
 // ControlSocketPath 返回 daemon 本地控制 socket 路径（~/.pocketctl/control.sock）。
@@ -61,7 +62,26 @@ func ControlSocketPath() string {
 	if err != nil {
 		return ""
 	}
+	return controlSocketPathFor(runtime.GOOS, home)
+}
+
+// controlSocketPathFor 是 ControlSocketPath 的纯函数核心（可注入 GOOS，便于单测）。
+// Windows 必须用 \\.\pipe\ 前缀的 named pipe 名（winio.CreateNamedPipe 要求），
+// 否则 listen/dial 失败（这是 keep-awake 与 approval 在 Windows 报
+// "Incorrect function" 的根因）。Unix 保持 ~/.pocketctl/control.sock 文件路径。
+func controlSocketPathFor(goos, home string) string {
+	if goos == "windows" {
+		return `\\.\pipe\pocketctl-control`
+	}
 	return filepath.Join(home, ".pocketctl", "control.sock")
+}
+
+// approvalSocketPathFor 是 ApprovalSocketPath 的纯函数核心（同上理由加平台分支）。
+func approvalSocketPathFor(goos, home string) string {
+	if goos == "windows" {
+		return `\\.\pipe\pocketctl-approval`
+	}
+	return filepath.Join(home, ".pocketctl", "approval.sock")
 }
 
 // SaveAuth persists relay URL and tokens to disk, preserving prod_relay_url if present.
