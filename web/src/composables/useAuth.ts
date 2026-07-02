@@ -19,6 +19,17 @@ if (savedUser && accessToken.value) {
 }
 
 async function apiRequest(path: string, body: any, auth?: boolean): Promise<{ ok: boolean; data: any }> {
+  let result = await fetchOnce(path, body, auth)
+  // 携带 access token 的请求遇 401（token 过期/吊销）：刷新后用新 token 重试一次。
+  // refresh 请求自身不带 auth，不会进入此分支，因此不会递归。
+  if (auth && result.status === 401) {
+    const refreshed = await doRefreshToken()
+    if (refreshed) result = await fetchOnce(path, body, auth)
+  }
+  return { ok: result.ok, data: result.data }
+}
+
+async function fetchOnce(path: string, body: any, auth?: boolean): Promise<{ ok: boolean; status: number; data: any }> {
   const origin = getRelayOrigin()
   const url = origin ? `${origin}${path}` : path
   const headers: Record<string, string> = { 'Content-Type': 'application/json' }
@@ -32,9 +43,9 @@ async function apiRequest(path: string, body: any, auth?: boolean): Promise<{ ok
       body: JSON.stringify(body),
     })
     const data = await res.json()
-    return { ok: res.ok, data }
+    return { ok: res.ok, status: res.status, data }
   } catch (e) {
-    return { ok: false, data: { error: '网络请求失败' } }
+    return { ok: false, status: 0, data: { error: '网络请求失败' } }
   }
 }
 
@@ -150,6 +161,28 @@ async function login(email: string, password: string): Promise<string | null> {
 }
 
 // --- Token Management ---
+
+/**
+ * 判断 access token 是否已过期/无效。解码 JWT payload 段读 exp（秒），
+ * 与传入时钟比较；exp 不足 skewSec 缓冲也视为过期，以便提前刷新。
+ * 纯函数 + 可注入时钟（参考 rate-limit.ts 风格），便于单测。
+ * 任何解码失败 / 无 exp / 空串 → 保守返回 true，触发刷新而非带过期 token 请求。
+ */
+export function isTokenExpired(token: string, skewSec = 30, nowSec = Math.floor(Date.now() / 1000)): boolean {
+  if (!token) return true
+  const parts = token.split('.')
+  if (parts.length < 2) return true
+  try {
+    // payload 段是 base64url：转标准 base64 并补齐 padding 再 atob
+    let b64 = parts[1].replace(/-/g, '+').replace(/_/g, '/')
+    while (b64.length % 4) b64 += '='
+    const payload = JSON.parse(atob(b64))
+    if (typeof payload.exp !== 'number') return true
+    return payload.exp - skewSec <= nowSec
+  } catch {
+    return true
+  }
+}
 
 function saveTokens(data: any) {
   accessToken.value = data.access_token

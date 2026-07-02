@@ -1,5 +1,6 @@
 import { ref } from 'vue'
 import { getRelayWs } from './useEnv'
+import { isTokenExpired, useAuth } from './useAuth'
 
 export interface DaemonEvent {
   type: string
@@ -57,6 +58,12 @@ let reconnectTimer: ReturnType<typeof setTimeout> | null = null
 let reconnectAttempt = 0
 let currentUrl = ''
 let pendingMessages: any[] = []
+// 连接流程进行中标志（含 connect 前的 token 刷新）。send 在此期间把消息 buffer 到
+// pendingMessages，等 onopen flush——否则 DashboardView 的 `connect(); send()` 在 async
+// 刷新窗口内 ws.value 尚未就绪，list_sessions/list_daemons 请求会丢失。
+let connecting = false
+
+const { doRefreshToken, logout } = useAuth()
 
 // Daemon online tracking
 const daemons = ref<Map<string, DaemonInfo>>(new Map())
@@ -69,46 +76,66 @@ function getRelayWsUrl(): string {
   return `${base}${sep}token=${encodeURIComponent(token)}&type=client`
 }
 
-function connect(url?: string) {
-  if (ws.value && ws.value.readyState === WebSocket.OPEN) return
-  currentUrl = url || getRelayWsUrl()
-  reconnecting.value = true
-  ws.value = new WebSocket(currentUrl)
+/** 连接前确保 access token 未过期；过期则刷新（成功后 localStorage 已写入新 token）。 */
+async function ensureFreshToken(): Promise<boolean> {
+  const token = localStorage.getItem('pocketctl_access_token')
+  if (!token) return true                  // 未登录：交给上层处理，不阻塞连接
+  if (!isTokenExpired(token)) return true  // 仍有效
+  return await doRefreshToken()
+}
 
-  ws.value.onopen = () => {
-    connected.value = true; reconnecting.value = false; reconnectAttempt = 0
-    // Report current locale to relay for language-aware title generation
-    const locale = localStorage.getItem('pocketctl-locale') || 'zh'
-    send({ type: 'set_locale', locale })
-    // Flush pending messages
-    if (pendingMessages.length > 0) {
-      const msgs = pendingMessages; pendingMessages = []
-      msgs.forEach(m => send(m))
+async function connect(url?: string) {
+  if (ws.value && ws.value.readyState === WebSocket.OPEN) return
+  connecting = true
+  reconnecting.value = true
+  try {
+    await ensureFreshToken()
+    currentUrl = url || getRelayWsUrl()
+    ws.value = new WebSocket(currentUrl)
+
+    ws.value.onopen = () => {
+      connected.value = true; reconnecting.value = false; connecting = false; reconnectAttempt = 0
+      // Report current locale to relay for language-aware title generation
+      const locale = localStorage.getItem('pocketctl-locale') || 'zh'
+      send({ type: 'set_locale', locale })
+      // Flush pending messages
+      if (pendingMessages.length > 0) {
+        const msgs = pendingMessages; pendingMessages = []
+        msgs.forEach(m => send(m))
+      }
     }
-  }
-  ws.value.onmessage = (event) => {
-    try {
-      const data = JSON.parse(event.data)
-      // Handle daemon_status and daemon_list internally to track online state
-      if (data.type === 'daemon_status') {
-        handleDaemonStatus(data)
-      }
-      if (data.type === 'daemon_list' && data.daemons) {
-        for (const d of data.daemons) {
-          daemons.value.set(d.daemon_id, {
-            daemon_id: d.daemon_id,
-            hostname: d.hostname || d.daemon_alias || 'unknown',
-            agents: d.agents || [],
-            online: d.daemon_online || d.status === 'online',
-            last_seen_at: d.last_seen_at,
-          })
+    ws.value.onmessage = (event) => {
+      try {
+        const data = JSON.parse(event.data)
+        // Handle daemon_status and daemon_list internally to track online state
+        if (data.type === 'daemon_status') {
+          handleDaemonStatus(data)
         }
-      }
-      handlers.forEach(h => h(data))
-    } catch {}
+        if (data.type === 'daemon_list' && data.daemons) {
+          for (const d of data.daemons) {
+            daemons.value.set(d.daemon_id, {
+              daemon_id: d.daemon_id,
+              hostname: d.hostname || d.daemon_alias || 'unknown',
+              agents: d.agents || [],
+              online: d.daemon_online || d.status === 'online',
+              last_seen_at: d.last_seen_at,
+            })
+          }
+        }
+        handlers.forEach(h => h(data))
+      } catch {}
+    }
+    ws.value.onclose = (ev: CloseEvent) => {
+      connected.value = false; connecting = false; reconnecting.value = true
+      // 4001 = relay 拒绝 token（过期/吊销）：刷新后用新 token 重连，而非无脑重试
+      // 撞同一个失效 token（那会触发 relay 端按 IP 递增封禁）。
+      if (ev?.code === 4001) handleAuthRejected()
+      else scheduleReconnect()
+    }
+    ws.value.onerror = () => { ws.value?.close() }
+  } catch {
+    connecting = false
   }
-  ws.value.onclose = () => { connected.value = false; reconnecting.value = true; scheduleReconnect() }
-  ws.value.onerror = () => { ws.value?.close() }
 }
 
 function handleDaemonStatus(data: any) {
@@ -152,14 +179,26 @@ function scheduleReconnect() {
   reconnectTimer = setTimeout(() => { reconnectTimer = null; connect(currentUrl) }, delay)
 }
 
+/** relay 以 4001(invalid token) 关闭后的恢复：刷新 token，成功则用新 token 立即重连
+ * （重置退避），失败则登出——避免持有永久失效的 refresh token 反复重试。 */
+async function handleAuthRejected(): Promise<void> {
+  const ok = await doRefreshToken()
+  if (ok) {
+    reconnectAttempt = 0
+    connect() // localStorage 已是新 token；ensureFreshToken 见有效不再刷新
+  } else {
+    logout() // refresh 失败，清空登录态，等待用户重新登录
+  }
+}
+
 function send(data: any): boolean {
   try {
     if (ws.value && ws.value.readyState === WebSocket.OPEN) {
       ws.value.send(JSON.stringify(data))
       return true
     }
-    if (ws.value && ws.value.readyState === WebSocket.CONNECTING) {
-      // Buffer until connected
+    // 连接流程进行中（含 connect 前的 token 刷新）或正在握手：buffer 到 onopen flush
+    if (connecting || (ws.value && ws.value.readyState === WebSocket.CONNECTING)) {
       pendingMessages.push(data)
       return true
     }
