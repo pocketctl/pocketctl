@@ -150,3 +150,85 @@ git commit -m "feat(platform): Windows InstanceLocker 真实实现(Mutex) (PR4/7
 ## Task 2-7: 待逐 task 展开
 
 Task 2(Daemonizer DETACHED) / Task 3(IPCListener named pipe + go-winio) / Task 4(ProcessController IsAlive/Kill) / Task 5(控制通道) / Task 6(ServiceManager SCM) / Task 7(集成验证)。执行到时写完整 Windows 代码。
+
+---
+
+## Task 2: Daemonizer（CREATE_NO_WINDOW|DETACHED_PROCESS）
+
+**Files:** Modify `internal/platform/platform_windows.go`（windowsDaemonizer.ForkDetached/Restart 真实实现）
+
+**设计：** `exec.Cmd.SysProcAttr.CreationFlags = windows.CREATE_NO_WINDOW | windows.DETACHED_PROCESS`。无控制台窗口、脱离父进程控制台（等价 Unix Setsid）。CreationFlags 是标准库 `syscall.SysProcAttr` 的字段（uint32），常量来自 `x/sys/windows`。
+
+- [ ] **Step 1: 改 platform_windows.go windowsDaemonizer**
+
+当前（PR1 stub）：
+```go
+func NewDaemonizer() Daemonizer { return windowsDaemonizer{} }
+
+type windowsDaemonizer struct{}
+
+func (windowsDaemonizer) ForkDetached(string, []string, []string) (*os.Process, error) {
+	return nil, ErrUnsupported
+}
+func (windowsDaemonizer) Restart(string, []string) error { return ErrUnsupported }
+```
+
+改为：
+```go
+// NewDaemonizer 返回 Windows daemonizer。
+// PR4: CREATE_NO_WINDOW|DETACHED_PROCESS 创建无窗口、脱离父控制台的子进程(等价 Unix Setsid)。
+func NewDaemonizer() Daemonizer { return windowsDaemonizer{} }
+
+type windowsDaemonizer struct{}
+
+func (windowsDaemonizer) ForkDetached(self string, args []string, env []string) (*os.Process, error) {
+	cmd := &exec.Cmd{
+		Path: self,
+		Args: append([]string{self}, args...),
+		Env:  env,
+		SysProcAttr: &syscall.SysProcAttr{
+			CreationFlags: windows.CREATE_NO_WINDOW | windows.DETACHED_PROCESS,
+		},
+	}
+	if err := cmd.Start(); err != nil {
+		return nil, fmt.Errorf("fork detached: %w", err)
+	}
+	return cmd.Process, nil
+}
+
+func (windowsDaemonizer) Restart(self string, args []string) error {
+	cmd := exec.Command(self, args...)
+	cmd.SysProcAttr = &syscall.SysProcAttr{
+		CreationFlags: windows.CREATE_NO_WINDOW | windows.DETACHED_PROCESS,
+	}
+	if err := cmd.Start(); err != nil {
+		return fmt.Errorf("restart spawn: %w", err)
+	}
+	return nil
+}
+```
+
+platform_windows.go import 加 `"syscall"`（已有 fmt/net/os/os/exec/windows）。
+
+- [ ] **Step 2: 三平台编译验证**
+
+Run: `GOOS=darwin go build ./... && GOOS=linux go build ./... && GOOS=windows go build ./...`
+Expected: 三平台全过。Windows Daemonizer 现用 CreationFlags。
+
+- [ ] **Step 3: Unix 零回归**
+
+Run: `go build ./... && go vet ./... && go test ./...`（macOS）— 全绿。
+
+- [ ] **Step 4: Commit**
+```bash
+git add internal/platform/platform_windows.go
+git commit -m "feat(platform): Windows Daemonizer 真实实现(DETACHED_PROCESS) (PR4/7)"
+```
+
+> review 重点: CreationFlags 是 syscall.SysProcAttr 字段(uint32)、常量 CREATE_NO_WINDOW(0x08000000)|DETACHED_PROCESS(0x00000008) 来自 x/sys/windows、ForkDetached 返回 cmd.Process、Restart 不返回 pid(同 Unix)。运行验证留 PR5。
+
+---
+
+## Task 3-7: 待逐 task 展开
+
+Task 3(IPCListener named pipe + go-winio) / Task 4(ProcessController IsAlive/Kill) / Task 5(控制通道) / Task 6(ServiceManager SCM) / Task 7(集成验证)。
