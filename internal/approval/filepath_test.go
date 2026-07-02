@@ -45,8 +45,9 @@ func TestNormalizePath(t *testing.T) {
 
 	// Absolute path stays absolute (cleaned).
 	got = normalizePath("/repo", "/abs/file.go")
-	if got != "/abs/file.go" {
-		t.Errorf("normalizePath absolute: got %q, want /abs/file.go", got)
+	want = filepath.Clean("/abs/file.go")
+	if got != want {
+		t.Errorf("normalizePath absolute: got %q, want %q", got, want)
 	}
 
 	// Empty cwd: relative path becomes absolute against process cwd, so just

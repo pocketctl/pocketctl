@@ -71,8 +71,11 @@ func TestRotatingLogWriterRotatesOnDateChange(t *testing.T) {
 
 func TestLatestLogPath(t *testing.T) {
 	dir := t.TempDir()
-	// Override LogDir via HOME so LatestLogPath looks in our temp tree.
+	// Override LogDir via HOME/USERPROFILE so LatestLogPath looks in our
+	// temp tree. On Windows, os.UserHomeDir() reads USERPROFILE first;
+	// on Unix it reads HOME.
 	t.Setenv("HOME", dir)
+	t.Setenv("USERPROFILE", dir)
 	logs := filepath.Join(dir, ".pocketctl", "logs")
 	if err := os.MkdirAll(logs, 0755); err != nil {
 		t.Fatal(err)

@@ -4,13 +4,33 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
-	"net"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/pocketctl/pocketctl/internal/platform"
 )
+
+// testIPCPath returns a cross-platform IPC path for test approval servers.
+// On Unix it creates a temp dir and returns a socket path inside it (keeps
+// the path short for macOS's ~104 char sun_path limit and avoids the
+// pocketctl/ subdirectory which production Listen doesn't auto-create).
+// On Windows it uses a named pipe name.
+func testIPCPath(t *testing.T) string {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		return platform.NewIPCListener().DefaultPath(fmt.Sprintf("approval-test-%d", os.Getpid()))
+	}
+	d, err := os.MkdirTemp("", "pcat")
+	if err != nil {
+		t.Fatalf("mkdtemp: %v", err)
+	}
+	t.Cleanup(func() { os.RemoveAll(d) })
+	return filepath.Join(d, fmt.Sprintf("approval-test-%d.sock", os.Getpid()))
+}
 
 // TestEnsureAndRemoveHooks verifies the daemon injects a tagged PreToolUse hook
 // into settings.local.json and strips only its own entry on cleanup, leaving a
@@ -112,7 +132,7 @@ func TestEnsureAndRemoveHooks(t *testing.T) {
 // TestServerResolveRoundTrip verifies the core broker path: a request blocks,
 // Resolve unblocks it with the client's decision, and unknown ids error.
 func TestServerResolveRoundTrip(t *testing.T) {
-	srv := NewServer("/tmp/nonexistent-approval-test.sock", nil)
+	srv := NewServer(testIPCPath(t), nil)
 
 	received := make(chan Request, 1)
 	srv.SetOnRequest(func(req Request) { received <- req })
@@ -146,7 +166,7 @@ func TestServerResolveRoundTrip(t *testing.T) {
 // TestServerDrainSession verifies DrainSession denies all pending requests for
 // a session so their hook processes exit.
 func TestServerDrainSession(t *testing.T) {
-	srv := NewServer("/tmp/nonexistent-approval-test.sock", nil)
+	srv := NewServer(testIPCPath(t), nil)
 	srv.SetOnRequest(func(Request) {})
 
 	ch1 := make(chan Response, 1)
@@ -181,9 +201,8 @@ func TestServerDrainSession(t *testing.T) {
 // drop the pending entry and fire OnCancel with the local decision instead of
 // blocking on an App response that will never come.
 func TestServerLocalResolveCancels(t *testing.T) {
-	// Keep the socket path short: macOS caps sun_path at ~104 bytes, and the
-	// t.TempDir() path under /var/folders blows past that.
-	sock := fmt.Sprintf("/tmp/pctl-approval-test-%d.sock", os.Getpid())
+	// Use platform-specific IPC path (Unix socket on Unix, named pipe on Windows).
+	sock := testIPCPath(t)
 	defer os.Remove(sock)
 	srv := NewServer(sock, nil)
 
@@ -204,10 +223,7 @@ func TestServerLocalResolveCancels(t *testing.T) {
 	}
 	defer srv.Close()
 
-	conn, err := net.Dial("unix", sock)
-	if err != nil {
-		t.Fatalf("dial: %v", err)
-	}
+	conn := dialIPC(t, sock)
 	defer conn.Close()
 
 	// Send the request line, as the hook does.

@@ -1,17 +1,19 @@
 package discovery
 
 import (
+	"path/filepath"
 	"reflect"
 	"testing"
 )
 
 func TestCandidatePaths_UserLocalFirstAndDedup(t *testing.T) {
-	got := candidatePaths("claude", "/home/u", "/usr/bin:/home/u/.local/bin", "")
+	home := "/home/u"
+	got := candidatePaths("claude", home, "/usr/bin:"+filepath.Join(home, ".local", "bin"), "")
 	want := []string{
-		"/home/u/.local/bin/claude", // well-known 用户本地
-		"/home/u/.claude/local/claude",
-		"/home/u/.opencode/bin/claude",
-		"/usr/bin/claude", // 来自 PATH
+		filepath.Join(home, ".local", "bin", "claude"), // well-known 用户本地
+		filepath.Join(home, ".claude", "local", "claude"),
+		filepath.Join(home, ".opencode", "bin", "claude"),
+		filepath.Join("/usr", "bin", "claude"), // 来自 PATH
 		// PATH 里的 /home/u/.local/bin/claude 被去重(已在首位)
 	}
 	if !reflect.DeepEqual(got, want) {
@@ -20,14 +22,15 @@ func TestCandidatePaths_UserLocalFirstAndDedup(t *testing.T) {
 }
 
 func TestCandidatePaths_NpmPrefixIncluded(t *testing.T) {
-	got := candidatePaths("codex", "/home/u", "/usr/bin", "/home/u/.npm-global")
+	home := "/home/u"
+	got := candidatePaths("codex", home, "/usr/bin", filepath.Join(home, ".npm-global"))
 	// npm 用户 prefix 的 bin 应排在 PATH 之前
 	want := []string{
-		"/home/u/.local/bin/codex",
-		"/home/u/.claude/local/codex",
-		"/home/u/.opencode/bin/codex",
-		"/home/u/.npm-global/bin/codex",
-		"/usr/bin/codex",
+		filepath.Join(home, ".local", "bin", "codex"),
+		filepath.Join(home, ".claude", "local", "codex"),
+		filepath.Join(home, ".opencode", "bin", "codex"),
+		filepath.Join(home, ".npm-global", "bin", "codex"),
+		filepath.Join("/usr", "bin", "codex"),
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("candidatePaths = %v, want %v", got, want)
