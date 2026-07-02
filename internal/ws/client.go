@@ -2,7 +2,12 @@ package ws
 
 import (
 	"context"
+	"crypto/sha256"
+	"crypto/tls"
+	"crypto/x509"
+	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	mathrand "math/rand/v2"
@@ -48,6 +53,28 @@ const (
 	// At the cap the producer blocks (back-pressure) rather than dropping events.
 	defaultMaxOutCount = 10000
 	defaultMaxOutBytes = 64 << 20 // 64 MiB
+	// registerAckWait is how long connectAndServe waits for register_ack before
+	// replaying anyway. The relay normally replies within milliseconds; the
+	// timeout covers legacy relays that never send register_ack (so replay
+	// still proceeds, just without the readiness guarantee) and pathological
+	// slow-DB edge cases.
+	registerAckWait = 5 * time.Second
+	// replayBatchSize / replayBatchGap pace the replay burst so a large unacked
+	// buffer (e.g. accumulated during a long outage) doesn't overwhelm the relay
+	// in a single sub-millisecond write storm that tears down the connection.
+	replayBatchSize = 50
+	replayBatchGap  = 50 * time.Millisecond
+	// spoolRestoreMaxCount / spoolRestoreMaxBytes cap how many events InitSpool
+	// restores from a prior crash's spool. A reconnect storm (relay down for a
+	// while, or a feedback loop) can leave the spool holding hundreds of events
+	// from already-finished sessions; replaying all of them on the next start
+	// re-triggers the storm. The oldest events beyond the cap are dropped — they
+	// are already persisted in the relay's event history, so this trades a
+	// redundant re-delivery for connection stability. The cap is generous
+	// relative to replayBatchSize so a single normal outage's worth replays in a
+	// few paced batches.
+	spoolRestoreMaxCount = 200
+	spoolRestoreMaxBytes = 4 << 20 // 4 MiB
 )
 
 // bufferedEvent is a sent-but-unacked daemon event held for replay on reconnect.
@@ -70,6 +97,11 @@ type Client struct {
 	relayURL        string
 	token           string
 	tokenMu         sync.Mutex // protects token (refreshable at runtime via UpdateToken)
+	// relayPin is the base64-encoded SHA-256 of the relay's leaf certificate
+	// SPKI (SubjectPublicKeyInfo). When set, the dialer pins the TLS peer to
+	// this key, defeating MITM even if a trusted CA is compromised. Empty =
+	// standard system-CA validation only (backwards compatible).
+	relayPin string
 	conn            *websocket.Conn
 	connMu          sync.Mutex
 	writeMu         sync.Mutex // protects WriteMessage on conn
@@ -147,8 +179,15 @@ type Client struct {
 	draining     bool  // ctx cancelled — stop blocking producers
 	ackKnown     bool  // register_ack processed on the current connection
 	ackSupported bool  // relay advertised supports_event_ack (else legacy trim-on-write)
-	maxOutCount  int
-	maxOutBytes  int
+	// registerAckCh signals that register_ack arrived on the current connection.
+	// connectAndServe waits on it before replaying the unacked buffer so the
+	// relay has finished its async registerDaemon DB work (upsert/bind/routes)
+	// and initialised the per-daemon seq cursor — otherwise a burst of replayed
+	// events arrives before the relay is ready and the connection is torn down.
+	// Recreated per connectAndServe call; closed by readPump via done.
+	registerAckCh chan struct{}
+	maxOutCount   int
+	maxOutBytes   int
 	// spool durably mirrors outBuf to disk so a daemon process crash doesn't lose
 	// unacked events. nil when spooling is disabled (in-memory-only fallback).
 	spool *spool
@@ -198,10 +237,25 @@ func (c *Client) InitSpool(path string) error {
 	}
 	c.spool = s
 	if len(restored) > 0 {
-		c.outBuf = restored
+		// Cap the restored set: a reconnect storm can leave the spool holding
+		// hundreds of stale events from finished sessions. Dropping the oldest
+		// ones beyond the count/byte caps prevents the next start from re-arming
+		// the same storm. These events are already in the relay's persisted
+		// history, so we only lose a redundant re-delivery.
+		trimmed := capRestoredSpool(restored)
+		if len(trimmed) < len(restored) {
+			c.logger.Warn("trimmed stale spool events on restore",
+				"original", len(restored), "kept", len(trimmed),
+				"dropped", len(restored)-len(trimmed),
+				"from_seq", trimmed[0].seq)
+			// Persist the trim so the file matches memory (a crash right after
+			// start would otherwise re-load the full set again).
+			s.rewrite(trimmed)
+		}
+		c.outBuf = trimmed
 		var bytesN int
 		var maxSeq int64
-		for _, be := range restored {
+		for _, be := range trimmed {
 			bytesN += len(be.data)
 			if be.seq > maxSeq {
 				maxSeq = be.seq
@@ -212,10 +266,38 @@ func (c *Client) InitSpool(path string) error {
 		// Everything below the lowest restored seq was already acked/trimmed before
 		// the crash; tell the relay so its fresh persisted mark starts there (no
 		// phantom gap before the replayed tail).
-		c.ackedSeq = restored[0].seq - 1
-		c.logger.Info("restored spooled events", "count", len(restored), "from_seq", restored[0].seq, "to_seq", maxSeq)
+		c.ackedSeq = trimmed[0].seq - 1
+		c.logger.Info("restored spooled events", "count", len(trimmed), "from_seq", trimmed[0].seq, "to_seq", maxSeq)
 	}
 	return nil
+}
+
+// capRestoredSpool drops the oldest events from a restored spool until both the
+// count and byte caps are satisfied. Events arrive already in seq order (oldest
+// first) from loadSpool, so we keep the tail (newest) and drop the head. The
+// newest events are the ones most likely to be unacked-and-unpersisted (a
+// near-crash flush), while the oldest are from long-finished sessions already
+// durably stored in the relay.
+func capRestoredSpool(events []bufferedEvent) []bufferedEvent {
+	// First trim by count: keep the newest spoolRestoreMaxCount.
+	start := 0
+	if len(events) > spoolRestoreMaxCount {
+		start = len(events) - spoolRestoreMaxCount
+	}
+	kept := events[start:]
+	// Then trim by bytes: walk from the newest end accumulating until the cap
+	// is exceeded. cutFrom=0 means "keep everything"; otherwise it's the index
+	// from which onward we keep (so kept[cutFrom:] is the newest tail).
+	var totalBytes int
+	cutFrom := 0
+	for i := len(kept) - 1; i >= 0; i-- {
+		totalBytes += len(kept[i].data)
+		if totalBytes > spoolRestoreMaxBytes {
+			cutFrom = i + 1
+			break
+		}
+	}
+	return kept[cutFrom:]
 }
 
 // envInt reads a positive integer from env, falling back to def.
@@ -270,6 +352,83 @@ func (c *Client) SetStartedAt(t int64) { c.startedAt = t }
 
 // SetMetricsFn sets the function used to collect system metrics for ping messages.
 func (c *Client) SetMetricsFn(fn func() (float64, float64, float64)) { c.metricsFn = fn }
+
+// SetRelayPin sets the pinned relay certificate SPKI hash (base64-encoded
+// SHA-256). When non-empty, the TLS handshake only succeeds if a certificate
+// in the peer chain has a matching public key — defeating MITM by a rogue CA
+// or a TLS-terminating proxy. The value is typically loaded from the
+// POCKETCTL_RELAY_PIN env var by the daemon bootstrap.
+func (c *Client) SetRelayPin(pin string) { c.relayPin = pin }
+
+// dialer returns the websocket.Dialer for connecting to the relay. When a pin
+// is configured and the scheme is wss://, the dialer carries a TLS client config
+// that verifies the peer certificate chain AND pins a public key — so a MITM
+// with a valid-but-malicious cert (rogue CA, TLS-terminating proxy) is rejected.
+// For ws:// (plain) or when no pin is set, it falls back to DefaultDialer.
+func (c *Client) dialer() *websocket.Dialer {
+	if c.relayPin == "" || !strings.HasPrefix(c.relayURL, "wss://") {
+		return websocket.DefaultDialer
+	}
+	return &websocket.Dialer{
+		NetDialContext:    websocket.DefaultDialer.NetDialContext,
+		HandshakeTimeout:  websocket.DefaultDialer.HandshakeTimeout,
+		TLSClientConfig:   &tls.Config{VerifyPeerCertificate: c.verifyPinnedCert},
+		// Force the standard chain validation too: VerifyPeerCertificate runs
+		// AFTER the normal chain build, so we get both the system-CA check and
+		// our pin check. gorilla sets the intermediates/root from the handshake.
+	}
+}
+
+// verifyPinnedCert is the VerifyPeerCertificate callback. Go has already parsed
+// the peer's certificate chain (rawCerts) by this point but has NOT validated it
+// against roots when a custom VerifyPeerCertificate is set without
+// InsecureSkipVerify — so we do a manual chain + pin check here.
+func (c *Client) verifyPinnedCert(rawCerts [][]byte, _ [][]*x509.Certificate) error {
+	if len(rawCerts) == 0 {
+		return errors.New("relay presented no certificates")
+	}
+	// Build and verify the chain against system roots so a self-signed or
+	// expired cert is rejected regardless of the pin.
+	certs := make([]*x509.Certificate, 0, len(rawCerts))
+	for _, raw := range rawCerts {
+		cert, err := x509.ParseCertificate(raw)
+		if err != nil {
+			return fmt.Errorf("parse peer cert: %w", err)
+		}
+		certs = append(certs, cert)
+	}
+	roots, err := x509.SystemCertPool()
+	if err != nil {
+		roots = x509.NewCertPool()
+	}
+	if _, err := certs[0].Verify(x509.VerifyOptions{Roots: roots}); err != nil {
+		return fmt.Errorf("relay cert chain invalid: %w", err)
+	}
+	// Pin check: at least one cert in the chain must have a matching SPKI hash.
+	pinBytes, err := base64.StdEncoding.DecodeString(c.relayPin)
+	if err != nil {
+		return fmt.Errorf("invalid relay pin (expected base64): %w", err)
+	}
+	for _, cert := range certs {
+		spki := sha256.Sum256(cert.RawSubjectPublicKeyInfo)
+		if equalHash(spki[:], pinBytes) {
+			return nil // pin matched
+		}
+	}
+	return errors.New("relay cert does not match pinned key (possible MITM)")
+}
+
+// equalHash is a constant-time comparison to avoid timing side channels.
+func equalHash(a, b []byte) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	var v byte
+	for i := range a {
+		v |= a[i] ^ b[i]
+	}
+	return v == 0
+}
 
 // UpdateToken replaces the access token used for future connections. Called after
 // a successful token refresh so the next reconnect dials with the fresh token.
@@ -363,7 +522,8 @@ func (c *Client) connectAndServe(ctx context.Context) error {
 	hdr.Set("Authorization", "Bearer "+tok)
 
 	c.logger.Info("connecting to relay", "url", u.Host)
-	conn, _, err := websocket.DefaultDialer.DialContext(ctx, u.String(), hdr)
+	dialer := c.dialer()
+	conn, _, err := dialer.DialContext(ctx, u.String(), hdr)
 	if err != nil {
 		return fmt.Errorf("dial: %w", err)
 	}
@@ -377,6 +537,8 @@ func (c *Client) connectAndServe(ctx context.Context) error {
 	c.ackKnown = false
 	c.ackSupported = false
 	c.outMu.Unlock()
+	// Fresh per-connection ack signal (readPump closes/sends on register_ack).
+	c.registerAckCh = make(chan struct{}, 1)
 
 	// NOTE: do NOT reset reconnectAttempt here. A successful dial only means the
 	// relay accepted the WS upgrade — it may still close us with 4001 if the token
@@ -410,10 +572,25 @@ func (c *Client) connectAndServe(ctx context.Context) error {
 	go c.readPump(done)
 	go c.pingPump(ctx, done)
 
+	// Wait for register_ack before replaying. The relay's registerDaemon does
+	// async DB work (upsert/bind/rebuild routes) and only seeds its per-daemon
+	// seq cursor inside that handler; replaying before it completes means the
+	// relay receives events it can't yet route/persist, and a large burst can
+	// tear the connection down (the "close sent" reconnect storm). We wait up
+	// to registerAckWait so a legacy relay (no register_ack) still replays.
+	select {
+	case <-c.registerAckCh:
+		c.logger.Info("register_ack received, replaying unacked buffer")
+	case <-time.After(registerAckWait):
+		c.logger.Warn("register_ack timeout, replaying without readiness guarantee")
+	case <-done:
+		return fmt.Errorf("connection closed before register_ack")
+	}
+
 	// Replay any events the relay hasn't acked (lost mid-flight on the previous
 	// connection) before resuming live delivery, so no event is silently dropped
 	// across a reconnect. The relay dedups replayed events by (daemon_id, seq).
-	c.replayOutbound(conn)
+	c.replayOutbound(ctx, conn)
 
 	for {
 		select {
@@ -660,7 +837,13 @@ func (c *Client) writeBuffered(seq int64, data []byte) {
 // replayOutbound re-sends every unacked event, in seq order, on a freshly
 // (re)connected socket. Called after register so replayed events precede live
 // ones on the wire.
-func (c *Client) replayOutbound(conn *websocket.Conn) {
+// replayOutbound re-sends every unacked event to the relay in seq order. Events
+// are written in batches (replayBatchSize) with a short gap (replayBatchGap)
+// between batches so a large accumulated buffer — e.g. hundreds of events from a
+// long outage — doesn't hit the relay as a single sub-millisecond write storm
+// that overwhelms its WS layer and tears the connection down. The gap is also
+// cancellable via ctx so a shutdown doesn't wait on the full pacing.
+func (c *Client) replayOutbound(ctx context.Context, conn *websocket.Conn) {
 	c.outMu.Lock()
 	pending := make([]bufferedEvent, len(c.outBuf))
 	copy(pending, c.outBuf)
@@ -668,8 +851,8 @@ func (c *Client) replayOutbound(conn *websocket.Conn) {
 	if len(pending) == 0 {
 		return
 	}
-	c.logger.Info("replaying unacked events", "count", len(pending), "from_seq", pending[0].seq)
-	for _, be := range pending {
+	c.logger.Info("replaying unacked events", "count", len(pending), "from_seq", pending[0].seq, "batch", replayBatchSize)
+	for i, be := range pending {
 		c.writeMu.Lock()
 		_ = conn.SetWriteDeadline(time.Now().Add(c.writeWait))
 		err := conn.WriteMessage(websocket.TextMessage, be.data)
@@ -678,6 +861,16 @@ func (c *Client) replayOutbound(conn *websocket.Conn) {
 			c.logger.Error("replay write error", "error", err, "seq", be.seq)
 			conn.Close()
 			return
+		}
+		// Pace between batches: after every replayBatchSize-th write, pause so the
+		// relay can persist/route the burst before the next one arrives. Skip the
+		// pause on the very last event (nothing follows).
+		if (i+1)%replayBatchSize == 0 && i+1 < len(pending) {
+			select {
+			case <-time.After(replayBatchGap):
+			case <-ctx.Done():
+				return
+			}
 		}
 	}
 }
@@ -706,6 +899,14 @@ func (c *Client) trimOutbound(uptoSeq int64) {
 // (no support) gets best-effort delivery: the current buffer is trimmed and
 // subsequent events are trimmed on successful write.
 func (c *Client) onRegisterAck(supports bool) {
+	// Signal connectAndServe that the relay has confirmed registration and
+	// finished its registerDaemon bookkeeping — it may now safely replay the
+	// unacked buffer. Non-blocking: the channel is buffered(1) and recreated
+	// per connection, so this never blocks readPump.
+	select {
+	case c.registerAckCh <- struct{}{}:
+	default:
+	}
 	// The relay confirmed our registration — this connection is genuinely usable
 	// (token valid, routes rebuilt), so reset the backoff. Until this point the
 	// connection could still be torn down with 4001 on a bad token, which must

@@ -117,3 +117,72 @@ func TestInitSpoolRestoresBufferAndResumesSeq(t *testing.T) {
 		t.Fatalf("spool should hold restored+new = [5,6,7], got %+v", got)
 	}
 }
+
+// TestCapRestoredSpoolDropsOldest verifies that a spool holding more events
+// than the restore cap is trimmed to the newest tail (oldest dropped), and that
+// a small spool is returned unchanged. This guards against a reconnect storm
+// re-arming itself on the next start from a huge accumulated spool.
+func TestCapRestoredSpoolDropsOldest(t *testing.T) {
+	// Build 250 events (seq 1..250), exceeding spoolRestoreMaxCount (200).
+	var events []bufferedEvent
+	for i := int64(1); i <= 250; i++ {
+		events = append(events, ev(i, "x"))
+	}
+	got := capRestoredSpool(events)
+	// Expect the newest 200 kept (seq 51..250), oldest 50 dropped.
+	if len(got) != 200 {
+		t.Fatalf("want 200 kept, got %d", len(got))
+	}
+	if got[0].seq != 51 {
+		t.Fatalf("oldest kept want seq 51, got %d", got[0].seq)
+	}
+	if got[199].seq != 250 {
+		t.Fatalf("newest kept want seq 250, got %d", got[199].seq)
+	}
+
+	// A small spool (under both caps) is returned unchanged.
+	small := []bufferedEvent{ev(1, "a"), ev(2, "b")}
+	gotSmall := capRestoredSpool(small)
+	if len(gotSmall) != 2 || gotSmall[0].seq != 1 || gotSmall[1].seq != 2 {
+		t.Fatalf("small spool should be unchanged, got %+v", gotSmall)
+	}
+}
+
+// TestInitSpoolTrimsOversizedRestore verifies InitSpool persists the cap trim:
+// after restoring from an oversized spool, the on-disk file is rewritten to
+// match the trimmed in-memory buffer (so a crash right after start doesn't
+// reload the full set again).
+func TestInitSpoolTrimsOversizedRestore(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "d.log")
+	seed, _ := openSpool(path)
+	// Write 210 events — exceeds the 200 cap.
+	for i := int64(1); i <= 210; i++ {
+		seed.append(ev(i, "x").data)
+	}
+	seed.Close()
+
+	c := NewClient("", "", "daemon-x", nil, nil, nil, nil, quietLogger())
+	if err := c.InitSpool(path); err != nil {
+		t.Fatal(err)
+	}
+	defer c.spool.Close()
+
+	if len(c.outBuf) != 200 {
+		t.Fatalf("want 200 restored after trim, got %d", len(c.outBuf))
+	}
+	if c.outBuf[0].seq != 11 {
+		t.Fatalf("oldest kept want seq 11, got %d", c.outBuf[0].seq)
+	}
+
+	// The on-disk spool must now hold only the trimmed set.
+	reloaded, _ := loadSpool(path)
+	if len(reloaded) != 200 || reloaded[0].seq != 11 {
+		t.Fatalf("disk spool should match trimmed buffer, got %d events from seq %d",
+			len(reloaded), func() int64 {
+				if len(reloaded) > 0 {
+					return reloaded[0].seq
+				}
+				return 0
+			}())
+	}
+}
