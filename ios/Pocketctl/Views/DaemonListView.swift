@@ -2,6 +2,7 @@ import SwiftUI
 
 struct DaemonListView: View {
     @Binding var isLoggedIn: Bool
+    @Environment(\.scenePhase) private var scenePhase
 
     private let apiClient = APIClient()
     private let wsService = WebSocketService()
@@ -128,7 +129,19 @@ struct DaemonListView: View {
             tryConsumePendingPush()
         }
         .onAppear {
-            if let vm = viewModel, vm.isConnected { vm.refresh() }
+            // 从子页面返回时刷新。refresh() 内部会判断连接状态：已连接则
+            // 重拉 list_daemons，未连接则触发重连。原先仅在 isConnected 时
+            // 刷新，半开连接（iOS 认为已连、relay 已踢）下会漏掉新主机。
+            if let vm = viewModel { vm.refresh() }
+        }
+        .onChange(of: scenePhase) { _, newPhase in
+            // App 回前台时强制刷新主机列表。iOS 后台会挂起/断开 WebSocket，
+            // 期间 relay 可能已广播了新主机上线（但本端 socket 不在广播名单
+            // 里）。回前台后无条件重拉一次 list_daemons，确保新主机能及时
+            // 出现，而不必重启 App。refresh() 内部会处理连接断开的重连。
+            if newPhase == .active, let vm = viewModel {
+                vm.refresh()
+            }
         }
         .onChange(of: notificationRouter.navigateToSessionId) { _, sessionId in
             // 推送深链落地：尝试导航到对应会话详情。匹配不到时缓存 pending，

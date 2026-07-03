@@ -207,14 +207,6 @@ final class WebSocketService: @unchecked Sendable {
         guard let data = text.data(using: .utf8),
               let dict = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return }
 
-        // Track daemon status internally
-        if let type = dict["type"] as? String, type == "daemon_status",
-           let daemonId = dict["daemon_id"] as? String {
-            if let daemon = Daemon.from(event: dict) {
-                daemons[daemonId] = daemon
-            }
-        }
-
         // NOTE: model_list is host-level and may omit daemon_id (relay forwards the
         // daemon's reply verbatim) and never carries `agent`. The owning view
         // (NewSessionSheet) knows which agent it requested, so it writes the
@@ -223,6 +215,22 @@ final class WebSocketService: @unchecked Sendable {
 
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
+            // Track daemon status in the cache on the main thread. Previously
+            // this write happened on the background receive-loop thread, racing
+            // with main-thread reads in buildDaemonList(). Doing it here keeps a
+            // single authoritative writer that runs BEFORE event listeners fire,
+            // so listeners (DaemonListViewModel, AgentManageViewModel) observe a
+            // consistent cache. Online updates the entry; offline removes it so
+            // the daemon doesn't linger as a ghost.
+            if let type = dict["type"] as? String, type == "daemon_status",
+               let daemonId = dict["daemon_id"] as? String,
+               let daemon = Daemon.from(event: dict) {
+                if daemon.online {
+                    self.daemons[daemonId] = daemon
+                } else {
+                    self.daemons.removeValue(forKey: daemonId)
+                }
+            }
             for (_, handler) in self.eventListeners {
                 handler(dict)
             }
