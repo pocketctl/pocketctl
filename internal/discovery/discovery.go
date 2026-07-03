@@ -51,23 +51,29 @@ func DiscoverAgents() []AgentInfo {
 // candidatePaths 按"用户本地优先"返回 cliName 的候选可执行路径(去重保序)。
 func candidatePaths(cliName, home, pathEnv, npmPrefix string) []string {
 	var ordered []string
+
+	extensions := platformExtensions()
+	addPath := func(dir, name string) {
+		for _, ext := range extensions {
+			ordered = append(ordered, filepath.Join(dir, name+ext))
+		}
+	}
+
 	if home != "" {
-		ordered = append(ordered,
-			filepath.Join(home, ".local", "bin", cliName),
-			filepath.Join(home, ".claude", "local", cliName),
-			// opencode self-installs here via `opencode upgrade` (takes priority over
-			// the older npm-installed version that may exist at /opt/homebrew/bin).
-			filepath.Join(home, ".opencode", "bin", cliName),
-		)
+		addPath(filepath.Join(home, ".local", "bin"), cliName)
+		addPath(filepath.Join(home, ".claude", "local"), cliName)
+		// opencode self-installs here via `opencode upgrade` (takes priority over
+		// the older npm-installed version that may exist at /opt/homebrew/bin).
+		addPath(filepath.Join(home, ".opencode", "bin"), cliName)
 	}
 	if npmPrefix != "" {
-		ordered = append(ordered, filepath.Join(npmPrefix, "bin", cliName))
+		addPath(filepath.Join(npmPrefix, "bin"), cliName)
 	}
 	for _, dir := range filepath.SplitList(pathEnv) {
 		if dir == "" {
 			continue
 		}
-		ordered = append(ordered, filepath.Join(dir, cliName))
+		addPath(dir, cliName)
 	}
 	seen := make(map[string]bool, len(ordered))
 	var out []string
