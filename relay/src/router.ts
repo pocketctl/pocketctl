@@ -411,7 +411,17 @@ export class Router {
   }
 
   registerClient(ws: WebSocket, userId: number | null): void {
-    this.clients.set(ws, { ws, subscribedSessions: new Set(), userId, locale: 'zh' });
+    // Idempotent: a client is now registered on auth success (server.ts) AND
+    // re-registered on its first message (processMessage). Preserve the
+    // existing subscribedSessions/locale so a re-entry doesn't wipe the
+    // client's active session subscriptions.
+    const existing = this.clients.get(ws);
+    this.clients.set(ws, {
+      ws,
+      subscribedSessions: existing?.subscribedSessions ?? new Set(),
+      userId,
+      locale: existing?.locale ?? 'zh',
+    });
   }
   unregisterClient(ws: WebSocket): void { this.clients.delete(ws); }
 

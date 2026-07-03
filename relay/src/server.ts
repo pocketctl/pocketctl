@@ -1098,6 +1098,19 @@ async function main() {
       authDone = true;
       console.log(`WS connected: type=${connType} ip=${clientIp} user=${userId || 'legacy'}`);
 
+      // Register client into router.clients IMMEDIATELY on auth success (not
+      // deferred to the first message). Previously registerClient() only ran
+      // inside processMessage(), i.e. after the client sent its first message
+      // (iOS sends set_locale on ping success). Any daemon registering in that
+      // window broadcast daemon_status to an empty clients set — the new host
+      // never reached the already-connected iOS app until a restart. Doing it
+      // here guarantees the socket is in the broadcast set from the moment it
+      // is authorized, so a re-processMessage() call becomes a no-op duplicate
+      // (registerClient just re-sets the same entry).
+      if (connType !== 'daemon') {
+        router.registerClient(socket, userId);
+      }
+
       // Process any messages that arrived during auth
       for (const raw of earlyMessages) {
         processMessage(raw);
