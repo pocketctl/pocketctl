@@ -15,7 +15,6 @@ Monitor and manage Claude Code, Codex, and OpenCode sessions from your phone or 
 - 🔔 **Push Notifications** — Get alerted when your agent needs attention
 - 🔄 **Self-updating** — One command to update to the latest version
 - 🌐 **Web Dashboard** — Full-featured Vue 3 SPA with dark/light theme, daemon & session management
-- 🏠 **Landing Page** — Marketing site at `pocketctl.me` with dual-theme, i18n (zh/en), iOS waitlist signup
 - 🔐 **Secure** — OAuth 2.0 Device Authorization Grant (RFC 8628) + email verification fallback
 - ⚡ **Lightweight** — Single binary, zero dependencies, runs on macOS and Linux
 
@@ -34,7 +33,6 @@ Monitor and manage Claude Code, Codex, and OpenCode sessions from your phone or 
                                                                    └───────────┘
 ```
 
-- **Landing** — Static marketing site served at root domain with theme/language switcher
 - **Daemon** — Runs on your development machine, discovers and monitors AI coding agent sessions
 - **Relay** — WebSocket server that bridges mobile/web clients with daemons
 - **Web** — Vue 3 SPA dashboard for browser-based monitoring, served at `/app`
@@ -150,13 +148,6 @@ pocketctl/
 │           ├── auth-sessions.ts   # Device authorization session store
 │           ├── email.ts           # Tencent Cloud SES email client
 │           └── verification.ts    # Shared verification code store
-├── landing/                       # Static marketing site (pocketctl.me)
-│   ├── index.html                 # Landing page with dual-theme + i18n
-│   ├── css/style.css              # Design system CSS variables
-│   ├── js/main.js                 # i18n data + interactions
-│   ├── assets/                    # Logo SVGs (dark/light theme)
-│   ├── nginx.conf                 # Prod Nginx config (Landing + /app + API proxy)
-│   └── nginx-docker.conf          # Docker Nginx config
 ├── web/                           # Vue 3 web dashboard
 │   └── src/
 │       ├── views/                 # DashboardView, SessionDetail, TokenUsage, HostsView, SettingsView, LoginView, DeviceAuthView
