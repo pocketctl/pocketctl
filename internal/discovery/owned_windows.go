@@ -8,3 +8,7 @@ package discovery
 func fileOwnedByCurrentUser(path string) bool {
 	return false
 }
+
+func platformExtensions() []string {
+	return []string{"", ".exe", ".cmd", ".bat"}
+}

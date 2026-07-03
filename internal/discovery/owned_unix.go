@@ -18,3 +18,7 @@ func fileOwnedByCurrentUser(path string) bool {
 	st, ok := info.Sys().(*syscall.Stat_t)
 	return ok && int(st.Uid) == os.Getuid()
 }
+
+func platformExtensions() []string {
+	return []string{""}
+}

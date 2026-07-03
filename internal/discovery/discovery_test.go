@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"testing"
 )
 
@@ -13,13 +14,13 @@ func TestCandidatePaths_UserLocalFirstAndDedup(t *testing.T) {
 	// 不切割 → 整个 PATH 当一个目录。
 	pathEnv := filepath.Join("/usr", "bin") + string(os.PathListSeparator) + filepath.Join(home, ".local", "bin")
 	got := candidatePaths("claude", home, pathEnv, "")
-	want := []string{
-		filepath.Join(home, ".local", "bin", "claude"), // well-known 用户本地
-		filepath.Join(home, ".claude", "local", "claude"),
-		filepath.Join(home, ".opencode", "bin", "claude"),
-		filepath.Join("/usr", "bin", "claude"), // 来自 PATH
-		// PATH 里的 /home/u/.local/bin/claude 被去重(已在首位)
-	}
+
+	var want []string
+	want = append(want, testExecutablePaths(filepath.Join(home, ".local", "bin"), "claude")...)
+	want = append(want, testExecutablePaths(filepath.Join(home, ".claude", "local"), "claude")...)
+	want = append(want, testExecutablePaths(filepath.Join(home, ".opencode", "bin"), "claude")...)
+	want = append(want, testExecutablePaths(filepath.Join("/usr", "bin"), "claude")...)
+
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("candidatePaths = %v, want %v", got, want)
 	}
@@ -29,16 +30,30 @@ func TestCandidatePaths_NpmPrefixIncluded(t *testing.T) {
 	home := "/home/u"
 	got := candidatePaths("codex", home, "/usr/bin", filepath.Join(home, ".npm-global"))
 	// npm 用户 prefix 的 bin 应排在 PATH 之前
-	want := []string{
-		filepath.Join(home, ".local", "bin", "codex"),
-		filepath.Join(home, ".claude", "local", "codex"),
-		filepath.Join(home, ".opencode", "bin", "codex"),
-		filepath.Join(home, ".npm-global", "bin", "codex"),
-		filepath.Join("/usr", "bin", "codex"),
-	}
+
+	var want []string
+	want = append(want, testExecutablePaths(filepath.Join(home, ".local", "bin"), "codex")...)
+	want = append(want, testExecutablePaths(filepath.Join(home, ".claude", "local"), "codex")...)
+	want = append(want, testExecutablePaths(filepath.Join(home, ".opencode", "bin"), "codex")...)
+	want = append(want, testExecutablePaths(filepath.Join(home, ".npm-global", "bin"), "codex")...)
+	want = append(want, testExecutablePaths("/usr/bin", "codex")...)
+
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("candidatePaths = %v, want %v", got, want)
 	}
+}
+
+func testExecutablePaths(dir, cliName string) []string {
+	names := []string{cliName}
+	if runtime.GOOS == "windows" {
+		names = []string{cliName, cliName + ".exe", cliName + ".cmd", cliName + ".bat"}
+	}
+
+	paths := make([]string, 0, len(names))
+	for _, name := range names {
+		paths = append(paths, filepath.Join(dir, name))
+	}
+	return paths
 }
 
 func TestResolveFrom(t *testing.T) {
