@@ -277,12 +277,25 @@ final class DaemonListViewModel {
             }
 
         case .daemonStatus:
+            // daemon_status is a real-time push for a single daemon going
+            // online/offline. wsService.daemons cache is already updated by
+            // WebSocketService.handleMessage (on the main thread, before this
+            // listener runs). Here we only mirror the change into the view
+            // array `daemons` so the list updates instantly without waiting
+            // for the next buildDaemonList() rebuild. This is the fix for the
+            // "newly-registered host needs app restart to appear" bug: the
+            // daemon_status broadcast is received and applied immediately.
             if let daemon = Daemon.from(event: dict) {
-                if let index = daemons.firstIndex(where: { $0.daemonId == daemon.daemonId }) {
-                    daemons[index] = daemon
+                if daemon.online {
+                    if let index = daemons.firstIndex(where: { $0.daemonId == daemon.daemonId }) {
+                        daemons[index] = daemon
+                    } else {
+                        daemons.append(daemon)
+                    }
                 } else {
-                    daemons.append(daemon)
+                    daemons.removeAll { $0.daemonId == daemon.daemonId }
                 }
+                daemons.sort { ($0.alias ?? $0.hostname) < ($1.alias ?? $1.hostname) }
             }
 
         case .daemonList:
