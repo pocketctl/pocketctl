@@ -705,6 +705,29 @@ export async function revokeToken(pool: pg.Pool, jti: string, userId: number, re
 }
 
 /**
+ * Decide what to do when a refresh request reuses an already-rotated jti.
+ *
+ * Tolerance policy (supports one account running multiple daemons): do NOT
+ * permanently breach. A daemon that failed to persist its last refreshed token
+ * (e.g. SaveAuth I/O error) will reuse the previous one — that's a stale-local
+ * token, not theft. Breaching on the first reuse permanently locks the daemon
+ * out (3×4001 → authRejectStopThreshold → park), which is how a whole account
+ * can silently lose a host. Instead: record an audit entry so reuse stays
+ * observable for real theft detection, and let the refresh proceed (issue a new
+ * token) so the daemon self-heals on its next refresh.
+ *
+ * Returns true to block the refresh (genuine breach — reserved for future
+ * multi-IP reuse heuristics), false to tolerate and continue.
+ */
+export async function handleRefreshReuse(pool: pg.Pool, userId: number, jti: string): Promise<boolean> {
+  await insertAuditLog(pool, userId, 'refresh_reuse_tolerated', {
+    jti,
+    message: 'refresh token reuse tolerated — daemon likely has a stale local token; issuing a new token so it can self-heal',
+  });
+  return false;
+}
+
+/**
  * Revoke the access token currently bound to a daemon (force_kick / new_login
  * eviction). Looks up daemons.active_token_jti and revokes that specific jti, so
  * the kicked daemon can't reconnect with its old token while the user's other

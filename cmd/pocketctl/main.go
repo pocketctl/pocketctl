@@ -988,8 +988,23 @@ func cmdDaemonStart(args []string) {
 			logger.Error("token refresh failed; refresh token may be expired", "error", err)
 			return "", false
 		}
-		if err := config.SaveAuth(relayURL, newAccess, newRefresh); err != nil {
-			logger.Error("persist refreshed token failed", "error", err)
+		// Persist the new tokens with retries. This MUST NOT be swallowed: the
+		// relay has already rotated the old refresh token, so if we don't
+		// durably save the new one the next refresh reuses the rotated one and
+		// gets judged a breach (the m3-pro incident). Only report success once
+		// persisted; otherwise abort so the daemon doesn't act on a half-applied
+		// refresh (it'll retry on the next 4001, and park if refresh stays broken).
+		var saveErr error
+		for attempt := 0; attempt < 3; attempt++ {
+			if saveErr = config.SaveAuth(relayURL, newAccess, newRefresh); saveErr == nil {
+				break
+			}
+			logger.Warn("persist refreshed token failed; retrying", "attempt", attempt+1, "error", saveErr)
+			time.Sleep(time.Duration(100*(attempt+1)) * time.Millisecond)
+		}
+		if saveErr != nil {
+			logger.Error("persist refreshed token failed after retries; aborting refresh to avoid stale-token reuse", "error", saveErr)
+			return "", false
 		}
 		logger.Info("access token refreshed; reconnecting with new token")
 		return newAccess, true
@@ -1602,8 +1617,16 @@ func handleWatcherEvents(ctx context.Context, events <-chan watcher.SessionEvent
 						if sm.DropGhostSession(evt.Session.SessionID) {
 							logger.Info("dropped ghost session (jsonl never resolved)", "session", evt.Session.SessionID)
 						} else {
-							logger.Error("tailer start failed after retries", "session", evt.Session.SessionID)
+							logger.Warn("tailer start failed after retries; session left without tailer", "session", evt.Session.SessionID)
 						}
+						// PARK, do NOT return. This fn runs under daemon.RunLoop, which
+						// restarts fn whenever it returns — so a bare return here re-runs
+						// the 30×2s retry loop forever (the ghost JSONL never appears),
+						// producing an unbounded restart loop that destabilized the daemon
+						// (the macmini incident: tailer ghost → restart loop → daemon
+						// shutdown). Block until shutdown; the ghost was never announced,
+						// so nothing on the relay side waits on it.
+						<-ctx.Done()
 						return
 					}
 					defer tailer.Close()
