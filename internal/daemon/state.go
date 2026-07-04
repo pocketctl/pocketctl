@@ -10,11 +10,12 @@ import (
 // DaemonState is written to a file by the running daemon
 // and read by CLI commands (status) to show daemon info.
 type DaemonState struct {
-	DaemonID  string        `json:"daemon_id"`
-	RelayURL  string        `json:"relay_url"`
-	Connected bool          `json:"connected"`
-	StartedAt time.Time     `json:"started_at"`
-	PID       int           `json:"pid"`
+	DaemonID  string         `json:"daemon_id"`
+	Version   string         `json:"version"`
+	RelayURL  string         `json:"relay_url"`
+	Connected bool           `json:"connected"`
+	StartedAt time.Time      `json:"started_at"`
+	PID       int            `json:"pid"`
 	Sessions  []SessionState `json:"sessions"`
 }
 

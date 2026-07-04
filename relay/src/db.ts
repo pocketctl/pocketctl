@@ -574,7 +574,10 @@ export async function getSessionDaemonId(pool: pg.Pool, sessionId: string): Prom
 /** Check if a session still has a default-generated title (Terminal Session-*) */
 export async function hasDefaultTitle(pool: pg.Pool, sessionId: string): Promise<boolean> {
   const result = await pool.query(
-    `SELECT 1 FROM sessions WHERE session_id = $1 AND title LIKE 'Terminal Session-%'`,
+    // NULL 也算默认: terminal session 的默认标题因时序竞争可能未写入 (session_discovered
+    // 不带 title → INSERT NULL)。若不把 NULL 当默认，这类 session 会被判为「已有自定义标题」
+    // 而永久跳过 AI 生成 (2fec2498 案例)。
+    `SELECT 1 FROM sessions WHERE session_id = $1 AND (title LIKE 'Terminal Session-%' OR title IS NULL)`,
     [sessionId]
   );
   return (result.rowCount ?? 0) > 0;
@@ -583,7 +586,7 @@ export async function hasDefaultTitle(pool: pg.Pool, sessionId: string): Promise
 /** Update session title only if it still has the default pattern. Returns true if updated. */
 export async function updateTitleIfDefault(pool: pg.Pool, sessionId: string, newTitle: string): Promise<boolean> {
   const result = await pool.query(
-    `UPDATE sessions SET title = $1, updated_at = NOW() WHERE session_id = $2 AND title LIKE 'Terminal Session-%'`,
+    `UPDATE sessions SET title = $1, updated_at = NOW() WHERE session_id = $2 AND (title LIKE 'Terminal Session-%' OR title IS NULL)`,
     [newTitle, sessionId]
   );
   return (result.rowCount ?? 0) > 0;
