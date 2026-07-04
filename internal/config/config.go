@@ -90,6 +90,9 @@ func SaveAuth(relayURL, accessToken, refreshToken string) error {
 	if err != nil {
 		return err
 	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return fmt.Errorf("create auth dir: %w", err)
+	}
 	// Read existing data to preserve prod_relay_url
 	data := authFile{}
 	if raw, err := os.ReadFile(path); err == nil {
@@ -102,8 +105,18 @@ func SaveAuth(relayURL, accessToken, refreshToken string) error {
 	if err != nil {
 		return fmt.Errorf("marshal auth: %w", err)
 	}
-	if err := os.WriteFile(path, raw, 0600); err != nil {
-		return fmt.Errorf("write auth: %w", err)
+	// Atomic write: stage to a temp file in the same dir, then rename. A crash
+	// or IO error mid-write leaves the previous auth.json intact (rename is
+	// atomic on the same filesystem), so the daemon never ends up with a
+	// truncated/missing refresh token — the gap that let a stale refresh token
+	// be reused after rotation (the m3-pro breach incident).
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, raw, 0o600); err != nil {
+		return fmt.Errorf("write auth (tmp): %w", err)
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		_ = os.Remove(tmp)
+		return fmt.Errorf("rename auth: %w", err)
 	}
 	return nil
 }

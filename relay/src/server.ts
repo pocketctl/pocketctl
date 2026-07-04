@@ -1,7 +1,7 @@
 import Fastify from 'fastify';
 import fastifyWebsocket from '@fastify/websocket';
 import fastifyCors from '@fastify/cors';
-import { createPool, initDB, parseDBUrl, createUser, getUserByEmail, getUserById, getUserProfile, registerDevice, removeDevice, cleanStaleTombstones, upsertDaemonAlias, deleteDaemon, updateDisplayName, updateEmail, addToIOSWaitlist, revokeToken, isTokenRevoked, cleanRevokedTokens, insertAuditLog, bindTokenToDaemon, updateSessionTitle, isSessionOwnedByUser, getSessionAllEvents, getTokenSummary, getTokensByDaemon, backfillSessionTokens, backfillSessionModel, backfillTokenDailyStats, aggregateDayIntoStats, cleanStaleEvents, getTokenDailySeries, getTokenByModel, getTokenByDaemon, getSessionTokenTrend, listProUserIds, getUserDailyTokens, getUserWeeklyTokens, markReportSent } from './db.js';
+import { createPool, initDB, parseDBUrl, createUser, getUserByEmail, getUserById, getUserProfile, registerDevice, removeDevice, cleanStaleTombstones, upsertDaemonAlias, deleteDaemon, updateDisplayName, updateEmail, addToIOSWaitlist, revokeToken, isTokenRevoked, cleanRevokedTokens, insertAuditLog, bindTokenToDaemon, updateSessionTitle, isSessionOwnedByUser, getSessionAllEvents, getTokenSummary, getTokensByDaemon, backfillSessionTokens, backfillSessionModel, backfillTokenDailyStats, aggregateDayIntoStats, cleanStaleEvents, getTokenDailySeries, getTokenByModel, getTokenByDaemon, getSessionTokenTrend, listProUserIds, getUserDailyTokens, getUserWeeklyTokens, markReportSent, handleRefreshReuse } from './db.js';
 import { Router } from './router.js';
 import { hashPassword, verifyPassword, signAccessToken, signRefreshToken, verifyRefreshToken, decodeToken, verifyAccessTokenWithRevocation } from './auth.js';
 import { notifyUser, sessionStatusPush, daemonOfflinePush, dailyReportPush, weeklyReportPush } from './push.js';
@@ -120,19 +120,20 @@ async function main() {
       reply.code(401); return { error: 'invalid or expired refresh token' };
     }
 
-    // Breach detection: if this token was already revoked, revoke ALL user tokens
+    // Reuse detection: if this refresh token was already rotated, the client is
+    // presenting a stale one (typically a daemon whose SaveAuth failed to
+    // persist the last rotation). Tolerance policy: don't permanently breach —
+    // that would lock the daemon out via authRejectStopThreshold (the m3-pro
+    // incident). Audit + let the refresh proceed so the daemon self-heals.
     if (payload.jti) {
       try {
         const alreadyRevoked = await isTokenRevoked(pool, payload.jti);
         if (alreadyRevoked) {
-          // Breach detected — revoke all tokens
-          await revokeToken(pool, payload.jti, payload.userId, 'breach');
-          await insertAuditLog(pool, payload.userId, 'breach_detected', {
-            jti: payload.jti,
-            message: 'refresh token reuse detected',
-          });
-          reply.code(401);
-          return { error: 'invalid or expired refresh token' };
+          const block = await handleRefreshReuse(pool, payload.userId, payload.jti);
+          if (block) {
+            reply.code(401);
+            return { error: 'invalid or expired refresh token' };
+          }
         }
       } catch (err) {
         console.error('refresh revocation check:', err);
