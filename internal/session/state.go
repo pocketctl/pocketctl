@@ -25,8 +25,16 @@ func (sm *SessionManager) UpdateSessionTitle(sessionID, title string) {
 	}
 }
 
+// MaxTitleAttempts caps how many times a session will ask the relay to generate
+// an AI title. Each new user+assistant round in the tailer re-triggers until the
+// relay succeeds (relay returns empty on failure and keeps the default title, so
+// re-generation is harmless and self-healing). 5 bounds cost/429-risk during a
+// sustained GLM outage while still letting transient failures recover.
+const MaxTitleAttempts = 5
+
 // GenerateTitle sends a generate_title_request event to the relay for LLM-based
-// title generation. Sends at most once per session (guarded by TitleGenerated flag).
+// title generation. Re-triggerable up to MaxTitleAttempts per session so a transient
+// GLM failure (429/timeout) self-heals on the next conversation round.
 func (sm *SessionManager) GenerateTitle(sessionID, userMessage, assistantMessage string) {
 	sm.mu.Lock()
 	ps, ok := sm.sessions[sessionID]
@@ -34,11 +42,11 @@ func (sm *SessionManager) GenerateTitle(sessionID, userMessage, assistantMessage
 		sm.mu.Unlock()
 		return
 	}
-	if ps.TitleGenerated {
+	if ps.TitleAttempts >= MaxTitleAttempts {
 		sm.mu.Unlock()
 		return
 	}
-	ps.TitleGenerated = true
+	ps.TitleAttempts++
 	sm.mu.Unlock()
 
 	sm.outputCh <- protocol.DaemonEvent{

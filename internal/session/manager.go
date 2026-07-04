@@ -28,7 +28,7 @@ type ProcessState struct {
 	Pid              int                  // terminal session's original PID
 	TTY              string               // terminal session's TTY device (e.g. /dev/ttys002)
 	ExitReason       string               // reason for process exit (terminal sessions only)
-	TitleGenerated   bool                 // true once generate_title_request has been sent
+	TitleAttempts    int                  // 已触发 generate_title_request 次数（上限 MaxTitleAttempts）
 	Tailer           *watcher.JSONLTailer // terminal session 的 JSONL tailer（D2: sendToIdleTerminal 期间 pause）
 	PTY              platform.PTY         // interactive-web-session D1: daemon session 的 PTY master（写 stdin 驱动 interactive claude）。PR2: platform.PTY interface (was *os.File)
 	PTYScanner       *ptyscan.Scanner     // daemon session 的 PTY 菜单扫描器（捕获 TUI 选择提示，转成 interactive_prompt 事件）
