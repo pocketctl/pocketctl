@@ -662,8 +662,11 @@ export class Router {
           db.updateTitleIfDefault(this.pool, sessionId, title).then((updated) => {
             if (updated) {
               console.log(`[router] title generated for ${sessionId}: ${title}`);
+              // Broadcast to all of the owner's online clients — the list view
+              // doesn't subscribe to sessions, so a subscribedSessions filter would
+              // never deliver title updates to it. Mirrors session_created/discovered.
               for (const [clientWs, client] of this.clients) {
-                if (client.subscribedSessions.has(sessionId) && clientWs.readyState === 1) {
+                if (clientWs.readyState === 1 && this.sameUser(client.userId, userId)) {
                   this.send(clientWs, { type: 'session_title_update', session_id: sessionId, title });
                 }
               }
@@ -679,8 +682,10 @@ export class Router {
       this.markPersisted(daemonId, msg.seq);
       // Only overwrite default titles — protect user-renamed titles
       this.pool.query('UPDATE sessions SET title = $1 WHERE session_id = $2 AND (title LIKE \'Terminal Session-%\' OR title IS NULL)', [msg.title || '', sessionId]).catch(console.error);
+      // Broadcast to all of the owner's online clients (list view included),
+      // not just subscribed sessions — same reasoning as generate_title_request.
       for (const [clientWs, client] of this.clients) {
-        if (client.subscribedSessions.has(sessionId) && clientWs.readyState === 1) this.send(clientWs, msg);
+        if (clientWs.readyState === 1 && this.sameUser(client.userId, userId)) this.send(clientWs, msg);
       }
       return;
     }

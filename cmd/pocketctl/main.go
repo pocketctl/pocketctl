@@ -1638,9 +1638,6 @@ func handleWatcherEvents(ctx context.Context, events <-chan watcher.SessionEvent
 					}
 					sm.UpdateSessionTitle(evt.Session.SessionID, "Terminal Session-"+sid)
 
-					// Track whether title generation request has been sent
-					titleGenSent := false
-
 					// Tail loop: send parsed events with session_id stamped
 					ticker := time.NewTicker(1 * time.Second)
 					defer ticker.Stop()
@@ -1669,13 +1666,15 @@ func handleWatcherEvents(ctx context.Context, events <-chan watcher.SessionEvent
 								}
 								outputCh <- events[i]
 							}
-							// Check for title generation trigger (user + assistant messages ready)
-							if !titleGenSent && len(rawLines) > 0 {
+							// Check for title generation trigger (user + assistant messages
+							// ready). Re-fires each new conversation round; GenerateTitle caps
+							// total attempts at MaxTitleAttempts and the relay skips once an AI
+							// title is written, so re-evaluating per tick is safe.
+							if len(rawLines) > 0 {
 								userMsg := adapter.ExtractFirstUserMessage(rawLines, 200)
 								assistantMsg := adapter.ExtractFirstAssistantMessage(rawLines, 200)
 								if userMsg != "" && assistantMsg != "" {
 									sm.GenerateTitle(evt.Session.SessionID, userMsg, assistantMsg)
-									titleGenSent = true
 								}
 							}
 						}
