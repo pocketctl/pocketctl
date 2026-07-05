@@ -21,14 +21,14 @@ const httpError = (status: number, statusText = '', retryAfter?: string) => ({
 
 describe('generateTitle - 失败语义与重试', () => {
   beforeEach(() => {
-    process.env.ZHIPU_API_KEY = 'test-key'
+    process.env.DEEPSEEK_API_KEY = 'test-key'
   })
   afterEach(() => {
     vi.restoreAllMocks()
   })
 
-  test('ZHIPU_API_KEY 未设 → 返回空串，不调 fetch', async () => {
-    delete process.env.ZHIPU_API_KEY
+  test('DEEPSEEK_API_KEY 未设 → 返回空串，不调 fetch', async () => {
+    delete process.env.DEEPSEEK_API_KEY
     global.fetch = vi.fn()
     expect(await generateTitle('hi', 'hello')).toBe('')
     expect(global.fetch).not.toHaveBeenCalled()
@@ -75,7 +75,7 @@ describe('generateTitle - 失败语义与重试', () => {
   })
 
   test('成功路径不返回 fallback 截断串（失败才不写库的关键）', async () => {
-    // 即使 user message 很长，成功时返回的是 GLM 的 cleanTitle，不是截断
+    // 即使 user message 很长，成功时返回的是 DeepSeek 的 cleanTitle，不是截断
     global.fetch = vi.fn().mockResolvedValue(ok('短标题'))
     const title = await generateTitle('这是一条非常非常长的用户消息'.repeat(10), 'assistant')
     expect(title).toBe('短标题')

@@ -793,6 +793,7 @@ func cmdDaemonStart(args []string) {
 	// even if the process is killed before the relay connection fires OnStateChange.
 	_ = daemon.WriteState(&daemon.DaemonState{
 		DaemonID: id,
+		Version:  version,
 		RelayURL: url,
 		PID:      os.Getpid(),
 	})
@@ -1069,6 +1070,7 @@ func cmdDaemonStart(args []string) {
 		stateDirty.Store(true)
 		state := &daemon.DaemonState{
 			DaemonID:  id,
+			Version:   version,
 			RelayURL:  url,
 			Connected: connected,
 			StartedAt: time.Now(),
@@ -1141,7 +1143,6 @@ func cmdDaemonStart(args []string) {
 		daemon.Go("keep-awake-server", logger, func() { kaServer.Serve(ctx) })
 	}
 
-
 	// Start session watcher (Claude terminal sessions)
 	if err := sw.Start(ctx); err != nil {
 		logger.Error("start session watcher", "error", err)
@@ -1213,6 +1214,7 @@ func cmdDaemonStart(args []string) {
 				}
 				state := &daemon.DaemonState{
 					DaemonID:  id,
+					Version:   version,
 					RelayURL:  url,
 					Connected: true,
 					StartedAt: time.Now(),
@@ -1331,6 +1333,13 @@ func cmdDaemonStatus() {
 	}
 
 	fmt.Println(i18n.T("status.daemon", state.DaemonID))
+	ver := state.Version
+	if ver == "" {
+		// Older daemon that predates the Version field — surface it explicitly
+		// so a version mismatch (stale daemon, new CLI) is visible, not silent.
+		ver = i18n.T("status.unknown")
+	}
+	fmt.Println(i18n.T("status.version", ver))
 	fmt.Println(i18n.T("status.pid", state.PID))
 	fmt.Println(i18n.T("status.relay", state.RelayURL))
 	conn := map[bool]string{true: i18n.T("status.connected"), false: i18n.T("status.disconnected")}[state.Connected]
@@ -1584,6 +1593,14 @@ func handleWatcherEvents(ctx context.Context, events <-chan watcher.SessionEvent
 				// silently dying and leaving the session — including a later --continue
 				// resume — with no message forwarding.
 				daemon.RunLoop(ctx, "tailer:"+evt.Session.SessionID, logger, func() {
+					// Default title baked into session_discovered so the relay row is created
+					// with it (not NULL), avoiding the race where session_title_update lands
+					// before the row exists and the default never sticks (2fec2498 case).
+					shortID := evt.Session.SessionID
+					if len(shortID) > 8 {
+						shortID = shortID[len(shortID)-8:]
+					}
+					defaultTitle := "Terminal Session-" + shortID
 					var tailer *watcher.JSONLTailer
 					// Retry: the agent may not have created the JSONL file yet
 					for retry := 0; retry < 30; retry++ {
@@ -1601,6 +1618,7 @@ func handleWatcherEvents(ctx context.Context, events <-chan watcher.SessionEvent
 									Status:    evt.Session.Status,
 									Source:    "terminal",
 									Agent:     agentType,
+									Title:     defaultTitle,
 								}
 								break
 							}
@@ -1631,14 +1649,12 @@ func handleWatcherEvents(ctx context.Context, events <-chan watcher.SessionEvent
 					}
 					defer tailer.Close()
 
-					// Set default title immediately
-					sid := evt.Session.SessionID
-					if len(sid) > 8 {
-						sid = sid[len(sid)-8:]
-					}
-					sm.UpdateSessionTitle(evt.Session.SessionID, "Terminal Session-"+sid)
+					// Mirror the default title locally too (session_discovered already
+					// carries it), so the daemon's in-memory state agrees with the relay row.
+					sm.UpdateSessionTitle(evt.Session.SessionID, defaultTitle)
 
 					// Tail loop: send parsed events with session_id stamped
+					titlePrimed := false // guards one-shot full-file read for title extraction
 					ticker := time.NewTicker(1 * time.Second)
 					defer ticker.Stop()
 					for {
@@ -1673,6 +1689,21 @@ func handleWatcherEvents(ctx context.Context, events <-chan watcher.SessionEvent
 							if len(rawLines) > 0 {
 								userMsg := adapter.ExtractFirstUserMessage(rawLines, 200)
 								assistantMsg := adapter.ExtractFirstAssistantMessage(rawLines, 200)
+								// 增量行常把 user/assistant 拆到不同 tick，单次提取不全；
+								// 首次不全时读全量 JSONL 兜底一次，确保有完整 user+assistant
+								// 后稳定触发 title 生成 (2fec2498 案例)。
+								if (userMsg == "" || assistantMsg == "") && !titlePrimed {
+									if jsonlPath, perr := adapter.ResolveJSONLPathFor(agentType, evt.Session.SessionID, evt.Session.Cwd); perr == nil {
+										allLines := readJSONLLines(jsonlPath, 500)
+										if u := adapter.ExtractFirstUserMessage(allLines, 200); u != "" {
+											userMsg = u
+										}
+										if a := adapter.ExtractFirstAssistantMessage(allLines, 200); a != "" {
+											assistantMsg = a
+										}
+										titlePrimed = true
+									}
+								}
 								if userMsg != "" && assistantMsg != "" {
 									sm.GenerateTitle(evt.Session.SessionID, userMsg, assistantMsg)
 								}

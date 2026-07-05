@@ -40,6 +40,13 @@ export class Router {
   // Grace window before a disconnected daemon is declared offline.
   private readonly offlineGraceMs = parseInt(process.env.DAEMON_OFFLINE_GRACE_MS || '30000', 10);
 
+  // Process startup time. During the startup grace window below, daemons that
+  // exist in the DB but haven't re-registered into memory yet (because this
+  // process just restarted) are shown optimistically online so clients don't
+  // see their host list flicker/empty during a relay restart.
+  private readonly startedAt = Date.now()
+  private readonly listGraceMs = parseInt(process.env.RELAY_LIST_GRACE_MS || '60000', 10)
+
   // Push dedup: same requestId pushed only once per TTL window. Guards the
   // ack-async / no-seq / persist-retry gaps that seq dedup can't cover for the
   // user-facing push side-effect.
@@ -77,10 +84,34 @@ export class Router {
     }
   }
 
-  /** Notify all connected daemons that the relay is restarting (expected disconnect). */
+  /** Notify all connected daemons AND clients that the relay is restarting
+   *  (expected disconnect). Daemons use it as a fast-reconnect trigger; clients
+   *  currently ignore the unknown message type (silently dropped) — this is
+   *  forward-compatible plumbing for a future client-side fast path. */
   broadcastRelayRestarting(): void {
     for (const [, daemon] of this.daemons) {
       if (daemon.ws.readyState === 1) this.send(daemon.ws, { type: 'relay_restarting' });
+    }
+    for (const [clientWs] of this.clients) {
+      if (clientWs.readyState === 1) this.send(clientWs, { type: 'relay_restarting' });
+    }
+  }
+
+  /**
+   * Force-terminate every daemon and client WebSocket immediately — no close
+   * frame, no 30s closeTimeout wait. Used during graceful shutdown so the old
+   * process exits in <1s instead of blocking on ws.close() drain when a peer
+   * doesn't promptly ack the close (half-open socket, nginx not relaying the
+   * close frame, etc.). ws.terminate() destroys the underlying socket at once.
+   */
+  terminateAllConnections(): void {
+    for (const [, daemon] of this.daemons) {
+      const ws = daemon.ws as any
+      if (typeof ws.terminate === 'function') ws.terminate()
+    }
+    for (const [clientWs] of this.clients) {
+      const ws = clientWs as any
+      if (typeof ws.terminate === 'function') ws.terminate()
     }
   }
 
@@ -1051,33 +1082,36 @@ export class Router {
           total_sessions: counts?.total ?? 0,
         });
       }
-      // Also include offline daemons from DB for this user.
-      // Skip any entry whose hostname is already represented by an online daemon —
-      // this handles the case where the daemon_id changed between runs (machine.id
-      // lost or re-derived) while the machine is the same physical host.
+      // Include daemons from DB for this user (both online-in-DB and offline).
+      // Within the startup grace window, daemons that haven't re-registered
+      // into memory yet (relay just restarted) are shown optimistically online
+      // so the client's host list doesn't empty/flicker during a restart.
+      // After the window, "not in memory" simply means offline.
       if (userId) {
         try {
-          const onlineHostnames = new Set(daemonList.map((d: any) => d.hostname));
+          const onlineHostnames = new Set(daemonList.map((d: any) => d.hostname))
           const result = await this.pool.query(
-            `SELECT daemon_id, hostname, agents, alias, status, last_heartbeat FROM daemons WHERE user_id = $1 AND status = 'offline'`,
+            `SELECT daemon_id, hostname, agents, alias, status, last_heartbeat FROM daemons WHERE user_id = $1`,
             [userId]
-          );
+          )
+          const inStartupWindow = (Date.now() - this.startedAt) < this.listGraceMs
           for (const row of result.rows) {
-            if (onlineHostnames.has(row.hostname)) continue;
-            const counts = sessionCounts[row.daemon_id];
+            if (onlineHostnames.has(row.hostname)) continue
+            const counts = sessionCounts[row.daemon_id]
+            const optimisticOnline = inStartupWindow
             daemonList.push({
               daemon_id: row.daemon_id,
               hostname: row.hostname,
               agents: row.agents || [],
-              daemon_online: false,
+              daemon_online: optimisticOnline,
               daemon_alias: row.alias,
-              status: 'offline',
+              status: optimisticOnline ? 'online' : 'offline',
               last_seen_at: row.last_heartbeat,
               active_sessions: counts?.active ?? 0,
               total_sessions: counts?.total ?? 0,
-            });
+            })
           }
-        } catch (e) { console.error('list_daemons offline:', e); }
+        } catch (e) { console.error('list_daemons db:', e) }
       }
       console.log('[router] list_daemons sending', daemonList.length, 'daemons to user', userId);
     this.send(clientWs, { type: 'daemon_list', daemons: daemonList });

@@ -66,6 +66,7 @@ function createMockWs(): any {
     readyState: 1, // OPEN
     send: vi.fn((data: string) => { sent.push(JSON.parse(data)) }),
     close: vi.fn(),
+    terminate: vi.fn(),
     _sent: sent,
   }
 }
@@ -779,5 +780,70 @@ describe('Router - force kick revokes the daemon-specific token (P0-2)', () => {
     expect(revokeInserts[0][0]).toBe('jti-abc')      // jti
     expect(revokeInserts[0][1]).toBe(7)              // userId
     expect(revokeInserts[0][2]).toBe('force_kick')   // reason
+  })
+})
+
+describe('Router - shutdown connections', () => {
+  let pool: any
+  let router: Router
+  beforeEach(() => { pool = createMockPool(); router = new Router(pool) })
+
+  test('terminateAllConnections terminates every daemon and client socket', async () => {
+    const daemonWs = createMockWs()
+    await router.registerDaemon(daemonWs, { type: 'register', daemon_id: 'd1', hostname: 'h', agents: [] }, null)
+    const clientWs = createMockWs()
+    router.registerClient(clientWs, null)
+
+    router.terminateAllConnections()
+
+    expect(daemonWs.terminate).toHaveBeenCalledTimes(1)
+    expect(clientWs.terminate).toHaveBeenCalledTimes(1)
+  })
+
+  test('broadcastRelayRestarting notifies clients too', () => {
+    const clientWs = createMockWs()
+    router.registerClient(clientWs, null)
+
+    router.broadcastRelayRestarting()
+
+    expect(clientWs._sent.find((m: any) => m.type === 'relay_restarting')).toBeDefined()
+  })
+})
+
+describe('Router - list_daemons restart grace', () => {
+  let pool: any
+  let router: Router
+  beforeEach(() => { pool = createMockPool(); router = new Router(pool) })
+
+  test('DB-online daemon not in memory is optimistic online within startup grace', async () => {
+    pool.query.mockImplementation(async (sql: string) => {
+      if (sql.includes('FROM daemons')) {
+        return { rows: [{ daemon_id: 'd-db', hostname: 'host-db', agents: [], alias: null, status: 'online', last_heartbeat: new Date().toISOString() }] }
+      }
+      return { rows: [], rowCount: 0 }
+    })
+    const clientWs = createMockWs()
+    await (router as any).handleListDaemons(clientWs, 1)
+    const list = clientWs._sent.find((m: any) => m.type === 'daemon_list')
+    expect(list.daemons).toHaveLength(1)
+    expect(list.daemons[0].daemon_online).toBe(true)
+    expect(list.daemons[0].status).toBe('online')
+  })
+
+  test('DB-online daemon not in memory goes offline after startup grace elapses', async () => {
+    process.env.RELAY_LIST_GRACE_MS = '0'
+    const router2 = new Router(pool)
+    pool.query.mockImplementation(async (sql: string) => {
+      if (sql.includes('FROM daemons')) {
+        return { rows: [{ daemon_id: 'd-db', hostname: 'host-db', agents: [], alias: null, status: 'online', last_heartbeat: new Date().toISOString() }] }
+      }
+      return { rows: [], rowCount: 0 }
+    })
+    const clientWs = createMockWs()
+    await (router2 as any).handleListDaemons(clientWs, 1)
+    const list = clientWs._sent.find((m: any) => m.type === 'daemon_list')
+    expect(list.daemons[0].daemon_online).toBe(false)
+    expect(list.daemons[0].status).toBe('offline')
+    delete process.env.RELAY_LIST_GRACE_MS
   })
 })

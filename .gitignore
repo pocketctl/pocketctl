@@ -40,6 +40,9 @@ coverage/
 # Test reports
 test-report-*.html
 
+# 调研报告（非代码，根目录临时产物）
+*调研报告.html
+
 app-connect/
 AuthKey_95HSWCLC89.p8
 AuthKey*.p8

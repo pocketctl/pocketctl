@@ -107,11 +107,11 @@ Relay 集成了智谱 GLM-4.6 API，可自动为每个 Session 生成简洁的�
 ```
 新建 Session → "Terminal Session-1def4567"  (默认名称)
        ↓ 等待首条用户消息 + 助手回复
-       ↓ 调用 GLM-4.6 生成标题
+       ↓ 调用 DeepSeek-V4-Flash 生成标题
        → "React暗色模式组件"                  (LLM 生成)
 ```
 
-配置方式：在 Relay 的 `.env` 中设置 `ZHIPU_API_KEY`（从 [open.bigmodel.cn](https://open.bigmodel.cn) 获取）。
+配置方式：在 Relay 的 `.env` 中设置 `DEEPSEEK_API_KEY`（从 [platform.deepseek.com](https://platform.deepseek.com) 获取）。
 
 ## CLI 命令
 
@@ -160,7 +160,7 @@ pocketctl version                                         显示版本号
 | `DATABASE_URL` | `postgresql://localhost:5432/pocketctl` | PostgreSQL 连接地址 |
 | `PORT` | `8080` | 监听端口 |
 | `NODE_ENV` | `development` | 运行环境（`development` / `production`） |
-| `ZHIPU_API_KEY` | 空 | 智谱 AI API Key（用于 Session 标题自动生成，未设置则跳过） |
+| `DEEPSEEK_API_KEY` | 空 | DeepSeek API Key（用于 Session 标题自动生成，未设置则跳过） |
 | `COS_SECRET_ID` | 空 | 腾讯云 API 密钥 ID（用于短信发送） |
 | `COS_SECRET_KEY` | 空 | 腾讯云 API 密钥 Key（用于短信发送） |
 | `SMS_SDK_APP_ID` | 空 | 腾讯云短信应用 SDK AppID |

@@ -96,7 +96,7 @@ pocketctl daemon status
 | `SES_REGION` | Tencent Cloud SES region (default: `ap-hongkong`) |
 | `DEV_EMAIL` | Dev mode test email address |
 | `DEV_EMAIL_CODE` | Dev mode test verification code |
-| `ZHIPU_API_KEY` | 智谱 GLM API key for session title generation |
+| `DEEPSEEK_API_KEY` | DeepSeek API key for session title generation |
 | `WEB_APP_URL` | Public base URL for OAuth device authorization redirect |
 
 ## Build from Source

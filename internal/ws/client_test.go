@@ -37,11 +37,32 @@ func TestBackoffDelayProgression(t *testing.T) {
 	for _, tc := range cases {
 		// Sample several times to exercise jitter.
 		for i := 0; i < 50; i++ {
-			d := backoffDelay(tc.attempt)
+			d := backoffDelay(tc.attempt, false)
 			lo, hi := tc.base/2, tc.base
 			if d < lo || d > hi {
 				t.Fatalf("attempt %d: delay %v outside [%v,%v]", tc.attempt, d, lo, hi)
 			}
+		}
+	}
+}
+
+// TestBackoffDelayFastReconnect verifies the compact, deterministic delay
+// sequence used after the daemon receives relay_restarting: 200/400/600/800/
+// 1000/1500ms, capped at 1500ms. No jitter so the fast-reconnect cadence is
+// predictable and testable.
+func TestBackoffDelayFastReconnect(t *testing.T) {
+	expected := []time.Duration{
+		200 * time.Millisecond, 400 * time.Millisecond, 600 * time.Millisecond,
+		800 * time.Millisecond, 1000 * time.Millisecond, 1500 * time.Millisecond,
+	}
+	for attempt := 0; attempt < 10; attempt++ {
+		i := attempt
+		if i >= len(expected) {
+			i = len(expected) - 1
+		}
+		got := backoffDelay(attempt, true)
+		if got != expected[i] {
+			t.Fatalf("attempt %d fast: got %v, want %v", attempt, got, expected[i])
 		}
 	}
 }
@@ -528,5 +549,49 @@ func waitSeq(t *testing.T, ch <-chan int64, timeout time.Duration) int64 {
 	case <-time.After(timeout):
 		t.Fatalf("timed out waiting for a received seq")
 		return 0
+	}
+}
+
+// TestRelayRestartingSetsFastReconnect verifies that when the relay sends
+// relay_restarting and closes, the daemon sets fastReconnect so subsequent
+// backoff uses the compact cadence.
+func TestRelayRestartingSetsFastReconnect(t *testing.T) {
+	upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
+	var conns int32
+	mux := http.NewServeMux()
+	mux.HandleFunc("/ws", func(w http.ResponseWriter, r *http.Request) {
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		if atomic.AddInt32(&conns, 1) == 1 {
+			_ = conn.WriteMessage(websocket.TextMessage, []byte(`{"type":"relay_restarting"}`))
+			_ = conn.Close()
+			return
+		}
+		for {
+			if _, _, err := conn.ReadMessage(); err != nil {
+				conn.Close()
+				return
+			}
+		}
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	c := newTestClient(wsURL(srv.URL))
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() { _ = c.Run(ctx) }()
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if c.fastReconnect.Load() {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if !c.fastReconnect.Load() {
+		t.Fatal("fastReconnect not set after relay_restarting")
 	}
 }
