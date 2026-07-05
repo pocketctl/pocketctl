@@ -159,6 +159,15 @@ type Client struct {
 	// to decide whether to attempt a token refresh before reconnecting.
 	lastCloseAuthReject atomic.Bool
 
+	// fastReconnect is set by readPump when the relay announces a restart
+	// (relay_restarting) and cleared in onRegisterAck after a successful
+	// re-registration. While set, backoffSleep uses the compact
+	// fastReconnectSteps cadence instead of the usual exponential backoff, so
+	// the daemon re-polls the relay tightly as it comes back up. Read by Run
+	// (backoffSleep) and written by readPump (relay_restarting) and
+	// onRegisterAck — atomic for the same cross-goroutine reason as above.
+	fastReconnect atomic.Bool
+
 	// Connection liveness/timeouts. Default to the package consts; overridable
 	// (e.g. shortened by tests) without touching the timing logic.
 	pingInterval time.Duration
@@ -676,7 +685,8 @@ func (c *Client) readPump(done chan struct{}) {
 			c.onRegisterAck(base.SupportsEventAck)
 			continue
 		case "relay_restarting":
-			c.logger.Info("relay restarting; expecting a brief disconnect")
+			c.logger.Info("relay restarting; switching to fast reconnect")
+			c.fastReconnect.Store(true)
 			continue
 		}
 
@@ -912,6 +922,7 @@ func (c *Client) onRegisterAck(supports bool) {
 	// connection could still be torn down with 4001 on a bad token, which must
 	// keep the backoff growing.
 	c.reconnectAttempt.Store(0)
+	c.fastReconnect.Store(false)
 	// A confirmed registration means the token is good — clear any prior auth
 	// rejections so a later transient 4001 starts counting from scratch.
 	c.authRejectCount.Store(0)
@@ -938,7 +949,7 @@ func (c *Client) onRegisterAck(supports bool) {
 // must keep retrying indefinitely until the relay comes back (or the token is
 // fixed via re-login).
 func (c *Client) backoffSleep(ctx context.Context) bool {
-	delay := backoffDelay(int(c.reconnectAttempt.Load()))
+	delay := backoffDelay(int(c.reconnectAttempt.Load()), c.fastReconnect.Load())
 	c.reconnectAttempt.Add(1)
 	select {
 	case <-time.After(delay):
@@ -948,11 +959,33 @@ func (c *Client) backoffSleep(ctx context.Context) bool {
 	}
 }
 
-// backoffDelay returns the jittered reconnect delay for the given consecutive
-// attempt count: an exponential base (1s, 2s, 4s, 8s, 16s, capped at maxBackoff)
-// with full jitter applied — the result is uniformly random in [base/2, base].
-// Pure (aside from the RNG) so the progression is unit-testable.
-func backoffDelay(attempt int) time.Duration {
+// fastReconnectSteps is the compact, deterministic delay sequence used right
+// after the daemon receives relay_restarting — the relay is coming back fast,
+// so we poll tightly instead of the usual 1/2/4s exponential backoff. Capped
+// at 1500ms; no jitter so the cadence is predictable.
+var fastReconnectSteps = []time.Duration{
+	200 * time.Millisecond, 400 * time.Millisecond, 600 * time.Millisecond,
+	800 * time.Millisecond, 1000 * time.Millisecond, 1500 * time.Millisecond,
+}
+
+// backoffDelay returns the reconnect delay for the given consecutive attempt
+// count. When fast is false (default), it is an exponential base (1s, 2s, 4s,
+// 8s, 16s, capped at maxBackoff) with full jitter — uniformly random in
+// [base/2, base]. When fast is true (relay just announced a restart), it
+// returns the deterministic fastReconnectSteps sequence. Pure aside from the
+// RNG so the progression is unit-testable.
+func backoffDelay(attempt int, fast bool) time.Duration {
+	if fast {
+		i := attempt
+		if i < 0 {
+			i = 0
+		}
+		if i >= len(fastReconnectSteps) {
+			i = len(fastReconnectSteps) - 1
+		}
+		return fastReconnectSteps[i]
+	}
+
 	// Cap the shift so 1<<attempt can't overflow; 1<<5 = 32s already exceeds the
 	// 30s cap, so attempts beyond 5 all clamp to maxBackoff.
 	shift := min(attempt, 5)

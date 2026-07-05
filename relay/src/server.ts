@@ -42,18 +42,28 @@ const rateLimiter = new ConnectionRateLimiter({
 });
 
 async function main() {
-  const pool = createPool(parseDBUrl(DB_URL));
-  await initDB(pool);
-  console.log('Database initialized');
-  // Backfill sessions token columns from agent_text usage events
-  try {
-    const backfilled = await backfillSessionTokens(pool);
-    if (backfilled > 0) console.log(`[tokens] backfilled ${backfilled} sessions with token usage`);
-    const modelBf = await backfillSessionModel(pool);
-    if (modelBf > 0) console.log(`[tokens] backfilled ${modelBf} sessions with model`);
-    const statsBf = await backfillTokenDailyStats(pool);
-    if (statsBf > 0) console.log(`[tokens] backfilled ${statsBf} token_daily_stats rows`);
-  } catch (e) { console.error('[tokens] backfill failed:', e); }
+  const tStart = (typeof performance !== 'undefined' ? performance.now() : Date.now())
+  const pool = createPool(parseDBUrl(DB_URL))
+  const tPool = (typeof performance !== 'undefined' ? performance.now() : Date.now())
+  // initDB 不阻塞 app.listen：生产重启表已存在，initDB 基本 no-op；全新库首启期间
+  // 表可能短暂不存在，但生产不触发该路径。失败仍致命 → exit。
+  initDB(pool)
+    .then(async () => {
+      const t = (typeof performance !== 'undefined' ? performance.now() : Date.now());
+      console.log(`[startup] initDB done in ${(t - tPool).toFixed(0)}ms`);
+      console.log('Database initialized');
+      // Backfill sessions token columns from agent_text usage events
+      try {
+        const backfilled = await backfillSessionTokens(pool);
+        if (backfilled > 0) console.log(`[tokens] backfilled ${backfilled} sessions with token usage`);
+        const modelBf = await backfillSessionModel(pool);
+        if (modelBf > 0) console.log(`[tokens] backfilled ${modelBf} sessions with model`);
+        const statsBf = await backfillTokenDailyStats(pool);
+        if (statsBf > 0) console.log(`[tokens] backfilled ${statsBf} token_daily_stats rows`);
+      } catch (e) { console.error('[tokens] backfill failed:', e); }
+    })
+    .catch((e) => { console.error('[startup] initDB failed:', e); process.exit(1) })
+  const tInit = tPool // listen 不再等 initDB
 
   const router = new Router(pool);
   const app = Fastify({ logger: false });
@@ -1124,13 +1134,16 @@ async function main() {
   });
 
   try {
-    await app.listen({ port: PORT, host: '0.0.0.0' });
-    console.log(`pocketctl relay listening on port ${PORT} [${NODE_ENV}]`);
-  } catch (err) { console.error('failed to start:', err); process.exit(1); }
+    await app.listen({ port: PORT, host: '0.0.0.0' })
+    const tListen = (typeof performance !== 'undefined' ? performance.now() : Date.now())
+    console.log(`pocketctl relay listening on port ${PORT} [${NODE_ENV}]`)
+    console.log(`[startup] pool=${(tPool - tStart).toFixed(0)}ms initDB=${(tInit - tPool).toFixed(0)}ms listen=${(tListen - tInit).toFixed(0)}ms total=${(tListen - tStart).toFixed(0)}ms`)
+  } catch (err) { console.error('failed to start:', err); process.exit(1) }
 
-  // Graceful shutdown: suppress offline pushes (daemons will reconnect to the
-  // new process — they are not genuinely offline), hint daemons to reconnect,
-  // then close the server. Guarded so double signals don't re-enter.
+  // Graceful shutdown: tell peers we're restarting, then terminate every WS
+  // immediately so the old process exits in <1s. The old code's `await
+  // app.close()` blocked ~30s on ws's closeTimeout when a peer didn't ack the
+  // close frame; terminate() bypasses that. A 2s race guards any stray conn.
   let shuttingDown = false;
   const shutdown = async (signal: string) => {
     if (shuttingDown) return;
@@ -1138,12 +1151,16 @@ async function main() {
     console.log(`[shutdown] received ${signal}, draining...`);
     router.beginShutdown();
     router.broadcastRelayRestarting();
-    try { await app.close(); } catch (e) { console.error('[shutdown] close error:', e); }
-    router.stop();
-    process.exit(0);
-  };
-  process.on('SIGTERM', () => { shutdown('SIGTERM'); });
-  process.on('SIGINT', () => { shutdown('SIGINT'); });
+    router.terminateAllConnections()
+    try {
+      await Promise.race([app.close(), new Promise(r => setTimeout(r, 2000))])
+    } catch (e) { console.error('[shutdown] close error:', e) }
+    try { await pool.end() } catch (e) { console.error('[shutdown] pool.end error:', e) }
+    router.stop()
+    process.exit(0)
+  }
+  process.on('SIGTERM', () => { shutdown('SIGTERM') })
+  process.on('SIGINT', () => { shutdown('SIGINT') })
 
   // Periodic cleanup: remove tombstones older than 30 days (every 6 hours)
   setInterval(async () => {
