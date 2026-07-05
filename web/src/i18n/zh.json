@@ -93,6 +93,7 @@
   "session.stop_session_not_found": "会话已不存在（可能已被清理）",
   "session.tool_timeout": "已超时（未收到结果）",
   "session.ended": "Session 已结束",
+  "session.subagent_readonly": "子代理会话 — 只读，请在主会话继续对话",
   "session.input_creating": "会话创建中…",
   "session.input_resume": "继续会话（将恢复历史上下文）...",
   "session.input_send": "发送消息... (⌥+Enter 换行)",

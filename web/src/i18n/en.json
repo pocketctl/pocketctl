@@ -93,6 +93,7 @@
   "session.stop_session_not_found": "Session no longer exists (may have been purged)",
   "session.tool_timeout": "Timed out (no result received)",
   "session.ended": "Session ended",
+  "session.subagent_readonly": "Sub-agent session — read-only. Continue in the parent session.",
   "session.input_creating": "Session creating…",
   "session.input_resume": "Resume session (history restored)...",
   "session.input_send": "Type a message... (⌥+Enter for newline)",

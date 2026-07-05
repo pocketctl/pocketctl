@@ -157,10 +157,19 @@
             @toggleExpand="msg.expanded = !msg.expanded"
             @toggleOutput="msg.outputExpanded = !msg.outputExpanded"
           />
+          <SubAgentFoldGroup
+            v-else-if="msg.type === 'subagent'"
+            :agent-id="msg.tool"
+            :title="msg.title || msg.input"
+            :desc="msg.input"
+            :agent-type="msg.agentType || ''"
+            :token-usage="msg.tokenUsage || childrenToken[msg.tool]"
+            :messages="subagentMessages[msg.tool] || []"
+            :parent-title="sessionTitle || ''"
+          />
           <ToolCallCard
-            v-else-if="msg.type === 'tool_call' || msg.type === 'subagent'"
+            v-else-if="msg.type === 'tool_call'"
             :message="msg"
-            :token-usage="msg.type === 'subagent' ? (msg.tokenUsage || childrenToken[msg.tool]) : undefined"
             @toggleExpand="msg.expanded = !msg.expanded"
             @toggleOutput="msg.outputExpanded = !msg.outputExpanded"
           />
@@ -323,6 +332,7 @@
             </div>
           </div>
         </template>
+        <div v-else-if="isSubagent" class="readonly-hint">{{ t('session.subagent_readonly') }}</div>
         <div v-else class="ended-text">{{ t('session.ended') }}</div>
       </div>
       </template><!-- /v-else hasNoSessions -->
@@ -362,7 +372,9 @@ import QuestionCard from '../components/messages/QuestionCard.vue'
 import ApprovalCard from '../components/messages/ApprovalCard.vue'
 import InteractiveChoiceCard from '../components/messages/InteractiveChoiceCard.vue'
 import DiffCard from '../components/messages/DiffCard.vue'
+import SubAgentFoldGroup from '../components/messages/SubAgentFoldGroup.vue'
 import { buildResumeCommand } from '../utils/resumeCommand'
+import { resolveAgentTarget } from './classifyByAgent'
 import { formatToolInput } from '../utils/toolDisplay'
 import { isDiffTool } from '../utils/diffRender'
 import { useSessionRename } from '../composables/useSessionRename'
@@ -378,6 +390,8 @@ const { t } = useLocale()
 const sessionId = computed(() => route.params.id as string)
 const messages = ref<any[]>([])
 const allSessions = ref<any[]>([])
+// P2: per-agent message buckets for sub-agent events (keyed by agentId)
+const subagentMessages = ref<Record<string, any[]>>({})
 // P1a: children token map keyed by agentId
 const childrenToken = ref<Record<string, { tokenIn: number; tokenOut: number; tokenCache: number; tokenCacheCreate: number }>>({})
 const messageInput = ref('')
@@ -522,7 +536,9 @@ const isDaemonSession = computed(() => {
   const s = allSessions.value.find((x: any) => x.session_id === sessionId.value)
   return s?.source === 'daemon'
 })
-const canInput = computed(() => !isDisconnected.value && (!isTerminal.value || isDaemonSession.value))
+// Sub-agent sessions are read-only (no input box — continue in the parent session)
+const isSubagent = computed(() => !!allSessions.value.find((s: any) => s.session_id === sessionId.value)?.is_subagent)
+const canInput = computed(() => !isDisconnected.value && (!isTerminal.value || isDaemonSession.value) && !isSubagent.value)
 // Agent is actively generating (send button → stop button)
 // Agent is actively working — includes 'waiting' (tool execution in progress),
 // otherwise the timer would stop prematurely when a tool call is running.
@@ -1183,8 +1199,10 @@ function isDuplicate(type: string, text: string, target = messages.value): boole
   return !!last && last.type === type && (last.content || '') === text
 }
 
-function processEvent(evt: any, target: any[] = messages.value) {
+function processEvent(evt: any, target: any[] = messages.value, subagentOverride?: Record<string, any[]>) {
   const type = evt.type || evt.event_type
+  // P2: route sub-agent events to per-agent buckets; parent events keep default target
+  target = resolveAgentTarget(evt, subagentOverride ?? subagentMessages.value, target)
   if (type === 'user_text') {
     const text = evt.text || evt.content || evt.payload?.text || evt.payload?.content || ''
     if (text && !isDuplicate('user_text', text, target)) target.push({ id: nextId('u'), type: 'user_text', role: 'user', content: text })
@@ -1339,6 +1357,8 @@ watch(sessionId, (newId, oldId) => {
     lastTurnDuration.value = null
     lastUsage.value = null  // reset context usage on session switch
     messages.value = []
+    subagentMessages.value = {}
+    childrenToken.value = {}
     status.value = 'running'
     awaitingStart.value = false  // A: reset optimistic window on session switch
     exitReason.value = ''
@@ -1393,6 +1413,11 @@ onMounted(() => {
         if (m.type === 'subagent' && m.tool && childrenToken.value[m.tool]) {
           m.tokenUsage = { ...childrenToken.value[m.tool] }
         }
+      }
+      // P2: sync child titles into subagent placeholder messages
+      for (const c of cur.children) {
+        const m: any = messages.value.find((x: any) => x.type === 'subagent' && x.tool === c.agentId)
+        if (m && c.title) m.title = c.title
       }
     }
     // default 哨兵 → 自动落到首个会话（避免停在空白的 default 占位）：
@@ -1487,8 +1512,14 @@ onMounted(() => {
       const oldScrollHeight = messagesEl.value?.scrollHeight || 0
       const oldScrollTop = messagesEl.value?.scrollTop || 0
       const tempMsgs: any[] = []
-      for (const evt of evts) processEvent(evt, tempMsgs)
+      const tempSubagent: Record<string, any[]> = {}
+      for (const evt of evts) processEvent(evt, tempMsgs, tempSubagent)
       if (tempMsgs.length) messages.value = [...tempMsgs, ...messages.value]
+      // prepend older sub-agent events to each persistent bucket
+      for (const [agentId, bucket] of Object.entries(tempSubagent)) {
+        if (!subagentMessages.value[agentId]) subagentMessages.value[agentId] = []
+        subagentMessages.value[agentId] = [...bucket, ...subagentMessages.value[agentId]]
+      }
       nextTick(() => {
         if (!messagesEl.value) return
         const delta = messagesEl.value.scrollHeight - oldScrollHeight
@@ -1598,7 +1629,17 @@ onMounted(() => {
 
   cleanups.push(onEvent('subagent_discovered', (msg: any) => {
     if (msg.session_id !== sessionId.value) return
-    messages.value.push({ id: nextId('sa'), type: 'subagent', tool: msg.agent_id || 'Agent', input: msg.subagent_desc, status: 'completed', expanded: true, outputExpanded: false })
+    // P2: initialise subagent message bucket so the fold group can render even empty
+    const aid = msg.agent_id || 'Agent'
+    subagentMessages.value[aid] = subagentMessages.value[aid] || []
+    messages.value.push({ id: nextId('sa'), type: 'subagent', tool: aid, input: msg.subagent_desc, status: 'completed', expanded: true, outputExpanded: false })
+  }))
+
+  // P2: live subagent_title_update — update fold group header with resolved title
+  cleanups.push(onEvent('subagent_title_update', (msg: any) => {
+    if (msg.session_id !== sessionId.value || !msg.agent_id) return
+    const m: any = messages.value.find((x: any) => x.type === 'subagent' && x.tool === msg.agent_id)
+    if (m && msg.title) m.title = msg.title
   }))
 
   // P1a: incremental subagent_usage — accumulate into childrenToken + sync subagent message
@@ -1813,6 +1854,7 @@ onMounted(() => {
 .chat-input-area { position: relative; flex-shrink: 0; border-top: 1px solid var(--border); padding: 12px 20px; background: var(--surface); transition: background var(--transition), border-color var(--transition); }
 .chat-input-area.ended { display: flex; align-items: center; justify-content: center; padding: 14px 20px; }
 .ended-text { color: var(--fg-tertiary); font-size: 13px; }
+.readonly-hint { color: var(--fg-tertiary); font-size: 13px; font-style: italic; }
 
 .chat-input-container { position: relative; background: var(--bg); border: 1px solid var(--border); border-radius: var(--radius-xl); transition: border-color 0.15s, box-shadow 0.15s; }
 .chat-input-container.focused { border-color: var(--border-focus); box-shadow: 0 0 0 3px var(--accent-muted); }
