@@ -1,6 +1,7 @@
 package adapter
 
 import (
+	"encoding/json"
 	"testing"
 )
 
@@ -233,5 +234,28 @@ func TestJSONLStreamParserPermissionMode(t *testing.T) {
 	}
 	if events[0].PermissionMode != "plan" {
 		t.Errorf("expected plan, got %s", events[0].PermissionMode)
+	}
+}
+
+func TestParseSidechainEntryFields(t *testing.T) {
+	line := `{"type":"user","sessionId":"85d3d7b6","isSidechain":true,"parentUuid":"abc-123","message":{"role":"user","content":"hi"}}`
+	events, err := ParseJSONLLine(line)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	// 主要断言：字段被接住、不报错、user_text 正常产出
+	if len(events) == 0 {
+		t.Fatal("expected at least one event")
+	}
+	// 直接验证 JSONLEntry 反序列化接住字段
+	var entry JSONLEntry
+	if err := json.Unmarshal([]byte(line), &entry); err != nil {
+		t.Fatalf("unmarshal entry: %v", err)
+	}
+	if !entry.IsSidechain {
+		t.Error("IsSidechain not parsed")
+	}
+	if entry.ParentUuid != "abc-123" {
+		t.Errorf("ParentUuid = %q, want abc-123", entry.ParentUuid)
 	}
 }

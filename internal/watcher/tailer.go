@@ -333,17 +333,20 @@ func findJSONLBySessionID(home string, sessionID string) (string, error) {
 
 // SubAgentTailer wraps a JSONLTailer for a sub-agent, stamping events with AgentID.
 type SubAgentTailer struct {
-	tailer   *JSONLTailer
-	agentID  string
+	tailer          *JSONLTailer
+	agentID         string
+	parentSessionID string
+	agentType       string
+	titleSent       bool // first user_text triggers title generation once
 }
 
 // NewSubAgentTailer creates a tailer for a sub-agent JSONL file that reads from the start.
-func NewSubAgentTailer(filePath string, agentID string) (*SubAgentTailer, error) {
+func NewSubAgentTailer(filePath string, agentID string, parentSessionID string, agentType string) (*SubAgentTailer, error) {
 	tailer, err := NewJSONLTailerFromStart(filePath, adapter.AgentClaude) // sub-agents are a Claude feature
 	if err != nil {
 		return nil, fmt.Errorf("create sub-agent tailer: %w", err)
 	}
-	return &SubAgentTailer{tailer: tailer, agentID: agentID}, nil
+	return &SubAgentTailer{tailer: tailer, agentID: agentID, parentSessionID: parentSessionID, agentType: agentType}, nil
 }
 
 // TailNewLines reads new lines and stamps each event with the sub-agent's AgentID.
@@ -359,6 +362,9 @@ func (t *SubAgentTailer) TailNewLines() ([]protocol.DaemonEvent, error) {
 }
 
 // Run starts a periodic tail loop for a sub-agent, sending stamped events to outputCh.
+// For events carrying Usage, an additional subagent_usage event is emitted so the
+// relay can accumulate the sub-agent's token columns.
+// On the first user_text event, a generate_subagent_title_request is emitted once.
 // Closes the inner tailer on exit.
 func (t *SubAgentTailer) Run(ctx context.Context, outputCh chan<- protocol.DaemonEvent) {
 	defer t.tailer.Close()
@@ -376,7 +382,29 @@ func (t *SubAgentTailer) Run(ctx context.Context, outputCh chan<- protocol.Daemo
 				continue
 			}
 			for _, evt := range events {
-				outputCh <- evt
+				outputCh <- evt // original event (already stamped with AgentID)
+				// Sub-agent output with usage: emit extra subagent_usage for relay token accumulation.
+				if evt.Usage != nil && evt.AgentID != "" {
+					outputCh <- protocol.DaemonEvent{
+						Type:            "subagent_usage",
+						SessionID:       evt.SessionID, // parent sid (child jsonl sessionId field is the parent sid)
+						AgentID:         evt.AgentID,
+						ParentSessionID: evt.SessionID,
+						Usage:           evt.Usage,
+					}
+				}
+				// First user_text → generate_subagent_title_request (once).
+				if !t.titleSent && evt.Type == "user_text" && evt.Text != "" {
+					t.titleSent = true
+					outputCh <- protocol.DaemonEvent{
+						Type:            "generate_subagent_title_request",
+						SessionID:       t.parentSessionID,
+						AgentID:         t.agentID,
+						ParentSessionID: t.parentSessionID,
+						SubAgentType:    t.agentType,
+						UserMessage:     evt.Text,
+					}
+				}
 			}
 		}
 	}
