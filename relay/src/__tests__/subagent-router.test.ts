@@ -27,8 +27,14 @@ import { Router } from '../router.js'
 
 // Minimal pool: satisfies Router constructor's type but never used for real queries.
 // query returns { rows: [] } by default so pool.query(...).rows[0] never throws.
+// Returns rowCount: 1 for subagent_usage_seen INSERTs so the dedup gate passes through.
 function createMockPool(): any {
-  return { query: vi.fn().mockResolvedValue({ rows: [], rowCount: 0 }) }
+  return {
+    query: vi.fn(async (sql: string) => {
+      if (/subagent_usage_seen/i.test(sql)) return { rows: [], rowCount: 1 }
+      return { rows: [], rowCount: 0 }
+    }),
+  }
 }
 
 function createMockWs(): any {

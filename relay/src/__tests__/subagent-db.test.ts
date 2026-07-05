@@ -15,13 +15,13 @@ describe('db subagent layer', () => {
   test('addSubagentUsage accumulates token columns (INSERT ON CONFLICT)', async () => {
     const calls: any[] = []
     const pool: any = { query: vi.fn((sql: string, params: any[]) => { calls.push({ sql, params }); return Promise.resolve({ rows: [] }) }) }
-    await addSubagentUsage(pool, 'parent-1', 'agent-abc', 100, 200, 50)
+    await addSubagentUsage(pool, 'parent-1', 'agent-abc', 100, 200, 50, 30)
     expect(calls).toHaveLength(1)
     expect(calls[0].sql).toContain('INSERT INTO subagents')
     expect(calls[0].sql).toMatch(/ON CONFLICT.*DO UPDATE/i)
     expect(calls[0].sql).toMatch(/subagents\.token_in\s*\+\s*\$3/i)
     expect(calls[0].sql).toMatch(/subagents\.token_out\s*\+\s*\$4/i)
-    expect(calls[0].params).toEqual(['parent-1', 'agent-abc', 100, 200, 50])
+    expect(calls[0].params).toEqual(['parent-1', 'agent-abc', 100, 200, 50, 30])
   })
 
   test('listSubagentsByParent maps rows', async () => {

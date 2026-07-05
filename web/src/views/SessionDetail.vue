@@ -69,6 +69,10 @@
           <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/></svg>
           {{ contextTokens }}
         </span>
+        <span v-if="parentTotalTokens !== null" class="context-pill" :title="t('session.total_incl_subagent')" style="cursor:default;">
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M16 8h-6a2 2 0 1 0 0 4h4a2 2 0 1 1 0 4H8"/><path d="M12 18V6"/></svg>
+          {{ fmtTk(parentTotalTokens) }}
+        </span>
         <span v-if="currentModel" class="model-pill" :title="'当前模型：' + currentModel">
           <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.6 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.6a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
           {{ currentModel }}
@@ -156,6 +160,7 @@
           <ToolCallCard
             v-else-if="msg.type === 'tool_call' || msg.type === 'subagent'"
             :message="msg"
+            :token-usage="msg.type === 'subagent' ? (msg.tokenUsage || childrenToken[msg.tool]) : undefined"
             @toggleExpand="msg.expanded = !msg.expanded"
             @toggleOutput="msg.outputExpanded = !msg.outputExpanded"
           />
@@ -373,6 +378,8 @@ const { t } = useLocale()
 const sessionId = computed(() => route.params.id as string)
 const messages = ref<any[]>([])
 const allSessions = ref<any[]>([])
+// P1a: children token map keyed by agentId
+const childrenToken = ref<Record<string, { tokenIn: number; tokenOut: number; tokenCache: number; tokenCacheCreate: number }>>({})
 const messageInput = ref('')
 const commandsCache = ref<CommandItem[]>([])
 const currentModel = ref('')            // resolved model name from session_meta event
@@ -696,6 +703,18 @@ const contextTooltip = computed(() => {
   }
   return ''
 })
+
+// P1a: parent total tokens (includes subagent tokens) from session_list
+const parentTotalTokens = computed(() => {
+  const s = allSessions.value.find((s: any) => s.session_id === sessionId.value)
+  return (s as any)?.totalTokens ?? null
+})
+function fmtTk(n: number) {
+  n = +n || 0
+  if (n >= 1e6) return (n / 1e6).toFixed(1) + 'M'
+  if (n >= 1e3) return (n / 1e3).toFixed(0) + 'K'
+  return '' + n
+}
 
 const milestones = computed(() => {
   const ms: any[] = []
@@ -1363,6 +1382,19 @@ onMounted(() => {
 
   cleanups.push(onEvent('session_list', (msg: any) => {
     allSessions.value = msg.sessions || []
+    // P1a: populate childrenToken from current session's children
+    const cur = msg.sessions?.find((s: any) => s.session_id === sessionId.value)
+    if (cur?.children) {
+      for (const c of cur.children) {
+        childrenToken.value[c.agentId] = { tokenIn: c.tokenIn || 0, tokenOut: c.tokenOut || 0, tokenCache: c.tokenCache || 0, tokenCacheCreate: c.tokenCacheCreate || 0 }
+      }
+      // sync subagent messages with fresh authoritative totals from session_list
+      for (const m of messages.value as any[]) {
+        if (m.type === 'subagent' && m.tool && childrenToken.value[m.tool]) {
+          m.tokenUsage = { ...childrenToken.value[m.tool] }
+        }
+      }
+    }
     // default 哨兵 → 自动落到首个会话（避免停在空白的 default 占位）：
     //   - 带 host query（从主机"查看全部"跳来）：该主机的首个会话
     //   - 无 host query（sidebar 直接进入会话模块）：整个列表的首个会话
@@ -1567,6 +1599,21 @@ onMounted(() => {
   cleanups.push(onEvent('subagent_discovered', (msg: any) => {
     if (msg.session_id !== sessionId.value) return
     messages.value.push({ id: nextId('sa'), type: 'subagent', tool: msg.agent_id || 'Agent', input: msg.subagent_desc, status: 'completed', expanded: true, outputExpanded: false })
+  }))
+
+  // P1a: incremental subagent_usage — accumulate into childrenToken + sync subagent message
+  cleanups.push(onEvent('subagent_usage', (msg: any) => {
+    if (msg.session_id !== sessionId.value || !msg.agent_id) return
+    const u = msg.usage || {}
+    childrenToken.value[msg.agent_id] = {
+      tokenIn: (childrenToken.value[msg.agent_id]?.tokenIn || 0) + (u.input_tokens || 0),
+      tokenOut: (childrenToken.value[msg.agent_id]?.tokenOut || 0) + (u.output_tokens || 0),
+      tokenCache: (childrenToken.value[msg.agent_id]?.tokenCache || 0) + (u.cache_read_tokens || 0),
+      tokenCacheCreate: (childrenToken.value[msg.agent_id]?.tokenCacheCreate || 0) + (u.cache_create_tokens || 0),
+    }
+    // Sync to the matching subagent message so ToolCallCard re-renders
+    const m: any = messages.value.find((x: any) => x.type === 'subagent' && x.tool === msg.agent_id)
+    if (m) m.tokenUsage = { ...childrenToken.value[msg.agent_id] }
   }))
 
   cleanups.push(onEvent('session_status', (msg: any) => {

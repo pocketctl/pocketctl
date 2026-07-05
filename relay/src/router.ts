@@ -250,6 +250,10 @@ export class Router {
     // are still recognised as duplicates.
     const prevSeq = this.daemonSeq.get(daemonId);
     if (!prevSeq || prevSeq.startedAt !== daemonStartedAt) {
+      // New daemon incarnation (non-graceful restart / rebuild / fresh install):
+      // seqCtr resets to 0 so prior-incarnation seen rows would collide with new
+      // replayed events via ON CONFLICT DO NOTHING, permanently losing token deltas.
+      await this.pool.query('DELETE FROM subagent_usage_seen WHERE daemon_id = $1', [daemonId]).catch(console.error);
       // Seed the persisted mark from the daemon's reported durable baseline. A
       // daemon that reconnects (after the grace window dropped our entry) or
       // restarts from its spool replays only its unacked tail; without this the
@@ -670,7 +674,20 @@ export class Router {
       this.markPersisted(daemonId, msg.seq);
       const u = msg.usage;
       if (msg.agent_id && u) {
-        db.addSubagentUsage(this.pool, sessionId, msg.agent_id, u.input_tokens || 0, u.output_tokens || 0, u.cache_read_tokens || 0).catch(console.error);
+        // P1a: 幂等去重 —— relay persistedHigh 是内存，重启后 daemon replay 会重发 subagent_usage。
+        // 用 subagent_usage_seen(daemon_id, seq) 主键 INSERT ON CONFLICT DO NOTHING：rowCount=0 表示已处理，跳过累加。
+        // Tradeoff (non-transactional): if this seen-INSERT commits but addSubagentUsage then
+        // fails, that seq's delta is permanently lost. The reverse order would re-open the
+        // relay-restart double-count window, so we accept this tradeoff.
+        this.pool.query(
+          'INSERT INTO subagent_usage_seen (daemon_id, seq) VALUES ($1, $2) ON CONFLICT DO NOTHING',
+          [daemonId, msg.seq]
+        ).then((r) => {
+          if ((r?.rowCount ?? 0) === 0) return; // 已 seen，跳过
+          db.addSubagentUsage(this.pool, sessionId, msg.agent_id,
+            u.input_tokens || 0, u.output_tokens || 0, u.cache_read_tokens || 0, u.cache_create_tokens || 0
+          ).catch(console.error);
+        }).catch(console.error);
       }
       return;
     }
