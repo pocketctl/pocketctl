@@ -140,22 +140,35 @@
         <span class="col-time">{{ t('dashboard.column_time') }}</span>
         <span class="col-actions" style="text-align:right;">{{ t('dashboard.column_status') }}</span>
       </div>
-      <div v-for="s in paginatedSessions" :key="s.session_id" :class="['session-row', { 'pending-delete': s.__pendingDelete }]" @click="!s.__pendingDelete && $router.push(`/session/${s.session_id}`)">
-        <div class="session-info">
-          <span :class="['status-dot', getEffectiveStatus(s)]"></span>
-          <span v-if="s.pinned" class="pin-mark">📌</span>
-          <input v-if="sessRenamingId === s.session_id" class="ss-rename-input" v-model="sessRenameInput" maxlength="60"
-            @click.stop @keydown.enter="sessCommitRename(s)" @keydown.escape="sessCancelRename" @blur="sessCommitRename(s)" />
-          <span v-else :class="['session-title', { mono: !s.title || s.title.startsWith('Terminal Session') }]">{{ s.title || s.session_id.slice(0, 8) }}</span>
-          <AgentBadge :agent="s.agent_type" size="sm" />
+      <template v-for="s in paginatedSessions" :key="s.session_id">
+        <div :class="['session-row', { 'pending-delete': s.__pendingDelete, 'has-children': s.children && s.children.length }]" @click="!s.__pendingDelete && $router.push(`/session/${s.session_id}`)">
+          <div class="session-info">
+            <span v-if="s.children && s.children.length" class="fold-toggle" @click.stop="toggleFold(s.session_id)">{{ folded[s.session_id] ? '▾' : '▸' }}</span>
+            <span :class="['status-dot', getEffectiveStatus(s)]"></span>
+            <span v-if="s.pinned" class="pin-mark">📌</span>
+            <input v-if="sessRenamingId === s.session_id" class="ss-rename-input" v-model="sessRenameInput" maxlength="60"
+              @click.stop @keydown.enter="sessCommitRename(s)" @keydown.escape="sessCancelRename" @blur="sessCommitRename(s)" />
+            <span v-else :class="['session-title', { mono: !s.title || s.title.startsWith('Terminal Session') }]">{{ s.title || s.session_id.slice(0, 8) }}</span>
+            <span v-if="s.subagent_count > 0" class="meta-chip subagent-chip">🤖 {{ s.subagent_count }}</span>
+            <span v-if="s.totalTokens > 0" class="meta-chip token-chip" :title="t('session.total_incl_subagent')">🪙 {{ fmtTk(s.totalTokens) }}</span>
+            <AgentBadge :agent="s.agent_type" size="sm" />
+          </div>
+          <div class="session-daemon">{{ s.daemon_alias || s.hostname || s.daemon_id?.slice(0, 8) }}</div>
+          <div class="session-time">{{ formatRelativeTime(s.last_activity_at || s.updated_at) }}</div>
+          <div class="session-actions">
+            <span :class="['chip', statusChip(s)]">{{ statusLabel(s) }}</span>
+            <SessionActions :session="s" @startRename="sessStartRename" @deleted="onDeleted" @pinned="onPinned" />
+          </div>
         </div>
-        <div class="session-daemon">{{ s.daemon_alias || s.hostname || s.daemon_id?.slice(0, 8) }}</div>
-        <div class="session-time">{{ formatRelativeTime(s.last_activity_at || s.updated_at) }}</div>
-        <div class="session-actions">
-          <span :class="['chip', statusChip(s)]">{{ statusLabel(s) }}</span>
-          <SessionActions :session="s" @startRename="sessStartRename" @deleted="onDeleted" @pinned="onPinned" />
+        <div v-if="s.children && s.children.length && folded[s.session_id]" class="child-rows">
+          <div v-for="c in s.children" :key="c.agentId" class="child-row">
+            <span class="child-indent">↳</span>
+            <AgentBadge :agent="c.agentType" size="sm" />
+            <span class="child-title">{{ c.title || c.agentType }}</span>
+            <span v-if="(c.tokenIn||0)+(c.tokenOut||0) > 0" class="child-token">🪙 {{ fmtTk((c.tokenIn||0)+(c.tokenOut||0)) }}</span>
+          </div>
         </div>
-      </div>
+      </template>
     </div>
 
     <!-- Pagination -->
@@ -249,13 +262,23 @@ const onlineDaemonCount = computed(() => daemons.value.filter(d => d.daemon_onli
 const offlineDaemonCount = computed(() => daemons.value.filter(d => !d.daemon_online).length)
 const activeSessionCount = computed(() => sessions.value.filter(s => s.status === 'running' || s.status === 'busy').length)
 
-const sortedSessions = computed(() => [...sessions.value].sort((a, b) => {
+const sortedSessions = computed(() => [...sessions.value].filter(s => !s.is_subagent).sort((a, b) => {
   if (a.pinned && !b.pinned) return -1
   if (!a.pinned && b.pinned) return 1
   const ta = a.last_activity_at ? new Date(a.last_activity_at).getTime() : 0
   const tb = b.last_activity_at ? new Date(b.last_activity_at).getTime() : 0
   return tb - ta
 }))
+
+// subagent 折叠组：父 session 展开/收起其子代理列表
+const folded = ref<Record<string, boolean>>({})
+function toggleFold(id: string) { folded.value[id] = !folded.value[id] }
+function fmtTk(n: number) {
+  n = +n || 0
+  if (n >= 1e6) return (n / 1e6).toFixed(1) + 'M'
+  if (n >= 1e3) return (n / 1e3).toFixed(0) + 'K'
+  return '' + n
+}
 
 const filteredSessions = computed(() => {
   if (!selectedDaemon.value) return sortedSessions.value
@@ -436,6 +459,17 @@ function onPinned(sessionId: string, pinned: boolean) { const s = sessions.value
 .session-row .session-daemon { font-size: 13px; color: var(--fg-secondary); }
 .session-row .session-time { font-size: 13px; color: var(--fg-tertiary); }
 .session-row .session-actions { display: flex; align-items: center; gap: 6px; justify-content: flex-end; }
+/* subagent 折叠组 + 父总额 token 胶囊 */
+.fold-toggle { cursor: pointer; font-size: 13px; color: var(--fg-tertiary); user-select: none; line-height: 1; flex-shrink: 0; padding: 2px; transition: color 0.15s; }
+.fold-toggle:hover { color: var(--fg); }
+.meta-chip { font-size: 11px; padding: 1px 6px; border-radius: 4px; white-space: nowrap; flex-shrink: 0; font-weight: 500; }
+.subagent-chip { background: var(--accent-muted); color: var(--accent); }
+.token-chip { background: rgba(34,197,94,0.12); color: var(--success); }
+.child-rows { padding: 8px 20px 10px 50px; background: var(--bg); border-bottom: 1px solid var(--border); }
+.child-row { display: flex; align-items: center; gap: 8px; padding: 4px 0; font-size: 13px; color: var(--fg-secondary); }
+.child-indent { color: var(--fg-tertiary); flex-shrink: 0; }
+.child-title { color: var(--fg); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.child-token { font-size: 11px; padding: 1px 6px; border-radius: 4px; background: rgba(34,197,94,0.12); color: var(--success); flex-shrink: 0; }
 .session-empty { padding: 48px; text-align: center; }
 
 /* Pagination */

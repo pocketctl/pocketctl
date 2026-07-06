@@ -64,3 +64,7 @@ web/vite.config.d.ts
 # Tool run artifacts (.omo continuation state) — anywhere in the tree
 .omo/
 **/.omo/
+
+# AI agent runtime working dirs
+.agents/
+.codex/
