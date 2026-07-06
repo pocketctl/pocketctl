@@ -140,6 +140,23 @@ export async function initDB(pool: pg.Pool): Promise<void> {
   await pool.query(`ALTER TABLE sessions ADD COLUMN IF NOT EXISTS pinned BOOLEAN NOT NULL DEFAULT false`);
   await pool.query(`ALTER TABLE sessions ADD COLUMN IF NOT EXISTS pinned_at TIMESTAMPTZ`);
   await pool.query(`CREATE INDEX IF NOT EXISTS idx_sessions_pinned ON sessions(user_id, pinned) WHERE pinned = true`);
+  await pool.query(`
+    CREATE INDEX IF NOT EXISTS idx_sessions_daemon_user_keyset
+    ON sessions (
+      user_id,
+      daemon_id,
+      (COALESCE(is_subagent, false)),
+      (CASE WHEN pinned THEN 1 ELSE 0 END) DESC,
+      (COALESCE(pinned_at, '1970-01-01T00:00:00Z'::timestamptz)) DESC,
+      (COALESCE(last_activity_at, updated_at)) DESC,
+      session_id DESC
+    )
+    WHERE session_id NOT LIKE 'pending-%'
+  `);
+  await pool.query(`
+    CREATE INDEX IF NOT EXISTS idx_subagents_parent_created
+    ON subagents(parent_session_id, created_at)
+  `);
 
   // C2: Token cost tracking — per-session cumulative cost (USD) from result events
   await pool.query(`ALTER TABLE sessions ADD COLUMN IF NOT EXISTS cost_usd DOUBLE PRECISION DEFAULT 0`);
@@ -372,6 +389,13 @@ export interface SessionListPage {
   nextCursor: string | null;
 }
 
+interface SessionListCursor {
+  pinned: number;
+  pinnedAt: string;
+  activityAt: string;
+  sessionId: string;
+}
+
 // 内部：带 children 聚合的列表（listSessions / listSessionsByUser 共用）
 export async function listSessionsWithChildren(pool: pg.Pool, whereUser?: number): Promise<any[]> {
   const baseParams: any[] = [];
@@ -420,6 +444,7 @@ function serializeSessionRow(row: any, byParent: Map<string, any[]>): any {
     tokCacheRead: parseInt(row.tok_cache_read ?? 0, 10),
     tokCacheCreate: parseInt(row.tok_cache_create ?? 0, 10),
     total_tokens: undefined, tok_input: undefined, tok_output: undefined, tok_cache_read: undefined, tok_cache_create: undefined,
+    sort_pinned: undefined, sort_pinned_at: undefined, sort_activity_at: undefined,
     daemon_online: row.daemon_status === 'online',
     daemon_alias: row.daemon_alias ?? null,
     daemon_status: undefined,
@@ -431,7 +456,36 @@ export async function listSessions(pool: pg.Pool): Promise<any[]> {
   return listSessionsWithChildren(pool);
 }
 
-/** Page top-level sessions for one daemon. `cursor` is an offset string. */
+function decodeSessionListCursor(cursor?: string | null): SessionListCursor | null {
+  if (!cursor || cursor === '0') return null;
+  try {
+    const raw = Buffer.from(cursor, 'base64url').toString('utf8');
+    const parsed = JSON.parse(raw);
+    if (
+      (parsed.pinned === 0 || parsed.pinned === 1) &&
+      typeof parsed.pinnedAt === 'string' &&
+      typeof parsed.activityAt === 'string' &&
+      typeof parsed.sessionId === 'string'
+    ) {
+      return parsed;
+    }
+  } catch {
+    return null;
+  }
+  return null;
+}
+
+function encodeSessionListCursor(row: any): string {
+  const cursor: SessionListCursor = {
+    pinned: Number(row.sort_pinned ?? 0),
+    pinnedAt: new Date(row.sort_pinned_at).toISOString(),
+    activityAt: new Date(row.sort_activity_at).toISOString(),
+    sessionId: row.session_id,
+  };
+  return Buffer.from(JSON.stringify(cursor), 'utf8').toString('base64url');
+}
+
+/** Page top-level sessions for one daemon using a keyset cursor. */
 export async function listSessionsPageByDaemon(pool: pg.Pool, opts: {
   userId?: number;
   daemonId: string;
@@ -439,45 +493,83 @@ export async function listSessionsPageByDaemon(pool: pg.Pool, opts: {
   cursor?: string | null;
 }): Promise<SessionListPage> {
   const limit = Math.max(1, Math.min(opts.limit, 100));
-  const offset = Math.max(0, Number.parseInt(opts.cursor ?? '0', 10) || 0);
-  const params: any[] = [opts.daemonId, limit + 1, offset];
-  const userClause = opts.userId !== undefined ? 'AND s.user_id = $4' : '';
+  const cursor = decodeSessionListCursor(opts.cursor);
+  const params: any[] = [opts.daemonId, limit + 1];
+  const userClause = opts.userId !== undefined ? `AND s.user_id = $${params.length + 1}` : '';
   if (opts.userId !== undefined) params.push(opts.userId);
+  let cursorClause = '';
+  if (cursor) {
+    const start = params.length + 1;
+    params.push(cursor.pinned, cursor.pinnedAt, cursor.activityAt, cursor.sessionId);
+    cursorClause = `
+       AND (
+         (CASE WHEN s.pinned THEN 1 ELSE 0 END),
+         COALESCE(s.pinned_at, '1970-01-01T00:00:00Z'::timestamptz),
+         COALESCE(s.last_activity_at, s.updated_at),
+         s.session_id
+       ) < ($${start}, $${start + 1}::timestamptz, $${start + 2}::timestamptz, $${start + 3})`;
+  }
 
+  const queryStartedAt = Date.now();
   const result = await pool.query(
     `SELECT s.session_id, s.daemon_id, s.agent_type, s.cwd, s.title, s.source, s.status,
             s.created_at, s.updated_at, s.last_activity_at, s.exit_reason, s.subagent_count, s.pinned,
             s.model, s.parent_session_id, s.is_subagent, s.root_session_id,
             s.total_tokens, s.tok_input, s.tok_output, s.tok_cache_read, s.tok_cache_create,
-            d.status AS daemon_status, d.hostname AS hostname, d.alias AS daemon_alias
+            d.status AS daemon_status, d.hostname AS hostname, d.alias AS daemon_alias,
+            CASE WHEN s.pinned THEN 1 ELSE 0 END AS sort_pinned,
+            COALESCE(s.pinned_at, '1970-01-01T00:00:00Z'::timestamptz) AS sort_pinned_at,
+            COALESCE(s.last_activity_at, s.updated_at) AS sort_activity_at
      FROM sessions s
      LEFT JOIN daemons d ON s.daemon_id = d.daemon_id
      WHERE s.session_id NOT LIKE 'pending-%'
        AND s.daemon_id = $1
        AND COALESCE(s.is_subagent, false) = false
        ${userClause}
-     ORDER BY s.pinned DESC, s.pinned_at DESC NULLS LAST, COALESCE(s.last_activity_at, s.updated_at) DESC
-     LIMIT $2 OFFSET $3`,
+       ${cursorClause}
+     ORDER BY CASE WHEN s.pinned THEN 1 ELSE 0 END DESC,
+              COALESCE(s.pinned_at, '1970-01-01T00:00:00Z'::timestamptz) DESC,
+              COALESCE(s.last_activity_at, s.updated_at) DESC,
+              s.session_id DESC
+     LIMIT $2`,
     params
   );
+  if (process.env.SESSION_LIST_DEBUG === '1') {
+    console.log('[session_list] page query', {
+      daemonId: opts.daemonId,
+      limit,
+      cursor: !!cursor,
+      rows: result.rows.length,
+      elapsedMs: Date.now() - queryStartedAt,
+    });
+  }
 
   const pageRows = result.rows.slice(0, limit);
   const hasMore = result.rows.length > limit;
   const parentIds = pageRows.map((row: any) => row.session_id);
   let byParent = new Map<string, any[]>();
   if (parentIds.length > 0) {
+    const childrenStartedAt = Date.now();
     const subs = await pool.query(
       `SELECT parent_session_id, agent_id, kind, agent_type, title, status, token_in, token_out, token_cache, token_cache_create
        FROM subagents WHERE parent_session_id = ANY($1) ORDER BY created_at ASC`,
       [parentIds]
     );
+    if (process.env.SESSION_LIST_DEBUG === '1') {
+      console.log('[session_list] children query', {
+        daemonId: opts.daemonId,
+        parents: parentIds.length,
+        rows: subs.rows.length,
+        elapsedMs: Date.now() - childrenStartedAt,
+      });
+    }
     byParent = groupSubagentsByParent(subs.rows);
   }
 
   return {
     sessions: pageRows.map((row: any) => serializeSessionRow(row, byParent)),
     hasMore,
-    nextCursor: hasMore ? String(offset + limit) : null,
+    nextCursor: hasMore ? encodeSessionListCursor(pageRows[pageRows.length - 1]) : null,
   };
 }
 

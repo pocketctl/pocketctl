@@ -37,7 +37,7 @@ import (
 	"github.com/pocketctl/pocketctl/internal/ws"
 )
 
-var version = "0.3.0-rc5"
+var version = "0.3.0-rc6"
 
 // PR2 platform defaults for the daemon entry: daemonize + service via platform
 // interface (was direct syscall.SysProcAttr{Setsid} + internal/service).
@@ -1568,7 +1568,7 @@ func handleWatcherEvents(ctx context.Context, events <-chan watcher.SessionEvent
 			switch evt.Action {
 			case "discovered":
 				logger.Info("session discovered", "session", evt.Session.SessionID, "pid", evt.Session.Pid)
-				registered := sm.RegisterTerminalSession(evt.Session.SessionID, evt.Session.Cwd, evt.Session.Pid, "", evt.Session.Status)
+				registered := sm.RegisterTerminalSession(evt.Session.SessionID, evt.Session.Cwd, evt.Session.Pid, "", evt.Session.Status, agentType)
 				// Register with process monitor
 				if evt.Session.Pid > 0 {
 					pm.Register(evt.Session.Pid, evt.Session.SessionID)
@@ -1577,7 +1577,7 @@ func handleWatcherEvents(ctx context.Context, events <-chan watcher.SessionEvent
 				if evt.Session.Pid > 0 {
 					if ttyPath, err := notify.GetTTYForPID(evt.Session.Pid); err == nil {
 						// Update TTY info (returns false if already registered, that is fine)
-						sm.RegisterTerminalSession(evt.Session.SessionID, evt.Session.Cwd, evt.Session.Pid, ttyPath, evt.Session.Status)
+						sm.RegisterTerminalSession(evt.Session.SessionID, evt.Session.Cwd, evt.Session.Pid, ttyPath, evt.Session.Status, agentType)
 					}
 				}
 				// Only start JSONL tailer if this is a genuinely new session
