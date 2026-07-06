@@ -1060,6 +1060,7 @@ func cmdDaemonStart(args []string) {
 				Cwd:       s.Cwd,
 				Status:    s.Status,
 				Source:    "terminal",
+				Agent:     s.Agent,
 			})
 		}
 		logger.Info("resync done")
