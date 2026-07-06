@@ -887,7 +887,7 @@ export class Router {
       client.subscribedSessions.add(msg.session_id);
     }
     if (msg.type === 'replay') { this.handleReplay(clientWs, msg.session_id, msg.last_seq, msg.req_id, msg.direction, msg.limit); return; }
-    if (msg.type === 'list_sessions') { this.handleListSessions(clientWs, client.userId); return; }
+    if (msg.type === 'list_sessions') { this.handleListSessions(clientWs, client.userId, msg); return; }
     if (msg.type === 'list_daemons') { console.log('[router] list_daemons from user', client.userId, 'daemons in map:', this.daemons.size); this.handleListDaemons(clientWs, client.userId); return; }
     if (msg.type === 'set_locale') {
       if (msg.locale) { client.locale = msg.locale; }
@@ -1105,8 +1105,24 @@ export class Router {
     }
   }
 
-  private async handleListSessions(clientWs: WebSocket, userId: number | null): Promise<void> {
+  private async handleListSessions(clientWs: WebSocket, userId: number | null, msg: any = {}): Promise<void> {
     try {
+      if (typeof msg.daemon_id === 'string' && msg.daemon_id.length > 0) {
+        const page = await db.listSessionsPageByDaemon(this.pool, {
+          userId: userId ?? undefined,
+          daemonId: msg.daemon_id,
+          limit: Number.isFinite(Number(msg.limit)) ? Number(msg.limit) : 30,
+          cursor: typeof msg.cursor === 'string' ? msg.cursor : null,
+        });
+        this.send(clientWs, {
+          type: 'session_list',
+          sessions: page.sessions,
+          daemon_id: msg.daemon_id,
+          has_more: page.hasMore,
+          next_cursor: page.nextCursor,
+        });
+        return;
+      }
       const sessions = userId
         ? await db.listSessionsByUser(this.pool, userId)
         : await db.listSessions(this.pool);

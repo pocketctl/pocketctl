@@ -366,6 +366,12 @@ export async function getEventsBefore(pool: pg.Pool, sessionId: string, cursor: 
   return result.rows;
 }
 
+export interface SessionListPage {
+  sessions: any[];
+  hasMore: boolean;
+  nextCursor: string | null;
+}
+
 // 内部：带 children 聚合的列表（listSessions / listSessionsByUser 共用）
 export async function listSessionsWithChildren(pool: pg.Pool, whereUser?: number): Promise<any[]> {
   const baseParams: any[] = [];
@@ -388,8 +394,13 @@ export async function listSessionsWithChildren(pool: pg.Pool, whereUser?: number
     `SELECT parent_session_id, agent_id, kind, agent_type, title, status, token_in, token_out, token_cache, token_cache_create
      FROM subagents ORDER BY created_at ASC`
   );
+  const byParent = groupSubagentsByParent(subs.rows);
+  return result.rows.map((row: any) => serializeSessionRow(row, byParent));
+}
+
+function groupSubagentsByParent(rows: any[]): Map<string, any[]> {
   const byParent = new Map<string, any[]>();
-  for (const r of subs.rows) {
+  for (const r of rows) {
     if (!byParent.has(r.parent_session_id)) byParent.set(r.parent_session_id, []);
     byParent.get(r.parent_session_id)!.push({
       agentId: r.agent_id, kind: r.kind, agentType: r.agent_type, title: r.title,
@@ -397,7 +408,11 @@ export async function listSessionsWithChildren(pool: pg.Pool, whereUser?: number
       tokenCache: r.token_cache, tokenCacheCreate: r.token_cache_create,
     });
   }
-  return result.rows.map((row: any) => ({
+  return byParent;
+}
+
+function serializeSessionRow(row: any, byParent: Map<string, any[]>): any {
+  return {
     ...row,
     totalTokens: parseInt(row.total_tokens ?? 0, 10),
     tokInput: parseInt(row.tok_input ?? 0, 10),
@@ -409,11 +424,61 @@ export async function listSessionsWithChildren(pool: pg.Pool, whereUser?: number
     daemon_alias: row.daemon_alias ?? null,
     daemon_status: undefined,
     children: byParent.get(row.session_id) || [],
-  }));
+  };
 }
 
 export async function listSessions(pool: pg.Pool): Promise<any[]> {
   return listSessionsWithChildren(pool);
+}
+
+/** Page top-level sessions for one daemon. `cursor` is an offset string. */
+export async function listSessionsPageByDaemon(pool: pg.Pool, opts: {
+  userId?: number;
+  daemonId: string;
+  limit: number;
+  cursor?: string | null;
+}): Promise<SessionListPage> {
+  const limit = Math.max(1, Math.min(opts.limit, 100));
+  const offset = Math.max(0, Number.parseInt(opts.cursor ?? '0', 10) || 0);
+  const params: any[] = [opts.daemonId, limit + 1, offset];
+  const userClause = opts.userId !== undefined ? 'AND s.user_id = $4' : '';
+  if (opts.userId !== undefined) params.push(opts.userId);
+
+  const result = await pool.query(
+    `SELECT s.session_id, s.daemon_id, s.agent_type, s.cwd, s.title, s.source, s.status,
+            s.created_at, s.updated_at, s.last_activity_at, s.exit_reason, s.subagent_count, s.pinned,
+            s.model, s.parent_session_id, s.is_subagent, s.root_session_id,
+            s.total_tokens, s.tok_input, s.tok_output, s.tok_cache_read, s.tok_cache_create,
+            d.status AS daemon_status, d.hostname AS hostname, d.alias AS daemon_alias
+     FROM sessions s
+     LEFT JOIN daemons d ON s.daemon_id = d.daemon_id
+     WHERE s.session_id NOT LIKE 'pending-%'
+       AND s.daemon_id = $1
+       AND COALESCE(s.is_subagent, false) = false
+       ${userClause}
+     ORDER BY s.pinned DESC, s.pinned_at DESC NULLS LAST, COALESCE(s.last_activity_at, s.updated_at) DESC
+     LIMIT $2 OFFSET $3`,
+    params
+  );
+
+  const pageRows = result.rows.slice(0, limit);
+  const hasMore = result.rows.length > limit;
+  const parentIds = pageRows.map((row: any) => row.session_id);
+  let byParent = new Map<string, any[]>();
+  if (parentIds.length > 0) {
+    const subs = await pool.query(
+      `SELECT parent_session_id, agent_id, kind, agent_type, title, status, token_in, token_out, token_cache, token_cache_create
+       FROM subagents WHERE parent_session_id = ANY($1) ORDER BY created_at ASC`,
+      [parentIds]
+    );
+    byParent = groupSubagentsByParent(subs.rows);
+  }
+
+  return {
+    sessions: pageRows.map((row: any) => serializeSessionRow(row, byParent)),
+    hasMore,
+    nextCursor: hasMore ? String(offset + limit) : null,
+  };
 }
 
 /** P1a: 取一个会话的 token 拆分 —— 父总额（含子，来自 sessions.tok_*）+ 各子代理明细。

@@ -280,6 +280,29 @@ describe('Router - list_sessions includes extended fields', () => {
       expect(s).not.toHaveProperty('daemon_status')
     }
   })
+
+  test('handleListSessions supports daemon scoped pagination', async () => {
+    const clientWs = createMockWs()
+    router.registerClient(clientWs, 1)
+
+    router.handleClientMessage(clientWs, {
+      type: 'list_sessions',
+      daemon_id: 'daemon-1',
+      limit: 1,
+      cursor: '0',
+    })
+
+    await new Promise(r => setTimeout(r, 50))
+
+    const listEvent = clientWs._sent.find((m: any) => m.type === 'session_list')
+    expect(listEvent).toBeDefined()
+    expect(listEvent.daemon_id).toBe('daemon-1')
+    expect(listEvent.has_more).toBe(false)
+    expect(pool.query.mock.calls.some(([sql, params]: [string, any[]]) =>
+      sql.includes('s.daemon_id = $1') && sql.includes('LIMIT $2 OFFSET $3') &&
+      params[0] === 'daemon-1' && params[1] === 2 && params[2] === 0 && params[3] === 1
+    )).toBe(true)
+  })
 })
 
 describe('Router - session→daemon routing resilience', () => {
