@@ -299,8 +299,41 @@ describe('Router - list_sessions includes extended fields', () => {
     expect(listEvent.daemon_id).toBe('daemon-1')
     expect(listEvent.has_more).toBe(false)
     expect(pool.query.mock.calls.some(([sql, params]: [string, any[]]) =>
-      sql.includes('s.daemon_id = $1') && sql.includes('LIMIT $2 OFFSET $3') &&
-      params[0] === 'daemon-1' && params[1] === 2 && params[2] === 0 && params[3] === 1
+      sql.includes('s.daemon_id = $1') &&
+      sql.includes('s.session_id DESC') &&
+      sql.includes('LIMIT $2') &&
+      !sql.includes('OFFSET') &&
+      params[0] === 'daemon-1' && params[1] === 2 && params[2] === 1
+    )).toBe(true)
+  })
+
+  test('handleListSessions uses keyset cursor for next page', async () => {
+    const clientWs = createMockWs()
+    router.registerClient(clientWs, 1)
+    const cursor = Buffer.from(JSON.stringify({
+      pinned: 0,
+      pinnedAt: '1970-01-01T00:00:00.000Z',
+      activityAt: '2026-01-02T03:04:05.000Z',
+      sessionId: 'sess-20',
+    }), 'utf8').toString('base64url')
+
+    router.handleClientMessage(clientWs, {
+      type: 'list_sessions',
+      daemon_id: 'daemon-1',
+      limit: 20,
+      cursor,
+    })
+
+    await new Promise(r => setTimeout(r, 50))
+
+    expect(pool.query.mock.calls.some(([sql, params]: [string, any[]]) =>
+      sql.includes(') < ($4, $5::timestamptz, $6::timestamptz, $7)') &&
+      !sql.includes('OFFSET') &&
+      params[0] === 'daemon-1' &&
+      params[1] === 21 &&
+      params[2] === 1 &&
+      params[3] === 0 &&
+      params[6] === 'sess-20'
     )).toBe(true)
   })
 })

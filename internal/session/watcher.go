@@ -58,7 +58,7 @@ func (sm *SessionManager) drainPTY(ctx context.Context, ps *ProcessState) {
 // Returns false for: daemon-spawned processes (skip entirely) or existing terminal
 // sessions (--continue — PID/status updated in-place, but no new tailer needed since
 // the old one still tails the same JSONL file).
-func (sm *SessionManager) RegisterTerminalSession(sessionID, cwd string, pid int, ttyPath string, status string) bool {
+func (sm *SessionManager) RegisterTerminalSession(sessionID, cwd string, pid int, ttyPath string, status string, agent string) bool {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
 
@@ -75,6 +75,12 @@ func (sm *SessionManager) RegisterTerminalSession(sessionID, cwd string, pid int
 			ps.Pid = pid
 			ps.Status = status
 			ps.ExitReason = ""
+			// Re-discover 时用 watcher 的 agentType 校正 Agent(防历史污染:
+			// 旧版 RegisterTerminalSession 硬编码 claude-code,completed session
+			// 的 sm.sessions.Agent 可能是错的,OnReconnected 会发错值覆盖 relay)
+			if agent != "" {
+				ps.Agent = agent
+			}
 			if cwd != "" {
 				ps.Cwd = cwd
 			}
@@ -105,7 +111,7 @@ func (sm *SessionManager) RegisterTerminalSession(sessionID, cwd string, pid int
 		StartedAt:      now,
 		LastActivityAt: now,
 		Cwd:            cwd,
-		Agent:          "claude-code",
+		Agent:          agent,
 		Source:         "terminal",
 		Pid:            pid,
 		TTY:            ttyPath,
