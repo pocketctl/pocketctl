@@ -131,6 +131,7 @@ func (sm *SessionManager) ResyncSessions() {
 			Cwd:       ps.Cwd,
 			Status:    ps.Status,
 			Source:    ps.Source,
+			Agent:     ps.Agent,
 		}
 	}
 }
