@@ -16,30 +16,42 @@
       <code class="empty-cmd">pocketctl daemon start</code>
       <button class="btn primary empty-btn" @click="showNewSession = true">创建 Web 会话</button>
     </div>
-    <div v-for="s in sortedSessions" :key="s.session_id" :class="['session-row', { 'pending-delete': s.__pendingDelete }]" @click="!s.__pendingDelete && $router.push(`/session/${s.session_id}`)">
-      <span class="status-indicator" :class="getEffectiveStatus(s)">
-        <span v-if="getEffectiveStatus(s) === 'running' || getEffectiveStatus(s) === 'busy'" class="pulse-ring"></span>
-        <span v-if="getEffectiveStatus(s) === 'completed'" class="icon">✓</span>
-        <span v-else-if="getEffectiveStatus(s) === 'killed'" class="icon">✕</span>
-      </span>
-      <div class="session-info">
-        <div class="session-title">
-          <span v-if="s.pinned" class="pin-mark" style="color: var(--accent); margin-right: 4px;">📌</span>
-          <input v-if="renamingId === s.session_id" class="ss-rename-input" v-model="renameInput" maxlength="60"
-            @click.stop @keydown.enter="commitRename(s)" @keydown.escape="cancelRename" @blur="commitRename(s)" />
-          <template v-else>{{ s.title || s.session_id.slice(0, 8) }}</template>
+    <div v-for="s in sortedSessions" :key="s.session_id" class="session-group">
+      <div :class="['session-row', { 'pending-delete': s.__pendingDelete }]" @click="!s.__pendingDelete && $router.push(`/session/${s.session_id}`)">
+        <span class="status-indicator" :class="getEffectiveStatus(s)">
+          <span v-if="getEffectiveStatus(s) === 'running' || getEffectiveStatus(s) === 'busy'" class="pulse-ring"></span>
+          <span v-if="getEffectiveStatus(s) === 'completed'" class="icon">✓</span>
+          <span v-else-if="getEffectiveStatus(s) === 'killed'" class="icon">✕</span>
+        </span>
+        <div class="session-info">
+          <div class="session-title">
+            <span v-if="s.children && s.children.length" class="fold-toggle" @click.stop="toggleFold(s.session_id)">{{ folded[s.session_id] ? '▾' : '▸' }}</span>
+            <span v-if="s.pinned" class="pin-mark" style="color: var(--accent); margin-right: 4px;">📌</span>
+            <input v-if="renamingId === s.session_id" class="ss-rename-input" v-model="renameInput" maxlength="60"
+              @click.stop @keydown.enter="commitRename(s)" @keydown.escape="cancelRename" @blur="commitRename(s)" />
+            <template v-else>{{ s.title || s.session_id.slice(0, 8) }}</template>
+          </div>
+          <div class="session-meta">
+            <span class="source-badge" :class="s.source">{{ s.source === 'terminal' ? '📺 终端' : '🌐 Web' }}</span>
+            <span v-if="s.hostname" class="hostname-badge">💻 {{ s.hostname }}</span>
+            <span v-if="s.subagent_count > 0" class="subagent-badge">🤖 {{ s.subagent_count }}</span>
+            <span v-if="s.totalTokens > 0" class="token-badge" :title="t('session.total_incl_subagent')">🪙 {{ fmtTk(s.totalTokens) }}</span>
+            <span v-if="s.exit_reason" class="exit-reason">{{ exitReasonLabel(s.exit_reason) }}</span>
+            <span class="session-id">{{ s.session_id.slice(0, 8) }}</span>
+            <AgentBadge :agent="s.agent" size="sm" />
+          </div>
         </div>
-        <div class="session-meta">
-          <span class="source-badge" :class="s.source">{{ s.source === 'terminal' ? '📺 终端' : '🌐 Web' }}</span>
-          <span v-if="s.hostname" class="hostname-badge">💻 {{ s.hostname }}</span>
-          <span v-if="s.subagent_count > 0" class="subagent-badge">🤖 {{ s.subagent_count }}</span>
-          <span v-if="s.exit_reason" class="exit-reason">{{ exitReasonLabel(s.exit_reason) }}</span>
-          <span class="session-id">{{ s.session_id.slice(0, 8) }}</span>
-          <AgentBadge :agent="s.agent" size="sm" />
+        <span class="session-time">{{ formatRelativeTime(s.last_activity_at || s.started_at) }}</span>
+        <SessionActions :session="s" @startRename="startRename" @deleted="onDeleted" @pinned="onPinned" />
+      </div>
+      <div v-if="s.children && s.children.length && folded[s.session_id]" class="child-rows">
+        <div v-for="c in s.children" :key="c.agentId" class="child-row">
+          <span class="child-indent">↳</span>
+          <AgentBadge :agent="c.agentType" size="sm" />
+          <span class="child-title">{{ c.title || c.agentType }}</span>
+          <span v-if="(c.tokenIn||0)+(c.tokenOut||0) > 0" class="child-token">🪙 {{ fmtTk((c.tokenIn||0)+(c.tokenOut||0)) }}</span>
         </div>
       </div>
-      <span class="session-time">{{ formatRelativeTime(s.last_activity_at || s.started_at) }}</span>
-      <SessionActions :session="s" @startRename="startRename" @deleted="onDeleted" @pinned="onPinned" />
     </div>
     <NewSessionDialog v-if="showNewSession" @close="showNewSession = false" @create="handleCreate" />
   </div>
@@ -56,9 +68,11 @@ import NewSessionDialog from '../components/NewSessionDialog.vue'
 import SessionActions from '../components/SessionActions.vue'
 import AgentBadge from '../components/AgentBadge.vue'
 import { getInstallCommand } from '../composables/useEnv'
+import { useLocale } from '../composables/useLocale'
 import { useSessionRename } from '../composables/useSessionRename'
 
 const { renamingId, renameInput, startRename, commitRename, cancelRename } = useSessionRename()
+const { t } = useLocale()
 
 const { connect, send, onEvent, effectiveStatus } = useWebSocket()
 const { isLoggedIn, logout } = useAuth()
@@ -66,9 +80,10 @@ const $router = useRouter()
 const sessions = ref<any[]>([])
 const showNewSession = ref(false)
 const lastError = ref('')
+const folded = ref<Record<string, boolean>>({})
 
 const sortedSessions = computed(() => {
-  return [...sessions.value].sort((a, b) => {
+  return [...sessions.value].filter(s => !s.isSubagent).sort((a, b) => {
     // Pinned first
     if (a.pinned && !b.pinned) return -1
     if (!a.pinned && b.pinned) return 1
@@ -91,6 +106,17 @@ function exitReasonLabel(reason: string): string {
     unknown: '已退出',
   }
   return labels[reason] || '已退出'
+}
+
+function fmtTk(n: number) {
+  n = +n || 0
+  if (n >= 1e6) return (n / 1e6).toFixed(1) + 'M'
+  if (n >= 1e3) return (n / 1e3).toFixed(0) + 'K'
+  return '' + n
+}
+
+function toggleFold(id: string) {
+  folded.value[id] = !folded.value[id]
 }
 
 onMounted(() => {
@@ -124,7 +150,11 @@ onMounted(() => {
           exit_reason: s.exit_reason,
           daemon_online: s.daemon_online,
           subagent_count: s.subagent_count || 0,
+          totalTokens: s.totalTokens ?? 0,
           pinned: s.pinned || false,
+          parentSessionId: s.parent_session_id ?? null,
+          isSubagent: !!s.is_subagent,
+          children: s.children ?? [],
         }))
       }
     }
@@ -245,6 +275,19 @@ function handleLogout() {
 .source-badge.daemon { background: #1a3a2a; color: #7ee787; }
 .hostname-badge { font-size: 11px; padding: 1px 6px; border-radius: 8px; background: #1c2333; color: #8b949e; }
 .subagent-badge { font-size: 11px; padding: 1px 6px; border-radius: 8px; background: #2d1a3e; color: #c084fc; }
+.token-badge { font-size: 11px; padding: 1px 6px; border-radius: 8px; background: #1a2e1a; color: #7ee787; }
+
+/* Fold toggle */
+.session-group { margin-bottom: 8px; }
+.fold-toggle { cursor: pointer; margin-right: 4px; font-size: 14px; color: #8b949e; user-select: none; line-height: 1; }
+.fold-toggle:hover { color: #e6edf3; }
+
+/* Child rows */
+.child-rows { padding: 4px 0 4px 42px; }
+.child-row { display: flex; align-items: center; gap: 8px; padding: 4px 8px; font-size: 13px; color: #8b949e; }
+.child-indent { color: #6B7280; font-size: 12px; flex-shrink: 0; }
+.child-title { color: #c9d1d9; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.child-token { font-size: 11px; padding: 1px 6px; border-radius: 8px; background: #1a2e1a; color: #7ee787; }
 
 /* Mobile */
 @media (max-width: 768px) {

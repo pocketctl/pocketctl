@@ -57,7 +57,8 @@ export async function generateTitle(userMessage: string, assistantMessage: strin
   for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
     const label = `attempt ${attempt + 1}/${MAX_RETRIES + 1}`;
     try {
-      const raw = await callDeepSeekOnce(apiKey, userMessage, assistantMessage, locale);
+      const systemContent = locale ? `${SYSTEM_PROMPT}\n\n${LOCALE_HINT(locale)}` : SYSTEM_PROMPT;
+      const raw = await callDeepSeekOnce(apiKey, systemContent, `User message: ${userMessage}\n\nAssistant reply: ${assistantMessage}`, MAX_TITLE_LEN);
       if (raw) return cleanTitle(raw);
       // DeepSeek 200 但 content 为空（thinking 模式下 reasoning 可能占满 max_tokens）—— 当作瞬时故障重试
       console.warn(`[title] DeepSeek returned empty content (${label})`);
@@ -80,61 +81,47 @@ export async function generateTitle(userMessage: string, assistantMessage: strin
   return '';
 }
 
-/** Single DeepSeek call. Throws an Error tagged with retryable/retryAfterMs on failure. */
-async function callDeepSeekOnce(apiKey: string, userMessage: string, assistantMessage: string, locale?: string): Promise<string> {
+/** Single DeepSeek call with caller-supplied system prompt + max length. Throws retryable Error on failure. */
+async function callDeepSeekOnce(apiKey: string, systemContent: string, userContent: string, maxLen: number): Promise<string> {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), DEEPSEEK_TIMEOUT_MS);
-
   try {
-    const content = `User message: ${userMessage}\n\nAssistant reply: ${assistantMessage}`;
-    const systemContent = locale ? `${SYSTEM_PROMPT}\n\n${LOCALE_HINT(locale)}` : SYSTEM_PROMPT;
-
     const response = await fetch(DEEPSEEK_API_URL, {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${apiKey}`,
-      },
+      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiKey}` },
       body: JSON.stringify({
         model: DEEPSEEK_MODEL,
         // V4-Flash 默认 thinking 模式，reasoning 会吃光 max_tokens 导致 content 为空。
         // title 是简单摘要，不需推理；显式关闭 (ThinkingOptions { type: 'disabled' })。
         thinking: { type: 'disabled' },
-        max_tokens: 64,
+        max_tokens: Math.min(64, Math.max(32, maxLen * 2)),
         temperature: 0.3,
         stream: false,
         messages: [
           { role: 'system', content: systemContent },
-          { role: 'user', content },
+          { role: 'user', content: userContent },
         ],
       }),
       signal: controller.signal,
     });
-
     if (!response.ok) {
       const retryable = response.status === 429 || response.status >= 500;
       const retryAfterMs = parseRetryAfter(response.headers.get('retry-after'));
-      if (response.status === 429) {
-        console.warn(`[title] DeepSeek 429 Too Many Requests${retryAfterMs ? ` (Retry-After ${retryAfterMs}ms)` : ''}`);
-      }
+      if (response.status === 429) console.warn(`[title] DeepSeek 429${retryAfterMs ? ` (Retry-After ${retryAfterMs}ms)` : ''}`);
       const err = new Error(`DeepSeek API ${response.status} ${response.statusText}`);
       (err as any).retryable = retryable;
       (err as any).retryAfterMs = retryAfterMs;
       throw err;
     }
-
     const data = await response.json() as any;
     return data?.choices?.[0]?.message?.content?.trim() || '';
   } catch (err: any) {
     // AbortError（超时）→ 可重试。不重写 err.message: node 的 AbortError 实为 DOMException,
     // 其 message 是只读 getter, 赋值会抛 TypeError, 反而吞掉 retryable 让本该重试 3 次
     // 的超时只试 1 次就放弃。
-    if (err?.name === 'AbortError') {
-      err.retryable = true;
-    } else if (err?.retryable === undefined) {
-      // 裸 fetch 网络错误（TypeError "fetch failed" 等）→ 可重试
-      err.retryable = true;
-    }
+    if (err?.name === 'AbortError') { err.retryable = true; }
+    // 裸 fetch 网络错误（TypeError "fetch failed" 等）→ 可重试
+    else if (err?.retryable === undefined) { err.retryable = true; }
     throw err;
   } finally {
     clearTimeout(timeout);
@@ -161,14 +148,46 @@ function backoffMs(attempt: number): number {
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
 /** Clean up DeepSeek-generated title: strip quotes, punctuation, enforce length */
-function cleanTitle(title: string): string {
-  // Strip surrounding quotes
+function cleanTitleLen(title: string, maxLen: number): string {
   title = title.replace(/^["'"「『「]|["'"」』」]$/g, '');
-  // Strip trailing punctuation
   title = title.replace(/[.,，。！!?？;；:：]+$/, '');
-  // Enforce max length
-  if (title.length > MAX_TITLE_LEN) {
-    title = title.slice(0, MAX_TITLE_LEN);
-  }
+  if (title.length > maxLen) title = title.slice(0, maxLen);
   return title.trim() || '';
+}
+function cleanTitle(title: string): string { return cleanTitleLen(title, MAX_TITLE_LEN); }
+
+const MAX_SUBAGENT_TITLE_LEN = 20;
+
+const SUBAGENT_SYSTEM_PROMPT = (agentType: string) => `You are a subagent task title generator. The parent agent dispatched a "${agentType}" subagent for a specific task. From the subagent's task prompt below, generate a concise task-oriented title.
+
+Rules:
+- Maximum 20 characters
+- Format: "<action verb> · <target file/scope>" (e.g. "审查 · docker-compose.prod.yml", "探索 · relay/src", "深挖 · SENSITIVE-TOBS")
+- Summarize the concrete task/target, NOT the generic agent type
+- No quotes, no trailing punctuation
+- Detect language from the task message; if the user's UI language is given, prefer it
+- Return ONLY the title text`;
+
+/**
+ * Generate a task-oriented title for a subagent based on its task prompt + agent_type.
+ * 失败一律返回 '' (调用方据此保持 title NULL)。复用 DeepSeek-V4-Flash。
+ */
+export async function generateSubagentTitle(userMessage: string, agentType: string, locale?: string): Promise<string> {
+  const apiKey = process.env.DEEPSEEK_API_KEY;
+  if (!apiKey) { console.log('[title] DEEPSEEK_API_KEY not set, skipping subagent title'); return ''; }
+  const systemContent = locale ? `${SUBAGENT_SYSTEM_PROMPT(agentType)}\n\n${LOCALE_HINT(locale)}` : SUBAGENT_SYSTEM_PROMPT(agentType);
+  for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+    try {
+      const raw = await callDeepSeekOnce(apiKey, systemContent, `Subagent task prompt: ${userMessage}`, MAX_SUBAGENT_TITLE_LEN);
+      if (raw) return cleanTitleLen(raw, MAX_SUBAGENT_TITLE_LEN);
+      console.warn(`[title] subagent DeepSeek empty content (attempt ${attempt + 1})`);
+    } catch (err: any) {
+      if (!err?.retryable || attempt >= MAX_RETRIES) { console.error(`[title] subagent DeepSeek failed: ${err?.message}`); break; }
+      await sleep(backoffMs(attempt));
+      continue;
+    }
+    if (attempt >= MAX_RETRIES) break;
+    await sleep(backoffMs(attempt));
+  }
+  return '';
 }

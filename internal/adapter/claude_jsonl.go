@@ -16,6 +16,8 @@ type JSONLEntry struct {
 	Message       *JSONLMessage `json:"message,omitempty"`
 	Content       string        `json:"content,omitempty"`
 	IsMeta        bool          `json:"isMeta,omitempty"`     // true for meta messages (e.g. local-command-caveat) — filtered from replay
+	IsSidechain   bool          `json:"isSidechain,omitempty"` // true for sub-agent (sidechain) records
+	ParentUuid    string        `json:"parentUuid,omitempty"` // message-level parent UUID (NOT session id; not used for relation)
 	CompactResult string        `json:"compact_result,omitempty"` // /compact outcome: "success" or "failed"
 	CompactError  string        `json:"compact_error,omitempty"`  // /compact failure reason
 	TotalCost     float64       `json:"total_cost_usd,omitempty"` // result event: aggregated cost

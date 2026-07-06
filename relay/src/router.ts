@@ -1,7 +1,7 @@
 import type { WebSocket } from 'ws';
 import type pg from 'pg';
 import * as db from './db.js';
-import { generateTitle } from './title.js';
+import { generateTitle, generateSubagentTitle } from './title.js';
 import { notifyUser, sessionStatusPush, daemonOfflinePush, daemonOnlinePush, approvalPush, interactivePush, summarizeToolInput, highRiskPush, isHighRiskCommand } from './push.js';
 import { PushDeduper } from './push-deduper.js';
 
@@ -250,6 +250,10 @@ export class Router {
     // are still recognised as duplicates.
     const prevSeq = this.daemonSeq.get(daemonId);
     if (!prevSeq || prevSeq.startedAt !== daemonStartedAt) {
+      // New daemon incarnation (non-graceful restart / rebuild / fresh install):
+      // seqCtr resets to 0 so prior-incarnation seen rows would collide with new
+      // replayed events via ON CONFLICT DO NOTHING, permanently losing token deltas.
+      await this.pool.query('DELETE FROM subagent_usage_seen WHERE daemon_id = $1', [daemonId]).catch(console.error);
       // Seed the persisted mark from the daemon's reported durable baseline. A
       // daemon that reconnects (after the grace window dropped our entry) or
       // restarts from its spool replays only its unacked tail; without this the
@@ -657,10 +661,70 @@ export class Router {
     }
     if (msg.type === 'subagent_discovered') {
       this.persistAndAck(daemonId, msg.seq, sessionId, msg.type, msg);
+      // 精确落库：toolUseId(=call_id) / agentType(=subagent_type) / desc(=subagent_desc)
+      db.upsertSubagent(this.pool, sessionId, msg.agent_id || '', 'claude_subagent', msg.call_id || undefined, msg.subagent_type || undefined, msg.subagent_desc || undefined).catch(console.error);
       db.incrementSubagentCount(this.pool, sessionId).catch(console.error);
       for (const [clientWs, client] of this.clients) {
         if (client.subscribedSessions.has(sessionId) && clientWs.readyState === 1) this.send(clientWs, msg);
       }
+      return;
+    }
+    if (msg.type === 'subagent_usage') {
+      // 子代理 token 累加到 subagents 行（不 persist 为 event，仅更新聚合）
+      this.markPersisted(daemonId, msg.seq);
+      const u = msg.usage;
+      if (msg.agent_id && u) {
+        // P1a: 幂等去重 —— relay persistedHigh 是内存，重启后 daemon replay 会重发 subagent_usage。
+        // 用 subagent_usage_seen(daemon_id, seq) 主键 INSERT ON CONFLICT DO NOTHING：rowCount=0 表示已处理，跳过累加。
+        // Tradeoff (non-transactional): if this seen-INSERT commits but addSubagentUsage then
+        // fails, that seq's delta is permanently lost. The reverse order would re-open the
+        // relay-restart double-count window, so we accept this tradeoff.
+        this.pool.query(
+          'INSERT INTO subagent_usage_seen (daemon_id, seq) VALUES ($1, $2) ON CONFLICT DO NOTHING',
+          [daemonId, msg.seq]
+        ).then((r) => {
+          if ((r?.rowCount ?? 0) === 0) return; // 已 seen，跳过
+          db.addSubagentUsage(this.pool, sessionId, msg.agent_id,
+            u.input_tokens || 0, u.output_tokens || 0, u.cache_read_tokens || 0, u.cache_create_tokens || 0
+          ).catch(console.error);
+        }).catch(console.error);
+      }
+      return;
+    }
+    if (msg.type === 'generate_subagent_title_request') {
+      // Not persisted as an event — only triggers async title generation for a subagent.
+      this.markPersisted(daemonId, msg.seq);
+      const agentId = msg.agent_id;
+      const userMsg = msg.user_message;
+      const agentType = msg.subagent_type;
+      if (!agentId || !userMsg) {
+        console.warn('[router] generate_subagent_title_request missing agent_id or user_message');
+        return;
+      }
+      // Layer 2: skip if subagent already has a title
+      db.hasDefaultSubagentTitle(this.pool, sessionId, agentId).then((isDefault) => {
+        if (!isDefault) {
+          console.log(`[router] skipping subagent title for ${sessionId}/${agentId} — already set`);
+          return;
+        }
+        let ownerLocale: string | undefined;
+        for (const [, client] of this.clients) {
+          if (client.subscribedSessions.has(sessionId) && client.userId) { ownerLocale = client.locale; break; }
+        }
+        generateSubagentTitle(userMsg, agentType || '', ownerLocale).then((title) => {
+          if (!title) return;
+          db.updateSubagentTitleIfDefault(this.pool, sessionId, agentId, title).then((updated) => {
+            if (updated) {
+              console.log(`[router] subagent title generated for ${sessionId}/${agentId}: ${title}`);
+              for (const [clientWs, client] of this.clients) {
+                if (client.subscribedSessions.has(sessionId) && clientWs.readyState === 1) {
+                  this.send(clientWs, { type: 'subagent_title_update', session_id: sessionId, agent_id: agentId, parent_session_id: sessionId, title });
+                }
+              }
+            }
+          }).catch(console.error);
+        }).catch(console.error);
+      }).catch(console.error);
       return;
     }
     if (msg.type === 'generate_title_request') {

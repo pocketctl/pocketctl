@@ -1620,6 +1620,11 @@ func handleWatcherEvents(ctx context.Context, events <-chan watcher.SessionEvent
 									Agent:     agentType,
 									Title:     defaultTitle,
 								}
+								// P0: start sub-agent discoverer (only Claude Code has subagents/ dir)
+								if agentType == adapter.AgentClaude {
+									disc := watcher.NewSubAgentDiscoverer(jsonlPath, evt.Session.SessionID, outputCh, 2*time.Second)
+									go disc.Run(ctx)
+								}
 								break
 							}
 						}

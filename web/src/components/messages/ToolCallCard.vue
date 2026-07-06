@@ -57,6 +57,14 @@
           <span class="spinner"></span>
           <span>{{ t('session.tool_running') }}</span>
         </div>
+
+        <!-- Subagent token usage -->
+        <div v-if="message.type === 'subagent' && tokenUsage" class="tcc-tokens">
+          <span class="tcc-tk" :title="'tokenIn ' + tokenUsage.tokenIn">↑{{ tokenUsage.tokenIn }}</span>
+          <span class="tcc-tk" :title="'tokenOut ' + tokenUsage.tokenOut">↓{{ tokenUsage.tokenOut }}</span>
+          <span class="tcc-tk" :title="'cache ' + tokenUsage.tokenCache">⚡{{ tokenUsage.tokenCache }}</span>
+          <span class="tcc-tk" :title="'cacheCreate ' + tokenUsage.tokenCacheCreate">+{{ tokenUsage.tokenCacheCreate }}</span>
+        </div>
       </div>
     </div>
   </div>
@@ -71,7 +79,10 @@ import { toolArgs, toolInputText, inferOutputLanguage } from '../../utils/toolDi
 
 const { t } = useLocale()
 
-const props = defineProps<{ message: any }>()
+const props = defineProps<{
+  message: any
+  tokenUsage?: { tokenIn: number; tokenOut: number; tokenCache: number; tokenCacheCreate: number }
+}>()
 const emit = defineEmits<{ (e: 'toggleExpand'): void; (e: 'toggleOutput'): void }>()
 
 const args = computed(() => toolArgs(props.message))
@@ -216,6 +227,17 @@ function toggleOutput() { emit('toggleOutput') }
   cursor: pointer;
   font-family: var(--font-body);
 }
+
+.tcc-tokens {
+  display: flex;
+  gap: 8px;
+  font-size: 11px;
+  color: var(--fg-tertiary);
+  margin-top: 6px;
+  padding-top: 4px;
+  border-top: 1px dashed var(--border);
+}
+.tcc-tk { font-family: var(--font-mono); }
 
 @keyframes spin { to { transform: rotate(360deg); } }
 @keyframes fade-in {

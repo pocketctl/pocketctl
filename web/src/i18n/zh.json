@@ -93,6 +93,7 @@
   "session.stop_session_not_found": "会话已不存在（可能已被清理）",
   "session.tool_timeout": "已超时（未收到结果）",
   "session.ended": "Session 已结束",
+  "session.subagent_readonly": "子代理会话 — 只读，请在主会话继续对话",
   "session.input_creating": "会话创建中…",
   "session.input_resume": "继续会话（将恢复历史上下文）...",
   "session.input_send": "发送消息... (⌥+Enter 换行)",
@@ -106,6 +107,7 @@
   "session.milestone_created": "创建",
   "session.milestone_exited": "退出",
   "session.sub_agents": "{{n}} 子智能体",
+  "session.total_incl_subagent": "累计 token（含子代理）",
   "session.show_all_hosts": "显示全部主机会话",
   "session.perm_default": "默认",
   "session.perm_bypass": "跳过权限",
@@ -446,5 +448,9 @@
   "token.created_on": "创建于",
   "token.in_out_ratio": "输入/输出比",
   "token.daily_avg_short": "日均消耗",
-  "token.trend_30d": "每日 Token 消耗趋势（30 天）"
+  "token.trend_30d": "每日 Token 消耗趋势（30 天）",
+  "token.incl_subagent": "总额含子代理 token",
+  "token.incl_subagent_short": "含子",
+  "token.subagent_breakdown": "子代理拆分",
+  "token.subagent_col": "子代理"
 }

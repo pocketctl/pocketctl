@@ -33,7 +33,7 @@
     <template v-if="!error">
 
     <div class="token-summary">
-      <div class="tk-item"><div class="tk-num">{{ fmt(totalTokens) }}</div><div class="tk-label">{{ t('token.total') }}</div></div>
+      <div class="tk-item"><div class="tk-num">{{ fmt(totalTokens) }}</div><div class="tk-label">{{ t('token.total') }} <span class="tk-sub" :title="t('token.incl_subagent')">·{{ t('token.incl_subagent_short') }}</span></div></div>
       <div class="tk-item"><div class="tk-num">{{ fmt(summary.today) }}</div><div class="tk-label">{{ t('token.today') }}</div></div>
       <div class="tk-item"><div class="tk-num">{{ fmt(summary.thisWeek) }}</div><div class="tk-label">{{ t('token.last_7d') }}</div></div>
       <div class="tk-item"><div class="tk-num">{{ fmt(summary.thisMonth) }}</div><div class="tk-label">{{ t('token.last_30d') }}</div></div>
@@ -132,6 +132,19 @@
                 <div class="se-item"><span class="se-label">{{ t('token.cache') }}</span><span class="se-val">{{ fmt(s.tok_cache_read) }}</span></div>
                 <div class="se-item"><span class="se-label">{{ t('token.amount') }}</span><span class="se-val">{{ fmt(s.total_tokens) }}</span></div>
                 <div class="se-item"><span class="se-label">{{ t('token.daily_avg_short') }}</span><span class="se-val">{{ fmt(Math.round((s.total_tokens || 0) / 30)) }}</span></div>
+              </div>
+              <!-- P1a: 子代理 token 拆分（父总额含子，此处展示各子代理明细） -->
+              <div v-if="s.children && s.children.length" class="se-subagents">
+                <div class="se-label">{{ t('token.subagent_breakdown') }}</div>
+                <div class="se-sub-table">
+                  <div class="se-sub-header"><span>{{ t('token.subagent_col') }}</span><span>{{ t('token.input') }}</span><span>{{ t('token.output') }}</span><span>{{ t('token.cache') }}</span></div>
+                  <div v-for="c in s.children" :key="c.agentId" class="se-sub-row">
+                    <span class="se-sub-name"><AgentBadge :agent="c.agentType" size="sm" /> {{ c.title || c.agentType || c.agentId.slice(0, 6) }}</span>
+                    <span class="se-val">{{ fmt(c.tokenIn) }}</span>
+                    <span class="se-val">{{ fmt(c.tokenOut) }}</span>
+                    <span class="se-val">{{ fmt(c.tokenCache) }}</span>
+                  </div>
+                </div>
               </div>
               <div class="se-trend-label">{{ t('token.trend_30d') }}</div>
               <div class="se-mini-chart">
@@ -381,6 +394,7 @@ onMounted(loadDashboard)
 .token-summary .tk-item:first-child { border-left: 0; }
 .token-summary .tk-num { font-size: 26px; font-weight: 700; color: var(--fg); font-variant-numeric: tabular-nums; letter-spacing: -0.01em; }
 .token-summary .tk-label { font-size: 12px; color: var(--fg-tertiary); margin-top: 4px; }
+.token-summary .tk-sub { font-size: 10px; color: var(--fg-tertiary); opacity: 0.7; }
 
 .metric-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(170px, 1fr)); gap: 12px; margin-bottom: 28px; }
 .metric-card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-lg); padding: 16px 18px; }
@@ -459,6 +473,13 @@ onMounted(loadDashboard)
 .session-expand-row .se-trend-label { font-size: 10px; color: var(--fg-tertiary); text-transform: uppercase; letter-spacing: 0.05em; margin: 12px 0 4px; }
 .session-expand-row .se-mini-chart { display: flex; align-items: flex-end; gap: 2px; height: 40px; margin-top: 6px; }
 .session-expand-row .se-mini-chart span { flex: 1; background: var(--accent); opacity: 0.5; border-radius: 1px 1px 0 0; min-height: 2px; }
+.session-expand-row .se-subagents { margin-top: 12px; }
+.session-expand-row .se-sub-table { display: grid; grid-template-columns: 2fr 1fr 1fr 1fr; gap: 0; font-size: 12px; border: 1px solid var(--border); border-radius: var(--radius-sm); overflow: hidden; }
+.session-expand-row .se-sub-header { display: contents; }
+.session-expand-row .se-sub-header span { background: var(--surface-hover); padding: 6px 10px; font-size: 10px; font-weight: 600; color: var(--fg-tertiary); text-transform: uppercase; letter-spacing: 0.05em; border-bottom: 1px solid var(--border); }
+.session-expand-row .se-sub-row { display: contents; }
+.session-expand-row .se-sub-row .se-sub-name { padding: 6px 10px; color: var(--fg-secondary); display: flex; align-items: center; gap: 4px; border-bottom: 1px solid var(--border); }
+.session-expand-row .se-sub-row .se-val { padding: 6px 10px; font-family: var(--font-mono); font-variant-numeric: tabular-nums; color: var(--fg); border-bottom: 1px solid var(--border); }
 
 .sess-pagination { display: flex; align-items: center; gap: 10px; justify-content: flex-end; padding: 12px 18px; font-size: 12px; color: var(--fg-tertiary); }
 .sess-pagination .page-total { font-family: var(--font-mono); }

@@ -93,6 +93,7 @@
   "session.stop_session_not_found": "Session no longer exists (may have been purged)",
   "session.tool_timeout": "Timed out (no result received)",
   "session.ended": "Session ended",
+  "session.subagent_readonly": "Sub-agent session — read-only. Continue in the parent session.",
   "session.input_creating": "Session creating…",
   "session.input_resume": "Resume session (history restored)...",
   "session.input_send": "Type a message... (⌥+Enter for newline)",
@@ -106,6 +107,7 @@
   "session.milestone_created": "Created",
   "session.milestone_exited": "Exited",
   "session.sub_agents": "{{n}} sub-agents",
+  "session.total_incl_subagent": "Total tokens (incl. sub-agents)",
   "session.show_all_hosts": "Show all host sessions",
   "session.perm_default": "Default",
   "session.perm_bypass": "Bypass permissions",
@@ -446,5 +448,9 @@
   "token.created_on": "Created",
   "token.in_out_ratio": "In/Out ratio",
   "token.daily_avg_short": "Daily avg",
-  "token.trend_30d": "Daily token trend (30 days)"
+  "token.trend_30d": "Daily token trend (30 days)",
+  "token.incl_subagent": "Total includes sub-agent tokens",
+  "token.incl_subagent_short": "incl. subagent",
+  "token.subagent_breakdown": "Sub-agent breakdown",
+  "token.subagent_col": "Sub-agent"
 }

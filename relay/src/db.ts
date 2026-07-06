@@ -59,6 +59,42 @@ export async function initDB(pool: pg.Pool): Promise<void> {
   // Migration: add subagent_count column
   await pool.query(`ALTER TABLE sessions ADD COLUMN IF NOT EXISTS subagent_count INT DEFAULT 0`);
 
+  // Subagent relation: parent linkage on sessions + dedicated subagents table.
+  await pool.query(`ALTER TABLE sessions ADD COLUMN IF NOT EXISTS parent_session_id VARCHAR(64)`);
+  await pool.query(`ALTER TABLE sessions ADD COLUMN IF NOT EXISTS is_subagent BOOLEAN DEFAULT false`);
+  await pool.query(`ALTER TABLE sessions ADD COLUMN IF NOT EXISTS root_session_id VARCHAR(64)`);
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_sessions_parent ON sessions(parent_session_id)`);
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS subagents (
+      parent_session_id VARCHAR(64) NOT NULL,
+      agent_id VARCHAR(64) NOT NULL,
+      kind VARCHAR(20) NOT NULL DEFAULT 'claude_subagent',
+      tool_use_id VARCHAR(64),
+      agent_type VARCHAR(40),
+      title VARCHAR(120),
+      status VARCHAR(20) DEFAULT 'running',
+      token_in BIGINT DEFAULT 0,
+      token_out BIGINT DEFAULT 0,
+      token_cache BIGINT DEFAULT 0,
+      created_at TIMESTAMPTZ DEFAULT NOW(),
+      updated_at TIMESTAMPTZ DEFAULT NOW(),
+      PRIMARY KEY (parent_session_id, agent_id)
+    )
+  `);
+
+  // P1a: subagents 补 cache_create 列（与 sessions.tok_cache_create 对齐，修复 cache_create 丢失）
+  await pool.query(`ALTER TABLE subagents ADD COLUMN IF NOT EXISTS token_cache_create BIGINT DEFAULT 0`);
+  // P1a: subagent_usage 幂等去重表 —— relay persistedHigh 是内存 Map，重启后 daemon replay 会重复发
+  // subagent_usage（不写 events 表），用 (daemon_id, seq) 主键去重防重复累加。
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS subagent_usage_seen (
+      daemon_id TEXT NOT NULL,
+      seq       BIGINT NOT NULL,
+      seen_at   TIMESTAMPTZ DEFAULT NOW(),
+      PRIMARY KEY (daemon_id, seq)
+    )
+  `);
+
   // Phase 2: users table for authentication
   await pool.query(`
     CREATE TABLE IF NOT EXISTS users (
@@ -330,23 +366,80 @@ export async function getEventsBefore(pool: pg.Pool, sessionId: string, cursor: 
   return result.rows;
 }
 
-export async function listSessions(pool: pg.Pool): Promise<any[]> {
+// 内部：带 children 聚合的列表（listSessions / listSessionsByUser 共用）
+export async function listSessionsWithChildren(pool: pg.Pool, whereUser?: number): Promise<any[]> {
+  const baseParams: any[] = [];
+  const userClause = whereUser !== undefined ? 'AND s.user_id = $1' : '';
+  if (whereUser !== undefined) baseParams.push(whereUser);
   const result = await pool.query(
     `SELECT s.session_id, s.daemon_id, s.agent_type, s.cwd, s.title, s.source, s.status,
             s.created_at, s.updated_at, s.last_activity_at, s.exit_reason, s.subagent_count, s.pinned,
-            s.model,
+            s.model, s.parent_session_id, s.is_subagent, s.root_session_id,
+            s.total_tokens, s.tok_input, s.tok_output, s.tok_cache_read, s.tok_cache_create,
             d.status AS daemon_status, d.hostname AS hostname, d.alias AS daemon_alias
      FROM sessions s
      LEFT JOIN daemons d ON s.daemon_id = d.daemon_id
-     WHERE s.session_id NOT LIKE 'pending-%'
-     ORDER BY s.pinned DESC, s.pinned_at DESC NULLS LAST, COALESCE(s.last_activity_at, s.updated_at) DESC`
+     WHERE s.session_id NOT LIKE 'pending-%' ${userClause}
+     ORDER BY s.pinned DESC, s.pinned_at DESC NULLS LAST, COALESCE(s.last_activity_at, s.updated_at) DESC`,
+    baseParams
   );
+  // 一次查全部 subagents，按 parent 分组（避免 N+1）
+  const subs = await pool.query(
+    `SELECT parent_session_id, agent_id, kind, agent_type, title, status, token_in, token_out, token_cache, token_cache_create
+     FROM subagents ORDER BY created_at ASC`
+  );
+  const byParent = new Map<string, any[]>();
+  for (const r of subs.rows) {
+    if (!byParent.has(r.parent_session_id)) byParent.set(r.parent_session_id, []);
+    byParent.get(r.parent_session_id)!.push({
+      agentId: r.agent_id, kind: r.kind, agentType: r.agent_type, title: r.title,
+      status: r.status, tokenIn: r.token_in, tokenOut: r.token_out,
+      tokenCache: r.token_cache, tokenCacheCreate: r.token_cache_create,
+    });
+  }
   return result.rows.map((row: any) => ({
     ...row,
+    totalTokens: parseInt(row.total_tokens ?? 0, 10),
+    tokInput: parseInt(row.tok_input ?? 0, 10),
+    tokOutput: parseInt(row.tok_output ?? 0, 10),
+    tokCacheRead: parseInt(row.tok_cache_read ?? 0, 10),
+    tokCacheCreate: parseInt(row.tok_cache_create ?? 0, 10),
+    total_tokens: undefined, tok_input: undefined, tok_output: undefined, tok_cache_read: undefined, tok_cache_create: undefined,
     daemon_online: row.daemon_status === 'online',
     daemon_alias: row.daemon_alias ?? null,
     daemon_status: undefined,
+    children: byParent.get(row.session_id) || [],
   }));
+}
+
+export async function listSessions(pool: pg.Pool): Promise<any[]> {
+  return listSessionsWithChildren(pool);
+}
+
+/** P1a: 取一个会话的 token 拆分 —— 父总额（含子，来自 sessions.tok_*）+ 各子代理明细。
+ *  父总额含子代理（方案 X）；不派生「主会话自身」（避免负数）。未知 session 返回 null。 */
+export async function getSessionTokenBreakdown(pool: pg.Pool, userId: number, sessionId: string): Promise<{
+  parent: { totalTokens: number; tokInput: number; tokOutput: number; tokCacheRead: number; tokCacheCreate: number };
+  children: Array<{ agentId: string; agentType: string; title: string; tokenIn: number; tokenOut: number; tokenCache: number; tokenCacheCreate: number }>;
+} | null> {
+  const sess = await pool.query(
+    `SELECT total_tokens, tok_input, tok_output, tok_cache_read, tok_cache_create
+     FROM sessions WHERE session_id = $1 AND user_id = $2`,
+    [sessionId, userId]
+  );
+  if ((sess.rowCount ?? 0) === 0) return null;
+  const r = sess.rows[0];
+  const children = await listSubagentsByParent(pool, sessionId);
+  return {
+    parent: {
+      totalTokens: parseInt(r.total_tokens ?? 0, 10),
+      tokInput: parseInt(r.tok_input ?? 0, 10),
+      tokOutput: parseInt(r.tok_output ?? 0, 10),
+      tokCacheRead: parseInt(r.tok_cache_read ?? 0, 10),
+      tokCacheCreate: parseInt(r.tok_cache_create ?? 0, 10),
+    },
+    children,
+  };
 }
 
 export async function upsertSession(pool: pg.Pool, sessionId: string, daemonId: string, agentType: string, cwd: string, status: string, title?: string, source?: string, exitReason?: string, userId?: number, model?: string): Promise<void> {
@@ -374,6 +467,53 @@ export async function incrementSubagentCount(pool: pg.Pool, sessionId: string): 
     `UPDATE sessions SET subagent_count = subagent_count + 1, updated_at = NOW() WHERE session_id = $1`,
     [sessionId]
   );
+}
+
+/** Upsert a subagent row keyed by (parent_session_id, agent_id). */
+export async function upsertSubagent(pool: pg.Pool, parentSessionId: string, agentId: string, kind: string, toolUseId?: string, agentType?: string, title?: string): Promise<void> {
+  await pool.query(
+    `INSERT INTO subagents (parent_session_id, agent_id, kind, tool_use_id, agent_type, title, created_at, updated_at)
+     VALUES ($1, $2, $3, $4, $5, $6, NOW(), NOW())
+     ON CONFLICT (parent_session_id, agent_id) DO UPDATE SET
+       kind = $3,
+       tool_use_id = COALESCE($4, subagents.tool_use_id),
+       agent_type = COALESCE($5, subagents.agent_type),
+       title = COALESCE($6, subagents.title),
+       updated_at = NOW()`,
+    [parentSessionId, agentId, kind, toolUseId || null, agentType || null, title || null]
+  );
+}
+
+/** Accumulate token usage into a subagent row. Uses INSERT ON CONFLICT so it
+ *  is idempotent and self-creates the row if subagent_usage arrives before
+ *  subagent_discovered (out-of-order or discovery dropped on backpressure).
+ *  P1a: 补 cache_create 列（修复此前被丢弃的 cache_create_tokens）。 */
+export async function addSubagentUsage(pool: pg.Pool, parentSessionId: string, agentId: string, inputTokens: number, outputTokens: number, cacheRead: number, cacheCreate: number): Promise<void> {
+  await pool.query(
+    `INSERT INTO subagents (parent_session_id, agent_id, token_in, token_out, token_cache, token_cache_create, updated_at)
+     VALUES ($1, $2, $3, $4, $5, $6, NOW())
+     ON CONFLICT (parent_session_id, agent_id) DO UPDATE SET
+       token_in = subagents.token_in + $3,
+       token_out = subagents.token_out + $4,
+       token_cache = subagents.token_cache + $5,
+       token_cache_create = subagents.token_cache_create + $6,
+       updated_at = NOW()`,
+    [parentSessionId, agentId, inputTokens, outputTokens, cacheRead, cacheCreate]
+  );
+}
+
+/** List subagents for one parent session (camelCased for clients). */
+export async function listSubagentsByParent(pool: pg.Pool, parentSessionId: string): Promise<any[]> {
+  const result = await pool.query(
+    `SELECT agent_id, kind, agent_type, title, status, token_in, token_out, token_cache, token_cache_create
+     FROM subagents WHERE parent_session_id = $1 ORDER BY created_at ASC`,
+    [parentSessionId]
+  );
+  return result.rows.map((r: any) => ({
+    agentId: r.agent_id, kind: r.kind, agentType: r.agent_type, title: r.title,
+    status: r.status, tokenIn: r.token_in, tokenOut: r.token_out,
+    tokenCache: r.token_cache, tokenCacheCreate: r.token_cache_create,
+  }));
 }
 
 /** Mark sessions as completed if their daemon has been offline for > 5 minutes. */
@@ -487,24 +627,7 @@ export async function bindDaemonToUser(pool: pg.Pool, daemonId: string, userId: 
 }
 
 export async function listSessionsByUser(pool: pg.Pool, userId: number): Promise<any[]> {
-  const result = await pool.query(
-    `SELECT s.session_id, s.daemon_id, s.agent_type, s.cwd, s.title, s.source, s.status,
-            s.created_at, s.updated_at, s.last_activity_at, s.exit_reason, s.subagent_count, s.pinned,
-            s.model,
-            d.status AS daemon_status, d.hostname AS hostname, d.alias AS daemon_alias
-     FROM sessions s
-     LEFT JOIN daemons d ON s.daemon_id = d.daemon_id
-     WHERE s.user_id = $1
-       AND s.session_id NOT LIKE 'pending-%'
-     ORDER BY s.pinned DESC, s.pinned_at DESC NULLS LAST, COALESCE(s.last_activity_at, s.updated_at) DESC`,
-    [userId]
-  );
-  return result.rows.map((row: any) => ({
-    ...row,
-    daemon_online: row.daemon_status === 'online',
-    daemon_alias: row.daemon_alias ?? null,
-    daemon_status: undefined,
-  }));
+  return listSessionsWithChildren(pool, userId);
 }
 
 // --- Session deletion ---
@@ -588,6 +711,24 @@ export async function updateTitleIfDefault(pool: pg.Pool, sessionId: string, new
   const result = await pool.query(
     `UPDATE sessions SET title = $1, updated_at = NOW() WHERE session_id = $2 AND (title LIKE 'Terminal Session-%' OR title IS NULL)`,
     [newTitle, sessionId]
+  );
+  return (result.rowCount ?? 0) > 0;
+}
+
+/** A subagent row's title is "default" when NULL (subagents table has no default value). */
+export async function hasDefaultSubagentTitle(pool: pg.Pool, parentSessionId: string, agentId: string): Promise<boolean> {
+  const result = await pool.query(
+    `SELECT 1 FROM subagents WHERE parent_session_id = $1 AND agent_id = $2 AND title IS NULL`,
+    [parentSessionId, agentId]
+  );
+  return (result.rowCount ?? 0) > 0;
+}
+
+/** Update a subagent's title only if still default (NULL). Returns true if a row was updated. */
+export async function updateSubagentTitleIfDefault(pool: pg.Pool, parentSessionId: string, agentId: string, newTitle: string): Promise<boolean> {
+  const result = await pool.query(
+    `UPDATE subagents SET title = $1, updated_at = NOW() WHERE parent_session_id = $2 AND agent_id = $3 AND title IS NULL`,
+    [newTitle, parentSessionId, agentId]
   );
   return (result.rowCount ?? 0) > 0;
 }
@@ -1125,7 +1266,7 @@ export async function getTokenSummary(pool: pg.Pool, userId: number): Promise<{ 
  *  with full token composition (input/output/cache_read/cache_create). */
 export async function getTokensByDaemon(pool: pg.Pool, userId: number, daemonId: string): Promise<{
   total: number; today: number; thisMonth: number;
-  sessions: Array<{ session_id: string; title: string; total_tokens: number; tok_input: number; tok_output: number; tok_cache_read: number; tok_cache_create: number; model: string; agent_type: string; status: string; created_at: Date }>;
+  sessions: Array<{ session_id: string; title: string; total_tokens: number; tok_input: number; tok_output: number; tok_cache_read: number; tok_cache_create: number; model: string; agent_type: string; status: string; created_at: Date; children?: any[] }>;
 } | null> {
   const own = await pool.query(`SELECT 1 FROM daemons WHERE daemon_id = $1 AND user_id = $2`, [daemonId, userId]);
   if ((own.rowCount ?? 0) === 0) return null;
@@ -1157,7 +1298,7 @@ export async function getTokensByDaemon(pool: pg.Pool, userId: number, daemonId:
            COALESCE(model, '') AS model,
            COALESCE(agent_type, '') AS agent_type,
            COALESCE(status, '') AS status,
-           created_at
+           created_at, COALESCE(parent_session_id, '') AS parent_session_id
     FROM sessions
     WHERE user_id = $1 AND daemon_id = $2 AND session_id NOT LIKE 'pending-%'
     ORDER BY COALESCE(last_activity_at, updated_at) DESC
@@ -1168,7 +1309,7 @@ export async function getTokensByDaemon(pool: pg.Pool, userId: number, daemonId:
     total: parseInt(t.total ?? 0, 10),
     today: parseInt(t.today ?? 0, 10),
     thisMonth: parseInt(t.this_month ?? 0, 10),
-    sessions: (sess.rows as any[]).map((r) => ({
+    sessions: await Promise.all((sess.rows as any[]).map(async (r) => ({
       session_id: r.session_id,
       title: r.title,
       total_tokens: parseInt(r.total_tokens ?? 0, 10),
@@ -1180,7 +1321,8 @@ export async function getTokensByDaemon(pool: pg.Pool, userId: number, daemonId:
       agent_type: r.agent_type,
       status: r.status,
       created_at: r.created_at,
-    })),
+      children: r.parent_session_id === '' ? await listSubagentsByParent(pool, r.session_id) : [],
+    }))),
   };
 }
 

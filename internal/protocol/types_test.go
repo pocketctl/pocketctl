@@ -151,3 +151,34 @@ func TestDaemonEvent_NewFields_Deserialization(t *testing.T) {
 		t.Errorf("Status = %q, want %q", evt.Status, StatusExited)
 	}
 }
+
+func TestDaemonEventSubagentFieldsSerialize(t *testing.T) {
+	ev := DaemonEvent{
+		Type:            "subagent_discovered",
+		SessionID:       "parent-1",
+		AgentID:         "agent-abc",
+		ParentSessionID: "parent-1",
+		IsSubagent:      true,
+		RootSessionID:   "parent-1",
+	}
+	out, err := json.Marshal(ev)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	j := string(out)
+	for _, want := range []string{`"parent_session_id":"parent-1"`, `"is_subagent":true`, `"root_session_id":"parent-1"`} {
+		if !contains(j, want) {
+			t.Errorf("missing %q in %s", want, j)
+		}
+	}
+}
+
+func contains(s, sub string) bool { return len(s) >= len(sub) && (indexOf(s, sub) >= 0) }
+func indexOf(s, sub string) int {
+	for i := 0; i+len(sub) <= len(s); i++ {
+		if s[i:i+len(sub)] == sub {
+			return i
+		}
+	}
+	return -1
+}
