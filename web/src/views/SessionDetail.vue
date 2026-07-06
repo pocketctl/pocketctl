@@ -25,21 +25,30 @@
         <span style="font-size:11px;color:var(--fg-tertiary);">{{ isDaemonOnline ? t('dashboard.online') : t('dashboard.offline') }} · {{ statusSubtext }}</span>
       </div>
       <div class="session-list">
-        <div v-for="s in visibleSessions" :key="s.session_id"
-          :class="['session-list-item', { active: s.session_id === sessionId, 'pending-delete': (s as any).__pendingDelete }]"
-          @click="!(s as any).__pendingDelete && $router.push(`/session/${s.session_id}`)">
-          <span :class="['status-dot', s.statusEffective || s.status]" style="width:7px;height:7px;"></span>
-          <div class="sl-info">
-            <div :class="['sl-title', { mono: !s.title || s.title.startsWith('Terminal Session') }]">
-              <svg v-if="s.pinned" class="pin-icon" width="12" height="12" viewBox="0 0 24 24" fill="currentColor" style="margin-right: 4px;"><path d="M16 3l5 5-3 1-3 3-1 5-2-2-5 5-1-1 5-5-2-2 5-1 3-3z"/></svg>
-              <input v-if="renamingId === s.session_id" class="ss-rename-input" v-model="renameInput" maxlength="60"
-                @click.stop @keydown.enter="commitRename(s)" @keydown.escape="cancelRename" @blur="commitRename(s)" />
-              <template v-else>{{ s.title || s.session_id.slice(0, 8) }}</template>
+        <template v-for="s in visibleSessions" :key="s.session_id">
+          <div :class="['session-list-item', { active: s.session_id === sessionId, 'pending-delete': (s as any).__pendingDelete, 'has-children': s.children && s.children.length }]"
+            @click="!(s as any).__pendingDelete && $router.push(`/session/${s.session_id}`)">
+            <span v-if="s.children && s.children.length" class="sl-fold" @click.stop="toggleFold(s.session_id)">{{ folded[s.session_id] ? '▾' : '▸' }}</span>
+            <span :class="['status-dot', s.statusEffective || s.status]" style="width:7px;height:7px;"></span>
+            <div class="sl-info">
+              <div :class="['sl-title', { mono: !s.title || s.title.startsWith('Terminal Session') }]">
+                <svg v-if="s.pinned" class="pin-icon" width="12" height="12" viewBox="0 0 24 24" fill="currentColor" style="margin-right: 4px;"><path d="M16 3l5 5-3 1-3 3-1 5-2-2-5 5-1-1 5-5-2-2 5-1 3-3z"/></svg>
+                <input v-if="renamingId === s.session_id" class="ss-rename-input" v-model="renameInput" maxlength="60"
+                  @click.stop @keydown.enter="commitRename(s)" @keydown.escape="cancelRename" @blur="commitRename(s)" />
+                <template v-else>{{ s.title || s.session_id.slice(0, 8) }}</template>
+              </div>
+              <div class="sl-meta"><AgentBadge :agent="s.agent_type" size="sm" />{{ formatRelativeTime(s.last_activity_at || s.updated_at) }}<span v-if="s.subagent_count > 0"> · {{ t('session.sub_agents', { n: s.subagent_count }) }}</span></div>
             </div>
-            <div class="sl-meta"><AgentBadge :agent="s.agent_type" size="sm" />{{ formatRelativeTime(s.last_activity_at || s.updated_at) }}<span v-if="s.subagent_count > 0"> · {{ t('session.sub_agents', { n: s.subagent_count }) }}</span></div>
+            <SessionActions :session="s" @startRename="startRename" @deleted="onDeleted" @pinned="onPinned" />
           </div>
-          <SessionActions :session="s" @startRename="startRename" @deleted="onDeleted" @pinned="onPinned" />
-        </div>
+          <div v-if="s.children && s.children.length && folded[s.session_id]" class="sl-children">
+            <div v-for="c in s.children" :key="c.agentId" class="sl-child" :title="c.title || c.agentType">
+              <span class="sl-child-indent">↳</span>
+              <AgentBadge :agent="c.agentType" size="sm" />
+              <span class="sl-child-title">{{ c.title || c.agentType }}</span>
+            </div>
+          </div>
+        </template>
       </div>
     </div>
 
@@ -476,6 +485,10 @@ const visibleSessions = computed(() => {
   if (!selectedHostId.value) return allSessions.value
   return allSessions.value.filter((s: any) => s.daemon_id === selectedHostId.value)
 })
+
+// subagent 折叠组：sidebar 会话列表展开/收起子代理
+const folded = ref<Record<string, boolean>>({})
+function toggleFold(id: string) { folded.value[id] = !folded.value[id] }
 
 // Auto-select the first host when sessions first arrive and nothing is selected
 watch(uniqueHosts, (hosts) => {
@@ -1765,6 +1778,12 @@ onMounted(() => {
 .host-tab.active { background: var(--accent-muted); border-color: var(--accent); color: var(--accent); }
 .host-tab .host-tab-name { max-width: 100px; overflow: hidden; text-overflow: ellipsis; }
 .session-list { flex: 1; overflow-y: auto; padding: 8px; }
+.sl-fold { cursor: pointer; font-size: 12px; color: var(--fg-tertiary); user-select: none; line-height: 1; flex-shrink: 0; width: 12px; text-align: center; transition: color 0.15s; }
+.sl-fold:hover { color: var(--fg); }
+.sl-children { padding: 2px 0 6px 26px; display: flex; flex-direction: column; gap: 2px; }
+.sl-child { display: flex; align-items: center; gap: 6px; padding: 3px 6px; font-size: 12px; color: var(--fg-secondary); border-radius: var(--radius-sm); }
+.sl-child-indent { color: var(--fg-tertiary); flex-shrink: 0; }
+.sl-child-title { color: var(--fg); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .session-list-item { display: flex; align-items: center; gap: 10px; padding: 10px 12px; border-radius: var(--radius-md); cursor: pointer; transition: background 0.1s, opacity 0.25s ease; margin-bottom: 2px; }
 .session-list-item:hover { background: var(--surface-hover); }
 .session-list-item.pending-delete { opacity: 0.35; pointer-events: none; }
