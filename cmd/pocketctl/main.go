@@ -1610,6 +1610,13 @@ func handleWatcherEvents(ctx context.Context, events <-chan watcher.SessionEvent
 						if err == nil {
 							tailer, err = watcher.NewJSONLTailerFromStart(jsonlPath, agentType)
 							if err == nil {
+								model := ""
+								if data, readErr := os.ReadFile(jsonlPath); readErr == nil {
+									model = adapter.NewStorage(agentType).ExtractModel(strings.Split(string(data), "\n"))
+									if model != "" {
+										sm.SetSessionModel(evt.Session.SessionID, model)
+									}
+								}
 								// Associate tailer with session so sendToIdleTerminal can pause/resume it (D2)
 								sm.SetTailer(evt.Session.SessionID, tailer)
 								// Tailer started successfully — now emit session_discovered
@@ -1621,7 +1628,7 @@ func handleWatcherEvents(ctx context.Context, events <-chan watcher.SessionEvent
 									Source:    "terminal",
 									Agent:     agentType,
 									Title:     defaultTitle,
-									Model:     adapter.ExtractModelFromFileFor(agentType, jsonlPath),
+									Model:     model,
 								}
 								// P0: start sub-agent discoverer (only Claude Code has subagents/ dir)
 								if agentType == adapter.AgentClaude {

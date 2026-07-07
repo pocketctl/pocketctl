@@ -34,7 +34,7 @@ const (
 	opencodeDiscoverInterval = 2 * time.Second
 	opencodeSyncInterval     = 1 * time.Second
 	opencodeFreshWindow      = 10 * time.Minute
-	opencodeReconcileWindow  = 2 * time.Hour // reconcile stuck "running" status for sessions active within this window
+	opencodeReconcileWindow  = 2 * time.Hour   // reconcile stuck "running" status for sessions active within this window
 	opencodeApprovalTimeout  = 5 * time.Minute // auto-reject a pending permission if no client answers
 )
 
@@ -308,6 +308,11 @@ func (c *opencodeCoordinator) discoverOnce(ctx context.Context) {
 			title = "opencode Session-" + short
 		}
 		c.sm.UpdateSessionTitle(s.ID, title)
+		model := ""
+		if info, err := c.srv().GetSession(ctx, s.ID); err == nil && info.Model.ProviderID != "" && info.Model.ID != "" {
+			model = info.Model.ProviderID + "/" + info.Model.ID
+			c.sm.SetSessionModel(s.ID, model)
+		}
 		c.sm.outputCh <- protocol.DaemonEvent{
 			Type:      "session_discovered",
 			SessionID: s.ID,
@@ -315,6 +320,7 @@ func (c *opencodeCoordinator) discoverOnce(ctx context.Context) {
 			Status:    protocol.StatusIdle,
 			Source:    "terminal",
 			Agent:     adapter.AgentOpencode,
+			Model:     model,
 		}
 		// emitUser=true: terminal sessions have no other source of user_text.
 		c.startSync(s.ID, true)
