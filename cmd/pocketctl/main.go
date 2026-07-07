@@ -1630,6 +1630,17 @@ func handleWatcherEvents(ctx context.Context, events <-chan watcher.SessionEvent
 									Title:     defaultTitle,
 									Model:     model,
 								}
+								// codex/opencode terminal 会话:session_discovered 带的 model 受
+								// upsertSession 的 COALESCE 约束(空值不覆盖、已有非空值不覆盖),
+								// 历史 rollout 解析出的 model 可能写不进已有空记录。补发一个
+								// session_model_changed —— relay 侧无条件覆盖,确保 DB 一定刷新。
+								if model != "" {
+									outputCh <- protocol.DaemonEvent{
+										Type:      "session_model_changed",
+										SessionID: evt.Session.SessionID,
+										Model:     model,
+									}
+								}
 								// P0: start sub-agent discoverer (only Claude Code has subagents/ dir)
 								if agentType == adapter.AgentClaude {
 									disc := watcher.NewSubAgentDiscoverer(jsonlPath, evt.Session.SessionID, outputCh, 2*time.Second)
@@ -1669,7 +1680,6 @@ func handleWatcherEvents(ctx context.Context, events <-chan watcher.SessionEvent
 					sm.UpdateSessionTitle(evt.Session.SessionID, defaultTitle)
 
 					// Tail loop: send parsed events with session_id stamped
-					titlePrimed := false // guards one-shot full-file read for title extraction
 					ticker := time.NewTicker(1 * time.Second)
 					defer ticker.Stop()
 					for {
@@ -1702,25 +1712,19 @@ func handleWatcherEvents(ctx context.Context, events <-chan watcher.SessionEvent
 							// total attempts at MaxTitleAttempts and the relay skips once an AI
 							// title is written, so re-evaluating per tick is safe.
 							if len(rawLines) > 0 {
-								userMsg := adapter.ExtractFirstUserMessageFor(rawLines, 200, agentType)
-								assistantMsg := adapter.ExtractFirstAssistantMessageFor(rawLines, 200, agentType)
-								// 增量行常把 user/assistant 拆到不同 tick，单次提取不全；
-								// 首次不全时读全量 JSONL 兜底一次，确保有完整 user+assistant
-								// 后稳定触发 title 生成 (2fec2498 案例)。
-								if (userMsg == "" || assistantMsg == "") && !titlePrimed {
-									if jsonlPath, perr := adapter.ResolveJSONLPathFor(agentType, evt.Session.SessionID, evt.Session.Cwd); perr == nil {
-										allLines := readJSONLLines(jsonlPath, 500)
-										if u := adapter.ExtractFirstUserMessageFor(allLines, 200, agentType); u != "" {
-											userMsg = u
-										}
-										if a := adapter.ExtractFirstAssistantMessageFor(allLines, 200, agentType); a != "" {
-											assistantMsg = a
-										}
-										titlePrimed = true
+								// title 提取需 user+assistant 都有。增量 rawLines 常把两者拆到不同
+								// tick(codex discovered 早时 user_message 在一增量、agent_message 在另一
+								// 增量),ExtractFirst(当前增量)永远凑不齐 → 永不触发 GenerateTitle。
+								// 直接读全量 JSONL 提取首条 user+assistant 确保凑齐。本地 IO 不增 token
+								// (ExtractFirst 只取首条截断 200;GenerateTitle 有 MaxTitleAttempts + relay
+								// hasDefaultTitle 防重复调 DeepSeek)。
+								if jsonlPath, perr := adapter.ResolveJSONLPathFor(agentType, evt.Session.SessionID, evt.Session.Cwd); perr == nil {
+									allLines := readJSONLLines(jsonlPath, 500)
+									userMsg := adapter.ExtractFirstUserMessageFor(allLines, 200, agentType)
+									assistantMsg := adapter.ExtractFirstAssistantMessageFor(allLines, 200, agentType)
+									if userMsg != "" && assistantMsg != "" {
+										sm.GenerateTitle(evt.Session.SessionID, userMsg, assistantMsg)
 									}
-								}
-								if userMsg != "" && assistantMsg != "" {
-									sm.GenerateTitle(evt.Session.SessionID, userMsg, assistantMsg)
 								}
 							}
 						}
