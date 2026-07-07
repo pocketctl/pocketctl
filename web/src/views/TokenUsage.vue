@@ -139,7 +139,7 @@
                 <div class="se-sub-table">
                   <div class="se-sub-header"><span>{{ t('token.subagent_col') }}</span><span>{{ t('token.input') }}</span><span>{{ t('token.output') }}</span><span>{{ t('token.cache') }}</span></div>
                   <div v-for="c in s.children" :key="c.agentId" class="se-sub-row">
-                    <span class="se-sub-name"><AgentBadge :agent="c.agentType" size="sm" /> {{ c.title || c.agentType || c.agentId.slice(0, 6) }}</span>
+                    <span class="se-sub-name">{{ c.title || c.agentId.slice(0, 6) }}</span>
                     <span class="se-val">{{ fmt(c.tokenIn) }}</span>
                     <span class="se-val">{{ fmt(c.tokenOut) }}</span>
                     <span class="se-val">{{ fmt(c.tokenCache) }}</span>

@@ -101,9 +101,10 @@ export async function initDB(pool: pg.Pool): Promise<void> {
     )
   `);
   // 在线表迁移：为旧表补列，并把 PK 从 (daemon_id, seq) 换成 (daemon_id, usage_hash)。
+  // 注意顺序：必须先 DROP 旧 PK(含 seq)，再 ALTER seq DROP NOT NULL（PG13 不允许
+  // 对主键列 DROP NOT NULL，42P16 错误）。
   await pool.query(`ALTER TABLE subagent_usage_seen ADD COLUMN IF NOT EXISTS usage_hash CHAR(16)`);
   await pool.query(`ALTER TABLE subagent_usage_seen ADD COLUMN IF NOT EXISTS agent_id TEXT`);
-  await pool.query(`ALTER TABLE subagent_usage_seen ALTER COLUMN seq DROP NOT NULL`);
   await pool.query(`DO $$
     BEGIN
       IF EXISTS (
@@ -114,6 +115,7 @@ export async function initDB(pool: pg.Pool): Promise<void> {
       ) THEN
         ALTER TABLE subagent_usage_seen DROP CONSTRAINT subagent_usage_seen_pkey;
         ALTER TABLE subagent_usage_seen ADD PRIMARY KEY (daemon_id, usage_hash);
+        ALTER TABLE subagent_usage_seen ALTER COLUMN seq DROP NOT NULL;
       END IF;
     EXCEPTION WHEN OTHERS THEN
       RAISE NOTICE 'subagent_usage_seen PK migrate skipped: %', SQLERRM;
