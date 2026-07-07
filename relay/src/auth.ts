@@ -91,7 +91,7 @@ export async function verifyAccessTokenWithRevocation(
       if (revoked) return null;
     } catch {
       // DB error — allow token through rather than blocking all auth
-      console.error('revocation check failed:', token.slice(0, 10) + '...');
+      console.error('revocation check failed:', `user=${payload.userId} jti=${payload.jti.slice(0, 8)}`);
     }
   }
 

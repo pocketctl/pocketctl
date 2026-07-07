@@ -1,4 +1,4 @@
-import { describe, test, expect, vi, beforeEach } from 'vitest'
+import { describe, test, expect, vi, beforeEach, afterEach } from 'vitest'
 
 // --- localStorage mock（useAuth / useWebSocket 顶层都读 localStorage）---
 const localStorageMock = (() => {
@@ -53,6 +53,15 @@ beforeEach(() => {
   capturedUrls = []
   lastWs = null
   ;(globalThis as any).WebSocket = FakeWS
+  vi.spyOn(globalThis, 'fetch').mockImplementation(async () => ({
+    ok: true,
+    status: 200,
+    json: async () => ({ ticket: `ticket-${capturedUrls.length + 1}`, expires_in: 60 }),
+  }) as any)
+})
+
+afterEach(() => {
+  vi.restoreAllMocks()
 })
 
 describe('useWebSocket — connect 前确保 token 新鲜', () => {
@@ -72,7 +81,15 @@ describe('useWebSocket — connect 前确保 token 新鲜', () => {
 
     expect(mockRefresh).toHaveBeenCalledTimes(1)
     expect(capturedUrls).toHaveLength(1)
-    expect(capturedUrls[0]).toContain(encodeURIComponent(fresh))
+    expect(capturedUrls[0]).toContain('ticket=ticket-1')
+    expect(capturedUrls[0]).not.toContain(encodeURIComponent(fresh))
+    expect(globalThis.fetch).toHaveBeenCalledWith(
+      'https://relay.test/api/auth/ws-ticket',
+      expect.objectContaining({
+        method: 'POST',
+        headers: { Authorization: `Bearer ${fresh}` },
+      }),
+    )
   })
 
   test('access token 仍有效时，connect 不刷新，直接用当前 token', async () => {
@@ -85,7 +102,8 @@ describe('useWebSocket — connect 前确保 token 新鲜', () => {
     await useWebSocket().connect()
 
     expect(mockRefresh).not.toHaveBeenCalled()
-    expect(capturedUrls[0]).toContain(encodeURIComponent(fresh))
+    expect(capturedUrls[0]).toContain('ticket=ticket-1')
+    expect(capturedUrls[0]).not.toContain(encodeURIComponent(fresh))
   })
 })
 
@@ -112,7 +130,8 @@ describe('useWebSocket — onclose 4001 刷新重连', () => {
 
     expect(mockRefresh).toHaveBeenCalledTimes(1)
     expect(capturedUrls.length).toBeGreaterThanOrEqual(2)
-    expect(capturedUrls[capturedUrls.length - 1]).toContain(encodeURIComponent(fresh))
+    expect(capturedUrls[capturedUrls.length - 1]).toContain('ticket=ticket-2')
+    expect(capturedUrls[capturedUrls.length - 1]).not.toContain(encodeURIComponent(fresh))
   })
 
   test('refresh 失败时登出，不再重连', async () => {

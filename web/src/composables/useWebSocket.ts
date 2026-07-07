@@ -1,5 +1,5 @@
 import { ref } from 'vue'
-import { getRelayWs } from './useEnv'
+import { getRelayOrigin, getRelayWs } from './useEnv'
 import { isTokenExpired, useAuth } from './useAuth'
 
 export interface DaemonEvent {
@@ -57,6 +57,7 @@ const handlers = new Set<EventHandler>()
 let reconnectTimer: ReturnType<typeof setTimeout> | null = null
 let reconnectAttempt = 0
 let currentUrl = ''
+let currentBaseUrl = ''
 let pendingMessages: any[] = []
 // 连接流程进行中标志（含 connect 前的 token 刷新）。send 在此期间把消息 buffer 到
 // pendingMessages，等 onopen flush——否则 DashboardView 的 `connect(); send()` 在 async
@@ -68,12 +69,44 @@ const { doRefreshToken, logout } = useAuth()
 // Daemon online tracking
 const daemons = ref<Map<string, DaemonInfo>>(new Map())
 
-function getRelayWsUrl(): string {
-  const base = getRelayWs()
+function withWsQuery(base: string, params: Record<string, string>): string {
+  try {
+    const url = new URL(base)
+    for (const key of ['token', 'ticket', 'api_key', 'type']) url.searchParams.delete(key)
+    for (const [key, value] of Object.entries(params)) url.searchParams.set(key, value)
+    return url.toString()
+  } catch {
+    const [path, rawQuery = ''] = base.split('?')
+    const search = new URLSearchParams(rawQuery)
+    for (const key of ['token', 'ticket', 'api_key', 'type']) search.delete(key)
+    for (const [key, value] of Object.entries(params)) search.set(key, value)
+    const query = search.toString()
+    return query ? `${path}?${query}` : path
+  }
+}
+
+async function requestWsTicket(token: string): Promise<string | null> {
+  const origin = getRelayOrigin()
+  const url = origin ? `${origin}/api/auth/ws-ticket` : '/api/auth/ws-ticket'
+  try {
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${token}` },
+    })
+    if (!res.ok) return null
+    const data = await res.json()
+    return typeof data.ticket === 'string' ? data.ticket : null
+  } catch {
+    return null
+  }
+}
+
+async function getRelayWsUrl(base = getRelayWs()): Promise<string> {
   const token = localStorage.getItem('pocketctl_access_token')
   if (!token) return base
-  const sep = base.includes('?') ? '&' : '?'
-  return `${base}${sep}token=${encodeURIComponent(token)}&type=client`
+  const ticket = await requestWsTicket(token)
+  if (!ticket) throw new Error('ws ticket request failed')
+  return withWsQuery(base, { type: 'client', ticket })
 }
 
 /** 连接前确保 access token 未过期；过期则刷新（成功后 localStorage 已写入新 token）。 */
@@ -90,7 +123,8 @@ async function connect(url?: string) {
   reconnecting.value = true
   try {
     await ensureFreshToken()
-    currentUrl = url || getRelayWsUrl()
+    currentBaseUrl = url || currentBaseUrl || getRelayWs()
+    currentUrl = await getRelayWsUrl(currentBaseUrl)
     ws.value = new WebSocket(currentUrl)
 
     ws.value.onopen = () => {
@@ -176,7 +210,7 @@ function scheduleReconnect() {
   if (reconnectTimer) return
   const delay = Math.min(1000 * Math.pow(2, reconnectAttempt), 30000)
   reconnectAttempt++
-  reconnectTimer = setTimeout(() => { reconnectTimer = null; connect(currentUrl) }, delay)
+  reconnectTimer = setTimeout(() => { reconnectTimer = null; connect(currentBaseUrl) }, delay)
 }
 
 /** relay 以 4001(invalid token) 关闭后的恢复：刷新 token，成功则用新 token 立即重连
@@ -185,7 +219,7 @@ async function handleAuthRejected(): Promise<void> {
   const ok = await doRefreshToken()
   if (ok) {
     reconnectAttempt = 0
-    connect() // localStorage 已是新 token；ensureFreshToken 见有效不再刷新
+    connect(currentBaseUrl) // localStorage 已是新 token；ensureFreshToken 见有效不再刷新
   } else {
     logout() // refresh 失败，清空登录态，等待用户重新登录
   }

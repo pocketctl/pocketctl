@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"net/http"
 	"net/url"
 	"os"
 	"os/exec"
@@ -1485,54 +1486,66 @@ func cmdDoctor() {
 		if !strings.HasSuffix(wsURL, "/ws") {
 			wsURL = strings.TrimRight(wsURL, "/") + "/ws"
 		}
-		wsURL += "?token=" + accessToken + "&type=daemon"
 
-		wsConn, _, wsErr := websocket.DefaultDialer.Dial(wsURL, nil)
-		if wsErr != nil {
-			check(i18n.T("doctor.check_ws"), false, wsErr.Error())
+		u, parseErr := url.Parse(wsURL)
+		if parseErr != nil {
+			check(i18n.T("doctor.check_ws"), false, parseErr.Error())
 			check(i18n.T("doctor.check_auth"), false, i18n.T("doctor.ws_fail"))
 			check(i18n.T("doctor.check_limit"), false, i18n.T("doctor.ws_fail"))
 		} else {
-			check(i18n.T("doctor.check_ws"), true, i18n.T("doctor.ws_ok"))
+			q := u.Query()
+			q.Set("type", "daemon")
+			u.RawQuery = q.Encode()
 
-			// Send register message
-			hostname, _ := os.Hostname()
-			registerMsg, _ := json.Marshal(map[string]any{
-				"type":      "register",
-				"daemon_id": "doctor-probe",
-				"hostname":  hostname,
-				"agents":    []string{"claude-code"},
-			})
-			wsConn.WriteMessage(websocket.TextMessage, registerMsg)
-
-			// Wait for response (5s timeout)
-			wsConn.SetReadDeadline(time.Now().Add(5 * time.Second))
-			_, resp, readErr := wsConn.ReadMessage()
-			wsConn.Close()
-
-			if readErr != nil {
-				check(i18n.T("doctor.check_auth"), false, i18n.T("doctor.ws_timeout", readErr))
-				check(i18n.T("doctor.check_limit"), false, i18n.T("doctor.cannot_check"))
+			hdr := http.Header{}
+			hdr.Set("Authorization", "Bearer "+accessToken)
+			wsConn, _, wsErr := websocket.DefaultDialer.Dial(u.String(), hdr)
+			if wsErr != nil {
+				check(i18n.T("doctor.check_ws"), false, wsErr.Error())
+				check(i18n.T("doctor.check_auth"), false, i18n.T("doctor.ws_fail"))
+				check(i18n.T("doctor.check_limit"), false, i18n.T("doctor.ws_fail"))
 			} else {
-				var result map[string]any
-				json.Unmarshal(resp, &result)
-				msgType, _ := result["type"].(string)
-				code, _ := result["code"].(string)
+				check(i18n.T("doctor.check_ws"), true, i18n.T("doctor.ws_ok"))
 
-				if msgType == "register_ack" {
-					check(i18n.T("doctor.check_auth"), true, i18n.T("doctor.auth_ack"))
-					check(i18n.T("doctor.check_limit"), true, i18n.T("doctor.limit_ok"))
-				} else if code == "DAEMON_LIMIT_REACHED" {
-					errMsg, _ := result["error"].(string)
-					check(i18n.T("doctor.check_auth"), true, i18n.T("doctor.auth_ok"))
-					check(i18n.T("doctor.check_limit"), false, errMsg)
-				} else if msgType == "error" {
-					errMsg, _ := result["error"].(string)
-					check(i18n.T("doctor.check_auth"), false, errMsg)
-					check(i18n.T("doctor.check_limit"), false, i18n.T("doctor.auth_fail"))
-				} else {
-					check(i18n.T("doctor.check_auth"), false, i18n.T("doctor.auth_unknown", msgType))
+				// Send register message
+				hostname, _ := os.Hostname()
+				registerMsg, _ := json.Marshal(map[string]any{
+					"type":      "register",
+					"daemon_id": "doctor-probe",
+					"hostname":  hostname,
+					"agents":    []string{"claude-code"},
+				})
+				wsConn.WriteMessage(websocket.TextMessage, registerMsg)
+
+				// Wait for response (5s timeout)
+				wsConn.SetReadDeadline(time.Now().Add(5 * time.Second))
+				_, resp, readErr := wsConn.ReadMessage()
+				wsConn.Close()
+
+				if readErr != nil {
+					check(i18n.T("doctor.check_auth"), false, i18n.T("doctor.ws_timeout", readErr))
 					check(i18n.T("doctor.check_limit"), false, i18n.T("doctor.cannot_check"))
+				} else {
+					var result map[string]any
+					json.Unmarshal(resp, &result)
+					msgType, _ := result["type"].(string)
+					code, _ := result["code"].(string)
+
+					if msgType == "register_ack" {
+						check(i18n.T("doctor.check_auth"), true, i18n.T("doctor.auth_ack"))
+						check(i18n.T("doctor.check_limit"), true, i18n.T("doctor.limit_ok"))
+					} else if code == "DAEMON_LIMIT_REACHED" {
+						errMsg, _ := result["error"].(string)
+						check(i18n.T("doctor.check_auth"), true, i18n.T("doctor.auth_ok"))
+						check(i18n.T("doctor.check_limit"), false, errMsg)
+					} else if msgType == "error" {
+						errMsg, _ := result["error"].(string)
+						check(i18n.T("doctor.check_auth"), false, errMsg)
+						check(i18n.T("doctor.check_limit"), false, i18n.T("doctor.auth_fail"))
+					} else {
+						check(i18n.T("doctor.check_auth"), false, i18n.T("doctor.auth_unknown", msgType))
+						check(i18n.T("doctor.check_limit"), false, i18n.T("doctor.cannot_check"))
+					}
 				}
 			}
 		}

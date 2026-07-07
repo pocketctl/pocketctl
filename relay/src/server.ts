@@ -10,6 +10,7 @@ import { generateCode, storeCode, verifyCode, hasPendingCode } from './config/ve
 import { validateClient } from './config/clients.js';
 import { createSession, getSessionByDeviceCode, getSessionByUserCode, authorizeSession, recordPoll, canPoll, deleteSession } from './config/auth-sessions.js';
 import { createQrSession, getQrSession, markScanned, confirmQrSession, deleteQrSession } from './config/qr-sessions.js';
+import { createWsTicketStore } from './config/ws-tickets.js';
 import { createHash } from 'crypto';
 import { ConnectionRateLimiter } from './rate-limit.js';
 
@@ -28,6 +29,7 @@ const RATE_LIMIT_BURST_MAX = parseInt(process.env.RATE_LIMIT_BURST_MAX || '5', 1
 const RATE_LIMIT_AUTH_FAIL_THRESHOLD = parseInt(process.env.RATE_LIMIT_AUTH_FAIL_THRESHOLD || '3', 10);
 
 const wsDaemonMap = new Map<any, string>();
+const wsTickets = createWsTicketStore(60_000);
 
 // Connection rate limiter: burst + sustained window, plus an escalating ban for
 // IPs that repeatedly fail auth. The auth-fail ban is what silences a
@@ -167,6 +169,23 @@ async function main() {
       refresh_token: newRefreshToken,
       user: { id: user.id, email: user.email, display_name: user.display_name },
     };
+  });
+
+  // WebSocket ticket: browsers cannot set Authorization headers on native
+  // WebSocket, so Web clients exchange a Bearer access token for a short-lived,
+  // one-time ticket and use that ticket only during the WS handshake.
+  app.post('/api/auth/ws-ticket', async (req, reply) => {
+    const authHeader = req.headers['authorization'] as string | undefined;
+    if (!authHeader?.startsWith('Bearer ')) {
+      reply.code(401); return { error: 'authorization required' };
+    }
+    const payload = await verifyAccessTokenWithRevocation(authHeader.slice(7), pool);
+    if (!payload) {
+      reply.code(401); return { error: 'invalid token' };
+    }
+    if (Math.random() < 0.01) wsTickets.gc();
+    const { ticket, expiresIn } = wsTickets.create(payload);
+    return { ticket, expires_in: expiresIn };
   });
 
   // Apple Sign In (Phase 3)
@@ -1004,13 +1023,13 @@ async function main() {
     }
 
     const query = req.query as any;
-    // Token resolution (P1-2: keep the JWT out of the URL where the client can
-    // manage it). Daemons (Go) send `Authorization: Bearer <jwt>`; the `?token=`
-    // query is kept as a legacy fallback for old daemons and for browsers, which
-    // cannot set WS request headers (its log-exposure is mitigated by the nginx
-    // access_log token redaction).
+    // Token resolution. Daemons/iOS/CLI send `Authorization: Bearer <jwt>`.
+    // Browser Web clients use a short-lived one-time `?ticket=` because native
+    // WebSocket cannot set headers. Long-lived JWTs are no longer accepted in
+    // the URL query string.
     const authHeader = req.headers['authorization'] as string | undefined;
-    const token = (authHeader?.startsWith('Bearer ') ? authHeader.slice(7).trim() : (query.token as string));
+    const token = authHeader?.startsWith('Bearer ') ? authHeader.slice(7).trim() : '';
+    const ticket = query.ticket as string;
     const apiKey = query.api_key as string;
     const connType = query.type as string;
 
@@ -1089,6 +1108,17 @@ async function main() {
           const banSec = rateLimiter.recordAuthFailure(clientIp);
           console.log(`WS rejected: type=${connType} ip=${clientIp} reason=invalid_token ${owner}${banSec ? ` banned=${banSec}s` : ''}`);
           socket.close(4001, 'invalid token');
+          return;
+        }
+        userId = payload.userId;
+        tokenJti = payload.jti;
+        tokenMachineId = payload.machine_id;
+      } else if (ticket) {
+        const payload = wsTickets.consume(ticket);
+        if (!payload) {
+          const banSec = rateLimiter.recordAuthFailure(clientIp);
+          console.log(`WS rejected: type=${connType} ip=${clientIp} reason=invalid_ticket${banSec ? ` banned=${banSec}s` : ''}`);
+          socket.close(4001, 'invalid ticket');
           return;
         }
         userId = payload.userId;
