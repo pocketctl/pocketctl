@@ -157,6 +157,11 @@ export async function initDB(pool: pg.Pool): Promise<void> {
     CREATE INDEX IF NOT EXISTS idx_subagents_parent_created
     ON subagents(parent_session_id, created_at)
   `);
+  await pool.query(`
+    CREATE INDEX IF NOT EXISTS idx_events_session_agent_id_desc
+    ON events (session_id, ((payload->>'agent_id')), id DESC)
+    WHERE payload ? 'agent_id'
+  `);
 
   // C2: Token cost tracking — per-session cumulative cost (USD) from result events
   await pool.query(`ALTER TABLE sessions ADD COLUMN IF NOT EXISTS cost_usd DOUBLE PRECISION DEFAULT 0`);
@@ -379,6 +384,28 @@ export async function getEventsBefore(pool: pg.Pool, sessionId: string, cursor: 
   const result = await pool.query(
     `SELECT id, session_id, event_type, payload, created_at FROM events WHERE session_id = $1 AND id < $2 ORDER BY id DESC LIMIT $3`,
     [sessionId, cursor, limit]
+  );
+  return result.rows;
+}
+
+export async function getRecentSubagentEvents(pool: pg.Pool, sessionId: string, agentId: string, limit: number): Promise<any[]> {
+  const result = await pool.query(
+    `SELECT id, session_id, event_type, payload, created_at
+     FROM events
+     WHERE session_id = $1 AND payload->>'agent_id' = $2
+     ORDER BY id DESC LIMIT $3`,
+    [sessionId, agentId, limit]
+  );
+  return result.rows;
+}
+
+export async function getSubagentEventsBefore(pool: pg.Pool, sessionId: string, agentId: string, cursor: number, limit: number): Promise<any[]> {
+  const result = await pool.query(
+    `SELECT id, session_id, event_type, payload, created_at
+     FROM events
+     WHERE session_id = $1 AND payload->>'agent_id' = $2 AND id < $3
+     ORDER BY id DESC LIMIT $4`,
+    [sessionId, agentId, cursor, limit]
   );
   return result.rows;
 }

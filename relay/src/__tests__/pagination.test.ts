@@ -1,6 +1,6 @@
 import { describe, test, expect, vi, beforeEach } from 'vitest'
 import { Router } from '../router.js'
-import { getRecentEvents, getEventsBefore } from '../db.js'
+import { getRecentEvents, getEventsBefore, getRecentSubagentEvents, getSubagentEventsBefore } from '../db.js'
 
 // Reusable mocks (mirror router.test.ts patterns)
 function createMockPool() {
@@ -79,6 +79,34 @@ describe('db - backward pagination queries (session-history-pagination 1.4)', ()
     expect(result).toHaveLength(1)
     expect(result[0].id).toBe(99)
   })
+
+  test('getRecentSubagentEvents filters by payload agent_id', async () => {
+    pool.query.mockResolvedValueOnce({ rows: [{ id: 10, payload: { type: 'agent_text', agent_id: 'agent-a' } }] })
+    const result = await getRecentSubagentEvents(pool, 'sess-1', 'agent-a', 20)
+    expect(pool.query).toHaveBeenCalledWith(
+      expect.stringContaining("payload->>'agent_id' = $2"),
+      ['sess-1', 'agent-a', 20]
+    )
+    expect(pool.query).toHaveBeenCalledWith(
+      expect.stringContaining('ORDER BY id DESC LIMIT $3'),
+      ['sess-1', 'agent-a', 20]
+    )
+    expect(result).toHaveLength(1)
+  })
+
+  test('getSubagentEventsBefore filters by agent_id and cursor', async () => {
+    pool.query.mockResolvedValueOnce({ rows: [{ id: 8, payload: { type: 'tool_call', agent_id: 'agent-a' } }] })
+    const result = await getSubagentEventsBefore(pool, 'sess-1', 'agent-a', 10, 20)
+    expect(pool.query).toHaveBeenCalledWith(
+      expect.stringContaining('id < $3'),
+      ['sess-1', 'agent-a', 10, 20]
+    )
+    expect(pool.query).toHaveBeenCalledWith(
+      expect.stringContaining('ORDER BY id DESC LIMIT $4'),
+      ['sess-1', 'agent-a', 10, 20]
+    )
+    expect(result).toHaveLength(1)
+  })
 })
 
 // --- 6.3 router unit tests: handleReplay direction routing + has_more ---
@@ -116,6 +144,31 @@ describe('Router - replay pagination (session-history-pagination 6.3)', () => {
     expect(end.req_id).toBe(1)
     // query was getRecentEvents (ORDER BY id DESC LIMIT, no id <)
     expect(pool.query.mock.calls.some(([sql]: [string]) => sql.includes('ORDER BY id DESC LIMIT') && !sql.includes('id <'))).toBe(true)
+  })
+
+  test('subagent replay returns only requested agent events with backward pagination metadata', async () => {
+    const clientWs = createMockWs()
+    router.registerClient(clientWs, 1)
+    const events = Array.from({ length: 2 }, (_, i) => ({
+      id: 20 - i,
+      payload: { type: 'agent_text', session_id: 'sess-1', agent_id: 'agent-a', text: 'm' + i },
+    }))
+    pool._setReplayRows(events)
+    await router.handleClientMessage(clientWs, { type: 'replay_subagent', session_id: 'sess-1', agent_id: 'agent-a', limit: 20 })
+    await new Promise(r => setTimeout(r, 50))
+
+    const batch = clientWs._sent.find((m: any) => m.type === 'replay_batch')
+    const end = clientWs._sent.find((m: any) => m.type === 'replay_end')
+    expect(batch).toBeDefined()
+    expect(batch.agent_id).toBe('agent-a')
+    expect(batch.direction).toBe('backward')
+    expect(end).toBeDefined()
+    expect(end.agent_id).toBe('agent-a')
+    expect(end.count).toBe(2)
+    expect(end.has_more).toBe(false)
+    expect(pool.query.mock.calls.some(([sql, params]: [string, any[]]) =>
+      sql.includes("payload->>'agent_id' = $2") && params.includes('agent-a')
+    )).toBe(true)
   })
 
   test('backward replay (last_seq cursor) → getEventsBefore (id < cursor)', async () => {
