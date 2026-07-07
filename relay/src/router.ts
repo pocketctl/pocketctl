@@ -887,6 +887,7 @@ export class Router {
       client.subscribedSessions.add(msg.session_id);
     }
     if (msg.type === 'replay') { this.handleReplay(clientWs, msg.session_id, msg.last_seq, msg.req_id, msg.direction, msg.limit); return; }
+    if (msg.type === 'replay_subagent') { this.handleReplaySubagent(clientWs, msg.session_id, msg.agent_id, msg.last_seq, msg.req_id, msg.limit); return; }
     if (msg.type === 'list_sessions') { this.handleListSessions(clientWs, client.userId, msg); return; }
     if (msg.type === 'list_daemons') { console.log('[router] list_daemons from user', client.userId, 'daemons in map:', this.daemons.size); this.handleListDaemons(clientWs, client.userId); return; }
     if (msg.type === 'set_locale') {
@@ -1102,6 +1103,48 @@ export class Router {
       console.error('replay error:', err);
       // Always send replay_end so the client doesn't hang on isLoading
       this.send(clientWs, withReq({ type: 'replay_end', session_id: sessionId, count: 0, last_seq: lastSeq, has_more: false }));
+    }
+  }
+
+  private async handleReplaySubagent(clientWs: WebSocket, sessionId: string, agentId: string, lastSeq?: number, reqId?: number, limit?: number): Promise<void> {
+    const withReq = (obj: any) => reqId !== undefined ? { ...obj, req_id: reqId } : obj;
+    const lim = limit && limit > 0 ? limit : 100;
+    if (!agentId) {
+      this.send(clientWs, withReq({ type: 'replay_end', session_id: sessionId, agent_id: agentId, count: 0, last_seq: lastSeq ?? 0, has_more: false }));
+      return;
+    }
+    try {
+      const events = (lastSeq && lastSeq > 0)
+        ? await db.getSubagentEventsBefore(this.pool, sessionId, agentId, lastSeq, lim)
+        : await db.getRecentSubagentEvents(this.pool, sessionId, agentId, lim);
+      const hasMore = events.length === lim;
+      if (events.length === 0) {
+        this.send(clientWs, withReq({ type: 'replay_end', session_id: sessionId, agent_id: agentId, count: 0, last_seq: lastSeq ?? 0, has_more: false }));
+        return;
+      }
+      const BATCH = 50;
+      for (let i = 0; i < events.length; i += BATCH) {
+        const slice = events.slice(i, i + BATCH);
+        this.send(clientWs, withReq({
+          type: 'replay_batch',
+          session_id: sessionId,
+          agent_id: agentId,
+          events: slice.map(e => e.payload),
+          last_seq: slice[slice.length - 1].id,
+          direction: 'backward',
+        }));
+      }
+      this.send(clientWs, withReq({
+        type: 'replay_end',
+        session_id: sessionId,
+        agent_id: agentId,
+        count: events.length,
+        last_seq: events[events.length - 1].id,
+        has_more: hasMore,
+      }));
+    } catch (err) {
+      console.error('replay_subagent error:', err);
+      this.send(clientWs, withReq({ type: 'replay_end', session_id: sessionId, agent_id: agentId, count: 0, last_seq: lastSeq ?? 0, has_more: false }));
     }
   }
 
