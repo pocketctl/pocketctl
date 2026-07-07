@@ -162,12 +162,11 @@
         </div>
         <div v-if="s.children && s.children.length && folded[s.session_id]" class="child-rows">
           <div v-for="c in s.children" :key="c.agentId" class="child-row" role="button" tabindex="0"
-            :title="c.title || c.agentType"
+            :title="c.title || c.agentId.slice(0, 8)"
             @click.stop="$router.push(`/session/${s.session_id}?subagent=${c.agentId}`)"
             @keydown.enter="$router.push(`/session/${s.session_id}?subagent=${c.agentId}`)">
             <span class="child-indent">↳</span>
-            <AgentBadge :agent="c.agentType" size="sm" />
-            <span class="child-title">{{ c.title || c.agentType }}</span>
+            <span class="child-title">{{ c.title || c.agentId.slice(0, 8) }}</span>
             <span v-if="(c.tokenIn||0)+(c.tokenOut||0) > 0" class="child-token">🪙 {{ fmtTk((c.tokenIn||0)+(c.tokenOut||0)) }}</span>
           </div>
         </div>
