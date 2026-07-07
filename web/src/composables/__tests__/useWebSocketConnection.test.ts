@@ -12,11 +12,15 @@ const localStorageMock = (() => {
 })()
 Object.defineProperty(globalThis, 'localStorage', { value: localStorageMock, configurable: true })
 
-// --- useAuth.doRefreshToken mock（isTokenExpired 等其余导出保留真实实现）---
-const { mockRefresh, mockLogout } = vi.hoisted(() => ({ mockRefresh: vi.fn(), mockLogout: vi.fn() }))
+// --- useAuth mock（isTokenExpired 等其余导出保留真实实现）---
+const { mockAccessToken, mockRefresh, mockLogout } = vi.hoisted(() => ({
+  mockAccessToken: { value: '' },
+  mockRefresh: vi.fn(),
+  mockLogout: vi.fn(),
+}))
 vi.mock('../useAuth', async () => {
   const actual = await vi.importActual<any>('../useAuth')
-  return { ...actual, useAuth: () => ({ doRefreshToken: mockRefresh, logout: mockLogout }) }
+  return { ...actual, useAuth: () => ({ accessToken: mockAccessToken, doRefreshToken: mockRefresh, logout: mockLogout }) }
 })
 
 // --- WebSocket mock：记录每次实例化的 url，暴露 onclose 供测试触发 ---
@@ -48,6 +52,7 @@ function makeToken(payload: object): string {
 
 beforeEach(() => {
   localStorageMock.clear()
+  mockAccessToken.value = ''
   mockRefresh.mockReset()
   mockLogout.mockReset()
   capturedUrls = []
@@ -68,10 +73,10 @@ describe('useWebSocket — connect 前确保 token 新鲜', () => {
   test('access token 已过期时，connect 先刷新再用新 token 建连', async () => {
     const expired = makeToken({ exp: Math.floor(Date.now() / 1000) - 100 })
     const fresh = makeToken({ exp: Math.floor(Date.now() / 1000) + 3600 })
-    localStorageMock.setItem('pocketctl_access_token', expired)
+    mockAccessToken.value = expired
     localStorageMock.setItem('pocketctl_relay_url', 'wss://relay.test/ws')
     mockRefresh.mockImplementation(async () => {
-      localStorageMock.setItem('pocketctl_access_token', fresh) // 模拟 saveTokens 写入新 token
+      mockAccessToken.value = fresh
       return true
     })
 
@@ -94,7 +99,7 @@ describe('useWebSocket — connect 前确保 token 新鲜', () => {
 
   test('access token 仍有效时，connect 不刷新，直接用当前 token', async () => {
     const fresh = makeToken({ exp: Math.floor(Date.now() / 1000) + 3600 })
-    localStorageMock.setItem('pocketctl_access_token', fresh)
+    mockAccessToken.value = fresh
     localStorageMock.setItem('pocketctl_relay_url', 'wss://relay.test/ws')
 
     vi.resetModules()
@@ -111,10 +116,10 @@ describe('useWebSocket — onclose 4001 刷新重连', () => {
   test('relay 返回 4001(invalid token) 时刷新 token 并用新 token 重连', async () => {
     const initial = makeToken({ exp: Math.floor(Date.now() / 1000) + 3600 })
     const fresh = makeToken({ exp: Math.floor(Date.now() / 1000) + 7200 })
-    localStorageMock.setItem('pocketctl_access_token', initial)
+    mockAccessToken.value = initial
     localStorageMock.setItem('pocketctl_relay_url', 'wss://relay.test/ws')
     mockRefresh.mockImplementation(async () => {
-      localStorageMock.setItem('pocketctl_access_token', fresh)
+      mockAccessToken.value = fresh
       return true
     })
 
@@ -135,7 +140,7 @@ describe('useWebSocket — onclose 4001 刷新重连', () => {
   })
 
   test('refresh 失败时登出，不再重连', async () => {
-    localStorageMock.setItem('pocketctl_access_token', makeToken({ exp: Math.floor(Date.now() / 1000) + 3600 }))
+    mockAccessToken.value = makeToken({ exp: Math.floor(Date.now() / 1000) + 3600 })
     localStorageMock.setItem('pocketctl_relay_url', 'wss://relay.test/ws')
     mockRefresh.mockResolvedValue(false)
 

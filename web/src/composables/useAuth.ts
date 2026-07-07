@@ -9,12 +9,12 @@ export interface UserInfo {
 }
 
 const user = ref<UserInfo | null>(null)
-const accessToken = ref(localStorage.getItem('pocketctl_access_token') || '')
-const refreshToken = ref(localStorage.getItem('pocketctl_refresh_token') || '')
+const accessToken = ref('')
+const refreshToken = ref('')
 
 // Restore user from localStorage
 const savedUser = localStorage.getItem('pocketctl_user')
-if (savedUser && accessToken.value) {
+if (savedUser) {
   try { user.value = JSON.parse(savedUser) } catch {}
 }
 
@@ -41,6 +41,7 @@ async function fetchOnce(path: string, body: any, auth?: boolean): Promise<{ ok:
       method: 'POST',
       headers,
       body: JSON.stringify(body),
+      credentials: 'include',
     })
     const data = await res.json()
     return { ok: res.ok, status: res.status, data }
@@ -54,7 +55,11 @@ async function apiGet(path: string): Promise<{ ok: boolean; data: any }> {
   const origin = getRelayOrigin()
   const url = origin ? `${origin}${path}` : path
   try {
-    const res = await fetch(url, { method: 'GET', headers: { 'Content-Type': 'application/json' } })
+    const res = await fetch(url, {
+      method: 'GET',
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'include',
+    })
     const data = await res.json()
     return { ok: res.ok, data }
   } catch (e) {
@@ -142,6 +147,7 @@ async function renameSession(sessionId: string, title: string): Promise<string |
       method: 'PUT',
       headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${accessToken.value}` },
       body: JSON.stringify({ title }),
+      credentials: 'include',
     })
     const data = await res.json()
     if (!res.ok) return data.error || '重命名失败'
@@ -186,31 +192,42 @@ export function isTokenExpired(token: string, skewSec = 30, nowSec = Math.floor(
 
 function saveTokens(data: any) {
   accessToken.value = data.access_token
-  refreshToken.value = data.refresh_token
+  refreshToken.value = ''
   user.value = data.user
-  localStorage.setItem('pocketctl_access_token', data.access_token)
-  localStorage.setItem('pocketctl_refresh_token', data.refresh_token)
+  localStorage.removeItem('pocketctl_access_token')
+  localStorage.removeItem('pocketctl_refresh_token')
   localStorage.setItem('pocketctl_user', JSON.stringify(data.user))
 }
 
 async function doRefreshToken(): Promise<boolean> {
-  if (!refreshToken.value) return false
-  const { ok, data } = await apiRequest('/api/auth/refresh', { refresh_token: refreshToken.value })
+  const legacyRefreshToken = localStorage.getItem('pocketctl_refresh_token') || refreshToken.value
+  const body = legacyRefreshToken ? { refresh_token: legacyRefreshToken } : {}
+  const { ok, data } = await apiRequest('/api/auth/refresh', body)
+  localStorage.removeItem('pocketctl_access_token')
+  localStorage.removeItem('pocketctl_refresh_token')
   if (!ok) {
-    logout()
+    clearAuthState()
     return false
   }
   saveTokens(data)
   return true
 }
 
-function logout() {
+function clearAuthState() {
   user.value = null
   accessToken.value = ''
   refreshToken.value = ''
   localStorage.removeItem('pocketctl_access_token')
   localStorage.removeItem('pocketctl_refresh_token')
   localStorage.removeItem('pocketctl_user')
+}
+
+async function logout() {
+  const legacyRefreshToken = localStorage.getItem('pocketctl_refresh_token') || refreshToken.value
+  clearAuthState()
+  try {
+    await apiRequest('/api/auth/logout', legacyRefreshToken ? { refresh_token: legacyRefreshToken } : {})
+  } catch {}
 }
 
 const isLoggedIn = computed(() => !!accessToken.value && !!user.value)

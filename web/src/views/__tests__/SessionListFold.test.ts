@@ -57,7 +57,7 @@ vi.mock('../../composables/useWebSocket', () => ({
   }),
 }))
 vi.mock('../../composables/useAuth', () => ({
-  useAuth: () => ({ isLoggedIn: true, logout: vi.fn() }),
+  useAuth: () => ({ isLoggedIn: { value: true }, accessToken: { value: 'tk' }, logout: vi.fn() }),
 }))
 vi.mock('vue-router', () => ({
   useRouter: () => ({ push: mockPush }),
@@ -65,7 +65,6 @@ vi.mock('vue-router', () => ({
 
 describe('SessionList.vue — subagent fold (P2)', () => {
   beforeEach(() => {
-    localStorage.setItem('pocketctl_access_token', 'tk')
     mockPush.mockClear()
   })
 

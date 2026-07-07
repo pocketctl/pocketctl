@@ -8,6 +8,7 @@ import HostsView from './views/HostsView.vue'
 import SessionDetail from './views/SessionDetail.vue'
 import TokenUsage from './views/TokenUsage.vue'
 import SettingsView from './views/SettingsView.vue'
+import { useAuth } from './composables/useAuth'
 
 const router = createRouter({
   history: createWebHistory('/app/'),
@@ -22,13 +23,14 @@ const router = createRouter({
   ],
 })
 
-// Route guard: redirect to login if not authenticated
-router.beforeEach((to) => {
-  const token = localStorage.getItem('pocketctl_access_token')
-  if (to.meta.requiresAuth && !token) {
+// Route guard: access token is memory-only; restore it from the HttpOnly refresh cookie on reload.
+router.beforeEach(async (to) => {
+  const { accessToken, doRefreshToken } = useAuth()
+  if (!accessToken.value) await doRefreshToken()
+  if (to.meta.requiresAuth && !accessToken.value) {
     return '/login'
   }
-  if (to.path === '/login' && token) {
+  if (to.path === '/login' && accessToken.value) {
     return '/'
   }
 })

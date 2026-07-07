@@ -27,6 +27,8 @@ const RATE_LIMIT_MAX_CONNECTIONS = parseInt(process.env.RATE_LIMIT_MAX_CONNECTIO
 const RATE_LIMIT_BURST_WINDOW_MS = parseInt(process.env.RATE_LIMIT_BURST_WINDOW_MS || '10000', 10);
 const RATE_LIMIT_BURST_MAX = parseInt(process.env.RATE_LIMIT_BURST_MAX || '5', 10);
 const RATE_LIMIT_AUTH_FAIL_THRESHOLD = parseInt(process.env.RATE_LIMIT_AUTH_FAIL_THRESHOLD || '3', 10);
+const REFRESH_COOKIE_NAME = 'pocketctl_refresh_token';
+const REFRESH_COOKIE_MAX_AGE = 7 * 24 * 60 * 60;
 
 const wsDaemonMap = new Map<any, string>();
 const wsTickets = createWsTicketStore(60_000);
@@ -42,6 +44,53 @@ const rateLimiter = new ConnectionRateLimiter({
   windowMax: RATE_LIMIT_MAX_CONNECTIONS,
   authFailThreshold: RATE_LIMIT_AUTH_FAIL_THRESHOLD,
 });
+
+function parseCookie(header: string | undefined, name: string): string {
+  if (!header) return '';
+  for (const part of header.split(';')) {
+    const [rawKey, ...rawValue] = part.trim().split('=');
+    if (rawKey === name) {
+      try {
+        return decodeURIComponent(rawValue.join('='));
+      } catch {
+        return rawValue.join('=');
+      }
+    }
+  }
+  return '';
+}
+
+function refreshCookie(token: string): string {
+  const attrs = [
+    `${REFRESH_COOKIE_NAME}=${encodeURIComponent(token)}`,
+    'HttpOnly',
+    'Path=/api/auth',
+    'SameSite=Lax',
+    `Max-Age=${REFRESH_COOKIE_MAX_AGE}`,
+  ];
+  if (NODE_ENV === 'production') attrs.push('Secure');
+  return attrs.join('; ');
+}
+
+function expiredRefreshCookie(): string {
+  const attrs = [
+    `${REFRESH_COOKIE_NAME}=`,
+    'HttpOnly',
+    'Path=/api/auth',
+    'SameSite=Lax',
+    'Max-Age=0',
+  ];
+  if (NODE_ENV === 'production') attrs.push('Secure');
+  return attrs.join('; ');
+}
+
+function setRefreshCookie(reply: any, token: string) {
+  reply.header('Set-Cookie', refreshCookie(token));
+}
+
+function clearRefreshCookie(reply: any) {
+  reply.header('Set-Cookie', expiredRefreshCookie());
+}
 
 async function main() {
   const tStart = (typeof performance !== 'undefined' ? performance.now() : Date.now())
@@ -71,7 +120,7 @@ async function main() {
   const app = Fastify({ logger: false });
 
   const corsOrigin = ALLOWED_ORIGINS.length > 0 ? ALLOWED_ORIGINS : true;
-  await app.register(fastifyCors, { origin: corsOrigin });
+  await app.register(fastifyCors, { origin: corsOrigin, credentials: true });
   await app.register(fastifyWebsocket);
 
   // ---- REST API: Auth ----
@@ -92,6 +141,7 @@ async function main() {
     const user = await createUser(pool, email, hashPassword(password), displayName);
     const accessToken = await signAccessToken(user.id, user.email);
     const refreshToken = await signRefreshToken(user.id);
+    setRefreshCookie(reply, refreshToken);
     return {
       access_token: accessToken,
       refresh_token: refreshToken,
@@ -113,6 +163,7 @@ async function main() {
     }
     const accessToken = await signAccessToken(user.id, user.email);
     const refreshToken = await signRefreshToken(user.id);
+    setRefreshCookie(reply, refreshToken);
     return {
       access_token: accessToken,
       refresh_token: refreshToken,
@@ -123,7 +174,8 @@ async function main() {
 
   // Refresh token (with rotation and breach detection)
   app.post('/api/auth/refresh', async (req, reply) => {
-    const { refresh_token } = req.body as any;
+    const body = (req.body || {}) as any;
+    const refresh_token = parseCookie(req.headers.cookie, REFRESH_COOKIE_NAME) || body.refresh_token;
     if (!refresh_token) {
       reply.code(400); return { error: 'refresh_token is required' };
     }
@@ -164,11 +216,23 @@ async function main() {
 
     const accessToken = await signAccessToken(user.id, user.email, user.phone);
     const newRefreshToken = await signRefreshToken(user.id);
+    setRefreshCookie(reply, newRefreshToken);
     return {
       access_token: accessToken,
       refresh_token: newRefreshToken,
       user: { id: user.id, email: user.email, display_name: user.display_name },
     };
+  });
+
+  app.post('/api/auth/logout', async (req, reply) => {
+    const body = (req.body || {}) as any;
+    const refreshToken = parseCookie(req.headers.cookie, REFRESH_COOKIE_NAME) || body.refresh_token;
+    if (refreshToken) {
+      const payload = verifyRefreshToken(refreshToken);
+      if (payload?.jti) revokeToken(pool, payload.jti, payload.userId, 'logout').catch(console.error);
+    }
+    clearRefreshCookie(reply);
+    return { success: true };
   });
 
   // WebSocket ticket: browsers cannot set Authorization headers on native
@@ -276,6 +340,7 @@ async function main() {
     }
     const accessToken = await signAccessToken(user.id, user.email, user.phone);
     const refreshToken = await signRefreshToken(user.id);
+    setRefreshCookie(reply, refreshToken);
     return {
       access_token: accessToken,
       refresh_token: refreshToken,
@@ -815,6 +880,7 @@ async function main() {
     const machineId = session.machine_id || 'unknown';
     const accessToken = await signAccessToken(user.id, user.email, user.phone, machineId);
     const refreshToken = await signRefreshToken(user.id);
+    setRefreshCookie(reply, refreshToken);
 
     // Clean up the session
     deleteSession(device_code);
@@ -923,6 +989,7 @@ async function main() {
       const accessToken = await signAccessToken(user.id, user.email, user.phone, 'web-qr');
       const refreshToken = await signRefreshToken(user.id);
       insertAuditLog(pool, user.id, 'qr_login_issued', { via: 'web-qr' }, req.ip).catch(console.error);
+      setRefreshCookie(reply, refreshToken);
       reply.code(200);
       return {
         status: 'confirmed' as const,
@@ -1421,7 +1488,7 @@ function setLoading(btn, loading, text) {
 async function api(path, body, auth) {
   const headers = { 'Content-Type': 'application/json' };
   if (auth && accessToken) headers['Authorization'] = 'Bearer ' + accessToken;
-  const res = await fetch(RELAY + path, { method: 'POST', headers, body: JSON.stringify(body) });
+  const res = await fetch(RELAY + path, { method: 'POST', headers, body: JSON.stringify(body), credentials: 'include' });
   return { ok: res.ok, data: await res.json() };
 }
 
@@ -1451,8 +1518,8 @@ async function doLogin() {
   if (!ok) { setLoading(loginBtn, false, '登录并授权'); showError(data.error || '验证失败'); return; }
   accessToken = data.access_token;
   userEmail = data.user.email;
-  localStorage.setItem('pocketctl_access_token', data.access_token);
-  localStorage.setItem('pocketctl_refresh_token', data.refresh_token);
+  localStorage.removeItem('pocketctl_access_token');
+  localStorage.removeItem('pocketctl_refresh_token');
   localStorage.setItem('pocketctl_user', JSON.stringify(data.user));
   setLoading(loginBtn, false, '登录并授权');
   await confirmAuth();
@@ -1460,18 +1527,16 @@ async function doLogin() {
 
 async function tryRefreshToken() {
   const savedRefresh = localStorage.getItem('pocketctl_refresh_token');
-  if (!savedRefresh) return false;
-  const { ok, data } = await api('/api/auth/refresh', { refresh_token: savedRefresh });
+  const { ok, data } = await api('/api/auth/refresh', savedRefresh ? { refresh_token: savedRefresh } : {});
+  localStorage.removeItem('pocketctl_access_token');
+  localStorage.removeItem('pocketctl_refresh_token');
   if (!ok) {
-    localStorage.removeItem('pocketctl_access_token');
-    localStorage.removeItem('pocketctl_refresh_token');
     localStorage.removeItem('pocketctl_user');
     accessToken = '';
     return false;
   }
   accessToken = data.access_token;
-  localStorage.setItem('pocketctl_access_token', data.access_token);
-  localStorage.setItem('pocketctl_refresh_token', data.refresh_token);
+  userEmail = data.user.email;
   localStorage.setItem('pocketctl_user', JSON.stringify(data.user));
   return true;
 }
@@ -1511,7 +1576,7 @@ async function confirmAuth() {
 }
 
 // Init
-document.addEventListener('DOMContentLoaded', () => {
+document.addEventListener('DOMContentLoaded', async () => {
   emailInput = document.getElementById('email');
   codeInput = document.getElementById('code');
   errorBanner = document.getElementById('error-banner');
@@ -1530,13 +1595,11 @@ document.addEventListener('DOMContentLoaded', () => {
     return;
   }
 
-  // Check if already logged in
-  const savedToken = localStorage.getItem('pocketctl_access_token');
-  const savedUser = localStorage.getItem('pocketctl_user');
-  if (savedToken && savedUser) {
+  // Check if already logged in. Tokens are memory-only; reload restores from the HttpOnly refresh cookie.
+  const refreshed = await tryRefreshToken();
+  if (refreshed) {
     try {
-      const user = JSON.parse(savedUser);
-      accessToken = savedToken;
+      const user = JSON.parse(localStorage.getItem('pocketctl_user') || '{}');
       userEmail = user.email;
       document.getElementById('step-login').style.display = 'none';
       document.getElementById('step-already-logged-in').style.display = 'block';

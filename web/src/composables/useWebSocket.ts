@@ -64,7 +64,7 @@ let pendingMessages: any[] = []
 // 刷新窗口内 ws.value 尚未就绪，list_sessions/list_daemons 请求会丢失。
 let connecting = false
 
-const { doRefreshToken, logout } = useAuth()
+const { accessToken, doRefreshToken, logout } = useAuth()
 
 // Daemon online tracking
 const daemons = ref<Map<string, DaemonInfo>>(new Map())
@@ -92,6 +92,7 @@ async function requestWsTicket(token: string): Promise<string | null> {
     const res = await fetch(url, {
       method: 'POST',
       headers: { Authorization: `Bearer ${token}` },
+      credentials: 'include',
     })
     if (!res.ok) return null
     const data = await res.json()
@@ -102,17 +103,17 @@ async function requestWsTicket(token: string): Promise<string | null> {
 }
 
 async function getRelayWsUrl(base = getRelayWs()): Promise<string> {
-  const token = localStorage.getItem('pocketctl_access_token')
+  const token = accessToken.value
   if (!token) return base
   const ticket = await requestWsTicket(token)
   if (!ticket) throw new Error('ws ticket request failed')
   return withWsQuery(base, { type: 'client', ticket })
 }
 
-/** 连接前确保 access token 未过期；过期则刷新（成功后 localStorage 已写入新 token）。 */
+/** 连接前确保 access token 未过期；缺失/过期则通过 HttpOnly refresh cookie 刷新。 */
 async function ensureFreshToken(): Promise<boolean> {
-  const token = localStorage.getItem('pocketctl_access_token')
-  if (!token) return true                  // 未登录：交给上层处理，不阻塞连接
+  const token = accessToken.value
+  if (!token) return await doRefreshToken()
   if (!isTokenExpired(token)) return true  // 仍有效
   return await doRefreshToken()
 }
@@ -219,7 +220,7 @@ async function handleAuthRejected(): Promise<void> {
   const ok = await doRefreshToken()
   if (ok) {
     reconnectAttempt = 0
-    connect(currentBaseUrl) // localStorage 已是新 token；ensureFreshToken 见有效不再刷新
+    connect(currentBaseUrl)
   } else {
     logout() // refresh 失败，清空登录态，等待用户重新登录
   }

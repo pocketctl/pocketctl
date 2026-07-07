@@ -78,7 +78,7 @@ const { renamingId, renameInput, startRename, commitRename, cancelRename } = use
 const { t } = useLocale()
 
 const { connect, send, onEvent, effectiveStatus } = useWebSocket()
-const { isLoggedIn, logout } = useAuth()
+const { isLoggedIn, accessToken, logout } = useAuth()
 const $router = useRouter()
 const sessions = ref<any[]>([])
 const showNewSession = ref(false)
@@ -123,7 +123,7 @@ function toggleFold(id: string) {
 }
 
 onMounted(() => {
-  const token = localStorage.getItem('pocketctl_access_token') || ''
+  const token = accessToken.value
   if (!token) { $router.push('/login'); return }
   connect()
 

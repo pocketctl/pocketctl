@@ -2,6 +2,10 @@ import { describe, test, expect, vi, beforeEach } from 'vitest'
 import { mount, flushPromises } from '@vue/test-utils'
 import TokenUsage from '../TokenUsage.vue'
 
+vi.mock('../../composables/useAuth', () => ({
+  useAuth: () => ({ accessToken: { value: 'tk' } }),
+}))
+
 const sessionsWithChildren = {
   total: 1000, today: 100, thisMonth: 500,
   sessions: [{
@@ -14,7 +18,6 @@ const sessionsWithChildren = {
 
 describe('TokenUsage.vue (P1a)', () => {
   beforeEach(() => {
-    localStorage.setItem('pocketctl_access_token', 'tk')
     vi.stubGlobal('fetch', vi.fn(async (url: string) => ({
       ok: true, status: 200, json: async () =>
         /\/api\/tokens\/by-daemon\//.test(url) ? sessionsWithChildren
