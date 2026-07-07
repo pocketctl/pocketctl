@@ -143,6 +143,7 @@ func (sm *SessionManager) ListSessions() []SessionInfo {
 			LastActivityAt: ps.LastActivityAt,
 			Agent:          ps.Agent,
 			Cwd:            ps.Cwd,
+			Model:          ps.Model,
 		}
 		if ps.Status == protocol.StatusExited || ps.Status == protocol.StatusCompleted ||
 			ps.Status == protocol.StatusError || ps.Status == protocol.StatusKilled {
@@ -259,4 +260,5 @@ type SessionInfo struct {
 	LastActivityAt time.Time `json:"last_activity_at"`
 	Agent          string    `json:"agent"`
 	Cwd            string    `json:"cwd"`
+	Model          string    `json:"model,omitempty"`
 }

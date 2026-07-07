@@ -88,7 +88,7 @@ func (sm *SessionManager) readOutput(ctx context.Context, cmd *exec.Cmd, stdout 
 				}
 				// Trigger title extraction from JSONL for daemon-created sessions
 				if sm.OnSessionIDResolved != nil {
-					sm.OnSessionIDResolved(sid, cwd)
+					sm.OnSessionIDResolved(sid, cwd, ps.Agent)
 				}
 			} else {
 				sm.mu.Unlock()

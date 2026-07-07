@@ -57,11 +57,11 @@ type SessionManager struct {
 	mu                  sync.RWMutex
 	sessions            map[string]*ProcessState
 	outputCh            chan protocol.DaemonEvent
-	childPids           map[int]bool                    // PIDs of daemon-spawned processes
-	OnNotifyTerminal    NotifyFunc                      // callback after --resume on terminal session
-	OnSessionIDResolved func(realSessionID, cwd string) // callback when daemon session gets real ID
-	ptyProvider         platform.PTYProvider            // PR2: daemon-session PTY backend (was direct creack/pty)
-	proc                platform.ProcessController      // PR2: process alive/kill (was syscall; used by Task 3)
+	childPids           map[int]bool                           // PIDs of daemon-spawned processes
+	OnNotifyTerminal    NotifyFunc                             // callback after --resume on terminal session
+	OnSessionIDResolved func(realSessionID, cwd, agent string) // callback when daemon session gets real ID
+	ptyProvider         platform.PTYProvider                   // PR2: daemon-session PTY backend (was direct creack/pty)
+	proc                platform.ProcessController             // PR2: process alive/kill (was syscall; used by Task 3)
 
 	// approvals brokers PreToolUse hook approvals for non-bypass daemon sessions.
 	// nil on daemons that don't surface approvals (or before wiring).
@@ -132,6 +132,7 @@ func (sm *SessionManager) ResyncSessions() {
 			Status:    ps.Status,
 			Source:    ps.Source,
 			Agent:     ps.Agent,
+			Model:     ps.Model,
 		}
 	}
 }

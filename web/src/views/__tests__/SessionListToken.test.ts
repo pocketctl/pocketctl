@@ -45,6 +45,7 @@ vi.mock('../../composables/useWebSocket', () => ({
             daemon_id: 'd1',
             subagent_count: 2,
             totalTokens: 12345,
+            model: 'gpt-5.5',
           },
         ],
       }), 0)
@@ -77,5 +78,6 @@ describe('SessionList.vue — token pill (P1a)', () => {
     expect(w.html()).toMatch(/12K/)
     // Pill should use 🪙 icon (distinct from 🤖 subagent badge)
     expect(w.html()).toMatch(/🪙/)
+    expect(w.text()).toContain('gpt-5.5')
   })
 })

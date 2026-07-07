@@ -14,7 +14,7 @@ import (
 func TestGenerateTitleAttemptCap(t *testing.T) {
 	outputCh := make(chan protocol.DaemonEvent, 32)
 	sm := NewSessionManager(outputCh)
-	sm.RegisterTerminalSession("sid", "/tmp", 1, "/dev/ttys001", protocol.StatusRunning)
+	sm.RegisterTerminalSession("sid", "/tmp", 1, "/dev/ttys001", protocol.StatusRunning, "")
 	drainDiscovered(t, outputCh)
 
 	// 前 MaxTitleAttempts 次每次都应发一个 generate_title_request（每轮可重触发）

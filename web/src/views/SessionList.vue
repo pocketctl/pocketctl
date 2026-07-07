@@ -39,13 +39,17 @@
             <span v-if="s.exit_reason" class="exit-reason">{{ exitReasonLabel(s.exit_reason) }}</span>
             <span class="session-id">{{ s.session_id.slice(0, 8) }}</span>
             <AgentBadge :agent="s.agent" size="sm" />
+            <span v-if="s.model" class="model-badge" :title="s.model">{{ s.model }}</span>
           </div>
         </div>
         <span class="session-time">{{ formatRelativeTime(s.last_activity_at || s.started_at) }}</span>
         <SessionActions :session="s" @startRename="startRename" @deleted="onDeleted" @pinned="onPinned" />
       </div>
       <div v-if="s.children && s.children.length && folded[s.session_id]" class="child-rows">
-        <div v-for="c in s.children" :key="c.agentId" class="child-row">
+        <div v-for="c in s.children" :key="c.agentId" class="child-row" role="button" tabindex="0"
+          :title="c.title || c.agentType"
+          @click.stop="$router.push(`/session/${s.session_id}?subagent=${c.agentId}`)"
+          @keydown.enter="$router.push(`/session/${s.session_id}?subagent=${c.agentId}`)">
           <span class="child-indent">↳</span>
           <AgentBadge :agent="c.agentType" size="sm" />
           <span class="child-title">{{ c.title || c.agentType }}</span>
@@ -151,6 +155,7 @@ onMounted(() => {
           daemon_online: s.daemon_online,
           subagent_count: s.subagent_count || 0,
           totalTokens: s.totalTokens ?? 0,
+          model: s.model || '',
           pinned: s.pinned || false,
           parentSessionId: s.parent_session_id ?? null,
           isSubagent: !!s.is_subagent,
@@ -173,13 +178,17 @@ onMounted(() => {
     }
     if (evt.type === 'session_created' && evt.session_id) {
       if (!sessions.value.find(s => s.session_id === evt.session_id)) {
-        sessions.value.unshift({ session_id: evt.session_id, status: 'running', agent: 'claude-code', started_at: new Date(), title: evt.title || '', source: 'daemon', last_activity_at: new Date() })
+        sessions.value.unshift({ session_id: evt.session_id, status: 'running', agent: (evt as any).agent_type || (evt as any).agent || 'claude-code', started_at: new Date(), title: evt.title || '', source: 'daemon', last_activity_at: new Date(), model: (evt as any).model || '' })
       }
     }
     if (evt.type === 'session_discovered' && evt.session_id) {
       if (!sessions.value.find(s => s.session_id === evt.session_id)) {
-        sessions.value.unshift({ session_id: evt.session_id, status: 'busy', agent: 'claude-code', started_at: new Date(), title: evt.title || 'Terminal Session', source: 'terminal', cwd: evt.cwd, last_activity_at: new Date(), subagent_count: (evt as any).subagent_count || 0, daemon_id: (evt as any).daemon_id || '', hostname: (evt as any).hostname || '' })
+        sessions.value.unshift({ session_id: evt.session_id, status: 'busy', agent: (evt as any).agent || 'claude-code', started_at: new Date(), title: evt.title || 'Terminal Session', source: 'terminal', cwd: evt.cwd, last_activity_at: new Date(), subagent_count: (evt as any).subagent_count || 0, daemon_id: (evt as any).daemon_id || '', hostname: (evt as any).hostname || '', model: (evt as any).model || '' })
       }
+    }
+    if (evt.type === 'session_model_changed' && evt.session_id) {
+      const existing = sessions.value.find(s => s.session_id === evt.session_id)
+      if (existing) existing.model = (evt as any).model || existing.model
     }
     if (evt.type === 'session_title_update' && evt.session_id) {
       const existing = sessions.value.find(s => s.session_id === evt.session_id)
@@ -265,6 +274,15 @@ function handleLogout() {
 
 .exit-reason { font-size: 11px; color: #6B7280; }
 .session-id { font-family: monospace; font-size: 12px; color: #58a6ff; }
+.model-badge {
+  max-width: 180px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: #8b949e;
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+  font-size: 11px;
+}
 .session-time { margin-left: auto; color: #8b949e; font-size: 13px; white-space: nowrap; }
 .session-info { flex: 1; min-width: 0; }
 .session-title { font-size: 14px; color: #e6edf3; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin-bottom: 2px; }
@@ -284,7 +302,8 @@ function handleLogout() {
 
 /* Child rows */
 .child-rows { padding: 4px 0 4px 42px; }
-.child-row { display: flex; align-items: center; gap: 8px; padding: 4px 8px; font-size: 13px; color: #8b949e; }
+.child-row { display: flex; align-items: center; gap: 8px; padding: 4px 8px; font-size: 13px; color: #8b949e; border-radius: var(--radius-sm); cursor: pointer; transition: background 0.15s, color 0.15s; }
+.child-row:hover { background: var(--hover, rgba(255,255,255,0.04)); color: #c9d1d9; }
 .child-indent { color: #6B7280; font-size: 12px; flex-shrink: 0; }
 .child-title { color: #c9d1d9; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .child-token { font-size: 11px; padding: 1px 6px; border-radius: 8px; background: #1a2e1a; color: #7ee787; }

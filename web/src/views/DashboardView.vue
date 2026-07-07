@@ -161,7 +161,10 @@
           </div>
         </div>
         <div v-if="s.children && s.children.length && folded[s.session_id]" class="child-rows">
-          <div v-for="c in s.children" :key="c.agentId" class="child-row">
+          <div v-for="c in s.children" :key="c.agentId" class="child-row" role="button" tabindex="0"
+            :title="c.title || c.agentType"
+            @click.stop="$router.push(`/session/${s.session_id}?subagent=${c.agentId}`)"
+            @keydown.enter="$router.push(`/session/${s.session_id}?subagent=${c.agentId}`)">
             <span class="child-indent">↳</span>
             <AgentBadge :agent="c.agentType" size="sm" />
             <span class="child-title">{{ c.title || c.agentType }}</span>
@@ -466,7 +469,8 @@ function onPinned(sessionId: string, pinned: boolean) { const s = sessions.value
 .subagent-chip { background: var(--accent-muted); color: var(--accent); }
 .token-chip { background: rgba(34,197,94,0.12); color: var(--success); }
 .child-rows { padding: 8px 20px 10px 50px; background: var(--bg); border-bottom: 1px solid var(--border); }
-.child-row { display: flex; align-items: center; gap: 8px; padding: 4px 0; font-size: 13px; color: var(--fg-secondary); }
+.child-row { display: flex; align-items: center; gap: 8px; padding: 4px 8px; margin: 0 -8px; font-size: 13px; color: var(--fg-secondary); border-radius: var(--radius-sm); cursor: pointer; transition: background var(--transition), color var(--transition); }
+.child-row:hover { background: var(--hover); color: var(--fg); }
 .child-indent { color: var(--fg-tertiary); flex-shrink: 0; }
 .child-title { color: var(--fg); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .child-token { font-size: 11px; padding: 1px 6px; border-radius: 4px; background: rgba(34,197,94,0.12); color: var(--success); flex-shrink: 0; }

@@ -921,7 +921,7 @@ func cmdDaemonStart(args []string) {
 
 	// When a daemon-created session resolves its real ID, wait for assistant
 	// reply then send generate_title_request to relay for LLM-based title generation.
-	sm.OnSessionIDResolved = func(realSessionID, cwd string) {
+	sm.OnSessionIDResolved = func(realSessionID, cwd, agent string) {
 		daemon.Go("title-resolve", logger, func() {
 			for i := 0; i < 30; i++ {
 				time.Sleep(1 * time.Second)
@@ -934,8 +934,8 @@ func cmdDaemonStart(args []string) {
 				}
 				// Read lines looking for both user and assistant messages
 				lines := readJSONLLines(jsonlPath, 500)
-				userMsg := adapter.ExtractFirstUserMessage(lines, 200)
-				assistantMsg := adapter.ExtractFirstAssistantMessage(lines, 200)
+				userMsg := adapter.ExtractFirstUserMessageFor(lines, 200, agent)
+				assistantMsg := adapter.ExtractFirstAssistantMessageFor(lines, 200, agent)
 				if userMsg != "" && assistantMsg != "" {
 					sm.GenerateTitle(realSessionID, userMsg, assistantMsg)
 					return
@@ -1061,6 +1061,7 @@ func cmdDaemonStart(args []string) {
 				Status:    s.Status,
 				Source:    "terminal",
 				Agent:     s.Agent,
+				Model:     s.Model,
 			})
 		}
 		logger.Info("resync done")
@@ -1609,6 +1610,13 @@ func handleWatcherEvents(ctx context.Context, events <-chan watcher.SessionEvent
 						if err == nil {
 							tailer, err = watcher.NewJSONLTailerFromStart(jsonlPath, agentType)
 							if err == nil {
+								model := ""
+								if data, readErr := os.ReadFile(jsonlPath); readErr == nil {
+									model = adapter.NewStorage(agentType).ExtractModel(strings.Split(string(data), "\n"))
+									if model != "" {
+										sm.SetSessionModel(evt.Session.SessionID, model)
+									}
+								}
 								// Associate tailer with session so sendToIdleTerminal can pause/resume it (D2)
 								sm.SetTailer(evt.Session.SessionID, tailer)
 								// Tailer started successfully — now emit session_discovered
@@ -1620,6 +1628,7 @@ func handleWatcherEvents(ctx context.Context, events <-chan watcher.SessionEvent
 									Source:    "terminal",
 									Agent:     agentType,
 									Title:     defaultTitle,
+									Model:     model,
 								}
 								// P0: start sub-agent discoverer (only Claude Code has subagents/ dir)
 								if agentType == adapter.AgentClaude {
@@ -1693,18 +1702,18 @@ func handleWatcherEvents(ctx context.Context, events <-chan watcher.SessionEvent
 							// total attempts at MaxTitleAttempts and the relay skips once an AI
 							// title is written, so re-evaluating per tick is safe.
 							if len(rawLines) > 0 {
-								userMsg := adapter.ExtractFirstUserMessage(rawLines, 200)
-								assistantMsg := adapter.ExtractFirstAssistantMessage(rawLines, 200)
+								userMsg := adapter.ExtractFirstUserMessageFor(rawLines, 200, agentType)
+								assistantMsg := adapter.ExtractFirstAssistantMessageFor(rawLines, 200, agentType)
 								// 增量行常把 user/assistant 拆到不同 tick，单次提取不全；
 								// 首次不全时读全量 JSONL 兜底一次，确保有完整 user+assistant
 								// 后稳定触发 title 生成 (2fec2498 案例)。
 								if (userMsg == "" || assistantMsg == "") && !titlePrimed {
 									if jsonlPath, perr := adapter.ResolveJSONLPathFor(agentType, evt.Session.SessionID, evt.Session.Cwd); perr == nil {
 										allLines := readJSONLLines(jsonlPath, 500)
-										if u := adapter.ExtractFirstUserMessage(allLines, 200); u != "" {
+										if u := adapter.ExtractFirstUserMessageFor(allLines, 200, agentType); u != "" {
 											userMsg = u
 										}
-										if a := adapter.ExtractFirstAssistantMessage(allLines, 200); a != "" {
+										if a := adapter.ExtractFirstAssistantMessageFor(allLines, 200, agentType); a != "" {
 											assistantMsg = a
 										}
 										titlePrimed = true

@@ -32,7 +32,7 @@ func TestSetSessionExited(t *testing.T) {
 	sm := NewSessionManager(outputCh)
 
 	// Register a terminal session
-	sm.RegisterTerminalSession("test-sid", "/tmp", 12345, "/dev/ttys001", protocol.StatusRunning)
+	sm.RegisterTerminalSession("test-sid", "/tmp", 12345, "/dev/ttys001", protocol.StatusRunning, "")
 	drainDiscovered(t, outputCh)
 
 	// Set exited
@@ -90,7 +90,7 @@ func TestSetSessionExitedWithDifferentReasons(t *testing.T) {
 			sm := NewSessionManager(outputCh)
 			sid := "test-" + tt.name
 
-			sm.RegisterTerminalSession(sid, "/tmp", 12345, "/dev/ttys001", protocol.StatusIdle)
+			sm.RegisterTerminalSession(sid, "/tmp", 12345, "/dev/ttys001", protocol.StatusIdle, "")
 			sm.SetSessionExited(sid, tt.exitReason)
 
 			sm.mu.RLock()
@@ -124,7 +124,7 @@ func TestSetSessionStatusIncludesLastActivityAt(t *testing.T) {
 	outputCh := make(chan protocol.DaemonEvent, 16)
 	sm := NewSessionManager(outputCh)
 
-	sm.RegisterTerminalSession("test-sid", "/tmp", 12345, "/dev/ttys001", protocol.StatusRunning)
+	sm.RegisterTerminalSession("test-sid", "/tmp", 12345, "/dev/ttys001", protocol.StatusRunning, "")
 	drainDiscovered(t, outputCh)
 	sm.SetSessionStatus("test-sid", protocol.StatusIdle)
 
@@ -145,7 +145,7 @@ func TestSetSessionExited_StatusTransition(t *testing.T) {
 	outputCh := make(chan protocol.DaemonEvent, 16)
 	sm := NewSessionManager(outputCh)
 
-	sm.RegisterTerminalSession("test-sid", "/tmp", 12345, "/dev/ttys001", protocol.StatusRunning)
+	sm.RegisterTerminalSession("test-sid", "/tmp", 12345, "/dev/ttys001", protocol.StatusRunning, "")
 	drainDiscovered(t, outputCh)
 
 	// Transition: running → exited
@@ -177,8 +177,8 @@ func TestSetSessionExited_DoesNotAffectOtherSessions(t *testing.T) {
 	outputCh := make(chan protocol.DaemonEvent, 16)
 	sm := NewSessionManager(outputCh)
 
-	sm.RegisterTerminalSession("session-a", "/tmp", 100, "/dev/ttys001", protocol.StatusRunning)
-	sm.RegisterTerminalSession("session-b", "/tmp", 200, "/dev/ttys002", protocol.StatusRunning)
+	sm.RegisterTerminalSession("session-a", "/tmp", 100, "/dev/ttys001", protocol.StatusRunning, "")
+	sm.RegisterTerminalSession("session-b", "/tmp", 200, "/dev/ttys002", protocol.StatusRunning, "")
 
 	// Only exit session-a
 	sm.SetSessionExited("session-a", protocol.ExitReasonUnknown)
@@ -201,7 +201,7 @@ func TestSendMessage_ExitedSession_Allowed(t *testing.T) {
 	sm := NewSessionManager(outputCh)
 
 	// Use a PID that is definitely dead (9999999 does not exist)
-	sm.RegisterTerminalSession("exited-sid", "/tmp", 9999999, "", protocol.StatusExited)
+	sm.RegisterTerminalSession("exited-sid", "/tmp", 9999999, "", protocol.StatusExited, "")
 
 	// SendMessage should NOT return "session not found"
 	err := sm.SendMessage(context.Background(), "exited-sid", "hello")
@@ -221,7 +221,7 @@ func TestSendMessage_ExitedSession_InvalidPID(t *testing.T) {
 
 	// PID 0 — special case, isProcessAlive(0) returns true on some systems
 	// Use a definitely-dead PID
-	sm.RegisterTerminalSession("dead-sid", os.TempDir(), 9999999, "", protocol.StatusIdle)
+	sm.RegisterTerminalSession("dead-sid", os.TempDir(), 9999999, "", protocol.StatusIdle, "")
 
 	// SendMessage should attempt resume (process is dead)
 	err := sm.SendMessage(context.Background(), "dead-sid", "test resume")
@@ -324,7 +324,7 @@ func TestUpdateLastActivity(t *testing.T) {
 	outputCh := make(chan protocol.DaemonEvent, 16)
 	sm := NewSessionManager(outputCh)
 
-	sm.RegisterTerminalSession("test-sid", "/tmp", 12345, "/dev/ttys001", protocol.StatusRunning)
+	sm.RegisterTerminalSession("test-sid", "/tmp", 12345, "/dev/ttys001", protocol.StatusRunning, "")
 	drainDiscovered(t, outputCh)
 
 	sm.mu.RLock()
@@ -356,10 +356,10 @@ func TestListSessions_SortedByLastActivity(t *testing.T) {
 	outputCh := make(chan protocol.DaemonEvent, 16)
 	sm := NewSessionManager(outputCh)
 
-	sm.RegisterTerminalSession("old-sid", "/tmp", 100, "", protocol.StatusIdle)
+	sm.RegisterTerminalSession("old-sid", "/tmp", 100, "", protocol.StatusIdle, "")
 	drainDiscovered(t, outputCh)
 	time.Sleep(10 * time.Millisecond)
-	sm.RegisterTerminalSession("new-sid", "/tmp", 101, "", protocol.StatusRunning)
+	sm.RegisterTerminalSession("new-sid", "/tmp", 101, "", protocol.StatusRunning, "")
 	drainDiscovered(t, outputCh)
 
 	// new-sid should have more recent LastActivityAt

@@ -228,6 +228,7 @@ function modelColor(m: string) {
 }
 function fmt(n: number) {
   n = +n || 0
+  if (n >= 1e9) return (n / 1e9).toFixed(2) + 'G'
   if (n >= 1e6) return (n / 1e6).toFixed(2) + 'M'
   if (n >= 1e3) return (n / 1e3).toFixed(0) + 'K'
   return '' + n
@@ -286,7 +287,11 @@ const totalCache = computed(() => dailySeries.value.reduce((s, d) => s + (+d.cac
 const totalRequests = computed(() => dailySeries.value.reduce((s, d) => s + (+d.requests || 0), 0))
 const avgOutputPerReq = computed(() => totalRequests.value ? Math.round(totalOutput.value / totalRequests.value) : 0)
 const dailyAvgReq = computed(() => dailySeries.value.length ? Math.round(totalRequests.value / dailySeries.value.length) : 0)
-const cacheRate = computed(() => totalInput.value ? Math.round(totalCache.value / totalInput.value * 100) : 0)
+// 命中率 = 缓存读取 / (缓存读取 + 新增输入)，cache_read 与 input 互斥，相加才构成完整输入侧 token
+const cacheRate = computed(() => {
+  const denom = totalCache.value + totalInput.value
+  return denom ? Math.round((totalCache.value / denom) * 100) : 0
+})
 const topModel = computed(() => byModel.value[0])
 const barData = computed(() => dailySeries.value.slice(-30))
 // 按单日 input+output 之和的最大值缩放，保证堆叠双柱总高不超过图表高度
