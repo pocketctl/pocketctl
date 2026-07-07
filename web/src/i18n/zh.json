@@ -107,6 +107,7 @@
   "session.milestone_created": "创建",
   "session.milestone_exited": "退出",
   "session.sub_agents": "{{n}} 子智能体",
+  "session.back_to_parent": "返回主会话",
   "session.total_incl_subagent": "累计 token（含子代理）",
   "session.show_all_hosts": "显示全部主机会话",
   "session.perm_default": "默认",

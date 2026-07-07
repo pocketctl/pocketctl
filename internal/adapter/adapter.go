@@ -89,6 +89,25 @@ const (
 	AgentOpencode = "opencode"
 )
 
+// ExtractFirstUserMessageFor 按 agentType 选首条 user 消息提取函数。
+// claude 走 JSONLEntry 格式;codex 走 codexLine 格式(event_msg user_message)。
+// GenerateTitle 触发需 user+assistant 都提取到,旧版只用 claude 提取导致 codex
+// session 永远不触发 AI title。
+func ExtractFirstUserMessageFor(lines []string, maxLen int, agentType string) string {
+	if agentType == AgentCodex {
+		return CodexExtractFirstUserMessage(lines, maxLen)
+	}
+	return ExtractFirstUserMessage(lines, maxLen)
+}
+
+// ExtractFirstAssistantMessageFor 按 agentType 选首条 assistant 消息提取函数。
+func ExtractFirstAssistantMessageFor(lines []string, maxLen int, agentType string) string {
+	if agentType == AgentCodex {
+		return CodexExtractFirstAssistantMessage(lines, maxLen)
+	}
+	return ExtractFirstAssistantMessage(lines, maxLen)
+}
+
 // The factories below dispatch through the registry (see registry.go /
 // providers.go). When an agent type is unregistered, or registered without the
 // relevant factory (e.g. opencode before its session-driving code lands), they

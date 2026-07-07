@@ -107,6 +107,7 @@
   "session.milestone_created": "Created",
   "session.milestone_exited": "Exited",
   "session.sub_agents": "{{n}} sub-agents",
+  "session.back_to_parent": "Back to parent session",
   "session.total_incl_subagent": "Total tokens (incl. sub-agents)",
   "session.show_all_hosts": "Show all host sessions",
   "session.perm_default": "Default",

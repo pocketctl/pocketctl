@@ -45,7 +45,10 @@
         <SessionActions :session="s" @startRename="startRename" @deleted="onDeleted" @pinned="onPinned" />
       </div>
       <div v-if="s.children && s.children.length && folded[s.session_id]" class="child-rows">
-        <div v-for="c in s.children" :key="c.agentId" class="child-row">
+        <div v-for="c in s.children" :key="c.agentId" class="child-row" role="button" tabindex="0"
+          :title="c.title || c.agentType"
+          @click.stop="$router.push(`/session/${s.session_id}?subagent=${c.agentId}`)"
+          @keydown.enter="$router.push(`/session/${s.session_id}?subagent=${c.agentId}`)">
           <span class="child-indent">↳</span>
           <AgentBadge :agent="c.agentType" size="sm" />
           <span class="child-title">{{ c.title || c.agentType }}</span>
@@ -284,7 +287,8 @@ function handleLogout() {
 
 /* Child rows */
 .child-rows { padding: 4px 0 4px 42px; }
-.child-row { display: flex; align-items: center; gap: 8px; padding: 4px 8px; font-size: 13px; color: #8b949e; }
+.child-row { display: flex; align-items: center; gap: 8px; padding: 4px 8px; font-size: 13px; color: #8b949e; border-radius: var(--radius-sm); cursor: pointer; transition: background 0.15s, color 0.15s; }
+.child-row:hover { background: var(--hover, rgba(255,255,255,0.04)); color: #c9d1d9; }
 .child-indent { color: #6B7280; font-size: 12px; flex-shrink: 0; }
 .child-title { color: #c9d1d9; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .child-token { font-size: 11px; padding: 1px 6px; border-radius: 8px; background: #1a2e1a; color: #7ee787; }

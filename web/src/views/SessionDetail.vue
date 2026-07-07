@@ -42,7 +42,11 @@
             <SessionActions :session="s" @startRename="startRename" @deleted="onDeleted" @pinned="onPinned" />
           </div>
           <div v-if="s.children && s.children.length && folded[s.session_id]" class="sl-children">
-            <div v-for="c in s.children" :key="c.agentId" class="sl-child" :title="c.title || c.agentType">
+            <div v-for="c in s.children" :key="c.agentId" class="sl-child" role="button" tabindex="0"
+              :class="{ active: s.session_id === sessionId && c.agentId === focusedSubAgentId }"
+              :title="c.title || c.agentType"
+              @click.stop="router.push(`/session/${s.session_id}?subagent=${c.agentId}`)"
+              @keydown.enter="router.push(`/session/${s.session_id}?subagent=${c.agentId}`)">
               <span class="sl-child-indent">↳</span>
               <AgentBadge :agent="c.agentType" size="sm" />
               <span class="sl-child-title">{{ c.title || c.agentType }}</span>
@@ -69,20 +73,31 @@
       <!-- Chat Toolbar -->
       <div class="chat-toolbar">
         <div class="session-label">
-          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="cursor:pointer;" @click="$router.push('/')"><path d="M15 18l-6-6 6-6"/></svg>
-          {{ sessionTitle || sessionId?.slice(0, 8) }}
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="cursor:pointer;"
+            :title="focusedSubAgentId ? t('session.back_to_parent') : ''"
+            @click="focusedSubAgentId ? router.push(`/session/${sessionId}`) : $router.push('/')"><path d="M15 18l-6-6 6-6"/></svg>
+          <template v-if="focusedSubAgentId">
+            <span class="focus-breadcrumb">{{ sessionTitle || sessionId?.slice(0, 8) }} › {{ focusedSubAgentInfo?.title || focusedSubAgentInfo?.agentType || focusedSubAgentId.slice(0, 8) }}</span>
+          </template>
+          <template v-else>
+            {{ sessionTitle || sessionId?.slice(0, 8) }}
+          </template>
           <span class="daemon-name">· {{ daemonName }}</span>
         </div>
         <span :class="['status-pill', statusClass]"><span class="pulse"></span>{{ statusLabel }}</span>
-        <span v-if="contextTokens" class="context-pill" :title="t('session.context_usage')">
+        <span v-if="!focusedSubAgentId && contextTokens" class="context-pill" :title="t('session.context_usage')">
           <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/></svg>
           {{ contextTokens }}
         </span>
-        <span v-if="parentTotalTokens !== null" class="context-pill" :title="t('session.total_incl_subagent')" style="cursor:default;">
+        <span v-if="focusedSubAgentId && focusedSubAgentTokenTotal > 0" class="context-pill" :title="t('session.total_incl_subagent')" style="cursor:default;">
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M16 8h-6a2 2 0 1 0 0 4h4a2 2 0 1 1 0 4H8"/><path d="M12 18V6"/></svg>
+          {{ fmtTk(focusedSubAgentTokenTotal) }}
+        </span>
+        <span v-if="!focusedSubAgentId && parentTotalTokens !== null" class="context-pill" :title="t('session.total_incl_subagent')" style="cursor:default;">
           <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M16 8h-6a2 2 0 1 0 0 4h4a2 2 0 1 1 0 4H8"/><path d="M12 18V6"/></svg>
           {{ fmtTk(parentTotalTokens) }}
         </span>
-        <span v-if="currentModel" class="model-pill" :title="'当前模型：' + currentModel">
+        <span v-if="!focusedSubAgentId && currentModel" class="model-pill" :title="'当前模型：' + currentModel">
           <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.6 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.6a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
           {{ currentModel }}
         </span>
@@ -92,7 +107,7 @@
             <svg v-if="!copied" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"/></svg>
             <svg v-else width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M20 6L9 17l-5-5"/></svg>
           </button>
-          <button v-if="currentSessionAgent !== 'opencode'" class="copy-btn" style="margin-left:6px;" :title="resumeCopied ? t('session.actions.resume_toast') : t('session.actions.resume') + t('session.actions.resume_hint')" @click="copyResumeCmd">
+          <button v-if="!focusedSubAgentId && currentSessionAgent !== 'opencode'" class="copy-btn" style="margin-left:6px;" :title="resumeCopied ? t('session.actions.resume_toast') : t('session.actions.resume') + t('session.actions.resume_hint')" @click="copyResumeCmd">
             <svg v-if="!resumeCopied" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8"/><path d="M12 17v4"/></svg>
             <svg v-else width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M20 6L9 17l-5-5"/></svg>
           </button>
@@ -133,7 +148,7 @@
         </div>
 
         <!-- Empty state when no messages -->
-        <div v-if="messages.length === 0" class="chat-empty-state">
+        <div v-if="renderMessages.length === 0" class="chat-empty-state">
           <svg class="empty-icon" width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
             <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>
           </svg>
@@ -142,7 +157,7 @@
         </div>
 
         <!-- Messages -->
-        <template v-for="msg in messages" :key="msg.id">
+        <template v-for="msg in renderMessages" :key="msg.id">
           <!-- User message (right bubble) -->
           <MessageUser v-if="msg.role === 'user'" :content="cleanContent(msg.content)" />
 
@@ -167,7 +182,7 @@
             @toggleOutput="msg.outputExpanded = !msg.outputExpanded"
           />
           <SubAgentFoldGroup
-            v-else-if="msg.type === 'subagent'"
+            v-else-if="msg.type === 'subagent' && !focusedSubAgentId"
             :agent-id="msg.tool"
             :title="msg.title || msg.input"
             :desc="msg.input"
@@ -199,7 +214,7 @@
         <!-- Turn status bar: lives inside the message stream (visually part of
              it), below the last message. Live timer while working; on completion
              shows total duration + output tokens + a copy button. -->
-        <div v-if="isExecuting || awaitingStart || lastTurnDuration !== null || completedBarVisible" class="turn-status-bar" :class="{ done: lastTurnDuration !== null || completedBarVisible }">
+        <div v-if="!focusedSubAgentId && (isExecuting || awaitingStart || lastTurnDuration !== null || completedBarVisible)" class="turn-status-bar" :class="{ done: lastTurnDuration !== null || completedBarVisible }">
           <template v-if="isExecuting || awaitingStart">
             <span class="status-dot working"></span>
             <span class="status-text">{{ t('session.creating') }}</span>
@@ -341,7 +356,7 @@
             </div>
           </div>
         </template>
-        <div v-else-if="isSubagent" class="readonly-hint">{{ t('session.subagent_readonly') }}</div>
+        <div v-else-if="isSubagent || focusedSubAgentId" class="readonly-hint">{{ t('session.subagent_readonly') }}</div>
         <div v-else class="ended-text">{{ t('session.ended') }}</div>
       </div>
       </template><!-- /v-else hasNoSessions -->
@@ -551,7 +566,29 @@ const isDaemonSession = computed(() => {
 })
 // Sub-agent sessions are read-only (no input box — continue in the parent session)
 const isSubagent = computed(() => !!allSessions.value.find((s: any) => s.session_id === sessionId.value)?.is_subagent)
-const canInput = computed(() => !isDisconnected.value && (!isTerminal.value || isDaemonSession.value) && !isSubagent.value)
+
+// Focused sub-agent detail view (?subagent=<agentId>): read-only full-screen
+// replay of one sub-agent's conversation. The agent_id comes from the URL
+// query (set when clicking a child row in any list); the authoritative
+// title/agentType/token/status come from session_list's children[].
+const focusedSubAgentId = computed(() => (route.query.subagent as string) || '')
+const focusedSubAgentInfo = computed(() => {
+  if (!focusedSubAgentId.value) return null
+  const p = allSessions.value.find((s: any) => s.session_id === sessionId.value)
+  return p?.children?.find((c: any) => c.agentId === focusedSubAgentId.value) || null
+})
+// Token total for the focused sub-agent (input+output+cache+cacheCreate), from
+// the authoritative session_list children[] entry.
+const focusedSubAgentTokenTotal = computed(() => {
+  const c: any = focusedSubAgentInfo.value
+  if (!c) return 0
+  return (c.tokenIn || 0) + (c.tokenOut || 0) + (c.tokenCache || 0) + (c.tokenCacheCreate || 0)
+})
+// Render source: the focused sub-agent's bucket when focusing, else parent messages.
+const renderMessages = computed(() =>
+  focusedSubAgentId.value ? (subagentMessages.value[focusedSubAgentId.value] || []) : messages.value,
+)
+const canInput = computed(() => !isDisconnected.value && (!isTerminal.value || isDaemonSession.value) && !isSubagent.value && !focusedSubAgentId.value)
 // Agent is actively generating (send button → stop button)
 // Agent is actively working — includes 'waiting' (tool execution in progress),
 // otherwise the timer would stop prematurely when a tool call is running.
@@ -825,6 +862,26 @@ function scrollToBottom() {
   if (messagesEl.value) { messagesEl.value.scrollTop = messagesEl.value.scrollHeight; autoScroll.value = true }
 }
 
+// Unified history loader: clears local message state and requests the first
+// backward page. In focused-sub-agent mode it sends `replay_subagent` (relay
+// filters events by agent_id); otherwise the regular parent-session `replay`.
+// Shared by onMounted and the loadKey watcher so every entry/exit/switch path
+// is consistent.
+function loadHistory() {
+  replayReqId.value++
+  isLoading.value = true
+  loadedMinId.value = 0
+  isLoadingBackward.value = false
+  hasMore.value = false
+  if (focusedSubAgentId.value) {
+    send({ type: 'replay_subagent', session_id: sessionId.value, agent_id: focusedSubAgentId.value, limit: pageSize.value, req_id: replayReqId.value })
+  } else {
+    send({ type: 'replay', session_id: sessionId.value, direction: 'backward', limit: pageSize.value, req_id: replayReqId.value })
+    send({ type: 'list_commands', session_id: sessionId.value })
+    send({ type: 'get_session_meta', session_id: sessionId.value })
+  }
+}
+
 function onMessagesScroll() {
   if (!messagesEl.value) return
   const { scrollTop, scrollHeight, clientHeight } = messagesEl.value
@@ -833,7 +890,11 @@ function onMessagesScroll() {
   if (scrollTop < 60 && hasMore.value && !isLoadingBackward.value && !isLoading.value && loadedMinId.value > 0) {
     isLoadingBackward.value = true
     replayReqId.value++
-    send({ type: 'replay', session_id: sessionId.value, direction: 'backward', last_seq: loadedMinId.value, limit: pageSize.value, req_id: replayReqId.value })
+    if (focusedSubAgentId.value) {
+      send({ type: 'replay_subagent', session_id: sessionId.value, agent_id: focusedSubAgentId.value, last_seq: loadedMinId.value, limit: pageSize.value, req_id: replayReqId.value })
+    } else {
+      send({ type: 'replay', session_id: sessionId.value, direction: 'backward', last_seq: loadedMinId.value, limit: pageSize.value, req_id: replayReqId.value })
+    }
   }
 }
 
@@ -1354,9 +1415,15 @@ function processEvent(evt: any, target: any[] = messages.value, subagentOverride
   }
 }
 
-// Watch for session switch — clear messages and replay new session
-watch(sessionId, (newId, oldId) => {
-  if (newId && newId !== oldId) {
+// Composite load key: session id + (optional) focused sub-agent id. A change
+// covers every transition — session switch, entering / leaving the focused
+// sub-agent view, and switching between sub-agents — so a single watcher drives
+// state reset + history reload instead of one watcher per dimension.
+const loadKey = computed(() => sessionId.value + '::' + (route.query.subagent as string || ''))
+
+// Watch for session switch / focus change — clear messages and replay new context
+watch(loadKey, (newKey, oldKey) => {
+  if (newKey && newKey !== oldKey) {
     clearAllToolTimeouts()   // reset tool timeout guards on session switch
     pendingToolResults.clear() // discard buffered out-of-order results
     // Gate the turn-timer watch: the placeholder status='running' below must
@@ -1380,14 +1447,7 @@ watch(sessionId, (newId, oldId) => {
     currentModel.value = '' // clear; refilled by get_session_meta below
     currentEffort.value = '' // clear; refilled by get_session_meta / localStorage
     showEffortMenu.value = false
-    replayReqId.value++
-    isLoading.value = true
-    loadedMinId.value = 0
-    isLoadingBackward.value = false
-    hasMore.value = false
-    send({ type: 'replay', session_id: newId, direction: 'backward', limit: pageSize.value, req_id: replayReqId.value })
-    send({ type: 'list_commands', session_id: newId })
-    send({ type: 'get_session_meta', session_id: newId })
+    loadHistory()
   }
 })
 
@@ -1401,17 +1461,7 @@ onMounted(() => {
   // (a placeholder) and would start the timer from zero before the real status
   // arrives via replay. replay_end un-gates and resumes correctly.
   sessionSwitching = true
-  replayReqId.value++
-  isLoading.value = true
-  loadedMinId.value = 0
-  isLoadingBackward.value = false
-  hasMore.value = false
-  send({ type: 'replay', session_id: sessionId.value, direction: 'backward', limit: pageSize.value, req_id: replayReqId.value })
-  send({ type: 'list_commands', session_id: sessionId.value })
-  // Query the resolved model on mount (authoritative, covers sessions opened
-  // directly rather than just-created — session_created is one-shot and fires
-  // before this component subscribes).
-  send({ type: 'get_session_meta', session_id: sessionId.value })
+  loadHistory()
 
   cleanups.push(onEvent('session_list', (msg: any) => {
     allSessions.value = msg.sessions || []
@@ -1555,30 +1605,39 @@ onMounted(() => {
     // Session switch complete: ungate the timer watch. If the target session is
     // executing, resume timing from the recovered turn start (last executing
     // session_status's last_activity_at) so elapsed isn't reset to zero.
+    // Skipped in focused-sub-agent mode: status/timer reflect the parent session
+    // and don't apply to a read-only sub-agent replay.
     if (sessionSwitching) {
       sessionSwitching = false
-      // The placeholder status set on switch is 'running'; the relay does NOT
-      // replay session_status events (only message history), so correct it from
-      // the authoritative session list (DB status, kept current by the relay).
-      // Without this an idle session (e.g. opencode) would look "running" and
-      // start the turn timer from zero.
-      const meta = allSessions.value.find((s: any) => s.session_id === sessionId.value)
-      if (meta) {
-        let st = meta.statusEffective || meta.status
-        // A "running/busy" status that hasn't seen activity recently is stale:
-        // the daemon isn't actively syncing this session (an actively-running
-        // session refreshes last_activity_at every poll). Treat it as idle so the
-        // timer doesn't start from zero on a session that isn't really working
-        // (e.g. an opencode turn that was abandoned and fell out of the sync window).
-        if (st === 'running' || st === 'busy' || st === 'waiting') {
-          const la = meta.last_activity_at || meta.updated_at
-          const ageMs = la ? Date.now() - new Date(la).getTime() : Infinity
-          if (ageMs > 120000) st = 'idle'
+      if (focusedSubAgentId.value) {
+        // Focused sub-agent: no turn timer; status is the sub-agent's own
+        // (from session_list children[]), not the parent's.
+        status.value = focusedSubAgentInfo.value?.status || 'completed'
+        resumeStartAt = null
+      } else {
+        // The placeholder status set on switch is 'running'; the relay does NOT
+        // replay session_status events (only message history), so correct it from
+        // the authoritative session list (DB status, kept current by the relay).
+        // Without this an idle session (e.g. opencode) would look "running" and
+        // start the turn timer from zero.
+        const meta = allSessions.value.find((s: any) => s.session_id === sessionId.value)
+        if (meta) {
+          let st = meta.statusEffective || meta.status
+          // A "running/busy" status that hasn't seen activity recently is stale:
+          // the daemon isn't actively syncing this session (an actively-running
+          // session refreshes last_activity_at every poll). Treat it as idle so the
+          // timer doesn't start from zero on a session that isn't really working
+          // (e.g. an opencode turn that was abandoned and fell out of the sync window).
+          if (st === 'running' || st === 'busy' || st === 'waiting') {
+            const la = meta.last_activity_at || meta.updated_at
+            const ageMs = la ? Date.now() - new Date(la).getTime() : Infinity
+            if (ageMs > 120000) st = 'idle'
+          }
+          if (st) status.value = st
         }
-        if (st) status.value = st
+        if (isExecuting.value) startTurnTimer(resumeStartAt ?? undefined)
+        resumeStartAt = null
       }
-      if (isExecuting.value) startTurnTimer(resumeStartAt ?? undefined)
-      resumeStartAt = null
     }
   }))
 
@@ -1781,7 +1840,9 @@ onMounted(() => {
 .sl-fold { cursor: pointer; font-size: 12px; color: var(--fg-tertiary); user-select: none; line-height: 1; flex-shrink: 0; width: 12px; text-align: center; transition: color 0.15s; }
 .sl-fold:hover { color: var(--fg); }
 .sl-children { padding: 2px 0 6px 26px; display: flex; flex-direction: column; gap: 2px; }
-.sl-child { display: flex; align-items: center; gap: 6px; padding: 3px 6px; font-size: 12px; color: var(--fg-secondary); border-radius: var(--radius-sm); }
+.sl-child { display: flex; align-items: center; gap: 6px; padding: 3px 6px; font-size: 12px; color: var(--fg-secondary); border-radius: var(--radius-sm); cursor: pointer; transition: background var(--transition), color var(--transition); }
+.sl-child:hover { background: var(--hover); color: var(--fg); }
+.sl-child.active { background: var(--accent-bg, rgba(99,102,241,0.12)); color: var(--accent); }
 .sl-child-indent { color: var(--fg-tertiary); flex-shrink: 0; }
 .sl-child-title { color: var(--fg); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .session-list-item { display: flex; align-items: center; gap: 10px; padding: 10px 12px; border-radius: var(--radius-md); cursor: pointer; transition: background 0.1s, opacity 0.25s ease; margin-bottom: 2px; }
@@ -1803,6 +1864,7 @@ onMounted(() => {
 .chat-toolbar { height: 52px; border-bottom: 1px solid var(--border); display: flex; align-items: center; padding: 0 20px; gap: 12px; background: var(--surface); transition: background var(--transition), border-color var(--transition); }
 .chat-toolbar .session-label { font-size: 14px; font-weight: 600; color: var(--fg); flex: 1; display: flex; align-items: center; gap: 8px; }
 .chat-toolbar .session-label .daemon-name { font-size: 12px; color: var(--fg-tertiary); font-weight: 400; }
+.chat-toolbar .session-label .focus-breadcrumb { font-size: 13px; font-weight: 600; color: var(--accent); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .status-pill { display: inline-flex; align-items: center; gap: 5px; padding: 4px 10px; border-radius: var(--radius-full); font-size: 12px; font-weight: 600; }
 .status-pill.running { background: var(--success-bg); color: var(--success); }
 .status-pill .pulse { width: 6px; height: 6px; border-radius: 50%; background: currentColor; animation: pulse-green 1.5s infinite; }

@@ -264,7 +264,7 @@ func (sm *SessionManager) servePTYSession(ctx context.Context, ps *ProcessState,
 		}
 		go tailer.Run(ctx, sm.outputCh, nil)
 		if sm.OnSessionIDResolved != nil {
-			sm.OnSessionIDResolved(ps.SessionID, ps.Cwd)
+			sm.OnSessionIDResolved(ps.SessionID, ps.Cwd, ps.Agent)
 		}
 	}()
 

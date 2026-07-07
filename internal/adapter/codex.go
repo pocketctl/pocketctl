@@ -393,6 +393,61 @@ func (CodexSessionStorage) ExtractTitle(lines []string) string {
 	return ""
 }
 
+// CodexExtractFirstUserMessage 提取 codex JSONL 首条 user 消息(供 GenerateTitle 触发)。
+// 与 CodexSessionStorage.ExtractTitle 同逻辑,但函数形式 + maxLen 可控。
+func CodexExtractFirstUserMessage(lines []string, maxLen int) string {
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		var raw codexLine
+		if json.Unmarshal([]byte(line), &raw) != nil || raw.Type != "event_msg" {
+			continue
+		}
+		var p codexPayload
+		if json.Unmarshal(raw.Payload, &p) != nil {
+			continue
+		}
+		if p.Type == "user_message" && p.Message != "" {
+			return truncateCodex(p.Message, maxLen)
+		}
+	}
+	return ""
+}
+
+// CodexExtractFirstAssistantMessage 提取 codex JSONL 首条 assistant 消息(供 GenerateTitle 触发)。
+// 支持 event_msg(agent_message)和 response_item(message assistant)两种 codex 格式。
+func CodexExtractFirstAssistantMessage(lines []string, maxLen int) string {
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		var raw codexLine
+		if json.Unmarshal([]byte(line), &raw) != nil {
+			continue
+		}
+		var p codexPayload
+		if json.Unmarshal(raw.Payload, &p) != nil {
+			continue
+		}
+		// event_msg: agent_message
+		if raw.Type == "event_msg" && p.Type == "agent_message" && p.Message != "" {
+			return truncateCodex(p.Message, maxLen)
+		}
+		// response_item: message assistant(取首个 Content.Text)
+		if raw.Type == "response_item" && p.Type == "message" && strings.EqualFold(p.Role, "assistant") {
+			for _, c := range p.Content {
+				if c.Text != "" {
+					return truncateCodex(c.Text, maxLen)
+				}
+			}
+		}
+	}
+	return ""
+}
+
 func (CodexSessionStorage) ExtractModel(lines []string) string {
 	model := ""
 	for _, line := range lines {
