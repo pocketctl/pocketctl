@@ -190,6 +190,15 @@ func convertCodexPayload(topType string, p codexPayload, session *CodexAdapter) 
 		}
 		return nil
 
+	case "turn_context":
+		// codex ≥0.142 only carries the model here (not on assistant messages).
+		// Record it on the streaming adapter so the daemon's OnEvent hook can
+		// derive a session_model_changed for live daemon sessions.
+		if session != nil && p.Model != "" {
+			session.model = CleanModelName(p.Model)
+		}
+		return nil
+
 	case "response_item":
 		return convertCodexResponseItem(p, session)
 
@@ -197,7 +206,7 @@ func convertCodexPayload(topType string, p codexPayload, session *CodexAdapter) 
 		return convertCodexEventMsg(p)
 
 	default:
-		// path / turn_context / etc. — not surfaced.
+		// path / etc. — not surfaced.
 		return nil
 	}
 }
@@ -247,9 +256,15 @@ func convertCodexMessage(p codexPayload, session *CodexAdapter) []protocol.Daemo
 		}
 		return []protocol.DaemonEvent{{Type: "user_text", Text: text}}
 	case "assistant":
-		ev := protocol.DaemonEvent{Type: "agent_text", Text: text, Model: CleanModelName(p.Model)}
-		if session != nil && p.Model != "" {
-			session.model = CleanModelName(p.Model)
+		// codex ≥0.142 stopped emitting model on assistant messages; fall back to
+		// the model captured from the preceding turn_context line (if any).
+		model := CleanModelName(p.Model)
+		if model == "" && session != nil && session.model != "" {
+			model = session.model
+		}
+		ev := protocol.DaemonEvent{Type: "agent_text", Text: text, Model: model}
+		if session != nil && model != "" {
+			session.model = model
 		}
 		return []protocol.DaemonEvent{ev}
 	}
@@ -459,14 +474,21 @@ func (CodexSessionStorage) ExtractModel(lines []string) string {
 		if json.Unmarshal([]byte(line), &raw) != nil {
 			continue
 		}
-		if raw.Type != "response_item" {
-			continue
-		}
 		var p codexPayload
 		if json.Unmarshal(raw.Payload, &p) != nil {
 			continue
 		}
-		if p.Type == "message" && strings.EqualFold(p.Role, "assistant") {
+		// codex ≥0.142 moved the model out of assistant messages: it now lives
+		// on the turn_context line (payload.model). Older rollouts still carry
+		// it on the assistant response_item. Check both so new AND old sessions
+		// resolve a model.
+		if raw.Type == "turn_context" {
+			if m := CleanModelName(p.Model); m != "" {
+				return m // turn_context is authoritative for the whole session
+			}
+			continue
+		}
+		if raw.Type == "response_item" && p.Type == "message" && strings.EqualFold(p.Role, "assistant") {
 			if m := CleanModelName(p.Model); m != "" {
 				model = m
 			}

@@ -84,16 +84,40 @@ export async function initDB(pool: pg.Pool): Promise<void> {
 
   // P1a: subagents 补 cache_create 列（与 sessions.tok_cache_create 对齐，修复 cache_create 丢失）
   await pool.query(`ALTER TABLE subagents ADD COLUMN IF NOT EXISTS token_cache_create BIGINT DEFAULT 0`);
-  // P1a: subagent_usage 幂等去重表 —— relay persistedHigh 是内存 Map，重启后 daemon replay 会重复发
-  // subagent_usage（不写 events 表），用 (daemon_id, seq) 主键去重防重复累加。
+  // subagent_usage 幂等去重表。早期版本用 (daemon_id, seq) 主键去重，但 seq 是 daemon 进程内的
+  // 自增计数器，incarnation 切换后 reset 从 0 开始，旧代码在 router 里整表 DELETE 这张表来避让，
+  // 反而让从 offset 0 重放的累计 usage 全部重新累加 → subagents.token_* 滚到 10^16。
+  // 现改为内容指纹 (daemon_id, usage_hash) 去重，与 events.event_hash 同构：同一份 per-turn usage
+  // 无论被重放多少遍（relay 重启 / daemon incarnation 切换 / tailer 从 offset 0 重读 child JSONL）
+  // 都只计入一次。usage_hash = md5(parent_session_id:agent_id:in:out:cache_read:cache_create) 前 16 位。
   await pool.query(`
     CREATE TABLE IF NOT EXISTS subagent_usage_seen (
-      daemon_id TEXT NOT NULL,
-      seq       BIGINT NOT NULL,
-      seen_at   TIMESTAMPTZ DEFAULT NOW(),
-      PRIMARY KEY (daemon_id, seq)
+      daemon_id   TEXT NOT NULL,
+      usage_hash  CHAR(16) NOT NULL,
+      seq         BIGINT,
+      agent_id    TEXT,
+      seen_at     TIMESTAMPTZ DEFAULT NOW(),
+      PRIMARY KEY (daemon_id, usage_hash)
     )
   `);
+  // 在线表迁移：为旧表补列，并把 PK 从 (daemon_id, seq) 换成 (daemon_id, usage_hash)。
+  await pool.query(`ALTER TABLE subagent_usage_seen ADD COLUMN IF NOT EXISTS usage_hash CHAR(16)`);
+  await pool.query(`ALTER TABLE subagent_usage_seen ADD COLUMN IF NOT EXISTS agent_id TEXT`);
+  await pool.query(`ALTER TABLE subagent_usage_seen ALTER COLUMN seq DROP NOT NULL`);
+  await pool.query(`DO $$
+    BEGIN
+      IF EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conname = 'subagent_usage_seen_pkey'
+          AND conrelid = 'subagent_usage_seen'::regclass
+          AND pg_get_constraintdef(oid) LIKE '%daemon_id, seq%'
+      ) THEN
+        ALTER TABLE subagent_usage_seen DROP CONSTRAINT subagent_usage_seen_pkey;
+        ALTER TABLE subagent_usage_seen ADD PRIMARY KEY (daemon_id, usage_hash);
+      END IF;
+    EXCEPTION WHEN OTHERS THEN
+      RAISE NOTICE 'subagent_usage_seen PK migrate skipped: %', SQLERRM;
+    END $$`);
 
   // Phase 2: users table for authentication
   await pool.query(`
@@ -445,12 +469,13 @@ export async function listSessionsWithChildren(pool: pg.Pool, whereUser?: number
     `SELECT parent_session_id, agent_id, kind, agent_type, title, status, token_in, token_out, token_cache, token_cache_create
      FROM subagents ORDER BY created_at ASC`
   );
-  const byParent = groupSubagentsByParent(subs.rows);
-  return result.rows.map((row: any) => serializeSessionRow(row, byParent));
+  const { byParent, sumChildren } = groupSubagentsByParent(subs.rows);
+  return result.rows.map((row: any) => serializeSessionRow(row, byParent, sumChildren));
 }
 
-function groupSubagentsByParent(rows: any[]): Map<string, any[]> {
+function groupSubagentsByParent(rows: any[]): { byParent: Map<string, any[]>; sumChildren: Map<string, number> } {
   const byParent = new Map<string, any[]>();
+  const sumChildren = new Map<string, number>();
   for (const r of rows) {
     if (!byParent.has(r.parent_session_id)) byParent.set(r.parent_session_id, []);
     byParent.get(r.parent_session_id)!.push({
@@ -458,14 +483,21 @@ function groupSubagentsByParent(rows: any[]): Map<string, any[]> {
       status: r.status, tokenIn: r.token_in, tokenOut: r.token_out,
       tokenCache: r.token_cache, tokenCacheCreate: r.token_cache_create,
     });
+    // 累加该 child 的四列 token 之和到其 parent 桶，用于把子用量并入 totalTokens。
+    const childSum = Number(r.token_in || 0) + Number(r.token_out || 0)
+      + Number(r.token_cache || 0) + Number(r.token_cache_create || 0);
+    sumChildren.set(r.parent_session_id, (sumChildren.get(r.parent_session_id) ?? 0) + childSum);
   }
-  return byParent;
+  return { byParent, sumChildren };
 }
 
-function serializeSessionRow(row: any, byParent: Map<string, any[]>): any {
+function serializeSessionRow(row: any, byParent: Map<string, any[]>, sumChildren?: Map<string, number>): any {
+  const childSum = sumChildren?.get(row.session_id) ?? 0;
   return {
     ...row,
-    totalTokens: parseInt(row.total_tokens ?? 0, 10),
+    // totalTokens = 父会话自身用量 + Σ所有子智能体用量（让 UI 标注的「含子智能体」名副其实；
+    // 父明细 tok_input/output/cache_* 不并子项，保留 breakdown 展开）。
+    totalTokens: parseInt(row.total_tokens ?? 0, 10) + childSum,
     tokInput: parseInt(row.tok_input ?? 0, 10),
     tokOutput: parseInt(row.tok_output ?? 0, 10),
     tokCacheRead: parseInt(row.tok_cache_read ?? 0, 10),
@@ -575,6 +607,7 @@ export async function listSessionsPageByDaemon(pool: pg.Pool, opts: {
   const hasMore = result.rows.length > limit;
   const parentIds = pageRows.map((row: any) => row.session_id);
   let byParent = new Map<string, any[]>();
+  let sumChildren = new Map<string, number>();
   if (parentIds.length > 0) {
     const childrenStartedAt = Date.now();
     const subs = await pool.query(
@@ -590,18 +623,19 @@ export async function listSessionsPageByDaemon(pool: pg.Pool, opts: {
         elapsedMs: Date.now() - childrenStartedAt,
       });
     }
-    byParent = groupSubagentsByParent(subs.rows);
+    ({ byParent, sumChildren } = groupSubagentsByParent(subs.rows));
   }
 
   return {
-    sessions: pageRows.map((row: any) => serializeSessionRow(row, byParent)),
+    sessions: pageRows.map((row: any) => serializeSessionRow(row, byParent, sumChildren)),
     hasMore,
     nextCursor: hasMore ? encodeSessionListCursor(pageRows[pageRows.length - 1]) : null,
   };
 }
 
-/** P1a: 取一个会话的 token 拆分 —— 父总额（含子，来自 sessions.tok_*）+ 各子代理明细。
- *  父总额含子代理（方案 X）；不派生「主会话自身」（避免负数）。未知 session 返回 null。 */
+/** 取一个会话的 token 拆分 —— parent.totalTokens = 父会话自身用量 + Σ各子代理用量；
+ *  parent.tokInput/Output/CacheRead/CacheCreate 仅父会话自身明细（不并子项，供 breakdown 展开）；
+ *  children 为各子代理明细。未知 session 返回 null。 */
 export async function getSessionTokenBreakdown(pool: pg.Pool, userId: number, sessionId: string): Promise<{
   parent: { totalTokens: number; tokInput: number; tokOutput: number; tokCacheRead: number; tokCacheCreate: number };
   children: Array<{ agentId: string; agentType: string; title: string; tokenIn: number; tokenOut: number; tokenCache: number; tokenCacheCreate: number }>;
@@ -614,9 +648,13 @@ export async function getSessionTokenBreakdown(pool: pg.Pool, userId: number, se
   if ((sess.rowCount ?? 0) === 0) return null;
   const r = sess.rows[0];
   const children = await listSubagentsByParent(pool, sessionId);
+  // totalTokens 含子代理：Σ各 child 的四列之和。
+  const childSum = children.reduce((acc: number, c: any) =>
+    acc + Number(c.tokenIn || 0) + Number(c.tokenOut || 0)
+      + Number(c.tokenCache || 0) + Number(c.tokenCacheCreate || 0), 0);
   return {
     parent: {
-      totalTokens: parseInt(r.total_tokens ?? 0, 10),
+      totalTokens: parseInt(r.total_tokens ?? 0, 10) + childSum,
       tokInput: parseInt(r.tok_input ?? 0, 10),
       tokOutput: parseInt(r.tok_output ?? 0, 10),
       tokCacheRead: parseInt(r.tok_cache_read ?? 0, 10),

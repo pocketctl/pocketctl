@@ -99,4 +99,25 @@ describe('db listSessions children aggregation', () => {
       tokenCache: 3,
     })
   })
+
+  test('totalTokens 含子代理：父 total_tokens + Σ各子 token 四列之和', async () => {
+    // 父自己 1000，两个子：a=(100+200+50+30=380)，b=(10+20+5+0=35)
+    // 期望 totalTokens = 1000 + 380 + 35 = 1415
+    const pool: any = {
+      query: vi.fn((sql: string) => {
+        if (sql.includes('FROM sessions s')) return Promise.resolve({ rows: [
+          { session_id: 'parent-1', title: 'main', subagent_count: 2, total_tokens: 1000 },
+          { session_id: 'parent-2', title: 'nochildren', subagent_count: 0, total_tokens: 500 },
+        ] })
+        if (sql.includes('FROM subagents')) return Promise.resolve({ rows: [
+          { parent_session_id: 'parent-1', agent_id: 'a', kind: 'claude_subagent', agent_type: 'Explore', title: 'ta', status: 'completed', token_in: 100, token_out: 200, token_cache: 50, token_cache_create: 30 },
+          { parent_session_id: 'parent-1', agent_id: 'b', kind: 'claude_subagent', agent_type: 'Explore', title: 'tb', status: 'completed', token_in: 10, token_out: 20, token_cache: 5, token_cache_create: 0 },
+        ] })
+        return Promise.resolve({ rows: [] })
+      }),
+    }
+    const out = await listSessionsWithChildren(pool)
+    expect(out[0].totalTokens).toBe(1415) // 父 1000 + 子 a 380 + 子 b 35
+    expect(out[1].totalTokens).toBe(500)  // 无子，仅父
+  })
 })

@@ -16,7 +16,8 @@ describe('db subagent token API (P1a)', () => {
     }
     const list = await listSessionsWithChildren(pool)
     const parent = list[0]
-    expect(parent).toMatchObject({ totalTokens: 1000, tokInput: 400, tokOutput: 300, tokCacheRead: 200, tokCacheCreate: 100 })
+    // totalTokens 含子代理：父 1000 + 子 (100+200+50+30=380) = 1380
+    expect(parent).toMatchObject({ totalTokens: 1380, tokInput: 400, tokOutput: 300, tokCacheRead: 200, tokCacheCreate: 100 })
     // Verify raw snake_case columns are NOT leaked
     expect(parent.total_tokens).toBeUndefined()
     expect(parent.tok_input).toBeUndefined()
@@ -40,7 +41,8 @@ describe('db subagent token API (P1a)', () => {
     }
     const bd = await getSessionTokenBreakdown(pool, 42, 'p1')
     expect(bd).not.toBeNull()
-    expect(bd!.parent).toMatchObject({ totalTokens: 1000, tokCacheCreate: 100 })
+    // parent.totalTokens 含子代理：父 1000 + 子 (100+200+50+30=380) = 1380
+    expect(bd!.parent).toMatchObject({ totalTokens: 1380, tokCacheCreate: 100 })
     expect(bd!.children[0]).toMatchObject({ agentId: 'a1', agentType: 'Explore', tokenCacheCreate: 30 })
   })
 

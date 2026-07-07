@@ -1,5 +1,6 @@
 import type { WebSocket } from 'ws';
 import type pg from 'pg';
+import { createHash } from 'crypto';
 import * as db from './db.js';
 import { generateTitle, generateSubagentTitle } from './title.js';
 import { notifyUser, sessionStatusPush, daemonOfflinePush, daemonOnlinePush, approvalPush, interactivePush, summarizeToolInput, highRiskPush, isHighRiskCommand } from './push.js';
@@ -251,9 +252,10 @@ export class Router {
     const prevSeq = this.daemonSeq.get(daemonId);
     if (!prevSeq || prevSeq.startedAt !== daemonStartedAt) {
       // New daemon incarnation (non-graceful restart / rebuild / fresh install):
-      // seqCtr resets to 0 so prior-incarnation seen rows would collide with new
-      // replayed events via ON CONFLICT DO NOTHING, permanently losing token deltas.
-      await this.pool.query('DELETE FROM subagent_usage_seen WHERE daemon_id = $1', [daemonId]).catch(console.error);
+      // seqCtr resets to 0. We deliberately do NOT clear subagent_usage_seen here —
+      // dedup is now keyed on content (usage_hash), not seq, so replayed usage from
+      // a from-scratch child-JSONL re-tail is correctly recognised as already-counted.
+      // Clearing the table here was the amplifier behind the subagents.token_* runaway.
       // Seed the persisted mark from the daemon's reported durable baseline. A
       // daemon that reconnects (after the grace window dropped our entry) or
       // restarts from its spool replays only its unacked tail; without this the
@@ -674,19 +676,25 @@ export class Router {
       this.markPersisted(daemonId, msg.seq);
       const u = msg.usage;
       if (msg.agent_id && u) {
-        // P1a: 幂等去重 —— relay persistedHigh 是内存，重启后 daemon replay 会重发 subagent_usage。
-        // 用 subagent_usage_seen(daemon_id, seq) 主键 INSERT ON CONFLICT DO NOTHING：rowCount=0 表示已处理，跳过累加。
-        // Tradeoff (non-transactional): if this seen-INSERT commits but addSubagentUsage then
-        // fails, that seq's delta is permanently lost. The reverse order would re-open the
-        // relay-restart double-count window, so we accept this tradeoff.
+        // 内容指纹幂等去重：daemon 发的 subagent_usage 携带 per-turn 的 Anthropic usage 原值，
+        // relay 当增量相加（addSubagentUsage: token_in = subagents.token_in + $3）。relay 重启 /
+        // daemon incarnation 切换 / subagent tailer 从 offset 0 重读 child JSONL 都会让同一份
+        // usage 被重发。用 (daemon_id, usage_hash) 内容指纹去重（与 events.event_hash 同构），
+        // 保证同一份 per-turn usage 无论重放多少遍只累加一次。
+        const inT = u.input_tokens || 0;
+        const outT = u.output_tokens || 0;
+        const crT = u.cache_read_tokens || 0;
+        const ccT = u.cache_create_tokens || 0;
+        const usageHash = createHash('md5')
+          .update(`${sessionId}:${msg.agent_id}:${inT}:${outT}:${crT}:${ccT}`)
+          .digest('hex').slice(0, 16);
         this.pool.query(
-          'INSERT INTO subagent_usage_seen (daemon_id, seq) VALUES ($1, $2) ON CONFLICT DO NOTHING',
-          [daemonId, msg.seq]
+          'INSERT INTO subagent_usage_seen (daemon_id, usage_hash, seq, agent_id) VALUES ($1, $2, $3, $4) ON CONFLICT DO NOTHING',
+          [daemonId, usageHash, msg.seq, msg.agent_id]
         ).then((r) => {
-          if ((r?.rowCount ?? 0) === 0) return; // 已 seen，跳过
-          db.addSubagentUsage(this.pool, sessionId, msg.agent_id,
-            u.input_tokens || 0, u.output_tokens || 0, u.cache_read_tokens || 0, u.cache_create_tokens || 0
-          ).catch(console.error);
+          if ((r?.rowCount ?? 0) === 0) return; // 同内容已计入，跳过
+          db.addSubagentUsage(this.pool, sessionId, msg.agent_id, inT, outT, crT, ccT)
+            .catch(console.error);
         }).catch(console.error);
       }
       return;
