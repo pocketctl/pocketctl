@@ -15,6 +15,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -1125,9 +1126,24 @@ func cmdDaemonStart(args []string) {
 	sigCh := make(chan os.Signal, 1)
 	installSignalHandler(sigCh) // PR2: platform split (Unix SIGINT/SIGTERM, Windows os.Interrupt)
 
-	// PR4: Windows 控制通道(Unix no-op)。收 stop → cancel → 优雅退出。
+	var shutdownNoticeOnce sync.Once
+	sendShutdownNotice := func() {
+		shutdownNoticeOnce.Do(func() {
+			client.SendMsg(protocol.DaemonEvent{
+				Type:    "daemon_shutdown",
+				Reason:  "daemon_stop",
+				Message: "daemon is shutting down",
+			})
+			logger.Info("daemon shutdown notice sent")
+		})
+	}
+
+	// PR4: Windows 控制通道(Unix no-op)。收 stop → 通知 relay → cancel → 优雅退出。
 	// detached Windows daemon 收不到信号,靠控制 pipe 接收 daemon stop 命令。
-	if err := daemon.StartControlChannel(cancel); err != nil {
+	if err := daemon.StartControlChannel(func() {
+		sendShutdownNotice()
+		cancel()
+	}); err != nil {
 		logger.Warn("control channel not started", "error", err)
 	}
 
@@ -1248,7 +1264,9 @@ func cmdDaemonStart(args []string) {
 	// Wait for signal
 	select {
 	case <-sigCh:
+		sendShutdownNotice()
 	case <-ctx.Done(): // PR4: 控制通道 stop → cancel → 这里唤醒
+		sendShutdownNotice()
 	}
 	logger.Info("shutting down")
 	fmt.Println(i18n.T("daemon.shutting_down"))
