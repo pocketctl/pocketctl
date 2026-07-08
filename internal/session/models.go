@@ -123,17 +123,28 @@ func ListModelsForAgent(agentType string) []protocol.ModelOption {
 	}
 }
 
-// listCodexModels returns the model options for the Codex agent. Codex has no
-// settings.json alias mechanism; the list comes from codex's known model ids.
-// If ~/.codex/config.toml sets a [model] we surface it first as the default.
+// listCodexModels returns the model options for the Codex agent.
+//
+// codex CLI (0.142.x) exposes no subcommand/flag to list its supported models,
+// and the real list is not persisted in ~/.codex/config.toml (that file only
+// holds the user's preferred `model =` plus nux/migration metadata). So we keep
+// a minimal candidate set aligned to the codex version, and surface the
+// config.toml preferred model first so users overriding it see their default
+// pinned to the top.
+//
+// The candidate set is version-coupled — when codex ships new model ids, this
+// list must be updated to stay in sync. Keeping it tight (rather than padded
+// with speculative ids) ensures we never show models the local codex can't run,
+// which is the bug this list previously caused (hard-coded gpt-5.5-codex/o3).
 func listCodexModels() []protocol.ModelOption {
 	var out []protocol.ModelOption
 	preferred := codexConfigModel()
 	if preferred != "" {
 		out = append(out, protocol.ModelOption{Alias: "default", Name: preferred})
 	}
-	// Common codex model ids (shown as concrete names; the alias is passed to -m).
-	for _, m := range []string{"gpt-5.5", "gpt-5.5-codex", "o3"} {
+	// Candidate ids known to codex CLI 0.142.x (shown as concrete names; the
+	// alias is passed to codex's -m). Keep in sync with the shipped codex.
+	for _, m := range []string{"gpt-5.5", "gpt-5.4", "gpt-5.4-mini"} {
 		if m != preferred {
 			out = append(out, protocol.ModelOption{Alias: m, Name: m})
 		}
