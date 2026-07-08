@@ -252,7 +252,10 @@ function formatTokens(v: number | null | undefined): string {
 async function fetchCostSummary() {
   const origin = getRelayOrigin()
   try {
-    const r = await fetch(`${origin}/api/tokens/summary`, { headers: { Authorization: `Bearer ${accessToken.value}` } })
+    const r = await fetch(`${origin}/api/tokens/summary`, {
+      headers: { Authorization: `Bearer ${accessToken.value}` },
+      credentials: 'include',
+    })
     if (r.ok) {
       const d = await r.json()
       tokenSummary.value = { total: d.total ?? 0, today: d.today ?? 0, week: d.thisWeek ?? 0, month: d.thisMonth ?? 0 }
@@ -343,7 +346,17 @@ function startRename(i: number) {
 }
 async function confirmRename(i: number) {
   const d = daemons.value[i]; const alias = renameInput.value.trim() || null
-  try { const token = localStorage.getItem('pocketctl_access_token'); if (token) await fetch(`/api/daemons/${d.daemon_id}/alias`, { method: 'PUT', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` }, body: JSON.stringify({ alias }) }) } catch {}
+  try {
+    const token = accessToken.value
+    if (token) {
+      await fetch(`/api/daemons/${d.daemon_id}/alias`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        body: JSON.stringify({ alias }),
+        credentials: 'include',
+      })
+    }
+  } catch {}
   d.daemon_alias = alias; renameIndex.value = null
 }
 function cancelRename() { renameIndex.value = null; renameInput.value = '' }

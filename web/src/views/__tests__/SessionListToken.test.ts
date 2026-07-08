@@ -1,4 +1,4 @@
-import { describe, test, expect, vi, beforeEach } from 'vitest'
+import { describe, test, expect, vi } from 'vitest'
 import { mount, flushPromises } from '@vue/test-utils'
 import SessionList from '../SessionList.vue'
 
@@ -54,17 +54,13 @@ vi.mock('../../composables/useWebSocket', () => ({
   }),
 }))
 vi.mock('../../composables/useAuth', () => ({
-  useAuth: () => ({ isLoggedIn: true, logout: vi.fn() }),
+  useAuth: () => ({ isLoggedIn: { value: true }, accessToken: { value: 'tk' }, logout: vi.fn() }),
 }))
 vi.mock('vue-router', () => ({
   useRouter: () => ({ push: vi.fn() }),
 }))
 
 describe('SessionList.vue — token pill (P1a)', () => {
-  beforeEach(() => {
-    localStorage.setItem('pocketctl_access_token', 'tk')
-  })
-
   test('renders 🪙 token pill with formatted totalTokens (12K)', async () => {
     const w = mount(SessionList, {
       global: {

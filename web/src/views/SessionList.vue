@@ -78,7 +78,7 @@ const { renamingId, renameInput, startRename, commitRename, cancelRename } = use
 const { t } = useLocale()
 
 const { connect, send, onEvent, effectiveStatus } = useWebSocket()
-const { isLoggedIn, logout } = useAuth()
+const { isLoggedIn, accessToken, logout } = useAuth()
 const $router = useRouter()
 const sessions = ref<any[]>([])
 const showNewSession = ref(false)
@@ -123,11 +123,9 @@ function toggleFold(id: string) {
 }
 
 onMounted(() => {
-  const token = localStorage.getItem('pocketctl_access_token') || ''
+  const token = accessToken.value
   if (!token) { $router.push('/login'); return }
-  const relayWs = localStorage.getItem('pocketctl_relay_url') || (window as any).__RELAY_WS__ || `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/ws`
-  const wsUrl = `${relayWs}?type=client&token=${encodeURIComponent(token)}`
-  connect(wsUrl)
+  connect()
 
   setTimeout(() => { send({ type: 'list_sessions' }) }, 500)
 

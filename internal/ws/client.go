@@ -520,10 +520,8 @@ func (c *Client) connectAndServe(ctx context.Context) error {
 	q.Set("type", "daemon")
 	u.RawQuery = q.Encode()
 
-	// Send the JWT in the Authorization header rather than the URL query, so it
-	// never lands in proxy access logs / referrers. The relay accepts both, but
-	// must be deployed before daemons that send header-only (it is, in the same
-	// release; old daemons keep using ?token= against the new relay).
+		// Send the JWT in the Authorization header rather than the URL query, so it
+		// never lands in proxy access logs / referrers.
 	c.tokenMu.Lock()
 	tok := c.token
 	c.tokenMu.Unlock()

@@ -73,7 +73,9 @@ describe('useAuth — Email Verification Code', () => {
     expect(err).toBeNull()
     expect(accessToken.value).toBe('jwt-123')
     expect(user.value?.email).toBe('a@b.com')
-    expect(localStorageMock.setItem).toHaveBeenCalledWith('pocketctl_access_token', 'jwt-123')
+    expect(localStorageMock.setItem).not.toHaveBeenCalledWith('pocketctl_access_token', 'jwt-123')
+    expect(localStorageMock.removeItem).toHaveBeenCalledWith('pocketctl_access_token')
+    expect(localStorageMock.removeItem).toHaveBeenCalledWith('pocketctl_refresh_token')
   })
 
   test('#41 loginViaEmail returns error on wrong code', async () => {
@@ -135,7 +137,8 @@ describe('useAuth — QR Scan-Login', () => {
     const result = await pollQrLogin('tok-abc')
     expect(result).toBe('confirmed')
     expect(accessToken.value).toBe('jwt-from-qr')
-    expect(localStorageMock.setItem).toHaveBeenCalledWith('pocketctl_access_token', 'jwt-from-qr')
+    expect(localStorageMock.setItem).not.toHaveBeenCalledWith('pocketctl_access_token', 'jwt-from-qr')
+    expect(localStorageMock.removeItem).toHaveBeenCalledWith('pocketctl_access_token')
   })
 
   test('#45 pollQrLogin returns expired status', async () => {
@@ -157,6 +160,7 @@ describe('useAuth — isLoggedIn', () => {
   test('isLoggedIn is false without tokens', () => {
     // useAuth refs are module-level singletons — reset them to a logged-out state
     const { logout, isLoggedIn } = useAuth()
+    mockFetchResponse(true, { success: true })
     logout()
     expect(isLoggedIn.value).toBe(false)
   })

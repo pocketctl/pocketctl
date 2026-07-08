@@ -32,7 +32,7 @@ import { ref, computed } from 'vue'
 import { useAuth } from '../composables/useAuth'
 
 const emit = defineEmits<{ close: []; saved: [name: string] }>()
-const { user } = useAuth()
+const { user, accessToken } = useAuth()
 
 const displayName = ref(user.value?.display_name || '')
 const saving = ref(false)
@@ -58,11 +58,12 @@ async function save() {
   saving.value = true
   error.value = ''
   try {
-    const token = localStorage.getItem('pocketctl_access_token')
+    const token = accessToken.value
     const res = await fetch(`/api/user/profile`, {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
       body: JSON.stringify({ display_name: name }),
+      credentials: 'include',
     })
     const data = await res.json()
     if (!res.ok) {
