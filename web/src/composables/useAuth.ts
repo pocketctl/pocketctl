@@ -224,10 +224,13 @@ function clearAuthState() {
 
 async function logout() {
   const legacyRefreshToken = localStorage.getItem('pocketctl_refresh_token') || refreshToken.value
-  clearAuthState()
+  // 先调 relay 清 HttpOnly cookie(必须带 credentials:include 让浏览器接受 Set-Cookie),
+  // 再清内存。如果先 clearAuthState,accessToken 变空 → router.beforeEach 触发
+  // doRefreshToken → cookie 还在 → relay 返回新 token → 恢复登录态 → 退出失效。
   try {
     await apiRequest('/api/auth/logout', legacyRefreshToken ? { refresh_token: legacyRefreshToken } : {})
   } catch {}
+  clearAuthState()
 }
 
 const isLoggedIn = computed(() => !!accessToken.value && !!user.value)
