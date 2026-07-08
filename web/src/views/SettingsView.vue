@@ -281,8 +281,8 @@ function scrollTo(id: string) {
   if (idx >= 0 && navItems[idx]) navItems[idx].classList.add('active')
 }
 
-function handleLogout() {
-  logout()
+async function handleLogout() {
+  await logout()
   router.push('/login')
 }
 
