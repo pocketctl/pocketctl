@@ -2001,6 +2001,7 @@ func handleCommands(ctx context.Context, client *ws.Client, sm *session.SessionM
 				// codex returns its own model list.
 				client.SendMsg(protocol.DaemonEvent{
 					Type:   "model_list",
+					Agent:  cmd.Agent,
 					Models: sm.ModelsForAgent(cmd.Agent),
 				})
 

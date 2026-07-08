@@ -544,7 +544,7 @@ export class Router {
       // model_list (host-level response, no session_id): broadcast to the daemon owner's clients
       if (msg.type === 'model_list') {
         const daemon = this.daemons.get(daemonId);
-        if (daemon?.userId) this.broadcastToUser(daemon.userId, msg);
+        if (daemon?.userId) this.broadcastToUser(daemon.userId, { ...msg, daemon_id: daemonId });
         return;
       }
       if (msg.type === 'error') {
