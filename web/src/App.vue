@@ -48,7 +48,7 @@
           <div class="user-avatar">{{ userInitial }}</div>
           <div class="user-info">
             <div class="user-name">{{ userDisplayName }}</div>
-            <div class="user-plan">{{ t('user.free_plan') }}</div>
+            <div class="user-plan" :class="{ pro: isPro }">{{ isPro ? t('user.pro_plan') : t('user.free_plan') }}</div>
           </div>
         </div>
       </div>
@@ -112,6 +112,12 @@ const userDisplayName = computed(() => {
   const phone = user.value?.phone
   if (phone) return phone.slice(0, 3) + '****' + phone.slice(-4)
   return user.value?.display_name || user.value?.email || t('user.guest')
+})
+
+// 付费用户:plan 非 free 即视为专业版(与后端 listProUserIds 判定一致)
+const isPro = computed(() => {
+  const plan = user.value?.plan
+  return !!plan && plan !== 'free'
 })
 
 const pageTitle = computed(() => {

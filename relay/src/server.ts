@@ -145,7 +145,7 @@ async function main() {
     return {
       access_token: accessToken,
       refresh_token: refreshToken,
-      user: { id: user.id, email: user.email, display_name: user.display_name },
+      user: { id: user.id, email: user.email, phone: user.phone ?? null, display_name: user.display_name, plan: user.plan || 'free' },
     };
   });
 
@@ -167,7 +167,7 @@ async function main() {
     return {
       access_token: accessToken,
       refresh_token: refreshToken,
-      user: { id: user.id, email: user.email, display_name: user.display_name },
+      user: { id: user.id, email: user.email, phone: user.phone ?? null, display_name: user.display_name, plan: user.plan || 'free' },
       _warning: 'This endpoint is deprecated and will be removed. Use /api/auth/email/verify for email-based login.',
     };
   });
@@ -220,7 +220,7 @@ async function main() {
     return {
       access_token: accessToken,
       refresh_token: newRefreshToken,
-      user: { id: user.id, email: user.email, display_name: user.display_name },
+      user: { id: user.id, email: user.email, phone: user.phone ?? null, display_name: user.display_name, plan: user.plan || 'free' },
     };
   });
 
@@ -344,7 +344,7 @@ async function main() {
     return {
       access_token: accessToken,
       refresh_token: refreshToken,
-      user: { id: user.id, email: user.email, phone: user.phone, display_name: user.display_name },
+      user: { id: user.id, email: user.email, phone: user.phone, display_name: user.display_name, plan: user.plan || 'free' },
     };
   });
   app.post('/api/auth/apple/signin', async (req, reply) => {
@@ -995,7 +995,7 @@ async function main() {
         status: 'confirmed' as const,
         access_token: accessToken,
         refresh_token: refreshToken,
-        user: { id: user.id, email: user.email, phone: user.phone, display_name: user.display_name },
+        user: { id: user.id, email: user.email, phone: user.phone, display_name: user.display_name, plan: user.plan || 'free' },
       };
     }
 

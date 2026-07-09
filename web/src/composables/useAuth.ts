@@ -6,6 +6,7 @@ export interface UserInfo {
   email: string | null
   phone: string | null
   display_name: string | null
+  plan?: string | null
 }
 
 const user = ref<UserInfo | null>(null)
@@ -65,6 +66,49 @@ async function apiGet(path: string): Promise<{ ok: boolean; data: any }> {
   } catch (e) {
     return { ok: false, data: { error: '网络请求失败' } }
   }
+}
+
+/** Authenticated GET with 401 → refresh → retry (mirrors apiRequest semantics). */
+async function apiGetAuth(path: string): Promise<{ ok: boolean; data: any }> {
+  let result = await fetchGetAuth(path)
+  if (result.status === 401) {
+    const refreshed = await doRefreshToken()
+    if (refreshed) result = await fetchGetAuth(path)
+  }
+  return { ok: result.ok, data: result.data }
+}
+
+async function fetchGetAuth(path: string): Promise<{ ok: boolean; status: number; data: any }> {
+  const origin = getRelayOrigin()
+  const url = origin ? `${origin}${path}` : path
+  const headers: Record<string, string> = { 'Content-Type': 'application/json' }
+  if (accessToken.value) headers['Authorization'] = `Bearer ${accessToken.value}`
+  try {
+    const res = await fetch(url, { method: 'GET', headers, credentials: 'include' })
+    const data = await res.json()
+    return { ok: res.ok, status: res.status, data }
+  } catch {
+    return { ok: false, status: 0, data: { error: '网络请求失败' } }
+  }
+}
+
+/**
+ * 拉取最新 profile 补全用户信息(主要是 plan 字段)。
+ * 老的 localStorage 里可能没有 plan,且 plan 可能在后台被改动,
+ * 登录后/恢复登录态后各调一次保持同步。失败静默,不影响登录。
+ */
+async function fetchProfile() {
+  if (!accessToken.value) return
+  const { ok, data } = await apiGetAuth('/api/user/profile')
+  if (!ok || !data?.id) return
+  user.value = {
+    id: data.id,
+    email: data.email ?? null,
+    phone: data.phone ?? null,
+    display_name: data.display_name ?? null,
+    plan: data.plan || 'free',
+  }
+  localStorage.setItem('pocketctl_user', JSON.stringify(user.value))
 }
 
 // --- Email Verification Code Auth ---
@@ -244,6 +288,7 @@ export function useAuth() {
     createQrLogin, pollQrLogin,       // QR scan-login (web side)
     forceKickDaemon,                  // force kick daemon
     renameSession,                    // session rename
+    fetchProfile,                     // refresh user profile (e.g. after plan change)
     doRefreshToken, logout,
   }
 }
