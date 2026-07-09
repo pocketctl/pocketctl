@@ -1209,68 +1209,124 @@ export class Router {
   private async handleListDaemons(clientWs: WebSocket, userId: number | null): Promise<void> {
     try {
       const daemonList: any[] = [];
-      const sessionCounts = userId ? await db.getSessionCountsByUser(this.pool, userId) : {};
-      for (const [, daemon] of this.daemons) {
-        console.log('[router] list_daemons iterating daemon', daemon.daemonId, 'daemon.userId:', daemon.userId, 'request.userId:', userId, 'agents:', JSON.stringify(daemon.agents));
-        if (!this.sameUser(daemon.userId, userId)) continue;
-        const alias = await db.getDaemonAlias(this.pool, daemon.daemonId);
-        const metrics = this.daemonMetrics.get(daemon.daemonId);
-        const counts = sessionCounts[daemon.daemonId];
-        daemonList.push({
-          daemon_id: daemon.daemonId,
-          hostname: daemon.hostname,
-          agents: daemon.agents,
-          daemon_online: true,
-          daemon_alias: alias,
-          status: 'online',
-          os: daemon.os || 'unknown',
-          ip: daemon.ip || 'unknown',
-          port: daemon.port || '',
-          arch: daemon.arch || '',
-          version: daemon.version || '',
-          started_at: daemon.startedAt || 0,
-          last_heartbeat: Date.now(),
-          cpu_pct: metrics?.cpuPct ?? null,
-          mem_pct: metrics?.memPct ?? null,
-          disk_pct: metrics?.diskPct ?? null,
-          active_sessions: counts?.active ?? 0,
-          total_sessions: counts?.total ?? 0,
-        });
-      }
-      // Include daemons from DB for this user (both online-in-DB and offline).
-      // Within the startup grace window, daemons that haven't re-registered
-      // into memory yet (relay just restarted) are shown optimistically online
-      // so the client's host list doesn't empty/flicker during a restart.
-      // After the window, "not in memory" simply means offline.
+      const seenIds = new Set<string>();
+
+      // 在线主机:遍历内存 map,逐个用 buildDaemonForUser 组装(保证与单主机
+      // HTTP 接口返回字段完全一致)。userId 为 null(未认证)时跳过。
       if (userId) {
+        for (const [daemonId, daemon] of this.daemons) {
+          if (!this.sameUser(daemon.userId, userId)) continue;
+          const entry = await this.buildDaemonForUser(daemonId, userId);
+          if (entry) { daemonList.push(entry); seenIds.add(daemonId); }
+        }
+
+        // 离线主机:补 DB 里该用户名下、不在内存 map 中的 daemon。
+        // 启动宽限期内乐观置 online,避免 relay 刚重启时列表闪烁/清空。
         try {
-          const onlineHostnames = new Set(daemonList.map((d: any) => d.hostname))
           const result = await this.pool.query(
-            `SELECT daemon_id, hostname, agents, alias, status, last_heartbeat FROM daemons WHERE user_id = $1`,
+            `SELECT daemon_id FROM daemons WHERE user_id = $1`,
             [userId]
           )
-          const inStartupWindow = (Date.now() - this.startedAt) < this.listGraceMs
           for (const row of result.rows) {
-            if (onlineHostnames.has(row.hostname)) continue
-            const counts = sessionCounts[row.daemon_id]
-            const optimisticOnline = inStartupWindow
-            daemonList.push({
-              daemon_id: row.daemon_id,
-              hostname: row.hostname,
-              agents: row.agents || [],
-              daemon_online: optimisticOnline,
-              daemon_alias: row.alias,
-              status: optimisticOnline ? 'online' : 'offline',
-              last_seen_at: row.last_heartbeat,
-              active_sessions: counts?.active ?? 0,
-              total_sessions: counts?.total ?? 0,
-            })
+            if (seenIds.has(row.daemon_id)) continue
+            const entry = await this.buildDaemonForUser(row.daemon_id, userId)
+            if (entry) daemonList.push(entry)
           }
         } catch (e) { console.error('list_daemons db:', e) }
       }
+
       console.log('[router] list_daemons sending', daemonList.length, 'daemons to user', userId);
     this.send(clientWs, { type: 'daemon_list', daemons: daemonList });
     } catch (err) { console.error('list_daemons error:', err); }
+  }
+
+  /**
+   * 组装单个 daemon 的快照对象,供 WS 的 list_daemons 与 HTTP 单主机查询共用。
+   * 在线(内存 map 里有)→ 带完整字段含 cpu/mem/disk 指标;
+   * 离线(仅 DB 里有)→ 字段较少。
+   * optimistic=true(默认,WS 全量列表用):relay 启动宽限期内乐观置 online,
+   *   防止 relay 刚重启时整页列表闪烁/清空;
+   * optimistic=false(HTTP 单主机刷新用):如实返回 DB 记录的真实 status——
+   *   能走到离线分支说明内存 map 里没有活跃连接,该主机此刻就是离线的,
+   *   单卡刷新的核心诉求是看真实状态,乐观值反而会误导。
+   * 返回 null 表示该 daemon 不存在或不属于该用户(调用方据此回 404)。
+   */
+  async buildDaemonForUser(daemonId: string, userId: number, optimistic = true): Promise<any | null> {
+    // 1) 在线:走内存 map,字段最全
+    const conn = this.daemons.get(daemonId);
+    if (conn && this.sameUser(conn.userId, userId)) {
+      const alias = await db.getDaemonAlias(this.pool, daemonId);
+      const metrics = this.daemonMetrics.get(daemonId);
+      const countsRow = await this.pool.query(
+        `SELECT COUNT(*)::int AS total,
+                COUNT(*) FILTER (WHERE status IN ('running','busy'))::int AS active
+         FROM sessions
+         WHERE user_id = $1 AND daemon_id = $2 AND session_id NOT LIKE 'pending-%'`,
+        [userId, daemonId]
+      );
+      const counts = countsRow.rows[0];
+      return {
+        daemon_id: conn.daemonId,
+        hostname: conn.hostname,
+        agents: conn.agents,
+        daemon_online: true,
+        daemon_alias: alias,
+        status: 'online',
+        os: conn.os || 'unknown',
+        ip: conn.ip || 'unknown',
+        port: conn.port || '',
+        arch: conn.arch || '',
+        version: conn.version || '',
+        started_at: conn.startedAt || 0,
+        last_heartbeat: Date.now(),
+        cpu_pct: metrics?.cpuPct ?? null,
+        mem_pct: metrics?.memPct ?? null,
+        disk_pct: metrics?.diskPct ?? null,
+        active_sessions: counts?.active ?? 0,
+        total_sessions: counts?.total ?? 0,
+      };
+    }
+
+    // 2) 离线:查 DB,校验归属,启动宽限期内乐观 online
+    try {
+      const result = await this.pool.query(
+        `SELECT daemon_id, hostname, agents, alias, status, last_heartbeat, user_id
+         FROM daemons WHERE daemon_id = $1`,
+        [daemonId]
+      );
+      const row = result.rows[0];
+      if (!row || row.user_id !== userId) return null;
+
+      const countsRow = await this.pool.query(
+        `SELECT COUNT(*)::int AS total,
+                COUNT(*) FILTER (WHERE status IN ('running','busy'))::int AS active
+         FROM sessions
+         WHERE user_id = $1 AND daemon_id = $2 AND session_id NOT LIKE 'pending-%'`,
+        [userId, daemonId]
+      );
+      const counts = countsRow.rows[0];
+      // 乐观:仅 WS 全量列表在启动宽限期内用,防列表闪烁;
+      // 单主机刷新如实返回真实 status(走到这里 = 内存无活跃连接 = 已离线)。
+      const inStartupWindow = (Date.now() - this.startedAt) < this.listGraceMs;
+      const optimisticOnline = optimistic && inStartupWindow;
+      // 非乐观模式下以 DB 记录的 status 为准;乐观模式下被乐观值覆盖。
+      const dbOnline = row.status === 'online';
+      const isOnline = optimisticOnline || (!optimistic && dbOnline);
+      return {
+        daemon_id: row.daemon_id,
+        hostname: row.hostname,
+        agents: row.agents || [],
+        daemon_online: isOnline,
+        daemon_alias: row.alias,
+        status: isOnline ? 'online' : 'offline',
+        last_seen_at: row.last_heartbeat,
+        active_sessions: counts?.active ?? 0,
+        total_sessions: counts?.total ?? 0,
+      };
+    } catch (e) {
+      console.error('buildDaemonForUser db:', e);
+      return null;
+    }
   }
 
   /** Force-kick a daemon from the Web settings page. */

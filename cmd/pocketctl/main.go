@@ -308,7 +308,43 @@ func cmdUninstall(args []string) {
 	}
 
 	// 2. Remove data/config directories.
+	// ~/.pocketctl carries login tokens & machine identity — deleting it is
+	// irreversible (must re-login; relay sees a new device). Require a second
+	// y/N confirmation (default N = keep) on top of the earlier y/N so the user
+	// must explicitly opt in to wiping credentials. --yes skips the FIRST prompt
+	// but NOT this one: wiping auth is too costly to bypass non-interactively.
+	configDir := ""
+	if home != "" {
+		configDir = filepath.Join(home, ".pocketctl")
+	}
+	if configDir != "" {
+		if _, err := os.Stat(configDir); err == nil {
+			fmt.Println(i18n.T("doctor.rule"))
+			fmt.Println(i18n.T("uninstall.config_warning_title"))
+			fmt.Println(i18n.T("uninstall.config_warning_body"))
+			fmt.Println(i18n.T("doctor.rule"))
+			fmt.Print(i18n.T("uninstall.config_confirm"))
+			reader := bufio.NewReader(os.Stdin)
+			answer, _ := reader.ReadString('\n')
+			answer = strings.ToLower(strings.TrimSpace(answer))
+			// y/N: default N (keep). Must explicitly type y/yes to delete.
+			if answer != "y" && answer != "yes" {
+				fmt.Println(i18n.T("uninstall.config_skipped"))
+			} else {
+				fmt.Println(i18n.T("uninstall.removing", configDir))
+				if err := os.RemoveAll(configDir); err != nil {
+					fmt.Fprintln(os.Stderr, i18n.T("uninstall.remove_fail", configDir, err))
+				}
+			}
+		}
+	}
+
+	// Remaining runtime dirs (e.g. /tmp/pocketctl): safe to remove without the
+	// extra warning — just pid/log/lock scratch files, no credentials.
 	for _, t := range targets {
+		if t.path == configDir {
+			continue // already handled above
+		}
 		if _, err := os.Stat(t.path); err != nil {
 			continue
 		}
