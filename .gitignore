@@ -68,3 +68,6 @@ web/vite.config.d.ts
 # AI agent runtime working dirs
 .agents/
 .codex/
+
+# AI agent runtime working dirs
+.zcode/

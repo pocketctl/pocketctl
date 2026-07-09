@@ -111,6 +111,11 @@ Relay 连接（默认: 生产环境 wss://www.pocketctl.me/ws）:
   POCKETCTL_RELAY_URL   Relay WebSocket URL（如 ws://localhost:8080/ws, wss://relay.example.com/ws）
   POCKETCTL_TOKEN       JWT 认证令牌`
 
+// configDirDisplay is the user-facing name of the profile directory shown in
+// the uninstall warning. Kept as a literal (not computed from runtime) so the
+// warning text is stable for the literal "DELETE" confirmation prompt.
+const configDirDisplay = "~/.pocketctl"
+
 // messages is the bilingual message table, keyed by "<namespace>.<name>".
 // Populated incrementally as call sites are migrated; see i18n.T for the
 // fallback behaviour when a key is absent.
@@ -391,4 +396,28 @@ var messages = map[string]msg{
 		"  💡 提示: 如果权限不足，请使用 sudo: sudo rm -f %s",
 	},
 	"uninstall.done": {"✅ pocketctl has been uninstalled.", "✅ pocketctl 已卸载完成。"},
+	"uninstall.config_warning_title": {
+		"⚠️  About to delete your pocketctl profile",
+		"⚠️  即将删除 pocketctl 用户数据",
+	},
+	"uninstall.config_warning_body": {
+		"This will permanently erase " + configDirDisplay + ", including:\n" +
+			"  • auth.json — login tokens (you MUST re-run 'pocketctl login' afterwards)\n" +
+			"  • machine.id — host identity (relay will show this as a NEW device next time)\n" +
+			"  • logs/ & spool/ — all daemon history\n" +
+			"This CANNOT be undone.",
+		"将永久删除 " + configDirDisplay + "，包括:\n" +
+			"  • auth.json — 登录凭证（删除后必须重新执行 'pocketctl login'）\n" +
+			"  • machine.id — 机器标识（relay 下次会将其视为新设备）\n" +
+			"  • logs/ 与 spool/ — 全部 daemon 历史记录\n" +
+			"此操作不可恢复。",
+	},
+	"uninstall.config_confirm": {
+		"\nDelete ~/.pocketctl? [y/N] ",
+		"\n确认删除 ~/.pocketctl? [y/N] ",
+	},
+	"uninstall.config_skipped": {
+		"~/.pocketctl kept (login tokens preserved).",
+		"已保留 ~/.pocketctl（登录凭证未删除）。",
+	},
 }

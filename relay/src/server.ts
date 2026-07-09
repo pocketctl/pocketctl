@@ -1052,6 +1052,21 @@ async function main() {
   });
 
   // Restart daemon (remote control)
+  // Get a single daemon's latest snapshot (for single-host refresh). Shares the
+  // same assembly logic as the WS `list_daemons` so fields stay consistent.
+  app.get('/api/daemons/:daemonId', async (req, reply) => {
+    const authHeader = req.headers.authorization;
+    if (!authHeader?.startsWith('Bearer ')) { reply.code(401); return { error: 'authorization required' }; }
+    const payload = await verifyAccessTokenWithRevocation(authHeader.slice(7), pool);
+    if (!payload) { reply.code(401); return { error: 'invalid token' }; }
+    const { daemonId } = req.params as any;
+    // 单主机刷新的核心诉求是看真实状态:optimistic=false 关闭启动宽限期乐观 online,
+    // 内存 map 里没有活跃连接时如实返回 offline。
+    const daemon = await router.buildDaemonForUser(daemonId, payload.userId, false);
+    if (!daemon) { reply.code(404); return { error: 'daemon not found or not owned' }; }
+    return daemon;
+  });
+
   app.post('/api/daemons/:daemonId/restart', async (req, reply) => {
     const authHeader = req.headers.authorization;
     if (!authHeader?.startsWith('Bearer ')) { reply.code(401); return { error: 'authorization required' }; }
