@@ -782,7 +782,7 @@ export async function reconcileDaemonSessions(pool: pg.Pool, daemonId: string, a
 
 export async function createUser(pool: pg.Pool, email: string, passwordHash: string, displayName?: string): Promise<any> {
   const result = await pool.query(
-    `INSERT INTO users (email, password_hash, display_name) VALUES ($1, $2, $3) RETURNING id, email, display_name, created_at`,
+    `INSERT INTO users (email, password_hash, display_name) VALUES ($1, $2, $3) RETURNING id, email, phone, display_name, plan, created_at`,
     [email, passwordHash, displayName || null]
   );
   return result.rows[0];
@@ -790,7 +790,7 @@ export async function createUser(pool: pg.Pool, email: string, passwordHash: str
 
 export async function getUserByEmail(pool: pg.Pool, email: string): Promise<any | null> {
   const result = await pool.query(
-    `SELECT id, email, password_hash, display_name, created_at FROM users WHERE email = $1`,
+    `SELECT id, email, phone, password_hash, display_name, plan, created_at FROM users WHERE email = $1`,
     [email]
   );
   return result.rows[0] || null;
@@ -798,7 +798,7 @@ export async function getUserByEmail(pool: pg.Pool, email: string): Promise<any 
 
 export async function getUserById(pool: pg.Pool, id: number): Promise<any | null> {
   const result = await pool.query(
-    `SELECT id, email, display_name, created_at FROM users WHERE id = $1`,
+    `SELECT id, email, phone, display_name, plan, created_at FROM users WHERE id = $1`,
     [id]
   );
   return result.rows[0] || null;

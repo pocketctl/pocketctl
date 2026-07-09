@@ -292,6 +292,10 @@ body {
   font-size: 11px;
   color: var(--fg-tertiary);
 }
+.sidebar-user .user-plan.pro {
+  color: var(--accent);
+  font-weight: 600;
+}
 
 /* ---- Main Content ---- */
 .main-content {

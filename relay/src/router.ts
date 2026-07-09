@@ -421,6 +421,24 @@ export class Router {
   }
 
   /**
+   * A daemon can explicitly announce a graceful local stop before its socket
+   * closes. In that case clients should see offline immediately instead of
+   * waiting for the reconnect grace window used for network flaps.
+   */
+  private finalizeDaemonShutdown(daemonId: string): void {
+    const daemon = this.daemons.get(daemonId);
+    if (!daemon) return;
+
+    const timer = this.pendingOfflineTimers.get(daemonId);
+    if (timer) {
+      clearTimeout(timer);
+      this.pendingOfflineTimers.delete(daemonId);
+    }
+
+    this.finalizeDaemonOffline(daemonId, daemon);
+  }
+
+  /**
    * Rebuild session→daemon routing entries for a freshly (re)connected daemon.
    * Merges two sources: the active session IDs the daemon reported in its
    * register message, and every session the DB still attributes to this daemon.
@@ -525,6 +543,12 @@ export class Router {
         const st = this.daemonSeq.get(daemonId);
         if (st && st.persistedHigh > 0) this.send(daemon.ws, { type: 'event_ack', up_to_seq: st.persistedHigh });
       }
+      return;
+    }
+
+    if (msg.type === 'daemon_shutdown') {
+      this.markPersisted(daemonId, msg.seq);
+      this.finalizeDaemonShutdown(daemonId);
       return;
     }
 

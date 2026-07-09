@@ -125,29 +125,87 @@ func ListModelsForAgent(agentType string) []protocol.ModelOption {
 
 // listCodexModels returns the model options for the Codex agent.
 //
-// codex CLI (0.142.x) exposes no subcommand/flag to list its supported models,
-// and the real list is not persisted in ~/.codex/config.toml (that file only
-// holds the user's preferred `model =` plus nux/migration metadata). So we keep
-// a minimal candidate set aligned to the codex version, and surface the
-// config.toml preferred model first so users overriding it see their default
-// pinned to the top.
-//
-// The candidate set is version-coupled — when codex ships new model ids, this
-// list must be updated to stay in sync. Keeping it tight (rather than padded
-// with speculative ids) ensures we never show models the local codex can't run,
-// which is the bug this list previously caused (hard-coded gpt-5.5-codex/o3).
+// Codex's interactive /model picker is backed by ~/.codex/models_cache.json
+// (falling back to models_catalog.json). Reading that catalog keeps iOS/web in
+// sync with the local Codex install instead of maintaining a version-coupled
+// hard-coded list.
 func listCodexModels() []protocol.ModelOption {
-	var out []protocol.ModelOption
 	preferred := codexConfigModel()
-	if preferred != "" {
-		out = append(out, protocol.ModelOption{Alias: "default", Name: preferred})
+	if out := readCodexModelCatalog(preferred); len(out) > 0 {
+		return out
 	}
-	// Candidate ids known to codex CLI 0.142.x (shown as concrete names; the
-	// alias is passed to codex's -m). Keep in sync with the shipped codex.
+	return codexFallbackModels(preferred)
+}
+
+func codexFallbackModels(preferred string) []protocol.ModelOption {
+	var out []protocol.ModelOption
 	for _, m := range []string{"gpt-5.5", "gpt-5.4", "gpt-5.4-mini"} {
-		if m != preferred {
-			out = append(out, protocol.ModelOption{Alias: m, Name: m})
+		out = appendModelOption(out, m)
+	}
+	out = movePreferredFirst(out, preferred)
+	return out
+}
+
+func readCodexModelCatalog(preferred string) []protocol.ModelOption {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return nil
+	}
+	for _, name := range []string{"models_cache.json", "models_catalog.json"} {
+		models := readCodexModelCatalogFile(filepath.Join(home, ".codex", name))
+		if len(models) > 0 {
+			return movePreferredFirst(models, preferred)
 		}
+	}
+	return nil
+}
+
+func readCodexModelCatalogFile(path string) []protocol.ModelOption {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil
+	}
+	var catalog struct {
+		Models []struct {
+			Slug       string `json:"slug"`
+			Visibility string `json:"visibility"`
+		} `json:"models"`
+	}
+	if err := json.Unmarshal(data, &catalog); err != nil {
+		return nil
+	}
+	var out []protocol.ModelOption
+	for _, m := range catalog.Models {
+		if m.Visibility != "list" {
+			continue
+		}
+		out = appendModelOption(out, m.Slug)
+	}
+	return out
+}
+
+func appendModelOption(out []protocol.ModelOption, slug string) []protocol.ModelOption {
+	slug = strings.TrimSpace(slug)
+	if slug == "" {
+		return out
+	}
+	for _, existing := range out {
+		if existing.Alias == slug {
+			return out
+		}
+	}
+	return append(out, protocol.ModelOption{Alias: slug, Name: slug})
+}
+
+func movePreferredFirst(models []protocol.ModelOption, preferred string) []protocol.ModelOption {
+	preferred = strings.TrimSpace(preferred)
+	if preferred == "" {
+		return models
+	}
+	out := make([]protocol.ModelOption, 0, len(models)+1)
+	out = appendModelOption(out, preferred)
+	for _, model := range models {
+		out = appendModelOption(out, model.Alias)
 	}
 	return out
 }

@@ -515,6 +515,29 @@ describe('Router - offline debounce', () => {
     expect(pushQuery).toBeUndefined()
   })
 
+  test('daemon_shutdown declares offline immediately without waiting for grace', async () => {
+    const clientWs = createMockWs()
+    router.registerClient(clientWs, 42)
+
+    const ws1 = createMockWs()
+    await router.registerDaemon(ws1, { type: 'register', daemon_id: 'daemon-1', hostname: 'host', agents: [] }, 42)
+
+    clientWs._sent.length = 0
+    pool._queries.length = 0
+
+    router.handleDaemonMessage('daemon-1', { type: 'daemon_shutdown', seq: 1 })
+    await new Promise(r => setTimeout(r, 20))
+
+    const offline = clientWs._sent.find((m: any) => m.type === 'daemon_status' && m.status === 'offline')
+    expect(offline).toBeDefined()
+    expect(offline.daemon_id).toBe('daemon-1')
+    expect(offline.hostname).toBe('host')
+    const offlineUpdate = pool._queries.find((q: any) =>
+      q.sql.includes('UPDATE daemons') && q.params.includes('daemon-1')
+    )
+    expect(offlineUpdate).toBeDefined()
+  })
+
   test('past the grace window the daemon is declared offline and pushed', async () => {
     const clientWs = createMockWs()
     router.registerClient(clientWs, 42)

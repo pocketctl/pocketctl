@@ -157,11 +157,11 @@ describe('useAuth — QR Scan-Login', () => {
 })
 
 describe('useAuth — isLoggedIn', () => {
-  test('isLoggedIn is false without tokens', () => {
+  test('isLoggedIn is false without tokens', async () => {
     // useAuth refs are module-level singletons — reset them to a logged-out state
     const { logout, isLoggedIn } = useAuth()
     mockFetchResponse(true, { success: true })
-    logout()
+    await logout()
     expect(isLoggedIn.value).toBe(false)
   })
 })
