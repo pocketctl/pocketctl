@@ -36,6 +36,9 @@ type ProcessState struct {
 	Model            string               // resolved model name (for session_created, surfaced to web /model)
 	Effort           string               // last-set thinking-effort level (low/medium/high/xhigh/max/ultracode)
 	PendingRequestID string               // non-empty while a tool-use approval request awaits a client decision
+	InitialPrompt    string               // prompt submitted when a daemon PTY session starts
+	JSONLExcludeIDs  map[string]struct{}  // rollout/session ids that existed before this PTY launch
+	PTYOutputTail    []byte               // recent raw PTY output for startup diagnostics
 	WorktreePath     string               // Scheme D: non-empty when the session runs inside a git worktree
 	WorktreeBranch   string               // Scheme D: the git branch backing the worktree
 	Backend          SessionBackend       // non-nil only for server-kind agents (opencode); subprocess agents drive via the fields above
@@ -60,6 +63,7 @@ type SessionManager struct {
 	childPids           map[int]bool                           // PIDs of daemon-spawned processes
 	OnNotifyTerminal    NotifyFunc                             // callback after --resume on terminal session
 	OnSessionIDResolved func(realSessionID, cwd, agent string) // callback when daemon session gets real ID
+	OnStateChanged      func()                                 // callback when in-memory session state should be persisted
 	ptyProvider         platform.PTYProvider                   // PR2: daemon-session PTY backend (was direct creack/pty)
 	proc                platform.ProcessController             // PR2: process alive/kill (was syscall; used by Task 3)
 

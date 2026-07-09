@@ -886,6 +886,7 @@ func cmdDaemonStart(args []string) {
 		fmt.Fprintln(os.Stderr, i18n.T("daemon.debug_banner", logWriter.CurrentPath()))
 	}
 	logger.Info("starting daemon", "version", version, "id", id, "relay", url, "debug", *debug)
+	daemonStartedAt := time.Now()
 
 	// Write PID file
 	if err := daemon.WritePID(os.Getpid()); err != nil {
@@ -963,7 +964,7 @@ func cmdDaemonStart(args []string) {
 		daemon.Go("title-resolve", logger, func() {
 			for i := 0; i < 30; i++ {
 				time.Sleep(1 * time.Second)
-				jsonlPath, err := watcher.ResolveJSONLPath(realSessionID, cwd)
+				jsonlPath, err := adapter.ResolveJSONLPathFor(agent, realSessionID, cwd)
 				if err != nil {
 					continue
 				}
@@ -1086,6 +1087,9 @@ func cmdDaemonStart(args []string) {
 
 	// Dirty flag for state persistence — only write when changed
 	var stateDirty atomic.Bool
+	sm.OnStateChanged = func() {
+		stateDirty.Store(true)
+	}
 
 	// Re-sync sessions after (re)connection
 	client.OnReconnected = func() {
@@ -1113,7 +1117,7 @@ func cmdDaemonStart(args []string) {
 			Version:   version,
 			RelayURL:  url,
 			Connected: connected,
-			StartedAt: time.Now(),
+			StartedAt: daemonStartedAt,
 			PID:       os.Getpid(),
 		}
 		if err := daemon.WriteState(state); err != nil {
@@ -1272,7 +1276,7 @@ func cmdDaemonStart(args []string) {
 					Version:   version,
 					RelayURL:  url,
 					Connected: true,
-					StartedAt: time.Now(),
+					StartedAt: daemonStartedAt,
 					PID:       os.Getpid(),
 					Sessions:  stateSessions,
 				}
@@ -2048,6 +2052,10 @@ func handleCommands(ctx context.Context, client *ws.Client, sm *session.SessionM
 					Model:     model,
 					Effort:    sm.GetSessionEffort(cmd.SessionID),
 				})
+				if evt, ok := sm.PendingInteractivePrompt(cmd.SessionID); ok {
+					logger.Info("get_session_meta: replay pending interactive prompt", "session", cmd.SessionID, "req", evt.RequestID)
+					client.SendMsg(evt)
+				}
 
 			case "list_models":
 				// Web client queries the host's available models to populate the

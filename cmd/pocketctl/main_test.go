@@ -96,6 +96,18 @@ func TestIsPermissionDenied(t *testing.T) {
 	}
 }
 
+func TestClassifyCreateErrorBadCwd(t *testing.T) {
+	for _, msg := range []string{
+		"工作目录不存在: /Users/me/projcts/pocketctl-test",
+		"工作目录创建失败: /Users/me/projcts/pocketctl-test (mkdir /Users/me/projcts: permission denied)",
+		"工作目录无法访问: /Users/me/repo (permission denied)",
+	} {
+		if got := classifyCreateError(msg); got != "bad_cwd" {
+			t.Errorf("classifyCreateError(%q) = %q, want bad_cwd", msg, got)
+		}
+	}
+}
+
 // TestStartSpinnerNonTTY verifies the spinner degrades cleanly when stdout is
 // not a terminal: it prints the message once (no escape codes), and the
 // returned stop function is safe to call.

@@ -174,6 +174,37 @@ func (sm *SessionManager) UpdateLastActivity(sessionID string) {
 	}
 }
 
+func (sm *SessionManager) remapSessionID(oldID, newID string) (cwd, agent string, changed bool) {
+	if oldID == "" || newID == "" || oldID == newID {
+		sm.mu.RLock()
+		ps, ok := sm.sessions[oldID]
+		sm.mu.RUnlock()
+		if !ok {
+			return "", "", false
+		}
+		return ps.Cwd, ps.Agent, false
+	}
+
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+	ps, ok := sm.sessions[oldID]
+	if !ok {
+		return "", "", false
+	}
+	delete(sm.sessions, oldID)
+	ps.SessionID = newID
+	sm.sessions[newID] = ps
+
+	if ps.Cwd != "" {
+		key := normalizeCwd(ps.Cwd)
+		if set, ok := sm.cwdSessions[key]; ok {
+			delete(set, oldID)
+			set[newID] = struct{}{}
+		}
+	}
+	return ps.Cwd, ps.Agent, true
+}
+
 // GetSessionCwd returns the working directory for a session and whether the
 // session exists. Used to resolve which command sources to scan for a session.
 func (sm *SessionManager) GetSessionCwd(sessionID string) (string, bool) {

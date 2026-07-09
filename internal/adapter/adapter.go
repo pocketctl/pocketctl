@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/pocketctl/pocketctl/internal/protocol"
 )
@@ -193,6 +194,23 @@ func (ClaudeSessionStorage) ExtractModel(lines []string) string {
 // storage. This is the agent-aware replacement for watcher.ResolveJSONLPath.
 func ResolveJSONLPathFor(agentType, sessionID, cwd string) (string, error) {
 	return NewStorage(agentType).ResolveJSONLPath(sessionID, cwd)
+}
+
+type PTYResolveHints struct {
+	StartedAt         time.Time
+	InitialPrompt     string
+	ExcludeSessionIDs map[string]struct{}
+}
+
+// ResolveJSONLPathForPTY resolves the JSONL file for a newly spawned PTY
+// session and returns the real agent session id. Claude can pin the daemon's id
+// up front, while Codex interactive mode generates its own id in session_meta.
+func ResolveJSONLPathForPTY(agentType, sessionID, cwd string, hints PTYResolveHints) (string, string, error) {
+	if agentType == AgentCodex {
+		return CodexSessionStorage{}.ResolveJSONLPathForPTY(sessionID, cwd, hints)
+	}
+	path, err := ResolveJSONLPathFor(agentType, sessionID, cwd)
+	return path, sessionID, err
 }
 
 // resolveClaudeJSONLPath mirrors watcher.ResolveJSONLPath: Claude Code stores

@@ -2,7 +2,10 @@ package adapter
 
 import (
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/pocketctl/pocketctl/internal/protocol"
 )
@@ -164,6 +167,86 @@ func TestCodex_ExtractModel(t *testing.T) {
 	}
 }
 
+func TestResolveJSONLPathForPTY_CodexFindsRealSessionIDByCwdAndStartTime(t *testing.T) {
+	codexHome := t.TempDir()
+	t.Setenv("CODEX_HOME", codexHome)
+	cwd := filepath.Join(t.TempDir(), "repo")
+	if err := os.MkdirAll(cwd, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	startedAt := time.Now().Add(-2 * time.Second)
+	realID := "019f455f-17b1-7372-814c-8011accab8f4"
+	path := writeCodexRollout(t, codexHome, realID, cwd, "fix this", time.Now())
+
+	gotPath, gotID, err := ResolveJSONLPathForPTY(AgentCodex, "pocketctl-temp-id", cwd, PTYResolveHints{
+		StartedAt:     startedAt,
+		InitialPrompt: "fix this",
+	})
+	if err != nil {
+		t.Fatalf("ResolveJSONLPathForPTY returned error: %v", err)
+	}
+	if gotPath != path {
+		t.Fatalf("path = %q, want %q", gotPath, path)
+	}
+	if gotID != realID {
+		t.Fatalf("real session id = %q, want %q", gotID, realID)
+	}
+}
+
+func TestResolveJSONLPathForPTY_CodexExcludesPreexistingRollouts(t *testing.T) {
+	codexHome := t.TempDir()
+	t.Setenv("CODEX_HOME", codexHome)
+	cwd := filepath.Join(t.TempDir(), "repo")
+	if err := os.MkdirAll(cwd, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	startedAt := time.Now().Add(-2 * time.Second)
+	oldID := "019f-old-terminal-session"
+	newID := "019f-new-daemon-session"
+	writeCodexRollout(t, codexHome, newID, cwd, "same prompt", time.Now())
+	writeCodexRollout(t, codexHome, oldID, cwd, "same prompt", time.Now().Add(time.Second))
+
+	_, gotID, err := ResolveJSONLPathForPTY(AgentCodex, "pocketctl-temp-id", cwd, PTYResolveHints{
+		StartedAt:         startedAt,
+		InitialPrompt:     "same prompt",
+		ExcludeSessionIDs: map[string]struct{}{oldID: {}},
+	})
+	if err != nil {
+		t.Fatalf("ResolveJSONLPathForPTY returned error: %v", err)
+	}
+	if gotID != newID {
+		t.Fatalf("real session id = %q, want %q", gotID, newID)
+	}
+}
+
+func TestResolveJSONLPathForPTY_CodexRequiresInitialPromptMatch(t *testing.T) {
+	codexHome := t.TempDir()
+	t.Setenv("CODEX_HOME", codexHome)
+	cwd := filepath.Join(t.TempDir(), "repo")
+	if err := os.MkdirAll(cwd, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	startedAt := time.Now().Add(-2 * time.Second)
+	targetID := "019f-target-session"
+	distractorID := "019f-distractor-session"
+	writeCodexRollout(t, codexHome, targetID, cwd, "fix target bug", time.Now())
+	writeCodexRollout(t, codexHome, distractorID, cwd, "unrelated terminal message", time.Now().Add(time.Second))
+
+	_, gotID, err := ResolveJSONLPathForPTY(AgentCodex, "pocketctl-temp-id", cwd, PTYResolveHints{
+		StartedAt:     startedAt,
+		InitialPrompt: "fix target bug",
+	})
+	if err != nil {
+		t.Fatalf("ResolveJSONLPathForPTY returned error: %v", err)
+	}
+	if gotID != targetID {
+		t.Fatalf("real session id = %q, want %q", gotID, targetID)
+	}
+}
+
 func TestCodex_SetPendingCmdNoOp(t *testing.T) {
 	// Should not panic / change behavior.
 	p := NewCodexJSONLParser()
@@ -211,3 +294,20 @@ func indexOf(s, sub string) int {
 
 // Ensure unused imports don't cause failures if helpers evolve.
 var _ = json.Unmarshal
+
+func writeCodexRollout(t *testing.T, codexHome, sessionID, cwd, userMessage string, mtime time.Time) string {
+	t.Helper()
+	path := filepath.Join(codexHome, "sessions", "2026", "07", "09", "rollout-2026-07-09T13-34-47-"+sessionID+".jsonl")
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	lines := `{"type":"session_meta","payload":{"id":"` + sessionID + `","cwd":"` + cwd + `","cli_version":"0.143.0"}}` + "\n" +
+		`{"type":"event_msg","payload":{"type":"user_message","message":"` + userMessage + `"}}` + "\n"
+	if err := os.WriteFile(path, []byte(lines), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(path, mtime, mtime); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}

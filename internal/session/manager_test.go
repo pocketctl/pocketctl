@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/pocketctl/pocketctl/internal/adapter"
 	"github.com/pocketctl/pocketctl/internal/protocol"
 )
 
@@ -352,6 +353,47 @@ func TestUpdateLastActivity_NonexistentSession(t *testing.T) {
 	sm.UpdateLastActivity("nonexistent")
 }
 
+func TestRemapSessionIDUpdatesSessionMapAndCwdRegistry(t *testing.T) {
+	outputCh := make(chan protocol.DaemonEvent, 16)
+	sm := NewSessionManager(outputCh)
+	cwd := t.TempDir()
+
+	sm.mu.Lock()
+	sm.sessions["old-id"] = &ProcessState{
+		SessionID: "old-id",
+		Cwd:       cwd,
+		Agent:     adapter.AgentCodex,
+	}
+	sm.mu.Unlock()
+	sm.registerCwd("old-id", cwd)
+
+	gotCwd, gotAgent, changed := sm.remapSessionID("old-id", "new-id")
+	if !changed {
+		t.Fatal("expected session id to change")
+	}
+	if gotCwd != cwd || gotAgent != adapter.AgentCodex {
+		t.Fatalf("metadata = (%q, %q), want (%q, %q)", gotCwd, gotAgent, cwd, adapter.AgentCodex)
+	}
+
+	sm.mu.RLock()
+	_, oldExists := sm.sessions["old-id"]
+	ps, newExists := sm.sessions["new-id"]
+	registry := sm.cwdSessions[normalizeCwd(cwd)]
+	_, oldRegistered := registry["old-id"]
+	_, newRegistered := registry["new-id"]
+	sm.mu.RUnlock()
+
+	if oldExists || !newExists {
+		t.Fatalf("session map migration failed: old=%v new=%v", oldExists, newExists)
+	}
+	if ps.SessionID != "new-id" {
+		t.Fatalf("process state session id = %q, want new-id", ps.SessionID)
+	}
+	if oldRegistered || !newRegistered {
+		t.Fatalf("cwd registry migration failed: old=%v new=%v", oldRegistered, newRegistered)
+	}
+}
+
 func TestListSessions_SortedByLastActivity(t *testing.T) {
 	outputCh := make(chan protocol.DaemonEvent, 16)
 	sm := NewSessionManager(outputCh)
@@ -373,5 +415,25 @@ func TestListSessions_SortedByLastActivity(t *testing.T) {
 	}
 	if sessions[1].SessionID != "old-sid" {
 		t.Errorf("expected old-sid second, got %s", sessions[1].SessionID)
+	}
+}
+
+func TestTerminalProbeResponsesForCodexStartupQueries(t *testing.T) {
+	chunk := []byte("\x1b[6n\x1b]10;?\x1b\\\x1b]11;?\x1b\\\x1b[?u\x1b[c")
+	got := terminalProbeResponses(chunk)
+	want := [][]byte{
+		[]byte("\x1b[1;1R"),
+		[]byte("\x1b[?1;2c"),
+		[]byte("\x1b[?0u"),
+		[]byte("\x1b]10;rgb:ffff/ffff/ffff\x1b\\"),
+		[]byte("\x1b]11;rgb:0000/0000/0000\x1b\\"),
+	}
+	if len(got) != len(want) {
+		t.Fatalf("responses = %d, want %d: %q", len(got), len(want), got)
+	}
+	for i := range want {
+		if string(got[i]) != string(want[i]) {
+			t.Fatalf("response[%d] = %q, want %q", i, got[i], want[i])
+		}
 	}
 }

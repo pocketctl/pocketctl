@@ -3,8 +3,10 @@
 // writes to its JSONL history.
 //
 // These menus (e.g. Claude Code's permission prompt "Do you want to proceed?
-//   ❯ 1. Yes
-//     2. No", or a host PreToolUse hook's confirmation prompt) are pure TUI
+//
+//	❯ 1. Yes
+//	  2. No", or a host PreToolUse hook's confirmation prompt) are pure TUI
+//
 // output: they exist only as bytes on the PTY while the agent blocks waiting
 // for a keystroke on stdin. Because the daemon's structured output comes from
 // the JSONL tailer (not the PTY), such prompts would otherwise be invisible to
@@ -12,8 +14,8 @@
 //
 // The scanner is deliberately conservative ("better to miss a prompt than to
 // raise a false card"). It only fires when it sees BOTH:
-//  1. a confirmation/question phrase ("Do you want to proceed?", "requires
-//     confirmation", "确认", "是否", …), AND
+//  1. a confirmation/question phrase ("Do you want to proceed?", "Do you
+//     trust the contents of this directory?", "确认", "是否", …), AND
 //  2. at least two numbered options ("1. Yes", "2. No", …) within a few lines
 //     after the phrase.
 //
@@ -26,9 +28,11 @@ package ptyscan
 import (
 	"encoding/json"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/google/uuid"
 	"github.com/pocketctl/pocketctl/internal/protocol"
@@ -54,12 +58,15 @@ const minOptions = 2
 // prompt with identical text is still surfaced if the first was resolved.
 const promptTimeout = 2 * time.Minute
 
+const snapshotMaxChars = 1200
+
 // questionPhrases matches the leading question/confirmation phrase. Compiled
 // once. Case-insensitive. Phrases are chosen for high specificity against TUI
 // prompts and low false-positive risk against ordinary agent prose.
 var questionPhrases = regexp.MustCompile(
 	`(?i)` +
 		`do you want to (?:proceed|continue)\??` +
+		`|do you trust the contents of this directory\??` +
 		`|proceed\??` +
 		`|requires confirmation` +
 		`|requires approval` +
@@ -75,23 +82,29 @@ var questionPhrases = regexp.MustCompile(
 )
 
 // optionLine matches one numbered option row, tolerating the Ink TUI's
-// selection cursor "❯" and trailing ANSI. Captures: index, label.
+// selection cursor ("❯" or Codex's "›") and trailing ANSI. Captures: index, label.
 //
 //	❯ 1. Yes          → ("1", "Yes")
+//	› 1. Yes          → ("1", "Yes")
 //	  2) No           → ("2", "No")
 //	3. Apply patch    → ("3", "Apply patch")
-var optionLine = regexp.MustCompile(`(?:❯|\s)*\s*(\d+)[.)]\s+(\S[^\n\r\x1b]*)`)
+var optionLine = regexp.MustCompile(`(?:❯|›|\s)*\s*(\d+)[.)]\s+(\S[^\n\r\x1b]*)`)
 
 // ansiEscape strips CSI/OSC sequences and a few cursor-control bytes the Ink
 // TUI emits while redrawing (colors, erase-line "\x1b[2K", hide/show cursor).
 // We strip these before matching so redraws collapse to plain text.
-var ansiEscape = regexp.MustCompile("\x1b\\[[0-9;?]*[A-Za-z]|\x1b\\][^\x07\x1b]*(?:\x07|\x1b\\\\)|\x1b[=>]|\r")
+var ansiEscape = regexp.MustCompile("\x1b\\[[0-9;?=>]*[A-Za-z]|\x1b\\][^\x07\x1b]*(?:\x07|\x1b\\\\)|\x1b[=>]|\r")
 
 // stripANSI returns s with ANSI escape / cursor sequences removed and each line
 // trimmed (leading/trailing whitespace dropped). Line structure is preserved so
 // the caller can reason about option rows; empty lines are kept as separators
 // and filtered later by splitNonEmpty.
 func stripANSI(s string) string {
+	if strings.Contains(s, "\x1b[") {
+		if rendered := renderTerminalScreen(s); rendered != "" {
+			return rendered
+		}
+	}
 	s = ansiEscape.ReplaceAllString(s, "")
 	var b strings.Builder
 	b.Grow(len(s))
@@ -102,6 +115,180 @@ func stripANSI(s string) string {
 		b.WriteString(strings.TrimSpace(ln))
 	}
 	return b.String()
+}
+
+// TextSnapshot converts recent PTY bytes into a compact, human-readable text
+// snippet for diagnostics. It uses the same terminal-screen reconstruction as
+// prompt detection so cursor-drawn TUIs produce useful error details.
+func TextSnapshot(data []byte) string {
+	clean := stripANSI(string(data))
+	lines := splitNonEmpty(clean)
+	if len(lines) > 12 {
+		lines = lines[len(lines)-12:]
+	}
+	out := strings.TrimSpace(strings.Join(lines, "\n"))
+	if len(out) > snapshotMaxChars {
+		out = out[len(out)-snapshotMaxChars:]
+	}
+	return out
+}
+
+// renderTerminalScreen reconstructs text from TUIs that draw by moving the
+// cursor around the terminal instead of writing ordinary newline-delimited
+// output. Codex's trust prompt is rendered this way, so deleting ANSI cursor
+// moves collapses distinct option rows into one line and hides the menu.
+func renderTerminalScreen(s string) string {
+	const maxRows = 80
+	const maxCols = 240
+
+	screen := make([][]rune, maxRows)
+	row, col := 0, 0
+	wrote := false
+
+	put := func(r rune) {
+		if row < 0 || row >= maxRows || col < 0 || col >= maxCols {
+			return
+		}
+		if screen[row] == nil {
+			screen[row] = make([]rune, maxCols)
+		}
+		screen[row][col] = r
+		col++
+		wrote = true
+	}
+
+	for i := 0; i < len(s); {
+		if s[i] == '\x1b' {
+			next, handled, nextRow, nextCol := consumeANSIEscape(s, i, row, col)
+			if handled {
+				row, col = nextRow, nextCol
+				i = next
+				continue
+			}
+		}
+		switch s[i] {
+		case '\r':
+			col = 0
+			i++
+			continue
+		case '\n':
+			row++
+			col = 0
+			i++
+			continue
+		}
+		r, size := utf8.DecodeRuneInString(s[i:])
+		if r == utf8.RuneError && size == 1 {
+			i++
+			continue
+		}
+		if r >= ' ' {
+			put(r)
+		}
+		i += size
+	}
+
+	if !wrote {
+		return ""
+	}
+	var b strings.Builder
+	for _, line := range screen {
+		if line == nil {
+			continue
+		}
+		end := len(line)
+		for end > 0 && line[end-1] == 0 {
+			end--
+		}
+		if end == 0 {
+			continue
+		}
+		if b.Len() > 0 {
+			b.WriteByte('\n')
+		}
+		for _, r := range line[:end] {
+			if r == 0 {
+				b.WriteByte(' ')
+			} else {
+				b.WriteRune(r)
+			}
+		}
+	}
+	return strings.TrimSpace(b.String())
+}
+
+func consumeANSIEscape(s string, start, row, col int) (next int, handled bool, nextRow int, nextCol int) {
+	nextRow, nextCol = row, col
+	if start+1 >= len(s) {
+		return start + 1, false, row, col
+	}
+	switch s[start+1] {
+	case '[':
+		j := start + 2
+		for j < len(s) && (s[j] < '@' || s[j] > '~') {
+			j++
+		}
+		if j >= len(s) {
+			return len(s), true, nextRow, nextCol
+		}
+		params := s[start+2 : j]
+		final := s[j]
+		switch final {
+		case 'H', 'f':
+			parts := strings.Split(params, ";")
+			if len(parts) >= 2 {
+				if r, err := strconv.Atoi(strings.TrimLeft(parts[0], "?=>")); err == nil && r > 0 {
+					nextRow = r - 1
+				}
+				if c, err := strconv.Atoi(strings.TrimLeft(parts[1], "?=>")); err == nil && c > 0 {
+					nextCol = c - 1
+				}
+			}
+		case 'A':
+			nextRow -= csiCount(params)
+			if nextRow < 0 {
+				nextRow = 0
+			}
+		case 'B':
+			nextRow += csiCount(params)
+		case 'C':
+			nextCol += csiCount(params)
+		case 'D':
+			nextCol -= csiCount(params)
+			if nextCol < 0 {
+				nextCol = 0
+			}
+		}
+		return j + 1, true, nextRow, nextCol
+	case ']':
+		j := start + 2
+		for j < len(s) {
+			if s[j] == '\a' {
+				return j + 1, true, nextRow, nextCol
+			}
+			if s[j] == '\x1b' && j+1 < len(s) && s[j+1] == '\\' {
+				return j + 2, true, nextRow, nextCol
+			}
+			j++
+		}
+		return len(s), true, nextRow, nextCol
+	case '>', '=':
+		return start + 2, true, nextRow, nextCol
+	default:
+		return start + 1, false, row, col
+	}
+}
+
+func csiCount(params string) int {
+	params = strings.TrimLeft(params, "?=>")
+	if params == "" {
+		return 1
+	}
+	n, err := strconv.Atoi(params)
+	if err != nil || n < 1 {
+		return 1
+	}
+	return n
 }
 
 // Option is one selectable entry parsed from the menu.
@@ -135,6 +322,18 @@ type Scanner struct {
 // NewScanner creates a scanner bound to a session id (stamped on emitted events).
 func NewScanner(sessionID string) *Scanner {
 	return &Scanner{sessionID: sessionID, seen: make(map[string]time.Time)}
+}
+
+// ActivePrompt returns a copy of the currently pending prompt, if any.
+func (s *Scanner) ActivePrompt() *PendingPrompt {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.active == nil {
+		return nil
+	}
+	cp := *s.active
+	cp.Options = append([]Option(nil), s.active.Options...)
+	return &cp
 }
 
 // Feed appends PTY bytes and returns any newly-detected interactive_prompt

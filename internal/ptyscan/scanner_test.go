@@ -20,6 +20,29 @@ const rawMenu = "\x1b[?25l\x1b[2K\r" +
 	"  2. No\n" +
 	"\x1b[?25h"
 
+// codexTrustMenu mimics Codex 0.143's first-run/untrusted-directory prompt.
+// The daemon previously drained this TUI output without surfacing it, so iOS/web
+// waited for a rollout JSONL that could never appear until the user chose here.
+const codexTrustMenu = "\x1b[>4;0m\x1b[?2026h\x1b[1;1H>\x1b[1;3H\x1b[1mYou are in \x1b[22m/Users/muwenbin\n" +
+	"Do you trust the contents of this directory? Working with untrusted contents\n" +
+	"comes with higher risk of prompt injection. Trusting the directory allows\n" +
+	"project-local config, hooks, and exec policies to load.\n\n" +
+	"\x1b[;m› 1. Yes, continue\n" +
+	"  2. No, quit\n\n" +
+	"\x1b[2mPress enter to continue\x1b[m"
+
+const codexTrustMenuCursorDrawn = "\x1b[?2004h\x1b[>4;0m\x1b[>7u\x1b[?1004h\x1b[6n\x1b]10;?\x1b\\\x1b]11;?\x1b\\\x1b[?u\x1b[c\x1b[?2026h" +
+	"\x1b[1;1H\x1b[J\x1b[1;29H\x1b[0m\x1b[m\x1b[K\x1b[2;2H\x1b[0m\x1b[m\x1b[K\x1b[3;79H\x1b[0m\x1b[m\x1b[K" +
+	"\x1b[4;76H\x1b[0m\x1b[m\x1b[K\x1b[5;58H\x1b[0m\x1b[m\x1b[K\x1b[6;2H\x1b[0m\x1b[m\x1b[K" +
+	"\x1b[7;19H\x1b[0m\x1b[m\x1b[K\x1b[8;14H\x1b[0m\x1b[m\x1b[K\x1b[9;2H\x1b[0m\x1b[m\x1b[K" +
+	"\x1b[10;26H\x1b[0m\x1b[m\x1b[K\x1b[1;1H>\x1b[1;3H\x1b[1mYou are in \x1b[22m/Users/muwenbin" +
+	"\x1b[3;3HDo\x1b[3;6Hyou\x1b[3;10Htrust\x1b[3;16Hthe\x1b[3;20Hcontents\x1b[3;29Hof\x1b[3;32Hthis\x1b[3;37Hdirectory?" +
+	"\x1b[3;48HWorking\x1b[3;56Hwith\x1b[3;61Huntrusted\x1b[3;71Hcontents" +
+	"\x1b[4;3Hcomes\x1b[4;9Hwith\x1b[4;14Hhigher\x1b[4;21Hrisk\x1b[4;26Hof\x1b[4;29Hprompt\x1b[4;36Hinjection." +
+	"\x1b[4;47HTrusting\x1b[4;56Hthe\x1b[4;60Hdirectory\x1b[4;70Hallows" +
+	"\x1b[5;3Hproject-local\x1b[5;17Hconfig,\x1b[5;25Hhooks,\x1b[5;32Hand\x1b[5;36Hexec\x1b[5;41Hpolicies\x1b[5;50Hto\x1b[5;53Hload." +
+	"\x1b[7;1H\x1b[;m› 1. Yes, continue\x1b[8;3H\x1b[;m2.\x1b[8;6HNo,\x1b[8;10Hquit\x1b[10;3H\x1b[2mPress enter to continue\x1b[m\x1b[m\x1b[0m\x1b[?25l\x1b[?2026l"
+
 func TestFeedDetectsNumberedMenu(t *testing.T) {
 	s := NewScanner("sess-1")
 	evs := s.Feed([]byte(rawMenu))
@@ -60,6 +83,72 @@ func TestFeedDetectsNumberedMenu(t *testing.T) {
 
 	if got := s.ActiveRequestID(); got != ev.RequestID {
 		t.Errorf("ActiveRequestID = %q, want %q", got, ev.RequestID)
+	}
+	active := s.ActivePrompt()
+	if active == nil {
+		t.Fatal("ActivePrompt returned nil")
+	}
+	if active.RequestID != ev.RequestID {
+		t.Errorf("ActivePrompt request = %q, want %q", active.RequestID, ev.RequestID)
+	}
+	active.Options[0].Label = "mutated"
+	if again := s.ActivePrompt(); again.Options[0].Label != "Yes" {
+		t.Errorf("ActivePrompt should return a copy, got option label %q", again.Options[0].Label)
+	}
+}
+
+func TestFeedDetectsCodexTrustDirectoryMenu(t *testing.T) {
+	s := NewScanner("codex-sess")
+	evs := s.Feed([]byte(codexTrustMenu))
+	if len(evs) != 1 {
+		t.Fatalf("expected 1 event, got %d", len(evs))
+	}
+	ev := evs[0]
+	if ev.Type != "interactive_prompt" {
+		t.Fatalf("type = %q, want interactive_prompt", ev.Type)
+	}
+	if ev.SessionID != "codex-sess" {
+		t.Errorf("session_id = %q, want codex-sess", ev.SessionID)
+	}
+
+	var p struct {
+		Prompt  string   `json:"prompt"`
+		Options []Option `json:"options"`
+	}
+	decodeInput(t, ev, &p)
+	if p.Prompt != "Do you trust the contents of this directory?" {
+		t.Errorf("prompt = %q", p.Prompt)
+	}
+	if len(p.Options) != 2 {
+		t.Fatalf("options = %d, want 2: %+v", len(p.Options), p.Options)
+	}
+	if p.Options[0].Index != "1" || p.Options[0].Label != "Yes, continue" {
+		t.Errorf("opt0 = {%s,%s}, want {1,Yes, continue}", p.Options[0].Index, p.Options[0].Label)
+	}
+	if p.Options[1].Index != "2" || p.Options[1].Label != "No, quit" {
+		t.Errorf("opt1 = {%s,%s}, want {2,No, quit}", p.Options[1].Index, p.Options[1].Label)
+	}
+}
+
+func TestFeedDetectsCursorDrawnCodexTrustDirectoryMenu(t *testing.T) {
+	s := NewScanner("codex-sess")
+	evs := s.Feed([]byte(codexTrustMenuCursorDrawn))
+	if len(evs) != 1 {
+		t.Fatalf("expected 1 event, got %d", len(evs))
+	}
+	var p struct {
+		Prompt  string   `json:"prompt"`
+		Options []Option `json:"options"`
+	}
+	decodeInput(t, evs[0], &p)
+	if p.Prompt != "Do you trust the contents of this directory?" {
+		t.Errorf("prompt = %q", p.Prompt)
+	}
+	if len(p.Options) != 2 {
+		t.Fatalf("options = %d, want 2: %+v", len(p.Options), p.Options)
+	}
+	if p.Options[0].Label != "Yes, continue" || p.Options[1].Label != "No, quit" {
+		t.Fatalf("unexpected options: %+v", p.Options)
 	}
 }
 

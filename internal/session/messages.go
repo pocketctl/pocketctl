@@ -3,6 +3,7 @@ package session
 import (
 	"bufio"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"os/exec"
@@ -10,6 +11,7 @@ import (
 
 	"github.com/pocketctl/pocketctl/internal/adapter"
 	"github.com/pocketctl/pocketctl/internal/protocol"
+	"github.com/pocketctl/pocketctl/internal/ptyscan"
 )
 
 // ResolveInteractivePrompt writes the user's menu choice back to the PTY so the
@@ -60,6 +62,30 @@ func (sm *SessionManager) ResolveInteractivePrompt(sessionID, requestID, choice 
 	return nil
 }
 
+func (sm *SessionManager) PendingInteractivePrompt(sessionID string) (protocol.DaemonEvent, bool) {
+	sm.mu.RLock()
+	ps, ok := sm.sessions[sessionID]
+	var prompt *ptyscan.PendingPrompt
+	if ok && ps.PTYScanner != nil {
+		prompt = ps.PTYScanner.ActivePrompt()
+	}
+	sm.mu.RUnlock()
+	if !ok || prompt == nil {
+		return protocol.DaemonEvent{}, false
+	}
+
+	input, _ := json.Marshal(map[string]any{
+		"prompt":  prompt.PromptText,
+		"options": prompt.Options,
+	})
+	return protocol.DaemonEvent{
+		Type:      "interactive_prompt",
+		SessionID: sessionID,
+		RequestID: prompt.RequestID,
+		Input:     input,
+	}, true
+}
+
 func (sm *SessionManager) readOutput(ctx context.Context, cmd *exec.Cmd, stdout io.Reader, adp adapter.AgentAdapter, ps *ProcessState) {
 	scanner := bufio.NewScanner(stdout)
 	scanner.Buffer(make([]byte, 1024*1024), 1024*1024)
@@ -75,23 +101,17 @@ func (sm *SessionManager) readOutput(ctx context.Context, cmd *exec.Cmd, stdout 
 			continue
 		}
 		if sid := adp.SessionID(); sid != "" {
-			sm.mu.Lock()
-			if ps.SessionID != sid {
-				oldID := ps.SessionID
-				delete(sm.sessions, ps.SessionID)
-				ps.SessionID = sid
-				sm.sessions[sid] = ps
-				cwd := ps.Cwd
-				sm.mu.Unlock()
+			sm.mu.RLock()
+			oldID := ps.SessionID
+			sm.mu.RUnlock()
+			if cwd, agent, changed := sm.remapSessionID(oldID, sid); changed {
 				sm.outputCh <- protocol.DaemonEvent{
 					Type: "session_id_changed", SessionID: sid, OldSessionID: oldID,
 				}
 				// Trigger title extraction from JSONL for daemon-created sessions
 				if sm.OnSessionIDResolved != nil {
-					sm.OnSessionIDResolved(sid, cwd, ps.Agent)
+					sm.OnSessionIDResolved(sid, cwd, agent)
 				}
-			} else {
-				sm.mu.Unlock()
 			}
 		}
 		// Cache slash commands reported by the agent's init event (emitted once,
@@ -181,7 +201,7 @@ func (sm *SessionManager) SendMessage(ctx context.Context, sessionID string, con
 	sm.mu.RLock()
 	cwd := ps.Cwd
 	isRunning := ps.Status == protocol.StatusRunning || ps.Status == "busy"
-	isExited := ps.Status == protocol.StatusExited
+	isExited := ps.Status == protocol.StatusExited || ps.Status == protocol.StatusCompleted
 	source := ps.Source
 	pid := ps.Pid
 	sm.mu.RUnlock()

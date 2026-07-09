@@ -1399,6 +1399,7 @@ function processEvent(evt: any, target: any[] = messages.value, subagentOverride
     // selection is sent back via interactive_response.
     const requestId = evt.request_id || evt.payload?.request_id
     if (!requestId) return
+    if (target.some((m: any) => m.type === 'interactive_prompt' && m.request_id === requestId)) return
     const rawInput = evt.input || evt.payload?.input
     let promptText = ''
     let options: Array<{ index: string; label: string }> = []
