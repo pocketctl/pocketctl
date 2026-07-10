@@ -34,13 +34,14 @@ type ClientMessage struct {
 
 // Daemon → Client events
 type DaemonEvent struct {
-	Type             string          `json:"type"`
+	Type string `json:"type"`
 	// Seq is a monotonically increasing per-connection sequence number stamped
 	// by the ws.Client just before the event is sent to the relay. It enables
 	// at-least-once delivery: the relay dedups by (daemon_id, seq) and acks the
 	// highest contiguous seq it has persisted so the daemon can trim its
 	// outbound replay buffer. Zero/omitted means a legacy event (no dedup).
 	Seq              int64           `json:"seq,omitempty"`
+	EventID          string          `json:"event_id,omitempty"` // stable JSONL record identity across daemon restarts
 	SessionID        string          `json:"session_id"`
 	OldSessionID     string          `json:"old_session_id,omitempty"`
 	Text             string          `json:"text,omitempty"`
@@ -113,28 +114,28 @@ type CommandItem struct {
 
 // Control messages
 type RegisterMessage struct {
-	Type             string            `json:"type"`
-	DaemonID         string            `json:"daemon_id"`
-	Hostname         string            `json:"hostname"`
-	Agents           []string          `json:"agents"`
-	AgentVersions    map[string]string `json:"agent_versions,omitempty"`
-	AgentLatests     map[string]string `json:"agent_latests,omitempty"`
-	AgentManageable  map[string]bool   `json:"agent_manageable,omitempty"`
-	OS               string            `json:"os"`
-	IP               string            `json:"ip"`
-	Arch             string            `json:"arch,omitempty"`
-	Version          string            `json:"version,omitempty"`
-	StartedAt        int64             `json:"started_at,omitempty"`
+	Type            string            `json:"type"`
+	DaemonID        string            `json:"daemon_id"`
+	Hostname        string            `json:"hostname"`
+	Agents          []string          `json:"agents"`
+	AgentVersions   map[string]string `json:"agent_versions,omitempty"`
+	AgentLatests    map[string]string `json:"agent_latests,omitempty"`
+	AgentManageable map[string]bool   `json:"agent_manageable,omitempty"`
+	OS              string            `json:"os"`
+	IP              string            `json:"ip"`
+	Arch            string            `json:"arch,omitempty"`
+	Version         string            `json:"version,omitempty"`
+	StartedAt       int64             `json:"started_at,omitempty"`
 	// AckedSeq is the highest event seq the daemon considers durably delivered
 	// (acked + trimmed). On a fresh daemonSeq entry the relay seeds its persisted
 	// water-mark from this, so a daemon that reconnects/restarts and replays only
 	// its *unacked* tail (e.g. seq 51+) doesn't leave a phantom 1..50 gap that
 	// would stall the contiguous ack mark. 0 for a fresh daemon.
-	AckedSeq         int64             `json:"acked_seq,omitempty"`
+	AckedSeq int64 `json:"acked_seq,omitempty"`
 	// Always emitted (no omitempty): an explicit empty list lets the relay
 	// distinguish "daemon has zero live sessions" (reconcile/close all its
 	// lingering running/busy rows) from a legacy daemon that never reports it.
-	ActiveSessionIDs []string          `json:"active_session_ids"`
+	ActiveSessionIDs []string `json:"active_session_ids"`
 }
 
 type RegisterAckMessage struct {

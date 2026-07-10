@@ -15,29 +15,34 @@ import (
 
 // DiscoveredSession represents a Claude Code session found in ~/.claude/sessions/
 type DiscoveredSession struct {
-	Pid       int    `json:"pid"`
-	SessionID string `json:"sessionId"`
-	Cwd       string `json:"cwd"`
-	Status    string `json:"status"`
-	StartedAt int64  `json:"startedAt"`
-	Version   string `json:"version"`
+	Pid             int    `json:"pid"`
+	SessionID       string `json:"sessionId"`
+	Cwd             string `json:"cwd"`
+	Status          string `json:"status"`
+	StartedAt       int64  `json:"startedAt"`
+	Version         string `json:"version"`
+	ParentSessionID string `json:"parentSessionId,omitempty"`
+	RootSessionID   string `json:"rootSessionId,omitempty"`
+	IsSubagent      bool   `json:"isSubagent,omitempty"`
+	AgentNickname   string `json:"agentNickname,omitempty"`
+	AgentPath       string `json:"agentPath,omitempty"`
 }
 
 // SessionEvent is emitted when a session is discovered or changes
 type SessionEvent struct {
-	Action   string             // "discovered", "changed", "removed"
+	Action   string // "discovered", "changed", "removed"
 	Session  DiscoveredSession
 	Filepath string
 }
 
 // SessionWatcher monitors ~/.claude/sessions/ for new/changed/removed session files
 type SessionWatcher struct {
-	sessionsDir    string
-	watcher        *fsnotify.Watcher
-	eventsCh       chan SessionEvent
-	knownSessions  map[string]DiscoveredSession // sessionId → session
-	fileToSession  map[string]string            // filepath → sessionId
-	dropped        uint64                       // events dropped because the consumer wasn't draining
+	sessionsDir   string
+	watcher       *fsnotify.Watcher
+	eventsCh      chan SessionEvent
+	knownSessions map[string]DiscoveredSession // sessionId → session
+	fileToSession map[string]string            // filepath → sessionId
+	dropped       uint64                       // events dropped because the consumer wasn't draining
 }
 
 // NewSessionWatcher creates a watcher for Claude Code sessions directory

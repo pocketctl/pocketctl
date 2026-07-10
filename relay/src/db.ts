@@ -349,7 +349,11 @@ export async function updateHeartbeat(pool: pg.Pool, daemonId: string): Promise<
 
 export async function insertEvent(pool: pg.Pool, sessionId: string, eventType: string, payload: any): Promise<number> {
   const payloadStr = JSON.stringify(payload);
-  const hash = createHash('md5').update(`${sessionId}:${eventType}:${payloadStr}`).digest('hex').slice(0, 16);
+  const stableEventId = typeof payload?.event_id === 'string' ? payload.event_id : '';
+  const hashInput = stableEventId
+    ? `${sessionId}:${eventType}:event:${stableEventId}`
+    : `${sessionId}:${eventType}:${payloadStr}`;
+  const hash = createHash('md5').update(hashInput).digest('hex').slice(0, 16);
   const result = await pool.query(
     `INSERT INTO events (session_id, event_type, payload, event_hash)
      VALUES ($1, $2, $3, $4)
@@ -462,7 +466,8 @@ export async function listSessionsWithChildren(pool: pg.Pool, whereUser?: number
             d.status AS daemon_status, d.hostname AS hostname, d.alias AS daemon_alias
      FROM sessions s
      LEFT JOIN daemons d ON s.daemon_id = d.daemon_id
-     WHERE s.session_id NOT LIKE 'pending-%' ${userClause}
+     WHERE s.session_id NOT LIKE 'pending-%'
+       AND COALESCE(s.is_subagent, false) = false ${userClause}
      ORDER BY s.pinned DESC, s.pinned_at DESC NULLS LAST, COALESCE(s.last_activity_at, s.updated_at) DESC`,
     baseParams
   );
@@ -495,6 +500,7 @@ function groupSubagentsByParent(rows: any[]): { byParent: Map<string, any[]>; su
 
 function serializeSessionRow(row: any, byParent: Map<string, any[]>, sumChildren?: Map<string, number>): any {
   const childSum = sumChildren?.get(row.session_id) ?? 0;
+  const children = byParent.get(row.session_id) || [];
   return {
     ...row,
     // totalTokens = 父会话自身用量 + Σ所有子智能体用量（让 UI 标注的「含子智能体」名副其实；
@@ -509,7 +515,8 @@ function serializeSessionRow(row: any, byParent: Map<string, any[]>, sumChildren
     daemon_online: row.daemon_status === 'online',
     daemon_alias: row.daemon_alias ?? null,
     daemon_status: undefined,
-    children: byParent.get(row.session_id) || [],
+    subagent_count: children.length,
+    children,
   };
 }
 
@@ -724,6 +731,69 @@ export async function upsertSubagent(pool: pg.Pool, parentSessionId: string, age
   );
 }
 
+export interface SubagentRelation {
+  parentSessionId: string;
+  agentId: string;
+  rootSessionId: string;
+  kind: string;
+  toolUseId?: string;
+  agentType?: string;
+  title?: string;
+}
+
+/** Reconcile one child relation and any legacy top-level session row.
+ * Token totals are rebuilt from rollout subagent_usage events; copying the
+ * legacy session snapshot here would double-count the first history replay. */
+export async function reconcileSubagent(pool: pg.Pool, relation: SubagentRelation): Promise<void> {
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    await client.query(
+      `INSERT INTO subagents (parent_session_id, agent_id, kind, tool_use_id, agent_type, title, created_at, updated_at)
+       VALUES ($1, $2, $3, $4, $5, $6, NOW(), NOW())
+       ON CONFLICT (parent_session_id, agent_id) DO UPDATE SET
+         kind = EXCLUDED.kind,
+         tool_use_id = COALESCE(EXCLUDED.tool_use_id, subagents.tool_use_id),
+         agent_type = COALESCE(EXCLUDED.agent_type, subagents.agent_type),
+         title = COALESCE(EXCLUDED.title, subagents.title),
+         updated_at = NOW()`,
+      [relation.parentSessionId, relation.agentId, relation.kind,
+        relation.toolUseId ?? null, relation.agentType ?? null, relation.title ?? null]
+    );
+    await client.query(
+      `UPDATE sessions
+       SET is_subagent = true, parent_session_id = $1, root_session_id = $2, updated_at = NOW()
+       WHERE session_id = $3`,
+      [relation.parentSessionId, relation.rootSessionId, relation.agentId]
+    );
+    if (relation.kind === 'codex_subagent') {
+      // Remove only pre-event_id Codex history written by older daemons. New
+      // stable events are protected even if they arrive while this transaction
+      // is running; Claude history is outside this migration.
+      await client.query(
+        `DELETE FROM events
+         WHERE session_id = $1
+           AND payload->>'agent_id' = $2
+           AND COALESCE(payload->>'event_id', '') = ''`,
+        [relation.parentSessionId, relation.agentId]
+      );
+    }
+    await client.query(
+      `UPDATE sessions SET subagent_count = (
+         SELECT COUNT(*)::int FROM subagents WHERE parent_session_id = $1
+       ), updated_at = NOW()
+       WHERE session_id = $1`,
+      [relation.parentSessionId]
+    );
+    await client.query('COMMIT');
+  } catch (error) {
+    await client.query('ROLLBACK');
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
 /** Accumulate token usage into a subagent row. Uses INSERT ON CONFLICT so it
  *  is idempotent and self-creates the row if subagent_usage arrives before
  *  subagent_discovered (out-of-order or discovery dropped on backpressure).
@@ -740,6 +810,61 @@ export async function addSubagentUsage(pool: pg.Pool, parentSessionId: string, a
        updated_at = NOW()`,
     [parentSessionId, agentId, inputTokens, outputTokens, cacheRead, cacheCreate]
   );
+}
+
+export interface SubagentUsageRecord {
+  daemonId: string;
+  seq?: number;
+  eventId: string;
+  parentSessionId: string;
+  agentId: string;
+  inputTokens: number;
+  outputTokens: number;
+  cacheRead: number;
+  cacheCreate: number;
+}
+
+/** Durably deduplicate and accumulate one child usage record in one transaction. */
+export async function recordSubagentUsage(pool: pg.Pool, usage: SubagentUsageRecord): Promise<boolean> {
+  const hashInput = usage.eventId
+    ? `${usage.parentSessionId}:${usage.agentId}:event:${usage.eventId}`
+    : `${usage.parentSessionId}:${usage.agentId}:${usage.inputTokens}:${usage.outputTokens}:${usage.cacheRead}:${usage.cacheCreate}`;
+  const usageHash = createHash('md5')
+    .update(hashInput)
+    .digest('hex').slice(0, 16);
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const seen = await client.query(
+      `INSERT INTO subagent_usage_seen (daemon_id, usage_hash, seq, agent_id)
+       VALUES ($1, $2, $3, $4)
+       ON CONFLICT DO NOTHING
+       RETURNING usage_hash`,
+      [usage.daemonId, usageHash, usage.seq ?? null, usage.agentId]
+    );
+    if ((seen.rowCount ?? 0) === 0) {
+      await client.query('COMMIT');
+      return false;
+    }
+    await client.query(
+      `INSERT INTO subagents (parent_session_id, agent_id, token_in, token_out, token_cache, token_cache_create, updated_at)
+       VALUES ($1, $2, $3, $4, $5, $6, NOW())
+       ON CONFLICT (parent_session_id, agent_id) DO UPDATE SET
+         token_in = subagents.token_in + $3,
+         token_out = subagents.token_out + $4,
+         token_cache = subagents.token_cache + $5,
+         token_cache_create = subagents.token_cache_create + $6,
+         updated_at = NOW()`,
+      [usage.parentSessionId, usage.agentId, usage.inputTokens, usage.outputTokens, usage.cacheRead, usage.cacheCreate]
+    );
+    await client.query('COMMIT');
+    return true;
+  } catch (error) {
+    await client.query('ROLLBACK');
+    throw error;
+  } finally {
+    client.release();
+  }
 }
 
 /** List subagents for one parent session (camelCased for clients). */

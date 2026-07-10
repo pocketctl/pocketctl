@@ -1327,6 +1327,38 @@ func reconnectDiscoveryEvent(s session.SessionInfo) protocol.DaemonEvent {
 	}
 }
 
+func codexSubagentDiscoveryEvent(s watcher.DiscoveredSession) protocol.DaemonEvent {
+	rootID := s.RootSessionID
+	if rootID == "" {
+		rootID = s.ParentSessionID
+	}
+	desc := strings.TrimSpace(s.AgentNickname)
+	if desc == "" && strings.TrimSpace(s.AgentPath) != "" {
+		desc = filepath.Base(strings.TrimRight(s.AgentPath, string(filepath.Separator)))
+		if desc == "." || desc == string(filepath.Separator) {
+			desc = ""
+		}
+	}
+	if desc == "" {
+		desc = s.SessionID
+		if len(desc) > 8 {
+			desc = desc[len(desc)-8:]
+		}
+	}
+	return protocol.DaemonEvent{
+		Type:            "subagent_discovered",
+		EventID:         "codex-subagent:" + s.SessionID + ":discovery",
+		SessionID:       rootID,
+		AgentID:         s.SessionID,
+		ParentSessionID: rootID,
+		RootSessionID:   rootID,
+		IsSubagent:      true,
+		Agent:           adapter.AgentCodex,
+		SubAgentType:    adapter.AgentCodex,
+		SubAgentDesc:    desc,
+	}
+}
+
 // ---------- daemon stop ----------
 
 func cmdDaemonStop() {
@@ -1643,6 +1675,27 @@ func handleWatcherEvents(ctx context.Context, events <-chan watcher.SessionEvent
 			return
 		case evt := <-events:
 			switch evt.Action {
+			case "subagent_discovered":
+				if agentType != adapter.AgentCodex {
+					logger.Warn("ignoring unsupported subagent watcher event", "agent", agentType, "session", evt.Session.SessionID)
+					break
+				}
+				outputCh <- codexSubagentDiscoveryEvent(evt.Session)
+				daemon.RunLoop(ctx, "tailer:codex-subagent:"+evt.Session.SessionID, logger, func() {
+					tailer, err := watcher.NewSubAgentTailerForAgent(
+						evt.Filepath,
+						evt.Session.SessionID,
+						evt.Session.RootSessionID,
+						adapter.AgentCodex,
+						adapter.AgentCodex,
+					)
+					if err != nil {
+						logger.Warn("codex subagent tailer start failed", "session", evt.Session.SessionID, "error", err)
+						return
+					}
+					tailer.Run(ctx, outputCh)
+				})
+
 			case "discovered":
 				logger.Info("session discovered", "session", evt.Session.SessionID, "pid", evt.Session.Pid)
 				registered := sm.RegisterTerminalSession(evt.Session.SessionID, evt.Session.Cwd, evt.Session.Pid, "", evt.Session.Status, agentType)

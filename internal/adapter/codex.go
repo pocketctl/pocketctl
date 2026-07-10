@@ -35,14 +35,26 @@ func CodexSessionsDir() string {
 	return filepath.Join(h, "sessions")
 }
 
-// CodexRolloutMeta reads the head of a codex rollout file and returns the
-// session id and cwd from its session_meta record. ok is false if no usable
-// session_meta is found in the leading lines (e.g. the file was just created
-// and the record hasn't been flushed yet).
-func CodexRolloutMeta(path string) (sessionID, cwd string, ok bool) {
+// CodexRolloutMetadata is the relationship metadata stored in a rollout's
+// leading session_meta record. RootSessionID is the root conversation ID;
+// ParentThreadID is the immediate parent for nested subagents.
+type CodexRolloutMetadata struct {
+	ID             string
+	Cwd            string
+	ParentThreadID string
+	RootSessionID  string
+	ThreadSource   string
+	AgentNickname  string
+	AgentPath      string
+	IsSubagent     bool
+}
+
+// ReadCodexRolloutMetadata reads the head of a Codex rollout. ok is false if
+// no usable session_meta has been flushed yet.
+func ReadCodexRolloutMetadata(path string) (CodexRolloutMetadata, bool) {
 	f, err := os.Open(path)
 	if err != nil {
-		return "", "", false
+		return CodexRolloutMetadata{}, false
 	}
 	defer f.Close()
 	sc := bufio.NewScanner(f)
@@ -57,10 +69,34 @@ func CodexRolloutMeta(path string) (sessionID, cwd string, ok bool) {
 			continue
 		}
 		if p.ID != "" {
-			return p.ID, p.Cwd, true
+			relationID := p.ParentThreadID
+			if relationID == "" {
+				relationID = p.SessionID
+			}
+			rootSessionID := p.SessionID
+			if rootSessionID == "" {
+				rootSessionID = p.ParentThreadID
+			}
+			return CodexRolloutMetadata{
+				ID:             p.ID,
+				Cwd:            p.Cwd,
+				ParentThreadID: p.ParentThreadID,
+				RootSessionID:  rootSessionID,
+				ThreadSource:   p.ThreadSource,
+				AgentNickname:  p.AgentNickname,
+				AgentPath:      p.AgentPath,
+				IsSubagent:     p.ThreadSource == "subagent" && relationID != "" && relationID != p.ID,
+			}, true
 		}
 	}
-	return "", "", false
+	return CodexRolloutMetadata{}, false
+}
+
+// CodexRolloutMeta preserves the original storage API for callers that only
+// need the session id and cwd.
+func CodexRolloutMeta(path string) (sessionID, cwd string, ok bool) {
+	meta, ok := ReadCodexRolloutMetadata(path)
+	return meta.ID, meta.Cwd, ok
 }
 
 // Codex adapter — parses OpenAI Codex CLI output.
@@ -122,9 +158,14 @@ type codexPayload struct {
 		LastTokenUsage *codexTokenUsage `json:"last_token_usage,omitempty"`
 	} `json:"info,omitempty"` // token_count in Codex exec/rollout v0.143+
 	// session_meta
-	ID         string `json:"id,omitempty"`
-	Cwd        string `json:"cwd,omitempty"`
-	CLIVersion string `json:"cli_version,omitempty"`
+	ID             string `json:"id,omitempty"`
+	SessionID      string `json:"session_id,omitempty"`
+	ParentThreadID string `json:"parent_thread_id,omitempty"`
+	ThreadSource   string `json:"thread_source,omitempty"`
+	AgentNickname  string `json:"agent_nickname,omitempty"`
+	AgentPath      string `json:"agent_path,omitempty"`
+	Cwd            string `json:"cwd,omitempty"`
+	CLIVersion     string `json:"cli_version,omitempty"`
 }
 
 type codexTokenUsage struct {

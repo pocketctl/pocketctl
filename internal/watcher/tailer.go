@@ -3,6 +3,7 @@ package watcher
 import (
 	"bufio"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -73,13 +74,16 @@ func SubAgentJSONLPath(parentJSONLPath string, agentID string) string {
 // The file handle and scanner buffer are reused across calls to minimize
 // allocations. The parser is agent-specific (Claude vs Codex schema).
 type JSONLTailer struct {
-	mu       sync.Mutex
-	filePath string
-	offset   int64
-	file     *os.File
-	scanBuf  []byte // reusable 1MB scanner buffer
-	paused   atomic.Bool // D2: paused during sendToIdleTerminal to avoid double-forward
-	parser   adapter.JSONLParser // agent-specific stateful parser
+	mu             sync.Mutex
+	filePath       string
+	offset         int64
+	file           *os.File
+	scanBuf        []byte              // reusable 1MB scanner buffer
+	paused         atomic.Bool         // D2: paused during sendToIdleTerminal to avoid double-forward
+	parser         adapter.JSONLParser // agent-specific stateful parser
+	stableEventIDs bool
+	eventSourceID  string
+	lineIndex      int64
 }
 
 // Pause stops the tailer from forwarding new lines (used during sendToIdleTerminal
@@ -126,6 +130,13 @@ func NewJSONLTailer(filePath, agentType string) (*JSONLTailer, error) {
 // NewJSONLTailerFromStart creates a tailer that reads from the beginning.
 // agentType selects the JSONL schema parser ("claude-code" / "codex").
 func NewJSONLTailerFromStart(filePath, agentType string) (*JSONLTailer, error) {
+	return newJSONLTailerFromStart(filePath, agentType, false)
+}
+
+// newJSONLTailerFromStart optionally assigns stable record identities. The
+// option is intentionally private and used only for Codex child migration;
+// ordinary Codex/Claude and Claude child replay keep their legacy hashes.
+func newJSONLTailerFromStart(filePath, agentType string, stableEventIDs bool) (*JSONLTailer, error) {
 	if _, err := os.Stat(filePath); err != nil {
 		return nil, fmt.Errorf("stat jsonl file: %w", err)
 	}
@@ -134,11 +145,13 @@ func NewJSONLTailerFromStart(filePath, agentType string) (*JSONLTailer, error) {
 		return nil, fmt.Errorf("open jsonl file: %w", err)
 	}
 	return &JSONLTailer{
-		filePath: filePath,
-		offset:   0,
-		file:     f,
-		scanBuf:  make([]byte, 1024*1024),
-		parser:   adapter.NewJSONLParser(agentType),
+		filePath:       filePath,
+		offset:         0,
+		file:           f,
+		scanBuf:        make([]byte, 1024*1024),
+		parser:         adapter.NewJSONLParser(agentType),
+		stableEventIDs: stableEventIDs,
+		eventSourceID:  fmt.Sprintf("%x", sha256.Sum256([]byte(filePath)))[:16],
 	}, nil
 }
 
@@ -192,6 +205,7 @@ func (t *JSONLTailer) TailNewLines() ([]protocol.DaemonEvent, []string, error) {
 	// File was truncated (rotated) — reset to beginning
 	if info.Size() < t.offset {
 		t.offset = 0
+		t.lineIndex = 0
 	}
 
 	if _, err := t.file.Seek(t.offset, 0); err != nil {
@@ -210,9 +224,18 @@ func (t *JSONLTailer) TailNewLines() ([]protocol.DaemonEvent, []string, error) {
 
 		events, err := t.parser.Parse(line)
 		if err != nil {
+			t.lineIndex++
 			continue // Skip unparseable lines
 		}
+		if t.stableEventIDs {
+			for i := range events {
+				if events[i].EventID == "" {
+					events[i].EventID = fmt.Sprintf("jsonl:%s:%d:%d", t.eventSourceID, t.lineIndex, i)
+				}
+			}
+		}
 		allEvents = append(allEvents, events...)
+		t.lineIndex++
 	}
 
 	// Update offset to current file position
@@ -337,16 +360,26 @@ type SubAgentTailer struct {
 	agentID         string
 	parentSessionID string
 	agentType       string
+	dropChildStatus bool
 	titleSent       bool // first user_text triggers title generation once
 }
 
 // NewSubAgentTailer creates a tailer for a sub-agent JSONL file that reads from the start.
 func NewSubAgentTailer(filePath string, agentID string, parentSessionID string, agentType string) (*SubAgentTailer, error) {
-	tailer, err := NewJSONLTailerFromStart(filePath, adapter.AgentClaude) // sub-agents are a Claude feature
+	return NewSubAgentTailerForAgent(filePath, agentID, parentSessionID, agentType, adapter.AgentClaude)
+}
+
+// NewSubAgentTailerForAgent creates a relationship-aware child tailer using
+// the requested JSONL parser while preserving the shared subagent protocol.
+func NewSubAgentTailerForAgent(filePath string, agentID string, parentSessionID string, agentType string, parserAgent string) (*SubAgentTailer, error) {
+	tailer, err := newJSONLTailerFromStart(filePath, parserAgent, parserAgent == adapter.AgentCodex)
 	if err != nil {
 		return nil, fmt.Errorf("create sub-agent tailer: %w", err)
 	}
-	return &SubAgentTailer{tailer: tailer, agentID: agentID, parentSessionID: parentSessionID, agentType: agentType}, nil
+	return &SubAgentTailer{
+		tailer: tailer, agentID: agentID, parentSessionID: parentSessionID,
+		agentType: agentType, dropChildStatus: parserAgent == adapter.AgentCodex,
+	}, nil
 }
 
 // TailNewLines reads new lines and stamps each event with the sub-agent's AgentID.
@@ -355,10 +388,21 @@ func (t *SubAgentTailer) TailNewLines() ([]protocol.DaemonEvent, error) {
 	if err != nil {
 		return nil, err
 	}
+	stamped := events[:0]
 	for i := range events {
+		// Codex task_complete describes the child turn, not the root session.
+		// Forwarding it as session_status would incorrectly complete the parent.
+		if t.dropChildStatus && events[i].Type == "session_status" {
+			continue
+		}
+		events[i].SessionID = t.parentSessionID
+		events[i].ParentSessionID = t.parentSessionID
+		events[i].RootSessionID = t.parentSessionID
 		events[i].AgentID = t.agentID
+		events[i].IsSubagent = true
+		stamped = append(stamped, events[i])
 	}
-	return events, nil
+	return stamped, nil
 }
 
 // Run starts a periodic tail loop for a sub-agent, sending stamped events to outputCh.
@@ -385,11 +429,18 @@ func (t *SubAgentTailer) Run(ctx context.Context, outputCh chan<- protocol.Daemo
 				outputCh <- evt // original event (already stamped with AgentID)
 				// Sub-agent output with usage: emit extra subagent_usage for relay token accumulation.
 				if evt.Usage != nil && evt.AgentID != "" {
+					usageEventID := ""
+					if evt.EventID != "" {
+						usageEventID = evt.EventID + ":usage"
+					}
 					outputCh <- protocol.DaemonEvent{
 						Type:            "subagent_usage",
-						SessionID:       evt.SessionID, // parent sid (child jsonl sessionId field is the parent sid)
+						EventID:         usageEventID,
+						SessionID:       t.parentSessionID,
 						AgentID:         evt.AgentID,
-						ParentSessionID: evt.SessionID,
+						ParentSessionID: t.parentSessionID,
+						RootSessionID:   t.parentSessionID,
+						IsSubagent:      true,
 						Usage:           evt.Usage,
 					}
 				}
@@ -401,6 +452,8 @@ func (t *SubAgentTailer) Run(ctx context.Context, outputCh chan<- protocol.Daemo
 						SessionID:       t.parentSessionID,
 						AgentID:         t.agentID,
 						ParentSessionID: t.parentSessionID,
+						RootSessionID:   t.parentSessionID,
+						IsSubagent:      true,
 						SubAgentType:    t.agentType,
 						UserMessage:     evt.Text,
 					}

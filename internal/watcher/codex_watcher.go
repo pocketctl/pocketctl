@@ -53,8 +53,11 @@ func (cw *CodexSessionWatcher) Start(ctx context.Context) error {
 	if cw.sessionsDir == "" {
 		return fmt.Errorf("codex sessions dir not resolved")
 	}
-	cw.scan(time.Now())
-	go cw.loop(ctx)
+	go func() {
+		cw.scanHistoricalSubagents()
+		cw.scan(time.Now())
+		cw.loop(ctx)
+	}()
 	return nil
 }
 
@@ -89,7 +92,6 @@ func (cw *CodexSessionWatcher) scan(now time.Time) {
 			if cw.seen[path] {
 				continue
 			}
-			cw.seen[path] = true
 
 			info, err := e.Info()
 			if err != nil {
@@ -98,22 +100,68 @@ func (cw *CodexSessionWatcher) scan(now time.Time) {
 			if now.Sub(info.ModTime()) > codexFreshWindow {
 				continue // historical rollout — not an active terminal session
 			}
-			sid, cwd, ok := adapter.CodexRolloutMeta(path)
-			if !ok || sid == "" {
-				// Brand-new file whose session_meta hasn't been flushed yet —
-				// un-mark so the next scan retries.
-				delete(cw.seen, path)
-				continue
-			}
-			cw.eventsCh <- SessionEvent{
-				Action: "discovered",
-				Session: DiscoveredSession{
-					SessionID: sid,
-					Cwd:       cwd,
-					Status:    "busy",
-				},
-				Filepath: path,
-			}
+			cw.inspectRollout(path, true)
 		}
 	}
+}
+
+// scanHistoricalSubagents walks persisted Codex history once at daemon start.
+// Ordinary historical sessions remain invisible; only explicit subagent
+// relations are emitted so legacy top-level child rows can be reconciled.
+func (cw *CodexSessionWatcher) scanHistoricalSubagents() {
+	_ = filepath.Walk(cw.sessionsDir, func(path string, info os.FileInfo, err error) error {
+		if err != nil || info.IsDir() || cw.seen[path] {
+			return nil
+		}
+		name := info.Name()
+		if !strings.HasPrefix(name, "rollout-") || !strings.HasSuffix(name, ".jsonl") {
+			return nil
+		}
+		cw.inspectRollout(path, false)
+		return nil
+	})
+}
+
+// inspectRollout classifies one rollout. A path is marked seen only after an
+// event is emitted. This lets partial files retry and prevents historical main
+// sessions from suppressing a later fresh discovery.
+func (cw *CodexSessionWatcher) inspectRollout(path string, fresh bool) {
+	if cw.seen[path] {
+		return
+	}
+	meta, ok := adapter.ReadCodexRolloutMetadata(path)
+	if !ok || meta.ID == "" {
+		return
+	}
+	if meta.IsSubagent {
+		cw.eventsCh <- SessionEvent{
+			Action: "subagent_discovered",
+			Session: DiscoveredSession{
+				SessionID:       meta.ID,
+				Cwd:             meta.Cwd,
+				Status:          "busy",
+				ParentSessionID: meta.ParentThreadID,
+				RootSessionID:   meta.RootSessionID,
+				IsSubagent:      true,
+				AgentNickname:   meta.AgentNickname,
+				AgentPath:       meta.AgentPath,
+			},
+			Filepath: path,
+		}
+		cw.seen[path] = true
+		return
+	}
+	if !fresh {
+		return
+	}
+	cw.eventsCh <- SessionEvent{
+		Action: "discovered",
+		Session: DiscoveredSession{
+			SessionID: meta.ID,
+			Cwd:       meta.Cwd,
+			Status:    "busy",
+		},
+		Filepath: path,
+	}
+	cw.seen[path] = true
 }

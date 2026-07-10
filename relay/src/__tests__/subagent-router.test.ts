@@ -17,6 +17,7 @@ vi.mock('../db.js', async (importOriginal) => {
     // The functions under test — spied via the module, not the mock factory,
     // so the router code path calls the real export which is the spy.
     upsertSubagent: actual.upsertSubagent,
+    reconcileSubagent: actual.reconcileSubagent,
     addSubagentUsage: actual.addSubagentUsage,
     incrementSubagentCount: actual.incrementSubagentCount,
   }
@@ -67,8 +68,8 @@ describe('router subagent event → db (through handleDaemonMessage)', () => {
     vi.restoreAllMocks()
   })
 
-  test('subagent_discovered → upsertSubagent called with mapped fields', async () => {
-    const upsertSpy = vi.spyOn(db, 'upsertSubagent').mockResolvedValue(undefined)
+  test('Claude subagent discovery preserves existing mapping', async () => {
+    const reconcileSpy = vi.spyOn(db, 'reconcileSubagent').mockResolvedValue(undefined)
     const incrSpy = vi.spyOn(db, 'incrementSubagentCount').mockResolvedValue(undefined)
 
     const router = new Router(createMockPool())
@@ -85,53 +86,59 @@ describe('router subagent event → db (through handleDaemonMessage)', () => {
       seq: 1,
     })
 
-    // Let async promises settle (persistAndAck → persistEvent, upsertSubagent, incrementSubagentCount)
     await new Promise((r) => setTimeout(r, 50))
 
-    // Assert the router mapped fields correctly to db.upsertSubagent
-    expect(upsertSpy).toHaveBeenCalledTimes(1)
-    const call = upsertSpy.mock.calls[0]
-    // call[0] = pool, call[1] = parentSessionId, call[2] = agentId, call[3] = kind, call[4] = toolUseId, call[5] = agentType, call[6] = title
-    expect(call[1]).toBe('parent-1')   // session_id → parentSessionId
-    expect(call[2]).toBe('agent-abc')   // agent_id → agentId
-    expect(call[3]).toBe('claude_subagent') // kind constant
-    expect(call[4]).toBe('call_xyz')    // call_id → toolUseId
-    expect(call[5]).toBe('Explore')      // subagent_type → agentType
-    expect(call[6]).toBe('find foo')     // subagent_desc → title
-
-    // Assert incrementSubagentCount was called (was dead code in old test)
-    expect(incrSpy).toHaveBeenCalledTimes(1)
-    expect(incrSpy).toHaveBeenCalledWith(expect.anything(), 'parent-1')
-
-    upsertSpy.mockRestore()
-    incrSpy.mockRestore()
+    expect(reconcileSpy).toHaveBeenCalledWith(expect.anything(), {
+      parentSessionId: 'parent-1',
+      agentId: 'agent-abc',
+      rootSessionId: 'parent-1',
+      kind: 'claude_subagent',
+      toolUseId: 'call_xyz',
+      agentType: 'Explore',
+      title: 'find foo',
+    })
+    expect(incrSpy).not.toHaveBeenCalled()
   })
 
-  test('subagent_usage → addSubagentUsage called with mapped token fields', async () => {
-    const usageSpy = vi.spyOn(db, 'addSubagentUsage').mockResolvedValue(undefined)
-
+  test('Codex subagent discovery maps internal kind without changing agent type', async () => {
+    const reconcileSpy = vi.spyOn(db, 'reconcileSubagent').mockResolvedValue(undefined)
     const router = new Router(createMockPool())
     const { daemonId } = await setupDaemon(router)
 
     router.handleDaemonMessage(daemonId, {
-      type: 'subagent_usage',
-      session_id: 'parent-1',
-      agent_id: 'agent-abc',
-      usage: { input_tokens: 100, output_tokens: 200, cache_read_tokens: 50 },
-      seq: 2,
+      type: 'subagent_discovered', session_id: 'root', root_session_id: 'root',
+      agent_id: 'child', agent: 'codex', subagent_type: 'codex',
+      subagent_desc: 'Newton', seq: 1,
     })
-
     await new Promise((r) => setTimeout(r, 50))
 
-    expect(usageSpy).toHaveBeenCalledTimes(1)
-    const call = usageSpy.mock.calls[0]
-    // call[0] = pool, call[1] = parentSessionId, call[2] = agentId, call[3] = inputTokens, call[4] = outputTokens, call[5] = cacheRead
-    expect(call[1]).toBe('parent-1')  // session_id → parentSessionId
-    expect(call[2]).toBe('agent-abc')  // agent_id → agentId
-    expect(call[3]).toBe(100)          // input_tokens
-    expect(call[4]).toBe(200)          // output_tokens
-    expect(call[5]).toBe(50)           // cache_read_tokens
-
-    usageSpy.mockRestore()
+    expect(reconcileSpy).toHaveBeenCalledWith(expect.anything(), {
+      parentSessionId: 'root', agentId: 'child', rootSessionId: 'root',
+      kind: 'codex_subagent', toolUseId: undefined,
+      agentType: 'codex', title: 'Newton',
+    })
   })
+
+  test('subagent discovery advances ack only after reconciliation succeeds', async () => {
+    const reconcileSpy = vi.spyOn(db, 'reconcileSubagent')
+      .mockRejectedValueOnce(new Error('reconcile failed'))
+      .mockResolvedValueOnce(undefined)
+    const router = new Router(createMockPool())
+    const { daemonId } = await setupDaemon(router)
+    const event = {
+      type: 'subagent_discovered', session_id: 'root', root_session_id: 'root',
+      agent_id: 'child', agent: 'codex', subagent_type: 'codex',
+      subagent_desc: 'Newton', seq: 1,
+    }
+
+    router.handleDaemonMessage(daemonId, event)
+    await new Promise((r) => setTimeout(r, 50))
+    expect((router as any).daemonSeq.get(daemonId).persistedHigh).toBe(0)
+
+    router.handleDaemonMessage(daemonId, event)
+    await new Promise((r) => setTimeout(r, 50))
+    expect((router as any).daemonSeq.get(daemonId).persistedHigh).toBe(1)
+    expect(reconcileSpy).toHaveBeenCalledTimes(2)
+  })
+
 })

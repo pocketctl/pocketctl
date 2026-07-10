@@ -7,8 +7,154 @@ import (
 	"testing"
 	"time"
 
+	"github.com/pocketctl/pocketctl/internal/adapter"
 	"github.com/pocketctl/pocketctl/internal/protocol"
 )
+
+func TestSubAgentTailerCodexStampsRootAndAgent(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "rollout-child.jsonl")
+	lines := `{"type":"session_meta","payload":{"id":"child","session_id":"root","thread_source":"subagent"}}` + "\n" +
+		`{"type":"event_msg","payload":{"type":"user_message","message":"inspect this"}}` + "\n" +
+		`{"type":"event_msg","payload":{"type":"agent_message","message":"done"}}` + "\n"
+	if err := os.WriteFile(path, []byte(lines), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	tailer, err := NewSubAgentTailerForAgent(path, "child", "root", adapter.AgentCodex, adapter.AgentCodex)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tailer.tailer.Close()
+	events, err := tailer.TailNewLines()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 2 {
+		t.Fatalf("events = %+v", events)
+	}
+	for _, event := range events {
+		if event.SessionID != "root" || event.ParentSessionID != "root" || event.RootSessionID != "root" ||
+			event.AgentID != "child" || !event.IsSubagent {
+			t.Fatalf("unstamped event: %+v", event)
+		}
+	}
+}
+
+func TestSubAgentTailerCodexEmitsUsage(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "rollout-child.jsonl")
+	line := `{"type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":100,"cached_input_tokens":50,"output_tokens":20}}}}` + "\n"
+	if err := os.WriteFile(path, []byte(line), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	tailer, err := NewSubAgentTailerForAgent(path, "child", "root", adapter.AgentCodex, adapter.AgentCodex)
+	if err != nil {
+		t.Fatal(err)
+	}
+	outputCh := make(chan protocol.DaemonEvent, 8)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go tailer.Run(ctx, outputCh)
+
+	deadline := time.After(2 * time.Second)
+	for {
+		select {
+		case event := <-outputCh:
+			if event.Type != "subagent_usage" {
+				continue
+			}
+			if event.SessionID != "root" || event.ParentSessionID != "root" || event.RootSessionID != "root" ||
+				event.AgentID != "child" || !event.IsSubagent || event.Usage == nil ||
+				event.Usage.InputTokens != 100 || event.Usage.OutputTokens != 20 || event.Usage.CacheRead != 50 {
+				t.Fatalf("usage event = %+v", event)
+			}
+			return
+		case <-deadline:
+			t.Fatal("timed out waiting for Codex subagent_usage")
+		}
+	}
+}
+
+func TestSubAgentTailerCodexDoesNotCompleteParentSession(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "rollout-child.jsonl")
+	line := `{"type":"event_msg","payload":{"type":"task_complete","last_agent_message":"done"}}` + "\n"
+	if err := os.WriteFile(path, []byte(line), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	tailer, err := NewSubAgentTailerForAgent(path, "child", "root", adapter.AgentCodex, adapter.AgentCodex)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tailer.tailer.Close()
+	events, err := tailer.TailNewLines()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, event := range events {
+		if event.Type == "session_status" {
+			t.Fatalf("child status must not mutate parent session: %+v", event)
+		}
+	}
+}
+
+func TestSubAgentTailerCodexEventIDsAreStableAndDistinct(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "rollout-child.jsonl")
+	line := `{"type":"event_msg","payload":{"type":"agent_message","message":"same"}}` + "\n"
+	if err := os.WriteFile(path, []byte(line+line), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	readIDs := func() []string {
+		tailer, err := NewSubAgentTailerForAgent(path, "child", "root", adapter.AgentCodex, adapter.AgentCodex)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer tailer.tailer.Close()
+		events, err := tailer.TailNewLines()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(events) != 2 {
+			t.Fatalf("events = %+v", events)
+		}
+		return []string{events[0].EventID, events[1].EventID}
+	}
+
+	first := readIDs()
+	second := readIDs()
+	if first[0] == "" || first[1] == "" || first[0] == first[1] {
+		t.Fatalf("event IDs must be non-empty and distinct: %v", first)
+	}
+	if first[0] != second[0] || first[1] != second[1] {
+		t.Fatalf("event IDs changed across restart: %v vs %v", first, second)
+	}
+}
+
+func TestRegularFromStartTailerDoesNotAddStableEventID(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "rollout-main.jsonl")
+	line := `{"type":"event_msg","payload":{"type":"agent_message","message":"main"}}` + "\n"
+	if err := os.WriteFile(path, []byte(line), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	tailer, err := NewJSONLTailerFromStart(path, adapter.AgentCodex)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tailer.Close()
+	events, _, err := tailer.TailNewLines()
+	if err != nil || len(events) != 1 {
+		t.Fatalf("events=%+v err=%v", events, err)
+	}
+	if events[0].EventID != "" {
+		t.Fatalf("ordinary session gained stable event id: %q", events[0].EventID)
+	}
+}
 
 func TestSubAgentTailerEmitsUsage(t *testing.T) {
 	dir := t.TempDir()
@@ -39,6 +185,9 @@ loop:
 				ev.Type, ev.AgentID, ev.SessionID, ev.ParentSessionID, ev.Usage)
 			if ev.Type == "subagent_usage" {
 				gotUsage = true
+				if ev.EventID != "" {
+					t.Errorf("Claude usage must keep legacy identity, got %q", ev.EventID)
+				}
 				if ev.AgentID != "abc" {
 					t.Errorf("AgentID = %q, want abc", ev.AgentID)
 				}
