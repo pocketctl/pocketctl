@@ -3,7 +3,11 @@ package session
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"os"
+	"os/exec"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 
@@ -52,12 +56,20 @@ func (sm *SessionManager) CreateSession(ctx context.Context, config protocol.Ses
 	} else if config.AutoCreateDir {
 		// Auto-create a missing cwd (only in non-worktree mode; worktrees are
 		// created by git). Best-effort: if the dir exists this is a no-op, and
-		// permission errors still surface via validateCwd below.
-		_ = os.MkdirAll(resolvedCwd, 0o755)
+		// permission errors are returned as bad_cwd instead of surfacing later as
+		// an opaque PTY/Codex startup failure.
+		if err := os.MkdirAll(resolvedCwd, 0o755); err != nil {
+			return "", fmt.Errorf("工作目录创建失败: %s (%w)", resolvedCwd, err)
+		}
 	}
 
 	if err := validateCwd(resolvedCwd); err != nil {
 		return "", err
+	}
+
+	jsonlExcludeIDs := map[string]struct{}{}
+	if config.Agent == adapter.AgentCodex {
+		jsonlExcludeIDs = adapter.CodexRolloutSessionIDsForCwd(resolvedCwd)
 	}
 
 	// Scheme A: warn when the target cwd already has active sessions. Clients
@@ -82,6 +94,10 @@ func (sm *SessionManager) CreateSession(ctx context.Context, config protocol.Ses
 		// ANTHROPIC_DEFAULT_*_MODEL, preserving e.g. [1M]). Derive the concrete
 		// display name for /model (haiku → glm-4.7).
 		displayModel = resolveModelAlias(config.Model)
+	}
+
+	if config.Agent == adapter.AgentCodex {
+		return sm.createCodexExecSession(ctx, sessionID, cliPath, resolvedCwd, config, displayModel, worktreePath, worktreeBranch)
 	}
 
 	// Resolve the effective permission mode BEFORE launching. Web/iOS daemon
@@ -135,25 +151,30 @@ func (sm *SessionManager) CreateSession(ctx context.Context, config protocol.Ses
 	ptmx, cmd, err := startPTYCli(sm.ptyProvider, cliPath, args, resolvedCwd, extraEnv, config.Agent)
 	if err != nil {
 		cancel()
+		if cwdErr := validateCwd(resolvedCwd); cwdErr != nil {
+			return "", cwdErr
+		}
 		return "", fmt.Errorf("start pty %s: %w", config.Agent, err)
 	}
 
 	now := time.Now()
 	ps := &ProcessState{
-		SessionID:      sessionID, // real id (not pending-): --session-id pins it
-		Cmd:            cmd,
-		Cancel:         cancel,
-		Status:         protocol.StatusIdle, // PTY up, awaiting first input
-		StartedAt:      now,
-		LastActivityAt: now,
-		Cwd:            resolvedCwd,
-		Agent:          config.Agent,
-		Source:         "daemon",
-		PTY:            ptmx,
-		PermissionMode: permMode,
-		Model:          displayModel,
-		WorktreePath:   worktreePath,
-		WorktreeBranch: worktreeBranch,
+		SessionID:       sessionID, // real id (not pending-): --session-id pins it
+		Cmd:             cmd,
+		Cancel:          cancel,
+		Status:          protocol.StatusIdle, // PTY up, awaiting first input
+		StartedAt:       now,
+		LastActivityAt:  now,
+		Cwd:             resolvedCwd,
+		Agent:           config.Agent,
+		Source:          "daemon",
+		PTY:             ptmx,
+		PermissionMode:  permMode,
+		Model:           displayModel,
+		WorktreePath:    worktreePath,
+		WorktreeBranch:  worktreeBranch,
+		InitialPrompt:   config.Prompt,
+		JSONLExcludeIDs: jsonlExcludeIDs,
 	}
 	sm.mu.Lock()
 	sm.sessions[sessionID] = ps
@@ -162,6 +183,16 @@ func (sm *SessionManager) CreateSession(ctx context.Context, config protocol.Ses
 		ps.Pid = cmd.Process.Pid
 	}
 	sm.mu.Unlock()
+	slog.Default().Info("pty session process started",
+		"session", sessionID,
+		"agent", config.Agent,
+		"cwd", resolvedCwd,
+		"cli", cliPath,
+		"pid", ps.Pid,
+	)
+	if config.Agent == adapter.AgentCodex {
+		logCodexLaunchContext(sessionID, cmd.Env)
+	}
 
 	// Scheme A: register the session against its cwd so later CreateSession
 	// calls can warn. Worktree sessions register under their worktree path.
@@ -184,6 +215,73 @@ func (sm *SessionManager) CreateSession(ctx context.Context, config protocol.Ses
 	return sessionID, nil
 }
 
+func (sm *SessionManager) createCodexExecSession(ctx context.Context, sessionID, cliPath, resolvedCwd string, config protocol.SessionConfig, displayModel, worktreePath, worktreeBranch string) (string, error) {
+	args := []string{"exec", "--json", "--skip-git-repo-check", "-C", resolvedCwd}
+	if config.Model != "" {
+		args = append(args, "-m", config.Model)
+	}
+	if config.Prompt != "" {
+		args = append(args, config.Prompt)
+	}
+
+	ctx, cancel := context.WithCancel(ctx)
+	cmd := exec.CommandContext(ctx, cliPath, args...)
+	cmd.Dir = resolvedCwd
+	env := sanitizePTYEnv(os.Environ(), adapter.AgentCodex)
+	env = ensureTERM(env, "xterm-256color")
+	env = ensureCodexTerminfo(env)
+	env = ensureEnvDefault(env, "COLORTERM", "truecolor")
+	env = ensureEnvDefault(env, "PAGER", "cat")
+	env = ensureEnvDefault(env, "GIT_PAGER", "cat")
+	env = ensureEnvDefault(env, "GH_PAGER", "cat")
+	cmd.Env = ensureEnvDefault(env, "TERM_PROGRAM", "pocketctl")
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		cancel()
+		return "", fmt.Errorf("stdout pipe: %w", err)
+	}
+	if err := cmd.Start(); err != nil {
+		cancel()
+		return "", fmt.Errorf("start codex exec: %w", err)
+	}
+
+	now := time.Now()
+	ps := &ProcessState{
+		SessionID:      sessionID,
+		Cmd:            cmd,
+		Cancel:         cancel,
+		Status:         protocol.StatusRunning,
+		StartedAt:      now,
+		LastActivityAt: now,
+		Cwd:            resolvedCwd,
+		Agent:          config.Agent,
+		Source:         "daemon",
+		Model:          displayModel,
+		WorktreePath:   worktreePath,
+		WorktreeBranch: worktreeBranch,
+	}
+	sm.mu.Lock()
+	sm.sessions[sessionID] = ps
+	if cmd.Process != nil {
+		sm.childPids[cmd.Process.Pid] = true
+		ps.Pid = cmd.Process.Pid
+	}
+	sm.mu.Unlock()
+	sm.registerCwd(sessionID, resolvedCwd)
+	slog.Default().Info("codex exec session process started",
+		"session", sessionID,
+		"cwd", resolvedCwd,
+		"cli", cliPath,
+		"pid", ps.Pid,
+	)
+	logCodexLaunchContext(sessionID, cmd.Env)
+	if config.Prompt != "" {
+		sm.outputCh <- protocol.DaemonEvent{Type: "user_text", SessionID: sessionID, Text: config.Prompt}
+	}
+	go sm.readOutput(ctx, cmd, stdout, adapter.NewCodexAdapter(), ps)
+	return sessionID, nil
+}
+
 // servePTYSession runs the background lifecycle for a daemon PTY session:
 // waits for the JSONL history file to appear, starts the JSONL tailer (the
 // structured output channel — interactive-web-session D2), writes the initial
@@ -198,6 +296,21 @@ func (sm *SessionManager) servePTYSession(ctx context.Context, ps *ProcessState,
 	ps.PTYScanner = ptyscan.NewScanner(ps.SessionID)
 	go sm.drainPTY(ctx, ps)
 
+	// Monitor process exit immediately. Some CLIs can fail during startup before
+	// the prompt delay elapses; waiting to call Wait until after the delay makes
+	// the logs look like the prompt write caused the crash.
+	done := make(chan struct{})
+	go func() {
+		_ = ps.Cmd.Wait()
+		close(done)
+	}()
+	handleDone := func() {
+		if ps.Cancel != nil {
+			ps.Cancel()
+		}
+		sm.handlePTYExit(ps)
+	}
+
 	// Submit the initial prompt after the TUI settles (~10s to render banner +
 	// plugins). IMPORTANT: do NOT wait for the JSONL file here — claude only
 	// writes JSONL after the first turn is processed, so gating the prompt on
@@ -206,18 +319,50 @@ func (sm *SessionManager) servePTYSession(ctx context.Context, ps *ProcessState,
 		select {
 		case <-ctx.Done():
 			return
+		case <-done:
+			handleDone()
+			return
 		case <-time.After(10 * time.Second):
 		}
 		if ps.PTY != nil {
-			_, _ = ps.PTY.Write([]byte(initialPrompt + "\r"))
+			slog.Default().Info("pty initial prompt write",
+				"session", ps.SessionID,
+				"agent", ps.Agent,
+				"prompt_len", len(initialPrompt),
+			)
+			n, err := ps.PTY.Write([]byte(initialPrompt + "\r"))
+			if err != nil {
+				slog.Default().Warn("pty initial prompt write failed",
+					"session", ps.SessionID,
+					"agent", ps.Agent,
+					"bytes", n,
+					"error", err,
+				)
+			} else {
+				slog.Default().Info("pty initial prompt written",
+					"session", ps.SessionID,
+					"agent", ps.Agent,
+					"bytes", n,
+				)
+			}
 		}
 	}
 
 	// Start the JSONL tailer once the file appears (after the first turn). Runs
-	// concurrently so it's ready whenever claude writes.
+	// concurrently so it's ready whenever the agent writes.
 	go func() {
 		var tailer *watcher.JSONLTailer
-		for i := 0; i < 120; i++ { // up to ~60s after the prompt
+		hasInitialPrompt := strings.TrimSpace(initialPrompt) != ""
+		maxAttempts := 0
+		if hasInitialPrompt {
+			maxAttempts = 120 // up to ~60s after the prompt
+		}
+		sm.mu.RLock()
+		tailerSessionID := ps.SessionID
+		tailerCwd := ps.Cwd
+		tailerAgent := ps.Agent
+		sm.mu.RUnlock()
+		for i := 0; maxAttempts == 0 || i < maxAttempts; i++ {
 			select {
 			case <-ctx.Done():
 				return
@@ -225,38 +370,81 @@ func (sm *SessionManager) servePTYSession(ctx context.Context, ps *ProcessState,
 			}
 			// Re-resolve each iteration — the JSONL file only appears after
 			// the agent's first turn, and the path resolver returns err until then.
-			if jsonlPath, err := adapter.ResolveJSONLPathFor(ps.Agent, ps.SessionID, ps.Cwd); err == nil {
-				if t, e := watcher.NewJSONLTailerFromStart(jsonlPath, ps.Agent); e == nil {
+			sm.mu.RLock()
+			currentID := ps.SessionID
+			currentCwd := ps.Cwd
+			currentAgent := ps.Agent
+			startedAt := ps.StartedAt
+			sm.mu.RUnlock()
+			hints := adapter.PTYResolveHints{
+				StartedAt:         startedAt,
+				InitialPrompt:     ps.InitialPrompt,
+				ExcludeSessionIDs: ps.JSONLExcludeIDs,
+			}
+			if jsonlPath, realID, err := adapter.ResolveJSONLPathForPTY(currentAgent, currentID, currentCwd, hints); err == nil {
+				if t, e := watcher.NewJSONLTailerFromStart(jsonlPath, currentAgent); e == nil {
 					tailer = t
+					tailerSessionID = currentID
+					tailerCwd = currentCwd
+					tailerAgent = currentAgent
+					if realID != "" && realID != currentID {
+						oldID := currentID
+						if cwd, agent, changed := sm.remapSessionID(oldID, realID); changed {
+							tailerSessionID = realID
+							tailerCwd = cwd
+							tailerAgent = agent
+							sm.outputCh <- protocol.DaemonEvent{
+								Type: "session_id_changed", SessionID: realID, OldSessionID: oldID,
+							}
+						}
+					}
 					break
 				}
 			}
 			time.Sleep(500 * time.Millisecond)
 		}
 		if tailer == nil {
-			// JSONL file never appeared within 60s — claude may be running
-			// ephemeral (env contamination) or crashed during startup. Notify
-			// clients instead of leaving the UI stuck on "no response".
+			if !hasInitialPrompt {
+				return
+			}
+			sm.mu.RLock()
+			errorSessionID := ps.SessionID
+			errorAgent := ps.Agent
+			errorCwd := ps.Cwd
+			ptyTail := append([]byte(nil), ps.PTYOutputTail...)
+			sm.mu.RUnlock()
+			ptySnapshot := ptyscan.TextSnapshot(ptyTail)
+			slog.Default().Warn("pty jsonl missing",
+				"session", errorSessionID,
+				"agent", errorAgent,
+				"cwd", errorCwd,
+				"pty_tail", ptySnapshot,
+			)
+			// JSONL file never appeared within 60s. Notify clients instead of
+			// leaving the UI stuck on "no response".
 			sm.outputCh <- protocol.DaemonEvent{
 				Type:      "error",
-				SessionID: ps.SessionID,
-				Error:     "会话未生成输出（JSONL 文件未创建）。可能原因：claude 以临时模式运行或启动失败。请检查 claude 是否正确安装且环境变量无冲突。",
+				SessionID: errorSessionID,
+				Error:     jsonlMissingError(errorAgent, ptySnapshot),
 			}
 			// Also mark the session as errored so the UI doesn't stay in
 			// "creating" / "running" limbo.
 			sm.mu.Lock()
-			if s, ok := sm.sessions[ps.SessionID]; ok {
+			if s, ok := sm.sessions[errorSessionID]; ok {
 				s.Status = protocol.StatusError
 			}
 			sm.mu.Unlock()
+			if sm.OnStateChanged != nil {
+				sm.OnStateChanged()
+			}
 			sm.outputCh <- protocol.DaemonEvent{
 				Type:      "session_status",
-				SessionID: ps.SessionID,
+				SessionID: errorSessionID,
 				Status:    protocol.StatusError,
 			}
 			return
 		}
-		sm.SetTailer(ps.SessionID, tailer)
+		sm.SetTailer(tailerSessionID, tailer)
 		// If the initial prompt is a slash command, record it so the first
 		// command_receipt (if any) carries the correct command name.
 		if initialPrompt != "" {
@@ -264,29 +452,28 @@ func (sm *SessionManager) servePTYSession(ctx context.Context, ps *ProcessState,
 		}
 		go tailer.Run(ctx, sm.outputCh, nil)
 		if sm.OnSessionIDResolved != nil {
-			sm.OnSessionIDResolved(ps.SessionID, ps.Cwd, ps.Agent)
+			sm.OnSessionIDResolved(tailerSessionID, tailerCwd, tailerAgent)
 		}
+		go sm.watchdogBusy(ctx, tailerSessionID)
 	}()
-
-	// Monitor process exit (crash detection, D7).
-	done := make(chan struct{})
-	go func() {
-		_ = ps.Cmd.Wait()
-		close(done)
-	}()
-
-	// Watchdog: if a busy session has no JSONL activity for >5 minutes, the
-	// agent is likely stuck (e.g. a long-running tool call blocked the PTY,
-	// or a daemon restart caused the tailer to miss the idle event). Recover
-	// by forcing the status back to idle so the UI is not stuck on "executing".
-	go sm.watchdogBusy(ctx, ps.SessionID)
 
 	select {
 	case <-ctx.Done():
 		return
 	case <-done:
-		sm.handlePTYExit(ps)
+		handleDone()
 	}
+}
+
+func jsonlMissingError(agent, ptySnapshot string) string {
+	var detail string
+	if strings.TrimSpace(ptySnapshot) != "" {
+		detail = "\n\n最近的终端输出：\n" + ptySnapshot
+	}
+	if agent == adapter.AgentCodex {
+		return "会话未生成输出（Codex rollout JSONL 文件未创建）。可能原因：codex 启动失败、模型不可用，或 Codex CLI 未写入 ~/.codex/sessions。请检查 codex 是否正确安装及 CODEX_HOME 环境变量。" + detail
+	}
+	return "会话未生成输出（JSONL 文件未创建）。可能原因：claude 以临时模式运行或启动失败。请检查 claude 是否正确安装且环境变量无冲突。" + detail
 }
 
 // watchdogBusy monitors a session for stuck "busy" state. If the session
@@ -322,11 +509,12 @@ func (sm *SessionManager) watchdogBusy(ctx context.Context, sessionID string) {
 				continue // not busy — nothing to fix
 			}
 			cwd := ps.Cwd
+			agent := ps.Agent
 			sm.mu.Unlock()
 
 			// Check JSONL file modification time — the authoritative signal
 			// for whether the agent is still producing output.
-			jsonlPath, err := watcher.ResolveJSONLPath(sessionID, cwd)
+			jsonlPath, err := adapter.ResolveJSONLPathFor(agent, sessionID, cwd)
 			if err != nil {
 				continue // can't determine — don't force
 			}
@@ -383,9 +571,23 @@ func (sm *SessionManager) handlePTYExit(ps *ProcessState) {
 	reason := ps.ExitReason
 	sid := ps.SessionID
 	cwd := ps.Cwd
+	agent := ps.Agent
+	ptyTail := append([]byte(nil), ps.PTYOutputTail...)
 	wtPath := ps.WorktreePath
 	wtBranch := ps.WorktreeBranch
 	sm.mu.Unlock()
+	if sm.OnStateChanged != nil {
+		sm.OnStateChanged()
+	}
+	slog.Default().Warn("pty session process exited",
+		"session", sid,
+		"agent", agent,
+		"cwd", cwd,
+		"status", status,
+		"exit_reason", reason,
+		"exit_code", exitCode,
+		"pty_tail", ptyscan.TextSnapshot(ptyTail),
+	)
 
 	// Drain any pending tool-use approval so the hook process exits promptly,
 	// and remove the PreToolUse hook we injected into the project settings.
@@ -583,5 +785,104 @@ func findAgentCLI(agent string) (string, error) {
 	if !found {
 		return "", fmt.Errorf("agent CLI not found: %s (%s)", agent, name)
 	}
+	if agent == adapter.AgentCodex {
+		if native := resolveCodexNativeBinary(path); native != "" {
+			return native, nil
+		}
+	}
 	return path, nil
+}
+
+func resolveCodexNativeBinary(cliPath string) string {
+	if runtime.GOOS != "darwin" && runtime.GOOS != "linux" && runtime.GOOS != "windows" {
+		return ""
+	}
+	realPath, err := filepath.EvalSymlinks(cliPath)
+	if err != nil {
+		realPath = cliPath
+	}
+	if !strings.HasSuffix(filepath.ToSlash(realPath), "/@openai/codex/bin/codex.js") {
+		return ""
+	}
+	var pkg string
+	var triple string
+	switch runtime.GOOS + "/" + runtime.GOARCH {
+	case "darwin/arm64":
+		pkg, triple = "@openai/codex-darwin-arm64", "aarch64-apple-darwin"
+	case "darwin/amd64":
+		pkg, triple = "@openai/codex-darwin-x64", "x86_64-apple-darwin"
+	case "linux/arm64":
+		pkg, triple = "@openai/codex-linux-arm64", "aarch64-unknown-linux-musl"
+	case "linux/amd64":
+		pkg, triple = "@openai/codex-linux-x64", "x86_64-unknown-linux-musl"
+	case "windows/amd64":
+		pkg, triple = "@openai/codex-win32-x64", "x86_64-pc-windows-msvc"
+	case "windows/arm64":
+		pkg, triple = "@openai/codex-win32-arm64", "aarch64-pc-windows-msvc"
+	default:
+		return ""
+	}
+	root := filepath.Dir(filepath.Dir(realPath))
+	exe := "codex"
+	if runtime.GOOS == "windows" {
+		exe = "codex.exe"
+	}
+	native := filepath.Join(root, "node_modules", pkg, "vendor", triple, "bin", exe)
+	if info, err := os.Stat(native); err == nil && !info.IsDir() {
+		return native
+	}
+	return ""
+}
+
+func logCodexLaunchContext(sessionID string, env []string) {
+	home := envValue(env, "HOME")
+	codexHome := envValue(env, "CODEX_HOME")
+	if codexHome == "" && home != "" {
+		codexHome = filepath.Join(home, ".codex")
+	}
+	tmpDir := envValue(env, "TMPDIR")
+	shell := envValue(env, "SHELL")
+	pathValue := envValue(env, "PATH")
+	terminfoDirs := envValue(env, "TERMINFO_DIRS")
+	slog.Default().Info("codex launch context",
+		"session", sessionID,
+		"home", home,
+		"home_exists", pathExists(home),
+		"codex_home", codexHome,
+		"codex_home_exists", pathExists(codexHome),
+		"sessions_dir_exists", pathExists(filepath.Join(codexHome, "sessions")),
+		"tmpdir", tmpDir,
+		"tmpdir_exists", pathExists(tmpDir),
+		"shell", shell,
+		"shell_exists", pathExists(shell),
+		"path_has_homebrew", strings.Contains(pathValue, "/opt/homebrew/bin"),
+		"path_has_codex_path", strings.Contains(pathValue, "/codex-path"),
+		"path_has_codex_shim", strings.Contains(pathValue, "/.codex/tmp/arg0/"),
+		"terminfo_dirs_set", terminfoDirs != "",
+		"terminfo_dirs", terminfoDirs,
+		"term_program", envValue(env, "TERM_PROGRAM"),
+		"colorterm_set", envValue(env, "COLORTERM") != "",
+		"pager", envValue(env, "PAGER"),
+		"mcp_github_token_set", envValue(env, "CODEX_GITHUB_PERSONAL_ACCESS_TOKEN") != "",
+		"https_proxy_set", envValue(env, "HTTPS_PROXY") != "" || envValue(env, "https_proxy") != "",
+		"http_proxy_set", envValue(env, "HTTP_PROXY") != "" || envValue(env, "http_proxy") != "",
+	)
+}
+
+func envValue(env []string, key string) string {
+	prefix := key + "="
+	for _, kv := range env {
+		if strings.HasPrefix(kv, prefix) {
+			return strings.TrimPrefix(kv, prefix)
+		}
+	}
+	return ""
+}
+
+func pathExists(path string) bool {
+	if strings.TrimSpace(path) == "" {
+		return false
+	}
+	_, err := os.Stat(path)
+	return err == nil
 }

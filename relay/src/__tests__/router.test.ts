@@ -139,6 +139,26 @@ describe('Router - daemon disconnect', () => {
     )
     expect(disconnectUpdate).toBeUndefined()
   })
+
+  test('session_id_changed ensures real Codex id remains a daemon session', async () => {
+    const daemonWs = createMockWs()
+    await router.registerDaemon(daemonWs, { type: 'register', daemon_id: 'daemon-1', hostname: 'test', agents: [] }, 7)
+
+    router.handleDaemonMessage('daemon-1', {
+      type: 'session_id_changed',
+      session_id: 'real-codex-id',
+      old_session_id: 'temp-id',
+    })
+    await tick()
+
+    const identityInsert = pool._queries.find((q: any) =>
+      q.sql.includes('INSERT INTO sessions') &&
+      q.sql.includes("source = 'daemon'") &&
+      q.params[0] === 'real-codex-id'
+    )
+    expect(identityInsert).toBeDefined()
+    expect(identityInsert.params).toEqual(['real-codex-id', 'daemon-1', 7])
+  })
 })
 
 describe('Router - daemon reconnect', () => {

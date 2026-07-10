@@ -24,6 +24,10 @@ export interface Session {
   is_subagent?: boolean
   root_session_id?: string | null
   totalTokens?: number
+  tokInput?: number
+  tokOutput?: number
+  tokCacheRead?: number
+  tokCacheCreate?: number
   children?: SubagentChild[]
   daemon_online?: boolean
   hostname?: string

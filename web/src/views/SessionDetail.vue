@@ -1108,14 +1108,27 @@ function buildLocalCommandResult(cmdName: string, text: string): any | null {
   return null
 }
 
-// buildCostMessage summarizes token usage accumulated in this session from the
-// last agent_text carrying usage (same source as the context-token pill).
-function buildCostMessage(): string {
-  let usage: any = null
-  for (let i = messages.value.length - 1; i >= 0; i--) {
-    const u = (messages.value[i] as any).usage
-    if (u) { usage = u; break }
+function sessionTokenUsageFallback(): any {
+  const s = allSessions.value.find((x: any) => x.session_id === sessionId.value) as any
+  if (!s) return null
+  const input = s.tokInput || 0
+  const output = s.tokOutput || 0
+  const cacheRead = s.tokCacheRead || 0
+  const cacheCreate = s.tokCacheCreate || 0
+  if (input + output + cacheRead + cacheCreate <= 0) return null
+  return {
+    input_tokens: input,
+    output_tokens: output,
+    cache_read_tokens: cacheRead,
+    cache_create_tokens: cacheCreate,
   }
+}
+
+// buildCostMessage summarizes token usage accumulated in this session. Prefer
+// event-level usage, falling back to persisted session totals for older Codex
+// events that were parsed before usage extraction existed.
+function buildCostMessage(): string {
+  const usage = effectiveUsage() || sessionTokenUsageFallback()
   if (!usage) return '当前会话暂无 token 用量记录'
   const input = usage.input_tokens || 0
   const output = usage.output_tokens || 0
@@ -1399,6 +1412,7 @@ function processEvent(evt: any, target: any[] = messages.value, subagentOverride
     // selection is sent back via interactive_response.
     const requestId = evt.request_id || evt.payload?.request_id
     if (!requestId) return
+    if (target.some((m: any) => m.type === 'interactive_prompt' && m.request_id === requestId)) return
     const rawInput = evt.input || evt.payload?.input
     let promptText = ''
     let options: Array<{ index: string; label: string }> = []

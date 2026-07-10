@@ -87,6 +87,14 @@ type codexLine struct {
 	Type      string          `json:"type"`
 	Timestamp string          `json:"timestamp,omitempty"`
 	Payload   json.RawMessage `json:"payload,omitempty"`
+	ThreadID  string          `json:"thread_id,omitempty"`
+	Item      json.RawMessage `json:"item,omitempty"`
+}
+
+type codexExecItem struct {
+	ID   string `json:"id,omitempty"`
+	Type string `json:"type,omitempty"`
+	Text string `json:"text,omitempty"`
 }
 
 // codexPayload is the union of fields across all payload subtypes.
@@ -107,12 +115,15 @@ type codexPayload struct {
 	// function_call_output
 	Output string `json:"output,omitempty"`
 	// event_msg subtypes
-	Message           string `json:"message,omitempty"`        // agent_message / user_message text
-	LastAgentMessage  string `json:"last_agent_message,omitempty"` // task_complete
-	LastTokenUsage    *codexTokenUsage `json:"last_token_usage,omitempty"` // token_count
+	Message          string           `json:"message,omitempty"`            // agent_message / user_message text
+	LastAgentMessage string           `json:"last_agent_message,omitempty"` // task_complete
+	LastTokenUsage   *codexTokenUsage `json:"last_token_usage,omitempty"`   // token_count
+	Info             struct {
+		LastTokenUsage *codexTokenUsage `json:"last_token_usage,omitempty"`
+	} `json:"info,omitempty"` // token_count in Codex exec/rollout v0.143+
 	// session_meta
-	ID        string `json:"id,omitempty"`
-	Cwd       string `json:"cwd,omitempty"`
+	ID         string `json:"id,omitempty"`
+	Cwd        string `json:"cwd,omitempty"`
 	CLIVersion string `json:"cli_version,omitempty"`
 }
 
@@ -135,7 +146,7 @@ type CodexAdapter struct {
 // NewCodexAdapter creates an adapter for a single codex exec spawn.
 func NewCodexAdapter() *CodexAdapter { return &CodexAdapter{} }
 
-func (a *CodexAdapter) SessionID() string     { return a.sessionID }
+func (a *CodexAdapter) SessionID() string       { return a.sessionID }
 func (a *CodexAdapter) SlashCommands() []string { return nil } // codex has no slash-command surface
 
 func (a *CodexAdapter) ParseStreamLine(line string) ([]protocol.DaemonEvent, error) {
@@ -169,6 +180,25 @@ func parseCodexLine(line string, session *CodexAdapter) ([]protocol.DaemonEvent,
 	var raw codexLine
 	if err := json.Unmarshal([]byte(line), &raw); err != nil {
 		return nil, fmt.Errorf("parse codex json: %w", err)
+	}
+	switch raw.Type {
+	case "thread.started":
+		if raw.ThreadID != "" && session != nil {
+			session.sessionID = raw.ThreadID
+		}
+		return nil, nil
+	case "item.completed":
+		var item codexExecItem
+		if json.Unmarshal(raw.Item, &item) == nil && item.Type == "agent_message" && item.Text != "" {
+			model := ""
+			if session != nil {
+				model = session.model
+			}
+			return []protocol.DaemonEvent{{Type: "agent_text", Text: item.Text, Model: model}}, nil
+		}
+		return nil, nil
+	case "turn.completed":
+		return nil, nil
 	}
 	if len(raw.Payload) == 0 {
 		return nil, nil
@@ -287,10 +317,13 @@ func convertCodexEventMsg(p codexPayload) []protocol.DaemonEvent {
 		return []protocol.DaemonEvent{{Type: "agent_text", Text: p.Message}}
 
 	case "token_count":
-		if p.LastTokenUsage == nil {
+		u := p.LastTokenUsage
+		if u == nil {
+			u = p.Info.LastTokenUsage
+		}
+		if u == nil {
 			return nil
 		}
-		u := p.LastTokenUsage
 		return []protocol.DaemonEvent{{
 			Type: "agent_text", // usage rides on an agent_text so the web can attribute it
 			Usage: &protocol.ContextUsage{
@@ -333,7 +366,7 @@ func (CodexLauncher) BuildInteractiveArgs(config protocol.SessionConfig) []strin
 }
 
 func (CodexLauncher) BuildResumeArgs(prompt, sessionID string, config protocol.SessionConfig) []string {
-	args := []string{"exec", "resume", sessionID, "--json"}
+	args := []string{"exec", "resume", sessionID, "--json", "--skip-git-repo-check"}
 	if config.Model != "" {
 		args = append(args, "-m", config.Model)
 	}
@@ -385,6 +418,144 @@ func (CodexSessionStorage) ResolveJSONLPath(sessionID, cwd string) (string, erro
 		return "", fmt.Errorf("codex jsonl not found for session %s", sessionID)
 	}
 	return found, nil
+}
+
+func (s CodexSessionStorage) ResolveJSONLPathForPTY(sessionID, cwd string, hints PTYResolveHints) (string, string, error) {
+	if path, err := s.ResolveJSONLPath(sessionID, cwd); err == nil {
+		return path, sessionID, nil
+	}
+	return s.findNewestRolloutByCwdSince(cwd, hints)
+}
+
+func (CodexSessionStorage) findNewestRolloutByCwdSince(cwd string, hints PTYResolveHints) (string, string, error) {
+	sessionsDir := CodexSessionsDir()
+	if sessionsDir == "" {
+		return "", "", fmt.Errorf("codex home not resolved")
+	}
+	if _, err := os.Stat(sessionsDir); err != nil {
+		return "", "", fmt.Errorf("codex sessions dir: %w", err)
+	}
+
+	var foundPath string
+	var foundID string
+	var foundMtime time.Time
+	cutoff := hints.StartedAt.Add(-2 * time.Second)
+	initialPrompt := strings.TrimSpace(hints.InitialPrompt)
+	_ = filepath.Walk(sessionsDir, func(path string, info os.FileInfo, err error) error {
+		if err != nil || info.IsDir() {
+			return nil
+		}
+		name := info.Name()
+		if !strings.HasPrefix(name, "rollout-") || !strings.HasSuffix(name, ".jsonl") {
+			return nil
+		}
+		if !hints.StartedAt.IsZero() && info.ModTime().Before(cutoff) {
+			return nil
+		}
+		sessionID, metaCwd, ok := CodexRolloutMeta(path)
+		if !ok || sessionID == "" || !sameCodexCwd(metaCwd, cwd) {
+			return nil
+		}
+		if _, excluded := hints.ExcludeSessionIDs[sessionID]; excluded {
+			return nil
+		}
+		if initialPrompt != "" && !CodexRolloutHasUserMessage(path, initialPrompt) {
+			return nil
+		}
+		if foundPath == "" || info.ModTime().After(foundMtime) {
+			foundPath = path
+			foundID = sessionID
+			foundMtime = info.ModTime()
+		}
+		return nil
+	})
+	if foundPath == "" {
+		return "", "", fmt.Errorf("codex jsonl not found for cwd %s since %s", cwd, hints.StartedAt.Format(time.RFC3339))
+	}
+	return foundPath, foundID, nil
+}
+
+func CodexRolloutSessionIDsForCwd(cwd string) map[string]struct{} {
+	ids := make(map[string]struct{})
+	sessionsDir := CodexSessionsDir()
+	if sessionsDir == "" {
+		return ids
+	}
+	_ = filepath.Walk(sessionsDir, func(path string, info os.FileInfo, err error) error {
+		if err != nil || info.IsDir() {
+			return nil
+		}
+		name := info.Name()
+		if !strings.HasPrefix(name, "rollout-") || !strings.HasSuffix(name, ".jsonl") {
+			return nil
+		}
+		sessionID, metaCwd, ok := CodexRolloutMeta(path)
+		if ok && sessionID != "" && sameCodexCwd(metaCwd, cwd) {
+			ids[sessionID] = struct{}{}
+		}
+		return nil
+	})
+	return ids
+}
+
+func CodexRolloutHasUserMessage(path string, want string) bool {
+	want = strings.TrimSpace(want)
+	if want == "" {
+		return true
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return false
+	}
+	defer f.Close()
+	sc := bufio.NewScanner(f)
+	sc.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+	for i := 0; sc.Scan() && i < 200; i++ {
+		var raw codexLine
+		if json.Unmarshal(sc.Bytes(), &raw) != nil || len(raw.Payload) == 0 {
+			continue
+		}
+		var p codexPayload
+		if json.Unmarshal(raw.Payload, &p) != nil {
+			continue
+		}
+		if raw.Type == "event_msg" && p.Type == "user_message" && strings.TrimSpace(p.Message) == want {
+			return true
+		}
+		if raw.Type == "response_item" && p.Type == "message" && strings.EqualFold(p.Role, "user") {
+			var text string
+			for _, c := range p.Content {
+				if c.Text != "" {
+					if text != "" {
+						text += "\n"
+					}
+					text += c.Text
+				}
+			}
+			if strings.TrimSpace(text) == want {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func sameCodexCwd(a, b string) bool {
+	if a == "" || b == "" {
+		return filepath.Clean(a) == filepath.Clean(b)
+	}
+	return cleanCodexCwd(a) == cleanCodexCwd(b)
+}
+
+func cleanCodexCwd(p string) string {
+	abs, err := filepath.Abs(p)
+	if err != nil {
+		return filepath.Clean(p)
+	}
+	if resolved, err := filepath.EvalSymlinks(abs); err == nil {
+		return resolved
+	}
+	return filepath.Clean(abs)
 }
 
 func (CodexSessionStorage) ExtractTitle(lines []string) string {

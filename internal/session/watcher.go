@@ -2,8 +2,10 @@ package session
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -12,6 +14,8 @@ import (
 	"github.com/pocketctl/pocketctl/internal/protocol"
 	"github.com/pocketctl/pocketctl/internal/watcher"
 )
+
+const ptyOutputTailMax = 32 * 1024
 
 // SetTailer associates a JSONL tailer with a session (so sendToIdleTerminal can pause/resume it).
 func (sm *SessionManager) SetTailer(sessionID string, t *watcher.JSONLTailer) {
@@ -36,13 +40,21 @@ func (sm *SessionManager) drainPTY(ctx context.Context, ps *ProcessState) {
 		default:
 		}
 		n, err := ps.PTY.Read(buf)
-		if n > 0 && ps.PTYScanner != nil {
-			// Forward a copy so the scanner can retain bytes across reads.
-			for _, ev := range ps.PTYScanner.Feed(append([]byte(nil), buf[:n]...)) {
-				select {
-				case sm.outputCh <- ev:
-				case <-ctx.Done():
-					return
+		if n > 0 {
+			chunk := append([]byte(nil), buf[:n]...)
+			for _, response := range terminalProbeResponses(chunk) {
+				_, _ = ps.PTY.Write(response)
+			}
+			sm.rememberPTYOutput(ps, chunk)
+			if ps.PTYScanner != nil {
+				// Forward a copy so the scanner can retain bytes across reads.
+				for _, ev := range ps.PTYScanner.Feed(chunk) {
+					slog.Default().Info("pty interactive prompt detected", "session", ev.SessionID, "req", ev.RequestID)
+					select {
+					case sm.outputCh <- ev:
+					case <-ctx.Done():
+						return
+					}
 				}
 			}
 		}
@@ -50,6 +62,43 @@ func (sm *SessionManager) drainPTY(ctx context.Context, ps *ProcessState) {
 			// EOF / closed master: session is exiting; handlePTYExit closes the fd.
 			return
 		}
+	}
+}
+
+func terminalProbeResponses(chunk []byte) [][]byte {
+	var responses [][]byte
+	// Cursor position report request: CSI 6 n.
+	if bytes.Contains(chunk, []byte("\x1b[6n")) {
+		responses = append(responses, []byte("\x1b[1;1R"))
+	}
+	// Primary device attributes request: CSI c.
+	if bytes.Contains(chunk, []byte("\x1b[c")) {
+		responses = append(responses, []byte("\x1b[?1;2c"))
+	}
+	// Kitty keyboard protocol flags query. Advertising no enhanced flags is
+	// enough for TUIs that wait for a terminal response before finishing render.
+	if bytes.Contains(chunk, []byte("\x1b[?u")) {
+		responses = append(responses, []byte("\x1b[?0u"))
+	}
+	// Foreground/background color queries: OSC 10/11 ; ? ST.
+	if bytes.Contains(chunk, []byte("\x1b]10;?\x1b\\")) {
+		responses = append(responses, []byte("\x1b]10;rgb:ffff/ffff/ffff\x1b\\"))
+	}
+	if bytes.Contains(chunk, []byte("\x1b]11;?\x1b\\")) {
+		responses = append(responses, []byte("\x1b]11;rgb:0000/0000/0000\x1b\\"))
+	}
+	return responses
+}
+
+func (sm *SessionManager) rememberPTYOutput(ps *ProcessState, chunk []byte) {
+	if len(chunk) == 0 {
+		return
+	}
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+	ps.PTYOutputTail = append(ps.PTYOutputTail, chunk...)
+	if len(ps.PTYOutputTail) > ptyOutputTailMax {
+		ps.PTYOutputTail = ps.PTYOutputTail[len(ps.PTYOutputTail)-ptyOutputTailMax:]
 	}
 }
 

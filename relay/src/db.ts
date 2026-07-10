@@ -676,12 +676,28 @@ export async function upsertSession(pool: pg.Pool, sessionId: string, daemonId: 
        agent_type = COALESCE(NULLIF($3, ''), sessions.agent_type),
        cwd = COALESCE(NULLIF($4, ''), sessions.cwd),
        title = COALESCE($5, sessions.title),
-       source = COALESCE($6, sessions.source),
+       source = CASE
+         WHEN sessions.source = 'daemon' AND $6 = 'terminal' THEN sessions.source
+         ELSE COALESCE($6, sessions.source)
+       END,
        exit_reason = COALESCE($8, sessions.exit_reason),
        user_id = CASE WHEN $9 IS NOT NULL THEN $9 ELSE sessions.user_id END,
        model = COALESCE($10, sessions.model),
        updated_at = NOW()`,
     [sessionId, daemonId, agentType, cwd, title || null, source || 'daemon', status, exitReason || null, userId || null, model || null]
+  );
+}
+
+export async function ensureDaemonSessionIdentity(pool: pg.Pool, sessionId: string, daemonId: string, userId?: number): Promise<void> {
+  await pool.query(
+    `INSERT INTO sessions (session_id, daemon_id, agent_type, cwd, source, status, user_id, created_at, updated_at)
+     VALUES ($1, $2, '', '', 'daemon', 'running', $3, NOW(), NOW())
+     ON CONFLICT (session_id) DO UPDATE SET
+       daemon_id = $2,
+       source = 'daemon',
+       user_id = CASE WHEN $3 IS NOT NULL THEN $3 ELSE sessions.user_id END,
+       updated_at = NOW()`,
+    [sessionId, daemonId, userId || null]
   );
 }
 

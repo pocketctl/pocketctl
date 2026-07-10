@@ -3,6 +3,7 @@ package session
 import (
 	"bufio"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"os/exec"
@@ -10,6 +11,7 @@ import (
 
 	"github.com/pocketctl/pocketctl/internal/adapter"
 	"github.com/pocketctl/pocketctl/internal/protocol"
+	"github.com/pocketctl/pocketctl/internal/ptyscan"
 )
 
 // ResolveInteractivePrompt writes the user's menu choice back to the PTY so the
@@ -60,6 +62,30 @@ func (sm *SessionManager) ResolveInteractivePrompt(sessionID, requestID, choice 
 	return nil
 }
 
+func (sm *SessionManager) PendingInteractivePrompt(sessionID string) (protocol.DaemonEvent, bool) {
+	sm.mu.RLock()
+	ps, ok := sm.sessions[sessionID]
+	var prompt *ptyscan.PendingPrompt
+	if ok && ps.PTYScanner != nil {
+		prompt = ps.PTYScanner.ActivePrompt()
+	}
+	sm.mu.RUnlock()
+	if !ok || prompt == nil {
+		return protocol.DaemonEvent{}, false
+	}
+
+	input, _ := json.Marshal(map[string]any{
+		"prompt":  prompt.PromptText,
+		"options": prompt.Options,
+	})
+	return protocol.DaemonEvent{
+		Type:      "interactive_prompt",
+		SessionID: sessionID,
+		RequestID: prompt.RequestID,
+		Input:     input,
+	}, true
+}
+
 func (sm *SessionManager) readOutput(ctx context.Context, cmd *exec.Cmd, stdout io.Reader, adp adapter.AgentAdapter, ps *ProcessState) {
 	scanner := bufio.NewScanner(stdout)
 	scanner.Buffer(make([]byte, 1024*1024), 1024*1024)
@@ -75,23 +101,17 @@ func (sm *SessionManager) readOutput(ctx context.Context, cmd *exec.Cmd, stdout 
 			continue
 		}
 		if sid := adp.SessionID(); sid != "" {
-			sm.mu.Lock()
-			if ps.SessionID != sid {
-				oldID := ps.SessionID
-				delete(sm.sessions, ps.SessionID)
-				ps.SessionID = sid
-				sm.sessions[sid] = ps
-				cwd := ps.Cwd
-				sm.mu.Unlock()
+			sm.mu.RLock()
+			oldID := ps.SessionID
+			sm.mu.RUnlock()
+			if cwd, agent, changed := sm.remapSessionID(oldID, sid); changed {
 				sm.outputCh <- protocol.DaemonEvent{
 					Type: "session_id_changed", SessionID: sid, OldSessionID: oldID,
 				}
 				// Trigger title extraction from JSONL for daemon-created sessions
 				if sm.OnSessionIDResolved != nil {
-					sm.OnSessionIDResolved(sid, cwd, ps.Agent)
+					sm.OnSessionIDResolved(sid, cwd, agent)
 				}
-			} else {
-				sm.mu.Unlock()
 			}
 		}
 		// Cache slash commands reported by the agent's init event (emitted once,
@@ -180,8 +200,9 @@ func (sm *SessionManager) SendMessage(ctx context.Context, sessionID string, con
 	// ps is non-nil here — safe to read fields.
 	sm.mu.RLock()
 	cwd := ps.Cwd
+	agentType := ps.Agent
 	isRunning := ps.Status == protocol.StatusRunning || ps.Status == "busy"
-	isExited := ps.Status == protocol.StatusExited
+	isExited := ps.Status == protocol.StatusExited || ps.Status == protocol.StatusCompleted
 	source := ps.Source
 	pid := ps.Pid
 	sm.mu.RUnlock()
@@ -220,52 +241,55 @@ func (sm *SessionManager) SendMessage(ctx context.Context, sessionID string, con
 		sm.mu.RLock()
 		ptyFile := ps.PTY
 		sm.mu.RUnlock()
-		if ptyFile == nil || !isProcessAlive(pid) {
-			return fmt.Errorf("daemon session interactive pty unavailable (process exited)")
-		}
-		// Emit user_text for UI (the tailer also forwards claude's own records).
-		sm.outputCh <- protocol.DaemonEvent{
-			Type:      "user_text",
-			SessionID: ps.SessionID,
-			Text:      content,
-		}
-		sm.mu.Lock()
-		ps.Status = protocol.StatusRunning
-		ps.LastActivityAt = time.Now()
-		sm.mu.Unlock()
-		// B (web-post-send-feedback): notify web the turn is running. PTY interactive
-		// mode previously omitted this, so the UI had no "working" feedback until
-		// the adapter emitted Completed at turn end.
-		sm.outputCh <- protocol.DaemonEvent{
-			Type:           "session_status",
-			SessionID:      ps.SessionID,
-			Status:         protocol.StatusRunning,
-			LastActivityAt: time.Now().UTC().Format(time.RFC3339),
-		}
-		if _, err := ptyFile.Write([]byte(content + "\r")); err != nil {
-			// B: stdin write failed — roll back so web doesn't sit on "running" forever.
-			sm.mu.Lock()
-			ps.Status = protocol.StatusError
-			sm.mu.Unlock()
-			sm.outputCh <- protocol.DaemonEvent{
-				Type:      "session_status",
-				SessionID: ps.SessionID,
-				Status:    protocol.StatusError,
+		if ptyFile == nil {
+			if agentType != adapter.AgentCodex {
+				return fmt.Errorf("daemon session interactive pty unavailable (process exited)")
 			}
-			return fmt.Errorf("pty stdin write: %w", err)
+		} else if !isProcessAlive(pid) {
+			return fmt.Errorf("daemon session interactive pty unavailable (process exited)")
+		} else {
+			// Emit user_text for UI (the tailer also forwards claude's own records).
+			sm.outputCh <- protocol.DaemonEvent{
+				Type:      "user_text",
+				SessionID: ps.SessionID,
+				Text:      content,
+			}
+			sm.mu.Lock()
+			ps.Status = protocol.StatusRunning
+			ps.LastActivityAt = time.Now()
+			sm.mu.Unlock()
+			// B (web-post-send-feedback): notify web the turn is running. PTY interactive
+			// mode previously omitted this, so the UI had no "working" feedback until
+			// the adapter emitted Completed at turn end.
+			sm.outputCh <- protocol.DaemonEvent{
+				Type:           "session_status",
+				SessionID:      ps.SessionID,
+				Status:         protocol.StatusRunning,
+				LastActivityAt: time.Now().UTC().Format(time.RFC3339),
+			}
+			if _, err := ptyFile.Write([]byte(content + "\r")); err != nil {
+				// B: stdin write failed — roll back so web doesn't sit on "running" forever.
+				sm.mu.Lock()
+				ps.Status = protocol.StatusError
+				sm.mu.Unlock()
+				sm.outputCh <- protocol.DaemonEvent{
+					Type:      "session_status",
+					SessionID: ps.SessionID,
+					Status:    protocol.StatusError,
+				}
+				return fmt.Errorf("pty stdin write: %w", err)
+			}
+			// Record the slash command (if any) so the tailer's JSONLStreamParser
+			// can attach it to the next command_receipt (e.g. /compact, /clear).
+			if ps.Tailer != nil {
+				ps.Tailer.SetPendingCmd(content)
+			}
+			return nil
 		}
-		// Record the slash command (if any) so the tailer's JSONLStreamParser
-		// can attach it to the next command_receipt (e.g. /compact, /clear).
-		if ps.Tailer != nil {
-			ps.Tailer.SetPendingCmd(content)
-		}
-		return nil
 	}
 
-	// Below: terminal session in exited state — resume via a new one-shot process
-	// (claude -p --resume / codex exec resume). (daemon sessions no longer reach
-	// here — they return above.)
-	agentType := ps.Agent
+	// Below: terminal or daemon-exec session in a dormant state — resume via a
+	// new one-shot process (claude -p --resume / codex exec resume).
 	if agentType == "" {
 		agentType = adapter.AgentClaude
 	}

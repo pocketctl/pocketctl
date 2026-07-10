@@ -610,6 +610,7 @@ export class Router {
       if (oldId) {
         this.pool.query('UPDATE sessions SET session_id = $1 WHERE session_id = $2', [sessionId, oldId]).catch(console.error);
         this.pool.query('UPDATE events SET session_id = $1 WHERE session_id = $2', [sessionId, oldId]).catch(console.error);
+        db.ensureDaemonSessionIdentity(this.pool, sessionId, daemonId, userId ?? undefined).catch(console.error);
         for (const [, client] of this.clients) {
           if (client.subscribedSessions.has(oldId)) {
             client.subscribedSessions.delete(oldId);
