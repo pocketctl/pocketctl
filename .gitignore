@@ -36,6 +36,7 @@ coverage/
 
 # Superpowers SDD scratch (local session artifacts — ledger/brief/report/diff)
 .superpowers/
+.worktrees/
 
 # Test reports
 test-report-*.html
