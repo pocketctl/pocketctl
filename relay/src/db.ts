@@ -1627,11 +1627,32 @@ export async function getTokenSummary(pool: pg.Pool, userId: number): Promise<{ 
   };
 }
 
+function normalizeAgentType(raw: string | null | undefined): string {
+  const lower = (raw ?? '').trim().toLowerCase();
+  switch (lower) {
+    case 'claude-code':
+    case 'claude_code':
+    case 'claudecode':
+    case 'claude':
+      return 'claude-code';
+    case 'opencode':
+    case 'open_code':
+    case 'open-code':
+      return 'opencode';
+    default:
+      return lower || 'unknown';
+  }
+}
+
 /** Daemon-level token usage: cumulative total + today/month deltas + per-session breakdown
- *  with full token composition (input/output/cache_read/cache_create). */
+ *  with full token composition (input/output/cache_read/cache_create).
+ *  Also returns per-agent aggregated usage, so clients can show agent-scoped
+ *  numbers without recomputing from session lists.
+ */
 export async function getTokensByDaemon(pool: pg.Pool, userId: number, daemonId: string): Promise<{
   total: number; today: number; thisMonth: number;
   sessions: Array<{ session_id: string; title: string; total_tokens: number; tok_input: number; tok_output: number; tok_cache_read: number; tok_cache_create: number; model: string; agent_type: string; status: string; created_at: Date; children?: any[] }>;
+  byAgent?: Array<{ agent_type: string; total: number; today: number; cache_read: number; cache_create: number }>;
 } | null> {
   const own = await pool.query(`SELECT 1 FROM daemons WHERE daemon_id = $1 AND user_id = $2`, [daemonId, userId]);
   if ((own.rowCount ?? 0) === 0) return null;
@@ -1669,6 +1690,66 @@ export async function getTokensByDaemon(pool: pg.Pool, userId: number, daemonId:
     ORDER BY COALESCE(last_activity_at, updated_at) DESC
   `, [userId, daemonId]);
 
+  const byAgentTotals = await pool.query(`
+    SELECT COALESCE(agent_type, '') AS agent_type,
+           COALESCE(SUM(COALESCE(total_tokens, 0)), 0) AS total_tokens,
+           COALESCE(SUM(COALESCE(tok_cache_read, 0)), 0) AS tok_cache_read,
+           COALESCE(SUM(COALESCE(tok_cache_create, 0)), 0) AS tok_cache_create
+    FROM sessions
+    WHERE user_id = $1 AND daemon_id = $2 AND session_id NOT LIKE 'pending-%'
+    GROUP BY COALESCE(agent_type, '')
+  `, [userId, daemonId]);
+
+  const byAgentToday = await pool.query(`
+    SELECT COALESCE(s.agent_type, '') AS agent_type,
+           COALESCE(SUM(
+             COALESCE((e.payload->'usage'->>'input_tokens')::bigint, 0) +
+             COALESCE((e.payload->'usage'->>'output_tokens')::bigint, 0) +
+             COALESCE((e.payload->'usage'->>'cache_read_tokens')::bigint, 0) +
+             COALESCE((e.payload->'usage'->>'cache_create_tokens')::bigint, 0)
+           ), 0) AS today
+    FROM events e
+    JOIN sessions s ON s.session_id = e.session_id
+    WHERE e.event_type = 'agent_text' AND e.payload ? 'usage'
+      AND s.user_id = $1 AND s.daemon_id = $2
+    GROUP BY COALESCE(s.agent_type, '')
+  `, [userId, daemonId]);
+
+  const byAgentMap = new Map<string, { agent_type: string; total: number; today: number; cache_read: number; cache_create: number }>();
+  for (const r of byAgentTotals.rows as any[]) {
+    const key = normalizeAgentType(r.agent_type ?? '');
+    const existing = byAgentMap.get(key);
+    if (existing) {
+      existing.total += parseInt(r.total_tokens ?? 0, 10);
+      existing.cache_read += parseInt(r.tok_cache_read ?? 0, 10);
+      existing.cache_create += parseInt(r.tok_cache_create ?? 0, 10);
+    } else {
+      byAgentMap.set(key, {
+        agent_type: key,
+        total: parseInt(r.total_tokens ?? 0, 10),
+        today: 0,
+        cache_read: parseInt(r.tok_cache_read ?? 0, 10),
+        cache_create: parseInt(r.tok_cache_create ?? 0, 10),
+      });
+    }
+  }
+  for (const r of byAgentToday.rows as any[]) {
+    const key = normalizeAgentType(r.agent_type ?? '');
+    const existing = byAgentMap.get(key);
+    if (existing) {
+      existing.today += parseInt(r.today ?? 0, 10);
+    } else {
+      byAgentMap.set(key, {
+        agent_type: key,
+        total: 0,
+        today: parseInt(r.today ?? 0, 10),
+        cache_read: 0,
+        cache_create: 0,
+      });
+    }
+  }
+  const byAgent = Array.from(byAgentMap.values()).sort((a, b) => b.total - a.total);
+
   const t = totals.rows[0] || {};
   return {
     total: parseInt(t.total ?? 0, 10),
@@ -1688,6 +1769,7 @@ export async function getTokensByDaemon(pool: pg.Pool, userId: number, daemonId:
       created_at: r.created_at,
       children: r.parent_session_id === '' ? await listSubagentsByParent(pool, r.session_id) : [],
     }))),
+    byAgent,
   };
 }
 
