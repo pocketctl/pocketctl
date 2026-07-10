@@ -1600,7 +1600,18 @@ export async function getSessionTokenTrend(pool: pg.Pool, sessionId: string, day
 /** User-level token usage summary: cumulative total + today/week/month deltas.
  *  All deltas come from per-turn agent_text usage (input+output+cache_read+cache_create),
  *  so BOTH PTY/attach sessions and -p sessions are attributed correctly. Model-agnostic. */
-export async function getTokenSummary(pool: pg.Pool, userId: number): Promise<{ total: number; today: number; thisWeek: number; thisMonth: number }> {
+export async function getTokenSummary(
+  pool: pg.Pool,
+  userId: number,
+  daemonId: string | null = null,
+): Promise<{ total: number; today: number; thisWeek: number; thisMonth: number }> {
+  const useDaemon = !!daemonId && daemonId !== 'all';
+  const params: any[] = [userId];
+  if (useDaemon) {
+    params.push(daemonId);
+  }
+  const daemonPredicate = useDaemon ? 'AND s.daemon_id = $2' : '';
+
   const result = await pool.query(`
     WITH turn_tokens AS (
       SELECT e.created_at,
@@ -1609,7 +1620,7 @@ export async function getTokenSummary(pool: pg.Pool, userId: number): Promise<{ 
               COALESCE((e.payload->'usage'->>'cache_read_tokens')::bigint, 0) +
               COALESCE((e.payload->'usage'->>'cache_create_tokens')::bigint, 0)) AS delta
       FROM events e JOIN sessions s ON s.session_id = e.session_id
-      WHERE e.event_type = 'agent_text' AND e.payload ? 'usage' AND s.user_id = $1
+      WHERE e.event_type = 'agent_text' AND e.payload ? 'usage' AND s.user_id = $1 ${daemonPredicate}
     )
     SELECT
       COALESCE(SUM(delta), 0) AS total,
@@ -1617,7 +1628,7 @@ export async function getTokenSummary(pool: pg.Pool, userId: number): Promise<{ 
       COALESCE(SUM(CASE WHEN created_at >= date_trunc('week', NOW()) THEN delta ELSE 0 END), 0) AS this_week,
       COALESCE(SUM(CASE WHEN created_at >= date_trunc('month', NOW()) THEN delta ELSE 0 END), 0) AS this_month
     FROM turn_tokens
-  `, [userId]);
+  `, params);
   const r = result.rows[0] || {};
   return {
     total: parseInt(r.total ?? 0, 10),
