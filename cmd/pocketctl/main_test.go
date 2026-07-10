@@ -7,7 +7,10 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/pocketctl/pocketctl/internal/adapter"
 	"github.com/pocketctl/pocketctl/internal/protocol"
+	"github.com/pocketctl/pocketctl/internal/session"
+	"github.com/pocketctl/pocketctl/internal/watcher"
 )
 
 func TestUpgradeGateDecision(t *testing.T) {
@@ -151,5 +154,59 @@ func TestPruneOrphanSpools(t *testing.T) {
 		if got[gone] {
 			t.Errorf("expected orphan %q removed, but it remains", gone)
 		}
+	}
+}
+
+func TestReconnectDiscoveryEventIsMarkedAsResync(t *testing.T) {
+	event := reconnectDiscoveryEvent(session.SessionInfo{
+		SessionID: "session-a",
+		Cwd:       "/tmp/project",
+		Status:    protocol.StatusCompleted,
+		Agent:     "codex",
+		Model:     "gpt-5.3-codex",
+	})
+
+	if event.Type != "session_discovered" || !event.Resync {
+		t.Fatalf("event = %#v, want resync session_discovered", event)
+	}
+	if event.SessionID != "session-a" || event.Source != "terminal" {
+		t.Fatalf("event = %#v, want session identity and source preserved", event)
+	}
+}
+
+func TestCodexSubagentDiscoveryEvent(t *testing.T) {
+	tests := []struct {
+		name     string
+		session  watcher.DiscoveredSession
+		wantDesc string
+	}{
+		{
+			name:     "nickname",
+			session:  watcher.DiscoveredSession{SessionID: "child", RootSessionID: "root", AgentNickname: "Newton", AgentPath: "/root/task"},
+			wantDesc: "Newton",
+		},
+		{
+			name:     "agent path basename",
+			session:  watcher.DiscoveredSession{SessionID: "child", RootSessionID: "root", AgentPath: "/root/keyboard_task2_impl"},
+			wantDesc: "keyboard_task2_impl",
+		},
+		{
+			name:     "short id",
+			session:  watcher.DiscoveredSession{SessionID: "019f4ad3-342e-7213-a51f-2758edf9ec6b", RootSessionID: "root"},
+			wantDesc: "edf9ec6b",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := codexSubagentDiscoveryEvent(tt.session)
+			if got.Type != "subagent_discovered" || got.SessionID != "root" ||
+				got.EventID != "codex-subagent:"+tt.session.SessionID+":discovery" ||
+				got.AgentID != tt.session.SessionID || got.ParentSessionID != "root" ||
+				got.RootSessionID != "root" || !got.IsSubagent || got.Agent != adapter.AgentCodex ||
+				got.SubAgentType != adapter.AgentCodex || got.SubAgentDesc != tt.wantDesc {
+				t.Fatalf("event = %+v", got)
+			}
+		})
 	}
 }

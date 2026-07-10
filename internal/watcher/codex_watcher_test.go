@@ -97,3 +97,62 @@ func TestCodexWatcher_RetriesFileWithoutMeta(t *testing.T) {
 		t.Fatalf("expected discovery after meta flush, got %+v", got)
 	}
 }
+
+func TestCodexWatcher_ClassifiesFreshSubagentWithoutTopLevelDiscovery(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("CODEX_HOME", tmp)
+	now := time.Now()
+	dayDir := filepath.Join(tmp, "sessions", now.Format("2006"), now.Format("01"), now.Format("02"))
+	path := writeRollout(t, dayDir, "rollout-child.jsonl",
+		`{"type":"session_meta","payload":{"id":"child","session_id":"root","parent_thread_id":"root","thread_source":"subagent","cwd":"/work/a","agent_nickname":"Newton","agent_path":"/root/task"}}`+"\n", now)
+
+	cw := NewCodexSessionWatcher()
+	cw.scan(now)
+	got := drainEvents(cw.eventsCh)
+	if len(got) != 1 {
+		t.Fatalf("want one subagent event, got %+v", got)
+	}
+	ev := got[0]
+	if ev.Action != "subagent_discovered" || ev.Filepath != path || ev.Session.SessionID != "child" ||
+		ev.Session.ParentSessionID != "root" || ev.Session.RootSessionID != "root" ||
+		!ev.Session.IsSubagent || ev.Session.AgentNickname != "Newton" || ev.Session.AgentPath != "/root/task" {
+		t.Fatalf("unexpected subagent event: %+v", ev)
+	}
+}
+
+func TestCodexWatcher_BootstrapFindsHistoricalSubagentButSkipsHistoricalMain(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("CODEX_HOME", tmp)
+	now := time.Now()
+	oldDay := now.AddDate(0, 0, -30)
+	dayDir := filepath.Join(tmp, "sessions", oldDay.Format("2006"), oldDay.Format("01"), oldDay.Format("02"))
+	old := now.Add(-30 * 24 * time.Hour)
+	writeRollout(t, dayDir, "rollout-main.jsonl",
+		`{"type":"session_meta","payload":{"id":"main","session_id":"main","thread_source":"user","cwd":"/work/a"}}`+"\n", old)
+	writeRollout(t, dayDir, "rollout-child.jsonl",
+		`{"type":"session_meta","payload":{"id":"child","session_id":"root","parent_thread_id":"root","thread_source":"subagent","cwd":"/work/a"}}`+"\n", old)
+
+	cw := NewCodexSessionWatcher()
+	cw.scanHistoricalSubagents()
+	got := drainEvents(cw.eventsCh)
+	if len(got) != 1 || got[0].Action != "subagent_discovered" || got[0].Session.SessionID != "child" {
+		t.Fatalf("historical scan = %+v", got)
+	}
+}
+
+func TestCodexWatcher_DoesNotRediscoverSubagentPath(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("CODEX_HOME", tmp)
+	now := time.Now()
+	dayDir := filepath.Join(tmp, "sessions", now.Format("2006"), now.Format("01"), now.Format("02"))
+	writeRollout(t, dayDir, "rollout-child.jsonl",
+		`{"type":"session_meta","payload":{"id":"child","session_id":"root","parent_thread_id":"root","thread_source":"subagent"}}`+"\n", now)
+
+	cw := NewCodexSessionWatcher()
+	cw.scanHistoricalSubagents()
+	cw.scan(now)
+	got := drainEvents(cw.eventsCh)
+	if len(got) != 1 || got[0].Session.SessionID != "child" {
+		t.Fatalf("subagent path should emit once, got %+v", got)
+	}
+}

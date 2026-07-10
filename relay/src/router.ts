@@ -1,6 +1,5 @@
 import type { WebSocket } from 'ws';
 import type pg from 'pg';
-import { createHash } from 'crypto';
 import * as db from './db.js';
 import { generateTitle, generateSubagentTitle } from './title.js';
 import { notifyUser, sessionStatusPush, daemonOfflinePush, daemonOnlinePush, approvalPush, interactivePush, summarizeToolInput, highRiskPush, isHighRiskCommand } from './push.js';
@@ -687,41 +686,55 @@ export class Router {
       return;
     }
     if (msg.type === 'subagent_discovered') {
-      this.persistAndAck(daemonId, msg.seq, sessionId, msg.type, msg);
-      // 精确落库：toolUseId(=call_id) / agentType(=subagent_type) / desc(=subagent_desc)
-      db.upsertSubagent(this.pool, sessionId, msg.agent_id || '', 'claude_subagent', msg.call_id || undefined, msg.subagent_type || undefined, msg.subagent_desc || undefined).catch(console.error);
-      db.incrementSubagentCount(this.pool, sessionId).catch(console.error);
-      for (const [clientWs, client] of this.clients) {
-        if (client.subscribedSessions.has(sessionId) && clientWs.readyState === 1) this.send(clientWs, msg);
-      }
+      const isCodex = msg.agent === 'codex';
+      const relation: db.SubagentRelation = {
+        parentSessionId: sessionId,
+        agentId: msg.agent_id || '',
+        rootSessionId: msg.root_session_id || sessionId,
+        kind: isCodex ? 'codex_subagent' : 'claude_subagent',
+        toolUseId: msg.call_id || undefined,
+        agentType: msg.subagent_type || undefined,
+        title: msg.subagent_desc || undefined,
+      };
+      // Ack only after both the event and its relationship are durable. A
+      // failed reconciliation remains in the daemon spool and retries safely.
+      db.persistEvent(this.pool, sessionId, msg.type, msg)
+        .then(() => db.reconcileSubagent(this.pool, relation))
+        .then(() => {
+          this.markPersisted(daemonId, msg.seq);
+          for (const [clientWs, client] of this.clients) {
+            if (client.subscribedSessions.has(sessionId) && clientWs.readyState === 1) this.send(clientWs, msg);
+          }
+        })
+        .catch((e) => console.error('subagent discovery reconcile:', e));
       return;
     }
     if (msg.type === 'subagent_usage') {
-      // 子代理 token 累加到 subagents 行（不 persist 为 event，仅更新聚合）
-      this.markPersisted(daemonId, msg.seq);
       const u = msg.usage;
-      if (msg.agent_id && u) {
-        // 内容指纹幂等去重：daemon 发的 subagent_usage 携带 per-turn 的 Anthropic usage 原值，
-        // relay 当增量相加（addSubagentUsage: token_in = subagents.token_in + $3）。relay 重启 /
-        // daemon incarnation 切换 / subagent tailer 从 offset 0 重读 child JSONL 都会让同一份
-        // usage 被重发。用 (daemon_id, usage_hash) 内容指纹去重（与 events.event_hash 同构），
-        // 保证同一份 per-turn usage 无论重放多少遍只累加一次。
-        const inT = u.input_tokens || 0;
-        const outT = u.output_tokens || 0;
-        const crT = u.cache_read_tokens || 0;
-        const ccT = u.cache_create_tokens || 0;
-        const usageHash = createHash('md5')
-          .update(`${sessionId}:${msg.agent_id}:${inT}:${outT}:${crT}:${ccT}`)
-          .digest('hex').slice(0, 16);
-        this.pool.query(
-          'INSERT INTO subagent_usage_seen (daemon_id, usage_hash, seq, agent_id) VALUES ($1, $2, $3, $4) ON CONFLICT DO NOTHING',
-          [daemonId, usageHash, msg.seq, msg.agent_id]
-        ).then((r) => {
-          if ((r?.rowCount ?? 0) === 0) return; // 同内容已计入，跳过
-          db.addSubagentUsage(this.pool, sessionId, msg.agent_id, inT, outT, crT, ccT)
-            .catch(console.error);
-        }).catch(console.error);
+      if (!msg.agent_id || !u) {
+        this.markPersisted(daemonId, msg.seq);
+        return;
       }
+      const inT = u.input_tokens || 0;
+      const outT = u.output_tokens || 0;
+      const crT = u.cache_read_tokens || 0;
+      const ccT = u.cache_create_tokens || 0;
+      // New daemons provide a stable JSONL record identity. An empty value
+      // preserves the exact amount-based fingerprint used by older daemons.
+      const eventId = msg.event_id || '';
+      db.recordSubagentUsage(this.pool, {
+        daemonId,
+        seq: msg.seq,
+        eventId,
+        parentSessionId: sessionId,
+        agentId: msg.agent_id,
+        inputTokens: inT,
+        outputTokens: outT,
+        cacheRead: crT,
+        cacheCreate: ccT,
+      })
+        .then(() => this.markPersisted(daemonId, msg.seq))
+        .catch((e) => console.error('subagent usage persist:', e));
       return;
     }
     if (msg.type === 'generate_subagent_title_request') {

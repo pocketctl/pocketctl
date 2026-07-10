@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/pocketctl/pocketctl/internal/adapter"
 	"github.com/pocketctl/pocketctl/internal/protocol"
 	"github.com/pocketctl/pocketctl/internal/watcher"
 )
@@ -118,6 +119,19 @@ func (sm *SessionManager) RegisterTerminalSession(sessionID, cwd string, pid int
 
 	// Check if session already exists
 	if ps, ok := sm.sessions[sessionID]; ok {
+		// Codex rollout discovery has no PID, so the childPids guard above cannot
+		// identify a rollout created by our own `codex exec --json` child. The
+		// managed session has already been remapped to the real rollout ID. Keep
+		// its daemon ownership only while that original child is still managed,
+		// executing, and alive. Once it exits, a later terminal resume must be
+		// allowed to take over and start a JSONL tailer.
+		managedCodexChildAlive := ps.Pid > 0 &&
+			sm.childPids[ps.Pid] &&
+			(ps.Status == protocol.StatusRunning || ps.Status == "busy") &&
+			sm.proc != nil && sm.proc.IsAlive(ps.Pid)
+		if pid == 0 && agent == adapter.AgentCodex && ps.Source == "daemon" && managedCodexChildAlive {
+			return false
+		}
 		if ps.Source == "terminal" {
 			// Re-discovered (e.g. --continue): update PID, status, cwd.
 			// Old tailer still works on same JSONL — no new tailer needed.

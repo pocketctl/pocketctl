@@ -652,16 +652,33 @@ func (sm *SessionManager) AbortSession(sessionID string) bool {
 // as terminal/exited so SendMessage's existing --resume path drives it.
 // Returns false only if no JSONL exists (genuinely unknown session).
 func (sm *SessionManager) tryResumeHistorical(sessionID string) bool {
-	jsonlPath, err := watcher.ResolveJSONLPath(sessionID, "")
-	if err != nil {
-		return false
+	type historicalSession struct {
+		agent string
+		cwd   string
 	}
-	cwd := extractCwdFromJSONL(jsonlPath)
-	if cwd == "" {
-		// Fallback: decode cwd from the projects dir name (-Users-foo-bar →
-		// /Users/foo/bar). Less reliable (collapses internal hyphens) but
-		// better than an empty cwd.
-		cwd = cwdFromProjectsDir(jsonlPath)
+
+	var historical *historicalSession
+	for _, agentType := range []string{adapter.AgentClaude, adapter.AgentCodex} {
+		jsonlPath, err := adapter.ResolveJSONLPathFor(agentType, sessionID, "")
+		if err != nil {
+			continue
+		}
+		cwd := ""
+		if agentType == adapter.AgentCodex {
+			_, cwd, _ = adapter.CodexRolloutMeta(jsonlPath)
+		} else {
+			cwd = extractCwdFromJSONL(jsonlPath)
+			if cwd == "" {
+				// Fallback: decode cwd from the projects dir name
+				// (-Users-foo-bar → /Users/foo/bar).
+				cwd = cwdFromProjectsDir(jsonlPath)
+			}
+		}
+		historical = &historicalSession{agent: agentType, cwd: cwd}
+		break
+	}
+	if historical == nil {
+		return false
 	}
 	now := time.Now()
 	sm.mu.Lock()
@@ -676,8 +693,8 @@ func (sm *SessionManager) tryResumeHistorical(sessionID string) bool {
 		Source:         "terminal",
 		StartedAt:      now,
 		LastActivityAt: now,
-		Cwd:            cwd,
-		Agent:          "claude-code",
+		Cwd:            historical.cwd,
+		Agent:          historical.agent,
 	}
 	return true
 }

@@ -2,6 +2,7 @@ package adapter
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -9,6 +10,79 @@ import (
 
 	"github.com/pocketctl/pocketctl/internal/protocol"
 )
+
+func TestReadCodexRolloutMetadata_ClassifiesSubagentsStrictly(t *testing.T) {
+	tests := []struct {
+		name         string
+		payload      string
+		id           string
+		cwd          string
+		parent       string
+		root         string
+		nickname     string
+		agentPath    string
+		wantSubagent bool
+	}{
+		{
+			name:    "ordinary main session",
+			payload: `{"id":"main","session_id":"main","thread_source":"user","cwd":"/repo"}`,
+			id:      "main", cwd: "/repo", root: "main",
+		},
+		{
+			name:    "modern spawned subagent",
+			payload: `{"id":"child","session_id":"root","parent_thread_id":"root","thread_source":"subagent","agent_nickname":"Newton","agent_path":"/root/task"}`,
+			id:      "child", parent: "root", root: "root", nickname: "Newton", agentPath: "/root/task", wantSubagent: true,
+		},
+		{
+			name:    "legacy review subagent",
+			payload: `{"id":"review","session_id":"root","parent_thread_id":"root","thread_source":"subagent","source":{"subagent":"review"}}`,
+			id:      "review", parent: "root", root: "root", wantSubagent: true,
+		},
+		{
+			name:    "subagent without relation",
+			payload: `{"id":"orphan","thread_source":"subagent"}`,
+			id:      "orphan",
+		},
+		{
+			name:         "parent only subagent uses parent as root",
+			payload:      `{"id":"child","parent_thread_id":"parent","thread_source":"subagent"}`,
+			id:           "child",
+			parent:       "parent",
+			root:         "parent",
+			wantSubagent: true,
+		},
+		{
+			name:    "self parent is not a subagent",
+			payload: `{"id":"same","session_id":"same","parent_thread_id":"same","thread_source":"subagent"}`,
+			id:      "same", parent: "same", root: "same",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "rollout.jsonl")
+			line := fmt.Sprintf(`{"type":"session_meta","payload":%s}`+"\n", tt.payload)
+			if err := os.WriteFile(path, []byte(line), 0o644); err != nil {
+				t.Fatal(err)
+			}
+
+			got, ok := ReadCodexRolloutMetadata(path)
+			if !ok {
+				t.Fatal("metadata not parsed")
+			}
+			if got.ID != tt.id || got.Cwd != tt.cwd || got.ParentThreadID != tt.parent ||
+				got.RootSessionID != tt.root || got.AgentNickname != tt.nickname ||
+				got.AgentPath != tt.agentPath || got.IsSubagent != tt.wantSubagent {
+				t.Fatalf("metadata = %+v", got)
+			}
+
+			legacyID, legacyCwd, legacyOK := CodexRolloutMeta(path)
+			if !legacyOK || legacyID != tt.id || legacyCwd != tt.cwd {
+				t.Fatalf("legacy tuple = (%q, %q, %v)", legacyID, legacyCwd, legacyOK)
+			}
+		})
+	}
+}
 
 // helper: parse a codex line via the JSONL parser and return events.
 func codexParse(t *testing.T, line string) []protocol.DaemonEvent {

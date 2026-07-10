@@ -6,7 +6,9 @@ import (
 	"path/filepath"
 	"runtime"
 	"testing"
+	"time"
 
+	"github.com/pocketctl/pocketctl/internal/adapter"
 	"github.com/pocketctl/pocketctl/internal/protocol"
 )
 
@@ -35,6 +37,7 @@ func TestSendMessage_UnknownSessionReturnsError(t *testing.T) {
 func TestTryResumeHistorical_RegistersFromJSONL(t *testing.T) {
 	tmp := t.TempDir()
 	t.Setenv("HOME", tmp)
+	t.Setenv("CODEX_HOME", filepath.Join(tmp, ".codex"))
 	if runtime.GOOS == "windows" {
 		t.Setenv("USERPROFILE", tmp)
 	}
@@ -65,6 +68,53 @@ func TestTryResumeHistorical_RegistersFromJSONL(t *testing.T) {
 	if ps.Source != "terminal" || ps.Status != protocol.StatusExited {
 		t.Errorf("source/status = %q/%q, want terminal/exited", ps.Source, ps.Status)
 	}
+	if ps.Agent != adapter.AgentClaude {
+		t.Errorf("agent = %q, want %q", ps.Agent, adapter.AgentClaude)
+	}
+}
+
+func TestTryResumeHistorical_RegistersCodexRollout(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("HOME", tmp)
+	t.Setenv("CODEX_HOME", filepath.Join(tmp, ".codex"))
+	if runtime.GOOS == "windows" {
+		t.Setenv("USERPROFILE", tmp)
+	}
+
+	sid := "11111111-2222-3333-4444-555555555555"
+	dir := filepath.Join(tmp, ".codex", "sessions", "2026", "07", "10")
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	rollout := filepath.Join(dir, "rollout-2026-07-10T11-13-28-"+sid+".jsonl")
+	line := `{"type":"session_meta","payload":{"id":"` + sid + `","cwd":"/Users/foo/codex-project"}}` + "\n"
+	if err := os.WriteFile(rollout, []byte(line), 0644); err != nil {
+		t.Fatal(err)
+	}
+	old := time.Now().Add(-time.Hour)
+	if err := os.Chtimes(rollout, old, old); err != nil {
+		t.Fatal(err)
+	}
+
+	sm := NewSessionManager(make(chan protocol.DaemonEvent, 16))
+	if !sm.tryResumeHistorical(sid) {
+		t.Fatal("expected Codex rollout to be recovered")
+	}
+	sm.mu.RLock()
+	ps := sm.sessions[sid]
+	sm.mu.RUnlock()
+	if ps == nil {
+		t.Fatal("Codex session not registered")
+	}
+	if ps.Agent != adapter.AgentCodex {
+		t.Errorf("agent = %q, want %q", ps.Agent, adapter.AgentCodex)
+	}
+	if ps.Cwd != "/Users/foo/codex-project" {
+		t.Errorf("cwd = %q, want /Users/foo/codex-project", ps.Cwd)
+	}
+	if ps.Source != "terminal" || ps.Status != protocol.StatusExited {
+		t.Errorf("source/status = %q/%q, want terminal/exited", ps.Source, ps.Status)
+	}
 }
 
 // TestTryResumeHistorical_NoJSONLReturnsFalse verifies an unknown session with
@@ -72,6 +122,7 @@ func TestTryResumeHistorical_RegistersFromJSONL(t *testing.T) {
 func TestTryResumeHistorical_NoJSONLReturnsFalse(t *testing.T) {
 	tmp := t.TempDir()
 	t.Setenv("HOME", tmp)
+	t.Setenv("CODEX_HOME", filepath.Join(tmp, ".codex"))
 	if runtime.GOOS == "windows" {
 		t.Setenv("USERPROFILE", tmp)
 	}

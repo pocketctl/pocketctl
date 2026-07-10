@@ -18,6 +18,24 @@ const baseMessages = [
 ]
 
 describe('SubAgentFoldGroup', () => {
+  test('renders a Codex child through the existing fold component', () => {
+    const w = mount(SubAgentFoldGroup, {
+      props: {
+        agentId: '019f4ad3-342e-7213-a51f-2758edf9ec6b',
+        title: 'Newton',
+        desc: 'keyboard task',
+        agentType: 'codex',
+        tokenUsage: null,
+        messages: baseMessages,
+        parentTitle: 'Main Codex Session',
+      },
+      global: { stubs: globalStubs },
+    })
+    expect(w.text()).toContain('Main Codex Session')
+    expect(w.text()).toContain('Newton')
+    expect(w.html()).toContain('message-agent-stub')
+  })
+
   test('renders breadcrumb with parentTitle and title', () => {
     const w = mount(SubAgentFoldGroup, {
       props: {

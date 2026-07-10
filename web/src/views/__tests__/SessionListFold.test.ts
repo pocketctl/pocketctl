@@ -16,7 +16,15 @@ const mockSessions = [
     totalTokens: 50000,
     children: [
       { agentId: 'child1', agentType: 'claude-code', title: 'Research task', tokenIn: 1000, tokenOut: 500 },
-      { agentId: 'child2', agentType: 'codex', title: null, tokenIn: 0, tokenOut: 0 },
+      {
+        agentId: '019f4ad3-342e-7213-a51f-2758edf9ec6b',
+        kind: 'codex_subagent',
+        agentType: 'codex',
+        title: 'Newton',
+        status: 'completed',
+        tokenIn: 0,
+        tokenOut: 0,
+      },
     ],
   },
   {
@@ -163,6 +171,22 @@ describe('SessionList.vue — subagent fold (P2)', () => {
     // child2 should not have a .child-token element
     const child2 = childRows[1]
     expect(child2.find('.child-token').exists()).toBe(false)
+  })
+
+  test('Codex child routes through its existing root session', async () => {
+    const w = mount(SessionList, {
+      global: {
+        stubs: ['router-link', 'AgentBadge', 'SessionActions', 'NewSessionDialog'],
+      },
+    })
+    await flushPromises()
+    await new Promise((r) => setTimeout(r, 10))
+
+    await w.find('.fold-toggle').trigger('click')
+    const codexChild = w.findAll('.child-row').find((row) => row.text().includes('Newton'))
+    expect(codexChild).toBeDefined()
+    await codexChild!.trigger('click')
+    expect(mockPush).toHaveBeenCalledWith('/session/parent1?subagent=019f4ad3-342e-7213-a51f-2758edf9ec6b')
   })
 
   test('toggling fold twice collapses children', async () => {

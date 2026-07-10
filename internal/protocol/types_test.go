@@ -155,6 +155,7 @@ func TestDaemonEvent_NewFields_Deserialization(t *testing.T) {
 func TestDaemonEventSubagentFieldsSerialize(t *testing.T) {
 	ev := DaemonEvent{
 		Type:            "subagent_discovered",
+		EventID:         "jsonl:source:1:0",
 		SessionID:       "parent-1",
 		AgentID:         "agent-abc",
 		ParentSessionID: "parent-1",
@@ -166,7 +167,7 @@ func TestDaemonEventSubagentFieldsSerialize(t *testing.T) {
 		t.Fatalf("marshal: %v", err)
 	}
 	j := string(out)
-	for _, want := range []string{`"parent_session_id":"parent-1"`, `"is_subagent":true`, `"root_session_id":"parent-1"`} {
+	for _, want := range []string{`"event_id":"jsonl:source:1:0"`, `"parent_session_id":"parent-1"`, `"is_subagent":true`, `"root_session_id":"parent-1"`} {
 		if !contains(j, want) {
 			t.Errorf("missing %q in %s", want, j)
 		}

@@ -11,6 +11,14 @@ import (
 	"github.com/pocketctl/pocketctl/internal/protocol"
 )
 
+type fixedProcessController struct {
+	alive map[int]bool
+}
+
+func (f fixedProcessController) IsAlive(pid int) bool { return f.alive[pid] }
+func (fixedProcessController) Terminate(int) error    { return nil }
+func (fixedProcessController) Kill(int) error         { return nil }
+
 // drainDiscovered consumes a session_discovered event if one is pending.
 // RegisterTerminalSession no longer emits session_discovered itself — it's
 // emitted later by handleWatcherEvents (cmd/pocketctl/main.go) once the JSONL
@@ -394,6 +402,84 @@ func TestRemapSessionIDUpdatesSessionMapAndCwdRegistry(t *testing.T) {
 	}
 }
 
+func TestRegisterTerminalSessionCodexWatcherDoesNotTakeOverDaemonSessionWithoutPID(t *testing.T) {
+	outputCh := make(chan protocol.DaemonEvent, 16)
+	sm := NewSessionManager(outputCh)
+	sm.proc = fixedProcessController{alive: map[int]bool{4321: true}}
+	sm.mu.Lock()
+	sm.sessions["codex-session"] = &ProcessState{
+		SessionID: "codex-session",
+		Cwd:       "/tmp/project",
+		Agent:     adapter.AgentCodex,
+		Source:    "daemon",
+		Status:    protocol.StatusRunning,
+		Pid:       4321,
+	}
+	sm.childPids[4321] = true
+	sm.mu.Unlock()
+
+	startTailer := sm.RegisterTerminalSession(
+		"codex-session",
+		"/tmp/project",
+		0, // Codex rollout discovery has no process id.
+		"",
+		protocol.StatusRunning,
+		adapter.AgentCodex,
+	)
+
+	if startTailer {
+		t.Fatal("codex watcher must not start a second tailer for a daemon-created session")
+	}
+	sm.mu.RLock()
+	ps := sm.sessions["codex-session"]
+	sm.mu.RUnlock()
+	if ps.Source != "daemon" {
+		t.Fatalf("session source = %q, want daemon", ps.Source)
+	}
+	if ps.Pid != 4321 {
+		t.Fatalf("session pid = %d, want original daemon child pid 4321", ps.Pid)
+	}
+}
+
+func TestRegisterTerminalSessionCodexWatcherTakesOverExitedDaemonSessionWithoutPID(t *testing.T) {
+	outputCh := make(chan protocol.DaemonEvent, 16)
+	sm := NewSessionManager(outputCh)
+	sm.proc = fixedProcessController{alive: map[int]bool{4321: false}}
+	sm.mu.Lock()
+	sm.sessions["codex-session"] = &ProcessState{
+		SessionID: "codex-session",
+		Cwd:       "/tmp/project",
+		Agent:     adapter.AgentCodex,
+		Source:    "daemon",
+		Status:    protocol.StatusCompleted,
+		Pid:       4321,
+	}
+	sm.childPids[4321] = true
+	sm.mu.Unlock()
+
+	startTailer := sm.RegisterTerminalSession(
+		"codex-session",
+		"/tmp/project",
+		0,
+		"",
+		protocol.StatusRunning,
+		adapter.AgentCodex,
+	)
+
+	if !startTailer {
+		t.Fatal("external Codex resume must start a JSONL tailer after daemon session exits")
+	}
+	sm.mu.RLock()
+	ps := sm.sessions["codex-session"]
+	sm.mu.RUnlock()
+	if ps.Source != "terminal" {
+		t.Fatalf("session source = %q, want terminal", ps.Source)
+	}
+	if ps.Pid != 0 {
+		t.Fatalf("session pid = %d, want watcher pid 0", ps.Pid)
+	}
+}
+
 func TestListSessions_SortedByLastActivity(t *testing.T) {
 	outputCh := make(chan protocol.DaemonEvent, 16)
 	sm := NewSessionManager(outputCh)
@@ -415,6 +501,26 @@ func TestListSessions_SortedByLastActivity(t *testing.T) {
 	}
 	if sessions[1].SessionID != "old-sid" {
 		t.Errorf("expected old-sid second, got %s", sessions[1].SessionID)
+	}
+}
+
+func TestResyncSessionsMarksDiscoveryEvents(t *testing.T) {
+	outputCh := make(chan protocol.DaemonEvent, 16)
+	sm := NewSessionManager(outputCh)
+	sm.mu.Lock()
+	sm.sessions["session-a"] = &ProcessState{
+		SessionID: "session-a",
+		Cwd:       "/tmp/project",
+		Agent:     adapter.AgentCodex,
+		Source:    "daemon",
+		Status:    protocol.StatusCompleted,
+	}
+	sm.mu.Unlock()
+
+	sm.ResyncSessions()
+	evt := <-outputCh
+	if evt.Type != "session_discovered" || !evt.Resync {
+		t.Fatalf("event = %#v, want resync session_discovered", evt)
 	}
 }
 
