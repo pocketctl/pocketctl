@@ -59,6 +59,7 @@ type DaemonEvent struct {
 	Title            string          `json:"title,omitempty"`
 	Cwd              string          `json:"cwd,omitempty"`
 	Source           string          `json:"source,omitempty"`
+	Resync           bool            `json:"resync,omitempty"` // reconnect replay, not a newly discovered session
 	ExitReason       string          `json:"exit_reason,omitempty"`
 	LastActivityAt   string          `json:"last_activity_at,omitempty"`
 	AgentID          string          `json:"agent_id,omitempty"`          // sub-agent identifier (e.g. "afa8314e6e3f6e552)

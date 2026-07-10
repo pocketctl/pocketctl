@@ -137,6 +137,7 @@ func (sm *SessionManager) ResyncSessions() {
 			Source:    ps.Source,
 			Agent:     ps.Agent,
 			Model:     ps.Model,
+			Resync:    true,
 		}
 	}
 }

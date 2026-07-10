@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/pocketctl/pocketctl/internal/protocol"
+	"github.com/pocketctl/pocketctl/internal/session"
 )
 
 func TestUpgradeGateDecision(t *testing.T) {
@@ -151,5 +152,22 @@ func TestPruneOrphanSpools(t *testing.T) {
 		if got[gone] {
 			t.Errorf("expected orphan %q removed, but it remains", gone)
 		}
+	}
+}
+
+func TestReconnectDiscoveryEventIsMarkedAsResync(t *testing.T) {
+	event := reconnectDiscoveryEvent(session.SessionInfo{
+		SessionID: "session-a",
+		Cwd:       "/tmp/project",
+		Status:    protocol.StatusCompleted,
+		Agent:     "codex",
+		Model:     "gpt-5.3-codex",
+	})
+
+	if event.Type != "session_discovered" || !event.Resync {
+		t.Fatalf("event = %#v, want resync session_discovered", event)
+	}
+	if event.SessionID != "session-a" || event.Source != "terminal" {
+		t.Fatalf("event = %#v, want session identity and source preserved", event)
 	}
 }

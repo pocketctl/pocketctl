@@ -1096,15 +1096,7 @@ func cmdDaemonStart(args []string) {
 		count := len(sm.ListSessions())
 		logger.Info(fmt.Sprintf("resyncing %d sessions after reconnect", count))
 		for _, s := range sm.ListSessions() {
-			client.SendMsg(protocol.DaemonEvent{
-				Type:      "session_discovered",
-				SessionID: s.SessionID,
-				Cwd:       s.Cwd,
-				Status:    s.Status,
-				Source:    "terminal",
-				Agent:     s.Agent,
-				Model:     s.Model,
-			})
+			client.SendMsg(reconnectDiscoveryEvent(s))
 		}
 		logger.Info("resync done")
 	}
@@ -1320,6 +1312,19 @@ func cmdDaemonStart(args []string) {
 	sm.ShutdownOpencode()
 	cancel()
 	time.Sleep(500 * time.Millisecond)
+}
+
+func reconnectDiscoveryEvent(s session.SessionInfo) protocol.DaemonEvent {
+	return protocol.DaemonEvent{
+		Type:      "session_discovered",
+		SessionID: s.SessionID,
+		Cwd:       s.Cwd,
+		Status:    s.Status,
+		Source:    "terminal",
+		Agent:     s.Agent,
+		Model:     s.Model,
+		Resync:    true,
+	}
 }
 
 // ---------- daemon stop ----------
