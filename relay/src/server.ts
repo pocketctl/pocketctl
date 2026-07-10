@@ -499,7 +499,7 @@ async function main() {
     const daemon = ((req.query as any).daemon as string) || 'all';
     const days = Math.min(Math.max(parseInt((req.query as any).days as string) || 30, 1), 365);
     const [summary, dailySeries, byModel, byDaemon] = await Promise.all([
-      getTokenSummary(pool, payload.userId),
+      getTokenSummary(pool, payload.userId, daemon),
       getTokenDailySeries(pool, payload.userId, daemon, days),
       getTokenByModel(pool, payload.userId, daemon),
       getTokenByDaemon(pool, payload.userId),
