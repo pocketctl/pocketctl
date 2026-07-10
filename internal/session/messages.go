@@ -200,6 +200,7 @@ func (sm *SessionManager) SendMessage(ctx context.Context, sessionID string, con
 	// ps is non-nil here — safe to read fields.
 	sm.mu.RLock()
 	cwd := ps.Cwd
+	agentType := ps.Agent
 	isRunning := ps.Status == protocol.StatusRunning || ps.Status == "busy"
 	isExited := ps.Status == protocol.StatusExited || ps.Status == protocol.StatusCompleted
 	source := ps.Source
@@ -240,52 +241,55 @@ func (sm *SessionManager) SendMessage(ctx context.Context, sessionID string, con
 		sm.mu.RLock()
 		ptyFile := ps.PTY
 		sm.mu.RUnlock()
-		if ptyFile == nil || !isProcessAlive(pid) {
-			return fmt.Errorf("daemon session interactive pty unavailable (process exited)")
-		}
-		// Emit user_text for UI (the tailer also forwards claude's own records).
-		sm.outputCh <- protocol.DaemonEvent{
-			Type:      "user_text",
-			SessionID: ps.SessionID,
-			Text:      content,
-		}
-		sm.mu.Lock()
-		ps.Status = protocol.StatusRunning
-		ps.LastActivityAt = time.Now()
-		sm.mu.Unlock()
-		// B (web-post-send-feedback): notify web the turn is running. PTY interactive
-		// mode previously omitted this, so the UI had no "working" feedback until
-		// the adapter emitted Completed at turn end.
-		sm.outputCh <- protocol.DaemonEvent{
-			Type:           "session_status",
-			SessionID:      ps.SessionID,
-			Status:         protocol.StatusRunning,
-			LastActivityAt: time.Now().UTC().Format(time.RFC3339),
-		}
-		if _, err := ptyFile.Write([]byte(content + "\r")); err != nil {
-			// B: stdin write failed — roll back so web doesn't sit on "running" forever.
-			sm.mu.Lock()
-			ps.Status = protocol.StatusError
-			sm.mu.Unlock()
-			sm.outputCh <- protocol.DaemonEvent{
-				Type:      "session_status",
-				SessionID: ps.SessionID,
-				Status:    protocol.StatusError,
+		if ptyFile == nil {
+			if agentType != adapter.AgentCodex {
+				return fmt.Errorf("daemon session interactive pty unavailable (process exited)")
 			}
-			return fmt.Errorf("pty stdin write: %w", err)
+		} else if !isProcessAlive(pid) {
+			return fmt.Errorf("daemon session interactive pty unavailable (process exited)")
+		} else {
+			// Emit user_text for UI (the tailer also forwards claude's own records).
+			sm.outputCh <- protocol.DaemonEvent{
+				Type:      "user_text",
+				SessionID: ps.SessionID,
+				Text:      content,
+			}
+			sm.mu.Lock()
+			ps.Status = protocol.StatusRunning
+			ps.LastActivityAt = time.Now()
+			sm.mu.Unlock()
+			// B (web-post-send-feedback): notify web the turn is running. PTY interactive
+			// mode previously omitted this, so the UI had no "working" feedback until
+			// the adapter emitted Completed at turn end.
+			sm.outputCh <- protocol.DaemonEvent{
+				Type:           "session_status",
+				SessionID:      ps.SessionID,
+				Status:         protocol.StatusRunning,
+				LastActivityAt: time.Now().UTC().Format(time.RFC3339),
+			}
+			if _, err := ptyFile.Write([]byte(content + "\r")); err != nil {
+				// B: stdin write failed — roll back so web doesn't sit on "running" forever.
+				sm.mu.Lock()
+				ps.Status = protocol.StatusError
+				sm.mu.Unlock()
+				sm.outputCh <- protocol.DaemonEvent{
+					Type:      "session_status",
+					SessionID: ps.SessionID,
+					Status:    protocol.StatusError,
+				}
+				return fmt.Errorf("pty stdin write: %w", err)
+			}
+			// Record the slash command (if any) so the tailer's JSONLStreamParser
+			// can attach it to the next command_receipt (e.g. /compact, /clear).
+			if ps.Tailer != nil {
+				ps.Tailer.SetPendingCmd(content)
+			}
+			return nil
 		}
-		// Record the slash command (if any) so the tailer's JSONLStreamParser
-		// can attach it to the next command_receipt (e.g. /compact, /clear).
-		if ps.Tailer != nil {
-			ps.Tailer.SetPendingCmd(content)
-		}
-		return nil
 	}
 
-	// Below: terminal session in exited state — resume via a new one-shot process
-	// (claude -p --resume / codex exec resume). (daemon sessions no longer reach
-	// here — they return above.)
-	agentType := ps.Agent
+	// Below: terminal or daemon-exec session in a dormant state — resume via a
+	// new one-shot process (claude -p --resume / codex exec resume).
 	if agentType == "" {
 		agentType = adapter.AgentClaude
 	}

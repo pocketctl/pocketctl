@@ -98,6 +98,17 @@ func TestCodex_TokenCount(t *testing.T) {
 	}
 }
 
+func TestCodex_TokenCountInfoFormat(t *testing.T) {
+	line := `{"type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":12535,"cached_input_tokens":4736,"output_tokens":56,"reasoning_output_tokens":47,"total_tokens":12591}}}}`
+	evts := codexParse(t, line)
+	if len(evts) != 1 || evts[0].Usage == nil {
+		t.Fatalf("expected usage event, got %+v", evts)
+	}
+	if evts[0].Usage.InputTokens != 12535 || evts[0].Usage.OutputTokens != 56 || evts[0].Usage.CacheRead != 4736 {
+		t.Errorf("got %+v", evts[0].Usage)
+	}
+}
+
 func TestCodex_TaskComplete(t *testing.T) {
 	line := `{"type":"event_msg","payload":{"type":"task_complete","last_agent_message":"Hello"}}`
 	evts := codexParse(t, line)
@@ -139,7 +150,7 @@ func TestCodexLauncher_InteractiveArgs(t *testing.T) {
 func TestCodexLauncher_ResumeArgs(t *testing.T) {
 	args := CodexLauncher{}.BuildResumeArgs("hello", "sid-123", protocol.SessionConfig{})
 	joined := joinArgs(args)
-	for _, want := range []string{"exec", "resume", "sid-123", "--json", "hello"} {
+	for _, want := range []string{"exec", "resume", "sid-123", "--json", "--skip-git-repo-check", "hello"} {
 		if !contains(joined, want) {
 			t.Errorf("expected %q in args %v", want, args)
 		}

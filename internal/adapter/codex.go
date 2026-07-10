@@ -118,6 +118,9 @@ type codexPayload struct {
 	Message          string           `json:"message,omitempty"`            // agent_message / user_message text
 	LastAgentMessage string           `json:"last_agent_message,omitempty"` // task_complete
 	LastTokenUsage   *codexTokenUsage `json:"last_token_usage,omitempty"`   // token_count
+	Info             struct {
+		LastTokenUsage *codexTokenUsage `json:"last_token_usage,omitempty"`
+	} `json:"info,omitempty"` // token_count in Codex exec/rollout v0.143+
 	// session_meta
 	ID         string `json:"id,omitempty"`
 	Cwd        string `json:"cwd,omitempty"`
@@ -314,10 +317,13 @@ func convertCodexEventMsg(p codexPayload) []protocol.DaemonEvent {
 		return []protocol.DaemonEvent{{Type: "agent_text", Text: p.Message}}
 
 	case "token_count":
-		if p.LastTokenUsage == nil {
+		u := p.LastTokenUsage
+		if u == nil {
+			u = p.Info.LastTokenUsage
+		}
+		if u == nil {
 			return nil
 		}
-		u := p.LastTokenUsage
 		return []protocol.DaemonEvent{{
 			Type: "agent_text", // usage rides on an agent_text so the web can attribute it
 			Usage: &protocol.ContextUsage{
@@ -360,7 +366,7 @@ func (CodexLauncher) BuildInteractiveArgs(config protocol.SessionConfig) []strin
 }
 
 func (CodexLauncher) BuildResumeArgs(prompt, sessionID string, config protocol.SessionConfig) []string {
-	args := []string{"exec", "resume", sessionID, "--json"}
+	args := []string{"exec", "resume", sessionID, "--json", "--skip-git-repo-check"}
 	if config.Model != "" {
 		args = append(args, "-m", config.Model)
 	}
