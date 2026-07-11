@@ -418,6 +418,14 @@ export async function getEventsBefore(pool: pg.Pool, sessionId: string, cursor: 
   return result.rows;
 }
 
+export async function getSessionStatus(pool: pg.Pool, sessionId: string): Promise<string | null> {
+  const result = await pool.query(
+    `SELECT status FROM sessions WHERE session_id = $1`,
+    [sessionId]
+  );
+  return result.rows[0]?.status ?? null;
+}
+
 export async function getRecentSubagentEvents(pool: pg.Pool, sessionId: string, agentId: string, limit: number): Promise<any[]> {
   const result = await pool.query(
     `SELECT id, session_id, event_type, payload, created_at

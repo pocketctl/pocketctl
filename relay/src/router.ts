@@ -1111,6 +1111,7 @@ export class Router {
     const isBackward = direction === 'backward';
     const lim = isBackward && limit && limit > 0 ? limit : 100;
     try {
+      const currentStatus = await db.getSessionStatus(this.pool, sessionId);
       let events: any[];
       if (isBackward) {
         events = (lastSeq && lastSeq > 0)
@@ -1122,7 +1123,7 @@ export class Router {
       // has_more (backward only, count-based heuristic): a full page implies older rows may exist.
       const hasMore = isBackward ? events.length === lim : false;
       if (events.length === 0) {
-        this.send(clientWs, withReq({ type: 'replay_end', session_id: sessionId, count: 0, last_seq: lastSeq, has_more: false }));
+        this.send(clientWs, withReq({ type: 'replay_end', session_id: sessionId, count: 0, last_seq: lastSeq, has_more: false, status: currentStatus }));
         return;
       }
       // backward rows arrive in id DESC; forward rows in id ASC. Batches keep that order;
@@ -1144,6 +1145,7 @@ export class Router {
         count: events.length,
         last_seq: events[events.length - 1].id,
         has_more: hasMore,
+        status: currentStatus,
       }));
     } catch (err) {
       console.error('replay error:', err);

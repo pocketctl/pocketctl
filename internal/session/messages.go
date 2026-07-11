@@ -133,6 +133,9 @@ func (sm *SessionManager) readOutput(ctx context.Context, cmd *exec.Cmd, stdout 
 			if evt.SessionID == "" {
 				evt.SessionID = ps.SessionID
 			}
+			if evt.Effort != "" {
+				sm.SetSessionEffort(ps.SessionID, evt.Effort)
+			}
 			sm.outputCh <- evt
 		}
 	}

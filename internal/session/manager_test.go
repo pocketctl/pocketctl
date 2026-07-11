@@ -543,3 +543,13 @@ func TestTerminalProbeResponsesForCodexStartupQueries(t *testing.T) {
 		}
 	}
 }
+
+func TestSessionEffortCacheKeepsLatestNonEmptyValue(t *testing.T) {
+	sm := NewSessionManager(make(chan protocol.DaemonEvent, 1))
+	sm.sessions["s1"] = &ProcessState{SessionID: "s1", Agent: adapter.AgentCodex}
+	sm.SetSessionEffort("s1", "high")
+	sm.SetSessionEffort("s1", "")
+	if got := sm.GetSessionEffort("s1"); got != "high" {
+		t.Fatalf("GetSessionEffort() = %q, want high", got)
+	}
+}

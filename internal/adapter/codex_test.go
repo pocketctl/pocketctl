@@ -252,6 +252,27 @@ func TestCodex_ExtractModel(t *testing.T) {
 	}
 }
 
+func TestCodexTurnContextEmitsEffort(t *testing.T) {
+	events, err := NewCodexAdapter().ParseStreamLine(`{"type":"turn_context","payload":{"model":"gpt-5.4","effort":"high"}}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 1 || events[0].Type != "session_meta" || events[0].Effort != "high" {
+		t.Fatalf("events = %+v, want session_meta effort=high", events)
+	}
+}
+
+func TestCodexExtractEffortUsesLatestNonEmptyTurnContext(t *testing.T) {
+	lines := []string{
+		`{"type":"turn_context","payload":{"effort":"low"}}`,
+		`{"type":"turn_context","payload":{"effort":""}}`,
+		`{"type":"turn_context","payload":{"effort":"xhigh"}}`,
+	}
+	if got := (CodexSessionStorage{}).ExtractEffort(lines); got != "xhigh" {
+		t.Fatalf("ExtractEffort() = %q, want xhigh", got)
+	}
+}
+
 func TestResolveJSONLPathForPTY_CodexFindsRealSessionIDByCwdAndStartTime(t *testing.T) {
 	codexHome := t.TempDir()
 	t.Setenv("CODEX_HOME", codexHome)
