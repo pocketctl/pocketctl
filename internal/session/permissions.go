@@ -1,11 +1,10 @@
 package session
 
 import (
-	"context"
 	"fmt"
 	"strings"
-	"time"
 
+	"github.com/pocketctl/pocketctl/internal/adapter"
 	"github.com/pocketctl/pocketctl/internal/protocol"
 )
 
@@ -21,44 +20,6 @@ func isValidEffort(level string) bool {
 		}
 	}
 	return false
-}
-
-// SetPermissionMode cycles the Claude TUI's permission mode via Shift+Tab.
-// Only works for daemon (PTY) sessions. The cycle order is default→acceptEdits→plan;
-// we calculate how many Shift+Tab presses are needed based on the current mode.
-func (sm *SessionManager) SetPermissionMode(ctx context.Context, sessionID, targetMode string) error {
-	sm.mu.RLock()
-	ps, ok := sm.sessions[sessionID]
-	sm.mu.RUnlock()
-	if !ok {
-		return fmt.Errorf("session not found")
-	}
-	if ps.Source != "daemon" || ps.PTY == nil {
-		return fmt.Errorf("only daemon (interactive) sessions support runtime mode switch")
-	}
-
-	cycle := []string{"default", "acceptEdits", "plan"}
-	currentIdx := indexOfString(cycle, ps.PermissionMode)
-	if currentIdx == -1 {
-		currentIdx = 1 // unknown → assume acceptEdits (the daemon default)
-	}
-	targetIdx := indexOfString(cycle, targetMode)
-	if targetIdx == -1 {
-		return fmt.Errorf("unsupported permission mode: %s (use default/acceptEdits/plan)", targetMode)
-	}
-
-	presses := (targetIdx - currentIdx + len(cycle)) % len(cycle)
-	for i := 0; i < presses; i++ {
-		if _, err := ps.PTY.Write([]byte("\x1b[Z")); err != nil { // Shift+Tab (CSI Z)
-			return fmt.Errorf("pty write shift+tab: %w", err)
-		}
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-time.After(150 * time.Millisecond): // let TUI process each press
-		}
-	}
-	return nil
 }
 
 // SetEffort switches the Claude TUI's thinking-effort level for a daemon (PTY)
@@ -158,22 +119,50 @@ func (sm *SessionManager) InterruptSession(sessionID string) error {
 	return nil
 }
 
-// UpdatePermissionMode records the current permission mode (called when a
-// permission_mode_changed event is received from the JSONL tailer).
-func (sm *SessionManager) UpdatePermissionMode(sessionID, mode string) {
-	sm.mu.Lock()
-	defer sm.mu.Unlock()
-	if ps, ok := sm.sessions[sessionID]; ok {
-		ps.PermissionMode = mode
+func (sm *SessionManager) SetPermissionConfig(sessionID string, cfg *protocol.PermissionConfig) error {
+	if cfg == nil {
+		return fmt.Errorf("permission config is required")
 	}
+	sm.mu.Lock()
+	ps, ok := sm.sessions[sessionID]
+	if !ok {
+		sm.mu.Unlock()
+		return fmt.Errorf("session not found")
+	}
+	if err := adapter.ValidatePermissionConfig(ps.Agent, cfg); err != nil {
+		sm.mu.Unlock()
+		return err
+	}
+	if ps.Agent == adapter.AgentCodex && cfg.ApprovalPolicy != "" && cfg.ApprovalPolicy != "never" {
+		sm.mu.Unlock()
+		return fmt.Errorf("codex remote approval is not supported")
+	}
+	if ps.Source != "daemon" {
+		sm.mu.Unlock()
+		return fmt.Errorf("permission configuration is immutable")
+	}
+	if ps.Status == protocol.StatusRunning || ps.Status == protocol.StatusWaitingApproval {
+		sm.mu.Unlock()
+		return fmt.Errorf("session_busy")
+	}
+	if ps.Agent != adapter.AgentCodex {
+		sm.mu.Unlock()
+		return fmt.Errorf("permission configuration is not runtime mutable")
+	}
+	ps.Permission = clonePermission(cfg)
+	confirmed := clonePermission(ps.Permission)
+	sm.mu.Unlock()
+	sm.outputCh <- protocol.DaemonEvent{Type: "permission_config_changed", SessionID: sessionID, Permission: confirmed, PermissionEffective: "next_turn"}
+	return nil
 }
 
-// GetPermissionMode returns the current permission mode for a session.
-func (sm *SessionManager) GetPermissionMode(sessionID string) string {
+func (sm *SessionManager) GetPermissionMeta(sessionID string) (*protocol.PermissionConfig, bool, []string, bool) {
 	sm.mu.RLock()
 	defer sm.mu.RUnlock()
-	if ps, ok := sm.sessions[sessionID]; ok {
-		return ps.PermissionMode
+	ps, ok := sm.sessions[sessionID]
+	if !ok {
+		return nil, false, nil, false
 	}
-	return ""
+	mutable := ps.Source == "daemon" && ps.Agent == adapter.AgentCodex && ps.Status != protocol.StatusRunning && ps.Status != protocol.StatusWaitingApproval
+	return clonePermission(ps.Permission), mutable, nil, true
 }

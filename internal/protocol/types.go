@@ -15,10 +15,8 @@ type ClientMessage struct {
 	// Choice carries the selected option index (e.g. "1") for an
 	// interactive_response — the user's answer to a PTY selection prompt
 	// surfaced as an interactive_prompt card.
-	Choice string `json:"choice,omitempty"`
-	// PermissionMode for session_create: "default" | "acceptEdits" | "plan" | "bypassPermissions".
-	// Empty falls back to "acceptEdits" (the daemon default).
-	PermissionMode string `json:"permission_mode,omitempty"`
+	Choice     string            `json:"choice,omitempty"`
+	Permission *PermissionConfig `json:"permission,omitempty"`
 	// Model for session_create: opus/sonnet/haiku alias (or concrete model name).
 	// Empty = follow the host's ~/.claude/settings.json default.
 	Model string `json:"model,omitempty"`
@@ -40,51 +38,54 @@ type DaemonEvent struct {
 	// at-least-once delivery: the relay dedups by (daemon_id, seq) and acks the
 	// highest contiguous seq it has persisted so the daemon can trim its
 	// outbound replay buffer. Zero/omitted means a legacy event (no dedup).
-	Seq              int64           `json:"seq,omitempty"`
-	EventID          string          `json:"event_id,omitempty"` // stable JSONL record identity across daemon restarts
-	SessionID        string          `json:"session_id"`
-	OldSessionID     string          `json:"old_session_id,omitempty"`
-	Text             string          `json:"text,omitempty"`
-	Streaming        bool            `json:"streaming,omitempty"`
-	CallID           string          `json:"call_id,omitempty"`
-	Tool             string          `json:"tool,omitempty"`
-	Input            json.RawMessage `json:"input,omitempty"`
-	Output           string          `json:"output,omitempty"`
-	Status           string          `json:"status,omitempty"`
-	Error            string          `json:"error,omitempty"`
-	CostUSD          float64         `json:"cost_usd,omitempty"`
-	Turns            int             `json:"turns,omitempty"`
-	RiskLevel        string          `json:"risk_level,omitempty"`
-	RequestID        string          `json:"request_id,omitempty"`
-	Approved         bool            `json:"approved,omitempty"` // for approval_resolved: how it was answered (terminal-side)
-	Title            string          `json:"title,omitempty"`
-	Cwd              string          `json:"cwd,omitempty"`
-	Source           string          `json:"source,omitempty"`
-	Resync           bool            `json:"resync,omitempty"` // reconnect replay, not a newly discovered session
-	ExitReason       string          `json:"exit_reason,omitempty"`
-	LastActivityAt   string          `json:"last_activity_at,omitempty"`
-	AgentID          string          `json:"agent_id,omitempty"`          // sub-agent identifier (e.g. "afa8314e6e3f6e552)
-	ParentSessionID  string          `json:"parent_session_id,omitempty"` // subagent's parent session (P0 subagent relation)
-	IsSubagent       bool            `json:"is_subagent,omitempty"`       // true for subagent-scoped events
-	RootSessionID    string          `json:"root_session_id,omitempty"`   // root session for multi-level aggregation
-	Agent            string          `json:"agent,omitempty"`             // agent type for upgrade_result (claude-code, codex)
-	SubAgentDesc     string          `json:"subagent_desc,omitempty"`     // sub-agent task description
-	SubAgentType     string          `json:"subagent_type,omitempty"`     // sub-agent type (Explore, general-purpose, etc.)
-	UserMessage      string          `json:"user_message,omitempty"`      // for generate_title_request
-	AssistantMessage string          `json:"assistant_message,omitempty"` // for generate_title_request
-	Reason           string          `json:"reason,omitempty"`            // failure reason code (no_cli, bad_cwd, start_fail, timeout, daemon_offline)
-	Commands         []CommandItem   `json:"commands,omitempty"`          // for command_list
-	Command          string          `json:"command,omitempty"`           // for command_receipt (e.g. "/compact")
-	ReceiptStatus    string          `json:"receipt_status,omitempty"`    // for command_receipt: success/failed/unavailable
-	Message          string          `json:"message,omitempty"`           // for command_receipt message
-	Usage            *ContextUsage   `json:"usage,omitempty"`             // token usage for agent_text events
-	PermissionMode   string          `json:"permission_mode,omitempty"`   // current mode (permission_mode_changed event)
-	Model            string          `json:"model,omitempty"`             // resolved model name (session_meta event)
-	Effort           string          `json:"effort,omitempty"`            // current thinking-effort level (session_meta event)
-	Models           []ModelOption   `json:"models,omitempty"`            // available models (model_list event)
-	CwdSessions      int             `json:"cwd_sessions,omitempty"`      // active session count on the same cwd (cwd_in_use/session_created)
-	WorktreePath     string          `json:"worktree_path,omitempty"`     // worktree absolute path when the session is isolated (Scheme D)
-	WorktreeBranch   string          `json:"worktree_branch,omitempty"`   // git branch backing the worktree (Scheme D)
+	Seq                    int64             `json:"seq,omitempty"`
+	EventID                string            `json:"event_id,omitempty"` // stable JSONL record identity across daemon restarts
+	SessionID              string            `json:"session_id"`
+	OldSessionID           string            `json:"old_session_id,omitempty"`
+	Text                   string            `json:"text,omitempty"`
+	Streaming              bool              `json:"streaming,omitempty"`
+	CallID                 string            `json:"call_id,omitempty"`
+	Tool                   string            `json:"tool,omitempty"`
+	Input                  json.RawMessage   `json:"input,omitempty"`
+	Output                 string            `json:"output,omitempty"`
+	Status                 string            `json:"status,omitempty"`
+	Error                  string            `json:"error,omitempty"`
+	CostUSD                float64           `json:"cost_usd,omitempty"`
+	Turns                  int               `json:"turns,omitempty"`
+	RiskLevel              string            `json:"risk_level,omitempty"`
+	RequestID              string            `json:"request_id,omitempty"`
+	Approved               bool              `json:"approved,omitempty"` // for approval_resolved: how it was answered (terminal-side)
+	Title                  string            `json:"title,omitempty"`
+	Cwd                    string            `json:"cwd,omitempty"`
+	Source                 string            `json:"source,omitempty"`
+	Resync                 bool              `json:"resync,omitempty"` // reconnect replay, not a newly discovered session
+	ExitReason             string            `json:"exit_reason,omitempty"`
+	LastActivityAt         string            `json:"last_activity_at,omitempty"`
+	AgentID                string            `json:"agent_id,omitempty"`          // sub-agent identifier (e.g. "afa8314e6e3f6e552)
+	ParentSessionID        string            `json:"parent_session_id,omitempty"` // subagent's parent session (P0 subagent relation)
+	IsSubagent             bool              `json:"is_subagent,omitempty"`       // true for subagent-scoped events
+	RootSessionID          string            `json:"root_session_id,omitempty"`   // root session for multi-level aggregation
+	Agent                  string            `json:"agent,omitempty"`             // agent type for upgrade_result (claude-code, codex)
+	SubAgentDesc           string            `json:"subagent_desc,omitempty"`     // sub-agent task description
+	SubAgentType           string            `json:"subagent_type,omitempty"`     // sub-agent type (Explore, general-purpose, etc.)
+	UserMessage            string            `json:"user_message,omitempty"`      // for generate_title_request
+	AssistantMessage       string            `json:"assistant_message,omitempty"` // for generate_title_request
+	Reason                 string            `json:"reason,omitempty"`            // failure reason code (no_cli, bad_cwd, start_fail, timeout, daemon_offline)
+	Commands               []CommandItem     `json:"commands,omitempty"`          // for command_list
+	Command                string            `json:"command,omitempty"`           // for command_receipt (e.g. "/compact")
+	ReceiptStatus          string            `json:"receipt_status,omitempty"`    // for command_receipt: success/failed/unavailable
+	Message                string            `json:"message,omitempty"`           // for command_receipt message
+	Usage                  *ContextUsage     `json:"usage,omitempty"`             // token usage for agent_text events
+	Permission             *PermissionConfig `json:"permission,omitempty"`
+	PermissionEffective    string            `json:"permission_effective,omitempty"`
+	PermissionMutable      bool              `json:"permission_mutable,omitempty"`
+	PermissionMutableModes []string          `json:"permission_mutable_modes,omitempty"`
+	Model                  string            `json:"model,omitempty"`           // resolved model name (session_meta event)
+	Effort                 string            `json:"effort,omitempty"`          // current thinking-effort level (session_meta event)
+	Models                 []ModelOption     `json:"models,omitempty"`          // available models (model_list event)
+	CwdSessions            int               `json:"cwd_sessions,omitempty"`    // active session count on the same cwd (cwd_in_use/session_created)
+	WorktreePath           string            `json:"worktree_path,omitempty"`   // worktree absolute path when the session is isolated (Scheme D)
+	WorktreeBranch         string            `json:"worktree_branch,omitempty"` // git branch backing the worktree (Scheme D)
 }
 
 // ModelOption is one selectable model surfaced by a daemon for session creation.
@@ -99,6 +100,15 @@ type ContextUsage struct {
 	OutputTokens int `json:"output_tokens,omitempty"`
 	CacheRead    int `json:"cache_read_tokens,omitempty"`
 	CacheCreate  int `json:"cache_create_tokens,omitempty"`
+}
+
+type PermissionConfig struct {
+	Agent           string `json:"agent"`
+	Mode            string `json:"mode,omitempty"`
+	Preset          string `json:"preset,omitempty"`
+	ApprovalPolicy  string `json:"approval_policy,omitempty"`
+	SandboxMode     string `json:"sandbox_mode,omitempty"`
+	DangerousBypass bool   `json:"dangerously_bypass,omitempty"`
 }
 
 // CommandItem represents a slash command or skill available in a session,
@@ -188,15 +198,15 @@ type ReplayMessage struct {
 
 // Session config
 type SessionConfig struct {
-	Agent          string   `json:"agent"`
-	Cwd            string   `json:"cwd"`
-	Prompt         string   `json:"prompt"`
-	AllowedTools   []string `json:"allowed_tools,omitempty"`
-	PermissionMode string   `json:"permission_mode,omitempty"`
-	Model          string   `json:"model,omitempty"` // resolved clean model name (no [...] suffix)
-	Worktree       bool     `json:"worktree,omitempty"`
-	AutoCreateDir  bool     `json:"auto_create_dir,omitempty"`
-	Force          bool     `json:"force,omitempty"`
+	Agent         string            `json:"agent"`
+	Cwd           string            `json:"cwd"`
+	Prompt        string            `json:"prompt"`
+	AllowedTools  []string          `json:"allowed_tools,omitempty"`
+	Permission    *PermissionConfig `json:"permission,omitempty"`
+	Model         string            `json:"model,omitempty"` // resolved clean model name (no [...] suffix)
+	Worktree      bool              `json:"worktree,omitempty"`
+	AutoCreateDir bool              `json:"auto_create_dir,omitempty"`
+	Force         bool              `json:"force,omitempty"`
 }
 
 // Session states

@@ -2,8 +2,27 @@ package protocol
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 )
+
+func TestPermissionConfigJSON(t *testing.T) {
+	msg := ClientMessage{Type: "session_create", Agent: "codex", Permission: &PermissionConfig{Agent: "codex", Preset: "custom", ApprovalPolicy: "never", SandboxMode: "workspace-write"}}
+	b, err := json.Marshal(msg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(b), "permission_mode") {
+		t.Fatalf("legacy field serialized: %s", b)
+	}
+	var decoded ClientMessage
+	if err := json.Unmarshal(b, &decoded); err != nil {
+		t.Fatal(err)
+	}
+	if decoded.Permission == nil || decoded.Permission.ApprovalPolicy != "never" {
+		t.Fatalf("bad round trip: %+v", decoded.Permission)
+	}
+}
 
 func TestStatusConstants(t *testing.T) {
 	statuses := []string{

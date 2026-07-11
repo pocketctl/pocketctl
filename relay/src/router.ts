@@ -875,6 +875,13 @@ export class Router {
         }
       }
     }
+    if (msg.type === 'permission_config_changed') {
+      this.persistAndAck(daemonId, msg.seq, sessionId, msg.type, msg);
+      for (const [clientWs, client] of this.clients) {
+        if (client.subscribedSessions.has(sessionId) && clientWs.readyState === 1) this.send(clientWs, msg);
+      }
+      return;
+    }
     if (msg.type === 'session_status') {
       // UPDATE-ONLY: never INSERT from a status event. A session_id that no
       // session_created/session_discovered ever announced is a ghost (e.g. the

@@ -282,21 +282,22 @@
             <div class="input-controls">
               <!-- Left: permission mode dropdown -->
               <div class="perm-dropdown" ref="permDropdownEl">
-                <button class="perm-trigger" @click="showPermMenu = !showPermMenu" :title="`当前: ${t(currentPermLabel)}`">
+                <button class="perm-trigger" @click="showPermMenu = !showPermMenu" :disabled="!permissionCanChange" :title="t(currentPermLabel)">
                   <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
-                  <span class="perm-label">{{ t(currentPermLabel) }}</span>
+                  <span class="perm-label">{{ pendingPermission ? t('session.permission.pending') : t(currentPermLabel) }}</span>
                   <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M6 9l6 6 6-6"/></svg>
                 </button>
                 <Transition name="perm-menu">
                   <div v-if="showPermMenu" class="perm-menu">
-                    <button v-for="m in PERMISSION_MODES" :key="m.value"
-                      :class="['perm-menu-item', { active: currentPermissionMode === m.value }]"
-                      @click="setPermissionMode(m.value); showPermMenu = false">
-                      <span class="perm-menu-name">{{ t(m.label) }}</span>
-                      <svg v-if="currentPermissionMode === m.value" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M20 6L9 17l-5-5"/></svg>
+                    <button v-for="m in runtimePermissionOptions" :key="m.value" :disabled="m.disabled"
+                      :class="['perm-menu-item', { active: currentPermissionValue === m.value }]"
+                      @click="requestPermission(m.value); showPermMenu = false">
+                      <span class="perm-menu-copy"><span class="perm-menu-name">{{ t(m.titleKey) }}</span><small>{{ t(m.descriptionKey) }}</small></span>
+                      <svg v-if="currentPermissionValue === m.value" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M20 6L9 17l-5-5"/></svg>
                     </button>
                   </div>
                 </Transition>
+                <span v-if="permissionError" class="permission-error">{{ permissionError }}</span>
               </div>
 
               <!-- Session metadata: model + context usage -->
@@ -391,6 +392,7 @@ import { formatToolInput } from '../utils/toolDisplay'
 import { isDiffTool } from '../utils/diffRender'
 import { useSessionRename } from '../composables/useSessionRename'
 import type { CommandItem } from '../composables/useWebSocket'
+import { expandCodexPreset, permissionOptions, permissionTitleKey, type AgentType, type ClaudeMode, type PermissionConfig } from '../types/permission'
 
 const { renamingId, renameInput, startRename, commitRename, cancelRename } = useSessionRename()
 
@@ -421,7 +423,7 @@ const hasMore = ref(false)      // relay signaled older events exist
 const resumeCopied = ref(false)  // session-resume-command: 复制恢复命令反馈
 const showNewSession = ref(false)
 const daemonList = computed(() => Object.values(daemons.value))
-const currentSessionAgent = computed(() => allSessions.value.find((x: any) => x.session_id === sessionId.value)?.agent)
+const currentSessionAgent = computed(() => { const s: any = allSessions.value.find((x: any) => x.session_id === sessionId.value); return s?.agent_type || s?.agent || '' })
 const normalizedEffort = computed(() => normalizeEffort(currentEffort.value))
 const effortVisible = computed(() => shouldShowEffort(currentSessionAgent.value || '', currentEffort.value))
 const effortLabel = computed(() => {
@@ -445,16 +447,17 @@ const sendError = ref(false)
 // L2: pending ack-timeout timer for the last optimistic send.
 const pendingAckTimer = ref<ReturnType<typeof setTimeout> | null>(null)
 const exitReason = ref('')
-const currentPermissionMode = ref('bypassPermissions')
+const currentPermission = ref<PermissionConfig>()
+const pendingPermission = ref<PermissionConfig>()
+const permissionMutable = ref(false)
+const permissionMutableModes = ref<string[]>([])
+const permissionError = ref('')
+let permissionTimer: ReturnType<typeof setTimeout> | null = null
 const showPermMenu = ref(false)
-const PERMISSION_MODES = [
-  { value: 'bypassPermissions', label: 'session.perm_bypass' },
-  { value: 'default', label: 'session.perm_default' },
-  { value: 'acceptEdits', label: 'session.perm_accept_edits' },
-  { value: 'plan', label: 'session.perm_plan' },
-]
-const PERM_LABELS: Record<string, string> = { bypassPermissions: 'session.perm_bypass', default: 'session.perm_default', acceptEdits: 'session.perm_accept_edits', plan: 'session.perm_plan' }
-const currentPermLabel = computed(() => PERM_LABELS[currentPermissionMode.value] || currentPermissionMode.value)
+const runtimePermissionOptions = computed(() => permissionOptions(currentSessionAgent.value as AgentType, false, permissionMutableModes.value))
+const currentPermissionValue = computed(() => currentPermission.value?.agent === 'claude-code' ? currentPermission.value.mode : currentPermission.value?.preset || '')
+const currentPermLabel = computed(() => permissionTitleKey(currentPermission.value))
+const permissionCanChange = computed(() => permissionMutable.value && !isExecuting.value && !isDisconnected.value && !pendingPermission.value)
 const exitedAt = ref('')
 const autoScroll = ref(true)
 const copied = ref(false)
@@ -742,7 +745,7 @@ const contextTokens = computed(() => {
   const u = effectiveUsage()
   if (u) {
     const total = (u.input_tokens || 0) + (u.cache_read_tokens || 0) + (u.cache_create_tokens || 0)
-    return total > 1000 ? (total / 1000).toFixed(1) + 'K' : String(total)
+    return formatTokenAmount(total)
   }
   return ''
 })
@@ -766,7 +769,12 @@ const parentTotalTokens = computed(() => {
   return (s as any)?.totalTokens ?? null
 })
 function fmtTk(n: number) {
+  return formatTokenAmount(n)
+}
+
+function formatTokenAmount(n: number) {
   n = +n || 0
+  if (n > 1e9) return (n / 1e9).toFixed(1) + 'G'
   if (n >= 1e6) return (n / 1e6).toFixed(1) + 'M'
   if (n >= 1e3) return (n / 1e3).toFixed(0) + 'K'
   return '' + n
@@ -890,8 +898,23 @@ function onMessagesScroll() {
 
 function focusResumeInput() { if (inputEl.value) { inputEl.value.focus() } }
 
-function setPermissionMode(mode: string) {
-  send({ type: 'set_permission_mode', session_id: sessionId.value, content: mode })
+function requestPermission(value: string) {
+  if (!permissionCanChange.value) return
+  const option = runtimePermissionOptions.value.find(x => x.value === value)
+  if (!option || option.disabled) return
+  if (option.dangerous && !window.confirm(t('session.permission.dangerous_confirm'))) return
+  const permission: PermissionConfig = currentSessionAgent.value === 'codex'
+    ? expandCodexPreset(value as any)
+    : { agent: 'claude-code', mode: value as ClaudeMode }
+  pendingPermission.value = permission
+  permissionError.value = ''
+  send({ type: 'set_permission_config', session_id: sessionId.value, permission })
+  if (permissionTimer) clearTimeout(permissionTimer)
+  permissionTimer = setTimeout(() => {
+    pendingPermission.value = undefined
+    permissionError.value = t('session.permission.failed')
+    send({ type: 'get_session_meta', session_id: sessionId.value })
+  }, 10000)
 }
 
 // Switch thinking-effort: inject `/effort <level>` into the PTY via the daemon,
@@ -1540,6 +1563,11 @@ onMounted(() => {
     if (msg.session_id !== sessionId.value) return
     if (msg.model) currentModel.value = msg.model
     if (msg.effort) currentEffort.value = msg.effort
+    currentPermission.value = msg.permission
+    permissionMutable.value = !!msg.permission_mutable
+    permissionMutableModes.value = msg.permission_mutable_modes || []
+    pendingPermission.value = undefined
+    if (permissionTimer) { clearTimeout(permissionTimer); permissionTimer = null }
   }))
 
   // session_model_changed: the daemon detected a /model switch mid-session
@@ -1731,9 +1759,12 @@ onMounted(() => {
     if (msg.session_id === sessionId.value) { status.value = msg.status; if (msg.exit_reason) exitReason.value = msg.exit_reason; if (msg.exited_at) exitedAt.value = msg.exited_at }
   }))
 
-  cleanups.push(onEvent('permission_mode_changed', (msg: any) => {
+  cleanups.push(onEvent('permission_config_changed', (msg: any) => {
     if (msg.session_id !== sessionId.value) return
-    currentPermissionMode.value = msg.permission_mode || 'acceptEdits'
+    currentPermission.value = msg.permission
+    pendingPermission.value = undefined
+    if (permissionTimer) { clearTimeout(permissionTimer); permissionTimer = null }
+    permissionError.value = msg.permission_effective === 'next_turn' ? t('session.permission.next_turn') : ''
   }))
 
   // 兜底：URL 仍是 pending 时，session_id_changed 到达则替换为真实 ID 并重新 replay
@@ -1750,6 +1781,13 @@ onMounted(() => {
 
   cleanups.push(onEvent('error', (msg: any) => {
     if (msg.session_id && msg.session_id !== sessionId.value) return
+    if (pendingPermission.value) {
+      pendingPermission.value = undefined
+      if (permissionTimer) { clearTimeout(permissionTimer); permissionTimer = null }
+      permissionError.value = msg.error || t('session.permission.failed')
+      send({ type: 'get_session_meta', session_id: sessionId.value })
+      return
+    }
     // 带可区分 code 的错误(来自 relay 路由层):停止操作的失败显示为按钮旁的
     // 临时提示,而非消息气泡 —— 避免把"daemon 重连中"这类可恢复状态写进消息流。
     const code = msg.code
@@ -1942,6 +1980,7 @@ onMounted(() => {
 .perm-dropdown { position: relative; }
 .perm-trigger { display: inline-flex; align-items: center; gap: 4px; padding: 4px 8px; background: none; border: none; color: var(--fg-secondary); font-size: 12px; cursor: pointer; border-radius: var(--radius-sm); transition: color 0.15s, background 0.15s; font-family: var(--font-body); }
 .perm-trigger:hover { color: var(--fg); background: var(--surface-hover); }
+.perm-trigger:disabled { opacity: .45; cursor: not-allowed; }
 .perm-label { font-weight: 500; }
 
 /* Current model pill (right) */
@@ -1954,6 +1993,10 @@ onMounted(() => {
 .perm-menu-item:hover { background: var(--surface-hover); }
 .perm-menu-item.active { color: var(--accent); }
 .perm-menu-item.active svg { color: var(--accent); }
+.perm-menu-item:disabled { opacity: .45; cursor: not-allowed; }
+.perm-menu-copy { display: flex; flex-direction: column; align-items: flex-start; gap: 2px; text-align: left; }
+.perm-menu-copy small { color: var(--fg-tertiary); font-size: 11px; font-weight: 400; }
+.permission-error { position: absolute; left: 0; bottom: 100%; margin-bottom: 6px; white-space: nowrap; color: var(--warning); font-size: 11px; }
 .perm-menu-enter-active, .perm-menu-leave-active { transition: opacity 0.15s, transform 0.15s; }
 .perm-menu-enter-from, .perm-menu-leave-to { opacity: 0; transform: translateY(4px); }
 

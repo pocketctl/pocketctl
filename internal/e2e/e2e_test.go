@@ -28,9 +28,9 @@ import (
 // ---------------------------------------------------------------------------
 
 type mockRelay struct {
-	server    *http.Server
-	listener  net.Listener
-	addr      string
+	server   *http.Server
+	listener net.Listener
+	addr     string
 
 	mu             sync.Mutex
 	daemonConns    []*websocket.Conn
@@ -407,10 +407,10 @@ func TestConcurrent_SessionsIsolated(t *testing.T) {
 	ctx := context.Background()
 
 	sid1, err1 := sm.CreateSession(ctx, protocol.SessionConfig{
-		Agent: "claude-code", Cwd: "/tmp", Prompt: "test 1", PermissionMode: "acceptEdits",
+		Agent: "claude-code", Cwd: "/tmp", Prompt: "test 1", Permission: &protocol.PermissionConfig{Agent: "claude-code", Mode: "acceptEdits"},
 	})
 	sid2, err2 := sm.CreateSession(ctx, protocol.SessionConfig{
-		Agent: "claude-code", Cwd: "/tmp", Prompt: "test 2", PermissionMode: "acceptEdits",
+		Agent: "claude-code", Cwd: "/tmp", Prompt: "test 2", Permission: &protocol.PermissionConfig{Agent: "claude-code", Mode: "acceptEdits"},
 	})
 
 	if err1 != nil || err2 != nil {
@@ -594,7 +594,7 @@ func TestMultiTurn_UserMessageProtocol(t *testing.T) {
 
 	// Try creating a session
 	sid, err := sm.CreateSession(ctx, protocol.SessionConfig{
-		Agent: "claude-code", Cwd: "/tmp", Prompt: "first message", PermissionMode: "acceptEdits",
+		Agent: "claude-code", Cwd: "/tmp", Prompt: "first message", Permission: &protocol.PermissionConfig{Agent: "claude-code", Mode: "acceptEdits"},
 	})
 	if err != nil {
 		t.Log("claude CLI not available, testing protocol structure only")
@@ -838,7 +838,7 @@ func TestSessionExited_ReadOutputLastActivityAt(t *testing.T) {
 	defer cancel()
 
 	sid, err := sm.CreateSession(ctx, protocol.SessionConfig{
-		Agent: "claude-code", Cwd: os.TempDir(), Prompt: "test", PermissionMode: "acceptEdits",
+		Agent: "claude-code", Cwd: os.TempDir(), Prompt: "test", Permission: &protocol.PermissionConfig{Agent: "claude-code", Mode: "acceptEdits"},
 	})
 	if err != nil {
 		t.Skipf("cannot create session: %v", err)

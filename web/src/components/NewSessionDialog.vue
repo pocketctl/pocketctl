@@ -59,18 +59,29 @@
           </div>
         </div>
 
-        <!-- Permission Mode (Claude/Codex only; opencode has no Shift+Tab/runtime mode) -->
+        <!-- Agent-specific native permission configuration -->
         <div v-if="form.agent !== 'opencode'" class="form-group">
           <div class="field-label">
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
-            {{ t('new_session.permission_mode') }}
+            {{ t('new_session.permission_label') }}
           </div>
-          <select v-model="form.permissionMode" class="input-field">
-            <option value="bypassPermissions">{{ t('session.perm_bypass') }} — {{ t('new_session.perm_bypass') }}</option>
-            <option value="default">{{ t('session.perm_default') }} — {{ t('new_session.perm_confirm') }}</option>
-            <option value="acceptEdits">{{ t('session.perm_accept_edits') }} — {{ t('new_session.perm_auto_edit') }}</option>
-            <option value="plan">{{ t('session.perm_plan') }} — {{ t('new_session.perm_plan_only') }}</option>
+          <select v-model="permissionValue" class="input-field">
+            <option v-for="option in creationPermissionOptions" :key="option.value" :value="option.value" :disabled="option.disabled">
+              {{ t(option.titleKey) }} — {{ t(option.descriptionKey) }}
+            </option>
           </select>
+          <div v-if="codexPermission?.preset === 'custom'" class="permission-custom-grid">
+            <select v-model="codexPermission.approval_policy" class="input-field">
+              <option :value="undefined">{{ t('session.permission.inherit') }}</option>
+              <option value="never">never</option>
+            </select>
+            <select v-model="codexPermission.sandbox_mode" class="input-field">
+              <option :value="undefined">{{ t('session.permission.inherit') }}</option>
+              <option value="read-only">read-only</option>
+              <option value="workspace-write">workspace-write</option>
+              <option value="danger-full-access">danger-full-access</option>
+            </select>
+          </div>
         </div>
 
         <!-- Model (dynamic: host's available models). All agents — including
@@ -170,6 +181,7 @@ import { ref, reactive, computed, onMounted, onUnmounted, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { useWebSocket } from '../composables/useWebSocket'
 import { useLocale } from '../composables/useLocale'
+import { defaultPermission, expandCodexPreset, permissionOptions, type AgentType, type ClaudeMode, type CodexPreset, type PermissionConfig } from '../types/permission'
 
 const props = defineProps<{ daemons?: any[]; preSelectedDaemonId?: string }>()
 const emit = defineEmits<{ close: [] }>()
@@ -183,7 +195,7 @@ const form = reactive({
   agent: 'claude-code',
   cwd: localStorage.getItem('pocketctl_default_cwd') || '~/',
   prompt: '',
-  permissionMode: 'bypassPermissions',  // Web 会话无人值守，默认跳过权限（acceptEdits 会卡在工具批准提示）
+  permission: defaultPermission('claude-code') as PermissionConfig | undefined,
   model: '',  // '' = follow host default | opus | sonnet | haiku alias
   // Scheme A/C/D advanced options
   autoCreateDir: true,   // 目录不存在时自动创建（默认开）
@@ -206,6 +218,16 @@ const selectedDaemonName = computed(() => {
 })
 
 const canStart = computed(() => !!(form.daemonId && form.agent))
+const creationPermissionOptions = computed(() => permissionOptions(form.agent as AgentType, true))
+const codexPermission = computed(() => form.permission?.agent === 'codex' ? form.permission : undefined)
+const permissionValue = computed({
+  get: () => form.permission?.agent === 'claude-code' ? form.permission.mode : form.permission?.preset || '',
+  set: (value: string) => {
+    form.permission = form.agent === 'claude-code'
+      ? { agent: 'claude-code', mode: value as ClaudeMode }
+      : expandCodexPreset(value as CodexPreset)
+  },
+})
 const isAgentAvailable = computed(() => form.agent === 'claude-code' || form.agent === 'codex' || form.agent === 'opencode')
 
 function selectHost(d: any) {
@@ -219,6 +241,7 @@ function selectHost(d: any) {
 function selectAgent(agent: string) {
   if (form.agent === agent) return
   form.agent = agent
+  form.permission = defaultPermission(agent as AgentType)
   models.value = []
   modelsLoaded.value = false
   form.model = ''
@@ -322,7 +345,7 @@ function startSession() {
     agent: form.agent,
     cwd: form.cwd || undefined,
     prompt: form.prompt || undefined,
-    permission_mode: form.permissionMode || undefined,
+    permission: form.permission,
     model: form.model || undefined,
     worktree: form.worktree || undefined,
     auto_create_dir: form.autoCreateDir || undefined,
@@ -517,6 +540,7 @@ onUnmounted(() => {
 .prompt-area:focus { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-muted); }
 .prompt-area::placeholder { color: var(--fg-tertiary); }
 .char-count { text-align: right; font-size: 11px; color: var(--fg-tertiary); margin-top: 4px; }
+.permission-custom-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 8px; }
 
 /* Advanced Options (Scheme A/C/D) */
 .advanced-section { margin-bottom: 16px; }

@@ -306,10 +306,10 @@ func TestKillSession_SetsKilledStatus(t *testing.T) {
 	// Create a daemon session
 	ctx := context.Background()
 	sid, err := sm.CreateSession(ctx, protocol.SessionConfig{
-		Agent:          "claude-code",
-		Cwd:            os.TempDir(),
-		Prompt:         "echo hello",
-		PermissionMode: "acceptEdits",
+		Agent:      "claude-code",
+		Cwd:        os.TempDir(),
+		Prompt:     "echo hello",
+		Permission: &protocol.PermissionConfig{Agent: adapter.AgentClaude, Mode: "acceptEdits"},
 	})
 	if err != nil {
 		t.Skipf("cannot create session (claude CLI may not be available): %v", err)

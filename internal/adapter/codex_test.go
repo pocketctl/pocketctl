@@ -222,9 +222,14 @@ func TestCodexLauncher_InteractiveArgs(t *testing.T) {
 }
 
 func TestCodexLauncher_ResumeArgs(t *testing.T) {
-	args := CodexLauncher{}.BuildResumeArgs("hello", "sid-123", protocol.SessionConfig{})
+	args := CodexLauncher{}.BuildResumeArgs("hello", "sid-123", protocol.SessionConfig{Permission: &protocol.PermissionConfig{Agent: AgentCodex, Preset: "custom", ApprovalPolicy: "never", SandboxMode: "workspace-write"}})
 	joined := joinArgs(args)
 	for _, want := range []string{"exec", "resume", "sid-123", "--json", "--skip-git-repo-check", "hello"} {
+		if !contains(joined, want) {
+			t.Errorf("expected %q in args %v", want, args)
+		}
+	}
+	for _, want := range []string{`approval_policy="never"`, `sandbox_mode="workspace-write"`} {
 		if !contains(joined, want) {
 			t.Errorf("expected %q in args %v", want, args)
 		}

@@ -412,6 +412,9 @@ func (CodexLauncher) BuildInteractiveArgs(config protocol.SessionConfig) []strin
 
 func (CodexLauncher) BuildResumeArgs(prompt, sessionID string, config protocol.SessionConfig) []string {
 	args := []string{"exec", "resume", sessionID, "--json", "--skip-git-repo-check"}
+	if permissionArgs, err := PermissionArgs(AgentCodex, config.Permission, CommandResume); err == nil {
+		args = append(args, permissionArgs...)
+	}
 	if config.Model != "" {
 		args = append(args, "-m", config.Model)
 	}
