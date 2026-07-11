@@ -370,7 +370,7 @@
   />
   <CommandHelpModal
     v-if="showHelpModal"
-    :commands="commandsCache"
+    :commands="availableCommands"
     @close="showHelpModal = false"
   />
 </template>
@@ -381,6 +381,7 @@ import { useRoute, useRouter } from 'vue-router'
 import NewSessionDialog from '../components/NewSessionDialog.vue'
 import { useWebSocket } from '../composables/useWebSocket'
 import { formatRelativeTime } from '../composables/useRelativeTime'
+import { mergeLocalCommands, POCKETCTL_LOCAL_COMMANDS } from '../utils/commands'
 import SessionActions from '../components/SessionActions.vue'
 import AgentBadge from '../components/AgentBadge.vue'
 import CommandPopover from '../components/CommandPopover.vue'
@@ -977,7 +978,7 @@ function clearAllToolTimeouts() {
 // daemon PTY. NOT sourced from commandsCache — these builtins are filtered out
 // of command_list by the agent's init event in daemon sessions, so relying on
 // the cache would silently disable them. Hardcode the names instead.
-const LOCAL_COMMANDS = ['cost', 'status', 'help', 'model']
+const LOCAL_COMMANDS = POCKETCTL_LOCAL_COMMANDS.map(command => command.name)
 
 // Send a tool-use approval decision back to the daemon. The ApprovalCard
 // already flipped its local status optimistically; here we just dispatch the
@@ -1172,10 +1173,11 @@ const filteredCommands = computed(() => {
   const input = messageInput.value
   if (!input.startsWith('/')) return []
   const prefix = input.slice(1).toLowerCase()
-  const pool = commandsCache.value
+  const pool = availableCommands.value
   if (prefix === '') return pool.slice(0, 50)
   return pool.filter(c => c.name.toLowerCase().startsWith(prefix)).slice(0, 50)
 })
+const availableCommands = computed(() => mergeLocalCommands(commandsCache.value))
 const showPopover = computed(() => !popoverDismissed.value && filteredCommands.value.length > 0)
 
 // Reset selection/dismissal whenever the input changes
