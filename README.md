@@ -7,6 +7,7 @@ Monitor and manage Claude Code, Codex, and OpenCode sessions from your phone or 
 ## Features
 
 - 🤖 **Multi-agent** — Claude Code, Codex, and OpenCode, behind one unified "zero-config discovery + live sync + cross-device continue" model. Run an agent in your terminal; the daemon discovers it and syncs it to your client where you can keep chatting. (OpenCode is a client/server agent — the daemon hosts a shared `opencode serve` and drives it over its HTTP API. To add a new agent, register a `Provider` — see [docs/adding-an-agent.md](docs/adding-an-agent.md).)
+- 🔐 **Agent-specific permissions** — Configure Claude Code's native startup modes and Codex approval/sandbox policies from Web or iOS; confirmed session changes are reused on resumed turns.
 - 🖥️ **Real-time Monitoring** — Watch your AI coding sessions live from anywhere
 - 📱 **iOS App** — Native SwiftUI app: hosts dashboard, session list/detail (backward-paginated history), new-session sheet (model & permission picker, locale-aware auto titles), agent management with one-tap upgrade, token usage analytics, scan-to-authorize web login
 - 🖧 **Hosts Dashboard** — System resource monitoring (CPU / Memory / Disk) with remote daemon restart
