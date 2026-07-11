@@ -10,18 +10,19 @@ import (
 
 // JSONL entry structures — Claude Code's session history format
 type JSONLEntry struct {
-	Type          string        `json:"type"`
-	Subtype       string        `json:"subtype,omitempty"`
-	SessionID     string        `json:"sessionId"`
-	Message       *JSONLMessage `json:"message,omitempty"`
-	Content       string        `json:"content,omitempty"`
-	IsMeta        bool          `json:"isMeta,omitempty"`         // true for meta messages (e.g. local-command-caveat) — filtered from replay
-	IsSidechain   bool          `json:"isSidechain,omitempty"`    // true for sub-agent (sidechain) records
-	ParentUuid    string        `json:"parentUuid,omitempty"`     // message-level parent UUID (NOT session id; not used for relation)
-	CompactResult string        `json:"compact_result,omitempty"` // /compact outcome: "success" or "failed"
-	CompactError  string        `json:"compact_error,omitempty"`  // /compact failure reason
-	TotalCost     float64       `json:"total_cost_usd,omitempty"` // result event: aggregated cost
-	NumTurns      int           `json:"num_turns,omitempty"`      // result event: turn count
+	Type           string        `json:"type"`
+	Subtype        string        `json:"subtype,omitempty"`
+	SessionID      string        `json:"sessionId"`
+	Message        *JSONLMessage `json:"message,omitempty"`
+	Content        string        `json:"content,omitempty"`
+	PermissionMode string        `json:"permissionMode,omitempty"`
+	IsMeta         bool          `json:"isMeta,omitempty"`         // true for meta messages (e.g. local-command-caveat) — filtered from replay
+	IsSidechain    bool          `json:"isSidechain,omitempty"`    // true for sub-agent (sidechain) records
+	ParentUuid     string        `json:"parentUuid,omitempty"`     // message-level parent UUID (NOT session id; not used for relation)
+	CompactResult  string        `json:"compact_result,omitempty"` // /compact outcome: "success" or "failed"
+	CompactError   string        `json:"compact_error,omitempty"`  // /compact failure reason
+	TotalCost      float64       `json:"total_cost_usd,omitempty"` // result event: aggregated cost
+	NumTurns       int           `json:"num_turns,omitempty"`      // result event: turn count
 }
 
 type JSONLMessage struct {
@@ -421,7 +422,10 @@ func (p *JSONLStreamParser) Parse(line string) ([]protocol.DaemonEvent, error) {
 	case "permission-mode":
 		// Claude writes this when the user cycles modes via Shift+Tab.
 		// Emit a feedback event so the daemon updates ProcessState and web UI syncs.
-		mode := strings.TrimSpace(entry.Content)
+		mode := strings.TrimSpace(entry.PermissionMode)
+		if mode == "" { // tolerate histories produced by older Claude versions
+			mode = strings.TrimSpace(entry.Content)
+		}
 		if mode == "" {
 			return nil, nil
 		}

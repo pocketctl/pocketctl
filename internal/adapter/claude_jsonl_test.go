@@ -227,7 +227,8 @@ func TestJSONLResultEventForwarded(t *testing.T) {
 
 func TestJSONLStreamParserPermissionConfigChanged(t *testing.T) {
 	p := NewJSONLStreamParser()
-	line := `{"type":"permission-mode","sessionId":"s1","content":"plan"}`
+	// Claude Code 2.1.206 writes the mode in permissionMode, not content.
+	line := `{"type":"permission-mode","sessionId":"s1","permissionMode":"plan"}`
 	events, _ := p.Parse(line)
 	if len(events) != 1 || events[0].Type != "permission_config_changed" {
 		t.Fatalf("expected permission_config_changed, got %v", events)
