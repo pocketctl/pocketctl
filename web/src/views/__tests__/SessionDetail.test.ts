@@ -1,5 +1,6 @@
 import { describe, test, expect } from 'vitest'
 import type { CommandItem } from '../../composables/useWebSocket'
+import { mergeLocalCommands } from '../../utils/commands'
 
 // Pure logic tests extracted from SessionDetail.vue
 
@@ -261,6 +262,27 @@ describe('slash command filtering', () => {
 
   test('no match returns empty', () => {
     expect(filterCommands('/xyz', pool)).toEqual([])
+  })
+})
+
+describe('Pocketctl local slash commands', () => {
+  test('remain visible when the daemon reports no agent commands', () => {
+    expect(mergeLocalCommands([]).map(c => c.name)).toEqual([
+      'cost', 'status', 'help', 'model',
+    ])
+  })
+
+  test('merge with agent commands without duplicate names', () => {
+    const daemonCommands: CommandItem[] = [
+      { name: 'compact', source: 'builtin', kind: 'command' },
+      { name: 'model', source: 'builtin', kind: 'command' },
+    ]
+
+    const merged = mergeLocalCommands(daemonCommands)
+    expect(merged.map(c => c.name)).toEqual([
+      'cost', 'status', 'help', 'model', 'compact',
+    ])
+    expect(merged.find(c => c.name === 'model')?.source).toBe('pocketctl')
   })
 })
 
@@ -608,4 +630,3 @@ describe('retry last prompt', () => {
     expect(retryLastPrompt(msgs, false).sent).toBeNull()
   })
 })
-

@@ -289,7 +289,10 @@ func TestListCommandsFallbackWithoutAvailable(t *testing.T) {
 // /clear, /model, /config — only project/user/plugin disk-scanned commands.
 func TestListCommandsExcludesClaudeBuiltinsForCodex(t *testing.T) {
 	cwd := t.TempDir()
-	// a real project command should still appear
+	// Historically, codex sessions were accidentally picking up local Claude
+	// .claude command files from this repo; that caused local command leakage.
+	// Only Codex-native slash commands (currently none from CLI scan) should be
+	// visible after fallback discovery.
 	mustMkdir(t, filepath.Join(cwd, ".claude", "commands"))
 	writeFile(t, filepath.Join(cwd, ".claude", "commands", "optimize.md"),
 		"---\ndescription: optimize code\n---\n")
@@ -306,18 +309,27 @@ func TestListCommandsExcludesClaudeBuiltinsForCodex(t *testing.T) {
 			t.Fatalf("Claude builtin /%s must be excluded for codex agent", name)
 		}
 	}
-	// project command survives
-	if !got["optimize"] {
-		t.Fatal("project command optimize should still appear for codex")
+	if got["optimize"] {
+		t.Fatalf("project command optimize should not appear for codex agent fallback scan")
 	}
 }
 
 // opencode likewise must not receive Claude builtins.
 func TestListCommandsExcludesClaudeBuiltinsForOpencode(t *testing.T) {
-	items := ListCommands("", "opencode", nil)
+	cwd := t.TempDir()
+	mustMkdir(t, filepath.Join(cwd, ".claude", "commands"))
+	writeFile(t, filepath.Join(cwd, ".claude", "commands", "optimize.md"),
+		"---\ndescription: optimize code\n---\n")
+
+	items := ListCommands(cwd, "opencode", nil)
 	for _, it := range items {
 		if it.Source == "builtin" {
 			t.Fatalf("opencode must not receive Claude builtins, got %+v", it)
+		}
+	}
+	for _, it := range items {
+		if it.Name == "optimize" {
+			t.Fatal("opencode must not scan .claude command files during fallback")
 		}
 	}
 }

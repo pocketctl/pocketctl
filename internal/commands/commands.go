@@ -95,14 +95,14 @@ func listCommands(cwd, home, agentType string) []protocol.CommandItem {
 	var all []protocol.CommandItem
 	if useClaudeBuiltins(agentType) {
 		all = append(all, builtinCommands()...)
+		if cwd != "" {
+			all = append(all, scanCommandsAndSkills(filepath.Join(cwd, ".claude"), "project", "")...)
+		}
+		if home != "" {
+			all = append(all, scanCommandsAndSkills(filepath.Join(home, ".claude"), "user", "")...)
+		}
+		all = append(all, scanPlugins(cwd, home)...)
 	}
-	if cwd != "" {
-		all = append(all, scanCommandsAndSkills(filepath.Join(cwd, ".claude"), "project", "")...)
-	}
-	if home != "" {
-		all = append(all, scanCommandsAndSkills(filepath.Join(home, ".claude"), "user", "")...)
-	}
-	all = append(all, scanPlugins(cwd, home)...)
 
 	seen := make(map[string]bool)
 	var result []protocol.CommandItem

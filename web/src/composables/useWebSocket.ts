@@ -33,7 +33,7 @@ export interface DaemonEvent {
 // CommandItem represents a slash command or skill available for autocompletion.
 export interface CommandItem {
   name: string
-  source: 'builtin' | 'project' | 'user' | 'plugin'
+  source: 'builtin' | 'project' | 'user' | 'plugin' | 'pocketctl'
   kind: 'command' | 'skill'
   description?: string
   arg_hint?: string
