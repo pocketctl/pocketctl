@@ -301,7 +301,7 @@ func (sm *SessionManager) SendMessage(ctx context.Context, sessionID string, con
 		return err
 	}
 	launcher := adapter.NewLauncher(agentType)
-	args := launcher.BuildResumeArgs(content, sessionID, protocol.SessionConfig{PermissionMode: "acceptEdits"})
+	args := launcher.BuildResumeArgs(content, sessionID, protocol.SessionConfig{Permission: clonePermission(ps.Permission)})
 	ctx, cancel := context.WithCancel(ctx)
 	cmd := exec.CommandContext(ctx, cliPath, args...)
 	if cwd != "" {
@@ -349,7 +349,7 @@ func (sm *SessionManager) sendToIdleTerminal(ctx context.Context, ps *ProcessSta
 	}
 
 	launcher := adapter.NewLauncher(agentType)
-	args := launcher.BuildResumeArgs(content, ps.SessionID, protocol.SessionConfig{PermissionMode: "acceptEdits"})
+	args := launcher.BuildResumeArgs(content, ps.SessionID, protocol.SessionConfig{Permission: clonePermission(ps.Permission)})
 	ctx, cancel := context.WithCancel(ctx)
 	cmd := exec.CommandContext(ctx, cliPath, args...)
 	cmd.Dir = ps.Cwd

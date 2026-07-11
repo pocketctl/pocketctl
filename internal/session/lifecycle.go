@@ -21,6 +21,20 @@ import (
 )
 
 func (sm *SessionManager) CreateSession(ctx context.Context, config protocol.SessionConfig) (string, error) {
+	if config.Agent == "" {
+		config.Agent = adapter.AgentClaude
+	}
+	if config.Permission == nil {
+		cfg := adapter.DefaultPermissionConfig(config.Agent)
+		config.Permission = &cfg
+	}
+	if err := adapter.ValidatePermissionConfig(config.Agent, config.Permission); err != nil {
+		return "", err
+	}
+	if config.Agent == adapter.AgentCodex && config.Permission.ApprovalPolicy != "" && config.Permission.ApprovalPolicy != "never" {
+		return "", fmt.Errorf("codex remote approval is not supported")
+	}
+	config.Permission = clonePermission(config.Permission)
 	cliPath, err := findAgentCLI(config.Agent)
 	if err != nil {
 		return "", err
@@ -104,12 +118,8 @@ func (sm *SessionManager) CreateSession(ctx context.Context, config protocol.Ses
 	// sessions are unattended, so default to bypassing permission checks —
 	// otherwise Bash/Write tools stall forever on a y/n prompt the UI can't
 	// surface (and Ctrl+C doesn't dismiss). Callers who want stricter modes can
-	// set PermissionMode explicitly.
-	permMode := config.PermissionMode
-	if permMode == "" {
-		permMode = "bypassPermissions"
-	}
-	config.PermissionMode = permMode
+	// supply a permission object explicitly.
+	permMode := config.Permission.Mode
 
 	// Build launch args via the agent-specific launcher. Claude takes a pinned
 	// --session-id so the JSONL filename is known up front; codex generates its
@@ -169,7 +179,7 @@ func (sm *SessionManager) CreateSession(ctx context.Context, config protocol.Ses
 		Agent:           config.Agent,
 		Source:          "daemon",
 		PTY:             ptmx,
-		PermissionMode:  permMode,
+		Permission:      clonePermission(config.Permission),
 		Model:           displayModel,
 		WorktreePath:    worktreePath,
 		WorktreeBranch:  worktreeBranch,
@@ -217,6 +227,11 @@ func (sm *SessionManager) CreateSession(ctx context.Context, config protocol.Ses
 
 func (sm *SessionManager) createCodexExecSession(ctx context.Context, sessionID, cliPath, resolvedCwd string, config protocol.SessionConfig, displayModel, worktreePath, worktreeBranch string) (string, error) {
 	args := []string{"exec", "--json", "--skip-git-repo-check", "-C", resolvedCwd}
+	permissionArgs, err := adapter.PermissionArgs(adapter.AgentCodex, config.Permission, adapter.CommandCreate)
+	if err != nil {
+		return "", err
+	}
+	args = append(args, permissionArgs...)
 	if config.Model != "" {
 		args = append(args, "-m", config.Model)
 	}
@@ -256,6 +271,7 @@ func (sm *SessionManager) createCodexExecSession(ctx context.Context, sessionID,
 		Cwd:            resolvedCwd,
 		Agent:          config.Agent,
 		Source:         "daemon",
+		Permission:     clonePermission(config.Permission),
 		Model:          displayModel,
 		WorktreePath:   worktreePath,
 		WorktreeBranch: worktreeBranch,

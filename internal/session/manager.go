@@ -32,16 +32,24 @@ type ProcessState struct {
 	Tailer           *watcher.JSONLTailer // terminal session 的 JSONL tailer（D2: sendToIdleTerminal 期间 pause）
 	PTY              platform.PTY         // interactive-web-session D1: daemon session 的 PTY master（写 stdin 驱动 interactive claude）。PR2: platform.PTY interface (was *os.File)
 	PTYScanner       *ptyscan.Scanner     // daemon session 的 PTY 菜单扫描器（捕获 TUI 选择提示，转成 interactive_prompt 事件）
-	PermissionMode   string               // current permission mode (updated by JSONL permission-mode parser)
-	Model            string               // resolved model name (for session_created, surfaced to web /model)
-	Effort           string               // last-set thinking-effort level (low/medium/high/xhigh/max/ultracode)
-	PendingRequestID string               // non-empty while a tool-use approval request awaits a client decision
-	InitialPrompt    string               // prompt submitted when a daemon PTY session starts
-	JSONLExcludeIDs  map[string]struct{}  // rollout/session ids that existed before this PTY launch
-	PTYOutputTail    []byte               // recent raw PTY output for startup diagnostics
-	WorktreePath     string               // Scheme D: non-empty when the session runs inside a git worktree
-	WorktreeBranch   string               // Scheme D: the git branch backing the worktree
-	Backend          SessionBackend       // non-nil only for server-kind agents (opencode); subprocess agents drive via the fields above
+	Permission       *protocol.PermissionConfig
+	Model            string              // resolved model name (for session_created, surfaced to web /model)
+	Effort           string              // last-set thinking-effort level (low/medium/high/xhigh/max/ultracode)
+	PendingRequestID string              // non-empty while a tool-use approval request awaits a client decision
+	InitialPrompt    string              // prompt submitted when a daemon PTY session starts
+	JSONLExcludeIDs  map[string]struct{} // rollout/session ids that existed before this PTY launch
+	PTYOutputTail    []byte              // recent raw PTY output for startup diagnostics
+	WorktreePath     string              // Scheme D: non-empty when the session runs inside a git worktree
+	WorktreeBranch   string              // Scheme D: the git branch backing the worktree
+	Backend          SessionBackend      // non-nil only for server-kind agents (opencode); subprocess agents drive via the fields above
+}
+
+func clonePermission(p *protocol.PermissionConfig) *protocol.PermissionConfig {
+	if p == nil {
+		return nil
+	}
+	c := *p
+	return &c
 }
 
 // NotifyFunc is called after a web→terminal message completes.

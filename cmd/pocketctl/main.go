@@ -1902,14 +1902,14 @@ func handleCommands(ctx context.Context, client *ws.Client, sm *session.SessionM
 					"worktree", cmd.Worktree, "auto_create_dir", cmd.AutoCreateDir, "force", cmd.Force)
 				stateDirty.Store(true)
 				config := protocol.SessionConfig{
-					Agent:          cmd.Agent,
-					Cwd:            cmd.Cwd,
-					Prompt:         cmd.Prompt,
-					PermissionMode: cmd.PermissionMode,
-					Model:          cmd.Model,
-					Worktree:       cmd.Worktree,
-					AutoCreateDir:  cmd.AutoCreateDir,
-					Force:          cmd.Force,
+					Agent:         cmd.Agent,
+					Cwd:           cmd.Cwd,
+					Prompt:        cmd.Prompt,
+					Permission:    cmd.Permission,
+					Model:         cmd.Model,
+					Worktree:      cmd.Worktree,
+					AutoCreateDir: cmd.AutoCreateDir,
+					Force:         cmd.Force,
 				}
 				if config.Agent == "" {
 					config.Agent = "claude-code"
@@ -1935,6 +1935,11 @@ func handleCommands(ctx context.Context, client *ws.Client, sm *session.SessionM
 					SessionID: sessionID,
 					Title:     config.Prompt,
 					Model:     model,
+				}
+				if permission, mutable, modes, ok := sm.GetPermissionMeta(sessionID); ok {
+					evt.Permission = permission
+					evt.PermissionMutable = mutable
+					evt.PermissionMutableModes = modes
 				}
 				// Scheme D: surface the worktree path/branch so clients can show it.
 				if wt, branch, ok := sm.GetWorktreeInfo(sessionID); ok {
@@ -2005,19 +2010,9 @@ func handleCommands(ctx context.Context, client *ws.Client, sm *session.SessionM
 					})
 				}
 
-			case "set_permission_mode":
-				logger.Info("set permission mode", "session", cmd.SessionID, "mode", cmd.Content)
-				agentType, _ := sm.GetSessionAgent(cmd.SessionID)
-				if !adapter.Capabilities(agentType).SupportsPermissionCycle {
-					client.SendMsg(protocol.DaemonEvent{
-						Type:      "error",
-						SessionID: cmd.SessionID,
-						Error:     "permission mode switching is not supported for " + agentType,
-					})
-					continue
-				}
-				if err := sm.SetPermissionMode(ctx, cmd.SessionID, cmd.Content); err != nil {
-					logger.Error("set permission mode failed", "error", err)
+			case "set_permission_config":
+				if err := sm.SetPermissionConfig(cmd.SessionID, cmd.Permission); err != nil {
+					logger.Error("set permission config failed", "error", err)
 					client.SendMsg(protocol.DaemonEvent{
 						Type:      "error",
 						SessionID: cmd.SessionID,
@@ -2115,12 +2110,16 @@ func handleCommands(ctx context.Context, client *ws.Client, sm *session.SessionM
 					}
 				}
 				logger.Info("get_session_meta", "session", cmd.SessionID, "model", model)
-				client.SendMsg(protocol.DaemonEvent{
+				meta := protocol.DaemonEvent{
 					Type:      "session_meta",
 					SessionID: cmd.SessionID,
 					Model:     model,
 					Effort:    effort,
-				})
+				}
+				if permission, mutable, modes, ok := sm.GetPermissionMeta(cmd.SessionID); ok {
+					meta.Permission, meta.PermissionMutable, meta.PermissionMutableModes = permission, mutable, modes
+				}
+				client.SendMsg(meta)
 				if evt, ok := sm.PendingInteractivePrompt(cmd.SessionID); ok {
 					logger.Info("get_session_meta: replay pending interactive prompt", "session", cmd.SessionID, "req", evt.RequestID)
 					client.SendMsg(evt)

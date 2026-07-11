@@ -816,10 +816,43 @@ describe('Router - WS authorization gate (P0-1)', () => {
     router.registerClient(clientWs, 2) // different user
     daemonWs._sent.length = 0
 
-    await router.handleClientMessage(clientWs, { type: 'set_permission_mode', session_id: 'victim-sess', mode: 'bypassPermissions' })
+    await router.handleClientMessage(clientWs, { type: 'set_permission_config', session_id: 'victim-sess', permission: { agent: 'codex', preset: 'custom', approval_policy: 'never', sandbox_mode: 'workspace-write' } })
 
-    expect(daemonWs._sent.some((m: any) => m.type === 'set_permission_mode')).toBe(false)
+    expect(daemonWs._sent.some((m: any) => m.type === 'set_permission_config')).toBe(false)
     expect(clientWs._sent.some((m: any) => m.error === 'session not found or not owned')).toBe(true)
+  })
+
+  test('owned permission config is routed unchanged through session ownership, ignoring supplied daemon id', async () => {
+    const router = new Router(createMockPool())
+    const ownerDaemon = createMockWs()
+    const otherDaemon = createMockWs()
+    await router.registerDaemon(ownerDaemon, { type: 'register', daemon_id: 'daemon-1', hostname: 'owner', agents: [] }, 1)
+    await router.registerDaemon(otherDaemon, { type: 'register', daemon_id: 'daemon-2', hostname: 'other', agents: [] }, 1)
+    const clientWs = createMockWs()
+    router.registerClient(clientWs, 1)
+    ownerDaemon._sent.length = 0
+    otherDaemon._sent.length = 0
+    const permission = { agent: 'codex', preset: 'custom', approval_policy: 'never', sandbox_mode: 'workspace-write' }
+
+    await router.handleClientMessage(clientWs, { type: 'set_permission_config', session_id: 'test-sid', daemon_id: 'daemon-2', permission })
+
+    expect(ownerDaemon._sent).toContainEqual({ type: 'set_permission_config', session_id: 'test-sid', daemon_id: 'daemon-2', permission })
+    expect(otherDaemon._sent.some((m: any) => m.type === 'set_permission_config')).toBe(false)
+  })
+
+  test('permission_config_changed is broadcast unchanged to subscribed clients', async () => {
+    const router = new Router(createMockPool())
+    const daemonWs = createMockWs()
+    await router.registerDaemon(daemonWs, { type: 'register', daemon_id: 'daemon-1', hostname: 'h', agents: [] }, 1)
+    const clientWs = createMockWs()
+    router.registerClient(clientWs, 1)
+    await router.handleClientMessage(clientWs, { type: 'replay', session_id: 'test-sid', last_seq: 0 })
+    clientWs._sent.length = 0
+    const event = { type: 'permission_config_changed', session_id: 'test-sid', permission: { agent: 'codex', preset: 'custom', approval_policy: 'never', sandbox_mode: 'workspace-write' }, permission_effective: 'next_turn' }
+
+    router.handleDaemonMessage('daemon-1', event)
+
+    expect(clientWs._sent).toContainEqual(event)
   })
 
   test('a rejected non-owned session does not subscribe the attacker to its event stream', async () => {
@@ -917,7 +950,7 @@ describe('Router - list_daemons restart grace', () => {
   test('DB-online daemon not in memory is optimistic online within startup grace', async () => {
     pool.query.mockImplementation(async (sql: string) => {
       if (sql.includes('FROM daemons')) {
-        return { rows: [{ daemon_id: 'd-db', hostname: 'host-db', agents: [], alias: null, status: 'online', last_heartbeat: new Date().toISOString() }] }
+        return { rows: [{ daemon_id: 'd-db', hostname: 'host-db', agents: [], alias: null, status: 'online', last_heartbeat: new Date().toISOString(), user_id: 1 }] }
       }
       return { rows: [], rowCount: 0 }
     })
@@ -934,7 +967,7 @@ describe('Router - list_daemons restart grace', () => {
     const router2 = new Router(pool)
     pool.query.mockImplementation(async (sql: string) => {
       if (sql.includes('FROM daemons')) {
-        return { rows: [{ daemon_id: 'd-db', hostname: 'host-db', agents: [], alias: null, status: 'online', last_heartbeat: new Date().toISOString() }] }
+        return { rows: [{ daemon_id: 'd-db', hostname: 'host-db', agents: [], alias: null, status: 'online', last_heartbeat: new Date().toISOString(), user_id: 1 }] }
       }
       return { rows: [], rowCount: 0 }
     })

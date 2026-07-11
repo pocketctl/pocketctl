@@ -168,29 +168,29 @@ func (a *ClaudeAdapter) convertAssistant(raw ClaudeStreamEvent, sid string) ([]p
 	var events []protocol.DaemonEvent
 	for _, c := range raw.Message.Content {
 		switch c.Type {
-			case "text":
-				if isSynthetic {
-					// Local command feedback → command_receipt (not agent_text), so the
-					// web shows a receipt card instead of a confusing plain bubble.
-					events = append(events, a.makeReceipt(sid, c.Text))
-				} else {
-					ev := protocol.DaemonEvent{
-						Type:      "agent_text",
-						SessionID: sid,
-						Text:      c.Text,
-						Streaming: false,
-						Model:     CleanModelName(raw.Message.Model),
-					}
-					if u := raw.Message.Usage; u != nil {
-						ev.Usage = &protocol.ContextUsage{
-							InputTokens:  u.InputTokens,
-							OutputTokens: u.OutputTokens,
-							CacheRead:    u.CacheRead,
-							CacheCreate:  u.CacheCreation,
-						}
-					}
-					events = append(events, ev)
+		case "text":
+			if isSynthetic {
+				// Local command feedback → command_receipt (not agent_text), so the
+				// web shows a receipt card instead of a confusing plain bubble.
+				events = append(events, a.makeReceipt(sid, c.Text))
+			} else {
+				ev := protocol.DaemonEvent{
+					Type:      "agent_text",
+					SessionID: sid,
+					Text:      c.Text,
+					Streaming: false,
+					Model:     CleanModelName(raw.Message.Model),
 				}
+				if u := raw.Message.Usage; u != nil {
+					ev.Usage = &protocol.ContextUsage{
+						InputTokens:  u.InputTokens,
+						OutputTokens: u.OutputTokens,
+						CacheRead:    u.CacheRead,
+						CacheCreate:  u.CacheCreation,
+					}
+				}
+				events = append(events, ev)
+			}
 		case "tool_use":
 			events = append(events, protocol.DaemonEvent{
 				Type:      "tool_call",
@@ -315,7 +315,10 @@ func BuildClaudeArgs(prompt string, sessionID string, config protocol.SessionCon
 		args = append(args, "--allowedTools", strings.Join(config.AllowedTools, ","))
 	}
 
-	permMode := config.PermissionMode
+	permMode := ""
+	if config.Permission != nil {
+		permMode = config.Permission.Mode
+	}
 	if permMode == "" {
 		permMode = "acceptEdits"
 	}
@@ -328,7 +331,10 @@ func BuildClaudeArgs(prompt string, sessionID string, config protocol.SessionCon
 // driven via PTY stdin (interactive-web-session D1). No -p, no --output-format —
 // structured output is obtained via JSONL tailer, not stream-json stdout.
 func BuildInteractiveArgs(config protocol.SessionConfig) []string {
-	permMode := config.PermissionMode
+	permMode := ""
+	if config.Permission != nil {
+		permMode = config.Permission.Mode
+	}
 	if permMode == "" {
 		// Unattended daemon sessions: bypass all permission checks (see the
 		// matching default in CreateSession). acceptEdits would stall Bash

@@ -58,7 +58,7 @@ type SessionLauncher interface {
 }
 
 // AgentCapabilities declares which runtime features an agent supports. The
-// daemon consults these to decide whether a command (set_permission_mode,
+// daemon consults these to decide whether a command (set_permission_config,
 // set_effort, approval hook install, …) is applicable, returning a friendly
 // error instead of writing agent-specific PTY bytes when it isn't.
 type AgentCapabilities struct {

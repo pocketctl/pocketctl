@@ -15,9 +15,9 @@ type JSONLEntry struct {
 	SessionID     string        `json:"sessionId"`
 	Message       *JSONLMessage `json:"message,omitempty"`
 	Content       string        `json:"content,omitempty"`
-	IsMeta        bool          `json:"isMeta,omitempty"`     // true for meta messages (e.g. local-command-caveat) — filtered from replay
-	IsSidechain   bool          `json:"isSidechain,omitempty"` // true for sub-agent (sidechain) records
-	ParentUuid    string        `json:"parentUuid,omitempty"` // message-level parent UUID (NOT session id; not used for relation)
+	IsMeta        bool          `json:"isMeta,omitempty"`         // true for meta messages (e.g. local-command-caveat) — filtered from replay
+	IsSidechain   bool          `json:"isSidechain,omitempty"`    // true for sub-agent (sidechain) records
+	ParentUuid    string        `json:"parentUuid,omitempty"`     // message-level parent UUID (NOT session id; not used for relation)
 	CompactResult string        `json:"compact_result,omitempty"` // /compact outcome: "success" or "failed"
 	CompactError  string        `json:"compact_error,omitempty"`  // /compact failure reason
 	TotalCost     float64       `json:"total_cost_usd,omitempty"` // result event: aggregated cost
@@ -35,7 +35,7 @@ type JSONLMessage struct {
 type JSONLContentBlock struct {
 	Type      string          `json:"type"`
 	Text      string          `json:"text,omitempty"`
-	Content   string          `json:"content,omitempty"`   // tool_result output
+	Content   string          `json:"content,omitempty"` // tool_result output
 	Name      string          `json:"name,omitempty"`
 	ID        string          `json:"id,omitempty"`
 	Input     json.RawMessage `json:"input,omitempty"`
@@ -50,10 +50,10 @@ func computeTurnCost(u *TokenUsage) float64 {
 		return 0
 	}
 	const (
-		inputPerM    = 3.0
-		outputPerM   = 15.0
-		cacheReadM   = 0.30
-		cacheWriteM  = 3.75
+		inputPerM   = 3.0
+		outputPerM  = 15.0
+		cacheReadM  = 0.30
+		cacheWriteM = 3.75
 	)
 	return (float64(u.InputTokens)*inputPerM +
 		float64(u.OutputTokens)*outputPerM +
@@ -102,11 +102,11 @@ func ParseJSONLLine(line string) ([]protocol.DaemonEvent, error) {
 	case "result":
 		// End-of-turn summary with aggregated cost/turns.
 		return []protocol.DaemonEvent{{
-			Type:     "session_status",
+			Type:      "session_status",
 			SessionID: sid,
-			Status:   protocol.StatusCompleted,
-			CostUSD:  entry.TotalCost,
-			Turns:    entry.NumTurns,
+			Status:    protocol.StatusCompleted,
+			CostUSD:   entry.TotalCost,
+			Turns:     entry.NumTurns,
 		}}, nil
 	default:
 		// Skip: mode, permission-mode, file-history-snapshot, attachment, etc.
@@ -412,11 +412,11 @@ func (p *JSONLStreamParser) Parse(line string) ([]protocol.DaemonEvent, error) {
 		// End-of-turn summary with aggregated cost/turns. Previously the PTY
 		// path dropped this — forwarding it lets daemon sessions report cost.
 		return []protocol.DaemonEvent{{
-			Type:     "session_status",
+			Type:      "session_status",
 			SessionID: sid,
-			Status:   protocol.StatusCompleted,
-			CostUSD:  entry.TotalCost,
-			Turns:    entry.NumTurns,
+			Status:    protocol.StatusCompleted,
+			CostUSD:   entry.TotalCost,
+			Turns:     entry.NumTurns,
 		}}, nil
 	case "permission-mode":
 		// Claude writes this when the user cycles modes via Shift+Tab.
@@ -426,9 +426,10 @@ func (p *JSONLStreamParser) Parse(line string) ([]protocol.DaemonEvent, error) {
 			return nil, nil
 		}
 		return []protocol.DaemonEvent{{
-			Type:           "permission_mode_changed",
-			SessionID:      sid,
-			PermissionMode: mode,
+			Type:                "permission_config_changed",
+			SessionID:           sid,
+			Permission:          &protocol.PermissionConfig{Agent: AgentClaude, Mode: mode},
+			PermissionEffective: "immediate",
 		}}, nil
 	default:
 		return nil, nil
@@ -452,30 +453,30 @@ func (p *JSONLStreamParser) parseAssistant(entry JSONLEntry, sid string) ([]prot
 	var events []protocol.DaemonEvent
 	for _, b := range blocks {
 		switch b.Type {
-			case "text":
-				if isSynthetic {
-					// Local command reply → receipt (not a confusing plain bubble)
-					events = append(events, p.makeReceipt(sid, b.Text))
-				} else {
-					ev := protocol.DaemonEvent{
-						Type:      "agent_text",
-						SessionID: sid,
-						Text:      b.Text,
-						Streaming: false,
-						Model:     CleanModelName(entry.Message.Model),
-					}
-					if u := entry.Message.Usage; u != nil {
-						ev.Usage = &protocol.ContextUsage{
-							InputTokens:  u.InputTokens,
-							OutputTokens: u.OutputTokens,
-							CacheRead:    u.CacheRead,
-							CacheCreate:  u.CacheCreation,
-						}
-						// Compute per-turn cost delta from usage tokens (Sonnet pricing)
-						ev.CostUSD = computeTurnCost(u)
-					}
-					events = append(events, ev)
+		case "text":
+			if isSynthetic {
+				// Local command reply → receipt (not a confusing plain bubble)
+				events = append(events, p.makeReceipt(sid, b.Text))
+			} else {
+				ev := protocol.DaemonEvent{
+					Type:      "agent_text",
+					SessionID: sid,
+					Text:      b.Text,
+					Streaming: false,
+					Model:     CleanModelName(entry.Message.Model),
 				}
+				if u := entry.Message.Usage; u != nil {
+					ev.Usage = &protocol.ContextUsage{
+						InputTokens:  u.InputTokens,
+						OutputTokens: u.OutputTokens,
+						CacheRead:    u.CacheRead,
+						CacheCreate:  u.CacheCreation,
+					}
+					// Compute per-turn cost delta from usage tokens (Sonnet pricing)
+					ev.CostUSD = computeTurnCost(u)
+				}
+				events = append(events, ev)
+			}
 		case "tool_use":
 			events = append(events, protocol.DaemonEvent{
 				Type:      "tool_call",
