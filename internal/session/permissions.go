@@ -3,7 +3,10 @@ package session
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
+
+	"github.com/pocketctl/pocketctl/internal/protocol"
 )
 
 // ValidEffortLevels are the thinking-effort levels exposed by Claude Code's TUI
@@ -104,6 +107,20 @@ func (sm *SessionManager) GetSessionEffort(sessionID string) string {
 	return ps.Effort
 }
 
+// SetSessionEffort caches an actual non-empty effort reported by the agent.
+// Empty metadata must not erase the latest known value.
+func (sm *SessionManager) SetSessionEffort(sessionID, effort string) {
+	effort = strings.TrimSpace(effort)
+	if effort == "" {
+		return
+	}
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+	if ps, ok := sm.sessions[sessionID]; ok {
+		ps.Effort = effort
+	}
+}
+
 // InterruptSession stops the agent's current generation without killing the
 // session. For daemon (PTY) sessions it writes Ctrl+C (\x03) to the PTY,
 // which Claude's TUI interprets as "interrupt current turn". For terminal
@@ -124,10 +141,13 @@ func (sm *SessionManager) InterruptSession(sessionID string) error {
 
 	if ps.Source == "daemon" && ps.PTY != nil {
 		// Ctrl+C (ETX) — Claude TUI stops the current generation and returns
-		// to the input prompt. The JSONL tailer will push an idle status.
+		// to the input prompt. An interrupted Claude turn does not append a
+		// terminal JSONL record, so the tailer has nothing from which to infer
+		// idle; publish it explicitly after the PTY accepted the interrupt.
 		if _, err := ps.PTY.Write([]byte{0x03}); err != nil {
 			return fmt.Errorf("pty write ctrl+c: %w", err)
 		}
+		sm.SetSessionStatus(sessionID, protocol.StatusIdle)
 		return nil
 	}
 

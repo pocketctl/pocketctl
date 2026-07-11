@@ -139,6 +139,7 @@ type codexPayload struct {
 	Type    string `json:"type,omitempty"` // "message" | "function_call" | "function_call_output"
 	Role    string `json:"role,omitempty"` // for messages: user | assistant
 	Model   string `json:"model,omitempty"`
+	Effort  string `json:"effort,omitempty"`
 	Phase   string `json:"phase,omitempty"` // final_answer | commentary
 	Content []struct {
 		Type string `json:"type"` // input_text | output_text | text
@@ -267,6 +268,9 @@ func convertCodexPayload(topType string, p codexPayload, session *CodexAdapter) 
 		// derive a session_model_changed for live daemon sessions.
 		if session != nil && p.Model != "" {
 			session.model = CleanModelName(p.Model)
+		}
+		if effort := strings.TrimSpace(p.Effort); effort != "" {
+			return []protocol.DaemonEvent{{Type: "session_meta", Effort: effort}}
 		}
 		return nil
 
@@ -707,6 +711,27 @@ func (CodexSessionStorage) ExtractModel(lines []string) string {
 		}
 	}
 	return model
+}
+
+func (CodexSessionStorage) ExtractEffort(lines []string) string {
+	for i := len(lines) - 1; i >= 0; i-- {
+		line := strings.TrimSpace(lines[i])
+		if line == "" {
+			continue
+		}
+		var raw codexLine
+		if json.Unmarshal([]byte(line), &raw) != nil || raw.Type != "turn_context" {
+			continue
+		}
+		var p codexPayload
+		if json.Unmarshal(raw.Payload, &p) != nil {
+			continue
+		}
+		if effort := strings.TrimSpace(p.Effort); effort != "" {
+			return effort
+		}
+	}
+	return ""
 }
 
 func truncateCodex(s string, maxLen int) string {

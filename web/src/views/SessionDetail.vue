@@ -100,6 +100,11 @@
           <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.6 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.6a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
           {{ currentModel }}
         </span>
+        <span v-if="!focusedSubAgentId && effortVisible" class="effort-pill"
+          :title="`${t('session.effort_level')}：${effortLabel}`">
+          <svg aria-hidden="true" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 3v3M12 18v3M3 12h3M18 12h3M5.64 5.64l2.12 2.12M16.24 16.24l2.12 2.12M18.36 5.64l-2.12 2.12M7.76 16.24l-2.12 2.12"/><circle cx="12" cy="12" r="3"/></svg>
+          <span class="effort-prefix">{{ t('session.effort_short') }} · </span>{{ effortLabel }}
+        </span>
         <div class="session-id-box">
           <code class="session-id-text">{{ sessionId?.slice(0, 8) }}</code>
           <button class="copy-btn" @click="copySessionId" :title="copied ? t('common.copied') : t('session.actions.copy_id')">
@@ -294,39 +299,21 @@
                 </Transition>
               </div>
 
-              <!-- Right: model + effort + context usage + send/stop button -->
-              <div class="input-right">
+              <!-- Session metadata: model + context usage -->
+              <div class="input-meta">
                 <!-- Current model (resolved from session_meta) -->
                 <span v-if="currentModel" class="model-pill" :title="t('session.current_model')">
                   <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M12 1v6M12 17v6M4.22 4.22l4.24 4.24M15.54 15.54l4.24 4.24M1 12h6M17 12h6M4.22 19.78l4.24-4.24M15.54 8.46l4.24-4.24"/></svg>
                   <span class="model-name">{{ currentModel }}</span>
                 </span>
 
-                <!-- Effort level dropdown (Claude Code thinking strength) -->
-                <div v-if="canInput && currentSessionAgent === 'claude-code'" class="effort-dropdown" ref="effortDropdownEl">
-                  <button class="effort-trigger" @click="showEffortMenu = !showEffortMenu"
-                    :title="t('session.effort_level')">
-                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2a4 4 0 0 0-4 4v4a4 4 0 0 0 8 0V6a4 4 0 0 0-4-4z"/><path d="M6 10v2a6 6 0 0 0 12 0v-2"/><path d="M12 18v3"/></svg>
-                    <span class="effort-label">{{ currentEffort || t('session.effort_unknown') }}</span>
-                    <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M6 9l6 6 6-6"/></svg>
-                  </button>
-                  <Transition name="perm-menu">
-                    <div v-if="showEffortMenu" class="perm-menu">
-                      <button v-for="lvl in EFFORT_LEVELS" :key="lvl"
-                        :class="['perm-menu-item', { active: currentEffort === lvl }]"
-                        @click="setEffort(lvl)">
-                        <span class="perm-menu-name">{{ lvl }}</span>
-                        <svg v-if="currentEffort === lvl" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M20 6L9 17l-5-5"/></svg>
-                      </button>
-                    </div>
-                  </Transition>
-                </div>
-
                 <div v-if="contextTokens" class="ctx-indicator" :title="contextTooltip">
                   <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/></svg>
                   <span class="ctx-value">{{ contextTokens }}</span>
                 </div>
+              </div>
 
+              <div class="input-actions">
                 <!-- Send button (idle) -->
                 <button v-if="!isExecuting" class="action-btn send-btn"
                   @click="sendMessage"
@@ -378,6 +365,7 @@
 <script setup lang="ts">
 import { ref, computed, onMounted, onUnmounted, nextTick, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
+import { normalizeEffort, shouldShowEffort } from '../utils/effort'
 import NewSessionDialog from '../components/NewSessionDialog.vue'
 import { useWebSocket } from '../composables/useWebSocket'
 import { formatRelativeTime } from '../composables/useRelativeTime'
@@ -422,12 +410,6 @@ const messageInput = ref('')
 const commandsCache = ref<CommandItem[]>([])
 const currentModel = ref('')            // resolved model name from session_meta event
 const currentEffort = ref('')           // thinking-effort level from session_meta (low/medium/high/xhigh/max/ultracode)
-const showEffortMenu = ref(false)       // effort dropdown visibility
-// Claude Code TUI exposes these effort levels via the /effort command.
-const EFFORT_LEVELS = ['low', 'medium', 'high', 'xhigh', 'max', 'ultracode'] as const
-// Persist the last-set effort per session so it survives refresh / session switch
-// (effort is a runtime TUI state, not stored in JSONL or settings.json).
-const effortStorageKey = (sid: string) => `pocketctl:effort:${sid}`
 const showHelpModal = ref(false)        // /help local command → full-screen modal
 const replayReqId = ref(0)
 const isLoading = ref(false)
@@ -440,6 +422,15 @@ const resumeCopied = ref(false)  // session-resume-command: 复制恢复命令�
 const showNewSession = ref(false)
 const daemonList = computed(() => Object.values(daemons.value))
 const currentSessionAgent = computed(() => allSessions.value.find((x: any) => x.session_id === sessionId.value)?.agent)
+const normalizedEffort = computed(() => normalizeEffort(currentEffort.value))
+const effortVisible = computed(() => shouldShowEffort(currentSessionAgent.value || '', currentEffort.value))
+const effortLabel = computed(() => {
+  const known: Record<string, string> = {
+    minimal: t('session.effort.minimal'), low: t('session.effort.low'), medium: t('session.effort.medium'),
+    high: t('session.effort.high'), xhigh: t('session.effort.xhigh'), max: t('session.effort.max'), ultracode: 'Ultracode',
+  }
+  return known[normalizedEffort.value] || currentEffort.value.trim()
+})
 const isPendingSession = computed(() => sessionId.value.startsWith('pending-'))
 const selectedIndex = ref(0)
 const popoverDismissed = ref(false)
@@ -470,7 +461,6 @@ const copied = ref(false)
 const messagesEl = ref<HTMLDivElement | null>(null)
 const inputEl = ref<HTMLTextAreaElement | null>(null)
 const permDropdownEl = ref<HTMLElement | null>(null)
-const effortDropdownEl = ref<HTMLElement | null>(null)
 const isInputFocused = ref(false)
 // Textarea height (user-adjustable via drag handle, resets on page refresh)
 const DEFAULT_TEXTAREA_HEIGHT = 72  // ~3 rows
@@ -752,7 +742,7 @@ const contextTokens = computed(() => {
   const u = effectiveUsage()
   if (u) {
     const total = (u.input_tokens || 0) + (u.cache_read_tokens || 0) + (u.cache_create_tokens || 0)
-    return total > 1000 ? (total / 1000).toFixed(1) + 'K' : String(total)
+    return formatTokenAmount(total)
   }
   return ''
 })
@@ -776,7 +766,12 @@ const parentTotalTokens = computed(() => {
   return (s as any)?.totalTokens ?? null
 })
 function fmtTk(n: number) {
+  return formatTokenAmount(n)
+}
+
+function formatTokenAmount(n: number) {
   n = +n || 0
+  if (n > 1e9) return (n / 1e9).toFixed(1) + 'G'
   if (n >= 1e6) return (n / 1e6).toFixed(1) + 'M'
   if (n >= 1e3) return (n / 1e3).toFixed(0) + 'K'
   return '' + n
@@ -906,13 +901,6 @@ function setPermissionMode(mode: string) {
 
 // Switch thinking-effort: inject `/effort <level>` into the PTY via the daemon,
 // then persist it locally so the pill stays in sync across refresh / session switch.
-function setEffort(level: string) {
-  currentEffort.value = level
-  showEffortMenu.value = false
-  try { localStorage.setItem(effortStorageKey(sessionId.value), level) } catch {}
-  send({ type: 'set_effort', session_id: sessionId.value, content: level })
-}
-
 // Stop button escalation: 1st click sends PTY Ctrl+C (graceful). If clicked
 // again within 2.5s (Ctrl+C didn't reach claude — PTY disconnected), escalate
 // to session_kill (SIGKILL the claude process). This guarantees a stuck session
@@ -1460,8 +1448,7 @@ watch(loadKey, (newKey, oldKey) => {
     exitedAt.value = ''
     commandsCache.value = []
     currentModel.value = '' // clear; refilled by get_session_meta below
-    currentEffort.value = '' // clear; refilled by get_session_meta / localStorage
-    showEffortMenu.value = false
+    currentEffort.value = '' // clear; refilled by authoritative get_session_meta
     loadHistory()
   }
 })
@@ -1557,16 +1544,7 @@ onMounted(() => {
   cleanups.push(onEvent('session_meta', (msg: any) => {
     if (msg.session_id !== sessionId.value) return
     if (msg.model) currentModel.value = msg.model
-    // effort: prefer the daemon-reported value (reflects what pocketctl set);
-    // fall back to the last persisted local value when the daemon has none.
-    if (msg.effort) {
-      currentEffort.value = msg.effort
-    } else {
-      try {
-        const saved = localStorage.getItem(effortStorageKey(sessionId.value))
-        if (saved) currentEffort.value = saved
-      } catch {}
-    }
+    if (msg.effort) currentEffort.value = msg.effort
   }))
 
   // session_model_changed: the daemon detected a /model switch mid-session
@@ -1829,9 +1807,6 @@ function closePermMenu(e: MouseEvent) {
   if (permDropdownEl.value && !permDropdownEl.value.contains(e.target as Node)) {
     showPermMenu.value = false
   }
-  if (effortDropdownEl.value && !effortDropdownEl.value.contains(e.target as Node)) {
-    showEffortMenu.value = false
-  }
 }
 onMounted(() => {
   document.addEventListener('click', closePermMenu)
@@ -1884,6 +1859,7 @@ onMounted(() => {
 .status-pill.running { background: var(--success-bg); color: var(--success); }
 .status-pill .pulse { width: 6px; height: 6px; border-radius: 50%; background: currentColor; animation: pulse-green 1.5s infinite; }
 .model-pill { display: inline-flex; align-items: center; gap: 5px; padding: 4px 10px; border-radius: var(--radius-full); font-size: 12px; font-weight: 600; background: var(--accent-muted); color: var(--accent); max-width: 180px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.effort-pill { display: inline-flex; align-items: center; gap: 5px; padding: 4px 10px; border-radius: var(--radius-full); font-size: 12px; font-weight: 600; background: var(--warning-bg); color: var(--warning); white-space: nowrap; }
 
 .session-id-box { display: flex; align-items: center; gap: 6px; padding: 3px 8px; background: var(--bg); border: 1px solid var(--border); border-radius: var(--radius-md); }
 .session-id-text { font-family: var(--font-mono); font-size: 12px; color: var(--fg-secondary); }
@@ -1952,7 +1928,7 @@ onMounted(() => {
 .ended-text { color: var(--fg-tertiary); font-size: 13px; }
 .readonly-hint { color: var(--fg-tertiary); font-size: 13px; font-style: italic; }
 
-.chat-input-container { position: relative; background: var(--bg); border: 1px solid var(--border); border-radius: var(--radius-xl); transition: border-color 0.15s, box-shadow 0.15s; }
+.chat-input-container { position: relative; container-type: inline-size; background: var(--bg); border: 1px solid var(--border); border-radius: var(--radius-xl); transition: border-color 0.15s, box-shadow 0.15s; }
 .chat-input-container.focused { border-color: var(--border-focus); box-shadow: 0 0 0 3px var(--accent-muted); }
 
 .chat-textarea { width: 100%; background: none; border: none; color: var(--fg); font-size: 14px; font-family: var(--font-body); line-height: 1.5; outline: none; resize: none; padding: 12px 16px 4px; min-height: 60px; max-height: 400px; overflow-y: auto; }
@@ -1965,7 +1941,7 @@ onMounted(() => {
 .chat-textarea:disabled { opacity: 0.5; }
 
 /* Bottom control row */
-.input-controls { display: flex; align-items: center; justify-content: space-between; padding: 6px 8px 8px 12px; gap: 8px; }
+.input-controls { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; padding: 6px 8px 8px 12px; gap: 8px; }
 
 /* Permission dropdown (left) */
 .perm-dropdown { position: relative; }
@@ -1978,11 +1954,6 @@ onMounted(() => {
 .model-pill svg { flex-shrink: 0; }
 .model-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
-/* Effort dropdown (right) — mirrors .perm-dropdown */
-.effort-dropdown { position: relative; }
-.effort-trigger { display: inline-flex; align-items: center; gap: 4px; padding: 4px 8px; background: none; border: none; color: var(--fg-secondary); font-size: 12px; cursor: pointer; border-radius: var(--radius-sm); transition: color 0.15s, background 0.15s; font-family: var(--font-body); }
-.effort-trigger:hover { color: var(--fg); background: var(--surface-hover); }
-.effort-label { font-weight: 500; }
 .perm-menu { position: absolute; bottom: calc(100% + 4px); left: 0; min-width: 140px; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-md); box-shadow: 0 4px 16px rgba(0,0,0,0.3); padding: 4px; z-index: 30; }
 .perm-menu-item { display: flex; align-items: center; justify-content: space-between; width: 100%; padding: 8px 10px; background: none; border: none; color: var(--fg); font-size: 13px; cursor: pointer; border-radius: var(--radius-sm); transition: background 0.1s; font-family: var(--font-body); }
 .perm-menu-item:hover { background: var(--surface-hover); }
@@ -1991,11 +1962,22 @@ onMounted(() => {
 .perm-menu-enter-active, .perm-menu-leave-active { transition: opacity 0.15s, transform 0.15s; }
 .perm-menu-enter-from, .perm-menu-leave-to { opacity: 0; transform: translateY(4px); }
 
-/* Right side: context + action button */
-.input-right { display: flex; align-items: center; gap: 8px; }
+/* Metadata can shrink independently; actions always keep their hit target. */
+.input-meta { min-width: 0; display: flex; align-items: center; justify-content: flex-end; gap: 8px; }
+.input-meta .model-pill { min-width: 0; flex: 0 1 180px; }
+.input-actions { display: flex; align-items: center; gap: 8px; }
 .ctx-indicator { display: inline-flex; align-items: center; gap: 4px; padding: 4px 8px; font-size: 11px; color: var(--fg-tertiary); font-family: var(--font-mono); cursor: help; white-space: pre-line; }
 
 .action-btn { width: 32px; height: 32px; border-radius: 50%; border: none; display: flex; align-items: center; justify-content: center; cursor: pointer; flex-shrink: 0; transition: background 0.15s, opacity 0.15s; }
+
+@container (max-width: 620px) {
+  .input-controls { grid-template-columns: minmax(0, 1fr) auto; row-gap: 4px; }
+  .input-meta { grid-column: 1 / -1; grid-row: 1; justify-content: flex-start; }
+  .perm-dropdown { grid-column: 1; grid-row: 2; }
+  .input-actions { grid-column: 2; grid-row: 2; }
+  .input-meta .model-pill { max-width: 120px; }
+  .effort-prefix { display: none; }
+}
 .send-btn { background: var(--accent); color: #fff; }
 .send-btn:hover:not(:disabled) { background: var(--accent-hover); }
 .send-btn:disabled { background: var(--border); color: var(--fg-tertiary); cursor: not-allowed; }

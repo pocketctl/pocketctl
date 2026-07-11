@@ -220,4 +220,23 @@ describe('Router - replay pagination (session-history-pagination 6.3)', () => {
     expect(end.count).toBe(0)
     expect(end.has_more).toBe(false)
   })
+
+  test('replay_end carries the authoritative current session status', async () => {
+    const clientWs = createMockWs()
+    router.registerClient(clientWs, 1)
+    pool.query.mockImplementation((sql: string) => {
+      if (sql.includes('SELECT 1 FROM sessions')) return Promise.resolve({ rows: [{ '?column?': 1 }], rowCount: 1 })
+      if (sql.includes('SELECT status FROM sessions')) return Promise.resolve({ rows: [{ status: 'completed' }], rowCount: 1 })
+      if (sql.includes('FROM events')) return Promise.resolve({ rows: [{ id: 1, payload: { type: 'agent_text', text: 'done' } }] })
+      return Promise.resolve({ rows: [], rowCount: 0 })
+    })
+
+    await router.handleClientMessage(clientWs, {
+      type: 'replay', session_id: 'sess-1', direction: 'backward', limit: 20,
+    })
+    await new Promise(r => setTimeout(r, 50))
+
+    const end = clientWs._sent.find((m: any) => m.type === 'replay_end')
+    expect(end.status).toBe('completed')
+  })
 })

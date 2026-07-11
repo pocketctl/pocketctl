@@ -2078,12 +2078,15 @@ func handleCommands(ctx context.Context, client *ws.Client, sm *session.SessionM
 				agentType, _ := sm.GetSessionAgent(cmd.SessionID)
 				storage := adapter.NewStorage(agentType)
 				model, exists := sm.GetSessionModel(cmd.SessionID)
+				effort := sm.GetSessionEffort(cmd.SessionID)
 				if model == "" && agentType == adapter.AgentOpencode {
 					// opencode terminal sessions carry no model at discovery and have no
 					// claude-style JSONL; fetch the model from the serve instead.
 					model = sm.OpencodeSessionModelFromServe(cmd.SessionID)
 				}
-				if model == "" && agentType != adapter.AgentOpencode {
+				needsModel := model == "" && agentType != adapter.AgentOpencode
+				needsCodexEffort := effort == "" && agentType == adapter.AgentCodex
+				if needsModel || needsCodexEffort {
 					// Terminal sessions don't carry a model at discovery time — extract
 					// it from the JSONL history (last real assistant message) and cache.
 					cwd, cwdOk := sm.GetSessionCwd(cmd.SessionID)
@@ -2095,11 +2098,19 @@ func handleCommands(ctx context.Context, client *ws.Client, sm *session.SessionM
 						logger.Info("get_session_meta: read jsonl failed", "session", cmd.SessionID, "path", path, "error", ferr)
 					} else {
 						lines := strings.Split(string(data), "\n")
-						m := storage.ExtractModel(lines)
-						logger.Info("get_session_meta: extracted", "session", cmd.SessionID, "lines", len(lines), "model", m)
-						if m != "" {
-							sm.SetSessionModel(cmd.SessionID, m)
-							model = m
+						if needsModel {
+							m := storage.ExtractModel(lines)
+							logger.Info("get_session_meta: extracted", "session", cmd.SessionID, "lines", len(lines), "model", m)
+							if m != "" {
+								sm.SetSessionModel(cmd.SessionID, m)
+								model = m
+							}
+						}
+						if needsCodexEffort {
+							effort = (adapter.CodexSessionStorage{}).ExtractEffort(lines)
+							if effort != "" {
+								sm.SetSessionEffort(cmd.SessionID, effort)
+							}
 						}
 					}
 				}
@@ -2108,7 +2119,7 @@ func handleCommands(ctx context.Context, client *ws.Client, sm *session.SessionM
 					Type:      "session_meta",
 					SessionID: cmd.SessionID,
 					Model:     model,
-					Effort:    sm.GetSessionEffort(cmd.SessionID),
+					Effort:    effort,
 				})
 				if evt, ok := sm.PendingInteractivePrompt(cmd.SessionID); ok {
 					logger.Info("get_session_meta: replay pending interactive prompt", "session", cmd.SessionID, "req", evt.RequestID)
