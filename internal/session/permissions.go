@@ -3,10 +3,14 @@ package session
 import (
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/pocketctl/pocketctl/internal/adapter"
 	"github.com/pocketctl/pocketctl/internal/protocol"
 )
+
+var claudeRuntimePermissionModes = []string{"manual", "acceptEdits", "plan"}
+var claudeNextTurnPermissionModes = []string{"manual", "auto", "acceptEdits", "dontAsk", "plan", "bypassPermissions"}
 
 // ValidEffortLevels are the thinking-effort levels exposed by Claude Code's TUI
 // via the /effort command. Kept in the order shown by the TUI picker.
@@ -137,17 +141,51 @@ func (sm *SessionManager) SetPermissionConfig(sessionID string, cfg *protocol.Pe
 		sm.mu.Unlock()
 		return fmt.Errorf("codex remote approval is not supported")
 	}
-	if ps.Source != "daemon" {
-		sm.mu.Unlock()
-		return fmt.Errorf("permission configuration is immutable")
-	}
 	if ps.Status == protocol.StatusRunning || ps.Status == protocol.StatusWaitingApproval {
 		sm.mu.Unlock()
 		return fmt.Errorf("session_busy")
 	}
-	if ps.Agent != adapter.AgentCodex {
+	if ps.Source != "daemon" || ps.PTY == nil {
+		ps.Permission = clonePermission(cfg)
+		confirmed := clonePermission(ps.Permission)
 		sm.mu.Unlock()
-		return fmt.Errorf("permission configuration is not runtime mutable")
+		sm.outputCh <- protocol.DaemonEvent{Type: "permission_config_changed", SessionID: sessionID, Permission: confirmed, PermissionEffective: "next_turn"}
+		return nil
+	}
+	if ps.Agent == adapter.AgentClaude {
+		targetIdx := indexString(claudeRuntimePermissionModes, cfg.Mode)
+		if targetIdx < 0 {
+			sm.mu.Unlock()
+			return fmt.Errorf("permission mode %q is not runtime mutable", cfg.Mode)
+		}
+		current := ""
+		if ps.Permission != nil {
+			current = ps.Permission.Mode
+		}
+		currentIdx := indexString(claudeRuntimePermissionModes, current)
+		if currentIdx == targetIdx {
+			confirmed := clonePermission(ps.Permission)
+			sm.mu.Unlock()
+			sm.outputCh <- protocol.DaemonEvent{Type: "permission_config_changed", SessionID: sessionID, Permission: confirmed, PermissionEffective: "immediate"}
+			return nil
+		}
+		presses := 1 + targetIdx
+		if currentIdx >= 0 {
+			presses = (targetIdx - currentIdx + len(claudeRuntimePermissionModes)) % len(claudeRuntimePermissionModes)
+		}
+		pty := ps.PTY
+		sm.mu.Unlock()
+		for i := 0; i < presses; i++ {
+			if _, err := pty.Write([]byte("\x1b[Z")); err != nil {
+				return fmt.Errorf("pty write shift+tab: %w", err)
+			}
+			if i+1 < presses {
+				time.Sleep(150 * time.Millisecond)
+			}
+		}
+		// The JSONL permission-mode record is authoritative; its parser emits
+		// permission_config_changed only after Claude confirms the actual mode.
+		return nil
 	}
 	ps.Permission = clonePermission(cfg)
 	confirmed := clonePermission(ps.Permission)
@@ -163,6 +201,37 @@ func (sm *SessionManager) GetPermissionMeta(sessionID string) (*protocol.Permiss
 	if !ok {
 		return nil, false, nil, false
 	}
-	mutable := ps.Source == "daemon" && ps.Agent == adapter.AgentCodex && ps.Status != protocol.StatusRunning && ps.Status != protocol.StatusWaitingApproval
-	return clonePermission(ps.Permission), mutable, nil, true
+	idle := ps.Status != protocol.StatusRunning && ps.Status != protocol.StatusWaitingApproval
+	if !idle {
+		return clonePermission(ps.Permission), false, nil, true
+	}
+	if ps.Agent == adapter.AgentClaude {
+		if ps.Source == "daemon" && ps.PTY != nil {
+			return clonePermission(ps.Permission), true, append([]string(nil), claudeRuntimePermissionModes...), true
+		}
+		return clonePermission(ps.Permission), true, append([]string(nil), claudeNextTurnPermissionModes...), true
+	}
+	return clonePermission(ps.Permission), ps.Agent == adapter.AgentCodex, nil, true
+}
+
+func indexString(values []string, target string) int {
+	for i, value := range values {
+		if value == target {
+			return i
+		}
+	}
+	return -1
+}
+
+// ObservePermissionEvent caches only agent-confirmed changes before the event
+// is forwarded, keeping later session_meta responses authoritative.
+func (sm *SessionManager) ObservePermissionEvent(event protocol.DaemonEvent) {
+	if event.Type != "permission_config_changed" || event.Permission == nil {
+		return
+	}
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+	if ps, ok := sm.sessions[event.SessionID]; ok {
+		ps.Permission = clonePermission(event.Permission)
+	}
 }

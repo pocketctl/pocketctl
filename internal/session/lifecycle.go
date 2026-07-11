@@ -2,6 +2,7 @@ package session
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"os"
@@ -466,7 +467,19 @@ func (sm *SessionManager) servePTYSession(ctx context.Context, ps *ProcessState,
 		if initialPrompt != "" {
 			tailer.SetPendingCmd(initialPrompt)
 		}
-		go tailer.Run(ctx, sm.outputCh, nil)
+		tailerEvents := make(chan protocol.DaemonEvent, 32)
+		go tailer.Run(ctx, tailerEvents, nil)
+		go func() {
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case event := <-tailerEvents:
+					sm.ObservePermissionEvent(event)
+					sm.outputCh <- event
+				}
+			}
+		}()
 		if sm.OnSessionIDResolved != nil {
 			sm.OnSessionIDResolved(tailerSessionID, tailerCwd, tailerAgent)
 		}
@@ -669,8 +682,9 @@ func (sm *SessionManager) AbortSession(sessionID string) bool {
 // Returns false only if no JSONL exists (genuinely unknown session).
 func (sm *SessionManager) tryResumeHistorical(sessionID string) bool {
 	type historicalSession struct {
-		agent string
-		cwd   string
+		agent      string
+		cwd        string
+		permission *protocol.PermissionConfig
 	}
 
 	var historical *historicalSession
@@ -691,6 +705,12 @@ func (sm *SessionManager) tryResumeHistorical(sessionID string) bool {
 			}
 		}
 		historical = &historicalSession{agent: agentType, cwd: cwd}
+		if agentType == adapter.AgentClaude {
+			historical.permission = extractClaudePermissionFromJSONL(jsonlPath)
+		} else {
+			cfg := adapter.DefaultPermissionConfig(agentType)
+			historical.permission = &cfg
+		}
 		break
 	}
 	if historical == nil {
@@ -711,8 +731,46 @@ func (sm *SessionManager) tryResumeHistorical(sessionID string) bool {
 		LastActivityAt: now,
 		Cwd:            historical.cwd,
 		Agent:          historical.agent,
+		Permission:     clonePermission(historical.permission),
 	}
 	return true
+}
+
+// EnsureSessionLoaded restores JSONL-backed history into the in-memory map so
+// metadata requests after a daemon restart still return model and permission.
+func (sm *SessionManager) EnsureSessionLoaded(sessionID string) bool {
+	sm.mu.RLock()
+	_, ok := sm.sessions[sessionID]
+	sm.mu.RUnlock()
+	if ok {
+		return true
+	}
+	return sm.tryResumeHistorical(sessionID)
+}
+
+func extractClaudePermissionFromJSONL(path string) *protocol.PermissionConfig {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil
+	}
+	var mode string
+	for _, line := range strings.Split(string(data), "\n") {
+		var entry struct {
+			Type           string `json:"type"`
+			PermissionMode string `json:"permissionMode"`
+			Content        string `json:"content"`
+		}
+		if json.Unmarshal([]byte(line), &entry) == nil && entry.Type == "permission-mode" {
+			mode = strings.TrimSpace(entry.PermissionMode)
+			if mode == "" {
+				mode = strings.TrimSpace(entry.Content)
+			}
+		}
+	}
+	if mode == "" {
+		return nil
+	}
+	return &protocol.PermissionConfig{Agent: adapter.AgentClaude, Mode: mode}
 }
 
 // isProcessAlive checks if a process with the given PID is running.

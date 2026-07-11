@@ -136,6 +136,7 @@ func (sm *SessionManager) readOutput(ctx context.Context, cmd *exec.Cmd, stdout 
 			if evt.Effort != "" {
 				sm.SetSessionEffort(ps.SessionID, evt.Effort)
 			}
+			sm.ObservePermissionEvent(evt)
 			sm.outputCh <- evt
 		}
 	}
@@ -406,6 +407,7 @@ func (sm *SessionManager) sendToIdleTerminal(ctx context.Context, ps *ProcessSta
 				if evt.SessionID == "" {
 					evt.SessionID = ps.SessionID
 				}
+				sm.ObservePermissionEvent(evt)
 				sm.outputCh <- evt
 			}
 		}

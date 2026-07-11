@@ -1834,6 +1834,7 @@ func handleWatcherEvents(ctx context.Context, events <-chan watcher.SessionEvent
 								if events[i].SessionID == "" {
 									events[i].SessionID = evt.Session.SessionID
 								}
+								sm.ObservePermissionEvent(events[i])
 								outputCh <- events[i]
 							}
 							// Check for title generation trigger (user + assistant messages
@@ -2070,6 +2071,7 @@ func handleCommands(ctx context.Context, client *ws.Client, sm *session.SessionM
 				// Web client queries a session's resolved model (for the /model
 				// command). Unlike session_created (one-shot, fired before the web
 				// subscribes), this is a request/response the client issues on mount.
+				sm.EnsureSessionLoaded(cmd.SessionID)
 				agentType, _ := sm.GetSessionAgent(cmd.SessionID)
 				storage := adapter.NewStorage(agentType)
 				model, exists := sm.GetSessionModel(cmd.SessionID)
