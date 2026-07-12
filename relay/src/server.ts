@@ -278,7 +278,7 @@ async function main() {
       if (hasPendingCode(normalizedEmail)) {
         reply.code(429); return { error: '请等待 60 秒后再重新获取验证码' };
       }
-      const devCode = DEV_EMAIL_CODE || '888888';
+      const devCode = DEV_EMAIL_CODE || '123456';
       storeCode(normalizedEmail, devCode, 5 * 60 * 1000);
       console.log(`[email] dev code for ${normalizedEmail}: ${devCode} (expires in 5m)`);
       return { success: true, message: 'verification code sent', code: devCode };
