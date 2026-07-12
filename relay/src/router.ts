@@ -1,6 +1,7 @@
 import type { WebSocket } from 'ws';
 import type pg from 'pg';
 import { randomUUID } from 'crypto';
+import { isAppReviewDemoDaemon, isAppReviewDemoSession } from './config/app-review-demo.js';
 import * as db from './db.js';
 import { generateTitle, generateSubagentTitle } from './title.js';
 import { notifyUser, sessionStatusPush, daemonOfflinePush, daemonOnlinePush, approvalPush, interactivePush, summarizeToolInput, highRiskPush, isHighRiskCommand } from './push.js';
@@ -1099,6 +1100,15 @@ export class Router {
     }
 
     if (msg.type === 'session_create') {
+      if (isAppReviewDemoDaemon(msg.daemon_id)) {
+        this.send(clientWs, {
+          type: 'session_create_failed',
+          request_id: msg.request_id,
+          reason: 'demo_read_only',
+          error: 'App Review 演示数据为只读模式',
+        });
+        return;
+      }
       // Precise routing: prefer msg.daemon_id, validate ownership; fallback to first online same-user daemon
       let targetDaemon: { id: string; daemon: DaemonConnection } | null = null;
       if (msg.daemon_id) {
@@ -1195,6 +1205,20 @@ export class Router {
     }
 
     if (msg.session_id) {
+      if (isAppReviewDemoSession(msg.session_id)) {
+        if (msg.type === 'user_message') {
+          this.send(clientWs, {
+            type: 'user_message_nack', msg_id: msg.msg_id,
+            reason: 'demo_read_only', error: 'App Review 演示数据为只读模式',
+          });
+        } else {
+          this.send(clientWs, {
+            type: 'error', session_id: msg.session_id,
+            code: 'demo_read_only', error: 'App Review 演示数据为只读模式',
+          });
+        }
+        return;
+      }
       // Route to the owning daemon. The in-memory sessionToDaemon map is the
       // fast path, but it is volatile (cleared on relay restart, stale after a
       // daemon reconnect with a new id, never pruned on disconnect). Fall back
@@ -1535,7 +1559,8 @@ export class Router {
       const optimisticOnline = optimistic && inStartupWindow;
       // 非乐观模式下以 DB 记录的 status 为准;乐观模式下被乐观值覆盖。
       const dbOnline = row.status === 'online';
-      const isOnline = optimisticOnline || (!optimistic && dbOnline);
+      const demoOnline = isAppReviewDemoDaemon(row.daemon_id);
+      const isOnline = demoOnline || optimisticOnline || (!optimistic && dbOnline);
       return {
         daemon_id: row.daemon_id,
         hostname: row.hostname,

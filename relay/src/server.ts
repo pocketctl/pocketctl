@@ -15,6 +15,8 @@ import { getQuotaSnapshot } from './quota.js';
 import { createWsTicketStore } from './config/ws-tickets.js';
 import { createHash } from 'crypto';
 import { ConnectionRateLimiter } from './rate-limit.js';
+import { isAppReviewEmail, isAppReviewEnabled, isConfiguredAppReviewEmail, verifyAppReviewCode } from './config/app-review-auth.js';
+import { ensureAppReviewDemoData } from './config/app-review-demo.js';
 
 const API_KEY = process.env.POCKETCTL_API_KEY || '';
 const DB_URL = process.env.DATABASE_URL || 'postgresql://localhost:5432/pocketctl';
@@ -268,11 +270,20 @@ async function main() {
     if (!normalizedEmail.includes('@')) {
       reply.code(400); return { error: 'invalid email format' };
     }
+    if (isConfiguredAppReviewEmail(normalizedEmail) && !isAppReviewEnabled()) {
+      reply.code(403); return { error: 'App Review account is disabled' };
+    }
 
     // Determine language: body param > Accept-Language header > default zh
     const acceptLang = (req.headers['accept-language'] || '').trim();
     const isEn = bodyLang === 'en' || acceptLang.toLowerCase().startsWith('en');
     const lang: 'zh' | 'en' = isEn ? 'en' : 'zh';
+
+    // App Review account: the reviewer uses the fixed code documented in
+    // App Store Connect. Do not send email or expose the code in the response.
+    if (isAppReviewEmail(normalizedEmail)) {
+      return { success: true, message: 'verification code sent' };
+    }
 
     // Dev/test email shortcut: if DEV_EMAIL configured and matches, use fixed code (skip SES)
     // Works in any NODE_ENV — useful when SES unavailable (e.g. pre-ICP-filing)
@@ -326,7 +337,10 @@ async function main() {
       reply.code(400); return { error: 'email and code are required' };
     }
     const normalizedEmail = email.trim().toLowerCase();
-    if (!verifyCode(normalizedEmail, code)) {
+    if (isConfiguredAppReviewEmail(normalizedEmail) && !isAppReviewEnabled()) {
+      reply.code(403); return { error: 'App Review account is disabled' };
+    }
+    if (!verifyAppReviewCode(normalizedEmail, code) && !verifyCode(normalizedEmail, code)) {
       reply.code(400); return { error: 'invalid or expired verification code' };
     }
     // Find or create user by email
@@ -338,6 +352,14 @@ async function main() {
         user = await createUser(pool, normalizedEmail, '', displayName);
       } catch (e: any) {
         reply.code(500); return { error: '创建用户失败' };
+      }
+    }
+    if (isAppReviewEmail(normalizedEmail)) {
+      try {
+        await ensureAppReviewDemoData(pool, user.id);
+      } catch (e) {
+        console.error('[app-review] failed to prepare demo data:', e);
+        reply.code(500); return { error: '审核演示数据准备失败' };
       }
     }
     const accessToken = await signAccessToken(user.id, user.email, user.phone);
