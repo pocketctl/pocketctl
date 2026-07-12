@@ -1077,12 +1077,7 @@ func cmdDaemonStart(args []string) {
 	// relay can rebuild its session→daemon routing table synchronously on
 	// (re)connection, before any session_discovered events arrive.
 	client.SetActiveSessionIDsFn(func() []string {
-		sessions := sm.ListSessions()
-		ids := make([]string, 0, len(sessions))
-		for _, s := range sessions {
-			ids = append(ids, s.SessionID)
-		}
-		return ids
+		return sm.ActiveRootSessionIDs()
 	})
 
 	// Dirty flag for state persistence — only write when changed
@@ -1891,7 +1886,15 @@ func handleProcessEvents(ctx context.Context, pm *watcher.ProcessMonitor, sm *se
 	}
 }
 
+func quotaReservationID(grant *protocol.QuotaGrant) string {
+	if grant == nil {
+		return ""
+	}
+	return grant.ReservationID
+}
+
 func handleCommands(ctx context.Context, client *ws.Client, sm *session.SessionManager, logger *slog.Logger, stateDirty *atomic.Bool) {
+	quotaGrants := session.NewQuotaGrantValidator()
 	for {
 		select {
 		case <-ctx.Done():
@@ -1899,6 +1902,21 @@ func handleCommands(ctx context.Context, client *ws.Client, sm *session.SessionM
 		case cmd := <-client.CommandCh:
 			switch cmd.Type {
 			case "session_create":
+				duplicate, grantErr := quotaGrants.Validate(cmd.RequestID, cmd.QuotaGrant, "create", time.Now())
+				if grantErr != nil || duplicate {
+					reason := "quota_grant_invalid"
+					errText := "invalid quota grant"
+					if duplicate {
+						reason, errText = "duplicate_request", "session create request already processed"
+					} else if grantErr != nil {
+						errText = grantErr.Error()
+					}
+					client.SendMsg(protocol.DaemonEvent{
+						Type: "session_create_failed", RequestID: cmd.RequestID,
+						ReservationID: quotaReservationID(cmd.QuotaGrant), Reason: reason, Error: errText,
+					})
+					continue
+				}
 				logger.Info("create session", "agent", cmd.Agent, "cwd", cmd.Cwd, "model", cmd.Model,
 					"worktree", cmd.Worktree, "auto_create_dir", cmd.AutoCreateDir, "force", cmd.Force)
 				stateDirty.Store(true)
@@ -1920,9 +1938,8 @@ func handleCommands(ctx context.Context, client *ws.Client, sm *session.SessionM
 					logger.Error("create session failed", "error", err)
 					reason := classifyCreateError(err.Error())
 					client.SendMsg(protocol.DaemonEvent{
-						Type:   "session_create_failed",
-						Reason: reason,
-						Error:  err.Error(),
+						Type: "session_create_failed", RequestID: cmd.RequestID,
+						ReservationID: quotaReservationID(cmd.QuotaGrant), Reason: reason, Error: err.Error(),
 					})
 					continue
 				}
@@ -1932,10 +1949,12 @@ func handleCommands(ctx context.Context, client *ws.Client, sm *session.SessionM
 				// Carry the resolved model so the web client can show it (/model command).
 				model, _ := sm.GetSessionModel(sessionID)
 				evt := protocol.DaemonEvent{
-					Type:      "session_created",
-					SessionID: sessionID,
-					Title:     config.Prompt,
-					Model:     model,
+					Type:          "session_created",
+					SessionID:     sessionID,
+					Title:         config.Prompt,
+					Model:         model,
+					RequestID:     cmd.RequestID,
+					ReservationID: quotaReservationID(cmd.QuotaGrant),
 				}
 				if permission, mutable, modes, ok := sm.GetPermissionMeta(sessionID); ok {
 					evt.Permission = permission
@@ -1981,10 +2000,30 @@ func handleCommands(ctx context.Context, client *ws.Client, sm *session.SessionM
 			case "user_message":
 				logger.Info("user message", "session", cmd.SessionID)
 				stateDirty.Store(true)
+				requiresResume := sm.RequiresResume(cmd.SessionID)
+				if requiresResume {
+					duplicate, grantErr := quotaGrants.Validate(cmd.RequestID, cmd.QuotaGrant, "resume", time.Now())
+					if grantErr != nil || duplicate {
+						errText := "resume request already processed"
+						if grantErr != nil {
+							errText = grantErr.Error()
+						}
+						client.SendMsg(protocol.DaemonEvent{
+							Type: "error", SessionID: cmd.SessionID, RequestID: cmd.RequestID,
+							ReservationID: quotaReservationID(cmd.QuotaGrant), Reason: "quota_grant_invalid", Error: errText,
+						})
+						continue
+					}
+				}
 				if err := sm.SendMessage(ctx, cmd.SessionID, cmd.Content); err != nil {
 					logger.Error("send message failed", "error", err)
 					client.SendMsg(protocol.DaemonEvent{
 						Type: "error", SessionID: cmd.SessionID, Error: err.Error(),
+					})
+				} else if requiresResume {
+					client.SendMsg(protocol.DaemonEvent{
+						Type: "session_status", SessionID: cmd.SessionID, Status: protocol.StatusRunning,
+						RequestID: cmd.RequestID, ReservationID: quotaReservationID(cmd.QuotaGrant),
 					})
 				}
 

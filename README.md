@@ -4,14 +4,14 @@
 
 Monitor and manage Claude Code, Codex, and OpenCode sessions from your phone or browser.
 
-Official website: [pocketctl.me](https://www.pocketctl.me) · iOS App: download it from the official website, then use **Settings → Test Environment** to connect a self-hosted Relay.
+Official website: [pocketctl.me](https://www.pocketctl.me) · Web dashboard: [pocketctl.me/app](https://www.pocketctl.me/app)
 
 ## Features
 
 - 🤖 **Multi-agent** — Claude Code, Codex, and OpenCode, behind one unified "zero-config discovery + live sync + cross-device continue" model. Run an agent in your terminal; the daemon discovers it and syncs it to your client where you can keep chatting. (OpenCode is a client/server agent — the daemon hosts a shared `opencode serve` and drives it over its HTTP API. To add a new agent, register a `Provider` — see [docs/adding-an-agent.md](docs/adding-an-agent.md).)
-- 🔐 **Agent-specific permissions** — Configure Claude Code's native startup modes and Codex approval/sandbox policies from the web client; confirmed session changes are reused on resumed turns.
+- 🔐 **Agent-specific permissions** — Configure Claude Code's native startup modes and Codex approval/sandbox policies from Web or iOS; confirmed session changes are reused on resumed turns.
 - 🖥️ **Real-time Monitoring** — Watch your AI coding sessions live from anywhere
-- 📱 **iOS App** — Download it from the official website. In Settings, select **Test Environment** and enter your self-hosted Relay address to connect it.
+- 📱 **iOS App** — Download the iOS app from the official website. In Settings, select **Test Environment** and enter your self-hosted Relay address to connect it.
 - 🖧 **Hosts Dashboard** — System resource monitoring (CPU / Memory / Disk) with remote daemon restart
 - 📌 **Session Management** — Pin, rename, export, and delete sessions with inline editing
 - 📊 **Token Analytics** — Usage dashboard (daily / model / host breakdown); deleting a session never shrinks historical totals
@@ -40,6 +40,9 @@ Official website: [pocketctl.me](https://www.pocketctl.me) · iOS App: download 
 - **Relay** — WebSocket server that bridges mobile/web clients with daemons
 - **Web** — Vue 3 SPA dashboard for browser-based monitoring, served at `/app`
 - **iOS App** — Download it from the official website; use Settings → Test Environment to connect a self-hosted Relay.
+
+The public service is available at [pocketctl.me](https://www.pocketctl.me). The browser client is served from
+[`/app`](https://www.pocketctl.me/app); the root URL contains product information and client entry points.
 
 ## Quick Start
 
@@ -128,9 +131,16 @@ pocketctl/
 ├── internal/
 │   ├── adapter/                   # Agent output parsers (Claude Code JSONL)
 │   ├── api/                       # HTTP API client (auth)
+│   ├── approval/                  # Tool approval broker and hook integration
+│   ├── commands/                  # Daemon command handlers
 │   ├── config/                    # Config management (~/.pocketctl/auth.json)
 │   ├── daemon/                    # PID file, daemon state, machine ID
 │   ├── discovery/                 # Agent CLI auto-discovery
+│   ├── i18n/                      # CLI locale and translated messages
+│   ├── keepawake/                 # Keep the host awake during active sessions
+│   ├── platform/                  # OS-specific process and service helpers
+│   ├── ptyscan/                   # Terminal/process discovery helpers
+│   ├── service/                   # Background service integration
 │   ├── notify/                    # Terminal notifications
 │   ├── protocol/                  # WebSocket message type definitions
 │   ├── session/                   # Session lifecycle management
@@ -145,7 +155,7 @@ pocketctl/
 │       ├── auth.ts                # JWT sign/verify with jti revocation
 │       ├── db.ts                  # PostgreSQL queries
 │       ├── push.ts                # Push notification service
-│       ├── title.ts               # LLM title generation (智谱 GLM)
+│       ├── title.ts               # DeepSeek-V4-Flash title generation
 │       └── config/
 │           ├── clients.ts         # OAuth 2.0 client registry
 │           ├── auth-sessions.ts   # Device authorization session store

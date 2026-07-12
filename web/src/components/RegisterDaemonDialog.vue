@@ -9,7 +9,12 @@
       </div>
       <p class="dialog-subtitle">{{ t('settings.install_desc') }}</p>
 
-      <div class="steps">
+      <div v-if="hostQuotaReached" class="quota-warning">
+        <strong>{{ t('quota.host_reached_title') }}（{{ boundHosts?.used }}/{{ boundHosts?.limit }}）</strong>
+        <span>{{ t('quota.host_reached_desc') }}</span>
+      </div>
+
+      <div v-if="!hostQuotaReached" class="steps">
         <div class="step">
           <div class="step-number">1</div>
           <div class="step-content">
@@ -40,7 +45,7 @@
       </div>
 
       <div class="dialog-actions">
-        <button class="btn btn-copy" @click="copyCommands">
+        <button v-if="!hostQuotaReached" class="btn btn-copy" @click="copyCommands">
           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"/></svg>
           {{ copied ? t('common.copied') : t('common.copy') }}
         </button>
@@ -54,9 +59,12 @@
 import { ref, computed } from 'vue'
 import { useLocale } from '../composables/useLocale'
 import { getInstallURL } from '../composables/useEnv'
+import { useQuota } from '../composables/useQuota'
 
 defineEmits<{ close: [] }>()
 const { t } = useLocale()
+const { boundHosts, quotaReached } = useQuota()
+const hostQuotaReached = computed(() => quotaReached('bound_hosts'))
 
 const copied = ref(false)
 
@@ -143,6 +151,8 @@ async function copyCommands() {
   color: var(--fg-secondary);
   margin: 0 0 24px 0;
 }
+.quota-warning { display: flex; flex-direction: column; gap: 6px; margin: 0 0 20px; padding: 14px 16px; border: 1px solid var(--warning); border-radius: var(--radius-md); background: var(--warning-bg); color: var(--fg-secondary); font-size: 13px; line-height: 1.5; }
+.quota-warning strong { color: var(--warning); }
 
 .steps {
   display: flex;

@@ -4,14 +4,15 @@ import "encoding/json"
 
 // Client → Daemon commands
 type ClientMessage struct {
-	Type      string `json:"type"`
-	SessionID string `json:"session_id,omitempty"`
-	Content   string `json:"content,omitempty"`
-	Agent     string `json:"agent,omitempty"`
-	Cwd       string `json:"cwd,omitempty"`
-	Prompt    string `json:"prompt,omitempty"`
-	RequestID string `json:"request_id,omitempty"`
-	Approved  bool   `json:"approved,omitempty"`
+	Type       string      `json:"type"`
+	SessionID  string      `json:"session_id,omitempty"`
+	Content    string      `json:"content,omitempty"`
+	Agent      string      `json:"agent,omitempty"`
+	Cwd        string      `json:"cwd,omitempty"`
+	Prompt     string      `json:"prompt,omitempty"`
+	RequestID  string      `json:"request_id,omitempty"`
+	QuotaGrant *QuotaGrant `json:"quota_grant,omitempty"`
+	Approved   bool        `json:"approved,omitempty"`
 	// Choice carries the selected option index (e.g. "1") for an
 	// interactive_response — the user's answer to a PTY selection prompt
 	// surfaced as an interactive_prompt card.
@@ -54,6 +55,7 @@ type DaemonEvent struct {
 	Turns                  int               `json:"turns,omitempty"`
 	RiskLevel              string            `json:"risk_level,omitempty"`
 	RequestID              string            `json:"request_id,omitempty"`
+	ReservationID          string            `json:"reservation_id,omitempty"`
 	Approved               bool              `json:"approved,omitempty"` // for approval_resolved: how it was answered (terminal-side)
 	Title                  string            `json:"title,omitempty"`
 	Cwd                    string            `json:"cwd,omitempty"`
@@ -145,7 +147,14 @@ type RegisterMessage struct {
 	// Always emitted (no omitempty): an explicit empty list lets the relay
 	// distinguish "daemon has zero live sessions" (reconcile/close all its
 	// lingering running/busy rows) from a legacy daemon that never reports it.
-	ActiveSessionIDs []string `json:"active_session_ids"`
+	ActiveSessionIDs   []string `json:"active_session_ids"`
+	SupportsQuotaGrant bool     `json:"supports_quota_grant,omitempty"`
+}
+
+type QuotaGrant struct {
+	ReservationID string `json:"reservation_id"`
+	ExpiresAt     int64  `json:"expires_at"`
+	Operation     string `json:"operation"`
 }
 
 type RegisterAckMessage struct {

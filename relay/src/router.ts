@@ -1,13 +1,26 @@
 import type { WebSocket } from 'ws';
 import type pg from 'pg';
+import { randomUUID } from 'crypto';
 import * as db from './db.js';
 import { generateTitle, generateSubagentTitle } from './title.js';
 import { notifyUser, sessionStatusPush, daemonOfflinePush, daemonOnlinePush, approvalPush, interactivePush, summarizeToolInput, highRiskPush, isHighRiskCommand } from './push.js';
 import { PushDeduper } from './push-deduper.js';
+import { quotaEnforcementMode, resolveEntitlements } from './entitlements.js';
+import { claimBoundDaemonSlot, getQuotaSnapshot, releaseQuotaReservation, reserveConcurrentSession } from './quota.js';
 
 interface DaemonConnection { ws: WebSocket; daemonId: string; hostname: string; agents: any[]; userId: number | null; os?: string; ip?: string; port?: string; arch?: string; version?: string; startedAt?: number }
 interface ClientConnection { ws: WebSocket; subscribedSessions: Set<string>; userId: number | null; locale: string }
 interface DaemonMetrics { cpuPct: number; memPct: number; diskPct: number; updatedAt: number }
+interface PendingSessionOperation {
+  requestId: string;
+  reservationId: string | null;
+  daemonId: string;
+  origin: WebSocket;
+  operation: 'create' | 'resume';
+  agentType: string;
+  cwd: string;
+  timeout?: ReturnType<typeof setTimeout>;
+}
 
 export class Router {
   private daemons = new Map<string, DaemonConnection>();
@@ -16,6 +29,7 @@ export class Router {
   private sessionToDaemon = new Map<string, string>();
   private pendingSessionCreate = new Map<string, WebSocket>();
   private pendingSessionMeta = new Map<string, { agent_type: string; cwd: string }>();
+  private pendingSessionOperations = new Map<string, PendingSessionOperation>();
   private pendingOriginClient = new Map<string, WebSocket>(); // pending session_id → origin client (for session_id_changed 补发)
   private takeoverTimers = new Map<string, { timer: ReturnType<typeof setTimeout>; newDaemonId: string; newHostname: string }>();
   // Pending offline-transition timers, keyed by daemonId. On WS close we defer
@@ -61,6 +75,54 @@ export class Router {
   constructor(pool: pg.Pool) {
     this.pool = pool;
     this.pushDeduper.startSweeping();
+  }
+
+  private findPendingSessionOperation(daemonId: string, requestId?: string): PendingSessionOperation | undefined {
+    if (requestId) {
+      const exact = this.pendingSessionOperations.get(requestId);
+      if (exact?.daemonId === daemonId) return exact;
+    }
+    return [...this.pendingSessionOperations.values()].find((pending) => pending.daemonId === daemonId);
+  }
+
+  private settlePendingSessionOperation(pending: PendingSessionOperation | undefined): void {
+    if (!pending) return;
+    if (pending.timeout) clearTimeout(pending.timeout);
+    this.pendingSessionOperations.delete(pending.requestId);
+    if (pending.reservationId) {
+      releaseQuotaReservation(this.pool, pending.reservationId)
+        .then(() => {
+          const daemon = this.daemons.get(pending.daemonId);
+          if (daemon?.userId) this.broadcastQuotaStatus(daemon.userId).catch(console.error);
+        })
+        .catch((e) => console.error('release quota reservation:', e));
+    }
+  }
+
+  private trackPendingSessionOperation(pending: PendingSessionOperation, expiresAt: number | null): void {
+    if (expiresAt) {
+      const timeout = setTimeout(() => {
+        const current = this.pendingSessionOperations.get(pending.requestId);
+        if (current !== pending) return;
+        if (pending.origin.readyState === 1) {
+          if (pending.operation === 'create') {
+            this.send(pending.origin, { type: 'session_create_failed', request_id: pending.requestId, reason: 'timeout', error: 'session start quota reservation expired' });
+          } else {
+            this.send(pending.origin, { type: 'user_message_nack', request_id: pending.requestId, reason: 'timeout' });
+          }
+        }
+        this.settlePendingSessionOperation(pending);
+      }, Math.min(2_147_483_647, Math.max(1, expiresAt - Date.now())));
+      timeout.unref?.();
+      pending.timeout = timeout;
+    }
+    this.pendingSessionOperations.set(pending.requestId, pending);
+  }
+
+  async broadcastQuotaStatus(userId: number): Promise<void> {
+    const { plan, whitelist } = await db.getUserPlanAndWhitelist(this.pool, userId);
+    const quota = await getQuotaSnapshot(this.pool, userId, resolveEntitlements(plan, whitelist));
+    this.broadcastToUser(userId, { type: 'quota_status', plan, ...quota });
   }
 
   /** Mark the relay as shutting down so offline pushes are suppressed. */
@@ -135,64 +197,63 @@ export class Router {
       manageable: agentManageable[t] !== false, // 缺省 true，兼容旧 daemon
     }));
 
-    // Soft eviction: check for existing daemon(s) for this user
+    const daemonOS = msg.os || 'unknown';
+    const daemonIP = msg.ip || 'unknown';
+    const daemonPort = msg.port || '';
+    const daemonArch = msg.arch || '';
+    const daemonVersion = msg.version || '';
+    const daemonStartedAt = msg.started_at || 0;
+
+    // Count every persisted binding, including offline hosts. Claiming the row
+    // and checking the limit share a user-scoped transaction, closing the race
+    // where two machines try to take the final slot simultaneously.
+    let daemonClaimedForUser = false;
     if (userId) {
       try {
         const { plan, whitelist } = await db.getUserPlanAndWhitelist(this.pool, userId);
-        const maxDaemons = whitelist ? Infinity : (plan === 'free' ? 1 : Infinity);
-
-        // Find existing online daemons for this user with different daemonId
-        const oldDaemons: { daemonId: string; daemon: DaemonConnection }[] = [];
-        for (const [dId, d] of this.daemons) {
-          if (d.userId === userId && dId !== daemonId) {
-            oldDaemons.push({ daemonId: dId, daemon: d });
-          }
+        const entitlements = resolveEntitlements(plan, whitelist);
+        const enforcement = quotaEnforcementMode();
+        if (enforcement === 'enforce' && msg.supports_quota_grant !== true) {
+          this.send(ws, {
+            type: 'register_rejected', reason: 'upgrade_required', retryable: false,
+            message: '当前 daemon 版本不支持会话额度协议，请升级 pocketctl 后重试',
+          });
+          ws.close(4009, 'upgrade_required');
+          return;
         }
-
-        if (oldDaemons.length >= maxDaemons) {
-          // Soft eviction: notify old daemon(s) and set grace period
-          for (const { daemonId: oldId, daemon: oldDaemon } of oldDaemons) {
-            // Send kicked message with grace period
-            this.send(oldDaemon.ws, {
-              type: 'kicked',
-              reason: 'new_login',
-              message: `账号已在 ${hostname} 上登录，当前连接将在 5 分钟后断开`,
-              grace_period_seconds: 300,
-              new_hostname: hostname,
-            });
-
-            // Start grace period timer
-            const timer = setTimeout(() => {
-              // Revoke old daemon's token
-              if (oldDaemon.userId) {
-                db.revokeDaemonToken(this.pool, oldId, oldDaemon.userId, 'new_login').catch(console.error);
-                db.insertAuditLog(this.pool, oldDaemon.userId, 'daemon_replace', {
-                  old_daemon_id: oldId,
-                  new_daemon_id: daemonId,
-                  grace_period: 300,
-                }).catch(console.error);
-              }
-              // Close old daemon connection
-              if (oldDaemon.ws.readyState === 1) {
-                this.send(oldDaemon.ws, {
-                  type: 'kicked',
-                  reason: 'grace_period_expired',
-                  message: '5 分钟等待期已过，连接即将断开',
-                  grace_period_seconds: 0,
-                });
-                oldDaemon.ws.close();
-              }
-              this.daemons.delete(oldId);
-              db.setDaemonOffline(this.pool, oldId).catch(console.error);
-            }, 300_000); // 5 minutes
-
-            // Store timer reference for cancellation
-            this.takeoverTimers = this.takeoverTimers || new Map();
-            this.takeoverTimers.set(oldId, { timer, newDaemonId: daemonId, newHostname: hostname });
-          }
+        const decision = await claimBoundDaemonSlot(this.pool, {
+          userId, daemonId, hostname, agents,
+          arch: daemonArch, version: daemonVersion, startedAt: daemonStartedAt,
+          limit: enforcement === 'enforce' ? entitlements.maxBoundDaemons : null,
+        });
+        if (!decision.allowed) {
+          this.send(ws, {
+            type: 'register_rejected',
+            reason: decision.reason,
+            resource: 'bound_hosts',
+            plan,
+            used: decision.used,
+            limit: decision.limit,
+            retryable: false,
+            message: decision.reason === 'host_quota_exceeded'
+              ? `免费版最多连接 ${decision.limit} 台主机`
+              : '该主机已绑定其他账号',
+          });
+          ws.close(4008, decision.reason);
+          return;
         }
+        if (enforcement === 'observe' && entitlements.maxBoundDaemons !== null && !decision.reconnect && decision.used > entitlements.maxBoundDaemons) {
+          db.insertAuditLog(this.pool, userId, 'quota_would_reject', {
+            resource: 'bound_hosts', operation: 'register', used: decision.used - 1,
+            limit: entitlements.maxBoundDaemons, daemon_id: daemonId,
+          }).catch(console.error);
+        }
+        daemonClaimedForUser = true;
       } catch (e) {
-        console.error('daemon limit check:', e);
+        console.error('daemon quota check:', e);
+        this.send(ws, { type: 'register_rejected', reason: 'quota_check_failed', retryable: true, message: '主机额度检查失败' });
+        ws.close(4011, 'quota check failed');
+        return;
       }
     }
 
@@ -200,47 +261,20 @@ export class Router {
     // anonymous reconnection), recover the daemon's persisted owner from
     // daemons.user_id. Without this, sessions created during this connection
     // land with user_id NULL and vanish from the owner's web list (filtered by
-    // listSessionsByUser). Soft eviction above already ran on the original
-    // (null) userId, which is fine — an anonymous reconnect shouldn't evict.
+    // listSessionsByUser). Anonymous legacy reconnects do not create bindings.
     if (!userId) {
       try { userId = await db.getDaemonOwner(this.pool, daemonId); } catch (e) { /* leave null */ }
     }
 
-    const daemonOS = msg.os || 'unknown';
-    const daemonIP = msg.ip || 'unknown';
-    const daemonPort = msg.port || '';
-    const daemonArch = msg.arch || '';
-    const daemonVersion = msg.version || '';
-    const daemonStartedAt = msg.started_at || 0;
     this.daemons.set(daemonId, { ws, daemonId, hostname, agents, userId, os: daemonOS, ip: daemonIP, port: daemonPort, arch: daemonArch, version: daemonVersion, startedAt: daemonStartedAt });
     console.log('[ws] daemon registered', daemonId, 'agents:', JSON.stringify(agents), 'userId:', userId);
-    try { await db.upsertDaemon(this.pool, daemonId, hostname, agents, daemonArch, daemonVersion, daemonStartedAt); } catch (e) { console.error('upsertDaemon:', e); }
+    if (!daemonClaimedForUser) {
+      try { await db.upsertDaemon(this.pool, daemonId, hostname, agents, daemonArch, daemonVersion, daemonStartedAt); } catch (e) { console.error('upsertDaemon:', e); }
+    }
     if (userId) {
-      try { await db.bindDaemonToUser(this.pool, daemonId, userId); } catch (e) { console.error('bindDaemon:', e); }
       if (tokenJti) {
         db.bindTokenToDaemon(this.pool, daemonId, tokenJti, machineId).catch(console.error);
       }
-      // Clean up stale offline entries for the same hostname belonging to this
-      // user. When daemon_id changes between runs (machine.id lost/re-derived),
-      // the old entry stays 'offline' in the DB indefinitely. Deleting it here
-      // on re-registration prevents the web client from showing duplicate entries.
-      // Reassign any sessions still owned by those stale daemons to the current
-      // daemon_id first — they belong to the same physical machine (hostname
-      // matches), and without this the sessions_daemon_id_fkey constraint blocks
-      // the delete.
-      this.pool.query(
-        `UPDATE sessions SET daemon_id = $3
-         WHERE daemon_id IN (
-           SELECT daemon_id FROM daemons
-           WHERE user_id = $1 AND hostname = $2 AND daemon_id != $3 AND status = 'offline'
-         )`,
-        [userId, hostname, daemonId]
-      ).then(() =>
-        this.pool.query(
-          `DELETE FROM daemons WHERE user_id = $1 AND hostname = $2 AND daemon_id != $3 AND status = 'offline'`,
-          [userId, hostname, daemonId]
-        )
-      ).catch((e: any) => console.error('cleanup stale daemons:', e));
     }
     db.cleanStaleSessions(this.pool).catch(console.error);
 
@@ -266,6 +300,7 @@ export class Router {
     // Advertise at-least-once delivery support so the daemon retains an unacked
     // buffer and trims it on our event_ack (rather than legacy trim-on-write).
     this.send(ws, { type: 'register_ack', status: 'ok', connection_id: daemonId, supports_event_ack: true });
+    if (userId) this.broadcastQuotaStatus(userId).catch(console.error);
 
     // Rebuild the session→daemon routing table for this daemon. The in-memory
     // map is volatile (lost on relay restart; stale entries survive disconnects),
@@ -343,12 +378,19 @@ export class Router {
 
     // Immediate (not deferred): an in-flight session_create on this daemon has
     // failed — the origin client must not wait out the grace window for it.
-    const pendingOrigin = this.pendingSessionCreate.get(daemonId);
-    if (pendingOrigin && pendingOrigin.readyState === 1) {
-      this.send(pendingOrigin, { type: 'session_create_failed', reason: 'daemon_offline', error: 'daemon disconnected' });
-    }
     this.pendingSessionCreate.delete(daemonId);
     this.pendingSessionMeta?.delete(daemonId);
+    for (const pending of [...this.pendingSessionOperations.values()]) {
+      if (pending.daemonId !== daemonId) continue;
+      if (pending.origin.readyState === 1) {
+        if (pending.operation === 'create') {
+          this.send(pending.origin, { type: 'session_create_failed', request_id: pending.requestId, reason: 'daemon_offline', error: 'daemon disconnected' });
+        } else {
+          this.send(pending.origin, { type: 'user_message_nack', request_id: pending.requestId, reason: 'daemon_offline' });
+        }
+      }
+      this.settlePendingSessionOperation(pending);
+    }
 
     // Defer the offline declaration behind the grace window. The daemon entry
     // stays in this.daemons (holding the dead socket; routing no-ops via the
@@ -578,10 +620,18 @@ export class Router {
       }
       // session_create_failed (no session_id): forward to the originating client
       if (msg.type === 'session_create_failed') {
-        const originClient = this.pendingSessionCreate.get(daemonId);
+        const pending = this.findPendingSessionOperation(daemonId, msg.request_id);
+        const originClient = pending?.origin ?? this.pendingSessionCreate.get(daemonId);
         if (originClient && originClient.readyState === 1) {
-          this.send(originClient, { type: 'session_create_failed', reason: msg.reason || 'start_fail', error: msg.error });
+          this.send(originClient, {
+            type: 'session_create_failed',
+            request_id: pending?.requestId ?? msg.request_id,
+            reservation_id: pending?.reservationId ?? msg.reservation_id,
+            reason: msg.reason || 'start_fail',
+            error: msg.error,
+          });
         }
+        this.settlePendingSessionOperation(pending);
         this.pendingSessionCreate.delete(daemonId);
         this.pendingSessionMeta?.delete(daemonId);
       }
@@ -626,11 +676,22 @@ export class Router {
       }
     }
     if (msg.type === 'session_created') {
-      const meta = this.pendingSessionMeta?.get(daemonId);
-      db.upsertSession(this.pool, sessionId, daemonId, meta?.agent_type || '', meta?.cwd || '', 'running', msg.title || undefined, 'daemon', undefined, userId ?? undefined, msg.model || undefined).catch(console.error);
+      const pending = this.findPendingSessionOperation(daemonId, msg.request_id);
+      const meta = pending
+        ? { agent_type: pending.agentType, cwd: pending.cwd }
+        : this.pendingSessionMeta?.get(daemonId);
+      db.upsertSession(this.pool, sessionId, daemonId, meta?.agent_type || '', meta?.cwd || '', 'running', msg.title || undefined, 'daemon', undefined, userId ?? undefined, msg.model || undefined)
+        .then(() => this.settlePendingSessionOperation(pending))
+        .catch(console.error);
       this.pendingSessionMeta?.delete(daemonId);
-      const originClient = this.pendingSessionCreate.get(daemonId);
-      const enriched = { ...msg, daemon_id: daemonId, hostname: daemon?.hostname || 'unknown' };
+      const originClient = pending?.origin ?? this.pendingSessionCreate.get(daemonId);
+      const enriched = {
+        ...msg,
+        request_id: pending?.requestId ?? msg.request_id,
+        reservation_id: pending?.reservationId ?? msg.reservation_id,
+        daemon_id: daemonId,
+        hostname: daemon?.hostname || 'unknown',
+      };
       if (originClient && originClient.readyState === 1) {
         const client = this.clients.get(originClient);
         if (client) client.subscribedSessions.add(sessionId);
@@ -664,7 +725,9 @@ export class Router {
         // Use provided title if present; otherwise leave existing title untouched
         const title = msg.title || undefined;
         const cwd = msg.cwd || '';
-        db.upsertSession(this.pool, sessionId, daemonId, msg.agent || 'claude-code', cwd, msg.status || 'busy', title, 'terminal', undefined, userId ?? undefined, msg.model || undefined).catch(console.error);
+        db.upsertSession(this.pool, sessionId, daemonId, msg.agent || 'claude-code', cwd, msg.status || 'busy', title, 'terminal', undefined, userId ?? undefined, msg.model || undefined)
+          .then(() => { if (userId) return this.broadcastQuotaStatus(userId); })
+          .catch(console.error);
         this.persistAndAck(daemonId, msg.seq, sessionId, msg.type, msg);
         const enriched = { ...msg, daemon_id: daemonId, hostname: daemon?.hostname || 'unknown' };
         for (const [clientWs, client] of this.clients) {
@@ -898,6 +961,11 @@ export class Router {
           if (msg.cost_usd != null) {
             db.updateSessionCost(this.pool, sessionId, parseFloat(msg.cost_usd)).catch(console.error);
           }
+          const pending = this.findPendingSessionOperation(daemonId, msg.request_id);
+          if (pending && ['running', 'busy', 'idle', 'waiting', 'waiting_approval'].includes(msg.status)) {
+            this.settlePendingSessionOperation(pending);
+          }
+          if (userId) this.broadcastQuotaStatus(userId).catch(console.error);
           // Push notification for terminal states
           if (userId && ['completed', 'error', 'killed', 'exited'].includes(msg.status)) {
             notifyUser(this.pool, userId, sessionStatusPush(msg.title || '', msg.status, sessionId)).catch(console.error);
@@ -1052,10 +1120,77 @@ export class Router {
         return;
       }
       const { id: daemonId } = targetDaemon;
+      const requestId = typeof msg.request_id === 'string' && msg.request_id
+        ? msg.request_id
+        : randomUUID();
+      const existingPending = this.pendingSessionOperations.get(requestId);
+      if (existingPending?.daemonId === daemonId && existingPending.operation === 'create') {
+        return;
+      }
+      let reservationId: string | null = null;
+      let expiresAt: number | null = null;
+      if (client.userId !== null) {
+        const { plan, whitelist } = await db.getUserPlanAndWhitelist(this.pool, client.userId);
+        const entitlements = resolveEntitlements(plan, whitelist);
+        const enforcement = quotaEnforcementMode();
+        if (enforcement === 'observe' && entitlements.maxConcurrentSessions !== null) {
+          const snapshot = await getQuotaSnapshot(this.pool, client.userId, entitlements);
+          const usage = snapshot.resources.concurrent_sessions;
+          if (usage.used + (usage.reserved || 0) >= entitlements.maxConcurrentSessions) {
+            db.insertAuditLog(this.pool, client.userId, 'quota_would_reject', {
+              resource: 'concurrent_sessions', operation: 'create', used: usage.used,
+              reserved: usage.reserved || 0, limit: entitlements.maxConcurrentSessions,
+              daemon_id: daemonId, request_id: requestId,
+            }).catch(console.error);
+          }
+        }
+        const decision = await reserveConcurrentSession(this.pool, {
+          userId: client.userId,
+          requestId,
+          operation: 'create',
+          daemonId,
+          limit: enforcement === 'enforce' ? entitlements.maxConcurrentSessions : null,
+        });
+        if (!decision.allowed) {
+          this.send(clientWs, {
+            type: 'session_create_failed',
+            request_id: requestId,
+            reason: decision.reason,
+            resource: 'concurrent_sessions',
+            plan,
+            used: decision.used,
+            reserved: decision.reserved,
+            limit: decision.limit,
+            retryable: true,
+            error: `免费版最多同时运行 ${decision.limit} 个会话`,
+          });
+          return;
+        }
+        reservationId = decision.reservationId;
+        expiresAt = decision.expiresAt;
+      }
+      this.trackPendingSessionOperation({
+        requestId,
+        reservationId,
+        daemonId,
+        origin: clientWs,
+        operation: 'create',
+        agentType: msg.agent || 'claude-code',
+        cwd: msg.cwd || '',
+      }, expiresAt);
+      if (client.userId !== null) this.broadcastQuotaStatus(client.userId).catch(console.error);
       this.pendingSessionCreate.set(daemonId, clientWs);
       this.pendingSessionMeta = this.pendingSessionMeta || new Map();
       this.pendingSessionMeta.set(daemonId, { agent_type: msg.agent || 'claude-code', cwd: msg.cwd || '' });
-      this.send(targetDaemon.daemon.ws, msg);
+      this.send(targetDaemon.daemon.ws, {
+        ...msg,
+        request_id: requestId,
+        quota_grant: {
+          reservation_id: reservationId ?? `unlimited-${requestId}`,
+          expires_at: expiresAt ?? (Date.now() + 20_000),
+          operation: 'create',
+        },
+      });
       return;
     }
 
@@ -1076,7 +1211,73 @@ export class Router {
       if (daemonId) {
         const daemon = this.daemons.get(daemonId);
         if (daemon && daemon.ws.readyState === 1) {
-          this.send(daemon.ws, msg);
+          let outbound = msg;
+          if (msg.type === 'user_message' && client.userId !== null) {
+            const status = await db.getSessionStatus(this.pool, msg.session_id);
+            const isActive = ['running', 'busy', 'idle', 'waiting', 'waiting_approval'].includes(status || '');
+            if (!isActive) {
+              const requestId = typeof msg.request_id === 'string' && msg.request_id
+                ? msg.request_id
+                : (typeof msg.msg_id === 'string' && msg.msg_id ? msg.msg_id : randomUUID());
+              const { plan, whitelist } = await db.getUserPlanAndWhitelist(this.pool, client.userId);
+              const entitlements = resolveEntitlements(plan, whitelist);
+              const enforcement = quotaEnforcementMode();
+              if (enforcement === 'observe' && entitlements.maxConcurrentSessions !== null) {
+                const snapshot = await getQuotaSnapshot(this.pool, client.userId, entitlements);
+                const usage = snapshot.resources.concurrent_sessions;
+                if (usage.used + (usage.reserved || 0) >= entitlements.maxConcurrentSessions) {
+                  db.insertAuditLog(this.pool, client.userId, 'quota_would_reject', {
+                    resource: 'concurrent_sessions', operation: 'resume', used: usage.used,
+                    reserved: usage.reserved || 0, limit: entitlements.maxConcurrentSessions,
+                    daemon_id: daemonId, request_id: requestId, session_id: msg.session_id,
+                  }).catch(console.error);
+                }
+              }
+              const decision = await reserveConcurrentSession(this.pool, {
+                userId: client.userId,
+                requestId,
+                operation: 'resume',
+                daemonId,
+                sessionId: msg.session_id,
+                limit: enforcement === 'enforce' ? entitlements.maxConcurrentSessions : null,
+              });
+              if (!decision.allowed) {
+                this.send(clientWs, {
+                  type: 'user_message_nack',
+                  msg_id: msg.msg_id,
+                  request_id: requestId,
+                  reason: decision.reason,
+                  resource: 'concurrent_sessions',
+                  plan,
+                  used: decision.used,
+                  reserved: decision.reserved,
+                  limit: decision.limit,
+                  retryable: true,
+                });
+                return;
+              }
+              this.trackPendingSessionOperation({
+                requestId,
+                reservationId: decision.reservationId,
+                daemonId,
+                origin: clientWs,
+                operation: 'resume',
+                agentType: '',
+                cwd: '',
+              }, decision.expiresAt);
+              this.broadcastQuotaStatus(client.userId).catch(console.error);
+              outbound = {
+                ...msg,
+                request_id: requestId,
+                quota_grant: {
+                  reservation_id: decision.reservationId ?? `unlimited-${requestId}`,
+                  expires_at: decision.expiresAt ?? (Date.now() + 20_000),
+                  operation: 'resume',
+                },
+              };
+            }
+          }
+          this.send(daemon.ws, outbound);
           // L2 (web-post-send-feedback): ack so the web client clears its ack-timeout.
           if (msg.type === 'user_message' && msg.msg_id) {
             this.send(clientWs, { type: 'user_message_ack', msg_id: msg.msg_id });
@@ -1406,6 +1607,48 @@ export class Router {
     this.daemons.delete(daemonId);
     db.setDaemonOffline(this.pool, daemonId).catch(console.error);
 
+    return { success: true };
+  }
+
+  async handleDeleteDaemon(daemonId: string, userId: number): Promise<{ success: boolean; error?: string }> {
+    const daemon = this.daemons.get(daemonId);
+    if (daemon && daemon.userId !== userId) {
+      return { success: false, error: 'forbidden' };
+    }
+
+    if (daemon?.ws.readyState === 1) {
+      this.send(daemon.ws, {
+        type: 'kicked',
+        reason: 'host_unbound',
+        message: '该主机已从账号中删除，请重新登录后再连接',
+        grace_period_seconds: 0,
+      });
+      daemon.ws.close();
+    }
+
+    const takeover = this.takeoverTimers.get(daemonId);
+    if (takeover) {
+      clearTimeout(takeover.timer);
+      this.takeoverTimers.delete(daemonId);
+    }
+    const offlineTimer = this.pendingOfflineTimers.get(daemonId);
+    if (offlineTimer) {
+      clearTimeout(offlineTimer);
+      this.pendingOfflineTimers.delete(daemonId);
+    }
+
+    try {
+      await db.revokeDaemonToken(this.pool, daemonId, userId, 'user_revoke');
+      const deleted = await db.deleteDaemon(this.pool, userId, daemonId);
+      if (!deleted) return { success: false, error: 'daemon not found or not owned' };
+    } catch (e) {
+      console.error('delete daemon:', e);
+      return { success: false, error: 'failed to delete daemon' };
+    }
+
+    this.daemons.delete(daemonId);
+    this.knownOffline.delete(daemonId);
+    this.broadcastQuotaStatus(userId).catch(console.error);
     return { success: true };
   }
 

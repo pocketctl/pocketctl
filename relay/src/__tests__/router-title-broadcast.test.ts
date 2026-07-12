@@ -14,7 +14,7 @@ import { Router } from '../router.js'
 
 // Minimal pool: hasDefaultTitle → true (default placeholder), updateTitleIfDefault → updated.
 function createMockPool(): any {
-  return {
+  const pool: any = {
     query: vi.fn((sql: string) => {
       let result: any = { rows: [], rowCount: 0 }
       if (sql.includes('SELECT 1 FROM sessions')) {
@@ -25,6 +25,8 @@ function createMockPool(): any {
       return Promise.resolve(result)
     }),
   }
+  pool.connect = vi.fn(async () => ({ query: pool.query, release: vi.fn() }))
+  return pool
 }
 
 function createMockWs(): any {

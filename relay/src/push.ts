@@ -16,20 +16,81 @@ export interface PushPayload {
   data?: Record<string, string>;
 }
 
-// APNs configuration from environment
-const APNS_KEY_PATH = process.env.APNS_KEY_PATH || '';
-const APNS_KEY_ID = process.env.APNS_KEY_ID || '';
-const APNS_TEAM_ID = process.env.APNS_TEAM_ID || '';
-const APNS_BUNDLE_ID = process.env.APNS_BUNDLE_ID || 'com.pocketctl.app';
-const APNS_ENVIRONMENT = process.env.APNS_ENVIRONMENT || 'development';
+export interface APNsConfig {
+  enabled: boolean;
+  keyPath: string;
+  keyId: string;
+  teamId: string;
+  bundleId: string;
+  environment: 'development' | 'production';
+  error?: string;
+}
 
-const APNS_HOST = APNS_ENVIRONMENT === 'production'
+/** Resolve APNs settings once at process start and expose actionable errors. */
+export function resolveAPNsConfig(env: NodeJS.ProcessEnv): APNsConfig {
+  const keyPath = env.APNS_KEY_PATH || '';
+  const keyId = env.APNS_KEY_ID || '';
+  const teamId = env.APNS_TEAM_ID || '';
+  const bundleId = env.APNS_BUNDLE_ID || 'com.pocketctl.app';
+  const environment = env.APNS_ENVIRONMENT === 'production'
+    || (!env.APNS_ENVIRONMENT && env.NODE_ENV === 'production')
+    ? 'production'
+    : 'development';
+  const missing = [
+    ['APNS_KEY_PATH', keyPath],
+    ['APNS_KEY_ID', keyId],
+    ['APNS_TEAM_ID', teamId],
+  ].filter(([, value]) => !value).map(([name]) => name);
+  const production = env.NODE_ENV === 'production';
+
+  return {
+    enabled: missing.length === 0,
+    keyPath,
+    keyId,
+    teamId,
+    bundleId,
+    environment,
+    error: production && missing.length > 0
+      ? `APNs not configured: missing ${missing.join(', ')}`
+      : undefined,
+  };
+}
+
+const APNS_CONFIG = resolveAPNsConfig(process.env);
+if (APNS_CONFIG.error) {
+  console.error(`[push] ${APNS_CONFIG.error}; remote notifications are disabled`);
+} else if (APNS_CONFIG.enabled) {
+  console.log(`[push] APNs enabled (${APNS_CONFIG.environment}, ${APNS_CONFIG.bundleId})`);
+}
+
+const APNS_HOST = APNS_CONFIG.environment === 'production'
   ? 'https://api.push.apple.com'
   : 'https://api.sandbox.push.apple.com';
 
 // Cached JWT token for APNs auth
 let cachedToken = '';
 let tokenExpiresAt = 0;
+
+/** Create the ES256 provider JWT required by APNs. */
+export function signAPNsJWT(
+  privateKey: crypto.KeyObject,
+  keyId: string,
+  teamId: string,
+  issuedAt: number,
+): string {
+  const header = { alg: 'ES256', kid: keyId };
+  const payload = { iss: teamId, iat: issuedAt };
+  const headerB64 = Buffer.from(JSON.stringify(header)).toString('base64url');
+  const payloadB64 = Buffer.from(JSON.stringify(payload)).toString('base64url');
+  const signInput = `${headerB64}.${payloadB64}`;
+  const signature = crypto
+    .createSign('SHA256')
+    .update(signInput)
+    .sign({ key: privateKey, dsaEncoding: 'ieee-p1363' })
+    .toString('base64url');
+
+  return `${signInput}.${signature}`;
+}
 
 /**
  * Generate APNs JWT token using .p8 key.
@@ -41,24 +102,12 @@ function generateAPNsToken(): string {
     return cachedToken;
   }
 
-  if (!APNS_KEY_PATH || !APNS_KEY_ID || !APNS_TEAM_ID) {
-    throw new Error('APNs not configured: missing APNS_KEY_PATH, APNS_KEY_ID, or APNS_TEAM_ID');
+  if (!APNS_CONFIG.enabled) {
+    throw new Error(APNS_CONFIG.error || 'APNs not configured');
   }
 
-  const privateKey = fs.readFileSync(APNS_KEY_PATH, 'utf8');
-  const header = { alg: 'ES256', kid: APNS_KEY_ID };
-  const payload = { iss: APNS_TEAM_ID, iat: now };
-
-  const headerB64 = Buffer.from(JSON.stringify(header)).toString('base64url');
-  const payloadB64 = Buffer.from(JSON.stringify(payload)).toString('base64url');
-  const signInput = `${headerB64}.${payloadB64}`;
-
-  const signature = crypto
-    .createSign('SHA256')
-    .update(signInput)
-    .sign(privateKey, 'base64url');
-
-  cachedToken = `${signInput}.${signature}`;
+  const privateKey = crypto.createPrivateKey(fs.readFileSync(APNS_CONFIG.keyPath, 'utf8'));
+  cachedToken = signAPNsJWT(privateKey, APNS_CONFIG.keyId, APNS_CONFIG.teamId, now);
   tokenExpiresAt = now + 3500; // ~1 hour
   return cachedToken;
 }
@@ -86,7 +135,7 @@ async function sendAPNs(deviceToken: string, payload: PushPayload): Promise<{ ok
       ':method': 'POST',
       ':path': path,
       'authorization': `bearer ${token}`,
-      'apns-topic': APNS_BUNDLE_ID,
+      'apns-topic': APNS_CONFIG.bundleId,
       'apns-push-type': 'alert',
       'apns-priority': '10',
       'content-type': 'application/json',
@@ -131,8 +180,9 @@ export async function sendPushNotification(
   platform: string,
   payload: PushPayload,
 ): Promise<void> {
-  if (!APNS_KEY_PATH) {
-    // Development mode: log only
+  if (!APNS_CONFIG.enabled) {
+    if (APNS_CONFIG.error) throw new Error(APNS_CONFIG.error);
+    // Local development without credentials: log only.
     console.log(`[push] ${platform} → ${deviceToken.slice(0, 16)}... | ${payload.title}: ${payload.body}`);
     if (payload.data) console.log(`[push] data:`, JSON.stringify(payload.data));
     return;

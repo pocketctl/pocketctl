@@ -164,6 +164,26 @@ func (sm *SessionManager) ListSessions() []SessionInfo {
 	return append(active, exited...)
 }
 
+// ActiveRootSessionIDs returns every root Agent process that consumes a
+// concurrent-session slot. Idle and approval-blocked processes remain active;
+// only terminal lifecycle states release the slot. Sub-agents are tracked in
+// their own relation store rather than sm.sessions and therefore never appear.
+func (sm *SessionManager) ActiveRootSessionIDs() []string {
+	sm.mu.RLock()
+	defer sm.mu.RUnlock()
+	ids := make([]string, 0, len(sm.sessions))
+	for id, ps := range sm.sessions {
+		switch ps.Status {
+		case protocol.StatusExited, protocol.StatusCompleted, protocol.StatusError, protocol.StatusKilled, protocol.StatusDisconnected:
+			continue
+		default:
+			ids = append(ids, id)
+		}
+	}
+	sort.Strings(ids)
+	return ids
+}
+
 // UpdateLastActivity updates the LastActivityAt timestamp for a session.
 // Used by terminal session JSONL tailer to track when events are received.
 func (sm *SessionManager) UpdateLastActivity(sessionID string) {

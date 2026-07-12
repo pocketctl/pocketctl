@@ -49,7 +49,10 @@ function createMockPool() {
       return Promise.resolve(result)
     }),
     _queries: queries,
-    connect: vi.fn(),
+    connect: vi.fn(async () => ({
+      query: (sql: string, params?: any[]) => mockPool.query(sql, params),
+      release: vi.fn(),
+    })),
     end: vi.fn(),
   }
   return mockPool as any
@@ -782,7 +785,7 @@ describe('Router - WS authorization gate (P0-1)', () => {
   // Pool whose ownership check always denies (SELECT 1 FROM sessions → no row),
   // simulating a session that belongs to a different user than the caller.
   function denyingPool(): any {
-    return {
+    const pool: any = {
       query: vi.fn((sql: string) => {
         if (sql.includes('SELECT 1 FROM sessions')) return Promise.resolve({ rows: [], rowCount: 0 })
         if (sql.includes('FROM sessions') && sql.includes('SELECT')) {
@@ -790,8 +793,10 @@ describe('Router - WS authorization gate (P0-1)', () => {
         }
         return Promise.resolve({ rows: [], rowCount: 0 })
       }),
-      connect: vi.fn(), end: vi.fn(),
+      end: vi.fn(),
     }
+    pool.connect = vi.fn(async () => ({ query: pool.query, release: vi.fn() }))
+    return pool
   }
 
   test('replay on a non-owned session is rejected and leaks no events', async () => {
@@ -897,8 +902,9 @@ describe('Router - force kick revokes the daemon-specific token (P0-2)', () => {
         }
         return Promise.resolve({ rows: [], rowCount: 0 })
       }),
-      connect: vi.fn(), end: vi.fn(),
+      end: vi.fn(),
     }
+    pool.connect = vi.fn(async () => ({ query: pool.query, release: vi.fn() }))
     const router = new Router(pool)
     const daemonWs = createMockWs()
     await router.registerDaemon(daemonWs, { type: 'register', daemon_id: 'daemon-1', hostname: 'h', agents: [] }, 7)

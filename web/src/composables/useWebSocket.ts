@@ -1,6 +1,7 @@
 import { ref } from 'vue'
 import { getRelayOrigin, getRelayWs } from './useEnv'
 import { isTokenExpired, useAuth } from './useAuth'
+import { applyQuotaPayload } from './useQuota'
 
 export interface DaemonEvent {
   type: string
@@ -157,6 +158,7 @@ async function connect(url?: string) {
             })
           }
         }
+        if (data.type === 'quota_status') applyQuotaPayload(data)
         handlers.forEach(h => h(data))
       } catch {}
     }

@@ -8,6 +8,11 @@
         </button>
       </div>
       <div class="modal-body">
+        <div v-if="concurrentSessions" :class="['quota-banner', { reached: sessionQuotaReached, over: concurrentSessions.over_limit }]">
+          <span>{{ t('quota.concurrent_sessions') }}</span>
+          <strong>{{ concurrentSessions.used + (concurrentSessions.reserved || 0) }}/{{ concurrentSessions.limit ?? '∞' }}</strong>
+          <span v-if="sessionQuotaReached">{{ t('quota.session_reached_hint') }}</span>
+        </div>
         <!-- Host Selector -->
         <div class="field-label">
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="2" width="20" height="20" rx="3"/><path d="M7 2v20"/></svg>
@@ -181,6 +186,7 @@ import { ref, reactive, computed, onMounted, onUnmounted, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { useWebSocket } from '../composables/useWebSocket'
 import { useLocale } from '../composables/useLocale'
+import { useQuota } from '../composables/useQuota'
 import { defaultPermission, expandCodexPreset, permissionOptions, type AgentType, type ClaudeMode, type CodexPreset, type PermissionConfig } from '../types/permission'
 
 const props = defineProps<{ daemons?: any[]; preSelectedDaemonId?: string }>()
@@ -189,6 +195,8 @@ const emit = defineEmits<{ close: [] }>()
 const router = useRouter()
 const { connect, send, onEvent } = useWebSocket()
 const { t } = useLocale()
+const { concurrentSessions, quotaReached } = useQuota()
+const sessionQuotaReached = computed(() => quotaReached('concurrent_sessions'))
 
 const form = reactive({
   daemonId: '',
@@ -266,6 +274,7 @@ function showError(reason: string, err?: string) {
     start_fail: { title: t('new_session.error_title', { host }), desc: t('new_session.failed_start_desc', { error: err || t('dashboard.unknown_error') }) },
     timeout: { title: t('new_session.error_title', { host }), desc: t('new_session.failed_timeout_desc') },
     daemon_offline: { title: t('new_session.error_title', { host }), desc: t('new_session.failed_offline_desc') },
+    concurrent_session_quota_exceeded: { title: t('quota.session_reached_title'), desc: t('quota.session_reached_desc') },
   }
   // Scheme A: cwd_in_use 进入"确认覆盖"状态，用户可勾选强制创建后重试
   if (reason === 'cwd_in_use') {
@@ -280,9 +289,15 @@ let cleanupFns: (() => void)[] = []
 let timeoutTimer: ReturnType<typeof setTimeout> | null = null
 let pendingSessionId = ''
 let done = false
+let currentRequestId = ''
 
 function startSession() {
   if (!canStart.value || creating.value) return
+  if (sessionQuotaReached.value) {
+    showError('concurrent_session_quota_exceeded')
+    return
+  }
+  currentRequestId = crypto.randomUUID()
   creating.value = true
   phase.value = 'submitting'
   hideError()
@@ -295,6 +310,7 @@ function startSession() {
   // ① session_created: redirect immediately, SessionDetail loading handles the wait
   cleanupFns.push(onEvent('session_created', (msg: any) => {
     if (done) return
+    if (msg.request_id && msg.request_id !== currentRequestId) return
     const sid = msg.session_id as string
     if (!sid || sid.startsWith('pending')) { phase.value = 'connecting'; return }
     done = true
@@ -323,6 +339,7 @@ function startSession() {
   // ③ session_create_failed: 显示失败 banner
   cleanupFns.push(onEvent('session_create_failed', (msg: any) => {
     if (done) return
+    if (msg.request_id && msg.request_id !== currentRequestId) return
     done = true
     if (timeoutTimer) clearTimeout(timeoutTimer)
     creating.value = false
@@ -341,6 +358,7 @@ function startSession() {
   // Send create command with daemon_id
   send({
     type: 'session_create',
+    request_id: currentRequestId,
     daemon_id: form.daemonId,
     agent: form.agent,
     cwd: form.cwd || undefined,
@@ -541,6 +559,10 @@ onUnmounted(() => {
 .prompt-area::placeholder { color: var(--fg-tertiary); }
 .char-count { text-align: right; font-size: 11px; color: var(--fg-tertiary); margin-top: 4px; }
 .permission-custom-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 8px; }
+.quota-banner { display: flex; align-items: center; gap: 8px; padding: 9px 12px; margin-bottom: 14px; border: 1px solid var(--border); border-radius: var(--radius-md); background: var(--bg); color: var(--fg-secondary); font-size: 12px; }
+.quota-banner strong { color: var(--fg); font-family: var(--font-mono); }
+.quota-banner.reached { border-color: var(--warning); background: var(--warning-bg); }
+.quota-banner.over { border-color: var(--error); background: var(--error-bg); }
 
 /* Advanced Options (Scheme A/C/D) */
 .advanced-section { margin-bottom: 16px; }
