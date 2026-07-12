@@ -4,12 +4,14 @@
 
 pocketctl 是一个远程 AI 编码代理控制系统。它让你在远程机器上运行 AI 编码代理（如 Claude Code、OpenCode、Codex），并通过 iOS App 或 Web 浏览器随时随地监控和交互。
 
+官网：[pocketctl.me](https://www.pocketctl.me)。iOS App 可从官网下载；在“设置 → 测试环境”中填写自建 Relay 地址即可连接。
+
 ## 架构
 
 ```
 ┌─────────────┐    WebSocket    ┌─────────────┐    WebSocket    ┌─────────────┐
-│   iOS App   │ ◄────────────► │    Relay     │ ◄────────────► │   Daemon    │
-│  (SwiftUI)  │                │  (Node.js)   │                │   (Go CLI)  │
+│ iOS App/Web │ ◄────────────► │    Relay     │ ◄────────────► │   Daemon    │
+│   (客户端)   │                │  (Node.js)   │                │   (Go CLI)  │
 └─────────────┘                └──────┬───────┘                └──────┬──────┘
                                       │                               │
                                       ▼                               ▼
@@ -27,7 +29,7 @@ pocketctl 是一个远程 AI 编码代理控制系统。它让你在远程机器
 
 - **Daemon** — 运行在远程机器上的轻量守护进程，负责发现、启动和管理 AI 代理进程
 - **Relay** — 中央 WebSocket 路由服务器，负责消息转发、事件持久化和 LLM 标题生成
-- **iOS App** — SwiftUI 原生应用，提供会话列表、实时对话、工具调用查看等功能
+- **iOS App** — 可从官网下载安装；在设置中切换到“测试环境”并填写自建 Relay 地址即可连接
 - **Web UI** — Vue 3 单页应用（可选）
 
 ## 支持的 Agent
@@ -40,7 +42,7 @@ pocketctl 是一个远程 AI 编码代理控制系统。它让你在远程机器
 
 三种 agent 共用一套"零配置发现 + 实时同步 + 跨设备续聊"能力 —— 你在终端正常运行 agent，daemon 自动发现并同步到客户端，可在客户端接着对话。
 
-权限配置按 Agent 原生能力提供：Claude Code 支持六种启动权限模式，Codex 支持 approval policy、sandbox mode 与安全 preset；Web/iOS 会等待 daemon 确认后再更新会话状态，Codex resume 会复用已确认的配置。
+权限配置按 Agent 原生能力提供：Claude Code 支持六种启动权限模式，Codex 支持 approval policy、sandbox mode 与安全 preset；Web 会等待 daemon 确认后再更新会话状态，Codex resume 会复用已确认的配置。
 
 **opencode 的特殊性**：它是 client/server 架构（会话存在 SQLite，不是可 tail 的 JSONL 文件）。daemon 托管一个共享的 `opencode serve` 进程，通过其 HTTP API 驱动会话、轮询消息历史做实时同步、发现终端会话。由于 opencode 不向第三方 API 暴露权限请求，daemon 会话默认自动放行工具（等价 Claude 的 `bypassPermissions`）；终端里运行的 opencode 仍按其自身配置在终端应答权限。
 
@@ -98,9 +100,7 @@ Daemon 会自动扫描 `PATH` 发现可用的代理 CLI，并注册到 Relay。
 
 ### 4. 使用 iOS App
 
-1. 在 Xcode 中打开 `ios/Pocketctl.xcodeproj`
-2. 编译并安装到 iPhone/iPad
-3. 登录后即可查看和管理远程 AI 代理会话
+从[官网](https://www.pocketctl.me)下载安装 iOS App。若使用自己搭建的 Relay，在 App 的“设置 → 服务器”中切换到“测试环境”，填写 Relay 的 IP 或域名（可带端口），保存后退出登录并重新登录即可连接。
 
 ### 4. Session 标题自动生成
 
@@ -281,7 +281,7 @@ daemons           -- 注册的守护进程（daemon_id, hostname, agents, status
 sessions          -- 代理会话（session_id, daemon_id, agent_type, cwd, title, source, status, user_id）
 events            -- 事件流（session_id, event_type, payload JSONB, event_hash 去重）
 users             -- 用户账户（email, phone, password_hash）
-devices           -- iOS 推送设备（user_id, device_token, platform）
+devices           -- 移动端推送设备（user_id, device_token, platform）
 deleted_sessions  -- 已删除 session 的墓碑表（用于防止重新发现已删除的 session）
 ```
 
@@ -323,18 +323,9 @@ pocketctl/
 │       ├── db.ts                  # PostgreSQL 连接和查询
 │       ├── title.ts               # GLM-4.6 标题生成服务
 │       ├── auth.ts                # JWT 认证
-│       ├── push.ts                # iOS 推送通知（APNs）
+│       ├── push.ts                # 推送通知（APNs）
 │       └── config/
 │           └── sms.ts             # 腾讯云短信发送服务
-├── ios/
-│   └── Pocketctl/                 # SwiftUI 原生 App（iOS 17+）
-│       ├── App/                   # App 入口
-│       ├── Models/                # Daemon、Session、WebSocketEvent、ModelOption、ChatMessage、SubAgent 等
-│       ├── Services/              # APIClient、WebSocketService、KeychainStorage
-│       ├── ViewModels/            # DaemonListVM、SessionListVM、SessionDetailVM、AgentManageVM、TokenUsageVM
-│       ├── Views/                 # DaemonListView、SessionListView、SessionDetailView、NewSessionSheet、AgentManageView、TokenUsageView、SettingsView、LoginView、ScanLoginView
-│       ├── Theme/ Utils/          # 设计 token、AgentDefaultsStore
-│       └── Components/            # 通用 UI 组件
 ├── web/                           # Vue 3 Web UI（可选）
 ├── docs/                          # 文档（路线图、测试报告、上线计划）
 ├── .claude/skills/                # Claude Code 技能（自动化工作流）
@@ -349,7 +340,6 @@ pocketctl/
 |------|------|
 | Daemon | Go 1.25, gorilla/websocket, fsnotify |
 | Relay | TypeScript, Fastify v5, @fastify/websocket, PostgreSQL |
-| iOS App | SwiftUI, URLSessionWebSocketTask, Swift 6 |
 | Web UI | Vue 3, Vue Router 4, Vite 6, TypeScript（可选） |
 | LLM | 智谱 GLM-4.6（Session 标题自动生成） |
 | 部署 | Docker Compose, PostgreSQL 17 |
