@@ -66,6 +66,7 @@
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 5v14M5 12h14"/></svg>
             {{ t('session.new_session') }}
           </button>
+          <TopbarGithubLink />
           <button class="theme-toggle" @click="toggleLocale" :title="locale === 'zh' ? 'English' : '中文'" style="font-size:12px;font-weight:600;min-width:28px;">{{ locale === 'zh' ? 'EN' : '中' }}</button>
           <button class="theme-toggle" @click="toggleTheme" :title="t('common.toggle_theme')">
             <svg v-if="isDark" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 12.79A9 9 0 1111.21 3 7 7 0 0021 12.79z"/></svg>
@@ -86,6 +87,7 @@ import { ref, computed, provide } from 'vue'
 import { useRoute } from 'vue-router'
 import { useAuth } from './composables/useAuth'
 import { useLocale } from './composables/useLocale'
+import TopbarGithubLink from './components/TopbarGithubLink.vue'
 import logoDark from './assets/logo-github-org.svg'
 import logoLight from './assets/logo-github-org-light.svg'
 
