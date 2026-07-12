@@ -10,7 +10,7 @@ Official website: [pocketctl.me](https://www.pocketctl.me) · Web dashboard: [po
 
 - 🤖 **Multi-agent** — Claude Code, Codex, and OpenCode, behind one unified "zero-config discovery + live sync + cross-device continue" model. Run an agent in your terminal; the daemon discovers it and syncs it to your client where you can keep chatting. (OpenCode is a client/server agent — the daemon hosts a shared `opencode serve` and drives it over its HTTP API. To add a new agent, register a `Provider` — see [docs/adding-an-agent.md](docs/adding-an-agent.md).)
 - 🖥️ **Real-time Monitoring** — Watch your AI coding sessions live from anywhere
-- 📱 **iOS App** — Native SwiftUI app: hosts dashboard, session list/detail (backward-paginated history), new-session sheet (model & permission picker, locale-aware auto titles), agent management with one-tap upgrade, token usage analytics, scan-to-authorize web login
+- 📱 **iOS App** — Download the iOS app from the official website. In Settings, select **Test Environment** and enter your self-hosted Relay address to connect it.
 - 🖧 **Hosts Dashboard** — System resource monitoring (CPU / Memory / Disk) with remote daemon restart
 - 📌 **Session Management** — Pin, rename, export, and delete sessions with inline editing
 - 📊 **Token Analytics** — Usage dashboard (daily / model / host breakdown); deleting a session never shrinks historical totals
@@ -38,7 +38,7 @@ Official website: [pocketctl.me](https://www.pocketctl.me) · Web dashboard: [po
 - **Daemon** — Runs on your development machine, discovers and monitors AI coding agent sessions
 - **Relay** — WebSocket server that bridges mobile/web clients with daemons
 - **Web** — Vue 3 SPA dashboard for browser-based monitoring, served at `/app`
-- **iOS** — Native SwiftUI app (iPhone) for real-time session monitoring & management on the go
+- **iOS App** — Download it from the official website; use Settings → Test Environment to connect a self-hosted Relay.
 
 The public service is available at [pocketctl.me](https://www.pocketctl.me). The browser client is served from
 [`/app`](https://www.pocketctl.me/app); the root URL contains product information and client entry points.
@@ -166,14 +166,6 @@ pocketctl/
 │       ├── composables/           # useAuth, useWebSocket, useCountdown, useRelativeTime, useSessionRename
 │       ├── components/            # SessionActions, SessionTimeline, NewSessionDialog, SubAgentCard, MarkdownRenderer, etc.
 │       └── assets/                # Design system CSS, logo SVGs
-├── ios/Pocketctl/                 # Native iOS app (SwiftUI, iOS 17+)
-│   ├── Models/                    # Daemon, Session, WebSocketEvent, ModelOption, ChatMessage, SubAgent, ...
-│   ├── Services/                  # APIClient, WebSocketService, KeychainStorage
-│   ├── ViewModels/                # DaemonListVM, SessionListVM, SessionDetailVM, AgentManageVM, TokenUsageVM
-│   ├── Views/                     # DaemonListView, SessionListView, SessionDetailView, NewSessionSheet, AgentManageView, TokenUsageView, SettingsView, LoginView, ScanLoginView
-│   ├── Theme/ Utils/              # Design tokens, AgentDefaultsStore
-│   ├── Views/Components/           # Reusable SwiftUI components
-│   └── App/                       # App entry
 ├── scripts/
 │   ├── install-daemon.sh          # One-line installer
 │   └── sync-github.sh             # Sync to GitHub
@@ -188,7 +180,6 @@ pocketctl/
 | Daemon | Go 1.25, gorilla/websocket, fsnotify, gopsutil |
 | Relay | TypeScript, Fastify v5, @fastify/websocket, PostgreSQL |
 | Web UI | Vue 3, Vue Router 4, Vite 6, TypeScript |
-| iOS App | Swift, SwiftUI, iOS 17+, @Observable |
 
 ## License
 

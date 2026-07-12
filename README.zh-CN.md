@@ -12,8 +12,8 @@ pocketctl 是一个远程 AI 编码代理控制系统。它让你在远程机器
 
 ```
 ┌─────────────┐    WebSocket    ┌─────────────┐    WebSocket    ┌─────────────┐
-│   iOS App   │ ◄────────────► │    Relay     │ ◄────────────► │   Daemon    │
-│  (SwiftUI)  │                │  (Node.js)   │                │   (Go CLI)  │
+│ iOS App/Web │ ◄────────────► │    Relay     │ ◄────────────► │   Daemon    │
+│   (客户端)   │                │  (Node.js)   │                │   (Go CLI)  │
 └─────────────┘                └──────┬───────┘                └──────┬──────┘
                                       │                               │
                                       ▼                               ▼
@@ -31,7 +31,7 @@ pocketctl 是一个远程 AI 编码代理控制系统。它让你在远程机器
 
 - **Daemon** — 运行在远程机器上的轻量守护进程，负责发现、启动和管理 AI 代理进程
 - **Relay** — 中央 WebSocket 路由服务器，负责消息转发、事件持久化和 LLM 标题生成
-- **iOS App** — SwiftUI 原生应用，提供会话列表、实时对话、工具调用查看等功能
+- **iOS App** — 可从官网下载安装；在设置中切换到“测试环境”并填写自建 Relay 地址即可连接
 - **Web UI** — Vue 3 单页应用，生产环境通过官网 `/app` 提供
 - **官网** — 双主题、中英文切换的产品介绍页，并提供客户端入口
 
@@ -101,9 +101,7 @@ Daemon 会自动扫描 `PATH` 发现可用的代理 CLI，并注册到 Relay。
 
 ### 4. 使用 iOS App
 
-1. 在 Xcode 中打开 `ios/Pocketctl.xcodeproj`
-2. 编译并安装到 iPhone/iPad
-3. 登录后即可查看和管理远程 AI 代理会话
+从[官网](https://www.pocketctl.me)下载安装 iOS App。若使用自己搭建的 Relay，在 App 的“设置 → 服务器”中切换到“测试环境”，填写 Relay 的 IP 或域名（可带端口），保存后退出登录并重新登录即可连接。
 
 ### 5. Session 标题自动生成
 
@@ -333,18 +331,9 @@ pocketctl/
 │       ├── db.ts                  # PostgreSQL 连接和查询
 │       ├── title.ts               # DeepSeek 标题生成服务
 │       ├── auth.ts                # JWT 认证
-│       ├── push.ts                # iOS 推送通知（APNs）
+│       ├── push.ts                # 推送通知（APNs）
 │       └── config/
 │           └── sms.ts             # 腾讯云短信发送服务
-├── ios/
-│   └── Pocketctl/                 # SwiftUI 原生 App（iOS 17+）
-│       ├── App/                   # App 入口
-│       ├── Models/                # Daemon、Session、WebSocketEvent、ModelOption、ChatMessage、SubAgent 等
-│       ├── Services/              # APIClient、WebSocketService、KeychainStorage
-│       ├── ViewModels/            # DaemonListVM、SessionListVM、SessionDetailVM、AgentManageVM、TokenUsageVM
-│       ├── Views/                 # DaemonListView、SessionListView、SessionDetailView、NewSessionSheet、AgentManageView、TokenUsageView、SettingsView、LoginView、ScanLoginView
-│       ├── Theme/ Utils/          # 设计 token、AgentDefaultsStore
-│       └── Components/            # 通用 UI 组件
 ├── web/                           # Vue 3 Web UI（生产环境 /app）
 │   ├── src/views/                 # Dashboard、Session、Hosts、Token Usage、Settings 等页面
 │   ├── src/components/            # 会话消息、审批、Diff、交互选择等组件
@@ -363,7 +352,6 @@ pocketctl/
 |------|------|
 | Daemon | Go 1.25, gorilla/websocket, fsnotify |
 | Relay | TypeScript, Fastify v5, @fastify/websocket, PostgreSQL |
-| iOS App | SwiftUI, URLSessionWebSocketTask, Swift 6 |
 | Web UI | Vue 3, Vue Router 4, Vite 6, TypeScript（可选） |
 | LLM | DeepSeek-V4-Flash（Session 标题自动生成） |
 | 部署 | Docker Compose, PostgreSQL 17 |
