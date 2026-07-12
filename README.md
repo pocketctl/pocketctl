@@ -4,6 +4,8 @@
 
 Monitor and manage Claude Code, Codex, and OpenCode sessions from your phone or browser.
 
+Official website: [pocketctl.me](https://www.pocketctl.me) · Web dashboard: [pocketctl.me/app](https://www.pocketctl.me/app)
+
 ## Features
 
 - 🤖 **Multi-agent** — Claude Code, Codex, and OpenCode, behind one unified "zero-config discovery + live sync + cross-device continue" model. Run an agent in your terminal; the daemon discovers it and syncs it to your client where you can keep chatting. (OpenCode is a client/server agent — the daemon hosts a shared `opencode serve` and drives it over its HTTP API. To add a new agent, register a `Provider` — see [docs/adding-an-agent.md](docs/adding-an-agent.md).)
@@ -37,6 +39,9 @@ Monitor and manage Claude Code, Codex, and OpenCode sessions from your phone or 
 - **Relay** — WebSocket server that bridges mobile/web clients with daemons
 - **Web** — Vue 3 SPA dashboard for browser-based monitoring, served at `/app`
 - **iOS** — Native SwiftUI app (iPhone) for real-time session monitoring & management on the go
+
+The public service is available at [pocketctl.me](https://www.pocketctl.me). The browser client is served from
+[`/app`](https://www.pocketctl.me/app); the root URL contains product information and client entry points.
 
 ## Quick Start
 
@@ -125,9 +130,16 @@ pocketctl/
 ├── internal/
 │   ├── adapter/                   # Agent output parsers (Claude Code JSONL)
 │   ├── api/                       # HTTP API client (auth)
+│   ├── approval/                  # Tool approval broker and hook integration
+│   ├── commands/                  # Daemon command handlers
 │   ├── config/                    # Config management (~/.pocketctl/auth.json)
 │   ├── daemon/                    # PID file, daemon state, machine ID
 │   ├── discovery/                 # Agent CLI auto-discovery
+│   ├── i18n/                      # CLI locale and translated messages
+│   ├── keepawake/                 # Keep the host awake during active sessions
+│   ├── platform/                  # OS-specific process and service helpers
+│   ├── ptyscan/                   # Terminal/process discovery helpers
+│   ├── service/                   # Background service integration
 │   ├── notify/                    # Terminal notifications
 │   ├── protocol/                  # WebSocket message type definitions
 │   ├── session/                   # Session lifecycle management
@@ -142,7 +154,7 @@ pocketctl/
 │       ├── auth.ts                # JWT sign/verify with jti revocation
 │       ├── db.ts                  # PostgreSQL queries
 │       ├── push.ts                # Push notification service
-│       ├── title.ts               # LLM title generation (智谱 GLM)
+│       ├── title.ts               # DeepSeek-V4-Flash title generation
 │       └── config/
 │           ├── clients.ts         # OAuth 2.0 client registry
 │           ├── auth-sessions.ts   # Device authorization session store
@@ -160,6 +172,7 @@ pocketctl/
 │   ├── ViewModels/                # DaemonListVM, SessionListVM, SessionDetailVM, AgentManageVM, TokenUsageVM
 │   ├── Views/                     # DaemonListView, SessionListView, SessionDetailView, NewSessionSheet, AgentManageView, TokenUsageView, SettingsView, LoginView, ScanLoginView
 │   ├── Theme/ Utils/              # Design tokens, AgentDefaultsStore
+│   ├── Views/Components/           # Reusable SwiftUI components
 │   └── App/                       # App entry
 ├── scripts/
 │   ├── install-daemon.sh          # One-line installer

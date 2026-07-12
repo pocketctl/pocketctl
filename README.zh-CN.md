@@ -1,8 +1,12 @@
 # pocketctl
 
-**Your coding agents, in your pocket.**
+**把 AI 编码代理装进口袋。**
 
 pocketctl 是一个远程 AI 编码代理控制系统。它让你在远程机器上运行 AI 编码代理（如 Claude Code、OpenCode、Codex），并通过 iOS App 或 Web 浏览器随时随地监控和交互。
+
+官网：[pocketctl.me](https://www.pocketctl.me) · Web 控制台：[pocketctl.me/app](https://www.pocketctl.me/app)
+
+官网根路径提供产品介绍和客户端入口，`/app` 是浏览器控制台。Daemon、Relay、Web 和 iOS 的源码及部署配置均位于本仓库。
 
 ## 架构
 
@@ -20,7 +24,7 @@ pocketctl 是一个远程 AI 编码代理控制系统。它让你在远程机器
                                       │
                                       ▼
                                ┌─────────────┐
-                               │ 智谱 GLM-4.6│  ← Session 标题自动生成
+                               │ DeepSeek    │  ← Session 标题自动生成
                                │  (LLM API)  │
                                └─────────────┘
 ```
@@ -28,7 +32,8 @@ pocketctl 是一个远程 AI 编码代理控制系统。它让你在远程机器
 - **Daemon** — 运行在远程机器上的轻量守护进程，负责发现、启动和管理 AI 代理进程
 - **Relay** — 中央 WebSocket 路由服务器，负责消息转发、事件持久化和 LLM 标题生成
 - **iOS App** — SwiftUI 原生应用，提供会话列表、实时对话、工具调用查看等功能
-- **Web UI** — Vue 3 单页应用（可选）
+- **Web UI** — Vue 3 单页应用，生产环境通过官网 `/app` 提供
+- **官网** — 双主题、中英文切换的产品介绍页，并提供客户端入口
 
 ## 支持的 Agent
 
@@ -51,7 +56,7 @@ pocketctl 是一个远程 AI 编码代理控制系统。它让你在远程机器
 - [Docker](https://www.docker.com/) 和 Docker Compose
 - [Go 1.25+](https://go.dev/)（编译 Daemon）
 - 远程机器上安装了至少一个 AI 代理 CLI（`claude`、`opencode` 或 `codex`）
-- [可选] 智谱 AI API Key（用于 Session 标题自动生成）
+- [可选] DeepSeek API Key（用于 Session 标题自动生成）
 
 ### 1. 启动 Relay
 
@@ -76,7 +81,7 @@ docker compose up -d
 curl -fsSL https://www.pocketctl.me/install.sh | bash
 ```
 
-安装完成后，daemon 默认连接生产 relay（`wss://www.pocketctl.me/ws`），直接运行：
+安装完成后，daemon 默认连接生产 Relay（`wss://www.pocketctl.me/ws`），直接运行：
 
 ```bash
 pocketctl daemon start --prod
@@ -100,9 +105,9 @@ Daemon 会自动扫描 `PATH` 发现可用的代理 CLI，并注册到 Relay。
 2. 编译并安装到 iPhone/iPad
 3. 登录后即可查看和管理远程 AI 代理会话
 
-### 4. Session 标题自动生成
+### 5. Session 标题自动生成
 
-Relay 集成了智谱 GLM-4.6 API，可自动为每个 Session 生成简洁的标题。标题语言跟随 Web 客户端 UI 语言设置（中文/英文），切换语言后新建的会话标题自动适配：
+Relay 集成了 DeepSeek V4 Flash API，可自动为每个 Session 生成简洁的标题。标题语言跟随 Web 客户端 UI 语言设置（中文/英文），切换语言后新建的会话标题自动适配：
 
 ```
 新建 Session → "Terminal Session-1def4567"  (默认名称)
@@ -111,12 +116,12 @@ Relay 集成了智谱 GLM-4.6 API，可自动为每个 Session 生成简洁的�
        → "React暗色模式组件"                  (LLM 生成)
 ```
 
-配置方式：在 Relay 的 `.env` 中设置 `DEEPSEEK_API_KEY`（从 [platform.deepseek.com](https://platform.deepseek.com) 获取）。
+配置方式：在 Relay 的 `.env` 中设置 `DEEPSEEK_API_KEY`（从 [platform.deepseek.com](https://platform.deepseek.com) 获取）。未配置时会保留默认会话标题，不影响会话使用。
 
 ## CLI 命令
 
 ```
-pocketctl login          [--relay <URL>] [--prod]           手机号短信验证登录
+pocketctl login          [--relay <URL>] [--prod] [--email]  OAuth 设备流登录；无浏览器时可用邮箱验证码
 pocketctl daemon start   [--relay <URL>] [--prod] [--token] 启动代理守护进程
 pocketctl daemon stop                                     停止运行中的守护进程
 pocketctl daemon status                                   查看守护进程状态和已发现的代理
@@ -302,11 +307,18 @@ pocketctl/
 │   │   ├── manager.go            # 会话生命周期管理（含标题生成触发）
 │   │   ├── backend.go            # SessionBackend 接口（server-kind agent）
 │   │   └── opencode_backend.go   # opencode 协调器（serve 单例 + 发现 + 同步 + 续聊）
-│   ├── api/client.go              # HTTP API 客户端（认证、SMS）
+│   ├── api/client.go              # HTTP API 客户端（认证、邮箱/短信验证码）
+│   ├── approval/                  # 工具调用审批 broker 与 Claude hook 集成
+│   ├── commands/                  # daemon 命令处理
 │   ├── config/config.go           # 配置管理（~/.pocketctl/auth.json）
 │   ├── daemon/                    # PID 文件、守护进程状态管理
 │   ├── discovery/discovery.go     # 代理 CLI 自动发现
+│   ├── i18n/                      # CLI 多语言文案与 locale 检测
+│   ├── keepawake/                 # 会话运行期间防止系统休眠
 │   ├── notify/                    # 终端通知
+│   ├── platform/                  # 平台相关进程与服务辅助
+│   ├── ptyscan/                   # 终端/进程发现辅助
+│   ├── service/                   # 后台服务集成
 │   ├── protocol/types.go          # WebSocket 消息类型定义
 │   ├── update/updater.go          # Daemon 自更新（版本检测、下载、校验、替换）
 │   ├── watcher/
@@ -319,7 +331,7 @@ pocketctl/
 │       ├── server.ts              # Fastify + WebSocket 入口
 │       ├── router.ts              # 消息路由逻辑（含 generate_title_request 处理）
 │       ├── db.ts                  # PostgreSQL 连接和查询
-│       ├── title.ts               # GLM-4.6 标题生成服务
+│       ├── title.ts               # DeepSeek 标题生成服务
 │       ├── auth.ts                # JWT 认证
 │       ├── push.ts                # iOS 推送通知（APNs）
 │       └── config/
@@ -333,7 +345,11 @@ pocketctl/
 │       ├── Views/                 # DaemonListView、SessionListView、SessionDetailView、NewSessionSheet、AgentManageView、TokenUsageView、SettingsView、LoginView、ScanLoginView
 │       ├── Theme/ Utils/          # 设计 token、AgentDefaultsStore
 │       └── Components/            # 通用 UI 组件
-├── web/                           # Vue 3 Web UI（可选）
+├── web/                           # Vue 3 Web UI（生产环境 /app）
+│   ├── src/views/                 # Dashboard、Session、Hosts、Token Usage、Settings 等页面
+│   ├── src/components/            # 会话消息、审批、Diff、交互选择等组件
+│   └── src/composables/           # Auth、WebSocket、通知、locale 等组合式逻辑
+├── landing/                       # 官网静态页（本地部署时由 Nginx 提供）
 ├── docs/                          # 文档（路线图、测试报告、上线计划）
 ├── .claude/skills/                # Claude Code 技能（自动化工作流）
 ├── docker-compose.yml
@@ -349,7 +365,7 @@ pocketctl/
 | Relay | TypeScript, Fastify v5, @fastify/websocket, PostgreSQL |
 | iOS App | SwiftUI, URLSessionWebSocketTask, Swift 6 |
 | Web UI | Vue 3, Vue Router 4, Vite 6, TypeScript（可选） |
-| LLM | 智谱 GLM-4.6（Session 标题自动生成） |
+| LLM | DeepSeek-V4-Flash（Session 标题自动生成） |
 | 部署 | Docker Compose, PostgreSQL 17 |
 
 ## License
