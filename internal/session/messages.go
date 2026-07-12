@@ -336,6 +336,37 @@ func (sm *SessionManager) SendMessage(ctx context.Context, sessionID string, con
 	return nil
 }
 
+// RequiresResume reports whether SendMessage would have to recreate a dormant
+// root-session process. Relay attaches a resume quota grant only for this path;
+// messages written to an already-live PTY/backend stay within the existing slot.
+func (sm *SessionManager) RequiresResume(sessionID string) bool {
+	sm.mu.RLock()
+	ps, ok := sm.sessions[sessionID]
+	if !ok {
+		sm.mu.RUnlock()
+		return true
+	}
+	backend := ps.Backend
+	status := ps.Status
+	pid := ps.Pid
+	pty := ps.PTY
+	source := ps.Source
+	sm.mu.RUnlock()
+	if backend != nil {
+		return false
+	}
+	if status == protocol.StatusExited || status == protocol.StatusCompleted || status == protocol.StatusError || status == protocol.StatusKilled {
+		return true
+	}
+	if source == "daemon" {
+		return pty == nil || pid <= 0 || !isProcessAlive(pid)
+	}
+	if source == "terminal" {
+		return pid <= 0 || !isProcessAlive(pid)
+	}
+	return false
+}
+
 // sendToIdleTerminal sends a message to a terminal session that's idle (alive but waiting for input).
 // Uses a one-shot resume (claude --resume / codex exec resume) without stdout capture — the JSONL
 // tailer handles event forwarding.

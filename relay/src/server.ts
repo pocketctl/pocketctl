@@ -1,7 +1,7 @@
 import Fastify from 'fastify';
 import fastifyWebsocket from '@fastify/websocket';
 import fastifyCors from '@fastify/cors';
-import { createPool, initDB, parseDBUrl, createUser, getUserByEmail, getUserById, getUserProfile, registerDevice, removeDevice, cleanStaleTombstones, upsertDaemonAlias, deleteDaemon, updateDisplayName, updateEmail, addToIOSWaitlist, revokeToken, isTokenRevoked, cleanRevokedTokens, insertAuditLog, bindTokenToDaemon, updateSessionTitle, isSessionOwnedByUser, getSessionAllEvents, getTokenSummary, getTokensByDaemon, backfillSessionTokens, backfillSessionModel, backfillTokenDailyStats, aggregateDayIntoStats, cleanStaleEvents, getTokenDailySeries, getTokenByModel, getTokenByDaemon, getSessionTokenTrend, listProUserIds, getUserDailyTokens, getUserWeeklyTokens, markReportSent, handleRefreshReuse } from './db.js';
+import { createPool, initDB, parseDBUrl, createUser, getUserByEmail, getUserById, getUserPlanAndWhitelist, getUserProfile, registerDevice, removeDevice, cleanStaleTombstones, upsertDaemonAlias, updateDisplayName, updateEmail, addToIOSWaitlist, revokeToken, isTokenRevoked, cleanRevokedTokens, insertAuditLog, bindTokenToDaemon, updateSessionTitle, isSessionOwnedByUser, getSessionAllEvents, getTokenSummary, getTokensByDaemon, backfillSessionTokens, backfillSessionModel, backfillTokenDailyStats, aggregateDayIntoStats, cleanStaleEvents, getTokenDailySeries, getTokenByModel, getTokenByDaemon, getSessionTokenTrend, listProUserIds, getUserDailyTokens, getUserWeeklyTokens, markReportSent, handleRefreshReuse } from './db.js';
 import { Router } from './router.js';
 import { hashPassword, verifyPassword, signAccessToken, signRefreshToken, verifyRefreshToken, decodeToken, verifyAccessTokenWithRevocation } from './auth.js';
 import { notifyUser, sessionStatusPush, daemonOfflinePush, dailyReportPush, weeklyReportPush } from './push.js';
@@ -10,6 +10,8 @@ import { generateCode, storeCode, verifyCode, hasPendingCode } from './config/ve
 import { validateClient } from './config/clients.js';
 import { createSession, getSessionByDeviceCode, getSessionByUserCode, authorizeSession, recordPoll, canPoll, deleteSession } from './config/auth-sessions.js';
 import { createQrSession, getQrSession, markScanned, confirmQrSession, deleteQrSession } from './config/qr-sessions.js';
+import { resolveEntitlements } from './entitlements.js';
+import { getQuotaSnapshot } from './quota.js';
 import { createWsTicketStore } from './config/ws-tickets.js';
 import { createHash } from 'crypto';
 import { ConnectionRateLimiter } from './rate-limit.js';
@@ -373,7 +375,9 @@ async function main() {
     if (!profile) {
       reply.code(404); return { error: 'user not found' };
     }
-    return profile;
+    const { plan, whitelist } = await getUserPlanAndWhitelist(pool, payload.userId);
+    const quota = await getQuotaSnapshot(pool, payload.userId, resolveEntitlements(plan, whitelist));
+    return { ...profile, quota };
   });
 
   // Register device for push notifications
@@ -528,8 +532,11 @@ async function main() {
     const payload = await verifyAccessTokenWithRevocation(authHeader.slice(7), pool);
     if (!payload) { reply.code(401); return { error: 'invalid token' }; }
     const { daemonId } = req.params as any;
-    const ok = await deleteDaemon(pool, payload.userId, daemonId);
-    if (!ok) { reply.code(404); return { error: 'daemon not found or not owned' }; }
+    const result = await router.handleDeleteDaemon(daemonId, payload.userId);
+    if (!result.success) {
+      reply.code(result.error === 'forbidden' ? 403 : 404);
+      return { error: result.error || 'daemon not found or not owned' };
+    }
     // Notify same-user clients to remove the daemon from their list
     router.broadcastToUser(payload.userId, { type: 'daemon_status', daemon_id: daemonId, status: 'unregistered' });
     return { success: true };

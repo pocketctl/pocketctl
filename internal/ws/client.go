@@ -94,14 +94,14 @@ type OnConnectStateChange func(connected bool)
 type OnEvent func(evt protocol.DaemonEvent) []protocol.DaemonEvent
 
 type Client struct {
-	relayURL        string
-	token           string
-	tokenMu         sync.Mutex // protects token (refreshable at runtime via UpdateToken)
+	relayURL string
+	token    string
+	tokenMu  sync.Mutex // protects token (refreshable at runtime via UpdateToken)
 	// relayPin is the base64-encoded SHA-256 of the relay's leaf certificate
 	// SPKI (SubjectPublicKeyInfo). When set, the dialer pins the TLS peer to
 	// this key, defeating MITM even if a trusted CA is compromised. Empty =
 	// standard system-CA validation only (backwards compatible).
-	relayPin string
+	relayPin        string
 	conn            *websocket.Conn
 	connMu          sync.Mutex
 	writeMu         sync.Mutex // protects WriteMessage on conn
@@ -158,6 +158,12 @@ type Client struct {
 	// with 4001, reset to false at the start of each connectAndServe. Read by Run
 	// to decide whether to attempt a token refresh before reconnecting.
 	lastCloseAuthReject atomic.Bool
+
+	// registrationRejected is set for persistent business rejections such as a
+	// free account exhausting its bound-host slots. Reconnecting with the same
+	// credentials cannot fix that state, so Run parks until the daemon is
+	// restarted after the user deletes a host or logs in again.
+	registrationRejected atomic.Bool
 
 	// fastReconnect is set by readPump when the relay announces a restart
 	// (relay_restarting) and cleared in onRegisterAck after a successful
@@ -346,6 +352,7 @@ func (c *Client) ResendRegister() {
 		AgentLatests:    c.agentLatests,
 		AgentManageable: c.agentManageable,
 		OS:              c.osName, IP: c.localIP, Arch: c.arch, Version: c.version, StartedAt: c.startedAt,
+		SupportsQuotaGrant: true,
 	}
 	if c.activeSessionIDsFn != nil {
 		register.ActiveSessionIDs = c.activeSessionIDsFn()
@@ -379,9 +386,9 @@ func (c *Client) dialer() *websocket.Dialer {
 		return websocket.DefaultDialer
 	}
 	return &websocket.Dialer{
-		NetDialContext:    websocket.DefaultDialer.NetDialContext,
-		HandshakeTimeout:  websocket.DefaultDialer.HandshakeTimeout,
-		TLSClientConfig:   &tls.Config{VerifyPeerCertificate: c.verifyPinnedCert},
+		NetDialContext:   websocket.DefaultDialer.NetDialContext,
+		HandshakeTimeout: websocket.DefaultDialer.HandshakeTimeout,
+		TLSClientConfig:  &tls.Config{VerifyPeerCertificate: c.verifyPinnedCert},
 		// Force the standard chain validation too: VerifyPeerCertificate runs
 		// AFTER the normal chain build, so we get both the system-CA check and
 		// our pin check. gorilla sets the intermediates/root from the handshake.
@@ -496,6 +503,11 @@ func (c *Client) Run(ctx context.Context) error {
 			<-ctx.Done()
 			return ctx.Err()
 		}
+		if c.registrationRejected.Load() {
+			c.logger.Error("relay rejected daemon registration; pausing reconnect until a host slot is released and the daemon is restarted")
+			<-ctx.Done()
+			return ctx.Err()
+		}
 		c.logger.Error("connection lost, reconnecting", "error", err)
 		if !c.backoffSleep(ctx) {
 			return ctx.Err()
@@ -520,8 +532,8 @@ func (c *Client) connectAndServe(ctx context.Context) error {
 	q.Set("type", "daemon")
 	u.RawQuery = q.Encode()
 
-		// Send the JWT in the Authorization header rather than the URL query, so it
-		// never lands in proxy access logs / referrers.
+	// Send the JWT in the Authorization header rather than the URL query, so it
+	// never lands in proxy access logs / referrers.
 	c.tokenMu.Lock()
 	tok := c.token
 	c.tokenMu.Unlock()
@@ -650,10 +662,16 @@ func (c *Client) readPump(done chan struct{}) {
 			// missing auth). Flag it so Run attempts a token refresh before giving
 			// up; count it so Run can stop reconnecting after authRejectStopThreshold
 			// if refresh also keeps failing.
-			if ce, ok := err.(*websocket.CloseError); ok && ce.Code == 4001 {
-				c.lastCloseAuthReject.Store(true)
-				n := c.authRejectCount.Add(1)
-				c.logger.Error("relay rejected the connection: token invalid/expired/revoked", "reason", ce.Text, "consecutive", n)
+			if ce, ok := err.(*websocket.CloseError); ok {
+				switch ce.Code {
+				case 4001:
+					c.lastCloseAuthReject.Store(true)
+					n := c.authRejectCount.Add(1)
+					c.logger.Error("relay rejected the connection: token invalid/expired/revoked", "reason", ce.Text, "consecutive", n)
+				case 4008:
+					c.registrationRejected.Store(true)
+					c.logger.Error("relay rejected daemon registration", "reason", ce.Text)
+				}
 			}
 			return
 		}
@@ -668,6 +686,8 @@ func (c *Client) readPump(done chan struct{}) {
 			GracePeriodSeconds int    `json:"grace_period_seconds"`
 			UpToSeq            int64  `json:"up_to_seq"`
 			SupportsEventAck   bool   `json:"supports_event_ack"`
+			Used               int    `json:"used"`
+			Limit              int    `json:"limit"`
 		}
 		if err := json.Unmarshal(msg, &base); err != nil {
 			continue
@@ -686,6 +706,10 @@ func (c *Client) readPump(done chan struct{}) {
 			c.logger.Info("relay restarting; switching to fast reconnect")
 			c.fastReconnect.Store(true)
 			continue
+		case "register_rejected":
+			c.registrationRejected.Store(true)
+			c.logger.Error("relay rejected daemon registration", "reason", base.Reason, "message", base.Message, "used", base.Used, "limit", base.Limit)
+			return
 		}
 
 		// Handle kicked message: daemon is being evicted

@@ -1,5 +1,6 @@
 import { ref, computed } from 'vue'
 import { getRelayOrigin } from './useEnv'
+import { applyQuotaPayload } from './useQuota'
 
 export interface UserInfo {
   id: number
@@ -7,6 +8,7 @@ export interface UserInfo {
   phone: string | null
   display_name: string | null
   plan?: string | null
+  quota?: any
 }
 
 const user = ref<UserInfo | null>(null)
@@ -107,7 +109,9 @@ async function fetchProfile() {
     phone: data.phone ?? null,
     display_name: data.display_name ?? null,
     plan: data.plan || 'free',
+    quota: data.quota,
   }
+  applyQuotaPayload(data)
   localStorage.setItem('pocketctl_user', JSON.stringify(user.value))
 }
 

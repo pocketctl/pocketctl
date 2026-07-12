@@ -4,7 +4,7 @@
     <div class="page-header">
       <div>
         <h2 class="page-title">{{ t('nav.hosts') }}</h2>
-        <div class="page-subtitle">{{ t('hosts.count_prefix') }} <span class="text-mono">{{ daemons.length }}</span> {{ t('hosts.host_unit') }} · <span class="text-success text-mono">{{ onlineCount }}</span> {{ t('dashboard.online') }} · <span class="text-tertiary text-mono">{{ offlineCount }}</span> {{ t('dashboard.offline') }}</div>
+        <div class="page-subtitle">{{ t('hosts.count_prefix') }} <span class="text-mono">{{ daemons.length }}</span> {{ t('hosts.host_unit') }} · <span class="text-success text-mono">{{ onlineCount }}</span> {{ t('dashboard.online') }} · <span class="text-tertiary text-mono">{{ offlineCount }}</span> {{ t('dashboard.offline') }} <template v-if="boundHosts">· <span :class="{ 'text-danger': boundHosts.over_limit }">{{ t('quota.bound_hosts') }} {{ boundHosts.used }}/{{ boundHosts.limit ?? '∞' }}</span></template></div>
       </div>
       <button class="btn btn-secondary" @click="showRegister = true">
         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 5v14M5 12h14"/></svg>
@@ -293,6 +293,7 @@ import { useWebSocket } from '../composables/useWebSocket'
 import { useAuth } from '../composables/useAuth'
 import { formatRelativeTime } from '../composables/useRelativeTime'
 import { useLocale } from '../composables/useLocale'
+import { useQuota } from '../composables/useQuota'
 import RegisterDaemonDialog from '../components/RegisterDaemonDialog.vue'
 import AgentBadge from '../components/AgentBadge.vue'
 import { getRelayOrigin } from '../composables/useEnv'
@@ -302,6 +303,7 @@ const ws = useWebSocket()
 const { accessToken } = useAuth()
 const { connect, send, onEvent } = ws
 const { t } = useLocale()
+const { boundHosts } = useQuota()
 
 const daemons = ref<any[]>([])
 const selectedId = ref<string | null>(null)

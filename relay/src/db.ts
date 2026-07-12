@@ -136,6 +136,27 @@ export async function initDB(pool: pg.Pool): Promise<void> {
   await pool.query(`ALTER TABLE daemons ADD COLUMN IF NOT EXISTS user_id INT`);
   await pool.query(`CREATE INDEX IF NOT EXISTS idx_sessions_user_id ON sessions(user_id)`);
 
+  // Short-lived, transactionally allocated quota slots. These close the race
+  // where two clients on different hosts create or revive a session at once.
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS quota_reservations (
+      id UUID PRIMARY KEY,
+      user_id INT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      resource VARCHAR(32) NOT NULL,
+      operation VARCHAR(16) NOT NULL,
+      daemon_id VARCHAR(64),
+      session_id VARCHAR(64),
+      request_id VARCHAR(64) NOT NULL,
+      expires_at TIMESTAMPTZ NOT NULL,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      UNIQUE (user_id, request_id)
+    )
+  `);
+  await pool.query(`
+    CREATE INDEX IF NOT EXISTS idx_quota_reservations_active
+    ON quota_reservations (user_id, resource, expires_at)
+  `);
+
   // Phase 3: devices table for push notifications
   await pool.query(`
     CREATE TABLE IF NOT EXISTS devices (

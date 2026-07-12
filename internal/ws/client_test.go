@@ -82,6 +82,38 @@ func wsURL(httpURL string) string {
 	return "ws" + strings.TrimPrefix(httpURL, "http")
 }
 
+func TestHostQuotaRejectionStopsReconnectLoop(t *testing.T) {
+	var conns int32
+	upgrader := websocket.Upgrader{}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&conns, 1)
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		_, _, _ = conn.ReadMessage() // register
+		_ = conn.WriteJSON(map[string]any{
+			"type": "register_rejected", "reason": "host_quota_exceeded",
+			"message": "免费版最多连接 2 台主机", "used": 2, "limit": 2,
+		})
+		_ = conn.WriteControl(websocket.CloseMessage,
+			websocket.FormatCloseMessage(4008, "host_quota_exceeded"), time.Now().Add(time.Second))
+	}))
+	defer server.Close()
+
+	c := newTestClient(wsURL(server.URL))
+	ctx, cancel := context.WithTimeout(context.Background(), 1800*time.Millisecond)
+	defer cancel()
+	err := c.Run(ctx)
+	if err == nil || !strings.Contains(err.Error(), "context") {
+		t.Fatalf("Run error = %v, want context cancellation after parking", err)
+	}
+	if got := atomic.LoadInt32(&conns); got != 1 {
+		t.Fatalf("connections = %d, want exactly 1 after persistent quota rejection", got)
+	}
+}
+
 // TestReconnectsOnSilentServer is the core liveness test: a server that accepts
 // the connection and reads forever but NEVER replies (no pong, no FIN/RST)
 // simulates a half-open socket. The client must detect the dead link via its

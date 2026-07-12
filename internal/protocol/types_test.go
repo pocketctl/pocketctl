@@ -24,6 +24,45 @@ func TestPermissionConfigJSON(t *testing.T) {
 	}
 }
 
+func TestQuotaGrantProtocolRoundTrip(t *testing.T) {
+	msg := ClientMessage{
+		Type:      "session_create",
+		RequestID: "request-1",
+		QuotaGrant: &QuotaGrant{
+			ReservationID: "reservation-1",
+			ExpiresAt:     1_800_000_000_000,
+			Operation:     "create",
+		},
+	}
+	raw, err := json.Marshal(msg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var decoded ClientMessage
+	if err := json.Unmarshal(raw, &decoded); err != nil {
+		t.Fatal(err)
+	}
+	if decoded.RequestID != "request-1" || decoded.QuotaGrant == nil || decoded.QuotaGrant.ReservationID != "reservation-1" {
+		t.Fatalf("quota grant did not round-trip: %+v", decoded)
+	}
+
+	eventRaw, err := json.Marshal(DaemonEvent{Type: "session_created", RequestID: "request-1", ReservationID: "reservation-1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(eventRaw), `"reservation_id":"reservation-1"`) {
+		t.Fatalf("reservation_id missing from event JSON: %s", eventRaw)
+	}
+
+	registerRaw, err := json.Marshal(RegisterMessage{Type: "register", SupportsQuotaGrant: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(registerRaw), `"supports_quota_grant":true`) {
+		t.Fatalf("quota capability missing from register JSON: %s", registerRaw)
+	}
+}
+
 func TestStatusConstants(t *testing.T) {
 	statuses := []string{
 		StatusRunning,
