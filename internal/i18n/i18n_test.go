@@ -44,6 +44,28 @@ func TestDetect(t *testing.T) {
 	}
 }
 
+func TestCurrentCode(t *testing.T) {
+	t.Cleanup(func() { Set(English) })
+
+	tests := []struct {
+		name string
+		lang Lang
+		want string
+	}{
+		{name: "Chinese", lang: Chinese, want: "zh"},
+		{name: "English", lang: English, want: "en"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			Set(tt.lang)
+			if got := CurrentCode(); got != tt.want {
+				t.Fatalf("CurrentCode() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestT_HitsEnglishTemplate(t *testing.T) {
 	Set(English)
 	got := T("daemon.started", "abc", 123)

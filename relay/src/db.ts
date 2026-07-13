@@ -1,5 +1,6 @@
 import pg from 'pg';
 import { createHash } from 'crypto';
+import type { SupportedLanguage } from './config/language.js';
 const { Pool } = pg;
 
 export interface DBConfig {
@@ -130,6 +131,41 @@ export async function initDB(pool: pg.Pool): Promise<void> {
       display_name VARCHAR(100),
       created_at TIMESTAMPTZ DEFAULT NOW()
     )
+  `);
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS email_outbox (
+      id BIGSERIAL PRIMARY KEY,
+      user_id INT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      email_type VARCHAR(32) NOT NULL CONSTRAINT email_outbox_email_type_check CHECK (email_type = 'welcome'),
+      recipient_email VARCHAR(255) NOT NULL,
+      locale VARCHAR(2) NOT NULL CHECK (locale IN ('zh', 'en')),
+      status VARCHAR(16) NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'processing', 'sent')),
+      attempt_count INT NOT NULL DEFAULT 0,
+      next_attempt_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      locked_at TIMESTAMPTZ,
+      sent_at TIMESTAMPTZ,
+      message_id VARCHAR(255),
+      last_error TEXT,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      UNIQUE (user_id, email_type)
+    );
+    CREATE INDEX IF NOT EXISTS idx_email_outbox_due
+      ON email_outbox (status, next_attempt_at);
+    CREATE INDEX IF NOT EXISTS idx_email_outbox_processing_locked
+      ON email_outbox (locked_at) WHERE status = 'processing';
+  `);
+  await pool.query(`
+    DO $$ BEGIN
+      IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conname = 'email_outbox_email_type_check'
+          AND conrelid = 'email_outbox'::regclass
+      ) THEN
+        ALTER TABLE email_outbox
+          ADD CONSTRAINT email_outbox_email_type_check CHECK (email_type = 'welcome');
+      END IF;
+    END $$
   `);
   // Phase 2: add user_id to sessions and daemons
   await pool.query(`ALTER TABLE sessions ADD COLUMN IF NOT EXISTS user_id INT`);
@@ -949,6 +985,125 @@ export async function reconcileDaemonSessions(pool: pg.Pool, daemonId: string, a
 }
 
 // --- Phase 2: User management ---
+
+export interface User {
+  id: number;
+  email: string;
+  phone?: string | null;
+  display_name?: string | null;
+  plan?: string;
+  created_at?: Date | string;
+}
+
+export interface WelcomeEmailJob {
+  id: string;
+  userId: number;
+  recipientEmail: string;
+  locale: SupportedLanguage;
+  attemptCount: number;
+}
+
+export async function createUserWithWelcomeEmail(
+  pool: pg.Pool,
+  email: string,
+  passwordHash: string,
+  displayName: string | undefined,
+  locale: SupportedLanguage,
+): Promise<User> {
+  const normalizedEmail = email.trim().toLowerCase();
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const result = await client.query<User>(
+      `INSERT INTO users (email, password_hash, display_name) VALUES ($1, $2, $3) RETURNING id, email, phone, display_name, plan, created_at`,
+      [normalizedEmail, passwordHash, displayName || null],
+    );
+    const user = result.rows[0];
+    await client.query(
+      `INSERT INTO email_outbox (user_id, email_type, recipient_email, locale)
+       VALUES ($1, 'welcome', $2, $3)
+       ON CONFLICT (user_id, email_type) DO NOTHING`,
+      [user.id, normalizedEmail, locale],
+    );
+    await client.query('COMMIT');
+    return user;
+  } catch (error) {
+    try {
+      await client.query('ROLLBACK');
+    } catch {
+      // Preserve the transaction failure; rollback is best-effort on a broken connection.
+    }
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
+export async function claimWelcomeEmails(
+  pool: pg.Pool,
+  limit: number,
+  leaseCutoff: Date,
+): Promise<WelcomeEmailJob[]> {
+  const result = await pool.query(
+    `WITH claimable AS (
+       SELECT id
+       FROM email_outbox
+       WHERE email_type = 'welcome'
+         AND (
+           (status = 'pending' AND next_attempt_at <= NOW())
+           OR (status = 'processing' AND locked_at < $2)
+         )
+       ORDER BY next_attempt_at, id
+       FOR UPDATE SKIP LOCKED
+       LIMIT $1
+     )
+     UPDATE email_outbox AS outbox
+     SET status = 'processing',
+         attempt_count = outbox.attempt_count + 1,
+         locked_at = NOW(),
+         updated_at = NOW()
+     FROM claimable
+     WHERE outbox.id = claimable.id
+     RETURNING outbox.id,
+               outbox.user_id AS "userId",
+               outbox.recipient_email AS "recipientEmail",
+               outbox.locale,
+               outbox.attempt_count AS "attemptCount"`,
+    [limit, leaseCutoff],
+  );
+  return result.rows;
+}
+
+export async function markWelcomeEmailSent(
+  pool: pg.Pool,
+  id: string,
+  attemptCount: number,
+  messageId: string,
+): Promise<void> {
+  await pool.query(
+    `UPDATE email_outbox
+     SET status = 'sent', message_id = $3, sent_at = NOW(), locked_at = NULL,
+         last_error = NULL, updated_at = NOW()
+     WHERE id = $1 AND attempt_count = $2 AND status = 'processing'`,
+    [id, attemptCount, messageId],
+  );
+}
+
+export async function rescheduleWelcomeEmail(
+  pool: pg.Pool,
+  id: string,
+  attemptCount: number,
+  nextAttemptAt: Date,
+  error: string,
+): Promise<void> {
+  await pool.query(
+    `UPDATE email_outbox
+     SET status = 'pending', next_attempt_at = $3, last_error = $4,
+         locked_at = NULL, updated_at = NOW()
+     WHERE id = $1 AND attempt_count = $2 AND status = 'processing'`,
+    [id, attemptCount, nextAttemptAt, error.slice(0, 1000)],
+  );
+}
 
 export async function createUser(pool: pg.Pool, email: string, passwordHash: string, displayName?: string): Promise<any> {
   const result = await pool.query(

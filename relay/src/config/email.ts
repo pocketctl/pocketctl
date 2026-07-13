@@ -1,4 +1,5 @@
 import * as tencentcloud from 'tencentcloud-sdk-nodejs-ses';
+import type { SupportedLanguage } from './language.js';
 
 const SesClient = tencentcloud.ses.v20201002.Client;
 
@@ -22,6 +23,43 @@ function getClient() {
   }
   return _client;
 }
+
+type SesSender = {
+  SendEmail(params: any): Promise<{ MessageId?: string; RequestId?: string }>
+}
+
+const WELCOME_FROM_EMAIL = process.env.SES_WELCOME_FROM_EMAIL || 'welcome@mail.pocketctl.me'
+const WELCOME_TEMPLATE_ZH = Number(process.env.SES_WELCOME_TEMPLATE_ZH || '204007')
+const WELCOME_TEMPLATE_EN = Number(process.env.SES_WELCOME_TEMPLATE_EN || '204008')
+const APP_LOGIN_URL = 'https://www.pocketctl.me/app/login'
+
+export function getWelcomeTemplateId(lang: SupportedLanguage): number {
+  return lang === 'zh' ? WELCOME_TEMPLATE_ZH : WELCOME_TEMPLATE_EN
+}
+
+export function createWelcomeEmailSender(client: SesSender) {
+  return async (toEmail: string, lang: SupportedLanguage): Promise<string> => {
+    const templateId = getWelcomeTemplateId(lang)
+    const response = await client.SendEmail({
+      FromEmailAddress: WELCOME_FROM_EMAIL,
+      Destination: [toEmail],
+      Subject: lang === 'zh' ? '欢迎使用 pocketctl' : 'Welcome to pocketctl',
+      ReplyToAddresses: WELCOME_FROM_EMAIL,
+      Template: {
+        TemplateID: templateId,
+        TemplateData: JSON.stringify({ app_url: APP_LOGIN_URL, user_name: toEmail }),
+      },
+    })
+
+    if (!response.MessageId) {
+      throw new Error(`Welcome email send failed: ${response.RequestId || 'missing MessageId'}`)
+    }
+    return response.MessageId
+  }
+}
+
+export const sendWelcomeEmail = (toEmail: string, lang: SupportedLanguage) =>
+  createWelcomeEmailSender(getClient())(toEmail, lang)
 
 /** SES template IDs for verification code emails. Configured in .env. */
 const ZH_TEMPLATE_ID = parseInt(process.env.SES_TEMPLATE_ZH || '187105', 10);

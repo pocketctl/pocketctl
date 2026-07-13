@@ -584,7 +584,7 @@ func loginViaEmail(apiURL string) (string, string, error) {
 	}
 
 	fmt.Print(i18n.T("login.sending_code"))
-	if err := api.SendEmailCode(apiURL, email); err != nil {
+	if err := api.SendEmailCode(apiURL, email, i18n.CurrentCode()); err != nil {
 		return "", "", fmt.Errorf("%s", i18n.T("login.send_failed", err))
 	}
 	fmt.Println(i18n.T("login.code_sent"))
@@ -599,7 +599,7 @@ func loginViaEmail(apiURL string) (string, string, error) {
 	}
 
 	fmt.Print(i18n.T("login.verifying"))
-	return api.VerifyEmailCode(apiURL, email, code)
+	return api.VerifyEmailCode(apiURL, email, code, i18n.CurrentCode())
 }
 
 // ---------- daemon start (continued) ----------

@@ -12,6 +12,7 @@ const localStorageMock = (() => {
 })()
 
 Object.defineProperty(globalThis, 'localStorage', { value: localStorageMock, configurable: true })
+const initialNavigatorLanguage = globalThis.navigator.language
 
 // Ensure window exists (happy-dom may not have it ready at dynamic import time)
 if (!(globalThis as any).window) {
@@ -20,6 +21,14 @@ if (!(globalThis as any).window) {
 
 // Dynamic import after mock is in place
 const { useAuth } = await import('../useAuth')
+const authLocale = (await import('../useLocale')).useLocale().locale
+
+async function useFreshAuthWithNavigator(language: string) {
+  Object.defineProperty(globalThis.navigator, 'language', { value: language, configurable: true })
+  localStorageMock.clear()
+  vi.resetModules()
+  return (await import('../useAuth')).useAuth()
+}
 
 function mockFetchResponse(ok: boolean, data: any) {
   return vi.spyOn(globalThis, 'fetch').mockResolvedValue({
@@ -33,13 +42,49 @@ function mockFetchResponse(ok: boolean, data: any) {
 beforeEach(() => {
   localStorageMock.clear()
   vi.resetAllMocks()
+  const { user, accessToken, refreshToken } = useAuth()
+  user.value = null
+  accessToken.value = ''
+  refreshToken.value = ''
+  authLocale.value = 'zh'
 })
 
 afterEach(() => {
+  Object.defineProperty(globalThis.navigator, 'language', { value: initialNavigatorLanguage, configurable: true })
   vi.restoreAllMocks()
 })
 
 describe('useAuth — Email Verification Code', () => {
+
+  test('loginViaEmail uses navigator-detected Chinese UI locale when storage is missing', async () => {
+    const { loginViaEmail } = await useFreshAuthWithNavigator('zh-CN')
+    const fetchSpy = mockFetchResponse(false, { error: '验证码错误' })
+
+    await loginViaEmail('a@b.com', '123456')
+
+    expect(localStorageMock.getItem('pocketctl-locale')).toBeNull()
+    expect(fetchSpy).toHaveBeenCalledWith(
+      '/api/auth/email/verify',
+      expect.objectContaining({
+        body: JSON.stringify({ email: 'a@b.com', code: '123456', lang: 'zh' }),
+      }),
+    )
+  })
+
+  test('sendEmailCode uses navigator-detected English UI locale when storage is missing', async () => {
+    const { sendEmailCode } = await useFreshAuthWithNavigator('en-US')
+    const fetchSpy = mockFetchResponse(true, { ok: true })
+
+    await sendEmailCode('a@b.com')
+
+    expect(localStorageMock.getItem('pocketctl-locale')).toBeNull()
+    expect(fetchSpy).toHaveBeenCalledWith(
+      '/api/auth/email/send',
+      expect.objectContaining({
+        body: JSON.stringify({ email: 'a@b.com', lang: 'en' }),
+      }),
+    )
+  })
 
   test('#39 sendEmailCode returns null (success) when API responds ok', async () => {
     const { sendEmailCode } = useAuth()
@@ -64,7 +109,8 @@ describe('useAuth — Email Verification Code', () => {
 
   test('#40 loginViaEmail saves tokens on success', async () => {
     const { loginViaEmail, accessToken, user } = useAuth()
-    mockFetchResponse(true, {
+    authLocale.value = 'en'
+    const fetchSpy = mockFetchResponse(true, {
       access_token: 'jwt-123',
       refresh_token: 'refresh-456',
       user: { id: 1, email: 'a@b.com', phone: null, display_name: 'A' },
@@ -73,9 +119,36 @@ describe('useAuth — Email Verification Code', () => {
     expect(err).toBeNull()
     expect(accessToken.value).toBe('jwt-123')
     expect(user.value?.email).toBe('a@b.com')
+    expect(fetchSpy).toHaveBeenCalledWith(
+      '/api/auth/email/verify',
+      expect.objectContaining({
+        body: JSON.stringify({ email: 'a@b.com', code: '123456', lang: 'en' }),
+      }),
+    )
     expect(localStorageMock.setItem).not.toHaveBeenCalledWith('pocketctl_access_token', 'jwt-123')
     expect(localStorageMock.removeItem).toHaveBeenCalledWith('pocketctl_access_token')
     expect(localStorageMock.removeItem).toHaveBeenCalledWith('pocketctl_refresh_token')
+  })
+
+  test('loginViaEmail uses the locale active when verification completes', async () => {
+    const { sendEmailCode, loginViaEmail } = useAuth()
+    const fetchSpy = mockFetchResponse(true, {
+      access_token: 'jwt-123',
+      refresh_token: 'refresh-456',
+      user: { id: 1, email: 'a@b.com', phone: null, display_name: 'A' },
+    })
+
+    authLocale.value = 'zh'
+    await sendEmailCode('a@b.com')
+    authLocale.value = 'en'
+    await loginViaEmail('a@b.com', '123456')
+
+    expect(fetchSpy).toHaveBeenLastCalledWith(
+      '/api/auth/email/verify',
+      expect.objectContaining({
+        body: JSON.stringify({ email: 'a@b.com', code: '123456', lang: 'en' }),
+      }),
+    )
   })
 
   test('#41 loginViaEmail returns error on wrong code', async () => {
