@@ -301,6 +301,15 @@ export function interactivePush(
   };
 }
 
+/** Build a push for OpenCode's structured question flow. */
+export function questionPush(prompt: string, sessionId: string, requestId: string): PushPayload {
+  return {
+    title: 'Agent 需要你的回答',
+    body: truncate(prompt, 80) || '等待你的回答',
+    data: { type: 'question', session_id: sessionId, request_id: requestId },
+  };
+}
+
 /**
  * Extract a human-readable summary from a tool's raw input payload.
  * - Bash: the `command` field

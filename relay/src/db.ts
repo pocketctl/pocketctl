@@ -54,6 +54,8 @@ export async function initDB(pool: pg.Pool): Promise<void> {
   // Migration: add title and source columns to existing sessions table
   await pool.query(`ALTER TABLE sessions ADD COLUMN IF NOT EXISTS title TEXT`);
   await pool.query(`ALTER TABLE sessions ADD COLUMN IF NOT EXISTS source VARCHAR(16) DEFAULT 'daemon'`);
+  // OpenCode's runtime agent (build/plan/...) is independent from agent_type.
+  await pool.query(`ALTER TABLE sessions ADD COLUMN IF NOT EXISTS active_agent VARCHAR(128)`);
   // Migration: add last_activity_at and exit_reason columns
   await pool.query(`ALTER TABLE sessions ADD COLUMN IF NOT EXISTS last_activity_at TIMESTAMPTZ`);
   await pool.query(`ALTER TABLE sessions ADD COLUMN IF NOT EXISTS exit_reason VARCHAR(32)`);
@@ -524,7 +526,7 @@ export async function listSessionsWithChildren(pool: pg.Pool, whereUser?: number
   const userClause = whereUser !== undefined ? 'AND s.user_id = $1' : '';
   if (whereUser !== undefined) baseParams.push(whereUser);
   const result = await pool.query(
-    `SELECT s.session_id, s.daemon_id, s.agent_type, s.cwd, s.title, s.source, s.status,
+    `SELECT s.session_id, s.daemon_id, s.agent_type, s.active_agent, s.cwd, s.title, s.source, s.status,
             s.created_at, s.updated_at, s.last_activity_at, s.exit_reason, s.subagent_count, s.pinned,
             s.model, s.parent_session_id, s.is_subagent, s.root_session_id,
             s.total_tokens, s.tok_input, s.tok_output, s.tok_cache_read, s.tok_cache_create,
@@ -645,7 +647,7 @@ export async function listSessionsPageByDaemon(pool: pg.Pool, opts: {
 
   const queryStartedAt = Date.now();
   const result = await pool.query(
-    `SELECT s.session_id, s.daemon_id, s.agent_type, s.cwd, s.title, s.source, s.status,
+    `SELECT s.session_id, s.daemon_id, s.agent_type, s.active_agent, s.cwd, s.title, s.source, s.status,
             s.created_at, s.updated_at, s.last_activity_at, s.exit_reason, s.subagent_count, s.pinned,
             s.model, s.parent_session_id, s.is_subagent, s.root_session_id,
             s.total_tokens, s.tok_input, s.tok_output, s.tok_cache_read, s.tok_cache_create,
@@ -1523,6 +1525,14 @@ export async function updateSessionCost(pool: pg.Pool, sessionId: string, costUs
  *  upsertSession (which uses COALESCE and cannot overwrite), this writes unconditionally. */
 export async function updateSessionModel(pool: pg.Pool, sessionId: string, model: string): Promise<void> {
   await pool.query(`UPDATE sessions SET model = $1, updated_at = NOW() WHERE session_id = $2`, [model, sessionId]);
+}
+
+/** Persist an OpenCode agent switch only after the daemon confirms it. */
+export async function updateSessionActiveAgent(pool: pg.Pool, sessionId: string, activeAgent: string): Promise<void> {
+  await pool.query(
+    `UPDATE sessions SET active_agent = $1, updated_at = NOW() WHERE session_id = $2`,
+    [activeAgent, sessionId],
+  );
 }
 
 /** Increment session cost by a delta (for per-turn cost accumulation from assistant usage). */

@@ -52,9 +52,10 @@ type OpencodeMessageWithParts struct {
 // message.updated payload. Carries the role + model that the message's parts
 // inherit.
 type OpencodeMessage struct {
-	ID        string `json:"id"`
-	SessionID string `json:"sessionID"`
-	Role      string `json:"role"` // "user" | "assistant"
+	ID        string          `json:"id"`
+	SessionID string          `json:"sessionID"`
+	Role      string          `json:"role"` // "user" | "assistant"
+	Error     json.RawMessage `json:"error,omitempty"`
 	Model     *struct {
 		ProviderID string `json:"providerID"`
 		ModelID    string `json:"modelID"`
@@ -87,6 +88,17 @@ type OpencodePart struct {
 
 	// step-finish
 	Tokens *OpencodeTokens `json:"tokens,omitempty"`
+
+	// retry
+	Attempt int             `json:"attempt,omitempty"`
+	Error   json.RawMessage `json:"error,omitempty"`
+	Time    struct {
+		Created int64 `json:"created"`
+	} `json:"time,omitempty"`
+
+	// compaction
+	Auto     bool `json:"auto,omitempty"`
+	Overflow bool `json:"overflow,omitempty"`
 }
 
 // OpencodeToolState is the tool part's evolving state (pending→running→completed/error).
@@ -145,15 +157,18 @@ func ParseOpencodePart(data []byte) (*OpencodePart, error) {
 // session sync: feed it the latest message+part snapshot each poll and it emits
 // only what's new or changed.
 //
-// Dedup rules (mirror the SSE demux): text/step-finish parts emit once; tool
-// parts re-emit when their status changes (pending/running→completed/error), and
-// a given tool_call is forwarded at most once.
+// Dedup rules (mirror the SSE demux): text/reasoning parts emit revisioned
+// deltas plus one final snapshot; step-finish emits once; tool parts re-emit
+// when their status changes (pending/running→completed/error), and a given
+// tool_call is forwarded at most once.
 type OpencodeSync struct {
-	sessionID  string
-	partState  map[string]string // partID → last emitted marker
-	seenCalls  map[string]bool    // callID → tool_call already emitted
-	emitUser   bool               // whether to emit user_text parts
-	lastStatus string             // last emitted session_status (dedupe)
+	sessionID     string
+	partState     map[string]string // partID → last emitted marker
+	textState     map[string]opencodeTextState
+	messageErrors map[string]string // messageID → last emitted raw error
+	seenCalls     map[string]bool   // callID → tool_call already emitted
+	emitUser      bool              // whether to emit user_text parts
+	lastStatus    string            // last emitted session_status (dedupe)
 
 	// Turn-completion tracking. opencode polls every ~1s and only emits a
 	// session_status on a derived-status change. A fast turn whose entire
@@ -166,15 +181,23 @@ type OpencodeSync struct {
 	seededCompletion bool  // first Diff seeds lastCompletedAt without force-emitting
 }
 
+type opencodeTextState struct {
+	text      string
+	revision  int
+	finalized bool
+}
+
 // NewOpencodeSync creates a differ for a session. emitUser controls whether user
 // message parts produce user_text events (terminal sessions: true, since nothing
 // else surfaces them; owned sessions echo user text on send instead).
 func NewOpencodeSync(sessionID string, emitUser bool) *OpencodeSync {
 	return &OpencodeSync{
-		sessionID: sessionID,
-		partState: make(map[string]string),
-		seenCalls: make(map[string]bool),
-		emitUser:  emitUser,
+		sessionID:     sessionID,
+		partState:     make(map[string]string),
+		textState:     make(map[string]opencodeTextState),
+		messageErrors: make(map[string]string),
+		seenCalls:     make(map[string]bool),
+		emitUser:      emitUser,
 	}
 }
 
@@ -191,11 +214,39 @@ func (s *OpencodeSync) Diff(msgs []OpencodeMessageWithParts) []protocol.DaemonEv
 	for _, m := range ordered {
 		role := m.Info.Role
 		model := m.Info.OpencodeModelDisplay()
+		if strings.EqualFold(role, "assistant") && len(m.Info.Error) > 0 {
+			raw := string(m.Info.Error)
+			if s.messageErrors[m.Info.ID] != raw {
+				s.messageErrors[m.Info.ID] = raw
+				out = append(out, protocol.DaemonEvent{
+					Type:      "error",
+					SessionID: s.sessionID,
+					MessageID: m.Info.ID,
+					Error:     opencodeErrorMessage(m.Info.Error),
+				})
+			}
+		}
 		for i := range m.Parts {
 			part := &m.Parts[i]
+			if part.MessageID == "" {
+				part.MessageID = m.Info.ID
+			}
+			if part.Type == "text" || part.Type == "reasoning" {
+				isFinal := !strings.EqualFold(role, "assistant") || m.Info.Time.Completed > 0
+				if ev, ok := s.diffTextPart(part, role, model, isFinal); ok {
+					if ev.Type != "user_text" || s.emitUser {
+						ev.SessionID = s.sessionID
+						out = append(out, ev)
+					}
+				}
+				continue
+			}
 			marker := "done"
 			if part.Type == "tool" && part.State != nil {
 				marker = part.State.Status
+			} else if part.Type == "retry" || part.Type == "compaction" {
+				encoded, _ := json.Marshal(part)
+				marker = string(encoded)
 			}
 			if s.partState[part.ID] == marker {
 				continue
@@ -249,6 +300,48 @@ func (s *OpencodeSync) Diff(msgs []OpencodeMessageWithParts) []protocol.DaemonEv
 	}
 	s.seededCompletion = true
 	return out
+}
+
+// diffTextPart converts OpenCode's mutable text/reasoning Part snapshots into
+// revisioned append or replace events. A completed assistant message always
+// gets one exact, non-streaming final snapshot even when its text did not change
+// since the preceding poll.
+func (s *OpencodeSync) diffTextPart(p *OpencodePart, role, model string, final bool) (protocol.DaemonEvent, bool) {
+	if strings.TrimSpace(p.Text) == "" || p.ID == "" {
+		return protocol.DaemonEvent{}, false
+	}
+	state, seen := s.textState[p.ID]
+	if seen && state.text == p.Text && (!final || state.finalized) {
+		return protocol.DaemonEvent{}, false
+	}
+
+	state.revision++
+	ev := protocol.DaemonEvent{
+		Type:      "agent_text",
+		Text:      p.Text,
+		Streaming: strings.EqualFold(role, "assistant") && !final,
+		MessageID: p.MessageID,
+		PartID:    p.ID,
+		Revision:  state.revision,
+		Model:     model,
+	}
+	if strings.EqualFold(role, "user") {
+		ev.Type = "user_text"
+	} else if p.Type == "reasoning" {
+		ev.Type = "agent_reasoning"
+	}
+
+	if seen {
+		if final || !strings.HasPrefix(p.Text, state.text) {
+			ev.Replace = true
+		} else {
+			ev.Text = strings.TrimPrefix(p.Text, state.text)
+		}
+	}
+	state.text = p.Text
+	state.finalized = final
+	s.textState[p.ID] = state
+	return ev, true
 }
 
 // latestCompletedAssistant returns the greatest Time.Completed across assistant
@@ -322,6 +415,31 @@ func ConvertOpencodePart(p *OpencodePart, role, model string) []protocol.DaemonE
 		}
 		return []protocol.DaemonEvent{{Type: "agent_text", Text: p.Text, Model: model}}
 
+	case "reasoning":
+		if strings.TrimSpace(p.Text) == "" || !strings.EqualFold(role, "assistant") {
+			return nil
+		}
+		return []protocol.DaemonEvent{{Type: "agent_reasoning", Text: p.Text, Model: model}}
+
+	case "retry":
+		return []protocol.DaemonEvent{{
+			Type:      "agent_retry",
+			MessageID: p.MessageID,
+			PartID:    p.ID,
+			Attempt:   p.Attempt,
+			RetryAt:   p.Time.Created,
+			Error:     opencodeErrorMessage(p.Error),
+		}}
+
+	case "compaction":
+		return []protocol.DaemonEvent{{
+			Type:      "agent_compaction",
+			MessageID: p.MessageID,
+			PartID:    p.ID,
+			Auto:      p.Auto,
+			Overflow:  p.Overflow,
+		}}
+
 	case "tool":
 		if p.State == nil {
 			return nil
@@ -356,7 +474,28 @@ func ConvertOpencodePart(p *OpencodePart, role, model string) []protocol.DaemonE
 		}}
 
 	default:
-		// reasoning / step-start / patch / file — not surfaced.
+		// step-start / patch / file — not surfaced.
 		return nil
 	}
+}
+
+func opencodeErrorMessage(raw json.RawMessage) string {
+	if len(raw) == 0 {
+		return ""
+	}
+	var parsed struct {
+		Name string `json:"name"`
+		Data struct {
+			Message string `json:"message"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(raw, &parsed); err == nil {
+		if parsed.Data.Message != "" {
+			return parsed.Data.Message
+		}
+		if parsed.Name != "" {
+			return parsed.Name
+		}
+	}
+	return string(raw)
 }

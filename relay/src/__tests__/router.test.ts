@@ -274,6 +274,34 @@ describe('Router - event insertion updates last_activity_at', () => {
     expect(activityUpdate).toBeDefined()
     expect(activityUpdate.params).toContain('sess-3')
   })
+
+  test('OpenCode Part revisions are persisted and broadcast unchanged', async () => {
+    const daemonWs = createMockWs()
+    await router.registerDaemon(daemonWs, { type: 'register', daemon_id: 'daemon-1', hostname: 'test', agents: ['opencode'] }, 1)
+    const clientWs = createMockWs()
+    router.registerClient(clientWs, 1)
+    await router.handleClientMessage(clientWs, { type: 'replay', session_id: 'test-sid', last_seq: 0 })
+    clientWs._sent.length = 0
+
+    const reasoning = {
+      type: 'agent_reasoning', session_id: 'test-sid', text: 'checking', streaming: true,
+      message_id: 'msg_1', part_id: 'prt_reason', revision: 2, replace: false,
+    }
+    const replacement = {
+      type: 'agent_text', session_id: 'test-sid', text: 'final answer', streaming: false,
+      message_id: 'msg_1', part_id: 'prt_text', revision: 3, replace: true,
+    }
+
+    router.handleDaemonMessage('daemon-1', reasoning)
+    router.handleDaemonMessage('daemon-1', replacement)
+    await tick()
+
+    expect(clientWs._sent).toContainEqual(reasoning)
+    expect(clientWs._sent).toContainEqual(replacement)
+    const inserts = pool._queries.filter((q: any) => q.sql.includes('INSERT INTO events'))
+    expect(inserts.some((q: any) => q.params[1] === 'agent_reasoning' && q.params[2]?.includes('"part_id":"prt_reason"'))).toBe(true)
+    expect(inserts.some((q: any) => q.params[1] === 'agent_text' && q.params[2]?.includes('"replace":true'))).toBe(true)
+  })
 })
 
 describe('Router - list_sessions includes extended fields', () => {

@@ -145,3 +145,161 @@ func TestOpencodeSync_EmitUserFalse(t *testing.T) {
 		t.Fatalf("expected session_status idle, got %+v", got[1])
 	}
 }
+
+func TestOpencodeSync_TextGrowth(t *testing.T) {
+	s := NewOpencodeSync("ses_growth", false)
+
+	first := s.Diff([]OpencodeMessageWithParts{
+		mkMsg("msg_a", "assistant", "glm-5", 1000, 0,
+			OpencodePart{ID: "prt_text", MessageID: "msg_a", Type: "text", Text: "Hel"}),
+	})
+	if len(first) < 1 || first[0].Type != "agent_text" {
+		t.Fatalf("first snapshot must emit agent_text: %+v", first)
+	}
+	if first[0].Text != "Hel" || !first[0].Streaming || first[0].Replace || first[0].PartID != "prt_text" || first[0].Revision != 1 {
+		t.Fatalf("unexpected initial text event: %+v", first[0])
+	}
+
+	second := s.Diff([]OpencodeMessageWithParts{
+		mkMsg("msg_a", "assistant", "glm-5", 1000, 0,
+			OpencodePart{ID: "prt_text", MessageID: "msg_a", Type: "text", Text: "Hello"}),
+	})
+	if len(second) != 1 {
+		t.Fatalf("growth snapshot should emit one delta, got %+v", second)
+	}
+	if second[0].Text != "lo" || !second[0].Streaming || second[0].Replace || second[0].PartID != "prt_text" || second[0].Revision != 2 {
+		t.Fatalf("prefix growth must be an append delta: %+v", second[0])
+	}
+}
+
+func TestOpencodeSync_TextRevision(t *testing.T) {
+	s := NewOpencodeSync("ses_revision", false)
+	s.Diff([]OpencodeMessageWithParts{
+		mkMsg("msg_a", "assistant", "glm-5", 1000, 0,
+			OpencodePart{ID: "prt_text", MessageID: "msg_a", Type: "text", Text: "Hello"}),
+	})
+
+	got := s.Diff([]OpencodeMessageWithParts{
+		mkMsg("msg_a", "assistant", "glm-5", 1000, 0,
+			OpencodePart{ID: "prt_text", MessageID: "msg_a", Type: "text", Text: "Hallo"}),
+	})
+	if len(got) != 1 {
+		t.Fatalf("revision snapshot should emit one replacement, got %+v", got)
+	}
+	if got[0].Text != "Hallo" || !got[0].Replace || got[0].Revision != 2 {
+		t.Fatalf("non-prefix revision must replace full text: %+v", got[0])
+	}
+}
+
+func TestOpencodeSync_FinalSnapshot(t *testing.T) {
+	s := NewOpencodeSync("ses_final", false)
+	s.Diff([]OpencodeMessageWithParts{
+		mkMsg("msg_a", "assistant", "glm-5", 1000, 0,
+			OpencodePart{ID: "prt_text", MessageID: "msg_a", Type: "text", Text: "Hello"}),
+	})
+
+	got := s.Diff([]OpencodeMessageWithParts{
+		mkMsg("msg_a", "assistant", "glm-5", 1000, 2000,
+			OpencodePart{ID: "prt_text", MessageID: "msg_a", Type: "text", Text: "Hello"}),
+	})
+	if len(got) < 1 {
+		t.Fatal("completion must emit a final text snapshot")
+	}
+	final := got[0]
+	if final.Type != "agent_text" || final.Text != "Hello" || final.Streaming || !final.Replace || final.Revision != 2 {
+		t.Fatalf("completion must emit the exact final snapshot: %+v", final)
+	}
+
+	again := s.Diff([]OpencodeMessageWithParts{
+		mkMsg("msg_a", "assistant", "glm-5", 1000, 2000,
+			OpencodePart{ID: "prt_text", MessageID: "msg_a", Type: "text", Text: "Hello"}),
+	})
+	for _, ev := range again {
+		if ev.Type == "agent_text" {
+			t.Fatalf("unchanged completed snapshot must not repeat final text: %+v", again)
+		}
+	}
+}
+
+func TestOpencodeSync_Reasoning(t *testing.T) {
+	s := NewOpencodeSync("ses_reasoning", false)
+	first := s.Diff([]OpencodeMessageWithParts{
+		mkMsg("msg_a", "assistant", "glm-5", 1000, 0,
+			OpencodePart{ID: "prt_reason", MessageID: "msg_a", Type: "reasoning", Text: "think"}),
+	})
+	if len(first) < 1 || first[0].Type != "agent_reasoning" || first[0].Text != "think" || !first[0].Streaming {
+		t.Fatalf("initial reasoning mapping wrong: %+v", first)
+	}
+
+	growth := s.Diff([]OpencodeMessageWithParts{
+		mkMsg("msg_a", "assistant", "glm-5", 1000, 0,
+			OpencodePart{ID: "prt_reason", MessageID: "msg_a", Type: "reasoning", Text: "thinking"}),
+	})
+	if len(growth) != 1 || growth[0].Text != "ing" || growth[0].Revision != 2 || growth[0].Replace {
+		t.Fatalf("reasoning growth must be an append delta: %+v", growth)
+	}
+
+	final := s.Diff([]OpencodeMessageWithParts{
+		mkMsg("msg_a", "assistant", "glm-5", 1000, 2000,
+			OpencodePart{ID: "prt_reason", MessageID: "msg_a", Type: "reasoning", Text: "thinking"}),
+	})
+	if len(final) < 1 || final[0].Type != "agent_reasoning" || final[0].Text != "thinking" || !final[0].Replace || final[0].Streaming {
+		t.Fatalf("reasoning completion must emit final snapshot: %+v", final)
+	}
+}
+
+func TestOpencodeSync_AssistantError(t *testing.T) {
+	s := NewOpencodeSync("ses_error", false)
+	m := mkMsg("msg_a", "assistant", "glm-5", 1000, 2000)
+	m.Info.Error = []byte(`{"name":"UnknownError","data":{"message":"provider failed"}}`)
+	got := s.Diff([]OpencodeMessageWithParts{m})
+	if len(got) < 1 || got[0].Type != "error" || got[0].Error != "provider failed" || got[0].MessageID != "msg_a" {
+		t.Fatalf("assistant error mapping wrong: %+v", got)
+	}
+	if again := s.Diff([]OpencodeMessageWithParts{m}); again != nil {
+		t.Fatalf("unchanged assistant error must not repeat: %+v", again)
+	}
+
+	m.Info.Error = []byte(`{"name":"APIError","data":{"message":"rate limited","isRetryable":true}}`)
+	changed := s.Diff([]OpencodeMessageWithParts{m})
+	if len(changed) != 1 || changed[0].Error != "rate limited" {
+		t.Fatalf("changed assistant error should emit once: %+v", changed)
+	}
+}
+
+func TestOpencodeSync_Retry(t *testing.T) {
+	s := NewOpencodeSync("ses_retry", false)
+	retry := OpencodePart{
+		ID: "prt_retry", MessageID: "msg_a", Type: "retry", Attempt: 2,
+		Error: []byte(`{"name":"APIError","data":{"message":"rate limited","isRetryable":true}}`),
+	}
+	retry.Time.Created = 1234
+	got := s.Diff([]OpencodeMessageWithParts{
+		mkMsg("msg_a", "assistant", "glm-5", 1000, 0, retry),
+	})
+	if len(got) < 1 || got[0].Type != "agent_retry" || got[0].Attempt != 2 || got[0].RetryAt != 1234 || got[0].Error != "rate limited" {
+		t.Fatalf("retry mapping wrong: %+v", got)
+	}
+	unchanged := s.Diff([]OpencodeMessageWithParts{
+		mkMsg("msg_a", "assistant", "glm-5", 1000, 0, retry),
+	})
+	for _, ev := range unchanged {
+		if ev.Type == "agent_retry" {
+			t.Fatalf("unchanged retry must not repeat: %+v", unchanged)
+		}
+	}
+}
+
+func TestOpencodeSync_Compaction(t *testing.T) {
+	s := NewOpencodeSync("ses_compaction", false)
+	part := OpencodePart{ID: "prt_compact", MessageID: "msg_a", Type: "compaction", Auto: true, Overflow: true}
+	got := s.Diff([]OpencodeMessageWithParts{
+		mkMsg("msg_a", "assistant", "glm-5", 1000, 2000, part),
+	})
+	if len(got) < 1 || got[0].Type != "agent_compaction" || !got[0].Auto || !got[0].Overflow || got[0].PartID != "prt_compact" {
+		t.Fatalf("compaction mapping wrong: %+v", got)
+	}
+	if again := s.Diff([]OpencodeMessageWithParts{mkMsg("msg_a", "assistant", "glm-5", 1000, 2000, part)}); again != nil {
+		t.Fatalf("unchanged compaction must not repeat: %+v", again)
+	}
+}

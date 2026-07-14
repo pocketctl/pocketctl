@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"regexp"
@@ -75,8 +76,8 @@ func (s *OpencodeServer) Start(ctx context.Context) error {
 	cmd := exec.CommandContext(runCtx, s.cliPath, "serve", "--port", "0")
 	// Force edit/bash to "ask" for daemon-driven sessions so this serve emits
 	// permission.asked SSE events, which the coordinator surfaces as approval_request
-	// cards for remote approval (and auto-rejects on timeout so an unattended turn
-	// never hangs forever). OPENCODE_CONFIG_CONTENT merges over the user's config
+	// cards for remote approval. Requests remain pending until an explicit reply;
+	// PocketCtl does not impose an approval timeout. OPENCODE_CONFIG_CONTENT merges over the user's config
 	// (model/provider/etc. preserved); it only affects THIS serve — terminal
 	// `opencode` runs its own server with the user's own config.
 	cmd.Env = append(os.Environ(),
@@ -173,6 +174,84 @@ type OpencodeModelRef struct {
 	Variant    string `json:"variant,omitempty"`
 }
 
+type OpencodeCommand struct {
+	Name        string   `json:"name"`
+	Description string   `json:"description,omitempty"`
+	Agent       string   `json:"agent,omitempty"`
+	Model       string   `json:"model,omitempty"`
+	Source      string   `json:"source,omitempty"`
+	Template    string   `json:"template"`
+	Subtask     bool     `json:"subtask,omitempty"`
+	Hints       []string `json:"hints"`
+}
+
+type OpencodeAgent struct {
+	Name        string
+	Description string
+	Mode        string
+	Native      bool
+	Hidden      bool
+	Color       string
+	Model       string
+	Variant     string
+}
+
+// ListCommands returns OpenCode's directory-scoped command, MCP, and skill
+// entries. The session layer maps these raw records to PocketCtl CommandItems.
+func (s *OpencodeServer) ListCommands(ctx context.Context, directory string) ([]OpencodeCommand, error) {
+	var out []OpencodeCommand
+	if err := s.get(ctx, withDirectory("/command", directory), &out); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// ExecuteCommand runs a known OpenCode slash command. This endpoint may invoke
+// a model, so it deliberately uses the no-timeout client like Prompt.
+func (s *OpencodeServer) ExecuteCommand(ctx context.Context, sessionID, directory, command, arguments string) error {
+	body := map[string]any{"command": command, "arguments": arguments}
+	path := "/session/" + url.PathEscape(sessionID) + "/command"
+	return s.postWith(s.httpLong, ctx, withDirectory(path, directory), body, nil)
+}
+
+// ListAgents returns raw OpenCode Agent definitions. Product filtering (hidden
+// and subagent-only entries) belongs to the session layer.
+func (s *OpencodeServer) ListAgents(ctx context.Context, directory string) ([]OpencodeAgent, error) {
+	var raw []struct {
+		Name        string `json:"name"`
+		Description string `json:"description"`
+		Mode        string `json:"mode"`
+		Native      bool   `json:"native"`
+		Hidden      bool   `json:"hidden"`
+		Color       string `json:"color"`
+		Model       *struct {
+			ProviderID string `json:"providerID"`
+			ModelID    string `json:"modelID"`
+		} `json:"model"`
+		Variant string `json:"variant"`
+	}
+	if err := s.get(ctx, withDirectory("/agent", directory), &raw); err != nil {
+		return nil, err
+	}
+	out := make([]OpencodeAgent, 0, len(raw))
+	for _, item := range raw {
+		agent := OpencodeAgent{
+			Name: item.Name, Description: item.Description, Mode: item.Mode,
+			Native: item.Native, Hidden: item.Hidden, Color: item.Color, Variant: item.Variant,
+		}
+		if item.Model != nil && item.Model.ProviderID != "" && item.Model.ModelID != "" {
+			agent.Model = item.Model.ProviderID + "/" + item.Model.ModelID
+		}
+		out = append(out, agent)
+	}
+	return out, nil
+}
+
+func (s *OpencodeServer) SwitchAgent(ctx context.Context, sessionID, agent string) error {
+	path := "/api/session/" + url.PathEscape(sessionID) + "/agent"
+	return s.post(ctx, path, map[string]any{"agent": agent}, nil)
+}
+
 // CreateSession creates a session and returns its id. model and directory are
 // optional; directory pins the session's working directory (LocationRef).
 func (s *OpencodeServer) CreateSession(ctx context.Context, model *OpencodeModelRef, directory string) (string, error) {
@@ -259,6 +338,7 @@ type SessionInfo struct {
 	ID        string `json:"id"`
 	Title     string `json:"title"`
 	Directory string `json:"directory"`
+	Agent     string `json:"agent"`
 	Time      struct {
 		Created int64 `json:"created"`
 		Updated int64 `json:"updated"`
@@ -274,7 +354,7 @@ func (s *OpencodeServer) GetSession(ctx context.Context, sessionID string) (*Ses
 	var resp struct {
 		Data SessionInfo `json:"data"`
 	}
-	if err := s.get(ctx, "/api/session/"+sessionID, &resp); err != nil {
+	if err := s.get(ctx, "/api/session/"+url.PathEscape(sessionID), &resp); err != nil {
 		return nil, err
 	}
 	return &resp.Data, nil
@@ -334,6 +414,7 @@ func (s *OpencodeServer) ListModels(ctx context.Context) ([]protocol.ModelOption
 //  2. any valid model from the same provider as the config default (keeps the
 //     provider the user has already authenticated);
 //  3. the first available model.
+//
 // Returns "" only when no models are available.
 func (s *OpencodeServer) ResolveDefaultModel(ctx context.Context) string {
 	models, err := s.ListModels(ctx)
@@ -375,7 +456,7 @@ func (s *OpencodeServer) ListSessions(ctx context.Context) ([]OpencodeSessionSum
 // an empty list for DB-backed sessions).
 func (s *OpencodeServer) GetMessages(ctx context.Context, sessionID string) ([]OpencodeMessageWithParts, error) {
 	var out []OpencodeMessageWithParts
-	if err := s.get(ctx, "/session/"+sessionID+"/message", &out); err != nil {
+	if err := s.get(ctx, "/session/"+url.PathEscape(sessionID)+"/message", &out); err != nil {
 		return nil, err
 	}
 	return out, nil
@@ -384,20 +465,95 @@ func (s *OpencodeServer) GetMessages(ctx context.Context, sessionID string) ([]O
 // ReplyPermission answers a tool-approval permission request. decision is one of
 // "once" | "always" | "reject" (the EventPermissionReplied reply enum).
 func (s *OpencodeServer) ReplyPermission(ctx context.Context, sessionID, requestID, decision string) error {
+	return s.ReplyPermissionVersioned(ctx, sessionID, requestID, decision, PermissionVersionV2)
+}
+
+const (
+	PermissionVersionLegacy = "legacy"
+	PermissionVersionV2     = "v2"
+)
+
+func (s *OpencodeServer) ReplyPermissionVersioned(ctx context.Context, sessionID, requestID, decision, version string) error {
 	body := map[string]any{"reply": decision}
-	return s.post(ctx, "/api/session/"+sessionID+"/permission/"+requestID+"/reply", body, nil)
+	if version == PermissionVersionLegacy {
+		return s.post(ctx, "/permission/"+url.PathEscape(requestID)+"/reply", body, nil)
+	}
+	path := "/api/session/" + url.PathEscape(sessionID) + "/permission/" + url.PathEscape(requestID) + "/reply"
+	return s.post(ctx, path, body, nil)
+}
+
+func (s *OpencodeServer) ListPermissions(ctx context.Context) ([]PermissionAsked, error) {
+	var raw []json.RawMessage
+	if err := s.get(ctx, "/permission", &raw); err != nil {
+		return nil, err
+	}
+	out := make([]PermissionAsked, 0, len(raw))
+	for _, item := range raw {
+		if permission, ok := ParsePermissionAsked(item); ok {
+			out = append(out, permission)
+		}
+	}
+	return out, nil
+}
+
+func (s *OpencodeServer) ListPermissionsV2(ctx context.Context, sessionID string) ([]PermissionAsked, error) {
+	var raw []json.RawMessage
+	path := "/api/session/" + url.PathEscape(sessionID) + "/permission"
+	if err := s.get(ctx, path, &raw); err != nil {
+		return nil, err
+	}
+	out := make([]PermissionAsked, 0, len(raw))
+	for _, item := range raw {
+		if permission, ok := ParsePermissionV2Asked(item); ok {
+			out = append(out, permission)
+		}
+	}
+	return out, nil
 }
 
 // ReplyQuestion answers an interactive question. answers is ordered per question;
 // each answer is the list of selected option labels.
 func (s *OpencodeServer) ReplyQuestion(ctx context.Context, sessionID, requestID string, answers [][]string) error {
 	body := map[string]any{"answers": answers}
-	return s.post(ctx, "/api/session/"+sessionID+"/question/"+requestID+"/reply", body, nil)
+	path := "/api/session/" + url.PathEscape(sessionID) + "/question/" + url.PathEscape(requestID) + "/reply"
+	return s.post(ctx, path, body, nil)
 }
 
 // RejectQuestion rejects (dismisses) an interactive question.
 func (s *OpencodeServer) RejectQuestion(ctx context.Context, sessionID, requestID string) error {
-	return s.post(ctx, "/api/session/"+sessionID+"/question/"+requestID+"/reject", map[string]any{}, nil)
+	path := "/api/session/" + url.PathEscape(sessionID) + "/question/" + url.PathEscape(requestID) + "/reject"
+	return s.post(ctx, path, map[string]any{}, nil)
+}
+
+func (s *OpencodeServer) ListQuestions(ctx context.Context) ([]QuestionAsked, error) {
+	var raw []json.RawMessage
+	if err := s.get(ctx, "/question", &raw); err != nil {
+		return nil, err
+	}
+	out := make([]QuestionAsked, 0, len(raw))
+	for _, item := range raw {
+		if question, ok := ParseQuestionAsked(item); ok {
+			question.Version = PermissionVersionLegacy
+			out = append(out, question)
+		}
+	}
+	return out, nil
+}
+
+func (s *OpencodeServer) ListQuestionsV2(ctx context.Context, sessionID string) ([]QuestionAsked, error) {
+	var raw []json.RawMessage
+	path := "/api/session/" + url.PathEscape(sessionID) + "/question"
+	if err := s.get(ctx, path, &raw); err != nil {
+		return nil, err
+	}
+	out := make([]QuestionAsked, 0, len(raw))
+	for _, item := range raw {
+		if question, ok := ParseQuestionAsked(item); ok {
+			question.Version = PermissionVersionV2
+			out = append(out, question)
+		}
+	}
+	return out, nil
 }
 
 // ---- SSE ----
@@ -459,75 +615,210 @@ func (s *OpencodeServer) Events(ctx context.Context) (<-chan SSEEvent, error) {
 	return out, nil
 }
 
-// PermissionAsked is the decoded payload of a "permission.asked" (or
-// "permission.replied") SSE event: enough to surface an approval card and route
-// a reply. ID is the request id used by the reply route
-// (POST /api/session/{sessionID}/permission/{ID}/reply).
+// PermissionAsked is the normalized legacy/v2 OpenCode permission request.
 type PermissionAsked struct {
-	ID        string          // permission/request id
-	SessionID string          // owning session
-	Tool      string          // tool/permission type (e.g. "bash", "edit")
-	Title     string          // human-readable summary, if provided
-	Metadata  json.RawMessage // tool input / details (rendered in the card)
+	ID         string
+	SessionID  string
+	Permission string
+	// Tool is retained as a compatibility alias for existing approval code.
+	Tool          string
+	Title         string
+	Patterns      []string
+	Always        []string
+	Metadata      json.RawMessage
+	ToolMessageID string
+	ToolCallID    string
+	Version       string
 }
 
-// ParsePermissionAsked decodes a permission event's properties. opencode has
-// nested the permission under a few shapes across versions, so we probe both the
-// flat object and a {permission:{...}} wrapper. ok is false unless both a request
-// id and a session id are found.
+type permissionWire struct {
+	ID           string          `json:"id"`
+	RequestID    string          `json:"requestID"`
+	PermissionID string          `json:"permissionID"`
+	SessionID    string          `json:"sessionID"`
+	Permission   string          `json:"permission"`
+	Type         string          `json:"type"`
+	ToolName     string          `json:"toolName"`
+	Title        string          `json:"title"`
+	Patterns     []string        `json:"patterns"`
+	Always       []string        `json:"always"`
+	Metadata     json.RawMessage `json:"metadata"`
+	Tool         struct {
+		MessageID string `json:"messageID"`
+		CallID    string `json:"callID"`
+	} `json:"tool"`
+}
+
 func ParsePermissionAsked(props json.RawMessage) (PermissionAsked, bool) {
-	type perm struct {
+	raw, ok := nestedObject(props, "request", "permission")
+	if !ok {
+		return PermissionAsked{}, false
+	}
+	var wire permissionWire
+	if json.Unmarshal(raw, &wire) != nil {
+		return PermissionAsked{}, false
+	}
+	name := firstNonEmpty(wire.Permission, wire.Type, wire.ToolName)
+	permission := PermissionAsked{
+		ID: firstNonEmpty(wire.ID, wire.RequestID, wire.PermissionID), SessionID: wire.SessionID,
+		Permission: name, Tool: name, Title: wire.Title, Patterns: wire.Patterns,
+		Always: wire.Always, Metadata: wire.Metadata, ToolMessageID: wire.Tool.MessageID,
+		ToolCallID: wire.Tool.CallID, Version: PermissionVersionLegacy,
+	}
+	if permission.ID == "" || permission.SessionID == "" {
+		return PermissionAsked{}, false
+	}
+	return permission, true
+}
+
+func ParsePermissionV2Asked(props json.RawMessage) (PermissionAsked, bool) {
+	raw, ok := nestedObject(props, "request", "permission")
+	if !ok {
+		return PermissionAsked{}, false
+	}
+	var wire struct {
 		ID           string          `json:"id"`
 		RequestID    string          `json:"requestID"`
 		PermissionID string          `json:"permissionID"`
 		SessionID    string          `json:"sessionID"`
-		Type         string          `json:"type"`
-		ToolName     string          `json:"toolName"`
-		Title        string          `json:"title"`
+		Action       string          `json:"action"`
+		Resources    []string        `json:"resources"`
+		Save         []string        `json:"save"`
 		Metadata     json.RawMessage `json:"metadata"`
+		Source       struct {
+			MessageID string `json:"messageID"`
+			CallID    string `json:"callID"`
+		} `json:"source"`
 	}
-	var flat struct {
-		perm
-		Permission json.RawMessage `json:"permission"`
-	}
-	if json.Unmarshal(props, &flat) != nil {
+	if json.Unmarshal(raw, &wire) != nil || firstNonEmpty(wire.ID, wire.RequestID, wire.PermissionID) == "" || wire.SessionID == "" {
 		return PermissionAsked{}, false
 	}
-	merge := func(p perm) PermissionAsked {
-		return PermissionAsked{
-			ID:        firstNonEmpty(p.ID, p.RequestID, p.PermissionID),
-			SessionID: p.SessionID,
-			Tool:      firstNonEmpty(p.Type, p.ToolName),
-			Title:     p.Title,
-			Metadata:  p.Metadata,
+	return PermissionAsked{
+		ID: firstNonEmpty(wire.ID, wire.RequestID, wire.PermissionID), SessionID: wire.SessionID, Permission: wire.Action, Tool: wire.Action,
+		Patterns: wire.Resources, Always: wire.Save, Metadata: wire.Metadata,
+		ToolMessageID: wire.Source.MessageID, ToolCallID: wire.Source.CallID,
+		Version: PermissionVersionV2,
+	}, true
+}
+
+type QuestionAsked struct {
+	ID            string
+	SessionID     string
+	Questions     []protocol.QuestionInfo
+	ToolMessageID string
+	ToolCallID    string
+	Version       string
+}
+
+func ParseQuestionAsked(props json.RawMessage) (QuestionAsked, bool) {
+	raw, ok := nestedObject(props, "request", "question")
+	if !ok {
+		return QuestionAsked{}, false
+	}
+	var wire struct {
+		ID         string                  `json:"id"`
+		RequestID  string                  `json:"requestID"`
+		QuestionID string                  `json:"questionID"`
+		SessionID  string                  `json:"sessionID"`
+		Questions  []protocol.QuestionInfo `json:"questions"`
+		Tool       struct {
+			MessageID string `json:"messageID"`
+			CallID    string `json:"callID"`
+		} `json:"tool"`
+	}
+	if json.Unmarshal(raw, &wire) != nil || firstNonEmpty(wire.ID, wire.RequestID, wire.QuestionID) == "" || wire.SessionID == "" || len(wire.Questions) == 0 {
+		return QuestionAsked{}, false
+	}
+	return QuestionAsked{
+		ID: firstNonEmpty(wire.ID, wire.RequestID, wire.QuestionID), SessionID: wire.SessionID, Questions: wire.Questions,
+		ToolMessageID: wire.Tool.MessageID, ToolCallID: wire.Tool.CallID, Version: PermissionVersionLegacy,
+	}, true
+}
+
+func ParseRequestIdentity(props json.RawMessage) (requestID, sessionID string, ok bool) {
+	raw, valid := nestedObject(props, "request", "permission", "question")
+	if !valid {
+		return "", "", false
+	}
+	var wire struct {
+		ID           string `json:"id"`
+		RequestID    string `json:"requestID"`
+		PermissionID string `json:"permissionID"`
+		QuestionID   string `json:"questionID"`
+		SessionID    string `json:"sessionID"`
+	}
+	if json.Unmarshal(raw, &wire) != nil {
+		return "", "", false
+	}
+	requestID = firstNonEmpty(wire.ID, wire.RequestID, wire.PermissionID, wire.QuestionID)
+	return requestID, wire.SessionID, requestID != "" && wire.SessionID != ""
+}
+
+// ParsePermissionResolution preserves the decision carried by an out-of-band
+// permission.replied event so other PocketCtl clients do not mistake every
+// remote resolution for a rejection. OpenCode versions have used response,
+// reply, and action for the same enum, so accept all three shapes.
+func ParsePermissionResolution(props json.RawMessage) (requestID, sessionID, action string, ok bool) {
+	raw, valid := nestedObject(props, "request", "permission")
+	if !valid {
+		return "", "", "", false
+	}
+	var wire struct {
+		ID           string `json:"id"`
+		RequestID    string `json:"requestID"`
+		PermissionID string `json:"permissionID"`
+		SessionID    string `json:"sessionID"`
+		Response     string `json:"response"`
+		Reply        string `json:"reply"`
+		Action       string `json:"action"`
+	}
+	if json.Unmarshal(raw, &wire) != nil {
+		return "", "", "", false
+	}
+	requestID = firstNonEmpty(wire.ID, wire.RequestID, wire.PermissionID)
+	action = firstNonEmpty(wire.Response, wire.Reply, wire.Action)
+	switch action {
+	case "allow":
+		action = "once"
+	case "deny":
+		action = "reject"
+	}
+	return requestID, wire.SessionID, action, requestID != "" && wire.SessionID != "" && protocol.ValidApprovalAction(action)
+}
+
+// ParseQuestionResolution keeps ordered answers when a different OpenCode
+// client answered the request. Rejected events commonly omit answers.
+func ParseQuestionResolution(props json.RawMessage) (requestID, sessionID string, answers [][]string, ok bool) {
+	raw, valid := nestedObject(props, "request", "question")
+	if !valid {
+		return "", "", nil, false
+	}
+	var wire struct {
+		ID         string     `json:"id"`
+		RequestID  string     `json:"requestID"`
+		QuestionID string     `json:"questionID"`
+		SessionID  string     `json:"sessionID"`
+		Answers    [][]string `json:"answers"`
+	}
+	if json.Unmarshal(raw, &wire) != nil {
+		return "", "", nil, false
+	}
+	requestID = firstNonEmpty(wire.ID, wire.RequestID, wire.QuestionID)
+	return requestID, wire.SessionID, wire.Answers, requestID != "" && wire.SessionID != ""
+}
+
+func nestedObject(props json.RawMessage, keys ...string) (json.RawMessage, bool) {
+	var envelope map[string]json.RawMessage
+	if json.Unmarshal(props, &envelope) != nil {
+		return nil, false
+	}
+	for _, key := range keys {
+		raw := envelope[key]
+		if len(raw) > 0 && raw[0] == '{' {
+			return raw, true
 		}
 	}
-	pa := merge(flat.perm)
-	if (pa.ID == "" || pa.SessionID == "") && len(flat.Permission) > 0 {
-		var inner perm
-		if json.Unmarshal(flat.Permission, &inner) == nil {
-			nested := merge(inner)
-			if pa.ID == "" {
-				pa.ID = nested.ID
-			}
-			if pa.SessionID == "" {
-				pa.SessionID = nested.SessionID
-			}
-			if pa.Tool == "" {
-				pa.Tool = nested.Tool
-			}
-			if pa.Title == "" {
-				pa.Title = nested.Title
-			}
-			if len(pa.Metadata) == 0 {
-				pa.Metadata = nested.Metadata
-			}
-		}
-	}
-	if pa.ID == "" || pa.SessionID == "" {
-		return PermissionAsked{}, false
-	}
-	return pa, true
+	return props, true
 }
 
 func firstNonEmpty(vals ...string) string {
@@ -540,6 +831,15 @@ func firstNonEmpty(vals ...string) string {
 }
 
 // ---- HTTP helpers ----
+
+func withDirectory(path, directory string) string {
+	if directory == "" {
+		return path
+	}
+	values := url.Values{}
+	values.Set("directory", directory)
+	return path + "?" + values.Encode()
+}
 
 func (s *OpencodeServer) auth(req *http.Request) {
 	// opencode basic auth: username defaults to "opencode", password is the token.

@@ -67,6 +67,7 @@ func TestStatusConstants(t *testing.T) {
 	statuses := []string{
 		StatusRunning,
 		StatusWaitingApproval,
+		StatusWaitingQuestion,
 		StatusIdle,
 		StatusExited,
 		StatusDisconnected,
@@ -92,8 +93,8 @@ func TestStatusConstants(t *testing.T) {
 		seen[s] = true
 	}
 
-	if len(statuses) != 8 {
-		t.Errorf("expected 8 status constants, got %d", len(statuses))
+	if len(statuses) != 9 {
+		t.Errorf("expected 9 status constants, got %d", len(statuses))
 	}
 }
 

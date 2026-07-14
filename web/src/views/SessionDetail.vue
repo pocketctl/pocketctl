@@ -172,6 +172,12 @@
             :streaming="msg.streaming"
           />
 
+          <!-- OpenCode reasoning is intentionally collapsed by default. -->
+          <details v-else-if="msg.type === 'agent_reasoning'" class="reasoning-block">
+            <summary>{{ t('session.opencode_reasoning') }}</summary>
+            <div class="reasoning-content">{{ msg.content }}</div>
+          </details>
+
           <!-- AskUserQuestion (question card, not a tool card) -->
           <QuestionCard
             v-if="msg.type === 'tool_call' && msg.tool === 'AskUserQuestion'"
@@ -205,11 +211,32 @@
           <!-- Error message (full-width block) -->
           <MessageError v-else-if="msg.type === 'error'" :content="msg.content || msg.error" />
 
+          <div v-else-if="msg.type === 'agent_retry'" class="opencode-notice">
+            {{ t('session.opencode_retry', { n: msg.attempt || 1 }) }}<span v-if="msg.error"> · {{ msg.error }}</span>
+          </div>
+          <div v-else-if="msg.type === 'agent_compaction'" class="opencode-notice">
+            {{ t(msg.auto ? 'session.opencode_compaction_auto' : 'session.opencode_compaction') }}<span v-if="msg.overflow"> · {{ t('session.opencode_compaction_overflow') }}</span>
+          </div>
+
           <!-- Command execution receipt -->
           <CommandReceiptCard v-else-if="msg.type === 'command_receipt'" :command="msg.command" :status="msg.receiptStatus" :message="msg.message" />
 
           <!-- Tool-use approval request (non-bypass sessions) -->
-          <ApprovalCard v-else-if="msg.type === 'approval_request'" :message="msg" @respond="onApprovalRespond" />
+          <ApprovalCard
+            v-else-if="msg.type === 'approval_request'"
+            :message="msg"
+            :supports-actions="interactionCapabilities.includes('permission_actions')"
+            :disabled="isDisconnected"
+            @respond="onApprovalRespond"
+          />
+
+          <OpenCodeQuestionCard
+            v-else-if="msg.type === 'question_request'"
+            :message="msg"
+            :disabled="isDisconnected"
+            @submit="onQuestionSubmit"
+            @reject="onQuestionReject"
+          />
 
           <!-- PTY selection menu (host-hook confirmation, TUI prompt, etc.) -->
           <InteractiveChoiceCard v-else-if="msg.type === 'interactive_prompt'" :message="msg" @respond="onChoiceRespond" />
@@ -302,6 +329,17 @@
 
               <!-- Session metadata: model + context usage -->
               <div class="input-meta">
+                <SessionAgentPicker
+                  v-if="showSessionAgentPicker"
+                  :agents="sessionAgents"
+                  :current-agent="currentOpenCodeAgent"
+                  :loading="sessionAgentsLoading"
+                  :error="sessionAgentError"
+                  :disabled="sessionAgentDisabled"
+                  :submitting="sessionAgentSubmitting"
+                  @select="requestSessionAgentSwitch"
+                  @retry="requestSessionAgents"
+                />
                 <!-- Current model (resolved from session_meta) -->
                 <span v-if="currentModel" class="model-pill" :title="t('session.current_model')">
                   <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M12 1v6M12 17v6M4.22 4.22l4.24 4.24M15.54 15.54l4.24 4.24M1 12h6M17 12h6M4.22 19.78l4.24-4.24M15.54 8.46l4.24-4.24"/></svg>
@@ -371,9 +409,11 @@ import NewSessionDialog from '../components/NewSessionDialog.vue'
 import { useWebSocket } from '../composables/useWebSocket'
 import { formatRelativeTime } from '../composables/useRelativeTime'
 import { mergeLocalCommands, POCKETCTL_LOCAL_COMMANDS } from '../utils/commands'
+import { mergeRevisionedPart } from '../utils/opencodePartMerge'
 import SessionActions from '../components/SessionActions.vue'
 import AgentBadge from '../components/AgentBadge.vue'
 import CommandPopover from '../components/CommandPopover.vue'
+import SessionAgentPicker from '../components/SessionAgentPicker.vue'
 import CommandReceiptCard from '../components/CommandReceiptCard.vue'
 import CommandHelpModal from '../components/CommandHelpModal.vue'
 import MessageUser from '../components/messages/MessageUser.vue'
@@ -383,6 +423,7 @@ import { useLocale } from '../composables/useLocale'
 import ToolCallCard from '../components/messages/ToolCallCard.vue'
 import QuestionCard from '../components/messages/QuestionCard.vue'
 import ApprovalCard from '../components/messages/ApprovalCard.vue'
+import OpenCodeQuestionCard from '../components/messages/OpenCodeQuestionCard.vue'
 import InteractiveChoiceCard from '../components/messages/InteractiveChoiceCard.vue'
 import DiffCard from '../components/messages/DiffCard.vue'
 import SubAgentFoldGroup from '../components/messages/SubAgentFoldGroup.vue'
@@ -392,6 +433,7 @@ import { formatToolInput } from '../utils/toolDisplay'
 import { isDiffTool } from '../utils/diffRender'
 import { useSessionRename } from '../composables/useSessionRename'
 import type { CommandItem } from '../composables/useWebSocket'
+import { normalizeSessionAgents, resolveInteractionRequest, sessionAgentSwitchDisabled, shouldShowSessionAgentPicker, upsertInteractionRequest, type SessionAgentOption } from '../types/opencode-interactions'
 import { expandCodexPreset, permissionOptions, permissionTitleKey, type AgentType, type ClaudeMode, type PermissionConfig } from '../types/permission'
 
 const { renamingId, renameInput, startRename, commitRename, cancelRename } = useSessionRename()
@@ -412,6 +454,12 @@ const messageInput = ref('')
 const commandsCache = ref<CommandItem[]>([])
 const currentModel = ref('')            // resolved model name from session_meta event
 const currentEffort = ref('')           // thinking-effort level from session_meta (low/medium/high/xhigh/max/ultracode)
+const interactionCapabilities = ref<string[]>([])
+const sessionAgents = ref<SessionAgentOption[]>([])
+const currentOpenCodeAgent = ref('')
+const sessionAgentsLoading = ref(false)
+const sessionAgentError = ref('')
+const sessionAgentSubmitting = ref(false)
 const showHelpModal = ref(false)        // /help local command → full-screen modal
 const replayReqId = ref(0)
 const isLoading = ref(false)
@@ -565,6 +613,17 @@ const isSubagent = computed(() => !!allSessions.value.find((s: any) => s.session
 // query (set when clicking a child row in any list); the authoritative
 // title/agentType/token/status come from session_list's children[].
 const focusedSubAgentId = computed(() => (route.query.subagent as string) || '')
+const showSessionAgentPicker = computed(() => shouldShowSessionAgentPicker(
+  currentSessionAgent.value,
+  interactionCapabilities.value,
+  isSubagent.value,
+  !!focusedSubAgentId.value,
+))
+const sessionAgentDisabled = computed(() => sessionAgentSwitchDisabled(
+  status.value,
+  isDisconnected.value,
+  sessionAgentSubmitting.value,
+))
 const focusedSubAgentInfo = computed(() => {
   if (!focusedSubAgentId.value) return null
   const p = allSessions.value.find((s: any) => s.session_id === sessionId.value)
@@ -860,6 +919,47 @@ function scrollToBottom() {
   if (messagesEl.value) { messagesEl.value.scrollTop = messagesEl.value.scrollHeight; autoScroll.value = true }
 }
 
+let sessionAgentListTimer: ReturnType<typeof setTimeout> | null = null
+let sessionAgentSwitchTimer: ReturnType<typeof setTimeout> | null = null
+function requestSessionAgents() {
+  if (!showSessionAgentPicker.value || sessionAgentsLoading.value) return
+  sessionAgentsLoading.value = true
+  sessionAgentError.value = ''
+  const sent = send({ type: 'list_session_agents', session_id: sessionId.value })
+  if (!sent) {
+    sessionAgentsLoading.value = false
+    sessionAgentError.value = 'Agent list unavailable'
+    return
+  }
+  if (sessionAgentListTimer) clearTimeout(sessionAgentListTimer)
+  sessionAgentListTimer = setTimeout(() => {
+    sessionAgentsLoading.value = false
+    sessionAgentError.value = 'Agent list unavailable'
+  }, 10000)
+}
+
+function requestSessionAgentSwitch(name: string) {
+  if (!name || name === currentOpenCodeAgent.value || sessionAgentDisabled.value) return
+  sessionAgentSubmitting.value = true
+  sessionAgentError.value = ''
+  const sent = send({
+    type: 'set_session_agent',
+    session_id: sessionId.value,
+    agent_name: name,
+    request_id: `agent-${Date.now()}`,
+  })
+  if (!sent) {
+    sessionAgentSubmitting.value = false
+    sessionAgentError.value = 'Agent switch failed'
+    return
+  }
+  if (sessionAgentSwitchTimer) clearTimeout(sessionAgentSwitchTimer)
+  sessionAgentSwitchTimer = setTimeout(() => {
+    sessionAgentSubmitting.value = false
+    sessionAgentError.value = 'Agent switch failed'
+  }, 15000)
+}
+
 // Unified history loader: clears local message state and requests the first
 // backward page. In focused-sub-agent mode it sends `replay_subagent` (relay
 // filters events by agent_id); otherwise the regular parent-session `replay`.
@@ -989,14 +1089,63 @@ const LOCAL_COMMANDS = POCKETCTL_LOCAL_COMMANDS.map(command => command.name)
 // Send a tool-use approval decision back to the daemon. The ApprovalCard
 // already flipped its local status optimistically; here we just dispatch the
 // approval_response command, which the relay forwards to the owning daemon.
-function onApprovalRespond(msg: any, approved: boolean) {
+const interactionSubmitTimers = new Map<string, ReturnType<typeof setTimeout>>()
+const interactionResolutions = new Map<string, { type: 'approval_request' | 'question_request'; resolution: Record<string, unknown> }>()
+function markInteractionSubmitting(msg: any, operation: string): boolean {
+  if (!msg.request_id || msg.submitting) return false
+  msg.submitting = true
+  msg.error = ''
+  const prior = interactionSubmitTimers.get(msg.request_id)
+  if (prior) clearTimeout(prior)
+  interactionSubmitTimers.set(msg.request_id, setTimeout(() => {
+    msg.submitting = false
+    msg.error = `${operation} timed out`
+    interactionSubmitTimers.delete(msg.request_id)
+  }, 15000))
+  return true
+}
+
+function clearInteractionSubmitting(requestId: string) {
+  const timer = interactionSubmitTimers.get(requestId)
+  if (timer) clearTimeout(timer)
+  interactionSubmitTimers.delete(requestId)
+}
+
+function onApprovalRespond(msg: any, action: 'once' | 'always' | 'reject') {
   if (!msg.request_id) return
-  send({
+  if (!markInteractionSubmitting(msg, 'Approval')) return
+  const supportsActions = interactionCapabilities.value.includes('permission_actions')
+  const sent = send({
     type: 'approval_response',
     session_id: sessionId.value,
     request_id: msg.request_id,
-    approved,
+    ...(supportsActions ? { action } : { approved: action !== 'reject' }),
   })
+  if (!sent) {
+    clearInteractionSubmitting(msg.request_id)
+    msg.submitting = false
+    msg.error = 'Approval failed'
+  }
+}
+
+function onQuestionSubmit(msg: any, answers: string[][]) {
+  if (!markInteractionSubmitting(msg, 'Question response')) return
+  const sent = send({ type: 'question_response', session_id: sessionId.value, request_id: msg.request_id, answers })
+  if (!sent) {
+    clearInteractionSubmitting(msg.request_id)
+    msg.submitting = false
+    msg.error = 'Question response failed'
+  }
+}
+
+function onQuestionReject(msg: any) {
+  if (!markInteractionSubmitting(msg, 'Question rejection')) return
+  const sent = send({ type: 'question_reject', session_id: sessionId.value, request_id: msg.request_id })
+  if (!sent) {
+    clearInteractionSubmitting(msg.request_id)
+    msg.submitting = false
+    msg.error = 'Question rejection failed'
+  }
 }
 
 // Send the user's menu choice back to the daemon. The InteractiveChoiceCard
@@ -1318,6 +1467,16 @@ function processEvent(evt: any, target: any[] = messages.value, subagentOverride
       }
       return
     }
+    const merged = mergeRevisionedPart(target, {
+      type: 'agent_text', text: content,
+      message_id: evt.message_id || evt.payload?.message_id,
+      part_id: evt.part_id || evt.payload?.part_id,
+      revision: evt.revision || evt.payload?.revision,
+      replace: evt.replace ?? evt.payload?.replace,
+      streaming: evt.streaming ?? evt.payload?.streaming ?? false,
+      usage,
+    })
+    if (merged !== 'legacy') return
     if (isDuplicate('agent_text', content, target)) return
     const streaming = evt.streaming ?? evt.payload?.streaming ?? false
     const last = target[target.length - 1]
@@ -1328,6 +1487,37 @@ function processEvent(evt: any, target: any[] = messages.value, subagentOverride
     } else {
       target.push({ id: nextId('a'), type: 'agent_text', role: 'agent', content, streaming, usage })
     }
+  } else if (type === 'agent_reasoning') {
+    const content = evt.text || evt.content || evt.payload?.text || evt.payload?.content || ''
+    if (!content) return
+    const merged = mergeRevisionedPart(target, {
+      type: 'agent_reasoning', text: content,
+      message_id: evt.message_id || evt.payload?.message_id,
+      part_id: evt.part_id || evt.payload?.part_id,
+      revision: evt.revision || evt.payload?.revision,
+      replace: evt.replace ?? evt.payload?.replace,
+      streaming: evt.streaming ?? evt.payload?.streaming ?? false,
+    })
+    if (merged === 'legacy' && !isDuplicate('agent_reasoning', content, target)) {
+      target.push({ id: nextId('or'), type: 'agent_reasoning', role: 'agent', content, streaming: false })
+    }
+  } else if (type === 'agent_retry') {
+    const partId = evt.part_id || evt.payload?.part_id
+    if (partId && target.some((m: any) => m.type === 'agent_retry' && m.partId === partId)) return
+    target.push({
+      id: nextId('or'), type: 'agent_retry', role: 'agent', partId,
+      attempt: evt.attempt || evt.payload?.attempt || 1,
+      error: evt.error || evt.payload?.error || '',
+      retryAt: evt.retry_at || evt.payload?.retry_at,
+    })
+  } else if (type === 'agent_compaction') {
+    const partId = evt.part_id || evt.payload?.part_id
+    if (partId && target.some((m: any) => m.type === 'agent_compaction' && m.partId === partId)) return
+    target.push({
+      id: nextId('oc'), type: 'agent_compaction', role: 'agent', partId,
+      auto: evt.auto ?? evt.payload?.auto ?? false,
+      overflow: evt.overflow ?? evt.payload?.overflow ?? false,
+    })
   } else if (type === 'tool_call') {
     const callId = evt.call_id || evt.payload?.call_id
     if (!callId) return
@@ -1386,33 +1576,61 @@ function processEvent(evt: any, target: any[] = messages.value, subagentOverride
       message: evt.message || '',
     })
   } else if (type === 'approval_request') {
-    // Daemon surfaced a PreToolUse approval (non-bypass session). Render an
-    // inline Yes/No card; the user's answer is sent back via approval_response.
     const requestId = evt.request_id || evt.payload?.request_id
     if (!requestId) return
     const tool = evt.tool || evt.payload?.tool || ''
     const input = evt.input || evt.payload?.input
-    target.push({
+    const requestTarget = target !== messages.value && messages.value.some((message: any) => message.type === 'approval_request' && message.request_id === requestId)
+      ? messages.value : target
+    upsertInteractionRequest(requestTarget, 'approval_request', requestId, {
       id: nextId('ap'), type: 'approval_request', request_id: requestId,
       call_id: evt.call_id || evt.payload?.call_id,
       tool, input, inputDesc: formatToolInput(tool, input),
-      status: 'pending',
+      permissionName: evt.permission_name || evt.payload?.permission_name || '',
+      patterns: evt.patterns || evt.payload?.patterns || [],
+      always: evt.always || evt.payload?.always || [],
+      metadata: evt.metadata || evt.payload?.metadata,
+      toolMessageId: evt.tool_message_id || evt.payload?.tool_message_id,
+      toolCallId: evt.tool_call_id || evt.payload?.tool_call_id,
+      permissionVersion: evt.permission_version || evt.payload?.permission_version,
     })
+    const knownResolution = interactionResolutions.get(requestId)
+    if (knownResolution?.type === 'approval_request') resolveInteractionRequest(requestTarget, 'approval_request', requestId, knownResolution.resolution)
   } else if (type === 'approval_resolved') {
-    // The pending approval was answered ELSEWHERE — the user typed [y/n] in the
-    // terminal that owns this session. Flip the matching card out of 'pending'
-    // so its buttons disappear and it shows the terminal-side result, instead of
-    // lingering as a stale, re-answerable prompt on this device.
     const requestId = evt.request_id || evt.payload?.request_id
     if (!requestId) return
     const approved = evt.approved ?? evt.payload?.approved
-    for (let i = target.length - 1; i >= 0; i--) {
-      const m = target[i] as any
-      if (m.type === 'approval_request' && m.request_id === requestId && m.status === 'pending') {
-        m.status = approved ? 'allowed' : 'denied'
-        break
-      }
+    const action = evt.action || evt.payload?.action || (approved ? 'once' : 'reject')
+    interactionResolutions.set(requestId, { type: 'approval_request', resolution: { action } })
+    resolveInteractionRequest(target, 'approval_request', requestId, { action })
+    if (target !== messages.value) resolveInteractionRequest(messages.value, 'approval_request', requestId, { action })
+    clearInteractionSubmitting(requestId)
+  } else if (type === 'question_request') {
+    const requestId = evt.request_id || evt.payload?.request_id
+    if (!requestId) return
+    const questions = evt.questions || evt.payload?.questions
+    if (!Array.isArray(questions) || questions.length === 0) return
+    const requestTarget = target !== messages.value && messages.value.some((message: any) => message.type === 'question_request' && message.request_id === requestId)
+      ? messages.value : target
+    upsertInteractionRequest(requestTarget, 'question_request', requestId, {
+      id: nextId('oq'),
+      questions,
+      toolMessageId: evt.tool_message_id || evt.payload?.tool_message_id,
+      toolCallId: evt.tool_call_id || evt.payload?.tool_call_id,
+    })
+    const knownResolution = interactionResolutions.get(requestId)
+    if (knownResolution?.type === 'question_request') resolveInteractionRequest(requestTarget, 'question_request', requestId, knownResolution.resolution)
+  } else if (type === 'question_resolved') {
+    const requestId = evt.request_id || evt.payload?.request_id
+    if (!requestId) return
+    const resolution = {
+      answers: evt.answers || evt.payload?.answers || [],
+      rejected: !!(evt.rejected ?? evt.payload?.rejected),
     }
+    interactionResolutions.set(requestId, { type: 'question_request', resolution })
+    resolveInteractionRequest(target, 'question_request', requestId, resolution)
+    if (target !== messages.value) resolveInteractionRequest(messages.value, 'question_request', requestId, resolution)
+    clearInteractionSubmitting(requestId)
   } else if (type === 'interactive_prompt') {
     // Daemon scanned a selection menu the agent's TUI drew to the PTY (e.g. a
     // host PreToolUse hook's "Do you want to proceed? ❶Yes ❷No" prompt that
@@ -1446,6 +1664,9 @@ const loadKey = computed(() => sessionId.value + '::' + (route.query.subagent as
 watch(loadKey, (newKey, oldKey) => {
   if (newKey && newKey !== oldKey) {
     clearAllToolTimeouts()   // reset tool timeout guards on session switch
+    for (const timer of interactionSubmitTimers.values()) clearTimeout(timer)
+    interactionSubmitTimers.clear()
+    interactionResolutions.clear()
     pendingToolResults.clear() // discard buffered out-of-order results
     // Gate the turn-timer watch: the placeholder status='running' below must
     // not start the timer from zero. The real turn start (if executing) is
@@ -1467,6 +1688,14 @@ watch(loadKey, (newKey, oldKey) => {
     commandsCache.value = []
     currentModel.value = '' // clear; refilled by get_session_meta below
     currentEffort.value = '' // clear; refilled by authoritative get_session_meta
+    interactionCapabilities.value = []
+    sessionAgents.value = []
+    currentOpenCodeAgent.value = ''
+    sessionAgentsLoading.value = false
+    sessionAgentError.value = ''
+    sessionAgentSubmitting.value = false
+    if (sessionAgentListTimer) { clearTimeout(sessionAgentListTimer); sessionAgentListTimer = null }
+    if (sessionAgentSwitchTimer) { clearTimeout(sessionAgentSwitchTimer); sessionAgentSwitchTimer = null }
     loadHistory()
   }
 })
@@ -1487,6 +1716,7 @@ onMounted(() => {
     allSessions.value = msg.sessions || []
     // P1a: populate childrenToken from current session's children
     const cur = msg.sessions?.find((s: any) => s.session_id === sessionId.value)
+    if (cur?.active_agent && !currentOpenCodeAgent.value) currentOpenCodeAgent.value = cur.active_agent
     if (cur?.children) {
       for (const c of cur.children) {
         childrenToken.value[c.agentId] = { tokenIn: c.tokenIn || 0, tokenOut: c.tokenOut || 0, tokenCache: c.tokenCache || 0, tokenCacheCreate: c.tokenCacheCreate || 0 }
@@ -1552,6 +1782,22 @@ onMounted(() => {
     if (msg.session_id !== sessionId.value) return // discard stale responses from other sessions
     commandsCache.value = msg.commands || []
   }))
+  cleanups.push(onEvent('session_agent_list', (msg: any) => {
+    if (msg.session_id !== sessionId.value) return
+    sessionAgents.value = normalizeSessionAgents(msg.agents)
+    sessionAgentsLoading.value = false
+    sessionAgentError.value = ''
+    if (sessionAgentListTimer) { clearTimeout(sessionAgentListTimer); sessionAgentListTimer = null }
+  }))
+  cleanups.push(onEvent('session_agent_changed', (msg: any) => {
+    if (msg.session_id !== sessionId.value || !msg.current_agent) return
+    currentOpenCodeAgent.value = msg.current_agent
+    sessionAgentSubmitting.value = false
+    sessionAgentError.value = ''
+    if (sessionAgentSwitchTimer) { clearTimeout(sessionAgentSwitchTimer); sessionAgentSwitchTimer = null }
+    const session = allSessions.value.find((item: any) => item.session_id === sessionId.value)
+    if (session) session.active_agent = msg.current_agent
+  }))
   cleanups.push(onEvent('command_receipt', (msg: any) => {
     if (msg.session_id !== sessionId.value) return
     processEvent(msg)
@@ -1563,11 +1809,14 @@ onMounted(() => {
     if (msg.session_id !== sessionId.value) return
     if (msg.model) currentModel.value = msg.model
     if (msg.effort) currentEffort.value = msg.effort
+    interactionCapabilities.value = Array.isArray(msg.capabilities) ? msg.capabilities : []
+    if (msg.current_agent) currentOpenCodeAgent.value = msg.current_agent
     currentPermission.value = msg.permission
     permissionMutable.value = !!msg.permission_mutable
     permissionMutableModes.value = msg.permission_mutable_modes || []
     pendingPermission.value = undefined
     if (permissionTimer) { clearTimeout(permissionTimer); permissionTimer = null }
+    if (showSessionAgentPicker.value && sessionAgents.value.length === 0) requestSessionAgents()
   }))
 
   // session_model_changed: the daemon detected a /model switch mid-session
@@ -1679,6 +1928,14 @@ onMounted(() => {
     nextTick(scrollToBottom)
   }))
 
+  for (const eventType of ['agent_reasoning', 'agent_retry', 'agent_compaction']) {
+    cleanups.push(onEvent(eventType, (msg: any) => {
+      if (msg.session_id !== sessionId.value) return
+      processEvent(msg)
+      nextTick(scrollToBottom)
+    }))
+  }
+
   cleanups.push(onEvent('tool_call', (msg: any) => {
     if (msg.session_id !== sessionId.value) return
     processEvent(msg)
@@ -1706,6 +1963,15 @@ onMounted(() => {
     nextTick(scrollToBottom)
   }))
   cleanups.push(onEvent('approval_resolved', (msg: any) => {
+    if (msg.session_id !== sessionId.value) return
+    processEvent(msg)
+  }))
+  cleanups.push(onEvent('question_request', (msg: any) => {
+    if (msg.session_id !== sessionId.value) return
+    processEvent(msg)
+    nextTick(scrollToBottom)
+  }))
+  cleanups.push(onEvent('question_resolved', (msg: any) => {
     if (msg.session_id !== sessionId.value) return
     processEvent(msg)
   }))
@@ -1781,6 +2047,24 @@ onMounted(() => {
 
   cleanups.push(onEvent('error', (msg: any) => {
     if (msg.session_id && msg.session_id !== sessionId.value) return
+    if (['approval_response', 'question_response', 'question_reject'].includes(msg.operation) && msg.request_id) {
+      clearInteractionSubmitting(msg.request_id)
+      const type = msg.operation === 'approval_response' ? 'approval_request' : 'question_request'
+      const card = messages.value.find((item: any) => item.type === type && item.request_id === msg.request_id)
+      if (card) {
+        card.submitting = false
+        card.error = msg.error || 'Request failed'
+      }
+      return
+    }
+    if (msg.operation === 'list_session_agents' || msg.operation === 'set_session_agent') {
+      sessionAgentsLoading.value = false
+      sessionAgentSubmitting.value = false
+      sessionAgentError.value = msg.error || (msg.operation === 'list_session_agents' ? 'Agent list unavailable' : 'Agent switch failed')
+      if (sessionAgentListTimer) { clearTimeout(sessionAgentListTimer); sessionAgentListTimer = null }
+      if (sessionAgentSwitchTimer) { clearTimeout(sessionAgentSwitchTimer); sessionAgentSwitchTimer = null }
+      return
+    }
     if (pendingPermission.value) {
       pendingPermission.value = undefined
       if (permissionTimer) { clearTimeout(permissionTimer); permissionTimer = null }
@@ -1833,7 +2117,12 @@ onUnmounted(() => {
   document.removeEventListener('click', closePermMenu)
   if (turnTimer) { clearInterval(turnTimer); turnTimer = null }
   if (stopResetTimer) { clearTimeout(stopResetTimer); stopResetTimer = null }
+  if (sessionAgentListTimer) { clearTimeout(sessionAgentListTimer); sessionAgentListTimer = null }
+  if (sessionAgentSwitchTimer) { clearTimeout(sessionAgentSwitchTimer); sessionAgentSwitchTimer = null }
   clearAllToolTimeouts()
+  for (const timer of interactionSubmitTimers.values()) clearTimeout(timer)
+  interactionSubmitTimers.clear()
+  interactionResolutions.clear()
 })
 
 function closePermMenu(e: MouseEvent) {
@@ -2032,6 +2321,25 @@ onMounted(() => {
   color: var(--fg-tertiary);
   white-space: nowrap;
   margin-right: 4px;
+}
+.reasoning-block {
+  align-self: stretch;
+  max-width: 720px;
+  color: var(--fg-secondary);
+  font-size: 12px;
+  border-left: 2px solid var(--border);
+  padding: 4px 10px;
+}
+.reasoning-block summary { cursor: pointer; color: var(--fg-tertiary); user-select: none; }
+.reasoning-content { margin-top: 8px; white-space: pre-wrap; line-height: 1.55; }
+.opencode-notice {
+  align-self: flex-start;
+  max-width: 720px;
+  padding: 5px 9px;
+  border-radius: var(--radius-sm);
+  background: var(--surface-hover);
+  color: var(--fg-tertiary);
+  font-size: 12px;
 }
 .fade-enter-active, .fade-leave-active { transition: opacity 0.25s ease; }
 .fade-enter-from, .fade-leave-to { opacity: 0; }

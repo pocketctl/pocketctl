@@ -63,4 +63,17 @@ describe('CommandPopover', () => {
     const wrapper = mount(CommandPopover, { props: { commands, activeIndex: 0 } })
     expect(wrapper.html()).toContain('codex')
   })
+
+  test('renders OpenCode skill source, hints, and description', () => {
+    const wrapper = mount(CommandPopover, {
+      props: {
+        commands: [{ name: 'review', source: 'skill', kind: 'skill', description: 'Review changes', hints: ['<target>'] }],
+        activeIndex: 0,
+      },
+    })
+    expect(wrapper.text()).toContain('/review')
+    expect(wrapper.text()).toContain('<target>')
+    expect(wrapper.text()).toContain('Review changes')
+    expect(wrapper.find('.cmd-source').text()).toBe('skill')
+  })
 })

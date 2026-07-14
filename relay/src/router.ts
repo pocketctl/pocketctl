@@ -4,7 +4,7 @@ import { randomUUID } from 'crypto';
 import { isAppReviewDemoDaemon, isAppReviewDemoSession } from './config/app-review-demo.js';
 import * as db from './db.js';
 import { generateTitle, generateSubagentTitle } from './title.js';
-import { notifyUser, sessionStatusPush, daemonOfflinePush, daemonOnlinePush, approvalPush, interactivePush, summarizeToolInput, highRiskPush, isHighRiskCommand } from './push.js';
+import { notifyUser, sessionStatusPush, daemonOfflinePush, daemonOnlinePush, approvalPush, interactivePush, questionPush, summarizeToolInput, highRiskPush, isHighRiskCommand } from './push.js';
 import { PushDeduper } from './push-deduper.js';
 import { quotaEnforcementMode, resolveEntitlements } from './entitlements.js';
 import { claimBoundDaemonSlot, getQuotaSnapshot, releaseQuotaReservation, reserveConcurrentSession } from './quota.js';
@@ -749,6 +749,16 @@ export class Router {
       }
       return;
     }
+    if (msg.type === 'session_agent_changed') {
+      // Persist only daemon-confirmed switches, then fan the authoritative state
+      // out to every device currently viewing the session.
+      db.updateSessionActiveAgent(this.pool, sessionId, msg.current_agent).catch(console.error);
+      this.persistAndAck(daemonId, msg.seq, sessionId, msg.type, msg);
+      for (const [clientWs, client] of this.clients) {
+        if (client.subscribedSessions.has(sessionId) && clientWs.readyState === 1) this.send(clientWs, msg);
+      }
+      return;
+    }
     if (msg.type === 'subagent_discovered') {
       const isCodex = msg.agent === 'codex';
       const relation: db.SubagentRelation = {
@@ -911,7 +921,7 @@ export class Router {
     // the push twice. Only the push side-effect is guarded here — event
     // forwarding to subscribed clients below still runs regardless, so a
     // reconnected foreground client stays in sync.
-    if (userId && (msg.type === 'approval_request' || msg.type === 'interactive_prompt')) {
+    if (userId && (msg.type === 'approval_request' || msg.type === 'interactive_prompt' || msg.type === 'question_request')) {
       const requestId = (msg.request_id as string | undefined) || '';
       // Empty requestId can't be deduped (and shouldn't block the push) —
       // accept the rare duplicate for such malformed events.
@@ -931,11 +941,15 @@ export class Router {
               msg.title || '', toolName, summary, sessionId, requestId,
             )).catch(console.error);
           }
-        } else {
+        } else if (msg.type === 'interactive_prompt') {
           const prompt = (msg.input?.prompt as string) || '';
           notifyUser(this.pool, userId, interactivePush(
             msg.title || '', prompt, sessionId, requestId,
           )).catch(console.error);
+        } else {
+          const firstQuestion = Array.isArray(msg.questions) ? msg.questions[0] : undefined;
+          const prompt = firstQuestion?.question || firstQuestion?.header || '';
+          notifyUser(this.pool, userId, questionPush(prompt, sessionId, requestId)).catch(console.error);
         }
       }
     }
@@ -963,7 +977,7 @@ export class Router {
             db.updateSessionCost(this.pool, sessionId, parseFloat(msg.cost_usd)).catch(console.error);
           }
           const pending = this.findPendingSessionOperation(daemonId, msg.request_id);
-          if (pending && ['running', 'busy', 'idle', 'waiting', 'waiting_approval'].includes(msg.status)) {
+          if (pending && ['running', 'busy', 'idle', 'waiting', 'waiting_approval', 'waiting_question'].includes(msg.status)) {
             this.settlePendingSessionOperation(pending);
           }
           if (userId) this.broadcastQuotaStatus(userId).catch(console.error);
@@ -1238,7 +1252,7 @@ export class Router {
           let outbound = msg;
           if (msg.type === 'user_message' && client.userId !== null) {
             const status = await db.getSessionStatus(this.pool, msg.session_id);
-            const isActive = ['running', 'busy', 'idle', 'waiting', 'waiting_approval'].includes(status || '');
+            const isActive = ['running', 'busy', 'idle', 'waiting', 'waiting_approval', 'waiting_question'].includes(status || '');
             if (!isActive) {
               const requestId = typeof msg.request_id === 'string' && msg.request_id
                 ? msg.request_id

@@ -2100,11 +2100,43 @@ func handleCommands(ctx context.Context, client *ws.Client, sm *session.SessionM
 				// (authoritative for the -p environment); empty falls back to scan.
 				available, _ := sm.GetSessionSlashCommands(cmd.SessionID)
 				agentType, _ := sm.GetSessionAgent(cmd.SessionID)
+				if agentType == adapter.AgentOpencode {
+					commandCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+					items, err := sm.CommandsForSession(commandCtx, cmd.SessionID)
+					cancel()
+					if err != nil {
+						logger.Error("list opencode commands failed", "session", cmd.SessionID, "error", err)
+						client.SendMsg(protocol.DaemonEvent{Type: "error", SessionID: cmd.SessionID, Operation: "list_commands", Error: err.Error()})
+						items = []protocol.CommandItem{}
+					}
+					client.SendMsg(protocol.DaemonEvent{Type: "command_list", SessionID: cmd.SessionID, Commands: items})
+					continue
+				}
 				client.SendMsg(protocol.DaemonEvent{
 					Type:      "command_list",
 					SessionID: cmd.SessionID,
 					Commands:  commands.ListCommands(cwd, agentType, available),
 				})
+
+			case "list_session_agents":
+				agentCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+				agents, err := sm.ListSessionAgents(agentCtx, cmd.SessionID)
+				cancel()
+				if err != nil {
+					logger.Error("list session agents failed", "session", cmd.SessionID, "error", err)
+					client.SendMsg(protocol.DaemonEvent{Type: "error", SessionID: cmd.SessionID, Operation: "list_session_agents", Error: err.Error()})
+					continue
+				}
+				client.SendMsg(protocol.DaemonEvent{Type: "session_agent_list", SessionID: cmd.SessionID, Agents: agents})
+
+			case "set_session_agent":
+				agentCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+				err := sm.SetSessionAgent(agentCtx, cmd.SessionID, cmd.AgentName)
+				cancel()
+				if err != nil {
+					logger.Error("set session agent failed", "session", cmd.SessionID, "agent", cmd.AgentName, "error", err)
+					client.SendMsg(protocol.DaemonEvent{Type: "error", SessionID: cmd.SessionID, Operation: "set_session_agent", RequestID: cmd.RequestID, Error: err.Error()})
+				}
 
 			case "get_session_meta":
 				// Web client queries a session's resolved model (for the /model
@@ -2157,12 +2189,21 @@ func handleCommands(ctx context.Context, client *ws.Client, sm *session.SessionM
 					Model:     model,
 					Effort:    effort,
 				}
+				if agentType == adapter.AgentOpencode {
+					meta.Capabilities = sm.OpenCodeInteractionCapabilities(cmd.SessionID)
+					agentCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+					meta.CurrentAgent = sm.CurrentSessionAgent(agentCtx, cmd.SessionID)
+					cancel()
+				}
 				if permission, mutable, modes, ok := sm.GetPermissionMeta(cmd.SessionID); ok {
 					meta.Permission, meta.PermissionMutable, meta.PermissionMutableModes = permission, mutable, modes
 				}
 				client.SendMsg(meta)
 				if evt, ok := sm.PendingInteractivePrompt(cmd.SessionID); ok {
 					logger.Info("get_session_meta: replay pending interactive prompt", "session", cmd.SessionID, "req", evt.RequestID)
+					client.SendMsg(evt)
+				}
+				for _, evt := range sm.PendingOpencodeInteractions(cmd.SessionID) {
 					client.SendMsg(evt)
 				}
 
@@ -2183,14 +2224,31 @@ func handleCommands(ctx context.Context, client *ws.Client, sm *session.SessionM
 				// Client answered a tool-use approval request (Yes/No). Resolves
 				// the blocked PreToolUse hook so Claude proceeds (allow) or is
 				// told to stop (deny).
-				logger.Info("approval response", "session", cmd.SessionID, "req", cmd.RequestID, "approved", cmd.Approved)
-				if err := sm.ResolveApproval(cmd.SessionID, cmd.RequestID, cmd.Approved); err != nil {
+				logger.Info("approval response", "session", cmd.SessionID, "req", cmd.RequestID, "approved", cmd.Approved, "action", cmd.Action)
+				var err error
+				if cmd.Action != "" {
+					err = sm.ResolveApprovalAction(cmd.SessionID, cmd.RequestID, cmd.Action)
+				} else {
+					err = sm.ResolveApproval(cmd.SessionID, cmd.RequestID, cmd.Approved)
+				}
+				if err != nil {
 					logger.Error("resolve approval failed", "error", err)
 					client.SendMsg(protocol.DaemonEvent{
-						Type:      "error",
-						SessionID: cmd.SessionID,
-						Error:     err.Error(),
+						Type: "error", SessionID: cmd.SessionID, RequestID: cmd.RequestID,
+						Operation: "approval_response", Error: err.Error(),
 					})
+				}
+
+			case "question_response":
+				if err := sm.ResolveQuestion(cmd.SessionID, cmd.RequestID, cmd.Answers); err != nil {
+					logger.Error("resolve question failed", "error", err)
+					client.SendMsg(protocol.DaemonEvent{Type: "error", SessionID: cmd.SessionID, RequestID: cmd.RequestID, Operation: "question_response", Error: err.Error()})
+				}
+
+			case "question_reject":
+				if err := sm.RejectQuestion(cmd.SessionID, cmd.RequestID); err != nil {
+					logger.Error("reject question failed", "error", err)
+					client.SendMsg(protocol.DaemonEvent{Type: "error", SessionID: cmd.SessionID, RequestID: cmd.RequestID, Operation: "question_reject", Error: err.Error()})
 				}
 
 			case "interactive_response":

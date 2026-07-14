@@ -34,8 +34,7 @@ const (
 	opencodeDiscoverInterval = 2 * time.Second
 	opencodeSyncInterval     = 1 * time.Second
 	opencodeFreshWindow      = 10 * time.Minute
-	opencodeReconcileWindow  = 2 * time.Hour   // reconcile stuck "running" status for sessions active within this window
-	opencodeApprovalTimeout  = 5 * time.Minute // auto-reject a pending permission if no client answers
+	opencodeReconcileWindow  = 2 * time.Hour // reconcile stuck "running" status for sessions active within this window
 )
 
 type opencodeCoordinator struct {
@@ -182,7 +181,7 @@ func (c *opencodeCoordinator) startDiscovery() error {
 	slog.Default().Info("opencode discovery started", "serve", c.srv().BaseURL())
 	go c.discoveryLoop(c.ctx)
 	go c.supervise(c.ctx)
-	go c.permissionLoop(c.ctx)
+	go c.interactionLoop(c.ctx)
 	return nil
 }
 
@@ -190,15 +189,15 @@ func (c *opencodeCoordinator) startDiscovery() error {
 // events for sessions THIS serve drives. The daemon's serve forces edit/bash to
 // "ask" (OPENCODE_CONFIG_CONTENT in OpencodeServer.Start), so daemon-driven
 // sessions raise permission.asked, which permissionLoop surfaces as an
-// approval_request card (reply routed via ResolveApproval → ReplyPermission, and
-// auto-rejected on timeout so an unattended turn never hangs). Terminal `opencode`
+// approval_request card (reply routed via ResolveApprovalAction → the matching
+// legacy/v2 OpenCode reply endpoint). Requests remain pending until an explicit
+// response or authoritative reconciliation. Terminal `opencode`
 // sessions are driven by the user's own server, whose permission events this serve
 // never sees — those keep prompting in the user's terminal.
 
-// permissionLoop subscribes to the serve's SSE /event stream and turns
-// permission.asked / permission.replied events into approval cards. It reconnects
-// when the stream drops or the serve restarts.
-func (c *opencodeCoordinator) permissionLoop(ctx context.Context) {
+// interactionLoop subscribes to OpenCode's SSE stream, surfaces permission and
+// question cards, and reconciles pending state whenever the stream reconnects.
+func (c *opencodeCoordinator) interactionLoop(ctx context.Context) {
 	for {
 		if ctx.Err() != nil {
 			return
@@ -213,27 +212,86 @@ func (c *opencodeCoordinator) permissionLoop(ctx context.Context) {
 			time.Sleep(2 * time.Second)
 			continue
 		}
+		c.reconcileInteractions(ctx)
 		for ev := range evCh {
-			switch ev.Type {
-			case "permission.asked":
-				if pa, ok := adapter.ParsePermissionAsked(ev.Properties); ok {
-					tool := pa.Tool
-					if tool == "" {
-						tool = "permission"
-					}
-					c.sm.handleOpencodePermission(pa.SessionID, pa.ID, tool, pa.Metadata)
-				}
-			case "permission.replied":
-				if pa, ok := adapter.ParsePermissionAsked(ev.Properties); ok {
-					c.sm.clearOpencodePermissionReplied(pa.SessionID, pa.ID)
-				}
-			}
+			c.handleInteractionEvent(ev)
 		}
 		// Stream closed (serve restart / disconnect) — reconnect after a beat.
 		if ctx.Err() != nil {
 			return
 		}
 		time.Sleep(time.Second)
+	}
+}
+
+func (c *opencodeCoordinator) handleInteractionEvent(ev adapter.SSEEvent) {
+	switch ev.Type {
+	case "permission.asked":
+		if permission, ok := adapter.ParsePermissionAsked(ev.Properties); ok {
+			c.sm.handleOpencodePermission(permission)
+		}
+	case "permission.v2.asked":
+		if permission, ok := adapter.ParsePermissionV2Asked(ev.Properties); ok {
+			c.sm.handleOpencodePermission(permission)
+		}
+	case "permission.replied", "permission.v2.replied":
+		if requestID, sessionID, action, ok := adapter.ParsePermissionResolution(ev.Properties); ok && c.sm.clearOpencodePermission(sessionID, requestID) {
+			c.sm.outputCh <- protocol.DaemonEvent{Type: "approval_resolved", SessionID: sessionID, RequestID: requestID, Action: action, Approved: action != "reject", Reason: "resolved_elsewhere"}
+			c.sm.emitCurrentInteractionStatus(sessionID)
+		}
+	case "question.asked", "question.v2.asked":
+		if question, ok := adapter.ParseQuestionAsked(ev.Properties); ok {
+			if ev.Type == "question.v2.asked" {
+				question.Version = adapter.PermissionVersionV2
+			}
+			c.sm.handleOpencodeQuestion(question)
+		}
+	case "question.replied", "question.rejected", "question.v2.replied", "question.v2.rejected":
+		if requestID, sessionID, answers, ok := adapter.ParseQuestionResolution(ev.Properties); ok && c.sm.clearOpencodeQuestion(sessionID, requestID) {
+			c.sm.outputCh <- protocol.DaemonEvent{Type: "question_resolved", SessionID: sessionID, RequestID: requestID, Answers: answers, Rejected: strings.Contains(ev.Type, "rejected"), Reason: "resolved_elsewhere"}
+			c.sm.emitCurrentInteractionStatus(sessionID)
+		}
+	}
+}
+
+func (sm *SessionManager) emitCurrentInteractionStatus(sessionID string) {
+	sm.mu.RLock()
+	ps, ok := sm.sessions[sessionID]
+	status := protocol.StatusIdle
+	if ok {
+		status = pendingInteractionStatus(ps)
+	}
+	sm.mu.RUnlock()
+	if ok {
+		sm.emitInteractionStatus(sessionID, status)
+	}
+}
+
+// reconcileInteractions recovers asked events missed while SSE was disconnected.
+// It intentionally treats list failures as non-authoritative and never clears
+// local state merely because one endpoint was unavailable.
+func (c *opencodeCoordinator) reconcileInteractions(ctx context.Context) {
+	if srv := c.srv(); srv != nil {
+		if permissions, err := srv.ListPermissions(ctx); err == nil {
+			c.sm.reconcileOpencodePermissionSnapshot("", adapter.PermissionVersionLegacy, permissions)
+		}
+		if questions, err := srv.ListQuestions(ctx); err == nil {
+			c.sm.reconcileOpencodeQuestionSnapshot("", adapter.PermissionVersionLegacy, questions)
+		}
+		c.trackMu.Lock()
+		sessionIDs := make([]string, 0, len(c.tracked))
+		for sessionID := range c.tracked {
+			sessionIDs = append(sessionIDs, sessionID)
+		}
+		c.trackMu.Unlock()
+		for _, sessionID := range sessionIDs {
+			if permissions, err := srv.ListPermissionsV2(ctx, sessionID); err == nil {
+				c.sm.reconcileOpencodePermissionSnapshot(sessionID, adapter.PermissionVersionV2, permissions)
+			}
+			if questions, err := srv.ListQuestionsV2(ctx, sessionID); err == nil {
+				c.sm.reconcileOpencodeQuestionSnapshot(sessionID, adapter.PermissionVersionV2, questions)
+			}
+		}
 	}
 }
 
@@ -409,6 +467,69 @@ type serverBackend struct {
 	coord *opencodeCoordinator
 }
 
+func parseOpenCodeSlashCommand(content string) (name, arguments string, ok bool) {
+	trimmed := strings.TrimSpace(content)
+	if len(trimmed) < 2 || trimmed[0] != '/' || trimmed[1] == '/' || trimmed[1] == ' ' || trimmed[1] == '\t' || trimmed[1] == '\n' {
+		return "", "", false
+	}
+	rest := trimmed[1:]
+	if split := strings.IndexAny(rest, " \t\r\n"); split >= 0 {
+		name = rest[:split]
+		arguments = strings.TrimSpace(rest[split:])
+	} else {
+		name = rest
+	}
+	return name, arguments, name != ""
+}
+
+func mapOpenCodeCommands(commands []adapter.OpencodeCommand) []protocol.CommandItem {
+	out := make([]protocol.CommandItem, 0, len(commands))
+	for _, command := range commands {
+		if strings.TrimSpace(command.Name) == "" {
+			continue
+		}
+		kind := "command"
+		if command.Source == "skill" {
+			kind = "skill"
+		}
+		out = append(out, protocol.CommandItem{
+			Name: command.Name, Source: command.Source, Kind: kind, Description: command.Description,
+			ArgHint: strings.Join(command.Hints, " "), Template: command.Template, Hints: command.Hints,
+			Subtask: command.Subtask, Agent: command.Agent, Model: command.Model,
+		})
+	}
+	return out
+}
+
+func filterOpenCodeAgents(agents []adapter.OpencodeAgent) []protocol.SessionAgentOption {
+	out := make([]protocol.SessionAgentOption, 0, len(agents))
+	for _, agent := range agents {
+		if agent.Hidden || (agent.Mode != "primary" && agent.Mode != "all") || strings.TrimSpace(agent.Name) == "" {
+			continue
+		}
+		out = append(out, protocol.SessionAgentOption{
+			Name: agent.Name, Description: agent.Description, Mode: agent.Mode,
+			Color: agent.Color, Model: agent.Model, Variant: agent.Variant,
+		})
+	}
+	return out
+}
+
+func validateOpenCodeAgentSwitchState(ps *ProcessState) error {
+	if ps == nil {
+		return fmt.Errorf("session not found")
+	}
+	if len(ps.PendingPermissions) > 0 || len(ps.PendingQuestions) > 0 {
+		return fmt.Errorf("cannot switch agent while an interaction is pending")
+	}
+	switch ps.Status {
+	case protocol.StatusRunning, "busy", protocol.StatusWaitingApproval, protocol.StatusWaitingQuestion:
+		return fmt.Errorf("cannot switch agent while session is %s", ps.Status)
+	default:
+		return nil
+	}
+}
+
 func (b *serverBackend) Start(ctx context.Context, config protocol.SessionConfig) (string, error) {
 	if err := b.coord.ensureStarted(); err != nil {
 		return "", err
@@ -424,26 +545,6 @@ func (b *serverBackend) Send(ctx context.Context, sessionID, content string) err
 	if err := b.coord.ensureStarted(); err != nil {
 		return err
 	}
-	// /compact is a built-in command, not a prompt: call opencode's compact
-	// endpoint and report via command_receipt (mirrors claude's /compact). The
-	// compacted history is surfaced by the message poller.
-	if strings.TrimSpace(content) == "/compact" {
-		model, _ := b.coord.sm.GetSessionModel(sessionID)
-		go func() {
-			status, msg := "success", ""
-			if err := b.coord.srv().Compact(context.Background(), sessionID, model); err != nil {
-				status, msg = "failed", err.Error()
-			}
-			b.coord.sm.outputCh <- protocol.DaemonEvent{
-				Type:          "command_receipt",
-				SessionID:     sessionID,
-				Command:       "/compact",
-				ReceiptStatus: status,
-				Message:       msg,
-			}
-		}()
-		return nil
-	}
 	// 6.4 busy-collision: refuse to start a new turn while one is still generating
 	// (mirrors claude's "session busy" guard). Checked against the session's live
 	// message state via the serve.
@@ -453,6 +554,37 @@ func (b *serverBackend) Send(ctx context.Context, sessionID, content string) err
 		cancel()
 		if err == nil && adapter.OpencodeMessagesRunning(msgs) {
 			return fmt.Errorf("会话正在生成回复，请等当前回合结束后再发送")
+		}
+	}
+	if name, arguments, isSlash := parseOpenCodeSlashCommand(content); isSlash {
+		cwd, _ := b.coord.sm.GetSessionCwd(sessionID)
+		commands, err := b.coord.srv().ListCommands(ctx, cwd)
+		if err != nil {
+			b.coord.sm.outputCh <- protocol.DaemonEvent{
+				Type: "command_receipt", SessionID: sessionID, Command: "/" + name,
+				ReceiptStatus: "failed", Message: "无法加载 OpenCode 命令列表: " + err.Error(),
+			}
+			return nil
+		}
+		known := false
+		for _, command := range commands {
+			if command.Name == name {
+				known = true
+				break
+			}
+		}
+		if known {
+			go func() {
+				status, message := "success", ""
+				if err := b.coord.srv().ExecuteCommand(context.Background(), sessionID, cwd, name, arguments); err != nil {
+					status, message = "failed", err.Error()
+				}
+				b.coord.sm.outputCh <- protocol.DaemonEvent{
+					Type: "command_receipt", SessionID: sessionID, Command: "/" + name,
+					ReceiptStatus: status, Message: message,
+				}
+			}()
+			return nil
 		}
 	}
 	// opencode POST /prompt blocks until the turn completes; run it in the
@@ -518,18 +650,6 @@ func (sm *SessionManager) opencodeBackendFor(sessionID string) *serverBackend {
 	return nil
 }
 
-// clearPendingApproval clears a session's pending approval request and returns it
-// to running. Used when an opencode approval is resolved.
-func (sm *SessionManager) clearPendingApproval(sessionID, requestID string) {
-	sm.mu.Lock()
-	defer sm.mu.Unlock()
-	if ps, ok := sm.sessions[sessionID]; ok && ps.PendingRequestID == requestID {
-		ps.PendingRequestID = ""
-		ps.Status = protocol.StatusRunning
-		ps.LastActivityAt = time.Now()
-	}
-}
-
 // ensureOpencode returns the lazily-created opencode coordinator.
 func (sm *SessionManager) ensureOpencode() *opencodeCoordinator {
 	sm.mu.Lock()
@@ -571,6 +691,119 @@ func (sm *SessionManager) OpencodeSessionModelFromServe(sessionID string) string
 	model := info.Model.ProviderID + "/" + info.Model.ID
 	sm.SetSessionModel(sessionID, model)
 	return model
+}
+
+var opencodeInteractionCapabilities = []string{
+	"dynamic_commands", "agent_switch", "permission_actions", "questions",
+}
+
+func (sm *SessionManager) OpenCodeInteractionCapabilities(sessionID string) []string {
+	agent, ok := sm.GetSessionAgent(sessionID)
+	if !ok || agent != adapter.AgentOpencode {
+		return nil
+	}
+	return append([]string(nil), opencodeInteractionCapabilities...)
+}
+
+func (sm *SessionManager) CommandsForSession(ctx context.Context, sessionID string) ([]protocol.CommandItem, error) {
+	b := sm.opencodeBackendFor(sessionID)
+	if b == nil || b.coord == nil {
+		return nil, fmt.Errorf("not an opencode session")
+	}
+	if err := b.coord.ensureStarted(); err != nil {
+		return nil, err
+	}
+	cwd, ok := sm.GetSessionCwd(sessionID)
+	if !ok {
+		return nil, fmt.Errorf("session not found")
+	}
+	commands, err := b.coord.srv().ListCommands(ctx, cwd)
+	if err != nil {
+		return nil, err
+	}
+	return mapOpenCodeCommands(commands), nil
+}
+
+func (sm *SessionManager) ListSessionAgents(ctx context.Context, sessionID string) ([]protocol.SessionAgentOption, error) {
+	b := sm.opencodeBackendFor(sessionID)
+	if b == nil || b.coord == nil {
+		return nil, fmt.Errorf("not an opencode session")
+	}
+	if err := b.coord.ensureStarted(); err != nil {
+		return nil, err
+	}
+	cwd, ok := sm.GetSessionCwd(sessionID)
+	if !ok {
+		return nil, fmt.Errorf("session not found")
+	}
+	agents, err := b.coord.srv().ListAgents(ctx, cwd)
+	if err != nil {
+		return nil, err
+	}
+	return filterOpenCodeAgents(agents), nil
+}
+
+func (sm *SessionManager) CurrentSessionAgent(ctx context.Context, sessionID string) string {
+	sm.mu.RLock()
+	ps, ok := sm.sessions[sessionID]
+	if ok && ps.CurrentAgent != "" {
+		current := ps.CurrentAgent
+		sm.mu.RUnlock()
+		return current
+	}
+	sm.mu.RUnlock()
+	b := sm.opencodeBackendFor(sessionID)
+	if !ok || b == nil || b.coord == nil || b.coord.srv() == nil {
+		return ""
+	}
+	info, err := b.coord.srv().GetSession(ctx, sessionID)
+	if err != nil || info.Agent == "" {
+		return ""
+	}
+	sm.mu.Lock()
+	if state := sm.sessions[sessionID]; state != nil {
+		state.CurrentAgent = info.Agent
+	}
+	sm.mu.Unlock()
+	return info.Agent
+}
+
+func (sm *SessionManager) SetSessionAgent(ctx context.Context, sessionID, agentName string) error {
+	b := sm.opencodeBackendFor(sessionID)
+	if b == nil || b.coord == nil {
+		return fmt.Errorf("not an opencode session")
+	}
+	sm.mu.RLock()
+	ps := sm.sessions[sessionID]
+	if err := validateOpenCodeAgentSwitchState(ps); err != nil {
+		sm.mu.RUnlock()
+		return err
+	}
+	sm.mu.RUnlock()
+	agents, err := sm.ListSessionAgents(ctx, sessionID)
+	if err != nil {
+		return err
+	}
+	found := false
+	for _, agent := range agents {
+		if agent.Name == agentName {
+			found = true
+			break
+		}
+	}
+	if !found {
+		return fmt.Errorf("unknown or non-interactive opencode agent %q", agentName)
+	}
+	if err := b.coord.srv().SwitchAgent(ctx, sessionID, agentName); err != nil {
+		return err
+	}
+	sm.mu.Lock()
+	if state := sm.sessions[sessionID]; state != nil {
+		state.CurrentAgent = agentName
+	}
+	sm.mu.Unlock()
+	sm.outputCh <- protocol.DaemonEvent{Type: "session_agent_changed", SessionID: sessionID, CurrentAgent: agentName}
+	return nil
 }
 
 // ModelsForAgent returns the model picker options for an agent. opencode models
