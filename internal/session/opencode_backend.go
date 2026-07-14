@@ -2,6 +2,7 @@ package session
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"os"
@@ -50,16 +51,19 @@ type opencodeCoordinator struct {
 	trackMu sync.Mutex
 	tracked map[string]context.CancelFunc // sessionID → its sync loop's cancel
 
-	reconciled  map[string]bool // sessionIDs whose stale "running" status was reconciled to idle
-	summaryOnce sync.Once
+	reconciled     map[string]bool // sessionIDs whose stale "running" status was reconciled to idle
+	summaryOnce    sync.Once
+	recoverSession func(context.Context, string)
 }
 
 func newOpencodeCoordinator(sm *SessionManager) *opencodeCoordinator {
-	return &opencodeCoordinator{
+	c := &opencodeCoordinator{
 		sm:         sm,
 		tracked:    make(map[string]context.CancelFunc),
 		reconciled: make(map[string]bool),
 	}
+	c.recoverSession = c.reconcileSessionInteractions
+	return c
 }
 
 // ensureStarted lazily launches the shared opencode serve process. Safe to call
@@ -263,6 +267,15 @@ func (sm *SessionManager) emitCurrentInteractionStatus(sessionID string) {
 	}
 	sm.mu.RUnlock()
 	if ok {
+		// Once the last interaction is cleared, ask OpenCode for the real
+		// runtime state instead of briefly reporting a locally inferred idle.
+		// OpenCode may already have resumed work or entered retry at this point.
+		if status == protocol.StatusIdle {
+			if backend := sm.opencodeBackendFor(sessionID); backend != nil && backend.coord != nil && backend.coord.srv() != nil {
+				sm.reconcileOpencodeInteractionStatus(sessionID, backend)
+				return
+			}
+		}
 		sm.emitInteractionStatus(sessionID, status)
 	}
 }
@@ -292,6 +305,43 @@ func (c *opencodeCoordinator) reconcileInteractions(ctx context.Context) {
 				c.sm.reconcileOpencodeQuestionSnapshot(sessionID, adapter.PermissionVersionV2, questions)
 			}
 		}
+	}
+}
+
+// reconcileSessionInteractions closes the daemon-restart race where the first
+// global SSE reconciliation runs before discovery has populated c.tracked.
+// Each newly tracked session gets authoritative legacy and v2 snapshots,
+// filtered to that session after querying the global legacy routes.
+func (c *opencodeCoordinator) reconcileSessionInteractions(ctx context.Context, sessionID string) {
+	srv := c.srv()
+	if srv == nil {
+		return
+	}
+	requestCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	if permissions, err := srv.ListPermissions(requestCtx); err == nil {
+		filtered := make([]adapter.PermissionAsked, 0, len(permissions))
+		for _, permission := range permissions {
+			if permission.SessionID == sessionID {
+				filtered = append(filtered, permission)
+			}
+		}
+		c.sm.reconcileOpencodePermissionSnapshot(sessionID, adapter.PermissionVersionLegacy, filtered)
+	}
+	if questions, err := srv.ListQuestions(requestCtx); err == nil {
+		filtered := make([]adapter.QuestionAsked, 0, len(questions))
+		for _, question := range questions {
+			if question.SessionID == sessionID {
+				filtered = append(filtered, question)
+			}
+		}
+		c.sm.reconcileOpencodeQuestionSnapshot(sessionID, adapter.PermissionVersionLegacy, filtered)
+	}
+	if permissions, err := srv.ListPermissionsV2(requestCtx, sessionID); err == nil {
+		c.sm.reconcileOpencodePermissionSnapshot(sessionID, adapter.PermissionVersionV2, permissions)
+	}
+	if questions, err := srv.ListQuestionsV2(requestCtx, sessionID); err == nil {
+		c.sm.reconcileOpencodeQuestionSnapshot(sessionID, adapter.PermissionVersionV2, questions)
 	}
 }
 
@@ -401,6 +451,9 @@ func (c *opencodeCoordinator) startSync(sessionID string, emitUser bool) {
 	sctx, scancel := context.WithCancel(base)
 	c.tracked[sessionID] = scancel
 	c.trackMu.Unlock()
+	if c.recoverSession != nil {
+		go c.recoverSession(sctx, sessionID)
+	}
 	go c.syncLoop(sctx, sessionID, emitUser)
 }
 
@@ -409,6 +462,7 @@ func (c *opencodeCoordinator) syncLoop(ctx context.Context, sessionID string, em
 	ticker := time.NewTicker(opencodeSyncInterval)
 	defer ticker.Stop()
 	lastTitle := ""
+	lastTodos := ""
 	tick := 0
 	for {
 		select {
@@ -420,14 +474,36 @@ func (c *opencodeCoordinator) syncLoop(ctx context.Context, sessionID string, em
 			if s == nil {
 				continue // serve down (e.g. mid-restart); next tick retries
 			}
+			cwd, _ := c.sm.GetSessionCwd(sessionID)
+			var nativeStatus *adapter.OpencodeSessionStatus
+			if statuses, err := s.ListSessionStatuses(ctx, cwd); err == nil {
+				if status, ok := statuses[sessionID]; ok {
+					nativeStatus = &status
+				}
+			}
 			msgs, err := s.GetMessages(ctx, sessionID)
 			if err == nil {
-				if evs := sync.Diff(msgs); len(evs) > 0 {
+				if evs := sync.DiffWithNativeStatus(msgs, nativeStatus); len(evs) > 0 {
 					for _, ev := range evs {
+						if ev.Type == "session_status" {
+							ev.Status = c.sm.applyOpencodeRuntimeStatus(sessionID, ev.Status)
+						}
 						c.sm.outputCh <- ev
 					}
 					c.sm.UpdateLastActivity(sessionID)
 				}
+			}
+			if todos, err := s.ListTodos(ctx, sessionID, cwd); err == nil {
+				encoded, _ := json.Marshal(todos)
+				key := string(encoded)
+				if key != lastTodos {
+					c.sm.outputCh <- protocol.DaemonEvent{
+						Type: "agent_todo", SessionID: sessionID, PartID: "todo:" + sessionID,
+						Todos: append([]protocol.TodoItem(nil), todos...),
+					}
+					c.sm.UpdateLastActivity(sessionID)
+				}
+				lastTodos = key
 			}
 			// Refresh the title periodically: opencode auto-generates a real title
 			// after the first exchange (replacing "New session - <ts>"). Pick it up
@@ -523,7 +599,7 @@ func validateOpenCodeAgentSwitchState(ps *ProcessState) error {
 		return fmt.Errorf("cannot switch agent while an interaction is pending")
 	}
 	switch ps.Status {
-	case protocol.StatusRunning, "busy", protocol.StatusWaitingApproval, protocol.StatusWaitingQuestion:
+	case protocol.StatusRunning, protocol.StatusBusy, protocol.StatusRetry, protocol.StatusWaitingApproval, protocol.StatusWaitingQuestion:
 		return fmt.Errorf("cannot switch agent while session is %s", ps.Status)
 	default:
 		return nil

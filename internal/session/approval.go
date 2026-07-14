@@ -207,6 +207,24 @@ func pendingInteractionStatus(ps *ProcessState) string {
 	return protocol.StatusIdle
 }
 
+// applyOpencodeRuntimeStatus stores the native/fallback runtime state while
+// preserving pending interaction priority for both daemon logic and clients.
+func (sm *SessionManager) applyOpencodeRuntimeStatus(sessionID, runtimeStatus string) string {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+	ps, ok := sm.sessions[sessionID]
+	if !ok {
+		return runtimeStatus
+	}
+	status := runtimeStatus
+	if pending := pendingInteractionStatus(ps); pending != protocol.StatusIdle {
+		status = pending
+	}
+	ps.Status = status
+	ps.LastActivityAt = time.Now()
+	return status
+}
+
 func (sm *SessionManager) clearOpencodePermission(sessionID, requestID string) bool {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
@@ -466,18 +484,20 @@ func (sm *SessionManager) RejectQuestion(sessionID, requestID string) error {
 func (sm *SessionManager) reconcileOpencodeInteractionStatus(sessionID string, b *serverBackend) {
 	status := protocol.StatusIdle
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	if messages, err := b.coord.srv().GetMessages(ctx, sessionID); err == nil && adapter.OpencodeMessagesRunning(messages) {
-		status = protocol.StatusRunning
+	cwd, _ := sm.GetSessionCwd(sessionID)
+	usedNative := false
+	if statuses, err := b.coord.srv().ListSessionStatuses(ctx, cwd); err == nil {
+		if native, ok := statuses[sessionID]; ok {
+			status = native.Type
+			usedNative = status == protocol.StatusBusy || status == protocol.StatusRetry || status == protocol.StatusIdle
+		}
+	}
+	if !usedNative {
+		if messages, err := b.coord.srv().GetMessages(ctx, sessionID); err == nil && adapter.OpencodeMessagesRunning(messages) {
+			status = protocol.StatusRunning
+		}
 	}
 	cancel()
-	sm.mu.Lock()
-	if ps, ok := sm.sessions[sessionID]; ok {
-		if pending := pendingInteractionStatus(ps); pending != protocol.StatusIdle {
-			status = pending
-		}
-		ps.Status = status
-		ps.LastActivityAt = time.Now()
-	}
-	sm.mu.Unlock()
+	status = sm.applyOpencodeRuntimeStatus(sessionID, status)
 	sm.emitInteractionStatus(sessionID, status)
 }

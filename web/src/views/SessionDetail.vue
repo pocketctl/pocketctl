@@ -172,11 +172,11 @@
             :streaming="msg.streaming"
           />
 
-          <!-- OpenCode reasoning is intentionally collapsed by default. -->
-          <details v-else-if="msg.type === 'agent_reasoning'" class="reasoning-block">
-            <summary>{{ t('session.opencode_reasoning') }}</summary>
-            <div class="reasoning-content">{{ msg.content }}</div>
-          </details>
+          <OpenCodeReasoningCard
+            v-else-if="msg.type === 'agent_reasoning'"
+            :content="msg.content"
+            :streaming="msg.streaming"
+          />
 
           <!-- AskUserQuestion (question card, not a tool card) -->
           <QuestionCard
@@ -206,6 +206,11 @@
             :message="msg"
             @toggleExpand="msg.expanded = !msg.expanded"
             @toggleOutput="msg.outputExpanded = !msg.outputExpanded"
+          />
+
+          <OpenCodePartCard
+            v-else-if="isOpenCodeStructuredType(msg.type)"
+            :message="msg"
           />
 
           <!-- Error message (full-width block) -->
@@ -410,6 +415,7 @@ import { useWebSocket } from '../composables/useWebSocket'
 import { formatRelativeTime } from '../composables/useRelativeTime'
 import { mergeLocalCommands, POCKETCTL_LOCAL_COMMANDS } from '../utils/commands'
 import { mergeRevisionedPart } from '../utils/opencodePartMerge'
+import { mergeStructuredPart, type OpenCodeStructuredType } from '../utils/opencodeStructuredMerge'
 import SessionActions from '../components/SessionActions.vue'
 import AgentBadge from '../components/AgentBadge.vue'
 import CommandPopover from '../components/CommandPopover.vue'
@@ -424,6 +430,8 @@ import ToolCallCard from '../components/messages/ToolCallCard.vue'
 import QuestionCard from '../components/messages/QuestionCard.vue'
 import ApprovalCard from '../components/messages/ApprovalCard.vue'
 import OpenCodeQuestionCard from '../components/messages/OpenCodeQuestionCard.vue'
+import OpenCodeReasoningCard from '../components/messages/OpenCodeReasoningCard.vue'
+import OpenCodePartCard from '../components/messages/OpenCodePartCard.vue'
 import InteractiveChoiceCard from '../components/messages/InteractiveChoiceCard.vue'
 import DiffCard from '../components/messages/DiffCard.vue'
 import SubAgentFoldGroup from '../components/messages/SubAgentFoldGroup.vue'
@@ -445,6 +453,10 @@ const { t } = useLocale()
 
 const sessionId = computed(() => route.params.id as string)
 const messages = ref<any[]>([])
+const openCodeStructuredTypes = new Set<OpenCodeStructuredType>(['agent_file', 'agent_patch', 'agent_todo', 'agent_subtask', 'agent_profile'])
+function isOpenCodeStructuredType(type: string): type is OpenCodeStructuredType {
+  return openCodeStructuredTypes.has(type as OpenCodeStructuredType)
+}
 const allSessions = ref<any[]>([])
 // P2: per-agent message buckets for sub-agent events (keyed by agentId)
 const subagentMessages = ref<Record<string, any[]>>({})
@@ -563,12 +575,12 @@ watch(() => sessionId.value, (sid) => {
 })
 
 const statusClass = computed(() => {
-  const map: Record<string, string> = { running: 'running', busy: 'running', idle: 'running', completed: '', error: '', killed: '', disconnected: '', exited: '' }
+  const map: Record<string, string> = { running: 'running', busy: 'running', retry: 'running', idle: 'running', completed: '', error: '', killed: '', disconnected: '', exited: '' }
   return map[status.value] || ''
 })
 
 const statusLabel = computed(() => {
-  const STATUS_KEYS: Record<string, string> = { running: 'session.status.running', busy: 'session.status.busy', idle: 'session.status.idle', completed: 'session.status.completed', error: 'session.status.error', killed: 'session.status.killed', disconnected: 'session.status.disconnected', exited: 'session.status.exited' }
+  const STATUS_KEYS: Record<string, string> = { running: 'session.status.running', busy: 'session.status.busy', retry: 'session.status.retry', idle: 'session.status.idle', completed: 'session.status.completed', error: 'session.status.error', killed: 'session.status.killed', disconnected: 'session.status.disconnected', exited: 'session.status.exited' }
   return t(STATUS_KEYS[status.value] || 'session.status.running')
 })
 
@@ -644,7 +656,7 @@ const canInput = computed(() => !isDisconnected.value && (!isTerminal.value || i
 // Agent is actively generating (send button → stop button)
 // Agent is actively working — includes 'waiting' (tool execution in progress),
 // otherwise the timer would stop prematurely when a tool call is running.
-const isExecuting = computed(() => status.value === 'running' || status.value === 'busy' || status.value === 'waiting')
+const isExecuting = computed(() => status.value === 'running' || status.value === 'busy' || status.value === 'retry' || status.value === 'waiting')
 
 // --- Turn timer (status bar above the input area) ---
 // Timer is driven entirely by isExecuting transitions: starts on false→true
@@ -844,7 +856,7 @@ const milestones = computed(() => {
   const s = allSessions.value.find(s => s.session_id === sessionId.value)
   if (!s) return ms
   if (s.created_at) ms.push({ label: t('session.milestone_created'), time: formatTime(s.created_at), state: 'active' })
-  ms.push({ label: t('session.status.running'), time: formatTime(s.last_activity_at || s.updated_at || s.created_at), state: status.value === 'running' || status.value === 'busy' ? 'current' : 'active' })
+  ms.push({ label: t('session.status.running'), time: formatTime(s.last_activity_at || s.updated_at || s.created_at), state: status.value === 'running' || status.value === 'busy' || status.value === 'retry' ? 'current' : 'active' })
   ms.push({ label: statusLabel.value, time: '—', state: isTerminal.value || status.value === 'exited' ? 'active' : '' })
   return ms
 })
@@ -1518,6 +1530,17 @@ function processEvent(evt: any, target: any[] = messages.value, subagentOverride
       auto: evt.auto ?? evt.payload?.auto ?? false,
       overflow: evt.overflow ?? evt.payload?.overflow ?? false,
     })
+  } else if (isOpenCodeStructuredType(type)) {
+    const payload = evt.payload && typeof evt.payload === 'object' ? evt.payload : {}
+    mergeStructuredPart(target, {
+      ...payload,
+      ...evt,
+      type,
+      session_id: evt.session_id || payload.session_id,
+      message_id: evt.message_id || payload.message_id,
+      part_id: evt.part_id || payload.part_id,
+      todos: evt.todos || payload.todos || [],
+    })
   } else if (type === 'tool_call') {
     const callId = evt.call_id || evt.payload?.call_id
     if (!callId) return
@@ -1559,11 +1582,11 @@ function processEvent(evt: any, target: any[] = messages.value, subagentOverride
     const s = evt.status || evt.payload?.status
     if (s) status.value = s
     // A: first executing status from daemon ends the optimistic window.
-    if (s === 'running' || s === 'busy' || s === 'waiting') awaitingStart.value = false
+    if (s === 'running' || s === 'busy' || s === 'retry' || s === 'waiting') awaitingStart.value = false
     // During a session switch, capture the turn start time from the last
     // executing status (busy/running/waiting) so the timer can resume the
     // accumulated elapsed instead of restarting from zero.
-    if (sessionSwitching && (s === 'running' || s === 'busy' || s === 'waiting')) {
+    if (sessionSwitching && (s === 'running' || s === 'busy' || s === 'retry' || s === 'waiting')) {
       const ts = evt.last_activity_at || evt.payload?.last_activity_at
       if (ts) resumeStartAt = new Date(ts).getTime()
     }
@@ -1842,7 +1865,11 @@ onMounted(() => {
       const tempMsgs: any[] = []
       const tempSubagent: Record<string, any[]> = {}
       for (const evt of evts) processEvent(evt, tempMsgs, tempSubagent)
-      if (tempMsgs.length) messages.value = [...tempMsgs, ...messages.value]
+      if (tempMsgs.length) {
+        const existingPartKeys = new Set(messages.value.map((message: any) => message.partKey).filter(Boolean))
+        const uniqueTemp = tempMsgs.filter((message: any) => !message.partKey || !existingPartKeys.has(message.partKey))
+        messages.value = [...uniqueTemp, ...messages.value]
+      }
       // prepend older sub-agent events to each persistent bucket
       for (const [agentId, bucket] of Object.entries(tempSubagent)) {
         if (!subagentMessages.value[agentId]) subagentMessages.value[agentId] = []
@@ -1893,7 +1920,7 @@ onMounted(() => {
           // session refreshes last_activity_at every poll). Treat it as idle so the
           // timer doesn't start from zero on a session that isn't really working
           // (e.g. an opencode turn that was abandoned and fell out of the sync window).
-          if (st === 'running' || st === 'busy' || st === 'waiting') {
+          if (st === 'running' || st === 'busy' || st === 'retry' || st === 'waiting') {
             const la = meta.last_activity_at || meta.updated_at
             const ageMs = la ? Date.now() - new Date(la).getTime() : Infinity
             if (ageMs > 120000) st = 'idle'
@@ -1928,7 +1955,7 @@ onMounted(() => {
     nextTick(scrollToBottom)
   }))
 
-  for (const eventType of ['agent_reasoning', 'agent_retry', 'agent_compaction']) {
+  for (const eventType of ['agent_reasoning', 'agent_retry', 'agent_compaction', ...openCodeStructuredTypes]) {
     cleanups.push(onEvent(eventType, (msg: any) => {
       if (msg.session_id !== sessionId.value) return
       processEvent(msg)
@@ -2322,16 +2349,6 @@ onMounted(() => {
   white-space: nowrap;
   margin-right: 4px;
 }
-.reasoning-block {
-  align-self: stretch;
-  max-width: 720px;
-  color: var(--fg-secondary);
-  font-size: 12px;
-  border-left: 2px solid var(--border);
-  padding: 4px 10px;
-}
-.reasoning-block summary { cursor: pointer; color: var(--fg-tertiary); user-select: none; }
-.reasoning-content { margin-top: 8px; white-space: pre-wrap; line-height: 1.55; }
 .opencode-notice {
   align-self: flex-start;
   max-width: 720px;

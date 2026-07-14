@@ -11,10 +11,7 @@ func mkMsg(id, role, model string, created, completed int64, parts ...OpencodePa
 	m.Info.Time.Created = created
 	m.Info.Time.Completed = completed
 	if model != "" {
-		m.Info.Model = &struct {
-			ProviderID string `json:"providerID"`
-			ModelID    string `json:"modelID"`
-		}{ProviderID: "opencode", ModelID: model}
+		m.Info.Model = &OpencodeModelRef{ProviderID: "opencode", ModelID: model}
 	}
 	return m
 }

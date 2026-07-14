@@ -34,7 +34,7 @@ export function shouldShowSessionAgentPicker(
 }
 
 export function sessionAgentSwitchDisabled(status: string, offline: boolean, submitting: boolean): boolean {
-  return offline || submitting || ['running', 'busy', 'waiting', 'waiting_approval', 'waiting_question'].includes(status)
+  return offline || submitting || ['running', 'busy', 'retry', 'waiting', 'waiting_approval', 'waiting_question'].includes(status)
 }
 
 export function upsertInteractionRequest(

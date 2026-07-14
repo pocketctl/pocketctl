@@ -19,7 +19,7 @@
     <div v-for="s in sortedSessions" :key="s.session_id" class="session-group">
       <div :class="['session-row', { 'pending-delete': s.__pendingDelete }]" @click="!s.__pendingDelete && $router.push(`/session/${s.session_id}`)">
         <span class="status-indicator" :class="getEffectiveStatus(s)">
-          <span v-if="getEffectiveStatus(s) === 'running' || getEffectiveStatus(s) === 'busy'" class="pulse-ring"></span>
+          <span v-if="getEffectiveStatus(s) === 'running' || getEffectiveStatus(s) === 'busy' || getEffectiveStatus(s) === 'retry'" class="pulse-ring"></span>
           <span v-if="getEffectiveStatus(s) === 'completed'" class="icon">✓</span>
           <span v-else-if="getEffectiveStatus(s) === 'killed'" class="icon">✕</span>
         </span>

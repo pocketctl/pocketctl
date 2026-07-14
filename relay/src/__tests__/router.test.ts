@@ -291,16 +291,23 @@ describe('Router - event insertion updates last_activity_at', () => {
       type: 'agent_text', session_id: 'test-sid', text: 'final answer', streaming: false,
       message_id: 'msg_1', part_id: 'prt_text', revision: 3, replace: true,
     }
+    const structured = {
+      type: 'agent_patch', session_id: 'test-sid', message_id: 'msg_1', part_id: 'prt_patch',
+      hash: 'abc123', files: ['a.go', 'b.go'],
+    }
 
     router.handleDaemonMessage('daemon-1', reasoning)
     router.handleDaemonMessage('daemon-1', replacement)
+    router.handleDaemonMessage('daemon-1', structured)
     await tick()
 
     expect(clientWs._sent).toContainEqual(reasoning)
     expect(clientWs._sent).toContainEqual(replacement)
+    expect(clientWs._sent).toContainEqual(structured)
     const inserts = pool._queries.filter((q: any) => q.sql.includes('INSERT INTO events'))
     expect(inserts.some((q: any) => q.params[1] === 'agent_reasoning' && q.params[2]?.includes('"part_id":"prt_reason"'))).toBe(true)
     expect(inserts.some((q: any) => q.params[1] === 'agent_text' && q.params[2]?.includes('"replace":true'))).toBe(true)
+    expect(inserts.some((q: any) => q.params[1] === 'agent_patch' && q.params[2]?.includes('"files":["a.go","b.go"]'))).toBe(true)
   })
 })
 

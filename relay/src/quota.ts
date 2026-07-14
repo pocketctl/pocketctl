@@ -52,7 +52,7 @@ const ACTIVE_ROOT_SESSION_SQL = `
   SELECT COUNT(*)::int AS active_count
   FROM sessions
   WHERE user_id = $1
-    AND status IN ('running', 'busy', 'idle', 'waiting', 'waiting_approval')
+    AND status IN ('running', 'busy', 'retry', 'idle', 'waiting', 'waiting_approval', 'waiting_question')
     AND COALESCE(is_subagent, false) = false
     AND session_id NOT LIKE 'pending-%'`
 

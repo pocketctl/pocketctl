@@ -522,6 +522,7 @@ body {
 .status-dot.offline { background: var(--fg-tertiary); }
 .status-dot.running { background: var(--success); animation: pulse-green 1.5s infinite; }
 .status-dot.busy { background: var(--warning); animation: pulse-amber 1.5s infinite; }
+.status-dot.retry { background: var(--warning); animation: pulse-amber 1.5s infinite; }
 .status-dot.idle { background: #eab308; }
 .status-dot.completed { background: var(--accent); }
 .status-dot.error { background: var(--error); }

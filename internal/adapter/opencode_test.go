@@ -75,7 +75,7 @@ func TestConvertOpencodePart_StepFinish(t *testing.T) {
 }
 
 func TestConvertOpencodePart_Skipped(t *testing.T) {
-	for _, typ := range []string{"step-start", "patch", "file"} {
+	for _, typ := range []string{"step-start", "unknown"} {
 		p := &OpencodePart{Type: typ}
 		if got := ConvertOpencodePart(p, "assistant", "glm-5"); got != nil {
 			t.Fatalf("%s should map to nil, got %+v", typ, got)

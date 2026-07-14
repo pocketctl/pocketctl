@@ -977,7 +977,7 @@ export class Router {
             db.updateSessionCost(this.pool, sessionId, parseFloat(msg.cost_usd)).catch(console.error);
           }
           const pending = this.findPendingSessionOperation(daemonId, msg.request_id);
-          if (pending && ['running', 'busy', 'idle', 'waiting', 'waiting_approval', 'waiting_question'].includes(msg.status)) {
+          if (pending && ['running', 'busy', 'retry', 'idle', 'waiting', 'waiting_approval', 'waiting_question'].includes(msg.status)) {
             this.settlePendingSessionOperation(pending);
           }
           if (userId) this.broadcastQuotaStatus(userId).catch(console.error);
@@ -1252,7 +1252,7 @@ export class Router {
           let outbound = msg;
           if (msg.type === 'user_message' && client.userId !== null) {
             const status = await db.getSessionStatus(this.pool, msg.session_id);
-            const isActive = ['running', 'busy', 'idle', 'waiting', 'waiting_approval', 'waiting_question'].includes(status || '');
+            const isActive = ['running', 'busy', 'retry', 'idle', 'waiting', 'waiting_approval', 'waiting_question'].includes(status || '');
             if (!isActive) {
               const requestId = typeof msg.request_id === 'string' && msg.request_id
                 ? msg.request_id
@@ -1521,7 +1521,7 @@ export class Router {
       const metrics = this.daemonMetrics.get(daemonId);
       const countsRow = await this.pool.query(
         `SELECT COUNT(*)::int AS total,
-                COUNT(*) FILTER (WHERE status IN ('running','busy'))::int AS active
+                COUNT(*) FILTER (WHERE status IN ('running','busy','retry'))::int AS active
          FROM sessions
          WHERE user_id = $1 AND daemon_id = $2 AND session_id NOT LIKE 'pending-%'`,
         [userId, daemonId]
@@ -1561,7 +1561,7 @@ export class Router {
 
       const countsRow = await this.pool.query(
         `SELECT COUNT(*)::int AS total,
-                COUNT(*) FILTER (WHERE status IN ('running','busy'))::int AS active
+                COUNT(*) FILTER (WHERE status IN ('running','busy','retry'))::int AS active
          FROM sessions
          WHERE user_id = $1 AND daemon_id = $2 AND session_id NOT LIKE 'pending-%'`,
         [userId, daemonId]

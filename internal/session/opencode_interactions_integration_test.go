@@ -163,6 +163,99 @@ func TestOpenCodeP1IntegrationFlow(t *testing.T) {
 	}
 }
 
+func TestOpenCodePerSessionRecoveryIncludesLegacyInteractions(t *testing.T) {
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.URL.Path == "/api/health":
+			json.NewEncoder(w).Encode(map[string]bool{"healthy": true})
+		case r.Method == http.MethodGet && r.URL.Path == "/permission":
+			json.NewEncoder(w).Encode([]map[string]any{
+				{"requestID": "per_legacy", "sessionID": "ses_1", "permission": "bash"},
+				{"requestID": "per_other", "sessionID": "ses_other", "permission": "edit"},
+			})
+		case r.Method == http.MethodGet && r.URL.Path == "/question":
+			json.NewEncoder(w).Encode([]map[string]any{
+				{"requestID": "que_legacy", "sessionID": "ses_1", "questions": []map[string]any{{"question": "Continue?"}}},
+				{"requestID": "que_other", "sessionID": "ses_other", "questions": []map[string]any{{"question": "Other?"}}},
+			})
+		case r.Method == http.MethodGet && (r.URL.Path == "/api/session/ses_1/permission" || r.URL.Path == "/api/session/ses_1/question"):
+			json.NewEncoder(w).Encode([]any{})
+		default:
+			http.Error(w, fmt.Sprintf("unexpected %s %s", r.Method, r.URL.Path), http.StatusNotFound)
+		}
+	})
+
+	openCodeServer := startFakeOpenCodeServer(t, handler)
+	out := make(chan protocol.DaemonEvent, 16)
+	sm := NewSessionManager(out)
+	coord := newOpencodeCoordinator(sm)
+	coord.mu.Lock()
+	coord.server = openCodeServer
+	coord.started = true
+	coord.mu.Unlock()
+	sm.sessions["ses_1"] = &ProcessState{
+		SessionID: "ses_1", Agent: adapter.AgentOpencode, Status: protocol.StatusIdle,
+		PendingPermissions: make(map[string]PendingOpenCodePermission),
+		PendingQuestions:   make(map[string]PendingOpenCodeQuestion),
+	}
+
+	coord.reconcileSessionInteractions(context.Background(), "ses_1")
+	if event := waitDaemonEvent(t, out, "approval_request", "per_legacy"); event.SessionID != "ses_1" || event.PermissionVersion != adapter.PermissionVersionLegacy {
+		t.Fatalf("legacy permission event=%+v", event)
+	}
+	if event := waitDaemonEvent(t, out, "question_request", "que_legacy"); event.SessionID != "ses_1" {
+		t.Fatalf("legacy question event=%+v", event)
+	}
+
+	sm.mu.RLock()
+	state := sm.sessions["ses_1"]
+	permissionVersion := state.PendingPermissions["per_legacy"].ProtocolVersion
+	questionVersion := state.PendingQuestions["que_legacy"].ProtocolVersion
+	_, hasOtherPermission := state.PendingPermissions["per_other"]
+	_, hasOtherQuestion := state.PendingQuestions["que_other"]
+	sm.mu.RUnlock()
+	if permissionVersion != adapter.PermissionVersionLegacy || questionVersion != adapter.PermissionVersionLegacy || hasOtherPermission || hasOtherQuestion {
+		t.Fatal("per-session recovery must filter legacy snapshots to the tracked session")
+	}
+}
+
+func TestOpenCodeSyncEmitsInitialEmptyTodoSnapshot(t *testing.T) {
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.URL.Path == "/api/health":
+			json.NewEncoder(w).Encode(map[string]bool{"healthy": true})
+		case r.Method == http.MethodGet && r.URL.Path == "/session/status":
+			json.NewEncoder(w).Encode(map[string]any{"ses_1": map[string]any{"type": "idle"}})
+		case r.Method == http.MethodGet && r.URL.Path == "/session/ses_1/message":
+			json.NewEncoder(w).Encode([]any{})
+		case r.Method == http.MethodGet && r.URL.Path == "/session/ses_1/todo":
+			json.NewEncoder(w).Encode([]any{})
+		default:
+			http.Error(w, fmt.Sprintf("unexpected %s %s", r.Method, r.URL.Path), http.StatusNotFound)
+		}
+	})
+
+	openCodeServer := startFakeOpenCodeServer(t, handler)
+	out := make(chan protocol.DaemonEvent, 16)
+	sm := NewSessionManager(out)
+	coord := newOpencodeCoordinator(sm)
+	coord.mu.Lock()
+	coord.server = openCodeServer
+	coord.started = true
+	coord.mu.Unlock()
+	sm.sessions["ses_1"] = &ProcessState{SessionID: "ses_1", Agent: adapter.AgentOpencode, Status: protocol.StatusIdle, Cwd: "/repo"}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go coord.syncLoop(ctx, "ses_1", false)
+	event := waitDaemonEvent(t, out, "agent_todo", "")
+	if event.SessionID != "ses_1" || event.PartID != "todo:ses_1" || len(event.Todos) != 0 {
+		t.Fatalf("initial Todo snapshot=%+v", event)
+	}
+}
+
 func startFakeOpenCodeServer(t *testing.T, handler http.Handler) *adapter.OpencodeServer {
 	t.Helper()
 	httpServer := httptest.NewServer(handler)

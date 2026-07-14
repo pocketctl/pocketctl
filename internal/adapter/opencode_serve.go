@@ -170,7 +170,8 @@ func (s *OpencodeServer) Healthy(ctx context.Context) bool {
 // OpencodeModelRef identifies a model in opencode's provider/model space.
 type OpencodeModelRef struct {
 	ProviderID string `json:"providerID"`
-	ID         string `json:"id"`
+	ID         string `json:"id,omitempty"`
+	ModelID    string `json:"modelID,omitempty"`
 	Variant    string `json:"variant,omitempty"`
 }
 
@@ -457,6 +458,32 @@ func (s *OpencodeServer) ListSessions(ctx context.Context) ([]OpencodeSessionSum
 func (s *OpencodeServer) GetMessages(ctx context.Context, sessionID string) ([]OpencodeMessageWithParts, error) {
 	var out []OpencodeMessageWithParts
 	if err := s.get(ctx, "/session/"+url.PathEscape(sessionID)+"/message", &out); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// OpencodeSessionStatus is the native /session/status union. Type is one of
+// idle, busy, or retry; retry carries the remaining fields.
+type OpencodeSessionStatus struct {
+	Type    string `json:"type"`
+	Attempt int    `json:"attempt,omitempty"`
+	Message string `json:"message,omitempty"`
+	Next    int64  `json:"next,omitempty"`
+}
+
+func (s *OpencodeServer) ListSessionStatuses(ctx context.Context, directory string) (map[string]OpencodeSessionStatus, error) {
+	out := make(map[string]OpencodeSessionStatus)
+	if err := s.get(ctx, withDirectory("/session/status", directory), &out); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (s *OpencodeServer) ListTodos(ctx context.Context, sessionID, directory string) ([]protocol.TodoItem, error) {
+	var out []protocol.TodoItem
+	path := "/session/" + url.PathEscape(sessionID) + "/todo"
+	if err := s.get(ctx, withDirectory(path, directory), &out); err != nil {
 		return nil, err
 	}
 	return out, nil
@@ -805,6 +832,21 @@ func ParseQuestionResolution(props json.RawMessage) (requestID, sessionID string
 	}
 	requestID = firstNonEmpty(wire.ID, wire.RequestID, wire.QuestionID)
 	return requestID, wire.SessionID, wire.Answers, requestID != "" && wire.SessionID != ""
+}
+
+func ParseTodoUpdated(props json.RawMessage) (sessionID string, todos []protocol.TodoItem, ok bool) {
+	raw, valid := nestedObject(props, "data")
+	if !valid {
+		return "", nil, false
+	}
+	var wire struct {
+		SessionID string              `json:"sessionID"`
+		Todos     []protocol.TodoItem `json:"todos"`
+	}
+	if json.Unmarshal(raw, &wire) != nil || wire.SessionID == "" {
+		return "", nil, false
+	}
+	return wire.SessionID, wire.Todos, true
 }
 
 func nestedObject(props json.RawMessage, keys ...string) (json.RawMessage, bool) {

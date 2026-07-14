@@ -45,9 +45,9 @@ pocketctl 是一个远程 AI 编码代理控制系统。它让你在远程机器
 
 三种 agent 共用一套"零配置发现 + 实时同步 + 跨设备续聊"能力 —— 你在终端正常运行 agent，daemon 自动发现并同步到客户端，可在客户端接着对话。
 
-**opencode 的特殊性**：它是 client/server 架构（会话存在 SQLite，不是可 tail 的 JSONL 文件）。daemon 托管一个共享的 `opencode serve` 进程，通过其 HTTP API 驱动会话、轮询消息历史做实时同步、发现终端会话。由于 opencode 不向第三方 API 暴露权限请求，daemon 会话默认自动放行工具（等价 Claude 的 `bypassPermissions`）；终端里运行的 opencode 仍按其自身配置在终端应答权限。
+**opencode 的特殊性**：它是 client/server 架构（会话存在 SQLite，不是可 tail 的 JSONL 文件）。daemon 托管一个共享的 `opencode serve` 进程，通过其 HTTP API 驱动会话、轮询消息历史做实时同步、发现终端会话，并同步 slash command、Agent、permission 与 question。由另一个终端 OpenCode 进程已经驱动的在途请求仍归该终端处理；从 PocketCtl 发起的新回合由 daemon serve 完整接管。
 
-opencode 的文本与思考 Part 会按 identity/revision 增量同步，并在 turn 完成时用最终快照对账，避免长回复截断或重复；Web 和 iOS 默认折叠思考过程，并显示重试、上下文压缩及 Assistant 错误提示。终端 opencode 的权限询问仍只能在终端处理。
+opencode 的文本与思考 Part 会按 identity/revision 增量同步，并在 turn 完成时用最终快照对账，避免长回复截断或重复；Web 和 iOS 默认折叠思考过程，并以结构化卡片显示 File、Patch、Todo、Subtask 与 Agent Part。会话状态优先采用 OpenCode 原生 busy/retry/idle；daemon 重启后会重新查询 permission/question，恢复未处理卡片。
 
 > 想接入新的 agent？见 [docs/adding-an-agent.md](docs/adding-an-agent.md)——注册一个 `Provider` 即可，无需改散落的 switch。
 

@@ -71,6 +71,16 @@ type DaemonEvent struct {
 	RetryAt                int64                `json:"retry_at,omitempty"` // retry creation time in source milliseconds
 	Auto                   bool                 `json:"auto,omitempty"`     // compaction was automatically triggered
 	Overflow               bool                 `json:"overflow,omitempty"` // compaction followed a context overflow
+	Mime                   string               `json:"mime,omitempty"`
+	Filename               string               `json:"filename,omitempty"`
+	URL                    string               `json:"url,omitempty"`
+	PartSource             json.RawMessage      `json:"part_source,omitempty"`
+	Hash                   string               `json:"hash,omitempty"`
+	Files                  []string             `json:"files,omitempty"`
+	Prompt                 string               `json:"prompt,omitempty"`
+	Description            string               `json:"description,omitempty"`
+	ProfileName            string               `json:"profile_name,omitempty"`
+	Todos                  []TodoItem           `json:"todos,omitempty"`
 	CostUSD                float64              `json:"cost_usd,omitempty"`
 	Turns                  int                  `json:"turns,omitempty"`
 	RiskLevel              string               `json:"risk_level,omitempty"`
@@ -186,6 +196,14 @@ type QuestionInfo struct {
 	Options  []QuestionOption `json:"options,omitempty"`
 	Multiple bool             `json:"multiple,omitempty"`
 	Custom   bool             `json:"custom,omitempty"`
+}
+
+// TodoItem is OpenCode's session-level task snapshot. Status and priority stay
+// as source strings so newer OpenCode values remain forward-compatible.
+type TodoItem struct {
+	Content  string `json:"content"`
+	Status   string `json:"status"`
+	Priority string `json:"priority"`
 }
 
 const (
@@ -341,6 +359,8 @@ type SessionConfig struct {
 // Session states
 const (
 	StatusRunning         = "running"
+	StatusBusy            = "busy"
+	StatusRetry           = "retry"
 	StatusWaitingApproval = "waiting_approval"
 	StatusWaitingQuestion = "waiting_question"
 	StatusIdle            = "idle"

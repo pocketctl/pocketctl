@@ -52,15 +52,12 @@ type OpencodeMessageWithParts struct {
 // message.updated payload. Carries the role + model that the message's parts
 // inherit.
 type OpencodeMessage struct {
-	ID        string          `json:"id"`
-	SessionID string          `json:"sessionID"`
-	Role      string          `json:"role"` // "user" | "assistant"
-	Error     json.RawMessage `json:"error,omitempty"`
-	Model     *struct {
-		ProviderID string `json:"providerID"`
-		ModelID    string `json:"modelID"`
-	} `json:"model,omitempty"`
-	Time struct {
+	ID        string            `json:"id"`
+	SessionID string            `json:"sessionID"`
+	Role      string            `json:"role"` // "user" | "assistant"
+	Error     json.RawMessage   `json:"error,omitempty"`
+	Model     *OpencodeModelRef `json:"model,omitempty"`
+	Time      struct {
 		Created   int64 `json:"created"`
 		Completed int64 `json:"completed"` // assistant messages: set when the turn finishes
 	} `json:"time"`
@@ -99,6 +96,34 @@ type OpencodePart struct {
 	// compaction
 	Auto     bool `json:"auto,omitempty"`
 	Overflow bool `json:"overflow,omitempty"`
+
+	// file
+	Mime       string          `json:"mime,omitempty"`
+	Filename   string          `json:"filename,omitempty"`
+	URL        string          `json:"url,omitempty"`
+	PartSource json.RawMessage `json:"source,omitempty"`
+
+	// patch
+	Hash  string   `json:"hash,omitempty"`
+	Files []string `json:"files,omitempty"`
+
+	// subtask / agent
+	Prompt      string            `json:"prompt,omitempty"`
+	Description string            `json:"description,omitempty"`
+	Agent       string            `json:"agent,omitempty"`
+	Model       *OpencodeModelRef `json:"model,omitempty"`
+	Command     string            `json:"command,omitempty"`
+	Name        string            `json:"name,omitempty"`
+}
+
+func (m *OpencodeModelRef) Display() string {
+	if m == nil || m.ModelID == "" {
+		return ""
+	}
+	if m.ProviderID == "" {
+		return m.ModelID
+	}
+	return m.ProviderID + "/" + m.ModelID
 }
 
 // OpencodeToolState is the tool part's evolving state (pending→running→completed/error).
@@ -168,12 +193,12 @@ type OpencodeSync struct {
 	messageErrors map[string]string // messageID → last emitted raw error
 	seenCalls     map[string]bool   // callID → tool_call already emitted
 	emitUser      bool              // whether to emit user_text parts
-	lastStatus    string            // last emitted session_status (dedupe)
+	lastStatusKey string            // last emitted status plus native retry metadata
 
 	// Turn-completion tracking. opencode polls every ~1s and only emits a
 	// session_status on a derived-status change. A fast turn whose entire
 	// running window falls between two polls is never observed as "running",
-	// and its trailing "idle" is deduped away (lastStatus already idle) — so
+	// and its trailing "idle" is deduped away (lastStatusKey already idle) — so
 	// the turn emits zero session_status events and clients' optimistic timers
 	// never resolve. We detect such turns by watching the latest assistant
 	// completion timestamp and force an idle when it advances.
@@ -204,6 +229,13 @@ func NewOpencodeSync(sessionID string, emitUser bool) *OpencodeSync {
 // Diff returns events for anything new/changed since the last snapshot. Messages
 // are processed oldest-first (by time.created) for conversational order.
 func (s *OpencodeSync) Diff(msgs []OpencodeMessageWithParts) []protocol.DaemonEvent {
+	return s.DiffWithNativeStatus(msgs, nil)
+}
+
+// DiffWithNativeStatus prefers OpenCode's /session/status value when present.
+// A nil status retains the P0 message-snapshot inference for older OpenCode
+// versions and terminal sessions owned by a different OpenCode process.
+func (s *OpencodeSync) DiffWithNativeStatus(msgs []OpencodeMessageWithParts, native *OpencodeSessionStatus) []protocol.DaemonEvent {
 	ordered := make([]OpencodeMessageWithParts, len(msgs))
 	copy(ordered, msgs)
 	sort.SliceStable(ordered, func(i, j int) bool {
@@ -273,27 +305,30 @@ func (s *OpencodeSync) Diff(msgs []OpencodeMessageWithParts) []protocol.DaemonEv
 	// opencode never streams an explicit "turn done" event, so we infer it.
 	// Two triggers:
 	//   1) the derived status changed (running<->idle) — the normal path, and
-	//      also fires on the first Diff (lastStatus == "").
+	//      also fires on the first Diff (lastStatusKey == "").
 	//   2) a new assistant turn *completed* since the last poll even though the
 	//      derived status is still idle — a fast turn whose "running" window
 	//      fell between two polls. Without this it emits zero session_status.
 	status := s.deriveStatus(ordered)
+	statusKey := status
+	statusEvent := protocol.DaemonEvent{Type: "session_status", SessionID: s.sessionID, Status: status}
+	if native != nil && (native.Type == protocol.StatusBusy || native.Type == protocol.StatusRetry || native.Type == protocol.StatusIdle) {
+		status = native.Type
+		statusEvent.Status = native.Type
+		statusEvent.Attempt = native.Attempt
+		statusEvent.Error = native.Message
+		statusEvent.RetryAt = native.Next
+		encoded, _ := json.Marshal(native)
+		statusKey = string(encoded)
+	}
 	completedAt := latestCompletedAssistant(ordered)
 	switch {
-	case status != "" && status != s.lastStatus:
-		s.lastStatus = status
-		out = append(out, protocol.DaemonEvent{
-			Type:      "session_status",
-			SessionID: s.sessionID,
-			Status:    status,
-		})
+	case status != "" && statusKey != s.lastStatusKey:
+		s.lastStatusKey = statusKey
+		out = append(out, statusEvent)
 	case s.seededCompletion && completedAt > s.lastCompletedAt && status == protocol.StatusIdle:
-		s.lastStatus = protocol.StatusIdle
-		out = append(out, protocol.DaemonEvent{
-			Type:      "session_status",
-			SessionID: s.sessionID,
-			Status:    protocol.StatusIdle,
-		})
+		s.lastStatusKey = statusKey
+		out = append(out, statusEvent)
 	}
 	if completedAt > s.lastCompletedAt {
 		s.lastCompletedAt = completedAt
@@ -440,6 +475,32 @@ func ConvertOpencodePart(p *OpencodePart, role, model string) []protocol.DaemonE
 			Overflow:  p.Overflow,
 		}}
 
+	case "file":
+		return []protocol.DaemonEvent{{
+			Type: "agent_file", MessageID: p.MessageID, PartID: p.ID,
+			Mime: p.Mime, Filename: p.Filename, URL: p.URL,
+			PartSource: append(json.RawMessage(nil), p.PartSource...),
+		}}
+
+	case "patch":
+		return []protocol.DaemonEvent{{
+			Type: "agent_patch", MessageID: p.MessageID, PartID: p.ID,
+			Hash: p.Hash, Files: append([]string(nil), p.Files...),
+		}}
+
+	case "subtask":
+		return []protocol.DaemonEvent{{
+			Type: "agent_subtask", MessageID: p.MessageID, PartID: p.ID,
+			Prompt: p.Prompt, Description: p.Description, Agent: p.Agent,
+			Model: p.Model.Display(), Command: p.Command,
+		}}
+
+	case "agent":
+		return []protocol.DaemonEvent{{
+			Type: "agent_profile", MessageID: p.MessageID, PartID: p.ID,
+			ProfileName: p.Name, PartSource: append(json.RawMessage(nil), p.PartSource...),
+		}}
+
 	case "tool":
 		if p.State == nil {
 			return nil
@@ -474,7 +535,7 @@ func ConvertOpencodePart(p *OpencodePart, role, model string) []protocol.DaemonE
 		}}
 
 	default:
-		// step-start / patch / file — not surfaced.
+		// step-start and unknown future Parts are not surfaced.
 		return nil
 	}
 }

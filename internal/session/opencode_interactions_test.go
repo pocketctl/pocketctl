@@ -1,8 +1,10 @@
 package session
 
 import (
+	"context"
 	"encoding/json"
 	"testing"
+	"time"
 
 	"github.com/pocketctl/pocketctl/internal/adapter"
 	"github.com/pocketctl/pocketctl/internal/protocol"
@@ -17,6 +19,41 @@ func newOpenCodeInteractionManager() (*SessionManager, chan protocol.DaemonEvent
 		PendingQuestions:   make(map[string]PendingOpenCodeQuestion),
 	}
 	return sm, out
+}
+
+func TestOpenCodeStartSyncTriggersPerSessionRecovery(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	recovered := make(chan string, 1)
+	coordinator := &opencodeCoordinator{
+		ctx:     ctx,
+		tracked: make(map[string]context.CancelFunc),
+		recoverSession: func(_ context.Context, sessionID string) {
+			recovered <- sessionID
+		},
+	}
+	coordinator.startSync("ses_recovered", false)
+	select {
+	case sessionID := <-recovered:
+		if sessionID != "ses_recovered" {
+			t.Fatalf("recovered session=%q", sessionID)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("startSync did not trigger per-session interaction recovery")
+	}
+	cancel()
+}
+
+func TestOpenCodeNativeStatusKeepsPendingInteractionPriority(t *testing.T) {
+	sm, _ := newOpenCodeInteractionManager()
+	sm.sessions["ses_1"].PendingQuestions["que_1"] = PendingOpenCodeQuestion{RequestID: "que_1"}
+	if got := sm.applyOpencodeRuntimeStatus("ses_1", protocol.StatusRetry); got != protocol.StatusWaitingQuestion {
+		t.Fatalf("effective status=%q want waiting_question", got)
+	}
+	delete(sm.sessions["ses_1"].PendingQuestions, "que_1")
+	if got := sm.applyOpencodeRuntimeStatus("ses_1", protocol.StatusBusy); got != protocol.StatusBusy {
+		t.Fatalf("effective status=%q want busy", got)
+	}
 }
 
 func TestOpenCodeInteractionStateMultiplePendingAndDedup(t *testing.T) {

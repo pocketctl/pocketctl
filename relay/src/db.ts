@@ -952,7 +952,7 @@ export async function listSubagentsByParent(pool: pg.Pool, parentSessionId: stri
 export async function cleanStaleSessions(pool: pg.Pool): Promise<void> {
   await pool.query(`
     UPDATE sessions SET status = 'completed', updated_at = NOW()
-    WHERE status IN ('running', 'busy')
+    WHERE status IN ('running', 'busy', 'retry')
       AND daemon_id NOT IN (SELECT daemon_id FROM daemons WHERE status = 'online' AND last_heartbeat > NOW() - INTERVAL '5 minutes')
   `);
   // Also purge ghost pending-* sessions older than 10 minutes
@@ -965,19 +965,19 @@ export async function cleanStaleSessions(pool: pg.Pool): Promise<void> {
 
 /**
  * Reconcile a daemon's sessions against the live set it reports on (re)connect.
- * Any session this daemon owns that is still 'running'/'busy' in the DB but NOT
+ * Any session this daemon owns that is still 'running'/'busy'/'retry' in the DB but NOT
  * in `activeSessionIds` is a zombie: its agent process ended without a terminal
  * session_status (daemon restart / machine sleep / crash mid-turn), so the row
  * is frozen "executing" forever — cleanStaleSessions can't help while the daemon
  * is online. Close them. An empty `activeSessionIds` (daemon has no live sessions)
- * correctly closes all of this daemon's lingering running/busy rows.
+ * correctly closes all of this daemon's lingering executing rows.
  * Returns the closed session IDs so the caller can notify clients.
  */
 export async function reconcileDaemonSessions(pool: pg.Pool, daemonId: string, activeSessionIds: string[]): Promise<string[]> {
   const res = await pool.query(
     `UPDATE sessions SET status = 'completed', updated_at = NOW()
      WHERE daemon_id = $1
-       AND status IN ('running', 'busy')
+       AND status IN ('running', 'busy', 'retry')
        AND session_id NOT LIKE 'pending-%'
        AND session_id <> ALL($2::text[])
      RETURNING session_id`,
@@ -1978,12 +1978,12 @@ export async function getTokensByDaemon(pool: pg.Pool, userId: number, daemonId:
   };
 }
 
-/** Per-daemon session counts (active running/busy + total) for a user. */
+/** Per-daemon session counts (active running/busy/retry + total) for a user. */
 export async function getSessionCountsByUser(pool: pg.Pool, userId: number): Promise<Record<string, { active: number; total: number }>> {
   const result = await pool.query(`
     SELECT daemon_id,
       COUNT(*)::int AS total,
-      COUNT(*) FILTER (WHERE status IN ('running','busy'))::int AS active
+      COUNT(*) FILTER (WHERE status IN ('running','busy','retry'))::int AS active
     FROM sessions
     WHERE user_id = $1 AND daemon_id IS NOT NULL AND session_id NOT LIKE 'pending-%'
     GROUP BY daemon_id

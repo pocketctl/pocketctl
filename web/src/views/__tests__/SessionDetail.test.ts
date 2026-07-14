@@ -32,13 +32,13 @@ describe('exitReasonLabel', () => {
 
 describe('statusLabel', () => {
   const labels: Record<string, string> = {
-    running: 'Running', busy: 'Running', idle: 'Idle',
+    running: 'Running', busy: 'Running', retry: 'Retrying', idle: 'Idle',
     waiting_approval: 'Waiting', exited: 'Exited', disconnected: 'Disconnected',
     completed: 'Completed', error: 'Error', killed: 'Killed',
   }
 
   test('all statuses have labels', () => {
-    const statuses = ['running', 'busy', 'idle', 'waiting_approval', 'exited', 'disconnected', 'completed', 'error', 'killed']
+    const statuses = ['running', 'busy', 'retry', 'idle', 'waiting_approval', 'exited', 'disconnected', 'completed', 'error', 'killed']
     for (const s of statuses) {
       expect(labels[s]).toBeDefined()
     }
@@ -46,6 +46,10 @@ describe('statusLabel', () => {
 
   test('busy shows as Running', () => {
     expect(labels['busy']).toBe('Running')
+  })
+
+  test('retry exposes the native retry state', () => {
+    expect(labels['retry']).toBe('Retrying')
   })
 })
 
@@ -89,7 +93,7 @@ describe('terminalBadge computed', () => {
 
 describe('showInput computed', () => {
   function shouldShowInput(effectiveStatus: string, isDaemonOnline: boolean): boolean {
-    return ['running', 'busy', 'idle', 'waiting_approval'].includes(effectiveStatus) ||
+    return ['running', 'busy', 'retry', 'idle', 'waiting_approval'].includes(effectiveStatus) ||
       (effectiveStatus === 'exited' && isDaemonOnline)
   }
 
@@ -347,7 +351,7 @@ describe('turn timer resumeStartAt recovery', () => {
   function processStatusEvent(evt: any, sessionSwitching: boolean): { status: string; resumeStartAt: number | null } {
     const status = evt.status || evt.payload?.status
     let resumeStartAt: number | null = null
-    if (sessionSwitching && (status === 'running' || status === 'busy' || status === 'waiting')) {
+    if (sessionSwitching && (status === 'running' || status === 'busy' || status === 'retry' || status === 'waiting')) {
       const ts = evt.last_activity_at || evt.payload?.last_activity_at
       if (ts) resumeStartAt = new Date(ts).getTime()
     }
@@ -362,6 +366,11 @@ describe('turn timer resumeStartAt recovery', () => {
   test('running status sets resumeStartAt', () => {
     const r = processStatusEvent({ status: 'running', last_activity_at: '2026-06-24T06:42:00Z' }, true)
     expect(r.resumeStartAt).toBe(new Date('2026-06-24T06:42:00Z').getTime())
+  })
+
+  test('retry status sets resumeStartAt', () => {
+    const r = processStatusEvent({ status: 'retry', last_activity_at: '2026-06-24T06:42:30Z' }, true)
+    expect(r.resumeStartAt).toBe(new Date('2026-06-24T06:42:30Z').getTime())
   })
 
   test('idle status does NOT set resumeStartAt', () => {

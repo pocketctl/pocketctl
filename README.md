@@ -10,7 +10,7 @@ Official website: [pocketctl.me](https://www.pocketctl.me) · Web dashboard: [po
 
 - 🤖 **Multi-agent** — Claude Code, Codex, and OpenCode, behind one unified "zero-config discovery + live sync + cross-device continue" model. Run an agent in your terminal; the daemon discovers it and syncs it to your client where you can keep chatting. (OpenCode is a client/server agent — the daemon hosts a shared `opencode serve` and drives it over its HTTP API. To add a new agent, register a `Provider` — see [docs/adding-an-agent.md](docs/adding-an-agent.md).)
 - 🖥️ **Real-time Monitoring** — Watch your AI coding sessions live from anywhere
-- 🧩 **Reliable OpenCode output** — Text and reasoning Parts reconcile to exact final snapshots; retries, compaction, and assistant errors appear consistently in Web and iOS. Reasoning is collapsed by default. Terminal-side OpenCode permission prompts still remain in the terminal.
+- 🧩 **Native OpenCode experience** — Text and reasoning reconcile to exact final snapshots; File, Patch, Todo, Subtask, and Agent Parts render as structured cards in Web and iOS. Native busy/retry/idle state, slash commands, Agent switching, permissions, and questions stay synchronized across clients, including pending-card recovery after daemon restarts. Prompts already owned by a separate terminal OpenCode process still remain in that terminal.
 - 📱 **iOS App** — Download the iOS app from the official website. In Settings, select **Test Environment** and enter your self-hosted Relay address to connect it.
 - 🖧 **Hosts Dashboard** — System resource monitoring (CPU / Memory / Disk) with remote daemon restart
 - 📌 **Session Management** — Pin, rename, export, and delete sessions with inline editing
