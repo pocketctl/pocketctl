@@ -2,6 +2,27 @@ import { describe, test, expect } from 'vitest'
 import type { CommandItem } from '../../composables/useWebSocket'
 import { mergeLocalCommands } from '../../utils/commands'
 
+describe('durable assistant errors', () => {
+  function processError(target: any[], evt: any) {
+    const key = evt.event_id || evt.message_id
+    if (key && target.some(m => m.type === 'error' && m.eventKey === key)) return
+    const text = evt.error || evt.payload?.error || 'Unknown error'
+    target.push({ type: 'error', eventKey: key, content: text, error: text })
+  }
+
+  test('live and replay/refresh events are persisted once and remain visible', () => {
+    const messages: any[] = []
+    const event = { type: 'error', event_id: 'opencode:error:m1:abcdef0123456789', message_id: 'm1', error: 'Provider authentication failed' }
+    processError(messages, event)
+    processError(messages, { ...event, payload: event })
+    expect(messages).toHaveLength(1)
+    expect(messages[0]).toMatchObject({ type: 'error', content: 'Provider authentication failed' })
+    const refreshed = messages.map(m => ({ ...m }))
+    processError(refreshed, event)
+    expect(refreshed).toHaveLength(1)
+  })
+})
+
 // Pure logic tests extracted from SessionDetail.vue
 
 describe('exitReasonLabel', () => {
@@ -32,13 +53,13 @@ describe('exitReasonLabel', () => {
 
 describe('statusLabel', () => {
   const labels: Record<string, string> = {
-    running: 'Running', busy: 'Running', idle: 'Idle',
+    running: 'Running', busy: 'Running', retry: 'Retrying', idle: 'Idle',
     waiting_approval: 'Waiting', exited: 'Exited', disconnected: 'Disconnected',
     completed: 'Completed', error: 'Error', killed: 'Killed',
   }
 
   test('all statuses have labels', () => {
-    const statuses = ['running', 'busy', 'idle', 'waiting_approval', 'exited', 'disconnected', 'completed', 'error', 'killed']
+    const statuses = ['running', 'busy', 'retry', 'idle', 'waiting_approval', 'exited', 'disconnected', 'completed', 'error', 'killed']
     for (const s of statuses) {
       expect(labels[s]).toBeDefined()
     }
@@ -46,6 +67,10 @@ describe('statusLabel', () => {
 
   test('busy shows as Running', () => {
     expect(labels['busy']).toBe('Running')
+  })
+
+  test('retry exposes the native retry state', () => {
+    expect(labels['retry']).toBe('Retrying')
   })
 })
 
@@ -89,7 +114,7 @@ describe('terminalBadge computed', () => {
 
 describe('showInput computed', () => {
   function shouldShowInput(effectiveStatus: string, isDaemonOnline: boolean): boolean {
-    return ['running', 'busy', 'idle', 'waiting_approval'].includes(effectiveStatus) ||
+    return ['running', 'busy', 'retry', 'idle', 'waiting_approval'].includes(effectiveStatus) ||
       (effectiveStatus === 'exited' && isDaemonOnline)
   }
 
@@ -347,7 +372,7 @@ describe('turn timer resumeStartAt recovery', () => {
   function processStatusEvent(evt: any, sessionSwitching: boolean): { status: string; resumeStartAt: number | null } {
     const status = evt.status || evt.payload?.status
     let resumeStartAt: number | null = null
-    if (sessionSwitching && (status === 'running' || status === 'busy' || status === 'waiting')) {
+    if (sessionSwitching && (status === 'running' || status === 'busy' || status === 'retry' || status === 'waiting')) {
       const ts = evt.last_activity_at || evt.payload?.last_activity_at
       if (ts) resumeStartAt = new Date(ts).getTime()
     }
@@ -362,6 +387,11 @@ describe('turn timer resumeStartAt recovery', () => {
   test('running status sets resumeStartAt', () => {
     const r = processStatusEvent({ status: 'running', last_activity_at: '2026-06-24T06:42:00Z' }, true)
     expect(r.resumeStartAt).toBe(new Date('2026-06-24T06:42:00Z').getTime())
+  })
+
+  test('retry status sets resumeStartAt', () => {
+    const r = processStatusEvent({ status: 'retry', last_activity_at: '2026-06-24T06:42:30Z' }, true)
+    expect(r.resumeStartAt).toBe(new Date('2026-06-24T06:42:30Z').getTime())
   })
 
   test('idle status does NOT set resumeStartAt', () => {

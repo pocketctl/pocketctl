@@ -4,12 +4,12 @@ import { randomUUID } from 'crypto';
 import { isAppReviewDemoDaemon, isAppReviewDemoSession } from './config/app-review-demo.js';
 import * as db from './db.js';
 import { generateTitle, generateSubagentTitle } from './title.js';
-import { notifyUser, sessionStatusPush, daemonOfflinePush, daemonOnlinePush, approvalPush, interactivePush, summarizeToolInput, highRiskPush, isHighRiskCommand } from './push.js';
+import { notifyUser, sessionStatusPush, daemonOfflinePush, daemonOnlinePush, approvalPush, interactivePush, questionPush, summarizeToolInput, highRiskPush, isHighRiskCommand } from './push.js';
 import { PushDeduper } from './push-deduper.js';
 import { quotaEnforcementMode, resolveEntitlements } from './entitlements.js';
 import { claimBoundDaemonSlot, getQuotaSnapshot, releaseQuotaReservation, reserveConcurrentSession } from './quota.js';
 
-interface DaemonConnection { ws: WebSocket; daemonId: string; hostname: string; agents: any[]; userId: number | null; os?: string; ip?: string; port?: string; arch?: string; version?: string; startedAt?: number }
+interface DaemonConnection { ws: WebSocket; daemonId: string; hostname: string; agents: any[]; userId: number | null; os?: string; ip?: string; port?: string; arch?: string; version?: string; startedAt?: number; registrationId: string; tokenJti?: string }
 interface ClientConnection { ws: WebSocket; subscribedSessions: Set<string>; userId: number | null; locale: string }
 interface DaemonMetrics { cpuPct: number; memPct: number; diskPct: number; updatedAt: number }
 interface PendingSessionOperation {
@@ -21,6 +21,39 @@ interface PendingSessionOperation {
   agentType: string;
   cwd: string;
   timeout?: ReturnType<typeof setTimeout>;
+}
+
+interface DaemonSeqState {
+  startedAt: number;
+  persistedHigh: number;
+  pending: Set<number>;
+  effects: Map<number, () => Promise<void> | void>;
+  draining: boolean;
+  drainPromise?: Promise<void>;
+  inflight: Set<number>;
+  baselineSet: boolean;
+  accepting: boolean;
+}
+
+interface QueuedDaemonMessage {
+  daemonId: string;
+  msg: any;
+  originWs: WebSocket;
+  originStartedAt: number | undefined;
+  bytes: number;
+}
+
+interface DaemonRevocationGateState {
+  promise: Promise<boolean>;
+  queue: QueuedDaemonMessage[];
+  queuedBytes: number;
+  closed: boolean;
+}
+
+interface DurableEffectContext {
+  readonly resuming: boolean;
+  step(effect: () => Promise<void> | void): Promise<void>;
+  atomicStep(effect: (eventID: number, nextStep: number) => Promise<void>): Promise<void>;
 }
 
 export class Router {
@@ -45,15 +78,26 @@ export class Router {
   // is the highest *contiguous* seq that has been durably persisted; it is what
   // event_ack reports, so the daemon only trims its outbound buffer/spool once an
   // event is safely in the DB (ack-after-persist). `pending` holds out-of-order
-  // persisted seqs above the mark, drained contiguously by markPersisted.
+  // persisted seqs above the mark; `effects` holds matching post-insert work.
+  // Both drain contiguously so promise completion cannot reorder live delivery.
   // `startedAt` detects a daemon process restart (seq resets): when it changes we
   // reset the cursor. The DB row dedup is handled separately by the
   // events.event_hash unique index.
-  private daemonSeq = new Map<string, { startedAt: number; persistedHigh: number; pending: Set<number>; baselineSet: boolean }>();
+  private daemonSeq = new Map<string, DaemonSeqState>();
+  private daemonRegistrationChains = new Map<string, Promise<void>>();
+  private daemonRevocationGates = new Map<string, DaemonRevocationGateState>();
   private pool: pg.Pool;
 
   // Grace window before a disconnected daemon is declared offline.
   private readonly offlineGraceMs = parseInt(process.env.DAEMON_OFFLINE_GRACE_MS || '30000', 10);
+  private readonly offlineWriteTimeoutMs = parseInt(process.env.DAEMON_OFFLINE_WRITE_TIMEOUT_MS || '1000', 10);
+  private readonly revocationCheckTimeoutMs = parseInt(process.env.DAEMON_REVOCATION_CHECK_TIMEOUT_MS || '1000', 10);
+  private readonly revocationGateMaxMessages = Math.max(
+    1, parseInt(process.env.DAEMON_REVOCATION_GATE_MAX_MESSAGES || '64', 10) || 64,
+  );
+  private readonly revocationGateMaxBytes = Math.max(
+    1, parseInt(process.env.DAEMON_REVOCATION_GATE_MAX_BYTES || '1048576', 10) || 1_048_576,
+  );
 
   // Process startup time. During the startup grace window below, daemons that
   // exist in the DB but haven't re-registered into memory yet (because this
@@ -86,18 +130,15 @@ export class Router {
     return [...this.pendingSessionOperations.values()].find((pending) => pending.daemonId === daemonId);
   }
 
-  private settlePendingSessionOperation(pending: PendingSessionOperation | undefined): void {
+  private async settlePendingSessionOperation(pending: PendingSessionOperation | undefined): Promise<void> {
     if (!pending) return;
     if (pending.timeout) clearTimeout(pending.timeout);
-    this.pendingSessionOperations.delete(pending.requestId);
     if (pending.reservationId) {
-      releaseQuotaReservation(this.pool, pending.reservationId)
-        .then(() => {
-          const daemon = this.daemons.get(pending.daemonId);
-          if (daemon?.userId) this.broadcastQuotaStatus(daemon.userId).catch(console.error);
-        })
-        .catch((e) => console.error('release quota reservation:', e));
+      await releaseQuotaReservation(this.pool, pending.reservationId);
+      const daemon = this.daemons.get(pending.daemonId);
+      if (daemon?.userId) await this.broadcastQuotaStatus(daemon.userId);
     }
+    this.pendingSessionOperations.delete(pending.requestId);
   }
 
   private trackPendingSessionOperation(pending: PendingSessionOperation, expiresAt: number | null): void {
@@ -112,7 +153,7 @@ export class Router {
             this.send(pending.origin, { type: 'user_message_nack', request_id: pending.requestId, reason: 'timeout' });
           }
         }
-        this.settlePendingSessionOperation(pending);
+        void this.settlePendingSessionOperation(pending).catch((e) => console.error('release quota reservation:', e));
       }, Math.min(2_147_483_647, Math.max(1, expiresAt - Date.now())));
       timeout.unref?.();
       pending.timeout = timeout;
@@ -138,13 +179,9 @@ export class Router {
    * Regular approval/session-status pushes bypass this (free users get those).
    */
   private async maybePushToPro(userId: number, payload: import('./push.js').PushPayload): Promise<void> {
-    try {
-      const { plan, whitelist } = await db.getUserPlanAndWhitelist(this.pool, userId);
-      if (!whitelist && plan === 'free') return;
-      await notifyUser(this.pool, userId, payload);
-    } catch (e) {
-      console.error('maybePushToPro:', e);
-    }
+    const { plan, whitelist } = await db.getUserPlanAndWhitelist(this.pool, userId);
+    if (!whitelist && plan === 'free') return;
+    await notifyUser(this.pool, userId, payload);
   }
 
   /** Notify all connected daemons AND clients that the relay is restarting
@@ -178,9 +215,45 @@ export class Router {
     }
   }
 
-  async registerDaemon(ws: WebSocket, msg: any, userId: number | null, tokenJti?: string, machineId?: string): Promise<void> {
+  registerDaemon(ws: WebSocket, msg: any, userId: number | null, tokenJti?: string, machineId?: string): Promise<boolean> {
+    const daemonId = msg.daemon_id;
+    return this.withDaemonRegistrationLock(daemonId, () =>
+      this.registerDaemonLocked(ws, msg, userId, tokenJti, machineId));
+  }
+
+  private withDaemonRegistrationLock<T>(daemonId: string, operation: () => Promise<T>): Promise<T> {
+    const previous = this.daemonRegistrationChains.get(daemonId) ?? Promise.resolve();
+    const result = previous.catch(() => undefined).then(operation);
+    const tail = result.then(() => undefined, () => undefined);
+    this.daemonRegistrationChains.set(daemonId, tail);
+    void tail.finally(() => {
+      if (this.daemonRegistrationChains.get(daemonId) === tail) this.daemonRegistrationChains.delete(daemonId);
+    });
+    return result;
+  }
+
+  private async registerDaemonLocked(ws: WebSocket, msg: any, userId: number | null, tokenJti?: string, machineId?: string): Promise<boolean> {
     const daemonId = msg.daemon_id;
     const hostname = msg.hostname || 'unknown';
+    const previousDaemon = this.daemons.get(daemonId);
+
+    // Authentication may have completed before this socket waited behind a
+    // force-kick in the per-daemon chain. Recheck the same JTI inside the lock,
+    // before quota admission or any activation mutation.
+    if (tokenJti) {
+      try {
+        if (await db.isTokenRevoked(this.pool, tokenJti)) {
+          this.send(ws, { type: 'register_rejected', reason: 'token_revoked', retryable: false });
+          ws.close(4001, 'token revoked');
+          return false;
+        }
+      } catch (e) {
+        console.error('registration token recheck:', e);
+        this.send(ws, { type: 'register_rejected', reason: 'token_check_failed', retryable: true });
+        ws.close(4011, 'token check failed');
+        return false;
+      }
+    }
 
     // Cancel any pending offline transition — the daemon reconnected within the
     // grace window, so it must not be flapped offline (no push, no broadcast).
@@ -204,11 +277,11 @@ export class Router {
     const daemonArch = msg.arch || '';
     const daemonVersion = msg.version || '';
     const daemonStartedAt = msg.started_at || 0;
+    const registrationId = randomUUID();
 
     // Count every persisted binding, including offline hosts. Claiming the row
     // and checking the limit share a user-scoped transaction, closing the race
     // where two machines try to take the final slot simultaneously.
-    let daemonClaimedForUser = false;
     if (userId) {
       try {
         const { plan, whitelist } = await db.getUserPlanAndWhitelist(this.pool, userId);
@@ -220,7 +293,7 @@ export class Router {
             message: '当前 daemon 版本不支持会话额度协议，请升级 pocketctl 后重试',
           });
           ws.close(4009, 'upgrade_required');
-          return;
+          return false;
         }
         const decision = await claimBoundDaemonSlot(this.pool, {
           userId, daemonId, hostname, agents,
@@ -241,7 +314,7 @@ export class Router {
               : '该主机已绑定其他账号',
           });
           ws.close(4008, decision.reason);
-          return;
+          return false;
         }
         if (enforcement === 'observe' && entitlements.maxBoundDaemons !== null && !decision.reconnect && decision.used > entitlements.maxBoundDaemons) {
           db.insertAuditLog(this.pool, userId, 'quota_would_reject', {
@@ -249,12 +322,11 @@ export class Router {
             limit: entitlements.maxBoundDaemons, daemon_id: daemonId,
           }).catch(console.error);
         }
-        daemonClaimedForUser = true;
       } catch (e) {
         console.error('daemon quota check:', e);
         this.send(ws, { type: 'register_rejected', reason: 'quota_check_failed', retryable: true, message: '主机额度检查失败' });
         ws.close(4011, 'quota check failed');
-        return;
+        return false;
       }
     }
 
@@ -267,15 +339,63 @@ export class Router {
       try { userId = await db.getDaemonOwner(this.pool, daemonId); } catch (e) { /* leave null */ }
     }
 
-    this.daemons.set(daemonId, { ws, daemonId, hostname, agents, userId, os: daemonOS, ip: daemonIP, port: daemonPort, arch: daemonArch, version: daemonVersion, startedAt: daemonStartedAt });
-    console.log('[ws] daemon registered', daemonId, 'agents:', JSON.stringify(agents), 'userId:', userId);
-    if (!daemonClaimedForUser) {
-      try { await db.upsertDaemon(this.pool, daemonId, hostname, agents, daemonArch, daemonVersion, daemonStartedAt); } catch (e) { console.error('upsertDaemon:', e); }
-    }
-    if (userId) {
-      if (tokenJti) {
-        db.bindTokenToDaemon(this.pool, daemonId, tokenJti, machineId).catch(console.error);
+    // The server installs a provisional socket identity before awaiting us. A
+    // close during owner/quota admission must not activate a dead socket.
+    if (ws.readyState !== 1) return false;
+
+    let activationSnapshot: db.DaemonRegistrationSnapshot | null;
+    try {
+      activationSnapshot = await db.activateDaemonRegistration(this.pool, {
+        daemonId, userId, hostname, agents, arch: daemonArch, version: daemonVersion,
+        startedAt: daemonStartedAt, tokenJti, machineId, registrationId,
+      });
+    } catch (e) {
+      console.error('activateDaemonRegistration:', e);
+      if (e instanceof db.TokenRevokedDuringActivationError) {
+        this.send(ws, { type: 'register_rejected', reason: 'token_revoked', retryable: false });
+        ws.close(4001, 'token revoked');
+        return false;
       }
+      this.send(ws, { type: 'register_rejected', reason: 'activation_failed', retryable: true });
+      ws.close(4011, 'activation failed');
+      return false;
+    }
+    const restoreActivation = async (): Promise<db.DaemonRegistrationRestoreResult> => {
+      let result: db.DaemonRegistrationRestoreResult = { status: 'sql_failure', error: new Error('not attempted') };
+      for (let attempt = 0; attempt < 3; attempt++) {
+        result = await db.restoreDaemonRegistration(this.pool, daemonId, registrationId, activationSnapshot);
+        if (result.status !== 'sql_failure') return result;
+        console.error('restoreDaemonRegistration:', result.error);
+        if (attempt < 2) await new Promise((resolve) => setTimeout(resolve, 10 * (attempt + 1)));
+      }
+      return result;
+    };
+    const failClosedLocalGenerations = (reason: string) => {
+      const current = this.daemons.get(daemonId);
+      if (previousDaemon && current?.ws === previousDaemon.ws && current.registrationId === previousDaemon.registrationId) {
+        this.cancelDaemonRevocationGate(previousDaemon.registrationId);
+        this.daemons.delete(daemonId);
+        const oldCursor = this.daemonSeq.get(daemonId);
+        if (oldCursor) oldCursor.accepting = false;
+        this.daemonSeq.delete(daemonId);
+      }
+      if (previousDaemon?.ws.readyState === 1) previousDaemon.ws.close(4013, reason);
+      if (ws.readyState === 1) ws.close(4013, reason);
+    };
+    const compensateActivation = async (): Promise<boolean> => {
+      const result = await restoreActivation();
+      if (result.status === 'confirmed_restored') return true;
+      // CAS miss proves another generation won in the DB; SQL failure leaves
+      // DB state unknown. In both cases this relay must stop its old/contender
+      // generations without touching an identity-guarded local successor.
+      failClosedLocalGenerations(result.status === 'stale_successor'
+        ? 'registration superseded'
+        : 'activation compensation failed');
+      return false;
+    };
+    if (ws.readyState !== 1) {
+      await compensateActivation();
+      return false;
     }
     db.cleanStaleSessions(this.pool).catch(console.error);
 
@@ -295,7 +415,65 @@ export class Router {
       // restarts from its spool replays only its unacked tail; without this the
       // contiguous mark would stall on the phantom gap before that tail.
       const baseline = Math.max(0, Number(msg.acked_seq) || 0);
-      this.daemonSeq.set(daemonId, { startedAt: daemonStartedAt, persistedHigh: baseline, pending: new Set(), baselineSet: baseline > 0 });
+      if (prevSeq) {
+        // Stop old persistence completions from joining this incarnation. If an
+        // old effect is already running, let it settle before installing the
+        // new cursor so it cannot overwrite newer state. A failed effect
+        // resolves the drain and remains pending in the DB ledger for replay.
+        prevSeq.accepting = false;
+        if (prevSeq.drainPromise) {
+          const retireMs = Math.max(100, Number(process.env.DAEMON_CURSOR_RETIRE_MS) || 5_000);
+          let timer: ReturnType<typeof setTimeout> | undefined;
+          const retired = await Promise.race([
+            prevSeq.drainPromise.then(() => true),
+            new Promise<boolean>((resolve) => { timer = setTimeout(() => resolve(false), retireMs); timer.unref?.(); }),
+          ]);
+          if (timer) clearTimeout(timer);
+          if (!retired) {
+            const restored = await compensateActivation();
+            if (restored) {
+              prevSeq.accepting = true;
+              if (!prevSeq.draining && prevSeq.pending.has(prevSeq.persistedHigh + 1)) {
+                prevSeq.drainPromise = this.drainPersisted(prevSeq);
+                void prevSeq.drainPromise;
+              }
+            }
+            this.send(ws, { type: 'register_rejected', reason: 'previous_effect_draining', retryable: true });
+            ws.close(4012, 'previous effect still draining');
+            return false;
+          }
+        }
+        if (ws.readyState !== 1) {
+          const restored = await compensateActivation();
+          if (restored) {
+            prevSeq.accepting = true;
+            if (!prevSeq.draining && prevSeq.pending.has(prevSeq.persistedHigh + 1)) {
+              prevSeq.drainPromise = this.drainPersisted(prevSeq);
+              void prevSeq.drainPromise;
+            }
+          }
+          return false;
+        }
+        prevSeq.pending.clear();
+        prevSeq.effects.clear();
+        prevSeq.inflight.clear();
+      }
+      this.daemonSeq.set(daemonId, {
+        startedAt: daemonStartedAt, persistedHigh: baseline, pending: new Set(), effects: new Map(),
+        draining: false, inflight: new Set(), baselineSet: baseline > 0, accepting: true,
+      });
+    }
+
+    if (previousDaemon && previousDaemon.ws !== ws) {
+      this.cancelDaemonRevocationGate(previousDaemon.registrationId);
+    }
+    this.daemons.set(daemonId, { ws, daemonId, hostname, agents, userId, os: daemonOS, ip: daemonIP, port: daemonPort, arch: daemonArch, version: daemonVersion, startedAt: daemonStartedAt, registrationId, tokenJti });
+    console.log('[ws] daemon registered', daemonId, 'agents:', JSON.stringify(agents), 'userId:', userId);
+    if (previousDaemon && previousDaemon.ws !== ws) {
+      const reason = previousDaemon.startedAt === daemonStartedAt
+        ? 'replaced by reconnect'
+        : 'replaced by new incarnation';
+      previousDaemon.ws.close(4009, reason);
     }
 
     // Advertise at-least-once delivery support so the daemon retains an unacked
@@ -319,8 +497,10 @@ export class Router {
     // mid-turn without a terminal status) gets closed and pushed to clients.
     // Guard on Array so legacy daemons (no active_session_ids) are left untouched.
     if (Array.isArray(msg.active_session_ids)) {
-      db.reconcileDaemonSessions(this.pool, daemonId, msg.active_session_ids)
+      db.reconcileDaemonSessions(this.pool, daemonId, msg.active_session_ids, registrationId)
         .then((closed) => {
+          const active = this.daemons.get(daemonId);
+          if (!active || active.ws !== ws || active.registrationId !== registrationId) return;
           if (!closed.length) return;
           console.log(`[router] reconciled ${closed.length} zombie session(s) for daemon ${daemonId}`);
           for (const sid of closed) {
@@ -334,13 +514,18 @@ export class Router {
         .catch((e) => console.error('reconcileDaemonSessions:', e));
     }
 
-    // Broadcast daemon online to clients with same userId
-    const alias = await db.getDaemonAlias(this.pool, daemonId);
-    for (const [clientWs, client] of this.clients) {
-      if (clientWs.readyState === 1 && this.sameUser(client.userId, userId)) {
-        this.send(clientWs, { type: 'daemon_status', daemon_id: daemonId, status: 'online', hostname, agents, alias, os: daemonOS, ip: daemonIP });
+    // Activation and register_ack above are the registration commit point.
+    // Alias lookup/broadcast is best-effort and must never reject or hang the
+    // per-daemon registration chain after that point.
+    void db.getDaemonAlias(this.pool, daemonId).then((alias) => {
+      const active = this.daemons.get(daemonId);
+      if (!active || active.ws !== ws || active.registrationId !== registrationId) return;
+      for (const [clientWs, client] of this.clients) {
+        if (clientWs.readyState === 1 && this.sameUser(client.userId, userId)) {
+          this.send(clientWs, { type: 'daemon_status', daemon_id: daemonId, status: 'online', hostname, agents, alias, os: daemonOS, ip: daemonIP });
+        }
       }
-    }
+    }).catch((e) => console.error('getDaemonAlias:', e));
 
     // Push "online" only on a genuine offline→online transition. A flap
     // reconnect inside the grace window never ran finalize, so knownOffline
@@ -351,6 +536,7 @@ export class Router {
     if (wasOffline && userId && !this.shuttingDown) {
       this.maybePushToPro(userId, daemonOnlinePush(hostname, daemonId)).catch(console.error);
     }
+    return true;
   }
 
   /**
@@ -369,6 +555,7 @@ export class Router {
       return;
     }
     if (!daemon) return;
+    this.cancelDaemonRevocationGate(daemon.registrationId);
 
     // Clean up any pending takeover timer
     const takeover = this.takeoverTimers.get(daemonId);
@@ -390,7 +577,7 @@ export class Router {
           this.send(pending.origin, { type: 'user_message_nack', request_id: pending.requestId, reason: 'daemon_offline' });
         }
       }
-      this.settlePendingSessionOperation(pending);
+      void this.settlePendingSessionOperation(pending).catch((e) => console.error('release quota reservation:', e));
     }
 
     // Defer the offline declaration behind the grace window. The daemon entry
@@ -408,7 +595,7 @@ export class Router {
       // socket different from the one that closed — do not declare it offline.
       const current = this.daemons.get(daemonId);
       if (current && current.ws !== closedSocket) return;
-      this.finalizeDaemonOffline(daemonId, daemon);
+      void this.finalizeDaemonOffline(daemonId, daemon);
     }, this.offlineGraceMs);
     this.pendingOfflineTimers.set(daemonId, timer);
   }
@@ -418,13 +605,19 @@ export class Router {
    * without a reconnect: remove it from the map, persist offline, push (unless
    * shutting down), broadcast offline, and drop/notify its routed sessions.
    */
-  private finalizeDaemonOffline(daemonId: string, daemon: DaemonConnection): void {
+  private async finalizeDaemonOffline(daemonId: string, daemon: DaemonConnection): Promise<void> {
+    const current = this.daemons.get(daemonId);
+    if (!current || current.ws !== daemon.ws || current.registrationId !== daemon.registrationId) return;
     const hostname = daemon.hostname || 'unknown';
     const userId = daemon.userId ?? null;
+    this.cancelDaemonRevocationGate(daemon.registrationId);
     this.daemons.delete(daemonId);
     this.daemonSeq.delete(daemonId);
 
-    db.setDaemonOffline(this.pool, daemonId).catch(console.error);
+    const markedOffline = await this.setDaemonOfflineWithRetry(daemonId, daemon.registrationId);
+    // A registration may have won after the captured generation was removed
+    // from memory but before its DB CAS ran. Never publish stale offline state.
+    if (!markedOffline || this.daemons.has(daemonId)) return;
 
     // Push notification for daemon offline — suppressed during relay shutdown
     // (the daemon is about to reconnect to the new process, not truly offline).
@@ -438,6 +631,7 @@ export class Router {
 
     // Broadcast offline status with alias (async fetch)
     db.getDaemonAlias(this.pool, daemonId).then((alias) => {
+      if (this.daemons.has(daemonId)) return;
       for (const [clientWs, client] of this.clients) {
         if (clientWs.readyState === 1 && this.sameUser(client.userId, userId)) {
           this.send(clientWs, { type: 'daemon_status', daemon_id: daemonId, status: 'offline', hostname, last_seen_at: new Date().toISOString(), alias });
@@ -477,7 +671,22 @@ export class Router {
       this.pendingOfflineTimers.delete(daemonId);
     }
 
-    this.finalizeDaemonOffline(daemonId, daemon);
+    void this.finalizeDaemonOffline(daemonId, daemon);
+  }
+
+  private async setDaemonOfflineWithRetry(daemonId: string, registrationId: string): Promise<boolean> {
+    for (let attempt = 0; attempt < 3; attempt++) {
+      try {
+        return await db.setDaemonOfflineWithTimeout(
+          this.pool, daemonId, registrationId, this.offlineWriteTimeoutMs,
+        );
+      } catch (e) {
+        console.error('setDaemonOffline:', e);
+        if (attempt < 2) await new Promise((resolve) => setTimeout(resolve, 10 * (attempt + 1)));
+      }
+    }
+    console.error(`[router] generation-bound offline failed permanently: daemon=${daemonId} registration=${registrationId}`);
+    return false;
   }
 
   /**
@@ -526,15 +735,55 @@ export class Router {
    * Advance the per-daemon ack water-mark to the highest *contiguous* persisted
    * seq. event_ack reports this, so the daemon trims its outbound buffer/spool
    * only once an event is durably stored. Out-of-order completions wait in
-   * `pending` until the gap before them fills. A missing seq (control message
-   * with no seq) is a no-op.
+   * `pending` until the gap before them fills. A missing seq has no watermark
+   * effect, but its durable callback runs immediately for legacy daemons.
    */
-  private markPersisted(daemonId: string, seq?: number): void {
-    if (!seq) return;
-    const st = this.daemonSeq.get(daemonId);
-    if (!st || seq <= st.persistedHigh) return;
+  private markPersisted(daemonId: string, seq?: number, effect?: () => Promise<void> | void, state?: DaemonSeqState): void {
+    if (!seq) {
+      if (effect) void Promise.resolve(effect()).catch((e) => console.error('durable effect:', e));
+      return;
+    }
+    const st = state ?? this.daemonSeq.get(daemonId);
+    if (!st || !st.accepting || this.daemonSeq.get(daemonId) !== st) return;
+    if (seq <= st.persistedHigh) {
+      st.inflight.delete(seq);
+      return;
+    }
     st.pending.add(seq);
-    while (st.pending.delete(st.persistedHigh + 1)) st.persistedHigh++;
+    if (effect) st.effects.set(seq, effect);
+    if (!st.draining) {
+      st.drainPromise = this.drainPersisted(st);
+      void st.drainPromise;
+    }
+  }
+
+  private async drainPersisted(st: DaemonSeqState): Promise<void> {
+    if (st.draining) return;
+    st.draining = true;
+    try {
+      while (st.accepting && st.pending.has(st.persistedHigh + 1)) {
+        const seq = st.persistedHigh + 1;
+        const durableEffect = st.effects.get(seq);
+        if (durableEffect) {
+          try {
+            await durableEffect();
+          } catch (e) {
+            // Keep pending/effect at this seq and withhold the contiguous ack.
+            // Clearing in-flight permits a replay to refresh and retry it.
+            st.inflight.delete(seq);
+            console.error('durable effect:', e);
+            return;
+          }
+        }
+        st.pending.delete(seq);
+        st.effects.delete(seq);
+        st.persistedHigh = seq;
+        st.inflight.delete(seq);
+      }
+    } finally {
+      st.draining = false;
+      st.drainPromise = undefined;
+    }
   }
 
   /**
@@ -543,23 +792,216 @@ export class Router {
    * the ack so the daemon keeps the event buffered and replays it on reconnect
    * (where it is re-persisted), rather than acking-then-losing it.
    */
-  private persistAndAck(daemonId: string, seq: number | undefined, sessionId: string, type: string, payload: any): void {
-    db.persistEvent(this.pool, sessionId, type, payload)
-      .then(() => this.markPersisted(daemonId, seq))
-      .catch((e) => console.error('persistAndAck:', e));
+  private persistAndAck(
+    daemonId: string,
+    seq: number | undefined,
+    sessionId: string,
+    type: string,
+    payload: any,
+    onDurable?: (inserted: boolean, context: DurableEffectContext) => Promise<void> | void,
+    originatingState?: DaemonSeqState,
+  ): void {
+    const state = originatingState ?? this.daemonSeq.get(daemonId);
+    const persisted = onDurable
+      ? db.persistEventWithEffect(this.pool, sessionId, type, payload)
+      : db.persistEvent(this.pool, sessionId, type, payload).then((rowID) => ({ rowID, inserted: rowID > 0, completed: true, nextStep: 0 }));
+    persisted
+      .then((event) => {
+        const effect = onDurable && !event.completed
+          ? async () => {
+            // A pending conflict is a recovery replay, so it must execute the
+            // same effect as a fresh insert. Completed conflicts skip above.
+            const latest = await db.getEventEffectState(this.pool, event.rowID);
+            if (latest?.completed) return;
+            const nextStep = latest?.nextStep ?? event.nextStep;
+            let stepIndex = 0;
+            const context: DurableEffectContext = {
+              resuming: nextStep > 0,
+              step: async (stepEffect) => {
+                const currentStep = stepIndex++;
+                if (currentStep < nextStep) return;
+                await stepEffect();
+                await db.advanceEventEffectStep(this.pool, event.rowID, currentStep + 1);
+              },
+              atomicStep: async (stepEffect) => {
+                const currentStep = stepIndex++;
+                if (currentStep < nextStep) return;
+                await stepEffect(event.rowID, currentStep + 1);
+              },
+            };
+            await onDurable(true, context);
+            await db.completeEventEffect(this.pool, event.rowID);
+          }
+          : undefined;
+        this.markPersisted(daemonId, seq, effect, state);
+      })
+      .catch((e) => {
+        if (seq) state?.inflight.delete(seq);
+        console.error('persistAndAck:', e);
+      });
   }
 
-  handleDaemonMessage(daemonId: string, msg: any): void {
+  private cancelDaemonRevocationGate(registrationId: string): void {
+    const state = this.daemonRevocationGates.get(registrationId);
+    if (!state) return;
+    state.closed = true;
+    state.queue.length = 0;
+    state.queuedBytes = 0;
+    if (this.daemonRevocationGates.get(registrationId) === state) {
+      this.daemonRevocationGates.delete(registrationId);
+    }
+  }
+
+  private failClosedDaemonRevocationGate(
+    daemonId: string,
+    daemon: DaemonConnection,
+    state: DaemonRevocationGateState,
+    code: number,
+    closeReason: string,
+    kickedReason: string,
+  ): void {
+    if (state.closed) return;
+    this.cancelDaemonRevocationGate(daemon.registrationId);
+    const current = this.daemons.get(daemonId);
+    if (!current || current.ws !== daemon.ws || current.registrationId !== daemon.registrationId) return;
+    const cursor = this.daemonSeq.get(daemonId);
+    if (cursor) cursor.accepting = false;
+    this.send(daemon.ws, { type: 'kicked', reason: kickedReason });
+    daemon.ws.close(code, closeReason);
+    void this.finalizeDaemonOffline(daemonId, daemon)
+      .catch((e) => console.error('heartbeat fail-closed cleanup:', e));
+  }
+
+  private settleDaemonRevocationGate(
+    daemonId: string,
+    daemon: DaemonConnection,
+    state: DaemonRevocationGateState,
+    admitted: boolean,
+  ): void {
+    if (state.closed) return;
+    const current = this.daemons.get(daemonId);
+    if (!admitted || !current || current.ws !== daemon.ws || current.registrationId !== daemon.registrationId) {
+      this.cancelDaemonRevocationGate(daemon.registrationId);
+      return;
+    }
+    const queued = state.queue.splice(0);
+    state.queuedBytes = 0;
+    state.closed = true;
+    if (this.daemonRevocationGates.get(daemon.registrationId) === state) {
+      this.daemonRevocationGates.delete(daemon.registrationId);
+    }
+    for (const item of queued) {
+      this.handleDaemonMessage(item.daemonId, item.msg, item.originWs, item.originStartedAt, true);
+    }
+  }
+
+  private startDaemonRevocationGate(daemonId: string, daemon: DaemonConnection): DaemonRevocationGateState {
+    const state: DaemonRevocationGateState = {
+      promise: Promise.resolve(false), queue: [], queuedBytes: 0, closed: false,
+    };
+    state.promise = db.isTokenRevokedWithTimeout(
+      this.pool, daemon.tokenJti!, this.revocationCheckTimeoutMs,
+    ).then((revoked) => {
+      const current = this.daemons.get(daemonId);
+      if (!current || current.ws !== daemon.ws || current.registrationId !== daemon.registrationId) return false;
+      if (revoked) {
+        this.failClosedDaemonRevocationGate(
+          daemonId, daemon, state, 4001, 'token revoked', 'token_revoked',
+        );
+        return false;
+      }
+      return true;
+    }).catch((e) => {
+      console.error('heartbeat token recheck:', e);
+      this.failClosedDaemonRevocationGate(
+        daemonId, daemon, state, 1011, 'token check failed', 'token_check_failed',
+      );
+      return false;
+    });
+    this.daemonRevocationGates.set(daemon.registrationId, state);
+    void state.promise.then((admitted) => {
+      this.settleDaemonRevocationGate(daemonId, daemon, state, admitted);
+    }).catch((e) => console.error('daemon revocation gate settle:', e));
+    return state;
+  }
+
+  private enqueueDaemonRevocationGate(
+    daemonId: string,
+    daemon: DaemonConnection,
+    state: DaemonRevocationGateState,
+    msg: any,
+    originWs: WebSocket,
+    originStartedAt: number | undefined,
+  ): void {
+    if (state.closed) return;
+    let bytes = this.revocationGateMaxBytes + 1;
+    try { bytes = Buffer.byteLength(JSON.stringify(msg), 'utf8'); } catch { /* overflow below */ }
+    if (state.queue.length >= this.revocationGateMaxMessages
+      || state.queuedBytes + bytes > this.revocationGateMaxBytes) {
+      this.failClosedDaemonRevocationGate(
+        daemonId, daemon, state, 1011, 'revocation gate overflow', 'token_check_overflow',
+      );
+      return;
+    }
+    state.queue.push({ daemonId, msg, originWs, originStartedAt, bytes });
+    state.queuedBytes += bytes;
+  }
+
+  private acceptDaemonHeartbeat(daemonId: string, daemon: DaemonConnection, msg: any): void {
+    const current = this.daemons.get(daemonId);
+    const cursor = this.daemonSeq.get(daemonId);
+    if (!current || current.ws !== daemon.ws || current.registrationId !== daemon.registrationId || !cursor?.accepting) return;
+    this.send(daemon.ws, { type: 'pong' });
+    db.updateHeartbeat(this.pool, daemonId).catch(console.error);
+    if (msg.cpu_pct !== undefined) {
+      this.daemonMetrics.set(daemonId, {
+        cpuPct: msg.cpu_pct, memPct: msg.mem_pct, diskPct: msg.disk_pct, updatedAt: Date.now(),
+      });
+    }
+    if (cursor.persistedHigh > 0) this.send(daemon.ws, { type: 'event_ack', up_to_seq: cursor.persistedHigh });
+    this.markPersisted(daemonId, msg.seq);
+  }
+
+  handleDaemonMessage(
+    daemonId: string,
+    msg: any,
+    originWs?: WebSocket,
+    originStartedAt?: number,
+    revocationAdmitted = false,
+  ): void {
+    let originDaemon: DaemonConnection | undefined;
+    if (originWs) {
+      const daemon = this.daemons.get(daemonId);
+      const cursor = this.daemonSeq.get(daemonId);
+      if (!daemon || daemon.ws !== originWs || daemon.startedAt !== originStartedAt
+        || !cursor || cursor.startedAt !== originStartedAt || !cursor.accepting) return;
+      originDaemon = daemon;
+    }
+    // A ping creates one shared per-generation revocation gate before any seq
+    // admission. Messages arriving behind that check are replayed in arrival
+    // order only on success; failure admits none and therefore leaves no gap.
+    if (!revocationAdmitted && originDaemon?.tokenJti) {
+      const pending = this.daemonRevocationGates.get(originDaemon.registrationId);
+      if (msg.type === 'ping' || pending) {
+        const gate = pending ?? this.startDaemonRevocationGate(daemonId, originDaemon);
+        this.enqueueDaemonRevocationGate(
+          daemonId, originDaemon, gate, msg, originWs!, originStartedAt,
+        );
+        return;
+      }
+    }
     // At-least-once dedup keyed on the *persisted* water-mark: a seq at or below
     // it has already been durably stored, so a reconnect replay of it is a
     // duplicate — drop it. A seq above the mark (received before but its persist
     // failed, or genuinely new) is (re)processed; the events.event_hash unique
     // index independently prevents duplicate DB rows. The mark advances only via
     // markPersisted (after the DB write), never synchronously on receipt.
+    let messageState: DaemonSeqState | undefined;
     if (msg.seq) {
       const st = this.daemonSeq.get(daemonId);
       if (st) {
         if (msg.seq <= st.persistedHigh) return;
+        if (st.inflight.has(msg.seq)) return;
         // Establish the contiguity floor from the FIRST seq seen on a fresh entry
         // (set synchronously, in receive order, so it's the lowest). This covers
         // legacy daemons that don't report acked_seq and any daemon that replays
@@ -567,24 +1009,14 @@ export class Router {
         // phantom gap below that tail. Guarded by baselineSet so a burst arriving
         // before the first persist can't mis-floor past an unpersisted seq.
         if (!st.baselineSet) { st.persistedHigh = msg.seq - 1; st.baselineSet = true; }
+        st.inflight.add(msg.seq);
+        messageState = st;
       }
     }
 
     if (msg.type === 'ping') {
       const daemon = this.daemons.get(daemonId);
-      if (daemon) {
-        this.send(daemon.ws, { type: 'pong' });
-        db.updateHeartbeat(this.pool, daemonId).catch(console.error);
-        // Cache metrics if present
-        if (msg.cpu_pct !== undefined) {
-          this.daemonMetrics.set(daemonId, { cpuPct: msg.cpu_pct, memPct: msg.mem_pct, diskPct: msg.disk_pct, updatedAt: Date.now() });
-        }
-        // Piggyback the delivery ack on the heartbeat so the daemon can trim its
-        // unacked outbound buffer/spool — but only up to what we've durably
-        // persisted, so a crash after ack can't lose an unwritten event.
-        const st = this.daemonSeq.get(daemonId);
-        if (st && st.persistedHigh > 0) this.send(daemon.ws, { type: 'event_ack', up_to_seq: st.persistedHigh });
-      }
+      if (daemon) this.acceptDaemonHeartbeat(daemonId, daemon, msg);
       return;
     }
 
@@ -602,6 +1034,7 @@ export class Router {
         this.takeoverTimers.delete(daemonId);
         console.log(`[router] takeover cancelled by ${daemonId} — new daemon ${takeover.newDaemonId} accepted immediately`);
       }
+      this.markPersisted(daemonId, msg.seq);
       return;
     }
 
@@ -632,7 +1065,7 @@ export class Router {
             error: msg.error,
           });
         }
-        this.settlePendingSessionOperation(pending);
+        void this.settlePendingSessionOperation(pending).catch((e) => console.error('release quota reservation:', e));
         this.pendingSessionCreate.delete(daemonId);
         this.pendingSessionMeta?.delete(daemonId);
       }
@@ -652,39 +1085,39 @@ export class Router {
     const daemon = this.daemons.get(daemonId);
     const userId = daemon?.userId ?? null;
 
-    if (msg.type === 'session_created' || msg.type === 'session_status' || msg.type === 'session_id_changed' || msg.type === 'session_discovered' || msg.type === 'subagent_discovered' || msg.type === 'session_model_changed') {
-      this.sessionToDaemon.set(sessionId, daemonId);
-    }
     if (msg.type === 'session_id_changed') {
       const oldId = msg.old_session_id;
-      if (oldId) {
-        this.pool.query('UPDATE sessions SET session_id = $1 WHERE session_id = $2', [sessionId, oldId]).catch(console.error);
-        this.pool.query('UPDATE events SET session_id = $1 WHERE session_id = $2', [sessionId, oldId]).catch(console.error);
-        db.ensureDaemonSessionIdentity(this.pool, sessionId, daemonId, userId ?? undefined).catch(console.error);
-        for (const [, client] of this.clients) {
-          if (client.subscribedSessions.has(oldId)) {
-            client.subscribedSessions.delete(oldId);
-            client.subscribedSessions.add(sessionId);
+      this.persistAndAck(daemonId, msg.seq, sessionId, msg.type, msg, async (inserted) => {
+        if (!inserted) return;
+        this.sessionToDaemon.set(sessionId, daemonId);
+        if (oldId) {
+          await this.pool.query('UPDATE sessions SET session_id = $1 WHERE session_id = $2', [sessionId, oldId]);
+          await this.pool.query('UPDATE events SET session_id = $1 WHERE session_id = $2', [sessionId, oldId]);
+          await db.ensureDaemonSessionIdentity(this.pool, sessionId, daemonId, userId ?? undefined);
+          for (const [, client] of this.clients) {
+            if (client.subscribedSessions.has(oldId)) {
+              client.subscribedSessions.delete(oldId);
+              client.subscribedSessions.add(sessionId);
+            }
           }
+          this.sessionToDaemon.delete(oldId);
+          const origin = this.pendingOriginClient.get(oldId);
+          if (origin && origin.readyState === 1) {
+            this.send(origin, { type: 'session_id_changed', session_id: sessionId, old_session_id: oldId });
+          }
+          this.pendingOriginClient.delete(oldId);
         }
-        this.sessionToDaemon.delete(oldId);
-        // 主动向原始发起方补发 session_id_changed，确保即使订阅迁移有竞态也收到真实 ID
-        const origin = this.pendingOriginClient.get(oldId);
-        if (origin && origin.readyState === 1) {
-          this.send(origin, { type: 'session_id_changed', session_id: sessionId, old_session_id: oldId });
+        for (const [clientWs, client] of this.clients) {
+          if (client.subscribedSessions.has(sessionId) && clientWs.readyState === 1) this.send(clientWs, msg);
         }
-        this.pendingOriginClient.delete(oldId);
-      }
+      });
+      return;
     }
     if (msg.type === 'session_created') {
       const pending = this.findPendingSessionOperation(daemonId, msg.request_id);
       const meta = pending
         ? { agent_type: pending.agentType, cwd: pending.cwd }
         : this.pendingSessionMeta?.get(daemonId);
-      db.upsertSession(this.pool, sessionId, daemonId, meta?.agent_type || '', meta?.cwd || '', 'running', msg.title || undefined, 'daemon', undefined, userId ?? undefined, msg.model || undefined)
-        .then(() => this.settlePendingSessionOperation(pending))
-        .catch(console.error);
-      this.pendingSessionMeta?.delete(daemonId);
       const originClient = pending?.origin ?? this.pendingSessionCreate.get(daemonId);
       const enriched = {
         ...msg,
@@ -693,24 +1126,30 @@ export class Router {
         daemon_id: daemonId,
         hostname: daemon?.hostname || 'unknown',
       };
-      if (originClient && originClient.readyState === 1) {
-        const client = this.clients.get(originClient);
-        if (client) client.subscribedSessions.add(sessionId);
-        // 记录 origin client，供后续 session_id_changed 补发
-        this.pendingOriginClient.set(sessionId, originClient);
-        this.send(originClient, enriched);
-      }
-      // 广播给同用户的其他在线 client（多端：Web + iOS 等同时在线），
-      // 让非发起端也能即时看到新会话，不依赖轮询 list_sessions。
-      for (const [clientWs, client] of this.clients) {
-        if (clientWs === originClient) continue;
-        if (clientWs.readyState === 1 && this.sameUser(client.userId, userId)) {
+      this.persistAndAck(daemonId, msg.seq, sessionId, msg.type, msg, async (inserted) => {
+        if (!inserted) return;
+        this.sessionToDaemon.set(sessionId, daemonId);
+        await db.upsertSession(this.pool, sessionId, daemonId, meta?.agent_type || '', meta?.cwd || '', 'running', msg.title || undefined, 'daemon', undefined, userId ?? undefined, msg.model || undefined);
+        await this.settlePendingSessionOperation(pending);
+        this.pendingSessionMeta?.delete(daemonId);
+        this.pendingSessionCreate.delete(daemonId);
+        if (originClient && originClient.readyState === 1) {
+          const client = this.clients.get(originClient);
           if (client) client.subscribedSessions.add(sessionId);
-          this.send(clientWs, enriched);
+          // 记录 origin client，供后续 session_id_changed 补发
+          this.pendingOriginClient.set(sessionId, originClient);
+          this.send(originClient, enriched);
         }
-      }
-      this.pendingSessionCreate.delete(daemonId);
-      this.persistAndAck(daemonId, msg.seq, sessionId, msg.type, msg);
+        // 广播给同用户的其他在线 client（多端：Web + iOS 等同时在线），
+        // 让非发起端也能即时看到新会话，不依赖轮询 list_sessions。
+        for (const [clientWs, client] of this.clients) {
+          if (clientWs === originClient) continue;
+          if (clientWs.readyState === 1 && this.sameUser(client.userId, userId)) {
+            client.subscribedSessions.add(sessionId);
+            this.send(clientWs, enriched);
+          }
+        }
+      });
       return;
     }
     if (msg.type === 'session_discovered') {
@@ -720,21 +1159,26 @@ export class Router {
           console.log(`[router] skipping tombstoned session: ${sessionId}`);
           // Intentionally not persisted, but ack it so the daemon stops
           // re-discovering (replaying) a session the user already deleted.
-          this.markPersisted(daemonId, msg.seq);
+          this.markPersisted(daemonId, msg.seq, undefined, messageState);
           return;
         }
         // Use provided title if present; otherwise leave existing title untouched
         const title = msg.title || undefined;
         const cwd = msg.cwd || '';
-        db.upsertSession(this.pool, sessionId, daemonId, msg.agent || 'claude-code', cwd, msg.status || 'busy', title, 'terminal', undefined, userId ?? undefined, msg.model || undefined)
-          .then(() => { if (userId) return this.broadcastQuotaStatus(userId); })
-          .catch(console.error);
-        this.persistAndAck(daemonId, msg.seq, sessionId, msg.type, msg);
         const enriched = { ...msg, daemon_id: daemonId, hostname: daemon?.hostname || 'unknown' };
-        for (const [clientWs, client] of this.clients) {
-          if (clientWs.readyState === 1 && this.sameUser(client.userId, userId)) this.send(clientWs, enriched);
-        }
-      }).catch(console.error);
+        this.persistAndAck(daemonId, msg.seq, sessionId, msg.type, msg, async (inserted) => {
+          if (!inserted) return;
+          this.sessionToDaemon.set(sessionId, daemonId);
+          await db.upsertSession(this.pool, sessionId, daemonId, msg.agent || 'claude-code', cwd, msg.status || 'busy', title, 'terminal', undefined, userId ?? undefined, msg.model || undefined);
+          if (userId) await this.broadcastQuotaStatus(userId);
+          for (const [clientWs, client] of this.clients) {
+            if (clientWs.readyState === 1 && this.sameUser(client.userId, userId)) this.send(clientWs, enriched);
+          }
+        }, messageState);
+      }).catch((e) => {
+        if (msg.seq) messageState?.inflight.delete(msg.seq);
+        console.error(e);
+      });
       return;
     }
     if (msg.type === 'session_model_changed') {
@@ -742,11 +1186,26 @@ export class Router {
       // sessions.model column unconditionally (upsertSession's COALESCE cannot
       // overwrite), persist as an event, and broadcast to all of the owner's
       // clients so every device's model badge refreshes.
-      db.updateSessionModel(this.pool, sessionId, msg.model).catch(console.error);
-      this.persistAndAck(daemonId, msg.seq, sessionId, msg.type, msg);
-      for (const [clientWs, client] of this.clients) {
-        if (clientWs.readyState === 1 && this.sameUser(client.userId, userId)) this.send(clientWs, msg);
-      }
+      this.persistAndAck(daemonId, msg.seq, sessionId, msg.type, msg, async (inserted) => {
+        if (!inserted) return;
+        this.sessionToDaemon.set(sessionId, daemonId);
+        await db.updateSessionModel(this.pool, sessionId, msg.model);
+        for (const [clientWs, client] of this.clients) {
+          if (clientWs.readyState === 1 && this.sameUser(client.userId, userId)) this.send(clientWs, msg);
+        }
+      });
+      return;
+    }
+    if (msg.type === 'session_agent_changed') {
+      // Persist only daemon-confirmed switches, then fan the authoritative state
+      // out to every device currently viewing the session.
+      this.persistAndAck(daemonId, msg.seq, sessionId, msg.type, msg, async (inserted) => {
+        if (!inserted) return;
+        await db.updateSessionActiveAgent(this.pool, sessionId, msg.current_agent);
+        for (const [clientWs, client] of this.clients) {
+          if (client.subscribedSessions.has(sessionId) && clientWs.readyState === 1) this.send(clientWs, msg);
+        }
+      });
       return;
     }
     if (msg.type === 'subagent_discovered') {
@@ -760,17 +1219,16 @@ export class Router {
         agentType: msg.subagent_type || undefined,
         title: msg.subagent_desc || undefined,
       };
-      // Ack only after both the event and its relationship are durable. A
-      // failed reconciliation remains in the daemon spool and retries safely.
-      db.persistEvent(this.pool, sessionId, msg.type, msg)
-        .then(() => db.reconcileSubagent(this.pool, relation))
-        .then(() => {
-          this.markPersisted(daemonId, msg.seq);
-          for (const [clientWs, client] of this.clients) {
-            if (client.subscribedSessions.has(sessionId) && clientWs.readyState === 1) this.send(clientWs, msg);
-          }
-        })
-        .catch((e) => console.error('subagent discovery reconcile:', e));
+      // The event row carries a pending-effect ledger marker. A reconciliation
+      // failure withholds ack; conflict replay resumes it until completed.
+      this.persistAndAck(daemonId, msg.seq, sessionId, msg.type, msg, async (pending) => {
+        if (!pending) return;
+        await db.reconcileSubagent(this.pool, relation);
+        this.sessionToDaemon.set(sessionId, daemonId);
+        for (const [clientWs, client] of this.clients) {
+          if (client.subscribedSessions.has(sessionId) && clientWs.readyState === 1) this.send(clientWs, msg);
+        }
+      }, messageState);
       return;
     }
     if (msg.type === 'subagent_usage') {
@@ -797,8 +1255,11 @@ export class Router {
         cacheRead: crT,
         cacheCreate: ccT,
       })
-        .then(() => this.markPersisted(daemonId, msg.seq))
-        .catch((e) => console.error('subagent usage persist:', e));
+        .then(() => this.markPersisted(daemonId, msg.seq, undefined, messageState))
+        .catch((e) => {
+          if (msg.seq) messageState?.inflight.delete(msg.seq);
+          console.error('subagent usage persist:', e);
+        });
       return;
     }
     if (msg.type === 'generate_subagent_title_request') {
@@ -896,51 +1357,71 @@ export class Router {
     }
     // Generic data path (agent_text, tool_call/result, user_text, session_status,
     // session_id_changed, …): persist with the ack gated on durability.
-    this.persistAndAck(daemonId, msg.seq, sessionId, msg.type, msg);
-    // Accumulate per-turn token usage from agent_text events carrying usage (model-agnostic)
-    if (msg.usage != null) {
-      db.incrementSessionTokens(this.pool, sessionId, msg.usage).catch(console.error);
-    }
+    this.persistAndAck(daemonId, msg.seq, sessionId, msg.type, msg, async (inserted, effect) => {
+      if (!inserted) return;
+    if (msg.type === 'session_status') this.sessionToDaemon.set(sessionId, daemonId);
+      // Accumulate per-turn token usage from agent_text events carrying usage (model-agnostic)
+      if (msg.usage != null) {
+        await effect.atomicStep((eventID, nextStep) => db.incrementSessionTokensForEvent(
+          this.pool, eventID, nextStep, sessionId, msg.usage,
+        ));
+      }
     // Push for attention-requiring events (agent blocked, needs user action).
     // Both arrive via this generic path; push to all of the owner's devices so
-    // the agent doesn't stall while the app is backgrounded/killed. Fire-and-
-    // forget (never blocks the ack), mirroring session_status push below.
+    // the agent doesn't stall while the app is backgrounded/killed. Delivery
+    // attempts are awaited and checkpointed before the daemon ack advances.
     //
-    // Dedup by requestId: WS reconnect/seq-replay gaps (ack async window,
-    // no-seq legacy daemons, persist retries) can reprocess an event and fire
-    // the push twice. Only the push side-effect is guarded here — event
-    // forwarding to subscribed clients below still runs regardless, so a
-    // reconnected foreground client stays in sync.
-    if (userId && (msg.type === 'approval_request' || msg.type === 'interactive_prompt')) {
+    // Durable replay dedup is handled by the insert gate around this callback.
+    // Keep requestId dedup as a second guard for logically equivalent requests
+    // that arrive with distinct event identities.
+    if (userId && (msg.type === 'approval_request' || msg.type === 'interactive_prompt' || msg.type === 'question_request')) {
       const requestId = (msg.request_id as string | undefined) || '';
       // Empty requestId can't be deduped (and shouldn't block the push) —
       // accept the rare duplicate for such malformed events.
-      const shouldPush = requestId === '' || this.pushDeduper.shouldPush(requestId);
+      const shouldPush = effect.resuming || requestId === '' || this.pushDeduper.shouldPush(requestId);
       if (shouldPush) {
         if (msg.type === 'approval_request') {
           const toolName = msg.tool || '';
           const summary = summarizeToolInput(toolName, msg.input);
           // Regular approval — free + Pro (product-critical, never gated).
-          notifyUser(this.pool, userId, approvalPush(
-            msg.title || '', toolName, summary, sessionId, requestId,
-          )).catch(console.error);
+          try {
+            await effect.step(() => notifyUser(this.pool, userId, approvalPush(
+              msg.title || '', toolName, summary, sessionId, requestId,
+            )));
+          } catch (e) {
+            if (requestId) this.pushDeduper.forget(requestId);
+            throw e;
+          }
           // D3 high-risk warning — Pro-only, layered on top of the regular
           // push. Shares the same dedup decision (one requestId = one event).
           if (isHighRiskCommand(toolName, summary)) {
-            this.maybePushToPro(userId, highRiskPush(
+            await effect.step(() => this.maybePushToPro(userId, highRiskPush(
               msg.title || '', toolName, summary, sessionId, requestId,
-            )).catch(console.error);
+            )));
+          }
+        } else if (msg.type === 'interactive_prompt') {
+          const prompt = (msg.input?.prompt as string) || '';
+          try {
+            await effect.step(() => notifyUser(this.pool, userId, interactivePush(
+              msg.title || '', prompt, sessionId, requestId,
+            )));
+          } catch (e) {
+            if (requestId) this.pushDeduper.forget(requestId);
+            throw e;
           }
         } else {
-          const prompt = (msg.input?.prompt as string) || '';
-          notifyUser(this.pool, userId, interactivePush(
-            msg.title || '', prompt, sessionId, requestId,
-          )).catch(console.error);
+          const firstQuestion = Array.isArray(msg.questions) ? msg.questions[0] : undefined;
+          const prompt = firstQuestion?.question || firstQuestion?.header || '';
+          try {
+            await effect.step(() => notifyUser(this.pool, userId, questionPush(prompt, sessionId, requestId)));
+          } catch (e) {
+            if (requestId) this.pushDeduper.forget(requestId);
+            throw e;
+          }
         }
       }
     }
     if (msg.type === 'permission_config_changed') {
-      this.persistAndAck(daemonId, msg.seq, sessionId, msg.type, msg);
       for (const [clientWs, client] of this.clients) {
         if (client.subscribedSessions.has(sessionId) && clientWs.readyState === 1) this.send(clientWs, msg);
       }
@@ -952,36 +1433,36 @@ export class Router {
       // transient sessions/<pid>.json Claude Code writes on --continue); insert-
       // upserting it created phantom "status + time, no messages" rows. If the
       // row doesn't exist, drop the status and its side-effects entirely.
-      db.updateSessionStatus(this.pool, sessionId, daemonId, msg.status || 'unknown', msg.exit_reason, userId ?? undefined)
-        .then((updated) => {
+      await db.updateSessionStatus(this.pool, sessionId, daemonId, msg.status || 'unknown', msg.exit_reason, userId ?? undefined)
+        .then(async (updated) => {
           if (!updated) {
             console.log(`[router] dropping session_status for unknown session ${sessionId} (no row — likely a ghost/transient session)`);
             return;
           }
           // C2: persist cumulative cost_usd from result event
           if (msg.cost_usd != null) {
-            db.updateSessionCost(this.pool, sessionId, parseFloat(msg.cost_usd)).catch(console.error);
+            await effect.step(() => db.updateSessionCost(this.pool, sessionId, parseFloat(msg.cost_usd)));
           }
           const pending = this.findPendingSessionOperation(daemonId, msg.request_id);
-          if (pending && ['running', 'busy', 'idle', 'waiting', 'waiting_approval'].includes(msg.status)) {
-            this.settlePendingSessionOperation(pending);
+          if (['running', 'busy', 'retry', 'idle', 'waiting', 'waiting_approval', 'waiting_question'].includes(msg.status)) {
+            await effect.step(() => this.settlePendingSessionOperation(pending));
           }
-          if (userId) this.broadcastQuotaStatus(userId).catch(console.error);
+          if (userId) await effect.step(() => this.broadcastQuotaStatus(userId));
           // Push notification for terminal states
           if (userId && ['completed', 'error', 'killed', 'exited'].includes(msg.status)) {
-            notifyUser(this.pool, userId, sessionStatusPush(msg.title || '', msg.status, sessionId)).catch(console.error);
+            await effect.step(() => notifyUser(this.pool, userId, sessionStatusPush(msg.title || '', msg.status, sessionId)));
           }
           // Forward to subscribed clients only for real sessions.
           for (const [clientWs, client] of this.clients) {
             if (client.subscribedSessions.has(sessionId) && clientWs.readyState === 1) this.send(clientWs, msg);
           }
         })
-        .catch(console.error);
       return;
     }
     for (const [clientWs, client] of this.clients) {
       if (client.subscribedSessions.has(sessionId) && clientWs.readyState === 1) this.send(clientWs, msg);
     }
+    });
   }
 
   async handleClientMessage(clientWs: WebSocket, msg: any): Promise<void> {
@@ -1238,7 +1719,7 @@ export class Router {
           let outbound = msg;
           if (msg.type === 'user_message' && client.userId !== null) {
             const status = await db.getSessionStatus(this.pool, msg.session_id);
-            const isActive = ['running', 'busy', 'idle', 'waiting', 'waiting_approval'].includes(status || '');
+            const isActive = ['running', 'busy', 'retry', 'idle', 'waiting', 'waiting_approval', 'waiting_question'].includes(status || '');
             if (!isActive) {
               const requestId = typeof msg.request_id === 'string' && msg.request_id
                 ? msg.request_id
@@ -1507,7 +1988,7 @@ export class Router {
       const metrics = this.daemonMetrics.get(daemonId);
       const countsRow = await this.pool.query(
         `SELECT COUNT(*)::int AS total,
-                COUNT(*) FILTER (WHERE status IN ('running','busy'))::int AS active
+                COUNT(*) FILTER (WHERE status IN ('running','busy','retry'))::int AS active
          FROM sessions
          WHERE user_id = $1 AND daemon_id = $2 AND session_id NOT LIKE 'pending-%'`,
         [userId, daemonId]
@@ -1547,7 +2028,7 @@ export class Router {
 
       const countsRow = await this.pool.query(
         `SELECT COUNT(*)::int AS total,
-                COUNT(*) FILTER (WHERE status IN ('running','busy'))::int AS active
+                COUNT(*) FILTER (WHERE status IN ('running','busy','retry'))::int AS active
          FROM sessions
          WHERE user_id = $1 AND daemon_id = $2 AND session_id NOT LIKE 'pending-%'`,
         [userId, daemonId]
@@ -1593,6 +2074,10 @@ export class Router {
   }
 
   async handleForceKick(daemonId: string, userId: number): Promise<{ success: boolean; error?: string }> {
+    return this.withDaemonRegistrationLock(daemonId, () => this.handleForceKickLocked(daemonId, userId));
+  }
+
+  private async handleForceKickLocked(daemonId: string, userId: number): Promise<{ success: boolean; error?: string }> {
     const daemon = this.daemons.get(daemonId);
     if (!daemon) {
       return { success: false, error: 'daemon not found or offline' };
@@ -1601,14 +2086,42 @@ export class Router {
       return { success: false, error: 'forbidden' };
     }
 
-    // Cancel any pending takeover timer for this daemon
+    // Revoke the token captured with this exact in-memory generation. Reading
+    // daemons.active_token_jti after an await could revoke a replacement token.
+    let revoked = !daemon.tokenJti;
+    if (daemon.tokenJti) {
+      for (let attempt = 0; attempt < 3; attempt++) {
+        try {
+          await db.revokeToken(this.pool, daemon.tokenJti, userId, 'force_kick');
+          revoked = true;
+          break;
+        } catch (e) {
+          console.error('force_kick revoke:', e);
+          if (attempt < 2) await new Promise((resolve) => setTimeout(resolve, 10 * (attempt + 1)));
+        }
+      }
+    }
+    if (!revoked) {
+      // Keep the existing generation online and usable: claiming success after
+      // a failed revoke would let the still-valid token reconnect immediately.
+      return { success: false, error: 'token revocation failed' };
+    }
+
+    // Audit is observability, not the security commit. Never keep the daemon
+    // alive or hold the registration chain while waiting for audit storage.
+    void db.insertAuditLog(this.pool, userId, 'force_kick', {
+      daemon_id: daemonId,
+      hostname: daemon.hostname,
+      registration_id: daemon.registrationId,
+    }).catch((e) => console.error('force_kick audit:', e));
+
+    // Cancel any pending takeover timer only after the revoke security commit.
     const takeover = this.takeoverTimers.get(daemonId);
     if (takeover) {
       clearTimeout(takeover.timer);
       this.takeoverTimers.delete(daemonId);
     }
 
-    // Send kicked message with 0 grace period
     if (daemon.ws.readyState === 1) {
       this.send(daemon.ws, {
         type: 'kicked',
@@ -1619,18 +2132,24 @@ export class Router {
       daemon.ws.close();
     }
 
-    // Revoke the daemon's specific token so it can't reconnect with the old one.
-    try {
-      await db.revokeDaemonToken(this.pool, daemonId, userId, 'force_kick');
-      await db.insertAuditLog(this.pool, userId, 'force_kick', {
-        daemon_id: daemonId,
-        hostname: daemon.hostname,
-      });
-    } catch (e) { console.error('force_kick revoke:', e); }
-
-    // Unregister
-    this.daemons.delete(daemonId);
-    db.setDaemonOffline(this.pool, daemonId).catch(console.error);
+    // Unregister only the generation captured before the awaits. Registration
+    // shares this lock, but identity guards also protect cross-relay successors.
+    const current = this.daemons.get(daemonId);
+    if (current?.ws === daemon.ws && current.registrationId === daemon.registrationId) {
+      this.cancelDaemonRevocationGate(daemon.registrationId);
+      this.daemons.delete(daemonId);
+      this.daemonSeq.delete(daemonId);
+    }
+    const offlineTimer = this.pendingOfflineTimers.get(daemonId);
+    if (offlineTimer) {
+      clearTimeout(offlineTimer);
+      this.pendingOfflineTimers.delete(daemonId);
+    }
+    // Cleanup is not part of the revoke/close security commit. Keep it outside
+    // the registration chain; bounded attempts and the generation CAS make a
+    // late completion harmless to a replacement.
+    void this.setDaemonOfflineWithRetry(daemonId, daemon.registrationId)
+      .catch((e) => console.error('force_kick offline cleanup:', e));
 
     return { success: true };
   }
@@ -1640,6 +2159,8 @@ export class Router {
     if (daemon && daemon.userId !== userId) {
       return { success: false, error: 'forbidden' };
     }
+
+    if (daemon) this.cancelDaemonRevocationGate(daemon.registrationId);
 
     if (daemon?.ws.readyState === 1) {
       this.send(daemon.ws, {

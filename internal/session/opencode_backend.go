@@ -2,15 +2,20 @@ package session
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/pocketctl/pocketctl/internal/adapter"
+	"github.com/pocketctl/pocketctl/internal/daemon"
 	"github.com/pocketctl/pocketctl/internal/discovery"
+	"github.com/pocketctl/pocketctl/internal/platform"
 	"github.com/pocketctl/pocketctl/internal/protocol"
 )
 
@@ -34,33 +39,56 @@ const (
 	opencodeDiscoverInterval = 2 * time.Second
 	opencodeSyncInterval     = 1 * time.Second
 	opencodeFreshWindow      = 10 * time.Minute
-	opencodeReconcileWindow  = 2 * time.Hour   // reconcile stuck "running" status for sessions active within this window
-	opencodeApprovalTimeout  = 5 * time.Minute // auto-reject a pending permission if no client answers
+	opencodeReconcileWindow  = 2 * time.Hour // reconcile stuck "running" status for sessions active within this window
+	opencodeSeenEventLimit   = 4096
 )
 
 type opencodeCoordinator struct {
 	sm *SessionManager
 
-	mu           sync.Mutex
-	server       *adapter.OpencodeServer
-	ctx          context.Context    // daemon lifetime (loops + supervisor)
-	cancel       context.CancelFunc // cancels daemon lifetime
-	serverCancel context.CancelFunc // cancels the current serve process (restart)
-	started      bool
+	mu            sync.Mutex
+	server        *adapter.OpencodeServer
+	ctx           context.Context    // daemon lifetime (loops + supervisor)
+	cancel        context.CancelFunc // cancels daemon lifetime
+	serverCancel  context.CancelFunc // cancels the current serve process (restart)
+	started       bool
+	preserveServe bool // set only while handing ownership to an in-place restart
 
-	trackMu sync.Mutex
-	tracked map[string]context.CancelFunc // sessionID → its sync loop's cancel
+	trackMu               sync.Mutex
+	tracked               map[string]context.CancelFunc // sessionID → its sync loop's cancel
+	loadMu                sync.Mutex
+	loads                 map[string]*opencodeLoadCall
+	interactionMu         sync.Mutex
+	eventMu               sync.Mutex
+	seenInteractionEvents map[string]struct{}
+	seenInteractionOrder  []string
+	resolvedInteractions  map[string]struct{}
+	resolvedOrder         []string
+	interactionGeneration map[interactionGenerationScope]uint64
 
-	reconciled  map[string]bool // sessionIDs whose stale "running" status was reconciled to idle
-	summaryOnce sync.Once
+	reconciled     map[string]bool // sessionIDs whose stale "running" status was reconciled to idle
+	summaryOnce    sync.Once
+	recoverSession func(context.Context, string)
+}
+
+type opencodeLoadCall struct {
+	done     chan struct{}
+	loaded   bool
+	notFound bool
 }
 
 func newOpencodeCoordinator(sm *SessionManager) *opencodeCoordinator {
-	return &opencodeCoordinator{
-		sm:         sm,
-		tracked:    make(map[string]context.CancelFunc),
-		reconciled: make(map[string]bool),
+	c := &opencodeCoordinator{
+		sm:                    sm,
+		tracked:               make(map[string]context.CancelFunc),
+		loads:                 make(map[string]*opencodeLoadCall),
+		reconciled:            make(map[string]bool),
+		seenInteractionEvents: make(map[string]struct{}),
+		resolvedInteractions:  make(map[string]struct{}),
+		interactionGeneration: make(map[interactionGenerationScope]uint64),
 	}
+	c.recoverSession = c.reconcileSessionInteractions
+	return c
 }
 
 // ensureStarted lazily launches the shared opencode serve process. Safe to call
@@ -76,6 +104,34 @@ func (c *opencodeCoordinator) ensureStarted() error {
 	if c.ctx == nil {
 		c.ctx, c.cancel = context.WithCancel(context.Background())
 	}
+	state, stateErr := daemon.ReadOpenCodeServeState()
+	if stateErr != nil && !os.IsNotExist(stateErr) {
+		if err := daemon.RemoveOpenCodeServeState(); err != nil {
+			return fmt.Errorf("remove invalid opencode handoff: %w", err)
+		}
+	}
+	if stateErr == nil {
+		if !handoffOwnerAvailable(state) {
+			return fmt.Errorf("opencode handoff still owned by live daemon pid %d", state.OwnerPID)
+		}
+		if cliPath, _, found := discovery.ResolveAgent("opencode"); found {
+			versionCtx, versionCancel := context.WithTimeout(c.ctx, 5*time.Second)
+			installedVersion, versionErr := adapter.DetectOpencodeVersion(versionCtx, cliPath)
+			versionCancel()
+			if versionErr != nil {
+				return versionErr
+			}
+			attached, err := c.tryAttachHandoffLocked(state, installedVersion)
+			if err != nil {
+				return err
+			}
+			if attached {
+				return nil
+			}
+		} else {
+			return fmt.Errorf("opencode CLI not found while serve handoff exists")
+		}
+	}
 	server, scancel, err := c.launchServerLocked()
 	if err != nil {
 		return err
@@ -84,6 +140,40 @@ func (c *opencodeCoordinator) ensureStarted() error {
 	c.serverCancel = scancel
 	c.started = true
 	return nil
+}
+
+func handoffOwnerAvailable(state *daemon.OpenCodeServeState) bool {
+	return state.OwnerPID <= 0 || state.OwnerPID == os.Getpid() || !platform.NewProcessController().IsAlive(state.OwnerPID)
+}
+
+func (c *opencodeCoordinator) tryAttachHandoffLocked(state *daemon.OpenCodeServeState, installedVersion string) (bool, error) {
+	ctx, cancel := context.WithTimeout(c.ctx, 5*time.Second)
+	defer cancel()
+	server, err := adapter.AttachOpencodeServer(ctx, state.BaseURL, state.Password, state.PID, state.Version, state.UpdatedAt)
+	if err != nil {
+		if platform.NewProcessController().IsAlive(state.PID) {
+			return false, fmt.Errorf("live opencode serve identity unverifiable; refusing competing serve: %w", err)
+		}
+		if removeErr := daemon.RemoveOpenCodeServeState(); removeErr != nil {
+			return false, removeErr
+		}
+		return false, nil
+	}
+	if server.Version() != installedVersion {
+		if err := server.Stop(); err != nil {
+			return false, fmt.Errorf("stop incompatible opencode serve: %w", err)
+		}
+		if err := daemon.RemoveOpenCodeServeState(); err != nil {
+			return false, err
+		}
+		return false, nil
+	}
+	if err := daemon.ClaimOpenCodeServeState(state.OwnerPID, openCodeHandoffState(server)); err != nil {
+		return false, err
+	}
+	_, scancel := context.WithCancel(c.ctx)
+	c.server, c.serverCancel, c.started = server, scancel, true
+	return true, nil
 }
 
 // launchServerLocked starts a new serve process under a child of c.ctx. Caller
@@ -99,7 +189,61 @@ func (c *opencodeCoordinator) launchServerLocked() (*adapter.OpencodeServer, con
 		scancel()
 		return nil, nil, fmt.Errorf("start opencode serve: %w", err)
 	}
+	if err := writeOpenCodeHandoff(server); err != nil {
+		server.Stop()
+		scancel()
+		return nil, nil, fmt.Errorf("persist opencode serve handoff: %w", err)
+	}
 	return server, scancel, nil
+}
+
+func (c *opencodeCoordinator) attachHandoffLocked(state *daemon.OpenCodeServeState) error {
+	ctx, cancel := context.WithTimeout(c.ctx, 5*time.Second)
+	defer cancel()
+	server, err := adapter.AttachOpencodeServer(ctx, state.BaseURL, state.Password, state.PID, state.Version, state.UpdatedAt)
+	if err != nil {
+		return err
+	}
+	if err := daemon.ClaimOpenCodeServeState(state.OwnerPID, openCodeHandoffState(server)); err != nil {
+		server.Stop()
+		return err
+	}
+	_, scancel := context.WithCancel(c.ctx)
+	c.server, c.serverCancel, c.started = server, scancel, true
+	return nil
+}
+
+func writeOpenCodeHandoff(server *adapter.OpencodeServer) error {
+	return daemon.WriteOpenCodeServeState(openCodeHandoffState(server))
+}
+
+func openCodeHandoffState(server *adapter.OpencodeServer) *daemon.OpenCodeServeState {
+	return &daemon.OpenCodeServeState{
+		PID: server.PID(), BaseURL: server.BaseURL(), Password: server.Password(),
+		Version: server.Version(), OwnerPID: os.Getpid(), UpdatedAt: time.Now().UTC(),
+	}
+}
+
+// PrepareDaemonRestart transfers serve ownership to the handoff record. It is
+// only called by the Web-triggered in-place restart path.
+func (c *opencodeCoordinator) PrepareDaemonRestart() error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.server == nil {
+		return nil
+	}
+	if err := daemon.ClaimOpenCodeServeState(os.Getpid(), openCodeHandoffState(c.server)); err != nil {
+		return err
+	}
+	c.server.Detach()
+	c.preserveServe = true
+	return nil
+}
+
+func (c *opencodeCoordinator) cancelDaemonRestart() {
+	c.mu.Lock()
+	c.preserveServe = false
+	c.mu.Unlock()
 }
 
 // srv returns the current serve client under lock (it may be swapped by a restart).
@@ -119,7 +263,10 @@ func (c *opencodeCoordinator) restartServer() {
 		c.serverCancel()
 	}
 	if c.server != nil {
-		c.server.Stop()
+		if err := c.server.Stop(); err != nil {
+			slog.Default().Error("refusing opencode serve restart without verified cleanup", "error", err)
+			return
+		}
 	}
 	c.server, c.serverCancel = nil, nil
 	c.started = false
@@ -166,8 +313,17 @@ func (c *opencodeCoordinator) Shutdown() {
 	if c.cancel != nil {
 		c.cancel()
 	}
-	if c.server != nil {
-		c.server.Stop()
+	if !c.preserveServe {
+		stopped := true
+		if c.server != nil {
+			if err := c.server.Stop(); err != nil {
+				stopped = false
+				slog.Default().Error("opencode serve shutdown requires CLI cleanup", "error", err)
+			}
+		}
+		if stopped {
+			_ = daemon.RemoveOpenCodeServeState()
+		}
 	}
 	c.started = false
 }
@@ -182,7 +338,7 @@ func (c *opencodeCoordinator) startDiscovery() error {
 	slog.Default().Info("opencode discovery started", "serve", c.srv().BaseURL())
 	go c.discoveryLoop(c.ctx)
 	go c.supervise(c.ctx)
-	go c.permissionLoop(c.ctx)
+	go c.interactionLoop(c.ctx)
 	return nil
 }
 
@@ -190,15 +346,15 @@ func (c *opencodeCoordinator) startDiscovery() error {
 // events for sessions THIS serve drives. The daemon's serve forces edit/bash to
 // "ask" (OPENCODE_CONFIG_CONTENT in OpencodeServer.Start), so daemon-driven
 // sessions raise permission.asked, which permissionLoop surfaces as an
-// approval_request card (reply routed via ResolveApproval → ReplyPermission, and
-// auto-rejected on timeout so an unattended turn never hangs). Terminal `opencode`
+// approval_request card (reply routed via ResolveApprovalAction → the matching
+// legacy/v2 OpenCode reply endpoint). Requests remain pending until an explicit
+// response or authoritative reconciliation. Terminal `opencode`
 // sessions are driven by the user's own server, whose permission events this serve
 // never sees — those keep prompting in the user's terminal.
 
-// permissionLoop subscribes to the serve's SSE /event stream and turns
-// permission.asked / permission.replied events into approval cards. It reconnects
-// when the stream drops or the serve restarts.
-func (c *opencodeCoordinator) permissionLoop(ctx context.Context) {
+// interactionLoop subscribes to OpenCode's SSE stream, surfaces permission and
+// question cards, and reconciles pending state whenever the stream reconnects.
+func (c *opencodeCoordinator) interactionLoop(ctx context.Context) {
 	for {
 		if ctx.Err() != nil {
 			return
@@ -208,26 +364,14 @@ func (c *opencodeCoordinator) permissionLoop(ctx context.Context) {
 			time.Sleep(time.Second)
 			continue
 		}
-		evCh, err := srv.Events(ctx)
+		evCh, err := srv.GlobalEvents(ctx)
 		if err != nil {
 			time.Sleep(2 * time.Second)
 			continue
 		}
+		c.reconcileInteractions(ctx)
 		for ev := range evCh {
-			switch ev.Type {
-			case "permission.asked":
-				if pa, ok := adapter.ParsePermissionAsked(ev.Properties); ok {
-					tool := pa.Tool
-					if tool == "" {
-						tool = "permission"
-					}
-					c.sm.handleOpencodePermission(pa.SessionID, pa.ID, tool, pa.Metadata)
-				}
-			case "permission.replied":
-				if pa, ok := adapter.ParsePermissionAsked(ev.Properties); ok {
-					c.sm.clearOpencodePermissionReplied(pa.SessionID, pa.ID)
-				}
-			}
+			c.handleInteractionEvent(ev)
 		}
 		// Stream closed (serve restart / disconnect) — reconnect after a beat.
 		if ctx.Err() != nil {
@@ -235,6 +379,386 @@ func (c *opencodeCoordinator) permissionLoop(ctx context.Context) {
 		}
 		time.Sleep(time.Second)
 	}
+}
+
+func (c *opencodeCoordinator) handleInteractionEvent(ev adapter.SSEEvent) {
+	c.interactionMu.Lock()
+	statusSessionID := ""
+	switch ev.Type {
+	case "permission.asked":
+		if permission, ok := adapter.ParsePermissionAsked(ev.Properties); ok {
+			if c.interactionDirectoryMatches(permission.SessionID, ev.Directory) && !c.interactionResolved("permission", permission.SessionID, permission.ID) && c.claimInteractionEvent(ev.ID) {
+				if c.sm.handleOpencodePermission(permission) {
+					c.bumpInteractionGeneration(permission.SessionID, "permission", permission.Version)
+				}
+			}
+		}
+	case "permission.v2.asked":
+		if permission, ok := adapter.ParsePermissionV2Asked(ev.Properties); ok {
+			if c.interactionDirectoryMatches(permission.SessionID, ev.Directory) && !c.interactionResolved("permission", permission.SessionID, permission.ID) && c.claimInteractionEvent(ev.ID) {
+				if c.sm.handleOpencodePermission(permission) {
+					c.bumpInteractionGeneration(permission.SessionID, "permission", permission.Version)
+				}
+			}
+		}
+	case "permission.replied", "permission.v2.replied":
+		if requestID, sessionID, action, ok := adapter.ParsePermissionResolution(ev.Properties); ok && c.interactionDirectoryMatches(sessionID, ev.Directory) {
+			cleared := c.sm.clearOpencodePermission(sessionID, requestID)
+			c.markInteractionResolved("permission", sessionID, requestID)
+			c.bumpInteractionGeneration(sessionID, "permission", interactionVersionForEvent(ev.Type))
+			if cleared {
+				c.sm.outputCh <- protocol.DaemonEvent{Type: "approval_resolved", SessionID: sessionID, RequestID: requestID, Action: action, Approved: action != "reject", Reason: "resolved_elsewhere"}
+				statusSessionID = sessionID
+			}
+		}
+	case "question.asked", "question.v2.asked":
+		if question, ok := adapter.ParseQuestionAsked(ev.Properties); ok {
+			if ev.Type == "question.v2.asked" {
+				question.Version = adapter.PermissionVersionV2
+			}
+			if c.interactionDirectoryMatches(question.SessionID, ev.Directory) && !c.interactionResolved("question", question.SessionID, question.ID) && c.claimInteractionEvent(ev.ID) {
+				if c.sm.handleOpencodeQuestion(question) {
+					c.bumpInteractionGeneration(question.SessionID, "question", question.Version)
+				}
+			}
+		}
+	case "question.replied", "question.rejected", "question.v2.replied", "question.v2.rejected":
+		if requestID, sessionID, answers, ok := adapter.ParseQuestionResolution(ev.Properties); ok && c.interactionDirectoryMatches(sessionID, ev.Directory) {
+			cleared := c.sm.clearOpencodeQuestion(sessionID, requestID)
+			c.markInteractionResolved("question", sessionID, requestID)
+			c.bumpInteractionGeneration(sessionID, "question", interactionVersionForEvent(ev.Type))
+			if cleared {
+				c.sm.outputCh <- protocol.DaemonEvent{Type: "question_resolved", SessionID: sessionID, RequestID: requestID, Answers: answers, Rejected: strings.Contains(ev.Type, "rejected"), Reason: "resolved_elsewhere"}
+				statusSessionID = sessionID
+			}
+		}
+	}
+	c.interactionMu.Unlock()
+	if statusSessionID != "" {
+		c.sm.emitCurrentInteractionStatus(statusSessionID)
+	}
+}
+
+type interactionGenerationScope struct {
+	sessionID string
+	kind      string
+	version   string
+}
+
+func normalizeInteractionVersion(version string) string {
+	if version == adapter.PermissionVersionV2 {
+		return adapter.PermissionVersionV2
+	}
+	return adapter.PermissionVersionLegacy
+}
+
+func interactionVersionForEvent(eventType string) string {
+	if strings.Contains(eventType, ".v2.") {
+		return adapter.PermissionVersionV2
+	}
+	return adapter.PermissionVersionLegacy
+}
+
+func interactionScope(sessionID, kind, version string) interactionGenerationScope {
+	return interactionGenerationScope{sessionID: sessionID, kind: kind, version: normalizeInteractionVersion(version)}
+}
+
+func (c *opencodeCoordinator) bumpInteractionGeneration(sessionID, kind, version string) {
+	if c.interactionGeneration == nil {
+		c.interactionGeneration = make(map[interactionGenerationScope]uint64)
+	}
+	c.interactionGeneration[interactionScope(sessionID, kind, version)]++
+}
+
+func (c *opencodeCoordinator) captureInteractionGenerations(sessionIDs []string, kind, version string) map[string]uint64 {
+	c.interactionMu.Lock()
+	defer c.interactionMu.Unlock()
+	generations := make(map[string]uint64, len(sessionIDs))
+	for _, sessionID := range sessionIDs {
+		generations[sessionID] = c.interactionGeneration[interactionScope(sessionID, kind, version)]
+	}
+	return generations
+}
+
+func interactionRequestKey(kind, sessionID, requestID string) string {
+	return kind + "\x00" + sessionID + "\x00" + requestID
+}
+
+func (c *opencodeCoordinator) interactionResolved(kind, sessionID, requestID string) bool {
+	_, ok := c.resolvedInteractions[interactionRequestKey(kind, sessionID, requestID)]
+	return ok
+}
+
+func (c *opencodeCoordinator) markInteractionResolved(kind, sessionID, requestID string) {
+	if sessionID == "" || requestID == "" {
+		return
+	}
+	if c.resolvedInteractions == nil {
+		c.resolvedInteractions = make(map[string]struct{})
+	}
+	key := interactionRequestKey(kind, sessionID, requestID)
+	if _, exists := c.resolvedInteractions[key]; exists {
+		return
+	}
+	if len(c.resolvedOrder) == opencodeSeenEventLimit {
+		delete(c.resolvedInteractions, c.resolvedOrder[0])
+		copy(c.resolvedOrder, c.resolvedOrder[1:])
+		c.resolvedOrder = c.resolvedOrder[:len(c.resolvedOrder)-1]
+	}
+	c.resolvedInteractions[key] = struct{}{}
+	c.resolvedOrder = append(c.resolvedOrder, key)
+}
+
+func (c *opencodeCoordinator) claimInteractionEvent(eventID string) bool {
+	if eventID == "" {
+		return true
+	}
+	c.eventMu.Lock()
+	defer c.eventMu.Unlock()
+	if c.seenInteractionEvents == nil {
+		c.seenInteractionEvents = make(map[string]struct{})
+	}
+	if _, duplicate := c.seenInteractionEvents[eventID]; duplicate {
+		return false
+	}
+	if len(c.seenInteractionOrder) == opencodeSeenEventLimit {
+		delete(c.seenInteractionEvents, c.seenInteractionOrder[0])
+		copy(c.seenInteractionOrder, c.seenInteractionOrder[1:])
+		c.seenInteractionOrder = c.seenInteractionOrder[:len(c.seenInteractionOrder)-1]
+	}
+	c.seenInteractionEvents[eventID] = struct{}{}
+	c.seenInteractionOrder = append(c.seenInteractionOrder, eventID)
+	return true
+}
+
+func (c *opencodeCoordinator) interactionDirectoryMatches(sessionID, directory string) bool {
+	canonicalDirectory, valid := canonicalInteractionDirectory(directory)
+	if !valid {
+		return false
+	}
+	c.sm.mu.RLock()
+	state, ok := c.sm.sessions[sessionID]
+	var cwd string
+	if ok {
+		cwd = state.Cwd
+	}
+	c.sm.mu.RUnlock()
+	canonicalCwd, valid := canonicalInteractionDirectory(cwd)
+	return ok && valid && canonicalCwd == canonicalDirectory
+}
+
+func (sm *SessionManager) emitCurrentInteractionStatus(sessionID string) {
+	sm.mu.RLock()
+	ps, ok := sm.sessions[sessionID]
+	status := protocol.StatusIdle
+	if ok {
+		status = pendingInteractionStatus(ps)
+	}
+	sm.mu.RUnlock()
+	if ok {
+		// Once the last interaction is cleared, ask OpenCode for the real
+		// runtime state instead of briefly reporting a locally inferred idle.
+		// OpenCode may already have resumed work or entered retry at this point.
+		if status == protocol.StatusIdle {
+			if backend := sm.opencodeBackendFor(sessionID); backend != nil && backend.coord != nil && backend.coord.srv() != nil {
+				sm.reconcileOpencodeInteractionStatus(sessionID, backend)
+				return
+			}
+		}
+		sm.emitInteractionStatus(sessionID, status)
+	}
+}
+
+// reconcileInteractions recovers asked events missed while SSE was disconnected.
+// It intentionally treats list failures as non-authoritative and never clears
+// local state merely because one endpoint was unavailable.
+func (c *opencodeCoordinator) reconcileInteractions(ctx context.Context) {
+	if srv := c.srv(); srv != nil {
+		c.trackMu.Lock()
+		sessionIDs := make([]string, 0, len(c.tracked))
+		for sessionID := range c.tracked {
+			sessionIDs = append(sessionIDs, sessionID)
+		}
+		c.trackMu.Unlock()
+		sessionsByDirectory := make(map[string][]string)
+		c.sm.mu.RLock()
+		for _, sessionID := range sessionIDs {
+			if state, ok := c.sm.sessions[sessionID]; ok {
+				if directory, valid := canonicalInteractionDirectory(state.Cwd); valid {
+					sessionsByDirectory[directory] = append(sessionsByDirectory[directory], sessionID)
+				}
+			}
+		}
+		c.sm.mu.RUnlock()
+		for directory, cwdSessionIDs := range sessionsByDirectory {
+			permissionGenerations := c.captureInteractionGenerations(cwdSessionIDs, "permission", adapter.PermissionVersionLegacy)
+			if permissions, err := srv.ListPermissions(ctx, directory); err == nil {
+				for _, sessionID := range cwdSessionIDs {
+					c.applyPermissionSnapshot(sessionID, adapter.PermissionVersionLegacy, permissionGenerations[sessionID], permissions)
+				}
+			}
+			questionGenerations := c.captureInteractionGenerations(cwdSessionIDs, "question", adapter.PermissionVersionLegacy)
+			if questions, err := srv.ListQuestions(ctx, directory); err == nil {
+				for _, sessionID := range cwdSessionIDs {
+					c.applyQuestionSnapshot(sessionID, adapter.PermissionVersionLegacy, questionGenerations[sessionID], questions)
+				}
+			}
+		}
+		for _, sessionID := range sessionIDs {
+			permissionGeneration := c.captureInteractionGenerations([]string{sessionID}, "permission", adapter.PermissionVersionV2)[sessionID]
+			if permissions, err := srv.ListPermissionsV2(ctx, sessionID); err == nil {
+				c.applyPermissionSnapshot(sessionID, adapter.PermissionVersionV2, permissionGeneration, permissions)
+			}
+			questionGeneration := c.captureInteractionGenerations([]string{sessionID}, "question", adapter.PermissionVersionV2)[sessionID]
+			if questions, err := srv.ListQuestionsV2(ctx, sessionID); err == nil {
+				c.applyQuestionSnapshot(sessionID, adapter.PermissionVersionV2, questionGeneration, questions)
+			}
+		}
+	}
+}
+
+// reconcileSessionInteractions closes the daemon-restart race where the first
+// global SSE reconciliation runs before discovery has populated c.tracked.
+// Each newly tracked session gets authoritative legacy and v2 snapshots,
+// filtered to that session after querying the global legacy routes.
+func (c *opencodeCoordinator) reconcileSessionInteractions(ctx context.Context, sessionID string) {
+	srv := c.srv()
+	if srv == nil {
+		return
+	}
+	requestCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	directory, _ := c.sm.GetSessionCwd(sessionID)
+	directory, valid := canonicalInteractionDirectory(directory)
+	if valid {
+		permissionGeneration := c.captureInteractionGenerations([]string{sessionID}, "permission", adapter.PermissionVersionLegacy)[sessionID]
+		if permissions, err := srv.ListPermissions(requestCtx, directory); err == nil {
+			c.applyPermissionSnapshot(sessionID, adapter.PermissionVersionLegacy, permissionGeneration, permissions)
+		}
+		questionGeneration := c.captureInteractionGenerations([]string{sessionID}, "question", adapter.PermissionVersionLegacy)[sessionID]
+		if questions, err := srv.ListQuestions(requestCtx, directory); err == nil {
+			c.applyQuestionSnapshot(sessionID, adapter.PermissionVersionLegacy, questionGeneration, questions)
+		}
+	}
+	permissionGeneration := c.captureInteractionGenerations([]string{sessionID}, "permission", adapter.PermissionVersionV2)[sessionID]
+	if permissions, err := srv.ListPermissionsV2(requestCtx, sessionID); err == nil {
+		c.applyPermissionSnapshot(sessionID, adapter.PermissionVersionV2, permissionGeneration, permissions)
+	}
+	questionGeneration := c.captureInteractionGenerations([]string{sessionID}, "question", adapter.PermissionVersionV2)[sessionID]
+	if questions, err := srv.ListQuestionsV2(requestCtx, sessionID); err == nil {
+		c.applyQuestionSnapshot(sessionID, adapter.PermissionVersionV2, questionGeneration, questions)
+	}
+}
+
+func (c *opencodeCoordinator) applyPermissionSnapshot(sessionID, version string, generation uint64, observed []adapter.PermissionAsked) bool {
+	c.interactionMu.Lock()
+	if c.interactionGeneration[interactionScope(sessionID, "permission", version)] != generation {
+		c.interactionMu.Unlock()
+		return false
+	}
+	statusSessions := c.reconcilePermissionSnapshot(sessionID, version, c.permissionsForSession(observed, sessionID))
+	c.bumpInteractionGeneration(sessionID, "permission", version)
+	c.interactionMu.Unlock()
+	for _, statusSessionID := range statusSessions {
+		c.sm.emitCurrentInteractionStatus(statusSessionID)
+	}
+	return true
+}
+
+func (c *opencodeCoordinator) applyQuestionSnapshot(sessionID, version string, generation uint64, observed []adapter.QuestionAsked) bool {
+	c.interactionMu.Lock()
+	if c.interactionGeneration[interactionScope(sessionID, "question", version)] != generation {
+		c.interactionMu.Unlock()
+		return false
+	}
+	statusSessions := c.reconcileQuestionSnapshot(sessionID, version, c.questionsForSession(observed, sessionID))
+	c.bumpInteractionGeneration(sessionID, "question", version)
+	c.interactionMu.Unlock()
+	for _, statusSessionID := range statusSessions {
+		c.sm.emitCurrentInteractionStatus(statusSessionID)
+	}
+	return true
+}
+
+func (c *opencodeCoordinator) reconcilePermissionSnapshot(sessionID, version string, observed []adapter.PermissionAsked) []string {
+	before := make([]string, 0)
+	c.sm.mu.RLock()
+	if state, ok := c.sm.sessions[sessionID]; ok {
+		for requestID, pending := range state.PendingPermissions {
+			if pending.ProtocolVersion == version {
+				before = append(before, requestID)
+			}
+		}
+	}
+	c.sm.mu.RUnlock()
+	statusSessions := c.sm.reconcileOpencodePermissionSnapshot(sessionID, version, observed)
+	c.sm.mu.RLock()
+	state := c.sm.sessions[sessionID]
+	for _, requestID := range before {
+		if state == nil {
+			c.markInteractionResolved("permission", sessionID, requestID)
+			continue
+		}
+		if _, pending := state.PendingPermissions[requestID]; !pending {
+			c.markInteractionResolved("permission", sessionID, requestID)
+		}
+	}
+	c.sm.mu.RUnlock()
+	return statusSessions
+}
+
+func (c *opencodeCoordinator) reconcileQuestionSnapshot(sessionID, version string, observed []adapter.QuestionAsked) []string {
+	before := make([]string, 0)
+	c.sm.mu.RLock()
+	if state, ok := c.sm.sessions[sessionID]; ok {
+		for requestID, pending := range state.PendingQuestions {
+			if pending.ProtocolVersion == version {
+				before = append(before, requestID)
+			}
+		}
+	}
+	c.sm.mu.RUnlock()
+	statusSessions := c.sm.reconcileOpencodeQuestionSnapshot(sessionID, version, observed)
+	c.sm.mu.RLock()
+	state := c.sm.sessions[sessionID]
+	for _, requestID := range before {
+		if state == nil {
+			c.markInteractionResolved("question", sessionID, requestID)
+			continue
+		}
+		if _, pending := state.PendingQuestions[requestID]; !pending {
+			c.markInteractionResolved("question", sessionID, requestID)
+		}
+	}
+	c.sm.mu.RUnlock()
+	return statusSessions
+}
+
+func (c *opencodeCoordinator) permissionsForSession(permissions []adapter.PermissionAsked, sessionID string) []adapter.PermissionAsked {
+	filtered := make([]adapter.PermissionAsked, 0, len(permissions))
+	for _, permission := range permissions {
+		if permission.SessionID == sessionID && !c.interactionResolved("permission", sessionID, permission.ID) {
+			filtered = append(filtered, permission)
+		}
+	}
+	return filtered
+}
+
+func (c *opencodeCoordinator) questionsForSession(questions []adapter.QuestionAsked, sessionID string) []adapter.QuestionAsked {
+	filtered := make([]adapter.QuestionAsked, 0, len(questions))
+	for _, question := range questions {
+		if question.SessionID == sessionID && !c.interactionResolved("question", sessionID, question.ID) {
+			filtered = append(filtered, question)
+		}
+	}
+	return filtered
+}
+
+func canonicalInteractionDirectory(directory string) (string, bool) {
+	if strings.TrimSpace(directory) == "" || strings.ContainsRune(directory, '\x00') {
+		return "", false
+	}
+	return normalizeCwd(directory), true
 }
 
 // discoveryLoop polls the shared serve for sessions and registers any
@@ -343,6 +867,9 @@ func (c *opencodeCoordinator) startSync(sessionID string, emitUser bool) {
 	sctx, scancel := context.WithCancel(base)
 	c.tracked[sessionID] = scancel
 	c.trackMu.Unlock()
+	if c.recoverSession != nil {
+		go c.recoverSession(sctx, sessionID)
+	}
 	go c.syncLoop(sctx, sessionID, emitUser)
 }
 
@@ -351,6 +878,8 @@ func (c *opencodeCoordinator) syncLoop(ctx context.Context, sessionID string, em
 	ticker := time.NewTicker(opencodeSyncInterval)
 	defer ticker.Stop()
 	lastTitle := ""
+	lastTodos := ""
+	lastTodoEventID := ""
 	tick := 0
 	for {
 		select {
@@ -362,14 +891,39 @@ func (c *opencodeCoordinator) syncLoop(ctx context.Context, sessionID string, em
 			if s == nil {
 				continue // serve down (e.g. mid-restart); next tick retries
 			}
+			cwd, _ := c.sm.GetSessionCwd(sessionID)
+			var nativeStatus *adapter.OpencodeSessionStatus
+			if statuses, err := s.ListSessionStatuses(ctx, cwd); err == nil {
+				if status, ok := statuses[sessionID]; ok {
+					nativeStatus = &status
+				}
+			}
 			msgs, err := s.GetMessages(ctx, sessionID)
 			if err == nil {
-				if evs := sync.Diff(msgs); len(evs) > 0 {
+				if evs := sync.DiffWithNativeStatus(msgs, nativeStatus); len(evs) > 0 {
 					for _, ev := range evs {
+						if ev.Type == "session_status" {
+							ev.Status = c.sm.applyOpencodeRuntimeStatus(sessionID, ev.Status)
+						}
 						c.sm.outputCh <- ev
 					}
 					c.sm.UpdateLastActivity(sessionID)
 				}
+			}
+			if todos, err := s.ListTodos(ctx, sessionID, cwd); err == nil {
+				encoded, _ := json.Marshal(todos)
+				key := string(encoded)
+				if key != lastTodos {
+					eventID := adapter.OpencodeTodoEventID(sessionID, todos)
+					c.sm.outputCh <- protocol.DaemonEvent{
+						Type: "agent_todo", SessionID: sessionID, PartID: "todo:" + sessionID,
+						EventID: eventID, PreviousEventID: lastTodoEventID,
+						Todos: append([]protocol.TodoItem(nil), todos...),
+					}
+					lastTodoEventID = eventID
+					c.sm.UpdateLastActivity(sessionID)
+				}
+				lastTodos = key
 			}
 			// Refresh the title periodically: opencode auto-generates a real title
 			// after the first exchange (replacing "New session - <ts>"). Pick it up
@@ -409,6 +963,69 @@ type serverBackend struct {
 	coord *opencodeCoordinator
 }
 
+func parseOpenCodeSlashCommand(content string) (name, arguments string, ok bool) {
+	trimmed := strings.TrimSpace(content)
+	if len(trimmed) < 2 || trimmed[0] != '/' || trimmed[1] == '/' || trimmed[1] == ' ' || trimmed[1] == '\t' || trimmed[1] == '\n' {
+		return "", "", false
+	}
+	rest := trimmed[1:]
+	if split := strings.IndexAny(rest, " \t\r\n"); split >= 0 {
+		name = rest[:split]
+		arguments = strings.TrimSpace(rest[split:])
+	} else {
+		name = rest
+	}
+	return name, arguments, name != ""
+}
+
+func mapOpenCodeCommands(commands []adapter.OpencodeCommand) []protocol.CommandItem {
+	out := make([]protocol.CommandItem, 0, len(commands))
+	for _, command := range commands {
+		if strings.TrimSpace(command.Name) == "" {
+			continue
+		}
+		kind := "command"
+		if command.Source == "skill" {
+			kind = "skill"
+		}
+		out = append(out, protocol.CommandItem{
+			Name: command.Name, Source: command.Source, Kind: kind, Description: command.Description,
+			ArgHint: strings.Join(command.Hints, " "), Template: command.Template, Hints: command.Hints,
+			Subtask: command.Subtask, Agent: command.Agent, Model: command.Model,
+		})
+	}
+	return out
+}
+
+func filterOpenCodeAgents(agents []adapter.OpencodeAgent) []protocol.SessionAgentOption {
+	out := make([]protocol.SessionAgentOption, 0, len(agents))
+	for _, agent := range agents {
+		if agent.Hidden || (agent.Mode != "primary" && agent.Mode != "all") || strings.TrimSpace(agent.Name) == "" {
+			continue
+		}
+		out = append(out, protocol.SessionAgentOption{
+			Name: agent.Name, Description: agent.Description, Mode: agent.Mode,
+			Color: agent.Color, Model: agent.Model, Variant: agent.Variant,
+		})
+	}
+	return out
+}
+
+func validateOpenCodeAgentSwitchState(ps *ProcessState) error {
+	if ps == nil {
+		return fmt.Errorf("session not found")
+	}
+	if len(ps.PendingPermissions) > 0 || len(ps.PendingQuestions) > 0 {
+		return fmt.Errorf("cannot switch agent while an interaction is pending")
+	}
+	switch ps.Status {
+	case protocol.StatusRunning, protocol.StatusBusy, protocol.StatusRetry, protocol.StatusWaitingApproval, protocol.StatusWaitingQuestion:
+		return fmt.Errorf("cannot switch agent while session is %s", ps.Status)
+	default:
+		return nil
+	}
+}
+
 func (b *serverBackend) Start(ctx context.Context, config protocol.SessionConfig) (string, error) {
 	if err := b.coord.ensureStarted(); err != nil {
 		return "", err
@@ -424,26 +1041,6 @@ func (b *serverBackend) Send(ctx context.Context, sessionID, content string) err
 	if err := b.coord.ensureStarted(); err != nil {
 		return err
 	}
-	// /compact is a built-in command, not a prompt: call opencode's compact
-	// endpoint and report via command_receipt (mirrors claude's /compact). The
-	// compacted history is surfaced by the message poller.
-	if strings.TrimSpace(content) == "/compact" {
-		model, _ := b.coord.sm.GetSessionModel(sessionID)
-		go func() {
-			status, msg := "success", ""
-			if err := b.coord.srv().Compact(context.Background(), sessionID, model); err != nil {
-				status, msg = "failed", err.Error()
-			}
-			b.coord.sm.outputCh <- protocol.DaemonEvent{
-				Type:          "command_receipt",
-				SessionID:     sessionID,
-				Command:       "/compact",
-				ReceiptStatus: status,
-				Message:       msg,
-			}
-		}()
-		return nil
-	}
 	// 6.4 busy-collision: refuse to start a new turn while one is still generating
 	// (mirrors claude's "session busy" guard). Checked against the session's live
 	// message state via the serve.
@@ -453,6 +1050,37 @@ func (b *serverBackend) Send(ctx context.Context, sessionID, content string) err
 		cancel()
 		if err == nil && adapter.OpencodeMessagesRunning(msgs) {
 			return fmt.Errorf("会话正在生成回复，请等当前回合结束后再发送")
+		}
+	}
+	if name, arguments, isSlash := parseOpenCodeSlashCommand(content); isSlash {
+		cwd, _ := b.coord.sm.GetSessionCwd(sessionID)
+		commands, err := b.coord.srv().ListCommands(ctx, cwd)
+		if err != nil {
+			b.coord.sm.outputCh <- protocol.DaemonEvent{
+				Type: "command_receipt", SessionID: sessionID, Command: "/" + name,
+				ReceiptStatus: "failed", Message: "无法加载 OpenCode 命令列表: " + err.Error(),
+			}
+			return nil
+		}
+		known := false
+		for _, command := range commands {
+			if command.Name == name {
+				known = true
+				break
+			}
+		}
+		if known {
+			go func() {
+				status, message := "success", ""
+				if err := b.coord.srv().ExecuteCommand(context.Background(), sessionID, cwd, name, arguments); err != nil {
+					status, message = "failed", err.Error()
+				}
+				b.coord.sm.outputCh <- protocol.DaemonEvent{
+					Type: "command_receipt", SessionID: sessionID, Command: "/" + name,
+					ReceiptStatus: status, Message: message,
+				}
+			}()
+			return nil
 		}
 	}
 	// opencode POST /prompt blocks until the turn completes; run it in the
@@ -518,18 +1146,6 @@ func (sm *SessionManager) opencodeBackendFor(sessionID string) *serverBackend {
 	return nil
 }
 
-// clearPendingApproval clears a session's pending approval request and returns it
-// to running. Used when an opencode approval is resolved.
-func (sm *SessionManager) clearPendingApproval(sessionID, requestID string) {
-	sm.mu.Lock()
-	defer sm.mu.Unlock()
-	if ps, ok := sm.sessions[sessionID]; ok && ps.PendingRequestID == requestID {
-		ps.PendingRequestID = ""
-		ps.Status = protocol.StatusRunning
-		ps.LastActivityAt = time.Now()
-	}
-}
-
 // ensureOpencode returns the lazily-created opencode coordinator.
 func (sm *SessionManager) ensureOpencode() *opencodeCoordinator {
 	sm.mu.Lock()
@@ -573,6 +1189,209 @@ func (sm *SessionManager) OpencodeSessionModelFromServe(sessionID string) string
 	return model
 }
 
+// loadOpencodeSessionFromServe fetches and registers one session that discovery
+// has not observed yet. The second result is true only for an authoritative 404.
+func (sm *SessionManager) loadOpencodeSessionFromServe(sessionID string) (loaded, notFound bool) {
+	coord := sm.ensureOpencode()
+	coord.loadMu.Lock()
+	if call := coord.loads[sessionID]; call != nil {
+		coord.loadMu.Unlock()
+		<-call.done
+		return call.loaded, call.notFound
+	}
+	call := &opencodeLoadCall{done: make(chan struct{})}
+	coord.loads[sessionID] = call
+	coord.loadMu.Unlock()
+	defer func() {
+		coord.loadMu.Lock()
+		call.loaded, call.notFound = loaded, notFound
+		delete(coord.loads, sessionID)
+		close(call.done)
+		coord.loadMu.Unlock()
+	}()
+
+	sm.mu.RLock()
+	_, exists := sm.sessions[sessionID]
+	sm.mu.RUnlock()
+	if exists {
+		return true, false
+	}
+	if err := coord.ensureStarted(); err != nil {
+		return false, false
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	info, err := coord.srv().GetSession(ctx, sessionID)
+	if err != nil {
+		var statusErr *adapter.OpencodeHTTPStatusError
+		return false, errors.As(err, &statusErr) && statusErr.StatusCode == 404
+	}
+	if info.ID != sessionID || strings.TrimSpace(info.Directory) == "" || !filepath.IsAbs(info.Directory) ||
+		strings.TrimSpace(info.Agent) == "" || strings.TrimSpace(info.Model.ProviderID) == "" || strings.TrimSpace(info.Model.ID) == "" {
+		return false, false
+	}
+
+	model := info.Model.ProviderID + "/" + info.Model.ID
+	cwdKey := normalizeCwd(info.Directory)
+	now := time.Now()
+	sm.mu.Lock()
+	if state := sm.sessions[sessionID]; state != nil {
+		startSync := false
+		if state.Agent == adapter.AgentOpencode {
+			state.Cwd, state.Model, state.CurrentAgent = info.Directory, model, info.Agent
+			if _, ok := state.Backend.(*serverBackend); !ok {
+				state.Backend = &serverBackend{coord: coord}
+			}
+			registerCwdKeyLocked(sm, sessionID, cwdKey)
+			startSync = true
+		}
+		sm.mu.Unlock()
+		if startSync {
+			coord.startSync(sessionID, true)
+		}
+		return true, false
+	}
+	sm.sessions[sessionID] = &ProcessState{
+		SessionID:      sessionID,
+		Status:         protocol.StatusIdle,
+		StartedAt:      now,
+		LastActivityAt: now,
+		Cwd:            info.Directory,
+		Agent:          adapter.AgentOpencode,
+		Source:         "terminal",
+		Model:          model,
+		CurrentAgent:   info.Agent,
+		Backend:        &serverBackend{coord: coord},
+	}
+	registerCwdKeyLocked(sm, sessionID, cwdKey)
+	sm.mu.Unlock()
+	coord.startSync(sessionID, true)
+	return true, false
+}
+
+// registerCwdKeyLocked records an already-normalized cwd while the caller holds sm.mu.
+func registerCwdKeyLocked(sm *SessionManager, sessionID, cwdKey string) {
+	set := sm.cwdSessions[cwdKey]
+	if set == nil {
+		set = make(map[string]struct{})
+		sm.cwdSessions[cwdKey] = set
+	}
+	set[sessionID] = struct{}{}
+}
+
+var opencodeInteractionCapabilities = []string{
+	"dynamic_commands", "agent_switch", "permission_actions", "questions",
+}
+
+func (sm *SessionManager) OpenCodeInteractionCapabilities(sessionID string) []string {
+	agent, ok := sm.GetSessionAgent(sessionID)
+	if !ok || agent != adapter.AgentOpencode {
+		return nil
+	}
+	return append([]string(nil), opencodeInteractionCapabilities...)
+}
+
+func (sm *SessionManager) CommandsForSession(ctx context.Context, sessionID string) ([]protocol.CommandItem, error) {
+	b := sm.opencodeBackendFor(sessionID)
+	if b == nil || b.coord == nil {
+		return nil, fmt.Errorf("not an opencode session")
+	}
+	if err := b.coord.ensureStarted(); err != nil {
+		return nil, err
+	}
+	cwd, ok := sm.GetSessionCwd(sessionID)
+	if !ok {
+		return nil, fmt.Errorf("session not found")
+	}
+	commands, err := b.coord.srv().ListCommands(ctx, cwd)
+	if err != nil {
+		return nil, err
+	}
+	return mapOpenCodeCommands(commands), nil
+}
+
+func (sm *SessionManager) ListSessionAgents(ctx context.Context, sessionID string) ([]protocol.SessionAgentOption, error) {
+	b := sm.opencodeBackendFor(sessionID)
+	if b == nil || b.coord == nil {
+		return nil, fmt.Errorf("not an opencode session")
+	}
+	if err := b.coord.ensureStarted(); err != nil {
+		return nil, err
+	}
+	cwd, ok := sm.GetSessionCwd(sessionID)
+	if !ok {
+		return nil, fmt.Errorf("session not found")
+	}
+	agents, err := b.coord.srv().ListAgents(ctx, cwd)
+	if err != nil {
+		return nil, err
+	}
+	return filterOpenCodeAgents(agents), nil
+}
+
+func (sm *SessionManager) CurrentSessionAgent(ctx context.Context, sessionID string) string {
+	sm.mu.RLock()
+	ps, ok := sm.sessions[sessionID]
+	if ok && ps.CurrentAgent != "" {
+		current := ps.CurrentAgent
+		sm.mu.RUnlock()
+		return current
+	}
+	sm.mu.RUnlock()
+	b := sm.opencodeBackendFor(sessionID)
+	if !ok || b == nil || b.coord == nil || b.coord.srv() == nil {
+		return ""
+	}
+	info, err := b.coord.srv().GetSession(ctx, sessionID)
+	if err != nil || info.Agent == "" {
+		return ""
+	}
+	sm.mu.Lock()
+	if state := sm.sessions[sessionID]; state != nil {
+		state.CurrentAgent = info.Agent
+	}
+	sm.mu.Unlock()
+	return info.Agent
+}
+
+func (sm *SessionManager) SetSessionAgent(ctx context.Context, sessionID, agentName string) error {
+	b := sm.opencodeBackendFor(sessionID)
+	if b == nil || b.coord == nil {
+		return fmt.Errorf("not an opencode session")
+	}
+	sm.mu.RLock()
+	ps := sm.sessions[sessionID]
+	if err := validateOpenCodeAgentSwitchState(ps); err != nil {
+		sm.mu.RUnlock()
+		return err
+	}
+	sm.mu.RUnlock()
+	agents, err := sm.ListSessionAgents(ctx, sessionID)
+	if err != nil {
+		return err
+	}
+	found := false
+	for _, agent := range agents {
+		if agent.Name == agentName {
+			found = true
+			break
+		}
+	}
+	if !found {
+		return fmt.Errorf("unknown or non-interactive opencode agent %q", agentName)
+	}
+	if err := b.coord.srv().SwitchAgent(ctx, sessionID, agentName); err != nil {
+		return err
+	}
+	sm.mu.Lock()
+	if state := sm.sessions[sessionID]; state != nil {
+		state.CurrentAgent = agentName
+	}
+	sm.mu.Unlock()
+	sm.outputCh <- protocol.DaemonEvent{Type: "session_agent_changed", SessionID: sessionID, CurrentAgent: agentName}
+	return nil
+}
+
 // ModelsForAgent returns the model picker options for an agent. opencode models
 // come from its serve API (requires the shared serve running); other agents use
 // the stateless ListModelsForAgent.
@@ -605,6 +1424,29 @@ func (sm *SessionManager) ShutdownOpencode() {
 	sm.mu.Unlock()
 	if c != nil {
 		c.Shutdown()
+	}
+}
+
+// PrepareDaemonRestart preserves only the OpenCode serve across a Web-requested
+// daemon replacement. Explicit daemon stop continues to call ShutdownOpencode.
+func (sm *SessionManager) PrepareDaemonRestart() error {
+	sm.mu.Lock()
+	c := sm.opencode
+	sm.mu.Unlock()
+	if c == nil {
+		return nil
+	}
+	return c.PrepareDaemonRestart()
+}
+
+// CancelDaemonRestart restores normal destructive shutdown semantics if the
+// replacement process could not be spawned after preparing the handoff.
+func (sm *SessionManager) CancelDaemonRestart() {
+	sm.mu.Lock()
+	c := sm.opencode
+	sm.mu.Unlock()
+	if c != nil {
+		c.cancelDaemonRestart()
 	}
 }
 
@@ -666,7 +1508,11 @@ func (sm *SessionManager) createOpencodeSession(ctx context.Context, config prot
 	// returns the config default first IFF it's still a valid model, otherwise the
 	// first available model — so we never set a stale/renamed model id.
 	if strings.TrimSpace(cfg.Model) == "" {
-		cfg.Model = coord.srv().ResolveDefaultModel(ctx)
+		var resolveErr error
+		cfg.Model, resolveErr = coord.srv().ResolveDefaultModel(ctx)
+		if resolveErr != nil {
+			return "", fmt.Errorf("select runnable opencode model: %w", resolveErr)
+		}
 	}
 	sid, err := backend.Start(ctx, cfg)
 	if err != nil {

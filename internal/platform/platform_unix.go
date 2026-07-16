@@ -11,8 +11,8 @@ import (
 	"syscall"
 
 	"github.com/creack/pty"
-	"golang.org/x/sys/unix"
 	"github.com/pocketctl/pocketctl/internal/service"
+	"golang.org/x/sys/unix"
 )
 
 // NewPTYProvider 返回 Unix PTY provider（基于 creack/pty）。
@@ -73,6 +73,10 @@ func (unixIPCListener) DefaultPath(name string) string {
 // NewInstanceLocker 返回基于 flock 的单实例锁。行为对齐现有 daemon.AcquireInstanceLock
 // （PR2 接入时由 daemon 传入同样的锁文件路径，无缝替换）。
 func NewInstanceLocker() InstanceLocker { return unixLocker{} }
+
+// NewLogicalLocker uses the supplied filesystem path for flock on Unix. The
+// logical ID is used by platforms whose kernel locks are not path-backed.
+func NewLogicalLocker(_ string) InstanceLocker { return unixLocker{} }
 
 type unixLocker struct{}
 

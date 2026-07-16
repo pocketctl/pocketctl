@@ -41,6 +41,11 @@ export class PushDeduper {
     return true;
   }
 
+  /** Allow a failed delivery attempt to be retried by durable replay. */
+  forget(key: string): void {
+    this.seen.delete(key);
+  }
+
   /**
    * Start periodic sweeping to reclaim expired entries, keeping the Map
    * bounded over a long-lived process. Idempotent — calling again is a no-op.

@@ -46,10 +46,10 @@ type DeviceAuthResponse struct {
 
 // DeviceTokenResponse is the response from POST /api/auth/device/token.
 type DeviceTokenResponse struct {
-	AccessToken  string `json:"access_token"`
-	RefreshToken string `json:"refresh_token"`
-	TokenType    string `json:"token_type"`
-	ExpiresIn    int    `json:"expires_in"`
+	AccessToken      string `json:"access_token"`
+	RefreshToken     string `json:"refresh_token"`
+	TokenType        string `json:"token_type"`
+	ExpiresIn        int    `json:"expires_in"`
 	Error            string `json:"error"`
 	ErrorDescription string `json:"error_description"`
 }
@@ -86,9 +86,9 @@ func DeviceAuthorize(baseURL, clientID, codeChallenge, machineID string) (*Devic
 // DeviceToken polls the token endpoint for an access token per RFC 8628 §3.4.
 func DeviceToken(baseURL, deviceCode, clientID, codeVerifier string) (*DeviceTokenResponse, error) {
 	body := map[string]string{
-		"grant_type":   "urn:ietf:params:oauth:grant-type:device_code",
-		"device_code":  deviceCode,
-		"client_id":    clientID,
+		"grant_type":    "urn:ietf:params:oauth:grant-type:device_code",
+		"device_code":   deviceCode,
+		"client_id":     clientID,
 		"code_verifier": codeVerifier,
 	}
 
@@ -98,10 +98,10 @@ func DeviceToken(baseURL, deviceCode, clientID, codeVerifier string) (*DeviceTok
 	}
 
 	result := &DeviceTokenResponse{
-		AccessToken:  stringField(resp, "access_token"),
-		RefreshToken: stringField(resp, "refresh_token"),
-		TokenType:    stringField(resp, "token_type"),
-		ExpiresIn:    intField(resp, "expires_in"),
+		AccessToken:      stringField(resp, "access_token"),
+		RefreshToken:     stringField(resp, "refresh_token"),
+		TokenType:        stringField(resp, "token_type"),
+		ExpiresIn:        intField(resp, "expires_in"),
 		Error:            stringField(resp, "error"),
 		ErrorDescription: stringField(resp, "error_description"),
 	}
@@ -123,8 +123,8 @@ func RevokeToken(baseURL, token, tokenTypeHint string) error {
 // ---- Email Verification Code Auth ----
 
 // SendEmailCode requests a verification code for the given email address.
-func SendEmailCode(baseURL, email string) error {
-	resp, err := postJSON(baseURL+"/api/auth/email/send", map[string]string{"email": email})
+func SendEmailCode(baseURL, email, lang string) error {
+	resp, err := postJSON(baseURL+"/api/auth/email/send", map[string]string{"email": email, "lang": lang})
 	if err != nil {
 		return err
 	}
@@ -138,8 +138,8 @@ func SendEmailCode(baseURL, email string) error {
 }
 
 // VerifyEmailCode verifies the email code and returns access/refresh tokens.
-func VerifyEmailCode(baseURL, email, code string) (accessToken, refreshToken string, err error) {
-	resp, err := postJSON(baseURL+"/api/auth/email/verify", map[string]string{"email": email, "code": code})
+func VerifyEmailCode(baseURL, email, code, lang string) (accessToken, refreshToken string, err error) {
+	resp, err := postJSON(baseURL+"/api/auth/email/verify", map[string]string{"email": email, "code": code, "lang": lang})
 	if err != nil {
 		return "", "", err
 	}

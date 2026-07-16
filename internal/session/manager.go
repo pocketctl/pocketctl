@@ -33,15 +33,39 @@ type ProcessState struct {
 	PTY              platform.PTY         // interactive-web-session D1: daemon session 的 PTY master（写 stdin 驱动 interactive claude）。PR2: platform.PTY interface (was *os.File)
 	PTYScanner       *ptyscan.Scanner     // daemon session 的 PTY 菜单扫描器（捕获 TUI 选择提示，转成 interactive_prompt 事件）
 	Permission       *protocol.PermissionConfig
-	Model            string              // resolved model name (for session_created, surfaced to web /model)
-	Effort           string              // last-set thinking-effort level (low/medium/high/xhigh/max/ultracode)
-	PendingRequestID string              // non-empty while a tool-use approval request awaits a client decision
-	InitialPrompt    string              // prompt submitted when a daemon PTY session starts
-	JSONLExcludeIDs  map[string]struct{} // rollout/session ids that existed before this PTY launch
-	PTYOutputTail    []byte              // recent raw PTY output for startup diagnostics
-	WorktreePath     string              // Scheme D: non-empty when the session runs inside a git worktree
-	WorktreeBranch   string              // Scheme D: the git branch backing the worktree
-	Backend          SessionBackend      // non-nil only for server-kind agents (opencode); subprocess agents drive via the fields above
+	Model            string // resolved model name (for session_created, surfaced to web /model)
+	CurrentAgent     string // selected OpenCode Agent profile; Agent remains the CLI type
+	Effort           string // last-set thinking-effort level (low/medium/high/xhigh/max/ultracode)
+	PendingRequestID string // non-empty while a tool-use approval request awaits a client decision
+	// OpenCode interactions are independent, request-ID-keyed collections. The
+	// legacy PendingRequestID above remains exclusively for Claude hook approval.
+	PendingPermissions map[string]PendingOpenCodePermission
+	PendingQuestions   map[string]PendingOpenCodeQuestion
+	InitialPrompt      string              // prompt submitted when a daemon PTY session starts
+	JSONLExcludeIDs    map[string]struct{} // rollout/session ids that existed before this PTY launch
+	PTYOutputTail      []byte              // recent raw PTY output for startup diagnostics
+	WorktreePath       string              // Scheme D: non-empty when the session runs inside a git worktree
+	WorktreeBranch     string              // Scheme D: the git branch backing the worktree
+	Backend            SessionBackend      // non-nil only for server-kind agents (opencode); subprocess agents drive via the fields above
+}
+
+type PendingOpenCodePermission struct {
+	RequestID       string
+	Permission      string
+	Patterns        []string
+	Always          []string
+	Metadata        []byte
+	ToolMessageID   string
+	ToolCallID      string
+	ProtocolVersion string
+}
+
+type PendingOpenCodeQuestion struct {
+	RequestID       string
+	Questions       []protocol.QuestionInfo
+	ToolMessageID   string
+	ToolCallID      string
+	ProtocolVersion string
 }
 
 func clonePermission(p *protocol.PermissionConfig) *protocol.PermissionConfig {
@@ -74,6 +98,7 @@ type SessionManager struct {
 	OnStateChanged      func()                                 // callback when in-memory session state should be persisted
 	ptyProvider         platform.PTYProvider                   // PR2: daemon-session PTY backend (was direct creack/pty)
 	proc                platform.ProcessController             // PR2: process alive/kill (was syscall; used by Task 3)
+	createDeps          createSessionDependencies
 
 	// approvals brokers PreToolUse hook approvals for non-bypass daemon sessions.
 	// nil on daemons that don't surface approvals (or before wiring).
@@ -94,6 +119,11 @@ type SessionManager struct {
 	opencode *opencodeCoordinator
 }
 
+type createSessionDependencies struct {
+	resolveAgentCLI func(protocol.SessionConfig) (string, error)
+	startOpencode   func(*SessionManager, context.Context, protocol.SessionConfig) (string, error)
+}
+
 func NewSessionManager(outputCh chan protocol.DaemonEvent) *SessionManager {
 	return &SessionManager{
 		sessions:    make(map[string]*ProcessState),
@@ -103,6 +133,14 @@ func NewSessionManager(outputCh chan protocol.DaemonEvent) *SessionManager {
 		fileLocks:   filelock.New(),
 		ptyProvider: defaultPTYProvider,
 		proc:        defaultProc,
+		createDeps: createSessionDependencies{
+			resolveAgentCLI: func(config protocol.SessionConfig) (string, error) {
+				return findAgentCLI(config.Agent)
+			},
+			startOpencode: func(sm *SessionManager, ctx context.Context, config protocol.SessionConfig) (string, error) {
+				return sm.createOpencodeSession(ctx, config)
+			},
+		},
 	}
 }
 

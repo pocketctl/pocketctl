@@ -1,6 +1,7 @@
 import { describe, expect, test, vi } from 'vitest'
 import {
   countBoundDaemonsLocked,
+  claimBoundDaemonSlot,
   getQuotaSnapshot,
   releaseQuotaReservation,
   reserveConcurrentSession,
@@ -103,6 +104,20 @@ describe('reserveConcurrentSession', () => {
 })
 
 describe('quota helpers', () => {
+  test('claims only ownership without publishing contender activation metadata', async () => {
+    const { pool, client } = fakePool((sql) => {
+      if (sql.includes('SELECT user_id FROM daemons')) return { rows: [{ user_id: 7 }] }
+      if (sql.includes('COUNT(*)::int AS count')) return { rows: [{ count: 1 }] }
+      return { rows: [] }
+    })
+    await expect(claimBoundDaemonSlot(pool, {
+      userId: 7, daemonId: 'daemon-1', hostname: 'contender', agents: [{ type: 'opencode' }],
+      arch: 'arm64', version: 'new', startedAt: 200, limit: 2,
+    })).resolves.toMatchObject({ allowed: true, reconnect: true })
+    const mutation = client.query.mock.calls.find(([sql]) => String(sql).includes('INSERT INTO daemons'))
+    expect(mutation).toBeUndefined()
+  })
+
   test('counts offline and online bound daemons', async () => {
     const query = vi.fn(async (_sql: string, _params?: any[]) => ({ rows: [{ count: 2 }] }))
     await expect(countBoundDaemonsLocked({ query } as any, 3)).resolves.toBe(2)

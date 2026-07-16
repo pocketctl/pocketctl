@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'vitest'
-import { approvalPush, interactivePush } from '../push.js'
+import { approvalPush, interactivePush, questionPush } from '../push.js'
 
 describe('attention push payloads', () => {
   test('approval payload contains iOS deep-link identifiers', () => {
@@ -16,5 +16,13 @@ describe('attention push payloads', () => {
       body: '请选择执行方式',
       data: { type: 'interactive', session_id: 'session-2', request_id: 'request-2' },
     })
+  })
+})
+
+test('questionPush points to the pending native question', () => {
+  expect(questionPush('Choose scope', 'session-1', 'question-1')).toEqual({
+    title: 'Agent 需要你的回答',
+    body: 'Choose scope',
+    data: { type: 'question', session_id: 'session-1', request_id: 'question-1' },
   })
 })

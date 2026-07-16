@@ -7,6 +7,23 @@ import (
 	"github.com/pocketctl/pocketctl/internal/protocol"
 )
 
+func TestDefaultPermissionConfig(t *testing.T) {
+	tests := []struct {
+		agent string
+		want  protocol.PermissionConfig
+	}{
+		{AgentClaude, protocol.PermissionConfig{Agent: AgentClaude, Mode: "acceptEdits"}},
+		{AgentCodex, protocol.PermissionConfig{Agent: AgentCodex, Preset: "custom"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.agent, func(t *testing.T) {
+			if got := DefaultPermissionConfig(tt.agent); got != tt.want {
+				t.Fatalf("DefaultPermissionConfig(%q) = %+v, want %+v", tt.agent, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestValidatePermissionConfigCreationMatrix(t *testing.T) {
 	tests := []struct {
 		name    string

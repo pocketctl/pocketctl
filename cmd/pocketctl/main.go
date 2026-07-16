@@ -3,9 +3,12 @@ package main
 import (
 	"bufio"
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
 	"log/slog"
 	"net"
 	"net/http"
@@ -584,7 +587,7 @@ func loginViaEmail(apiURL string) (string, string, error) {
 	}
 
 	fmt.Print(i18n.T("login.sending_code"))
-	if err := api.SendEmailCode(apiURL, email); err != nil {
+	if err := api.SendEmailCode(apiURL, email, i18n.CurrentCode()); err != nil {
 		return "", "", fmt.Errorf("%s", i18n.T("login.send_failed", err))
 	}
 	fmt.Println(i18n.T("login.code_sent"))
@@ -599,7 +602,7 @@ func loginViaEmail(apiURL string) (string, string, error) {
 	}
 
 	fmt.Print(i18n.T("login.verifying"))
-	return api.VerifyEmailCode(apiURL, email, code)
+	return api.VerifyEmailCode(apiURL, email, code, i18n.CurrentCode())
 }
 
 // ---------- daemon start (continued) ----------
@@ -722,8 +725,20 @@ func cmdDaemonStart(args []string) {
 		os.Exit(1)
 	}
 
-	// Check if already running
-	if pid, running := daemon.IsRunning(); running {
+	restartReadyFile := consumeRestartReadyEnv()
+	observedIntent, observedIntentExists, intentErr := daemon.ObserveStopIntent()
+	if intentErr != nil {
+		fmt.Fprintln(os.Stderr, intentErr)
+		os.Exit(1)
+	}
+	if restartReadyFile != "" {
+		if observedIntentExists {
+			os.Exit(0)
+		}
+	}
+	// A replacement deliberately starts while the old owner is alive. It must
+	// bypass only this racy PID pre-check; the instance lock remains authoritative.
+	if pid, running := daemon.IsRunning(); running && restartReadyFile == "" && !observedIntentExists {
 		fmt.Println(i18n.T("daemon.already_running", pid))
 		os.Exit(0)
 	}
@@ -808,7 +823,16 @@ func cmdDaemonStart(args []string) {
 	// is a fast pre-check, but it can't tell two simultaneous starts apart; this
 	// lock can. Without it, a second daemon could start, load a stale token, and
 	// become an invalid-token zombie when the token later rotates.
-	instanceLock, err := daemon.AcquireInstanceLock()
+	var instanceLock io.Closer
+	var err error
+	if restartReadyFile != "" {
+		instanceLock, err = waitForRestartOwnership(restartReadyFile, 20*time.Second, daemon.AcquireInstanceLock)
+		if err == nil {
+			instanceLock, err = finalizeRestartOwnership(instanceLock)
+		}
+	} else {
+		instanceLock, err = daemon.AcquireInstanceLock()
+	}
 	if err != nil {
 		fmt.Fprintln(os.Stderr, i18n.T("daemon.lock_held"))
 		os.Exit(1)
@@ -889,7 +913,11 @@ func cmdDaemonStart(args []string) {
 	daemonStartedAt := time.Now()
 
 	// Write PID file
-	if err := daemon.WritePID(os.Getpid()); err != nil {
+	var observedIntentPtr *daemon.StopIntent
+	if observedIntentExists {
+		observedIntentPtr = &observedIntent
+	}
+	if err := daemon.PublishDaemonPID(os.Getpid(), restartReadyFile != "", observedIntentPtr); err != nil {
 		logger.Error("write pid", "error", err)
 		os.Exit(1)
 	}
@@ -1893,6 +1921,64 @@ func quotaReservationID(grant *protocol.QuotaGrant) string {
 	return grant.ReservationID
 }
 
+func buildSessionMeta(ctx context.Context, sm *session.SessionManager, sessionID string, logger *slog.Logger) protocol.DaemonEvent {
+	sm.EnsureOpencodeSessionLoaded(sessionID)
+	agentType, _ := sm.GetSessionAgent(sessionID)
+	storage := adapter.NewStorage(agentType)
+	model, exists := sm.GetSessionModel(sessionID)
+	effort := sm.GetSessionEffort(sessionID)
+	if model == "" && agentType == adapter.AgentOpencode {
+		model = sm.OpencodeSessionModelFromServe(sessionID)
+	}
+	needsModel := model == "" && agentType != adapter.AgentOpencode
+	needsCodexEffort := effort == "" && agentType == adapter.AgentCodex
+	if needsModel || needsCodexEffort {
+		cwd, cwdOk := sm.GetSessionCwd(sessionID)
+		if !cwdOk {
+			logger.Info("get_session_meta: not in memory", "session", sessionID, "exists", exists)
+		} else if path, perr := storage.ResolveJSONLPath(sessionID, cwd); perr != nil {
+			logger.Info("get_session_meta: resolve path failed", "session", sessionID, "cwd", cwd, "error", perr)
+		} else if data, ferr := os.ReadFile(path); ferr != nil {
+			logger.Info("get_session_meta: read jsonl failed", "session", sessionID, "path", path, "error", ferr)
+		} else {
+			lines := strings.Split(string(data), "\n")
+			if needsModel {
+				m := storage.ExtractModel(lines)
+				logger.Info("get_session_meta: extracted", "session", sessionID, "lines", len(lines), "model", m)
+				if m != "" {
+					sm.SetSessionModel(sessionID, m)
+					model = m
+				}
+			}
+			if needsCodexEffort {
+				effort = (adapter.CodexSessionStorage{}).ExtractEffort(lines)
+				if effort != "" {
+					sm.SetSessionEffort(sessionID, effort)
+				}
+			}
+		}
+	}
+	logger.Info("get_session_meta", "session", sessionID, "model", model)
+	cwd, _ := sm.GetSessionCwd(sessionID)
+	meta := protocol.DaemonEvent{
+		Type:      "session_meta",
+		SessionID: sessionID,
+		Cwd:       cwd,
+		Model:     model,
+		Effort:    effort,
+	}
+	if agentType == adapter.AgentOpencode {
+		meta.Capabilities = sm.OpenCodeInteractionCapabilities(sessionID)
+		agentCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+		meta.CurrentAgent = sm.CurrentSessionAgent(agentCtx, sessionID)
+		cancel()
+	}
+	if permission, mutable, modes, ok := sm.GetPermissionMeta(sessionID); ok {
+		meta.Permission, meta.PermissionMutable, meta.PermissionMutableModes = permission, mutable, modes
+	}
+	return meta
+}
+
 func handleCommands(ctx context.Context, client *ws.Client, sm *session.SessionManager, logger *slog.Logger, stateDirty *atomic.Bool) {
 	quotaGrants := session.NewQuotaGrantValidator()
 	for {
@@ -1982,15 +2068,42 @@ func handleCommands(ctx context.Context, client *ws.Client, sm *session.SessionM
 				logger.Info("daemon restart requested")
 				daemon.Go("daemon-restart", logger, func() {
 					time.Sleep(500 * time.Millisecond) // allow ack to send
+					if daemon.ExplicitStopIntentActive() {
+						return
+					}
 					// Fork+exec: spawn a new daemon process before exiting
 					exe, err := os.Executable()
 					if err != nil {
 						logger.Error("daemon restart failed: get executable", "error", err)
 						return
 					}
-					// PR2: restart via platform.Daemonizer (was exec.Command + SysProcAttr{Setsid}).
-					if err := daemonizer.Restart(exe, os.Args[1:]); err != nil {
+					if err := prepareDaemonRestart(sm); err != nil {
+						logger.Error("daemon restart aborted: preserve opencode serve", "error", err)
+						return
+					}
+					readyPath := filepath.Join(filepath.Dir(daemon.PIDPath()), fmt.Sprintf("restart-%d-%d.ready", os.Getpid(), time.Now().UnixNano()))
+					childEnv := restartChildEnv(append(os.Environ(), "POCKETCTL_DAEMON_CHILD=1"), readyPath)
+					proc, err := daemonizer.ForkDetached(exe, os.Args[1:], childEnv)
+					if err != nil {
+						sm.CancelDaemonRestart()
 						logger.Error("daemon restart failed: spawn", "error", err)
+						return
+					}
+					if err := waitForRestartReady(readyPath, proc.Pid, 10*time.Second); err != nil {
+						sm.CancelDaemonRestart()
+						terminateRestartChild(proc, readyPath)
+						logger.Error("daemon restart failed: replacement not ready", "error", err)
+						return
+					}
+					if !platform.NewProcessController().IsAlive(proc.Pid) {
+						sm.CancelDaemonRestart()
+						terminateRestartChild(proc, readyPath)
+						logger.Error("daemon restart failed: replacement died after readiness")
+						return
+					}
+					if daemon.ExplicitStopIntentActive() {
+						sm.CancelDaemonRestart()
+						terminateRestartChild(proc, readyPath)
 						return
 					}
 					logger.Info("new daemon spawned, exiting")
@@ -2100,69 +2213,54 @@ func handleCommands(ctx context.Context, client *ws.Client, sm *session.SessionM
 				// (authoritative for the -p environment); empty falls back to scan.
 				available, _ := sm.GetSessionSlashCommands(cmd.SessionID)
 				agentType, _ := sm.GetSessionAgent(cmd.SessionID)
+				if agentType == adapter.AgentOpencode {
+					commandCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+					items, err := sm.CommandsForSession(commandCtx, cmd.SessionID)
+					cancel()
+					if err != nil {
+						logger.Error("list opencode commands failed", "session", cmd.SessionID, "error", err)
+						client.SendMsg(protocol.DaemonEvent{Type: "error", SessionID: cmd.SessionID, Operation: "list_commands", Error: err.Error()})
+						items = []protocol.CommandItem{}
+					}
+					client.SendMsg(protocol.DaemonEvent{Type: "command_list", SessionID: cmd.SessionID, Commands: items})
+					continue
+				}
 				client.SendMsg(protocol.DaemonEvent{
 					Type:      "command_list",
 					SessionID: cmd.SessionID,
 					Commands:  commands.ListCommands(cwd, agentType, available),
 				})
 
+			case "list_session_agents":
+				agentCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+				agents, err := sm.ListSessionAgents(agentCtx, cmd.SessionID)
+				cancel()
+				if err != nil {
+					logger.Error("list session agents failed", "session", cmd.SessionID, "error", err)
+					client.SendMsg(protocol.DaemonEvent{Type: "error", SessionID: cmd.SessionID, Operation: "list_session_agents", Error: err.Error()})
+					continue
+				}
+				client.SendMsg(protocol.DaemonEvent{Type: "session_agent_list", SessionID: cmd.SessionID, Agents: agents})
+
+			case "set_session_agent":
+				agentCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+				err := sm.SetSessionAgent(agentCtx, cmd.SessionID, cmd.AgentName)
+				cancel()
+				if err != nil {
+					logger.Error("set session agent failed", "session", cmd.SessionID, "agent", cmd.AgentName, "error", err)
+					client.SendMsg(protocol.DaemonEvent{Type: "error", SessionID: cmd.SessionID, Operation: "set_session_agent", RequestID: cmd.RequestID, Error: err.Error()})
+				}
+
 			case "get_session_meta":
 				// Web client queries a session's resolved model (for the /model
 				// command). Unlike session_created (one-shot, fired before the web
 				// subscribes), this is a request/response the client issues on mount.
-				sm.EnsureSessionLoaded(cmd.SessionID)
-				agentType, _ := sm.GetSessionAgent(cmd.SessionID)
-				storage := adapter.NewStorage(agentType)
-				model, exists := sm.GetSessionModel(cmd.SessionID)
-				effort := sm.GetSessionEffort(cmd.SessionID)
-				if model == "" && agentType == adapter.AgentOpencode {
-					// opencode terminal sessions carry no model at discovery and have no
-					// claude-style JSONL; fetch the model from the serve instead.
-					model = sm.OpencodeSessionModelFromServe(cmd.SessionID)
-				}
-				needsModel := model == "" && agentType != adapter.AgentOpencode
-				needsCodexEffort := effort == "" && agentType == adapter.AgentCodex
-				if needsModel || needsCodexEffort {
-					// Terminal sessions don't carry a model at discovery time — extract
-					// it from the JSONL history (last real assistant message) and cache.
-					cwd, cwdOk := sm.GetSessionCwd(cmd.SessionID)
-					if !cwdOk {
-						logger.Info("get_session_meta: not in memory", "session", cmd.SessionID, "exists", exists)
-					} else if path, perr := storage.ResolveJSONLPath(cmd.SessionID, cwd); perr != nil {
-						logger.Info("get_session_meta: resolve path failed", "session", cmd.SessionID, "cwd", cwd, "error", perr)
-					} else if data, ferr := os.ReadFile(path); ferr != nil {
-						logger.Info("get_session_meta: read jsonl failed", "session", cmd.SessionID, "path", path, "error", ferr)
-					} else {
-						lines := strings.Split(string(data), "\n")
-						if needsModel {
-							m := storage.ExtractModel(lines)
-							logger.Info("get_session_meta: extracted", "session", cmd.SessionID, "lines", len(lines), "model", m)
-							if m != "" {
-								sm.SetSessionModel(cmd.SessionID, m)
-								model = m
-							}
-						}
-						if needsCodexEffort {
-							effort = (adapter.CodexSessionStorage{}).ExtractEffort(lines)
-							if effort != "" {
-								sm.SetSessionEffort(cmd.SessionID, effort)
-							}
-						}
-					}
-				}
-				logger.Info("get_session_meta", "session", cmd.SessionID, "model", model)
-				meta := protocol.DaemonEvent{
-					Type:      "session_meta",
-					SessionID: cmd.SessionID,
-					Model:     model,
-					Effort:    effort,
-				}
-				if permission, mutable, modes, ok := sm.GetPermissionMeta(cmd.SessionID); ok {
-					meta.Permission, meta.PermissionMutable, meta.PermissionMutableModes = permission, mutable, modes
-				}
-				client.SendMsg(meta)
+				client.SendMsg(buildSessionMeta(ctx, sm, cmd.SessionID, logger))
 				if evt, ok := sm.PendingInteractivePrompt(cmd.SessionID); ok {
 					logger.Info("get_session_meta: replay pending interactive prompt", "session", cmd.SessionID, "req", evt.RequestID)
+					client.SendMsg(evt)
+				}
+				for _, evt := range sm.PendingOpencodeInteractions(cmd.SessionID) {
 					client.SendMsg(evt)
 				}
 
@@ -2183,14 +2281,31 @@ func handleCommands(ctx context.Context, client *ws.Client, sm *session.SessionM
 				// Client answered a tool-use approval request (Yes/No). Resolves
 				// the blocked PreToolUse hook so Claude proceeds (allow) or is
 				// told to stop (deny).
-				logger.Info("approval response", "session", cmd.SessionID, "req", cmd.RequestID, "approved", cmd.Approved)
-				if err := sm.ResolveApproval(cmd.SessionID, cmd.RequestID, cmd.Approved); err != nil {
+				logger.Info("approval response", "session", cmd.SessionID, "req", cmd.RequestID, "approved", cmd.Approved, "action", cmd.Action)
+				var err error
+				if cmd.Action != "" {
+					err = sm.ResolveApprovalAction(cmd.SessionID, cmd.RequestID, cmd.Action)
+				} else {
+					err = sm.ResolveApproval(cmd.SessionID, cmd.RequestID, cmd.Approved)
+				}
+				if err != nil {
 					logger.Error("resolve approval failed", "error", err)
 					client.SendMsg(protocol.DaemonEvent{
-						Type:      "error",
-						SessionID: cmd.SessionID,
-						Error:     err.Error(),
+						Type: "error", SessionID: cmd.SessionID, RequestID: cmd.RequestID,
+						Operation: "approval_response", Error: err.Error(),
 					})
+				}
+
+			case "question_response":
+				if err := sm.ResolveQuestion(cmd.SessionID, cmd.RequestID, cmd.Answers); err != nil {
+					logger.Error("resolve question failed", "error", err)
+					client.SendMsg(protocol.DaemonEvent{Type: "error", SessionID: cmd.SessionID, RequestID: cmd.RequestID, Operation: "question_response", Error: err.Error()})
+				}
+
+			case "question_reject":
+				if err := sm.RejectQuestion(cmd.SessionID, cmd.RequestID); err != nil {
+					logger.Error("reject question failed", "error", err)
+					client.SendMsg(protocol.DaemonEvent{Type: "error", SessionID: cmd.SessionID, RequestID: cmd.RequestID, Operation: "question_reject", Error: err.Error()})
 				}
 
 			case "interactive_response":
@@ -2213,6 +2328,131 @@ func handleCommands(ctx context.Context, client *ws.Client, sm *session.SessionM
 			}
 		}
 	}
+}
+
+type daemonRestartPreparer interface {
+	PrepareDaemonRestart() error
+}
+
+func prepareDaemonRestart(preparer daemonRestartPreparer) error {
+	return preparer.PrepareDaemonRestart()
+}
+
+func waitForRestartOwnership(readyPath string, timeout time.Duration, acquire func() (io.Closer, error)) (io.Closer, error) {
+	if err := os.MkdirAll(filepath.Dir(readyPath), 0o700); err != nil {
+		return nil, err
+	}
+	cleanupRestartHandshake(readyPath)
+	defer cleanupRestartHandshake(readyPath)
+	heartbeatPath := restartHeartbeatPath(readyPath)
+	challengePath := restartChallengePath(readyPath)
+	ackPath := restartAckPath(readyPath)
+	if err := os.WriteFile(heartbeatPath, []byte(fmt.Sprintf("%d", os.Getpid())), 0o600); err != nil {
+		return nil, err
+	}
+	deadline := time.Now().Add(timeout)
+	pidText := fmt.Sprintf("%d", os.Getpid())
+	for time.Now().Before(deadline) {
+		if daemon.ExplicitStopIntentActive() {
+			return nil, fmt.Errorf("explicit stop intent active")
+		}
+		if lock, err := acquire(); err == nil {
+			return lock, nil
+		}
+		if data, err := os.ReadFile(challengePath); err == nil {
+			if challenge := strings.TrimSpace(string(data)); challenge != "" {
+				_ = os.WriteFile(ackPath, []byte(pidText+":"+challenge), 0o600)
+			}
+		}
+		_ = os.WriteFile(heartbeatPath, []byte(pidText), 0o600)
+		time.Sleep(50 * time.Millisecond)
+	}
+	return nil, fmt.Errorf("timed out waiting for previous daemon ownership release")
+}
+
+func waitForRestartReady(path string, wantPID int, timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	var firstMod time.Time
+	heartbeatPath := restartHeartbeatPath(path)
+	challengePath := restartChallengePath(path)
+	ackPath := restartAckPath(path)
+	for time.Now().Before(deadline) {
+		if data, err := os.ReadFile(heartbeatPath); err == nil && strings.TrimSpace(string(data)) == fmt.Sprintf("%d", wantPID) {
+			if info, statErr := os.Stat(heartbeatPath); statErr == nil {
+				if firstMod.IsZero() {
+					firstMod = info.ModTime()
+				} else if info.ModTime().After(firstMod) {
+					challengeBytes := make([]byte, 16)
+					if _, err := rand.Read(challengeBytes); err != nil {
+						return fmt.Errorf("generate restart challenge: %w", err)
+					}
+					challenge := hex.EncodeToString(challengeBytes)
+					_ = os.Remove(ackPath)
+					if err := os.WriteFile(challengePath, []byte(challenge), 0o600); err != nil {
+						return err
+					}
+					for time.Now().Before(deadline) {
+						data, err := os.ReadFile(ackPath)
+						if err == nil && strings.TrimSpace(string(data)) == fmt.Sprintf("%d:%s", wantPID, challenge) {
+							if !platform.NewProcessController().IsAlive(wantPID) {
+								return fmt.Errorf("replacement pid %d died before readiness acknowledgment", wantPID)
+							}
+							return nil
+						}
+						time.Sleep(10 * time.Millisecond)
+					}
+					return fmt.Errorf("replacement pid %d died before readiness acknowledgment", wantPID)
+				}
+			}
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+	return fmt.Errorf("replacement pid %d did not enter ownership wait", wantPID)
+}
+
+func restartHeartbeatPath(base string) string { return base + ".heartbeat" }
+func restartChallengePath(base string) string { return base + ".challenge" }
+func restartAckPath(base string) string       { return base + ".ack" }
+
+func cleanupRestartHandshake(base string) {
+	for _, path := range []string{base, restartHeartbeatPath(base), restartChallengePath(base), restartAckPath(base)} {
+		_ = os.Remove(path)
+	}
+}
+
+func terminateRestartChild(proc *os.Process, handshakeBase string) {
+	_ = proc.Kill()
+	_, _ = proc.Wait()
+	cleanupRestartHandshake(handshakeBase)
+}
+
+func restartChildEnv(base []string, readyPath string) []string {
+	return replaceEnv(base, "POCKETCTL_RESTART_READY_FILE", readyPath)
+}
+
+func consumeRestartReadyEnv() string {
+	value := os.Getenv("POCKETCTL_RESTART_READY_FILE")
+	_ = os.Unsetenv("POCKETCTL_RESTART_READY_FILE")
+	return value
+}
+
+func finalizeRestartOwnership(lock io.Closer) (io.Closer, error) {
+	if daemon.ExplicitStopIntentActive() {
+		_ = lock.Close()
+		return nil, fmt.Errorf("explicit stop intent active after ownership claim")
+	}
+	return lock, nil
+}
+
+func replaceEnv(base []string, key, value string) []string {
+	prefix := key + "="
+	out := make([]string, 0, len(base)+1)
+	for _, item := range base {
+		if !strings.HasPrefix(item, prefix) {
+			out = append(out, item)
+		}
+	}
+	return append(out, prefix+value)
 }
 
 // runAgentUpgrade executes the agent's built-in update command when present

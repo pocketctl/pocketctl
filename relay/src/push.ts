@@ -206,19 +206,14 @@ export async function notifyUser(
   userId: number,
   payload: PushPayload,
 ): Promise<void> {
-  try {
-    const devices = await getDevicesByUser(pool, userId);
-    if (devices.length === 0) return;
-
-    const promises = devices.map((device: any) =>
-      sendPushNotification(pool, device.device_token, device.platform, payload).catch((err) =>
-        console.error(`[push] failed for device ${device.id}:`, err.message)
-      )
-    );
-    await Promise.allSettled(promises);
-  } catch (err) {
-    console.error('[push] notifyUser error:', (err as Error).message);
-  }
+  const devices = await getDevicesByUser(pool, userId);
+  if (devices.length === 0) return;
+  // Propagate delivery/setup failures to durable callers. They keep the event
+  // effect pending and retry on replay; non-durable callers already attach
+  // their own catch/log policy.
+  await Promise.all(devices.map((device: any) =>
+    sendPushNotification(pool, device.device_token, device.platform, payload)
+  ));
 }
 
 /**
@@ -298,6 +293,15 @@ export function interactivePush(
     title: 'Agent 需要你的输入',
     body,
     data: { type: 'interactive', session_id: sessionId, request_id: requestId },
+  };
+}
+
+/** Build a push for OpenCode's structured question flow. */
+export function questionPush(prompt: string, sessionId: string, requestId: string): PushPayload {
+  return {
+    title: 'Agent 需要你的回答',
+    body: truncate(prompt, 80) || '等待你的回答',
+    data: { type: 'question', session_id: sessionId, request_id: requestId },
   };
 }
 

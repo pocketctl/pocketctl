@@ -9,11 +9,16 @@ vi.mock('../db.js', async (importOriginal) => {
   return {
     ...actual,
     persistEvent: vi.fn().mockResolvedValue(1),
+    persistEventWithEffect: vi.fn().mockResolvedValue({
+      rowID: 1, inserted: true, completed: false, nextStep: 0,
+    }),
     getUserPlanAndWhitelist: vi.fn().mockResolvedValue({ plan: 'pro', whitelist: false }),
     updateHeartbeat: vi.fn().mockResolvedValue(undefined),
     setDaemonOnline: vi.fn().mockResolvedValue(undefined),
     getDaemonAlias: vi.fn().mockResolvedValue(null),
     getDaemonOwner: vi.fn().mockResolvedValue(null),
+    activateDaemonRegistration: vi.fn().mockResolvedValue(null),
+    restoreDaemonRegistration: vi.fn().mockResolvedValue(undefined),
     // The functions under test — spied via the module, not the mock factory,
     // so the router code path calls the real export which is the spy.
     upsertSubagent: actual.upsertSubagent,

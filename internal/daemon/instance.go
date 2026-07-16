@@ -21,7 +21,15 @@ func AcquireInstanceLock() (io.Closer, error) {
 	if err := os.MkdirAll(pidDir, 0o755); err != nil {
 		return nil, fmt.Errorf("create %s: %w", pidDir, err)
 	}
-	path := filepath.Join(pidDir, "daemon.lock")
+	return AcquireInstanceLockAt(filepath.Join(pidDir, "daemon.lock"))
+}
+
+// AcquireInstanceLockAt is the path-selectable form used by restart ownership
+// handoff and process-level tests.
+func AcquireInstanceLockAt(path string) (io.Closer, error) {
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return nil, fmt.Errorf("create %s: %w", filepath.Dir(path), err)
+	}
 	lock, err := defaultLocker.Acquire(path)
 	if err != nil {
 		return nil, err // platform 已包装 "another pocketctl daemon is already running..."

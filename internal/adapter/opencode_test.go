@@ -75,11 +75,19 @@ func TestConvertOpencodePart_StepFinish(t *testing.T) {
 }
 
 func TestConvertOpencodePart_Skipped(t *testing.T) {
-	for _, typ := range []string{"reasoning", "step-start", "patch", "file"} {
+	for _, typ := range []string{"step-start", "unknown"} {
 		p := &OpencodePart{Type: typ}
 		if got := ConvertOpencodePart(p, "assistant", "glm-5"); got != nil {
 			t.Fatalf("%s should map to nil, got %+v", typ, got)
 		}
+	}
+}
+
+func TestConvertOpencodePart_Reasoning(t *testing.T) {
+	p := &OpencodePart{Type: "reasoning", Text: "checking the repository"}
+	got := ConvertOpencodePart(p, "assistant", "glm-5")
+	if len(got) != 1 || got[0].Type != "agent_reasoning" || got[0].Text != p.Text || got[0].Model != "glm-5" {
+		t.Fatalf("reasoning mapping wrong: %+v", got)
 	}
 }
 

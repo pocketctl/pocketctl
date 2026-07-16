@@ -48,6 +48,14 @@ func detect() Lang {
 // Current returns the resolved display language (English by default).
 func Current() Lang { return current }
 
+// CurrentCode returns the resolved display language as an API language code.
+func CurrentCode() string {
+	if Current() == Chinese {
+		return "zh"
+	}
+	return "en"
+}
+
 // Set overrides the detected language. Intended for tests; callers normally
 // rely on auto-detection.
 func Set(l Lang) { current = l }

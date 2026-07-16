@@ -28,6 +28,7 @@ describe('status indicator CSS classes', () => {
   const statusClasses: Record<string, string> = {
     running: 'running',
     busy: 'busy',
+    retry: 'retry',
     idle: 'idle',
     waiting_approval: 'waiting_approval',
     exited: 'exited',
@@ -37,8 +38,8 @@ describe('status indicator CSS classes', () => {
     disconnected: 'disconnected',
   }
 
-  test('all 8 statuses have CSS class mappings', () => {
-    const expectedStatuses = ['running', 'idle', 'waiting_approval', 'exited', 'completed', 'disconnected', 'error', 'killed']
+  test('all statuses have CSS class mappings', () => {
+    const expectedStatuses = ['running', 'busy', 'retry', 'idle', 'waiting_approval', 'exited', 'completed', 'disconnected', 'error', 'killed']
     for (const s of expectedStatuses) {
       expect(statusClasses[s]).toBeDefined()
     }

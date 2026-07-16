@@ -1,5 +1,6 @@
 import { ref, computed } from 'vue'
 import { getRelayOrigin } from './useEnv'
+import { useLocale } from './useLocale'
 import { applyQuotaPayload } from './useQuota'
 
 export interface UserInfo {
@@ -14,6 +15,7 @@ export interface UserInfo {
 const user = ref<UserInfo | null>(null)
 const accessToken = ref('')
 const refreshToken = ref('')
+const { locale } = useLocale()
 
 // Restore user from localStorage
 const savedUser = localStorage.getItem('pocketctl_user')
@@ -118,14 +120,13 @@ async function fetchProfile() {
 // --- Email Verification Code Auth ---
 
 async function sendEmailCode(email: string): Promise<string | null> {
-  const lang = localStorage.getItem('pocketctl-locale') || 'zh'
-  const { ok, data } = await apiRequest('/api/auth/email/send', { email, lang })
+  const { ok, data } = await apiRequest('/api/auth/email/send', { email, lang: locale.value })
   if (!ok) return data.error || '发送失败'
   return null
 }
 
 async function loginViaEmail(email: string, code: string): Promise<string | null> {
-  const { ok, data } = await apiRequest('/api/auth/email/verify', { email, code })
+  const { ok, data } = await apiRequest('/api/auth/email/verify', { email, code, lang: locale.value })
   if (!ok) return data.error || '验证失败'
   saveTokens(data)
   return null

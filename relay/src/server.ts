@@ -1,7 +1,7 @@
 import Fastify from 'fastify';
 import fastifyWebsocket from '@fastify/websocket';
 import fastifyCors from '@fastify/cors';
-import { createPool, initDB, parseDBUrl, createUser, getUserByEmail, getUserById, getUserPlanAndWhitelist, getUserProfile, registerDevice, removeDevice, cleanStaleTombstones, upsertDaemonAlias, updateDisplayName, updateEmail, addToIOSWaitlist, revokeToken, isTokenRevoked, cleanRevokedTokens, insertAuditLog, bindTokenToDaemon, updateSessionTitle, isSessionOwnedByUser, getSessionAllEvents, getTokenSummary, getTokensByDaemon, backfillSessionTokens, backfillSessionModel, backfillTokenDailyStats, aggregateDayIntoStats, cleanStaleEvents, getTokenDailySeries, getTokenByModel, getTokenByDaemon, getSessionTokenTrend, listProUserIds, getUserDailyTokens, getUserWeeklyTokens, markReportSent, handleRefreshReuse } from './db.js';
+import { createPool, initDB, parseDBUrl, createUserWithWelcomeEmail, getUserByEmail, getUserById, getUserPlanAndWhitelist, getUserProfile, registerDevice, removeDevice, cleanStaleTombstones, upsertDaemonAlias, updateDisplayName, updateEmail, addToIOSWaitlist, revokeToken, isTokenRevoked, cleanRevokedTokens, insertAuditLog, bindTokenToDaemon, updateSessionTitle, isSessionOwnedByUser, getSessionAllEvents, getTokenSummary, getTokensByDaemon, backfillSessionTokens, backfillSessionModel, backfillTokenDailyStats, aggregateDayIntoStats, cleanStaleEvents, getTokenDailySeries, getTokenByModel, getTokenByDaemon, getSessionTokenTrend, listProUserIds, getUserDailyTokens, getUserWeeklyTokens, markReportSent, handleRefreshReuse, type User } from './db.js';
 import { Router } from './router.js';
 import { hashPassword, verifyPassword, signAccessToken, signRefreshToken, verifyRefreshToken, decodeToken, verifyAccessTokenWithRevocation } from './auth.js';
 import { notifyUser, sessionStatusPush, daemonOfflinePush, dailyReportPush, weeklyReportPush } from './push.js';
@@ -17,6 +17,11 @@ import { createHash } from 'crypto';
 import { ConnectionRateLimiter } from './rate-limit.js';
 import { isAppReviewEmail, isAppReviewEnabled, isConfiguredAppReviewEmail, verifyAppReviewCode } from './config/app-review-auth.js';
 import { ensureAppReviewDemoData } from './config/app-review-demo.js';
+import { resolveLanguage } from './config/language.js';
+import type { SupportedLanguage } from './config/language.js';
+import { createWelcomeEmailWorker } from './welcome-email-worker.js';
+import { pathToFileURL } from 'node:url';
+import { registerDaemonConnection, type DaemonSocketIdentity } from './daemon-registration.js';
 
 const API_KEY = process.env.POCKETCTL_API_KEY || '';
 const DB_URL = process.env.DATABASE_URL || 'postgresql://localhost:5432/pocketctl';
@@ -34,7 +39,7 @@ const RATE_LIMIT_AUTH_FAIL_THRESHOLD = parseInt(process.env.RATE_LIMIT_AUTH_FAIL
 const REFRESH_COOKIE_NAME = 'pocketctl_refresh_token';
 const REFRESH_COOKIE_MAX_AGE = 7 * 24 * 60 * 60;
 
-const wsDaemonMap = new Map<any, string>();
+const wsDaemonMap = new Map<any, DaemonSocketIdentity>();
 const wsTickets = createWsTicketStore(60_000);
 
 // Connection rate limiter: burst + sustained window, plus an escalating ban for
@@ -96,9 +101,31 @@ function clearRefreshCookie(reply: any) {
   reply.header('Set-Cookie', expiredRefreshCookie());
 }
 
+export async function findOrCreateEmailUser(
+  pool: any,
+  email: string,
+  displayName: string,
+  locale: SupportedLanguage,
+): Promise<User> {
+  const normalizedEmail = email.trim().toLowerCase();
+  const existing = await getUserByEmail(pool, normalizedEmail);
+  if (existing) return existing;
+
+  try {
+    return await createUserWithWelcomeEmail(pool, normalizedEmail, '', displayName, locale);
+  } catch (error: any) {
+    if (error?.code !== '23505') throw error;
+    const winner = await getUserByEmail(pool, normalizedEmail);
+    if (winner) return winner;
+    throw error;
+  }
+}
+
 async function main() {
   const tStart = (typeof performance !== 'undefined' ? performance.now() : Date.now())
   const pool = createPool(parseDBUrl(DB_URL))
+  const welcomeEmailWorker = createWelcomeEmailWorker({ pool })
+  let shuttingDown = false
   const tPool = (typeof performance !== 'undefined' ? performance.now() : Date.now())
   // initDB 不阻塞 app.listen：生产重启表已存在，initDB 基本 no-op；全新库首启期间
   // 表可能短暂不存在，但生产不触发该路径。失败仍致命 → exit。
@@ -107,6 +134,7 @@ async function main() {
       const t = (typeof performance !== 'undefined' ? performance.now() : Date.now());
       console.log(`[startup] initDB done in ${(t - tPool).toFixed(0)}ms`);
       console.log('Database initialized');
+      if (!shuttingDown) welcomeEmailWorker.start();
       // Backfill sessions token columns from agent_text usage events
       try {
         const backfilled = await backfillSessionTokens(pool);
@@ -131,18 +159,28 @@ async function main() {
 
   // Register
   app.post('/api/auth/register', async (req, reply) => {
-    const { email, password, displayName } = req.body as any;
+    const { email, password, displayName, lang: bodyLang } = req.body as any;
     if (!email || !password) {
       reply.code(400); return { error: 'email and password are required' };
     }
     if (password.length < 6) {
       reply.code(400); return { error: 'password must be at least 6 characters' };
     }
-    const existing = await getUserByEmail(pool, email);
+    const normalizedEmail = email.trim().toLowerCase();
+    const locale = resolveLanguage(bodyLang, req.headers['accept-language']);
+    const existing = await getUserByEmail(pool, normalizedEmail);
     if (existing) {
       reply.code(409); return { error: 'email already registered' };
     }
-    const user = await createUser(pool, email, hashPassword(password), displayName);
+    let user;
+    try {
+      user = await createUserWithWelcomeEmail(pool, normalizedEmail, hashPassword(password), displayName, locale);
+    } catch (error: any) {
+      if (error?.code === '23505') {
+        reply.code(409); return { error: 'email already registered' };
+      }
+      throw error;
+    }
     const accessToken = await signAccessToken(user.id, user.email);
     const refreshToken = await signRefreshToken(user.id);
     setRefreshCookie(reply, refreshToken);
@@ -274,10 +312,7 @@ async function main() {
       reply.code(403); return { error: 'App Review account is disabled' };
     }
 
-    // Determine language: body param > Accept-Language header > default zh
-    const acceptLang = (req.headers['accept-language'] || '').trim();
-    const isEn = bodyLang === 'en' || acceptLang.toLowerCase().startsWith('en');
-    const lang: 'zh' | 'en' = isEn ? 'en' : 'zh';
+    const lang = resolveLanguage(bodyLang, req.headers['accept-language']);
 
     // App Review account: the reviewer uses the fixed code documented in
     // App Store Connect. Do not send email or expose the code in the response.
@@ -332,11 +367,12 @@ async function main() {
 
   // Verify email code and login/register
   app.post('/api/auth/email/verify', async (req, reply) => {
-    const { email, code } = req.body as any;
+    const { email, code, lang: bodyLang } = req.body as any;
     if (!email || !code) {
       reply.code(400); return { error: 'email and code are required' };
     }
     const normalizedEmail = email.trim().toLowerCase();
+    const locale = resolveLanguage(bodyLang, req.headers['accept-language']);
     if (isConfiguredAppReviewEmail(normalizedEmail) && !isAppReviewEnabled()) {
       reply.code(403); return { error: 'App Review account is disabled' };
     }
@@ -344,15 +380,12 @@ async function main() {
       reply.code(400); return { error: 'invalid or expired verification code' };
     }
     // Find or create user by email
-    let user = await getUserByEmail(pool, normalizedEmail);
-    if (!user) {
-      // Create new user (email-only, no phone, no password)
-      const displayName = normalizedEmail.split('@')[0];
-      try {
-        user = await createUser(pool, normalizedEmail, '', displayName);
-      } catch (e: any) {
-        reply.code(500); return { error: '创建用户失败' };
-      }
+    const displayName = normalizedEmail.split('@')[0];
+    let user;
+    try {
+      user = await findOrCreateEmailUser(pool, normalizedEmail, displayName, locale);
+    } catch (e: any) {
+      reply.code(500); return { error: '创建用户失败' };
     }
     if (isAppReviewEmail(normalizedEmail)) {
       try {
@@ -362,7 +395,7 @@ async function main() {
         reply.code(500); return { error: '审核演示数据准备失败' };
       }
     }
-    const accessToken = await signAccessToken(user.id, user.email, user.phone);
+    const accessToken = await signAccessToken(user.id, user.email, user.phone ?? undefined);
     const refreshToken = await signRefreshToken(user.id);
     setRefreshCookie(reply, refreshToken);
     return {
@@ -485,9 +518,12 @@ async function main() {
       return { error: result.error || 'failed to kick daemon' };
     }
 
-    await insertAuditLog(pool, payload.userId, 'force_kick', {
+    // Router has already completed the security-critical revoke/close path.
+    // Request metadata is best-effort and must not hang an otherwise successful
+    // force-kick response when audit storage is unavailable.
+    void insertAuditLog(pool, payload.userId, 'force_kick', {
       daemon_id: daemonId,
-    }, req.ip);
+    }, req.ip).catch((e) => console.error('force_kick request audit:', e));
 
     return { success: true };
   });
@@ -1159,20 +1195,27 @@ async function main() {
         // debug log removed
         return;
       }
-      processMessage(raw);
+      enqueueMessage(raw);
     });
 
     socket.on('close', () => {
       if (connType === 'daemon') {
-        const daemonId = wsDaemonMap.get(socket);
-        if (daemonId) { router.unregisterDaemon(daemonId, socket); wsDaemonMap.delete(socket); }
+        const daemon = wsDaemonMap.get(socket);
+        if (daemon) { router.unregisterDaemon(daemon.daemonId, socket); wsDaemonMap.delete(socket); }
       } else {
         router.unregisterClient(socket);
       }
       console.log(`WS disconnected: type=${connType} ip=${clientIp}`);
     });
 
-    function processMessage(raw: Buffer) {
+    let messageChain = Promise.resolve();
+    function enqueueMessage(raw: Buffer): void {
+      messageChain = messageChain.then(() => processMessage(raw)).catch((err) => {
+        console.error(`message processing error from ${clientIp}:`, err.message);
+      });
+    }
+
+    async function processMessage(raw: Buffer): Promise<void> {
       if (raw.length > MAX_WS_MESSAGE_SIZE) {
         socket.close(4003, 'message too large');
         return;
@@ -1182,13 +1225,16 @@ async function main() {
         // debug log removed
         if (connType === 'daemon') {
           if (msg.type === 'register') {
-            router.registerDaemon(socket, msg, userId, tokenJti, tokenMachineId);
-            wsDaemonMap.set(socket, msg.daemon_id);
-            console.log('[ws] daemon registered, total in map:', wsDaemonMap.size);
+            const registered = await registerDaemonConnection(
+              router, wsDaemonMap, socket, msg, userId, tokenJti, tokenMachineId,
+            );
+            if (registered) {
+              console.log('[ws] daemon registered, total in map:', wsDaemonMap.size);
+            }
           } else {
-            const daemonId = wsDaemonMap.get(socket);
-            if (daemonId) {
-              router.handleDaemonMessage(daemonId, msg);
+            const daemon = wsDaemonMap.get(socket);
+            if (daemon) {
+              router.handleDaemonMessage(daemon.daemonId, msg, socket, daemon.startedAt);
             }
             else console.log('[ws] message for unknown daemon, type:', msg.type);
           }
@@ -1265,7 +1311,7 @@ async function main() {
 
       // Process any messages that arrived during auth
       for (const raw of earlyMessages) {
-        processMessage(raw);
+        enqueueMessage(raw);
       }
       earlyMessages.length = 0;
     })().catch((err) => {
@@ -1285,7 +1331,6 @@ async function main() {
   // immediately so the old process exits in <1s. The old code's `await
   // app.close()` blocked ~30s on ws's closeTimeout when a peer didn't ack the
   // close frame; terminate() bypasses that. A 2s race guards any stray conn.
-  let shuttingDown = false;
   const shutdown = async (signal: string) => {
     if (shuttingDown) return;
     shuttingDown = true;
@@ -1293,6 +1338,7 @@ async function main() {
     router.beginShutdown();
     router.broadcastRelayRestarting();
     router.terminateAllConnections()
+    await welcomeEmailWorker.stop()
     try {
       await Promise.race([app.close(), new Promise(r => setTimeout(r, 2000))])
     } catch (e) { console.error('[shutdown] close error:', e) }
@@ -1540,7 +1586,7 @@ async function sendCode() {
   hideError();
   const email = emailInput.value.trim();
   if (!email.includes('@')) { showError('请输入有效的邮箱地址'); return; }
-  const { ok, data } = await api('/api/auth/email/send', { email });
+  const { ok, data } = await api('/api/auth/email/send', { email, lang: 'zh' });
   if (!ok) { showError(data.error || '发送失败'); return; }
   countdown = 60;
   sendCodeBtn.disabled = true;
@@ -1558,7 +1604,7 @@ async function doLogin() {
   if (!email.includes('@')) { showError('请输入有效的邮箱地址'); return; }
   if (code.length !== 6) { showError('请输入6位验证码'); return; }
   setLoading(loginBtn, true, '登录中');
-  const { ok, data } = await api('/api/auth/email/verify', { email, code });
+  const { ok, data } = await api('/api/auth/email/verify', { email, code, lang: 'zh' });
   if (!ok) { setLoading(loginBtn, false, '登录并授权'); showError(data.error || '验证失败'); return; }
   accessToken = data.access_token;
   userEmail = data.user.email;
@@ -1656,4 +1702,6 @@ document.addEventListener('DOMContentLoaded', async () => {
 </html>`;
 }
 
-main();
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  void main();
+}

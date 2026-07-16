@@ -1,5 +1,6 @@
 import pg from 'pg';
 import { createHash } from 'crypto';
+import type { SupportedLanguage } from './config/language.js';
 const { Pool } = pg;
 
 export interface DBConfig {
@@ -8,10 +9,16 @@ export interface DBConfig {
   database: string;
   user: string;
   password: string;
+  connectionTimeoutMillis?: number;
 }
 
 export function createPool(config: DBConfig): pg.Pool {
-  return new Pool(config);
+  const requested = config.connectionTimeoutMillis
+    ?? Number.parseInt(process.env.DB_CONNECTION_TIMEOUT_MS || '5000', 10);
+  const connectionTimeoutMillis = Number.isFinite(requested) && requested > 0
+    ? Math.max(1, Math.min(60_000, Math.trunc(requested)))
+    : 5_000;
+  return new Pool({ ...config, connectionTimeoutMillis });
 }
 
 export async function initDB(pool: pg.Pool): Promise<void> {
@@ -49,10 +56,16 @@ export async function initDB(pool: pg.Pool): Promise<void> {
   `);
   // Migration: add event_hash for deduplication
   await pool.query(`ALTER TABLE events ADD COLUMN IF NOT EXISTS event_hash VARCHAR(32)`);
+  // Durable post-insert effect ledger. The marker lives on the event row so
+  // event insertion and `pending` creation are one atomic SQL statement.
+  await pool.query(`ALTER TABLE events ADD COLUMN IF NOT EXISTS effect_status VARCHAR(16) NOT NULL DEFAULT 'none'`);
+  await pool.query(`ALTER TABLE events ADD COLUMN IF NOT EXISTS effect_step INT NOT NULL DEFAULT 0`);
   await pool.query(`CREATE UNIQUE INDEX IF NOT EXISTS idx_events_dedup ON events(session_id, event_hash)`);
   // Migration: add title and source columns to existing sessions table
   await pool.query(`ALTER TABLE sessions ADD COLUMN IF NOT EXISTS title TEXT`);
   await pool.query(`ALTER TABLE sessions ADD COLUMN IF NOT EXISTS source VARCHAR(16) DEFAULT 'daemon'`);
+  // OpenCode's runtime agent (build/plan/...) is independent from agent_type.
+  await pool.query(`ALTER TABLE sessions ADD COLUMN IF NOT EXISTS active_agent VARCHAR(128)`);
   // Migration: add last_activity_at and exit_reason columns
   await pool.query(`ALTER TABLE sessions ADD COLUMN IF NOT EXISTS last_activity_at TIMESTAMPTZ`);
   await pool.query(`ALTER TABLE sessions ADD COLUMN IF NOT EXISTS exit_reason VARCHAR(32)`);
@@ -130,6 +143,41 @@ export async function initDB(pool: pg.Pool): Promise<void> {
       display_name VARCHAR(100),
       created_at TIMESTAMPTZ DEFAULT NOW()
     )
+  `);
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS email_outbox (
+      id BIGSERIAL PRIMARY KEY,
+      user_id INT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      email_type VARCHAR(32) NOT NULL CONSTRAINT email_outbox_email_type_check CHECK (email_type = 'welcome'),
+      recipient_email VARCHAR(255) NOT NULL,
+      locale VARCHAR(2) NOT NULL CHECK (locale IN ('zh', 'en')),
+      status VARCHAR(16) NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'processing', 'sent')),
+      attempt_count INT NOT NULL DEFAULT 0,
+      next_attempt_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      locked_at TIMESTAMPTZ,
+      sent_at TIMESTAMPTZ,
+      message_id VARCHAR(255),
+      last_error TEXT,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      UNIQUE (user_id, email_type)
+    );
+    CREATE INDEX IF NOT EXISTS idx_email_outbox_due
+      ON email_outbox (status, next_attempt_at);
+    CREATE INDEX IF NOT EXISTS idx_email_outbox_processing_locked
+      ON email_outbox (locked_at) WHERE status = 'processing';
+  `);
+  await pool.query(`
+    DO $$ BEGIN
+      IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conname = 'email_outbox_email_type_check'
+          AND conrelid = 'email_outbox'::regclass
+      ) THEN
+        ALTER TABLE email_outbox
+          ADD CONSTRAINT email_outbox_email_type_check CHECK (email_type = 'welcome');
+      END IF;
+    END $$
   `);
   // Phase 2: add user_id to sessions and daemons
   await pool.query(`ALTER TABLE sessions ADD COLUMN IF NOT EXISTS user_id INT`);
@@ -309,6 +357,7 @@ export async function initDB(pool: pg.Pool): Promise<void> {
   await pool.query(`ALTER TABLE daemons ADD COLUMN IF NOT EXISTS arch VARCHAR(32)`);
   await pool.query(`ALTER TABLE daemons ADD COLUMN IF NOT EXISTS version VARCHAR(32)`);
   await pool.query(`ALTER TABLE daemons ADD COLUMN IF NOT EXISTS started_at BIGINT`);
+  await pool.query(`ALTER TABLE daemons ADD COLUMN IF NOT EXISTS registration_id VARCHAR(64)`);
 
   // User daemon limit control
   await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS max_daemons INT DEFAULT 1`);
@@ -325,8 +374,176 @@ export async function upsertDaemon(pool: pg.Pool, daemonId: string, hostname: st
   );
 }
 
-export async function setDaemonOffline(pool: pg.Pool, daemonId: string): Promise<void> {
-  await pool.query(`UPDATE daemons SET status = 'offline' WHERE daemon_id = $1`, [daemonId]);
+export interface DaemonRegistrationActivation {
+  daemonId: string;
+  userId: number | null;
+  hostname: string;
+  agents: any[];
+  arch?: string;
+  version?: string;
+  startedAt?: number;
+  tokenJti?: string;
+  machineId?: string;
+  registrationId: string;
+}
+
+export interface DaemonRegistrationSnapshot {
+  hostname: string | null;
+  agents: any;
+  status: string | null;
+  last_heartbeat: Date | string | null;
+  arch: string | null;
+  version: string | null;
+  started_at: number | null;
+  active_token_jti: string | null;
+  machine_id: string | null;
+  last_login_at: Date | string | null;
+  registration_id: string | null;
+}
+
+export type DaemonRegistrationRestoreResult =
+  | { status: 'confirmed_restored' }
+  | { status: 'stale_successor' }
+  | { status: 'sql_failure'; error: unknown };
+
+/** Activation lost the shared token-revocation fence to a committed revoke. */
+export class TokenRevokedDuringActivationError extends Error {
+  constructor() {
+    super('token revoked during daemon activation');
+    this.name = 'TokenRevokedDuringActivationError';
+  }
+}
+
+// PostgreSQL evaluates hashtext on the database server, so every relay uses the
+// same key. Hash collisions only add harmless serialization; they cannot admit
+// a revoked token. The namespace keeps these locks separate from other users of
+// two-key advisory locks in the application.
+const TOKEN_REVOCATION_LOCK_NAMESPACE = 1885566060;
+
+async function lockTokenRevocationFence(client: pg.PoolClient, jti: string): Promise<void> {
+  await client.query(
+    `SELECT pg_advisory_xact_lock($1, hashtext($2))`,
+    [TOKEN_REVOCATION_LOCK_NAMESPACE, jti],
+  );
+}
+
+/** Commit all mutable connection identity in one generation transaction. */
+export async function activateDaemonRegistration(
+  pool: pg.Pool,
+  input: DaemonRegistrationActivation,
+): Promise<DaemonRegistrationSnapshot | null> {
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    // This is the authoritative revocation check. It shares a transaction lock
+    // with every revokeToken write, closing the cross-relay SELECT/activation
+    // window. It must precede every daemon read or mutation in this transaction.
+    if (input.tokenJti) {
+      await lockTokenRevocationFence(client, input.tokenJti);
+      const revoked = await client.query(`SELECT 1 FROM revoked_tokens WHERE jti = $1`, [input.tokenJti]);
+      if ((revoked.rowCount ?? 0) > 0) throw new TokenRevokedDuringActivationError();
+    }
+    const previous = await client.query(
+      `SELECT hostname, agents, status, last_heartbeat, arch, version, started_at,
+              active_token_jti, machine_id, last_login_at, registration_id
+       FROM daemons WHERE daemon_id = $1 FOR UPDATE`,
+      [input.daemonId],
+    );
+    const activated = await client.query(
+      `INSERT INTO daemons
+         (daemon_id, user_id, hostname, agents, status, last_heartbeat, arch, version, started_at,
+          active_token_jti, machine_id, last_login_at, registration_id)
+       VALUES ($1, $2, $3, $4, 'online', NOW(), $5, $6, $7, $8::varchar, $9,
+               CASE WHEN $8::varchar IS NULL THEN NULL ELSE NOW() END, $10)
+       ON CONFLICT (daemon_id) DO UPDATE SET
+         user_id = COALESCE(daemons.user_id, EXCLUDED.user_id),
+         hostname = EXCLUDED.hostname, agents = EXCLUDED.agents, status = 'online', last_heartbeat = NOW(),
+         arch = COALESCE(EXCLUDED.arch, daemons.arch), version = COALESCE(EXCLUDED.version, daemons.version),
+         started_at = EXCLUDED.started_at,
+         active_token_jti = COALESCE(EXCLUDED.active_token_jti, daemons.active_token_jti),
+         machine_id = COALESCE(EXCLUDED.machine_id, daemons.machine_id),
+         last_login_at = CASE WHEN EXCLUDED.active_token_jti IS NULL THEN daemons.last_login_at ELSE NOW() END,
+         registration_id = EXCLUDED.registration_id
+       WHERE EXCLUDED.user_id IS NULL OR daemons.user_id IS NULL OR daemons.user_id = EXCLUDED.user_id
+       RETURNING daemon_id`,
+      [input.daemonId, input.userId, input.hostname, JSON.stringify(input.agents), input.arch || null,
+       input.version || null, input.startedAt ?? null, input.tokenJti || null, input.machineId || null, input.registrationId],
+    );
+    if (!activated.rows[0] && activated.rowCount === 0) throw new Error(`daemon owner changed during activation: ${input.daemonId}`);
+    await client.query('COMMIT');
+    return previous.rows[0] ?? null;
+  } catch (error) {
+    await client.query('ROLLBACK');
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
+/** Restore a failed activation only while its exact generation is still current. */
+export async function restoreDaemonRegistration(
+  pool: pg.Pool,
+  daemonId: string,
+  registrationId: string,
+  snapshot: DaemonRegistrationSnapshot | null,
+): Promise<DaemonRegistrationRestoreResult> {
+  try {
+    const result = !snapshot
+      ? await pool.query(`DELETE FROM daemons WHERE daemon_id = $1 AND registration_id = $2`, [daemonId, registrationId])
+      : await pool.query(
+        `UPDATE daemons SET
+           hostname = $3, agents = $4, status = $5, last_heartbeat = $6, arch = $7, version = $8,
+           started_at = $9, active_token_jti = $10, machine_id = $11, last_login_at = $12, registration_id = $13
+         WHERE daemon_id = $1 AND registration_id = $2`,
+        [daemonId, registrationId, snapshot.hostname, snapshot.agents, snapshot.status, snapshot.last_heartbeat,
+         snapshot.arch, snapshot.version, snapshot.started_at, snapshot.active_token_jti, snapshot.machine_id,
+         snapshot.last_login_at, snapshot.registration_id],
+      );
+    return (result.rowCount ?? 0) > 0
+      ? { status: 'confirmed_restored' }
+      : { status: 'stale_successor' };
+  } catch (error) {
+    return { status: 'sql_failure', error };
+  }
+}
+
+export async function setDaemonOffline(pool: pg.Pool, daemonId: string, registrationId: string): Promise<boolean> {
+  const result = await pool.query(
+    `UPDATE daemons SET status = 'offline' WHERE daemon_id = $1 AND registration_id = $2`,
+    [daemonId, registrationId],
+  );
+  return (result.rowCount ?? 0) > 0;
+}
+
+/**
+ * Generation-bound offline CAS with a PostgreSQL-enforced deadline.
+ * statement_timeout cancels the query on the server, allowing the transaction
+ * to roll back and the checked-out client to be released instead of merely
+ * abandoning a still-running query in application code.
+ */
+export async function setDaemonOfflineWithTimeout(
+  pool: pg.Pool,
+  daemonId: string,
+  registrationId: string,
+  timeoutMs: number,
+): Promise<boolean> {
+  const safeTimeoutMs = Math.max(1, Math.min(2_147_483_647, Math.trunc(timeoutMs) || 1));
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    await client.query(`SELECT set_config('statement_timeout', $1, true)`, [String(safeTimeoutMs)]);
+    const result = await client.query(
+      `UPDATE daemons SET status = 'offline' WHERE daemon_id = $1 AND registration_id = $2`,
+      [daemonId, registrationId],
+    );
+    await client.query('COMMIT');
+    return (result.rowCount ?? 0) > 0;
+  } catch (error) {
+    await client.query('ROLLBACK');
+    throw error;
+  } finally {
+    client.release();
+  }
 }
 
 export async function setDaemonReconnecting(pool: pg.Pool, daemonId: string): Promise<void> {
@@ -368,12 +585,20 @@ export async function updateHeartbeat(pool: pg.Pool, daemonId: string): Promise<
   await pool.query(`UPDATE daemons SET last_heartbeat = NOW() WHERE daemon_id = $1`, [daemonId]);
 }
 
+function eventHashInput(sessionId: string, eventType: string, payload: any): string {
+  const stableEventId = typeof payload?.event_id === 'string' ? payload.event_id : '';
+  if (stableEventId) return `${sessionId}:${eventType}:event:${stableEventId}`;
+  const stableRequestId = typeof payload?.request_id === 'string' ? payload.request_id : '';
+  if (stableRequestId) return `${sessionId}:${eventType}:request:${stableRequestId}`;
+  // Only discard transport seq when a stable business identity exists. Events
+  // such as user_text may legitimately repeat with identical content, so their
+  // seq remains part of the fallback fingerprint.
+  return `${sessionId}:${eventType}:${JSON.stringify(payload)}`;
+}
+
 export async function insertEvent(pool: pg.Pool, sessionId: string, eventType: string, payload: any): Promise<number> {
   const payloadStr = JSON.stringify(payload);
-  const stableEventId = typeof payload?.event_id === 'string' ? payload.event_id : '';
-  const hashInput = stableEventId
-    ? `${sessionId}:${eventType}:event:${stableEventId}`
-    : `${sessionId}:${eventType}:${payloadStr}`;
+  const hashInput = eventHashInput(sessionId, eventType, payload);
   const hash = createHash('md5').update(hashInput).digest('hex').slice(0, 16);
   const result = await pool.query(
     `INSERT INTO events (session_id, event_type, payload, event_hash)
@@ -411,6 +636,131 @@ export async function persistEvent(pool: pg.Pool, sessionId: string, eventType: 
     }
   }
   /* unreachable */ return 0;
+}
+
+export interface PersistedEventEffect {
+  rowID: number;
+  inserted: boolean;
+  completed: boolean;
+  nextStep: number;
+}
+
+/**
+ * Persist an event together with a durable pending-effect marker. Conflict
+ * replay returns the existing marker, allowing an unfinished effect to resume
+ * while a completed event remains a pure dedup/ack.
+ */
+export async function persistEventWithEffect(
+  pool: pg.Pool,
+  sessionId: string,
+  eventType: string,
+  payload: any,
+  attempts = 5,
+): Promise<PersistedEventEffect> {
+  const payloadStr = JSON.stringify(payload);
+  const hashInput = eventHashInput(sessionId, eventType, payload);
+  const hash = createHash('md5').update(hashInput).digest('hex').slice(0, 16);
+  let delay = 100;
+  for (let i = 0; i < attempts; i++) {
+    try {
+      const result = await pool.query(
+        `INSERT INTO events (session_id, event_type, payload, event_hash, effect_status, effect_step)
+         VALUES ($1, $2, $3, $4, 'pending', 0)
+         ON CONFLICT (session_id, event_hash) DO UPDATE SET event_hash = EXCLUDED.event_hash
+         RETURNING id, (xmax = 0) AS inserted, effect_status, effect_step`,
+        [sessionId, eventType, payloadStr, hash],
+      );
+      const row = result.rows[0];
+      if (!row) return { rowID: 0, inserted: false, completed: true, nextStep: 0 };
+      const inserted = row.inserted === undefined || row.inserted === true || row.inserted === 't';
+      if (inserted) {
+        pool.query(`UPDATE sessions SET last_activity_at = NOW(), updated_at = NOW() WHERE session_id = $1`, [sessionId]).catch(console.error);
+      }
+      return {
+        rowID: Number(row.id),
+        inserted,
+        // `none` marks rows created before/without durable effects and must not
+        // replay historical side effects after this migration.
+        completed: row.effect_status === 'completed' || row.effect_status === 'none',
+        nextStep: Number(row.effect_step) || 0,
+      };
+    } catch (e) {
+      if (i === attempts - 1) throw e;
+      await new Promise((resolve) => setTimeout(resolve, delay));
+      delay *= 3;
+    }
+  }
+  throw new Error('unreachable');
+}
+
+export async function advanceEventEffectStep(pool: pg.Pool, eventID: number, nextStep: number): Promise<void> {
+  await pool.query(
+    `UPDATE events SET effect_step = GREATEST(effect_step, $2) WHERE id = $1 AND effect_status = 'pending'`,
+    [eventID, nextStep],
+  );
+}
+
+export async function completeEventEffect(pool: pg.Pool, eventID: number): Promise<void> {
+  await pool.query(`UPDATE events SET effect_status = 'completed' WHERE id = $1`, [eventID]);
+}
+
+export async function getEventEffectState(
+  pool: pg.Pool,
+  eventID: number,
+): Promise<{ completed: boolean; nextStep: number } | null> {
+  const result = await pool.query(
+    `SELECT effect_status, effect_step FROM events WHERE id = $1`,
+    [eventID],
+  );
+  const row = result.rows[0];
+  if (!row) return null;
+  return {
+    completed: row.effect_status === 'completed' || row.effect_status === 'none',
+    nextStep: Number(row.effect_step) || 0,
+  };
+}
+
+/** Atomically checkpoint and apply the only non-idempotent generic DB effect. */
+export async function incrementSessionTokensForEvent(
+  pool: pg.Pool,
+  eventID: number,
+  nextStep: number,
+  sessionId: string,
+  u: TokenUsageDelta,
+): Promise<void> {
+  const inp = Math.max(0, u.input_tokens || 0);
+  const out = Math.max(0, u.output_tokens || 0);
+  const cr = Math.max(0, u.cache_read_tokens || 0);
+  const cc = Math.max(0, u.cache_create_tokens || 0);
+  const total = inp + out + cr + cc;
+  const result = await pool.query(
+    `WITH session_target AS (
+       SELECT session_id FROM sessions WHERE session_id = $8 FOR UPDATE
+     ), checkpoint AS (
+       UPDATE events SET effect_step = $2
+       WHERE id = $1 AND effect_status = 'pending' AND effect_step < $2
+         AND EXISTS (SELECT 1 FROM session_target)
+       RETURNING 1
+     ), session_update AS (
+       UPDATE sessions SET
+       total_tokens = COALESCE(total_tokens, 0) + $3,
+       tok_input = COALESCE(tok_input, 0) + $4,
+       tok_output = COALESCE(tok_output, 0) + $5,
+       tok_cache_read = COALESCE(tok_cache_read, 0) + $6,
+       tok_cache_create = COALESCE(tok_cache_create, 0) + $7,
+       updated_at = NOW()
+       WHERE session_id = $8 AND EXISTS (SELECT 1 FROM checkpoint)
+       RETURNING 1
+     )
+     SELECT
+       EXISTS (SELECT 1 FROM session_target) AS session_exists,
+       EXISTS (SELECT 1 FROM checkpoint) AS claimed,
+       EXISTS (SELECT 1 FROM session_update) AS applied`,
+    [eventID, nextStep, total, inp, out, cr, cc, sessionId],
+  );
+  const outcome = result.rows[0];
+  if (!outcome?.session_exists) throw new Error(`session missing for token effect: ${sessionId}`);
+  if (outcome.claimed && !outcome.applied) throw new Error(`token effect checkpoint was not applied: ${sessionId}`);
 }
 
 export async function getEventsAfter(pool: pg.Pool, sessionId: string, lastSeq: number): Promise<any[]> {
@@ -488,7 +838,7 @@ export async function listSessionsWithChildren(pool: pg.Pool, whereUser?: number
   const userClause = whereUser !== undefined ? 'AND s.user_id = $1' : '';
   if (whereUser !== undefined) baseParams.push(whereUser);
   const result = await pool.query(
-    `SELECT s.session_id, s.daemon_id, s.agent_type, s.cwd, s.title, s.source, s.status,
+    `SELECT s.session_id, s.daemon_id, s.agent_type, s.active_agent, s.cwd, s.title, s.source, s.status,
             s.created_at, s.updated_at, s.last_activity_at, s.exit_reason, s.subagent_count, s.pinned,
             s.model, s.parent_session_id, s.is_subagent, s.root_session_id,
             s.total_tokens, s.tok_input, s.tok_output, s.tok_cache_read, s.tok_cache_create,
@@ -609,7 +959,7 @@ export async function listSessionsPageByDaemon(pool: pg.Pool, opts: {
 
   const queryStartedAt = Date.now();
   const result = await pool.query(
-    `SELECT s.session_id, s.daemon_id, s.agent_type, s.cwd, s.title, s.source, s.status,
+    `SELECT s.session_id, s.daemon_id, s.agent_type, s.active_agent, s.cwd, s.title, s.source, s.status,
             s.created_at, s.updated_at, s.last_activity_at, s.exit_reason, s.subagent_count, s.pinned,
             s.model, s.parent_session_id, s.is_subagent, s.root_session_id,
             s.total_tokens, s.tok_input, s.tok_output, s.tok_cache_read, s.tok_cache_create,
@@ -914,7 +1264,7 @@ export async function listSubagentsByParent(pool: pg.Pool, parentSessionId: stri
 export async function cleanStaleSessions(pool: pg.Pool): Promise<void> {
   await pool.query(`
     UPDATE sessions SET status = 'completed', updated_at = NOW()
-    WHERE status IN ('running', 'busy')
+    WHERE status IN ('running', 'busy', 'retry')
       AND daemon_id NOT IN (SELECT daemon_id FROM daemons WHERE status = 'online' AND last_heartbeat > NOW() - INTERVAL '5 minutes')
   `);
   // Also purge ghost pending-* sessions older than 10 minutes
@@ -927,28 +1277,172 @@ export async function cleanStaleSessions(pool: pg.Pool): Promise<void> {
 
 /**
  * Reconcile a daemon's sessions against the live set it reports on (re)connect.
- * Any session this daemon owns that is still 'running'/'busy' in the DB but NOT
+ * Any session this daemon owns that is still 'running'/'busy'/'retry' in the DB but NOT
  * in `activeSessionIds` is a zombie: its agent process ended without a terminal
  * session_status (daemon restart / machine sleep / crash mid-turn), so the row
  * is frozen "executing" forever — cleanStaleSessions can't help while the daemon
  * is online. Close them. An empty `activeSessionIds` (daemon has no live sessions)
- * correctly closes all of this daemon's lingering running/busy rows.
+ * correctly closes all of this daemon's lingering executing rows.
  * Returns the closed session IDs so the caller can notify clients.
  */
-export async function reconcileDaemonSessions(pool: pg.Pool, daemonId: string, activeSessionIds: string[]): Promise<string[]> {
-  const res = await pool.query(
-    `UPDATE sessions SET status = 'completed', updated_at = NOW()
-     WHERE daemon_id = $1
-       AND status IN ('running', 'busy')
-       AND session_id NOT LIKE 'pending-%'
-       AND session_id <> ALL($2::text[])
-     RETURNING session_id`,
-    [daemonId, activeSessionIds]
-  );
-  return res.rows.map(r => r.session_id);
+export async function reconcileDaemonSessions(
+  pool: pg.Pool,
+  daemonId: string,
+  activeSessionIds: string[],
+  registrationId: string,
+): Promise<string[]> {
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const claim = await client.query(
+      `SELECT registration_id FROM daemons
+       WHERE daemon_id = $1 AND registration_id = $2
+       FOR UPDATE`,
+      [daemonId, registrationId],
+    );
+    if (!claim.rows[0]) {
+      await client.query('COMMIT');
+      return [];
+    }
+    const res = await client.query(
+      `UPDATE sessions SET status = 'completed', updated_at = NOW()
+       WHERE daemon_id = $1
+         AND status IN ('running', 'busy', 'retry')
+         AND session_id NOT LIKE 'pending-%'
+         AND session_id <> ALL($2::text[])
+       RETURNING session_id`,
+      [daemonId, activeSessionIds],
+    );
+    await client.query('COMMIT');
+    return res.rows.map(r => r.session_id);
+  } catch (error) {
+    await client.query('ROLLBACK');
+    throw error;
+  } finally {
+    client.release();
+  }
 }
 
 // --- Phase 2: User management ---
+
+export interface User {
+  id: number;
+  email: string;
+  phone?: string | null;
+  display_name?: string | null;
+  plan?: string;
+  created_at?: Date | string;
+}
+
+export interface WelcomeEmailJob {
+  id: string;
+  userId: number;
+  recipientEmail: string;
+  locale: SupportedLanguage;
+  attemptCount: number;
+}
+
+export async function createUserWithWelcomeEmail(
+  pool: pg.Pool,
+  email: string,
+  passwordHash: string,
+  displayName: string | undefined,
+  locale: SupportedLanguage,
+): Promise<User> {
+  const normalizedEmail = email.trim().toLowerCase();
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const result = await client.query<User>(
+      `INSERT INTO users (email, password_hash, display_name) VALUES ($1, $2, $3) RETURNING id, email, phone, display_name, plan, created_at`,
+      [normalizedEmail, passwordHash, displayName || null],
+    );
+    const user = result.rows[0];
+    await client.query(
+      `INSERT INTO email_outbox (user_id, email_type, recipient_email, locale)
+       VALUES ($1, 'welcome', $2, $3)
+       ON CONFLICT (user_id, email_type) DO NOTHING`,
+      [user.id, normalizedEmail, locale],
+    );
+    await client.query('COMMIT');
+    return user;
+  } catch (error) {
+    try {
+      await client.query('ROLLBACK');
+    } catch {
+      // Preserve the transaction failure; rollback is best-effort on a broken connection.
+    }
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
+export async function claimWelcomeEmails(
+  pool: pg.Pool,
+  limit: number,
+  leaseCutoff: Date,
+): Promise<WelcomeEmailJob[]> {
+  const result = await pool.query(
+    `WITH claimable AS (
+       SELECT id
+       FROM email_outbox
+       WHERE email_type = 'welcome'
+         AND (
+           (status = 'pending' AND next_attempt_at <= NOW())
+           OR (status = 'processing' AND locked_at < $2)
+         )
+       ORDER BY next_attempt_at, id
+       FOR UPDATE SKIP LOCKED
+       LIMIT $1
+     )
+     UPDATE email_outbox AS outbox
+     SET status = 'processing',
+         attempt_count = outbox.attempt_count + 1,
+         locked_at = NOW(),
+         updated_at = NOW()
+     FROM claimable
+     WHERE outbox.id = claimable.id
+     RETURNING outbox.id,
+               outbox.user_id AS "userId",
+               outbox.recipient_email AS "recipientEmail",
+               outbox.locale,
+               outbox.attempt_count AS "attemptCount"`,
+    [limit, leaseCutoff],
+  );
+  return result.rows;
+}
+
+export async function markWelcomeEmailSent(
+  pool: pg.Pool,
+  id: string,
+  attemptCount: number,
+  messageId: string,
+): Promise<void> {
+  await pool.query(
+    `UPDATE email_outbox
+     SET status = 'sent', message_id = $3, sent_at = NOW(), locked_at = NULL,
+         last_error = NULL, updated_at = NOW()
+     WHERE id = $1 AND attempt_count = $2 AND status = 'processing'`,
+    [id, attemptCount, messageId],
+  );
+}
+
+export async function rescheduleWelcomeEmail(
+  pool: pg.Pool,
+  id: string,
+  attemptCount: number,
+  nextAttemptAt: Date,
+  error: string,
+): Promise<void> {
+  await pool.query(
+    `UPDATE email_outbox
+     SET status = 'pending', next_attempt_at = $3, last_error = $4,
+         locked_at = NULL, updated_at = NOW()
+     WHERE id = $1 AND attempt_count = $2 AND status = 'processing'`,
+    [id, attemptCount, nextAttemptAt, error.slice(0, 1000)],
+  );
+}
 
 export async function createUser(pool: pg.Pool, email: string, passwordHash: string, displayName?: string): Promise<any> {
   const result = await pool.query(
@@ -1234,12 +1728,45 @@ export async function isTokenRevoked(pool: pg.Pool, jti: string): Promise<boolea
   return (result.rowCount ?? 0) > 0;
 }
 
+/** Revocation lookup with a PostgreSQL-enforced deadline and owned client. */
+export async function isTokenRevokedWithTimeout(
+  pool: pg.Pool,
+  jti: string,
+  timeoutMs: number,
+): Promise<boolean> {
+  const safeTimeoutMs = Math.max(1, Math.min(2_147_483_647, Math.trunc(timeoutMs) || 1));
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    await client.query(`SELECT set_config('statement_timeout', $1, true)`, [String(safeTimeoutMs)]);
+    const result = await client.query(`SELECT 1 FROM revoked_tokens WHERE jti = $1`, [jti]);
+    await client.query('COMMIT');
+    return (result.rowCount ?? 0) > 0;
+  } catch (error) {
+    await client.query('ROLLBACK');
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
 /** Revoke a token by jti. */
 export async function revokeToken(pool: pg.Pool, jti: string, userId: number, reason: string): Promise<void> {
-  await pool.query(
-    `INSERT INTO revoked_tokens (jti, user_id, reason) VALUES ($1, $2, $3) ON CONFLICT DO NOTHING`,
-    [jti, userId, reason]
-  );
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    await lockTokenRevocationFence(client, jti);
+    await client.query(
+      `INSERT INTO revoked_tokens (jti, user_id, reason) VALUES ($1, $2, $3) ON CONFLICT DO NOTHING`,
+      [jti, userId, reason]
+    );
+    await client.query('COMMIT');
+  } catch (error) {
+    await client.query('ROLLBACK');
+    throw error;
+  } finally {
+    client.release();
+  }
 }
 
 /**
@@ -1368,6 +1895,14 @@ export async function updateSessionCost(pool: pg.Pool, sessionId: string, costUs
  *  upsertSession (which uses COALESCE and cannot overwrite), this writes unconditionally. */
 export async function updateSessionModel(pool: pg.Pool, sessionId: string, model: string): Promise<void> {
   await pool.query(`UPDATE sessions SET model = $1, updated_at = NOW() WHERE session_id = $2`, [model, sessionId]);
+}
+
+/** Persist an OpenCode agent switch only after the daemon confirms it. */
+export async function updateSessionActiveAgent(pool: pg.Pool, sessionId: string, activeAgent: string): Promise<void> {
+  await pool.query(
+    `UPDATE sessions SET active_agent = $1, updated_at = NOW() WHERE session_id = $2`,
+    [activeAgent, sessionId],
+  );
 }
 
 /** Increment session cost by a delta (for per-turn cost accumulation from assistant usage). */
@@ -1813,12 +2348,12 @@ export async function getTokensByDaemon(pool: pg.Pool, userId: number, daemonId:
   };
 }
 
-/** Per-daemon session counts (active running/busy + total) for a user. */
+/** Per-daemon session counts (active running/busy/retry + total) for a user. */
 export async function getSessionCountsByUser(pool: pg.Pool, userId: number): Promise<Record<string, { active: number; total: number }>> {
   const result = await pool.query(`
     SELECT daemon_id,
       COUNT(*)::int AS total,
-      COUNT(*) FILTER (WHERE status IN ('running','busy'))::int AS active
+      COUNT(*) FILTER (WHERE status IN ('running','busy','retry'))::int AS active
     FROM sessions
     WHERE user_id = $1 AND daemon_id IS NOT NULL AND session_id NOT LIKE 'pending-%'
     GROUP BY daemon_id

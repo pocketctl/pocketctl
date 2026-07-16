@@ -67,6 +67,7 @@ func TestStatusConstants(t *testing.T) {
 	statuses := []string{
 		StatusRunning,
 		StatusWaitingApproval,
+		StatusWaitingQuestion,
 		StatusIdle,
 		StatusExited,
 		StatusDisconnected,
@@ -92,8 +93,8 @@ func TestStatusConstants(t *testing.T) {
 		seen[s] = true
 	}
 
-	if len(statuses) != 8 {
-		t.Errorf("expected 8 status constants, got %d", len(statuses))
+	if len(statuses) != 9 {
+		t.Errorf("expected 9 status constants, got %d", len(statuses))
 	}
 }
 
@@ -214,6 +215,7 @@ func TestDaemonEventSubagentFieldsSerialize(t *testing.T) {
 	ev := DaemonEvent{
 		Type:            "subagent_discovered",
 		EventID:         "jsonl:source:1:0",
+		PreviousEventID: "jsonl:source:0:0",
 		SessionID:       "parent-1",
 		AgentID:         "agent-abc",
 		ParentSessionID: "parent-1",
@@ -225,7 +227,7 @@ func TestDaemonEventSubagentFieldsSerialize(t *testing.T) {
 		t.Fatalf("marshal: %v", err)
 	}
 	j := string(out)
-	for _, want := range []string{`"event_id":"jsonl:source:1:0"`, `"parent_session_id":"parent-1"`, `"is_subagent":true`, `"root_session_id":"parent-1"`} {
+	for _, want := range []string{`"event_id":"jsonl:source:1:0"`, `"previous_event_id":"jsonl:source:0:0"`, `"parent_session_id":"parent-1"`, `"is_subagent":true`, `"root_session_id":"parent-1"`} {
 		if !contains(j, want) {
 			t.Errorf("missing %q in %s", want, j)
 		}

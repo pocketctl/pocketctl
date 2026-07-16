@@ -7,13 +7,24 @@ export interface DaemonEvent {
   type: string
   session_id?: string
   text?: string
+  snapshot?: string
   streaming?: boolean
+  message_id?: string
+  part_id?: string
+  revision?: number
+  event_id?: string
+  previous_event_id?: string
+  replace?: boolean
   call_id?: string
   tool?: string
   input?: any
   output?: string
   status?: string
   error?: string
+  attempt?: number
+  retry_at?: number
+  auto?: boolean
+  overflow?: boolean
   cost_usd?: number
   turns?: number
   title?: string
@@ -34,11 +45,16 @@ export interface DaemonEvent {
 // CommandItem represents a slash command or skill available for autocompletion.
 export interface CommandItem {
   name: string
-  source: 'builtin' | 'project' | 'user' | 'plugin' | 'pocketctl'
+  source: 'builtin' | 'project' | 'user' | 'plugin' | 'pocketctl' | 'command' | 'skill' | string
   kind: 'command' | 'skill'
   description?: string
   arg_hint?: string
   namespace?: string
+  template?: string
+  hints?: string[]
+  subtask?: boolean
+  agent?: string
+  model?: string
 }
 
 export interface DaemonInfo {

@@ -1,46 +1,44 @@
 <template>
-  <!--
-    Tool-use approval card — rendered inline in the chat stream when the daemon
-    surfaces a PreToolUse approval request (non-bypass sessions). Shows the tool
-    and its arguments, with Allow / Deny buttons. After the user answers the
-    buttons disable and a result chip replaces them.
-  -->
   <div class="approval-card-wrap">
     <div class="approval-card" :class="resultClass">
-      <!-- Header -->
       <div class="approval-header">
-        <span class="approval-icon">
-          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-            <path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z" />
-            <line x1="12" y1="9" x2="12" y2="13" />
-            <line x1="12" y1="17" x2="12.01" y2="17" />
-          </svg>
-        </span>
+        <span class="approval-icon" aria-hidden="true">⚠</span>
         <span class="approval-tag">{{ t('approval.title') }}</span>
-        <span v-if="isPending" class="approval-waiting">{{ t('approval.waiting') }}</span>
+        <span v-if="isPending" class="approval-waiting">{{ message.submitting ? t('approval.submitting') : t('approval.waiting') }}</span>
       </div>
 
-      <!-- Tool + args -->
       <div class="approval-body">
-        <span class="approval-tool">{{ message.tool || 'Tool' }}</span>
+        <span class="approval-tool">{{ message.permissionName || message.tool || 'Tool' }}</span>
         <span v-if="message.inputDesc" class="approval-args">{{ message.inputDesc }}</span>
       </div>
 
-      <!-- Actions / result -->
+      <div v-if="supportsActions && hasDetails" class="approval-details">
+        <div v-if="message.patterns?.length" class="detail-row">
+          <span>{{ t('approval.patterns') }}</span>
+          <code v-for="pattern in message.patterns" :key="pattern">{{ pattern }}</code>
+        </div>
+        <div v-if="message.always?.length" class="detail-row">
+          <span>{{ t('approval.save_rules') }}</span>
+          <code v-for="rule in message.always" :key="rule">{{ rule }}</code>
+        </div>
+        <details v-if="metadataText" class="approval-metadata">
+          <summary>{{ t('approval.metadata') }}</summary>
+          <pre>{{ metadataText }}</pre>
+        </details>
+      </div>
+
+      <div v-if="message.error" class="approval-error">{{ message.error }}</div>
       <div class="approval-actions">
-        <template v-if="isPending">
-          <button class="approval-btn allow" @click.stop="respond(true)">
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6L9 17l-5-5" /></svg>
-            {{ t('approval.allow') }}
-          </button>
-          <button class="approval-btn deny" @click.stop="respond(false)">
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M18 6L6 18M6 6l12 12" /></svg>
-            {{ t('approval.deny') }}
-          </button>
+        <template v-if="isPending && supportsActions">
+          <button class="approval-btn once" :disabled="actionsDisabled" @click.stop="respond('once')">{{ t('approval.once') }}</button>
+          <button class="approval-btn always" :disabled="actionsDisabled || !message.always?.length" @click.stop="respond('always')">{{ t('approval.always') }}</button>
+          <button class="approval-btn reject" :disabled="actionsDisabled" @click.stop="respond('reject')">{{ t('approval.deny') }}</button>
         </template>
-        <span v-else :class="['approval-result', message.status]">
-          {{ message.status === 'allowed' ? t('approval.allowed') : t('approval.denied') }}
-        </span>
+        <template v-else-if="isPending">
+          <button class="approval-btn allow" :disabled="actionsDisabled" @click.stop="respond('once')">{{ t('approval.allow') }}</button>
+          <button class="approval-btn deny" :disabled="actionsDisabled" @click.stop="respond('reject')">{{ t('approval.deny') }}</button>
+        </template>
+        <span v-else :class="['approval-result', resolvedAction]">{{ resolvedLabel }}</span>
       </div>
     </div>
   </div>
@@ -50,81 +48,67 @@
 import { computed } from 'vue'
 import { useLocale } from '../../composables/useLocale'
 
+type ApprovalAction = 'once' | 'always' | 'reject'
+
 const { t } = useLocale()
-const props = defineProps<{ message: any }>()
-const emit = defineEmits<{ (e: 'respond', message: any, approved: boolean): void }>()
+const props = withDefaults(defineProps<{ message: any; supportsActions?: boolean; disabled?: boolean }>(), {
+  supportsActions: false,
+  disabled: false,
+})
+const emit = defineEmits<{ (event: 'respond', message: any, action: ApprovalAction): void }>()
 
 const isPending = computed(() => props.message.status === 'pending')
-const resultClass = computed(() => `result-${props.message.status}`)
+const actionsDisabled = computed(() => props.disabled || !!props.message.submitting)
+const resolvedAction = computed<ApprovalAction>(() => {
+  if (props.message.action === 'always' || props.message.action === 'once' || props.message.action === 'reject') return props.message.action
+  return props.message.status === 'allowed' ? 'once' : 'reject'
+})
+const resultClass = computed(() => `result-${isPending.value ? 'pending' : resolvedAction.value}`)
+const resolvedLabel = computed(() => {
+  if (resolvedAction.value === 'always') return t('approval.always_resolved')
+  if (resolvedAction.value === 'once') return t('approval.allowed')
+  return t('approval.denied')
+})
+const metadataText = computed(() => {
+  const metadata = props.message.metadata
+  if (!metadata) return ''
+  try {
+    const text = typeof metadata === 'string' ? metadata : JSON.stringify(metadata, null, 2)
+    return text.length > 4000 ? `${text.slice(0, 4000)}…` : text
+  } catch { return '' }
+})
+const hasDetails = computed(() => !!(props.message.patterns?.length || props.message.always?.length || metadataText.value))
 
-function respond(approved: boolean) {
-  // Optimistically flip the card so the UI feels instant; the daemon's
-  // session_status running event (sent on resolution) reconciles state.
-  props.message.status = approved ? 'allowed' : 'denied'
-  emit('respond', props.message, approved)
+function respond(action: ApprovalAction) {
+  if (!isPending.value || actionsDisabled.value) return
+  emit('respond', props.message, action)
 }
 </script>
 
 <style scoped>
-.approval-card-wrap { width: 100%; animation: fade-in 0.2s ease; }
-
-.approval-card {
-  display: flex; flex-direction: column; gap: 10px;
-  padding: 14px 16px;
-  background: var(--surface);
-  border: 1px solid var(--border);
-  border-left: 3px solid var(--warning, #F59E0B);
-  border-radius: var(--radius-lg);
-}
-.approval-card.result-allowed { border-left-color: var(--success, #10B981); }
-.approval-card.result-denied { border-left-color: var(--error, #EF4444); }
-
-.approval-header { display: flex; align-items: center; gap: 6px; }
-.approval-icon { color: var(--warning, #F59E0B); display: flex; }
-.approval-tag {
-  font-size: 11px; font-weight: 700; color: var(--warning, #F59E0B);
-  text-transform: uppercase; letter-spacing: 0.6px;
-}
-.approval-waiting {
-  margin-left: auto; font-size: 11px; color: var(--fg-tertiary);
-  display: flex; align-items: center; gap: 5px;
-}
-.approval-waiting::before {
-  content: ''; width: 6px; height: 6px; border-radius: 50%;
-  background: var(--warning, #F59E0B); animation: pulse 1.2s ease-in-out infinite;
-}
-
-.approval-body {
-  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
-  font-size: 13px;
-}
-.approval-tool {
-  font-family: var(--font-mono); font-weight: 600; color: var(--accent);
-  background: var(--accent-muted); padding: 2px 8px; border-radius: var(--radius-sm);
-}
-.approval-args {
-  font-family: var(--font-mono); font-size: 12px; color: var(--fg-secondary);
-  white-space: pre-wrap; word-break: break-all; max-width: 100%;
-}
-
-.approval-actions { display: flex; align-items: center; gap: 8px; }
-.approval-btn {
-  display: inline-flex; align-items: center; gap: 5px;
-  padding: 6px 14px; border-radius: var(--radius-md);
-  font-size: 13px; font-weight: 600; cursor: pointer;
-  border: 1px solid transparent; transition: all 0.15s;
-}
-.approval-btn.allow { background: var(--success, #10B981); color: #fff; }
-.approval-btn.allow:hover { filter: brightness(1.08); }
-.approval-btn.deny { background: var(--surface-active); color: var(--fg-secondary); border-color: var(--border); }
-.approval-btn.deny:hover { color: var(--error, #EF4444); border-color: var(--error, #EF4444); }
-
-.approval-result {
-  font-size: 12px; font-weight: 600; padding: 4px 10px; border-radius: var(--radius-full);
-}
-.approval-result.allowed { color: var(--success, #10B981); background: var(--success-muted, rgba(16,185,129,0.12)); }
-.approval-result.denied { color: var(--error, #EF4444); background: var(--error-muted, rgba(239,68,68,0.12)); }
-
+.approval-card-wrap { width: 100%; animation: fade-in .2s ease; }
+.approval-card { display: flex; flex-direction: column; gap: 10px; padding: 14px 16px; background: var(--surface); border: 1px solid var(--border); border-left: 3px solid var(--warning, #f59e0b); border-radius: var(--radius-lg); }
+.approval-card.result-once, .approval-card.result-always { border-left-color: var(--success, #10b981); }
+.approval-card.result-reject { border-left-color: var(--error, #ef4444); }
+.approval-header, .approval-body, .approval-actions { display: flex; align-items: center; gap: 8px; }
+.approval-icon, .approval-tag { color: var(--warning, #f59e0b); }
+.approval-tag { font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: .6px; }
+.approval-waiting { margin-left: auto; font-size: 11px; color: var(--fg-tertiary); }
+.approval-tool { font: 600 12px var(--font-mono); color: var(--accent); background: var(--accent-muted); padding: 2px 8px; border-radius: var(--radius-sm); }
+.approval-args { min-width: 0; max-width: 100%; color: var(--fg-secondary); font: 12px var(--font-mono); white-space: pre-wrap; overflow-wrap: anywhere; }
+.approval-details { display: flex; flex-direction: column; gap: 7px; padding: 9px 10px; background: var(--bg); border-radius: var(--radius-md); }
+.detail-row { display: flex; align-items: flex-start; flex-wrap: wrap; gap: 5px; font-size: 11px; color: var(--fg-tertiary); }
+.detail-row code { color: var(--fg-secondary); background: var(--surface); padding: 2px 5px; border-radius: 4px; overflow-wrap: anywhere; }
+.approval-metadata summary { cursor: pointer; color: var(--fg-tertiary); font-size: 11px; }
+.approval-metadata pre { max-height: 180px; overflow: auto; margin: 6px 0 0; color: var(--fg-secondary); font: 11px/1.45 var(--font-mono); white-space: pre-wrap; overflow-wrap: anywhere; }
+.approval-error { color: var(--error, #ef4444); font-size: 11px; }
+.approval-btn { padding: 6px 12px; border: 1px solid var(--border); border-radius: var(--radius-md); background: var(--surface-active); color: var(--fg-secondary); font-size: 12px; font-weight: 600; cursor: pointer; }
+.approval-btn.once, .approval-btn.allow { color: #fff; border-color: var(--success, #10b981); background: var(--success, #10b981); }
+.approval-btn.always { color: var(--accent); border-color: var(--accent); background: var(--accent-muted); }
+.approval-btn.reject:hover:not(:disabled), .approval-btn.deny:hover:not(:disabled) { color: var(--error, #ef4444); border-color: var(--error, #ef4444); }
+.approval-btn:disabled { cursor: not-allowed; opacity: .45; }
+.approval-result { padding: 4px 10px; border-radius: var(--radius-full); font-size: 12px; font-weight: 600; }
+.approval-result.once, .approval-result.always { color: var(--success, #10b981); background: rgba(16,185,129,.12); }
+.approval-result.reject { color: var(--error, #ef4444); background: rgba(239,68,68,.12); }
 @keyframes fade-in { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: translateY(0); } }
-@keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.35; } }
 </style>

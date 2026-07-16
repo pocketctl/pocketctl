@@ -2,10 +2,14 @@ import { describe, test, expect, vi, beforeEach } from 'vitest'
 // Short the offline grace window so debounce tests run fast. Read by the Router
 // constructor, so this must be set before any `new Router(...)`.
 process.env.DAEMON_OFFLINE_GRACE_MS = '20'
+process.env.DAEMON_OFFLINE_WRITE_TIMEOUT_MS = '20'
+process.env.DAEMON_REVOCATION_CHECK_TIMEOUT_MS = '20'
+process.env.DAEMON_REVOCATION_GATE_MAX_MESSAGES = '4'
+process.env.DAEMON_REVOCATION_GATE_MAX_BYTES = '1024'
 import { Router } from '../router.js'
 
 // Mock pg.Pool
-function createMockPool() {
+function createMockPool(eventInsertIDs?: number[]) {
   const queries: { sql: string; params: any[] }[] = []
   const mockPool = {
     query: vi.fn((sql: string, params?: any[]) => {
@@ -39,8 +43,17 @@ function createMockPool() {
         }
       } else if (sql.includes('FROM daemons')) {
         result = { rows: [{ daemon_id: 'daemon-1', status: 'online' }] }
+      } else if (sql.includes('INSERT INTO events') && sql.includes('RETURNING id')) {
+    const id = eventInsertIDs?.shift()
+    result = id === 0 ? { rows: [] } : { rows: [{ id: id ?? 1 }] }
       } else if (sql.includes('RETURNING id')) {
-        result = { rows: [{ id: 1 }] }
+    result = { rows: [{ id: 1 }] }
+      } else if (sql.includes('RETURNING daemon_id')) {
+        result = { rows: [{ daemon_id: params?.[0] }], rowCount: 1 }
+      } else if (sql.includes('session_target AS')) {
+        result = { rows: [{ session_exists: true, claimed: true, applied: true }], rowCount: 1 }
+      } else if (sql.includes("UPDATE daemons SET status = 'offline'")) {
+        result = { rows: [], rowCount: 1 }
       } else if (sql.includes('UPDATE sessions')) {
         // Existing-row update path: report one affected row so update-only
         // helpers (updateSessionStatus) treat the session as real.
@@ -201,13 +214,14 @@ describe('Router - session_status with exit_reason', () => {
     router = new Router(pool)
   })
 
-  test('session_status is UPDATE-only and never INSERTs a (phantom) session row', () => {
+  test('session_status is UPDATE-only and never INSERTs a (phantom) session row', async () => {
     const daemonWs = createMockWs()
     router.registerDaemon(daemonWs, { type: 'register', daemon_id: 'daemon-1', hostname: 'test', agents: [] }, null)
 
     router.handleDaemonMessage('daemon-1', {
       type: 'session_status', session_id: 'sess-exit', status: 'exited', exit_reason: 'user_interrupt',
     })
+  await tick()
 
     // The status + exit_reason go out as an UPDATE...
     const updateCall = pool._queries.find((q: any) =>
@@ -227,7 +241,7 @@ describe('Router - session_status with exit_reason', () => {
     expect(updateCall!.sql).toMatch(/COALESCE\(\$5::int/i)
   })
 
-  test('session_status without exit_reason does not null existing reason (COALESCE)', () => {
+  test('session_status without exit_reason does not null existing reason (COALESCE)', async () => {
     const daemonWs = createMockWs()
     router.registerDaemon(daemonWs, { type: 'register', daemon_id: 'daemon-1', hostname: 'test', agents: [] }, null)
 
@@ -238,6 +252,7 @@ describe('Router - session_status with exit_reason', () => {
     router.handleDaemonMessage('daemon-1', {
       type: 'session_status', session_id: 'sess-2', status: 'running',
     })
+  await tick()
 
     const statusUpdates = pool._queries.filter((q: any) =>
       q.sql.includes('UPDATE sessions') && q.sql.includes('exit_reason') && q.params.includes('sess-2')
@@ -273,6 +288,41 @@ describe('Router - event insertion updates last_activity_at', () => {
     )
     expect(activityUpdate).toBeDefined()
     expect(activityUpdate.params).toContain('sess-3')
+  })
+
+  test('OpenCode Part revisions are persisted and broadcast unchanged', async () => {
+    const daemonWs = createMockWs()
+    await router.registerDaemon(daemonWs, { type: 'register', daemon_id: 'daemon-1', hostname: 'test', agents: ['opencode'] }, 1)
+    const clientWs = createMockWs()
+    router.registerClient(clientWs, 1)
+    await router.handleClientMessage(clientWs, { type: 'replay', session_id: 'test-sid', last_seq: 0 })
+    clientWs._sent.length = 0
+
+    const reasoning = {
+      type: 'agent_reasoning', session_id: 'test-sid', text: 'checking', streaming: true,
+      message_id: 'msg_1', part_id: 'prt_reason', revision: 2, replace: false,
+    }
+    const replacement = {
+      type: 'agent_text', session_id: 'test-sid', text: 'final answer', streaming: false,
+      message_id: 'msg_1', part_id: 'prt_text', revision: 3, replace: true,
+    }
+    const structured = {
+      type: 'agent_patch', session_id: 'test-sid', message_id: 'msg_1', part_id: 'prt_patch',
+      hash: 'abc123', files: ['a.go', 'b.go'],
+    }
+
+    router.handleDaemonMessage('daemon-1', reasoning)
+    router.handleDaemonMessage('daemon-1', replacement)
+    router.handleDaemonMessage('daemon-1', structured)
+    await tick()
+
+    expect(clientWs._sent).toContainEqual(reasoning)
+    expect(clientWs._sent).toContainEqual(replacement)
+    expect(clientWs._sent).toContainEqual(structured)
+    const inserts = pool._queries.filter((q: any) => q.sql.includes('INSERT INTO events'))
+    expect(inserts.some((q: any) => q.params[1] === 'agent_reasoning' && q.params[2]?.includes('"part_id":"prt_reason"'))).toBe(true)
+    expect(inserts.some((q: any) => q.params[1] === 'agent_text' && q.params[2]?.includes('"replace":true'))).toBe(true)
+    expect(inserts.some((q: any) => q.params[1] === 'agent_patch' && q.params[2]?.includes('"files":["a.go","b.go"]'))).toBe(true)
   })
 })
 
@@ -397,13 +447,16 @@ describe('Router - session→daemon routing resilience', () => {
     // longer reports as live. Everything else falls through to empty results.
     const reconcilePool: any = {
       query: vi.fn((sql: string) => {
+        if (sql.includes('RETURNING daemon_id')) return Promise.resolve({ rows: [{ daemon_id: 'daemon-1' }], rowCount: 1 })
+        if (sql.includes('SELECT registration_id FROM daemons')) return Promise.resolve({ rows: [{ registration_id: 'current' }], rowCount: 1 })
         if (sql.includes("status = 'completed'") && sql.includes('RETURNING session_id')) {
           return Promise.resolve({ rows: [{ session_id: 'zombie-1' }], rowCount: 1 })
         }
         return Promise.resolve({ rows: [], rowCount: 0 })
       }),
-      connect: vi.fn(), end: vi.fn(),
+      end: vi.fn(),
     }
+    reconcilePool.connect = vi.fn(async () => ({ query: reconcilePool.query, release: vi.fn() }))
     const r = new Router(reconcilePool)
 
     const clientWs = createMockWs()
@@ -668,6 +721,224 @@ describe('Router - event delivery dedup + ack', () => {
     expect(clientWs._sent.filter((m: any) => m.type === 'agent_text').length).toBe(2)
   })
 
+  test('a stable event replay with a new seq is acked without duplicate fanout or side effects', async () => {
+  const queries: { sql: string; params: any[] }[] = []
+  let eventInserts = 0
+  const dedupPool: any = {
+    query: vi.fn((sql: string, params?: any[]) => {
+    queries.push({ sql, params: params || [] })
+    if (sql.includes('INSERT INTO events')) {
+      eventInserts++
+      return Promise.resolve(eventInserts === 1 ? { rows: [{ id: 41 }] } : { rows: [] })
+    }
+    if (sql.includes('FROM daemons')) return Promise.resolve({ rows: [{ daemon_id: 'daemon-1', status: 'online' }] })
+    if (sql.includes('SELECT 1 FROM sessions')) return Promise.resolve({ rows: [{ '?column?': 1 }], rowCount: 1 })
+    if (sql.includes('session_target AS')) return Promise.resolve({ rows: [{ session_exists: true, claimed: true, applied: true }], rowCount: 1 })
+    return Promise.resolve({ rows: [], rowCount: 1 })
+    }),
+    connect: vi.fn(async () => ({
+    query: (sql: string, params?: any[]) => dedupPool.query(sql, params),
+    release: vi.fn(),
+    })),
+    end: vi.fn(),
+  }
+  const r = new Router(dedupPool)
+  const daemonWs = createMockWs()
+  await r.registerDaemon(daemonWs, { type: 'register', daemon_id: 'daemon-1', hostname: 'h', agents: [], started_at: 100 }, 1)
+  const clientWs = createMockWs()
+  r.registerClient(clientWs, 1)
+  await r.handleClientMessage(clientWs, { type: 'replay', session_id: 'sess-1', last_seq: 0 })
+  clientWs._sent.length = 0
+
+  const event = {
+    type: 'approval_request', session_id: 'sess-1', event_id: 'opencode:tool:call_1:running',
+    request_id: '', tool: 'read', usage: { input_tokens: 3 },
+  }
+  r.handleDaemonMessage('daemon-1', { ...event, seq: 1 })
+  r.handleDaemonMessage('daemon-1', { ...event, seq: 2 })
+  await tick()
+
+  expect(clientWs._sent.filter((m: any) => m.type === 'approval_request')).toHaveLength(1)
+  expect(queries.filter(q => q.sql.includes('total_tokens = COALESCE')).length).toBe(1)
+  expect(queries.filter(q => q.sql.includes('FROM devices WHERE user_id')).length).toBe(1)
+
+  daemonWs._sent.length = 0
+  r.handleDaemonMessage('daemon-1', { type: 'ping' })
+  expect(daemonWs._sent.find((m: any) => m.type === 'event_ack')?.up_to_seq).toBe(2)
+  })
+
+  test.each(['session_created', 'session_discovered'])(
+  '%s upsert replay only fans out the inserted event while acking both seqs',
+  async (type) => {
+    const dedupPool = createMockPool([51, 0])
+    const r = new Router(dedupPool)
+    const daemonWs = createMockWs()
+    await r.registerDaemon(daemonWs, { type: 'register', daemon_id: 'daemon-1', hostname: 'h', agents: [], started_at: 100 }, 1)
+    const clientWs = createMockWs()
+    r.registerClient(clientWs, 1)
+    clientWs._sent.length = 0
+    const event = {
+    type, session_id: `sess-${type}`, event_id: `opencode:${type}:stable`,
+    cwd: '/tmp', agent: 'opencode', status: 'running',
+    }
+    r.handleDaemonMessage('daemon-1', { ...event, seq: 1 })
+    r.handleDaemonMessage('daemon-1', { ...event, seq: 2 })
+    await tick()
+    expect(clientWs._sent.filter((m: any) => m.type === type)).toHaveLength(1)
+
+    daemonWs._sent.length = 0
+    r.handleDaemonMessage('daemon-1', { type: 'ping' })
+    expect(daemonWs._sent.find((m: any) => m.type === 'event_ack')?.up_to_seq).toBe(2)
+  },
+  )
+
+  test.each([
+  { type: 'session_id_changed', extra: { old_session_id: 'old-sess' } },
+  { type: 'session_created', extra: { title: 'Created' } },
+  { type: 'session_discovered', extra: { cwd: '/tmp', agent: 'opencode', status: 'running' } },
+  { type: 'session_model_changed', extra: { model: 'openai/gpt-5' } },
+  { type: 'session_agent_changed', extra: { current_agent: 'build' } },
+  ])('$type conflict advances ack without DB/session/quota/subscription/fanout effects', async ({ type, extra }) => {
+  const conflictPool = createMockPool([0])
+  const r = new Router(conflictPool)
+  const daemonWs = createMockWs()
+  await r.registerDaemon(daemonWs, { type: 'register', daemon_id: 'daemon-1', hostname: 'h', agents: [], started_at: 100 }, 1)
+  const clientWs = createMockWs()
+  r.registerClient(clientWs, 1)
+  await tick()
+  conflictPool._queries.length = 0
+  clientWs._sent.length = 0
+  ;(r as any).clients.get(clientWs).subscribedSessions.add('old-sess')
+
+  r.handleDaemonMessage('daemon-1', {
+    type, session_id: 'new-sess', event_id: `stable:${type}`, seq: 1, ...extra,
+  })
+  await tick()
+
+  const nonEventWrites = conflictPool._queries.filter((q: any) =>
+    !q.sql.includes('INSERT INTO events') && !q.sql.includes('SELECT 1 FROM deleted_sessions'),
+  )
+  expect(nonEventWrites).toEqual([])
+  expect((r as any).sessionToDaemon.has('new-sess')).toBe(false)
+  expect((r as any).clients.get(clientWs).subscribedSessions.has('new-sess')).toBe(false)
+  expect((r as any).clients.get(clientWs).subscribedSessions.has('old-sess')).toBe(true)
+  expect(clientWs._sent).toEqual([])
+
+  daemonWs._sent.length = 0
+  r.handleDaemonMessage('daemon-1', { type: 'ping' })
+  expect(daemonWs._sent.find((m: any) => m.type === 'event_ack')?.up_to_seq).toBe(1)
+  })
+
+  test('special-branch effects await DB completion in daemon seq order', async () => {
+  const releases = new Map<number, (result: any) => void>()
+  const updates: string[] = []
+  let releaseModel!: (result: any) => void
+  const orderedPool: any = {
+    query: vi.fn((sql: string, params?: any[]) => {
+    if (sql.includes('INSERT INTO events')) {
+      const payload = JSON.parse(params?.[2] || '{}')
+      return new Promise(resolve => releases.set(payload.seq, resolve))
+    }
+    if (sql.includes('UPDATE sessions SET model')) {
+      updates.push(`model:${params?.[0]}`)
+      return new Promise(resolve => { releaseModel = resolve })
+    }
+    if (sql.includes('UPDATE sessions SET active_agent')) {
+      updates.push(`agent:${params?.[0]}`)
+      return Promise.resolve({ rows: [], rowCount: 1 })
+    }
+    if (sql.includes('FROM daemons')) return Promise.resolve({ rows: [{ daemon_id: 'daemon-1', status: 'online' }] })
+    return Promise.resolve({ rows: [], rowCount: 1 })
+    }),
+    connect: vi.fn(async () => ({ query: (sql: string, params?: any[]) => orderedPool.query(sql, params), release: vi.fn() })),
+    end: vi.fn(),
+  }
+  const r = new Router(orderedPool)
+  const daemonWs = createMockWs()
+  await r.registerDaemon(daemonWs, { type: 'register', daemon_id: 'daemon-1', hostname: 'h', agents: [], started_at: 100 }, null)
+  const clientWs = createMockWs()
+  r.registerClient(clientWs, null)
+  ;(r as any).clients.get(clientWs).subscribedSessions.add('sess-1')
+  clientWs._sent.length = 0
+  r.handleDaemonMessage('daemon-1', { type: 'session_model_changed', session_id: 'sess-1', event_id: 'model:first', model: 'first', seq: 1 })
+  r.handleDaemonMessage('daemon-1', { type: 'session_agent_changed', session_id: 'sess-1', event_id: 'agent:build', current_agent: 'build', seq: 2 })
+
+  releases.get(2)!({ rows: [{ id: 2 }] })
+  await tick()
+  expect(updates).toEqual([])
+  expect(clientWs._sent.filter((m: any) => m.type === 'session_model_changed')).toEqual([])
+  releases.get(1)!({ rows: [{ id: 1 }] })
+  await tick()
+  expect(updates).toEqual(['model:first'])
+  expect(clientWs._sent.filter((m: any) => m.type === 'session_agent_changed')).toEqual([])
+  releaseModel({ rows: [], rowCount: 1 })
+  await tick()
+  expect(updates).toEqual(['model:first', 'agent:build'])
+  expect(clientWs._sent.filter((m: any) => ['session_model_changed', 'session_agent_changed'].includes(m.type)).map((m: any) => m.type)).toEqual(['session_model_changed', 'session_agent_changed'])
+
+  daemonWs._sent.length = 0
+  r.handleDaemonMessage('daemon-1', { type: 'ping' })
+  expect(daemonWs._sent.find((m: any) => m.type === 'event_ack')?.up_to_seq).toBe(2)
+  })
+
+  test('session status waits for the preceding session create upsert', async () => {
+    const writes: string[] = []
+    let releaseCreate!: (result: any) => void
+    let eventID = 0
+    const orderedPool: any = {
+      query: vi.fn((sql: string) => {
+        if (sql.includes('INSERT INTO events')) return Promise.resolve({ rows: [{ id: ++eventID }] })
+        if (sql.includes('INSERT INTO sessions')) {
+          writes.push('create')
+          return new Promise(resolve => { releaseCreate = resolve })
+        }
+        if (sql.includes('UPDATE sessions SET') && sql.includes('status = $3')) {
+          writes.push('status')
+          return Promise.resolve({ rows: [], rowCount: 1 })
+        }
+        if (sql.includes('FROM daemons')) return Promise.resolve({ rows: [{ daemon_id: 'daemon-1', status: 'online' }] })
+        return Promise.resolve({ rows: [], rowCount: 1 })
+      }),
+      connect: vi.fn(async () => ({ query: (sql: string, params?: any[]) => orderedPool.query(sql, params), release: vi.fn() })), end: vi.fn(),
+    }
+    const r = new Router(orderedPool)
+    const daemonWs = createMockWs()
+    await r.registerDaemon(daemonWs, { type: 'register', daemon_id: 'daemon-1', hostname: 'h', agents: [], started_at: 100 }, null)
+    r.handleDaemonMessage('daemon-1', { type: 'session_created', session_id: 'sess-1', event_id: 'create', seq: 1 })
+    r.handleDaemonMessage('daemon-1', { type: 'session_status', session_id: 'sess-1', event_id: 'status', status: 'completed', seq: 2 })
+    await tick()
+    expect(writes).toEqual(['create'])
+    releaseCreate({ rows: [], rowCount: 1 })
+    await tick()
+    expect(writes).toEqual(['create', 'status'])
+  })
+
+  test('special-branch persistence rejection withholds ack and all effects', async () => {
+  const rejectedPool: any = {
+    query: vi.fn((sql: string) => {
+    if (sql.includes('INSERT INTO events')) return Promise.reject(new Error('db down'))
+    if (sql.includes('FROM daemons')) return Promise.resolve({ rows: [{ daemon_id: 'daemon-1', status: 'online' }] })
+    return Promise.resolve({ rows: [], rowCount: 1 })
+    }),
+    connect: vi.fn(async () => ({ query: (sql: string) => rejectedPool.query(sql), release: vi.fn() })), end: vi.fn(),
+  }
+  const r = new Router(rejectedPool)
+  const daemonWs = createMockWs()
+  await r.registerDaemon(daemonWs, { type: 'register', daemon_id: 'daemon-1', hostname: 'h', agents: [], started_at: 100 }, null)
+  const clientWs = createMockWs()
+  r.registerClient(clientWs, null)
+  clientWs._sent.length = 0
+  r.handleDaemonMessage('daemon-1', {
+    type: 'session_model_changed', session_id: 'sess-1', event_id: 'model:new', model: 'new', seq: 1,
+  })
+  await new Promise(resolve => setTimeout(resolve, 4500))
+  expect(rejectedPool.query.mock.calls.some(([sql]: [string]) => sql.includes('UPDATE sessions SET model'))).toBe(false)
+  expect(clientWs._sent).toEqual([])
+  daemonWs._sent.length = 0
+  r.handleDaemonMessage('daemon-1', { type: 'ping' })
+  expect(daemonWs._sent.some((m: any) => m.type === 'event_ack')).toBe(false)
+  }, 7000)
+
   test('ping piggybacks event_ack with the highest CONTIGUOUS persisted seq', async () => {
     const daemonWs = createMockWs()
     await router.registerDaemon(daemonWs, { type: 'register', daemon_id: 'daemon-1', hostname: 'h', agents: [], started_at: 100 }, null)
@@ -683,20 +954,797 @@ describe('Router - event delivery dedup + ack', () => {
     expect(ack.up_to_seq).toBe(3)
   })
 
+  test('drops a duplicate seq while its first persistence is still in flight', async () => {
+    let releaseInsert!: (result: any) => void
+    let inserts = 0
+    const inflightPool: any = {
+      query: vi.fn((sql: string) => {
+        if (sql.includes('RETURNING daemon_id')) return Promise.resolve({ rows: [{ daemon_id: 'daemon-1' }], rowCount: 1 })
+        if (sql.includes('INSERT INTO events')) {
+          inserts++
+          return new Promise(resolve => { releaseInsert = resolve })
+        }
+        if (sql.includes('FROM daemons')) return Promise.resolve({ rows: [{ daemon_id: 'daemon-1', status: 'online' }] })
+        return Promise.resolve({ rows: [], rowCount: 1 })
+      }),
+      connect: vi.fn(async () => ({ query: (sql: string, params?: any[]) => inflightPool.query(sql, params), release: vi.fn() })), end: vi.fn(),
+    }
+    const r = new Router(inflightPool)
+    const daemonWs = createMockWs()
+    await r.registerDaemon(daemonWs, { type: 'register', daemon_id: 'daemon-1', hostname: 'h', agents: [], started_at: 100 }, null)
+    const event = { type: 'agent_text', session_id: 'sess-1', event_id: 'same', text: 'hello', seq: 1 }
+    r.handleDaemonMessage('daemon-1', event)
+    r.handleDaemonMessage('daemon-1', event)
+    expect(inserts).toBe(1)
+    releaseInsert({ rows: [{ id: 1 }] })
+    await tick()
+    daemonWs._sent.length = 0
+    r.handleDaemonMessage('daemon-1', { type: 'ping' })
+    expect(daemonWs._sent.find((message: any) => message.type === 'event_ack')?.up_to_seq).toBe(1)
+  })
+
+  test('does not let an old daemon incarnation complete against the new cursor', async () => {
+    const releases = new Map<string, (result: any) => void>()
+    const updates: string[] = []
+    const racePool: any = {
+      query: vi.fn((sql: string, params?: any[]) => {
+        if (sql.includes('INSERT INTO events')) {
+          const payload = JSON.parse(params?.[2] || '{}')
+          return new Promise(resolve => releases.set(payload.model, resolve))
+        }
+        if (sql.includes('UPDATE sessions SET model')) {
+          updates.push(params?.[0])
+          return Promise.resolve({ rows: [], rowCount: 1 })
+        }
+        if (sql.includes('FROM daemons')) return Promise.resolve({ rows: [{ daemon_id: 'daemon-1', status: 'online' }] })
+        return Promise.resolve({ rows: [], rowCount: 1 })
+      }),
+      connect: vi.fn(async () => ({ query: (sql: string, params?: any[]) => racePool.query(sql, params), release: vi.fn() })), end: vi.fn(),
+    }
+    const r = new Router(racePool)
+    const oldWs = createMockWs()
+    await r.registerDaemon(oldWs, { type: 'register', daemon_id: 'daemon-1', hostname: 'h', agents: [], started_at: 100 }, null)
+    r.handleDaemonMessage('daemon-1', { type: 'session_model_changed', session_id: 'sess-1', event_id: 'old', model: 'old', seq: 7 })
+
+    const newWs = createMockWs()
+    await r.registerDaemon(newWs, { type: 'register', daemon_id: 'daemon-1', hostname: 'h', agents: [], started_at: 200 }, null)
+    r.handleDaemonMessage('daemon-1', { type: 'session_model_changed', session_id: 'sess-1', event_id: 'new', model: 'new', seq: 1 })
+
+    releases.get('old')!({ rows: [{ id: 1 }] })
+    await tick()
+    releases.get('new')!({ rows: [{ id: 2 }] })
+    await tick()
+
+    expect(updates).toEqual(['new'])
+    const cursor = (r as any).daemonSeq.get('daemon-1')
+    expect(cursor.persistedHigh).toBe(1)
+    expect([...cursor.pending]).toEqual([])
+    newWs._sent.length = 0
+    r.handleDaemonMessage('daemon-1', { type: 'ping' })
+    expect(newWs._sent.find((message: any) => message.type === 'event_ack')?.up_to_seq).toBe(1)
+  })
+
+  test('rejects messages from a replaced daemon socket before they can seed the new cursor', async () => {
+    const models: string[] = []
+    const pool: any = {
+      query: vi.fn(async (sql: string, params?: any[]) => {
+        if (sql.includes('INSERT INTO events')) {
+          return { rows: [{ id: 1, inserted: true, effect_status: 'pending', effect_step: 0 }] }
+        }
+        if (sql.includes('UPDATE sessions SET model')) {
+          models.push(params?.[0])
+          return { rows: [], rowCount: 1 }
+        }
+        if (sql.includes('FROM daemons')) return { rows: [{ daemon_id: 'daemon-1', status: 'online' }] }
+        return { rows: [], rowCount: 1 }
+      }),
+      connect: vi.fn(async () => ({ query: (sql: string, params?: any[]) => pool.query(sql, params), release: vi.fn() })),
+      end: vi.fn(),
+    }
+    const r = new Router(pool)
+    const oldWs = createMockWs()
+    const newWs = createMockWs()
+    await r.registerDaemon(oldWs, { type: 'register', daemon_id: 'daemon-1', hostname: 'old', agents: [], started_at: 100 }, null)
+    await r.registerDaemon(newWs, { type: 'register', daemon_id: 'daemon-1', hostname: 'new', agents: [], started_at: 200 }, null)
+
+    expect(oldWs.close).toHaveBeenCalledWith(4009, 'replaced by new incarnation')
+    r.handleDaemonMessage('daemon-1', {
+      type: 'session_model_changed', session_id: 'sess-1', event_id: 'stale', model: 'stale', seq: 100,
+    }, oldWs, 100)
+    r.handleDaemonMessage('daemon-1', {
+      type: 'session_model_changed', session_id: 'sess-1', event_id: 'fresh', model: 'fresh', seq: 1,
+    }, newWs, 200)
+    await tick()
+
+    expect(models).toEqual(['fresh'])
+    const cursor = (r as any).daemonSeq.get('daemon-1')
+    expect(cursor.persistedHigh).toBe(1)
+    expect([...cursor.pending]).toEqual([])
+  })
+
+  test('serializes competing daemon replacements and closes every losing socket', async () => {
+    const r = new Router(createMockPool())
+    const oldWs = createMockWs()
+    const middleWs = createMockWs()
+    const newestWs = createMockWs()
+    await r.registerDaemon(oldWs, { type: 'register', daemon_id: 'daemon-1', hostname: 'old', agents: [], started_at: 100 }, null)
+    await Promise.all([
+      r.registerDaemon(middleWs, { type: 'register', daemon_id: 'daemon-1', hostname: 'middle', agents: [], started_at: 200 }, null),
+      r.registerDaemon(newestWs, { type: 'register', daemon_id: 'daemon-1', hostname: 'newest', agents: [], started_at: 300 }, null),
+    ])
+
+    expect(oldWs.close).toHaveBeenCalledWith(4009, 'replaced by new incarnation')
+    expect(middleWs.close).toHaveBeenCalledWith(4009, 'replaced by new incarnation')
+    expect((r as any).daemons.get('daemon-1')).toMatchObject({ ws: newestWs, startedAt: 300 })
+    expect((r as any).daemonSeq.get('daemon-1').startedAt).toBe(300)
+  })
+
+  test('does not activate a socket that closes while registration is awaiting pre-activation work', async () => {
+    let releaseUpsert!: () => void
+    const pool: any = {
+      query: vi.fn((sql: string) => {
+        if (sql.includes('INSERT INTO daemons')) return new Promise(resolve => { releaseUpsert = () => resolve({ rows: [], rowCount: 1 }) })
+        if (sql.includes('SELECT user_id FROM daemons')) return Promise.resolve({ rows: [] })
+        if (sql.includes('FROM daemons')) return Promise.resolve({ rows: [{ daemon_id: 'daemon-1', status: 'online' }] })
+        return Promise.resolve({ rows: [], rowCount: 1 })
+      }),
+      connect: vi.fn(async () => ({ query: (sql: string, params?: any[]) => pool.query(sql, params), release: vi.fn() })),
+      end: vi.fn(),
+    }
+    const r = new Router(pool)
+    const ws = createMockWs()
+    const registering = r.registerDaemon(ws, {
+      type: 'register', daemon_id: 'daemon-1', hostname: 'h', agents: [], started_at: 100,
+    }, null)
+    while (!releaseUpsert) await Promise.resolve()
+    ws.readyState = 3
+    releaseUpsert()
+
+    await expect(registering).resolves.toBe(false)
+    expect((r as any).daemons.has('daemon-1')).toBe(false)
+    expect((r as any).daemonSeq.has('daemon-1')).toBe(false)
+  })
+
+  test('treats a post-activation alias rejection as best-effort and accepts a contender', async () => {
+    const pool = createMockPool()
+    pool.query.mockImplementation((sql: string, params?: any[]) => {
+      if (sql.includes('SELECT alias FROM daemons')) return Promise.reject(new Error('alias unavailable'))
+      return createMockPool().query(sql, params)
+    })
+    const r = new Router(pool)
+    const first = createMockWs()
+    const second = createMockWs()
+    await expect(r.registerDaemon(first, {
+      type: 'register', daemon_id: 'daemon-1', hostname: 'one', agents: [], started_at: 100,
+    }, null)).resolves.toBe(true)
+    await expect(r.registerDaemon(second, {
+      type: 'register', daemon_id: 'daemon-1', hostname: 'two', agents: [], started_at: 200,
+    }, null)).resolves.toBe(true)
+    expect((r as any).daemons.get('daemon-1').ws).toBe(second)
+  })
+
+  test('does not let a hanging post-activation alias lookup block the registration chain', async () => {
+    const pool = createMockPool()
+    pool.query.mockImplementation((sql: string, params?: any[]) => {
+      if (sql.includes('SELECT alias FROM daemons')) return new Promise(() => {})
+      return createMockPool().query(sql, params)
+    })
+    const r = new Router(pool)
+    const outcome = (promise: Promise<boolean>) => Promise.race([
+      promise.then(() => 'registered'),
+      new Promise<string>(resolve => setTimeout(() => resolve('timeout'), 30)),
+    ])
+    expect(await outcome(r.registerDaemon(createMockWs(), {
+      type: 'register', daemon_id: 'daemon-1', hostname: 'one', agents: [], started_at: 100,
+    }, null))).toBe('registered')
+    const contender = createMockWs()
+    expect(await outcome(r.registerDaemon(contender, {
+      type: 'register', daemon_id: 'daemon-1', hostname: 'two', agents: [], started_at: 200,
+    }, null))).toBe('registered')
+    expect((r as any).daemons.get('daemon-1').ws).toBe(contender)
+  })
+
+  test('does not broadcast a changed-incarnation reconcile that completes after its replacement', async () => {
+    let releaseOld!: (closed: string[]) => void
+    const reconcile = vi.spyOn(await import('../db.js'), 'reconcileDaemonSessions')
+      .mockImplementationOnce(() => new Promise(resolve => { releaseOld = resolve }))
+      .mockResolvedValueOnce([])
+    const r = new Router(createMockPool())
+    const client = createMockWs()
+    r.registerClient(client, null)
+    await r.registerDaemon(createMockWs(), {
+      type: 'register', daemon_id: 'daemon-1', hostname: 'old', agents: [], started_at: 100,
+      active_session_ids: ['A'],
+    }, null)
+    await r.registerDaemon(createMockWs(), {
+      type: 'register', daemon_id: 'daemon-1', hostname: 'new', agents: [], started_at: 200,
+      active_session_ids: ['B'],
+    }, null)
+    client._sent.length = 0
+    releaseOld(['B'])
+    await tick()
+    expect(client._sent).not.toContainEqual(expect.objectContaining({ type: 'session_status', session_id: 'B', status: 'completed' }))
+    reconcile.mockRestore()
+  })
+
+  test('does not broadcast a same-incarnation reconcile from a replaced connection', async () => {
+    let releaseOld!: (closed: string[]) => void
+    const reconcile = vi.spyOn(await import('../db.js'), 'reconcileDaemonSessions')
+      .mockImplementationOnce(() => new Promise(resolve => { releaseOld = resolve }))
+      .mockResolvedValueOnce([])
+    const r = new Router(createMockPool())
+    const client = createMockWs()
+    r.registerClient(client, null)
+    await r.registerDaemon(createMockWs(), {
+      type: 'register', daemon_id: 'daemon-1', hostname: 'old-socket', agents: [], started_at: 100,
+      active_session_ids: ['A'],
+    }, null)
+    await r.registerDaemon(createMockWs(), {
+      type: 'register', daemon_id: 'daemon-1', hostname: 'new-socket', agents: [], started_at: 100,
+      active_session_ids: ['B'],
+    }, null)
+    client._sent.length = 0
+    releaseOld(['B'])
+    await tick()
+    expect(client._sent).not.toContainEqual(expect.objectContaining({ type: 'session_status', session_id: 'B', status: 'completed' }))
+    reconcile.mockRestore()
+  })
+
+  test('restores old persisted identity and token when delayed activation finishes after close without rolling back a successor', async () => {
+    const dbModule = await import('../db.js')
+    let persisted = { hostname: 'none', startedAt: 0, token: 'none', registrationId: 'none' }
+    let releaseContender!: () => void
+    const activation = vi.spyOn(dbModule, 'activateDaemonRegistration')
+      .mockImplementationOnce(async (_pool, input) => {
+        persisted = { hostname: input.hostname, startedAt: input.startedAt || 0, token: input.tokenJti || '', registrationId: input.registrationId }
+        return null
+      })
+      .mockImplementationOnce((_pool, input) => new Promise(resolve => {
+        releaseContender = () => {
+          const snapshot: any = {
+            hostname: persisted.hostname, agents: [], status: 'online', last_heartbeat: null,
+            arch: null, version: null, started_at: persisted.startedAt, active_token_jti: persisted.token,
+            machine_id: null, last_login_at: null, registration_id: persisted.registrationId,
+          }
+          persisted = { hostname: input.hostname, startedAt: input.startedAt || 0, token: input.tokenJti || '', registrationId: input.registrationId }
+          resolve(snapshot)
+        }
+      }))
+      .mockImplementationOnce(async (_pool, input) => {
+        const snapshot: any = {
+          hostname: persisted.hostname, agents: [], status: 'online', last_heartbeat: null,
+          arch: null, version: null, started_at: persisted.startedAt, active_token_jti: persisted.token,
+          machine_id: null, last_login_at: null, registration_id: persisted.registrationId,
+        }
+        persisted = { hostname: input.hostname, startedAt: input.startedAt || 0, token: input.tokenJti || '', registrationId: input.registrationId }
+        return snapshot
+      })
+    let restoreAttempts = 0
+    const restore = vi.spyOn(dbModule, 'restoreDaemonRegistration').mockImplementation(async (_pool, _daemonId, expected, snapshot) => {
+      restoreAttempts++
+      if (restoreAttempts === 1) return { status: 'sql_failure', error: new Error('transient') } as const
+      if (persisted.registrationId !== expected || !snapshot) return { status: 'stale_successor' } as const
+      persisted = {
+        hostname: snapshot.hostname || '', startedAt: Number(snapshot.started_at) || 0,
+        token: snapshot.active_token_jti || '', registrationId: snapshot.registration_id || '',
+      }
+      return { status: 'confirmed_restored' } as const
+    })
+    const r = new Router(createMockPool())
+    await r.registerDaemon(createMockWs(), {
+      type: 'register', daemon_id: 'daemon-1', hostname: 'old', agents: [], started_at: 100,
+    }, null, 'old-token')
+
+    const contenderWs = createMockWs()
+    const contender = r.registerDaemon(contenderWs, {
+      type: 'register', daemon_id: 'daemon-1', hostname: 'contender', agents: [], started_at: 200,
+    }, null, 'contender-token')
+    while (!releaseContender) await Promise.resolve()
+    contenderWs.readyState = 3
+    releaseContender()
+    await expect(contender).resolves.toBe(false)
+    expect(persisted).toMatchObject({ hostname: 'old', startedAt: 100, token: 'old-token' })
+
+    await r.registerDaemon(createMockWs(), {
+      type: 'register', daemon_id: 'daemon-1', hostname: 'successor', agents: [], started_at: 300,
+    }, null, 'successor-token')
+    expect(persisted).toMatchObject({ hostname: 'successor', startedAt: 300, token: 'successor-token' })
+    expect(restore).toHaveBeenCalledTimes(2)
+    activation.mockRestore()
+    restore.mockRestore()
+  })
+
+  test('fails both local generations closed when activation compensation permanently fails', async () => {
+    const dbModule = await import('../db.js')
+    let contenderWs: any
+    const activation = vi.spyOn(dbModule, 'activateDaemonRegistration').mockImplementation(async (_pool, input) => {
+      if (input.hostname === 'contender') contenderWs.readyState = 3
+      return null
+    })
+    const restore = vi.spyOn(dbModule, 'restoreDaemonRegistration').mockResolvedValue({
+      status: 'sql_failure', error: new Error('still unavailable'),
+    })
+    const r = new Router(createMockPool())
+    const oldWs = createMockWs()
+    await r.registerDaemon(oldWs, {
+      type: 'register', daemon_id: 'daemon-1', hostname: 'old', agents: [], started_at: 100,
+    }, null)
+    contenderWs = createMockWs()
+    await expect(r.registerDaemon(contenderWs, {
+      type: 'register', daemon_id: 'daemon-1', hostname: 'contender', agents: [], started_at: 200,
+    }, null)).resolves.toBe(false)
+
+    expect(restore).toHaveBeenCalledTimes(3)
+    expect(oldWs.close).toHaveBeenCalled()
+    expect((r as any).daemons.has('daemon-1')).toBe(false)
+    expect((r as any).daemonSeq.has('daemon-1')).toBe(false)
+    oldWs._sent.length = 0
+    r.handleDaemonMessage('daemon-1', { type: 'ping', seq: 1 })
+    expect(oldWs._sent.some((message: any) => message.type === 'event_ack')).toBe(false)
+    activation.mockRestore()
+    restore.mockRestore()
+  })
+
+  test('does not remove or close an already-winning successor when compensation CAS misses', async () => {
+    const dbModule = await import('../db.js')
+    let contenderWs: any
+    const activation = vi.spyOn(dbModule, 'activateDaemonRegistration').mockImplementation(async (_pool, input) => {
+      if (input.hostname === 'contender') contenderWs.readyState = 3
+      return null
+    })
+    const r = new Router(createMockPool())
+    const oldWs = createMockWs()
+    await r.registerDaemon(oldWs, {
+      type: 'register', daemon_id: 'daemon-1', hostname: 'old', agents: [], started_at: 100,
+    }, null)
+    const successorWs = createMockWs()
+    const restore = vi.spyOn(dbModule, 'restoreDaemonRegistration').mockImplementation(async () => {
+      ;(r as any).daemons.set('daemon-1', {
+        ws: successorWs, daemonId: 'daemon-1', hostname: 'successor', agents: [], userId: null,
+        startedAt: 300, registrationId: 'successor-generation',
+      })
+      return { status: 'stale_successor' } as const
+    })
+    contenderWs = createMockWs()
+    await r.registerDaemon(contenderWs, {
+      type: 'register', daemon_id: 'daemon-1', hostname: 'contender', agents: [], started_at: 200,
+    }, null)
+    expect((r as any).daemons.get('daemon-1').ws).toBe(successorWs)
+    expect(successorWs.close).not.toHaveBeenCalled()
+    activation.mockRestore()
+    restore.mockRestore()
+  })
+
+  test('ignores a late offline finalizer captured from a replaced generation', async () => {
+    const dbModule = await import('../db.js')
+    const offline = vi.spyOn(dbModule, 'setDaemonOfflineWithTimeout').mockResolvedValue(true as any)
+    const r = new Router(createMockPool())
+    const oldWs = createMockWs()
+    await r.registerDaemon(oldWs, {
+      type: 'register', daemon_id: 'daemon-1', hostname: 'old', agents: [], started_at: 100,
+    }, null)
+    const capturedOld = (r as any).daemons.get('daemon-1')
+    const successorWs = createMockWs()
+    await r.registerDaemon(successorWs, {
+      type: 'register', daemon_id: 'daemon-1', hostname: 'successor', agents: [], started_at: 200,
+    }, null)
+    await (r as any).finalizeDaemonOffline('daemon-1', capturedOld)
+    expect((r as any).daemons.get('daemon-1').ws).toBe(successorWs)
+    expect(offline).not.toHaveBeenCalled()
+    offline.mockRestore()
+  })
+
+  test('retries a transient generation-bound offline failure and discloses permanent failure without broadcasting', async () => {
+    const dbModule = await import('../db.js')
+    const transient = vi.spyOn(dbModule, 'setDaemonOfflineWithTimeout')
+      .mockRejectedValueOnce(new Error('temporary'))
+      .mockResolvedValueOnce(true as any)
+    const first = new Router(createMockPool())
+    const firstWs = createMockWs()
+    const firstClient = createMockWs()
+    first.registerClient(firstClient, null)
+    await first.registerDaemon(firstWs, {
+      type: 'register', daemon_id: 'daemon-1', hostname: 'first', agents: [], started_at: 100,
+    }, null)
+    const capturedFirst = (first as any).daemons.get('daemon-1')
+    firstClient._sent.length = 0
+    await (first as any).finalizeDaemonOffline('daemon-1', capturedFirst)
+    await tick()
+    expect(transient).toHaveBeenCalledTimes(2)
+    expect(firstClient._sent).toContainEqual(expect.objectContaining({ type: 'daemon_status', status: 'offline' }))
+    transient.mockRestore()
+
+    const permanent = vi.spyOn(dbModule, 'setDaemonOfflineWithTimeout').mockRejectedValue(new Error('down'))
+    const second = new Router(createMockPool())
+    const secondWs = createMockWs()
+    const secondClient = createMockWs()
+    second.registerClient(secondClient, null)
+    await second.registerDaemon(secondWs, {
+      type: 'register', daemon_id: 'daemon-2', hostname: 'second', agents: [], started_at: 100,
+    }, null)
+    const capturedSecond = (second as any).daemons.get('daemon-2')
+    secondClient._sent.length = 0
+    await (second as any).finalizeDaemonOffline('daemon-2', capturedSecond)
+    expect(permanent).toHaveBeenCalledTimes(3)
+    expect(secondClient._sent).not.toContainEqual(expect.objectContaining({ type: 'daemon_status', status: 'offline' }))
+    permanent.mockRestore()
+  })
+
+  test('withholds token-event ack while the session is missing, then retries exactly once', async () => {
+    let sessionExists = false
+    let effectStep = 0
+    let effectStatus = 'pending'
+    let tokenTotal = 0
+    let insertCount = 0
+    const pool: any = {
+      query: vi.fn(async (sql: string, params?: any[]) => {
+        if (sql.includes('INSERT INTO events')) {
+          insertCount++
+          return { rows: [{ id: 1, inserted: insertCount === 1, effect_status: effectStatus, effect_step: effectStep }] }
+        }
+        if (sql.includes('SELECT effect_status, effect_step')) {
+          return { rows: [{ effect_status: effectStatus, effect_step: effectStep }] }
+        }
+        if (sql.includes('session_target AS')) {
+          if (!sessionExists) return { rows: [{ session_exists: false, claimed: false, applied: false }], rowCount: 1 }
+          if (effectStep >= (params?.[1] || 0)) return { rows: [{ session_exists: true, claimed: false, applied: false }], rowCount: 1 }
+          effectStep = params?.[1] || 0
+          tokenTotal += params?.[2] || 0
+          return { rows: [{ session_exists: true, claimed: true, applied: true }], rowCount: 1 }
+        }
+        if (sql.includes("effect_status = 'completed'")) {
+          effectStatus = 'completed'
+          return { rows: [], rowCount: 1 }
+        }
+        if (sql.includes('FROM daemons')) return { rows: [{ daemon_id: 'daemon-1', status: 'online' }] }
+        return { rows: [], rowCount: 1 }
+      }),
+      connect: vi.fn(async () => ({ query: (sql: string, params?: any[]) => pool.query(sql, params), release: vi.fn() })),
+      end: vi.fn(),
+    }
+    const r = new Router(pool)
+    const ws = createMockWs()
+    await r.registerDaemon(ws, { type: 'register', daemon_id: 'daemon-1', hostname: 'h', agents: [], started_at: 100 }, null)
+    const event = {
+      type: 'agent_text', session_id: 'sess-late', event_id: 'token-late', snapshot: 'done',
+      usage: { input_tokens: 3, output_tokens: 4 }, seq: 1,
+    }
+
+    r.handleDaemonMessage('daemon-1', event)
+    await tick()
+    ws._sent.length = 0
+    r.handleDaemonMessage('daemon-1', { type: 'ping' })
+    expect(ws._sent.some((message: any) => message.type === 'event_ack')).toBe(false)
+    expect(effectStep).toBe(0)
+    expect(tokenTotal).toBe(0)
+
+    sessionExists = true
+    r.handleDaemonMessage('daemon-1', event)
+    await tick()
+    ws._sent.length = 0
+    r.handleDaemonMessage('daemon-1', { type: 'ping' })
+    expect(ws._sent.find((message: any) => message.type === 'event_ack')?.up_to_seq).toBe(1)
+    expect(effectStep).toBe(1)
+    expect(effectStatus).toBe('completed')
+    expect(tokenTotal).toBe(7)
+  })
+
+  test('retires an already-running old drain before installing the new incarnation', async () => {
+    let releaseOld!: (result: any) => void
+    const completed: string[] = []
+    const pool: any = {
+      query: vi.fn((sql: string, params?: any[]) => {
+        if (sql.includes('INSERT INTO events')) {
+          return Promise.resolve({ rows: [{ id: params?.[2]?.includes('old') ? 1 : 2, inserted: true, effect_status: 'pending', effect_step: 0 }] })
+        }
+        if (sql.includes('UPDATE sessions SET model')) {
+          if (params?.[0] === 'old') return new Promise(resolve => { releaseOld = (result) => { completed.push('old'); resolve(result) } })
+          completed.push('new')
+          return Promise.resolve({ rows: [], rowCount: 1 })
+        }
+        if (sql.includes('FROM daemons')) return Promise.resolve({ rows: [{ daemon_id: 'daemon-1', status: 'online' }] })
+        return Promise.resolve({ rows: [], rowCount: 1 })
+      }),
+      connect: vi.fn(async () => ({ query: (sql: string, params?: any[]) => pool.query(sql, params), release: vi.fn() })), end: vi.fn(),
+    }
+    const r = new Router(pool)
+    await r.registerDaemon(createMockWs(), { type: 'register', daemon_id: 'daemon-1', hostname: 'h', agents: [], started_at: 100 }, null)
+    r.handleDaemonMessage('daemon-1', { type: 'session_model_changed', session_id: 'sess-1', event_id: 'old', model: 'old', seq: 1 })
+    await tick()
+    let registered = false
+    const newWs = createMockWs()
+    const registering = r.registerDaemon(newWs, { type: 'register', daemon_id: 'daemon-1', hostname: 'h', agents: [], started_at: 200 }, null)
+      .then(() => { registered = true })
+    await Promise.resolve()
+    expect(registered).toBe(false)
+    releaseOld({ rows: [], rowCount: 1 })
+    await registering
+    r.handleDaemonMessage('daemon-1', { type: 'session_model_changed', session_id: 'sess-1', event_id: 'new', model: 'new', seq: 1 })
+    await tick()
+    expect(completed).toEqual(['old', 'new'])
+  })
+
+  test('does not deadlock new registration when the retiring effect rejects', async () => {
+    const pool: any = {
+      query: vi.fn((sql: string) => {
+        if (sql.includes('INSERT INTO events')) {
+          return Promise.resolve({ rows: [{ id: 1, inserted: true, effect_status: 'pending', effect_step: 0 }] })
+        }
+        if (sql.includes('UPDATE sessions SET model')) return Promise.reject(new Error('retiring effect failed'))
+        if (sql.includes('FROM daemons')) return Promise.resolve({ rows: [{ daemon_id: 'daemon-1', status: 'online' }] })
+        return Promise.resolve({ rows: [], rowCount: 1 })
+      }),
+      connect: vi.fn(async () => ({ query: (sql: string, params?: any[]) => pool.query(sql, params), release: vi.fn() })), end: vi.fn(),
+    }
+    const r = new Router(pool)
+    await r.registerDaemon(createMockWs(), { type: 'register', daemon_id: 'daemon-1', hostname: 'h', agents: [], started_at: 100 }, null)
+    r.handleDaemonMessage('daemon-1', { type: 'session_model_changed', session_id: 'sess-1', event_id: 'old', model: 'old', seq: 1 })
+    await tick()
+    await expect(r.registerDaemon(createMockWs(), {
+      type: 'register', daemon_id: 'daemon-1', hostname: 'h', agents: [], started_at: 200,
+    }, null)).resolves.toBe(true)
+    expect((r as any).daemonSeq.get('daemon-1').startedAt).toBe(200)
+  })
+
+  test('bounds retirement wait when an old effect never settles', async () => {
+    const previous = process.env.DAEMON_CURSOR_RETIRE_MS
+    process.env.DAEMON_CURSOR_RETIRE_MS = '100'
+    let releaseOld!: (result: any) => void
+    const pool: any = {
+      query: vi.fn((sql: string) => {
+        if (sql.includes('INSERT INTO events')) {
+          return Promise.resolve({ rows: [{ id: 1, inserted: true, effect_status: 'pending', effect_step: 0 }] })
+        }
+        if (sql.includes('UPDATE sessions SET model')) return new Promise(resolve => { releaseOld = resolve })
+        if (sql.includes('FROM daemons')) return Promise.resolve({ rows: [{ daemon_id: 'daemon-1', status: 'online' }] })
+        return Promise.resolve({ rows: [], rowCount: 1 })
+      }),
+      connect: vi.fn(async () => ({ query: (sql: string, params?: any[]) => pool.query(sql, params), release: vi.fn() })), end: vi.fn(),
+    }
+    try {
+      const r = new Router(pool)
+      await r.registerDaemon(createMockWs(), { type: 'register', daemon_id: 'daemon-1', hostname: 'h', agents: [], started_at: 100 }, null)
+      r.handleDaemonMessage('daemon-1', { type: 'session_model_changed', session_id: 'sess-1', event_id: 'old', model: 'old', seq: 1 })
+      await tick()
+      const newWs = createMockWs()
+      await r.registerDaemon(newWs, { type: 'register', daemon_id: 'daemon-1', hostname: 'h', agents: [], started_at: 200 }, null)
+      expect(newWs._sent).toContainEqual(expect.objectContaining({ type: 'register_rejected', reason: 'previous_effect_draining' }))
+      expect(newWs.close).toHaveBeenCalledWith(4012, 'previous effect still draining')
+      releaseOld({ rows: [], rowCount: 1 })
+    } finally {
+      if (previous === undefined) delete process.env.DAEMON_CURSOR_RETIRE_MS
+      else process.env.DAEMON_CURSOR_RETIRE_MS = previous
+    }
+  })
+
+  test('awaits cumulative cost writes before starting the next seq effect', async () => {
+    const costs: number[] = []
+    let releaseFirstCost!: (result: any) => void
+    let eventID = 0
+    const costPool: any = {
+      query: vi.fn((sql: string, params?: any[]) => {
+        if (sql.includes('INSERT INTO events')) return Promise.resolve({ rows: [{ id: ++eventID }] })
+        if (sql.includes('status = $3')) return Promise.resolve({ rows: [], rowCount: 1 })
+        if (sql.includes('SET cost_usd = $1')) {
+          costs.push(params?.[0])
+          if (costs.length === 1) return new Promise(resolve => { releaseFirstCost = resolve })
+          return Promise.resolve({ rows: [], rowCount: 1 })
+        }
+        if (sql.includes('FROM daemons')) return Promise.resolve({ rows: [{ daemon_id: 'daemon-1', status: 'online' }] })
+        return Promise.resolve({ rows: [], rowCount: 1 })
+      }),
+      connect: vi.fn(async () => ({ query: (sql: string, params?: any[]) => costPool.query(sql, params), release: vi.fn() })), end: vi.fn(),
+    }
+    const r = new Router(costPool)
+    const daemonWs = createMockWs()
+    await r.registerDaemon(daemonWs, { type: 'register', daemon_id: 'daemon-1', hostname: 'h', agents: [], started_at: 100 }, null)
+    r.handleDaemonMessage('daemon-1', { type: 'session_status', session_id: 'sess-1', event_id: 'cost-1', status: 'running', cost_usd: '1', seq: 1 })
+    r.handleDaemonMessage('daemon-1', { type: 'session_status', session_id: 'sess-1', event_id: 'cost-2', status: 'running', cost_usd: '2', seq: 2 })
+    await tick()
+    expect(costs).toEqual([1])
+    releaseFirstCost({ rows: [], rowCount: 1 })
+    await tick()
+    expect(costs).toEqual([1, 2])
+  })
+
+  test('withholds ack on durable-effect rejection and retries it after insert conflict', async () => {
+    let eventInsert = 0
+    let modelAttempts = 0
+    const retryPool: any = {
+      query: vi.fn((sql: string) => {
+        if (sql.includes('INSERT INTO events')) {
+          eventInsert++
+          return Promise.resolve(eventInsert === 1
+            ? { rows: [{ id: 1, inserted: true, effect_status: 'pending', effect_step: 0 }] }
+            : { rows: [{ id: 1, inserted: false, effect_status: 'pending', effect_step: 0 }] })
+        }
+        if (sql.includes('UPDATE sessions SET model')) {
+          modelAttempts++
+          if (modelAttempts === 1) return Promise.reject(new Error('model write failed'))
+          return Promise.resolve({ rows: [], rowCount: 1 })
+        }
+        if (sql.includes('FROM daemons')) return Promise.resolve({ rows: [{ daemon_id: 'daemon-1', status: 'online' }] })
+        return Promise.resolve({ rows: [], rowCount: 1 })
+      }),
+      connect: vi.fn(async () => ({ query: (sql: string, params?: any[]) => retryPool.query(sql, params), release: vi.fn() })), end: vi.fn(),
+    }
+    const r = new Router(retryPool)
+    const daemonWs = createMockWs()
+    await r.registerDaemon(daemonWs, { type: 'register', daemon_id: 'daemon-1', hostname: 'h', agents: [], started_at: 100 }, null)
+    const event = { type: 'session_model_changed', session_id: 'sess-1', event_id: 'model-retry', model: 'new', seq: 1 }
+    r.handleDaemonMessage('daemon-1', event)
+    await tick()
+    daemonWs._sent.length = 0
+    r.handleDaemonMessage('daemon-1', { type: 'ping' })
+    expect(daemonWs._sent.some((message: any) => message.type === 'event_ack')).toBe(false)
+
+    r.handleDaemonMessage('daemon-1', event)
+    await tick()
+    expect(modelAttempts).toBe(2)
+    daemonWs._sent.length = 0
+    r.handleDaemonMessage('daemon-1', { type: 'ping' })
+    expect(daemonWs._sent.find((message: any) => message.type === 'event_ack')?.up_to_seq).toBe(1)
+  })
+
+  test('resumes a partially completed effect from its durable step checkpoint', async () => {
+    let effectStep = 0
+    let effectStatus = 'pending'
+    let tokenUpdates = 0
+    let deviceReads = 0
+    const checkpointPool: any = {
+      query: vi.fn((sql: string, params?: any[]) => {
+        if (sql.includes('INSERT INTO events')) {
+          return Promise.resolve({ rows: [{
+            id: 1, inserted: effectStep === 0 && deviceReads === 0,
+            effect_status: effectStatus, effect_step: effectStep,
+          }] })
+        }
+        if (sql.includes('effect_step = GREATEST')) {
+          effectStep = Math.max(effectStep, params?.[1] || 0)
+          return Promise.resolve({ rows: [], rowCount: 1 })
+        }
+        if (sql.includes("effect_status = 'completed'")) {
+          effectStatus = 'completed'
+          return Promise.resolve({ rows: [], rowCount: 1 })
+        }
+        if (sql.includes('total_tokens = COALESCE')) {
+          tokenUpdates++
+          effectStep = Math.max(effectStep, params?.[1] || 0)
+          return Promise.resolve({ rows: [{ session_exists: true, claimed: true, applied: true }], rowCount: 1 })
+        }
+        if (sql.includes('FROM devices WHERE user_id')) {
+          deviceReads++
+          if (deviceReads === 1) return Promise.reject(new Error('device query failed'))
+          return Promise.resolve({ rows: [] })
+        }
+        if (sql.includes('SELECT plan, whitelist')) return Promise.resolve({ rows: [{ plan: 'free', whitelist: false }] })
+        if (sql.includes('FROM daemons')) return Promise.resolve({ rows: [{ daemon_id: 'daemon-1', status: 'online' }] })
+        return Promise.resolve({ rows: [], rowCount: 1 })
+      }),
+      connect: vi.fn(async () => ({ query: (sql: string, params?: any[]) => checkpointPool.query(sql, params), release: vi.fn() })), end: vi.fn(),
+    }
+    const r = new Router(checkpointPool)
+    const daemonWs = createMockWs()
+    await r.registerDaemon(daemonWs, { type: 'register', daemon_id: 'daemon-1', hostname: 'h', agents: [], started_at: 100 }, 1)
+    const event = {
+      type: 'approval_request', session_id: 'sess-1', event_id: 'approval-retry', request_id: 'request-1',
+      tool: 'read', usage: { input_tokens: 3 }, seq: 1,
+    }
+    r.handleDaemonMessage('daemon-1', event)
+    await tick()
+    expect(tokenUpdates).toBe(1)
+    expect(effectStep).toBe(1)
+    daemonWs._sent.length = 0
+    r.handleDaemonMessage('daemon-1', { type: 'ping' })
+    expect(daemonWs._sent.some((message: any) => message.type === 'event_ack')).toBe(false)
+
+    r.handleDaemonMessage('daemon-1', event)
+    await tick()
+    expect(tokenUpdates).toBe(1)
+    expect(deviceReads).toBe(2)
+    expect(effectStatus).toBe('completed')
+    daemonWs._sent.length = 0
+    r.handleDaemonMessage('daemon-1', { type: 'ping' })
+    expect(daemonWs._sent.find((message: any) => message.type === 'event_ack')?.up_to_seq).toBe(1)
+  })
+
+  test('recovers a pending durable effect after relay restart and insert conflict', async () => {
+    let firstInsert = true
+    let status = 'pending'
+    let attempts = 0
+    const restartPool: any = {
+      query: vi.fn((sql: string) => {
+        if (sql.includes('INSERT INTO events')) {
+          const inserted = firstInsert
+          firstInsert = false
+          return Promise.resolve({ rows: [{ id: 21, inserted, effect_status: status, effect_step: 0 }] })
+        }
+        if (sql.includes("effect_status = 'completed'")) {
+          status = 'completed'
+          return Promise.resolve({ rows: [], rowCount: 1 })
+        }
+        if (sql.includes('UPDATE sessions SET model')) {
+          attempts++
+          if (attempts === 1) return Promise.reject(new Error('first relay lost DB connection'))
+          return Promise.resolve({ rows: [], rowCount: 1 })
+        }
+        if (sql.includes('FROM daemons')) return Promise.resolve({ rows: [{ daemon_id: 'daemon-1', status: 'online' }] })
+        return Promise.resolve({ rows: [], rowCount: 1 })
+      }),
+      connect: vi.fn(async () => ({ query: (sql: string, params?: any[]) => restartPool.query(sql, params), release: vi.fn() })), end: vi.fn(),
+    }
+    const event = { type: 'session_model_changed', session_id: 'sess-1', event_id: 'restart-pending', model: 'new', seq: 1 }
+    const first = new Router(restartPool)
+    const firstWs = createMockWs()
+    await first.registerDaemon(firstWs, { type: 'register', daemon_id: 'daemon-1', hostname: 'h', agents: [], started_at: 100 }, null)
+    first.handleDaemonMessage('daemon-1', event)
+    await tick()
+    first.stop()
+
+    const restarted = new Router(restartPool)
+    const restartedWs = createMockWs()
+    await restarted.registerDaemon(restartedWs, { type: 'register', daemon_id: 'daemon-1', hostname: 'h', agents: [], started_at: 100 }, null)
+    restarted.handleDaemonMessage('daemon-1', event)
+    await tick()
+    expect(attempts).toBe(2)
+    expect(status).toBe('completed')
+    restartedWs._sent.length = 0
+    restarted.handleDaemonMessage('daemon-1', { type: 'ping' })
+    expect(restartedWs._sent.find((message: any) => message.type === 'event_ack')?.up_to_seq).toBe(1)
+    restarted.stop()
+  })
+
+  test('rechecks the ledger before a queued duplicate event effect runs', async () => {
+    let status = 'pending'
+    let modelUpdates = 0
+    const pool: any = {
+      query: vi.fn((sql: string) => {
+        if (sql.includes('INSERT INTO events')) {
+          return Promise.resolve({ rows: [{ id: 31, inserted: false, effect_status: status, effect_step: 0 }] })
+        }
+        if (sql.includes("SELECT effect_status, effect_step FROM events")) {
+          return Promise.resolve({ rows: [{ effect_status: status, effect_step: 0 }] })
+        }
+        if (sql.includes("effect_status = 'completed'")) {
+          status = 'completed'
+          return Promise.resolve({ rows: [], rowCount: 1 })
+        }
+        if (sql.includes('UPDATE sessions SET model')) {
+          modelUpdates++
+          return Promise.resolve({ rows: [], rowCount: 1 })
+        }
+        if (sql.includes('FROM daemons')) return Promise.resolve({ rows: [{ daemon_id: 'daemon-1', status: 'online' }] })
+        return Promise.resolve({ rows: [], rowCount: 1 })
+      }),
+      connect: vi.fn(async () => ({ query: (sql: string, params?: any[]) => pool.query(sql, params), release: vi.fn() })), end: vi.fn(),
+    }
+    const r = new Router(pool)
+    await r.registerDaemon(createMockWs(), { type: 'register', daemon_id: 'daemon-1', hostname: 'h', agents: [], started_at: 100 }, null)
+    const event = { type: 'session_model_changed', session_id: 'sess-1', event_id: 'same-event', model: 'new' }
+    r.handleDaemonMessage('daemon-1', { ...event, seq: 1 })
+    r.handleDaemonMessage('daemon-1', { ...event, seq: 2 })
+    await tick()
+    expect(modelUpdates).toBe(1)
+  })
+
   test('ack-after-persist: the mark does not advance until the DB write completes', async () => {
     // Pool whose event INSERT stays pending until we release it, so the persist
     // is in flight when we ping.
     let releaseInsert: (() => void) | undefined
     const pendingPool: any = {
       query: vi.fn((sql: string) => {
+        if (sql.includes('RETURNING daemon_id')) {
+          return Promise.resolve({ rows: [{ daemon_id: 'daemon-1' }], rowCount: 1 })
+        }
         if (sql.includes('INSERT INTO events')) {
           return new Promise((res) => { releaseInsert = () => res({ rows: [{ id: 1 }] }) })
         }
         if (sql.includes('FROM daemons')) return Promise.resolve({ rows: [{ daemon_id: 'daemon-1', status: 'online' }] })
         return Promise.resolve({ rows: [], rowCount: 0 })
       }),
-      connect: vi.fn(), end: vi.fn(),
+      end: vi.fn(),
     }
+    pendingPool.connect = vi.fn(async () => ({ query: pendingPool.query, release: vi.fn() }))
     const r = new Router(pendingPool)
     const daemonWs = createMockWs()
     await r.registerDaemon(daemonWs, { type: 'register', daemon_id: 'daemon-1', hostname: 'h', agents: [], started_at: 100 }, null)
@@ -733,6 +1781,7 @@ describe('Router - event delivery dedup + ack', () => {
     clientWs._sent.length = 0
     // seq 1 from the new process must NOT be treated as a duplicate of the old 9.
     router.handleDaemonMessage('daemon-1', { type: 'agent_text', session_id: 'sess-1', text: 'b', seq: 1 })
+  await tick()
     expect(clientWs._sent.filter((m: any) => m.type === 'agent_text').length).toBe(1)
   })
 
@@ -777,6 +1826,7 @@ describe('Router - event delivery dedup + ack', () => {
     clientWs._sent.length = 0
     router.handleDaemonMessage('daemon-1', { type: 'agent_text', session_id: 'sess-1', text: 'x' })
     router.handleDaemonMessage('daemon-1', { type: 'agent_text', session_id: 'sess-1', text: 'y' })
+  await tick()
     expect(clientWs._sent.filter((m: any) => m.type === 'agent_text').length).toBe(2)
   })
 })
@@ -856,6 +1906,7 @@ describe('Router - WS authorization gate (P0-1)', () => {
     const event = { type: 'permission_config_changed', session_id: 'test-sid', permission: { agent: 'codex', preset: 'custom', approval_policy: 'never', sandbox_mode: 'workspace-write' }, permission_effective: 'next_turn' }
 
     router.handleDaemonMessage('daemon-1', event)
+  await tick()
 
     expect(clientWs._sent).toContainEqual(event)
   })
@@ -893,6 +1944,7 @@ describe('Router - force kick revokes the daemon-specific token (P0-2)', () => {
     const revokeInserts: any[][] = []
     const pool: any = {
       query: vi.fn((sql: string, params?: any[]) => {
+        if (sql.includes('RETURNING daemon_id')) return Promise.resolve({ rows: [{ daemon_id: 'daemon-1' }], rowCount: 1 })
         if (sql.includes('SELECT active_token_jti')) {
           return Promise.resolve({ rows: [{ active_token_jti: 'jti-abc' }], rowCount: 1 })
         }
@@ -907,7 +1959,7 @@ describe('Router - force kick revokes the daemon-specific token (P0-2)', () => {
     pool.connect = vi.fn(async () => ({ query: pool.query, release: vi.fn() }))
     const router = new Router(pool)
     const daemonWs = createMockWs()
-    await router.registerDaemon(daemonWs, { type: 'register', daemon_id: 'daemon-1', hostname: 'h', agents: [] }, 7)
+    await router.registerDaemon(daemonWs, { type: 'register', daemon_id: 'daemon-1', hostname: 'h', agents: [] }, 7, 'jti-abc')
 
     const res = await router.handleForceKick('daemon-1', 7)
     expect(res.success).toBe(true)
@@ -918,6 +1970,631 @@ describe('Router - force kick revokes the daemon-specific token (P0-2)', () => {
     expect(revokeInserts[0][0]).toBe('jti-abc')      // jti
     expect(revokeInserts[0][1]).toBe(7)              // userId
     expect(revokeInserts[0][2]).toBe('force_kick')   // reason
+  })
+
+  test('serializes replacement behind force kick and revokes only the captured generation token', async () => {
+    const dbModule = await import('../db.js')
+    let release!: () => void
+    const gate = new Promise<void>(resolve => { release = resolve })
+    const capturedRevoke = vi.spyOn(dbModule, 'revokeToken').mockImplementation(async () => gate)
+    const rereadRevoke = vi.spyOn(dbModule, 'revokeDaemonToken').mockImplementation(async () => gate)
+    const audit = vi.spyOn(dbModule, 'insertAuditLog').mockResolvedValue(undefined)
+    const offline = vi.spyOn(dbModule, 'setDaemonOfflineWithTimeout').mockResolvedValue(true as any)
+    const router = new Router(createMockPool())
+    const oldWs = createMockWs()
+    await router.registerDaemon(oldWs, {
+      type: 'register', daemon_id: 'daemon-1', hostname: 'old', agents: [], started_at: 100,
+    }, 7, 'old-token')
+
+    const kicking = router.handleForceKick('daemon-1', 7)
+    await Promise.resolve()
+    const replacementWs = createMockWs()
+    const replacing = router.registerDaemon(replacementWs, {
+      type: 'register', daemon_id: 'daemon-1', hostname: 'replacement', agents: [], started_at: 200,
+    }, 7, 'new-token')
+    await tick()
+    expect(replacementWs._sent.some((message: any) => message.type === 'register_ack')).toBe(false)
+
+    release()
+    await kicking
+    await replacing
+    expect(capturedRevoke).toHaveBeenCalledWith(expect.anything(), 'old-token', 7, 'force_kick')
+    expect(rereadRevoke).not.toHaveBeenCalled()
+    expect((router as any).daemons.get('daemon-1').ws).toBe(replacementWs)
+    expect(replacementWs.close).not.toHaveBeenCalled()
+    capturedRevoke.mockRestore()
+    rereadRevoke.mockRestore()
+    audit.mockRestore()
+    offline.mockRestore()
+  })
+
+  test('rejects an already-authenticated old-token registration queued behind force kick but accepts a new token', async () => {
+    const dbModule = await import('../db.js')
+    let release!: () => void
+    const gate = new Promise<void>(resolve => { release = resolve })
+    const revoked = new Set<string>()
+    const revoke = vi.spyOn(dbModule, 'revokeToken').mockImplementation(async (_pool, jti) => {
+      await gate
+      revoked.add(jti)
+    })
+    const check = vi.spyOn(dbModule, 'isTokenRevoked').mockImplementation(async (_pool, jti) => revoked.has(jti))
+    const audit = vi.spyOn(dbModule, 'insertAuditLog').mockResolvedValue(undefined)
+    const offline = vi.spyOn(dbModule, 'setDaemonOfflineWithTimeout').mockResolvedValue(true as any)
+    const router = new Router(createMockPool())
+    await router.registerDaemon(createMockWs(), {
+      type: 'register', daemon_id: 'daemon-1', hostname: 'old', agents: [], started_at: 100,
+    }, 7, 'old-token')
+    const kicking = router.handleForceKick('daemon-1', 7)
+    await Promise.resolve()
+    const queuedOldWs = createMockWs()
+    const queuedOld = router.registerDaemon(queuedOldWs, {
+      type: 'register', daemon_id: 'daemon-1', hostname: 'queued-old', agents: [], started_at: 100,
+    }, 7, 'old-token')
+    release()
+    await expect(kicking).resolves.toEqual({ success: true })
+    await expect(queuedOld).resolves.toBe(false)
+    expect(queuedOldWs._sent).toContainEqual(expect.objectContaining({ type: 'register_rejected', reason: 'token_revoked' }))
+    expect(queuedOldWs._sent.some((message: any) => message.type === 'register_ack')).toBe(false)
+
+    const newWs = createMockWs()
+    await expect(router.registerDaemon(newWs, {
+      type: 'register', daemon_id: 'daemon-1', hostname: 'new', agents: [], started_at: 200,
+    }, 7, 'new-token')).resolves.toBe(true)
+    expect(newWs._sent).toContainEqual(expect.objectContaining({ type: 'register_ack' }))
+    revoke.mockRestore(); check.mockRestore(); audit.mockRestore(); offline.mockRestore()
+  })
+
+  test('rejects a cross-relay activation that observed an old standalone revocation check', async () => {
+    const dbModule = await import('../db.js')
+    const oldRelay = new Router(createMockPool())
+    const oldWs = createMockWs()
+    await oldRelay.registerDaemon(oldWs, {
+      type: 'register', daemon_id: 'daemon-1', hostname: 'old-relay', agents: [], started_at: 100,
+    }, 7, 'old-token')
+
+    let releaseRevoke!: () => void
+    const revokeGate = new Promise<void>((resolve) => { releaseRevoke = resolve })
+    let revokeHasFence!: () => void
+    const revokeFence = new Promise<void>((resolve) => { revokeHasFence = resolve })
+    let revoked = false
+    vi.spyOn(dbModule, 'revokeToken').mockImplementation(async () => {
+      revokeHasFence()
+      await revokeGate
+      revoked = true
+    })
+    // Router-level precheck deliberately observes the old value. The activation
+    // transaction below represents the independent relay waiting on DB fence.
+    vi.spyOn(dbModule, 'isTokenRevoked').mockResolvedValue(false)
+    vi.spyOn(dbModule, 'activateDaemonRegistration').mockImplementation(async () => {
+      await revokeGate
+      if (revoked) throw new dbModule.TokenRevokedDuringActivationError()
+      return null
+    })
+    vi.spyOn(dbModule, 'insertAuditLog').mockResolvedValue(undefined)
+    vi.spyOn(dbModule, 'setDaemonOfflineWithTimeout').mockResolvedValue(true as any)
+
+    const kicking = oldRelay.handleForceKick('daemon-1', 7)
+    await revokeFence
+    const newRelay = new Router(createMockPool())
+    const racingWs = createMockWs()
+    const racing = newRelay.registerDaemon(racingWs, {
+      type: 'register', daemon_id: 'daemon-1', hostname: 'other-relay', agents: [], started_at: 200,
+    }, 7, 'old-token')
+    await Promise.resolve()
+    releaseRevoke()
+
+    await expect(kicking).resolves.toEqual({ success: true })
+    await expect(racing).resolves.toBe(false)
+    expect(oldWs.close).toHaveBeenCalled()
+    expect(racingWs._sent).toContainEqual(expect.objectContaining({ type: 'register_rejected', reason: 'token_revoked' }))
+    expect(racingWs._sent.some((message: any) => message.type === 'register_ack')).toBe(false)
+    expect((newRelay as any).daemons.has('daemon-1')).toBe(false)
+    vi.restoreAllMocks()
+  })
+
+  test('fails closed and clears a bounded gate when pending messages overflow', async () => {
+    const dbModule = await import('../db.js')
+    let finish!: (revoked: boolean) => void
+    const check = vi.spyOn(dbModule, 'isTokenRevokedWithTimeout').mockResolvedValue(false)
+    vi.spyOn(dbModule, 'setDaemonOfflineWithTimeout').mockResolvedValue(true as any)
+    const relay = new Router(createMockPool())
+    const ws = createMockWs()
+    await relay.registerDaemon(ws, {
+      type: 'register', daemon_id: 'daemon-1', hostname: 'relay', agents: [], started_at: 200,
+    }, 7, 'token-1')
+    check.mockImplementationOnce(() => new Promise<boolean>((resolve) => { finish = resolve }))
+
+    relay.handleDaemonMessage('daemon-1', { type: 'ping', seq: 1 }, ws, 200)
+    for (let seq = 2; seq <= 5; seq++) {
+      relay.handleDaemonMessage('daemon-1', {
+        type: 'agent_text', session_id: 'bounded', text: `queued-${seq}`, seq,
+      }, ws, 200)
+    }
+
+    expect(ws.close).toHaveBeenCalledWith(1011, 'revocation gate overflow')
+    expect((relay as any).daemonRevocationGates.size).toBe(0)
+    finish(false)
+    await tick()
+    expect((relay as any).daemonRevocationGates.size).toBe(0)
+    vi.restoreAllMocks()
+  })
+
+  test('fails closed when one queued message exceeds the gate byte budget', async () => {
+    const dbModule = await import('../db.js')
+    let finish!: (revoked: boolean) => void
+    const check = vi.spyOn(dbModule, 'isTokenRevokedWithTimeout').mockImplementationOnce(
+      () => new Promise<boolean>((resolve) => { finish = resolve }),
+    )
+    vi.spyOn(dbModule, 'setDaemonOfflineWithTimeout').mockResolvedValue(true as any)
+    const relay = new Router(createMockPool())
+    const ws = createMockWs()
+    await relay.registerDaemon(ws, {
+      type: 'register', daemon_id: 'daemon-1', hostname: 'relay', agents: [], started_at: 200,
+    }, 7, 'token-1')
+
+    relay.handleDaemonMessage('daemon-1', { type: 'ping', seq: 1, padding: 'x'.repeat(2048) }, ws, 200)
+
+    expect(check).toHaveBeenCalledOnce()
+    expect(ws.close).toHaveBeenCalledWith(1011, 'revocation gate overflow')
+    expect((relay as any).daemonRevocationGates.size).toBe(0)
+    finish(false)
+    await Promise.resolve()
+    vi.restoreAllMocks()
+  })
+
+  test('fails closed and releases the bounded lookup client after PostgreSQL statement timeout', async () => {
+    const dbModule = await import('../db.js')
+    vi.spyOn(dbModule, 'setDaemonOfflineWithTimeout').mockResolvedValue(true as any)
+    const pool = createMockPool()
+    const originalConnect = pool.connect
+    let boundedReleaseCount = 0
+    const boundedSql: string[] = []
+    pool.connect = vi.fn(async () => {
+      const client = await originalConnect()
+      let boundedLookup = false
+      return {
+        query: vi.fn(async (sql: string, params?: any[]) => {
+          if (sql.includes("set_config('statement_timeout'")) boundedLookup = true
+          if (boundedLookup) boundedSql.push(sql)
+          if (boundedLookup && sql.includes('FROM revoked_tokens')) {
+            throw Object.assign(new Error('canceling statement due to statement timeout'), { code: '57014' })
+          }
+          return client.query(sql, params)
+        }),
+        release: vi.fn(() => {
+          if (boundedLookup) boundedReleaseCount++
+          client.release()
+        }),
+      }
+    })
+    const relay = new Router(pool)
+    const ws = createMockWs()
+    await relay.registerDaemon(ws, {
+      type: 'register', daemon_id: 'daemon-1', hostname: 'relay', agents: [], started_at: 200,
+    }, 7, 'token-1')
+
+    relay.handleDaemonMessage('daemon-1', { type: 'ping', seq: 1 }, ws, 200)
+    await tick()
+
+    expect(ws.close).toHaveBeenCalledWith(1011, 'token check failed')
+    expect(boundedSql).toContain('ROLLBACK')
+    expect(boundedReleaseCount).toBe(1)
+    expect((relay as any).daemonRevocationGates.size).toBe(0)
+    vi.restoreAllMocks()
+  })
+
+  test('clears the pending revocation gate and queued messages on socket disconnect', async () => {
+    const dbModule = await import('../db.js')
+    let finish!: (revoked: boolean) => void
+    const check = vi.spyOn(dbModule, 'isTokenRevokedWithTimeout').mockResolvedValue(false)
+    const pool = createMockPool()
+    const relay = new Router(pool)
+    const ws = createMockWs()
+    await relay.registerDaemon(ws, {
+      type: 'register', daemon_id: 'daemon-1', hostname: 'relay', agents: [], started_at: 200,
+    }, 7, 'token-1')
+    check.mockImplementationOnce(() => new Promise<boolean>((resolve) => { finish = resolve }))
+    relay.handleDaemonMessage('daemon-1', { type: 'ping', seq: 1 }, ws, 200)
+    relay.handleDaemonMessage('daemon-1', {
+      type: 'agent_text', session_id: 'disconnect-gated', text: 'queued', seq: 2,
+    }, ws, 200)
+
+    relay.unregisterDaemon('daemon-1', ws)
+    expect((relay as any).daemonRevocationGates.size).toBe(0)
+    finish(false)
+    await tick()
+    expect(pool._queries.some((query: any) => query.sql.includes('INSERT INTO events') && query.params.includes('disconnect-gated'))).toBe(false)
+    vi.restoreAllMocks()
+  })
+
+  test('cancels an old queued gate on replacement and never replays it after late success', async () => {
+    const dbModule = await import('../db.js')
+    const heartbeatCheck = vi.spyOn(dbModule, 'isTokenRevokedWithTimeout').mockResolvedValue(false)
+    const pool = createMockPool()
+    const relay = new Router(pool)
+    const oldWs = createMockWs()
+    await relay.registerDaemon(oldWs, {
+      type: 'register', daemon_id: 'daemon-1', hostname: 'old', agents: [], started_at: 100,
+    }, 7, 'old-token')
+    let finish!: (revoked: boolean) => void
+    heartbeatCheck.mockImplementationOnce(() => new Promise<boolean>((resolve) => { finish = resolve })).mockResolvedValue(false)
+    relay.handleDaemonMessage('daemon-1', { type: 'ping', seq: 1 }, oldWs, 100)
+    relay.handleDaemonMessage('daemon-1', {
+      type: 'agent_text', session_id: 'old-queued', text: 'never replay', seq: 2,
+    }, oldWs, 100)
+
+    const successorWs = createMockWs()
+    await relay.registerDaemon(successorWs, {
+      type: 'register', daemon_id: 'daemon-1', hostname: 'successor', agents: [], started_at: 200,
+    }, 7, 'new-token')
+    expect((relay as any).daemonRevocationGates.size).toBe(0)
+    finish(false)
+    await tick()
+
+    expect((relay as any).daemons.get('daemon-1').ws).toBe(successorWs)
+    expect(pool._queries.some((query: any) => query.sql.includes('INSERT INTO events') && query.params.includes('old-queued'))).toBe(false)
+    vi.restoreAllMocks()
+  })
+
+  test('tears down a gate before pool checkout timeout and reconnects without accumulating waiters', async () => {
+    const pool = createMockPool()
+    const relay = new Router(pool)
+    const oldWs = createMockWs()
+    await relay.registerDaemon(oldWs, {
+      type: 'register', daemon_id: 'daemon-1', hostname: 'old', agents: [], started_at: 100,
+    }, 7, 'old-token')
+
+    const originalConnect = pool.connect
+    let waitingCount = 0
+    pool.connect = vi.fn(() => new Promise((_, reject) => {
+      waitingCount++
+      const timer = setTimeout(() => {
+        waitingCount--
+        reject(new Error('timeout exceeded when trying to connect'))
+      }, 20)
+      timer.unref?.()
+    }))
+    relay.handleDaemonMessage('daemon-1', { type: 'ping', seq: 1 }, oldWs, 100)
+    relay.handleDaemonMessage('daemon-1', {
+      type: 'agent_text', session_id: 'checkout-queued', text: 'never replay', seq: 2,
+    }, oldWs, 100)
+    expect(waitingCount).toBe(1)
+
+    relay.unregisterDaemon('daemon-1', oldWs)
+    expect((relay as any).daemonRevocationGates.size).toBe(0)
+    pool.connect = originalConnect
+    const successorWs = createMockWs()
+    await relay.registerDaemon(successorWs, {
+      type: 'register', daemon_id: 'daemon-1', hostname: 'successor', agents: [], started_at: 200,
+    }, 7, 'new-token')
+    await new Promise((resolve) => setTimeout(resolve, 30))
+
+    expect(waitingCount).toBe(0)
+    expect((relay as any).daemonRevocationGates.size).toBe(0)
+    expect((relay as any).daemons.get('daemon-1').ws).toBe(successorWs)
+    expect(successorWs.close).not.toHaveBeenCalled()
+    expect(pool._queries.some((query: any) => query.sql.includes('INSERT INTO events') && query.params.includes('checkout-queued'))).toBe(false)
+  })
+
+  test('disconnects an activation-first cross-relay connection on its next heartbeat after revoke', async () => {
+    const dbModule = await import('../db.js')
+    const check = vi.spyOn(dbModule, 'isTokenRevokedWithTimeout').mockResolvedValue(false)
+    const relay = new Router(createMockPool())
+    const ws = createMockWs()
+    await relay.registerDaemon(ws, {
+      type: 'register', daemon_id: 'daemon-1', hostname: 'other-relay', agents: [], started_at: 200,
+    }, 7, 'token-1')
+    check.mockResolvedValue(true)
+
+    relay.handleDaemonMessage('daemon-1', { type: 'ping' }, ws, 200)
+    await Promise.resolve()
+
+    expect(ws.close).toHaveBeenCalledWith(4001, 'token revoked')
+    vi.restoreAllMocks()
+  })
+
+  test('gates later events before seq admission while a heartbeat token check is pending', async () => {
+    const dbModule = await import('../db.js')
+    const check = vi.spyOn(dbModule, 'isTokenRevokedWithTimeout').mockResolvedValue(false)
+    const pool = createMockPool()
+    const relay = new Router(pool)
+    const ws = createMockWs()
+    await relay.registerDaemon(ws, {
+      type: 'register', daemon_id: 'daemon-1', hostname: 'relay', agents: [], started_at: 200,
+    }, 7, 'token-1')
+    let finishCheck!: (revoked: boolean) => void
+    check.mockImplementationOnce(() => new Promise<boolean>((resolve) => { finishCheck = resolve }))
+
+    relay.handleDaemonMessage('daemon-1', { type: 'ping', seq: 1 }, ws, 200)
+    relay.handleDaemonMessage('daemon-1', {
+      type: 'agent_text', session_id: 'session-gated', text: 'after heartbeat', seq: 2,
+    }, ws, 200)
+    await Promise.resolve()
+    expect(pool._queries.some((query: any) => query.sql.includes('INSERT INTO events') && query.params.includes('session-gated'))).toBe(false)
+
+    finishCheck(false)
+    await tick()
+    expect(pool._queries.some((query: any) => query.sql.includes('INSERT INTO events') && query.params.includes('session-gated'))).toBe(true)
+    vi.restoreAllMocks()
+  })
+
+  test('settles concurrent heartbeat seqs in order after one shared successful check', async () => {
+    const dbModule = await import('../db.js')
+    const check = vi.spyOn(dbModule, 'isTokenRevokedWithTimeout').mockResolvedValue(false)
+    const relay = new Router(createMockPool())
+    const ws = createMockWs()
+    await relay.registerDaemon(ws, {
+      type: 'register', daemon_id: 'daemon-1', hostname: 'relay', agents: [], started_at: 200,
+    }, 7, 'token-1')
+    const cursor = (relay as any).daemonSeq.get('daemon-1')
+    let finishCheck!: (revoked: boolean) => void
+    check.mockImplementationOnce(() => new Promise<boolean>((resolve) => { finishCheck = resolve }))
+
+    relay.handleDaemonMessage('daemon-1', { type: 'ping', seq: 1 }, ws, 200)
+    relay.handleDaemonMessage('daemon-1', { type: 'ping', seq: 2 }, ws, 200)
+    expect(cursor.inflight.size).toBe(0)
+    finishCheck(false)
+    await tick()
+
+    expect(check).toHaveBeenCalledOnce()
+    expect(cursor.persistedHigh).toBe(2)
+    expect(cursor.inflight.size).toBe(0)
+    expect(ws._sent.filter((message: any) => message.type === 'pong')).toHaveLength(2)
+    vi.restoreAllMocks()
+  })
+
+  test.each([
+    ['rejection', undefined],
+    ['revocation', true],
+  ])('admits no pending heartbeat seqs when the shared check ends in %s', async (_label, revoked) => {
+    const dbModule = await import('../db.js')
+    const check = vi.spyOn(dbModule, 'isTokenRevokedWithTimeout').mockResolvedValue(false)
+    vi.spyOn(dbModule, 'setDaemonOfflineWithTimeout').mockResolvedValue(true as any)
+    const relay = new Router(createMockPool())
+    const ws = createMockWs()
+    await relay.registerDaemon(ws, {
+      type: 'register', daemon_id: 'daemon-1', hostname: 'relay', agents: [], started_at: 200,
+    }, 7, 'token-1')
+    const cursor = (relay as any).daemonSeq.get('daemon-1')
+    let finish!: (value: boolean) => void
+    let fail!: (error: Error) => void
+    check.mockImplementationOnce(() => new Promise<boolean>((resolve, reject) => { finish = resolve; fail = reject }))
+
+    relay.handleDaemonMessage('daemon-1', { type: 'ping', seq: 1 }, ws, 200)
+    relay.handleDaemonMessage('daemon-1', { type: 'ping', seq: 2 }, ws, 200)
+    if (revoked) finish(true)
+    else fail(new Error('check failed'))
+    await tick()
+
+    expect(cursor.inflight.size).toBe(0)
+    expect(cursor.pending.size).toBe(0)
+    expect(cursor.persistedHigh).toBe(0)
+    expect(ws._sent.some((message: any) => message.type === 'pong')).toBe(false)
+    vi.restoreAllMocks()
+  })
+
+  test('fails the captured heartbeat generation closed when revocation lookup errors', async () => {
+    const dbModule = await import('../db.js')
+    const check = vi.spyOn(dbModule, 'isTokenRevokedWithTimeout').mockResolvedValue(false)
+    const heartbeat = vi.spyOn(dbModule, 'updateHeartbeat').mockResolvedValue(undefined as any)
+    const offline = vi.spyOn(dbModule, 'setDaemonOfflineWithTimeout').mockResolvedValue(true as any)
+    const pool = createMockPool()
+    const relay = new Router(pool)
+    const ws = createMockWs()
+    await relay.registerDaemon(ws, {
+      type: 'register', daemon_id: 'daemon-1', hostname: 'relay', agents: [], started_at: 200,
+    }, 7, 'token-1')
+    const cursor = (relay as any).daemonSeq.get('daemon-1')
+    check.mockRejectedValue(new Error('revocation database unavailable'))
+
+    relay.handleDaemonMessage('daemon-1', { type: 'ping', seq: 1 }, ws, 200)
+    await tick()
+
+    expect(ws.close).toHaveBeenCalledWith(1011, 'token check failed')
+    expect(cursor.accepting).toBe(false)
+    expect(ws._sent.some((message: any) => message.type === 'pong')).toBe(false)
+    expect(heartbeat).not.toHaveBeenCalled()
+    expect(offline).toHaveBeenCalledWith(expect.anything(), 'daemon-1', expect.any(String), 20)
+    const eventWritesBefore = pool._queries.filter((query: any) => query.sql.includes('INSERT INTO events')).length
+    relay.handleDaemonMessage('daemon-1', {
+      type: 'agent_text', session_id: 'session-after-failure', text: 'must not persist', seq: 2,
+    }, ws, 200)
+    await tick()
+    expect(pool._queries.filter((query: any) => query.sql.includes('INSERT INTO events'))).toHaveLength(eventWritesBefore)
+    vi.restoreAllMocks()
+  })
+
+  test('does not let an old heartbeat lookup failure close or freeze its successor generation', async () => {
+    const dbModule = await import('../db.js')
+    const check = vi.spyOn(dbModule, 'isTokenRevokedWithTimeout').mockResolvedValue(false)
+    const offline = vi.spyOn(dbModule, 'setDaemonOfflineWithTimeout').mockResolvedValue(true as any)
+    const relay = new Router(createMockPool())
+    const oldWs = createMockWs()
+    await relay.registerDaemon(oldWs, {
+      type: 'register', daemon_id: 'daemon-1', hostname: 'old', agents: [], started_at: 100,
+    }, 7, 'token-1')
+    let rejectOld!: (error: Error) => void
+    const oldLookup = new Promise<boolean>((_, reject) => { rejectOld = reject })
+    check.mockImplementationOnce(() => oldLookup).mockResolvedValue(false)
+    relay.handleDaemonMessage('daemon-1', { type: 'ping' }, oldWs, 100)
+
+    const successorWs = createMockWs()
+    await relay.registerDaemon(successorWs, {
+      type: 'register', daemon_id: 'daemon-1', hostname: 'successor', agents: [], started_at: 200,
+    }, 7, 'token-2')
+    successorWs.close.mockClear()
+    rejectOld(new Error('late old lookup failure'))
+    await Promise.resolve()
+    await Promise.resolve()
+
+    expect(successorWs.close).not.toHaveBeenCalled()
+    expect((relay as any).daemons.get('daemon-1').ws).toBe(successorWs)
+    expect((relay as any).daemonSeq.get('daemon-1').accepting).toBe(true)
+    expect(offline).not.toHaveBeenCalled()
+    vi.restoreAllMocks()
+  })
+
+  test('retries transient token revoke failure before reporting force-kick success', async () => {
+    const dbModule = await import('../db.js')
+    const revoke = vi.spyOn(dbModule, 'revokeToken')
+      .mockRejectedValueOnce(new Error('temporary'))
+      .mockResolvedValueOnce(undefined)
+    vi.spyOn(dbModule, 'insertAuditLog').mockResolvedValue(undefined)
+    vi.spyOn(dbModule, 'setDaemonOfflineWithTimeout').mockResolvedValue(true as any)
+    const router = new Router(createMockPool())
+    const ws = createMockWs()
+    await router.registerDaemon(ws, {
+      type: 'register', daemon_id: 'daemon-1', hostname: 'h', agents: [], started_at: 100,
+    }, 7, 'token')
+    await expect(router.handleForceKick('daemon-1', 7)).resolves.toEqual({ success: true })
+    expect(revoke).toHaveBeenCalledTimes(2)
+    expect(ws.close).toHaveBeenCalled()
+    vi.restoreAllMocks()
+  })
+
+  test('keeps the old generation online and reports error when token revoke permanently fails', async () => {
+    const dbModule = await import('../db.js')
+    const revoke = vi.spyOn(dbModule, 'revokeToken').mockRejectedValue(new Error('permanent'))
+    const offline = vi.spyOn(dbModule, 'setDaemonOfflineWithTimeout').mockResolvedValue(true as any)
+    const router = new Router(createMockPool())
+    const ws = createMockWs()
+    await router.registerDaemon(ws, {
+      type: 'register', daemon_id: 'daemon-1', hostname: 'h', agents: [], started_at: 100,
+    }, 7, 'token')
+    await expect(router.handleForceKick('daemon-1', 7)).resolves.toEqual({ success: false, error: 'token revocation failed' })
+    expect(revoke).toHaveBeenCalledTimes(3)
+    expect(ws.close).not.toHaveBeenCalled()
+    expect((router as any).daemons.get('daemon-1').ws).toBe(ws)
+    expect(offline).not.toHaveBeenCalled()
+    vi.restoreAllMocks()
+  })
+
+  test('audit failure does not undo a successfully revoked force kick', async () => {
+    const dbModule = await import('../db.js')
+    const revoke = vi.spyOn(dbModule, 'revokeToken').mockResolvedValue(undefined)
+    vi.spyOn(dbModule, 'insertAuditLog').mockRejectedValue(new Error('audit down'))
+    vi.spyOn(dbModule, 'setDaemonOfflineWithTimeout').mockResolvedValue(true as any)
+    const router = new Router(createMockPool())
+    const ws = createMockWs()
+    await router.registerDaemon(ws, {
+      type: 'register', daemon_id: 'daemon-1', hostname: 'h', agents: [], started_at: 100,
+    }, 7, 'token')
+    await expect(router.handleForceKick('daemon-1', 7)).resolves.toEqual({ success: true })
+    expect(revoke).toHaveBeenCalledOnce()
+    expect(ws.close).toHaveBeenCalled()
+    vi.restoreAllMocks()
+  })
+
+  test('does not hold force-kick safety or the registration lock on a hanging audit write', async () => {
+    const dbModule = await import('../db.js')
+    vi.spyOn(dbModule, 'revokeToken').mockResolvedValue(undefined)
+    vi.spyOn(dbModule, 'insertAuditLog').mockImplementation(() => new Promise<void>(() => {}))
+    vi.spyOn(dbModule, 'setDaemonOfflineWithTimeout').mockResolvedValue(true as any)
+    const router = new Router(createMockPool())
+    const oldWs = createMockWs()
+    await router.registerDaemon(oldWs, {
+      type: 'register', daemon_id: 'daemon-1', hostname: 'old', agents: [], started_at: 100,
+    }, 7, 'old-token')
+
+    const kick = router.handleForceKick('daemon-1', 7)
+    const newWs = createMockWs()
+    const replacement = router.registerDaemon(newWs, {
+      type: 'register', daemon_id: 'daemon-1', hostname: 'new', agents: [], started_at: 200,
+    }, 7, 'new-token')
+    const deadline = new Promise<never>((_, reject) => setTimeout(() => reject(new Error('force kick remained blocked on audit')), 100))
+
+    await expect(Promise.race([kick, deadline])).resolves.toEqual({ success: true })
+    await expect(Promise.race([replacement, deadline])).resolves.toBe(true)
+    expect(oldWs.close).toHaveBeenCalled()
+    expect((router as any).daemons.get('daemon-1').ws).toBe(newWs)
+    vi.restoreAllMocks()
+  })
+
+  test('does not hold force-kick or replacement while statement timeout cancels each offline CAS', async () => {
+    const dbModule = await import('../db.js')
+    vi.spyOn(dbModule, 'revokeToken').mockResolvedValue(undefined)
+    vi.spyOn(dbModule, 'insertAuditLog').mockResolvedValue(undefined)
+    const pool = createMockPool()
+    const originalConnect = pool.connect
+    let offlineReleases = 0
+    pool.connect = vi.fn(async () => {
+      const client = await originalConnect()
+      let offlineTransaction = false
+      return {
+        query: vi.fn(async (sql: string, params?: any[]) => {
+          if (sql.includes("set_config('statement_timeout'")) offlineTransaction = true
+          if (sql.includes("UPDATE daemons SET status = 'offline'")) {
+            throw Object.assign(new Error('canceling statement due to statement timeout'), { code: '57014' })
+          }
+          return client.query(sql, params)
+        }),
+        release: vi.fn(() => {
+          if (offlineTransaction) offlineReleases++
+          client.release()
+        }),
+      }
+    })
+    const router = new Router(pool)
+    const oldWs = createMockWs()
+    await router.registerDaemon(oldWs, {
+      type: 'register', daemon_id: 'daemon-1', hostname: 'old', agents: [], started_at: 100,
+    }, 7, 'old-token')
+
+    const kick = router.handleForceKick('daemon-1', 7)
+    const replacementWs = createMockWs()
+    const replacement = router.registerDaemon(replacementWs, {
+      type: 'register', daemon_id: 'daemon-1', hostname: 'replacement', agents: [], started_at: 200,
+    }, 7, 'new-token')
+    const deadline = new Promise<never>((_, reject) => setTimeout(() => reject(new Error('offline CAS held registration lock')), 100))
+
+    await expect(Promise.race([kick, deadline])).resolves.toEqual({ success: true })
+    await expect(Promise.race([replacement, deadline])).resolves.toBe(true)
+    expect(replacementWs._sent).toContainEqual(expect.objectContaining({ type: 'register_ack' }))
+    expect((router as any).daemons.get('daemon-1').ws).toBe(replacementWs)
+    await new Promise((resolve) => setTimeout(resolve, 80))
+    expect(offlineReleases).toBe(3)
+    vi.restoreAllMocks()
+  })
+
+  test('late force-kick offline completion cannot remove or close a replacement generation', async () => {
+    const dbModule = await import('../db.js')
+    vi.spyOn(dbModule, 'revokeToken').mockResolvedValue(undefined)
+    vi.spyOn(dbModule, 'insertAuditLog').mockResolvedValue(undefined)
+    let finishOffline!: (value: boolean) => void
+    vi.spyOn(dbModule, 'setDaemonOfflineWithTimeout').mockImplementationOnce(() => new Promise<boolean>((resolve) => { finishOffline = resolve }))
+    const router = new Router(createMockPool())
+    await router.registerDaemon(createMockWs(), {
+      type: 'register', daemon_id: 'daemon-1', hostname: 'old', agents: [], started_at: 100,
+    }, 7, 'old-token')
+
+    await expect(router.handleForceKick('daemon-1', 7)).resolves.toEqual({ success: true })
+    const replacementWs = createMockWs()
+    await expect(router.registerDaemon(replacementWs, {
+      type: 'register', daemon_id: 'daemon-1', hostname: 'replacement', agents: [], started_at: 200,
+    }, 7, 'new-token')).resolves.toBe(true)
+    finishOffline(true)
+    await Promise.resolve()
+
+    expect((router as any).daemons.get('daemon-1').ws).toBe(replacementWs)
+    expect(replacementWs.close).not.toHaveBeenCalled()
+    vi.restoreAllMocks()
+  })
+
+  test('contains detached force-kick offline rejection and stops after finite attempts', async () => {
+    const dbModule = await import('../db.js')
+    vi.spyOn(dbModule, 'revokeToken').mockResolvedValue(undefined)
+    vi.spyOn(dbModule, 'insertAuditLog').mockResolvedValue(undefined)
+    const offline = vi.spyOn(dbModule, 'setDaemonOfflineWithTimeout').mockRejectedValue(new Error('offline database down'))
+    const router = new Router(createMockPool())
+    await router.registerDaemon(createMockWs(), {
+      type: 'register', daemon_id: 'daemon-1', hostname: 'old', agents: [], started_at: 100,
+    }, 7, 'old-token')
+
+    await expect(router.handleForceKick('daemon-1', 7)).resolves.toEqual({ success: true })
+    await new Promise((resolve) => setTimeout(resolve, 80))
+
+    expect(offline).toHaveBeenCalledTimes(3)
+    vi.restoreAllMocks()
   })
 })
 

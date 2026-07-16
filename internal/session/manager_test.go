@@ -2,14 +2,315 @@ package session
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
+	"net/http"
 	"os"
 	"path/filepath"
+	"reflect"
+	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/pocketctl/pocketctl/internal/adapter"
 	"github.com/pocketctl/pocketctl/internal/protocol"
 )
+
+func TestEnsureOpenCodeSessionLoadedBeforeDiscovery(t *testing.T) {
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/api/health":
+			_ = json.NewEncoder(w).Encode(map[string]bool{"healthy": true})
+		case r.Method == http.MethodGet && r.URL.Path == "/api/session/ses_1":
+			_ = json.NewEncoder(w).Encode(map[string]any{"data": map[string]any{
+				"id": "ses_1", "directory": "/repo", "agent": "build",
+				"model": map[string]string{"providerID": "opencode", "id": "deepseek-v4-flash-free"},
+			}})
+		case r.Method == http.MethodGet && r.URL.Path == "/session/status":
+			_ = json.NewEncoder(w).Encode(map[string]any{"ses_1": map[string]string{"type": "idle"}})
+		case r.Method == http.MethodGet && r.URL.Path == "/session/ses_1/message":
+			_ = json.NewEncoder(w).Encode([]any{})
+		case r.Method == http.MethodGet && r.URL.Path == "/session/ses_1/todo":
+			_ = json.NewEncoder(w).Encode([]any{})
+		default:
+			http.NotFound(w, r)
+		}
+	})
+
+	serve := startFakeOpenCodeServer(t, handler)
+	sm := NewSessionManager(make(chan protocol.DaemonEvent, 16))
+	coord := newOpencodeCoordinator(sm)
+	coord.ctx, coord.cancel = context.WithCancel(context.Background())
+	coord.server, coord.started = serve, true
+	sm.opencode = coord
+	t.Cleanup(coord.cancel)
+
+	if !sm.EnsureOpencodeSessionLoaded("ses_1") {
+		t.Fatal("EnsureOpencodeSessionLoaded returned false")
+	}
+	if agent, ok := sm.GetSessionAgent("ses_1"); !ok || agent != adapter.AgentOpencode {
+		t.Fatalf("agent=%q ok=%v, want opencode", agent, ok)
+	}
+	if cwd, ok := sm.GetSessionCwd("ses_1"); !ok || cwd != "/repo" {
+		t.Fatalf("cwd=%q ok=%v, want /repo", cwd, ok)
+	}
+	if model, ok := sm.GetSessionModel("ses_1"); !ok || model != "opencode/deepseek-v4-flash-free" {
+		t.Fatalf("model=%q ok=%v", model, ok)
+	}
+	if got := sm.OpenCodeInteractionCapabilities("ses_1"); !reflect.DeepEqual(got, []string{"dynamic_commands", "agent_switch", "permission_actions", "questions"}) {
+		t.Fatalf("capabilities=%v", got)
+	}
+	if got := sm.CurrentSessionAgent(context.Background(), "ses_1"); got != "build" {
+		t.Fatalf("current agent=%q, want build", got)
+	}
+	if sm.CwdSessionCount("/repo") != 1 {
+		t.Fatalf("cwd registration count=%d, want 1", sm.CwdSessionCount("/repo"))
+	}
+	if !coord.isTracked("ses_1") {
+		t.Fatal("session sync was not started")
+	}
+}
+
+func TestEnsureOpenCodeSessionLoadedFallsBackOnlyAfter404(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	missingID := "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+	errorID := "11111111-2222-3333-4444-555555555555"
+	dir := filepath.Join(home, ".claude", "projects", "-repo")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range []string{missingID, errorID} {
+		if err := os.WriteFile(filepath.Join(dir, id+".jsonl"), []byte(`{"type":"user","cwd":"/repo"}`+"\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	serve := startFakeOpenCodeServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.URL.Path == "/api/health":
+			_ = json.NewEncoder(w).Encode(map[string]bool{"healthy": true})
+		case r.URL.Path == "/api/session/"+missingID:
+			http.NotFound(w, r)
+		case r.URL.Path == "/api/session/"+errorID:
+			http.Error(w, "serve unavailable status 404:", http.StatusInternalServerError)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	sm := NewSessionManager(make(chan protocol.DaemonEvent, 8))
+	coord := newOpencodeCoordinator(sm)
+	coord.ctx, coord.cancel = context.WithCancel(context.Background())
+	coord.server, coord.started = serve, true
+	sm.opencode = coord
+	t.Cleanup(coord.cancel)
+
+	if !sm.EnsureOpencodeSessionLoaded(missingID) {
+		t.Fatal("404 did not fall back to JSONL history")
+	}
+	if agent, _ := sm.GetSessionAgent(missingID); agent != adapter.AgentClaude {
+		t.Fatalf("404 fallback agent=%q, want claude", agent)
+	}
+	if sm.EnsureOpencodeSessionLoaded(errorID) {
+		t.Fatal("500 unexpectedly fell back to JSONL history")
+	}
+	if _, ok := sm.GetSessionAgent(errorID); ok {
+		t.Fatal("500 response classified the unknown session")
+	}
+}
+
+func TestEnsureOpenCodeSessionLoadedRejectsMalformedMetadata(t *testing.T) {
+	responses := map[string]string{
+		"empty":        `{}`,
+		"null":         `{"data":null}`,
+		"wrong":        `{"data":{"id":"ses_other","directory":"/repo","agent":"build","model":{"providerID":"opencode","id":"deepseek-v4-flash-free"}}}`,
+		"missing-cwd":  `{"data":{"id":"missing-cwd","agent":"build","model":{"providerID":"opencode","id":"deepseek-v4-flash-free"}}}`,
+		"relative-cwd": `{"data":{"id":"relative-cwd","directory":"repo","agent":"build","model":{"providerID":"opencode","id":"deepseek-v4-flash-free"}}}`,
+		"missing-meta": `{"data":{"id":"missing-meta","directory":"/repo"}}`,
+		"valid":        `{"data":{"id":"valid","directory":"/repo","agent":"build","model":{"providerID":"opencode","id":"deepseek-v4-flash-free"}}}`,
+	}
+	serve := startFakeOpenCodeServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.URL.Path == "/api/health" {
+			_ = json.NewEncoder(w).Encode(map[string]bool{"healthy": true})
+			return
+		}
+		id := strings.TrimPrefix(r.URL.Path, "/api/session/")
+		if body, ok := responses[id]; ok {
+			_, _ = w.Write([]byte(body))
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	sm := NewSessionManager(make(chan protocol.DaemonEvent, 16))
+	coord := newOpencodeCoordinator(sm)
+	coord.ctx, coord.cancel = context.WithCancel(context.Background())
+	coord.server, coord.started = serve, true
+	sm.opencode = coord
+	t.Cleanup(coord.cancel)
+
+	for _, id := range []string{"empty", "null", "wrong", "missing-cwd", "relative-cwd", "missing-meta"} {
+		t.Run(id, func(t *testing.T) {
+			if sm.EnsureOpencodeSessionLoaded(id) {
+				t.Fatalf("malformed %s response was loaded", id)
+			}
+			if _, ok := sm.GetSessionAgent(id); ok || coord.isTracked(id) || sm.CwdSessionCount("/repo") != 0 {
+				t.Fatalf("malformed %s response published state, cwd, or sync", id)
+			}
+		})
+	}
+	if !sm.EnsureOpencodeSessionLoaded("valid") {
+		t.Fatal("valid response was rejected")
+	}
+}
+
+func TestEnsureOpenCodeSessionLoadedConcurrentCallersWaitForSetup(t *testing.T) {
+	var requestCount atomic.Int32
+	firstRequest := make(chan struct{})
+	release := make(chan struct{})
+	serve := startFakeOpenCodeServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/api/health":
+			_ = json.NewEncoder(w).Encode(map[string]bool{"healthy": true})
+		case "/api/session/ses_concurrent":
+			if requestCount.Add(1) == 1 {
+				close(firstRequest)
+			}
+			<-release
+			_, _ = w.Write([]byte(`{"data":{"id":"ses_concurrent","directory":"/repo","agent":"build","model":{"providerID":"opencode","id":"deepseek-v4-flash-free"}}}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	sm := NewSessionManager(make(chan protocol.DaemonEvent, 16))
+	coord := newOpencodeCoordinator(sm)
+	coord.ctx, coord.cancel = context.WithCancel(context.Background())
+	coord.server, coord.started = serve, true
+	sm.opencode = coord
+	t.Cleanup(coord.cancel)
+
+	const callers = 8
+	results := make(chan bool, callers)
+	for range callers {
+		go func() {
+			loaded := sm.EnsureOpencodeSessionLoaded("ses_concurrent")
+			if loaded && (sm.CwdSessionCount("/repo") != 1 || !coord.isTracked("ses_concurrent")) {
+				results <- false
+				return
+			}
+			results <- loaded
+		}()
+	}
+	<-firstRequest
+	time.Sleep(50 * time.Millisecond)
+	close(release)
+	for range callers {
+		if !<-results {
+			t.Fatal("a successful concurrent caller returned before setup completed")
+		}
+	}
+	if got := requestCount.Load(); got != 1 {
+		t.Fatalf("GetSession requests=%d, want one", got)
+	}
+	if sm.CwdSessionCount("/repo") != 1 || !coord.isTracked("ses_concurrent") {
+		t.Fatal("final cwd/sync setup incomplete")
+	}
+}
+
+func TestCreateSessionPermissionDefaults(t *testing.T) {
+	stopBeforeSubprocess := errors.New("stop before subprocess startup")
+	missingCwd := filepath.Join(t.TempDir(), "missing")
+	tests := []struct {
+		name            string
+		agent           string
+		permission      *protocol.PermissionConfig
+		wantPermission  *protocol.PermissionConfig
+		wantErr         string
+		wantStartupStop bool
+	}{
+		{
+			name:            "claude receives its default",
+			agent:           adapter.AgentClaude,
+			wantPermission:  &protocol.PermissionConfig{Agent: adapter.AgentClaude, Mode: "acceptEdits"},
+			wantStartupStop: true,
+		},
+		{
+			name:            "codex receives its default",
+			agent:           adapter.AgentCodex,
+			wantPermission:  &protocol.PermissionConfig{Agent: adapter.AgentCodex, Preset: "custom"},
+			wantStartupStop: true,
+		},
+		{
+			name:  "opencode keeps permission nil",
+			agent: adapter.AgentOpencode,
+		},
+		{
+			name:       "opencode rejects explicit permission",
+			agent:      adapter.AgentOpencode,
+			permission: &protocol.PermissionConfig{Agent: adapter.AgentOpencode},
+			wantErr:    "opencode does not support permission configuration",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			sm := NewSessionManager(make(chan protocol.DaemonEvent, 1))
+			var capturedConfig *protocol.SessionConfig
+			sm.createDeps.resolveAgentCLI = func(config protocol.SessionConfig) (string, error) {
+				captured := config
+				capturedConfig = &captured
+				if config.Agent == adapter.AgentOpencode {
+					return "/fake/opencode", nil
+				}
+				return "", stopBeforeSubprocess
+			}
+			sm.createDeps.startOpencode = func(_ *SessionManager, _ context.Context, config protocol.SessionConfig) (string, error) {
+				captured := config
+				capturedConfig = &captured
+				return "opencode-session", nil
+			}
+			sid, err := sm.CreateSession(context.Background(), protocol.SessionConfig{
+				Agent:      tt.agent,
+				Cwd:        missingCwd,
+				Permission: tt.permission,
+			})
+			if tt.agent == adapter.AgentOpencode && tt.permission == nil {
+				if err != nil {
+					t.Fatalf("CreateSession() error = %v", err)
+				}
+				if sid != "opencode-session" {
+					t.Fatalf("CreateSession() id = %q, want opencode-session", sid)
+				}
+				if capturedConfig == nil || capturedConfig.Permission != nil {
+					t.Fatalf("OpenCode permission = %+v, want nil", capturedConfig)
+				}
+				return
+			}
+			if tt.wantStartupStop && !errors.Is(err, stopBeforeSubprocess) {
+				t.Fatalf("CreateSession() error = %v, want startup boundary", err)
+			}
+			if tt.wantErr != "" {
+				if !strings.Contains(err.Error(), tt.wantErr) {
+					t.Fatalf("CreateSession() error = %q, want %q", err, tt.wantErr)
+				}
+				return
+			}
+			if capturedConfig == nil {
+				t.Fatal("CreateSession() did not reach downstream lifecycle boundary")
+			}
+			if !reflect.DeepEqual(capturedConfig.Permission, tt.wantPermission) {
+				t.Fatalf("CreateSession() permission = %+v, want %+v", capturedConfig.Permission, tt.wantPermission)
+			}
+			if strings.Contains(err.Error(), "permission") {
+				t.Fatalf("CreateSession() rejected default permission: %v", err)
+			}
+		})
+	}
+}
 
 type fixedProcessController struct {
 	alive map[int]bool

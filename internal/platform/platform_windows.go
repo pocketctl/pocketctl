@@ -46,7 +46,62 @@ func (windowsIPCListener) DefaultPath(name string) string {
 // (race-free,等价 Unix flock)。
 func NewInstanceLocker() InstanceLocker { return windowsLocker{} }
 
+// NewLogicalLocker preserves the legacy fixed-name daemon instance mutex while
+// providing an alias-independent, per-user kernel mutex for a logical lock.
+func NewLogicalLocker(logicalID string) InstanceLocker {
+	return windowsLogicalLocker{logicalID: logicalID}
+}
+
 type windowsLocker struct{}
+
+type windowsLogicalLocker struct{ logicalID string }
+
+var currentWindowsUserSID = func() (string, error) {
+	token, err := windows.OpenCurrentProcessToken()
+	if err != nil {
+		return "", fmt.Errorf("open current process token: %w", err)
+	}
+	defer token.Close()
+	user, err := token.GetTokenUser()
+	if err != nil {
+		return "", fmt.Errorf("read current token user: %w", err)
+	}
+	if user == nil || user.User.Sid == nil {
+		return "", fmt.Errorf("current token has no user SID")
+	}
+	sid := user.User.Sid.String()
+	if sid == "" {
+		return "", fmt.Errorf("format current user SID")
+	}
+	return sid, nil
+}
+
+func (l windowsLogicalLocker) mutexName(_ string) (string, error) {
+	sid, err := currentWindowsUserSID()
+	if err != nil {
+		return "", fmt.Errorf("resolve current user SID for logical lock %q: %w", l.logicalID, err)
+	}
+	return logicalLockKernelName(l.logicalID, sid)
+}
+
+func (l windowsLogicalLocker) Acquire(path string) (Lock, error) {
+	mutexName, err := l.mutexName(path)
+	if err != nil {
+		return nil, err
+	}
+	name := windows.StringToUTF16Ptr(mutexName)
+	handle, err := windows.CreateMutex(nil, false, name)
+	if err != nil {
+		if err == windows.ERROR_ALREADY_EXISTS {
+			if handle != 0 {
+				_ = windows.CloseHandle(handle)
+			}
+			return nil, fmt.Errorf("another process holds logical lock %q", l.logicalID)
+		}
+		return nil, fmt.Errorf("create logical mutex %q: %w", l.logicalID, err)
+	}
+	return &mutexLock{handle: handle}, nil
+}
 
 func (windowsLocker) Acquire(path string) (Lock, error) {
 	// path 是 Unix 锁文件路径语义;Windows 忽略它,用固定 Global mutex 名

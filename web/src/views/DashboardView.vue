@@ -265,7 +265,7 @@ async function fetchCostSummary() {
 
 const onlineDaemonCount = computed(() => daemons.value.filter(d => d.daemon_online).length)
 const offlineDaemonCount = computed(() => daemons.value.filter(d => !d.daemon_online).length)
-const activeSessionCount = computed(() => sessions.value.filter(s => s.status === 'running' || s.status === 'busy').length)
+const activeSessionCount = computed(() => sessions.value.filter(s => s.status === 'running' || s.status === 'busy' || s.status === 'retry').length)
 
 const sortedSessions = computed(() => [...sessions.value].filter(s => !s.is_subagent).sort((a, b) => {
   if (a.pinned && !b.pinned) return -1
@@ -305,7 +305,7 @@ const selectedDaemonObj = computed(() => daemons.value.find(d => d.daemon_id ===
 function toggleDaemonFilter(daemonId: string) { selectedDaemon.value = selectedDaemon.value === daemonId ? null : daemonId }
 function clearDaemonFilter() { selectedDaemon.value = null }
 function getDisplayName(d: any): string { return d.daemon_alias || d.hostname || d.daemon_id?.slice(0, 8) }
-function daemonSessionCount(daemonId: string): number { return sessions.value.filter(s => s.daemon_id === daemonId && (s.status === 'running' || s.status === 'busy')).length }
+function daemonSessionCount(daemonId: string): number { return sessions.value.filter(s => s.daemon_id === daemonId && (s.status === 'running' || s.status === 'busy' || s.status === 'retry')).length }
 function totalSessionCount(daemonId: string): number { return sessions.value.filter(s => s.daemon_id === daemonId).length }
 function getEffectiveStatus(s: any): string { return effectiveStatus({ status: s.status, daemon_id: s.daemon_id }) }
 function getActiveAgents(daemonId: string): string[] {
@@ -320,13 +320,13 @@ function agentLabel(agent: string): string {
 function statusChip(s: any): string {
   const st = getEffectiveStatus(s)
   if (st === 'running') return 'chip-running'
-  if (st === 'busy' || st === 'idle') return 'chip-busy'
+  if (st === 'busy' || st === 'retry' || st === 'idle') return 'chip-busy'
   if (st === 'completed') return 'chip-terminal'
   if (st === 'error' || st === 'killed') return 'chip-offline'
   return 'chip-terminal'
 }
 const STATUS_KEYS: Record<string, string> = {
-  running: 'session.status.running', busy: 'session.status.busy', idle: 'session.status.idle',
+  running: 'session.status.running', busy: 'session.status.busy', retry: 'session.status.retry', idle: 'session.status.idle',
   completed: 'session.status.completed', error: 'session.status.error', killed: 'session.status.killed',
   disconnected: 'session.status.disconnected', exited: 'session.status.exited',
 }

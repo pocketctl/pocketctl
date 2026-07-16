@@ -9,9 +9,9 @@
     >
       <span class="cmd-icon" v-html="commandIcon(c)"></span>
       <span class="cmd-name">/{{ c.name }}</span>
-      <span class="cmd-arg" v-if="c.arg_hint">{{ c.arg_hint }}</span>
+      <span class="cmd-arg" v-if="commandHint(c)">{{ commandHint(c) }}</span>
       <span class="cmd-desc" v-if="c.description">{{ c.description }}</span>
-      <span class="cmd-source" v-if="c.source === 'plugin'">{{ c.namespace }}</span>
+      <span class="cmd-source" v-if="c.source === 'plugin' || c.source === 'skill'">{{ c.source === 'plugin' ? c.namespace : 'skill' }}</span>
     </div>
   </div>
 </template>
@@ -47,6 +47,10 @@ function commandIcon(c: CommandItem): string {
     case 'plugin':  return ICONS.package
     default:        return ICONS.sparkles
   }
+}
+
+function commandHint(c: CommandItem): string {
+  return c.arg_hint || c.hints?.join(' ') || ''
 }
 </script>
 

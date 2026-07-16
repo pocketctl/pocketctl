@@ -538,7 +538,7 @@ function toggleTokenExpand(sid: string) {
 watch(selectedId, () => { costExpanded.value = false; costPage.value = 1; expandedTokenSession.value = null })
 
 function sessionStatusLabel(s: any): string {
-  const STATUS_KEYS: Record<string, string> = { running: 'session.status.running', busy: 'session.status.busy', idle: 'session.status.idle', completed: 'session.status.completed', error: 'session.status.error', killed: 'session.status.killed', disconnected: 'session.status.disconnected', exited: 'session.status.exited' }
+  const STATUS_KEYS: Record<string, string> = { running: 'session.status.running', busy: 'session.status.busy', retry: 'session.status.retry', idle: 'session.status.idle', completed: 'session.status.completed', error: 'session.status.error', killed: 'session.status.killed', disconnected: 'session.status.disconnected', exited: 'session.status.exited' }
   return t(STATUS_KEYS[s.status] || 'session.status.running')
 }
 
@@ -900,7 +900,7 @@ onUnmounted(() => {
 .detail-sess-row:hover { background: var(--surface-hover); }
 .detail-sess-row .ds-title { font-size: 13px; font-weight: 500; color: var(--fg); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; min-width: 0; }
 .detail-sess-row .ds-status { font-size: 11px; font-weight: 600; padding: 2px 8px; border-radius: var(--radius-full); margin-left: 8px; flex-shrink: 0; }
-.detail-sess-row .ds-status.running, .detail-sess-row .ds-status.busy { background: var(--success-bg); color: var(--success); }
+.detail-sess-row .ds-status.running, .detail-sess-row .ds-status.busy, .detail-sess-row .ds-status.retry { background: var(--success-bg); color: var(--success); }
 .detail-sess-row .ds-status.completed, .detail-sess-row .ds-status.exited { background: var(--surface-active); color: var(--fg-tertiary); }
 .detail-sess-row .ds-status.error, .detail-sess-row .ds-status.killed { background: var(--error-bg); color: var(--error); }
 .detail-sess-row .ds-status.idle, .detail-sess-row .ds-status.disconnected { background: var(--accent-muted); color: var(--accent); }
