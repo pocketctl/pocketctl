@@ -42,7 +42,7 @@ import (
 	"github.com/pocketctl/pocketctl/internal/ws"
 )
 
-var version = "0.3.0"
+var version = "0.3.1"
 
 // PR2 platform defaults for the daemon entry: daemonize + service via platform
 // interface (was direct syscall.SysProcAttr{Setsid} + internal/service).
