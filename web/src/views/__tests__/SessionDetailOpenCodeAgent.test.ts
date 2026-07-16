@@ -34,6 +34,17 @@ describe('OpenCode dynamic commands', () => {
 })
 
 describe('OpenCode Agent state', () => {
+  test('the first metadata response is sufficient before a discovery retry', () => {
+    const firstMeta = {
+      model: 'opencode/deepseek-v4-flash-free',
+      capabilities: ['dynamic_commands', 'agent_switch', 'permission_actions', 'questions'],
+      current_agent: 'build',
+    }
+    expect(firstMeta.model).toBe('opencode/deepseek-v4-flash-free')
+    expect(firstMeta.current_agent).toBe('build')
+    expect(shouldShowSessionAgentPicker('opencode', firstMeta.capabilities, false, false)).toBe(true)
+  })
+
   test('filters subagent and hidden entries defensively', () => {
     expect(normalizeSessionAgents([
       ...agents,

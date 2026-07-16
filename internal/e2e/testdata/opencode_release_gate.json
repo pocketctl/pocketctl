@@ -1,0 +1,35 @@
+{
+  "session_id": "ses_fixture",
+  "directory": "/tmp/fixture",
+  "cases": [
+    {"id":"OC-105","event":"command.failure","payload":{"type":"command_receipt","command":"/build","receipt_status":"failed","message":"injected"},"web_type":"command_receipt","status":"failed","dedup_key":"command:/build"},
+    {"id":"OC-205","event":"agent.rollback","payload":{"type":"session_agent_changed","current_agent":"build","previous_agent":"review"},"web_type":"session_agent_changed","status":"build","dedup_key":"agent:build"},
+
+    {"id":"OC-301","event":"permission.asked","payload":{"type":"approval_request","request_id":"per_1","permission_name":"bash","patterns":["git *"],"always":["git status"],"metadata":{"command":"git status"}},"web_type":"approval_request","status":"pending","dedup_key":"request:per_1"},
+    {"id":"OC-302","event":"permission.once","payload":{"type":"approval_resolved","request_id":"per_1","action":"once","approved":true},"web_type":"approval_request","status":"resolved","dedup_key":"request:per_1"},
+    {"id":"OC-303","event":"permission.always","payload":{"type":"approval_resolved","request_id":"per_2","action":"always","approved":true},"web_type":"approval_request","status":"resolved","dedup_key":"request:per_2"},
+    {"id":"OC-304","event":"permission.reject","payload":{"type":"approval_resolved","request_id":"per_3","action":"reject","approved":false},"web_type":"approval_request","status":"resolved","dedup_key":"request:per_3"},
+    {"id":"OC-305","event":"permission.retry","payload":{"type":"approval_request","request_id":"per_4","permission_name":"edit"},"web_type":"approval_request","status":"pending","dedup_key":"request:per_4"},
+    {"id":"OC-306","event":"permission.multiple","payload":{"type":"approval_request","request_id":"per_5","permission_name":"bash","related_request_id":"per_6"},"web_type":"approval_request","status":"pending","dedup_key":"request:per_5"},
+
+    {"id":"OC-401","event":"question.display","payload":{"type":"question_request","request_id":"q_1","questions":[{"header":"One","question":"continue?","options":[{"label":"yes","description":"continue"},{"label":"no"}],"multiple":false,"custom":false},{"header":"Many","question":"choose","options":[{"label":"A"},{"label":"B"}],"multiple":true,"custom":true}]},"web_type":"question_request","status":"pending","dedup_key":"request:q_1"},
+    {"id":"OC-402","event":"question.single","payload":{"type":"question_request","request_id":"q_2","questions":[{"question":"one?","options":[{"label":"A"},{"label":"B"}],"multiple":false,"custom":false}]},"web_type":"question_request","status":"pending","dedup_key":"request:q_2"},
+    {"id":"OC-403","event":"question.multiple","payload":{"type":"question_request","request_id":"q_3","questions":[{"question":"many?","options":[{"label":"A"},{"label":"B"}],"multiple":true,"custom":false}]},"web_type":"question_request","status":"pending","dedup_key":"request:q_3"},
+    {"id":"OC-404","event":"question.custom","payload":{"type":"question_request","request_id":"q_4","questions":[{"question":"custom?","options":[{"label":"A"}],"multiple":false,"custom":true}]},"web_type":"question_request","status":"pending","dedup_key":"request:q_4"},
+    {"id":"OC-405","event":"question.answer","payload":{"type":"question_resolved","request_id":"q_1","answers":[["yes"],["A","custom"]],"rejected":false},"web_type":"question_request","status":"resolved","dedup_key":"request:q_1"},
+    {"id":"OC-406","event":"question.reject","payload":{"type":"question_resolved","request_id":"q_5","answers":[],"rejected":true},"web_type":"question_request","status":"resolved","dedup_key":"request:q_5"},
+    {"id":"OC-407","event":"question.retry","payload":{"type":"question_request","request_id":"q_6","questions":[{"question":"retry?","options":[{"label":"yes"}]}]},"web_type":"question_request","status":"pending","dedup_key":"request:q_6"},
+
+    {"id":"OC-501","event":"file.part","payload":{"type":"agent_file","part_id":"prt_file","filename":"a.go","mime":"text/plain","url":"https://invalid.example/file"},"web_type":"agent_file","status":"present","dedup_key":"part:prt_file"},
+    {"id":"OC-502","event":"patch.part","payload":{"type":"agent_patch","part_id":"prt_patch","hash":"h1","files":["a.go"]},"web_type":"agent_patch","status":"present","dedup_key":"part:prt_patch"},
+    {"id":"OC-505","event":"subtask.part","payload":{"type":"agent_subtask","part_id":"prt_sub","agent":"explore","prompt":"inspect","description":"read only"},"web_type":"agent_subtask","status":"present","dedup_key":"part:prt_sub"},
+    {"id":"OC-506","event":"profile.part","payload":{"type":"agent_profile","part_id":"prt_profile","profile_name":"default","source":"fixture"},"web_type":"agent_profile","status":"present","dedup_key":"part:prt_profile"},
+    {"id":"OC-602","event":"retry","payload":{"type":"agent_retry","part_id":"prt_retry","attempt":2,"error":"rate limited"},"web_type":"agent_retry","status":"present","dedup_key":"part:prt_retry"},
+    {"id":"OC-605","event":"status.fallback","payload":{"type":"session_status","status":"running","source":"message_snapshot"},"web_type":"session_status","status":"running","dedup_key":"status:ses_fixture:running"},
+    {"id":"OC-701","event":"restart.permission","payload":{"type":"approval_request","request_id":"per_restart","permission_name":"bash"},"web_type":"approval_request","status":"pending","dedup_key":"request:per_restart"},
+    {"id":"OC-702","event":"restart.question","payload":{"type":"question_request","request_id":"q_restart","questions":[{"question":"resume?","options":[{"label":"yes"}]}]},"web_type":"question_request","status":"pending","dedup_key":"request:q_restart"},
+    {"id":"OC-705","event":"offline.gate","payload":{"type":"session_status","status":"disconnected"},"web_type":"session_status","status":"disconnected","dedup_key":"status:ses_fixture:disconnected"},
+    {"id":"OC-802","event":"multiclient.resolution","payload":{"type":"question_resolved","request_id":"q_multiclient","answers":[["yes"]],"rejected":false},"web_type":"question_request","status":"resolved","dedup_key":"request:q_multiclient"},
+    {"id":"OC-804","event":"pagination.replay","payload":{"type":"replay_batch","direction":"backward","events":[{"type":"agent_text","message_id":"msg_fixture","part_id":"prt_text","text":"hello","snapshot":"hello","revision":1,"event_id":"opencode:part:prt_text:final:fixture"}]},"web_type":"agent_text","status":"deduped","dedup_key":"part:prt_text"}
+  ]
+}

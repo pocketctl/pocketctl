@@ -98,6 +98,7 @@ type SessionManager struct {
 	OnStateChanged      func()                                 // callback when in-memory session state should be persisted
 	ptyProvider         platform.PTYProvider                   // PR2: daemon-session PTY backend (was direct creack/pty)
 	proc                platform.ProcessController             // PR2: process alive/kill (was syscall; used by Task 3)
+	createDeps          createSessionDependencies
 
 	// approvals brokers PreToolUse hook approvals for non-bypass daemon sessions.
 	// nil on daemons that don't surface approvals (or before wiring).
@@ -118,6 +119,11 @@ type SessionManager struct {
 	opencode *opencodeCoordinator
 }
 
+type createSessionDependencies struct {
+	resolveAgentCLI func(protocol.SessionConfig) (string, error)
+	startOpencode   func(*SessionManager, context.Context, protocol.SessionConfig) (string, error)
+}
+
 func NewSessionManager(outputCh chan protocol.DaemonEvent) *SessionManager {
 	return &SessionManager{
 		sessions:    make(map[string]*ProcessState),
@@ -127,6 +133,14 @@ func NewSessionManager(outputCh chan protocol.DaemonEvent) *SessionManager {
 		fileLocks:   filelock.New(),
 		ptyProvider: defaultPTYProvider,
 		proc:        defaultProc,
+		createDeps: createSessionDependencies{
+			resolveAgentCLI: func(config protocol.SessionConfig) (string, error) {
+				return findAgentCLI(config.Agent)
+			},
+			startOpencode: func(sm *SessionManager, ctx context.Context, config protocol.SessionConfig) (string, error) {
+				return sm.createOpencodeSession(ctx, config)
+			},
+		},
 	}
 }
 

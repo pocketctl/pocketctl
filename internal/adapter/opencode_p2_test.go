@@ -6,6 +6,8 @@ import (
 	"net/http"
 	"reflect"
 	"testing"
+
+	"github.com/pocketctl/pocketctl/internal/protocol"
 )
 
 func TestConvertOpencodePart_StructuredDisplayParts(t *testing.T) {
@@ -97,6 +99,77 @@ func TestOpencodeSync_StructuredPartsDeduplicate(t *testing.T) {
 		if event.Type == "agent_patch" || event.Type == "agent_subtask" {
 			t.Fatalf("unchanged structured Part repeated: %+v", event)
 		}
+	}
+}
+
+func TestOpencodeSync_StructuredPartsDeduplicateAcrossInstances(t *testing.T) {
+	parts := []OpencodePart{
+		{ID: "prt_patch", MessageID: "msg_1", Type: "patch", Hash: "h1", Files: []string{"a.go"}},
+		{ID: "prt_sub", MessageID: "msg_1", Type: "subtask", Prompt: "Inspect", Description: "Read only", Agent: "explore"},
+	}
+	snapshot := []OpencodeMessageWithParts{mkMsg("msg_1", "assistant", "gpt-5", 1, 2, parts...)}
+	first := NewOpencodeSync("ses_1", false).Diff(snapshot)
+	second := NewOpencodeSync("ses_1", false).Diff(snapshot)
+	for i := 0; i < 2; i++ {
+		if first[i].EventID == "" || first[i].EventID != second[i].EventID {
+			t.Fatalf("structured event %d lacks stable identity: %q != %q", i, first[i].EventID, second[i].EventID)
+		}
+	}
+}
+
+func TestOpencodeSync_StructuredPartMutationEmitsCausalSnapshot(t *testing.T) {
+	tests := []struct {
+		name  string
+		first OpencodePart
+		later OpencodePart
+	}{
+		{"file", OpencodePart{ID: "p", Type: "file", Filename: "a.txt", URL: "file:a"}, OpencodePart{ID: "p", Type: "file", Filename: "b.txt", URL: "file:b"}},
+		{"patch", OpencodePart{ID: "p", Type: "patch", Hash: "one", Files: []string{"a.go"}}, OpencodePart{ID: "p", Type: "patch", Hash: "two", Files: []string{"b.go"}}},
+		{"subtask", OpencodePart{ID: "p", Type: "subtask", Prompt: "one", Agent: "build"}, OpencodePart{ID: "p", Type: "subtask", Prompt: "two", Agent: "build"}},
+		{"profile", OpencodePart{ID: "p", Type: "agent", Name: "build"}, OpencodePart{ID: "p", Type: "agent", Name: "review"}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			syncer := NewOpencodeSync("ses_1", false)
+			first := syncer.Diff([]OpencodeMessageWithParts{mkMsg("m", "assistant", "gpt-5", 1, 2, test.first)})[0]
+			if exact := syncer.Diff([]OpencodeMessageWithParts{mkMsg("m", "assistant", "gpt-5", 1, 2, test.first)}); len(exact) != 0 {
+				t.Fatalf("exact snapshot repeated: %+v", exact)
+			}
+			later := syncer.Diff([]OpencodeMessageWithParts{mkMsg("m", "assistant", "gpt-5", 1, 2, test.later)})[0]
+			if later.EventID == first.EventID || later.PreviousEventID != first.EventID {
+				t.Fatalf("mutation identity=%q previous=%q first=%q", later.EventID, later.PreviousEventID, first.EventID)
+			}
+		})
+	}
+}
+
+func TestOpencodeSync_StepFinishMutationEmitsCausalUsageSnapshot(t *testing.T) {
+	tokens := func(input int) *OpencodeTokens {
+		return &OpencodeTokens{Input: input, Output: 2}
+	}
+	syncer := NewOpencodeSync("ses_1", false)
+	firstPart := OpencodePart{ID: "step_1", Type: "step-finish", Tokens: tokens(1)}
+	first := syncer.Diff([]OpencodeMessageWithParts{mkMsg("m", "assistant", "gpt-5", 1, 2, firstPart)})[0]
+	if exact := syncer.Diff([]OpencodeMessageWithParts{mkMsg("m", "assistant", "gpt-5", 1, 2, firstPart)}); len(exact) != 0 {
+		t.Fatalf("exact step snapshot repeated: %+v", exact)
+	}
+	changedPart := OpencodePart{ID: "step_1", Type: "step-finish", Tokens: tokens(3)}
+	changed := syncer.Diff([]OpencodeMessageWithParts{mkMsg("m", "assistant", "gpt-5", 1, 2, changedPart)})[0]
+	if changed.EventID == first.EventID || changed.PreviousEventID != first.EventID || changed.Usage == nil || changed.Usage.InputTokens != 3 {
+		t.Fatalf("changed step snapshot=%+v first=%+v", changed, first)
+	}
+}
+
+func TestOpencodeTodoEventIDCanonicalSnapshot(t *testing.T) {
+	first := []protocol.TodoItem{{Content: "Build", Status: "in_progress", Priority: "high"}}
+	same := append([]protocol.TodoItem(nil), first...)
+	changed := []protocol.TodoItem{{Content: "Build", Status: "completed", Priority: "high"}}
+	firstID := OpencodeTodoEventID("ses_1", first)
+	if firstID == "" || firstID != OpencodeTodoEventID("ses_1", same) {
+		t.Fatalf("identical todo snapshots must share an id: %q", firstID)
+	}
+	if firstID == OpencodeTodoEventID("ses_1", changed) {
+		t.Fatalf("todo state transition must change id: %q", firstID)
 	}
 }
 

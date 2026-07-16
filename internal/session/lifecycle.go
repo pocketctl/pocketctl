@@ -25,18 +25,18 @@ func (sm *SessionManager) CreateSession(ctx context.Context, config protocol.Ses
 	if config.Agent == "" {
 		config.Agent = adapter.AgentClaude
 	}
-	if config.Permission == nil {
+	if config.Permission == nil && (config.Agent == adapter.AgentClaude || config.Agent == adapter.AgentCodex) {
 		cfg := adapter.DefaultPermissionConfig(config.Agent)
 		config.Permission = &cfg
 	}
 	if err := adapter.ValidatePermissionConfig(config.Agent, config.Permission); err != nil {
 		return "", err
 	}
-	if config.Agent == adapter.AgentCodex && config.Permission.ApprovalPolicy != "" && config.Permission.ApprovalPolicy != "never" {
+	if config.Agent == adapter.AgentCodex && config.Permission != nil && config.Permission.ApprovalPolicy != "" && config.Permission.ApprovalPolicy != "never" {
 		return "", fmt.Errorf("codex remote approval is not supported")
 	}
 	config.Permission = clonePermission(config.Permission)
-	cliPath, err := findAgentCLI(config.Agent)
+	cliPath, err := sm.createDeps.resolveAgentCLI(config)
 	if err != nil {
 		return "", err
 	}
@@ -44,7 +44,7 @@ func (sm *SessionManager) CreateSession(ctx context.Context, config protocol.Ses
 	// Server-kind agents (opencode) are driven via a SessionBackend (shared
 	// `opencode serve` + SSE), not the PTY spawn flow below.
 	if adapter.BackendKindFor(config.Agent) == adapter.BackendServer {
-		return sm.createOpencodeSession(ctx, config)
+		return sm.createDeps.startOpencode(sm, ctx, config)
 	}
 
 	// --- Working directory resolution --------------------------------------
@@ -746,6 +746,20 @@ func (sm *SessionManager) EnsureSessionLoaded(sessionID string) bool {
 		return true
 	}
 	return sm.tryResumeHistorical(sessionID)
+}
+
+// EnsureOpencodeSessionLoaded restores a session from the shared OpenCode serve
+// before falling back to Claude/Codex JSONL history. The fallback is safe only
+// when the serve authoritatively reports that the ID is not an OpenCode session.
+func (sm *SessionManager) EnsureOpencodeSessionLoaded(sessionID string) bool {
+	loaded, notFound := sm.loadOpencodeSessionFromServe(sessionID)
+	if loaded {
+		return true
+	}
+	if notFound {
+		return sm.EnsureSessionLoaded(sessionID)
+	}
+	return false
 }
 
 func extractClaudePermissionFromJSONL(path string) *protocol.PermissionConfig {

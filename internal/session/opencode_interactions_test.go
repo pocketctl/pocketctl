@@ -3,6 +3,7 @@ package session
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"testing"
 	"time"
 
@@ -97,6 +98,113 @@ func TestOpenCodeInteractionStateMultiplePendingAndDedup(t *testing.T) {
 	}
 	if approvalRequests != 2 || questionRequests != 1 {
 		t.Fatalf("approval=%d question=%d", approvalRequests, questionRequests)
+	}
+}
+
+func TestOpenCodeInteractionEventValidatesGlobalDirectory(t *testing.T) {
+	sm, out := newOpenCodeInteractionManager()
+	sm.sessions["ses_1"].Cwd = "/repo"
+	coordinator := &opencodeCoordinator{sm: sm}
+	event := adapter.SSEEvent{
+		ID: "evt_1", Type: "permission.asked",
+		Properties: json.RawMessage(`{"id":"per_1","sessionID":"ses_1","permission":"bash"}`),
+	}
+	coordinator.handleInteractionEvent(event)
+	if len(sm.sessions["ses_1"].PendingPermissions) != 0 || len(out) != 0 {
+		t.Fatal("global event without a directory must be ignored")
+	}
+	event.Directory = "/tmp/other"
+	coordinator.handleInteractionEvent(event)
+	if len(sm.sessions["ses_1"].PendingPermissions) != 0 || len(out) != 0 {
+		t.Fatal("event from a different global directory must be ignored")
+	}
+	event.Directory = "/repo"
+	coordinator.handleInteractionEvent(event)
+	if len(sm.sessions["ses_1"].PendingPermissions) != 1 {
+		t.Fatal("event from the session directory must be accepted")
+	}
+	sm.clearOpencodePermission("ses_1", "per_1")
+	for len(out) > 0 {
+		<-out
+	}
+	coordinator.handleInteractionEvent(event)
+	if len(sm.sessions["ses_1"].PendingPermissions) != 0 || len(out) != 0 {
+		t.Fatal("replayed global event ID must not recreate a resolved card")
+	}
+}
+
+func TestOpenCodeInteractionResolutionRequiresGlobalDirectory(t *testing.T) {
+	sm, _ := newOpenCodeInteractionManager()
+	sm.sessions["ses_1"].Cwd = "/repo"
+	sm.handleOpencodePermission(adapter.PermissionAsked{ID: "per_1", SessionID: "ses_1", Permission: "bash", Version: adapter.PermissionVersionLegacy})
+	sm.handleOpencodeQuestion(adapter.QuestionAsked{ID: "que_1", SessionID: "ses_1", Questions: []protocol.QuestionInfo{{Question: "Continue?"}}, Version: adapter.PermissionVersionLegacy})
+	coordinator := &opencodeCoordinator{sm: sm}
+	permissionResolved := adapter.SSEEvent{ID: "evt_per_done", Type: "permission.replied", Properties: json.RawMessage(`{"sessionID":"ses_1","permissionID":"per_1","response":"once"}`)}
+	questionResolved := adapter.SSEEvent{ID: "evt_que_done", Type: "question.replied", Properties: json.RawMessage(`{"sessionID":"ses_1","requestID":"que_1","answers":[["Yes"]]}`)}
+	coordinator.handleInteractionEvent(permissionResolved)
+	coordinator.handleInteractionEvent(questionResolved)
+	if len(sm.sessions["ses_1"].PendingPermissions) != 1 || len(sm.sessions["ses_1"].PendingQuestions) != 1 {
+		t.Fatal("global resolutions without directory mutated pending state")
+	}
+	permissionResolved.Directory = "/repo"
+	questionResolved.Directory = "/repo"
+	coordinator.handleInteractionEvent(permissionResolved)
+	coordinator.handleInteractionEvent(questionResolved)
+	if len(sm.sessions["ses_1"].PendingPermissions) != 0 || len(sm.sessions["ses_1"].PendingQuestions) != 0 {
+		t.Fatal("matching-directory global resolutions did not clear pending state")
+	}
+	coordinator.handleInteractionEvent(adapter.SSEEvent{ID: "evt_future_done", Type: "permission.replied", Directory: "/repo", Properties: json.RawMessage(`{"sessionID":"ses_1","permissionID":"per_future","response":"once"}`)})
+	coordinator.handleInteractionEvent(adapter.SSEEvent{ID: "evt_future_asked", Type: "permission.asked", Directory: "/repo", Properties: json.RawMessage(`{"id":"per_future","sessionID":"ses_1","permission":"bash"}`)})
+	if _, replayed := sm.sessions["ses_1"].PendingPermissions["per_future"]; replayed {
+		t.Fatal("resolution received before replayed asked did not tombstone the request lifecycle")
+	}
+}
+
+func TestOpenCodeInteractionRequestTombstonesAreBounded(t *testing.T) {
+	coordinator := &opencodeCoordinator{}
+	for i := 0; i <= opencodeSeenEventLimit; i++ {
+		coordinator.markInteractionResolved("permission", "ses_1", fmt.Sprintf("per_%d", i))
+	}
+	if len(coordinator.resolvedInteractions) != opencodeSeenEventLimit || len(coordinator.resolvedOrder) != opencodeSeenEventLimit {
+		t.Fatalf("tombstone cache sizes map=%d order=%d", len(coordinator.resolvedInteractions), len(coordinator.resolvedOrder))
+	}
+	if coordinator.interactionResolved("permission", "ses_1", "per_0") {
+		t.Fatal("oldest tombstone was not evicted")
+	}
+	if !coordinator.interactionResolved("permission", "ses_1", fmt.Sprintf("per_%d", opencodeSeenEventLimit)) {
+		t.Fatal("newest tombstone missing")
+	}
+}
+
+func TestOpenCodeInteractionSnapshotGenerationsAreScoped(t *testing.T) {
+	sm, _ := newOpenCodeInteractionManager()
+	sm.sessions["ses_1"].Cwd = "/repo"
+	coordinator := newOpencodeCoordinator(sm)
+	permissionLegacy := coordinator.captureInteractionGenerations([]string{"ses_1"}, "permission", adapter.PermissionVersionLegacy)["ses_1"]
+	questionLegacy := coordinator.captureInteractionGenerations([]string{"ses_1"}, "question", adapter.PermissionVersionLegacy)["ses_1"]
+	permissionV2 := coordinator.captureInteractionGenerations([]string{"ses_1"}, "permission", adapter.PermissionVersionV2)["ses_1"]
+	questionV2 := coordinator.captureInteractionGenerations([]string{"ses_1"}, "question", adapter.PermissionVersionV2)["ses_1"]
+
+	if !coordinator.applyPermissionSnapshot("ses_1", adapter.PermissionVersionLegacy, permissionLegacy, []adapter.PermissionAsked{{ID: "per_legacy", SessionID: "ses_1", Permission: "bash", Version: adapter.PermissionVersionLegacy}}) {
+		t.Fatal("legacy permission snapshot was discarded")
+	}
+	if !coordinator.applyQuestionSnapshot("ses_1", adapter.PermissionVersionLegacy, questionLegacy, []adapter.QuestionAsked{{ID: "que_legacy", SessionID: "ses_1", Version: adapter.PermissionVersionLegacy, Questions: []protocol.QuestionInfo{{Question: "Legacy?"}}}}) {
+		t.Fatal("legacy question snapshot was invalidated by permission scope")
+	}
+	if !coordinator.applyPermissionSnapshot("ses_1", adapter.PermissionVersionV2, permissionV2, []adapter.PermissionAsked{{ID: "per_v2", SessionID: "ses_1", Permission: "edit", Version: adapter.PermissionVersionV2}}) {
+		t.Fatal("v2 permission snapshot was invalidated by legacy scopes")
+	}
+	if !coordinator.applyQuestionSnapshot("ses_1", adapter.PermissionVersionV2, questionV2, []adapter.QuestionAsked{{ID: "que_v2", SessionID: "ses_1", Version: adapter.PermissionVersionV2, Questions: []protocol.QuestionInfo{{Question: "V2?"}}}}) {
+		t.Fatal("v2 question snapshot was invalidated by another scope")
+	}
+
+	stalePermissionLegacy := coordinator.captureInteractionGenerations([]string{"ses_1"}, "permission", adapter.PermissionVersionLegacy)["ses_1"]
+	coordinator.handleInteractionEvent(adapter.SSEEvent{ID: "evt_new_scope", Type: "permission.asked", Directory: "/repo", Properties: json.RawMessage(`{"id":"per_new_scope","sessionID":"ses_1","permission":"bash"}`)})
+	if coordinator.applyPermissionSnapshot("ses_1", adapter.PermissionVersionLegacy, stalePermissionLegacy, nil) {
+		t.Fatal("same-scope stale permission snapshot was applied")
+	}
+	if _, ok := sm.sessions["ses_1"].PendingPermissions["per_new_scope"]; !ok {
+		t.Fatal("same-scope newer mutation was overwritten")
 	}
 }
 

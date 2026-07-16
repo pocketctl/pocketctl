@@ -20,6 +20,12 @@ var (
 
 const pidDir = "/tmp/pocketctl"
 
+var (
+	stopGracePeriod           = 5 * time.Second
+	stopPollInterval          = 100 * time.Millisecond
+	stopOwnershipSettlePeriod = 500 * time.Millisecond
+)
+
 func PIDPath() string {
 	return filepath.Join(pidDir, "daemon.pid")
 }
@@ -96,51 +102,80 @@ func IsRunning() (int, bool) {
 // Stop sends SIGTERM to the daemon, waits up to 5s for graceful exit,
 // then sends SIGKILL if the process hasn't exited.
 func Stop() error {
+	intent, err := BeginExplicitStopTransaction()
+	if err != nil {
+		return fmt.Errorf("write stop intent: %w", err)
+	}
 	pid, err := ReadPID()
 	if err != nil {
+		if cleanupErr := CleanupOpenCodeServeAfterForcedStop(); cleanupErr != nil {
+			return cleanupErr
+		}
+		if completeErr := CompleteExplicitStopTransaction(intent.Token); completeErr != nil {
+			return completeErr
+		}
 		return err
 	}
-
-	// Check if process is actually running (PR2: via platform.ProcessController, was signal 0)
-	if !defaultProc.IsAlive(pid) {
-		os.Remove(PIDPath())
+	stoppedAny := false
+	for attempts := 0; attempts < 4; attempts++ {
+		if defaultProc.IsAlive(pid) {
+			if err := stopDaemonProcess(pid, defaultProc); err != nil {
+				return err
+			}
+			stoppedAny = true
+		}
+		if current, ok := waitForReplacementPID(pid); ok {
+			pid = current
+			continue
+		}
+		break
+	}
+	_ = os.Remove(PIDPath())
+	if err := CleanupOpenCodeServeAfterForcedStop(); err != nil {
+		return fmt.Errorf("daemon stopped but opencode cleanup failed: %w", err)
+	}
+	if err := CompleteExplicitStopTransaction(intent.Token); err != nil {
+		return err
+	}
+	if !stoppedAny {
 		return fmt.Errorf("daemon process not running (stale pid file removed)")
 	}
+	return nil
+}
 
-	// Send SIGTERM (PR2: via platform.ProcessController.Terminate)
-	if err := defaultProc.Terminate(pid); err != nil {
-		return fmt.Errorf("send SIGTERM: %w", err)
-	}
-
-	// Wait for process to exit with timeout
-	deadline := time.After(5 * time.Second)
-	ticker := time.NewTicker(100 * time.Millisecond)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-deadline:
-			// Process didn't exit in time, SIGKILL it (PR2: via platform.ProcessController.Kill)
-			if err := defaultProc.Kill(pid); err != nil {
-				return fmt.Errorf("process did not exit after SIGTERM and SIGKILL failed: %w", err)
-			}
-			os.Remove(PIDPath())
-			// NOTE: do NOT remove StatePath() here — daemon.state carries the
-			// persisted daemon_id, which must survive stop/start so the same
-			// physical host keeps one stable ID. Removing it forces MachineID()
-			// to re-derive the ID on next start, and on WSL2/macOS/Docker that
-			// yields a DIFFERENT id (machine-id/MAC/hostname are unstable there),
-			// so the relay sees the same host as two daemons (old=offline, new=online).
-			return nil
-		case <-ticker.C:
-			// Check if process has exited
-			if !defaultProc.IsAlive(pid) {
-				// Process is gone — clean up
-				os.Remove(PIDPath())
-				// NOTE: keep StatePath() (see SIGKILL branch above) so the
-				// daemon_id survives restarts.
-				return nil
-			}
+func waitForReplacementPID(previous int) (int, bool) {
+	deadline := time.Now().Add(stopOwnershipSettlePeriod)
+	for time.Now().Before(deadline) {
+		if current, err := ReadPID(); err == nil && current != previous && defaultProc.IsAlive(current) {
+			return current, true
 		}
+		time.Sleep(stopPollInterval)
 	}
+	return 0, false
+}
+
+func stopDaemonProcess(pid int, proc platform.ProcessController) error {
+	if err := proc.Terminate(pid); err != nil {
+		if !proc.IsAlive(pid) {
+			return nil
+		}
+		if killErr := proc.Kill(pid); killErr != nil {
+			return fmt.Errorf("terminate failed (%v) and kill failed: %w", err, killErr)
+		}
+		return nil
+	}
+	deadline := time.Now().Add(stopGracePeriod)
+	for time.Now().Before(deadline) {
+		if !proc.IsAlive(pid) {
+			return nil
+		}
+		time.Sleep(stopPollInterval)
+	}
+	if !proc.IsAlive(pid) {
+		return nil
+	}
+	if err := proc.Kill(pid); err != nil {
+		return fmt.Errorf("process did not exit after terminate and kill failed: %w", err)
+	}
+	return nil
 }

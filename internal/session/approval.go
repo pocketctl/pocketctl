@@ -287,7 +287,7 @@ func (sm *SessionManager) PendingOpencodeInteractions(sessionID string) []protoc
 
 // reconcileOpencodePermissionSnapshot applies one successful authoritative
 // pending-list response. targetSession is empty for the global legacy list.
-func (sm *SessionManager) reconcileOpencodePermissionSnapshot(targetSession, version string, observed []adapter.PermissionAsked) {
+func (sm *SessionManager) reconcileOpencodePermissionSnapshot(targetSession, version string, observed []adapter.PermissionAsked) []string {
 	seen := make(map[string]map[string]struct{})
 	for _, request := range observed {
 		if request.Version == "" {
@@ -301,6 +301,7 @@ func (sm *SessionManager) reconcileOpencodePermissionSnapshot(targetSession, ver
 	}
 	type staleRequest struct{ sessionID, requestID string }
 	var stale []staleRequest
+	var statusSessions []string
 	sm.mu.RLock()
 	for sessionID, ps := range sm.sessions {
 		if targetSession != "" && sessionID != targetSession {
@@ -319,12 +320,13 @@ func (sm *SessionManager) reconcileOpencodePermissionSnapshot(targetSession, ver
 	for _, request := range stale {
 		if sm.clearOpencodePermission(request.sessionID, request.requestID) {
 			sm.outputCh <- protocol.DaemonEvent{Type: "approval_resolved", SessionID: request.sessionID, RequestID: request.requestID, Reason: "no_longer_pending"}
-			sm.emitCurrentInteractionStatus(request.sessionID)
+			statusSessions = append(statusSessions, request.sessionID)
 		}
 	}
+	return statusSessions
 }
 
-func (sm *SessionManager) reconcileOpencodeQuestionSnapshot(targetSession, version string, observed []adapter.QuestionAsked) {
+func (sm *SessionManager) reconcileOpencodeQuestionSnapshot(targetSession, version string, observed []adapter.QuestionAsked) []string {
 	seen := make(map[string]map[string]struct{})
 	for _, request := range observed {
 		if request.Version == "" {
@@ -338,6 +340,7 @@ func (sm *SessionManager) reconcileOpencodeQuestionSnapshot(targetSession, versi
 	}
 	type staleRequest struct{ sessionID, requestID string }
 	var stale []staleRequest
+	var statusSessions []string
 	sm.mu.RLock()
 	for sessionID, ps := range sm.sessions {
 		if targetSession != "" && sessionID != targetSession {
@@ -356,9 +359,10 @@ func (sm *SessionManager) reconcileOpencodeQuestionSnapshot(targetSession, versi
 	for _, request := range stale {
 		if sm.clearOpencodeQuestion(request.sessionID, request.requestID) {
 			sm.outputCh <- protocol.DaemonEvent{Type: "question_resolved", SessionID: request.sessionID, RequestID: request.requestID, Reason: "no_longer_pending"}
-			sm.emitCurrentInteractionStatus(request.sessionID)
+			statusSessions = append(statusSessions, request.sessionID)
 		}
 	}
+	return statusSessions
 }
 
 // ResolveApproval delivers a client's approval decision to the blocked
@@ -417,21 +421,28 @@ func (sm *SessionManager) ResolveApprovalAction(sessionID, requestID, action str
 	if b == nil || b.coord == nil || b.coord.srv() == nil {
 		return fmt.Errorf("opencode session not found")
 	}
+	b.coord.interactionMu.Lock()
 	sm.mu.RLock()
 	ps := sm.sessions[sessionID]
 	request, ok := ps.PendingPermissions[requestID]
+	directory := ps.Cwd
 	sm.mu.RUnlock()
 	if !ok {
+		b.coord.interactionMu.Unlock()
 		return fmt.Errorf("permission request not pending in session")
 	}
-	if err := b.coord.srv().ReplyPermissionVersioned(context.Background(), sessionID, requestID, action, request.ProtocolVersion); err != nil {
+	if err := b.coord.srv().ReplyPermissionVersionedInDirectory(context.Background(), sessionID, requestID, action, request.ProtocolVersion, directory); err != nil {
+		b.coord.interactionMu.Unlock()
 		return err
 	}
 	sm.clearOpencodePermission(sessionID, requestID)
+	b.coord.markInteractionResolved("permission", sessionID, requestID)
+	b.coord.bumpInteractionGeneration(sessionID, "permission", request.ProtocolVersion)
 	sm.outputCh <- protocol.DaemonEvent{
 		Type: "approval_resolved", SessionID: sessionID, RequestID: requestID,
 		Action: action, Approved: action != "reject",
 	}
+	b.coord.interactionMu.Unlock()
 	sm.reconcileOpencodeInteractionStatus(sessionID, b)
 	return nil
 }
@@ -441,21 +452,29 @@ func (sm *SessionManager) ResolveQuestion(sessionID, requestID string, answers [
 	if b == nil || b.coord == nil || b.coord.srv() == nil {
 		return fmt.Errorf("opencode session not found")
 	}
+	b.coord.interactionMu.Lock()
 	sm.mu.RLock()
 	ps := sm.sessions[sessionID]
 	request, ok := ps.PendingQuestions[requestID]
+	directory := ps.Cwd
 	sm.mu.RUnlock()
 	if !ok {
+		b.coord.interactionMu.Unlock()
 		return fmt.Errorf("question request not pending in session")
 	}
 	if err := protocol.ValidateQuestionAnswers(request.Questions, answers); err != nil {
+		b.coord.interactionMu.Unlock()
 		return err
 	}
-	if err := b.coord.srv().ReplyQuestion(context.Background(), sessionID, requestID, answers); err != nil {
+	if err := b.coord.srv().ReplyQuestionVersioned(context.Background(), sessionID, requestID, answers, request.ProtocolVersion, directory); err != nil {
+		b.coord.interactionMu.Unlock()
 		return err
 	}
 	sm.clearOpencodeQuestion(sessionID, requestID)
+	b.coord.markInteractionResolved("question", sessionID, requestID)
+	b.coord.bumpInteractionGeneration(sessionID, "question", request.ProtocolVersion)
 	sm.outputCh <- protocol.DaemonEvent{Type: "question_resolved", SessionID: sessionID, RequestID: requestID, Answers: answers}
+	b.coord.interactionMu.Unlock()
 	sm.reconcileOpencodeInteractionStatus(sessionID, b)
 	return nil
 }
@@ -465,18 +484,25 @@ func (sm *SessionManager) RejectQuestion(sessionID, requestID string) error {
 	if b == nil || b.coord == nil || b.coord.srv() == nil {
 		return fmt.Errorf("opencode session not found")
 	}
+	b.coord.interactionMu.Lock()
 	sm.mu.RLock()
 	ps := sm.sessions[sessionID]
-	_, ok := ps.PendingQuestions[requestID]
+	request, ok := ps.PendingQuestions[requestID]
+	directory := ps.Cwd
 	sm.mu.RUnlock()
 	if !ok {
+		b.coord.interactionMu.Unlock()
 		return fmt.Errorf("question request not pending in session")
 	}
-	if err := b.coord.srv().RejectQuestion(context.Background(), sessionID, requestID); err != nil {
+	if err := b.coord.srv().RejectQuestionVersioned(context.Background(), sessionID, requestID, request.ProtocolVersion, directory); err != nil {
+		b.coord.interactionMu.Unlock()
 		return err
 	}
 	sm.clearOpencodeQuestion(sessionID, requestID)
+	b.coord.markInteractionResolved("question", sessionID, requestID)
+	b.coord.bumpInteractionGeneration(sessionID, "question", request.ProtocolVersion)
 	sm.outputCh <- protocol.DaemonEvent{Type: "question_resolved", SessionID: sessionID, RequestID: requestID, Rejected: true}
+	b.coord.interactionMu.Unlock()
 	sm.reconcileOpencodeInteractionStatus(sessionID, b)
 	return nil
 }

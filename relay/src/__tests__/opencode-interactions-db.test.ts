@@ -9,6 +9,14 @@ describe('OpenCode interaction DB state', () => {
     expect(queries.some((sql) => /ALTER TABLE sessions ADD COLUMN IF NOT EXISTS active_agent/i.test(sql))).toBe(true)
   })
 
+  test('initDB adds the durable event effect ledger columns', async () => {
+    const queries: string[] = []
+    const pool: any = { query: vi.fn(async (sql: string) => { queries.push(sql); return { rows: [], rowCount: 0 } }) }
+    await initDB(pool)
+    expect(queries.some((sql) => /ALTER TABLE events ADD COLUMN IF NOT EXISTS effect_status/i.test(sql))).toBe(true)
+    expect(queries.some((sql) => /ALTER TABLE events ADD COLUMN IF NOT EXISTS effect_step/i.test(sql))).toBe(true)
+  })
+
   test('updateSessionActiveAgent writes only confirmed active agent', async () => {
     const pool: any = { query: vi.fn(async () => ({ rows: [], rowCount: 1 })) }
     await updateSessionActiveAgent(pool, 'ses_1', 'build')

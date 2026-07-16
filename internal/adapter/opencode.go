@@ -1,7 +1,10 @@
 package adapter
 
 import (
+	"bytes"
+	"crypto/sha256"
 	"encoding/json"
+	"fmt"
 	"sort"
 	"strings"
 
@@ -183,15 +186,13 @@ func ParseOpencodePart(data []byte) (*OpencodePart, error) {
 // only what's new or changed.
 //
 // Dedup rules (mirror the SSE demux): text/reasoning parts emit revisioned
-// deltas plus one final snapshot; step-finish emits once; tool parts re-emit
-// when their status changes (pending/running→completed/error), and a given
-// tool_call is forwarded at most once.
+// deltas plus one final snapshot; structured and tool parts re-emit whenever
+// their canonical semantic snapshot changes, including within the same state.
 type OpencodeSync struct {
 	sessionID     string
-	partState     map[string]string // partID → last emitted marker
+	partState     map[string]opencodePartState
 	textState     map[string]opencodeTextState
 	messageErrors map[string]string // messageID → last emitted raw error
-	seenCalls     map[string]bool   // callID → tool_call already emitted
 	emitUser      bool              // whether to emit user_text parts
 	lastStatusKey string            // last emitted status plus native retry metadata
 
@@ -210,6 +211,12 @@ type opencodeTextState struct {
 	text      string
 	revision  int
 	finalized bool
+	eventID   string
+}
+
+type opencodePartState struct {
+	marker  string
+	eventID string
 }
 
 // NewOpencodeSync creates a differ for a session. emitUser controls whether user
@@ -218,10 +225,9 @@ type opencodeTextState struct {
 func NewOpencodeSync(sessionID string, emitUser bool) *OpencodeSync {
 	return &OpencodeSync{
 		sessionID:     sessionID,
-		partState:     make(map[string]string),
+		partState:     make(map[string]opencodePartState),
 		textState:     make(map[string]opencodeTextState),
 		messageErrors: make(map[string]string),
-		seenCalls:     make(map[string]bool),
 		emitUser:      emitUser,
 	}
 }
@@ -241,6 +247,33 @@ func (s *OpencodeSync) DiffWithNativeStatus(msgs []OpencodeMessageWithParts, nat
 	sort.SliceStable(ordered, func(i, j int) bool {
 		return ordered[i].Info.Time.Created < ordered[j].Info.Time.Created
 	})
+	for messageIndex := range ordered {
+		message := &ordered[messageIndex]
+		if message.Info.ID == "" {
+			// Native-ID-less records are inherently ambiguous. A semantic
+			// fingerprint is more stable than array position when another message
+			// with the same role/timestamp is inserted before this one.
+			message.Info.ID = opencodeFallbackID(
+				"message", message.Info.Role, fmt.Sprint(message.Info.Time.Created),
+				opencodeContentHash(string(opencodeCanonicalJSON(message.Parts))),
+			)
+		}
+		for partIndex := range message.Parts {
+			part := &message.Parts[partIndex]
+			if part.MessageID == "" {
+				part.MessageID = message.Info.ID
+			}
+			if part.ID == "" {
+				part.ID = opencodeFallbackID(
+					"part", message.Info.ID, part.Type,
+					opencodeContentHash(string(opencodeCanonicalJSON(part))),
+				)
+			}
+			if part.Type == "tool" && part.CallID == "" {
+				part.CallID = part.ID
+			}
+		}
+	}
 
 	var out []protocol.DaemonEvent
 	for _, m := range ordered {
@@ -250,19 +283,18 @@ func (s *OpencodeSync) DiffWithNativeStatus(msgs []OpencodeMessageWithParts, nat
 			raw := string(m.Info.Error)
 			if s.messageErrors[m.Info.ID] != raw {
 				s.messageErrors[m.Info.ID] = raw
+				errorMessage := opencodeErrorMessage(m.Info.Error)
 				out = append(out, protocol.DaemonEvent{
 					Type:      "error",
 					SessionID: s.sessionID,
 					MessageID: m.Info.ID,
-					Error:     opencodeErrorMessage(m.Info.Error),
+					Error:     errorMessage,
+					EventID:   fmt.Sprintf("opencode:error:%s:%s", m.Info.ID, opencodeContentHash(errorMessage)),
 				})
 			}
 		}
 		for i := range m.Parts {
 			part := &m.Parts[i]
-			if part.MessageID == "" {
-				part.MessageID = m.Info.ID
-			}
 			if part.Type == "text" || part.Type == "reasoning" {
 				isFinal := !strings.EqualFold(role, "assistant") || m.Info.Time.Completed > 0
 				if ev, ok := s.diffTextPart(part, role, model, isFinal); ok {
@@ -273,31 +305,25 @@ func (s *OpencodeSync) DiffWithNativeStatus(msgs []OpencodeMessageWithParts, nat
 				}
 				continue
 			}
-			marker := "done"
-			if part.Type == "tool" && part.State != nil {
-				marker = part.State.Status
-			} else if part.Type == "retry" || part.Type == "compaction" {
-				encoded, _ := json.Marshal(part)
-				marker = string(encoded)
-			}
-			if s.partState[part.ID] == marker {
+			canonicalPart := opencodeCanonicalJSON(part)
+			marker := opencodeContentHash(string(canonicalPart))
+			previous := s.partState[part.ID]
+			if previous.marker == marker {
 				continue
 			}
-			s.partState[part.ID] = marker
 
+			emittedEventID := ""
 			for _, ev := range ConvertOpencodePart(part, role, model) {
 				if ev.Type == "user_text" && !s.emitUser {
 					continue
 				}
-				if ev.Type == "tool_call" {
-					if s.seenCalls[ev.CallID] {
-						continue
-					}
-					s.seenCalls[ev.CallID] = true
-				}
 				ev.SessionID = s.sessionID
+				ev.EventID = opencodePartEventID(part, ev)
+				ev.PreviousEventID = previous.eventID
+				emittedEventID = ev.EventID
 				out = append(out, ev)
 			}
+			s.partState[part.ID] = opencodePartState{marker: marker, eventID: emittedEventID}
 		}
 	}
 
@@ -354,6 +380,7 @@ func (s *OpencodeSync) diffTextPart(p *OpencodePart, role, model string, final b
 	ev := protocol.DaemonEvent{
 		Type:      "agent_text",
 		Text:      p.Text,
+		Snapshot:  p.Text,
 		Streaming: strings.EqualFold(role, "assistant") && !final,
 		MessageID: p.MessageID,
 		PartID:    p.ID,
@@ -362,9 +389,18 @@ func (s *OpencodeSync) diffTextPart(p *OpencodePart, role, model string, final b
 	}
 	if strings.EqualFold(role, "user") {
 		ev.Type = "user_text"
+		ev.EventID = fmt.Sprintf("opencode:user:%s:%s", p.MessageID, p.ID)
 	} else if p.Type == "reasoning" {
 		ev.Type = "agent_reasoning"
 	}
+	if ev.EventID == "" {
+		stateName := "stream"
+		if final {
+			stateName = "final"
+		}
+		ev.EventID = fmt.Sprintf("opencode:part:%s:%s:%s", p.ID, stateName, opencodeContentHash(p.Text))
+	}
+	ev.PreviousEventID = state.eventID
 
 	if seen {
 		if final || !strings.HasPrefix(p.Text, state.text) {
@@ -375,8 +411,72 @@ func (s *OpencodeSync) diffTextPart(p *OpencodePart, role, model string, final b
 	}
 	state.text = p.Text
 	state.finalized = final
+	state.eventID = ev.EventID
 	s.textState[p.ID] = state
 	return ev, true
+}
+
+func opencodeContentHash(content string) string {
+	sum := sha256.Sum256([]byte(content))
+	return fmt.Sprintf("%x", sum)[:16]
+}
+
+func opencodeFallbackID(kind string, components ...string) string {
+	return fmt.Sprintf("fallback-%s-%s", kind, opencodeContentHash(strings.Join(components, "\x00")))
+}
+
+func opencodeCanonicalJSON(value any) []byte {
+	encoded, _ := json.Marshal(value)
+	var normalized any
+	decoder := json.NewDecoder(bytes.NewReader(encoded))
+	decoder.UseNumber()
+	if decoder.Decode(&normalized) != nil {
+		return encoded
+	}
+	canonical, _ := json.Marshal(normalized)
+	return canonical
+}
+
+// opencodePartEventID identifies a non-text native Part snapshot. Tool Parts
+// use their call identity and mutable state. Other structured Parts are keyed by
+// their Part ID and canonical event content so restarts dedupe an identical
+// snapshot without collapsing a changed native Part.
+func opencodePartEventID(part *OpencodePart, event protocol.DaemonEvent) string {
+	if part.Type == "tool" && part.State != nil {
+		type canonicalTool struct {
+			Tool   string          `json:"tool"`
+			Status string          `json:"status"`
+			Input  json.RawMessage `json:"input,omitempty"`
+			Output string          `json:"output,omitempty"`
+			Error  string          `json:"error,omitempty"`
+		}
+		canonical := opencodeCanonicalJSON(canonicalTool{
+			Tool: part.Tool, Status: part.State.Status, Input: part.State.Input,
+			Output: part.State.Output, Error: part.State.Error,
+		})
+		return fmt.Sprintf("opencode:tool:%s:%s:%s", part.CallID, part.State.Status, opencodeContentHash(string(canonical)))
+	}
+	event.EventID = ""
+	event.PreviousEventID = ""
+	event.Seq = 0
+	canonical := opencodeCanonicalJSON(event)
+	return fmt.Sprintf("opencode:part:%s:final:%s", part.ID, opencodeContentHash(string(canonical)))
+}
+
+// OpencodeTodoEventID returns the stable identity for a native todo snapshot.
+// A fixed-field projection makes the JSON representation explicit and stable.
+func OpencodeTodoEventID(sessionID string, todos []protocol.TodoItem) string {
+	type canonicalTodo struct {
+		Content  string `json:"content"`
+		Status   string `json:"status"`
+		Priority string `json:"priority"`
+	}
+	canonical := make([]canonicalTodo, len(todos))
+	for i, todo := range todos {
+		canonical[i] = canonicalTodo{Content: todo.Content, Status: todo.Status, Priority: todo.Priority}
+	}
+	encoded, _ := json.Marshal(canonical)
+	return fmt.Sprintf("opencode:todo:%s:%s", sessionID, opencodeContentHash(string(encoded)))
 }
 
 // latestCompletedAssistant returns the greatest Time.Completed across assistant
@@ -435,9 +535,8 @@ func (s *OpencodeSync) deriveStatus(ordered []OpencodeMessageWithParts) string {
 // model come from the part's owning message ("user"/"assistant", display model).
 //
 // Tool parts are observed as their state evolves: pending/running yields a
-// tool_call; completed/error yields a tool_result. The observation layer
-// (DirWatch / SSE demux) is responsible for not double-forwarding the same
-// tool_call across repeated part updates (dedupe by call_id).
+// tool_call; completed/error yields a tool_result. OpencodeSync deduplicates an
+// exact canonical snapshot while preserving same-state input/output mutation.
 func ConvertOpencodePart(p *OpencodePart, role, model string) []protocol.DaemonEvent {
 	switch p.Type {
 	case "text":

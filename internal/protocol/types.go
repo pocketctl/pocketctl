@@ -52,10 +52,12 @@ type DaemonEvent struct {
 	// highest contiguous seq it has persisted so the daemon can trim its
 	// outbound replay buffer. Zero/omitted means a legacy event (no dedup).
 	Seq                    int64                `json:"seq,omitempty"`
-	EventID                string               `json:"event_id,omitempty"` // stable JSONL record identity across daemon restarts
+	EventID                string               `json:"event_id,omitempty"`          // stable JSONL record identity across daemon restarts
+	PreviousEventID        string               `json:"previous_event_id,omitempty"` // causal predecessor for mutable native snapshots
 	SessionID              string               `json:"session_id"`
 	OldSessionID           string               `json:"old_session_id,omitempty"`
 	Text                   string               `json:"text,omitempty"`
+	Snapshot               string               `json:"snapshot,omitempty"` // full native text snapshot; Text may remain an append delta
 	Streaming              bool                 `json:"streaming,omitempty"`
 	MessageID              string               `json:"message_id,omitempty"` // source message identity (OpenCode revisioned Parts)
 	PartID                 string               `json:"part_id,omitempty"`    // source Part identity for client-side upsert

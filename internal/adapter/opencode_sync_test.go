@@ -1,6 +1,14 @@
 package adapter
 
-import "testing"
+import (
+	"crypto/sha256"
+	"encoding/json"
+	"fmt"
+	"strings"
+	"testing"
+
+	"github.com/pocketctl/pocketctl/internal/protocol"
+)
 
 // mkMsg builds an OpencodeMessageWithParts for the differ tests. completed>0
 // marks an assistant turn as finished.
@@ -14,6 +22,246 @@ func mkMsg(id, role, model string, created, completed int64, parts ...OpencodePa
 		m.Info.Model = &OpencodeModelRef{ProviderID: "opencode", ModelID: model}
 	}
 	return m
+}
+
+func shortSHA256(value string) string {
+	return fmt.Sprintf("%x", sha256.Sum256([]byte(value)))[:16]
+}
+
+func TestOpencodeSync_EventIDsStableAcrossInstances(t *testing.T) {
+	snapshot := []OpencodeMessageWithParts{
+		mkMsg("msg_u", "user", "", 1, 0,
+			OpencodePart{ID: "prt_u", MessageID: "msg_u", Type: "text", Text: "question"}),
+		mkMsg("msg_a", "assistant", "glm-5", 2, 3,
+			OpencodePart{ID: "prt_text", MessageID: "msg_a", Type: "text", Text: "answer"},
+			OpencodePart{ID: "prt_reason", MessageID: "msg_a", Type: "reasoning", Text: "thinking"},
+			OpencodePart{ID: "prt_tool", MessageID: "msg_a", Type: "tool", CallID: "call_1", Tool: "read",
+				State: &OpencodeToolState{Status: "completed", Output: "ok"}}),
+	}
+	first := NewOpencodeSync("ses_1", true).Diff(snapshot)
+	second := NewOpencodeSync("ses_1", true).Diff(snapshot)
+	if len(first) != len(second) {
+		t.Fatalf("fresh syncs emitted different event counts: %d != %d", len(first), len(second))
+	}
+	for i := range first {
+		if first[i].EventID != second[i].EventID {
+			t.Fatalf("event %d identity changed across sync instances: %q != %q", i, first[i].EventID, second[i].EventID)
+		}
+	}
+	wants := map[string]string{
+		"user_text":       "opencode:user:msg_u:prt_u",
+		"agent_text":      "opencode:part:prt_text:final:" + shortSHA256("answer"),
+		"agent_reasoning": "opencode:part:prt_reason:final:" + shortSHA256("thinking"),
+	}
+	for _, event := range first {
+		if event.Type == "tool_result" && !strings.HasPrefix(event.EventID, "opencode:tool:call_1:completed:") {
+			t.Errorf("tool_result event_id=%q", event.EventID)
+		}
+		if want, ok := wants[event.Type]; ok && event.EventID != want {
+			t.Errorf("%s event_id=%q want %q", event.Type, event.EventID, want)
+		}
+	}
+}
+
+func TestOpencodeSync_EventIDsPreserveTextAndToolTransitions(t *testing.T) {
+	syncer := NewOpencodeSync("ses_1", false)
+	stream := syncer.Diff([]OpencodeMessageWithParts{mkMsg("msg_a", "assistant", "glm-5", 1, 0,
+		OpencodePart{ID: "prt_text", MessageID: "msg_a", Type: "text", Text: "Hel"},
+		OpencodePart{ID: "prt_tool", MessageID: "msg_a", Type: "tool", CallID: "call_1", Tool: "read",
+			State: &OpencodeToolState{Status: "running", Input: []byte(`{"path":"a"}`)}},
+	)})
+	growth := syncer.Diff([]OpencodeMessageWithParts{mkMsg("msg_a", "assistant", "glm-5", 1, 0,
+		OpencodePart{ID: "prt_text", MessageID: "msg_a", Type: "text", Text: "Hello"},
+		OpencodePart{ID: "prt_tool", MessageID: "msg_a", Type: "tool", CallID: "call_1", Tool: "read",
+			State: &OpencodeToolState{Status: "completed", Output: "ok"}},
+	)})
+	if stream[0].EventID != "opencode:part:prt_text:stream:"+shortSHA256("Hel") {
+		t.Fatalf("initial stream id=%q", stream[0].EventID)
+	}
+	if growth[0].EventID != "opencode:part:prt_text:stream:"+shortSHA256("Hello") || growth[0].EventID == stream[0].EventID {
+		t.Fatalf("text growth must have snapshot-derived identity: before=%q after=%q", stream[0].EventID, growth[0].EventID)
+	}
+	if !strings.HasPrefix(stream[1].EventID, "opencode:tool:call_1:running:") || !strings.HasPrefix(growth[1].EventID, "opencode:tool:call_1:completed:") {
+		t.Fatalf("tool state identities wrong: before=%q after=%q", stream[1].EventID, growth[1].EventID)
+	}
+}
+
+func TestOpencodeSync_TextEventIDsFormRestartStableCausalChain(t *testing.T) {
+	firstSync := NewOpencodeSync("ses_1", false)
+	first := firstSync.Diff([]OpencodeMessageWithParts{mkMsg("msg_a", "assistant", "glm-5", 1, 0,
+		OpencodePart{ID: "prt_text", Type: "text", Text: "Hel"},
+	)})[0]
+	if first.PreviousEventID != "" {
+		t.Fatalf("first snapshot unexpectedly has predecessor %q", first.PreviousEventID)
+	}
+
+	restarted := NewOpencodeSync("ses_1", false)
+	seed := restarted.Diff([]OpencodeMessageWithParts{mkMsg("msg_a", "assistant", "glm-5", 1, 0,
+		OpencodePart{ID: "prt_text", Type: "text", Text: "Hel"},
+	)})[0]
+	if seed.EventID != first.EventID {
+		t.Fatalf("restart seed id changed: %q != %q", seed.EventID, first.EventID)
+	}
+	growth := restarted.Diff([]OpencodeMessageWithParts{mkMsg("msg_a", "assistant", "glm-5", 1, 0,
+		OpencodePart{ID: "prt_text", Type: "text", Text: "Hell"},
+	)})[0]
+	if growth.PreviousEventID != seed.EventID {
+		t.Fatalf("growth predecessor=%q want %q", growth.PreviousEventID, seed.EventID)
+	}
+	if growth.Text != "l" || growth.Snapshot != "Hell" {
+		t.Fatalf("growth must carry delta plus full snapshot: %+v", growth)
+	}
+	final := restarted.Diff([]OpencodeMessageWithParts{mkMsg("msg_a", "assistant", "glm-5", 1, 2,
+		OpencodePart{ID: "prt_text", Type: "text", Text: "Hell"},
+	)})[0]
+	if final.PreviousEventID != growth.EventID || final.EventID == growth.EventID {
+		t.Fatalf("final causal identity wrong: previous=%q id=%q growth=%q", final.PreviousEventID, final.EventID, growth.EventID)
+	}
+}
+
+func TestOpencodeSync_ToolSameStateMutationEmitsDistinctStableEvents(t *testing.T) {
+	syncer := NewOpencodeSync("ses_1", false)
+	tool := func(status, input, output, stateError string) []OpencodeMessageWithParts {
+		return []OpencodeMessageWithParts{mkMsg("msg_a", "assistant", "glm-5", 1, 0,
+			OpencodePart{ID: "prt_tool", Type: "tool", CallID: "call_1", Tool: "read", State: &OpencodeToolState{
+				Status: status, Input: json.RawMessage(input), Output: output, Error: stateError,
+			}},
+		)}
+	}
+	running1 := syncer.Diff(tool("running", `{"path":"a","mode":1}`, "", ""))[0]
+	if exact := syncer.Diff(tool("running", `{"mode":1,"path":"a"}`, "", "")); len(exact) != 0 {
+		t.Fatalf("exact running replay emitted: %+v", exact)
+	}
+	running2 := syncer.Diff(tool("running", `{"path":"b"}`, "", ""))[0]
+	completed1 := syncer.Diff(tool("completed", `{"path":"b"}`, "one", ""))[0]
+	completed2 := syncer.Diff(tool("completed", `{"path":"b"}`, "two", ""))[0]
+	if exact := syncer.Diff(tool("completed", `{"path":"b"}`, "two", "")); len(exact) != 0 {
+		t.Fatalf("exact completed replay emitted: %+v", exact)
+	}
+	error1 := syncer.Diff(tool("error", `{"path":"b"}`, "", "failed one"))[0]
+	error2 := syncer.Diff(tool("error", `{"path":"b"}`, "", "failed two"))[0]
+	if exact := syncer.Diff(tool("error", `{"path":"b"}`, "", "failed two")); len(exact) != 0 {
+		t.Fatalf("exact error replay emitted: %+v", exact)
+	}
+	for _, pair := range [][2]string{{running1.EventID, running2.EventID}, {completed1.EventID, completed2.EventID}, {error1.EventID, error2.EventID}} {
+		if pair[0] == pair[1] {
+			t.Fatalf("same-state semantic mutation reused id %q", pair[0])
+		}
+	}
+	if running2.PreviousEventID != running1.EventID || completed2.PreviousEventID != completed1.EventID || error2.PreviousEventID != error1.EventID {
+		t.Fatalf("tool mutations lost causal chain: running=%q completed=%q error=%q", running2.PreviousEventID, completed2.PreviousEventID, error2.PreviousEventID)
+	}
+}
+
+func TestOpencodeSync_EmptyNativeIDsGetDistinctStableFallbacks(t *testing.T) {
+	snapshot := []OpencodeMessageWithParts{
+		mkMsg("", "assistant", "glm-5", 100, 0,
+			OpencodePart{Type: "text", Text: "one"},
+			OpencodePart{Type: "text", Text: "two"},
+			OpencodePart{Type: "tool", Tool: "read", State: &OpencodeToolState{Status: "running", Input: []byte(`{"path":"a"}`)}},
+			OpencodePart{Type: "tool", Tool: "read", State: &OpencodeToolState{Status: "running", Input: []byte(`{"path":"b"}`)}}),
+		mkMsg("", "assistant", "glm-5", 101, 2),
+		mkMsg("", "assistant", "glm-5", 102, 3),
+	}
+	snapshot[1].Info.Error = []byte(`{"name":"Error","data":{"message":"failed"}}`)
+	snapshot[2].Info.Error = []byte(`{"name":"Error","data":{"message":"failed"}}`)
+	first := NewOpencodeSync("ses_1", false).Diff(snapshot)
+	second := NewOpencodeSync("ses_1", false).Diff(snapshot)
+	seen := map[string]bool{}
+	for i := range first {
+		if first[i].Type == "session_status" {
+			continue
+		}
+		if first[i].EventID == "" || first[i].EventID != second[i].EventID {
+			t.Fatalf("event %d fallback identity unstable: %q != %q", i, first[i].EventID, second[i].EventID)
+		}
+		if seen[first[i].EventID] {
+			t.Fatalf("fallback identity collision: %q", first[i].EventID)
+		}
+		seen[first[i].EventID] = true
+		if strings.Contains(first[i].EventID, "tool::") {
+			t.Fatalf("empty tool identity leaked into id: %q", first[i].EventID)
+		}
+	}
+}
+
+func TestOpencodeSync_EmptyMessageFallbackSurvivesEarlierHistory(t *testing.T) {
+	target := func() OpencodeMessageWithParts {
+		return mkMsg("", "assistant", "glm-5", 100, 0, OpencodePart{Type: "text", Text: "target"})
+	}
+	first := NewOpencodeSync("ses_1", false).Diff([]OpencodeMessageWithParts{target()})[0]
+	withHistory := NewOpencodeSync("ses_1", false).Diff([]OpencodeMessageWithParts{
+		mkMsg("older", "user", "", 50, 0, OpencodePart{ID: "older-part", Type: "text", Text: "old"}),
+		target(),
+	})
+	var replay protocol.DaemonEvent
+	for _, event := range withHistory {
+		if event.Text == "target" {
+			replay = event
+			break
+		}
+	}
+	if replay.EventID != first.EventID {
+		t.Fatalf("earlier history changed fallback identity: %q != %q", replay.EventID, first.EventID)
+	}
+}
+
+func TestOpencodeSync_EmptyMessageFallbackSurvivesSameContextInsertion(t *testing.T) {
+	target := func() OpencodeMessageWithParts {
+		return mkMsg("", "assistant", "glm-5", 100, 0, OpencodePart{Type: "text", Text: "target"})
+	}
+	first := NewOpencodeSync("ses_1", false).Diff([]OpencodeMessageWithParts{target()})[0]
+	withPeer := NewOpencodeSync("ses_1", false).Diff([]OpencodeMessageWithParts{
+		mkMsg("", "assistant", "glm-5", 100, 0, OpencodePart{Type: "text", Text: "inserted"}),
+		target(),
+	})
+	found := false
+	for _, event := range withPeer {
+		if event.Text == "target" {
+			found = true
+			if event.EventID != first.EventID {
+				t.Fatalf("same-context insertion changed fallback identity: %q != %q", event.EventID, first.EventID)
+			}
+		}
+	}
+	if !found {
+		t.Fatal("target event missing")
+	}
+}
+
+func TestOpencodeSync_EmptyPartFallbackSurvivesPrefixInsertion(t *testing.T) {
+	target := OpencodePart{Type: "text", Text: "target"}
+	first := NewOpencodeSync("ses_1", false).Diff([]OpencodeMessageWithParts{
+		mkMsg("msg_1", "assistant", "glm-5", 100, 0, target),
+	})[0]
+	withPrefix := NewOpencodeSync("ses_1", false).Diff([]OpencodeMessageWithParts{
+		mkMsg("msg_1", "assistant", "glm-5", 100, 0, OpencodePart{Type: "reasoning", Text: "prefix"}, target),
+	})
+	found := false
+	for _, event := range withPrefix {
+		if event.Text == "target" {
+			found = true
+			if event.EventID != first.EventID {
+				t.Fatalf("Part prefix changed fallback identity: %q != %q", event.EventID, first.EventID)
+			}
+		}
+	}
+	if !found {
+		t.Fatal("target event missing")
+	}
+}
+
+func TestOpencodeSync_ErrorEventIDChangesWithError(t *testing.T) {
+	syncer := NewOpencodeSync("ses_1", false)
+	first := mkMsg("msg_a", "assistant", "glm-5", 1, 2)
+	first.Info.Error = []byte(`{"name":"APIError","data":{"message":"failed"}}`)
+	before := syncer.Diff([]OpencodeMessageWithParts{first})[0]
+	changed := first
+	changed.Info.Error = []byte(`{"name":"APIError","data":{"message":"retry failed"}}`)
+	after := syncer.Diff([]OpencodeMessageWithParts{changed})[0]
+	if before.EventID != "opencode:error:msg_a:"+shortSHA256("failed") || before.EventID == after.EventID {
+		t.Fatalf("error identities wrong: before=%q after=%q", before.EventID, after.EventID)
+	}
 }
 
 func TestOpencodeSync_IncrementalAndOrdering(t *testing.T) {
@@ -298,5 +546,16 @@ func TestOpencodeSync_Compaction(t *testing.T) {
 	}
 	if again := s.Diff([]OpencodeMessageWithParts{mkMsg("msg_a", "assistant", "glm-5", 1000, 2000, part)}); again != nil {
 		t.Fatalf("unchanged compaction must not repeat: %+v", again)
+	}
+}
+
+func TestOpencodeCanonicalJSONPreservesLargeIntegers(t *testing.T) {
+	left := opencodeCanonicalJSON(json.RawMessage(`{"value":9007199254740992}`))
+	right := opencodeCanonicalJSON(json.RawMessage(`{"value":9007199254740993}`))
+	if string(left) == string(right) {
+		t.Fatalf("adjacent integers above 2^53 must remain distinct: %s", left)
+	}
+	if string(right) != `{"value":9007199254740993}` {
+		t.Fatalf("large integer changed during canonicalization: %s", right)
 	}
 }

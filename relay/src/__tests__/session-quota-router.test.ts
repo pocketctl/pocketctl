@@ -17,7 +17,7 @@ vi.mock('../quota.js', async (importOriginal) => {
 })
 
 import { Router } from '../router.js'
-import { releaseQuotaReservation, reserveConcurrentSession } from '../quota.js'
+import { getQuotaSnapshot, releaseQuotaReservation, reserveConcurrentSession } from '../quota.js'
 
 process.env.QUOTA_ENFORCEMENT = 'enforce'
 
@@ -32,8 +32,9 @@ function ws(): any {
 }
 
 function pool(): any {
-  return {
+  const value: any = {
     query: vi.fn(async (sql: string) => {
+      if (sql.includes('RETURNING daemon_id')) return { rows: [{ daemon_id: 'd1' }], rowCount: 1 }
       if (sql.includes('SELECT plan, whitelist')) return { rows: [{ plan: 'free', whitelist: false }] }
       if (sql.includes('SELECT alias FROM daemons')) return { rows: [] }
       if (sql.includes('SELECT daemon_id FROM sessions')) return { rows: [] }
@@ -41,11 +42,14 @@ function pool(): any {
       return { rows: [], rowCount: 0 }
     }),
   }
+  value.connect = vi.fn(async () => ({ query: (...args: any[]) => value.query(...args), release: vi.fn() }))
+  return value
 }
 
 function exitedSessionPool(): any {
   const value = pool()
   value.query = vi.fn(async (sql: string) => {
+    if (sql.includes('RETURNING daemon_id')) return { rows: [{ daemon_id: 'd1' }], rowCount: 1 }
     if (sql.includes('SELECT plan, whitelist')) return { rows: [{ plan: 'free', whitelist: false }] }
     if (sql.includes('SELECT 1 FROM sessions')) return { rows: [{ '?column?': 1 }], rowCount: 1 }
     if (sql.includes('SELECT status FROM sessions')) return { rows: [{ status: 'exited' }] }
@@ -117,6 +121,45 @@ describe('Router active-session quota', () => {
     })
     await vi.waitFor(() => expect(releaseQuotaReservation).toHaveBeenCalledWith(expect.anything(), 'reservation-1'))
     expect(client._sent).toContainEqual(expect.objectContaining({ type: 'session_create_failed', request_id: 'request-1', error: 'boom' }))
+  })
+
+  test('awaits reservation release before reading and broadcasting quota for a durable create', async () => {
+    vi.mocked(reserveConcurrentSession).mockResolvedValue({
+      allowed: true,
+      reservationId: 'reservation-ordered',
+      expiresAt: 1_800_000_000_000,
+      reused: false,
+    })
+    let release!: () => void
+    vi.mocked(releaseQuotaReservation).mockImplementationOnce(() => new Promise<void>(resolve => { release = resolve }))
+    const value = pool()
+    value.query = vi.fn(async (sql: string) => {
+      if (sql.includes('SELECT plan, whitelist')) return { rows: [{ plan: 'free', whitelist: false }] }
+      if (sql.includes('INSERT INTO events')) {
+        return { rows: [{ id: 11, inserted: true, effect_status: 'pending', effect_step: 0 }] }
+      }
+      return { rows: [], rowCount: 1 }
+    })
+    const router = new Router(value)
+    const daemon = ws()
+    const client = ws()
+    await router.registerDaemon(daemon, { type: 'register', daemon_id: 'd1', hostname: 'host', agents: [], supports_quota_grant: true, started_at: 100 }, 7)
+    await vi.waitFor(() => expect(getQuotaSnapshot).toHaveBeenCalled())
+    vi.mocked(getQuotaSnapshot).mockClear()
+    router.registerClient(client, 7)
+    await router.handleClientMessage(client, {
+      type: 'session_create', daemon_id: 'd1', request_id: 'request-ordered', agent: 'codex', cwd: '/repo',
+    })
+    await vi.waitFor(() => expect(getQuotaSnapshot).toHaveBeenCalled())
+    vi.mocked(getQuotaSnapshot).mockClear()
+
+    router.handleDaemonMessage('d1', {
+      type: 'session_created', session_id: 'sess-1', event_id: 'created-ordered', request_id: 'request-ordered', seq: 1,
+    })
+    await vi.waitFor(() => expect(releaseQuotaReservation).toHaveBeenCalledWith(expect.anything(), 'reservation-ordered'))
+    expect(getQuotaSnapshot).not.toHaveBeenCalled()
+    release()
+    await vi.waitFor(() => expect(getQuotaSnapshot).toHaveBeenCalled())
   })
 
   test('coalesces a duplicate create while the original request is pending', async () => {

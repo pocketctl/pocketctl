@@ -83,16 +83,17 @@ export async function claimBoundDaemonSlot(pool: pg.Pool, input: ClaimBoundDaemo
       return { allowed: false, reason: 'host_quota_exceeded', used, limit: input.limit }
     }
 
-    await client.query(
-      `INSERT INTO daemons
-         (daemon_id, user_id, hostname, agents, status, last_heartbeat, arch, version, started_at)
-       VALUES ($1, $2, $3, $4, 'online', NOW(), $5, $6, $7)
-       ON CONFLICT (daemon_id) DO UPDATE SET
-         user_id = $2, hostname = $3, agents = $4, status = 'online', last_heartbeat = NOW(),
-         arch = COALESCE($5, daemons.arch), version = COALESCE($6, daemons.version),
-         started_at = COALESCE($7, daemons.started_at)`,
-      [input.daemonId, input.userId, input.hostname, JSON.stringify(input.agents), input.arch || null, input.version || null, input.startedAt || null],
-    )
+    // Admission owns only the durable account binding. Connection metadata,
+    // online status, incarnation, and token are committed later by Router's
+    // generation-guarded activation transaction.
+    if (!reconnect) {
+      await client.query(
+        `INSERT INTO daemons (daemon_id, user_id, status)
+         VALUES ($1, $2, 'offline')
+         ON CONFLICT (daemon_id) DO NOTHING`,
+        [input.daemonId, input.userId],
+      )
+    }
     await client.query('COMMIT')
     return { allowed: true, reconnect, used: reconnect ? used : used + 1, limit: input.limit }
   } catch (error) {

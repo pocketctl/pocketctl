@@ -12,6 +12,8 @@ vi.mock('../db.js', async (importOriginal) => {
     setDaemonOnline: vi.fn().mockResolvedValue(undefined),
     getDaemonAlias: vi.fn().mockResolvedValue(null),
     getDaemonOwner: vi.fn().mockResolvedValue(null),
+    activateDaemonRegistration: vi.fn().mockResolvedValue(null),
+    restoreDaemonRegistration: vi.fn().mockResolvedValue(undefined),
     recordSubagentUsage: actual.recordSubagentUsage,
   }
 })

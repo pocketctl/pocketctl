@@ -1484,6 +1484,9 @@ function processEvent(evt: any, target: any[] = messages.value, subagentOverride
       message_id: evt.message_id || evt.payload?.message_id,
       part_id: evt.part_id || evt.payload?.part_id,
       revision: evt.revision || evt.payload?.revision,
+      snapshot: evt.snapshot ?? evt.payload?.snapshot,
+      event_id: evt.event_id || evt.payload?.event_id,
+      previous_event_id: evt.previous_event_id || evt.payload?.previous_event_id,
       replace: evt.replace ?? evt.payload?.replace,
       streaming: evt.streaming ?? evt.payload?.streaming ?? false,
       usage,
@@ -1507,6 +1510,9 @@ function processEvent(evt: any, target: any[] = messages.value, subagentOverride
       message_id: evt.message_id || evt.payload?.message_id,
       part_id: evt.part_id || evt.payload?.part_id,
       revision: evt.revision || evt.payload?.revision,
+      snapshot: evt.snapshot ?? evt.payload?.snapshot,
+      event_id: evt.event_id || evt.payload?.event_id,
+      previous_event_id: evt.previous_event_id || evt.payload?.previous_event_id,
       replace: evt.replace ?? evt.payload?.replace,
       streaming: evt.streaming ?? evt.payload?.streaming ?? false,
     })
@@ -1547,16 +1553,24 @@ function processEvent(evt: any, target: any[] = messages.value, subagentOverride
     const tool = evt.tool || evt.payload?.tool || ''
     const input = evt.input || evt.payload?.input
     const inputDesc = formatToolInput(tool, input)
-    // Always create new tool_call message (matches iOS app). If a matching
-    // result arrived out of order (buffered in pendingToolResults), apply it
-    // now so the card renders completed instead of spinning forever.
     const pending = pendingToolResults.get(callId)
-    target.push({
-      id: nextId('t'), type: 'tool_call', call_id: callId,
-      tool, input, inputDesc,
-      output: pending?.output ?? null, status: pending ? 'completed' : 'running',
-      expanded: false, outputExpanded: false,
-    })
+    const existing = target.find(message => message.type === 'tool_call' && message.call_id === callId)
+    if (existing) {
+      existing.tool = tool
+      existing.input = input
+      existing.inputDesc = inputDesc
+      if (pending) {
+        existing.output = pending.output
+        existing.status = 'completed'
+      }
+    } else {
+      target.push({
+        id: nextId('t'), type: 'tool_call', call_id: callId,
+        tool, input, inputDesc,
+        output: pending?.output ?? null, status: pending ? 'completed' : 'running',
+        expanded: false, outputExpanded: false,
+      })
+    }
     if (pending) pendingToolResults.delete(callId)
   } else if (type === 'tool_result') {
     const callId = evt.call_id || evt.payload?.call_id
@@ -1578,6 +1592,14 @@ function processEvent(evt: any, target: any[] = messages.value, subagentOverride
       // result so it's applied when the matching tool_call arrives.
       pendingToolResults.set(callId, { output: output ?? null })
     }
+  } else if (type === 'error') {
+    // Durable OpenCode errors can arrive both as live events and replay_batch.
+    // Use the daemon's stable event_id (falling back to message_id) so refresh
+    // and reconnect never render the same assistant error twice.
+    const errorText = evt.error || evt.content || evt.payload?.error || evt.payload?.content || 'Unknown error'
+    const eventKey = evt.event_id || evt.payload?.event_id || (evt.message_id || evt.payload?.message_id ? `message:${evt.message_id || evt.payload?.message_id}` : '')
+    if (eventKey && target.some((m: any) => m.type === 'error' && m.eventKey === eventKey)) return
+    target.push({ id: nextId('e'), type: 'error', role: 'agent', content: errorText, error: errorText, eventKey, message_id: evt.message_id || evt.payload?.message_id })
   } else if (type === 'session_status') {
     const s = evt.status || evt.payload?.status
     if (s) status.value = s
@@ -1676,6 +1698,9 @@ function processEvent(evt: any, target: any[] = messages.value, subagentOverride
     })
   }
 }
+
+// Exposed for focused integration tests of the actual event-consumer path.
+defineExpose({ processEvent, messages, status, currentOpenCodeAgent })
 
 // Composite load key: session id + (optional) focused sub-agent id. A change
 // covers every transition — session switch, entering / leaving the focused
@@ -2109,7 +2134,13 @@ onMounted(() => {
       stopErrorTimer = setTimeout(() => { stopError.value = '' }, 3500)
       return
     }
-    messages.value.push({ id: nextId('e'), type: 'error', content: msg.error || '未知错误' })
+    // Native assistant errors are durable events and must share the replay
+    // path so live delivery and refresh use the same event-key deduplication.
+    if (msg.event_id || msg.message_id || msg.payload?.event_id || msg.payload?.message_id) {
+      processEvent(msg)
+    } else {
+      messages.value.push({ id: nextId('e'), type: 'error', content: msg.error || '未知错误' })
+    }
   }))
 
   cleanups.push(onEvent('session_deleted', (msg: any) => {

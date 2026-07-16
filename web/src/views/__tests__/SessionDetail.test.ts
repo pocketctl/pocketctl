@@ -2,6 +2,27 @@ import { describe, test, expect } from 'vitest'
 import type { CommandItem } from '../../composables/useWebSocket'
 import { mergeLocalCommands } from '../../utils/commands'
 
+describe('durable assistant errors', () => {
+  function processError(target: any[], evt: any) {
+    const key = evt.event_id || evt.message_id
+    if (key && target.some(m => m.type === 'error' && m.eventKey === key)) return
+    const text = evt.error || evt.payload?.error || 'Unknown error'
+    target.push({ type: 'error', eventKey: key, content: text, error: text })
+  }
+
+  test('live and replay/refresh events are persisted once and remain visible', () => {
+    const messages: any[] = []
+    const event = { type: 'error', event_id: 'opencode:error:m1:abcdef0123456789', message_id: 'm1', error: 'Provider authentication failed' }
+    processError(messages, event)
+    processError(messages, { ...event, payload: event })
+    expect(messages).toHaveLength(1)
+    expect(messages[0]).toMatchObject({ type: 'error', content: 'Provider authentication failed' })
+    const refreshed = messages.map(m => ({ ...m }))
+    processError(refreshed, event)
+    expect(refreshed).toHaveLength(1)
+  })
+})
+
 // Pure logic tests extracted from SessionDetail.vue
 
 describe('exitReasonLabel', () => {

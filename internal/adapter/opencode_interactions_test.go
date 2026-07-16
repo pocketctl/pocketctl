@@ -7,7 +7,79 @@ import (
 	"net/http/httptest"
 	"reflect"
 	"testing"
+	"time"
 )
+
+func TestOpencodeServer_GlobalEvents(t *testing.T) {
+	stream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/global/event" {
+			t.Errorf("event path=%q", r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("event: message\n"))
+		_, _ = w.Write([]byte("data: not-json\n\n"))
+		_, _ = w.Write([]byte(`data: {"directory":"/tmp/other","project":"proj_1","workspace":"ws_1","payload":{"id":"evt_1","type":"permission.asked","properties":{"id":"per_1","sessionID":"ses_1","permission":"bash","patterns":["pwd"]}}}` + "\n\n"))
+		_, _ = w.Write([]byte(`data: {"directory":"/tmp/other","payload":{"id":"evt_2","type":"question.asked","properties":{"id":"que_1","sessionID":"ses_1","questions":[{"question":"Continue?"}]}}}` + "\n\n"))
+	}))
+	defer stream.Close()
+
+	srv := NewOpencodeServer("unused")
+	srv.mu.Lock()
+	srv.baseURL = stream.URL
+	srv.mu.Unlock()
+	events, err := srv.GlobalEvents(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []SSEEvent{
+		{ID: "evt_1", Type: "permission.asked", Directory: "/tmp/other", Properties: json.RawMessage(`{"id":"per_1","sessionID":"ses_1","permission":"bash","patterns":["pwd"]}`)},
+		{ID: "evt_2", Type: "question.asked", Directory: "/tmp/other", Properties: json.RawMessage(`{"id":"que_1","sessionID":"ses_1","questions":[{"question":"Continue?"}]}`)},
+	}
+	var got []SSEEvent
+	for event := range events {
+		got = append(got, event)
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("events=%+v want %+v", got, want)
+	}
+}
+
+func TestOpencodeServer_GlobalEventsNonOK(t *testing.T) {
+	stream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "nope", http.StatusServiceUnavailable)
+	}))
+	defer stream.Close()
+	srv := NewOpencodeServer("unused")
+	srv.mu.Lock()
+	srv.baseURL = stream.URL
+	srv.mu.Unlock()
+	if _, err := srv.GlobalEvents(context.Background()); err == nil {
+		t.Fatal("expected non-200 error")
+	}
+}
+
+func TestOpencodeServer_GlobalEventsClosesOnDisconnect(t *testing.T) {
+	stream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+	}))
+	defer stream.Close()
+	srv := NewOpencodeServer("unused")
+	srv.mu.Lock()
+	srv.baseURL = stream.URL
+	srv.mu.Unlock()
+	events, err := srv.GlobalEvents(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case _, ok := <-events:
+		if ok {
+			t.Fatal("event channel remained open after disconnect")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("event channel did not close after disconnect")
+	}
+}
 
 type roundTripFunc func(*http.Request) (*http.Response, error)
 
@@ -43,11 +115,15 @@ func TestOpencodeServer_Commands(t *testing.T) {
 			if r.Method != http.MethodGet || r.URL.Path != "/command" {
 				t.Errorf("list request = %s %s", r.Method, r.URL.Path)
 			}
-			json.NewEncoder(w).Encode([]map[string]any{{
-				"name": "review", "description": "Review", "source": "command",
-				"template": "Review $ARGUMENTS", "hints": []string{"[scope]"}, "subtask": true,
-				"agent": "build", "model": "openai/gpt-5",
-			}})
+			json.NewEncoder(w).Encode([]map[string]any{
+				{
+					"name": "review", "description": "Review", "source": "command",
+					"template": "Review $ARGUMENTS", "hints": []string{"[scope]"}, "subtask": true,
+					"agent": "build", "model": "openai/gpt-5",
+				},
+				{"name": "mcp_search", "source": "mcp", "template": map[string]any{}, "hints": []string{"[query]"}},
+				{"name": "deploy", "source": "skill", "hints": []string{"[target]"}},
+			})
 		case 2:
 			if r.Method != http.MethodPost || r.URL.EscapedPath() != "/session/ses%2F1/command" {
 				t.Errorf("execute request = %s %s", r.Method, r.URL.EscapedPath())
@@ -68,8 +144,16 @@ func TestOpencodeServer_Commands(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(commands) != 1 || commands[0].Name != "review" || !commands[0].Subtask || len(commands[0].Hints) != 1 {
+	if len(commands) != 3 {
 		t.Fatalf("commands=%+v", commands)
+	}
+	want := []OpencodeCommand{
+		{Name: "review", Description: "Review", Source: "command", Template: "Review $ARGUMENTS", Hints: []string{"[scope]"}, Subtask: true, Agent: "build", Model: "openai/gpt-5"},
+		{Name: "mcp_search", Source: "mcp", Template: "", Hints: []string{"[query]"}},
+		{Name: "deploy", Source: "skill", Template: "", Hints: []string{"[target]"}},
+	}
+	if !reflect.DeepEqual(commands, want) {
+		t.Fatalf("commands=%+v, want %+v", commands, want)
 	}
 	if err := srv.ExecuteCommand(context.Background(), "ses/1", "/work/a b", "review", "abc def"); err != nil {
 		t.Fatal(err)
@@ -119,13 +203,16 @@ func TestOpencodeServer_PermissionRoutes(t *testing.T) {
 		calls++
 		switch calls {
 		case 1:
-			if r.Method != http.MethodGet || r.URL.Path != "/permission" {
-				t.Errorf("list permission=%s %s", r.Method, r.URL.Path)
+			if r.Method != http.MethodGet || r.URL.Path != "/permission" || r.URL.Query().Get("directory") != "/work/a b" {
+				t.Errorf("list permission=%s %s?%s", r.Method, r.URL.Path, r.URL.RawQuery)
 			}
 			json.NewEncoder(w).Encode([]map[string]any{{"id": "per_1", "sessionID": "ses_1", "permission": "bash", "patterns": []string{"git *"}, "metadata": map[string]any{"command": "git status"}, "always": []string{"git status"}}})
 		case 2:
 			if r.URL.EscapedPath() != "/permission/per%2F1/reply" {
 				t.Errorf("legacy reply path=%s", r.URL.EscapedPath())
+			}
+			if r.URL.Query().Get("directory") != "/work/a b" {
+				t.Errorf("legacy reply directory=%q", r.URL.Query().Get("directory"))
 			}
 			assertJSONField(t, r, "reply", "always")
 			w.WriteHeader(http.StatusNoContent)
@@ -137,11 +224,11 @@ func TestOpencodeServer_PermissionRoutes(t *testing.T) {
 			w.WriteHeader(http.StatusNoContent)
 		}
 	})
-	permissions, err := srv.ListPermissions(context.Background())
+	permissions, err := srv.ListPermissions(context.Background(), "/work/a b")
 	if err != nil || len(permissions) != 1 || permissions[0].Permission != "bash" {
 		t.Fatalf("permissions=%+v err=%v", permissions, err)
 	}
-	if err := srv.ReplyPermissionVersioned(context.Background(), "ses/1", "per/1", "always", PermissionVersionLegacy); err != nil {
+	if err := srv.ReplyPermissionVersionedInDirectory(context.Background(), "ses/1", "per/1", "always", PermissionVersionLegacy, "/work/a b"); err != nil {
 		t.Fatal(err)
 	}
 	if err := srv.ReplyPermissionVersioned(context.Background(), "ses/1", "per/1", "reject", PermissionVersionV2); err != nil {
@@ -155,13 +242,16 @@ func TestOpencodeServer_QuestionRoutes(t *testing.T) {
 		calls++
 		switch calls {
 		case 1:
-			if r.Method != http.MethodGet || r.URL.Path != "/question" {
-				t.Errorf("list question=%s %s", r.Method, r.URL.Path)
+			if r.Method != http.MethodGet || r.URL.Path != "/question" || r.URL.Query().Get("directory") != "/work/a b" {
+				t.Errorf("list question=%s %s?%s", r.Method, r.URL.Path, r.URL.RawQuery)
 			}
 			json.NewEncoder(w).Encode([]map[string]any{{"id": "que_1", "sessionID": "ses_1", "questions": []map[string]any{{"header": "Scope", "question": "Choose", "options": []map[string]any{{"label": "A", "description": "first"}}, "multiple": false, "custom": true}}}})
 		case 2:
-			if r.URL.EscapedPath() != "/api/session/ses%2F1/question/que%2F1/reply" {
+			if r.URL.EscapedPath() != "/question/que%2F1/reply" {
 				t.Errorf("reply path=%s", r.URL.EscapedPath())
+			}
+			if r.URL.Query().Get("directory") != "/work/a b" {
+				t.Errorf("legacy reply directory=%q", r.URL.Query().Get("directory"))
 			}
 			var body struct {
 				Answers [][]string `json:"answers"`
@@ -172,20 +262,23 @@ func TestOpencodeServer_QuestionRoutes(t *testing.T) {
 			}
 			w.WriteHeader(http.StatusNoContent)
 		case 3:
-			if r.URL.EscapedPath() != "/api/session/ses%2F1/question/que%2F1/reject" {
+			if r.URL.EscapedPath() != "/question/que%2F1/reject" {
 				t.Errorf("reject path=%s", r.URL.EscapedPath())
+			}
+			if r.URL.Query().Get("directory") != "/work/a b" {
+				t.Errorf("legacy reject directory=%q", r.URL.Query().Get("directory"))
 			}
 			w.WriteHeader(http.StatusNoContent)
 		}
 	})
-	questions, err := srv.ListQuestions(context.Background())
+	questions, err := srv.ListQuestions(context.Background(), "/work/a b")
 	if err != nil || len(questions) != 1 || len(questions[0].Questions) != 1 || !questions[0].Questions[0].Custom {
 		t.Fatalf("questions=%+v err=%v", questions, err)
 	}
-	if err := srv.ReplyQuestion(context.Background(), "ses/1", "que/1", [][]string{{"A"}}); err != nil {
+	if err := srv.ReplyQuestionVersioned(context.Background(), "ses/1", "que/1", [][]string{{"A"}}, PermissionVersionLegacy, "/work/a b"); err != nil {
 		t.Fatal(err)
 	}
-	if err := srv.RejectQuestion(context.Background(), "ses/1", "que/1"); err != nil {
+	if err := srv.RejectQuestionVersioned(context.Background(), "ses/1", "que/1", PermissionVersionLegacy, "/work/a b"); err != nil {
 		t.Fatal(err)
 	}
 }

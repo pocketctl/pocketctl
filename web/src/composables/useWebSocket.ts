@@ -7,10 +7,13 @@ export interface DaemonEvent {
   type: string
   session_id?: string
   text?: string
+  snapshot?: string
   streaming?: boolean
   message_id?: string
   part_id?: string
   revision?: number
+  event_id?: string
+  previous_event_id?: string
   replace?: boolean
   call_id?: string
   tool?: string

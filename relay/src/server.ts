@@ -21,6 +21,7 @@ import { resolveLanguage } from './config/language.js';
 import type { SupportedLanguage } from './config/language.js';
 import { createWelcomeEmailWorker } from './welcome-email-worker.js';
 import { pathToFileURL } from 'node:url';
+import { registerDaemonConnection, type DaemonSocketIdentity } from './daemon-registration.js';
 
 const API_KEY = process.env.POCKETCTL_API_KEY || '';
 const DB_URL = process.env.DATABASE_URL || 'postgresql://localhost:5432/pocketctl';
@@ -38,7 +39,7 @@ const RATE_LIMIT_AUTH_FAIL_THRESHOLD = parseInt(process.env.RATE_LIMIT_AUTH_FAIL
 const REFRESH_COOKIE_NAME = 'pocketctl_refresh_token';
 const REFRESH_COOKIE_MAX_AGE = 7 * 24 * 60 * 60;
 
-const wsDaemonMap = new Map<any, string>();
+const wsDaemonMap = new Map<any, DaemonSocketIdentity>();
 const wsTickets = createWsTicketStore(60_000);
 
 // Connection rate limiter: burst + sustained window, plus an escalating ban for
@@ -517,9 +518,12 @@ async function main() {
       return { error: result.error || 'failed to kick daemon' };
     }
 
-    await insertAuditLog(pool, payload.userId, 'force_kick', {
+    // Router has already completed the security-critical revoke/close path.
+    // Request metadata is best-effort and must not hang an otherwise successful
+    // force-kick response when audit storage is unavailable.
+    void insertAuditLog(pool, payload.userId, 'force_kick', {
       daemon_id: daemonId,
-    }, req.ip);
+    }, req.ip).catch((e) => console.error('force_kick request audit:', e));
 
     return { success: true };
   });
@@ -1191,20 +1195,27 @@ async function main() {
         // debug log removed
         return;
       }
-      processMessage(raw);
+      enqueueMessage(raw);
     });
 
     socket.on('close', () => {
       if (connType === 'daemon') {
-        const daemonId = wsDaemonMap.get(socket);
-        if (daemonId) { router.unregisterDaemon(daemonId, socket); wsDaemonMap.delete(socket); }
+        const daemon = wsDaemonMap.get(socket);
+        if (daemon) { router.unregisterDaemon(daemon.daemonId, socket); wsDaemonMap.delete(socket); }
       } else {
         router.unregisterClient(socket);
       }
       console.log(`WS disconnected: type=${connType} ip=${clientIp}`);
     });
 
-    function processMessage(raw: Buffer) {
+    let messageChain = Promise.resolve();
+    function enqueueMessage(raw: Buffer): void {
+      messageChain = messageChain.then(() => processMessage(raw)).catch((err) => {
+        console.error(`message processing error from ${clientIp}:`, err.message);
+      });
+    }
+
+    async function processMessage(raw: Buffer): Promise<void> {
       if (raw.length > MAX_WS_MESSAGE_SIZE) {
         socket.close(4003, 'message too large');
         return;
@@ -1214,13 +1225,16 @@ async function main() {
         // debug log removed
         if (connType === 'daemon') {
           if (msg.type === 'register') {
-            router.registerDaemon(socket, msg, userId, tokenJti, tokenMachineId);
-            wsDaemonMap.set(socket, msg.daemon_id);
-            console.log('[ws] daemon registered, total in map:', wsDaemonMap.size);
+            const registered = await registerDaemonConnection(
+              router, wsDaemonMap, socket, msg, userId, tokenJti, tokenMachineId,
+            );
+            if (registered) {
+              console.log('[ws] daemon registered, total in map:', wsDaemonMap.size);
+            }
           } else {
-            const daemonId = wsDaemonMap.get(socket);
-            if (daemonId) {
-              router.handleDaemonMessage(daemonId, msg);
+            const daemon = wsDaemonMap.get(socket);
+            if (daemon) {
+              router.handleDaemonMessage(daemon.daemonId, msg, socket, daemon.startedAt);
             }
             else console.log('[ws] message for unknown daemon, type:', msg.type);
           }
@@ -1297,7 +1311,7 @@ async function main() {
 
       // Process any messages that arrived during auth
       for (const raw of earlyMessages) {
-        processMessage(raw);
+        enqueueMessage(raw);
       }
       earlyMessages.length = 0;
     })().catch((err) => {

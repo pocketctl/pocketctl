@@ -12,7 +12,7 @@ function ws(): any {
 
 function pool(): any {
   const calls: Array<{ sql: string; params: any[] }> = []
-  return {
+  const value: any = {
     _calls: calls,
     query: vi.fn(async (sql: string, params: any[] = []) => {
       calls.push({ sql, params })
@@ -22,6 +22,8 @@ function pool(): any {
       return { rows: [], rowCount: 1 }
     }),
   }
+  value.connect = vi.fn(async () => ({ query: value.query, release: vi.fn() }))
+  return value
 }
 
 const tick = () => new Promise((resolve) => setTimeout(resolve, 20))
