@@ -98,6 +98,25 @@ func TestProcessController_IsAlive(t *testing.T) {
 	}
 }
 
+func TestProcessInspectorListsCurrentProcess(t *testing.T) {
+	processes, err := NewProcessInspector().List()
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, process := range processes {
+		if process.PID == os.Getpid() {
+			found = true
+			if len(process.Args) == 0 || process.CWD == "" {
+				t.Fatalf("current process snapshot incomplete: %+v", process)
+			}
+		}
+	}
+	if !found {
+		t.Fatal("current process missing from snapshot")
+	}
+}
+
 func TestDaemonizer_ForkDetached(t *testing.T) {
 	if _, err := os.Stat("/bin/sleep"); err != nil {
 		t.Skip("/bin/sleep 不可用，跳过 detached 测试")

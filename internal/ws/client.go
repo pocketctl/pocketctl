@@ -101,25 +101,26 @@ type Client struct {
 	// SPKI (SubjectPublicKeyInfo). When set, the dialer pins the TLS peer to
 	// this key, defeating MITM even if a trusted CA is compromised. Empty =
 	// standard system-CA validation only (backwards compatible).
-	relayPin        string
-	conn            *websocket.Conn
-	connMu          sync.Mutex
-	writeMu         sync.Mutex // protects WriteMessage on conn
-	outputCh        <-chan protocol.DaemonEvent
-	sendCh          chan []byte
-	logger          *slog.Logger
-	daemonID        string
-	hostname        string
-	agents          []string
-	agentVersions   map[string]string
-	agentLatests    map[string]string
-	agentManageable map[string]bool
-	osName          string
-	localIP         string
-	arch            string
-	version         string
-	startedAt       int64
-	metricsFn       func() (float64, float64, float64) // cpu, mem, disk
+	relayPin                   string
+	conn                       *websocket.Conn
+	connMu                     sync.Mutex
+	writeMu                    sync.Mutex // protects WriteMessage on conn
+	outputCh                   <-chan protocol.DaemonEvent
+	sendCh                     chan []byte
+	logger                     *slog.Logger
+	daemonID                   string
+	hostname                   string
+	agents                     []string
+	agentVersions              map[string]string
+	agentLatests               map[string]string
+	agentManageable            map[string]bool
+	osName                     string
+	localIP                    string
+	arch                       string
+	version                    string
+	startedAt                  int64
+	metricsFn                  func() (float64, float64, float64) // cpu, mem, disk
+	openCodeRuntimeTelemetryFn func() protocol.OpenCodeRuntimeTelemetry
 	// activeSessionIDsFn returns the session IDs this daemon currently owns.
 	// Seeded into the register message so the relay can rebuild its
 	// session→daemon routing table after a relay restart or daemon reconnect,
@@ -368,6 +369,12 @@ func (c *Client) SetStartedAt(t int64) { c.startedAt = t }
 
 // SetMetricsFn sets the function used to collect system metrics for ping messages.
 func (c *Client) SetMetricsFn(fn func() (float64, float64, float64)) { c.metricsFn = fn }
+
+// SetOpenCodeRuntimeTelemetryFn adds cumulative, content-free rollout counters
+// to heartbeats without mixing them into session events or durable relay data.
+func (c *Client) SetOpenCodeRuntimeTelemetryFn(fn func() protocol.OpenCodeRuntimeTelemetry) {
+	c.openCodeRuntimeTelemetryFn = fn
+}
 
 // SetRelayPin sets the pinned relay certificate SPKI hash (base64-encoded
 // SHA-256). When non-empty, the TLS handshake only succeeds if a certificate
@@ -757,6 +764,10 @@ func (c *Client) pingPump(ctx context.Context, done chan struct{}) {
 			ping := protocol.PingMessage{Type: "ping"}
 			if c.metricsFn != nil {
 				ping.CpuPct, ping.MemPct, ping.DiskPct = c.metricsFn()
+			}
+			if c.openCodeRuntimeTelemetryFn != nil {
+				snapshot := c.openCodeRuntimeTelemetryFn()
+				ping.OpenCodeRuntime = &snapshot
 			}
 			c.SendMsg(ping)
 		case <-done:

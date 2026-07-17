@@ -8,6 +8,18 @@ export interface SessionAgentOption {
   hidden?: boolean
 }
 
+export function isManagedOpenCodeSession(agent: string, controlMode: unknown, capabilities: unknown): boolean {
+  return agent === 'opencode'
+    && controlMode === 'managed'
+    && Array.isArray(capabilities)
+    && capabilities.includes('shared_runtime')
+}
+
+export function canControlOpenCodeInteractions(agent: string, controlMode: unknown, capabilities: unknown): boolean {
+  return isManagedOpenCodeSession(agent, controlMode, capabilities)
+    && (capabilities as string[]).includes('terminal_coapproval')
+}
+
 export function normalizeSessionAgents(input: unknown): SessionAgentOption[] {
   if (!Array.isArray(input)) return []
   const seen = new Set<string>()

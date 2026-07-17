@@ -59,8 +59,11 @@ func TestEnsureOpenCodeSessionLoadedBeforeDiscovery(t *testing.T) {
 	if model, ok := sm.GetSessionModel("ses_1"); !ok || model != "opencode/deepseek-v4-flash-free" {
 		t.Fatalf("model=%q ok=%v", model, ok)
 	}
-	if got := sm.OpenCodeInteractionCapabilities("ses_1"); !reflect.DeepEqual(got, []string{"dynamic_commands", "agent_switch", "permission_actions", "questions"}) {
-		t.Fatalf("capabilities=%v", got)
+	if got := sm.SessionControlMode("ses_1"); got != protocol.ControlLegacyReadOnly {
+		t.Fatalf("control mode=%q", got)
+	}
+	if got := sm.OpenCodeInteractionCapabilities("ses_1"); len(got) != 0 {
+		t.Fatalf("legacy capabilities=%v", got)
 	}
 	if got := sm.CurrentSessionAgent(context.Background(), "ses_1"); got != "build" {
 		t.Fatalf("current agent=%q, want build", got)

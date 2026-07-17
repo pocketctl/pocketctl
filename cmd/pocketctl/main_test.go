@@ -62,14 +62,31 @@ func TestOpenCodeSessionMetaUsesLoadedAuthoritativeState(t *testing.T) {
 	if meta.Model != "opencode/deepseek-v4-flash-free" || meta.Cwd != "/repo" || meta.CurrentAgent != "build" {
 		t.Fatalf("meta=%+v", meta)
 	}
-	wantCapabilities := []string{"dynamic_commands", "agent_switch", "permission_actions", "questions"}
-	if strings.Join(meta.Capabilities, ",") != strings.Join(wantCapabilities, ",") {
-		t.Fatalf("capabilities=%v", meta.Capabilities)
+	if meta.ControlMode != protocol.ControlLegacyReadOnly || len(meta.Capabilities) != 0 {
+		t.Fatalf("control mode=%q capabilities=%v", meta.ControlMode, meta.Capabilities)
 	}
 	if err := sm.PrepareDaemonRestart(); err != nil {
 		t.Fatal(err)
 	}
 	sm.ShutdownOpencode()
+}
+
+func TestOpenCodeInteractionRaceResolvedElsewhereIsSuccessResult(t *testing.T) {
+	event := interactionCommandResultEvent(
+		"approval_response", "ses_1", "per_1",
+		&session.ResolvedElsewhereError{RequestID: "per_1"},
+	)
+	if event.Type != "interaction_result" || event.Status != session.InteractionResolvedElsewhere || event.Reason != session.InteractionResolvedElsewhere {
+		t.Fatalf("event=%+v", event)
+	}
+	if event.Operation != "approval_response" || event.SessionID != "ses_1" || event.RequestID != "per_1" || event.Error != "" {
+		t.Fatalf("correlation=%+v", event)
+	}
+
+	failed := interactionCommandResultEvent("question_response", "ses_1", "que_1", errors.New("reply failed"))
+	if failed.Type != "error" || failed.Operation != "question_response" || failed.Error != "reply failed" {
+		t.Fatalf("failed event=%+v", failed)
+	}
 }
 
 func TestDaemonRestartReplacementProcessWaitsForOwnership(t *testing.T) {

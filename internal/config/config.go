@@ -65,6 +65,17 @@ func ControlSocketPath() string {
 	return controlSocketPathFor(runtime.GOOS, home)
 }
 
+// AgentControlSocketPath returns the dedicated local endpoint used by terminal
+// agent launchers. It intentionally does not reuse ControlSocketPath because
+// the keep-awake control server already owns that listener.
+func AgentControlSocketPath() string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+	return agentControlSocketPathFor(runtime.GOOS, home)
+}
+
 // controlSocketPathFor 是 ControlSocketPath 的纯函数核心（可注入 GOOS，便于单测）。
 // Windows 必须用 \\.\pipe\ 前缀的 named pipe 名（winio.CreateNamedPipe 要求），
 // 否则 listen/dial 失败（这是 keep-awake 与 approval 在 Windows 报
@@ -74,6 +85,13 @@ func controlSocketPathFor(goos, home string) string {
 		return `\\.\pipe\pocketctl-control`
 	}
 	return filepath.Join(home, ".pocketctl", "control.sock")
+}
+
+func agentControlSocketPathFor(goos, home string) string {
+	if goos == "windows" {
+		return `\\.\pipe\pocketctl-agent-control`
+	}
+	return filepath.Join(home, ".pocketctl", "agent-control.sock")
 }
 
 // approvalSocketPathFor 是 ApprovalSocketPath 的纯函数核心（同上理由加平台分支）。

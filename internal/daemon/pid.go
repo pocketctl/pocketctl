@@ -18,7 +18,7 @@ var (
 	defaultLocker = platform.NewInstanceLocker()
 )
 
-const pidDir = "/tmp/pocketctl"
+const defaultRuntimeDir = "/tmp/pocketctl"
 
 var (
 	stopGracePeriod           = 5 * time.Second
@@ -27,7 +27,14 @@ var (
 )
 
 func PIDPath() string {
-	return filepath.Join(pidDir, "daemon.pid")
+	return filepath.Join(runtimeDir(), "daemon.pid")
+}
+
+func runtimeDir() string {
+	if dir := os.Getenv("POCKETCTL_RUNTIME_DIR"); dir != "" {
+		return dir
+	}
+	return defaultRuntimeDir
 }
 
 // logPrefix is the filename prefix for dated daemon log files
@@ -43,7 +50,7 @@ func LogPrefix() string { return logPrefix }
 func LogDir() string {
 	home, err := os.UserHomeDir()
 	if err != nil || home == "" {
-		return filepath.Join(pidDir, "logs")
+		return filepath.Join(runtimeDir(), "logs")
 	}
 	return filepath.Join(home, ".pocketctl", "logs")
 }
@@ -70,7 +77,7 @@ func StatePath() string {
 }
 
 func WritePID(pid int) error {
-	if err := os.MkdirAll(pidDir, 0755); err != nil {
+	if err := os.MkdirAll(runtimeDir(), 0755); err != nil {
 		return err
 	}
 	return os.WriteFile(PIDPath(), []byte(strconv.Itoa(pid)), 0644)

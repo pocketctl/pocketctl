@@ -6,6 +6,13 @@ import (
 	"strings"
 )
 
+const (
+	ControlManaged               = "managed"
+	ControlUnmanagedActive       = "unmanaged_active"
+	ControlLegacyReadOnly        = "legacy_read_only"
+	InteractionResolvedElsewhere = "resolved_elsewhere"
+)
+
 // Client → Daemon commands
 type ClientMessage struct {
 	Type       string      `json:"type"`
@@ -124,6 +131,7 @@ type DaemonEvent struct {
 	CurrentAgent           string               `json:"current_agent,omitempty"`   // selected OpenCode profile; Agent remains the CLI type
 	Agents                 []SessionAgentOption `json:"agents,omitempty"`
 	Capabilities           []string             `json:"capabilities,omitempty"`
+	ControlMode            string               `json:"control_mode,omitempty"`
 	PermissionName         string               `json:"permission_name,omitempty"`
 	Patterns               []string             `json:"patterns,omitempty"`
 	Always                 []string             `json:"always,omitempty"`
@@ -323,10 +331,17 @@ type RelayRestartingMessage struct {
 }
 
 type PingMessage struct {
-	Type    string  `json:"type"`
-	CpuPct  float64 `json:"cpu_pct,omitempty"`
-	MemPct  float64 `json:"mem_pct,omitempty"`
-	DiskPct float64 `json:"disk_pct,omitempty"`
+	Type            string                    `json:"type"`
+	CpuPct          float64                   `json:"cpu_pct,omitempty"`
+	MemPct          float64                   `json:"mem_pct,omitempty"`
+	DiskPct         float64                   `json:"disk_pct,omitempty"`
+	OpenCodeRuntime *OpenCodeRuntimeTelemetry `json:"opencode_runtime,omitempty"`
+}
+
+type OpenCodeRuntimeTelemetry struct {
+	FallbackReasons map[string]uint64 `json:"fallback_reasons,omitempty"`
+	HealthOK        uint64            `json:"health_ok,omitempty"`
+	HealthFailed    uint64            `json:"health_failed,omitempty"`
 }
 
 type PongMessage struct {

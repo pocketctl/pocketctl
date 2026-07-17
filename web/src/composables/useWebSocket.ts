@@ -76,6 +76,7 @@ let reconnectAttempt = 0
 let currentUrl = ''
 let currentBaseUrl = ''
 let pendingMessages: any[] = []
+let hasOpened = false
 // 连接流程进行中标志（含 connect 前的 token 刷新）。send 在此期间把消息 buffer 到
 // pendingMessages，等 onopen flush——否则 DashboardView 的 `connect(); send()` 在 async
 // 刷新窗口内 ws.value 尚未就绪，list_sessions/list_daemons 请求会丢失。
@@ -145,17 +146,20 @@ async function connect(url?: string) {
     currentUrl = await getRelayWsUrl(currentBaseUrl)
     ws.value = new WebSocket(currentUrl)
 
-    ws.value.onopen = () => {
-      connected.value = true; reconnecting.value = false; connecting = false; reconnectAttempt = 0
+		ws.value.onopen = () => {
+			const restored = hasOpened
+			hasOpened = true
+			connected.value = true; reconnecting.value = false; connecting = false; reconnectAttempt = 0
       // Report current locale to relay for language-aware title generation
       const locale = localStorage.getItem('pocketctl-locale') || 'zh'
       send({ type: 'set_locale', locale })
       // Flush pending messages
-      if (pendingMessages.length > 0) {
-        const msgs = pendingMessages; pendingMessages = []
-        msgs.forEach(m => send(m))
-      }
-    }
+			if (pendingMessages.length > 0) {
+				const msgs = pendingMessages; pendingMessages = []
+				msgs.forEach(m => send(m))
+			}
+			if (restored) handlers.forEach(h => h({ type: 'connection_restored' }))
+		}
     ws.value.onmessage = (event) => {
       try {
         const data = JSON.parse(event.data)

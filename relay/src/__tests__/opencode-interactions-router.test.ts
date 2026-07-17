@@ -16,6 +16,7 @@ function pool(): any {
     _calls: calls,
     query: vi.fn(async (sql: string, params: any[] = []) => {
       calls.push({ sql, params })
+      if (/SELECT 1 FROM deleted_sessions/i.test(sql)) return { rows: [], rowCount: 0 }
       if (/SELECT 1 FROM sessions/i.test(sql)) return { rows: [{ ok: 1 }], rowCount: 1 }
       if (/SELECT daemon_id FROM sessions/i.test(sql)) return { rows: [{ daemon_id: 'd1' }], rowCount: 1 }
       if (/INSERT INTO events/i.test(sql)) return { rows: [{ id: 1 }], rowCount: 1 }
@@ -92,5 +93,85 @@ describe('OpenCode interaction router', () => {
     expect(persisted.some((call: any) => call.params.includes('approval_request') && call.params.some((value: any) => typeof value === 'string' && value.includes('git status')))).toBe(true)
     expect(persisted.some((call: any) => call.params.includes('approval_resolved') && call.params.some((value: any) => typeof value === 'string' && value.includes('always')))).toBe(true)
     expect(persisted.some((call: any) => call.params.includes('question_resolved') && call.params.some((value: any) => typeof value === 'string' && value.includes('custom')))).toBe(true)
+  })
+
+  test('persists and broadcasts managed control claims from session discovery', async () => {
+    const db = pool()
+    const router = new Router(db)
+    const daemon = ws()
+    await router.registerDaemon(daemon, { type: 'register', daemon_id: 'd1', hostname: 'host', agents: ['opencode'] }, 7)
+    const client = ws()
+    router.registerClient(client, 7)
+
+    router.handleDaemonMessage('d1', {
+      type: 'session_discovered', session_id: 'ses_managed', agent: 'opencode', cwd: '/repo', status: 'idle',
+      control_mode: 'managed', capabilities: ['shared_runtime', 'terminal_coapproval', 'questions'], seq: 20,
+    })
+    await tick()
+
+    const upsert = db._calls.find((call: any) => /INSERT INTO sessions/i.test(call.sql))
+    expect(upsert?.sql).toMatch(/control_mode, capabilities/)
+    expect(upsert?.params).toEqual(expect.arrayContaining(['managed', JSON.stringify(['shared_runtime', 'terminal_coapproval', 'questions'])]))
+    expect(client._sent).toContainEqual(expect.objectContaining({
+      type: 'session_discovered', session_id: 'ses_managed', control_mode: 'managed',
+      capabilities: ['shared_runtime', 'terminal_coapproval', 'questions'],
+    }))
+  })
+
+  test('directs resolved_elsewhere to the submitter and broadcasts the final resolution to all devices', async () => {
+    const db = pool()
+    const router = new Router(db)
+    const daemon = ws()
+    await router.registerDaemon(daemon, { type: 'register', daemon_id: 'd1', hostname: 'host', agents: ['opencode'] }, 7)
+    const first = ws()
+    const second = ws()
+    router.registerClient(first, 7)
+    router.registerClient(second, 7)
+    ;(router as any).sessionToDaemon.set('ses_1', 'd1')
+    ;(router as any).clients.get(first).subscribedSessions.add('ses_1')
+    ;(router as any).clients.get(second).subscribedSessions.add('ses_1')
+
+    await router.handleClientMessage(first, { type: 'approval_response', session_id: 'ses_1', request_id: 'per_1', action: 'once' })
+    await router.handleClientMessage(second, { type: 'approval_response', session_id: 'ses_1', request_id: 'per_1', action: 'always' })
+    first._sent.length = 0
+    second._sent.length = 0
+
+    const idempotent = {
+      type: 'interaction_result', session_id: 'ses_1', request_id: 'per_1', operation: 'approval_response',
+      status: 'resolved_elsewhere', reason: 'resolved_elsewhere', seq: 30,
+    }
+    router.handleDaemonMessage('d1', idempotent)
+    await tick()
+
+    expect(first._sent).toContainEqual(idempotent)
+    expect(second._sent).not.toContainEqual(idempotent)
+
+    const resolution = {
+      type: 'approval_resolved', session_id: 'ses_1', request_id: 'per_1', action: 'once', approved: true, seq: 31,
+    }
+    router.handleDaemonMessage('d1', resolution)
+    await tick()
+    expect(first._sent).toContainEqual(resolution)
+    expect(second._sent).toContainEqual(resolution)
+  })
+
+  test('refreshes persisted control state from session metadata', async () => {
+    const db = pool()
+    const router = new Router(db)
+    const daemon = ws()
+    await router.registerDaemon(daemon, { type: 'register', daemon_id: 'd1', hostname: 'host', agents: ['opencode'] }, 7)
+    const client = ws()
+    router.registerClient(client, 7)
+    ;(router as any).clients.get(client).subscribedSessions.add('ses_1')
+
+    const metadata = {
+      type: 'session_meta', session_id: 'ses_1', control_mode: 'managed',
+      capabilities: ['shared_runtime', 'terminal_coapproval', 'questions'], seq: 40,
+    }
+    router.handleDaemonMessage('d1', metadata)
+    await tick()
+
+    expect(db._calls.some((call: any) => /UPDATE sessions SET control_mode/i.test(call.sql) && call.params[0] === 'managed')).toBe(true)
+    expect(client._sent).toContainEqual(metadata)
   })
 })

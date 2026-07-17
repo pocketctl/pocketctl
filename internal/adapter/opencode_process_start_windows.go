@@ -4,10 +4,15 @@ package adapter
 
 import (
 	"fmt"
+	"os/exec"
 	"time"
 
 	"golang.org/x/sys/windows"
 )
+
+func configureOpencodeServeProcess(cmd *exec.Cmd) {
+	cmd.SysProcAttr = &windows.SysProcAttr{CreationFlags: windows.CREATE_NEW_PROCESS_GROUP}
+}
 
 func validateProcessStartedBefore(pid int, notAfter time.Time) error {
 	if notAfter.IsZero() {

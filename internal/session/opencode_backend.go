@@ -13,10 +13,11 @@ import (
 	"time"
 
 	"github.com/pocketctl/pocketctl/internal/adapter"
+	"github.com/pocketctl/pocketctl/internal/agentcontrol"
 	"github.com/pocketctl/pocketctl/internal/daemon"
-	"github.com/pocketctl/pocketctl/internal/discovery"
 	"github.com/pocketctl/pocketctl/internal/platform"
 	"github.com/pocketctl/pocketctl/internal/protocol"
+	"github.com/pocketctl/pocketctl/internal/watcher"
 )
 
 // opencode_backend.go wires opencode (a server-kind agent) into the manager.
@@ -36,23 +37,28 @@ import (
 //     DirWatch (terminal) — one mechanism, equivalent to claude/codex.
 
 const (
-	opencodeDiscoverInterval = 2 * time.Second
-	opencodeSyncInterval     = 1 * time.Second
-	opencodeFreshWindow      = 10 * time.Minute
-	opencodeReconcileWindow  = 2 * time.Hour // reconcile stuck "running" status for sessions active within this window
-	opencodeSeenEventLimit   = 4096
+	opencodeDiscoverInterval  = 2 * time.Second
+	opencodeSyncInterval      = 1 * time.Second
+	opencodeLeaseReapInterval = 2 * time.Second
+	opencodeFreshWindow       = 10 * time.Minute
+	opencodeReconcileWindow   = 2 * time.Hour // reconcile stuck "running" status for sessions active within this window
+	opencodeSeenEventLimit    = 4096
 )
 
 type opencodeCoordinator struct {
 	sm *SessionManager
 
-	mu            sync.Mutex
-	server        *adapter.OpencodeServer
-	ctx           context.Context    // daemon lifetime (loops + supervisor)
-	cancel        context.CancelFunc // cancels daemon lifetime
-	serverCancel  context.CancelFunc // cancels the current serve process (restart)
-	started       bool
-	preserveServe bool // set only while handing ownership to an in-place restart
+	mu               sync.Mutex
+	server           *adapter.OpencodeServer
+	ctx              context.Context    // daemon lifetime (loops + supervisor)
+	cancel           context.CancelFunc // cancels daemon lifetime
+	serverCancel     context.CancelFunc // cancels the current serve process (restart)
+	started          bool
+	preserveServe    bool // set only while handing ownership to an in-place restart
+	generation       uint64
+	realBinary       string
+	realVersion      string
+	handoffPersisted bool
 
 	trackMu               sync.Mutex
 	tracked               map[string]context.CancelFunc // sessionID → its sync loop's cancel
@@ -65,6 +71,12 @@ type opencodeCoordinator struct {
 	resolvedInteractions  map[string]struct{}
 	resolvedOrder         []string
 	interactionGeneration map[interactionGenerationScope]uint64
+	managedMu             sync.RWMutex
+	managedSessions       map[string]managedOpenCodeSession
+	pendingForks          map[string][]managedOpenCodeSession
+	baselineMu            sync.RWMutex
+	baselineModes         map[string]string
+	processInspector      platform.ProcessInspector
 
 	reconciled     map[string]bool // sessionIDs whose stale "running" status was reconciled to idle
 	summaryOnce    sync.Once
@@ -77,6 +89,11 @@ type opencodeLoadCall struct {
 	notFound bool
 }
 
+type managedOpenCodeSession struct {
+	CWD        string
+	Generation uint64
+}
+
 func newOpencodeCoordinator(sm *SessionManager) *opencodeCoordinator {
 	c := &opencodeCoordinator{
 		sm:                    sm,
@@ -86,6 +103,10 @@ func newOpencodeCoordinator(sm *SessionManager) *opencodeCoordinator {
 		seenInteractionEvents: make(map[string]struct{}),
 		resolvedInteractions:  make(map[string]struct{}),
 		interactionGeneration: make(map[interactionGenerationScope]uint64),
+		managedSessions:       make(map[string]managedOpenCodeSession),
+		pendingForks:          make(map[string][]managedOpenCodeSession),
+		baselineModes:         make(map[string]string),
+		processInspector:      platform.NewProcessInspector(),
 	}
 	c.recoverSession = c.reconcileSessionInteractions
 	return c
@@ -111,25 +132,23 @@ func (c *opencodeCoordinator) ensureStarted() error {
 		}
 	}
 	if stateErr == nil {
+		c.generation = normalizedOpenCodeGeneration(state.Generation)
+		c.sm.leases.Restore(state.Leases)
+		c.restoreControlRegistry(state)
 		if !handoffOwnerAvailable(state) {
 			return fmt.Errorf("opencode handoff still owned by live daemon pid %d", state.OwnerPID)
 		}
-		if cliPath, _, found := discovery.ResolveAgent("opencode"); found {
-			versionCtx, versionCancel := context.WithTimeout(c.ctx, 5*time.Second)
-			installedVersion, versionErr := adapter.DetectOpencodeVersion(versionCtx, cliPath)
-			versionCancel()
-			if versionErr != nil {
-				return versionErr
-			}
+		if cliPath, installedVersion, resolveErr := resolveOpenCodeCLI(); resolveErr == nil {
 			attached, err := c.tryAttachHandoffLocked(state, installedVersion)
 			if err != nil {
 				return err
 			}
 			if attached {
+				c.realBinary, c.realVersion = cliPath, installedVersion
 				return nil
 			}
 		} else {
-			return fmt.Errorf("opencode CLI not found while serve handoff exists")
+			return fmt.Errorf("resolve opencode CLI while serve handoff exists: %w", resolveErr)
 		}
 	}
 	server, scancel, err := c.launchServerLocked()
@@ -168,20 +187,23 @@ func (c *opencodeCoordinator) tryAttachHandoffLocked(state *daemon.OpenCodeServe
 		}
 		return false, nil
 	}
-	if err := daemon.ClaimOpenCodeServeState(state.OwnerPID, openCodeHandoffState(server)); err != nil {
+	generation := normalizedOpenCodeGeneration(state.Generation)
+	if err := daemon.ClaimOpenCodeServeState(state.OwnerPID, c.openCodeHandoffState(server, generation)); err != nil {
 		return false, err
 	}
 	_, scancel := context.WithCancel(c.ctx)
 	c.server, c.serverCancel, c.started = server, scancel, true
+	c.generation = generation
+	c.handoffPersisted = true
 	return true, nil
 }
 
 // launchServerLocked starts a new serve process under a child of c.ctx. Caller
 // holds c.mu and has ensured c.ctx is set.
 func (c *opencodeCoordinator) launchServerLocked() (*adapter.OpencodeServer, context.CancelFunc, error) {
-	cliPath, _, found := discovery.ResolveAgent("opencode")
-	if !found {
-		return nil, nil, fmt.Errorf("opencode CLI not found")
+	cliPath, cliVersion, err := resolveOpenCodeCLI()
+	if err != nil {
+		return nil, nil, err
 	}
 	server := adapter.NewOpencodeServer(cliPath)
 	sctx, scancel := context.WithCancel(c.ctx)
@@ -189,39 +211,91 @@ func (c *opencodeCoordinator) launchServerLocked() (*adapter.OpencodeServer, con
 		scancel()
 		return nil, nil, fmt.Errorf("start opencode serve: %w", err)
 	}
-	if err := writeOpenCodeHandoff(server); err != nil {
+	generation := nextOpenCodeGeneration(c.generation)
+	c.setManagedGeneration(generation)
+	if err := daemon.WriteOpenCodeServeState(c.openCodeHandoffState(server, generation)); err != nil {
 		server.Stop()
 		scancel()
 		return nil, nil, fmt.Errorf("persist opencode serve handoff: %w", err)
 	}
+	c.generation = generation
+	c.realBinary = cliPath
+	c.realVersion = cliVersion
+	c.handoffPersisted = true
 	return server, scancel, nil
 }
 
+func resolveOpenCodeCLI() (string, string, error) {
+	return agentcontrol.ResolveConfiguredOpenCode()
+}
+
 func (c *opencodeCoordinator) attachHandoffLocked(state *daemon.OpenCodeServeState) error {
+	cliPath, cliVersion, err := resolveOpenCodeCLI()
+	if err != nil {
+		return err
+	}
 	ctx, cancel := context.WithTimeout(c.ctx, 5*time.Second)
 	defer cancel()
 	server, err := adapter.AttachOpencodeServer(ctx, state.BaseURL, state.Password, state.PID, state.Version, state.UpdatedAt)
 	if err != nil {
 		return err
 	}
-	if err := daemon.ClaimOpenCodeServeState(state.OwnerPID, openCodeHandoffState(server)); err != nil {
+	generation := normalizedOpenCodeGeneration(state.Generation)
+	c.restoreControlRegistry(state)
+	if err := daemon.ClaimOpenCodeServeState(state.OwnerPID, c.openCodeHandoffState(server, generation)); err != nil {
 		server.Stop()
 		return err
 	}
 	_, scancel := context.WithCancel(c.ctx)
 	c.server, c.serverCancel, c.started = server, scancel, true
+	c.generation = generation
+	c.realBinary = cliPath
+	c.realVersion = cliVersion
+	c.handoffPersisted = true
 	return nil
 }
 
-func writeOpenCodeHandoff(server *adapter.OpencodeServer) error {
-	return daemon.WriteOpenCodeServeState(openCodeHandoffState(server))
-}
-
-func openCodeHandoffState(server *adapter.OpencodeServer) *daemon.OpenCodeServeState {
+func (c *opencodeCoordinator) openCodeHandoffState(server *adapter.OpencodeServer, generation uint64) *daemon.OpenCodeServeState {
+	managed, pending := c.controlRegistrySnapshot()
 	return &daemon.OpenCodeServeState{
 		PID: server.PID(), BaseURL: server.BaseURL(), Password: server.Password(),
-		Version: server.Version(), OwnerPID: os.Getpid(), UpdatedAt: time.Now().UTC(),
+		Version: server.Version(), OwnerPID: os.Getpid(), Generation: generation,
+		ManagedSessions: managed, PendingForks: pending, Leases: c.sm.leases.Snapshot(), UpdatedAt: time.Now().UTC(),
 	}
+}
+
+func (c *opencodeCoordinator) persistLeaseHandoff() error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.server == nil {
+		return nil
+	}
+	next := c.openCodeHandoffState(c.server, c.generation)
+	current, err := daemon.ReadOpenCodeServeState()
+	if os.IsNotExist(err) {
+		return daemon.WriteOpenCodeServeState(next)
+	}
+	if err != nil {
+		return err
+	}
+	if current.OwnerPID != os.Getpid() {
+		return fmt.Errorf("cannot persist opencode leases owned by daemon pid %d", current.OwnerPID)
+	}
+	return daemon.ClaimOpenCodeServeState(current.OwnerPID, next)
+}
+
+func normalizedOpenCodeGeneration(generation uint64) uint64 {
+	if generation == 0 {
+		return 1
+	}
+	return generation
+}
+
+func nextOpenCodeGeneration(previous uint64) uint64 {
+	if previous == ^uint64(0) {
+		return 1
+	}
+	return previous + 1
 }
 
 // PrepareDaemonRestart transfers serve ownership to the handoff record. It is
@@ -232,7 +306,7 @@ func (c *opencodeCoordinator) PrepareDaemonRestart() error {
 	if c.server == nil {
 		return nil
 	}
-	if err := daemon.ClaimOpenCodeServeState(os.Getpid(), openCodeHandoffState(c.server)); err != nil {
+	if err := daemon.ClaimOpenCodeServeState(os.Getpid(), c.openCodeHandoffState(c.server, c.generation)); err != nil {
 		return err
 	}
 	c.server.Detach()
@@ -298,9 +372,32 @@ func (c *opencodeCoordinator) supervise(ctx context.Context) {
 			hctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 			ok := s.Healthy(hctx)
 			cancel()
+			c.sm.observeOpenCodeRuntimeHealth(ok)
 			if !ok {
 				slog.Default().Warn("opencode serve unhealthy — restarting")
 				c.restartServer()
+			}
+		}
+	}
+}
+
+func (c *opencodeCoordinator) reapTerminalLeases() error {
+	if !c.sm.leases.Prune() {
+		return nil
+	}
+	return c.persistLeaseHandoff()
+}
+
+func (c *opencodeCoordinator) leaseReaper(ctx context.Context) {
+	ticker := time.NewTicker(opencodeLeaseReapInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			if err := c.reapTerminalLeases(); err != nil {
+				slog.Default().Warn("persist reaped opencode terminal lease failed", "error", err)
 			}
 		}
 	}
@@ -310,6 +407,29 @@ func (c *opencodeCoordinator) supervise(ctx context.Context) {
 func (c *opencodeCoordinator) Shutdown() {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if !c.preserveServe && c.server != nil && len(c.sm.leases.Active(c.generation)) > 0 {
+		next := c.openCodeHandoffState(c.server, c.generation)
+		next.OwnerPID = 0
+		if current, err := daemon.ReadOpenCodeServeState(); err == nil && current.OwnerPID == os.Getpid() {
+			if err := daemon.ClaimOpenCodeServeState(current.OwnerPID, next); err != nil {
+				slog.Default().Error("persist opencode active lease handoff", "error", err)
+			}
+		} else if os.IsNotExist(err) {
+			if err := daemon.WriteOpenCodeServeState(next); err != nil {
+				slog.Default().Error("write opencode active lease handoff", "error", err)
+			}
+		} else if err != nil {
+			slog.Default().Error("read opencode active lease handoff", "error", err)
+		} else {
+			slog.Default().Error("opencode active lease handoff owner changed", "owner_pid", current.OwnerPID)
+		}
+		// An active terminal is the stronger safety invariant. Even if the
+		// metadata update failed, relinquish process ownership rather than
+		// interrupting the user's TUI. A later daemon start can diagnose or
+		// clean the stale handoff record without killing this attach mid-turn.
+		c.server.Detach()
+		c.preserveServe = true
+	}
 	if c.cancel != nil {
 		c.cancel()
 	}
@@ -335,9 +455,13 @@ func (c *opencodeCoordinator) startDiscovery() error {
 	if err := c.ensureStarted(); err != nil {
 		return err
 	}
+	if err := c.initializeControlBaseline(c.ctx); err != nil {
+		return fmt.Errorf("initialize opencode control baseline: %w", err)
+	}
 	slog.Default().Info("opencode discovery started", "serve", c.srv().BaseURL())
 	go c.discoveryLoop(c.ctx)
 	go c.supervise(c.ctx)
+	go c.leaseReaper(c.ctx)
 	go c.interactionLoop(c.ctx)
 	return nil
 }
@@ -813,6 +937,9 @@ func (c *opencodeCoordinator) discoverOnce(ctx context.Context) {
 			continue
 		}
 		fresh++
+		if s.ParentID != "" {
+			c.promoteDiscoveredFork(s.ID, s.ParentID, s.Directory())
+		}
 		if c.isTracked(s.ID) {
 			continue // owned, or already-discovered terminal session
 		}
@@ -838,17 +965,218 @@ func (c *opencodeCoordinator) discoverOnce(ctx context.Context) {
 			c.sm.SetSessionModel(s.ID, model)
 		}
 		c.sm.outputCh <- protocol.DaemonEvent{
-			Type:      "session_discovered",
-			SessionID: s.ID,
-			Cwd:       s.Directory(),
-			Status:    protocol.StatusIdle,
-			Source:    "terminal",
-			Agent:     adapter.AgentOpencode,
-			Model:     model,
+			Type:         "session_discovered",
+			SessionID:    s.ID,
+			Cwd:          s.Directory(),
+			Status:       protocol.StatusIdle,
+			Source:       "terminal",
+			Agent:        adapter.AgentOpencode,
+			Model:        model,
+			ControlMode:  c.sm.SessionControlMode(s.ID),
+			Capabilities: c.sm.OpenCodeInteractionCapabilities(s.ID),
 		}
 		// emitUser=true: terminal sessions have no other source of user_text.
 		c.startSync(s.ID, true)
 	}
+}
+
+func (c *opencodeCoordinator) markManagedSession(sessionID, cwd string) {
+	generation := c.currentGeneration()
+	c.managedMu.Lock()
+	c.managedSessions[sessionID] = managedOpenCodeSession{CWD: normalizeCwd(cwd), Generation: generation}
+	c.managedMu.Unlock()
+	c.sm.mu.Lock()
+	if state := c.sm.sessions[sessionID]; state != nil && state.Agent == adapter.AgentOpencode {
+		state.ControlMode = protocol.ControlManaged
+	}
+	c.sm.mu.Unlock()
+	c.persistControlRegistry()
+}
+
+func (c *opencodeCoordinator) deferManagedFork(parentID, cwd string) {
+	generation := c.currentGeneration()
+	c.managedMu.Lock()
+	c.pendingForks[parentID] = append(c.pendingForks[parentID], managedOpenCodeSession{CWD: normalizeCwd(cwd), Generation: generation})
+	c.managedMu.Unlock()
+	c.persistControlRegistry()
+}
+
+func (c *opencodeCoordinator) promoteDiscoveredFork(childID, parentID, cwd string) {
+	c.managedMu.Lock()
+	pending := c.pendingForks[parentID]
+	for i, candidate := range pending {
+		if normalizeCwd(cwd) != candidate.CWD {
+			continue
+		}
+		pending = append(pending[:i], pending[i+1:]...)
+		if len(pending) == 0 {
+			delete(c.pendingForks, parentID)
+		} else {
+			c.pendingForks[parentID] = pending
+		}
+		c.managedSessions[childID] = candidate
+		break
+	}
+	c.managedMu.Unlock()
+	c.persistControlRegistry()
+}
+
+func (c *opencodeCoordinator) isManagedSession(sessionID string) bool {
+	c.managedMu.RLock()
+	_, ok := c.managedSessions[sessionID]
+	c.managedMu.RUnlock()
+	return ok
+}
+
+func (c *opencodeCoordinator) currentGeneration() uint64 {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.generation
+}
+
+func (c *opencodeCoordinator) setManagedGeneration(generation uint64) {
+	c.managedMu.Lock()
+	for sessionID, session := range c.managedSessions {
+		session.Generation = generation
+		c.managedSessions[sessionID] = session
+	}
+	for parentID, pending := range c.pendingForks {
+		for i := range pending {
+			pending[i].Generation = generation
+		}
+		c.pendingForks[parentID] = pending
+	}
+	c.managedMu.Unlock()
+}
+
+func (c *opencodeCoordinator) controlRegistrySnapshot() (map[string]daemon.OpenCodeManagedSessionState, map[string][]daemon.OpenCodeManagedSessionState) {
+	c.managedMu.RLock()
+	defer c.managedMu.RUnlock()
+	managed := make(map[string]daemon.OpenCodeManagedSessionState, len(c.managedSessions))
+	for sessionID, session := range c.managedSessions {
+		managed[sessionID] = daemon.OpenCodeManagedSessionState{CWD: session.CWD, Generation: session.Generation, ControlMode: protocol.ControlManaged}
+	}
+	pending := make(map[string][]daemon.OpenCodeManagedSessionState, len(c.pendingForks))
+	for parentID, sessions := range c.pendingForks {
+		items := make([]daemon.OpenCodeManagedSessionState, 0, len(sessions))
+		for _, session := range sessions {
+			items = append(items, daemon.OpenCodeManagedSessionState{CWD: session.CWD, Generation: session.Generation, ControlMode: protocol.ControlManaged})
+		}
+		pending[parentID] = items
+	}
+	return managed, pending
+}
+
+func (c *opencodeCoordinator) restoreControlRegistry(state *daemon.OpenCodeServeState) {
+	if state == nil {
+		return
+	}
+	c.managedMu.Lock()
+	for sessionID, session := range state.ManagedSessions {
+		if session.ControlMode == protocol.ControlManaged && strings.TrimSpace(session.CWD) != "" {
+			c.managedSessions[sessionID] = managedOpenCodeSession{CWD: normalizeCwd(session.CWD), Generation: session.Generation}
+		}
+	}
+	for parentID, sessions := range state.PendingForks {
+		for _, session := range sessions {
+			if session.ControlMode == protocol.ControlManaged && strings.TrimSpace(session.CWD) != "" {
+				c.pendingForks[parentID] = append(c.pendingForks[parentID], managedOpenCodeSession{CWD: normalizeCwd(session.CWD), Generation: session.Generation})
+			}
+		}
+	}
+	c.managedMu.Unlock()
+}
+
+func (c *opencodeCoordinator) persistControlRegistry() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if !c.handoffPersisted || c.server == nil {
+		return
+	}
+	if err := daemon.ClaimOpenCodeServeState(os.Getpid(), c.openCodeHandoffState(c.server, c.generation)); err != nil {
+		slog.Default().Warn("persist opencode control registry failed", "error", err)
+	}
+}
+
+func (c *opencodeCoordinator) initializeControlBaseline(ctx context.Context) error {
+	server := c.srv()
+	if server == nil {
+		return fmt.Errorf("opencode serve is not ready")
+	}
+	sessions, err := server.ListSessions(ctx)
+	if err != nil {
+		return err
+	}
+	processes, err := c.processInspector.List()
+	if err != nil {
+		return err
+	}
+	processes = excludeProcessPIDs(processes, server.PID())
+	c.baselineMu.Lock()
+	for _, session := range sessions {
+		mode := protocol.ControlLegacyReadOnly
+		if watcher.HasUnmanagedOpenCodeProcessInCWD(processes, session.Directory(), server.BaseURL()) {
+			mode = protocol.ControlUnmanagedActive
+		}
+		if c.isManagedSession(session.ID) {
+			mode = protocol.ControlManaged
+		}
+		c.baselineModes[session.ID] = mode
+	}
+	c.baselineMu.Unlock()
+	return nil
+}
+
+func (c *opencodeCoordinator) controlModeForSession(sessionID, cwd string) string {
+	if c.isManagedSession(sessionID) {
+		return protocol.ControlManaged
+	}
+	c.baselineMu.RLock()
+	mode := c.baselineModes[sessionID]
+	c.baselineMu.RUnlock()
+	if mode != "" {
+		return mode
+	}
+	server := c.srv()
+	baseURL := ""
+	if server != nil {
+		baseURL = server.BaseURL()
+	}
+	serverPID := 0
+	if server != nil {
+		serverPID = server.PID()
+	}
+	if hasUnmanagedOpenCodeProcess(c.processInspector, cwd, baseURL, serverPID) {
+		return protocol.ControlUnmanagedActive
+	}
+	return protocol.ControlLegacyReadOnly
+}
+
+func hasUnmanagedOpenCodeProcess(inspector platform.ProcessInspector, cwd, sharedBaseURL string, excludedPIDs ...int) bool {
+	if inspector == nil {
+		return true
+	}
+	processes, err := inspector.List()
+	if err != nil {
+		return true
+	}
+	return watcher.HasUnmanagedOpenCodeProcessInCWD(excludeProcessPIDs(processes, excludedPIDs...), cwd, sharedBaseURL)
+}
+
+func excludeProcessPIDs(processes []platform.ProcessSnapshot, excludedPIDs ...int) []platform.ProcessSnapshot {
+	excluded := make(map[int]struct{}, len(excludedPIDs))
+	for _, pid := range excludedPIDs {
+		if pid > 0 {
+			excluded[pid] = struct{}{}
+		}
+	}
+	out := make([]platform.ProcessSnapshot, 0, len(processes))
+	for _, process := range processes {
+		if _, skip := excluded[process.PID]; !skip {
+			out = append(out, process)
+		}
+	}
+	return out
 }
 
 // startSync launches a per-session message poll loop (once). emitUser controls
@@ -1163,7 +1491,7 @@ func (sm *SessionManager) StartOpencodeDiscovery() error {
 	if _, ok := adapter.Get(adapter.AgentOpencode); !ok {
 		return nil
 	}
-	if _, _, found := discovery.ResolveAgent("opencode"); !found {
+	if _, _, err := resolveOpenCodeCLI(); err != nil {
 		return nil // opencode not installed — nothing to discover
 	}
 	return sm.ensureOpencode().startDiscovery()
@@ -1233,6 +1561,7 @@ func (sm *SessionManager) loadOpencodeSessionFromServe(sessionID string) (loaded
 
 	model := info.Model.ProviderID + "/" + info.Model.ID
 	cwdKey := normalizeCwd(info.Directory)
+	controlMode := coord.controlModeForSession(sessionID, info.Directory)
 	now := time.Now()
 	sm.mu.Lock()
 	if state := sm.sessions[sessionID]; state != nil {
@@ -1262,6 +1591,7 @@ func (sm *SessionManager) loadOpencodeSessionFromServe(sessionID string) (loaded
 		Model:          model,
 		CurrentAgent:   info.Agent,
 		Backend:        &serverBackend{coord: coord},
+		ControlMode:    controlMode,
 	}
 	registerCwdKeyLocked(sm, sessionID, cwdKey)
 	sm.mu.Unlock()
@@ -1280,12 +1610,19 @@ func registerCwdKeyLocked(sm *SessionManager, sessionID, cwdKey string) {
 }
 
 var opencodeInteractionCapabilities = []string{
-	"dynamic_commands", "agent_switch", "permission_actions", "questions",
+	"dynamic_commands", "agent_switch", "permission_actions", "questions", "shared_runtime", "terminal_coapproval",
 }
 
 func (sm *SessionManager) OpenCodeInteractionCapabilities(sessionID string) []string {
-	agent, ok := sm.GetSessionAgent(sessionID)
-	if !ok || agent != adapter.AgentOpencode {
+	sm.mu.RLock()
+	state := sm.sessions[sessionID]
+	capabilities := sm.openCodeCapabilitiesLocked(state)
+	sm.mu.RUnlock()
+	return capabilities
+}
+
+func (sm *SessionManager) openCodeCapabilitiesLocked(state *ProcessState) []string {
+	if state == nil || state.Agent != adapter.AgentOpencode || state.ControlMode != protocol.ControlManaged {
 		return nil
 	}
 	return append([]string(nil), opencodeInteractionCapabilities...)
@@ -1399,7 +1736,7 @@ func (sm *SessionManager) ModelsForAgent(agentType string) []protocol.ModelOptio
 	if agentType != adapter.AgentOpencode {
 		return ListModelsForAgent(agentType)
 	}
-	if _, _, found := discovery.ResolveAgent("opencode"); !found {
+	if _, _, err := resolveOpenCodeCLI(); err != nil {
 		return nil
 	}
 	coord := sm.ensureOpencode()
@@ -1417,7 +1754,9 @@ func (sm *SessionManager) ModelsForAgent(agentType string) []protocol.ModelOptio
 	return models
 }
 
-// ShutdownOpencode stops the shared serve process and its loops (daemon stop).
+// ShutdownOpencode stops coordinator loops. The serve is stopped when no live
+// terminal lease remains; otherwise ownership is handed off so the TUI keeps
+// running across an explicit daemon stop.
 func (sm *SessionManager) ShutdownOpencode() {
 	sm.mu.Lock()
 	c := sm.opencode
@@ -1456,6 +1795,7 @@ func (sm *SessionManager) CancelDaemonRestart() {
 // Returns true if newly registered.
 func (sm *SessionManager) RegisterOpencodeTerminalSession(sessionID, cwd string) bool {
 	coord := sm.ensureOpencode()
+	controlMode := coord.controlModeForSession(sessionID, cwd)
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
 	if _, exists := sm.sessions[sessionID]; exists {
@@ -1471,6 +1811,7 @@ func (sm *SessionManager) RegisterOpencodeTerminalSession(sessionID, cwd string)
 		Agent:          adapter.AgentOpencode,
 		Source:         "terminal",
 		Backend:        &serverBackend{coord: coord},
+		ControlMode:    controlMode,
 	}
 	return true
 }
@@ -1530,10 +1871,12 @@ func (sm *SessionManager) createOpencodeSession(ctx context.Context, config prot
 		Source:         "daemon",
 		Model:          cfg.Model,
 		Backend:        backend,
+		ControlMode:    protocol.ControlManaged,
 	}
 	sm.mu.Lock()
 	sm.sessions[sid] = ps
 	sm.mu.Unlock()
+	coord.markManagedSession(sid, resolvedCwd)
 	sm.registerCwd(sid, resolvedCwd)
 
 	// Start the message poller (emitUser=false: we echo the user message below).

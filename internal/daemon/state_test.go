@@ -12,12 +12,13 @@ import (
 	"testing"
 	"time"
 
+	"github.com/pocketctl/pocketctl/internal/agentcontrol"
 	"github.com/pocketctl/pocketctl/internal/platform"
 )
 
 func TestOpenCodeServeStateRoundTripIsPrivateAndRemovable(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
-	want := &OpenCodeServeState{PID: os.Getpid(), BaseURL: "http://127.0.0.1:1234", Password: "secret", Version: "1.2.3", OwnerPID: 42, UpdatedAt: time.Now().UTC().Truncate(time.Second)}
+	want := &OpenCodeServeState{PID: os.Getpid(), BaseURL: "http://127.0.0.1:1234", Password: "secret", Version: "1.2.3", OwnerPID: 42, Generation: 7, UpdatedAt: time.Now().UTC().Truncate(time.Second)}
 	if err := WriteOpenCodeServeState(want); err != nil {
 		t.Fatal(err)
 	}
@@ -89,6 +90,45 @@ func TestOpenCodeServeStateForcedDaemonStopCleanup(t *testing.T) {
 	}
 	if _, err := os.Stat(OpenCodeServeStatePath()); !os.IsNotExist(err) {
 		t.Fatalf("state survived: %v", err)
+	}
+}
+
+func TestOpenCodeServeStateCleanupPreservesLiveTerminalLease(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	const password = "active-lease-secret"
+	proc := exec.Command("sleep", "30")
+	if err := proc.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer proc.Process.Kill()
+	go proc.Wait()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		user, pass, ok := r.BasicAuth()
+		if !ok || user != "opencode" || pass != password {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		fmt.Fprint(w, `{"healthy":true,"version":"1.2.3"}`)
+	}))
+	defer server.Close()
+	leases := agentcontrol.NewLeaseRegistry()
+	if err := leases.Register(agentcontrol.Lease{ID: "lease-live", Agent: agentcontrol.AgentOpenCode, PID: os.Getpid(), Generation: 3}); err != nil {
+		t.Fatal(err)
+	}
+	if err := WriteOpenCodeServeState(&OpenCodeServeState{
+		PID: proc.Process.Pid, BaseURL: server.URL, Password: password, Version: "1.2.3",
+		OwnerPID: 0, Generation: 3, Leases: leases.Snapshot(), UpdatedAt: time.Now(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := CleanupOpenCodeServeAfterForcedStop(); err != nil {
+		t.Fatal(err)
+	}
+	if !platform.NewProcessController().IsAlive(proc.Process.Pid) {
+		t.Fatal("serve was killed while terminal lease was active")
+	}
+	if _, err := ReadOpenCodeServeState(); err != nil {
+		t.Fatalf("handoff state removed while lease active: %v", err)
 	}
 }
 

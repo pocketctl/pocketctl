@@ -41,6 +41,8 @@ export async function initDB(pool: pg.Pool): Promise<void> {
       title TEXT,
       source VARCHAR(16) DEFAULT 'daemon',
       status VARCHAR(32) DEFAULT 'running',
+      control_mode VARCHAR(32),
+      capabilities JSONB,
       created_at TIMESTAMPTZ DEFAULT NOW(),
       updated_at TIMESTAMPTZ DEFAULT NOW()
     );
@@ -66,6 +68,10 @@ export async function initDB(pool: pg.Pool): Promise<void> {
   await pool.query(`ALTER TABLE sessions ADD COLUMN IF NOT EXISTS source VARCHAR(16) DEFAULT 'daemon'`);
   // OpenCode's runtime agent (build/plan/...) is independent from agent_type.
   await pool.query(`ALTER TABLE sessions ADD COLUMN IF NOT EXISTS active_agent VARCHAR(128)`);
+  // Managed OpenCode control is an explicit daemon claim. Keep control_mode
+  // nullable so historical rows remain safely distinguishable from managed.
+  await pool.query(`ALTER TABLE sessions ADD COLUMN IF NOT EXISTS control_mode VARCHAR(32)`);
+  await pool.query(`ALTER TABLE sessions ADD COLUMN IF NOT EXISTS capabilities JSONB`);
   // Migration: add last_activity_at and exit_reason columns
   await pool.query(`ALTER TABLE sessions ADD COLUMN IF NOT EXISTS last_activity_at TIMESTAMPTZ`);
   await pool.query(`ALTER TABLE sessions ADD COLUMN IF NOT EXISTS exit_reason VARCHAR(32)`);
@@ -839,6 +845,7 @@ export async function listSessionsWithChildren(pool: pg.Pool, whereUser?: number
   if (whereUser !== undefined) baseParams.push(whereUser);
   const result = await pool.query(
     `SELECT s.session_id, s.daemon_id, s.agent_type, s.active_agent, s.cwd, s.title, s.source, s.status,
+            s.control_mode, s.capabilities,
             s.created_at, s.updated_at, s.last_activity_at, s.exit_reason, s.subagent_count, s.pinned,
             s.model, s.parent_session_id, s.is_subagent, s.root_session_id,
             s.total_tokens, s.tok_input, s.tok_output, s.tok_cache_read, s.tok_cache_create,
@@ -882,6 +889,8 @@ function serializeSessionRow(row: any, byParent: Map<string, any[]>, sumChildren
   const children = byParent.get(row.session_id) || [];
   return {
     ...row,
+    control_mode: row.control_mode ?? (row.agent_type === 'opencode' ? 'legacy_read_only' : null),
+    capabilities: Array.isArray(row.capabilities) ? row.capabilities : [],
     // totalTokens = 父会话自身用量 + Σ所有子智能体用量（让 UI 标注的「含子智能体」名副其实；
     // 父明细 tok_input/output/cache_* 不并子项，保留 breakdown 展开）。
     totalTokens: parseInt(row.total_tokens ?? 0, 10) + childSum,
@@ -960,6 +969,7 @@ export async function listSessionsPageByDaemon(pool: pg.Pool, opts: {
   const queryStartedAt = Date.now();
   const result = await pool.query(
     `SELECT s.session_id, s.daemon_id, s.agent_type, s.active_agent, s.cwd, s.title, s.source, s.status,
+            s.control_mode, s.capabilities,
             s.created_at, s.updated_at, s.last_activity_at, s.exit_reason, s.subagent_count, s.pinned,
             s.model, s.parent_session_id, s.is_subagent, s.root_session_id,
             s.total_tokens, s.tok_input, s.tok_output, s.tok_cache_read, s.tok_cache_create,
@@ -1052,10 +1062,10 @@ export async function getSessionTokenBreakdown(pool: pg.Pool, userId: number, se
   };
 }
 
-export async function upsertSession(pool: pg.Pool, sessionId: string, daemonId: string, agentType: string, cwd: string, status: string, title?: string, source?: string, exitReason?: string, userId?: number, model?: string): Promise<void> {
+export async function upsertSession(pool: pg.Pool, sessionId: string, daemonId: string, agentType: string, cwd: string, status: string, title?: string, source?: string, exitReason?: string, userId?: number, model?: string, controlMode?: string, capabilities?: string[]): Promise<void> {
   await pool.query(
-    `INSERT INTO sessions (session_id, daemon_id, agent_type, cwd, title, source, status, exit_reason, user_id, model, created_at, updated_at)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NOW(), NOW())
+    `INSERT INTO sessions (session_id, daemon_id, agent_type, cwd, title, source, status, exit_reason, user_id, model, control_mode, capabilities, created_at, updated_at)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12::jsonb, NOW(), NOW())
      ON CONFLICT (session_id) DO UPDATE SET
        daemon_id = $2,
        status = $7,
@@ -1069,8 +1079,17 @@ export async function upsertSession(pool: pg.Pool, sessionId: string, daemonId: 
        exit_reason = COALESCE($8, sessions.exit_reason),
        user_id = CASE WHEN $9 IS NOT NULL THEN $9 ELSE sessions.user_id END,
        model = COALESCE($10, sessions.model),
+       control_mode = COALESCE($11, sessions.control_mode),
+       capabilities = COALESCE($12::jsonb, sessions.capabilities),
        updated_at = NOW()`,
-    [sessionId, daemonId, agentType, cwd, title || null, source || 'daemon', status, exitReason || null, userId || null, model || null]
+    [sessionId, daemonId, agentType, cwd, title || null, source || 'daemon', status, exitReason || null, userId || null, model || null, controlMode || null, capabilities ? JSON.stringify(capabilities) : null]
+  );
+}
+
+export async function updateSessionControl(pool: pg.Pool, sessionId: string, controlMode: string, capabilities: string[]): Promise<void> {
+  await pool.query(
+    `UPDATE sessions SET control_mode = $1, capabilities = $2::jsonb, updated_at = NOW() WHERE session_id = $3`,
+    [controlMode, JSON.stringify(capabilities), sessionId],
   );
 }
 

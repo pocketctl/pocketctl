@@ -82,6 +82,57 @@ func wsURL(httpURL string) string {
 	return "ws" + strings.TrimPrefix(httpURL, "http")
 }
 
+func TestPingIncludesContentFreeOpenCodeTelemetry(t *testing.T) {
+	observed := make(chan protocol.OpenCodeRuntimeTelemetry, 1)
+	upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		for {
+			_, raw, err := conn.ReadMessage()
+			if err != nil {
+				return
+			}
+			var message protocol.PingMessage
+			if json.Unmarshal(raw, &message) != nil {
+				continue
+			}
+			if message.Type == "register" {
+				_ = conn.WriteJSON(map[string]any{"type": "register_ack", "supports_event_ack": true})
+				continue
+			}
+			if message.Type == "ping" && message.OpenCodeRuntime != nil {
+				observed <- *message.OpenCodeRuntime
+				_ = conn.WriteJSON(map[string]string{"type": "pong"})
+				return
+			}
+		}
+	}))
+	defer server.Close()
+
+	client := newTestClient(wsURL(server.URL))
+	client.SetOpenCodeRuntimeTelemetryFn(func() protocol.OpenCodeRuntimeTelemetry {
+		return protocol.OpenCodeRuntimeTelemetry{
+			FallbackReasons: map[string]uint64{"daemon_unavailable": 3}, HealthOK: 5, HealthFailed: 1,
+		}
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go client.Run(ctx)
+
+	select {
+	case snapshot := <-observed:
+		if snapshot.FallbackReasons["daemon_unavailable"] != 3 || snapshot.HealthOK != 5 || snapshot.HealthFailed != 1 {
+			t.Fatalf("telemetry=%+v", snapshot)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("heartbeat did not include OpenCode telemetry")
+	}
+}
+
 func TestHostQuotaRejectionStopsReconnectLoop(t *testing.T) {
 	var conns int32
 	upgrader := websocket.Upgrader{}

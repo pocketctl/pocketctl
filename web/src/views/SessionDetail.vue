@@ -133,6 +133,10 @@
           <svg class="banner-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><path d="M12 9v4"/><path d="M12 17h.01"/></svg>
           <span>{{ t('session.daemon_offline') }}</span>
         </div>
+        <div v-if="isLegacyOpenCodeSession" class="banner banner-info opencode-legacy-banner" style="flex-shrink:0;">
+          <svg class="banner-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M12 16v-4"/><path d="M12 8h.01"/></svg>
+          <span>{{ t('session.opencode_legacy_readonly') }}</span>
+        </div>
         <!-- L1: send failed (ws not open at send time) -->
         <div v-if="sendError" class="banner banner-warning" style="flex-shrink:0;">
           <svg class="banner-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><path d="M12 9v4"/><path d="M12 17h.01"/></svg>
@@ -231,14 +235,14 @@
             v-else-if="msg.type === 'approval_request'"
             :message="msg"
             :supports-actions="interactionCapabilities.includes('permission_actions')"
-            :disabled="isDisconnected"
+            :disabled="interactionCardsDisabled"
             @respond="onApprovalRespond"
           />
 
           <OpenCodeQuestionCard
             v-else-if="msg.type === 'question_request'"
             :message="msg"
-            :disabled="isDisconnected"
+            :disabled="interactionCardsDisabled"
             @submit="onQuestionSubmit"
             @reject="onQuestionReject"
           />
@@ -441,7 +445,7 @@ import { formatToolInput } from '../utils/toolDisplay'
 import { isDiffTool } from '../utils/diffRender'
 import { useSessionRename } from '../composables/useSessionRename'
 import type { CommandItem } from '../composables/useWebSocket'
-import { normalizeSessionAgents, resolveInteractionRequest, sessionAgentSwitchDisabled, shouldShowSessionAgentPicker, upsertInteractionRequest, type SessionAgentOption } from '../types/opencode-interactions'
+import { canControlOpenCodeInteractions, isManagedOpenCodeSession, normalizeSessionAgents, resolveInteractionRequest, sessionAgentSwitchDisabled, shouldShowSessionAgentPicker, upsertInteractionRequest, type SessionAgentOption } from '../types/opencode-interactions'
 import { expandCodexPreset, permissionOptions, permissionTitleKey, type AgentType, type ClaudeMode, type PermissionConfig } from '../types/permission'
 
 const { renamingId, renameInput, startRename, commitRename, cancelRename } = useSessionRename()
@@ -483,7 +487,21 @@ const hasMore = ref(false)      // relay signaled older events exist
 const resumeCopied = ref(false)  // session-resume-command: 复制恢复命令反馈
 const showNewSession = ref(false)
 const daemonList = computed(() => Object.values(daemons.value))
-const currentSessionAgent = computed(() => { const s: any = allSessions.value.find((x: any) => x.session_id === sessionId.value); return s?.agent_type || s?.agent || '' })
+const currentSession = computed(() => allSessions.value.find((x: any) => x.session_id === sessionId.value))
+const currentSessionAgent = computed(() => { const s: any = currentSession.value; return s?.agent_type || s?.agent || '' })
+const currentSessionCapabilities = computed(() => interactionCapabilities.value.length > 0
+  ? interactionCapabilities.value
+  : (Array.isArray(currentSession.value?.capabilities) ? currentSession.value.capabilities : []))
+const isManagedOpenCode = computed(() => isManagedOpenCodeSession(
+  currentSessionAgent.value,
+  currentSession.value?.control_mode,
+  currentSessionCapabilities.value,
+))
+const isLegacyOpenCodeSession = computed(() => currentSessionAgent.value === 'opencode' && !isManagedOpenCode.value)
+const interactionCardsDisabled = computed(() => isDisconnected.value || (
+  currentSessionAgent.value === 'opencode'
+  && !canControlOpenCodeInteractions(currentSessionAgent.value, currentSession.value?.control_mode, currentSessionCapabilities.value)
+))
 const normalizedEffort = computed(() => normalizeEffort(currentEffort.value))
 const effortVisible = computed(() => shouldShowEffort(currentSessionAgent.value || '', currentEffort.value))
 const effortLabel = computed(() => {
@@ -652,7 +670,11 @@ const focusedSubAgentTokenTotal = computed(() => {
 const renderMessages = computed(() =>
   focusedSubAgentId.value ? (subagentMessages.value[focusedSubAgentId.value] || []) : messages.value,
 )
-const canInput = computed(() => !isDisconnected.value && (!isTerminal.value || isDaemonSession.value) && !isSubagent.value && !focusedSubAgentId.value)
+const canInput = computed(() => !isDisconnected.value
+  && (!isTerminal.value || isDaemonSession.value)
+  && !isSubagent.value
+  && !focusedSubAgentId.value
+  && (currentSessionAgent.value !== 'opencode' || isManagedOpenCode.value))
 // Agent is actively generating (send button → stop button)
 // Agent is actively working — includes 'waiting' (tool execution in progress),
 // otherwise the timer would stop prematurely when a tool call is running.
@@ -1646,9 +1668,10 @@ function processEvent(evt: any, target: any[] = messages.value, subagentOverride
     if (!requestId) return
     const approved = evt.approved ?? evt.payload?.approved
     const action = evt.action || evt.payload?.action || (approved ? 'once' : 'reject')
-    interactionResolutions.set(requestId, { type: 'approval_request', resolution: { action } })
-    resolveInteractionRequest(target, 'approval_request', requestId, { action })
-    if (target !== messages.value) resolveInteractionRequest(messages.value, 'approval_request', requestId, { action })
+    const resolution = { action, reason: evt.reason || evt.payload?.reason }
+    interactionResolutions.set(requestId, { type: 'approval_request', resolution })
+    resolveInteractionRequest(target, 'approval_request', requestId, resolution)
+    if (target !== messages.value) resolveInteractionRequest(messages.value, 'approval_request', requestId, resolution)
     clearInteractionSubmitting(requestId)
   } else if (type === 'question_request') {
     const requestId = evt.request_id || evt.payload?.request_id
@@ -1671,6 +1694,7 @@ function processEvent(evt: any, target: any[] = messages.value, subagentOverride
     const resolution = {
       answers: evt.answers || evt.payload?.answers || [],
       rejected: !!(evt.rejected ?? evt.payload?.rejected),
+      reason: evt.reason || evt.payload?.reason,
     }
     interactionResolutions.set(requestId, { type: 'question_request', resolution })
     resolveInteractionRequest(target, 'question_request', requestId, resolution)
@@ -1757,13 +1781,21 @@ onMounted(() => {
   // Gate the timer watch for the initial load too: status defaults to 'running'
   // (a placeholder) and would start the timer from zero before the real status
   // arrives via replay. replay_end un-gates and resumes correctly.
-  sessionSwitching = true
-  loadHistory()
+	sessionSwitching = true
+	loadHistory()
+	cleanups.push(onEvent('connection_restored', () => {
+		send({ type: 'list_sessions' })
+		send({ type: 'list_daemons' })
+		loadHistory()
+	}))
 
-  cleanups.push(onEvent('session_list', (msg: any) => {
+	cleanups.push(onEvent('session_list', (msg: any) => {
     allSessions.value = msg.sessions || []
     // P1a: populate childrenToken from current session's children
     const cur = msg.sessions?.find((s: any) => s.session_id === sessionId.value)
+    if (cur && interactionCapabilities.value.length === 0 && Array.isArray(cur.capabilities)) {
+      interactionCapabilities.value = cur.capabilities
+    }
     if (cur?.active_agent && !currentOpenCodeAgent.value) currentOpenCodeAgent.value = cur.active_agent
     if (cur?.children) {
       for (const c of cur.children) {
@@ -1815,6 +1847,8 @@ onMounted(() => {
         subagent_count: 0,
         pinned: false,
         daemon_online: true,
+        control_mode: msg.control_mode,
+        capabilities: Array.isArray(msg.capabilities) ? msg.capabilities : [],
       })
     }
     // session_created carries the daemon-resolved model (for the /model command).
@@ -1858,6 +1892,11 @@ onMounted(() => {
     if (msg.model) currentModel.value = msg.model
     if (msg.effort) currentEffort.value = msg.effort
     interactionCapabilities.value = Array.isArray(msg.capabilities) ? msg.capabilities : []
+    const session = allSessions.value.find((item: any) => item.session_id === msg.session_id)
+    if (session) {
+      if (msg.control_mode !== undefined) session.control_mode = msg.control_mode
+      session.capabilities = interactionCapabilities.value
+    }
     if (msg.current_agent) currentOpenCodeAgent.value = msg.current_agent
     currentPermission.value = msg.permission
     permissionMutable.value = !!msg.permission_mutable
@@ -2026,6 +2065,17 @@ onMounted(() => {
   cleanups.push(onEvent('question_resolved', (msg: any) => {
     if (msg.session_id !== sessionId.value) return
     processEvent(msg)
+  }))
+  cleanups.push(onEvent('interaction_result', (msg: any) => {
+    if (msg.session_id !== sessionId.value || msg.status !== 'resolved_elsewhere' || !msg.request_id) return
+    let type: 'approval_request' | 'question_request'
+    if (msg.operation === 'approval_response') type = 'approval_request'
+    else if (msg.operation === 'question_response' || msg.operation === 'question_reject') type = 'question_request'
+    else return
+    const resolution = { reason: 'resolved_elsewhere' }
+    interactionResolutions.set(msg.request_id, { type, resolution })
+    resolveInteractionRequest(messages.value, type, msg.request_id, resolution)
+    clearInteractionSubmitting(msg.request_id)
   }))
   cleanups.push(onEvent('interactive_prompt', (msg: any) => {
     if (msg.session_id !== sessionId.value) return

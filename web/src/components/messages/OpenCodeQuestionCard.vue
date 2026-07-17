@@ -43,7 +43,7 @@
       <button class="question-submit" type="button" :disabled="controlsDisabled || !valid" @click="submit">{{ t('question.submit') }}</button>
       <button class="question-reject" type="button" :disabled="controlsDisabled" @click="$emit('reject', message)">{{ t('question.reject') }}</button>
     </div>
-    <div v-else class="question-result">{{ message.rejected ? t('question.rejected') : t('question.answered') }}</div>
+    <div v-else class="question-result">{{ message.reason === 'resolved_elsewhere' ? t('question.resolved_elsewhere') : (message.rejected ? t('question.rejected') : t('question.answered')) }}</div>
   </div>
 </template>
 

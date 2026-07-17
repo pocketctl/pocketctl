@@ -49,6 +49,7 @@ type OpencodeServer struct {
 	cmd              *exec.Cmd
 	cancel           context.CancelFunc
 	baseURL          string // e.g. http://127.0.0.1:53211 (resolved from the server's stdout)
+	outputPath       string // unique per serve; prevents concurrent starts reading another process's URL
 	pid              int
 	version          string
 	identityNotAfter time.Time
@@ -147,9 +148,9 @@ func DetectOpencodeVersion(ctx context.Context, cliPath string) (string, error) 
 	return "", fmt.Errorf("opencode version not found")
 }
 
-func OpencodeServeOutputPath() string {
+func opencodeServeOutputDir() string {
 	home, _ := os.UserHomeDir()
-	return filepath.Join(home, ".pocketctl", "logs", "opencode-serve.log")
+	return filepath.Join(home, ".pocketctl", "logs")
 }
 
 // Start launches `opencode serve --port 0`, parses the chosen base URL from its
@@ -164,6 +165,7 @@ func (s *OpencodeServer) Start(ctx context.Context) error {
 	}
 	_, cancel := context.WithCancel(ctx)
 	cmd := exec.Command(s.cliPath, "serve", "--port", "0")
+	configureOpencodeServeProcess(cmd)
 	// Force edit/bash to "ask" for daemon-driven sessions so this serve emits
 	// permission.asked SSE events, which the coordinator surfaces as approval_request
 	// cards for remote approval. Requests remain pending until an explicit reply;
@@ -174,25 +176,25 @@ func (s *OpencodeServer) Start(ctx context.Context) error {
 		"OPENCODE_SERVER_PASSWORD="+s.password,
 		`OPENCODE_CONFIG_CONTENT={"permission":{"edit":{"*":"ask"},"bash":{"*":"ask"}}}`,
 	)
-	outputPath := OpencodeServeOutputPath()
-	if err := os.MkdirAll(filepath.Dir(outputPath), 0o700); err != nil {
+	outputDir := opencodeServeOutputDir()
+	if err := os.MkdirAll(outputDir, 0o700); err != nil {
 		cancel()
 		s.mu.Unlock()
 		return fmt.Errorf("create opencode output directory: %w", err)
 	}
-	if err := os.Chmod(filepath.Dir(outputPath), 0o700); err != nil {
+	if err := os.Chmod(outputDir, 0o700); err != nil {
 		cancel()
 		s.mu.Unlock()
 		return err
 	}
-	output, err := os.OpenFile(outputPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
+	output, err := os.CreateTemp(outputDir, "opencode-serve-*.log")
 	if err != nil {
 		cancel()
 		s.mu.Unlock()
 		return fmt.Errorf("open opencode output: %w", err)
 	}
+	outputPath := output.Name()
 	_ = output.Chmod(0o600)
-	startOffset, _ := output.Seek(0, io.SeekEnd)
 	cmd.Stdout = output
 	cmd.Stderr = output
 	if err := cmd.Start(); err != nil {
@@ -207,11 +209,12 @@ func (s *OpencodeServer) Start(ctx context.Context) error {
 	s.cmd = cmd
 	s.cancel = cancel
 	s.pid = cmd.Process.Pid
+	s.outputPath = outputPath
 	s.identityNotAfter = time.Now()
 	s.mu.Unlock()
 
 	// Parse the listening URL from stdout (line: "opencode server listening on http://127.0.0.1:PORT").
-	base, perr := waitListenURLFromFile(outputPath, startOffset, 15*time.Second)
+	base, perr := waitListenURLFromFile(outputPath, 0, 15*time.Second)
 	if perr != nil {
 		s.Stop()
 		return fmt.Errorf("opencode serve did not report a listen URL: %w", perr)
@@ -325,6 +328,11 @@ func (s *OpencodeServer) BaseURL() string {
 func (s *OpencodeServer) PID() int         { s.mu.Lock(); defer s.mu.Unlock(); return s.pid }
 func (s *OpencodeServer) Version() string  { s.mu.Lock(); defer s.mu.Unlock(); return s.version }
 func (s *OpencodeServer) Password() string { s.mu.Lock(); defer s.mu.Unlock(); return s.password }
+func (s *OpencodeServer) OutputPath() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.outputPath
+}
 
 type opencodeGlobalHealth struct {
 	Healthy bool   `json:"healthy"`

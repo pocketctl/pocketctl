@@ -18,10 +18,11 @@ import (
 // modification. Replaces the former instance_unix.go / instance_windows.go
 // build-tag split (platform now owns the platform split).
 func AcquireInstanceLock() (io.Closer, error) {
-	if err := os.MkdirAll(pidDir, 0o755); err != nil {
-		return nil, fmt.Errorf("create %s: %w", pidDir, err)
+	dir := runtimeDir()
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return nil, fmt.Errorf("create %s: %w", dir, err)
 	}
-	return AcquireInstanceLockAt(filepath.Join(pidDir, "daemon.lock"))
+	return AcquireInstanceLockAt(filepath.Join(dir, "daemon.lock"))
 }
 
 // AcquireInstanceLockAt is the path-selectable form used by restart ownership

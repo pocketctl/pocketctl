@@ -73,6 +73,19 @@ type ProcessController interface {
 	Kill(pid int) error
 }
 
+type ProcessSnapshot struct {
+	PID        int
+	Executable string
+	Args       []string
+	CWD        string
+}
+
+// ProcessInspector returns best-effort process metadata used to distinguish
+// native terminal agents from launchers attached to a managed runtime.
+type ProcessInspector interface {
+	List() ([]ProcessSnapshot, error)
+}
+
 // Daemonizer 抽象进程后台化与 re-exec 重启。
 type Daemonizer interface {
 	// ForkDetached 启动脱离终端的子进程运行 self+args，返回子进程。env 为子进程环境。

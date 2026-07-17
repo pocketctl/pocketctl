@@ -10,12 +10,32 @@ import (
 	"syscall"
 
 	"github.com/Microsoft/go-winio"
+	gopsprocess "github.com/shirou/gopsutil/v3/process"
 	"golang.org/x/sys/windows"
 )
 
 // NewPTYProvider 返回 Windows PTY provider（PR1 stub）。
 // ConPTY 真实实现见 PR4；PR1 全部返回 ErrUnsupported，调用方降级处理。
 func NewPTYProvider() PTYProvider { return windowsPTYProvider{} }
+
+func NewProcessInspector() ProcessInspector { return windowsProcessInspector{} }
+
+type windowsProcessInspector struct{}
+
+func (windowsProcessInspector) List() ([]ProcessSnapshot, error) {
+	processes, err := gopsprocess.Processes()
+	if err != nil {
+		return nil, err
+	}
+	out := make([]ProcessSnapshot, 0, len(processes))
+	for _, process := range processes {
+		args, _ := process.CmdlineSlice()
+		cwd, _ := process.Cwd()
+		executable, _ := process.Exe()
+		out = append(out, ProcessSnapshot{PID: int(process.Pid), Executable: executable, Args: args, CWD: cwd})
+	}
+	return out, nil
+}
 
 type windowsPTYProvider struct{}
 
@@ -30,11 +50,23 @@ func NewIPCListener() IPCListener { return windowsIPCListener{} }
 type windowsIPCListener struct{}
 
 func (windowsIPCListener) Listen(name string) (net.Listener, error) {
-	ln, err := winio.ListenPipe(name, nil)
+	sid, err := currentWindowsUserSID()
+	if err != nil {
+		return nil, fmt.Errorf("resolve current user SID for named pipe: %w", err)
+	}
+	config := &winio.PipeConfig{SecurityDescriptor: windowsPipeSecurityDescriptor(sid)}
+	ln, err := winio.ListenPipe(name, config)
 	if err != nil {
 		return nil, fmt.Errorf("listen named pipe: %w", err)
 	}
 	return ln, nil
+}
+
+func windowsPipeSecurityDescriptor(userSID string) string {
+	// Protected DACL: only LocalSystem and the daemon's current user can open
+	// the pipe. In particular, do not inherit the Windows default named-pipe ACL,
+	// which can include broader local principals depending on the host policy.
+	return "D:P(A;;GA;;;SY)(A;;GA;;;" + userSID + ")"
 }
 
 func (windowsIPCListener) DefaultPath(name string) string {

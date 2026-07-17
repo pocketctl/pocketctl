@@ -3,9 +3,34 @@ package watcher
 import (
 	"context"
 	"os"
+	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/pocketctl/pocketctl/internal/platform"
 )
+
+func TestOpenCodeAdoptionProcessClassification(t *testing.T) {
+	repo := t.TempDir()
+	sharedURL := "http://127.0.0.1:4096"
+	processes := []platform.ProcessSnapshot{
+		{PID: 1, Executable: "/opt/opencode", Args: []string{"/opt/opencode"}, CWD: repo},
+		{PID: 2, Executable: "/opt/opencode", Args: []string{"/opt/opencode", "attach", sharedURL, "--dir", repo}, CWD: repo},
+		{PID: 3, Executable: "/opt/opencode", Args: []string{"/opt/opencode", "attach", "http://127.0.0.1:9999"}, CWD: repo},
+		{PID: 4, Executable: "/opt/opencode", Args: []string{"/opt/opencode", "run", "--attach=" + sharedURL, "fix"}, CWD: repo},
+		{PID: 5, Executable: "/bin/zsh", Args: []string{"zsh"}, CWD: repo},
+	}
+	got := UnmanagedOpenCodeProcesses(processes, sharedURL)
+	if len(got) != 2 || got[0].PID != 1 || got[1].PID != 3 {
+		t.Fatalf("unmanaged=%+v", got)
+	}
+	if !HasUnmanagedOpenCodeProcessInCWD(processes, filepath.Join(repo, "."), sharedURL) {
+		t.Fatal("native OpenCode process in cwd was not detected")
+	}
+	if HasUnmanagedOpenCodeProcessInCWD(processes[1:2], repo, sharedURL) {
+		t.Fatal("managed attach was classified as unmanaged")
+	}
+}
 
 func TestProcessMonitorDetectsExit(t *testing.T) {
 	pm := NewProcessMonitor()

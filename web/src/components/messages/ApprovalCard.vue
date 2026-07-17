@@ -38,7 +38,7 @@
           <button class="approval-btn allow" :disabled="actionsDisabled" @click.stop="respond('once')">{{ t('approval.allow') }}</button>
           <button class="approval-btn deny" :disabled="actionsDisabled" @click.stop="respond('reject')">{{ t('approval.deny') }}</button>
         </template>
-        <span v-else :class="['approval-result', resolvedAction]">{{ resolvedLabel }}</span>
+        <span v-else :class="['approval-result', resolvedResultClass]">{{ resolvedLabel }}</span>
       </div>
     </div>
   </div>
@@ -64,7 +64,10 @@ const resolvedAction = computed<ApprovalAction>(() => {
   return props.message.status === 'allowed' ? 'once' : 'reject'
 })
 const resultClass = computed(() => `result-${isPending.value ? 'pending' : resolvedAction.value}`)
+const resolvedElsewhere = computed(() => props.message.reason === 'resolved_elsewhere')
+const resolvedResultClass = computed(() => resolvedElsewhere.value ? 'elsewhere' : resolvedAction.value)
 const resolvedLabel = computed(() => {
+  if (resolvedElsewhere.value) return t('approval.resolved_elsewhere')
   if (resolvedAction.value === 'always') return t('approval.always_resolved')
   if (resolvedAction.value === 'once') return t('approval.allowed')
   return t('approval.denied')
@@ -110,5 +113,6 @@ function respond(action: ApprovalAction) {
 .approval-result { padding: 4px 10px; border-radius: var(--radius-full); font-size: 12px; font-weight: 600; }
 .approval-result.once, .approval-result.always { color: var(--success, #10b981); background: rgba(16,185,129,.12); }
 .approval-result.reject { color: var(--error, #ef4444); background: rgba(239,68,68,.12); }
+.approval-result.elsewhere { color: var(--fg-secondary); background: var(--surface-active); }
 @keyframes fade-in { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: translateY(0); } }
 </style>
