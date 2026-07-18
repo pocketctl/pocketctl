@@ -51,6 +51,49 @@ func TestSupportsManagedOpenCodeVersion(t *testing.T) {
 	}
 }
 
+func TestSupportsManagedCodexVersion(t *testing.T) {
+	tests := map[string]bool{
+		"0.143.9":          false,
+		"0.144.0":          false,
+		"0.144.1":          true,
+		"0.144.1-beta.1":   true,
+		"0.144.1+homebrew": true,
+		"0.145.0":          true,
+		"1.0.0":            true,
+		"invalid":          false,
+	}
+	for version, want := range tests {
+		if got := SupportsManagedCodexVersion(version); got != want {
+			t.Fatalf("version %q supported=%v, want %v", version, got, want)
+		}
+	}
+}
+
+func TestResolveCodexUsesStoredRealBinaryAndExcludesShim(t *testing.T) {
+	stored := testExecutable(t, "stored-codex")
+	shim := testExecutable(t, "codex-shim")
+	resolver := BinaryResolver{
+		Timeout: time.Second,
+		ResolveAgent: func(string, ...string) (string, bool, bool) {
+			t.Fatal("fallback discovery should not run")
+			return "", false, false
+		},
+		RunVersion: func(_ context.Context, path string) (string, error) {
+			if !sameFile(path, stored) {
+				t.Fatalf("version path=%q want %q", path, stored)
+			}
+			return "codex-cli 0.144.1", nil
+		},
+	}
+	got, version, err := resolver.ResolveCodex(AgentConfig{RealBinary: stored, ShimPath: shim})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !sameFile(got, stored) || version != "0.144.1" {
+		t.Fatalf("got path=%q version=%q", got, version)
+	}
+}
+
 func TestResolveOpenCodeDeletedStoredPathFallsBackExcludingShim(t *testing.T) {
 	real := testExecutable(t, "real-opencode")
 	shim := testExecutable(t, "pocketctl-shim")

@@ -59,6 +59,17 @@ var (
 const DefaultRelayURL = "wss://www.pocketctl.me/ws"
 
 func main() {
+	if isCodexLauncherInvocation(os.Args[0], os.Args[1:]) {
+		args := codexLauncherArgs(os.Args[0], os.Args[1:])
+		if err := agentcontrol.NewCodexLauncher().Run(context.Background(), args, ""); err != nil {
+			if exitErr, ok := err.(*exec.ExitError); ok {
+				os.Exit(exitErr.ExitCode())
+			}
+			fmt.Fprintln(os.Stderr, "pocketctl: cannot start Codex:", err)
+			os.Exit(1)
+		}
+		return
+	}
 	if isOpenCodeLauncherInvocation(os.Args[0], os.Args[1:]) {
 		args := openCodeLauncherArgs(os.Args[0], os.Args[1:])
 		if err := agentcontrol.NewLauncher().Run(context.Background(), args, ""); err != nil {
@@ -102,6 +113,25 @@ func main() {
 		printUsage()
 		os.Exit(1)
 	}
+}
+
+func isCodexLauncherInvocation(argv0 string, args []string) bool {
+	name := strings.TrimSuffix(strings.ToLower(filepath.Base(argv0)), ".exe")
+	if name == agentcontrol.AgentCodex {
+		return true
+	}
+	return len(args) >= 2 && args[0] == "__agent-launch" && args[1] == agentcontrol.AgentCodex
+}
+
+func codexLauncherArgs(argv0 string, args []string) []string {
+	name := strings.TrimSuffix(strings.ToLower(filepath.Base(argv0)), ".exe")
+	if name == agentcontrol.AgentCodex {
+		return args
+	}
+	if len(args) >= 2 && args[0] == "__agent-launch" && args[1] == agentcontrol.AgentCodex {
+		return args[2:]
+	}
+	return args
 }
 
 func isOpenCodeLauncherInvocation(argv0 string, args []string) bool {
@@ -183,7 +213,8 @@ func cmdServiceInstall(args []string) {
 	fs := flag.NewFlagSet("daemon service install", flag.ExitOnError)
 	production := fs.Bool("prod", false, "Bake --prod into the supervised daemon (use production relay from config)")
 	relayURL := fs.String("relay", "", "Bake an explicit --relay URL into the supervised daemon")
-	noAgentPrompt := fs.Bool("no-agent-prompt", false, "Skip optional agent setup prompts")
+	noAgentAutoEnable := fs.Bool("no-agent-auto-enable", false, "Skip optional managed-agent auto-enable")
+	noAgentPrompt := fs.Bool("no-agent-prompt", false, "Deprecated alias for --no-agent-auto-enable")
 	fs.Parse(args)
 
 	// A token must already be stored — the supervised daemon resolves it from
@@ -193,7 +224,7 @@ func cmdServiceInstall(args []string) {
 		fmt.Fprintln(os.Stderr, i18n.T("service.no_token"))
 		os.Exit(1)
 	}
-	maybePromptOpenCodeForDaemon(*noAgentPrompt, "")
+	maybeAutoEnableAgentsForDaemon(*noAgentAutoEnable || *noAgentPrompt, "")
 
 	exe, err := os.Executable()
 	if err != nil {
@@ -235,7 +266,7 @@ func cmdServiceInstall(args []string) {
 }
 
 func serviceDaemonArgs(production bool, relayURL string) []string {
-	args := []string{"daemon", "start", "--foreground", "--no-agent-prompt"}
+	args := []string{"daemon", "start", "--foreground", "--no-agent-auto-enable"}
 	if production {
 		args = append(args, "--prod")
 	}
@@ -724,7 +755,8 @@ func cmdDaemonStart(args []string) {
 	daemonID := fs.String("id", "", "Daemon ID (auto-generated if empty)")
 	foreground := fs.Bool("foreground", false, "Run in foreground (don't daemonize)")
 	debug := fs.Bool("debug", false, "Verbose debug logging; with --foreground also streams logs to the console")
-	noAgentPrompt := fs.Bool("no-agent-prompt", false, "Skip optional agent setup prompts")
+	noAgentAutoEnable := fs.Bool("no-agent-auto-enable", false, "Skip optional managed-agent auto-enable")
+	noAgentPrompt := fs.Bool("no-agent-prompt", false, "Deprecated alias for --no-agent-auto-enable")
 	fs.Parse(args)
 
 	// --debug also implies running in the foreground so the operator sees logs
@@ -785,7 +817,7 @@ func cmdDaemonStart(args []string) {
 		os.Exit(0)
 	}
 
-	maybePromptOpenCodeForDaemon(*noAgentPrompt, restartReadyFile)
+	maybeAutoEnableAgentsForDaemon(*noAgentAutoEnable || *noAgentPrompt, restartReadyFile)
 
 	// Determine daemon ID before forking so the launcher can print it and pass
 	// it to the child. This avoids the child re-deriving an ID that might differ
@@ -1004,15 +1036,24 @@ func cmdDaemonStart(args []string) {
 	// Start the local Agent Control endpoint before any relay connection loop.
 	// A terminal launcher can therefore acquire the shared OpenCode runtime even
 	// while the relay is offline; remote synchronization catches up separately.
-	agentControlServer := agentcontrol.NewServer(config.AgentControlSocketPath(), map[string]agentcontrol.RuntimeProvider{
-		agentcontrol.AgentOpenCode: sm,
-	})
+	agentControlServer := agentcontrol.NewServer(config.AgentControlSocketPath(), daemonRuntimeProviders(sm))
 	if err := agentControlServer.Start(); err != nil {
 		logger.Warn("agent control server disabled", "error", err)
 	} else {
 		logger.Info("agent control server listening", "path", config.AgentControlSocketPath())
 		defer agentControlServer.Close()
 	}
+	// If a previous daemon relinquished a live Codex app-server because an
+	// official TUI still held a lease, adopt it immediately and resume the
+	// persisted managed threads. With no handoff this is a no-op and Codex stays
+	// lazy until the next acquire/session start.
+	daemon.Go("codex-runtime-recover", logger, func() {
+		recoverCtx, recoverCancel := context.WithTimeout(context.Background(), 20*time.Second)
+		defer recoverCancel()
+		if err := sm.CodexRuntimeProvider().Recover(recoverCtx); err != nil {
+			logger.Warn("Codex app-server recovery unavailable", "error", err)
+		}
+	})
 
 	// Start the in-process approval broker. The PreToolUse hook connects here
 	// to surface tool-use approvals to web/iOS clients. The socket lives at a
@@ -1402,12 +1443,22 @@ func cmdDaemonStart(args []string) {
 	// Stop accepting new terminal acquire requests before the shared runtime is
 	// shut down, so a launcher cannot receive credentials for a closing serve.
 	_ = agentControlServer.Close()
+	if err := sm.ShutdownCodex(); err != nil {
+		logger.Warn("Codex app-server shutdown incomplete", "error", err)
+	}
 	// Stop the shared opencode serve process (bound to its own context, not the
 	// daemon ctx) so it doesn't linger and race the next daemon's serve on the
 	// shared SQLite DB.
 	sm.ShutdownOpencode()
 	cancel()
 	time.Sleep(500 * time.Millisecond)
+}
+
+func daemonRuntimeProviders(sm *session.SessionManager) map[string]agentcontrol.RuntimeProvider {
+	return map[string]agentcontrol.RuntimeProvider{
+		agentcontrol.AgentOpenCode: sm,
+		agentcontrol.AgentCodex:    sm.CodexRuntimeProvider(),
+	}
 }
 
 func reconnectDiscoveryEvent(s session.SessionInfo) protocol.DaemonEvent {
@@ -2406,6 +2457,17 @@ func handleCommands(ctx context.Context, client *ws.Client, sm *session.SessionM
 						logger.Error("reject question failed", "error", err)
 					} else {
 						logger.Info("question already resolved", "session", cmd.SessionID, "req", cmd.RequestID)
+					}
+					client.SendMsg(event)
+				}
+
+			case "mcp_elicitation_response":
+				if err := sm.ResolveMcpElicitation(cmd.SessionID, cmd.RequestID, cmd.ElicitationAction, cmd.ElicitationContent); err != nil {
+					event := interactionCommandResultEvent("mcp_elicitation_response", cmd.SessionID, cmd.RequestID, err)
+					if event.Type == "error" {
+						logger.Error("resolve MCP elicitation failed", "session", cmd.SessionID, "req", cmd.RequestID, "error", err)
+					} else {
+						logger.Info("MCP elicitation already resolved", "session", cmd.SessionID, "req", cmd.RequestID)
 					}
 					client.SendMsg(event)
 				}

@@ -194,3 +194,57 @@ func TestOpenCodeInstallerStatusReportsReachableManagedRuntime(t *testing.T) {
 		t.Fatalf("managed runtime was reported unreachable: %+v", status)
 	}
 }
+
+func TestCodexInstallerEnableDisableRoundTrip(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Unix symlink/profile behavior")
+	}
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	realBinary := testExecutable(t, "real-codex")
+	installer := Installer{
+		PocketctlPath: testExecutable(t, "pocketctl"),
+		Shell:         "/bin/zsh",
+		ResolveCodex: func(context.Context) (string, string, error) {
+			return realBinary, "0.144.1", nil
+		},
+		ProbeCodex: func(context.Context, string, string) (CodexCapabilities, error) {
+			return CodexCapabilities{Core: true, TerminalRemote: true}, nil
+		},
+	}
+	status, err := installer.EnableAgent(context.Background(), AgentCodex, EnableOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantShim := filepath.Join(home, ".pocketctl", "bin", "codex")
+	if status.Agent != AgentCodex || status.State != StateEnabled || status.ShimPath != wantShim || status.RealBinary != realBinary {
+		t.Fatalf("enable status=%+v", status)
+	}
+	if err := installer.DisableAgent(context.Background(), AgentCodex); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := LoadConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Codex.State != StateDisabled || cfg.OpenCode.State != StateUndecided {
+		t.Fatalf("config=%+v", cfg)
+	}
+}
+
+func TestCodexInstallerRejectsOldVersionBeforeInstallingShim(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	installer := Installer{
+		PocketctlPath: testExecutable(t, "pocketctl"),
+		ResolveCodex: func(context.Context) (string, string, error) {
+			return testExecutable(t, "old-codex"), "0.144.0", nil
+		},
+	}
+	if _, err := installer.EnableAgent(context.Background(), AgentCodex, EnableOptions{}); !errors.Is(err, ErrCodexVersionUnsupported) {
+		t.Fatalf("error=%v, want ErrCodexVersionUnsupported", err)
+	}
+	if _, err := os.Lstat(filepath.Join(home, ".pocketctl", "bin", "codex")); !os.IsNotExist(err) {
+		t.Fatalf("old Codex installed shim: %v", err)
+	}
+}

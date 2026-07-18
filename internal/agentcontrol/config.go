@@ -20,6 +20,7 @@ const (
 	StateDisabled  = "disabled"
 
 	SourceDaemonPrompt = "daemon_prompt"
+	SourceDaemonAuto   = "daemon_auto_enable"
 	SourceCommand      = "command"
 )
 
@@ -28,6 +29,7 @@ var ErrConfigVersion = errors.New("unsupported agent launcher config version")
 type Config struct {
 	Version  int         `json:"version"`
 	OpenCode AgentConfig `json:"opencode"`
+	Codex    AgentConfig `json:"codex"`
 }
 
 type AgentConfig struct {
@@ -40,7 +42,11 @@ type AgentConfig struct {
 }
 
 func DefaultConfig() Config {
-	return Config{Version: ConfigVersion, OpenCode: AgentConfig{State: StateUndecided}}
+	return Config{
+		Version:  ConfigVersion,
+		OpenCode: AgentConfig{State: StateUndecided},
+		Codex:    AgentConfig{State: StateUndecided},
+	}
 }
 
 func ConfigPath() (string, error) {
@@ -81,8 +87,12 @@ func LoadConfig() (Config, error) {
 	if cfg.Version != ConfigVersion {
 		return fallback, fmt.Errorf("%w: %d", ErrConfigVersion, cfg.Version)
 	}
+	normalizeConfig(&cfg)
 	if !validState(cfg.OpenCode.State) {
 		return fallback, fmt.Errorf("invalid opencode launcher state %q", cfg.OpenCode.State)
+	}
+	if !validState(cfg.Codex.State) {
+		return fallback, fmt.Errorf("invalid codex launcher state %q", cfg.Codex.State)
 	}
 	return cfg, nil
 }
@@ -93,6 +103,9 @@ func SaveConfig(cfg Config) error {
 	}
 	if !validState(cfg.OpenCode.State) {
 		return fmt.Errorf("invalid opencode launcher state %q", cfg.OpenCode.State)
+	}
+	if !validState(cfg.Codex.State) {
+		return fmt.Errorf("invalid codex launcher state %q", cfg.Codex.State)
 	}
 	path, err := ConfigPath()
 	if err != nil {
@@ -140,4 +153,13 @@ func SaveConfig(cfg Config) error {
 
 func validState(state string) bool {
 	return state == StateUndecided || state == StateEnabled || state == StateDisabled
+}
+
+func normalizeConfig(cfg *Config) {
+	if cfg.OpenCode.State == "" {
+		cfg.OpenCode.State = StateUndecided
+	}
+	if cfg.Codex.State == "" {
+		cfg.Codex.State = StateUndecided
+	}
 }

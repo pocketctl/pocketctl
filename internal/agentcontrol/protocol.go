@@ -16,6 +16,7 @@ const (
 
 const (
 	AgentOpenCode = "opencode"
+	AgentCodex    = "codex"
 
 	MethodRuntimeAcquire   = "agent.runtime.acquire"
 	MethodRuntimeLeaseBind = "agent.runtime.lease_bind"
@@ -76,6 +77,7 @@ type AcquirePayload struct {
 
 type AcquireResult struct {
 	Mode              string `json:"mode"`
+	RemoteURI         string `json:"remote_uri,omitempty"`
 	BaseURL           string `json:"base_url,omitempty"`
 	Password          string `json:"password,omitempty"`
 	Username          string `json:"username,omitempty"`
@@ -147,7 +149,7 @@ func ValidateRequest(req Request) error {
 	default:
 		return invalid("unknown method %q", req.Method)
 	}
-	if req.Agent != AgentOpenCode {
+	if req.Agent != AgentOpenCode && req.Agent != AgentCodex {
 		return invalid("unknown agent %q", req.Agent)
 	}
 	return nil

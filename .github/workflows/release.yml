@@ -9,7 +9,7 @@ permissions:
   contents: write
 
 jobs:
-  managed-opencode-gate:
+  managed-agent-gate:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -34,6 +34,9 @@ jobs:
       - name: OpenCode managed terminal gate (Unix launcher + IPC)
         run: make test-opencode-managed
 
+      - name: Codex managed terminal gate (official TUI + app-server)
+        run: make test-codex-managed
+
       - name: Relay tests and build
         working-directory: relay
         run: |
@@ -55,11 +58,11 @@ jobs:
         with:
           go-version: '1.25'
 
-      - name: Windows wrapper, PATH, and exit propagation tests
-        run: go test ./internal/platform ./internal/agentcontrol ./cmd/pocketctl -count=1
+      - name: Windows wrapper, app-server, PATH, and exit propagation tests
+        run: go test ./internal/platform ./internal/agentcontrol ./internal/codexapp ./internal/session ./cmd/pocketctl -count=1
 
   build:
-    needs: [managed-opencode-gate, windows-launcher-tests]
+    needs: [managed-agent-gate, windows-launcher-tests]
     strategy:
       matrix:
         include:

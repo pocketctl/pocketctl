@@ -14,8 +14,27 @@ func TestLauncherConfigMissingIsUndecided(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.Version != ConfigVersion || cfg.OpenCode.State != StateUndecided {
+	if cfg.Version != ConfigVersion || cfg.OpenCode.State != StateUndecided || cfg.Codex.State != StateUndecided {
 		t.Fatalf("unexpected default config: %+v", cfg)
+	}
+}
+
+func TestLauncherConfigOpenCodeOnlyFileMigratesCodexToUndecided(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	path, err := ConfigPath()
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw := []byte(`{"version":1,"opencode":{"state":"enabled","real_binary":"/opt/opencode"}}`)
+	if err := os.WriteFile(path, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := LoadConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.OpenCode.State != StateEnabled || cfg.Codex.State != StateUndecided {
+		t.Fatalf("unexpected migrated config: %+v", cfg)
 	}
 }
 
@@ -31,6 +50,14 @@ func TestLauncherConfigAtomicPrivateRoundTrip(t *testing.T) {
 			ShimPath:       filepath.Join(home, ".pocketctl", "bin", "opencode"),
 			DecidedAt:      time.Unix(100, 0).UTC(),
 			InstalledAt:    time.Unix(101, 0).UTC(),
+		},
+		Codex: AgentConfig{
+			State:          StateEnabled,
+			DecisionSource: SourceCommand,
+			RealBinary:     "/opt/codex",
+			ShimPath:       filepath.Join(home, ".pocketctl", "bin", "codex"),
+			DecidedAt:      time.Unix(102, 0).UTC(),
+			InstalledAt:    time.Unix(103, 0).UTC(),
 		},
 	}
 	if err := SaveConfig(want); err != nil {
@@ -56,6 +83,9 @@ func TestLauncherConfigAtomicPrivateRoundTrip(t *testing.T) {
 	}
 	if got.OpenCode.State != StateEnabled || got.OpenCode.RealBinary != "/opt/opencode" || !got.OpenCode.InstalledAt.Equal(want.OpenCode.InstalledAt) {
 		t.Fatalf("round trip mismatch: %+v", got)
+	}
+	if got.Codex.State != StateEnabled || got.Codex.RealBinary != "/opt/codex" || !got.Codex.InstalledAt.Equal(want.Codex.InstalledAt) {
+		t.Fatalf("codex round trip mismatch: %+v", got)
 	}
 }
 

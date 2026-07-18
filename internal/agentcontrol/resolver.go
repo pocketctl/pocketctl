@@ -21,13 +21,25 @@ var (
 	ErrOpenCodeNotExecutable  = errors.New("opencode binary is not executable")
 	ErrOpenCodeVersion        = errors.New("opencode version could not be detected")
 	ErrOpenCodeVersionTimeout = errors.New("opencode version check timed out")
+	ErrCodexNotFound          = errors.New("codex binary not found")
+	ErrCodexVersion           = errors.New("codex version could not be detected")
+	ErrCodexVersionTimeout    = errors.New("codex version check timed out")
 )
 
 var openCodeVersionRE = regexp.MustCompile(`\d+\.\d+(?:\.\d+)?`)
 
 const minimumManagedOpenCodeVersion = "1.17.11"
+const minimumManagedCodexVersion = "0.144.1"
 
 func SupportsManagedOpenCodeVersion(version string) bool {
+	return versionAtLeast(version, minimumManagedOpenCodeVersion)
+}
+
+func SupportsManagedCodexVersion(version string) bool {
+	return versionAtLeast(version, minimumManagedCodexVersion)
+}
+
+func versionAtLeast(version, minimumVersion string) bool {
 	parse := func(value string) ([3]int, bool) {
 		var parsed [3]int
 		value = strings.TrimPrefix(strings.TrimSpace(value), "v")
@@ -51,7 +63,7 @@ func SupportsManagedOpenCodeVersion(version string) bool {
 	if !ok {
 		return false
 	}
-	minimum, _ := parse(minimumManagedOpenCodeVersion)
+	minimum, _ := parse(minimumVersion)
 	for i := range got {
 		if got[i] != minimum[i] {
 			return got[i] > minimum[i]
@@ -85,27 +97,43 @@ func ResolveConfiguredOpenCode() (string, string, error) {
 	return NewBinaryResolver().ResolveOpenCode(cfg.OpenCode)
 }
 
+func ResolveConfiguredCodex() (string, string, error) {
+	cfg, err := LoadConfig()
+	if err != nil {
+		return "", "", err
+	}
+	return NewBinaryResolver().ResolveCodex(cfg.Codex)
+}
+
 func (r BinaryResolver) ResolveOpenCode(cfg AgentConfig, excluded ...string) (string, string, error) {
+	return r.resolve(AgentOpenCode, cfg, ErrOpenCodeNotFound, ErrOpenCodeVersion, ErrOpenCodeVersionTimeout, defaultOpenCodeShimPath(), excluded...)
+}
+
+func (r BinaryResolver) ResolveCodex(cfg AgentConfig, excluded ...string) (string, string, error) {
+	return r.resolve(AgentCodex, cfg, ErrCodexNotFound, ErrCodexVersion, ErrCodexVersionTimeout, defaultCodexShimPath(), excluded...)
+}
+
+func (r BinaryResolver) resolve(agent string, cfg AgentConfig, notFound, versionError, timeoutError error, defaultShim string, excluded ...string) (string, string, error) {
 	r = r.withDefaults()
-	excluded = append(excluded, cfg.ShimPath, defaultOpenCodeShimPath())
+	excluded = append(excluded, cfg.ShimPath, defaultShim)
 
 	var storedErr error
 	if cfg.RealBinary != "" {
-		if path, version, err := r.validate(cfg.RealBinary, excluded); err == nil {
+		if path, version, err := r.validate(cfg.RealBinary, excluded, notFound, versionError, timeoutError); err == nil {
 			return path, version, nil
 		} else {
 			storedErr = err
 		}
 	}
 
-	path, _, found := r.ResolveAgent(AgentOpenCode, compactPaths(excluded)...)
+	path, _, found := r.ResolveAgent(agent, compactPaths(excluded)...)
 	if !found {
-		if storedErr != nil && !errors.Is(storedErr, ErrOpenCodeNotFound) {
+		if storedErr != nil && !errors.Is(storedErr, notFound) {
 			return "", "", storedErr
 		}
-		return "", "", ErrOpenCodeNotFound
+		return "", "", notFound
 	}
-	resolved, version, err := r.validate(path, excluded)
+	resolved, version, err := r.validate(path, excluded, notFound, versionError, timeoutError)
 	if err != nil {
 		return "", "", err
 	}
@@ -126,15 +154,18 @@ func (r BinaryResolver) withDefaults() BinaryResolver {
 	return r
 }
 
-func (r BinaryResolver) validate(path string, excluded []string) (string, string, error) {
+func (r BinaryResolver) validate(path string, excluded []string, notFound, versionError, timeoutError error) (string, string, error) {
 	resolved, info, err := inspectExecutable(path)
 	if err != nil {
+		if errors.Is(err, ErrOpenCodeNotFound) {
+			return "", "", notFound
+		}
 		return "", "", err
 	}
 	for _, blocked := range excluded {
 		blockedResolved, blockedInfo, blockedErr := inspectPath(blocked)
 		if blockedErr == nil && (resolved == blockedResolved || os.SameFile(info, blockedInfo)) {
-			return "", "", ErrOpenCodeNotFound
+			return "", "", notFound
 		}
 	}
 
@@ -142,14 +173,14 @@ func (r BinaryResolver) validate(path string, excluded []string) (string, string
 	defer cancel()
 	out, err := r.RunVersion(ctx, resolved)
 	if errors.Is(ctx.Err(), context.DeadlineExceeded) || errors.Is(err, context.DeadlineExceeded) {
-		return "", "", ErrOpenCodeVersionTimeout
+		return "", "", timeoutError
 	}
 	if err != nil {
-		return "", "", fmt.Errorf("%w: %v", ErrOpenCodeVersion, err)
+		return "", "", fmt.Errorf("%w: %v", versionError, err)
 	}
 	version := openCodeVersionRE.FindString(out)
 	if version == "" {
-		return "", "", ErrOpenCodeVersion
+		return "", "", versionError
 	}
 	return resolved, version, nil
 }
@@ -188,13 +219,21 @@ func inspectPath(path string) (string, os.FileInfo, error) {
 }
 
 func defaultOpenCodeShimPath() string {
+	return defaultShimPath(AgentOpenCode)
+}
+
+func defaultCodexShimPath() string {
+	return defaultShimPath(AgentCodex)
+}
+
+func defaultShimPath(agent string) string {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return ""
 	}
-	name := "opencode"
+	name := agent
 	if runtime.GOOS == "windows" {
-		name = "opencode.cmd"
+		name += ".cmd"
 	}
 	return filepath.Join(home, ".pocketctl", "bin", name)
 }

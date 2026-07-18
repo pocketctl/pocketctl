@@ -13,7 +13,7 @@ import (
 
 const windowsShimMarker = "@rem pocketctl-agent-launcher"
 
-func installPlatformShim(shimPath, pocketctlPath string) error {
+func installPlatformShim(shimPath, pocketctlPath, agent string) error {
 	if data, err := os.ReadFile(shimPath); err == nil {
 		if strings.Contains(string(data), windowsShimMarker) {
 			return nil
@@ -22,7 +22,7 @@ func installPlatformShim(shimPath, pocketctlPath string) error {
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
-	body := fmt.Sprintf("%s\r\n@\"%s\" __agent-launch opencode %%*\r\n", windowsShimMarker, pocketctlPath)
+	body := fmt.Sprintf("%s\r\n@\"%s\" __agent-launch %s %%*\r\n", windowsShimMarker, pocketctlPath, agent)
 	return os.WriteFile(shimPath, []byte(body), 0o600)
 }
 

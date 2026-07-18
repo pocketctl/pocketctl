@@ -10,7 +10,7 @@ import (
 	"strings"
 )
 
-func installPlatformShim(shimPath, pocketctlPath string) error {
+func installPlatformShim(shimPath, pocketctlPath, _ string) error {
 	if _, err := os.Lstat(shimPath); err == nil {
 		if sameFilePath(shimPath, pocketctlPath) {
 			return nil
@@ -20,7 +20,7 @@ func installPlatformShim(shimPath, pocketctlPath string) error {
 		return err
 	}
 	if err := os.Symlink(pocketctlPath, shimPath); err != nil {
-		return fmt.Errorf("install opencode launcher: %w", err)
+		return fmt.Errorf("install agent launcher: %w", err)
 	}
 	return nil
 }

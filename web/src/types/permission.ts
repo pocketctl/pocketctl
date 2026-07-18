@@ -30,7 +30,7 @@ export function permissionOptions(agent: AgentType, creation = false, mutableMod
     const modes = creation ? claudeModes : claudeModes.filter(mode => mutableModes.includes(mode))
     return modes.map(value => ({ value, titleKey: `session.permission.claude.${value}.title`, descriptionKey: `session.permission.claude.${value}.description`, icon: value === 'plan' ? 'list' : value === 'bypassPermissions' ? 'warning' : 'shield', dangerous: value === 'bypassPermissions' }))
   }
-  if (agent === 'codex') return codexPresets.map(value => ({ value, titleKey: `session.permission.codex.${value}.title`, descriptionKey: `session.permission.codex.${value}.description`, icon: value === 'custom' ? 'gear' : value === 'full_access' ? 'warning' : 'shield', dangerous: value === 'full_access', disabled: value === 'request_approval' || value === 'agent_managed' }))
+  if (agent === 'codex') return codexPresets.map(value => ({ value, titleKey: `session.permission.codex.${value}.title`, descriptionKey: `session.permission.codex.${value}.description`, icon: value === 'custom' ? 'gear' : value === 'full_access' ? 'warning' : 'shield', dangerous: value === 'full_access' }))
   return []
 }
 

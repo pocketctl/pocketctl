@@ -53,11 +53,34 @@ func TestDaemonAgentPromptContextOnlyInteractiveParentCanPrompt(t *testing.T) {
 	}
 }
 
-func TestServiceDaemonArgsAlwaysDisableBackgroundPrompt(t *testing.T) {
+func TestServiceDaemonArgsAlwaysDisableBackgroundAgentAutoEnable(t *testing.T) {
 	got := serviceDaemonArgs(true, "wss://relay.example/ws")
-	wantParts := []string{"daemon", "start", "--foreground", "--no-agent-prompt", "--prod", "--relay", "wss://relay.example/ws"}
+	wantParts := []string{"daemon", "start", "--foreground", "--no-agent-auto-enable", "--prod", "--relay", "wss://relay.example/ws"}
 	if strings.Join(got, " ") != strings.Join(wantParts, " ") {
 		t.Fatalf("args=%v want %v", got, wantParts)
+	}
+}
+
+func TestDaemonAgentAutoEnableContextOnlyUserParentCanMutate(t *testing.T) {
+	tests := []struct {
+		name        string
+		skip        bool
+		restartFile string
+		child       bool
+		wantSkip    bool
+	}{
+		{"user parent", false, "", false, false},
+		{"flag", true, "", false, true},
+		{"restart", false, "/tmp/ready", false, true},
+		{"child", false, "", true, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := daemonAgentAutoEnableContext(tt.skip, tt.restartFile, tt.child)
+			if skipped := got.Skip || got.IsRestart || got.IsDaemonChild; skipped != tt.wantSkip {
+				t.Fatalf("skip=%v context=%+v", skipped, got)
+			}
+		})
 	}
 }
 

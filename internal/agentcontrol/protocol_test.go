@@ -49,6 +49,24 @@ func TestControlProtocolRoundTrip(t *testing.T) {
 	}
 }
 
+func TestControlProtocolAcceptsCodexAndRemoteURI(t *testing.T) {
+	req := Request{Version: ProtocolVersion, ID: "req-codex", Method: MethodRuntimeStatus, Agent: AgentCodex}
+	if err := ValidateRequest(req); err != nil {
+		t.Fatalf("Codex request rejected: %v", err)
+	}
+	raw, err := json.Marshal(AcquireResult{Mode: string(LaunchManaged), RemoteURI: "unix:///tmp/codex.sock"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var result AcquireResult
+	if err := json.Unmarshal(raw, &result); err != nil {
+		t.Fatal(err)
+	}
+	if result.RemoteURI != "unix:///tmp/codex.sock" {
+		t.Fatalf("result=%+v", result)
+	}
+}
+
 func TestControlProtocolRejectsInvalidEnvelope(t *testing.T) {
 	tests := []struct {
 		name string

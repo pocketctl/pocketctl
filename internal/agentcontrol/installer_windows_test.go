@@ -15,7 +15,7 @@ func TestOpenCodeInstallerWindowsWrapperRoundTrip(t *testing.T) {
 	shim := filepath.Join(dir, "opencode.cmd")
 	pocketctl := filepath.Join(dir, "Pocketctl Program", "pocketctl.exe")
 
-	if err := installPlatformShim(shim, pocketctl); err != nil {
+	if err := installPlatformShim(shim, pocketctl, AgentOpenCode); err != nil {
 		t.Fatal(err)
 	}
 	want := windowsShimMarker + "\r\n@\"" + pocketctl + "\" __agent-launch opencode %*\r\n"
@@ -23,7 +23,7 @@ func TestOpenCodeInstallerWindowsWrapperRoundTrip(t *testing.T) {
 	if err != nil || string(data) != want {
 		t.Fatalf("wrapper=%q err=%v, want %q", data, err, want)
 	}
-	if err := installPlatformShim(shim, pocketctl); err != nil {
+	if err := installPlatformShim(shim, pocketctl, AgentOpenCode); err != nil {
 		t.Fatalf("idempotent wrapper install: %v", err)
 	}
 	if err := removePlatformShim(shim, pocketctl); err != nil {
@@ -39,7 +39,7 @@ func TestOpenCodeInstallerWindowsWrapperRefusesForeignFile(t *testing.T) {
 	if err := os.WriteFile(shim, []byte("@echo foreign\r\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := installPlatformShim(shim, `C:\Pocketctl\pocketctl.exe`); !errors.Is(err, ErrForeignShim) {
+	if err := installPlatformShim(shim, `C:\Pocketctl\pocketctl.exe`, AgentOpenCode); !errors.Is(err, ErrForeignShim) {
 		t.Fatalf("install error=%v, want ErrForeignShim", err)
 	}
 	if err := removePlatformShim(shim, `C:\Pocketctl\pocketctl.exe`); !errors.Is(err, ErrForeignShim) {
@@ -48,6 +48,22 @@ func TestOpenCodeInstallerWindowsWrapperRefusesForeignFile(t *testing.T) {
 	data, err := os.ReadFile(shim)
 	if err != nil || string(data) != "@echo foreign\r\n" {
 		t.Fatalf("foreign wrapper changed: %q err=%v", data, err)
+	}
+}
+
+func TestCodexInstallerWindowsWrapperRoutesCodexAgent(t *testing.T) {
+	dir := t.TempDir()
+	shim := filepath.Join(dir, "codex.cmd")
+	pocketctl := filepath.Join(dir, "pocketctl.exe")
+	if err := installPlatformShim(shim, pocketctl, AgentCodex); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(shim)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), "__agent-launch codex %*") {
+		t.Fatalf("wrapper does not route Codex: %q", data)
 	}
 }
 

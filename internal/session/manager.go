@@ -119,13 +119,15 @@ type SessionManager struct {
 	// opencode coordinates the shared `opencode serve` process and its SSE demux
 	// for server-kind (opencode) sessions. Lazily created on first use.
 	opencode                    *opencodeCoordinator
+	codexProvider               *CodexRuntimeProvider
 	leases                      *agentcontrol.LeaseRegistry
 	recordOpenCodeRuntimeHealth func(bool)
 }
 
 type createSessionDependencies struct {
-	resolveAgentCLI func(protocol.SessionConfig) (string, error)
-	startOpencode   func(*SessionManager, context.Context, protocol.SessionConfig) (string, error)
+	resolveAgentCLI   func(protocol.SessionConfig) (string, error)
+	startOpencode     func(*SessionManager, context.Context, protocol.SessionConfig) (string, error)
+	startCodexManaged func(*SessionManager, context.Context, protocol.SessionConfig, string, string, string, string, string) (string, bool, error)
 }
 
 func NewSessionManager(outputCh chan protocol.DaemonEvent) *SessionManager {
@@ -144,6 +146,9 @@ func NewSessionManager(outputCh chan protocol.DaemonEvent) *SessionManager {
 			},
 			startOpencode: func(sm *SessionManager, ctx context.Context, config protocol.SessionConfig) (string, error) {
 				return sm.createOpencodeSession(ctx, config)
+			},
+			startCodexManaged: func(sm *SessionManager, ctx context.Context, config protocol.SessionConfig, cliPath, cwd, model, worktreePath, worktreeBranch string) (string, bool, error) {
+				return sm.tryCreateManagedCodexSession(ctx, config, cliPath, cwd, model, worktreePath, worktreeBranch)
 			},
 		},
 	}

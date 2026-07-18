@@ -32,9 +32,6 @@ func (sm *SessionManager) CreateSession(ctx context.Context, config protocol.Ses
 	if err := adapter.ValidatePermissionConfig(config.Agent, config.Permission); err != nil {
 		return "", err
 	}
-	if config.Agent == adapter.AgentCodex && config.Permission != nil && config.Permission.ApprovalPolicy != "" && config.Permission.ApprovalPolicy != "never" {
-		return "", fmt.Errorf("codex remote approval is not supported")
-	}
 	config.Permission = clonePermission(config.Permission)
 	cliPath, err := sm.createDeps.resolveAgentCLI(config)
 	if err != nil {
@@ -112,6 +109,14 @@ func (sm *SessionManager) CreateSession(ctx context.Context, config protocol.Ses
 	}
 
 	if config.Agent == adapter.AgentCodex {
+		if sm.createDeps.startCodexManaged != nil {
+			if managedID, handled, managedErr := sm.createDeps.startCodexManaged(sm, ctx, config, cliPath, resolvedCwd, displayModel, worktreePath, worktreeBranch); handled {
+				return managedID, managedErr
+			}
+		}
+		if config.Permission != nil && config.Permission.ApprovalPolicy != "" && config.Permission.ApprovalPolicy != "never" {
+			return "", fmt.Errorf("codex remote approval requires the managed app-server backend")
+		}
 		return sm.createCodexExecSession(ctx, sessionID, cliPath, resolvedCwd, config, displayModel, worktreePath, worktreeBranch)
 	}
 
@@ -804,6 +809,25 @@ func (sm *SessionManager) KillSession(sessionID string) error {
 	sm.mu.Unlock()
 	if !ok {
 		return fmt.Errorf("session not found: %s", sessionID)
+	}
+	if ps.Backend != nil {
+		if err := ps.Backend.Close(sessionID); err != nil {
+			return err
+		}
+		now := time.Now()
+		sm.mu.Lock()
+		ps.Status = protocol.StatusKilled
+		ps.LastActivityAt = now
+		sm.mu.Unlock()
+		sm.unregisterCwd(sessionID, cwd)
+		if sm.fileLocks != nil {
+			sm.fileLocks.ReleaseAll(sessionID)
+		}
+		sm.outputCh <- protocol.DaemonEvent{
+			Type: "session_status", SessionID: sessionID, Status: protocol.StatusKilled,
+			LastActivityAt: now.UTC().Format(time.RFC3339),
+		}
+		return nil
 	}
 	if ps.Cancel != nil {
 		ps.Cancel()

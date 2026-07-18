@@ -55,4 +55,19 @@ describe('OpenCodeQuestionCard', () => {
     expect(wrapper.find('.question-submit').exists()).toBe(false)
     expect(wrapper.text()).toMatch(/rejected|拒绝/i)
   })
+
+  test('uses password input for Codex secret questions', () => {
+    const wrapper = mount(OpenCodeQuestionCard, {
+      props: {
+        message: {
+          type: 'question_request', request_id: 'codex_secret', status: 'pending',
+          questions: [{ id: 'token', header: 'Token', question: 'Enter token', custom: true, secret: true }],
+        },
+        disabled: false,
+      },
+    })
+    const input = wrapper.get('.question-custom')
+    expect(input.attributes('type')).toBe('password')
+    expect(input.attributes('autocomplete')).toBe('new-password')
+  })
 })

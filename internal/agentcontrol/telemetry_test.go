@@ -1,6 +1,8 @@
 package agentcontrol
 
 import (
+	"bytes"
+	"encoding/json"
 	"os"
 	"testing"
 )
@@ -39,6 +41,39 @@ func TestOpenCodeTelemetryStoresOnlyEnumeratedCounters(t *testing.T) {
 	}
 	if info.Mode().Perm() != 0o600 {
 		t.Fatalf("telemetry mode=%o", info.Mode().Perm())
+	}
+}
+
+func TestCodexTelemetryStoresOnlyReasonCountAndGenerationMetadata(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	if err := RecordCodexFallback(CodexFallbackOldVersion); err != nil {
+		t.Fatal(err)
+	}
+	if err := RecordCodexReconnect(7); err != nil {
+		t.Fatal(err)
+	}
+	if err := RecordCodexFallback("prompt=secret token=auth cwd=/private"); err == nil {
+		t.Fatal("arbitrary Codex telemetry reason was accepted")
+	}
+	snapshot, err := LoadCodexTelemetry()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snapshot.FallbackReasons[CodexFallbackOldVersion] != 1 || snapshot.Reconnects != 1 || snapshot.LastGeneration != 7 {
+		t.Fatalf("snapshot=%+v", snapshot)
+	}
+	raw, err := os.ReadFile(codexTelemetryPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, forbidden := range [][]byte{[]byte("prompt"), []byte("secret"), []byte("token"), []byte("auth"), []byte("/private")} {
+		if bytes.Contains(raw, forbidden) {
+			t.Fatalf("telemetry leaked %q: %s", forbidden, raw)
+		}
+	}
+	var wire map[string]any
+	if json.Unmarshal(raw, &wire) != nil || len(wire) != 4 {
+		t.Fatalf("unexpected telemetry fields: %s", raw)
 	}
 }
 

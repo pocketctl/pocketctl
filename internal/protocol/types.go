@@ -29,6 +29,11 @@ type ClientMessage struct {
 	Action string `json:"action,omitempty"`
 	// Answers is ordered exactly like an OpenCode question request's questions.
 	Answers [][]string `json:"answers,omitempty"`
+	// ElicitationAction and ElicitationContent answer a Codex MCP elicitation.
+	// Content remains opaque JSON on the wire and is never copied into a
+	// durable daemon event after the native app-server accepts it.
+	ElicitationAction  string          `json:"elicitation_action,omitempty"`
+	ElicitationContent json.RawMessage `json:"elicitation_content,omitempty"`
 	// AgentName is an OpenCode session profile name, distinct from Agent (the
 	// CLI type: claude-code/codex/opencode).
 	AgentName string `json:"agent_name,omitempty"`
@@ -140,9 +145,18 @@ type DaemonEvent struct {
 	ToolCallID             string               `json:"tool_call_id,omitempty"`
 	PermissionVersion      string               `json:"permission_version,omitempty"`
 	Action                 string               `json:"action,omitempty"`
+	ApprovalKind           string               `json:"approval_kind,omitempty"`
+	AvailableDecisions     []string             `json:"available_decisions,omitempty"`
 	Questions              []QuestionInfo       `json:"questions,omitempty"`
 	Answers                [][]string           `json:"answers,omitempty"`
 	Rejected               bool                 `json:"rejected,omitempty"`
+	AutoResolutionMs       uint64               `json:"auto_resolution_ms,omitempty"`
+	Redacted               bool                 `json:"redacted,omitempty"`
+	MCPServer              string               `json:"mcp_server,omitempty"`
+	ElicitationMode        string               `json:"elicitation_mode,omitempty"`
+	ElicitationID          string               `json:"elicitation_id,omitempty"`
+	ElicitationSchema      json.RawMessage      `json:"elicitation_schema,omitempty"`
+	ElicitationContent     json.RawMessage      `json:"elicitation_content,omitempty"`
 }
 
 // ModelOption is one selectable model surfaced by a daemon for session creation.
@@ -201,11 +215,13 @@ type QuestionOption struct {
 }
 
 type QuestionInfo struct {
+	ID       string           `json:"id,omitempty"`
 	Header   string           `json:"header,omitempty"`
 	Question string           `json:"question"`
 	Options  []QuestionOption `json:"options,omitempty"`
 	Multiple bool             `json:"multiple,omitempty"`
 	Custom   bool             `json:"custom,omitempty"`
+	Secret   bool             `json:"secret,omitempty"`
 }
 
 // TodoItem is OpenCode's session-level task snapshot. Status and priority stay

@@ -16,14 +16,19 @@ import (
 
 type Client struct {
 	SocketPath string
+	Agent      string
 	Dial       func(context.Context, string) (net.Conn, error)
 }
 
 func NewClient(socketPath string) Client {
+	return NewAgentClient(socketPath, AgentOpenCode)
+}
+
+func NewAgentClient(socketPath, agent string) Client {
 	if socketPath == "" {
 		socketPath = config.AgentControlSocketPath()
 	}
-	return Client{SocketPath: socketPath, Dial: dialAgentControl}
+	return Client{SocketPath: socketPath, Agent: agent, Dial: dialAgentControl}
 }
 
 func (c Client) Acquire(ctx context.Context, payload AcquirePayload) (AcquireResult, error) {
@@ -59,7 +64,7 @@ func (c Client) callPayload(ctx context.Context, method string, payload any, res
 	}
 	req := Request{
 		Version: ProtocolVersion, ID: newOperationID(), Method: method,
-		Agent: AgentOpenCode, ClientPID: os.Getpid(), Payload: payloadBytes,
+		Agent: c.Agent, ClientPID: os.Getpid(), Payload: payloadBytes,
 	}
 	return c.call(ctx, req, result)
 }

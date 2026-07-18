@@ -2,6 +2,7 @@ package session
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -388,6 +389,13 @@ func (sm *SessionManager) reconcileOpencodeQuestionSnapshot(targetSession, versi
 // PreToolUse hook and returns the session to running. Called from the
 // approval_response command handler.
 func (sm *SessionManager) ResolveApproval(sessionID, requestID string, approved bool) error {
+	if broker := sm.codexInteractionBroker(); broker != nil && broker.KnowsApproval(sessionID, requestID) {
+		action := "reject"
+		if approved {
+			action = "once"
+		}
+		return broker.ResolveApproval(context.Background(), sessionID, requestID, action)
+	}
 	// opencode sessions answer permission prompts via the serve API, not the
 	// claude PreToolUse hook socket.
 	if b := sm.opencodeBackendFor(sessionID); b != nil {
@@ -433,6 +441,9 @@ func (sm *SessionManager) ResolveApproval(sessionID, requestID string, approved 
 }
 
 func (sm *SessionManager) ResolveApprovalAction(sessionID, requestID, action string) error {
+	if broker := sm.codexInteractionBroker(); broker != nil && broker.KnowsApproval(sessionID, requestID) {
+		return broker.ResolveApproval(context.Background(), sessionID, requestID, action)
+	}
 	if !protocol.ValidApprovalAction(action) {
 		return fmt.Errorf("invalid approval action %q", action)
 	}
@@ -534,6 +545,9 @@ func permissionStillPending(observed []adapter.PermissionAsked, sessionID, reque
 }
 
 func (sm *SessionManager) ResolveQuestion(sessionID, requestID string, answers [][]string) error {
+	if broker := sm.codexInteractionBroker(); broker != nil && broker.KnowsQuestion(sessionID, requestID) {
+		return broker.ResolveQuestion(context.Background(), sessionID, requestID, answers)
+	}
 	b := sm.opencodeBackendFor(sessionID)
 	if b == nil || b.coord == nil || b.coord.srv() == nil {
 		return fmt.Errorf("opencode session not found")
@@ -628,6 +642,9 @@ func questionStillPending(observed []adapter.QuestionAsked, sessionID, requestID
 }
 
 func (sm *SessionManager) RejectQuestion(sessionID, requestID string) error {
+	if broker := sm.codexInteractionBroker(); broker != nil && broker.KnowsQuestion(sessionID, requestID) {
+		return broker.RejectQuestion(context.Background(), sessionID, requestID)
+	}
 	b := sm.opencodeBackendFor(sessionID)
 	if b == nil || b.coord == nil || b.coord.srv() == nil {
 		return fmt.Errorf("opencode session not found")
@@ -675,6 +692,16 @@ func (sm *SessionManager) RejectQuestion(sessionID, requestID string) error {
 	b.coord.interactionMu.Unlock()
 	sm.reconcileOpencodeInteractionStatus(sessionID, b)
 	return nil
+}
+
+// ResolveMcpElicitation answers a Codex app-server MCP elicitation through the
+// same first-writer-wins interaction broker used by approvals and questions.
+func (sm *SessionManager) ResolveMcpElicitation(sessionID, requestID, action string, content json.RawMessage) error {
+	broker := sm.codexInteractionBroker()
+	if broker == nil || !broker.KnowsMcpElicitation(sessionID, requestID) {
+		return fmt.Errorf("Codex MCP elicitation is not pending")
+	}
+	return broker.ResolveMcpElicitation(context.Background(), sessionID, requestID, action, content)
 }
 
 func (sm *SessionManager) reconcileOpencodeInteractionStatus(sessionID string, b *serverBackend) {

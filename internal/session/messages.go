@@ -190,12 +190,13 @@ func (sm *SessionManager) SendMessage(ctx context.Context, sessionID string, con
 		sm.mu.Lock()
 		ps.LastActivityAt = time.Now()
 		src := ps.Source
+		agent := ps.Agent
 		sm.mu.Unlock()
 		// Echo the user's message for instant feedback only for owned sessions:
 		// the SSE demux skips the user echo, so we supply it here. Terminal
 		// sessions get their user_text from DirWatch (storage), so echoing here
 		// would duplicate.
-		if src != "terminal" {
+		if src != "terminal" && agent != adapter.AgentCodex {
 			sm.outputCh <- protocol.DaemonEvent{Type: "user_text", SessionID: sessionID, Text: content}
 		}
 		return ps.Backend.Send(ctx, sessionID, content)

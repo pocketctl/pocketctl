@@ -25,6 +25,7 @@ Usage:
 Commands:
   login          Login via browser (OAuth 2.0 Device Flow) or email code
   agent opencode enable|disable|status   Manage transparent OpenCode terminal control
+  agent codex enable|disable|status      Manage official Codex TUI terminal control
   daemon start   Start the daemon (connects to relay)
   daemon stop    Stop the running daemon
   daemon status  Show daemon status
@@ -60,13 +61,20 @@ Options:
   --debug        Verbose debug logs streamed to console (implies --foreground)
   --token <t>    JWT token (or POCKETCTL_TOKEN env)
   --id <id>      Daemon ID (auto-generated if empty)
-  --no-agent-prompt  Skip optional agent setup prompts during daemon startup
+  --no-agent-auto-enable  Skip optional managed-agent detection and auto-enable
+  --no-agent-prompt       Deprecated alias for --no-agent-auto-enable
 
 OpenCode terminal control:
   pocketctl agent opencode enable     Enable once; then continue using the normal opencode command
   pocketctl agent opencode disable    Remove the Pocketctl launcher without uninstalling OpenCode
   pocketctl agent opencode status     Show detection and launcher state
   opencode --native                   Bypass Pocketctl for one invocation
+
+Codex terminal control (requires Codex 0.144.1+):
+  pocketctl agent codex enable        Enable once; daemon restart is not required
+  pocketctl agent codex disable       Remove the Pocketctl launcher without uninstalling Codex
+  pocketctl agent codex status        Show desired/effective state and capability diagnostics
+  codex --native                      Bypass Pocketctl for one invocation
 
 Environment:
   POCKETCTL_RELAY_URL   Relay WebSocket URL (e.g. ws://localhost:8080/ws, wss://relay.example.com/ws)
@@ -80,6 +88,7 @@ const helpZh = `pocketctl - 远程 AI 编程代理控制
 命令:
   login          通过浏览器（OAuth 2.0 Device Flow）或邮箱验证码登录
   agent opencode enable|disable|status   管理透明 OpenCode 终端控制
+  agent codex enable|disable|status      管理 Codex 官方 TUI 终端控制
   daemon start   启动 daemon（连接 relay）
   daemon stop    停止运行中的 daemon
   daemon status  查看 daemon 状态
@@ -115,13 +124,20 @@ Relay 连接（默认: 生产环境 wss://www.pocketctl.me/ws）:
   --debug        调试日志实时输出到控制台（隐含 --foreground）
   --token <t>    JWT 令牌（或 POCKETCTL_TOKEN 环境变量）
   --id <id>      Daemon ID（为空则自动生成）
-  --no-agent-prompt  daemon 启动时跳过可选的 Agent 设置询问
+  --no-agent-auto-enable  daemon 启动时跳过可选的 Agent 检测与自动启用
+  --no-agent-prompt       --no-agent-auto-enable 的兼容别名（已弃用）
 
 OpenCode 终端控制:
   pocketctl agent opencode enable     启用一次，之后仍直接使用普通 opencode 命令
   pocketctl agent opencode disable    移除 Pocketctl launcher，不卸载 OpenCode
   pocketctl agent opencode status     查看检测与 launcher 状态
   opencode --native                   单次绕过 Pocketctl
+
+Codex 终端控制（要求 Codex 0.144.1+）:
+  pocketctl agent codex enable        启用一次，无需重启 daemon
+  pocketctl agent codex disable       移除 Pocketctl launcher，不卸载 Codex
+  pocketctl agent codex status        查看期望/实际状态与能力诊断
+  codex --native                      单次绕过 Pocketctl
 
 环境变量:
   POCKETCTL_RELAY_URL   Relay WebSocket URL（如 ws://localhost:8080/ws, wss://relay.example.com/ws）
@@ -141,32 +157,40 @@ var messages = map[string]msg{
 
 	// ---- agent.* ---------------------------------------------------------
 	"agent.help": {
-		"Agent control:\n  pocketctl agent opencode enable [--no-shell-profile]\n  pocketctl agent opencode disable\n  pocketctl agent opencode status\n  pocketctl agent opencode help\n\nAfter enabling, use `opencode` normally. Use `opencode --native` to bypass Pocketctl once.",
-		"Agent 控制:\n  pocketctl agent opencode enable [--no-shell-profile]\n  pocketctl agent opencode disable\n  pocketctl agent opencode status\n  pocketctl agent opencode help\n\n启用后仍正常使用 `opencode`。可用 `opencode --native` 单次绕过 Pocketctl。",
+		"Agent control:\n  pocketctl agent opencode enable\n  pocketctl agent opencode disable\n  pocketctl agent opencode status\n  pocketctl agent opencode help\n  pocketctl agent codex enable\n  pocketctl agent codex disable\n  pocketctl agent codex status\n  pocketctl agent codex help\n\nEnable does not require a daemon restart. Reload your login shell if PATH is not active. Use `opencode --native` or `codex --native` to bypass Pocketctl once.",
+		"Agent 控制:\n  pocketctl agent opencode enable\n  pocketctl agent opencode disable\n  pocketctl agent opencode status\n  pocketctl agent opencode help\n  pocketctl agent codex enable\n  pocketctl agent codex disable\n  pocketctl agent codex status\n  pocketctl agent codex help\n\n启用后无需重启 daemon；若 PATH 尚未生效，请重新载入登录 shell。可用 `opencode --native` 或 `codex --native` 单次绕过 Pocketctl。",
 	},
 	"agent.opencode_help": {
 		"usage: pocketctl agent opencode <enable|disable|status|help>",
 		"用法: pocketctl agent opencode <enable|disable|status|help>",
 	},
+	"agent.codex_help": {
+		"usage: pocketctl agent codex <enable|disable|status|help>",
+		"用法: pocketctl agent codex <enable|disable|status|help>",
+	},
 	"agent.unknown":          {"unknown agent command: %s", "未知的 Agent 命令: %s"},
-	"agent.unknown_opencode": {"unknown opencode action: %s", "未知的 OpenCode 操作: %s"},
+	"agent.unknown_action":   {"unknown %s action: %s", "未知的 %s 操作: %s"},
 	"agent.no_shell_profile": {"Do not modify the shell profile or PATH", "不修改 shell 配置或 PATH"},
-	"agent.enabled":          {"OpenCode terminal control enabled (real binary: %s)", "OpenCode 终端控制已启用（真实 binary: %s）"},
-	"agent.disabled":         {"OpenCode terminal control disabled", "OpenCode 终端控制已关闭"},
+	"agent.enabled":          {"%s terminal control enabled (real binary: %s); daemon restart is not required", "%s 终端控制已启用（真实 binary: %s）；无需重启 daemon"},
+	"agent.disabled":         {"%s terminal control disabled; daemon restart is not required", "%s 终端控制已关闭；无需重启 daemon"},
 	"agent.opencode_prompt": {
 		"OpenCode was detected. Enable Pocketctl remote continuation for terminal OpenCode sessions? [y/N] ",
 		"检测到 OpenCode，是否为终端 OpenCode 会话启用 Pocketctl 远程接续？[y/N] ",
 	},
-	"agent.prompt_warning":  {"OpenCode setup warning: %v", "OpenCode 设置警告: %v"},
-	"agent.status_detected": {"Detected: %s", "已检测: %s"},
-	"agent.status_state":    {"State: %s", "状态: %s"},
-	"agent.status_binary":   {"Real binary: %s", "真实 binary: %s"},
-	"agent.status_launcher": {"Launcher: %s", "Launcher: %s"},
-	"agent.status_path":     {"PATH active: %s", "PATH 已生效: %s"},
-	"agent.status_runtime":  {"Runtime reachable: %s", "Runtime 可连接: %s"},
-	"agent.status_error":    {"Diagnostic: %s", "诊断: %s"},
-	"agent.yes":             {"yes", "是"},
-	"agent.no":              {"no", "否"},
+	"agent.prompt_warning":    {"OpenCode setup warning: %v", "OpenCode 设置警告: %v"},
+	"agent.status_agent":      {"Agent: %s", "Agent: %s"},
+	"agent.status_detected":   {"Detected: %s", "已检测: %s"},
+	"agent.status_version":    {"Version: %s", "版本: %s"},
+	"agent.status_state":      {"State: %s", "状态: %s"},
+	"agent.status_effective":  {"Effective mode: %s", "实际模式: %s"},
+	"agent.status_binary":     {"Real binary: %s", "真实 binary: %s"},
+	"agent.status_launcher":   {"Launcher: %s", "Launcher: %s"},
+	"agent.status_path":       {"PATH active: %s", "PATH 已生效: %s"},
+	"agent.status_runtime":    {"Runtime reachable: %s", "Runtime 可连接: %s"},
+	"agent.status_error":      {"Diagnostic: %s", "诊断: %s"},
+	"agent.status_capability": {"Capability: %s", "能力: %s"},
+	"agent.yes":               {"yes", "是"},
+	"agent.no":                {"no", "否"},
 
 	// ---- daemon.* (start banner / stop / shutdown) -----------------------
 	"daemon.started": {

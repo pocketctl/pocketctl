@@ -247,6 +247,13 @@
             @reject="onQuestionReject"
           />
 
+          <McpElicitationCard
+            v-else-if="msg.type === 'mcp_elicitation_request'"
+            :message="msg"
+            :disabled="interactionCardsDisabled"
+            @respond="onMcpElicitationRespond"
+          />
+
           <!-- PTY selection menu (host-hook confirmation, TUI prompt, etc.) -->
           <InteractiveChoiceCard v-else-if="msg.type === 'interactive_prompt'" :message="msg" @respond="onChoiceRespond" />
         </template>
@@ -434,6 +441,7 @@ import ToolCallCard from '../components/messages/ToolCallCard.vue'
 import QuestionCard from '../components/messages/QuestionCard.vue'
 import ApprovalCard from '../components/messages/ApprovalCard.vue'
 import OpenCodeQuestionCard from '../components/messages/OpenCodeQuestionCard.vue'
+import McpElicitationCard from '../components/messages/McpElicitationCard.vue'
 import OpenCodeReasoningCard from '../components/messages/OpenCodeReasoningCard.vue'
 import OpenCodePartCard from '../components/messages/OpenCodePartCard.vue'
 import InteractiveChoiceCard from '../components/messages/InteractiveChoiceCard.vue'
@@ -1124,7 +1132,8 @@ const LOCAL_COMMANDS = POCKETCTL_LOCAL_COMMANDS.map(command => command.name)
 // already flipped its local status optimistically; here we just dispatch the
 // approval_response command, which the relay forwards to the owning daemon.
 const interactionSubmitTimers = new Map<string, ReturnType<typeof setTimeout>>()
-const interactionResolutions = new Map<string, { type: 'approval_request' | 'question_request'; resolution: Record<string, unknown> }>()
+type InteractionCardType = 'approval_request' | 'question_request' | 'mcp_elicitation_request'
+const interactionResolutions = new Map<string, { type: InteractionCardType; resolution: Record<string, unknown> }>()
 function markInteractionSubmitting(msg: any, operation: string): boolean {
   if (!msg.request_id || msg.submitting) return false
   msg.submitting = true
@@ -1145,15 +1154,15 @@ function clearInteractionSubmitting(requestId: string) {
   interactionSubmitTimers.delete(requestId)
 }
 
-function onApprovalRespond(msg: any, action: 'once' | 'always' | 'reject') {
+function onApprovalRespond(msg: any, action: 'once' | 'always' | 'reject' | 'cancel') {
   if (!msg.request_id) return
   if (!markInteractionSubmitting(msg, 'Approval')) return
-  const supportsActions = interactionCapabilities.value.includes('permission_actions')
+  const supportsActions = interactionCapabilities.value.includes('permission_actions') || Array.isArray(msg.availableDecisions)
   const sent = send({
     type: 'approval_response',
     session_id: sessionId.value,
     request_id: msg.request_id,
-    ...(supportsActions ? { action } : { approved: action !== 'reject' }),
+    ...(supportsActions ? { action } : { approved: action !== 'reject' && action !== 'cancel' }),
   })
   if (!sent) {
     clearInteractionSubmitting(msg.request_id)
@@ -1179,6 +1188,19 @@ function onQuestionReject(msg: any) {
     clearInteractionSubmitting(msg.request_id)
     msg.submitting = false
     msg.error = 'Question rejection failed'
+  }
+}
+
+function onMcpElicitationRespond(msg: any, action: 'accept' | 'decline' | 'cancel', content?: Record<string, unknown>) {
+  if (!markInteractionSubmitting(msg, 'MCP elicitation')) return
+  const sent = send({
+    type: 'mcp_elicitation_response', session_id: sessionId.value, request_id: msg.request_id,
+    elicitation_action: action, ...(content === undefined ? {} : { elicitation_content: content }),
+  })
+  if (!sent) {
+    clearInteractionSubmitting(msg.request_id)
+    msg.submitting = false
+    msg.error = 'MCP elicitation response failed'
   }
 }
 
@@ -1652,7 +1674,7 @@ function processEvent(evt: any, target: any[] = messages.value, subagentOverride
     upsertInteractionRequest(requestTarget, 'approval_request', requestId, {
       id: nextId('ap'), type: 'approval_request', request_id: requestId,
       call_id: evt.call_id || evt.payload?.call_id,
-      tool, input, inputDesc: formatToolInput(tool, input),
+      tool, input,
       permissionName: evt.permission_name || evt.payload?.permission_name || '',
       patterns: evt.patterns || evt.payload?.patterns || [],
       always: evt.always || evt.payload?.always || [],
@@ -1660,6 +1682,12 @@ function processEvent(evt: any, target: any[] = messages.value, subagentOverride
       toolMessageId: evt.tool_message_id || evt.payload?.tool_message_id,
       toolCallId: evt.tool_call_id || evt.payload?.tool_call_id,
       permissionVersion: evt.permission_version || evt.payload?.permission_version,
+      approvalKind: evt.approval_kind || evt.payload?.approval_kind,
+      availableDecisions: evt.available_decisions || evt.payload?.available_decisions || [],
+      command: evt.command || evt.payload?.command,
+      cwd: evt.cwd || evt.payload?.cwd,
+      description: evt.description || evt.payload?.description,
+      inputDesc: evt.command || evt.payload?.command || evt.description || evt.payload?.description || formatToolInput(tool, input),
     })
     const knownResolution = interactionResolutions.get(requestId)
     if (knownResolution?.type === 'approval_request') resolveInteractionRequest(requestTarget, 'approval_request', requestId, knownResolution.resolution)
@@ -1683,6 +1711,7 @@ function processEvent(evt: any, target: any[] = messages.value, subagentOverride
     upsertInteractionRequest(requestTarget, 'question_request', requestId, {
       id: nextId('oq'),
       questions,
+      autoResolutionMs: evt.auto_resolution_ms || evt.payload?.auto_resolution_ms,
       toolMessageId: evt.tool_message_id || evt.payload?.tool_message_id,
       toolCallId: evt.tool_call_id || evt.payload?.tool_call_id,
     })
@@ -1695,10 +1724,33 @@ function processEvent(evt: any, target: any[] = messages.value, subagentOverride
       answers: evt.answers || evt.payload?.answers || [],
       rejected: !!(evt.rejected ?? evt.payload?.rejected),
       reason: evt.reason || evt.payload?.reason,
+      redacted: !!(evt.redacted ?? evt.payload?.redacted),
     }
     interactionResolutions.set(requestId, { type: 'question_request', resolution })
     resolveInteractionRequest(target, 'question_request', requestId, resolution)
     if (target !== messages.value) resolveInteractionRequest(messages.value, 'question_request', requestId, resolution)
+    clearInteractionSubmitting(requestId)
+  } else if (type === 'mcp_elicitation_request') {
+    const requestId = evt.request_id || evt.payload?.request_id
+    if (!requestId) return
+    const requestTarget = target !== messages.value && messages.value.some((message: any) => message.type === 'mcp_elicitation_request' && message.request_id === requestId)
+      ? messages.value : target
+    upsertInteractionRequest(requestTarget, 'mcp_elicitation_request', requestId, {
+      id: nextId('mcp'), mcpServer: evt.mcp_server || evt.payload?.mcp_server,
+      elicitationMode: evt.elicitation_mode || evt.payload?.elicitation_mode,
+      elicitationId: evt.elicitation_id || evt.payload?.elicitation_id,
+      elicitationSchema: evt.elicitation_schema || evt.payload?.elicitation_schema,
+      message: evt.message || evt.payload?.message, url: evt.url || evt.payload?.url,
+    })
+    const knownResolution = interactionResolutions.get(requestId)
+    if (knownResolution?.type === 'mcp_elicitation_request') resolveInteractionRequest(requestTarget, 'mcp_elicitation_request', requestId, knownResolution.resolution)
+  } else if (type === 'mcp_elicitation_resolved') {
+    const requestId = evt.request_id || evt.payload?.request_id
+    if (!requestId) return
+    const resolution = { action: evt.action || evt.payload?.action, reason: evt.reason || evt.payload?.reason, redacted: !!(evt.redacted ?? evt.payload?.redacted) }
+    interactionResolutions.set(requestId, { type: 'mcp_elicitation_request', resolution })
+    resolveInteractionRequest(target, 'mcp_elicitation_request', requestId, resolution)
+    if (target !== messages.value) resolveInteractionRequest(messages.value, 'mcp_elicitation_request', requestId, resolution)
     clearInteractionSubmitting(requestId)
   } else if (type === 'interactive_prompt') {
     // Daemon scanned a selection menu the agent's TUI drew to the PTY (e.g. a
@@ -2066,11 +2118,21 @@ onMounted(() => {
     if (msg.session_id !== sessionId.value) return
     processEvent(msg)
   }))
+  cleanups.push(onEvent('mcp_elicitation_request', (msg: any) => {
+    if (msg.session_id !== sessionId.value) return
+    processEvent(msg)
+    nextTick(scrollToBottom)
+  }))
+  cleanups.push(onEvent('mcp_elicitation_resolved', (msg: any) => {
+    if (msg.session_id !== sessionId.value) return
+    processEvent(msg)
+  }))
   cleanups.push(onEvent('interaction_result', (msg: any) => {
     if (msg.session_id !== sessionId.value || msg.status !== 'resolved_elsewhere' || !msg.request_id) return
-    let type: 'approval_request' | 'question_request'
+    let type: InteractionCardType
     if (msg.operation === 'approval_response') type = 'approval_request'
     else if (msg.operation === 'question_response' || msg.operation === 'question_reject') type = 'question_request'
+    else if (msg.operation === 'mcp_elicitation_response') type = 'mcp_elicitation_request'
     else return
     const resolution = { reason: 'resolved_elsewhere' }
     interactionResolutions.set(msg.request_id, { type, resolution })
@@ -2149,9 +2211,9 @@ onMounted(() => {
 
   cleanups.push(onEvent('error', (msg: any) => {
     if (msg.session_id && msg.session_id !== sessionId.value) return
-    if (['approval_response', 'question_response', 'question_reject'].includes(msg.operation) && msg.request_id) {
+    if (['approval_response', 'question_response', 'question_reject', 'mcp_elicitation_response'].includes(msg.operation) && msg.request_id) {
       clearInteractionSubmitting(msg.request_id)
-      const type = msg.operation === 'approval_response' ? 'approval_request' : 'question_request'
+      const type = msg.operation === 'approval_response' ? 'approval_request' : msg.operation === 'mcp_elicitation_response' ? 'mcp_elicitation_request' : 'question_request'
       const card = messages.value.find((item: any) => item.type === type && item.request_id === msg.request_id)
       if (card) {
         card.submitting = false

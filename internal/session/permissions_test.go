@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 	"time"
 
@@ -81,8 +82,8 @@ func TestDaemonClaudePermissionChangesOnlyAfterObservedConfirmation(t *testing.T
 func TestSetPermissionConfigCodexNextTurnAndDefensiveCopy(t *testing.T) {
 	out := make(chan protocol.DaemonEvent, 1)
 	sm := NewSessionManager(out)
-	sm.sessions["s"] = &ProcessState{SessionID: "s", Agent: "codex", Source: "daemon", Status: protocol.StatusIdle, Permission: &protocol.PermissionConfig{Agent: "codex", Preset: "custom", ApprovalPolicy: "never", SandboxMode: "read-only"}}
-	cfg := &protocol.PermissionConfig{Agent: "codex", Preset: "custom", ApprovalPolicy: "never", SandboxMode: "workspace-write"}
+	sm.sessions["s"] = &ProcessState{SessionID: "s", Agent: "codex", Source: "daemon", Status: protocol.StatusIdle, ControlMode: protocol.ControlManaged, Permission: &protocol.PermissionConfig{Agent: "codex", Preset: "custom", ApprovalPolicy: "never", SandboxMode: "read-only"}}
+	cfg := &protocol.PermissionConfig{Agent: "codex", Preset: "custom", ApprovalPolicy: "on-request", SandboxMode: "workspace-write"}
 	if err := sm.SetPermissionConfig("s", cfg); err != nil {
 		t.Fatal(err)
 	}
@@ -94,6 +95,15 @@ func TestSetPermissionConfigCodexNextTurnAndDefensiveCopy(t *testing.T) {
 	got, mutable, _, ok := sm.GetPermissionMeta("s")
 	if !ok || !mutable || got.SandboxMode != "workspace-write" {
 		t.Fatalf("meta = %+v mutable=%v ok=%v", got, mutable, ok)
+	}
+}
+
+func TestSetPermissionConfigRejectsCodexRemoteApprovalWithoutManagedBackend(t *testing.T) {
+	sm := NewSessionManager(make(chan protocol.DaemonEvent, 1))
+	sm.sessions["s"] = &ProcessState{SessionID: "s", Agent: "codex", Source: "daemon", Status: protocol.StatusIdle, Permission: &protocol.PermissionConfig{Agent: "codex", ApprovalPolicy: "never", SandboxMode: "read-only"}}
+	err := sm.SetPermissionConfig("s", &protocol.PermissionConfig{Agent: "codex", Preset: "custom", ApprovalPolicy: "on-request", SandboxMode: "workspace-write"})
+	if err == nil || !strings.Contains(err.Error(), "managed app-server") {
+		t.Fatalf("error=%v", err)
 	}
 }
 

@@ -29,7 +29,13 @@
 
       <div v-if="message.error" class="approval-error">{{ message.error }}</div>
       <div class="approval-actions">
-        <template v-if="isPending && supportsActions">
+    <template v-if="isPending && isCodexApproval">
+      <button v-if="canAccept" class="approval-btn once" :disabled="actionsDisabled" @click.stop="respond('once')">{{ t('approval.once') }}</button>
+      <button v-if="canAcceptForSession" class="approval-btn always" :disabled="actionsDisabled" @click.stop="respond('always')">{{ t('approval.always') }}</button>
+      <button v-if="canDecline" class="approval-btn reject" :disabled="actionsDisabled" @click.stop="respond('reject')">{{ t('approval.deny') }}</button>
+      <button v-if="canCancel" class="approval-btn cancel" :disabled="actionsDisabled" @click.stop="respond('cancel')">{{ t('common.cancel') }}</button>
+    </template>
+        <template v-else-if="isPending && supportsActions">
           <button class="approval-btn once" :disabled="actionsDisabled" @click.stop="respond('once')">{{ t('approval.once') }}</button>
           <button class="approval-btn always" :disabled="actionsDisabled || !message.always?.length" @click.stop="respond('always')">{{ t('approval.always') }}</button>
           <button class="approval-btn reject" :disabled="actionsDisabled" @click.stop="respond('reject')">{{ t('approval.deny') }}</button>
@@ -48,7 +54,7 @@
 import { computed } from 'vue'
 import { useLocale } from '../../composables/useLocale'
 
-type ApprovalAction = 'once' | 'always' | 'reject'
+type ApprovalAction = 'once' | 'always' | 'reject' | 'cancel'
 
 const { t } = useLocale()
 const props = withDefaults(defineProps<{ message: any; supportsActions?: boolean; disabled?: boolean }>(), {
@@ -59,8 +65,14 @@ const emit = defineEmits<{ (event: 'respond', message: any, action: ApprovalActi
 
 const isPending = computed(() => props.message.status === 'pending')
 const actionsDisabled = computed(() => props.disabled || !!props.message.submitting)
+const availableDecisions = computed<string[]>(() => Array.isArray(props.message.availableDecisions) ? props.message.availableDecisions : [])
+const isCodexApproval = computed(() => availableDecisions.value.length > 0)
+const canAccept = computed(() => availableDecisions.value.includes('accept'))
+const canAcceptForSession = computed(() => availableDecisions.value.includes('acceptForSession'))
+const canDecline = computed(() => availableDecisions.value.includes('decline'))
+const canCancel = computed(() => availableDecisions.value.includes('cancel'))
 const resolvedAction = computed<ApprovalAction>(() => {
-  if (props.message.action === 'always' || props.message.action === 'once' || props.message.action === 'reject') return props.message.action
+  if (props.message.action === 'always' || props.message.action === 'once' || props.message.action === 'reject' || props.message.action === 'cancel') return props.message.action
   return props.message.status === 'allowed' ? 'once' : 'reject'
 })
 const resultClass = computed(() => `result-${isPending.value ? 'pending' : resolvedAction.value}`)
@@ -108,7 +120,7 @@ function respond(action: ApprovalAction) {
 .approval-btn { padding: 6px 12px; border: 1px solid var(--border); border-radius: var(--radius-md); background: var(--surface-active); color: var(--fg-secondary); font-size: 12px; font-weight: 600; cursor: pointer; }
 .approval-btn.once, .approval-btn.allow { color: #fff; border-color: var(--success, #10b981); background: var(--success, #10b981); }
 .approval-btn.always { color: var(--accent); border-color: var(--accent); background: var(--accent-muted); }
-.approval-btn.reject:hover:not(:disabled), .approval-btn.deny:hover:not(:disabled) { color: var(--error, #ef4444); border-color: var(--error, #ef4444); }
+.approval-btn.reject:hover:not(:disabled), .approval-btn.deny:hover:not(:disabled), .approval-btn.cancel:hover:not(:disabled) { color: var(--error, #ef4444); border-color: var(--error, #ef4444); }
 .approval-btn:disabled { cursor: not-allowed; opacity: .45; }
 .approval-result { padding: 4px 10px; border-radius: var(--radius-full); font-size: 12px; font-weight: 600; }
 .approval-result.once, .approval-result.always { color: var(--success, #10b981); background: rgba(16,185,129,.12); }
