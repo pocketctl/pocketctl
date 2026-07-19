@@ -129,7 +129,7 @@
                 <div class="se-item"><span class="se-label">{{ t('token.input') }}</span><span class="se-val">{{ fmt(s.tok_input) }}</span></div>
                 <div class="se-item"><span class="se-label">{{ t('token.output') }}</span><span class="se-val">{{ fmt(s.tok_output) }}</span></div>
                 <div class="se-item"><span class="se-label">{{ t('token.in_out_ratio') }}</span><span class="se-val">{{ pct(s.tok_input, s.total_tokens) }}% / {{ pct(s.tok_output, s.total_tokens) }}%</span></div>
-                <div class="se-item"><span class="se-label">{{ t('token.cache') }}</span><span class="se-val">{{ fmt(s.tok_cache_read) }}</span></div>
+                <div class="se-item"><span class="se-label">{{ t('token.cache') }}</span><span class="se-val">{{ fmt((s.tok_cache_read || 0) + (s.tok_cache_create || 0)) }}</span></div>
                 <div class="se-item"><span class="se-label">{{ t('token.amount') }}</span><span class="se-val">{{ fmt(s.total_tokens) }}</span></div>
                 <div class="se-item"><span class="se-label">{{ t('token.daily_avg_short') }}</span><span class="se-val">{{ fmt(Math.round((s.total_tokens || 0) / 30)) }}</span></div>
               </div>
@@ -137,12 +137,13 @@
               <div v-if="s.children && s.children.length" class="se-subagents">
                 <div class="se-label">{{ t('token.subagent_breakdown') }}</div>
                 <div class="se-sub-table">
-                  <div class="se-sub-header"><span>{{ t('token.subagent_col') }}</span><span>{{ t('token.input') }}</span><span>{{ t('token.output') }}</span><span>{{ t('token.cache') }}</span></div>
+                  <div class="se-sub-header"><span>{{ t('token.subagent_col') }}</span><span>{{ t('token.input') }}</span><span>{{ t('token.output') }}</span><span>{{ t('token.cache') }}</span><span>{{ t('token.amount') }}</span></div>
                   <div v-for="c in s.children" :key="c.agentId" class="se-sub-row">
                     <span class="se-sub-name">{{ c.title || c.agentId.slice(0, 6) }}</span>
                     <span class="se-val">{{ fmt(c.tokenIn) }}</span>
                     <span class="se-val">{{ fmt(c.tokenOut) }}</span>
-                    <span class="se-val">{{ fmt(c.tokenCache) }}</span>
+                    <span class="se-val">{{ fmt((c.tokenCache || 0) + (c.tokenCacheCreate || 0)) }}</span>
+                    <span class="se-val">{{ fmt(childAgentTokenTotal(c)) }}</span>
                   </div>
                 </div>
               </div>
@@ -187,6 +188,7 @@ import { ref, computed, onMounted } from 'vue'
 import { useLocale } from '../composables/useLocale'
 import { useAuth } from '../composables/useAuth'
 import AgentBadge from '../components/AgentBadge.vue'
+import { formatTokenCount, childAgentTokenTotal } from '../utils/tokenFormat'
 
 const { t } = useLocale()
 const { accessToken } = useAuth()
@@ -227,11 +229,7 @@ function modelColor(m: string) {
   return PALETTE[h % PALETTE.length]
 }
 function fmt(n: number) {
-  n = +n || 0
-  if (n >= 1e9) return (n / 1e9).toFixed(1) + 'G'
-  if (n >= 1e6) return (n / 1e6).toFixed(1) + 'M'
-  if (n >= 1e3) return (n / 1e3).toFixed(0) + 'K'
-  return '' + n
+  return formatTokenCount(n)
 }
 
 async function loadDashboard() {
@@ -479,7 +477,7 @@ onMounted(loadDashboard)
 .session-expand-row .se-mini-chart { display: flex; align-items: flex-end; gap: 2px; height: 40px; margin-top: 6px; }
 .session-expand-row .se-mini-chart span { flex: 1; background: var(--accent); opacity: 0.5; border-radius: 1px 1px 0 0; min-height: 2px; }
 .session-expand-row .se-subagents { margin-top: 12px; }
-.session-expand-row .se-sub-table { display: grid; grid-template-columns: 2fr 1fr 1fr 1fr; gap: 0; font-size: 12px; border: 1px solid var(--border); border-radius: var(--radius-sm); overflow: hidden; }
+  .session-expand-row .se-sub-table { display: grid; grid-template-columns: 2fr 1fr 1fr 1fr 1fr; gap: 0; font-size: 12px; border: 1px solid var(--border); border-radius: var(--radius-sm); overflow: hidden; }
 .session-expand-row .se-sub-header { display: contents; }
 .session-expand-row .se-sub-header span { background: var(--surface-hover); padding: 6px 10px; font-size: 10px; font-weight: 600; color: var(--fg-tertiary); text-transform: uppercase; letter-spacing: 0.05em; border-bottom: 1px solid var(--border); }
 .session-expand-row .se-sub-row { display: contents; }

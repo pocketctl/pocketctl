@@ -35,7 +35,7 @@
             <span class="source-badge" :class="s.source">{{ s.source === 'terminal' ? '📺 终端' : '🌐 Web' }}</span>
             <span v-if="s.hostname" class="hostname-badge">💻 {{ s.hostname }}</span>
             <span v-if="s.subagent_count > 0" class="subagent-badge">🤖 {{ s.subagent_count }}</span>
-            <span v-if="s.totalTokens > 0" class="token-badge" :title="t('session.total_incl_subagent')">🪙 {{ fmtTk(s.totalTokens) }}</span>
+            <span v-if="s.totalTokens > 0" class="token-badge" :title="t('session.total_incl_subagent')">🪙 {{ formatTokenCount(s.totalTokens) }}</span>
             <span v-if="s.exit_reason" class="exit-reason">{{ exitReasonLabel(s.exit_reason) }}</span>
             <span class="session-id">{{ s.session_id.slice(0, 8) }}</span>
             <AgentBadge :agent="s.agent" size="sm" />
@@ -52,7 +52,7 @@
           @keydown.enter="$router.push(`/session/${s.session_id}?subagent=${c.agentId}`)">
           <span class="child-indent">↳</span>
           <span class="child-title">{{ c.title || c.agentId.slice(0, 8) }}</span>
-          <span v-if="(c.tokenIn||0)+(c.tokenOut||0) > 0" class="child-token">🪙 {{ fmtTk((c.tokenIn||0)+(c.tokenOut||0)) }}</span>
+          <span v-if="childAgentTokenTotal(c) > 0" class="child-token">🪙 {{ formatTokenCount(childAgentTokenTotal(c)) }}</span>
         </div>
       </div>
     </div>
@@ -71,6 +71,7 @@ import NewSessionDialog from '../components/NewSessionDialog.vue'
 import SessionActions from '../components/SessionActions.vue'
 import AgentBadge from '../components/AgentBadge.vue'
 import { getInstallCommand } from '../composables/useEnv'
+import { formatTokenCount, childAgentTokenTotal } from '../utils/tokenFormat'
 import { useLocale } from '../composables/useLocale'
 import { useSessionRename } from '../composables/useSessionRename'
 
@@ -109,13 +110,6 @@ function exitReasonLabel(reason: string): string {
     unknown: '已退出',
   }
   return labels[reason] || '已退出'
-}
-
-function fmtTk(n: number) {
-  n = +n || 0
-  if (n >= 1e6) return (n / 1e6).toFixed(1) + 'M'
-  if (n >= 1e3) return (n / 1e3).toFixed(0) + 'K'
-  return '' + n
 }
 
 function toggleFold(id: string) {

@@ -884,15 +884,19 @@ function groupSubagentsByParent(rows: any[]): { byParent: Map<string, any[]>; su
   const byParent = new Map<string, any[]>();
   const sumChildren = new Map<string, number>();
   for (const r of rows) {
+    // node-postgres returns BIGINT as strings. Normalize at the API boundary so
+    // clients cannot accidentally concatenate token fields with JavaScript `+`.
+    const tokenIn = Number(r.token_in || 0);
+    const tokenOut = Number(r.token_out || 0);
+    const tokenCache = Number(r.token_cache || 0);
+    const tokenCacheCreate = Number(r.token_cache_create || 0);
     if (!byParent.has(r.parent_session_id)) byParent.set(r.parent_session_id, []);
     byParent.get(r.parent_session_id)!.push({
       agentId: r.agent_id, kind: r.kind, agentType: r.agent_type, title: r.title,
-      status: r.status, tokenIn: r.token_in, tokenOut: r.token_out,
-      tokenCache: r.token_cache, tokenCacheCreate: r.token_cache_create,
+      status: r.status, tokenIn, tokenOut, tokenCache, tokenCacheCreate,
     });
     // 累加该 child 的四列 token 之和到其 parent 桶，用于把子用量并入 totalTokens。
-    const childSum = Number(r.token_in || 0) + Number(r.token_out || 0)
-      + Number(r.token_cache || 0) + Number(r.token_cache_create || 0);
+    const childSum = tokenIn + tokenOut + tokenCache + tokenCacheCreate;
     sumChildren.set(r.parent_session_id, (sumChildren.get(r.parent_session_id) ?? 0) + childSum);
   }
   return { byParent, sumChildren };
@@ -2367,15 +2371,30 @@ export async function getTokensByDaemon(pool: pg.Pool, userId: number, daemonId:
   }
   const byAgent = Array.from(byAgentMap.values()).sort((a, b) => b.total - a.total);
 
+  const parentSessionIds = (sess.rows as any[])
+    .filter((r) => r.parent_session_id === '')
+    .map((r) => r.session_id);
+  const subagentRows = parentSessionIds.length > 0
+    ? await pool.query(
+      `SELECT parent_session_id, agent_id, kind, agent_type, title, status,
+              token_in, token_out, token_cache, token_cache_create
+       FROM subagents
+       WHERE parent_session_id = ANY($1::text[])
+       ORDER BY created_at ASC`,
+      [parentSessionIds],
+    )
+    : { rows: [] };
+  const { byParent, sumChildren } = groupSubagentsByParent(subagentRows.rows);
+
   const t = totals.rows[0] || {};
   return {
     total: parseInt(t.total ?? 0, 10),
     today: parseInt(t.today ?? 0, 10),
     thisMonth: parseInt(t.this_month ?? 0, 10),
-    sessions: await Promise.all((sess.rows as any[]).map(async (r) => ({
+    sessions: (sess.rows as any[]).map((r) => ({
       session_id: r.session_id,
       title: r.title,
-      total_tokens: parseInt(r.total_tokens ?? 0, 10),
+      total_tokens: parseInt(r.total_tokens ?? 0, 10) + (sumChildren.get(r.session_id) ?? 0),
       tok_input: parseInt(r.tok_input ?? 0, 10),
       tok_output: parseInt(r.tok_output ?? 0, 10),
       tok_cache_read: parseInt(r.tok_cache_read ?? 0, 10),
@@ -2384,8 +2403,8 @@ export async function getTokensByDaemon(pool: pg.Pool, userId: number, daemonId:
       agent_type: r.agent_type,
       status: r.status,
       created_at: r.created_at,
-      children: r.parent_session_id === '' ? await listSubagentsByParent(pool, r.session_id) : [],
-    }))),
+      children: r.parent_session_id === '' ? (byParent.get(r.session_id) ?? []) : [],
+    })),
     byAgent,
   };
 }

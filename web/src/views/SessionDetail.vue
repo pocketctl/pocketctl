@@ -451,6 +451,7 @@ import { buildResumeCommand } from '../utils/resumeCommand'
 import { resolveAgentTarget } from './classifyByAgent'
 import { formatToolInput } from '../utils/toolDisplay'
 import { isDiffTool } from '../utils/diffRender'
+import { formatTokenCount } from '../utils/tokenFormat'
 import { useSessionRename } from '../composables/useSessionRename'
 import type { CommandItem } from '../composables/useWebSocket'
 import { canControlOpenCodeInteractions, isManagedOpenCodeSession, normalizeSessionAgents, resolveInteractionRequest, sessionAgentSwitchDisabled, shouldShowSessionAgentPicker, upsertInteractionRequest, type SessionAgentOption } from '../types/opencode-interactions'
@@ -762,8 +763,7 @@ const completedBarVisible = computed(() => {
 })
 
 function fmtTokens(n: number): string {
-  if (n > 1000) return (n / 1000).toFixed(1) + 'K'
-  return String(n)
+  return formatTokenCount(n)
 }
 // Format a duration (seconds) as Xs / Xm Ys / Xh Ym Zs for the turn timer.
 function fmtDuration(sec: number): string {
@@ -847,7 +847,7 @@ const contextTokens = computed(() => {
   const u = effectiveUsage()
   if (u) {
     const total = (u.input_tokens || 0) + (u.cache_read_tokens || 0) + (u.cache_create_tokens || 0)
-    return formatTokenAmount(total)
+    return formatTokenCount(total)
   }
   return ''
 })
@@ -871,15 +871,7 @@ const parentTotalTokens = computed(() => {
   return (s as any)?.totalTokens ?? null
 })
 function fmtTk(n: number) {
-  return formatTokenAmount(n)
-}
-
-function formatTokenAmount(n: number) {
-  n = +n || 0
-  if (n > 1e9) return (n / 1e9).toFixed(1) + 'G'
-  if (n >= 1e6) return (n / 1e6).toFixed(1) + 'M'
-  if (n >= 1e3) return (n / 1e3).toFixed(0) + 'K'
-  return '' + n
+  return formatTokenCount(n)
 }
 
 const milestones = computed(() => {
