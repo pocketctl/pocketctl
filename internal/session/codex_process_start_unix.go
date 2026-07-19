@@ -49,6 +49,19 @@ func adoptCodexAppServer(ctx context.Context, state *daemon.CodexAppServerState)
 	return runtime, nil
 }
 
+func stopPersistedCodexAppServer(state *daemon.CodexAppServerState) error {
+	if state == nil || state.PID <= 0 {
+		return fmt.Errorf("invalid Codex app-server handoff")
+	}
+	if err := syscall.Kill(-state.PID, syscall.SIGTERM); err != nil && !errors.Is(err, syscall.ESRCH) {
+		return err
+	}
+	if state.Endpoint != "" {
+		_ = os.Remove(state.Endpoint)
+	}
+	return nil
+}
+
 func startCodexAppServerWithFactory(ctx context.Context, binary, _ string, generation uint64, timeout time.Duration, factory codexCommandFactory) (*codexAppServerRuntime, error) {
 	dir, err := codexRuntimeDir()
 	if err != nil {

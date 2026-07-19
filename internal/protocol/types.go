@@ -107,6 +107,7 @@ type DaemonEvent struct {
 	Resync                 bool                 `json:"resync,omitempty"` // reconnect replay, not a newly discovered session
 	ExitReason             string               `json:"exit_reason,omitempty"`
 	LastActivityAt         string               `json:"last_activity_at,omitempty"`
+	TurnStartedAt          string               `json:"turn_started_at,omitempty"` // authoritative start of the currently active turn
 	AgentID                string               `json:"agent_id,omitempty"`          // sub-agent identifier (e.g. "afa8314e6e3f6e552)
 	ParentSessionID        string               `json:"parent_session_id,omitempty"` // subagent's parent session (P0 subagent relation)
 	IsSubagent             bool                 `json:"is_subagent,omitempty"`       // true for subagent-scoped events

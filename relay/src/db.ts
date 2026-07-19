@@ -74,6 +74,7 @@ export async function initDB(pool: pg.Pool): Promise<void> {
   await pool.query(`ALTER TABLE sessions ADD COLUMN IF NOT EXISTS capabilities JSONB`);
   // Migration: add last_activity_at and exit_reason columns
   await pool.query(`ALTER TABLE sessions ADD COLUMN IF NOT EXISTS last_activity_at TIMESTAMPTZ`);
+  await pool.query(`ALTER TABLE sessions ADD COLUMN IF NOT EXISTS turn_started_at TIMESTAMPTZ`);
   await pool.query(`ALTER TABLE sessions ADD COLUMN IF NOT EXISTS exit_reason VARCHAR(32)`);
   // Migration: add subagent_count column
   await pool.query(`ALTER TABLE sessions ADD COLUMN IF NOT EXISTS subagent_count INT DEFAULT 0`);
@@ -803,6 +804,19 @@ export async function getSessionStatus(pool: pg.Pool, sessionId: string): Promis
   return result.rows[0]?.status ?? null;
 }
 
+export async function getSessionRuntime(pool: pg.Pool, sessionId: string): Promise<{ status: string | null; turnStartedAt: string | null; lastActivityAt: string | null }> {
+  const result = await pool.query(
+    `SELECT status, turn_started_at, last_activity_at FROM sessions WHERE session_id = $1`,
+    [sessionId]
+  );
+  const row = result.rows[0];
+  return {
+    status: row?.status ?? null,
+    turnStartedAt: row?.turn_started_at ? new Date(row.turn_started_at).toISOString() : null,
+    lastActivityAt: row?.last_activity_at ? new Date(row.last_activity_at).toISOString() : null,
+  };
+}
+
 export async function getRecentSubagentEvents(pool: pg.Pool, sessionId: string, agentId: string, limit: number): Promise<any[]> {
   const result = await pool.query(
     `SELECT id, session_id, event_type, payload, created_at
@@ -846,7 +860,7 @@ export async function listSessionsWithChildren(pool: pg.Pool, whereUser?: number
   const result = await pool.query(
     `SELECT s.session_id, s.daemon_id, s.agent_type, s.active_agent, s.cwd, s.title, s.source, s.status,
             s.control_mode, s.capabilities,
-            s.created_at, s.updated_at, s.last_activity_at, s.exit_reason, s.subagent_count, s.pinned,
+            s.created_at, s.updated_at, s.last_activity_at, s.turn_started_at, s.exit_reason, s.subagent_count, s.pinned,
             s.model, s.parent_session_id, s.is_subagent, s.root_session_id,
             s.total_tokens, s.tok_input, s.tok_output, s.tok_cache_read, s.tok_cache_create,
             d.status AS daemon_status, d.hostname AS hostname, d.alias AS daemon_alias
@@ -1891,16 +1905,25 @@ export async function bindTokenToDaemon(pool: pg.Pool, daemonId: string, jti: st
  *  session_discovered is ever emitted — only session_status). Upserting on those
  *  produced phantom rows with empty cwd/agent/title showing "status + time, no
  *  messages". Returns true if an existing row was updated. */
-export async function updateSessionStatus(pool: pg.Pool, sessionId: string, daemonId: string, status: string, exitReason?: string, userId?: number): Promise<boolean> {
+export async function updateSessionStatus(pool: pg.Pool, sessionId: string, daemonId: string, status: string, exitReason?: string, userId?: number, turnStartedAt?: string): Promise<boolean> {
   const res = await pool.query(
-    `UPDATE sessions SET
+    `WITH input AS (
+       SELECT $3::varchar AS status, $6::timestamptz AS turn_started_at
+     )
+     UPDATE sessions SET
        daemon_id = $2,
-       status = $3,
+       status = input.status,
        exit_reason = COALESCE($4, sessions.exit_reason),
        user_id = COALESCE($5::int, sessions.user_id),
+       turn_started_at = CASE
+         WHEN input.status IN ('running', 'busy', 'retry', 'waiting', 'waiting_approval', 'waiting_question')
+           THEN COALESCE(input.turn_started_at, sessions.turn_started_at, NOW())
+         ELSE NULL
+       END,
        updated_at = NOW()
+     FROM input
      WHERE session_id = $1`,
-    [sessionId, daemonId, status, exitReason || null, userId || null]
+    [sessionId, daemonId, status, exitReason || null, userId || null, turnStartedAt || null]
   );
   return (res.rowCount ?? 0) > 0;
 }

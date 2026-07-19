@@ -60,6 +60,19 @@ function exitedSessionPool(): any {
   return value
 }
 
+function activeSessionPool(): any {
+  const value = pool()
+  value.query = vi.fn(async (sql: string) => {
+    if (sql.includes('RETURNING daemon_id')) return { rows: [{ daemon_id: 'd1' }], rowCount: 1 }
+    if (sql.includes('SELECT 1 FROM sessions')) return { rows: [{ '?column?': 1 }], rowCount: 1 }
+    if (sql.includes('SELECT status FROM sessions')) return { rows: [{ status: 'running' }] }
+    if (sql.includes('SELECT daemon_id FROM sessions')) return { rows: [{ daemon_id: 'd1' }], rowCount: 1 }
+    if (sql.includes('SELECT alias FROM daemons')) return { rows: [] }
+    return { rows: [], rowCount: 0 }
+  })
+  return value
+}
+
 describe('Router active-session quota', () => {
   beforeEach(() => vi.clearAllMocks())
 
@@ -213,6 +226,31 @@ describe('Router active-session quota', () => {
       reason: 'concurrent_session_quota_exceeded',
       used: 2,
       limit: 2,
+    }))
+  })
+
+  test('forwards an active-session message without reserving another concurrent slot', async () => {
+    const router = new Router(activeSessionPool())
+    const daemon = ws()
+    const client = ws()
+    await router.registerDaemon(daemon, { type: 'register', daemon_id: 'd1', hostname: 'host', agents: [], supports_quota_grant: true }, 7)
+    router.registerClient(client, 7)
+    daemon._sent.length = 0
+
+    await router.handleClientMessage(client, {
+      type: 'user_message', session_id: 'active-session', msg_id: 'message-active', content: 'continue',
+    })
+
+    expect(reserveConcurrentSession).not.toHaveBeenCalled()
+    expect(daemon._sent).toContainEqual(expect.objectContaining({
+      type: 'user_message',
+      session_id: 'active-session',
+      msg_id: 'message-active',
+      request_id: 'message-active',
+      quota_grant: expect.objectContaining({
+        reservation_id: 'active-session-message-active',
+        operation: 'resume',
+      }),
     }))
   })
 })

@@ -4,8 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/pocketctl/pocketctl/internal/codexapp"
 	"github.com/pocketctl/pocketctl/internal/protocol"
@@ -118,6 +120,460 @@ func TestCodexInteractionsRemoteResolutionWins(t *testing.T) {
 	defer client.responseMu.Unlock()
 	if len(client.responses) != 0 {
 		t.Fatalf("losing client wrote response=%+v", client.responses)
+	}
+}
+
+func TestCodexInteractionsBackToBackRequestAndRemoteResolutionPublishInOrder(t *testing.T) {
+	output := make(chan protocol.DaemonEvent, 16)
+	sm := NewSessionManager(output)
+	interactions := newCodexInteractions(sm, 22, newInteractionCodexClient())
+	interactions.Handle(codexServerRequest(t, `1`, "item/fileChange/requestApproval", `{
+		"threadId":"thr_1","turnId":"turn_1","itemId":"patch_1"
+	}`))
+	interactions.Handle(codexNotification("serverRequest/resolved", `{"threadId":"thr_1","requestId":1}`))
+	events := []protocol.DaemonEvent{<-output, <-output, <-output, <-output}
+	if events[0].Type != "approval_request" || events[1].Type != "session_status" || events[1].Status != protocol.StatusWaitingApproval || events[2].Type != "approval_resolved" || events[3].Type != "session_status" {
+		t.Fatalf("publication order=%+v", events)
+	}
+}
+
+func TestCodexInteractionsLocalResolutionPublishesAfterRequestAndWaiting(t *testing.T) {
+	output := make(chan protocol.DaemonEvent, 16)
+	sm := NewSessionManager(output)
+	interactions := newCodexInteractions(sm, 23, newInteractionCodexClient())
+	interactions.Handle(codexServerRequest(t, `1`, "item/commandExecution/requestApproval", `{
+		"threadId":"thr_1","turnId":"turn_1","itemId":"cmd_1","availableDecisions":["accept"]
+	}`))
+	interactions.mu.Lock()
+	publicID := ""
+	for _, pending := range interactions.pendingByNative {
+		publicID = pending.publicID
+	}
+	interactions.mu.Unlock()
+	if err := interactions.ResolveApproval(context.Background(), "thr_1", publicID, "once"); err != nil {
+		t.Fatal(err)
+	}
+	events := []protocol.DaemonEvent{<-output, <-output, <-output, <-output}
+	if events[0].Type != "approval_request" || events[1].Type != "session_status" || events[1].Status != protocol.StatusWaitingApproval || events[2].Type != "approval_resolved" || events[3].Type != "session_status" {
+		t.Fatalf("publication order=%+v", events)
+	}
+}
+
+func TestCodexInteractionsFinalResolutionReconcilesDeferredTerminalStatus(t *testing.T) {
+	output := make(chan protocol.DaemonEvent, 16)
+	sm := NewSessionManager(output)
+	client := newInteractionCodexClient()
+	coord := newCodexCoordinator(sm)
+	interactions := newCodexInteractions(sm, 3, client)
+	coord.interactions = interactions
+
+	interactions.Handle(codexServerRequest(t, `99`, "item/fileChange/requestApproval", `{
+		"threadId":"thr_1","turnId":"turn_1","itemId":"patch_1","startedAtMs":1
+	}`))
+	asked := nextCodexEvent(t, output, "approval_request")
+	projector := newCodexProjection(3)
+	coord.publishProjected(projector.Project(codexNotification("turn/completed", `{"threadId":"thr_1","turn":{"id":"turn_1","status":"completed"}}`)))
+	coord.publishProjected(projector.Project(codexNotification("thread/status/changed", `{"threadId":"thr_1","status":{"type":"idle"}}`)))
+
+	interactions.Handle(codexNotification("serverRequest/resolved", `{"threadId":"thr_1","requestId":99}`))
+	resolved := nextCodexEvent(t, output, "approval_resolved")
+	if resolved.RequestID != asked.RequestID {
+		t.Fatalf("resolved=%+v, want request %q", resolved, asked.RequestID)
+	}
+	status := nextCodexEvent(t, output, "session_status")
+	if status.Status != protocol.StatusIdle {
+		t.Fatalf("final status=%+v, want deferred idle", status)
+	}
+	sm.mu.RLock()
+	got := sm.sessions["thr_1"].Status
+	sm.mu.RUnlock()
+	if got != protocol.StatusIdle {
+		t.Fatalf("session status=%q, want idle", got)
+	}
+}
+
+type blockingInteractionClient struct {
+	*interactionCodexClient
+	started chan struct{}
+	release chan struct{}
+}
+
+func (f *blockingInteractionClient) Respond(id codexapp.RequestID, result any, rpcErr *codexapp.RPCError) error {
+	f.started <- struct{}{}
+	<-f.release
+	return f.interactionCodexClient.Respond(id, result, rpcErr)
+}
+
+func TestCodexInteractionsDelayedFinalResolutionRestoresDeferredIdle(t *testing.T) {
+	output := make(chan protocol.DaemonEvent, 32)
+	sm := NewSessionManager(output)
+	client := &blockingInteractionClient{interactionCodexClient: newInteractionCodexClient(), started: make(chan struct{}, 1), release: make(chan struct{})}
+	coord := newCodexCoordinator(sm)
+	interactions := newCodexInteractions(sm, 13, client)
+	coord.interactions = interactions
+	interactions.Handle(codexServerRequest(t, `1`, "item/commandExecution/requestApproval", `{
+		"threadId":"thr_1","turnId":"turn_1","itemId":"cmd_1","availableDecisions":["accept"]
+	}`))
+	asked := nextCodexEvent(t, output, "approval_request")
+	_ = nextCodexEvent(t, output, "session_status")
+	errCh := make(chan error, 1)
+	go func() { errCh <- interactions.ResolveApproval(context.Background(), "thr_1", asked.RequestID, "once") }()
+	<-client.started
+	statusDone := make(chan struct{})
+	go func() {
+		coord.publishProjected([]protocol.DaemonEvent{{Type: "session_status", SessionID: "thr_1", Status: protocol.StatusIdle}})
+		close(statusDone)
+	}()
+	close(client.release)
+	if err := <-errCh; err != nil {
+		t.Fatal(err)
+	}
+	<-statusDone
+	statuses := []string{nextCodexEvent(t, output, "session_status").Status, nextCodexEvent(t, output, "session_status").Status}
+	if statuses[0] != protocol.StatusRunning || statuses[1] != protocol.StatusIdle {
+		t.Fatalf("status order=%v, want restored running then newer idle", statuses)
+	}
+}
+
+func TestCodexInteractionsTicketedFinalizersAndLaterStatusPublishFIFO(t *testing.T) {
+	output := make(chan protocol.DaemonEvent, 64)
+	sm := NewSessionManager(output)
+	client := newInteractionCodexClient()
+	coord := newCodexCoordinator(sm)
+	interactions := newCodexInteractions(sm, 14, client)
+	coord.interactions = interactions
+	requestIDs := make([]string, 0, 2)
+	for i := 1; i <= 2; i++ {
+		interactions.Handle(codexServerRequest(t, fmt.Sprint(i), "item/commandExecution/requestApproval", `{
+			"threadId":"thr_1","turnId":"turn_1","itemId":"cmd_`+fmt.Sprint(i)+`","availableDecisions":["accept"]
+		}`))
+		requestIDs = append(requestIDs, nextCodexEvent(t, output, "approval_request").RequestID)
+		_ = nextCodexEvent(t, output, "session_status")
+	}
+	blockerRelease, open := interactions.beginLifecycle("thr_1")
+	if !open {
+		t.Fatal("broker unexpectedly closed")
+	}
+	waitForTickets := func(want uint64) {
+		t.Helper()
+		deadline := time.Now().Add(time.Second)
+		for {
+			interactions.sequencerMu.Lock()
+			sequencer := interactions.sequencers["thr_1"]
+			interactions.sequencerMu.Unlock()
+			sequencer.mu.Lock()
+			next := sequencer.next
+			sequencer.mu.Unlock()
+			if next == want {
+				return
+			}
+			if time.Now().After(deadline) {
+				t.Fatalf("ticket count=%d, want %d", next, want)
+			}
+			time.Sleep(time.Millisecond)
+		}
+	}
+	errs := make(chan error, 2)
+	go func() { errs <- interactions.ResolveApproval(context.Background(), "thr_1", requestIDs[0], "once") }()
+	waitForTickets(4)
+	go func() { errs <- interactions.ResolveApproval(context.Background(), "thr_1", requestIDs[1], "once") }()
+	waitForTickets(5)
+	statusDone := make(chan struct{})
+	go func() {
+		coord.publishProjected([]protocol.DaemonEvent{{Type: "session_status", SessionID: "thr_1", Status: protocol.StatusIdle}})
+		close(statusDone)
+	}()
+	waitForTickets(6)
+	blockerRelease()
+	for range 2 {
+		if err := <-errs; err != nil {
+			t.Fatal(err)
+		}
+	}
+	<-statusDone
+	events := []protocol.DaemonEvent{<-output, <-output, <-output, <-output}
+	if events[0].Type != "approval_resolved" || events[0].RequestID != requestIDs[0] || events[1].Type != "approval_resolved" || events[1].RequestID != requestIDs[1] {
+		t.Fatalf("resolution order=%+v", events)
+	}
+	if events[2].Type != "session_status" || events[2].Status != protocol.StatusRunning || events[3].Type != "session_status" || events[3].Status != protocol.StatusIdle {
+		t.Fatalf("lifecycle order=%+v, want running then idle", events)
+	}
+}
+
+func TestCodexInteractionsCloseDoesNotWaitForResponseAndDropsStaleResult(t *testing.T) {
+	output := make(chan protocol.DaemonEvent, 16)
+	sm := NewSessionManager(output)
+	client := &blockingInteractionClient{interactionCodexClient: newInteractionCodexClient(), started: make(chan struct{}, 1), release: make(chan struct{})}
+	interactions := newCodexInteractions(sm, 26, client)
+	interactions.Handle(codexServerRequest(t, `1`, "item/commandExecution/requestApproval", `{
+		"threadId":"thr_1","turnId":"turn_1","itemId":"cmd_1","availableDecisions":["accept"]
+	}`))
+	asked := nextCodexEvent(t, output, "approval_request")
+	_ = nextCodexEvent(t, output, "session_status")
+	errCh := make(chan error, 1)
+	go func() { errCh <- interactions.ResolveApproval(context.Background(), "thr_1", asked.RequestID, "once") }()
+	<-client.started
+	closed := make(chan struct{})
+	go func() {
+		interactions.Close()
+		close(closed)
+	}()
+	select {
+	case <-closed:
+	case <-time.After(time.Second):
+		t.Fatal("Close waited for blocked Respond")
+	}
+	close(client.release)
+	if err := <-errCh; err == nil {
+		t.Fatal("response completing after Close unexpectedly succeeded")
+	}
+	select {
+	case event := <-output:
+		t.Fatalf("closed broker published stale event %+v", event)
+	default:
+	}
+}
+
+func TestCodexInteractionsCloseBetweenCheckAndSendDropsStaleEvent(t *testing.T) {
+	output := make(chan protocol.DaemonEvent, 1)
+	output <- protocol.DaemonEvent{Type: "sentinel"}
+	interactions := newCodexInteractions(NewSessionManager(output), 29, newInteractionCodexClient())
+	checked := make(chan struct{})
+	release := make(chan struct{})
+	interactions.beforeLifecycleEmit = func(protocol.DaemonEvent) {
+		close(checked)
+		<-release
+	}
+	published := make(chan bool, 1)
+	go func() {
+		published <- interactions.publishEvent(protocol.DaemonEvent{Type: "session_status", SessionID: "thr_1", Status: protocol.StatusIdle})
+	}()
+	<-checked
+	interactions.Close()
+	<-output
+	close(release)
+	if <-published {
+		t.Fatal("event was published after Close won the pre-send window")
+	}
+	select {
+	case event := <-output:
+		t.Fatalf("closed broker sent stale event %+v", event)
+	default:
+	}
+}
+
+func TestCodexInteractionsCloseDoesNotWaitForBlockedOutput(t *testing.T) {
+	output := make(chan protocol.DaemonEvent)
+	interactions := newCodexInteractions(NewSessionManager(output), 30, newInteractionCodexClient())
+	blocked := make(chan struct{})
+	var once sync.Once
+	interactions.afterSendBlocked = func() {
+		once.Do(func() { close(blocked) })
+	}
+	published := make(chan bool, 1)
+	go func() {
+		published <- interactions.publishEvent(protocol.DaemonEvent{Type: "session_status", SessionID: "thr_1", Status: protocol.StatusIdle})
+	}()
+	<-blocked
+	closed := make(chan struct{})
+	go func() {
+		interactions.Close()
+		close(closed)
+	}()
+	select {
+	case <-closed:
+	case <-time.After(time.Second):
+		t.Fatal("Close waited for output channel backpressure")
+	}
+	if <-published {
+		t.Fatal("blocked event published after Close")
+	}
+}
+
+func TestCodexInteractionsCloseWakesTicketWaiter(t *testing.T) {
+	sm := NewSessionManager(make(chan protocol.DaemonEvent))
+	interactions := newCodexInteractions(sm, 27, newInteractionCodexClient())
+	release, open := interactions.beginLifecycle("thr_1")
+	if !open {
+		t.Fatal("broker unexpectedly closed")
+	}
+	waiter := make(chan bool, 1)
+	go func() {
+		_, acquired := interactions.beginLifecycle("thr_1")
+		waiter <- acquired
+	}()
+	deadline := time.Now().Add(time.Second)
+	for {
+		interactions.sequencerMu.Lock()
+		sequencer := interactions.sequencers["thr_1"]
+		interactions.sequencerMu.Unlock()
+		sequencer.mu.Lock()
+		next := sequencer.next
+		sequencer.mu.Unlock()
+		if next == 2 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("waiter did not allocate a ticket")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	interactions.Close()
+	select {
+	case acquired := <-waiter:
+		if acquired {
+			t.Fatal("closed waiter acquired lifecycle ticket")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Close did not wake ticket waiter")
+	}
+	release()
+}
+
+func TestCodexInteractionsNewerStatusWinsPostSelectionRace(t *testing.T) {
+	output := make(chan protocol.DaemonEvent, 32)
+	sm := NewSessionManager(output)
+	client := newInteractionCodexClient()
+	coord := newCodexCoordinator(sm)
+	interactions := newCodexInteractions(sm, 18, client)
+	coord.interactions = interactions
+	selected := make(chan struct{})
+	release := make(chan struct{})
+	var once sync.Once
+	interactions.beforeLifecycleEmit = func(event protocol.DaemonEvent) {
+		if event.Type == "session_status" && event.Status == protocol.StatusIdle {
+			once.Do(func() {
+				close(selected)
+				<-release
+			})
+		}
+	}
+	interactions.Handle(codexServerRequest(t, `1`, "item/commandExecution/requestApproval", `{
+		"threadId":"thr_1","turnId":"turn_1","itemId":"cmd_1","availableDecisions":["accept"]
+	}`))
+	asked := nextCodexEvent(t, output, "approval_request")
+	_ = nextCodexEvent(t, output, "session_status")
+	coord.publishProjected([]protocol.DaemonEvent{{Type: "session_status", SessionID: "thr_1", Status: protocol.StatusIdle}})
+	errCh := make(chan error, 1)
+	go func() { errCh <- interactions.ResolveApproval(context.Background(), "thr_1", asked.RequestID, "once") }()
+	<-selected
+	newerDone := make(chan struct{})
+	go func() {
+		coord.publishProjected([]protocol.DaemonEvent{{Type: "session_status", SessionID: "thr_1", Status: protocol.StatusError}})
+		close(newerDone)
+	}()
+	close(release)
+	if err := <-errCh; err != nil {
+		t.Fatal(err)
+	}
+	<-newerDone
+	statuses := make([]string, 0, 2)
+	for len(statuses) < 2 {
+		event := <-output
+		if event.Type == "session_status" {
+			statuses = append(statuses, event.Status)
+		}
+	}
+	if statuses[0] != protocol.StatusIdle || statuses[1] != protocol.StatusError {
+		t.Fatalf("status output order=%v, want idle then newer error", statuses)
+	}
+}
+
+func TestCodexInteractionsNewPendingWinsPostSelectionRace(t *testing.T) {
+	output := make(chan protocol.DaemonEvent, 48)
+	sm := NewSessionManager(output)
+	client := newInteractionCodexClient()
+	coord := newCodexCoordinator(sm)
+	interactions := newCodexInteractions(sm, 19, client)
+	coord.interactions = interactions
+	selected := make(chan struct{})
+	release := make(chan struct{})
+	var once sync.Once
+	interactions.beforeLifecycleEmit = func(event protocol.DaemonEvent) {
+		if event.Type == "session_status" && event.Status == protocol.StatusIdle {
+			once.Do(func() {
+				close(selected)
+				<-release
+			})
+		}
+	}
+	interactions.Handle(codexServerRequest(t, `1`, "item/commandExecution/requestApproval", `{
+		"threadId":"thr_1","turnId":"turn_1","itemId":"cmd_1","availableDecisions":["accept"]
+	}`))
+	first := nextCodexEvent(t, output, "approval_request")
+	_ = nextCodexEvent(t, output, "session_status")
+	coord.publishProjected([]protocol.DaemonEvent{{Type: "session_status", SessionID: "thr_1", Status: protocol.StatusIdle}})
+	errCh := make(chan error, 1)
+	go func() { errCh <- interactions.ResolveApproval(context.Background(), "thr_1", first.RequestID, "once") }()
+	<-selected
+	pendingDone := make(chan struct{})
+	go func() {
+		interactions.Handle(codexServerRequest(t, `2`, "item/fileChange/requestApproval", `{
+			"threadId":"thr_1","turnId":"turn_1","itemId":"patch_2"
+		}`))
+		close(pendingDone)
+	}()
+	close(release)
+	if err := <-errCh; err != nil {
+		t.Fatal(err)
+	}
+	<-pendingDone
+	statuses := make([]string, 0, 2)
+	secondRequestID := ""
+	for len(statuses) < 2 || secondRequestID == "" {
+		event := <-output
+		if event.Type == "approval_request" {
+			secondRequestID = event.RequestID
+		}
+		if event.Type == "session_status" {
+			statuses = append(statuses, event.Status)
+		}
+	}
+	if secondRequestID == first.RequestID {
+		t.Fatal("new pending request reused resolved request id")
+	}
+	if statuses[0] != protocol.StatusIdle || statuses[1] != protocol.StatusWaitingApproval {
+		t.Fatalf("status output order=%v, want idle then new waiting approval", statuses)
+	}
+}
+
+func TestCodexInteractionsClosedBrokerCannotPublishAfterReplacement(t *testing.T) {
+	output := make(chan protocol.DaemonEvent, 16)
+	sm := NewSessionManager(output)
+	coord := newCodexCoordinator(sm)
+	oldBroker := newCodexInteractions(sm, 24, newInteractionCodexClient())
+	newBroker := newCodexInteractions(sm, 25, newInteractionCodexClient())
+	coord.interactions = oldBroker
+	coord.replaceInteractionsLocked(newBroker)
+	oldBroker.Handle(codexServerRequest(t, `1`, "item/fileChange/requestApproval", `{
+		"threadId":"thr_old","turnId":"turn_1","itemId":"patch_old"
+	}`))
+	oldBroker.PublishProjectedStatus(protocol.DaemonEvent{Type: "session_status", SessionID: "thr_old", Status: protocol.StatusIdle}, func() []protocol.DaemonEvent {
+		return []protocol.DaemonEvent{{Type: "session_status", SessionID: "thr_old", Status: protocol.StatusIdle}}
+	})
+	select {
+	case event := <-output:
+		t.Fatalf("closed old broker published %+v", event)
+	default:
+	}
+	newBroker.Handle(codexServerRequest(t, `2`, "item/fileChange/requestApproval", `{
+		"threadId":"thr_new","turnId":"turn_1","itemId":"patch_new"
+	}`))
+	if event := <-output; event.Type != "approval_request" || event.SessionID != "thr_new" {
+		t.Fatalf("replacement broker event=%+v", event)
+	}
+}
+
+func TestCodexCoordinatorReplaceInteractionsWithNilClosesBroker(t *testing.T) {
+	coord := newCodexCoordinator(NewSessionManager(make(chan protocol.DaemonEvent, 1)))
+	broker := newCodexInteractions(coord.sm, 28, newInteractionCodexClient())
+	coord.interactions = broker
+	coord.replaceInteractionsLocked(nil)
+	if coord.interactions != nil {
+		t.Fatal("interaction broker was not cleared")
+	}
+	if !broker.closed.Load() {
+		t.Fatal("replaced interaction broker was not closed")
 	}
 }
 

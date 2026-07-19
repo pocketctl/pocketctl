@@ -18,13 +18,14 @@ import (
 // state: app-server deltas are append-only, while item/completed is the
 // authoritative full snapshot used to converge clients after missed deltas.
 type codexProjection struct {
-	mu            sync.Mutex
-	generation    uint64
-	seen          map[string]struct{}
-	activeTurn    map[string]string
-	completedTurn map[string]struct{}
-	threadStatus  map[string]string
-	parts         map[string]codexProjectedPart
+	mu             sync.Mutex
+	generation     uint64
+	seen           map[string]struct{}
+	activeTurn     map[string]string
+	completedTurn  map[string]struct{}
+	threadStatus   map[string]string
+	threadRevision map[string]uint64
+	parts          map[string]codexProjectedPart
 }
 
 type codexProjectedPart struct {
@@ -71,16 +72,27 @@ type codexFileEdit struct {
 
 func newCodexProjection(generation uint64) *codexProjection {
 	return &codexProjection{
-		generation:    generation,
-		seen:          make(map[string]struct{}),
-		activeTurn:    make(map[string]string),
-		completedTurn: make(map[string]struct{}),
-		threadStatus:  make(map[string]string),
-		parts:         make(map[string]codexProjectedPart),
+		generation:     generation,
+		seen:           make(map[string]struct{}),
+		activeTurn:     make(map[string]string),
+		completedTurn:  make(map[string]struct{}),
+		threadStatus:   make(map[string]string),
+		threadRevision: make(map[string]uint64),
+		parts:          make(map[string]codexProjectedPart),
 	}
 }
 
 func (p *codexProjection) Project(in codexapp.Inbound) []protocol.DaemonEvent {
+	return p.project(in, false)
+}
+
+// ProjectHistorical hydrates persisted turn content into a fresh projector
+// without presenting historical lifecycle transitions as live events.
+func (p *codexProjection) ProjectHistorical(in codexapp.Inbound) []protocol.DaemonEvent {
+	return p.project(in, true)
+}
+
+func (p *codexProjection) project(in codexapp.Inbound, historical bool) []protocol.DaemonEvent {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if in.ID != nil { // server requests are handled by the interaction broker.
@@ -92,9 +104,9 @@ func (p *codexProjection) Project(in codexapp.Inbound) []protocol.DaemonEvent {
 	case "thread/status/changed":
 		return p.projectThreadStatus(in.Params)
 	case "turn/started", "turn/completed":
-		return p.projectTurn(in.Method, in.Params)
+		return p.projectTurn(in.Method, in.Params, historical)
 	case "item/started", "item/completed":
-		return p.projectItem(in.Method, in.Params)
+		return p.projectItem(in.Method, in.Params, historical)
 	case "item/agentMessage/delta":
 		return p.projectTextDelta(in.Method, "agent_text", in.Params)
 	case "item/reasoning/summaryTextDelta", "item/reasoning/textDelta", "item/plan/delta":
@@ -128,6 +140,9 @@ func (p *codexProjection) projectThreadStarted(raw json.RawMessage) []protocol.D
 	if params.Thread.Name != nil {
 		title = *params.Thread.Name
 	}
+	if params.Thread.Status.Type != "" {
+		p.threadStatus[params.Thread.ID] = params.Thread.Status.Type
+	}
 	return []protocol.DaemonEvent{{
 		Type: "session_discovered", SessionID: params.Thread.ID, Cwd: params.Thread.Cwd,
 		Title: title, Status: mapCodexThreadStatus(params.Thread.Status.Type),
@@ -143,6 +158,7 @@ func (p *codexProjection) projectThreadStatus(raw json.RawMessage) []protocol.Da
 	if json.Unmarshal(raw, &params) != nil || params.ThreadID == "" || params.Status.Type == "" {
 		return nil
 	}
+	p.threadRevision[params.ThreadID]++
 	if p.threadStatus[params.ThreadID] == params.Status.Type {
 		return nil
 	}
@@ -150,7 +166,7 @@ func (p *codexProjection) projectThreadStatus(raw json.RawMessage) []protocol.Da
 	return []protocol.DaemonEvent{{Type: "session_status", SessionID: params.ThreadID, Status: mapCodexThreadStatus(params.Status.Type)}}
 }
 
-func (p *codexProjection) projectTurn(method string, raw json.RawMessage) []protocol.DaemonEvent {
+func (p *codexProjection) projectTurn(method string, raw json.RawMessage, historical bool) []protocol.DaemonEvent {
 	var params struct {
 		ThreadID string `json:"threadId"`
 		Turn     struct {
@@ -161,27 +177,38 @@ func (p *codexProjection) projectTurn(method string, raw json.RawMessage) []prot
 	if json.Unmarshal(raw, &params) != nil || params.ThreadID == "" || params.Turn.ID == "" {
 		return nil
 	}
-	key := p.key(method, params.ThreadID, params.Turn.ID, params.Turn.Status)
+	provenance := "live"
+	if historical {
+		provenance = "historical"
+	}
+	key := p.key(method, provenance, params.ThreadID, params.Turn.ID, params.Turn.Status)
 	if !p.mark(key) {
 		return nil
 	}
 	if method == "turn/started" {
 		p.activeTurn[params.ThreadID] = params.Turn.ID
 		delete(p.completedTurn, params.ThreadID+"\x00"+params.Turn.ID)
+		if historical {
+			return nil
+		}
 		return []protocol.DaemonEvent{{Type: "session_status", SessionID: params.ThreadID, Status: protocol.StatusRunning}}
 	}
 	delete(p.activeTurn, params.ThreadID)
 	p.completedTurn[params.ThreadID+"\x00"+params.Turn.ID] = struct{}{}
-	status := protocol.StatusCompleted
-	switch params.Turn.Status {
-	case "failed":
-		status = protocol.StatusError
-	case "interrupted":
-		status = protocol.StatusIdle
-	case "inProgress":
-		status = protocol.StatusRunning
+	if historical {
+		return nil
 	}
-	return []protocol.DaemonEvent{{Type: "session_status", SessionID: params.ThreadID, Status: status}}
+	switch params.Turn.Status {
+	case "inProgress":
+		return []protocol.DaemonEvent{{Type: "session_status", SessionID: params.ThreadID, Status: protocol.StatusRunning}}
+	case "failed":
+		return []protocol.DaemonEvent{
+			{Type: "error", SessionID: params.ThreadID, Error: "Codex turn failed"},
+			{Type: "session_status", SessionID: params.ThreadID, Status: protocol.StatusIdle},
+		}
+	default:
+		return []protocol.DaemonEvent{{Type: "session_status", SessionID: params.ThreadID, Status: protocol.StatusIdle}}
+	}
 }
 
 func (p *codexProjection) projectTextDelta(method, eventType string, raw json.RawMessage) []protocol.DaemonEvent {
@@ -194,7 +221,7 @@ func (p *codexProjection) projectTextDelta(method, eventType string, raw json.Ra
 	if json.Unmarshal(raw, &params) != nil || params.ThreadID == "" || params.TurnID == "" || params.ItemID == "" || params.Delta == "" {
 		return nil
 	}
-	events := p.synthesizeActiveTurn(params.ThreadID, params.TurnID)
+	events := p.synthesizeActiveTurn(params.ThreadID, params.TurnID, false)
 	partKey := p.partKey(params.ThreadID, params.TurnID, params.ItemID, eventType)
 	state := p.parts[partKey]
 	state.revision++
@@ -220,7 +247,7 @@ func (p *codexProjection) projectOutputDelta(raw json.RawMessage) []protocol.Dae
 	if json.Unmarshal(raw, &params) != nil || params.ThreadID == "" || params.TurnID == "" || params.ItemID == "" || params.Delta == "" {
 		return nil
 	}
-	events := p.synthesizeActiveTurn(params.ThreadID, params.TurnID)
+	events := p.synthesizeActiveTurn(params.ThreadID, params.TurnID, false)
 	events = append(events, protocol.DaemonEvent{
 		Type: "tool_result", SessionID: params.ThreadID, CallID: params.ItemID,
 		Tool: "commandExecution", Output: params.Delta, Streaming: true,
@@ -229,7 +256,7 @@ func (p *codexProjection) projectOutputDelta(raw json.RawMessage) []protocol.Dae
 	return events
 }
 
-func (p *codexProjection) projectItem(method string, raw json.RawMessage) []protocol.DaemonEvent {
+func (p *codexProjection) projectItem(method string, raw json.RawMessage, historical bool) []protocol.DaemonEvent {
 	var params struct {
 		ThreadID string          `json:"threadId"`
 		TurnID   string          `json:"turnId"`
@@ -242,7 +269,7 @@ func (p *codexProjection) projectItem(method string, raw json.RawMessage) []prot
 	if !p.mark(key) {
 		return nil
 	}
-	events := p.synthesizeActiveTurn(params.ThreadID, params.TurnID)
+	events := p.synthesizeActiveTurn(params.ThreadID, params.TurnID, historical)
 	event, ok := p.convertItem(method, params.ThreadID, params.TurnID, params.Item)
 	if ok {
 		events = append(events, event)
@@ -403,7 +430,7 @@ func (p *codexProjection) projectUsage(raw json.RawMessage) []protocol.DaemonEve
 	}}
 }
 
-func (p *codexProjection) synthesizeActiveTurn(threadID, turnID string) []protocol.DaemonEvent {
+func (p *codexProjection) synthesizeActiveTurn(threadID, turnID string, historical bool) []protocol.DaemonEvent {
 	if _, completed := p.completedTurn[threadID+"\x00"+turnID]; completed {
 		return nil
 	}
@@ -411,11 +438,52 @@ func (p *codexProjection) synthesizeActiveTurn(threadID, turnID string) []protoc
 		return nil
 	}
 	p.activeTurn[threadID] = turnID
-	key := p.key("synthesized-turn", threadID, turnID)
+	provenance := "live"
+	if historical {
+		provenance = "historical"
+	}
+	key := p.key("synthesized-turn", provenance, threadID, turnID)
 	if !p.mark(key) {
 		return nil
 	}
+	if provenance == "historical" {
+		return nil
+	}
 	return []protocol.DaemonEvent{{Type: "session_status", SessionID: threadID, Status: protocol.StatusRunning}}
+}
+
+func (p *codexProjection) CurrentThreadStatus(threadID string) string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.threadStatus[threadID]
+}
+
+func (p *codexProjection) ThreadStatusRevision(threadID string) uint64 {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.threadRevision[threadID]
+}
+
+func (p *codexProjection) ProjectResumedThread(raw json.RawMessage, threadID string, baseline uint64, overrideStatus string) ([]protocol.DaemonEvent, string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	var thread map[string]any
+	if json.Unmarshal(raw, &thread) != nil {
+		return nil, ""
+	}
+	status := ""
+	if native, ok := thread["status"].(map[string]any); ok {
+		status, _ = native["type"].(string)
+	}
+	if overrideStatus != "" {
+		status = overrideStatus
+		thread["status"] = map[string]any{"type": status}
+	} else if p.threadRevision[threadID] != baseline && p.threadStatus[threadID] != "" {
+		status = p.threadStatus[threadID]
+		thread["status"] = map[string]any{"type": status}
+	}
+	params, _ := json.Marshal(map[string]any{"thread": thread})
+	return p.projectThreadStarted(params), status
 }
 
 func (p *codexProjection) mark(key string) bool {

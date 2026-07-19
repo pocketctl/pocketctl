@@ -114,6 +114,16 @@ func adoptCodexAppServer(ctx context.Context, state *daemon.CodexAppServerState)
 	}, nil
 }
 
+func stopPersistedCodexAppServer(state *daemon.CodexAppServerState) error {
+	if state == nil || state.PID <= 0 {
+		return fmt.Errorf("invalid Codex app-server handoff")
+	}
+	if !platform.NewProcessController().IsAlive(state.PID) {
+		return nil
+	}
+	return platform.NewProcessController().Kill(state.PID)
+}
+
 func initializeCodexWindowsClient(ctx context.Context, client *codexapp.Client) error {
 	var initialized map[string]any
 	return client.Initialize(ctx, codexInitializeParams(), &initialized)

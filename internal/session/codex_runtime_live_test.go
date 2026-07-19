@@ -7,13 +7,53 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
 	"github.com/pocketctl/pocketctl/internal/agentcontrol"
 	"github.com/pocketctl/pocketctl/internal/codexapp"
+	"github.com/pocketctl/pocketctl/internal/daemon"
 	"github.com/pocketctl/pocketctl/internal/protocol"
 )
+
+func TestCodexCoordinatorReplacesIncompatibleHandoffWithoutCodexLease(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	oldRuntime := exec.Command("sleep", "30")
+	oldRuntime.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	if err := oldRuntime.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		_ = syscall.Kill(-oldRuntime.Process.Pid, syscall.SIGKILL)
+		_, _ = oldRuntime.Process.Wait()
+	}()
+	state := &daemon.CodexAppServerState{
+		PID: oldRuntime.Process.Pid, OwnerPID: 0,
+		Endpoint: "/tmp/old-codex.sock", RemoteURI: "unix:///tmp/old-codex.sock",
+		Binary: "/opt/codex", Version: "0.144.1", SchemaHash: "old-schema", Generation: 7,
+		Threads: []string{"thr_managed"},
+	}
+	if err := daemon.WriteCodexAppServerState(state); err != nil {
+		t.Fatal(err)
+	}
+
+	coord := newCodexCoordinator(nil)
+	var startedGeneration uint64
+	coord.start = func(_ context.Context, _, _ string, generation uint64) (*codexAppServerRuntime, error) {
+		startedGeneration = generation
+		return &codexAppServerRuntime{PID: os.Getpid(), Endpoint: "/tmp/new-codex.sock", RemoteURI: "unix:///tmp/new-codex.sock"}, nil
+	}
+	if _, err := coord.ensureStarted(context.Background(), state.Binary, state.Version, agentcontrol.CodexCapabilities{Core: true, TerminalRemote: true, SchemaHash: "new-schema"}); err != nil {
+		t.Fatal(err)
+	}
+	if startedGeneration != 8 {
+		t.Fatalf("generation=%d want 8", startedGeneration)
+	}
+	if threads := coord.managedThreadSnapshot(); len(threads) != 1 || threads[0] != "thr_managed" {
+		t.Fatalf("managed threads=%v want persisted thread after runtime replacement", threads)
+	}
+}
 
 func TestInstalledCodexRuntimeAcquireAndSecondClient(t *testing.T) {
 	if os.Getenv("POCKETCTL_CODEX_SMOKE") != "1" {

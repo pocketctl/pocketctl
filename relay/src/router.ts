@@ -1516,7 +1516,7 @@ export class Router {
       // transient sessions/<pid>.json Claude Code writes on --continue); insert-
       // upserting it created phantom "status + time, no messages" rows. If the
       // row doesn't exist, drop the status and its side-effects entirely.
-      await db.updateSessionStatus(this.pool, sessionId, daemonId, msg.status || 'unknown', msg.exit_reason, userId ?? undefined)
+      await db.updateSessionStatus(this.pool, sessionId, daemonId, msg.status || 'unknown', msg.exit_reason, userId ?? undefined, msg.turn_started_at)
         .then(async (updated) => {
           if (!updated) {
             console.log(`[router] dropping session_status for unknown session ${sessionId} (no row — likely a ghost/transient session)`);
@@ -1803,10 +1803,10 @@ export class Router {
           if (msg.type === 'user_message' && client.userId !== null) {
             const status = await db.getSessionStatus(this.pool, msg.session_id);
             const isActive = ['running', 'busy', 'retry', 'idle', 'waiting', 'waiting_approval', 'waiting_question'].includes(status || '');
+            const requestId = typeof msg.request_id === 'string' && msg.request_id
+              ? msg.request_id
+              : (typeof msg.msg_id === 'string' && msg.msg_id ? msg.msg_id : randomUUID());
             if (!isActive) {
-              const requestId = typeof msg.request_id === 'string' && msg.request_id
-                ? msg.request_id
-                : (typeof msg.msg_id === 'string' && msg.msg_id ? msg.msg_id : randomUUID());
               const { plan, whitelist } = await db.getUserPlanAndWhitelist(this.pool, client.userId);
               const entitlements = resolveEntitlements(plan, whitelist);
               const enforcement = quotaEnforcementMode();
@@ -1863,6 +1863,16 @@ export class Router {
                   operation: 'resume',
                 },
               };
+            } else {
+              outbound = {
+                ...msg,
+                request_id: requestId,
+                quota_grant: {
+                  reservation_id: `active-session-${requestId}`,
+                  expires_at: Date.now() + 20_000,
+                  operation: 'resume',
+                },
+              };
             }
           }
           if (['approval_response', 'question_response', 'question_reject'].includes(msg.type) && typeof msg.request_id === 'string') {
@@ -1910,7 +1920,8 @@ export class Router {
     const isBackward = direction === 'backward';
     const lim = isBackward && limit && limit > 0 ? limit : 100;
     try {
-      const currentStatus = await db.getSessionStatus(this.pool, sessionId);
+      const runtime = await db.getSessionRuntime(this.pool, sessionId);
+      const currentStatus = runtime.status;
       let events: any[];
       if (isBackward) {
         events = (lastSeq && lastSeq > 0)
@@ -1922,7 +1933,7 @@ export class Router {
       // has_more (backward only, count-based heuristic): a full page implies older rows may exist.
       const hasMore = isBackward ? events.length === lim : false;
       if (events.length === 0) {
-        this.send(clientWs, withReq({ type: 'replay_end', session_id: sessionId, count: 0, last_seq: lastSeq, has_more: false, status: currentStatus }));
+        this.send(clientWs, withReq({ type: 'replay_end', session_id: sessionId, count: 0, last_seq: lastSeq, has_more: false, status: currentStatus, turn_started_at: runtime.turnStartedAt, last_activity_at: runtime.lastActivityAt }));
         return;
       }
       // backward rows arrive in id DESC; forward rows in id ASC. Batches keep that order;
@@ -1945,6 +1956,8 @@ export class Router {
         last_seq: events[events.length - 1].id,
         has_more: hasMore,
         status: currentStatus,
+        turn_started_at: runtime.turnStartedAt,
+        last_activity_at: runtime.lastActivityAt,
       }));
     } catch (err) {
       console.error('replay error:', err);

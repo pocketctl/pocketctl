@@ -696,10 +696,10 @@ func waitSeq(t *testing.T, ch <-chan int64, timeout time.Duration) int64 {
 	}
 }
 
-// TestRelayRestartingSetsFastReconnect verifies that when the relay sends
-// relay_restarting and closes, the daemon sets fastReconnect so subsequent
-// backoff uses the compact cadence.
-func TestRelayRestartingSetsFastReconnect(t *testing.T) {
+// TestRelayRestartingReconnectsWithoutServerClose verifies that the daemon
+// does not depend on the restarting relay (or an intermediate proxy) closing
+// the old socket before it starts reconnecting.
+func TestRelayRestartingReconnectsWithoutServerClose(t *testing.T) {
 	upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
 	var conns int32
 	mux := http.NewServeMux()
@@ -710,8 +710,6 @@ func TestRelayRestartingSetsFastReconnect(t *testing.T) {
 		}
 		if atomic.AddInt32(&conns, 1) == 1 {
 			_ = conn.WriteMessage(websocket.TextMessage, []byte(`{"type":"relay_restarting"}`))
-			_ = conn.Close()
-			return
 		}
 		for {
 			if _, _, err := conn.ReadMessage(); err != nil {
@@ -724,18 +722,21 @@ func TestRelayRestartingSetsFastReconnect(t *testing.T) {
 	defer srv.Close()
 
 	c := newTestClient(wsURL(srv.URL))
+	// Keep the normal liveness timeout out of this assertion: reconnect must be
+	// caused by relay_restarting itself, not by the old socket timing out.
+	c.pongWait = 5 * time.Second
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	go func() { _ = c.Run(ctx) }()
 
-	deadline := time.Now().Add(2 * time.Second)
+	deadline := time.Now().Add(1 * time.Second)
 	for time.Now().Before(deadline) {
-		if c.fastReconnect.Load() {
+		if atomic.LoadInt32(&conns) >= 2 {
 			break
 		}
 		time.Sleep(5 * time.Millisecond)
 	}
-	if !c.fastReconnect.Load() {
-		t.Fatal("fastReconnect not set after relay_restarting")
+	if got := atomic.LoadInt32(&conns); got < 2 {
+		t.Fatalf("daemon did not reconnect after relay_restarting without server close: connections = %d", got)
 	}
 }

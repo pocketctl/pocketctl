@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"os"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -47,7 +48,9 @@ type codexRuntimeSnapshot struct {
 type codexRuntimeStarter func(context.Context, string, string, uint64) (*codexAppServerRuntime, error)
 
 type codexCoordinator struct {
-	sm *SessionManager
+	titleMu    sync.Mutex
+	titleTurns map[string]codexTitleTurn
+	sm         *SessionManager
 
 	mu             sync.Mutex
 	runtime        *codexAppServerRuntime
@@ -58,8 +61,10 @@ type codexCoordinator struct {
 	start          codexRuntimeStarter
 	adopt          func(context.Context, *daemon.CodexAppServerState) (*codexAppServerRuntime, error)
 	pumpCancel     context.CancelFunc
+	projectionMu   sync.Mutex
 	turnMu         sync.RWMutex
 	activeTurn     map[string]string
+	turnRevision   map[string]uint64
 	subscribeMu    sync.Mutex
 	subscribed     map[string]struct{}
 	subscribing    map[string]struct{}
@@ -68,10 +73,15 @@ type codexCoordinator struct {
 	reconnecting   bool
 }
 
+type codexTitleTurn struct {
+	user      string
+	assistant string
+}
+
 func newCodexCoordinator(sm *SessionManager) *codexCoordinator {
 	return &codexCoordinator{
 		sm: sm, start: startCodexAppServer, adopt: adoptCodexAppServer,
-		activeTurn: make(map[string]string), subscribed: make(map[string]struct{}), subscribing: make(map[string]struct{}), managedThreads: make(map[string]struct{}),
+		activeTurn: make(map[string]string), turnRevision: make(map[string]uint64), subscribed: make(map[string]struct{}), subscribing: make(map[string]struct{}), managedThreads: make(map[string]struct{}),
 	}
 }
 
@@ -81,9 +91,11 @@ func (c *codexCoordinator) ensureStarted(ctx context.Context, binary, version st
 	if c.runtime != nil {
 		return c.snapshotLocked(), nil
 	}
+	var restoredThreads []string
 	state, stateErr := daemon.ReadCodexAppServerState()
 	if stateErr == nil {
 		c.generation = state.Generation
+		restoredThreads = append(restoredThreads, state.Threads...)
 		alive := platform.NewProcessController().IsAlive(state.PID)
 		ownerAvailable := state.OwnerPID <= 0 || state.OwnerPID == os.Getpid() || !platform.NewProcessController().IsAlive(state.OwnerPID)
 		compatible := state.Binary == binary && state.Version == version && state.SchemaHash == capabilities.SchemaHash
@@ -92,24 +104,32 @@ func (c *codexCoordinator) ensureStarted(ctx context.Context, binary, version st
 				return codexRuntimeSnapshot{}, fmt.Errorf("Codex app-server handoff is still owned by live daemon pid %d", state.OwnerPID)
 			}
 			if !compatible {
-				return codexRuntimeSnapshot{}, errors.New("live Codex app-server handoff is incompatible; refusing competing runtime")
-			}
-			runtime, err := c.adopt(ctx, state)
-			if err != nil {
-				return codexRuntimeSnapshot{}, fmt.Errorf("adopt Codex app-server: %w", err)
-			}
-			c.runtime, c.binary, c.version, c.schemaHash = runtime, binary, version, capabilities.SchemaHash
-			c.restoreManagedThreads(state.Threads)
-			c.startEventPumpLocked()
-			if c.sm != nil {
-				c.sm.leases.Restore(state.Leases)
-				if err := c.persistLocked(); err != nil {
+				if hasActiveCodexLease(state.Leases, state.Generation) {
+					return codexRuntimeSnapshot{}, errors.New("live Codex app-server handoff is incompatible and still has an active Codex terminal lease")
+				}
+				if err := stopPersistedCodexAppServer(state); err != nil {
+					return codexRuntimeSnapshot{}, fmt.Errorf("stop incompatible Codex app-server handoff: %w", err)
+				}
+				if err := daemon.RemoveCodexAppServerState(); err != nil {
 					return codexRuntimeSnapshot{}, err
 				}
+			} else {
+				runtime, err := c.adopt(ctx, state)
+				if err != nil {
+					return codexRuntimeSnapshot{}, fmt.Errorf("adopt Codex app-server: %w", err)
+				}
+				c.runtime, c.binary, c.version, c.schemaHash = runtime, binary, version, capabilities.SchemaHash
+				c.restoreManagedThreads(state.Threads)
+				c.startEventPumpLocked()
+				if c.sm != nil {
+					c.sm.leases.Restore(state.Leases)
+					if err := c.persistLocked(); err != nil {
+						return codexRuntimeSnapshot{}, err
+					}
+				}
+				return c.snapshotLocked(), nil
 			}
-			return c.snapshotLocked(), nil
-		}
-		if err := daemon.RemoveCodexAppServerState(); err != nil {
+		} else if err := daemon.RemoveCodexAppServerState(); err != nil {
 			return codexRuntimeSnapshot{}, err
 		}
 	} else if !os.IsNotExist(stateErr) {
@@ -128,7 +148,7 @@ func (c *codexCoordinator) ensureStarted(ctx context.Context, binary, version st
 	c.version = version
 	c.schemaHash = capabilities.SchemaHash
 	c.generation = generation
-	c.restoreManagedThreads(nil)
+	c.restoreManagedThreads(restoredThreads)
 	c.startEventPumpLocked()
 	if c.sm != nil {
 		if err := c.persistLocked(); err != nil {
@@ -141,6 +161,17 @@ func (c *codexCoordinator) ensureStarted(ctx context.Context, binary, version st
 		}
 	}
 	return c.snapshotLocked(), nil
+}
+
+func hasActiveCodexLease(snapshot map[string]agentcontrol.Lease, generation uint64) bool {
+	registry := agentcontrol.NewLeaseRegistry()
+	registry.Restore(snapshot)
+	for _, lease := range registry.Active(generation) {
+		if lease.Agent == agentcontrol.AgentCodex {
+			return true
+		}
+	}
+	return false
 }
 
 func (c *codexCoordinator) snapshotLocked() codexRuntimeSnapshot {
@@ -164,10 +195,16 @@ func (c *codexCoordinator) persistOwnerLocked(ownerPID int) error {
 	if c.runtime == nil || c.sm == nil {
 		return nil
 	}
+	leases := c.sm.leases.Snapshot()
+	for id, lease := range leases {
+		if lease.Agent != agentcontrol.AgentCodex {
+			delete(leases, id)
+		}
+	}
 	return daemon.WriteCodexAppServerState(&daemon.CodexAppServerState{
 		PID: c.runtime.PID, OwnerPID: ownerPID, Endpoint: c.runtime.Endpoint,
 		RemoteURI: c.runtime.RemoteURI, Binary: c.binary, Version: c.version,
-		SchemaHash: c.schemaHash, Generation: c.generation, Leases: c.sm.leases.Snapshot(),
+		SchemaHash: c.schemaHash, Generation: c.generation, Leases: leases,
 		Threads:   c.managedThreadSnapshot(),
 		UpdatedAt: time.Now().UTC(),
 	})
@@ -198,8 +235,12 @@ func (c *codexCoordinator) shutdown() error {
 		return nil
 	}
 	c.stopEventPumpLocked()
-	if c.sm != nil && len(c.sm.leases.Active(c.generation)) > 0 {
-		return c.persistOwnerLocked(0)
+	if c.sm != nil {
+		for _, lease := range c.sm.leases.Active(c.generation) {
+			if lease.Agent == agentcontrol.AgentCodex {
+				return c.persistOwnerLocked(0)
+			}
+		}
 	}
 	var err error
 	if c.runtime.Stop != nil {
@@ -224,7 +265,7 @@ func (c *codexCoordinator) startEventPumpLocked() {
 	ctx, cancel := context.WithCancel(context.Background())
 	c.pumpCancel = cancel
 	projector := newCodexProjection(c.generation)
-	c.interactions = newCodexInteractions(c.sm, c.generation, c.runtime.Client)
+	c.replaceInteractionsLocked(newCodexInteractions(c.sm, c.generation, c.runtime.Client))
 	go c.consumeEventsWithInteractions(ctx, c.runtime.Client.Events(), projector, c.interactions)
 	client, generation := c.runtime.Client, c.generation
 	for _, threadID := range c.managedThreadSnapshot() {
@@ -246,7 +287,14 @@ func (c *codexCoordinator) stopEventPumpLocked() {
 		c.pumpCancel()
 		c.pumpCancel = nil
 	}
-	c.interactions = nil
+	c.replaceInteractionsLocked(nil)
+}
+
+func (c *codexCoordinator) replaceInteractionsLocked(next *codexInteractions) {
+	if c.interactions != nil {
+		c.interactions.Close()
+	}
+	c.interactions = next
 }
 
 func (c *codexCoordinator) consumeEvents(ctx context.Context, inbound <-chan codexapp.Inbound, projector *codexProjection) {
@@ -268,9 +316,8 @@ func (c *codexCoordinator) consumeEventsWithInteractions(ctx context.Context, in
 			if interactions != nil {
 				interactions.Handle(message)
 			}
-			c.observeTurnNotification(message)
 			c.maybeSubscribeTerminalThread(ctx, message, projector)
-			c.publishProjected(projector.Project(message))
+			c.projectLive(projector, message)
 		}
 	}
 }
@@ -331,7 +378,7 @@ func (c *codexCoordinator) reconnectClient(generation uint64) {
 	c.mu.Lock()
 	if c.runtime != nil && c.generation == generation {
 		c.runtime.Client = nil
-		c.interactions = nil
+		c.replaceInteractionsLocked(nil)
 	}
 	c.mu.Unlock()
 }
@@ -344,8 +391,17 @@ func (c *codexCoordinator) interactionBroker() *codexInteractions {
 
 func (c *codexCoordinator) publishProjected(events []protocol.DaemonEvent) {
 	for _, event := range events {
+		c.decorateTurnLifecycle(&event)
 		if event.Type == "session_status" && event.Status != protocol.StatusWaitingApproval && event.Status != protocol.StatusWaitingQuestion {
-			if broker := c.interactionBroker(); broker != nil && broker.HasPending(event.SessionID) {
+			if broker := c.interactionBroker(); broker != nil {
+				broker.PublishProjectedStatus(event, func() []protocol.DaemonEvent {
+					published := make([]protocol.DaemonEvent, 0, 2)
+					if discovered, ok := c.applyProjectedEvent(event); ok {
+						published = append(published, discovered)
+					}
+					c.observeTitleEvent(event)
+					return append(published, event)
+				})
 				continue
 			}
 		}
@@ -353,7 +409,78 @@ func (c *codexCoordinator) publishProjected(events []protocol.DaemonEvent) {
 			c.sm.outputCh <- discovered
 		}
 		c.sm.outputCh <- event
+		c.observeTitleEvent(event)
 	}
+}
+
+func (c *codexCoordinator) decorateTurnLifecycle(event *protocol.DaemonEvent) {
+	if c.sm == nil || event.Type != "session_status" || event.SessionID == "" {
+		return
+	}
+	active := event.Status == protocol.StatusRunning || event.Status == protocol.StatusBusy || event.Status == protocol.StatusRetry ||
+		event.Status == protocol.StatusWaitingApproval || event.Status == protocol.StatusWaitingQuestion
+	c.sm.mu.Lock()
+	defer c.sm.mu.Unlock()
+	ps := c.sm.sessions[event.SessionID]
+	if ps == nil {
+		return
+	}
+	if active {
+		if ps.TurnStartedAt.IsZero() {
+			ps.TurnStartedAt = time.Now()
+		}
+		event.TurnStartedAt = ps.TurnStartedAt.UTC().Format(time.RFC3339Nano)
+	} else {
+		ps.TurnStartedAt = time.Time{}
+	}
+}
+
+func (c *codexCoordinator) observeTitleEvent(event protocol.DaemonEvent) {
+	if c.sm == nil || event.SessionID == "" || (event.Type != "user_text" && event.Type != "agent_text") {
+		return
+	}
+	c.titleMu.Lock()
+	if c.titleTurns == nil {
+		c.titleTurns = make(map[string]codexTitleTurn)
+	}
+	turn := c.titleTurns[event.SessionID]
+	if event.Type == "user_text" {
+		turn = codexTitleTurn{user: strings.TrimSpace(event.Snapshot)}
+		if turn.user == "" {
+			turn.user = strings.TrimSpace(event.Text)
+		}
+		c.titleTurns[event.SessionID] = turn
+		c.titleMu.Unlock()
+		return
+	}
+	turn.assistant = strings.TrimSpace(event.Snapshot)
+	if turn.assistant == "" {
+		turn.assistant = strings.TrimSpace(event.Text)
+	}
+	if turn.user == "" || turn.assistant == "" || event.Streaming {
+		c.titleTurns[event.SessionID] = turn
+		c.titleMu.Unlock()
+		return
+	}
+	delete(c.titleTurns, event.SessionID)
+	c.titleMu.Unlock()
+	c.sm.GenerateTitle(event.SessionID, turn.user, turn.assistant)
+}
+
+func (c *codexCoordinator) projectLive(projector *codexProjection, message codexapp.Inbound) {
+	c.projectionMu.Lock()
+	defer c.projectionMu.Unlock()
+	c.observeTurnNotification(message)
+	if threadID, status, ok := codexThreadStatusNotification(message); ok {
+		c.reconcileActiveTurnStatus(threadID, status)
+	}
+	c.publishProjected(projector.Project(message))
+}
+
+func (c *codexCoordinator) projectHistorical(projector *codexProjection, message codexapp.Inbound) {
+	c.projectionMu.Lock()
+	c.publishProjected(projector.ProjectHistorical(message))
+	c.projectionMu.Unlock()
 }
 
 func (c *codexCoordinator) maybeSubscribeTerminalThread(parent context.Context, message codexapp.Inbound, projector *codexProjection) {
@@ -456,25 +583,62 @@ func (c *codexCoordinator) subscribeTerminalThread(parent context.Context, clien
 		Model  string          `json:"model"`
 		Cwd    string          `json:"cwd"`
 	}
-	if err := client.Call(ctx, "thread/resume", map[string]any{"threadId": threadID, "excludeTurns": true}, &resumed); err != nil {
+	statusRevision := projector.ThreadStatusRevision(threadID)
+	_, turnRevision := c.turnSnapshot(threadID)
+	err := client.Call(ctx, "thread/resume", map[string]any{"threadId": threadID, "excludeTurns": true}, &resumed)
+	c.projectionMu.Lock()
+	if err == nil && len(resumed.Thread) > 0 {
+		overrideStatus := ""
+		liveTurn, currentTurnRevision := c.turnSnapshot(threadID)
+		if currentTurnRevision != turnRevision {
+			overrideStatus = "idle"
+			if liveTurn != "" {
+				overrideStatus = "active"
+			}
+		}
+		events, _ := projector.ProjectResumedThread(resumed.Thread, threadID, statusRevision, overrideStatus)
+		c.publishProjected(events)
+	}
+	c.projectionMu.Unlock()
+	if err != nil {
 		c.finishSubscription(threadID, false)
 		slog.Default().Warn("Codex terminal thread subscription failed", "thread", threadID, "generation", generation, "error", err)
 		return
 	}
-	if len(resumed.Thread) > 0 {
-		params, _ := json.Marshal(map[string]any{"thread": json.RawMessage(resumed.Thread)})
-		c.publishProjected(projector.Project(codexapp.Inbound{Method: "thread/started", Params: params}))
+	historicalActiveTurn := ""
+	cursor := ""
+	visitedCursors := map[string]struct{}{"": {}}
+	hydrationComplete := false
+	for {
+		var page struct {
+			Data       []json.RawMessage `json:"data"`
+			NextCursor string            `json:"nextCursor"`
+		}
+		params := map[string]any{
+			"threadId": threadID, "itemsView": "full", "sortDirection": "ascending", "limit": 100,
+		}
+		if cursor != "" {
+			params["cursor"] = cursor
+		}
+		if err := client.Call(ctx, "thread/turns/list", params, &page); err != nil {
+			slog.Default().Warn("Codex terminal thread hydration failed", "thread", threadID, "generation", generation, "error", err)
+			break
+		}
+		historicalActiveTurn = c.hydrateTurns(threadID, page.Data, historicalActiveTurn, projector)
+		if page.NextCursor == "" {
+			hydrationComplete = true
+			break
+		}
+		if _, visited := visitedCursors[page.NextCursor]; visited {
+			slog.Default().Warn("Codex terminal thread hydration returned cursor cycle", "thread", threadID, "generation", generation)
+			break
+		}
+		visitedCursors[page.NextCursor] = struct{}{}
+		cursor = page.NextCursor
 	}
-	var page struct {
-		Data []json.RawMessage `json:"data"`
-	}
-	if err := client.Call(ctx, "thread/turns/list", map[string]any{
-		"threadId": threadID, "itemsView": "full", "sortDirection": "ascending", "limit": 100,
-	}, &page); err != nil {
-		slog.Default().Warn("Codex terminal thread hydration failed", "thread", threadID, "generation", generation, "error", err)
-	} else {
-		c.hydrateTurns(threadID, page.Data, projector)
-	}
+	c.projectionMu.Lock()
+	c.reconcileHydratedActiveTurn(threadID, projector.CurrentThreadStatus(threadID), historicalActiveTurn, turnRevision, hydrationComplete)
+	c.projectionMu.Unlock()
 	// A reconnect can replace the daemon client while an old resume/hydration
 	// call is still completing. Never attach a backend that writes through the
 	// stale connection or mutate the new connection's subscription bookkeeping.
@@ -504,7 +668,7 @@ func (c *codexCoordinator) subscribeTerminalThread(parent context.Context, clien
 	c.finishSubscription(threadID, true)
 }
 
-func (c *codexCoordinator) hydrateTurns(threadID string, turns []json.RawMessage, projector *codexProjection) {
+func (c *codexCoordinator) hydrateTurns(threadID string, turns []json.RawMessage, activeTurn string, projector *codexProjection) string {
 	for _, rawTurn := range turns {
 		var turn struct {
 			ID     string            `json:"id"`
@@ -515,22 +679,23 @@ func (c *codexCoordinator) hydrateTurns(threadID string, turns []json.RawMessage
 			continue
 		}
 		if turn.Status == "inProgress" {
+			activeTurn = turn.ID
 			params, _ := json.Marshal(map[string]any{"threadId": threadID, "turn": json.RawMessage(rawTurn)})
 			n := codexapp.Inbound{Method: "turn/started", Params: params}
-			c.observeTurnNotification(n)
-			c.publishProjected(projector.Project(n))
+			c.projectHistorical(projector, n)
 		}
 		for _, item := range turn.Items {
 			params, _ := json.Marshal(map[string]any{"threadId": threadID, "turnId": turn.ID, "completedAtMs": 0, "item": json.RawMessage(item)})
-			c.publishProjected(projector.Project(codexapp.Inbound{Method: "item/completed", Params: params}))
+			c.projectHistorical(projector, codexapp.Inbound{Method: "item/completed", Params: params})
 		}
 		if turn.Status != "inProgress" {
+			activeTurn = ""
 			params, _ := json.Marshal(map[string]any{"threadId": threadID, "turn": json.RawMessage(rawTurn)})
 			n := codexapp.Inbound{Method: "turn/completed", Params: params}
-			c.observeTurnNotification(n)
-			c.publishProjected(projector.Project(n))
+			c.projectHistorical(projector, n)
 		}
 	}
+	return activeTurn
 }
 
 func (c *codexCoordinator) observeTurnNotification(message codexapp.Inbound) {
@@ -547,14 +712,58 @@ func (c *codexCoordinator) observeTurnNotification(message codexapp.Inbound) {
 		return
 	}
 	if message.Method == "turn/started" {
-		c.setActiveTurn(params.ThreadID, params.Turn.ID)
+		c.turnMu.Lock()
+		c.activeTurn[params.ThreadID] = params.Turn.ID
+		c.turnRevision[params.ThreadID]++
+		c.turnMu.Unlock()
 		return
 	}
 	c.turnMu.Lock()
 	if c.activeTurn[params.ThreadID] == params.Turn.ID {
 		delete(c.activeTurn, params.ThreadID)
 	}
+	c.turnRevision[params.ThreadID]++
 	c.turnMu.Unlock()
+}
+
+func codexThreadStatusNotification(message codexapp.Inbound) (string, string, bool) {
+	if message.Method != "thread/status/changed" {
+		return "", "", false
+	}
+	var params struct {
+		ThreadID string            `json:"threadId"`
+		Status   codexThreadStatus `json:"status"`
+	}
+	if json.Unmarshal(message.Params, &params) != nil || params.ThreadID == "" || params.Status.Type == "" {
+		return "", "", false
+	}
+	return params.ThreadID, params.Status.Type, true
+}
+
+func (c *codexCoordinator) reconcileActiveTurnStatus(threadID, status string) {
+	if status != "active" {
+		c.setActiveTurn(threadID, "")
+	}
+}
+
+func (c *codexCoordinator) reconcileHydratedActiveTurn(threadID, status, historicalTurn string, baseline uint64, hydrationComplete bool) {
+	_, revision := c.turnSnapshot(threadID)
+	if revision != baseline {
+		return
+	}
+	if status != "active" {
+		c.setActiveTurn(threadID, "")
+		return
+	}
+	if hydrationComplete {
+		c.setActiveTurn(threadID, historicalTurn)
+	}
+}
+
+func (c *codexCoordinator) turnSnapshot(threadID string) (string, uint64) {
+	c.turnMu.RLock()
+	defer c.turnMu.RUnlock()
+	return c.activeTurn[threadID], c.turnRevision[threadID]
 }
 
 func (c *codexCoordinator) setActiveTurn(threadID, turnID string) {

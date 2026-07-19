@@ -496,6 +496,7 @@ const resumeCopied = ref(false)  // session-resume-command: 复制恢复命令�
 const showNewSession = ref(false)
 const daemonList = computed(() => Object.values(daemons.value))
 const currentSession = computed(() => allSessions.value.find((x: any) => x.session_id === sessionId.value))
+const isManagedSession = computed(() => currentSession.value?.control_mode === 'managed')
 const currentSessionAgent = computed(() => { const s: any = currentSession.value; return s?.agent_type || s?.agent || '' })
 const currentSessionCapabilities = computed(() => interactionCapabilities.value.length > 0
   ? interactionCapabilities.value
@@ -679,7 +680,7 @@ const renderMessages = computed(() =>
   focusedSubAgentId.value ? (subagentMessages.value[focusedSubAgentId.value] || []) : messages.value,
 )
 const canInput = computed(() => !isDisconnected.value
-  && (!isTerminal.value || isDaemonSession.value)
+  && (!isTerminal.value || isDaemonSession.value || isManagedSession.value)
   && !isSubagent.value
   && !focusedSubAgentId.value
   && (currentSessionAgent.value !== 'opencode' || isManagedOpenCode.value))
@@ -695,7 +696,7 @@ const isExecuting = computed(() => status.value === 'running' || status.value ==
 // sessionSwitching gates the watch during a session change: the placeholder
 // status='running' (set in the sessionId watcher before replay) must NOT start
 // the timer from zero. The real turn start is recovered from the last
-// executing session_status's last_activity_at once replay completes.
+// authoritative turn_started_at once replay completes.
 const turnStartTime = ref<number | null>(null)   // 本轮开始时间戳
 const turnElapsed = ref(0)                        // 实时计时（秒）
 const lastTurnDuration = ref<number | null>(null) // 完成后的总耗时（秒）
@@ -1653,7 +1654,7 @@ function processEvent(evt: any, target: any[] = messages.value, subagentOverride
     // executing status (busy/running/waiting) so the timer can resume the
     // accumulated elapsed instead of restarting from zero.
     if (sessionSwitching && (s === 'running' || s === 'busy' || s === 'retry' || s === 'waiting')) {
-      const ts = evt.last_activity_at || evt.payload?.last_activity_at
+      const ts = evt.turn_started_at || evt.payload?.turn_started_at
       if (ts) resumeStartAt = new Date(ts).getTime()
     }
     if (evt.exit_reason || evt.payload?.exit_reason) exitReason.value = evt.exit_reason || evt.payload.exit_reason
@@ -2012,7 +2013,7 @@ onMounted(() => {
     if (msg.last_seq && (!loadedMinId.value || msg.last_seq < loadedMinId.value)) loadedMinId.value = msg.last_seq
     // Session switch complete: ungate the timer watch. If the target session is
     // executing, resume timing from the recovered turn start (last executing
-    // session_status's last_activity_at) so elapsed isn't reset to zero.
+    // session_status's turn_started_at) so elapsed isn't reset to zero.
     // Skipped in focused-sub-agent mode: status/timer reflect the parent session
     // and don't apply to a read-only sub-agent replay.
     if (sessionSwitching) {
@@ -2042,6 +2043,8 @@ onMounted(() => {
             if (ageMs > 120000) st = 'idle'
           }
           if (st) status.value = st
+          const turnStartedAt = meta.turn_started_at || msg.turn_started_at
+          if (turnStartedAt) resumeStartAt = new Date(turnStartedAt).getTime()
         }
         if (isExecuting.value) startTurnTimer(resumeStartAt ?? undefined)
         resumeStartAt = null

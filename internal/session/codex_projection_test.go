@@ -2,6 +2,7 @@ package session
 
 import (
 	"encoding/json"
+	"fmt"
 	"testing"
 
 	"github.com/pocketctl/pocketctl/internal/codexapp"
@@ -35,7 +36,7 @@ func TestCodexProjectionThreadAndTurnLifecycle(t *testing.T) {
 	events = p.Project(codexNotification("turn/completed", `{
 		"threadId":"thr_1","turn":{"id":"turn_1","status":"completed","items":[]}
 	}`))
-	if len(events) != 1 || events[0].Status != protocol.StatusCompleted {
+	if len(events) != 1 || events[0].Type != "session_status" || events[0].SessionID != "thr_1" || events[0].Status != protocol.StatusIdle {
 		t.Fatalf("turn completed=%+v", events)
 	}
 	if duplicate := p.Project(codexNotification("turn/completed", `{
@@ -49,6 +50,113 @@ func TestCodexProjectionThreadAndTurnLifecycle(t *testing.T) {
 	}`))
 	if len(late) != 1 || late[0].Type != "agent_text" {
 		t.Fatalf("late completed item re-opened turn=%+v", late)
+	}
+}
+
+func TestCodexProjectionTurnCompletionKeepsThreadWritable(t *testing.T) {
+	tests := []struct {
+		native string
+		want   []protocol.DaemonEvent
+	}{
+		{native: "completed", want: []protocol.DaemonEvent{{Type: "session_status", SessionID: "thr_completed", Status: protocol.StatusIdle}}},
+		{native: "interrupted", want: []protocol.DaemonEvent{{Type: "session_status", SessionID: "thr_interrupted", Status: protocol.StatusIdle}}},
+		{native: "failed", want: []protocol.DaemonEvent{
+			{Type: "error", SessionID: "thr_failed", Error: "Codex turn failed"},
+			{Type: "session_status", SessionID: "thr_failed", Status: protocol.StatusIdle},
+		}},
+		{native: "inProgress", want: []protocol.DaemonEvent{{Type: "session_status", SessionID: "thr_inProgress", Status: protocol.StatusRunning}}},
+	}
+
+	for i, tt := range tests {
+		t.Run(tt.native, func(t *testing.T) {
+			p := newCodexProjection(uint64(i + 1))
+			threadID := "thr_" + tt.native
+			turnID := "turn_" + tt.native
+			events := p.Project(codexNotification("turn/completed", `{"threadId":"`+threadID+`","turn":{"id":"`+turnID+`","status":"`+tt.native+`","items":[]}}`))
+
+			if len(events) != len(tt.want) {
+				t.Fatalf("events=%+v, want exactly %d events", events, len(tt.want))
+			}
+			for j, event := range events {
+				want := tt.want[j]
+				if event.Type != want.Type || event.SessionID != want.SessionID || event.Status != want.Status || event.Error != want.Error {
+					t.Fatalf("event %d=%+v, want type=%q session=%q status=%q error=%q", j, event, want.Type, want.SessionID, want.Status, want.Error)
+				}
+			}
+
+			if tt.native == "failed" {
+				duplicate := p.Project(codexNotification("turn/completed", `{"threadId":"thr_failed","turn":{"id":"turn_failed","status":"failed","items":[]}}`))
+				if len(duplicate) != 0 {
+					t.Fatalf("duplicate failed completion=%+v", duplicate)
+				}
+			}
+		})
+	}
+}
+
+func TestCodexProjectionHistoricalAndLiveFailedTurnProvenance(t *testing.T) {
+	n := codexNotification("turn/completed", `{"threadId":"thr_1","turn":{"id":"turn_failed","status":"failed","items":[]}}`)
+	tests := []struct {
+		name            string
+		historicalFirst bool
+	}{
+		{name: "historical_then_live", historicalFirst: true},
+		{name: "live_then_historical", historicalFirst: false},
+	}
+	for generation, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			p := newCodexProjection(uint64(generation + 1))
+			var historical, live []protocol.DaemonEvent
+			if tt.historicalFirst {
+				historical = p.ProjectHistorical(n)
+				live = p.Project(n)
+			} else {
+				live = p.Project(n)
+				historical = p.ProjectHistorical(n)
+			}
+			if len(historical) != 0 {
+				t.Fatalf("historical failure emitted lifecycle=%+v", historical)
+			}
+			if len(live) != 2 || live[0].Type != "error" || live[1].Status != protocol.StatusIdle {
+				t.Fatalf("live failure=%+v, want one error then idle", live)
+			}
+			if duplicate := p.Project(n); len(duplicate) != 0 {
+				t.Fatalf("duplicate live failure=%+v", duplicate)
+			}
+		})
+	}
+}
+
+func TestCodexProjectionIdleAndTurnCompletionOrderAlwaysSettlesIdle(t *testing.T) {
+	orders := [][]codexapp.Inbound{
+		{
+			codexNotification("thread/status/changed", `{"threadId":"thr_1","status":{"type":"idle"}}`),
+			codexNotification("turn/completed", `{"threadId":"thr_1","turn":{"id":"turn_1","status":"completed"}}`),
+		},
+		{
+			codexNotification("turn/completed", `{"threadId":"thr_1","turn":{"id":"turn_1","status":"completed"}}`),
+			codexNotification("thread/status/changed", `{"threadId":"thr_1","status":{"type":"idle"}}`),
+		},
+	}
+
+	for i, order := range orders {
+		t.Run(fmt.Sprintf("order_%d", i+1), func(t *testing.T) {
+			p := newCodexProjection(uint64(i + 1))
+			var projected []protocol.DaemonEvent
+			for _, notification := range order {
+				projected = append(projected, p.Project(notification)...)
+			}
+
+			var lastStatus protocol.DaemonEvent
+			for _, event := range projected {
+				if event.Type == "session_status" {
+					lastStatus = event
+				}
+			}
+			if lastStatus.Type != "session_status" || lastStatus.SessionID != "thr_1" || lastStatus.Status != protocol.StatusIdle {
+				t.Fatalf("projected=%+v, last status=%+v, want idle", projected, lastStatus)
+			}
+		})
 	}
 }
 

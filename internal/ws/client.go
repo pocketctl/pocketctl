@@ -715,7 +715,11 @@ func (c *Client) readPump(done chan struct{}) {
 		case "relay_restarting":
 			c.logger.Info("relay restarting; switching to fast reconnect")
 			c.fastReconnect.Store(true)
-			continue
+			// Do not depend on the restarting relay or an intermediate proxy to
+			// close the old socket. Returning closes done, which makes
+			// connectAndServe exit and Run enter the fast reconnect loop.
+			conn.Close()
+			return
 		case "register_rejected":
 			c.registrationRejected.Store(true)
 			c.logger.Error("relay rejected daemon registration", "reason", base.Reason, "message", base.Message, "used", base.Used, "limit", base.Limit)

@@ -22,6 +22,7 @@ type ProcessState struct {
 	Status           string
 	StartedAt        time.Time
 	LastActivityAt   time.Time // last activity timestamp (status change, message, etc.)
+	TurnStartedAt    time.Time // start of the current turn; zero while idle
 	Cwd              string
 	Agent            string
 	Source           string               // "daemon" or "terminal"
