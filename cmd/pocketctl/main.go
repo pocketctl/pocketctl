@@ -817,7 +817,8 @@ func cmdDaemonStart(args []string) {
 		os.Exit(0)
 	}
 
-	maybeAutoEnableAgentsForDaemon(*noAgentAutoEnable || *noAgentPrompt, restartReadyFile)
+	agentSetupSkipped := *noAgentAutoEnable || *noAgentPrompt
+	agentAutoEnable := maybeAutoEnableAgentsForDaemon(agentSetupSkipped, restartReadyFile)
 
 	// Determine daemon ID before forking so the launcher can print it and pass
 	// it to the child. This avoids the child re-deriving an ID that might differ
@@ -887,6 +888,7 @@ func cmdDaemonStart(args []string) {
 		} else {
 			fmt.Println(i18n.T("daemon.relay_connecting", url))
 		}
+		printDaemonAgentStartupStatus(os.Stdout, agentAutoEnable, agentSetupSkipped)
 		fmt.Println(i18n.T("daemon.logs", daemon.LogPath()))
 		os.Exit(0)
 	}
@@ -1415,6 +1417,7 @@ func cmdDaemonStart(args []string) {
 	fmt.Println(i18n.T("daemon.version", version))
 	fmt.Println(i18n.T("daemon.relay", url))
 	fmt.Println(i18n.T("daemon.agents", strings.Join(agentTypes, ", ")))
+	printDaemonAgentStartupStatus(os.Stdout, agentAutoEnable, agentSetupSkipped)
 	fmt.Println(i18n.T("daemon.logs", daemon.LogPath()))
 
 	// Discover terminal-started opencode sessions via the shared `opencode serve`

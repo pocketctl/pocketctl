@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strings"
 
 	"github.com/pocketctl/pocketctl/internal/agentcontrol"
 	"github.com/pocketctl/pocketctl/internal/i18n"
@@ -40,6 +41,58 @@ func daemonAgentAutoEnableContext(skip bool, restartReadyFile string, daemonChil
 func maybeAutoEnableAgentsForDaemon(skip bool, restartReadyFile string) agentcontrol.AutoEnableResult {
 	start := daemonAgentAutoEnableContext(skip, restartReadyFile, os.Getenv("POCKETCTL_DAEMON_CHILD") == "1")
 	return agentcontrol.AutoEnableAgents(context.Background(), os.Stderr, start, agentcontrol.NewInstaller())
+}
+
+func printDaemonAgentStartupStatus(output io.Writer, result agentcontrol.AutoEnableResult, skipped bool) {
+	manager := agentcontrol.NewInstaller()
+	statuses := make([]agentcontrol.Status, 0, 2)
+	ctx := context.Background()
+	for _, agent := range []string{agentcontrol.AgentOpenCode, agentcontrol.AgentCodex} {
+		statuses = append(statuses, manager.StatusAgent(ctx, agent))
+	}
+	for _, line := range daemonAgentStartupLines(statuses, result, skipped) {
+		fmt.Fprintln(output, line)
+	}
+}
+
+func daemonAgentStartupLines(statuses []agentcontrol.Status, result agentcontrol.AutoEnableResult, skipped bool) []string {
+	warnings := make(map[string]string, len(result.Warnings))
+	for _, warning := range result.Warnings {
+		if warning.Err != nil {
+			warnings[warning.Agent] = warning.Err.Error()
+		}
+	}
+	lines := make([]string, 0, len(statuses)+1)
+	lines = append(lines, i18n.T("daemon.agent_status_header"))
+	for _, status := range statuses {
+		enable := ""
+		if warning := warnings[status.Agent]; warning != "" {
+			if status.State == agentcontrol.StateEnabled {
+				enable = i18n.T("daemon.agent_enable_fallback", warning)
+			} else {
+				enable = i18n.T("daemon.agent_enable_failed", warning)
+			}
+		} else {
+			switch status.State {
+			case agentcontrol.StateEnabled:
+				enable = i18n.T("daemon.agent_enable_success")
+			case agentcontrol.StateDisabled:
+				enable = i18n.T("daemon.agent_enable_disabled")
+			default:
+				if skipped {
+					enable = i18n.T("daemon.agent_enable_skipped")
+				} else {
+					enable = i18n.T("daemon.agent_enable_not_enabled")
+				}
+			}
+		}
+		version := strings.TrimSpace(status.Version)
+		if version == "" {
+			version = "-"
+		}
+		lines = append(lines, i18n.T("daemon.agent_status_line", status.Agent, yesNo(status.Detected), version, enable))
+	}
+	return lines
 }
 
 func cmdAgent(args []string) {

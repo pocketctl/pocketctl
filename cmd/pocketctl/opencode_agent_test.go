@@ -84,6 +84,33 @@ func TestDaemonAgentAutoEnableContextOnlyUserParentCanMutate(t *testing.T) {
 	}
 }
 
+func TestDaemonAgentStartupLinesIncludeVersionAndEnableResult(t *testing.T) {
+	statuses := []agentcontrol.Status{
+		{Agent: agentcontrol.AgentOpenCode, Detected: true, Version: "1.18.3", State: agentcontrol.StateEnabled},
+		{Agent: agentcontrol.AgentCodex, Detected: true, Version: "0.144.6", State: agentcontrol.StateUndecided},
+	}
+	result := agentcontrol.AutoEnableResult{Warnings: []agentcontrol.AutoEnableWarning{{Agent: agentcontrol.AgentCodex, Err: context.DeadlineExceeded}}}
+	output := strings.Join(daemonAgentStartupLines(statuses, result, false), "\n")
+	for _, want := range []string{"opencode", "1.18.3", "successful", "codex", "0.144.6", "failed", context.DeadlineExceeded.Error()} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("startup status missing %q:\n%s", want, output)
+		}
+	}
+}
+
+func TestDaemonAgentStartupLinesDistinguishDisabledAndSkipped(t *testing.T) {
+	statuses := []agentcontrol.Status{
+		{Agent: agentcontrol.AgentOpenCode, State: agentcontrol.StateDisabled},
+		{Agent: agentcontrol.AgentCodex, State: agentcontrol.StateUndecided},
+	}
+	output := strings.Join(daemonAgentStartupLines(statuses, agentcontrol.AutoEnableResult{}, true), "\n")
+	for _, want := range []string{"disabled", "skipped"} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("startup status missing %q:\n%s", want, output)
+		}
+	}
+}
+
 func TestAgentOpenCodeCommandsCallManager(t *testing.T) {
 	manager := &fakeAgentManager{status: agentcontrol.Status{Detected: true, State: agentcontrol.StateEnabled, RealBinary: "/opt/opencode", ShimPath: "/home/u/.pocketctl/bin/opencode", PathActive: true}}
 	for _, args := range [][]string{{"opencode", "enable", "--no-shell-profile"}, {"opencode", "status"}, {"opencode", "disable"}} {
