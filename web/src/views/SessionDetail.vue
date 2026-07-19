@@ -111,7 +111,7 @@
             <svg v-if="!copied" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"/></svg>
             <svg v-else width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M20 6L9 17l-5-5"/></svg>
           </button>
-          <button v-if="!focusedSubAgentId && currentSessionAgent !== 'opencode'" class="copy-btn" style="margin-left:6px;" :title="resumeCopied ? t('session.actions.resume_toast') : t('session.actions.resume') + t('session.actions.resume_hint')" @click="copyResumeCmd">
+          <button v-if="!focusedSubAgentId" class="copy-btn" style="margin-left:6px;" :title="resumeCopied ? t('session.actions.resume_toast') : t('session.actions.resume') + t('session.actions.resume_hint')" @click="copyResumeCmd">
             <svg v-if="!resumeCopied" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8"/><path d="M12 17v4"/></svg>
             <svg v-else width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M20 6L9 17l-5-5"/></svg>
           </button>
@@ -639,7 +639,7 @@ const chatEmptyDesc = computed(() => {
   return t('session.empty_select_desc')
 })
 const isTerminal = computed(() => ['completed', 'error', 'killed'].includes(status.value))
-// Daemon-created sessions can be resumed (via claude --resume) even after completion,
+// Daemon-created sessions can be resumed with their agent CLI even after completion,
 // so the input box stays available as long as the daemon is online.
 const isDaemonSession = computed(() => {
   const s = allSessions.value.find((x: any) => x.session_id === sessionId.value)
@@ -897,7 +897,12 @@ function copySessionId() {
 function copyResumeCmd() {
   const s = allSessions.value.find((x: any) => x.session_id === sessionId.value)
   if (!s) return
-  const cmd = buildResumeCommand({ agent: (s as any).agent, cwd: (s as any).cwd, session_id: sessionId.value })
+  const cmd = buildResumeCommand({
+    agent: (s as any).agent,
+    agent_type: (s as any).agent_type,
+    cwd: (s as any).cwd,
+    session_id: sessionId.value,
+  })
   navigator.clipboard.writeText(cmd).then(() => {
     resumeCopied.value = true
     if (copyTimer) clearTimeout(copyTimer)
