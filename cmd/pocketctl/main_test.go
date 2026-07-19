@@ -530,6 +530,25 @@ func TestReconnectDiscoveryEventIsMarkedAsResync(t *testing.T) {
 	}
 }
 
+func TestTerminalHydrationEventsKeepsCurrentStatusAuthoritative(t *testing.T) {
+	events := []protocol.DaemonEvent{
+		{Type: "agent_text", Text: "historical answer"},
+		{Type: "session_status", Status: protocol.StatusCompleted},
+		{Type: "tool_result", Output: "historical output"},
+	}
+
+	got := terminalHydrationEvents(events, "session-a", protocol.StatusBusy)
+	if len(got) != 3 {
+		t.Fatalf("events=%+v, want two historical content events and one authoritative status", got)
+	}
+	if got[0].Type != "agent_text" || got[1].Type != "tool_result" {
+		t.Fatalf("historical content order changed: %+v", got)
+	}
+	if got[2].Type != "session_status" || got[2].SessionID != "session-a" || got[2].Status != protocol.StatusBusy {
+		t.Fatalf("final event=%+v, want authoritative busy status", got[2])
+	}
+}
+
 func TestCodexSubagentDiscoveryEvent(t *testing.T) {
 	tests := []struct {
 		name     string

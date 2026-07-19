@@ -13,16 +13,24 @@ import (
 
 const windowsShimMarker = "@rem pocketctl-agent-launcher"
 
-func installPlatformShim(shimPath, pocketctlPath, agent string) error {
+func installPlatformShim(shimPath, pocketctlPath, agent string, realBinaries ...string) error {
 	if data, err := os.ReadFile(shimPath); err == nil {
-		if strings.Contains(string(data), windowsShimMarker) {
-			return nil
+		if !strings.Contains(string(data), windowsShimMarker) {
+			return ErrForeignShim
 		}
-		return ErrForeignShim
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
-	body := fmt.Sprintf("%s\r\n@\"%s\" __agent-launch %s %%*\r\n", windowsShimMarker, pocketctlPath, agent)
+	realBinary := ""
+	if len(realBinaries) > 0 {
+		realBinary = realBinaries[0]
+	}
+	body := fmt.Sprintf("%s\r\n@if not exist \"%s\" goto fallback\r\n@\"%s\" __agent-launch %s %%*\r\n@exit /b %%errorlevel%%\r\n:fallback\r\n", windowsShimMarker, pocketctlPath, pocketctlPath, agent)
+	if realBinary != "" {
+		body += fmt.Sprintf("@\"%s\" %%*\r\n@exit /b %%errorlevel%%\r\n", realBinary)
+	} else {
+		body += "@exit /b 9009\r\n"
+	}
 	return os.WriteFile(shimPath, []byte(body), 0o600)
 }
 

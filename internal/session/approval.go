@@ -716,7 +716,7 @@ func (sm *SessionManager) reconcileOpencodeInteractionStatus(sessionID string, b
 		}
 	}
 	if !usedNative {
-		if messages, err := b.coord.srv().GetMessages(ctx, sessionID); err == nil && adapter.OpencodeMessagesRunning(messages) {
+		if messages, err := b.coord.srv().GetMessages(ctx, sessionID, cwd); err == nil && adapter.OpencodeMessagesRunning(messages) {
 			status = protocol.StatusRunning
 		}
 	}

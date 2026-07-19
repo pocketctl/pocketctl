@@ -1479,6 +1479,29 @@ func reconnectDiscoveryEvent(s session.SessionInfo) protocol.DaemonEvent {
 	}
 }
 
+// terminalHydrationEvents projects the first full JSONL pass into historical
+// content plus one current watcher status. Persisted turn-completion records
+// describe old turns, not the current terminal process; forwarding them as live
+// session_status events can overwrite a freshly discovered busy/idle state.
+func terminalHydrationEvents(events []protocol.DaemonEvent, sessionID, currentStatus string) []protocol.DaemonEvent {
+	projected := make([]protocol.DaemonEvent, 0, len(events)+1)
+	for _, event := range events {
+		if event.Type == "session_status" {
+			continue
+		}
+		if event.SessionID == "" {
+			event.SessionID = sessionID
+		}
+		projected = append(projected, event)
+	}
+	projected = append(projected, protocol.DaemonEvent{
+		Type:      "session_status",
+		SessionID: sessionID,
+		Status:    currentStatus,
+	})
+	return projected
+}
+
 func interactionCommandResultEvent(operation, sessionID, requestID string, err error) protocol.DaemonEvent {
 	var resolved *session.ResolvedElsewhereError
 	if errors.As(err, &resolved) {
@@ -1977,6 +2000,7 @@ func handleWatcherEvents(ctx context.Context, events <-chan watcher.SessionEvent
 					// Tail loop: send parsed events with session_id stamped
 					ticker := time.NewTicker(1 * time.Second)
 					defer ticker.Stop()
+					hydrating := true
 					for {
 						select {
 						case <-ctx.Done():
@@ -1989,11 +2013,16 @@ func handleWatcherEvents(ctx context.Context, events <-chan watcher.SessionEvent
 							if err != nil {
 								continue
 							}
+							initialHydration := hydrating && (len(events) > 0 || len(rawLines) > 0)
+							if initialHydration {
+								events = terminalHydrationEvents(events, evt.Session.SessionID, evt.Session.Status)
+								hydrating = false
+							}
 							// Fresh tail output: refresh activity and, if the session had
 							// gone dormant (e.g. after `exit`), revive it so an `exit` →
 							// `claude --continue` resume reappears as live instead of staying
 							// frozen at "exited".
-							if len(events) > 0 {
+							if len(events) > 0 && !initialHydration {
 								sm.ReviveTerminalSessionOnActivity(evt.Session.SessionID)
 							}
 							for i := range events {

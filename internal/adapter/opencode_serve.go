@@ -730,10 +730,13 @@ func (s *OpencodeServer) ListSessions(ctx context.Context) ([]OpencodeSessionSum
 
 // GetMessages returns a session's full message+part history. Uses the legacy
 // `/session/{id}/message` route (the `/api/session/{id}/message` variant returns
-// an empty list for DB-backed sessions).
-func (s *OpencodeServer) GetMessages(ctx context.Context, sessionID string) ([]OpencodeMessageWithParts, error) {
+// an empty list for DB-backed sessions). The legacy route is project-scoped, so
+// the session directory must be supplied for sessions created by a CLI running
+// outside the daemon's working directory.
+func (s *OpencodeServer) GetMessages(ctx context.Context, sessionID, directory string) ([]OpencodeMessageWithParts, error) {
 	var out []OpencodeMessageWithParts
-	if err := s.get(ctx, "/session/"+url.PathEscape(sessionID)+"/message", &out); err != nil {
+	path := "/session/" + url.PathEscape(sessionID) + "/message"
+	if err := s.get(ctx, withDirectory(path, directory), &out); err != nil {
 		return nil, err
 	}
 	return out, nil

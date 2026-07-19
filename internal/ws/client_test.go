@@ -560,6 +560,67 @@ func TestReplaysUnackedEventsOnReconnect(t *testing.T) {
 	}
 }
 
+func TestReconnectResyncRunsAfterDurableReplay(t *testing.T) {
+	received := make(chan string, 4)
+	upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
+	mux := http.NewServeMux()
+	mux.HandleFunc("/ws", func(w http.ResponseWriter, r *http.Request) {
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		for {
+			_, raw, err := conn.ReadMessage()
+			if err != nil {
+				return
+			}
+			var msg map[string]any
+			if json.Unmarshal(raw, &msg) != nil {
+				continue
+			}
+			typeName, _ := msg["type"].(string)
+			if typeName == "register" {
+				_ = conn.WriteJSON(map[string]any{"type": "register_ack", "status": "ok", "supports_event_ack": true})
+				continue
+			}
+			if typeName == "agent_text" || typeName == "session_discovered" {
+				received <- typeName
+			}
+		}
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	out := make(chan protocol.DaemonEvent, 4)
+	c := NewClient(wsURL(srv.URL), "tok", "daemon-order", []string{"codex"}, nil, nil, out, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	c.sendEvent(protocol.DaemonEvent{Type: "agent_text", SessionID: "session-a", Text: "durable"})
+	c.OnReconnected = func() {
+		c.SendMsg(protocol.DaemonEvent{Type: "session_discovered", SessionID: "session-a", Status: protocol.StatusBusy, Resync: true})
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go c.Run(ctx)
+
+	first := waitEventType(t, received, 2*time.Second)
+	second := waitEventType(t, received, 2*time.Second)
+	if first != "agent_text" || second != "session_discovered" {
+		t.Fatalf("wire order=%q then %q, want durable replay before authoritative resync", first, second)
+	}
+}
+
+func waitEventType(t *testing.T, ch <-chan string, timeout time.Duration) string {
+	t.Helper()
+	select {
+	case eventType := <-ch:
+		return eventType
+	case <-time.After(timeout):
+		t.Fatal("timed out waiting for event type")
+		return ""
+	}
+}
+
 // TestLegacyRelayTrimsOnWrite verifies a new daemon against an old relay (which
 // never advertises supports_event_ack and never sends event_ack) does not stall:
 // it trims its buffer on successful write so the buffer cannot grow unbounded.

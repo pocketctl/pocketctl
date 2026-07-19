@@ -26,6 +26,34 @@ func TestAutoEnableAgentsEnablesCompatibleUndecidedAgents(t *testing.T) {
 	}
 }
 
+func TestAutoEnableAgentsReconcilesEnabledAgentInstallation(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	cfg := DefaultConfig()
+	cfg.OpenCode.State = StateEnabled
+	cfg.OpenCode.DecisionSource = SourceCommand
+	cfg.Codex.State = StateDisabled
+	if err := SaveConfig(cfg); err != nil {
+		t.Fatal(err)
+	}
+	manager := &fakeMultiAgentManager{
+		detected: map[string]detectedAgent{
+			AgentOpenCode: {path: "/opt/opencode", version: "1.17.11"},
+		},
+	}
+
+	result := AutoEnableAgents(context.Background(), &bytes.Buffer{}, AutoEnableContext{}, manager)
+
+	if len(result.Warnings) != 0 {
+		t.Fatalf("warnings=%+v", result.Warnings)
+	}
+	if manager.enableCalls[AgentOpenCode] != 1 {
+		t.Fatalf("enabled OpenCode installation was not reconciled: calls=%v", manager.enableCalls)
+	}
+	if got := manager.enableOptions[AgentOpenCode].DecisionSource; got != SourceCommand {
+		t.Fatalf("decision source=%q want %q", got, SourceCommand)
+	}
+}
+
 func TestAutoEnableAgentsRespectsDisabledAndNeverBlocksOnFailures(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	cfg := DefaultConfig()
@@ -123,11 +151,12 @@ type detectedAgent struct {
 }
 
 type fakeMultiAgentManager struct {
-	detected    map[string]detectedAgent
-	detectCalls map[string]int
-	enableCalls map[string]int
-	enableErr   map[string]error
-	status      map[string]Status
+	detected      map[string]detectedAgent
+	detectCalls   map[string]int
+	enableCalls   map[string]int
+	enableOptions map[string]EnableOptions
+	enableErr     map[string]error
+	status        map[string]Status
 }
 
 func (f *fakeMultiAgentManager) DetectAgent(_ context.Context, agent string) (string, string, error) {
@@ -139,11 +168,15 @@ func (f *fakeMultiAgentManager) DetectAgent(_ context.Context, agent string) (st
 	return result.path, result.version, result.err
 }
 
-func (f *fakeMultiAgentManager) EnableAgentDetected(_ context.Context, agent, _ string, _ EnableOptions) (Status, error) {
+func (f *fakeMultiAgentManager) EnableAgentDetected(_ context.Context, agent, _ string, options EnableOptions) (Status, error) {
 	if f.enableCalls == nil {
 		f.enableCalls = map[string]int{}
 	}
+	if f.enableOptions == nil {
+		f.enableOptions = map[string]EnableOptions{}
+	}
 	f.enableCalls[agent]++
+	f.enableOptions[agent] = options
 	return Status{Agent: agent, State: StateEnabled}, f.enableErr[agent]
 }
 

@@ -590,10 +590,6 @@ func (c *Client) connectAndServe(ctx context.Context) error {
 	c.SendMsg(register)
 	c.logger.Info("register sent")
 
-	if c.OnReconnected != nil {
-		c.OnReconnected()
-	}
-
 	done := make(chan struct{})
 	go c.readPump(done)
 	go c.pingPump(ctx, done)
@@ -617,6 +613,13 @@ func (c *Client) connectAndServe(ctx context.Context) error {
 	// connection) before resuming live delivery, so no event is silently dropped
 	// across a reconnect. The relay dedups replayed events by (daemon_id, seq).
 	c.replayOutbound(ctx, conn)
+
+	// Re-announce current authoritative session snapshots only after every
+	// durable event from the previous connection has been replayed. Otherwise a
+	// historical status in the backlog can overwrite the fresh resync state.
+	if c.OnReconnected != nil {
+		c.OnReconnected()
+	}
 
 	for {
 		select {

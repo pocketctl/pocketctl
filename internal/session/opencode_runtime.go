@@ -198,15 +198,32 @@ func (sm *SessionManager) registerManagedOpenCodeSession(coord *opencodeCoordina
 			Source: "terminal", Agent: adapter.AgentOpencode, ControlMode: protocol.ControlManaged,
 			Capabilities: sm.OpenCodeInteractionCapabilities(sessionID),
 		}
-		// Local terminal startup must not depend on relay availability. This
-		// discovery event is recoverable: OnReconnected re-emits every tracked
-		// session, while the managed registry and terminal lease are persisted
-		// locally. Keep approval/question events on their reliable blocking path.
+		sm.enqueueOpenCodeLifecycleEvent(coord, event)
+	}
+}
+
+// enqueueOpenCodeLifecycleEvent keeps launcher acquisition independent from
+// relay backpressure without dropping the lifecycle event. The fast path is
+// allocation-free; when the daemon outbox is full, a background waiter hands
+// the event to the existing durable websocket spool as soon as capacity
+// returns. A daemon restart remains recoverable through the persisted managed
+// registry and normal OpenCode discovery.
+func (sm *SessionManager) enqueueOpenCodeLifecycleEvent(coord *opencodeCoordinator, event protocol.DaemonEvent) {
+	select {
+	case sm.outputCh <- event:
+		return
+	default:
+	}
+	ctx := coord.ctx
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	go func() {
 		select {
 		case sm.outputCh <- event:
-		default:
+		case <-ctx.Done():
 		}
-	}
+	}()
 }
 
 func runtimeUnavailable(err error) error {

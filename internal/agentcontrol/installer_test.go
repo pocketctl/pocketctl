@@ -37,19 +37,27 @@ func TestOpenCodeInstallerEnableDisableRoundTrip(t *testing.T) {
 	if status.State != StateEnabled || status.ShimPath != wantShim || status.RealBinary != realBinary {
 		t.Fatalf("enable status=%+v", status)
 	}
-	target, err := filepath.EvalSymlinks(wantShim)
+	shimInfo, err := os.Lstat(wantShim)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !sameFile(target, pocketctlBinary) {
-		t.Fatalf("shim target=%q want pocketctl %q", target, pocketctlBinary)
+	if shimInfo.Mode()&os.ModeSymlink != 0 || shimInfo.Mode().Perm()&0o111 == 0 {
+		t.Fatalf("shim must be an executable standalone wrapper: mode=%v", shimInfo.Mode())
+	}
+	shimData, err := os.ReadFile(wantShim)
+	if err != nil {
+		t.Fatal(err)
+	}
+	shimContent := string(shimData)
+	if !strings.Contains(shimContent, unixShimMarker) || !strings.Contains(shimContent, pocketctlBinary) || !strings.Contains(shimContent, realBinary) {
+		t.Fatalf("shim does not preserve launcher and fallback paths: %q", shimContent)
 	}
 	profile := filepath.Join(home, ".zshrc")
 	profileData, err := os.ReadFile(profile)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Count(string(profileData), launcherBlockStart) != 1 || !strings.Contains(string(profileData), `.pocketctl/bin`) {
+	if strings.Count(string(profileData), launcherBlockStart) != 1 || !strings.Contains(string(profileData), `.pocketctl/shell/path.sh`) {
 		t.Fatalf("profile block=%q", profileData)
 	}
 	if _, err := installer.Enable(context.Background(), EnableOptions{}); err != nil {

@@ -55,6 +55,15 @@ func AutoEnableAgents(ctx context.Context, output io.Writer, start AutoEnableCon
 				warning := errors.New(reason)
 				result.Warnings = append(result.Warnings, AutoEnableWarning{Agent: agent, Err: warning})
 				fmt.Fprintf(output, "pocketctl: %s remains enabled but is using native fallback: %v; daemon will continue\n", agent, warning)
+				continue
+			}
+			source := agentConfig.DecisionSource
+			if source == "" {
+				source = SourceDaemonAuto
+			}
+			if _, enableErr := manager.EnableAgentDetected(ctx, agent, path, EnableOptions{DecisionSource: source}); enableErr != nil {
+				result.Warnings = append(result.Warnings, AutoEnableWarning{Agent: agent, Err: enableErr})
+				fmt.Fprintf(output, "pocketctl: %s launcher reconciliation failed: %v; daemon will continue\n", agent, enableErr)
 			}
 			continue
 		}

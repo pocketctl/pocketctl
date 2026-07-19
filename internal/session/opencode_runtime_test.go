@@ -112,6 +112,17 @@ func TestOpenCodeRuntimeAcquireDoesNotBlockOnRelayBackpressure(t *testing.T) {
 		if !sm.hasActiveOpenCodeLeases(coord.generation) {
 			t.Fatal("acquire returned without registering its terminal lease")
 		}
+		deadline := time.After(2 * time.Second)
+		for {
+			select {
+			case event := <-sm.outputCh:
+				if event.Type == "session_discovered" && event.SessionID == "ses_offline" {
+					return
+				}
+			case <-deadline:
+				t.Fatal("managed session discovery was lost after relay backpressure cleared")
+			}
+		}
 	case <-time.After(500 * time.Millisecond):
 		<-sm.outputCh // unblock the old synchronous implementation before failing
 		<-done

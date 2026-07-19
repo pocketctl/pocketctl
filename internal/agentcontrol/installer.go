@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -134,7 +135,7 @@ func (i Installer) EnableAgentDetected(ctx context.Context, agent, realBinary st
 	if err := os.MkdirAll(filepath.Dir(shimPath), 0o700); err != nil {
 		return Status{}, fmt.Errorf("create launcher directory: %w", err)
 	}
-	if err := installPlatformShim(shimPath, pocketctlPath, agent); err != nil {
+	if err := installPlatformShim(shimPath, pocketctlPath, agent, realBinary); err != nil {
 		return Status{}, err
 	}
 	profileChanged := false
@@ -263,7 +264,7 @@ func (i Installer) StatusAgent(ctx context.Context, agent string) Status {
 		}
 	}
 	if status.ShimPath != "" {
-		status.PathActive = pathContains(filepath.Dir(status.ShimPath))
+		status.PathActive = pathResolvesTo(agent, status.ShimPath)
 	}
 	runtimeStatus := func(ctx context.Context) (RuntimeStatusResult, error) {
 		if i.RuntimeStatusAgent != nil {
@@ -278,11 +279,24 @@ func (i Installer) StatusAgent(ctx context.Context, agent string) Status {
 	defer cancel()
 	if runtime, runtimeErr := runtimeStatus(statusCtx); runtimeErr == nil {
 		status.RuntimeReachable = runtime.Mode == string(LaunchManaged)
-		if status.RuntimeReachable {
+		if status.RuntimeReachable && status.State == StateEnabled && status.PathActive && status.CapabilityReason == "" {
 			status.EffectiveMode = string(LaunchManaged)
 		}
 	}
 	return status
+}
+
+func pathResolvesTo(agent, shimPath string) bool {
+	resolved, err := exec.LookPath(agent)
+	if err != nil {
+		return false
+	}
+	resolvedPath, resolvedInfo, err := inspectPath(resolved)
+	if err != nil {
+		return false
+	}
+	shimResolved, shimInfo, err := inspectPath(shimPath)
+	return err == nil && (resolvedPath == shimResolved || os.SameFile(resolvedInfo, shimInfo))
 }
 
 func (i Installer) checkCompatibility(ctx context.Context, agent, binary, version string) error {

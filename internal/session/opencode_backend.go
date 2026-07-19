@@ -1226,7 +1226,7 @@ func (c *opencodeCoordinator) syncLoop(ctx context.Context, sessionID string, em
 					nativeStatus = &status
 				}
 			}
-			msgs, err := s.GetMessages(ctx, sessionID)
+			msgs, err := s.GetMessages(ctx, sessionID, cwd)
 			if err == nil {
 				if evs := sync.DiffWithNativeStatus(msgs, nativeStatus); len(evs) > 0 {
 					for _, ev := range evs {
@@ -1374,7 +1374,8 @@ func (b *serverBackend) Send(ctx context.Context, sessionID, content string) err
 	// message state via the serve.
 	if s := b.coord.srv(); s != nil {
 		bctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		msgs, err := s.GetMessages(bctx, sessionID)
+		cwd, _ := b.coord.sm.GetSessionCwd(sessionID)
+		msgs, err := s.GetMessages(bctx, sessionID, cwd)
 		cancel()
 		if err == nil && adapter.OpencodeMessagesRunning(msgs) {
 			return fmt.Errorf("会话正在生成回复，请等当前回合结束后再发送")

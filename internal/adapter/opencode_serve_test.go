@@ -19,6 +19,32 @@ import (
 	"github.com/pocketctl/pocketctl/internal/platform"
 )
 
+func TestOpenCodeGetMessagesUsesSessionDirectory(t *testing.T) {
+	const directory = "/tmp/opencode-cli-project"
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/session/ses_cli/message" {
+			http.NotFound(w, r)
+			return
+		}
+		if got := r.URL.Query().Get("directory"); got != directory {
+			http.Error(w, "wrong project directory", http.StatusBadRequest)
+			return
+		}
+		fmt.Fprint(w, `[{"info":{"id":"msg_cli","role":"assistant"},"parts":[{"id":"part_cli","type":"text","text":"synced"}]}]`)
+	}))
+	defer server.Close()
+
+	srv := NewOpencodeServer("unused")
+	srv.baseURL = server.URL
+	messages, err := srv.GetMessages(context.Background(), "ses_cli", directory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(messages) != 1 || messages[0].Info.ID != "msg_cli" || len(messages[0].Parts) != 1 || messages[0].Parts[0].Text != "synced" {
+		t.Fatalf("messages=%+v", messages)
+	}
+}
+
 func TestOpenCodeHTTPStatusErrorPreservesActualStatus(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "misleading body status 404:", http.StatusInternalServerError)
