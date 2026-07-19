@@ -4,7 +4,7 @@ BINARY = pocketctl
 GOOS ?= $(shell uname -s | tr '[:upper:]' '[:lower:]')
 GOARCH ?= $(shell uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/')
 
-.PHONY: build build-all clean relay web dev dev-relay test release
+.PHONY: build build-all clean relay web dev dev-relay test test-opencode-managed test-opencode-managed-release test-codex-managed test-codex-managed-release release
 
 -include .env
 export JWT_SECRET
@@ -79,6 +79,22 @@ test-go:
 test-e2e:
 	go test -v -tags=e2e ./internal/e2e/...
 
+## OpenCode 受管终端 A-D 回归（Go/Windows 编译/Relay/Web/iOS 源码回归）
+test-opencode-managed:
+	bash scripts/test-opencode-managed.sh
+
+## OpenCode 受管终端完整发布门禁（额外执行 Relay/Web、六平台和 iOS 构建）
+test-opencode-managed-release:
+	POCKETCTL_RELEASE_GATE=1 bash scripts/test-opencode-managed.sh
+
+## Codex 受管终端回归（Go race/Windows 编译/Web/iOS 源码回归）
+test-codex-managed:
+	bash scripts/test-codex-managed.sh
+
+## Codex 受管终端完整发布门禁（额外执行 Relay/Web、六平台和 iOS 构建）
+test-codex-managed-release:
+	POCKETCTL_RELEASE_GATE=1 bash scripts/test-codex-managed.sh
+
 # ---------- iOS ----------
 
 ## iOS Debug 构建
@@ -148,6 +164,10 @@ help:
 	@echo "测试:"
 	@echo "  make test        运行所有测试"
 	@echo "  make test-go     运行 Go 测试"
+	@echo "  make test-opencode-managed          运行 OpenCode 受管终端 A-D 回归"
+	@echo "  make test-opencode-managed-release  运行 OpenCode 受管终端完整发布门禁"
+	@echo "  make test-codex-managed             运行 Codex 受管终端回归"
+	@echo "  make test-codex-managed-release     运行 Codex 受管终端完整发布门禁"
 	@echo ""
 	@echo "发布:"
 	@echo "  make release VERSION=v0.1.0  创建发布"

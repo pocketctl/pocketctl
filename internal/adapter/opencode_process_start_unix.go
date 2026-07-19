@@ -6,8 +6,13 @@ import (
 	"fmt"
 	"os/exec"
 	"strings"
+	"syscall"
 	"time"
 )
+
+func configureOpencodeServeProcess(cmd *exec.Cmd) {
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+}
 
 func validateProcessStartedBefore(pid int, notAfter time.Time) error {
 	if notAfter.IsZero() {

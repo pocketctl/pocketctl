@@ -29,6 +29,22 @@ func TestControlSocketPathForUnixIsFilePath(t *testing.T) {
 	}
 }
 
+func TestAgentControlSocketPathForWindowsIsNamedPipe(t *testing.T) {
+	got := agentControlSocketPathFor("windows", `C:\Users\foo`)
+	want := `\\.\pipe\pocketctl-agent-control`
+	if got != want {
+		t.Errorf("windows agent control path = %q, want %q", got, want)
+	}
+}
+
+func TestAgentControlSocketPathForUnixIsFilePath(t *testing.T) {
+	got := agentControlSocketPathFor("linux", "/home/foo")
+	want := filepath.Join("/home/foo", ".pocketctl", "agent-control.sock")
+	if got != want {
+		t.Errorf("unix agent control path = %q, want %q", got, want)
+	}
+}
+
 func TestApprovalSocketPathForWindowsIsNamedPipe(t *testing.T) {
 	got := approvalSocketPathFor("windows", `C:\Users\foo`)
 	want := `\\.\pipe\pocketctl-approval`

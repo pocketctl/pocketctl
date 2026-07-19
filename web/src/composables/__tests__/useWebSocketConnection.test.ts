@@ -113,7 +113,35 @@ describe('useWebSocket — connect 前确保 token 新鲜', () => {
 })
 
 describe('useWebSocket — onclose 4001 刷新重连', () => {
-  test('relay 返回 4001(invalid token) 时刷新 token 并用新 token 重连', async () => {
+	test('重连成功时只发一次 connection_restored 供页面补拉快照', async () => {
+		const initial = makeToken({ exp: Math.floor(Date.now() / 1000) + 3600 })
+		const fresh = makeToken({ exp: Math.floor(Date.now() / 1000) + 7200 })
+		mockAccessToken.value = initial
+		localStorageMock.setItem('pocketctl_relay_url', 'wss://relay.test/ws')
+		mockRefresh.mockImplementation(async () => {
+			mockAccessToken.value = fresh
+			return true
+		})
+
+		vi.resetModules()
+		const { useWebSocket } = await import('../useWebSocket')
+		const restored = vi.fn()
+		const socket = useWebSocket()
+		socket.onEvent('connection_restored', restored)
+		await socket.connect()
+		lastWs.readyState = FakeWS.OPEN
+		lastWs.onopen()
+		expect(restored).not.toHaveBeenCalled()
+
+		lastWs.onclose({ code: 4001, reason: 'invalid token' })
+		await new Promise((r) => setTimeout(r, 50))
+		lastWs.readyState = FakeWS.OPEN
+		lastWs.onopen()
+
+		expect(restored).toHaveBeenCalledTimes(1)
+	})
+
+	test('relay 返回 4001(invalid token) 时刷新 token 并用新 token 重连', async () => {
     const initial = makeToken({ exp: Math.floor(Date.now() / 1000) + 3600 })
     const fresh = makeToken({ exp: Math.floor(Date.now() / 1000) + 7200 })
     mockAccessToken.value = initial

@@ -6,6 +6,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -24,6 +25,7 @@ import (
 
 	"github.com/gorilla/websocket"
 	"github.com/pocketctl/pocketctl/internal/adapter"
+	"github.com/pocketctl/pocketctl/internal/agentcontrol"
 	"github.com/pocketctl/pocketctl/internal/api"
 	"github.com/pocketctl/pocketctl/internal/approval"
 	"github.com/pocketctl/pocketctl/internal/commands"
@@ -57,12 +59,36 @@ var (
 const DefaultRelayURL = "wss://www.pocketctl.me/ws"
 
 func main() {
+	if isCodexLauncherInvocation(os.Args[0], os.Args[1:]) {
+		args := codexLauncherArgs(os.Args[0], os.Args[1:])
+		if err := agentcontrol.NewCodexLauncher().Run(context.Background(), args, ""); err != nil {
+			if exitErr, ok := err.(*exec.ExitError); ok {
+				os.Exit(exitErr.ExitCode())
+			}
+			fmt.Fprintln(os.Stderr, "pocketctl: cannot start Codex:", err)
+			os.Exit(1)
+		}
+		return
+	}
+	if isOpenCodeLauncherInvocation(os.Args[0], os.Args[1:]) {
+		args := openCodeLauncherArgs(os.Args[0], os.Args[1:])
+		if err := agentcontrol.NewLauncher().Run(context.Background(), args, ""); err != nil {
+			if exitErr, ok := err.(*exec.ExitError); ok {
+				os.Exit(exitErr.ExitCode())
+			}
+			fmt.Fprintln(os.Stderr, "pocketctl: cannot start OpenCode:", err)
+			os.Exit(1)
+		}
+		return
+	}
 	if len(os.Args) < 2 {
 		printUsage()
 		os.Exit(1)
 	}
 
 	switch os.Args[1] {
+	case "agent":
+		cmdAgent(os.Args[2:])
 	case "daemon":
 		cmdDaemon(os.Args[2:])
 	case "login":
@@ -87,6 +113,44 @@ func main() {
 		printUsage()
 		os.Exit(1)
 	}
+}
+
+func isCodexLauncherInvocation(argv0 string, args []string) bool {
+	name := strings.TrimSuffix(strings.ToLower(filepath.Base(argv0)), ".exe")
+	if name == agentcontrol.AgentCodex {
+		return true
+	}
+	return len(args) >= 2 && args[0] == "__agent-launch" && args[1] == agentcontrol.AgentCodex
+}
+
+func codexLauncherArgs(argv0 string, args []string) []string {
+	name := strings.TrimSuffix(strings.ToLower(filepath.Base(argv0)), ".exe")
+	if name == agentcontrol.AgentCodex {
+		return args
+	}
+	if len(args) >= 2 && args[0] == "__agent-launch" && args[1] == agentcontrol.AgentCodex {
+		return args[2:]
+	}
+	return args
+}
+
+func isOpenCodeLauncherInvocation(argv0 string, args []string) bool {
+	name := strings.TrimSuffix(strings.ToLower(filepath.Base(argv0)), ".exe")
+	if name == agentcontrol.AgentOpenCode {
+		return true
+	}
+	return len(args) >= 2 && args[0] == "__agent-launch" && args[1] == agentcontrol.AgentOpenCode
+}
+
+func openCodeLauncherArgs(argv0 string, args []string) []string {
+	name := strings.TrimSuffix(strings.ToLower(filepath.Base(argv0)), ".exe")
+	if name == agentcontrol.AgentOpenCode {
+		return args
+	}
+	if len(args) >= 2 && args[0] == "__agent-launch" && args[1] == agentcontrol.AgentOpenCode {
+		return args[2:]
+	}
+	return args
 }
 
 func printUsage() {
@@ -149,6 +213,8 @@ func cmdServiceInstall(args []string) {
 	fs := flag.NewFlagSet("daemon service install", flag.ExitOnError)
 	production := fs.Bool("prod", false, "Bake --prod into the supervised daemon (use production relay from config)")
 	relayURL := fs.String("relay", "", "Bake an explicit --relay URL into the supervised daemon")
+	noAgentAutoEnable := fs.Bool("no-agent-auto-enable", false, "Skip optional managed-agent auto-enable")
+	noAgentPrompt := fs.Bool("no-agent-prompt", false, "Deprecated alias for --no-agent-auto-enable")
 	fs.Parse(args)
 
 	// A token must already be stored — the supervised daemon resolves it from
@@ -158,6 +224,7 @@ func cmdServiceInstall(args []string) {
 		fmt.Fprintln(os.Stderr, i18n.T("service.no_token"))
 		os.Exit(1)
 	}
+	maybeAutoEnableAgentsForDaemon(*noAgentAutoEnable || *noAgentPrompt, "")
 
 	exe, err := os.Executable()
 	if err != nil {
@@ -170,13 +237,7 @@ func cmdServiceInstall(args []string) {
 
 	// The supervised process runs in the foreground so the init system owns its
 	// lifecycle (no self-fork). Relay flags are baked in so the unit is explicit.
-	daemonArgs := []string{"daemon", "start", "--foreground"}
-	if *production {
-		daemonArgs = append(daemonArgs, "--prod")
-	}
-	if *relayURL != "" {
-		daemonArgs = append(daemonArgs, "--relay", *relayURL)
-	}
+	daemonArgs := serviceDaemonArgs(*production, *relayURL)
 
 	// Ensure the log dir exists; launchd/systemd open the boot log but won't
 	// create its parent directory.
@@ -202,6 +263,17 @@ func cmdServiceInstall(args []string) {
 	if runtime.GOOS == "linux" {
 		fmt.Println(i18n.T("service.linger_note"))
 	}
+}
+
+func serviceDaemonArgs(production bool, relayURL string) []string {
+	args := []string{"daemon", "start", "--foreground", "--no-agent-auto-enable"}
+	if production {
+		args = append(args, "--prod")
+	}
+	if relayURL != "" {
+		args = append(args, "--relay", relayURL)
+	}
+	return args
 }
 
 func cmdServiceUninstall() {
@@ -683,6 +755,8 @@ func cmdDaemonStart(args []string) {
 	daemonID := fs.String("id", "", "Daemon ID (auto-generated if empty)")
 	foreground := fs.Bool("foreground", false, "Run in foreground (don't daemonize)")
 	debug := fs.Bool("debug", false, "Verbose debug logging; with --foreground also streams logs to the console")
+	noAgentAutoEnable := fs.Bool("no-agent-auto-enable", false, "Skip optional managed-agent auto-enable")
+	noAgentPrompt := fs.Bool("no-agent-prompt", false, "Deprecated alias for --no-agent-auto-enable")
 	fs.Parse(args)
 
 	// --debug also implies running in the foreground so the operator sees logs
@@ -742,6 +816,9 @@ func cmdDaemonStart(args []string) {
 		fmt.Println(i18n.T("daemon.already_running", pid))
 		os.Exit(0)
 	}
+
+	agentSetupSkipped := *noAgentAutoEnable || *noAgentPrompt
+	agentAutoEnable := maybeAutoEnableAgentsForDaemon(agentSetupSkipped, restartReadyFile)
 
 	// Determine daemon ID before forking so the launcher can print it and pass
 	// it to the child. This avoids the child re-deriving an ID that might differ
@@ -811,6 +888,7 @@ func cmdDaemonStart(args []string) {
 		} else {
 			fmt.Println(i18n.T("daemon.relay_connecting", url))
 		}
+		printDaemonAgentStartupStatus(os.Stdout, agentAutoEnable, agentSetupSkipped)
 		fmt.Println(i18n.T("daemon.logs", daemon.LogPath()))
 		os.Exit(0)
 	}
@@ -953,6 +1031,31 @@ func cmdDaemonStart(args []string) {
 
 	// Create session manager
 	sm := session.NewSessionManager(outputCh)
+	sm.SetOpenCodeRuntimeHealthRecorder(func(healthy bool) {
+		_ = agentcontrol.RecordOpenCodeRuntimeHealth(healthy)
+	})
+
+	// Start the local Agent Control endpoint before any relay connection loop.
+	// A terminal launcher can therefore acquire the shared OpenCode runtime even
+	// while the relay is offline; remote synchronization catches up separately.
+	agentControlServer := agentcontrol.NewServer(config.AgentControlSocketPath(), daemonRuntimeProviders(sm))
+	if err := agentControlServer.Start(); err != nil {
+		logger.Warn("agent control server disabled", "error", err)
+	} else {
+		logger.Info("agent control server listening", "path", config.AgentControlSocketPath())
+		defer agentControlServer.Close()
+	}
+	// If a previous daemon relinquished a live Codex app-server because an
+	// official TUI still held a lease, adopt it immediately and resume the
+	// persisted managed threads. With no handoff this is a no-op and Codex stays
+	// lazy until the next acquire/session start.
+	daemon.Go("codex-runtime-recover", logger, func() {
+		recoverCtx, recoverCancel := context.WithTimeout(context.Background(), 20*time.Second)
+		defer recoverCancel()
+		if err := sm.CodexRuntimeProvider().Recover(recoverCtx); err != nil {
+			logger.Warn("Codex app-server recovery unavailable", "error", err)
+		}
+	})
 
 	// Start the in-process approval broker. The PreToolUse hook connects here
 	// to surface tool-use approvals to web/iOS clients. The socket lives at a
@@ -1100,6 +1203,16 @@ func cmdDaemonStart(args []string) {
 	client.SetMetricsFn(func() (float64, float64, float64) {
 		m := sysinfo.Get()
 		return m.CpuPct, m.MemPct, m.DiskPct
+	})
+	client.SetOpenCodeRuntimeTelemetryFn(func() protocol.OpenCodeRuntimeTelemetry {
+		snapshot, err := agentcontrol.LoadOpenCodeTelemetry()
+		if err != nil {
+			return protocol.OpenCodeRuntimeTelemetry{}
+		}
+		return protocol.OpenCodeRuntimeTelemetry{
+			FallbackReasons: snapshot.FallbackReasons,
+			HealthOK:        snapshot.HealthOK, HealthFailed: snapshot.HealthFailed,
+		}
 	})
 	// Seed this daemon's active session IDs into the register message so the
 	// relay can rebuild its session→daemon routing table synchronously on
@@ -1304,6 +1417,7 @@ func cmdDaemonStart(args []string) {
 	fmt.Println(i18n.T("daemon.version", version))
 	fmt.Println(i18n.T("daemon.relay", url))
 	fmt.Println(i18n.T("daemon.agents", strings.Join(agentTypes, ", ")))
+	printDaemonAgentStartupStatus(os.Stdout, agentAutoEnable, agentSetupSkipped)
 	fmt.Println(i18n.T("daemon.logs", daemon.LogPath()))
 
 	// Discover terminal-started opencode sessions via the shared `opencode serve`
@@ -1329,6 +1443,12 @@ func cmdDaemonStart(args []string) {
 	// 也会兜底,但显式释放更及时)。
 	_ = kaMgr.Disable(keepawake.ReasonShutdown)
 	_ = kaServer.Close()
+	// Stop accepting new terminal acquire requests before the shared runtime is
+	// shut down, so a launcher cannot receive credentials for a closing serve.
+	_ = agentControlServer.Close()
+	if err := sm.ShutdownCodex(); err != nil {
+		logger.Warn("Codex app-server shutdown incomplete", "error", err)
+	}
 	// Stop the shared opencode serve process (bound to its own context, not the
 	// daemon ctx) so it doesn't linger and race the next daemon's serve on the
 	// shared SQLite DB.
@@ -1337,16 +1457,62 @@ func cmdDaemonStart(args []string) {
 	time.Sleep(500 * time.Millisecond)
 }
 
+func daemonRuntimeProviders(sm *session.SessionManager) map[string]agentcontrol.RuntimeProvider {
+	return map[string]agentcontrol.RuntimeProvider{
+		agentcontrol.AgentOpenCode: sm,
+		agentcontrol.AgentCodex:    sm.CodexRuntimeProvider(),
+	}
+}
+
 func reconnectDiscoveryEvent(s session.SessionInfo) protocol.DaemonEvent {
 	return protocol.DaemonEvent{
-		Type:      "session_discovered",
-		SessionID: s.SessionID,
-		Cwd:       s.Cwd,
-		Status:    s.Status,
-		Source:    "terminal",
-		Agent:     s.Agent,
-		Model:     s.Model,
-		Resync:    true,
+		Type:         "session_discovered",
+		SessionID:    s.SessionID,
+		Cwd:          s.Cwd,
+		Status:       s.Status,
+		Source:       "terminal",
+		Agent:        s.Agent,
+		Model:        s.Model,
+		ControlMode:  s.ControlMode,
+		Capabilities: s.Capabilities,
+		Resync:       true,
+	}
+}
+
+// terminalHydrationEvents projects the first full JSONL pass into historical
+// content plus one current watcher status. Persisted turn-completion records
+// describe old turns, not the current terminal process; forwarding them as live
+// session_status events can overwrite a freshly discovered busy/idle state.
+func terminalHydrationEvents(events []protocol.DaemonEvent, sessionID, currentStatus string) []protocol.DaemonEvent {
+	projected := make([]protocol.DaemonEvent, 0, len(events)+1)
+	for _, event := range events {
+		if event.Type == "session_status" {
+			continue
+		}
+		if event.SessionID == "" {
+			event.SessionID = sessionID
+		}
+		projected = append(projected, event)
+	}
+	projected = append(projected, protocol.DaemonEvent{
+		Type:      "session_status",
+		SessionID: sessionID,
+		Status:    currentStatus,
+	})
+	return projected
+}
+
+func interactionCommandResultEvent(operation, sessionID, requestID string, err error) protocol.DaemonEvent {
+	var resolved *session.ResolvedElsewhereError
+	if errors.As(err, &resolved) {
+		return protocol.DaemonEvent{
+			Type: "interaction_result", SessionID: sessionID, RequestID: resolved.RequestID,
+			Operation: operation, Status: session.InteractionResolvedElsewhere, Reason: session.InteractionResolvedElsewhere,
+		}
+	}
+	return protocol.DaemonEvent{
+		Type: "error", SessionID: sessionID, RequestID: requestID,
+		Operation: operation, Error: err.Error(),
 	}
 }
 
@@ -1834,6 +2000,7 @@ func handleWatcherEvents(ctx context.Context, events <-chan watcher.SessionEvent
 					// Tail loop: send parsed events with session_id stamped
 					ticker := time.NewTicker(1 * time.Second)
 					defer ticker.Stop()
+					hydrating := true
 					for {
 						select {
 						case <-ctx.Done():
@@ -1846,11 +2013,16 @@ func handleWatcherEvents(ctx context.Context, events <-chan watcher.SessionEvent
 							if err != nil {
 								continue
 							}
+							initialHydration := hydrating && (len(events) > 0 || len(rawLines) > 0)
+							if initialHydration {
+								events = terminalHydrationEvents(events, evt.Session.SessionID, evt.Session.Status)
+								hydrating = false
+							}
 							// Fresh tail output: refresh activity and, if the session had
 							// gone dormant (e.g. after `exit`), revive it so an `exit` →
 							// `claude --continue` resume reappears as live instead of staying
 							// frozen at "exited".
-							if len(events) > 0 {
+							if len(events) > 0 && !initialHydration {
 								sm.ReviveTerminalSessionOnActivity(evt.Session.SessionID)
 							}
 							for i := range events {
@@ -1969,6 +2141,7 @@ func buildSessionMeta(ctx context.Context, sm *session.SessionManager, sessionID
 	}
 	if agentType == adapter.AgentOpencode {
 		meta.Capabilities = sm.OpenCodeInteractionCapabilities(sessionID)
+		meta.ControlMode = sm.SessionControlMode(sessionID)
 		agentCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 		meta.CurrentAgent = sm.CurrentSessionAgent(agentCtx, sessionID)
 		cancel()
@@ -2289,23 +2462,46 @@ func handleCommands(ctx context.Context, client *ws.Client, sm *session.SessionM
 					err = sm.ResolveApproval(cmd.SessionID, cmd.RequestID, cmd.Approved)
 				}
 				if err != nil {
-					logger.Error("resolve approval failed", "error", err)
-					client.SendMsg(protocol.DaemonEvent{
-						Type: "error", SessionID: cmd.SessionID, RequestID: cmd.RequestID,
-						Operation: "approval_response", Error: err.Error(),
-					})
+					event := interactionCommandResultEvent("approval_response", cmd.SessionID, cmd.RequestID, err)
+					if event.Type == "error" {
+						logger.Error("resolve approval failed", "error", err)
+					} else {
+						logger.Info("approval already resolved", "session", cmd.SessionID, "req", cmd.RequestID)
+					}
+					client.SendMsg(event)
 				}
 
 			case "question_response":
 				if err := sm.ResolveQuestion(cmd.SessionID, cmd.RequestID, cmd.Answers); err != nil {
-					logger.Error("resolve question failed", "error", err)
-					client.SendMsg(protocol.DaemonEvent{Type: "error", SessionID: cmd.SessionID, RequestID: cmd.RequestID, Operation: "question_response", Error: err.Error()})
+					event := interactionCommandResultEvent("question_response", cmd.SessionID, cmd.RequestID, err)
+					if event.Type == "error" {
+						logger.Error("resolve question failed", "error", err)
+					} else {
+						logger.Info("question already resolved", "session", cmd.SessionID, "req", cmd.RequestID)
+					}
+					client.SendMsg(event)
 				}
 
 			case "question_reject":
 				if err := sm.RejectQuestion(cmd.SessionID, cmd.RequestID); err != nil {
-					logger.Error("reject question failed", "error", err)
-					client.SendMsg(protocol.DaemonEvent{Type: "error", SessionID: cmd.SessionID, RequestID: cmd.RequestID, Operation: "question_reject", Error: err.Error()})
+					event := interactionCommandResultEvent("question_reject", cmd.SessionID, cmd.RequestID, err)
+					if event.Type == "error" {
+						logger.Error("reject question failed", "error", err)
+					} else {
+						logger.Info("question already resolved", "session", cmd.SessionID, "req", cmd.RequestID)
+					}
+					client.SendMsg(event)
+				}
+
+			case "mcp_elicitation_response":
+				if err := sm.ResolveMcpElicitation(cmd.SessionID, cmd.RequestID, cmd.ElicitationAction, cmd.ElicitationContent); err != nil {
+					event := interactionCommandResultEvent("mcp_elicitation_response", cmd.SessionID, cmd.RequestID, err)
+					if event.Type == "error" {
+						logger.Error("resolve MCP elicitation failed", "session", cmd.SessionID, "req", cmd.RequestID, "error", err)
+					} else {
+						logger.Info("MCP elicitation already resolved", "session", cmd.SessionID, "req", cmd.RequestID)
+					}
+					client.SendMsg(event)
 				}
 
 			case "interactive_response":

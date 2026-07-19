@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/pocketctl/pocketctl/internal/adapter"
+	"github.com/pocketctl/pocketctl/internal/agentcontrol"
 	"github.com/pocketctl/pocketctl/internal/platform"
 )
 
@@ -38,12 +39,22 @@ type SessionState struct {
 // OpenCodeServeState is the private credential needed by a replacement daemon
 // to attach to the existing in-memory OpenCode serve process.
 type OpenCodeServeState struct {
-	PID       int       `json:"pid"`
-	BaseURL   string    `json:"base_url"`
-	Password  string    `json:"password"`
-	Version   string    `json:"version"`
-	OwnerPID  int       `json:"owner_pid"`
-	UpdatedAt time.Time `json:"updated_at"`
+	PID             int                                      `json:"pid"`
+	BaseURL         string                                   `json:"base_url"`
+	Password        string                                   `json:"password"`
+	Version         string                                   `json:"version"`
+	OwnerPID        int                                      `json:"owner_pid"`
+	Generation      uint64                                   `json:"generation,omitempty"`
+	ManagedSessions map[string]OpenCodeManagedSessionState   `json:"managed_sessions,omitempty"`
+	PendingForks    map[string][]OpenCodeManagedSessionState `json:"pending_forks,omitempty"`
+	Leases          map[string]agentcontrol.Lease            `json:"leases,omitempty"`
+	UpdatedAt       time.Time                                `json:"updated_at"`
+}
+
+type OpenCodeManagedSessionState struct {
+	CWD         string `json:"cwd"`
+	Generation  uint64 `json:"generation"`
+	ControlMode string `json:"control_mode"`
 }
 
 func OpenCodeServeStatePath() string {
@@ -173,6 +184,11 @@ func CleanupOpenCodeServeAfterForcedStop() error {
 	}
 	if err != nil {
 		return RemoveOpenCodeServeState()
+	}
+	leases := agentcontrol.NewLeaseRegistry()
+	leases.Restore(state.Leases)
+	if len(leases.Active(state.Generation)) > 0 {
+		return nil
 	}
 	if !platform.NewProcessController().IsAlive(state.PID) {
 		return RemoveOpenCodeServeState()

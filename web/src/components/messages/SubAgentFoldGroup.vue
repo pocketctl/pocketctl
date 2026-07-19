@@ -12,10 +12,10 @@
         <span class="safg-breadcrumb">{{ parentTitle }} › {{ displayTitle }}</span>
         <!-- Token pill (reuse ToolCallCard token-render style) -->
         <span v-if="tokenUsage" class="safg-tokens">
-          <span class="safg-tk" :title="'tokenIn ' + tokenUsage.tokenIn">↑{{ fmtTk(tokenUsage.tokenIn) }}</span>
-          <span class="safg-tk" :title="'tokenOut ' + tokenUsage.tokenOut">↓{{ fmtTk(tokenUsage.tokenOut) }}</span>
-          <span v-if="tokenUsage.tokenCache" class="safg-tk" :title="'cache ' + tokenUsage.tokenCache">⚡{{ fmtTk(tokenUsage.tokenCache) }}</span>
-          <span v-if="tokenUsage.tokenCacheCreate" class="safg-tk" :title="'cacheCreate ' + tokenUsage.tokenCacheCreate">+{{ fmtTk(tokenUsage.tokenCacheCreate) }}</span>
+          <span class="safg-tk" :title="'tokenIn ' + tokenUsage.tokenIn">↑{{ formatTokenCount(tokenUsage.tokenIn) }}</span>
+          <span class="safg-tk" :title="'tokenOut ' + tokenUsage.tokenOut">↓{{ formatTokenCount(tokenUsage.tokenOut) }}</span>
+          <span v-if="tokenUsage.tokenCache" class="safg-tk" :title="'cache ' + tokenUsage.tokenCache">⚡{{ formatTokenCount(tokenUsage.tokenCache) }}</span>
+          <span v-if="tokenUsage.tokenCacheCreate" class="safg-tk" :title="'cacheCreate ' + tokenUsage.tokenCacheCreate">+{{ formatTokenCount(tokenUsage.tokenCacheCreate) }}</span>
         </span>
         <!-- Chevron -->
         <svg class="safg-chevron" :class="{ open: expanded }" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -57,6 +57,7 @@
 <script setup lang="ts">
 import { ref, computed } from 'vue'
 import { useLocale } from '../../composables/useLocale'
+import { formatTokenCount } from '../../utils/tokenFormat'
 import MessageUser from './MessageUser.vue'
 import MessageAgent from './MessageAgent.vue'
 import ToolCallCard from './ToolCallCard.vue'
@@ -79,12 +80,6 @@ const expanded = ref(true)
 
 const displayTitle = computed(() => props.title || props.desc || props.agentId)
 
-function fmtTk(n: number): string {
-  n = n || 0
-  if (n >= 1e6) return (n / 1e6).toFixed(1) + 'M'
-  if (n >= 1e3) return (n / 1e3).toFixed(1) + 'K'
-  return String(n)
-}
 </script>
 
 <style scoped>

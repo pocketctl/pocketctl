@@ -89,10 +89,25 @@ func candidatePaths(cliName, home, pathEnv, npmPrefix string) []string {
 
 // resolveFrom 从有序候选中选择:优先第一个 manageable(owned)的;否则第一个存在的。
 func resolveFrom(candidates []string, statReal func(string) (string, bool), ownedByUser func(string) bool) (string, bool, bool) {
+	return resolveFromExcluding(candidates, statReal, ownedByUser, nil)
+}
+
+// resolveFromExcluding applies the normal ownership preference while skipping
+// candidates whose path or resolved target matches an excluded path.
+func resolveFromExcluding(candidates []string, statReal func(string) (string, bool), ownedByUser func(string) bool, excluded []string) (string, bool, bool) {
+	excludedPaths := make(map[string]struct{}, len(excluded))
+	for _, path := range excluded {
+		if normalized := normalizePath(path); normalized != "" {
+			excludedPaths[normalized] = struct{}{}
+		}
+	}
 	firstPath := ""
 	for _, c := range candidates {
 		real, ok := statReal(c)
 		if !ok {
+			continue
+		}
+		if pathExcluded(c, real, excludedPaths) {
 			continue
 		}
 		if firstPath == "" {
@@ -106,6 +121,26 @@ func resolveFrom(candidates []string, statReal func(string) (string, bool), owne
 		return firstPath, false, true
 	}
 	return "", false, false
+}
+
+func pathExcluded(candidate, real string, excluded map[string]struct{}) bool {
+	_, candidateExcluded := excluded[normalizePath(candidate)]
+	_, realExcluded := excluded[normalizePath(real)]
+	return candidateExcluded || realExcluded
+}
+
+func normalizePath(path string) string {
+	if strings.TrimSpace(path) == "" {
+		return ""
+	}
+	abs, err := filepath.Abs(path)
+	if err == nil {
+		path = abs
+	}
+	if real, err := filepath.EvalSymlinks(path); err == nil {
+		path = real
+	}
+	return filepath.Clean(path)
 }
 
 var (
@@ -129,6 +164,12 @@ func npmPrefix() string {
 // ResolveAgent 定位 agent 可执行文件。found=false 表示未安装;
 // manageable=true 表示真实二进制属当前 uid,可被就地升级。
 func ResolveAgent(cliName string) (string, bool, bool) {
+	return ResolveAgentExcluding(cliName)
+}
+
+// ResolveAgentExcluding locates an agent executable without returning a
+// Pocketctl-owned shim (or any other explicitly excluded path/target).
+func ResolveAgentExcluding(cliName string, excluded ...string) (string, bool, bool) {
 	home, _ := os.UserHomeDir()
 	cands := candidatePaths(cliName, home, os.Getenv("PATH"), npmPrefix())
 	statReal := func(p string) (string, bool) {
@@ -141,7 +182,7 @@ func ResolveAgent(cliName string) (string, bool, bool) {
 		}
 		return real, true
 	}
-	return resolveFrom(cands, statReal, fileOwnedByCurrentUser)
+	return resolveFromExcluding(cands, statReal, fileOwnedByCurrentUser, excluded)
 }
 
 // AgentUpgradeInfo returns the upgrade command and npm package for an agent type.

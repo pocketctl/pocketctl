@@ -2,16 +2,94 @@ package watcher
 
 import (
 	"context"
+	"path/filepath"
+	"strings"
 	"time"
+
+	"github.com/pocketctl/pocketctl/internal/platform"
 )
 
 // ProcessStateChange is emitted when a process changes from alive→dead
 type ProcessStateChange struct {
-	Pid     int
-	Alive   bool
+	Pid       int
+	Alive     bool
 	SessionID string
 }
 
+func UnmanagedOpenCodeProcesses(processes []platform.ProcessSnapshot, sharedBaseURL string) []platform.ProcessSnapshot {
+	out := make([]platform.ProcessSnapshot, 0)
+	for _, process := range processes {
+		agentIndex := openCodeArgIndex(process)
+		if agentIndex == -1 {
+			continue
+		}
+		if agentIndex >= 0 && isManagedOpenCodeInvocation(process.Args[agentIndex+1:], sharedBaseURL) {
+			continue
+		}
+		out = append(out, process)
+	}
+	return out
+}
+
+func HasUnmanagedOpenCodeProcessInCWD(processes []platform.ProcessSnapshot, cwd, sharedBaseURL string) bool {
+	want := canonicalProcessCWD(cwd)
+	for _, process := range UnmanagedOpenCodeProcesses(processes, sharedBaseURL) {
+		if want != "" && canonicalProcessCWD(process.CWD) == want {
+			return true
+		}
+	}
+	return false
+}
+
+func openCodeArgIndex(process platform.ProcessSnapshot) int {
+	for i, arg := range process.Args {
+		name := strings.TrimSuffix(strings.ToLower(filepath.Base(arg)), ".exe")
+		if name == "opencode" {
+			return i
+		}
+	}
+	name := strings.TrimSuffix(strings.ToLower(filepath.Base(process.Executable)), ".exe")
+	if name == "opencode" {
+		return -2 // executable is OpenCode but argv may be unavailable
+	}
+	return -1
+}
+
+func isManagedOpenCodeInvocation(args []string, sharedBaseURL string) bool {
+	sharedBaseURL = strings.TrimRight(sharedBaseURL, "/")
+	if sharedBaseURL == "" || len(args) == 0 {
+		return false
+	}
+	if args[0] == "attach" && len(args) > 1 {
+		return strings.TrimRight(args[1], "/") == sharedBaseURL
+	}
+	if args[0] != "run" {
+		return false
+	}
+	for i := 1; i < len(args); i++ {
+		if args[i] == "--attach" && i+1 < len(args) {
+			return strings.TrimRight(args[i+1], "/") == sharedBaseURL
+		}
+		if strings.HasPrefix(args[i], "--attach=") {
+			return strings.TrimRight(strings.TrimPrefix(args[i], "--attach="), "/") == sharedBaseURL
+		}
+	}
+	return false
+}
+
+func canonicalProcessCWD(cwd string) string {
+	if strings.TrimSpace(cwd) == "" {
+		return ""
+	}
+	abs, err := filepath.Abs(cwd)
+	if err != nil {
+		return filepath.Clean(cwd)
+	}
+	if resolved, err := filepath.EvalSymlinks(abs); err == nil {
+		return resolved
+	}
+	return filepath.Clean(abs)
+}
 
 // ProcessMonitor periodically checks PID liveness and reports changes.
 type ProcessMonitor struct {

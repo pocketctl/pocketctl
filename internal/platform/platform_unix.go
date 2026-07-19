@@ -12,6 +12,7 @@ import (
 
 	"github.com/creack/pty"
 	"github.com/pocketctl/pocketctl/internal/service"
+	gopsprocess "github.com/shirou/gopsutil/v3/process"
 	"golang.org/x/sys/unix"
 )
 
@@ -104,6 +105,25 @@ func (l fileLock) Close() error { return l.f.Close() }
 // NewProcessController 返回基于 Unix signal 的进程控制器。对齐现有 daemon.pid.go
 // 的 IsRunning/Stop 逻辑（PR2 接入时替换）。
 func NewProcessController() ProcessController { return unixProcessController{} }
+
+func NewProcessInspector() ProcessInspector { return unixProcessInspector{} }
+
+type unixProcessInspector struct{}
+
+func (unixProcessInspector) List() ([]ProcessSnapshot, error) {
+	processes, err := gopsprocess.Processes()
+	if err != nil {
+		return nil, err
+	}
+	out := make([]ProcessSnapshot, 0, len(processes))
+	for _, process := range processes {
+		args, _ := process.CmdlineSlice()
+		cwd, _ := process.Cwd()
+		executable, _ := process.Exe()
+		out = append(out, ProcessSnapshot{PID: int(process.Pid), Executable: executable, Args: args, CWD: cwd})
+	}
+	return out, nil
+}
 
 type unixProcessController struct{}
 

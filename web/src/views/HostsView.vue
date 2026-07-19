@@ -14,13 +14,13 @@
 
     <!-- 全局 Token 概览条（占位，待 C2/C3 接真实数据） -->
     <div class="token-global-strip">
-      <div class="tg-item"><span class="tg-num">{{ formatTokens(tokenGlobal?.total) }}</span><span class="tg-label">{{ t('dashboard.token_total') }}</span></div>
+              <div class="tg-item"><span class="tg-num">{{ formatTokenCount(tokenGlobal?.total) }}</span><span class="tg-label">{{ t('dashboard.token_total') }}</span></div>
       <div class="tg-sep"></div>
-      <div class="tg-item"><span class="tg-num">{{ formatTokens(tokenGlobal?.today) }}</span><span class="tg-label">{{ t('dashboard.token_today') }}</span></div>
+      <div class="tg-item"><span class="tg-num">{{ formatTokenCount(tokenGlobal?.today) }}</span><span class="tg-label">{{ t('dashboard.token_today') }}</span></div>
       <div class="tg-sep"></div>
-      <div class="tg-item"><span class="tg-num">{{ formatTokens(tokenGlobal?.thisWeek) }}</span><span class="tg-label">{{ t('dashboard.token_week') }}</span></div>
+      <div class="tg-item"><span class="tg-num">{{ formatTokenCount(tokenGlobal?.thisWeek) }}</span><span class="tg-label">{{ t('dashboard.token_week') }}</span></div>
       <div class="tg-sep"></div>
-      <div class="tg-item"><span class="tg-num">{{ formatTokens(tokenGlobal?.thisMonth) }}</span><span class="tg-label">{{ t('dashboard.token_month') }}</span></div>
+      <div class="tg-item"><span class="tg-num">{{ formatTokenCount(tokenGlobal?.thisMonth) }}</span><span class="tg-label">{{ t('dashboard.token_month') }}</span></div>
     </div>
 
     <!-- 筛选 + 搜索 -->
@@ -169,9 +169,9 @@
           <div class="hd-section">
             <div class="hd-section-title">{{ t('dashboard.token_usage') }}</div>
             <div class="token-overview">
-              <div class="token-stat"><div class="tk-num">{{ formatTokens(daemonCost?.total) }}</div><div class="tk-label">{{ t('hosts.token_host_total') }}</div></div>
-              <div class="token-stat"><div class="tk-num accent">{{ formatTokens(daemonCost?.today) }}</div><div class="tk-label">{{ t('hosts.token_today_consumed') }}</div></div>
-              <div class="token-stat"><div class="tk-num">{{ formatTokens(daemonCost?.thisMonth) }}</div><div class="tk-label">{{ t('hosts.token_month_consumed') }}</div></div>
+              <div class="token-stat"><div class="tk-num">{{ formatTokenCount(daemonCost?.total) }}</div><div class="tk-label">{{ t('hosts.token_host_total') }}</div></div>
+              <div class="token-stat"><div class="tk-num accent">{{ formatTokenCount(daemonCost?.today) }}</div><div class="tk-label">{{ t('hosts.token_today_consumed') }}</div></div>
+              <div class="token-stat"><div class="tk-num">{{ formatTokenCount(daemonCost?.thisMonth) }}</div><div class="tk-label">{{ t('hosts.token_month_consumed') }}</div></div>
             </div>
             <div class="session-token-list">
               <template v-if="sortedCostSessions.length">
@@ -179,13 +179,13 @@
                   <span class="st-rank">{{ (costExpanded ? (costPage - 1) * 10 : 0) + i + 1 }}</span>
                   <span class="st-title">{{ s.title || s.session_id.slice(0, 8) }}</span>
                   <AgentBadge :agent="s.agent_type" size="sm" />
-                  <span class="st-tokens">{{ formatTokens(s.total_tokens) }}</span>
+                  <span class="st-tokens">{{ formatTokenCount(s.total_tokens) }}</span>
                   <button class="st-expand" @click.stop="toggleTokenExpand(s.session_id)" :aria-expanded="expandedTokenSession === s.session_id">{{ expandedTokenSession === s.session_id ? '▾' : '▸' }}</button>
                   <div v-if="expandedTokenSession === s.session_id" class="st-breakdown">
-                    <div class="stb-item"><span class="stb-label">{{ t('dashboard.token_input') }}</span><span class="stb-val">{{ formatTokens(s.tok_input) }}</span></div>
-                    <div class="stb-item"><span class="stb-label">{{ t('dashboard.token_output') }}</span><span class="stb-val">{{ formatTokens(s.tok_output) }}</span></div>
-                    <div class="stb-item"><span class="stb-label">{{ t('dashboard.token_cache_read') }}</span><span class="stb-val">{{ formatTokens(s.tok_cache_read) }}</span></div>
-                    <div class="stb-item"><span class="stb-label">{{ t('dashboard.token_cache_create') }}</span><span class="stb-val">{{ formatTokens(s.tok_cache_create) }}</span></div>
+                    <div class="stb-item"><span class="stb-label">{{ t('dashboard.token_input') }}</span><span class="stb-val">{{ formatTokenCount(s.tok_input) }}</span></div>
+                    <div class="stb-item"><span class="stb-label">{{ t('dashboard.token_output') }}</span><span class="stb-val">{{ formatTokenCount(s.tok_output) }}</span></div>
+                    <div class="stb-item"><span class="stb-label">{{ t('dashboard.token_cache_read') }}</span><span class="stb-val">{{ formatTokenCount(s.tok_cache_read) }}</span></div>
+                    <div class="stb-item"><span class="stb-label">{{ t('dashboard.token_cache_create') }}</span><span class="stb-val">{{ formatTokenCount(s.tok_cache_create) }}</span></div>
                   </div>
                 </div>
                 <a v-if="sortedCostSessions.length > 5 && !costExpanded" class="st-more" @click="costExpanded = true">{{ t('common.all') }} {{ sortedCostSessions.length }} →</a>
@@ -297,6 +297,7 @@ import { useQuota } from '../composables/useQuota'
 import RegisterDaemonDialog from '../components/RegisterDaemonDialog.vue'
 import AgentBadge from '../components/AgentBadge.vue'
 import { getRelayOrigin } from '../composables/useEnv'
+import { formatTokenCount } from '../utils/tokenFormat'
 
 const router = useRouter()
 const ws = useWebSocket()
@@ -330,14 +331,6 @@ const upgrading = ref('')
 const tokenGlobal = ref<{ total: number; today: number; thisWeek: number; thisMonth: number } | null>(null)
 const daemonCost = ref<{ total: number; today: number; thisMonth: number; sessions: Array<{ session_id: string; title: string; total_tokens: number; tok_input: number; tok_output: number; tok_cache_read: number; tok_cache_create: number; model: string; agent_type: string; status: string; created_at: Date }> } | null>(null)
 
-function formatTokens(v: number | null | undefined): string {
-  if (v == null) return '—'
-  if (v === 0) return '0'
-  if (v >= 1e9) return (v / 1e9).toFixed(2) + 'B'
-  if (v >= 1e6) return (v / 1e6).toFixed(2) + 'M'
-  if (v >= 1e3) return (v / 1e3).toFixed(1) + 'K'
-  return String(v)
-}
 async function fetchCostSummary() {
   const origin = getRelayOrigin()
   try {

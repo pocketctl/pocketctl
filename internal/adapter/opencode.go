@@ -24,9 +24,10 @@ import (
 
 // OpencodeSessionSummary is a session list item from GET /api/session.
 type OpencodeSessionSummary struct {
-	ID    string `json:"id"`
-	Title string `json:"title"`
-	Time  struct {
+	ID       string `json:"id"`
+	ParentID string `json:"parentID,omitempty"`
+	Title    string `json:"title"`
+	Time     struct {
 		Created int64 `json:"created"`
 		Updated int64 `json:"updated"`
 	} `json:"time"`

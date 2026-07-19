@@ -1,5 +1,5 @@
 import { describe, test, expect, vi } from 'vitest'
-import { listSessionsWithChildren, getSessionTokenBreakdown } from '../db.js'
+import { listSessionsWithChildren, getSessionTokenBreakdown, getTokensByDaemon } from '../db.js'
 
 describe('db subagent token API (P1a)', () => {
   test('listSessionsWithChildren: returns parent token + children tokenCacheCreate', async () => {
@@ -9,7 +9,8 @@ describe('db subagent token API (P1a)', () => {
           return { rows: [{ session_id: 'p1', daemon_id: 'd1', agent_type: 'claude-code', cwd: '/', title: 't', source: 'daemon', status: 'running', subagent_count: 1, pinned: false, model: 'm', total_tokens: 1000, tok_input: 400, tok_output: 300, tok_cache_read: 200, tok_cache_create: 100, daemon_status: 'online', hostname: 'h', daemon_alias: null }] }
         }
         if (/FROM subagents/i.test(sql)) {
-          return { rows: [{ parent_session_id: 'p1', agent_id: 'a1', kind: 'claude_subagent', agent_type: 'Explore', title: '探索', status: 'completed', token_in: 100, token_out: 200, token_cache: 50, token_cache_create: 30 }] }
+          // node-postgres returns BIGINT columns as strings by default.
+          return { rows: [{ parent_session_id: 'p1', agent_id: 'a1', kind: 'claude_subagent', agent_type: 'Explore', title: '探索', status: 'completed', token_in: '100', token_out: '200', token_cache: '50', token_cache_create: '30' }] }
         }
         return { rows: [] }
       }),
@@ -49,5 +50,39 @@ describe('db subagent token API (P1a)', () => {
   test('getSessionTokenBreakdown: unknown session returns null', async () => {
     const pool: any = { query: vi.fn(async () => ({ rows: [] })) }
     expect(await getSessionTokenBreakdown(pool, 42, 'unknown')).toBeNull()
+  })
+
+  test('getTokensByDaemon: includes all child token fields in the parent total', async () => {
+    const pool: any = {
+      query: vi.fn(async (sql: string) => {
+        if (/SELECT 1 FROM daemons/i.test(sql)) return { rowCount: 1, rows: [{ '?column?': 1 }] }
+        if (/WITH turn_tokens AS/i.test(sql)) return { rows: [{ total: 1380, today: 1380, this_month: 1380 }] }
+        if (/SELECT session_id, COALESCE\(title/i.test(sql)) {
+          return { rows: [{
+            session_id: 'p1', title: 'parent', total_tokens: 1000,
+            tok_input: 400, tok_output: 300, tok_cache_read: 200, tok_cache_create: 100,
+            model: 'm', agent_type: 'claude-code', status: 'running', created_at: new Date(),
+            parent_session_id: '',
+          }] }
+        }
+        if (/FROM subagents/i.test(sql)) {
+          return { rows: [{
+            parent_session_id: 'p1', agent_id: 'a1', kind: 'claude_subagent',
+            agent_type: 'Explore', title: 'child', status: 'completed',
+            token_in: 100, token_out: 200, token_cache: 50, token_cache_create: 30,
+          }] }
+        }
+        return { rows: [] }
+      }),
+    }
+
+    const result = await getTokensByDaemon(pool, 42, 'd1')
+
+    expect(result?.sessions[0]).toMatchObject({
+      session_id: 'p1',
+      total_tokens: 1380,
+      children: [{ agentId: 'a1', tokenCacheCreate: 30 }],
+    })
+    expect(pool.query).toHaveBeenCalledTimes(6)
   })
 })

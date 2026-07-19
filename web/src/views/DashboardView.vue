@@ -22,13 +22,13 @@
     <div class="token-strip">
       <span class="ts-prefix">{{ t('dashboard.token_usage') }}</span>
       <span class="ts-sep"></span>
-      <span class="ts-item"><span class="ts-num">{{ formatTokens(tokenSummary.total) }}</span>{{ t('dashboard.token_total') }}</span>
+      <span class="ts-item"><span class="ts-num">{{ formatTokenCount(tokenSummary.total) }}</span>{{ t('dashboard.token_total') }}</span>
       <span class="ts-sep"></span>
-      <span class="ts-item"><span class="ts-num">{{ formatTokens(tokenSummary.today) }}</span>{{ t('dashboard.token_today') }}</span>
+      <span class="ts-item"><span class="ts-num">{{ formatTokenCount(tokenSummary.today) }}</span>{{ t('dashboard.token_today') }}</span>
       <span class="ts-sep"></span>
-      <span class="ts-item"><span class="ts-num">{{ formatTokens(tokenSummary.week) }}</span>{{ t('dashboard.token_week') }}</span>
+      <span class="ts-item"><span class="ts-num">{{ formatTokenCount(tokenSummary.week) }}</span>{{ t('dashboard.token_week') }}</span>
       <span class="ts-sep"></span>
-      <span class="ts-item"><span class="ts-num">{{ formatTokens(tokenSummary.month) }}</span>{{ t('dashboard.token_month') }}</span>
+      <span class="ts-item"><span class="ts-num">{{ formatTokenCount(tokenSummary.month) }}</span>{{ t('dashboard.token_month') }}</span>
     </div>
 
     <!-- Daemon Section -->
@@ -150,7 +150,7 @@
               @click.stop @keydown.enter="sessCommitRename(s)" @keydown.escape="sessCancelRename" @blur="sessCommitRename(s)" />
             <span v-else :class="['session-title', { mono: !s.title || s.title.startsWith('Terminal Session') }]">{{ s.title || s.session_id.slice(0, 8) }}</span>
             <span v-if="s.subagent_count > 0" class="meta-chip subagent-chip">🤖 {{ s.subagent_count }}</span>
-            <span v-if="s.totalTokens > 0" class="meta-chip token-chip" :title="t('session.total_incl_subagent')">🪙 {{ fmtTk(s.totalTokens) }}</span>
+            <span v-if="s.totalTokens > 0" class="meta-chip token-chip" :title="t('session.total_incl_subagent')">🪙 {{ formatTokenCount(s.totalTokens) }}</span>
             <AgentBadge :agent="s.agent_type" size="sm" />
           </div>
           <div class="session-daemon">{{ s.daemon_alias || s.hostname || s.daemon_id?.slice(0, 8) }}</div>
@@ -167,7 +167,7 @@
             @keydown.enter="$router.push(`/session/${s.session_id}?subagent=${c.agentId}`)">
             <span class="child-indent">↳</span>
             <span class="child-title">{{ c.title || c.agentId.slice(0, 8) }}</span>
-            <span v-if="(c.tokenIn||0)+(c.tokenOut||0) > 0" class="child-token">🪙 {{ fmtTk((c.tokenIn||0)+(c.tokenOut||0)) }}</span>
+            <span v-if="childAgentTokenTotal(c) > 0" class="child-token">🪙 {{ formatTokenCount(childAgentTokenTotal(c)) }}</span>
           </div>
         </div>
       </template>
@@ -218,6 +218,7 @@ import SessionActions from '../components/SessionActions.vue'
 import AgentBadge from '../components/AgentBadge.vue'
 import { getInstallCommand, getRelayOrigin } from '../composables/useEnv'
 import { useSessionRename } from '../composables/useSessionRename'
+import { formatTokenCount, childAgentTokenTotal } from '../utils/tokenFormat'
 
 const { renamingId: sessRenamingId, renameInput: sessRenameInput, startRename: sessStartRename, commitRename: sessCommitRename, cancelRename: sessCancelRename } = useSessionRename()
 
@@ -241,14 +242,6 @@ const selectedDaemon = ref<string | null>(null)
 
 // Token cost summary
 const tokenSummary = ref({ total: 0, today: 0, week: 0, month: 0 })
-function formatTokens(v: number | null | undefined): string {
-  if (v == null) return '—'
-  if (v === 0) return '0'
-  if (v >= 1e9) return (v / 1e9).toFixed(2) + 'B'
-  if (v >= 1e6) return (v / 1e6).toFixed(2) + 'M'
-  if (v >= 1e3) return (v / 1e3).toFixed(1) + 'K'
-  return String(v)
-}
 async function fetchCostSummary() {
   const origin = getRelayOrigin()
   try {
@@ -278,12 +271,6 @@ const sortedSessions = computed(() => [...sessions.value].filter(s => !s.is_suba
 // subagent 折叠组：父 session 展开/收起其子代理列表
 const folded = ref<Record<string, boolean>>({})
 function toggleFold(id: string) { folded.value[id] = !folded.value[id] }
-function fmtTk(n: number) {
-  n = +n || 0
-  if (n >= 1e6) return (n / 1e6).toFixed(1) + 'M'
-  if (n >= 1e3) return (n / 1e3).toFixed(0) + 'K'
-  return '' + n
-}
 
 const filteredSessions = computed(() => {
   if (!selectedDaemon.value) return sortedSessions.value

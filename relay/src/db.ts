@@ -41,6 +41,8 @@ export async function initDB(pool: pg.Pool): Promise<void> {
       title TEXT,
       source VARCHAR(16) DEFAULT 'daemon',
       status VARCHAR(32) DEFAULT 'running',
+      control_mode VARCHAR(32),
+      capabilities JSONB,
       created_at TIMESTAMPTZ DEFAULT NOW(),
       updated_at TIMESTAMPTZ DEFAULT NOW()
     );
@@ -66,8 +68,13 @@ export async function initDB(pool: pg.Pool): Promise<void> {
   await pool.query(`ALTER TABLE sessions ADD COLUMN IF NOT EXISTS source VARCHAR(16) DEFAULT 'daemon'`);
   // OpenCode's runtime agent (build/plan/...) is independent from agent_type.
   await pool.query(`ALTER TABLE sessions ADD COLUMN IF NOT EXISTS active_agent VARCHAR(128)`);
+  // Managed OpenCode control is an explicit daemon claim. Keep control_mode
+  // nullable so historical rows remain safely distinguishable from managed.
+  await pool.query(`ALTER TABLE sessions ADD COLUMN IF NOT EXISTS control_mode VARCHAR(32)`);
+  await pool.query(`ALTER TABLE sessions ADD COLUMN IF NOT EXISTS capabilities JSONB`);
   // Migration: add last_activity_at and exit_reason columns
   await pool.query(`ALTER TABLE sessions ADD COLUMN IF NOT EXISTS last_activity_at TIMESTAMPTZ`);
+  await pool.query(`ALTER TABLE sessions ADD COLUMN IF NOT EXISTS turn_started_at TIMESTAMPTZ`);
   await pool.query(`ALTER TABLE sessions ADD COLUMN IF NOT EXISTS exit_reason VARCHAR(32)`);
   // Migration: add subagent_count column
   await pool.query(`ALTER TABLE sessions ADD COLUMN IF NOT EXISTS subagent_count INT DEFAULT 0`);
@@ -797,6 +804,19 @@ export async function getSessionStatus(pool: pg.Pool, sessionId: string): Promis
   return result.rows[0]?.status ?? null;
 }
 
+export async function getSessionRuntime(pool: pg.Pool, sessionId: string): Promise<{ status: string | null; turnStartedAt: string | null; lastActivityAt: string | null }> {
+  const result = await pool.query(
+    `SELECT status, turn_started_at, last_activity_at FROM sessions WHERE session_id = $1`,
+    [sessionId]
+  );
+  const row = result.rows[0];
+  return {
+    status: row?.status ?? null,
+    turnStartedAt: row?.turn_started_at ? new Date(row.turn_started_at).toISOString() : null,
+    lastActivityAt: row?.last_activity_at ? new Date(row.last_activity_at).toISOString() : null,
+  };
+}
+
 export async function getRecentSubagentEvents(pool: pg.Pool, sessionId: string, agentId: string, limit: number): Promise<any[]> {
   const result = await pool.query(
     `SELECT id, session_id, event_type, payload, created_at
@@ -839,7 +859,8 @@ export async function listSessionsWithChildren(pool: pg.Pool, whereUser?: number
   if (whereUser !== undefined) baseParams.push(whereUser);
   const result = await pool.query(
     `SELECT s.session_id, s.daemon_id, s.agent_type, s.active_agent, s.cwd, s.title, s.source, s.status,
-            s.created_at, s.updated_at, s.last_activity_at, s.exit_reason, s.subagent_count, s.pinned,
+            s.control_mode, s.capabilities,
+            s.created_at, s.updated_at, s.last_activity_at, s.turn_started_at, s.exit_reason, s.subagent_count, s.pinned,
             s.model, s.parent_session_id, s.is_subagent, s.root_session_id,
             s.total_tokens, s.tok_input, s.tok_output, s.tok_cache_read, s.tok_cache_create,
             d.status AS daemon_status, d.hostname AS hostname, d.alias AS daemon_alias
@@ -863,15 +884,19 @@ function groupSubagentsByParent(rows: any[]): { byParent: Map<string, any[]>; su
   const byParent = new Map<string, any[]>();
   const sumChildren = new Map<string, number>();
   for (const r of rows) {
+    // node-postgres returns BIGINT as strings. Normalize at the API boundary so
+    // clients cannot accidentally concatenate token fields with JavaScript `+`.
+    const tokenIn = Number(r.token_in || 0);
+    const tokenOut = Number(r.token_out || 0);
+    const tokenCache = Number(r.token_cache || 0);
+    const tokenCacheCreate = Number(r.token_cache_create || 0);
     if (!byParent.has(r.parent_session_id)) byParent.set(r.parent_session_id, []);
     byParent.get(r.parent_session_id)!.push({
       agentId: r.agent_id, kind: r.kind, agentType: r.agent_type, title: r.title,
-      status: r.status, tokenIn: r.token_in, tokenOut: r.token_out,
-      tokenCache: r.token_cache, tokenCacheCreate: r.token_cache_create,
+      status: r.status, tokenIn, tokenOut, tokenCache, tokenCacheCreate,
     });
     // 累加该 child 的四列 token 之和到其 parent 桶，用于把子用量并入 totalTokens。
-    const childSum = Number(r.token_in || 0) + Number(r.token_out || 0)
-      + Number(r.token_cache || 0) + Number(r.token_cache_create || 0);
+    const childSum = tokenIn + tokenOut + tokenCache + tokenCacheCreate;
     sumChildren.set(r.parent_session_id, (sumChildren.get(r.parent_session_id) ?? 0) + childSum);
   }
   return { byParent, sumChildren };
@@ -882,6 +907,8 @@ function serializeSessionRow(row: any, byParent: Map<string, any[]>, sumChildren
   const children = byParent.get(row.session_id) || [];
   return {
     ...row,
+    control_mode: row.control_mode ?? (row.agent_type === 'opencode' ? 'legacy_read_only' : null),
+    capabilities: Array.isArray(row.capabilities) ? row.capabilities : [],
     // totalTokens = 父会话自身用量 + Σ所有子智能体用量（让 UI 标注的「含子智能体」名副其实；
     // 父明细 tok_input/output/cache_* 不并子项，保留 breakdown 展开）。
     totalTokens: parseInt(row.total_tokens ?? 0, 10) + childSum,
@@ -960,6 +987,7 @@ export async function listSessionsPageByDaemon(pool: pg.Pool, opts: {
   const queryStartedAt = Date.now();
   const result = await pool.query(
     `SELECT s.session_id, s.daemon_id, s.agent_type, s.active_agent, s.cwd, s.title, s.source, s.status,
+            s.control_mode, s.capabilities,
             s.created_at, s.updated_at, s.last_activity_at, s.exit_reason, s.subagent_count, s.pinned,
             s.model, s.parent_session_id, s.is_subagent, s.root_session_id,
             s.total_tokens, s.tok_input, s.tok_output, s.tok_cache_read, s.tok_cache_create,
@@ -1052,10 +1080,10 @@ export async function getSessionTokenBreakdown(pool: pg.Pool, userId: number, se
   };
 }
 
-export async function upsertSession(pool: pg.Pool, sessionId: string, daemonId: string, agentType: string, cwd: string, status: string, title?: string, source?: string, exitReason?: string, userId?: number, model?: string): Promise<void> {
+export async function upsertSession(pool: pg.Pool, sessionId: string, daemonId: string, agentType: string, cwd: string, status: string, title?: string, source?: string, exitReason?: string, userId?: number, model?: string, controlMode?: string, capabilities?: string[]): Promise<void> {
   await pool.query(
-    `INSERT INTO sessions (session_id, daemon_id, agent_type, cwd, title, source, status, exit_reason, user_id, model, created_at, updated_at)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NOW(), NOW())
+    `INSERT INTO sessions (session_id, daemon_id, agent_type, cwd, title, source, status, exit_reason, user_id, model, control_mode, capabilities, created_at, updated_at)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12::jsonb, NOW(), NOW())
      ON CONFLICT (session_id) DO UPDATE SET
        daemon_id = $2,
        status = $7,
@@ -1069,8 +1097,17 @@ export async function upsertSession(pool: pg.Pool, sessionId: string, daemonId: 
        exit_reason = COALESCE($8, sessions.exit_reason),
        user_id = CASE WHEN $9 IS NOT NULL THEN $9 ELSE sessions.user_id END,
        model = COALESCE($10, sessions.model),
+       control_mode = COALESCE($11, sessions.control_mode),
+       capabilities = COALESCE($12::jsonb, sessions.capabilities),
        updated_at = NOW()`,
-    [sessionId, daemonId, agentType, cwd, title || null, source || 'daemon', status, exitReason || null, userId || null, model || null]
+    [sessionId, daemonId, agentType, cwd, title || null, source || 'daemon', status, exitReason || null, userId || null, model || null, controlMode || null, capabilities ? JSON.stringify(capabilities) : null]
+  );
+}
+
+export async function updateSessionControl(pool: pg.Pool, sessionId: string, controlMode: string, capabilities: string[]): Promise<void> {
+  await pool.query(
+    `UPDATE sessions SET control_mode = $1, capabilities = $2::jsonb, updated_at = NOW() WHERE session_id = $3`,
+    [controlMode, JSON.stringify(capabilities), sessionId],
   );
 }
 
@@ -1872,16 +1909,25 @@ export async function bindTokenToDaemon(pool: pg.Pool, daemonId: string, jti: st
  *  session_discovered is ever emitted — only session_status). Upserting on those
  *  produced phantom rows with empty cwd/agent/title showing "status + time, no
  *  messages". Returns true if an existing row was updated. */
-export async function updateSessionStatus(pool: pg.Pool, sessionId: string, daemonId: string, status: string, exitReason?: string, userId?: number): Promise<boolean> {
+export async function updateSessionStatus(pool: pg.Pool, sessionId: string, daemonId: string, status: string, exitReason?: string, userId?: number, turnStartedAt?: string): Promise<boolean> {
   const res = await pool.query(
-    `UPDATE sessions SET
+    `WITH input AS (
+       SELECT $3::varchar AS status, $6::timestamptz AS turn_started_at
+     )
+     UPDATE sessions SET
        daemon_id = $2,
-       status = $3,
+       status = input.status,
        exit_reason = COALESCE($4, sessions.exit_reason),
        user_id = COALESCE($5::int, sessions.user_id),
+       turn_started_at = CASE
+         WHEN input.status IN ('running', 'busy', 'retry', 'waiting', 'waiting_approval', 'waiting_question')
+           THEN COALESCE(input.turn_started_at, sessions.turn_started_at, NOW())
+         ELSE NULL
+       END,
        updated_at = NOW()
+     FROM input
      WHERE session_id = $1`,
-    [sessionId, daemonId, status, exitReason || null, userId || null]
+    [sessionId, daemonId, status, exitReason || null, userId || null, turnStartedAt || null]
   );
   return (res.rowCount ?? 0) > 0;
 }
@@ -2325,15 +2371,30 @@ export async function getTokensByDaemon(pool: pg.Pool, userId: number, daemonId:
   }
   const byAgent = Array.from(byAgentMap.values()).sort((a, b) => b.total - a.total);
 
+  const parentSessionIds = (sess.rows as any[])
+    .filter((r) => r.parent_session_id === '')
+    .map((r) => r.session_id);
+  const subagentRows = parentSessionIds.length > 0
+    ? await pool.query(
+      `SELECT parent_session_id, agent_id, kind, agent_type, title, status,
+              token_in, token_out, token_cache, token_cache_create
+       FROM subagents
+       WHERE parent_session_id = ANY($1::text[])
+       ORDER BY created_at ASC`,
+      [parentSessionIds],
+    )
+    : { rows: [] };
+  const { byParent, sumChildren } = groupSubagentsByParent(subagentRows.rows);
+
   const t = totals.rows[0] || {};
   return {
     total: parseInt(t.total ?? 0, 10),
     today: parseInt(t.today ?? 0, 10),
     thisMonth: parseInt(t.this_month ?? 0, 10),
-    sessions: await Promise.all((sess.rows as any[]).map(async (r) => ({
+    sessions: (sess.rows as any[]).map((r) => ({
       session_id: r.session_id,
       title: r.title,
-      total_tokens: parseInt(r.total_tokens ?? 0, 10),
+      total_tokens: parseInt(r.total_tokens ?? 0, 10) + (sumChildren.get(r.session_id) ?? 0),
       tok_input: parseInt(r.tok_input ?? 0, 10),
       tok_output: parseInt(r.tok_output ?? 0, 10),
       tok_cache_read: parseInt(r.tok_cache_read ?? 0, 10),
@@ -2342,8 +2403,8 @@ export async function getTokensByDaemon(pool: pg.Pool, userId: number, daemonId:
       agent_type: r.agent_type,
       status: r.status,
       created_at: r.created_at,
-      children: r.parent_session_id === '' ? await listSubagentsByParent(pool, r.session_id) : [],
-    }))),
+      children: r.parent_session_id === '' ? (byParent.get(r.session_id) ?? []) : [],
+    })),
     byAgent,
   };
 }

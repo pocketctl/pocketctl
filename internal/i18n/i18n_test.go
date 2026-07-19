@@ -156,3 +156,16 @@ func TestKeyNamingConvention(t *testing.T) {
 		}
 	}
 }
+
+func TestHelpDocumentsOpenCodeAgentControl(t *testing.T) {
+	t.Cleanup(func() { Set(English) })
+	for _, lang := range []Lang{English, Chinese} {
+		Set(lang)
+		help := T("help.body")
+		for _, text := range []string{"agent opencode", "enable", "disable", "status", "--no-agent-prompt", "opencode --native"} {
+			if !strings.Contains(help, text) {
+				t.Fatalf("lang=%v help missing %q", lang, text)
+			}
+		}
+	}
+}

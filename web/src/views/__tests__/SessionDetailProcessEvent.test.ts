@@ -137,4 +137,40 @@ describe('SessionDetail processEvent integration', () => {
     expect(errors).toHaveLength(1)
     expect(errors[0]).toMatchObject({ content: event.error, eventKey: event.event_id })
   })
+
+  test('preserves Codex approval decisions and redacted user-input metadata', () => {
+    const wrapper = shallowMount(SessionDetail)
+    const vm = wrapper.vm as any
+    vm.processEvent({
+      type: 'approval_request', request_id: 'codex:1:a', approval_kind: 'commandExecution',
+      available_decisions: ['accept', 'cancel'], command: 'rm a', cwd: '/repo', description: 'needs write',
+    })
+    expect(vm.messages.find((message: any) => message.request_id === 'codex:1:a')).toMatchObject({
+      status: 'pending', approvalKind: 'commandExecution', availableDecisions: ['accept', 'cancel'], inputDesc: 'rm a', cwd: '/repo',
+    })
+
+    vm.processEvent({
+      type: 'question_request', request_id: 'codex:1:q', auto_resolution_ms: 60000,
+      questions: [{ id: 'token', question: 'Token?', custom: true, secret: true }],
+    })
+    vm.processEvent({ type: 'question_resolved', request_id: 'codex:1:q', redacted: true })
+    expect(vm.messages.find((message: any) => message.request_id === 'codex:1:q')).toMatchObject({
+      status: 'resolved', autoResolutionMs: 60000, redacted: true, answers: [],
+    })
+  })
+
+  test('projects MCP elicitation requests and redacted resolutions', () => {
+    const wrapper = shallowMount(SessionDetail)
+    const vm: any = wrapper.vm
+    vm.processEvent({
+      type: 'mcp_elicitation_request', request_id: 'mcp_1', mcp_server: 'github',
+      elicitation_mode: 'form', message: 'Configure',
+      elicitation_schema: { type: 'object', properties: { repo: { type: 'string' } } },
+    })
+    expect(vm.messages.find((message: any) => message.request_id === 'mcp_1')).toMatchObject({
+      type: 'mcp_elicitation_request', status: 'pending', mcpServer: 'github', elicitationMode: 'form', message: 'Configure',
+    })
+    vm.processEvent({ type: 'mcp_elicitation_resolved', request_id: 'mcp_1', action: 'accept', redacted: true })
+    expect(vm.messages.find((message: any) => message.request_id === 'mcp_1')).toMatchObject({ status: 'resolved', action: 'accept', redacted: true })
+  })
 })

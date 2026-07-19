@@ -8,6 +8,20 @@ export interface SessionAgentOption {
   hidden?: boolean
 }
 
+export type InteractionRequestType = 'approval_request' | 'question_request' | 'mcp_elicitation_request'
+
+export function isManagedOpenCodeSession(agent: string, controlMode: unknown, capabilities: unknown): boolean {
+  return agent === 'opencode'
+    && controlMode === 'managed'
+    && Array.isArray(capabilities)
+    && capabilities.includes('shared_runtime')
+}
+
+export function canControlOpenCodeInteractions(agent: string, controlMode: unknown, capabilities: unknown): boolean {
+  return isManagedOpenCodeSession(agent, controlMode, capabilities)
+    && (capabilities as string[]).includes('terminal_coapproval')
+}
+
 export function normalizeSessionAgents(input: unknown): SessionAgentOption[] {
   if (!Array.isArray(input)) return []
   const seen = new Set<string>()
@@ -39,7 +53,7 @@ export function sessionAgentSwitchDisabled(status: string, offline: boolean, sub
 
 export function upsertInteractionRequest(
   messages: any[],
-  type: 'approval_request' | 'question_request',
+  type: InteractionRequestType,
   requestId: string,
   incoming: Record<string, unknown>,
 ): any {
@@ -62,7 +76,7 @@ export function upsertInteractionRequest(
 
 export function resolveInteractionRequest(
   messages: any[],
-  type: 'approval_request' | 'question_request',
+  type: InteractionRequestType,
   requestId: string,
   resolution: Record<string, unknown>,
 ): boolean {

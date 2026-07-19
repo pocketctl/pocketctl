@@ -82,6 +82,57 @@ func wsURL(httpURL string) string {
 	return "ws" + strings.TrimPrefix(httpURL, "http")
 }
 
+func TestPingIncludesContentFreeOpenCodeTelemetry(t *testing.T) {
+	observed := make(chan protocol.OpenCodeRuntimeTelemetry, 1)
+	upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		for {
+			_, raw, err := conn.ReadMessage()
+			if err != nil {
+				return
+			}
+			var message protocol.PingMessage
+			if json.Unmarshal(raw, &message) != nil {
+				continue
+			}
+			if message.Type == "register" {
+				_ = conn.WriteJSON(map[string]any{"type": "register_ack", "supports_event_ack": true})
+				continue
+			}
+			if message.Type == "ping" && message.OpenCodeRuntime != nil {
+				observed <- *message.OpenCodeRuntime
+				_ = conn.WriteJSON(map[string]string{"type": "pong"})
+				return
+			}
+		}
+	}))
+	defer server.Close()
+
+	client := newTestClient(wsURL(server.URL))
+	client.SetOpenCodeRuntimeTelemetryFn(func() protocol.OpenCodeRuntimeTelemetry {
+		return protocol.OpenCodeRuntimeTelemetry{
+			FallbackReasons: map[string]uint64{"daemon_unavailable": 3}, HealthOK: 5, HealthFailed: 1,
+		}
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go client.Run(ctx)
+
+	select {
+	case snapshot := <-observed:
+		if snapshot.FallbackReasons["daemon_unavailable"] != 3 || snapshot.HealthOK != 5 || snapshot.HealthFailed != 1 {
+			t.Fatalf("telemetry=%+v", snapshot)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("heartbeat did not include OpenCode telemetry")
+	}
+}
+
 func TestHostQuotaRejectionStopsReconnectLoop(t *testing.T) {
 	var conns int32
 	upgrader := websocket.Upgrader{}
@@ -509,6 +560,67 @@ func TestReplaysUnackedEventsOnReconnect(t *testing.T) {
 	}
 }
 
+func TestReconnectResyncRunsAfterDurableReplay(t *testing.T) {
+	received := make(chan string, 4)
+	upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
+	mux := http.NewServeMux()
+	mux.HandleFunc("/ws", func(w http.ResponseWriter, r *http.Request) {
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		for {
+			_, raw, err := conn.ReadMessage()
+			if err != nil {
+				return
+			}
+			var msg map[string]any
+			if json.Unmarshal(raw, &msg) != nil {
+				continue
+			}
+			typeName, _ := msg["type"].(string)
+			if typeName == "register" {
+				_ = conn.WriteJSON(map[string]any{"type": "register_ack", "status": "ok", "supports_event_ack": true})
+				continue
+			}
+			if typeName == "agent_text" || typeName == "session_discovered" {
+				received <- typeName
+			}
+		}
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	out := make(chan protocol.DaemonEvent, 4)
+	c := NewClient(wsURL(srv.URL), "tok", "daemon-order", []string{"codex"}, nil, nil, out, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	c.sendEvent(protocol.DaemonEvent{Type: "agent_text", SessionID: "session-a", Text: "durable"})
+	c.OnReconnected = func() {
+		c.SendMsg(protocol.DaemonEvent{Type: "session_discovered", SessionID: "session-a", Status: protocol.StatusBusy, Resync: true})
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go c.Run(ctx)
+
+	first := waitEventType(t, received, 2*time.Second)
+	second := waitEventType(t, received, 2*time.Second)
+	if first != "agent_text" || second != "session_discovered" {
+		t.Fatalf("wire order=%q then %q, want durable replay before authoritative resync", first, second)
+	}
+}
+
+func waitEventType(t *testing.T, ch <-chan string, timeout time.Duration) string {
+	t.Helper()
+	select {
+	case eventType := <-ch:
+		return eventType
+	case <-time.After(timeout):
+		t.Fatal("timed out waiting for event type")
+		return ""
+	}
+}
+
 // TestLegacyRelayTrimsOnWrite verifies a new daemon against an old relay (which
 // never advertises supports_event_ack and never sends event_ack) does not stall:
 // it trims its buffer on successful write so the buffer cannot grow unbounded.
@@ -584,10 +696,10 @@ func waitSeq(t *testing.T, ch <-chan int64, timeout time.Duration) int64 {
 	}
 }
 
-// TestRelayRestartingSetsFastReconnect verifies that when the relay sends
-// relay_restarting and closes, the daemon sets fastReconnect so subsequent
-// backoff uses the compact cadence.
-func TestRelayRestartingSetsFastReconnect(t *testing.T) {
+// TestRelayRestartingReconnectsWithoutServerClose verifies that the daemon
+// does not depend on the restarting relay (or an intermediate proxy) closing
+// the old socket before it starts reconnecting.
+func TestRelayRestartingReconnectsWithoutServerClose(t *testing.T) {
 	upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
 	var conns int32
 	mux := http.NewServeMux()
@@ -598,8 +710,6 @@ func TestRelayRestartingSetsFastReconnect(t *testing.T) {
 		}
 		if atomic.AddInt32(&conns, 1) == 1 {
 			_ = conn.WriteMessage(websocket.TextMessage, []byte(`{"type":"relay_restarting"}`))
-			_ = conn.Close()
-			return
 		}
 		for {
 			if _, _, err := conn.ReadMessage(); err != nil {
@@ -612,18 +722,21 @@ func TestRelayRestartingSetsFastReconnect(t *testing.T) {
 	defer srv.Close()
 
 	c := newTestClient(wsURL(srv.URL))
+	// Keep the normal liveness timeout out of this assertion: reconnect must be
+	// caused by relay_restarting itself, not by the old socket timing out.
+	c.pongWait = 5 * time.Second
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	go func() { _ = c.Run(ctx) }()
 
-	deadline := time.Now().Add(2 * time.Second)
+	deadline := time.Now().Add(1 * time.Second)
 	for time.Now().Before(deadline) {
-		if c.fastReconnect.Load() {
+		if atomic.LoadInt32(&conns) >= 2 {
 			break
 		}
 		time.Sleep(5 * time.Millisecond)
 	}
-	if !c.fastReconnect.Load() {
-		t.Fatal("fastReconnect not set after relay_restarting")
+	if got := atomic.LoadInt32(&conns); got < 2 {
+		t.Fatalf("daemon did not reconnect after relay_restarting without server close: connections = %d", got)
 	}
 }

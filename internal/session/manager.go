@@ -6,6 +6,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/pocketctl/pocketctl/internal/agentcontrol"
 	"github.com/pocketctl/pocketctl/internal/approval"
 	"github.com/pocketctl/pocketctl/internal/filelock"
 	"github.com/pocketctl/pocketctl/internal/platform"
@@ -21,6 +22,7 @@ type ProcessState struct {
 	Status           string
 	StartedAt        time.Time
 	LastActivityAt   time.Time // last activity timestamp (status change, message, etc.)
+	TurnStartedAt    time.Time // start of the current turn; zero while idle
 	Cwd              string
 	Agent            string
 	Source           string               // "daemon" or "terminal"
@@ -47,6 +49,7 @@ type ProcessState struct {
 	WorktreePath       string              // Scheme D: non-empty when the session runs inside a git worktree
 	WorktreeBranch     string              // Scheme D: the git branch backing the worktree
 	Backend            SessionBackend      // non-nil only for server-kind agents (opencode); subprocess agents drive via the fields above
+	ControlMode        string              // managed | unmanaged_active | legacy_read_only
 }
 
 type PendingOpenCodePermission struct {
@@ -116,12 +119,16 @@ type SessionManager struct {
 
 	// opencode coordinates the shared `opencode serve` process and its SSE demux
 	// for server-kind (opencode) sessions. Lazily created on first use.
-	opencode *opencodeCoordinator
+	opencode                    *opencodeCoordinator
+	codexProvider               *CodexRuntimeProvider
+	leases                      *agentcontrol.LeaseRegistry
+	recordOpenCodeRuntimeHealth func(bool)
 }
 
 type createSessionDependencies struct {
-	resolveAgentCLI func(protocol.SessionConfig) (string, error)
-	startOpencode   func(*SessionManager, context.Context, protocol.SessionConfig) (string, error)
+	resolveAgentCLI   func(protocol.SessionConfig) (string, error)
+	startOpencode     func(*SessionManager, context.Context, protocol.SessionConfig) (string, error)
+	startCodexManaged func(*SessionManager, context.Context, protocol.SessionConfig, string, string, string, string, string) (string, bool, error)
 }
 
 func NewSessionManager(outputCh chan protocol.DaemonEvent) *SessionManager {
@@ -131,6 +138,7 @@ func NewSessionManager(outputCh chan protocol.DaemonEvent) *SessionManager {
 		childPids:   make(map[int]bool),
 		cwdSessions: make(map[string]map[string]struct{}),
 		fileLocks:   filelock.New(),
+		leases:      agentcontrol.NewLeaseRegistry(),
 		ptyProvider: defaultPTYProvider,
 		proc:        defaultProc,
 		createDeps: createSessionDependencies{
@@ -139,6 +147,9 @@ func NewSessionManager(outputCh chan protocol.DaemonEvent) *SessionManager {
 			},
 			startOpencode: func(sm *SessionManager, ctx context.Context, config protocol.SessionConfig) (string, error) {
 				return sm.createOpencodeSession(ctx, config)
+			},
+			startCodexManaged: func(sm *SessionManager, ctx context.Context, config protocol.SessionConfig, cliPath, cwd, model, worktreePath, worktreeBranch string) (string, bool, error) {
+				return sm.tryCreateManagedCodexSession(ctx, config, cliPath, cwd, model, worktreePath, worktreeBranch)
 			},
 		},
 	}
@@ -152,6 +163,23 @@ func (sm *SessionManager) SetProviders(pty platform.PTYProvider, proc platform.P
 	defer sm.mu.Unlock()
 	sm.ptyProvider = pty
 	sm.proc = proc
+}
+
+// SetOpenCodeRuntimeHealthRecorder installs the content-free rollout counter
+// sink used by the daemon. Tests and embedded callers can leave it unset.
+func (sm *SessionManager) SetOpenCodeRuntimeHealthRecorder(record func(bool)) {
+	sm.mu.Lock()
+	sm.recordOpenCodeRuntimeHealth = record
+	sm.mu.Unlock()
+}
+
+func (sm *SessionManager) observeOpenCodeRuntimeHealth(healthy bool) {
+	sm.mu.RLock()
+	record := sm.recordOpenCodeRuntimeHealth
+	sm.mu.RUnlock()
+	if record != nil {
+		record(healthy)
+	}
 }
 
 // SetApprovalServer wires the in-process approval broker. The server's
@@ -176,14 +204,16 @@ func (sm *SessionManager) ResyncSessions() {
 	defer sm.mu.RUnlock()
 	for sessionID, ps := range sm.sessions {
 		sm.outputCh <- protocol.DaemonEvent{
-			Type:      "session_discovered",
-			SessionID: sessionID,
-			Cwd:       ps.Cwd,
-			Status:    ps.Status,
-			Source:    ps.Source,
-			Agent:     ps.Agent,
-			Model:     ps.Model,
-			Resync:    true,
+			Type:         "session_discovered",
+			SessionID:    sessionID,
+			Cwd:          ps.Cwd,
+			Status:       ps.Status,
+			Source:       ps.Source,
+			Agent:        ps.Agent,
+			Model:        ps.Model,
+			ControlMode:  ps.ControlMode,
+			Capabilities: sm.openCodeCapabilitiesLocked(ps),
+			Resync:       true,
 		}
 	}
 }

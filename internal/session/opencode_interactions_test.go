@@ -15,7 +15,7 @@ func newOpenCodeInteractionManager() (*SessionManager, chan protocol.DaemonEvent
 	out := make(chan protocol.DaemonEvent, 32)
 	sm := NewSessionManager(out)
 	sm.sessions["ses_1"] = &ProcessState{
-		SessionID: "ses_1", Agent: adapter.AgentOpencode, Status: protocol.StatusRunning,
+		SessionID: "ses_1", Agent: adapter.AgentOpencode, ControlMode: protocol.ControlManaged, Status: protocol.StatusRunning,
 		PendingPermissions: make(map[string]PendingOpenCodePermission),
 		PendingQuestions:   make(map[string]PendingOpenCodeQuestion),
 	}

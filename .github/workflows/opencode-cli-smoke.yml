@@ -1,0 +1,69 @@
+name: OpenCode Official CLI Smoke
+
+on:
+  schedule:
+    - cron: '43 19 * * *'
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+jobs:
+  official-cli-smoke:
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Install Pocketctl client test dependencies
+        run: |
+          npm ci --prefix relay
+          npm ci --prefix web
+
+      - name: Install the current official OpenCode CLI
+        run: npm install --global opencode-ai
+
+      - name: Verify the CLI and shared-runtime API surface
+        shell: bash
+        run: |
+          set -euo pipefail
+          opencode --version
+          export OPENCODE_SERVER_PASSWORD=nightly-smoke-only
+          opencode serve --hostname 127.0.0.1 --port 4096 >/tmp/opencode-nightly.log 2>&1 &
+          serve_pid=$!
+          trap 'kill "$serve_pid" 2>/dev/null || true' EXIT
+
+          healthy=0
+          for _ in {1..60}; do
+            if curl --fail --silent --show-error \
+              --user opencode:nightly-smoke-only \
+              http://127.0.0.1:4096/api/health \
+              | jq -e '.healthy == true' >/dev/null; then
+              healthy=1
+              break
+            fi
+            sleep 0.25
+          done
+          if [[ "$healthy" != "1" ]]; then
+            sed -n '1,160p' /tmp/opencode-nightly.log
+            exit 1
+          fi
+
+          curl --fail --silent --show-error \
+            --user opencode:nightly-smoke-only \
+            --header 'Content-Type: application/json' \
+            --data "{\"location\":{\"directory\":\"$GITHUB_WORKSPACE\"}}" \
+            http://127.0.0.1:4096/api/session \
+            | jq -e '.data.id | strings | length > 0' >/dev/null
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.25'
+
+      - name: Run Pocketctl managed-runtime compatibility tests
+        run: make test-opencode-managed

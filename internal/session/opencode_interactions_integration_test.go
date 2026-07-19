@@ -124,7 +124,7 @@ func TestOpenCodeP1IntegrationFlow(t *testing.T) {
 	backend := &serverBackend{coord: coord}
 	sm.opencode = coord
 	sm.sessions["ses_1"] = &ProcessState{
-		SessionID: "ses_1", Agent: adapter.AgentOpencode, Status: protocol.StatusIdle, Cwd: "/repo", Backend: backend,
+		SessionID: "ses_1", Agent: adapter.AgentOpencode, ControlMode: protocol.ControlManaged, Status: protocol.StatusIdle, Cwd: "/repo", Backend: backend,
 		PendingPermissions: make(map[string]PendingOpenCodePermission), PendingQuestions: make(map[string]PendingOpenCodeQuestion),
 	}
 	coord.tracked["ses_1"] = func() {}
@@ -277,7 +277,7 @@ func TestOpenCodePerSessionRecoveryIncludesLegacyInteractions(t *testing.T) {
 	coord.started = true
 	coord.mu.Unlock()
 	sm.sessions["ses_1"] = &ProcessState{
-		SessionID: "ses_1", Agent: adapter.AgentOpencode, Status: protocol.StatusIdle, Cwd: "/repo",
+		SessionID: "ses_1", Agent: adapter.AgentOpencode, ControlMode: protocol.ControlManaged, Status: protocol.StatusIdle, Cwd: "/repo",
 		PendingPermissions: make(map[string]PendingOpenCodePermission),
 		PendingQuestions:   make(map[string]PendingOpenCodeQuestion),
 	}
@@ -340,7 +340,7 @@ func TestOpenCodeInteractionReconcileGroupsLegacyRequestsByCwd(t *testing.T) {
 	coord.server = openCodeServer
 	coord.started = true
 	for _, item := range []struct{ id, cwd string }{{"ses_1", "/repo/a"}, {"ses_2", "/repo/a/./"}, {"ses_3", "/repo/b"}, {"ses_empty", ""}} {
-		sm.sessions[item.id] = &ProcessState{SessionID: item.id, Agent: adapter.AgentOpencode, Cwd: item.cwd, PendingPermissions: make(map[string]PendingOpenCodePermission), PendingQuestions: make(map[string]PendingOpenCodeQuestion)}
+		sm.sessions[item.id] = &ProcessState{SessionID: item.id, Agent: adapter.AgentOpencode, ControlMode: protocol.ControlManaged, Cwd: item.cwd, PendingPermissions: make(map[string]PendingOpenCodePermission), PendingQuestions: make(map[string]PendingOpenCodeQuestion)}
 		coord.tracked[item.id] = func() {}
 	}
 
@@ -394,7 +394,7 @@ func TestOpenCodeGlobalInteractionStreamAcrossDirectory(t *testing.T) {
 	coord := newOpencodeCoordinator(sm)
 	coord.server = openCodeServer
 	coord.started = true
-	sm.sessions["ses_1"] = &ProcessState{SessionID: "ses_1", Agent: adapter.AgentOpencode, Cwd: "/repo/other", PendingPermissions: make(map[string]PendingOpenCodePermission), PendingQuestions: make(map[string]PendingOpenCodeQuestion)}
+	sm.sessions["ses_1"] = &ProcessState{SessionID: "ses_1", Agent: adapter.AgentOpencode, ControlMode: protocol.ControlManaged, Cwd: "/repo/other", PendingPermissions: make(map[string]PendingOpenCodePermission), PendingQuestions: make(map[string]PendingOpenCodeQuestion)}
 	coord.tracked["ses_1"] = func() {}
 	ctx, cancel := context.WithCancel(context.Background())
 	go coord.interactionLoop(ctx)
@@ -434,7 +434,7 @@ func TestOpenCodeInteractionReplyFailureKeepsPending(t *testing.T) {
 	coord := newOpencodeCoordinator(sm)
 	coord.server = openCodeServer
 	backend := &serverBackend{coord: coord}
-	sm.sessions["ses_1"] = &ProcessState{SessionID: "ses_1", Agent: adapter.AgentOpencode, Cwd: "/repo", Backend: backend, PendingPermissions: make(map[string]PendingOpenCodePermission), PendingQuestions: make(map[string]PendingOpenCodeQuestion)}
+	sm.sessions["ses_1"] = &ProcessState{SessionID: "ses_1", Agent: adapter.AgentOpencode, ControlMode: protocol.ControlManaged, Cwd: "/repo", Backend: backend, PendingPermissions: make(map[string]PendingOpenCodePermission), PendingQuestions: make(map[string]PendingOpenCodeQuestion)}
 	coord.handleInteractionEvent(adapter.SSEEvent{ID: "evt_retry", Type: "permission.asked", Directory: "/repo", Properties: json.RawMessage(`{"id":"per_retry","sessionID":"ses_1","permission":"bash"}`)})
 	waitDaemonEvent(t, out, "approval_request", "per_retry")
 	if err := sm.ResolveApprovalAction("ses_1", "per_retry", "once"); err == nil {
@@ -523,7 +523,7 @@ func TestOpenCodeInteractionLegacyBatchValidatesEachSessionGeneration(t *testing
 	server := startFakeOpenCodeServer(t, handler)
 	sm, _ := newOpenCodeInteractionManager()
 	sm.sessions["ses_1"].Cwd = "/repo"
-	sm.sessions["ses_2"] = &ProcessState{SessionID: "ses_2", Agent: adapter.AgentOpencode, Cwd: "/repo", PendingPermissions: make(map[string]PendingOpenCodePermission), PendingQuestions: make(map[string]PendingOpenCodeQuestion)}
+	sm.sessions["ses_2"] = &ProcessState{SessionID: "ses_2", Agent: adapter.AgentOpencode, ControlMode: protocol.ControlManaged, Cwd: "/repo", PendingPermissions: make(map[string]PendingOpenCodePermission), PendingQuestions: make(map[string]PendingOpenCodeQuestion)}
 	coord := newOpencodeCoordinator(sm)
 	coord.server = server
 	coord.tracked["ses_1"] = func() {}
@@ -576,7 +576,7 @@ func TestOpenCodeInteractionReconcileDoesNotStaleReaddResolvedRequest(t *testing
 	coord := newOpencodeCoordinator(sm)
 	coord.server = server
 	backend := &serverBackend{coord: coord}
-	sm.sessions["ses_1"] = &ProcessState{SessionID: "ses_1", Agent: adapter.AgentOpencode, Cwd: "/repo", Backend: backend, PendingPermissions: make(map[string]PendingOpenCodePermission), PendingQuestions: make(map[string]PendingOpenCodeQuestion)}
+	sm.sessions["ses_1"] = &ProcessState{SessionID: "ses_1", Agent: adapter.AgentOpencode, ControlMode: protocol.ControlManaged, Cwd: "/repo", Backend: backend, PendingPermissions: make(map[string]PendingOpenCodePermission), PendingQuestions: make(map[string]PendingOpenCodeQuestion)}
 	coord.tracked["ses_1"] = func() {}
 	coord.handleInteractionEvent(adapter.SSEEvent{ID: "evt_old", Type: "permission.asked", Directory: "/repo", Properties: json.RawMessage(`{"id":"per_old","sessionID":"ses_1","permission":"bash"}`)})
 	reconcileDone := make(chan struct{})
@@ -761,7 +761,7 @@ func TestOpenCodeSyncEmitsInitialEmptyTodoSnapshot(t *testing.T) {
 	coord.server = openCodeServer
 	coord.started = true
 	coord.mu.Unlock()
-	sm.sessions["ses_1"] = &ProcessState{SessionID: "ses_1", Agent: adapter.AgentOpencode, Status: protocol.StatusIdle, Cwd: "/repo"}
+	sm.sessions["ses_1"] = &ProcessState{SessionID: "ses_1", Agent: adapter.AgentOpencode, ControlMode: protocol.ControlManaged, Status: protocol.StatusIdle, Cwd: "/repo"}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -862,7 +862,7 @@ func TestOpenCodeRestartPreservesServeOwnership(t *testing.T) {
 	if next.server.PID() != pid || next.server.BaseURL() != base {
 		t.Fatalf("attached pid/url changed: %d %s", next.server.PID(), next.server.BaseURL())
 	}
-	nextSM.sessions["ses_restart"] = &ProcessState{SessionID: "ses_restart", Agent: adapter.AgentOpencode, Cwd: "/repo", Backend: &serverBackend{coord: next}, PendingPermissions: make(map[string]PendingOpenCodePermission), PendingQuestions: make(map[string]PendingOpenCodeQuestion)}
+	nextSM.sessions["ses_restart"] = &ProcessState{SessionID: "ses_restart", Agent: adapter.AgentOpencode, ControlMode: protocol.ControlManaged, Cwd: "/repo", Backend: &serverBackend{coord: next}, PendingPermissions: make(map[string]PendingOpenCodePermission), PendingQuestions: make(map[string]PendingOpenCodeQuestion)}
 	next.tracked["ses_restart"] = func() {}
 	next.reconcileInteractions(context.Background())
 	if event := waitDaemonEvent(t, out, "approval_request", "per_restart"); event.SessionID != "ses_restart" {

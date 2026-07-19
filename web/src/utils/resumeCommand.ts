@@ -3,6 +3,7 @@
 
 export interface ResumeSession {
   agent?: string
+  agent_type?: string
   cwd?: string
   session_id: string
 }
@@ -14,14 +15,19 @@ export interface ResumeSession {
  *
  * Agent mapping:
  *   - codex       → codex resume <sid>
+ *   - opencode    → opencode --session <sid>
  *   - claude-code → claude --resume <sid>  (default)
- *   - opencode    → NOT handled here (caller hides the entry); falls back to claude.
  *
  * cwd is quoted to survive spaces/special chars; a missing cwd falls back to `cd ~`.
  */
 export function buildResumeCommand(session: ResumeSession): string {
   const cwd = session.cwd ? `"${session.cwd}"` : '~'
   const sid = session.session_id
-  const cmd = session.agent === 'codex' ? `codex resume ${sid}` : `claude --resume ${sid}`
+  const agent = session.agent_type || session.agent
+  const cmd = agent === 'codex'
+    ? `codex resume ${sid}`
+    : agent === 'opencode'
+      ? `opencode --session ${sid}`
+      : `claude --resume ${sid}`
   return `cd ${cwd} && ${cmd}`
 }

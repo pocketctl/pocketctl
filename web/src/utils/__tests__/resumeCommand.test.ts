@@ -12,6 +12,16 @@ describe('buildResumeCommand (session-resume-command)', () => {
       .toBe('cd "/x" && codex resume abc')
   })
 
+  test('opencode', () => {
+    expect(buildResumeCommand({ agent: 'opencode', cwd: '/x', session_id: 'ses_abc' }))
+      .toBe('cd "/x" && opencode --session ses_abc')
+  })
+
+  test('agent_type takes precedence over the legacy agent field', () => {
+    expect(buildResumeCommand({ agent: 'claude-code', agent_type: 'codex', cwd: '/x', session_id: 'abc' }))
+      .toBe('cd "/x" && codex resume abc')
+  })
+
   test('no agent defaults to claude', () => {
     expect(buildResumeCommand({ cwd: '/x', session_id: 'abc' }))
       .toBe('cd "/x" && claude --resume abc')
@@ -27,10 +37,4 @@ describe('buildResumeCommand (session-resume-command)', () => {
       .toBe('cd "/Users/x/My Project" && claude --resume abc')
   })
 
-  test('opencode not specially handled (falls back to claude; caller hides entry)', () => {
-    // buildResumeCommand does NOT branch on opencode — the UI hides the entry via v-if.
-    // If called anyway, it falls back to claude (safe default).
-    expect(buildResumeCommand({ agent: 'opencode', cwd: '/x', session_id: 'abc' }))
-      .toBe('cd "/x" && claude --resume abc')
-  })
 })

@@ -9,6 +9,8 @@ export interface SubagentChild {
   tokenCacheCreate?: number
 }
 
+export type SessionControlMode = 'managed' | 'unmanaged_active' | 'legacy_read_only'
+
 export interface Session {
   session_id: string
   daemon_id: string
@@ -35,4 +37,6 @@ export interface Session {
   exit_reason?: string
   last_activity_at?: string
   created_at?: string
+  control_mode?: SessionControlMode | null
+  capabilities?: string[]
 }

@@ -6,7 +6,7 @@
       <span v-if="isPending" class="question-waiting">{{ message.submitting ? t('question.submitting') : t('question.waiting') }}</span>
     </div>
 
-    <div v-for="(question, questionIndex) in questions" :key="questionIndex" class="question-block">
+    <div v-for="(question, questionIndex) in questions" :key="question.id || questionIndex" class="question-block">
       <div class="question-label">
         <span v-if="question.header" class="question-tag">{{ question.header }}</span>
         <span v-if="question.multiple" class="question-multiple">{{ t('question.multiple') }}</span>
@@ -30,7 +30,8 @@
         v-if="question.custom"
         v-model="custom[questionIndex]"
         class="question-custom"
-        type="text"
+        :type="question.secret ? 'password' : 'text'"
+        :autocomplete="question.secret ? 'new-password' : 'off'"
         maxlength="4096"
         :disabled="controlsDisabled"
         :placeholder="t('question.custom_placeholder')"
@@ -43,7 +44,7 @@
       <button class="question-submit" type="button" :disabled="controlsDisabled || !valid" @click="submit">{{ t('question.submit') }}</button>
       <button class="question-reject" type="button" :disabled="controlsDisabled" @click="$emit('reject', message)">{{ t('question.reject') }}</button>
     </div>
-    <div v-else class="question-result">{{ message.rejected ? t('question.rejected') : t('question.answered') }}</div>
+    <div v-else class="question-result">{{ message.reason === 'resolved_elsewhere' ? t('question.resolved_elsewhere') : (message.rejected ? t('question.rejected') : t('question.answered')) }}</div>
   </div>
 </template>
 
@@ -52,7 +53,7 @@ import { computed, reactive, watch } from 'vue'
 import { useLocale } from '../../composables/useLocale'
 
 interface QuestionOption { label: string; description?: string }
-interface QuestionInfo { header?: string; question: string; options?: QuestionOption[]; multiple?: boolean; custom?: boolean }
+interface QuestionInfo { id?: string; header?: string; question: string; options?: QuestionOption[]; multiple?: boolean; custom?: boolean; secret?: boolean }
 
 const { t } = useLocale()
 const props = withDefaults(defineProps<{ message: any; disabled?: boolean }>(), { disabled: false })

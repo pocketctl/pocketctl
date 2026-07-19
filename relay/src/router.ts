@@ -11,7 +11,33 @@ import { claimBoundDaemonSlot, getQuotaSnapshot, releaseQuotaReservation, reserv
 
 interface DaemonConnection { ws: WebSocket; daemonId: string; hostname: string; agents: any[]; userId: number | null; os?: string; ip?: string; port?: string; arch?: string; version?: string; startedAt?: number; registrationId: string; tokenJti?: string }
 interface ClientConnection { ws: WebSocket; subscribedSessions: Set<string>; userId: number | null; locale: string }
-interface DaemonMetrics { cpuPct: number; memPct: number; diskPct: number; updatedAt: number }
+interface OpenCodeRuntimeTelemetry { fallbackReasons: Record<string, number>; healthOK: number; healthFailed: number }
+interface DaemonMetrics { cpuPct: number; memPct: number; diskPct: number; updatedAt: number; openCodeRuntime?: OpenCodeRuntimeTelemetry }
+
+const openCodeFallbackCategories = new Set([
+  'unsupported_arguments', 'daemon_unavailable', 'runtime_unavailable',
+  'session_busy', 'invalid_request', 'native_response',
+]);
+
+function nonNegativeCounter(value: unknown): number {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0 ? value : 0;
+}
+
+export function sanitizeOpenCodeRuntimeTelemetry(value: unknown): OpenCodeRuntimeTelemetry | undefined {
+  if (!value || typeof value !== 'object') return undefined;
+  const raw = value as Record<string, unknown>;
+  const fallbackReasons: Record<string, number> = {};
+  if (raw.fallback_reasons && typeof raw.fallback_reasons === 'object') {
+    for (const [reason, count] of Object.entries(raw.fallback_reasons as Record<string, unknown>)) {
+      if (openCodeFallbackCategories.has(reason)) fallbackReasons[reason] = nonNegativeCounter(count);
+    }
+  }
+  return {
+    fallbackReasons,
+    healthOK: nonNegativeCounter(raw.health_ok),
+    healthFailed: nonNegativeCounter(raw.health_failed),
+  };
+}
 interface PendingSessionOperation {
   requestId: string;
   reservationId: string | null;
@@ -64,6 +90,7 @@ export class Router {
   private pendingSessionCreate = new Map<string, WebSocket>();
   private pendingSessionMeta = new Map<string, { agent_type: string; cwd: string }>();
   private pendingSessionOperations = new Map<string, PendingSessionOperation>();
+  private pendingInteractionClients = new Map<string, WebSocket[]>();
   private pendingOriginClient = new Map<string, WebSocket>(); // pending session_id → origin client (for session_id_changed 补发)
   private takeoverTimers = new Map<string, { timer: ReturnType<typeof setTimeout>; newDaemonId: string; newHostname: string }>();
   // Pending offline-transition timers, keyed by daemonId. On WS close we defer
@@ -87,6 +114,26 @@ export class Router {
   private daemonRegistrationChains = new Map<string, Promise<void>>();
   private daemonRevocationGates = new Map<string, DaemonRevocationGateState>();
   private pool: pg.Pool;
+
+  private interactionClientKey(sessionId: string, requestId: string, operation: string): string {
+    return `${sessionId}\u0000${requestId}\u0000${operation}`;
+  }
+
+  private trackInteractionClient(sessionId: string, requestId: string, operation: string, ws: WebSocket): void {
+    if (!requestId) return;
+    const key = this.interactionClientKey(sessionId, requestId, operation);
+    const pending = this.pendingInteractionClients.get(key) ?? [];
+    pending.push(ws);
+    this.pendingInteractionClients.set(key, pending);
+  }
+
+  private takeInteractionClient(sessionId: string, requestId: string, operation: string): WebSocket | undefined {
+    const key = this.interactionClientKey(sessionId, requestId, operation);
+    const pending = this.pendingInteractionClients.get(key);
+    const origin = pending?.shift();
+    if (!pending || pending.length === 0) this.pendingInteractionClients.delete(key);
+    return origin;
+  }
 
   // Grace window before a disconnected daemon is declared offline.
   private readonly offlineGraceMs = parseInt(process.env.DAEMON_OFFLINE_GRACE_MS || '30000', 10);
@@ -375,6 +422,7 @@ export class Router {
       if (previousDaemon && current?.ws === previousDaemon.ws && current.registrationId === previousDaemon.registrationId) {
         this.cancelDaemonRevocationGate(previousDaemon.registrationId);
         this.daemons.delete(daemonId);
+        this.daemonMetrics.delete(daemonId);
         const oldCursor = this.daemonSeq.get(daemonId);
         if (oldCursor) oldCursor.accepting = false;
         this.daemonSeq.delete(daemonId);
@@ -613,6 +661,7 @@ export class Router {
     this.cancelDaemonRevocationGate(daemon.registrationId);
     this.daemons.delete(daemonId);
     this.daemonSeq.delete(daemonId);
+    this.daemonMetrics.delete(daemonId);
 
     const markedOffline = await this.setDaemonOfflineWithRetry(daemonId, daemon.registrationId);
     // A registration may have won after the captured generation was removed
@@ -953,9 +1002,15 @@ export class Router {
     if (!current || current.ws !== daemon.ws || current.registrationId !== daemon.registrationId || !cursor?.accepting) return;
     this.send(daemon.ws, { type: 'pong' });
     db.updateHeartbeat(this.pool, daemonId).catch(console.error);
-    if (msg.cpu_pct !== undefined) {
+    const openCodeRuntime = sanitizeOpenCodeRuntimeTelemetry(msg.opencode_runtime);
+    if (msg.cpu_pct !== undefined || openCodeRuntime) {
+      const previous = this.daemonMetrics.get(daemonId);
       this.daemonMetrics.set(daemonId, {
-        cpuPct: msg.cpu_pct, memPct: msg.mem_pct, diskPct: msg.disk_pct, updatedAt: Date.now(),
+        cpuPct: msg.cpu_pct ?? previous?.cpuPct ?? 0,
+        memPct: msg.mem_pct ?? previous?.memPct ?? 0,
+        diskPct: msg.disk_pct ?? previous?.diskPct ?? 0,
+        updatedAt: Date.now(),
+        openCodeRuntime: openCodeRuntime ?? previous?.openCodeRuntime,
       });
     }
     if (cursor.persistedHigh > 0) this.send(daemon.ws, { type: 'event_ack', up_to_seq: cursor.persistedHigh });
@@ -1084,6 +1139,22 @@ export class Router {
     }
     const daemon = this.daemons.get(daemonId);
     const userId = daemon?.userId ?? null;
+    if (msg.type === 'interaction_result' || (msg.type === 'error' && ['approval_response', 'question_response', 'question_reject'].includes(msg.operation))) {
+      this.markPersisted(daemonId, msg.seq, undefined, messageState);
+      const origin = this.takeInteractionClient(sessionId, msg.request_id || '', msg.operation || '');
+      if (origin && origin.readyState === 1) this.send(origin, msg);
+      return;
+    }
+    // A normal resolution is the success acknowledgement for the first remote
+    // submitter. resolved_elsewhere is followed by interaction_result, so keep
+    // its origin queued for that correlated idempotent result.
+    if (msg.reason !== 'resolved_elsewhere') {
+      if (msg.type === 'approval_resolved') {
+        this.takeInteractionClient(sessionId, msg.request_id || '', 'approval_response');
+      } else if (msg.type === 'question_resolved') {
+        this.takeInteractionClient(sessionId, msg.request_id || '', msg.rejected ? 'question_reject' : 'question_response');
+      }
+    }
 
     if (msg.type === 'session_id_changed') {
       const oldId = msg.old_session_id;
@@ -1129,7 +1200,7 @@ export class Router {
       this.persistAndAck(daemonId, msg.seq, sessionId, msg.type, msg, async (inserted) => {
         if (!inserted) return;
         this.sessionToDaemon.set(sessionId, daemonId);
-        await db.upsertSession(this.pool, sessionId, daemonId, meta?.agent_type || '', meta?.cwd || '', 'running', msg.title || undefined, 'daemon', undefined, userId ?? undefined, msg.model || undefined);
+        await db.upsertSession(this.pool, sessionId, daemonId, meta?.agent_type || '', meta?.cwd || '', 'running', msg.title || undefined, 'daemon', undefined, userId ?? undefined, msg.model || undefined, msg.control_mode || undefined, Array.isArray(msg.capabilities) ? msg.capabilities : undefined);
         await this.settlePendingSessionOperation(pending);
         this.pendingSessionMeta?.delete(daemonId);
         this.pendingSessionCreate.delete(daemonId);
@@ -1169,7 +1240,7 @@ export class Router {
         this.persistAndAck(daemonId, msg.seq, sessionId, msg.type, msg, async (inserted) => {
           if (!inserted) return;
           this.sessionToDaemon.set(sessionId, daemonId);
-          await db.upsertSession(this.pool, sessionId, daemonId, msg.agent || 'claude-code', cwd, msg.status || 'busy', title, 'terminal', undefined, userId ?? undefined, msg.model || undefined);
+          await db.upsertSession(this.pool, sessionId, daemonId, msg.agent || 'claude-code', cwd, msg.status || 'busy', title, 'terminal', undefined, userId ?? undefined, msg.model || undefined, msg.control_mode || undefined, Array.isArray(msg.capabilities) ? msg.capabilities : undefined);
           if (userId) await this.broadcastQuotaStatus(userId);
           for (const [clientWs, client] of this.clients) {
             if (clientWs.readyState === 1 && this.sameUser(client.userId, userId)) this.send(clientWs, enriched);
@@ -1202,6 +1273,18 @@ export class Router {
       this.persistAndAck(daemonId, msg.seq, sessionId, msg.type, msg, async (inserted) => {
         if (!inserted) return;
         await db.updateSessionActiveAgent(this.pool, sessionId, msg.current_agent);
+        for (const [clientWs, client] of this.clients) {
+          if (client.subscribedSessions.has(sessionId) && clientWs.readyState === 1) this.send(clientWs, msg);
+        }
+      });
+      return;
+    }
+    if (msg.type === 'session_meta') {
+      this.persistAndAck(daemonId, msg.seq, sessionId, msg.type, msg, async (inserted) => {
+        if (!inserted) return;
+        if (typeof msg.control_mode === 'string' && Array.isArray(msg.capabilities)) {
+          await db.updateSessionControl(this.pool, sessionId, msg.control_mode, msg.capabilities);
+        }
         for (const [clientWs, client] of this.clients) {
           if (client.subscribedSessions.has(sessionId) && clientWs.readyState === 1) this.send(clientWs, msg);
         }
@@ -1433,7 +1516,7 @@ export class Router {
       // transient sessions/<pid>.json Claude Code writes on --continue); insert-
       // upserting it created phantom "status + time, no messages" rows. If the
       // row doesn't exist, drop the status and its side-effects entirely.
-      await db.updateSessionStatus(this.pool, sessionId, daemonId, msg.status || 'unknown', msg.exit_reason, userId ?? undefined)
+      await db.updateSessionStatus(this.pool, sessionId, daemonId, msg.status || 'unknown', msg.exit_reason, userId ?? undefined, msg.turn_started_at)
         .then(async (updated) => {
           if (!updated) {
             console.log(`[router] dropping session_status for unknown session ${sessionId} (no row — likely a ghost/transient session)`);
@@ -1720,10 +1803,10 @@ export class Router {
           if (msg.type === 'user_message' && client.userId !== null) {
             const status = await db.getSessionStatus(this.pool, msg.session_id);
             const isActive = ['running', 'busy', 'retry', 'idle', 'waiting', 'waiting_approval', 'waiting_question'].includes(status || '');
+            const requestId = typeof msg.request_id === 'string' && msg.request_id
+              ? msg.request_id
+              : (typeof msg.msg_id === 'string' && msg.msg_id ? msg.msg_id : randomUUID());
             if (!isActive) {
-              const requestId = typeof msg.request_id === 'string' && msg.request_id
-                ? msg.request_id
-                : (typeof msg.msg_id === 'string' && msg.msg_id ? msg.msg_id : randomUUID());
               const { plan, whitelist } = await db.getUserPlanAndWhitelist(this.pool, client.userId);
               const entitlements = resolveEntitlements(plan, whitelist);
               const enforcement = quotaEnforcementMode();
@@ -1780,7 +1863,20 @@ export class Router {
                   operation: 'resume',
                 },
               };
+            } else {
+              outbound = {
+                ...msg,
+                request_id: requestId,
+                quota_grant: {
+                  reservation_id: `active-session-${requestId}`,
+                  expires_at: Date.now() + 20_000,
+                  operation: 'resume',
+                },
+              };
             }
+          }
+          if (['approval_response', 'question_response', 'question_reject'].includes(msg.type) && typeof msg.request_id === 'string') {
+            this.trackInteractionClient(msg.session_id, msg.request_id, msg.type, clientWs);
           }
           this.send(daemon.ws, outbound);
           // L2 (web-post-send-feedback): ack so the web client clears its ack-timeout.
@@ -1824,7 +1920,8 @@ export class Router {
     const isBackward = direction === 'backward';
     const lim = isBackward && limit && limit > 0 ? limit : 100;
     try {
-      const currentStatus = await db.getSessionStatus(this.pool, sessionId);
+      const runtime = await db.getSessionRuntime(this.pool, sessionId);
+      const currentStatus = runtime.status;
       let events: any[];
       if (isBackward) {
         events = (lastSeq && lastSeq > 0)
@@ -1836,7 +1933,7 @@ export class Router {
       // has_more (backward only, count-based heuristic): a full page implies older rows may exist.
       const hasMore = isBackward ? events.length === lim : false;
       if (events.length === 0) {
-        this.send(clientWs, withReq({ type: 'replay_end', session_id: sessionId, count: 0, last_seq: lastSeq, has_more: false, status: currentStatus }));
+        this.send(clientWs, withReq({ type: 'replay_end', session_id: sessionId, count: 0, last_seq: lastSeq, has_more: false, status: currentStatus, turn_started_at: runtime.turnStartedAt, last_activity_at: runtime.lastActivityAt }));
         return;
       }
       // backward rows arrive in id DESC; forward rows in id ASC. Batches keep that order;
@@ -1859,6 +1956,8 @@ export class Router {
         last_seq: events[events.length - 1].id,
         has_more: hasMore,
         status: currentStatus,
+        turn_started_at: runtime.turnStartedAt,
+        last_activity_at: runtime.lastActivityAt,
       }));
     } catch (err) {
       console.error('replay error:', err);
@@ -2139,6 +2238,7 @@ export class Router {
       this.cancelDaemonRevocationGate(daemon.registrationId);
       this.daemons.delete(daemonId);
       this.daemonSeq.delete(daemonId);
+      this.daemonMetrics.delete(daemonId);
     }
     const offlineTimer = this.pendingOfflineTimers.get(daemonId);
     if (offlineTimer) {
@@ -2193,6 +2293,7 @@ export class Router {
     }
 
     this.daemons.delete(daemonId);
+    this.daemonMetrics.delete(daemonId);
     this.knownOffline.delete(daemonId);
     this.broadcastQuotaStatus(userId).catch(console.error);
     return { success: true };

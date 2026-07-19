@@ -62,14 +62,31 @@ func TestOpenCodeSessionMetaUsesLoadedAuthoritativeState(t *testing.T) {
 	if meta.Model != "opencode/deepseek-v4-flash-free" || meta.Cwd != "/repo" || meta.CurrentAgent != "build" {
 		t.Fatalf("meta=%+v", meta)
 	}
-	wantCapabilities := []string{"dynamic_commands", "agent_switch", "permission_actions", "questions"}
-	if strings.Join(meta.Capabilities, ",") != strings.Join(wantCapabilities, ",") {
-		t.Fatalf("capabilities=%v", meta.Capabilities)
+	if meta.ControlMode != protocol.ControlLegacyReadOnly || len(meta.Capabilities) != 0 {
+		t.Fatalf("control mode=%q capabilities=%v", meta.ControlMode, meta.Capabilities)
 	}
 	if err := sm.PrepareDaemonRestart(); err != nil {
 		t.Fatal(err)
 	}
 	sm.ShutdownOpencode()
+}
+
+func TestOpenCodeInteractionRaceResolvedElsewhereIsSuccessResult(t *testing.T) {
+	event := interactionCommandResultEvent(
+		"approval_response", "ses_1", "per_1",
+		&session.ResolvedElsewhereError{RequestID: "per_1"},
+	)
+	if event.Type != "interaction_result" || event.Status != session.InteractionResolvedElsewhere || event.Reason != session.InteractionResolvedElsewhere {
+		t.Fatalf("event=%+v", event)
+	}
+	if event.Operation != "approval_response" || event.SessionID != "ses_1" || event.RequestID != "per_1" || event.Error != "" {
+		t.Fatalf("correlation=%+v", event)
+	}
+
+	failed := interactionCommandResultEvent("question_response", "ses_1", "que_1", errors.New("reply failed"))
+	if failed.Type != "error" || failed.Operation != "question_response" || failed.Error != "reply failed" {
+		t.Fatalf("failed event=%+v", failed)
+	}
 }
 
 func TestDaemonRestartReplacementProcessWaitsForOwnership(t *testing.T) {
@@ -510,6 +527,25 @@ func TestReconnectDiscoveryEventIsMarkedAsResync(t *testing.T) {
 	}
 	if event.SessionID != "session-a" || event.Source != "terminal" {
 		t.Fatalf("event = %#v, want session identity and source preserved", event)
+	}
+}
+
+func TestTerminalHydrationEventsKeepsCurrentStatusAuthoritative(t *testing.T) {
+	events := []protocol.DaemonEvent{
+		{Type: "agent_text", Text: "historical answer"},
+		{Type: "session_status", Status: protocol.StatusCompleted},
+		{Type: "tool_result", Output: "historical output"},
+	}
+
+	got := terminalHydrationEvents(events, "session-a", protocol.StatusBusy)
+	if len(got) != 3 {
+		t.Fatalf("events=%+v, want two historical content events and one authoritative status", got)
+	}
+	if got[0].Type != "agent_text" || got[1].Type != "tool_result" {
+		t.Fatalf("historical content order changed: %+v", got)
+	}
+	if got[2].Type != "session_status" || got[2].SessionID != "session-a" || got[2].Status != protocol.StatusBusy {
+		t.Fatalf("final event=%+v, want authoritative busy status", got[2])
 	}
 }
 

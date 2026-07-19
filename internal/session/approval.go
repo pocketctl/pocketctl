@@ -2,7 +2,10 @@ package session
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
+	"net/http"
 	"sort"
 	"time"
 
@@ -10,6 +13,23 @@ import (
 	"github.com/pocketctl/pocketctl/internal/approval"
 	"github.com/pocketctl/pocketctl/internal/protocol"
 )
+
+const InteractionResolvedElsewhere = protocol.InteractionResolvedElsewhere
+
+// ResolvedElsewhereError is a successful convergence result: OpenCode's
+// authority no longer has the request because another terminal or remote
+// client answered first. Callers should dismiss the correlated card rather
+// than presenting this as a failed operation.
+type ResolvedElsewhereError struct {
+	RequestID string
+}
+
+func (e *ResolvedElsewhereError) Error() string {
+	return fmt.Sprintf("interaction %s was resolved elsewhere", e.RequestID)
+}
+
+func (e *ResolvedElsewhereError) Code() string              { return InteractionResolvedElsewhere }
+func (e *ResolvedElsewhereError) ResolvedRequestID() string { return e.RequestID }
 
 // handleApprovalRequest is the approval server's OnRequest callback. It flips
 // the session to waiting_approval and emits an approval_request event so the
@@ -134,7 +154,7 @@ func (sm *SessionManager) handleOpencodePermission(request adapter.PermissionAsk
 	}
 	sm.mu.Lock()
 	ps, ok := sm.sessions[request.SessionID]
-	if !ok {
+	if !ok || ps.ControlMode != protocol.ControlManaged {
 		sm.mu.Unlock()
 		return false
 	}
@@ -166,7 +186,7 @@ func (sm *SessionManager) handleOpencodeQuestion(request adapter.QuestionAsked) 
 	}
 	sm.mu.Lock()
 	ps, ok := sm.sessions[request.SessionID]
-	if !ok {
+	if !ok || ps.ControlMode != protocol.ControlManaged {
 		sm.mu.Unlock()
 		return false
 	}
@@ -369,6 +389,13 @@ func (sm *SessionManager) reconcileOpencodeQuestionSnapshot(targetSession, versi
 // PreToolUse hook and returns the session to running. Called from the
 // approval_response command handler.
 func (sm *SessionManager) ResolveApproval(sessionID, requestID string, approved bool) error {
+	if broker := sm.codexInteractionBroker(); broker != nil && broker.KnowsApproval(sessionID, requestID) {
+		action := "reject"
+		if approved {
+			action = "once"
+		}
+		return broker.ResolveApproval(context.Background(), sessionID, requestID, action)
+	}
 	// opencode sessions answer permission prompts via the serve API, not the
 	// claude PreToolUse hook socket.
 	if b := sm.opencodeBackendFor(sessionID); b != nil {
@@ -414,6 +441,9 @@ func (sm *SessionManager) ResolveApproval(sessionID, requestID string, approved 
 }
 
 func (sm *SessionManager) ResolveApprovalAction(sessionID, requestID, action string) error {
+	if broker := sm.codexInteractionBroker(); broker != nil && broker.KnowsApproval(sessionID, requestID) {
+		return broker.ResolveApproval(context.Background(), sessionID, requestID, action)
+	}
 	if !protocol.ValidApprovalAction(action) {
 		return fmt.Errorf("invalid approval action %q", action)
 	}
@@ -424,18 +454,40 @@ func (sm *SessionManager) ResolveApprovalAction(sessionID, requestID, action str
 	b.coord.interactionMu.Lock()
 	sm.mu.RLock()
 	ps := sm.sessions[sessionID]
+	if ps == nil || ps.ControlMode != protocol.ControlManaged {
+		sm.mu.RUnlock()
+		b.coord.interactionMu.Unlock()
+		return fmt.Errorf("opencode session is not managed for remote interaction")
+	}
 	request, ok := ps.PendingPermissions[requestID]
 	directory := ps.Cwd
 	sm.mu.RUnlock()
 	if !ok {
+		resolved := b.coord.interactionResolved("permission", sessionID, requestID)
 		b.coord.interactionMu.Unlock()
+		if resolved {
+			return &ResolvedElsewhereError{RequestID: requestID}
+		}
 		return fmt.Errorf("permission request not pending in session")
 	}
+	b.coord.bumpInteractionGeneration(sessionID, "permission", request.ProtocolVersion)
+	b.coord.interactionMu.Unlock()
 	if err := b.coord.srv().ReplyPermissionVersionedInDirectory(context.Background(), sessionID, requestID, action, request.ProtocolVersion, directory); err != nil {
-		b.coord.interactionMu.Unlock()
+		if opencodeNotPendingStatus(err) && sm.confirmPermissionResolvedElsewhere(b.coord, sessionID, requestID, request.ProtocolVersion, directory) {
+			return &ResolvedElsewhereError{RequestID: requestID}
+		}
 		return err
 	}
-	sm.clearOpencodePermission(sessionID, requestID)
+	b.coord.interactionMu.Lock()
+	cleared := sm.clearOpencodePermission(sessionID, requestID)
+	if !cleared {
+		resolved := b.coord.interactionResolved("permission", sessionID, requestID)
+		b.coord.interactionMu.Unlock()
+		if resolved {
+			return &ResolvedElsewhereError{RequestID: requestID}
+		}
+		return fmt.Errorf("permission request not pending in session")
+	}
 	b.coord.markInteractionResolved("permission", sessionID, requestID)
 	b.coord.bumpInteractionGeneration(sessionID, "permission", request.ProtocolVersion)
 	sm.outputCh <- protocol.DaemonEvent{
@@ -447,7 +499,55 @@ func (sm *SessionManager) ResolveApprovalAction(sessionID, requestID, action str
 	return nil
 }
 
+func opencodeNotPendingStatus(err error) bool {
+	var statusErr *adapter.OpencodeHTTPStatusError
+	return errors.As(err, &statusErr) && (statusErr.StatusCode == http.StatusNotFound || statusErr.StatusCode == http.StatusConflict)
+}
+
+func (sm *SessionManager) confirmPermissionResolvedElsewhere(coord *opencodeCoordinator, sessionID, requestID, version, directory string) bool {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	var (
+		observed []adapter.PermissionAsked
+		err      error
+	)
+	if version == adapter.PermissionVersionLegacy {
+		observed, err = coord.srv().ListPermissions(ctx, directory)
+	} else {
+		observed, err = coord.srv().ListPermissionsV2(ctx, sessionID)
+	}
+	if err != nil || permissionStillPending(observed, sessionID, requestID) {
+		return false
+	}
+	coord.interactionMu.Lock()
+	cleared := sm.clearOpencodePermission(sessionID, requestID)
+	coord.markInteractionResolved("permission", sessionID, requestID)
+	coord.bumpInteractionGeneration(sessionID, "permission", version)
+	if cleared {
+		sm.outputCh <- protocol.DaemonEvent{
+			Type: "approval_resolved", SessionID: sessionID, RequestID: requestID, Reason: InteractionResolvedElsewhere,
+		}
+	}
+	coord.interactionMu.Unlock()
+	if cleared {
+		sm.emitCurrentInteractionStatus(sessionID)
+	}
+	return true
+}
+
+func permissionStillPending(observed []adapter.PermissionAsked, sessionID, requestID string) bool {
+	for _, request := range observed {
+		if request.SessionID == sessionID && request.ID == requestID {
+			return true
+		}
+	}
+	return false
+}
+
 func (sm *SessionManager) ResolveQuestion(sessionID, requestID string, answers [][]string) error {
+	if broker := sm.codexInteractionBroker(); broker != nil && broker.KnowsQuestion(sessionID, requestID) {
+		return broker.ResolveQuestion(context.Background(), sessionID, requestID, answers)
+	}
 	b := sm.opencodeBackendFor(sessionID)
 	if b == nil || b.coord == nil || b.coord.srv() == nil {
 		return fmt.Errorf("opencode session not found")
@@ -455,22 +555,44 @@ func (sm *SessionManager) ResolveQuestion(sessionID, requestID string, answers [
 	b.coord.interactionMu.Lock()
 	sm.mu.RLock()
 	ps := sm.sessions[sessionID]
+	if ps == nil || ps.ControlMode != protocol.ControlManaged {
+		sm.mu.RUnlock()
+		b.coord.interactionMu.Unlock()
+		return fmt.Errorf("opencode session is not managed for remote interaction")
+	}
 	request, ok := ps.PendingQuestions[requestID]
 	directory := ps.Cwd
 	sm.mu.RUnlock()
 	if !ok {
+		resolved := b.coord.interactionResolved("question", sessionID, requestID)
 		b.coord.interactionMu.Unlock()
+		if resolved {
+			return &ResolvedElsewhereError{RequestID: requestID}
+		}
 		return fmt.Errorf("question request not pending in session")
 	}
 	if err := protocol.ValidateQuestionAnswers(request.Questions, answers); err != nil {
 		b.coord.interactionMu.Unlock()
 		return err
 	}
+	b.coord.bumpInteractionGeneration(sessionID, "question", request.ProtocolVersion)
+	b.coord.interactionMu.Unlock()
 	if err := b.coord.srv().ReplyQuestionVersioned(context.Background(), sessionID, requestID, answers, request.ProtocolVersion, directory); err != nil {
-		b.coord.interactionMu.Unlock()
+		if opencodeNotPendingStatus(err) && sm.confirmQuestionResolvedElsewhere(b.coord, sessionID, requestID, request.ProtocolVersion, directory) {
+			return &ResolvedElsewhereError{RequestID: requestID}
+		}
 		return err
 	}
-	sm.clearOpencodeQuestion(sessionID, requestID)
+	b.coord.interactionMu.Lock()
+	cleared := sm.clearOpencodeQuestion(sessionID, requestID)
+	if !cleared {
+		resolved := b.coord.interactionResolved("question", sessionID, requestID)
+		b.coord.interactionMu.Unlock()
+		if resolved {
+			return &ResolvedElsewhereError{RequestID: requestID}
+		}
+		return fmt.Errorf("question request not pending in session")
+	}
 	b.coord.markInteractionResolved("question", sessionID, requestID)
 	b.coord.bumpInteractionGeneration(sessionID, "question", request.ProtocolVersion)
 	sm.outputCh <- protocol.DaemonEvent{Type: "question_resolved", SessionID: sessionID, RequestID: requestID, Answers: answers}
@@ -479,7 +601,50 @@ func (sm *SessionManager) ResolveQuestion(sessionID, requestID string, answers [
 	return nil
 }
 
+func (sm *SessionManager) confirmQuestionResolvedElsewhere(coord *opencodeCoordinator, sessionID, requestID, version, directory string) bool {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	var (
+		observed []adapter.QuestionAsked
+		err      error
+	)
+	if version == adapter.PermissionVersionLegacy {
+		observed, err = coord.srv().ListQuestions(ctx, directory)
+	} else {
+		observed, err = coord.srv().ListQuestionsV2(ctx, sessionID)
+	}
+	if err != nil || questionStillPending(observed, sessionID, requestID) {
+		return false
+	}
+	coord.interactionMu.Lock()
+	cleared := sm.clearOpencodeQuestion(sessionID, requestID)
+	coord.markInteractionResolved("question", sessionID, requestID)
+	coord.bumpInteractionGeneration(sessionID, "question", version)
+	if cleared {
+		sm.outputCh <- protocol.DaemonEvent{
+			Type: "question_resolved", SessionID: sessionID, RequestID: requestID, Reason: InteractionResolvedElsewhere,
+		}
+	}
+	coord.interactionMu.Unlock()
+	if cleared {
+		sm.emitCurrentInteractionStatus(sessionID)
+	}
+	return true
+}
+
+func questionStillPending(observed []adapter.QuestionAsked, sessionID, requestID string) bool {
+	for _, request := range observed {
+		if request.SessionID == sessionID && request.ID == requestID {
+			return true
+		}
+	}
+	return false
+}
+
 func (sm *SessionManager) RejectQuestion(sessionID, requestID string) error {
+	if broker := sm.codexInteractionBroker(); broker != nil && broker.KnowsQuestion(sessionID, requestID) {
+		return broker.RejectQuestion(context.Background(), sessionID, requestID)
+	}
 	b := sm.opencodeBackendFor(sessionID)
 	if b == nil || b.coord == nil || b.coord.srv() == nil {
 		return fmt.Errorf("opencode session not found")
@@ -487,24 +652,56 @@ func (sm *SessionManager) RejectQuestion(sessionID, requestID string) error {
 	b.coord.interactionMu.Lock()
 	sm.mu.RLock()
 	ps := sm.sessions[sessionID]
+	if ps == nil || ps.ControlMode != protocol.ControlManaged {
+		sm.mu.RUnlock()
+		b.coord.interactionMu.Unlock()
+		return fmt.Errorf("opencode session is not managed for remote interaction")
+	}
 	request, ok := ps.PendingQuestions[requestID]
 	directory := ps.Cwd
 	sm.mu.RUnlock()
 	if !ok {
+		resolved := b.coord.interactionResolved("question", sessionID, requestID)
 		b.coord.interactionMu.Unlock()
+		if resolved {
+			return &ResolvedElsewhereError{RequestID: requestID}
+		}
 		return fmt.Errorf("question request not pending in session")
 	}
+	b.coord.bumpInteractionGeneration(sessionID, "question", request.ProtocolVersion)
+	b.coord.interactionMu.Unlock()
 	if err := b.coord.srv().RejectQuestionVersioned(context.Background(), sessionID, requestID, request.ProtocolVersion, directory); err != nil {
-		b.coord.interactionMu.Unlock()
+		if opencodeNotPendingStatus(err) && sm.confirmQuestionResolvedElsewhere(b.coord, sessionID, requestID, request.ProtocolVersion, directory) {
+			return &ResolvedElsewhereError{RequestID: requestID}
+		}
 		return err
 	}
-	sm.clearOpencodeQuestion(sessionID, requestID)
+	b.coord.interactionMu.Lock()
+	cleared := sm.clearOpencodeQuestion(sessionID, requestID)
+	if !cleared {
+		resolved := b.coord.interactionResolved("question", sessionID, requestID)
+		b.coord.interactionMu.Unlock()
+		if resolved {
+			return &ResolvedElsewhereError{RequestID: requestID}
+		}
+		return fmt.Errorf("question request not pending in session")
+	}
 	b.coord.markInteractionResolved("question", sessionID, requestID)
 	b.coord.bumpInteractionGeneration(sessionID, "question", request.ProtocolVersion)
 	sm.outputCh <- protocol.DaemonEvent{Type: "question_resolved", SessionID: sessionID, RequestID: requestID, Rejected: true}
 	b.coord.interactionMu.Unlock()
 	sm.reconcileOpencodeInteractionStatus(sessionID, b)
 	return nil
+}
+
+// ResolveMcpElicitation answers a Codex app-server MCP elicitation through the
+// same first-writer-wins interaction broker used by approvals and questions.
+func (sm *SessionManager) ResolveMcpElicitation(sessionID, requestID, action string, content json.RawMessage) error {
+	broker := sm.codexInteractionBroker()
+	if broker == nil || !broker.KnowsMcpElicitation(sessionID, requestID) {
+		return fmt.Errorf("Codex MCP elicitation is not pending")
+	}
+	return broker.ResolveMcpElicitation(context.Background(), sessionID, requestID, action, content)
 }
 
 func (sm *SessionManager) reconcileOpencodeInteractionStatus(sessionID string, b *serverBackend) {
@@ -519,7 +716,7 @@ func (sm *SessionManager) reconcileOpencodeInteractionStatus(sessionID string, b
 		}
 	}
 	if !usedNative {
-		if messages, err := b.coord.srv().GetMessages(ctx, sessionID); err == nil && adapter.OpencodeMessagesRunning(messages) {
+		if messages, err := b.coord.srv().GetMessages(ctx, sessionID, cwd); err == nil && adapter.OpencodeMessagesRunning(messages) {
 			status = protocol.StatusRunning
 		}
 	}

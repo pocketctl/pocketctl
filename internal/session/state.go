@@ -144,6 +144,10 @@ func (sm *SessionManager) ListSessions() []SessionInfo {
 			Agent:          ps.Agent,
 			Cwd:            ps.Cwd,
 			Model:          ps.Model,
+			ControlMode:    ps.ControlMode,
+		}
+		if ps.Agent == adapter.AgentOpencode {
+			info.Capabilities = sm.openCodeCapabilitiesLocked(ps)
 		}
 		if ps.Status == protocol.StatusExited || ps.Status == protocol.StatusCompleted ||
 			ps.Status == protocol.StatusError || ps.Status == protocol.StatusKilled {
@@ -312,4 +316,15 @@ type SessionInfo struct {
 	Agent          string    `json:"agent"`
 	Cwd            string    `json:"cwd"`
 	Model          string    `json:"model,omitempty"`
+	ControlMode    string    `json:"control_mode,omitempty"`
+	Capabilities   []string  `json:"capabilities,omitempty"`
+}
+
+func (sm *SessionManager) SessionControlMode(sessionID string) string {
+	sm.mu.RLock()
+	defer sm.mu.RUnlock()
+	if state := sm.sessions[sessionID]; state != nil {
+		return state.ControlMode
+	}
+	return ""
 }

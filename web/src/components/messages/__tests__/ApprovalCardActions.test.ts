@@ -54,4 +54,25 @@ describe('ApprovalCard OpenCode actions', () => {
     await legacy.findAll('.approval-btn')[0].trigger('click')
     expect(legacy.emitted('respond')?.[0][1]).toBe('once')
   })
+
+  test('renders only Codex app-server available decisions', async () => {
+	const wrapper = mount(ApprovalCard, {
+	  props: {
+		message: message({
+		  approvalKind: 'commandExecution',
+		  availableDecisions: ['accept', 'cancel'],
+		  always: [],
+		}),
+		supportsActions: false,
+		disabled: false,
+	  },
+	})
+	expect(wrapper.find('.approval-btn.once').exists()).toBe(true)
+	expect(wrapper.find('.approval-btn.always').exists()).toBe(false)
+	expect(wrapper.find('.approval-btn.reject').exists()).toBe(false)
+	expect(wrapper.find('.approval-btn.cancel').exists()).toBe(true)
+	await wrapper.get('.approval-btn.once').trigger('click')
+	await wrapper.get('.approval-btn.cancel').trigger('click')
+	expect(wrapper.emitted('respond')?.map(args => args[1])).toEqual(['once', 'cancel'])
+  })
 })

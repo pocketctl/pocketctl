@@ -10,6 +10,7 @@ func TestOpenCodeInteractionClientRoundTrip(t *testing.T) {
 	tests := []ClientMessage{
 		{Type: "approval_response", SessionID: "ses_1", RequestID: "per_1", Action: "always"},
 		{Type: "question_response", SessionID: "ses_1", RequestID: "que_1", Answers: [][]string{{"A"}, {"B", "custom"}}},
+		{Type: "mcp_elicitation_response", SessionID: "ses_1", RequestID: "mcp_1", ElicitationAction: "accept", ElicitationContent: json.RawMessage(`{"project":"pocketctl"}`)},
 		{Type: "set_session_agent", SessionID: "ses_1", AgentName: "build"},
 	}
 	for _, want := range tests {
@@ -27,6 +28,28 @@ func TestOpenCodeInteractionClientRoundTrip(t *testing.T) {
 		if len(got.Answers) != len(want.Answers) {
 			t.Fatalf("answers lost: got %+v want %+v", got.Answers, want.Answers)
 		}
+		if got.ElicitationAction != want.ElicitationAction || string(got.ElicitationContent) != string(want.ElicitationContent) {
+			t.Fatalf("elicitation fields lost: got %+v want %+v", got, want)
+		}
+	}
+}
+
+func TestMcpElicitationDaemonEventRoundTrip(t *testing.T) {
+	want := DaemonEvent{
+		Type: "mcp_elicitation_request", SessionID: "thr_1", RequestID: "mcp_1",
+		MCPServer: "github", ElicitationMode: "form", Message: "Choose a repository",
+		ElicitationSchema: json.RawMessage(`{"type":"object","required":["repo"],"properties":{"repo":{"type":"string"}}}`),
+	}
+	raw, err := json.Marshal(want)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got DaemonEvent
+	if err := json.Unmarshal(raw, &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.MCPServer != want.MCPServer || got.ElicitationMode != "form" || string(got.ElicitationSchema) != string(want.ElicitationSchema) {
+		t.Fatalf("elicitation fields lost: %+v", got)
 	}
 }
 

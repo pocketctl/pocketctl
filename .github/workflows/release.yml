@@ -9,7 +9,60 @@ permissions:
   contents: write
 
 jobs:
+  managed-agent-gate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.25'
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: |
+            relay/package-lock.json
+            web/package-lock.json
+
+      - name: Install Relay and Web dependencies
+        run: |
+          npm ci --prefix relay
+          npm ci --prefix web
+
+      - name: OpenCode managed terminal gate (Unix launcher + IPC)
+        run: make test-opencode-managed
+
+      - name: Codex managed terminal gate (official TUI + app-server)
+        run: make test-codex-managed
+
+      - name: Relay tests and build
+        working-directory: relay
+        run: |
+          npm test
+          npm run build
+
+      - name: Web tests and build
+        working-directory: web
+        run: |
+          npm test
+          npm run build
+
+  windows-launcher-tests:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.25'
+
+      - name: Windows wrapper, app-server, PATH, and exit propagation tests
+        run: go test ./internal/platform ./internal/agentcontrol ./internal/codexapp ./internal/session ./cmd/pocketctl -count=1
+
   build:
+    needs: [managed-agent-gate, windows-launcher-tests]
     strategy:
       matrix:
         include:

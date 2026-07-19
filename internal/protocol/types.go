@@ -6,6 +6,13 @@ import (
 	"strings"
 )
 
+const (
+	ControlManaged               = "managed"
+	ControlUnmanagedActive       = "unmanaged_active"
+	ControlLegacyReadOnly        = "legacy_read_only"
+	InteractionResolvedElsewhere = "resolved_elsewhere"
+)
+
 // Client → Daemon commands
 type ClientMessage struct {
 	Type       string      `json:"type"`
@@ -22,6 +29,11 @@ type ClientMessage struct {
 	Action string `json:"action,omitempty"`
 	// Answers is ordered exactly like an OpenCode question request's questions.
 	Answers [][]string `json:"answers,omitempty"`
+	// ElicitationAction and ElicitationContent answer a Codex MCP elicitation.
+	// Content remains opaque JSON on the wire and is never copied into a
+	// durable daemon event after the native app-server accepts it.
+	ElicitationAction  string          `json:"elicitation_action,omitempty"`
+	ElicitationContent json.RawMessage `json:"elicitation_content,omitempty"`
 	// AgentName is an OpenCode session profile name, distinct from Agent (the
 	// CLI type: claude-code/codex/opencode).
 	AgentName string `json:"agent_name,omitempty"`
@@ -95,6 +107,7 @@ type DaemonEvent struct {
 	Resync                 bool                 `json:"resync,omitempty"` // reconnect replay, not a newly discovered session
 	ExitReason             string               `json:"exit_reason,omitempty"`
 	LastActivityAt         string               `json:"last_activity_at,omitempty"`
+	TurnStartedAt          string               `json:"turn_started_at,omitempty"` // authoritative start of the currently active turn
 	AgentID                string               `json:"agent_id,omitempty"`          // sub-agent identifier (e.g. "afa8314e6e3f6e552)
 	ParentSessionID        string               `json:"parent_session_id,omitempty"` // subagent's parent session (P0 subagent relation)
 	IsSubagent             bool                 `json:"is_subagent,omitempty"`       // true for subagent-scoped events
@@ -124,6 +137,7 @@ type DaemonEvent struct {
 	CurrentAgent           string               `json:"current_agent,omitempty"`   // selected OpenCode profile; Agent remains the CLI type
 	Agents                 []SessionAgentOption `json:"agents,omitempty"`
 	Capabilities           []string             `json:"capabilities,omitempty"`
+	ControlMode            string               `json:"control_mode,omitempty"`
 	PermissionName         string               `json:"permission_name,omitempty"`
 	Patterns               []string             `json:"patterns,omitempty"`
 	Always                 []string             `json:"always,omitempty"`
@@ -132,9 +146,18 @@ type DaemonEvent struct {
 	ToolCallID             string               `json:"tool_call_id,omitempty"`
 	PermissionVersion      string               `json:"permission_version,omitempty"`
 	Action                 string               `json:"action,omitempty"`
+	ApprovalKind           string               `json:"approval_kind,omitempty"`
+	AvailableDecisions     []string             `json:"available_decisions,omitempty"`
 	Questions              []QuestionInfo       `json:"questions,omitempty"`
 	Answers                [][]string           `json:"answers,omitempty"`
 	Rejected               bool                 `json:"rejected,omitempty"`
+	AutoResolutionMs       uint64               `json:"auto_resolution_ms,omitempty"`
+	Redacted               bool                 `json:"redacted,omitempty"`
+	MCPServer              string               `json:"mcp_server,omitempty"`
+	ElicitationMode        string               `json:"elicitation_mode,omitempty"`
+	ElicitationID          string               `json:"elicitation_id,omitempty"`
+	ElicitationSchema      json.RawMessage      `json:"elicitation_schema,omitempty"`
+	ElicitationContent     json.RawMessage      `json:"elicitation_content,omitempty"`
 }
 
 // ModelOption is one selectable model surfaced by a daemon for session creation.
@@ -193,11 +216,13 @@ type QuestionOption struct {
 }
 
 type QuestionInfo struct {
+	ID       string           `json:"id,omitempty"`
 	Header   string           `json:"header,omitempty"`
 	Question string           `json:"question"`
 	Options  []QuestionOption `json:"options,omitempty"`
 	Multiple bool             `json:"multiple,omitempty"`
 	Custom   bool             `json:"custom,omitempty"`
+	Secret   bool             `json:"secret,omitempty"`
 }
 
 // TodoItem is OpenCode's session-level task snapshot. Status and priority stay
@@ -323,10 +348,17 @@ type RelayRestartingMessage struct {
 }
 
 type PingMessage struct {
-	Type    string  `json:"type"`
-	CpuPct  float64 `json:"cpu_pct,omitempty"`
-	MemPct  float64 `json:"mem_pct,omitempty"`
-	DiskPct float64 `json:"disk_pct,omitempty"`
+	Type            string                    `json:"type"`
+	CpuPct          float64                   `json:"cpu_pct,omitempty"`
+	MemPct          float64                   `json:"mem_pct,omitempty"`
+	DiskPct         float64                   `json:"disk_pct,omitempty"`
+	OpenCodeRuntime *OpenCodeRuntimeTelemetry `json:"opencode_runtime,omitempty"`
+}
+
+type OpenCodeRuntimeTelemetry struct {
+	FallbackReasons map[string]uint64 `json:"fallback_reasons,omitempty"`
+	HealthOK        uint64            `json:"health_ok,omitempty"`
+	HealthFailed    uint64            `json:"health_failed,omitempty"`
 }
 
 type PongMessage struct {

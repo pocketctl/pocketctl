@@ -11,12 +11,39 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/pocketctl/pocketctl/internal/platform"
 )
+
+func TestOpenCodeGetMessagesUsesSessionDirectory(t *testing.T) {
+	const directory = "/tmp/opencode-cli-project"
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/session/ses_cli/message" {
+			http.NotFound(w, r)
+			return
+		}
+		if got := r.URL.Query().Get("directory"); got != directory {
+			http.Error(w, "wrong project directory", http.StatusBadRequest)
+			return
+		}
+		fmt.Fprint(w, `[{"info":{"id":"msg_cli","role":"assistant"},"parts":[{"id":"part_cli","type":"text","text":"synced"}]}]`)
+	}))
+	defer server.Close()
+
+	srv := NewOpencodeServer("unused")
+	srv.baseURL = server.URL
+	messages, err := srv.GetMessages(context.Background(), "ses_cli", directory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(messages) != 1 || messages[0].Info.ID != "msg_cli" || len(messages[0].Parts) != 1 || messages[0].Parts[0].Text != "synced" {
+		t.Fatalf("messages=%+v", messages)
+	}
+}
 
 func TestOpenCodeHTTPStatusErrorPreservesActualStatus(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -233,7 +260,7 @@ func TestOpenCodeRestartServeOutputSurvivesDetach(t *testing.T) {
 	srv.Detach()
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
-		data, _ := os.ReadFile(OpencodeServeOutputPath())
+		data, _ := os.ReadFile(srv.OutputPath())
 		if strings.Contains(string(data), "late-after-detach") {
 			if !srv.Healthy(context.Background()) {
 				t.Fatal("serve unhealthy after late detached log")
@@ -243,6 +270,72 @@ func TestOpenCodeRestartServeOutputSurvivesDetach(t *testing.T) {
 		time.Sleep(20 * time.Millisecond)
 	}
 	t.Fatal("late child output did not reach persistent sink")
+}
+
+func TestOpenCodeConcurrentStartsDoNotReadAnotherServersListenURL(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell synchronization fixture is Unix-only")
+	}
+	t.Setenv("HOME", t.TempDir())
+
+	serverA := httptest.NewServer(opencodeHealthHandler("1.2.3"))
+	defer serverA.Close()
+	serverB := httptest.NewServer(opencodeHealthHandler("1.2.3"))
+	defer serverB.Close()
+
+	dir := t.TempDir()
+	readyA := filepath.Join(dir, "a-ready")
+	cliA := filepath.Join(dir, "opencode-a")
+	cliB := filepath.Join(dir, "opencode-b")
+	scriptA := fmt.Sprintf("#!/bin/sh\ntouch %q\nsleep 0.3\necho 'opencode server listening on %s'\nwhile :; do sleep 1; done\n", readyA, serverA.URL)
+	scriptB := fmt.Sprintf("#!/bin/sh\necho 'opencode server listening on %s'\nwhile :; do sleep 1; done\n", serverB.URL)
+	if err := os.WriteFile(cliA, []byte(scriptA), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(cliB, []byte(scriptB), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	opA := NewOpencodeServer(cliA)
+	opB := NewOpencodeServer(cliB)
+	t.Cleanup(func() { _ = opA.Stop(); _ = opB.Stop() })
+	errA := make(chan error, 1)
+	go func() { errA <- opA.Start(context.Background()) }()
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		if _, err := os.Stat(readyA); err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("first fake serve did not start")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if err := opB.Start(context.Background()); err != nil {
+		t.Fatalf("start B: %v", err)
+	}
+	if err := <-errA; err != nil {
+		t.Fatalf("start A: %v", err)
+	}
+	if opA.BaseURL() != serverA.URL || opB.BaseURL() != serverB.URL {
+		t.Fatalf("crossed listen URLs: A=%q want %q, B=%q want %q", opA.BaseURL(), serverA.URL, opB.BaseURL(), serverB.URL)
+	}
+	if opA.OutputPath() == "" || opA.OutputPath() == opB.OutputPath() {
+		t.Fatalf("serve output paths are not isolated: A=%q B=%q", opA.OutputPath(), opB.OutputPath())
+	}
+}
+
+func opencodeHealthHandler(version string) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/health":
+			fmt.Fprint(w, `{"healthy":true}`)
+		case "/global/health":
+			fmt.Fprintf(w, `{"healthy":true,"version":%q}`, version)
+		default:
+			http.NotFound(w, r)
+		}
+	})
 }
 
 func TestOpenCodeRestartStopDoesNotKillOnEndpointIdentityMismatch(t *testing.T) {
@@ -359,6 +452,24 @@ func TestOpencodeServerSmoke(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 40*time.Second)
 	defer cancel()
+	for _, contract := range []struct {
+		args  []string
+		flags []string
+	}{
+		{args: []string{"serve", "--help"}},
+		{args: []string{"attach", "--help"}, flags: []string{"--dir", "--session", "--fork"}},
+		{args: []string{"run", "--help"}, flags: []string{"--attach", "--dir"}},
+	} {
+		out, err := exec.CommandContext(ctx, cli, contract.args...).CombinedOutput()
+		if err != nil {
+			t.Skipf("installed opencode does not expose managed CLI contract %v: %v", contract.args, err)
+		}
+		for _, flag := range contract.flags {
+			if !strings.Contains(string(out), flag) {
+				t.Skipf("installed opencode %v does not expose %s", contract.args, flag)
+			}
+		}
+	}
 
 	srv := NewOpencodeServer(cli)
 	if err := srv.Start(ctx); err != nil {

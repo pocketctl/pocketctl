@@ -111,7 +111,7 @@
             <svg v-if="!copied" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"/></svg>
             <svg v-else width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M20 6L9 17l-5-5"/></svg>
           </button>
-          <button v-if="!focusedSubAgentId && currentSessionAgent !== 'opencode'" class="copy-btn" style="margin-left:6px;" :title="resumeCopied ? t('session.actions.resume_toast') : t('session.actions.resume') + t('session.actions.resume_hint')" @click="copyResumeCmd">
+          <button v-if="!focusedSubAgentId" class="copy-btn" style="margin-left:6px;" :title="resumeCopied ? t('session.actions.resume_toast') : t('session.actions.resume') + t('session.actions.resume_hint')" @click="copyResumeCmd">
             <svg v-if="!resumeCopied" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8"/><path d="M12 17v4"/></svg>
             <svg v-else width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M20 6L9 17l-5-5"/></svg>
           </button>
@@ -132,6 +132,10 @@
         <div v-if="isDisconnected" class="banner banner-warning" style="flex-shrink:0;">
           <svg class="banner-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><path d="M12 9v4"/><path d="M12 17h.01"/></svg>
           <span>{{ t('session.daemon_offline') }}</span>
+        </div>
+        <div v-if="isLegacyOpenCodeSession" class="banner banner-info opencode-legacy-banner" style="flex-shrink:0;">
+          <svg class="banner-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M12 16v-4"/><path d="M12 8h.01"/></svg>
+          <span>{{ t('session.opencode_legacy_readonly') }}</span>
         </div>
         <!-- L1: send failed (ws not open at send time) -->
         <div v-if="sendError" class="banner banner-warning" style="flex-shrink:0;">
@@ -231,16 +235,23 @@
             v-else-if="msg.type === 'approval_request'"
             :message="msg"
             :supports-actions="interactionCapabilities.includes('permission_actions')"
-            :disabled="isDisconnected"
+            :disabled="interactionCardsDisabled"
             @respond="onApprovalRespond"
           />
 
           <OpenCodeQuestionCard
             v-else-if="msg.type === 'question_request'"
             :message="msg"
-            :disabled="isDisconnected"
+            :disabled="interactionCardsDisabled"
             @submit="onQuestionSubmit"
             @reject="onQuestionReject"
+          />
+
+          <McpElicitationCard
+            v-else-if="msg.type === 'mcp_elicitation_request'"
+            :message="msg"
+            :disabled="interactionCardsDisabled"
+            @respond="onMcpElicitationRespond"
           />
 
           <!-- PTY selection menu (host-hook confirmation, TUI prompt, etc.) -->
@@ -430,6 +441,7 @@ import ToolCallCard from '../components/messages/ToolCallCard.vue'
 import QuestionCard from '../components/messages/QuestionCard.vue'
 import ApprovalCard from '../components/messages/ApprovalCard.vue'
 import OpenCodeQuestionCard from '../components/messages/OpenCodeQuestionCard.vue'
+import McpElicitationCard from '../components/messages/McpElicitationCard.vue'
 import OpenCodeReasoningCard from '../components/messages/OpenCodeReasoningCard.vue'
 import OpenCodePartCard from '../components/messages/OpenCodePartCard.vue'
 import InteractiveChoiceCard from '../components/messages/InteractiveChoiceCard.vue'
@@ -439,9 +451,10 @@ import { buildResumeCommand } from '../utils/resumeCommand'
 import { resolveAgentTarget } from './classifyByAgent'
 import { formatToolInput } from '../utils/toolDisplay'
 import { isDiffTool } from '../utils/diffRender'
+import { formatTokenCount } from '../utils/tokenFormat'
 import { useSessionRename } from '../composables/useSessionRename'
 import type { CommandItem } from '../composables/useWebSocket'
-import { normalizeSessionAgents, resolveInteractionRequest, sessionAgentSwitchDisabled, shouldShowSessionAgentPicker, upsertInteractionRequest, type SessionAgentOption } from '../types/opencode-interactions'
+import { canControlOpenCodeInteractions, isManagedOpenCodeSession, normalizeSessionAgents, resolveInteractionRequest, sessionAgentSwitchDisabled, shouldShowSessionAgentPicker, upsertInteractionRequest, type SessionAgentOption } from '../types/opencode-interactions'
 import { expandCodexPreset, permissionOptions, permissionTitleKey, type AgentType, type ClaudeMode, type PermissionConfig } from '../types/permission'
 
 const { renamingId, renameInput, startRename, commitRename, cancelRename } = useSessionRename()
@@ -483,7 +496,22 @@ const hasMore = ref(false)      // relay signaled older events exist
 const resumeCopied = ref(false)  // session-resume-command: 复制恢复命令反馈
 const showNewSession = ref(false)
 const daemonList = computed(() => Object.values(daemons.value))
-const currentSessionAgent = computed(() => { const s: any = allSessions.value.find((x: any) => x.session_id === sessionId.value); return s?.agent_type || s?.agent || '' })
+const currentSession = computed(() => allSessions.value.find((x: any) => x.session_id === sessionId.value))
+const isManagedSession = computed(() => currentSession.value?.control_mode === 'managed')
+const currentSessionAgent = computed(() => { const s: any = currentSession.value; return s?.agent_type || s?.agent || '' })
+const currentSessionCapabilities = computed(() => interactionCapabilities.value.length > 0
+  ? interactionCapabilities.value
+  : (Array.isArray(currentSession.value?.capabilities) ? currentSession.value.capabilities : []))
+const isManagedOpenCode = computed(() => isManagedOpenCodeSession(
+  currentSessionAgent.value,
+  currentSession.value?.control_mode,
+  currentSessionCapabilities.value,
+))
+const isLegacyOpenCodeSession = computed(() => currentSessionAgent.value === 'opencode' && !isManagedOpenCode.value)
+const interactionCardsDisabled = computed(() => isDisconnected.value || (
+  currentSessionAgent.value === 'opencode'
+  && !canControlOpenCodeInteractions(currentSessionAgent.value, currentSession.value?.control_mode, currentSessionCapabilities.value)
+))
 const normalizedEffort = computed(() => normalizeEffort(currentEffort.value))
 const effortVisible = computed(() => shouldShowEffort(currentSessionAgent.value || '', currentEffort.value))
 const effortLabel = computed(() => {
@@ -611,7 +639,7 @@ const chatEmptyDesc = computed(() => {
   return t('session.empty_select_desc')
 })
 const isTerminal = computed(() => ['completed', 'error', 'killed'].includes(status.value))
-// Daemon-created sessions can be resumed (via claude --resume) even after completion,
+// Daemon-created sessions can be resumed with their agent CLI even after completion,
 // so the input box stays available as long as the daemon is online.
 const isDaemonSession = computed(() => {
   const s = allSessions.value.find((x: any) => x.session_id === sessionId.value)
@@ -652,7 +680,11 @@ const focusedSubAgentTokenTotal = computed(() => {
 const renderMessages = computed(() =>
   focusedSubAgentId.value ? (subagentMessages.value[focusedSubAgentId.value] || []) : messages.value,
 )
-const canInput = computed(() => !isDisconnected.value && (!isTerminal.value || isDaemonSession.value) && !isSubagent.value && !focusedSubAgentId.value)
+const canInput = computed(() => !isDisconnected.value
+  && (!isTerminal.value || isDaemonSession.value || isManagedSession.value)
+  && !isSubagent.value
+  && !focusedSubAgentId.value
+  && (currentSessionAgent.value !== 'opencode' || isManagedOpenCode.value))
 // Agent is actively generating (send button → stop button)
 // Agent is actively working — includes 'waiting' (tool execution in progress),
 // otherwise the timer would stop prematurely when a tool call is running.
@@ -665,7 +697,7 @@ const isExecuting = computed(() => status.value === 'running' || status.value ==
 // sessionSwitching gates the watch during a session change: the placeholder
 // status='running' (set in the sessionId watcher before replay) must NOT start
 // the timer from zero. The real turn start is recovered from the last
-// executing session_status's last_activity_at once replay completes.
+// authoritative turn_started_at once replay completes.
 const turnStartTime = ref<number | null>(null)   // 本轮开始时间戳
 const turnElapsed = ref(0)                        // 实时计时（秒）
 const lastTurnDuration = ref<number | null>(null) // 完成后的总耗时（秒）
@@ -731,8 +763,7 @@ const completedBarVisible = computed(() => {
 })
 
 function fmtTokens(n: number): string {
-  if (n > 1000) return (n / 1000).toFixed(1) + 'K'
-  return String(n)
+  return formatTokenCount(n)
 }
 // Format a duration (seconds) as Xs / Xm Ys / Xh Ym Zs for the turn timer.
 function fmtDuration(sec: number): string {
@@ -816,7 +847,7 @@ const contextTokens = computed(() => {
   const u = effectiveUsage()
   if (u) {
     const total = (u.input_tokens || 0) + (u.cache_read_tokens || 0) + (u.cache_create_tokens || 0)
-    return formatTokenAmount(total)
+    return formatTokenCount(total)
   }
   return ''
 })
@@ -840,15 +871,7 @@ const parentTotalTokens = computed(() => {
   return (s as any)?.totalTokens ?? null
 })
 function fmtTk(n: number) {
-  return formatTokenAmount(n)
-}
-
-function formatTokenAmount(n: number) {
-  n = +n || 0
-  if (n > 1e9) return (n / 1e9).toFixed(1) + 'G'
-  if (n >= 1e6) return (n / 1e6).toFixed(1) + 'M'
-  if (n >= 1e3) return (n / 1e3).toFixed(0) + 'K'
-  return '' + n
+  return formatTokenCount(n)
 }
 
 const milestones = computed(() => {
@@ -874,7 +897,12 @@ function copySessionId() {
 function copyResumeCmd() {
   const s = allSessions.value.find((x: any) => x.session_id === sessionId.value)
   if (!s) return
-  const cmd = buildResumeCommand({ agent: (s as any).agent, cwd: (s as any).cwd, session_id: sessionId.value })
+  const cmd = buildResumeCommand({
+    agent: (s as any).agent,
+    agent_type: (s as any).agent_type,
+    cwd: (s as any).cwd,
+    session_id: sessionId.value,
+  })
   navigator.clipboard.writeText(cmd).then(() => {
     resumeCopied.value = true
     if (copyTimer) clearTimeout(copyTimer)
@@ -1102,7 +1130,8 @@ const LOCAL_COMMANDS = POCKETCTL_LOCAL_COMMANDS.map(command => command.name)
 // already flipped its local status optimistically; here we just dispatch the
 // approval_response command, which the relay forwards to the owning daemon.
 const interactionSubmitTimers = new Map<string, ReturnType<typeof setTimeout>>()
-const interactionResolutions = new Map<string, { type: 'approval_request' | 'question_request'; resolution: Record<string, unknown> }>()
+type InteractionCardType = 'approval_request' | 'question_request' | 'mcp_elicitation_request'
+const interactionResolutions = new Map<string, { type: InteractionCardType; resolution: Record<string, unknown> }>()
 function markInteractionSubmitting(msg: any, operation: string): boolean {
   if (!msg.request_id || msg.submitting) return false
   msg.submitting = true
@@ -1123,15 +1152,15 @@ function clearInteractionSubmitting(requestId: string) {
   interactionSubmitTimers.delete(requestId)
 }
 
-function onApprovalRespond(msg: any, action: 'once' | 'always' | 'reject') {
+function onApprovalRespond(msg: any, action: 'once' | 'always' | 'reject' | 'cancel') {
   if (!msg.request_id) return
   if (!markInteractionSubmitting(msg, 'Approval')) return
-  const supportsActions = interactionCapabilities.value.includes('permission_actions')
+  const supportsActions = interactionCapabilities.value.includes('permission_actions') || Array.isArray(msg.availableDecisions)
   const sent = send({
     type: 'approval_response',
     session_id: sessionId.value,
     request_id: msg.request_id,
-    ...(supportsActions ? { action } : { approved: action !== 'reject' }),
+    ...(supportsActions ? { action } : { approved: action !== 'reject' && action !== 'cancel' }),
   })
   if (!sent) {
     clearInteractionSubmitting(msg.request_id)
@@ -1157,6 +1186,19 @@ function onQuestionReject(msg: any) {
     clearInteractionSubmitting(msg.request_id)
     msg.submitting = false
     msg.error = 'Question rejection failed'
+  }
+}
+
+function onMcpElicitationRespond(msg: any, action: 'accept' | 'decline' | 'cancel', content?: Record<string, unknown>) {
+  if (!markInteractionSubmitting(msg, 'MCP elicitation')) return
+  const sent = send({
+    type: 'mcp_elicitation_response', session_id: sessionId.value, request_id: msg.request_id,
+    elicitation_action: action, ...(content === undefined ? {} : { elicitation_content: content }),
+  })
+  if (!sent) {
+    clearInteractionSubmitting(msg.request_id)
+    msg.submitting = false
+    msg.error = 'MCP elicitation response failed'
   }
 }
 
@@ -1609,7 +1651,7 @@ function processEvent(evt: any, target: any[] = messages.value, subagentOverride
     // executing status (busy/running/waiting) so the timer can resume the
     // accumulated elapsed instead of restarting from zero.
     if (sessionSwitching && (s === 'running' || s === 'busy' || s === 'retry' || s === 'waiting')) {
-      const ts = evt.last_activity_at || evt.payload?.last_activity_at
+      const ts = evt.turn_started_at || evt.payload?.turn_started_at
       if (ts) resumeStartAt = new Date(ts).getTime()
     }
     if (evt.exit_reason || evt.payload?.exit_reason) exitReason.value = evt.exit_reason || evt.payload.exit_reason
@@ -1630,7 +1672,7 @@ function processEvent(evt: any, target: any[] = messages.value, subagentOverride
     upsertInteractionRequest(requestTarget, 'approval_request', requestId, {
       id: nextId('ap'), type: 'approval_request', request_id: requestId,
       call_id: evt.call_id || evt.payload?.call_id,
-      tool, input, inputDesc: formatToolInput(tool, input),
+      tool, input,
       permissionName: evt.permission_name || evt.payload?.permission_name || '',
       patterns: evt.patterns || evt.payload?.patterns || [],
       always: evt.always || evt.payload?.always || [],
@@ -1638,6 +1680,12 @@ function processEvent(evt: any, target: any[] = messages.value, subagentOverride
       toolMessageId: evt.tool_message_id || evt.payload?.tool_message_id,
       toolCallId: evt.tool_call_id || evt.payload?.tool_call_id,
       permissionVersion: evt.permission_version || evt.payload?.permission_version,
+      approvalKind: evt.approval_kind || evt.payload?.approval_kind,
+      availableDecisions: evt.available_decisions || evt.payload?.available_decisions || [],
+      command: evt.command || evt.payload?.command,
+      cwd: evt.cwd || evt.payload?.cwd,
+      description: evt.description || evt.payload?.description,
+      inputDesc: evt.command || evt.payload?.command || evt.description || evt.payload?.description || formatToolInput(tool, input),
     })
     const knownResolution = interactionResolutions.get(requestId)
     if (knownResolution?.type === 'approval_request') resolveInteractionRequest(requestTarget, 'approval_request', requestId, knownResolution.resolution)
@@ -1646,9 +1694,10 @@ function processEvent(evt: any, target: any[] = messages.value, subagentOverride
     if (!requestId) return
     const approved = evt.approved ?? evt.payload?.approved
     const action = evt.action || evt.payload?.action || (approved ? 'once' : 'reject')
-    interactionResolutions.set(requestId, { type: 'approval_request', resolution: { action } })
-    resolveInteractionRequest(target, 'approval_request', requestId, { action })
-    if (target !== messages.value) resolveInteractionRequest(messages.value, 'approval_request', requestId, { action })
+    const resolution = { action, reason: evt.reason || evt.payload?.reason }
+    interactionResolutions.set(requestId, { type: 'approval_request', resolution })
+    resolveInteractionRequest(target, 'approval_request', requestId, resolution)
+    if (target !== messages.value) resolveInteractionRequest(messages.value, 'approval_request', requestId, resolution)
     clearInteractionSubmitting(requestId)
   } else if (type === 'question_request') {
     const requestId = evt.request_id || evt.payload?.request_id
@@ -1660,6 +1709,7 @@ function processEvent(evt: any, target: any[] = messages.value, subagentOverride
     upsertInteractionRequest(requestTarget, 'question_request', requestId, {
       id: nextId('oq'),
       questions,
+      autoResolutionMs: evt.auto_resolution_ms || evt.payload?.auto_resolution_ms,
       toolMessageId: evt.tool_message_id || evt.payload?.tool_message_id,
       toolCallId: evt.tool_call_id || evt.payload?.tool_call_id,
     })
@@ -1671,10 +1721,34 @@ function processEvent(evt: any, target: any[] = messages.value, subagentOverride
     const resolution = {
       answers: evt.answers || evt.payload?.answers || [],
       rejected: !!(evt.rejected ?? evt.payload?.rejected),
+      reason: evt.reason || evt.payload?.reason,
+      redacted: !!(evt.redacted ?? evt.payload?.redacted),
     }
     interactionResolutions.set(requestId, { type: 'question_request', resolution })
     resolveInteractionRequest(target, 'question_request', requestId, resolution)
     if (target !== messages.value) resolveInteractionRequest(messages.value, 'question_request', requestId, resolution)
+    clearInteractionSubmitting(requestId)
+  } else if (type === 'mcp_elicitation_request') {
+    const requestId = evt.request_id || evt.payload?.request_id
+    if (!requestId) return
+    const requestTarget = target !== messages.value && messages.value.some((message: any) => message.type === 'mcp_elicitation_request' && message.request_id === requestId)
+      ? messages.value : target
+    upsertInteractionRequest(requestTarget, 'mcp_elicitation_request', requestId, {
+      id: nextId('mcp'), mcpServer: evt.mcp_server || evt.payload?.mcp_server,
+      elicitationMode: evt.elicitation_mode || evt.payload?.elicitation_mode,
+      elicitationId: evt.elicitation_id || evt.payload?.elicitation_id,
+      elicitationSchema: evt.elicitation_schema || evt.payload?.elicitation_schema,
+      message: evt.message || evt.payload?.message, url: evt.url || evt.payload?.url,
+    })
+    const knownResolution = interactionResolutions.get(requestId)
+    if (knownResolution?.type === 'mcp_elicitation_request') resolveInteractionRequest(requestTarget, 'mcp_elicitation_request', requestId, knownResolution.resolution)
+  } else if (type === 'mcp_elicitation_resolved') {
+    const requestId = evt.request_id || evt.payload?.request_id
+    if (!requestId) return
+    const resolution = { action: evt.action || evt.payload?.action, reason: evt.reason || evt.payload?.reason, redacted: !!(evt.redacted ?? evt.payload?.redacted) }
+    interactionResolutions.set(requestId, { type: 'mcp_elicitation_request', resolution })
+    resolveInteractionRequest(target, 'mcp_elicitation_request', requestId, resolution)
+    if (target !== messages.value) resolveInteractionRequest(messages.value, 'mcp_elicitation_request', requestId, resolution)
     clearInteractionSubmitting(requestId)
   } else if (type === 'interactive_prompt') {
     // Daemon scanned a selection menu the agent's TUI drew to the PTY (e.g. a
@@ -1757,13 +1831,21 @@ onMounted(() => {
   // Gate the timer watch for the initial load too: status defaults to 'running'
   // (a placeholder) and would start the timer from zero before the real status
   // arrives via replay. replay_end un-gates and resumes correctly.
-  sessionSwitching = true
-  loadHistory()
+	sessionSwitching = true
+	loadHistory()
+	cleanups.push(onEvent('connection_restored', () => {
+		send({ type: 'list_sessions' })
+		send({ type: 'list_daemons' })
+		loadHistory()
+	}))
 
-  cleanups.push(onEvent('session_list', (msg: any) => {
+	cleanups.push(onEvent('session_list', (msg: any) => {
     allSessions.value = msg.sessions || []
     // P1a: populate childrenToken from current session's children
     const cur = msg.sessions?.find((s: any) => s.session_id === sessionId.value)
+    if (cur && interactionCapabilities.value.length === 0 && Array.isArray(cur.capabilities)) {
+      interactionCapabilities.value = cur.capabilities
+    }
     if (cur?.active_agent && !currentOpenCodeAgent.value) currentOpenCodeAgent.value = cur.active_agent
     if (cur?.children) {
       for (const c of cur.children) {
@@ -1815,6 +1897,8 @@ onMounted(() => {
         subagent_count: 0,
         pinned: false,
         daemon_online: true,
+        control_mode: msg.control_mode,
+        capabilities: Array.isArray(msg.capabilities) ? msg.capabilities : [],
       })
     }
     // session_created carries the daemon-resolved model (for the /model command).
@@ -1858,6 +1942,11 @@ onMounted(() => {
     if (msg.model) currentModel.value = msg.model
     if (msg.effort) currentEffort.value = msg.effort
     interactionCapabilities.value = Array.isArray(msg.capabilities) ? msg.capabilities : []
+    const session = allSessions.value.find((item: any) => item.session_id === msg.session_id)
+    if (session) {
+      if (msg.control_mode !== undefined) session.control_mode = msg.control_mode
+      session.capabilities = interactionCapabilities.value
+    }
     if (msg.current_agent) currentOpenCodeAgent.value = msg.current_agent
     currentPermission.value = msg.permission
     permissionMutable.value = !!msg.permission_mutable
@@ -1921,7 +2010,7 @@ onMounted(() => {
     if (msg.last_seq && (!loadedMinId.value || msg.last_seq < loadedMinId.value)) loadedMinId.value = msg.last_seq
     // Session switch complete: ungate the timer watch. If the target session is
     // executing, resume timing from the recovered turn start (last executing
-    // session_status's last_activity_at) so elapsed isn't reset to zero.
+    // session_status's turn_started_at) so elapsed isn't reset to zero.
     // Skipped in focused-sub-agent mode: status/timer reflect the parent session
     // and don't apply to a read-only sub-agent replay.
     if (sessionSwitching) {
@@ -1951,6 +2040,8 @@ onMounted(() => {
             if (ageMs > 120000) st = 'idle'
           }
           if (st) status.value = st
+          const turnStartedAt = meta.turn_started_at || msg.turn_started_at
+          if (turnStartedAt) resumeStartAt = new Date(turnStartedAt).getTime()
         }
         if (isExecuting.value) startTurnTimer(resumeStartAt ?? undefined)
         resumeStartAt = null
@@ -2027,6 +2118,27 @@ onMounted(() => {
     if (msg.session_id !== sessionId.value) return
     processEvent(msg)
   }))
+  cleanups.push(onEvent('mcp_elicitation_request', (msg: any) => {
+    if (msg.session_id !== sessionId.value) return
+    processEvent(msg)
+    nextTick(scrollToBottom)
+  }))
+  cleanups.push(onEvent('mcp_elicitation_resolved', (msg: any) => {
+    if (msg.session_id !== sessionId.value) return
+    processEvent(msg)
+  }))
+  cleanups.push(onEvent('interaction_result', (msg: any) => {
+    if (msg.session_id !== sessionId.value || msg.status !== 'resolved_elsewhere' || !msg.request_id) return
+    let type: InteractionCardType
+    if (msg.operation === 'approval_response') type = 'approval_request'
+    else if (msg.operation === 'question_response' || msg.operation === 'question_reject') type = 'question_request'
+    else if (msg.operation === 'mcp_elicitation_response') type = 'mcp_elicitation_request'
+    else return
+    const resolution = { reason: 'resolved_elsewhere' }
+    interactionResolutions.set(msg.request_id, { type, resolution })
+    resolveInteractionRequest(messages.value, type, msg.request_id, resolution)
+    clearInteractionSubmitting(msg.request_id)
+  }))
   cleanups.push(onEvent('interactive_prompt', (msg: any) => {
     if (msg.session_id !== sessionId.value) return
     processEvent(msg)
@@ -2099,9 +2211,9 @@ onMounted(() => {
 
   cleanups.push(onEvent('error', (msg: any) => {
     if (msg.session_id && msg.session_id !== sessionId.value) return
-    if (['approval_response', 'question_response', 'question_reject'].includes(msg.operation) && msg.request_id) {
+    if (['approval_response', 'question_response', 'question_reject', 'mcp_elicitation_response'].includes(msg.operation) && msg.request_id) {
       clearInteractionSubmitting(msg.request_id)
-      const type = msg.operation === 'approval_response' ? 'approval_request' : 'question_request'
+      const type = msg.operation === 'approval_response' ? 'approval_request' : msg.operation === 'mcp_elicitation_response' ? 'mcp_elicitation_request' : 'question_request'
       const card = messages.value.find((item: any) => item.type === type && item.request_id === msg.request_id)
       if (card) {
         card.submitting = false

@@ -137,9 +137,9 @@ func (sm *SessionManager) SetPermissionConfig(sessionID string, cfg *protocol.Pe
 		sm.mu.Unlock()
 		return err
 	}
-	if ps.Agent == adapter.AgentCodex && cfg.ApprovalPolicy != "" && cfg.ApprovalPolicy != "never" {
+	if ps.Agent == adapter.AgentCodex && cfg.ApprovalPolicy != "" && cfg.ApprovalPolicy != "never" && ps.ControlMode != protocol.ControlManaged {
 		sm.mu.Unlock()
-		return fmt.Errorf("codex remote approval is not supported")
+		return fmt.Errorf("codex remote approval requires the managed app-server backend")
 	}
 	if ps.Status == protocol.StatusRunning || ps.Status == protocol.StatusWaitingApproval {
 		sm.mu.Unlock()

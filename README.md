@@ -11,7 +11,8 @@ Official website: [pocketctl.me](https://www.pocketctl.me) · Web dashboard: [po
 - 🤖 **Multi-agent** — Claude Code, Codex, and OpenCode, behind one unified "zero-config discovery + live sync + cross-device continue" model. Run an agent in your terminal; the daemon discovers it and syncs it to your client where you can keep chatting. (OpenCode is a client/server agent — the daemon hosts a shared `opencode serve` and drives it over its HTTP API. To add a new agent, register a `Provider` — see [docs/adding-an-agent.md](docs/adding-an-agent.md).)
 - 🔐 **Agent-specific permissions** — Configure Claude Code's native startup modes and Codex approval/sandbox policies from Web or iOS; confirmed session changes are reused on resumed turns.
 - 🖥️ **Real-time Monitoring** — Watch your AI coding sessions live from anywhere
-- 🧩 **Native OpenCode experience** — Text and reasoning reconcile to exact final snapshots; File, Patch, Todo, Subtask, and Agent Parts render as structured cards in Web and iOS. Native busy/retry/idle state, slash commands, Agent switching, permissions, and questions stay synchronized across clients, including pending-card recovery after daemon restarts. Prompts already owned by a separate terminal OpenCode process still remain in that terminal.
+- 🧩 **Native OpenCode experience** — Opt in to the Pocketctl launcher and a normal terminal `opencode` joins the daemon's shared runtime. The official TUI, Web, and iOS can continue the same managed session and resolve permissions/questions from any device; pre-existing independent processes remain safely read-only until resumed through the launcher. See [OpenCode managed terminal control](docs/opencode-managed-terminal.md).
+- ⌨️ **Official Codex TUI, shared control** — With Codex CLI 0.144.1+, an optional Pocketctl launcher connects the official TUI and daemon to one managed app-server. Terminal, Web, and iOS share thread progress and first-writer-wins approvals/questions/MCP elicitation. See [Codex managed terminal control](docs/codex-managed-terminal.md).
 - 📱 **iOS App** — Download the iOS app from the official website. In Settings, select **Test Environment** and enter your self-hosted Relay address to connect it.
 - 🖧 **Hosts Dashboard** — System resource monitoring (CPU / Memory / Disk) with remote daemon restart
 - 📌 **Session Management** — Pin, rename, export, and delete sessions with inline editing
@@ -79,6 +80,27 @@ pocketctl daemon start --prod
 pocketctl daemon status
 ```
 
+### Optional: Share New OpenCode Terminal Sessions
+
+```bash
+pocketctl agent opencode enable
+# Open a new shell, then keep using OpenCode normally.
+opencode
+```
+
+This installs a reversible Pocketctl launcher, not another OpenCode distribution. If the daemon is unavailable, it quickly falls back to the real OpenCode binary. See the [behavior, security boundaries, compatibility policy, and rollback guide](docs/opencode-managed-terminal.md).
+
+### Optional: Share Codex TUI Sessions
+
+```bash
+pocketctl agent codex enable
+# Open a new shell if PATH changed, then use the official TUI normally.
+codex
+codex resume <thread-id>
+```
+
+No daemon restart or separate app-server connection command is required. Missing/old Codex only produces a daemon-start warning and keeps native fallback. See the [Codex behavior, recovery, and security guide](docs/codex-managed-terminal.md).
+
 ## Commands
 
 | Command | Description |
@@ -90,6 +112,14 @@ pocketctl daemon status
 | `pocketctl daemon logs` | View daemon logs |
 | `pocketctl daemon doctor` | Diagnose connection issues |
 | `pocketctl daemon update` | Update to the latest version |
+| `pocketctl agent opencode enable [--no-shell-profile]` | Opt in to shared OpenCode terminal control |
+| `pocketctl agent opencode disable` | Remove the Pocketctl launcher without uninstalling OpenCode |
+| `pocketctl agent opencode status` | Show OpenCode detection, launcher, PATH, and runtime state |
+| `opencode --native ...` | Bypass Pocketctl for one OpenCode invocation |
+| `pocketctl agent codex enable [--no-shell-profile]` | Opt in to official Codex TUI managed control (Codex 0.144.1+) |
+| `pocketctl agent codex disable` | Remove the Pocketctl launcher without uninstalling Codex |
+| `pocketctl agent codex status` | Show Codex detection, capabilities, launcher, PATH, and runtime state |
+| `codex --native ...` | Bypass Pocketctl for one Codex invocation |
 | `pocketctl uninstall [--yes] [--keep-binary]` | Remove daemon, config, and data directories |
 | `pocketctl version` | Print version |
 

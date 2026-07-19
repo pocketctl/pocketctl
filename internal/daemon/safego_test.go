@@ -3,20 +3,39 @@ package daemon
 import (
 	"bytes"
 	"context"
+	"io"
 	"log/slog"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 )
 
 // testLogger returns a slog logger writing to buf so tests can assert on output.
-func testLogger(buf *bytes.Buffer) *slog.Logger {
+func testLogger(buf io.Writer) *slog.Logger {
 	return slog.New(slog.NewJSONHandler(buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
 }
 
+type synchronizedBuffer struct {
+	mu sync.Mutex
+	b  bytes.Buffer
+}
+
+func (b *synchronizedBuffer) Write(data []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.b.Write(data)
+}
+
+func (b *synchronizedBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.b.String()
+}
+
 func TestGo_RecoversAndLogsPanic(t *testing.T) {
-	var buf bytes.Buffer
+	var buf synchronizedBuffer
 	logger := testLogger(&buf)
 
 	done := make(chan struct{})
@@ -60,7 +79,7 @@ func TestGo_NilLogger_DoesNotPanic(t *testing.T) {
 }
 
 func TestGo_NoPanic_RunsCleanly(t *testing.T) {
-	var buf bytes.Buffer
+	var buf synchronizedBuffer
 	ran := make(chan struct{}, 1)
 	Go("clean", testLogger(&buf), func() {
 		ran <- struct{}{}
@@ -80,7 +99,7 @@ func TestRunLoop_RestartsAfterPanic(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	var buf bytes.Buffer
+	var buf synchronizedBuffer
 	var calls atomic.Int32
 	// fn panics on the first two invocations, then succeeds by waiting on ctx.
 	RunLoop(ctx, "restart-test", testLogger(&buf), func() {
@@ -113,7 +132,7 @@ func TestRunLoop_RestartsAfterPanic(t *testing.T) {
 
 func TestRunLoop_StopsOnContextCancel(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
-	var buf bytes.Buffer
+	var buf synchronizedBuffer
 
 	// fn returns immediately each time (clean return), so the loop keeps
 	// restarting until ctx is cancelled.
