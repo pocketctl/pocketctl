@@ -1,7 +1,7 @@
 import Fastify from 'fastify';
 import fastifyWebsocket from '@fastify/websocket';
 import fastifyCors from '@fastify/cors';
-import { createPool, initDB, parseDBUrl, createUserWithWelcomeEmail, getUserByEmail, getUserById, getUserPlanAndWhitelist, getUserProfile, registerDevice, removeDevice, cleanStaleTombstones, upsertDaemonAlias, updateDisplayName, updateEmail, addToIOSWaitlist, revokeToken, isTokenRevoked, cleanRevokedTokens, insertAuditLog, bindTokenToDaemon, updateSessionTitle, isSessionOwnedByUser, getSessionAllEvents, getTokenSummary, getTokensByDaemon, backfillSessionTokens, backfillSessionModel, backfillTokenDailyStats, aggregateDayIntoStats, cleanStaleEvents, getTokenDailySeries, getTokenByModel, getTokenByDaemon, getSessionTokenTrend, listProUserIds, getUserDailyTokens, getUserWeeklyTokens, markReportSent, handleRefreshReuse, type User } from './db.js';
+import { createPool, initDB, parseDBUrl, createUserWithWelcomeEmail, getUserByEmail, getUserById, getUserPlanAndWhitelist, getUserProfile, userExists, deleteUserAccount, registerDevice, removeDevice, cleanStaleTombstones, upsertDaemonAlias, updateDisplayName, updateEmail, addToIOSWaitlist, revokeToken, isTokenRevoked, cleanRevokedTokens, insertAuditLog, bindTokenToDaemon, updateSessionTitle, isSessionOwnedByUser, getSessionAllEvents, getTokenSummary, getTokensByDaemon, backfillSessionTokens, backfillSessionModel, backfillTokenDailyStats, aggregateDayIntoStats, cleanStaleEvents, getTokenDailySeries, getTokenByModel, getTokenByDaemon, getSessionTokenTrend, listProUserIds, getUserDailyTokens, getUserWeeklyTokens, markReportSent, handleRefreshReuse, type User } from './db.js';
 import { Router } from './router.js';
 import { hashPassword, verifyPassword, signAccessToken, signRefreshToken, verifyRefreshToken, decodeToken, verifyAccessTokenWithRevocation } from './auth.js';
 import { notifyUser, sessionStatusPush, daemonOfflinePush, dailyReportPush, weeklyReportPush } from './push.js';
@@ -13,6 +13,7 @@ import { createQrSession, getQrSession, markScanned, confirmQrSession, deleteQrS
 import { resolveEntitlements } from './entitlements.js';
 import { getQuotaSnapshot } from './quota.js';
 import { createWsTicketStore } from './config/ws-tickets.js';
+import type { WsTicketPayload } from './config/ws-tickets.js';
 import { createHash } from 'crypto';
 import { ConnectionRateLimiter } from './rate-limit.js';
 import { isAppReviewEmail, isAppReviewEnabled, isConfiguredAppReviewEmail, verifyAppReviewCode } from './config/app-review-auth.js';
@@ -99,6 +100,47 @@ function setRefreshCookie(reply: any, token: string) {
 
 function clearRefreshCookie(reply: any) {
   reply.header('Set-Cookie', expiredRefreshCookie());
+}
+
+export async function consumeLiveUserWsTicket(
+  store: { consume(ticket: string): WsTicketPayload | null },
+  ticket: string,
+  pool: any,
+): Promise<WsTicketPayload | null> {
+  const payload = store.consume(ticket);
+  if (!payload) return null;
+  try {
+    return await userExists(pool, payload.userId) ? payload : null;
+  } catch {
+    return null;
+  }
+}
+
+export async function handleDeleteAccountRequest(
+  req: any,
+  reply: any,
+  pool: any,
+  router: Pick<Router, 'terminateUserConnections'>,
+): Promise<{ success: true } | { error: string }> {
+  const authHeader = req.headers.authorization as string | undefined;
+  if (!authHeader?.startsWith('Bearer ')) {
+    reply.code(401);
+    return { error: 'authorization required' };
+  }
+  const payload = await verifyAccessTokenWithRevocation(authHeader.slice(7), pool);
+  if (!payload) {
+    reply.code(401);
+    return { error: 'invalid token' };
+  }
+
+  router.terminateUserConnections(payload.userId);
+  const deleted = await deleteUserAccount(pool, payload.userId);
+  clearRefreshCookie(reply);
+  if (!deleted) {
+    reply.code(404);
+    return { error: 'user not found' };
+  }
+  return { success: true };
 }
 
 export async function findOrCreateEmailUser(
@@ -433,6 +475,10 @@ async function main() {
     const { plan, whitelist } = await getUserPlanAndWhitelist(pool, payload.userId);
     const quota = await getQuotaSnapshot(pool, payload.userId, resolveEntitlements(plan, whitelist));
     return { ...profile, quota };
+  });
+
+  app.delete('/api/user/account', async (req, reply) => {
+    return handleDeleteAccountRequest(req, reply, pool, router);
   });
 
   // Register device for push notifications
@@ -1271,7 +1317,7 @@ async function main() {
         tokenJti = payload.jti;
         tokenMachineId = payload.machine_id;
       } else if (ticket) {
-        const payload = wsTickets.consume(ticket);
+        const payload = await consumeLiveUserWsTicket(wsTickets, ticket, pool);
         if (!payload) {
           const banSec = rateLimiter.recordAuthFailure(clientIp);
           console.log(`WS rejected: type=${connType} ip=${clientIp} reason=invalid_ticket${banSec ? ` banned=${banSec}s` : ''}`);

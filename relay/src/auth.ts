@@ -1,7 +1,7 @@
 import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
 import { randomBytes } from 'crypto';
-import { isTokenRevoked } from './db.js';
+import { isTokenRevoked, userExists } from './db.js';
 import type { Pool } from 'pg';
 
 const JWT_SECRET: string = process.env.JWT_SECRET ?? '';
@@ -93,6 +93,15 @@ export async function verifyAccessTokenWithRevocation(
       // DB error — allow token through rather than blocking all auth
       console.error('revocation check failed:', `user=${payload.userId} jti=${payload.jti.slice(0, 8)}`);
     }
+  }
+
+  try {
+    if (!await userExists(pool, payload.userId)) return null;
+  } catch {
+    // Account existence is an authorization boundary. Fail closed so a
+    // deleted account cannot regain access during a database fault.
+    console.error('user existence check failed:', `user=${payload.userId}`);
+    return null;
   }
 
   return payload;

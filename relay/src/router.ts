@@ -262,6 +262,25 @@ export class Router {
     }
   }
 
+  /** Close and unregister every live socket belonging to one deleted user. */
+  terminateUserConnections(userId: number, code = 4001, reason = 'account deleted'): void {
+    for (const [clientWs, client] of [...this.clients]) {
+      if (!this.sameUser(client.userId, userId)) continue;
+      this.clients.delete(clientWs);
+      if (clientWs.readyState === 1) clientWs.close(code, reason);
+    }
+    for (const [daemonId, daemon] of [...this.daemons]) {
+      if (!this.sameUser(daemon.userId, userId)) continue;
+      this.daemons.delete(daemonId);
+      this.daemonMetrics.delete(daemonId);
+      this.knownOffline.delete(daemonId);
+      const offlineTimer = this.pendingOfflineTimers.get(daemonId);
+      if (offlineTimer) clearTimeout(offlineTimer);
+      this.pendingOfflineTimers.delete(daemonId);
+      if (daemon.ws.readyState === 1) daemon.ws.close(code, reason);
+    }
+  }
+
   registerDaemon(ws: WebSocket, msg: any, userId: number | null, tokenJti?: string, machineId?: string): Promise<boolean> {
     const daemonId = msg.daemon_id;
     return this.withDaemonRegistrationLock(daemonId, () =>
