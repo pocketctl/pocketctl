@@ -1505,6 +1505,70 @@ export async function getUserById(pool: pg.Pool, id: number): Promise<any | null
   return result.rows[0] || null;
 }
 
+/** Return whether an authenticated user id still belongs to a live account. */
+export async function userExists(pool: pg.Pool, userId: number): Promise<boolean> {
+  const result = await pool.query(
+    `SELECT EXISTS (SELECT 1 FROM users WHERE id = $1) AS exists`,
+    [userId],
+  );
+  return result.rows[0]?.exists === true;
+}
+
+/**
+ * Permanently remove one account and every directly associated record.
+ *
+ * Several legacy tables predate user foreign keys, so deletion cannot rely on
+ * ON DELETE CASCADE alone. Capture the owned session/daemon ids while holding
+ * the user-row lock, then remove their dependent rows in the same transaction.
+ */
+export async function deleteUserAccount(pool: pg.Pool, userId: number): Promise<boolean> {
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const user = await client.query(
+      `SELECT id FROM users WHERE id = $1 FOR UPDATE`,
+      [userId],
+    );
+    if ((user.rowCount ?? 0) === 0) {
+      await client.query('COMMIT');
+      return false;
+    }
+
+    const sessions = await client.query(
+      `SELECT session_id FROM sessions WHERE user_id = $1`,
+      [userId],
+    );
+    const daemons = await client.query(
+      `SELECT daemon_id FROM daemons WHERE user_id = $1`,
+      [userId],
+    );
+    const sessionIds = sessions.rows.map((row: any) => row.session_id as string);
+    const daemonIds = daemons.rows.map((row: any) => row.daemon_id as string);
+
+    await client.query(`DELETE FROM events WHERE session_id = ANY($1::varchar[])`, [sessionIds]);
+    await client.query(`DELETE FROM subagents WHERE parent_session_id = ANY($1::varchar[])`, [sessionIds]);
+    await client.query(`DELETE FROM subagent_usage_seen WHERE daemon_id = ANY($1::text[])`, [daemonIds]);
+    await client.query(`DELETE FROM deleted_sessions WHERE session_id = ANY($1::varchar[])`, [sessionIds]);
+    await client.query(`DELETE FROM token_daily_stats WHERE user_id = $1`, [userId]);
+    await client.query(`DELETE FROM audit_log WHERE user_id = $1`, [userId]);
+    await client.query(`DELETE FROM revoked_tokens WHERE user_id = $1`, [userId]);
+    await client.query(`DELETE FROM sessions WHERE user_id = $1`, [userId]);
+    await client.query(`DELETE FROM daemons WHERE user_id = $1`, [userId]);
+    await client.query(`DELETE FROM users WHERE id = $1`, [userId]);
+    await client.query('COMMIT');
+    return true;
+  } catch (error) {
+    try {
+      await client.query('ROLLBACK');
+    } catch {
+      // Preserve the deletion failure; rollback is best-effort on a broken connection.
+    }
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
 /** Update user's display name */
 export async function updateDisplayName(pool: pg.Pool, userId: number, displayName: string): Promise<void> {
   await pool.query(`UPDATE users SET display_name = $1 WHERE id = $2`, [displayName, userId]);
