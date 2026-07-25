@@ -1,0 +1,131 @@
+<template>
+  <header class="mobile-topbar">
+    <button
+      v-if="isSession"
+      type="button"
+      class="mobile-topbar-back"
+      :aria-label="t('mobile.back_to_sessions')"
+      @click="router.push('/sessions')"
+    >
+      <svg viewBox="0 0 24 24" aria-hidden="true">
+        <path d="m15 18-6-6 6-6" />
+      </svg>
+    </button>
+    <div v-else class="mobile-brand" aria-label="PocketCtl">P</div>
+
+    <div class="mobile-topbar-title">{{ title }}</div>
+
+    <div class="mobile-connection" role="status" aria-live="polite">
+      <span :class="['mobile-connection-dot', connectionClass]"></span>
+      <span>{{ connectionLabel }}</span>
+    </div>
+
+    <button
+      v-if="showNewSession"
+      type="button"
+      class="mobile-topbar-action"
+      :aria-label="t('session.new_session')"
+      @click="$emit('new-session')"
+    >
+      <svg viewBox="0 0 24 24" aria-hidden="true">
+        <path d="M12 5v14M5 12h14" />
+      </svg>
+    </button>
+  </header>
+</template>
+
+<script setup lang="ts">
+import { computed } from 'vue'
+import { useRouter } from 'vue-router'
+import { useLocale } from '../../composables/useLocale'
+
+const props = defineProps<{
+  title: string
+  connected: boolean
+  reconnecting: boolean
+  isSession: boolean
+  showNewSession: boolean
+}>()
+
+defineEmits<{ (event: 'new-session'): void }>()
+
+const router = useRouter()
+const { t } = useLocale()
+const connectionClass = computed(() => props.connected ? 'online' : props.reconnecting ? 'connecting' : 'offline')
+const connectionLabel = computed(() => props.connected
+  ? t('mobile.connection_online')
+  : props.reconnecting
+    ? t('mobile.connection_connecting')
+    : t('mobile.connection_offline'))
+</script>
+
+<style scoped>
+.mobile-topbar {
+  position: fixed;
+  inset: 0 0 auto;
+  z-index: 70;
+  min-height: var(--mobile-topbar-h);
+  padding: max(6px, env(safe-area-inset-top)) 12px 6px;
+  display: grid;
+  grid-template-columns: 44px minmax(0, 1fr) auto 44px;
+  align-items: center;
+  gap: 6px;
+  border-bottom: 1px solid var(--border);
+  background: color-mix(in srgb, var(--bg) 92%, transparent);
+  backdrop-filter: blur(14px);
+}
+.mobile-brand {
+  width: 34px;
+  height: 34px;
+  display: grid;
+  place-items: center;
+  border-radius: 9px;
+  color: var(--bg);
+  background: var(--accent);
+  font-weight: 800;
+}
+.mobile-topbar-title {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 15px;
+  font-weight: 650;
+}
+.mobile-topbar-back,
+.mobile-topbar-action {
+  width: 44px;
+  height: 44px;
+  display: grid;
+  place-items: center;
+  border: 0;
+  border-radius: var(--radius-md);
+  color: var(--fg);
+  background: transparent;
+}
+.mobile-topbar-back svg,
+.mobile-topbar-action svg {
+  width: 22px;
+  height: 22px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2;
+  stroke-linecap: round;
+}
+.mobile-connection {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--fg-tertiary);
+  font-size: 11px;
+  white-space: nowrap;
+}
+.mobile-connection-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--fg-tertiary);
+}
+.mobile-connection-dot.online { background: var(--success); }
+.mobile-connection-dot.connecting { background: var(--warning); }
+</style>

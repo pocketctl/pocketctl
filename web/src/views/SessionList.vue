@@ -8,16 +8,33 @@
       </div>
     </div>
     <div v-if="lastError" class="error-banner">{{ lastError }}</div>
-    <div v-if="sessions.length === 0" class="empty">
-      <div class="empty-icon">📡</div>
-      <p class="empty-title">还没有活跃的会话</p>
-      <p class="empty-desc">在远程机器上安装并启动 Daemon 即可看到会话</p>
-      <code class="empty-cmd">{{ getInstallCommand() }}</code>
-      <code class="empty-cmd">pocketctl daemon start</code>
-      <button class="btn primary empty-btn" @click="showNewSession = true">创建 Web 会话</button>
+    <div v-if="!hasLoadedSessions && !lastError" class="session-loading" data-state="loading-sessions" aria-label="正在查询会话记录">
+      <div v-for="index in 3" :key="index" class="session-skeleton" :style="{ '--delay': `${index * 70}ms` }">
+        <span class="skeleton-dot"></span>
+        <div class="skeleton-lines">
+          <span></span>
+          <span></span>
+          <span></span>
+        </div>
+      </div>
     </div>
-    <div v-for="s in sortedSessions" :key="s.session_id" class="session-group">
-      <div :class="['session-row', { 'pending-delete': s.__pendingDelete }]" @click="!s.__pendingDelete && $router.push(`/session/${s.session_id}`)">
+    <DaemonInstallGuide
+      v-else-if="sortedSessions.length === 0"
+      data-state="daemon-install-guide"
+      :install-command="getInstallCommand()"
+      @create="showNewSession = true"
+    />
+    <div v-for="s in displayedSessions" :key="s.session_id" class="session-group">
+      <MobileSessionCard
+        v-if="isMobile"
+        :session="s"
+        :effective-status="getEffectiveStatus(s)"
+        :relative-time="formatRelativeTime(s.last_activity_at || s.started_at)"
+        :expanded="!!folded[s.session_id]"
+        @open="$router.push(`/session/${s.session_id}`)"
+        @toggle-subagents="toggleFold(s.session_id)"
+      />
+      <div v-else :class="['session-row', { 'pending-delete': s.__pendingDelete }]" @click="!s.__pendingDelete && $router.push(`/session/${s.session_id}`)">
         <span class="status-indicator" :class="getEffectiveStatus(s)">
           <span v-if="getEffectiveStatus(s) === 'running' || getEffectiveStatus(s) === 'busy' || getEffectiveStatus(s) === 'retry'" class="pulse-ring"></span>
           <span v-if="getEffectiveStatus(s) === 'completed'" class="icon">✓</span>
@@ -29,7 +46,7 @@
             <span v-if="s.pinned" class="pin-mark" style="color: var(--accent); margin-right: 4px;">📌</span>
             <input v-if="renamingId === s.session_id" class="ss-rename-input" v-model="renameInput" maxlength="60"
               @click.stop @keydown.enter="commitRename(s)" @keydown.escape="cancelRename" @blur="commitRename(s)" />
-            <template v-else>{{ s.title || s.session_id.slice(0, 8) }}</template>
+            <span v-else class="session-title-copy">{{ s.title || s.session_id.slice(0, 8) }}</span>
           </div>
           <div class="session-meta">
             <span class="source-badge" :class="s.source">{{ s.source === 'terminal' ? '📺 终端' : '🌐 Web' }}</span>
@@ -56,13 +73,19 @@
         </div>
       </div>
     </div>
-    <NewSessionDialog v-if="showNewSession" @close="showNewSession = false" @create="handleCreate" />
+    <div v-if="canLoadMore" ref="loadMoreSentinel" class="session-load-more">
+      <button class="session-load-more-btn" type="button" :disabled="isLoadingPage" @click="loadMoreSessions">
+        <span v-if="isLoadingPage" class="load-more-spinner" aria-hidden="true"></span>
+        {{ isLoadingPage ? '正在加载…' : '加载更多会话' }}
+      </button>
+    </div>
+    <NewSessionDialog v-if="showNewSession" :daemons="daemons" @close="showNewSession = false" @create="handleCreate" />
   </div>
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted } from 'vue'
-import { useRouter } from 'vue-router'
+import { ref, computed, inject, onMounted, onBeforeUnmount, watch, nextTick, type Ref } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
 import { useWebSocket } from '../composables/useWebSocket'
 import type { DaemonEvent } from '../composables/useWebSocket'
 import { formatRelativeTime } from '../composables/useRelativeTime'
@@ -70,10 +93,20 @@ import { useAuth } from '../composables/useAuth'
 import NewSessionDialog from '../components/NewSessionDialog.vue'
 import SessionActions from '../components/SessionActions.vue'
 import AgentBadge from '../components/AgentBadge.vue'
+import MobileSessionCard from '../components/MobileSessionCard.vue'
+import DaemonInstallGuide from '../components/DaemonInstallGuide.vue'
 import { getInstallCommand } from '../composables/useEnv'
 import { formatTokenCount, childAgentTokenTotal } from '../utils/tokenFormat'
 import { useLocale } from '../composables/useLocale'
 import { useSessionRename } from '../composables/useSessionRename'
+import { useResponsiveLayout } from '../composables/useResponsiveLayout'
+import { sortMobileSessions } from '../utils/sessionPriority'
+import {
+  SESSION_REMOTE_PAGE_SIZE,
+  SESSION_RENDER_BATCH_SIZE,
+  mergeSessionPage,
+  nextVisibleSessionCount,
+} from '../utils/sessionListPagination'
 
 const { renamingId, renameInput, startRename, commitRename, cancelRename } = useSessionRename()
 const { t } = useLocale()
@@ -81,13 +114,33 @@ const { t } = useLocale()
 const { connect, send, onEvent, effectiveStatus } = useWebSocket()
 const { isLoggedIn, accessToken, logout } = useAuth()
 const $router = useRouter()
+const route = useRoute()
 const sessions = ref<any[]>([])
+const daemons = ref<any[]>([])
 const showNewSession = ref(false)
 const lastError = ref('')
+const hasLoadedSessions = ref(false)
 const folded = ref<Record<string, boolean>>({})
+const { isMobile } = useResponsiveLayout()
+const hostId = computed(() => typeof route.query.host === 'string' ? route.query.host : '')
+const visibleCount = ref(SESSION_RENDER_BATCH_SIZE)
+const hasMoreRemoteSessions = ref(false)
+const nextSessionCursor = ref<string | null>(null)
+const isLoadingPage = ref(false)
+const requestingNextPage = ref(false)
+const liveSessionIds = new Set<string>()
+const loadMoreSentinel = ref<HTMLElement | null>(null)
+let loadMoreObserver: IntersectionObserver | null = null
+const triggerNewSession = inject<Ref<number>>('triggerNewSession', ref(0))
+watch(triggerNewSession, (value) => {
+  if (value > 0) showNewSession.value = true
+})
 
 const sortedSessions = computed(() => {
-  return [...sessions.value].filter(s => !s.isSubagent).sort((a, b) => {
+  const rootSessions = sessions.value.filter(s => !s.isSubagent)
+  if (isMobile.value) return sortMobileSessions(rootSessions)
+
+  return [...rootSessions].sort((a, b) => {
     // Pinned first
     if (a.pinned && !b.pinned) return -1
     if (!a.pinned && b.pinned) return 1
@@ -95,6 +148,47 @@ const sortedSessions = computed(() => {
     const tb = b.last_activity_at ? new Date(b.last_activity_at).getTime() : (b.started_at ? new Date(b.started_at).getTime() : 0)
     return tb - ta
   })
+})
+const displayedSessions = computed(() => sortedSessions.value.slice(0, visibleCount.value))
+const canLoadMore = computed(() =>
+  visibleCount.value < sortedSessions.value.length ||
+  (Boolean(hostId.value) && hasMoreRemoteSessions.value),
+)
+
+function requestSessionPage(cursor?: string) {
+  isLoadingPage.value = true
+  requestingNextPage.value = Boolean(cursor)
+  if (hostId.value) {
+    send({
+      type: 'list_sessions',
+      daemon_id: hostId.value,
+      limit: SESSION_REMOTE_PAGE_SIZE,
+      ...(cursor ? { cursor } : {}),
+    })
+    return
+  }
+  send({ type: 'list_sessions' })
+}
+
+function loadMoreSessions() {
+  if (isLoadingPage.value) return
+  if (visibleCount.value < sortedSessions.value.length) {
+    visibleCount.value = nextVisibleSessionCount(visibleCount.value, sortedSessions.value.length)
+    return
+  }
+  if (hostId.value && hasMoreRemoteSessions.value && nextSessionCursor.value) {
+    requestSessionPage(nextSessionCursor.value)
+  }
+}
+
+watch([canLoadMore, loadMoreSentinel], async ([canLoad]) => {
+  await nextTick()
+  loadMoreObserver?.disconnect()
+  if (!canLoad || !loadMoreSentinel.value || typeof IntersectionObserver === 'undefined') return
+  loadMoreObserver = new IntersectionObserver(entries => {
+    if (entries.some(entry => entry.isIntersecting)) loadMoreSessions()
+  }, { rootMargin: '160px 0px' })
+  loadMoreObserver.observe(loadMoreSentinel.value)
 })
 
 function getEffectiveStatus(s: any): string {
@@ -121,17 +215,21 @@ onMounted(() => {
   if (!token) { $router.push('/login'); return }
   connect()
 
-  setTimeout(() => { send({ type: 'list_sessions' }) }, 500)
+  setTimeout(() => { requestSessionPage() }, 500)
+  send({ type: 'list_daemons' })
 
   onEvent((evt: DaemonEvent) => {
     if (evt.type === 'error') {
       lastError.value = evt.error || 'Unknown error'
+      isLoadingPage.value = false
+      requestingNextPage.value = false
       setTimeout(() => { lastError.value = '' }, 5000)
     }
     if (evt.type === 'session_list') {
-      const list = (evt as any).sessions as any[]
-      if (list && list.length) {
-        sessions.value = list.map(s => ({
+      const event = evt as any
+      if (hostId.value && event.daemon_id !== hostId.value) return
+      const list = Array.isArray(event.sessions) ? event.sessions : []
+      const normalized = list.map((s: any) => ({
           session_id: s.session_id,
           status: s.status,
           agent: s.agent_type || 'claude-code',
@@ -156,7 +254,25 @@ onMounted(() => {
           isSubagent: !!s.is_subagent,
           children: s.children ?? [],
         }))
+      if (hostId.value) {
+        if (requestingNextPage.value) {
+          sessions.value = mergeSessionPage(sessions.value, normalized)
+        } else {
+          const liveSessions = sessions.value.filter(session => liveSessionIds.has(session.session_id))
+          sessions.value = mergeSessionPage(normalized, liveSessions)
+          visibleCount.value = SESSION_RENDER_BATCH_SIZE
+        }
+        hasMoreRemoteSessions.value = Boolean(event.has_more)
+        nextSessionCursor.value = typeof event.next_cursor === 'string' ? event.next_cursor : null
+      } else {
+        sessions.value = normalized
       }
+      hasLoadedSessions.value = true
+      isLoadingPage.value = false
+      requestingNextPage.value = false
+    }
+    if (evt.type === 'daemon_list') {
+      daemons.value = (evt as any).daemons || []
     }
     if (evt.type === 'session_status' && evt.session_id) {
       const existing = sessions.value.find(s => s.session_id === evt.session_id)
@@ -172,12 +288,16 @@ onMounted(() => {
       if (existing) existing.session_id = evt.session_id
     }
     if (evt.type === 'session_created' && evt.session_id) {
-      if (!sessions.value.find(s => s.session_id === evt.session_id)) {
+      if ((!hostId.value || (evt as any).daemon_id === hostId.value) && !sessions.value.find(s => s.session_id === evt.session_id)) {
+        liveSessionIds.add(evt.session_id)
+        hasLoadedSessions.value = true
         sessions.value.unshift({ session_id: evt.session_id, status: 'running', agent: (evt as any).agent_type || (evt as any).agent || 'claude-code', started_at: new Date(), title: evt.title || '', source: 'daemon', last_activity_at: new Date(), model: (evt as any).model || '' })
       }
     }
     if (evt.type === 'session_discovered' && evt.session_id) {
-      if (!sessions.value.find(s => s.session_id === evt.session_id)) {
+      if ((!hostId.value || (evt as any).daemon_id === hostId.value) && !sessions.value.find(s => s.session_id === evt.session_id)) {
+        liveSessionIds.add(evt.session_id)
+        hasLoadedSessions.value = true
         sessions.value.unshift({ session_id: evt.session_id, status: 'busy', agent: (evt as any).agent || 'claude-code', started_at: new Date(), title: evt.title || 'Terminal Session', source: 'terminal', cwd: evt.cwd, last_activity_at: new Date(), subagent_count: (evt as any).subagent_count || 0, daemon_id: (evt as any).daemon_id || '', hostname: (evt as any).hostname || '', model: (evt as any).model || '' })
       }
     }
@@ -198,6 +318,8 @@ onMounted(() => {
     }
   })
 })
+
+onBeforeUnmount(() => loadMoreObserver?.disconnect())
 
 // SessionActions handlers (local optimistic updates; WS events above keep multi-client in sync)
 function onDeleted(sessionId: string) {
@@ -229,13 +351,19 @@ function handleLogout() {
 .btn.logout { background: transparent; border-color: #30363d; color: #8b949e; font-size: 13px; }
 .btn.logout:hover { border-color: #f85149; color: #f85149; }
 .header-actions { display: flex; gap: 8px; align-items: center; }
-.empty { text-align: center; color: #8b949e; padding: 48px 20px; }
-.empty-icon { font-size: 40px; margin-bottom: 12px; }
-.empty-title { font-size: 16px; color: #e6edf3; margin-bottom: 6px; }
-.empty-desc { font-size: 13px; margin-bottom: 20px; }
-.empty-cmd { display: block; background: #0d1117; padding: 8px 12px; border-radius: 6px; font-size: 12px; color: #79c0ff; margin: 6px auto; max-width: 400px; word-break: break-all; }
-.empty-btn { margin-top: 20px; }
+.session-loading { display: grid; gap: 10px; padding-top: 6px; }
+.session-skeleton { display: flex; min-height: 76px; align-items: flex-start; gap: 12px; padding: 14px; border: 1px solid var(--border, #21262d); border-radius: 12px; background: var(--surface, #161b22); animation: skeleton-in .35s ease both; animation-delay: var(--delay); }
+.skeleton-dot { width: 10px; height: 10px; flex: 0 0 10px; margin-top: 5px; border-radius: 50%; background: var(--surface-active, #30363d); }
+.skeleton-lines { display: grid; width: 100%; gap: 8px; }
+.skeleton-lines span { height: 10px; border-radius: 6px; background: linear-gradient(90deg, var(--surface-active, #21262d), var(--surface-hover, #30363d), var(--surface-active, #21262d)); background-size: 200% 100%; animation: skeleton-shimmer 1.4s ease-in-out infinite; }
+.skeleton-lines span:first-child { width: 52%; height: 14px; }
+.skeleton-lines span:nth-child(2) { width: 68%; }
+.skeleton-lines span:last-child { width: 34%; }
 .error-banner { background: #3d1214; border: 1px solid #da3633; color: #f85149; padding: 12px 16px; border-radius: 8px; margin-bottom: 12px; font-size: 14px; }
+.session-load-more { display: flex; justify-content: center; padding: 8px 0 18px; }
+.session-load-more-btn { display: inline-flex; min-height: 40px; align-items: center; justify-content: center; gap: 8px; padding: 8px 16px; border: 1px solid var(--border, #30363d); border-radius: 999px; background: var(--surface, #161b22); color: var(--fg-secondary, #c9d1d9); font-size: 12px; cursor: pointer; }
+.session-load-more-btn:disabled { cursor: default; opacity: .65; }
+.load-more-spinner { width: 13px; height: 13px; border: 2px solid var(--border-light, #484f58); border-top-color: var(--accent, #58a6ff); border-radius: 50%; animation: load-more-spin .7s linear infinite; }
 .session-row { display: flex; align-items: center; gap: 12px; padding: 12px 16px; border: 1px solid #21262d; border-radius: 8px; margin-bottom: 8px; cursor: pointer; background: #161b22; transition: opacity 0.25s ease; }
 .session-row.pending-delete { opacity: 0.35; pointer-events: none; }
 .session-row:hover { border-color: #30363d; background: #1c2129; }
@@ -258,6 +386,7 @@ function handleLogout() {
 }
 .status-indicator.idle { background: #EAB308; }
 .status-indicator.waiting_approval { background: #F97316; }
+.status-indicator.waiting_question { background: #A855F7; }
 .status-indicator.exited { background: #6B7280; }
 .status-indicator.completed { background: #9CA3AF; color: white; }
 .status-indicator.error { background: #EF4444; }
@@ -306,11 +435,14 @@ function handleLogout() {
 /* Mobile */
 @media (max-width: 768px) {
   .session-list { padding: 12px; }
-  .session-row { padding: 14px 12px; gap: 10px; min-height: 44px; }
-  .session-id { font-size: 13px; }
-  .session-time { font-size: 12px; }
-  .header-row h2 { font-size: 17px; }
+  .header-row { display: none; }
+  .session-group { margin-bottom: 10px; }
+  .child-rows { padding-left: 28px; }
+  .child-row { min-height: 36px; padding: 7px 8px; }
   .btn { padding: 10px 14px; font-size: 13px; min-height: 44px; }
 }
 @keyframes pulse-ring { 0% { opacity: 0.8; transform: scale(1); } 100% { opacity: 0; transform: scale(1.6); } }
+@keyframes load-more-spin { to { transform: rotate(360deg); } }
+@keyframes skeleton-shimmer { to { background-position: -200% 0; } }
+@keyframes skeleton-in { from { opacity: 0; transform: translateY(4px); } }
 </style>

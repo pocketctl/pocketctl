@@ -159,6 +159,40 @@ describe('useAuth — Email Verification Code', () => {
   })
 })
 
+describe('useAuth — authenticated GET', () => {
+  test('refreshes an expired access token once before returning a daemon snapshot', async () => {
+    const { apiGetAuth, accessToken } = useAuth()
+    accessToken.value = 'expired-token'
+    vi.spyOn(globalThis, 'fetch')
+      .mockResolvedValueOnce({
+        ok: false,
+        status: 401,
+        json: async () => ({ error: 'invalid token' }),
+      } as any)
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: async () => ({
+          access_token: 'fresh-token',
+          user: { id: 1, email: 'a@b.com', phone: null, display_name: 'A' },
+        }),
+      } as any)
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: async () => ({ daemon_id: 'daemon-1', hostname: 'mac-studio' }),
+      } as any)
+
+    const result = await apiGetAuth('/api/daemons/daemon-1')
+
+    expect(result).toEqual({
+      ok: true,
+      data: { daemon_id: 'daemon-1', hostname: 'mac-studio' },
+    })
+    expect(accessToken.value).toBe('fresh-token')
+  })
+})
+
 describe('useAuth — QR Scan-Login', () => {
 
   test('#42-43 createQrLogin returns qr_payload on success', async () => {

@@ -69,6 +69,7 @@ vi.mock('../../composables/useAuth', () => ({
 }))
 vi.mock('vue-router', () => ({
   useRouter: () => ({ push: mockPush }),
+  useRoute: () => ({ query: {} }),
 }))
 
 describe('SessionList.vue — subagent fold (P2)', () => {

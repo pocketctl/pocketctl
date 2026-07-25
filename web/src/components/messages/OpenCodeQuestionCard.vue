@@ -40,6 +40,10 @@
     </div>
 
     <div v-if="message.error" class="question-error">{{ message.error }}</div>
+    <div v-if="isPending && disabledReason" class="interaction-readiness" role="status">
+      <span>{{ disabledReason }}</span>
+      <button v-if="message.resultUnknown" type="button" @click="$emit('resync')">{{ t('interaction.resync') }}</button>
+    </div>
     <div v-if="isPending" class="question-actions">
       <button class="question-submit" type="button" :disabled="controlsDisabled || !valid" @click="submit">{{ t('question.submit') }}</button>
       <button class="question-reject" type="button" :disabled="controlsDisabled" @click="$emit('reject', message)">{{ t('question.reject') }}</button>
@@ -56,10 +60,14 @@ interface QuestionOption { label: string; description?: string }
 interface QuestionInfo { id?: string; header?: string; question: string; options?: QuestionOption[]; multiple?: boolean; custom?: boolean; secret?: boolean }
 
 const { t } = useLocale()
-const props = withDefaults(defineProps<{ message: any; disabled?: boolean }>(), { disabled: false })
+const props = withDefaults(defineProps<{ message: any; disabled?: boolean; disabledReason?: string }>(), {
+  disabled: false,
+  disabledReason: '',
+})
 const emit = defineEmits<{
   (event: 'submit', message: any, answers: string[][]): void
   (event: 'reject', message: any): void
+  (event: 'resync'): void
 }>()
 
 const questions = computed<QuestionInfo[]>(() => Array.isArray(props.message.questions) ? props.message.questions : [])
@@ -131,5 +139,7 @@ function submit() {
 .question-reject { border: 1px solid var(--border); background: var(--surface-active); color: var(--fg-secondary); }
 .question-submit:disabled, .question-reject:disabled { cursor: not-allowed; opacity: .45; }
 .question-error { color: var(--error, #ef4444); font-size: 11px; }
+.interaction-readiness { display: flex; align-items: center; justify-content: space-between; gap: 8px; color: var(--warning); font-size: 12px; }
+.interaction-readiness button { padding: 5px 9px; border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--surface-active); color: var(--fg); cursor: pointer; }
 .question-result { color: var(--fg-secondary); font-size: 12px; font-weight: 600; }
 </style>

@@ -13,6 +13,7 @@ vi.mock('vue-router', () => ({
 vi.mock('../../composables/useWebSocket', () => ({
   useWebSocket: () => ({
     connect: vi.fn(), send: websocketMock.send,
+    connected: ref(true), reconnecting: ref(false),
     onEvent: vi.fn((type: string, handler: (message: any) => void) => {
       websocketMock.handlers.set(type, handler)
       return () => websocketMock.handlers.delete(type)
@@ -37,6 +38,7 @@ afterEach(() => {
 function mountSession() {
   const wrapper = shallowMount(SessionDetail)
   mounted.push(wrapper)
+  websocketMock.handlers.get('replay_end')?.({ type: 'replay_end', session_id: 'thr_1', req_id: 1 })
   return wrapper
 }
 

@@ -40,6 +40,20 @@ describe('ApprovalCard OpenCode actions', () => {
     expect(wrapper.findAll('button').every(button => button.attributes('disabled') !== undefined)).toBe(true)
   })
 
+  test('shows the readiness reason while actions are locked', () => {
+    const wrapper = mount(ApprovalCard, {
+      props: {
+        message: message(),
+        supportsActions: true,
+        disabled: true,
+        disabledReason: '正在同步最新状态',
+      },
+    })
+
+    expect(wrapper.get('.interaction-readiness').text()).toBe('正在同步最新状态')
+    expect(wrapper.findAll('button').every(button => button.attributes('disabled') !== undefined)).toBe(true)
+  })
+
   test('renders daemon-confirmed action and preserves legacy two-action UI', async () => {
     const resolved = mount(ApprovalCard, {
       props: { message: message({ status: 'resolved', action: 'always' }), supportsActions: true, disabled: false },
