@@ -28,6 +28,10 @@
       </div>
 
       <div v-if="message.error" class="approval-error">{{ message.error }}</div>
+      <div v-if="isPending && disabledReason" class="interaction-readiness" role="status">
+        <span>{{ disabledReason }}</span>
+        <button v-if="message.resultUnknown" type="button" @click.stop="$emit('resync')">{{ t('interaction.resync') }}</button>
+      </div>
       <div class="approval-actions">
     <template v-if="isPending && isCodexApproval">
       <button v-if="canAccept" class="approval-btn once" :disabled="actionsDisabled" @click.stop="respond('once')">{{ t('approval.once') }}</button>
@@ -57,11 +61,15 @@ import { useLocale } from '../../composables/useLocale'
 type ApprovalAction = 'once' | 'always' | 'reject' | 'cancel'
 
 const { t } = useLocale()
-const props = withDefaults(defineProps<{ message: any; supportsActions?: boolean; disabled?: boolean }>(), {
+const props = withDefaults(defineProps<{ message: any; supportsActions?: boolean; disabled?: boolean; disabledReason?: string }>(), {
   supportsActions: false,
   disabled: false,
+  disabledReason: '',
 })
-const emit = defineEmits<{ (event: 'respond', message: any, action: ApprovalAction): void }>()
+const emit = defineEmits<{
+  (event: 'respond', message: any, action: ApprovalAction): void
+  (event: 'resync'): void
+}>()
 
 const isPending = computed(() => props.message.status === 'pending')
 const actionsDisabled = computed(() => props.disabled || !!props.message.submitting)
@@ -117,6 +125,8 @@ function respond(action: ApprovalAction) {
 .approval-metadata summary { cursor: pointer; color: var(--fg-tertiary); font-size: 11px; }
 .approval-metadata pre { max-height: 180px; overflow: auto; margin: 6px 0 0; color: var(--fg-secondary); font: 11px/1.45 var(--font-mono); white-space: pre-wrap; overflow-wrap: anywhere; }
 .approval-error { color: var(--error, #ef4444); font-size: 11px; }
+.interaction-readiness { display: flex; align-items: center; justify-content: space-between; gap: 8px; color: var(--warning); font-size: 12px; }
+.interaction-readiness button { padding: 5px 9px; border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--surface-active); color: var(--fg); cursor: pointer; }
 .approval-btn { padding: 6px 12px; border: 1px solid var(--border); border-radius: var(--radius-md); background: var(--surface-active); color: var(--fg-secondary); font-size: 12px; font-weight: 600; cursor: pointer; }
 .approval-btn.once, .approval-btn.allow { color: #fff; border-color: var(--success, #10b981); background: var(--success, #10b981); }
 .approval-btn.always { color: var(--accent); border-color: var(--accent); background: var(--accent-muted); }

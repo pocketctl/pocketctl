@@ -1,7 +1,14 @@
 <template>
-  <div class="app-layout" :class="{ 'sidebar-collapsed': sidebarCollapsed }">
+  <div
+    class="app-layout"
+    :class="{
+      'sidebar-collapsed': sidebarCollapsed,
+      'mobile-shell-active': showMobileShell,
+      'mobile-session-route': showMobileShell && isSessionRoute,
+    }"
+  >
     <!-- Sidebar -->
-    <nav class="sidebar" v-if="isLoggedIn">
+    <nav class="sidebar" v-if="isLoggedIn && !showMobileShell">
       <router-link to="/" class="sidebar-logo">
         <img :src="sidebarLogoSrc" alt="pocketctl" />
         <span class="brand-name">pocketctl</span>
@@ -54,10 +61,23 @@
       </div>
     </nav>
 
+    <MobileAppShell
+      v-if="showMobileShell"
+      :title="pageTitle"
+      :connected="connected"
+      :reconnecting="reconnecting"
+      :is-session="isSessionRoute"
+      :show-bottom-nav="!isSessionRoute"
+      :show-new-session="route.path === '/sessions'"
+      :session-count="sessionCount"
+      @new-session="triggerNewSession++"
+    />
+    <PwaUpdateBanner />
+
     <!-- Main Content -->
-    <main class="main-content" :class="{ 'no-sidebar': !isLoggedIn }">
+    <main class="main-content" :class="{ 'no-sidebar': !isLoggedIn || showMobileShell }">
       <!-- Topbar (only when logged in) -->
-      <header class="topbar" v-if="isLoggedIn">
+      <header class="topbar" v-if="isLoggedIn && !showMobileShell">
         <div class="topbar-breadcrumb">
           <span class="current">{{ pageTitle }}</span>
         </div>
@@ -87,13 +107,22 @@ import { ref, computed, provide } from 'vue'
 import { useRoute } from 'vue-router'
 import { useAuth } from './composables/useAuth'
 import { useLocale } from './composables/useLocale'
+import { useWebSocket } from './composables/useWebSocket'
+import { useResponsiveLayout } from './composables/useResponsiveLayout'
+import { isPwaMobileShellEnabled } from './composables/useEnv'
+import MobileAppShell from './components/layout/MobileAppShell.vue'
 import TopbarGithubLink from './components/TopbarGithubLink.vue'
+import PwaUpdateBanner from './components/pwa/PwaUpdateBanner.vue'
 import logoDark from './assets/logo-github-org.svg'
 import logoLight from './assets/logo-github-org-light.svg'
 
 const route = useRoute()
 const { isLoggedIn, user } = useAuth()
 const { t, locale, setLocale } = useLocale()
+const { connected, reconnecting } = useWebSocket()
+const { isMobile } = useResponsiveLayout()
+const showMobileShell = computed(() => isLoggedIn.value && isPwaMobileShellEnabled() && isMobile.value)
+const isSessionRoute = computed(() => route.path.startsWith('/session/'))
 function toggleLocale() { setLocale(locale.value === 'zh' ? 'en' : 'zh') }
 
 const triggerNewSession = ref(0)
@@ -125,6 +154,7 @@ const isPro = computed(() => {
 const pageTitle = computed(() => {
   const titles: Record<string, string> = {
     '/': t('nav.overview'),
+    '/sessions': t('nav.sessions'),
     '/settings': t('nav.settings'),
     '/hosts': t('nav.hosts'),
     '/tokens': t('nav.tokens'),
@@ -219,4 +249,23 @@ if (typeof window !== 'undefined') {
   background: var(--surface-hover);
 }
 .main-content { transition: margin-left 0.2s ease; }
+
+:root {
+  --mobile-topbar-h: calc(56px + env(safe-area-inset-top));
+  --mobile-bottom-nav-h: calc(60px + env(safe-area-inset-bottom));
+}
+
+.mobile-shell-active {
+  min-height: 100dvh;
+}
+.mobile-shell-active .main-content {
+  width: 100%;
+  min-height: 100dvh;
+  margin-left: 0;
+  padding-top: var(--mobile-topbar-h);
+  padding-bottom: var(--mobile-bottom-nav-h);
+}
+.mobile-shell-active.mobile-session-route .main-content {
+  padding-bottom: 0;
+}
 </style>

@@ -58,6 +58,7 @@ vi.mock('../../composables/useAuth', () => ({
 }))
 vi.mock('vue-router', () => ({
   useRouter: () => ({ push: vi.fn() }),
+  useRoute: () => ({ query: {} }),
 }))
 
 describe('SessionList.vue — token pill (P1a)', () => {

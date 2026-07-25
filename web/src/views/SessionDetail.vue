@@ -233,29 +233,50 @@
           <!-- Tool-use approval request (non-bypass sessions) -->
           <ApprovalCard
             v-else-if="msg.type === 'approval_request'"
+            :data-request-id="msg.request_id"
+            :data-status="msg.status"
             :message="msg"
             :supports-actions="interactionCapabilities.includes('permission_actions')"
             :disabled="interactionCardsDisabled"
+            :disabled-reason="interactionDisabledReason(msg)"
             @respond="onApprovalRespond"
+            @resync="resyncInteractionState"
           />
 
           <OpenCodeQuestionCard
             v-else-if="msg.type === 'question_request'"
+            :data-request-id="msg.request_id"
+            :data-status="msg.status"
             :message="msg"
             :disabled="interactionCardsDisabled"
+            :disabled-reason="interactionDisabledReason(msg)"
             @submit="onQuestionSubmit"
             @reject="onQuestionReject"
+            @resync="resyncInteractionState"
           />
 
           <McpElicitationCard
             v-else-if="msg.type === 'mcp_elicitation_request'"
+            :data-request-id="msg.request_id"
+            :data-status="msg.status"
             :message="msg"
             :disabled="interactionCardsDisabled"
+            :disabled-reason="interactionDisabledReason(msg)"
             @respond="onMcpElicitationRespond"
+            @resync="resyncInteractionState"
           />
 
           <!-- PTY selection menu (host-hook confirmation, TUI prompt, etc.) -->
-          <InteractiveChoiceCard v-else-if="msg.type === 'interactive_prompt'" :message="msg" @respond="onChoiceRespond" />
+          <InteractiveChoiceCard
+            v-else-if="msg.type === 'interactive_prompt'"
+            :data-request-id="msg.request_id"
+            :data-status="msg.status"
+            :message="msg"
+            :disabled="interactionCardsDisabled"
+            :disabled-reason="interactionDisabledReason(msg)"
+            @respond="onChoiceRespond"
+            @resync="resyncInteractionState"
+          />
         </template>
 
         <!-- Turn status bar: lives inside the message stream (visually part of
@@ -456,12 +477,16 @@ import { useSessionRename } from '../composables/useSessionRename'
 import type { CommandItem } from '../composables/useWebSocket'
 import { canControlOpenCodeInteractions, isManagedOpenCodeSession, normalizeSessionAgents, resolveInteractionRequest, sessionAgentSwitchDisabled, shouldShowSessionAgentPicker, upsertInteractionRequest, type SessionAgentOption } from '../types/opencode-interactions'
 import { expandCodexPreset, permissionOptions, permissionTitleKey, type AgentType, type ClaudeMode, type PermissionConfig } from '../types/permission'
+import { useVisualViewport } from '../composables/useVisualViewport'
+import { normalizeRequestId, scrollToRequest } from '../utils/requestDeepLink'
+import { resolveInteractionReadiness, type InteractionConnectivity } from '../composables/useInteractionReadiness'
 
 const { renamingId, renameInput, startRename, commitRename, cancelRename } = useSessionRename()
 
 const route = useRoute()
 const router = useRouter()
-const { connect, send, onEvent } = useWebSocket()
+useVisualViewport()
+const { connect, send, onEvent, connected, reconnecting } = useWebSocket()
 const { t } = useLocale()
 
 const sessionId = computed(() => route.params.id as string)
@@ -509,9 +534,10 @@ const isManagedOpenCode = computed(() => isManagedOpenCodeSession(
 ))
 const isLegacyOpenCodeSession = computed(() => currentSessionAgent.value === 'opencode' && !isManagedOpenCode.value)
 const interactionCardsDisabled = computed(() => isDisconnected.value || (
+  interactionConnectivity.value !== 'ready' || (
   currentSessionAgent.value === 'opencode'
   && !canControlOpenCodeInteractions(currentSessionAgent.value, currentSession.value?.control_mode, currentSessionCapabilities.value)
-))
+)))
 const normalizedEffort = computed(() => normalizeEffort(currentEffort.value))
 const effortVisible = computed(() => shouldShowEffort(currentSessionAgent.value || '', currentEffort.value))
 const effortLabel = computed(() => {
@@ -623,6 +649,22 @@ const isDaemonOnline = computed(() => {
 })
 
 const isDisconnected = computed(() => status.value === 'disconnected' || !isDaemonOnline.value)
+const interactionConnectivity = computed<InteractionConnectivity>(() => {
+  if (isDisconnected.value) return 'offline'
+  if (!connected.value) return reconnecting.value ? 'connecting' : 'offline'
+  if (isLoading.value) return 'syncing'
+  return 'ready'
+})
+function interactionDisabledReason(message: any): string {
+  const readiness = resolveInteractionReadiness({
+    connectivity: interactionConnectivity.value,
+    requestStatus: message.status,
+    submitting: !!message.submitting,
+    resultUnknown: !!message.resultUnknown,
+    resolvedElsewhere: message.reason === 'resolved_elsewhere',
+  })
+  return readiness.reasonKey ? t(readiness.reasonKey) : ''
+}
 // True when there are zero sessions at all — the whole chat area should show
 // a welcoming empty state instead of "unknown host" / error messages.
 const hasNoSessions = computed(() => allSessions.value.length === 0)
@@ -679,6 +721,19 @@ const focusedSubAgentTokenTotal = computed(() => {
 // Render source: the focused sub-agent's bucket when focusing, else parent messages.
 const renderMessages = computed(() =>
   focusedSubAgentId.value ? (subagentMessages.value[focusedSubAgentId.value] || []) : messages.value,
+)
+const requestDeepLinkId = computed(() => normalizeRequestId(route.query.request_id))
+watch(
+  [
+    requestDeepLinkId,
+    () => renderMessages.value.map((message: any) => `${message.request_id || ''}:${message.status || ''}`).join('|'),
+  ],
+  async ([requestId]) => {
+    if (!requestId) return
+    await nextTick()
+    if (messagesEl.value) scrollToRequest(messagesEl.value, requestId)
+  },
+  { immediate: true },
 )
 const canInput = computed(() => !isDisconnected.value
   && (!isTerminal.value || isDaemonSession.value || isManagedSession.value)
@@ -1133,14 +1188,23 @@ const interactionSubmitTimers = new Map<string, ReturnType<typeof setTimeout>>()
 type InteractionCardType = 'approval_request' | 'question_request' | 'mcp_elicitation_request'
 const interactionResolutions = new Map<string, { type: InteractionCardType; resolution: Record<string, unknown> }>()
 function markInteractionSubmitting(msg: any, operation: string): boolean {
-  if (!msg.request_id || msg.submitting) return false
+  const readiness = resolveInteractionReadiness({
+    connectivity: interactionConnectivity.value,
+    requestStatus: msg.status,
+    submitting: !!msg.submitting,
+    resultUnknown: !!msg.resultUnknown,
+    resolvedElsewhere: msg.reason === 'resolved_elsewhere',
+  })
+  if (!msg.request_id || !readiness.canInteract) return false
   msg.submitting = true
+  msg.resultUnknown = false
   msg.error = ''
   const prior = interactionSubmitTimers.get(msg.request_id)
   if (prior) clearTimeout(prior)
   interactionSubmitTimers.set(msg.request_id, setTimeout(() => {
     msg.submitting = false
-    msg.error = `${operation} timed out`
+    msg.resultUnknown = true
+    msg.error = `${operation}: ${t('interaction.unknown')}`
     interactionSubmitTimers.delete(msg.request_id)
   }, 15000))
   return true
@@ -1150,6 +1214,15 @@ function clearInteractionSubmitting(requestId: string) {
   const timer = interactionSubmitTimers.get(requestId)
   if (timer) clearTimeout(timer)
   interactionSubmitTimers.delete(requestId)
+  const card = messages.value.find((message: any) => message.request_id === requestId)
+  if (card) {
+    card.submitting = false
+    card.resultUnknown = false
+  }
+}
+
+function resyncInteractionState() {
+  loadHistory()
 }
 
 function onApprovalRespond(msg: any, action: 'once' | 'always' | 'reject' | 'cancel') {
@@ -1202,19 +1275,18 @@ function onMcpElicitationRespond(msg: any, action: 'accept' | 'decline' | 'cance
   }
 }
 
-// Send the user's menu choice back to the daemon. The InteractiveChoiceCard
-// already marked its selection optimistically; here we dispatch the
-// interactive_response command, which the relay forwards to the owning daemon,
-// which writes the chosen index to the agent's PTY so the blocking prompt
-// proceeds.
 function onChoiceRespond(msg: any, choice: string) {
-  if (!msg.request_id) return
-  send({
+  if (!markInteractionSubmitting(msg, 'Interactive response')) return
+  const sent = send({
     type: 'interactive_response',
     session_id: sessionId.value,
     request_id: msg.request_id,
     choice,
   })
+  if (!sent) {
+    clearInteractionSubmitting(msg.request_id)
+    msg.error = 'Interactive response failed'
+  }
 }
 
 function sendMessage() {
@@ -2306,7 +2378,7 @@ onMounted(() => {
 </script>
 
 <style>
-.session-layout { display: flex; flex: 1; width: 100%; min-width: 0; height: calc(100vh - var(--topbar-h)); overflow: hidden; }
+.session-layout { display: flex; flex: 1; width: 100%; min-width: 0; height: calc(100dvh - var(--topbar-h)); overflow: hidden; }
 
 /* Session Panel */
 .session-panel { width: 300px; background: var(--sidebar-bg); border-right: 1px solid var(--sidebar-border); display: flex; flex-direction: column; flex-shrink: 0; transition: background var(--transition), border-color var(--transition); }
@@ -2371,6 +2443,11 @@ onMounted(() => {
 /* Tool cards: left-aligned, not centered. */
 .chat-messages > .tool-wrap { min-width: 0; max-width: 820px; width: 100%; align-self: flex-start; }
 .chat-messages > *.msg { min-width: 0; max-width: 85%; }
+.request-deep-link-target { animation: request-deep-link-highlight 1.8s ease-out; }
+@keyframes request-deep-link-highlight {
+  0%, 30% { outline: 3px solid var(--warning); outline-offset: 3px; }
+  100% { outline: 3px solid transparent; outline-offset: 6px; }
+}
 
 /* Empty state */
 .chat-empty-state { display: flex; flex-direction: column; align-items: center; justify-content: center; flex: 1; gap: 12px; padding: 40px 20px; text-align: center; }
@@ -2541,6 +2618,19 @@ onMounted(() => {
 @keyframes fade-in { from { opacity: 0; } to { opacity: 1; } }
 @keyframes bar-in { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: translateY(0); } }
 
-@media (max-width: 1024px) { .session-layout { height: calc(100vh - var(--topbar-h)); } }
-@media (max-width: 768px) { .session-panel { display: none; } }
+@media (max-width: 1024px) { .session-layout { height: calc(100dvh - var(--topbar-h)); } }
+@media (max-width: 768px) {
+  .session-layout { height: calc(var(--visual-viewport-height, 100dvh) - var(--mobile-topbar-h)); }
+  .session-panel,
+  .chat-toolbar { display: none; }
+  .chat-messages { padding: 14px 12px; gap: 12px; }
+  .chat-input-area {
+    padding: 8px 10px max(8px, env(safe-area-inset-bottom));
+  }
+  .textarea-resize-handle { display: none; }
+  .chat-textarea { resize: none; padding-top: 10px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .request-deep-link-target { animation: none; outline: 2px solid var(--warning); }
+}
 </style>

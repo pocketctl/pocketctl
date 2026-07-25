@@ -44,6 +44,10 @@
     </div>
 
     <p v-if="message.error" class="error">{{ message.error }}</p>
+    <div v-if="isPending && disabledReason" class="interaction-readiness" role="status">
+      <span>{{ disabledReason }}</span>
+      <button v-if="message.resultUnknown" type="button" @click="$emit('resync')">{{ t('interaction.resync') }}</button>
+    </div>
     <footer v-if="isPending">
       <button v-if="message.elicitationMode === 'form'" class="submit" :disabled="controlsDisabled" @click="submit">Submit</button>
       <button v-else class="submit" :disabled="controlsDisabled" @click="respond('accept')">Continue</button>
@@ -56,11 +60,16 @@
 
 <script setup lang="ts">
 import { computed, reactive } from 'vue'
+import { useLocale } from '../../composables/useLocale'
 
 type Action = 'accept' | 'decline' | 'cancel'
 type Option = { value: string; title: string }
-const props = defineProps<{ message: any; disabled?: boolean }>()
-const emit = defineEmits<{ (event: 'respond', message: any, action: Action, content?: Record<string, unknown>): void }>()
+const { t } = useLocale()
+const props = defineProps<{ message: any; disabled?: boolean; disabledReason?: string }>()
+const emit = defineEmits<{
+  (event: 'respond', message: any, action: Action, content?: Record<string, unknown>): void
+  (event: 'resync'): void
+}>()
 const schema = computed(() => props.message.elicitationSchema || { properties: {} })
 const fields = computed(() => Object.entries(schema.value.properties || {}).map(([name, value]) => ({
   name, schema: value as any, required: (schema.value.required || []).includes(name),
@@ -141,6 +150,8 @@ header, footer { display: flex; align-items: center; gap: 8px; }
 .badge { color: var(--accent); font-size: 11px; font-weight: 700; }
 .waiting { margin-left: auto; color: var(--fg-tertiary); font-size: 12px; }
 .prompt, .resolved, .error { margin: 0; }
+.interaction-readiness { display: flex; align-items: center; justify-content: space-between; gap: 8px; color: var(--warning); font-size: 12px; }
+.interaction-readiness button { background: var(--surface-active); color: var(--fg); }
 .url { overflow-wrap: anywhere; }
 .form, .field { display: flex; flex-direction: column; gap: 6px; }
 .field > span { font-size: 13px; font-weight: 600; }

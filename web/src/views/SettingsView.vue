@@ -31,6 +31,11 @@
 
       <!-- Settings Content -->
       <div>
+        <div id="section-pwa" class="settings-section">
+          <div class="settings-section-title">{{ t('pwa.section_title') }}</div>
+          <InstallPwaCard />
+        </div>
+
         <!-- Profile -->
         <div id="section-profile" class="settings-section">
           <div class="profile-card">
@@ -212,6 +217,7 @@ import AgreementModal from '../components/AgreementModal.vue'
 import EditProfileModal from '../components/EditProfileModal.vue'
 import BindEmailModal from '../components/BindEmailModal.vue'
 import RegisterDaemonDialog from '../components/RegisterDaemonDialog.vue'
+import InstallPwaCard from '../components/pwa/InstallPwaCard.vue'
 
 const router = useRouter()
 const { user, logout, sendEmailCode, forceKickDaemon } = useAuth()

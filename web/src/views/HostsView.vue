@@ -1,5 +1,10 @@
 <template>
   <div class="page-container">
+    <div class="mobile-hosts-heading">
+      <h1>{{ t('mobile.my_hosts') }}</h1>
+      <p>{{ daemons.length }} {{ t('hosts.host_unit') }} · {{ onlineCount }} {{ t('dashboard.online') }}</p>
+    </div>
+
     <!-- Page Header -->
     <div class="page-header">
       <div>
@@ -37,36 +42,50 @@
     </div>
 
     <!-- 主机布局（单栏：卡片网格 ↔ 胶囊横向 + 全宽详情） -->
-    <div class="hosts-layout" :class="{ 'hosts-selecting': !!selectedId }">
+    <div class="hosts-layout">
       <div class="hosts-grid-wrap">
         <div class="host-cards-grid" id="host-cards">
-          <div v-for="d in filteredDaemons" :key="d.daemon_id"
-            :class="['host-card', { selected: selectedId === d.daemon_id }]"
-            :data-id="d.daemon_id"
-            tabindex="0"
-            role="button"
-            :aria-label="(d.daemon_alias || d.hostname || d.daemon_id?.slice(0,8)) + ' ' + statusLabel(d)"
-            @click="selectHost(d.daemon_id)"
-            @keydown.enter.prevent="selectHost(d.daemon_id)">
-            <div class="hc-head">
-              <span :class="['status-dot', d.daemon_online ? 'online' : 'offline', { reconnecting: d.status === 'reconnecting' }]"></span>
-              <span class="hc-icon" v-html="hostIcon(d, 18)"></span>
-              <div class="hc-info">
-                <div class="hc-name">{{ d.daemon_alias || d.hostname || d.daemon_id?.slice(0, 8) }}</div>
-                <div class="hc-meta">{{ d.ip && d.ip !== 'unknown' ? d.ip : '—' }} · {{ d.os || 'unknown' }}</div>
+          <template v-if="isMobile">
+            <MobileHostCard
+              v-for="d in filteredDaemons"
+              :key="`mobile-${d.daemon_id}`"
+              :daemon="d"
+              :active-sessions="d.active_sessions || 0"
+              :total-sessions="hostSessionCount(d.daemon_id)"
+              :last-activity-label="hostLastActivityLabel(d)"
+              @sessions="goSessionWithHost(d)"
+              @new-session="openMobileNewSession(d)"
+              @more="openMenu($event, d)"
+            />
+          </template>
+          <template v-else>
+            <div v-for="d in filteredDaemons" :key="d.daemon_id"
+              class="host-card desktop-host-card"
+              :data-id="d.daemon_id"
+              tabindex="0"
+              role="button"
+              :aria-label="(d.daemon_alias || d.hostname || d.daemon_id?.slice(0,8)) + ' ' + statusLabel(d)"
+              @click="selectHost(d.daemon_id)"
+              @keydown.enter.prevent="selectHost(d.daemon_id)">
+              <div class="hc-head">
+                <span :class="['status-dot', d.daemon_online ? 'online' : 'offline', { reconnecting: d.status === 'reconnecting' }]"></span>
+                <span class="hc-icon" v-html="hostIcon(d, 18)"></span>
+                <div class="hc-info">
+                  <div class="hc-name">{{ d.daemon_alias || d.hostname || d.daemon_id?.slice(0, 8) }}</div>
+                  <div class="hc-meta">{{ d.ip && d.ip !== 'unknown' ? d.ip : '—' }} · {{ d.os || 'unknown' }}</div>
+                </div>
               </div>
+              <div class="hc-foot">
+                <div><span class="hc-sessions">{{ d.active_sessions || 0 }}</span> <span class="hc-sess-label">{{ t('dashboard.active_sessions') }}</span></div>
+                <span :class="['status-pill', 'mini', statusPillClass(d)]" :style="statusPillStyle(d)">{{ statusLabel(d) }}</span>
+              </div>
+              <button class="ss-more-btn" type="button" :title="t('session.actions.more')" :aria-label="t('session.actions.more')" @click.stop="openMenu($event, d)">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><circle cx="12" cy="5" r="1.8"/><circle cx="12" cy="12" r="1.8"/><circle cx="12" cy="19" r="1.8"/></svg>
+              </button>
             </div>
-            <div class="hc-foot">
-              <div><span class="hc-sessions">{{ d.active_sessions || 0 }}</span> <span class="hc-sess-label">{{ t('dashboard.active_sessions') }}</span></div>
-              <span :class="['status-pill', 'mini', statusPillClass(d)]" :style="statusPillStyle(d)">{{ statusLabel(d) }}</span>
-            </div>
-            <button class="ss-more-btn" type="button" :title="t('session.actions.more')" :aria-label="t('session.actions.more')" @click.stop="openMenu($event, d)">
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><circle cx="12" cy="5" r="1.8"/><circle cx="12" cy="12" r="1.8"/><circle cx="12" cy="19" r="1.8"/></svg>
-            </button>
-          </div>
+          </template>
           <div v-if="filteredDaemons.length === 0" class="host-cards-empty">{{ t('hosts.no_match') }}</div>
         </div>
-        <button class="hosts-deselect-btn" type="button" :title="t('hosts.deselect')" :aria-label="t('hosts.deselect')" @click="deselectAll">✕</button>
       </div>
 
       <!-- 详情面板（全宽） -->
@@ -226,40 +245,23 @@
       </div>
     </div>
 
-    <!-- Floating Action Menu -->
-    <div v-if="menuOpen" class="ss-menu" :style="{ left: menuX + 'px', top: menuY + 'px' }" @click.stop>
-      <button class="ss-menu-item" @click="onMenuAct('copy')">
-        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"/></svg>
-        <span>{{ t('hosts.menu_copy_info') }}</span>
-      </button>
-      <button class="ss-menu-item" @click="onMenuAct('export')">
-        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><path d="M7 10l5 5 5-5"/><path d="M12 15V3"/></svg>
-        <span>{{ t('hosts.menu_export_report') }}</span>
-      </button>
-      <button class="ss-menu-item" @click="onMenuAct('alias')">
-        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M11 4H4a2 2 0 00-2 2v14a2 2 0 002 2h14a2 2 0 002-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 013 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>
-        <span>{{ t('hosts.menu_edit_alias') }}</span>
-      </button>
-      <div class="ss-menu-sep"></div>
-      <template v-if="menuTarget?.daemon_online">
-        <button class="ss-menu-item" @click="onMenuAct('restart')">
-          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 12a9 9 0 019-9 9 9 0 016.7 3"/><path d="M21 3v5h-5"/><path d="M21 12a9 9 0 01-9 9 9 9 0 01-6.7-3"/><path d="M3 21v-5h5"/></svg>
-          <span>{{ t('hosts.restart_daemon') }}</span>
-        </button>
-        <button class="ss-menu-item" @click="onMenuAct('kick')">
-          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 3v9"/><path d="M6.4 6.4a8 8 0 106.6-2.3"/></svg>
-          <span>{{ t('hosts.force_kick_label') }}</span>
-        </button>
-      </template>
-      <div class="ss-menu-sep"></div>
-      <button class="ss-menu-item danger" @click="onMenuAct('unregister')">
-        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 6h18"/><path d="M8 6V4a2 2 0 012-2h4a2 2 0 012 2v2"/><path d="M19 6l-1 14a2 2 0 01-2 2H8a2 2 0 01-2-2L5 6"/></svg>
-        <span>{{ t('hosts.menu_unregister') }}</span>
-      </button>
-    </div>
+    <HostActionsMenu
+      v-if="menuOpen && menuTarget"
+      :daemon="menuTarget"
+      :x="menuX"
+      :y="menuY"
+      @action="onMenuAct"
+      @close="closeMenu"
+    />
 
     <!-- Register Dialog -->
     <RegisterDaemonDialog v-if="showRegister" @close="showRegister = false" />
+    <NewSessionDialog
+      v-if="mobileNewSessionHost"
+      :daemons="daemons"
+      :pre-selected-daemon-id="mobileNewSessionHost.daemon_id"
+      @close="mobileNewSessionHost = null"
+    />
 
     <!-- Confirm Dialog -->
     <div v-if="confirm.show" class="ss-overlay" @click.self="confirm.show = false">
@@ -295,22 +297,30 @@ import { formatRelativeTime } from '../composables/useRelativeTime'
 import { useLocale } from '../composables/useLocale'
 import { useQuota } from '../composables/useQuota'
 import RegisterDaemonDialog from '../components/RegisterDaemonDialog.vue'
+import NewSessionDialog from '../components/NewSessionDialog.vue'
+import MobileHostCard from '../components/hosts/MobileHostCard.vue'
+import HostActionsMenu from '../components/hosts/HostActionsMenu.vue'
 import AgentBadge from '../components/AgentBadge.vue'
 import { getRelayOrigin } from '../composables/useEnv'
 import { formatTokenCount } from '../utils/tokenFormat'
+import { hostSessionsLocation } from '../utils/hostNavigation'
+import { useResponsiveLayout } from '../composables/useResponsiveLayout'
+import type { HostActionId } from '../utils/hostActions'
 
 const router = useRouter()
 const ws = useWebSocket()
-const { accessToken } = useAuth()
+const { accessToken, apiGetAuth } = useAuth()
 const { connect, send, onEvent } = ws
 const { t } = useLocale()
 const { boundHosts } = useQuota()
+const { isMobile } = useResponsiveLayout()
 
 const daemons = ref<any[]>([])
 const selectedId = ref<string | null>(null)
 const filter = ref<'all' | 'online' | 'offline'>('all')
 const searchQuery = ref('')
 const showRegister = ref(false)
+const mobileNewSessionHost = ref<any | null>(null)
 const toast = ref<{ show: boolean; msg: string; undo?: () => void }>({ show: false, msg: '' })
 const confirm = ref<{ show: boolean; title: string; desc: string; confirmText: string; danger: boolean; loading: boolean; action: () => void }>({
   show: false, title: '', desc: '', confirmText: '确认', danger: false, loading: false, action: () => {}
@@ -478,20 +488,34 @@ function showConfirm(opts: { title: string; desc: string; confirmText?: string; 
   confirm.value = { show: true, title: opts.title, desc: opts.desc, confirmText: opts.confirmText || '确认', danger: !!opts.danger, loading: false, action: opts.action }
 }
 
-// 卡片 ↔ 胶囊 状态机
 function selectHost(id: string) {
-  selectedId.value = selectedId.value === id ? null : id
-}
-function deselectAll() {
-  if (selectedId.value) selectedId.value = null
+  selectedId.value = id
 }
 
 function goSessionWithHost(d: any) {
-  router.push({ path: '/session/default', query: { host: d.daemon_id } })
+  router.push(hostSessionsLocation(d.daemon_id))
+}
+
+function openMobileNewSession(d: any) {
+  if (d.daemon_online) mobileNewSessionHost.value = d
 }
 
 // Sessions for detail panel (recent 3)
 const allSessions = ref<any[]>([])
+function sessionsForHost(daemonId: string): any[] {
+  return allSessions.value.filter(session => session.daemon_id === daemonId)
+}
+function hostSessionCount(daemonId: string): number {
+  return sessionsForHost(daemonId).length
+}
+function hostLastActivityLabel(d: any): string {
+  const latest = sessionsForHost(d.daemon_id)
+    .map(session => session.last_activity_at || session.updated_at || session.created_at)
+    .filter(Boolean)
+    .sort((a, b) => new Date(b).getTime() - new Date(a).getTime())[0]
+  const value = latest || d.last_heartbeat
+  return value ? formatRelativeTime(value) : ''
+}
 const detailSessions = computed(() => {
   if (!selectedId.value) return []
   return allSessions.value
@@ -538,7 +562,7 @@ function sessionStatusLabel(s: any): string {
 function openMenu(e: MouseEvent, d: any) {
   menuTarget.value = d
   const btn = (e.currentTarget as HTMLElement).getBoundingClientRect()
-  menuX.value = Math.max(8, btn.right - 188)
+  menuX.value = Math.max(8, btn.right - 224)
   menuY.value = btn.bottom + 6
   menuOpen.value = true
 }
@@ -550,14 +574,13 @@ function openDetailMenu(e: MouseEvent) {
 
 function closeMenu() { menuOpen.value = false }
 
-function onMenuAct(act: string) {
+function onMenuAct(act: HostActionId) {
   closeMenu()
   const d = menuTarget.value
   if (!d) return
   const id = d.daemon_id
   setTimeout(() => {
-    if (act === 'copy') copyConnection(d)
-    else if (act === 'export') exportReport(d)
+    if (act === 'refresh') refreshHost(d)
     else if (act === 'alias') { selectedId.value = id; startRename(d) }
     else if (act === 'restart') confirmRestart(d)
     else if (act === 'kick') confirmKick(d)
@@ -565,20 +588,16 @@ function onMenuAct(act: string) {
   }, 50)
 }
 
-function copyConnection(d: any) {
-  const conn = d.ip && d.ip !== 'unknown' ? d.ip : '—'
-  navigator.clipboard.writeText(conn).then(() => showToast(t('hosts.copy_toast', { info: conn }))).catch(() => {})
-}
-
-function exportReport(d: any) {
-  const md = `# ${d.daemon_alias || d.hostname || '主机报告'}\n\n- **状态**: ${statusLabel(d)}\n- **IP**: ${d.ip || '—'}\n- **系统**: ${d.os || '—'} (${d.arch || '—'})\n- **Daemon 版本**: ${d.version ? 'v' + d.version : '—'}\n- **CPU**: ${d.cpu_pct != null ? d.cpu_pct.toFixed(0) + '%' : '—'}\n- **内存**: ${d.mem_pct != null ? d.mem_pct.toFixed(0) + '%' : '—'}\n- **磁盘**: ${d.disk_pct != null ? d.disk_pct.toFixed(0) + '%' : '—'}\n`
-  const blob = new Blob([md], { type: 'text/markdown' })
-  const a = document.createElement('a')
-  a.href = URL.createObjectURL(blob)
-  a.download = `${(d.hostname || 'host').replace(/[^\w]/g, '_')}-report.md`
-  a.click()
-  setTimeout(() => { URL.revokeObjectURL(a.href); a.remove() }, 200)
-  showToast(`已导出 ${a.download}`)
+async function refreshHost(d: any) {
+  const { ok, data } = await apiGetAuth(`/api/daemons/${encodeURIComponent(d.daemon_id)}`)
+  if (!ok || !data || data.daemon_id !== d.daemon_id) {
+    showToast(t('hosts.refresh_failed'))
+    return
+  }
+  const existingAlias = d.daemon_alias
+  Object.assign(d, data)
+  if (!d.daemon_alias && existingAlias) d.daemon_alias = existingAlias
+  showToast(t('hosts.refresh_success'))
 }
 
 function confirmRestart(d: any) {
@@ -729,6 +748,7 @@ onUnmounted(() => {
 .page-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 24px; gap: 16px; }
 .page-title { font-size: 24px; font-weight: 700; color: var(--fg); font-family: var(--font-display); }
 .page-subtitle { font-size: 14px; color: var(--fg-secondary); margin-top: 4px; }
+.mobile-hosts-heading { display: none; }
 
 /* 全局 Token 概览条（占位） */
 .token-global-strip { display: flex; align-items: center; gap: 24px; padding: 10px 18px; background: var(--bg); border: 1px solid var(--border); border-radius: var(--radius-lg); margin-bottom: 20px; font-size: 13px; }
@@ -757,7 +777,6 @@ onUnmounted(() => {
 .host-cards-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 12px; flex: 1; min-width: 0; }
 .host-card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-lg); padding: 16px; cursor: pointer; transition: border-color 0.15s, background 0.15s, box-shadow 0.15s; position: relative; }
 .host-card:hover { border-color: var(--border-light); background: var(--surface-hover); }
-.host-card.selected { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent-muted); }
 .host-card:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .host-card .hc-head { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; }
 .host-card .hc-icon { width: 36px; height: 36px; border-radius: var(--radius-md); background: var(--surface-active); display: flex; align-items: center; justify-content: center; flex-shrink: 0; color: var(--fg-secondary); }
@@ -771,23 +790,6 @@ onUnmounted(() => {
 .host-card .ss-more-btn { position: absolute; top: 10px; right: 10px; }
 .host-card:hover .ss-more-btn { opacity: 1; }
 .host-cards-empty { padding: 48px 16px; text-align: center; color: var(--fg-tertiary); font-size: 13px; grid-column: 1 / -1; }
-
-/* 选中 → 胶囊横向 */
-.hosts-selecting .host-cards-grid { display: flex; flex-wrap: nowrap; overflow-x: auto; gap: 6px; padding: 4px 0; scrollbar-width: none; }
-.hosts-selecting .host-cards-grid::-webkit-scrollbar { display: none; }
-.hosts-selecting .host-card { flex: 0 0 auto; cursor: pointer; display: inline-flex; align-items: center; padding: 5px 12px; border-radius: var(--radius-full); font-size: 13px; min-width: 0; }
-.hosts-selecting .host-card .hc-head { margin: 0; gap: 6px; }
-.hosts-selecting .host-card .hc-icon,
-.hosts-selecting .host-card .hc-meta,
-.hosts-selecting .host-card .hc-foot,
-.hosts-selecting .host-card .ss-more-btn { display: none; }
-.hosts-selecting .host-card.selected { background: var(--accent-muted); border-color: var(--accent); color: var(--accent); }
-.hosts-selecting .host-card.selected .hc-name { color: var(--accent); }
-
-/* 取消选择按钮 */
-.hosts-deselect-btn { display: none; flex-shrink: 0; width: 28px; height: 28px; border-radius: 50%; border: 1px solid var(--border); background: var(--surface); color: var(--fg-tertiary); cursor: pointer; align-items: center; justify-content: center; font-size: 16px; line-height: 1; transition: background 0.15s, color 0.15s; }
-.hosts-deselect-btn:hover { background: var(--surface-hover); color: var(--fg); }
-.hosts-selecting .hosts-deselect-btn { display: inline-flex; }
 
 /* 详情面板（全宽） */
 .host-detail-panel { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-lg); padding: 28px; transition: background var(--transition), border-color var(--transition); }
@@ -922,12 +924,6 @@ onUnmounted(() => {
 .status-dot.reconnecting { background: var(--warning); animation: pulse-amber 1.5s infinite; }
 
 /* Floating Menu */
-.ss-menu { position: fixed; z-index: 200; min-width: 188px; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-md); box-shadow: var(--shadow-lg); padding: 4px; }
-.ss-menu-item { width: 100%; display: flex; align-items: center; gap: 10px; padding: 8px 10px; border: none; background: none; color: var(--fg-secondary); font-size: 13px; cursor: pointer; border-radius: var(--radius-sm); text-align: left; }
-.ss-menu-item:hover { background: var(--surface-hover); color: var(--fg); }
-.ss-menu-item.danger { color: var(--error); }
-.ss-menu-item.danger:hover { background: rgba(248, 81, 73, 0.12); }
-.ss-menu-sep { height: 1px; background: var(--border); margin: 4px 2px; }
 
 /* Buttons */
 .btn { padding: 8px 16px; border: none; border-radius: var(--radius-md); font-size: 14px; font-weight: 500; cursor: pointer; display: inline-flex; align-items: center; gap: 6px; transition: background 0.15s, border-color 0.15s, color 0.15s; }
@@ -976,6 +972,19 @@ onUnmounted(() => {
 /* Responsive */
 @media (max-width: 900px) { .host-cards-grid { grid-template-columns: repeat(auto-fill, minmax(160px, 1fr)); } .host-detail-grid { grid-template-columns: 1fr; } .conn-grid { grid-template-columns: 1fr; } }
 @media (max-width: 520px) { .host-controls { flex-direction: column; align-items: stretch; } .host-search { max-width: none; } .host-cards-grid { grid-template-columns: repeat(2, 1fr); } .host-filter { justify-content: space-between; } }
-@media (max-width: 768px) { .host-card .ss-more-btn { opacity: 1; } }
+@media (max-width: 768px) {
+  .page-container { padding: 14px 12px 20px; }
+  .page-header,
+  .token-global-strip,
+  .host-controls,
+  .desktop-host-card,
+  .host-detail-panel { display: none; }
+  .mobile-hosts-heading { display: block; margin: 4px 2px 16px; }
+  .mobile-hosts-heading h1 { margin: 0; color: var(--fg); font-size: 27px; font-weight: 750; letter-spacing: -.02em; }
+  .mobile-hosts-heading p { margin: 5px 0 0; color: var(--fg-secondary); font-size: 12px; }
+  .hosts-layout,
+  .hosts-grid-wrap { width: 100%; }
+  .host-cards-grid { display: grid; grid-template-columns: 1fr; gap: 10px; }
+}
 @media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation-duration: 0.01ms !important; transition-duration: 0.01ms !important; } }
 </style>

@@ -294,6 +294,7 @@ export function useAuth() {
     forceKickDaemon,                  // force kick daemon
     renameSession,                    // session rename
     fetchProfile,                     // refresh user profile (e.g. after plan change)
+    apiGetAuth,                       // authenticated GET with one token-refresh retry
     doRefreshToken, logout,
   }
 }

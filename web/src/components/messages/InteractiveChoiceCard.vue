@@ -25,6 +25,10 @@
 
       <!-- Prompt text (the question phrase parsed from the menu) -->
       <div v-if="promptText" class="choice-prompt">{{ promptText }}</div>
+      <div v-if="isPending && disabledReason" class="interaction-readiness" role="status">
+        <span>{{ disabledReason }}</span>
+        <button v-if="message.resultUnknown" type="button" @click.stop="$emit('resync')">{{ t('interaction.resync') }}</button>
+      </div>
 
       <!-- Options -->
       <div class="choice-options">
@@ -33,7 +37,7 @@
           :key="opt.index"
           class="choice-option"
           :class="{ selected: !isPending && message.selectedChoice === opt.index, dim: !isPending && message.selectedChoice !== opt.index }"
-          :disabled="!isPending"
+          :disabled="!isPending || disabled || message.submitting || message.resultUnknown"
           @click.stop="choose(opt)"
         >
           <span class="choice-index">{{ opt.index }}</span>
@@ -50,8 +54,14 @@ import { computed } from 'vue'
 import { useLocale } from '../../composables/useLocale'
 
 const { t } = useLocale()
-const props = defineProps<{ message: any }>()
-const emit = defineEmits<{ (e: 'respond', message: any, choice: string): void }>()
+const props = withDefaults(defineProps<{ message: any; disabled?: boolean; disabledReason?: string }>(), {
+  disabled: false,
+  disabledReason: '',
+})
+const emit = defineEmits<{
+  (e: 'respond', message: any, choice: string): void
+  (e: 'resync'): void
+}>()
 
 const isPending = computed(() => props.message.status === 'pending')
 const promptText = computed(() => props.message.prompt || '')
@@ -60,10 +70,7 @@ interface ChoiceOption { index: string; label: string }
 const options = computed<ChoiceOption[]>(() => props.message.options || [])
 
 function choose(opt: ChoiceOption) {
-  // Optimistically mark the choice so the UI feels instant; the daemon writes
-  // the keystroke to the PTY and the agent continues.
-  props.message.status = 'answered'
-  props.message.selectedChoice = opt.index
+  if (!isPending.value || props.disabled || props.message.submitting || props.message.resultUnknown) return
   emit('respond', props.message, opt.index)
 }
 </script>
@@ -99,6 +106,8 @@ function choose(opt: ChoiceOption) {
   font-size: 13px; line-height: 1.5; color: var(--fg);
   font-family: var(--font-mono); white-space: pre-wrap; word-break: break-word;
 }
+.interaction-readiness { display: flex; align-items: center; justify-content: space-between; gap: 8px; color: var(--warning); font-size: 12px; }
+.interaction-readiness button { padding: 5px 9px; border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--surface-active); color: var(--fg); cursor: pointer; }
 
 .choice-options { display: flex; flex-direction: column; gap: 6px; }
 

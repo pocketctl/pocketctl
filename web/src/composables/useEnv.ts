@@ -38,3 +38,13 @@ export function getInstallURL(): string {
 export function getInstallCommand(): string {
   return `curl -fsSL ${getInstallURL()} | bash`
 }
+
+/** Mobile shell is on by default and can be disabled for an emergency rollback. */
+export function isPwaMobileShellEnabled(value = import.meta.env.VITE_PWA_MOBILE_SHELL): boolean {
+  return value !== 'false'
+}
+
+/** Service worker is opt-in so mobile Web remains the safe rollback path. */
+export function isPwaServiceWorkerEnabled(value = import.meta.env.VITE_PWA_SERVICE_WORKER): boolean {
+  return value === 'true'
+}
