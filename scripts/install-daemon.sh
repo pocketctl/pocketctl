@@ -12,7 +12,7 @@ set -euo pipefail
 
 GITHUB_REPO="pocketctl/pocketctl"
 GITEE_REPO="muwb123/pocketctl"
-INSTALL_DIR="/usr/local/bin"
+INSTALL_DIR="${POCKETCTL_INSTALL_DIR:-/usr/local/bin}"
 BINARY_NAME="pocketctl"
 PROD_RELAY="${POCKETCTL_PROD_RELAY_URL:-}"
 
@@ -99,12 +99,14 @@ fi
 # ---------- 3. 下载二进制 ----------
 BINARY_FILENAME="pocketctl_${OS}_${ARCH}"
 TEMP_FILE=$(mktemp)
-EXPECTED_SHA=""
+SHA_FILE=$(mktemp)
+trap 'rm -f "$TEMP_FILE" "$SHA_FILE"' EXIT
 
 info "下载 ${BINARY_FILENAME}..."
 
-download_binary() {
+download_file() {
   local url="$1"
+  local destination="$2"
   # Show a live percentage progress bar when stderr is a terminal; otherwise
   # (e.g. `curl ... | bash`, or output redirected to a log) stay silent so we
   # don't fill logs with hundreds of progress frames. curl writes its # bar to
@@ -115,16 +117,16 @@ download_binary() {
   fi
   if command -v curl &>/dev/null; then
     if [[ -n "$show_progress" ]]; then
-      curl -fL --progress-bar -o "$TEMP_FILE" "$url"
+      curl -fL --progress-bar -o "$destination" "$url"
     else
-      curl -fsSL -o "$TEMP_FILE" "$url" 2>/dev/null
+      curl -fsSL -o "$destination" "$url" 2>/dev/null
     fi
   elif command -v wget &>/dev/null; then
     if [[ -n "$show_progress" ]]; then
       # bar:force keeps the bar even when wget thinks it's not on a TTY
-      wget --show-progress --progress=bar:force -O "$TEMP_FILE" "$url"
+      wget --show-progress --progress=bar:force -O "$destination" "$url"
     else
-      wget -q -O "$TEMP_FILE" "$url" 2>/dev/null
+      wget -q -O "$destination" "$url" 2>/dev/null
     fi
   else
     error "需要 curl 或 wget"
@@ -135,31 +137,33 @@ download_binary() {
 GITHUB_URL="https://github.com/${GITHUB_REPO}/releases/download/${LATEST_VERSION}/${BINARY_FILENAME}"
 GITEE_URL="https://gitee.com/${GITEE_REPO}/releases/download/${LATEST_VERSION}/${BINARY_FILENAME}"
 
-if download_binary "$GITHUB_URL"; then
+if download_file "$GITHUB_URL" "$TEMP_FILE" &&
+   download_file "${GITHUB_URL}.sha256" "$SHA_FILE"; then
   info "从 GitHub 下载成功"
-elif download_binary "$GITEE_URL"; then
+elif download_file "$GITEE_URL" "$TEMP_FILE" &&
+     download_file "${GITEE_URL}.sha256" "$SHA_FILE"; then
   info "从 Gitee 下载成功"
 else
-  rm -f "$TEMP_FILE"
   error "下载失败: 尝试了 GitHub 和 Gitee 源"
 fi
 
-# ---------- 4. 校验（如果存在 SHA256 文件） ----------
-if [[ -n "$EXPECTED_SHA" ]]; then
-  ACTUAL_SHA=""
-  if command -v shasum &>/dev/null; then
-    ACTUAL_SHA=$(shasum -a 256 "$TEMP_FILE" | awk '{print $1}')
-  elif command -v sha256sum &>/dev/null; then
-    ACTUAL_SHA=$(sha256sum "$TEMP_FILE" | awk '{print $1}')
-  fi
-
-  if [[ -n "$ACTUAL_SHA" && "$ACTUAL_SHA" != "$EXPECTED_SHA" ]]; then
-    rm -f "$TEMP_FILE"
-    error "文件校验失败！SHA256 不匹配\n  期望: ${EXPECTED_SHA}\n  实际: ${ACTUAL_SHA}"
-  elif [[ -n "$ACTUAL_SHA" ]]; then
-    info "文件校验通过 ✓"
-  fi
+# ---------- 4. 强制校验同一来源的 SHA256 ----------
+EXPECTED_SHA=$(awk 'NR == 1 { print $1 }' "$SHA_FILE")
+if [[ ! "$EXPECTED_SHA" =~ ^[0-9a-fA-F]{64}$ ]]; then
+  error "SHA256 校验文件格式无效"
 fi
+if command -v shasum &>/dev/null; then
+  ACTUAL_SHA=$(shasum -a 256 "$TEMP_FILE" | awk '{print $1}')
+elif command -v sha256sum &>/dev/null; then
+  ACTUAL_SHA=$(sha256sum "$TEMP_FILE" | awk '{print $1}')
+else
+  error "缺少 shasum 或 sha256sum，无法安全安装"
+fi
+ACTUAL_SHA_LOWER=$(printf '%s' "$ACTUAL_SHA" | tr '[:upper:]' '[:lower:]')
+EXPECTED_SHA_LOWER=$(printf '%s' "$EXPECTED_SHA" | tr '[:upper:]' '[:lower:]')
+[[ "$ACTUAL_SHA_LOWER" == "$EXPECTED_SHA_LOWER" ]] ||
+  error "文件校验失败！SHA256 不匹配\n  期望: ${EXPECTED_SHA}\n  实际: ${ACTUAL_SHA}"
+info "文件校验通过 ✓"
 
 # ---------- 5. 安装 ----------
 info "安装到 ${INSTALL_DIR}/${BINARY_NAME}..."
@@ -259,8 +263,4 @@ echo "  # 首次交互启动 daemon 时会在检测到 OpenCode 后询问，也�
 echo "  pocketctl agent opencode enable"
 echo "  pocketctl agent opencode status"
 echo "  pocketctl agent opencode disable"
-echo ""
-echo -e "  ${BLUE}Homebrew 安装方式:${NC}"
-echo "  brew tap pocketctl/tap"
-echo "  brew install pocketctl"
 echo ""

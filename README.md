@@ -6,6 +6,10 @@ Monitor and manage Claude Code, Codex, and OpenCode sessions from your phone or 
 
 Official website: [pocketctl.me](https://www.pocketctl.me) · Web dashboard: [pocketctl.me/app](https://www.pocketctl.me/app)
 
+The Gitee repository is the canonical source history. GitHub is a filtered public
+mirror used for public review and release artifacts; commit IDs can differ between
+the two repositories.
+
 ## Features
 
 - 🤖 **Multi-agent** — Claude Code, Codex, and OpenCode, behind one unified "zero-config discovery + live sync + cross-device continue" model. Run an agent in your terminal; the daemon discovers it and syncs it to your client where you can keep chatting. (OpenCode is a client/server agent — the daemon hosts a shared `opencode serve` and drives it over its HTTP API. To add a new agent, register a `Provider` — see [docs/adding-an-agent.md](docs/adding-an-agent.md).)
@@ -13,7 +17,7 @@ Official website: [pocketctl.me](https://www.pocketctl.me) · Web dashboard: [po
 - 🖥️ **Real-time Monitoring** — Watch your AI coding sessions live from anywhere
 - 🧩 **Native OpenCode experience** — Opt in to the Pocketctl launcher and a normal terminal `opencode` joins the daemon's shared runtime. The official TUI, Web, and iOS can continue the same managed session and resolve permissions/questions from any device; pre-existing independent processes remain safely read-only until resumed through the launcher. See [OpenCode managed terminal control](docs/opencode-managed-terminal.md).
 - ⌨️ **Official Codex TUI, shared control** — With Codex CLI 0.144.1+, an optional Pocketctl launcher connects the official TUI and daemon to one managed app-server. Terminal, Web, and iOS share thread progress and first-writer-wins approvals/questions/MCP elicitation. See [Codex managed terminal control](docs/codex-managed-terminal.md).
-- 📱 **iOS App** — Download the iOS app from the official website. In Settings, select **Test Environment** and enter your self-hosted Relay address to connect it.
+- 📱 **iOS App (beta)** — Join the beta waitlist on the official website. In Settings, select **Test Environment** and enter your self-hosted Relay address to connect it.
 - 🖧 **Hosts Dashboard** — System resource monitoring (CPU / Memory / Disk) with remote daemon restart
 - 📌 **Session Management** — Pin, rename, export, and delete sessions with inline editing
 - 📊 **Token Analytics** — Usage dashboard (daily / model / host breakdown); deleting a session never shrinks historical totals
@@ -39,9 +43,18 @@ Official website: [pocketctl.me](https://www.pocketctl.me) · Web dashboard: [po
 ```
 
 - **Daemon** — Runs on your development machine, discovers and monitors AI coding agent sessions
-- **Relay** — WebSocket server that bridges mobile/web clients with daemons
+- **Relay** — WebSocket server that authenticates clients, persists session events for replay, and bridges mobile/web clients with daemons
 - **Web** — Vue 3 SPA dashboard for browser-based monitoring, served at `/app`
-- **iOS App** — Download it from the official website; use Settings → Test Environment to connect a self-hosted Relay.
+- **iOS App** — Currently distributed as a beta; use Settings → Test Environment to connect a self-hosted Relay.
+
+### Security and data boundary
+
+Production traffic uses HTTPS/WSS, but session and tool content is not end-to-end
+encrypted. The Relay can read and persist content needed for routing, history
+replay, notifications, and account features. If `DEEPSEEK_API_KEY` is configured,
+the Relay may send the text needed to generate a session title to DeepSeek; without
+that key, title generation is skipped. See the privacy policy on the official
+website for the current collection, retention, processor, and deletion details.
 
 The public service is available at [pocketctl.me](https://www.pocketctl.me). The browser client is served from
 [`/app`](https://www.pocketctl.me/app); the root URL contains product information and client entry points.
@@ -51,11 +64,8 @@ The public service is available at [pocketctl.me](https://www.pocketctl.me). The
 ### Install
 
 ```bash
-# Install the latest version (production)
-curl -fsSL https://raw.githubusercontent.com/pocketctl/pocketctl/master/scripts/install-daemon.sh | bash -s -- --prod
-
-# Or install for local development
-curl -fsSL https://raw.githubusercontent.com/pocketctl/pocketctl/master/scripts/install-daemon.sh | bash
+# Install the latest published binary and verify its SHA256 checksum
+curl -fsSL https://www.pocketctl.me/install.sh | bash
 ```
 
 ### Login

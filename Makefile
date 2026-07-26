@@ -4,7 +4,7 @@ BINARY = pocketctl
 GOOS ?= $(shell uname -s | tr '[:upper:]' '[:lower:]')
 GOARCH ?= $(shell uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/')
 
-.PHONY: build build-all clean relay web dev dev-relay test test-opencode-managed test-opencode-managed-release test-codex-managed test-codex-managed-release release
+.PHONY: build build-all clean relay web dev dev-relay test test-opencode-managed test-opencode-managed-release test-codex-managed test-codex-managed-release release release-dry-run
 
 -include .env
 export JWT_SECRET
@@ -119,13 +119,15 @@ ios-bump:
 
 # ---------- 发布 ----------
 
-## 创建 GitHub Release
+## 运行完整发布链（Gitee canonical + GitHub filtered mirror）
 release:
 	@if [ "$(VERSION)" = "dev" ]; then echo "❌ 请指定版本: make release VERSION=v0.1.0"; exit 1; fi
-	@echo "发布 $(VERSION)..."
-	git tag -a $(VERSION) -m "Release $(VERSION)"
-	git push github $(VERSION)
-	@echo "✅ Tag 已推送到 GitHub，GitHub Actions 将自动构建和发布"
+	bash scripts/release.sh $(VERSION)
+
+## 只验证发布计划，不 fetch/checkout/merge/tag/push
+release-dry-run:
+	@if [ "$(VERSION)" = "dev" ]; then echo "❌ 请指定版本: make release-dry-run VERSION=v0.1.0"; exit 1; fi
+	bash scripts/release.sh --dry-run $(VERSION)
 
 # ---------- 清理 ----------
 

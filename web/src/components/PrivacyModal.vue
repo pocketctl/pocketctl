@@ -8,139 +8,143 @@
         </button>
       </div>
       <div class="modal-body">
-        <div class="update-date">{{ locale === 'zh' ? '更新日期：2026年6月10日' : 'Updated: June 10, 2026' }}</div>
+        <div class="update-date">{{ locale === 'zh' ? '更新日期：2026年7月26日' : 'Updated: July 26, 2026' }}</div>
 
         <!-- Chinese version -->
         <template v-if="locale === 'zh'">
         <section>
-          <h4>一、信息收集</h4>
-          <p>pocketctl（以下简称"我们"）在提供服务过程中，可能收集以下信息：</p>
+          <h4>一、我们处理的信息</h4>
+          <p>pocketctl（以下简称“我们”）为提供跨设备 AI 编程会话控制服务，会处理以下信息：</p>
           <ol>
-            <li>账户信息：手机号码，用于登录验证和账户识别。</li>
-            <li>设备信息：设备型号、操作系统版本、设备标识符，用于推送通知和安全认证。</li>
-            <li>使用数据：功能使用频率、操作日志，用于服务改进和问题排查。</li>
-            <li>主机连接数据：主机名、IP 地址（仅在连接时临时使用），用于远程管理功能。</li>
+            <li>账户信息：邮箱地址、显示名称，以及邮箱验证码或 OAuth 设备授权产生的账户和令牌标识。</li>
+            <li>设备与推送信息：设备型号、操作系统版本、设备标识符、推送令牌和应用环境。</li>
+            <li>主机与连接信息：主机名、Daemon 标识、在线状态、网络地址、IP 地址和 User-Agent。</li>
+            <li>会话内容与元数据：工作目录、会话标题、提示词、回复、命令、路径、差异内容、工具输入输出、审批与问题、错误、状态、时间和用量信息。</li>
+            <li>候补名单信息：您主动提交的 iOS Beta 通知邮箱。</li>
           </ol>
         </section>
         <section>
-          <h4>二、信息使用</h4>
-          <p>我们收集的信息仅用于以下目的：</p>
+          <h4>二、处理目的</h4>
           <ol>
-            <li>提供核心服务：账户认证、会话管理、远程控制。</li>
-            <li>推送通知：任务完成、错误提醒、主机状态变更。</li>
-            <li>服务改进：分析使用模式，优化产品体验。</li>
-            <li>安全保障：异常登录检测、欺诈防范。</li>
+            <li>账户认证、设备授权和安全审计。</li>
+            <li>在客户端、Relay 与 Daemon 之间路由控制消息，并持久化事件以支持历史记录和断线重放。</li>
+            <li>发送任务完成、错误、审批、问题和主机状态等通知。</li>
+            <li>执行配额统计、故障排查、滥用防护和服务改进。</li>
           </ol>
-          <p>我们不会将您的个人信息出售给第三方。</p>
+          <p>我们不会出售您的个人信息。</p>
         </section>
         <section>
-          <h4>三、第三方服务</h4>
-          <p>本应用使用以下第三方服务：</p>
+          <h4>三、第三方处理者</h4>
           <ol>
-            <li>智谱 AI（GLM-4.6）：用于自动生成会话标题，仅传输会话首条消息摘要，不传输完整对话内容。</li>
-            <li>Apple Push Notification Service（APNs）：用于 iOS 推送通知。</li>
+            <li>腾讯云邮件服务（SES）：处理收件邮箱、验证码和必要的服务邮件内容。</li>
+            <li>DeepSeek：仅在服务配置了 API Key 且触发标题生成时，处理用于生成标题的用户消息和助手回复；未配置时不会调用。</li>
+            <li>Apple Push Notification Service（APNs）：处理设备推送令牌和通知载荷。通知预览可能包含会话标题、主机名、命令、路径、审批摘要或问题内容。</li>
           </ol>
-          <p>上述第三方服务有独立的隐私政策，我们建议您查阅其相关政策。</p>
+          <p>第三方服务依据其自身条款处理数据，其处理地域可能不同于我们的主要服务地域。</p>
         </section>
         <section>
-          <h4>四、数据存储与安全</h4>
+          <h4>四、存储与传输安全</h4>
           <ol>
-            <li>数据存储在位于中国的云服务器上。</li>
-            <li>所有网络通信均通过 HTTPS/WSS 加密传输。</li>
-            <li>敏感信息（如认证令牌）使用 iOS Keychain 安全存储。</li>
-            <li>数据库采用加密存储，定期备份。</li>
+            <li>生产环境客户端与服务之间使用 HTTPS/WSS（TLS）传输。</li>
+            <li>iOS 认证令牌存储于 Keychain，Web 访问令牌仅保存在当前页面内存中，刷新令牌使用 HttpOnly Cookie。</li>
+            <li>Relay 会处理并存储会话事件，并可以读取当前会话事件内容。</li>
+            <li>主要数据库、基础设施日志和第三方处理服务可能位于不同地域，具体取决于实际部署与服务商配置。</li>
           </ol>
         </section>
         <section>
-          <h4>五、用户权利</h4>
-          <p>您享有以下权利：</p>
+          <h4>五、保存与删除</h4>
           <ol>
-            <li>查看权：随时查看您的账户信息和使用数据。</li>
-            <li>删除权：请求删除您的账户和所有相关数据。</li>
-            <li>导出权：请求导出您的会话历史数据。</li>
-            <li>撤回同意权：随时撤回对数据处理的同意。</li>
+            <li>账户、主机、会话及事件数据通常在账户有效期间保存，直至您删除相关数据或账户。</li>
+            <li>删除账户会触发对当前业务数据库中关联账户数据的删除。</li>
+            <li>Nginx 访问日志、Relay 审计日志、第三方服务日志和备份按照各自的运维保留周期清理，可能不会与账户删除同步完成。</li>
+            <li>iOS Beta 候补邮箱保存至完成通知、您请求删除或候补计划终止。</li>
           </ol>
-          <p>行使上述权利，请通过应用内「帮助与反馈」联系我们。</p>
         </section>
         <section>
-          <h4>六、未成年人保护</h4>
-          <p>本服务不面向 14 岁以下未成年人。如您为未成年人，请在监护人指导下使用本服务。</p>
+          <h4>六、您的权利</h4>
+          <ol>
+            <li>在应用中查看和更新账户资料。</li>
+            <li>导出当前产品支持导出的账户和会话数据。</li>
+            <li>通过“设置 → 账户 → 删除账户”删除账户和当前业务数据。</li>
+            <li>通过关闭推送权限、退出候补名单或联系我们撤回可撤回的处理同意。</li>
+          </ol>
         </section>
         <section>
-          <h4>七、政策更新</h4>
-          <p>我们可能不时更新本隐私政策。重大变更将通过应用内通知或电子邮件告知您。继续使用本服务即表示您同意更新后的政策。</p>
+          <h4>七、未成年人和政策更新</h4>
+          <p>本服务不面向 14 岁以下未成年人。我们更新本政策时会修改版本和生效日期；重大变更将通过应用内通知、网站或电子邮件告知。</p>
         </section>
         <section>
           <h4>八、联系我们</h4>
-          <p>如您对本隐私政策有任何疑问，请通过以下方式联系我们：</p>
-          <p>邮箱：<a href="mailto:james_2001_2001@163.com">james_2001_2001@163.com</a></p>
+          <p>如需行使权利或咨询本政策，请通过应用内“帮助与反馈”或邮箱 james_2001_2001@163.com 联系我们。</p>
         </section>
         </template>
 
         <!-- English version -->
         <template v-else>
         <section>
-          <h4>1. Information Collection</h4>
-          <p>pocketctl ("we") may collect the following information while providing our services:</p>
+          <h4>1. Information We Process</h4>
+          <p>pocketctl (&quot;we&quot;) processes the following information to provide cross-device control of AI coding sessions:</p>
           <ol>
-            <li>Account information: Phone number, used for login verification and account identification.</li>
-            <li>Device information: Device model, OS version, device identifiers, used for push notifications and security authentication.</li>
-            <li>Usage data: Feature usage frequency, operation logs, used for service improvement and troubleshooting.</li>
-            <li>Host connection data: Hostname, IP address (temporarily used during connection only), used for remote management.</li>
+            <li>Account information: email address, display name, and account or token identifiers created by email verification or OAuth device authorization.</li>
+            <li>Device and push information: device model, operating-system version, device identifiers, push token, and app environment.</li>
+            <li>Host and connection information: hostname, Daemon identifier, online state, network address, IP address, and User-Agent.</li>
+            <li>Session content and metadata: working directory, title, prompts, responses, commands, paths, diffs, tool inputs and outputs, approvals, questions, errors, status, timestamps, and usage.</li>
+            <li>Waitlist information: an email address you submit for iOS Beta notifications.</li>
           </ol>
         </section>
         <section>
-          <h4>2. Information Usage</h4>
-          <p>The information we collect is used solely for the following purposes:</p>
+          <h4>2. Purposes</h4>
           <ol>
-            <li>Core services: Account authentication, session management, remote control.</li>
-            <li>Push notifications: Task completion, error alerts, host status changes.</li>
-            <li>Service improvement: Analyze usage patterns, optimize product experience.</li>
-            <li>Security: Abnormal login detection, fraud prevention.</li>
+            <li>Account authentication, device authorization, and security auditing.</li>
+            <li>Routing control messages among clients, Relay, and Daemon, and persisting events for history and reconnect replay.</li>
+            <li>Sending task, error, approval, question, and host-status notifications.</li>
+            <li>Quota measurement, troubleshooting, abuse prevention, and service improvement.</li>
           </ol>
-          <p>We do not sell your personal information to third parties.</p>
+          <p>We do not sell your personal information.</p>
         </section>
         <section>
-          <h4>3. Third-Party Services</h4>
-          <p>This application uses the following third-party services:</p>
+          <h4>3. Third-Party Processors</h4>
           <ol>
-            <li>Zhipu AI (GLM-4.6): Used to auto-generate session titles. Only the first message summary is transmitted, not the full conversation.</li>
-            <li>Apple Push Notification Service (APNs): Used for iOS push notifications.</li>
+            <li>Tencent Cloud Simple Email Service (SES): processes recipient email addresses, verification codes, and necessary service-email content.</li>
+            <li>DeepSeek: only when an API key is configured and title generation is triggered, processes user messages and assistant responses used to create a title. It is not called when unconfigured.</li>
+            <li>Apple Push Notification Service (APNs): processes device push tokens and notification payloads. Notification previews may contain a session title, hostname, command, path, approval summary, or question content.</li>
           </ol>
-          <p>The above third-party services have their own privacy policies. We recommend reviewing them.</p>
+          <p>Third parties process data under their own terms, and their processing regions may differ from our primary service region.</p>
         </section>
         <section>
-          <h4>4. Data Storage & Security</h4>
+          <h4>4. Storage and Transport Security</h4>
           <ol>
-            <li>Data is stored on cloud servers located in China.</li>
-            <li>All network communication is encrypted via HTTPS/WSS.</li>
-            <li>Sensitive information (e.g., auth tokens) is securely stored using iOS Keychain.</li>
-            <li>Databases use encrypted storage with regular backups.</li>
+            <li>Production client-to-service traffic uses HTTPS/WSS (TLS).</li>
+            <li>iOS authentication tokens are stored in Keychain. Web access tokens stay in page memory, while refresh tokens use an HttpOnly cookie.</li>
+            <li>Relay processes and stores session events and can read current session-event content.</li>
+            <li>Primary databases, infrastructure logs, and third-party processors may operate in different regions according to the actual deployment and provider configuration.</li>
           </ol>
         </section>
         <section>
-          <h4>5. User Rights</h4>
-          <p>You have the following rights:</p>
+          <h4>5. Retention and Deletion</h4>
           <ol>
-            <li>Right to access: View your account information and usage data at any time.</li>
-            <li>Right to deletion: Request deletion of your account and all related data.</li>
-            <li>Right to export: Request export of your session history data.</li>
-            <li>Right to withdraw consent: Withdraw consent for data processing at any time.</li>
+            <li>Account, host, session, and event data is generally retained while your account is active, until you delete applicable data or the account.</li>
+            <li>Account deletion triggers deletion of associated account data from the current application database.</li>
+            <li>Nginx access logs, Relay audit logs, third-party service logs, and backups follow separate operational retention cycles and may not be deleted synchronously with the account.</li>
+            <li>An iOS Beta waitlist email is retained until notification is complete, you request deletion, or the waitlist program ends.</li>
           </ol>
-          <p>To exercise these rights, contact us via "Help & Feedback" in the app.</p>
         </section>
         <section>
-          <h4>6. Minors</h4>
-          <p>This service is not intended for users under 14. If you are a minor, please use this service under guardian supervision.</p>
+          <h4>6. Your Rights</h4>
+          <ol>
+            <li>View and update account profile information in the app.</li>
+            <li>Export account and session data supported by the current product.</li>
+            <li>Delete your account and current application data through Settings → Account → Delete Account.</li>
+            <li>Withdraw applicable consent by disabling push permissions, leaving the waitlist, or contacting us.</li>
+          </ol>
         </section>
         <section>
-          <h4>7. Policy Updates</h4>
-          <p>We may update this privacy policy from time to time. Significant changes will be communicated via in-app notifications or email. Continued use of the service constitutes acceptance of the updated policy.</p>
+          <h4>7. Minors and Policy Updates</h4>
+          <p>The service is not directed to children under 14. When this policy changes, we update its version and effective date; material changes will be communicated in the app, on the website, or by email.</p>
         </section>
         <section>
-          <h4>8. Contact Us</h4>
-          <p>If you have any questions about this privacy policy, please contact us:</p>
-          <p>Email: <a href="mailto:james_2001_2001@163.com">james_2001_2001@163.com</a></p>
+          <h4>8. Contact</h4>
+          <p>To exercise your rights or ask about this policy, use Help &amp; Feedback in the app or email james_2001_2001@163.com.</p>
         </section>
         </template>
       </div>
