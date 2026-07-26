@@ -6,7 +6,9 @@ pocketctl 是一个远程 AI 编码代理控制系统。它让你在远程机器
 
 官网：[pocketctl.me](https://www.pocketctl.me) · Web 控制台：[pocketctl.me/app](https://www.pocketctl.me/app)
 
-官网根路径提供产品介绍和客户端入口，`/app` 是浏览器控制台。Daemon、Relay、Web 和 iOS 的源码及部署配置均位于本仓库。
+官网根路径提供产品介绍和客户端入口，`/app` 是浏览器控制台。Gitee
+仓库保存规范源码历史；GitHub 是用于公开审阅和 Release 资产的过滤镜像，
+两边的提交 ID 可能不同。
 
 ## 架构
 
@@ -31,7 +33,7 @@ pocketctl 是一个远程 AI 编码代理控制系统。它让你在远程机器
 
 - **Daemon** — 运行在远程机器上的轻量守护进程，负责发现、启动和管理 AI 代理进程
 - **Relay** — 中央 WebSocket 路由服务器，负责消息转发、事件持久化和 LLM 标题生成
-- **iOS App** — 可从官网下载安装；在设置中切换到“测试环境”并填写自建 Relay 地址即可连接
+- **iOS App** — 当前为 Beta，可在官网加入候补名单；在设置中切换到“测试环境”并填写自建 Relay 地址即可连接
 - **Web UI** — Vue 3 单页应用，生产环境通过官网 `/app` 提供
 - **官网** — 双主题、中英文切换的产品介绍页，并提供客户端入口
 
@@ -50,6 +52,14 @@ pocketctl 是一个远程 AI 编码代理控制系统。它让你在远程机器
 opencode 的文本与思考 Part 会按 identity/revision 增量同步，并在 turn 完成时用最终快照对账，避免长回复截断或重复；Web 和 iOS 默认折叠思考过程，并以结构化卡片显示 File、Patch、Todo、Subtask 与 Agent Part。会话状态优先采用 OpenCode 原生 busy/retry/idle；daemon 重启后会重新查询 permission/question，恢复未处理卡片。
 
 > 想接入新的 agent？见 [docs/adding-an-agent.md](docs/adding-an-agent.md)——注册一个 `Provider` 即可，无需改散落的 switch。
+
+### 安全与数据边界
+
+生产链路使用 HTTPS/WSS，但会话内容和工具内容当前不是端到端加密。Relay
+可以读取并持久化路由、历史重放、通知和账户功能所需的内容。配置
+`DEEPSEEK_API_KEY` 后，Relay 可能把生成会话标题所需的文本发送给
+DeepSeek；未配置时跳过标题生成。具体收集范围、保留期限、处理方和删除
+规则以官网隐私政策为准。
 
 ## 快速开始
 
@@ -79,7 +89,7 @@ docker compose up -d
 在安装了 AI 代理的远程机器上：
 
 ```bash
-# 国内用户自动走 Gitee 镜像（更快），不可用时降级 GitHub
+# 从 GitHub Release 代理或直连下载二进制及同源 SHA256 文件
 curl -fsSL https://www.pocketctl.me/install.sh | bash
 ```
 
@@ -103,7 +113,7 @@ Daemon 会自动扫描 `PATH` 发现可用的代理 CLI，并注册到 Relay。
 
 ### 4. 使用 iOS App
 
-从[官网](https://www.pocketctl.me)下载安装 iOS App。若使用自己搭建的 Relay，在 App 的“设置 → 服务器”中切换到“测试环境”，填写 Relay 的 IP 或域名（可带端口），保存后退出登录并重新登录即可连接。
+在[官网](https://www.pocketctl.me)加入 iOS Beta 候补名单。获得 Beta 后，若使用自己搭建的 Relay，可在 App 的“设置 → 服务器”中切换到“测试环境”，填写 Relay 的 IP 或域名（可带端口），保存后退出登录并重新登录即可连接。
 
 ### 5. Session 标题自动生成
 

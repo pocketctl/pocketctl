@@ -82,6 +82,18 @@ describe('deleted-account authorization boundary', () => {
     await expect(verifyAccessTokenWithRevocation(token, pool)).resolves.toBeNull()
   })
 
+  test('fails closed when revocation lookup fails', async () => {
+    const { signAccessToken, verifyAccessTokenWithRevocation } = await import('../auth.js')
+    const token = await signAccessToken(7, 'person@example.com')
+    const pool = {
+      query: vi.fn()
+        .mockRejectedValueOnce(new Error('revocation table unavailable'))
+        .mockResolvedValueOnce({ rows: [{ exists: true }], rowCount: 1 }),
+    } as any
+
+    await expect(verifyAccessTokenWithRevocation(token, pool)).resolves.toBeNull()
+  })
+
   test('rejects a pre-issued websocket ticket after account deletion', async () => {
     const { createWsTicketStore } = await import('../config/ws-tickets.js')
     const { consumeLiveUserWsTicket } = await import('../server.js')

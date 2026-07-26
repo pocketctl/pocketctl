@@ -90,8 +90,8 @@ export async function verifyAccessTokenWithRevocation(
       const revoked = await isTokenRevoked(pool, payload.jti);
       if (revoked) return null;
     } catch {
-      // DB error — allow token through rather than blocking all auth
       console.error('revocation check failed:', `user=${payload.userId} jti=${payload.jti.slice(0, 8)}`);
+      return null;
     }
   }
 

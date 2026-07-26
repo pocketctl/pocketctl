@@ -1,0 +1,23 @@
+# Public GitHub mirror contract. One repository-relative path per line.
+# Keep this list minimal, but every workflow dependency must be present.
+cmd
+internal
+relay
+web
+.github
+docs/adding-an-agent.md
+docs/codex-managed-terminal.md
+docs/opencode-managed-terminal.md
+scripts/install-daemon.sh
+scripts/ci-windows-smoke.ps1
+scripts/test-opencode-managed.sh
+scripts/test-codex-managed.sh
+scripts/secret-scan.sh
+scripts/github-mirror-files.txt
+scripts/tests/github-mirror-contract.test.mjs
+go.mod
+go.sum
+Makefile
+LICENSE
+README.md
+README.zh-CN.md

@@ -8,167 +8,117 @@
         </button>
       </div>
       <div class="modal-body">
-        <div class="update-date">{{ locale === 'zh' ? '更新日期：2026年6月10日' : 'Updated: June 10, 2026' }}</div>
+        <div class="update-date">{{ locale === 'zh' ? '更新日期：2026年7月26日' : 'Updated: July 26, 2026' }}</div>
 
         <!-- Chinese version -->
         <template v-if="locale === 'zh'">
         <section>
           <h4>一、服务说明</h4>
-          <p>pocketctl 是一款远程 AI 编程助手管理工具。通过本服务，您可以：</p>
-          <ol>
-            <li>远程监控运行在开发机上的 AI 编程会话（如 Claude Code、Codex）。</li>
-            <li>查看会话状态、消息历史、工具调用详情。</li>
-            <li>通过移动设备发送消息和管理会话。</li>
-            <li>接收任务完成和错误提醒的推送通知。</li>
-          </ol>
+          <p>pocketctl 是一款跨设备 AI 编程助手控制工具，目前支持 Claude Code、Codex 和 OpenCode。服务可展示会话历史和工具调用、发送消息、处理审批或问题，并提供状态通知。</p>
         </section>
         <section>
-          <h4>二、账户注册与安全</h4>
+          <h4>二、账户与安全</h4>
           <ol>
-            <li>您需要通过手机号码验证注册账户。</li>
-            <li>您应妥善保管账户信息，不得将账户转让或借给他人使用。</li>
-            <li>您对账户下的所有活动承担责任。</li>
-            <li>如发现账户被盗用，请立即联系我们。</li>
+            <li>您可通过邮箱验证码或 OAuth 设备授权访问账户。</li>
+            <li>您应妥善保护账户、设备和认证信息，不得转让账户。</li>
+            <li>发现异常访问时，请立即退出相关设备并联系我们。</li>
           </ol>
         </section>
         <section>
           <h4>三、使用规范</h4>
-          <p>您同意在使用本服务时：</p>
           <ol>
-            <li>遵守中华人民共和国法律法规。</li>
-            <li>不利用本服务从事违法活动或侵犯他人权益。</li>
-            <li>不尝试攻击、干扰或破坏服务的正常运行。</li>
-            <li>不利用本服务对他人计算机系统进行未授权访问。</li>
+            <li>遵守适用法律法规并仅控制您有权使用的主机和会话。</li>
+            <li>不得利用本服务实施违法活动、侵犯他人权益、攻击服务或进行未授权访问。</li>
+            <li>您应在执行高风险命令或批准 Agent 操作前自行核验其影响。</li>
           </ol>
         </section>
         <section>
-          <h4>四、知识产权</h4>
+          <h4>四、内容与知识产权</h4>
           <ol>
-            <li>pocketctl 软件、界面设计、商标等知识产权归我们所有。</li>
-            <li>您通过本服务创建的内容（如会话记录）归您所有。</li>
-            <li>您授予我们在提供服务范围内使用您内容的必要许可。</li>
+            <li>pocketctl 软件、界面和商标的相关权利归其权利人所有。</li>
+            <li>您保留对自身代码和会话内容依法享有的权利。</li>
+            <li>您授予我们为提供路由、存储、重放和通知功能所必需的有限处理权限。</li>
           </ol>
         </section>
         <section>
-          <h4>五、付费条款</h4>
+          <h4>五、费用说明</h4>
+          <p>当前 Beta 不提供应用内购买或已生效的付费订阅。未来如开放付费服务，我们会在购买前提供价格、权益、续费、取消、退款和开票条款。</p>
+        </section>
+        <section>
+          <h4>六、服务变更与可用性</h4>
+          <p>Beta 服务可能变更、中断或调整权益。我们会尽合理努力维护服务并对重大变更作出通知，但不承诺服务始终无错误或不中断。</p>
+        </section>
+        <section>
+          <h4>七、责任边界</h4>
+          <p>AI Agent 可能生成错误或有风险的建议。您应审查代码、命令和工具操作并自行备份重要数据。在法律允许范围内，我们不对未经核验的 Agent 操作造成的间接损失承担责任。</p>
+        </section>
+        <section>
+          <h4>八、终止与删除</h4>
           <ol>
-            <li>本服务目前提供免费使用。</li>
-            <li>未来可能推出付费订阅计划，届时将另行公告。</li>
-            <li>付费服务的具体条款将在订阅页面明确说明。</li>
+            <li>退出登录只结束当前登录状态，不会删除账户。</li>
+            <li>您可通过“设置 → 账户 → 删除账户”永久删除账户和当前业务数据库中的关联数据。</li>
+            <li>基础设施日志、第三方日志和备份按照隐私政策所述的独立周期清理。</li>
           </ol>
         </section>
         <section>
-          <h4>六、服务变更与中断</h4>
-          <ol>
-            <li>我们保留随时修改或中断服务的权利。</li>
-            <li>重大变更将提前 30 天通知用户。</li>
-            <li>因不可抗力导致的服务中断，我们不承担责任。</li>
-          </ol>
-        </section>
-        <section>
-          <h4>七、免责声明</h4>
-          <ol>
-            <li>本服务按「现状」提供，不做任何明示或暗示的保证。</li>
-            <li>对于因使用本服务造成的任何直接或间接损失，我们的赔偿责任不超过您在过去 12 个月内支付的费用总额。</li>
-            <li>您应自行备份重要数据，我们不对数据丢失承担责任。</li>
-          </ol>
-        </section>
-        <section>
-          <h4>八、协议终止</h4>
-          <ol>
-            <li>您可随时通过应用内「退出登录」并联系客服删除账户来终止本协议。</li>
-            <li>我们保留在您违反本协议时终止服务的权利。</li>
-            <li>协议终止后，我们将在合理期限内删除您的数据。</li>
-          </ol>
-        </section>
-        <section>
-          <h4>九、适用法律与争议解决</h4>
-          <ol>
-            <li>本协议受中华人民共和国法律管辖。</li>
-            <li>如有争议，双方应友好协商解决。</li>
-            <li>协商不成的，任何一方可向我们所在地人民法院提起诉讼。</li>
-          </ol>
+          <h4>九、法律适用与联系</h4>
+          <p>本协议适用中华人民共和国法律。争议应先友好协商；如需联系我们，请使用应用内“帮助与反馈”或邮箱 james_2001_2001@163.com。</p>
         </section>
         </template>
 
         <!-- English version -->
         <template v-else>
         <section>
-          <h4>1. Service Description</h4>
-          <p>pocketctl is a remote AI coding assistant management tool. Through this service, you can:</p>
+          <h4>1. Service</h4>
+          <p>pocketctl is a cross-device control tool for AI coding assistants and currently supports Claude Code, Codex, and OpenCode. The service can show session history and tool calls, send messages, handle approvals or questions, and provide status notifications.</p>
+        </section>
+        <section>
+          <h4>2. Account and Security</h4>
           <ol>
-            <li>Remotely monitor AI coding sessions running on your development machine (e.g., Claude Code, Codex).</li>
-            <li>View session status, message history, and tool call details.</li>
-            <li>Send messages and manage sessions from your mobile device.</li>
-            <li>Receive push notifications for task completion and error alerts.</li>
+            <li>You may access an account through email verification or OAuth device authorization.</li>
+            <li>You must protect account, device, and authentication information and must not transfer your account.</li>
+            <li>If you discover unauthorized access, sign out affected devices and contact us promptly.</li>
           </ol>
         </section>
         <section>
-          <h4>2. Account Registration & Security</h4>
+          <h4>3. Acceptable Use</h4>
           <ol>
-            <li>You must register an account using phone number verification.</li>
-            <li>You must safeguard your account information and must not transfer or lend your account to others.</li>
-            <li>You are responsible for all activities under your account.</li>
-            <li>If you suspect your account has been compromised, contact us immediately.</li>
+            <li>Follow applicable laws and control only hosts and sessions you are authorized to use.</li>
+            <li>Do not use the service for unlawful activity, infringement, service attacks, or unauthorized access.</li>
+            <li>Review the impact of high-risk commands and Agent actions before approving them.</li>
           </ol>
         </section>
         <section>
-          <h4>3. Usage Guidelines</h4>
-          <p>You agree that when using this service, you will:</p>
+          <h4>4. Content and Intellectual Property</h4>
           <ol>
-            <li>Comply with applicable laws and regulations.</li>
-            <li>Not use this service for illegal activities or to infringe on others' rights.</li>
-            <li>Not attempt to attack, disrupt, or damage the normal operation of the service.</li>
-            <li>Not use this service for unauthorized access to others' computer systems.</li>
+            <li>Rights in the pocketctl software, interface, and marks belong to their respective owners.</li>
+            <li>You retain rights you lawfully hold in your code and session content.</li>
+            <li>You grant us the limited processing permission necessary to provide routing, storage, replay, and notification functions.</li>
           </ol>
         </section>
         <section>
-          <h4>4. Intellectual Property</h4>
+          <h4>5. Fees</h4>
+          <p>The current Beta does not offer in-app purchases or an active paid subscription. Before any future paid service opens, we will provide pricing, entitlement, renewal, cancellation, refund, and invoicing terms.</p>
+        </section>
+        <section>
+          <h4>6. Changes and Availability</h4>
+          <p>The Beta service, availability, and entitlements may change or be interrupted. We use reasonable efforts to maintain the service and communicate material changes, but do not promise uninterrupted or error-free operation.</p>
+        </section>
+        <section>
+          <h4>7. Responsibility</h4>
+          <p>AI agents may produce incorrect or risky suggestions. You must review code, commands, and tool operations and maintain backups of important data. To the extent allowed by law, we are not responsible for indirect loss caused by unreviewed Agent actions.</p>
+        </section>
+        <section>
+          <h4>8. Termination and Deletion</h4>
           <ol>
-            <li>The intellectual property of pocketctl software, interface design, trademarks, etc. belongs to us.</li>
-            <li>Content you create through this service (e.g., session records) belongs to you.</li>
-            <li>You grant us the necessary license to use your content within the scope of providing the service.</li>
+            <li>Signing out ends the current login state; it does not delete the account.</li>
+            <li>You may permanently delete your account and associated current application-database data through Settings → Account → Delete Account.</li>
+            <li>Infrastructure logs, third-party logs, and backups are cleared on the separate cycles described in the Privacy Policy.</li>
           </ol>
         </section>
         <section>
-          <h4>5. Paid Terms</h4>
-          <ol>
-            <li>This service is currently available for free.</li>
-            <li>Paid subscription plans may be introduced in the future, with separate announcements.</li>
-            <li>Specific terms for paid services will be clearly stated on the subscription page.</li>
-          </ol>
-        </section>
-        <section>
-          <h4>6. Service Changes & Interruptions</h4>
-          <ol>
-            <li>We reserve the right to modify or discontinue the service at any time.</li>
-            <li>Significant changes will be announced 30 days in advance.</li>
-            <li>We are not liable for service interruptions caused by force majeure.</li>
-          </ol>
-        </section>
-        <section>
-          <h4>7. Disclaimer</h4>
-          <ol>
-            <li>This service is provided "as is" without any express or implied warranties.</li>
-            <li>For any direct or indirect losses caused by using this service, our liability shall not exceed the total fees you paid in the past 12 months.</li>
-            <li>You should back up important data yourself. We are not liable for data loss.</li>
-          </ol>
-        </section>
-        <section>
-          <h4>8. Agreement Termination</h4>
-          <ol>
-            <li>You may terminate this agreement at any time by signing out and contacting customer support to delete your account.</li>
-            <li>We reserve the right to terminate the service if you violate this agreement.</li>
-            <li>After agreement termination, we will delete your data within a reasonable period.</li>
-          </ol>
-        </section>
-        <section>
-          <h4>9. Governing Law & Dispute Resolution</h4>
-          <ol>
-            <li>This agreement is governed by the laws of the People's Republic of China.</li>
-            <li>In case of disputes, both parties shall resolve them through friendly negotiation.</li>
-            <li>If negotiation fails, either party may file a lawsuit with the people's court at our location.</li>
-          </ol>
+          <h4>9. Governing Law and Contact</h4>
+          <p>This agreement is governed by the laws of the People's Republic of China. The parties should first seek an amicable resolution. Contact us through Help &amp; Feedback in the app or at james_2001_2001@163.com.</p>
         </section>
         </template>
       </div>

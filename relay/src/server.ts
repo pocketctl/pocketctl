@@ -23,6 +23,7 @@ import type { SupportedLanguage } from './config/language.js';
 import { createWelcomeEmailWorker } from './welcome-email-worker.js';
 import { pathToFileURL } from 'node:url';
 import { registerDaemonConnection, type DaemonSocketIdentity } from './daemon-registration.js';
+import { resolveBuildInfo, resolveCorsOrigin, resolvePublicIssuer } from './runtime-config.js';
 
 const API_KEY = process.env.POCKETCTL_API_KEY || '';
 const DB_URL = process.env.DATABASE_URL || 'postgresql://localhost:5432/pocketctl';
@@ -165,6 +166,13 @@ export async function findOrCreateEmailUser(
 
 async function main() {
   const tStart = (typeof performance !== 'undefined' ? performance.now() : Date.now())
+  const corsOrigin = resolveCorsOrigin(NODE_ENV, ALLOWED_ORIGINS)
+  const publicIssuer = resolvePublicIssuer(
+    NODE_ENV,
+    process.env.PUBLIC_ISSUER_URL,
+    `http://localhost:${PORT}`,
+  )
+  const buildInfo = resolveBuildInfo(process.env)
   const pool = createPool(parseDBUrl(DB_URL))
   const welcomeEmailWorker = createWelcomeEmailWorker({ pool })
   let shuttingDown = false
@@ -193,7 +201,6 @@ async function main() {
   const router = new Router(pool);
   const app = Fastify({ logger: false });
 
-  const corsOrigin = ALLOWED_ORIGINS.length > 0 ? ALLOWED_ORIGINS : true;
   await app.register(fastifyCors, { origin: corsOrigin, credentials: true });
   await app.register(fastifyWebsocket);
 
@@ -1148,8 +1155,8 @@ async function main() {
   });
 
   // OAuth 2.0 Authorization Server Metadata (RFC 8414)
-  app.get('/.well-known/oauth-authorization-server', async (req) => {
-    const baseUrl = `http://${req.hostname}:${PORT}`;
+  app.get('/.well-known/oauth-authorization-server', async () => {
+    const baseUrl = publicIssuer;
     return {
       issuer: baseUrl,
       device_authorization_endpoint: `${baseUrl}/api/auth/device/authorize`,
@@ -1195,8 +1202,12 @@ async function main() {
   // ---- Health check ----
 
   app.get('/health', async () => {
-    try { await pool.query('SELECT 1'); return { status: 'ok', version: process.env.npm_package_version || 'dev' }; }
-    catch { return { status: 'degraded', error: 'db unreachable' }; }
+    try {
+      await pool.query('SELECT 1');
+      return { status: 'ok', ...buildInfo };
+    } catch {
+      return { status: 'degraded', ...buildInfo, error: 'db unreachable' };
+    }
   });
 
   // ---- WebSocket endpoint ----
