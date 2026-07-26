@@ -1031,8 +1031,44 @@ func cmdDaemonStart(args []string) {
 
 	// Create session manager
 	sm := session.NewSessionManager(outputCh)
+	var recoveredClaudeApprovalMu sync.Mutex
+	var recoveredClaudeApprovals []daemon.ClaudeApprovalStateItem
+	if sm.ClaudeApprovalV2Enabled() {
+		if previous, readErr := daemon.ReadClaudeApprovalState(); readErr == nil {
+			recoveredClaudeApprovals = append(recoveredClaudeApprovals, previous.Requests...)
+		} else if !os.IsNotExist(readErr) {
+			// Corrupt or insecure state is never made actionable. Leave a
+			// diagnostic and continue daemon startup.
+			logger.Warn("Claude approval state unavailable", "error", readErr)
+		}
+		sm.SetClaudeApprovalRecorder(func(references []session.ClaudeApprovalReference) error {
+			recoveredClaudeApprovalMu.Lock()
+			defer recoveredClaudeApprovalMu.Unlock()
+			requests := make([]daemon.ClaudeApprovalStateItem, 0, len(recoveredClaudeApprovals)+len(references))
+			requests = append(requests, recoveredClaudeApprovals...)
+			for _, reference := range references {
+				requests = append(requests, daemon.ClaudeApprovalStateItem{
+					SessionID: reference.SessionID,
+					RequestID: reference.RequestID,
+					CreatedAt: reference.CreatedAt,
+				})
+			}
+			return daemon.WriteClaudeApprovalState(daemon.ClaudeApprovalState{
+				DaemonID: id,
+				Requests: requests,
+			})
+		})
+	}
 	sm.SetOpenCodeRuntimeHealthRecorder(func(healthy bool) {
 		_ = agentcontrol.RecordOpenCodeRuntimeHealth(healthy)
+	})
+	sm.SetClaudeTelemetryRecorder(func(metric, reason string) {
+		switch metric {
+		case "finish":
+			_ = agentcontrol.RecordClaudeApprovalFinish(reason)
+		case "resolved_elsewhere":
+			_ = agentcontrol.RecordClaudeResolvedElsewhere()
+		}
 	})
 
 	// Start the local Agent Control endpoint before any relay connection loop.
@@ -1229,10 +1265,36 @@ func cmdDaemonStart(args []string) {
 
 	// Re-sync sessions after (re)connection
 	client.OnReconnected = func() {
-		count := len(sm.ListSessions())
+		sessions := sm.ListSessions()
+		count := len(sessions)
 		logger.Info(fmt.Sprintf("resyncing %d sessions after reconnect", count))
-		for _, s := range sm.ListSessions() {
-			client.SendMsg(reconnectDiscoveryEvent(s))
+		reconnectEvents := reconnectSessionEvents(sessions, sm.PendingClaudeApprovals)
+		for _, evt := range reconnectEvents {
+			client.SendMsg(evt)
+		}
+		_ = agentcontrol.RecordClaudeReplay(len(reconnectEvents) - len(sessions))
+		if sm.ClaudeApprovalV2Enabled() {
+			recoveredClaudeApprovalMu.Lock()
+			if len(recoveredClaudeApprovals) > 0 {
+				_ = agentcontrol.RecordClaudeOrphanClosure(len(recoveredClaudeApprovals))
+				for _, evt := range recoverClaudeApprovalEvents(&daemon.ClaudeApprovalState{Requests: recoveredClaudeApprovals}) {
+					client.SendMsg(evt)
+				}
+				recoveredClaudeApprovals = nil
+				references := sm.ClaudeApprovalReferences()
+				requests := make([]daemon.ClaudeApprovalStateItem, 0, len(references))
+				for _, reference := range references {
+					requests = append(requests, daemon.ClaudeApprovalStateItem{
+						SessionID: reference.SessionID,
+						RequestID: reference.RequestID,
+						CreatedAt: reference.CreatedAt,
+					})
+				}
+				if err := daemon.WriteClaudeApprovalState(daemon.ClaudeApprovalState{DaemonID: id, Requests: requests}); err != nil {
+					logger.Warn("clear recovered Claude approval state", "error", err)
+				}
+			}
+			recoveredClaudeApprovalMu.Unlock()
 		}
 		logger.Info("resync done")
 	}
@@ -1477,6 +1539,39 @@ func reconnectDiscoveryEvent(s session.SessionInfo) protocol.DaemonEvent {
 		Capabilities: s.Capabilities,
 		Resync:       true,
 	}
+}
+
+// reconnectSessionEvents keeps the existing discovery stream intact and then
+// appends only Claude Hook approvals that are still answerable by this daemon.
+// Codex and OpenCode retain their own reconnect/reconciliation authorities.
+func reconnectSessionEvents(sessions []session.SessionInfo, pendingClaude func(string) []protocol.DaemonEvent) []protocol.DaemonEvent {
+	events := make([]protocol.DaemonEvent, 0, len(sessions))
+	for _, info := range sessions {
+		events = append(events, reconnectDiscoveryEvent(info))
+	}
+	if pendingClaude == nil {
+		return events
+	}
+	for _, info := range sessions {
+		events = append(events, pendingClaude(info.SessionID)...)
+	}
+	return events
+}
+
+func recoverClaudeApprovalEvents(state *daemon.ClaudeApprovalState) []protocol.DaemonEvent {
+	if state == nil {
+		return nil
+	}
+	events := make([]protocol.DaemonEvent, 0, len(state.Requests))
+	for _, request := range state.Requests {
+		events = append(events, protocol.DaemonEvent{
+			Type:      "approval_resolved",
+			SessionID: request.SessionID,
+			RequestID: request.RequestID,
+			Reason:    "daemon_restarted",
+		})
+	}
+	return events
 }
 
 // terminalHydrationEvents projects the first full JSONL pass into historical
@@ -1926,7 +2021,11 @@ func handleWatcherEvents(ctx context.Context, events <-chan watcher.SessionEvent
 					for retry := 0; retry < 30; retry++ {
 						jsonlPath, err := adapter.ResolveJSONLPathFor(agentType, evt.Session.SessionID, evt.Session.Cwd)
 						if err == nil {
-							tailer, err = watcher.NewJSONLTailerFromStart(jsonlPath, agentType)
+							if agentType == adapter.AgentClaude && watcher.ClaudeJSONLV2Enabled() {
+								tailer, err = watcher.NewClaudeJSONLTailerFromStart(jsonlPath, evt.Session.SessionID)
+							} else {
+								tailer, err = watcher.NewJSONLTailerFromStart(jsonlPath, agentType)
+							}
 							if err == nil {
 								model := ""
 								if data, readErr := os.ReadFile(jsonlPath); readErr == nil {
@@ -1939,14 +2038,15 @@ func handleWatcherEvents(ctx context.Context, events <-chan watcher.SessionEvent
 								sm.SetTailer(evt.Session.SessionID, tailer)
 								// Tailer started successfully — now emit session_discovered
 								outputCh <- protocol.DaemonEvent{
-									Type:      "session_discovered",
-									SessionID: evt.Session.SessionID,
-									Cwd:       evt.Session.Cwd,
-									Status:    evt.Session.Status,
-									Source:    "terminal",
-									Agent:     agentType,
-									Title:     defaultTitle,
-									Model:     model,
+									Type:         "session_discovered",
+									SessionID:    evt.Session.SessionID,
+									Cwd:          evt.Session.Cwd,
+									Status:       evt.Session.Status,
+									Source:       "terminal",
+									Agent:        agentType,
+									Title:        defaultTitle,
+									Model:        model,
+									Capabilities: sm.SessionCapabilities(evt.Session.SessionID),
 								}
 								// codex/opencode terminal 会话:session_discovered 带的 model 受
 								// upsertSession 的 COALESCE 约束(空值不覆盖、已有非空值不覆盖),
@@ -2028,6 +2128,9 @@ func handleWatcherEvents(ctx context.Context, events <-chan watcher.SessionEvent
 							for i := range events {
 								if events[i].SessionID == "" {
 									events[i].SessionID = evt.Session.SessionID
+								}
+								if agentType == adapter.AgentClaude && events[i].Type == "sync_warning" {
+									_ = agentcontrol.RecordClaudeJSONLWarning(events[i].Reason)
 								}
 								sm.ObservePermissionEvent(events[i])
 								outputCh <- events[i]
@@ -2214,6 +2317,7 @@ func handleCommands(ctx context.Context, client *ws.Client, sm *session.SessionM
 					Model:         model,
 					RequestID:     cmd.RequestID,
 					ReservationID: quotaReservationID(cmd.QuotaGrant),
+					Capabilities:  sm.SessionCapabilities(sessionID),
 				}
 				if permission, mutable, modes, ok := sm.GetPermissionMeta(sessionID); ok {
 					evt.Permission = permission
@@ -2434,6 +2538,9 @@ func handleCommands(ctx context.Context, client *ws.Client, sm *session.SessionM
 					client.SendMsg(evt)
 				}
 				for _, evt := range sm.PendingOpencodeInteractions(cmd.SessionID) {
+					client.SendMsg(evt)
+				}
+				for _, evt := range sm.PendingClaudeApprovals(cmd.SessionID) {
 					client.SendMsg(evt)
 				}
 

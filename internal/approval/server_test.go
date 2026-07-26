@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -270,6 +271,111 @@ func TestServerLocalResolveCancels(t *testing.T) {
 	srv.mu.Unlock()
 	if n != 0 {
 		t.Errorf("pending not drained after local resolve: %d", n)
+	}
+}
+
+func TestServerFinishedLifecycle(t *testing.T) {
+	srv := NewServer("unused", nil)
+	finished := make(chan Finished, 4)
+	srv.SetOnFinished(func(result Finished) { finished <- result })
+
+	srv.pending["approve"] = &pendingEntry{ch: make(chan Response, 1), sessionID: "s1"}
+	if err := srv.Resolve("approve", true); err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	result := <-finished
+	if result.RequestID != "approve" || result.Reason != FinishApproved || result.Approved == nil || !*result.Approved {
+		t.Fatalf("approve result=%#v", result)
+	}
+
+	srv.pending["drain"] = &pendingEntry{ch: make(chan Response, 1), sessionID: "s1"}
+	srv.pending["other"] = &pendingEntry{ch: make(chan Response, 1), sessionID: "s2"}
+	srv.DrainSession("s1")
+	result = <-finished
+	if result.RequestID != "drain" || result.Reason != FinishSessionDrained || result.Approved != nil {
+		t.Fatalf("drain result=%#v", result)
+	}
+	srv.mu.Lock()
+	_, otherPending := srv.pending["other"]
+	srv.mu.Unlock()
+	if !otherPending {
+		t.Fatal("DrainSession removed another session's request")
+	}
+
+	if err := srv.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	result = <-finished
+	if result.RequestID != "other" || result.Reason != FinishServerShutdown {
+		t.Fatalf("shutdown result=%#v", result)
+	}
+}
+
+func TestServerFinishRaceHasSingleWinner(t *testing.T) {
+	for i := 0; i < 100; i++ {
+		srv := NewServer("unused", nil)
+		var mu sync.Mutex
+		var results []Finished
+		srv.SetOnFinished(func(result Finished) {
+			mu.Lock()
+			results = append(results, result)
+			mu.Unlock()
+		})
+		srv.pending["race"] = &pendingEntry{ch: make(chan Response, 1), sessionID: "s1"}
+
+		start := make(chan struct{})
+		var wg sync.WaitGroup
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			<-start
+			_ = srv.Resolve("race", true)
+		}()
+		go func() {
+			defer wg.Done()
+			<-start
+			srv.DrainSession("s1")
+		}()
+		close(start)
+		wg.Wait()
+
+		mu.Lock()
+		count := len(results)
+		mu.Unlock()
+		if count != 1 {
+			t.Fatalf("iteration %d produced %d finish callbacks", i, count)
+		}
+	}
+}
+
+func TestServerTimeoutEmitsFinished(t *testing.T) {
+	sock := testIPCPath(t)
+	defer os.Remove(sock)
+	srv := NewServer(sock, nil)
+	srv.timeout = 20 * time.Millisecond
+	requests := make(chan Request, 1)
+	finished := make(chan Finished, 1)
+	srv.SetOnRequest(func(request Request) { requests <- request })
+	srv.SetOnFinished(func(result Finished) { finished <- result })
+	if err := srv.Start(); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer srv.Close()
+
+	conn := dialIPC(t, sock)
+	defer conn.Close()
+	payload, _ := json.Marshal(hookRequest{SessionID: "s1", Tool: "Bash", PermMode: "default"})
+	if _, err := conn.Write(append(payload, '\n')); err != nil {
+		t.Fatalf("write request: %v", err)
+	}
+	request := <-requests
+	select {
+	case result := <-finished:
+		if result.RequestID != request.RequestID || result.Reason != FinishTimedOut || result.Approved != nil {
+			t.Fatalf("timeout result=%#v", result)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timeout did not emit OnFinished")
 	}
 }
 

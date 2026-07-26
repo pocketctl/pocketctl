@@ -89,4 +89,19 @@ describe('ApprovalCard OpenCode actions', () => {
 	await wrapper.get('.approval-btn.cancel').trigger('click')
 	expect(wrapper.emitted('respond')?.map(args => args[1])).toEqual(['once', 'cancel'])
   })
+
+  test.each(['timed_out', 'daemon_restarted', 'hook_disconnected', 'session_drained', 'server_shutdown'])(
+    'renders %s as a neutral closed result',
+    (reason) => {
+      const wrapper = mount(ApprovalCard, {
+        props: {
+          message: message({ status: 'resolved', action: 'reject', reason }),
+          supportsActions: false,
+        },
+      })
+      expect(wrapper.get('.approval-result').classes()).toContain('elsewhere')
+      expect(wrapper.text()).toMatch(/closed|关闭/i)
+      expect(wrapper.findAll('button')).toHaveLength(0)
+    },
+  )
 })

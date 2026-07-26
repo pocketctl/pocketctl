@@ -146,8 +146,8 @@ func (sm *SessionManager) ListSessions() []SessionInfo {
 			Model:          ps.Model,
 			ControlMode:    ps.ControlMode,
 		}
-		if ps.Agent == adapter.AgentOpencode {
-			info.Capabilities = sm.openCodeCapabilitiesLocked(ps)
+		if ps.Agent == adapter.AgentOpencode || ps.Agent == adapter.AgentClaude {
+			info.Capabilities = sm.sessionCapabilitiesLocked(ps)
 		}
 		if ps.Status == protocol.StatusExited || ps.Status == protocol.StatusCompleted ||
 			ps.Status == protocol.StatusError || ps.Status == protocol.StatusKilled {

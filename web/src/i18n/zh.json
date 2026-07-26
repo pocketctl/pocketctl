@@ -207,6 +207,7 @@
   "approval.save_rules": "可保存规则",
   "approval.metadata": "请求详情",
   "approval.resolved_elsewhere": "已在其他设备处理",
+  "approval.closed": "审批已关闭",
   "question.title": "Agent 提问",
   "question.waiting": "等待你的回答",
   "question.submitting": "正在提交…",

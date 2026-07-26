@@ -41,11 +41,11 @@ pocketctl 是一个远程 AI 编码代理控制系统。它让你在远程机器
 
 | Agent | 类型 | 实时输出 | 终端会话发现 | 备注 |
 |---|---|---|---|---|
-| **Claude Code** (`claude`) | 子进程 | tail JSONL | `~/.claude/sessions/` sidecar | 支持权限审批 hook、Shift+Tab 模式、`/effort` |
+| **Claude Code** (`claude`) | 子进程 | tail JSONL | `~/.claude/sessions/` sidecar | 终端会话使用 idle/exited `--resume` 接力；Pocketctl 创建会话支持跨端审批 |
 | **Codex** (`codex`) | 子进程 | tail JSONL | `~/.codex/sessions/` rollout | 审批走 `--ask-for-approval` |
 | **opencode** (`opencode`) | **服务** | serve API 轮询 | serve `GET /api/session` | DB 后端；详见下 |
 
-三种 agent 共用一套"零配置发现 + 实时同步 + 跨设备续聊"能力 —— 你在终端正常运行 agent，daemon 自动发现并同步到客户端，可在客户端接着对话。
+三种 agent 共用“零配置发现 + 实时历史同步”，但控制能力遵循各自真实 runtime。Claude 终端会话在 idle 或退出后通过 `--resume` 接力，并不是共享运行时；Pocketctl 创建的 Claude PTY 可以在 Web/iOS 审批，用户独立启动的终端 Claude 仍使用 Claude 原生终端审批。详见 [Claude 跨端控制](docs/claude-cross-device-control.md)。
 
 **opencode 的特殊性**：它是 client/server 架构（会话存在 SQLite，不是可 tail 的 JSONL 文件）。daemon 托管一个共享的 `opencode serve` 进程，通过其 HTTP API 驱动会话、轮询消息历史做实时同步、发现终端会话，并同步 slash command、Agent、permission 与 question。由另一个终端 OpenCode 进程已经驱动的在途请求仍归该终端处理；从 PocketCtl 发起的新回合由 daemon serve 完整接管。
 

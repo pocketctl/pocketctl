@@ -207,6 +207,7 @@
   "approval.save_rules": "Save rules",
   "approval.metadata": "Request details",
   "approval.resolved_elsewhere": "Handled on another device",
+  "approval.closed": "Approval closed",
   "question.title": "Agent question",
   "question.waiting": "Awaiting your answer",
   "question.submitting": "Submitting…",

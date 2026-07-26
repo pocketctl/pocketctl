@@ -85,9 +85,12 @@ const resolvedAction = computed<ApprovalAction>(() => {
 })
 const resultClass = computed(() => `result-${isPending.value ? 'pending' : resolvedAction.value}`)
 const resolvedElsewhere = computed(() => props.message.reason === 'resolved_elsewhere')
-const resolvedResultClass = computed(() => resolvedElsewhere.value ? 'elsewhere' : resolvedAction.value)
+const neutralReasons = new Set(['timed_out', 'daemon_restarted', 'hook_disconnected', 'session_drained', 'server_shutdown'])
+const neutralResolution = computed(() => neutralReasons.has(props.message.reason))
+const resolvedResultClass = computed(() => resolvedElsewhere.value || neutralResolution.value ? 'elsewhere' : resolvedAction.value)
 const resolvedLabel = computed(() => {
   if (resolvedElsewhere.value) return t('approval.resolved_elsewhere')
+  if (neutralResolution.value) return t('approval.closed')
   if (resolvedAction.value === 'always') return t('approval.always_resolved')
   if (resolvedAction.value === 'once') return t('approval.allowed')
   return t('approval.denied')
