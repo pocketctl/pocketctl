@@ -81,6 +81,35 @@ type OnRequestFunc func(req Request)
 // only tells clients to dismiss the now-stale approval card. Must not block.
 type OnCancelFunc func(requestID, sessionID string, allow *bool)
 
+// FinishReason describes why a pending Claude hook approval stopped being
+// answerable. It is intentionally Claude-specific; Codex and OpenCode keep
+// their own interaction authorities and never use this server.
+type FinishReason string
+
+const (
+	FinishApproved         FinishReason = "approved"
+	FinishDenied           FinishReason = "denied"
+	FinishTimedOut         FinishReason = "timed_out"
+	FinishHookDisconnected FinishReason = "hook_disconnected"
+	FinishSessionDrained   FinishReason = "session_drained"
+	FinishServerShutdown   FinishReason = "server_shutdown"
+)
+
+// Finished is emitted exactly once for every request that was registered as
+// pending. Approved is nil when no user decision exists (disconnect, drain, or
+// shutdown).
+type Finished struct {
+	RequestID string
+	SessionID string
+	Approved  *bool
+	Reason    FinishReason
+}
+
+// OnFinishedFunc is the authoritative lifecycle callback for pending Claude
+// hook approvals. It must return quickly and must not call back into Server
+// while holding external locks.
+type OnFinishedFunc func(Finished)
+
 // defaultIPCListener is the platform IPC listener (unix domain socket on Unix,
 // named pipe on Windows). PR2: replaces approval's direct net.Listen("unix").
 var defaultIPCListener = platform.NewIPCListener()
@@ -97,6 +126,7 @@ type Server struct {
 	pending  map[string]*pendingEntry // keyed by requestID
 	onReq    OnRequestFunc
 	onCancel OnCancelFunc
+	onFinish OnFinishedFunc
 
 	// fileLocks (Scheme C) enforces per-file mutual exclusion across sessions.
 	// When non-nil, Edit/Write/MultiEdit/NotebookEdit on a file held by another
@@ -107,7 +137,8 @@ type Server struct {
 	closeMu sync.Mutex
 	closed  bool
 
-	wg sync.WaitGroup
+	wg      sync.WaitGroup
+	timeout time.Duration
 }
 
 type pendingEntry struct {
@@ -126,6 +157,7 @@ func NewServer(socketPath string, logger *slog.Logger) *Server {
 		logger:     logger,
 		ipc:        defaultIPCListener,
 		pending:    make(map[string]*pendingEntry),
+		timeout:    approvalTimeout,
 	}
 }
 
@@ -151,6 +183,15 @@ func (s *Server) SetOnCancel(fn OnCancelFunc) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.onCancel = fn
+}
+
+// SetOnFinished registers the single authoritative lifecycle callback for
+// every pending request. SetOnCancel remains for compatibility with callers
+// interested only in the legacy hook-side resolution path.
+func (s *Server) SetOnFinished(fn OnFinishedFunc) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.onFinish = fn
 }
 
 // SetFileLockManager wires the shared file-lock manager (Scheme C). When set,
@@ -193,18 +234,13 @@ func (s *Server) Close() error {
 	if s.ln != nil {
 		err = s.ln.Close()
 	}
-	s.wg.Wait()
 
 	// Deny everything still pending so hooks exit promptly.
-	s.mu.Lock()
-	for id, e := range s.pending {
-		select {
-		case e.ch <- Response{Allow: false}:
-		default:
-		}
-		delete(s.pending, id)
+	for _, item := range s.takePendingForSession("") {
+		item.entry.ch <- Response{Allow: false}
+		s.notifyFinished(item.id, item.entry.sessionID, nil, FinishServerShutdown)
 	}
-	s.mu.Unlock()
+	s.wg.Wait()
 
 	_ = os.Remove(s.socketPath)
 	return err
@@ -214,33 +250,67 @@ func (s *Server) Close() error {
 // Returns an error if there is no pending request with that id (already
 // resolved, drained, or unknown).
 func (s *Server) Resolve(requestID string, allow bool) error {
-	s.mu.Lock()
-	e, ok := s.pending[requestID]
-	if ok {
-		delete(s.pending, requestID)
-	}
-	s.mu.Unlock()
+	e, ok := s.takePending(requestID)
 	if !ok {
 		return fmt.Errorf("no pending approval: %s", requestID)
 	}
 	e.ch <- Response{Allow: allow}
+	approved := allow
+	reason := FinishDenied
+	if allow {
+		reason = FinishApproved
+	}
+	s.notifyFinished(requestID, e.sessionID, &approved, reason)
 	return nil
 }
 
 // DrainSession denies and removes all pending requests for a session. Called
 // when a session is killed or exits so its hook processes don't linger.
 func (s *Server) DrainSession(sessionID string) {
+	for _, item := range s.takePendingForSession(sessionID) {
+		item.entry.ch <- Response{Allow: false}
+		s.notifyFinished(item.id, item.entry.sessionID, nil, FinishSessionDrained)
+	}
+}
+
+type takenPending struct {
+	id    string
+	entry *pendingEntry
+}
+
+func (s *Server) takePending(requestID string) (*pendingEntry, bool) {
 	s.mu.Lock()
-	for id, e := range s.pending {
-		if e.sessionID == sessionID {
-			select {
-			case e.ch <- Response{Allow: false}:
-			default:
-			}
+	defer s.mu.Unlock()
+	entry, ok := s.pending[requestID]
+	if ok {
+		delete(s.pending, requestID)
+	}
+	return entry, ok
+}
+
+// takePendingForSession atomically removes a session's requests. An empty
+// sessionID means all requests. Callbacks and channel writes happen after the
+// server lock is released.
+func (s *Server) takePendingForSession(sessionID string) []takenPending {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var taken []takenPending
+	for id, entry := range s.pending {
+		if sessionID == "" || entry.sessionID == sessionID {
+			taken = append(taken, takenPending{id: id, entry: entry})
 			delete(s.pending, id)
 		}
 	}
+	return taken
+}
+
+func (s *Server) notifyFinished(requestID, sessionID string, approved *bool, reason FinishReason) {
+	s.mu.Lock()
+	onFinish := s.onFinish
 	s.mu.Unlock()
+	if onFinish != nil {
+		onFinish(Finished{RequestID: requestID, SessionID: sessionID, Approved: approved, Reason: reason})
+	}
 }
 
 func (s *Server) acceptLoop() {
@@ -374,26 +444,34 @@ func (s *Server) handleConn(conn net.Conn) {
 
 	// Block until the client answers, the session is drained, the server is
 	// closed, the hook resolves locally, or the auto-deny deadline fires.
-	timer := time.NewTimer(approvalTimeout)
+	timer := time.NewTimer(s.timeout)
 	defer timer.Stop()
 	var resp Response
 	select {
 	case resp = <-ch:
 	case <-timer.C:
-		s.mu.Lock()
-		delete(s.pending, reqID)
-		s.mu.Unlock()
-		resp = Response{Allow: false}
-		s.logger.Warn("approval timed out (auto-deny)", "request_id", reqID, "session", hr.SessionID, "tool", hr.Tool)
+		if _, won := s.takePending(reqID); won {
+			resp = Response{Allow: false}
+			s.notifyFinished(reqID, hr.SessionID, nil, FinishTimedOut)
+			s.logger.Warn("approval timed out (auto-deny)", "request_id", reqID, "session", hr.SessionID, "tool", hr.Tool)
+		} else {
+			// A concurrent Resolve/Drain/Close removed the request and is about
+			// to deliver the response. Preserve that winner's decision.
+			resp = <-ch
+		}
 	case local := <-cancelCh:
 		// Hook answered locally (or went away). Drop the pending entry; the hook
 		// has already returned the decision to claude (or is gone), so there is
 		// nothing to write back. A local allow on a file write still takes the
 		// lock so concurrent sessions can't race the same file.
+		_, won := s.takePending(reqID)
 		s.mu.Lock()
-		delete(s.pending, reqID)
 		onCancel := s.onCancel
 		s.mu.Unlock()
+		if !won {
+			// A remote response, drain, or shutdown already won.
+			return
+		}
 		if local != nil && *local && fl != nil {
 			if path, ok := extractFilePath(hr.Tool, hr.Input); ok {
 				fl.TryLock(hr.SessionID, normalizePath(hr.Cwd, path))
@@ -402,6 +480,14 @@ func (s *Server) handleConn(conn net.Conn) {
 		if onCancel != nil {
 			onCancel(reqID, hr.SessionID, local)
 		}
+		reason := FinishHookDisconnected
+		if local != nil {
+			reason = FinishDenied
+			if *local {
+				reason = FinishApproved
+			}
+		}
+		s.notifyFinished(reqID, hr.SessionID, local, reason)
 		return
 	}
 

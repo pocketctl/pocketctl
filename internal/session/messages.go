@@ -415,22 +415,27 @@ func (sm *SessionManager) sendToIdleTerminal(ctx context.Context, ps *ProcessSta
 		LastActivityAt: time.Now().UTC().Format(time.RFC3339),
 	}
 
-	// D2: pause the JSONL tailer while this --resume runs to avoid double-forwarding
-	// (stdout adapter covers all events; tailer would re-read the same JSONL lines).
-	if ps.Tailer != nil {
+	// Legacy tailers pause while stdout is projected. Claude JSONL V2 owns event
+	// identity, so it remains active and stdout is only drained; otherwise a
+	// later daemon restart would hydrate the same turn under a new identity.
+	tailerOwnsEvents := ps.Tailer != nil && ps.Tailer.StableEventIDs()
+	if ps.Tailer != nil && !tailerOwnsEvents {
 		ps.Tailer.Pause()
 	}
 
 	// Wait for --resume to finish in background; forward stdout events via adapter.
 	go func() {
 		defer func() {
-			if ps.Tailer != nil {
+			if ps.Tailer != nil && !tailerOwnsEvents {
 				ps.Tailer.Resume()
 			}
 		}()
 		scanner := bufio.NewScanner(stdout)
 		scanner.Buffer(make([]byte, 1024*1024), 1024*1024)
 		for scanner.Scan() {
+			if tailerOwnsEvents {
+				continue
+			}
 			events, perr := adp.ParseStreamLine(scanner.Text())
 			if perr != nil {
 				continue

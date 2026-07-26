@@ -333,7 +333,7 @@
               v-model="messageInput"
               class="chat-textarea"
               :style="{ height: textareaHeight + 'px' }"
-              :placeholder="isPendingSession ? t('session.input_creating') : (isDaemonSession && isTerminal ? t('session.input_resume') : t('session.input_send'))"
+              :placeholder="isPendingSession ? t('session.input_creating') : (isDaemonSession && isTerminalStatus ? t('session.input_resume') : t('session.input_send'))"
               @keydown="onInputKeydown"
               @focus="isInputFocused = true"
               @blur="isInputFocused = false"
@@ -480,6 +480,7 @@ import { expandCodexPreset, permissionOptions, permissionTitleKey, type AgentTyp
 import { useVisualViewport } from '../composables/useVisualViewport'
 import { normalizeRequestId, scrollToRequest } from '../utils/requestDeepLink'
 import { resolveInteractionReadiness, type InteractionConnectivity } from '../composables/useInteractionReadiness'
+import { canSendClaudeSession } from '../utils/claudeSessionControl'
 
 const { renamingId, renameInput, startRename, commitRename, cancelRename } = useSessionRename()
 
@@ -680,7 +681,7 @@ const chatEmptyDesc = computed(() => {
   if (allSessions.value.length === 0) return t('session.empty_no_session_desc')
   return t('session.empty_select_desc')
 })
-const isTerminal = computed(() => ['completed', 'error', 'killed'].includes(status.value))
+const isTerminalStatus = computed(() => ['exited', 'completed', 'error', 'killed'].includes(status.value))
 // Daemon-created sessions can be resumed with their agent CLI even after completion,
 // so the input box stays available as long as the daemon is online.
 const isDaemonSession = computed(() => {
@@ -735,11 +736,23 @@ watch(
   },
   { immediate: true },
 )
-const canInput = computed(() => !isDisconnected.value
-  && (!isTerminal.value || isDaemonSession.value || isManagedSession.value)
-  && !isSubagent.value
-  && !focusedSubAgentId.value
-  && (currentSessionAgent.value !== 'opencode' || isManagedOpenCode.value))
+const canInput = computed(() => {
+  if (currentSessionAgent.value === 'claude-code') {
+    return !focusedSubAgentId.value && canSendClaudeSession({
+      status: status.value,
+      source: currentSession.value?.source || '',
+      daemonOnline: isDaemonOnline.value && !isDisconnected.value,
+      isSubagent: isSubagent.value,
+      isManagedSession: isManagedSession.value,
+      capabilities: currentSessionCapabilities.value,
+    })
+  }
+  return !isDisconnected.value
+    && (!isTerminalStatus.value || isDaemonSession.value || isManagedSession.value)
+    && !isSubagent.value
+    && !focusedSubAgentId.value
+    && (currentSessionAgent.value !== 'opencode' || isManagedOpenCode.value)
+})
 // Agent is actively generating (send button → stop button)
 // Agent is actively working — includes 'waiting' (tool execution in progress),
 // otherwise the timer would stop prematurely when a tool call is running.
@@ -935,7 +948,7 @@ const milestones = computed(() => {
   if (!s) return ms
   if (s.created_at) ms.push({ label: t('session.milestone_created'), time: formatTime(s.created_at), state: 'active' })
   ms.push({ label: t('session.status.running'), time: formatTime(s.last_activity_at || s.updated_at || s.created_at), state: status.value === 'running' || status.value === 'busy' || status.value === 'retry' ? 'current' : 'active' })
-  ms.push({ label: statusLabel.value, time: '—', state: isTerminal.value || status.value === 'exited' ? 'active' : '' })
+  ms.push({ label: statusLabel.value, time: '—', state: isTerminalStatus.value ? 'active' : '' })
   return ms
 })
 

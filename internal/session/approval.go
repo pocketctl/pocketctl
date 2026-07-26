@@ -36,6 +36,10 @@ func (e *ResolvedElsewhereError) ResolvedRequestID() string { return e.RequestID
 // web/iOS client renders an inline Yes/No card. Invoked from the server's
 // accept goroutine — must not block (it only emits events).
 func (sm *SessionManager) handleApprovalRequest(req approval.Request) {
+	if sm.claudeApprovalV2 {
+		sm.handleClaudeApprovalRequest(req)
+		return
+	}
 	sm.mu.Lock()
 	ps, ok := sm.sessions[req.SessionID]
 	if !ok {
@@ -408,6 +412,9 @@ func (sm *SessionManager) ResolveApproval(sessionID, requestID string, approved 
 	}
 	if sm.approvals == nil {
 		return fmt.Errorf("approval not configured on this daemon")
+	}
+	if sm.routesClaudeApproval(sessionID) {
+		return sm.resolveClaudeApproval(sessionID, requestID, approved)
 	}
 	sm.mu.Lock()
 	ps, ok := sm.sessions[sessionID]

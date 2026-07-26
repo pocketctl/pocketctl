@@ -41,11 +41,11 @@ pocketctl 是一个远程 AI 编码代理控制系统。它让你在远程机器
 
 | Agent | 类型 | 实时输出 | 终端会话发现 | 备注 |
 |---|---|---|---|---|
-| **Claude Code** (`claude`) | 子进程 | tail JSONL | `~/.claude/sessions/` sidecar | 支持权限审批 hook、Shift+Tab 模式、`/effort` |
+| **Claude Code** (`claude`) | 子进程 | tail JSONL | `~/.claude/sessions/` sidecar | 终端会话使用 idle/exited `--resume` 接力；Pocketctl 创建会话支持跨端审批 |
 | **Codex** (`codex`) | 子进程 | tail JSONL | `~/.codex/sessions/` rollout | 审批走 `--ask-for-approval` |
 | **opencode** (`opencode`) | **服务** | serve API 轮询 | serve `GET /api/session` | DB 后端；详见下 |
 
-三种 agent 共用一套"零配置发现 + 实时同步 + 跨设备续聊"能力 —— 你在终端正常运行 agent，daemon 自动发现并同步到客户端，可在客户端接着对话。
+三种 agent 共用“零配置发现 + 实时历史同步”，但控制能力遵循各自真实 runtime。Claude 终端会话在 idle 或退出后通过 `--resume` 接力，并不是共享运行时；Pocketctl 创建的 Claude PTY 可以在 Web/iOS 审批，用户独立启动的终端 Claude 仍使用 Claude 原生终端审批。详见 [Claude 跨端控制](docs/claude-cross-device-control.md)。
 
 权限配置按 Agent 原生能力提供：Claude Code 支持六种启动权限模式，Codex 支持 approval policy、sandbox mode 与安全 preset；Web/iOS 会等待 daemon 确认后再更新会话状态，Codex resume 会复用已确认的配置。
 

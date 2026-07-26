@@ -108,6 +108,13 @@ type SessionManager struct {
 	approvals       *approval.Server
 	pocketctlPath   string // path to this binary, for the hook command
 	approvalEnabled bool   // set once an approval server is attached
+	// Claude V2 approvals are isolated from Codex/OpenCode interaction state.
+	// They are enabled only by the Claude-specific rollout flag.
+	claudeApprovalV2        bool
+	claudeApprovals         map[string]*claudeApprovalSession
+	claudeApprovalResolved  map[claudeApprovalKey]time.Time
+	claudeApprovalRecorder  func([]ClaudeApprovalReference) error
+	claudeTelemetryRecorder func(metric, reason string)
 
 	// Scheme A: cwd → active session ID set, for "directory already in use"
 	// awareness. Keyed by normalized absolute path (normalizeCwd).
@@ -133,14 +140,17 @@ type createSessionDependencies struct {
 
 func NewSessionManager(outputCh chan protocol.DaemonEvent) *SessionManager {
 	return &SessionManager{
-		sessions:    make(map[string]*ProcessState),
-		outputCh:    outputCh,
-		childPids:   make(map[int]bool),
-		cwdSessions: make(map[string]map[string]struct{}),
-		fileLocks:   filelock.New(),
-		leases:      agentcontrol.NewLeaseRegistry(),
-		ptyProvider: defaultPTYProvider,
-		proc:        defaultProc,
+		sessions:               make(map[string]*ProcessState),
+		outputCh:               outputCh,
+		childPids:              make(map[int]bool),
+		cwdSessions:            make(map[string]map[string]struct{}),
+		fileLocks:              filelock.New(),
+		leases:                 agentcontrol.NewLeaseRegistry(),
+		ptyProvider:            defaultPTYProvider,
+		proc:                   defaultProc,
+		claudeApprovalV2:       claudeApprovalV2Enabled(),
+		claudeApprovals:        make(map[string]*claudeApprovalSession),
+		claudeApprovalResolved: make(map[claudeApprovalKey]time.Time),
 		createDeps: createSessionDependencies{
 			resolveAgentCLI: func(config protocol.SessionConfig) (string, error) {
 				return findAgentCLI(config.Agent)
@@ -191,7 +201,11 @@ func (sm *SessionManager) SetApprovalServer(srv *approval.Server, pocketctlPath 
 	sm.pocketctlPath = pocketctlPath
 	sm.approvalEnabled = true
 	srv.SetOnRequest(sm.handleApprovalRequest)
-	srv.SetOnCancel(sm.handleApprovalCancel)
+	if sm.claudeApprovalV2 {
+		srv.SetOnFinished(sm.handleClaudeApprovalFinished)
+	} else {
+		srv.SetOnCancel(sm.handleApprovalCancel)
+	}
 	// Share the file-lock manager so the approval server can deny Edit/Write on
 	// files held by other sessions (Scheme C), even in bypassPermissions mode.
 	srv.SetFileLockManager(sm.fileLocks)
@@ -212,7 +226,7 @@ func (sm *SessionManager) ResyncSessions() {
 			Agent:        ps.Agent,
 			Model:        ps.Model,
 			ControlMode:  ps.ControlMode,
-			Capabilities: sm.openCodeCapabilitiesLocked(ps),
+			Capabilities: sm.sessionCapabilitiesLocked(ps),
 			Resync:       true,
 		}
 	}

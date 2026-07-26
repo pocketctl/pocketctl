@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -84,6 +85,8 @@ type JSONLTailer struct {
 	stableEventIDs bool
 	eventSourceID  string
 	lineIndex      int64
+	claudeV2       bool
+	maxRecordBytes int
 }
 
 // Pause stops the tailer from forwarding new lines (used during sendToIdleTerminal
@@ -95,6 +98,8 @@ func (t *JSONLTailer) Resume() { t.paused.Store(false) }
 
 // IsPaused reports whether the tailer is currently paused.
 func (t *JSONLTailer) IsPaused() bool { return t.paused.Load() }
+
+func (t *JSONLTailer) StableEventIDs() bool { return t.stableEventIDs }
 
 // SetPendingCmd records the slash command from a user message so the parser
 // can attach it (e.g. "/compact") to the next command_receipt event.
@@ -131,6 +136,30 @@ func NewJSONLTailer(filePath, agentType string) (*JSONLTailer, error) {
 // agentType selects the JSONL schema parser ("claude-code" / "codex").
 func NewJSONLTailerFromStart(filePath, agentType string) (*JSONLTailer, error) {
 	return newJSONLTailerFromStart(filePath, agentType, false)
+}
+
+// NewClaudeJSONLTailerFromStart enables the Claude-only loss-aware reader and
+// deterministic record identities. Codex callers continue using
+// NewJSONLTailerFromStart and retain their existing behavior.
+func NewClaudeJSONLTailerFromStart(filePath, sessionID string) (*JSONLTailer, error) {
+	tailer, err := newJSONLTailerFromStart(filePath, adapter.AgentClaude, true)
+	if err != nil {
+		return nil, err
+	}
+	tailer.claudeV2 = true
+	tailer.maxRecordBytes = 8 * 1024 * 1024
+	source := sessionID + "|" + filepath.Clean(filePath)
+	tailer.eventSourceID = fmt.Sprintf("%x", sha256.Sum256([]byte(source)))[:24]
+	return tailer, nil
+}
+
+func ClaudeJSONLV2Enabled() bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("POCKETCTL_CLAUDE_JSONL_V2"))) {
+	case "1", "true", "yes", "on":
+		return true
+	default:
+		return false
+	}
 }
 
 // newJSONLTailerFromStart optionally assigns stable record identities. The
@@ -198,6 +227,10 @@ func (t *JSONLTailer) TailNewLines() ([]protocol.DaemonEvent, []string, error) {
 		return nil, nil, err
 	}
 
+	if t.claudeV2 {
+		return t.tailClaudeNewLinesLocked(info)
+	}
+
 	if info.Size() <= t.offset {
 		return nil, nil, nil // No new data
 	}
@@ -243,6 +276,107 @@ func (t *JSONLTailer) TailNewLines() ([]protocol.DaemonEvent, []string, error) {
 	t.offset = newOffset
 
 	return allEvents, rawLines, nil
+}
+
+func (t *JSONLTailer) tailClaudeNewLinesLocked(info os.FileInfo) ([]protocol.DaemonEvent, []string, error) {
+	pathInfo, err := os.Stat(t.filePath)
+	if err != nil {
+		return nil, nil, err
+	}
+	if !os.SameFile(info, pathInfo) {
+		if err := t.reopenFile(); err != nil {
+			return nil, nil, err
+		}
+		info = pathInfo
+		t.offset = 0
+		t.lineIndex = 0
+	}
+	if info.Size() < t.offset {
+		t.offset = 0
+		t.lineIndex = 0
+	}
+	if info.Size() == t.offset {
+		return nil, nil, nil
+	}
+	if _, err := t.file.Seek(t.offset, io.SeekStart); err != nil {
+		return nil, nil, err
+	}
+
+	reader := bufio.NewReaderSize(t.file, 64*1024)
+	recordStart := t.offset
+	var allEvents []protocol.DaemonEvent
+	var rawLines []string
+	for {
+		var record []byte
+		var consumed int64
+		oversized := false
+		complete := false
+		for {
+			fragment, readErr := reader.ReadSlice('\n')
+			consumed += int64(len(fragment))
+			if !oversized {
+				if len(record)+len(fragment) > t.maxRecordBytes {
+					oversized = true
+					record = nil
+				} else {
+					record = append(record, fragment...)
+				}
+			}
+			switch readErr {
+			case nil:
+				complete = true
+			case bufio.ErrBufferFull:
+				continue
+			case io.EOF:
+				// Do not commit a partial final record. The next poll seeks back
+				// to recordStart and parses it after the writer adds '\n'.
+				return allEvents, rawLines, nil
+			default:
+				return allEvents, rawLines, readErr
+			}
+			break
+		}
+		if !complete {
+			return allEvents, rawLines, nil
+		}
+
+		t.offset = recordStart + consumed
+		t.lineIndex++
+		if oversized {
+			allEvents = append(allEvents, protocol.DaemonEvent{
+				Type:   "sync_warning",
+				Reason: "jsonl_record_too_large",
+			})
+			recordStart = t.offset
+			continue
+		}
+
+		line := strings.TrimSuffix(string(record), "\n")
+		line = strings.TrimSuffix(line, "\r")
+		rawLines = append(rawLines, line)
+		events, parseErr := t.parser.Parse(line)
+		if parseErr != nil {
+			allEvents = append(allEvents, protocol.DaemonEvent{
+				Type:   "sync_warning",
+				Reason: "jsonl_parse_error",
+			})
+			recordStart = t.offset
+			continue
+		}
+		recordHash := sha256.Sum256(record)
+		for i := range events {
+			if events[i].EventID == "" {
+				identity := fmt.Sprintf("%s|%d|%x|%d", t.eventSourceID, recordStart, recordHash, i)
+				eventHash := sha256.Sum256([]byte(identity))
+				events[i].EventID = fmt.Sprintf("claude-jsonl:v1:%x", eventHash[:16])
+			}
+		}
+		allEvents = append(allEvents, events...)
+		recordStart = t.offset
+		if t.offset >= info.Size() {
+			return allEvents, rawLines, nil
+		}
+	}
 }
 
 // Run starts a periodic tail loop, sending events to outputCh.
