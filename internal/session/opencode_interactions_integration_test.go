@@ -856,6 +856,15 @@ func TestOpenCodeRestartPreservesServeOwnership(t *testing.T) {
 	nextSM := NewSessionManager(out)
 	next := newOpencodeCoordinator(nextSM)
 	next.ctx, next.cancel = context.WithCancel(context.Background())
+	cli := writeFakeCommandFixture(t, filepath.Join(t.TempDir(), "opencode"),
+		"#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then echo 'opencode version test-version'; fi\n",
+		"@echo off\nif \"%~1\"==\"--version\" echo opencode version test-version\n",
+	)
+	cfg := agentcontrol.DefaultConfig()
+	cfg.OpenCode.RealBinary = cli
+	if err := agentcontrol.SaveConfig(cfg); err != nil {
+		t.Fatal(err)
+	}
 	if err := next.attachHandoffLocked(state); err != nil {
 		t.Fatal(err)
 	}
