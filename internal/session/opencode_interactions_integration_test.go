@@ -776,7 +776,7 @@ func startFakeOpenCodeServer(t *testing.T, handler http.Handler) *adapter.Openco
 	t.Helper()
 	httpServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/global/health" {
-			json.NewEncoder(w).Encode(map[string]any{"healthy": true, "version": "test-version"})
+			json.NewEncoder(w).Encode(map[string]any{"healthy": true, "version": "1.17.11"})
 			return
 		}
 		handler.ServeHTTP(w, r)
@@ -847,7 +847,7 @@ func TestOpenCodeRestartPreservesServeOwnership(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if state.PID != pid || state.BaseURL != base || state.Password == "" || state.Version != "test-version" {
+	if state.PID != pid || state.BaseURL != base || state.Password == "" || state.Version != "1.17.11" {
 		t.Fatalf("handoff=%+v", state)
 	}
 	old.Shutdown()
@@ -857,8 +857,8 @@ func TestOpenCodeRestartPreservesServeOwnership(t *testing.T) {
 	next := newOpencodeCoordinator(nextSM)
 	next.ctx, next.cancel = context.WithCancel(context.Background())
 	cli := writeFakeCommandFixture(t, filepath.Join(t.TempDir(), "opencode"),
-		"#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then echo 'opencode version test-version'; fi\n",
-		"@echo off\nif \"%~1\"==\"--version\" echo opencode version test-version\n",
+		"#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then echo 'opencode version 1.17.11'; fi\n",
+		"@echo off\nif \"%~1\"==\"--version\" echo opencode version 1.17.11\n",
 	)
 	cfg := agentcontrol.DefaultConfig()
 	cfg.OpenCode.RealBinary = cli
