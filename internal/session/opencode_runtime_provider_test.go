@@ -2,7 +2,6 @@ package session
 
 import (
 	"context"
-	"os"
 	"path/filepath"
 	"testing"
 
@@ -14,9 +13,10 @@ func TestOpenCodeRuntimeProviderDisabledReturnsNative(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	real := filepath.Join(home, "opencode")
-	if err := os.WriteFile(real, []byte("#!/bin/sh\nexit 0\n"), 0o700); err != nil {
-		t.Fatal(err)
-	}
+	real = writeFakeCommandFixture(t, real,
+		"#!/bin/sh\nexit 0\n",
+		"@echo off\nexit /B 0\n",
+	)
 	cfg := agentcontrol.DefaultConfig()
 	cfg.OpenCode.State = agentcontrol.StateDisabled
 	cfg.OpenCode.RealBinary = real
