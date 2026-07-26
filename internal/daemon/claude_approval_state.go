@@ -7,6 +7,8 @@ import (
 	"os"
 	"path/filepath"
 	"time"
+
+	"github.com/pocketctl/pocketctl/internal/config"
 )
 
 const claudeApprovalStateVersion = 1
@@ -24,7 +26,7 @@ type ClaudeApprovalStateItem struct {
 }
 
 func ClaudeApprovalStatePath() string {
-	home, _ := os.UserHomeDir()
+	home, _ := config.HomeDir()
 	return filepath.Join(home, ".pocketctl", "claude-approvals.state")
 }
 

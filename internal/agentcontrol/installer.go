@@ -10,6 +10,8 @@ import (
 	"runtime"
 	"strings"
 	"time"
+
+	"github.com/pocketctl/pocketctl/internal/config"
 )
 
 const (
@@ -123,7 +125,7 @@ func (i Installer) EnableAgentDetected(ctx context.Context, agent, realBinary st
 	if err := i.checkCompatibility(ctx, agent, detectedPath, version); err != nil {
 		return Status{}, err
 	}
-	home, err := os.UserHomeDir()
+	home, err := config.HomeDir()
 	if err != nil {
 		return Status{}, err
 	}
@@ -183,7 +185,7 @@ func (i Installer) Disable(ctx context.Context) error {
 }
 
 func (i Installer) DisableAgent(_ context.Context, agent string) error {
-	home, err := os.UserHomeDir()
+	home, err := config.HomeDir()
 	if err != nil {
 		return err
 	}

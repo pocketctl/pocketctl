@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/pocketctl/pocketctl/internal/adapter"
+	"github.com/pocketctl/pocketctl/internal/config"
 	"github.com/pocketctl/pocketctl/internal/protocol"
 )
 
@@ -425,7 +426,7 @@ func (t *JSONLTailer) Run(ctx context.Context, outputCh chan<- protocol.DaemonEv
 // ResolveJSONLPath returns the JSONL file path for a given session and cwd.
 // Claude Code stores sessions at ~/.claude/projects/<encoded-path>/<session-id>.jsonl
 func ResolveJSONLPath(sessionID string, cwd string) (string, error) {
-	home, err := os.UserHomeDir()
+	home, err := config.HomeDir()
 	if err != nil {
 		return "", err
 	}

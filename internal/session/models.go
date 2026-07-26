@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/pocketctl/pocketctl/internal/adapter"
+	"github.com/pocketctl/pocketctl/internal/config"
 	"github.com/pocketctl/pocketctl/internal/protocol"
 )
 
@@ -35,7 +36,7 @@ func stripModelSuffix(s string) string {
 // Returns "" if settings.json is missing or unparseable (claude falls back to
 // its own defaults).
 func resolveCleanModel() string {
-	home, err := os.UserHomeDir()
+	home, err := config.HomeDir()
 	if err != nil {
 		return ""
 	}
@@ -71,7 +72,7 @@ func resolveCleanModel() string {
 // the host's actual available models (not hardcoded aliases). Returns nil if
 // settings.json is missing/unparseable.
 func ListAvailableModels() []protocol.ModelOption {
-	home, err := os.UserHomeDir()
+	home, err := config.HomeDir()
 	if err != nil {
 		return nil
 	}
@@ -147,7 +148,7 @@ func codexFallbackModels(preferred string) []protocol.ModelOption {
 }
 
 func readCodexModelCatalog(preferred string) []protocol.ModelOption {
-	home, err := os.UserHomeDir()
+	home, err := config.HomeDir()
 	if err != nil {
 		return nil
 	}
@@ -214,7 +215,7 @@ func movePreferredFirst(models []protocol.ModelOption, preferred string) []proto
 // returning "" if not set or unreadable. Codex uses TOML, not JSON; we do a
 // lightweight scan rather than pulling a TOML dependency for one field.
 func codexConfigModel() string {
-	home, err := os.UserHomeDir()
+	home, err := config.HomeDir()
 	if err != nil {
 		return ""
 	}

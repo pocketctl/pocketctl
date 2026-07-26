@@ -12,6 +12,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/pocketctl/pocketctl/internal/config"
 	"github.com/pocketctl/pocketctl/internal/protocol"
 )
 
@@ -45,7 +46,7 @@ func useClaudeBuiltins(agentType string) bool {
 // types) get the Claude builtins; codex/opencode get none, since their CLIs
 // have no slash-command surface and surfacing Claude's would mislead.
 func ListCommands(cwd, agentType string, available []string) []protocol.CommandItem {
-	home, _ := os.UserHomeDir()
+	home, _ := config.HomeDir()
 	scanned := listCommands(cwd, home, agentType)
 
 	// No authoritative list from the agent (e.g. terminal session without an

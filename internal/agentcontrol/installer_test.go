@@ -49,7 +49,7 @@ func TestOpenCodeInstallerEnableDisableRoundTrip(t *testing.T) {
 		t.Fatal(err)
 	}
 	shimContent := string(shimData)
-	if !strings.Contains(shimContent, unixShimMarker) || !strings.Contains(shimContent, pocketctlBinary) || !strings.Contains(shimContent, realBinary) {
+	if !strings.Contains(shimContent, testShimMarker()) || !strings.Contains(shimContent, pocketctlBinary) || !strings.Contains(shimContent, realBinary) {
 		t.Fatalf("shim does not preserve launcher and fallback paths: %q", shimContent)
 	}
 	profile := filepath.Join(home, ".zshrc")

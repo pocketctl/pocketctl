@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/pocketctl/pocketctl/internal/config"
+
 	"github.com/pocketctl/pocketctl/internal/agentcontrol"
 )
 
@@ -26,7 +28,7 @@ type CodexAppServerState struct {
 }
 
 func CodexAppServerStatePath() string {
-	home, _ := os.UserHomeDir()
+	home, _ := config.HomeDir()
 	return filepath.Join(home, ".pocketctl", "codex-app-server.state")
 }
 

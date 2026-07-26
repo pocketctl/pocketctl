@@ -11,6 +11,7 @@ import (
 
 	"github.com/pocketctl/pocketctl/internal/adapter"
 	"github.com/pocketctl/pocketctl/internal/agentcontrol"
+	"github.com/pocketctl/pocketctl/internal/config"
 	"github.com/pocketctl/pocketctl/internal/platform"
 )
 
@@ -58,7 +59,7 @@ type OpenCodeManagedSessionState struct {
 }
 
 func OpenCodeServeStatePath() string {
-	home, _ := os.UserHomeDir()
+	home, _ := config.HomeDir()
 	return filepath.Join(home, ".pocketctl", "opencode-serve.state")
 }
 
