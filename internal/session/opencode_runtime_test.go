@@ -6,7 +6,6 @@ import (
 	"errors"
 	"net/http"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"sync"
 	"sync/atomic"
@@ -160,7 +159,7 @@ func TestOpenCodeLeaseReaperPersistsTerminalExit(t *testing.T) {
 	sm, coord := newOpenCodeRuntimeTestManagerWithHealth(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode([]any{})
 	}), nil)
-	terminal := exec.Command("sleep", "30")
+	terminal := sleepCommand(t, 30)
 	if err := terminal.Start(); err != nil {
 		t.Fatal(err)
 	}
@@ -435,9 +434,10 @@ func newOpenCodeRuntimeTestManagerWithHealth(t *testing.T, handler http.Handler,
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	realBinary := filepath.Join(home, "real-opencode")
-	if err := os.WriteFile(realBinary, []byte("#!/bin/sh\nexit 0\n"), 0o700); err != nil {
-		t.Fatal(err)
-	}
+	realBinary = writeFakeCommandFixture(t, realBinary,
+		"#!/bin/sh\nexit 0\n",
+		"@echo off\nexit /B 0\n",
+	)
 	cfg := agentcontrol.DefaultConfig()
 	cfg.OpenCode.State = agentcontrol.StateEnabled
 	cfg.OpenCode.RealBinary = realBinary

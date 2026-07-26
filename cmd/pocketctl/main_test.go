@@ -249,8 +249,21 @@ func TestDaemonRestartHeartbeatCannotOverwriteChallenge(t *testing.T) {
 }
 
 func TestDaemonRestartTerminationWaitsBeforeCleaningHandshakeFiles(t *testing.T) {
+	if os.Getenv("POCKETCTL_RESTART_HEARTBEAT_HELPER") == "1" {
+		base := os.Getenv("POCKETCTL_RESTART_HEARTBEAT_BASE")
+		for {
+			if err := os.WriteFile(base+".heartbeat", []byte(fmt.Sprintf("%d", os.Getpid())), 0o600); err != nil {
+				os.Exit(2)
+			}
+			time.Sleep(time.Millisecond)
+		}
+	}
 	base := filepath.Join(t.TempDir(), "ready")
-	cmd := exec.Command("sh", "-c", "while :; do echo $$ > \"$1.heartbeat\"; done", "sh", base)
+	cmd := exec.Command(os.Args[0], "-test.run=^TestDaemonRestartTerminationWaitsBeforeCleaningHandshakeFiles$")
+	cmd.Env = append(os.Environ(),
+		"POCKETCTL_RESTART_HEARTBEAT_HELPER=1",
+		"POCKETCTL_RESTART_HEARTBEAT_BASE="+base,
+	)
 	if err := cmd.Start(); err != nil {
 		t.Fatal(err)
 	}
