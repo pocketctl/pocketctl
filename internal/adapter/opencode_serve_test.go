@@ -12,6 +12,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -157,7 +158,7 @@ func TestResolveDefaultModelProviderFallbackAndAllConnected(t *testing.T) {
 
 func TestOpenCodeRestartAttachValidatesPIDAuthAndVersion(t *testing.T) {
 	const password = "handoff-secret"
-	proc := exec.Command("sleep", "30")
+	proc := fakeSleepCommand(30)
 	proc.Env = append(os.Environ(), "OPENCODE_SERVER_PASSWORD="+password)
 	if err := proc.Start(); err != nil {
 		t.Fatal(err)
@@ -198,9 +199,10 @@ func TestOpenCodeRestartAttachValidatesPIDAuthAndVersion(t *testing.T) {
 
 func TestOpenCodeRestartDetectsInstalledVersion(t *testing.T) {
 	cli := filepath.Join(t.TempDir(), "opencode")
-	if err := os.WriteFile(cli, []byte("#!/bin/sh\necho 'bun warning: ABI 9.8.7' >&2\necho 'opencode version 1.2.3-beta.4'\n"), 0o755); err != nil {
-		t.Fatal(err)
-	}
+	cli = writeFakeCommandFixture(t, cli,
+		"#!/bin/sh\necho 'bun warning: ABI 9.8.7' >&2\necho 'opencode version 1.2.3-beta.4'\n",
+		"@echo off\n(>&2 echo bun warning: ABI 9.8.7)\necho opencode version 1.2.3-beta.4\n",
+	)
 	got, err := DetectOpencodeVersion(context.Background(), cli)
 	if err != nil {
 		t.Fatal(err)
@@ -248,10 +250,10 @@ func TestOpenCodeRestartServeOutputSurvivesDetach(t *testing.T) {
 	}))
 	defer httpServer.Close()
 	cli := filepath.Join(t.TempDir(), "opencode")
-	script := fmt.Sprintf("#!/bin/sh\necho 'opencode server listening on %s'\nsleep 0.2\necho late-after-detach\nwhile :; do sleep 1; done\n", httpServer.URL)
-	if err := os.WriteFile(cli, []byte(script), 0o755); err != nil {
-		t.Fatal(err)
-	}
+	cli = writeFakeCommandFixture(t, cli,
+		fmt.Sprintf("#!/bin/sh\necho 'opencode server listening on %s'\nsleep 0.2\necho late-after-detach\nwhile :; do sleep 1; done\n", httpServer.URL),
+		fmt.Sprintf("@echo off\necho opencode server listening on %s\ntimeout /t 1 /nobreak >nul\necho late-after-detach\n:loop\ntimeout /t 1 /nobreak >nul\ngoto loop\n", httpServer.URL),
+	)
 	srv := NewOpencodeServer(cli)
 	if err := srv.Start(context.Background()); err != nil {
 		t.Fatal(err)
@@ -338,8 +340,32 @@ func opencodeHealthHandler(version string) http.Handler {
 	})
 }
 
+func writeFakeCommandFixture(t *testing.T, basePath, unixScript, windowsScript string) string {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		if filepath.Ext(basePath) == "" {
+			basePath += ".cmd"
+		}
+		if err := os.WriteFile(basePath, []byte(windowsScript), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		return basePath
+	}
+	if err := os.WriteFile(basePath, []byte(unixScript), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	return basePath
+}
+
+func fakeSleepCommand(seconds int) *exec.Cmd {
+	if runtime.GOOS == "windows" {
+		return exec.Command("cmd", "/C", "timeout", "/T", strconv.Itoa(seconds), "/NOBREAK")
+	}
+	return exec.Command("sleep", strconv.Itoa(seconds))
+}
+
 func TestOpenCodeRestartStopDoesNotKillOnEndpointIdentityMismatch(t *testing.T) {
-	cmd := exec.Command("sleep", "30")
+	cmd := fakeSleepCommand(30)
 	if err := cmd.Start(); err != nil {
 		t.Fatal(err)
 	}
@@ -371,9 +397,10 @@ func TestOpenCodeRestartStopTreatsExitedLocalChildAsClean(t *testing.T) {
 	}))
 	defer httpServer.Close()
 	cli := filepath.Join(t.TempDir(), "opencode")
-	if err := os.WriteFile(cli, []byte(fmt.Sprintf("#!/bin/sh\necho 'opencode server listening on %s'\nsleep 0.1\n", httpServer.URL)), 0o755); err != nil {
-		t.Fatal(err)
-	}
+	cli = writeFakeCommandFixture(t, cli,
+		fmt.Sprintf("#!/bin/sh\necho 'opencode server listening on %s'\nsleep 0.1\n", httpServer.URL),
+		fmt.Sprintf("@echo off\necho opencode server listening on %s\ntimeout /t 1 /nobreak >nul\n", httpServer.URL),
+	)
 	srv := NewOpencodeServer(cli)
 	if err := srv.Start(context.Background()); err != nil {
 		t.Fatal(err)

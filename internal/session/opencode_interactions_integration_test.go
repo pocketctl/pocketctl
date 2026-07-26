@@ -7,7 +7,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -777,17 +776,17 @@ func startFakeOpenCodeServer(t *testing.T, handler http.Handler) *adapter.Openco
 	t.Helper()
 	httpServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/global/health" {
-			json.NewEncoder(w).Encode(map[string]any{"healthy": true, "version": "test-version"})
+			json.NewEncoder(w).Encode(map[string]any{"healthy": true, "version": "1.17.11"})
 			return
 		}
 		handler.ServeHTTP(w, r)
 	}))
 	t.Cleanup(httpServer.Close)
 	script := filepath.Join(t.TempDir(), "opencode")
-	contents := fmt.Sprintf("#!/bin/sh\nprintf 'opencode server listening on %s\\n'\nwhile :; do sleep 60; done\n", httpServer.URL)
-	if err := os.WriteFile(script, []byte(contents), 0o755); err != nil {
-		t.Fatal(err)
-	}
+	script = writeFakeCommandFixture(t, script,
+		fmt.Sprintf("#!/bin/sh\nprintf 'opencode server listening on %s\\n'\nwhile :; do sleep 60; done\n", httpServer.URL),
+		fmt.Sprintf("@echo off\necho opencode server listening on %s\n:loop\ntimeout /t 60 /nobreak >nul\ngoto loop\n", httpServer.URL),
+	)
 	server := adapter.NewOpencodeServer(script)
 	ctx, cancel := context.WithCancel(context.Background())
 	if err := server.Start(ctx); err != nil {
@@ -848,7 +847,7 @@ func TestOpenCodeRestartPreservesServeOwnership(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if state.PID != pid || state.BaseURL != base || state.Password == "" || state.Version != "test-version" {
+	if state.PID != pid || state.BaseURL != base || state.Password == "" || state.Version != "1.17.11" {
 		t.Fatalf("handoff=%+v", state)
 	}
 	old.Shutdown()
@@ -857,6 +856,15 @@ func TestOpenCodeRestartPreservesServeOwnership(t *testing.T) {
 	nextSM := NewSessionManager(out)
 	next := newOpencodeCoordinator(nextSM)
 	next.ctx, next.cancel = context.WithCancel(context.Background())
+	cli := writeFakeCommandFixture(t, filepath.Join(t.TempDir(), "opencode"),
+		"#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then echo 'opencode version 1.17.11'; fi\n",
+		"@echo off\nif \"%~1\"==\"--version\" echo opencode version 1.17.11\n",
+	)
+	cfg := agentcontrol.DefaultConfig()
+	cfg.OpenCode.RealBinary = cli
+	if err := agentcontrol.SaveConfig(cfg); err != nil {
+		t.Fatal(err)
+	}
 	if err := next.attachHandoffLocked(state); err != nil {
 		t.Fatal(err)
 	}
@@ -896,7 +904,7 @@ func TestOpenCodeRestartPreservesServeOwnership(t *testing.T) {
 
 func TestOpenCodeRestartRejectsConcurrentOwnerAndStopsIncompatibleServe(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
-	owner := exec.Command("sleep", "30")
+	owner := sleepCommand(t, 30)
 	if err := owner.Start(); err != nil {
 		t.Fatal(err)
 	}
@@ -949,16 +957,33 @@ func TestOpenCodeRestartSupervisorReplacesExitedServeAndUpdatesState(t *testing.
 	dir := t.TempDir()
 	counter := filepath.Join(dir, "count")
 	cli := filepath.Join(dir, "opencode")
-	script := fmt.Sprintf(`#!/bin/sh
+	cli = writeFakeCommandFixture(t, cli,
+		fmt.Sprintf(`#!/bin/sh
 if [ "$1" = "--version" ]; then echo 'opencode version 1.2.3'; exit 0; fi
 n=$(cat %q 2>/dev/null || echo 0); n=$((n+1)); echo "$n" > %q
 echo 'opencode server listening on %s'
 if [ "$n" = "1" ]; then sleep 0.1; exit 0; fi
 while :; do sleep 1; done
-`, counter, counter, httpServer.URL)
-	if err := os.WriteFile(cli, []byte(script), 0o755); err != nil {
-		t.Fatal(err)
-	}
+`, counter, counter, httpServer.URL),
+		fmt.Sprintf(`@echo off
+if "%%~1"=="--version" (
+  echo opencode version 1.2.3
+  exit /B 0
+)
+if exist "%s" (
+  set /p n=<"%s"
+) else (
+  set n=0
+)
+set /a n=n+1
+> "%s" echo %%n%%
+echo opencode server listening on %s
+if "%%n%%"=="1" exit /B 0
+:loop
+timeout /t 1 /nobreak >nul
+goto loop
+`, counter, counter, counter, httpServer.URL),
+	)
 	cfg := agentcontrol.DefaultConfig()
 	cfg.OpenCode.RealBinary = cli
 	if err := agentcontrol.SaveConfig(cfg); err != nil {

@@ -226,7 +226,12 @@ describe('Router - replay pagination (session-history-pagination 6.3)', () => {
     router.registerClient(clientWs, 1)
     pool.query.mockImplementation((sql: string) => {
       if (sql.includes('SELECT 1 FROM sessions')) return Promise.resolve({ rows: [{ '?column?': 1 }], rowCount: 1 })
-      if (sql.includes('SELECT status FROM sessions')) return Promise.resolve({ rows: [{ status: 'completed' }], rowCount: 1 })
+      if (sql.includes('SELECT status, turn_started_at, last_activity_at FROM sessions')) {
+        return Promise.resolve({
+          rows: [{ status: 'completed', turn_started_at: null, last_activity_at: null }],
+          rowCount: 1,
+        })
+      }
       if (sql.includes('FROM events')) return Promise.resolve({ rows: [{ id: 1, payload: { type: 'agent_text', text: 'done' } }] })
       return Promise.resolve({ rows: [], rowCount: 0 })
     })

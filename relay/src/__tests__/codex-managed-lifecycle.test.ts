@@ -94,7 +94,7 @@ describe('Codex managed lifecycle relay contract', () => {
 
     await vi.waitFor(() => {
       expect(queriesMatching(pool, 'UPDATE sessions SET')).toContainEqual(expect.objectContaining({
-        params: ['thr_1', 'daemon-1', 'idle', null, null],
+        params: ['thr_1', 'daemon-1', 'idle', null, null, null],
       }))
       expect(queriesMatching(pool, 'INSERT INTO events')).toContainEqual(expect.objectContaining({
         params: ['thr_1', 'session_status', expect.stringContaining('"status":"idle"'), expect.any(String)],
@@ -119,7 +119,7 @@ describe('Codex managed lifecycle relay contract', () => {
 
     await vi.waitFor(() => {
       expect(queriesMatching(pool, 'UPDATE sessions SET')).toContainEqual(expect.objectContaining({
-        params: ['thr_1', 'daemon-1', 'completed', null, null],
+        params: ['thr_1', 'daemon-1', 'completed', null, null, null],
       }))
       expect(client._sent).toContainEqual(expect.objectContaining({
         type: 'session_status',
