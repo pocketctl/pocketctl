@@ -4,23 +4,26 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
+
+	"github.com/pocketctl/pocketctl/internal/config"
 )
 
 // resolveCwd resolves the working directory path:
-// - "" or "~" → os.UserHomeDir()
+// - "" or "~" → config.HomeDir()
 // - "~/xxx" → join(home, "xxx")
 // - other → as-is
 func resolveCwd(cwd string) string {
 	if cwd == "" || cwd == "~" {
-		home, err := os.UserHomeDir()
+		home, err := config.HomeDir()
 		if err != nil {
 			return cwd
 		}
 		return home
 	}
 	if strings.HasPrefix(cwd, "~/") {
-		home, err := os.UserHomeDir()
+		home, err := config.HomeDir()
 		if err != nil {
 			return cwd
 		}
@@ -33,7 +36,18 @@ func resolveCwd(cwd string) string {
 // to an absolute path and resolves symlinks when possible, falling back to
 // filepath.Clean so that "~/repo", "/Users/x/repo", and "/Users/x/./repo" all
 // collapse to a single key.
+//
+// On Windows, a leading slash like "/repo" is preserved as-is so we do not
+// accidentally materialize the current volume (for example "C:\\repo") and
+// break protocol fixtures that use POSIX-style directories.
 func normalizeCwd(p string) string {
+	if strings.TrimSpace(p) == "" {
+		return ""
+	}
+	if shouldPreserveRootedProtocolPath(runtime.GOOS, p, filepath.Separator) {
+		return filepath.Clean(filepath.ToSlash(p))
+	}
+
 	abs, err := filepath.Abs(p)
 	if err != nil {
 		return filepath.Clean(p)
@@ -42,6 +56,11 @@ func normalizeCwd(p string) string {
 		return resolved
 	}
 	return filepath.Clean(abs)
+}
+
+func shouldPreserveRootedProtocolPath(goos, p string, separator uint8) bool {
+	return goos == "windows" &&
+		(strings.HasPrefix(p, "/") || strings.HasPrefix(p, string(separator)))
 }
 
 // registerCwd records (cwd, sessionID) in the cwd→sessions registry. Caller

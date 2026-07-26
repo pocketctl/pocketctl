@@ -892,7 +892,7 @@ describe('Router - event delivery dedup + ack', () => {
           writes.push('create')
           return new Promise(resolve => { releaseCreate = resolve })
         }
-        if (sql.includes('UPDATE sessions SET') && sql.includes('status = $3')) {
+        if (sql.includes('UPDATE sessions SET') && sql.includes('status = input.status')) {
           writes.push('status')
           return Promise.resolve({ rows: [], rowCount: 1 })
         }
@@ -909,8 +909,9 @@ describe('Router - event delivery dedup + ack', () => {
     await tick()
     expect(writes).toEqual(['create'])
     releaseCreate({ rows: [], rowCount: 1 })
-    await tick()
-    expect(writes).toEqual(['create', 'status'])
+    await vi.waitFor(() => {
+      expect(writes).toEqual(['create', 'status'])
+    })
   })
 
   test('special-branch persistence rejection withholds ack and all effects', async () => {

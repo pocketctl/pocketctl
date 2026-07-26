@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+
+	"github.com/pocketctl/pocketctl/internal/config"
 )
 
 // HookMarker is the unique description tag stamped on every PreToolUse entry
@@ -42,7 +44,7 @@ func EnsureHooks(cwd, pocketctlPath string) error {
 // Safe to call on every daemon start: idempotent (deduped by HookMarker) and
 // preserves any user-authored hooks. Pair with RemoveUserHook on shutdown.
 func EnsureUserHook(pocketctlPath string) error {
-	home, err := os.UserHomeDir()
+	home, err := config.HomeDir()
 	if err != nil {
 		return fmt.Errorf("get home dir: %w", err)
 	}
@@ -59,7 +61,7 @@ func EnsureUserHook(pocketctlPath string) error {
 // Called on daemon shutdown so we don't leave a dangling hook pointing at a
 // daemon that's no longer running.
 func RemoveUserHook() error {
-	home, err := os.UserHomeDir()
+	home, err := config.HomeDir()
 	if err != nil {
 		return fmt.Errorf("get home dir: %w", err)
 	}

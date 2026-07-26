@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/fsnotify/fsnotify"
+	"github.com/pocketctl/pocketctl/internal/config"
 )
 
 // DiscoveredSession represents a Claude Code session found in ~/.claude/sessions/
@@ -47,7 +48,7 @@ type SessionWatcher struct {
 
 // NewSessionWatcher creates a watcher for Claude Code sessions directory
 func NewSessionWatcher() (*SessionWatcher, error) {
-	home, err := os.UserHomeDir()
+	home, err := config.HomeDir()
 	if err != nil {
 		return nil, fmt.Errorf("get home dir: %w", err)
 	}

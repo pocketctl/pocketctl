@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/pocketctl/pocketctl/internal/adapter"
+	"github.com/pocketctl/pocketctl/internal/agentcontrol"
 	"github.com/pocketctl/pocketctl/internal/daemon"
 	"github.com/pocketctl/pocketctl/internal/platform"
 	"github.com/pocketctl/pocketctl/internal/protocol"
@@ -956,6 +957,11 @@ if [ "$n" = "1" ]; then sleep 0.1; exit 0; fi
 while :; do sleep 1; done
 `, counter, counter, httpServer.URL)
 	if err := os.WriteFile(cli, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cfg := agentcontrol.DefaultConfig()
+	cfg.OpenCode.RealBinary = cli
+	if err := agentcontrol.SaveConfig(cfg); err != nil {
 		t.Fatal(err)
 	}
 	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))

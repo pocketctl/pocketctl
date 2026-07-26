@@ -329,7 +329,7 @@ func cmdUninstall(args []string) {
 	}
 	var targets []removeTarget
 
-	home, _ := os.UserHomeDir()
+	home, _ := config.HomeDir()
 	if home != "" {
 		targets = append(targets, removeTarget{
 			filepath.Join(home, ".pocketctl"),

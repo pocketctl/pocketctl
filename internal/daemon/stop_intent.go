@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/pocketctl/pocketctl/internal/config"
 	"github.com/pocketctl/pocketctl/internal/platform"
 )
 
@@ -25,7 +26,7 @@ type StopIntent struct {
 }
 
 func StopIntentPath() string {
-	home, _ := os.UserHomeDir()
+	home, _ := config.HomeDir()
 	return filepath.Join(home, ".pocketctl", "daemon-stop.intent")
 }
 func lifecycleLockPath() string { return StopIntentPath() + ".lock" }

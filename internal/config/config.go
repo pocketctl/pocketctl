@@ -19,7 +19,7 @@ type authFile struct {
 // ConfigDir returns the pocketctl config directory (~/.pocketctl/).
 // Creates it if it doesn't exist.
 func ConfigDir() (string, error) {
-	home, err := os.UserHomeDir()
+	home, err := HomeDir()
 	if err != nil {
 		return "", fmt.Errorf("get home dir: %w", err)
 	}
@@ -46,7 +46,7 @@ func AuthPath() (string, error) {
 // lets a `claude` process the user launched in their own terminal reach the
 // running daemon. Returns "" only if the home dir cannot be resolved.
 func ApprovalSocketPath() string {
-	home, err := os.UserHomeDir()
+	home, err := HomeDir()
 	if err != nil {
 		return ""
 	}
@@ -58,7 +58,7 @@ func ApprovalSocketPath() string {
 // 与 ApprovalSocketPath 同置 ~/.pocketctl/ 下，权限由 IPCListener 设 0600。
 // 返回 "" 仅当 home 目录无法解析。
 func ControlSocketPath() string {
-	home, err := os.UserHomeDir()
+	home, err := HomeDir()
 	if err != nil {
 		return ""
 	}
@@ -69,7 +69,7 @@ func ControlSocketPath() string {
 // agent launchers. It intentionally does not reuse ControlSocketPath because
 // the keep-awake control server already owns that listener.
 func AgentControlSocketPath() string {
-	home, err := os.UserHomeDir()
+	home, err := HomeDir()
 	if err != nil {
 		return ""
 	}

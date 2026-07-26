@@ -2,6 +2,8 @@ package daemon
 
 import (
 	"fmt"
+
+	"github.com/pocketctl/pocketctl/internal/config"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -48,7 +50,7 @@ func LogPrefix() string { return logPrefix }
 // ~/.pocketctl/logs. Falls back to /tmp/pocketctl/logs only if the home
 // directory can't be resolved.
 func LogDir() string {
-	home, err := os.UserHomeDir()
+	home, err := config.HomeDir()
 	if err != nil || home == "" {
 		return filepath.Join(runtimeDir(), "logs")
 	}
@@ -72,7 +74,7 @@ func ServiceBootLogPath() string {
 }
 
 func StatePath() string {
-	home, _ := os.UserHomeDir()
+	home, _ := config.HomeDir()
 	return filepath.Join(home, ".pocketctl", "daemon.state")
 }
 

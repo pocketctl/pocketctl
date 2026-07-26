@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/pocketctl/pocketctl/internal/config"
 	"github.com/pocketctl/pocketctl/internal/protocol"
 )
 
@@ -19,7 +20,7 @@ func CodexHome() string {
 	if h := strings.TrimSpace(os.Getenv("CODEX_HOME")); h != "" {
 		return h
 	}
-	home, err := os.UserHomeDir()
+	home, err := config.HomeDir()
 	if err != nil {
 		return ""
 	}

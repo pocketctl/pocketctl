@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/pocketctl/pocketctl/internal/adapter"
+	"github.com/pocketctl/pocketctl/internal/config"
 )
 
 type AgentInfo struct {
@@ -170,7 +171,7 @@ func ResolveAgent(cliName string) (string, bool, bool) {
 // ResolveAgentExcluding locates an agent executable without returning a
 // Pocketctl-owned shim (or any other explicitly excluded path/target).
 func ResolveAgentExcluding(cliName string, excluded ...string) (string, bool, bool) {
-	home, _ := os.UserHomeDir()
+	home, _ := config.HomeDir()
 	cands := candidatePaths(cliName, home, os.Getenv("PATH"), npmPrefix())
 	statReal := func(p string) (string, bool) {
 		if _, err := os.Lstat(p); err != nil {

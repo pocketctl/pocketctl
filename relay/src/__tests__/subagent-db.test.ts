@@ -219,6 +219,7 @@ describe('db listSessions children aggregation', () => {
       tokenIn: 1,
       tokenOut: 2,
       tokenCache: 3,
+      tokenCacheCreate: 0,
     })
   })
 

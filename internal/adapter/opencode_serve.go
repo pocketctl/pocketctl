@@ -21,6 +21,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/pocketctl/pocketctl/internal/config"
 	"github.com/pocketctl/pocketctl/internal/platform"
 	"github.com/pocketctl/pocketctl/internal/protocol"
 )
@@ -149,7 +150,10 @@ func DetectOpencodeVersion(ctx context.Context, cliPath string) (string, error) 
 }
 
 func opencodeServeOutputDir() string {
-	home, _ := os.UserHomeDir()
+	home, err := config.HomeDir()
+	if err != nil {
+		return filepath.Join(".pocketctl", "logs")
+	}
 	return filepath.Join(home, ".pocketctl", "logs")
 }
 

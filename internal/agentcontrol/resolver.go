@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/pocketctl/pocketctl/internal/config"
 	"github.com/pocketctl/pocketctl/internal/discovery"
 )
 
@@ -227,7 +228,7 @@ func defaultCodexShimPath() string {
 }
 
 func defaultShimPath(agent string) string {
-	home, err := os.UserHomeDir()
+	home, err := config.HomeDir()
 	if err != nil {
 		return ""
 	}

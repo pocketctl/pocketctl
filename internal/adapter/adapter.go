@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/pocketctl/pocketctl/internal/config"
 	"github.com/pocketctl/pocketctl/internal/protocol"
 )
 
@@ -217,7 +218,7 @@ func ResolveJSONLPathForPTY(agentType, sessionID, cwd string, hints PTYResolveHi
 // sessions at ~/.claude/projects/<encoded-cwd>/<session-id>.jsonl, with a
 // fallback search across all project dirs when cwd is unknown/stale.
 func resolveClaudeJSONLPath(sessionID, cwd string) (string, error) {
-	home, err := os.UserHomeDir()
+	home, err := config.HomeDir()
 	if err != nil {
 		return "", err
 	}

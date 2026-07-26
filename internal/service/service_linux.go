@@ -8,13 +8,15 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+
+	"github.com/pocketctl/pocketctl/internal/config"
 )
 
 const unitName = "pocketctl.service"
 
 // unitPath returns ~/.config/systemd/user/pocketctl.service.
 func unitPath() (string, error) {
-	home, err := os.UserHomeDir()
+	home, err := config.HomeDir()
 	if err != nil {
 		return "", fmt.Errorf("get home dir: %w", err)
 	}

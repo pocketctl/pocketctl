@@ -7,6 +7,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/pocketctl/pocketctl/internal/config"
 )
 
 // MachineID returns a deterministic daemon ID. The first time it is called on a
@@ -77,10 +79,10 @@ func deriveMachineID() string {
 }
 
 // machineIDCachePath returns ~/.pocketctl/machine.id — the persisted host
-// identifier. Resolves $HOME directly to avoid importing the config package
-// (which would create a daemon→config dependency edge we don't need).
+// identifier. Uses the shared Pocketctl home resolver so state remains isolated
+// when HOME is overridden by a service, test harness, or operator.
 func machineIDCachePath() string {
-	home, err := os.UserHomeDir()
+	home, err := config.HomeDir()
 	if err != nil || home == "" {
 		return "" // caller falls back to deriving each time
 	}
