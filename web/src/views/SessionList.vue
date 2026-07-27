@@ -430,7 +430,7 @@ function handleLogout() {
 .child-row:hover { background: var(--hover, rgba(255,255,255,0.04)); color: #c9d1d9; }
 .child-indent { color: #6B7280; font-size: 12px; flex-shrink: 0; }
 .child-title { color: #c9d1d9; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.child-token { font-size: 11px; padding: 1px 6px; border-radius: 8px; background: #1a2e1a; color: #7ee787; }
+.child-token { font-size: 11px; padding: 1px 6px; border-radius: 8px; background: var(--success-bg); color: var(--success); }
 
 /* Mobile */
 @media (max-width: 768px) {

@@ -940,6 +940,37 @@ describe('Router - event delivery dedup + ack', () => {
   expect(daemonWs._sent.some((m: any) => m.type === 'event_ack')).toBe(false)
   }, 7000)
 
+  test('acks subagent agent_text usage without requiring a root session token row', async () => {
+    const tokenUpdates: string[] = []
+    const missingRootPool: any = {
+      query: vi.fn((sql: string) => {
+        if (sql.includes('INSERT INTO events')) {
+          return Promise.resolve({ rows: [{ id: 1, inserted: true, effect_status: 'pending', effect_step: 0 }] })
+        }
+        if (sql.includes('total_tokens = COALESCE')) {
+          tokenUpdates.push(sql)
+          return Promise.resolve({ rows: [{ session_exists: false, claimed: false, applied: false }], rowCount: 1 })
+        }
+        if (sql.includes("effect_status = 'completed'")) return Promise.resolve({ rows: [], rowCount: 1 })
+        if (sql.includes('FROM daemons')) return Promise.resolve({ rows: [{ daemon_id: 'daemon-1', status: 'online' }] })
+        return Promise.resolve({ rows: [], rowCount: 1 })
+      }),
+      connect: vi.fn(async () => ({ query: (sql: string, params?: any[]) => missingRootPool.query(sql, params), release: vi.fn() })), end: vi.fn(),
+    }
+    const r = new Router(missingRootPool)
+    const daemonWs = createMockWs()
+    await r.registerDaemon(daemonWs, { type: 'register', daemon_id: 'daemon-1', hostname: 'h', agents: [], started_at: 100 }, null)
+
+    r.handleDaemonMessage('daemon-1', {
+      type: 'agent_text', session_id: 'root-not-yet-discovered', agent_id: 'child-1', is_subagent: true,
+      event_id: 'jsonl:child:1:0', usage: { input_tokens: 3 }, seq: 1,
+    })
+    await tick()
+
+    expect(tokenUpdates).toEqual([])
+    expect((r as any).daemonSeq.get('daemon-1').persistedHigh).toBe(1)
+  })
+
   test('ping piggybacks event_ack with the highest CONTIGUOUS persisted seq', async () => {
     const daemonWs = createMockWs()
     await router.registerDaemon(daemonWs, { type: 'register', daemon_id: 'daemon-1', hostname: 'h', agents: [], started_at: 100 }, null)

@@ -593,6 +593,12 @@ func (c *Client) connectAndServe(ctx context.Context) error {
 	done := make(chan struct{})
 	go c.readPump(done)
 	go c.pingPump(ctx, done)
+	go func() {
+		<-done
+		c.outMu.Lock()
+		c.outCond.Broadcast()
+		c.outMu.Unlock()
+	}()
 
 	// Wait for register_ack before replaying. The relay's registerDaemon does
 	// async DB work (upsert/bind/rebuild routes) and only seeds its per-daemon
@@ -632,10 +638,14 @@ func (c *Client) connectAndServe(ctx context.Context) error {
 			// before forwarding to the relay.
 			if c.OnEvent != nil {
 				for _, e := range c.OnEvent(evt) {
-					c.sendEvent(e)
+					if !c.sendEventUntil(e, done) {
+						return fmt.Errorf("connection closed")
+					}
 				}
 			} else {
-				c.sendEvent(evt)
+				if !c.sendEventUntil(evt, done) {
+					return fmt.Errorf("connection closed")
+				}
 			}
 		case <-done:
 			return fmt.Errorf("connection closed")
@@ -818,11 +828,16 @@ func (c *Client) SendMsg(v any) {
 // acked, and written to the current connection. Unlike SendMsg, a write failure
 // here does NOT drop the event — it stays buffered for replay on reconnect.
 func (c *Client) sendEvent(evt protocol.DaemonEvent) {
-	seq, data, ok := c.appendOutbound(&evt)
+	c.sendEventUntil(evt, nil)
+}
+
+func (c *Client) sendEventUntil(evt protocol.DaemonEvent, stop <-chan struct{}) bool {
+	seq, data, ok := c.appendOutboundUntil(&evt, stop)
 	if !ok {
-		return
+		return false
 	}
 	c.writeBuffered(seq, data)
+	return true
 }
 
 // appendOutbound assigns the next seq, marshals the event, and appends it to the
@@ -831,11 +846,19 @@ func (c *Client) sendEvent(evt protocol.DaemonEvent) {
 // on marshal error. Called only from the single serve-loop goroutine, so seqCtr
 // increments are serialized.
 func (c *Client) appendOutbound(evt *protocol.DaemonEvent) (int64, []byte, bool) {
+	return c.appendOutboundUntil(evt, nil)
+}
+
+func (c *Client) appendOutboundUntil(evt *protocol.DaemonEvent, stop <-chan struct{}) (int64, []byte, bool) {
 	c.outMu.Lock()
 	for !c.draining && (len(c.outBuf) >= c.maxOutCount || c.outBytes >= c.maxOutBytes) {
+		if channelClosed(stop) {
+			c.outMu.Unlock()
+			return 0, nil, false
+		}
 		c.outCond.Wait()
 	}
-	if c.draining {
+	if c.draining || channelClosed(stop) {
 		c.outMu.Unlock()
 		return 0, nil, false
 	}
@@ -854,6 +877,18 @@ func (c *Client) appendOutbound(evt *protocol.DaemonEvent) (int64, []byte, bool)
 	c.spool.append(data) // durable mirror (nil-safe, best-effort)
 	c.outMu.Unlock()
 	return seq, data, true
+}
+
+func channelClosed(ch <-chan struct{}) bool {
+	if ch == nil {
+		return false
+	}
+	select {
+	case <-ch:
+		return true
+	default:
+		return false
+	}
 }
 
 // writeBuffered writes one already-buffered event to the current connection. On

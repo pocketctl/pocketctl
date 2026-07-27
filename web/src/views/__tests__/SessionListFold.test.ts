@@ -1,5 +1,7 @@
 import { describe, test, expect, vi, beforeEach } from 'vitest'
 import { mount, flushPromises } from '@vue/test-utils'
+import { readFileSync } from 'node:fs'
+import { resolve } from 'node:path'
 import SessionList from '../SessionList.vue'
 
 const mockSessions = [
@@ -75,6 +77,13 @@ vi.mock('vue-router', () => ({
 describe('SessionList.vue — subagent fold (P2)', () => {
   beforeEach(() => {
     mockPush.mockClear()
+  })
+
+  test('uses the semantic success background for child token usage', () => {
+    const source = readFileSync(resolve(process.cwd(), 'src/views/SessionList.vue'), 'utf8')
+
+    expect(source).toMatch(/\.child-token\s*\{[^}]*background:\s*var\(--success-bg/m)
+    expect(source).toMatch(/\.child-token\s*\{[^}]*color:\s*var\(--success/m)
   })
 
   test('filters out is_subagent sessions from top-level list', async () => {

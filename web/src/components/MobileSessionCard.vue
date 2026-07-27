@@ -216,11 +216,12 @@ function openSession() {
   place-items: center;
   margin: 1px -4px 0 0;
   padding: 0;
-  border: 1px solid var(--border, #30363d);
+  border: 1px solid var(--sub-agent, #c084fc);
   border-radius: 50%;
-  background: var(--surface-raised, #21262d);
-  color: var(--fg-secondary, #c9d1d9);
+  background: var(--sub-agent-bg, rgba(192, 132, 252, .12));
+  color: var(--sub-agent, #c084fc);
 }
+.mobile-subagent-toggle:active { background: var(--sub-agent, #c084fc); color: var(--surface, #161b22); }
 .mobile-subagent-toggle svg { width: 14px; height: 14px; fill: none; stroke: currentColor; stroke-linecap: round; stroke-linejoin: round; stroke-width: 1.7; transition: transform .18s; }
 .mobile-subagent-toggle svg.expanded { transform: rotate(90deg); }
 .mobile-exit-card {

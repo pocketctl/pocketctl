@@ -1,5 +1,7 @@
 import { mount } from '@vue/test-utils'
 import { describe, expect, test } from 'vitest'
+import { readFileSync } from 'node:fs'
+import { resolve } from 'node:path'
 import MobileSessionCard from '../MobileSessionCard.vue'
 
 const session = {
@@ -51,5 +53,12 @@ describe('MobileSessionCard', () => {
     await wrapper.get('.mobile-subagent-toggle').trigger('click')
     expect(wrapper.emitted('toggle-subagents')).toHaveLength(1)
     expect(wrapper.emitted('open')).toHaveLength(1)
+  })
+
+  test('uses semantic theme tokens for the subagent toggle', () => {
+    const source = readFileSync(resolve(process.cwd(), 'src/components/MobileSessionCard.vue'), 'utf8')
+
+    expect(source).toMatch(/\.mobile-subagent-toggle\s*\{[^}]*background:\s*var\(--sub-agent-bg/m)
+    expect(source).toMatch(/\.mobile-subagent-toggle\s*\{[^}]*color:\s*var\(--sub-agent/m)
   })
 })

@@ -491,6 +491,60 @@ func TestOutboundDrainUnblocks(t *testing.T) {
 	}
 }
 
+// TestFullOutboundBufferDoesNotBlockReconnect verifies that connection loss
+// interrupts a producer parked on durable-buffer back-pressure. Without this,
+// the serve loop cannot observe readPump's closed done channel and reconnect.
+func TestFullOutboundBufferDoesNotBlockReconnect(t *testing.T) {
+	var conns int32
+	upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		connection := atomic.AddInt32(&conns, 1)
+		defer conn.Close()
+		for {
+			_, raw, err := conn.ReadMessage()
+			if err != nil {
+				return
+			}
+			var msg map[string]any
+			if json.Unmarshal(raw, &msg) != nil {
+				continue
+			}
+			switch msg["type"] {
+			case "register":
+				_ = conn.WriteJSON(map[string]any{
+					"type":               "register_ack",
+					"supports_event_ack": true,
+				})
+			case "agent_text":
+				if connection == 1 {
+					return // disconnect without ack while the buffer stays full
+				}
+			}
+		}
+	}))
+	defer server.Close()
+
+	out := make(chan protocol.DaemonEvent, 2)
+	c := NewClient(wsURL(server.URL), "tok", "daemon-full-buffer", nil, nil, nil, out, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	c.maxOutCount = 1
+	c.pingInterval = 30 * time.Millisecond
+	c.pongWait = 150 * time.Millisecond
+	c.writeWait = 150 * time.Millisecond
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go c.Run(ctx)
+
+	out <- protocol.DaemonEvent{Type: "agent_text", SessionID: "session-a", Text: "first"}
+	out <- protocol.DaemonEvent{Type: "agent_text", SessionID: "session-a", Text: "second"}
+
+	waitForConns(t, &conns, 2, 3*time.Second)
+}
+
 // TestReplaysUnackedEventsOnReconnect is the end-to-end durability test: an
 // event delivered on the first connection but never acked must be replayed
 // (same seq) after the daemon reconnects.

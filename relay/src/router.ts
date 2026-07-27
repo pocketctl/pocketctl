@@ -1463,7 +1463,7 @@ export class Router {
       if (!inserted) return;
     if (msg.type === 'session_status') this.sessionToDaemon.set(sessionId, daemonId);
       // Accumulate per-turn token usage from agent_text events carrying usage (model-agnostic)
-      if (msg.usage != null) {
+      if (msg.usage != null && !msg.is_subagent) {
         await effect.atomicStep((eventID, nextStep) => db.incrementSessionTokensForEvent(
           this.pool, eventID, nextStep, sessionId, msg.usage,
         ));
