@@ -61,6 +61,28 @@ const mirrorCovers = (relativePath) =>
     (entry) => relativePath === entry || relativePath.startsWith(`${entry}/`),
   )
 
+const walkFiles = (directory) =>
+  fs.readdirSync(directory, { withFileTypes: true }).flatMap((entry) => {
+    const absolutePath = path.join(directory, entry.name)
+    return entry.isDirectory() ? walkFiles(absolutePath) : [absolutePath]
+  })
+
+for (const testFile of walkFiles(path.join(repoRoot, 'relay/src/__tests__'))) {
+  if (!/\.[cm]?[jt]sx?$/.test(testFile)) continue
+  const testText = fs.readFileSync(testFile, 'utf8')
+  for (const match of testText.matchAll(
+    /new URL\(\s*['"]([^'"]+)['"]\s*,\s*import\.meta\.url\s*\)/g,
+  )) {
+    const dependencyPath = path.resolve(path.dirname(testFile), match[1])
+    const relativePath = path.relative(repoRoot, dependencyPath)
+    if (relativePath.startsWith('..')) continue
+    assert.ok(
+      mirrorCovers(relativePath),
+      `relay test dependency is absent from public mirror: ${relativePath}`,
+    )
+  }
+}
+
 const expandRepoPattern = (pattern) => {
   if (!pattern.includes('*')) return [pattern]
   const directory = path.dirname(pattern)

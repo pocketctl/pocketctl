@@ -5,6 +5,7 @@ internal
 relay
 web
 .github
+docker-compose.prod.yml
 docs/adding-an-agent.md
 docs/codex-managed-terminal.md
 docs/claude-cross-device-control.md
