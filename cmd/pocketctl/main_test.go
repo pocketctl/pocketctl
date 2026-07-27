@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -23,6 +24,9 @@ import (
 )
 
 func TestOpenCodeSessionMetaUsesLoadedAuthoritativeState(t *testing.T) {
+	if os.Getenv("POCKETCTL_OPENCODE_SERVE_TEST_HELPER") == "1" {
+		select {}
+	}
 	home := t.TempDir()
 	repo := t.TempDir()
 	t.Setenv("HOME", home)
@@ -31,14 +35,23 @@ func TestOpenCodeSessionMetaUsesLoadedAuthoritativeState(t *testing.T) {
 		t.Fatal(err)
 	}
 	cli := filepath.Join(binDir, "opencode")
-	if err := os.WriteFile(cli, []byte("#!/bin/sh\necho 1.2.3\n"), 0o755); err != nil {
+	cliContents := "#!/bin/sh\necho 1.2.3\n"
+	if runtime.GOOS == "windows" {
+		cli += ".cmd"
+		cliContents = "@echo off\r\necho 1.2.3\r\n"
+	}
+	if err := os.WriteFile(cli, []byte(cliContents), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	serveProcess := exec.Command("sleep", "30")
+	serveProcess := exec.Command(os.Args[0], "-test.run=^TestOpenCodeSessionMetaUsesLoadedAuthoritativeState$")
+	serveProcess.Env = append(os.Environ(), "POCKETCTL_OPENCODE_SERVE_TEST_HELPER=1")
 	if err := serveProcess.Start(); err != nil {
 		t.Fatal(err)
 	}
-	defer serveProcess.Process.Kill()
+	t.Cleanup(func() {
+		_ = serveProcess.Process.Kill()
+		_, _ = serveProcess.Process.Wait()
+	})
 	serve := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		switch r.URL.Path {

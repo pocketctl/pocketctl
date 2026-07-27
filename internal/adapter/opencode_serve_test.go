@@ -14,6 +14,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -338,6 +339,38 @@ func opencodeHealthHandler(version string) http.Handler {
 			http.NotFound(w, r)
 		}
 	})
+}
+
+func TestOpencodeServerHealthChecksUseGlobalEndpoint(t *testing.T) {
+	var apiHealthCalls atomic.Int32
+	httpServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/global/health":
+			fmt.Fprint(w, `{"healthy":true,"version":"1.18.5"}`)
+		case "/api/health":
+			apiHealthCalls.Add(1)
+			http.Error(w, "project-scoped health unavailable", http.StatusServiceUnavailable)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer httpServer.Close()
+
+	srv := &OpencodeServer{
+		baseURL:  httpServer.URL,
+		password: "secret",
+		http:     newHTTPClient(time.Second),
+		httpLong: newHTTPClient(0),
+	}
+	if !srv.Healthy(context.Background()) {
+		t.Fatal("Healthy rejected a healthy global endpoint")
+	}
+	if err := srv.waitHealthy(context.Background(), 100*time.Millisecond); err != nil {
+		t.Fatalf("waitHealthy: %v", err)
+	}
+	if got := apiHealthCalls.Load(); got != 0 {
+		t.Fatalf("project-scoped /api/health calls=%d, want 0", got)
+	}
 }
 
 func writeFakeCommandFixture(t *testing.T, basePath, unixScript, windowsScript string) string {

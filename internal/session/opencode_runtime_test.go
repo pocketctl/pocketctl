@@ -440,17 +440,7 @@ func newOpenCodeRuntimeTestManagerWithHealth(t *testing.T, handler http.Handler,
 	if err := agentcontrol.SaveConfig(cfg); err != nil {
 		t.Fatal(err)
 	}
-	server := startFakeOpenCodeServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/api/health" {
-			value := true
-			if health != nil {
-				value = health()
-			}
-			json.NewEncoder(w).Encode(map[string]bool{"healthy": value})
-			return
-		}
-		handler.ServeHTTP(w, r)
-	}))
+	server := startFakeOpenCodeServerWithHealth(t, handler, health)
 	sm := NewSessionManager(make(chan protocol.DaemonEvent, 32))
 	coord := newOpencodeCoordinator(sm)
 	coord.mu.Lock()

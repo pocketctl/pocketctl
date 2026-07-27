@@ -355,10 +355,7 @@ func (s *OpencodeServer) waitHealthy(ctx context.Context, timeout time.Duration)
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		var out struct {
-			Healthy bool `json:"healthy"`
-		}
-		if err := s.get(ctx, "/api/health", &out); err == nil && out.Healthy {
+		if out, err := s.globalHealth(ctx); err == nil && out.Healthy {
 			return nil
 		}
 		time.Sleep(300 * time.Millisecond)
@@ -366,12 +363,11 @@ func (s *OpencodeServer) waitHealthy(ctx context.Context, timeout time.Duration)
 	return fmt.Errorf("opencode serve health check timed out")
 }
 
-// Healthy reports whether the server currently answers /api/health.
+// Healthy reports whether the server currently answers the documented global
+// health endpoint without initializing a project-scoped instance.
 func (s *OpencodeServer) Healthy(ctx context.Context) bool {
-	var out struct {
-		Healthy bool `json:"healthy"`
-	}
-	return s.get(ctx, "/api/health", &out) == nil && out.Healthy
+	out, err := s.globalHealth(ctx)
+	return err == nil && out.Healthy
 }
 
 // ---- REST operations ----

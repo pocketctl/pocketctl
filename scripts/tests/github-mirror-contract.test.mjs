@@ -56,6 +56,51 @@ for (const script of requiredScripts) {
   assert.ok(mirrored.has(script), `workflow dependency is absent from public mirror: ${script}`)
 }
 
+const mirrorCovers = (relativePath) =>
+  [...mirrored].some(
+    (entry) => relativePath === entry || relativePath.startsWith(`${entry}/`),
+  )
+
+const expandRepoPattern = (pattern) => {
+  if (!pattern.includes('*')) return [pattern]
+  const directory = path.dirname(pattern)
+  const basenamePattern = path
+    .basename(pattern)
+    .replace(/[.+?^${}()|[\]\\]/g, '\\$&')
+    .replaceAll('*', '.*')
+  const matcher = new RegExp(`^${basenamePattern}$`)
+  return fs
+    .readdirSync(path.join(repoRoot, directory))
+    .filter((name) => matcher.test(name))
+    .map((name) => path.join(directory, name))
+}
+
+const managedGateIOSPaths = new Set()
+for (const script of requiredScripts) {
+  if (!/^scripts\/test-(?:opencode|codex)-managed\.sh$/.test(script)) continue
+  const scriptText = fs.readFileSync(path.join(repoRoot, script), 'utf8')
+  for (const match of scriptText.matchAll(/\bios\/[A-Za-z0-9_./*-]+/g)) {
+    for (const relativePath of expandRepoPattern(match[0])) {
+      managedGateIOSPaths.add(relativePath)
+    }
+  }
+}
+
+for (const testPath of [...managedGateIOSPaths]) {
+  if (!/^ios\/Tests\/.*\.swift$/.test(testPath)) continue
+  const testText = fs.readFileSync(path.join(repoRoot, testPath), 'utf8')
+  for (const match of testText.matchAll(/\bios\/[A-Za-z0-9_./-]+/g)) {
+    managedGateIOSPaths.add(match[0])
+  }
+}
+
+for (const relativePath of managedGateIOSPaths) {
+  assert.ok(
+    mirrorCovers(relativePath),
+    `managed gate iOS dependency is absent from public mirror: ${relativePath}`,
+  )
+}
+
 for (const readmeName of ['README.md', 'README.zh-CN.md']) {
   const readme = fs.readFileSync(path.join(repoRoot, readmeName), 'utf8')
   for (const match of readme.matchAll(/\]\(([^)]+)\)/g)) {

@@ -778,10 +778,18 @@ func TestOpenCodeSyncEmitsInitialEmptyTodoSnapshot(t *testing.T) {
 }
 
 func startFakeOpenCodeServer(t *testing.T, handler http.Handler) *adapter.OpencodeServer {
+	return startFakeOpenCodeServerWithHealth(t, handler, nil)
+}
+
+func startFakeOpenCodeServerWithHealth(t *testing.T, handler http.Handler, health func() bool) *adapter.OpencodeServer {
 	t.Helper()
 	httpServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/global/health" {
-			json.NewEncoder(w).Encode(map[string]any{"healthy": true, "version": "1.17.11"})
+			value := true
+			if health != nil {
+				value = health()
+			}
+			json.NewEncoder(w).Encode(map[string]any{"healthy": value, "version": "1.17.11"})
 			return
 		}
 		handler.ServeHTTP(w, r)

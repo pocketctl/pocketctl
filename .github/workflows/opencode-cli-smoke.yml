@@ -33,33 +33,72 @@ jobs:
         run: |
           set -euo pipefail
           opencode --version
+
+          smoke_dir="$(mktemp -d /tmp/pocketctl-opencode-smoke.XXXXXX)"
+          serve_log=/tmp/opencode-nightly.log
+          serve_pid=
+          cleanup() {
+            status=$?
+            if [[ "$status" != "0" ]]; then
+              echo "::group::OpenCode serve diagnostics"
+              sed -n '1,200p' "$serve_log" 2>/dev/null || true
+              echo "::endgroup::"
+            fi
+            if [[ -n "$serve_pid" ]]; then
+              kill "$serve_pid" 2>/dev/null || true
+              wait "$serve_pid" 2>/dev/null || true
+            fi
+            rm -rf "$smoke_dir"
+            exit "$status"
+          }
+          trap cleanup EXIT
+
           export OPENCODE_SERVER_PASSWORD=nightly-smoke-only
-          opencode serve --hostname 127.0.0.1 --port 4096 >/tmp/opencode-nightly.log 2>&1 &
+          opencode serve \
+            --hostname 127.0.0.1 \
+            --port 4096 \
+            --pure \
+            --print-logs \
+            --log-level DEBUG \
+            >"$serve_log" 2>&1 &
           serve_pid=$!
-          trap 'kill "$serve_pid" 2>/dev/null || true' EXIT
 
           healthy=0
           for _ in {1..60}; do
-            if curl --fail --silent --show-error \
+            if ! kill -0 "$serve_pid" 2>/dev/null; then
+              echo "OpenCode serve exited before becoming healthy"
+              break
+            fi
+            if curl \
+              --fail \
+              --silent \
+              --show-error \
+              --connect-timeout 1 \
+              --max-time 3 \
               --user opencode:nightly-smoke-only \
-              http://127.0.0.1:4096/api/health \
-              | jq -e '.healthy == true' >/dev/null; then
+              http://127.0.0.1:4096/global/health \
+              | jq -e '.healthy == true and (.version | type == "string" and length > 0)' >/dev/null; then
               healthy=1
               break
             fi
             sleep 0.25
           done
           if [[ "$healthy" != "1" ]]; then
-            sed -n '1,160p' /tmp/opencode-nightly.log
+            echo "OpenCode serve did not become healthy within the bounded retry window"
             exit 1
           fi
 
-          curl --fail --silent --show-error \
+          curl \
+            --fail \
+            --silent \
+            --show-error \
+            --connect-timeout 1 \
+            --max-time 5 \
             --user opencode:nightly-smoke-only \
             --header 'Content-Type: application/json' \
-            --data "{\"location\":{\"directory\":\"$GITHUB_WORKSPACE\"}}" \
-            http://127.0.0.1:4096/api/session \
-            | jq -e '.data.id | strings | length > 0' >/dev/null
+            --data '{}' \
+            "http://127.0.0.1:4096/session?directory=$smoke_dir" \
+            | jq -e '.id | strings | length > 0' >/dev/null
 
       - uses: actions/setup-go@v5
         with:
