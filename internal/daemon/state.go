@@ -108,7 +108,7 @@ func ReadOpenCodeServeState() (*OpenCodeServeState, error) {
 	if err != nil {
 		return nil, err
 	}
-	if !lstat.Mode().IsRegular() || lstat.Mode().Perm() != 0o600 || !stateFileOwnedByCurrentUser(lstat) {
+	if !lstat.Mode().IsRegular() || !stateFileHasPrivatePermissions(lstat) || !stateFileOwnedByCurrentUser(lstat) {
 		return nil, fmt.Errorf("opencode serve state must be a private regular file (0600)")
 	}
 	f, err := os.Open(path)
@@ -117,7 +117,7 @@ func ReadOpenCodeServeState() (*OpenCodeServeState, error) {
 	}
 	defer f.Close()
 	fstat, err := f.Stat()
-	if err != nil || !os.SameFile(lstat, fstat) || !fstat.Mode().IsRegular() || fstat.Mode().Perm() != 0o600 || !stateFileOwnedByCurrentUser(fstat) {
+	if err != nil || !os.SameFile(lstat, fstat) || !fstat.Mode().IsRegular() || !stateFileHasPrivatePermissions(fstat) || !stateFileOwnedByCurrentUser(fstat) {
 		return nil, fmt.Errorf("opencode serve state changed while opening")
 	}
 	data, err := io.ReadAll(io.LimitReader(f, 64<<10))

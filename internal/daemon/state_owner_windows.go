@@ -7,3 +7,7 @@ import "os"
 // The state lives below the current user's profile and is opened with private
 // mode. Windows ownership enforcement is provided by the profile ACL.
 func stateFileOwnedByCurrentUser(info os.FileInfo) bool { return true }
+
+// Go reports synthesized Unix permission bits on Windows (typically 0666),
+// while access control is enforced by the user's profile ACL.
+func stateFileHasPrivatePermissions(info os.FileInfo) bool { return true }

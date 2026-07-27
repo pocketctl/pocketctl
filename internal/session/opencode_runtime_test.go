@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -389,7 +390,11 @@ func TestOpenCodeRuntimeAcquireDuplicateOperationCreatesOnce(t *testing.T) {
 		}
 		json.NewEncoder(w).Encode([]any{})
 	}), nil)
-	dir, err := os.MkdirTemp("/tmp", "pocketctl-runtime-acquire-")
+	tempBase := os.TempDir()
+	if runtime.GOOS != "windows" {
+		tempBase = "/tmp"
+	}
+	dir, err := os.MkdirTemp(tempBase, "pc-runtime-")
 	if err != nil {
 		t.Fatal(err)
 	}

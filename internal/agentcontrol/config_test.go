@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 	"time"
 )
@@ -71,7 +72,7 @@ func TestLauncherConfigAtomicPrivateRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if info.Mode().Perm() != 0o600 {
+	if runtime.GOOS != "windows" && info.Mode().Perm() != 0o600 {
 		t.Fatalf("mode=%o, want 600", info.Mode().Perm())
 	}
 	if matches, err := filepath.Glob(filepath.Join(filepath.Dir(path), ".agent-launchers-*")); err != nil || len(matches) != 0 {

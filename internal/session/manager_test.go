@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -18,6 +19,7 @@ import (
 )
 
 func TestEnsureOpenCodeSessionLoadedBeforeDiscovery(t *testing.T) {
+	repo := t.TempDir()
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		switch {
@@ -25,7 +27,7 @@ func TestEnsureOpenCodeSessionLoadedBeforeDiscovery(t *testing.T) {
 			_ = json.NewEncoder(w).Encode(map[string]bool{"healthy": true})
 		case r.Method == http.MethodGet && r.URL.Path == "/api/session/ses_1":
 			_ = json.NewEncoder(w).Encode(map[string]any{"data": map[string]any{
-				"id": "ses_1", "directory": "/repo", "agent": "build",
+				"id": "ses_1", "directory": repo, "agent": "build",
 				"model": map[string]string{"providerID": "opencode", "id": "deepseek-v4-flash-free"},
 			}})
 		case r.Method == http.MethodGet && r.URL.Path == "/session/status":
@@ -53,8 +55,8 @@ func TestEnsureOpenCodeSessionLoadedBeforeDiscovery(t *testing.T) {
 	if agent, ok := sm.GetSessionAgent("ses_1"); !ok || agent != adapter.AgentOpencode {
 		t.Fatalf("agent=%q ok=%v, want opencode", agent, ok)
 	}
-	if cwd, ok := sm.GetSessionCwd("ses_1"); !ok || cwd != "/repo" {
-		t.Fatalf("cwd=%q ok=%v, want /repo", cwd, ok)
+	if cwd, ok := sm.GetSessionCwd("ses_1"); !ok || cwd != repo {
+		t.Fatalf("cwd=%q ok=%v, want %q", cwd, ok, repo)
 	}
 	if model, ok := sm.GetSessionModel("ses_1"); !ok || model != "opencode/deepseek-v4-flash-free" {
 		t.Fatalf("model=%q ok=%v", model, ok)
@@ -68,7 +70,7 @@ func TestEnsureOpenCodeSessionLoadedBeforeDiscovery(t *testing.T) {
 	if got := sm.CurrentSessionAgent(context.Background(), "ses_1"); got != "build" {
 		t.Fatalf("current agent=%q, want build", got)
 	}
-	if sm.CwdSessionCount("/repo") != 1 {
+	if sm.CwdSessionCount(repo) != 1 {
 		t.Fatalf("cwd registration count=%d, want 1", sm.CwdSessionCount("/repo"))
 	}
 	if !coord.isTracked("ses_1") {
@@ -126,14 +128,15 @@ func TestEnsureOpenCodeSessionLoadedFallsBackOnlyAfter404(t *testing.T) {
 }
 
 func TestEnsureOpenCodeSessionLoadedRejectsMalformedMetadata(t *testing.T) {
+	repo := t.TempDir()
 	responses := map[string]string{
 		"empty":        `{}`,
 		"null":         `{"data":null}`,
-		"wrong":        `{"data":{"id":"ses_other","directory":"/repo","agent":"build","model":{"providerID":"opencode","id":"deepseek-v4-flash-free"}}}`,
+		"wrong":        fmt.Sprintf(`{"data":{"id":"ses_other","directory":%q,"agent":"build","model":{"providerID":"opencode","id":"deepseek-v4-flash-free"}}}`, repo),
 		"missing-cwd":  `{"data":{"id":"missing-cwd","agent":"build","model":{"providerID":"opencode","id":"deepseek-v4-flash-free"}}}`,
 		"relative-cwd": `{"data":{"id":"relative-cwd","directory":"repo","agent":"build","model":{"providerID":"opencode","id":"deepseek-v4-flash-free"}}}`,
-		"missing-meta": `{"data":{"id":"missing-meta","directory":"/repo"}}`,
-		"valid":        `{"data":{"id":"valid","directory":"/repo","agent":"build","model":{"providerID":"opencode","id":"deepseek-v4-flash-free"}}}`,
+		"missing-meta": fmt.Sprintf(`{"data":{"id":"missing-meta","directory":%q}}`, repo),
+		"valid":        fmt.Sprintf(`{"data":{"id":"valid","directory":%q,"agent":"build","model":{"providerID":"opencode","id":"deepseek-v4-flash-free"}}}`, repo),
 	}
 	serve := startFakeOpenCodeServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -160,7 +163,7 @@ func TestEnsureOpenCodeSessionLoadedRejectsMalformedMetadata(t *testing.T) {
 			if sm.EnsureOpencodeSessionLoaded(id) {
 				t.Fatalf("malformed %s response was loaded", id)
 			}
-			if _, ok := sm.GetSessionAgent(id); ok || coord.isTracked(id) || sm.CwdSessionCount("/repo") != 0 {
+			if _, ok := sm.GetSessionAgent(id); ok || coord.isTracked(id) || sm.CwdSessionCount(repo) != 0 {
 				t.Fatalf("malformed %s response published state, cwd, or sync", id)
 			}
 		})
@@ -171,6 +174,7 @@ func TestEnsureOpenCodeSessionLoadedRejectsMalformedMetadata(t *testing.T) {
 }
 
 func TestEnsureOpenCodeSessionLoadedConcurrentCallersWaitForSetup(t *testing.T) {
+	repo := t.TempDir()
 	var requestCount atomic.Int32
 	firstRequest := make(chan struct{})
 	release := make(chan struct{})
@@ -184,7 +188,7 @@ func TestEnsureOpenCodeSessionLoadedConcurrentCallersWaitForSetup(t *testing.T) 
 				close(firstRequest)
 			}
 			<-release
-			_, _ = w.Write([]byte(`{"data":{"id":"ses_concurrent","directory":"/repo","agent":"build","model":{"providerID":"opencode","id":"deepseek-v4-flash-free"}}}`))
+			_, _ = fmt.Fprintf(w, `{"data":{"id":"ses_concurrent","directory":%q,"agent":"build","model":{"providerID":"opencode","id":"deepseek-v4-flash-free"}}}`, repo)
 		default:
 			http.NotFound(w, r)
 		}
@@ -201,7 +205,7 @@ func TestEnsureOpenCodeSessionLoadedConcurrentCallersWaitForSetup(t *testing.T) 
 	for range callers {
 		go func() {
 			loaded := sm.EnsureOpencodeSessionLoaded("ses_concurrent")
-			if loaded && (sm.CwdSessionCount("/repo") != 1 || !coord.isTracked("ses_concurrent")) {
+			if loaded && (sm.CwdSessionCount(repo) != 1 || !coord.isTracked("ses_concurrent")) {
 				results <- false
 				return
 			}
@@ -219,7 +223,7 @@ func TestEnsureOpenCodeSessionLoadedConcurrentCallersWaitForSetup(t *testing.T) 
 	if got := requestCount.Load(); got != 1 {
 		t.Fatalf("GetSession requests=%d, want one", got)
 	}
-	if sm.CwdSessionCount("/repo") != 1 || !coord.isTracked("ses_concurrent") {
+	if sm.CwdSessionCount(repo) != 1 || !coord.isTracked("ses_concurrent") {
 		t.Fatal("final cwd/sync setup incomplete")
 	}
 }

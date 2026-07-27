@@ -302,7 +302,7 @@ func (s *OpencodeServer) Stop() error {
 			err = platform.NewProcessController().Kill(pid)
 		}
 	}
-	if err != nil && !errors.Is(err, os.ErrProcessDone) {
+	if err != nil && !errors.Is(err, os.ErrProcessDone) && platform.NewProcessController().IsAlive(pid) {
 		return err
 	}
 	if cancel != nil {

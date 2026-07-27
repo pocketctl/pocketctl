@@ -59,16 +59,17 @@ func TestOpenCodeLaunchPlan(t *testing.T) {
 }
 
 func TestOpenCodeManagedArgs(t *testing.T) {
+	repo := t.TempDir()
 	result := AcquireResult{BaseURL: "http://127.0.0.1:4096", ResolvedSessionID: "ses_new"}
-	interactive := PlanOpenCode([]string{"-c", "--fork"}, "/repo")
-	if got, want := interactive.ManagedArgs(result), []string{"attach", result.BaseURL, "--dir", "/repo", "--session", "ses_new", "--fork"}; !reflect.DeepEqual(got, want) {
+	interactive := PlanOpenCode([]string{"-c", "--fork"}, repo)
+	if got, want := interactive.ManagedArgs(result), []string{"attach", result.BaseURL, "--dir", repo, "--session", "ses_new", "--fork"}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("interactive args=%q, want %q", got, want)
 	}
-	run := PlanOpenCode([]string{"run", "fix tests"}, "/repo")
-	if got, want := run.ManagedArgs(result), []string{"run", "--attach", result.BaseURL, "--dir", "/repo", "--session", "ses_new", "fix tests"}; !reflect.DeepEqual(got, want) {
+	run := PlanOpenCode([]string{"run", "fix tests"}, repo)
+	if got, want := run.ManagedArgs(result), []string{"run", "--attach", result.BaseURL, "--dir", repo, "--session", "ses_new", "fix tests"}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("run args=%q, want %q", got, want)
 	}
-	runWithDir := PlanOpenCode([]string{"run", "--dir", "/other", "fix"}, "/repo")
+	runWithDir := PlanOpenCode([]string{"run", "--dir", "/other", "fix"}, repo)
 	if got, want := runWithDir.ManagedArgs(result), []string{"run", "--attach", result.BaseURL, "--session", "ses_new", "--dir", "/other", "fix"}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("run args=%q, want %q", got, want)
 	}

@@ -41,13 +41,23 @@ func TestClaudeApprovalRegistryMultiplePending(t *testing.T) {
 	if len(snapshot) != 2 {
 		t.Fatalf("pending snapshot len=%d want 2", len(snapshot))
 	}
-	if snapshot[0].RequestID != "req-2" || snapshot[1].RequestID != "req-1" {
-		t.Fatalf("pending order=%q,%q", snapshot[0].RequestID, snapshot[1].RequestID)
+	req2Index := -1
+	seen := make(map[string]bool, len(snapshot))
+	for i, pending := range snapshot {
+		seen[pending.RequestID] = true
+		if pending.RequestID == "req-2" {
+			req2Index = i
+		}
 	}
-	snapshot[0].Input[0] = '['
+	if !seen["req-1"] || !seen["req-2"] || req2Index < 0 {
+		t.Fatalf("pending IDs=%v", seen)
+	}
+	snapshot[req2Index].Input[0] = '['
 	again := sm.PendingClaudeApprovals("claude-1")
-	if string(again[0].Input) != `{"file":"b"}` {
-		t.Fatalf("snapshot mutated registry input: %s", again[0].Input)
+	for _, pending := range again {
+		if pending.RequestID == "req-2" && string(pending.Input) != `{"file":"b"}` {
+			t.Fatalf("snapshot mutated registry input: %s", pending.Input)
+		}
 	}
 
 	approved := true

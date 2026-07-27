@@ -13,6 +13,7 @@ import (
 )
 
 func TestOpenCodeLauncherDaemonUnavailableFallsBack(t *testing.T) {
+	repo := t.TempDir()
 	var executed ExecSpec
 	var stderr bytes.Buffer
 	launcher := Launcher{
@@ -28,14 +29,14 @@ func TestOpenCodeLauncherDaemonUnavailableFallsBack(t *testing.T) {
 	}
 
 	started := time.Now()
-	err := launcher.Run(context.Background(), []string{"-c"}, "/repo")
+	err := launcher.Run(context.Background(), []string{"-c"}, repo)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if elapsed := time.Since(started); elapsed > 300*time.Millisecond {
 		t.Fatalf("fallback took %v", elapsed)
 	}
-	if executed.Path != "/real/opencode" || !reflect.DeepEqual(executed.Args, []string{"-c"}) || executed.Dir != "/repo" {
+	if executed.Path != "/real/opencode" || !reflect.DeepEqual(executed.Args, []string{"-c"}) || executed.Dir != repo {
 		t.Fatalf("exec=%+v", executed)
 	}
 	if !reflect.DeepEqual(executed.Env, []string{"HOME=/tmp/home", "TERM=xterm"}) {
@@ -91,6 +92,7 @@ func TestOpenCodeLauncherNativePlanDoesNotDial(t *testing.T) {
 }
 
 func TestOpenCodeLauncherManagedAttachKeepsPasswordOutOfArgs(t *testing.T) {
+	repo := t.TempDir()
 	var payload AcquirePayload
 	var executed ExecSpec
 	launcher := Launcher{
@@ -102,10 +104,10 @@ func TestOpenCodeLauncherManagedAttachKeepsPasswordOutOfArgs(t *testing.T) {
 		Execute:       func(spec ExecSpec) error { executed = spec; return nil },
 		Environ:       func() []string { return []string{"HOME=/tmp/home", "OPENCODE_SERVER_PASSWORD=old"} },
 	}
-	if err := launcher.Run(context.Background(), []string{"-s", "ses_1"}, "/repo"); err != nil {
+	if err := launcher.Run(context.Background(), []string{"-s", "ses_1"}, repo); err != nil {
 		t.Fatal(err)
 	}
-	if payload.Intent != IntentResume || payload.SessionID != "ses_1" || payload.CWD != "/repo" || payload.OperationID == "" {
+	if payload.Intent != IntentResume || payload.SessionID != "ses_1" || payload.CWD != repo || payload.OperationID == "" {
 		t.Fatalf("payload=%+v", payload)
 	}
 	if executed.Path != "/daemon/opencode" || strings.Contains(strings.Join(executed.Args, " "), "secret") {
