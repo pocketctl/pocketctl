@@ -18,7 +18,12 @@ func TestOpenCodeInstallerWindowsWrapperRoundTrip(t *testing.T) {
 	if err := installPlatformShim(shim, pocketctl, AgentOpenCode); err != nil {
 		t.Fatal(err)
 	}
-	want := windowsShimMarker + "\r\n@\"" + pocketctl + "\" __agent-launch opencode %*\r\n"
+	want := windowsShimMarker + "\r\n" +
+		"@if not exist \"" + pocketctl + "\" goto fallback\r\n" +
+		"@\"" + pocketctl + "\" __agent-launch opencode %*\r\n" +
+		"@exit /b %errorlevel%\r\n" +
+		":fallback\r\n" +
+		"@exit /b 9009\r\n"
 	data, err := os.ReadFile(shim)
 	if err != nil || string(data) != want {
 		t.Fatalf("wrapper=%q err=%v, want %q", data, err, want)

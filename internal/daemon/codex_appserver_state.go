@@ -81,7 +81,7 @@ func ReadCodexAppServerState() (*CodexAppServerState, error) {
 	if err != nil {
 		return nil, err
 	}
-	if !lstat.Mode().IsRegular() || lstat.Mode().Perm() != 0o600 || !stateFileOwnedByCurrentUser(lstat) {
+	if !lstat.Mode().IsRegular() || !stateFileHasPrivatePermissions(lstat) || !stateFileOwnedByCurrentUser(lstat) {
 		return nil, fmt.Errorf("codex app-server state must be a private regular file (0600)")
 	}
 	file, err := os.Open(path)
@@ -90,7 +90,7 @@ func ReadCodexAppServerState() (*CodexAppServerState, error) {
 	}
 	defer file.Close()
 	fstat, err := file.Stat()
-	if err != nil || !os.SameFile(lstat, fstat) || !fstat.Mode().IsRegular() || fstat.Mode().Perm() != 0o600 || !stateFileOwnedByCurrentUser(fstat) {
+	if err != nil || !os.SameFile(lstat, fstat) || !fstat.Mode().IsRegular() || !stateFileHasPrivatePermissions(fstat) || !stateFileOwnedByCurrentUser(fstat) {
 		return nil, fmt.Errorf("codex app-server state changed while opening")
 	}
 	raw, err := io.ReadAll(io.LimitReader(file, 128<<10))

@@ -9,6 +9,7 @@ import (
 )
 
 func TestCodexLauncherAppendsOfficialRemoteAndUsesCodexAcquire(t *testing.T) {
+	repo := t.TempDir()
 	var payload AcquirePayload
 	var executed ExecSpec
 	launcher := CodexLauncher{
@@ -24,10 +25,10 @@ func TestCodexLauncherAppendsOfficialRemoteAndUsesCodexAcquire(t *testing.T) {
 		Execute:   func(spec ExecSpec) error { executed = spec; return nil },
 		Environ:   func() []string { return []string{"HOME=/tmp/home"} },
 	}
-	if err := launcher.Run(context.Background(), []string{"resume", "thread-1"}, "/repo"); err != nil {
+	if err := launcher.Run(context.Background(), []string{"resume", "thread-1"}, repo); err != nil {
 		t.Fatal(err)
 	}
-	if payload.Intent != IntentResume || payload.SessionID != "thread-1" || payload.CWD != "/repo" {
+	if payload.Intent != IntentResume || payload.SessionID != "thread-1" || payload.CWD != repo {
 		t.Fatalf("payload=%+v", payload)
 	}
 	want := []string{"resume", "thread-1", "--remote", "unix:///tmp/pocketctl-codex.sock"}

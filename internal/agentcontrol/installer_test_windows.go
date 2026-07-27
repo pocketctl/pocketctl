@@ -6,4 +6,3 @@ package agentcontrol
 func testShimMarker() string {
 	return windowsShimMarker
 }
-

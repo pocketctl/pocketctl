@@ -60,7 +60,7 @@ func TestOpenCodeP1IntegrationFlow(t *testing.T) {
 			mu.Unlock()
 			w.WriteHeader(http.StatusNoContent)
 		case r.Method == http.MethodPost && strings.HasPrefix(r.URL.Path, "/permission/") && strings.HasSuffix(r.URL.Path, "/reply"):
-			if r.URL.Query().Get("directory") != "/repo" {
+			if r.URL.Query().Get("directory") != normalizeCwd("/repo") {
 				t.Errorf("permission reply directory=%q", r.URL.Query().Get("directory"))
 			}
 			var body map[string]string
@@ -70,7 +70,7 @@ func TestOpenCodeP1IntegrationFlow(t *testing.T) {
 			mu.Unlock()
 			w.WriteHeader(http.StatusNoContent)
 		case r.Method == http.MethodPost && r.URL.Path == "/question/que_1/reply":
-			if r.URL.Query().Get("directory") != "/repo" {
+			if r.URL.Query().Get("directory") != normalizeCwd("/repo") {
 				t.Errorf("question reply directory=%q", r.URL.Query().Get("directory"))
 			}
 			var body struct {
@@ -82,7 +82,7 @@ func TestOpenCodeP1IntegrationFlow(t *testing.T) {
 			mu.Unlock()
 			w.WriteHeader(http.StatusNoContent)
 		case r.Method == http.MethodPost && r.URL.Path == "/question/que_reject/reject":
-			if r.URL.Query().Get("directory") != "/repo" {
+			if r.URL.Query().Get("directory") != normalizeCwd("/repo") {
 				t.Errorf("question reject directory=%q", r.URL.Query().Get("directory"))
 			}
 			mu.Lock()
@@ -92,7 +92,7 @@ func TestOpenCodeP1IntegrationFlow(t *testing.T) {
 		case r.Method == http.MethodGet && r.URL.Path == "/session/status":
 			json.NewEncoder(w).Encode(map[string]any{"ses_1": map[string]any{"type": "idle"}})
 		case r.Method == http.MethodGet && r.URL.Path == "/permission":
-			if r.URL.Query().Get("directory") != "/repo" {
+			if r.URL.Query().Get("directory") != normalizeCwd("/repo") {
 				t.Errorf("permission directory=%q", r.URL.Query().Get("directory"))
 			}
 			mu.Lock()
@@ -104,7 +104,7 @@ func TestOpenCodeP1IntegrationFlow(t *testing.T) {
 				json.NewEncoder(w).Encode([]any{})
 			}
 		case r.Method == http.MethodGet && r.URL.Path == "/question":
-			if r.URL.Query().Get("directory") != "/repo" {
+			if r.URL.Query().Get("directory") != normalizeCwd("/repo") {
 				t.Errorf("question directory=%q", r.URL.Query().Get("directory"))
 			}
 			json.NewEncoder(w).Encode([]any{})
@@ -246,7 +246,7 @@ func TestOpenCodePerSessionRecoveryIncludesLegacyInteractions(t *testing.T) {
 		case r.URL.Path == "/api/health":
 			json.NewEncoder(w).Encode(map[string]bool{"healthy": true})
 		case r.Method == http.MethodGet && r.URL.Path == "/permission":
-			if r.URL.Query().Get("directory") != "/repo" {
+			if r.URL.Query().Get("directory") != normalizeCwd("/repo") {
 				t.Errorf("permission directory=%q", r.URL.Query().Get("directory"))
 			}
 			json.NewEncoder(w).Encode([]map[string]any{
@@ -254,7 +254,7 @@ func TestOpenCodePerSessionRecoveryIncludesLegacyInteractions(t *testing.T) {
 				{"requestID": "per_other", "sessionID": "ses_other", "permission": "edit"},
 			})
 		case r.Method == http.MethodGet && r.URL.Path == "/question":
-			if r.URL.Query().Get("directory") != "/repo" {
+			if r.URL.Query().Get("directory") != normalizeCwd("/repo") {
 				t.Errorf("question directory=%q", r.URL.Query().Get("directory"))
 			}
 			json.NewEncoder(w).Encode([]map[string]any{
@@ -315,7 +315,7 @@ func TestOpenCodeInteractionReconcileGroupsLegacyRequestsByCwd(t *testing.T) {
 			mu.Lock()
 			calls[r.URL.Path+":"+directory]++
 			mu.Unlock()
-			if r.URL.Path == "/permission" && directory == "/repo/a" {
+			if r.URL.Path == "/permission" && directory == normalizeCwd("/repo/a") {
 				json.NewEncoder(w).Encode([]map[string]any{
 					{"id": "per_1", "sessionID": "ses_1", "permission": "bash"},
 					{"id": "per_2", "sessionID": "ses_2", "permission": "edit"},
@@ -347,7 +347,12 @@ func TestOpenCodeInteractionReconcileGroupsLegacyRequestsByCwd(t *testing.T) {
 	coord.reconcileInteractions(context.Background())
 	mu.Lock()
 	defer mu.Unlock()
-	for _, path := range []string{"/permission:/repo/a", "/question:/repo/a", "/permission:/repo/b", "/question:/repo/b"} {
+	for _, path := range []string{
+		"/permission:" + normalizeCwd("/repo/a"),
+		"/question:" + normalizeCwd("/repo/a"),
+		"/permission:" + normalizeCwd("/repo/b"),
+		"/question:" + normalizeCwd("/repo/b"),
+	} {
 		if calls[path] != 1 {
 			t.Fatalf("calls[%q]=%d want 1 (all=%v)", path, calls[path], calls)
 		}
@@ -377,7 +382,7 @@ func TestOpenCodeGlobalInteractionStreamAcrossDirectory(t *testing.T) {
 			question := `data: {"directory":"/repo/other","payload":{"id":"evt_2","type":"question.asked","properties":{"id":"que_1","sessionID":"ses_1","questions":[{"question":"Continue?","options":[{"label":"Yes"}]}]}}}` + "\n\n"
 			_, _ = w.Write([]byte(permission + permission + question + question))
 		case r.URL.Path == "/permission" || r.URL.Path == "/question":
-			if r.URL.Query().Get("directory") != "/repo/other" {
+			if r.URL.Query().Get("directory") != normalizeCwd("/repo/other") {
 				t.Errorf("legacy pending directory=%q", r.URL.Query().Get("directory"))
 			}
 			json.NewEncoder(w).Encode([]any{})
@@ -814,13 +819,13 @@ func TestOpenCodeRestartPreservesServeOwnership(t *testing.T) {
 		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/api/session/ses_restart/"):
 			json.NewEncoder(w).Encode([]any{})
 		case r.Method == http.MethodPost && r.URL.Path == "/permission/per_restart/reply":
-			if r.URL.Query().Get("directory") != "/repo" {
+			if r.URL.Query().Get("directory") != normalizeCwd("/repo") {
 				t.Errorf("permission reply directory=%q", r.URL.Query().Get("directory"))
 			}
 			permissionReply = true
 			w.WriteHeader(http.StatusOK)
 		case r.Method == http.MethodPost && r.URL.Path == "/question/que_restart/reject":
-			if r.URL.Query().Get("directory") != "/repo" {
+			if r.URL.Query().Get("directory") != normalizeCwd("/repo") {
 				t.Errorf("question reject directory=%q", r.URL.Query().Get("directory"))
 			}
 			questionReject = true

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"os"
+	"runtime"
 	"testing"
 )
 
@@ -39,7 +40,7 @@ func TestOpenCodeTelemetryStoresOnlyEnumeratedCounters(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if info.Mode().Perm() != 0o600 {
+	if runtime.GOOS != "windows" && info.Mode().Perm() != 0o600 {
 		t.Fatalf("telemetry mode=%o", info.Mode().Perm())
 	}
 }

@@ -24,6 +24,7 @@ import (
 
 func TestOpenCodeSessionMetaUsesLoadedAuthoritativeState(t *testing.T) {
 	home := t.TempDir()
+	repo := t.TempDir()
 	t.Setenv("HOME", home)
 	binDir := filepath.Join(home, ".local", "bin")
 	if err := os.MkdirAll(binDir, 0o755); err != nil {
@@ -44,7 +45,7 @@ func TestOpenCodeSessionMetaUsesLoadedAuthoritativeState(t *testing.T) {
 		case "/global/health":
 			_, _ = w.Write([]byte(`{"healthy":true,"version":"1.2.3"}`))
 		case "/api/session/ses_1":
-			_, _ = w.Write([]byte(`{"data":{"id":"ses_1","directory":"/repo","agent":"build","model":{"providerID":"opencode","id":"deepseek-v4-flash-free"}}}`))
+			_, _ = fmt.Fprintf(w, `{"data":{"id":"ses_1","directory":%q,"agent":"build","model":{"providerID":"opencode","id":"deepseek-v4-flash-free"}}}`, repo)
 		default:
 			http.NotFound(w, r)
 		}
@@ -59,7 +60,7 @@ func TestOpenCodeSessionMetaUsesLoadedAuthoritativeState(t *testing.T) {
 	sm := session.NewSessionManager(make(chan protocol.DaemonEvent, 8))
 
 	meta := buildSessionMeta(context.Background(), sm, "ses_1", slog.Default())
-	if meta.Model != "opencode/deepseek-v4-flash-free" || meta.Cwd != "/repo" || meta.CurrentAgent != "build" {
+	if meta.Model != "opencode/deepseek-v4-flash-free" || meta.Cwd != repo || meta.CurrentAgent != "build" {
 		t.Fatalf("meta=%+v", meta)
 	}
 	if meta.ControlMode != protocol.ControlLegacyReadOnly || len(meta.Capabilities) != 0 {
