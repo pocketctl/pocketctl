@@ -24,3 +24,17 @@ func TestShouldPreserveRootedProtocolPathOnWindows(t *testing.T) {
 		})
 	}
 }
+
+func TestNormalizeProtocolRootedPathUsesForwardSlashes(t *testing.T) {
+	tests := map[string]string{
+		"/repo":        "/repo",
+		`\repo`:        "/repo",
+		`/repo/a/../b`: "/repo/b",
+		`\repo\a\..\b`: "/repo/b",
+	}
+	for input, want := range tests {
+		if got := normalizeProtocolRootedPath(input, '\\'); got != want {
+			t.Errorf("normalizeProtocolRootedPath(%q) = %q, want %q", input, got, want)
+		}
+	}
+}

@@ -3,6 +3,7 @@ package session
 import (
 	"fmt"
 	"os"
+	"path"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -45,7 +46,7 @@ func normalizeCwd(p string) string {
 		return ""
 	}
 	if shouldPreserveRootedProtocolPath(runtime.GOOS, p, filepath.Separator) {
-		return filepath.Clean(filepath.ToSlash(p))
+		return normalizeProtocolRootedPath(p, filepath.Separator)
 	}
 
 	abs, err := filepath.Abs(p)
@@ -56,6 +57,10 @@ func normalizeCwd(p string) string {
 		return resolved
 	}
 	return filepath.Clean(abs)
+}
+
+func normalizeProtocolRootedPath(p string, separator uint8) string {
+	return path.Clean(strings.ReplaceAll(p, string(separator), "/"))
 }
 
 func shouldPreserveRootedProtocolPath(goos, p string, separator uint8) bool {

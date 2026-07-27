@@ -212,7 +212,7 @@ func TestOpenCodeControlModeRestoresManagedRegistryAfterRestart(t *testing.T) {
 	coord.managedMu.RLock()
 	entry := coord.managedSessions["ses_managed"]
 	coord.managedMu.RUnlock()
-	if entry.CWD != "/repo" || entry.Generation != 9 {
+	if entry.CWD != normalizeCwd("/repo") || entry.Generation != 9 {
 		t.Fatalf("restored entry=%+v", entry)
 	}
 }

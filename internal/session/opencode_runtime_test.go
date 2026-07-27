@@ -7,7 +7,6 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
-	"runtime"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -390,21 +389,13 @@ func TestOpenCodeRuntimeAcquireDuplicateOperationCreatesOnce(t *testing.T) {
 		}
 		json.NewEncoder(w).Encode([]any{})
 	}), nil)
-	tempBase := os.TempDir()
-	if runtime.GOOS != "windows" {
-		tempBase = "/tmp"
-	}
-	dir, err := os.MkdirTemp(tempBase, "pc-runtime-")
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = os.RemoveAll(dir) })
-	server := agentcontrol.NewServer(filepath.Join(dir, "control.sock"), map[string]agentcontrol.RuntimeProvider{agentcontrol.AgentOpenCode: sm})
+	endpoint := platform.NewIPCListener().DefaultPath("agent-control-runtime-duplicate-test")
+	server := agentcontrol.NewServer(endpoint, map[string]agentcontrol.RuntimeProvider{agentcontrol.AgentOpenCode: sm})
 	if err := server.Start(); err != nil {
 		t.Fatal(err)
 	}
 	defer server.Close()
-	client := agentcontrol.NewClient(filepath.Join(dir, "control.sock"))
+	client := agentcontrol.NewClient(endpoint)
 	payload := agentcontrol.AcquirePayload{CWD: repo, Intent: agentcontrol.IntentNew, OperationID: "same-operation"}
 
 	var wg sync.WaitGroup
