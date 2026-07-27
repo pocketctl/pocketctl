@@ -30,7 +30,15 @@ func writeFakeCommandFixture(t *testing.T, basePath, unixScript, windowsScript s
 func sleepCommand(t *testing.T, seconds int) *exec.Cmd {
 	t.Helper()
 	if runtime.GOOS == "windows" {
-		return exec.Command("cmd", "/C", "timeout", "/T", strconv.Itoa(seconds), "/NOBREAK")
+		return exec.Command(
+			"powershell.exe",
+			"-NoProfile",
+			"-NonInteractive",
+			"-Command",
+			"Start-Sleep",
+			"-Seconds",
+			strconv.Itoa(seconds),
+		)
 	}
 	return exec.Command("sleep", strconv.Itoa(seconds))
 }
