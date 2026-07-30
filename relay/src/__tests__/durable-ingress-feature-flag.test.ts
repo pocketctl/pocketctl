@@ -1,8 +1,4 @@
-import { afterEach, describe, expect, test, vi } from 'vitest'
-
-vi.hoisted(() => {
-  vi.stubEnv('JWT_SECRET', 'durable-ingress-feature-flag-test-secret')
-})
+import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest'
 
 import {
   Router,
@@ -20,6 +16,13 @@ function pool(): any {
 }
 
 describe('strict durable-ingress feature flags', () => {
+  // Some assertions dynamically import server.ts, which imports auth.ts and
+  // validates JWT_SECRET at module load. Restore this fixture for every test:
+  // afterEach deliberately clears all stubs to keep each flag case isolated.
+  beforeEach(() => {
+    vi.stubEnv('JWT_SECRET', 'durable-ingress-feature-flag-test-secret')
+  })
+
   afterEach(() => {
     vi.unstubAllEnvs()
   })
