@@ -7,10 +7,17 @@ process.env.DAEMON_REVOCATION_CHECK_TIMEOUT_MS = '20'
 process.env.DAEMON_REVOCATION_GATE_MAX_MESSAGES = '4'
 process.env.DAEMON_REVOCATION_GATE_MAX_BYTES = '1024'
 import { Router } from '../router.js'
+import { checkpointKey } from '../ingress/controller.js'
+
+function createNamedMockPools() {
+  const make = () => createMockPool()
+  return { control: make(), ingest: make(), query: make(), worker: make() }
+}
 
 // Mock pg.Pool
 function createMockPool(eventInsertIDs?: number[]) {
   const queries: { sql: string; params: any[] }[] = []
+  let lastEventID = 1
   const mockPool = {
     query: vi.fn((sql: string, params?: any[]) => {
       queries.push({ sql, params: params || [] })
@@ -45,7 +52,12 @@ function createMockPool(eventInsertIDs?: number[]) {
         result = { rows: [{ daemon_id: 'daemon-1', status: 'online' }] }
       } else if (sql.includes('INSERT INTO events') && sql.includes('RETURNING id')) {
     const id = eventInsertIDs?.shift()
-    result = id === 0 ? { rows: [] } : { rows: [{ id: id ?? 1 }] }
+    if (id === 0) {
+      result = { rows: [{ id: lastEventID, inserted: false, effect_status: 'completed', effect_step: 0 }] }
+    } else {
+      lastEventID = id ?? lastEventID
+      result = { rows: [{ id: lastEventID, inserted: true, effect_status: 'pending', effect_step: 0 }] }
+    }
       } else if (sql.includes('RETURNING id')) {
     result = { rows: [{ id: 1 }] }
       } else if (sql.includes('RETURNING daemon_id')) {
@@ -75,6 +87,16 @@ function createMockPool(eventInsertIDs?: number[]) {
 // follows them) settle before assertions on the ack water-mark.
 const tick = () => new Promise((r) => setTimeout(r, 20))
 
+function forceAuthLeaseRefresh(router: any, daemonId = 'daemon-1'): void {
+  const daemon = router.daemons.get(daemonId)
+  router.authLeases.confirm(daemon.registrationId, Date.now() - 12_000)
+}
+
+function expireAuthLease(router: any, daemonId = 'daemon-1'): void {
+  const daemon = router.daemons.get(daemonId)
+  router.authLeases.confirm(daemon.registrationId, Date.now() - 31_000)
+}
+
 // Mock WebSocket
 function createMockWs(): any {
   const sent: any[] = []
@@ -86,6 +108,447 @@ function createMockWs(): any {
     _sent: sent,
   }
 }
+
+function deferred<T>() {
+  let resolve!: (value: T | PromiseLike<T>) => void
+  let reject!: (reason?: unknown) => void
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise
+    reject = rejectPromise
+  })
+  return { promise, resolve, reject }
+}
+
+test('durable ingress flag off preserves the legacy persist-and-ack path', async () => {
+  const pool = createMockPool()
+  const repository = { persistBatch: vi.fn(), seedCheckpoint: vi.fn() }
+  const router = new Router(pool, { durableIngress: { mode: 'off', repository } })
+  const ws = createMockWs()
+  await router.registerDaemon(ws, { type: 'register', daemon_id: 'legacy-d1', hostname: 'h', agents: [], started_at: 17 }, 1)
+  router.handleDaemonMessage('legacy-d1', { type: 'agent_text', session_id: 's1', text: 'hello', seq: 1 })
+  await tick()
+  expect(repository.seedCheckpoint).not.toHaveBeenCalled()
+  expect(repository.persistBatch).not.toHaveBeenCalled()
+  expect(pool.query).toHaveBeenCalledWith(expect.stringContaining('INSERT INTO events'), expect.anything())
+})
+
+test('durable ingress commits Inbox before its single ACK and skips legacy persistence', async () => {
+  const pool = createMockPool()
+  const repository = {
+    seedCheckpoint: vi.fn(async () => ({ daemonId: 'durable-d1', daemonGeneration: 17, ackSeq: 0 })),
+    persistBatch: vi.fn(async () => new Map([[checkpointKey('durable-d1', 17), {
+      daemonId: 'durable-d1', daemonGeneration: 17, ackSeq: 1,
+    }]])),
+  }
+  const router = new Router(pool, { durableIngress: { mode: 'on', repository } })
+  const ws = createMockWs()
+  await router.registerDaemon(ws, { type: 'register', daemon_id: 'durable-d1', hostname: 'h', agents: [], started_at: 17 }, 1)
+  expect(ws._sent.find((message: any) => message.type === 'register_ack')).toEqual(expect.objectContaining({
+    capabilities: ['durable_inbox', 'ack_watermark', 'flow_control'], event_window: 128,
+  }))
+  router.handleDaemonMessage('durable-d1', { type: 'agent_text', session_id: 's1', text: 'hello', seq: 1 })
+  await tick()
+  expect(repository.persistBatch).toHaveBeenCalledTimes(1)
+  expect(pool.query).not.toHaveBeenCalledWith(expect.stringContaining('INSERT INTO events'), expect.anything())
+  expect(ws._sent.find((message: any) => message.type === 'event_ack')).toEqual(expect.objectContaining({
+    up_to_seq: 1, event_window: 128, daemon_generation: 17,
+  }))
+})
+
+test('durable ingress receipt-only title events share the Inbox ACK owner', async () => {
+  const persisted = deferred<void>()
+  const repository = {
+    seedCheckpoint: vi.fn(async () => ({ daemonId: 'durable-title', daemonGeneration: 17, ackSeq: 0 })),
+    persistBatch: vi.fn(async () => {
+      await persisted.promise
+      return new Map([[checkpointKey('durable-title', 17), {
+        daemonId: 'durable-title', daemonGeneration: 17, ackSeq: 1,
+      }]])
+    }),
+  }
+  const router = new Router(createMockPool(), { durableIngress: { mode: 'on', repository } })
+  const daemonWs = createMockWs()
+  await router.registerDaemon(daemonWs, {
+    type: 'register', daemon_id: 'durable-title', hostname: 'h', agents: [], started_at: 17,
+  }, 1)
+  const titleEffect = vi.spyOn(router as any, 'runEphemeralTitleEffect').mockImplementation(() => {})
+  daemonWs._sent.length = 0
+
+  router.handleDaemonMessage('durable-title', {
+    type: 'generate_subagent_title_request',
+    session_id: 'root',
+    agent_id: 'child',
+    event_id: 'jsonl:source:3:0:title',
+    seq: 1,
+  })
+  const flushing = (router as any).durableIngress.flushNow()
+  await Promise.resolve()
+
+  expect(titleEffect).toHaveBeenCalledOnce()
+  expect(repository.persistBatch).toHaveBeenCalledWith([
+    expect.objectContaining({
+      seq: 1,
+      eventType: 'generate_subagent_title_request',
+      receiptOnly: true,
+    }),
+  ])
+  expect(daemonWs._sent.some((message: any) => message.type === 'event_ack')).toBe(false)
+
+  persisted.resolve()
+  await flushing
+  expect(daemonWs._sent).toContainEqual(expect.objectContaining({
+    type: 'event_ack', up_to_seq: 1, daemon_generation: 17,
+  }))
+})
+
+test.each([
+  { mode: 'on' as const, canaryDaemonIds: undefined },
+  { mode: 'canary' as const, canaryDaemonIds: ['durable-controls'] },
+])('durable ingress $mode receipts sequenced no-session controls without changing effects', async ({ mode, canaryDaemonIds }) => {
+  const repository = {
+    seedCheckpoint: vi.fn(async () => ({ daemonId: 'durable-controls', daemonGeneration: 17, ackSeq: 0 })),
+    persistBatch: vi.fn(async () => new Map([[checkpointKey('durable-controls', 17), {
+      daemonId: 'durable-controls', daemonGeneration: 17, ackSeq: 2,
+    }]])),
+  }
+  const router = new Router(createMockPool(), {
+    durableIngress: { mode, canaryDaemonIds, repository },
+  })
+  const daemonWs = createMockWs()
+  await router.registerDaemon(daemonWs, {
+    type: 'register', daemon_id: 'durable-controls', hostname: 'h', agents: [], started_at: 17,
+  }, 1)
+  const clientWs = createMockWs()
+  router.registerClient(clientWs, 1)
+  clientWs._sent.length = 0
+
+  router.handleDaemonMessage('durable-controls', {
+    type: 'model_list', models: ['gpt-5'], seq: 1,
+  })
+  router.handleDaemonMessage('durable-controls', {
+    type: 'upgrade_result', ok: true, seq: 2,
+  })
+  await tick()
+
+  expect(repository.persistBatch).toHaveBeenCalledWith([
+    expect.objectContaining({ eventType: 'model_list', receiptOnly: true }),
+    expect.objectContaining({ eventType: 'upgrade_result', receiptOnly: true }),
+  ])
+  expect(clientWs._sent).toContainEqual({
+    type: 'model_list', models: ['gpt-5'], seq: 1, daemon_id: 'durable-controls',
+  })
+  expect(clientWs._sent).toContainEqual({ type: 'upgrade_result', ok: true, seq: 2 })
+})
+
+describe.each([
+  { mode: 'on' as const, canaryDaemonIds: undefined },
+  { mode: 'canary' as const, canaryDaemonIds: ['durable-error'] },
+])('durable ingress $mode host-level error routing', ({ mode, canaryDaemonIds }) => {
+  test.each([
+    { shape: 'missing', sessionFields: {} },
+    { shape: 'null', sessionFields: { session_id: null } },
+    { shape: 'empty', sessionFields: { session_id: '' } },
+    { shape: 'number', sessionFields: { session_id: 42 } },
+    { shape: 'object', sessionFields: { session_id: { id: 'nested-session' } } },
+    { shape: 'array', sessionFields: { session_id: ['nested-session'] } },
+    { shape: 'nested-only', sessionFields: { session: { session_id: 'nested-session' } } },
+  ])('treats $shape session_id as host-level control', async ({ sessionFields }) => {
+    const repository = {
+      seedCheckpoint: vi.fn(async () => ({
+        daemonId: 'durable-error', daemonGeneration: 17, ackSeq: 0,
+      })),
+      persistBatch: vi.fn(async () => new Map([[checkpointKey('durable-error', 17), {
+        daemonId: 'durable-error', daemonGeneration: 17, ackSeq: 1,
+      }]])),
+    }
+    const router = new Router(createMockPool(), {
+      durableIngress: { mode, canaryDaemonIds, repository },
+    })
+    const daemonWs = createMockWs()
+    await router.registerDaemon(daemonWs, {
+      type: 'register', daemon_id: 'durable-error', hostname: 'h', agents: [], started_at: 17,
+    }, 1)
+    const originWs = createMockWs()
+    ;(router as any).pendingSessionCreate.set('durable-error', originWs)
+    const durableAccept = vi.spyOn((router as any).durableIngress, 'accept')
+    const payload = {
+      type: 'error', request_id: 'request-1', error: 'session start failed', seq: 1,
+      ...sessionFields,
+    }
+
+    router.handleDaemonMessage('durable-error', payload)
+    await (router as any).durableIngress.flushNow()
+
+    expect(repository.persistBatch).toHaveBeenCalledWith([
+      expect.objectContaining({ eventType: 'error', receiptOnly: true, payload }),
+    ])
+    expect(durableAccept).toHaveBeenCalled()
+    expect(originWs._sent).toEqual([payload])
+    expect((router as any).pendingSessionCreate.get('durable-error')).toBe(originWs)
+    expect((router as any).daemonSeq.get('durable-error').inflight.has(1)).toBe(false)
+    expect(daemonWs._sent).toContainEqual(expect.objectContaining({
+      type: 'event_ack', up_to_seq: 1,
+    }))
+  })
+})
+
+describe.each([
+  { mode: 'on' as const, canaryDaemonIds: undefined },
+  { mode: 'canary' as const, canaryDaemonIds: ['durable-session-error'] },
+])('durable ingress $mode session error routing', ({ mode, canaryDaemonIds }) => {
+  test.each([
+    { shape: 'ordinary non-empty string', sessionId: 'session-1' },
+    { shape: 'non-empty whitespace string', sessionId: '   ' },
+  ])('accepts $shape into Inbox', async ({ sessionId }) => {
+    const persisted = deferred<void>()
+    const repository = {
+      seedCheckpoint: vi.fn(async () => ({
+        daemonId: 'durable-session-error', daemonGeneration: 17, ackSeq: 0,
+      })),
+      persistBatch: vi.fn(async () => {
+        persisted.resolve()
+        return new Map()
+      }),
+    }
+    const router = new Router(createMockPool(), {
+      durableIngress: { mode, canaryDaemonIds, repository },
+    })
+    const daemonWs = createMockWs()
+    await router.registerDaemon(daemonWs, {
+      type: 'register', daemon_id: 'durable-session-error', hostname: 'h', agents: [], started_at: 17,
+    }, 1)
+    const originWs = createMockWs()
+    ;(router as any).pendingSessionCreate.set('durable-session-error', originWs)
+    const durableAccept = vi.spyOn((router as any).durableIngress, 'accept')
+    const payload = {
+      type: 'error', session_id: sessionId, error: 'turn failed', seq: 1,
+    }
+
+    router.handleDaemonMessage('durable-session-error', payload)
+    const flushing = (router as any).durableIngress.flushNow()
+    await persisted.promise
+    await flushing
+
+    expect(repository.persistBatch).toHaveBeenCalledWith([
+      expect.objectContaining({ eventType: 'error', sessionId, payload }),
+    ])
+    expect(durableAccept).toHaveBeenCalledWith(
+      expect.objectContaining({ daemonId: 'durable-session-error' }),
+      payload,
+      expect.objectContaining({ hostname: 'h' }),
+    )
+    expect(originWs._sent).toEqual([])
+  })
+})
+
+test('durable ingress on still executes graceful daemon shutdown immediately', async () => {
+  const repository = {
+    seedCheckpoint: vi.fn(async () => ({ daemonId: 'durable-shutdown', daemonGeneration: 17, ackSeq: 0 })),
+    persistBatch: vi.fn(async () => new Map([[checkpointKey('durable-shutdown', 17), {
+      daemonId: 'durable-shutdown', daemonGeneration: 17, ackSeq: 1,
+    }]])),
+  }
+  const router = new Router(createMockPool(), { durableIngress: { mode: 'on', repository } })
+  const daemonWs = createMockWs()
+  await router.registerDaemon(daemonWs, {
+    type: 'register', daemon_id: 'durable-shutdown', hostname: 'h', agents: [], started_at: 17,
+  }, 1)
+  const clientWs = createMockWs()
+  router.registerClient(clientWs, 1)
+  clientWs._sent.length = 0
+
+  router.handleDaemonMessage('durable-shutdown', { type: 'daemon_shutdown', seq: 1 })
+  await tick()
+
+  expect(repository.persistBatch).toHaveBeenCalledWith([
+    expect.objectContaining({ eventType: 'daemon_shutdown', receiptOnly: true }),
+  ])
+  expect(clientWs._sent).toContainEqual(expect.objectContaining({
+    type: 'daemon_status', daemon_id: 'durable-shutdown', status: 'offline',
+  }))
+})
+
+test('oversized durable admission sends a permanent sequence barrier without reconnecting', async () => {
+  const repository = {
+    seedCheckpoint: vi.fn(async () => ({ daemonId: 'durable-full', daemonGeneration: 17, ackSeq: 0 })),
+    persistBatch: vi.fn(),
+  }
+  const router = new Router(createMockPool(), { durableIngress: { mode: 'on', repository } })
+  const ws = createMockWs()
+  await router.registerDaemon(ws, {
+    type: 'register', daemon_id: 'durable-full', hostname: 'h', agents: [], started_at: 17,
+  }, 1)
+
+  router.handleDaemonMessage('durable-full', {
+    type: 'agent_text', session_id: 's1', seq: 1, text: 'x'.repeat((1 << 20) + 1),
+  }, ws, 17)
+
+  const transport = ws._sent.filter((message: any) => ['flow_control', 'disconnect', 'event_ack'].includes(message.type))
+  expect(transport).toEqual([expect.objectContaining({
+    type: 'flow_control', reason: 'event_too_large', blocked_seq: 1,
+    daemon_generation: 17,
+  })])
+  expect(ws.close).not.toHaveBeenCalled()
+  expect(repository.persistBatch).not.toHaveBeenCalled()
+})
+
+test('transient durable capacity refusal still flow-controls and disconnects for replay', async () => {
+  const repository = {
+    seedCheckpoint: vi.fn(async () => ({ daemonId: 'durable-capacity', daemonGeneration: 17, ackSeq: 0 })),
+    persistBatch: vi.fn(async () => new Map()),
+  }
+  const router = new Router(createMockPool(), { durableIngress: { mode: 'on', repository } })
+  const ws = createMockWs()
+  await router.registerDaemon(ws, {
+    type: 'register', daemon_id: 'durable-capacity', hostname: 'h', agents: [], started_at: 17,
+  }, 1)
+
+  for (let seq = 1; seq <= 1_025; seq++) {
+    router.handleDaemonMessage('durable-capacity', {
+      type: 'agent_text', session_id: 's1', seq, text: 'capacity',
+    }, ws, 17)
+  }
+
+  const transport = ws._sent.filter((message: any) => ['flow_control', 'disconnect', 'event_ack'].includes(message.type))
+  expect(transport.slice(-2)).toEqual([
+    expect.objectContaining({ type: 'flow_control', reason: 'ingest_backpressure' }),
+    expect.objectContaining({
+      type: 'disconnect', retryable: true, reason: 'ingest_backpressure', daemon_generation: 17,
+    }),
+  ])
+  expect(ws.close).toHaveBeenCalledWith(1013, 'ingest_backpressure')
+  expect(repository.persistBatch).not.toHaveBeenCalled()
+  await router.stopDurableIngress({ flushDeadlineMs: 1_500 })
+})
+
+test('an old failed batch cannot flow-control or disconnect its replacement generation', async () => {
+  const pending = deferred<Map<string, { daemonId: string; daemonGeneration: number; ackSeq: number }>>()
+  const repository = {
+    seedCheckpoint: vi.fn(async (daemonId: string, daemonGeneration: number, ackSeq: number) => ({
+      daemonId, daemonGeneration, ackSeq,
+    })),
+    persistBatch: vi.fn(() => pending.promise),
+  }
+  const router = new Router(createMockPool(), { durableIngress: { mode: 'on', repository } })
+  const oldWs = createMockWs()
+  await router.registerDaemon(oldWs, {
+    type: 'register', daemon_id: 'generation-safe', hostname: 'h', agents: [], started_at: 17,
+  }, 1)
+  router.handleDaemonMessage('generation-safe', {
+    type: 'agent_text', session_id: 's1', seq: 1, text: 'old',
+  }, oldWs, 17)
+  const flushing = (router as any).durableIngress.flushNow()
+  expect(repository.persistBatch).toHaveBeenCalledTimes(1)
+
+  const newWs = createMockWs()
+  await router.registerDaemon(newWs, {
+    type: 'register', daemon_id: 'generation-safe', hostname: 'h', agents: [], started_at: 18,
+  }, 1)
+  pending.reject(new Error('old generation commit failed'))
+  await flushing
+  await router.stopDurableIngress({ flushDeadlineMs: 0 })
+
+  expect(newWs._sent.some((message: any) => message.type === 'flow_control' || message.type === 'disconnect')).toBe(false)
+  expect(newWs.close).not.toHaveBeenCalled()
+})
+
+test('heartbeat revocation uses control pool while event persistence uses ingest pool', async () => {
+  const pools = createNamedMockPools()
+  const router = new Router(pools)
+  const daemonWs = createMockWs()
+  await router.registerDaemon(daemonWs, {
+    type: 'register', daemon_id: 'pool-daemon', hostname: 'test', agents: [],
+  }, 1, 'token-jti')
+  forceAuthLeaseRefresh(router, 'pool-daemon')
+
+  router.handleDaemonMessage('pool-daemon', { type: 'ping' })
+  router.handleDaemonMessage('pool-daemon', {
+    type: 'agent_text', session_id: 'pool-session', seq: 1, text: 'hello',
+  })
+  await tick()
+
+  expect(pools.control.query).toHaveBeenCalledWith(expect.stringContaining('revoked_tokens'), expect.anything())
+  expect(pools.ingest.query).toHaveBeenCalledWith(expect.stringContaining('INSERT INTO events'), expect.anything())
+})
+
+test('keeps a confirmed daemon alive during a short heartbeat token-lookup outage', async () => {
+  const dbModule = await import('../db.js')
+  let now = 1_000
+  const router = new Router(createMockPool(), {
+    authLeaseOptions: { now: () => now, jitter: () => 0 },
+  })
+  const ws = createMockWs()
+  await router.registerDaemon(ws, {
+    type: 'register', daemon_id: 'lease-daemon', hostname: 'test', agents: [], started_at: 100,
+  }, 1, 'token-jti')
+  const lookup = vi.spyOn(dbModule, 'isTokenRevokedWithTimeout').mockRejectedValue(new Error('control db unavailable'))
+
+  now += 10_000
+  router.handleDaemonMessage('lease-daemon', { type: 'ping' }, ws, 100)
+  await tick()
+  router.handleDaemonMessage('lease-daemon', { type: 'ping' }, ws, 100)
+
+  expect(lookup).toHaveBeenCalledOnce()
+  expect(ws.close).not.toHaveBeenCalled()
+  expect(ws._sent.filter((message: any) => message.type === 'pong')).toHaveLength(2)
+  vi.restoreAllMocks()
+})
+
+test('rejects a non-ping daemon payload once its auth lease expires during an outage', async () => {
+  let now = 1_000
+  const pool = createMockPool()
+  const router = new Router(pool, { authLeaseOptions: { now: () => now, jitter: () => 0 } })
+  const ws = createMockWs()
+  await router.registerDaemon(ws, { type: 'register', daemon_id: 'expired-daemon', hostname: 'test', agents: [], started_at: 100 }, 1, 'jti')
+  now += 30_000
+  router.handleDaemonMessage('expired-daemon', { type: 'agent_text', session_id: 'must-not-persist', text: 'late', seq: 1 }, ws, 100)
+  await tick()
+  expect(ws._sent).toContainEqual(expect.objectContaining({ type: 'disconnect', reason: 'token_check_unavailable', retryable: true }))
+  expect(pool._queries.some((query: any) => query.sql.includes('INSERT INTO events') && query.params.includes('must-not-persist'))).toBe(false)
+})
+
+test('does not observe an expired durable payload before failing its lease closed', async () => {
+  let now = 1_000
+  let observed = 0
+  const router = new Router(createMockPool(), {
+    authLeaseOptions: { now: () => now, jitter: () => 0 },
+    observeIngressClass: () => { observed++ },
+  })
+  const ws = createMockWs()
+  await router.registerDaemon(ws, { type: 'register', daemon_id: 'observer-expired', hostname: 'test', agents: [], started_at: 100 }, 1, 'jti')
+  now += 30_000
+  router.handleDaemonMessage('observer-expired', { type: 'agent_text', session_id: 's', text: 'late', seq: 1 }, ws, 100)
+  expect(observed).toBe(0)
+})
+
+test('local command events use ingest while token revocations use control', async () => {
+  const pools = createNamedMockPools()
+  const router = new Router(pools)
+  const clientWs = createMockWs()
+  router.registerClient(clientWs, 1)
+  router.handleClientMessage(clientWs, {
+    type: 'local_command_log', session_id: 'pool-session', user_text: '/model', command: '/model', receipt_status: 'ok', message: 'done',
+  })
+  await tick()
+  expect(pools.ingest.query).toHaveBeenCalledWith(expect.stringContaining('INSERT INTO events'), expect.anything())
+  expect(pools.query.query).not.toHaveBeenCalledWith(expect.stringContaining('INSERT INTO events'), expect.anything())
+
+  const daemonWs = createMockWs()
+  await router.registerDaemon(daemonWs, { type: 'register', daemon_id: 'secured-daemon', hostname: 'test', agents: [] }, 1, 'token-jti')
+  pools.control.query.mockClear()
+  pools.query.query.mockClear()
+  await router.handleForceKick('secured-daemon', 1)
+  expect(pools.control.query).toHaveBeenCalledWith(expect.stringContaining('revoked_tokens'), expect.anything())
+  expect(pools.query.query).not.toHaveBeenCalledWith(expect.stringContaining('revoked_tokens'), expect.anything())
+
+  const deleteWs = createMockWs()
+  await router.registerDaemon(deleteWs, { type: 'register', daemon_id: 'delete-daemon', hostname: 'test', agents: [] }, 1, 'delete-jti')
+  pools.control.query.mockClear()
+  pools.query.query.mockClear()
+  await router.handleDeleteDaemon('delete-daemon', 1)
+  expect(pools.control.query).toHaveBeenCalled()
+  expect(pools.query.query).not.toHaveBeenCalled()
+})
 
 describe('Router - daemon disconnect', () => {
   let pool: any
@@ -233,12 +696,12 @@ describe('Router - session_status with exit_reason', () => {
       q.sql.includes('INSERT INTO sessions') && q.params.includes('sess-exit')
     )
     expect(insertCall).toBeUndefined()
-    // Regression guard: user_id must use an explicit cast (COALESCE($5::int)),
-    // NOT `CASE WHEN $5 IS NOT NULL` — that pattern left $5's type un-inferrable
-    // for Postgres ("could not determine data type of parameter $5") whenever a
+    // Regression guard: user_id must use an explicit cast (COALESCE($8::int)),
+    // NOT `CASE WHEN $8 IS NOT NULL` — that pattern left $8's type un-inferrable
+    // for Postgres ("could not determine data type of parameter $8") whenever a
     // session_status arrived without a userId, silently dropping the status update.
-    expect(updateCall!.sql).not.toMatch(/CASE\s+WHEN\s+\$5/i)
-    expect(updateCall!.sql).toMatch(/COALESCE\(\$5::int/i)
+    expect(updateCall!.sql).not.toMatch(/CASE\s+WHEN\s+\$8/i)
+    expect(updateCall!.sql).toMatch(/COALESCE\(\$8::int/i)
   })
 
   test('session_status without exit_reason does not null existing reason (COALESCE)', async () => {
@@ -258,9 +721,10 @@ describe('Router - session_status with exit_reason', () => {
       q.sql.includes('UPDATE sessions') && q.sql.includes('exit_reason') && q.params.includes('sess-2')
     )
     expect(statusUpdates.length).toBeGreaterThanOrEqual(2)
-    // updateSessionStatus params: [sessionId, daemonId, status, exitReason||null, userId||null]
+    // updateSessionStatusForEvent params prefix the event ledger coordinates;
+    // exitReason remains nullable at index 6.
     // The second call carried no exit_reason → null, and COALESCE keeps the old value.
-    expect(statusUpdates[1].params[3]).toBeNull()
+    expect(statusUpdates[1].params[6]).toBeNull()
   })
 })
 
@@ -721,6 +1185,89 @@ describe('Router - event delivery dedup + ack', () => {
     expect(clientWs._sent.filter((m: any) => m.type === 'agent_text').length).toBe(2)
   })
 
+  test('replays delivery after a crash between business effects and delivery before finalizing the ledger', async () => {
+    const log = vi.spyOn(console, 'error').mockImplementation(() => undefined)
+    const r = new Router(createMockPool())
+    const daemonWs = createMockWs()
+    await r.registerDaemon(daemonWs, { type: 'register', daemon_id: 'daemon-1', hostname: 'h', agents: [], started_at: 100 }, 1)
+    const clientWs = createMockWs()
+    r.registerClient(clientWs, 1)
+    ;(r as any).clients.get(clientWs).subscribedSessions.add('sess-1')
+    const applyEffects = vi.fn().mockResolvedValue(undefined)
+    const finalizeEffect = vi.fn().mockResolvedValue(undefined)
+    ;(r as any).materializer = {
+      materialize: vi.fn().mockResolvedValue({
+        eventId: 91,
+        inserted: false,
+        completed: false,
+        deliveries: [{
+          eventId: 91, userId: 1, audience: 'session', sessionId: 'sess-1',
+          requestId: null, ordinal: 0, deliveryKey: 'event:91:session:-:0',
+          type: 'agent_text', payload: { type: 'agent_text', session_id: 'sess-1', text: 'hello' },
+        }],
+        applyEffects,
+        finalizeEffect,
+      }),
+    }
+    const realDelivery = (r as any).deliverMaterializedEvent.bind(r)
+    vi.spyOn(r as any, 'deliverMaterializedEvent')
+      .mockImplementationOnce(() => { throw new Error('crash before delivery') })
+      .mockImplementation(realDelivery)
+
+    r.handleDaemonMessage('daemon-1', { type: 'agent_text', session_id: 'sess-1', text: 'hello', seq: 1 })
+    await tick()
+    expect(finalizeEffect).not.toHaveBeenCalled()
+    expect(clientWs._sent.filter((message: any) => message.type === 'agent_text')).toHaveLength(0)
+
+    r.handleDaemonMessage('daemon-1', { type: 'agent_text', session_id: 'sess-1', text: 'hello', seq: 1 })
+    await tick()
+    expect(clientWs._sent.filter((message: any) => message.type === 'agent_text')).toHaveLength(1)
+    expect(finalizeEffect).toHaveBeenCalledOnce()
+    daemonWs._sent.length = 0
+    r.handleDaemonMessage('daemon-1', { type: 'ping' })
+    expect(daemonWs._sent.find((message: any) => message.type === 'event_ack')?.up_to_seq).toBe(1)
+    log.mockRestore()
+  })
+
+  test('keeps the legacy at-least-once duplicate boundary when finalization fails after delivery', async () => {
+    const log = vi.spyOn(console, 'error').mockImplementation(() => undefined)
+    const r = new Router(createMockPool())
+    const daemonWs = createMockWs()
+    await r.registerDaemon(daemonWs, { type: 'register', daemon_id: 'daemon-1', hostname: 'h', agents: [], started_at: 100 }, 1)
+    const clientWs = createMockWs()
+    r.registerClient(clientWs, 1)
+    ;(r as any).clients.get(clientWs).subscribedSessions.add('sess-1')
+    const finalizeEffect = vi.fn()
+      .mockRejectedValueOnce(new Error('finalize unavailable'))
+      .mockResolvedValueOnce(undefined)
+    ;(r as any).materializer = {
+      materialize: vi.fn().mockResolvedValue({
+        eventId: 92,
+        inserted: false,
+        completed: false,
+        deliveries: [{
+          eventId: 92, userId: 1, audience: 'session', sessionId: 'sess-1',
+          requestId: null, ordinal: 0, deliveryKey: 'event:92:session:-:0',
+          type: 'agent_text', payload: { type: 'agent_text', session_id: 'sess-1', text: 'hello' },
+        }],
+        applyEffects: vi.fn().mockResolvedValue(undefined),
+        finalizeEffect,
+      }),
+    }
+
+    r.handleDaemonMessage('daemon-1', { type: 'agent_text', session_id: 'sess-1', text: 'hello', seq: 1 })
+    await tick()
+    r.handleDaemonMessage('daemon-1', { type: 'agent_text', session_id: 'sess-1', text: 'hello', seq: 1 })
+    await tick()
+
+    expect(clientWs._sent.filter((message: any) => message.type === 'agent_text')).toHaveLength(2)
+    expect(finalizeEffect).toHaveBeenCalledTimes(2)
+    daemonWs._sent.length = 0
+    r.handleDaemonMessage('daemon-1', { type: 'ping' })
+    expect(daemonWs._sent.find((message: any) => message.type === 'event_ack')?.up_to_seq).toBe(1)
+    log.mockRestore()
+  })
+
   test('a stable event replay with a new seq is acked without duplicate fanout or side effects', async () => {
   const queries: { sql: string; params: any[] }[] = []
   let eventInserts = 0
@@ -729,7 +1276,14 @@ describe('Router - event delivery dedup + ack', () => {
     queries.push({ sql, params: params || [] })
     if (sql.includes('INSERT INTO events')) {
       eventInserts++
-      return Promise.resolve(eventInserts === 1 ? { rows: [{ id: 41 }] } : { rows: [] })
+      return Promise.resolve({
+        rows: [{
+          id: 41,
+          inserted: eventInserts === 1,
+          effect_status: eventInserts === 1 ? 'pending' : 'completed',
+          effect_step: eventInserts === 1 ? 0 : 2,
+        }],
+      })
     }
     if (sql.includes('FROM daemons')) return Promise.resolve({ rows: [{ daemon_id: 'daemon-1', status: 'online' }] })
     if (sql.includes('SELECT 1 FROM sessions')) return Promise.resolve({ rows: [{ '?column?': 1 }], rowCount: 1 })
@@ -2134,6 +2688,7 @@ describe('Router - force kick revokes the daemon-specific token (P0-2)', () => {
     await relay.registerDaemon(ws, {
       type: 'register', daemon_id: 'daemon-1', hostname: 'relay', agents: [], started_at: 200,
     }, 7, 'token-1')
+    forceAuthLeaseRefresh(relay)
     check.mockImplementationOnce(() => new Promise<boolean>((resolve) => { finish = resolve }))
 
     relay.handleDaemonMessage('daemon-1', { type: 'ping', seq: 1 }, ws, 200)
@@ -2163,6 +2718,7 @@ describe('Router - force kick revokes the daemon-specific token (P0-2)', () => {
     await relay.registerDaemon(ws, {
       type: 'register', daemon_id: 'daemon-1', hostname: 'relay', agents: [], started_at: 200,
     }, 7, 'token-1')
+    forceAuthLeaseRefresh(relay)
 
     relay.handleDaemonMessage('daemon-1', { type: 'ping', seq: 1, padding: 'x'.repeat(2048) }, ws, 200)
 
@@ -2204,13 +2760,14 @@ describe('Router - force kick revokes the daemon-specific token (P0-2)', () => {
     await relay.registerDaemon(ws, {
       type: 'register', daemon_id: 'daemon-1', hostname: 'relay', agents: [], started_at: 200,
     }, 7, 'token-1')
+    expireAuthLease(relay)
 
     relay.handleDaemonMessage('daemon-1', { type: 'ping', seq: 1 }, ws, 200)
     await tick()
 
-    expect(ws.close).toHaveBeenCalledWith(1011, 'token check failed')
-    expect(boundedSql).toContain('ROLLBACK')
-    expect(boundedReleaseCount).toBe(1)
+    expect(ws.close).toHaveBeenCalledWith(1011, 'token check unavailable')
+    expect(boundedSql).toHaveLength(0)
+    expect(boundedReleaseCount).toBe(0)
     expect((relay as any).daemonRevocationGates.size).toBe(0)
     vi.restoreAllMocks()
   })
@@ -2225,6 +2782,7 @@ describe('Router - force kick revokes the daemon-specific token (P0-2)', () => {
     await relay.registerDaemon(ws, {
       type: 'register', daemon_id: 'daemon-1', hostname: 'relay', agents: [], started_at: 200,
     }, 7, 'token-1')
+    forceAuthLeaseRefresh(relay)
     check.mockImplementationOnce(() => new Promise<boolean>((resolve) => { finish = resolve }))
     relay.handleDaemonMessage('daemon-1', { type: 'ping', seq: 1 }, ws, 200)
     relay.handleDaemonMessage('daemon-1', {
@@ -2248,6 +2806,7 @@ describe('Router - force kick revokes the daemon-specific token (P0-2)', () => {
     await relay.registerDaemon(oldWs, {
       type: 'register', daemon_id: 'daemon-1', hostname: 'old', agents: [], started_at: 100,
     }, 7, 'old-token')
+    forceAuthLeaseRefresh(relay)
     let finish!: (revoked: boolean) => void
     heartbeatCheck.mockImplementationOnce(() => new Promise<boolean>((resolve) => { finish = resolve })).mockResolvedValue(false)
     relay.handleDaemonMessage('daemon-1', { type: 'ping', seq: 1 }, oldWs, 100)
@@ -2275,6 +2834,7 @@ describe('Router - force kick revokes the daemon-specific token (P0-2)', () => {
     await relay.registerDaemon(oldWs, {
       type: 'register', daemon_id: 'daemon-1', hostname: 'old', agents: [], started_at: 100,
     }, 7, 'old-token')
+    forceAuthLeaseRefresh(relay)
 
     const originalConnect = pool.connect
     let waitingCount = 0
@@ -2316,6 +2876,7 @@ describe('Router - force kick revokes the daemon-specific token (P0-2)', () => {
     await relay.registerDaemon(ws, {
       type: 'register', daemon_id: 'daemon-1', hostname: 'other-relay', agents: [], started_at: 200,
     }, 7, 'token-1')
+    forceAuthLeaseRefresh(relay)
     check.mockResolvedValue(true)
 
     relay.handleDaemonMessage('daemon-1', { type: 'ping' }, ws, 200)
@@ -2334,6 +2895,7 @@ describe('Router - force kick revokes the daemon-specific token (P0-2)', () => {
     await relay.registerDaemon(ws, {
       type: 'register', daemon_id: 'daemon-1', hostname: 'relay', agents: [], started_at: 200,
     }, 7, 'token-1')
+    forceAuthLeaseRefresh(relay)
     let finishCheck!: (revoked: boolean) => void
     check.mockImplementationOnce(() => new Promise<boolean>((resolve) => { finishCheck = resolve }))
 
@@ -2358,6 +2920,7 @@ describe('Router - force kick revokes the daemon-specific token (P0-2)', () => {
     await relay.registerDaemon(ws, {
       type: 'register', daemon_id: 'daemon-1', hostname: 'relay', agents: [], started_at: 200,
     }, 7, 'token-1')
+    forceAuthLeaseRefresh(relay)
     const cursor = (relay as any).daemonSeq.get('daemon-1')
     let finishCheck!: (revoked: boolean) => void
     check.mockImplementationOnce(() => new Promise<boolean>((resolve) => { finishCheck = resolve }))
@@ -2378,7 +2941,7 @@ describe('Router - force kick revokes the daemon-specific token (P0-2)', () => {
   test.each([
     ['rejection', undefined],
     ['revocation', true],
-  ])('admits no pending heartbeat seqs when the shared check ends in %s', async (_label, revoked) => {
+  ])('fails closed after the lease expires when the shared check ends in %s', async (_label, revoked) => {
     const dbModule = await import('../db.js')
     const check = vi.spyOn(dbModule, 'isTokenRevokedWithTimeout').mockResolvedValue(false)
     vi.spyOn(dbModule, 'setDaemonOfflineWithTimeout').mockResolvedValue(true as any)
@@ -2387,15 +2950,10 @@ describe('Router - force kick revokes the daemon-specific token (P0-2)', () => {
     await relay.registerDaemon(ws, {
       type: 'register', daemon_id: 'daemon-1', hostname: 'relay', agents: [], started_at: 200,
     }, 7, 'token-1')
+    expireAuthLease(relay)
     const cursor = (relay as any).daemonSeq.get('daemon-1')
-    let finish!: (value: boolean) => void
-    let fail!: (error: Error) => void
-    check.mockImplementationOnce(() => new Promise<boolean>((resolve, reject) => { finish = resolve; fail = reject }))
-
     relay.handleDaemonMessage('daemon-1', { type: 'ping', seq: 1 }, ws, 200)
     relay.handleDaemonMessage('daemon-1', { type: 'ping', seq: 2 }, ws, 200)
-    if (revoked) finish(true)
-    else fail(new Error('check failed'))
     await tick()
 
     expect(cursor.inflight.size).toBe(0)
@@ -2405,7 +2963,7 @@ describe('Router - force kick revokes the daemon-specific token (P0-2)', () => {
     vi.restoreAllMocks()
   })
 
-  test('fails the captured heartbeat generation closed when revocation lookup errors', async () => {
+  test('fails the captured heartbeat generation closed after its lease expires when revocation lookup errors', async () => {
     const dbModule = await import('../db.js')
     const check = vi.spyOn(dbModule, 'isTokenRevokedWithTimeout').mockResolvedValue(false)
     const heartbeat = vi.spyOn(dbModule, 'updateHeartbeat').mockResolvedValue(undefined as any)
@@ -2416,13 +2974,14 @@ describe('Router - force kick revokes the daemon-specific token (P0-2)', () => {
     await relay.registerDaemon(ws, {
       type: 'register', daemon_id: 'daemon-1', hostname: 'relay', agents: [], started_at: 200,
     }, 7, 'token-1')
+    expireAuthLease(relay)
     const cursor = (relay as any).daemonSeq.get('daemon-1')
     check.mockRejectedValue(new Error('revocation database unavailable'))
 
     relay.handleDaemonMessage('daemon-1', { type: 'ping', seq: 1 }, ws, 200)
     await tick()
 
-    expect(ws.close).toHaveBeenCalledWith(1011, 'token check failed')
+    expect(ws.close).toHaveBeenCalledWith(1011, 'token check unavailable')
     expect(cursor.accepting).toBe(false)
     expect(ws._sent.some((message: any) => message.type === 'pong')).toBe(false)
     expect(heartbeat).not.toHaveBeenCalled()
@@ -2445,6 +3004,7 @@ describe('Router - force kick revokes the daemon-specific token (P0-2)', () => {
     await relay.registerDaemon(oldWs, {
       type: 'register', daemon_id: 'daemon-1', hostname: 'old', agents: [], started_at: 100,
     }, 7, 'token-1')
+    forceAuthLeaseRefresh(relay)
     let rejectOld!: (error: Error) => void
     const oldLookup = new Promise<boolean>((_, reject) => { rejectOld = reject })
     check.mockImplementationOnce(() => oldLookup).mockResolvedValue(false)

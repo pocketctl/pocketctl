@@ -1,11 +1,13 @@
 package ws
 
 import (
+	"bytes"
 	"fmt"
 	"io"
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/pocketctl/pocketctl/internal/protocol"
@@ -118,71 +120,87 @@ func TestInitSpoolRestoresBufferAndResumesSeq(t *testing.T) {
 	}
 }
 
-// TestCapRestoredSpoolDropsOldest verifies that a spool holding more events
-// than the restore cap is trimmed to the newest tail (oldest dropped), and that
-// a small spool is returned unchanged. This guards against a reconnect storm
-// re-arming itself on the next start from a huge accumulated spool.
-func TestCapRestoredSpoolDropsOldest(t *testing.T) {
-	// Build 250 events (seq 1..250), exceeding spoolRestoreMaxCount (200).
-	var events []bufferedEvent
-	for i := int64(1); i <= 250; i++ {
-		events = append(events, ev(i, "x"))
+func TestInitSpoolRestoresTenThousandUnackedEventsWithoutTrimming(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "daemon.log")
+	seed, err := openSpool(path)
+	if err != nil {
+		t.Fatal(err)
 	}
-	got := capRestoredSpool(events)
-	// Expect the newest 200 kept (seq 51..250), oldest 50 dropped.
-	if len(got) != 200 {
-		t.Fatalf("want 200 kept, got %d", len(got))
+	for i := int64(1); i <= 10_000; i++ {
+		seed.append(ev(i, fmt.Sprintf("payload-%05d", i)).data)
 	}
-	if got[0].seq != 51 {
-		t.Fatalf("oldest kept want seq 51, got %d", got[0].seq)
+	if err := seed.Close(); err != nil {
+		t.Fatal(err)
 	}
-	if got[199].seq != 250 {
-		t.Fatalf("newest kept want seq 250, got %d", got[199].seq)
-	}
-
-	// A small spool (under both caps) is returned unchanged.
-	small := []bufferedEvent{ev(1, "a"), ev(2, "b")}
-	gotSmall := capRestoredSpool(small)
-	if len(gotSmall) != 2 || gotSmall[0].seq != 1 || gotSmall[1].seq != 2 {
-		t.Fatalf("small spool should be unchanged, got %+v", gotSmall)
-	}
-}
-
-// TestInitSpoolTrimsOversizedRestore verifies InitSpool persists the cap trim:
-// after restoring from an oversized spool, the on-disk file is rewritten to
-// match the trimmed in-memory buffer (so a crash right after start doesn't
-// reload the full set again).
-func TestInitSpoolTrimsOversizedRestore(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "d.log")
-	seed, _ := openSpool(path)
-	// Write 210 events — exceeds the 200 cap.
-	for i := int64(1); i <= 210; i++ {
-		seed.append(ev(i, "x").data)
-	}
-	seed.Close()
 
 	c := NewClient("", "", "daemon-x", nil, nil, nil, nil, quietLogger())
 	if err := c.InitSpool(path); err != nil {
 		t.Fatal(err)
 	}
-	defer c.spool.Close()
+	defer func() {
+		if err := c.spool.Close(); err != nil {
+			t.Errorf("close restored spool: %v", err)
+		}
+	}()
 
-	if len(c.outBuf) != 200 {
-		t.Fatalf("want 200 restored after trim, got %d", len(c.outBuf))
+	if len(c.outBuf) != 10_000 || c.outBuf[0].seq != 1 || c.outBuf[9_999].seq != 10_000 {
+		t.Fatalf("restored=%d range=%d..%d", len(c.outBuf), c.outBuf[0].seq, c.outBuf[len(c.outBuf)-1].seq)
 	}
-	if c.outBuf[0].seq != 11 {
-		t.Fatalf("oldest kept want seq 11, got %d", c.outBuf[0].seq)
+	for i, event := range c.outBuf {
+		want := ev(int64(i+1), fmt.Sprintf("payload-%05d", i+1))
+		if event.seq != want.seq || !bytes.Equal(event.data, want.data) {
+			t.Fatalf("event[%d]=%+v", i, event)
+		}
 	}
 
-	// The on-disk spool must now hold only the trimmed set.
-	reloaded, _ := loadSpool(path)
-	if len(reloaded) != 200 || reloaded[0].seq != 11 {
-		t.Fatalf("disk spool should match trimmed buffer, got %d events from seq %d",
-			len(reloaded), func() int64 {
-				if len(reloaded) > 0 {
-					return reloaded[0].seq
-				}
-				return 0
-			}())
+	c.handleEventAck(protocol.EventAckMessage{UpToSeq: 128, EventWindow: 128})
+	remaining, err := loadSpool(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(remaining) != 9_872 || remaining[0].seq != 129 || remaining[9_871].seq != 10_000 {
+		t.Fatalf("remaining=%d range=%d..%d", len(remaining), remaining[0].seq, remaining[len(remaining)-1].seq)
+	}
+	for i, event := range remaining {
+		wantSeq := int64(i + 129)
+		if event.seq != wantSeq {
+			t.Fatalf("remaining[%d].seq=%d want=%d", i, event.seq, wantSeq)
+		}
+	}
+}
+
+func TestInitSpoolRestoresBeyondFormerByteLimitWithoutTrimming(t *testing.T) {
+	const recordCount = 128
+	body := strings.Repeat("x", 40<<10)
+	path := filepath.Join(t.TempDir(), "large.log")
+	seed, err := openSpool(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for seq := int64(1); seq <= recordCount; seq++ {
+		seed.append(ev(seq, body).data)
+	}
+	if err := seed.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	c := NewClient("", "", "daemon-x", nil, nil, nil, nil, quietLogger())
+	if err := c.InitSpool(path); err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		if err := c.spool.Close(); err != nil {
+			t.Errorf("close restored spool: %v", err)
+		}
+	}()
+
+	if len(c.outBuf) != recordCount {
+		t.Fatalf("restored=%d want=%d", len(c.outBuf), recordCount)
+	}
+	for i, event := range c.outBuf {
+		want := ev(int64(i+1), body)
+		if event.seq != want.seq || !bytes.Equal(event.data, want.data) {
+			t.Fatalf("event[%d] was trimmed or changed", i)
+		}
 	}
 }

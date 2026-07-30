@@ -3,11 +3,14 @@
 package service
 
 import (
+	"context"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestRenderPlistValid(t *testing.T) {
@@ -41,5 +44,103 @@ func TestRenderPlistValid(t *testing.T) {
 		if b, err := exec.Command("plutil", "-lint", f).CombinedOutput(); err != nil {
 			t.Errorf("plutil -lint rejected generated plist: %v\n%s\n--- plist ---\n%s", err, b, out)
 		}
+	}
+}
+
+func TestParseLaunchctlStatusDistinguishesInstalledLoadedAndRunning(t *testing.T) {
+	got := parseLaunchctlPrint("state = exited\nlast exit code = 0\n")
+	if !got.Loaded || got.Running || got.LastExitCode == nil || *got.LastExitCode != 0 {
+		t.Fatalf("got %#v", got)
+	}
+}
+
+func TestParseLaunchctlStatusRequiresRunningStateAndPID(t *testing.T) {
+	tests := []struct {
+		name    string
+		output  string
+		running bool
+		pid     int
+	}{
+		{"running", "state = running\npid = 321\nlast exit code = 7\n", true, 321},
+		{"running without pid", "state = running\n", false, 0},
+		{"exited with stale pid", "state = exited\npid = 321\n", false, 321},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := parseLaunchctlPrint(tt.output)
+			if !got.Loaded || got.Running != tt.running || got.PID != tt.pid {
+				t.Fatalf("got %#v", got)
+			}
+		})
+	}
+}
+
+func TestLaunchctlPrintNotLoadedIsNotExecutionFailure(t *testing.T) {
+	if !launchctlServiceNotLoaded("Could not find service \"me.pocketctl.daemon\" in domain for user gui: 501") {
+		t.Fatal("not-loaded launchctl output was treated as an execution failure")
+	}
+	if launchctlServiceNotLoaded("launchctl: internal I/O error") {
+		t.Fatal("real launchctl error was treated as not loaded")
+	}
+}
+
+func TestStatusSeparatesLaunchAgentFileFromLiveLoadState(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	path, err := plistPath()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("<plist/>"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	old := launchctlPrintCommand
+	launchctlPrintCommand = func(context.Context, string) ([]byte, error) {
+		return []byte("Could not find service \"me.pocketctl.daemon\" in domain for user gui: 501"), errors.New("exit status 113")
+	}
+	t.Cleanup(func() { launchctlPrintCommand = old })
+
+	got, err := Status()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !got.Installed || got.Loaded || got.Running || got.Detail != "" {
+		t.Fatalf("got %#v", got)
+	}
+}
+
+func TestStatusReturnsLaunchctlExecutionFailures(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	old := launchctlPrintCommand
+	launchctlPrintCommand = func(context.Context, string) ([]byte, error) {
+		return nil, exec.ErrNotFound
+	}
+	t.Cleanup(func() { launchctlPrintCommand = old })
+
+	if _, err := Status(); err == nil {
+		t.Fatal("missing launchctl command was treated as an unloaded service")
+	}
+}
+
+func TestStatusLaunchctlTimeoutHasDeadlineAndIsNotUnloaded(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	old := launchctlPrintCommand
+	launchctlPrintCommand = func(ctx context.Context, _ string) ([]byte, error) {
+		deadline, ok := ctx.Deadline()
+		if !ok {
+			t.Fatal("launchctl context has no deadline")
+		}
+		remaining := time.Until(deadline)
+		if remaining <= 0 || remaining > 6*time.Second {
+			t.Fatalf("launchctl deadline remaining=%s", remaining)
+		}
+		return []byte("Could not find service \"me.pocketctl.daemon\""), context.DeadlineExceeded
+	}
+	t.Cleanup(func() { launchctlPrintCommand = old })
+
+	if _, err := Status(); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("Status error=%v, want deadline exceeded", err)
 	}
 }

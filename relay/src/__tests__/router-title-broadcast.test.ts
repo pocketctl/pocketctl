@@ -41,6 +41,12 @@ function createMockWs(): any {
   }
 }
 
+function deferred<T>() {
+  let resolve!: (value: T | PromiseLike<T>) => void
+  const promise = new Promise<T>((resolvePromise) => { resolve = resolvePromise })
+  return { promise, resolve }
+}
+
 // P1 fix: session_title_update used to filter by subscribedSessions.has(sid),
 // but the list view never subscribes — so it never received title updates.
 // Now it broadcasts to all of the owner's online clients (sameUser), matching
@@ -74,6 +80,39 @@ describe('Router - session_title_update broadcasts to unsubscribed same-user cli
     expect(evt).toBeDefined()
     expect(evt.title).toBe('AI标题')
     expect(evt.session_id).toBe('sess-1')
+  })
+
+  test('generate_title_request ACKs before a slow best-effort title hook settles', async () => {
+    const title = deferred<string>()
+    vi.mocked(generateTitle).mockReturnValue(title.promise)
+    const router = new Router(createMockPool())
+    const daemonWs = createMockWs()
+    await router.registerDaemon(daemonWs, {
+      type: 'register', daemon_id: 'd1', hostname: 'h', agents: [], started_at: 17,
+    }, 1)
+    const clientWs = createMockWs()
+    router.registerClient(clientWs, 1)
+
+    router.handleDaemonMessage('d1', {
+      type: 'generate_title_request',
+      session_id: 'sess-1',
+      user_message: 'u',
+      assistant_message: 'a',
+      seq: 1,
+    })
+    await Promise.resolve()
+    daemonWs._sent.length = 0
+    router.handleDaemonMessage('d1', { type: 'ping' })
+
+    expect(daemonWs._sent.find((message: any) => message.type === 'event_ack')?.up_to_seq).toBe(1)
+    expect(clientWs._sent.find((message: any) => message.type === 'session_title_update')).toBeUndefined()
+
+    title.resolve('后台标题')
+    await vi.waitFor(() => {
+      expect(clientWs._sent).toContainEqual(expect.objectContaining({
+        type: 'session_title_update', session_id: 'sess-1', title: '后台标题',
+      }))
+    })
   })
 
   test('不同用户的 client 收不到 title 更新（sameUser 隔离）', async () => {

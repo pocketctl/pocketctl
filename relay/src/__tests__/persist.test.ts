@@ -131,6 +131,12 @@ describe('durable event effect ledger', () => {
       .resolves.toEqual({ rowID: 5, inserted: false, completed: true, nextStep: 0 })
   })
 
+  test('never converts a missing ledger RETURNING row into event id zero', async () => {
+    const pool: any = { query: vi.fn(async () => ({ rows: [] })) }
+    await expect(persistEventWithEffect(pool, 'sess-1', 'agent_text', { event_id: 'missing' }, 1))
+      .rejects.toThrow('event ledger row unavailable')
+  })
+
   test('marks an event effect completed only after the callback succeeds', async () => {
     const pool: any = { query: vi.fn(async () => ({ rows: [], rowCount: 1 })) }
     await completeEventEffect(pool, 9)

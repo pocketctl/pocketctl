@@ -22,6 +22,10 @@ import (
 // 不得 panic——这是受控降级，不是崩溃。
 var ErrUnsupported = errors.New("platform mechanism not supported on this OS")
 
+// ErrInstanceLockHeld distinguishes normal lock contention from failures that
+// make ownership unverifiable (for example, a permission or filesystem error).
+var ErrInstanceLockHeld = errors.New("instance lock is held")
+
 // Size 是终端窗口尺寸（行列）。
 type Size struct {
 	Rows uint16
@@ -103,10 +107,13 @@ type ServiceOpts struct {
 
 // ServiceStatus 是服务状态查询结果（映射 internal/service.Info）。
 type ServiceStatus struct {
-	Installed bool
-	Running   bool
-	UnitPath  string
-	Detail    string
+	Installed    bool
+	Loaded       bool
+	Running      bool
+	PID          int
+	LastExitCode *int
+	UnitPath     string
+	Detail       string
 }
 
 // ServiceManager 安装/卸载/查询系统服务（launchd/systemd/Windows Service）。

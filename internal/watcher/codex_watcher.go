@@ -23,22 +23,30 @@ import (
 // It emits the same SessionEvent type as SessionWatcher so the shared discovery
 // handler can register it (with agentType "codex").
 const (
-	codexScanInterval = 5 * time.Second
-	codexFreshWindow  = 5 * time.Minute
+	codexScanInterval          = 5 * time.Second
+	codexFreshWindow           = 5 * time.Minute
+	defaultCodexReplayLookback = 24 * time.Hour
 )
 
 type CodexSessionWatcher struct {
-	sessionsDir string
-	eventsCh    chan SessionEvent
-	seen        map[string]bool // rollout path → already processed
+	sessionsDir     string
+	eventsCh        chan SessionEvent
+	seen            map[string]bool // rollout path → already processed
+	replayCursor    *CodexReplayCursorStore
+	replayNotBefore time.Time
 }
 
 // NewCodexSessionWatcher creates a watcher over the CODEX_HOME-aware sessions dir.
 func NewCodexSessionWatcher() *CodexSessionWatcher {
+	return NewCodexSessionWatcherWithReplayCursor(nil)
+}
+
+func NewCodexSessionWatcherWithReplayCursor(cursor *CodexReplayCursorStore) *CodexSessionWatcher {
 	return &CodexSessionWatcher{
-		sessionsDir: adapter.CodexSessionsDir(),
-		eventsCh:    make(chan SessionEvent, 32),
-		seen:        make(map[string]bool),
+		sessionsDir:  adapter.CodexSessionsDir(),
+		eventsCh:     make(chan SessionEvent, 32),
+		seen:         make(map[string]bool),
+		replayCursor: cursor,
 	}
 }
 
@@ -109,17 +117,42 @@ func (cw *CodexSessionWatcher) scan(now time.Time) {
 // Ordinary historical sessions remain invisible; only explicit subagent
 // relations are emitted so legacy top-level child rows can be reconciled.
 func (cw *CodexSessionWatcher) scanHistoricalSubagents() {
-	_ = filepath.Walk(cw.sessionsDir, func(path string, info os.FileInfo, err error) error {
-		if err != nil || info.IsDir() || cw.seen[path] {
-			return nil
+	lookback := codexReplayLookback()
+	if lookback == 0 {
+		return
+	}
+	now := time.Now()
+	firstDay := now.Add(-lookback)
+	cw.replayNotBefore = firstDay
+	for day := firstDay; !day.After(now); day = day.AddDate(0, 0, 1) {
+		dir := filepath.Join(cw.sessionsDir, day.Format("2006"), day.Format("01"), day.Format("02"))
+		entries, err := os.ReadDir(dir)
+		if err != nil {
+			continue
 		}
-		name := info.Name()
-		if !strings.HasPrefix(name, "rollout-") || !strings.HasSuffix(name, ".jsonl") {
-			return nil
+		for _, entry := range entries {
+			name := entry.Name()
+			if entry.IsDir() || !strings.HasPrefix(name, "rollout-") || !strings.HasSuffix(name, ".jsonl") {
+				continue
+			}
+			cw.inspectRollout(filepath.Join(dir, name), false)
 		}
-		cw.inspectRollout(path, false)
-		return nil
-	})
+	}
+}
+
+func codexReplayLookback() time.Duration {
+	raw := strings.TrimSpace(os.Getenv("POCKETCTL_CODEX_REPLAY_LOOKBACK"))
+	if raw == "" {
+		return defaultCodexReplayLookback
+	}
+	if raw == "0" {
+		return 0
+	}
+	lookback, err := time.ParseDuration(raw)
+	if err != nil || lookback <= 0 {
+		return defaultCodexReplayLookback
+	}
+	return lookback
 }
 
 // inspectRollout classifies one rollout. A path is marked seen only after an
@@ -134,6 +167,12 @@ func (cw *CodexSessionWatcher) inspectRollout(path string, fresh bool) {
 		return
 	}
 	if meta.IsSubagent {
+		replayStartLine := int64(0)
+		replayNotBefore := time.Time{}
+		if !fresh {
+			replayStartLine = cw.replayCursor.StartLine(path)
+			replayNotBefore = cw.replayNotBefore
+		}
 		cw.eventsCh <- SessionEvent{
 			Action: "subagent_discovered",
 			Session: DiscoveredSession{
@@ -146,7 +185,10 @@ func (cw *CodexSessionWatcher) inspectRollout(path string, fresh bool) {
 				AgentNickname:   meta.AgentNickname,
 				AgentPath:       meta.AgentPath,
 			},
-			Filepath: path,
+			Filepath:        path,
+			Replay:          !fresh,
+			ReplayNotBefore: replayNotBefore,
+			ReplayStartLine: replayStartLine,
 		}
 		cw.seen[path] = true
 		return

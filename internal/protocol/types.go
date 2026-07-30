@@ -107,7 +107,7 @@ type DaemonEvent struct {
 	Resync                 bool                 `json:"resync,omitempty"` // reconnect replay, not a newly discovered session
 	ExitReason             string               `json:"exit_reason,omitempty"`
 	LastActivityAt         string               `json:"last_activity_at,omitempty"`
-	TurnStartedAt          string               `json:"turn_started_at,omitempty"` // authoritative start of the currently active turn
+	TurnStartedAt          string               `json:"turn_started_at,omitempty"`   // authoritative start of the currently active turn
 	AgentID                string               `json:"agent_id,omitempty"`          // sub-agent identifier (e.g. "afa8314e6e3f6e552)
 	ParentSessionID        string               `json:"parent_session_id,omitempty"` // subagent's parent session (P0 subagent relation)
 	IsSubagent             bool                 `json:"is_subagent,omitempty"`       // true for subagent-scoped events
@@ -329,15 +329,43 @@ type RegisterAckMessage struct {
 	// SupportsEventAck advertises that this relay dedups (daemon_id, seq) events
 	// and emits event_ack. When false/absent the daemon falls back to trimming
 	// its outbound buffer on successful write (best-effort, legacy behavior).
-	SupportsEventAck bool `json:"supports_event_ack,omitempty"`
+	SupportsEventAck bool     `json:"supports_event_ack,omitempty"`
+	Capabilities     []string `json:"capabilities,omitempty"`
+	EventWindow      int      `json:"event_window,omitempty"`
+	DaemonGeneration int64    `json:"daemon_generation,omitempty"`
 }
 
 // EventAckMessage is sent by the relay to acknowledge durable receipt of daemon
 // events up to and including UpToSeq (highest contiguous persisted seq). The
 // daemon trims acknowledged events from its outbound replay buffer.
 type EventAckMessage struct {
-	Type    string `json:"type"`
-	UpToSeq int64  `json:"up_to_seq"`
+	Type             string `json:"type"`
+	UpToSeq          int64  `json:"up_to_seq"`
+	EventWindow      int    `json:"event_window,omitempty"`
+	DaemonGeneration int64  `json:"daemon_generation,omitempty"`
+}
+
+// FlowControlMessage reduces the durable event sending window while Relay
+// ingress is backpressured. Older relays never send it and are unaffected.
+type FlowControlMessage struct {
+	Type         string `json:"type"`
+	Window       int    `json:"window"`
+	RetryAfterMS int    `json:"retry_after_ms,omitempty"`
+	Reason       string `json:"reason,omitempty"`
+	BlockedSeq   int64  `json:"blocked_seq,omitempty"`
+}
+
+// RegisterRejectedMessage distinguishes retryable registration infrastructure
+// failures from terminal policy/auth refusals. Missing Retryable remains false,
+// preserving the terminal behavior expected from older Relay messages.
+type RegisterRejectedMessage struct {
+	Type         string `json:"type"`
+	Reason       string `json:"reason,omitempty"`
+	Message      string `json:"message,omitempty"`
+	Used         int    `json:"used,omitempty"`
+	Limit        int    `json:"limit,omitempty"`
+	Retryable    bool   `json:"retryable,omitempty"`
+	RetryAfterMS int    `json:"retry_after_ms,omitempty"`
 }
 
 // RelayRestartingMessage hints daemons that the relay is shutting down for a
@@ -345,6 +373,18 @@ type EventAckMessage struct {
 // surface an error).
 type RelayRestartingMessage struct {
 	Type string `json:"type"`
+}
+
+// DisconnectMessage is a backwards-compatible relay control message that
+// tells a daemon why the current connection is ending and whether it should
+// reconnect. Older relays may still send kicked/error messages instead.
+type DisconnectMessage struct {
+	Type               string `json:"type"`
+	Reason             string `json:"reason,omitempty"`
+	Message            string `json:"message,omitempty"`
+	Retryable          bool   `json:"retryable,omitempty"`
+	RetryAfterMS       int    `json:"retry_after_ms,omitempty"`
+	GracePeriodSeconds int    `json:"grace_period_seconds,omitempty"`
 }
 
 type PingMessage struct {

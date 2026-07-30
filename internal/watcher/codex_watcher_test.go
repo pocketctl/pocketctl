@@ -120,23 +120,54 @@ func TestCodexWatcher_ClassifiesFreshSubagentWithoutTopLevelDiscovery(t *testing
 	}
 }
 
-func TestCodexWatcher_BootstrapFindsHistoricalSubagentButSkipsHistoricalMain(t *testing.T) {
+func TestCodexWatcher_BootstrapReplaysOnlyRecentSubagentsByDefault(t *testing.T) {
 	tmp := t.TempDir()
 	t.Setenv("CODEX_HOME", tmp)
 	now := time.Now()
 	oldDay := now.AddDate(0, 0, -30)
-	dayDir := filepath.Join(tmp, "sessions", oldDay.Format("2006"), oldDay.Format("01"), oldDay.Format("02"))
+	oldDir := filepath.Join(tmp, "sessions", oldDay.Format("2006"), oldDay.Format("01"), oldDay.Format("02"))
 	old := now.Add(-30 * 24 * time.Hour)
-	writeRollout(t, dayDir, "rollout-main.jsonl",
+	writeRollout(t, oldDir, "rollout-main.jsonl",
 		`{"type":"session_meta","payload":{"id":"main","session_id":"main","thread_source":"user","cwd":"/work/a"}}`+"\n", old)
-	writeRollout(t, dayDir, "rollout-child.jsonl",
+	writeRollout(t, oldDir, "rollout-child.jsonl",
 		`{"type":"session_meta","payload":{"id":"child","session_id":"root","parent_thread_id":"root","thread_source":"subagent","cwd":"/work/a"}}`+"\n", old)
+	recent := now.Add(-6 * time.Hour)
+	recentDir := filepath.Join(tmp, "sessions", recent.Format("2006"), recent.Format("01"), recent.Format("02"))
+	writeRollout(t, recentDir, "rollout-recent-child.jsonl",
+		`{"timestamp":"`+recent.UTC().Format(time.RFC3339Nano)+`","type":"session_meta","payload":{"id":"recent-child","session_id":"root","parent_thread_id":"root","thread_source":"subagent","cwd":"/work/a"}}`+"\n", old)
 
 	cw := NewCodexSessionWatcher()
 	cw.scanHistoricalSubagents()
 	got := drainEvents(cw.eventsCh)
-	if len(got) != 1 || got[0].Action != "subagent_discovered" || got[0].Session.SessionID != "child" {
+	if len(got) != 1 || got[0].Action != "subagent_discovered" || got[0].Session.SessionID != "recent-child" {
 		t.Fatalf("historical scan = %+v", got)
+	}
+	if !got[0].Replay || got[0].ReplayNotBefore.IsZero() {
+		t.Fatalf("historical event missing replay metadata: %+v", got[0])
+	}
+}
+
+func TestCodexWatcherHistoricalReplayUsesAcknowledgedCursor(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("CODEX_HOME", tmp)
+	now := time.Now()
+	dayDir := filepath.Join(tmp, "sessions", now.Format("2006"), now.Format("01"), now.Format("02"))
+	path := writeRollout(t, dayDir, "rollout-child.jsonl",
+		`{"timestamp":"`+now.UTC().Format(time.RFC3339Nano)+`","type":"session_meta","payload":{"id":"child","session_id":"root","parent_thread_id":"root","thread_source":"subagent"}}`+"\n", now)
+	cursor, err := NewCodexReplayCursorStore(filepath.Join(tmp, "cursor.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	sourceID := CodexReplaySourceID(path)
+	if err := cursor.AdvanceEventIDs([]string{"jsonl:" + sourceID + ":7:0"}); err != nil {
+		t.Fatal(err)
+	}
+
+	cw := NewCodexSessionWatcherWithReplayCursor(cursor)
+	cw.scanHistoricalSubagents()
+	got := drainEvents(cw.eventsCh)
+	if len(got) != 1 || got[0].ReplayStartLine != 7 {
+		t.Fatalf("historical cursor event = %+v", got)
 	}
 }
 
@@ -155,4 +186,31 @@ func TestCodexWatcher_DoesNotRediscoverSubagentPath(t *testing.T) {
 	if len(got) != 1 || got[0].Session.SessionID != "child" {
 		t.Fatalf("subagent path should emit once, got %+v", got)
 	}
+}
+
+func TestCodexReplayLookbackConfiguration(t *testing.T) {
+	t.Run("default", func(t *testing.T) {
+		t.Setenv("POCKETCTL_CODEX_REPLAY_LOOKBACK", "")
+		if got := codexReplayLookback(); got != 24*time.Hour {
+			t.Fatalf("lookback = %v", got)
+		}
+	})
+	t.Run("custom", func(t *testing.T) {
+		t.Setenv("POCKETCTL_CODEX_REPLAY_LOOKBACK", "6h")
+		if got := codexReplayLookback(); got != 6*time.Hour {
+			t.Fatalf("lookback = %v", got)
+		}
+	})
+	t.Run("disabled", func(t *testing.T) {
+		t.Setenv("POCKETCTL_CODEX_REPLAY_LOOKBACK", "0")
+		if got := codexReplayLookback(); got != 0 {
+			t.Fatalf("lookback = %v", got)
+		}
+	})
+	t.Run("invalid falls back", func(t *testing.T) {
+		t.Setenv("POCKETCTL_CODEX_REPLAY_LOOKBACK", "not-a-duration")
+		if got := codexReplayLookback(); got != 24*time.Hour {
+			t.Fatalf("lookback = %v", got)
+		}
+	})
 }

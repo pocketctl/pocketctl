@@ -31,9 +31,12 @@ type DiscoveredSession struct {
 
 // SessionEvent is emitted when a session is discovered or changes
 type SessionEvent struct {
-	Action   string // "discovered", "changed", "removed"
-	Session  DiscoveredSession
-	Filepath string
+	Action          string // "discovered", "changed", "removed"
+	Session         DiscoveredSession
+	Filepath        string
+	Replay          bool
+	ReplayNotBefore time.Time
+	ReplayStartLine int64
 }
 
 // SessionWatcher monitors ~/.claude/sessions/ for new/changed/removed session files

@@ -3,6 +3,7 @@
 package platform
 
 import (
+	"errors"
 	"io"
 	"net"
 	"os"
@@ -84,6 +85,8 @@ func TestInstanceLocker_Exclusion(t *testing.T) {
 
 	if _, err := locker.Acquire(path); err == nil {
 		t.Fatal("second Acquire should fail (lock already held)")
+	} else if !errors.Is(err, ErrInstanceLockHeld) {
+		t.Fatalf("second Acquire error=%v, want ErrInstanceLockHeld", err)
 	}
 }
 
@@ -95,6 +98,11 @@ func TestProcessController_IsAlive(t *testing.T) {
 	// 999999 几乎不可能是真实 pid；仅作「不存在」判据。
 	if pc.IsAlive(999999) {
 		t.Fatal("pid 999999 should not be alive")
+	}
+	for _, pid := range []int{0, -1} {
+		if pc.IsAlive(pid) {
+			t.Fatalf("invalid pid %d should not be alive", pid)
+		}
 	}
 }
 

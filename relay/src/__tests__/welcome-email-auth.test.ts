@@ -76,12 +76,15 @@ describe('auth route integration', () => {
   })
 
   test('worker starts after database initialization unless shutdown already began', () => {
-    expect(source.indexOf('welcomeEmailWorker.start()')).toBeGreaterThan(source.indexOf('.then(async () =>'))
-    expect(source).toMatch(/if \(!shuttingDown\) welcomeEmailWorker\.start\(\)/)
+    expect(source.indexOf('startRelayBackgroundWorkers({')).toBeGreaterThan(source.indexOf('.then(async () =>'))
+    expect(source).toMatch(/if \(!shuttingDown\) \{\s*await startRelayBackgroundWorkers\(/)
   })
 
   test('shutdown awaits worker drain before closing the pool', () => {
     expect(source).toContain('await welcomeEmailWorker.stop()')
-    expect(source.indexOf('await welcomeEmailWorker.stop()')).toBeLessThan(source.indexOf('await pool.end()'))
+    expect(source).toContain('await closeRelayPools(pools)')
+    expect(source.indexOf('await welcomeEmailWorker.stop()')).toBeLessThan(
+      source.indexOf('await closeRelayPools(pools)'),
+    )
   })
 })

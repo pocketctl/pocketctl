@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/pocketctl/pocketctl/internal/adapter"
 	"github.com/pocketctl/pocketctl/internal/protocol"
 )
 
@@ -103,5 +104,44 @@ loop:
 	}
 	if titleCount != 1 {
 		t.Fatalf("expected exactly 1 title request, got %d", titleCount)
+	}
+}
+
+func TestCodexReplayTitleRequestKeepsStableIdentityAndReplayPriority(t *testing.T) {
+	dir := t.TempDir()
+	childPath := filepath.Join(dir, "rollout-child.jsonl")
+	line := `{"timestamp":"2026-07-29T03:00:00Z","type":"event_msg","payload":{"type":"user_message","message":"Replay this task"}}` + "\n"
+	if err := os.WriteFile(childPath, []byte(line), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	tailer, err := NewCodexReplaySubAgentTailer(
+		childPath, "child", "root", adapter.AgentCodex,
+		time.Date(2026, time.July, 29, 2, 0, 0, 0, time.UTC), 0,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	outputCh := make(chan protocol.DaemonEvent, 4)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go tailer.Run(ctx, outputCh)
+
+	deadline := time.After(2 * time.Second)
+	var sourceID string
+	for {
+		select {
+		case event := <-outputCh:
+			switch event.Type {
+			case "user_text":
+				sourceID = event.EventID
+			case "generate_subagent_title_request":
+				if sourceID == "" || event.EventID != sourceID+":title" || !event.Resync {
+					t.Fatalf("title request = %+v, source ID = %q", event, sourceID)
+				}
+				return
+			}
+		case <-deadline:
+			t.Fatal("timed out waiting for Codex replay title request")
+		}
 	}
 }

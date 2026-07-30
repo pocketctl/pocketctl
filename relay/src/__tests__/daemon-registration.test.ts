@@ -42,4 +42,18 @@ describe('registerDaemonConnection', () => {
     )).resolves.toBe(false)
     expect(identities.get(socket)).toBe(replacement)
   })
+
+  test('releases handshake admission after Router registration settles', async () => {
+    const router = {
+      registerDaemon: vi.fn(async () => true),
+      unregisterDaemon: vi.fn(),
+    }
+    const release = vi.fn()
+
+    await expect(registerDaemonConnection(
+      router, new Map(), {}, { daemon_id: 'daemon-1', started_at: 100 }, null, undefined, undefined, release,
+    )).resolves.toBe(true)
+
+    expect(release).toHaveBeenCalledOnce()
+  })
 })

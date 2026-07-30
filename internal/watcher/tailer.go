@@ -86,6 +86,8 @@ type JSONLTailer struct {
 	stableEventIDs bool
 	eventSourceID  string
 	lineIndex      int64
+	notBefore      time.Time
+	replayUntil    int64
 	claudeV2       bool
 	maxRecordBytes int
 }
@@ -167,6 +169,10 @@ func ClaudeJSONLV2Enabled() bool {
 // option is intentionally private and used only for Codex child migration;
 // ordinary Codex/Claude and Claude child replay keep their legacy hashes.
 func newJSONLTailerFromStart(filePath, agentType string, stableEventIDs bool) (*JSONLTailer, error) {
+	return newJSONLTailerFromLine(filePath, agentType, stableEventIDs, 0)
+}
+
+func newJSONLTailerFromLine(filePath, agentType string, stableEventIDs bool, startLine int64) (*JSONLTailer, error) {
 	if _, err := os.Stat(filePath); err != nil {
 		return nil, fmt.Errorf("stat jsonl file: %w", err)
 	}
@@ -174,15 +180,42 @@ func newJSONLTailerFromStart(filePath, agentType string, stableEventIDs bool) (*
 	if err != nil {
 		return nil, fmt.Errorf("open jsonl file: %w", err)
 	}
+	offset, lineIndex, err := seekJSONLLine(f, startLine)
+	if err != nil {
+		f.Close()
+		return nil, fmt.Errorf("seek jsonl replay cursor: %w", err)
+	}
 	return &JSONLTailer{
 		filePath:       filePath,
-		offset:         0,
+		offset:         offset,
 		file:           f,
 		scanBuf:        make([]byte, 1024*1024),
 		parser:         adapter.NewJSONLParser(agentType),
 		stableEventIDs: stableEventIDs,
-		eventSourceID:  fmt.Sprintf("%x", sha256.Sum256([]byte(filePath)))[:16],
+		eventSourceID:  CodexReplaySourceID(filePath),
+		lineIndex:      lineIndex,
 	}, nil
+}
+
+func seekJSONLLine(f *os.File, startLine int64) (int64, int64, error) {
+	if startLine <= 0 {
+		return 0, 0, nil
+	}
+	reader := bufio.NewReader(f)
+	var offset int64
+	var line int64
+	for line < startLine {
+		record, err := reader.ReadBytes('\n')
+		offset += int64(len(record))
+		if err == io.EOF {
+			return offset, line, nil
+		}
+		if err != nil {
+			return 0, 0, err
+		}
+		line++
+	}
+	return offset, line, nil
 }
 
 // Close releases the file handle.
@@ -251,10 +284,15 @@ func (t *JSONLTailer) TailNewLines() ([]protocol.DaemonEvent, []string, error) {
 	// Reuse the pre-allocated 1MB buffer instead of allocating a new one each call
 	scanner := bufio.NewScanner(t.file)
 	scanner.Buffer(t.scanBuf, cap(t.scanBuf))
+	replaying := t.replayUntil > 0 && t.offset < t.replayUntil
 
 	for scanner.Scan() {
 		line := scanner.Text()
 		rawLines = append(rawLines, line)
+		if !t.notBefore.IsZero() && codexRecordBefore(line, t.notBefore) {
+			t.lineIndex++
+			continue
+		}
 
 		events, err := t.parser.Parse(line)
 		if err != nil {
@@ -265,6 +303,9 @@ func (t *JSONLTailer) TailNewLines() ([]protocol.DaemonEvent, []string, error) {
 			for i := range events {
 				if events[i].EventID == "" {
 					events[i].EventID = fmt.Sprintf("jsonl:%s:%d:%d", t.eventSourceID, t.lineIndex, i)
+				}
+				if replaying {
+					events[i].Resync = true
 				}
 			}
 		}
@@ -277,6 +318,17 @@ func (t *JSONLTailer) TailNewLines() ([]protocol.DaemonEvent, []string, error) {
 	t.offset = newOffset
 
 	return allEvents, rawLines, nil
+}
+
+func codexRecordBefore(line string, cutoff time.Time) bool {
+	var envelope struct {
+		Timestamp string `json:"timestamp"`
+	}
+	if json.Unmarshal([]byte(line), &envelope) != nil || envelope.Timestamp == "" {
+		return false
+	}
+	recordedAt, err := time.Parse(time.RFC3339Nano, envelope.Timestamp)
+	return err == nil && recordedAt.Before(cutoff)
 }
 
 func (t *JSONLTailer) tailClaudeNewLinesLocked(info os.FileInfo) ([]protocol.DaemonEvent, []string, error) {
@@ -517,6 +569,26 @@ func NewSubAgentTailerForAgent(filePath string, agentID string, parentSessionID 
 	}, nil
 }
 
+// NewCodexReplaySubAgentTailer creates the startup-history reader. It is
+// intentionally Codex-only: Claude child replay retains its existing contract.
+func NewCodexReplaySubAgentTailer(filePath, agentID, parentSessionID, agentType string, notBefore time.Time, startLine int64) (*SubAgentTailer, error) {
+	tailer, err := newJSONLTailerFromLine(filePath, adapter.AgentCodex, true, startLine)
+	if err != nil {
+		return nil, fmt.Errorf("create Codex replay tailer: %w", err)
+	}
+	info, err := os.Stat(filePath)
+	if err != nil {
+		tailer.Close()
+		return nil, fmt.Errorf("stat Codex replay file: %w", err)
+	}
+	tailer.notBefore = notBefore
+	tailer.replayUntil = info.Size()
+	return &SubAgentTailer{
+		tailer: tailer, agentID: agentID, parentSessionID: parentSessionID,
+		agentType: agentType, dropChildStatus: true,
+	}, nil
+}
+
 // TailNewLines reads new lines and stamps each event with the sub-agent's AgentID.
 func (t *SubAgentTailer) TailNewLines() ([]protocol.DaemonEvent, error) {
 	events, _, err := t.tailer.TailNewLines()
@@ -571,6 +643,7 @@ func (t *SubAgentTailer) Run(ctx context.Context, outputCh chan<- protocol.Daemo
 					outputCh <- protocol.DaemonEvent{
 						Type:            "subagent_usage",
 						EventID:         usageEventID,
+						Resync:          evt.Resync,
 						SessionID:       t.parentSessionID,
 						AgentID:         evt.AgentID,
 						ParentSessionID: t.parentSessionID,
@@ -582,8 +655,14 @@ func (t *SubAgentTailer) Run(ctx context.Context, outputCh chan<- protocol.Daemo
 				// First user_text → generate_subagent_title_request (once).
 				if !t.titleSent && evt.Type == "user_text" && evt.Text != "" {
 					t.titleSent = true
+					titleEventID := ""
+					if evt.EventID != "" {
+						titleEventID = evt.EventID + ":title"
+					}
 					outputCh <- protocol.DaemonEvent{
 						Type:            "generate_subagent_title_request",
+						EventID:         titleEventID,
+						Resync:          evt.Resync,
 						SessionID:       t.parentSessionID,
 						AgentID:         t.agentID,
 						ParentSessionID: t.parentSessionID,

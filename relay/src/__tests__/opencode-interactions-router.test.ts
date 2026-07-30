@@ -1,5 +1,10 @@
 import { describe, expect, test, vi } from 'vitest'
 import { Router } from '../router.js'
+import {
+  RealtimeOutboxConsumer,
+  type RealtimeOutboxClaim,
+  type RealtimeOutboxRow,
+} from '../materialization/realtime-outbox.js'
 
 function ws(): any {
   const sent: any[] = []
@@ -153,6 +158,96 @@ describe('OpenCode interaction router', () => {
     await tick()
     expect(first._sent).toContainEqual(resolution)
     expect(second._sent).toContainEqual(resolution)
+  })
+
+  test('recovers durable interaction feedback to one same-owner client after origin state is lost', async () => {
+    const router = new Router(pool())
+    const owner = ws()
+    const otherOwner = ws()
+    router.registerClient(owner, 7)
+    router.registerClient(otherOwner, 8)
+    const payload = {
+      type: 'interaction_result', session_id: 'ses_1', request_id: 'per_1',
+      operation: 'approval_response', status: 'ok',
+    }
+
+    expect(await router.deliverMaterializedEvent({
+      inboxId: 11, daemonId: 'd1', eventId: null, userId: 7,
+      audience: 'interaction-origin', sessionId: 'ses_1', requestId: 'per_1',
+      ordinal: 0, deliveryKey: 'inbox:11:interaction-origin:per_1:0',
+      type: 'interaction_result', payload,
+    })).toBe(true)
+
+    expect(owner._sent).toContainEqual(payload)
+    expect(otherOwner._sent).not.toContainEqual(payload)
+  })
+
+  test('does not claim durable interaction feedback delivered without an eligible owner', async () => {
+    const router = new Router(pool())
+    const otherOwner = ws()
+    router.registerClient(otherOwner, 8)
+
+    expect(await router.deliverMaterializedEvent({
+      inboxId: 12, daemonId: 'd1', eventId: null, userId: 7,
+      audience: 'interaction-origin', sessionId: 'ses_1', requestId: 'per_1',
+      ordinal: 0, deliveryKey: 'inbox:12:interaction-origin:per_1:0',
+      type: 'interaction_result',
+      payload: { type: 'interaction_result', operation: 'approval_response' },
+    })).toBe(false)
+    expect(otherOwner._sent).toHaveLength(0)
+  })
+
+  test('retries durable quota refresh before marking delivery and does not duplicate business payload', async () => {
+    const router = new Router(pool())
+    const owner = ws()
+    router.registerClient(owner, 7)
+    ;(router as any).clients.get(owner).subscribedSessions.add('ses_1')
+    const quota = vi.spyOn(router, 'broadcastQuotaStatus')
+      .mockRejectedValueOnce(new Error('quota database unavailable'))
+      .mockImplementationOnce(async (userId) => {
+        ;(router as any).broadcastToUser(userId, { type: 'quota_status', remaining: 1 })
+      })
+    const delivery: RealtimeOutboxRow = {
+      outboxId: 91,
+      inboxId: 51,
+      daemonId: 'd1',
+      eventId: 301,
+      userId: 7,
+      audience: 'session',
+      sessionId: 'ses_1',
+      requestId: null,
+      ordinal: 0,
+      deliveryKey: 'event:301:session:-:0',
+      type: 'session_status',
+      payload: { type: 'session_status', session_id: 'ses_1', status: 'completed' },
+    }
+    const makeClaim = (): RealtimeOutboxClaim => ({
+      rows: [delivery],
+      markDelivered: vi.fn().mockResolvedValue(undefined),
+      commit: vi.fn().mockResolvedValue(undefined),
+      rollback: vi.fn().mockResolvedValue(undefined),
+    })
+    const first = makeClaim()
+    const second = makeClaim()
+    const repository = {
+      claimUndelivered: vi.fn()
+        .mockResolvedValueOnce(first)
+        .mockResolvedValueOnce(second),
+    }
+    const consumer = new RealtimeOutboxConsumer({
+      repository,
+      deliver: (row) => router.deliverDurableMaterializedEvent(row),
+    })
+
+    await expect(consumer.runOnce()).rejects.toThrow('quota database unavailable')
+    expect(first.markDelivered).not.toHaveBeenCalled()
+    expect(owner._sent).toHaveLength(0)
+    await consumer.runOnce()
+
+    expect(second.markDelivered).toHaveBeenCalledWith(91)
+    expect(owner._sent.filter((message: any) => message.type === 'session_status')).toHaveLength(1)
+    expect(owner._sent.filter((message: any) => message.type === 'quota_status')).toHaveLength(1)
+    expect(quota).toHaveBeenCalledTimes(2)
   })
 
   test('refreshes persisted control state from session metadata', async () => {

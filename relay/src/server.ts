@@ -1,8 +1,10 @@
-import Fastify from 'fastify';
+import Fastify, { type FastifyInstance } from 'fastify';
 import fastifyWebsocket from '@fastify/websocket';
 import fastifyCors from '@fastify/cors';
-import { createPool, initDB, parseDBUrl, createUserWithWelcomeEmail, getUserByEmail, getUserById, getUserPlanAndWhitelist, getUserProfile, userExists, deleteUserAccount, registerDevice, removeDevice, cleanStaleTombstones, upsertDaemonAlias, updateDisplayName, updateEmail, addToIOSWaitlist, revokeToken, isTokenRevoked, cleanRevokedTokens, insertAuditLog, bindTokenToDaemon, updateSessionTitle, isSessionOwnedByUser, getSessionAllEvents, getTokenSummary, getTokensByDaemon, backfillSessionTokens, backfillSessionModel, backfillTokenDailyStats, aggregateDayIntoStats, cleanStaleEvents, getTokenDailySeries, getTokenByModel, getTokenByDaemon, getSessionTokenTrend, listProUserIds, getUserDailyTokens, getUserWeeklyTokens, markReportSent, handleRefreshReuse, type User } from './db.js';
-import { Router } from './router.js';
+import type pg from 'pg';
+import { initDB, parseDBUrl, createUserWithWelcomeEmail, getUserByEmail, getUserById, getUserPlanAndWhitelist, getUserProfile, userExists, deleteUserAccount, registerDevice, removeDevice, cleanStaleTombstones, upsertDaemonAlias, updateDisplayName, updateEmail, addToIOSWaitlist, revokeToken, isTokenRevoked, cleanRevokedTokens, insertAuditLog, bindTokenToDaemon, updateSessionTitle, isSessionOwnedByUser, getSessionAllEvents, getTokenSummary, getTokensByDaemon, backfillSessionTokens, backfillSessionModel, backfillTokenDailyStats, aggregateDayIntoStats, cleanStaleEvents, getTokenDailySeries, getTokenByModel, getTokenByDaemon, getSessionTokenTrend, listProUserIds, getUserDailyTokens, getUserWeeklyTokens, markReportSent, handleRefreshReuse, type User } from './db.js';
+import { closeRelayPools, createRelayPools } from './db-pools.js';
+import { Router, parseDurableIngressFlag, type FlagConfig } from './router.js';
 import { hashPassword, verifyPassword, signAccessToken, signRefreshToken, verifyRefreshToken, decodeToken, verifyAccessTokenWithRevocation } from './auth.js';
 import { notifyUser, sessionStatusPush, daemonOfflinePush, dailyReportPush, weeklyReportPush } from './push.js';
 import { sendEmailCode } from './config/email.js';
@@ -24,6 +26,15 @@ import { createWelcomeEmailWorker } from './welcome-email-worker.js';
 import { pathToFileURL } from 'node:url';
 import { registerDaemonConnection, type DaemonSocketIdentity } from './daemon-registration.js';
 import { resolveBuildInfo, resolveCorsOrigin, resolvePublicIssuer } from './runtime-config.js';
+import { ConnectionAdmission } from './connection-admission.js';
+import { RegistrationDeadline } from './registration-deadline.js';
+import { resolveAdmissionAddress } from './remote-address.js';
+import { registry as relayMetricsRegistry } from './metrics.js';
+import {
+  RealtimeOutboxConsumer,
+  RealtimeOutboxRepository,
+} from './materialization/realtime-outbox.js';
+import { assertDurableIngressSchema } from './event-worker-main.js';
 
 const API_KEY = process.env.POCKETCTL_API_KEY || '';
 const DB_URL = process.env.DATABASE_URL || 'postgresql://localhost:5432/pocketctl';
@@ -40,9 +51,78 @@ const RATE_LIMIT_BURST_MAX = parseInt(process.env.RATE_LIMIT_BURST_MAX || '5', 1
 const RATE_LIMIT_AUTH_FAIL_THRESHOLD = parseInt(process.env.RATE_LIMIT_AUTH_FAIL_THRESHOLD || '3', 10);
 const REFRESH_COOKIE_NAME = 'pocketctl_refresh_token';
 const REFRESH_COOKIE_MAX_AGE = 7 * 24 * 60 * 60;
+const DAEMON_REGISTRATION_DEADLINE_MS = 10_000;
+const TRUST_PROXY = process.env.TRUST_PROXY === 'true';
 
 const wsDaemonMap = new Map<any, DaemonSocketIdentity>();
 const wsTickets = createWsTicketStore(60_000);
+
+function positiveEnvInt(name: string, fallback: number): number {
+  const value = Number.parseInt(process.env[name] ?? '', 10);
+  return Number.isSafeInteger(value) && value > 0 ? value : fallback;
+}
+
+export interface RelayRuntimeConfig {
+  durableIngress: FlagConfig;
+  materializationMode: 'inline' | 'worker';
+  eventWindow: number;
+}
+
+function strictPositiveConfig(
+  env: Record<string, string | undefined>,
+  name: string,
+  fallback: number,
+): number {
+  const raw = env[name];
+  if (raw === undefined) return fallback;
+  if (!/^[1-9]\d*$/.test(raw)) {
+    throw new Error(`${name} must be a positive decimal integer`);
+  }
+  const value = Number(raw);
+  if (!Number.isSafeInteger(value)) {
+    throw new Error(`${name} must be a positive decimal integer`);
+  }
+  return value;
+}
+
+export function resolveRelayRuntimeConfig(
+  env: Record<string, string | undefined> = process.env,
+): RelayRuntimeConfig {
+  const durableIngress = parseDurableIngressFlag(env);
+  const rawMaterialization = env.RELAY_MATERIALIZATION_MODE ?? 'inline';
+  if (rawMaterialization !== 'inline' && rawMaterialization !== 'worker') {
+    throw new Error(`invalid RELAY_MATERIALIZATION_MODE: ${rawMaterialization}`);
+  }
+  for (const [name, fallback] of [
+    ['DB_CONTROL_POOL_MAX', 4],
+    ['DB_INGEST_POOL_MAX', 8],
+    ['DB_QUERY_POOL_MAX', 8],
+    ['DB_WORKER_POOL_MAX', 8],
+    ['DB_POOL_SINGLE_MAX', 16],
+    ['DB_POOL_TOTAL_MAX', 28],
+  ] as const) {
+    strictPositiveConfig(env, name, fallback);
+  }
+  const eventWindow = strictPositiveConfig(env, 'RELAY_DURABLE_INGRESS_WINDOW', 128);
+  if (eventWindow > 65_536) {
+    throw new Error('RELAY_DURABLE_INGRESS_WINDOW must be at most 65536');
+  }
+  if (rawMaterialization === 'inline' && durableIngress.mode !== 'off') {
+    throw new Error('RELAY_MATERIALIZATION_MODE=inline requires RELAY_DURABLE_INGRESS=off');
+  }
+  return {
+    durableIngress,
+    materializationMode: rawMaterialization,
+    eventWindow,
+  };
+}
+
+export async function assertRelayMaterializationReady(
+  mode: 'inline' | 'worker',
+  pool: Pick<pg.Pool, 'query'>,
+): Promise<void> {
+  if (mode === 'worker') await assertDurableIngressSchema(pool as pg.Pool);
+}
 
 // Connection rate limiter: burst + sustained window, plus an escalating ban for
 // IPs that repeatedly fail auth. The auth-fail ban is what silences a
@@ -164,6 +244,307 @@ export async function findOrCreateEmailUser(
   }
 }
 
+export async function startRelayBackgroundWorkers(deps: {
+  welcome: { start(): void; stop?(): Promise<void> };
+  realtimeOutboxConsumer: { start(): Promise<void> };
+}): Promise<void> {
+  deps.welcome.start()
+  try {
+    await deps.realtimeOutboxConsumer.start()
+  } catch (error) {
+    await deps.welcome.stop?.()
+    throw error
+  }
+}
+
+export function registerDurableIngressReadinessRoute(
+  app: FastifyInstance,
+  getDatabaseReady: () => boolean,
+  pool: Pick<pg.Pool, 'query'>,
+  buildInfo: Record<string, unknown>,
+): void {
+  app.get('/health/ready', async (_req, reply) => {
+    if (!getDatabaseReady()) {
+      reply.code(503);
+      return { status: 'not_ready', ...buildInfo, error: 'database schema initializing' };
+    }
+    try {
+      await pool.query('SELECT 1');
+      return { status: 'ok', ...buildInfo };
+    } catch {
+      reply.code(503);
+      return { status: 'degraded', ...buildInfo, error: 'db unreachable' };
+    }
+  });
+}
+
+export function registerRelayMetricsRoute(
+  app: FastifyInstance,
+  dependencies: {
+    verifyAccessToken(token: string): Promise<unknown>;
+    metrics(): Promise<string>;
+  },
+): void {
+  app.get('/internal/metrics', async (req, reply) => {
+    const authHeader = req.headers.authorization;
+    if (!authHeader?.startsWith('Bearer ')) {
+      reply.code(401);
+      return { error: 'authorization required' };
+    }
+    if (!await dependencies.verifyAccessToken(authHeader.slice(7))) {
+      reply.code(401);
+      return { error: 'invalid token' };
+    }
+    reply.type('text/plain; version=0.0.4; charset=utf-8');
+    return dependencies.metrics();
+  });
+}
+
+export { relayMetricsRegistry }
+
+interface RelayWebSocketHandlerDependencies {
+  getDatabaseReady(): boolean;
+  maxMessageSize: number;
+  apiKey: string;
+  trustProxy: boolean;
+  random(): number;
+  rateLimiter: {
+    check(address: string): { allowed: boolean; reason?: string };
+    gc(): void;
+    recordAuthFailure(address: string): number;
+    clearAuthFailure(address: string): void;
+  };
+  connectionAdmission: {
+    tryAcquire(
+      type: 'daemon' | 'client',
+      address: string,
+    ): { admitted: true; release: () => void } | { admitted: false; retryAfterMs: number };
+  };
+  verifyAccessToken(token: string): Promise<any>;
+  consumeTicket(ticket: string): Promise<any>;
+  decodeToken(token: string): any;
+  registerDaemon(
+    router: any,
+    daemonMap: Map<any, any>,
+    socket: any,
+    message: any,
+    userId: number | null,
+    tokenJti: string | undefined,
+    tokenMachineId: string | undefined,
+    releaseAdmission: () => void,
+  ): Promise<boolean>;
+  createRegistrationDeadline(onTimeout: () => void): {
+    complete(): boolean;
+    isActive(): boolean;
+  };
+  router: any;
+  wsDaemonMap: Map<any, any>;
+}
+
+export function createRelayWebSocketHandler(dependencies: RelayWebSocketHandlerDependencies) {
+  return (socket: any, req: any): void => {
+    const query = req.query as any;
+    const connType = query.type as string;
+    // This is the production preflight boundary. Nothing below it may observe
+    // or mutate connection, auth, admission, rate-limit, or Router state while
+    // the authoritative schema is still initializing.
+    if (!dependencies.getDatabaseReady() && connType === 'daemon') {
+      if (socket.readyState === 1) {
+        socket.send(JSON.stringify({ type: 'relay_restarting', retryable: true }));
+        socket.close(1013, 'relay restarting');
+      }
+      return;
+    }
+
+    const clientIp = resolveAdmissionAddress({
+      transportAddress: req.socket.remoteAddress,
+      frameworkClientAddress: req.ip,
+      trustProxy: dependencies.trustProxy,
+    });
+
+    const decision = dependencies.rateLimiter.check(clientIp);
+    if (dependencies.random() < 0.01) dependencies.rateLimiter.gc();
+    if (!decision.allowed) {
+      socket.close(4029, decision.reason || 'rate limit exceeded');
+      return;
+    }
+
+    const authHeader = req.headers['authorization'] as string | undefined;
+    const token = authHeader?.startsWith('Bearer ') ? authHeader.slice(7).trim() : '';
+    const ticket = query.ticket as string;
+    const apiKey = query.api_key as string;
+    const admission = dependencies.connectionAdmission.tryAcquire(
+      connType === 'daemon' ? 'daemon' : 'client',
+      clientIp,
+    );
+    if (!admission.admitted) {
+      socket.send(JSON.stringify({
+        type: 'disconnect',
+        reason: 'relay_overloaded',
+        retryable: true,
+        retry_after_ms: admission.retryAfterMs,
+      }));
+      socket.close(1013, 'relay overloaded');
+      return;
+    }
+    const releaseAdmission = admission.release;
+
+    const earlyMessages: Buffer[] = [];
+    let authDone = false;
+    let userId: number | null = null;
+    let tokenJti: string | undefined;
+    let tokenMachineId: string | undefined;
+    let registrationDeadline: ReturnType<RelayWebSocketHandlerDependencies['createRegistrationDeadline']> | undefined;
+    if (connType === 'daemon') {
+      registrationDeadline = dependencies.createRegistrationDeadline(() => {
+        releaseAdmission();
+        if (socket.readyState === 1) {
+          socket.send(JSON.stringify({ type: 'disconnect', reason: 'registration_timeout', retryable: true }));
+          socket.close(1013, 'registration timeout');
+        }
+      });
+    }
+
+    socket.on('message', (raw: Buffer) => {
+      if (!authDone) {
+        earlyMessages.push(raw);
+        return;
+      }
+      enqueueMessage(raw);
+    });
+
+    socket.on('close', () => {
+      registrationDeadline?.complete();
+      releaseAdmission();
+      if (connType === 'daemon') {
+        const daemon = dependencies.wsDaemonMap.get(socket);
+        if (daemon) {
+          dependencies.router.unregisterDaemon(daemon.daemonId, socket);
+          dependencies.wsDaemonMap.delete(socket);
+        }
+      } else {
+        dependencies.router.unregisterClient(socket);
+      }
+      console.log(`WS disconnected: type=${connType} ip=${clientIp}`);
+    });
+
+    let messageChain = Promise.resolve();
+    function enqueueMessage(raw: Buffer): void {
+      messageChain = messageChain.then(() => processMessage(raw)).catch((err) => {
+        console.error(`message processing error from ${clientIp}:`, err.message);
+      });
+    }
+
+    async function processMessage(raw: Buffer): Promise<void> {
+      if (raw.length > dependencies.maxMessageSize) {
+        socket.close(4003, 'message too large');
+        return;
+      }
+      try {
+        const msg = JSON.parse(raw.toString());
+        if (connType === 'daemon') {
+          if (msg.type === 'register') {
+            if (!registrationDeadline?.isActive()) return;
+            let registered = false;
+            try {
+              registered = await dependencies.registerDaemon(
+                dependencies.router,
+                dependencies.wsDaemonMap,
+                socket,
+                msg,
+                userId,
+                tokenJti,
+                tokenMachineId,
+                releaseAdmission,
+              );
+            } finally {
+              const completed = registrationDeadline.complete();
+              if (!completed && registered) dependencies.router.unregisterDaemon(msg.daemon_id, socket);
+            }
+            if (registered && socket.readyState === 1) {
+              console.log('[ws] daemon registered, total in map:', dependencies.wsDaemonMap.size);
+            }
+          } else {
+            const daemon = dependencies.wsDaemonMap.get(socket);
+            if (daemon) {
+              dependencies.router.handleDaemonMessage(daemon.daemonId, msg, socket, daemon.startedAt);
+            } else {
+              console.log('[ws] message for unknown daemon, type:', msg.type);
+            }
+          }
+        } else {
+          dependencies.router.registerClient(socket, userId);
+          dependencies.router.handleClientMessage(socket, msg);
+        }
+      } catch (err) {
+        console.error(`message parse error from ${clientIp}:`, (err as Error).message);
+      }
+    }
+
+    (async () => {
+      if (token) {
+        const payload = await dependencies.verifyAccessToken(token);
+        if (!payload) {
+          const decoded = dependencies.decodeToken(token);
+          const owner = decoded && decoded.userId
+            ? `claimed user=${decoded.userId} daemon=${decoded.machine_id || '?'} jti=${(decoded.jti || '').slice(0, 8)}`
+            : 'malformed';
+          const banSec = dependencies.rateLimiter.recordAuthFailure(clientIp);
+          console.log(`WS rejected: type=${connType} ip=${clientIp} reason=invalid_token ${owner}${banSec ? ` banned=${banSec}s` : ''}`);
+          registrationDeadline?.complete();
+          releaseAdmission();
+          socket.close(4001, 'invalid token');
+          return;
+        }
+        userId = payload.userId;
+        tokenJti = payload.jti;
+        tokenMachineId = payload.machine_id;
+      } else if (ticket) {
+        const payload = await dependencies.consumeTicket(ticket);
+        if (!payload) {
+          const banSec = dependencies.rateLimiter.recordAuthFailure(clientIp);
+          console.log(`WS rejected: type=${connType} ip=${clientIp} reason=invalid_ticket${banSec ? ` banned=${banSec}s` : ''}`);
+          registrationDeadline?.complete();
+          releaseAdmission();
+          socket.close(4001, 'invalid ticket');
+          return;
+        }
+        userId = payload.userId;
+        tokenJti = payload.jti;
+        tokenMachineId = payload.machine_id;
+      } else if (apiKey && dependencies.apiKey && apiKey === dependencies.apiKey) {
+        userId = null;
+      } else {
+        const banSec = dependencies.rateLimiter.recordAuthFailure(clientIp);
+        console.log(`WS rejected: type=${connType} ip=${clientIp} reason=auth_required${banSec ? ` banned=${banSec}s` : ''}`);
+        registrationDeadline?.complete();
+        releaseAdmission();
+        socket.close(4001, 'authentication required');
+        return;
+      }
+
+      if (connType === 'daemon' && !registrationDeadline?.isActive()) return;
+
+      dependencies.rateLimiter.clearAuthFailure(clientIp);
+      authDone = true;
+      console.log(`WS connected: type=${connType} ip=${clientIp} user=${userId || 'legacy'}`);
+
+      if (connType !== 'daemon') {
+        dependencies.router.registerClient(socket, userId);
+        releaseAdmission();
+      }
+
+      for (const raw of earlyMessages) enqueueMessage(raw);
+      earlyMessages.length = 0;
+    })().catch((err) => {
+      console.error(`ws auth error from ${clientIp}:`, err.message);
+      registrationDeadline?.complete();
+      releaseAdmission();
+      socket.close(4011, 'internal error');
+    });
+  };
+}
+
 async function main() {
   const tStart = (typeof performance !== 'undefined' ? performance.now() : Date.now())
   const corsOrigin = resolveCorsOrigin(NODE_ENV, ALLOWED_ORIGINS)
@@ -173,18 +554,36 @@ async function main() {
     `http://localhost:${PORT}`,
   )
   const buildInfo = resolveBuildInfo(process.env)
-  const pool = createPool(parseDBUrl(DB_URL))
-  const welcomeEmailWorker = createWelcomeEmailWorker({ pool })
+  const runtimeConfig = resolveRelayRuntimeConfig(process.env)
+  const pools = createRelayPools(parseDBUrl(DB_URL))
+  const pool = pools.query
+  const welcomeEmailWorker = createWelcomeEmailWorker({ pool: pools.worker })
+  const router = new Router(pools, {
+    durableIngress: {
+      mode: runtimeConfig.durableIngress.mode,
+      canaryDaemonIds: runtimeConfig.durableIngress.daemonIds,
+      eventWindow: runtimeConfig.eventWindow,
+    },
+  });
+  const realtimeOutboxConsumer = new RealtimeOutboxConsumer({
+    repository: new RealtimeOutboxRepository(pools.query),
+    deliver: (delivery) => router.deliverDurableMaterializedEvent(delivery),
+  })
   let shuttingDown = false
+  let databaseReady = false
   const tPool = (typeof performance !== 'undefined' ? performance.now() : Date.now())
   // initDB 不阻塞 app.listen：生产重启表已存在，initDB 基本 no-op；全新库首启期间
   // 表可能短暂不存在，但生产不触发该路径。失败仍致命 → exit。
-  initDB(pool)
+  initDB(pools.query)
     .then(async () => {
+      await assertRelayMaterializationReady(runtimeConfig.materializationMode, pools.query)
       const t = (typeof performance !== 'undefined' ? performance.now() : Date.now());
       console.log(`[startup] initDB done in ${(t - tPool).toFixed(0)}ms`);
       console.log('Database initialized');
-      if (!shuttingDown) welcomeEmailWorker.start();
+      if (!shuttingDown) {
+        await startRelayBackgroundWorkers({ welcome: welcomeEmailWorker, realtimeOutboxConsumer });
+        databaseReady = true
+      }
       // Backfill sessions token columns from agent_text usage events
       try {
         const backfilled = await backfillSessionTokens(pool);
@@ -198,8 +597,14 @@ async function main() {
     .catch((e) => { console.error('[startup] initDB failed:', e); process.exit(1) })
   const tInit = tPool // listen 不再等 initDB
 
-  const router = new Router(pool);
-  const app = Fastify({ logger: false });
+  const connectionAdmission = new ConnectionAdmission({
+    daemonGlobalMax: positiveEnvInt('RELAY_DAEMON_HANDSHAKE_MAX', 64),
+    clientGlobalMax: positiveEnvInt('RELAY_CLIENT_HANDSHAKE_MAX', 128),
+    daemonPerAddressMax: positiveEnvInt('RELAY_DAEMON_HANDSHAKE_PER_ADDRESS_MAX', 8),
+    clientPerAddressMax: positiveEnvInt('RELAY_CLIENT_HANDSHAKE_PER_ADDRESS_MAX', 32),
+    jitter: () => Math.floor(Math.random() * 1_000),
+  });
+  const app = Fastify({ logger: false, trustProxy: TRUST_PROXY });
 
   await app.register(fastifyCors, { origin: corsOrigin, credentials: true });
   await app.register(fastifyWebsocket);
@@ -1202,6 +1607,7 @@ async function main() {
   // ---- Health check ----
 
   app.get('/health', async () => {
+    if (!databaseReady) return { status: 'not_ready', ...buildInfo, error: 'database schema initializing' };
     try {
       await pool.query('SELECT 1');
       return { status: 'ok', ...buildInfo };
@@ -1210,172 +1616,37 @@ async function main() {
     }
   });
 
+  registerDurableIngressReadinessRoute(app, () => databaseReady, pool, buildInfo);
+  registerRelayMetricsRoute(app, {
+    verifyAccessToken: (token) => verifyAccessTokenWithRevocation(token, pool),
+    metrics: () => relayMetricsRegistry.metrics(),
+  });
+
   // ---- WebSocket endpoint ----
 
-  app.get('/ws', { websocket: true }, (socket, req) => {
-    // Trust X-Forwarded-For from the nginx proxy so logs show the real client
-    // IP (without this, every connection appears as 127.0.0.1 behind nginx).
-    const clientIp = (req.headers['x-forwarded-for'] as string)?.split(',')[0]?.trim()
-      || (req.headers['x-real-ip'] as string)?.trim()
-      || req.ip || req.socket.remoteAddress || 'unknown';
-
-    const decision = rateLimiter.check(clientIp);
-    if (Math.random() < 0.01) rateLimiter.gc(); // opportunistic cleanup
-    if (!decision.allowed) {
-      socket.close(4029, decision.reason || 'rate limit exceeded');
-      return;
-    }
-
-    const query = req.query as any;
-    // Token resolution. Daemons/iOS/CLI send `Authorization: Bearer <jwt>`.
-    // Browser Web clients use a short-lived one-time `?ticket=` because native
-    // WebSocket cannot set headers. Long-lived JWTs are no longer accepted in
-    // the URL query string.
-    const authHeader = req.headers['authorization'] as string | undefined;
-    const token = authHeader?.startsWith('Bearer ') ? authHeader.slice(7).trim() : '';
-    const ticket = query.ticket as string;
-    const apiKey = query.api_key as string;
-    const connType = query.type as string;
-
-    // Buffer early messages until auth completes
-    const earlyMessages: Buffer[] = [];
-    let authDone = false;
-    let userId: number | null = null;
-    let tokenJti: string | undefined;
-    let tokenMachineId: string | undefined;
-
-    // Register message listener BEFORE async auth (avoid race condition)
-    socket.on('message', (raw: Buffer) => {
-      // debug log removed
-      if (!authDone) {
-        earlyMessages.push(raw);
-        // debug log removed
-        return;
-      }
-      enqueueMessage(raw);
-    });
-
-    socket.on('close', () => {
-      if (connType === 'daemon') {
-        const daemon = wsDaemonMap.get(socket);
-        if (daemon) { router.unregisterDaemon(daemon.daemonId, socket); wsDaemonMap.delete(socket); }
-      } else {
-        router.unregisterClient(socket);
-      }
-      console.log(`WS disconnected: type=${connType} ip=${clientIp}`);
-    });
-
-    let messageChain = Promise.resolve();
-    function enqueueMessage(raw: Buffer): void {
-      messageChain = messageChain.then(() => processMessage(raw)).catch((err) => {
-        console.error(`message processing error from ${clientIp}:`, err.message);
-      });
-    }
-
-    async function processMessage(raw: Buffer): Promise<void> {
-      if (raw.length > MAX_WS_MESSAGE_SIZE) {
-        socket.close(4003, 'message too large');
-        return;
-      }
-      try {
-        const msg = JSON.parse(raw.toString());
-        // debug log removed
-        if (connType === 'daemon') {
-          if (msg.type === 'register') {
-            const registered = await registerDaemonConnection(
-              router, wsDaemonMap, socket, msg, userId, tokenJti, tokenMachineId,
-            );
-            if (registered) {
-              console.log('[ws] daemon registered, total in map:', wsDaemonMap.size);
-            }
-          } else {
-            const daemon = wsDaemonMap.get(socket);
-            if (daemon) {
-              router.handleDaemonMessage(daemon.daemonId, msg, socket, daemon.startedAt);
-            }
-            else console.log('[ws] message for unknown daemon, type:', msg.type);
-          }
-        } else {
-          router.registerClient(socket, userId);
-          router.handleClientMessage(socket, msg);
-        }
-      } catch (err) {
-        console.error(`message parse error from ${clientIp}:`, (err as Error).message);
-      }
-    }
-
-    // Async auth + flush buffered messages
-    (async () => {
-      if (token) {
-        const payload = await verifyAccessTokenWithRevocation(token, pool);
-        if (!payload) {
-          // Resolve the claimed owner for diagnostics. The token is rejected
-          // regardless (revoked/expired/bad sig), but a real zombie holds a
-          // structurally-intact expired token whose payload still decodes — so
-          // decodeToken (no signature/exp check) surfaces the user/daemon it
-          // belongs to. "claimed" because the payload is unsigned; a forged
-          // token could lie, but the connection is never authorized on it.
-          const decoded = decodeToken(token);
-          const owner = decoded && decoded.userId
-            ? `claimed user=${decoded.userId} daemon=${decoded.machine_id || '?'} jti=${(decoded.jti || '').slice(0, 8)}`
-            : 'malformed';
-          const banSec = rateLimiter.recordAuthFailure(clientIp);
-          console.log(`WS rejected: type=${connType} ip=${clientIp} reason=invalid_token ${owner}${banSec ? ` banned=${banSec}s` : ''}`);
-          socket.close(4001, 'invalid token');
-          return;
-        }
-        userId = payload.userId;
-        tokenJti = payload.jti;
-        tokenMachineId = payload.machine_id;
-      } else if (ticket) {
-        const payload = await consumeLiveUserWsTicket(wsTickets, ticket, pool);
-        if (!payload) {
-          const banSec = rateLimiter.recordAuthFailure(clientIp);
-          console.log(`WS rejected: type=${connType} ip=${clientIp} reason=invalid_ticket${banSec ? ` banned=${banSec}s` : ''}`);
-          socket.close(4001, 'invalid ticket');
-          return;
-        }
-        userId = payload.userId;
-        tokenJti = payload.jti;
-        tokenMachineId = payload.machine_id;
-      } else if (apiKey && API_KEY && apiKey === API_KEY) {
-        userId = null;
-      } else {
-        const banSec = rateLimiter.recordAuthFailure(clientIp);
-        console.log(`WS rejected: type=${connType} ip=${clientIp} reason=auth_required${banSec ? ` banned=${banSec}s` : ''}`);
-        socket.close(4001, 'authentication required');
-        return;
-      }
-
-      // Auth succeeded — this is a legitimate client. Forgive any prior
-      // fat-finger failures from this IP so a one-off bad token doesn't haunt.
-      rateLimiter.clearAuthFailure(clientIp);
-      authDone = true;
-      console.log(`WS connected: type=${connType} ip=${clientIp} user=${userId || 'legacy'}`);
-
-      // Register client into router.clients IMMEDIATELY on auth success (not
-      // deferred to the first message). Previously registerClient() only ran
-      // inside processMessage(), i.e. after the client sent its first message
-      // (iOS sends set_locale on ping success). Any daemon registering in that
-      // window broadcast daemon_status to an empty clients set — the new host
-      // never reached the already-connected iOS app until a restart. Doing it
-      // here guarantees the socket is in the broadcast set from the moment it
-      // is authorized, so a re-processMessage() call becomes a no-op duplicate
-      // (registerClient just re-sets the same entry).
-      if (connType !== 'daemon') {
-        router.registerClient(socket, userId);
-      }
-
-      // Process any messages that arrived during auth
-      for (const raw of earlyMessages) {
-        enqueueMessage(raw);
-      }
-      earlyMessages.length = 0;
-    })().catch((err) => {
-      console.error(`ws auth error from ${clientIp}:`, err.message);
-      socket.close(4011, 'internal error');
-    });
-  });
+  app.get('/ws', { websocket: true }, createRelayWebSocketHandler({
+    getDatabaseReady: () => databaseReady,
+    maxMessageSize: MAX_WS_MESSAGE_SIZE,
+    apiKey: API_KEY,
+    trustProxy: TRUST_PROXY,
+    random: Math.random,
+    rateLimiter,
+    connectionAdmission,
+    verifyAccessToken: (token) => verifyAccessTokenWithRevocation(token, pool),
+    consumeTicket: (ticket) => consumeLiveUserWsTicket(wsTickets, ticket, pool),
+    decodeToken,
+    registerDaemon: registerDaemonConnection,
+    createRegistrationDeadline: (onTimeout) => new RegistrationDeadline(
+      DAEMON_REGISTRATION_DEADLINE_MS,
+      {
+        setTimeout: (callback, delayMs) => setTimeout(callback, delayMs),
+        clearTimeout: (handle) => clearTimeout(handle as ReturnType<typeof setTimeout>),
+      },
+      onTimeout,
+    ),
+    router,
+    wsDaemonMap,
+  }));
 
   try {
     await app.listen({ port: PORT, host: '0.0.0.0' })
@@ -1393,13 +1664,19 @@ async function main() {
     shuttingDown = true;
     console.log(`[shutdown] received ${signal}, draining...`);
     router.beginShutdown();
+    await router.stopDurableIngress({ flushDeadlineMs: 1_500 });
+    try {
+      await realtimeOutboxConsumer.stop()
+    } catch (e) {
+      console.error('[shutdown] realtime outbox drain error:', e instanceof Error ? e.name : typeof e)
+    }
     router.broadcastRelayRestarting();
     router.terminateAllConnections()
     await welcomeEmailWorker.stop()
     try {
       await Promise.race([app.close(), new Promise(r => setTimeout(r, 2000))])
     } catch (e) { console.error('[shutdown] close error:', e) }
-    try { await pool.end() } catch (e) { console.error('[shutdown] pool.end error:', e) }
+    try { await closeRelayPools(pools) } catch (e) { console.error('[shutdown] pool.end error:', e) }
     router.stop()
     process.exit(0)
   }

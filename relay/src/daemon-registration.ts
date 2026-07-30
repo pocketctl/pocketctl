@@ -28,6 +28,7 @@ export async function registerDaemonConnection(
   userId: number | null,
   tokenJti?: string,
   machineId?: string,
+  releaseAdmission?: () => void,
 ): Promise<boolean> {
   const identity: DaemonSocketIdentity = {
     daemonId: message.daemon_id,
@@ -38,9 +39,11 @@ export async function registerDaemonConnection(
   try {
     registered = await router.registerDaemon(socket, message, userId, tokenJti, machineId)
   } catch (error) {
+    releaseAdmission?.()
     if (identities.get(socket) === identity) identities.delete(socket)
     throw error
   }
+  releaseAdmission?.()
   if (!registered) {
     if (identities.get(socket) === identity) identities.delete(socket)
     return false

@@ -6,6 +6,68 @@ import (
 	"testing"
 )
 
+func TestDisconnectMessageRoundTrip(t *testing.T) {
+	want := DisconnectMessage{
+		Type: "disconnect", Reason: "token_check_unavailable",
+		Retryable: true, RetryAfterMS: 750,
+	}
+	data, _ := json.Marshal(want)
+	var got DisconnectMessage
+	if err := json.Unmarshal(data, &got); err != nil || got != want {
+		t.Fatalf("got %#v err=%v", got, err)
+	}
+}
+
+func TestDurableIngressControlMessagesRoundTrip(t *testing.T) {
+	register := RegisterAckMessage{
+		Type: "register_ack", SupportsEventAck: true,
+		Capabilities: []string{"durable_inbox", "flow_control"}, EventWindow: 128, DaemonGeneration: 17,
+	}
+	data, err := json.Marshal(register)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var decoded RegisterAckMessage
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		t.Fatal(err)
+	}
+	if decoded.EventWindow != 128 || decoded.DaemonGeneration != 17 || len(decoded.Capabilities) != 2 {
+		t.Fatalf("register ack did not round-trip: %+v", decoded)
+	}
+
+	ack := EventAckMessage{Type: "event_ack", UpToSeq: 4, EventWindow: 64, DaemonGeneration: 17}
+	flow := FlowControlMessage{
+		Type: "flow_control", Window: 1, RetryAfterMS: 50,
+		Reason: "event_too_large", BlockedSeq: 9,
+	}
+	for _, message := range []any{ack, flow} {
+		if _, err := json.Marshal(message); err != nil {
+			t.Fatalf("marshal durable control message: %v", err)
+		}
+	}
+	flowRaw, _ := json.Marshal(flow)
+	var decodedFlow FlowControlMessage
+	if err := json.Unmarshal(flowRaw, &decodedFlow); err != nil || decodedFlow.BlockedSeq != 9 {
+		t.Fatalf("flow control barrier did not round-trip: %+v err=%v", decodedFlow, err)
+	}
+
+	rejected := RegisterRejectedMessage{
+		Type: "register_rejected", Reason: "durable_ingress_unavailable",
+		Retryable: true, RetryAfterMS: 250,
+	}
+	raw, err := json.Marshal(rejected)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var decodedRejected RegisterRejectedMessage
+	if err := json.Unmarshal(raw, &decodedRejected); err != nil {
+		t.Fatal(err)
+	}
+	if !decodedRejected.Retryable || decodedRejected.RetryAfterMS != 250 {
+		t.Fatalf("register rejection did not round-trip: %+v", decodedRejected)
+	}
+}
+
 func TestPermissionConfigJSON(t *testing.T) {
 	msg := ClientMessage{Type: "session_create", Agent: "codex", Permission: &PermissionConfig{Agent: "codex", Preset: "custom", ApprovalPolicy: "never", SandboxMode: "workspace-write"}}
 	b, err := json.Marshal(msg)

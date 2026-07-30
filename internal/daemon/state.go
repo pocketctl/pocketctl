@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sync"
 	"time"
 
 	"github.com/pocketctl/pocketctl/internal/adapter"
@@ -18,14 +19,28 @@ import (
 // DaemonState is written to a file by the running daemon
 // and read by CLI commands (status) to show daemon info.
 type DaemonState struct {
-	DaemonID  string         `json:"daemon_id"`
-	Version   string         `json:"version"`
-	RelayURL  string         `json:"relay_url"`
-	Connected bool           `json:"connected"`
-	StartedAt time.Time      `json:"started_at"`
-	PID       int            `json:"pid"`
-	Sessions  []SessionState `json:"sessions"`
+	DaemonID             string         `json:"daemon_id"`
+	RuntimeInstanceToken string         `json:"runtime_instance_token,omitempty"`
+	Version              string         `json:"version"`
+	RelayURL             string         `json:"relay_url"`
+	Connected            bool           `json:"connected"`
+	ConnectionStatus     string         `json:"connection_status,omitempty"`
+	ConnectionReason     string         `json:"connection_reason,omitempty"`
+	UpdatedAt            time.Time      `json:"updated_at,omitempty"`
+	StartedAt            time.Time      `json:"started_at"`
+	PID                  int            `json:"pid"`
+	SpoolEvents          int            `json:"spool_events,omitempty"`
+	SpoolBytes           int64          `json:"spool_bytes,omitempty"`
+	EventWindow          int            `json:"event_window,omitempty"`
+	UnackedEvents        int            `json:"unacked_events,omitempty"`
+	LastACKAt            time.Time      `json:"last_ack_at,omitempty"`
+	ReconnectCount       uint64         `json:"reconnect_count,omitempty"`
+	BackpressureDuration time.Duration  `json:"backpressure_duration,omitempty"`
+	BackpressureSince    time.Time      `json:"backpressure_since,omitempty"`
+	Sessions             []SessionState `json:"sessions"`
 }
+
+var daemonStateWriteMu sync.Mutex
 
 // SessionState is a snapshot of a single session's status.
 type SessionState struct {
@@ -208,6 +223,9 @@ func CleanupOpenCodeServeAfterForcedStop() error {
 
 // WriteState persists the daemon state to the state file.
 func WriteState(s *DaemonState) error {
+	daemonStateWriteMu.Lock()
+	defer daemonStateWriteMu.Unlock()
+
 	statePath := StatePath()
 	if err := os.MkdirAll(filepath.Dir(statePath), 0755); err != nil {
 		return err
@@ -216,7 +234,31 @@ func WriteState(s *DaemonState) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(statePath, data, 0644)
+	tmp, err := os.CreateTemp(filepath.Dir(statePath), ".daemon.state-*")
+	if err != nil {
+		return err
+	}
+	tmpName := tmp.Name()
+	defer os.Remove(tmpName)
+	if err := tmp.Chmod(0o644); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if _, err := tmp.Write(data); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Sync(); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	if err := os.Rename(tmpName, statePath); err != nil {
+		return err
+	}
+	return syncStateDirectory(filepath.Dir(statePath))
 }
 
 // ReadState reads the daemon state from the state file.

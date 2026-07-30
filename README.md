@@ -139,6 +139,7 @@ No daemon restart or separate app-server connection command is required. Missing
 |----------|-------------|
 | `POCKETCTL_RELAY_URL` | Relay WebSocket URL (e.g. `wss://your-domain.com/ws`) |
 | `POCKETCTL_TOKEN` | JWT token for authentication |
+| `POCKETCTL_CODEX_REPLAY_LOOKBACK` | Codex startup replay window for historical subagent events (default: `24h`; set to `0` to disable historical replay) |
 | `SES_FROM_EMAIL` | Sender email address for verification emails |
 | `SES_REGION` | Tencent Cloud SES region (default: `ap-hongkong`) |
 | `DEV_EMAIL` | Dev mode test email address |

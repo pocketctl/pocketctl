@@ -3,16 +3,27 @@
 package service
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"github.com/pocketctl/pocketctl/internal/config"
 )
 
 const unitName = "pocketctl.service"
+
+var systemctlShowCommand = func(ctx context.Context) ([]byte, error) {
+	return exec.CommandContext(
+		ctx,
+		"systemctl", "--user", "show", unitName, "--no-pager",
+		"--property=LoadState", "--property=ActiveState", "--property=MainPID", "--property=ExecMainStatus",
+	).CombinedOutput()
+}
 
 // unitPath returns ~/.config/systemd/user/pocketctl.service.
 func unitPath() (string, error) {
@@ -70,8 +81,7 @@ func Uninstall() error {
 	return nil
 }
 
-// Status reports whether the unit file exists and whether systemd reports it
-// active.
+// Status reports the on-disk unit separately from systemd's live unit state.
 func Status() (Info, error) {
 	path, err := unitPath()
 	if err != nil {
@@ -80,15 +90,58 @@ func Status() (Info, error) {
 	info := Info{UnitPath: path}
 	if _, statErr := os.Stat(path); statErr == nil {
 		info.Installed = true
+	} else if !os.IsNotExist(statErr) {
+		return Info{}, fmt.Errorf("stat systemd user unit: %w", statErr)
 	}
-	// `is-active` exits non-zero when inactive; we read the word it prints.
-	out, _ := exec.Command("systemctl", "--user", "is-active", unitName).CombinedOutput()
-	state := strings.TrimSpace(string(out))
-	info.Detail = state
-	if state == "active" {
-		info.Running = true
+
+	ctx, cancel := context.WithTimeout(context.Background(), statusQueryTimeout)
+	defer cancel()
+	out, commandErr := systemctlShowCommand(ctx)
+	live := parseSystemctlShow(string(out))
+	if commandErr != nil {
+		if ctx.Err() != nil {
+			commandErr = ctx.Err()
+		}
+		if errors.Is(commandErr, context.DeadlineExceeded) ||
+			errors.Is(commandErr, context.Canceled) ||
+			!systemctlUnitNotFound(string(out)) {
+			return Info{}, fmt.Errorf("systemctl --user show %s: %w (%s)", unitName, commandErr, strings.TrimSpace(string(out)))
+		}
 	}
-	return info, nil
+	live.Installed = info.Installed
+	live.UnitPath = path
+	return live, nil
+}
+
+func parseSystemctlShow(out string) Info {
+	values := make(map[string]string)
+	for _, line := range strings.Split(out, "\n") {
+		key, value, ok := strings.Cut(strings.TrimSpace(line), "=")
+		if ok {
+			values[key] = value
+		}
+	}
+	info := Info{
+		Loaded: values["LoadState"] == "loaded",
+		Detail: values["ActiveState"],
+	}
+	if pid, err := strconv.Atoi(values["MainPID"]); err == nil {
+		info.PID = pid
+	}
+	if code, err := strconv.Atoi(values["ExecMainStatus"]); err == nil {
+		info.LastExitCode = &code
+	}
+	info.Running = values["ActiveState"] == "active" && info.PID > 0
+	return info
+}
+
+func systemctlUnitNotFound(out string) bool {
+	for _, line := range strings.Split(out, "\n") {
+		if strings.TrimSpace(line) == "LoadState=not-found" {
+			return true
+		}
+	}
+	return false
 }
 
 func renderUnit(cfg Config) string {

@@ -36,6 +36,7 @@ scripts/install-daemon.sh
 scripts/ci-windows-smoke.ps1
 scripts/test-opencode-managed.sh
 scripts/test-codex-managed.sh
+scripts/test-relay-durable-ingress.sh
 scripts/secret-scan.sh
 scripts/github-mirror-files.txt
 scripts/tests/github-mirror-contract.test.mjs

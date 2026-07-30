@@ -18,6 +18,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -246,9 +247,17 @@ func cmdServiceInstall(args []string) {
 
 	// If the daemon is already running standalone, stop it so it doesn't fight
 	// the supervised instance for the relay registration / approval socket.
-	if pid, running := daemon.IsRunning(); running {
+	pid, running, runtimeErr := daemon.RuntimeStatus()
+	if runtimeErr != nil {
+		fmt.Fprintln(os.Stderr, i18n.T("daemon.status_uncertain", runtimeErr))
+		os.Exit(1)
+	}
+	if running {
 		fmt.Println(i18n.T("service.stopping_standalone", pid))
-		_ = daemon.Stop()
+		if err := daemon.Stop(); err != nil {
+			fmt.Fprintln(os.Stderr, i18n.T("service.stop_standalone_fail", err))
+			os.Exit(1)
+		}
 	}
 
 	if err := serviceMgr.Install(cfg); err != nil {
@@ -277,6 +286,10 @@ func serviceDaemonArgs(production bool, relayURL string) []string {
 }
 
 func cmdServiceUninstall() {
+	if _, _, err := daemon.RuntimeStatus(); err != nil {
+		fmt.Fprintln(os.Stderr, i18n.T("daemon.status_uncertain", err))
+		os.Exit(1)
+	}
 	if err := serviceMgr.Uninstall(); err != nil {
 		fmt.Fprintln(os.Stderr, i18n.T("service.uninstall_fail", err))
 		os.Exit(1)
@@ -290,21 +303,40 @@ func cmdServiceStatus() {
 		fmt.Fprintln(os.Stderr, i18n.T("service.status_fail", err))
 		os.Exit(1)
 	}
+	renderServiceStatus(os.Stdout, info)
+}
+
+func renderServiceStatus(out io.Writer, info platform.ServiceStatus) {
 	installed := i18n.T("service.no")
 	if info.Installed {
 		installed = i18n.T("service.yes")
+	}
+	loaded := i18n.T("service.no")
+	if info.Loaded {
+		loaded = i18n.T("service.yes")
 	}
 	running := i18n.T("service.no")
 	if info.Running {
 		running = i18n.T("service.yes")
 	}
-	fmt.Println(i18n.T("service.status_installed", installed))
-	fmt.Println(i18n.T("service.status_running", running))
+	fmt.Fprintln(out, i18n.T("service.status_installed", installed))
+	fmt.Fprintln(out, i18n.T("service.status_loaded", loaded))
+	fmt.Fprintln(out, i18n.T("service.status_running", running))
+	if info.PID > 0 {
+		fmt.Fprintln(out, i18n.T("service.status_pid", info.PID))
+	}
+	if info.LastExitCode != nil {
+		fmt.Fprintln(out, i18n.T("service.status_last_exit", *info.LastExitCode))
+	}
 	if info.UnitPath != "" {
-		fmt.Println(i18n.T("service.unit_path", info.UnitPath))
+		fmt.Fprintln(out, i18n.T("service.unit_path", info.UnitPath))
 	}
 	if info.Detail != "" {
-		fmt.Println(i18n.T("service.status_detail", info.Detail))
+		fmt.Fprintln(out, i18n.T("service.status_detail", info.Detail))
+	}
+	if info.Installed && !info.Loaded {
+		fmt.Fprintln(out, i18n.T("service.supervisor_unloaded"))
+		fmt.Fprintln(out, i18n.T("service.reinstall_hint"))
 	}
 }
 
@@ -373,10 +405,16 @@ func cmdUninstall(args []string) {
 	}
 
 	// 1. Stop the daemon first so it isn't holding the binary / log files.
-	if pid, running := daemon.IsRunning(); running {
+	pid, running, runtimeErr := daemon.RuntimeStatus()
+	if runtimeErr != nil {
+		fmt.Fprintln(os.Stderr, i18n.T("daemon.status_uncertain", runtimeErr))
+		return
+	}
+	if running {
 		fmt.Println(i18n.T("uninstall.stopping_daemon", pid))
 		if err := daemon.Stop(); err != nil {
 			fmt.Fprintln(os.Stderr, i18n.T("uninstall.stop_fail", err))
+			return
 		} else {
 			fmt.Println(i18n.T("daemon.stopped"))
 		}
@@ -812,7 +850,12 @@ func cmdDaemonStart(args []string) {
 	}
 	// A replacement deliberately starts while the old owner is alive. It must
 	// bypass only this racy PID pre-check; the instance lock remains authoritative.
-	if pid, running := daemon.IsRunning(); running && restartReadyFile == "" && !observedIntentExists {
+	pid, running, runtimeErr := daemon.RuntimeStatus()
+	if runtimeErr != nil {
+		fmt.Fprintln(os.Stderr, i18n.T("daemon.status_uncertain", runtimeErr))
+		os.Exit(1)
+	}
+	if running && restartReadyFile == "" && !observedIntentExists {
 		fmt.Println(i18n.T("daemon.already_running", pid))
 		os.Exit(0)
 	}
@@ -861,14 +904,25 @@ func cmdDaemonStart(args []string) {
 		// optimistic "started" printed before anything actually came up.
 		stop := startSpinner(i18n.T("daemon.starting"))
 		var running, connected bool
+		var startupUncertainty error
 		deadline := time.Now().Add(12 * time.Second)
 		for time.Now().Before(deadline) {
 			time.Sleep(200 * time.Millisecond)
-			if _, ok := daemon.IsRunning(); !ok {
+			runningNow, connectedNow, observationErr := observeDetachedDaemonStartup(
+				daemon.RuntimeStatus,
+				daemon.ReadState,
+				daemon.VerifyRuntimeIdentity,
+			)
+			if observationErr != nil {
+				startupUncertainty = observationErr
+				continue
+			}
+			if !runningNow {
 				continue
 			}
 			running = true
-			if st, err := daemon.ReadState(); err == nil && st.Connected {
+			startupUncertainty = nil
+			if connectedNow {
 				connected = true
 				break
 			}
@@ -877,8 +931,12 @@ func cmdDaemonStart(args []string) {
 
 		// Print the startup banner from the launcher (the child's stdout is nil /
 		// detached, so only the launcher can write to the user's terminal).
-		if !running {
-			fmt.Println(i18n.T("daemon.start_failed", daemon.LogPath()))
+		if !running || startupUncertainty != nil {
+			renderDetachedDaemonStartupFailure(
+				os.Stdout,
+				daemon.LogPath(),
+				startupUncertainty,
+			)
 			os.Exit(1)
 		}
 		fmt.Println(i18n.T("daemon.started", preForkID, proc.Pid))
@@ -916,6 +974,11 @@ func cmdDaemonStart(args []string) {
 		os.Exit(1)
 	}
 	defer instanceLock.Close()
+	runtimeInstanceToken, err := daemon.CurrentInstanceToken()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, i18n.T("daemon.status_uncertain", err))
+		os.Exit(1)
+	}
 
 	id := *daemonID
 	if id == "" {
@@ -929,14 +992,35 @@ func cmdDaemonStart(args []string) {
 		}
 	}
 
+	daemonStartedAt := time.Now()
+	initialState := daemon.DaemonState{
+		DaemonID:             id,
+		RuntimeInstanceToken: runtimeInstanceToken,
+		Version:              version,
+		RelayURL:             url,
+		ConnectionStatus:     string(ws.ConnectionReconnecting),
+		UpdatedAt:            daemonStartedAt.UTC(),
+		StartedAt:            daemonStartedAt,
+		PID:                  os.Getpid(),
+		EventWindow:          -1,
+		UnackedEvents:        -1,
+	}
 	// Persist daemon_id immediately so the next start always reads the same ID,
-	// even if the process is killed before the relay connection fires OnStateChange.
-	_ = daemon.WriteState(&daemon.DaemonState{
-		DaemonID: id,
-		Version:  version,
-		RelayURL: url,
-		PID:      os.Getpid(),
-	})
+	// even if the process is killed before the relay connection callback fires.
+	var statePersistence *daemonStatePersistence
+	if err := persistInitialDaemonStateAndContinue(
+		initialState,
+		daemon.WriteState,
+		func() {
+			_ = instanceLock.Close()
+		},
+		func(persistence *daemonStatePersistence) {
+			statePersistence = persistence
+		},
+	); err != nil {
+		fmt.Fprintln(os.Stderr, i18n.T("daemon.initial_state_fail", err))
+		os.Exit(1)
+	}
 
 	// Setup logging: a date-rotating writer under ~/.pocketctl/logs so logs are
 	// split by day (daemon-YYYY-MM-DD.log) for easier troubleshooting. The
@@ -988,8 +1072,6 @@ func cmdDaemonStart(args []string) {
 		fmt.Fprintln(os.Stderr, i18n.T("daemon.debug_banner", logWriter.CurrentPath()))
 	}
 	logger.Info("starting daemon", "version", version, "id", id, "relay", url, "debug", *debug)
-	daemonStartedAt := time.Now()
-
 	// Write PID file
 	var observedIntentPtr *daemon.StopIntent
 	if observedIntentExists {
@@ -1166,6 +1248,15 @@ func cmdDaemonStart(args []string) {
 	client.SetAgentManageable(agentManageable)
 	client.SetVersion(version)
 	client.SetStartedAt(time.Now().Unix())
+	var codexReplayCursor *watcher.CodexReplayCursorStore
+	if cfgDir, cfgErr := config.ConfigDir(); cfgErr == nil {
+		cursorPath := filepath.Join(cfgDir, "codex-replay-cursors.json")
+		if cursor, cursorErr := watcher.NewCodexReplayCursorStore(cursorPath); cursorErr != nil {
+			logger.Warn("Codex replay cursor disabled", "error", cursorErr)
+		} else {
+			codexReplayCursor = cursor
+		}
+	}
 	// Optional TLS certificate pinning: when POCKETCTL_RELAY_PIN is set
 	// (base64 SHA-256 of the relay cert's SPKI), the daemon pins the relay's
 	// public key so a MITM with a trusted-but-malicious cert is rejected.
@@ -1220,16 +1311,26 @@ func cmdDaemonStart(args []string) {
 	// Durable outbound spool: mirror unacked events to disk so a daemon process
 	// crash doesn't lose them (replayed on next start). Default on; disable with
 	// POCKETCTL_SPOOL=0. A setup failure is non-fatal — fall back to in-memory.
+	spoolReady := false
 	if os.Getenv("POCKETCTL_SPOOL") != "0" {
 		if cfgDir, err := config.ConfigDir(); err == nil {
 			spoolDir := filepath.Join(cfgDir, "spool")
 			spoolPath := filepath.Join(spoolDir, id+".log")
 			if err := client.InitSpool(spoolPath); err != nil {
 				logger.Warn("outbound spool disabled", "error", err)
+			} else {
+				spoolReady = true
 			}
 			// Remove orphan spool files left by a previous daemon whose ID changed
 			// (machine.id drift): each is bounded but never reclaimed otherwise.
 			pruneOrphanSpools(spoolDir, id, logger)
+		}
+	}
+	if codexReplayCursor != nil && spoolReady {
+		client.OnEventsAcknowledged = func(eventIDs []string) {
+			if err := codexReplayCursor.AdvanceEventIDs(eventIDs); err != nil {
+				logger.Warn("persist Codex replay cursor failed", "error", err)
+			}
 		}
 	}
 
@@ -1302,21 +1403,16 @@ func cmdDaemonStart(args []string) {
 	// Connection state tracking
 	client.OnStateChange = func(connected bool) {
 		stateDirty.Store(true)
-		state := &daemon.DaemonState{
-			DaemonID:  id,
-			Version:   version,
-			RelayURL:  url,
-			Connected: connected,
-			StartedAt: daemonStartedAt,
-			PID:       os.Getpid(),
-		}
-		if err := daemon.WriteState(state); err != nil {
-			logger.Error("write state", "error", err)
-		}
 		if connected {
 			logger.Info("connected to relay")
 		} else {
 			logger.Warn("disconnected from relay")
+		}
+	}
+	client.OnConnectionStatus = func(status ws.ConnectionStatus, reason string) {
+		stateDirty.Store(true)
+		if err := statePersistence.updateConnectionWithDiagnostics(status, reason, time.Now().UTC(), client.DurableIngressDiagnostics()); err != nil {
+			logger.Error("write daemon connection state", "error", err)
 		}
 	}
 
@@ -1400,7 +1496,7 @@ func cmdDaemonStart(args []string) {
 
 	// Start codex terminal-session watcher (CODEX_HOME-aware rollout discovery).
 	// Non-fatal: a host without codex just yields no events.
-	cw := watcher.NewCodexSessionWatcher()
+	cw := watcher.NewCodexSessionWatcherWithReplayCursor(codexReplayCursor)
 	if err := cw.Start(ctx); err != nil {
 		logger.Warn("codex session watcher not started", "error", err)
 	}
@@ -1436,7 +1532,9 @@ func cmdDaemonStart(args []string) {
 		handleCommands(ctx, client, sm, logger, &stateDirty)
 	})
 
-	// Periodic state update — only writes when stateDirty is true
+	// Periodic state update. Durable-ingress diagnostics are refreshed on this
+	// bounded cadence because normal ACKs do not necessarily change connection
+	// status or session state.
 	daemon.RunLoop(ctx, "state-persist", logger, func() {
 		ticker := time.NewTicker(10 * time.Second)
 		defer ticker.Stop()
@@ -1445,10 +1543,12 @@ func cmdDaemonStart(args []string) {
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
-				if !stateDirty.Load() {
+				if !stateDirty.Swap(false) {
+					if err := statePersistence.refreshDiagnostics(client.DurableIngressDiagnostics()); err != nil {
+						logger.Error("write daemon ingress diagnostics", "error", err)
+					}
 					continue
 				}
-				stateDirty.Store(false)
 				sessions := sm.ListSessions()
 				stateSessions := make([]daemon.SessionState, len(sessions))
 				for i, s := range sessions {
@@ -1461,16 +1561,9 @@ func cmdDaemonStart(args []string) {
 						LastActivityAt: s.LastActivityAt,
 					}
 				}
-				state := &daemon.DaemonState{
-					DaemonID:  id,
-					Version:   version,
-					RelayURL:  url,
-					Connected: true,
-					StartedAt: daemonStartedAt,
-					PID:       os.Getpid(),
-					Sessions:  stateSessions,
+				if err := statePersistence.updateSessionsWithDiagnostics(stateSessions, client.DurableIngressDiagnostics()); err != nil {
+					logger.Error("write daemon session state", "error", err)
 				}
-				daemon.WriteState(state)
 			}
 		}
 	})
@@ -1702,7 +1795,11 @@ func cmdDaemonKeepAwake(args []string) {
 // ---------- daemon status ----------
 
 func cmdDaemonStatus() {
-	pid, running := daemon.IsRunning()
+	pid, running, runtimeErr := daemon.RuntimeStatus()
+	if runtimeErr != nil {
+		renderDaemonStatusUncertainty(os.Stdout, runtimeErr)
+		return
+	}
 	if !running {
 		fmt.Println(i18n.T("daemon.not_running"))
 		return
@@ -1713,27 +1810,310 @@ func cmdDaemonStatus() {
 		fmt.Println(i18n.T("daemon.running_no_state", pid))
 		return
 	}
+	renderVerifiedDaemonStatus(os.Stdout, *state, pid, daemon.VerifyRuntimeIdentity)
+}
 
-	fmt.Println(i18n.T("status.daemon", state.DaemonID))
+func renderDaemonStatusUncertainty(out io.Writer, err error) {
+	fmt.Fprintln(out, i18n.T("daemon.status_uncertain", err))
+}
+
+type detachedDaemonStartupStage uint8
+
+const (
+	detachedDaemonStartupRuntime detachedDaemonStartupStage = iota + 1
+	detachedDaemonStartupState
+	detachedDaemonStartupIdentity
+)
+
+type detachedDaemonStartupUncertainty struct {
+	stage detachedDaemonStartupStage
+	cause error
+}
+
+func newDetachedDaemonStartupUncertainty(
+	stage detachedDaemonStartupStage,
+	cause error,
+) error {
+	if cause == nil {
+		cause = errors.New("daemon startup observation was incomplete")
+	}
+	return &detachedDaemonStartupUncertainty{stage: stage, cause: cause}
+}
+
+func (e *detachedDaemonStartupUncertainty) Error() string {
+	return "detached daemon startup status is uncertain"
+}
+
+func (e *detachedDaemonStartupUncertainty) Unwrap() []error {
+	return []error{daemon.ErrRuntimeStatusUncertain, e.cause}
+}
+
+func observeDetachedDaemonStartup(
+	runtimeStatus func() (int, bool, error),
+	readState func() (*daemon.DaemonState, error),
+	verify func(int, string) (bool, error),
+) (bool, bool, error) {
+	_, running, err := runtimeStatus()
+	if err != nil {
+		return false, false, newDetachedDaemonStartupUncertainty(
+			detachedDaemonStartupRuntime,
+			err,
+		)
+	}
+	if !running {
+		return false, false, nil
+	}
+	state, err := readState()
+	if err != nil {
+		return true, false, newDetachedDaemonStartupUncertainty(
+			detachedDaemonStartupState,
+			err,
+		)
+	}
+	verified, err := verify(state.PID, state.RuntimeInstanceToken)
+	if err != nil {
+		return true, false, newDetachedDaemonStartupUncertainty(
+			detachedDaemonStartupIdentity,
+			err,
+		)
+	}
+	if !verified {
+		return false, false, newDetachedDaemonStartupUncertainty(
+			detachedDaemonStartupIdentity,
+			errors.New("daemon process identity did not match startup state"),
+		)
+	}
+	return true, state.Connected, nil
+}
+
+func renderDetachedDaemonStartupFailure(
+	out io.Writer,
+	logPath string,
+	uncertainty error,
+) {
+	fmt.Fprintln(out, i18n.T("daemon.start_failed", logPath))
+	if uncertainty == nil {
+		return
+	}
+	fmt.Fprintln(out, localizedDetachedDaemonStartupUncertainty(uncertainty))
+}
+
+func localizedDetachedDaemonStartupUncertainty(err error) string {
+	if errors.Is(err, os.ErrPermission) {
+		return i18n.T("daemon.start_uncertain_permission")
+	}
+	var startupErr *detachedDaemonStartupUncertainty
+	if !errors.As(err, &startupErr) {
+		return i18n.T("daemon.start_uncertain")
+	}
+	switch startupErr.stage {
+	case detachedDaemonStartupRuntime:
+		return i18n.T("daemon.start_uncertain_runtime")
+	case detachedDaemonStartupState:
+		return i18n.T("daemon.start_uncertain_state")
+	case detachedDaemonStartupIdentity:
+		return i18n.T("daemon.start_uncertain_identity")
+	default:
+		return i18n.T("daemon.start_uncertain")
+	}
+}
+
+func renderVerifiedDaemonStatus(
+	out io.Writer,
+	state daemon.DaemonState,
+	pidfilePID int,
+	verify func(int, string) (bool, error),
+) {
+	running, err := verify(state.PID, state.RuntimeInstanceToken)
+	if err != nil {
+		renderDaemonStatusUncertainty(out, err)
+		return
+	}
+	if !running {
+		fmt.Fprintln(out, i18n.T("daemon.not_running"))
+		return
+	}
+	if state.PID != pidfilePID {
+		renderDaemonStatusUncertainty(
+			out,
+			fmt.Errorf(
+				"%w: state pid %d does not match runtime pid %d",
+				daemon.ErrRuntimeStatusUncertain,
+				state.PID,
+				pidfilePID,
+			),
+		)
+		return
+	}
+	renderDaemonStatus(out, state, pidfilePID, func(int) bool { return true })
+}
+
+func renderDaemonStatus(out io.Writer, state daemon.DaemonState, pidfilePID int, isAlive func(int) bool) {
+	if pidfilePID <= 0 || state.PID != pidfilePID || !isAlive(pidfilePID) {
+		fmt.Fprintln(out, i18n.T("daemon.not_running"))
+		return
+	}
+	fmt.Fprintln(out, i18n.T("status.daemon", state.DaemonID))
 	ver := state.Version
 	if ver == "" {
 		// Older daemon that predates the Version field — surface it explicitly
 		// so a version mismatch (stale daemon, new CLI) is visible, not silent.
 		ver = i18n.T("status.unknown")
 	}
-	fmt.Println(i18n.T("status.version", ver))
-	fmt.Println(i18n.T("status.pid", state.PID))
-	fmt.Println(i18n.T("status.relay", state.RelayURL))
-	conn := map[bool]string{true: i18n.T("status.connected"), false: i18n.T("status.disconnected")}[state.Connected]
-	fmt.Println(i18n.T("status.status_line", conn))
-	fmt.Println(i18n.T("status.started", state.StartedAt.Format(time.RFC3339)))
+	fmt.Fprintln(out, i18n.T("status.version", ver))
+	fmt.Fprintln(out, i18n.T("status.pid", state.PID))
+	fmt.Fprintln(out, i18n.T("status.relay", state.RelayURL))
+	conn := localizedConnectionStatus(state)
+	fmt.Fprintln(out, i18n.T("status.status_line", conn))
+	if state.ConnectionReason != "" {
+		fmt.Fprintln(out, i18n.T("status.reason", state.ConnectionReason))
+	}
+	if !state.UpdatedAt.IsZero() {
+		fmt.Fprintln(out, i18n.T("status.updated", state.UpdatedAt.Format(time.RFC3339)))
+	}
+	fmt.Fprintln(out, i18n.T("status.started", state.StartedAt.Format(time.RFC3339)))
+	fmt.Fprintf(out, "Ingress spool: %d events, %d bytes\n", state.SpoolEvents, state.SpoolBytes)
+	fmt.Fprintf(out, "Ingress window: %s\n", diagnosticCount(state.EventWindow))
+	fmt.Fprintf(out, "Ingress unacked: %s\n", diagnosticCount(state.UnackedEvents))
+	if state.LastACKAt.IsZero() {
+		fmt.Fprintln(out, "Ingress last ACK: unknown")
+	} else {
+		fmt.Fprintln(out, "Ingress last ACK:", state.LastACKAt.Format(time.RFC3339))
+	}
+	fmt.Fprintln(out, "Reconnects:", state.ReconnectCount)
+	backpressureDuration := state.BackpressureDuration
+	if !state.BackpressureSince.IsZero() {
+		backpressureDuration += time.Since(state.BackpressureSince)
+	}
+	fmt.Fprintln(out, "Backpressure duration:", backpressureDuration.Round(time.Millisecond))
 
 	if len(state.Sessions) > 0 {
-		fmt.Println(i18n.T("status.sessions", len(state.Sessions)))
+		fmt.Fprintln(out, i18n.T("status.sessions", len(state.Sessions)))
 		for _, s := range state.Sessions {
-			fmt.Println(i18n.T("status.session_row", s.SessionID[:8], s.Status, s.Cwd))
+			fmt.Fprintln(out, i18n.T("status.session_row", s.SessionID[:8], s.Status, s.Cwd))
 		}
 	}
+}
+
+func diagnosticCount(value int) string {
+	if value < 0 {
+		return "unknown"
+	}
+	return strconv.Itoa(value)
+}
+
+func localizedConnectionStatus(state daemon.DaemonState) string {
+	if state.ConnectionStatus == "" {
+		if state.Connected {
+			return i18n.T("status.connected")
+		}
+		return i18n.T("status.disconnected")
+	}
+	keys := map[string]string{
+		string(ws.ConnectionConnected):     "status.connected",
+		string(ws.ConnectionReconnecting):  "status.reconnecting",
+		string(ws.ConnectionBackpressured): "status.backpressured",
+		string(ws.ConnectionAuthUncertain): "status.auth_uncertain",
+		string(ws.ConnectionLoginRequired): "status.login_required",
+		string(ws.ConnectionRevoked):       "status.revoked",
+		string(ws.ConnectionStopped):       "status.stopped",
+	}
+	if key, ok := keys[state.ConnectionStatus]; ok {
+		return i18n.T(key)
+	}
+	return i18n.T("status.connection_unknown", state.ConnectionStatus)
+}
+
+type daemonStatePersistence struct {
+	mu    sync.Mutex
+	state daemon.DaemonState
+}
+
+func newDaemonStatePersistence(initial daemon.DaemonState) *daemonStatePersistence {
+	initial.Sessions = append([]daemon.SessionState(nil), initial.Sessions...)
+	return &daemonStatePersistence{state: initial}
+}
+
+func persistInitialDaemonStateAndContinue(
+	initial daemon.DaemonState,
+	write func(*daemon.DaemonState) error,
+	cleanup func(),
+	continueStartup func(*daemonStatePersistence),
+) error {
+	persistence := newDaemonStatePersistence(initial)
+	if err := write(&persistence.state); err != nil {
+		cleanup()
+		return fmt.Errorf("write initial daemon state: %w", err)
+	}
+	continueStartup(persistence)
+	return nil
+}
+
+func (p *daemonStatePersistence) write() error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return daemon.WriteState(&p.state)
+}
+
+func (p *daemonStatePersistence) updateConnection(status ws.ConnectionStatus, reason string, updatedAt time.Time) error {
+	return p.updateConnectionWithDiagnostics(status, reason, updatedAt, ws.DurableIngressDiagnostics{
+		EventWindow:   -1,
+		UnackedEvents: -1,
+	})
+}
+
+func (p *daemonStatePersistence) updateConnectionWithDiagnostics(status ws.ConnectionStatus, reason string, updatedAt time.Time, diagnostics ws.DurableIngressDiagnostics) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if status == ws.ConnectionReconnecting && p.state.ConnectionStatus != string(ws.ConnectionReconnecting) {
+		p.state.ReconnectCount++
+	}
+	if status == ws.ConnectionBackpressured && p.state.BackpressureSince.IsZero() {
+		p.state.BackpressureSince = updatedAt
+	}
+	if status != ws.ConnectionBackpressured && !p.state.BackpressureSince.IsZero() {
+		p.state.BackpressureDuration += updatedAt.Sub(p.state.BackpressureSince)
+		p.state.BackpressureSince = time.Time{}
+	}
+	p.state.SpoolEvents = diagnostics.SpoolEvents
+	p.state.SpoolBytes = diagnostics.SpoolBytes
+	p.state.EventWindow = diagnostics.EventWindow
+	p.state.UnackedEvents = diagnostics.UnackedEvents
+	p.state.LastACKAt = diagnostics.LastACKAt
+	p.state.ReconnectCount = diagnostics.Reconnects
+	p.state.Connected = status == ws.ConnectionConnected
+	p.state.ConnectionStatus = string(status)
+	p.state.ConnectionReason = reason
+	p.state.UpdatedAt = updatedAt
+	return daemon.WriteState(&p.state)
+}
+
+func (p *daemonStatePersistence) updateSessions(sessions []daemon.SessionState) error {
+	return p.updateSessionsWithDiagnostics(sessions, ws.DurableIngressDiagnostics{})
+}
+
+func (p *daemonStatePersistence) updateSessionsWithDiagnostics(sessions []daemon.SessionState, diagnostics ws.DurableIngressDiagnostics) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.state.Sessions = append(p.state.Sessions[:0], sessions...)
+	p.applyDiagnostics(diagnostics)
+	return daemon.WriteState(&p.state)
+}
+
+func (p *daemonStatePersistence) refreshDiagnostics(diagnostics ws.DurableIngressDiagnostics) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.applyDiagnostics(diagnostics)
+	return daemon.WriteState(&p.state)
+}
+
+func (p *daemonStatePersistence) applyDiagnostics(diagnostics ws.DurableIngressDiagnostics) {
+	p.state.SpoolEvents = diagnostics.SpoolEvents
+	p.state.SpoolBytes = diagnostics.SpoolBytes
+	p.state.EventWindow = diagnostics.EventWindow
+	p.state.UnackedEvents = diagnostics.UnackedEvents
+	p.state.LastACKAt = diagnostics.LastACKAt
+	p.state.ReconnectCount = diagnostics.Reconnects
 }
 
 // ---------- daemon logs ----------
@@ -1966,13 +2346,26 @@ func handleWatcherEvents(ctx context.Context, events <-chan watcher.SessionEvent
 				}
 				outputCh <- codexSubagentDiscoveryEvent(evt.Session)
 				daemon.RunLoop(ctx, "tailer:codex-subagent:"+evt.Session.SessionID, logger, func() {
-					tailer, err := watcher.NewSubAgentTailerForAgent(
-						evt.Filepath,
-						evt.Session.SessionID,
-						evt.Session.RootSessionID,
-						adapter.AgentCodex,
-						adapter.AgentCodex,
-					)
+					var tailer *watcher.SubAgentTailer
+					var err error
+					if evt.Replay {
+						tailer, err = watcher.NewCodexReplaySubAgentTailer(
+							evt.Filepath,
+							evt.Session.SessionID,
+							evt.Session.RootSessionID,
+							adapter.AgentCodex,
+							evt.ReplayNotBefore,
+							evt.ReplayStartLine,
+						)
+					} else {
+						tailer, err = watcher.NewSubAgentTailerForAgent(
+							evt.Filepath,
+							evt.Session.SessionID,
+							evt.Session.RootSessionID,
+							adapter.AgentCodex,
+							adapter.AgentCodex,
+						)
+					}
 					if err != nil {
 						logger.Warn("codex subagent tailer start failed", "session", evt.Session.SessionID, "error", err)
 						return

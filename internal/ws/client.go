@@ -49,6 +49,10 @@ const (
 	// daemon. >1 so a transient 4001 during a relay deploy doesn't permanently
 	// park every daemon — a healthy register_ack resets the counter.
 	authRejectStopThreshold = 3
+	// connectionStatusQueueLimit bounds asynchronous observer delivery. A slow
+	// observer must never hold up the connection loop or create one goroutine per
+	// status change.
+	connectionStatusQueueLimit = 16
 	// defaultMaxOutCount / defaultMaxOutBytes bound the unacked outbound buffer.
 	// At the cap the producer blocks (back-pressure) rather than dropping events.
 	defaultMaxOutCount = 10000
@@ -64,17 +68,6 @@ const (
 	// in a single sub-millisecond write storm that tears down the connection.
 	replayBatchSize = 50
 	replayBatchGap  = 50 * time.Millisecond
-	// spoolRestoreMaxCount / spoolRestoreMaxBytes cap how many events InitSpool
-	// restores from a prior crash's spool. A reconnect storm (relay down for a
-	// while, or a feedback loop) can leave the spool holding hundreds of events
-	// from already-finished sessions; replaying all of them on the next start
-	// re-triggers the storm. The oldest events beyond the cap are dropped — they
-	// are already persisted in the relay's event history, so this trades a
-	// redundant re-delivery for connection stability. The cap is generous
-	// relative to replayBatchSize so a single normal outage's worth replays in a
-	// few paced batches.
-	spoolRestoreMaxCount = 200
-	spoolRestoreMaxBytes = 4 << 20 // 4 MiB
 )
 
 // bufferedEvent is a sent-but-unacked daemon event held for replay on reconnect.
@@ -85,6 +78,42 @@ type bufferedEvent struct {
 
 // OnConnectStateChange is called when the relay connection state changes.
 type OnConnectStateChange func(connected bool)
+
+// DurableIngressDiagnostics is a local-only aggregate snapshot for daemon
+// status. It deliberately contains no daemon, session, token, request, or
+// event identifiers.
+type DurableIngressDiagnostics struct {
+	SpoolEvents   int
+	SpoolBytes    int64
+	EventWindow   int
+	UnackedEvents int
+	LastACKAt     time.Time
+	Reconnects    uint64
+}
+
+// ConnectionStatus describes the daemon's recoverable relationship with the
+// relay. It supplements OnStateChange without changing that older callback.
+type ConnectionStatus string
+
+const (
+	ConnectionConnected     ConnectionStatus = "connected"
+	ConnectionReconnecting  ConnectionStatus = "reconnecting"
+	ConnectionBackpressured ConnectionStatus = "backpressured"
+	ConnectionAuthUncertain ConnectionStatus = "auth_uncertain"
+	ConnectionLoginRequired ConnectionStatus = "login_required"
+	ConnectionRevoked       ConnectionStatus = "revoked"
+	ConnectionStopped       ConnectionStatus = "stopped"
+)
+
+var errReconnectRequested = errors.New("relay requested reconnect")
+
+var errOutputClosed = errors.New("daemon output channel closed")
+
+type connectionStatusEvent struct {
+	status   ConnectionStatus
+	reason   string
+	callback func(ConnectionStatus, string)
+}
 
 // OnEvent is invoked for every event leaving the daemon (just before it is
 // forwarded to the relay). It lets the daemon inspect outgoing events and
@@ -127,9 +156,18 @@ type Client struct {
 	// instead of losing every historical session to a cold in-memory map.
 	activeSessionIDsFn func() []string
 	CommandCh          chan protocol.ClientMessage
-	OnStateChange      OnConnectStateChange
+	// Callbacks are configured before Run and not replaced while it is running,
+	// matching the existing OnStateChange configuration contract.
+	OnStateChange OnConnectStateChange
+	// OnConnectionStatus receives asynchronously dispatched connection states.
+	// Configure it before Run; replacing callback fields during Run is unsafe.
+	OnConnectionStatus func(ConnectionStatus, string)
 	OnReconnected      func()  // called after successful (re)connection + register
 	OnEvent            OnEvent // optional hook: inspect/derive events before forwarding to relay
+	// OnEventsAcknowledged receives stable event identities removed by a real
+	// Relay event_ack. It is used by Codex startup replay to checkpoint source
+	// lines only after the receiver has durably accepted their transport prefix.
+	OnEventsAcknowledged func(eventIDs []string)
 	// OnTokenRefresh is invoked when the relay rejects us with 4001 (invalid/expired
 	// access token). It must attempt a refresh-token exchange and return the new
 	// access token + true on success. On success the client reconnects with the new
@@ -147,6 +185,7 @@ type Client struct {
 	// readPump goroutine (onRegisterAck) and the Run goroutine (backoffSleep), so
 	// it is atomic.
 	reconnectAttempt atomic.Int64
+	reconnectCount   atomic.Uint64
 
 	// authRejectCount counts CONSECUTIVE relay auth rejections (close 4001) that
 	// were NOT followed by a successful token refresh. Incremented in readPump on a
@@ -165,6 +204,9 @@ type Client struct {
 	// credentials cannot fix that state, so Run parks until the daemon is
 	// restarted after the user deletes a host or logs in again.
 	registrationRejected atomic.Bool
+	// registrationRevoked distinguishes a terminal remote revocation from other
+	// registration rejections, which still report a stopped daemon.
+	registrationRevoked atomic.Bool
 
 	// fastReconnect is set by readPump when the relay announces a restart
 	// (relay_restarting) and cleared in onRegisterAck after a successful
@@ -174,27 +216,51 @@ type Client struct {
 	// (backoffSleep) and written by readPump (relay_restarting) and
 	// onRegisterAck — atomic for the same cross-goroutine reason as above.
 	fastReconnect atomic.Bool
+	// reconnectStatusPending keeps a specific relay status visible while Run is
+	// backing off. It is changed to reconnecting only when the next attempt
+	// actually begins.
+	reconnectStatusPending atomic.Bool
+
+	// serverRetryAfter is a one-shot reconnect floor supplied by the relay when
+	// it is overloaded. It is consumed by the next reconnect sleep.
+	serverRetryAfter atomic.Int64
+
+	connectionStatusMu     sync.Mutex
+	connectionStatusQueue  []connectionStatusEvent
+	connectionStatusWorker bool
 
 	// Connection liveness/timeouts. Default to the package consts; overridable
 	// (e.g. shortened by tests) without touching the timing logic.
 	pingInterval time.Duration
 	pongWait     time.Duration
 	writeWait    time.Duration
+	// Jitter sources are configured before Run, like the existing callbacks.
+	// They make fleet timing testable without sharing mutable RNG state.
+	heartbeatJitter func(max time.Duration) time.Duration
+	reconnectJitter func(base time.Duration) time.Duration
 
 	// Outbound delivery buffer (at-least-once). Holds events sent on the current
 	// or a prior connection that the relay has not yet acked. On reconnect the
 	// buffer is replayed in seq order; the relay dedups by (daemon_id, seq) and
 	// acks via event_ack, which trims the buffer. Guarded by outMu/outCond so a
 	// full buffer applies back-pressure to producers instead of dropping events.
-	outMu        sync.Mutex
-	outCond      *sync.Cond
-	outBuf       []bufferedEvent
-	outBytes     int
-	seqCtr       int64 // monotonic, assigned at enqueue; never reset across reconnects
-	ackedSeq     int64 // highest seq the relay has acknowledged
-	draining     bool  // ctx cancelled — stop blocking producers
-	ackKnown     bool  // register_ack processed on the current connection
-	ackSupported bool  // relay advertised supports_event_ack (else legacy trim-on-write)
+	outMu                sync.Mutex
+	outCond              *sync.Cond
+	outBuf               []bufferedEvent
+	outBytes             int
+	seqCtr               int64 // monotonic, assigned at enqueue; never reset across reconnects
+	ackedSeq             int64 // highest seq the relay has acknowledged
+	lastACKAt            time.Time
+	draining             bool // ctx cancelled — stop blocking producers
+	ackKnown             bool // register_ack processed on the current connection
+	ackSupported         bool // relay advertised supports_event_ack (else legacy trim-on-write)
+	flowControlSupported bool // register_ack advertised the durable flow-control capability
+	eventWindow          int  // maximum unacknowledged events while flow control is active
+	flowRetryAfterMS     int
+	flowBackpressured    bool
+	fatalFlowBlockedSeq  int64  // permanent barrier for an event Relay can never admit
+	fatalFlowReason      string // guarded by outMu; retained across reconnects
+	outWaiters           int    // guarded by outMu; used by deterministic blocked-send tests
 	// registerAckCh signals that register_ack arrived on the current connection.
 	// connectAndServe waits on it before replaying the unacked buffer so the
 	// relay has finished its async registerDaemon DB work (upsert/bind/routes)
@@ -214,26 +280,29 @@ func NewClient(relayURL, token, daemonID string, agents []string, agentVersions 
 	localIP := getLocalIP()
 	osName := runtime.GOOS
 	c := &Client{
-		relayURL:      relayURL,
-		token:         token,
-		outputCh:      outputCh,
-		sendCh:        make(chan []byte, 256),
-		logger:        logger,
-		daemonID:      daemonID,
-		hostname:      hostname,
-		agents:        agents,
-		agentVersions: agentVersions,
-		agentLatests:  agentLatests,
-		osName:        osName,
-		localIP:       localIP,
-		arch:          runtime.GOARCH,
-		CommandCh:     make(chan protocol.ClientMessage, 64),
-		pingInterval:  pingInterval,
-		pongWait:      pongWait,
-		writeWait:     writeWait,
-		maxOutCount:   envInt("POCKETCTL_OUTBUF_MAX_COUNT", defaultMaxOutCount),
-		maxOutBytes:   envInt("POCKETCTL_OUTBUF_MAX_BYTES", defaultMaxOutBytes),
+		relayURL:        relayURL,
+		token:           token,
+		outputCh:        outputCh,
+		sendCh:          make(chan []byte, 256),
+		logger:          logger,
+		daemonID:        daemonID,
+		hostname:        hostname,
+		agents:          agents,
+		agentVersions:   agentVersions,
+		agentLatests:    agentLatests,
+		osName:          osName,
+		localIP:         localIP,
+		arch:            runtime.GOARCH,
+		CommandCh:       make(chan protocol.ClientMessage, 64),
+		pingInterval:    pingInterval,
+		pongWait:        pongWait,
+		writeWait:       writeWait,
+		heartbeatJitter: boundedJitter,
+		reconnectJitter: fullReconnectJitter,
+		maxOutCount:     envInt("POCKETCTL_OUTBUF_MAX_COUNT", defaultMaxOutCount),
+		maxOutBytes:     envInt("POCKETCTL_OUTBUF_MAX_BYTES", defaultMaxOutBytes),
 	}
+	c.eventWindow = c.maxOutCount
 	c.outCond = sync.NewCond(&c.outMu)
 	return c
 }
@@ -253,25 +322,10 @@ func (c *Client) InitSpool(path string) error {
 	}
 	c.spool = s
 	if len(restored) > 0 {
-		// Cap the restored set: a reconnect storm can leave the spool holding
-		// hundreds of stale events from finished sessions. Dropping the oldest
-		// ones beyond the count/byte caps prevents the next start from re-arming
-		// the same storm. These events are already in the relay's persisted
-		// history, so we only lose a redundant re-delivery.
-		trimmed := capRestoredSpool(restored)
-		if len(trimmed) < len(restored) {
-			c.logger.Warn("trimmed stale spool events on restore",
-				"original", len(restored), "kept", len(trimmed),
-				"dropped", len(restored)-len(trimmed),
-				"from_seq", trimmed[0].seq)
-			// Persist the trim so the file matches memory (a crash right after
-			// start would otherwise re-load the full set again).
-			s.rewrite(trimmed)
-		}
-		c.outBuf = trimmed
+		c.outBuf = restored
 		var bytesN int
 		var maxSeq int64
-		for _, be := range trimmed {
+		for _, be := range restored {
 			bytesN += len(be.data)
 			if be.seq > maxSeq {
 				maxSeq = be.seq
@@ -282,38 +336,10 @@ func (c *Client) InitSpool(path string) error {
 		// Everything below the lowest restored seq was already acked/trimmed before
 		// the crash; tell the relay so its fresh persisted mark starts there (no
 		// phantom gap before the replayed tail).
-		c.ackedSeq = trimmed[0].seq - 1
-		c.logger.Info("restored spooled events", "count", len(trimmed), "from_seq", trimmed[0].seq, "to_seq", maxSeq)
+		c.ackedSeq = restored[0].seq - 1
+		c.logger.Info("restored spooled events", "count", len(restored), "from_seq", restored[0].seq, "to_seq", maxSeq)
 	}
 	return nil
-}
-
-// capRestoredSpool drops the oldest events from a restored spool until both the
-// count and byte caps are satisfied. Events arrive already in seq order (oldest
-// first) from loadSpool, so we keep the tail (newest) and drop the head. The
-// newest events are the ones most likely to be unacked-and-unpersisted (a
-// near-crash flush), while the oldest are from long-finished sessions already
-// durably stored in the relay.
-func capRestoredSpool(events []bufferedEvent) []bufferedEvent {
-	// First trim by count: keep the newest spoolRestoreMaxCount.
-	start := 0
-	if len(events) > spoolRestoreMaxCount {
-		start = len(events) - spoolRestoreMaxCount
-	}
-	kept := events[start:]
-	// Then trim by bytes: walk from the newest end accumulating until the cap
-	// is exceeded. cutFrom=0 means "keep everything"; otherwise it's the index
-	// from which onward we keep (so kept[cutFrom:] is the newest tail).
-	var totalBytes int
-	cutFrom := 0
-	for i := len(kept) - 1; i >= 0; i-- {
-		totalBytes += len(kept[i].data)
-		if totalBytes > spoolRestoreMaxBytes {
-			cutFrom = i + 1
-			break
-		}
-	}
-	return kept[cutFrom:]
 }
 
 // envInt reads a positive integer from env, falling back to def.
@@ -465,6 +491,25 @@ func (c *Client) UpdateToken(newToken string) {
 // session IDs for the register message (rebuilds the relay's routing table).
 func (c *Client) SetActiveSessionIDsFn(fn func() []string) { c.activeSessionIDsFn = fn }
 
+// DurableIngressDiagnostics returns a race-free local snapshot. Spool fields
+// are zero when disk spooling is disabled; unacked fields remain available for
+// the in-memory fallback.
+func (c *Client) DurableIngressDiagnostics() DurableIngressDiagnostics {
+	c.outMu.Lock()
+	defer c.outMu.Unlock()
+	diagnostics := DurableIngressDiagnostics{
+		EventWindow:   c.eventWindow,
+		UnackedEvents: len(c.outBuf),
+		LastACKAt:     c.lastACKAt,
+		Reconnects:    c.reconnectCount.Load(),
+	}
+	if c.spool != nil {
+		diagnostics.SpoolEvents = len(c.outBuf)
+		diagnostics.SpoolBytes = int64(c.outBytes)
+	}
+	return diagnostics
+}
+
 func (c *Client) Run(ctx context.Context) error {
 	// Unblock any producer parked on a full outbound buffer when we're shutting
 	// down, so back-pressure doesn't outlive ctx cancellation.
@@ -475,12 +520,25 @@ func (c *Client) Run(ctx context.Context) error {
 		c.outCond.Broadcast()
 		c.outMu.Unlock()
 	}()
+	firstConnection := true
 	for {
+		if firstConnection {
+			firstConnection = false
+		} else {
+			c.reconnectCount.Add(1)
+		}
+		if c.reconnectStatusPending.Swap(false) {
+			c.notifyConnectionStatus(ConnectionReconnecting, "")
+		}
 		err := c.connectAndServe(ctx)
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
 		c.notifyState(false)
+		if errors.Is(err, errOutputClosed) {
+			c.notifyConnectionStatus(ConnectionStopped, "output_closed")
+			return nil
+		}
 
 		// If the relay rejected our access token (4001), try to refresh it before
 		// anything else: a remote daemon whose 24h access token simply expired must
@@ -512,8 +570,14 @@ func (c *Client) Run(ctx context.Context) error {
 		}
 		if c.registrationRejected.Load() {
 			c.logger.Error("relay rejected daemon registration; pausing reconnect until a host slot is released and the daemon is restarted")
+			if !c.registrationRevoked.Load() {
+				c.notifyConnectionStatus(ConnectionStopped, "registration_rejected")
+			}
 			<-ctx.Done()
 			return ctx.Err()
+		}
+		if !errors.Is(err, errReconnectRequested) {
+			c.notifyConnectionStatus(ConnectionReconnecting, err.Error())
 		}
 		c.logger.Error("connection lost, reconnecting", "error", err)
 		if !c.backoffSleep(ctx) {
@@ -562,6 +626,12 @@ func (c *Client) connectAndServe(ctx context.Context) error {
 	c.outMu.Lock()
 	c.ackKnown = false
 	c.ackSupported = false
+	c.flowControlSupported = false
+	c.eventWindow = c.maxOutCount
+	c.flowRetryAfterMS = 0
+	c.flowBackpressured = c.fatalFlowBlockedSeq > 0
+	fatalReason := c.fatalFlowReason
+	hasFatalBarrier := c.fatalFlowBlockedSeq > 0
 	c.outMu.Unlock()
 	// Fresh per-connection ack signal (readPump closes/sends on register_ack).
 	c.registerAckCh = make(chan struct{}, 1)
@@ -572,6 +642,11 @@ func (c *Client) connectAndServe(ctx context.Context) error {
 	// onRegisterAck, once the relay has actually confirmed our registration.
 
 	c.notifyState(true)
+	if hasFatalBarrier {
+		c.notifyConnectionStatus(ConnectionBackpressured, fatalReason)
+	} else {
+		c.notifyConnectionStatus(ConnectionConnected, "")
+	}
 
 	c.logger.Info("sending register", "daemonID", c.daemonID, "hostname", c.hostname)
 	register := protocol.RegisterMessage{
@@ -591,7 +666,8 @@ func (c *Client) connectAndServe(ctx context.Context) error {
 	c.logger.Info("register sent")
 
 	done := make(chan struct{})
-	go c.readPump(done)
+	readErr := make(chan error, 1)
+	go c.readPump(ctx, done, readErr)
 	go c.pingPump(ctx, done)
 	go func() {
 		<-done
@@ -612,13 +688,15 @@ func (c *Client) connectAndServe(ctx context.Context) error {
 	case <-time.After(registerAckWait):
 		c.logger.Warn("register_ack timeout, replaying without readiness guarantee")
 	case <-done:
-		return fmt.Errorf("connection closed before register_ack")
+		return readPumpError(readErr, "connection closed before register_ack")
 	}
 
 	// Replay any events the relay hasn't acked (lost mid-flight on the previous
 	// connection) before resuming live delivery, so no event is silently dropped
 	// across a reconnect. The relay dedups replayed events by (daemon_id, seq).
-	c.replayOutbound(ctx, conn)
+	if !c.replayOutbound(ctx, conn, done) {
+		return readPumpError(readErr, "connection closed during durable replay")
+	}
 
 	// Re-announce current authoritative session snapshots only after every
 	// durable event from the previous connection has been replayed. Otherwise a
@@ -631,7 +709,8 @@ func (c *Client) connectAndServe(ctx context.Context) error {
 		select {
 		case evt, ok := <-c.outputCh:
 			if !ok {
-				return nil
+				conn.Close()
+				return errOutputClosed
 			}
 			// Give the daemon a chance to inspect the event and emit derived
 			// events (e.g. session_model_changed from an agent_text model change)
@@ -648,7 +727,7 @@ func (c *Client) connectAndServe(ctx context.Context) error {
 				}
 			}
 		case <-done:
-			return fmt.Errorf("connection closed")
+			return readPumpError(readErr, "connection closed")
 		case <-ctx.Done():
 			conn.Close()
 			return ctx.Err()
@@ -656,8 +735,14 @@ func (c *Client) connectAndServe(ctx context.Context) error {
 	}
 }
 
-func (c *Client) readPump(done chan struct{}) {
+func (c *Client) readPump(ctx context.Context, done chan struct{}, readErr chan<- error) {
 	defer close(done)
+	report := func(err error) {
+		select {
+		case readErr <- err:
+		default:
+		}
+	}
 	c.connMu.Lock()
 	conn := c.conn
 	c.connMu.Unlock()
@@ -693,6 +778,7 @@ func (c *Client) readPump(done chan struct{}) {
 					c.logger.Error("relay rejected daemon registration", "reason", ce.Text)
 				}
 			}
+			report(err)
 			return
 		}
 		// Any inbound message proves the link is alive — extend the deadline.
@@ -705,7 +791,6 @@ func (c *Client) readPump(done chan struct{}) {
 			Message            string `json:"message"`
 			GracePeriodSeconds int    `json:"grace_period_seconds"`
 			UpToSeq            int64  `json:"up_to_seq"`
-			SupportsEventAck   bool   `json:"supports_event_ack"`
 			Used               int    `json:"used"`
 			Limit              int    `json:"limit"`
 		}
@@ -717,47 +802,61 @@ func (c *Client) readPump(done chan struct{}) {
 		// and don't forward to CommandCh.
 		switch base.Type {
 		case "event_ack":
-			c.trimOutbound(base.UpToSeq)
+			var ack protocol.EventAckMessage
+			if json.Unmarshal(msg, &ack) == nil {
+				c.handleEventAck(ack)
+			}
 			continue
 		case "register_ack":
-			c.onRegisterAck(base.SupportsEventAck)
+			var ack protocol.RegisterAckMessage
+			if json.Unmarshal(msg, &ack) == nil {
+				c.onRegisterAck(ack)
+			}
+			continue
+		case "flow_control":
+			var flow protocol.FlowControlMessage
+			if json.Unmarshal(msg, &flow) == nil {
+				c.onFlowControl(flow)
+			}
 			continue
 		case "relay_restarting":
-			c.logger.Info("relay restarting; switching to fast reconnect")
-			c.fastReconnect.Store(true)
-			// Do not depend on the restarting relay or an intermediate proxy to
-			// close the old socket. Returning closes done, which makes
-			// connectAndServe exit and Run enter the fast reconnect loop.
+			err := c.handleRelayDisconnect(protocol.DisconnectMessage{Type: base.Type, Reason: "relay_restarting"})
 			conn.Close()
+			report(err)
 			return
 		case "register_rejected":
-			c.registrationRejected.Store(true)
-			c.logger.Error("relay rejected daemon registration", "reason", base.Reason, "message", base.Message, "used", base.Used, "limit", base.Limit)
+			var rejected protocol.RegisterRejectedMessage
+			if json.Unmarshal(msg, &rejected) != nil {
+				rejected = protocol.RegisterRejectedMessage{
+					Type: base.Type, Reason: base.Reason, Message: base.Message,
+					Used: base.Used, Limit: base.Limit,
+				}
+			}
+			c.handleRegisterRejected(rejected)
+			c.logger.Error("relay rejected daemon registration", "reason", rejected.Reason,
+				"message", rejected.Message, "used", rejected.Used, "limit", rejected.Limit,
+				"retryable", rejected.Retryable, "retry_after_ms", rejected.RetryAfterMS)
+			conn.Close()
+			report(errReconnectRequested)
 			return
 		}
 
-		// Handle kicked message: daemon is being evicted
-		if base.Type == "kicked" {
-			fmt.Fprintf(os.Stderr, "\n⚠️  %s\n", base.Message)
-			if base.GracePeriodSeconds > 0 {
-				fmt.Fprintf(os.Stderr, "将在 %d 秒后断开连接...\n", base.GracePeriodSeconds)
-				// Grace period: wait then exit
-				go func() {
-					time.Sleep(time.Duration(base.GracePeriodSeconds) * time.Second)
-					fmt.Fprintf(os.Stderr, "连接已断开\n")
-					os.Exit(0)
-				}()
-				// Continue reading messages during grace period
-				continue
+		if base.Type == "kicked" || base.Type == "disconnect" || (base.Type == "error" && base.Code == "DAEMON_LIMIT_REACHED") {
+			var disconnect protocol.DisconnectMessage
+			if err := json.Unmarshal(msg, &disconnect); err != nil {
+				disconnect = protocol.DisconnectMessage{Type: base.Type, Reason: base.Reason, Message: base.Message, GracePeriodSeconds: base.GracePeriodSeconds}
 			}
-			fmt.Fprintf(os.Stderr, "连接已断开\n")
-			os.Exit(0)
-		}
-
-		// Handle DAEMON_LIMIT_REACHED: print error and exit (legacy compat)
-		if base.Type == "error" && base.Code == "DAEMON_LIMIT_REACHED" {
-			fmt.Fprintf(os.Stderr, "\n❌ %s\n\n", base.Error)
-			os.Exit(1)
+			if disconnect.Reason == "" && base.Type == "error" {
+				disconnect.Reason = base.Code
+			}
+			err := c.handleRelayDisconnect(disconnect)
+			if !c.waitRelayGracePeriod(ctx, disconnect.GracePeriodSeconds) {
+				report(ctx.Err())
+				return
+			}
+			conn.Close()
+			report(err)
+			return
 		}
 
 		// Forward all other messages to command channel
@@ -773,26 +872,55 @@ func (c *Client) readPump(done chan struct{}) {
 }
 
 func (c *Client) pingPump(ctx context.Context, done chan struct{}) {
+	initial := time.NewTimer(c.heartbeatInitialDelay())
+	defer initial.Stop()
+	select {
+	case <-initial.C:
+		c.sendHeartbeat()
+	case <-done:
+		return
+	case <-ctx.Done():
+		return
+	}
 	ticker := time.NewTicker(c.pingInterval)
 	defer ticker.Stop()
 	for {
 		select {
 		case <-ticker.C:
-			ping := protocol.PingMessage{Type: "ping"}
-			if c.metricsFn != nil {
-				ping.CpuPct, ping.MemPct, ping.DiskPct = c.metricsFn()
-			}
-			if c.openCodeRuntimeTelemetryFn != nil {
-				snapshot := c.openCodeRuntimeTelemetryFn()
-				ping.OpenCodeRuntime = &snapshot
-			}
-			c.SendMsg(ping)
+			c.sendHeartbeat()
 		case <-done:
 			return
 		case <-ctx.Done():
 			return
 		}
 	}
+}
+
+func (c *Client) heartbeatInitialDelay() time.Duration {
+	const maxInitialHeartbeatJitter = 10 * time.Second
+	if c.heartbeatJitter == nil {
+		return 0
+	}
+	delay := c.heartbeatJitter(maxInitialHeartbeatJitter)
+	if delay < 0 {
+		return 0
+	}
+	if delay > maxInitialHeartbeatJitter {
+		return maxInitialHeartbeatJitter
+	}
+	return delay
+}
+
+func (c *Client) sendHeartbeat() {
+	ping := protocol.PingMessage{Type: "ping"}
+	if c.metricsFn != nil {
+		ping.CpuPct, ping.MemPct, ping.DiskPct = c.metricsFn()
+	}
+	if c.openCodeRuntimeTelemetryFn != nil {
+		snapshot := c.openCodeRuntimeTelemetryFn()
+		ping.OpenCodeRuntime = &snapshot
+	}
+	c.SendMsg(ping)
 }
 
 func (c *Client) SendMsg(v any) {
@@ -836,15 +964,16 @@ func (c *Client) sendEventUntil(evt protocol.DaemonEvent, stop <-chan struct{}) 
 	if !ok {
 		return false
 	}
-	c.writeBuffered(seq, data)
-	return true
+	return c.writeBuffered(seq, data, stop)
 }
 
 // appendOutbound assigns the next seq, marshals the event, and appends it to the
 // unacked buffer. If the buffer is at its cap it blocks (back-pressure) until an
-// ack frees space or the client is draining. Returns ok=false when draining or
-// on marshal error. Called only from the single serve-loop goroutine, so seqCtr
-// increments are serialized.
+// ack frees space or the client is draining. Flow-control windows and permanent
+// sequence barriers are intentionally enforced only after this durable append,
+// at the shared live/replay transmission boundary. Returns ok=false when
+// draining or on marshal error. Called only from the single serve-loop
+// goroutine, so seqCtr increments are serialized.
 func (c *Client) appendOutbound(evt *protocol.DaemonEvent) (int64, []byte, bool) {
 	return c.appendOutboundUntil(evt, nil)
 }
@@ -856,7 +985,9 @@ func (c *Client) appendOutboundUntil(evt *protocol.DaemonEvent, stop <-chan stru
 			c.outMu.Unlock()
 			return 0, nil, false
 		}
+		c.outWaiters++
 		c.outCond.Wait()
+		c.outWaiters--
 	}
 	if c.draining || channelClosed(stop) {
 		c.outMu.Unlock()
@@ -891,32 +1022,55 @@ func channelClosed(ch <-chan struct{}) bool {
 	}
 }
 
-// writeBuffered writes one already-buffered event to the current connection. On
-// failure it closes the conn (triggering reconnect+replay) but keeps the event
-// buffered. On success against a legacy relay (no event_ack), it trims the event
-// immediately so the buffer can't grow unbounded.
-func (c *Client) writeBuffered(seq int64, data []byte) {
+// writeBuffered transmits one already-durable event on the current connection.
+// Live and replay writes both delegate to writeBufferedTo, so a flow window or
+// fatal sequence barrier is checked under the same outMu ordering as ACK and
+// flow-control updates. A stopped wait never removes the buffered/spooled event.
+func (c *Client) writeBuffered(seq int64, data []byte, stop <-chan struct{}) bool {
 	c.connMu.Lock()
 	conn := c.conn
 	c.connMu.Unlock()
 	if conn == nil {
-		return // no live conn; will be replayed on reconnect
+		return true // no live conn; the durable event will replay on reconnect
 	}
+	return c.writeBufferedTo(context.Background(), conn, seq, data, stop)
+}
+
+func (c *Client) writeBufferedTo(
+	ctx context.Context,
+	conn *websocket.Conn,
+	seq int64,
+	data []byte,
+	stop <-chan struct{},
+) bool {
+	c.outMu.Lock()
+	if !c.waitTransmitPermitLocked(ctx, seq, stop) {
+		c.outMu.Unlock()
+		return false
+	}
+	if seq <= c.ackedSeq {
+		c.outMu.Unlock()
+		return true
+	}
+	// Keep outMu through the bounded socket write. This gives flow-control
+	// installation and transmission a total order and preserves a single lock
+	// direction (outMu -> writeMu); no writer holds writeMu while taking outMu.
 	c.writeMu.Lock()
 	_ = conn.SetWriteDeadline(time.Now().Add(c.writeWait))
 	err := conn.WriteMessage(websocket.TextMessage, data)
 	c.writeMu.Unlock()
 	if err != nil {
+		c.outMu.Unlock()
 		c.logger.Error("event write error", "error", err, "seq", seq, "len", len(data))
 		conn.Close()
-		return
+		return false
 	}
-	c.outMu.Lock()
 	legacy := c.ackKnown && !c.ackSupported
-	c.outMu.Unlock()
 	if legacy {
-		c.trimOutbound(seq)
+		c.trimOutboundLocked(seq)
 	}
+	c.outMu.Unlock()
+	return true
 }
 
 // replayOutbound re-sends every unacked event, in seq order, on a freshly
@@ -928,62 +1082,108 @@ func (c *Client) writeBuffered(seq int64, data []byte) {
 // long outage — doesn't hit the relay as a single sub-millisecond write storm
 // that overwhelms its WS layer and tears the connection down. The gap is also
 // cancellable via ctx so a shutdown doesn't wait on the full pacing.
-func (c *Client) replayOutbound(ctx context.Context, conn *websocket.Conn) {
+func (c *Client) replayOutbound(ctx context.Context, conn *websocket.Conn, done <-chan struct{}) bool {
 	c.outMu.Lock()
 	pending := make([]bufferedEvent, len(c.outBuf))
 	copy(pending, c.outBuf)
 	c.outMu.Unlock()
 	if len(pending) == 0 {
-		return
+		return true
 	}
 	c.logger.Info("replaying unacked events", "count", len(pending), "from_seq", pending[0].seq, "batch", replayBatchSize)
 	for i, be := range pending {
-		c.writeMu.Lock()
-		_ = conn.SetWriteDeadline(time.Now().Add(c.writeWait))
-		err := conn.WriteMessage(websocket.TextMessage, be.data)
-		c.writeMu.Unlock()
-		if err != nil {
-			c.logger.Error("replay write error", "error", err, "seq", be.seq)
-			conn.Close()
-			return
+		if !c.writeBufferedTo(ctx, conn, be.seq, be.data, done) {
+			return false
 		}
+		c.outMu.Lock()
+		flowControlled := c.flowControlSupported
+		c.outMu.Unlock()
 		// Pace between batches: after every replayBatchSize-th write, pause so the
 		// relay can persist/route the burst before the next one arrives. Skip the
 		// pause on the very last event (nothing follows).
-		if (i+1)%replayBatchSize == 0 && i+1 < len(pending) {
+		if !flowControlled && (i+1)%replayBatchSize == 0 && i+1 < len(pending) {
 			select {
 			case <-time.After(replayBatchGap):
 			case <-ctx.Done():
-				return
+				return false
+			case <-done:
+				return false
 			}
 		}
 	}
+	return true
+}
+
+func (c *Client) waitTransmitPermit(ctx context.Context, seq int64, done <-chan struct{}) bool {
+	c.outMu.Lock()
+	defer c.outMu.Unlock()
+	return c.waitTransmitPermitLocked(ctx, seq, done)
+}
+
+func (c *Client) waitTransmitPermitLocked(ctx context.Context, seq int64, done <-chan struct{}) bool {
+	for seq > c.ackedSeq && ((c.fatalFlowBlockedSeq > 0 && seq >= c.fatalFlowBlockedSeq) ||
+		(c.flowControlSupported && seq > c.ackedSeq+int64(c.eventWindow))) {
+		if c.transmitWaitStoppedLocked(ctx, done) {
+			return false
+		}
+		c.outWaiters++
+		c.outCond.Wait()
+		c.outWaiters--
+	}
+	return !c.transmitWaitStoppedLocked(ctx, done)
+}
+
+func (c *Client) transmitWaitStoppedLocked(ctx context.Context, done <-chan struct{}) bool {
+	return c.draining || ctx.Err() != nil || channelClosed(done)
 }
 
 // trimOutbound removes all buffered events with seq <= uptoSeq (acknowledged or,
 // for a legacy relay, written) and wakes any producer blocked on a full buffer.
 func (c *Client) trimOutbound(uptoSeq int64) {
 	c.outMu.Lock()
+	c.trimOutboundLocked(uptoSeq)
+	c.outMu.Unlock()
+}
+
+func (c *Client) trimOutboundLocked(uptoSeq int64) []string {
+	ackAdvanced := false
 	if uptoSeq > c.ackedSeq {
 		c.ackedSeq = uptoSeq
+		ackAdvanced = true
 	}
 	i := 0
 	for i < len(c.outBuf) && c.outBuf[i].seq <= uptoSeq {
 		c.outBytes -= len(c.outBuf[i].data)
 		i++
 	}
+	eventIDs := stableEventIDs(c.outBuf[:i])
 	if i > 0 {
 		c.outBuf = append(c.outBuf[:0], c.outBuf[i:]...)
-		c.outCond.Broadcast()
 		c.spool.rewrite(c.outBuf) // shrink the durable mirror to the remaining unacked set
 	}
-	c.outMu.Unlock()
+	if i > 0 || ackAdvanced {
+		c.outCond.Broadcast()
+	}
+	return eventIDs
+}
+
+func stableEventIDs(events []bufferedEvent) []string {
+	var eventIDs []string
+	for _, event := range events {
+		var envelope struct {
+			EventID string `json:"event_id"`
+		}
+		if json.Unmarshal(event.data, &envelope) == nil && envelope.EventID != "" {
+			eventIDs = append(eventIDs, envelope.EventID)
+		}
+	}
+	return eventIDs
 }
 
 // onRegisterAck records whether this relay supports event_ack. A legacy relay
 // (no support) gets best-effort delivery: the current buffer is trimmed and
 // subsequent events are trimmed on successful write.
-func (c *Client) onRegisterAck(supports bool) {
+func (c *Client) onRegisterAck(msg protocol.RegisterAckMessage) {
 	// Signal connectAndServe that the relay has confirmed registration and
 	// finished its registerDaemon bookkeeping — it may now safely replay the
 	// unacked buffer. Non-blocking: the channel is buffered(1) and recreated
@@ -1002,15 +1202,130 @@ func (c *Client) onRegisterAck(supports bool) {
 	// rejections so a later transient 4001 starts counting from scratch.
 	c.authRejectCount.Store(0)
 	c.outMu.Lock()
-	c.ackSupported = supports
+	c.ackSupported = msg.SupportsEventAck
 	c.ackKnown = true
-	if supports {
+	c.flowControlSupported = containsCapability(msg.Capabilities, "flow_control")
+	if c.flowControlSupported && msg.EventWindow > 0 {
+		c.eventWindow = clampEventWindow(msg.EventWindow, c.maxOutCount)
+	}
+	fatalReason := c.fatalFlowReason
+	hasFatalBarrier := c.fatalFlowBlockedSeq > 0
+	if hasFatalBarrier {
+		c.flowBackpressured = true
+	}
+	c.outCond.Broadcast()
+	if msg.SupportsEventAck {
 		c.outMu.Unlock()
+		if hasFatalBarrier {
+			c.notifyConnectionStatus(ConnectionBackpressured, fatalReason)
+		}
+		return
+	}
+	if hasFatalBarrier {
+		c.outMu.Unlock()
+		c.notifyConnectionStatus(ConnectionBackpressured, fatalReason)
 		return
 	}
 	upto := c.seqCtr
 	c.outMu.Unlock()
 	c.trimOutbound(upto)
+}
+
+func (c *Client) handleEventAck(msg protocol.EventAckMessage) {
+	c.outMu.Lock()
+	if msg.DaemonGeneration != 0 && c.startedAt != 0 && msg.DaemonGeneration != c.startedAt {
+		c.outMu.Unlock()
+		return
+	}
+	previousWindow := c.eventWindow
+	if msg.UpToSeq > c.ackedSeq {
+		c.lastACKAt = time.Now().UTC()
+	}
+	eventIDs := c.trimOutboundLocked(msg.UpToSeq)
+	restored := false
+	if c.flowControlSupported && msg.EventWindow > 0 {
+		c.eventWindow = clampEventWindow(msg.EventWindow, c.maxOutCount)
+		if c.flowBackpressured && c.fatalFlowBlockedSeq == 0 && c.eventWindow > previousWindow {
+			c.flowBackpressured = false
+			c.flowRetryAfterMS = 0
+			restored = true
+		}
+		c.outCond.Broadcast()
+	}
+	c.outMu.Unlock()
+	if len(eventIDs) > 0 && c.OnEventsAcknowledged != nil {
+		c.OnEventsAcknowledged(eventIDs)
+	}
+	if restored {
+		c.notifyConnectionStatus(ConnectionConnected, "")
+	}
+}
+
+func (c *Client) onFlowControl(msg protocol.FlowControlMessage) {
+	c.outMu.Lock()
+	if !c.flowControlSupported {
+		c.outMu.Unlock()
+		return
+	}
+	if msg.Reason == "event_too_large" {
+		blockedSeq := msg.BlockedSeq
+		if blockedSeq <= 0 {
+			blockedSeq = c.ackedSeq + 1
+		}
+		if c.fatalFlowBlockedSeq == 0 || blockedSeq < c.fatalFlowBlockedSeq {
+			c.fatalFlowBlockedSeq = blockedSeq
+		}
+		c.fatalFlowReason = msg.Reason
+		c.flowRetryAfterMS = 0
+		c.flowBackpressured = true
+		c.outCond.Broadcast()
+		c.outMu.Unlock()
+		c.notifyConnectionStatus(ConnectionBackpressured, msg.Reason)
+		return
+	}
+	if c.fatalFlowBlockedSeq > 0 {
+		reason := c.fatalFlowReason
+		c.flowBackpressured = true
+		c.outCond.Broadcast()
+		c.outMu.Unlock()
+		c.notifyConnectionStatus(ConnectionBackpressured, reason)
+		return
+	}
+	if msg.Window > 0 {
+		c.eventWindow = clampEventWindow(msg.Window, c.maxOutCount)
+	}
+	c.flowRetryAfterMS = max(0, msg.RetryAfterMS)
+	c.flowBackpressured = msg.Reason != "normal" && msg.RetryAfterMS > 0
+	backpressured := c.flowBackpressured
+	c.outCond.Broadcast()
+	c.outMu.Unlock()
+	if !backpressured {
+		c.notifyConnectionStatus(ConnectionConnected, "")
+		return
+	}
+	c.notifyConnectionStatus(ConnectionBackpressured, msg.Reason)
+}
+
+func clampEventWindow(window, maximum int) int {
+	if maximum < 1 {
+		return 1
+	}
+	if window < 1 {
+		return 1
+	}
+	if window > maximum {
+		return maximum
+	}
+	return window
+}
+
+func containsCapability(capabilities []string, want string) bool {
+	for _, capability := range capabilities {
+		if capability == want {
+			return true
+		}
+	}
+	return false
 }
 
 // backoffSleep waits before the next reconnect attempt. It returns true when
@@ -1024,7 +1339,10 @@ func (c *Client) onRegisterAck(supports bool) {
 // must keep retrying indefinitely until the relay comes back (or the token is
 // fixed via re-login).
 func (c *Client) backoffSleep(ctx context.Context) bool {
-	delay := backoffDelay(int(c.reconnectAttempt.Load()), c.fastReconnect.Load())
+	delay := c.reconnectDelay(int(c.reconnectAttempt.Load()), c.fastReconnect.Load())
+	if retryAfter := time.Duration(c.serverRetryAfter.Swap(0)); retryAfter > delay {
+		delay = retryAfter
+	}
 	c.reconnectAttempt.Add(1)
 	select {
 	case <-time.After(delay):
@@ -1032,6 +1350,28 @@ func (c *Client) backoffSleep(ctx context.Context) bool {
 	case <-ctx.Done():
 		return false
 	}
+}
+
+func (c *Client) reconnectDelay(attempt int, fast bool) time.Duration {
+	if fast {
+		return backoffDelay(attempt, true)
+	}
+	shift := min(attempt, 5)
+	base := time.Duration(1<<uint(shift)) * time.Second
+	if base > maxBackoff {
+		base = maxBackoff
+	}
+	if c.reconnectJitter == nil {
+		return fullReconnectJitter(base)
+	}
+	delay := c.reconnectJitter(base)
+	if delay < base/2 {
+		return base / 2
+	}
+	if delay > base {
+		return base
+	}
+	return delay
 }
 
 // fastReconnectSteps is the compact, deterministic delay sequence used right
@@ -1068,14 +1408,206 @@ func backoffDelay(attempt int, fast bool) time.Duration {
 	if base > maxBackoff {
 		base = maxBackoff
 	}
+	return fullReconnectJitter(base)
+}
+
+func boundedJitter(max time.Duration) time.Duration {
+	if max <= 0 {
+		return 0
+	}
+	return time.Duration(mathrand.Int64N(int64(max) + 1))
+}
+
+func fullReconnectJitter(base time.Duration) time.Duration {
 	half := base / 2
-	return half + time.Duration(mathrand.Int64N(int64(half)+1))
+	return half + boundedJitter(half)
 }
 
 func (c *Client) notifyState(connected bool) {
 	if c.OnStateChange != nil {
 		c.OnStateChange(connected)
 	}
+}
+
+func (c *Client) notifyConnectionStatus(status ConnectionStatus, reason string) {
+	// Capture the configured callback with its event. This avoids a new delayed
+	// read of the public callback field in the dispatcher worker; as with
+	// OnStateChange, callers configure it before Run and do not replace it while
+	// the client is active.
+	callback := c.OnConnectionStatus
+	if callback == nil {
+		return
+	}
+	event := connectionStatusEvent{status: status, reason: reason, callback: callback}
+	c.connectionStatusMu.Lock()
+	c.enqueueConnectionStatusLocked(event)
+	startWorker := !c.connectionStatusWorker
+	if startWorker {
+		c.connectionStatusWorker = true
+	}
+	c.connectionStatusMu.Unlock()
+	if startWorker {
+		go c.dispatchConnectionStatuses()
+	}
+}
+
+// enqueueConnectionStatusLocked preserves retained-event order while keeping
+// the newest real state. At capacity, an incoming transient replaces the
+// oldest queued transient; an incoming terminal does the same, and with an
+// all-terminal queue it coalesces the oldest terminal of its own kind. Thus the
+// bounded queue retains the latest transient state and every terminal kind.
+func (c *Client) enqueueConnectionStatusLocked(event connectionStatusEvent) {
+	if len(c.connectionStatusQueue) < connectionStatusQueueLimit {
+		c.connectionStatusQueue = append(c.connectionStatusQueue, event)
+		return
+	}
+	for i, queued := range c.connectionStatusQueue {
+		if !isTerminalConnectionStatus(queued.status) {
+			c.replaceQueuedStatusLocked(i, event)
+			return
+		}
+	}
+	if !isTerminalConnectionStatus(event.status) {
+		// A terminal-only queue is a final state: a later transient must not
+		// displace a terminal state that the observer has yet to receive.
+		return
+	}
+	for i, queued := range c.connectionStatusQueue {
+		if queued.status == event.status {
+			c.replaceQueuedStatusLocked(i, event)
+			return
+		}
+	}
+	// The incoming terminal kind is absent. Evict the earliest repeated kind,
+	// never an existing unique terminal, then append the newest terminal state.
+	// This remains correct if a future terminal kind is added or a queue contains
+	// only a subset of terminal kinds.
+	counts := make(map[ConnectionStatus]int, len(c.connectionStatusQueue))
+	for _, queued := range c.connectionStatusQueue {
+		counts[queued.status]++
+	}
+	for i, queued := range c.connectionStatusQueue {
+		if counts[queued.status] > 1 {
+			c.replaceQueuedStatusLocked(i, event)
+			return
+		}
+	}
+	// No repeated terminal can be safely replaced. Retain every existing unique
+	// terminal rather than silently dropping one to make room for the incoming
+	// state.
+}
+
+func (c *Client) replaceQueuedStatusLocked(index int, event connectionStatusEvent) {
+	copy(c.connectionStatusQueue[index:], c.connectionStatusQueue[index+1:])
+	c.connectionStatusQueue = c.connectionStatusQueue[:len(c.connectionStatusQueue)-1]
+	c.connectionStatusQueue = append(c.connectionStatusQueue, event)
+}
+
+func isTerminalConnectionStatus(status ConnectionStatus) bool {
+	return status == ConnectionLoginRequired || status == ConnectionRevoked || status == ConnectionStopped
+}
+
+func (c *Client) dispatchConnectionStatuses() {
+	for {
+		c.connectionStatusMu.Lock()
+		if len(c.connectionStatusQueue) == 0 {
+			c.connectionStatusWorker = false
+			c.connectionStatusMu.Unlock()
+			return
+		}
+		event := c.connectionStatusQueue[0]
+		c.connectionStatusQueue = c.connectionStatusQueue[1:]
+		callback := event.callback
+		c.connectionStatusMu.Unlock()
+		if callback != nil {
+			c.callConnectionStatusObserver(callback, event)
+		}
+	}
+}
+
+func (c *Client) callConnectionStatusObserver(callback func(ConnectionStatus, string), event connectionStatusEvent) {
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			c.logger.Error("connection status observer panicked", "panic", recovered, "status", event.status)
+		}
+	}()
+	callback(event.status, event.reason)
+}
+
+func (c *Client) setServerRetryAfter(delay time.Duration) {
+	if delay <= 0 {
+		return
+	}
+	for {
+		current := c.serverRetryAfter.Load()
+		if current >= delay.Nanoseconds() || c.serverRetryAfter.CompareAndSwap(current, delay.Nanoseconds()) {
+			return
+		}
+	}
+}
+
+func (c *Client) handleRelayDisconnect(msg protocol.DisconnectMessage) error {
+	if msg.Retryable {
+		c.setServerRetryAfter(time.Duration(msg.RetryAfterMS) * time.Millisecond)
+	}
+	switch msg.Reason {
+	case "token_revoked", "host_unbound", "force_kick":
+		c.notifyConnectionStatus(ConnectionRevoked, msg.Reason)
+		c.registrationRevoked.Store(true)
+		c.registrationRejected.Store(true)
+		return errReconnectRequested
+	case "token_check_failed", "token_check_unavailable":
+		c.notifyConnectionStatus(ConnectionAuthUncertain, msg.Reason)
+		c.reconnectStatusPending.Store(true)
+		return errReconnectRequested
+	case "relay_overloaded":
+		c.notifyConnectionStatus(ConnectionBackpressured, msg.Reason)
+		c.setServerRetryAfter(time.Duration(msg.RetryAfterMS) * time.Millisecond)
+		c.reconnectStatusPending.Store(true)
+		return errReconnectRequested
+	case "relay_restarting":
+		c.fastReconnect.Store(true)
+		c.notifyConnectionStatus(ConnectionReconnecting, msg.Reason)
+		return errReconnectRequested
+	default:
+		c.notifyConnectionStatus(ConnectionReconnecting, msg.Reason)
+		return errReconnectRequested
+	}
+}
+
+func (c *Client) handleRegisterRejected(msg protocol.RegisterRejectedMessage) {
+	if !msg.Retryable {
+		c.registrationRejected.Store(true)
+		return
+	}
+	c.setServerRetryAfter(time.Duration(msg.RetryAfterMS) * time.Millisecond)
+	c.reconnectStatusPending.Store(true)
+	c.notifyConnectionStatus(ConnectionBackpressured, msg.Reason)
+}
+
+func (c *Client) waitRelayGracePeriod(ctx context.Context, seconds int) bool {
+	if seconds <= 0 {
+		return true
+	}
+	timer := time.NewTimer(time.Duration(seconds) * time.Second)
+	defer timer.Stop()
+	select {
+	case <-timer.C:
+		return true
+	case <-ctx.Done():
+		return false
+	}
+}
+
+func readPumpError(readErr <-chan error, fallback string) error {
+	select {
+	case err := <-readErr:
+		if err != nil {
+			return err
+		}
+	default:
+	}
+	return errors.New(fallback)
 }
 
 // getLocalIP returns the preferred outbound IP of this machine.

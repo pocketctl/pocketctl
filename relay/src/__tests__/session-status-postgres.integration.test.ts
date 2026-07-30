@@ -1,6 +1,7 @@
 import pg from 'pg'
 import { afterAll, beforeAll, beforeEach, describe, expect, test } from 'vitest'
-import { initDB, updateSessionStatus } from '../db.js'
+import { initDB, SESSION_STATUS_SUPPRESSED_EFFECT_STEP, updateSessionStatus } from '../db.js'
+import { EventMaterializer } from '../materialization/event-materializer.js'
 
 const databaseUrl = process.env.TEST_DATABASE_URL
 const integrationEnabled = Boolean(databaseUrl && process.env.RUN_POSTGRES_INTEGRATION === '1')
@@ -94,5 +95,38 @@ describeWithDatabase('session status PostgreSQL integration', () => {
       `SELECT COUNT(*)::int AS count FROM sessions WHERE session_id = 'unknown-session'`,
     )
     expect(result.rows[0].count).toBe(0)
+  })
+
+  test('persists an unknown session_status suppression decision across later session creation', async () => {
+    const materializer = new EventMaterializer({ pool })
+    const input = {
+      inboxId: 91,
+      userId: null,
+      daemonId: 'daemon-status-test',
+      sessionId: 'late-session',
+      eventType: 'session_status',
+      payload: { type: 'session_status', session_id: 'late-session', status: 'busy' },
+    }
+
+    expect((await materializer.materialize(input)).deliveries).toEqual([])
+    await pool.query(
+      `INSERT INTO sessions (session_id, daemon_id, agent_type, status)
+       VALUES ('late-session', 'daemon-status-test', 'codex', 'idle')`,
+    )
+    expect((await materializer.materialize(input)).deliveries).toEqual([])
+
+    const ledger = await pool.query(
+      `SELECT effect_status, effect_step
+       FROM events
+       WHERE session_id = 'late-session' AND event_type = 'session_status'`,
+    )
+    expect(ledger.rows).toEqual([{
+      effect_status: 'completed',
+      effect_step: SESSION_STATUS_SUPPRESSED_EFFECT_STEP,
+    }])
+    const session = await pool.query(
+      `SELECT status FROM sessions WHERE session_id = 'late-session'`,
+    )
+    expect(session.rows[0].status).toBe('idle')
   })
 })

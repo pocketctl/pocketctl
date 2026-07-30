@@ -20,6 +20,7 @@ services:
       - "5432"
 
   relay:
+    image: pocketctl-relay:${RELEASE_VERSION:-latest}
     build:
       context: ./relay
       dockerfile: Dockerfile
@@ -33,6 +34,19 @@ services:
         condition: service_healthy
     environment:
       DATABASE_URL: postgresql://pocketctl:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}@postgres:5432/pocketctl
+      DB_CONTROL_POOL_MAX: ${DB_CONTROL_POOL_MAX:-4}
+      DB_INGEST_POOL_MAX: ${DB_INGEST_POOL_MAX:-8}
+      DB_QUERY_POOL_MAX: ${DB_QUERY_POOL_MAX:-8}
+      DB_WORKER_POOL_MAX: ${DB_WORKER_POOL_MAX:-8}
+      # Keep total Relay connections below PostgreSQL max_connections.
+      DB_POOL_SINGLE_MAX: ${DB_POOL_SINGLE_MAX:-16}
+      DB_POOL_TOTAL_MAX: ${DB_POOL_TOTAL_MAX:-28}
+      # Safe rollout defaults. Production canary/on requires an explicit env
+      # override after the durable-ingress release gate has passed.
+      RELAY_DURABLE_INGRESS: ${RELAY_DURABLE_INGRESS:-off}
+      RELAY_DURABLE_INGRESS_DAEMONS: ${RELAY_DURABLE_INGRESS_DAEMONS:-}
+      RELAY_DURABLE_INGRESS_WINDOW: ${RELAY_DURABLE_INGRESS_WINDOW:-128}
+      RELAY_MATERIALIZATION_MODE: ${RELAY_MATERIALIZATION_MODE:-inline}
       POCKETCTL_API_KEY: ${POCKETCTL_API_KEY:-}
       DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-}
       NODE_ENV: production
@@ -62,6 +76,37 @@ services:
       - "${APNS_KEY_DIR:-./secrets/apns}:/run/secrets/apns:ro"
     expose:
       - "8080"
+
+  relay-worker:
+    image: pocketctl-relay:${RELEASE_VERSION:-latest}
+    build:
+      context: ./relay
+      dockerfile: Dockerfile
+      args:
+        RELEASE_VERSION: ${RELEASE_VERSION:-}
+        GIT_SHA: ${GIT_SHA:-}
+        BUILD_TIME: ${BUILD_TIME:-}
+    command: ["node", "dist/event-worker-main.js"]
+    restart: always
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql://pocketctl:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}@postgres:5432/pocketctl
+      DB_WORKER_POOL_MAX: ${DB_WORKER_POOL_MAX:-8}
+      RELAY_MATERIALIZATION_MODE: worker
+      RELAY_WORKER_ID: ${RELAY_WORKER_ID:-relay-worker-1}
+      RELAY_WORKER_SHARD_COUNT: "1"
+      RELAY_WORKER_SHARD_INDEX: "0"
+      NODE_ENV: production
+      POCKETCTL_MODE: saas
+      APNS_KEY_PATH: ${APNS_KEY_PATH:-}
+      APNS_KEY_ID: ${APNS_KEY_ID:-}
+      APNS_TEAM_ID: ${APNS_TEAM_ID:-}
+      APNS_BUNDLE_ID: ${APNS_BUNDLE_ID:-com.pocketctl.app}
+      APNS_ENVIRONMENT: ${APNS_ENVIRONMENT:-production}
+    volumes:
+      - "${APNS_KEY_DIR:-./secrets/apns}:/run/secrets/apns:ro"
 
   nginx:
     image: nginx:alpine

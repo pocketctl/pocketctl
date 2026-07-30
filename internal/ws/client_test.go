@@ -3,12 +3,17 @@ package ws
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
+	"reflect"
 	"runtime"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -16,6 +21,585 @@ import (
 	"github.com/gorilla/websocket"
 	"github.com/pocketctl/pocketctl/internal/protocol"
 )
+
+func TestKickedTokenCheckUnavailableDoesNotExitAndReconnects(t *testing.T) {
+	statuses := make(chan ConnectionStatus, 4)
+	c := newTestClient("ws://example")
+	c.OnConnectionStatus = func(status ConnectionStatus, _ string) { statuses <- status }
+	err := c.handleRelayDisconnect(protocol.DisconnectMessage{
+		Type: "kicked", Reason: "token_check_unavailable", Retryable: true,
+	})
+	if !errors.Is(err, errReconnectRequested) {
+		t.Fatalf("err=%v", err)
+	}
+	if got := <-statuses; got != ConnectionAuthUncertain {
+		t.Fatalf("status=%q", got)
+	}
+}
+
+func TestDurableIngressDiagnosticsSnapshotIsAggregateAndLocked(t *testing.T) {
+	c := newTestClient("ws://example")
+	c.outMu.Lock()
+	c.outBuf = []bufferedEvent{{seq: 3, data: []byte("abc")}, {seq: 4, data: []byte("de")}}
+	c.outBytes = 5
+	c.eventWindow = 8
+	c.spool = &spool{}
+	c.outMu.Unlock()
+
+	method := reflect.ValueOf(c).MethodByName("DurableIngressDiagnostics")
+	if !method.IsValid() {
+		t.Fatal("DurableIngressDiagnostics snapshot is required for daemon local status")
+	}
+	result := method.Call(nil)[0]
+	if got := result.FieldByName("SpoolEvents").Int(); got != 2 {
+		t.Fatalf("spool events=%d want 2", got)
+	}
+	if got := result.FieldByName("SpoolBytes").Int(); got != 5 {
+		t.Fatalf("spool bytes=%d want 5", got)
+	}
+	if got := result.FieldByName("UnackedEvents").Int(); got != 2 {
+		t.Fatalf("unacked=%d want 2", got)
+	}
+	if got := result.FieldByName("EventWindow").Int(); got != 8 {
+		t.Fatalf("window=%d want 8", got)
+	}
+}
+
+func TestEventAckRefreshesDiagnosticsWithoutConnectionStatusTransition(t *testing.T) {
+	c := newTestClient("ws://example")
+	c.outMu.Lock()
+	c.outBuf = []bufferedEvent{{seq: 1, data: []byte("event")}}
+	c.outBytes = len(c.outBuf[0].data)
+	c.ackSupported = true
+	c.ackKnown = true
+	c.startedAt = 42
+	c.outMu.Unlock()
+
+	c.OnConnectionStatus = func(ConnectionStatus, string) {
+		t.Fatal("ordinary ACK must not synthesize a connection status transition")
+	}
+
+	c.handleEventAck(protocol.EventAckMessage{DaemonGeneration: 42, UpToSeq: 1})
+	if got := c.DurableIngressDiagnostics(); got.UnackedEvents != 0 || got.LastACKAt.IsZero() {
+		t.Fatalf("diagnostics after ACK=%+v", got)
+	}
+}
+
+func TestHeartbeatInitialDelayUsesJitter(t *testing.T) {
+	c := newTestClient("ws://example")
+	c.heartbeatJitter = func(max time.Duration) time.Duration { return 7 * time.Second }
+	if got := c.heartbeatInitialDelay(); got != 7*time.Second {
+		t.Fatalf("delay=%s", got)
+	}
+}
+
+func TestReconnectDelayUsesJitterHook(t *testing.T) {
+	c := newTestClient("ws://example")
+	c.reconnectJitter = func(base time.Duration) time.Duration { return base * 3 / 4 }
+	if got := c.reconnectDelay(2, false); got != 3*time.Second {
+		t.Fatalf("delay=%s", got)
+	}
+}
+
+func TestRunStopsCleanlyWhenOutputChannelCloses(t *testing.T) {
+	registered := make(chan struct{}, 1)
+	upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		for {
+			_, raw, err := conn.ReadMessage()
+			if err != nil {
+				return
+			}
+			var msg protocol.RegisterMessage
+			if json.Unmarshal(raw, &msg) == nil && msg.Type == "register" {
+				_ = conn.WriteJSON(protocol.RegisterAckMessage{Type: "register_ack", SupportsEventAck: true})
+				registered <- struct{}{}
+			}
+		}
+	}))
+	defer server.Close()
+
+	out := make(chan protocol.DaemonEvent)
+	c := NewClient(wsURL(server.URL), "token", "daemon-output-close", nil, nil, nil, out, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	c.pingInterval = 30 * time.Millisecond
+	c.pongWait = 150 * time.Millisecond
+	c.writeWait = 150 * time.Millisecond
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	type result struct {
+		err   error
+		panic any
+	}
+	finished := make(chan result, 1)
+	go func() {
+		got := result{}
+		defer func() {
+			got.panic = recover()
+			finished <- got
+		}()
+		got.err = c.Run(ctx)
+	}()
+
+	select {
+	case <-registered:
+		close(out)
+	case <-time.After(time.Second):
+		t.Fatal("client did not register")
+	}
+	select {
+	case got := <-finished:
+		if got.panic != nil || got.err != nil {
+			t.Fatalf("Run result = %+v, want clean stop", got)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Run did not stop after output channel closed")
+	}
+}
+
+func TestBlockingConnectionStatusObserverDoesNotBlockRunStop(t *testing.T) {
+	upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		for {
+			_, raw, err := conn.ReadMessage()
+			if err != nil {
+				return
+			}
+			var msg protocol.RegisterMessage
+			if json.Unmarshal(raw, &msg) == nil && msg.Type == "register" {
+				_ = conn.WriteJSON(protocol.RegisterAckMessage{Type: "register_ack", SupportsEventAck: true})
+			}
+		}
+	}))
+	defer server.Close()
+
+	c := newTestClient(wsURL(server.URL))
+	observerStarted := make(chan struct{}, 1)
+	observerBlock := make(chan struct{})
+	c.OnConnectionStatus = func(ConnectionStatus, string) {
+		select {
+		case observerStarted <- struct{}{}:
+		default:
+		}
+		<-observerBlock
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	defer close(observerBlock)
+	finished := make(chan error, 1)
+	go func() { finished <- c.Run(ctx) }()
+
+	select {
+	case <-observerStarted:
+	case <-time.After(time.Second):
+		t.Fatal("connection status observer was not called")
+	}
+	cancel()
+	select {
+	case err := <-finished:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("Run error = %v, want context cancellation", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("blocking status observer froze Run shutdown")
+	}
+}
+
+func TestConnectionStatusObserverPanicDoesNotBlockLaterStatus(t *testing.T) {
+	c := newTestClient("ws://example")
+	statuses := make(chan ConnectionStatus, 1)
+	c.OnConnectionStatus = func(status ConnectionStatus, _ string) {
+		if status == ConnectionAuthUncertain {
+			panic("observer failure")
+		}
+		statuses <- status
+	}
+	result := make(chan any, 1)
+	go func() {
+		defer func() { result <- recover() }()
+		c.notifyConnectionStatus(ConnectionAuthUncertain, "token_check_unavailable")
+		c.notifyConnectionStatus(ConnectionReconnecting, "")
+	}()
+	if panicValue := <-result; panicValue != nil {
+		t.Fatalf("observer panic escaped: %v", panicValue)
+	}
+	select {
+	case got := <-statuses:
+		if got != ConnectionReconnecting {
+			t.Fatalf("status=%q, want %q after recovered observer panic", got, ConnectionReconnecting)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("later status was not dispatched")
+	}
+}
+
+func TestConnectionStatusQueueKeepsLatestTransientStatesWhenFull(t *testing.T) {
+	c, _, release := newBlockedStatusClient(t)
+	defer release()
+	for i := 0; i < connectionStatusQueueLimit; i++ {
+		c.notifyConnectionStatus(ConnectionReconnecting, "stale")
+	}
+	c.notifyConnectionStatus(ConnectionAuthUncertain, "token_check_failed")
+	assertStatusQueueTail(t, c, ConnectionAuthUncertain, "token_check_failed")
+	c.notifyConnectionStatus(ConnectionBackpressured, "relay_overloaded")
+	assertStatusQueueTail(t, c, ConnectionBackpressured, "relay_overloaded")
+
+	c.connectionStatusMu.Lock()
+	defer c.connectionStatusMu.Unlock()
+	if len(c.connectionStatusQueue) != connectionStatusQueueLimit {
+		t.Fatalf("queue length=%d, want %d", len(c.connectionStatusQueue), connectionStatusQueueLimit)
+	}
+	if !statusQueueContains(c.connectionStatusQueue, ConnectionAuthUncertain) {
+		t.Fatal("latest auth_uncertain was lost from a full queue")
+	}
+}
+
+func TestConnectionStatusQueueCoalescesTerminalFullQueueDeterministically(t *testing.T) {
+	c, _, release := newBlockedStatusClient(t)
+	defer release()
+	terminals := []ConnectionStatus{ConnectionRevoked, ConnectionStopped, ConnectionLoginRequired}
+	for i := 0; i < connectionStatusQueueLimit; i++ {
+		c.notifyConnectionStatus(terminals[i%len(terminals)], "old")
+	}
+	c.notifyConnectionStatus(ConnectionStopped, "latest")
+
+	c.connectionStatusMu.Lock()
+	defer c.connectionStatusMu.Unlock()
+	if len(c.connectionStatusQueue) != connectionStatusQueueLimit {
+		t.Fatalf("queue length=%d, want %d", len(c.connectionStatusQueue), connectionStatusQueueLimit)
+	}
+	for _, terminal := range terminals {
+		if !statusQueueContains(c.connectionStatusQueue, terminal) {
+			t.Fatalf("terminal %q was dropped", terminal)
+		}
+	}
+	if first := c.connectionStatusQueue[0]; first.status != ConnectionRevoked || first.reason != "old" {
+		t.Fatalf("queue head=%+v, want oldest non-coalesced terminal", first)
+	}
+	if tail := c.connectionStatusQueue[len(c.connectionStatusQueue)-1]; tail.status != ConnectionStopped || tail.reason != "latest" {
+		t.Fatalf("queue tail=%+v, want latest stopped terminal", tail)
+	}
+}
+
+func TestConnectionStatusQueueAddsMissingTerminalByEvictingOldestDuplicate(t *testing.T) {
+	c, _, release := newBlockedStatusClient(t)
+	defer release()
+	for i := 0; i < connectionStatusQueueLimit; i++ {
+		c.notifyConnectionStatus(ConnectionStopped, "old")
+	}
+	c.notifyConnectionStatus(ConnectionRevoked, "new-revoked")
+
+	c.connectionStatusMu.Lock()
+	defer c.connectionStatusMu.Unlock()
+	if len(c.connectionStatusQueue) != connectionStatusQueueLimit {
+		t.Fatalf("queue length=%d, want %d", len(c.connectionStatusQueue), connectionStatusQueueLimit)
+	}
+	if first := c.connectionStatusQueue[0]; first.status != ConnectionStopped || first.reason != "old" {
+		t.Fatalf("queue head=%+v, want oldest surviving stopped terminal", first)
+	}
+	if tail := c.connectionStatusQueue[len(c.connectionStatusQueue)-1]; tail.status != ConnectionRevoked || tail.reason != "new-revoked" {
+		t.Fatalf("queue tail=%+v, want incoming revoked terminal", tail)
+	}
+}
+
+func TestConnectionStatusQueueKeepsUniqueTerminalWhenAddingMissingKind(t *testing.T) {
+	c, _, release := newBlockedStatusClient(t)
+	defer release()
+	c.notifyConnectionStatus(ConnectionRevoked, "only-revoked")
+	for i := 1; i < connectionStatusQueueLimit; i++ {
+		c.notifyConnectionStatus(ConnectionStopped, "duplicate-stopped")
+	}
+	c.notifyConnectionStatus(ConnectionLoginRequired, "new-login")
+
+	c.connectionStatusMu.Lock()
+	defer c.connectionStatusMu.Unlock()
+	if len(c.connectionStatusQueue) != connectionStatusQueueLimit {
+		t.Fatalf("queue length=%d, want %d", len(c.connectionStatusQueue), connectionStatusQueueLimit)
+	}
+	if first := c.connectionStatusQueue[0]; first.status != ConnectionRevoked || first.reason != "only-revoked" {
+		t.Fatalf("queue head=%+v, want unique revoked retained", first)
+	}
+	if !statusQueueContains(c.connectionStatusQueue, ConnectionLoginRequired) {
+		t.Fatal("incoming login_required terminal was not retained")
+	}
+	if tail := c.connectionStatusQueue[len(c.connectionStatusQueue)-1]; tail.status != ConnectionLoginRequired || tail.reason != "new-login" {
+		t.Fatalf("queue tail=%+v, want incoming login_required terminal", tail)
+	}
+}
+
+func TestBlockingConnectionStatusObserverUsesOneWorkerPerClient(t *testing.T) {
+	c, observerCalls, release := newBlockedStatusClient(t)
+	defer release()
+	for i := 0; i < connectionStatusQueueLimit*2; i++ {
+		c.notifyConnectionStatus(ConnectionReconnecting, "burst")
+	}
+	if got := observerCalls.Load(); got != 1 {
+		t.Fatalf("observer calls while first callback is blocked=%d, want 1", got)
+	}
+	c.connectionStatusMu.Lock()
+	worker := c.connectionStatusWorker
+	c.connectionStatusMu.Unlock()
+	if !worker {
+		t.Fatal("status dispatcher worker stopped while observer was blocked")
+	}
+}
+
+func TestHandleRelayDisconnectReasonMappings(t *testing.T) {
+	cases := []struct {
+		name           string
+		reason         string
+		retryAfterMS   int
+		wantStatus     ConnectionStatus
+		wantRejected   bool
+		wantRevoked    bool
+		wantPending    bool
+		wantFast       bool
+		wantRetryAfter time.Duration
+	}{
+		{name: "token check failed", reason: "token_check_failed", wantStatus: ConnectionAuthUncertain, wantPending: true},
+		{name: "host unbound", reason: "host_unbound", wantStatus: ConnectionRevoked, wantRejected: true, wantRevoked: true},
+		{name: "force kick", reason: "force_kick", wantStatus: ConnectionRevoked, wantRejected: true, wantRevoked: true},
+		{name: "overloaded positive retry", reason: "relay_overloaded", retryAfterMS: 750, wantStatus: ConnectionBackpressured, wantPending: true, wantRetryAfter: 750 * time.Millisecond},
+		{name: "overloaded zero retry", reason: "relay_overloaded", retryAfterMS: 0, wantStatus: ConnectionBackpressured, wantPending: true},
+		{name: "overloaded negative retry", reason: "relay_overloaded", retryAfterMS: -1, wantStatus: ConnectionBackpressured, wantPending: true},
+		{name: "relay restarting", reason: "relay_restarting", wantStatus: ConnectionReconnecting, wantFast: true},
+		{name: "unknown reason", reason: "new_relay_reason", wantStatus: ConnectionReconnecting},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			c := newTestClient("ws://example")
+			statuses := make(chan ConnectionStatus, 1)
+			c.OnConnectionStatus = func(status ConnectionStatus, _ string) { statuses <- status }
+			err := c.handleRelayDisconnect(protocol.DisconnectMessage{Type: "disconnect", Reason: tc.reason, RetryAfterMS: tc.retryAfterMS})
+			if !errors.Is(err, errReconnectRequested) {
+				t.Fatalf("error=%v, want reconnect request", err)
+			}
+			if got := waitConnectionStatus(t, statuses, time.Second); got != tc.wantStatus {
+				t.Fatalf("status=%q, want %q", got, tc.wantStatus)
+			}
+			if got := c.registrationRejected.Load(); got != tc.wantRejected {
+				t.Fatalf("registrationRejected=%t, want %t", got, tc.wantRejected)
+			}
+			if got := c.registrationRevoked.Load(); got != tc.wantRevoked {
+				t.Fatalf("registrationRevoked=%t, want %t", got, tc.wantRevoked)
+			}
+			if got := c.reconnectStatusPending.Load(); got != tc.wantPending {
+				t.Fatalf("reconnectStatusPending=%t, want %t", got, tc.wantPending)
+			}
+			if got := c.fastReconnect.Load(); got != tc.wantFast {
+				t.Fatalf("fastReconnect=%t, want %t", got, tc.wantFast)
+			}
+			if got := time.Duration(c.serverRetryAfter.Load()); got != tc.wantRetryAfter {
+				t.Fatalf("serverRetryAfter=%v, want %v", got, tc.wantRetryAfter)
+			}
+		})
+	}
+}
+
+const testStatusObserverDrainReason = "__test_status_dispatcher_drain__"
+
+func newBlockedStatusClient(t *testing.T) (*Client, *atomic.Int32, func()) {
+	t.Helper()
+	c := newTestClient("ws://example")
+	observerStarted := make(chan struct{})
+	observerDrained := make(chan struct{})
+	release := make(chan struct{})
+	var observerCalls atomic.Int32
+	var startedOnce sync.Once
+	var drainedOnce sync.Once
+	var releaseOnce sync.Once
+	c.OnConnectionStatus = func(_ ConnectionStatus, reason string) {
+		observerCalls.Add(1)
+		startedOnce.Do(func() { close(observerStarted) })
+		<-release
+		if reason == testStatusObserverDrainReason {
+			drainedOnce.Do(func() { close(observerDrained) })
+		}
+	}
+	c.notifyConnectionStatus(ConnectionConnected, "initial")
+	select {
+	case <-observerStarted:
+	case <-time.After(time.Second):
+		t.Fatal("status observer did not begin")
+	}
+	return c, &observerCalls, func() {
+		releaseOnce.Do(func() {
+			close(release)
+			c.notifyConnectionStatus(ConnectionStopped, testStatusObserverDrainReason)
+			select {
+			case <-observerDrained:
+			case <-time.After(time.Second):
+				t.Fatal("status dispatcher did not drain after observer release")
+			}
+			waitForStatusDispatcherIdle(t, c, time.Second)
+		})
+	}
+}
+
+func waitForStatusDispatcherIdle(t *testing.T, c *Client, timeout time.Duration) {
+	t.Helper()
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	for {
+		c.connectionStatusMu.Lock()
+		active := c.connectionStatusWorker
+		queued := len(c.connectionStatusQueue)
+		c.connectionStatusMu.Unlock()
+		if !active && queued == 0 {
+			return
+		}
+		select {
+		case <-timer.C:
+			t.Fatalf("status dispatcher not idle after release: active=%t queued=%d", active, queued)
+		default:
+			runtime.Gosched()
+		}
+	}
+}
+
+func assertStatusQueueTail(t *testing.T, c *Client, want ConnectionStatus, reason string) {
+	t.Helper()
+	c.connectionStatusMu.Lock()
+	defer c.connectionStatusMu.Unlock()
+	if len(c.connectionStatusQueue) == 0 {
+		t.Fatal("status queue is empty")
+	}
+	if got := c.connectionStatusQueue[len(c.connectionStatusQueue)-1]; got.status != want || got.reason != reason {
+		t.Fatalf("queue tail=%+v, want status=%q reason=%q", got, want, reason)
+	}
+}
+
+func statusQueueContains(queue []connectionStatusEvent, want ConnectionStatus) bool {
+	for _, event := range queue {
+		if event.status == want {
+			return true
+		}
+	}
+	return false
+}
+
+func TestTokenCheckDisconnectKeepsAuthUncertainUntilReconnectAttempt(t *testing.T) {
+	var conns int32
+	upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		connection := atomic.AddInt32(&conns, 1)
+		for {
+			_, raw, err := conn.ReadMessage()
+			if err != nil {
+				return
+			}
+			var msg protocol.RegisterMessage
+			if json.Unmarshal(raw, &msg) == nil && msg.Type == "register" {
+				_ = conn.WriteJSON(protocol.RegisterAckMessage{Type: "register_ack", SupportsEventAck: true})
+				if connection == 1 {
+					_ = conn.WriteJSON(protocol.DisconnectMessage{Type: "disconnect", Reason: "token_check_unavailable", Retryable: true})
+				}
+			}
+		}
+	}))
+	defer server.Close()
+
+	c := newTestClient(wsURL(server.URL))
+	statuses := make(chan ConnectionStatus, 8)
+	c.OnConnectionStatus = func(status ConnectionStatus, _ string) { statuses <- status }
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	finished := make(chan error, 1)
+	go func() { finished <- c.Run(ctx) }()
+
+	for {
+		if got := waitConnectionStatus(t, statuses, 2*time.Second); got == ConnectionAuthUncertain {
+			break
+		}
+	}
+	select {
+	case got := <-statuses:
+		if got == ConnectionReconnecting {
+			t.Fatalf("auth_uncertain was immediately overwritten by %q", got)
+		}
+	case <-time.After(200 * time.Millisecond):
+	}
+	waitForConns(t, &conns, 2, time.Second)
+	if got := waitConnectionStatus(t, statuses, time.Second); got != ConnectionReconnecting {
+		t.Fatalf("status after reconnect attempt = %q, want %q", got, ConnectionReconnecting)
+	}
+	cancel()
+	if err := <-finished; !errors.Is(err, context.Canceled) {
+		t.Fatalf("Run error = %v, want context cancellation", err)
+	}
+}
+
+func TestRevokedDisconnectDoesNotEmitStopped(t *testing.T) {
+	upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		for {
+			_, raw, err := conn.ReadMessage()
+			if err != nil {
+				return
+			}
+			var msg protocol.RegisterMessage
+			if json.Unmarshal(raw, &msg) == nil && msg.Type == "register" {
+				_ = conn.WriteJSON(protocol.DisconnectMessage{Type: "disconnect", Reason: "token_revoked"})
+			}
+		}
+	}))
+	defer server.Close()
+
+	c := newTestClient(wsURL(server.URL))
+	statuses := make(chan ConnectionStatus, 8)
+	c.OnConnectionStatus = func(status ConnectionStatus, _ string) { statuses <- status }
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	finished := make(chan error, 1)
+	go func() { finished <- c.Run(ctx) }()
+
+	for {
+		if got := waitConnectionStatus(t, statuses, 2*time.Second); got == ConnectionRevoked {
+			break
+		}
+	}
+	select {
+	case got := <-statuses:
+		if got == ConnectionStopped {
+			t.Fatal("revoked was overwritten by stopped")
+		}
+	case <-time.After(200 * time.Millisecond):
+	}
+	cancel()
+	if err := <-finished; !errors.Is(err, context.Canceled) {
+		t.Fatalf("Run error = %v, want context cancellation", err)
+	}
+}
+
+func waitConnectionStatus(t *testing.T, statuses <-chan ConnectionStatus, timeout time.Duration) ConnectionStatus {
+	t.Helper()
+	select {
+	case status := <-statuses:
+		return status
+	case <-time.After(timeout):
+		t.Fatal("timed out waiting for connection status")
+		return ""
+	}
+}
 
 // TestBackoffDelayProgression verifies the reconnect delay grows exponentially
 // and stays within the jitter bounds [base/2, base], capped at maxBackoff —
@@ -75,6 +659,7 @@ func newTestClient(relayURL string) *Client {
 	c.pingInterval = 30 * time.Millisecond
 	c.pongWait = 150 * time.Millisecond
 	c.writeWait = 150 * time.Millisecond
+	c.heartbeatJitter = func(time.Duration) time.Duration { return 0 }
 	return c
 }
 
@@ -162,6 +747,307 @@ func TestHostQuotaRejectionStopsReconnectLoop(t *testing.T) {
 	}
 	if got := atomic.LoadInt32(&conns); got != 1 {
 		t.Fatalf("connections = %d, want exactly 1 after persistent quota rejection", got)
+	}
+}
+
+func TestRetryableRegisterRejectionReconnects(t *testing.T) {
+	var conns atomic.Int32
+	registered := make(chan struct{}, 1)
+	upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		connection := conns.Add(1)
+		_, _, _ = conn.ReadMessage()
+		if connection == 1 {
+			_ = conn.WriteJSON(protocol.RegisterRejectedMessage{
+				Type: "register_rejected", Reason: "durable_ingress_unavailable",
+				Retryable: true, RetryAfterMS: 1,
+			})
+			return
+		}
+		_ = conn.WriteJSON(protocol.RegisterAckMessage{
+			Type: "register_ack", Status: "ok", SupportsEventAck: true,
+		})
+		registered <- struct{}{}
+		<-r.Context().Done()
+	}))
+	defer server.Close()
+
+	c := newTestClient(wsURL(server.URL))
+	c.reconnectJitter = func(time.Duration) time.Duration { return 0 }
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go c.Run(ctx)
+	select {
+	case <-registered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("retryable register rejection did not reconnect")
+	}
+	if c.registrationRejected.Load() {
+		t.Fatal("retryable register rejection permanently parked the client")
+	}
+	if conns.Load() < 2 {
+		t.Fatalf("connections=%d, want reconnect", conns.Load())
+	}
+}
+
+func TestDurableAdmissionDisconnectReplaysSameSequence(t *testing.T) {
+	received := make(chan int64, 2)
+	var conns atomic.Int32
+	upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		connection := conns.Add(1)
+		for {
+			_, raw, err := conn.ReadMessage()
+			if err != nil {
+				return
+			}
+			var message map[string]any
+			if json.Unmarshal(raw, &message) != nil {
+				continue
+			}
+			switch message["type"] {
+			case "register":
+				_ = conn.WriteJSON(protocol.RegisterAckMessage{
+					Type: "register_ack", Status: "ok", SupportsEventAck: true,
+					Capabilities: []string{"flow_control"}, EventWindow: 128,
+				})
+			case "agent_text":
+				seq := int64(message["seq"].(float64))
+				received <- seq
+				if connection == 1 {
+					_ = conn.WriteJSON(protocol.FlowControlMessage{
+						Type: "flow_control", Window: 1, RetryAfterMS: 1, Reason: "ingest_backpressure",
+					})
+					_ = conn.WriteJSON(protocol.DisconnectMessage{
+						Type: "disconnect", Reason: "ingest_backpressure", Retryable: true, RetryAfterMS: 1,
+					})
+					return
+				}
+				_ = conn.WriteJSON(protocol.EventAckMessage{
+					Type: "event_ack", UpToSeq: seq, EventWindow: 128,
+				})
+			}
+		}
+	}))
+	defer server.Close()
+
+	out := make(chan protocol.DaemonEvent, 1)
+	c := NewClient(wsURL(server.URL), "token", "replay-admission", nil, nil, nil, out, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	c.reconnectJitter = func(time.Duration) time.Duration { return 0 }
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go c.Run(ctx)
+	out <- protocol.DaemonEvent{Type: "agent_text", SessionID: "s1", Text: "durable"}
+	first := waitSeq(t, received, 2*time.Second)
+	second := waitSeq(t, received, 2*time.Second)
+	if first != second {
+		t.Fatalf("replayed seq=%d, want original seq=%d", second, first)
+	}
+}
+
+func TestOversizedFlowBarrierSurvivesReconnectWithoutReplayStorm(t *testing.T) {
+	received := make(chan int64, 4)
+	registered := make(chan int32, 2)
+	forceReconnect := make(chan struct{})
+	statuses := make(chan ConnectionStatus, 16)
+	var conns atomic.Int32
+	upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		connection := conns.Add(1)
+		if connection == 1 {
+			go func() {
+				<-forceReconnect
+				conn.Close()
+			}()
+		}
+		for {
+			_, raw, err := conn.ReadMessage()
+			if err != nil {
+				return
+			}
+			var message map[string]any
+			if json.Unmarshal(raw, &message) != nil {
+				continue
+			}
+			switch message["type"] {
+			case "register":
+				_ = conn.WriteJSON(protocol.RegisterAckMessage{
+					Type: "register_ack", Status: "ok", SupportsEventAck: true,
+					Capabilities: []string{"flow_control"}, EventWindow: 128,
+				})
+				registered <- connection
+			case "agent_text":
+				seq := int64(message["seq"].(float64))
+				received <- seq
+				if connection == 1 {
+					_ = conn.WriteJSON(protocol.FlowControlMessage{
+						Type: "flow_control", Window: 1, Reason: "event_too_large",
+						BlockedSeq: seq,
+					})
+				}
+			}
+		}
+	}))
+	defer server.Close()
+
+	out := make(chan protocol.DaemonEvent, 2)
+	c := NewClient(wsURL(server.URL), "token", "oversized-barrier", nil, nil, nil, out, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	spoolPath := filepath.Join(t.TempDir(), "oversized-barrier.log")
+	if err := c.InitSpool(spoolPath); err != nil {
+		t.Fatal(err)
+	}
+	c.OnConnectionStatus = func(status ConnectionStatus, _ string) { statuses <- status }
+	c.reconnectJitter = func(time.Duration) time.Duration { return 0 }
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	finished := make(chan error, 1)
+	go func() { finished <- c.Run(ctx) }()
+	if connection := <-registered; connection != 1 {
+		t.Fatalf("first registration=%d", connection)
+	}
+	out <- protocol.DaemonEvent{Type: "agent_text", SessionID: "s1", Text: "oversized"}
+	if seq := waitSeq(t, received, 2*time.Second); seq != 1 {
+		t.Fatalf("oversized seq=%d, want 1", seq)
+	}
+	for {
+		if status := waitConnectionStatus(t, statuses, time.Second); status == ConnectionBackpressured {
+			break
+		}
+	}
+	out <- protocol.DaemonEvent{Type: "agent_text", SessionID: "s1", Text: "must-not-pass"}
+	waitForOutboundWaiters(t, c, 1)
+	c.outMu.Lock()
+	if c.seqCtr != 2 || len(c.outBuf) != 2 || c.outBuf[1].seq != 2 {
+		seqCtr := c.seqCtr
+		outBuf := append([]bufferedEvent(nil), c.outBuf...)
+		c.outMu.Unlock()
+		t.Fatalf("later event was not durably accepted: seqCtr=%d outBuf=%+v", seqCtr, outBuf)
+	}
+	c.outMu.Unlock()
+	persisted, err := loadSpool(spoolPath)
+	if err != nil || len(persisted) != 2 || persisted[1].seq != 2 {
+		t.Fatalf("later event missing from spool before disconnect: events=%+v err=%v", persisted, err)
+	}
+
+	close(forceReconnect)
+	if connection := <-registered; connection != 2 {
+		t.Fatalf("second registration=%d", connection)
+	}
+	waitForOutboundWaiters(t, c, 1)
+	select {
+	case seq := <-received:
+		t.Fatalf("fatal barrier replayed or passed a later seq: %d", seq)
+	case <-time.After(150 * time.Millisecond):
+	}
+	c.outMu.Lock()
+	if c.fatalFlowBlockedSeq != 1 || c.seqCtr != 2 || len(c.outBuf) != 2 {
+		blockedSeq := c.fatalFlowBlockedSeq
+		seqCtr := c.seqCtr
+		outBuf := append([]bufferedEvent(nil), c.outBuf...)
+		c.outMu.Unlock()
+		t.Fatalf("reconnect changed fatal durable state: blocked=%d seqCtr=%d outBuf=%+v",
+			blockedSeq, seqCtr, outBuf)
+	}
+	c.outMu.Unlock()
+	if got := conns.Load(); got != 2 {
+		t.Fatalf("connections=%d, want one controlled reconnect without a storm", got)
+	}
+
+	cancel()
+	if err := <-finished; !errors.Is(err, context.Canceled) {
+		t.Fatalf("Run error = %v, want context cancellation", err)
+	}
+	if err := c.spool.Close(); err != nil {
+		t.Fatal(err)
+	}
+	persisted, err = loadSpool(spoolPath)
+	if err != nil || len(persisted) != 2 || persisted[1].seq != 2 {
+		t.Fatalf("later event missing from spool after stop: events=%+v err=%v", persisted, err)
+	}
+	restarted := newTestClient("ws://example")
+	if err := restarted.InitSpool(spoolPath); err != nil {
+		t.Fatal(err)
+	}
+	defer restarted.spool.Close()
+	if restarted.seqCtr != 2 || len(restarted.outBuf) != 2 || restarted.outBuf[1].seq != 2 {
+		t.Fatalf("new Client did not restore later event: seqCtr=%d outBuf=%+v",
+			restarted.seqCtr, restarted.outBuf)
+	}
+}
+
+func TestReplayOutboundHonorsNegotiatedWindow(t *testing.T) {
+	received := make(chan int64, 3)
+	releaseAck := make(chan struct{})
+	upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		for {
+			_, raw, err := conn.ReadMessage()
+			if err != nil {
+				return
+			}
+			var message map[string]any
+			if json.Unmarshal(raw, &message) != nil {
+				continue
+			}
+			switch message["type"] {
+			case "register":
+				_ = conn.WriteJSON(protocol.RegisterAckMessage{
+					Type: "register_ack", Status: "ok", SupportsEventAck: true,
+					Capabilities: []string{"flow_control"}, EventWindow: 2,
+				})
+			case "agent_text":
+				seq := int64(message["seq"].(float64))
+				received <- seq
+				if seq == 2 {
+					<-releaseAck
+					_ = conn.WriteJSON(protocol.EventAckMessage{
+						Type: "event_ack", UpToSeq: 1, EventWindow: 2,
+					})
+				}
+			}
+		}
+	}))
+	defer server.Close()
+
+	out := make(chan protocol.DaemonEvent)
+	c := NewClient(wsURL(server.URL), "token", "windowed-replay", nil, nil, nil, out, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	for seq := 1; seq <= 3; seq++ {
+		if _, _, ok := c.appendOutbound(&protocol.DaemonEvent{
+			Type: "agent_text", SessionID: "s1", Text: fmt.Sprintf("%d", seq),
+		}); !ok {
+			t.Fatalf("preload seq %d failed", seq)
+		}
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go c.Run(ctx)
+	if first, second := waitSeq(t, received, 2*time.Second), waitSeq(t, received, 2*time.Second); first != 1 || second != 2 {
+		t.Fatalf("first replay window=%d,%d, want 1,2", first, second)
+	}
+	waitForOutboundWaiters(t, c, 1)
+	close(releaseAck)
+	if third := waitSeq(t, received, 2*time.Second); third != 3 {
+		t.Fatalf("third replay seq=%d, want 3", third)
 	}
 }
 
@@ -376,6 +1262,26 @@ func TestTrimOutboundRemovesPrefix(t *testing.T) {
 	}
 }
 
+func TestEventAckReportsStableEventIDsFromContiguousTrim(t *testing.T) {
+	c := newTestClient("ws://example")
+	var acknowledged []string
+	c.OnEventsAcknowledged = func(eventIDs []string) {
+		acknowledged = append(acknowledged, eventIDs...)
+	}
+	c.appendOutbound(&protocol.DaemonEvent{Type: "a", EventID: "jsonl:source:3:0"})
+	c.appendOutbound(&protocol.DaemonEvent{Type: "b"})
+	c.appendOutbound(&protocol.DaemonEvent{Type: "c", EventID: "jsonl:source:4:0:usage"})
+
+	c.handleEventAck(protocol.EventAckMessage{UpToSeq: 2})
+	if !reflect.DeepEqual(acknowledged, []string{"jsonl:source:3:0"}) {
+		t.Fatalf("first ack IDs = %v", acknowledged)
+	}
+	c.handleEventAck(protocol.EventAckMessage{UpToSeq: 3})
+	if !reflect.DeepEqual(acknowledged, []string{"jsonl:source:3:0", "jsonl:source:4:0:usage"}) {
+		t.Fatalf("all ack IDs = %v", acknowledged)
+	}
+}
+
 // TestOnRegisterAckLegacyTrims verifies a relay without ack support drains the
 // buffer (best-effort) so it can't grow unbounded.
 func TestOnRegisterAckLegacyTrims(t *testing.T) {
@@ -383,7 +1289,7 @@ func TestOnRegisterAckLegacyTrims(t *testing.T) {
 	for i := 0; i < 3; i++ {
 		c.appendOutbound(&protocol.DaemonEvent{Type: "e"})
 	}
-	c.onRegisterAck(false)
+	c.onRegisterAck(protocol.RegisterAckMessage{})
 	c.outMu.Lock()
 	defer c.outMu.Unlock()
 	if len(c.outBuf) != 0 {
@@ -399,7 +1305,7 @@ func TestOnRegisterAckLegacyTrims(t *testing.T) {
 func TestOnRegisterAckSupportedKeepsBuffer(t *testing.T) {
 	c := newTestClient("ws://example")
 	c.appendOutbound(&protocol.DaemonEvent{Type: "e"})
-	c.onRegisterAck(true)
+	c.onRegisterAck(protocol.RegisterAckMessage{SupportsEventAck: true})
 	c.outMu.Lock()
 	defer c.outMu.Unlock()
 	if len(c.outBuf) != 1 {
@@ -407,6 +1313,195 @@ func TestOnRegisterAckSupportedKeepsBuffer(t *testing.T) {
 	}
 	if !c.ackSupported {
 		t.Fatal("ackSupported should be true")
+	}
+}
+
+func TestDurableWindowBlocksNthPlusOneUntilAck(t *testing.T) {
+	c := newTestClient("ws://example")
+	c.maxOutCount = 8
+	c.onRegisterAck(protocol.RegisterAckMessage{
+		SupportsEventAck: true, Capabilities: []string{"flow_control"}, EventWindow: 2,
+	})
+	for _, name := range []string{"one", "two"} {
+		if _, _, ok := c.appendOutbound(&protocol.DaemonEvent{Type: name}); !ok {
+			t.Fatalf("append %s failed", name)
+		}
+	}
+	blocked := make(chan bool, 1)
+	seq, _, ok := c.appendOutbound(&protocol.DaemonEvent{Type: "three"})
+	if !ok || seq != 3 {
+		t.Fatalf("third event was not durably accepted before transmit: seq=%d ok=%v", seq, ok)
+	}
+	go func() {
+		blocked <- c.waitTransmitPermit(context.Background(), seq, nil)
+	}()
+	deadline := time.Now().Add(time.Second)
+	for {
+		c.outMu.Lock()
+		waiters := c.outWaiters
+		c.outMu.Unlock()
+		if waiters == 1 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("third event did not reach the durable-window condition wait")
+		}
+		runtime.Gosched()
+	}
+	c.handleEventAck(protocol.EventAckMessage{UpToSeq: 1, EventWindow: 2})
+	select {
+	case ok := <-blocked:
+		if !ok {
+			t.Fatal("third event was not released after ACK")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("ACK did not release durable window")
+	}
+}
+
+func TestFlowControlAdjustsWindowAndRestoresConnectionStatus(t *testing.T) {
+	c := newTestClient("ws://example")
+	c.maxOutCount = 8
+	c.onRegisterAck(protocol.RegisterAckMessage{
+		SupportsEventAck: true, Capabilities: []string{"flow_control"}, EventWindow: 4,
+	})
+	statuses := make(chan ConnectionStatus, 2)
+	c.OnConnectionStatus = func(status ConnectionStatus, _ string) { statuses <- status }
+	c.onFlowControl(protocol.FlowControlMessage{Type: "flow_control", Window: 1, RetryAfterMS: 50, Reason: "ingest_backpressure"})
+	c.outMu.Lock()
+	if c.eventWindow != 1 || c.flowRetryAfterMS != 50 {
+		c.outMu.Unlock()
+		t.Fatalf("flow state = window %d retry %d", c.eventWindow, c.flowRetryAfterMS)
+	}
+	c.outMu.Unlock()
+	if status := <-statuses; status != ConnectionBackpressured {
+		t.Fatalf("status=%q, want backpressured", status)
+	}
+	c.onFlowControl(protocol.FlowControlMessage{Type: "flow_control", Window: 4, Reason: "normal"})
+	if status := <-statuses; status != ConnectionConnected {
+		t.Fatalf("status=%q, want connected", status)
+	}
+}
+
+func TestOversizedFlowBarrierCannotBeClearedWithinClient(t *testing.T) {
+	c := newTestClient("ws://example")
+	c.maxOutCount = 8
+	c.onRegisterAck(protocol.RegisterAckMessage{
+		SupportsEventAck: true, Capabilities: []string{"flow_control"}, EventWindow: 4,
+	})
+	statuses := make(chan ConnectionStatus, 3)
+	c.OnConnectionStatus = func(status ConnectionStatus, _ string) { statuses <- status }
+
+	c.onFlowControl(protocol.FlowControlMessage{
+		Type: "flow_control", Window: 1, Reason: "event_too_large", BlockedSeq: 1,
+	})
+	if status := <-statuses; status != ConnectionBackpressured {
+		t.Fatalf("fatal status=%q, want backpressured", status)
+	}
+	c.onFlowControl(protocol.FlowControlMessage{Type: "flow_control", Window: 4, Reason: "normal"})
+	if status := <-statuses; status != ConnectionBackpressured {
+		t.Fatalf("normal update cleared fatal status to %q", status)
+	}
+	c.handleEventAck(protocol.EventAckMessage{UpToSeq: 1, EventWindow: 8})
+	c.onRegisterAck(protocol.RegisterAckMessage{
+		SupportsEventAck: true, Capabilities: []string{"flow_control"}, EventWindow: 8,
+	})
+	if status := <-statuses; status != ConnectionBackpressured {
+		t.Fatalf("register ACK cleared fatal status to %q", status)
+	}
+	c.outMu.Lock()
+	defer c.outMu.Unlock()
+	if c.fatalFlowBlockedSeq != 1 || !c.flowBackpressured {
+		t.Fatalf("fatal barrier = seq %d backpressured %v", c.fatalFlowBlockedSeq, c.flowBackpressured)
+	}
+}
+
+func TestEventAckRestoresConnectedWithoutNormalFlowReason(t *testing.T) {
+	c := newTestClient("ws://example")
+	c.maxOutCount = 8
+	c.onRegisterAck(protocol.RegisterAckMessage{
+		SupportsEventAck: true, Capabilities: []string{"flow_control"}, EventWindow: 4,
+	})
+	statuses := make(chan ConnectionStatus, 2)
+	c.OnConnectionStatus = func(status ConnectionStatus, _ string) { statuses <- status }
+	c.onFlowControl(protocol.FlowControlMessage{
+		Type: "flow_control", Window: 1, RetryAfterMS: 50, Reason: "ingest_backpressure",
+	})
+	if status := <-statuses; status != ConnectionBackpressured {
+		t.Fatalf("status=%q, want backpressured", status)
+	}
+	c.handleEventAck(protocol.EventAckMessage{UpToSeq: 1, EventWindow: 4})
+	if status := <-statuses; status != ConnectionConnected {
+		t.Fatalf("ACK recovery status=%q, want connected", status)
+	}
+}
+
+func TestTransmitPermitBlocksNthPlusOneUntilAckAndExitsOnDisconnect(t *testing.T) {
+	c := newTestClient("ws://example")
+	c.maxOutCount = 8
+	c.onRegisterAck(protocol.RegisterAckMessage{
+		SupportsEventAck: true, Capabilities: []string{"flow_control"}, EventWindow: 2,
+	})
+	done := make(chan struct{})
+	permitted := make(chan bool, 1)
+	go func() {
+		permitted <- c.waitTransmitPermit(context.Background(), 3, done)
+	}()
+	waitForOutboundWaiters(t, c, 1)
+	c.handleEventAck(protocol.EventAckMessage{UpToSeq: 1, EventWindow: 2})
+	select {
+	case ok := <-permitted:
+		if !ok {
+			t.Fatal("ACK should release third replay event")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("ACK did not release replay window")
+	}
+
+	blocked := make(chan bool, 1)
+	go func() {
+		blocked <- c.waitTransmitPermit(context.Background(), 4, done)
+	}()
+	waitForOutboundWaiters(t, c, 1)
+	close(done)
+	c.outMu.Lock()
+	c.outCond.Broadcast()
+	c.outMu.Unlock()
+	select {
+	case ok := <-blocked:
+		if ok {
+			t.Fatal("disconnected replay wait unexpectedly succeeded")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("disconnect did not release replay wait")
+	}
+}
+
+func waitForOutboundWaiters(t *testing.T, c *Client, want int) {
+	t.Helper()
+	deadline := time.Now().Add(time.Second)
+	for {
+		c.outMu.Lock()
+		waiters := c.outWaiters
+		c.outMu.Unlock()
+		if waiters == want {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("outbound waiters=%d, want %d", waiters, want)
+		}
+		runtime.Gosched()
+	}
+}
+
+func TestLegacyRelayDoesNotEnableDurableWindow(t *testing.T) {
+	c := newTestClient("ws://example")
+	c.maxOutCount = 2
+	c.onRegisterAck(protocol.RegisterAckMessage{SupportsEventAck: true})
+	c.outMu.Lock()
+	defer c.outMu.Unlock()
+	if c.flowControlSupported {
+		t.Fatal("legacy register_ack unexpectedly enabled flow control")
 	}
 }
 
@@ -428,7 +1523,7 @@ func TestBackoffResetsOnlyOnRegisterAck(t *testing.T) {
 		t.Fatalf("reconnectAttempt = %d, want 4 (no register_ack → backoff keeps growing)", got)
 	}
 
-	c.onRegisterAck(true)
+	c.onRegisterAck(protocol.RegisterAckMessage{SupportsEventAck: true})
 	if got := c.reconnectAttempt.Load(); got != 0 {
 		t.Fatalf("reconnectAttempt = %d after register_ack, want 0 (reset on confirmed registration)", got)
 	}

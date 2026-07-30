@@ -2,12 +2,14 @@ package daemon
 
 import (
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -44,6 +46,108 @@ func TestOpenCodeServeStateRoundTripIsPrivateAndRemovable(t *testing.T) {
 	}
 }
 
+func TestDaemonStateRoundTripsConnectionStatus(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	want := &DaemonState{
+		DaemonID:             "d1",
+		PID:                  os.Getpid(),
+		Connected:            false,
+		RuntimeInstanceToken: "runtime-token-1",
+		ConnectionStatus:     "auth_uncertain",
+		ConnectionReason:     "token_check_unavailable",
+		UpdatedAt:            time.Now().UTC().Truncate(time.Second),
+	}
+	if err := WriteState(want); err != nil {
+		t.Fatal(err)
+	}
+	got, err := ReadState()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.ConnectionStatus != want.ConnectionStatus || got.ConnectionReason != want.ConnectionReason ||
+		got.RuntimeInstanceToken != want.RuntimeInstanceToken || !got.UpdatedAt.Equal(want.UpdatedAt) {
+		t.Fatalf("got %#v", got)
+	}
+}
+
+func TestDaemonStateReadersNeverObservePartialReplacement(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	makeState := func(generation int) *DaemonState {
+		id := fmt.Sprintf("daemon-%d", generation)
+		sessions := make([]SessionState, 64)
+		for i := range sessions {
+			sessions[i] = SessionState{
+				SessionID: id,
+				Cwd:       strings.Repeat("x", 128),
+			}
+		}
+		return &DaemonState{DaemonID: id, PID: os.Getpid(), Sessions: sessions}
+	}
+	if err := WriteState(makeState(0)); err != nil {
+		t.Fatal(err)
+	}
+
+	stop := make(chan struct{})
+	done := make(chan struct{})
+	readErr := make(chan error, 1)
+	go func() {
+		defer close(done)
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			state, err := ReadState()
+			if err != nil {
+				select {
+				case readErr <- err:
+				default:
+				}
+				return
+			}
+			for _, session := range state.Sessions {
+				if session.SessionID != state.DaemonID {
+					select {
+					case readErr <- fmt.Errorf("mixed snapshot daemon=%q session=%q", state.DaemonID, session.SessionID):
+					default:
+					}
+					return
+				}
+			}
+		}
+	}()
+	for generation := 1; generation <= 32; generation++ {
+		if err := WriteState(makeState(generation)); err != nil {
+			close(stop)
+			<-done
+			t.Fatal(err)
+		}
+	}
+	close(stop)
+	<-done
+	select {
+	case err := <-readErr:
+		t.Fatal(err)
+	default:
+	}
+
+	info, err := os.Stat(StatePath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := info.Mode().Perm(); got != 0o644 {
+		t.Fatalf("state mode=%o want 644", got)
+	}
+	temps, err := filepath.Glob(filepath.Join(filepath.Dir(StatePath()), ".daemon.state-*"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(temps) != 0 {
+		t.Fatalf("temporary state files remain: %v", temps)
+	}
+}
+
 func TestOpenCodeServeStateForcedDaemonStopCleanup(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	const password = "forced-stop-secret"
@@ -66,15 +170,22 @@ func TestOpenCodeServeStateForcedDaemonStopCleanup(t *testing.T) {
 		t.Fatal(err)
 	}
 	oldProc, oldGrace, oldPoll, oldSettle := defaultProc, stopGracePeriod, stopPollInterval, stopOwnershipSettlePeriod
+	oldProcessStartIdentity := processStartIdentity
 	fake := &forcedDaemonProcess{alive: true}
 	defaultProc, stopGracePeriod, stopPollInterval, stopOwnershipSettlePeriod = fake, 10*time.Millisecond, time.Millisecond, 5*time.Millisecond
+	processStartIdentity = func(pid int) (string, error) {
+		return fmt.Sprintf("test-process-start-%d", pid), nil
+	}
 	t.Cleanup(func() {
 		defaultProc, stopGracePeriod, stopPollInterval, stopOwnershipSettlePeriod = oldProc, oldGrace, oldPoll, oldSettle
+		processStartIdentity = oldProcessStartIdentity
 		_ = os.Remove(PIDPath())
 	})
 	if err := WritePID(424242); err != nil {
 		t.Fatal(err)
 	}
+	daemonLock := acquireTestDaemonInstanceLock(t, 424242)
+	defer daemonLock.Close()
 	if err := Stop(); err != nil {
 		t.Fatal(err)
 	}
@@ -144,14 +255,22 @@ func (p *forcedDaemonProcess) Kill(pid int) error      { p.killed = true; return
 
 func TestDaemonStopTerminateErrorFallsBackByLiveness(t *testing.T) {
 	alive := &forcedDaemonProcess{alive: true, terminateErr: fmt.Errorf("no control pipe")}
-	if err := stopDaemonProcess(1, alive); err != nil {
+	if err := stopDaemonProcessWithIdentity(
+		1, "runtime-token", alive,
+		func(int, string) (bool, error) { return true, nil },
+		func(int, platform.ProcessController) bool { return false },
+	); err != nil {
 		t.Fatal(err)
 	}
 	if !alive.killed {
 		t.Fatal("alive daemon was not killed after Terminate error")
 	}
 	dead := &forcedDaemonProcess{alive: false, terminateErr: fmt.Errorf("already gone")}
-	if err := stopDaemonProcess(2, dead); err != nil {
+	if err := stopDaemonProcessWithIdentity(
+		2, "runtime-token", dead,
+		func(int, string) (bool, error) { return true, nil },
+		func(int, platform.ProcessController) bool { return true },
+	); err != nil {
 		t.Fatal(err)
 	}
 	if dead.killed {
@@ -170,6 +289,13 @@ func (p *replacementRaceProcess) Terminate(pid int) error {
 	p.stopped = append(p.stopped, pid)
 	if pid == 101 {
 		p.alive[202] = true
+		if err := writeInstanceOwner(instanceLockPath(), instanceOwner{
+			PID:                  202,
+			RuntimeToken:         "replacement-runtime-token",
+			ProcessStartIdentity: "test-process-start-202",
+		}); err != nil {
+			return err
+		}
 		return WritePID(202)
 	}
 	return nil
@@ -183,15 +309,22 @@ func (p *replacementRaceProcess) Kill(pid int) error {
 func TestDaemonStopIntentStopsReplacementThatClaimedFirst(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	oldProc, oldGrace, oldPoll, oldSettle := defaultProc, stopGracePeriod, stopPollInterval, stopOwnershipSettlePeriod
+	oldProcessStartIdentity := processStartIdentity
 	fake := &replacementRaceProcess{alive: map[int]bool{101: true}}
 	defaultProc, stopGracePeriod, stopPollInterval, stopOwnershipSettlePeriod = fake, 10*time.Millisecond, time.Millisecond, 20*time.Millisecond
+	processStartIdentity = func(pid int) (string, error) {
+		return fmt.Sprintf("test-process-start-%d", pid), nil
+	}
 	t.Cleanup(func() {
 		defaultProc, stopGracePeriod, stopPollInterval, stopOwnershipSettlePeriod = oldProc, oldGrace, oldPoll, oldSettle
+		processStartIdentity = oldProcessStartIdentity
 		_ = os.Remove(PIDPath())
 	})
 	if err := WritePID(101); err != nil {
 		t.Fatal(err)
 	}
+	daemonLock := acquireTestDaemonInstanceLock(t, 101)
+	defer daemonLock.Close()
 	if err := Stop(); err != nil {
 		t.Fatal(err)
 	}
@@ -201,6 +334,23 @@ func TestDaemonStopIntentStopsReplacementThatClaimedFirst(t *testing.T) {
 	if _, err := os.Stat(OpenCodeServeStatePath()); !os.IsNotExist(err) {
 		t.Fatalf("credential state remains: %v", err)
 	}
+}
+
+func acquireTestDaemonInstanceLock(t *testing.T, pid int) io.Closer {
+	t.Helper()
+	lock, err := defaultLocker.Acquire(instanceLockPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := writeInstanceOwner(instanceLockPath(), instanceOwner{
+		PID:                  pid,
+		RuntimeToken:         "test-runtime-token",
+		ProcessStartIdentity: fmt.Sprintf("test-process-start-%d", pid),
+	}); err != nil {
+		_ = lock.Close()
+		t.Fatal(err)
+	}
+	return lock
 }
 
 func TestOpenCodeServeStateRejectsCorruptJSON(t *testing.T) {

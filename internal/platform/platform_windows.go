@@ -128,7 +128,7 @@ func (l windowsLogicalLocker) Acquire(path string) (Lock, error) {
 			if handle != 0 {
 				_ = windows.CloseHandle(handle)
 			}
-			return nil, fmt.Errorf("another process holds logical lock %q", l.logicalID)
+			return nil, fmt.Errorf("%w: another process holds logical lock %q", ErrInstanceLockHeld, l.logicalID)
 		}
 		return nil, fmt.Errorf("create logical mutex %q: %w", l.logicalID, err)
 	}
@@ -146,7 +146,7 @@ func (windowsLocker) Acquire(path string) (Lock, error) {
 			if handle != 0 {
 				_ = windows.CloseHandle(handle)
 			}
-			return nil, fmt.Errorf("another pocketctl daemon is already running on this host")
+			return nil, fmt.Errorf("%w: another pocketctl daemon is already running on this host", ErrInstanceLockHeld)
 		}
 		return nil, fmt.Errorf("create mutex: %w", err)
 	}
@@ -167,6 +167,9 @@ func NewProcessController() ProcessController { return windowsProcessController{
 type windowsProcessController struct{}
 
 func (windowsProcessController) IsAlive(pid int) bool {
+	if pid <= 0 {
+		return false
+	}
 	// OpenProcess 成功即存活;进程已退出 → OpenProcess 失败 → false。
 	// Windows 无 Unix zombie(进程退出即消失),检测可靠。
 	handle, err := windows.OpenProcess(windows.SYNCHRONIZE, false, uint32(pid))

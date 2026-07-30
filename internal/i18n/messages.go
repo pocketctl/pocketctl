@@ -209,6 +209,26 @@ var messages = map[string]msg{
 		"daemon failed to start — check logs: %s",
 		"守护进程启动失败 — 请查看日志: %s",
 	},
+	"daemon.start_uncertain": {
+		"Startup uncertainty: daemon status could not be verified.",
+		"启动状态不确定：无法验证 Daemon 状态。",
+	},
+	"daemon.start_uncertain_permission": {
+		"Startup uncertainty: permission denied while reading daemon runtime metadata.",
+		"启动状态不确定：读取 Daemon 运行元数据时权限不足。",
+	},
+	"daemon.start_uncertain_runtime": {
+		"Startup uncertainty: daemon runtime ownership metadata could not be verified.",
+		"启动状态不确定：无法验证 Daemon 运行身份元数据。",
+	},
+	"daemon.start_uncertain_state": {
+		"Startup uncertainty: initial daemon state could not be read or persisted.",
+		"启动状态不确定：无法读取或持久化 Daemon 初始状态。",
+	},
+	"daemon.start_uncertain_identity": {
+		"Startup uncertainty: daemon process identity could not be verified.",
+		"启动状态不确定：无法验证 Daemon 进程身份。",
+	},
 	"daemon.agents":              {"Agents: %s", "Agents: %s"},
 	"daemon.agent_status_header": {"Managed agent checks:", "Managed Agent 检测:"},
 	"daemon.agent_status_line": {
@@ -229,6 +249,14 @@ var messages = map[string]msg{
 	"daemon.shutting_down": {"\nShutting down...", "\n正在关闭..."},
 	"daemon.stopped":       {"Daemon stopped", "Daemon 已停止"},
 	"daemon.not_running":   {"Daemon is not running", "Daemon 未运行"},
+	"daemon.status_uncertain": {
+		"Daemon status cannot be confirmed: %v",
+		"无法确认 Daemon 状态：%v",
+	},
+	"daemon.initial_state_fail": {
+		"Failed to persist initial daemon state; startup aborted: %v",
+		"持久化 Daemon 初始状态失败；已中止启动：%v",
+	},
 	"daemon.running_no_state": {
 		"Daemon running (PID %d), state unavailable",
 		"Daemon 运行中 (PID %d)，状态不可用",
@@ -279,6 +307,10 @@ var messages = map[string]msg{
 		"Stopping standalone daemon (PID %d) before handing off to the supervisor...",
 		"先停止独立运行的 daemon (PID %d)，再交由系统服务接管...",
 	},
+	"service.stop_standalone_fail": {
+		"failed to stop standalone daemon; service install aborted: %v",
+		"停止独立 daemon 失败；已中止服务安装：%v",
+	},
 	"service.installed": {
 		"Service installed and started: %s",
 		"服务已安装并启动: %s",
@@ -293,10 +325,21 @@ var messages = map[string]msg{
 		"提示: 已尝试开启 linger 使 daemon 在登出后继续运行。若被拒绝，请手动运行: loginctl enable-linger $USER",
 	},
 	"service.status_installed": {"Installed:  %s", "已安装:    %s"},
+	"service.status_loaded":    {"Loaded:     %s", "已加载:    %s"},
 	"service.status_running":   {"Running:    %s", "运行中:    %s"},
+	"service.status_pid":       {"PID:        %d", "PID:       %d"},
+	"service.status_last_exit": {"Last exit:  %d", "上次退出码: %d"},
 	"service.status_detail":    {"Detail:    %s", "详情:      %s"},
-	"service.yes":              {"yes", "是"},
-	"service.no":               {"no", "否"},
+	"service.supervisor_unloaded": {
+		"Supervisor is not loaded",
+		"系统服务未加载",
+	},
+	"service.reinstall_hint": {
+		"Recover with: pocketctl daemon service install",
+		"恢复命令: pocketctl daemon service install",
+	},
+	"service.yes": {"yes", "是"},
+	"service.no":  {"no", "否"},
 
 	// ---- status.* (cmdDaemonStatus table; labels stay English to keep
 	// column alignment, only values localize) ------------------------------
@@ -309,8 +352,26 @@ var messages = map[string]msg{
 	"status.started":      {"Started: %s", "Started: %s"},
 	"status.connected":    {"connected", "已连接"},
 	"status.disconnected": {"disconnected", "未连接"},
-	"status.sessions":     {"\nSessions (%d):", "\n会话 (%d):"},
-	"status.session_row":  {"  %s  %-10s  %s", "  %s  %-10s  %s"},
+	"status.reconnecting": {"reconnecting", "正在重新连接"},
+	"status.backpressured": {
+		"relay backpressured",
+		"中继服务繁忙",
+	},
+	"status.auth_uncertain": {
+		"authentication uncertain",
+		"身份验证状态不确定",
+	},
+	"status.login_required": {"login required", "需要重新登录"},
+	"status.revoked":        {"access revoked", "访问权限已撤销"},
+	"status.stopped":        {"stopped", "已停止"},
+	"status.connection_unknown": {
+		"unknown (%s)",
+		"未知 (%s)",
+	},
+	"status.reason":      {"Reason: %s", "原因: %s"},
+	"status.updated":     {"Updated: %s", "更新时间: %s"},
+	"status.sessions":    {"\nSessions (%d):", "\n会话 (%d):"},
+	"status.session_row": {"  %s  %-10s  %s", "  %s  %-10s  %s"},
 
 	// ---- error.* (stderr) ------------------------------------------------
 	"error.generic":         {"error: %v", "错误: %v"},

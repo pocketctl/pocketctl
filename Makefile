@@ -4,7 +4,7 @@ BINARY = pocketctl
 GOOS ?= $(shell uname -s | tr '[:upper:]' '[:lower:]')
 GOARCH ?= $(shell uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/')
 
-.PHONY: build build-all clean relay web dev dev-relay test test-opencode-managed test-opencode-managed-release test-codex-managed test-codex-managed-release release release-dry-run
+.PHONY: build build-all clean relay web dev dev-relay test test-relay-durable-ingress test-opencode-managed test-opencode-managed-release test-codex-managed test-codex-managed-release release release-dry-run
 
 -include .env
 export JWT_SECRET
@@ -78,6 +78,10 @@ test-go:
 ## 运行 E2E 测试
 test-e2e:
 	go test -v -tags=e2e ./internal/e2e/...
+
+## Durable Inbox PostgreSQL 故障与混合 Agent 发布门禁
+test-relay-durable-ingress:
+	bash scripts/test-relay-durable-ingress.sh
 
 ## OpenCode 受管终端 A-D 回归（Go/Windows 编译/Relay/Web/iOS 源码回归）
 test-opencode-managed:
@@ -166,6 +170,7 @@ help:
 	@echo "测试:"
 	@echo "  make test        运行所有测试"
 	@echo "  make test-go     运行 Go 测试"
+	@echo "  make test-relay-durable-ingress     运行 Durable Inbox PostgreSQL/混合 Agent 门禁"
 	@echo "  make test-opencode-managed          运行 OpenCode 受管终端 A-D 回归"
 	@echo "  make test-opencode-managed-release  运行 OpenCode 受管终端完整发布门禁"
 	@echo "  make test-codex-managed             运行 Codex 受管终端回归"

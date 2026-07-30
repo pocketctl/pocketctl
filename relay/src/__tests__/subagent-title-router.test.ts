@@ -73,7 +73,7 @@ async function setupDaemon(router: Router, daemonId = 'd1') {
 
 describe('router generate_subagent_title_request → db/title/broadcast', () => {
   beforeEach(() => {
-    vi.restoreAllMocks()
+    vi.clearAllMocks()
   })
 
   test('success path: generates title, writes to db, broadcasts subagent_title_update', async () => {

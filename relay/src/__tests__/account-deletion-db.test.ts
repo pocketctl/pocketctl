@@ -37,6 +37,8 @@ describe('account deletion persistence', () => {
       'DELETE FROM token_daily_stats WHERE user_id = $1',
       'DELETE FROM audit_log WHERE user_id = $1',
       'DELETE FROM revoked_tokens WHERE user_id = $1',
+      'DELETE FROM realtime_outbox',
+      'DELETE FROM event_inbox',
       'DELETE FROM sessions WHERE user_id = $1',
       'DELETE FROM daemons WHERE user_id = $1',
       'DELETE FROM users WHERE id = $1',

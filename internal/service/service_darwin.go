@@ -3,14 +3,21 @@
 package service
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"github.com/pocketctl/pocketctl/internal/config"
 )
+
+var launchctlPrintCommand = func(ctx context.Context, target string) ([]byte, error) {
+	return exec.CommandContext(ctx, "launchctl", "print", target).CombinedOutput()
+}
 
 // plistPath returns ~/Library/LaunchAgents/<Label>.plist.
 func plistPath() (string, error) {
@@ -61,8 +68,7 @@ func Uninstall() error {
 	return nil
 }
 
-// Status reports whether the plist exists and whether launchd currently lists
-// the job (a numeric PID in `launchctl list` output means it's running).
+// Status reports the on-disk plist separately from launchd's live job state.
 func Status() (Info, error) {
 	path, err := plistPath()
 	if err != nil {
@@ -71,22 +77,63 @@ func Status() (Info, error) {
 	info := Info{UnitPath: path}
 	if _, statErr := os.Stat(path); statErr == nil {
 		info.Installed = true
+	} else if !os.IsNotExist(statErr) {
+		return Info{}, fmt.Errorf("stat launch agent: %w", statErr)
 	}
 
-	out, _ := exec.Command("launchctl", "list").CombinedOutput()
-	for _, line := range strings.Split(string(out), "\n") {
-		if !strings.Contains(line, Label) {
+	target := fmt.Sprintf("gui/%d/%s", os.Getuid(), Label)
+	ctx, cancel := context.WithTimeout(context.Background(), statusQueryTimeout)
+	defer cancel()
+	out, commandErr := launchctlPrintCommand(ctx, target)
+	if commandErr != nil {
+		if ctx.Err() != nil {
+			commandErr = ctx.Err()
+		}
+		if !errors.Is(commandErr, context.DeadlineExceeded) &&
+			!errors.Is(commandErr, context.Canceled) &&
+			launchctlServiceNotLoaded(string(out)) {
+			return info, nil
+		}
+		return Info{}, fmt.Errorf("launchctl print %s: %w (%s)", target, commandErr, strings.TrimSpace(string(out)))
+	}
+	live := parseLaunchctlPrint(string(out))
+	live.Installed = info.Installed
+	live.UnitPath = path
+	return live, nil
+}
+
+func parseLaunchctlPrint(out string) Info {
+	info := Info{Loaded: true}
+	state := ""
+	for _, line := range strings.Split(out, "\n") {
+		key, value, ok := strings.Cut(strings.TrimSpace(line), "=")
+		if !ok {
 			continue
 		}
-		// Columns: PID  Status  Label. A numeric (non "-") PID means running.
-		fields := strings.Fields(line)
-		if len(fields) >= 1 && fields[0] != "-" {
-			info.Running = true
+		key = strings.TrimSpace(key)
+		value = strings.TrimSpace(value)
+		switch key {
+		case "state":
+			state = value
+		case "pid":
+			if pid, err := strconv.Atoi(value); err == nil {
+				info.PID = pid
+			}
+		case "last exit code":
+			if code, err := strconv.Atoi(value); err == nil {
+				info.LastExitCode = &code
+			}
 		}
-		info.Detail = strings.TrimSpace(line)
-		break
 	}
-	return info, nil
+	info.Running = state == "running" && info.PID > 0
+	info.Detail = state
+	return info
+}
+
+func launchctlServiceNotLoaded(out string) bool {
+	lower := strings.ToLower(out)
+	return strings.Contains(lower, "could not find service") ||
+		strings.Contains(lower, "service not found")
 }
 
 func renderPlist(cfg Config) string {

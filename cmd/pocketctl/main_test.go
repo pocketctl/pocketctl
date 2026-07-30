@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -18,10 +19,433 @@ import (
 
 	"github.com/pocketctl/pocketctl/internal/adapter"
 	"github.com/pocketctl/pocketctl/internal/daemon"
+	"github.com/pocketctl/pocketctl/internal/i18n"
+	"github.com/pocketctl/pocketctl/internal/platform"
 	"github.com/pocketctl/pocketctl/internal/protocol"
 	"github.com/pocketctl/pocketctl/internal/session"
 	"github.com/pocketctl/pocketctl/internal/watcher"
+	"github.com/pocketctl/pocketctl/internal/ws"
 )
+
+func TestDaemonStatusDoesNotReportDeadStatePIDAsRunning(t *testing.T) {
+	t.Cleanup(func() { i18n.Set(i18n.English) })
+	i18n.Set(i18n.English)
+	var out bytes.Buffer
+	renderDaemonStatus(&out, daemon.DaemonState{
+		DaemonID:         "d1",
+		PID:              424242,
+		Connected:        true,
+		ConnectionStatus: "connected",
+	}, 424242, func(pid int) bool { return false })
+	if !strings.Contains(out.String(), i18n.T("daemon.not_running")) {
+		t.Fatalf("output=%q", out.String())
+	}
+}
+
+func TestDaemonStatusUsesStructuredConnectionStatusAndLegacyFallback(t *testing.T) {
+	t.Cleanup(func() { i18n.Set(i18n.English) })
+	tests := []struct {
+		name  string
+		lang  i18n.Lang
+		state daemon.DaemonState
+		want  []string
+	}{
+		{
+			name: "structured English",
+			lang: i18n.English,
+			state: daemon.DaemonState{
+				DaemonID: "d1", PID: os.Getpid(), ConnectionStatus: "auth_uncertain",
+				ConnectionReason: "token_check_unavailable",
+			},
+			want: []string{"authentication uncertain", "Reason: token_check_unavailable"},
+		},
+		{
+			name: "structured Chinese",
+			lang: i18n.Chinese,
+			state: daemon.DaemonState{
+				DaemonID: "d1", PID: os.Getpid(), ConnectionStatus: "backpressured",
+			},
+			want: []string{"中继服务繁忙"},
+		},
+		{
+			name:  "legacy connected",
+			lang:  i18n.English,
+			state: daemon.DaemonState{DaemonID: "d1", PID: os.Getpid(), Connected: true},
+			want:  []string{"Status: connected"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			i18n.Set(tt.lang)
+			var out bytes.Buffer
+			renderDaemonStatus(&out, tt.state, tt.state.PID, func(int) bool { return true })
+			for _, want := range tt.want {
+				if !strings.Contains(out.String(), want) {
+					t.Fatalf("output=%q, want %q", out.String(), want)
+				}
+			}
+		})
+	}
+}
+
+func TestDaemonStatusRendersDurableIngressDiagnostics(t *testing.T) {
+	t.Cleanup(func() { i18n.Set(i18n.English) })
+	i18n.Set(i18n.English)
+	ackAt := time.Date(2026, time.July, 29, 1, 2, 3, 0, time.UTC)
+	var out bytes.Buffer
+	renderDaemonStatus(&out, daemon.DaemonState{
+		DaemonID: "d1", PID: os.Getpid(), EventWindow: 8, UnackedEvents: 2,
+		SpoolEvents: 2, SpoolBytes: 123, LastACKAt: ackAt, ReconnectCount: 3,
+		BackpressureDuration: 1500 * time.Millisecond,
+	}, os.Getpid(), func(int) bool { return true })
+	for _, want := range []string{
+		"Ingress spool: 2 events, 123 bytes",
+		"Ingress window: 8",
+		"Ingress unacked: 2",
+		"Ingress last ACK: 2026-07-29T01:02:03Z",
+		"Reconnects: 3",
+		"Backpressure duration: 1.5s",
+	} {
+		if !strings.Contains(out.String(), want) {
+			t.Fatalf("output=%q, want %q", out.String(), want)
+		}
+	}
+}
+
+func TestDaemonStatePersistenceRecordsDurableIngressSnapshot(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	persistence := newDaemonStatePersistence(daemon.DaemonState{PID: os.Getpid(), EventWindow: -1, UnackedEvents: -1})
+	ackAt := time.Date(2026, time.July, 29, 1, 2, 3, 0, time.UTC)
+	if err := persistence.updateConnectionWithDiagnostics(ws.ConnectionConnected, "", ackAt, ws.DurableIngressDiagnostics{
+		SpoolEvents: 2, SpoolBytes: 123, EventWindow: 8, UnackedEvents: 2,
+		LastACKAt: ackAt, Reconnects: 3,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	state, err := daemon.ReadState()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state.SpoolEvents != 2 || state.SpoolBytes != 123 || state.EventWindow != 8 ||
+		state.UnackedEvents != 2 || !state.LastACKAt.Equal(ackAt) || state.ReconnectCount != 3 {
+		t.Fatalf("diagnostics=%+v", state)
+	}
+}
+
+func TestDaemonStatusRejectsPIDFileStateMismatch(t *testing.T) {
+	t.Cleanup(func() { i18n.Set(i18n.English) })
+	i18n.Set(i18n.English)
+	var out bytes.Buffer
+	renderDaemonStatus(&out, daemon.DaemonState{
+		DaemonID: "old", PID: 111, Connected: true, ConnectionStatus: "connected",
+	}, 222, func(int) bool { return true })
+	if got := out.String(); !strings.Contains(got, i18n.T("daemon.not_running")) ||
+		strings.Contains(got, "Status: connected") {
+		t.Fatalf("output=%q", got)
+	}
+}
+
+func TestDaemonStatusUncertaintyIsLocalized(t *testing.T) {
+	t.Cleanup(func() { i18n.Set(i18n.English) })
+	for _, tt := range []struct {
+		lang i18n.Lang
+		want string
+	}{
+		{i18n.English, "Daemon status cannot be confirmed"},
+		{i18n.Chinese, "无法确认 Daemon 状态"},
+	} {
+		i18n.Set(tt.lang)
+		var out bytes.Buffer
+		renderDaemonStatusUncertainty(&out, errors.New("owner metadata missing"))
+		if got := out.String(); !strings.Contains(got, tt.want) ||
+			!strings.Contains(got, "owner metadata missing") {
+			t.Fatalf("lang=%v output=%q", tt.lang, got)
+		}
+	}
+}
+
+func TestDaemonStatusStateIdentityMismatchIsUncertain(t *testing.T) {
+	t.Cleanup(func() { i18n.Set(i18n.English) })
+	i18n.Set(i18n.English)
+	var out bytes.Buffer
+	var verified bool
+	renderVerifiedDaemonStatus(
+		&out,
+		daemon.DaemonState{
+			DaemonID:             "stale",
+			PID:                  111,
+			RuntimeInstanceToken: "stale-token",
+			Connected:            true,
+			ConnectionStatus:     "connected",
+		},
+		222,
+		func(pid int, token string) (bool, error) {
+			verified = true
+			if pid != 111 || token != "stale-token" {
+				t.Fatalf("identity=(%d, %q)", pid, token)
+			}
+			return false, fmt.Errorf("%w: state identity mismatch", daemon.ErrRuntimeStatusUncertain)
+		},
+	)
+	got := out.String()
+	if !verified {
+		t.Fatal("typed runtime identity verifier was skipped")
+	}
+	if !strings.Contains(got, "Daemon status cannot be confirmed") ||
+		strings.Contains(got, i18n.T("daemon.not_running")) ||
+		strings.Contains(got, "Status: connected") {
+		t.Fatalf("output=%q", got)
+	}
+}
+
+func TestDetachedStartupObservationNeverTrustsUnverifiedConnectedState(t *testing.T) {
+	state := &daemon.DaemonState{
+		PID:                  101,
+		RuntimeInstanceToken: "stale-token",
+		Connected:            true,
+		ConnectionStatus:     "connected",
+	}
+	identityChanged := fmt.Errorf(
+		"%w: token changed",
+		daemon.ErrRuntimeStatusUncertain,
+	)
+	running, connected, startupErr := observeDetachedDaemonStartup(
+		func() (int, bool, error) { return 101, true, nil },
+		func() (*daemon.DaemonState, error) { return state, nil },
+		func(pid int, token string) (bool, error) {
+			return false, identityChanged
+		},
+	)
+	if !running || connected ||
+		!errors.Is(startupErr, daemon.ErrRuntimeStatusUncertain) ||
+		!errors.Is(startupErr, identityChanged) {
+		t.Fatalf("running=%v connected=%v err=%v", running, connected, startupErr)
+	}
+
+	running, connected, startupErr = observeDetachedDaemonStartup(
+		func() (int, bool, error) { return 101, true, nil },
+		func() (*daemon.DaemonState, error) { return state, nil },
+		func(pid int, token string) (bool, error) { return true, nil },
+	)
+	if !running || !connected || startupErr != nil {
+		t.Fatalf(
+			"verified runtime reported running=%v connected=%v err=%v",
+			running,
+			connected,
+			startupErr,
+		)
+	}
+
+	runtimeErr := fmt.Errorf(
+		"%w: pidfile not published",
+		daemon.ErrRuntimeStatusUncertain,
+	)
+	running, connected, startupErr = observeDetachedDaemonStartup(
+		func() (int, bool, error) {
+			return 0, false, runtimeErr
+		},
+		func() (*daemon.DaemonState, error) {
+			t.Fatal("state read during runtime uncertainty")
+			return nil, nil
+		},
+		func(int, string) (bool, error) {
+			t.Fatal("identity verified during runtime uncertainty")
+			return false, nil
+		},
+	)
+	if running || connected ||
+		!errors.Is(startupErr, daemon.ErrRuntimeStatusUncertain) ||
+		!errors.Is(startupErr, runtimeErr) {
+		t.Fatalf("uncertain runtime reported running=%v connected=%v err=%v", running, connected, startupErr)
+	}
+}
+
+func TestDetachedStartupObservationReturnsTypedStateAndVerificationUncertainty(t *testing.T) {
+	stateErr := errors.New("initial state read failed")
+	running, connected, startupErr := observeDetachedDaemonStartup(
+		func() (int, bool, error) { return 101, true, nil },
+		func() (*daemon.DaemonState, error) { return nil, stateErr },
+		func(int, string) (bool, error) {
+			t.Fatal("verified identity without startup state")
+			return false, nil
+		},
+	)
+	if !running || connected ||
+		!errors.Is(startupErr, daemon.ErrRuntimeStatusUncertain) ||
+		!errors.Is(startupErr, stateErr) {
+		t.Fatalf("state failure running=%v connected=%v err=%v", running, connected, startupErr)
+	}
+
+	running, connected, startupErr = observeDetachedDaemonStartup(
+		func() (int, bool, error) { return 101, true, nil },
+		func() (*daemon.DaemonState, error) {
+			return &daemon.DaemonState{
+				PID:                  101,
+				RuntimeInstanceToken: "runtime-a",
+			}, nil
+		},
+		func(int, string) (bool, error) { return false, nil },
+	)
+	if running || connected || !errors.Is(startupErr, daemon.ErrRuntimeStatusUncertain) {
+		t.Fatalf("unverified runtime running=%v connected=%v err=%v", running, connected, startupErr)
+	}
+}
+
+func TestDetachedStartupFailureRendersLocalizedSafeUncertaintyDetail(t *testing.T) {
+	t.Cleanup(func() { i18n.Set(i18n.English) })
+	tests := []struct {
+		name  string
+		lang  i18n.Lang
+		stage detachedDaemonStartupStage
+		cause error
+		want  string
+	}{
+		{
+			name:  "permission English",
+			lang:  i18n.English,
+			stage: detachedDaemonStartupRuntime,
+			cause: os.ErrPermission,
+			want:  "permission",
+		},
+		{
+			name:  "runtime metadata Chinese",
+			lang:  i18n.Chinese,
+			stage: detachedDaemonStartupRuntime,
+			cause: errors.New("owner metadata unavailable"),
+			want:  "运行身份元数据",
+		},
+		{
+			name:  "initial state English",
+			lang:  i18n.English,
+			stage: detachedDaemonStartupState,
+			cause: errors.New("disk full; runtime token super-secret-token"),
+			want:  "initial daemon state",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			i18n.Set(tt.lang)
+			var out bytes.Buffer
+			renderDetachedDaemonStartupFailure(
+				&out,
+				"/tmp/daemon.log",
+				newDetachedDaemonStartupUncertainty(tt.stage, tt.cause),
+			)
+			got := out.String()
+			if !strings.Contains(got, i18n.T("daemon.start_failed", "/tmp/daemon.log")) ||
+				!strings.Contains(got, tt.want) {
+				t.Fatalf("output=%q", got)
+			}
+			if strings.Contains(got, "super-secret-token") {
+				t.Fatalf("startup failure leaked internal runtime token: %q", got)
+			}
+		})
+	}
+}
+
+func TestInitialDaemonStateFailureStopsStartupContinuation(t *testing.T) {
+	initial := daemon.DaemonState{
+		DaemonID:             "daemon-1",
+		PID:                  101,
+		RuntimeInstanceToken: "runtime-token",
+	}
+	var continued bool
+	var released bool
+	err := persistInitialDaemonStateAndContinue(
+		initial,
+		func(state *daemon.DaemonState) error {
+			if state.PID != 101 || state.RuntimeInstanceToken != "runtime-token" {
+				t.Fatalf("initial state=%+v", state)
+			}
+			return errors.New("disk full")
+		},
+		func() {
+			released = true
+		},
+		func(*daemonStatePersistence) {
+			continued = true
+		},
+	)
+	if err == nil || !strings.Contains(err.Error(), "disk full") {
+		t.Fatalf("error=%v", err)
+	}
+	if continued {
+		t.Fatal("client/loop continuation ran after initial state write failure")
+	}
+	if !released {
+		t.Fatal("startup resources were not released after initial state write failure")
+	}
+}
+
+func TestDaemonStatePersistenceDoesNotRegressConnectionWhenSessionsChange(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	persistence := newDaemonStatePersistence(daemon.DaemonState{
+		DaemonID: "d1", PID: os.Getpid(), ConnectionStatus: "reconnecting",
+	})
+	updatedAt := time.Now().UTC().Truncate(time.Second)
+	if err := persistence.updateConnection(ws.ConnectionAuthUncertain, "token_check_unavailable", updatedAt); err != nil {
+		t.Fatal(err)
+	}
+	sessions := []daemon.SessionState{{SessionID: "session-1", Agent: "codex", Status: "busy"}}
+	if err := persistence.updateSessions(sessions); err != nil {
+		t.Fatal(err)
+	}
+	got, err := daemon.ReadState()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Connected || got.ConnectionStatus != "auth_uncertain" ||
+		got.ConnectionReason != "token_check_unavailable" || !got.UpdatedAt.Equal(updatedAt) {
+		t.Fatalf("connection regressed: %+v", got)
+	}
+	if len(got.Sessions) != 1 || got.Sessions[0].SessionID != "session-1" {
+		t.Fatalf("sessions=%+v", got.Sessions)
+	}
+}
+
+func TestDaemonStatePersistenceRefreshesDiagnosticsWithoutConnectionTransition(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	ackAt := time.Date(2026, time.July, 29, 1, 2, 3, 0, time.UTC)
+	persistence := newDaemonStatePersistence(daemon.DaemonState{
+		DaemonID: "d1", PID: os.Getpid(), ConnectionStatus: string(ws.ConnectionConnected), Connected: true,
+		UnackedEvents: 1, Sessions: []daemon.SessionState{{SessionID: "session-1", Agent: "codex"}},
+	})
+	if err := persistence.refreshDiagnostics(ws.DurableIngressDiagnostics{
+		EventWindow: 8, UnackedEvents: 0, LastACKAt: ackAt,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	got, err := daemon.ReadState()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.ConnectionStatus != string(ws.ConnectionConnected) || !got.Connected ||
+		got.UnackedEvents != 0 || got.EventWindow != 8 || !got.LastACKAt.Equal(ackAt) {
+		t.Fatalf("state after ACK diagnostics refresh=%+v", got)
+	}
+	if len(got.Sessions) != 1 || got.Sessions[0].SessionID != "session-1" {
+		t.Fatalf("diagnostics refresh changed sessions: %+v", got.Sessions)
+	}
+}
+
+func TestRenderServiceStatusExplainsInstalledButUnloaded(t *testing.T) {
+	t.Cleanup(func() { i18n.Set(i18n.English) })
+	for _, tt := range []struct {
+		lang i18n.Lang
+		want string
+	}{
+		{i18n.English, "Supervisor is not loaded"},
+		{i18n.Chinese, "系统服务未加载"},
+	} {
+		i18n.Set(tt.lang)
+		var out bytes.Buffer
+		renderServiceStatus(&out, platform.ServiceStatus{Installed: true, Loaded: false})
+		if got := out.String(); !strings.Contains(got, tt.want) ||
+			!strings.Contains(got, "pocketctl daemon service install") {
+			t.Fatalf("lang=%v output=%q", tt.lang, got)
+		}
+	}
+}
 
 func TestOpenCodeSessionMetaUsesLoadedAuthoritativeState(t *testing.T) {
 	if os.Getenv("POCKETCTL_OPENCODE_SERVE_TEST_HELPER") == "1" {

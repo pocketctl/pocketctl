@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -132,6 +133,41 @@ func TestSubAgentTailerCodexEventIDsAreStableAndDistinct(t *testing.T) {
 	}
 	if first[0] != second[0] || first[1] != second[1] {
 		t.Fatalf("event IDs changed across restart: %v vs %v", first, second)
+	}
+}
+
+func TestCodexReplaySubAgentTailerFiltersNativeTimestampsAndKeepsStableIDs(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "rollout-child.jsonl")
+	cutoff := time.Date(2026, time.July, 29, 2, 0, 0, 0, time.UTC)
+	lines := []string{
+		`{"timestamp":"2026-07-29T01:59:59Z","type":"event_msg","payload":{"type":"agent_message","message":"old"}}`,
+		`{"timestamp":"2026-07-29T02:00:01Z","type":"event_msg","payload":{"type":"agent_message","message":"recent"}}`,
+		`{"type":"event_msg","payload":{"type":"agent_message","message":"timestamp-missing"}}`,
+	}
+	if err := os.WriteFile(path, []byte(strings.Join(lines, "\n")+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	tailer, err := NewCodexReplaySubAgentTailer(path, "child", "root", adapter.AgentCodex, cutoff, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tailer.tailer.Close()
+	events, err := tailer.TailNewLines()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 2 || events[0].Text != "recent" || events[1].Text != "timestamp-missing" {
+		t.Fatalf("events = %+v", events)
+	}
+	for _, event := range events {
+		if event.EventID == "" || !event.Resync {
+			t.Fatalf("replay event missing stable identity/priority marker: %+v", event)
+		}
+	}
+	if !strings.Contains(events[0].EventID, ":1:0") || !strings.Contains(events[1].EventID, ":2:0") {
+		t.Fatalf("event IDs lost source line indexes: %q %q", events[0].EventID, events[1].EventID)
 	}
 }
 

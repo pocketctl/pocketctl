@@ -145,6 +145,41 @@ func TestAllKeysHaveBothLangsAndMatchingVerbs(t *testing.T) {
 	}
 }
 
+func TestDaemonAndServiceRecoveryStatusesAreLocalized(t *testing.T) {
+	t.Cleanup(func() { Set(English) })
+	for _, tt := range []struct {
+		lang Lang
+		want []string
+	}{
+		{English, []string{"authentication uncertain", "Supervisor is not loaded"}},
+		{Chinese, []string{"身份验证状态不确定", "系统服务未加载"}},
+	} {
+		Set(tt.lang)
+		got := []string{T("status.auth_uncertain"), T("service.supervisor_unloaded")}
+		for i, want := range tt.want {
+			if got[i] != want {
+				t.Fatalf("lang=%v got=%q want=%q", tt.lang, got[i], want)
+			}
+		}
+	}
+}
+
+func TestDaemonStatusUncertaintyHasBothLanguages(t *testing.T) {
+	t.Cleanup(func() { Set(English) })
+	for _, tt := range []struct {
+		lang Lang
+		want string
+	}{
+		{English, "Daemon status cannot be confirmed: owner metadata missing"},
+		{Chinese, "无法确认 Daemon 状态：owner metadata missing"},
+	} {
+		Set(tt.lang)
+		if got := T("daemon.status_uncertain", "owner metadata missing"); got != tt.want {
+			t.Fatalf("lang=%v got=%q want=%q", tt.lang, got, tt.want)
+		}
+	}
+}
+
 func TestKeyNamingConvention(t *testing.T) {
 	for key := range messages {
 		// Special exception: literal-fallback style keys (with spaces) are

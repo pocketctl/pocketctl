@@ -19,6 +19,7 @@ vi.mock('../db.js', async (importOriginal) => {
 })
 import * as db from '../db.js'
 import { Router } from '../router.js'
+import { BoundedExecutor } from '../ingress/bounded-executor.js'
 
 function createMockPool(): any {
   return { query: vi.fn(async () => ({ rows: [], rowCount: 0 })) }
@@ -106,5 +107,54 @@ describe('router subagent_usage durable identity and ack', () => {
     await new Promise((r) => setTimeout(r, 30))
 
     expect(usageSpy.mock.calls.map((call) => call[1].eventId)).toEqual(['turn-1', 'turn-2'])
+  })
+
+  test('bounds 10,000 subagent usage transactions and disconnects before ack on overload', async () => {
+    let active = 0
+    let peak = 0
+    const release = { resolve: undefined as (() => void) | undefined, promise: Promise.resolve() as Promise<void> }
+    release.promise = new Promise<void>((resolve) => { release.resolve = resolve })
+    const ingest = {
+      query: vi.fn(async () => ({ rows: [], rowCount: 0 })),
+      connect: vi.fn(async () => {
+        active++
+        peak = Math.max(peak, active)
+        await release.promise
+        return {
+          query: vi.fn(async (sql: string) => sql.includes('RETURNING usage_hash')
+            ? { rows: [{ usage_hash: 'seen' }], rowCount: 1 }
+            : { rows: [], rowCount: 0 }),
+          release: () => { active-- },
+        }
+      }),
+    }
+    const control = createMockPool()
+    const pools = { control, ingest, query: createMockPool(), worker: createMockPool() } as any
+    const router = new Router(pools)
+    ;(router as any).legacyPersist = new BoundedExecutor({ maxConcurrent: 2, maxPending: 10_000 })
+    const { ws, daemonId } = await setupDaemon(router)
+
+    for (let seq = 1; seq <= 10_000; seq++) {
+      router.handleDaemonMessage(daemonId, {
+        type: 'subagent_usage', session_id: 'root', agent_id: 'child', event_id: `event-${seq}`, seq,
+        usage: { input_tokens: 1, output_tokens: 1 },
+      })
+    }
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    expect(peak).toBe(2)
+    release.resolve!()
+    await new Promise((resolve) => setTimeout(resolve, 500))
+    expect(peak).toBeLessThanOrEqual(2)
+    expect((router as any).daemonSeq.get(daemonId).persistedHigh).toBe(10_000)
+
+    ;(router as any).legacyPersist = new BoundedExecutor({ maxConcurrent: 1, maxPending: 1 })
+    const held = new Promise<boolean>(() => undefined)
+    vi.spyOn(db, 'recordSubagentUsage').mockReturnValue(held)
+    router.handleDaemonMessage(daemonId, { type: 'subagent_usage', session_id: 'root', agent_id: 'child', event_id: 'overload-1', seq: 10_001, usage: { input_tokens: 1 } })
+    router.handleDaemonMessage(daemonId, { type: 'subagent_usage', session_id: 'root', agent_id: 'child', event_id: 'overload-2', seq: 10_002, usage: { input_tokens: 1 } })
+    router.handleDaemonMessage(daemonId, { type: 'subagent_usage', session_id: 'root', agent_id: 'child', event_id: 'overload-3', seq: 10_003, usage: { input_tokens: 1 } })
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    expect(ws.close).toHaveBeenCalledWith(1013, 'relay_overloaded')
+    expect((router as any).daemonSeq.get(daemonId).persistedHigh).toBe(10_000)
   })
 })

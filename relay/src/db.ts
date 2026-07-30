@@ -1,6 +1,7 @@
 import pg from 'pg';
 import { createHash } from 'crypto';
 import type { SupportedLanguage } from './config/language.js';
+import { initDurableIngressSchema } from './schema/durable-ingress.js';
 const { Pool } = pg;
 
 export interface DBConfig {
@@ -12,13 +13,26 @@ export interface DBConfig {
   connectionTimeoutMillis?: number;
 }
 
-export function createPool(config: DBConfig): pg.Pool {
-  const requested = config.connectionTimeoutMillis
+export interface PoolOptions {
+  name?: string;
+  max?: number;
+  connectionTimeoutMillis?: number;
+  statementTimeoutMillis?: number;
+}
+
+export function createPool(config: DBConfig, options: PoolOptions = {}): pg.Pool {
+  const requested = options.connectionTimeoutMillis ?? config.connectionTimeoutMillis
     ?? Number.parseInt(process.env.DB_CONNECTION_TIMEOUT_MS || '5000', 10);
   const connectionTimeoutMillis = Number.isFinite(requested) && requested > 0
     ? Math.max(1, Math.min(60_000, Math.trunc(requested)))
     : 5_000;
-  return new Pool({ ...config, connectionTimeoutMillis });
+  return new Pool({
+    ...config,
+    connectionTimeoutMillis,
+    ...(options.max === undefined ? {} : { max: options.max }),
+    ...(options.name === undefined ? {} : { application_name: `pocketctl-relay-${options.name}` }),
+    ...(options.statementTimeoutMillis === undefined ? {} : { statement_timeout: options.statementTimeoutMillis }),
+  });
 }
 
 export async function initDB(pool: pg.Pool): Promise<void> {
@@ -149,6 +163,19 @@ export async function initDB(pool: pg.Pool): Promise<void> {
       password_hash VARCHAR(255) NOT NULL,
       display_name VARCHAR(100),
       created_at TIMESTAMPTZ DEFAULT NOW()
+    )
+  `);
+  // Durable request-level push-effect grant. Agent event identity remains
+  // event_id-based, while approval/question notifications retain the legacy
+  // request_id dedup contract across Worker restarts. The winning event FK
+  // bounds this table to the existing event retention/deletion lifecycle.
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS request_push_effect (
+      user_id INT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      request_id TEXT NOT NULL,
+      event_id BIGINT NOT NULL REFERENCES events(id) ON DELETE CASCADE,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      PRIMARY KEY (user_id, request_id)
     )
   `);
   await pool.query(`
@@ -368,6 +395,8 @@ export async function initDB(pool: pg.Pool): Promise<void> {
 
   // User daemon limit control
   await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS max_daemons INT DEFAULT 1`);
+
+  await initDurableIngressSchema(pool);
 }
 
 export async function upsertDaemon(pool: pg.Pool, daemonId: string, hostname: string, agents: any[], arch?: string, version?: string, startedAt?: number): Promise<void> {
@@ -426,12 +455,46 @@ export class TokenRevokedDuringActivationError extends Error {
 // a revoked token. The namespace keeps these locks separate from other users of
 // two-key advisory locks in the application.
 const TOKEN_REVOCATION_LOCK_NAMESPACE = 1885566060;
+const SESSION_MATERIALIZATION_LOCK_NAMESPACE = 1885566061;
 
 async function lockTokenRevocationFence(client: pg.PoolClient, jti: string): Promise<void> {
   await client.query(
     `SELECT pg_advisory_xact_lock($1, hashtext($2))`,
     [TOKEN_REVOCATION_LOCK_NAMESPACE, jti],
   );
+}
+
+async function lockSessionMaterializationFence(
+  client: Pick<pg.PoolClient, 'query'>,
+  sessionId: string,
+): Promise<void> {
+  await client.query(
+    `SELECT pg_advisory_xact_lock($1, hashtext($2))`,
+    [SESSION_MATERIALIZATION_LOCK_NAMESPACE, sessionId],
+  );
+}
+
+/** Serialize durable materialization with explicit deletion for one session. */
+export async function withSessionMaterializationFence<T>(
+  pool: pg.Pool,
+  sessionId: string,
+  work: (client: pg.PoolClient) => Promise<T>,
+): Promise<T> {
+  // Lightweight unit fakes intentionally expose query only.
+  if (typeof pool.connect !== 'function') return work(pool as unknown as pg.PoolClient)
+  const client = await pool.connect()
+  try {
+    await client.query('BEGIN')
+    await lockSessionMaterializationFence(client, sessionId)
+    const result = await work(client)
+    await client.query('COMMIT')
+    return result
+  } catch (error) {
+    await client.query('ROLLBACK')
+    throw error
+  } finally {
+    client.release()
+  }
 }
 
 /** Commit all mutable connection identity in one generation transaction. */
@@ -678,7 +741,7 @@ export async function persistEventWithEffect(
         [sessionId, eventType, payloadStr, hash],
       );
       const row = result.rows[0];
-      if (!row) return { rowID: 0, inserted: false, completed: true, nextStep: 0 };
+      if (!row) throw new Error('event ledger row unavailable');
       const inserted = row.inserted === undefined || row.inserted === true || row.inserted === 't';
       if (inserted) {
         pool.query(`UPDATE sessions SET last_activity_at = NOW(), updated_at = NOW() WHERE session_id = $1`, [sessionId]).catch(console.error);
@@ -709,6 +772,27 @@ export async function advanceEventEffectStep(pool: pg.Pool, eventID: number, nex
 
 export async function completeEventEffect(pool: pg.Pool, eventID: number): Promise<void> {
   await pool.query(`UPDATE events SET effect_status = 'completed' WHERE id = $1`, [eventID]);
+}
+
+/**
+ * Atomically grant one approval/question push effect per durable owner/request.
+ * Callers hold the materialization transaction: a failed external push rolls
+ * this insert back, so a fresh Worker can retry rather than being suppressed.
+ */
+export async function claimRequestPushEffect(
+  pool: pg.Pool,
+  userId: number,
+  requestId: string,
+  eventId: number,
+): Promise<boolean> {
+  const result = await pool.query(
+    `INSERT INTO request_push_effect (user_id, request_id, event_id)
+     VALUES ($1, $2, $3)
+     ON CONFLICT (user_id, request_id) DO NOTHING
+     RETURNING event_id`,
+    [userId, requestId, eventId],
+  )
+  return (result.rowCount ?? 0) === 1
 }
 
 export async function getEventEffectState(
@@ -1241,40 +1325,47 @@ export interface SubagentUsageRecord {
 }
 
 /** Durably deduplicate and accumulate one child usage record in one transaction. */
-export async function recordSubagentUsage(pool: pg.Pool, usage: SubagentUsageRecord): Promise<boolean> {
+export async function recordSubagentUsageInTransaction(
+  client: Pick<pg.PoolClient, 'query'>,
+  usage: SubagentUsageRecord,
+): Promise<boolean> {
   const hashInput = usage.eventId
     ? `${usage.parentSessionId}:${usage.agentId}:event:${usage.eventId}`
     : `${usage.parentSessionId}:${usage.agentId}:${usage.inputTokens}:${usage.outputTokens}:${usage.cacheRead}:${usage.cacheCreate}`;
   const usageHash = createHash('md5')
     .update(hashInput)
     .digest('hex').slice(0, 16);
+  const seen = await client.query(
+    `INSERT INTO subagent_usage_seen (daemon_id, usage_hash, seq, agent_id)
+     VALUES ($1, $2, $3, $4)
+     ON CONFLICT DO NOTHING
+     RETURNING usage_hash`,
+    [usage.daemonId, usageHash, usage.seq ?? null, usage.agentId]
+  );
+  if ((seen.rowCount ?? 0) === 0) {
+    return false;
+  }
+  await client.query(
+    `INSERT INTO subagents (parent_session_id, agent_id, token_in, token_out, token_cache, token_cache_create, updated_at)
+     VALUES ($1, $2, $3, $4, $5, $6, NOW())
+     ON CONFLICT (parent_session_id, agent_id) DO UPDATE SET
+       token_in = subagents.token_in + $3,
+       token_out = subagents.token_out + $4,
+       token_cache = subagents.token_cache + $5,
+       token_cache_create = subagents.token_cache_create + $6,
+       updated_at = NOW()`,
+    [usage.parentSessionId, usage.agentId, usage.inputTokens, usage.outputTokens, usage.cacheRead, usage.cacheCreate]
+  );
+  return true;
+}
+
+export async function recordSubagentUsage(pool: pg.Pool, usage: SubagentUsageRecord): Promise<boolean> {
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
-    const seen = await client.query(
-      `INSERT INTO subagent_usage_seen (daemon_id, usage_hash, seq, agent_id)
-       VALUES ($1, $2, $3, $4)
-       ON CONFLICT DO NOTHING
-       RETURNING usage_hash`,
-      [usage.daemonId, usageHash, usage.seq ?? null, usage.agentId]
-    );
-    if ((seen.rowCount ?? 0) === 0) {
-      await client.query('COMMIT');
-      return false;
-    }
-    await client.query(
-      `INSERT INTO subagents (parent_session_id, agent_id, token_in, token_out, token_cache, token_cache_create, updated_at)
-       VALUES ($1, $2, $3, $4, $5, $6, NOW())
-       ON CONFLICT (parent_session_id, agent_id) DO UPDATE SET
-         token_in = subagents.token_in + $3,
-         token_out = subagents.token_out + $4,
-         token_cache = subagents.token_cache + $5,
-         token_cache_create = subagents.token_cache_create + $6,
-         updated_at = NOW()`,
-      [usage.parentSessionId, usage.agentId, usage.inputTokens, usage.outputTokens, usage.cacheRead, usage.cacheCreate]
-    );
+    const applied = await recordSubagentUsageInTransaction(client, usage);
     await client.query('COMMIT');
-    return true;
+    return applied;
   } catch (error) {
     await client.query('ROLLBACK');
     throw error;
@@ -1545,6 +1636,12 @@ export async function deleteUserAccount(pool: pg.Pool, userId: number): Promise<
     const sessionIds = sessions.rows.map((row: any) => row.session_id as string);
     const daemonIds = daemons.rows.map((row: any) => row.daemon_id as string);
 
+    await client.query(
+      `DELETE FROM realtime_outbox
+       WHERE inbox_id IN (SELECT inbox_id FROM event_inbox WHERE user_id = $1)`,
+      [userId],
+    );
+    await client.query(`DELETE FROM event_inbox WHERE user_id = $1`, [userId]);
     await client.query(`DELETE FROM events WHERE session_id = ANY($1::varchar[])`, [sessionIds]);
     await client.query(`DELETE FROM subagents WHERE parent_session_id = ANY($1::varchar[])`, [sessionIds]);
     await client.query(`DELETE FROM subagent_usage_seen WHERE daemon_id = ANY($1::text[])`, [daemonIds]);
@@ -1625,6 +1722,7 @@ export async function deleteSession(pool: pg.Pool, sessionId: string): Promise<v
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
+    await lockSessionMaterializationFence(client, sessionId);
     // Compensate: roll this session's TODAY usage into token_daily_stats before
     // deleting events. Past days are already captured in stats by cron/backfill
     // (independent of events, so deleting them is safe); only today (not yet rolled
@@ -1650,6 +1748,12 @@ export async function deleteSession(pool: pg.Pool, sessionId: string): Promise<v
         cache_create = token_daily_stats.cache_create + EXCLUDED.cache_create,
         requests = token_daily_stats.requests + EXCLUDED.requests
     `, [sessionId]);
+    await client.query(
+      `DELETE FROM realtime_outbox
+       WHERE inbox_id IN (SELECT inbox_id FROM event_inbox WHERE session_id = $1)`,
+      [sessionId],
+    );
+    await client.query(`DELETE FROM event_inbox WHERE session_id = $1`, [sessionId]);
     await client.query(`DELETE FROM events WHERE session_id = $1`, [sessionId]);
     await client.query(`DELETE FROM sessions WHERE session_id = $1`, [sessionId]);
     await client.query(
@@ -1667,7 +1771,7 @@ export async function deleteSession(pool: pg.Pool, sessionId: string): Promise<v
 
 export async function isSessionDeleted(pool: pg.Pool, sessionId: string): Promise<boolean> {
   const result = await pool.query(`SELECT 1 FROM deleted_sessions WHERE session_id = $1`, [sessionId]);
-  return (result.rowCount ?? 0) > 0;
+  return result.rows.length > 0;
 }
 
 /**
@@ -1996,6 +2100,77 @@ export async function updateSessionStatus(pool: pg.Pool, sessionId: string, daem
   return (res.rowCount ?? 0) > 0;
 }
 
+export const SESSION_STATUS_SUPPRESSED_EFFECT_STEP = 1_000_000_000;
+
+/**
+ * Atomically records whether a session_status referred to a real session.
+ * A missing-session decision is encoded in the event effect ledger so later
+ * replay cannot start delivering the historical ghost after a session appears.
+ */
+export async function updateSessionStatusForEvent(
+  pool: pg.Pool,
+  eventID: number,
+  nextStep: number,
+  sessionId: string,
+  daemonId: string,
+  status: string,
+  exitReason?: string,
+  userId?: number,
+  turnStartedAt?: string,
+): Promise<{ sessionExists: boolean; suppressed: boolean }> {
+  const result = await pool.query(
+    `WITH input AS (
+       SELECT $6::varchar AS status, $9::timestamptz AS turn_started_at
+     ), session_status_decision AS (
+       UPDATE sessions SET
+         daemon_id = $5,
+         status = input.status,
+         exit_reason = COALESCE($7, sessions.exit_reason),
+         user_id = COALESCE($8::int, sessions.user_id),
+         turn_started_at = CASE
+           WHEN input.status IN ('running', 'busy', 'retry', 'waiting', 'waiting_approval', 'waiting_question')
+             THEN COALESCE(input.turn_started_at, sessions.turn_started_at, NOW())
+           ELSE NULL
+         END,
+         updated_at = NOW()
+       FROM input
+       WHERE session_id = $4
+       RETURNING 1
+     ), ledger_decision AS (
+       UPDATE events SET effect_step = CASE
+         WHEN EXISTS (SELECT 1 FROM session_status_decision)
+           THEN GREATEST(effect_step, $2)
+         ELSE $3
+       END
+       WHERE id = $1 AND effect_status = 'pending'
+       RETURNING effect_step
+     )
+     SELECT
+       EXISTS (SELECT 1 FROM session_status_decision) AS session_exists,
+       COALESCE((SELECT effect_step >= $3 FROM ledger_decision), false) AS suppressed`,
+    [
+      eventID,
+      nextStep,
+      SESSION_STATUS_SUPPRESSED_EFFECT_STEP,
+      sessionId,
+      daemonId,
+      status,
+      exitReason || null,
+      userId || null,
+      turnStartedAt || null,
+    ],
+  );
+  const outcome = result.rows[0];
+  if (!outcome) {
+    const sessionExists = (result.rowCount ?? 0) > 0;
+    return { sessionExists, suppressed: !sessionExists };
+  }
+  return {
+    sessionExists: outcome?.session_exists === true || outcome?.session_exists === 't',
+    suppressed: outcome?.suppressed === true || outcome?.suppressed === 't',
+  };
+}
+
 /** Update session cumulative cost (called on session_status carrying cost_usd from result event). */
 export async function updateSessionCost(pool: pg.Pool, sessionId: string, costUsd: number): Promise<void> {
   await pool.query(`UPDATE sessions SET cost_usd = $1, updated_at = NOW() WHERE session_id = $2`, [costUsd, sessionId]);
@@ -2169,7 +2344,17 @@ export async function aggregateDayIntoStats(pool: pg.Pool, date: Date): Promise<
 /** Delete events older than the retention window (default 90 days). token_daily_stats
  *  preserves their rolled-up totals, so the dashboard stays complete. */
 export async function cleanStaleEvents(pool: pg.Pool, days = 90): Promise<number> {
-  const result = await pool.query(`DELETE FROM events WHERE created_at < NOW() - ($1 || ' days')::interval`, [days]);
+  const result = await pool.query(
+    `DELETE FROM events e
+     WHERE e.created_at < NOW() - ($1 || ' days')::interval
+       AND NOT EXISTS (
+         SELECT 1
+         FROM realtime_outbox o
+         WHERE o.event_id = e.id
+           AND o.delivered_at IS NULL
+       )`,
+    [days],
+  );
   return result.rowCount ?? 0;
 }
 

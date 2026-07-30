@@ -3,6 +3,7 @@
 package platform
 
 import (
+	"errors"
 	"fmt"
 	"net"
 	"os"
@@ -93,7 +94,10 @@ func (unixLocker) Acquire(path string) (Lock, error) {
 	// 进程退出（含 SIGKILL/崩溃）时内核自动释放——race-free。
 	if err := unix.Flock(int(f.Fd()), unix.LOCK_EX|unix.LOCK_NB); err != nil {
 		f.Close()
-		return nil, fmt.Errorf("another pocketctl daemon is already running on this host")
+		if errors.Is(err, unix.EWOULDBLOCK) || errors.Is(err, unix.EAGAIN) {
+			return nil, fmt.Errorf("%w: another pocketctl daemon is already running on this host", ErrInstanceLockHeld)
+		}
+		return nil, fmt.Errorf("lock instance file: %w", err)
 	}
 	return fileLock{f: f}, nil
 }
@@ -128,6 +132,9 @@ func (unixProcessInspector) List() ([]ProcessSnapshot, error) {
 type unixProcessController struct{}
 
 func (unixProcessController) IsAlive(pid int) bool {
+	if pid <= 0 {
+		return false
+	}
 	proc, err := os.FindProcess(pid)
 	if err != nil {
 		return false
@@ -204,9 +211,12 @@ func (unixServiceManager) Status() (ServiceStatus, error) {
 		return ServiceStatus{}, err
 	}
 	return ServiceStatus{
-		Installed: info.Installed,
-		Running:   info.Running,
-		UnitPath:  info.UnitPath,
-		Detail:    info.Detail,
+		Installed:    info.Installed,
+		Loaded:       info.Loaded,
+		Running:      info.Running,
+		PID:          info.PID,
+		LastExitCode: info.LastExitCode,
+		UnitPath:     info.UnitPath,
+		Detail:       info.Detail,
 	}, nil
 }

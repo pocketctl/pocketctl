@@ -12,7 +12,10 @@
 // init system — not pocketctl's own self-fork — owns the process lifecycle.
 package service
 
-import "errors"
+import (
+	"errors"
+	"time"
+)
 
 // Label is the reverse-DNS identifier used for the launchd job and the systemd
 // unit base name. Kept stable so install/uninstall/status always agree.
@@ -21,6 +24,8 @@ const Label = "me.pocketctl.daemon"
 // ErrUnsupported is returned by the service backend on platforms without a
 // supported supervisor (e.g. plain Windows).
 var ErrUnsupported = errors.New("native service management is not supported on this platform")
+
+const statusQueryTimeout = 5 * time.Second
 
 // Config describes how the supervised daemon should be launched.
 type Config struct {
@@ -33,11 +38,14 @@ type Config struct {
 	LogPath string
 }
 
-// Info is the result of Status: whether the service is installed and running,
-// plus the on-disk unit path and a human-readable detail line.
+// Info is the result of Status. Installed describes only the on-disk unit;
+// Loaded and Running come from a live supervisor query.
 type Info struct {
-	Installed bool
-	Running   bool
-	UnitPath  string
-	Detail    string
+	Installed    bool
+	Loaded       bool
+	Running      bool
+	PID          int
+	LastExitCode *int
+	UnitPath     string
+	Detail       string
 }
