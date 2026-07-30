@@ -101,6 +101,48 @@ func TestClientDisconnectFailsPendingCall(t *testing.T) {
 	}
 }
 
+func TestClientCloseWhileInboundDeliveryIsBlocked(t *testing.T) {
+	upgrader := websocket.Upgrader{}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		for i := 0; i <= 128; i++ {
+			if err := conn.WriteJSON(map[string]any{
+				"method": "thread/status/changed",
+				"params": map[string]any{"sequence": i},
+			}); err != nil {
+				return
+			}
+		}
+		<-r.Context().Done()
+	}))
+	defer server.Close()
+
+	conn, _, err := websocket.DefaultDialer.Dial("ws"+strings.TrimPrefix(server.URL, "http"), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	client := NewClient(conn)
+	deadline := time.Now().Add(time.Second)
+	for len(client.events) != cap(client.events) && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if got, want := len(client.events), cap(client.events); got != want {
+		t.Fatalf("inbound queue length=%d, want %d", got, want)
+	}
+	if err := client.Close(); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-client.Done():
+	case <-time.After(time.Second):
+		t.Fatal("client did not close")
+	}
+}
+
 func receiveInbound(t *testing.T, events <-chan Inbound) Inbound {
 	t.Helper()
 	select {

@@ -137,6 +137,7 @@ func (c *Client) writeMessage(value any) error {
 }
 
 func (c *Client) readLoop() {
+	defer close(c.events)
 	for {
 		messageType, raw, err := c.conn.ReadMessage()
 		if err != nil {
@@ -201,6 +202,5 @@ func (c *Client) failAll(err error) {
 			wait <- response{closed: err}
 		}
 		close(c.done)
-		close(c.events)
 	})
 }
