@@ -1,5 +1,5 @@
-import { describe, test, expect, beforeEach } from 'vitest'
-import { formatRelativeTime } from '../useRelativeTime'
+import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest'
+import { formatOfflineTime, formatRelativeTime } from '../useRelativeTime'
 import { useLocale } from '../useLocale'
 
 // formatRelativeTime is locale-aware. Pin to zh so the expected Chinese
@@ -68,5 +68,36 @@ describe('formatRelativeTime', () => {
   test('handles ISO string input', () => {
     const justNow = new Date().toISOString()
     expect(formatRelativeTime(justNow)).toBe('刚刚')
+  })
+})
+
+describe('formatOfflineTime', () => {
+  beforeEach(() => {
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date('2026-07-31T12:00:00Z'))
+  })
+
+  afterEach(() => {
+    vi.useRealTimers()
+  })
+
+  test('uses minutes for less than one hour offline', () => {
+    expect(formatOfflineTime(new Date('2026-07-31T11:30:00Z'))).toBe('30分钟前')
+  })
+
+  test('uses hours from one hour until one day offline', () => {
+    expect(formatOfflineTime(new Date('2026-07-31T10:00:00Z'))).toBe('2小时前')
+  })
+
+  test('uses days from one day until three days offline', () => {
+    expect(formatOfflineTime(new Date('2026-07-30T12:00:00Z'))).toBe('1天前')
+  })
+
+  test('uses month and day from three days until one year offline', () => {
+    expect(formatOfflineTime(new Date('2026-07-28T12:00:00Z'))).toBe('离线07月28日')
+  })
+
+  test('uses year, month, and day after one year offline', () => {
+    expect(formatOfflineTime(new Date('2025-07-30T12:00:00Z'))).toBe('离线2025年07月30日')
   })
 })

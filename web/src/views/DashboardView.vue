@@ -116,7 +116,7 @@
           <div class="agents">
             <span v-for="agent in getActiveAgents(d.daemon_id)" :key="agent" :class="['chip', d.daemon_online ? 'chip-terminal' : 'chip-offline']">{{ agentLabel(agent) }}</span>
           </div>
-          <span>{{ d.daemon_online ? t('dashboard.online') : (d.last_seen_at ? t('session.ago_minutes', { n: formatAge(d.last_seen_at) }) : t('dashboard.offline')) }}</span>
+          <span>{{ d.daemon_online ? t('dashboard.online') : (d.last_seen_at ? formatOfflineTime(d.last_seen_at) : t('dashboard.offline')) }}</span>
         </div>
       </div>
     </div>
@@ -209,7 +209,7 @@
 import { ref, computed, onMounted, nextTick, inject, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { useWebSocket } from '../composables/useWebSocket'
-import { formatRelativeTime } from '../composables/useRelativeTime'
+import { formatOfflineTime, formatRelativeTime } from '../composables/useRelativeTime'
 import { useAuth } from '../composables/useAuth'
 import { useLocale } from '../composables/useLocale'
 import NewSessionDialog from '../components/NewSessionDialog.vue'
@@ -321,11 +321,6 @@ function statusLabel(s: any): string {
   const st = getEffectiveStatus(s)
   return t(STATUS_KEYS[st] || 'session.status.running')
 }
-function formatAge(ts: string): string {
-  const mins = Math.floor((Date.now() - new Date(ts).getTime()) / 60000)
-  return String(mins)
-}
-
 // Alias editing
 function startRename(i: number) {
   renameIndex.value = i; renameInput.value = daemons.value[i].daemon_alias || ''

@@ -30,6 +30,30 @@ export function formatRelativeTime(isoOrDate: string | Date | undefined | null):
   return `${mm}-${dd} ${hh}:${mi}`
 }
 
+/** Format how long a host has been offline for display in the host list. */
+export function formatOfflineTime(isoOrDate: string | Date | undefined | null): string {
+  if (!isoOrDate) return ''
+  const date = isoOrDate instanceof Date ? isoOrDate : new Date(isoOrDate)
+  if (isNaN(date.getTime())) return ''
+
+  const { locale } = useLocale()
+  const zh = locale.value === 'zh'
+  const diff = Math.max(0, Date.now() - date.getTime())
+  const minutes = Math.floor(diff / 60_000)
+  const hours = Math.floor(diff / 3_600_000)
+  const days = Math.floor(diff / 86_400_000)
+
+  if (hours < 1) return zh ? `${minutes}分钟前` : `${minutes}m ago`
+  if (days < 1) return zh ? `${hours}小时前` : `${hours}h ago`
+  if (days < 3) return zh ? `${days}天前` : `${days}d ago`
+
+  const mm = String(date.getMonth() + 1).padStart(2, '0')
+  const dd = String(date.getDate()).padStart(2, '0')
+  if (days < 365) return zh ? `离线${mm}月${dd}日` : `Offline ${mm}-${dd}`
+
+  return zh ? `离线${date.getFullYear()}年${mm}月${dd}日` : `Offline ${date.getFullYear()}-${mm}-${dd}`
+}
+
 /**
  * Reactive relative time that auto-updates.
  */
