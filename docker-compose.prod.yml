@@ -1,0 +1,125 @@
+version: '3.8'
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    restart: always
+    environment:
+      POSTGRES_USER: pocketctl
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
+      POSTGRES_DB: pocketctl
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U pocketctl"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    # 不对外暴露端口
+    expose:
+      - "5432"
+
+  relay:
+    image: pocketctl-relay:${RELEASE_VERSION:-latest}
+    build:
+      context: ./relay
+      dockerfile: Dockerfile
+      args:
+        RELEASE_VERSION: ${RELEASE_VERSION:-}
+        GIT_SHA: ${GIT_SHA:-}
+        BUILD_TIME: ${BUILD_TIME:-}
+    restart: always
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql://pocketctl:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}@postgres:5432/pocketctl
+      DB_CONTROL_POOL_MAX: ${DB_CONTROL_POOL_MAX:-4}
+      DB_INGEST_POOL_MAX: ${DB_INGEST_POOL_MAX:-8}
+      DB_QUERY_POOL_MAX: ${DB_QUERY_POOL_MAX:-8}
+      DB_WORKER_POOL_MAX: ${DB_WORKER_POOL_MAX:-8}
+      # Keep total Relay connections below PostgreSQL max_connections.
+      DB_POOL_SINGLE_MAX: ${DB_POOL_SINGLE_MAX:-16}
+      DB_POOL_TOTAL_MAX: ${DB_POOL_TOTAL_MAX:-28}
+      # Safe rollout defaults. Production canary/on requires an explicit env
+      # override after the durable-ingress release gate has passed.
+      RELAY_DURABLE_INGRESS: ${RELAY_DURABLE_INGRESS:-off}
+      RELAY_DURABLE_INGRESS_DAEMONS: ${RELAY_DURABLE_INGRESS_DAEMONS:-}
+      RELAY_DURABLE_INGRESS_WINDOW: ${RELAY_DURABLE_INGRESS_WINDOW:-128}
+      RELAY_MATERIALIZATION_MODE: ${RELAY_MATERIALIZATION_MODE:-inline}
+      POCKETCTL_API_KEY: ${POCKETCTL_API_KEY:-}
+      DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-}
+      NODE_ENV: production
+      POCKETCTL_MODE: saas
+      QUOTA_ENFORCEMENT: ${QUOTA_ENFORCEMENT:-enforce}
+      FREE_MAX_BOUND_DAEMONS: ${FREE_MAX_BOUND_DAEMONS:-2}
+      FREE_MAX_CONCURRENT_SESSIONS: ${FREE_MAX_CONCURRENT_SESSIONS:-2}
+      PORT: 8080
+      WEB_APP_URL: "https://www.pocketctl.me"
+      PUBLIC_ISSUER_URL: "https://www.pocketctl.me"
+      # CORS 白名单：Relay 在 production 下拒绝空值并中止启动。
+      # 新增前端域名时在此追加（逗号分隔）。
+      ALLOWED_ORIGINS: ${ALLOWED_ORIGINS:-https://www.pocketctl.me,https://pocketctl.me}
+      # 测试账号固定验证码：server.ts 的 DEV_EMAIL 分支在任何 NODE_ENV 下生效，
+      # 匹配该邮箱则跳过 SES、直接用固定码（不发真实邮件），方便测试登录。
+      # 安全：默认留空。server.ts:184 不校验 NODE_ENV，若给默认值则任何 compose
+      # 生产部署都会落入 "test@pocketctl.me / 123456" 固定验证码后门。仅 staging
+      # 等显式设置 DEV_EMAIL/DEV_EMAIL_CODE 时才启用。
+      DEV_EMAIL: ${DEV_EMAIL:-}
+      DEV_EMAIL_CODE: ${DEV_EMAIL_CODE:-}
+      APNS_KEY_PATH: ${APNS_KEY_PATH:-}
+      APNS_KEY_ID: ${APNS_KEY_ID:-}
+      APNS_TEAM_ID: ${APNS_TEAM_ID:-}
+      APNS_BUNDLE_ID: ${APNS_BUNDLE_ID:-com.pocketctl.app}
+      APNS_ENVIRONMENT: ${APNS_ENVIRONMENT:-production}
+    volumes:
+      - "${APNS_KEY_DIR:-./secrets/apns}:/run/secrets/apns:ro"
+    expose:
+      - "8080"
+
+  relay-worker:
+    image: pocketctl-relay:${RELEASE_VERSION:-latest}
+    build:
+      context: ./relay
+      dockerfile: Dockerfile
+      args:
+        RELEASE_VERSION: ${RELEASE_VERSION:-}
+        GIT_SHA: ${GIT_SHA:-}
+        BUILD_TIME: ${BUILD_TIME:-}
+    command: ["node", "dist/event-worker-main.js"]
+    restart: always
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql://pocketctl:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}@postgres:5432/pocketctl
+      DB_WORKER_POOL_MAX: ${DB_WORKER_POOL_MAX:-8}
+      RELAY_MATERIALIZATION_MODE: worker
+      RELAY_WORKER_ID: ${RELAY_WORKER_ID:-relay-worker-1}
+      RELAY_WORKER_SHARD_COUNT: "1"
+      RELAY_WORKER_SHARD_INDEX: "0"
+      NODE_ENV: production
+      POCKETCTL_MODE: saas
+      APNS_KEY_PATH: ${APNS_KEY_PATH:-}
+      APNS_KEY_ID: ${APNS_KEY_ID:-}
+      APNS_TEAM_ID: ${APNS_TEAM_ID:-}
+      APNS_BUNDLE_ID: ${APNS_BUNDLE_ID:-com.pocketctl.app}
+      APNS_ENVIRONMENT: ${APNS_ENVIRONMENT:-production}
+    volumes:
+      - "${APNS_KEY_DIR:-./secrets/apns}:/run/secrets/apns:ro"
+
+  nginx:
+    image: nginx:alpine
+    restart: always
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./nginx/ssl:/etc/nginx/ssl:ro
+      - ./nginx/html:/usr/share/nginx/html:ro
+    depends_on:
+      - relay
+
+volumes:
+  pgdata:

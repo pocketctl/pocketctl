@@ -1,0 +1,6 @@
+# vue-tsc -b (build mode) artifacts — regenerated on every build, not for VCS
+*.tsbuildinfo
+vite.config.d.ts
+vite.config.js
+vite.config.js
+vite.config.d.ts
