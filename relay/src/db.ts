@@ -2,6 +2,7 @@ import pg from 'pg';
 import { createHash } from 'crypto';
 import type { SupportedLanguage } from './config/language.js';
 import { initDurableIngressSchema } from './schema/durable-ingress.js';
+import { countReplayLogicalItems, findCompleteReplayBoundary, hasOpenReplayStreams } from './replay-page.js';
 const { Pool } = pg;
 
 export interface DBConfig {
@@ -878,6 +879,124 @@ export async function getEventsBefore(pool: pg.Pool, sessionId: string, cursor: 
     [sessionId, cursor, limit]
   );
   return result.rows;
+}
+
+export interface CompleteBackwardReplayPage {
+  events: any[];
+  oldestId: number;
+  logicalCount: number;
+  hasMore: boolean;
+}
+
+interface ReplayFilter {
+  where: string;
+  params: any[];
+}
+
+function completeReplayFilter(sessionId: string, beforeId: number | undefined, agentId?: string): ReplayFilter {
+  const params: any[] = [sessionId];
+  const clauses = ['session_id = $1'];
+  if (agentId) {
+    params.push(agentId);
+    clauses.push(`payload->>'agent_id' = $${params.length}`);
+  }
+  if (beforeId !== undefined && beforeId > 0) {
+    params.push(beforeId);
+    clauses.push(`id < $${params.length}`);
+  }
+  return { where: clauses.join(' AND '), params };
+}
+
+async function scanBackwardReplayEvents(
+  pool: pg.Pool,
+  sessionId: string,
+  beforeId: number | undefined,
+  limit: number,
+  agentId?: string,
+): Promise<any[]> {
+  const filter = completeReplayFilter(sessionId, beforeId, agentId);
+  const result = await pool.query(
+    `SELECT id, session_id, event_type, payload, created_at
+     FROM events
+     WHERE ${filter.where}
+     ORDER BY id DESC LIMIT $${filter.params.length + 1}`,
+    [...filter.params, limit],
+  );
+  return result.rows;
+}
+
+async function hasOlderReplayEvent(
+  pool: pg.Pool,
+  sessionId: string,
+  oldestId: number,
+  agentId?: string,
+): Promise<boolean> {
+  const filter = completeReplayFilter(sessionId, oldestId, agentId);
+  const result = await pool.query(
+    `SELECT 1 FROM events WHERE ${filter.where} LIMIT 1`,
+    filter.params,
+  );
+  return result.rows.length > 0;
+}
+
+/**
+ * Builds one backward page that never begins in the middle of a chunked
+ * content stream. The database is scanned newest-first for efficient cursor
+ * pagination, then the selected contiguous interval is returned oldest-first.
+ */
+export async function getCompleteBackwardReplayPage(
+  pool: pg.Pool,
+  sessionId: string,
+  beforeId: number | undefined,
+  logicalLimit: number,
+  agentId?: string,
+): Promise<CompleteBackwardReplayPage> {
+  const limit = Math.max(1, Math.trunc(logicalLimit));
+  const scanLimit = Math.max(100, limit * 2);
+  const rowsDesc: any[] = [];
+  let scanCursor = beforeId;
+
+  while (true) {
+    const rows = await scanBackwardReplayEvents(pool, sessionId, scanCursor, scanLimit, agentId);
+    if (rows.length === 0) break;
+    rowsDesc.push(...rows);
+
+    const boundary = findCompleteReplayBoundary(rowsDesc, limit);
+    if (boundary) {
+      const selectedDesc = rowsDesc.slice(0, boundary.endIndex + 1);
+      const events = [...selectedDesc].reverse();
+      const oldestId = events[0].id;
+      return {
+        events,
+        oldestId,
+        logicalCount: boundary.logicalCount,
+        hasMore: await hasOlderReplayEvent(pool, sessionId, oldestId, agentId),
+      };
+    }
+
+    scanCursor = rows[rows.length - 1].id;
+    if (rows.length < scanLimit) break;
+  }
+
+  if (rowsDesc.length === 0) {
+    return { events: [], oldestId: beforeId ?? 0, logicalCount: 0, hasMore: false };
+  }
+
+  const events = [...rowsDesc].reverse();
+  const oldestId = events[0].id;
+  if (hasOpenReplayStreams(rowsDesc)) {
+    console.warn('[history-replay] reached oldest event before stream boundary', {
+      sessionId,
+      agentId,
+      oldestId,
+    });
+  }
+  return {
+    events,
+    oldestId,
+    logicalCount: countReplayLogicalItems(rowsDesc),
+    hasMore: await hasOlderReplayEvent(pool, sessionId, oldestId, agentId),
+  };
 }
 
 export async function getSessionStatus(pool: pg.Pool, sessionId: string): Promise<string | null> {

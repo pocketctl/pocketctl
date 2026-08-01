@@ -487,6 +487,7 @@ import { resolveInteractionReadiness, type InteractionConnectivity } from '../co
 import { canSendClaudeSession } from '../utils/claudeSessionControl'
 import { resolveSessionComposerState } from '../utils/sessionComposerPolicy'
 import { ContentStreamAssembler } from '../utils/contentStream'
+import { ReplayPageBuffer } from '../utils/replayPageBuffer'
 
 const { renamingId, renameInput, startRename, commitRename, cancelRename } = useSessionRename()
 
@@ -525,6 +526,9 @@ const pageSize = computed(() => 50)  // session-history-pagination: 一次加载
 const loadedMinId = ref(0)      // oldest loaded event id (backward cursor)
 const isLoadingBackward = ref(false)  // a pagination (scroll-up) request in flight
 const hasMore = ref(false)      // relay signaled older events exist
+const olderReplayEvents = new ReplayPageBuffer<any>()
+let olderReplayScrollHeight = 0
+let olderReplayScrollTop = 0
 const resumeCopied = ref(false)  // session-resume-command: 复制恢复命令反馈
 const showNewSession = ref(false)
 const daemonList = computed(() => Object.values(daemons.value))
@@ -1097,6 +1101,27 @@ function requestSessionAgentSwitch(name: string) {
   }, 15000)
 }
 
+function prependOlderReplayEvents(events: any[]) {
+  if (events.length === 0) return
+  const tempMsgs: any[] = []
+  const tempSubagent: Record<string, any[]> = {}
+  for (const evt of events) processEvent(evt, tempMsgs, tempSubagent)
+  if (tempMsgs.length) {
+    const existingPartKeys = new Set(messages.value.map((message: any) => message.partKey).filter(Boolean))
+    const uniqueTemp = tempMsgs.filter((message: any) => !message.partKey || !existingPartKeys.has(message.partKey))
+    messages.value = [...uniqueTemp, ...messages.value]
+  }
+  for (const [agentId, bucket] of Object.entries(tempSubagent)) {
+    if (!subagentMessages.value[agentId]) subagentMessages.value[agentId] = []
+    subagentMessages.value[agentId] = [...bucket, ...subagentMessages.value[agentId]]
+  }
+  nextTick(() => {
+    if (!messagesEl.value) return
+    const delta = messagesEl.value.scrollHeight - olderReplayScrollHeight
+    messagesEl.value.scrollTop = olderReplayScrollTop + delta
+  })
+}
+
 // Unified history loader: clears local message state and requests the first
 // backward page. In focused-sub-agent mode it sends `replay_subagent` (relay
 // filters events by agent_id); otherwise the regular parent-session `replay`.
@@ -1108,6 +1133,7 @@ function loadHistory() {
   loadedMinId.value = 0
   isLoadingBackward.value = false
   hasMore.value = false
+  olderReplayEvents.reset()
   if (focusedSubAgentId.value) {
     send({ type: 'replay_subagent', session_id: sessionId.value, agent_id: focusedSubAgentId.value, limit: pageSize.value, req_id: replayReqId.value })
   } else {
@@ -1125,6 +1151,9 @@ function onMessagesScroll() {
   if (scrollTop < 60 && hasMore.value && !isLoadingBackward.value && !isLoading.value && loadedMinId.value > 0) {
     isLoadingBackward.value = true
     replayReqId.value++
+    olderReplayEvents.reset()
+    olderReplayScrollHeight = scrollHeight
+    olderReplayScrollTop = scrollTop
     if (focusedSubAgentId.value) {
       send({ type: 'replay_subagent', session_id: sessionId.value, agent_id: focusedSubAgentId.value, last_seq: loadedMinId.value, limit: pageSize.value, req_id: replayReqId.value })
     } else {
@@ -2016,6 +2045,7 @@ watch(loadKey, (newKey, oldKey) => {
     interactionResolutions.clear()
     pendingToolResults.clear() // discard buffered out-of-order results
     contentStreams.reset()
+    olderReplayEvents.reset()
     // Gate the turn-timer watch: the placeholder status='running' below must
     // not start the timer from zero. The real turn start (if executing) is
     // recovered from the last executing session_status once replay completes.
@@ -2197,35 +2227,13 @@ onMounted(() => {
     if (msg.session_id !== sessionId.value) return
     if (msg.req_id !== undefined && msg.req_id !== replayReqId.value) return // D4: stale batch
     const isBackward = msg.direction === 'backward'
-    // backward batches arrive in id DESC; reverse to ASC for chronological render/prepend
-    const evts = isBackward ? [...msg.events].reverse() : msg.events
+    // Relay sends every replay batch in id ASC order. Keeping this order across
+    // batch boundaries lets stream assemblers receive chunk zero before later chunks.
+    const evts = Array.isArray(msg.events) ? msg.events : []
     if (isLoadingBackward.value && isBackward) {
-      // pagination: build page into a temp array, prepend in ONE shot, then manually
-      // restore scrollTop so the viewport stays on the exact same content.
-      // overflow-anchor is DISABLED (CSS) because it mis-anchors to the newly prepended
-      // top element and yanks the viewport to the oldest record. Manual restore is precise.
-      const oldScrollHeight = messagesEl.value?.scrollHeight || 0
-      const oldScrollTop = messagesEl.value?.scrollTop || 0
-      const tempMsgs: any[] = []
-      const tempSubagent: Record<string, any[]> = {}
-      for (const evt of evts) processEvent(evt, tempMsgs, tempSubagent)
-      if (tempMsgs.length) {
-        const existingPartKeys = new Set(messages.value.map((message: any) => message.partKey).filter(Boolean))
-        const uniqueTemp = tempMsgs.filter((message: any) => !message.partKey || !existingPartKeys.has(message.partKey))
-        messages.value = [...uniqueTemp, ...messages.value]
-      }
-      // prepend older sub-agent events to each persistent bucket
-      for (const [agentId, bucket] of Object.entries(tempSubagent)) {
-        if (!subagentMessages.value[agentId]) subagentMessages.value[agentId] = []
-        subagentMessages.value[agentId] = [...bucket, ...subagentMessages.value[agentId]]
-      }
-      nextTick(() => {
-        if (!messagesEl.value) return
-        const delta = messagesEl.value.scrollHeight - oldScrollHeight
-        messagesEl.value.scrollTop = oldScrollTop + delta
-      })
+      olderReplayEvents.append(evts)
     } else {
-      // initial load (first backward page, or legacy forward full-load): render + scroll bottom
+      // Initial backward page and forward replay can render progressively.
       for (const evt of evts) processEvent(evt)
       nextTick(scrollToBottom)
     }
@@ -2233,6 +2241,9 @@ onMounted(() => {
   cleanups.push(onEvent('replay_end', (msg: any) => {
     if (msg.session_id !== sessionId.value) return
     if (msg.req_id !== undefined && msg.req_id !== replayReqId.value) return
+    const wasLoadingBackward = isLoadingBackward.value
+    if (wasLoadingBackward) prependOlderReplayEvents(olderReplayEvents.take())
+    else olderReplayEvents.reset()
     isLoading.value = false
     isLoadingBackward.value = false
     if (msg.has_more !== undefined) hasMore.value = !!msg.has_more
@@ -2459,6 +2470,7 @@ onMounted(() => {
       router.replace(`/session/${msg.session_id}`)
       // 清空旧消息，重新拉取真实 ID 的历史
       messages.value = []
+      olderReplayEvents.reset()
       replayReqId.value++
       isLoading.value = true
       send({ type: 'replay', session_id: msg.session_id, direction: 'backward', limit: pageSize.value, req_id: replayReqId.value })

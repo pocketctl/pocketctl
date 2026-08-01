@@ -1,6 +1,6 @@
 import { describe, test, expect, vi, beforeEach } from 'vitest'
 import { Router } from '../router.js'
-import { getRecentEvents, getEventsBefore, getRecentSubagentEvents, getSubagentEventsBefore } from '../db.js'
+import { getCompleteBackwardReplayPage, getRecentEvents, getEventsBefore, getRecentSubagentEvents, getSubagentEventsBefore } from '../db.js'
 
 // Reusable mocks (mirror router.test.ts patterns)
 function createMockPool() {
@@ -14,6 +14,7 @@ function createMockPool() {
     query: vi.fn((sql: string, params?: any[]) => {
       queries.push({ sql, params: params || [] })
       if (sql.includes('SELECT 1 FROM sessions')) return Promise.resolve({ rows: [{ '?column?': 1 }], rowCount: 1 })
+      if (sql.includes('SELECT 1 FROM events')) return Promise.resolve({ rows: [] })
       if (sql.includes('FROM events')) return Promise.resolve({ rows: replayRows })
       return Promise.resolve({ rows: [], rowCount: 0 })
     }),
@@ -109,6 +110,69 @@ describe('db - backward pagination queries (session-history-pagination 1.4)', ()
   })
 })
 
+describe('db - complete backward replay pages', () => {
+  function streamRows(fromSequence: number, toSequence: number) {
+    return Array.from({ length: fromSequence - toSequence + 1 }, (_, index) => {
+      const chunkSeq = fromSequence - index
+      return {
+        id: chunkSeq + 923,
+        payload: {
+          type: 'agent_text',
+          stream_id: 'stream-a',
+          chunk_seq: chunkSeq,
+          byte_offset: chunkSeq,
+          final: chunkSeq === 77,
+        },
+      }
+    })
+  }
+
+  test('scans past an event window and returns a complete stream in ascending order', async () => {
+    const scans = [streamRows(177, 78), streamRows(77, 0)]
+    const pool = {
+      query: vi.fn((sql: string) => {
+        if (sql.includes('SELECT 1 FROM events')) return Promise.resolve({ rows: [{ exists: true }] })
+        if (sql.includes('FROM events')) return Promise.resolve({ rows: scans.shift() ?? [] })
+        return Promise.resolve({ rows: [] })
+      }),
+    } as any
+
+    const page = await getCompleteBackwardReplayPage(pool, 'sess-1', undefined, 1)
+
+    expect(page.events.map(event => event.payload.chunk_seq)).toEqual(Array.from({ length: 178 }, (_, i) => i))
+    expect(page.oldestId).toBe(923)
+    expect(page.logicalCount).toBe(1)
+    expect(page.hasMore).toBe(true)
+    const scansIssued = pool.query.mock.calls.filter(([sql]: [string]) =>
+      sql.includes('FROM events') && !sql.includes('SELECT 1 FROM events')
+    )
+    expect(scansIssued).toHaveLength(2)
+    expect(scansIssued[1][0]).toContain('id <')
+  })
+
+  test('keeps the subagent filter for scans and has-more lookup', async () => {
+    const pool = {
+      query: vi.fn((sql: string) => {
+        if (sql.includes('SELECT 1 FROM events')) return Promise.resolve({ rows: [] })
+        if (sql.includes('FROM events')) {
+          return Promise.resolve({ rows: [{
+            id: 8,
+            payload: { type: 'agent_text', agent_id: 'agent-a', stream_id: 'stream-a', chunk_seq: 0, byte_offset: 0, final: true },
+          }] })
+        }
+        return Promise.resolve({ rows: [] })
+      }),
+    } as any
+
+    const page = await getCompleteBackwardReplayPage(pool, 'sess-1', 9, 1, 'agent-a')
+
+    expect(page.events).toHaveLength(1)
+    const eventQueries = pool.query.mock.calls.filter(([sql]: [string]) => sql.includes('FROM events'))
+    expect(eventQueries).toHaveLength(2)
+    expect(eventQueries.every(([sql]: [string]) => sql.includes("payload->>'agent_id'"))).toBe(true)
+  })
+})
+
 // --- 6.3 router unit tests: handleReplay direction routing + has_more ---
 describe('Router - replay pagination (session-history-pagination 6.3)', () => {
   let pool: any
@@ -129,7 +193,7 @@ describe('Router - replay pagination (session-history-pagination 6.3)', () => {
     expect(pool.query.mock.calls.some(([sql]: [string]) => sql.includes('id > $2') && sql.includes('ORDER BY id ASC'))).toBe(true)
   })
 
-  test('backward replay (no last_seq) → getRecentEvents (recent N)', async () => {
+  test('backward replay returns the complete page in ascending order', async () => {
     const clientWs = createMockWs()
     router.registerClient(clientWs, 1)
     const events = Array.from({ length: 50 }, (_, i) => ({ id: 50 - i, payload: { type: 'agent_text', text: 'm' + i } }))
@@ -139,11 +203,14 @@ describe('Router - replay pagination (session-history-pagination 6.3)', () => {
 
     const end = clientWs._sent.find((m: any) => m.type === 'replay_end')
     expect(end).toBeDefined()
-    expect(end.has_more).toBe(true)  // full page (50 = limit) → has_more
+    expect(end.has_more).toBe(false) // exact older-row lookup found no older event
     expect(end.count).toBe(50)
+    expect(end.logical_count).toBe(50)
     expect(end.req_id).toBe(1)
-    // query was getRecentEvents (ORDER BY id DESC LIMIT, no id <)
+    // the scan query is newest-first, but the client receives the selected page ASC.
     expect(pool.query.mock.calls.some(([sql]: [string]) => sql.includes('ORDER BY id DESC LIMIT') && !sql.includes('id <'))).toBe(true)
+    const batch = clientWs._sent.find((message: any) => message.type === 'replay_batch')
+    expect(batch.events.map((event: any) => event.text)).toEqual(Array.from({ length: 50 }, (_, index) => `m${49 - index}`))
   })
 
   test('subagent replay returns only requested agent events with backward pagination metadata', async () => {
@@ -188,7 +255,7 @@ describe('Router - replay pagination (session-history-pagination 6.3)', () => {
     expect(q[1]).toContain(5424)
   })
 
-  test('backward full page (count = limit) → has_more=true', async () => {
+  test('backward full page uses the older-row lookup instead of count heuristic', async () => {
     const clientWs = createMockWs()
     router.registerClient(clientWs, 1)
     const events = Array.from({ length: 50 }, (_, i) => ({ id: 100 - i, payload: {} }))
@@ -196,7 +263,7 @@ describe('Router - replay pagination (session-history-pagination 6.3)', () => {
     router.handleClientMessage(clientWs, { type: 'replay', session_id: 'sess-1', direction: 'backward', last_seq: 200, limit: 50 })
     await new Promise(r => setTimeout(r, 50))
     const end = clientWs._sent.find((m: any) => m.type === 'replay_end')
-    expect(end.has_more).toBe(true)
+    expect(end.has_more).toBe(false)
   })
 
   test('replay_batch carries direction field for backward', async () => {
@@ -339,5 +406,58 @@ describe('Router - replay pagination (session-history-pagination 6.3)', () => {
 
     const end = clientWs._sent.find((m: any) => m.type === 'replay_end')
     expect(end.status).toBe('completed')
+  })
+
+  test('backward replay emits a multi-batch stream from chunk zero through final', async () => {
+    const streamRows = (fromSequence: number, toSequence: number) =>
+      Array.from({ length: fromSequence - toSequence + 1 }, (_, index) => {
+        const chunkSeq = fromSequence - index
+        return {
+          id: chunkSeq + 923,
+          payload: {
+            type: 'agent_text',
+            session_id: 'sess-1',
+            stream_id: 'stream-a',
+            chunk_seq: chunkSeq,
+            byte_offset: chunkSeq,
+            final: chunkSeq === 177,
+            text: String(chunkSeq),
+          },
+        }
+      })
+    const scans = [streamRows(177, 78), streamRows(77, 0)]
+    const completePagePool = {
+      query: vi.fn((sql: string) => {
+        if (sql.includes('SELECT 1 FROM sessions')) return Promise.resolve({ rows: [{ '?column?': 1 }], rowCount: 1 })
+        if (sql.includes('SELECT status, turn_started_at, last_activity_at FROM sessions')) {
+          return Promise.resolve({ rows: [{ status: 'completed', turn_started_at: null, last_activity_at: null }] })
+        }
+        if (sql.includes('SELECT 1 FROM events')) return Promise.resolve({ rows: [] })
+        if (sql.includes('FROM events')) return Promise.resolve({ rows: scans.shift() ?? [] })
+        return Promise.resolve({ rows: [] })
+      }),
+    } as any
+    const orderedRouter = new Router(completePagePool, {
+      transport: {
+        maxEventBytes: 1_048_576,
+        maxChunkBytes: 131_072,
+        replayBatchMaxEvents: 50,
+        replayBatchMaxBytes: 10_000,
+      },
+    })
+    const clientWs = createMockWs()
+    orderedRouter.registerClient(clientWs, 1)
+
+    orderedRouter.handleClientMessage(clientWs, {
+      type: 'replay', session_id: 'sess-1', direction: 'backward', limit: 1, req_id: 9,
+    })
+    await new Promise(resolve => setTimeout(resolve, 50))
+
+    const batches = clientWs._sent.filter((message: any) => message.type === 'replay_batch')
+    expect(batches.map((batch: any) => batch.events.length)).toEqual([50, 50, 50, 28])
+    expect(batches.flatMap((batch: any) => batch.events).map((event: any) => event.chunk_seq))
+      .toEqual(Array.from({ length: 178 }, (_, index) => index))
+    const end = clientWs._sent.find((message: any) => message.type === 'replay_end')
+    expect(end).toMatchObject({ count: 178, logical_count: 1, last_seq: 923, has_more: false, req_id: 9 })
   })
 })

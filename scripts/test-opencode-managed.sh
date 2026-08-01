@@ -49,13 +49,13 @@ echo "[C-D/4] Web managed-session and interaction-card tests"
     src/components/messages/__tests__/OpenCodeQuestionCard.test.ts
 )
 
-if command -v swift >/dev/null 2>&1; then
+if [[ -d ios ]] && command -v swift >/dev/null 2>&1; then
   echo "[C-D/5] iOS OpenCode source-regression tests"
   for test_file in ios/Tests/OpenCode*RegressionTests.swift; do
     swift "$test_file"
   done
 else
-  echo "[C-D/5] SKIP iOS source-regression tests: swift is unavailable"
+  echo "[C-D/5] SKIP iOS source-regression tests: iOS source or swift is unavailable"
 fi
 
 if [[ "${POCKETCTL_RELEASE_GATE:-0}" == "1" ]]; then
@@ -66,7 +66,7 @@ if [[ "${POCKETCTL_RELEASE_GATE:-0}" == "1" ]]; then
   echo "[D/7] Pocketctl six-platform build matrix"
   make build-all
 
-  if command -v xcodebuild >/dev/null 2>&1; then
+  if [[ -d ios ]] && command -v xcodebuild >/dev/null 2>&1; then
     echo "[D/8] iOS simulator Debug build"
     xcodebuild \
       -project ios/Pocketctl.xcodeproj \
@@ -76,7 +76,7 @@ if [[ "${POCKETCTL_RELEASE_GATE:-0}" == "1" ]]; then
       build \
       CODE_SIGNING_ALLOWED=NO
   else
-    echo "[D/8] SKIP iOS simulator build: xcodebuild is unavailable"
+    echo "[D/8] SKIP iOS simulator build: iOS source or xcodebuild is unavailable"
   fi
 fi
 

@@ -2070,34 +2070,42 @@ export class Router {
 
   private async handleReplay(clientWs: WebSocket, sessionId: string, lastSeq: number, reqId?: number, direction?: string, limit?: number): Promise<void> {
     const withReq = (obj: any) => reqId !== undefined ? { ...obj, req_id: reqId } : obj;
-    // session-history-pagination: backward direction paginates history (recent N / cursor-before N).
-    // Default forward (id > lastSeq ASC) preserves existing full-load behavior for old clients.
+    // Backward history is paginated by complete logical streams. Forward replay
+    // remains the existing incremental id-ASC subscription path.
     const isBackward = direction === 'backward';
     const lim = isBackward && limit && limit > 0 ? limit : 100;
     try {
       const runtime = await db.getSessionRuntime(this.pool, sessionId);
       const currentStatus = runtime.status;
       let events: any[];
+      let logicalCount = 0;
+      let replayLastSeq = lastSeq;
+      let hasMore = false;
       if (isBackward) {
-        events = (lastSeq && lastSeq > 0)
-          ? await db.getEventsBefore(this.pool, sessionId, lastSeq, lim)
-          : await db.getRecentEvents(this.pool, sessionId, lim);
+        const page = await db.getCompleteBackwardReplayPage(
+          this.pool,
+          sessionId,
+          lastSeq && lastSeq > 0 ? lastSeq : undefined,
+          lim,
+        );
+        events = page.events;
+        logicalCount = page.logicalCount;
+        replayLastSeq = page.oldestId;
+        hasMore = page.hasMore;
       } else {
         events = await db.getEventsAfter(this.pool, sessionId, lastSeq);
       }
-      // has_more (backward only, count-based heuristic): a full page implies older rows may exist.
-      const hasMore = isBackward ? events.length === lim : false;
       if (events.length === 0) {
-        this.send(clientWs, withReq({ type: 'replay_end', session_id: sessionId, count: 0, last_seq: lastSeq, has_more: false, status: currentStatus, turn_started_at: runtime.turnStartedAt, last_activity_at: runtime.lastActivityAt }));
+        this.send(clientWs, withReq({ type: 'replay_end', session_id: sessionId, count: 0, logical_count: 0, last_seq: replayLastSeq, has_more: false, status: currentStatus, turn_started_at: runtime.turnStartedAt, last_activity_at: runtime.lastActivityAt }));
         return;
       }
-      // backward rows arrive in id DESC; forward rows in id ASC. Batches keep that order;
-      // the client reverses backward batches before render/prepend.
+      // Both forward and complete backward pages are ASC, including across
+      // replay batches, so stream assemblers always receive chunk zero first.
       const batches = this.buildReplayBatches(events, (slice) => withReq({
           type: 'replay_batch',
           session_id: sessionId,
           events: slice.map(e => e.payload),
-          last_seq: slice[slice.length - 1].id,
+          last_seq: isBackward ? slice[0].id : slice[slice.length - 1].id,
           direction: direction || 'forward',
       }));
       for (const batch of batches) {
@@ -2107,7 +2115,8 @@ export class Router {
         type: 'replay_end',
         session_id: sessionId,
         count: events.length,
-        last_seq: events[events.length - 1].id,
+        logical_count: logicalCount,
+        last_seq: isBackward ? replayLastSeq : events[events.length - 1].id,
         has_more: hasMore,
         status: currentStatus,
         turn_started_at: runtime.turnStartedAt,
@@ -2124,16 +2133,20 @@ export class Router {
     const withReq = (obj: any) => reqId !== undefined ? { ...obj, req_id: reqId } : obj;
     const lim = limit && limit > 0 ? limit : 100;
     if (!agentId) {
-      this.send(clientWs, withReq({ type: 'replay_end', session_id: sessionId, agent_id: agentId, count: 0, last_seq: lastSeq ?? 0, has_more: false }));
+      this.send(clientWs, withReq({ type: 'replay_end', session_id: sessionId, agent_id: agentId, count: 0, logical_count: 0, last_seq: lastSeq ?? 0, has_more: false }));
       return;
     }
     try {
-      const events = (lastSeq && lastSeq > 0)
-        ? await db.getSubagentEventsBefore(this.pool, sessionId, agentId, lastSeq, lim)
-        : await db.getRecentSubagentEvents(this.pool, sessionId, agentId, lim);
-      const hasMore = events.length === lim;
+      const page = await db.getCompleteBackwardReplayPage(
+        this.pool,
+        sessionId,
+        lastSeq && lastSeq > 0 ? lastSeq : undefined,
+        lim,
+        agentId,
+      );
+      const events = page.events;
       if (events.length === 0) {
-        this.send(clientWs, withReq({ type: 'replay_end', session_id: sessionId, agent_id: agentId, count: 0, last_seq: lastSeq ?? 0, has_more: false }));
+        this.send(clientWs, withReq({ type: 'replay_end', session_id: sessionId, agent_id: agentId, count: 0, logical_count: 0, last_seq: page.oldestId, has_more: false }));
         return;
       }
       const batches = this.buildReplayBatches(events, (slice) => withReq({
@@ -2141,7 +2154,7 @@ export class Router {
           session_id: sessionId,
           agent_id: agentId,
           events: slice.map(e => e.payload),
-          last_seq: slice[slice.length - 1].id,
+          last_seq: slice[0].id,
           direction: 'backward',
       }));
       for (const batch of batches) {
@@ -2152,8 +2165,9 @@ export class Router {
         session_id: sessionId,
         agent_id: agentId,
         count: events.length,
-        last_seq: events[events.length - 1].id,
-        has_more: hasMore,
+        logical_count: page.logicalCount,
+        last_seq: page.oldestId,
+        has_more: page.hasMore,
       }));
     } catch (err) {
       console.error('replay_subagent error:', err);

@@ -30,6 +30,21 @@ vi.mock('../../composables/useSessionRename', () => ({
 }))
 
 describe('SessionDetail processEvent integration', () => {
+  test('keeps backward replay batches in relay chronological order', () => {
+    const wrapper = shallowMount(SessionDetail)
+    const handler = websocketMock.handlers.get('replay_batch')!
+
+    handler({
+      type: 'replay_batch', session_id: 'ses_1', direction: 'backward',
+      events: [
+        { type: 'user_text', text: 'older' },
+        { type: 'user_text', text: 'newer' },
+      ],
+    })
+
+    expect((wrapper.vm as any).messages.map((message: any) => message.content)).toEqual(['older', 'newer'])
+  })
+
   test('consumes the shared OpenCode release contract with request and Part deduplication', () => {
     const contract = JSON.parse(readFileSync(resolve(process.cwd(), '../internal/e2e/testdata/opencode_release_gate.json'), 'utf8')) as {
       session_id: string
