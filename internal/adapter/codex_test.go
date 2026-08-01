@@ -183,13 +183,13 @@ func TestCodex_TokenCountInfoFormat(t *testing.T) {
 	}
 }
 
-func TestCodex_TaskComplete(t *testing.T) {
+func TestCodex_TaskCompleteKeepsTerminalSessionIdle(t *testing.T) {
 	line := `{"type":"event_msg","payload":{"type":"task_complete","last_agent_message":"Hello"}}`
 	evts := codexParse(t, line)
 	if len(evts) != 1 || evts[0].Type != "session_status" {
 		t.Fatalf("expected session_status, got %+v", evts)
 	}
-	if evts[0].Status != protocol.StatusCompleted {
+	if evts[0].Status != protocol.StatusIdle {
 		t.Errorf("got status %q", evts[0].Status)
 	}
 }

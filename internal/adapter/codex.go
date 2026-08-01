@@ -380,10 +380,10 @@ func convertCodexEventMsg(p codexPayload) []protocol.DaemonEvent {
 		}}
 
 	case "task_complete":
-		// End of a turn → mark the session as completed (idle for PTY sessions).
+		// task_complete ends one Codex turn, not the interactive terminal session.
 		return []protocol.DaemonEvent{{
 			Type:   "session_status",
-			Status: protocol.StatusCompleted,
+			Status: protocol.StatusIdle,
 		}}
 	}
 	return nil
