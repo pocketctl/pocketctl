@@ -7,7 +7,7 @@ import (
 )
 
 func TestMain(m *testing.M) {
-	testHome, err := os.MkdirTemp("/private/tmp", "pc-session-test-")
+	testHome, err := os.MkdirTemp("", "pc-session-test-")
 	if err != nil {
 		panic(err)
 	}

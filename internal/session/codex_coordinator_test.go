@@ -10,7 +10,6 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
-	"syscall"
 	"testing"
 	"time"
 
@@ -658,12 +657,11 @@ func TestCodexCoordinatorKeepsRuntimeWhenEndpointIsMissingAndTerminalIsActive(t 
 
 func TestCodexCoordinatorReplacesUnadoptableHandoffWithoutActiveTerminal(t *testing.T) {
 	oldRuntime := exec.Command("sleep", "30")
-	oldRuntime.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	if err := oldRuntime.Start(); err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() {
-		_ = syscall.Kill(-oldRuntime.Process.Pid, syscall.SIGKILL)
+		_ = oldRuntime.Process.Kill()
 		_, _ = oldRuntime.Process.Wait()
 	})
 	state := &daemon.CodexAppServerState{
