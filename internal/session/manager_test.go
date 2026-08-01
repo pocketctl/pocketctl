@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/pocketctl/pocketctl/internal/config"
 	"github.com/pocketctl/pocketctl/internal/adapter"
 	"github.com/pocketctl/pocketctl/internal/protocol"
 )
@@ -553,7 +554,7 @@ func TestSendMessage_ExitedSession_InvalidPID(t *testing.T) {
 }
 
 func TestResolveCwd(t *testing.T) {
-	home, err := os.UserHomeDir()
+	home, err := config.HomeDir()
 	if err != nil {
 		t.Fatalf("cannot get home dir: %v", err)
 	}
