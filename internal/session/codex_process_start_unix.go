@@ -137,6 +137,18 @@ func startCodexAppServerWithFactory(ctx context.Context, binary, _ string, gener
 }
 
 func codexRuntimeDir() (string, error) {
+	if configured := os.Getenv("POCKETCTL_CODEX_RUNTIME_DIR"); configured != "" {
+		if !filepath.IsAbs(configured) {
+			return "", fmt.Errorf("POCKETCTL_CODEX_RUNTIME_DIR must be an absolute path")
+		}
+		if err := os.MkdirAll(configured, 0o700); err != nil {
+			return "", err
+		}
+		if err := os.Chmod(configured, 0o700); err != nil {
+			return "", err
+		}
+		return configured, nil
+	}
 	base := os.TempDir()
 	if runtime.GOOS == "darwin" {
 		base = "/private/tmp"

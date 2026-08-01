@@ -46,6 +46,7 @@ type codexRuntimeSnapshot struct {
 }
 
 type codexRuntimeStarter func(context.Context, string, string, uint64) (*codexAppServerRuntime, error)
+type codexRuntimeProbe func(context.Context, *codexAppServerRuntime) error
 
 type codexCoordinator struct {
 	titleMu    sync.Mutex
@@ -60,6 +61,7 @@ type codexCoordinator struct {
 	generation     uint64
 	start          codexRuntimeStarter
 	adopt          func(context.Context, *daemon.CodexAppServerState) (*codexAppServerRuntime, error)
+	probe          codexRuntimeProbe
 	pumpCancel     context.CancelFunc
 	projectionMu   sync.Mutex
 	turnMu         sync.RWMutex
@@ -80,7 +82,7 @@ type codexTitleTurn struct {
 
 func newCodexCoordinator(sm *SessionManager) *codexCoordinator {
 	return &codexCoordinator{
-		sm: sm, start: startCodexAppServer, adopt: adoptCodexAppServer,
+		sm: sm, start: startCodexAppServer, adopt: adoptCodexAppServer, probe: probeCodexAppServer,
 		activeTurn: make(map[string]string), turnRevision: make(map[string]uint64), subscribed: make(map[string]struct{}), subscribing: make(map[string]struct{}), managedThreads: make(map[string]struct{}),
 	}
 }
@@ -89,7 +91,22 @@ func (c *codexCoordinator) ensureStarted(ctx context.Context, binary, version st
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.runtime != nil {
-		return c.snapshotLocked(), nil
+		if err := c.probe(ctx, c.runtime); err == nil {
+			return c.snapshotLocked(), nil
+		} else if c.sm != nil && hasActiveCodexLease(c.sm.leases.Snapshot(), c.generation) {
+			return codexRuntimeSnapshot{}, fmt.Errorf("Codex app-server endpoint is unavailable while a managed terminal is active: %w", err)
+		} else {
+			c.stopEventPumpLocked()
+			if c.runtime.Stop != nil {
+				if stopErr := c.runtime.Stop(); stopErr != nil {
+					return codexRuntimeSnapshot{}, fmt.Errorf("stop unavailable Codex app-server: %w", stopErr)
+				}
+			}
+			c.runtime = nil
+			if removeErr := daemon.RemoveCodexAppServerState(); removeErr != nil && !os.IsNotExist(removeErr) {
+				return codexRuntimeSnapshot{}, removeErr
+			}
+		}
 	}
 	var restoredThreads []string
 	state, stateErr := daemon.ReadCodexAppServerState()
@@ -116,18 +133,27 @@ func (c *codexCoordinator) ensureStarted(ctx context.Context, binary, version st
 			} else {
 				runtime, err := c.adopt(ctx, state)
 				if err != nil {
-					return codexRuntimeSnapshot{}, fmt.Errorf("adopt Codex app-server: %w", err)
-				}
-				c.runtime, c.binary, c.version, c.schemaHash = runtime, binary, version, capabilities.SchemaHash
-				c.restoreManagedThreads(state.Threads)
-				c.startEventPumpLocked()
-				if c.sm != nil {
-					c.sm.leases.Restore(state.Leases)
-					if err := c.persistLocked(); err != nil {
-						return codexRuntimeSnapshot{}, err
+					if hasActiveCodexLease(state.Leases, state.Generation) {
+						return codexRuntimeSnapshot{}, fmt.Errorf("Codex app-server endpoint is unavailable while a managed terminal is active: %w", err)
 					}
+					if stopErr := stopPersistedCodexAppServer(state); stopErr != nil {
+						return codexRuntimeSnapshot{}, fmt.Errorf("stop unavailable persisted Codex app-server: %w", stopErr)
+					}
+					if removeErr := daemon.RemoveCodexAppServerState(); removeErr != nil {
+						return codexRuntimeSnapshot{}, removeErr
+					}
+				} else {
+					c.runtime, c.binary, c.version, c.schemaHash = runtime, binary, version, capabilities.SchemaHash
+					c.restoreManagedThreads(state.Threads)
+					c.startEventPumpLocked()
+					if c.sm != nil {
+						c.sm.leases.Restore(state.Leases)
+						if err := c.persistLocked(); err != nil {
+							return codexRuntimeSnapshot{}, err
+						}
+					}
+					return c.snapshotLocked(), nil
 				}
-				return c.snapshotLocked(), nil
 			}
 		} else if err := daemon.RemoveCodexAppServerState(); err != nil {
 			return codexRuntimeSnapshot{}, err
@@ -161,6 +187,26 @@ func (c *codexCoordinator) ensureStarted(ctx context.Context, binary, version st
 		}
 	}
 	return c.snapshotLocked(), nil
+}
+
+func probeCodexAppServer(ctx context.Context, runtime *codexAppServerRuntime) error {
+	if runtime == nil || runtime.Endpoint == "" {
+		return errors.New("Codex app-server endpoint is empty")
+	}
+	info, err := os.Stat(runtime.Endpoint)
+	if err != nil {
+		return err
+	}
+	if info.Mode()&os.ModeSocket == 0 || info.Mode().Perm() != 0o600 {
+		return errors.New("Codex app-server socket must be private (0600)")
+	}
+	client, err := codexapp.DialUnix(ctx, runtime.Endpoint)
+	if err != nil {
+		return err
+	}
+	defer client.Close()
+	var initialized map[string]any
+	return client.Initialize(ctx, codexInitializeParams(), &initialized)
 }
 
 func hasActiveCodexLease(snapshot map[string]agentcontrol.Lease, generation uint64) bool {

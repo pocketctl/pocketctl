@@ -3,11 +3,14 @@ package session
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
@@ -565,6 +568,7 @@ func TestCodexCoordinatorStartsOneRuntimeForConcurrentAcquire(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	var starts atomic.Int32
 	coord := newCodexCoordinator(nil)
+	coord.probe = func(context.Context, *codexAppServerRuntime) error { return nil }
 	coord.start = func(context.Context, string, string, uint64) (*codexAppServerRuntime, error) {
 		starts.Add(1)
 		return &codexAppServerRuntime{PID: 123, Endpoint: "/tmp/codex.sock", RemoteURI: "unix:///tmp/codex.sock"}, nil
@@ -593,6 +597,104 @@ func TestCodexCoordinatorStartsOneRuntimeForConcurrentAcquire(t *testing.T) {
 		if result.Generation != 1 || result.RemoteURI != "unix:///tmp/codex.sock" || result.Binary != "/opt/codex" {
 			t.Fatalf("snapshot=%+v", result)
 		}
+	}
+}
+
+func TestCodexCoordinatorReplacesRuntimeWhenEndpointIsMissing(t *testing.T) {
+	coord := newCodexCoordinator(nil)
+	stopped := false
+	coord.runtime = &codexAppServerRuntime{
+		PID:       123,
+		Endpoint:  t.TempDir() + "/missing.sock",
+		RemoteURI: "unix:///missing.sock",
+		Stop:      func() error { stopped = true; return nil },
+	}
+	coord.binary, coord.version, coord.schemaHash, coord.generation = "/opt/codex", "0.144.1", "abc", 4
+	var startedGeneration uint64
+	coord.start = func(_ context.Context, _, _ string, generation uint64) (*codexAppServerRuntime, error) {
+		startedGeneration = generation
+		return &codexAppServerRuntime{PID: 456, Endpoint: "/tmp/new-codex.sock", RemoteURI: "unix:///tmp/new-codex.sock"}, nil
+	}
+
+	snapshot, err := coord.ensureStarted(context.Background(), "/opt/codex", "0.144.1", agentcontrol.CodexCapabilities{Core: true, TerminalRemote: true, SchemaHash: "abc"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !stopped {
+		t.Fatal("missing endpoint did not stop the old runtime")
+	}
+	if startedGeneration != 5 || snapshot.Generation != 5 || snapshot.PID != 456 {
+		t.Fatalf("started=%d snapshot=%+v", startedGeneration, snapshot)
+	}
+}
+
+func TestCodexCoordinatorKeepsRuntimeWhenEndpointIsMissingAndTerminalIsActive(t *testing.T) {
+	sm := NewSessionManager(make(chan protocol.DaemonEvent, 1))
+	coord := newCodexCoordinator(sm)
+	stopped := false
+	coord.runtime = &codexAppServerRuntime{
+		PID:       123,
+		Endpoint:  t.TempDir() + "/missing.sock",
+		RemoteURI: "unix:///missing.sock",
+		Stop:      func() error { stopped = true; return nil },
+	}
+	coord.binary, coord.version, coord.schemaHash, coord.generation = "/opt/codex", "0.144.1", "abc", 4
+	if err := sm.leases.Register(agentcontrol.Lease{ID: "active-terminal", Agent: agentcontrol.AgentCodex, PID: os.Getpid(), Generation: 4}); err != nil {
+		t.Fatal(err)
+	}
+	coord.start = func(context.Context, string, string, uint64) (*codexAppServerRuntime, error) {
+		t.Fatal("active terminal allowed an unavailable runtime to restart")
+		return nil, nil
+	}
+
+	_, err := coord.ensureStarted(context.Background(), "/opt/codex", "0.144.1", agentcontrol.CodexCapabilities{Core: true, TerminalRemote: true, SchemaHash: "abc"})
+	if err == nil || !strings.Contains(err.Error(), "managed terminal is active") {
+		t.Fatalf("err=%v want active-terminal endpoint error", err)
+	}
+	if stopped {
+		t.Fatal("active terminal did not preserve the old runtime")
+	}
+}
+
+func TestCodexCoordinatorReplacesUnadoptableHandoffWithoutActiveTerminal(t *testing.T) {
+	oldRuntime := exec.Command("sleep", "30")
+	oldRuntime.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	if err := oldRuntime.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = syscall.Kill(-oldRuntime.Process.Pid, syscall.SIGKILL)
+		_, _ = oldRuntime.Process.Wait()
+	})
+	state := &daemon.CodexAppServerState{
+		PID: oldRuntime.Process.Pid, OwnerPID: 0,
+		Endpoint: t.TempDir() + "/missing.sock", RemoteURI: "unix:///missing.sock",
+		Binary: "/opt/codex", Version: "0.144.1", SchemaHash: "abc", Generation: 7,
+		Threads: []string{"thr_recover"},
+	}
+	if err := daemon.WriteCodexAppServerState(state); err != nil {
+		t.Fatal(err)
+	}
+	coord := newCodexCoordinator(nil)
+	coord.adopt = func(context.Context, *daemon.CodexAppServerState) (*codexAppServerRuntime, error) {
+		return nil, errors.New("missing app-server socket")
+	}
+	var startedGeneration uint64
+	coord.start = func(_ context.Context, _, _ string, generation uint64) (*codexAppServerRuntime, error) {
+		startedGeneration = generation
+		return &codexAppServerRuntime{PID: 456, Endpoint: "/tmp/new-codex.sock", RemoteURI: "unix:///tmp/new-codex.sock"}, nil
+	}
+
+	snapshot, err := coord.ensureStarted(context.Background(), state.Binary, state.Version, agentcontrol.CodexCapabilities{Core: true, TerminalRemote: true, SchemaHash: state.SchemaHash})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if startedGeneration != 8 || snapshot.Generation != 8 {
+		t.Fatalf("started=%d snapshot=%+v", startedGeneration, snapshot)
+	}
+	threads := coord.managedThreadSnapshot()
+	if len(threads) != 1 || threads[0] != "thr_recover" {
+		t.Fatalf("threads=%v want persisted managed thread", threads)
 	}
 }
 

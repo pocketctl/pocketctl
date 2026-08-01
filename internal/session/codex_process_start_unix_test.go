@@ -18,6 +18,7 @@ import (
 
 func TestStartCodexAppServerWaitsForInitializedPrivateSocket(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
+	t.Setenv("POCKETCTL_CODEX_RUNTIME_DIR", shortCodexRuntimeDir(t))
 	factory := func(string, string) *exec.Cmd {
 		cmd := exec.Command(os.Args[0], "-test.run=^TestCodexAppServerHelperProcess$")
 		cmd.Env = append(os.Environ(), "POCKETCTL_CODEX_HELPER=1")
@@ -52,6 +53,7 @@ func TestCodexInitializeDoesNotOptIntoUnsupportedOpenAIForm(t *testing.T) {
 
 func TestStartCodexAppServerTimesOutWhenSocketNeverAppears(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
+	t.Setenv("POCKETCTL_CODEX_RUNTIME_DIR", shortCodexRuntimeDir(t))
 	factory := func(string, string) *exec.Cmd { return exec.Command("sh", "-c", "sleep 5") }
 	start := time.Now()
 	_, err := startCodexAppServerWithFactory(context.Background(), "/fake/codex", "0.144.1", 1, 50*time.Millisecond, factory)
@@ -60,6 +62,29 @@ func TestStartCodexAppServerTimesOutWhenSocketNeverAppears(t *testing.T) {
 	}
 	if elapsed := time.Since(start); elapsed > time.Second {
 		t.Fatalf("timeout took %v", elapsed)
+	}
+}
+
+func shortCodexRuntimeDir(t *testing.T) string {
+	t.Helper()
+	dir, err := os.MkdirTemp("/private/tmp", "pc-codex-test-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	return dir
+}
+
+func TestCodexRuntimeDirUsesConfiguredRuntimeDirectory(t *testing.T) {
+	runtimeDir := t.TempDir()
+	t.Setenv("POCKETCTL_CODEX_RUNTIME_DIR", runtimeDir)
+
+	dir, err := codexRuntimeDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if dir != runtimeDir {
+		t.Fatalf("runtime dir=%q want %q", dir, runtimeDir)
 	}
 }
 
