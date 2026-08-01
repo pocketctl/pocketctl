@@ -67,7 +67,7 @@ func TestStartCodexAppServerTimesOutWhenSocketNeverAppears(t *testing.T) {
 
 func shortCodexRuntimeDir(t *testing.T) string {
 	t.Helper()
-	dir, err := os.MkdirTemp("/private/tmp", "pc-codex-test-")
+	dir, err := os.MkdirTemp("", "pc-codex-test-")
 	if err != nil {
 		t.Fatal(err)
 	}
