@@ -161,6 +161,43 @@ func TestCodex_FunctionCallOutput(t *testing.T) {
 	}
 }
 
+func TestCodex_FunctionCallOutputArray(t *testing.T) {
+	line := `{"type":"response_item","payload":{"type":"function_call_output","call_id":"call_wait","output":[{"type":"input_text","text":"first result"},{"type":"input_text","text":"second result"}]}}`
+	evts := codexParse(t, line)
+	if len(evts) != 1 || evts[0].Type != "tool_result" {
+		t.Fatalf("expected 1 tool_result, got %+v", evts)
+	}
+	if evts[0].CallID != "call_wait" || evts[0].Output != "first result\nsecond result" {
+		t.Errorf("got CallID=%q Output=%q", evts[0].CallID, evts[0].Output)
+	}
+}
+
+func TestCodex_CustomToolCall(t *testing.T) {
+	line := `{"type":"response_item","payload":{"type":"custom_tool_call","call_id":"call_custom","name":"exec","input":"{\"cmd\":\"pwd\"}"}}`
+	evts := codexParse(t, line)
+	if len(evts) != 1 || evts[0].Type != "tool_call" {
+		t.Fatalf("expected 1 tool_call, got %+v", evts)
+	}
+	if evts[0].CallID != "call_custom" || evts[0].Tool != "exec" {
+		t.Errorf("got CallID=%q Tool=%q", evts[0].CallID, evts[0].Tool)
+	}
+	var input string
+	if err := json.Unmarshal(evts[0].Input, &input); err != nil || input != `{"cmd":"pwd"}` {
+		t.Fatalf("input=%q err=%v", evts[0].Input, err)
+	}
+}
+
+func TestCodex_CustomToolCallOutputArray(t *testing.T) {
+	line := `{"type":"response_item","payload":{"type":"custom_tool_call_output","call_id":"call_custom","output":[{"type":"input_text","text":"done"}]}}`
+	evts := codexParse(t, line)
+	if len(evts) != 1 || evts[0].Type != "tool_result" {
+		t.Fatalf("expected 1 tool_result, got %+v", evts)
+	}
+	if evts[0].CallID != "call_custom" || evts[0].Output != "done" {
+		t.Errorf("got CallID=%q Output=%q", evts[0].CallID, evts[0].Output)
+	}
+}
+
 func TestCodex_TokenCount(t *testing.T) {
 	line := `{"type":"event_msg","payload":{"type":"token_count","last_token_usage":{"input_tokens":31119,"cached_input_tokens":24448,"output_tokens":5}}}`
 	evts := codexParse(t, line)

@@ -881,6 +881,25 @@ export async function getEventsBefore(pool: pg.Pool, sessionId: string, cursor: 
   return result.rows;
 }
 
+export async function getLatestAgentPlan(pool: pg.Pool, sessionId: string): Promise<any | undefined> {
+  const result = await pool.query(
+    `SELECT id, session_id, event_type, payload, created_at
+     FROM events
+     WHERE session_id = $1 AND event_type = 'agent_plan'
+     ORDER BY
+       CASE
+         WHEN jsonb_typeof(payload->'revision') = 'number'
+          AND (payload->>'revision') ~ '^[1-9][0-9]*$'
+         THEN (payload->>'revision')::numeric
+         ELSE NULL
+       END DESC NULLS LAST,
+       id DESC
+     LIMIT 1`,
+    [sessionId],
+  );
+  return result.rows[0];
+}
+
 export interface CompleteBackwardReplayPage {
   events: any[];
   oldestId: number;

@@ -150,8 +150,12 @@ type codexPayload struct {
 	CallID    string          `json:"call_id,omitempty"`
 	Name      string          `json:"name,omitempty"`
 	Arguments json.RawMessage `json:"arguments,omitempty"`
-	// function_call_output
-	Output string `json:"output,omitempty"`
+	// custom_tool_call uses input while function_call uses arguments.
+	Input json.RawMessage `json:"input,omitempty"`
+	// function_call_output and custom_tool_call_output emit either a string or
+	// an array of text blocks. Keep the raw JSON until conversion so one shape
+	// never makes the complete response_item unparseable.
+	Output json.RawMessage `json:"output,omitempty"`
 	// event_msg subtypes
 	Message          string           `json:"message,omitempty"`            // agent_message / user_message text
 	LastAgentMessage string           `json:"last_agent_message,omitempty"` // task_complete
@@ -184,38 +188,50 @@ type codexTokenUsage struct {
 type CodexAdapter struct {
 	sessionID string
 	model     string
+	plan      *codexPlanTracker
 }
 
 // NewCodexAdapter creates an adapter for a single codex exec spawn.
-func NewCodexAdapter() *CodexAdapter { return &CodexAdapter{} }
+func NewCodexAdapter() *CodexAdapter { return NewCodexAdapterWithPlanState(nil) }
+
+// NewCodexAdapterWithPlanState reuses Plan identity across subprocess resumes
+// of the same Codex session.
+func NewCodexAdapterWithPlanState(state *CodexPlanState) *CodexAdapter {
+	if state == nil {
+		state = NewCodexPlanState()
+	}
+	return &CodexAdapter{plan: &state.tracker}
+}
 
 func (a *CodexAdapter) SessionID() string       { return a.sessionID }
 func (a *CodexAdapter) SlashCommands() []string { return nil } // codex has no slash-command surface
 
 func (a *CodexAdapter) ParseStreamLine(line string) ([]protocol.DaemonEvent, error) {
-	return parseCodexLine(line, a)
+	return parseCodexLine(line, a, a.plan)
 }
 
 // ---- CodexJSONLParser (persisted JSONL history) ----
 
-// CodexJSONLParser implements JSONLParser for Codex rollout files. Stateless
-// beyond the shared codex-line parsing (codex has no slash-command concept, so
-// SetPendingCmd is a no-op).
-type CodexJSONLParser struct{}
+// CodexJSONLParser implements JSONLParser for Codex rollout files. It retains
+// only bounded Plan identity state; Codex has no slash-command state, so
+// SetPendingCmd is a no-op.
+type CodexJSONLParser struct {
+	plan codexPlanTracker
+}
 
 func NewCodexJSONLParser() *CodexJSONLParser { return &CodexJSONLParser{} }
 
 func (p *CodexJSONLParser) SetPendingCmd(string) {} // no-op: codex has no slash commands
 
 func (p *CodexJSONLParser) Parse(line string) ([]protocol.DaemonEvent, error) {
-	return parseCodexLine(line, nil)
+	return parseCodexLine(line, nil, &p.plan)
 }
 
 // parseCodexLine is the shared converter for both stdout and JSONL lines.
 // session is non-nil when called from the streaming adapter (so it can record
 // the session id/model parsed from session_meta); nil when called from the
 // JSONL parser (events are stamped by the tailer instead).
-func parseCodexLine(line string, session *CodexAdapter) ([]protocol.DaemonEvent, error) {
+func parseCodexLine(line string, session *CodexAdapter, plan *codexPlanTracker) ([]protocol.DaemonEvent, error) {
 	line = strings.TrimSpace(line)
 	if line == "" {
 		return nil, nil
@@ -250,12 +266,12 @@ func parseCodexLine(line string, session *CodexAdapter) ([]protocol.DaemonEvent,
 	if err := json.Unmarshal(raw.Payload, &p); err != nil {
 		return nil, nil // payload shape we don't recognize — skip
 	}
-	return convertCodexPayload(raw.Type, p, session), nil
+	return convertCodexPayload(raw.Type, p, session, plan), nil
 }
 
 // convertCodexPayload maps a Codex payload to daemon events. The session
 // pointer (when non-nil) is updated with the session id / model as they're seen.
-func convertCodexPayload(topType string, p codexPayload, session *CodexAdapter) []protocol.DaemonEvent {
+func convertCodexPayload(topType string, p codexPayload, session *CodexAdapter, plan *codexPlanTracker) []protocol.DaemonEvent {
 	switch topType {
 	case "session_meta":
 		if p.ID != "" && session != nil {
@@ -276,7 +292,7 @@ func convertCodexPayload(topType string, p codexPayload, session *CodexAdapter) 
 		return nil
 
 	case "response_item":
-		return convertCodexResponseItem(p, session)
+		return convertCodexResponseItem(p, session, plan)
 
 	case "event_msg":
 		return convertCodexEventMsg(p)
@@ -288,26 +304,83 @@ func convertCodexPayload(topType string, p codexPayload, session *CodexAdapter) 
 }
 
 // convertCodexResponseItem handles the wrapped message / function_call records.
-func convertCodexResponseItem(p codexPayload, session *CodexAdapter) []protocol.DaemonEvent {
+func convertCodexResponseItem(p codexPayload, session *CodexAdapter, plan *codexPlanTracker) []protocol.DaemonEvent {
 	switch p.Type {
 	case "message":
 		return convertCodexMessage(p, session)
 	case "function_call":
-		return []protocol.DaemonEvent{{
-			Type:   "tool_call",
-			CallID: p.CallID,
-			Tool:   p.Name,
-			Input:  p.Arguments,
-		}}
+		return []protocol.DaemonEvent{codexToolCall(p.CallID, p.Name, p.Arguments)}
 	case "function_call_output":
-		out := p.Output
-		return []protocol.DaemonEvent{{
-			Type:   "tool_result",
-			CallID: p.CallID,
-			Output: out,
-		}}
+		return []protocol.DaemonEvent{codexToolResult(p.CallID, p.Output)}
+	case "custom_tool_call":
+		events := []protocol.DaemonEvent{codexToolCall(p.CallID, p.Name, p.Input)}
+		if p.CallID == "" || plan == nil {
+			return events
+		}
+		payload, err := parseCodexPlanToolCall(p.Name, p.Input)
+		if err != nil {
+			return events
+		}
+		return append(events, plan.project(p.CallID, payload))
+	case "custom_tool_call_output":
+		return []protocol.DaemonEvent{codexToolResult(p.CallID, p.Output)}
 	}
 	return nil
+}
+
+func codexToolCall(callID, name string, input json.RawMessage) protocol.DaemonEvent {
+	return protocol.DaemonEvent{
+		Type:   "tool_call",
+		CallID: callID,
+		Tool:   name,
+		Input:  input,
+	}
+}
+
+func codexToolResult(callID string, rawOutput json.RawMessage) protocol.DaemonEvent {
+	return protocol.DaemonEvent{
+		Type:   "tool_result",
+		CallID: callID,
+		Output: decodeCodexToolOutput(rawOutput),
+	}
+}
+
+// decodeCodexToolOutput normalizes Codex tool output without losing records
+// when the CLI changes between a string and an array of text blocks.
+func decodeCodexToolOutput(raw json.RawMessage) string {
+	if len(raw) == 0 || string(raw) == "null" {
+		return ""
+	}
+
+	var text string
+	if err := json.Unmarshal(raw, &text); err == nil {
+		return text
+	}
+
+	var blocks []struct {
+		Text string `json:"text"`
+	}
+	if err := json.Unmarshal(raw, &blocks); err == nil {
+		parts := make([]string, 0, len(blocks))
+		for _, block := range blocks {
+			if block.Text != "" {
+				parts = append(parts, block.Text)
+			}
+		}
+		if len(parts) > 0 {
+			return strings.Join(parts, "\n")
+		}
+	}
+
+	// Keep a valid but unfamiliar output shape visible instead of silently
+	// dropping its tool_result and leaving the client card permanently running.
+	var value any
+	if err := json.Unmarshal(raw, &value); err == nil {
+		if compact, err := json.Marshal(value); err == nil {
+			return string(compact)
+		}
+	}
+	return string(raw)
 }
 
 // convertCodexMessage maps a user/assistant message to user_text / agent_text.

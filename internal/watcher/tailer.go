@@ -460,6 +460,7 @@ func (t *JSONLTailer) Run(ctx context.Context, outputCh chan<- protocol.DaemonEv
 				if evt.SessionID == "" {
 					evt.SessionID = sid
 				}
+				protocol.FinalizeAgentPlanEvent(&evt)
 				outputCh <- evt
 			}
 
@@ -600,6 +601,11 @@ func (t *SubAgentTailer) TailNewLines() ([]protocol.DaemonEvent, error) {
 		// Codex task_complete describes the child turn, not the root session.
 		// Forwarding it as session_status would incorrectly complete the parent.
 		if t.dropChildStatus && events[i].Type == "session_status" {
+			continue
+		}
+		// A child rollout has no independent client Plan surface in phase one.
+		// Never stamp its snapshot with the parent session id.
+		if events[i].Type == "agent_plan" {
 			continue
 		}
 		events[i].SessionID = t.parentSessionID

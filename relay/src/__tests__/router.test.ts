@@ -790,6 +790,33 @@ describe('Router - event insertion updates last_activity_at', () => {
     expect(inserts.some((q: any) => q.params[1] === 'agent_text' && q.params[2]?.includes('"replace":true'))).toBe(true)
     expect(inserts.some((q: any) => q.params[1] === 'agent_patch' && q.params[2]?.includes('"files":["a.go","b.go"]'))).toBe(true)
   })
+
+  test('Codex plan snapshots are persisted and broadcast unchanged', async () => {
+    const daemonWs = createMockWs()
+    await router.registerDaemon(daemonWs, { type: 'register', daemon_id: 'daemon-1', hostname: 'test', agents: ['codex'] }, 1)
+    const clientWs = createMockWs()
+    router.registerClient(clientWs, 1)
+    await router.handleClientMessage(clientWs, { type: 'replay', session_id: 'test-sid', last_seq: 0 })
+    clientWs._sent.length = 0
+
+    const plan = {
+      type: 'agent_plan', session_id: 'test-sid', part_id: 'plan:test-sid', revision: 2,
+      event_id: 'plan:2', previous_event_id: 'plan:1', explanation: 'Continuing',
+      plan: [
+        { step: 'Protocol', status: 'completed' },
+        { step: 'Web panel', status: 'in_progress' },
+      ],
+    }
+
+    router.handleDaemonMessage('daemon-1', plan)
+    await tick()
+
+    expect(clientWs._sent).toContainEqual(plan)
+    const insert = pool._queries.find((query: any) =>
+      query.sql.includes('INSERT INTO events') && query.params[1] === 'agent_plan'
+    )
+    expect(JSON.parse(insert.params[2])).toEqual(plan)
+  })
 })
 
 describe('Router - list_sessions includes extended fields', () => {

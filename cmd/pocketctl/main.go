@@ -2522,6 +2522,7 @@ func handleWatcherEvents(ctx context.Context, events <-chan watcher.SessionEvent
 								if events[i].SessionID == "" {
 									events[i].SessionID = evt.Session.SessionID
 								}
+								protocol.FinalizeAgentPlanEvent(&events[i])
 								if agentType == adapter.AgentClaude && events[i].Type == "sync_warning" {
 									_ = agentcontrol.RecordClaudeJSONLWarning(events[i].Reason)
 								}

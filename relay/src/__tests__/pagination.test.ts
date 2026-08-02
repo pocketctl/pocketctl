@@ -1,6 +1,6 @@
 import { describe, test, expect, vi, beforeEach } from 'vitest'
 import { Router } from '../router.js'
-import { getCompleteBackwardReplayPage, getRecentEvents, getEventsBefore, getRecentSubagentEvents, getSubagentEventsBefore } from '../db.js'
+import { getCompleteBackwardReplayPage, getLatestAgentPlan, getRecentEvents, getEventsBefore, getRecentSubagentEvents, getSubagentEventsBefore } from '../db.js'
 
 // Reusable mocks (mirror router.test.ts patterns)
 function createMockPool() {
@@ -10,16 +10,19 @@ function createMockPool() {
   // mockImplementationOnce (it would be consumed by the ownership check). Set the
   // replay payload via _setReplayRows instead.
   let replayRows: any[] = []
+  let latestTypedRow: any | undefined
   const mockPool = {
     query: vi.fn((sql: string, params?: any[]) => {
       queries.push({ sql, params: params || [] })
       if (sql.includes('SELECT 1 FROM sessions')) return Promise.resolve({ rows: [{ '?column?': 1 }], rowCount: 1 })
       if (sql.includes('SELECT 1 FROM events')) return Promise.resolve({ rows: [] })
+      if (sql.includes("event_type = 'agent_plan'")) return Promise.resolve({ rows: latestTypedRow ? [latestTypedRow] : [] })
       if (sql.includes('FROM events')) return Promise.resolve({ rows: replayRows })
       return Promise.resolve({ rows: [], rowCount: 0 })
     }),
     _queries: queries,
     _setReplayRows: (rows: any[]) => { replayRows = rows },
+    _setLatestTypedRow: (row: any | undefined) => { latestTypedRow = row },
     connect: vi.fn(),
     end: vi.fn(),
   }
@@ -173,6 +176,25 @@ describe('db - complete backward replay pages', () => {
   })
 })
 
+describe('db - latest event by type', () => {
+  test('orders Plan snapshots by validated semantic revision before database id', async () => {
+    const pool = createMockPool()
+    const plan = { id: 17, event_type: 'agent_plan', payload: { type: 'agent_plan', revision: 3 } }
+    pool._setLatestTypedRow(plan)
+
+    await expect(getLatestAgentPlan(pool, 'sess-1')).resolves.toEqual(plan)
+    expect(pool.query).toHaveBeenCalledWith(
+      expect.stringContaining("event_type = 'agent_plan'"),
+      ['sess-1'],
+    )
+    const query = pool.query.mock.calls.find(([sql]: [string, any[]]) => sql.includes("event_type = 'agent_plan'"))?.[0]
+    expect(query).toContain("jsonb_typeof(payload->'revision') = 'number'")
+    expect(query).toContain("(payload->>'revision') ~ '^[1-9][0-9]*$'")
+    expect(query).toContain("(payload->>'revision')::numeric")
+    expect(query).toMatch(/DESC NULLS LAST,\s*id DESC\s*LIMIT 1/)
+  })
+})
+
 // --- 6.3 router unit tests: handleReplay direction routing + has_more ---
 describe('Router - replay pagination (session-history-pagination 6.3)', () => {
   let pool: any
@@ -211,6 +233,34 @@ describe('Router - replay pagination (session-history-pagination 6.3)', () => {
     expect(pool.query.mock.calls.some(([sql]: [string]) => sql.includes('ORDER BY id DESC LIMIT') && !sql.includes('id <'))).toBe(true)
     const batch = clientWs._sent.find((message: any) => message.type === 'replay_batch')
     expect(batch.events.map((event: any) => event.text)).toEqual(Array.from({ length: 50 }, (_, index) => `m${49 - index}`))
+  })
+
+  test('initial backward replay supplements the latest plan without changing the history cursor', async () => {
+    const clientWs = createMockWs()
+    router.registerClient(clientWs, 1)
+    pool._setReplayRows([
+      { id: 102, payload: { type: 'agent_text', text: 'newer' } },
+      { id: 101, payload: { type: 'agent_text', text: 'older' } },
+    ])
+    pool._setLatestTypedRow({
+      id: 40,
+      payload: {
+        type: 'agent_plan', session_id: 'sess-1', part_id: 'plan:sess-1', revision: 4,
+        plan: [{ step: 'Implement UI', status: 'in_progress' }],
+      },
+    })
+
+    router.handleClientMessage(clientWs, {
+      type: 'replay', session_id: 'sess-1', direction: 'backward', limit: 2, req_id: 7,
+    })
+    await new Promise(r => setTimeout(r, 50))
+
+    const replayed = clientWs._sent
+      .filter((message: any) => message.type === 'replay_batch')
+      .flatMap((message: any) => message.events)
+    expect(replayed.map((event: any) => event.type)).toEqual(['agent_plan', 'agent_text', 'agent_text'])
+    const end = clientWs._sent.find((message: any) => message.type === 'replay_end')
+    expect(end).toMatchObject({ req_id: 7, count: 3, logical_count: 2, last_seq: 101 })
   })
 
   test('subagent replay returns only requested agent events with backward pagination metadata', async () => {

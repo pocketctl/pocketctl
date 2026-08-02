@@ -2092,6 +2092,12 @@ export class Router {
         logicalCount = page.logicalCount;
         replayLastSeq = page.oldestId;
         hasMore = page.hasMore;
+        if (!lastSeq || lastSeq <= 0) {
+          const latestPlan = await db.getLatestAgentPlan(this.pool, sessionId);
+          if (latestPlan && !events.some(event => event.id === latestPlan.id)) {
+            events = [...events, latestPlan].sort((left, right) => left.id - right.id);
+          }
+        }
       } else {
         events = await db.getEventsAfter(this.pool, sessionId, lastSeq);
       }

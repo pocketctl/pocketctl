@@ -56,6 +56,11 @@ for (const script of requiredScripts) {
   assert.ok(mirrored.has(script), `workflow dependency is absent from public mirror: ${script}`)
 }
 
+assert.ok(
+  mirrored.has('scripts/lib/github-sync-retry.sh'),
+  'GitHub sync retry library is absent from the public mirror',
+)
+
 const mirrorCovers = (relativePath) =>
   [...mirrored].some(
     (entry) => relativePath === entry || relativePath.startsWith(`${entry}/`),

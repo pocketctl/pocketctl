@@ -4,6 +4,8 @@ import { ref } from 'vue'
 import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 import SessionDetail from '../SessionDetail.vue'
+import { resetAgentPlanProgressForTests } from '../../composables/useAgentPlanProgress'
+import PlanSidePanel from '../../components/plan/PlanSidePanel.vue'
 
 const websocketMock = vi.hoisted(() => ({ handlers: new Map<string, (message: any) => void>() }))
 
@@ -30,6 +32,50 @@ vi.mock('../../composables/useSessionRename', () => ({
 }))
 
 describe('SessionDetail processEvent integration', () => {
+  test('reduces live and replayed agent plans outside the chat timeline', () => {
+    resetAgentPlanProgressForTests()
+    const wrapper = shallowMount(SessionDetail)
+    const vm = wrapper.vm as any
+
+    vm.processEvent({
+      type: 'agent_plan', session_id: 'ses_1', event_id: 'plan-2', previous_event_id: 'plan-1', revision: 2,
+      plan: [{ step: 'Build Web panel', status: 'in_progress' }],
+    })
+    vm.processEvent({
+      type: 'agent_plan', session_id: 'ses_1', event_id: 'plan-1', revision: 1,
+      plan: [{ step: 'Old state', status: 'pending' }],
+    })
+
+    expect(vm.messages).toEqual([])
+    expect(vm.currentPlan).toMatchObject({ eventId: 'plan-2', revision: 2 })
+    expect(vm.currentPlan.items[0]).toEqual({ step: 'Build Web panel', status: 'in_progress' })
+  })
+
+  test('opens and closes the desktop plan panel from the session toolbar', async () => {
+    resetAgentPlanProgressForTests()
+    localStorage.removeItem('pocketctl_plan_panel_open')
+    const wrapper = shallowMount(SessionDetail)
+    const vm = wrapper.vm as any
+    vm.allSessions = [{ session_id: 'ses_1', daemon_id: 'daemon-1', status: 'running' }]
+
+    vm.processEvent({
+      type: 'agent_plan', session_id: 'ses_1', event_id: 'plan-1', revision: 1,
+      plan: [{ step: 'Show the panel', status: 'in_progress' }],
+    })
+    await wrapper.vm.$nextTick()
+
+    expect(wrapper.findComponent(PlanSidePanel).exists()).toBe(false)
+    const button = wrapper.get('.plan-toolbar-button')
+    expect(button.attributes('aria-expanded')).toBe('false')
+    await button.trigger('click')
+    expect(wrapper.findComponent(PlanSidePanel).exists()).toBe(true)
+    expect(button.attributes('aria-expanded')).toBe('true')
+
+    wrapper.findComponent(PlanSidePanel).vm.$emit('close')
+    await wrapper.vm.$nextTick()
+    expect(wrapper.findComponent(PlanSidePanel).exists()).toBe(false)
+  })
+
   test('keeps backward replay batches in relay chronological order', () => {
     const wrapper = shallowMount(SessionDetail)
     const handler = websocketMock.handlers.get('replay_batch')!
@@ -43,6 +89,30 @@ describe('SessionDetail processEvent integration', () => {
     })
 
     expect((wrapper.vm as any).messages.map((message: any) => message.content)).toEqual(['older', 'newer'])
+  })
+
+  test('marks an unresolved replayed tool unknown after idle replay completion', () => {
+    const wrapper = shallowMount(SessionDetail)
+    const batch = websocketMock.handlers.get('replay_batch')!
+    const end = websocketMock.handlers.get('replay_end')!
+    const vm = wrapper.vm as any
+
+    batch({
+      type: 'replay_batch', session_id: 'ses_1',
+      events: [{ type: 'tool_call', call_id: 'missing-result', tool: 'wait', input: '{}' }],
+    })
+    vm.processEvent({ type: 'session_status', status: 'idle' })
+    end({ type: 'replay_end', session_id: 'ses_1' })
+
+    expect(vm.messages.find((message: any) => message.call_id === 'missing-result')).toMatchObject({
+      status: 'unknown',
+    })
+
+    vm.processEvent({ type: 'tool_result', call_id: 'missing-result', output: 'received later' })
+
+    expect(vm.messages.find((message: any) => message.call_id === 'missing-result')).toMatchObject({
+      status: 'completed', output: 'received later',
+    })
   })
 
   test('consumes the shared OpenCode release contract with request and Part deduplication', () => {

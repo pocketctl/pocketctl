@@ -281,6 +281,7 @@ func (sm *SessionManager) createCodexExecSession(ctx context.Context, sessionID,
 		Model:          displayModel,
 		WorktreePath:   worktreePath,
 		WorktreeBranch: worktreeBranch,
+		CodexPlanState: adapter.NewCodexPlanState(),
 	}
 	sm.mu.Lock()
 	sm.sessions[sessionID] = ps
@@ -300,7 +301,7 @@ func (sm *SessionManager) createCodexExecSession(ctx context.Context, sessionID,
 	if config.Prompt != "" {
 		sm.outputCh <- protocol.DaemonEvent{Type: "user_text", SessionID: sessionID, Text: config.Prompt}
 	}
-	go sm.readOutput(ctx, cmd, stdout, adapter.NewCodexAdapter(), ps)
+	go sm.readOutput(ctx, cmd, stdout, adapter.NewCodexAdapterWithPlanState(ps.CodexPlanState), ps)
 	return sessionID, nil
 }
 

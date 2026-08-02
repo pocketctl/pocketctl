@@ -21,7 +21,19 @@
     </div>
 
     <button
-      v-if="showNewSession"
+      v-if="showPlan"
+      type="button"
+      :class="['mobile-topbar-action', 'mobile-plan-action', { active: planOpen, complete: planComplete }]"
+      :aria-label="planLabel"
+      :aria-expanded="planOpen"
+      @click="$emit('open-plan')"
+    >
+      <svg viewBox="0 0 24 24" aria-hidden="true">
+        <path d="m4 6 2 2 4-4M12 6h8M4 13l2 2 4-4M12 13h8M4 20l2 2 4-4M12 20h8" />
+      </svg>
+    </button>
+    <button
+      v-else-if="showNewSession"
       type="button"
       class="mobile-topbar-action"
       :aria-label="t('session.new_session')"
@@ -45,9 +57,13 @@ const props = defineProps<{
   reconnecting: boolean
   isSession: boolean
   showNewSession: boolean
+  showPlan?: boolean
+  planLabel?: string
+  planOpen?: boolean
+  planComplete?: boolean
 }>()
 
-defineEmits<{ (event: 'new-session'): void }>()
+defineEmits<{ (event: 'new-session'): void; (event: 'open-plan'): void }>()
 
 const router = useRouter()
 const { t } = useLocale()
@@ -112,6 +128,8 @@ const connectionLabel = computed(() => props.connected
   stroke-width: 2;
   stroke-linecap: round;
 }
+.mobile-plan-action.active { color: var(--accent); background: var(--accent-muted); }
+.mobile-plan-action.complete { color: var(--success); }
 .mobile-connection {
   display: flex;
   align-items: center;

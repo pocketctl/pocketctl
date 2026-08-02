@@ -49,7 +49,13 @@ if [[ -d ios ]] && command -v swift >/dev/null 2>&1 && command -v swiftc >/dev/n
     swift_test_dir="$(mktemp -d)"
     trap 'rm -rf "$swift_test_dir"' EXIT
     swiftc \
+      ios/Pocketctl/Models/AgentPlan.swift \
+      ios/Tests/AgentPlanRegressionTests.swift \
+      -o "$swift_test_dir/AgentPlanRegressionTests"
+    "$swift_test_dir/AgentPlanRegressionTests"
+    swiftc \
       ios/Pocketctl/Models/ChatMessage.swift \
+      ios/Pocketctl/Models/AgentPlan.swift \
       ios/Pocketctl/Models/AgentPermissionConfig.swift \
       ios/Pocketctl/Models/OpenCodeInteraction.swift \
       ios/Pocketctl/Models/Session.swift \

@@ -21,6 +21,21 @@ export const agentEventContracts = [
   },
   {
     agent: 'codex',
+    name: 'structured plan snapshot',
+    expectedPriority: 'live',
+    payload: {
+      type: 'agent_plan', session_id: 'thr_root', part_id: 'plan:thr_root',
+      event_id: 'codex:plan:call_2', previous_event_id: 'codex:plan:call_1', revision: 2,
+      explanation: 'Starting the UI',
+      plan: [
+        { step: 'Define protocol', status: 'completed' },
+        { step: 'Implement UI', status: 'in_progress' },
+      ],
+      seq: 14,
+    },
+  },
+  {
+    agent: 'codex',
     name: 'subagent historical content',
     expectedPriority: 'replay',
     payload: {

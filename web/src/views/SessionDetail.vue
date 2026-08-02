@@ -105,6 +105,17 @@
           <svg aria-hidden="true" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 3v3M12 18v3M3 12h3M18 12h3M5.64 5.64l2.12 2.12M16.24 16.24l2.12 2.12M18.36 5.64l-2.12 2.12M7.76 16.24l-2.12 2.12"/><circle cx="12" cy="12" r="3"/></svg>
           <span class="effort-prefix">{{ t('session.effort_short') }} · </span>{{ effortLabel }}
         </span>
+        <button
+          v-if="currentPlan && !focusedSubAgentId"
+          type="button"
+          :class="['plan-toolbar-button', { active: planPanelOpen, complete: planCompleted === currentPlan.items.length }]"
+          :aria-label="planButtonLabel"
+          :aria-expanded="planPanelOpen"
+          @click="togglePlanPanel"
+        >
+          <svg viewBox="0 0 20 20" aria-hidden="true"><path d="m3.5 5 1.5 1.5L8 3.5M10 5h6M3.5 11 5 12.5 8 9.5M10 11h6M3.5 17 5 18.5l3-3M10 17h6" /></svg>
+          <span>{{ planCompleted }}/{{ currentPlan.items.length }}</span>
+        </button>
         <div class="session-id-box">
           <code class="session-id-text">{{ sessionId?.slice(0, 8) }}</code>
           <button class="copy-btn" @click="copySessionId" :title="copied ? t('common.copied') : t('session.actions.copy_id')">
@@ -427,6 +438,12 @@
       </div>
       </template><!-- /v-else hasNoSessions -->
     </div>
+    <PlanSidePanel
+      v-if="currentPlan && planPanelOpen && !focusedSubAgentId"
+      :plan="currentPlan"
+      :connected="connected !== false"
+      @close="closePlanPanel"
+    />
   </div>
 
   <NewSessionDialog
@@ -452,6 +469,7 @@ import { formatRelativeTime } from '../composables/useRelativeTime'
 import { mergeLocalCommands, POCKETCTL_LOCAL_COMMANDS } from '../utils/commands'
 import { mergeRevisionedPart } from '../utils/opencodePartMerge'
 import { mergeStructuredPart, type OpenCodeStructuredType } from '../utils/opencodeStructuredMerge'
+import { reconcileUnresolvedTools } from '../utils/toolState'
 import SessionActions from '../components/SessionActions.vue'
 import AgentBadge from '../components/AgentBadge.vue'
 import CommandPopover from '../components/CommandPopover.vue'
@@ -488,6 +506,9 @@ import { canSendClaudeSession } from '../utils/claudeSessionControl'
 import { resolveSessionComposerState } from '../utils/sessionComposerPolicy'
 import { ContentStreamAssembler } from '../utils/contentStream'
 import { ReplayPageBuffer } from '../utils/replayPageBuffer'
+import { useAgentPlanProgress } from '../composables/useAgentPlanProgress'
+import PlanSidePanel from '../components/plan/PlanSidePanel.vue'
+import { completedPlanItemCount } from '../utils/agentPlanMerge'
 
 const { renamingId, renameInput, startRename, commitRename, cancelRename } = useSessionRename()
 
@@ -498,6 +519,19 @@ const { connect, send, onEvent, connected, reconnecting } = useWebSocket()
 const { t } = useLocale()
 
 const sessionId = computed(() => route.params.id as string)
+const { acceptAgentPlan, planForSession } = useAgentPlanProgress()
+const currentPlan = planForSession(sessionId)
+const planPanelOpen = ref(localStorage.getItem('pocketctl_plan_panel_open') === 'true')
+const planCompleted = computed(() => currentPlan.value ? completedPlanItemCount(currentPlan.value) : 0)
+const planButtonLabel = computed(() => currentPlan.value
+  ? t('plan.open', { completed: planCompleted.value, total: currentPlan.value.items.length })
+  : '')
+function setPlanPanelOpen(open: boolean) {
+  planPanelOpen.value = open
+  localStorage.setItem('pocketctl_plan_panel_open', String(open))
+}
+function togglePlanPanel() { setPlanPanelOpen(!planPanelOpen.value) }
+function closePlanPanel() { setPlanPanelOpen(false) }
 const messages = ref<any[]>([])
 const openCodeStructuredTypes = new Set<OpenCodeStructuredType>(['agent_file', 'agent_patch', 'agent_todo', 'agent_subtask', 'agent_profile'])
 function isOpenCodeStructuredType(type: string): type is OpenCodeStructuredType {
@@ -1247,6 +1281,13 @@ function clearAllToolTimeouts() {
   toolTimeouts.clear()
 }
 
+function reconcileVisibleUnresolvedTools(sessionStatus: string) {
+  reconcileUnresolvedTools(messages.value, sessionStatus)
+  for (const childMessages of Object.values(subagentMessages.value)) {
+    reconcileUnresolvedTools(childMessages, sessionStatus)
+  }
+}
+
 // Local-command whitelist: handled entirely in the browser, never sent to the
 // daemon PTY. NOT sourced from commandsCache — these builtins are filtered out
 // of command_list by the agent's init event in daemon sessions, so relying on
@@ -1672,6 +1713,10 @@ function isDuplicate(type: string, text: string, target = messages.value): boole
 
 function processEvent(evt: any, target: any[] = messages.value, subagentOverride?: Record<string, any[]>) {
   const type = evt.type || evt.event_type
+  if (type === 'agent_plan') {
+    if (!evt.agent_id && !evt.payload?.agent_id) acceptAgentPlan(evt)
+    return
+  }
   // P2: route sub-agent events to per-agent buckets; parent events keep default target
   target = resolveAgentTarget(evt, subagentOverride ?? subagentMessages.value, target)
   if (type === 'user_text') {
@@ -2288,6 +2333,7 @@ onMounted(() => {
         resumeStartAt = null
       }
     }
+    reconcileVisibleUnresolvedTools(status.value)
   }))
 
   cleanups.push(onEvent('user_message_ack', (msg: any) => {
@@ -2328,6 +2374,11 @@ onMounted(() => {
     if (msg.session_id !== sessionId.value) return
     processEvent(msg)
     nextTick(scrollToBottom)
+  }))
+
+  cleanups.push(onEvent('agent_plan', (msg: any) => {
+    if (msg.session_id !== sessionId.value) return
+    processEvent(msg)
   }))
 
   for (const eventType of ['agent_reasoning', 'agent_retry', 'agent_compaction', ...openCodeStructuredTypes]) {
@@ -2453,7 +2504,12 @@ onMounted(() => {
       ls.statusEffective = msg.status
       ls.last_activity_at = new Date().toISOString()
     }
-    if (msg.session_id === sessionId.value) { status.value = msg.status; if (msg.exit_reason) exitReason.value = msg.exit_reason; if (msg.exited_at) exitedAt.value = msg.exited_at }
+    if (msg.session_id === sessionId.value) {
+      status.value = msg.status
+      reconcileVisibleUnresolvedTools(msg.status)
+      if (msg.exit_reason) exitReason.value = msg.exit_reason
+      if (msg.exited_at) exitedAt.value = msg.exited_at
+    }
   }))
 
   cleanups.push(onEvent('permission_config_changed', (msg: any) => {
@@ -2617,6 +2673,11 @@ onMounted(() => {
 .chat-toolbar .session-label { font-size: 14px; font-weight: 600; color: var(--fg); flex: 1; display: flex; align-items: center; gap: 8px; }
 .chat-toolbar .session-label .daemon-name { font-size: 12px; color: var(--fg-tertiary); font-weight: 400; }
 .chat-toolbar .session-label .focus-breadcrumb { font-size: 13px; font-weight: 600; color: var(--accent); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.plan-toolbar-button { min-height: 32px; display: inline-flex; align-items: center; gap: 5px; padding: 4px 8px; border: 1px solid var(--border); border-radius: var(--radius-md); color: var(--fg-secondary); background: transparent; font: 600 11px/1 var(--font-mono); cursor: pointer; }
+.plan-toolbar-button:hover { color: var(--fg); background: var(--surface-hover); }
+.plan-toolbar-button.active { border-color: var(--accent); color: var(--accent); background: var(--accent-muted); }
+.plan-toolbar-button.complete { color: var(--success); }
+.plan-toolbar-button svg { width: 15px; height: 15px; fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; }
 .status-pill { display: inline-flex; align-items: center; gap: 5px; padding: 4px 10px; border-radius: var(--radius-full); font-size: 12px; font-weight: 600; }
 .status-pill.running { background: var(--success-bg); color: var(--success); }
 .status-pill .pulse { width: 6px; height: 6px; border-radius: 50%; background: currentColor; animation: pulse-green 1.5s infinite; }

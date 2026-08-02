@@ -133,6 +133,7 @@ func (sm *SessionManager) readOutput(ctx context.Context, cmd *exec.Cmd, stdout 
 			if evt.SessionID == "" {
 				evt.SessionID = ps.SessionID
 			}
+			protocol.FinalizeAgentPlanEvent(&evt)
 			if evt.Effort != "" {
 				sm.SetSessionEffort(ps.SessionID, evt.Effort)
 			}
@@ -319,7 +320,7 @@ func (sm *SessionManager) SendMessage(ctx context.Context, sessionID string, con
 		return fmt.Errorf("start process: %w", err)
 	}
 
-	adp := adapter.NewAdapter(agentType, content)
+	adp := sm.newStreamAdapter(ps, agentType, content)
 	sm.mu.Lock()
 	ps.Cmd = cmd
 	ps.Cancel = cancel
@@ -398,7 +399,7 @@ func (sm *SessionManager) sendToIdleTerminal(ctx context.Context, ps *ProcessSta
 		return fmt.Errorf("start --resume: %w", err)
 	}
 
-	adp := adapter.NewAdapter(agentType, content)
+	adp := sm.newStreamAdapter(ps, agentType, content)
 	now := time.Now()
 	sm.mu.Lock()
 	ps.Cmd = cmd
@@ -444,6 +445,7 @@ func (sm *SessionManager) sendToIdleTerminal(ctx context.Context, ps *ProcessSta
 				if evt.SessionID == "" {
 					evt.SessionID = ps.SessionID
 				}
+				protocol.FinalizeAgentPlanEvent(&evt)
 				sm.ObservePermissionEvent(evt)
 				sm.outputCh <- evt
 			}
@@ -470,4 +472,32 @@ func (sm *SessionManager) sendToIdleTerminal(ctx context.Context, ps *ProcessSta
 	}()
 
 	return nil
+}
+
+func (sm *SessionManager) newStreamAdapter(ps *ProcessState, agentType, prompt string) adapter.AgentAdapter {
+	if agentType != adapter.AgentCodex {
+		return adapter.NewAdapter(agentType, prompt)
+	}
+
+	sm.mu.Lock()
+	state := ps.CodexPlanState
+	sessionID := ps.SessionID
+	cwd := ps.Cwd
+	sm.mu.Unlock()
+	if state == nil {
+		state = adapter.NewCodexPlanState()
+		if rollout, err := adapter.ResolveJSONLPathFor(adapter.AgentCodex, sessionID, cwd); err == nil {
+			if restored, restoreErr := adapter.LoadCodexPlanState(rollout); restoreErr == nil {
+				state = restored
+			}
+		}
+		sm.mu.Lock()
+		if ps.CodexPlanState == nil {
+			ps.CodexPlanState = state
+		} else {
+			state = ps.CodexPlanState
+		}
+		sm.mu.Unlock()
+	}
+	return adapter.NewCodexAdapterWithPlanState(state)
 }

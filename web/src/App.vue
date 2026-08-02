@@ -70,6 +70,7 @@
       :show-bottom-nav="!isSessionRoute"
       :show-new-session="route.path === '/sessions'"
       :session-count="sessionCount"
+      :plan="mobileCurrentPlan"
       @new-session="triggerNewSession++"
     />
     <PwaUpdateBanner />
@@ -115,6 +116,7 @@ import TopbarGithubLink from './components/TopbarGithubLink.vue'
 import PwaUpdateBanner from './components/pwa/PwaUpdateBanner.vue'
 import logoDark from './assets/logo-github-org.svg'
 import logoLight from './assets/logo-github-org-light.svg'
+import { useAgentPlanProgress } from './composables/useAgentPlanProgress'
 
 const route = useRoute()
 const { isLoggedIn, user } = useAuth()
@@ -123,6 +125,10 @@ const { connected, reconnecting } = useWebSocket()
 const { isMobile } = useResponsiveLayout()
 const showMobileShell = computed(() => isLoggedIn.value && isPwaMobileShellEnabled() && isMobile.value)
 const isSessionRoute = computed(() => route.path.startsWith('/session/'))
+const { planForSession } = useAgentPlanProgress()
+const mobileCurrentPlan = planForSession(computed(() =>
+  isSessionRoute.value && !route.query.subagent ? String(route.params.id || '') : '',
+))
 function toggleLocale() { setLocale(locale.value === 'zh' ? 'en' : 'zh') }
 
 const triggerNewSession = ref(0)

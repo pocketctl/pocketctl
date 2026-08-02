@@ -95,6 +95,7 @@
   "session.stop_daemon_unreachable": "Daemon reconnecting — click again to force-kill",
   "session.stop_session_not_found": "Session no longer exists (may have been purged)",
   "session.tool_timeout": "Timed out (no result received)",
+  "session.tool_result_unknown": "Result unavailable",
   "session.opencode_reasoning": "Reasoning",
   "session.opencode_reasoning_live": "Thinking",
   "session.opencode_retry": "Retrying request (attempt {{n}})",
@@ -554,5 +555,17 @@
   "token.incl_subagent": "Total includes sub-agent tokens",
   "token.incl_subagent_short": "incl. subagent",
   "token.subagent_breakdown": "Sub-agent breakdown",
-  "token.subagent_col": "Sub-agent"
+  "token.subagent_col": "Sub-agent",
+  "plan.title": "Execution plan",
+  "plan.open": "Open execution plan, {{completed}} of {{total}} complete",
+  "plan.close": "Close execution plan",
+  "plan.expand_sheet": "Expand execution plan",
+  "plan.collapse_sheet": "Collapse execution plan",
+  "plan.progress_count": "{{completed}} / {{total}} complete",
+  "plan.progress_aria": "Plan completion progress",
+  "plan.last_sync": "Offline — showing the last synced plan state",
+  "plan.step_aria": "{{status}}: {{step}}",
+  "plan.status.pending": "Pending",
+  "plan.status.in_progress": "In progress",
+  "plan.status.completed": "Completed"
 }

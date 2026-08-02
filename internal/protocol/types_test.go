@@ -172,6 +172,57 @@ func TestContentStreamEventRoundTrip(t *testing.T) {
 	}
 }
 
+func TestAgentPlanEventRoundTripPreservesStructuredSnapshot(t *testing.T) {
+	event := DaemonEvent{
+		Type:            "agent_plan",
+		SessionID:       "session-1",
+		PartID:          "plan:session-1",
+		EventID:         "codex:plan:call-2",
+		PreviousEventID: "codex:plan:call-1",
+		Revision:        2,
+		Explanation:     "Implement the clients",
+		Plan: []PlanItem{
+			{Step: "Parse Codex plan", Status: PlanCompleted},
+			{Step: "Render Web panel", Status: PlanInProgress},
+			{Step: "Render iOS sheet", Status: PlanPending},
+		},
+	}
+	raw, err := json.Marshal(event)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var decoded DaemonEvent
+	if err := json.Unmarshal(raw, &decoded); err != nil {
+		t.Fatal(err)
+	}
+	if decoded.Explanation != event.Explanation || len(decoded.Plan) != 3 ||
+		decoded.Plan[1].Step != "Render Web panel" || decoded.Plan[1].Status != PlanInProgress {
+		t.Fatalf("plan snapshot did not round-trip: %+v", decoded)
+	}
+	for _, status := range []string{PlanPending, PlanInProgress, PlanCompleted} {
+		if !ValidPlanStatus(status) {
+			t.Fatalf("known plan status rejected: %q", status)
+		}
+	}
+	if ValidPlanStatus("cancelled") {
+		t.Fatal("unknown plan status accepted")
+	}
+}
+
+func TestFinalizeAgentPlanEventUsesTheResolvedSessionID(t *testing.T) {
+	event := DaemonEvent{Type: "agent_plan", SessionID: "session-1", PartID: "stale"}
+	FinalizeAgentPlanEvent(&event)
+	if event.PartID != "plan:session-1" {
+		t.Fatalf("part_id = %q", event.PartID)
+	}
+
+	ordinary := DaemonEvent{Type: "agent_text", SessionID: "session-1", PartID: "text-1"}
+	FinalizeAgentPlanEvent(&ordinary)
+	if ordinary.PartID != "text-1" {
+		t.Fatalf("ordinary event identity changed: %+v", ordinary)
+	}
+}
+
 func TestPermissionConfigJSON(t *testing.T) {
 	msg := ClientMessage{Type: "session_create", Agent: "codex", Permission: &PermissionConfig{Agent: "codex", Preset: "custom", ApprovalPolicy: "never", SandboxMode: "workspace-write"}}
 	b, err := json.Marshal(msg)

@@ -95,6 +95,7 @@
   "session.stop_daemon_unreachable": "Daemon 正在重连，可再次点击强制终止",
   "session.stop_session_not_found": "会话已不存在（可能已被清理）",
   "session.tool_timeout": "已超时（未收到结果）",
+  "session.tool_result_unknown": "结果未确认",
   "session.opencode_reasoning": "思考过程",
   "session.opencode_reasoning_live": "思考中",
   "session.opencode_retry": "正在重试请求（第 {{n}} 次）",
@@ -554,5 +555,17 @@
   "token.incl_subagent": "总额含子代理 token",
   "token.incl_subagent_short": "含子",
   "token.subagent_breakdown": "子代理拆分",
-  "token.subagent_col": "子代理"
+  "token.subagent_col": "子代理",
+  "plan.title": "执行计划",
+  "plan.open": "打开执行计划，已完成 {{completed}}/{{total}}",
+  "plan.close": "关闭执行计划",
+  "plan.expand_sheet": "展开执行计划",
+  "plan.collapse_sheet": "收起执行计划",
+  "plan.progress_count": "已完成 {{completed}} / {{total}}",
+  "plan.progress_aria": "计划完成进度",
+  "plan.last_sync": "当前离线，显示上次同步的计划状态",
+  "plan.step_aria": "{{status}}：{{step}}",
+  "plan.status.pending": "待执行",
+  "plan.status.in_progress": "进行中",
+  "plan.status.completed": "已完成"
 }

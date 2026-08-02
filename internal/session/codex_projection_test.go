@@ -97,6 +97,27 @@ func TestCodexProjectionTurnCompletionKeepsThreadWritable(t *testing.T) {
 	}
 }
 
+func TestCodexManagedPlanTextIsNotProjectedAsStructuredAgentPlan(t *testing.T) {
+	p := newCodexProjection(11)
+
+	events := p.Project(codexNotification("item/plan/delta", `{
+		"threadId":"thr_1","turnId":"turn_1","itemId":"plan_1","delta":"1. Inspect\n2. Implement"
+	}`))
+	events = append(events, p.Project(codexNotification("item/completed", `{
+		"threadId":"thr_1","turnId":"turn_1",
+		"item":{"id":"plan_1","type":"plan","text":"1. Inspect\n2. Implement"}
+	}`))...)
+
+	if len(events) == 0 {
+		t.Fatal("managed plan text was unexpectedly discarded")
+	}
+	for _, event := range events {
+		if event.Type == "agent_plan" {
+			t.Fatalf("managed plan text must not be inferred as agent_plan: %+v", event)
+		}
+	}
+}
+
 func TestCodexProjectionHistoricalAndLiveFailedTurnProvenance(t *testing.T) {
 	n := codexNotification("turn/completed", `{"threadId":"thr_1","turn":{"id":"turn_failed","status":"failed","items":[]}}`)
 	tests := []struct {

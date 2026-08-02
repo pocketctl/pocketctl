@@ -105,6 +105,8 @@ type DaemonEvent struct {
 	Description            string               `json:"description,omitempty"`
 	ProfileName            string               `json:"profile_name,omitempty"`
 	Todos                  []TodoItem           `json:"todos,omitempty"`
+	Explanation            string               `json:"explanation,omitempty"`
+	Plan                   []PlanItem           `json:"plan,omitempty"`
 	CostUSD                float64              `json:"cost_usd,omitempty"`
 	Turns                  int                  `json:"turns,omitempty"`
 	RiskLevel              string               `json:"risk_level,omitempty"`
@@ -243,6 +245,38 @@ type TodoItem struct {
 	Content  string `json:"content"`
 	Status   string `json:"status"`
 	Priority string `json:"priority"`
+}
+
+// PlanItem is one step in a Codex session-level plan snapshot. Unlike the
+// forward-compatible OpenCode TodoItem, its status is a closed PocketCtl wire
+// contract so clients never guess completion from unknown source values.
+type PlanItem struct {
+	Step   string `json:"step"`
+	Status string `json:"status"`
+}
+
+const (
+	PlanPending    = "pending"
+	PlanInProgress = "in_progress"
+	PlanCompleted  = "completed"
+)
+
+func ValidPlanStatus(status string) bool {
+	switch status {
+	case PlanPending, PlanInProgress, PlanCompleted:
+		return true
+	default:
+		return false
+	}
+}
+
+// FinalizeAgentPlanEvent derives the stable per-session Part identity after a
+// caller has resolved and stamped SessionID. It intentionally leaves every
+// other daemon event unchanged.
+func FinalizeAgentPlanEvent(event *DaemonEvent) {
+	if event != nil && event.Type == "agent_plan" && event.SessionID != "" {
+		event.PartID = "plan:" + event.SessionID
+	}
 }
 
 const (

@@ -29,6 +29,20 @@ describe('DiffCard — header', () => {
     })
     expect(wrapper.find('.diff-badge.new').exists()).toBe(false)
   })
+
+  test('shows an unknown-result status without a running spinner', () => {
+    const wrapper = mount(DiffCard, {
+      props: {
+        message: {
+          ...msg('Edit', { file_path: 'src/a.ts', old_string: 'x', new_string: 'y' }),
+          status: 'unknown',
+        },
+      },
+    })
+    expect(wrapper.find('.status-unknown').exists()).toBe(true)
+    expect(wrapper.find('.tool-running.unknown').exists()).toBe(true)
+    expect(wrapper.find('.spinner').exists()).toBe(false)
+  })
 })
 
 describe('DiffCard — diff rows', () => {

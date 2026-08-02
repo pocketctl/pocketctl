@@ -6,6 +6,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/pocketctl/pocketctl/internal/adapter"
 	"github.com/pocketctl/pocketctl/internal/agentcontrol"
 	"github.com/pocketctl/pocketctl/internal/approval"
 	"github.com/pocketctl/pocketctl/internal/filelock"
@@ -50,6 +51,7 @@ type ProcessState struct {
 	WorktreeBranch     string              // Scheme D: the git branch backing the worktree
 	Backend            SessionBackend      // non-nil only for server-kind agents (opencode); subprocess agents drive via the fields above
 	ControlMode        string              // managed | unmanaged_active | legacy_read_only
+	CodexPlanState     *adapter.CodexPlanState
 }
 
 type PendingOpenCodePermission struct {

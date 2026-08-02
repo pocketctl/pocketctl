@@ -17,6 +17,9 @@
           <svg v-else-if="message.status === 'timeout'" class="status-timeout" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
             <circle cx="12" cy="12" r="10"/><path d="M12 8v4"/><path d="M12 16h.01"/>
           </svg>
+          <svg v-else-if="message.status === 'unknown'" class="status-unknown" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+            <circle cx="12" cy="12" r="10"/><path d="M12 8v4"/><path d="M12 16h.01"/>
+          </svg>
           <span v-else class="spinner"></span>
         </span>
         <svg class="tool-chevron" :class="{ open: message.expanded }" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -29,6 +32,9 @@
         <!-- Running / timeout placeholder -->
         <div v-if="message.status === 'timeout'" class="tool-running timeout">
           <span class="status-timeout-text">{{ t('session.tool_timeout') }}</span>
+        </div>
+        <div v-else-if="message.status === 'unknown'" class="tool-running unknown">
+          <span class="status-unknown-text">{{ t('session.tool_result_unknown') }}</span>
         </div>
         <div v-else-if="message.status !== 'completed'" class="tool-running">
           <span class="spinner"></span>
@@ -178,7 +184,10 @@ function toggleExpandOutput() { emit('toggleOutput') }
 .status-check { color: var(--success); }
 .status-timeout { color: #e5484d; }
 .status-timeout-text { color: #e5484d; font-size: 12px; }
+.status-unknown { color: #b7791f; }
+.status-unknown-text { color: #b7791f; font-size: 12px; }
 .tool-running.timeout { opacity: 0.8; }
+.tool-running.unknown { opacity: 0.8; }
 .tool-status .spinner {
   width: 13px;
   height: 13px;

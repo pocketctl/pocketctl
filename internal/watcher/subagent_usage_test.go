@@ -136,6 +136,26 @@ func TestSubAgentTailerCodexEventIDsAreStableAndDistinct(t *testing.T) {
 	}
 }
 
+func TestSubAgentTailerCodexDoesNotProjectChildPlanOntoParent(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "rollout-child.jsonl")
+	line := `{"type":"response_item","payload":{"type":"custom_tool_call","call_id":"plan-child","name":"exec","input":"const p = await tools.update_plan({plan:[{step:\"Child\",status:\"in_progress\"}]}); text(p);"}}` + "\n"
+	if err := os.WriteFile(path, []byte(line), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	tailer, err := NewSubAgentTailerForAgent(path, "child", "root", adapter.AgentCodex, adapter.AgentCodex)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tailer.tailer.Close()
+	events, err := tailer.TailNewLines()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 1 || events[0].Type != "tool_call" {
+		t.Fatalf("child plan leaked into parent plan surface: %+v", events)
+	}
+}
+
 func TestCodexReplaySubAgentTailerFiltersNativeTimestampsAndKeepsStableIDs(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "rollout-child.jsonl")

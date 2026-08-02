@@ -17,6 +17,7 @@ scripts/test-codex-managed.sh
 scripts/test-relay-durable-ingress.sh
 scripts/secret-scan.sh
 scripts/github-mirror-files.txt
+scripts/lib/github-sync-retry.sh
 scripts/tests/github-mirror-contract.test.mjs
 go.mod
 go.sum
