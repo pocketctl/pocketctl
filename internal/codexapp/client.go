@@ -69,25 +69,41 @@ func (c *Client) Call(ctx context.Context, method string, params any, result any
 		c.removePending(id.Key())
 		return err
 	}
+	// A peer may close immediately after writing its response. Prefer an
+	// already-delivered response over the terminal connection signal.
 	select {
 	case reply := <-wait:
-		if reply.closed != nil {
-			return reply.closed
-		}
-		if reply.err != nil {
-			return reply.err
-		}
-		if result == nil || len(reply.result) == 0 {
-			return nil
-		}
-		return json.Unmarshal(reply.result, result)
+		return c.decodeResponse(reply, result)
+	default:
+	}
+	select {
+	case reply := <-wait:
+		return c.decodeResponse(reply, result)
 	case <-ctx.Done():
 		c.removePending(id.Key())
 		return ctx.Err()
 	case <-c.done:
+		select {
+		case reply := <-wait:
+			return c.decodeResponse(reply, result)
+		default:
+		}
 		c.removePending(id.Key())
 		return ErrClosed
 	}
+}
+
+func (c *Client) decodeResponse(reply response, result any) error {
+	if reply.closed != nil {
+		return reply.closed
+	}
+	if reply.err != nil {
+		return reply.err
+	}
+	if result == nil || len(reply.result) == 0 {
+		return nil
+	}
+	return json.Unmarshal(reply.result, result)
 }
 
 func (c *Client) Notify(method string, params any) error {

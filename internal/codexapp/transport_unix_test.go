@@ -63,6 +63,12 @@ func TestDialUnixUsesWebSocketHTTPUpgrade(t *testing.T) {
 	}
 }
 
+func TestDialUnixReturnsResponseWhenServerClosesImmediately(t *testing.T) {
+	for attempt := 0; attempt < 200; attempt++ {
+		TestDialUnixUsesWebSocketHTTPUpgrade(t)
+	}
+}
+
 func shortUnixTempDir(t *testing.T) string {
 	t.Helper()
 	base := os.TempDir()
