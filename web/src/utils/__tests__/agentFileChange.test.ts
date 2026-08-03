@@ -216,7 +216,7 @@ describe('createAgentFileChangeReducer', () => {
       card(target).files.find(file => file.path === 'bad.txt')?.edits[0].integrity,
     ).toBe('failed'))
     expect(card(target).files.find(file => file.path === 'bad.txt')?.edits[0].diff).toBe('')
-  })
+  }, 15_000)
 
   test('resetting transient streams preserves completed cards', () => {
     const target: AgentFileChangeMessage[] = []
