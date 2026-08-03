@@ -128,6 +128,28 @@ func TestCodex_EventMsgAgentMessage(t *testing.T) {
 	}
 }
 
+func TestCodexJSONLParserSuppressesResponseItemMirrorOfAgentMessage(t *testing.T) {
+	p := NewCodexJSONLParser()
+	message := "Only the adapter and clients changed."
+	eventMsg := `{"type":"event_msg","payload":{"type":"agent_message","message":"` + message + `","phase":"final_answer"}}`
+	responseItem := `{"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"` + message + `\n\n<oai-mem-citation>internal metadata</oai-mem-citation>"}],"phase":"final_answer"}}`
+
+	first, err := p.Parse(eventMsg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(first) != 1 || first[0].Text != message {
+		t.Fatalf("event_msg = %+v, want one agent message", first)
+	}
+	second, err := p.Parse(responseItem)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(second) != 0 {
+		t.Fatalf("response_item mirror = %+v, want no events", second)
+	}
+}
+
 func TestCodex_EventMsgUserMessage(t *testing.T) {
 	line := `{"type":"event_msg","payload":{"type":"user_message","message":"hello in one word"}}`
 	evts := codexParse(t, line)
@@ -243,6 +265,17 @@ func TestCodex_TaskCompleteKeepsTerminalSessionIdle(t *testing.T) {
 		t.Fatalf("expected session_status, got %+v", evts)
 	}
 	if evts[0].Status != protocol.StatusIdle {
+		t.Errorf("got status %q", evts[0].Status)
+	}
+}
+
+func TestCodex_TaskStartedMarksTerminalSessionRunning(t *testing.T) {
+	line := `{"type":"event_msg","payload":{"type":"task_started","turn_id":"turn-2","started_at":1785742847}}`
+	evts := codexParse(t, line)
+	if len(evts) != 1 || evts[0].Type != "session_status" {
+		t.Fatalf("expected session_status, got %+v", evts)
+	}
+	if evts[0].Status != protocol.StatusRunning {
 		t.Errorf("got status %q", evts[0].Status)
 	}
 }

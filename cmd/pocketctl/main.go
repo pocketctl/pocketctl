@@ -1634,6 +1634,13 @@ func reconnectDiscoveryEvent(s session.SessionInfo) protocol.DaemonEvent {
 	}
 }
 
+func observeTerminalLifecycle(sm *session.SessionManager, event protocol.DaemonEvent) bool {
+	if sm == nil || event.Type != "session_status" {
+		return false
+	}
+	return sm.ObserveTerminalSessionStatus(event.SessionID, event.Status)
+}
+
 // reconnectSessionEvents keeps the existing discovery stream intact and then
 // appends only Claude Hook approvals that are still answerable by this daemon.
 // Codex and OpenCode retain their own reconnect/reconciliation authorities.
@@ -2521,6 +2528,9 @@ func handleWatcherEvents(ctx context.Context, events <-chan watcher.SessionEvent
 							for i := range events {
 								if events[i].SessionID == "" {
 									events[i].SessionID = evt.Session.SessionID
+								}
+								if observeTerminalLifecycle(sm, events[i]) {
+									stateDirty.Store(true)
 								}
 								protocol.FinalizeAgentPlanEvent(&events[i])
 								if agentType == adapter.AgentClaude && events[i].Type == "sync_warning" {

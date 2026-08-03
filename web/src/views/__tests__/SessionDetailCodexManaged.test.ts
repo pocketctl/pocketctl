@@ -77,9 +77,38 @@ function deliveryStatus(wrapper: ReturnType<typeof shallowMount>, content: strin
 }
 
 describe('SessionDetail managed Codex terminal control', () => {
-  test('managed Codex keeps composer available after a terminal status', async () => {
+  test('collapses adjacent historical Codex replies that differ only by a memory citation', async () => {
+    const wrapper = mountSession()
+    const reply = 'Only the adapter and clients changed.'
+
+    await nextTick()
+    setTerminalSession({})
+    await nextTick()
+
+    websocketMock.handlers.get('agent_text')?.({ type: 'agent_text', session_id: 'thr_1', text: reply })
+    websocketMock.handlers.get('agent_text')?.({
+      type: 'agent_text', session_id: 'thr_1',
+      text: `${reply}\n\n<oai-mem-citation>internal metadata</oai-mem-citation>`,
+    })
+    await nextTick()
+
+    expect(wrapper.findAll('message-agent-stub')).toHaveLength(1)
+  })
+
+  test('native Codex TUI session remains read-only even if a stale control mode says managed', async () => {
     const wrapper = mountSession()
     setTerminalSession({ control_mode: 'managed' })
+    await nextTick()
+
+    expect(wrapper.find('.chat-input-container').exists()).toBe(false)
+  })
+
+  test('managed Codex keeps composer available after a terminal status', async () => {
+    const wrapper = mountSession()
+    setTerminalSession({
+      control_mode: 'managed',
+      capabilities: ['message_acceptance_receipt'],
+    })
     await nextTick()
 
     expect(wrapper.find('.chat-input-container').exists()).toBe(true)
@@ -95,7 +124,10 @@ describe('SessionDetail managed Codex terminal control', () => {
 
   test('offline managed Codex keeps an editable draft composer after a terminal status', async () => {
     const wrapper = mountSession()
-    setTerminalSession({ control_mode: 'managed', daemon_online: false })
+    setTerminalSession({
+      control_mode: 'managed', daemon_online: false,
+      capabilities: ['message_acceptance_receipt'],
+    })
     await nextTick()
 
     expect(wrapper.find('.chat-input-container').exists()).toBe(true)
@@ -106,7 +138,10 @@ describe('SessionDetail managed Codex terminal control', () => {
 
   test('daemon_status offline disables a managed Codex send without ending the session', async () => {
     const wrapper = mountSession()
-    setTerminalSession({ control_mode: 'managed' })
+    setTerminalSession({
+      control_mode: 'managed',
+      capabilities: ['message_acceptance_receipt'],
+    })
     await nextTick()
     expect(wrapper.text()).toContain('dashboard.online')
 
@@ -121,7 +156,10 @@ describe('SessionDetail managed Codex terminal control', () => {
 
   test('legacy disconnected status does not replace the managed Codex lifecycle', async () => {
     const wrapper = mountSession()
-    setTerminalSession({ control_mode: 'managed' })
+    setTerminalSession({
+      control_mode: 'managed',
+      capabilities: ['message_acceptance_receipt'],
+    })
     websocketMock.handlers.get('session_status')?.({ session_id: 'thr_1', status: 'disconnected' })
     await nextTick()
 

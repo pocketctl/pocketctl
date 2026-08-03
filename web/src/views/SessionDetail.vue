@@ -116,6 +116,17 @@
           <svg viewBox="0 0 20 20" aria-hidden="true"><path d="m3.5 5 1.5 1.5L8 3.5M10 5h6M3.5 11 5 12.5 8 9.5M10 11h6M3.5 17 5 18.5l3-3M10 17h6" /></svg>
           <span>{{ planCompleted }}/{{ currentPlan.items.length }}</span>
         </button>
+        <button
+          v-if="fileChangeMessages.length && !focusedSubAgentId"
+          type="button"
+          :class="['file-change-toolbar-button', { active: fileChangePanelOpen }]"
+          :aria-label="fileChangeButtonLabel"
+          :aria-expanded="fileChangePanelOpen"
+          @click="toggleFileChangePanel"
+        >
+          <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M4 3.5h12v13H4zM7 7h6M7 10h6M7 13h4" /></svg>
+          <span>{{ fileChangeFileCount }}</span>
+        </button>
         <div class="session-id-box">
           <code class="session-id-text">{{ sessionId?.slice(0, 8) }}</code>
           <button class="copy-btn" @click="copySessionId" :title="copied ? t('common.copied') : t('session.actions.copy_id')">
@@ -204,7 +215,7 @@
           />
 
           <FileChangeCard
-            v-else-if="msg.type === 'agent_file_change'"
+            v-else-if="msg.type === 'agent_file_change' && isMobile"
             :message="msg"
             @open-mobile="openFileChangeSheet(msg, $event)"
           />
@@ -450,6 +461,29 @@
       :connected="connected !== false"
       @close="closePlanPanel"
     />
+    <aside
+      v-if="fileChangeMessages.length && fileChangePanelOpen && !focusedSubAgentId"
+      class="file-change-side-panel"
+      :aria-label="t('session.file_change_edited_files', { n: fileChangeFileCount })"
+    >
+      <header class="file-change-panel-heading">
+        <div>
+          <h2>{{ t('session.file_change_edited_files', { n: fileChangeFileCount }) }}</h2>
+          <span>+{{ fileChangeAdditions }} −{{ fileChangeDeletions }}</span>
+        </div>
+        <button type="button" class="file-change-panel-close" :aria-label="t('session.file_change_close')" @click="closeFileChangePanel">
+          <svg viewBox="0 0 20 20" aria-hidden="true"><path d="m5 5 10 10M15 5 5 15" /></svg>
+        </button>
+      </header>
+      <div class="file-change-panel-list">
+        <FileChangeCard
+          v-for="message in fileChangeMessages"
+          :key="message.id"
+          :message="message"
+          @open-mobile="openFileChangeSheet(message, $event)"
+        />
+      </div>
+    </aside>
     <FileChangeBottomSheet
       v-if="mobileFileChange"
       :message="mobileFileChange"
@@ -514,6 +548,7 @@ import type { CommandItem } from '../composables/useWebSocket'
 import { canControlOpenCodeInteractions, isManagedOpenCodeSession, normalizeSessionAgents, resolveInteractionRequest, sessionAgentSwitchDisabled, shouldShowSessionAgentPicker, upsertInteractionRequest, type SessionAgentOption } from '../types/opencode-interactions'
 import { expandCodexPreset, permissionOptions, permissionTitleKey, type AgentType, type ClaudeMode, type PermissionConfig } from '../types/permission'
 import { useVisualViewport } from '../composables/useVisualViewport'
+import { useResponsiveLayout } from '../composables/useResponsiveLayout'
 import { normalizeRequestId, scrollToRequest } from '../utils/requestDeepLink'
 import { resolveInteractionReadiness, type InteractionConnectivity } from '../composables/useInteractionReadiness'
 import { canSendClaudeSession } from '../utils/claudeSessionControl'
@@ -530,6 +565,7 @@ const { renamingId, renameInput, startRename, commitRename, cancelRename } = use
 const route = useRoute()
 const router = useRouter()
 useVisualViewport()
+const { isMobile } = useResponsiveLayout()
 const { connect, send, onEvent, connected, reconnecting } = useWebSocket()
 const { t } = useLocale()
 
@@ -544,9 +580,25 @@ const planButtonLabel = computed(() => currentPlan.value
 function setPlanPanelOpen(open: boolean) {
   planPanelOpen.value = open
   localStorage.setItem('pocketctl_plan_panel_open', String(open))
+  if (open) fileChangePanelOpen.value = false
 }
 function togglePlanPanel() { setPlanPanelOpen(!planPanelOpen.value) }
 function closePlanPanel() { setPlanPanelOpen(false) }
+const fileChangePanelOpen = ref(false)
+const fileChangeMessages = computed(() => messages.value.filter((message: any) => message.type === 'agent_file_change'))
+const fileChangeFileCount = computed(() => fileChangeMessages.value.reduce((total, message) => total + message.fileChange.files.length, 0))
+const fileChangeAdditions = computed(() => fileChangeMessages.value.reduce((total, message) => total + message.fileChange.additions, 0))
+const fileChangeDeletions = computed(() => fileChangeMessages.value.reduce((total, message) => total + message.fileChange.deletions, 0))
+const fileChangeButtonLabel = computed(() => t('session.file_change_edited_files', { n: fileChangeFileCount.value }))
+function setFileChangePanelOpen(open: boolean) {
+  fileChangePanelOpen.value = open
+  if (open) setPlanPanelOpen(false)
+}
+function toggleFileChangePanel() { setFileChangePanelOpen(!fileChangePanelOpen.value) }
+function closeFileChangePanel() { setFileChangePanelOpen(false) }
+function onFileChangePanelKeydown(event: KeyboardEvent) {
+  if (event.key === 'Escape' && fileChangePanelOpen.value) closeFileChangePanel()
+}
 const mobileFileChange = ref<AgentFileChangeMessage | null>(null)
 const fileChangeOpener = ref<HTMLElement | null>(null)
 function openFileChangeSheet(message: AgentFileChangeMessage, opener: HTMLElement) {
@@ -834,6 +886,17 @@ const canWriteWhenConnected = computed(() => {
       capabilities: currentSessionCapabilities.value,
     })
   }
+  // A Codex rollout seen by the native JSONL watcher is observational only:
+  // its `control_mode` can be stale or ambiguous, but it has no PocketCtl
+  // app-server backend that can accept a prompt from another device. The
+  // acceptance receipt is emitted only by the shim-managed backend, so require
+  // it before rendering a multi-device composer for Codex.
+  if (currentSessionAgent.value === 'codex') {
+    return isManagedSession.value
+      && supportsMessageAcceptanceReceipt.value
+      && !isSubagent.value
+      && !focusedSubAgentId.value
+  }
   return (!isTerminalStatus.value || isDaemonSession.value || isManagedSession.value)
     && !isSubagent.value
     && !focusedSubAgentId.value
@@ -1077,6 +1140,7 @@ function formatTime(ts: string): string {
 
 function cleanContent(text: string): string {
   if (!text) return ''
+  text = text.replace(/<oai-mem-citation>[\s\S]*?<\/oai-mem-citation>\s*/g, '')
 
   // Slash command: Claude Code records the command as <command-name>/<command-message>/
   // <command-args> tags — these wrap the whole user message. iOS's sanitizeUserMessage
@@ -1733,7 +1797,12 @@ function safeParseJSON(s: string): any {
 // matches a historical one.
 function isDuplicate(type: string, text: string, target = messages.value): boolean {
   const last = target[target.length - 1]
-  return !!last && last.type === type && (last.content || '') === text
+  if (!last || last.type !== type) return false
+  if ((last.content || '') === text) return true
+  // Codex persists final answers in both event_msg and response_item. The
+  // latter can include a local memory-citation envelope, so compare the
+  // user-visible text for this adjacent agent-only fallback.
+  return type === 'agent_text' && cleanContent(last.content || '') === cleanContent(text)
 }
 
 function processEvent(evt: any, target: any[] = messages.value, subagentOverride?: Record<string, any[]>) {
@@ -2118,6 +2187,7 @@ watch(loadKey, (newKey, oldKey) => {
     pendingToolResults.clear() // discard buffered out-of-order results
     contentStreams.reset()
     fileChangeReducer.resetTransientStreams()
+    fileChangePanelOpen.value = false
     mobileFileChange.value = null
     fileChangeOpener.value = null
     olderReplayEvents.reset()
@@ -2639,6 +2709,7 @@ onUnmounted(() => {
   for (const fn of cleanups) fn()
   cleanups.length = 0
   document.removeEventListener('click', closePermMenu)
+  window.removeEventListener('keydown', onFileChangePanelKeydown)
   if (turnTimer) { clearInterval(turnTimer); turnTimer = null }
   if (stopResetTimer) { clearTimeout(stopResetTimer); stopResetTimer = null }
   if (sessionAgentListTimer) { clearTimeout(sessionAgentListTimer); sessionAgentListTimer = null }
@@ -2658,6 +2729,7 @@ function closePermMenu(e: MouseEvent) {
 }
 onMounted(() => {
   document.addEventListener('click', closePermMenu)
+  window.addEventListener('keydown', onFileChangePanelKeydown)
 })
 </script>
 
@@ -2708,6 +2780,21 @@ onMounted(() => {
 .plan-toolbar-button.active { border-color: var(--accent); color: var(--accent); background: var(--accent-muted); }
 .plan-toolbar-button.complete { color: var(--success); }
 .plan-toolbar-button svg { width: 15px; height: 15px; fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; }
+.file-change-toolbar-button { min-height: 32px; display: inline-flex; align-items: center; gap: 5px; padding: 4px 8px; border: 1px solid var(--border); border-radius: var(--radius-md); color: var(--fg-secondary); background: transparent; font: 600 11px/1 var(--font-mono); cursor: pointer; }
+.file-change-toolbar-button:hover { color: var(--fg); background: var(--surface-hover); }
+.file-change-toolbar-button.active { border-color: var(--accent); color: var(--accent); background: var(--accent-muted); }
+.file-change-toolbar-button svg { width: 15px; height: 15px; fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; }
+.file-change-side-panel { width: 360px; min-width: 320px; max-width: 440px; height: 100%; display: flex; flex: 0 0 360px; flex-direction: column; overflow: hidden; border-left: 1px solid var(--border); background: var(--surface); }
+.file-change-panel-heading { min-height: 68px; display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 12px 10px 10px 16px; border-bottom: 1px solid var(--border); }
+.file-change-panel-heading h2 { margin: 0; color: var(--fg); font-size: 14px; font-weight: 650; }
+.file-change-panel-heading span { display: block; margin-top: 4px; color: var(--fg-tertiary); font: 11px/1 var(--font-mono); }
+.file-change-panel-close { width: 44px; height: 44px; display: grid; place-items: center; flex: 0 0 auto; border: 0; border-radius: var(--radius-md); color: var(--fg-secondary); background: transparent; cursor: pointer; }
+.file-change-panel-close:hover { color: var(--fg); background: var(--surface-hover); }
+.file-change-panel-close:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.file-change-panel-close svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; }
+.file-change-panel-list { min-height: 0; display: flex; flex: 1; flex-direction: column; gap: 10px; overflow-y: auto; padding: 12px; }
+.file-change-panel-list .file-change-card { width: 100%; flex: 0 0 auto; }
+@media (max-width: 1120px) and (min-width: 769px) { .file-change-side-panel { position: absolute; z-index: 45; inset: 0 0 0 auto; box-shadow: -12px 0 32px rgba(0, 0, 0, .18); } }
 .status-pill { display: inline-flex; align-items: center; gap: 5px; padding: 4px 10px; border-radius: var(--radius-full); font-size: 12px; font-weight: 600; }
 .status-pill.running { background: var(--success-bg); color: var(--success); }
 .status-pill .pulse { width: 6px; height: 6px; border-radius: 50%; background: currentColor; animation: pulse-green 1.5s infinite; }

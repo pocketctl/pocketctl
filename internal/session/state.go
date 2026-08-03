@@ -131,6 +131,35 @@ func (sm *SessionManager) SetSessionStatus(sessionID, status string) {
 	}
 }
 
+// ObserveTerminalSessionStatus records a lifecycle event that is already being
+// forwarded to the relay. It intentionally does not publish another event.
+func (sm *SessionManager) ObserveTerminalSessionStatus(sessionID, status string) bool {
+	if sessionID == "" || status == "" {
+		return false
+	}
+
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+	ps, ok := sm.sessions[sessionID]
+	if !ok || ps.Source != "terminal" {
+		return false
+	}
+
+	now := time.Now()
+	ps.Status = status
+	ps.LastActivityAt = now
+	active := status == protocol.StatusRunning || status == protocol.StatusBusy || status == protocol.StatusRetry ||
+		status == protocol.StatusWaitingApproval || status == protocol.StatusWaitingQuestion
+	if active {
+		if ps.TurnStartedAt.IsZero() {
+			ps.TurnStartedAt = now
+		}
+	} else {
+		ps.TurnStartedAt = time.Time{}
+	}
+	return true
+}
+
 // SyncRediscoveredTerminalStatus publishes watcher status only for sessions
 // owned by the terminal watcher. Managed app-server sessions can share the same
 // Codex rollout ID, but their status remains authoritative from the backend.

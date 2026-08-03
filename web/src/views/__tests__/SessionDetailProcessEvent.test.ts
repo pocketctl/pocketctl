@@ -80,7 +80,7 @@ describe('SessionDetail processEvent integration', () => {
     expect(wrapper.findComponent(OpenCodePartCard).exists()).toBe(true)
   })
 
-  test('renders live agent_file_change events without waiting for replay', async () => {
+  test('moves live Edited files from the chat timeline into the toolbar panel', async () => {
     const wrapper = shallowMount(SessionDetail)
     const vm = wrapper.vm as any
     vm.allSessions = [{ session_id: 'ses_1', daemon_id: 'daemon-1', status: 'running' }]
@@ -96,7 +96,65 @@ describe('SessionDetail processEvent integration', () => {
     await wrapper.vm.$nextTick()
 
     expect(vm.messages.filter((item: any) => item.type === 'agent_file_change')).toHaveLength(1)
+    expect(wrapper.findComponent(FileChangeCard).exists()).toBe(false)
+    const toolbarButton = wrapper.find('.file-change-toolbar-button')
+    expect(toolbarButton.exists()).toBe(true)
+    await toolbarButton.trigger('click')
     expect(wrapper.findComponent(FileChangeCard).exists()).toBe(true)
+  })
+
+  test('closes the desktop Edited files panel with Escape', async () => {
+    const wrapper = shallowMount(SessionDetail)
+    const vm = wrapper.vm as any
+    vm.allSessions = [{ session_id: 'ses_1', daemon_id: 'daemon-1', status: 'running' }]
+    vm.processEvent({
+      type: 'agent_file_change', session_id: 'ses_1', turn_id: 'turn-escape', seq: 12,
+      event_id: 'file-escape', change_set_id: 'managed:call-escape', change_index: 0, change_total: 1,
+      path: 'escape.txt', change_kind: 'update', diff: '@@ -1 +1 @@\n-old\n+new\n',
+      additions: 1, deletions: 1, status: 'completed',
+    })
+    await wrapper.vm.$nextTick()
+
+    await wrapper.get('.file-change-toolbar-button').trigger('click')
+    expect(wrapper.find('.file-change-side-panel').exists()).toBe(true)
+
+    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }))
+    await wrapper.vm.$nextTick()
+
+    expect(wrapper.find('.file-change-side-panel').exists()).toBe(false)
+    expect(wrapper.get('.file-change-toolbar-button').attributes('aria-expanded')).toBe('false')
+    wrapper.unmount()
+  })
+
+  test('uses one side-panel slot for Task list and Edited files', async () => {
+    resetAgentPlanProgressForTests()
+    const wrapper = shallowMount(SessionDetail)
+    const vm = wrapper.vm as any
+    vm.allSessions = [{ session_id: 'ses_1', daemon_id: 'daemon-1', status: 'running' }]
+    vm.processEvent({
+      type: 'agent_plan', session_id: 'ses_1', event_id: 'plan-side-slot', revision: 1,
+      plan: [{ step: 'Share the side-panel slot', status: 'in_progress' }],
+    })
+    vm.processEvent({
+      type: 'agent_file_change', session_id: 'ses_1', turn_id: 'turn-side-slot', seq: 13,
+      event_id: 'file-side-slot', change_set_id: 'managed:call-side-slot', change_index: 0, change_total: 1,
+      path: 'slot.txt', change_kind: 'update', diff: '@@ -1 +1 @@\n-old\n+new\n',
+      additions: 1, deletions: 1, status: 'completed',
+    })
+    await wrapper.vm.$nextTick()
+
+    await wrapper.get('.plan-toolbar-button').trigger('click')
+    expect(wrapper.findComponent(PlanSidePanel).exists()).toBe(true)
+    expect(wrapper.find('.file-change-side-panel').exists()).toBe(false)
+
+    await wrapper.get('.file-change-toolbar-button').trigger('click')
+    expect(wrapper.findComponent(PlanSidePanel).exists()).toBe(false)
+    expect(wrapper.find('.file-change-side-panel').exists()).toBe(true)
+
+    await wrapper.get('.plan-toolbar-button').trigger('click')
+    expect(wrapper.findComponent(PlanSidePanel).exists()).toBe(true)
+    expect(wrapper.find('.file-change-side-panel').exists()).toBe(false)
+    wrapper.unmount()
   })
 
   test('dismisses an open file-change sheet and drops its opener on session switch', async () => {
@@ -112,6 +170,7 @@ describe('SessionDetail processEvent integration', () => {
     await wrapper.vm.$nextTick()
     const opener = document.createElement('button')
     document.body.append(opener)
+    await wrapper.find('.file-change-toolbar-button').trigger('click')
     wrapper.findComponent(FileChangeCard).vm.$emit('open-mobile', opener)
     await wrapper.vm.$nextTick()
     expect(wrapper.findComponent(FileChangeBottomSheet).exists()).toBe(true)

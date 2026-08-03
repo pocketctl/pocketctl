@@ -1074,6 +1074,40 @@ func TestReconnectDiscoveryEventIsMarkedAsResync(t *testing.T) {
 	}
 }
 
+func TestObserveTerminalLifecycleUpdatesReconnectState(t *testing.T) {
+	sm := session.NewSessionManager(make(chan protocol.DaemonEvent, 1))
+	sm.RegisterTerminalSession(
+		"codex-terminal", "/tmp/project", 0, "", protocol.StatusIdle, adapter.AgentCodex,
+	)
+
+	if updated := observeTerminalLifecycle(sm, protocol.DaemonEvent{
+		Type: "session_status", SessionID: "codex-terminal", Status: protocol.StatusRunning,
+	}); !updated {
+		t.Fatal("terminal lifecycle event did not update local state")
+	}
+
+	var current session.SessionInfo
+	for _, info := range sm.ListSessions() {
+		if info.SessionID == "codex-terminal" {
+			current = info
+			break
+		}
+	}
+	if current.Status != protocol.StatusRunning {
+		t.Fatalf("local status = %q, want running", current.Status)
+	}
+	resync := reconnectDiscoveryEvent(current)
+	if !resync.Resync || resync.Status != protocol.StatusRunning {
+		t.Fatalf("reconnect event = %+v, want resync running", resync)
+	}
+
+	if updated := observeTerminalLifecycle(sm, protocol.DaemonEvent{
+		Type: "agent_text", SessionID: "codex-terminal", Text: "working",
+	}); updated {
+		t.Fatal("non-lifecycle event unexpectedly updated terminal status")
+	}
+}
+
 func TestTerminalHydrationEventsKeepsCurrentStatusAuthoritative(t *testing.T) {
 	events := []protocol.DaemonEvent{
 		{Type: "agent_text", Text: "historical answer"},

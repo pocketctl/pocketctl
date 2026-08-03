@@ -220,7 +220,8 @@ func (a *CodexAdapter) ParseStreamLine(line string) ([]protocol.DaemonEvent, err
 // only bounded Plan identity state; Codex has no slash-command state, so
 // SetPendingCmd is a no-op.
 type CodexJSONLParser struct {
-	plan codexPlanTracker
+	plan                    codexPlanTracker
+	pendingAgentMessageText string
 }
 
 func NewCodexJSONLParser() *CodexJSONLParser { return &CodexJSONLParser{} }
@@ -228,7 +229,57 @@ func NewCodexJSONLParser() *CodexJSONLParser { return &CodexJSONLParser{} }
 func (p *CodexJSONLParser) SetPendingCmd(string) {} // no-op: codex has no slash commands
 
 func (p *CodexJSONLParser) Parse(line string) ([]protocol.DaemonEvent, error) {
-	return parseCodexLine(line, nil, &p.plan)
+	events, err := parseCodexLine(line, nil, &p.plan)
+	if err != nil {
+		return nil, err
+	}
+
+	var raw codexLine
+	var payload codexPayload
+	if json.Unmarshal([]byte(line), &raw) != nil || json.Unmarshal(raw.Payload, &payload) != nil {
+		return events, nil
+	}
+
+	if raw.Type == "event_msg" && payload.Type == "agent_message" && len(events) == 1 && events[0].Type == "agent_text" {
+		p.pendingAgentMessageText = normalizeCodexAgentMessage(events[0].Text)
+		return events, nil
+	}
+	if raw.Type == "response_item" && payload.Type == "message" && strings.EqualFold(payload.Role, "assistant") {
+		responseText := ""
+		for _, content := range payload.Content {
+			if content.Text != "" {
+				if responseText != "" {
+					responseText += "\n"
+				}
+				responseText += content.Text
+			}
+		}
+		if responseText != "" && p.pendingAgentMessageText != "" && normalizeCodexAgentMessage(responseText) == p.pendingAgentMessageText {
+			p.pendingAgentMessageText = ""
+			return nil, nil
+		}
+	}
+
+	// The mirrored response_item immediately follows event_msg. Do not let a
+	// later, unrelated record suppress a legitimate assistant response.
+	p.pendingAgentMessageText = ""
+	return events, nil
+}
+
+func normalizeCodexAgentMessage(text string) string {
+	for {
+		start := strings.Index(text, "<oai-mem-citation>")
+		if start < 0 {
+			break
+		}
+		end := strings.Index(text[start:], "</oai-mem-citation>")
+		if end < 0 {
+			break
+		}
+		end += start + len("</oai-mem-citation>")
+		text = text[:start] + text[end:]
+	}
+	return strings.TrimSpace(text)
 }
 
 // parseCodexLine is the shared converter for both stdout and JSONL lines.
@@ -454,6 +505,12 @@ func convertCodexEventMsg(p codexPayload) []protocol.DaemonEvent {
 				OutputTokens: u.OutputTokens,
 				CacheRead:    u.CachedInputTokens,
 			},
+		}}
+
+	case "task_started":
+		return []protocol.DaemonEvent{{
+			Type:   "session_status",
+			Status: protocol.StatusRunning,
 		}}
 
 	case "task_complete":

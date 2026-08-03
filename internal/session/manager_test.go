@@ -14,8 +14,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/pocketctl/pocketctl/internal/config"
 	"github.com/pocketctl/pocketctl/internal/adapter"
+	"github.com/pocketctl/pocketctl/internal/config"
 	"github.com/pocketctl/pocketctl/internal/protocol"
 )
 
@@ -818,6 +818,64 @@ func TestSyncRediscoveredTerminalStatusEmitsForTerminalSession(t *testing.T) {
 		}
 	default:
 		t.Fatal("terminal watcher rediscovery did not emit session_status")
+	}
+}
+
+func TestObserveTerminalSessionStatusUpdatesStateWithoutEmitting(t *testing.T) {
+	outputCh := make(chan protocol.DaemonEvent, 1)
+	sm := NewSessionManager(outputCh)
+	oldActivity := time.Now().Add(-time.Hour)
+	sm.mu.Lock()
+	sm.sessions["codex-terminal"] = &ProcessState{
+		SessionID:      "codex-terminal",
+		Agent:          adapter.AgentCodex,
+		Source:         "terminal",
+		Status:         protocol.StatusIdle,
+		LastActivityAt: oldActivity,
+	}
+	sm.sessions["codex-managed"] = &ProcessState{
+		SessionID: "codex-managed",
+		Agent:     adapter.AgentCodex,
+		Source:    "daemon",
+		Status:    protocol.StatusIdle,
+	}
+	sm.mu.Unlock()
+
+	if updated := sm.ObserveTerminalSessionStatus("codex-terminal", protocol.StatusRunning); !updated {
+		t.Fatal("terminal lifecycle event did not update session state")
+	}
+	sm.mu.RLock()
+	terminalStatus := sm.sessions["codex-terminal"].Status
+	terminalActivity := sm.sessions["codex-terminal"].LastActivityAt
+	turnStartedAt := sm.sessions["codex-terminal"].TurnStartedAt
+	sm.mu.RUnlock()
+	if terminalStatus != protocol.StatusRunning || !terminalActivity.After(oldActivity) || turnStartedAt.IsZero() {
+		t.Fatalf("terminal state status=%q last_activity=%v turn_started=%v", terminalStatus, terminalActivity, turnStartedAt)
+	}
+
+	if updated := sm.ObserveTerminalSessionStatus("codex-terminal", protocol.StatusIdle); !updated {
+		t.Fatal("terminal idle lifecycle event did not update session state")
+	}
+	sm.mu.RLock()
+	turnStartedAt = sm.sessions["codex-terminal"].TurnStartedAt
+	sm.mu.RUnlock()
+	if !turnStartedAt.IsZero() {
+		t.Fatalf("idle terminal session kept turn start %v", turnStartedAt)
+	}
+
+	if updated := sm.ObserveTerminalSessionStatus("codex-managed", protocol.StatusRunning); updated {
+		t.Fatal("terminal lifecycle observer must not mutate a managed session")
+	}
+	sm.mu.RLock()
+	managedStatus := sm.sessions["codex-managed"].Status
+	sm.mu.RUnlock()
+	if managedStatus != protocol.StatusIdle {
+		t.Fatalf("managed status = %q, want idle", managedStatus)
+	}
+	select {
+	case event := <-outputCh:
+		t.Fatalf("lifecycle observation emitted a duplicate event: %+v", event)
+	default:
 	}
 }
 
