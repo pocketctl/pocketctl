@@ -35,7 +35,11 @@ echo "[Codex/3] Web managed composer, interaction projection and cards"
     src/views/__tests__/SessionDetailOpenCodeManaged.test.ts \
     src/views/__tests__/SessionDetailProcessEvent.test.ts \
     src/components/messages/__tests__/ApprovalCardActions.test.ts \
-    src/components/messages/__tests__/McpElicitationCard.test.ts
+    src/components/messages/__tests__/McpElicitationCard.test.ts \
+    src/utils/__tests__/agentFileChange.test.ts \
+    src/utils/__tests__/unifiedDiff.test.ts \
+    src/components/messages/__tests__/FileChangeCard.test.ts \
+    src/components/messages/__tests__/FileChangeBottomSheet.test.ts
 )
 
 if [[ -d ios ]] && command -v swift >/dev/null 2>&1 && command -v swiftc >/dev/null 2>&1; then
@@ -66,6 +70,13 @@ if [[ -d ios ]] && command -v swift >/dev/null 2>&1 && command -v swiftc >/dev/n
       ios/Tests/SessionEventRegressionTests.swift \
       -o "$swift_test_dir/SessionEventRegressionTests"
     "$swift_test_dir/SessionEventRegressionTests"
+    swiftc \
+      ios/Pocketctl/Models/AgentFileChange.swift \
+      ios/Pocketctl/Utils/UnifiedDiffParser.swift \
+      ios/Pocketctl/Utils/SessionEventPolicy.swift \
+      ios/Tests/AgentFileChangeRegressionTests.swift \
+      -o "$swift_test_dir/AgentFileChangeRegressionTests"
+    "$swift_test_dir/AgentFileChangeRegressionTests"
   )
 else
   echo "[Codex/4] SKIP iOS source-regression tests: iOS source or swift/swiftc is unavailable"

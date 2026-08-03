@@ -187,6 +187,22 @@ func TestCodex_CustomToolCall(t *testing.T) {
 	}
 }
 
+func TestCodexCustomToolCallDoesNotInferFileChangesFromExecInput(t *testing.T) {
+	line := `{"type":"response_item","payload":{"type":"custom_tool_call","call_id":"call_patch_like","name":"exec","input":"{\"cmd\":\"printf '--- a/a.go\\n+++ b/a.go\\n@@\\n-old\\n+new\\n'\"}"}}`
+	evts := codexParse(t, line)
+	if len(evts) != 1 {
+		t.Fatalf("events=%+v, want exactly the legacy tool call", evts)
+	}
+	if got := evts[0]; got.Type != "tool_call" || got.CallID != "call_patch_like" || got.Tool != "exec" {
+		t.Fatalf("tool call=%+v", got)
+	}
+	for _, event := range evts {
+		if event.Type == "agent_file_change" {
+			t.Fatalf("exec input was incorrectly projected as a file change: %+v", event)
+		}
+	}
+}
+
 func TestCodex_CustomToolCallOutputArray(t *testing.T) {
 	line := `{"type":"response_item","payload":{"type":"custom_tool_call_output","call_id":"call_custom","output":[{"type":"input_text","text":"done"}]}}`
 	evts := codexParse(t, line)

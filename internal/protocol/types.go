@@ -68,6 +68,8 @@ type DaemonEvent struct {
 	EventID                string               `json:"event_id,omitempty"`          // stable JSONL record identity across daemon restarts
 	PreviousEventID        string               `json:"previous_event_id,omitempty"` // causal predecessor for mutable native snapshots
 	SessionID              string               `json:"session_id"`
+	TurnID                 string               `json:"turn_id,omitempty"`
+	ChangeSetID            string               `json:"change_set_id,omitempty"`
 	OldSessionID           string               `json:"old_session_id,omitempty"`
 	Text                   string               `json:"text,omitempty"`
 	Snapshot               string               `json:"snapshot,omitempty"` // full native text snapshot; Text may remain an append delta
@@ -101,6 +103,14 @@ type DaemonEvent struct {
 	PartSource             json.RawMessage      `json:"part_source,omitempty"`
 	Hash                   string               `json:"hash,omitempty"`
 	Files                  []string             `json:"files,omitempty"`
+	ChangeIndex            int                  `json:"change_index,omitempty"`
+	ChangeTotal            int                  `json:"change_total,omitempty"`
+	Path                   string               `json:"path,omitempty"`
+	ChangeKind             string               `json:"change_kind,omitempty"`
+	MovePath               string               `json:"move_path,omitempty"`
+	Diff                   string               `json:"diff,omitempty"`
+	Additions              int                  `json:"additions,omitempty"`
+	Deletions              int                  `json:"deletions,omitempty"`
 	Prompt                 string               `json:"prompt,omitempty"`
 	Description            string               `json:"description,omitempty"`
 	ProfileName            string               `json:"profile_name,omitempty"`

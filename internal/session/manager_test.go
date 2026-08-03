@@ -750,6 +750,77 @@ func TestRegisterTerminalSessionCodexWatcherDoesNotTakeOverDaemonSessionWithoutP
 	}
 }
 
+func TestRegisterTerminalSessionCodexWatcherDoesNotTailAppServerManagedSessionWithoutPID(t *testing.T) {
+	outputCh := make(chan protocol.DaemonEvent, 16)
+	sm := NewSessionManager(outputCh)
+	backend := newCodexAppServerBackend(sm, newCodexCoordinator(sm), newFakeCodexRuntimeClient(), 1)
+	sm.mu.Lock()
+	sm.sessions["codex-managed"] = &ProcessState{
+		SessionID:   "codex-managed",
+		Cwd:         "/tmp/project",
+		Agent:       adapter.AgentCodex,
+		Source:      "daemon",
+		Status:      protocol.StatusRunning,
+		Backend:     backend,
+		ControlMode: protocol.ControlManaged,
+	}
+	sm.mu.Unlock()
+
+	startTailer := sm.RegisterTerminalSession(
+		"codex-managed",
+		"/tmp/project",
+		0,
+		"",
+		protocol.StatusRunning,
+		adapter.AgentCodex,
+	)
+
+	if startTailer {
+		t.Fatal("Codex app-server managed session must not start a rollout tailer")
+	}
+	sm.mu.RLock()
+	ps := sm.sessions["codex-managed"]
+	sm.mu.RUnlock()
+	if ps.Source != "daemon" || ps.Backend != backend || ps.ControlMode != protocol.ControlManaged {
+		t.Fatalf("managed ownership changed: source=%q backend=%T control=%q", ps.Source, ps.Backend, ps.ControlMode)
+	}
+
+	if emitted := sm.SyncRediscoveredTerminalStatus("codex-managed", protocol.StatusCompleted); emitted {
+		t.Fatal("managed app-server session must ignore watcher status synchronization")
+	}
+	sm.mu.RLock()
+	status := sm.sessions["codex-managed"].Status
+	sm.mu.RUnlock()
+	if status != protocol.StatusRunning {
+		t.Fatalf("managed status = %q, want app-server status %q", status, protocol.StatusRunning)
+	}
+	select {
+	case evt := <-outputCh:
+		t.Fatalf("managed watcher rediscovery emitted event: %+v", evt)
+	default:
+	}
+}
+
+func TestSyncRediscoveredTerminalStatusEmitsForTerminalSession(t *testing.T) {
+	outputCh := make(chan protocol.DaemonEvent, 16)
+	sm := NewSessionManager(outputCh)
+	sm.RegisterTerminalSession(
+		"codex-terminal", "/tmp/project", 0, "", protocol.StatusCompleted, adapter.AgentCodex,
+	)
+
+	if emitted := sm.SyncRediscoveredTerminalStatus("codex-terminal", protocol.StatusRunning); !emitted {
+		t.Fatal("terminal rediscovery must synchronize watcher status")
+	}
+	select {
+	case evt := <-outputCh:
+		if evt.Type != "session_status" || evt.SessionID != "codex-terminal" || evt.Status != protocol.StatusRunning {
+			t.Fatalf("terminal watcher status event = %+v", evt)
+		}
+	default:
+		t.Fatal("terminal watcher rediscovery did not emit session_status")
+	}
+}
+
 func TestRegisterTerminalSessionCodexWatcherTakesOverExitedDaemonSessionWithoutPID(t *testing.T) {
 	outputCh := make(chan protocol.DaemonEvent, 16)
 	sm := NewSessionManager(outputCh)

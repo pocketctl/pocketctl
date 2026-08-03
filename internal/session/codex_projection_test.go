@@ -3,6 +3,7 @@ package session
 import (
 	"encoding/json"
 	"fmt"
+	"reflect"
 	"testing"
 
 	"github.com/pocketctl/pocketctl/internal/codexapp"
@@ -231,6 +232,7 @@ func TestCodexProjectionAgentDeltaAndAuthoritativeCompletion(t *testing.T) {
 }
 
 func TestCodexProjectionUserCommandFileAndUsage(t *testing.T) {
+	t.Setenv("POCKETCTL_CODEX_EDITED_FILES", "1")
 	p := newCodexProjection(1)
 
 	user := p.Project(codexNotification("item/completed", `{
@@ -278,8 +280,19 @@ func TestCodexProjectionUserCommandFileAndUsage(t *testing.T) {
 		"threadId":"thr_1","turnId":"turn_1","completedAtMs":4,
 		"item":{"id":"patch_1","type":"fileChange","status":"completed","changes":[{"path":"a.go","kind":"update","diff":"@@"}]}
 	}`))
-	if len(file) != 1 || file[0].Type != "tool_result" || file[0].Tool != "fileChange" || len(file[0].Files) != 1 || file[0].Files[0] != "a.go" {
+	if len(file) != 2 {
 		t.Fatalf("file=%+v", file)
+	}
+	legacy := file[0]
+	if legacy.Type != "tool_result" || legacy.Tool != "fileChange" ||
+		legacy.CallID != "patch_1" || legacy.PartID != "patch_1" ||
+		legacy.Output != "@@" || legacy.Status != "completed" ||
+		!reflect.DeepEqual(legacy.Files, []string{"a.go"}) {
+		t.Fatalf("legacy fileChange changed: %+v", legacy)
+	}
+	wantLegacyID := p.key("file", "thr_1", "turn_1", "patch_1", "completed", digest([]byte("@@")))
+	if legacy.EventID != wantLegacyID {
+		t.Fatalf("legacy event id=%q, want %q", legacy.EventID, wantLegacyID)
 	}
 
 	usage := p.Project(codexNotification("thread/tokenUsage/updated", `{

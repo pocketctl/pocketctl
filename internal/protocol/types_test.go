@@ -2,6 +2,8 @@ package protocol
 
 import (
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -169,6 +171,94 @@ func TestContentStreamEventRoundTrip(t *testing.T) {
 	}
 	if decoded.OriginalType != "tool_result" || decoded.OriginalBytes != 1234 {
 		t.Fatalf("delivery error metadata did not round-trip: %+v", decoded)
+	}
+}
+
+func TestAgentFileChangeEventRoundTrip(t *testing.T) {
+	event := DaemonEvent{
+		Type:        "agent_file_change",
+		Seq:         101,
+		EventID:     "codex:file:two",
+		SessionID:   "session-1",
+		TurnID:      "turn-1",
+		ChangeSetID: "native:call-1",
+		CallID:      "call-1",
+		ChangeIndex: 1,
+		ChangeTotal: 2,
+		Path:        "old/name.go",
+		ChangeKind:  "move",
+		MovePath:    "new/name.go",
+		Diff:        "@@ -1 +1 @@\n-old\n+new\n",
+		Additions:   1,
+		Deletions:   1,
+		Status:      "completed",
+	}
+	raw, err := json.Marshal(event)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var decoded DaemonEvent
+	if err := json.Unmarshal(raw, &decoded); err != nil {
+		t.Fatal(err)
+	}
+	if decoded.TurnID != event.TurnID || decoded.ChangeSetID != event.ChangeSetID ||
+		decoded.ChangeIndex != event.ChangeIndex || decoded.ChangeTotal != event.ChangeTotal ||
+		decoded.Path != event.Path || decoded.ChangeKind != event.ChangeKind ||
+		decoded.MovePath != event.MovePath || decoded.Diff != event.Diff ||
+		decoded.Additions != event.Additions || decoded.Deletions != event.Deletions {
+		t.Fatalf("file change event did not round-trip: %+v", decoded)
+	}
+}
+
+func TestLegacyDaemonEventOmitsAgentFileChangeFields(t *testing.T) {
+	var event DaemonEvent
+	if err := json.Unmarshal([]byte(`{"type":"agent_text","session_id":"session-1","text":"hello"}`), &event); err != nil {
+		t.Fatal(err)
+	}
+	if event.TurnID != "" || event.ChangeSetID != "" || event.ChangeTotal != 0 ||
+		event.Path != "" || event.ChangeKind != "" || event.Diff != "" ||
+		event.Additions != 0 || event.Deletions != 0 {
+		t.Fatalf("legacy event gained file change values: %+v", event)
+	}
+	raw, err := json.Marshal(event)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var wire map[string]any
+	if err := json.Unmarshal(raw, &wire); err != nil {
+		t.Fatal(err)
+	}
+	for _, key := range []string{
+		"turn_id", "change_set_id", "change_index", "change_total", "path",
+		"change_kind", "move_path", "diff", "additions", "deletions",
+	} {
+		if _, exists := wire[key]; exists {
+			t.Fatalf("legacy event serialized %q: %s", key, raw)
+		}
+	}
+}
+
+func TestAgentFileChangeContractFixture(t *testing.T) {
+	raw, err := os.ReadFile(filepath.Join("..", "..", "testdata", "contracts", "agent_file_change_turn.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var fixture struct {
+		SessionID string        `json:"session_id"`
+		TurnID    string        `json:"turn_id"`
+		Events    []DaemonEvent `json:"events"`
+	}
+	if err := json.Unmarshal(raw, &fixture); err != nil {
+		t.Fatal(err)
+	}
+	if fixture.SessionID != "ses_contract" || fixture.TurnID != "turn_contract" || len(fixture.Events) != 2 {
+		t.Fatalf("unexpected contract envelope: %+v", fixture)
+	}
+	if fixture.Events[0].TurnID != fixture.TurnID || fixture.Events[0].Path != "a.txt" ||
+		fixture.Events[0].Additions != 2 || fixture.Events[0].Deletions != 1 ||
+		fixture.Events[1].TurnID != fixture.TurnID || fixture.Events[1].Path != "b.txt" ||
+		fixture.Events[1].ChangeKind != "create" {
+		t.Fatalf("unexpected contract events: %+v", fixture.Events)
 	}
 }
 

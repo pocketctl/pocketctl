@@ -119,6 +119,13 @@ func (sm *SessionManager) RegisterTerminalSession(sessionID, cwd string, pid int
 
 	// Check if session already exists
 	if ps, ok := sm.sessions[sessionID]; ok {
+		// App-server managed Codex sessions share one long-lived backend and have
+		// no per-thread PID. Their rollout is still visible to the native watcher,
+		// but starting a JSONL tailer would project every event a second time.
+		if pid == 0 && agent == adapter.AgentCodex && ps.Source == "daemon" &&
+			ps.ControlMode == protocol.ControlManaged && ps.Backend != nil {
+			return false
+		}
 		// Codex rollout discovery has no PID, so the childPids guard above cannot
 		// identify a rollout created by our own `codex exec --json` child. The
 		// managed session has already been remapped to the real rollout ID. Keep

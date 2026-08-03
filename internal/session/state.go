@@ -131,6 +131,30 @@ func (sm *SessionManager) SetSessionStatus(sessionID, status string) {
 	}
 }
 
+// SyncRediscoveredTerminalStatus publishes watcher status only for sessions
+// owned by the terminal watcher. Managed app-server sessions can share the same
+// Codex rollout ID, but their status remains authoritative from the backend.
+func (sm *SessionManager) SyncRediscoveredTerminalStatus(sessionID, status string) bool {
+	sm.mu.Lock()
+	ps, ok := sm.sessions[sessionID]
+	if !ok || ps.Source != "terminal" {
+		sm.mu.Unlock()
+		return false
+	}
+	now := time.Now()
+	ps.Status = status
+	ps.LastActivityAt = now
+	sm.mu.Unlock()
+
+	sm.outputCh <- protocol.DaemonEvent{
+		Type:           "session_status",
+		SessionID:      sessionID,
+		Status:         status,
+		LastActivityAt: now.UTC().Format(time.RFC3339),
+	}
+	return true
+}
+
 func (sm *SessionManager) ListSessions() []SessionInfo {
 	sm.mu.RLock()
 	defer sm.mu.RUnlock()

@@ -1,16 +1,20 @@
 import { shallowMount } from '@vue/test-utils'
-import { describe, expect, test, vi } from 'vitest'
-import { ref } from 'vue'
+import { beforeEach, describe, expect, test, vi } from 'vitest'
+import { reactive, ref } from 'vue'
 import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 import SessionDetail from '../SessionDetail.vue'
 import { resetAgentPlanProgressForTests } from '../../composables/useAgentPlanProgress'
 import PlanSidePanel from '../../components/plan/PlanSidePanel.vue'
+import OpenCodePartCard from '../../components/messages/OpenCodePartCard.vue'
+import FileChangeCard from '../../components/messages/FileChangeCard.vue'
+import FileChangeBottomSheet from '../../components/messages/FileChangeBottomSheet.vue'
 
 const websocketMock = vi.hoisted(() => ({ handlers: new Map<string, (message: any) => void>() }))
+const routeMock = vi.hoisted(() => ({ current: null as any }))
 
 vi.mock('vue-router', () => ({
-  useRoute: () => ({ params: { id: 'ses_1' }, query: {} }),
+  useRoute: () => routeMock.current,
   useRouter: () => ({ push: vi.fn(), replace: vi.fn() }),
 }))
 
@@ -32,6 +36,97 @@ vi.mock('../../composables/useSessionRename', () => ({
 }))
 
 describe('SessionDetail processEvent integration', () => {
+  beforeEach(() => {
+    routeMock.current = reactive({ params: { id: 'ses_1' }, query: {} as Record<string, string> })
+  })
+
+  test('isolates Edited files reduction from legacy tool results and OpenCode parts', async () => {
+    const contract = JSON.parse(readFileSync(resolve(process.cwd(), '../testdata/contracts/agent_file_change_turn.json'), 'utf8')) as {
+      events: Array<Record<string, any>>
+    }
+    const wrapper = shallowMount(SessionDetail)
+    const vm = wrapper.vm as any
+    vm.allSessions = [{ session_id: 'ses_1', daemon_id: 'daemon-1', status: 'running' }]
+
+    for (const event of contract.events) vm.processEvent(event)
+    websocketMock.handlers.get('replay_batch')?.({
+      type: 'replay_batch', session_id: 'ses_1', events: [contract.events[0]],
+    })
+    vm.processEvent({
+      ...contract.events[0], event_id: 'codex:file:three', change_set_id: 'native:call_2',
+      seq: 102, change_index: 0, change_total: 1, additions: 1, deletions: 0,
+      diff: '@@ -2,0 +3 @@\n+later\n',
+    })
+    vm.processEvent({ type: 'tool_result', call_id: 'missing-result', output: 'legacy result' })
+    vm.processEvent({
+      type: 'agent_patch', message_id: 'oc-message', part_id: 'oc-patch',
+      files: ['legacy-opencode.txt'], hash: 'hash-1',
+    })
+    await wrapper.vm.$nextTick()
+
+    const cards = vm.messages.filter((item: any) => item.type === 'agent_file_change')
+    expect(cards).toHaveLength(1)
+    expect(cards[0].fileChange).toMatchObject({ additions: 4, deletions: 1 })
+    expect(cards[0].fileChange.files.map((file: any) => file.path)).toEqual(['a.txt', 'b.txt'])
+    expect(cards[0].fileChange.files[0].edits).toHaveLength(2)
+
+    expect(vm.messages.some((item: any) => item.call_id === 'missing-result')).toBe(false)
+    vm.processEvent({ type: 'tool_call', call_id: 'missing-result', tool: 'Read', input: { path: 'old.txt' } })
+    expect(vm.messages.find((item: any) => item.call_id === 'missing-result')).toMatchObject({
+      output: 'legacy result', status: 'completed',
+    })
+    expect(vm.messages.filter((item: any) => item.type === 'agent_file_change')).toHaveLength(1)
+    await wrapper.vm.$nextTick()
+    expect(wrapper.findComponent(OpenCodePartCard).exists()).toBe(true)
+  })
+
+  test('renders live agent_file_change events without waiting for replay', async () => {
+    const wrapper = shallowMount(SessionDetail)
+    const vm = wrapper.vm as any
+    vm.allSessions = [{ session_id: 'ses_1', daemon_id: 'daemon-1', status: 'running' }]
+
+    const handler = websocketMock.handlers.get('agent_file_change')
+    expect(handler).toBeTypeOf('function')
+    handler!({
+      type: 'agent_file_change', session_id: 'ses_1', turn_id: 'turn-live', seq: 11,
+      event_id: 'file-live', change_set_id: 'managed:call-live', change_index: 0, change_total: 1,
+      path: 'live.txt', change_kind: 'update', diff: '@@ -1 +1 @@\n-old\n+new\n',
+      additions: 1, deletions: 1, status: 'completed',
+    })
+    await wrapper.vm.$nextTick()
+
+    expect(vm.messages.filter((item: any) => item.type === 'agent_file_change')).toHaveLength(1)
+    expect(wrapper.findComponent(FileChangeCard).exists()).toBe(true)
+  })
+
+  test('dismisses an open file-change sheet and drops its opener on session switch', async () => {
+    const wrapper = shallowMount(SessionDetail)
+    const vm = wrapper.vm as any
+    vm.allSessions = [{ session_id: 'ses_1', daemon_id: 'daemon-1', status: 'running' }]
+    vm.processEvent({
+      type: 'agent_file_change', session_id: 'ses_1', turn_id: 'turn-1', seq: 1,
+      event_id: 'file-1', change_set_id: 'set-1', change_index: 0, change_total: 1,
+      path: 'old-session.txt', change_kind: 'update', diff: '@@ -1 +1 @@\n-old\n+new\n',
+      additions: 1, deletions: 1, status: 'completed',
+    })
+    await wrapper.vm.$nextTick()
+    const opener = document.createElement('button')
+    document.body.append(opener)
+    wrapper.findComponent(FileChangeCard).vm.$emit('open-mobile', opener)
+    await wrapper.vm.$nextTick()
+    expect(wrapper.findComponent(FileChangeBottomSheet).exists()).toBe(true)
+    expect(vm.fileChangeOpener).toBe(opener)
+
+    routeMock.current.params.id = 'ses_2'
+    await wrapper.vm.$nextTick()
+
+    expect(wrapper.findComponent(FileChangeBottomSheet).exists()).toBe(false)
+    expect(vm.mobileFileChange).toBeNull()
+    expect(vm.fileChangeOpener).toBeNull()
+    wrapper.unmount()
+    opener.remove()
+  })
+
   test('reduces live and replayed agent plans outside the chat timeline', () => {
     resetAgentPlanProgressForTests()
     const wrapper = shallowMount(SessionDetail)

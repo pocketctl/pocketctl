@@ -1,4 +1,4 @@
-const STREAM_EVENT_TYPES = new Set(['agent_text', 'agent_reasoning', 'tool_result'])
+const STREAM_EVENT_TYPES = new Set(['agent_text', 'agent_reasoning', 'tool_result', 'agent_file_change'])
 
 export interface ReplayBoundary {
   endIndex: number

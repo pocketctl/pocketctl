@@ -817,6 +817,33 @@ describe('Router - event insertion updates last_activity_at', () => {
     )
     expect(JSON.parse(insert.params[2])).toEqual(plan)
   })
+
+  test('Codex file changes are persisted and broadcast unchanged', async () => {
+    const daemonWs = createMockWs()
+    await router.registerDaemon(daemonWs, { type: 'register', daemon_id: 'daemon-1', hostname: 'test', agents: ['codex'] }, 1)
+    const clientWs = createMockWs()
+    router.registerClient(clientWs, 1)
+    await router.handleClientMessage(clientWs, { type: 'replay', session_id: 'test-sid', last_seq: 0 })
+    clientWs._sent.length = 0
+
+    const fileChange = {
+      type: 'agent_file_change', session_id: 'test-sid', turn_id: 'turn-1',
+      change_set_id: 'native:call-1', event_id: 'file-event-1', call_id: 'call-1',
+      change_index: 0, change_total: 1, path: 'src/a.ts', change_kind: 'update',
+      move_path: '', diff: '@@ -1 +1 @@\n-old\n+new\n', additions: 1, deletions: 1,
+      status: 'completed',
+    }
+
+    router.handleDaemonMessage('daemon-1', fileChange)
+    await tick()
+
+    expect(clientWs._sent).toContainEqual(fileChange)
+    const insert = pool._queries.find((query: any) =>
+      query.sql.includes('INSERT INTO events') && query.params[1] === 'agent_file_change'
+    )
+    expect(insert).toBeDefined()
+    expect(JSON.parse(insert.params[2])).toEqual(fileChange)
+  })
 })
 
 describe('Router - list_sessions includes extended fields', () => {

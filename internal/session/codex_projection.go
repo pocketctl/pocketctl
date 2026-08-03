@@ -66,9 +66,10 @@ type codexUserInput struct {
 }
 
 type codexFileEdit struct {
-	Path string `json:"path"`
-	Kind string `json:"kind"`
-	Diff string `json:"diff"`
+	Path     string              `json:"path"`
+	Kind     codexFileChangeKind `json:"kind"`
+	Diff     string              `json:"diff"`
+	MovePath string              `json:"movePath,omitempty"`
 }
 
 func newCodexProjection(generation uint64) *codexProjection {
@@ -288,6 +289,11 @@ func (p *codexProjection) projectItem(method string, raw json.RawMessage, histor
 	event, ok := p.convertItem(method, params.ThreadID, params.TurnID, params.Item)
 	if ok {
 		events = append(events, event)
+		if method == "item/completed" && params.Item.Type == "fileChange" {
+			events = append(events, p.projectManagedFileChanges(
+				params.ThreadID, params.TurnID, params.Item,
+			)...)
+		}
 	}
 	return events
 }

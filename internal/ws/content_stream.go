@@ -314,6 +314,8 @@ func eventContent(event protocol.DaemonEvent) (string, bool) {
 		return event.Text, true
 	case "tool_result":
 		return event.Output, true
+	case "agent_file_change":
+		return event.Diff, true
 	default:
 		return "", false
 	}
@@ -325,6 +327,8 @@ func setEventContent(event *protocol.DaemonEvent, content string) {
 		event.Text = content
 	case "tool_result":
 		event.Output = content
+	case "agent_file_change":
+		event.Diff = content
 	}
 }
 

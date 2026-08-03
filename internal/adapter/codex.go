@@ -157,9 +157,13 @@ type codexPayload struct {
 	// never makes the complete response_item unparseable.
 	Output json.RawMessage `json:"output,omitempty"`
 	// event_msg subtypes
-	Message          string           `json:"message,omitempty"`            // agent_message / user_message text
-	LastAgentMessage string           `json:"last_agent_message,omitempty"` // task_complete
-	LastTokenUsage   *codexTokenUsage `json:"last_token_usage,omitempty"`   // token_count
+	Message          string                      `json:"message,omitempty"`            // agent_message / user_message text
+	LastAgentMessage string                      `json:"last_agent_message,omitempty"` // task_complete
+	LastTokenUsage   *codexTokenUsage            `json:"last_token_usage,omitempty"`   // token_count
+	TurnID           string                      `json:"turn_id,omitempty"`
+	Success          bool                        `json:"success,omitempty"`
+	Status           string                      `json:"status,omitempty"`
+	Changes          map[string]codexPatchChange `json:"changes,omitempty"`
 	Info             struct {
 		LastTokenUsage *codexTokenUsage `json:"last_token_usage,omitempty"`
 	} `json:"info,omitempty"` // token_count in Codex exec/rollout v0.143+
@@ -458,6 +462,9 @@ func convertCodexEventMsg(p codexPayload) []protocol.DaemonEvent {
 			Type:   "session_status",
 			Status: protocol.StatusIdle,
 		}}
+
+	case "patch_apply_end":
+		return projectCodexPatchApplyEnd(p)
 	}
 	return nil
 }

@@ -203,6 +203,12 @@
             :message="msg"
           />
 
+          <FileChangeCard
+            v-else-if="msg.type === 'agent_file_change'"
+            :message="msg"
+            @open-mobile="openFileChangeSheet(msg, $event)"
+          />
+
           <!-- Tool call / subagent (full-width block) -->
           <DiffCard
             v-else-if="msg.type === 'tool_call' && isDiffTool(msg.tool)"
@@ -444,6 +450,12 @@
       :connected="connected !== false"
       @close="closePlanPanel"
     />
+    <FileChangeBottomSheet
+      v-if="mobileFileChange"
+      :message="mobileFileChange"
+      :return-focus-to="fileChangeOpener"
+      @close="closeFileChangeSheet"
+    />
   </div>
 
   <NewSessionDialog
@@ -489,6 +501,8 @@ import OpenCodeReasoningCard from '../components/messages/OpenCodeReasoningCard.
 import OpenCodePartCard from '../components/messages/OpenCodePartCard.vue'
 import InteractiveChoiceCard from '../components/messages/InteractiveChoiceCard.vue'
 import DiffCard from '../components/messages/DiffCard.vue'
+import FileChangeCard from '../components/messages/FileChangeCard.vue'
+import FileChangeBottomSheet from '../components/messages/FileChangeBottomSheet.vue'
 import SubAgentFoldGroup from '../components/messages/SubAgentFoldGroup.vue'
 import { buildResumeCommand } from '../utils/resumeCommand'
 import { resolveAgentTarget } from './classifyByAgent'
@@ -509,6 +523,7 @@ import { ReplayPageBuffer } from '../utils/replayPageBuffer'
 import { useAgentPlanProgress } from '../composables/useAgentPlanProgress'
 import PlanSidePanel from '../components/plan/PlanSidePanel.vue'
 import { completedPlanItemCount } from '../utils/agentPlanMerge'
+import { createAgentFileChangeReducer, type AgentFileChangeMessage } from '../utils/agentFileChange'
 
 const { renamingId, renameInput, startRename, commitRename, cancelRename } = useSessionRename()
 
@@ -532,6 +547,15 @@ function setPlanPanelOpen(open: boolean) {
 }
 function togglePlanPanel() { setPlanPanelOpen(!planPanelOpen.value) }
 function closePlanPanel() { setPlanPanelOpen(false) }
+const mobileFileChange = ref<AgentFileChangeMessage | null>(null)
+const fileChangeOpener = ref<HTMLElement | null>(null)
+function openFileChangeSheet(message: AgentFileChangeMessage, opener: HTMLElement) {
+  mobileFileChange.value = message
+  fileChangeOpener.value = opener
+}
+function closeFileChangeSheet() {
+  mobileFileChange.value = null
+}
 const messages = ref<any[]>([])
 const openCodeStructuredTypes = new Set<OpenCodeStructuredType>(['agent_file', 'agent_patch', 'agent_todo', 'agent_subtask', 'agent_profile'])
 function isOpenCodeStructuredType(type: string): type is OpenCodeStructuredType {
@@ -1263,6 +1287,7 @@ const toolTimeouts = new Map<string, ReturnType<typeof setTimeout>>()
 // apply them when the matching tool_call is created.
 const pendingToolResults = new Map<string, { output: string | null; status: string }>()
 const contentStreams = new ContentStreamAssembler()
+const fileChangeReducer = createAgentFileChangeReducer()
 function armToolTimeout(callId: string) {
   if (toolTimeouts.has(callId)) clearTimeout(toolTimeouts.get(callId)!)
   const timer = setTimeout(() => {
@@ -1862,6 +1887,8 @@ function processEvent(evt: any, target: any[] = messages.value, subagentOverride
       auto: evt.auto ?? evt.payload?.auto ?? false,
       overflow: evt.overflow ?? evt.payload?.overflow ?? false,
     })
+  } else if (type === 'agent_file_change') {
+    fileChangeReducer.accept(evt, target)
   } else if (isOpenCodeStructuredType(type)) {
     const payload = evt.payload && typeof evt.payload === 'object' ? evt.payload : {}
     mergeStructuredPart(target, {
@@ -2090,6 +2117,9 @@ watch(loadKey, (newKey, oldKey) => {
     interactionResolutions.clear()
     pendingToolResults.clear() // discard buffered out-of-order results
     contentStreams.reset()
+    fileChangeReducer.resetTransientStreams()
+    mobileFileChange.value = null
+    fileChangeOpener.value = null
     olderReplayEvents.reset()
     // Gate the turn-timer watch: the placeholder status='running' below must
     // not start the timer from zero. The real turn start (if executing) is
@@ -2381,7 +2411,7 @@ onMounted(() => {
     processEvent(msg)
   }))
 
-  for (const eventType of ['agent_reasoning', 'agent_retry', 'agent_compaction', ...openCodeStructuredTypes]) {
+  for (const eventType of ['agent_reasoning', 'agent_retry', 'agent_compaction', 'agent_file_change', ...openCodeStructuredTypes]) {
     cleanups.push(onEvent(eventType, (msg: any) => {
       if (msg.session_id !== sessionId.value) return
       processEvent(msg)

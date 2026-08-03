@@ -2392,7 +2392,7 @@ func handleWatcherEvents(ctx context.Context, events <-chan watcher.SessionEvent
 					logger.Debug("session already known, skipping tailer", "session", evt.Session.SessionID)
 					// Re-discovered (e.g. --continue): tailer already running on same JSONL,
 					// but emit session_status so relay/DB updates from "exited" → current status.
-					sm.SetSessionStatus(evt.Session.SessionID, evt.Session.Status)
+					sm.SyncRediscoveredTerminalStatus(evt.Session.SessionID, evt.Session.Status)
 					break
 				}
 				// Start JSONL tailer from beginning to replay history and tail new events.

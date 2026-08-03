@@ -91,6 +91,120 @@ func TestStreamTransportChunksUTF8BeforeSpool(t *testing.T) {
 	}
 }
 
+func TestAgentFileChangeContentStreamChunksDiffBeforeSpool(t *testing.T) {
+	const (
+		maxEventBytes = 1 << 20
+		maxChunkBytes = 64 << 10
+	)
+	c := newTestClient("ws://example")
+	spoolPath := filepath.Join(t.TempDir(), "file-change-stream.log")
+	if err := c.InitSpool(spoolPath); err != nil {
+		t.Fatal(err)
+	}
+	defer c.spool.Close()
+	c.onRegisterAck(protocol.RegisterAckMessage{
+		SupportsEventAck: true,
+		Capabilities:     []string{"tool_output_stream_v1"},
+		MaxEventBytes:    maxEventBytes,
+		MaxChunkBytes:    maxChunkBytes,
+	})
+
+	diff := strings.Repeat("+large line\n", 120_000)
+	if ok := c.sendEventUntil(protocol.DaemonEvent{
+		Type: "agent_file_change", SessionID: "ses_1", TurnID: "turn_1",
+		ChangeSetID: "native:call_1", CallID: "call_1", EventID: "file-event-1",
+		Path: "large.go", ChangeKind: protocol.FileChangeUpdate,
+		Diff: diff, Additions: 120_000, Deletions: 17,
+		ChangeIndex: 0, ChangeTotal: 1, Status: "completed", Final: true,
+	}, nil); !ok {
+		t.Fatal("streamable file change was not durably accepted")
+	}
+
+	persisted, err := loadSpool(spoolPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(persisted) < 2 {
+		t.Fatalf("oversized diff remained one spool record: %d", len(persisted))
+	}
+	var rebuilt strings.Builder
+	streamID := ""
+	offset := 0
+	for index, record := range persisted {
+		if len(record.data) > maxEventBytes {
+			t.Fatalf("frame %d has %d bytes, max %d", index, len(record.data), maxEventBytes)
+		}
+		var chunk protocol.DaemonEvent
+		if err := json.Unmarshal(record.data, &chunk); err != nil {
+			t.Fatal(err)
+		}
+		if chunk.Type != "agent_file_change" || chunk.SessionID != "ses_1" ||
+			chunk.TurnID != "turn_1" || chunk.ChangeSetID != "native:call_1" ||
+			chunk.CallID != "call_1" || chunk.Path != "large.go" ||
+			chunk.ChangeKind != protocol.FileChangeUpdate || chunk.Additions != 120_000 ||
+			chunk.Deletions != 17 || chunk.ChangeIndex != 0 || chunk.ChangeTotal != 1 ||
+			chunk.Status != "completed" || chunk.StreamID == "" ||
+			chunk.ChunkSeq == nil || *chunk.ChunkSeq != index ||
+			chunk.ByteOffset == nil || *chunk.ByteOffset != offset {
+			t.Fatalf("chunk %d metadata=%+v", index, chunk)
+		}
+		if len([]byte(chunk.Diff)) > maxChunkBytes {
+			t.Fatalf("chunk %d content=%d bytes, max %d", index, len([]byte(chunk.Diff)), maxChunkBytes)
+		}
+		if streamID == "" {
+			streamID = chunk.StreamID
+		} else if chunk.StreamID != streamID {
+			t.Fatalf("chunk %d stream=%q want %q", index, chunk.StreamID, streamID)
+		}
+		if index < len(persisted)-1 &&
+			(chunk.Final || chunk.EventID != "" || chunk.ContentHash != "" || chunk.TotalBytes != 0) {
+			t.Fatalf("non-final chunk %d leaked completion metadata: %+v", index, chunk)
+		}
+		offset += len([]byte(chunk.Diff))
+		rebuilt.WriteString(chunk.Diff)
+	}
+
+	var final protocol.DaemonEvent
+	if err := json.Unmarshal(persisted[len(persisted)-1].data, &final); err != nil {
+		t.Fatal(err)
+	}
+	if !final.Final || final.TotalBytes != len([]byte(diff)) ||
+		final.ContentHash == "" || final.EventID != "file-event-1" {
+		t.Fatalf("final chunk=%+v", final)
+	}
+	if rebuilt.String() != diff {
+		t.Fatal("file diff changed during transport chunking")
+	}
+}
+
+func TestAgentFileChangeWithoutStreamCapabilityKeepsDiffAndClearsStreamMetadata(t *testing.T) {
+	c := newTestClient("ws://example")
+	c.onRegisterAck(protocol.RegisterAckMessage{SupportsEventAck: true})
+	diff := "@@ -1 +1 @@\n-old\n+new\n"
+	if ok := c.sendEventUntil(protocol.DaemonEvent{
+		Type: "agent_file_change", SessionID: "ses_1", TurnID: "turn_1",
+		ChangeSetID: "managed:patch_1", EventID: "file-event-1",
+		Path: "a.go", ChangeKind: protocol.FileChangeUpdate, Diff: diff,
+		StreamID: "file-stream-1", Streaming: true, Final: true,
+		TotalBytes: len([]byte(diff)), ContentHash: "source-hash",
+	}, nil); !ok {
+		t.Fatal("legacy file change was not accepted")
+	}
+	if len(c.outBuf) != 1 {
+		t.Fatalf("legacy relay unexpectedly received %d chunks", len(c.outBuf))
+	}
+	var got protocol.DaemonEvent
+	if err := json.Unmarshal(c.outBuf[0].data, &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Type != "agent_file_change" || got.Diff != diff || got.Path != "a.go" ||
+		got.ChangeSetID != "managed:patch_1" || got.EventID != "file-event-1" ||
+		got.StreamID != "" || got.Streaming || got.Final || got.TotalBytes != 0 ||
+		got.ContentHash != "" || got.ChunkSeq != nil || got.ByteOffset != nil {
+		t.Fatalf("legacy file change changed: %+v", got)
+	}
+}
+
 func TestStreamTransportPreservesLegacySingleEventWithoutCapability(t *testing.T) {
 	c := newTestClient("ws://example")
 	c.onRegisterAck(protocol.RegisterAckMessage{SupportsEventAck: true})

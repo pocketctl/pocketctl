@@ -14,6 +14,60 @@ function streamedRow(id: number, streamId: string, sequence: number) {
   }
 }
 
+function fileChangeStreamedRow(id: number, sequence: number) {
+  return {
+    id,
+    payload: {
+      type: 'agent_file_change',
+      stream_id: 'file-change-stream',
+      chunk_seq: sequence,
+      byte_offset: sequence * 10,
+      diff: `chunk-${sequence}`,
+      final: sequence === 2,
+    },
+  }
+}
+
+describe('agent_file_change replay streams', () => {
+  test('counts all chunks as one logical item', () => {
+    const rows = [
+      fileChangeStreamedRow(4, 2),
+      fileChangeStreamedRow(3, 1),
+      fileChangeStreamedRow(2, 0),
+      { id: 1, payload: { type: 'user_text', text: 'older' } },
+    ]
+
+    expect(countReplayLogicalItems(rows)).toBe(2)
+  })
+
+  test('remains open until the zero chunk appears', () => {
+    expect(hasOpenReplayStreams([
+      fileChangeStreamedRow(3, 2),
+      fileChangeStreamedRow(2, 1),
+    ])).toBe(true)
+    expect(hasOpenReplayStreams([
+      fileChangeStreamedRow(3, 2),
+      fileChangeStreamedRow(2, 1),
+      fileChangeStreamedRow(1, 0),
+    ])).toBe(false)
+  })
+
+  test('extends a page through chunk zero after reaching the logical limit', () => {
+    const rows = [
+      fileChangeStreamedRow(5, 2),
+      { id: 4, payload: { type: 'tool_call', call_id: 'call-1' } },
+      fileChangeStreamedRow(3, 1),
+      fileChangeStreamedRow(2, 0),
+      { id: 1, payload: { type: 'user_text', text: 'older' } },
+    ]
+
+    expect(findCompleteReplayBoundary(rows, 2)).toEqual({
+      endIndex: 3,
+      logicalCount: 2,
+    })
+  })
+})
+
 describe('findCompleteReplayBoundary', () => {
   test('extends a logical page backward to chunk zero', () => {
     const rows = Array.from({ length: 78 }, (_, index) => streamedRow(1000 - index, 'stream-a', 77 - index))
