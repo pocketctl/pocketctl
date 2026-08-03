@@ -1,0 +1,40 @@
+{
+  "session_id": "ses_contract",
+  "turn_id": "turn_contract",
+  "events": [
+    {
+      "type": "agent_file_change",
+      "session_id": "ses_contract",
+      "turn_id": "turn_contract",
+      "seq": 100,
+      "event_id": "codex:file:one",
+      "change_set_id": "native:call_1",
+      "call_id": "call_1",
+      "change_index": 0,
+      "change_total": 2,
+      "path": "a.txt",
+      "change_kind": "update",
+      "diff": "--- a/a.txt\n+++ b/a.txt\n@@ -1 +1,2 @@\n-old\n+new\n+next\n",
+      "additions": 2,
+      "deletions": 1,
+      "status": "completed"
+    },
+    {
+      "type": "agent_file_change",
+      "session_id": "ses_contract",
+      "turn_id": "turn_contract",
+      "seq": 101,
+      "event_id": "codex:file:two",
+      "change_set_id": "native:call_1",
+      "call_id": "call_1",
+      "change_index": 1,
+      "change_total": 2,
+      "path": "b.txt",
+      "change_kind": "create",
+      "diff": "--- /dev/null\n+++ b/b.txt\n@@ -0,0 +1 @@\n+hello\n",
+      "additions": 1,
+      "deletions": 0,
+      "status": "completed"
+    }
+  ]
+}

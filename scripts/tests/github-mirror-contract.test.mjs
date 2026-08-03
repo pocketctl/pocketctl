@@ -61,6 +61,11 @@ assert.ok(
   'GitHub sync retry library is absent from the public mirror',
 )
 
+assert.ok(
+  mirrored.has('testdata/contracts'),
+  'agent file change contract fixtures are absent from the public mirror',
+)
+
 const mirrorCovers = (relativePath) =>
   [...mirrored].some(
     (entry) => relativePath === entry || relativePath.startsWith(`${entry}/`),

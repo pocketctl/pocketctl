@@ -4,6 +4,7 @@ cmd
 internal
 relay
 web
+testdata/contracts
 .github
 docker-compose.prod.yml
 docs/adding-an-agent.md
