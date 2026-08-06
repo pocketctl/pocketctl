@@ -74,6 +74,25 @@ describe('db.persistEvent - retry on transient failure', () => {
     expect(inserts[0][3]).not.toBe(inserts[1][3])
   })
 
+  test('normalizes nested NUL text before serializing a legacy event', async () => {
+    const inserts: any[][] = []
+    const pool: any = {
+      query: vi.fn((sql: string, params?: any[]) => {
+        if (sql.includes('INSERT INTO events')) {
+          inserts.push(params ?? [])
+          return Promise.resolve({ rows: [{ id: 1 }] })
+        }
+        return Promise.resolve({ rows: [], rowCount: 1 })
+      }),
+    }
+
+    await insertEvent(pool, 'sess-1', 'tool_result', {
+      type: 'tool_result', output: [{ text: 'before\u0000after' }],
+    })
+
+    expect(JSON.parse(inserts[0][2]).output[0].text).toBe('before\uFFFDafter')
+  })
+
   test('retries a failing insert and returns the id once it succeeds', async () => {
     let insertCalls = 0
     const pool: any = {

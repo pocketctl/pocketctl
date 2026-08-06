@@ -35,6 +35,7 @@ import {
   RealtimeOutboxRepository,
 } from './materialization/realtime-outbox.js';
 import { assertDurableIngressSchema } from './event-worker-main.js';
+import { registerSessionShareRoutes } from './session-share-routes.js';
 
 const API_KEY = process.env.POCKETCTL_API_KEY || '';
 const DB_URL = process.env.DATABASE_URL || 'postgresql://localhost:5432/pocketctl';
@@ -631,6 +632,7 @@ async function main() {
 
   await app.register(fastifyCors, { origin: corsOrigin, credentials: true });
   await app.register(fastifyWebsocket);
+  registerSessionShareRoutes(app, { pool, publicIssuer });
 
   // ---- REST API: Auth ----
 

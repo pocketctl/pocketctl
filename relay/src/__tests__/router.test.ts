@@ -132,6 +132,24 @@ test('durable ingress flag off preserves the legacy persist-and-ack path', async
   expect(pool.query).toHaveBeenCalledWith(expect.stringContaining('INSERT INTO events'), expect.anything())
 })
 
+test('normalizes NUL payload text before inline persistence and advances the contiguous ACK', async () => {
+  const pool = createMockPool()
+  const router = new Router(pool)
+  const daemonWs = createMockWs()
+  await router.registerDaemon(daemonWs, { type: 'register', daemon_id: 'nul-inline', hostname: 'h', agents: [], started_at: 17 }, 1)
+  daemonWs._sent.length = 0
+
+  router.handleDaemonMessage('nul-inline', { type: 'agent_text', session_id: 's1', text: 'before\u0000after', seq: 1 })
+  router.handleDaemonMessage('nul-inline', { type: 'agent_text', session_id: 's1', text: 'next', seq: 2 })
+  await tick()
+
+  const inserts = pool._queries.filter((query: any) => query.sql.includes('INSERT INTO events'))
+  expect(JSON.parse(inserts[0].params[2]).text).toBe('before\uFFFDafter')
+  daemonWs._sent.length = 0
+  router.handleDaemonMessage('nul-inline', { type: 'ping' })
+  expect(daemonWs._sent).toContainEqual(expect.objectContaining({ type: 'event_ack', up_to_seq: 2 }))
+})
+
 test('durable ingress commits Inbox before its single ACK and skips legacy persistence', async () => {
   const pool = createMockPool()
   const repository = {
@@ -156,6 +174,27 @@ test('durable ingress commits Inbox before its single ACK and skips legacy persi
   expect(ws._sent.find((message: any) => message.type === 'event_ack')).toEqual(expect.objectContaining({
     up_to_seq: 1, event_window: 128, daemon_generation: 17,
   }))
+})
+
+test('normalizes NUL payload text before durable ingress commits its inbox', async () => {
+  const repository = {
+    seedCheckpoint: vi.fn(async () => ({ daemonId: 'nul-durable', daemonGeneration: 17, ackSeq: 0 })),
+    persistBatch: vi.fn(async () => new Map([[checkpointKey('nul-durable', 17), {
+      daemonId: 'nul-durable', daemonGeneration: 17, ackSeq: 1,
+    }]])),
+  }
+  const router = new Router(createMockPool(), { durableIngress: { mode: 'on', repository } })
+  const daemonWs = createMockWs()
+  await router.registerDaemon(daemonWs, { type: 'register', daemon_id: 'nul-durable', hostname: 'h', agents: [], started_at: 17 }, 1)
+  daemonWs._sent.length = 0
+
+  router.handleDaemonMessage('nul-durable', { type: 'tool_result', session_id: 's1', output: 'before\u0000after', seq: 1 })
+  await tick()
+
+  expect(repository.persistBatch).toHaveBeenCalledWith([expect.objectContaining({
+    payload: expect.objectContaining({ output: 'before\uFFFDafter' }),
+  })])
+  expect(daemonWs._sent).toContainEqual(expect.objectContaining({ type: 'event_ack', up_to_seq: 1 }))
 })
 
 test('durable ingress receipt-only title events share the Inbox ACK owner', async () => {

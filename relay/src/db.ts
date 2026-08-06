@@ -1,8 +1,15 @@
 import pg from 'pg';
 import { createHash } from 'crypto';
 import type { SupportedLanguage } from './config/language.js';
+import { sanitizeJSONBPayload } from './jsonb-payload.js';
 import { initDurableIngressSchema } from './schema/durable-ingress.js';
-import { countReplayLogicalItems, findCompleteReplayBoundary, hasOpenReplayStreams } from './replay-page.js';
+import {
+  countReplayLogicalItems,
+  findCompleteForwardReplayBoundary,
+  findCompleteReplayBoundary,
+  hasOpenForwardReplayStreams,
+  hasOpenReplayStreams,
+} from './replay-page.js';
 const { Pool } = pg;
 
 export interface DBConfig {
@@ -668,8 +675,9 @@ function eventHashInput(sessionId: string, eventType: string, payload: any): str
 }
 
 export async function insertEvent(pool: pg.Pool, sessionId: string, eventType: string, payload: any): Promise<number> {
-  const payloadStr = JSON.stringify(payload);
-  const hashInput = eventHashInput(sessionId, eventType, payload);
+  const persistedPayload = sanitizeJSONBPayload(payload);
+  const payloadStr = JSON.stringify(persistedPayload);
+  const hashInput = eventHashInput(sessionId, eventType, persistedPayload);
   const hash = createHash('md5').update(hashInput).digest('hex').slice(0, 16);
   const result = await pool.query(
     `INSERT INTO events (session_id, event_type, payload, event_hash)
@@ -728,8 +736,9 @@ export async function persistEventWithEffect(
   payload: any,
   attempts = 5,
 ): Promise<PersistedEventEffect> {
-  const payloadStr = JSON.stringify(payload);
-  const hashInput = eventHashInput(sessionId, eventType, payload);
+  const persistedPayload = sanitizeJSONBPayload(payload);
+  const payloadStr = JSON.stringify(persistedPayload);
+  const hashInput = eventHashInput(sessionId, eventType, persistedPayload);
   const hash = createHash('md5').update(hashInput).digest('hex').slice(0, 16);
   let delay = 100;
   for (let i = 0; i < attempts; i++) {
@@ -907,6 +916,14 @@ export interface CompleteBackwardReplayPage {
   hasMore: boolean;
 }
 
+export interface CompleteForwardReplayPage {
+  events: any[];
+  oldestId: number;
+  newestId: number;
+  logicalCount: number;
+  hasMore: boolean;
+}
+
 interface ReplayFilter {
   where: string;
   params: any[];
@@ -1015,6 +1032,113 @@ export async function getCompleteBackwardReplayPage(
     oldestId,
     logicalCount: countReplayLogicalItems(rowsDesc),
     hasMore: await hasOlderReplayEvent(pool, sessionId, oldestId, agentId),
+  };
+}
+
+function completeForwardReplayFilter(sessionId: string, afterId: number, agentId?: string): ReplayFilter {
+  const params: any[] = [sessionId, Math.max(0, afterId)];
+  const clauses = ['session_id = $1', 'id > $2'];
+  if (agentId) {
+    params.push(agentId);
+    clauses.push(`payload->>'agent_id' = $${params.length}`);
+  }
+  return { where: clauses.join(' AND '), params };
+}
+
+async function scanForwardReplayEvents(
+  pool: pg.Pool,
+  sessionId: string,
+  afterId: number,
+  limit: number,
+  agentId?: string,
+): Promise<any[]> {
+  const filter = completeForwardReplayFilter(sessionId, afterId, agentId);
+  const result = await pool.query(
+    `SELECT id, session_id, event_type, payload, created_at
+     FROM events
+     WHERE ${filter.where}
+     ORDER BY id ASC LIMIT $${filter.params.length + 1}`,
+    [...filter.params, limit],
+  );
+  return result.rows;
+}
+
+async function hasNewerReplayEvent(
+  pool: pg.Pool,
+  sessionId: string,
+  newestId: number,
+  agentId?: string,
+): Promise<boolean> {
+  const filter = completeForwardReplayFilter(sessionId, newestId, agentId);
+  const result = await pool.query(
+    `SELECT 1 FROM events WHERE ${filter.where} LIMIT 1`,
+    filter.params,
+  );
+  return result.rows.length > 0;
+}
+
+/**
+ * Builds one forward page that never ends in the middle of a chunked content
+ * stream. The returned interval is ordered oldest-first and can be appended
+ * directly by clients that already hold `afterId`.
+ */
+export async function getCompleteForwardReplayPage(
+  pool: pg.Pool,
+  sessionId: string,
+  afterId: number,
+  logicalLimit: number,
+  agentId?: string,
+): Promise<CompleteForwardReplayPage> {
+  const cursor = Math.max(0, Math.trunc(afterId));
+  const limit = Math.max(1, Math.trunc(logicalLimit));
+  const scanLimit = Math.max(100, limit * 2);
+  const rowsAsc: any[] = [];
+  let scanCursor = cursor;
+
+  while (true) {
+    const rows = await scanForwardReplayEvents(pool, sessionId, scanCursor, scanLimit, agentId);
+    if (rows.length === 0) break;
+    rowsAsc.push(...rows);
+
+    const boundary = findCompleteForwardReplayBoundary(rowsAsc, limit);
+    if (boundary) {
+      const events = rowsAsc.slice(0, boundary.endIndex + 1);
+      const oldestId = events[0].id;
+      const newestId = events[events.length - 1].id;
+      const bufferedNewerRows = boundary.endIndex + 1 < rowsAsc.length;
+      return {
+        events,
+        oldestId,
+        newestId,
+        logicalCount: boundary.logicalCount,
+        hasMore: bufferedNewerRows || await hasNewerReplayEvent(pool, sessionId, newestId, agentId),
+      };
+    }
+
+    scanCursor = rows[rows.length - 1].id;
+    if (rows.length < scanLimit) break;
+  }
+
+  if (rowsAsc.length === 0) {
+    return { events: [], oldestId: cursor, newestId: cursor, logicalCount: 0, hasMore: false };
+  }
+
+  const oldestId = rowsAsc[0].id;
+  const newestId = rowsAsc[rowsAsc.length - 1].id;
+  if (hasOpenForwardReplayStreams(rowsAsc)) {
+    console.warn('[history-replay] reached newest event before forward stream boundary', {
+      sessionId,
+      agentId,
+      oldestId,
+      newestId,
+    });
+  }
+  return {
+    events: rowsAsc,
+    oldestId,
+    newestId,
+    logicalCount: countReplayLogicalItems(rowsAsc),
+    hasMore: await hasNewerReplayEvent(pool, sessionId, newestId, agentId),
   };
 }
 

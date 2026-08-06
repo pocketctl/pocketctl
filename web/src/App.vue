@@ -63,7 +63,7 @@
 
     <MobileAppShell
       v-if="showMobileShell"
-      :title="pageTitle"
+      :title="mobileTopbarTitle"
       :connected="connected"
       :reconnecting="reconnecting"
       :is-session="isSessionRoute"
@@ -71,6 +71,9 @@
       :show-new-session="route.path === '/sessions'"
       :session-count="sessionCount"
       :plan="mobileCurrentPlan"
+      :session-host="sessionHeader.host"
+      :session-status="sessionHeader.status"
+      :session-status-label="sessionHeader.statusLabel"
       @new-session="triggerNewSession++"
     />
     <PwaUpdateBanner />
@@ -117,6 +120,7 @@ import PwaUpdateBanner from './components/pwa/PwaUpdateBanner.vue'
 import logoDark from './assets/logo-github-org.svg'
 import logoLight from './assets/logo-github-org-light.svg'
 import { useAgentPlanProgress } from './composables/useAgentPlanProgress'
+import { useSessionHeader } from './composables/useSessionHeader'
 
 const route = useRoute()
 const { isLoggedIn, user } = useAuth()
@@ -126,6 +130,7 @@ const { isMobile } = useResponsiveLayout()
 const showMobileShell = computed(() => isLoggedIn.value && isPwaMobileShellEnabled() && isMobile.value)
 const isSessionRoute = computed(() => route.path.startsWith('/session/'))
 const { planForSession } = useAgentPlanProgress()
+const { sessionHeader } = useSessionHeader()
 const mobileCurrentPlan = planForSession(computed(() =>
   isSessionRoute.value && !route.query.subagent ? String(route.params.id || '') : '',
 ))
@@ -168,6 +173,10 @@ const pageTitle = computed(() => {
   if (route.path.startsWith('/session/')) return t('nav.session_detail')
   return titles[route.path] || t('nav.overview')
 })
+
+const mobileTopbarTitle = computed(() => isSessionRoute.value && sessionHeader.value.title
+  ? sessionHeader.value.title
+  : pageTitle.value)
 
 const showNewSessionBtn = computed(() => {
   return route.path === '/' || route.path === ''

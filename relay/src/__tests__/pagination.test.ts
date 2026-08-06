@@ -1,6 +1,6 @@
 import { describe, test, expect, vi, beforeEach } from 'vitest'
 import { Router } from '../router.js'
-import { getCompleteBackwardReplayPage, getLatestAgentPlan, getRecentEvents, getEventsBefore, getRecentSubagentEvents, getSubagentEventsBefore } from '../db.js'
+import { getCompleteBackwardReplayPage, getCompleteForwardReplayPage, getLatestAgentPlan, getRecentEvents, getEventsBefore, getRecentSubagentEvents, getSubagentEventsBefore } from '../db.js'
 
 // Reusable mocks (mirror router.test.ts patterns)
 function createMockPool() {
@@ -176,6 +176,92 @@ describe('db - complete backward replay pages', () => {
   })
 })
 
+describe('db - complete forward replay pages', () => {
+  function streamRows(fromSequence: number, toSequence: number) {
+    return Array.from({ length: toSequence - fromSequence + 1 }, (_, index) => {
+      const chunkSeq = fromSequence + index
+      return {
+        id: chunkSeq + 1_001,
+        payload: {
+          type: 'agent_text',
+          stream_id: 'stream-forward',
+          chunk_seq: chunkSeq,
+          byte_offset: chunkSeq,
+          final: chunkSeq === 177,
+        },
+      }
+    })
+  }
+
+  test('scans past an event window and returns a complete forward stream', async () => {
+    const scans = [streamRows(0, 99), streamRows(100, 177)]
+    const pool = {
+      query: vi.fn((sql: string) => {
+        if (sql.includes('SELECT 1 FROM events')) return Promise.resolve({ rows: [] })
+        if (sql.includes('FROM events')) return Promise.resolve({ rows: scans.shift() ?? [] })
+        return Promise.resolve({ rows: [] })
+      }),
+    } as any
+
+    const page = await getCompleteForwardReplayPage(pool, 'sess-1', 1_000, 1)
+
+    expect(page.events.map(event => event.payload.chunk_seq)).toEqual(Array.from({ length: 178 }, (_, i) => i))
+    expect(page.oldestId).toBe(1_001)
+    expect(page.newestId).toBe(1_178)
+    expect(page.logicalCount).toBe(1)
+    expect(page.hasMore).toBe(false)
+    const scansIssued = pool.query.mock.calls.filter(([sql]: [string]) =>
+      sql.includes('FROM events') && !sql.includes('SELECT 1 FROM events')
+    )
+    expect(scansIssued).toHaveLength(2)
+    expect(scansIssued[1][0]).toContain('id >')
+  })
+
+  test('stops at a complete logical boundary and reports buffered newer rows', async () => {
+    const pool = {
+      query: vi.fn((sql: string) => {
+        if (sql.includes('SELECT 1 FROM events')) return Promise.resolve({ rows: [] })
+        if (sql.includes('FROM events')) {
+          return Promise.resolve({ rows: [
+            { id: 11, payload: { type: 'user_text', text: 'one' } },
+            { id: 12, payload: { type: 'agent_text', text: 'two' } },
+          ] })
+        }
+        return Promise.resolve({ rows: [] })
+      }),
+    } as any
+
+    const page = await getCompleteForwardReplayPage(pool, 'sess-1', 10, 1)
+
+    expect(page.events.map(event => event.id)).toEqual([11])
+    expect(page.oldestId).toBe(11)
+    expect(page.newestId).toBe(11)
+    expect(page.logicalCount).toBe(1)
+    expect(page.hasMore).toBe(true)
+  })
+
+  test('keeps the subagent filter for forward scans and has-more lookup', async () => {
+    const pool = {
+      query: vi.fn((sql: string) => {
+        if (sql.includes('SELECT 1 FROM events')) return Promise.resolve({ rows: [] })
+        if (sql.includes('FROM events')) {
+          return Promise.resolve({ rows: [{
+            id: 21,
+            payload: { type: 'agent_text', agent_id: 'agent-a', stream_id: 'stream-a', chunk_seq: 0, byte_offset: 0, final: true },
+          }] })
+        }
+        return Promise.resolve({ rows: [] })
+      }),
+    } as any
+
+    const page = await getCompleteForwardReplayPage(pool, 'sess-1', 20, 1, 'agent-a')
+
+    expect(page.events).toHaveLength(1)
+    const eventQueries = pool.query.mock.calls.filter(([sql]: [string]) => sql.includes('FROM events'))
+    expect(eventQueries.every(([sql]: [string]) => sql.includes("payload->>'agent_id'"))).toBe(true)
+  })
+})
+
 describe('db - latest event by type', () => {
   test('orders Plan snapshots by validated semantic revision before database id', async () => {
     const pool = createMockPool()
@@ -215,6 +301,25 @@ describe('Router - replay pagination (session-history-pagination 6.3)', () => {
     expect(pool.query.mock.calls.some(([sql]: [string]) => sql.includes('id > $2') && sql.includes('ORDER BY id ASC'))).toBe(true)
   })
 
+  test('explicit forward replay returns one complete page and newest metadata', async () => {
+    const clientWs = createMockWs()
+    router.registerClient(clientWs, 1)
+    pool._setReplayRows([
+      { id: 11, payload: { type: 'user_text', text: 'one' } },
+      { id: 12, payload: { type: 'agent_text', text: 'two' } },
+    ])
+
+    router.handleClientMessage(clientWs, {
+      type: 'replay', session_id: 'sess-1', direction: 'forward', last_seq: 10, limit: 1, req_id: 71,
+    })
+    await new Promise(r => setTimeout(r, 50))
+
+    const batches = clientWs._sent.filter((message: any) => message.type === 'replay_batch')
+    const end = clientWs._sent.find((message: any) => message.type === 'replay_end')
+    expect(batches.flatMap((batch: any) => batch.events).map((event: any) => event.text)).toEqual(['one'])
+    expect(end).toMatchObject({ req_id: 71, count: 1, logical_count: 1, last_seq: 11, newest_seq: 11, has_more: true })
+  })
+
   test('backward replay returns the complete page in ascending order', async () => {
     const clientWs = createMockWs()
     router.registerClient(clientWs, 1)
@@ -229,6 +334,7 @@ describe('Router - replay pagination (session-history-pagination 6.3)', () => {
     expect(end.count).toBe(50)
     expect(end.logical_count).toBe(50)
     expect(end.req_id).toBe(1)
+    expect(end.newest_seq).toBe(50)
     // the scan query is newest-first, but the client receives the selected page ASC.
     expect(pool.query.mock.calls.some(([sql]: [string]) => sql.includes('ORDER BY id DESC LIMIT') && !sql.includes('id <'))).toBe(true)
     const batch = clientWs._sent.find((message: any) => message.type === 'replay_batch')
@@ -260,7 +366,7 @@ describe('Router - replay pagination (session-history-pagination 6.3)', () => {
       .flatMap((message: any) => message.events)
     expect(replayed.map((event: any) => event.type)).toEqual(['agent_plan', 'agent_text', 'agent_text'])
     const end = clientWs._sent.find((message: any) => message.type === 'replay_end')
-    expect(end).toMatchObject({ req_id: 7, count: 3, logical_count: 2, last_seq: 101 })
+    expect(end).toMatchObject({ req_id: 7, count: 3, logical_count: 2, last_seq: 101, newest_seq: 102 })
   })
 
   test('subagent replay returns only requested agent events with backward pagination metadata', async () => {
@@ -285,6 +391,28 @@ describe('Router - replay pagination (session-history-pagination 6.3)', () => {
     expect(end.has_more).toBe(false)
     expect(pool.query.mock.calls.some(([sql, params]: [string, any[]]) =>
       sql.includes("payload->>'agent_id' = $2") && params.includes('agent-a')
+    )).toBe(true)
+  })
+
+  test('explicit subagent forward replay keeps the agent scope and newest metadata', async () => {
+    const clientWs = createMockWs()
+    router.registerClient(clientWs, 1)
+    pool._setReplayRows([
+      { id: 31, payload: { type: 'agent_text', session_id: 'sess-1', agent_id: 'agent-a', text: 'one' } },
+      { id: 32, payload: { type: 'agent_text', session_id: 'sess-1', agent_id: 'agent-a', text: 'two' } },
+    ])
+
+    await router.handleClientMessage(clientWs, {
+      type: 'replay_subagent', session_id: 'sess-1', agent_id: 'agent-a', direction: 'forward', last_seq: 30, limit: 1, req_id: 81,
+    })
+    await new Promise(r => setTimeout(r, 50))
+
+    const batch = clientWs._sent.find((message: any) => message.type === 'replay_batch')
+    const end = clientWs._sent.find((message: any) => message.type === 'replay_end')
+    expect(batch).toMatchObject({ agent_id: 'agent-a', direction: 'forward', req_id: 81 })
+    expect(end).toMatchObject({ agent_id: 'agent-a', req_id: 81, last_seq: 31, newest_seq: 31, has_more: true })
+    expect(pool.query.mock.calls.some(([sql, params]: [string, any[]]) =>
+      sql.includes("payload->>'agent_id'") && sql.includes('id >') && params.includes('agent-a')
     )).toBe(true)
   })
 

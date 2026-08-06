@@ -71,23 +71,24 @@
       <template v-else>
       <!-- Chat Toolbar -->
       <div class="chat-toolbar">
-        <div class="session-label">
-          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="cursor:pointer;"
-            :title="focusedSubAgentId ? t('session.back_to_parent') : ''"
-            @click="focusedSubAgentId ? router.push(`/session/${sessionId}`) : $router.push('/')"><path d="M15 18l-6-6 6-6"/></svg>
-          <template v-if="focusedSubAgentId">
-            <span class="focus-breadcrumb">{{ sessionTitle || sessionId?.slice(0, 8) }} › {{ focusedSubAgentInfo?.title || focusedSubAgentId.slice(0, 8) }}</span>
-          </template>
-          <template v-else>
-            {{ sessionTitle || sessionId?.slice(0, 8) }}
-          </template>
-          <span class="daemon-name">· {{ daemonName }}</span>
+        <div class="session-toolbar-identity">
+          <button
+            type="button"
+            class="session-toolbar-back"
+            :title="focusedSubAgentId ? t('session.back_to_parent') : t('mobile.back_to_sessions')"
+            :aria-label="focusedSubAgentId ? t('session.back_to_parent') : t('mobile.back_to_sessions')"
+            @click="focusedSubAgentId ? router.push(`/session/${sessionId}`) : $router.push('/')"
+          >
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M15 18l-6-6 6-6"/></svg>
+          </button>
+          <div class="session-toolbar-titles">
+            <span v-if="focusedSubAgentId" class="session-toolbar-title" :title="`${sessionTitle || sessionId?.slice(0, 8)} › ${focusedSubAgentInfo?.title || focusedSubAgentId.slice(0, 8)}`">{{ sessionTitle || sessionId?.slice(0, 8) }} › {{ focusedSubAgentInfo?.title || focusedSubAgentId.slice(0, 8) }}</span>
+            <span v-else class="session-toolbar-title" :title="sessionTitle || sessionId?.slice(0, 8)">{{ sessionTitle || sessionId?.slice(0, 8) }}</span>
+            <span class="session-toolbar-host" :title="daemonName">{{ daemonName }}</span>
+          </div>
         </div>
-        <span :class="['status-pill', statusClass]"><span class="pulse"></span>{{ statusLabel }}</span>
-        <span v-if="!focusedSubAgentId && contextTokens" class="context-pill" :title="t('session.context_usage')">
-          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/></svg>
-          {{ contextTokens }}
-        </span>
+        <div class="session-toolbar-actions">
+          <span :class="['status-pill', statusClass]"><span class="pulse"></span><span class="status-pill-label">{{ statusLabel }}</span></span>
         <span v-if="focusedSubAgentId && focusedSubAgentTokenTotal > 0" class="context-pill" :title="t('session.total_incl_subagent')" style="cursor:default;">
           <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M16 8h-6a2 2 0 1 0 0 4h4a2 2 0 1 1 0 4H8"/><path d="M12 18V6"/></svg>
           {{ fmtTk(focusedSubAgentTokenTotal) }}
@@ -137,6 +138,23 @@
             <svg v-if="!resumeCopied" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8"/><path d="M12 17v4"/></svg>
             <svg v-else width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M20 6L9 17l-5-5"/></svg>
           </button>
+        </div>
+        <div ref="toolbarOverflowEl" class="toolbar-overflow">
+          <button type="button" class="toolbar-more-btn" :aria-label="t('session.actions.more')" :aria-expanded="toolbarOverflowOpen" @click.stop="toolbarOverflowOpen = !toolbarOverflowOpen">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="5" cy="12" r="1.6"/><circle cx="12" cy="12" r="1.6"/><circle cx="19" cy="12" r="1.6"/></svg>
+          </button>
+          <div v-if="toolbarOverflowOpen" class="toolbar-overflow-menu" role="menu">
+            <div v-if="contextTokens || focusedSubAgentTokenTotal > 0 || parentTotalTokens !== null || currentModel || effortVisible" class="toolbar-overflow-metrics">
+              <span v-if="contextTokens" class="context-pill">{{ contextTokens }}</span>
+              <span v-if="focusedSubAgentId && focusedSubAgentTokenTotal > 0" class="context-pill">{{ fmtTk(focusedSubAgentTokenTotal) }}</span>
+              <span v-if="!focusedSubAgentId && parentTotalTokens !== null" class="context-pill">{{ fmtTk(parentTotalTokens) }}</span>
+              <span v-if="!focusedSubAgentId && currentModel" class="model-pill">{{ currentModel }}</span>
+              <span v-if="!focusedSubAgentId && effortVisible" class="effort-pill">{{ effortLabel }}</span>
+            </div>
+            <button type="button" class="toolbar-overflow-item" role="menuitem" @click="copySessionId"><span>{{ copied ? t('common.copied') : t('session.actions.copy_id') }}</span><code>{{ sessionId?.slice(0, 8) }}</code></button>
+            <button v-if="!focusedSubAgentId" type="button" class="toolbar-overflow-item" role="menuitem" @click="copyResumeCmd">{{ resumeCopied ? t('session.actions.resume_toast') : t('session.actions.resume') }}</button>
+          </div>
+        </div>
         </div>
       </div>
 
@@ -549,6 +567,7 @@ import { canControlOpenCodeInteractions, isManagedOpenCodeSession, normalizeSess
 import { expandCodexPreset, permissionOptions, permissionTitleKey, type AgentType, type ClaudeMode, type PermissionConfig } from '../types/permission'
 import { useVisualViewport } from '../composables/useVisualViewport'
 import { useResponsiveLayout } from '../composables/useResponsiveLayout'
+import { useSessionHeader } from '../composables/useSessionHeader'
 import { normalizeRequestId, scrollToRequest } from '../utils/requestDeepLink'
 import { resolveInteractionReadiness, type InteractionConnectivity } from '../composables/useInteractionReadiness'
 import { canSendClaudeSession } from '../utils/claudeSessionControl'
@@ -566,6 +585,7 @@ const route = useRoute()
 const router = useRouter()
 useVisualViewport()
 const { isMobile } = useResponsiveLayout()
+const { setSessionHeader, clearSessionHeader } = useSessionHeader()
 const { connect, send, onEvent, connected, reconnecting } = useWebSocket()
 const { t } = useLocale()
 
@@ -573,6 +593,8 @@ const sessionId = computed(() => route.params.id as string)
 const { acceptAgentPlan, planForSession } = useAgentPlanProgress()
 const currentPlan = planForSession(sessionId)
 const planPanelOpen = ref(localStorage.getItem('pocketctl_plan_panel_open') === 'true')
+const toolbarOverflowOpen = ref(false)
+const toolbarOverflowEl = ref<HTMLElement | null>(null)
 const planCompleted = computed(() => currentPlan.value ? completedPlanItemCount(currentPlan.value) : 0)
 const planButtonLabel = computed(() => currentPlan.value
   ? t('plan.open', { completed: planCompleted.value, total: currentPlan.value.items.length })
@@ -598,6 +620,7 @@ function toggleFileChangePanel() { setFileChangePanelOpen(!fileChangePanelOpen.v
 function closeFileChangePanel() { setFileChangePanelOpen(false) }
 function onFileChangePanelKeydown(event: KeyboardEvent) {
   if (event.key === 'Escape' && fileChangePanelOpen.value) closeFileChangePanel()
+  if (event.key === 'Escape' && toolbarOverflowOpen.value) toolbarOverflowOpen.value = false
 }
 const mobileFileChange = ref<AgentFileChangeMessage | null>(null)
 const fileChangeOpener = ref<HTMLElement | null>(null)
@@ -1047,6 +1070,19 @@ const sessionTitle = computed(() => {
   const s = allSessions.value.find(s => s.session_id === sessionId.value)
   return s?.title
 })
+
+const mobileSessionTitle = computed(() => focusedSubAgentId.value
+  ? focusedSubAgentInfo.value?.title || focusedSubAgentId.value.slice(0, 8)
+  : sessionTitle.value || sessionId.value?.slice(0, 8) || '')
+
+watch([mobileSessionTitle, daemonName, status, statusLabel], () => {
+  setSessionHeader({
+    title: mobileSessionTitle.value,
+    host: daemonName.value,
+    status: status.value,
+    statusLabel: statusLabel.value,
+  })
+}, { immediate: true })
 
 const statusSubtext = computed(() => isDaemonOnline.value ? t('session.status.connected') : t('session.status.waiting'))
 
@@ -2720,11 +2756,15 @@ onUnmounted(() => {
   for (const timer of pendingAckTimers.values()) clearTimeout(timer)
   pendingAckTimers.clear()
   interactionResolutions.clear()
+  clearSessionHeader()
 })
 
 function closePermMenu(e: MouseEvent) {
   if (permDropdownEl.value && !permDropdownEl.value.contains(e.target as Node)) {
     showPermMenu.value = false
+  }
+  if (toolbarOverflowEl.value && !toolbarOverflowEl.value.contains(e.target as Node)) {
+    toolbarOverflowOpen.value = false
   }
 }
 onMounted(() => {
@@ -2770,11 +2810,21 @@ onMounted(() => {
 /* Chat Area */
 .chat-area { flex: 1; display: flex; flex-direction: column; position: relative; min-width: 0; max-width: 100%; overflow: hidden; background: var(--bg); transition: background var(--transition); }
 
-/* Toolbar */
-.chat-toolbar { height: 52px; border-bottom: 1px solid var(--border); display: flex; align-items: center; padding: 0 20px; gap: 12px; background: var(--surface); transition: background var(--transition), border-color var(--transition); }
-.chat-toolbar .session-label { font-size: 14px; font-weight: 600; color: var(--fg); flex: 1; display: flex; align-items: center; gap: 8px; }
-.chat-toolbar .session-label .daemon-name { font-size: 12px; color: var(--fg-tertiary); font-weight: 400; }
-.chat-toolbar .session-label .focus-breadcrumb { font-size: 13px; font-weight: 600; color: var(--accent); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+/* Toolbar: identity is allowed to shrink; actions always retain a stable lane. */
+.chat-toolbar { min-height: 60px; border-bottom: 1px solid var(--border); display: flex; align-items: center; padding: 7px 20px; gap: 16px; background: var(--surface); transition: background var(--transition), border-color var(--transition); }
+.session-toolbar-identity { flex: 1 1 auto; min-width: 120px; display: flex; align-items: center; gap: 10px; }
+.session-toolbar-back { width: 34px; height: 34px; flex: 0 0 auto; display: grid; place-items: center; border: 1px solid transparent; border-radius: var(--radius-md); color: var(--fg-secondary); background: transparent; cursor: pointer; }
+.session-toolbar-back:hover { color: var(--fg); border-color: var(--border); background: var(--surface-hover); }
+.session-toolbar-back:focus-visible, .toolbar-more-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.session-toolbar-back svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+.session-toolbar-titles { min-width: 0; display: flex; flex: 1; flex-direction: column; gap: 2px; }
+.session-toolbar-title, .session-toolbar-host { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.session-toolbar-title { color: var(--fg); font-size: 14px; font-weight: 650; line-height: 18px; }
+.session-toolbar-host { color: var(--fg-tertiary); font: 11px/14px var(--font-mono); }
+.session-toolbar-actions { flex: 0 0 auto; display: flex; align-items: center; gap: 6px; }
+.session-toolbar-actions > .context-pill,
+.session-toolbar-actions > .model-pill,
+.session-toolbar-actions > .effort-pill { display: none; }
 .plan-toolbar-button { min-height: 32px; display: inline-flex; align-items: center; gap: 5px; padding: 4px 8px; border: 1px solid var(--border); border-radius: var(--radius-md); color: var(--fg-secondary); background: transparent; font: 600 11px/1 var(--font-mono); cursor: pointer; }
 .plan-toolbar-button:hover { color: var(--fg); background: var(--surface-hover); }
 .plan-toolbar-button.active { border-color: var(--accent); color: var(--accent); background: var(--accent-muted); }
@@ -2805,6 +2855,16 @@ onMounted(() => {
 .session-id-text { font-family: var(--font-mono); font-size: 12px; color: var(--fg-secondary); }
 .copy-btn { display: flex; align-items: center; justify-content: center; width: 22px; height: 22px; background: none; border: none; color: var(--fg-tertiary); cursor: pointer; border-radius: 4px; padding: 0; transition: color 0.15s, background 0.15s; }
 .copy-btn:hover { color: var(--accent); background: var(--accent-muted); }
+.toolbar-overflow { position: relative; flex: 0 0 auto; }
+.toolbar-more-btn { width: 32px; height: 32px; display: grid; place-items: center; border: 1px solid var(--border); border-radius: var(--radius-md); color: var(--fg-secondary); background: transparent; cursor: pointer; }
+.toolbar-more-btn:hover, .toolbar-more-btn[aria-expanded="true"] { color: var(--fg); border-color: var(--accent); background: var(--accent-muted); }
+.toolbar-more-btn svg { width: 17px; height: 17px; fill: currentColor; }
+.toolbar-overflow-menu { position: absolute; z-index: 55; top: calc(100% + 8px); right: 0; width: min(280px, calc(100vw - 32px)); display: flex; flex-direction: column; gap: 4px; padding: 6px; border: 1px solid var(--border); border-radius: var(--radius-lg); box-shadow: var(--shadow-lg); background: var(--surface); }
+.toolbar-overflow-metrics { display: flex; flex-wrap: wrap; gap: 5px; padding: 4px; border-bottom: 1px solid var(--border); }
+.toolbar-overflow-metrics:empty { display: none; }
+.toolbar-overflow-item { min-height: 34px; display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 7px 9px; border: 0; border-radius: var(--radius-sm); color: var(--fg-secondary); background: transparent; font: 13px/1.2 var(--font-body); text-align: left; cursor: pointer; }
+.toolbar-overflow-item:hover { color: var(--fg); background: var(--surface-hover); }
+.toolbar-overflow-item code { color: var(--fg-tertiary); font: 11px/1 var(--font-mono); }
 
 /* Messages */
 .chat-messages { flex: 1; min-height: 0; width: 100%; overflow-y: auto; overflow-x: hidden; padding: 20px; display: flex; flex-direction: column; align-items: stretch; gap: 16px; position: relative; overflow-anchor: none; }
@@ -2995,6 +3055,18 @@ onMounted(() => {
 @keyframes bar-in { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: translateY(0); } }
 
 @media (max-width: 1024px) { .session-layout { height: calc(100dvh - var(--topbar-h)); } }
+@media (max-width: 1180px) and (min-width: 769px) {
+  .session-toolbar-actions > .context-pill,
+  .session-toolbar-actions > .model-pill,
+  .session-toolbar-actions > .effort-pill,
+  .session-id-box { display: none; }
+}
+@media (max-width: 900px) and (min-width: 769px) {
+  .chat-toolbar { padding-inline: 12px; gap: 8px; }
+  .status-pill { padding: 5px 7px; }
+  .status-pill-label { display: none; }
+  .session-toolbar-identity { min-width: 0; }
+}
 @media (max-width: 768px) {
   .session-layout { height: calc(var(--visual-viewport-height, 100dvh) - var(--mobile-topbar-h)); }
   .session-panel,

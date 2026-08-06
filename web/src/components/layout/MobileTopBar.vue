@@ -13,11 +13,14 @@
     </button>
     <div v-else class="mobile-brand" aria-label="PocketCtl">P</div>
 
-    <div class="mobile-topbar-title">{{ title }}</div>
+    <div class="mobile-topbar-title">
+      <span class="mobile-topbar-title-text">{{ title }}</span>
+      <span v-if="isSession && sessionHost" class="mobile-topbar-host" :title="sessionHost">{{ sessionHost }}</span>
+    </div>
 
-    <div class="mobile-connection" role="status" aria-live="polite">
-      <span :class="['mobile-connection-dot', connectionClass]"></span>
-      <span>{{ connectionLabel }}</span>
+    <div :class="['mobile-connection', { 'is-session-status': isSession && sessionStatus }]" role="status" aria-live="polite">
+      <span :class="['mobile-connection-dot', displayStatusClass]"></span>
+      <span>{{ displayStatusLabel }}</span>
     </div>
 
     <button
@@ -61,6 +64,9 @@ const props = defineProps<{
   planLabel?: string
   planOpen?: boolean
   planComplete?: boolean
+  sessionHost?: string
+  sessionStatus?: string
+  sessionStatusLabel?: string
 }>()
 
 defineEmits<{ (event: 'new-session'): void; (event: 'open-plan'): void }>()
@@ -73,6 +79,12 @@ const connectionLabel = computed(() => props.connected
   : props.reconnecting
     ? t('mobile.connection_connecting')
     : t('mobile.connection_offline'))
+const displayStatusClass = computed(() => props.isSession && props.sessionStatus
+  ? `session-${props.sessionStatus}`
+  : connectionClass.value)
+const displayStatusLabel = computed(() => props.isSession && props.sessionStatusLabel
+  ? props.sessionStatusLabel
+  : connectionLabel.value)
 </script>
 
 <style scoped>
@@ -102,12 +114,21 @@ const connectionLabel = computed(() => props.connected
 }
 .mobile-topbar-title {
   min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+.mobile-topbar-title-text,
+.mobile-topbar-host {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+.mobile-topbar-title-text {
   font-size: 15px;
   font-weight: 650;
 }
+.mobile-topbar-host { color: var(--fg-tertiary); font-size: 11px; font-weight: 500; }
 .mobile-topbar-back,
 .mobile-topbar-action {
   width: 44px;
@@ -146,4 +167,16 @@ const connectionLabel = computed(() => props.connected
 }
 .mobile-connection-dot.online { background: var(--success); }
 .mobile-connection-dot.connecting { background: var(--warning); }
+.mobile-connection-dot.session-running,
+.mobile-connection-dot.session-busy,
+.mobile-connection-dot.session-retry,
+.mobile-connection-dot.session-idle { background: var(--success); }
+.mobile-connection-dot.session-waiting,
+.mobile-connection-dot.session-waiting_approval,
+.mobile-connection-dot.session-exited { background: var(--warning); }
+.mobile-connection-dot.session-completed { background: var(--accent); }
+.mobile-connection-dot.session-error,
+.mobile-connection-dot.session-killed { background: var(--error); }
+.mobile-connection-dot.session-disconnected { background: var(--fg-tertiary); }
+@media (max-width: 390px) { .mobile-connection span:last-child { display: none; } }
 </style>

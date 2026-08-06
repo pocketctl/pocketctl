@@ -8,6 +8,7 @@ export interface ReplayBoundary {
 interface ReplayStream {
   id: string
   startsAtZero: boolean
+  endsAtFinal: boolean
 }
 
 function replayStream(payload: any): ReplayStream | null {
@@ -17,6 +18,7 @@ function replayStream(payload: any): ReplayStream | null {
   return {
     id: payload.stream_id,
     startsAtZero: payload.chunk_seq === 0 && payload.byte_offset === 0,
+    endsAtFinal: payload.final === true,
   }
 }
 
@@ -65,6 +67,49 @@ export function findCompleteReplayBoundary(rowsDesc: any[], logicalLimit: number
         logicalCount += 1
       }
       if (stream.startsAtZero) openStreams.delete(stream.id)
+    } else {
+      logicalCount += 1
+    }
+
+    if (logicalCount >= logicalLimit && openStreams.size === 0) {
+      return { endIndex: index, logicalCount }
+    }
+  }
+
+  return null
+}
+
+/** Rows arrive oldest first. A stream remains open until its final chunk is seen. */
+export function hasOpenForwardReplayStreams(rowsAsc: any[]): boolean {
+  const openStreams = new Set<string>()
+  for (const row of rowsAsc) {
+    const stream = replayStream(row?.payload)
+    if (!stream) continue
+    openStreams.add(stream.id)
+    if (stream.endsAtFinal) openStreams.delete(stream.id)
+  }
+  return openStreams.size > 0
+}
+
+/**
+ * Finds the newest row that closes a forward-scanned page. Rows must arrive
+ * oldest first. A chunked stream is one logical item and the page cannot end
+ * until every stream opened inside it has emitted its final chunk.
+ */
+export function findCompleteForwardReplayBoundary(rowsAsc: any[], logicalLimit: number): ReplayBoundary | null {
+  const seenStreams = new Set<string>()
+  const openStreams = new Set<string>()
+  let logicalCount = 0
+
+  for (let index = 0; index < rowsAsc.length; index += 1) {
+    const stream = replayStream(rowsAsc[index]?.payload)
+    if (stream) {
+      if (!seenStreams.has(stream.id)) {
+        seenStreams.add(stream.id)
+        openStreams.add(stream.id)
+        logicalCount += 1
+      }
+      if (stream.endsAtFinal) openStreams.delete(stream.id)
     } else {
       logicalCount += 1
     }

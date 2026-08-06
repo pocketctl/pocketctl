@@ -4,6 +4,7 @@ import type { RelayPools } from './db-pools.js';
 import { randomUUID } from 'crypto';
 import { isAppReviewDemoDaemon, isAppReviewDemoSession } from './config/app-review-demo.js';
 import * as db from './db.js';
+import { sanitizeJSONBPayload } from './jsonb-payload.js';
 import { generateTitle, generateSubagentTitle } from './title.js';
 import { notifyUser, daemonOfflinePush, daemonOnlinePush } from './push.js';
 import { PushDeduper } from './push-deduper.js';
@@ -1534,6 +1535,7 @@ export class Router {
         return;
       }
     }
+    msg = sanitizeJSONBPayload(msg);
     const policy = classifyDaemonEvent(msg);
     let durableIngressOwnsAck = false;
     if (msg.seq) {
@@ -1728,7 +1730,7 @@ export class Router {
       client.subscribedSessions.add(msg.session_id);
     }
     if (msg.type === 'replay') { this.handleReplay(clientWs, msg.session_id, msg.last_seq, msg.req_id, msg.direction, msg.limit); return; }
-    if (msg.type === 'replay_subagent') { this.handleReplaySubagent(clientWs, msg.session_id, msg.agent_id, msg.last_seq, msg.req_id, msg.limit); return; }
+    if (msg.type === 'replay_subagent') { this.handleReplaySubagent(clientWs, msg.session_id, msg.agent_id, msg.last_seq, msg.req_id, msg.limit, msg.direction); return; }
     if (msg.type === 'list_sessions') { this.handleListSessions(clientWs, client.userId, msg); return; }
     if (msg.type === 'list_daemons') { console.log('[router] list_daemons from user', client.userId, 'daemons in map:', this.daemons.size); this.handleListDaemons(clientWs, client.userId); return; }
     if (msg.type === 'set_locale') {
@@ -2070,16 +2072,18 @@ export class Router {
 
   private async handleReplay(clientWs: WebSocket, sessionId: string, lastSeq: number, reqId?: number, direction?: string, limit?: number): Promise<void> {
     const withReq = (obj: any) => reqId !== undefined ? { ...obj, req_id: reqId } : obj;
-    // Backward history is paginated by complete logical streams. Forward replay
-    // remains the existing incremental id-ASC subscription path.
+    // Explicit forward/backward requests are paginated by complete logical
+    // streams. Direction-less forward replay remains the legacy unbounded path.
     const isBackward = direction === 'backward';
-    const lim = isBackward && limit && limit > 0 ? limit : 100;
+    const isPagedForward = direction === 'forward' && limit !== undefined && limit > 0;
+    const lim = (isBackward || isPagedForward) && limit && limit > 0 ? limit : 100;
     try {
       const runtime = await db.getSessionRuntime(this.pool, sessionId);
       const currentStatus = runtime.status;
       let events: any[];
       let logicalCount = 0;
       let replayLastSeq = lastSeq;
+      let replayNewestSeq = lastSeq ?? 0;
       let hasMore = false;
       if (isBackward) {
         const page = await db.getCompleteBackwardReplayPage(
@@ -2091,6 +2095,7 @@ export class Router {
         events = page.events;
         logicalCount = page.logicalCount;
         replayLastSeq = page.oldestId;
+        replayNewestSeq = page.events.length > 0 ? page.events[page.events.length - 1].id : (lastSeq ?? 0);
         hasMore = page.hasMore;
         if (!lastSeq || lastSeq <= 0) {
           const latestPlan = await db.getLatestAgentPlan(this.pool, sessionId);
@@ -2098,13 +2103,27 @@ export class Router {
             events = [...events, latestPlan].sort((left, right) => left.id - right.id);
           }
         }
+      } else if (isPagedForward) {
+        const page = await db.getCompleteForwardReplayPage(
+          this.pool,
+          sessionId,
+          lastSeq ?? 0,
+          lim,
+        );
+        events = page.events;
+        logicalCount = page.logicalCount;
+        replayLastSeq = page.newestId;
+        replayNewestSeq = page.newestId;
+        hasMore = page.hasMore;
       } else {
-        events = await db.getEventsAfter(this.pool, sessionId, lastSeq);
+        events = await db.getEventsAfter(this.pool, sessionId, lastSeq ?? 0);
+        replayNewestSeq = events.length > 0 ? events[events.length - 1].id : (lastSeq ?? 0);
       }
       if (events.length === 0) {
-        this.send(clientWs, withReq({ type: 'replay_end', session_id: sessionId, count: 0, logical_count: 0, last_seq: replayLastSeq, has_more: false, status: currentStatus, turn_started_at: runtime.turnStartedAt, last_activity_at: runtime.lastActivityAt }));
+        this.send(clientWs, withReq({ type: 'replay_end', session_id: sessionId, count: 0, logical_count: 0, last_seq: replayLastSeq, newest_seq: replayNewestSeq, has_more: hasMore, status: currentStatus, turn_started_at: runtime.turnStartedAt, last_activity_at: runtime.lastActivityAt }));
         return;
       }
+      replayNewestSeq = events.reduce((newest, event) => Math.max(newest, event.id), replayNewestSeq);
       // Both forward and complete backward pages are ASC, including across
       // replay batches, so stream assemblers always receive chunk zero first.
       const batches = this.buildReplayBatches(events, (slice) => withReq({
@@ -2123,6 +2142,7 @@ export class Router {
         count: events.length,
         logical_count: logicalCount,
         last_seq: isBackward ? replayLastSeq : events[events.length - 1].id,
+        newest_seq: replayNewestSeq,
         has_more: hasMore,
         status: currentStatus,
         turn_started_at: runtime.turnStartedAt,
@@ -2135,24 +2155,31 @@ export class Router {
     }
   }
 
-  private async handleReplaySubagent(clientWs: WebSocket, sessionId: string, agentId: string, lastSeq?: number, reqId?: number, limit?: number): Promise<void> {
+  private async handleReplaySubagent(clientWs: WebSocket, sessionId: string, agentId: string, lastSeq?: number, reqId?: number, limit?: number, direction?: string): Promise<void> {
     const withReq = (obj: any) => reqId !== undefined ? { ...obj, req_id: reqId } : obj;
     const lim = limit && limit > 0 ? limit : 100;
+    const isPagedForward = direction === 'forward' && limit !== undefined && limit > 0;
     if (!agentId) {
-      this.send(clientWs, withReq({ type: 'replay_end', session_id: sessionId, agent_id: agentId, count: 0, logical_count: 0, last_seq: lastSeq ?? 0, has_more: false }));
+      this.send(clientWs, withReq({ type: 'replay_end', session_id: sessionId, agent_id: agentId, count: 0, logical_count: 0, last_seq: lastSeq ?? 0, newest_seq: lastSeq ?? 0, has_more: false }));
       return;
     }
     try {
-      const page = await db.getCompleteBackwardReplayPage(
-        this.pool,
-        sessionId,
-        lastSeq && lastSeq > 0 ? lastSeq : undefined,
-        lim,
-        agentId,
-      );
+      const page = isPagedForward
+        ? await db.getCompleteForwardReplayPage(this.pool, sessionId, lastSeq ?? 0, lim, agentId)
+        : await db.getCompleteBackwardReplayPage(
+            this.pool,
+            sessionId,
+            lastSeq && lastSeq > 0 ? lastSeq : undefined,
+            lim,
+            agentId,
+          );
       const events = page.events;
+      const pageOldestId = page.oldestId;
+      const pageNewestId = 'newestId' in page
+        ? page.newestId
+        : (events.length > 0 ? events[events.length - 1].id : (lastSeq ?? 0));
       if (events.length === 0) {
-        this.send(clientWs, withReq({ type: 'replay_end', session_id: sessionId, agent_id: agentId, count: 0, logical_count: 0, last_seq: page.oldestId, has_more: false }));
+        this.send(clientWs, withReq({ type: 'replay_end', session_id: sessionId, agent_id: agentId, count: 0, logical_count: 0, last_seq: isPagedForward ? pageNewestId : pageOldestId, newest_seq: pageNewestId, has_more: page.hasMore }));
         return;
       }
       const batches = this.buildReplayBatches(events, (slice) => withReq({
@@ -2160,8 +2187,8 @@ export class Router {
           session_id: sessionId,
           agent_id: agentId,
           events: slice.map(e => e.payload),
-          last_seq: slice[0].id,
-          direction: 'backward',
+          last_seq: isPagedForward ? slice[slice.length - 1].id : slice[0].id,
+          direction: isPagedForward ? 'forward' : 'backward',
       }));
       for (const batch of batches) {
         this.send(clientWs, batch);
@@ -2172,7 +2199,8 @@ export class Router {
         agent_id: agentId,
         count: events.length,
         logical_count: page.logicalCount,
-        last_seq: page.oldestId,
+        last_seq: isPagedForward ? pageNewestId : pageOldestId,
+        newest_seq: pageNewestId,
         has_more: page.hasMore,
       }));
     } catch (err) {

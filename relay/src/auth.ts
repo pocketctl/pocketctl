@@ -11,6 +11,7 @@ if (!JWT_SECRET) {
 }
 const ACCESS_TOKEN_TTL = '24h';
 const REFRESH_TOKEN_TTL = '7d';
+const SESSION_SHARE_TOKEN_TTL = '15m';
 
 export function hashPassword(password: string): string {
   return bcrypt.hashSync(password, 10);
@@ -112,6 +113,36 @@ export function verifyRefreshToken(token: string): { userId: number; jti: string
     const decoded = jwt.verify(token, JWT_SECRET) as any;
     if (decoded.type !== 'refresh') return null;
     return { userId: decoded.userId, jti: decoded.jti || '' };
+  } catch {
+    return null;
+  }
+}
+
+export function signSessionShareToken(userId: number, sessionId: string): string {
+  return jwt.sign(
+    {
+      type: 'session_share',
+      userId,
+      sessionId,
+    },
+    JWT_SECRET,
+    { expiresIn: SESSION_SHARE_TOKEN_TTL }
+  );
+}
+
+export function verifySessionShareToken(
+  token: string
+): { userId: number; sessionId: string } | null {
+  try {
+    const decoded = jwt.verify(token, JWT_SECRET);
+    if (!decoded || typeof decoded === 'string') return null;
+    const allowedClaims = new Set(['type', 'userId', 'sessionId', 'iat', 'exp']);
+    if (Object.keys(decoded).some((key) => !allowedClaims.has(key))) return null;
+    if (decoded.type !== 'session_share') return null;
+    if (!Number.isSafeInteger(decoded.userId) || (decoded.userId as number) <= 0) return null;
+    if (typeof decoded.sessionId !== 'string' || decoded.sessionId.length === 0) return null;
+    if (typeof decoded.iat !== 'number' || typeof decoded.exp !== 'number') return null;
+    return { userId: decoded.userId as number, sessionId: decoded.sessionId };
   } catch {
     return null;
   }
