@@ -243,7 +243,7 @@ func cmdServiceInstall(args []string) {
 	// Ensure the log dir exists; launchd/systemd open the boot log but won't
 	// create its parent directory.
 	_ = os.MkdirAll(daemon.LogDir(), 0755)
-	cfg := platform.ServiceOpts{ExePath: exe, Args: daemonArgs, LogPath: daemon.ServiceBootLogPath()}
+	cfg := daemonServiceOptions(exe, daemon.ServiceBootLogPath(), *production, *relayURL, os.Getenv("PATH"))
 
 	// If the daemon is already running standalone, stop it so it doesn't fight
 	// the supervised instance for the relay registration / approval socket.
@@ -283,6 +283,15 @@ func serviceDaemonArgs(production bool, relayURL string) []string {
 		args = append(args, "--relay", relayURL)
 	}
 	return args
+}
+
+func daemonServiceOptions(exePath, logPath string, production bool, relayURL, pathEnv string) platform.ServiceOpts {
+	return platform.ServiceOpts{
+		ExePath: exePath,
+		Args:    serviceDaemonArgs(production, relayURL),
+		LogPath: logPath,
+		PathEnv: pathEnv,
+	}
 }
 
 func cmdServiceUninstall() {

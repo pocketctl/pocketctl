@@ -142,6 +142,15 @@ func renderPlist(cfg Config) string {
 	for _, a := range cfg.Args {
 		args.WriteString(fmt.Sprintf("    <string>%s</string>\n", xmlEscape(a)))
 	}
+	pathEnvironment := ""
+	if cfg.PathEnv != "" {
+		pathEnvironment = fmt.Sprintf(`  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>%s</string>
+  </dict>
+`, xmlEscape(cfg.PathEnv))
+	}
 	return fmt.Sprintf(`<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -157,13 +166,13 @@ func renderPlist(cfg Config) string {
   <true/>
   <key>ProcessType</key>
   <string>Background</string>
-  <key>StandardOutPath</key>
+%s  <key>StandardOutPath</key>
   <string>%s</string>
   <key>StandardErrorPath</key>
   <string>%s</string>
 </dict>
 </plist>
-`, Label, args.String(), xmlEscape(cfg.LogPath), xmlEscape(cfg.LogPath))
+`, Label, args.String(), pathEnvironment, xmlEscape(cfg.LogPath), xmlEscape(cfg.LogPath))
 }
 
 func xmlEscape(s string) string {

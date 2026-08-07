@@ -42,6 +42,34 @@ func TestRenderUnitQuotesSpaces(t *testing.T) {
 	}
 }
 
+func TestRenderUnitEscapesPathEnvironment(t *testing.T) {
+	tests := []struct {
+		name    string
+		pathEnv string
+		want    string
+	}{
+		{"spaces", "/home/alice/my tools/bin:/usr/bin", `Environment="PATH=/home/alice/my tools/bin:/usr/bin"`},
+		{"backslashes", `C:\\Program Files\\node`, `Environment="PATH=C:\\\\Program Files\\\\node"`},
+		{"quotes", `/opt/"node"/bin`, `Environment="PATH=/opt/\"node\"/bin"`},
+		{"systemd specifiers", `/opt/%h/%u/literal%/bin`, `Environment="PATH=/opt/%%h/%%u/literal%%/bin"`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			out := renderUnit(Config{ExePath: "/usr/local/bin/pocketctl", PathEnv: tt.pathEnv})
+			if !strings.Contains(out, tt.want) {
+				t.Fatalf("unit missing %q:\n%s", tt.want, out)
+			}
+		})
+	}
+}
+
+func TestRenderUnitOmitsEmptyPathEnvironment(t *testing.T) {
+	out := renderUnit(Config{ExePath: "/usr/local/bin/pocketctl"})
+	if strings.Contains(out, "Environment=") {
+		t.Fatalf("unit must omit an empty PATH environment:\n%s", out)
+	}
+}
+
 func TestParseSystemctlShowDistinguishesLoadedRunningAndExitStatus(t *testing.T) {
 	tests := []struct {
 		name    string

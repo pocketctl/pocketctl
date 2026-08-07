@@ -200,6 +200,7 @@ func (unixServiceManager) Install(opts ServiceOpts) error {
 		ExePath: opts.ExePath,
 		Args:    opts.Args,
 		LogPath: opts.LogPath,
+		PathEnv: opts.PathEnv,
 	})
 }
 

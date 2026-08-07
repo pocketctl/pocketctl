@@ -47,6 +47,23 @@ func TestRenderPlistValid(t *testing.T) {
 	}
 }
 
+func TestRenderPlistIncludesOnlyEscapedPathEnvironment(t *testing.T) {
+	cfg := Config{
+		ExePath: "/usr/local/bin/pocketctl",
+		Args:    []string{"daemon", "start", "--foreground"},
+		PathEnv: "/opt/homebrew/bin:/path with space:&<quoted>",
+	}
+	out := renderPlist(cfg)
+
+	want := "  <key>EnvironmentVariables</key>\n  <dict>\n    <key>PATH</key>\n    <string>/opt/homebrew/bin:/path with space:&amp;&lt;quoted&gt;</string>\n  </dict>\n"
+	if !strings.Contains(out, want) {
+		t.Fatalf("plist missing PATH environment:\n%s", out)
+	}
+	if strings.Count(out, "<key>EnvironmentVariables</key>") != 1 || strings.Count(out, "<key>PATH</key>") != 1 {
+		t.Fatalf("plist must persist only one PATH environment entry:\n%s", out)
+	}
+}
+
 func TestParseLaunchctlStatusDistinguishesInstalledLoadedAndRunning(t *testing.T) {
 	got := parseLaunchctlPrint("state = exited\nlast exit code = 0\n")
 	if !got.Loaded || got.Running || got.LastExitCode == nil || *got.LastExitCode != 0 {

@@ -627,6 +627,97 @@ func TestCodexCoordinatorReplacesRuntimeWhenEndpointIsMissing(t *testing.T) {
 	}
 }
 
+func TestCodexCoordinatorReplacesHealthyIncompatibleRuntimeWhenIdle(t *testing.T) {
+	tests := []struct {
+		name       string
+		binary     string
+		version    string
+		schemaHash string
+	}{
+		{"binary changed", "/opt/codex-new", "0.146.1", "old-schema"},
+		{"version changed", "/opt/codex", "0.147.0", "old-schema"},
+		{"schema changed", "/opt/codex", "0.146.1", "new-schema"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("HOME", t.TempDir())
+			stopped := false
+			coord := newCodexCoordinator(nil)
+			coord.runtime = &codexAppServerRuntime{
+				PID:       123,
+				Endpoint:  "/tmp/codex-old.sock",
+				RemoteURI: "unix:///tmp/codex-old.sock",
+				Stop:      func() error { stopped = true; return nil },
+			}
+			coord.binary, coord.version, coord.schemaHash, coord.generation = "/opt/codex", "0.146.1", "old-schema", 4
+			coord.restoreManagedThreads([]string{"thr_keep"})
+			coord.probe = func(context.Context, *codexAppServerRuntime) error { return nil }
+			var startedGeneration uint64
+			coord.start = func(_ context.Context, binary, version string, generation uint64) (*codexAppServerRuntime, error) {
+				if binary != tt.binary || version != tt.version {
+					t.Fatalf("start identity=(%q, %q), want (%q, %q)", binary, version, tt.binary, tt.version)
+				}
+				startedGeneration = generation
+				return &codexAppServerRuntime{PID: 456, Endpoint: "/tmp/codex-new.sock", RemoteURI: "unix:///tmp/codex-new.sock"}, nil
+			}
+
+			snapshot, err := coord.ensureStarted(context.Background(), tt.binary, tt.version, agentcontrol.CodexCapabilities{Core: true, TerminalRemote: true, SchemaHash: tt.schemaHash})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !stopped {
+				t.Fatal("idle incompatible runtime was not stopped")
+			}
+			if startedGeneration != 5 || snapshot.Generation != 5 || snapshot.PID != 456 || snapshot.Binary != tt.binary || snapshot.Version != tt.version || snapshot.SchemaHash != tt.schemaHash {
+				t.Fatalf("started=%d snapshot=%+v", startedGeneration, snapshot)
+			}
+			if threads := coord.managedThreadSnapshot(); len(threads) != 1 || threads[0] != "thr_keep" {
+				t.Fatalf("threads=%v want preserved managed thread", threads)
+			}
+		})
+	}
+}
+
+func TestCodexCoordinatorDefersHealthyIncompatibleRuntimeWithActiveLease(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	sm := NewSessionManager(make(chan protocol.DaemonEvent, 1))
+	coord := newCodexCoordinator(sm)
+	stopped := false
+	coord.runtime = &codexAppServerRuntime{
+		PID:       123,
+		Endpoint:  "/tmp/codex-old.sock",
+		RemoteURI: "unix:///tmp/codex-old.sock",
+		Stop:      func() error { stopped = true; return nil },
+	}
+	coord.binary, coord.version, coord.schemaHash, coord.generation = "/opt/codex", "0.146.1", "old-schema", 4
+	coord.restoreManagedThreads([]string{"thr_keep"})
+	coord.probe = func(context.Context, *codexAppServerRuntime) error { return nil }
+	if err := sm.leases.Register(agentcontrol.Lease{ID: "active-terminal", Agent: agentcontrol.AgentCodex, PID: os.Getpid(), Generation: 4}); err != nil {
+		t.Fatal(err)
+	}
+	coord.start = func(context.Context, string, string, uint64) (*codexAppServerRuntime, error) {
+		t.Fatal("active terminal allowed an incompatible runtime to restart")
+		return nil, nil
+	}
+
+	snapshot, err := coord.ensureStarted(context.Background(), "/opt/codex", "0.147.0", agentcontrol.CodexCapabilities{Core: true, TerminalRemote: true, SchemaHash: "old-schema"})
+	if !errors.Is(err, errCodexRuntimeUpgradeDeferred) {
+		t.Fatalf("err=%v want deferred runtime upgrade", err)
+	}
+	if stopped {
+		t.Fatal("active terminal did not preserve the old runtime")
+	}
+	if snapshot.Generation != 4 || snapshot.Version != "0.146.1" || snapshot.PID != 123 {
+		t.Fatalf("snapshot=%+v want current active generation", snapshot)
+	}
+	if !hasActiveCodexLease(sm.leases.Snapshot(), 4) {
+		t.Fatal("active Codex lease was not preserved")
+	}
+	if threads := coord.managedThreadSnapshot(); len(threads) != 1 || threads[0] != "thr_keep" {
+		t.Fatalf("threads=%v want preserved managed thread", threads)
+	}
+}
+
 func TestCodexCoordinatorKeepsRuntimeWhenEndpointIsMissingAndTerminalIsActive(t *testing.T) {
 	sm := NewSessionManager(make(chan protocol.DaemonEvent, 1))
 	coord := newCodexCoordinator(sm)

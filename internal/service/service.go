@@ -36,6 +36,9 @@ type Config struct {
 	Args []string
 	// LogPath is where stdout/stderr of the supervised process are written.
 	LogPath string
+	// PathEnv is the installer's effective PATH. It is intentionally the only
+	// environment value persisted in the service definition.
+	PathEnv string
 }
 
 // Info is the result of Status. Installed describes only the on-disk unit;

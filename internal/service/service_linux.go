@@ -153,6 +153,10 @@ func renderUnit(cfg Config) string {
 		}
 	}
 	execStart := strings.Join(parts, " ")
+	pathEnvironment := ""
+	if cfg.PathEnv != "" {
+		pathEnvironment = "Environment=" + quoteSystemdEnvironment("PATH="+cfg.PathEnv) + "\n"
+	}
 
 	return fmt.Sprintf(`[Unit]
 Description=pocketctl daemon (remote AI coding agent control)
@@ -166,8 +170,21 @@ Restart=always
 RestartSec=5
 # Disfavor the daemon for the kernel OOM killer (children are sacrificed first).
 OOMScoreAdjust=-500
+%s
 
 [Install]
 WantedBy=default.target
-`, execStart)
+`, execStart, pathEnvironment)
+}
+
+func quoteSystemdEnvironment(value string) string {
+	escaped := strings.NewReplacer(
+		`\`, `\\`,
+		`"`, `\"`,
+		`%`, `%%`,
+		"\n", `\n`,
+		"\r", `\r`,
+		"\t", `\t`,
+	).Replace(value)
+	return `"` + escaped + `"`
 }

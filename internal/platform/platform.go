@@ -103,6 +103,9 @@ type ServiceOpts struct {
 	ExePath string
 	Args    []string
 	LogPath string
+	// PathEnv is the installer's effective PATH. It is the only environment
+	// value copied into a supervised daemon definition.
+	PathEnv string
 }
 
 // ServiceStatus 是服务状态查询结果（映射 internal/service.Info）。

@@ -61,6 +61,17 @@ func TestServiceDaemonArgsAlwaysDisableBackgroundAgentAutoEnable(t *testing.T) {
 	}
 }
 
+func TestDaemonServiceOptionsPreservesPath(t *testing.T) {
+	pathEnv := "/opt/homebrew/bin:/usr/bin:/bin"
+	got := daemonServiceOptions("/usr/local/bin/pocketctl", "/tmp/pocketctl.log", false, "", pathEnv)
+	if got.PathEnv != pathEnv {
+		t.Fatalf("PATH=%q want %q", got.PathEnv, pathEnv)
+	}
+	if !strings.Contains(strings.Join(got.Args, " "), "--no-agent-auto-enable") {
+		t.Fatalf("args=%v missing --no-agent-auto-enable", got.Args)
+	}
+}
+
 func TestDaemonAgentAutoEnableContextOnlyUserParentCanMutate(t *testing.T) {
 	tests := []struct {
 		name        string

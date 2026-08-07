@@ -2,6 +2,7 @@ package session
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 
@@ -51,6 +52,9 @@ func (p *CodexRuntimeProvider) Recover(ctx context.Context) error {
 		return fmt.Errorf("Codex managed capabilities are incomplete")
 	}
 	_, err = p.coordinator.ensureStarted(ctx, binary, version, capabilities)
+	if errors.Is(err, errCodexRuntimeUpgradeDeferred) {
+		return nil
+	}
 	if err != nil {
 		_ = agentcontrol.RecordCodexFallback(agentcontrol.CodexFallbackRuntime)
 	}
@@ -103,6 +107,12 @@ func (p *CodexRuntimeProvider) Acquire(ctx context.Context, req agentcontrol.Acq
 		return agentcontrol.AcquireResult{Mode: string(agentcontrol.LaunchNative), RealBinary: binary, Reason: err.Error()}, nil
 	}
 	snapshot, err := p.coordinator.ensureStarted(ctx, binary, version, capabilities)
+	if errors.Is(err, errCodexRuntimeUpgradeDeferred) {
+		_ = agentcontrol.RecordCodexFallback(agentcontrol.CodexFallbackRuntime)
+		return agentcontrol.AcquireResult{
+			Mode: string(agentcontrol.LaunchNative), RealBinary: binary, Reason: err.Error(),
+		}, nil
+	}
 	if err != nil {
 		_ = agentcontrol.RecordCodexFallback(agentcontrol.CodexFallbackRuntime)
 		return agentcontrol.AcquireResult{}, runtimeProtocolError(err)

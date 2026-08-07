@@ -75,6 +75,20 @@ app-server 是交互结果的最终权威来源。Pocketctl 在本地也做 firs
 
 daemon 为每条连接发送 `initialize`，随后发送 `initialized`，并按运行时生成的 schema 做版本/能力协商。当前只 opt in `experimentalApi`；在 Web 与 iOS 完整支持 OpenAI 扩展表单前，不声明 `mcpServerOpenaiFormElicitation`。
 
+### 服务 PATH 与 Codex 升级收敛
+
+LaunchAgent（macOS）和 systemd user service（Linux）不会自动获得交互 shell 的 Node 路径。执行 `pocketctl daemon service install` 时，Pocketctl 只把当时有效的 `PATH` 写入服务定义；不会写入 token、代理、API key 或其他环境变量。该修复发布前已安装的受管 daemon 需要重新生成一次服务定义：
+
+```bash
+pocketctl daemon service install
+```
+
+不支持手工编辑 plist 或 systemd unit 作为修复方式。若 Node/Codex 被移动到了另一个安装前缀，先执行 `pocketctl agent codex enable` 更新 launcher 的真实 binary 记录，再重新安装 daemon service。
+
+每一次正常的 `codex`、`codex "prompt"` 或 `codex resume <thread-id>` 都会走 managed `Acquire`，探测真实 binary、版本与 capability schema；`codex --version` 保持原生查询，不触发 `Acquire`。若 idle app-server 的 binary、版本或 schema 与本次 Acquire 不一致，Pocketctl 会在启动 TUI 前停止旧 generation、保留已记录的 managed thread，并以递增 generation 启动新 app-server。若当前 generation 有活跃 Codex terminal lease，则保持旧 runtime；新的 Acquire 返回 native fallback，不会把新版 TUI 接到旧 app-server，也不会给旧 generation 增加 lease。daemon 重启时仍采用活跃的旧 handoff；最后一条旧 lease 释放后，下一次 Acquire 再完成 managed 收敛。
+
+Acquire 是只读协调：不会改写 `agent-launchers.json`、shell profile、shim 或 PATH 文件，也不会执行 Codex/npm 自动升级。
+
 ## 支持的交互
 
 - command execution、file change 和 permissions 审批。
@@ -121,6 +135,8 @@ Codex app-server 的 native event 是 lifecycle 的唯一输入；Pocketctl 只�
 | Relay/网络中断 | 本机 TUI 与 app-server 继续运行，远端重连后收敛 |
 | daemon 重启且 TUI 活跃 | 通过 handoff/lease 采用原 app-server，不创建第二份 thread |
 | daemon client 掉线 | 有界重连、恢复 managed thread 和待处理交互 |
+| idle runtime 的 binary/version/schema 已变化 | 下次 managed Acquire 滚动到下一 generation，保留 managed thread registry |
+| runtime identity 已变化但 terminal lease 活跃 | 保持当前 generation；新 Acquire native fallback 且不增加旧 lease；daemon 重启仍采用旧 handoff；待后续 idle Acquire 再收敛 |
 
 如果 Codex 在启用后被降级到旧版本，配置可保持“已启用”，但 effective mode 会显示 native fallback；升级回兼容版本后再次执行 `status` 或直接启动即可，无需重启 daemon。
 

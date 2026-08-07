@@ -75,6 +75,8 @@ type codexCoordinator struct {
 	reconnecting   bool
 }
 
+var errCodexRuntimeUpgradeDeferred = errors.New("Codex managed runtime upgrade is deferred while an active terminal lease uses the current generation")
+
 type codexTitleTurn struct {
 	user      string
 	assistant string
@@ -90,40 +92,45 @@ func newCodexCoordinator(sm *SessionManager) *codexCoordinator {
 func (c *codexCoordinator) ensureStarted(ctx context.Context, binary, version string, capabilities agentcontrol.CodexCapabilities) (codexRuntimeSnapshot, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	var restoredThreads []string
 	if c.runtime != nil {
-		if err := c.probe(ctx, c.runtime); err == nil {
+		probeErr := c.probe(ctx, c.runtime)
+		activeLease := c.sm != nil && hasActiveCodexLease(c.sm.leases.Snapshot(), c.generation)
+		compatible := codexRuntimeCompatible(c.binary, c.version, c.schemaHash, binary, version, capabilities.SchemaHash)
+		if probeErr == nil && compatible {
 			return c.snapshotLocked(), nil
-		} else if c.sm != nil && hasActiveCodexLease(c.sm.leases.Snapshot(), c.generation) {
-			return codexRuntimeSnapshot{}, fmt.Errorf("Codex app-server endpoint is unavailable while a managed terminal is active: %w", err)
-		} else {
-			c.stopEventPumpLocked()
-			if c.runtime.Stop != nil {
-				if stopErr := c.runtime.Stop(); stopErr != nil {
-					return codexRuntimeSnapshot{}, fmt.Errorf("stop unavailable Codex app-server: %w", stopErr)
-				}
-			}
-			c.runtime = nil
-			if removeErr := daemon.RemoveCodexAppServerState(); removeErr != nil && !os.IsNotExist(removeErr) {
-				return codexRuntimeSnapshot{}, removeErr
+		}
+		if probeErr == nil && activeLease {
+			return c.snapshotLocked(), errCodexRuntimeUpgradeDeferred
+		}
+		if probeErr != nil && activeLease {
+			return codexRuntimeSnapshot{}, fmt.Errorf("Codex app-server endpoint is unavailable while a managed terminal is active: %w", probeErr)
+		}
+		restoredThreads = c.managedThreadSnapshot()
+		c.stopEventPumpLocked()
+		if c.runtime.Stop != nil {
+			if stopErr := c.runtime.Stop(); stopErr != nil {
+				return codexRuntimeSnapshot{}, fmt.Errorf("stop unavailable Codex app-server: %w", stopErr)
 			}
 		}
+		c.runtime = nil
+		if removeErr := daemon.RemoveCodexAppServerState(); removeErr != nil && !os.IsNotExist(removeErr) {
+			return codexRuntimeSnapshot{}, removeErr
+		}
 	}
-	var restoredThreads []string
 	state, stateErr := daemon.ReadCodexAppServerState()
 	if stateErr == nil {
 		c.generation = state.Generation
 		restoredThreads = append(restoredThreads, state.Threads...)
 		alive := platform.NewProcessController().IsAlive(state.PID)
 		ownerAvailable := state.OwnerPID <= 0 || state.OwnerPID == os.Getpid() || !platform.NewProcessController().IsAlive(state.OwnerPID)
-		compatible := state.Binary == binary && state.Version == version && state.SchemaHash == capabilities.SchemaHash
+		compatible := codexRuntimeCompatible(state.Binary, state.Version, state.SchemaHash, binary, version, capabilities.SchemaHash)
 		if alive {
 			if !ownerAvailable {
 				return codexRuntimeSnapshot{}, fmt.Errorf("Codex app-server handoff is still owned by live daemon pid %d", state.OwnerPID)
 			}
-			if !compatible {
-				if hasActiveCodexLease(state.Leases, state.Generation) {
-					return codexRuntimeSnapshot{}, errors.New("live Codex app-server handoff is incompatible and still has an active Codex terminal lease")
-				}
+			activeLease := hasActiveCodexLease(state.Leases, state.Generation)
+			if !compatible && !activeLease {
 				if err := stopPersistedCodexAppServer(state); err != nil {
 					return codexRuntimeSnapshot{}, fmt.Errorf("stop incompatible Codex app-server handoff: %w", err)
 				}
@@ -133,7 +140,7 @@ func (c *codexCoordinator) ensureStarted(ctx context.Context, binary, version st
 			} else {
 				runtime, err := c.adopt(ctx, state)
 				if err != nil {
-					if hasActiveCodexLease(state.Leases, state.Generation) {
+					if activeLease {
 						return codexRuntimeSnapshot{}, fmt.Errorf("Codex app-server endpoint is unavailable while a managed terminal is active: %w", err)
 					}
 					if stopErr := stopPersistedCodexAppServer(state); stopErr != nil {
@@ -143,7 +150,7 @@ func (c *codexCoordinator) ensureStarted(ctx context.Context, binary, version st
 						return codexRuntimeSnapshot{}, removeErr
 					}
 				} else {
-					c.runtime, c.binary, c.version, c.schemaHash = runtime, binary, version, capabilities.SchemaHash
+					c.runtime, c.binary, c.version, c.schemaHash = runtime, state.Binary, state.Version, state.SchemaHash
 					c.restoreManagedThreads(state.Threads)
 					c.startEventPumpLocked()
 					if c.sm != nil {
@@ -152,7 +159,11 @@ func (c *codexCoordinator) ensureStarted(ctx context.Context, binary, version st
 							return codexRuntimeSnapshot{}, err
 						}
 					}
-					return c.snapshotLocked(), nil
+					snapshot := c.snapshotLocked()
+					if !compatible {
+						return snapshot, errCodexRuntimeUpgradeDeferred
+					}
+					return snapshot, nil
 				}
 			}
 		} else if err := daemon.RemoveCodexAppServerState(); err != nil {
@@ -218,6 +229,10 @@ func hasActiveCodexLease(snapshot map[string]agentcontrol.Lease, generation uint
 		}
 	}
 	return false
+}
+
+func codexRuntimeCompatible(binary, version, schemaHash, wantBinary, wantVersion, wantSchemaHash string) bool {
+	return binary == wantBinary && version == wantVersion && schemaHash == wantSchemaHash
 }
 
 func (c *codexCoordinator) snapshotLocked() codexRuntimeSnapshot {
