@@ -171,6 +171,7 @@
                 <button v-if="selectedDaemon?.daemon_online && !isAgentLatest(a) && agentManageable(a)" class="ag-upgrade-btn" :class="{ upgrading: upgrading === agentRawName(a) }" :disabled="upgrading === agentRawName(a)" @click="upgradeAgent(agentRawName(a))">
                   {{ t('settings.upgrade_btn') }}
                 </button>
+                <span v-else-if="isZcodeAgent(a)" class="ag-readonly">{{ t('hosts.agent_readonly_sync') }}</span>
                 <span v-else-if="!agentManageable(a)" class="ag-sysinstall">{{ t('hosts.agent_system_install') }}</span>
                 <span v-else-if="isAgentLatest(a)" class="ag-latest">✓ {{ t('settings.installed') }}</span>
               </div>
@@ -296,6 +297,7 @@ import { useAuth } from '../composables/useAuth'
 import { formatRelativeTime } from '../composables/useRelativeTime'
 import { useLocale } from '../composables/useLocale'
 import { useQuota } from '../composables/useQuota'
+import { agentDisplayName, agentShortLabel, agentIconClass as agentIconClassHelper, isZcodeAgent as isZcodeAgentHelper } from '../utils/agentDisplay'
 import RegisterDaemonDialog from '../components/RegisterDaemonDialog.vue'
 import NewSessionDialog from '../components/NewSessionDialog.vue'
 import MobileHostCard from '../components/hosts/MobileHostCard.vue'
@@ -431,14 +433,12 @@ function agentCards(d: any): any[] {
   if (d && Array.isArray(d.agents) && d.agents.length) return d.agents
   return []
 }
-const AGENT_DISPLAY_NAMES: Record<string, string> = { 'claude-code': 'Claude Code', 'opencode': 'OpenCode', 'codex': 'Codex' }
 function agentRawName(a: any): string { return typeof a === 'string' ? a : (a?.name || a?.type || 'Agent') }
 function agentName(a: any): string {
-  const raw = agentRawName(a)
-  return AGENT_DISPLAY_NAMES[raw] || raw
+  return agentDisplayName(agentRawName(a))
 }
-function agentShort(a: any): string { const n = agentRawName(a); if (/codex/i.test(n)) return 'Cx'; if (/opencode/i.test(n)) return 'OC'; return 'CC' }
-function agentIconClass(a: any): string { return /codex/i.test(agentName(a)) ? 'codex' : 'claude' }
+function agentShort(a: any): string { return agentShortLabel(agentRawName(a)) }
+function agentIconClass(a: any): string { return agentIconClassHelper(agentRawName(a)) }
 function agentVersionLabel(a: any): string {
   if (typeof a !== 'object' || !a?.version) return t('settings.version_pending')
   const v = 'v' + a.version
@@ -449,6 +449,7 @@ function isAgentLatest(a: any): boolean {
   return typeof a === 'object' && !!a?.latest && a?.version === a?.latest
 }
 function agentManageable(a: any): boolean { return typeof a !== 'object' || a?.manageable !== false }
+function isZcodeAgent(a: any): boolean { return isZcodeAgentHelper(agentRawName(a)) }
 function agentMetaLabel(a: any): string {
   if (typeof a === 'object' && a?.version) {
     return a.latest && a.version !== a.latest ? t('settings.upgrade_available') : t('settings.installed')
@@ -845,6 +846,7 @@ onUnmounted(() => {
 .agent-card .ag-icon { width: 32px; height: 32px; border-radius: var(--radius-sm); display: flex; align-items: center; justify-content: center; flex-shrink: 0; font-size: 14px; font-weight: 700; }
 .agent-card .ag-icon.claude { background: rgba(88,166,255,0.15); color: var(--accent); }
 .agent-card .ag-icon.codex { background: rgba(63,185,80,0.15); color: var(--success); }
+.agent-card .ag-icon.zcode { background: rgba(20,184,166,0.15); color: #14b8a6; }
 .agent-card .ag-info { flex: 1; min-width: 0; }
 .agent-card .ag-name { font-size: 14px; font-weight: 600; color: var(--fg); display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .agent-card .ag-version { font-family: var(--font-mono); font-size: 12px; color: var(--fg-secondary); display: inline-flex; align-items: center; gap: 4px; }
@@ -855,6 +857,7 @@ onUnmounted(() => {
 .ag-upgrade-btn.upgrading { background: var(--accent); color: #fff; opacity: 0.75; }
 .ag-latest { flex-shrink: 0; color: var(--success); font-size: 12px; font-weight: 600; display: inline-flex; align-items: center; }
 .ag-sysinstall { flex-shrink: 0; max-width: 220px; font-size: 11px; color: var(--fg-tertiary); text-align: right; line-height: 1.3; }
+.ag-readonly { flex-shrink: 0; max-width: 220px; font-size: 11px; color: var(--fg-tertiary); text-align: right; line-height: 1.3; }
 
 /* Token Overview */
 .token-overview { display: flex; gap: 16px; align-items: flex-start; margin-bottom: 16px; flex-wrap: wrap; }

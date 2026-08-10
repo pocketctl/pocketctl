@@ -4,6 +4,7 @@ import { deleteSession, deleteUserAccount, initDB } from '../db.js'
 import { InboxRetention } from '../inbox-retention.js'
 import { EventMaterializer } from '../materialization/event-materializer.js'
 import { RealtimeOutboxWriter } from '../materialization/realtime-outbox.js'
+import { closeTokenUsageDay } from '../token-usage/day-closer.js'
 
 const databaseUrl = process.env.TEST_DATABASE_URL
 const integrationEnabled = Boolean(databaseUrl && process.env.RUN_POSTGRES_INTEGRATION === '1')
@@ -314,5 +315,66 @@ describeWithDatabase('InboxRetention PostgreSQL integration', () => {
     } finally {
       await poolOne.end()
     }
+  })
+
+  test('retains completed post-baseline usage until its accounting date is sealed', async () => {
+    const date = new Date(Date.now() - 33 * 86_400_000).toISOString().slice(0, 10)
+    const baselineAt = new Date(Date.now() - 40 * 86_400_000)
+    // This suite intentionally reuses a local integration database across
+    // runs, so clear only this test's deterministic accounting date/identity.
+    await pool.query(`DELETE FROM token_daily_closures WHERE date = $1`, [date])
+    await pool.query(`DELETE FROM token_daily_stats WHERE daemon_id = 'retention-token-daemon'`)
+    await pool.query(`DELETE FROM token_session_daily_stats WHERE session_id = 'retention-token-session'`)
+    const user = await pool.query<{ id: number }>(
+      `INSERT INTO users (email, password_hash)
+       VALUES ('retention-token-accounting@example.test', '') RETURNING id`,
+    )
+    const userId = user.rows[0].id
+    await pool.query(
+      `INSERT INTO token_usage_accounting_state (key, completed_at)
+       VALUES ('baseline-v1', $1)
+       ON CONFLICT (key) DO UPDATE SET completed_at = EXCLUDED.completed_at`,
+      [baselineAt],
+    )
+    const inbox = await pool.query<{ inbox_id: string }>(`
+      INSERT INTO event_inbox (
+        user_id, daemon_id, daemon_generation, seq, dedup_key, session_id,
+        event_type, priority_class, received_at, payload, status, completed_at
+      ) VALUES (
+        $1, 'retention-token-daemon', 1, 1, 'retention-token-missing-fact',
+        'retention-token-session', 'agent_text', 0,
+        ($2::date + TIME '12:00') AT TIME ZONE 'UTC',
+        '{"type":"agent_text","usage":{"input_tokens":23,"output_tokens":4}}',
+        2, NOW() - INTERVAL '7 hours'
+      ) RETURNING inbox_id
+    `, [userId, date])
+
+    expect((await retention.runOnce()).deletedCompleted).toBe(0)
+    expect((await pool.query(
+      `SELECT 1 FROM event_inbox WHERE inbox_id = $1`, [inbox.rows[0].inbox_id],
+    )).rowCount).toBe(1)
+    await expect(closeTokenUsageDay(pool, date)).resolves.toEqual({
+      date, status: 'failed', reason: 'missing_usage_facts',
+    })
+
+    await pool.query(`
+      INSERT INTO token_usage_facts (
+        fact_key, user_id, daemon_id, session_id, agent_type, model,
+        usage_date, recorded_at, input, output, requests
+      ) VALUES (
+        $1, $2, 'retention-token-daemon', 'retention-token-session',
+        'codex', 'gpt-test', $3, ($3::date + TIME '12:00') AT TIME ZONE 'UTC',
+        23, 4, 1
+      )
+    `, [`inbox:${inbox.rows[0].inbox_id}`, userId, date])
+    await expect(closeTokenUsageDay(pool, date)).resolves.toMatchObject({
+      date, status: 'sealed', factCount: 1, total: 27,
+    })
+
+    expect((await retention.runOnce()).deletedCompleted).toBe(1)
+    expect((await pool.query(
+      `SELECT 1 FROM event_inbox WHERE inbox_id = $1`, [inbox.rows[0].inbox_id],
+    )).rowCount).toBe(0)
+    await deleteUserAccount(pool, userId)
   })
 })

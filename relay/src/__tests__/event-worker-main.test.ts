@@ -6,6 +6,7 @@ vi.hoisted(() => {
 
 import {
   assertDurableIngressSchema,
+  EVENT_WORKER_STATEMENT_TIMEOUT_MS,
   createStandaloneMaterializationHooks,
   createRetentionLoop,
   createWorkerRuntime,
@@ -13,6 +14,10 @@ import {
 import { startRelayBackgroundWorkers } from '../server.js'
 
 describe('standalone event worker runtime', () => {
+  test('allows durable materialization longer than connection checkout', () => {
+    expect(EVENT_WORKER_STATEMENT_TIMEOUT_MS).toBe(30_000)
+  })
+
   test('does not install process-local push dedup in the restartable Worker', () => {
     const hooks = createStandaloneMaterializationHooks()
 

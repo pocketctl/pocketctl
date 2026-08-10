@@ -44,6 +44,35 @@ export function createPool(config: DBConfig, options: PoolOptions = {}): pg.Pool
 }
 
 export async function initDB(pool: pg.Pool): Promise<void> {
+  // PostgreSQL's IF NOT EXISTS checks are not sufficient for two fresh Relay
+  // instances racing to create the same relation: both can reach the system
+  // catalog insert and one will fail with a duplicate-key error. Keep the
+  // complete schema bootstrap/upgrade on one connection under a database-wide
+  // transaction lock so fresh installs and legacy upgrades are both serial.
+  if (typeof pool.connect === 'function') {
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+      await client.query(`SELECT pg_advisory_xact_lock(hashtext('pocketctl-schema-init-v1'))`);
+      await initDBUnlocked({ query: client.query.bind(client) } as pg.Pool);
+      await client.query('COMMIT');
+    } catch (error) {
+      try {
+        await client.query('ROLLBACK');
+      } catch {
+        // Preserve the schema initialization failure.
+      }
+      throw error;
+    } finally {
+      client.release();
+    }
+    return;
+  }
+  // Lightweight unit-test doubles historically implement query only.
+  await initDBUnlocked(pool);
+}
+
+async function initDBUnlocked(pool: pg.Pool): Promise<void> {
   await pool.query(`
     CREATE TABLE IF NOT EXISTS daemons (
       id SERIAL PRIMARY KEY,
@@ -334,6 +363,196 @@ export async function initDB(pool: pg.Pool): Promise<void> {
     )
   `);
   await pool.query(`CREATE INDEX IF NOT EXISTS idx_token_daily_stats_user_date ON token_daily_stats(user_id, date)`);
+
+  // Immutable per-usage facts. Writes remain behind a disabled-by-default
+  // feature flag; V2 reads admit a past date only after explicit reconciliation
+  // and sealing.
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS token_usage_facts (
+      fact_key TEXT PRIMARY KEY,
+      source_event_id BIGINT,
+      user_id INT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      daemon_id VARCHAR(64) NOT NULL,
+      session_id VARCHAR(64) NOT NULL,
+      session_attribution_revoked BOOLEAN NOT NULL DEFAULT false,
+      agent_type VARCHAR(64) NOT NULL DEFAULT 'unknown',
+      model VARCHAR(128) NOT NULL DEFAULT 'unknown',
+      usage_date DATE NOT NULL,
+      recorded_at TIMESTAMPTZ NOT NULL,
+      input BIGINT NOT NULL DEFAULT 0 CHECK (input >= 0),
+      output BIGINT NOT NULL DEFAULT 0 CHECK (output >= 0),
+      cache_read BIGINT NOT NULL DEFAULT 0 CHECK (cache_read >= 0),
+      cache_create BIGINT NOT NULL DEFAULT 0 CHECK (cache_create >= 0),
+      reasoning BIGINT NOT NULL DEFAULT 0 CHECK (reasoning >= 0),
+      reported_total BIGINT NOT NULL DEFAULT 0 CHECK (reported_total >= 0),
+      requests BIGINT NOT NULL DEFAULT 1 CHECK (requests >= 0),
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )
+  `);
+  // Compatibility with the pre-cutover Task 1 shape, where source_event_id
+  // was the primary key and synthetic migration facts were not yet possible.
+  await pool.query(`ALTER TABLE token_usage_facts ADD COLUMN IF NOT EXISTS fact_key TEXT`);
+  await pool.query(`ALTER TABLE token_usage_facts ADD COLUMN IF NOT EXISTS requests BIGINT NOT NULL DEFAULT 1`);
+  await pool.query(`ALTER TABLE token_usage_facts ADD COLUMN IF NOT EXISTS session_attribution_revoked BOOLEAN NOT NULL DEFAULT false`);
+  await pool.query(`
+    UPDATE token_usage_facts
+    SET fact_key = 'event:' || source_event_id
+    WHERE fact_key IS NULL AND source_event_id IS NOT NULL
+  `);
+  await pool.query(`ALTER TABLE token_usage_facts ALTER COLUMN fact_key SET NOT NULL`);
+  await pool.query(`
+    DO $$
+    DECLARE
+      primary_name TEXT;
+      primary_has_fact_key BOOLEAN;
+    BEGIN
+      LOCK TABLE token_usage_facts IN ACCESS EXCLUSIVE MODE;
+      SELECT constraint_row.conname,
+             EXISTS (
+               SELECT 1
+               FROM unnest(constraint_row.conkey) AS key(attnum)
+               JOIN pg_attribute attribute
+                 ON attribute.attrelid = constraint_row.conrelid
+                AND attribute.attnum = key.attnum
+               WHERE attribute.attname = 'fact_key'
+             )
+      INTO primary_name, primary_has_fact_key
+      FROM pg_constraint constraint_row
+      WHERE constraint_row.conrelid = 'token_usage_facts'::regclass
+        AND constraint_row.contype = 'p';
+
+      IF primary_name IS NOT NULL AND NOT primary_has_fact_key THEN
+        EXECUTE format('ALTER TABLE token_usage_facts DROP CONSTRAINT %I', primary_name);
+      END IF;
+      IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conrelid = 'token_usage_facts'::regclass AND contype = 'p'
+      ) THEN
+        ALTER TABLE token_usage_facts ADD PRIMARY KEY (fact_key);
+      END IF;
+    END $$
+  `);
+  await pool.query(`ALTER TABLE token_usage_facts ALTER COLUMN source_event_id DROP NOT NULL`);
+  await pool.query(`CREATE UNIQUE INDEX IF NOT EXISTS idx_token_usage_facts_source_event ON token_usage_facts(source_event_id)`);
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_token_usage_facts_user_date ON token_usage_facts(user_id, usage_date)`);
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_token_usage_facts_user_daemon_date ON token_usage_facts(user_id, daemon_id, usage_date)`);
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_token_usage_facts_date ON token_usage_facts(usage_date)`);
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_token_usage_facts_session_date ON token_usage_facts(session_id, usage_date)`);
+
+  // Session-level history follows the same sealed-date contract as the main
+  // daily rollup. It exists separately because token_daily_stats aggregates
+  // away the session dimension.
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS token_session_daily_stats (
+      user_id INT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      session_id VARCHAR(64) NOT NULL,
+      date DATE NOT NULL,
+      input BIGINT NOT NULL DEFAULT 0,
+      output BIGINT NOT NULL DEFAULT 0,
+      cache_read BIGINT NOT NULL DEFAULT 0,
+      cache_create BIGINT NOT NULL DEFAULT 0,
+      requests BIGINT NOT NULL DEFAULT 0,
+      PRIMARY KEY (user_id, session_id, date)
+    )
+  `);
+  await pool.query(`ALTER TABLE token_session_daily_stats ADD COLUMN IF NOT EXISTS user_id INT`);
+  await pool.query(`
+    UPDATE token_session_daily_stats rollup
+    SET user_id = session.user_id
+    FROM sessions session
+    WHERE rollup.user_id IS NULL
+      AND session.session_id = rollup.session_id
+      AND session.user_id IS NOT NULL
+  `);
+  // A pre-cutover row without a live owner cannot be served safely and cannot
+  // be reconstructed from the aggregate alone.
+  await pool.query(`DELETE FROM token_session_daily_stats WHERE user_id IS NULL`);
+  await pool.query(`ALTER TABLE token_session_daily_stats ALTER COLUMN user_id SET NOT NULL`);
+  await pool.query(`
+    DO $$ BEGIN
+      LOCK TABLE token_session_daily_stats IN ACCESS EXCLUSIVE MODE;
+      IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conname = 'token_session_daily_stats_user_id_fkey'
+          AND conrelid = 'token_session_daily_stats'::regclass
+      ) THEN
+        ALTER TABLE token_session_daily_stats
+          ADD CONSTRAINT token_session_daily_stats_user_id_fkey
+          FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE;
+      END IF;
+    END $$
+  `);
+  await pool.query(`
+    DO $$
+    DECLARE
+      primary_name TEXT;
+      primary_has_user_id BOOLEAN;
+    BEGIN
+      LOCK TABLE token_session_daily_stats IN ACCESS EXCLUSIVE MODE;
+      SELECT constraint_row.conname,
+             EXISTS (
+               SELECT 1
+               FROM unnest(constraint_row.conkey) AS key(attnum)
+               JOIN pg_attribute attribute
+                 ON attribute.attrelid = constraint_row.conrelid
+                AND attribute.attnum = key.attnum
+               WHERE attribute.attname = 'user_id'
+             )
+      INTO primary_name, primary_has_user_id
+      FROM pg_constraint constraint_row
+      WHERE constraint_row.conrelid = 'token_session_daily_stats'::regclass
+        AND constraint_row.contype = 'p';
+
+      IF primary_name IS NOT NULL AND NOT primary_has_user_id THEN
+        EXECUTE format('ALTER TABLE token_session_daily_stats DROP CONSTRAINT %I', primary_name);
+      END IF;
+      IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conrelid = 'token_session_daily_stats'::regclass AND contype = 'p'
+      ) THEN
+        ALTER TABLE token_session_daily_stats ADD PRIMARY KEY (user_id, session_id, date);
+      END IF;
+    END $$
+  `);
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_token_session_daily_stats_owner_session_date ON token_session_daily_stats(user_id, session_id, date)`);
+
+  // Singleton migration markers make one-time baseline conversions safe across
+  // process restarts and multi-instance Relay startup.
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS token_usage_accounting_state (
+      key VARCHAR(64) PRIMARY KEY,
+      completed_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )
+  `);
+
+  // A date is not historical merely because midnight passed. Task 2 seals it
+  // only after facts and rollup have been reconciled.
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS token_daily_closures (
+      date DATE PRIMARY KEY,
+      status VARCHAR(16) NOT NULL DEFAULT 'pending'
+        CHECK (status IN ('pending', 'sealed', 'failed')),
+      cutoff_at TIMESTAMPTZ,
+      source_fact_count BIGINT,
+      source_request_count BIGINT,
+      rollup_request_count BIGINT,
+      session_source_request_count BIGINT,
+      session_rollup_request_count BIGINT,
+      source_total BIGINT,
+      rollup_total BIGINT,
+      session_source_total BIGINT,
+      session_rollup_total BIGINT,
+      sealed_at TIMESTAMPTZ,
+      last_error TEXT,
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )
+  `);
+  await pool.query(`ALTER TABLE token_daily_closures ADD COLUMN IF NOT EXISTS source_request_count BIGINT`);
+  await pool.query(`ALTER TABLE token_daily_closures ADD COLUMN IF NOT EXISTS rollup_request_count BIGINT`);
+  await pool.query(`ALTER TABLE token_daily_closures ADD COLUMN IF NOT EXISTS session_source_request_count BIGINT`);
+  await pool.query(`ALTER TABLE token_daily_closures ADD COLUMN IF NOT EXISTS session_rollup_request_count BIGINT`);
+  await pool.query(`ALTER TABLE token_daily_closures ADD COLUMN IF NOT EXISTS session_source_total BIGINT`);
+  await pool.query(`ALTER TABLE token_daily_closures ADD COLUMN IF NOT EXISTS session_rollup_total BIGINT`);
 
   // Report push dedup: tracks which daily/weekly report has been pushed to each
   // user, so the hourly report job is idempotent across relay restarts. The
@@ -828,15 +1047,19 @@ export async function incrementSessionTokensForEvent(
   nextStep: number,
   sessionId: string,
   u: TokenUsageDelta,
+  factOptions: TokenUsageFactWriteOptions = {},
 ): Promise<void> {
   const inp = Math.max(0, u.input_tokens || 0);
   const out = Math.max(0, u.output_tokens || 0);
   const cr = Math.max(0, u.cache_read_tokens || 0);
   const cc = Math.max(0, u.cache_create_tokens || 0);
+  const reasoning = Math.max(0, u.reasoning_tokens || 0);
+  const reportedTotal = Math.max(0, u.total_tokens || 0);
   const total = inp + out + cr + cc;
   const result = await pool.query(
     `WITH session_target AS (
-       SELECT session_id FROM sessions WHERE session_id = $8 FOR UPDATE
+       SELECT session_id, user_id, daemon_id, agent_type, model
+       FROM sessions WHERE session_id = $8 FOR UPDATE
      ), checkpoint AS (
        UPDATE events SET effect_step = $2
        WHERE id = $1 AND effect_status = 'pending' AND effect_step < $2
@@ -852,16 +1075,85 @@ export async function incrementSessionTokensForEvent(
        updated_at = NOW()
        WHERE session_id = $8 AND EXISTS (SELECT 1 FROM checkpoint)
        RETURNING 1
+     ), fact_insert AS (
+       INSERT INTO token_usage_facts (
+         fact_key, source_event_id, user_id, daemon_id, session_id, agent_type, model,
+         usage_date, recorded_at, input, output, cache_read, cache_create,
+         reasoning, reported_total, requests
+       )
+       SELECT
+         COALESCE(NULLIF($13::text, ''), 'event:' || $1), $1,
+         session_target.user_id, session_target.daemon_id, session_target.session_id,
+         COALESCE(NULLIF(session_target.agent_type, ''), 'unknown'),
+         COALESCE(NULLIF(session_target.model, ''), 'unknown'),
+         (COALESCE($10::timestamptz, NOW()) AT TIME ZONE 'UTC')::date,
+         COALESCE($10::timestamptz, NOW()), $4, $5, $6, $7, $11, $12, 1
+       FROM session_target
+       WHERE $9::boolean AND session_target.user_id IS NOT NULL
+         AND session_target.daemon_id IS NOT NULL
+         AND EXISTS (SELECT 1 FROM checkpoint)
+       ON CONFLICT DO NOTHING
+       RETURNING 1
      )
      SELECT
        EXISTS (SELECT 1 FROM session_target) AS session_exists,
        EXISTS (SELECT 1 FROM checkpoint) AS claimed,
        EXISTS (SELECT 1 FROM session_update) AS applied`,
-    [eventID, nextStep, total, inp, out, cr, cc, sessionId],
+    [eventID, nextStep, total, inp, out, cr, cc, sessionId,
+     factOptions.writeFact === true, factOptions.receivedAt ?? null,
+     reasoning, reportedTotal, factOptions.factKey ?? null],
   );
   const outcome = result.rows[0];
   if (!outcome?.session_exists) throw new Error(`session missing for token effect: ${sessionId}`);
   if (outcome.claimed && !outcome.applied) throw new Error(`token effect checkpoint was not applied: ${sessionId}`);
+}
+
+export interface TokenUsageFactInput {
+  factKey: string;
+  userId: number | null;
+  daemonId: string;
+  sessionId: string;
+  agentType?: string;
+  model?: string;
+  receivedAt?: Date | null;
+  usage: TokenUsageDelta;
+}
+
+/** Checkpoint an immutable usage fact without mutating a session accumulator. */
+export async function recordTokenUsageFactForEvent(
+  pool: pg.Pool,
+  eventID: number,
+  nextStep: number,
+  input: TokenUsageFactInput,
+): Promise<void> {
+  const usage = input.usage;
+  await pool.query(
+    `WITH checkpoint AS (
+       UPDATE events SET effect_step = $2
+       WHERE id = $1 AND effect_status = 'pending' AND effect_step < $2
+       RETURNING 1
+     ), fact_insert AS (
+       INSERT INTO token_usage_facts (
+         fact_key, source_event_id, user_id, daemon_id, session_id,
+         agent_type, model, usage_date, recorded_at, input, output,
+         cache_read, cache_create, reasoning, reported_total, requests
+       )
+       SELECT $3, $1, $4, $5, $6, COALESCE(NULLIF($7, ''), 'unknown'),
+              COALESCE(NULLIF($8, ''), 'unknown'),
+              (COALESCE($9::timestamptz, NOW()) AT TIME ZONE 'UTC')::date,
+              COALESCE($9::timestamptz, NOW()), $10, $11, $12, $13, $14, $15, 1
+       WHERE $4::int IS NOT NULL AND EXISTS (SELECT 1 FROM checkpoint)
+       ON CONFLICT DO NOTHING
+     )
+     SELECT EXISTS (SELECT 1 FROM checkpoint) AS claimed`,
+    [
+      eventID, nextStep, input.factKey, input.userId, input.daemonId, input.sessionId,
+      input.agentType || 'unknown', input.model || 'unknown', input.receivedAt ?? null,
+      Math.max(0, usage.input_tokens || 0), Math.max(0, usage.output_tokens || 0),
+      Math.max(0, usage.cache_read_tokens || 0), Math.max(0, usage.cache_create_tokens || 0),
+      Math.max(0, usage.reasoning_tokens || 0), Math.max(0, usage.total_tokens || 0),
+    ],
+  );
 }
 
 export async function getEventsAfter(pool: pg.Pool, sessionId: string, lastSeq: number): Promise<any[]> {
@@ -1503,6 +1795,50 @@ export interface SubagentRelation {
   title?: string;
 }
 
+/** Apply one subagent relation on the caller's existing transaction. */
+export async function reconcileSubagentInTransaction(
+  client: Pick<pg.PoolClient, 'query'>,
+  relation: SubagentRelation,
+): Promise<void> {
+  await client.query(
+    `INSERT INTO subagents (parent_session_id, agent_id, kind, tool_use_id, agent_type, title, created_at, updated_at)
+     VALUES ($1, $2, $3, $4, $5, $6, NOW(), NOW())
+     ON CONFLICT (parent_session_id, agent_id) DO UPDATE SET
+       kind = EXCLUDED.kind,
+       tool_use_id = COALESCE(EXCLUDED.tool_use_id, subagents.tool_use_id),
+       agent_type = COALESCE(EXCLUDED.agent_type, subagents.agent_type),
+       title = COALESCE(EXCLUDED.title, subagents.title),
+       updated_at = NOW()`,
+    [relation.parentSessionId, relation.agentId, relation.kind,
+      relation.toolUseId ?? null, relation.agentType ?? null, relation.title ?? null]
+  );
+  await client.query(
+    `UPDATE sessions
+     SET is_subagent = true, parent_session_id = $1, root_session_id = $2, updated_at = NOW()
+     WHERE session_id = $3`,
+    [relation.parentSessionId, relation.rootSessionId, relation.agentId]
+  );
+  if (relation.kind === 'codex_subagent') {
+    // Remove only pre-event_id Codex history written by older daemons. New
+    // stable events are protected even if they arrive while this transaction
+    // is running; Claude history is outside this migration.
+    await client.query(
+      `DELETE FROM events
+       WHERE session_id = $1
+         AND payload->>'agent_id' = $2
+         AND COALESCE(payload->>'event_id', '') = ''`,
+      [relation.parentSessionId, relation.agentId]
+    );
+  }
+  await client.query(
+    `UPDATE sessions SET subagent_count = (
+       SELECT COUNT(*)::int FROM subagents WHERE parent_session_id = $1
+     ), updated_at = NOW()
+     WHERE session_id = $1`,
+    [relation.parentSessionId]
+  );
+}
+
 /** Reconcile one child relation and any legacy top-level session row.
  * Token totals are rebuilt from rollout subagent_usage events; copying the
  * legacy session snapshot here would double-count the first history replay. */
@@ -1510,43 +1846,7 @@ export async function reconcileSubagent(pool: pg.Pool, relation: SubagentRelatio
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
-    await client.query(
-      `INSERT INTO subagents (parent_session_id, agent_id, kind, tool_use_id, agent_type, title, created_at, updated_at)
-       VALUES ($1, $2, $3, $4, $5, $6, NOW(), NOW())
-       ON CONFLICT (parent_session_id, agent_id) DO UPDATE SET
-         kind = EXCLUDED.kind,
-         tool_use_id = COALESCE(EXCLUDED.tool_use_id, subagents.tool_use_id),
-         agent_type = COALESCE(EXCLUDED.agent_type, subagents.agent_type),
-         title = COALESCE(EXCLUDED.title, subagents.title),
-         updated_at = NOW()`,
-      [relation.parentSessionId, relation.agentId, relation.kind,
-        relation.toolUseId ?? null, relation.agentType ?? null, relation.title ?? null]
-    );
-    await client.query(
-      `UPDATE sessions
-       SET is_subagent = true, parent_session_id = $1, root_session_id = $2, updated_at = NOW()
-       WHERE session_id = $3`,
-      [relation.parentSessionId, relation.rootSessionId, relation.agentId]
-    );
-    if (relation.kind === 'codex_subagent') {
-      // Remove only pre-event_id Codex history written by older daemons. New
-      // stable events are protected even if they arrive while this transaction
-      // is running; Claude history is outside this migration.
-      await client.query(
-        `DELETE FROM events
-         WHERE session_id = $1
-           AND payload->>'agent_id' = $2
-           AND COALESCE(payload->>'event_id', '') = ''`,
-        [relation.parentSessionId, relation.agentId]
-      );
-    }
-    await client.query(
-      `UPDATE sessions SET subagent_count = (
-         SELECT COUNT(*)::int FROM subagents WHERE parent_session_id = $1
-       ), updated_at = NOW()
-       WHERE session_id = $1`,
-      [relation.parentSessionId]
-    );
+    await reconcileSubagentInTransaction(client, relation);
     await client.query('COMMIT');
   } catch (error) {
     await client.query('ROLLBACK');
@@ -1908,6 +2208,7 @@ export async function deleteUserAccount(pool: pg.Pool, userId: number): Promise<
     await client.query(`DELETE FROM subagents WHERE parent_session_id = ANY($1::varchar[])`, [sessionIds]);
     await client.query(`DELETE FROM subagent_usage_seen WHERE daemon_id = ANY($1::text[])`, [daemonIds]);
     await client.query(`DELETE FROM deleted_sessions WHERE session_id = ANY($1::varchar[])`, [sessionIds]);
+    await client.query(`DELETE FROM token_session_daily_stats WHERE user_id = $1`, [userId]);
     await client.query(`DELETE FROM token_daily_stats WHERE user_id = $1`, [userId]);
     await client.query(`DELETE FROM audit_log WHERE user_id = $1`, [userId]);
     await client.query(`DELETE FROM revoked_tokens WHERE user_id = $1`, [userId]);
@@ -1980,18 +2281,60 @@ export async function listSessionsByUser(pool: pg.Pool, userId: number): Promise
 
 // --- Session deletion ---
 
-export async function deleteSession(pool: pg.Pool, sessionId: string): Promise<void> {
+export async function deleteSession(
+  pool: pg.Pool,
+  sessionId: string,
+  options: { usageFactsAuthoritative?: boolean; writeUsageFacts?: boolean } = {},
+): Promise<void> {
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
     await lockSessionMaterializationFence(client, sessionId);
+    if (options.writeUsageFacts) {
+      await client.query(`SELECT pg_advisory_xact_lock(hashtext('token-usage-accounting-global'))`);
+    }
+    if (options.writeUsageFacts) await client.query(`
+      INSERT INTO token_usage_facts (
+        fact_key, source_event_id, user_id, daemon_id, session_id,
+        agent_type, model, usage_date, recorded_at, input, output,
+        cache_read, cache_create, reasoning, reported_total, requests
+      )
+      SELECT 'inbox:' || inbox_id, NULL, inbox.user_id, inbox.daemon_id, inbox.session_id,
+             COALESCE(NULLIF(inbox.payload->>'agent', ''), NULLIF(session.agent_type, ''), 'unknown'),
+             COALESCE(NULLIF(inbox.payload->>'model', ''), NULLIF(session.model, ''), 'unknown'),
+             (inbox.received_at AT TIME ZONE 'UTC')::date, inbox.received_at,
+             GREATEST(COALESCE((inbox.payload->'usage'->>'input_tokens')::bigint, 0), 0),
+             GREATEST(COALESCE((inbox.payload->'usage'->>'output_tokens')::bigint, 0), 0),
+             GREATEST(COALESCE((inbox.payload->'usage'->>'cache_read_tokens')::bigint, 0), 0),
+             GREATEST(COALESCE((inbox.payload->'usage'->>'cache_create_tokens')::bigint, 0), 0),
+             GREATEST(COALESCE((inbox.payload->'usage'->>'reasoning_tokens')::bigint, 0), 0),
+             GREATEST(COALESCE((inbox.payload->'usage'->>'total_tokens')::bigint, 0), 0),
+             1
+      FROM event_inbox inbox
+      LEFT JOIN sessions session ON session.session_id = inbox.session_id
+      LEFT JOIN token_usage_accounting_state baseline ON baseline.key = 'baseline-v1'
+      WHERE inbox.session_id = $1
+        AND (
+          inbox.status IN (0, 1)
+          OR (inbox.status = 2 AND inbox.received_at >= baseline.completed_at)
+        )
+        AND inbox.event_type = 'agent_text'
+        AND inbox.user_id IS NOT NULL AND inbox.payload ? 'usage'
+      ON CONFLICT DO NOTHING
+    `, [sessionId]);
+    if (options.writeUsageFacts) await client.query(
+      `UPDATE token_usage_facts
+       SET session_attribution_revoked = true
+       WHERE session_id = $1 AND session_attribution_revoked = false`,
+      [sessionId],
+    );
     // Compensate: roll this session's TODAY usage into token_daily_stats before
     // deleting events. Past days are already captured in stats by cron/backfill
     // (independent of events, so deleting them is safe); only today (not yet rolled
     // up) needs compensation — otherwise deleting the session shrinks today's total.
-    await client.query(`
+    if (!options.usageFactsAuthoritative) await client.query(`
       INSERT INTO token_daily_stats (user_id, daemon_id, date, model, input, output, cache_read, cache_create, requests)
-      SELECT s.user_id, s.daemon_id, CURRENT_DATE,
+       SELECT s.user_id, s.daemon_id, (NOW() AT TIME ZONE 'UTC')::date,
              COALESCE(s.model, 'unknown'),
              SUM(COALESCE((e.payload->'usage'->>'input_tokens')::bigint, 0)),
              SUM(COALESCE((e.payload->'usage'->>'output_tokens')::bigint, 0)),
@@ -2000,7 +2343,7 @@ export async function deleteSession(pool: pg.Pool, sessionId: string): Promise<v
              COUNT(*)
       FROM events e JOIN sessions s ON s.session_id = e.session_id
       WHERE e.session_id = $1 AND e.event_type = 'agent_text' AND e.payload ? 'usage'
-        AND date_trunc('day', e.created_at) = CURRENT_DATE
+         AND (e.created_at AT TIME ZONE 'UTC')::date = (NOW() AT TIME ZONE 'UTC')::date
         AND s.user_id IS NOT NULL AND s.daemon_id IS NOT NULL
       GROUP BY s.user_id, s.daemon_id, COALESCE(s.model, 'unknown')
       ON CONFLICT (user_id, daemon_id, date, model) DO UPDATE SET
@@ -2015,8 +2358,9 @@ export async function deleteSession(pool: pg.Pool, sessionId: string): Promise<v
        WHERE inbox_id IN (SELECT inbox_id FROM event_inbox WHERE session_id = $1)`,
       [sessionId],
     );
-    await client.query(`DELETE FROM event_inbox WHERE session_id = $1`, [sessionId]);
+    await client.query(`DELETE FROM event_inbox WHERE session_id = $1 AND status <> 3`, [sessionId]);
     await client.query(`DELETE FROM events WHERE session_id = $1`, [sessionId]);
+    await client.query(`DELETE FROM token_session_daily_stats WHERE session_id = $1`, [sessionId]);
     await client.query(`DELETE FROM sessions WHERE session_id = $1`, [sessionId]);
     await client.query(
       `INSERT INTO deleted_sessions (session_id) VALUES ($1) ON CONFLICT (session_id) DO UPDATE SET deleted_at = NOW()`,
@@ -2463,6 +2807,16 @@ export interface TokenUsageDelta {
   output_tokens?: number;
   cache_read_tokens?: number;
   cache_create_tokens?: number;
+  reasoning_tokens?: number;
+  total_tokens?: number;
+}
+
+export interface TokenUsageFactWriteOptions {
+  writeFact?: boolean;
+  /** Server-controlled durable-ingress receipt time; never daemon wall clock. */
+  receivedAt?: Date | null;
+  /** Durable inbox identity when available; legacy inline events use event id. */
+  factKey?: string;
 }
 
 /** Accumulate per-turn token usage into sessions (total + per-type columns).
@@ -2624,6 +2978,42 @@ export async function cleanStaleEvents(pool: pg.Pool, days = 90): Promise<number
 // Query-time merge: past days from token_daily_stats + today from events
 // (deleted sessions still contribute via same-day compensation rows in stats).
 
+/**
+ * Reads one live accounting date from the immutable fact ledger. The V2
+ * dashboard uses its combined one-query path; this focused helper remains for
+ * diagnostics and reconciliation.
+ */
+export async function getTokenUsageFactDailySeries(
+  pool: pg.Pool,
+  userId: number,
+  date: string,
+  daemonId: string | null = null,
+): Promise<any[]> {
+  const useDaemon = !!daemonId && daemonId !== 'all';
+  const params: any[] = [userId, date];
+  if (useDaemon) params.push(daemonId);
+  const daemonPredicate = useDaemon ? 'AND daemon_id = $3' : '';
+  const result = await pool.query(
+    `SELECT usage_date AS date,
+            SUM(input) AS input,
+            SUM(output) AS output,
+            SUM(cache_read) AS cache_read,
+            SUM(requests) AS requests
+     FROM token_usage_facts
+     WHERE user_id = $1 AND usage_date = $2::date ${daemonPredicate}
+     GROUP BY usage_date
+     ORDER BY usage_date`,
+    params,
+  );
+  return result.rows.map((r: any) => ({
+    date: r.date,
+    input: Number(r.input) || 0,
+    output: Number(r.output) || 0,
+    cache_read: Number(r.cache_read) || 0,
+    requests: Number(r.requests) || 0,
+  }));
+}
+
 export async function getTokenDailySeries(pool: pg.Pool, userId: number, daemonId: string | null, days = 30): Promise<any[]> {
   const useD = !!daemonId && daemonId !== 'all';
   const params: any[] = [userId];
@@ -2781,7 +3171,17 @@ function normalizeAgentType(raw: string | null | undefined): string {
  *  Also returns per-agent aggregated usage, so clients can show agent-scoped
  *  numbers without recomputing from session lists.
  */
-export async function getTokensByDaemon(pool: pg.Pool, userId: number, daemonId: string): Promise<{
+export interface TokenDaemonAccountingSnapshot {
+  summary: { total: number; today: number; thisMonth: number }
+  byAgentToday: Array<{ agent_type: string; today: number }>
+}
+
+export async function getTokensByDaemon(
+  pool: pg.Pool,
+  userId: number,
+  daemonId: string,
+  accounting?: TokenDaemonAccountingSnapshot,
+): Promise<{
   total: number; today: number; thisMonth: number;
   sessions: Array<{ session_id: string; title: string; total_tokens: number; tok_input: number; tok_output: number; tok_cache_read: number; tok_cache_create: number; model: string; agent_type: string; status: string; created_at: Date; children?: any[] }>;
   byAgent?: Array<{ agent_type: string; total: number; today: number; cache_read: number; cache_create: number }>;
@@ -2789,7 +3189,13 @@ export async function getTokensByDaemon(pool: pg.Pool, userId: number, daemonId:
   const own = await pool.query(`SELECT 1 FROM daemons WHERE daemon_id = $1 AND user_id = $2`, [daemonId, userId]);
   if ((own.rowCount ?? 0) === 0) return null;
 
-  const totals = await pool.query(`
+  const totals = accounting
+    ? { rows: [{
+      total: accounting.summary.total,
+      today: accounting.summary.today,
+      this_month: accounting.summary.thisMonth,
+    }] }
+    : await pool.query(`
     WITH turn_tokens AS (
       SELECT e.created_at,
              (COALESCE((e.payload->'usage'->>'input_tokens')::bigint, 0) +
@@ -2832,7 +3238,9 @@ export async function getTokensByDaemon(pool: pg.Pool, userId: number, daemonId:
     GROUP BY COALESCE(agent_type, '')
   `, [userId, daemonId]);
 
-  const byAgentToday = await pool.query(`
+  const byAgentToday = accounting
+    ? { rows: accounting.byAgentToday }
+    : await pool.query(`
     SELECT COALESCE(s.agent_type, '') AS agent_type,
            COALESCE(SUM(
              COALESCE((e.payload->'usage'->>'input_tokens')::bigint, 0) +

@@ -29,13 +29,35 @@ import { resolveBuildInfo, resolveCorsOrigin, resolvePublicIssuer } from './runt
 import { ConnectionAdmission } from './connection-admission.js';
 import { RegistrationDeadline } from './registration-deadline.js';
 import { resolveAdmissionAddress } from './remote-address.js';
-import { registry as relayMetricsRegistry } from './metrics.js';
+import {
+  registry as relayMetricsRegistry,
+  tokenUsageDayClosures,
+  tokenUsageShadowComparisons,
+} from './metrics.js';
 import {
   RealtimeOutboxConsumer,
   RealtimeOutboxRepository,
 } from './materialization/realtime-outbox.js';
 import { assertDurableIngressSchema } from './event-worker-main.js';
 import { registerSessionShareRoutes } from './session-share-routes.js';
+import {
+  assertTokenUsageFeatureDependencies,
+  tokenUsageFeatures,
+  useFactAuthoritativeSessionDeletion,
+} from './config/token-usage.js';
+import {
+  getSessionTokenTrendV2,
+  getTodayTokenUsageByAgentV2,
+  getTokenDashboardV2,
+  getUserDailyTokensV2,
+  getUserWeeklyTokensV2,
+} from './token-usage/dashboard-v2.js';
+import { readTokenDashboard } from './token-usage/read-service.js';
+import {
+  assertTokenUsageWriteContinuity,
+  initializeTokenUsageAccounting,
+  runTokenUsageCloseSweep,
+} from './token-usage/lifecycle.js';
 
 const API_KEY = process.env.POCKETCTL_API_KEY || '';
 const DB_URL = process.env.DATABASE_URL || 'postgresql://localhost:5432/pocketctl';
@@ -573,6 +595,8 @@ async function main() {
   )
   const buildInfo = resolveBuildInfo(process.env)
   const runtimeConfig = resolveRelayRuntimeConfig(process.env)
+  const tokenFeatures = tokenUsageFeatures(process.env)
+  assertTokenUsageFeatureDependencies(tokenFeatures, runtimeConfig.durableIngress.mode)
   const pools = createRelayPools(parseDBUrl(DB_URL))
   const pool = pools.query
   const welcomeEmailWorker = createWelcomeEmailWorker({ pool: pools.worker })
@@ -588,6 +612,8 @@ async function main() {
       canaryDaemonIds: runtimeConfig.durableIngress.daemonIds,
       eventWindow: runtimeConfig.eventWindow,
     },
+    tokenUsageFactsAuthoritative: useFactAuthoritativeSessionDeletion(tokenFeatures),
+    writeTokenUsageFacts: tokenFeatures.writeFacts,
   });
   const realtimeOutboxConsumer = new RealtimeOutboxConsumer({
     repository: new RealtimeOutboxRepository(pools.query),
@@ -601,22 +627,39 @@ async function main() {
   initDB(pools.query)
     .then(async () => {
       await assertRelayMaterializationReady(runtimeConfig.materializationMode, pools.query)
+      await assertTokenUsageWriteContinuity(pool, tokenFeatures)
       const t = (typeof performance !== 'undefined' ? performance.now() : Date.now());
       console.log(`[startup] initDB done in ${(t - tPool).toFixed(0)}ms`);
       console.log('Database initialized');
-      if (!shuttingDown) {
-        await startRelayBackgroundWorkers({ welcome: welcomeEmailWorker, realtimeOutboxConsumer });
-        databaseReady = true
-      }
       // Backfill sessions token columns from agent_text usage events
       try {
         const backfilled = await backfillSessionTokens(pool);
         if (backfilled > 0) console.log(`[tokens] backfilled ${backfilled} sessions with token usage`);
         const modelBf = await backfillSessionModel(pool);
         if (modelBf > 0) console.log(`[tokens] backfilled ${modelBf} sessions with model`);
-        const statsBf = await backfillTokenDailyStats(pool);
-        if (statsBf > 0) console.log(`[tokens] backfilled ${statsBf} token_daily_stats rows`);
+        if (!tokenFeatures.writeFacts) {
+          const statsBf = await backfillTokenDailyStats(pool);
+          if (statsBf > 0) console.log(`[tokens] backfilled ${statsBf} token_daily_stats rows`);
+        }
       } catch (e) { console.error('[tokens] backfill failed:', e); }
+      if (tokenFeatures.writeFacts) {
+        const initialized = await initializeTokenUsageAccounting(pool, tokenFeatures)
+        if (initialized) {
+          console.log(
+            `[tokens:v2] baseline adopted_days=${initialized.migration.adoptedHistoricalDays}`
+            + ` event_facts=${initialized.migration.backfilledEventFacts}`
+            + ` synthetic_facts=${initialized.migration.syntheticCurrentFacts}`
+            + ` session_rollups=${initialized.migration.backfilledSessionRollups}`,
+          )
+          for (const result of initialized.closures) {
+            tokenUsageDayClosures.inc({ result: result.status })
+          }
+        }
+      }
+      if (!shuttingDown) {
+        await startRelayBackgroundWorkers({ welcome: welcomeEmailWorker, realtimeOutboxConsumer });
+      }
+      if (!shuttingDown) databaseReady = true
     })
     .catch((e) => { console.error('[startup] initDB failed:', e); process.exit(1) })
   const tInit = tPool // listen 不再等 initDB
@@ -1019,7 +1062,9 @@ async function main() {
     if (!authHeader?.startsWith('Bearer ')) { reply.code(401); return { error: 'authorization required' }; }
     const payload = await verifyAccessTokenWithRevocation(authHeader.slice(7), pool);
     if (!payload) { reply.code(401); return { error: 'invalid token' }; }
-    return await getTokenSummary(pool, payload.userId);
+    if (!databaseReady) { reply.code(503); return { error: 'token accounting initializing' }; }
+    if (!tokenFeatures.dashboardV2) return await getTokenSummary(pool, payload.userId);
+    return (await getTokenDashboardV2(pool, payload.userId, null, 1)).summary;
   });
 
   // Daemon-level token usage: total / today / thisMonth + per-session breakdown
@@ -1028,40 +1073,77 @@ async function main() {
     if (!authHeader?.startsWith('Bearer ')) { reply.code(401); return { error: 'authorization required' }; }
     const payload = await verifyAccessTokenWithRevocation(authHeader.slice(7), pool);
     if (!payload) { reply.code(401); return { error: 'invalid token' }; }
+    if (!databaseReady) { reply.code(503); return { error: 'token accounting initializing' }; }
     const { daemonId } = req.params as any;
-    const data = await getTokensByDaemon(pool, payload.userId, daemonId);
+    let data
+    if (tokenFeatures.dashboardV2) {
+      const [dashboard, byAgentToday] = await Promise.all([
+        getTokenDashboardV2(pool, payload.userId, daemonId, 1),
+        getTodayTokenUsageByAgentV2(pool, payload.userId, daemonId),
+      ])
+      data = await getTokensByDaemon(pool, payload.userId, daemonId, {
+        summary: {
+          total: dashboard.summary.total,
+          today: dashboard.summary.today,
+          thisMonth: dashboard.summary.thisMonth,
+        },
+        byAgentToday,
+      })
+    } else {
+      data = await getTokensByDaemon(pool, payload.userId, daemonId)
+    }
     if (!data) { reply.code(404); return { error: 'daemon not found or not owned' }; }
     return data;
   });
 
-  // Token dashboard: aggregated daily series + model/host breakdowns (query-time merge
-  // of token_daily_stats history + today's events). Supports host filtering.
+  // Token dashboard: legacy aggregation until cutover; V2 merges only sealed
+  // historical rollups with current-UTC-day immutable facts. Supports host filtering.
   app.get('/api/tokens/dashboard', async (req, reply) => {
     const authHeader = req.headers.authorization;
     if (!authHeader?.startsWith('Bearer ')) { reply.code(401); return { error: 'authorization required' }; }
     const payload = await verifyAccessTokenWithRevocation(authHeader.slice(7), pool);
     if (!payload) { reply.code(401); return { error: 'invalid token' }; }
+    if (!databaseReady) { reply.code(503); return { error: 'token accounting initializing' }; }
     const daemon = ((req.query as any).daemon as string) || 'all';
     const days = Math.min(Math.max(parseInt((req.query as any).days as string) || 30, 1), 365);
-    const [summary, dailySeries, byModel, byDaemon] = await Promise.all([
-      getTokenSummary(pool, payload.userId, daemon),
-      getTokenDailySeries(pool, payload.userId, daemon, days),
-      getTokenByModel(pool, payload.userId, daemon),
-      getTokenByDaemon(pool, payload.userId),
-    ]);
-    return { summary, dailySeries, byModel, byDaemon };
+    return await readTokenDashboard(
+      tokenFeatures,
+      async () => {
+        const [summary, dailySeries, byModel, byDaemon] = await Promise.all([
+          getTokenSummary(pool, payload.userId, daemon),
+          getTokenDailySeries(pool, payload.userId, daemon, days),
+          getTokenByModel(pool, payload.userId, daemon),
+          getTokenByDaemon(pool, payload.userId),
+        ])
+        return { summary, dailySeries, byModel, byDaemon }
+      },
+      () => getTokenDashboardV2(pool, payload.userId, daemon, days),
+      (observation) => {
+        tokenUsageShadowComparisons.inc({ result: observation.status })
+        if (observation.status === 'mismatch') {
+          console.warn(
+            `[tokens:v2] shadow mismatch values=${observation.differingValues}`
+            + ` max_delta=${observation.maxAbsoluteDelta}`,
+          )
+        }
+      },
+    );
   });
 
-  // Per-session daily token trend (from events, within the 90-day retention).
+  // Per-session daily token trend: legacy reads retained events; V2 reads only
+  // sealed historical session rollups plus current-UTC-day immutable facts.
   app.get('/api/tokens/session/:sessionId/trend', async (req, reply) => {
     const authHeader = req.headers.authorization;
     if (!authHeader?.startsWith('Bearer ')) { reply.code(401); return { error: 'authorization required' }; }
     const payload = await verifyAccessTokenWithRevocation(authHeader.slice(7), pool);
     if (!payload) { reply.code(401); return { error: 'invalid token' }; }
+    if (!databaseReady) { reply.code(503); return { error: 'token accounting initializing' }; }
     const { sessionId } = req.params as any;
     const owned = await isSessionOwnedByUser(pool, payload.userId, sessionId);
     if (!owned) { reply.code(404); return { error: 'session not found or not owned' }; }
-    const trend = await getSessionTokenTrend(pool, sessionId, 90);
+    const trend = tokenFeatures.dashboardV2
+      ? await getSessionTokenTrendV2(pool, payload.userId, sessionId, 90)
+      : await getSessionTokenTrend(pool, sessionId, 90);
     // Archived: the session predates the 90-day retention (events purged) → no trend.
     return { trend, archived: trend.length === 0 };
   });
@@ -1718,12 +1800,30 @@ async function main() {
     } catch (err) { console.error('[cleanup] cleanup error:', (err as Error).message); }
   }, 6 * 60 * 60 * 1000);
 
-  // Token daily stats rollup (yesterday) + old events retention. Idempotent
-  // (aggregateDayIntoStats uses ON CONFLICT DO NOTHING), so hourly is safe.
+  if (tokenFeatures.writeFacts) {
+    // Every five minutes, retry all eligible UTC dates. The closer itself
+    // enforces the 00:05 grace window, inbox terminality and reconciliation.
+    setInterval(async () => {
+      try {
+        await runTokenUsageCloseSweep(
+          pool,
+          new Date(),
+          (status) => tokenUsageDayClosures.inc({ result: status }),
+        )
+      } catch (err) {
+        console.error('[tokens:v2] close sweep error:', (err as Error).message)
+      }
+    }, 5 * 60 * 1000)
+  }
+
+  // Old events retention stays hourly. Legacy rollup remains active only while
+  // immutable fact writing is disabled.
   setInterval(async () => {
     try {
-      const yesterday = new Date(Date.now() - 24 * 60 * 60 * 1000);
-      await aggregateDayIntoStats(pool, yesterday);
+      if (!tokenFeatures.writeFacts) {
+        const yesterday = new Date(Date.now() - 24 * 60 * 60 * 1000);
+        await aggregateDayIntoStats(pool, yesterday);
+      }
       const purged = await cleanStaleEvents(pool);
       if (purged > 0) console.log(`[tokens] purged ${purged} events older than 90 days`);
     } catch (err) { console.error('[tokens] rollup error:', (err as Error).message); }
@@ -1739,7 +1839,7 @@ async function main() {
   // Both are Pro-gated (listProUserIds returns only plan!=free OR whitelist).
   setInterval(async () => {
     try {
-      await maybeSendReportPushes(pool);
+      await maybeSendReportPushes(pool, tokenFeatures.dashboardV2);
     } catch (err) { console.error('[report] push error:', (err as Error).message); }
   }, 60 * 60 * 1000);
 }
@@ -1749,7 +1849,7 @@ async function main() {
  * and/or weekly token reports to every Pro user. The report_sent table dedups:
  * once a (user, type, period) row exists, subsequent hourly runs skip it.
  */
-async function maybeSendReportPushes(pool: any): Promise<void> {
+async function maybeSendReportPushes(pool: any, useTokenAccountingV2 = false): Promise<void> {
   const now = new Date();
   const utcHour = now.getUTCHours();
   const utcDay = now.getUTCDay(); // 0=Sunday
@@ -1762,10 +1862,12 @@ async function maybeSendReportPushes(pool: any): Promise<void> {
     const dateLabel = zhDateLabel(yesterday);
     const proUsers = await listProUserIds(pool);
     for (const userId of proUsers) {
+      const usage = useTokenAccountingV2
+        ? await getUserDailyTokensV2(pool, userId, periodKey)
+        : await getUserDailyTokens(pool, userId, periodKey);
+      if (!usage) continue; // no usage that day — don't spam idle users
       const sent = await markReportSent(pool, userId, 'daily', periodKey);
       if (!sent) continue; // already pushed this period
-      const usage = await getUserDailyTokens(pool, userId, periodKey);
-      if (!usage) continue; // no usage that day — don't spam idle users
       await notifyUser(pool, userId, dailyReportPush(dateLabel, usage.total, usage.requests)).catch(() => {});
       console.log(`[report] daily pushed to user ${userId}: ${usage.total} tokens, ${usage.requests} reqs`);
     }
@@ -1784,10 +1886,12 @@ async function maybeSendReportPushes(pool: any): Promise<void> {
     const weekLabel = zhWeekLabel(lastSunday);
     const proUsers = await listProUserIds(pool);
     for (const userId of proUsers) {
+      const usage = useTokenAccountingV2
+        ? await getUserWeeklyTokensV2(pool, userId, periodKey)
+        : await getUserWeeklyTokens(pool, userId, periodKey);
+      if (!usage) continue;
       const sent = await markReportSent(pool, userId, 'weekly', periodKey);
       if (!sent) continue;
-      const usage = await getUserWeeklyTokens(pool, userId, periodKey);
-      if (!usage) continue;
       await notifyUser(pool, userId, weeklyReportPush(weekLabel, usage.total, usage.requests)).catch(() => {});
       console.log(`[report] weekly pushed to user ${userId}: ${usage.total} tokens, ${usage.requests} reqs`);
     }

@@ -108,6 +108,12 @@ func runAgentCommand(args []string, stdout, stderr io.Writer, manager any) error
 		return nil
 	}
 	agent := args[0]
+	// ZCode is a read-only observer, not a managed (launcher-shim) agent. It has
+	// its own `sync` subcommand and must NOT be routed through the opencode/codex
+	// launcher manager. Dispatch it before the managed-agent gate below.
+	if agent == zcodeAgentType {
+		return runZcodeSyncCommand(args[1:], stdout, stderr)
+	}
 	if agent != agentcontrol.AgentOpenCode && agent != agentcontrol.AgentCodex {
 		return fmt.Errorf("%s", i18n.T("agent.unknown", args[0]))
 	}

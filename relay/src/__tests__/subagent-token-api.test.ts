@@ -85,4 +85,31 @@ describe('db subagent token API (P1a)', () => {
     })
     expect(pool.query).toHaveBeenCalledTimes(6)
   })
+
+  test('getTokensByDaemon: accepts fact-authoritative accounting without scanning events', async () => {
+    const statements: string[] = []
+    const pool: any = {
+      query: vi.fn(async (sql: string) => {
+        statements.push(sql)
+        if (/SELECT 1 FROM daemons/i.test(sql)) return { rowCount: 1, rows: [{ '?column?': 1 }] }
+        if (/SELECT session_id, COALESCE\(title/i.test(sql)) return { rows: [] }
+        if (/GROUP BY COALESCE\(agent_type/i.test(sql)) return { rows: [{ agent_type: 'claude', total_tokens: '20', tok_cache_read: '3', tok_cache_create: '2' }] }
+        return { rows: [] }
+      }),
+    }
+
+    const result = await getTokensByDaemon(pool, 42, 'd1', {
+      summary: { total: 100, today: 15, thisMonth: 40 },
+      byAgentToday: [{ agent_type: 'claude-code', today: 15 }],
+    })
+
+    expect(result).toMatchObject({
+      total: 100,
+      today: 15,
+      thisMonth: 40,
+      byAgent: [{ agent_type: 'claude-code', total: 20, today: 15, cache_read: 3, cache_create: 2 }],
+    })
+    expect(statements.join('\n')).not.toContain('FROM events')
+    expect(pool.query).toHaveBeenCalledTimes(3)
+  })
 })

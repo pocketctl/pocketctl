@@ -54,6 +54,7 @@
 <script setup lang="ts">
 import { computed } from 'vue'
 import { useLocale } from '../../composables/useLocale'
+import { agentDisplayName, agentIconClass } from '../../utils/agentDisplay'
 
 const props = defineProps<{
   daemon: any
@@ -69,18 +70,13 @@ defineEmits<{
 }>()
 
 const { t } = useLocale()
-const names: Record<string, string> = {
-  'claude-code': 'Claude Code',
-  codex: 'Codex',
-  opencode: 'OpenCode',
-}
 const agents = computed(() => (Array.isArray(props.daemon.agents) ? props.daemon.agents : []).map((agent: any) => {
   const raw = typeof agent === 'string' ? agent : agent.type || agent.name || 'agent'
   return {
     raw,
-    label: names[raw] || raw,
+    label: agentDisplayName(raw),
     version: typeof agent === 'object' ? agent.version || '' : '',
-    kind: raw === 'codex' ? 'codex' : raw === 'opencode' ? 'opencode' : 'claude',
+    kind: agentIconClass(raw),
   }
 }))
 </script>
@@ -118,6 +114,7 @@ const agents = computed(() => (Array.isArray(props.daemon.agents) ? props.daemon
   .mobile-agent-tag { display: inline-flex; align-items: center; gap: 4px; padding: 4px 8px; border-radius: 999px; color: #d97757; background: rgba(217,119,87,.12); font-size: 11px; font-weight: 600; }
   .mobile-agent-tag.codex { color: #3fb950; background: rgba(63,185,80,.12); }
   .mobile-agent-tag.opencode { color: #a78bfa; background: rgba(167,139,250,.12); }
+  .mobile-agent-tag.zcode { color: #14b8a6; background: rgba(20,184,166,.12); }
   .mobile-agent-tag i { width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
   .mobile-agent-tag small { opacity: .75; font-size: 9px; }
   .mobile-host-actions { border-top: 1px solid var(--border); }

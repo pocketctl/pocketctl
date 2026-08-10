@@ -44,8 +44,11 @@ pocketctl 是一个远程 AI 编码代理控制系统。它让你在远程机器
 | **Claude Code** (`claude`) | 子进程 | tail JSONL | `~/.claude/sessions/` sidecar | 终端会话使用 idle/exited `--resume` 接力；Pocketctl 创建会话支持跨端审批 |
 | **Codex** (`codex`) | 子进程 | tail JSONL | `~/.codex/sessions/` rollout | 审批走 `--ask-for-approval` |
 | **opencode** (`opencode`) | **服务** | serve API 轮询 | serve `GET /api/session` | DB 后端；详见下 |
+| **ZCode** (`zcode`) | 只读 observer | 本地 SQLite 增量同步 | ZCode SQLite store | 仅在 Web/iOS 查看；不支持远程输入、审批、恢复或控制 |
 
 三种 agent 共用“零配置发现 + 实时历史同步”，但控制能力遵循各自真实 runtime。Claude 终端会话在 idle 或退出后通过 `--resume` 接力，并不是共享运行时；Pocketctl 创建的 Claude PTY 可以在 Web/iOS 审批，用户独立启动的终端 Claude 仍使用 Claude 原生终端审批。详见 [Claude 跨端控制](docs/claude-cross-device-control.md)。
+
+**ZCode 的特殊性**：它以只读 observer 方式从本地 SQLite 存储增量发现和同步会话内容，启用后可在 Web/iOS 查看。ZCode observer 不支持远程发送、审批、恢复或控制；运行 `pocketctl agent zcode sync enable` 后需要重启 daemon 生效。
 
 权限配置按 Agent 原生能力提供：Claude Code 支持六种启动权限模式，Codex 支持 approval policy、sandbox mode 与安全 preset；Web/iOS 会等待 daemon 确认后再更新会话状态，Codex resume 会复用已确认的配置。
 

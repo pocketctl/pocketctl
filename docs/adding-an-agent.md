@@ -93,7 +93,53 @@ Register(Provider{
 `ListModelsForAgent` 加分支（如读配置文件）；服务型经 server API 拉取（参考 opencode 的
 `ListModels` → `GET /api/model`）。web 新建会话对话框会自动用它填充下拉。
 
-## 5. 自测清单
+## 5. 只读 observer 型 agent（zcode 路线）
+
+第三类后端是 `BackendObserver`：daemon **不启动、不驱动**该 agent 的任何进程，只从其本地
+只读存储（如 SQLite）读取可见历史与增量，经现有 DaemonEvent/spool/Relay 上传，Web/iOS 只读
+查看。当前实现是 ZCode（见 `docs/zcode-session-observer.md` 与 ADR-001）。
+
+### 与前两类的关键区别
+
+| 维度 | 子进程型 / 服务型 | 只读 observer 型 |
+|---|---|---|
+| 后端 | `BackendSubprocess` / `BackendServer` | `BackendObserver` |
+| 发现 | `DiscoveryCLI`（npm/CLI 版本探测） | `DiscoveryStorage`（只读存储 probe） |
+| 进程 | daemon 启动/接管进程 | daemon 不拥有任何进程 |
+| 可控 | 可发送/停止/审批/恢复 | **绝不可控**：`CreateSession` fail-closed 返回 `ErrObserverReadOnly` |
+| SessionManager | 注册进 sessions / ActiveRootSessionIDs | **绝不**注册；独立 catalog/cursor |
+| differ | 各 agent 自己的 mapper | **独立** differ，不复用 OpenCode（ADR-001） |
+
+### 接入步骤（以 zcode 为模板）
+
+1. **Provider 注册**：在 `providers.go` 加 `Backend: BackendObserver`、`Discovery:
+   DiscoveryStorage`、`CLIName=""`、`Package=""`、`Manageable` 隐含 false；工厂指向
+   `observer.go` 里的 fail-closed sentinel（`observerStorage`/`observerLauncher`/…）。
+2. **阻断创建路径**：`SessionManager.CreateSession` 在 `resolveAgentCLI` 之前对
+   `BackendObserver` 返回 `ErrObserverReadOnly`（见 `internal/session/lifecycle.go`）。
+3. **独立 package**：在 `internal/<agent>` 实现 Store（只读打开 + schema probe + 分页）、
+   Mapper/Sync（独立 event-id 命名空间）、CursorStore（无内容 checkpoint）、Observer（低优先级
+   门 + ACK + resync）。**禁止**导入或修改 OpenCode differ。
+4. **main 接线**：仅当配置 `enabled=true` 才构造 observer；注入 `tryEmitLowPriority`（≤
+   outputCh cap/4 才非阻塞 send）；组合 `OnEventsAcknowledged`（既有 cursor + observer
+   cursor）；`OnReconnected` 调 `observer.QueueResync`；shutdown 调 `observer.Stop`。**不要**
+   把 observer session 加入 SessionManager / state persistence / ProcessMonitor。
+5. **Relay source 特例**：materializer 仅对 `agent=<x> && source=observer` 接受 observer
+   source，其它一律 terminal。
+6. **Web/iOS 只读门**：对 `<x>` 显式 `canWrite=false`（在所有其它判断之前），隐藏 composer /
+   stop / approval / resume；不加入新建会话选项。
+
+### 约束（务必遵守）
+
+- source DB **只读**（`mode=ro` + `query_only=ON`）；不得 migration/CREATE/INSERT/UPDATE/
+  DELETE/VACUUM/checkpoint；不得复制 DB 或读 WAL 文件内容。
+- 严格白名单（表/列/part 类型）；synthetic/system/hidden/unknown-role 整条丢弃；file 只留
+  basename + 限长 mime。
+- 日志**无内容**：只允许 session id 短 hash、表名、reason code、计数、耗时。
+- native session id 不离开 observer 内存；wire id 哈希化；cursor 只存 hash。
+- pending 必须**先于** enqueue 持久化；**仅** Relay ACK 后才推进 source cursor。
+
+## 6. 自测清单
 
 - `go build ./...` + `go vet ./...`
 - 单测：事件映射用真实样本驱动（参考 `opencode_test.go` / `opencode_sync_test.go`）

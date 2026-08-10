@@ -26,6 +26,7 @@ Commands:
   login          Login via browser (OAuth 2.0 Device Flow) or email code
   agent opencode enable|disable|status   Manage transparent OpenCode terminal control
   agent codex enable|disable|status      Manage official Codex TUI terminal control
+  agent zcode sync enable|disable|status Sync ZCode sessions read-only (view in Web/iOS)
   daemon start   Start the daemon (connects to relay)
   daemon stop    Stop the running daemon
   daemon status  Show daemon status
@@ -76,6 +77,14 @@ Codex terminal control (requires Codex 0.144.1+):
   pocketctl agent codex status        Show desired/effective state and capability diagnostics
   codex --native                      Bypass Pocketctl for one invocation
 
+ZCode session content sync (read-only):
+  pocketctl agent zcode sync enable   Sync recent ZCode sessions to Web/iOS (read-only; restart daemon to take effect)
+  pocketctl agent zcode sync enable --history all            Backfill all history
+  pocketctl agent zcode sync enable --lookback-days 30       Custom lookback window (default 7, range 1..3650)
+  pocketctl agent zcode sync disable  Stop syncing (uploaded sessions are NOT deleted; delete them in Web/iOS)
+  pocketctl agent zcode sync status   Show sync state (never prints session content)
+  Note: ZCode sessions are view-only. No remote send/approve/resume/control.
+
 Environment:
   POCKETCTL_RELAY_URL   Relay WebSocket URL (e.g. ws://localhost:8080/ws, wss://relay.example.com/ws)
   POCKETCTL_TOKEN       JWT token for authentication`
@@ -89,6 +98,7 @@ const helpZh = `pocketctl - 远程 AI 编程代理控制
   login          通过浏览器（OAuth 2.0 Device Flow）或邮箱验证码登录
   agent opencode enable|disable|status   管理透明 OpenCode 终端控制
   agent codex enable|disable|status      管理 Codex 官方 TUI 终端控制
+  agent zcode sync enable|disable|status 只读同步 ZCode 会话（在 Web/iOS 查看）
   daemon start   启动 daemon（连接 relay）
   daemon stop    停止运行中的 daemon
   daemon status  查看 daemon 状态
@@ -139,6 +149,14 @@ Codex 终端控制（要求 Codex 0.144.1+）:
   pocketctl agent codex status        查看期望/实际状态与能力诊断
   codex --native                      单次绕过 Pocketctl
 
+ZCode 会话内容同步（只读）:
+  pocketctl agent zcode sync enable   只读同步最近 ZCode 会话到 Web/iOS（重启 daemon 后生效）
+  pocketctl agent zcode sync enable --history all            回填全部历史
+  pocketctl agent zcode sync enable --lookback-days 30       自定义回溯窗口（默认 7 天，范围 1..3650）
+  pocketctl agent zcode sync disable  停止同步（已上传会话不会被删除，请在 Web/iOS 单独删除）
+  pocketctl agent zcode sync status   查看同步状态（不显示会话内容）
+  说明: ZCode 会话为只读查看，不支持远程发送/审批/恢复/控制。
+
 环境变量:
   POCKETCTL_RELAY_URL   Relay WebSocket URL（如 ws://localhost:8080/ws, wss://relay.example.com/ws）
   POCKETCTL_TOKEN       JWT 认证令牌`
@@ -157,8 +175,8 @@ var messages = map[string]msg{
 
 	// ---- agent.* ---------------------------------------------------------
 	"agent.help": {
-		"Agent control:\n  pocketctl agent opencode enable\n  pocketctl agent opencode disable\n  pocketctl agent opencode status\n  pocketctl agent opencode help\n  pocketctl agent codex enable\n  pocketctl agent codex disable\n  pocketctl agent codex status\n  pocketctl agent codex help\n\nEnable does not require a daemon restart. Reload your login shell if PATH is not active. Use `opencode --native` or `codex --native` to bypass Pocketctl once.",
-		"Agent 控制:\n  pocketctl agent opencode enable\n  pocketctl agent opencode disable\n  pocketctl agent opencode status\n  pocketctl agent opencode help\n  pocketctl agent codex enable\n  pocketctl agent codex disable\n  pocketctl agent codex status\n  pocketctl agent codex help\n\n启用后无需重启 daemon；若 PATH 尚未生效，请重新载入登录 shell。可用 `opencode --native` 或 `codex --native` 单次绕过 Pocketctl。",
+		"Agent control:\n  pocketctl agent opencode enable\n  pocketctl agent opencode disable\n  pocketctl agent opencode status\n  pocketctl agent opencode help\n  pocketctl agent codex enable\n  pocketctl agent codex disable\n  pocketctl agent codex status\n  pocketctl agent codex help\n  pocketctl agent zcode sync enable [--history recent|all] [--lookback-days N]\n  pocketctl agent zcode sync disable\n  pocketctl agent zcode sync status\n  pocketctl agent zcode sync help\n\nManaged agents (opencode/codex): enable does not require a daemon restart. Reload your login shell if PATH is not active. Use `opencode --native` or `codex --native` to bypass Pocketctl once.\nZCode sync is read-only: it surfaces local ZCode session content in Web/iOS. Enable requires a daemon restart to take effect. No remote send/approve/resume/control.",
+		"Agent 控制:\n  pocketctl agent opencode enable\n  pocketctl agent opencode disable\n  pocketctl agent opencode status\n  pocketctl agent opencode help\n  pocketctl agent codex enable\n  pocketctl agent codex disable\n  pocketctl agent codex status\n  pocketctl agent codex help\n  pocketctl agent zcode sync enable [--history recent|all] [--lookback-days N]\n  pocketctl agent zcode sync disable\n  pocketctl agent zcode sync status\n  pocketctl agent zcode sync help\n\n托管型 Agent（opencode/codex）：启用后无需重启 daemon；若 PATH 尚未生效，请重新载入登录 shell。可用 `opencode --native` 或 `codex --native` 单次绕过 Pocketctl。\nZCode 同步为只读：将本地 ZCode 会话内容展示到 Web/iOS。启用后需重启 daemon 生效。不支持远程发送/审批/恢复/控制。",
 	},
 	"agent.opencode_help": {
 		"usage: pocketctl agent opencode <enable|disable|status|help>",
@@ -191,6 +209,38 @@ var messages = map[string]msg{
 	"agent.status_capability": {"Capability: %s", "能力: %s"},
 	"agent.yes":               {"yes", "是"},
 	"agent.no":                {"no", "否"},
+
+	// ---- agent.zcode.* (read-only session content sync) -----------------
+	"agent.zcode_help": {
+		"usage: pocketctl agent zcode sync <enable|disable|status|help>",
+		"用法: pocketctl agent zcode sync <enable|disable|status|help>",
+	},
+	"agent.zcode_sync_help": {
+		"ZCode session content sync (read-only):\n  pocketctl agent zcode sync enable [--history recent|all] [--lookback-days N] [--storage-dir PATH]\n  pocketctl agent zcode sync disable\n  pocketctl agent zcode sync status\n\nZCode sessions are read from the local ZCode SQLite store and uploaded for viewing only. There is no remote input, approval, resume, or control.",
+		"ZCode 会话内容同步（只读）:\n  pocketctl agent zcode sync enable [--history recent|all] [--lookback-days N] [--storage-dir PATH]\n  pocketctl agent zcode sync disable\n  pocketctl agent zcode sync status\n\nZCode 会话从本地 ZCode SQLite 存储读取并上传以供查看。不支持远程输入、审批、恢复或控制。",
+	},
+	"agent.zcode_unknown_action": {"unknown zcode sync action: %s", "未知的 zcode sync 操作: %s"},
+	"agent.zcode_enabled_restart": {
+		"ZCode session content sync enabled (history=%s, lookback=%dd). Restart the daemon for it to take effect: pocketctl daemon restart",
+		"ZCode 会话内容同步已启用（history=%s，lookback=%dd）。需要重启 daemon 后生效：pocketctl daemon restart",
+	},
+	"agent.zcode_enable_failed": {"ZCode sync enable failed: %s", "ZCode 同步启用失败: %s"},
+	"agent.zcode_disabled": {
+		"ZCode session content sync disabled. New sync stops within 5 seconds; already-uploaded sessions are NOT deleted (delete them separately in PocketCtl). A daemon restart is needed only to refresh the agent advertisement.",
+		"ZCode 会话内容同步已关闭。新同步最迟 5 秒内停止；已上传的会话不会被删除（请在 PocketCtl 中单独删除）。仅在刷新 daemon agent 上报时才需要重启。",
+	},
+	"agent.zcode_disable_failed":         {"ZCode sync disable failed: %s", "ZCode 同步关闭失败: %s"},
+	"agent.zcode_status_header":          {"ZCode session content sync (read-only)", "ZCode 会话内容同步（只读）"},
+	"agent.zcode_status_enabled":         {"Enabled: %s", "已启用: %s"},
+	"agent.zcode_status_history":         {"History scope: %s", "历史范围: %s"},
+	"agent.zcode_status_lookback":        {"Lookback (days): %d", "回溯天数: %d"},
+	"agent.zcode_status_storage":         {"Storage dir: %s", "存储目录: %s"},
+	"agent.zcode_status_schema":          {"Schema state: %s", "Schema 状态: %s"},
+	"agent.zcode_status_source":          {"Source id: %s", "Source id: %s"},
+	"agent.zcode_status_no_session_info": {"(session contents are not shown here; they are viewable in Web/iOS after sync)", "（此处不显示会话内容；同步后可在 Web/iOS 查看）"},
+	"agent.zcode_schema_ok":              {"compatible", "兼容"},
+	"agent.zcode_schema_unknown":         {"not probed", "未探测"},
+	"agent.zcode_schema_incompatible":    {"incompatible", "不兼容"},
 
 	// ---- daemon.* (start banner / stop / shutdown) -----------------------
 	"daemon.started": {

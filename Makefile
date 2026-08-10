@@ -44,19 +44,20 @@ build-all:
 
 # ---------- 开发 ----------
 
-## 启动本地开发环境（Landing + Web + Relay 统一走 80 端口）
+## 启动本地开发环境（Landing + Web + Relay/Worker 统一部署）
 dev:
 	@echo "启动开发环境..."
 	@$(MAKE) web
 	@echo ""
 	@echo "重启 Docker 服务（volume mount 本地 web/dist/）..."
-	@docker compose up -d landing web relay
+	@docker compose up -d landing web relay relay-worker
 	@echo ""
 	@echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 	@echo "  ✅ 开发环境已就绪"
 	@echo "  Landing Page:  http://localhost/"
 	@echo "  Web 客户端:    http://localhost/app/"
 	@echo "  Relay API:     http://localhost/api/"
+	@echo "  Relay Worker:  docker compose ps relay-worker"
 	@echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 
 ## 启动本地 Relay（tsx 直跑，快速迭代 relay 代码）

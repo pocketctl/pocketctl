@@ -17,6 +17,7 @@ the two repositories.
 - 🧠 **Claude Code handoff and daemon approvals** — Terminal Claude sessions sync through JSONL and can continue from another device while idle or after exit. Pocketctl-created Claude PTYs support Web/iOS tool approvals with request-ID convergence; independently started terminal sessions keep Claude's native terminal approval prompt and are not advertised as shared runtime. See [Claude cross-device control](docs/claude-cross-device-control.md).
 - 🧩 **Native OpenCode experience** — Opt in to the Pocketctl launcher and a normal terminal `opencode` joins the daemon's shared runtime. The official TUI, Web, and iOS can continue the same managed session and resolve permissions/questions from any device; pre-existing independent processes remain safely read-only until resumed through the launcher. See [OpenCode managed terminal control](docs/opencode-managed-terminal.md).
 - ⌨️ **Official Codex TUI, shared control** — With Codex CLI 0.144.1+, an optional Pocketctl launcher connects the official TUI and daemon to one managed app-server. Terminal, Web, and iOS share thread progress and first-writer-wins approvals/questions/MCP elicitation. See [Codex managed terminal control](docs/codex-managed-terminal.md).
+- 🔭 **Read-only ZCode session sync** — Opt in to safely discover local ZCode sessions from its SQLite store and view their history in Web and iOS. Observer sessions never accept remote input, approvals, resume, or control.
 - 📱 **iOS App (beta)** — Join the beta waitlist on the official website. In Settings, select **Test Environment** and enter your self-hosted Relay address to connect it.
 - 🖧 **Hosts Dashboard** — System resource monitoring (CPU / Memory / Disk) with remote daemon restart
 - 📌 **Session Management** — Pin, rename, export, and delete sessions with inline editing
@@ -130,6 +131,9 @@ No daemon restart or separate app-server connection command is required. Missing
 | `pocketctl agent codex disable` | Remove the Pocketctl launcher without uninstalling Codex |
 | `pocketctl agent codex status` | Show Codex detection, capabilities, launcher, PATH, and runtime state |
 | `codex --native ...` | Bypass Pocketctl for one Codex invocation |
+| `pocketctl agent zcode sync enable [--history recent\|all] [--lookback-days N]` | Enable read-only ZCode session sync; restart the daemon to apply it |
+| `pocketctl agent zcode sync disable` | Stop new ZCode session sync without deleting sessions already uploaded |
+| `pocketctl agent zcode sync status` | Show ZCode sync configuration and local schema compatibility without printing session content |
 | `pocketctl uninstall [--yes] [--keep-binary]` | Remove daemon, config, and data directories |
 | `pocketctl version` | Print version |
 

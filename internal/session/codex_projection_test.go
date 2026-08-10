@@ -298,7 +298,7 @@ func TestCodexProjectionUserCommandFileAndUsage(t *testing.T) {
 	usage := p.Project(codexNotification("thread/tokenUsage/updated", `{
 		"threadId":"thr_1","turnId":"turn_1","tokenUsage":{"last":{"inputTokens":10,"cachedInputTokens":4,"outputTokens":3,"reasoningOutputTokens":2,"totalTokens":13},"total":{"inputTokens":10,"cachedInputTokens":4,"outputTokens":3,"reasoningOutputTokens":2,"totalTokens":13}}
 	}`))
-	if len(usage) != 1 || usage[0].Type != "agent_text" || usage[0].Usage == nil || usage[0].Usage.InputTokens != 10 || usage[0].Usage.OutputTokens != 3 || usage[0].Usage.CacheRead != 4 {
+	if len(usage) != 1 || usage[0].Type != "agent_text" || usage[0].Usage == nil || usage[0].Usage.InputTokens != 10 || usage[0].Usage.OutputTokens != 3 || usage[0].Usage.CacheRead != 4 || usage[0].Usage.ReasoningTokens != 2 || usage[0].Usage.TotalTokens != 13 {
 		t.Fatalf("usage=%+v", usage)
 	}
 }

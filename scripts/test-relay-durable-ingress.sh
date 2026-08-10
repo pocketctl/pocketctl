@@ -9,8 +9,9 @@ cd "$REPO_ROOT"
 
 go test ./internal/protocol ./internal/ws ./internal/session ./internal/daemon ./cmd/pocketctl -count=1
 (cd relay && env -u TEST_DATABASE_URL -u RUN_POSTGRES_INTEGRATION npm test && npm run build)
-(cd relay && TEST_DATABASE_URL="$TEST_DATABASE_URL" npx vitest run --no-file-parallelism \
+(cd relay && RUN_POSTGRES_INTEGRATION=1 TEST_DATABASE_URL="$TEST_DATABASE_URL" npx vitest run --no-file-parallelism \
   src/__tests__/durable-ingress-fault-postgres.integration.test.ts \
-  src/__tests__/mixed-agent-durable-ingress-postgres.integration.test.ts)
+  src/__tests__/mixed-agent-durable-ingress-postgres.integration.test.ts \
+  src/__tests__/token-usage-postgres.integration.test.ts)
 make test-opencode-managed
 make test-codex-managed

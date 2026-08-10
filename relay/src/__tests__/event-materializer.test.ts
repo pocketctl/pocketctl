@@ -31,6 +31,54 @@ function pools() {
 }
 
 describe('EventMaterializer', () => {
+  test('passes server receipt time to the immutable fact writer only when explicitly enabled', async () => {
+    const increment = vi.spyOn(db, 'incrementSessionTokensForEvent').mockResolvedValue(undefined)
+    const receivedAt = new Date('2026-08-09T12:34:56.000Z')
+    const materializer = new EventMaterializer({
+      pool: pools() as never,
+      writeTokenUsageFacts: true,
+    })
+    const input = {
+      ...inputFor({ type: 'agent_text', session_id: 'ses-1', usage: { input_tokens: 3 } }),
+      receivedAt,
+    }
+
+    await materializer.materialize(input)
+
+    expect(increment).toHaveBeenCalledWith(
+      expect.anything(), 91, 1, 'ses-1', { input_tokens: 3 },
+      { writeFact: true, receivedAt, factKey: 'inbox:7' },
+    )
+    increment.mockRestore()
+  })
+
+  test('writes direct subagent agent_text usage as a fact without mutating parent session totals', async () => {
+    const increment = vi.spyOn(db, 'incrementSessionTokensForEvent').mockResolvedValue(undefined)
+    const fact = vi.spyOn(db, 'recordTokenUsageFactForEvent').mockResolvedValue(undefined)
+    const receivedAt = new Date('2026-08-09T12:34:56.000Z')
+    const materializer = new EventMaterializer({
+      pool: pools() as never,
+      writeTokenUsageFacts: true,
+    })
+
+    await materializer.materialize({
+      ...inputFor({
+        type: 'agent_text', session_id: 'root', agent_id: 'child-1', is_subagent: true,
+        agent: 'codex', model: 'gpt-5', usage: { input_tokens: 7, output_tokens: 3 },
+      }),
+      receivedAt,
+    })
+
+    expect(increment).not.toHaveBeenCalled()
+    expect(fact).toHaveBeenCalledWith(expect.anything(), 91, 1, {
+      factKey: 'inbox:7', userId: 42, daemonId: 'daemon-1', sessionId: 'root',
+      agentType: 'codex', model: 'gpt-5', receivedAt,
+      usage: { input_tokens: 7, output_tokens: 3 },
+    })
+    fact.mockRestore()
+    increment.mockRestore()
+  })
+
   test.each(agentEventContracts)('preserves $agent $name payload in a deterministic delivery', async ({ payload }) => {
     const materializer = new EventMaterializer({ pool: pools() as never })
 
@@ -228,8 +276,9 @@ describe('EventMaterializer', () => {
 
   test('routes subagent usage through the legacy child usage ledger without parent delivery', async () => {
     const usage = vi.spyOn(db, 'recordSubagentUsageInTransaction').mockResolvedValue(true)
+    const fact = vi.spyOn(db, 'recordTokenUsageFactForEvent').mockResolvedValue(undefined)
     const pool = pools()
-    const materializer = new EventMaterializer({ pool: pool as never })
+    const materializer = new EventMaterializer({ pool: pool as never, writeTokenUsageFacts: true })
 
     const result = await materializer.materialize(inputFor({
       type: 'subagent_usage', session_id: 'root', agent_id: 'child', event_id: 'turn-1', seq: 9,
@@ -241,7 +290,9 @@ describe('EventMaterializer', () => {
       inputTokens: 2, outputTokens: 3, cacheRead: 4, cacheCreate: 5,
     })
     expect(result.deliveries).toEqual([])
+    expect(fact).not.toHaveBeenCalled()
     expect(pool.query).not.toHaveBeenCalledWith(expect.stringContaining('incrementSessionTokensForEvent'), expect.anything())
+    fact.mockRestore()
     usage.mockRestore()
   })
 
@@ -277,6 +328,43 @@ describe('EventMaterializer', () => {
       expect.stringContaining('INSERT INTO subagents'),
       'COMMIT',
     ])
+    expect(client.release).toHaveBeenCalledOnce()
+  })
+
+  test('reuses the session-fence PoolClient for subagent discovery', async () => {
+    let relationApplied = false
+    let ledgerCompleted = false
+    const client = {
+      query: vi.fn(async (sql: string) => {
+        if (sql.includes('INSERT INTO events')) {
+          return { rows: [{ id: 92, inserted: true, effect_status: 'pending', effect_step: 0 }], rowCount: 1 }
+        }
+        if (sql.includes('SELECT effect_status')) {
+          return { rows: [{ effect_status: 'pending', effect_step: 0 }], rowCount: 1 }
+        }
+        if (sql.includes('INSERT INTO subagents')) relationApplied = true
+        if (sql.includes("effect_status = 'completed'")) ledgerCompleted = true
+        return { rows: [], rowCount: 1 }
+      }),
+      connect: vi.fn().mockRejectedValue(new Error('Client has already been connected. You cannot reuse a client.')),
+      release: vi.fn(),
+    }
+    const pool = { connect: vi.fn().mockResolvedValue(client), query: vi.fn() }
+    const materializer = new EventMaterializer({ pool: pool as never })
+
+    await expect(materializer.materialize(inputFor({
+      type: 'subagent_discovered',
+      session_id: 'root',
+      agent: 'codex',
+      agent_id: 'child',
+      root_session_id: 'root',
+      call_id: 'call-1',
+      subagent_type: 'explorer',
+    }))).resolves.toMatchObject({ eventId: 92 })
+
+    expect(client.connect).not.toHaveBeenCalled()
+    expect(relationApplied).toBe(true)
+    expect(ledgerCompleted).toBe(true)
     expect(client.release).toHaveBeenCalledOnce()
   })
 
@@ -456,7 +544,7 @@ describe('EventMaterializer', () => {
   })
 
   test('materializes Codex subagent relation without changing parent/root delivery fields', async () => {
-    const reconcile = vi.spyOn(db, 'reconcileSubagent').mockResolvedValue(undefined)
+    const reconcile = vi.spyOn(db, 'reconcileSubagentInTransaction').mockResolvedValue(undefined)
     const bindSession = vi.fn()
     const pool = pools()
     const payload = {
@@ -475,5 +563,71 @@ describe('EventMaterializer', () => {
     expect(result.deliveries[0]?.payload).toEqual(payload)
     bindSession.mockRestore()
     reconcile.mockRestore()
+  })
+})
+
+describe('zcode observer session source', () => {
+  function materializerFor() {
+    const pool = pools()
+    const upsert = vi.spyOn(db, 'upsertSession').mockResolvedValue(undefined)
+    const materializer = new EventMaterializer({ pool: pool as never })
+    return { pool, upsert, materializer }
+  }
+
+  test('zcode observer session_discovered is recorded with source=observer', async () => {
+    const { upsert, materializer } = materializerFor()
+    await materializer.materialize(inputFor({
+      type: 'session_discovered', session_id: 'zcode-wire1',
+      agent: 'zcode', source: 'observer', control_mode: 'legacy_read_only',
+      capabilities: ['history_sync'], status: 'completed', title: 't', model: 'm',
+    }))
+    // 8th positional arg (index 7) is source.
+    const args = upsert.mock.calls[0]
+    expect(args[7]).toBe('observer')
+    expect(args[3]).toBe('zcode') // agentType
+    upsert.mockRestore()
+  })
+
+  test('non-zcode agent forging source=observer is recorded as terminal', async () => {
+    const { upsert, materializer } = materializerFor()
+    await materializer.materialize(inputFor({
+      type: 'session_discovered', session_id: 'ses1',
+      agent: 'claude-code', source: 'observer', // forged
+    }))
+    expect(upsert.mock.calls[0][7]).toBe('terminal')
+    upsert.mockRestore()
+  })
+
+  test('zcode without source=observer falls back to terminal', async () => {
+    const { upsert, materializer } = materializerFor()
+    await materializer.materialize(inputFor({
+      type: 'session_discovered', session_id: 'ses2',
+      agent: 'zcode', // missing source=observer
+    }))
+    expect(upsert.mock.calls[0][7]).toBe('terminal')
+    upsert.mockRestore()
+  })
+
+  test('legacy daemon without source field is terminal', async () => {
+    const { upsert, materializer } = materializerFor()
+    await materializer.materialize(inputFor({
+      type: 'session_discovered', session_id: 'ses3',
+      agent: 'claude-code', // no source field
+    }))
+    expect(upsert.mock.calls[0][7]).toBe('terminal')
+    upsert.mockRestore()
+  })
+
+  test('control_mode and capabilities persist for zcode observer', async () => {
+    const { upsert, materializer } = materializerFor()
+    await materializer.materialize(inputFor({
+      type: 'session_discovered', session_id: 'zcode-wire2',
+      agent: 'zcode', source: 'observer',
+      control_mode: 'legacy_read_only', capabilities: ['history_sync'],
+    }))
+    const args = upsert.mock.calls[0]
+    expect(args[11]).toBe('legacy_read_only') // controlMode (index 11)
+    expect(args[12]).toEqual(['history_sync']) // capabilities (index 12)
+    upsert.mockRestore()
   })
 })

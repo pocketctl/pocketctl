@@ -43,9 +43,10 @@ import (
 	"github.com/pocketctl/pocketctl/internal/update"
 	"github.com/pocketctl/pocketctl/internal/watcher"
 	"github.com/pocketctl/pocketctl/internal/ws"
+	"github.com/pocketctl/pocketctl/internal/zcode"
 )
 
-var version = "0.3.22"
+var version = "0.3.23"
 
 // PR2 platform defaults for the daemon entry: daemonize + service via platform
 // interface (was direct syscall.SysProcAttr{Setsid} + internal/service).
@@ -1122,6 +1123,53 @@ func cmdDaemonStart(args []string) {
 
 	// Create session manager
 	sm := session.NewSessionManager(outputCh)
+
+	// ZCode read-only observer (only when the user has explicitly enabled the
+	// sync). It is fully isolated from the SessionManager: it never enters
+	// ActiveRootSessionIDs, never drives a session, and emits only through the
+	// low-priority gate below so ZCode congestion never starves the other
+	// agents. See docs/adr/0001-zcode-independent-read-only-observer.md.
+	outputCap := cap(outputCh)
+	tryEmitLowPriority := func(ev protocol.DaemonEvent) bool {
+		// Low-watermark gate: only send when the shared channel is at/below 25%
+		// capacity, using a non-blocking send. Rejection keeps the observer's
+		// pending state intact (it retries the same stable event later).
+		if len(outputCh) > outputCap/4 {
+			return false
+		}
+		select {
+		case outputCh <- ev:
+			return true
+		default:
+			return false
+		}
+	}
+	var zcodeObserver *zcode.Observer
+	if zcCfg, err := zcode.LoadConfig(); err == nil && zcCfg.Enabled {
+		storage := zcode.ResolveStorageDir(zcCfg)
+		// emitDirect bypasses the low-watermark gate for critical metadata events
+		// (session_status). These are tiny (1 event) and directly affect the
+		// user-visible running/completed state — they must not be starved by
+		// content backfill backpressure. Still non-blocking (never hangs).
+		emitDirect := func(ev protocol.DaemonEvent) bool {
+			select {
+			case outputCh <- ev:
+				return true
+			default:
+				return false
+			}
+		}
+		zcodeObserver = zcode.NewObserver(zcode.ObserverConfig{
+			SourceID:     zcCfg.SourceID,
+			StorageDir:   storage,
+			History:      zcCfg.History,
+			LookbackDays: zcCfg.LookbackDays,
+			Emit:         tryEmitLowPriority,
+			EmitDirect:   emitDirect,
+			Logger:       logger,
+		})
+		// Start is deferred until the daemon ctx exists (see below).
+	}
 	var recoveredClaudeApprovalMu sync.Mutex
 	var recoveredClaudeApprovals []daemon.ClaudeApprovalStateItem
 	if sm.ClaudeApprovalV2Enabled() {
@@ -1340,6 +1388,16 @@ func cmdDaemonStart(args []string) {
 			if err := codexReplayCursor.AdvanceEventIDs(eventIDs); err != nil {
 				logger.Warn("persist Codex replay cursor failed", "error", err)
 			}
+			// Combined ACK: also advance the isolated ZCode observer's cursor.
+			// The two are independent — a failure in one does not block the
+			// other (each has its own diagnostics).
+			if zcodeObserver != nil {
+				zcodeObserver.AcknowledgeEventIDs(eventIDs)
+			}
+		}
+	} else if zcodeObserver != nil {
+		client.OnEventsAcknowledged = func(eventIDs []string) {
+			zcodeObserver.AcknowledgeEventIDs(eventIDs)
 		}
 	}
 
@@ -1407,6 +1465,12 @@ func cmdDaemonStart(args []string) {
 			recoveredClaudeApprovalMu.Unlock()
 		}
 		logger.Info("resync done")
+		// Ask the isolated ZCode observer to re-emit its resync metadata through
+		// the low-priority gate (ordered before new content). It does NOT burst
+		// all history here, and does NOT enter SessionManager resync.
+		if zcodeObserver != nil {
+			zcodeObserver.QueueResync()
+		}
 	}
 
 	// Connection state tracking
@@ -1457,6 +1521,17 @@ func cmdDaemonStart(args []string) {
 	// Context with signal handling
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
+
+	// Start the ZCode observer now that the daemon ctx exists. Fail-closed: if
+	// the storage/schema probe fails the observer is dropped but the daemon's
+	// other agents and the Relay loop continue unaffected.
+	if zcodeObserver != nil {
+		if err := zcodeObserver.Start(ctx); err != nil {
+			logger.Warn("zcode observer disabled (storage/schema unavailable)", "error", err)
+			zcodeObserver.Stop()
+			zcodeObserver = nil
+		}
+	}
 
 	sigCh := make(chan os.Signal, 1)
 	installSignalHandler(sigCh) // PR2: platform split (Unix SIGINT/SIGTERM, Windows os.Interrupt)
@@ -1612,6 +1687,10 @@ func cmdDaemonStart(args []string) {
 	_ = agentControlServer.Close()
 	if err := sm.ShutdownCodex(); err != nil {
 		logger.Warn("Codex app-server shutdown incomplete", "error", err)
+	}
+	// Stop the isolated ZCode observer (closes its read-only DB + poll loop).
+	if zcodeObserver != nil {
+		zcodeObserver.Stop()
 	}
 	// Stop the shared opencode serve process (bound to its own context, not the
 	// daemon ctx) so it doesn't linger and race the next daemon's serve on the

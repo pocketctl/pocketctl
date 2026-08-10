@@ -13,6 +13,8 @@ export interface MaterializationInput {
   sessionId: string | null;
   eventType: string;
   payload: Record<string, unknown>;
+  /** Relay receipt timestamp from durable ingress; never a daemon wall clock. */
+  receivedAt?: Date | null;
   context?: MaterializationContext;
 }
 

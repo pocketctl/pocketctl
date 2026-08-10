@@ -15,6 +15,11 @@
         <polyline points="5,8 10,12 5,16" />
         <line x1="13" y1="16" x2="19" y2="16" />
       </g>
+      <!-- ZCode: read-only eye (observer sync) -->
+      <g v-else-if="kind === 'zcode'" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z" />
+        <circle cx="12" cy="12" r="3" />
+      </g>
     </svg>
     <span class="agent-text">{{ label }}</span>
   </span>
@@ -33,14 +38,15 @@ const props = withDefaults(defineProps<{
 })
 
 // normalized visual kind
-const kind = computed<'claude' | 'codex' | 'opencode'>(() => {
+const kind = computed<'claude' | 'codex' | 'opencode' | 'zcode'>(() => {
   const a = (props.agent || '').toLowerCase()
   if (a === 'codex') return 'codex'
   if (a === 'opencode') return 'opencode'
+  if (a === 'zcode') return 'zcode'
   return 'claude'
 })
 
-const LABELS: Record<string, string> = { 'claude-code': 'Claude Code', codex: 'Codex', opencode: 'OpenCode' }
+const LABELS: Record<string, string> = { 'claude-code': 'Claude Code', codex: 'Codex', opencode: 'OpenCode', zcode: 'ZCode' }
 const label = computed(() => LABELS[props.agent] || LABELS['claude-code'])
 
 const iconSize = computed(() => props.size === 'md' ? 14 : 12)
@@ -69,4 +75,6 @@ const iconSize = computed(() => props.size === 'md' ? 14 : 12)
 .agent-badge.codex { background: rgba(63, 185, 80, 0.14); color: #3fb950; }
 /* OpenCode — purple */
 .agent-badge.opencode { background: rgba(167, 139, 250, 0.14); color: #a78bfa; }
+/* ZCode — teal (read-only observer) */
+.agent-badge.zcode { background: rgba(20, 184, 166, 0.14); color: #14b8a6; }
 </style>

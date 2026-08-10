@@ -8,8 +8,16 @@ import { InboxRetention } from './inbox-retention.js'
 import { EventMaterializer } from './materialization/event-materializer.js'
 import { RealtimeOutboxWriter } from './materialization/realtime-outbox.js'
 import type { RuntimeMaterializationHooks } from './materialization/types.js'
+import {
+  assertTokenUsageFeatureDependencies,
+  tokenUsageFeatures,
+} from './config/token-usage.js'
+import { assertTokenUsageWriteContinuity } from './token-usage/lifecycle.js'
 
 const RETENTION_INTERVAL_MS = 60_000
+// Connection checkout remains 1s; a claimed durable batch needs enough time
+// to complete its transactional materialization without a false timeout.
+export const EVENT_WORKER_STATEMENT_TIMEOUT_MS = 30_000
 
 export function createStandaloneMaterializationHooks(): RuntimeMaterializationHooks {
   // Request-ID dedup is authoritative in events(session_id,event_hash) plus
@@ -192,11 +200,13 @@ export async function main(): Promise<void> {
   const shardCount = strictPositiveEnvInt('RELAY_WORKER_SHARD_COUNT', 1)
   const shardIndex = nonNegativeEnvInt('RELAY_WORKER_SHARD_INDEX', 0)
   if (shardIndex >= shardCount) throw new Error('RELAY_WORKER_SHARD_INDEX must be less than RELAY_WORKER_SHARD_COUNT')
+  const tokenFeatures = tokenUsageFeatures(process.env)
+  assertTokenUsageFeatureDependencies(tokenFeatures, process.env.RELAY_DURABLE_INGRESS ?? 'off')
   const pool = createPool(parseDBUrl(databaseUrl), {
     name: 'event-worker',
     max: strictPositiveEnvInt('DB_WORKER_POOL_MAX', 8),
     connectionTimeoutMillis: 1_000,
-    statementTimeoutMillis: 1_000,
+    statementTimeoutMillis: EVENT_WORKER_STATEMENT_TIMEOUT_MS,
   })
   const repository = new InboxRepository(pool)
   const worker = createInboxWorker({
@@ -204,6 +214,7 @@ export async function main(): Promise<void> {
     materializer: new EventMaterializer({
       pool,
       hooks: createStandaloneMaterializationHooks(),
+      writeTokenUsageFacts: tokenFeatures.writeFacts,
     }),
     outboxWriter: new RealtimeOutboxWriter(pool),
     workerId: process.env.RELAY_WORKER_ID || `${hostname()}:${process.pid}`,
@@ -215,7 +226,10 @@ export async function main(): Promise<void> {
     intervalMs: RETENTION_INTERVAL_MS,
   })
   const runtime = createWorkerRuntime({
-    assertSchemaReady: () => assertDurableIngressSchema(pool),
+    assertSchemaReady: async () => {
+      await assertDurableIngressSchema(pool)
+      await assertTokenUsageWriteContinuity(pool, tokenFeatures)
+    },
     worker,
     retention,
     pool,

@@ -45,4 +45,16 @@ export const agentEventContracts = [
       event_id: 'codex:item_1:2', seq: 13,
     },
   },
+  {
+    agent: 'zcode',
+    name: 'observer read-only content is replay',
+    expectedPriority: 'replay',
+    payload: {
+      type: 'agent_text', session_id: 'zcode-abc123def4567890abcd',
+      agent: 'zcode', source: 'observer',
+      message_id: 'zcodem-msg1', part_id: 'zcodep-part1',
+      revision: 1, replace: true, snapshot: 'observer content', resync: true,
+      event_id: 'zcode:abcdef012345:text:part1:hash1', seq: 21,
+    },
+  },
 ] as const;

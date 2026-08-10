@@ -11,6 +11,7 @@ import {
 } from '../push.js'
 import { notifyUser } from '../push.js'
 import { releaseQuotaReservation } from '../quota.js'
+import { tokenUsageFeatures } from '../config/token-usage.js'
 import type {
   DurableMaterializationHooks,
   DurableEffectContext,
@@ -29,6 +30,8 @@ export interface EventMaterializerOptions {
   transactionClient?: Pick<pg.PoolClient, 'query'>
   durableHooks?: DurableMaterializationHooks
   hooks?: MaterializationHooks
+  /** Staged-rollout gate; production defaults to TOKEN_USAGE_FACTS_WRITE=false. */
+  writeTokenUsageFacts?: boolean
 }
 
 export interface MaterializationRunOptions {
@@ -69,9 +72,11 @@ export function createDatabaseMaterializationHooks(pool: pg.Pool): DurableMateri
  */
 export class EventMaterializer {
   private readonly durableHooks: DurableMaterializationHooks
+  private readonly writeTokenUsageFacts: boolean
 
   constructor(private readonly options: EventMaterializerOptions) {
     this.durableHooks = options.durableHooks ?? createDatabaseMaterializationHooks(options.effectPool ?? options.pool)
+    this.writeTokenUsageFacts = options.writeTokenUsageFacts ?? tokenUsageFeatures().writeFacts
   }
 
   private get effectPool(): pg.Pool {
@@ -248,13 +253,21 @@ export class EventMaterializer {
     if (input.eventType === 'session_discovered') {
       await effect.step(async () => {
         this.options.hooks?.bindSession?.(sessionId, input.daemonId)
+        // Source is a strict special case: only zcode observer sessions are
+        // recorded with source='observer'. Every other agent — even one that
+        // forges source='observer' in its payload — is recorded as 'terminal'.
+        // This keeps the observer source a closed set and prevents a forged
+        // payload from impersonating a read-only sync.
+        const source = payload.agent === 'zcode' && payload.source === 'observer'
+          ? 'observer'
+          : 'terminal'
         await db.upsertSession(
           this.effectPool, sessionId, input.daemonId,
           typeof payload.agent === 'string' ? payload.agent : 'claude-code',
           typeof payload.cwd === 'string' ? payload.cwd : '',
           typeof payload.status === 'string' ? payload.status : 'busy',
           typeof payload.title === 'string' && payload.title ? payload.title : undefined,
-          'terminal', undefined, input.userId ?? undefined,
+          source, undefined, input.userId ?? undefined,
           typeof payload.model === 'string' ? payload.model : undefined,
           typeof payload.control_mode === 'string' ? payload.control_mode : undefined,
           Array.isArray(payload.capabilities) ? payload.capabilities as string[] : undefined,
@@ -387,15 +400,22 @@ export class EventMaterializer {
     const payload = input.payload
     const sessionId = input.sessionId ?? ''
     await effect.step(async () => {
-      await db.reconcileSubagent(this.effectPool, {
+      const relation = {
         parentSessionId: sessionId,
         agentId: String(payload.agent_id ?? ''),
         rootSessionId: String(payload.root_session_id ?? sessionId),
-        kind: payload.agent === 'codex' ? 'codex_subagent' : 'claude_subagent',
+        kind: payload.agent === 'codex' ? 'codex_subagent'
+            : payload.agent === 'zcode' ? 'zcode_subagent'
+            : 'claude_subagent',
         toolUseId: typeof payload.call_id === 'string' ? payload.call_id : undefined,
         agentType: typeof payload.subagent_type === 'string' ? payload.subagent_type : undefined,
         title: typeof payload.subagent_desc === 'string' ? payload.subagent_desc : undefined,
-      })
+      }
+      if (this.options.transactionClient) {
+        await db.reconcileSubagentInTransaction(this.options.transactionClient, relation)
+      } else {
+        await db.reconcileSubagent(this.effectPool, relation)
+      }
       this.options.hooks?.bindSession?.(sessionId, input.daemonId)
     })
     return true
@@ -425,13 +445,42 @@ export class EventMaterializer {
     result: MaterializationResult,
   ): MaterializationEffect {
     return async (effect) => {
-      if (input.payload.usage != null && input.payload.is_subagent !== true) {
+      // Preserve the legacy generic session accumulator for older payloads
+      // carrying usage, while restricting immutable accounting facts to the
+      // canonical agent_text event. subagent_usage is paired bookkeeping and
+      // must trigger neither path, otherwise a child turn is counted twice.
+      const usage = input.eventType === 'subagent_usage'
+        ? undefined
+        : input.payload.usage as db.TokenUsageDelta | undefined
+      const factEligible = input.eventType === 'agent_text'
+      const factKey = input.inboxId > 0 ? `inbox:${input.inboxId}` : undefined
+      if (usage != null && input.payload.is_subagent !== true) {
         await effect.atomicStep((eventID, nextStep) => db.incrementSessionTokensForEvent(
           this.effectPool,
           eventID,
           nextStep,
           input.sessionId ?? '',
-          input.payload.usage as db.TokenUsageDelta,
+          usage,
+          { writeFact: this.writeTokenUsageFacts && factEligible, receivedAt: input.receivedAt, factKey },
+        ))
+      } else if (usage != null && input.payload.is_subagent === true
+        && this.writeTokenUsageFacts && factEligible) {
+        await effect.atomicStep((eventID, nextStep) => db.recordTokenUsageFactForEvent(
+          this.effectPool,
+          eventID,
+          nextStep,
+          {
+            factKey: factKey ?? `event:${eventID}`,
+            userId: input.userId,
+            daemonId: input.daemonId,
+            sessionId: input.sessionId ?? '',
+            agentType: typeof input.payload.agent === 'string'
+              ? input.payload.agent
+              : input.context?.agentType,
+            model: typeof input.payload.model === 'string' ? input.payload.model : undefined,
+            receivedAt: input.receivedAt,
+            usage,
+          },
         ))
       }
       if (await this.materializeSessionLifecycle(input, result, effect)) return

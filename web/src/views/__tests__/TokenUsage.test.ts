@@ -3,7 +3,13 @@ import { mount, flushPromises } from '@vue/test-utils'
 import TokenUsage from '../TokenUsage.vue'
 
 vi.mock('../../composables/useAuth', () => ({
-  useAuth: () => ({ accessToken: { value: 'tk' } }),
+  useAuth: () => ({
+    accessToken: { value: 'tk' },
+    apiGetAuth: async (url: string) => {
+      const response = await fetch(url)
+      return { ok: response.ok, data: await response.json() }
+    },
+  }),
 }))
 
 const sessionsWithChildren = {

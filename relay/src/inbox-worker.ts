@@ -78,6 +78,7 @@ export function createInboxWorker(deps: InboxWorkerDeps) {
         sessionId: row.sessionId,
         eventType: row.eventType,
         payload: row.payload,
+        receivedAt: row.receivedAt,
         context: row.materializationContext,
       }, undefined, { assertClaim })
       if (deps.outboxWriter) {

@@ -93,6 +93,7 @@ interface QueuedDaemonMessage {
   originWs: WebSocket;
   originStartedAt: number | undefined;
   bytes: number;
+  receivedAt: Date;
 }
 
 interface DaemonRevocationGateState {
@@ -105,6 +106,8 @@ interface DaemonRevocationGateState {
 export interface RouterOptions {
   observeIngressClass?: (daemonId: string, priority: PriorityClass) => void;
   authLeaseOptions?: AuthLeaseOptions;
+  tokenUsageFactsAuthoritative?: boolean;
+  writeTokenUsageFacts?: boolean;
   transport?: {
     maxEventBytes?: number;
     maxChunkBytes?: number;
@@ -248,6 +251,8 @@ export class Router {
   // ack-async / no-seq / persist-retry gaps that seq dedup can't cover for the
   // user-facing push side-effect.
   private pushDeduper = new PushDeduper();
+  private readonly tokenUsageFactsAuthoritative: boolean;
+  private readonly writeTokenUsageFacts: boolean;
 
   // Daemon ids that finalized a genuine offline (grace window elapsed). Used
   // to push "online" only on a real offline→online transition, not on every
@@ -257,6 +262,8 @@ export class Router {
   private materializer: EventMaterializer;
 
   constructor(pools: RelayPools | pg.Pool, options: RouterOptions = {}) {
+    this.tokenUsageFactsAuthoritative = options.tokenUsageFactsAuthoritative === true;
+    this.writeTokenUsageFacts = options.writeTokenUsageFacts === true;
     const normalized = isRelayPools(pools) ? pools : {
       control: pools, ingest: pools, query: pools, worker: pools,
     };
@@ -280,6 +287,7 @@ export class Router {
     this.materializer = new EventMaterializer({
       pool: this.ingestPool,
       effectPool: this.pool,
+      writeTokenUsageFacts: this.writeTokenUsageFacts,
       hooks: {
         bindSession: (sessionId, daemonId) => this.sessionToDaemon.set(sessionId, daemonId),
         renameSession: (oldSessionId, sessionId, daemonId) => {
@@ -1318,6 +1326,7 @@ export class Router {
     type: string,
     payload: any,
     originatingState?: DaemonSeqState,
+    receivedAt: Date = new Date(),
   ): void {
     const state = originatingState ?? this.daemonSeq.get(daemonId);
     this.legacyPersist.run(daemonId, () => this.materializer.materialize({
@@ -1327,6 +1336,7 @@ export class Router {
       sessionId,
       eventType: type,
       payload,
+      receivedAt,
       context: this.materializationContext(daemonId, payload),
     }, undefined, { deferEffects: true }))
       .then((result) => {
@@ -1423,7 +1433,9 @@ export class Router {
       this.daemonRevocationGates.delete(daemon.registrationId);
     }
     for (const item of queued) {
-      this.handleDaemonMessage(item.daemonId, item.msg, item.originWs, item.originStartedAt, true);
+      this.handleDaemonMessage(
+        item.daemonId, item.msg, item.originWs, item.originStartedAt, true, item.receivedAt,
+      );
     }
   }
 
@@ -1466,6 +1478,7 @@ export class Router {
     msg: any,
     originWs: WebSocket,
     originStartedAt: number | undefined,
+    receivedAt: Date,
   ): void {
     if (state.closed) return;
     let bytes = this.revocationGateMaxBytes + 1;
@@ -1477,7 +1490,7 @@ export class Router {
       );
       return;
     }
-    state.queue.push({ daemonId, msg, originWs, originStartedAt, bytes });
+    state.queue.push({ daemonId, msg, originWs, originStartedAt, bytes, receivedAt });
     state.queuedBytes += bytes;
   }
 
@@ -1508,6 +1521,7 @@ export class Router {
     originWs?: WebSocket,
     originStartedAt?: number,
     revocationAdmitted = false,
+    receivedAt: Date = new Date(),
   ): void {
     let originDaemon: DaemonConnection | undefined;
     if (originWs) {
@@ -1530,12 +1544,19 @@ export class Router {
       if (pending || (msg.type === 'ping' && this.authLeases.shouldRefresh(originDaemon.registrationId))) {
         const gate = pending ?? this.startDaemonRevocationGate(daemonId, originDaemon);
         this.enqueueDaemonRevocationGate(
-          daemonId, originDaemon, gate, msg, originWs!, originStartedAt,
+          daemonId, originDaemon, gate, msg, originWs!, originStartedAt, receivedAt,
         );
         return;
       }
     }
     msg = sanitizeJSONBPayload(msg);
+    if (this.writeTokenUsageFacts
+      && msg.type === 'agent_text'
+      && msg.usage != null
+      && (!Number.isSafeInteger(msg.seq) || msg.seq <= 0)) {
+      this.sendRetryableDisconnect(daemonId, 'token_usage_requires_seq', 5_000);
+      return;
+    }
     const policy = classifyDaemonEvent(msg);
     let durableIngressOwnsAck = false;
     if (msg.seq) {
@@ -1702,7 +1723,7 @@ export class Router {
       if (!durableIngressOwnsAck) this.markPersisted(daemonId, msg.seq);
       return;
     }
-    this.persistAndAck(daemonId, msg.seq, sessionId, msg.type, msg, messageState);
+    this.persistAndAck(daemonId, msg.seq, sessionId, msg.type, msg, messageState, receivedAt);
   }
 
   async handleClientMessage(clientWs: WebSocket, msg: any): Promise<void> {
@@ -1765,7 +1786,10 @@ export class Router {
       // Ownership check
       db.isSessionOwnedByUser(this.pool, client.userId!, sessionId).then((owned) => {
         if (!owned) { this.send(clientWs, { type: 'error', error: 'session not found or not owned' }); return; }
-        db.deleteSession(this.pool, sessionId).catch(console.error);
+        db.deleteSession(this.pool, sessionId, {
+          usageFactsAuthoritative: this.tokenUsageFactsAuthoritative,
+          writeUsageFacts: this.writeTokenUsageFacts,
+        }).catch(console.error);
         this.sessionToDaemon.delete(sessionId);
         for (const [ws, c] of this.clients) {
           if (ws.readyState === 1 && this.sameUser(c.userId, client.userId)) {

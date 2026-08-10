@@ -191,20 +191,18 @@ import AgentBadge from '../components/AgentBadge.vue'
 import { formatTokenCount, childAgentTokenTotal } from '../utils/tokenFormat'
 
 const { t } = useLocale()
-const { accessToken } = useAuth()
+const { accessToken, apiGetAuth } = useAuth()
 
 // 柱状图单柱最大像素高度（双柱：input + output，需与 .bar-chart 容器高度协调）
 const BAR_CHART_MAX_H = 90
 
 async function apiGet(url: string) {
-  const tok = accessToken.value
-  if (!tok) throw new Error('no_token')
-  const res = await fetch(url, { headers: { Authorization: `Bearer ${tok}` }, credentials: 'include' })
-  if (!res.ok) {
-    if (res.status === 401) throw new Error('auth_expired')
-    throw new Error(`${res.status}`)
-  }
-  return res.json()
+  if (!accessToken.value) throw new Error('no_token')
+  // Reuse the shared GET path: it refreshes a stale access token once before
+  // reporting the dashboard as unavailable.
+  const { ok, data } = await apiGetAuth(url)
+  if (!ok) throw new Error(data?.error || 'request_failed')
+  return data
 }
 
 const loading = ref(false)

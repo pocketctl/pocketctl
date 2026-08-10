@@ -37,4 +37,11 @@ describe('buildResumeCommand (session-resume-command)', () => {
       .toBe('cd "/Users/x/My Project" && claude --resume abc')
   })
 
+  test('zcode observer returns null (no resume, no claude fallback)', () => {
+    expect(buildResumeCommand({ agent: 'zcode', cwd: '/x', session_id: 'zcode-wire1' }))
+      .toBeNull()
+    expect(buildResumeCommand({ agent_type: 'zcode', session_id: 'zcode-wire1' }))
+      .toBeNull()
+  })
+
 })

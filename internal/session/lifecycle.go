@@ -25,6 +25,14 @@ func (sm *SessionManager) CreateSession(ctx context.Context, config protocol.Ses
 	if config.Agent == "" {
 		config.Agent = adapter.AgentClaude
 	}
+	// Observer agents (zcode) expose read-only historical content only — there is
+	// no process to spawn, no PTY, no CLI to resume. Reject before any side
+	// effect (CLI resolution, cwd/worktree creation, PTY spawn) so the request
+	// can never accidentally drive a ZCode session. This is the single fail-closed
+	// gate; the adapter's typed factory helpers surface the same error too.
+	if adapter.BackendKindFor(config.Agent) == adapter.BackendObserver {
+		return "", adapter.ErrObserverReadOnly
+	}
 	if config.Permission == nil && (config.Agent == adapter.AgentClaude || config.Agent == adapter.AgentCodex) {
 		cfg := adapter.DefaultPermissionConfig(config.Agent)
 		config.Permission = &cfg

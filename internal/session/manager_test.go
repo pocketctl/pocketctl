@@ -991,3 +991,48 @@ func TestSessionEffortCacheKeepsLatestNonEmptyValue(t *testing.T) {
 		t.Fatalf("GetSessionEffort() = %q, want high", got)
 	}
 }
+
+// TestCreateSessionZcodeObserverRejected verifies that a zcode (BackendObserver)
+// agent is fail-closed rejected before any subprocess/PTY/worktree side effect.
+// resolveAgentCLI, startOpencode and startCodexManaged must NOT be invoked.
+func TestCreateSessionZcodeObserverRejected(t *testing.T) {
+	cliCalled := false
+	opencodeCalled := false
+	codexManagedCalled := false
+
+	sm := NewSessionManager(make(chan protocol.DaemonEvent, 1))
+	sm.createDeps.resolveAgentCLI = func(protocol.SessionConfig) (string, error) {
+		cliCalled = true
+		return "/should/not/be/called", nil
+	}
+	sm.createDeps.startOpencode = func(*SessionManager, context.Context, protocol.SessionConfig) (string, error) {
+		opencodeCalled = true
+		return "should-not-start", nil
+	}
+	sm.createDeps.startCodexManaged = func(*SessionManager, context.Context, protocol.SessionConfig, string, string, string, string, string) (string, bool, error) {
+		codexManagedCalled = true
+		return "", false, nil
+	}
+
+	tmp := t.TempDir()
+	_, err := sm.CreateSession(context.Background(), protocol.SessionConfig{
+		Agent: adapter.AgentZcode,
+		Cwd:   tmp,
+	})
+	if !errors.Is(err, adapter.ErrObserverReadOnly) {
+		t.Fatalf("CreateSession(zcode) err = %v, want ErrObserverReadOnly", err)
+	}
+	if cliCalled {
+		t.Fatal("resolveAgentCLI was called for a zcode session; observer must be rejected before CLI resolution")
+	}
+	if opencodeCalled {
+		t.Fatal("startOpencode was called for a zcode session")
+	}
+	if codexManagedCalled {
+		t.Fatal("startCodexManaged was called for a zcode session")
+	}
+	// No session registered.
+	if sm.CwdSessionCount(tmp) != 0 {
+		t.Fatalf("CwdSessionCount = %d, want 0 (no session should be registered)", sm.CwdSessionCount(tmp))
+	}
+}

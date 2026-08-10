@@ -23,8 +23,14 @@ function strictBudget(raw: string | undefined, fallback: number, variable: strin
   return value;
 }
 
-function workloadPool(config: DBConfig, name: keyof RelayPools, max: number, connectionTimeoutMillis: number): pg.Pool {
-  return createPool(config, { name, max, connectionTimeoutMillis, statementTimeoutMillis: connectionTimeoutMillis });
+function workloadPool(
+  config: DBConfig,
+  name: keyof RelayPools,
+  max: number,
+  connectionTimeoutMillis: number,
+  statementTimeoutMillis: number,
+): pg.Pool {
+  return createPool(config, { name, max, connectionTimeoutMillis, statementTimeoutMillis });
 }
 
 export function createRelayPools(config: DBConfig, env: PoolEnvironment = process.env): RelayPools {
@@ -42,10 +48,12 @@ export function createRelayPools(config: DBConfig, env: PoolEnvironment = proces
   const total = Object.values(budgets).reduce((sum, max) => sum + max, 0);
   if (total > totalMax) throw new Error(`pool total ${total} exceeds DB_POOL_TOTAL_MAX ${totalMax}`);
   const pools = {
-    control: workloadPool(config, 'control', budgets.control, 200),
-    ingest: workloadPool(config, 'ingest', budgets.ingest, 500),
-    query: workloadPool(config, 'query', budgets.query, 1_000),
-    worker: workloadPool(config, 'worker', budgets.worker, 1_000),
+    // Admission must remain fast under saturation, while an admitted query
+    // gets a workload-appropriate execution budget.
+    control: workloadPool(config, 'control', budgets.control, 200, 1_000),
+    ingest: workloadPool(config, 'ingest', budgets.ingest, 500, 5_000),
+    query: workloadPool(config, 'query', budgets.query, 1_000, 15_000),
+    worker: workloadPool(config, 'worker', budgets.worker, 1_000, 30_000),
   };
   console.log(`[db] pools control=${pools.control.options.max} ingest=${pools.ingest.options.max} query=${pools.query.options.max} worker=${pools.worker.options.max} total=${total}/${totalMax} single_max=${singleMax} (verify against PostgreSQL max_connections)`);
   return pools;

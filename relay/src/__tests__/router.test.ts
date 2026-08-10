@@ -132,6 +132,59 @@ test('durable ingress flag off preserves the legacy persist-and-ack path', async
   expect(pool.query).toHaveBeenCalledWith(expect.stringContaining('INSERT INTO events'), expect.anything())
 })
 
+test('legacy inline materialization preserves the Relay receipt timestamp', async () => {
+  const router = new Router(createMockPool(), { durableIngress: { mode: 'off' } })
+  const ws = createMockWs()
+  await router.registerDaemon(ws, {
+    type: 'register', daemon_id: 'legacy-receipt', hostname: 'h', agents: [], started_at: 17,
+  }, 1)
+  const materialize = vi.fn(async (_input: any) => ({
+    eventId: 1, inserted: true, completed: true, deliveries: [],
+  }))
+  ;(router as any).materializer = { materialize }
+  const receivedAt = new Date('2026-08-09T23:59:59.900Z')
+
+  router.handleDaemonMessage(
+    'legacy-receipt',
+    { type: 'agent_text', session_id: 's1', usage: { input_tokens: 1 }, seq: 1 },
+    undefined,
+    undefined,
+    false,
+    receivedAt,
+  )
+  await tick()
+
+  expect(materialize.mock.calls[0]?.[0]).toMatchObject({ receivedAt })
+})
+
+test('rejects usage without a positive sequence when immutable accounting is enabled', async () => {
+  const pool = createMockPool()
+  const repository = {
+    seedCheckpoint: vi.fn(async () => ({ daemonId: 'usage-no-seq', daemonGeneration: 17, ackSeq: 0 })),
+    persistBatch: vi.fn(),
+  }
+  const router = new Router(pool, {
+    durableIngress: { mode: 'on', repository },
+    writeTokenUsageFacts: true,
+  })
+  const ws = createMockWs()
+  await router.registerDaemon(ws, {
+    type: 'register', daemon_id: 'usage-no-seq', hostname: 'h', agents: [], started_at: 17,
+  }, 1)
+  ws._sent.length = 0
+
+  router.handleDaemonMessage('usage-no-seq', {
+    type: 'agent_text', session_id: 's1', usage: { input_tokens: 1 },
+  })
+  await tick()
+
+  expect(ws._sent).toContainEqual(expect.objectContaining({
+    type: 'relay_overloaded', retryable: true, reason: 'token_usage_requires_seq',
+  }))
+  expect(repository.persistBatch).not.toHaveBeenCalled()
+  expect(pool._queries.some((query: any) => query.sql.includes('INSERT INTO events'))).toBe(false)
+})
+
 test('normalizes NUL payload text before inline persistence and advances the contiguous ACK', async () => {
   const pool = createMockPool()
   const router = new Router(pool)

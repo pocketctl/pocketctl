@@ -33,6 +33,16 @@ var versionRe = regexp.MustCompile(`\d+\.\d+(?:\.\d+)?`)
 func DiscoverAgents() []AgentInfo {
 	var agents []AgentInfo
 	for _, a := range adapter.All() {
+		// Storage-discovered agents (zcode) are surfaced only when the user has
+		// explicitly enabled the read-only sync AND the local store probe passes.
+		// They have no CLI/npm metadata, are never manageable, and never trigger
+		// npm version queries.
+		if a.Discovery == adapter.DiscoveryStorage {
+			if info, ok := discoverStorageAgent(a); ok {
+				agents = append(agents, info)
+			}
+			continue
+		}
 		path, manageable, found := ResolveAgent(a.CLIName)
 		if !found {
 			continue

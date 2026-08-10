@@ -34,6 +34,7 @@ describe('account deletion persistence', () => {
       'DELETE FROM subagents',
       'DELETE FROM subagent_usage_seen',
       'DELETE FROM deleted_sessions',
+      'DELETE FROM token_session_daily_stats WHERE user_id = $1',
       'DELETE FROM token_daily_stats WHERE user_id = $1',
       'DELETE FROM audit_log WHERE user_id = $1',
       'DELETE FROM revoked_tokens WHERE user_id = $1',

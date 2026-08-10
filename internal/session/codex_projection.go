@@ -465,9 +465,11 @@ func (p *codexProjection) projectUsage(raw json.RawMessage) []protocol.DaemonEve
 		TurnID     string `json:"turnId"`
 		TokenUsage struct {
 			Last struct {
-				InputTokens       int `json:"inputTokens"`
-				CachedInputTokens int `json:"cachedInputTokens"`
-				OutputTokens      int `json:"outputTokens"`
+				InputTokens           int `json:"inputTokens"`
+				CachedInputTokens     int `json:"cachedInputTokens"`
+				OutputTokens          int `json:"outputTokens"`
+				ReasoningOutputTokens int `json:"reasoningOutputTokens"`
+				TotalTokens           int `json:"totalTokens"`
 			} `json:"last"`
 		} `json:"tokenUsage"`
 	}
@@ -481,9 +483,11 @@ func (p *codexProjection) projectUsage(raw json.RawMessage) []protocol.DaemonEve
 	return []protocol.DaemonEvent{{
 		Type: "agent_text", SessionID: params.ThreadID, EventID: key,
 		Usage: &protocol.ContextUsage{
-			InputTokens:  params.TokenUsage.Last.InputTokens,
-			OutputTokens: params.TokenUsage.Last.OutputTokens,
-			CacheRead:    params.TokenUsage.Last.CachedInputTokens,
+			InputTokens:     params.TokenUsage.Last.InputTokens,
+			OutputTokens:    params.TokenUsage.Last.OutputTokens,
+			CacheRead:       params.TokenUsage.Last.CachedInputTokens,
+			ReasoningTokens: params.TokenUsage.Last.ReasoningOutputTokens,
+			TotalTokens:     params.TokenUsage.Last.TotalTokens,
 		},
 	}}
 }

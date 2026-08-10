@@ -253,7 +253,7 @@ func TestCodex_TokenCountInfoFormat(t *testing.T) {
 	if len(evts) != 1 || evts[0].Usage == nil {
 		t.Fatalf("expected usage event, got %+v", evts)
 	}
-	if evts[0].Usage.InputTokens != 12535 || evts[0].Usage.OutputTokens != 56 || evts[0].Usage.CacheRead != 4736 {
+	if evts[0].Usage.InputTokens != 12535 || evts[0].Usage.OutputTokens != 56 || evts[0].Usage.CacheRead != 4736 || evts[0].Usage.ReasoningTokens != 47 || evts[0].Usage.TotalTokens != 12591 {
 		t.Errorf("got %+v", evts[0].Usage)
 	}
 }

@@ -72,6 +72,20 @@ export const workerRetries = new Counter({
   registers: [registry],
 })
 
+export const tokenUsageShadowComparisons = new Counter({
+  name: 'pocketctl_token_usage_shadow_comparisons_total',
+  help: 'Token dashboard shadow comparisons by aggregate result',
+  labelNames: ['result'] as const,
+  registers: [registry],
+})
+
+export const tokenUsageDayClosures = new Counter({
+  name: 'pocketctl_token_usage_day_closures_total',
+  help: 'UTC token accounting day closure attempts by bounded result',
+  labelNames: ['result'] as const,
+  registers: [registry],
+})
+
 // Emit zero-value gauges immediately so a freshly started Relay has a stable
 // diagnostic surface before the first ingress event or worker poll.
 ingressQueueDepth.set(0)

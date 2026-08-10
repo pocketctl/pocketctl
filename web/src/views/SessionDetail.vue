@@ -177,6 +177,12 @@
           <svg class="banner-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M12 16v-4"/><path d="M12 8h.01"/></svg>
           <span>{{ t('session.opencode_legacy_readonly') }}</span>
         </div>
+        <!-- ZCode observer sessions are read-only sync from the local ZCode
+             store; no remote input, approval, resume, or control is possible. -->
+        <div v-if="isZcodeObserverSession" class="banner banner-info zcode-observer-banner" style="flex-shrink:0;">
+          <svg class="banner-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M12 16v-4"/><path d="M12 8h.01"/></svg>
+          <span>{{ t('session.zcode_observer_readonly') }}</span>
+        </div>
         <!-- L1: send failed (ws not open at send time) -->
         <div v-if="sendError" class="banner banner-warning" style="flex-shrink:0;">
           <svg class="banner-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><path d="M12 9v4"/><path d="M12 17h.01"/></svg>
@@ -557,6 +563,7 @@ import FileChangeCard from '../components/messages/FileChangeCard.vue'
 import FileChangeBottomSheet from '../components/messages/FileChangeBottomSheet.vue'
 import SubAgentFoldGroup from '../components/messages/SubAgentFoldGroup.vue'
 import { buildResumeCommand } from '../utils/resumeCommand'
+import { isZcodeObserverSession as isZcodeObserverSessionHelper } from '../utils/zcodeObserver'
 import { resolveAgentTarget } from './classifyByAgent'
 import { formatToolInput } from '../utils/toolDisplay'
 import { isDiffTool } from '../utils/diffRender'
@@ -679,6 +686,11 @@ const isManagedOpenCode = computed(() => isManagedOpenCodeSession(
   currentSessionCapabilities.value,
 ))
 const isLegacyOpenCodeSession = computed(() => currentSessionAgent.value === 'opencode' && !isManagedOpenCode.value)
+// ZCode observer sessions are read-only sync from the local ZCode store. They
+// can be viewed but never driven: no composer, no stop/approval/permission, no
+// resume command (see buildResumeCommand). Used as a fail-closed gate for
+// canWriteWhenConnected and the read-only banner.
+const isZcodeObserverSession = computed(() => isZcodeObserverSessionHelper(currentSessionAgent.value))
 const interactionCardsDisabled = computed(() => isDisconnected.value || (
   interactionConnectivity.value !== 'ready' || (
   currentSessionAgent.value === 'opencode'
@@ -899,6 +911,13 @@ watch(
   { immediate: true },
 )
 const canWriteWhenConnected = computed(() => {
+  // Fail-closed gate: a ZCode observer session is read-only sync content from
+  // the local ZCode store. It can NEVER be written to, regardless of status,
+  // source, control_mode, or capabilities — including forged managed/acceptance
+  // fields. This check takes precedence over every other writeability rule.
+  if (isZcodeObserverSession.value) {
+    return false
+  }
   if (currentSessionAgent.value === 'claude-code') {
     return !focusedSubAgentId.value && canSendClaudeSession({
       status: status.value,
@@ -1161,6 +1180,8 @@ function copyResumeCmd() {
     cwd: (s as any).cwd,
     session_id: sessionId.value,
   })
+  // ZCode observer sessions have no resume command; suppress the copy action.
+  if (!cmd) return
   navigator.clipboard.writeText(cmd).then(() => {
     resumeCopied.value = true
     if (copyTimer) clearTimeout(copyTimer)

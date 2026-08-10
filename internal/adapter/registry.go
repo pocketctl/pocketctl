@@ -28,23 +28,35 @@ const (
 	// BackendServer: one shared long-running server process, sessions multiplexed
 	// over HTTP with a single SSE event stream (opencode).
 	BackendServer
+	// BackendObserver: the daemon cannot drive the agent at all — it only reads
+	// historical/incremental content from a passive store out of band (zcode).
+	// There is no process to spawn, no PTY, no CLI resume; CreateSession is
+	// fail-closed rejected. Defined in observer.go as a value far from 0 so a
+	// default-zero BackendKind can never match an observer.
+	BackendObserver
 )
 
 // Provider is the registration record for a coding agent.
 type Provider struct {
 	// Identity / discovery metadata (single source of truth; internal/discovery
 	// derives its agent list from here).
-	Type      string // canonical agent type: "claude-code" | "codex" | "opencode"
-	CLIName   string // installed binary name (e.g. "claude")
+	Type      string // canonical agent type: "claude-code" | "codex" | "opencode" | "zcode"
+	CLIName   string // installed binary name (e.g. "claude"); "" for observer agents
 	Package   string // npm package for version checks ("" = none)
 	UpdateCmd string // built-in upgrade command ("" = npm install -g <pkg>@latest)
+
+	// How the agent is discovered/version-probed. Defaults to DiscoveryCLI for
+	// subprocess/server agents; observer agents use DiscoveryStorage.
+	Discovery DiscoveryKind
 
 	// Session driving.
 	Backend      BackendKind
 	Capabilities AgentCapabilities
 
 	// Factories (nil for not-yet-implemented agents — callers fall back to the
-	// Claude default to preserve legacy behavior).
+	// Claude default to preserve legacy behavior). Observer agents wire these to
+	// fail-closed sentinels so generic callers can never accidentally drive them
+	// (see observer.go); CreateSession additionally rejects them up front.
 	NewAdapter  func(prompt string) AgentAdapter
 	NewParser   func() JSONLParser
 	NewLauncher func() SessionLauncher

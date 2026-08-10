@@ -216,6 +216,7 @@ import NewSessionDialog from '../components/NewSessionDialog.vue'
 import RegisterDaemonDialog from '../components/RegisterDaemonDialog.vue'
 import SessionActions from '../components/SessionActions.vue'
 import AgentBadge from '../components/AgentBadge.vue'
+import { agentDisplayName } from '../utils/agentDisplay'
 import { getInstallCommand, getRelayOrigin } from '../composables/useEnv'
 import { useSessionRename } from '../composables/useSessionRename'
 import { formatTokenCount, childAgentTokenTotal } from '../utils/tokenFormat'
@@ -301,8 +302,7 @@ function getActiveAgents(daemonId: string): string[] {
   return agents.size > 0 ? [...agents] : ['claude-code']
 }
 function agentLabel(agent: string): string {
-  const labels: Record<string, string> = { 'claude-code': 'Claude Code', 'opencode': 'OpenCode', 'codex': 'Codex' }
-  return labels[agent] || agent
+  return agentDisplayName(agent)
 }
 function statusChip(s: any): string {
   const st = getEffectiveStatus(s)

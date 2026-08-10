@@ -33,6 +33,20 @@ export class InboxRetention {
            FROM event_inbox i
            WHERE i.status = 2
              AND i.completed_at < NOW() - INTERVAL '${COMPLETED_RETENTION_HOURS} hours'
+             AND (
+               i.event_type <> 'agent_text'
+               OR NOT (i.payload ? 'usage')
+               OR NOT EXISTS (
+                 SELECT 1 FROM token_usage_accounting_state baseline
+                 WHERE baseline.key = 'baseline-v1'
+                   AND i.received_at >= baseline.completed_at
+               )
+               OR EXISTS (
+                 SELECT 1 FROM token_daily_closures closure
+                 WHERE closure.date = (i.received_at AT TIME ZONE 'UTC')::date
+                   AND closure.status = 'sealed'
+               )
+             )
              AND NOT EXISTS (
                SELECT 1
                FROM realtime_outbox o

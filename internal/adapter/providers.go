@@ -10,6 +10,7 @@ func init() {
 		CLIName:   "claude",
 		Package:   "@anthropic-ai/claude-code",
 		UpdateCmd: "claude update",
+		Discovery: DiscoveryCLI,
 		Backend:   BackendSubprocess,
 		Capabilities: AgentCapabilities{
 			SupportsPermissionCycle: true,
@@ -31,6 +32,7 @@ func init() {
 		CLIName:      "codex",
 		Package:      "@openai/codex",
 		UpdateCmd:    "",
+		Discovery:    DiscoveryCLI,
 		Backend:      BackendSubprocess,
 		Capabilities: AgentCapabilities{},
 		NewAdapter:   func(prompt string) AgentAdapter { return NewCodexAdapter() },
@@ -48,6 +50,26 @@ func init() {
 		CLIName:   "opencode",
 		Package:   "opencode-ai",
 		UpdateCmd: "opencode upgrade",
+		Discovery: DiscoveryCLI,
 		Backend:   BackendServer,
+	})
+
+	// zcode — read-only observer backend. The daemon never launches or drives a
+	// ZCode session: it only reads historical/incremental content from the local
+	// SQLite store out of band (see internal/zcode). No CLI/npm metadata, no
+	// upgrade command, not manageable. The factories are fail-closed sentinels so
+	// generic callers cannot fall back to a Claude-backed path; CreateSession
+	// additionally rejects this agent up front before any side effect.
+	Register(Provider{
+		Type:        AgentZcode,
+		CLIName:     "",
+		Package:     "",
+		UpdateCmd:   "",
+		Discovery:   DiscoveryStorage,
+		Backend:     BackendObserver,
+		NewAdapter:  func(prompt string) AgentAdapter { return observerAdapter{} },
+		NewParser:   func() JSONLParser { return observerParser{} },
+		NewLauncher: func() SessionLauncher { return observerLauncher{} },
+		NewStorage:  func() SessionStorage { return observerStorage{} },
 	})
 }

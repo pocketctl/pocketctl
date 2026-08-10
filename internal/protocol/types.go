@@ -192,10 +192,15 @@ type ModelOption struct {
 
 // ContextUsage carries token consumption for a single assistant turn.
 type ContextUsage struct {
-	InputTokens  int `json:"input_tokens,omitempty"`
-	OutputTokens int `json:"output_tokens,omitempty"`
-	CacheRead    int `json:"cache_read_tokens,omitempty"`
-	CacheCreate  int `json:"cache_create_tokens,omitempty"`
+	InputTokens     int `json:"input_tokens,omitempty"`
+	OutputTokens    int `json:"output_tokens,omitempty"`
+	CacheRead       int `json:"cache_read_tokens,omitempty"`
+	CacheCreate     int `json:"cache_create_tokens,omitempty"`
+	ReasoningTokens int `json:"reasoning_tokens,omitempty"`
+	// TotalTokens is the provider-reported total. It is not summed with the
+	// component fields because providers commonly include cached input and
+	// reasoning output in input_tokens/output_tokens respectively.
+	TotalTokens int `json:"total_tokens,omitempty"`
 }
 
 type PermissionConfig struct {

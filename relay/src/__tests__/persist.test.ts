@@ -170,7 +170,24 @@ describe('durable event effect ledger', () => {
     expect(sql).toContain('checkpoint AS')
     expect(sql).toContain('UPDATE events SET effect_step')
     expect(sql).toContain('total_tokens = COALESCE')
-    expect(params).toEqual([9, 2, 7, 3, 4, 0, 0, 'sess-1'])
+    expect(params).toEqual([9, 2, 7, 3, 4, 0, 0, 'sess-1', false, null, 0, 0, null])
+  })
+
+  test('atomically records an immutable usage fact when fact writing is enabled', async () => {
+    const pool: any = { query: vi.fn(async () => ({ rows: [{ session_exists: true, claimed: true, applied: true }], rowCount: 1 })) }
+    const receivedAt = new Date('2026-08-09T12:34:56.000Z')
+    await incrementSessionTokensForEvent(
+      pool, 9, 2, 'sess-1',
+      { input_tokens: 3, output_tokens: 4, reasoning_tokens: 2, total_tokens: 7 },
+      { writeFact: true, receivedAt },
+    )
+    const [sql, params] = pool.query.mock.calls[0]
+    expect(sql).toContain('INSERT INTO token_usage_facts')
+    expect(sql).toContain("'event:' || $1")
+    expect(sql).toContain('FROM checkpoint')
+    expect(sql).toContain("AT TIME ZONE 'UTC'")
+    expect(sql).toContain('session_target.daemon_id IS NOT NULL')
+    expect(params).toEqual([9, 2, 7, 3, 4, 0, 0, 'sess-1', true, receivedAt, 2, 7, null])
   })
 
   test('does not checkpoint token usage until its session exists and only one concurrent caller claims it', async () => {

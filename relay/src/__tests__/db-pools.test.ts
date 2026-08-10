@@ -26,10 +26,12 @@ describe('relay PostgreSQL workload pools', () => {
     expect((pools.ingest as any).options.application_name).toBe('pocketctl-relay-ingest')
     expect((pools.query as any).options.application_name).toBe('pocketctl-relay-query')
     expect((pools.worker as any).options.application_name).toBe('pocketctl-relay-worker')
-    expect((pools.control as any).options.statement_timeout).toBe(200)
-    expect((pools.ingest as any).options.statement_timeout).toBe(500)
-    expect((pools.query as any).options.statement_timeout).toBe(1_000)
-    expect((pools.worker as any).options.statement_timeout).toBe(1_000)
+    // Checkout deadlines protect admission; statement limits protect the work
+    // after a connection is acquired. They must be configured independently.
+    expect((pools.control as any).options.statement_timeout).toBe(1_000)
+    expect((pools.ingest as any).options.statement_timeout).toBe(5_000)
+    expect((pools.query as any).options.statement_timeout).toBe(15_000)
+    expect((pools.worker as any).options.statement_timeout).toBe(30_000)
 
     await closeRelayPools(pools)
   })

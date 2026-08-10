@@ -66,5 +66,7 @@ describe('protected aggregate relay metrics', () => {
     expect(text).not.toContain('token=')
     expect(text).toContain('pocketctl_relay_ingress_events_total')
     expect(text).toContain('pocketctl_inbox_oldest_seconds')
+    expect(text).toContain('pocketctl_token_usage_shadow_comparisons_total')
+    expect(text).toContain('pocketctl_token_usage_day_closures_total')
   })
 })

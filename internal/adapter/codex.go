@@ -501,9 +501,11 @@ func convertCodexEventMsg(p codexPayload) []protocol.DaemonEvent {
 		return []protocol.DaemonEvent{{
 			Type: "agent_text", // usage rides on an agent_text so the web can attribute it
 			Usage: &protocol.ContextUsage{
-				InputTokens:  u.InputTokens,
-				OutputTokens: u.OutputTokens,
-				CacheRead:    u.CachedInputTokens,
+				InputTokens:     u.InputTokens,
+				OutputTokens:    u.OutputTokens,
+				CacheRead:       u.CachedInputTokens,
+				ReasoningTokens: u.ReasoningOutputTokens,
+				TotalTokens:     u.TotalTokens,
 			},
 		}}
 
