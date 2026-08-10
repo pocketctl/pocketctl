@@ -490,4 +490,56 @@ describeWithDatabase('token usage Task 2 PostgreSQL contracts', () => {
       `SELECT status, last_error FROM token_daily_closures WHERE date = $1`, [date],
     )).rows[0]).toEqual({ status: 'failed', last_error: 'missing_usage_facts' })
   })
+
+  test('accepts a replay receipt linked to a pre-baseline event fact', async () => {
+    const date = new Date(Date.now() - 21 * 86_400_000).toISOString().slice(0, 10)
+    const baselineAt = new Date(Date.now() - 30 * 86_400_000)
+    const user = await pool.query<{ id: number }>(`
+      INSERT INTO users (email, password_hash) VALUES ('event-fact-replay@example.test', '') RETURNING id
+    `)
+    const userId = user.rows[0].id
+    await pool.query(`
+      INSERT INTO token_usage_accounting_state (key, completed_at)
+      VALUES ('baseline-v1', $1)
+      ON CONFLICT (key) DO UPDATE SET completed_at = EXCLUDED.completed_at
+    `, [baselineAt])
+    await pool.query(`INSERT INTO daemons (daemon_id, user_id) VALUES ('event-fact-replay-daemon', $1)`, [userId])
+    await pool.query(`
+      INSERT INTO sessions (session_id, daemon_id, user_id, model, agent_type)
+      VALUES ('event-fact-replay-session', 'event-fact-replay-daemon', $1, 'gpt-test', 'codex')
+    `, [userId])
+    const event = await pool.query<{ id: string }>(`
+      INSERT INTO events (session_id, event_type, payload, event_hash, effect_status, effect_step, created_at)
+      VALUES ('event-fact-replay-session', 'agent_text',
+              '{"type":"agent_text","event_id":"replayed-turn","usage":{"input_tokens":13,"output_tokens":2}}',
+              'event-fact-replay', 'completed', 1,
+              ($1::date + TIME '12:00') AT TIME ZONE 'UTC')
+      RETURNING id
+    `, [date])
+    await pool.query(`
+      INSERT INTO token_usage_facts (
+        fact_key, source_event_id, user_id, daemon_id, session_id, agent_type, model,
+        usage_date, recorded_at, input, output, requests
+      ) VALUES ('event:' || $1::text, $1::bigint, $2, 'event-fact-replay-daemon',
+                'event-fact-replay-session', 'codex', 'gpt-test', $3,
+                ($3::date + TIME '12:00') AT TIME ZONE 'UTC', 13, 2, 1)
+    `, [event.rows[0].id, userId, date])
+    await pool.query(`
+      INSERT INTO event_inbox (
+        user_id, daemon_id, daemon_generation, seq, dedup_key, session_id,
+        event_type, priority_class, received_at, payload, status, completed_at,
+        materialized_event_id
+      ) VALUES (
+        $1, 'event-fact-replay-daemon', 1, 1, 'event-fact-replay-inbox',
+        'event-fact-replay-session', 'agent_text', 0,
+        ($2::date + TIME '12:05') AT TIME ZONE 'UTC',
+        '{"type":"agent_text","event_id":"replayed-turn","usage":{"input_tokens":13,"output_tokens":2}}',
+        2, NOW(), $3
+      )
+    `, [userId, date, event.rows[0].id])
+
+    await expect(closeTokenUsageDay(pool, date)).resolves.toEqual({
+      date, status: 'sealed', factCount: 1, total: 15,
+    })
+  })
 })

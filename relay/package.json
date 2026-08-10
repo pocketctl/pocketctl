@@ -8,6 +8,7 @@
     "build": "tsc",
     "start": "node dist/server.js",
     "start:worker": "node dist/event-worker-main.js",
+    "preflight:token-usage": "node dist/token-usage-preflight-main.js",
     "test": "vitest run",
     "test:watch": "vitest"
   },

@@ -108,11 +108,15 @@ export async function closeTokenUsageDay(
        FROM event_inbox inbox
        JOIN token_usage_accounting_state baseline ON baseline.key = 'baseline-v1'
        LEFT JOIN token_usage_facts fact ON fact.fact_key = 'inbox:' || inbox.inbox_id
+       LEFT JOIN token_usage_facts event_fact
+         ON inbox.materialized_event_id IS NOT NULL
+        AND event_fact.source_event_id = inbox.materialized_event_id
        WHERE inbox.received_at >= baseline.completed_at
          AND inbox.received_at >= ($1::date::timestamp AT TIME ZONE 'UTC')
          AND inbox.received_at < (($1::date + 1)::timestamp AT TIME ZONE 'UTC')
          AND inbox.status = 2 AND inbox.event_type = 'agent_text'
-         AND inbox.payload ? 'usage' AND fact.fact_key IS NULL`,
+         AND inbox.payload ? 'usage'
+         AND fact.fact_key IS NULL AND event_fact.fact_key IS NULL`,
       [date],
     )
     if (Number(missingFacts.rows[0]?.count ?? 0) > 0) {
