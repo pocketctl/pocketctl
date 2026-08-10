@@ -2,6 +2,10 @@ import { describe, test, expect, vi, beforeEach } from 'vitest'
 import { mount, flushPromises } from '@vue/test-utils'
 import TokenUsage from '../TokenUsage.vue'
 
+vi.mock('vue-router', () => ({
+  useRoute: () => ({ query: { daemon: 'daemon-1' } }),
+}))
+
 vi.mock('../../composables/useAuth', () => ({
   useAuth: () => ({
     accessToken: { value: 'tk' },
@@ -36,5 +40,13 @@ describe('TokenUsage.vue (P1a)', () => {
     await flushPromises()
     // summary 卡 total 区域含「含子」标注（title 属性或文本）
     expect(w.html()).toMatch(/含子代理|incl.*subagent/i)
+  })
+
+  test('uses the host query from a host-card token destination', async () => {
+    mount(TokenUsage)
+    await flushPromises()
+
+    expect(fetch).toHaveBeenCalledWith('/api/tokens/dashboard?daemon=daemon-1&days=270')
+    expect(fetch).toHaveBeenCalledWith('/api/tokens/by-daemon/daemon-1')
   })
 })

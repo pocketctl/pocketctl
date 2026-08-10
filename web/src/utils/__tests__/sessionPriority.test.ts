@@ -2,7 +2,7 @@ import { describe, expect, test } from 'vitest'
 import { sortMobileSessions } from '../sessionPriority'
 
 describe('sortMobileSessions', () => {
-  test('puts sessions needing attention before active and finished sessions', () => {
+  test('matches iOS pin-first then recent-activity ordering across statuses', () => {
     const sessions = [
       { session_id: 'finished-pinned', status: 'completed', pinned: true, last_activity_at: '2026-07-25T12:00:00Z' },
       { session_id: 'active', status: 'running', last_activity_at: '2026-07-25T11:00:00Z' },
@@ -11,14 +11,14 @@ describe('sortMobileSessions', () => {
     ]
 
     expect(sortMobileSessions(sessions).map(session => session.session_id)).toEqual([
+      'finished-pinned',
+      'active',
       'approval',
       'question',
-      'active',
-      'finished-pinned',
     ])
   })
 
-  test('uses pinning and recent activity inside the same priority group', () => {
+  test('uses pinning and recent activity without status buckets', () => {
     const sessions = [
       { session_id: 'older', status: 'busy', last_activity_at: '2026-07-25T09:00:00Z' },
       { session_id: 'newer', status: 'running', last_activity_at: '2026-07-25T11:00:00Z' },

@@ -5,6 +5,7 @@
       'sidebar-collapsed': sidebarCollapsed,
       'mobile-shell-active': showMobileShell,
       'mobile-session-route': showMobileShell && isSessionRoute,
+      'mobile-session-list-route': showMobileShell && isSessionListRoute,
     }"
   >
     <!-- Sidebar -->
@@ -67,7 +68,8 @@
       :connected="connected"
       :reconnecting="reconnecting"
       :is-session="isSessionRoute"
-      :show-bottom-nav="!isSessionRoute"
+      :show-top-bar="!isSessionListRoute"
+      :show-bottom-nav="!isSessionRoute && !isSessionListRoute"
       :show-new-session="route.path === '/sessions'"
       :session-count="sessionCount"
       :plan="mobileCurrentPlan"
@@ -129,6 +131,7 @@ const { connected, reconnecting } = useWebSocket()
 const { isMobile } = useResponsiveLayout()
 const showMobileShell = computed(() => isLoggedIn.value && isPwaMobileShellEnabled() && isMobile.value)
 const isSessionRoute = computed(() => route.path.startsWith('/session/'))
+const isSessionListRoute = computed(() => route.path === '/sessions')
 const { planForSession } = useAgentPlanProgress()
 const { sessionHeader } = useSessionHeader()
 const mobileCurrentPlan = planForSession(computed(() =>
@@ -281,6 +284,10 @@ if (typeof window !== 'undefined') {
   padding-bottom: var(--mobile-bottom-nav-h);
 }
 .mobile-shell-active.mobile-session-route .main-content {
+  padding-bottom: 0;
+}
+.mobile-shell-active.mobile-session-list-route .main-content {
+  padding-top: 0;
   padding-bottom: 0;
 }
 </style>

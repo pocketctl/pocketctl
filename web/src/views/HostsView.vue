@@ -2,7 +2,20 @@
   <div class="page-container">
     <div class="mobile-hosts-heading">
       <h1>{{ t('mobile.my_hosts') }}</h1>
-      <p>{{ daemons.length }} {{ t('hosts.host_unit') }} · {{ onlineCount }} {{ t('dashboard.online') }}</p>
+      <p :class="{ 'quota-over-limit': boundHosts?.over_limit }">
+        {{ daemons.length }} {{ t('hosts.host_unit') }} · {{ onlineCount }} {{ t('dashboard.online') }}
+        <template v-if="boundHosts"> · {{ t('mobile.host_quota') }} {{ boundHosts.used }}/{{ boundHosts.limit ?? '∞' }}</template>
+      </p>
+    </div>
+
+    <div class="mobile-host-overview" :aria-label="t('mobile.host_overview')">
+      <div data-metric="online"><strong>{{ onlineCount }}</strong><span>{{ t('dashboard.online') }}</span></div>
+      <i></i>
+      <div data-metric="offline"><strong>{{ offlineCount }}</strong><span>{{ t('dashboard.offline') }}</span></div>
+      <i></i>
+      <div data-metric="today-token"><strong>{{ formatTokenCount(tokenGlobal?.today) }}</strong><span>{{ t('mobile.host_today_token') }}</span></div>
+      <i></i>
+      <div data-metric="active-sessions"><strong>{{ mobileActiveSessions }}</strong><span>{{ t('dashboard.active_sessions') }}</span></div>
     </div>
 
     <!-- Page Header -->
@@ -51,10 +64,13 @@
               :key="`mobile-${d.daemon_id}`"
               :daemon="d"
               :active-sessions="d.active_sessions || 0"
-              :total-sessions="hostSessionCount(d.daemon_id)"
+              :total-sessions="d.total_sessions ?? hostSessionCount(d.daemon_id)"
               :last-activity-label="hostLastActivityLabel(d)"
               @sessions="goSessionWithHost(d)"
               @new-session="openMobileNewSession(d)"
+              @token="goTokenUsage(d)"
+              @agent="openMobileAgentManager(d)"
+              @set-alias="updateAlias(d, $event)"
               @more="openMenu($event, d)"
             />
           </template>
@@ -254,6 +270,13 @@
       @action="onMenuAct"
       @close="closeMenu"
     />
+    <MobileAgentManager
+      v-if="mobileAgentHost"
+      :daemon="mobileAgentHost"
+      :upgrading="upgrading"
+      @close="closeMobileAgentManager"
+      @upgrade="upgradeMobileAgent"
+    />
 
     <!-- Register Dialog -->
     <RegisterDaemonDialog v-if="showRegister" @close="showRegister = false" />
@@ -302,6 +325,7 @@ import RegisterDaemonDialog from '../components/RegisterDaemonDialog.vue'
 import NewSessionDialog from '../components/NewSessionDialog.vue'
 import MobileHostCard from '../components/hosts/MobileHostCard.vue'
 import HostActionsMenu from '../components/hosts/HostActionsMenu.vue'
+import MobileAgentManager from '../components/hosts/MobileAgentManager.vue'
 import AgentBadge from '../components/AgentBadge.vue'
 import { getRelayOrigin } from '../composables/useEnv'
 import { formatTokenCount } from '../utils/tokenFormat'
@@ -323,6 +347,7 @@ const filter = ref<'all' | 'online' | 'offline'>('all')
 const searchQuery = ref('')
 const showRegister = ref(false)
 const mobileNewSessionHost = ref<any | null>(null)
+const mobileAgentHost = ref<any | null>(null)
 const toast = ref<{ show: boolean; msg: string; undo?: () => void }>({ show: false, msg: '' })
 const confirm = ref<{ show: boolean; title: string; desc: string; confirmText: string; danger: boolean; loading: boolean; action: () => void }>({
   show: false, title: '', desc: '', confirmText: '确认', danger: false, loading: false, action: () => {}
@@ -335,6 +360,7 @@ const menuOpen = ref(false)
 const menuX = ref(0)
 const menuY = ref(0)
 const menuTarget = ref<any>(null)
+let mobileAgentOwnsHistory = false
 
 // C4c: agent upgrade (claude-code) in-flight state
 const upgrading = ref('')
@@ -360,6 +386,7 @@ async function fetchCostByDaemon(id: string) {
 
 const onlineCount = computed(() => daemons.value.filter(d => d.daemon_online).length)
 const offlineCount = computed(() => daemons.value.filter(d => !d.daemon_online).length)
+const mobileActiveSessions = computed(() => daemons.value.reduce((total, daemon) => total + Number(daemon.active_sessions || 0), 0))
 const selectedDaemon = computed(() => daemons.value.find(d => d.daemon_id === selectedId.value))
 
 watch(selectedDaemon, (d) => {
@@ -368,7 +395,7 @@ watch(selectedDaemon, (d) => {
 })
 
 const filteredDaemons = computed(() => {
-  let list = daemons.value
+  let list = [...daemons.value].sort((a, b) => Number(!!b.daemon_online) - Number(!!a.daemon_online))
   if (filter.value === 'online') list = list.filter(d => d.daemon_online)
   if (filter.value === 'offline') list = list.filter(d => !d.daemon_online)
   if (searchQuery.value.trim()) {
@@ -456,9 +483,9 @@ function agentMetaLabel(a: any): string {
   }
   return t('settings.version_pending')
 }
-async function upgradeAgent(name: string) {
+async function upgradeAgent(name: string, target?: any) {
   if (upgrading.value) return
-  const d = selectedDaemon.value
+  const d = target || selectedDaemon.value
   if (!d) return
   upgrading.value = name
   try {
@@ -495,6 +522,35 @@ function selectHost(id: string) {
 
 function goSessionWithHost(d: any) {
   router.push(hostSessionsLocation(d.daemon_id))
+}
+
+function goTokenUsage(d: any) {
+  router.push({ path: '/tokens', query: { daemon: d.daemon_id } })
+}
+
+function openMobileAgentManager(d: any) {
+  if (!d.daemon_online || mobileAgentHost.value) return
+  window.history.pushState({ ...window.history.state, pocketctlAgentManager: true }, '')
+  mobileAgentOwnsHistory = true
+  mobileAgentHost.value = d
+}
+
+function closeMobileAgentManager() {
+  mobileAgentHost.value = null
+  if (mobileAgentOwnsHistory) {
+    mobileAgentOwnsHistory = false
+    window.history.back()
+  }
+}
+
+function closeMobileAgentFromHistory() {
+  if (!mobileAgentHost.value) return
+  mobileAgentOwnsHistory = false
+  mobileAgentHost.value = null
+}
+
+function upgradeMobileAgent(name: string) {
+  upgradeAgent(name, mobileAgentHost.value)
 }
 
 function openMobileNewSession(d: any) {
@@ -575,14 +631,14 @@ function openDetailMenu(e: MouseEvent) {
 
 function closeMenu() { menuOpen.value = false }
 
-function onMenuAct(act: HostActionId) {
+function onMenuAct(act: HostActionId, alias?: string | null) {
   closeMenu()
   const d = menuTarget.value
   if (!d) return
   const id = d.daemon_id
   setTimeout(() => {
     if (act === 'refresh') refreshHost(d)
-    else if (act === 'alias') { selectedId.value = id; startRename(d) }
+    else if (act === 'alias') { selectedId.value = id; updateAlias(d, alias ?? null) }
     else if (act === 'restart') confirmRestart(d)
     else if (act === 'kick') confirmKick(d)
     else if (act === 'unregister') confirmUnregister(d)
@@ -653,18 +709,15 @@ function confirmUnregister(d: any) {
   })
 }
 
-function startRename(d: any) {
-  const newName = prompt(t('hosts.alias_prompt'), d.daemon_alias || d.hostname || '')
-  if (newName && newName.trim()) {
-    const oldName = d.daemon_alias
-    d.daemon_alias = newName.trim()
-    const origin = getRelayOrigin()
-    fetch(`${origin}/api/daemons/${d.daemon_id}/alias`, {
-      method: 'PUT', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${accessToken.value}` },
-      body: JSON.stringify({ alias: newName.trim() })
-    }).catch(() => {})
-    showToast(t('hosts.rename_toast', { name: newName.trim() }), () => { d.daemon_alias = oldName })
-  }
+function updateAlias(d: any, alias: string | null) {
+  const oldName = d.daemon_alias
+  d.daemon_alias = alias
+  const origin = getRelayOrigin()
+  fetch(`${origin}/api/daemons/${d.daemon_id}/alias`, {
+    method: 'PUT', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${accessToken.value}` },
+    body: JSON.stringify({ alias })
+  }).catch(() => { d.daemon_alias = oldName })
+  showToast(alias ? t('hosts.rename_toast', { name: alias }) : t('hosts.alias_cleared'), () => { d.daemon_alias = oldName })
 }
 
 // Global close for menu
@@ -681,6 +734,7 @@ onMounted(() => {
   document.addEventListener('keydown', onEsc)
   window.addEventListener('scroll', onScroll, true)
   window.addEventListener('resize', onScroll, true)
+  window.addEventListener('popstate', closeMobileAgentFromHistory)
 
   cleanups.push(onEvent('daemon_list', (msg: any) => {
     daemons.value = msg.daemons || []
@@ -741,6 +795,7 @@ onUnmounted(() => {
   document.removeEventListener('keydown', onEsc)
   window.removeEventListener('scroll', onScroll, true)
   window.removeEventListener('resize', onScroll, true)
+  window.removeEventListener('popstate', closeMobileAgentFromHistory)
 })
 </script>
 
@@ -749,7 +804,8 @@ onUnmounted(() => {
 .page-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 24px; gap: 16px; }
 .page-title { font-size: 24px; font-weight: 700; color: var(--fg); font-family: var(--font-display); }
 .page-subtitle { font-size: 14px; color: var(--fg-secondary); margin-top: 4px; }
-.mobile-hosts-heading { display: none; }
+.mobile-hosts-heading,
+.mobile-host-overview { display: none; }
 
 /* 全局 Token 概览条（占位） */
 .token-global-strip { display: flex; align-items: center; gap: 24px; padding: 10px 18px; background: var(--bg); border: 1px solid var(--border); border-radius: var(--radius-lg); margin-bottom: 20px; font-size: 13px; }
@@ -976,18 +1032,27 @@ onUnmounted(() => {
 @media (max-width: 900px) { .host-cards-grid { grid-template-columns: repeat(auto-fill, minmax(160px, 1fr)); } .host-detail-grid { grid-template-columns: 1fr; } .conn-grid { grid-template-columns: 1fr; } }
 @media (max-width: 520px) { .host-controls { flex-direction: column; align-items: stretch; } .host-search { max-width: none; } .host-cards-grid { grid-template-columns: repeat(2, 1fr); } .host-filter { justify-content: space-between; } }
 @media (max-width: 768px) {
-  .page-container { padding: 14px 12px 20px; }
+  .page-container { padding: 12px 10px 20px; }
   .page-header,
   .token-global-strip,
   .host-controls,
   .desktop-host-card,
   .host-detail-panel { display: none; }
-  .mobile-hosts-heading { display: block; margin: 4px 2px 16px; }
-  .mobile-hosts-heading h1 { margin: 0; color: var(--fg); font-size: 27px; font-weight: 750; letter-spacing: -.02em; }
-  .mobile-hosts-heading p { margin: 5px 0 0; color: var(--fg-secondary); font-size: 12px; }
+  .mobile-hosts-heading { display: block; margin: 0 0 12px; }
+  .mobile-hosts-heading h1 { margin: 0; color: var(--fg); font: 700 34px/1.16 var(--font-display); letter-spacing: -.025em; }
+  .mobile-hosts-heading p { margin: 4px 0 0; color: var(--fg-secondary); font-size: 13px; }
+  .mobile-hosts-heading p.quota-over-limit { color: var(--error); }
+  .mobile-host-overview { display: grid; grid-template-columns: minmax(0, 1fr) 1px minmax(0, 1fr) 1px minmax(0, 1fr) 1px minmax(0, 1fr); align-items: center; margin-bottom: 12px; padding: 10px 0; overflow: hidden; border: 1px solid var(--border-light); border-radius: var(--radius-lg); background: var(--surface); }
+  .mobile-host-overview > div { min-width: 0; min-height: 34px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 2px; }
+  .mobile-host-overview > i { width: 1px; height: 34px; background: var(--border); }
+  .mobile-host-overview strong { max-width: 100%; overflow: hidden; color: var(--fg); font-size: 14px; font-weight: 700; line-height: 1.2; text-overflow: ellipsis; white-space: nowrap; }
+  .mobile-host-overview [data-metric="online"] strong { color: var(--success); }
+  .mobile-host-overview [data-metric="offline"] strong { color: var(--fg-tertiary); }
+  .mobile-host-overview [data-metric="today-token"] strong { color: var(--accent); }
+  .mobile-host-overview span { max-width: 100%; overflow: hidden; color: var(--fg-tertiary); font-size: 10px; line-height: 1.2; text-overflow: ellipsis; white-space: nowrap; }
   .hosts-layout,
   .hosts-grid-wrap { width: 100%; }
-  .host-cards-grid { display: grid; grid-template-columns: 1fr; gap: 10px; }
+  .host-cards-grid { display: grid; grid-template-columns: 1fr; gap: 8px; }
 }
 @media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation-duration: 0.01ms !important; transition-duration: 0.01ms !important; } }
 </style>

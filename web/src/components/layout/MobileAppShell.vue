@@ -1,6 +1,7 @@
 <template>
   <div class="mobile-app-shell">
     <MobileTopBar
+      v-if="showTopBar"
       :title="title"
       :connected="connected"
       :reconnecting="reconnecting"
@@ -36,6 +37,7 @@ const props = defineProps<{
   connected: boolean
   reconnecting: boolean
   isSession: boolean
+  showTopBar: boolean
   showBottomNav: boolean
   showNewSession: boolean
   sessionCount: number

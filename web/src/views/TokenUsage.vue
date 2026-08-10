@@ -185,6 +185,7 @@
 
 <script setup lang="ts">
 import { ref, computed, onMounted } from 'vue'
+import { useRoute } from 'vue-router'
 import { useLocale } from '../composables/useLocale'
 import { useAuth } from '../composables/useAuth'
 import AgentBadge from '../components/AgentBadge.vue'
@@ -192,6 +193,7 @@ import { formatTokenCount, childAgentTokenTotal } from '../utils/tokenFormat'
 
 const { t } = useLocale()
 const { accessToken, apiGetAuth } = useAuth()
+const route = useRoute()
 
 // 柱状图单柱最大像素高度（双柱：input + output，需与 .bar-chart 容器高度协调）
 const BAR_CHART_MAX_H = 90
@@ -213,7 +215,8 @@ const dailySeries = ref<any[]>([])
 const byModel = ref<any[]>([])
 const byDaemon = ref<any[]>([])
 const sessions = ref<any[]>([])
-const selectedHost = ref<string>('all')
+const requestedHost = typeof route.query.daemon === 'string' ? route.query.daemon.trim() : ''
+const selectedHost = ref<string>(requestedHost || 'all')
 const hostMenuOpen = ref(false)
 const expanded = ref<string | null>(null)
 const sessionTrend = ref<any[]>([])

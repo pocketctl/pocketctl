@@ -39,7 +39,7 @@ function testRouter(path = '/sessions') {
 
 describe('mobile application shell', () => {
   test('replaces the desktop sidebar with accessible mobile navigation', async () => {
-    const router = testRouter()
+    const router = testRouter('/settings')
     await router.isReady()
     const App = (await import('../../../App.vue')).default
     const wrapper = mount(App, { global: { plugins: [router] } })
@@ -49,6 +49,17 @@ describe('mobile application shell', () => {
     expect(wrapper.get('a[href="/sessions"]').attributes('aria-label')).toBeTruthy()
     expect(wrapper.get('a[href="/settings"]').attributes('aria-label')).toBeTruthy()
     expect(wrapper.get('[role="status"]').text()).not.toBe('')
+  })
+
+  test('lets the session list render its iOS-style navigation chrome', async () => {
+    const router = testRouter()
+    await router.isReady()
+    const App = (await import('../../../App.vue')).default
+    const wrapper = mount(App, { global: { plugins: [router] } })
+
+    expect(wrapper.find('.mobile-topbar').exists()).toBe(false)
+    expect(wrapper.find('.mobile-bottom-nav').exists()).toBe(false)
+    expect(wrapper.find('.mobile-session-list-route').exists()).toBe(true)
   })
 
   test('hides bottom navigation inside a session to maximize message space', async () => {
