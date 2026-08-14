@@ -35,6 +35,25 @@ func TestClaudeChannelBindingWatcherFirstThenChannelBindsOnce(t *testing.T) {
 	}
 }
 
+func TestClaudeChannelBindingFallsBackWhenRegisterHasNoProcessIdentity(t *testing.T) {
+	events := make(chan protocol.DaemonEvent, 8)
+	sm := NewSessionManager(events)
+	sm.RegisterTerminalSession("session-windows", "/repo", 6002, "/dev/tty1", protocol.StatusRunning, adapter.AgentClaude)
+	sm.mu.Lock()
+	sm.sessions["session-windows"].ProcessStartIdentity = "windows:123"
+	sm.mu.Unlock()
+	sm.HandleClaudeChannelRegister(claudechannel.RegisterEvent{
+		InstanceID: "instance-windows", ClaudeParentPID: 6002, ChannelPID: 7002,
+		ProtocolVersion: claudechannel.MCPProtocolVersion,
+	})
+	sm.mu.RLock()
+	bound := sm.sessions["session-windows"].ClaudeChannelInstanceID
+	sm.mu.RUnlock()
+	if bound != "instance-windows" {
+		t.Fatalf("identity-less register did not bind current terminal session: %q", bound)
+	}
+}
+
 // TestClaudeChannelBindingBothOrderingsYieldSingleBinding verifies that no
 // matter the order, the instance ends up bound to exactly one session and
 // the session carries exactly one instance id.

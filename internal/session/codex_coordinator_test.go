@@ -558,9 +558,9 @@ func TestCodexCoordinatorReconnectsDaemonClientAfterSocketDisconnect(t *testing.
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	coord.mu.Lock()
-	coord.stopEventPumpLocked()
-	coord.mu.Unlock()
+	if err := coord.shutdown(); err != nil {
+		t.Fatalf("shutdown reconnected coordinator: %v", err)
+	}
 }
 
 func TestCodexCoordinatorStartsOneRuntimeForConcurrentAcquire(t *testing.T) {

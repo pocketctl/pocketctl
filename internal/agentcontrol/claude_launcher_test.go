@@ -51,11 +51,15 @@ func goodBootstrap(_ context.Context) (ClaudeBootstrapResult, error) {
 }
 
 func TestNewClaudeLauncherUsesDaemonChannelBootstrap(t *testing.T) {
-	home, err := os.MkdirTemp("/private/tmp", "ccl")
-	if err != nil {
-		t.Fatal(err)
+	home := t.TempDir()
+	if runtime.GOOS != "windows" {
+		var err error
+		home, err = os.MkdirTemp("/tmp", "ccl")
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = os.RemoveAll(home) })
 	}
-	t.Cleanup(func() { _ = os.RemoveAll(home) })
 	t.Setenv("HOME", home)
 	socketPath := appconfig.ClaudeChannelSocketPath()
 	mcpPath := filepath.Join(filepath.Dir(socketPath), "claude-channel", "mcp.json")
@@ -178,8 +182,8 @@ func TestClaudeLauncherNativeCommandsDontProbe(t *testing.T) {
 			if exec.last.Path != "/real/claude" {
 				t.Fatalf("exec path=%q want /real/claude", exec.last.Path)
 			}
-			if exec.last.Dir != "/repo" {
-				t.Fatalf("cwd=%q want /repo", exec.last.Dir)
+			if exec.last.Dir != filepath.Clean("/repo") {
+				t.Fatalf("cwd=%q want %q", exec.last.Dir, filepath.Clean("/repo"))
 			}
 			// Injected args MUST be absent.
 			for _, arg := range exec.last.Args {
@@ -506,8 +510,8 @@ func TestClaudeLauncherPreservesEnvCwdAndExitCode(t *testing.T) {
 		Bootstrap:     claudeBootstrapUnavailable,
 		ResolveBinary: func() (string, error) { return "/real/claude", nil },
 		Execute: func(spec ExecSpec) error {
-			if spec.Dir != "/work" {
-				t.Fatalf("cwd=%q want /work", spec.Dir)
+			if spec.Dir != filepath.Clean("/work") {
+				t.Fatalf("cwd=%q want %q", spec.Dir, filepath.Clean("/work"))
 			}
 			if len(spec.Env) != 2 || spec.Env[0] != "FOO=bar" || spec.Env[1] != "PATH=/usr/bin" {
 				t.Fatalf("env=%v want custom env", spec.Env)

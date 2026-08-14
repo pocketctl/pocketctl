@@ -100,7 +100,6 @@ func TestCodexAppServerHelperProcess(t *testing.T) {
 	if err != nil {
 		os.Exit(2)
 	}
-	_ = os.Chmod(socketPath, 0o600)
 	upgrader := websocket.Upgrader{}
 	server := http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		conn, upgradeErr := upgrader.Upgrade(w, r, nil)

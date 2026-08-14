@@ -113,9 +113,19 @@ func startCodexAppServerWithFactory(ctx context.Context, binary, _ string, gener
 		if statErr != nil {
 			continue
 		}
-		if info.Mode()&os.ModeSocket == 0 || info.Mode().Perm() != 0o600 {
+		if info.Mode()&os.ModeSocket == 0 {
 			_ = stop()
-			return nil, fmt.Errorf("Codex app-server socket must be private (0600)")
+			return nil, fmt.Errorf("Codex app-server endpoint is not a Unix socket")
+		}
+		// Unix listeners are commonly created using the process umask before the
+		// child can tighten their mode. The runtime directory is already private,
+		// and the daemon owns this exact per-generation path, so enforce the final
+		// socket mode here before making the endpoint reachable to any client.
+		if info.Mode().Perm() != 0o600 {
+			if chmodErr := os.Chmod(socketPath, 0o600); chmodErr != nil {
+				_ = stop()
+				return nil, fmt.Errorf("make Codex app-server socket private: %w", chmodErr)
+			}
 		}
 		client, err = codexapp.DialUnix(readyCtx, socketPath)
 		if err != nil {

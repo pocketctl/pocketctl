@@ -22,6 +22,19 @@ describe('ContentStreamAssembler', () => {
     })
   })
 
+  test('backs up to a valid UTF-8 boundary when the preview cuts a character', () => {
+    const assembler = new ContentStreamAssembler(2)
+
+    const completed = assembler.accept({
+      streamId: 'utf8-boundary', sequence: 0, byteOffset: 0,
+      content: '你A', final: true, totalBytes: 4,
+    })
+
+    expect(completed).toMatchObject({
+      content: '', completed: true, truncated: true, receivedBytes: 4,
+    })
+  })
+
   test('waits for a corrected chunk when its byte offset is inconsistent', () => {
     const assembler = new ContentStreamAssembler()
 

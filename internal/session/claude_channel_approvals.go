@@ -96,9 +96,8 @@ func claudeChannelBindingMatchesSession(state *ProcessState, binding *ClaudeChan
 		protocol.StatusKilled, protocol.StatusDisconnected:
 		return false
 	}
-	if binding.ProcessStartIdentity != "" || state.ProcessStartIdentity != "" {
-		return binding.ProcessStartIdentity != "" &&
-			binding.ProcessStartIdentity == state.ProcessStartIdentity
+	if binding.ProcessStartIdentity != "" {
+		return binding.ProcessStartIdentity == state.ProcessStartIdentity
 	}
 	// Compatibility fallback for synthetic/legacy registrations that do not
 	// carry an OS process identity. Limit it to the initial binding window so a

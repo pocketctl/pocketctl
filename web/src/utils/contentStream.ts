@@ -48,6 +48,7 @@ export class ContentStreamAssembler {
   private readonly completedStreams = new Set<string>()
   private readonly completedOrder: string[] = []
   private readonly encoder = new TextEncoder()
+  private readonly decoder = new TextDecoder('utf-8', { fatal: true })
   private readonly limits: ContentStreamLimits
   private bufferedBytes = 0
 
@@ -156,16 +157,19 @@ export class ContentStreamAssembler {
 
   private retainUtf8Prefix(content: string, byteLimit: number): string {
     if (byteLimit <= 0 || !content) return ''
-    if (this.encoder.encode(content).length <= byteLimit) return content
-    let retained = ''
-    let retainedBytes = 0
-    for (const character of content) {
-      const characterBytes = this.encoder.encode(character).length
-      if (retainedBytes + characterBytes > byteLimit) break
-      retained += character
-      retainedBytes += characterBytes
+    const encoded = this.encoder.encode(content)
+    if (encoded.length <= byteLimit) return content
+    const firstCandidate = Math.min(byteLimit, encoded.length)
+    const lastCandidate = Math.max(0, firstCandidate - 3)
+    for (let end = firstCandidate; end >= lastCandidate; end -= 1) {
+      try {
+        return this.decoder.decode(encoded.subarray(0, end))
+      } catch {
+        // A UTF-8 code point uses at most four bytes, so a valid boundary is
+        // at most three bytes behind an arbitrary preview limit.
+      }
     }
-    return retained
+    return ''
   }
 
   private finishUpdate(

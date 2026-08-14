@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"os"
+	"runtime"
 	"testing"
 	"time"
 
@@ -10,11 +11,15 @@ import (
 )
 
 func TestDaemonClaudeChannelIPCServesLauncherBootstrap(t *testing.T) {
-	home, err := os.MkdirTemp("/private/tmp", "ccd")
-	if err != nil {
-		t.Fatal(err)
+	home := t.TempDir()
+	if runtime.GOOS != "windows" {
+		var err error
+		home, err = os.MkdirTemp("/tmp", "ccd")
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = os.RemoveAll(home) })
 	}
-	t.Cleanup(func() { _ = os.RemoveAll(home) })
 	t.Setenv("HOME", home)
 	srv, err := startClaudeChannelIPC(nil)
 	if err != nil {

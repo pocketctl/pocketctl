@@ -53,26 +53,31 @@ type codexCoordinator struct {
 	titleTurns map[string]codexTitleTurn
 	sm         *SessionManager
 
-	mu             sync.Mutex
-	runtime        *codexAppServerRuntime
-	binary         string
-	version        string
-	schemaHash     string
-	generation     uint64
-	start          codexRuntimeStarter
-	adopt          func(context.Context, *daemon.CodexAppServerState) (*codexAppServerRuntime, error)
-	probe          codexRuntimeProbe
-	pumpCancel     context.CancelFunc
-	projectionMu   sync.Mutex
-	turnMu         sync.RWMutex
-	activeTurn     map[string]string
-	turnRevision   map[string]uint64
-	subscribeMu    sync.Mutex
-	subscribed     map[string]struct{}
-	subscribing    map[string]struct{}
-	managedThreads map[string]struct{}
-	interactions   *codexInteractions
-	reconnecting   bool
+	mu              sync.Mutex
+	runtime         *codexAppServerRuntime
+	binary          string
+	version         string
+	schemaHash      string
+	generation      uint64
+	start           codexRuntimeStarter
+	adopt           func(context.Context, *daemon.CodexAppServerState) (*codexAppServerRuntime, error)
+	probe           codexRuntimeProbe
+	pumpCancel      context.CancelFunc
+	projectionMu    sync.Mutex
+	turnMu          sync.RWMutex
+	activeTurn      map[string]string
+	turnRevision    map[string]uint64
+	subscribeMu     sync.Mutex
+	subscribed      map[string]struct{}
+	subscribing     map[string]struct{}
+	managedThreads  map[string]struct{}
+	interactions    *codexInteractions
+	reconnecting    bool
+	reconnectCancel context.CancelFunc
+	reconnectDone   chan struct{}
+	shuttingDown    bool
+	pumpWG          sync.WaitGroup
+	subscriptionWG  sync.WaitGroup
 }
 
 var errCodexRuntimeUpgradeDeferred = errors.New("Codex managed runtime upgrade is deferred while an active terminal lease uses the current generation")
@@ -92,6 +97,9 @@ func newCodexCoordinator(sm *SessionManager) *codexCoordinator {
 func (c *codexCoordinator) ensureStarted(ctx context.Context, binary, version string, capabilities agentcontrol.CodexCapabilities) (codexRuntimeSnapshot, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if c.shuttingDown {
+		return codexRuntimeSnapshot{}, errors.New("Codex coordinator is shutting down")
+	}
 	var restoredThreads []string
 	if c.runtime != nil {
 		probeErr := c.probe(ctx, c.runtime)
@@ -291,15 +299,25 @@ func (c *codexCoordinator) backendClient() (codexRuntimeClient, uint64, bool) {
 
 func (c *codexCoordinator) shutdown() error {
 	c.mu.Lock()
-	defer c.mu.Unlock()
+	c.shuttingDown = true
+	c.stopEventPumpLocked()
+	if c.reconnectCancel != nil {
+		c.reconnectCancel()
+	}
+	reconnectDone := c.reconnectDone
 	if c.runtime == nil {
+		c.mu.Unlock()
+		c.waitForBackgroundWork(reconnectDone)
 		return nil
 	}
-	c.stopEventPumpLocked()
 	if c.sm != nil {
 		for _, lease := range c.sm.leases.Active(c.generation) {
 			if lease.Agent == agentcontrol.AgentCodex {
-				return c.persistOwnerLocked(0)
+				err := c.persistOwnerLocked(0)
+				c.runtime = nil
+				c.mu.Unlock()
+				c.waitForBackgroundWork(reconnectDone)
+				return err
 			}
 		}
 	}
@@ -311,7 +329,17 @@ func (c *codexCoordinator) shutdown() error {
 	if removeErr := daemon.RemoveCodexAppServerState(); err == nil {
 		err = removeErr
 	}
+	c.mu.Unlock()
+	c.waitForBackgroundWork(reconnectDone)
 	return err
+}
+
+func (c *codexCoordinator) waitForBackgroundWork(done <-chan struct{}) {
+	if done != nil {
+		<-done
+	}
+	c.pumpWG.Wait()
+	c.subscriptionWG.Wait()
 }
 
 func (c *codexCoordinator) startEventPumpLocked() {
@@ -327,13 +355,26 @@ func (c *codexCoordinator) startEventPumpLocked() {
 	c.pumpCancel = cancel
 	projector := newCodexProjection(c.generation)
 	c.replaceInteractionsLocked(newCodexInteractions(c.sm, c.generation, c.runtime.Client))
-	go c.consumeEventsWithInteractions(ctx, c.runtime.Client.Events(), projector, c.interactions)
+	interactions := c.interactions
 	client, generation := c.runtime.Client, c.generation
+	c.pumpWG.Add(1)
+	go func() {
+		defer c.pumpWG.Done()
+		c.consumeEventsWithInteractions(ctx, client.Events(), projector, interactions)
+	}()
 	for _, threadID := range c.managedThreadSnapshot() {
 		if c.beginSubscription(threadID) {
-			go c.subscribeTerminalThread(context.Background(), client, generation, threadID, projector)
+			c.startTerminalThreadSubscription(ctx, client, generation, threadID, projector)
 		}
 	}
+}
+
+func (c *codexCoordinator) startTerminalThreadSubscription(parent context.Context, client codexRuntimeClient, generation uint64, threadID string, projector *codexProjection) {
+	c.subscriptionWG.Add(1)
+	go func() {
+		defer c.subscriptionWG.Done()
+		c.subscribeTerminalThread(parent, client, generation, threadID, projector)
+	}()
 }
 
 func (c *codexCoordinator) resetSubscriptionsForNewClient() {
@@ -385,21 +426,29 @@ func (c *codexCoordinator) consumeEventsWithInteractions(ctx context.Context, in
 
 func (c *codexCoordinator) reconnectClient(generation uint64) {
 	c.mu.Lock()
-	if c.runtime == nil || c.generation != generation || c.reconnecting {
+	if c.runtime == nil || c.generation != generation || c.reconnecting || c.shuttingDown {
 		c.mu.Unlock()
 		return
 	}
+	reconnectCtx, cancelReconnect := context.WithCancel(context.Background())
+	done := make(chan struct{})
 	c.reconnecting = true
+	c.reconnectCancel = cancelReconnect
+	c.reconnectDone = done
 	c.mu.Unlock()
 	defer func() {
+		cancelReconnect()
 		c.mu.Lock()
 		c.reconnecting = false
+		c.reconnectCancel = nil
+		c.reconnectDone = nil
 		c.mu.Unlock()
+		close(done)
 	}()
 
 	delay := 100 * time.Millisecond
 	for attempt := 1; attempt <= 5; attempt++ {
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		ctx, cancel := context.WithTimeout(reconnectCtx, 5*time.Second)
 		state, stateErr := daemon.ReadCodexAppServerState()
 		var runtime *codexAppServerRuntime
 		var err error
@@ -411,9 +460,15 @@ func (c *codexCoordinator) reconnectClient(generation uint64) {
 			runtime, err = c.adopt(ctx, state)
 		}
 		cancel()
+		if reconnectCtx.Err() != nil {
+			if runtime != nil && runtime.Client != nil {
+				_ = runtime.Client.Close()
+			}
+			return
+		}
 		if err == nil && runtime != nil && runtime.Client != nil {
 			c.mu.Lock()
-			if c.runtime == nil || c.generation != generation {
+			if c.runtime == nil || c.generation != generation || c.shuttingDown {
 				c.mu.Unlock()
 				_ = runtime.Client.Close()
 				return
@@ -431,7 +486,12 @@ func (c *codexCoordinator) reconnectClient(generation uint64) {
 		}
 		slog.Default().Warn("Codex app-server client reconnect failed", "generation", generation, "attempt", attempt, "error", err)
 		timer := time.NewTimer(delay)
-		<-timer.C
+		select {
+		case <-timer.C:
+		case <-reconnectCtx.Done():
+			timer.Stop()
+			return
+		}
 		if delay < 2*time.Second {
 			delay *= 2
 		}
@@ -565,7 +625,7 @@ func (c *codexCoordinator) maybeSubscribeTerminalThread(parent context.Context, 
 	if alreadyOwned || !c.beginSubscription(params.ThreadID) {
 		return
 	}
-	go c.subscribeTerminalThread(parent, client, generation, params.ThreadID, projector)
+	c.startTerminalThreadSubscription(parent, client, generation, params.ThreadID, projector)
 }
 
 func (c *codexCoordinator) beginSubscription(threadID string) bool {
