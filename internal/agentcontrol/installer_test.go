@@ -88,7 +88,7 @@ func TestClaudeStatusDoesNotReportChannelWhenRolloutIsOff(t *testing.T) {
 	if err := os.MkdirAll(shimDir, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	shim := filepath.Join(shimDir, "claude")
+	shim := defaultClaudeShimPath()
 	if err := os.WriteFile(shim, []byte("shim"), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -120,7 +120,7 @@ func TestClaudeStatusSocketReachabilityDoesNotClaimChannelConfirmation(t *testin
 	if err := os.MkdirAll(shimDir, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	shim := filepath.Join(shimDir, "claude")
+	shim := defaultClaudeShimPath()
 	if err := os.WriteFile(shim, []byte("shim"), 0o755); err != nil {
 		t.Fatal(err)
 	}

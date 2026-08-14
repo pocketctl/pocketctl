@@ -151,6 +151,10 @@ func enableRollout(t *testing.T) {
 // shape execs the real binary with NO probe, NO bootstrap, NO injection.
 // The bootstrap function would fatal the test if called. Design §3.3/Task 3.
 func TestClaudeLauncherNativeCommandsDontProbe(t *testing.T) {
+	wantCWD, err := filepath.Abs("/repo")
+	if err != nil {
+		t.Fatal(err)
+	}
 	nativeArgs := [][]string{
 		{"--native"},
 		{"--native", "--resume", "X"},
@@ -182,8 +186,8 @@ func TestClaudeLauncherNativeCommandsDontProbe(t *testing.T) {
 			if exec.last.Path != "/real/claude" {
 				t.Fatalf("exec path=%q want /real/claude", exec.last.Path)
 			}
-			if exec.last.Dir != filepath.Clean("/repo") {
-				t.Fatalf("cwd=%q want %q", exec.last.Dir, filepath.Clean("/repo"))
+			if exec.last.Dir != wantCWD {
+				t.Fatalf("cwd=%q want %q", exec.last.Dir, wantCWD)
 			}
 			// Injected args MUST be absent.
 			for _, arg := range exec.last.Args {
@@ -506,12 +510,16 @@ func TestClaudeLauncherPreservesUserMCPConfig(t *testing.T) {
 // 码不变".
 func TestClaudeLauncherPreservesEnvCwdAndExitCode(t *testing.T) {
 	customEnv := []string{"FOO=bar", "PATH=/usr/bin"}
+	wantCWD, err := filepath.Abs("/work")
+	if err != nil {
+		t.Fatal(err)
+	}
 	launcher := ClaudeLauncher{
 		Bootstrap:     claudeBootstrapUnavailable,
 		ResolveBinary: func() (string, error) { return "/real/claude", nil },
 		Execute: func(spec ExecSpec) error {
-			if spec.Dir != filepath.Clean("/work") {
-				t.Fatalf("cwd=%q want %q", spec.Dir, filepath.Clean("/work"))
+			if spec.Dir != wantCWD {
+				t.Fatalf("cwd=%q want %q", spec.Dir, wantCWD)
 			}
 			if len(spec.Env) != 2 || spec.Env[0] != "FOO=bar" || spec.Env[1] != "PATH=/usr/bin" {
 				t.Fatalf("env=%v want custom env", spec.Env)
