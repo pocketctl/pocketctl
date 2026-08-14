@@ -9,7 +9,10 @@ const (
 	ClaudeCapabilityHistorySync      = "history_sync"
 	ClaudeCapabilityResumeAfterExit  = "resume_after_exit"
 	ClaudeCapabilityRemoteApproval   = "remote_approval"
+	ClaudeCapabilityChannelApproval  = "claude_channel_approval"
+	ClaudeCapabilityTerminalParallel = "terminal_approval_parallel"
 	CodexCapabilityMessageAcceptance = "message_acceptance_receipt"
+	TrustedActionPolicyCapability    = "trusted_action_policy_v1"
 )
 
 func (sm *SessionManager) claudeCapabilitiesLocked(state *ProcessState) []string {
@@ -19,6 +22,9 @@ func (sm *SessionManager) claudeCapabilitiesLocked(state *ProcessState) []string
 	capabilities := []string{ClaudeCapabilityHistorySync}
 	if state.Source == "terminal" {
 		capabilities = append(capabilities, ClaudeCapabilityResumeAfterExit)
+		if state.ClaudeChannelInstanceID != "" {
+			capabilities = append(capabilities, ClaudeCapabilityChannelApproval, ClaudeCapabilityTerminalParallel)
+		}
 	}
 	if state.Source == "daemon" && sm.approvalEnabled {
 		capabilities = append(capabilities, ClaudeCapabilityRemoteApproval)
@@ -37,7 +43,11 @@ func (sm *SessionManager) sessionCapabilitiesLocked(state *ProcessState) []strin
 		return sm.openCodeCapabilitiesLocked(state)
 	case adapter.AgentCodex:
 		if state.ControlMode == protocol.ControlManaged {
-			return []string{CodexCapabilityMessageAcceptance}
+			capabilities := []string{CodexCapabilityMessageAcceptance}
+			if sm.trustedActionPolicy == trustedActionPolicyOn {
+				capabilities = append(capabilities, TrustedActionPolicyCapability)
+			}
+			return capabilities
 		}
 		return nil
 	default:

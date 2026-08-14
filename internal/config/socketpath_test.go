@@ -60,3 +60,22 @@ func TestApprovalSocketPathForUnixIsFilePath(t *testing.T) {
 		t.Errorf("unix approval path = %q, want %q", got, want)
 	}
 }
+
+// Claude Channel IPC has its own dedicated socket so its security boundary
+// (bootstrap tokens, instance ids) stays isolated from the other local
+// sockets. Design §Task 5.
+func TestClaudeChannelSocketPathForWindowsIsNamedPipe(t *testing.T) {
+	got := claudeChannelSocketPathFor("windows", `C:\Users\foo`)
+	want := `\\.\pipe\pocketctl-claude-channel`
+	if got != want {
+		t.Errorf("windows claude channel path = %q, want %q", got, want)
+	}
+}
+
+func TestClaudeChannelSocketPathForUnixIsFilePath(t *testing.T) {
+	got := claudeChannelSocketPathFor("linux", "/home/foo")
+	want := filepath.Join("/home/foo", ".pocketctl", "claude-channel.sock")
+	if got != want {
+		t.Errorf("unix claude channel path = %q, want %q", got, want)
+	}
+}

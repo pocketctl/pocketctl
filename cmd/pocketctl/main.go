@@ -29,6 +29,7 @@ import (
 	"github.com/pocketctl/pocketctl/internal/agentcontrol"
 	"github.com/pocketctl/pocketctl/internal/api"
 	"github.com/pocketctl/pocketctl/internal/approval"
+	"github.com/pocketctl/pocketctl/internal/claudechannel"
 	"github.com/pocketctl/pocketctl/internal/commands"
 	"github.com/pocketctl/pocketctl/internal/config"
 	"github.com/pocketctl/pocketctl/internal/daemon"
@@ -46,7 +47,7 @@ import (
 	"github.com/pocketctl/pocketctl/internal/zcode"
 )
 
-var version = "0.3.23"
+var version = "0.3.24"
 
 // PR2 platform defaults for the daemon entry: daemonize + service via platform
 // interface (was direct syscall.SysProcAttr{Setsid} + internal/service).
@@ -61,6 +62,17 @@ var (
 const DefaultRelayURL = "wss://www.pocketctl.me/ws"
 
 func main() {
+	if isClaudeLauncherInvocation(os.Args[0], os.Args[1:]) {
+		args := claudeLauncherArgs(os.Args[0], os.Args[1:])
+		if err := agentcontrol.NewClaudeLauncher().Run(context.Background(), args, ""); err != nil {
+			if exitErr, ok := err.(*exec.ExitError); ok {
+				os.Exit(exitErr.ExitCode())
+			}
+			fmt.Fprintln(os.Stderr, "pocketctl: cannot start Claude:", err)
+			os.Exit(1)
+		}
+		return
+	}
 	if isCodexLauncherInvocation(os.Args[0], os.Args[1:]) {
 		args := codexLauncherArgs(os.Args[0], os.Args[1:])
 		if err := agentcontrol.NewCodexLauncher().Run(context.Background(), args, ""); err != nil {
@@ -102,6 +114,17 @@ func main() {
 		// output. Never advertised in help output.
 		if err := approval.RunHook(slog.Default()); err != nil {
 			os.Exit(0) // exit 0 so Claude renders our deny reason
+		}
+		os.Exit(0)
+	case "__claude_channel":
+		// Hidden subcommand: spawned by real Claude from the Pocketctl-owned
+		// MCP config when the Channel permission relay is injected. It ferries
+		// permission request/verdict notifications between Claude stdio and
+		// the daemon's Claude Channel IPC. The process ALWAYS exits 0 so
+		// Claude never observes a non-zero status that could be read as a
+		// verdict. Never advertised in help output. Design §Task 6.
+		if err := claudechannel.RunChannelStdio(context.Background()); err != nil {
+			fmt.Fprintln(os.Stderr, "pocketctl: claude channel exited:", err)
 		}
 		os.Exit(0)
 	case "version":
@@ -150,6 +173,30 @@ func openCodeLauncherArgs(argv0 string, args []string) []string {
 		return args
 	}
 	if len(args) >= 2 && args[0] == "__agent-launch" && args[1] == agentcontrol.AgentOpenCode {
+		return args[2:]
+	}
+	return args
+}
+
+// isClaudeLauncherInvocation detects a Pocketctl-owned Claude shim call.
+// The shim binary name is "claude" (AgentClaudeCLI); the hidden subcommand
+// contract uses the canonical agent token "claude-code" (AgentClaudeCode).
+// Design §Task 3: "canonical agent type 使用 claude-code,CLI name 使用
+// claude,不得把二者混为 shim 文件名".
+func isClaudeLauncherInvocation(argv0 string, args []string) bool {
+	name := strings.TrimSuffix(strings.ToLower(filepath.Base(argv0)), ".exe")
+	if name == agentcontrol.AgentClaudeCLI {
+		return true
+	}
+	return len(args) >= 2 && args[0] == "__agent-launch" && args[1] == agentcontrol.AgentClaudeCode
+}
+
+func claudeLauncherArgs(argv0 string, args []string) []string {
+	name := strings.TrimSuffix(strings.ToLower(filepath.Base(argv0)), ".exe")
+	if name == agentcontrol.AgentClaudeCLI {
+		return args
+	}
+	if len(args) >= 2 && args[0] == "__agent-launch" && args[1] == agentcontrol.AgentClaudeCode {
 		return args[2:]
 	}
 	return args
@@ -215,9 +262,15 @@ func cmdServiceInstall(args []string) {
 	fs := flag.NewFlagSet("daemon service install", flag.ExitOnError)
 	production := fs.Bool("prod", false, "Bake --prod into the supervised daemon (use production relay from config)")
 	relayURL := fs.String("relay", "", "Bake an explicit --relay URL into the supervised daemon")
+	trustedActionPolicy := fs.String("trusted-action-policy", "", "Persist trusted approval action policy: off, observe, or on")
 	noAgentAutoEnable := fs.Bool("no-agent-auto-enable", false, "Skip optional managed-agent auto-enable")
 	noAgentPrompt := fs.Bool("no-agent-prompt", false, "Deprecated alias for --no-agent-auto-enable")
 	fs.Parse(args)
+	normalizedTrustedActionPolicy, policyErr := validateTrustedActionPolicyFlag(*trustedActionPolicy)
+	if policyErr != nil {
+		fmt.Fprintln(os.Stderr, policyErr)
+		os.Exit(2)
+	}
 
 	// A token must already be stored — the supervised daemon resolves it from
 	// config at launch, exactly like `daemon start`. Fail fast with a clear
@@ -239,12 +292,12 @@ func cmdServiceInstall(args []string) {
 
 	// The supervised process runs in the foreground so the init system owns its
 	// lifecycle (no self-fork). Relay flags are baked in so the unit is explicit.
-	daemonArgs := serviceDaemonArgs(*production, *relayURL)
+	daemonArgs := serviceDaemonArgs(*production, *relayURL, normalizedTrustedActionPolicy)
 
 	// Ensure the log dir exists; launchd/systemd open the boot log but won't
 	// create its parent directory.
 	_ = os.MkdirAll(daemon.LogDir(), 0755)
-	cfg := daemonServiceOptions(exe, daemon.ServiceBootLogPath(), *production, *relayURL, os.Getenv("PATH"))
+	cfg := daemonServiceOptions(exe, daemon.ServiceBootLogPath(), *production, *relayURL, normalizedTrustedActionPolicy, os.Getenv("PATH"))
 
 	// If the daemon is already running standalone, stop it so it doesn't fight
 	// the supervised instance for the relay registration / approval socket.
@@ -275,7 +328,7 @@ func cmdServiceInstall(args []string) {
 	}
 }
 
-func serviceDaemonArgs(production bool, relayURL string) []string {
+func serviceDaemonArgs(production bool, relayURL, trustedActionPolicy string) []string {
 	args := []string{"daemon", "start", "--foreground", "--no-agent-auto-enable"}
 	if production {
 		args = append(args, "--prod")
@@ -283,15 +336,28 @@ func serviceDaemonArgs(production bool, relayURL string) []string {
 	if relayURL != "" {
 		args = append(args, "--relay", relayURL)
 	}
+	if trustedActionPolicy != "" {
+		args = append(args, "--trusted-action-policy", trustedActionPolicy)
+	}
 	return args
 }
 
-func daemonServiceOptions(exePath, logPath string, production bool, relayURL, pathEnv string) platform.ServiceOpts {
+func daemonServiceOptions(exePath, logPath string, production bool, relayURL, trustedActionPolicy, pathEnv string) platform.ServiceOpts {
 	return platform.ServiceOpts{
 		ExePath: exePath,
-		Args:    serviceDaemonArgs(production, relayURL),
+		Args:    serviceDaemonArgs(production, relayURL, trustedActionPolicy),
 		LogPath: logPath,
 		PathEnv: pathEnv,
+	}
+}
+
+func validateTrustedActionPolicyFlag(value string) (string, error) {
+	normalized := strings.ToLower(strings.TrimSpace(value))
+	switch normalized {
+	case "", "off", "observe", "on":
+		return normalized, nil
+	default:
+		return "", fmt.Errorf("--trusted-action-policy must be one of off, observe, or on")
 	}
 }
 
@@ -803,9 +869,15 @@ func cmdDaemonStart(args []string) {
 	daemonID := fs.String("id", "", "Daemon ID (auto-generated if empty)")
 	foreground := fs.Bool("foreground", false, "Run in foreground (don't daemonize)")
 	debug := fs.Bool("debug", false, "Verbose debug logging; with --foreground also streams logs to the console")
+	trustedActionPolicy := fs.String("trusted-action-policy", "", "Trusted approval action policy: off, observe, or on")
 	noAgentAutoEnable := fs.Bool("no-agent-auto-enable", false, "Skip optional managed-agent auto-enable")
 	noAgentPrompt := fs.Bool("no-agent-prompt", false, "Deprecated alias for --no-agent-auto-enable")
 	fs.Parse(args)
+	normalizedTrustedActionPolicy, policyErr := validateTrustedActionPolicyFlag(*trustedActionPolicy)
+	if policyErr != nil {
+		fmt.Fprintln(os.Stderr, policyErr)
+		os.Exit(2)
+	}
 
 	// --debug also implies running in the foreground so the operator sees logs
 	// live on the console (the whole point of debug mode is interactive
@@ -1122,7 +1194,12 @@ func cmdDaemonStart(args []string) {
 	outputCh := make(chan protocol.DaemonEvent, 256)
 
 	// Create session manager
-	sm := session.NewSessionManager(outputCh)
+	var sm *session.SessionManager
+	if normalizedTrustedActionPolicy == "" {
+		sm = session.NewSessionManager(outputCh)
+	} else {
+		sm = session.NewSessionManagerWithTrustedActionPolicy(outputCh, normalizedTrustedActionPolicy)
+	}
 
 	// ZCode read-only observer (only when the user has explicitly enabled the
 	// sync). It is fully isolated from the SessionManager: it never enters
@@ -1172,32 +1249,30 @@ func cmdDaemonStart(args []string) {
 	}
 	var recoveredClaudeApprovalMu sync.Mutex
 	var recoveredClaudeApprovals []daemon.ClaudeApprovalStateItem
-	if sm.ClaudeApprovalV2Enabled() {
-		if previous, readErr := daemon.ReadClaudeApprovalState(); readErr == nil {
-			recoveredClaudeApprovals = append(recoveredClaudeApprovals, previous.Requests...)
-		} else if !os.IsNotExist(readErr) {
-			// Corrupt or insecure state is never made actionable. Leave a
-			// diagnostic and continue daemon startup.
-			logger.Warn("Claude approval state unavailable", "error", readErr)
-		}
-		sm.SetClaudeApprovalRecorder(func(references []session.ClaudeApprovalReference) error {
-			recoveredClaudeApprovalMu.Lock()
-			defer recoveredClaudeApprovalMu.Unlock()
-			requests := make([]daemon.ClaudeApprovalStateItem, 0, len(recoveredClaudeApprovals)+len(references))
-			requests = append(requests, recoveredClaudeApprovals...)
-			for _, reference := range references {
-				requests = append(requests, daemon.ClaudeApprovalStateItem{
-					SessionID: reference.SessionID,
-					RequestID: reference.RequestID,
-					CreatedAt: reference.CreatedAt,
-				})
-			}
-			return daemon.WriteClaudeApprovalState(daemon.ClaudeApprovalState{
-				DaemonID: id,
-				Requests: requests,
-			})
-		})
+	if previous, readErr := daemon.ReadClaudeApprovalState(); readErr == nil {
+		recoveredClaudeApprovals = append(recoveredClaudeApprovals, previous.Requests...)
+	} else if !os.IsNotExist(readErr) {
+		// Corrupt or insecure state is never made actionable. Leave a
+		// diagnostic and continue daemon startup.
+		logger.Warn("Claude approval state unavailable", "error", readErr)
 	}
+	sm.SetClaudeApprovalRecorder(func(references []session.ClaudeApprovalReference) error {
+		recoveredClaudeApprovalMu.Lock()
+		defer recoveredClaudeApprovalMu.Unlock()
+		requests := make([]daemon.ClaudeApprovalStateItem, 0, len(recoveredClaudeApprovals)+len(references))
+		requests = append(requests, recoveredClaudeApprovals...)
+		for _, reference := range references {
+			requests = append(requests, daemon.ClaudeApprovalStateItem{
+				SessionID: reference.SessionID,
+				RequestID: reference.RequestID,
+				CreatedAt: reference.CreatedAt,
+			})
+		}
+		return daemon.WriteClaudeApprovalState(daemon.ClaudeApprovalState{
+			DaemonID: id,
+			Requests: requests,
+		})
+	})
 	sm.SetOpenCodeRuntimeHealthRecorder(func(healthy bool) {
 		_ = agentcontrol.RecordOpenCodeRuntimeHealth(healthy)
 	})
@@ -1220,6 +1295,15 @@ func cmdDaemonStart(args []string) {
 		logger.Info("agent control server listening", "path", config.AgentControlSocketPath())
 		defer agentControlServer.Close()
 	}
+	// Claude Channels use a dedicated permission-only IPC endpoint. Failure is
+	// non-fatal and leaves every terminal invocation on native Claude approval.
+	claudeChannelServer, channelErr := startClaudeChannelIPC(logger, sm)
+	if channelErr != nil {
+		logger.Warn("Claude Channel IPC disabled", "error", channelErr)
+	} else {
+		logger.Info("Claude Channel IPC listening", "path", config.ClaudeChannelSocketPath())
+		defer claudeChannelServer.Close()
+	}
 	// If a previous daemon relinquished a live Codex app-server because an
 	// official TUI still held a lease, adopt it immediately and resume the
 	// persisted managed threads. With no handoff this is a no-op and Codex stays
@@ -1232,12 +1316,10 @@ func cmdDaemonStart(args []string) {
 		}
 	})
 
-	// Start the in-process approval broker. The PreToolUse hook connects here
-	// to surface tool-use approvals to web/iOS clients. The socket lives at a
-	// user-global fixed path (config.ApprovalSocketPath) so that a `claude`
-	// process the user launched in their OWN terminal can reach this daemon —
-	// not just daemon-spawned sessions. Failures are non-fatal: sessions simply
-	// won't get approval prompts (they still default to bypassPermissions).
+	// Start the legacy in-process approval broker for daemon-owned Claude PTYs.
+	// Their project-scoped PreToolUse hook connects here. External terminal
+	// sessions use the official Channel path and never depend on this broker or
+	// on a global ~/.claude/settings.json hook. Failures are non-fatal.
 	approvalSocket := config.ApprovalSocketPath()
 	pocketctlPath, _ := os.Executable()
 	if pocketctlPath == "" {
@@ -1251,16 +1333,9 @@ func cmdDaemonStart(args []string) {
 			sm.SetApprovalServer(approvalSrv, pocketctlPath)
 			defer approvalSrv.Close()
 
-			// Install the user-global PreToolUse hook into ~/.claude/settings.json
-			// so EVERY `claude` invocation (including ones the user starts in their
-			// own terminal) routes permission prompts here. Idempotent; cleaned up
-			// on shutdown via RemoveUserHook so we don't leave a dangling entry.
-			if err := approval.EnsureUserHook(pocketctlPath); err != nil {
-				logger.Warn("user-global approval hook not installed", "error", err)
-			} else {
-				logger.Info("user-global approval hook installed", "settings", "~/.claude/settings.json")
-			}
-			defer approval.RemoveUserHook()
+			// External terminal Claude sessions use the official Channel path.
+			// Keep this broker only for daemon-owned PTYs, whose project-scoped
+			// hooks are installed by SessionManager lifecycle code.
 		}
 	}
 
@@ -1441,7 +1516,7 @@ func cmdDaemonStart(args []string) {
 			client.SendMsg(evt)
 		}
 		_ = agentcontrol.RecordClaudeReplay(len(reconnectEvents) - len(sessions))
-		if sm.ClaudeApprovalV2Enabled() {
+		if len(recoveredClaudeApprovals) > 0 {
 			recoveredClaudeApprovalMu.Lock()
 			if len(recoveredClaudeApprovals) > 0 {
 				_ = agentcontrol.RecordClaudeOrphanClosure(len(recoveredClaudeApprovals))
@@ -3076,6 +3151,9 @@ func handleCommands(ctx context.Context, client *ws.Client, sm *session.SessionM
 					client.SendMsg(evt)
 				}
 				for _, evt := range sm.PendingClaudeApprovals(cmd.SessionID) {
+					client.SendMsg(evt)
+				}
+				for _, evt := range sm.PendingClaudeChannelApprovals(cmd.SessionID) {
 					client.SendMsg(evt)
 				}
 

@@ -28,6 +28,7 @@ func TestClaudeCapabilitiesAreAgentAndSourceScoped(t *testing.T) {
 }
 
 func TestManagedCodexAdvertisesMessageAcceptanceReceiptOnly(t *testing.T) {
+	t.Setenv("POCKETCTL_TRUSTED_ACTION_POLICY_V1", "off")
 	sm := NewSessionManager(nil)
 
 	managed := sm.sessionCapabilitiesLocked(&ProcessState{
@@ -43,7 +44,35 @@ func TestManagedCodexAdvertisesMessageAcceptanceReceiptOnly(t *testing.T) {
 	}
 }
 
+func TestSessionCapabilitiesAdvertiseTrustedActionPolicyOnlyForManagedCodexAndOpenCode(t *testing.T) {
+	t.Setenv("POCKETCTL_TRUSTED_ACTION_POLICY_V1", "on")
+	sm := NewSessionManager(nil)
+
+	codex := sm.sessionCapabilitiesLocked(&ProcessState{Agent: adapter.AgentCodex, ControlMode: protocol.ControlManaged})
+	if !sameStrings(codex, []string{CodexCapabilityMessageAcceptance, TrustedActionPolicyCapability}) {
+		t.Fatalf("managed Codex capabilities=%v", codex)
+	}
+	opencode := sm.openCodeCapabilitiesLocked(&ProcessState{Agent: adapter.AgentOpencode, ControlMode: protocol.ControlManaged})
+	if !testContainsCapability(opencode, TrustedActionPolicyCapability) {
+		t.Fatalf("managed OpenCode capabilities=%v", opencode)
+	}
+	claude := sm.claudeCapabilitiesLocked(&ProcessState{Agent: adapter.AgentClaude, Source: "daemon"})
+	if testContainsCapability(claude, TrustedActionPolicyCapability) {
+		t.Fatalf("trusted action policy leaked to Claude: %v", claude)
+	}
+}
+
+func testContainsCapability(values []string, want string) bool {
+	for _, value := range values {
+		if value == want {
+			return true
+		}
+	}
+	return false
+}
+
 func TestListSessionsIncludesManagedCodexAcceptanceCapability(t *testing.T) {
+	t.Setenv("POCKETCTL_TRUSTED_ACTION_POLICY_V1", "off")
 	sm := NewSessionManager(nil)
 	sm.sessions["thread-1"] = &ProcessState{
 		SessionID:   "thread-1",

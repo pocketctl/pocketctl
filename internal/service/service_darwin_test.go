@@ -92,6 +92,19 @@ func TestParseLaunchctlStatusRequiresRunningStateAndPID(t *testing.T) {
 	}
 }
 
+func TestParseLaunchctlStatusIgnoresNestedCoalitionState(t *testing.T) {
+	got := parseLaunchctlPrint(`gui/501/me.pocketctl.daemon = {
+	state = running
+	pid = 80365
+	resource coalition = {
+		state = active
+	}
+}`)
+	if !got.Loaded || !got.Running || got.PID != 80365 || got.Detail != "running" {
+		t.Fatalf("nested coalition state overrode service state: %#v", got)
+	}
+}
+
 func TestLaunchctlPrintNotLoadedIsNotExecutionFailure(t *testing.T) {
 	if !launchctlServiceNotLoaded("Could not find service \"me.pocketctl.daemon\" in domain for user gui: 501") {
 		t.Fatal("not-loaded launchctl output was treated as an execution failure")

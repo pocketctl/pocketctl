@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/pocketctl/pocketctl/internal/claudechannel"
 	"github.com/pocketctl/pocketctl/internal/config"
 )
 
@@ -59,14 +60,16 @@ type MultiAgentManager interface {
 }
 
 type Installer struct {
-	PocketctlPath      string
-	Shell              string
-	Now                func() time.Time
-	ResolveOpenCode    func(context.Context) (string, string, error)
-	ResolveCodex       func(context.Context) (string, string, error)
-	ProbeCodex         func(context.Context, string, string) (CodexCapabilities, error)
-	RuntimeStatus      func(context.Context) (RuntimeStatusResult, error)
-	RuntimeStatusAgent func(context.Context, string) (RuntimeStatusResult, error)
+	PocketctlPath          string
+	Shell                  string
+	Now                    func() time.Time
+	ResolveOpenCode        func(context.Context) (string, string, error)
+	ResolveCodex           func(context.Context) (string, string, error)
+	ResolveClaude          func(context.Context) (string, string, error)
+	ProbeCodex             func(context.Context, string, string) (CodexCapabilities, error)
+	RuntimeStatus          func(context.Context) (RuntimeStatusResult, error)
+	RuntimeStatusAgent     func(context.Context, string) (RuntimeStatusResult, error)
+	ClaudeChannelReachable func(context.Context) bool
 }
 
 func NewInstaller() *Installer {
@@ -89,6 +92,18 @@ func (i Installer) DetectAgent(ctx context.Context, agent string) (string, strin
 			return i.ResolveCodex(ctx)
 		}
 		return ResolveConfiguredCodex()
+	case AgentClaudeCode:
+		// Claude resolves through the dedicated Claude resolver, which always
+		// excludes the Pocketctl-owned claude shim. It does NOT register a
+		// RuntimeProvider. Design §Task 3.
+		if i.ResolveClaude != nil {
+			return i.ResolveClaude(ctx)
+		}
+		path, version, err := NewBinaryResolver().ResolveClaude(AgentConfig{})
+		if err != nil {
+			return "", "", err
+		}
+		return path, version, nil
 	default:
 		return "", "", fmt.Errorf("unknown managed agent %q", agent)
 	}
@@ -133,6 +148,11 @@ func (i Installer) EnableAgentDetected(ctx context.Context, agent, realBinary st
 	if err != nil {
 		return Status{}, err
 	}
+	if agent == AgentClaudeCode {
+		if _, err := ensureClaudeChannelMCPConfig(pocketctlPath); err != nil {
+			return Status{}, err
+		}
+	}
 	shimPath := defaultShimPath(agent)
 	if err := os.MkdirAll(filepath.Dir(shimPath), 0o700); err != nil {
 		return Status{}, fmt.Errorf("create launcher directory: %w", err)
@@ -166,6 +186,14 @@ func (i Installer) EnableAgentDetected(ctx context.Context, agent, realBinary st
 	agentConfig := AgentConfig{
 		State: StateEnabled, DecisionSource: source, RealBinary: realBinary,
 		ShimPath: shimPath, DecidedAt: now, InstalledAt: now,
+	}
+	if agent == AgentClaudeCode {
+		agentConfig.DetectedVersion = version
+		if info, statErr := os.Stat(realBinary); statErr == nil {
+			agentConfig.BinarySize = info.Size()
+			agentConfig.BinaryMTimeNS = info.ModTime().UnixNano()
+			agentConfig.BinaryMode = uint32(info.Mode())
+		}
 	}
 	if err := setAgentConfig(&cfg, agent, agentConfig); err != nil {
 		return Status{}, err
@@ -256,7 +284,7 @@ func (i Installer) StatusAgent(ctx context.Context, agent string) Status {
 		if compatibilityErr := i.checkCompatibility(ctx, agent, path, version); compatibilityErr != nil {
 			status.CapabilityReason = compatibilityErr.Error()
 		}
-	} else if !errors.Is(detectErr, ErrOpenCodeNotFound) && !errors.Is(detectErr, ErrCodexNotFound) {
+	} else if !errors.Is(detectErr, ErrOpenCodeNotFound) && !errors.Is(detectErr, ErrCodexNotFound) && !errors.Is(detectErr, ErrClaudeNotFound) {
 		status.Error = detectErr.Error()
 	}
 	if status.ShimPath == "" {
@@ -267,6 +295,54 @@ func (i Installer) StatusAgent(ctx context.Context, agent string) Status {
 	}
 	if status.ShimPath != "" {
 		status.PathActive = pathResolvesTo(agent, status.ShimPath)
+	}
+	// Claude is a Channel permission relay, not a managed runtime. Skip the
+	// runtime status probe entirely — EffectiveMode reflects LaunchChannel
+	// only when enabled, detected and version-eligible; otherwise LaunchNative.
+	// Design §1.3: "Claude Channel 不伪装成 RuntimeProvider".
+	if agent == AgentClaudeCode {
+		if !claudeChannelRolloutEnabled() {
+			status.CapabilityReason = StatusClaudeChannelRolloutDisabled
+			return status
+		}
+		if !claudeChannelDevelopmentEnabled() {
+			status.CapabilityReason = StatusClaudeChannelDevelopmentChannelNotConfirmed
+			return status
+		}
+		mcpPath, pathErr := config.ClaudeChannelMCPConfigPath()
+		if pathErr != nil {
+			status.CapabilityReason = StatusClaudeChannelProbeFailed
+			return status
+		}
+		if info, statErr := os.Stat(mcpPath); statErr != nil || !info.Mode().IsRegular() ||
+			(runtime.GOOS != "windows" && info.Mode().Perm() != 0o600) {
+			status.CapabilityReason = StatusClaudeChannelDevelopmentChannelNotConfirmed
+			return status
+		}
+		reachable := i.ClaudeChannelReachable
+		if reachable == nil {
+			reachable = func(ctx context.Context) bool {
+				probeCtx, cancel := context.WithTimeout(ctx, DefaultLauncherTimeout)
+				defer cancel()
+				conn, err := claudechannel.DialContext(probeCtx, config.ClaudeChannelSocketPath())
+				if err != nil {
+					return false
+				}
+				_ = conn.Close()
+				return true
+			}
+		}
+		status.RuntimeReachable = reachable(ctx)
+		if status.State == StateEnabled && status.PathActive && status.Detected &&
+			status.CapabilityReason == "" && status.RuntimeReachable {
+			// Socket reachability proves only that the enhancement is configured.
+			// The development-channel prompt and organization policy are enforced
+			// by Claude at launch, and this out-of-process status command has no
+			// authoritative ACK for either. Never report an active Channel based
+			// solely on files/version/socket.
+			status.CapabilityReason = StatusClaudeChannelDevelopmentChannelNotConfirmed
+		}
+		return status
 	}
 	runtimeStatus := func(ctx context.Context) (RuntimeStatusResult, error) {
 		if i.RuntimeStatusAgent != nil {
@@ -289,7 +365,14 @@ func (i Installer) StatusAgent(ctx context.Context, agent string) Status {
 }
 
 func pathResolvesTo(agent, shimPath string) bool {
-	resolved, err := exec.LookPath(agent)
+	// The canonical agent token for Claude is "claude-code" but the CLI/shim
+	// binary name is "claude" — LookPath must search the CLI name. Design
+	// §Task 3: "canonical agent type 使用 claude-code,CLI name 使用 claude".
+	cliName := agent
+	if agent == AgentClaudeCode {
+		cliName = AgentClaudeCLI
+	}
+	resolved, err := exec.LookPath(cliName)
 	if err != nil {
 		return false
 	}
@@ -320,6 +403,15 @@ func (i Installer) checkCompatibility(ctx context.Context, agent, binary, versio
 		}
 		_, err := probe(ctx, binary, version)
 		return err
+	case AgentClaudeCode:
+		// Claude compatibility is the Claude Channel semver + flag probe.
+		// We do NOT require PermissionRelaySmokePassed here — that is a
+		// release-time second gate, not a launcher install gate. A version
+		// below minimum fails the install with a clear reason. Design §Task 3.
+		if !SupportsClaudeChannelVersion(version) {
+			return fmt.Errorf("%w: have %s, need %s", ErrClaudeChannelVersionUnsupported, version, MinimumClaudeChannelVersion)
+		}
+		return nil
 	default:
 		return fmt.Errorf("unknown managed agent %q", agent)
 	}
@@ -331,6 +423,8 @@ func getAgentConfig(cfg Config, agent string) (AgentConfig, error) {
 		return cfg.OpenCode, nil
 	case AgentCodex:
 		return cfg.Codex, nil
+	case AgentClaudeCode:
+		return cfg.Claude, nil
 	default:
 		return AgentConfig{}, fmt.Errorf("unknown managed agent %q", agent)
 	}
@@ -342,6 +436,8 @@ func setAgentConfig(cfg *Config, agent string, value AgentConfig) error {
 		cfg.OpenCode = value
 	case AgentCodex:
 		cfg.Codex = value
+	case AgentClaudeCode:
+		cfg.Claude = value
 	default:
 		return fmt.Errorf("unknown managed agent %q", agent)
 	}
@@ -349,7 +445,7 @@ func setAgentConfig(cfg *Config, agent string, value AgentConfig) error {
 }
 
 func hasInstalledLauncher(cfg Config) bool {
-	for _, value := range []AgentConfig{cfg.OpenCode, cfg.Codex} {
+	for _, value := range []AgentConfig{cfg.OpenCode, cfg.Codex, cfg.Claude} {
 		if value.State == StateEnabled && value.ShimPath != "" {
 			if _, err := os.Lstat(value.ShimPath); err == nil {
 				return true

@@ -131,6 +131,19 @@ async function sendAPNs(deviceToken: string, payload: PushPayload): Promise<{ ok
 
   return new Promise((resolve) => {
     const session = http2.connect(APNS_HOST);
+    let settled = false;
+    const finish = (result: { ok: boolean; statusCode?: number }, error?: Error) => {
+      if (settled) return;
+      settled = true;
+      session.close();
+      if (error) console.error(`[push] APNs connection error: ${error.message}`);
+      resolve(result);
+    };
+    // HTTP/2 transport failures (DNS, TLS, connection reset) are emitted on
+    // the session as well as, or after, the request. Keep this listener for
+    // the session lifetime so a delayed transport error cannot escape as an
+    // uncaught EventEmitter error after the request promise has settled.
+    session.on('error', (err) => finish({ ok: false }, err));
     const req = session.request({
       ':method': 'POST',
       ':path': path,
@@ -149,18 +162,15 @@ async function sendAPNs(deviceToken: string, payload: PushPayload): Promise<{ ok
     });
     req.on('data', (chunk) => { responseBody += chunk; });
     req.on('end', () => {
-      session.close();
       if (statusCode === 200) {
-        resolve({ ok: true, statusCode });
+        finish({ ok: true, statusCode });
       } else {
         console.error(`[push] APNs error ${statusCode}: ${responseBody}`);
-        resolve({ ok: false, statusCode });
+        finish({ ok: false, statusCode });
       }
     });
     req.on('error', (err) => {
-      session.close();
-      console.error(`[push] APNs connection error: ${err.message}`);
-      resolve({ ok: false });
+      finish({ ok: false }, err);
     });
 
     req.setEncoding('utf8');

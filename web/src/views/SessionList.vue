@@ -25,6 +25,12 @@
       <div class="mobile-daemon-status">
         <span :class="['mobile-daemon-dot', { online: selectedDaemon?.online }]" aria-hidden="true"></span>
         <span>{{ selectedDaemon?.online ? '在线 · 最后心跳 刚刚' : '离线' }}</span>
+        <AttentionInboxEntryButton
+          v-if="hostId"
+          class="mobile-session-inbox"
+          :scope="{ type: 'daemon', daemonId: hostId, daemonName: daemonDisplayName }"
+          show-label
+        />
       </div>
       <div v-if="searchPresented" class="mobile-session-search">
         <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="6" /><path d="m16 16 4 4" /></svg>
@@ -179,6 +185,7 @@ import {
   mergeSessionPage,
   nextVisibleSessionCount,
 } from '../utils/sessionListPagination'
+import AttentionInboxEntryButton from '../components/attention-inbox/AttentionInboxEntryButton.vue'
 
 const { renamingId, renameInput, startRename, commitRename, cancelRename } = useSessionRename()
 const { t } = useLocale()
@@ -641,6 +648,7 @@ function handleLogout() {
   .mobile-session-nav-actions .mobile-new-session { border-color: var(--primary-btn); color: var(--bg); background: var(--primary-btn); }
   .mobile-session-nav-actions svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; }
   .mobile-daemon-status { display: flex; align-items: center; gap: 6px; min-height: 33px; color: var(--fg-secondary); font-size: 13px; }
+  .mobile-session-inbox { margin-left: auto; }
   .mobile-daemon-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--fg-tertiary); }
   .mobile-daemon-dot.online { background: var(--success); }
   .mobile-session-search {

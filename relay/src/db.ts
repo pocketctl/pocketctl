@@ -3,6 +3,7 @@ import { createHash } from 'crypto';
 import type { SupportedLanguage } from './config/language.js';
 import { sanitizeJSONBPayload } from './jsonb-payload.js';
 import { initDurableIngressSchema } from './schema/durable-ingress.js';
+import { initAttentionInboxSchema } from './attention-inbox/schema.js';
 import {
   countReplayLogicalItems,
   findCompleteForwardReplayBoundary,
@@ -624,6 +625,7 @@ async function initDBUnlocked(pool: pg.Pool): Promise<void> {
   await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS max_daemons INT DEFAULT 1`);
 
   await initDurableIngressSchema(pool);
+  await initAttentionInboxSchema(pool);
 }
 
 export async function upsertDaemon(pool: pg.Pool, daemonId: string, hostname: string, agents: any[], arch?: string, version?: string, startedAt?: number): Promise<void> {

@@ -1626,7 +1626,11 @@ func (sm *SessionManager) openCodeCapabilitiesLocked(state *ProcessState) []stri
 	if state == nil || state.Agent != adapter.AgentOpencode || state.ControlMode != protocol.ControlManaged {
 		return nil
 	}
-	return append([]string(nil), opencodeInteractionCapabilities...)
+	capabilities := append([]string(nil), opencodeInteractionCapabilities...)
+	if sm.trustedActionPolicy == trustedActionPolicyOn {
+		capabilities = append(capabilities, TrustedActionPolicyCapability)
+	}
+	return capabilities
 }
 
 func (sm *SessionManager) CommandsForSession(ctx context.Context, sessionID string) ([]protocol.CommandItem, error) {

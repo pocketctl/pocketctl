@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/pocketctl/pocketctl/internal/adapter"
+	"github.com/pocketctl/pocketctl/internal/platform"
 	"github.com/pocketctl/pocketctl/internal/protocol"
 	"github.com/pocketctl/pocketctl/internal/watcher"
 )
@@ -109,8 +110,15 @@ func (sm *SessionManager) rememberPTYOutput(ps *ProcessState, chunk []byte) {
 // sessions (--continue — PID/status updated in-place, but no new tailer needed since
 // the old one still tails the same JSONL file).
 func (sm *SessionManager) RegisterTerminalSession(sessionID, cwd string, pid int, ttyPath string, status string, agent string) bool {
+	processIdentity := ""
+	if agent == adapter.AgentClaude && pid > 0 {
+		processIdentity, _ = platform.ProcessStartIdentity(pid)
+	}
 	sm.mu.Lock()
-	defer sm.mu.Unlock()
+	defer func() {
+		sm.mu.Unlock()
+		sm.bindClaudeChannelForSession(sessionID)
+	}()
 
 	// Don't register if this is a daemon-spawned process
 	if sm.childPids[pid] {
@@ -143,6 +151,7 @@ func (sm *SessionManager) RegisterTerminalSession(sessionID, cwd string, pid int
 			// Re-discovered (e.g. --continue): update PID, status, cwd.
 			// Old tailer still works on same JSONL — no new tailer needed.
 			ps.Pid = pid
+			ps.ProcessStartIdentity = processIdentity
 			ps.Status = status
 			ps.ExitReason = ""
 			// Re-discover 时用 watcher 的 agentType 校正 Agent(防历史污染:
@@ -163,6 +172,7 @@ func (sm *SessionManager) RegisterTerminalSession(sessionID, cwd string, pid int
 		// Upgrade source and start tailer.
 		ps.Source = "terminal"
 		ps.Pid = pid
+		ps.ProcessStartIdentity = processIdentity
 		if cwd != "" {
 			ps.Cwd = cwd
 		}
@@ -176,15 +186,16 @@ func (sm *SessionManager) RegisterTerminalSession(sessionID, cwd string, pid int
 	// New session — register it
 	now := time.Now()
 	sm.sessions[sessionID] = &ProcessState{
-		SessionID:      sessionID,
-		Status:         status,
-		StartedAt:      now,
-		LastActivityAt: now,
-		Cwd:            cwd,
-		Agent:          agent,
-		Source:         "terminal",
-		Pid:            pid,
-		TTY:            ttyPath,
+		SessionID:            sessionID,
+		Status:               status,
+		StartedAt:            now,
+		LastActivityAt:       now,
+		Cwd:                  cwd,
+		Agent:                agent,
+		Source:               "terminal",
+		Pid:                  pid,
+		ProcessStartIdentity: processIdentity,
+		TTY:                  ttyPath,
 	}
 
 	// session_discovered is emitted later, after the JSONL tailer confirms the file exists.

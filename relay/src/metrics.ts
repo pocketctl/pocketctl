@@ -86,11 +86,31 @@ export const tokenUsageDayClosures = new Counter({
   registers: [registry],
 })
 
+export const attentionRecoveryTransitions = new Counter({
+  name: 'pocketctl_attention_recovery_transitions_total',
+  help: 'Recovery projection transitions by bounded outcome',
+  labelNames: ['outcome'] as const,
+  registers: [registry],
+})
+
+export const attentionRecoveryQuickResolutions = new Counter({
+  name: 'pocketctl_attention_recovery_quick_resolutions_total',
+  help: 'Recovery items resolved within 60 seconds, used as a false-positive proxy',
+  registers: [registry],
+})
+
+export const attentionRecoveryOpen = new Gauge({
+  name: 'pocketctl_attention_recovery_open',
+  help: 'Current number of open recovery items observed by maintenance',
+  registers: [registry],
+})
+
 // Emit zero-value gauges immediately so a freshly started Relay has a stable
 // diagnostic surface before the first ingress event or worker poll.
 ingressQueueDepth.set(0)
 inboxOldestSeconds.set(0)
 workerBacklog.set(0)
+attentionRecoveryOpen.set(0)
 
 export function observeInboxOldest(rows: ReadonlyArray<{ receivedAt: Date }>, now: Date): void {
   if (rows.length === 0) {

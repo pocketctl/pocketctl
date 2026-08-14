@@ -25,12 +25,28 @@ var (
 	ErrCodexNotFound          = errors.New("codex binary not found")
 	ErrCodexVersion           = errors.New("codex version could not be detected")
 	ErrCodexVersionTimeout    = errors.New("codex version check timed out")
+	ErrClaudeNotFound         = errors.New("claude binary not found")
+	ErrClaudeVersion          = errors.New("claude version could not be detected")
+	ErrClaudeVersionTimeout   = errors.New("claude version check timed out")
 )
 
 var openCodeVersionRE = regexp.MustCompile(`\d+\.\d+(?:\.\d+)?`)
 
 const minimumManagedOpenCodeVersion = "1.17.11"
 const minimumManagedCodexVersion = "0.144.1"
+
+// AgentClaudeCode is the canonical agent type token for Claude Code in the
+// launcher/config layer. It is distinct from adapter.AgentClaude
+// ("claude-code"): the launcher uses the canonical token in agent-launchers
+// config and command surface, while the session/observer layer uses the
+// adapter constant. The two MUST NOT be conflated into a single string.
+// Design §Task 3: "canonical agent type 使用 claude-code,CLI name 使用
+// claude,不得把二者混为 shim 文件名".
+const AgentClaudeCode = "claude-code"
+
+// AgentClaudeCLI is the CLI/shim binary name for Claude Code (the command
+// users type and the filename installed under ~/.pocketctl/bin/).
+const AgentClaudeCLI = "claude"
 
 func SupportsManagedOpenCodeVersion(version string) bool {
 	return versionAtLeast(version, minimumManagedOpenCodeVersion)
@@ -106,12 +122,52 @@ func ResolveConfiguredCodex() (string, string, error) {
 	return NewBinaryResolver().ResolveCodex(cfg.Codex)
 }
 
+// ResolveClaude resolves a Claude Code binary for the Channel probe. It does
+// NOT register a managed runtime provider and does NOT install a shim — it
+// only locates the binary so the probe can run `claude --version`. Excluded
+// paths always include the Pocketctl-owned claude shim path so the resolver
+// does not probe its own shim.
+func ResolveClaude(excluded ...string) (string, string, error) {
+	return NewBinaryResolver().ResolveClaude(AgentConfig{}, excluded...)
+}
+
+// ResolveClaudeExecutableFast locates a real Claude executable without
+// running it. Launcher hot paths use this only as a native fallback when the
+// configured binary disappeared; enable/status remain responsible for the
+// bounded version probe.
+func ResolveClaudeExecutableFast(excluded ...string) (string, error) {
+	excluded = append(excluded, defaultClaudeShimPath())
+	path, _, found := discovery.ResolveAgentExcluding(AgentClaudeCLI, compactPaths(excluded)...)
+	if !found {
+		return "", ErrClaudeNotFound
+	}
+	resolved, _, err := inspectExecutable(path)
+	if err != nil {
+		return "", ErrClaudeNotFound
+	}
+	for _, blocked := range compactPaths(excluded) {
+		if sameResolvedPath(resolved, blocked) {
+			return "", ErrClaudeNotFound
+		}
+	}
+	return resolved, nil
+}
+
 func (r BinaryResolver) ResolveOpenCode(cfg AgentConfig, excluded ...string) (string, string, error) {
 	return r.resolve(AgentOpenCode, cfg, ErrOpenCodeNotFound, ErrOpenCodeVersion, ErrOpenCodeVersionTimeout, defaultOpenCodeShimPath(), excluded...)
 }
 
 func (r BinaryResolver) ResolveCodex(cfg AgentConfig, excluded ...string) (string, string, error) {
 	return r.resolve(AgentCodex, cfg, ErrCodexNotFound, ErrCodexVersion, ErrCodexVersionTimeout, defaultCodexShimPath(), excluded...)
+}
+
+// ResolveClaude resolves a Claude Code binary for the Channel probe. It uses
+// AgentClaudeCLI ("claude") as the discovery name and defaultClaudeShimPath
+// as the Pocketctl-owned shim to exclude. It does NOT depend on a
+// RuntimeProvider — Claude Channel is a permission relay, not a managed
+// runtime.
+func (r BinaryResolver) ResolveClaude(cfg AgentConfig, excluded ...string) (string, string, error) {
+	return r.resolve(AgentClaudeCLI, cfg, ErrClaudeNotFound, ErrClaudeVersion, ErrClaudeVersionTimeout, defaultClaudeShimPath(), excluded...)
 }
 
 func (r BinaryResolver) resolve(agent string, cfg AgentConfig, notFound, versionError, timeoutError error, defaultShim string, excluded ...string) (string, string, error) {
@@ -227,12 +283,25 @@ func defaultCodexShimPath() string {
 	return defaultShimPath(AgentCodex)
 }
 
+// defaultClaudeShimPath returns the Pocketctl-owned Claude shim location
+// ($HOME/.pocketctl/bin/claude, or claude.cmd on Windows). The resolver
+// always excludes this path so it does not probe its own shim when looking
+// for the real Claude binary.
+func defaultClaudeShimPath() string {
+	return defaultShimPath(AgentClaudeCLI)
+}
+
 func defaultShimPath(agent string) string {
 	home, err := config.HomeDir()
 	if err != nil {
 		return ""
 	}
+	// Canonical agent token "claude-code" maps to CLI/shim binary name
+	// "claude" — the file users invoke and that PATH exposes. Design §Task 3.
 	name := agent
+	if agent == AgentClaudeCode {
+		name = AgentClaudeCLI
+	}
 	if runtime.GOOS == "windows" {
 		name += ".cmd"
 	}

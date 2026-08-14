@@ -24,6 +24,10 @@ import type {
   MaterializationInput,
   MaterializedDelivery,
 } from './materialization/types.js';
+import type {
+  AttentionInteractionCommand,
+  AttentionInteractionRouteResult,
+} from './attention-inbox/types.js';
 
 interface DaemonConnection { ws: WebSocket; daemonId: string; hostname: string; agents: any[]; userId: number | null; os?: string; ip?: string; port?: string; arch?: string; version?: string; startedAt?: number; registrationId: string; tokenJti?: string }
 interface ClientConnection { ws: WebSocket; subscribedSessions: Set<string>; userId: number | null; locale: string }
@@ -108,6 +112,7 @@ export interface RouterOptions {
   authLeaseOptions?: AuthLeaseOptions;
   tokenUsageFactsAuthoritative?: boolean;
   writeTokenUsageFacts?: boolean;
+  recoveryObserver?: AttentionRecoveryTransitionObserver;
   transport?: {
     maxEventBytes?: number;
     maxChunkBytes?: number;
@@ -121,6 +126,20 @@ export interface RouterOptions {
     controller?: IngressController;
     repository?: Pick<InboxRepository, 'persistBatch' | 'seedCheckpoint'>;
   };
+}
+
+export interface AttentionRecoveryTransitionObserver {
+  confirmedOffline(input: {
+    userId: number
+    daemonId: string
+    registrationGeneration: string
+    daemonDisplayName: string
+  }): Promise<void>
+  confirmedOnline(input: {
+    userId: number
+    daemonId: string
+    registrationGeneration: string
+  }): Promise<void>
 }
 
 export interface FlagConfig {
@@ -253,6 +272,7 @@ export class Router {
   private pushDeduper = new PushDeduper();
   private readonly tokenUsageFactsAuthoritative: boolean;
   private readonly writeTokenUsageFacts: boolean;
+  private readonly recoveryObserver?: AttentionRecoveryTransitionObserver;
 
   // Daemon ids that finalized a genuine offline (grace window elapsed). Used
   // to push "online" only on a real offline→online transition, not on every
@@ -264,6 +284,7 @@ export class Router {
   constructor(pools: RelayPools | pg.Pool, options: RouterOptions = {}) {
     this.tokenUsageFactsAuthoritative = options.tokenUsageFactsAuthoritative === true;
     this.writeTokenUsageFacts = options.writeTokenUsageFacts === true;
+    this.recoveryObserver = options.recoveryObserver;
     const normalized = isRelayPools(pools) ? pools : {
       control: pools, ingest: pools, query: pools, worker: pools,
     };
@@ -1009,6 +1030,13 @@ export class Router {
         ...streamTransport,
       });
     if (userId) this.broadcastQuotaStatus(userId).catch(console.error);
+    if (userId && this.recoveryObserver) {
+      void this.recoveryObserver.confirmedOnline({
+        userId,
+        daemonId,
+        registrationGeneration: registrationId,
+      }).catch((e) => console.error('[attention-inbox] recovery online projection:', e));
+    }
 
     // Rebuild the session→daemon routing table for this daemon. The in-memory
     // map is volatile (lost on relay restart; stale entries survive disconnects),
@@ -1148,6 +1176,15 @@ export class Router {
     // A registration may have won after the captured generation was removed
     // from memory but before its DB CAS ran. Never publish stale offline state.
     if (!markedOffline || this.daemons.has(daemonId)) return;
+
+    if (userId && this.recoveryObserver && !this.shuttingDown) {
+      void this.recoveryObserver.confirmedOffline({
+        userId,
+        daemonId,
+        registrationGeneration: daemon.registrationId,
+        daemonDisplayName: hostname,
+      }).catch((e) => console.error('[attention-inbox] recovery offline projection:', e));
+    }
 
     // Push notification for daemon offline — suppressed during relay shutdown
     // (the daemon is about to reconnect to the new process, not truly offline).
@@ -2092,6 +2129,58 @@ export class Router {
       return;
     }
     this.send(clientWs, { type: 'error', error: 'session not found or daemon offline' });
+  }
+
+  /**
+   * Submit a normalized Attention Inbox response through the same live daemon
+   * connection used by existing WebSocket clients. This deliberately does not
+   * register a synthetic client or track an interaction origin: final state is
+   * still driven by the daemon's durable resolution event.
+   */
+  async submitAttentionInboxInteraction(
+    userId: number,
+    command: AttentionInteractionCommand,
+  ): Promise<AttentionInteractionRouteResult> {
+    const owned = await db.isSessionOwnedByUser(this.pool, userId, command.session_id)
+      .catch(() => false);
+    if (!owned) return { accepted: false, code: 'session_not_found' };
+
+    let daemonId = this.sessionToDaemon.get(command.session_id) ?? null;
+    if (!daemonId) {
+      daemonId = await db.getSessionDaemonId(this.pool, command.session_id).catch(() => null);
+      if (daemonId) this.sessionToDaemon.set(command.session_id, daemonId);
+    }
+    if (!daemonId) return { accepted: false, code: 'daemon_unreachable' };
+
+    const daemon = this.daemons.get(daemonId);
+    if (!daemon || daemon.ws.readyState !== 1 || daemon.userId !== userId) {
+      return { accepted: false, code: 'daemon_unreachable' };
+    }
+
+    // Rebuild the outbound object so API-only or caller-controlled fields can
+    // never leak into the daemon protocol.
+    if (command.type === 'approval_response') {
+      this.send(daemon.ws, {
+        type: command.type,
+        session_id: command.session_id,
+        request_id: command.request_id,
+        action: command.action,
+      });
+    } else if (command.type === 'question_response') {
+      this.send(daemon.ws, {
+        type: command.type,
+        session_id: command.session_id,
+        request_id: command.request_id,
+        answers: command.answers,
+      });
+    } else {
+      this.send(daemon.ws, {
+        type: command.type,
+        session_id: command.session_id,
+        request_id: command.request_id,
+      });
+    }
+    return { accepted: true };
   }
 
   private async handleReplay(clientWs: WebSocket, sessionId: string, lastSeq: number, reqId?: number, direction?: string, limit?: number): Promise<void> {

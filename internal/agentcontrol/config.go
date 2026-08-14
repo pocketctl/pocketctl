@@ -12,6 +12,9 @@ import (
 	appconfig "github.com/pocketctl/pocketctl/internal/config"
 )
 
+// ConfigVersion deliberately remains v1. JSON readers used by older
+// Pocketctl releases ignore the optional Claude field, so keeping this header
+// preserves Codex/OpenCode rollback while extending the file compatibly.
 const ConfigVersion = 1
 
 const (
@@ -30,15 +33,23 @@ type Config struct {
 	Version  int         `json:"version"`
 	OpenCode AgentConfig `json:"opencode"`
 	Codex    AgentConfig `json:"codex"`
+	// Claude is the dedicated config for the Claude Code Channel permission
+	// relay launcher (JSON key "claude"). It is distinct from the legacy
+	// ClaudeProbe shared-runtime authority contract. Design §Task 3.
+	Claude AgentConfig `json:"claude"`
 }
 
 type AgentConfig struct {
-	State          string    `json:"state"`
-	DecisionSource string    `json:"decision_source,omitempty"`
-	RealBinary     string    `json:"real_binary,omitempty"`
-	ShimPath       string    `json:"shim_path,omitempty"`
-	DecidedAt      time.Time `json:"decided_at,omitempty"`
-	InstalledAt    time.Time `json:"installed_at,omitempty"`
+	State           string    `json:"state"`
+	DecisionSource  string    `json:"decision_source,omitempty"`
+	RealBinary      string    `json:"real_binary,omitempty"`
+	ShimPath        string    `json:"shim_path,omitempty"`
+	DetectedVersion string    `json:"detected_version,omitempty"`
+	BinarySize      int64     `json:"binary_size,omitempty"`
+	BinaryMTimeNS   int64     `json:"binary_mtime_ns,omitempty"`
+	BinaryMode      uint32    `json:"binary_mode,omitempty"`
+	DecidedAt       time.Time `json:"decided_at,omitempty"`
+	InstalledAt     time.Time `json:"installed_at,omitempty"`
 }
 
 func DefaultConfig() Config {
@@ -46,6 +57,7 @@ func DefaultConfig() Config {
 		Version:  ConfigVersion,
 		OpenCode: AgentConfig{State: StateUndecided},
 		Codex:    AgentConfig{State: StateUndecided},
+		Claude:   AgentConfig{State: StateUndecided},
 	}
 }
 
@@ -94,6 +106,9 @@ func LoadConfig() (Config, error) {
 	if !validState(cfg.Codex.State) {
 		return fallback, fmt.Errorf("invalid codex launcher state %q", cfg.Codex.State)
 	}
+	if !validState(cfg.Claude.State) {
+		return fallback, fmt.Errorf("invalid claude launcher state %q", cfg.Claude.State)
+	}
 	return cfg, nil
 }
 
@@ -106,6 +121,9 @@ func SaveConfig(cfg Config) error {
 	}
 	if !validState(cfg.Codex.State) {
 		return fmt.Errorf("invalid codex launcher state %q", cfg.Codex.State)
+	}
+	if !validState(cfg.Claude.State) {
+		return fmt.Errorf("invalid claude launcher state %q", cfg.Claude.State)
 	}
 	path, err := ConfigPath()
 	if err != nil {
@@ -161,5 +179,8 @@ func normalizeConfig(cfg *Config) {
 	}
 	if cfg.Codex.State == "" {
 		cfg.Codex.State = StateUndecided
+	}
+	if cfg.Claude.State == "" {
+		cfg.Claude.State = StateUndecided
 	}
 }

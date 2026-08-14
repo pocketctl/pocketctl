@@ -31,6 +31,9 @@ import { RegistrationDeadline } from './registration-deadline.js';
 import { resolveAdmissionAddress } from './remote-address.js';
 import {
   registry as relayMetricsRegistry,
+  attentionRecoveryOpen,
+  attentionRecoveryQuickResolutions,
+  attentionRecoveryTransitions,
   tokenUsageDayClosures,
   tokenUsageShadowComparisons,
 } from './metrics.js';
@@ -40,6 +43,15 @@ import {
 } from './materialization/realtime-outbox.js';
 import { assertDurableIngressSchema } from './event-worker-main.js';
 import { registerSessionShareRoutes } from './session-share-routes.js';
+import { attentionInboxConfig } from './attention-inbox/config.js';
+import { serializeAttentionItem, serializeAttentionRecovery } from './attention-inbox/dto.js';
+import { createAttentionNotifier } from './attention-inbox/notifier.js';
+import { createAttentionProjectionWorker } from './attention-inbox/projection-worker.js';
+import { AttentionInboxRepository } from './attention-inbox/repository.js';
+import { AttentionRecoveryRepository } from './attention-inbox/recovery-repository.js';
+import { registerAttentionInboxRoutes } from './attention-inbox/routes.js';
+import { createAttentionInboxRuntime } from './attention-inbox/runtime.js';
+import { AttentionInboxService } from './attention-inbox/service.js';
 import {
   assertTokenUsageFeatureDependencies,
   tokenUsageFeatures,
@@ -596,10 +608,36 @@ async function main() {
   const buildInfo = resolveBuildInfo(process.env)
   const runtimeConfig = resolveRelayRuntimeConfig(process.env)
   const tokenFeatures = tokenUsageFeatures(process.env)
+  const attentionConfig = attentionInboxConfig(process.env)
   assertTokenUsageFeatureDependencies(tokenFeatures, runtimeConfig.durableIngress.mode)
   const pools = createRelayPools(parseDBUrl(DB_URL))
   const pool = pools.query
   const welcomeEmailWorker = createWelcomeEmailWorker({ pool: pools.worker })
+  const attentionRepository = new AttentionInboxRepository(
+    pools.query,
+    process.env.JWT_SECRET!,
+  )
+  const recoveryRepository = new AttentionRecoveryRepository(pools.query)
+  const recoveryObserver = attentionConfig.recovery.projection ? {
+    async confirmedOffline(input: {
+      userId: number
+      daemonId: string
+      registrationGeneration: string
+      daemonDisplayName: string
+    }): Promise<void> {
+      const result = await recoveryRepository.recordConfirmedOffline(input)
+      attentionRecoveryTransitions.inc({ outcome: result.outcome })
+    },
+    async confirmedOnline(input: {
+      userId: number
+      daemonId: string
+      registrationGeneration: string
+    }): Promise<void> {
+      const result = await recoveryRepository.recordConfirmedOnline(input)
+      if (result.resolved > 0) attentionRecoveryTransitions.inc({ outcome: 'resolved' }, result.resolved)
+      if (result.quickResolved > 0) attentionRecoveryQuickResolutions.inc(result.quickResolved)
+    },
+  } : undefined
   const router = new Router(pools, {
     transport: {
       maxEventBytes: runtimeConfig.maxEventBytes,
@@ -614,10 +652,58 @@ async function main() {
     },
     tokenUsageFactsAuthoritative: useFactAuthoritativeSessionDeletion(tokenFeatures),
     writeTokenUsageFacts: tokenFeatures.writeFacts,
+    recoveryObserver,
   });
   const realtimeOutboxConsumer = new RealtimeOutboxConsumer({
     repository: new RealtimeOutboxRepository(pools.query),
     deliver: (delivery) => router.deliverDurableMaterializedEvent(delivery),
+  })
+  const attentionService = new AttentionInboxService({
+    mode: attentionConfig.mode,
+    repository: attentionRepository,
+    router,
+    requestHashSecret: process.env.JWT_SECRET!,
+  })
+  const attentionProjection = createAttentionProjectionWorker({
+    pool: pools.worker,
+    repository: attentionRepository,
+  })
+  const attentionNotifier = createAttentionNotifier({
+    pool: pools.worker,
+    loadItem: async (userId, itemId, revision) => {
+      const item = await attentionRepository.getItem(userId, itemId, revision)
+      return item ? serializeAttentionItem(item) : null
+    },
+    loadRecovery: async (userId, itemId, revision) => {
+      const item = await recoveryRepository.getItem(userId, itemId, revision)
+      return item ? serializeAttentionRecovery(item) : null
+    },
+    recoveryVisible: attentionConfig.recovery.visible,
+    broadcast: (userId, payload) => router.broadcastToUser(userId, payload),
+  })
+  const recoveryBackfillNotBefore = Date.now() + positiveEnvInt('RELAY_LIST_GRACE_MS', 60_000)
+  const attentionMaintenance = {
+    async runMaintenance(): Promise<number> {
+      const itemChanges = await attentionRepository.runMaintenance()
+      if (!attentionConfig.recovery.projection) return itemChanges
+      const recovery = await recoveryRepository.runMaintenance({
+        projectOffline: Date.now() >= recoveryBackfillNotBefore,
+      })
+      attentionRecoveryOpen.set(recovery.open)
+      if (recovery.changed > 0) {
+        attentionRecoveryTransitions.inc({ outcome: 'reconciled' }, recovery.changed)
+      }
+      return itemChanges + recovery.changed
+    },
+  }
+  const attentionRuntime = createAttentionInboxRuntime({
+    mode: attentionConfig.mode,
+    projection: attentionProjection,
+    maintenance: attentionMaintenance,
+    notifier: attentionNotifier,
+    onError: (component, error) => {
+      console.error(`[attention-inbox] ${component} failed:`, error instanceof Error ? error.name : typeof error)
+    },
   })
   let shuttingDown = false
   let databaseReady = false
@@ -658,6 +744,7 @@ async function main() {
       }
       if (!shuttingDown) {
         await startRelayBackgroundWorkers({ welcome: welcomeEmailWorker, realtimeOutboxConsumer });
+        await attentionRuntime.start();
       }
       if (!shuttingDown) databaseReady = true
     })
@@ -676,6 +763,14 @@ async function main() {
   await app.register(fastifyCors, { origin: corsOrigin, credentials: true });
   await app.register(fastifyWebsocket);
   registerSessionShareRoutes(app, { pool, publicIssuer });
+  registerAttentionInboxRoutes(app, {
+    pool,
+    config: attentionConfig,
+    repository: attentionRepository,
+    recoveryRepository,
+    service: attentionService,
+    verifyAccessToken: (token, authPool) => verifyAccessTokenWithRevocation(token, authPool),
+  });
 
   // ---- REST API: Auth ----
 
@@ -1776,6 +1871,11 @@ async function main() {
       await realtimeOutboxConsumer.stop()
     } catch (e) {
       console.error('[shutdown] realtime outbox drain error:', e instanceof Error ? e.name : typeof e)
+    }
+    try {
+      await attentionRuntime.stop()
+    } catch (e) {
+      console.error('[shutdown] attention inbox drain error:', e instanceof Error ? e.name : typeof e)
     }
     router.broadcastRelayRestarting();
     router.terminateAllConnections()

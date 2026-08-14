@@ -499,6 +499,60 @@ func TestDaemonEvent_NewFields_Present(t *testing.T) {
 	}
 }
 
+func TestDaemonEventRiskClassificationRoundTrip(t *testing.T) {
+	incomplete := false
+	event := DaemonEvent{
+		Type: "approval_request", SessionID: "session-1", RequestID: "request-1",
+		RiskLevel: "medium", RiskIncomplete: &incomplete,
+		RiskReasons: []string{"executes_command", "requests_permissions"},
+	}
+	raw, err := json.Marshal(event)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var decoded DaemonEvent
+	if err := json.Unmarshal(raw, &decoded); err != nil {
+		t.Fatal(err)
+	}
+	if decoded.RiskIncomplete == nil || *decoded.RiskIncomplete {
+		t.Fatalf("explicit complete classification did not round-trip: %+v", decoded)
+	}
+	if got := strings.Join(decoded.RiskReasons, ","); got != "executes_command,requests_permissions" {
+		t.Fatalf("risk reasons=%q", got)
+	}
+}
+
+func TestApprovalSecurityContextRoundTrip(t *testing.T) {
+	want := ApprovalSecurityContext{
+		SchemaVersion:            1,
+		RiskLevel:                "high",
+		ClassificationIncomplete: true,
+		RiskReasons:              []string{RiskReasonExecutesCommand},
+		AllowedActions:           []string{"once", "reject"},
+	}
+	raw, err := json.Marshal(DaemonEvent{
+		Type: "approval_request", SessionID: "session-1", RequestID: "request-1",
+		SecurityContext: &want,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var decoded DaemonEvent
+	if err := json.Unmarshal(raw, &decoded); err != nil {
+		t.Fatal(err)
+	}
+	if decoded.SecurityContext == nil {
+		t.Fatal("security context was not preserved")
+	}
+	got := decoded.SecurityContext
+	if got.SchemaVersion != 1 || got.RiskLevel != "high" || !got.ClassificationIncomplete {
+		t.Fatalf("security context facts=%+v", got)
+	}
+	if strings.Join(got.RiskReasons, ",") != RiskReasonExecutesCommand || strings.Join(got.AllowedActions, ",") != "once,reject" {
+		t.Fatalf("security context lists=%+v", got)
+	}
+}
+
 func TestDaemonEvent_NewFields_Deserialization(t *testing.T) {
 	jsonStr := `{"type":"session_status","session_id":"abc","status":"exited","exit_reason":"user_interrupt","last_activity_at":"2026-06-07T12:00:00Z"}`
 

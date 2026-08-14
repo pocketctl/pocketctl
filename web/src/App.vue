@@ -29,6 +29,12 @@
           <span class="badge" v-if="sessionCount > 0">{{ sessionCount }}</span>
         </router-link>
 
+        <router-link v-if="attentionInbox.isAvailable.value" to="/inbox" class="sidebar-link" active-class="active">
+          <span class="link-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 4h16v14H4z"/><path d="M4 13h5l2 2h2l2-2h5"/></svg></span>
+          <span class="link-text">{{ t('attention.title') }}</span>
+          <span class="badge" v-if="attentionInbox.actionableCount({ type: 'global' }) > 0">{{ attentionInbox.actionableCount({ type: 'global' }) > 99 ? '99+' : attentionInbox.actionableCount({ type: 'global' }) }}</span>
+        </router-link>
+
         <router-link to="/tokens" class="sidebar-link" active-class="active">
           <span class="link-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 20V10M12 20V4M6 20v-6"/></svg></span>
           <span class="link-text">{{ t('nav.tokens') }}</span>
@@ -109,7 +115,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, provide } from 'vue'
+import { ref, computed, provide, watch, onBeforeUnmount } from 'vue'
 import { useRoute } from 'vue-router'
 import { useAuth } from './composables/useAuth'
 import { useLocale } from './composables/useLocale'
@@ -123,6 +129,7 @@ import logoDark from './assets/logo-github-org.svg'
 import logoLight from './assets/logo-github-org-light.svg'
 import { useAgentPlanProgress } from './composables/useAgentPlanProgress'
 import { useSessionHeader } from './composables/useSessionHeader'
+import { useAttentionInbox } from './composables/useAttentionInbox'
 
 const route = useRoute()
 const { isLoggedIn, user } = useAuth()
@@ -134,6 +141,7 @@ const isSessionRoute = computed(() => route.path.startsWith('/session/'))
 const isSessionListRoute = computed(() => route.path === '/sessions')
 const { planForSession } = useAgentPlanProgress()
 const { sessionHeader } = useSessionHeader()
+const attentionInbox = useAttentionInbox()
 const mobileCurrentPlan = planForSession(computed(() =>
   isSessionRoute.value && !route.query.subagent ? String(route.params.id || '') : '',
 ))
@@ -172,10 +180,17 @@ const pageTitle = computed(() => {
     '/settings': t('nav.settings'),
     '/hosts': t('nav.hosts'),
     '/tokens': t('nav.tokens'),
+    '/inbox': t('attention.title'),
   }
   if (route.path.startsWith('/session/')) return t('nav.session_detail')
   return titles[route.path] || t('nav.overview')
 })
+
+watch(isLoggedIn, loggedIn => {
+  if (loggedIn) void attentionInbox.start()
+  else attentionInbox.stop()
+}, { immediate: true })
+onBeforeUnmount(() => attentionInbox.stop())
 
 const mobileTopbarTitle = computed(() => isSessionRoute.value && sessionHeader.value.title
   ? sessionHeader.value.title

@@ -1,0 +1,10 @@
+{
+  "jsonrpc": "2.0",
+  "method": "notifications/claude/channel/permission_request",
+  "params": {
+    "request_id": "abcde",
+    "tool_name": "Bash",
+    "description": "<redacted>",
+    "input_preview": "<redacted>"
+  }
+}

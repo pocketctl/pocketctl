@@ -32,7 +32,9 @@ func EnsureHooks(cwd, pocketctlPath string) error {
 	return mergeHookEntry(settingsPath, pocketctlPath)
 }
 
-// EnsureUserHook merges the daemon's PreToolUse hook into the USER-GLOBAL
+// EnsureUserHook is retained only for backwards-compatible tooling/tests. New
+// daemon and Channel startup paths MUST NOT call it. It merges a PreToolUse
+// hook into the USER-GLOBAL
 // ~/.claude/settings.json. Unlike EnsureHooks (which is per-project and only
 // covers daemon-spawned sessions), this installs a single hook that fires for
 // EVERY `claude` invocation the user starts in any terminal — including
@@ -41,8 +43,8 @@ func EnsureHooks(cwd, pocketctlPath string) error {
 // to web/iOS clients: the hook reads `session_id` straight from Claude's
 // payload and connects to the user-global approval socket.
 //
-// Safe to call on every daemon start: idempotent (deduped by HookMarker) and
-// preserves any user-authored hooks. Pair with RemoveUserHook on shutdown.
+// The active migration path only calls RemoveUserHook once during explicit
+// Claude enable, preserving native fallback when the daemon is absent.
 func EnsureUserHook(pocketctlPath string) error {
 	home, err := config.HomeDir()
 	if err != nil {
@@ -58,8 +60,8 @@ func EnsureUserHook(pocketctlPath string) error {
 
 // RemoveUserHook strips the daemon-injected PreToolUse entry from the
 // USER-GLOBAL ~/.claude/settings.json, leaving any user-authored hooks intact.
-// Called on daemon shutdown so we don't leave a dangling hook pointing at a
-// daemon that's no longer running.
+// Called during explicit Claude enable to remove entries left by older
+// releases; daemon lifecycle no longer mutates this file.
 func RemoveUserHook() error {
 	home, err := config.HomeDir()
 	if err != nil {
@@ -103,10 +105,8 @@ func mergeHookEntry(settingsPath, pocketctlPath string) error {
 	// Drop any pre-existing pocketctl-managed entry, then append the fresh one.
 	filtered := make([]any, 0, len(rawArr)+1)
 	for _, e := range rawArr {
-		if m, ok := e.(map[string]any); ok {
-			if d, _ := m["description"].(string); d == HookMarker {
-				continue
-			}
+		if isPocketctlManagedHook(e) {
+			continue
 		}
 		filtered = append(filtered, e)
 	}
@@ -121,7 +121,10 @@ func mergeHookEntry(settingsPath, pocketctlPath string) error {
 // settings file at path. If no hooks remain, the hooks key is dropped for
 // tidiness. Shared by the per-project and user-global cleaners.
 func stripHookEntry(settingsPath string) error {
-	settings := loadSettings(settingsPath)
+	settings, err := loadSettingsStrict(settingsPath)
+	if err != nil {
+		return err
+	}
 
 	hooks, _ := settings["hooks"].(map[string]any)
 	arr, _ := hooks["PreToolUse"].([]any)
@@ -131,10 +134,8 @@ func stripHookEntry(settingsPath string) error {
 
 	filtered := make([]any, 0, len(arr))
 	for _, e := range arr {
-		if m, ok := e.(map[string]any); ok {
-			if d, _ := m["description"].(string); d == HookMarker {
-				continue
-			}
+		if isPocketctlManagedHook(e) {
+			continue
 		}
 		filtered = append(filtered, e)
 	}
@@ -149,6 +150,32 @@ func stripHookEntry(settingsPath string) error {
 		settings["hooks"] = hooks
 	}
 	return saveSettings(settingsPath, settings)
+}
+
+// isPocketctlManagedHook requires both our marker and the exact legacy
+// command shape. A user entry that happens to reuse the description is not
+// ours and must survive migration cleanup.
+func isPocketctlManagedHook(entry any) bool {
+	m, ok := entry.(map[string]any)
+	if !ok || m["description"] != HookMarker {
+		return false
+	}
+	hooks, ok := m["hooks"].([]any)
+	if !ok || len(hooks) != 1 {
+		return false
+	}
+	hook, ok := hooks[0].(map[string]any)
+	if !ok || hook["type"] != "command" {
+		return false
+	}
+	command, ok := hook["command"].(string)
+	if !ok || !strings.HasSuffix(strings.TrimSpace(command), " __hook") {
+		return false
+	}
+	path := strings.TrimSpace(strings.TrimSuffix(strings.TrimSpace(command), " __hook"))
+	path = strings.Trim(path, "\"'")
+	base := strings.ToLower(filepath.Base(path))
+	return base == "pocketctl" || base == "pocketctl.exe"
 }
 
 // RemoveHooks strips the daemon-injected PreToolUse entry from <cwd>/.claude/
@@ -185,6 +212,18 @@ func loadSettings(path string) map[string]any {
 	// Best-effort: preserve whatever the user has, even if not an object.
 	_ = json.Unmarshal(data, &settings)
 	return settings
+}
+
+func loadSettingsStrict(path string) (map[string]any, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("read settings: %w", err)
+	}
+	settings := map[string]any{}
+	if err := json.Unmarshal(data, &settings); err != nil {
+		return nil, fmt.Errorf("parse settings without modifying it: %w", err)
+	}
+	return settings, nil
 }
 
 func saveSettings(path string, settings map[string]any) error {

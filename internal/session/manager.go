@@ -2,6 +2,7 @@ package session
 
 import (
 	"context"
+	"os"
 	"os/exec"
 	"sync"
 	"time"
@@ -17,41 +18,43 @@ import (
 )
 
 type ProcessState struct {
-	SessionID        string
-	Cmd              *exec.Cmd
-	Cancel           context.CancelFunc
-	Status           string
-	StartedAt        time.Time
-	LastActivityAt   time.Time // last activity timestamp (status change, message, etc.)
-	TurnStartedAt    time.Time // start of the current turn; zero while idle
-	Cwd              string
-	Agent            string
-	Source           string               // "daemon" or "terminal"
-	SlashCommands    []string             // slash commands the agent reported as available (init event)
-	Pid              int                  // terminal session's original PID
-	TTY              string               // terminal session's TTY device (e.g. /dev/ttys002)
-	ExitReason       string               // reason for process exit (terminal sessions only)
-	TitleAttempts    int                  // 已触发 generate_title_request 次数（上限 MaxTitleAttempts）
-	Tailer           *watcher.JSONLTailer // terminal session 的 JSONL tailer（D2: sendToIdleTerminal 期间 pause）
-	PTY              platform.PTY         // interactive-web-session D1: daemon session 的 PTY master（写 stdin 驱动 interactive claude）。PR2: platform.PTY interface (was *os.File)
-	PTYScanner       *ptyscan.Scanner     // daemon session 的 PTY 菜单扫描器（捕获 TUI 选择提示，转成 interactive_prompt 事件）
-	Permission       *protocol.PermissionConfig
-	Model            string // resolved model name (for session_created, surfaced to web /model)
-	CurrentAgent     string // selected OpenCode Agent profile; Agent remains the CLI type
-	Effort           string // last-set thinking-effort level (low/medium/high/xhigh/max/ultracode)
-	PendingRequestID string // non-empty while a tool-use approval request awaits a client decision
+	SessionID            string
+	Cmd                  *exec.Cmd
+	Cancel               context.CancelFunc
+	Status               string
+	StartedAt            time.Time
+	LastActivityAt       time.Time // last activity timestamp (status change, message, etc.)
+	TurnStartedAt        time.Time // start of the current turn; zero while idle
+	Cwd                  string
+	Agent                string
+	Source               string               // "daemon" or "terminal"
+	SlashCommands        []string             // slash commands the agent reported as available (init event)
+	Pid                  int                  // terminal session's original PID
+	ProcessStartIdentity string               // OS process-birth identity; prevents PID-reuse binding
+	TTY                  string               // terminal session's TTY device (e.g. /dev/ttys002)
+	ExitReason           string               // reason for process exit (terminal sessions only)
+	TitleAttempts        int                  // 已触发 generate_title_request 次数（上限 MaxTitleAttempts）
+	Tailer               *watcher.JSONLTailer // terminal session 的 JSONL tailer（D2: sendToIdleTerminal 期间 pause）
+	PTY                  platform.PTY         // interactive-web-session D1: daemon session 的 PTY master（写 stdin 驱动 interactive claude）。PR2: platform.PTY interface (was *os.File)
+	PTYScanner           *ptyscan.Scanner     // daemon session 的 PTY 菜单扫描器（捕获 TUI 选择提示，转成 interactive_prompt 事件）
+	Permission           *protocol.PermissionConfig
+	Model                string // resolved model name (for session_created, surfaced to web /model)
+	CurrentAgent         string // selected OpenCode Agent profile; Agent remains the CLI type
+	Effort               string // last-set thinking-effort level (low/medium/high/xhigh/max/ultracode)
+	PendingRequestID     string // non-empty while a tool-use approval request awaits a client decision
 	// OpenCode interactions are independent, request-ID-keyed collections. The
 	// legacy PendingRequestID above remains exclusively for Claude hook approval.
-	PendingPermissions map[string]PendingOpenCodePermission
-	PendingQuestions   map[string]PendingOpenCodeQuestion
-	InitialPrompt      string              // prompt submitted when a daemon PTY session starts
-	JSONLExcludeIDs    map[string]struct{} // rollout/session ids that existed before this PTY launch
-	PTYOutputTail      []byte              // recent raw PTY output for startup diagnostics
-	WorktreePath       string              // Scheme D: non-empty when the session runs inside a git worktree
-	WorktreeBranch     string              // Scheme D: the git branch backing the worktree
-	Backend            SessionBackend      // non-nil only for server-kind agents (opencode); subprocess agents drive via the fields above
-	ControlMode        string              // managed | unmanaged_active | legacy_read_only
-	CodexPlanState     *adapter.CodexPlanState
+	PendingPermissions      map[string]PendingOpenCodePermission
+	PendingQuestions        map[string]PendingOpenCodeQuestion
+	InitialPrompt           string              // prompt submitted when a daemon PTY session starts
+	JSONLExcludeIDs         map[string]struct{} // rollout/session ids that existed before this PTY launch
+	PTYOutputTail           []byte              // recent raw PTY output for startup diagnostics
+	WorktreePath            string              // Scheme D: non-empty when the session runs inside a git worktree
+	WorktreeBranch          string              // Scheme D: the git branch backing the worktree
+	Backend                 SessionBackend      // non-nil only for server-kind agents (opencode); subprocess agents drive via the fields above
+	ControlMode             string              // managed | unmanaged_active | legacy_read_only
+	CodexPlanState          *adapter.CodexPlanState
+	ClaudeChannelInstanceID string
 }
 
 type PendingOpenCodePermission struct {
@@ -63,6 +66,7 @@ type PendingOpenCodePermission struct {
 	ToolMessageID   string
 	ToolCallID      string
 	ProtocolVersion string
+	securityContext *protocol.ApprovalSecurityContext
 }
 
 type PendingOpenCodeQuestion struct {
@@ -112,11 +116,15 @@ type SessionManager struct {
 	approvalEnabled bool   // set once an approval server is attached
 	// Claude V2 approvals are isolated from Codex/OpenCode interaction state.
 	// They are enabled only by the Claude-specific rollout flag.
-	claudeApprovalV2        bool
-	claudeApprovals         map[string]*claudeApprovalSession
-	claudeApprovalResolved  map[claudeApprovalKey]time.Time
-	claudeApprovalRecorder  func([]ClaudeApprovalReference) error
-	claudeTelemetryRecorder func(metric, reason string)
+	claudeApprovalV2            bool
+	claudeApprovals             map[string]*claudeApprovalSession
+	claudeApprovalResolved      map[claudeApprovalKey]time.Time
+	claudeApprovalRecorder      func([]ClaudeApprovalReference) error
+	claudeApprovalPersistenceMu sync.Mutex
+	claudeTelemetryRecorder     func(metric, reason string)
+	claudeChannelInstances      map[string]*ClaudeChannelBinding
+	claudeChannelApprovals      map[ClaudeChannelApprovalKey]*PendingClaudeChannelApproval
+	claudeChannelPublic         map[string]*PendingClaudeChannelApproval
 
 	// Scheme A: cwd → active session ID set, for "directory already in use"
 	// awareness. Keyed by normalized absolute path (normalizeCwd).
@@ -132,6 +140,7 @@ type SessionManager struct {
 	codexProvider               *CodexRuntimeProvider
 	leases                      *agentcontrol.LeaseRegistry
 	recordOpenCodeRuntimeHealth func(bool)
+	trustedActionPolicy         trustedActionPolicyMode
 }
 
 type createSessionDependencies struct {
@@ -141,6 +150,14 @@ type createSessionDependencies struct {
 }
 
 func NewSessionManager(outputCh chan protocol.DaemonEvent) *SessionManager {
+	return NewSessionManagerWithTrustedActionPolicy(outputCh, os.Getenv("POCKETCTL_TRUSTED_ACTION_POLICY_V1"))
+}
+
+// NewSessionManagerWithTrustedActionPolicy constructs a manager with an
+// explicit rollout mode. The daemon CLI uses this entry point when its
+// supported --trusted-action-policy flag is present; NewSessionManager keeps
+// the legacy environment fallback for existing callers.
+func NewSessionManagerWithTrustedActionPolicy(outputCh chan protocol.DaemonEvent, trustedActionPolicy string) *SessionManager {
 	return &SessionManager{
 		sessions:               make(map[string]*ProcessState),
 		outputCh:               outputCh,
@@ -153,6 +170,10 @@ func NewSessionManager(outputCh chan protocol.DaemonEvent) *SessionManager {
 		claudeApprovalV2:       claudeApprovalV2Enabled(),
 		claudeApprovals:        make(map[string]*claudeApprovalSession),
 		claudeApprovalResolved: make(map[claudeApprovalKey]time.Time),
+		claudeChannelInstances: make(map[string]*ClaudeChannelBinding),
+		claudeChannelApprovals: make(map[ClaudeChannelApprovalKey]*PendingClaudeChannelApproval),
+		claudeChannelPublic:    make(map[string]*PendingClaudeChannelApproval),
+		trustedActionPolicy:    parseTrustedActionPolicyMode(trustedActionPolicy),
 		createDeps: createSessionDependencies{
 			resolveAgentCLI: func(config protocol.SessionConfig) (string, error) {
 				return findAgentCLI(config.Agent)

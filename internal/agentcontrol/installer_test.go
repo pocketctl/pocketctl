@@ -2,6 +2,7 @@ package agentcontrol
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -9,7 +10,145 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	appconfig "github.com/pocketctl/pocketctl/internal/config"
 )
+
+func TestClaudeChannelMCPConfigIsPrivateAndPocketctlOwned(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	pocketctlBinary := testExecutable(t, "pocketctl")
+	path, err := ensureClaudeChannelMCPConfig(pocketctlBinary)
+	if err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if runtime.GOOS != "windows" && info.Mode().Perm() != 0o600 {
+		t.Fatalf("mode=%o want 600", info.Mode().Perm())
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var config struct {
+		MCPServers map[string]struct {
+			Type    string   `json:"type"`
+			Command string   `json:"command"`
+			Args    []string `json:"args"`
+		} `json:"mcpServers"`
+	}
+	if err := json.Unmarshal(raw, &config); err != nil {
+		t.Fatal(err)
+	}
+	pocketctl, ok := config.MCPServers["pocketctl"]
+	if !ok || pocketctl.Type != "stdio" || pocketctl.Command != pocketctlBinary ||
+		len(pocketctl.Args) != 1 || pocketctl.Args[0] != "__claude_channel" {
+		t.Fatalf("unexpected MCP config: %s", raw)
+	}
+}
+
+func TestClaudeInstallerEnableCreatesMCPConfig(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("wrapper assertions are Unix-specific")
+	}
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	realClaude := testExecutable(t, "claude")
+	pocketctlBinary := testExecutable(t, "pocketctl")
+	installer := Installer{
+		PocketctlPath: pocketctlBinary,
+		ResolveClaude: func(context.Context) (string, string, error) {
+			return realClaude, MinimumClaudeChannelVersion, nil
+		},
+	}
+	status, err := installer.EnableAgent(context.Background(), AgentClaudeCode, EnableOptions{NoShellProfile: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status.State != StateEnabled || status.RealBinary != realClaude {
+		t.Fatalf("status=%+v", status)
+	}
+	mcpPath, err := appconfig.ClaudeChannelMCPConfigPath()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(mcpPath); err != nil {
+		t.Fatalf("MCP config not created: %v", err)
+	}
+}
+
+func TestClaudeStatusDoesNotReportChannelWhenRolloutIsOff(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("POCKETCTL_CLAUDE_CHANNEL_APPROVAL", "0")
+	shimDir := filepath.Join(home, ".pocketctl", "bin")
+	if err := os.MkdirAll(shimDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	shim := filepath.Join(shimDir, "claude")
+	if err := os.WriteFile(shim, []byte("shim"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", shimDir)
+	realClaude := testExecutable(t, "real-claude")
+	cfg := DefaultConfig()
+	cfg.Claude = AgentConfig{State: StateEnabled, RealBinary: realClaude, ShimPath: shim}
+	if err := SaveConfig(cfg); err != nil {
+		t.Fatal(err)
+	}
+	installer := Installer{ResolveClaude: func(context.Context) (string, string, error) {
+		return realClaude, MinimumClaudeChannelVersion, nil
+	}}
+	status := installer.StatusAgent(context.Background(), AgentClaudeCode)
+	if status.EffectiveMode != string(LaunchNative) {
+		t.Fatalf("rollout-off status falsely reports active Channel: %+v", status)
+	}
+	if status.CapabilityReason != StatusClaudeChannelRolloutDisabled {
+		t.Fatalf("rollout-off status reason=%q", status.CapabilityReason)
+	}
+}
+
+func TestClaudeStatusSocketReachabilityDoesNotClaimChannelConfirmation(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("POCKETCTL_CLAUDE_CHANNEL_APPROVAL", "1")
+	t.Setenv("POCKETCTL_CLAUDE_CHANNEL_DEVELOPMENT", "1")
+	shimDir := filepath.Join(home, ".pocketctl", "bin")
+	if err := os.MkdirAll(shimDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	shim := filepath.Join(shimDir, "claude")
+	if err := os.WriteFile(shim, []byte("shim"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", shimDir)
+	realClaude := testExecutable(t, "real-claude")
+	pocketctlBinary := testExecutable(t, "pocketctl")
+	if _, err := ensureClaudeChannelMCPConfig(pocketctlBinary); err != nil {
+		t.Fatal(err)
+	}
+	cfg := DefaultConfig()
+	cfg.Claude = AgentConfig{State: StateEnabled, RealBinary: realClaude, ShimPath: shim}
+	if err := SaveConfig(cfg); err != nil {
+		t.Fatal(err)
+	}
+	installer := Installer{
+		ResolveClaude: func(context.Context) (string, string, error) {
+			return realClaude, MinimumClaudeChannelVersion, nil
+		},
+		ClaudeChannelReachable: func(context.Context) bool { return true },
+	}
+	status := installer.StatusAgent(context.Background(), AgentClaudeCode)
+	if status.EffectiveMode != string(LaunchNative) || status.CapabilityReason != StatusClaudeChannelDevelopmentChannelNotConfirmed {
+		t.Fatalf("unconfirmed development channel was reported active: %+v", status)
+	}
+	if !status.RuntimeReachable {
+		t.Fatal("socket reachability should remain separately observable")
+	}
+}
 
 func TestOpenCodeInstallerEnableDisableRoundTrip(t *testing.T) {
 	if runtime.GOOS == "windows" {

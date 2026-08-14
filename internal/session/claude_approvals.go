@@ -93,6 +93,16 @@ func (sm *SessionManager) claudeApprovalReferencesLocked() []ClaudeApprovalRefer
 			})
 		}
 	}
+	for _, request := range sm.claudeChannelApprovals {
+		if request.SessionID == "" || (request.State != ClaudeChannelApprovalPending && request.State != ClaudeChannelApprovalReserved) {
+			continue
+		}
+		references = append(references, ClaudeApprovalReference{
+			SessionID: request.SessionID,
+			RequestID: request.PublicRequestID,
+			CreatedAt: request.CreatedAt,
+		})
+	}
 	sort.Slice(references, func(i, j int) bool {
 		if references[i].CreatedAt.Equal(references[j].CreatedAt) {
 			if references[i].SessionID == references[j].SessionID {
@@ -103,6 +113,22 @@ func (sm *SessionManager) claudeApprovalReferencesLocked() []ClaudeApprovalRefer
 		return references[i].CreatedAt.Before(references[j].CreatedAt)
 	})
 	return references
+}
+
+func (sm *SessionManager) persistClaudeApprovalReferences() error {
+	// Serialize the snapshot and write as one ordered operation. The snapshot
+	// is taken only after acquiring this mutex, so a delayed older writer can
+	// never overwrite a newer registry snapshot.
+	sm.claudeApprovalPersistenceMu.Lock()
+	defer sm.claudeApprovalPersistenceMu.Unlock()
+	sm.mu.RLock()
+	recorder := sm.claudeApprovalRecorder
+	references := append([]ClaudeApprovalReference(nil), sm.claudeApprovalReferencesLocked()...)
+	sm.mu.RUnlock()
+	if recorder == nil {
+		return nil
+	}
+	return recorder(references)
 }
 
 func cloneClaudeApproval(p *PendingClaudeApproval) PendingClaudeApproval {
@@ -174,11 +200,10 @@ func (sm *SessionManager) handleClaudeApprovalRequest(req approval.Request) {
 	ps.Status = protocol.StatusWaitingApproval
 	ps.LastActivityAt = now
 	recorder := sm.claudeApprovalRecorder
-	references := sm.claudeApprovalReferencesLocked()
 	sm.mu.Unlock()
 
 	if recorder != nil {
-		if err := recorder(references); err != nil {
+		if err := sm.persistClaudeApprovalReferences(); err != nil {
 			// Do not surface an approval that cannot be closed after a crash.
 			// Denying through the authority also removes it from the registry
 			// via OnFinished.
@@ -225,13 +250,9 @@ func (sm *SessionManager) handleClaudeApprovalFinished(finished approval.Finishe
 		ps.Status = status
 		ps.LastActivityAt = now
 	}
-	recorder := sm.claudeApprovalRecorder
-	references := sm.claudeApprovalReferencesLocked()
 	sm.mu.Unlock()
 
-	if recorder != nil {
-		_ = recorder(references)
-	}
+	_ = sm.persistClaudeApprovalReferences()
 	resolved := protocol.DaemonEvent{
 		Type:      "approval_resolved",
 		SessionID: finished.SessionID,

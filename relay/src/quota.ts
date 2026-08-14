@@ -179,6 +179,7 @@ export async function reserveConcurrentSession(
 }
 
 export async function releaseQuotaReservation(pool: pg.Pool, reservationId: string): Promise<void> {
+  if (reservationId.startsWith('unlimited-')) return
   await pool.query(`DELETE FROM quota_reservations WHERE id = $1`, [reservationId])
 }
 

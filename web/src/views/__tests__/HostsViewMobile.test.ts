@@ -4,6 +4,8 @@ import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest'
 import HostsView from '../HostsView.vue'
 
 const push = vi.fn()
+const routeQuery = ref<Record<string, string>>({})
+const isMobile = ref(true)
 const handlers = new Map<string, (event: any) => void>()
 const wrappers: ReturnType<typeof mount>[] = []
 
@@ -15,10 +17,11 @@ function mountView() {
 
 vi.mock('vue-router', () => ({
   useRouter: () => ({ push }),
+  useRoute: () => ({ query: routeQuery.value }),
 }))
 
 vi.mock('../../composables/useResponsiveLayout', () => ({
-  useResponsiveLayout: () => ({ isMobile: ref(true) }),
+  useResponsiveLayout: () => ({ isMobile }),
 }))
 
 vi.mock('../../composables/useWebSocket', () => ({
@@ -71,6 +74,8 @@ describe('HostsView mobile iOS parity', () => {
   beforeEach(() => {
     handlers.clear()
     push.mockReset()
+    routeQuery.value = {}
+    isMobile.value = true
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
       ok: true,
       json: async () => ({ total: 18_000_000, today: 12_400_000, thisWeek: 16_000_000, thisMonth: 18_000_000 }),
@@ -95,6 +100,16 @@ describe('HostsView mobile iOS parity', () => {
     expect(wrapper.get('[data-metric="active-sessions"]').text()).toContain('3')
     expect(wrapper.findAll('.mobile-host-card')[0].text()).toContain('主力机')
     expect(wrapper.get('.mobile-hosts-heading').text()).toContain('2/5')
+  })
+
+  test('selects the host requested by the recovery navigation query', async () => {
+    isMobile.value = false
+    routeQuery.value = { daemon_id: 'offline' }
+    const wrapper = mountView()
+    handlers.get('daemon_list')?.({ daemons: [online, offline] })
+    await flushPromises()
+
+    expect(wrapper.get('.host-detail-panel').text()).toContain('offline-mac')
   })
 
   test('opens host-scoped token usage and a usable agent manager', async () => {

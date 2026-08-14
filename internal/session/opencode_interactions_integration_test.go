@@ -239,6 +239,67 @@ func TestOpenCodeP1IntegrationFlow(t *testing.T) {
 	}
 }
 
+func TestOpenCodeTrustedActionPolicyRejectsPersistentApprovalBeforeNativeReply(t *testing.T) {
+	t.Setenv("POCKETCTL_TRUSTED_ACTION_POLICY_V1", "on")
+	var replies atomic.Int32
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.URL.Path == "/api/health":
+			json.NewEncoder(w).Encode(map[string]bool{"healthy": true})
+		case r.Method == http.MethodPost && r.URL.Path == "/permission/per_policy/reply":
+			replies.Add(1)
+			w.WriteHeader(http.StatusNoContent)
+		case r.Method == http.MethodGet && r.URL.Path == "/session/status":
+			json.NewEncoder(w).Encode(map[string]any{"ses_policy": map[string]any{"type": "idle"}})
+		case r.Method == http.MethodGet && r.URL.Path == "/session/ses_policy/message":
+			json.NewEncoder(w).Encode([]any{})
+		default:
+			http.Error(w, fmt.Sprintf("unexpected %s %s", r.Method, r.URL.Path), http.StatusNotFound)
+		}
+	})
+	server := startFakeOpenCodeServer(t, handler)
+	out := make(chan protocol.DaemonEvent, 16)
+	sm := NewSessionManager(out)
+	coord := newOpencodeCoordinator(sm)
+	coord.mu.Lock()
+	coord.server = server
+	coord.started = true
+	coord.mu.Unlock()
+	sm.opencode = coord
+	sm.sessions["ses_policy"] = &ProcessState{
+		SessionID: "ses_policy", Agent: adapter.AgentOpencode, ControlMode: protocol.ControlManaged,
+		Status: protocol.StatusIdle, Cwd: "/repo", Backend: &serverBackend{coord: coord},
+		PendingPermissions: make(map[string]PendingOpenCodePermission), PendingQuestions: make(map[string]PendingOpenCodeQuestion),
+	}
+
+	if !sm.handleOpencodePermission(adapter.PermissionAsked{
+		ID: "per_policy", SessionID: "ses_policy", Permission: "bash",
+		Always: []string{"git status"}, Version: adapter.PermissionVersionLegacy,
+	}) {
+		t.Fatal("permission request was not registered")
+	}
+	asked := waitDaemonEvent(t, out, "approval_request", "per_policy")
+	if asked.SecurityContext == nil || !reflect.DeepEqual(asked.SecurityContext.AllowedActions, []string{"once", "reject"}) {
+		t.Fatalf("security context=%+v", asked.SecurityContext)
+	}
+	if err := sm.ResolveApprovalAction("ses_policy", "per_policy", "always"); err == nil {
+		t.Fatal("persistent approval must be rejected by trusted action policy")
+	}
+	if replies.Load() != 0 {
+		t.Fatalf("policy rejection reached native API: replies=%d", replies.Load())
+	}
+	if _, pending := sm.sessions["ses_policy"].PendingPermissions["per_policy"]; !pending {
+		t.Fatal("policy rejection cleared the pending request")
+	}
+	if err := sm.ResolveApprovalAction("ses_policy", "per_policy", "once"); err != nil {
+		t.Fatal(err)
+	}
+	if replies.Load() != 1 {
+		t.Fatalf("allowed choice did not reach native API: replies=%d", replies.Load())
+	}
+}
+
 func TestOpenCodePerSessionRecoveryIncludesLegacyInteractions(t *testing.T) {
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")

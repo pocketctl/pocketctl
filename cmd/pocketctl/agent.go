@@ -9,8 +9,11 @@ import (
 	"strings"
 
 	"github.com/pocketctl/pocketctl/internal/agentcontrol"
+	"github.com/pocketctl/pocketctl/internal/approval"
 	"github.com/pocketctl/pocketctl/internal/i18n"
 )
+
+var removeLegacyClaudeUserHook = approval.RemoveUserHook
 
 func daemonAgentPromptContext(noPrompt bool, restartReadyFile string, daemonChild bool, inputMode os.FileMode) agentcontrol.PromptContext {
 	return agentcontrol.PromptContext{
@@ -114,7 +117,7 @@ func runAgentCommand(args []string, stdout, stderr io.Writer, manager any) error
 	if agent == zcodeAgentType {
 		return runZcodeSyncCommand(args[1:], stdout, stderr)
 	}
-	if agent != agentcontrol.AgentOpenCode && agent != agentcontrol.AgentCodex {
+	if agent != agentcontrol.AgentOpenCode && agent != agentcontrol.AgentCodex && agent != agentcontrol.AgentClaudeCode {
 		return fmt.Errorf("%s", i18n.T("agent.unknown", args[0]))
 	}
 	if len(args) == 1 || args[1] == "help" || args[1] == "--help" || args[1] == "-h" {
@@ -137,6 +140,15 @@ func runAgentCommand(args []string, stdout, stderr io.Writer, manager any) error
 		status, err := enableManagedAgent(ctx, manager, agent, path, agentcontrol.EnableOptions{NoShellProfile: *noShellProfile, DecisionSource: agentcontrol.SourceCommand})
 		if err != nil {
 			return err
+		}
+		// Claude Code enable gets a research-preview notice. Design §Task 3:
+		// "enable 时显示 research-preview 和 preview-data 警告,并要求用户
+		// 明确执行命令;daemon 自动启动不得静默 auto-enable Claude".
+		if agent == agentcontrol.AgentClaudeCode {
+			if err := removeLegacyClaudeUserHook(); err != nil {
+				fmt.Fprintln(stderr, "pocketctl: legacy Claude user hook cleanup failed:", err)
+			}
+			fmt.Fprintln(stdout, i18n.T("agent.claude-code_research_preview"))
 		}
 		fmt.Fprintln(stdout, i18n.T("agent.enabled", agent, status.RealBinary))
 		return nil

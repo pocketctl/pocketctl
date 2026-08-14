@@ -104,6 +104,14 @@ describe('reserveConcurrentSession', () => {
 })
 
 describe('quota helpers', () => {
+  test('does not release the synthetic unlimited grant as a UUID reservation', async () => {
+    const { pool, client } = fakePool(() => ({ rows: [] }))
+
+    await releaseQuotaReservation(pool, 'unlimited-018f6f58-38d0-7a32-a444-0123456789ab')
+
+    expect(client.query).not.toHaveBeenCalled()
+  })
+
   test('claims only ownership without publishing contender activation metadata', async () => {
     const { pool, client } = fakePool((sql) => {
       if (sql.includes('SELECT user_id FROM daemons')) return { rows: [{ user_id: 7 }] }

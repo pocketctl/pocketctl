@@ -1,7 +1,10 @@
 <template>
   <div class="page-container">
     <div class="mobile-hosts-heading">
-      <h1>{{ t('mobile.my_hosts') }}</h1>
+      <div class="mobile-host-title-row">
+        <h1>{{ t('mobile.my_hosts') }}</h1>
+        <AttentionInboxEntryButton :scope="{ type: 'global' }" />
+      </div>
       <p :class="{ 'quota-over-limit': boundHosts?.over_limit }">
         {{ daemons.length }} {{ t('hosts.host_unit') }} · {{ onlineCount }} {{ t('dashboard.online') }}
         <template v-if="boundHosts"> · {{ t('mobile.host_quota') }} {{ boundHosts.used }}/{{ boundHosts.limit ?? '∞' }}</template>
@@ -314,7 +317,7 @@
 
 <script setup lang="ts">
 import { ref, computed, watch, onMounted, onUnmounted } from 'vue'
-import { useRouter } from 'vue-router'
+import { useRoute, useRouter } from 'vue-router'
 import { useWebSocket } from '../composables/useWebSocket'
 import { useAuth } from '../composables/useAuth'
 import { formatRelativeTime } from '../composables/useRelativeTime'
@@ -332,8 +335,10 @@ import { formatTokenCount } from '../utils/tokenFormat'
 import { hostSessionsLocation } from '../utils/hostNavigation'
 import { useResponsiveLayout } from '../composables/useResponsiveLayout'
 import type { HostActionId } from '../utils/hostActions'
+import AttentionInboxEntryButton from '../components/attention-inbox/AttentionInboxEntryButton.vue'
 
 const router = useRouter()
+const route = useRoute()
 const ws = useWebSocket()
 const { accessToken, apiGetAuth } = useAuth()
 const { connect, send, onEvent } = ws
@@ -738,7 +743,10 @@ onMounted(() => {
 
   cleanups.push(onEvent('daemon_list', (msg: any) => {
     daemons.value = msg.daemons || []
-    if (!selectedId.value && daemons.value.length) {
+    const requestedDaemon = typeof route.query.daemon_id === 'string' ? route.query.daemon_id : ''
+    if (requestedDaemon && daemons.value.some(d => d.daemon_id === requestedDaemon)) {
+      selectedId.value = requestedDaemon
+    } else if (!selectedId.value && daemons.value.length) {
       selectedId.value = daemons.value[0].daemon_id
     }
   }))
@@ -1039,6 +1047,7 @@ onUnmounted(() => {
   .desktop-host-card,
   .host-detail-panel { display: none; }
   .mobile-hosts-heading { display: block; margin: 0 0 12px; }
+  .mobile-host-title-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
   .mobile-hosts-heading h1 { margin: 0; color: var(--fg); font: 700 34px/1.16 var(--font-display); letter-spacing: -.025em; }
   .mobile-hosts-heading p { margin: 4px 0 0; color: var(--fg-secondary); font-size: 13px; }
   .mobile-hosts-heading p.quota-over-limit { color: var(--error); }

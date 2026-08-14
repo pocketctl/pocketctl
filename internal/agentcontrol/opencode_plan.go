@@ -10,6 +10,13 @@ type LaunchMode string
 const (
 	LaunchManaged LaunchMode = "managed"
 	LaunchNative  LaunchMode = "native"
+	// LaunchChannel is used by the Claude Code Channel permission relay
+	// launcher. It is distinct from LaunchManaged: Claude does NOT get a
+	// RuntimeProvider. The mode indicates that the launcher will inject the
+	// Pocketctl-owned Channel MCP config and research-preview flags after a
+	// bootstrap probe succeeds; the real Claude native TUI remains the
+	// runtime authority. Design §Task 3.
+	LaunchChannel LaunchMode = "channel"
 )
 
 type OpenCodeLaunchPlan struct {

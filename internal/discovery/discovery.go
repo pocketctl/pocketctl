@@ -30,6 +30,11 @@ type AgentInfo struct {
 
 var versionRe = regexp.MustCompile(`\d+\.\d+(?:\.\d+)?`)
 
+const (
+	versionProbeTimeout   = 3 * time.Second
+	versionProbeWaitDelay = time.Second
+)
+
 func DiscoverAgents() []AgentInfo {
 	var agents []AgentInfo
 	for _, a := range adapter.All() {
@@ -206,7 +211,14 @@ func AgentUpgradeInfo(agentType string) (updateCmd, pkg string, err error) {
 }
 
 func detectVersion(binPath string) string {
-	out, err := exec.Command(binPath, "--version").Output()
+	ctx, cancel := context.WithTimeout(context.Background(), versionProbeTimeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, binPath, "--version")
+	// A wrapper may leave a child holding stdout/stderr open after cancellation.
+	// WaitDelay closes those pipes so discovery remains bounded instead of waiting
+	// for an unrelated CLI child to exit.
+	cmd.WaitDelay = versionProbeWaitDelay
+	out, err := cmd.Output()
 	if err != nil || len(out) == 0 {
 		return ""
 	}

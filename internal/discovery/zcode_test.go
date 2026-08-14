@@ -14,6 +14,9 @@ func withTempHome(t *testing.T) string {
 	t.Helper()
 	home := t.TempDir()
 	t.Setenv("HOME", home)
+	// ZCode discovery tests exercise only the storage opt-in gate. Keep the
+	// host's installed agent shims and npm registry probes out of that scope.
+	t.Setenv("PATH", filepath.Join(home, "bin"))
 	return home
 }
 

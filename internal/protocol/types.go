@@ -7,10 +7,14 @@ import (
 )
 
 const (
-	ControlManaged               = "managed"
-	ControlUnmanagedActive       = "unmanaged_active"
-	ControlLegacyReadOnly        = "legacy_read_only"
-	InteractionResolvedElsewhere = "resolved_elsewhere"
+	ControlManaged                = "managed"
+	ControlUnmanagedActive        = "unmanaged_active"
+	ControlLegacyReadOnly         = "legacy_read_only"
+	InteractionResolvedElsewhere  = "resolved_elsewhere"
+	RiskReasonExecutesCommand     = "executes_command"
+	RiskReasonChangesFiles        = "changes_files"
+	RiskReasonRequestsPermissions = "requests_permissions"
+	RiskReasonRequiresUserInput   = "requires_user_input"
 )
 
 // Client → Daemon commands
@@ -56,6 +60,17 @@ type ClientMessage struct {
 	Force bool `json:"force,omitempty"`
 }
 
+// ApprovalSecurityContext is the daemon-authored, versioned authorization
+// projection for one native approval request. Clients and Relay may narrow
+// AllowedActions, but the daemon resolver remains the enforcement boundary.
+type ApprovalSecurityContext struct {
+	SchemaVersion            int      `json:"schema_version"`
+	RiskLevel                string   `json:"risk_level"`
+	ClassificationIncomplete bool     `json:"classification_incomplete"`
+	RiskReasons              []string `json:"risk_reasons"`
+	AllowedActions           []string `json:"allowed_actions"`
+}
+
 // Daemon → Client events
 type DaemonEvent struct {
 	Type string `json:"type"`
@@ -64,124 +79,127 @@ type DaemonEvent struct {
 	// at-least-once delivery: the relay dedups by (daemon_id, seq) and acks the
 	// highest contiguous seq it has persisted so the daemon can trim its
 	// outbound replay buffer. Zero/omitted means a legacy event (no dedup).
-	Seq                    int64                `json:"seq,omitempty"`
-	EventID                string               `json:"event_id,omitempty"`          // stable JSONL record identity across daemon restarts
-	PreviousEventID        string               `json:"previous_event_id,omitempty"` // causal predecessor for mutable native snapshots
-	SessionID              string               `json:"session_id"`
-	TurnID                 string               `json:"turn_id,omitempty"`
-	ChangeSetID            string               `json:"change_set_id,omitempty"`
-	OldSessionID           string               `json:"old_session_id,omitempty"`
-	Text                   string               `json:"text,omitempty"`
-	Snapshot               string               `json:"snapshot,omitempty"` // full native text snapshot; Text may remain an append delta
-	StreamID               string               `json:"stream_id,omitempty"`
-	ChunkSeq               *int                 `json:"chunk_seq,omitempty"`
-	ByteOffset             *int                 `json:"byte_offset,omitempty"`
-	Streaming              bool                 `json:"streaming,omitempty"`
-	Final                  bool                 `json:"final,omitempty"`
-	TotalBytes             int                  `json:"total_bytes,omitempty"`
-	ContentHash            string               `json:"content_hash,omitempty"`
-	Truncated              bool                 `json:"truncated,omitempty"`
-	OriginalType           string               `json:"original_type,omitempty"`
-	OriginalBytes          int                  `json:"original_bytes,omitempty"`
-	MessageID              string               `json:"message_id,omitempty"` // source message identity (OpenCode revisioned Parts)
-	PartID                 string               `json:"part_id,omitempty"`    // source Part identity for client-side upsert
-	Revision               int                  `json:"revision,omitempty"`   // monotonically increasing per Part
-	Replace                bool                 `json:"replace,omitempty"`    // replace the Part's accumulated text instead of appending
-	CallID                 string               `json:"call_id,omitempty"`
-	Tool                   string               `json:"tool,omitempty"`
-	Input                  json.RawMessage      `json:"input,omitempty"`
-	Output                 string               `json:"output,omitempty"`
-	Status                 string               `json:"status,omitempty"`
-	Error                  string               `json:"error,omitempty"`
-	Attempt                int                  `json:"attempt,omitempty"`  // retry attempt number (OpenCode retry Part)
-	RetryAt                int64                `json:"retry_at,omitempty"` // retry creation time in source milliseconds
-	Auto                   bool                 `json:"auto,omitempty"`     // compaction was automatically triggered
-	Overflow               bool                 `json:"overflow,omitempty"` // compaction followed a context overflow
-	Mime                   string               `json:"mime,omitempty"`
-	Filename               string               `json:"filename,omitempty"`
-	URL                    string               `json:"url,omitempty"`
-	PartSource             json.RawMessage      `json:"part_source,omitempty"`
-	Hash                   string               `json:"hash,omitempty"`
-	Files                  []string             `json:"files,omitempty"`
-	ChangeIndex            int                  `json:"change_index,omitempty"`
-	ChangeTotal            int                  `json:"change_total,omitempty"`
-	Path                   string               `json:"path,omitempty"`
-	ChangeKind             string               `json:"change_kind,omitempty"`
-	MovePath               string               `json:"move_path,omitempty"`
-	Diff                   string               `json:"diff,omitempty"`
-	Additions              int                  `json:"additions,omitempty"`
-	Deletions              int                  `json:"deletions,omitempty"`
-	Prompt                 string               `json:"prompt,omitempty"`
-	Description            string               `json:"description,omitempty"`
-	ProfileName            string               `json:"profile_name,omitempty"`
-	Todos                  []TodoItem           `json:"todos,omitempty"`
-	Explanation            string               `json:"explanation,omitempty"`
-	Plan                   []PlanItem           `json:"plan,omitempty"`
-	CostUSD                float64              `json:"cost_usd,omitempty"`
-	Turns                  int                  `json:"turns,omitempty"`
-	RiskLevel              string               `json:"risk_level,omitempty"`
-	RequestID              string               `json:"request_id,omitempty"`
-	MsgID                  string               `json:"msg_id,omitempty"`
-	ReservationID          string               `json:"reservation_id,omitempty"`
-	Approved               bool                 `json:"approved,omitempty"` // for approval_resolved: how it was answered (terminal-side)
-	Title                  string               `json:"title,omitempty"`
-	Cwd                    string               `json:"cwd,omitempty"`
-	Source                 string               `json:"source,omitempty"`
-	Resync                 bool                 `json:"resync,omitempty"` // reconnect replay, not a newly discovered session
-	ExitReason             string               `json:"exit_reason,omitempty"`
-	LastActivityAt         string               `json:"last_activity_at,omitempty"`
-	TurnStartedAt          string               `json:"turn_started_at,omitempty"`   // authoritative start of the currently active turn
-	AgentID                string               `json:"agent_id,omitempty"`          // sub-agent identifier (e.g. "afa8314e6e3f6e552)
-	ParentSessionID        string               `json:"parent_session_id,omitempty"` // subagent's parent session (P0 subagent relation)
-	IsSubagent             bool                 `json:"is_subagent,omitempty"`       // true for subagent-scoped events
-	RootSessionID          string               `json:"root_session_id,omitempty"`   // root session for multi-level aggregation
-	Agent                  string               `json:"agent,omitempty"`             // agent type for upgrade_result (claude-code, codex)
-	SubAgentDesc           string               `json:"subagent_desc,omitempty"`     // sub-agent task description
-	SubAgentType           string               `json:"subagent_type,omitempty"`     // sub-agent type (Explore, general-purpose, etc.)
-	UserMessage            string               `json:"user_message,omitempty"`      // for generate_title_request
-	AssistantMessage       string               `json:"assistant_message,omitempty"` // for generate_title_request
-	Reason                 string               `json:"reason,omitempty"`            // failure reason code (no_cli, bad_cwd, start_fail, timeout, daemon_offline)
-	Retryable              *bool                `json:"retryable,omitempty"`         // user_message_receipt failure may be retried by an explicit future action
-	Commands               []CommandItem        `json:"commands,omitempty"`          // for command_list
-	Command                string               `json:"command,omitempty"`           // for command_receipt (e.g. "/compact")
-	ReceiptStatus          string               `json:"receipt_status,omitempty"`    // for command_receipt: success/failed/unavailable
-	Message                string               `json:"message,omitempty"`           // for command_receipt message
-	Operation              string               `json:"operation,omitempty"`         // failing interaction operation, for correlated UI rollback
-	Usage                  *ContextUsage        `json:"usage,omitempty"`             // token usage for agent_text events
-	Permission             *PermissionConfig    `json:"permission,omitempty"`
-	PermissionEffective    string               `json:"permission_effective,omitempty"`
-	PermissionMutable      bool                 `json:"permission_mutable,omitempty"`
-	PermissionMutableModes []string             `json:"permission_mutable_modes,omitempty"`
-	Model                  string               `json:"model,omitempty"`           // resolved model name (session_meta event)
-	Effort                 string               `json:"effort,omitempty"`          // current thinking-effort level (session_meta event)
-	Models                 []ModelOption        `json:"models,omitempty"`          // available models (model_list event)
-	CwdSessions            int                  `json:"cwd_sessions,omitempty"`    // active session count on the same cwd (cwd_in_use/session_created)
-	WorktreePath           string               `json:"worktree_path,omitempty"`   // worktree absolute path when the session is isolated (Scheme D)
-	WorktreeBranch         string               `json:"worktree_branch,omitempty"` // git branch backing the worktree (Scheme D)
-	CurrentAgent           string               `json:"current_agent,omitempty"`   // selected OpenCode profile; Agent remains the CLI type
-	Agents                 []SessionAgentOption `json:"agents,omitempty"`
-	Capabilities           []string             `json:"capabilities,omitempty"`
-	ControlMode            string               `json:"control_mode,omitempty"`
-	PermissionName         string               `json:"permission_name,omitempty"`
-	Patterns               []string             `json:"patterns,omitempty"`
-	Always                 []string             `json:"always,omitempty"`
-	Metadata               json.RawMessage      `json:"metadata,omitempty"`
-	ToolMessageID          string               `json:"tool_message_id,omitempty"`
-	ToolCallID             string               `json:"tool_call_id,omitempty"`
-	PermissionVersion      string               `json:"permission_version,omitempty"`
-	Action                 string               `json:"action,omitempty"`
-	ApprovalKind           string               `json:"approval_kind,omitempty"`
-	AvailableDecisions     []string             `json:"available_decisions,omitempty"`
-	Questions              []QuestionInfo       `json:"questions,omitempty"`
-	Answers                [][]string           `json:"answers,omitempty"`
-	Rejected               bool                 `json:"rejected,omitempty"`
-	AutoResolutionMs       uint64               `json:"auto_resolution_ms,omitempty"`
-	Redacted               bool                 `json:"redacted,omitempty"`
-	MCPServer              string               `json:"mcp_server,omitempty"`
-	ElicitationMode        string               `json:"elicitation_mode,omitempty"`
-	ElicitationID          string               `json:"elicitation_id,omitempty"`
-	ElicitationSchema      json.RawMessage      `json:"elicitation_schema,omitempty"`
-	ElicitationContent     json.RawMessage      `json:"elicitation_content,omitempty"`
+	Seq                    int64                    `json:"seq,omitempty"`
+	EventID                string                   `json:"event_id,omitempty"`          // stable JSONL record identity across daemon restarts
+	PreviousEventID        string                   `json:"previous_event_id,omitempty"` // causal predecessor for mutable native snapshots
+	SessionID              string                   `json:"session_id"`
+	TurnID                 string                   `json:"turn_id,omitempty"`
+	ChangeSetID            string                   `json:"change_set_id,omitempty"`
+	OldSessionID           string                   `json:"old_session_id,omitempty"`
+	Text                   string                   `json:"text,omitempty"`
+	Snapshot               string                   `json:"snapshot,omitempty"` // full native text snapshot; Text may remain an append delta
+	StreamID               string                   `json:"stream_id,omitempty"`
+	ChunkSeq               *int                     `json:"chunk_seq,omitempty"`
+	ByteOffset             *int                     `json:"byte_offset,omitempty"`
+	Streaming              bool                     `json:"streaming,omitempty"`
+	Final                  bool                     `json:"final,omitempty"`
+	TotalBytes             int                      `json:"total_bytes,omitempty"`
+	ContentHash            string                   `json:"content_hash,omitempty"`
+	Truncated              bool                     `json:"truncated,omitempty"`
+	OriginalType           string                   `json:"original_type,omitempty"`
+	OriginalBytes          int                      `json:"original_bytes,omitempty"`
+	MessageID              string                   `json:"message_id,omitempty"` // source message identity (OpenCode revisioned Parts)
+	PartID                 string                   `json:"part_id,omitempty"`    // source Part identity for client-side upsert
+	Revision               int                      `json:"revision,omitempty"`   // monotonically increasing per Part
+	Replace                bool                     `json:"replace,omitempty"`    // replace the Part's accumulated text instead of appending
+	CallID                 string                   `json:"call_id,omitempty"`
+	Tool                   string                   `json:"tool,omitempty"`
+	Input                  json.RawMessage          `json:"input,omitempty"`
+	Output                 string                   `json:"output,omitempty"`
+	Status                 string                   `json:"status,omitempty"`
+	Error                  string                   `json:"error,omitempty"`
+	Attempt                int                      `json:"attempt,omitempty"`  // retry attempt number (OpenCode retry Part)
+	RetryAt                int64                    `json:"retry_at,omitempty"` // retry creation time in source milliseconds
+	Auto                   bool                     `json:"auto,omitempty"`     // compaction was automatically triggered
+	Overflow               bool                     `json:"overflow,omitempty"` // compaction followed a context overflow
+	Mime                   string                   `json:"mime,omitempty"`
+	Filename               string                   `json:"filename,omitempty"`
+	URL                    string                   `json:"url,omitempty"`
+	PartSource             json.RawMessage          `json:"part_source,omitempty"`
+	Hash                   string                   `json:"hash,omitempty"`
+	Files                  []string                 `json:"files,omitempty"`
+	ChangeIndex            int                      `json:"change_index,omitempty"`
+	ChangeTotal            int                      `json:"change_total,omitempty"`
+	Path                   string                   `json:"path,omitempty"`
+	ChangeKind             string                   `json:"change_kind,omitempty"`
+	MovePath               string                   `json:"move_path,omitempty"`
+	Diff                   string                   `json:"diff,omitempty"`
+	Additions              int                      `json:"additions,omitempty"`
+	Deletions              int                      `json:"deletions,omitempty"`
+	Prompt                 string                   `json:"prompt,omitempty"`
+	Description            string                   `json:"description,omitempty"`
+	ProfileName            string                   `json:"profile_name,omitempty"`
+	Todos                  []TodoItem               `json:"todos,omitempty"`
+	Explanation            string                   `json:"explanation,omitempty"`
+	Plan                   []PlanItem               `json:"plan,omitempty"`
+	CostUSD                float64                  `json:"cost_usd,omitempty"`
+	Turns                  int                      `json:"turns,omitempty"`
+	RiskLevel              string                   `json:"risk_level,omitempty"`
+	RiskIncomplete         *bool                    `json:"classification_incomplete,omitempty"`
+	RiskReasons            []string                 `json:"risk_reasons,omitempty"`
+	SecurityContext        *ApprovalSecurityContext `json:"security_context,omitempty"`
+	RequestID              string                   `json:"request_id,omitempty"`
+	MsgID                  string                   `json:"msg_id,omitempty"`
+	ReservationID          string                   `json:"reservation_id,omitempty"`
+	Approved               bool                     `json:"approved,omitempty"` // for approval_resolved: how it was answered (terminal-side)
+	Title                  string                   `json:"title,omitempty"`
+	Cwd                    string                   `json:"cwd,omitempty"`
+	Source                 string                   `json:"source,omitempty"`
+	Resync                 bool                     `json:"resync,omitempty"` // reconnect replay, not a newly discovered session
+	ExitReason             string                   `json:"exit_reason,omitempty"`
+	LastActivityAt         string                   `json:"last_activity_at,omitempty"`
+	TurnStartedAt          string                   `json:"turn_started_at,omitempty"`   // authoritative start of the currently active turn
+	AgentID                string                   `json:"agent_id,omitempty"`          // sub-agent identifier (e.g. "afa8314e6e3f6e552)
+	ParentSessionID        string                   `json:"parent_session_id,omitempty"` // subagent's parent session (P0 subagent relation)
+	IsSubagent             bool                     `json:"is_subagent,omitempty"`       // true for subagent-scoped events
+	RootSessionID          string                   `json:"root_session_id,omitempty"`   // root session for multi-level aggregation
+	Agent                  string                   `json:"agent,omitempty"`             // agent type for upgrade_result (claude-code, codex)
+	SubAgentDesc           string                   `json:"subagent_desc,omitempty"`     // sub-agent task description
+	SubAgentType           string                   `json:"subagent_type,omitempty"`     // sub-agent type (Explore, general-purpose, etc.)
+	UserMessage            string                   `json:"user_message,omitempty"`      // for generate_title_request
+	AssistantMessage       string                   `json:"assistant_message,omitempty"` // for generate_title_request
+	Reason                 string                   `json:"reason,omitempty"`            // failure reason code (no_cli, bad_cwd, start_fail, timeout, daemon_offline)
+	Retryable              *bool                    `json:"retryable,omitempty"`         // user_message_receipt failure may be retried by an explicit future action
+	Commands               []CommandItem            `json:"commands,omitempty"`          // for command_list
+	Command                string                   `json:"command,omitempty"`           // for command_receipt (e.g. "/compact")
+	ReceiptStatus          string                   `json:"receipt_status,omitempty"`    // for command_receipt: success/failed/unavailable
+	Message                string                   `json:"message,omitempty"`           // for command_receipt message
+	Operation              string                   `json:"operation,omitempty"`         // failing interaction operation, for correlated UI rollback
+	Usage                  *ContextUsage            `json:"usage,omitempty"`             // token usage for agent_text events
+	Permission             *PermissionConfig        `json:"permission,omitempty"`
+	PermissionEffective    string                   `json:"permission_effective,omitempty"`
+	PermissionMutable      bool                     `json:"permission_mutable,omitempty"`
+	PermissionMutableModes []string                 `json:"permission_mutable_modes,omitempty"`
+	Model                  string                   `json:"model,omitempty"`           // resolved model name (session_meta event)
+	Effort                 string                   `json:"effort,omitempty"`          // current thinking-effort level (session_meta event)
+	Models                 []ModelOption            `json:"models,omitempty"`          // available models (model_list event)
+	CwdSessions            int                      `json:"cwd_sessions,omitempty"`    // active session count on the same cwd (cwd_in_use/session_created)
+	WorktreePath           string                   `json:"worktree_path,omitempty"`   // worktree absolute path when the session is isolated (Scheme D)
+	WorktreeBranch         string                   `json:"worktree_branch,omitempty"` // git branch backing the worktree (Scheme D)
+	CurrentAgent           string                   `json:"current_agent,omitempty"`   // selected OpenCode profile; Agent remains the CLI type
+	Agents                 []SessionAgentOption     `json:"agents,omitempty"`
+	Capabilities           []string                 `json:"capabilities,omitempty"`
+	ControlMode            string                   `json:"control_mode,omitempty"`
+	PermissionName         string                   `json:"permission_name,omitempty"`
+	Patterns               []string                 `json:"patterns,omitempty"`
+	Always                 []string                 `json:"always,omitempty"`
+	Metadata               json.RawMessage          `json:"metadata,omitempty"`
+	ToolMessageID          string                   `json:"tool_message_id,omitempty"`
+	ToolCallID             string                   `json:"tool_call_id,omitempty"`
+	PermissionVersion      string                   `json:"permission_version,omitempty"`
+	Action                 string                   `json:"action,omitempty"`
+	ApprovalKind           string                   `json:"approval_kind,omitempty"`
+	AvailableDecisions     []string                 `json:"available_decisions,omitempty"`
+	Questions              []QuestionInfo           `json:"questions,omitempty"`
+	Answers                [][]string               `json:"answers,omitempty"`
+	Rejected               bool                     `json:"rejected,omitempty"`
+	AutoResolutionMs       uint64                   `json:"auto_resolution_ms,omitempty"`
+	Redacted               bool                     `json:"redacted,omitempty"`
+	MCPServer              string                   `json:"mcp_server,omitempty"`
+	ElicitationMode        string                   `json:"elicitation_mode,omitempty"`
+	ElicitationID          string                   `json:"elicitation_id,omitempty"`
+	ElicitationSchema      json.RawMessage          `json:"elicitation_schema,omitempty"`
+	ElicitationContent     json.RawMessage          `json:"elicitation_content,omitempty"`
 }
 
 // ModelOption is one selectable model surfaced by a daemon for session creation.

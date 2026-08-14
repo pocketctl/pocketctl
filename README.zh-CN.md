@@ -48,6 +48,8 @@ pocketctl 是一个远程 AI 编码代理控制系统。它让你在远程机器
 
 三种 agent 共用“零配置发现 + 实时历史同步”，但控制能力遵循各自真实 runtime。Claude 终端会话在 idle 或退出后通过 `--resume` 接力，并不是共享运行时；Pocketctl 创建的 Claude PTY 可以在 Web/iOS 审批，用户独立启动的终端 Claude 仍使用 Claude 原生终端审批。详见 [Claude 跨端控制](docs/claude-cross-device-control.md)。
 
+**Attention Inbox**：启用后，Web 和 iOS 会将待审批、问题、高风险操作和恢复信号汇集到可操作的统一队列。每个事项都保留会话上下文和明确的风险原因，确保决策仅作用于当前请求的操作。
+
 **ZCode 的特殊性**：它以只读 observer 方式从本地 SQLite 存储增量发现和同步会话内容，启用后可在 Web/iOS 查看。ZCode observer 不支持远程发送、审批、恢复或控制；运行 `pocketctl agent zcode sync enable` 后需要重启 daemon 生效。
 
 权限配置按 Agent 原生能力提供：Claude Code 支持六种启动权限模式，Codex 支持 approval policy、sandbox mode 与安全 preset；Web/iOS 会等待 daemon 确认后再更新会话状态，Codex resume 会复用已确认的配置。

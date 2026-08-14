@@ -86,11 +86,27 @@ func TestOpenCodeInteractionStateMultiplePendingAndDedup(t *testing.T) {
 		switch event.Type {
 		case "approval_request":
 			approvalRequests++
+			if event.RiskLevel != "high" || event.RiskIncomplete == nil || !*event.RiskIncomplete {
+				t.Fatalf("permission risk classification missing: %+v", event)
+			}
+			wantReason := "requests_permissions"
+			if event.PermissionName == "bash" {
+				wantReason = "executes_command"
+			} else if event.PermissionName == "edit" {
+				wantReason = "changes_files"
+			}
+			if len(event.RiskReasons) != 1 || event.RiskReasons[0] != wantReason {
+				t.Fatalf("permission risk reasons=%+v want %q", event.RiskReasons, wantReason)
+			}
 			if event.RequestID == "per_1" && (event.PermissionName != "bash" || len(event.Patterns) != 1 || event.PermissionVersion != adapter.PermissionVersionLegacy) {
 				t.Fatalf("full permission fields missing: %+v", event)
 			}
 		case "question_request":
 			questionRequests++
+			if event.RiskLevel != "high" || event.RiskIncomplete == nil || !*event.RiskIncomplete ||
+				len(event.RiskReasons) != 1 || event.RiskReasons[0] != "requires_user_input" {
+				t.Fatalf("question risk classification missing: %+v", event)
+			}
 			if len(event.Questions) != 1 {
 				t.Fatalf("question fields missing: %+v", event)
 			}

@@ -1,10 +1,14 @@
 package session
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
+	"reflect"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -82,6 +86,14 @@ func TestCodexInteractionsApprovalIDsAndAvailableDecisionValidation(t *testing.T
 	if second.Type != "approval_request" || second.RequestID == first.RequestID || second.Tool != "fileChange" {
 		t.Fatalf("file approval=%+v", second)
 	}
+	if first.RiskLevel != "high" || first.RiskIncomplete == nil || !*first.RiskIncomplete ||
+		len(first.RiskReasons) != 1 || first.RiskReasons[0] != "executes_command" {
+		t.Fatalf("command risk classification=%+v", first)
+	}
+	if second.RiskLevel != "high" || second.RiskIncomplete == nil || !*second.RiskIncomplete ||
+		len(second.RiskReasons) != 1 || second.RiskReasons[0] != "changes_files" {
+		t.Fatalf("file risk classification=%+v", second)
+	}
 	if err := interactions.ResolveApproval(context.Background(), "thr_1", first.RequestID, "always"); err == nil {
 		t.Fatal("acceptForSession must be rejected when unavailable")
 	}
@@ -93,6 +105,107 @@ func TestCodexInteractionsApprovalIDsAndAvailableDecisionValidation(t *testing.T
 	client.responseMu.Unlock()
 	if response.id != "n:1" || string(response.result) != `{"decision":"accept"}` {
 		t.Fatalf("response=%+v", response)
+	}
+}
+
+func TestCodexTrustedActionPolicyRejectsPersistentApprovalBeforeNativeResponse(t *testing.T) {
+	t.Setenv("POCKETCTL_TRUSTED_ACTION_POLICY_V1", "on")
+	output := make(chan protocol.DaemonEvent, 16)
+	sm := NewSessionManager(output)
+	client := newInteractionCodexClient()
+	interactions := newCodexInteractions(sm, 31, client)
+	interactions.Handle(codexServerRequest(t, `1`, "item/commandExecution/requestApproval", `{
+		"threadId":"thr_policy","turnId":"turn_1","itemId":"cmd_1","command":"git status",
+		"availableDecisions":["accept","acceptForSession","decline","cancel"]
+	}`))
+	asked := nextCodexEvent(t, output, "approval_request")
+	if asked.SecurityContext == nil || asked.SecurityContext.SchemaVersion != 1 ||
+		!reflect.DeepEqual(asked.SecurityContext.AllowedActions, []string{"once", "reject", "cancel"}) {
+		t.Fatalf("security context=%+v", asked.SecurityContext)
+	}
+	if err := interactions.ResolveApproval(context.Background(), "thr_policy", asked.RequestID, "always"); err == nil {
+		t.Fatal("persistent approval must be rejected by trusted action policy")
+	}
+	client.responseMu.Lock()
+	responses := len(client.responses)
+	client.responseMu.Unlock()
+	if responses != 0 || !interactions.KnowsApproval("thr_policy", asked.RequestID) {
+		t.Fatalf("rejected policy choice mutated native state: responses=%d pending=%v", responses, interactions.KnowsApproval("thr_policy", asked.RequestID))
+	}
+	if err := interactions.ResolveApproval(context.Background(), "thr_policy", asked.RequestID, "once"); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestCodexTrustedActionPolicyObserveLogsAndAllowsPersistentApproval(t *testing.T) {
+	t.Setenv("POCKETCTL_TRUSTED_ACTION_POLICY_V1", "observe")
+	previousLogger := slog.Default()
+	var logs bytes.Buffer
+	slog.SetDefault(slog.New(slog.NewJSONHandler(&logs, nil)))
+	t.Cleanup(func() { slog.SetDefault(previousLogger) })
+
+	output := make(chan protocol.DaemonEvent, 16)
+	sm := NewSessionManager(output)
+	client := newInteractionCodexClient()
+	interactions := newCodexInteractions(sm, 33, client)
+	interactions.Handle(codexServerRequest(t, `1`, "item/commandExecution/requestApproval", `{
+		"threadId":"thr_policy_observe","turnId":"turn_1","itemId":"cmd_1","command":"true",
+		"availableDecisions":["accept","acceptForSession","decline","cancel"]
+	}`))
+	asked := nextCodexEvent(t, output, "approval_request")
+	if asked.SecurityContext != nil {
+		t.Fatalf("observe mode advertised enforcement: %+v", asked.SecurityContext)
+	}
+	if asked.RiskLevel != "high" || asked.RiskIncomplete == nil || !*asked.RiskIncomplete {
+		t.Fatalf("unexpected risk classification: level=%q incomplete=%v", asked.RiskLevel, asked.RiskIncomplete)
+	}
+	if err := interactions.ResolveApproval(context.Background(), "thr_policy_observe", asked.RequestID, "always"); err != nil {
+		t.Fatalf("observe mode blocked native persistent approval: %v", err)
+	}
+	if !strings.Contains(logs.String(), `"msg":"trusted action policy shadow rejection"`) ||
+		!strings.Contains(logs.String(), `"provider":"codex"`) ||
+		!strings.Contains(logs.String(), `"action":"always"`) {
+		t.Fatalf("missing shadow rejection log: %s", logs.String())
+	}
+	client.responseMu.Lock()
+	defer client.responseMu.Unlock()
+	if len(client.responses) != 1 || string(client.responses[0].result) != `{"decision":"acceptForSession"}` {
+		t.Fatalf("native responses=%+v", client.responses)
+	}
+	t.Log(strings.TrimSpace(logs.String()))
+}
+
+func TestCodexTrustedActionPolicyOffPreservesLegacyNativeDecision(t *testing.T) {
+	t.Setenv("POCKETCTL_TRUSTED_ACTION_POLICY_V1", "off")
+	output := make(chan protocol.DaemonEvent, 16)
+	sm := NewSessionManager(output)
+	client := newInteractionCodexClient()
+	interactions := newCodexInteractions(sm, 32, client)
+	interactions.Handle(codexServerRequest(t, `1`, "item/commandExecution/requestApproval", `{
+		"threadId":"thr_legacy","turnId":"turn_1","itemId":"cmd_1",
+		"availableDecisions":["accept","acceptForSession","decline"]
+	}`))
+	asked := nextCodexEvent(t, output, "approval_request")
+	if asked.SecurityContext != nil {
+		t.Fatalf("off mode advertised enforcement: %+v", asked.SecurityContext)
+	}
+	if err := interactions.ResolveApproval(context.Background(), "thr_legacy", asked.RequestID, "always"); err != nil {
+		t.Fatalf("off mode changed legacy native decision: %v", err)
+	}
+}
+
+func TestCodexInteractionsQuestionIncludesTrustedRiskReason(t *testing.T) {
+	output := make(chan protocol.DaemonEvent, 8)
+	sm := NewSessionManager(output)
+	interactions := newCodexInteractions(sm, 7, newInteractionCodexClient())
+	interactions.Handle(codexServerRequest(t, `3`, "item/tool/requestUserInput", `{
+		"threadId":"thr_1","turnId":"turn_1","itemId":"question_1",
+		"questions":[{"id":"choice","question":"Continue?","options":[{"label":"Yes"}]}]
+	}`))
+	event := nextCodexEvent(t, output, "question_request")
+	if event.RiskLevel != "high" || event.RiskIncomplete == nil || !*event.RiskIncomplete ||
+		len(event.RiskReasons) != 1 || event.RiskReasons[0] != "requires_user_input" {
+		t.Fatalf("question risk classification=%+v", event)
 	}
 }
 

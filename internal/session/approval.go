@@ -129,21 +129,26 @@ func (sm *SessionManager) handleApprovalCancel(requestID, sessionID string, allo
 	}
 }
 
-func permissionEvent(sessionID string, pending PendingOpenCodePermission) protocol.DaemonEvent {
-	return protocol.DaemonEvent{
+func permissionEvent(sessionID string, pending PendingOpenCodePermission, policyMode trustedActionPolicyMode) protocol.DaemonEvent {
+	event := protocol.DaemonEvent{
 		Type: "approval_request", SessionID: sessionID, RequestID: pending.RequestID,
 		Tool: pending.Permission, PermissionName: pending.Permission, Patterns: pending.Patterns,
 		Always: pending.Always, Metadata: pending.Metadata, Input: pending.Metadata,
 		ToolMessageID: pending.ToolMessageID, ToolCallID: pending.ToolCallID,
 		PermissionVersion: pending.ProtocolVersion,
 	}
+	event.RiskLevel, event.RiskIncomplete, event.RiskReasons = openCodePermissionAttentionRisk(pending.Permission)
+	event.SecurityContext = securityContextForPublication(policyMode, pending.securityContext)
+	return event
 }
 
 func questionEvent(sessionID string, pending PendingOpenCodeQuestion) protocol.DaemonEvent {
-	return protocol.DaemonEvent{
+	event := protocol.DaemonEvent{
 		Type: "question_request", SessionID: sessionID, RequestID: pending.RequestID,
 		Questions: pending.Questions, ToolMessageID: pending.ToolMessageID, ToolCallID: pending.ToolCallID,
 	}
+	event.RiskLevel, event.RiskIncomplete, event.RiskReasons = conservativeAttentionRisk(protocol.RiskReasonRequiresUserInput)
+	return event
 }
 
 func (sm *SessionManager) handleOpencodePermission(request adapter.PermissionAsked) bool {
@@ -156,6 +161,15 @@ func (sm *SessionManager) handleOpencodePermission(request adapter.PermissionAsk
 		ToolMessageID: request.ToolMessageID, ToolCallID: request.ToolCallID,
 		ProtocolVersion: request.Version,
 	}
+	riskLevel, riskIncomplete, riskReasons := openCodePermissionAttentionRisk(request.Permission)
+	nativeActions := []string{"once"}
+	if len(request.Always) > 0 {
+		nativeActions = append(nativeActions, "always")
+	}
+	nativeActions = append(nativeActions, "reject")
+	incomplete := riskIncomplete == nil || *riskIncomplete
+	securityContext := approvalSecurityContext(riskLevel, incomplete, riskReasons, nativeActions)
+	pending.securityContext = &securityContext
 	sm.mu.Lock()
 	ps, ok := sm.sessions[request.SessionID]
 	if !ok || ps.ControlMode != protocol.ControlManaged {
@@ -174,7 +188,7 @@ func (sm *SessionManager) handleOpencodePermission(request adapter.PermissionAsk
 	ps.LastActivityAt = time.Now()
 	sm.mu.Unlock()
 
-	sm.outputCh <- permissionEvent(request.SessionID, pending)
+	sm.outputCh <- permissionEvent(request.SessionID, pending, sm.trustedActionPolicy)
 	sm.emitInteractionStatus(request.SessionID, protocol.StatusWaitingApproval)
 	return true
 }
@@ -301,7 +315,7 @@ func (sm *SessionManager) PendingOpencodeInteractions(sessionID string) []protoc
 	sort.Slice(questions, func(i, j int) bool { return questions[i].RequestID < questions[j].RequestID })
 	out := make([]protocol.DaemonEvent, 0, len(permissions)+len(questions))
 	for _, request := range permissions {
-		out = append(out, permissionEvent(sessionID, request))
+		out = append(out, permissionEvent(sessionID, request, sm.trustedActionPolicy))
 	}
 	for _, request := range questions {
 		out = append(out, questionEvent(sessionID, request))
@@ -410,6 +424,13 @@ func (sm *SessionManager) ResolveApproval(sessionID, requestID string, approved 
 		_ = b
 		return sm.ResolveApprovalAction(sessionID, requestID, decision)
 	}
+	if sm.ClaudeChannelApprovalKnowsPublicRequest(sessionID, requestID) {
+		action := "reject"
+		if approved {
+			action = "once"
+		}
+		return sm.resolveClaudeChannelApproval(sessionID, requestID, action)
+	}
 	if sm.approvals == nil {
 		return fmt.Errorf("approval not configured on this daemon")
 	}
@@ -455,7 +476,13 @@ func (sm *SessionManager) ResolveApprovalAction(sessionID, requestID, action str
 		return fmt.Errorf("invalid approval action %q", action)
 	}
 	b := sm.opencodeBackendFor(sessionID)
-	if b == nil || b.coord == nil || b.coord.srv() == nil {
+	if b == nil {
+		if sm.ClaudeChannelApprovalKnowsPublicRequest(sessionID, requestID) {
+			return sm.resolveClaudeChannelApproval(sessionID, requestID, action)
+		}
+		return fmt.Errorf("opencode session not found")
+	}
+	if b.coord == nil || b.coord.srv() == nil {
 		return fmt.Errorf("opencode session not found")
 	}
 	b.coord.interactionMu.Lock()
@@ -476,6 +503,10 @@ func (sm *SessionManager) ResolveApprovalAction(sessionID, requestID, action str
 			return &ResolvedElsewhereError{RequestID: requestID}
 		}
 		return fmt.Errorf("permission request not pending in session")
+	}
+	if err := sm.enforceTrustedApprovalAction("opencode", request.securityContext, action); err != nil {
+		b.coord.interactionMu.Unlock()
+		return err
 	}
 	b.coord.bumpInteractionGeneration(sessionID, "permission", request.ProtocolVersion)
 	b.coord.interactionMu.Unlock()

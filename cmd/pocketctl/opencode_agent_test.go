@@ -54,16 +54,46 @@ func TestDaemonAgentPromptContextOnlyInteractiveParentCanPrompt(t *testing.T) {
 }
 
 func TestServiceDaemonArgsAlwaysDisableBackgroundAgentAutoEnable(t *testing.T) {
-	got := serviceDaemonArgs(true, "wss://relay.example/ws")
+	got := serviceDaemonArgs(true, "wss://relay.example/ws", "")
 	wantParts := []string{"daemon", "start", "--foreground", "--no-agent-auto-enable", "--prod", "--relay", "wss://relay.example/ws"}
 	if strings.Join(got, " ") != strings.Join(wantParts, " ") {
 		t.Fatalf("args=%v want %v", got, wantParts)
 	}
 }
 
+func TestServiceDaemonArgsPersistsTrustedActionPolicy(t *testing.T) {
+	got := serviceDaemonArgs(false, "ws://127.0.0.1:8080/ws", "observe")
+	want := []string{
+		"daemon", "start", "--foreground", "--no-agent-auto-enable",
+		"--relay", "ws://127.0.0.1:8080/ws",
+		"--trusted-action-policy", "observe",
+	}
+	if strings.Join(got, " ") != strings.Join(want, " ") {
+		t.Fatalf("args=%v want %v", got, want)
+	}
+}
+
+func TestValidateTrustedActionPolicyFlagRejectsUnknownMode(t *testing.T) {
+	for _, raw := range []string{"", "off", " OBSERVE ", "ON"} {
+		got, err := validateTrustedActionPolicyFlag(raw)
+		if err != nil {
+			t.Fatalf("validateTrustedActionPolicyFlag(%q): %v", raw, err)
+		}
+		if raw == " OBSERVE " && got != "observe" {
+			t.Fatalf("normalized mode=%q want observe", got)
+		}
+		if raw == "ON" && got != "on" {
+			t.Fatalf("normalized mode=%q want on", got)
+		}
+	}
+	if _, err := validateTrustedActionPolicyFlag("sometimes"); err == nil {
+		t.Fatal("unknown trusted action policy mode was accepted")
+	}
+}
+
 func TestDaemonServiceOptionsPreservesPath(t *testing.T) {
 	pathEnv := "/opt/homebrew/bin:/usr/bin:/bin"
-	got := daemonServiceOptions("/usr/local/bin/pocketctl", "/tmp/pocketctl.log", false, "", pathEnv)
+	got := daemonServiceOptions("/usr/local/bin/pocketctl", "/tmp/pocketctl.log", false, "", "", pathEnv)
 	if got.PathEnv != pathEnv {
 		t.Fatalf("PATH=%q want %q", got.PathEnv, pathEnv)
 	}

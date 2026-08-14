@@ -114,7 +114,9 @@ func parseLaunchctlPrint(out string) Info {
 		value = strings.TrimSpace(value)
 		switch key {
 		case "state":
-			state = value
+			if state == "" {
+				state = value
+			}
 		case "pid":
 			if pid, err := strconv.Atoi(value); err == nil {
 				info.PID = pid

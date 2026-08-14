@@ -76,6 +76,30 @@ func AgentControlSocketPath() string {
 	return agentControlSocketPathFor(runtime.GOOS, home)
 }
 
+// ClaudeChannelSocketPath returns the dedicated local endpoint for the
+// Claude Code Channel permission relay IPC. It is a SEPARATE socket from
+// ControlSocketPath / AgentControlSocketPath / ApprovalSocketPath because
+// the Channel IPC has its own security boundary (bootstrap tokens, instance
+// ids) and its own fail-closed semantics. Design §Task 5:
+// "~/.pocketctl/claude-channel.sock;Windows \\.\pipe\pocketctl-claude-channel".
+func ClaudeChannelSocketPath() string {
+	home, err := HomeDir()
+	if err != nil {
+		return ""
+	}
+	return claudeChannelSocketPathFor(runtime.GOOS, home)
+}
+
+// ClaudeChannelMCPConfigPath is the Pocketctl-owned MCP configuration used
+// only for the Claude permission Channel.
+func ClaudeChannelMCPConfigPath() (string, error) {
+	dir, err := ConfigDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(dir, "claude-channel", "mcp.json"), nil
+}
+
 // controlSocketPathFor 是 ControlSocketPath 的纯函数核心（可注入 GOOS，便于单测）。
 // Windows 必须用 \\.\pipe\ 前缀的 named pipe 名（winio.CreateNamedPipe 要求），
 // 否则 listen/dial 失败（这是 keep-awake 与 approval 在 Windows 报
@@ -92,6 +116,16 @@ func agentControlSocketPathFor(goos, home string) string {
 		return `\\.\pipe\pocketctl-agent-control`
 	}
 	return filepath.Join(home, ".pocketctl", "agent-control.sock")
+}
+
+// claudeChannelSocketPathFor is the pure core of ClaudeChannelSocketPath
+// (injectable GOOS for unit tests). Unix: ~/.pocketctl/claude-channel.sock.
+// Windows: named pipe \\.\pipe\pocketctl-claude-channel.
+func claudeChannelSocketPathFor(goos, home string) string {
+	if goos == "windows" {
+		return `\\.\pipe\pocketctl-claude-channel`
+	}
+	return filepath.Join(home, ".pocketctl", "claude-channel.sock")
 }
 
 // approvalSocketPathFor 是 ApprovalSocketPath 的纯函数核心（同上理由加平台分支）。

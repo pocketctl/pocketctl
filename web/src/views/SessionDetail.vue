@@ -293,6 +293,7 @@
             :data-status="msg.status"
             :message="msg"
             :supports-actions="interactionCapabilities.includes('permission_actions')"
+            :trusted-policy="currentSessionCapabilities.includes('trusted_action_policy_v1')"
             :disabled="interactionCardsDisabled"
             :disabled-reason="interactionDisabledReason(msg)"
             @respond="onApprovalRespond"
@@ -553,6 +554,7 @@ import { useLocale } from '../composables/useLocale'
 import ToolCallCard from '../components/messages/ToolCallCard.vue'
 import QuestionCard from '../components/messages/QuestionCard.vue'
 import ApprovalCard from '../components/messages/ApprovalCard.vue'
+import { trustedApprovalActions } from '../utils/trustedApprovalActions'
 import OpenCodeQuestionCard from '../components/messages/OpenCodeQuestionCard.vue'
 import McpElicitationCard from '../components/messages/McpElicitationCard.vue'
 import OpenCodeReasoningCard from '../components/messages/OpenCodeReasoningCard.vue'
@@ -1486,8 +1488,10 @@ function resyncInteractionState() {
 
 function onApprovalRespond(msg: any, action: 'once' | 'always' | 'reject' | 'cancel') {
   if (!msg.request_id) return
-  if (!markInteractionSubmitting(msg, 'Approval')) return
   const supportsActions = interactionCapabilities.value.includes('permission_actions') || Array.isArray(msg.availableDecisions)
+  const trustedPolicy = currentSessionCapabilities.value.includes('trusted_action_policy_v1')
+  if (!trustedApprovalActions(msg, supportsActions, trustedPolicy).includes(action)) return
+  if (!markInteractionSubmitting(msg, 'Approval')) return
   const sent = send({
     type: 'approval_response',
     session_id: sessionId.value,
@@ -2134,6 +2138,7 @@ function processEvent(evt: any, target: any[] = messages.value, subagentOverride
       permissionVersion: evt.permission_version || evt.payload?.permission_version,
       approvalKind: evt.approval_kind || evt.payload?.approval_kind,
       availableDecisions: evt.available_decisions || evt.payload?.available_decisions || [],
+      securityContext: evt.security_context || evt.payload?.security_context,
       command: evt.command || evt.payload?.command,
       cwd: evt.cwd || evt.payload?.cwd,
       description: evt.description || evt.payload?.description,
@@ -2595,13 +2600,21 @@ onMounted(() => {
     processEvent(msg)
   }))
   cleanups.push(onEvent('interaction_result', (msg: any) => {
-    if (msg.session_id !== sessionId.value || msg.status !== 'resolved_elsewhere' || !msg.request_id) return
+    if (msg.session_id !== sessionId.value || !msg.request_id) return
     let type: InteractionCardType
     if (msg.operation === 'approval_response') type = 'approval_request'
     else if (msg.operation === 'question_response' || msg.operation === 'question_reject') type = 'question_request'
     else if (msg.operation === 'mcp_elicitation_response') type = 'mcp_elicitation_request'
     else return
-    const resolution = { reason: 'resolved_elsewhere' }
+    const isClaudeNeutralResult = type === 'approval_request' && (msg.status === 'submitted' || msg.status === 'result_unknown')
+    if (msg.status !== 'resolved_elsewhere' && !isClaudeNeutralResult) return
+    const reason = msg.status === 'resolved_elsewhere'
+      ? 'resolved_elsewhere'
+      : (msg.reason || (msg.status === 'submitted' ? 'claude_result_unconfirmed' : 'result_unknown'))
+    const resolution = {
+      reason,
+      ...(isClaudeNeutralResult ? { action: msg.status, resultUnknown: msg.status === 'result_unknown' } : {}),
+    }
     interactionResolutions.set(msg.request_id, { type, resolution })
     resolveInteractionRequest(messages.value, type, msg.request_id, resolution)
     clearInteractionSubmitting(msg.request_id)

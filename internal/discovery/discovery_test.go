@@ -5,7 +5,10 @@ import (
 	"path/filepath"
 	"reflect"
 	"runtime"
+	"strconv"
+	"syscall"
 	"testing"
+	"time"
 )
 
 func TestCandidatePaths_UserLocalFirstAndDedup(t *testing.T) {
@@ -162,5 +165,37 @@ func TestResolveAgentExcludingNormalizesRelativeExclusion(t *testing.T) {
 	)
 	if found {
 		t.Fatal("relative exclusion did not exclude the absolute candidate")
+	}
+}
+
+func TestDetectVersionTimesOut(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell fixture is Unix-only")
+	}
+
+	dir := t.TempDir()
+	pidFile := filepath.Join(dir, "child.pid")
+	bin := filepath.Join(dir, "stalled-agent")
+	fixture := "#!/bin/sh\nsleep 30 &\necho $! > '" + pidFile + "'\nwait\n"
+	if err := os.WriteFile(bin, []byte(fixture), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		data, err := os.ReadFile(pidFile)
+		if err != nil {
+			return
+		}
+		pid, err := strconv.Atoi(string(data[:len(data)-1]))
+		if err == nil {
+			_ = syscall.Kill(pid, syscall.SIGTERM)
+		}
+	})
+
+	started := time.Now()
+	if got := detectVersion(bin); got != "" {
+		t.Fatalf("detectVersion(stalled binary) = %q, want empty", got)
+	}
+	if elapsed := time.Since(started); elapsed > versionProbeTimeout+2*time.Second {
+		t.Fatalf("detectVersion took %s, want bounded probe", elapsed)
 	}
 }

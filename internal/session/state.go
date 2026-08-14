@@ -70,6 +70,7 @@ func (sm *SessionManager) SetSessionExited(sessionID string, exitReason string) 
 	ps.LastActivityAt = now
 	cwd := ps.Cwd
 	sm.mu.Unlock()
+	sm.HandleClaudeChannelSessionEnd(sessionID, "session_ended")
 
 	// Scheme A/C: release cwd registry slot and file locks.
 	sm.unregisterCwd(sessionID, cwd)
@@ -122,6 +123,10 @@ func (sm *SessionManager) SetSessionStatus(sessionID, status string) {
 	ps.Status = status
 	ps.LastActivityAt = now
 	sm.mu.Unlock()
+	if status == protocol.StatusExited || status == protocol.StatusCompleted ||
+		status == protocol.StatusError || status == protocol.StatusKilled {
+		sm.HandleClaudeChannelSessionEnd(sessionID, "session_ended")
+	}
 
 	sm.outputCh <- protocol.DaemonEvent{
 		Type:           "session_status",
@@ -139,9 +144,9 @@ func (sm *SessionManager) ObserveTerminalSessionStatus(sessionID, status string)
 	}
 
 	sm.mu.Lock()
-	defer sm.mu.Unlock()
 	ps, ok := sm.sessions[sessionID]
 	if !ok || ps.Source != "terminal" {
+		sm.mu.Unlock()
 		return false
 	}
 
@@ -156,6 +161,11 @@ func (sm *SessionManager) ObserveTerminalSessionStatus(sessionID, status string)
 		}
 	} else {
 		ps.TurnStartedAt = time.Time{}
+	}
+	sm.mu.Unlock()
+	if status == protocol.StatusExited || status == protocol.StatusCompleted ||
+		status == protocol.StatusError || status == protocol.StatusKilled {
+		sm.HandleClaudeChannelSessionEnd(sessionID, "session_ended")
 	}
 	return true
 }
@@ -174,6 +184,10 @@ func (sm *SessionManager) SyncRediscoveredTerminalStatus(sessionID, status strin
 	ps.Status = status
 	ps.LastActivityAt = now
 	sm.mu.Unlock()
+	if status == protocol.StatusExited || status == protocol.StatusCompleted ||
+		status == protocol.StatusError || status == protocol.StatusKilled {
+		sm.HandleClaudeChannelSessionEnd(sessionID, "session_ended")
+	}
 
 	sm.outputCh <- protocol.DaemonEvent{
 		Type:           "session_status",

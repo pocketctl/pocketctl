@@ -13,8 +13,11 @@ function message(overrides: Record<string, unknown> = {}) {
 
 describe('ApprovalCard OpenCode actions', () => {
   test('renders full permission context and emits once/always/reject without optimistic resolution', async () => {
-    const pending = message()
-    const wrapper = mount(ApprovalCard, { props: { message: pending, supportsActions: true, disabled: false } })
+    const pending = message({ securityContext: {
+      schema_version: 1, risk_level: 'low', classification_incomplete: false,
+      risk_reasons: ['executes_command'], allowed_actions: ['once', 'always', 'reject'],
+    } })
+    const wrapper = mount(ApprovalCard, { props: { message: pending, supportsActions: true, trustedPolicy: true, disabled: false } })
     expect(wrapper.text()).toContain('bash')
     expect(wrapper.text()).toContain('git status')
     expect(wrapper.text()).toContain('/repo')
@@ -28,9 +31,33 @@ describe('ApprovalCard OpenCode actions', () => {
 
   test('disables always when OpenCode supplied no save rules', () => {
     const wrapper = mount(ApprovalCard, {
-      props: { message: message({ always: [] }), supportsActions: true, disabled: false },
+      props: { message: message({
+        always: [],
+        securityContext: {
+          schema_version: 1, risk_level: 'low', classification_incomplete: false,
+          risk_reasons: [], allowed_actions: ['once', 'always', 'reject'],
+        },
+      }), supportsActions: true, trustedPolicy: true, disabled: false },
     })
-    expect(wrapper.get('.approval-btn.always').attributes('disabled')).toBeDefined()
+    expect(wrapper.find('.approval-btn.always').exists()).toBe(false)
+  })
+
+  test('does not render persistent approval without a trusted policy context', () => {
+    const legacy = mount(ApprovalCard, {
+      props: { message: message(), supportsActions: true, trustedPolicy: false, disabled: false },
+    })
+    expect(legacy.find('.approval-btn.always').exists()).toBe(false)
+
+    const malformed = mount(ApprovalCard, {
+      props: {
+        message: message({
+          availableDecisions: ['accept', 'acceptForSession', 'decline'],
+          securityContext: { schema_version: 1, risk_level: 'low', allowed_actions: ['always'] },
+        }),
+        supportsActions: false, trustedPolicy: true, disabled: false,
+      },
+    })
+    expect(malformed.find('.approval-btn.always').exists()).toBe(false)
   })
 
   test('submitting and external disabled state lock every action', () => {
@@ -90,7 +117,22 @@ describe('ApprovalCard OpenCode actions', () => {
 	expect(wrapper.emitted('respond')?.map(args => args[1])).toEqual(['once', 'cancel'])
   })
 
-  test.each(['timed_out', 'daemon_restarted', 'hook_disconnected', 'session_drained', 'server_shutdown'])(
+  test('renders only once and reject for Claude Channel explicit decisions', () => {
+    const wrapper = mount(ApprovalCard, {
+      props: {
+        message: message({
+          approvalKind: 'claude_channel', availableDecisions: ['accept', 'decline'], always: [],
+        }),
+        supportsActions: false,
+      },
+    })
+    expect(wrapper.find('.approval-btn.once').exists()).toBe(true)
+    expect(wrapper.find('.approval-btn.always').exists()).toBe(false)
+    expect(wrapper.find('.approval-btn.reject').exists()).toBe(true)
+    expect(wrapper.find('.approval-btn.cancel').exists()).toBe(false)
+  })
+
+  test.each(['timed_out', 'daemon_restarted', 'hook_disconnected', 'session_drained', 'server_shutdown', 'claude_result_unconfirmed', 'result_unknown', 'channel_disconnected', 'channel_write_failed'])(
     'renders %s as a neutral closed result',
     (reason) => {
       const wrapper = mount(ApprovalCard, {
@@ -100,7 +142,7 @@ describe('ApprovalCard OpenCode actions', () => {
         },
       })
       expect(wrapper.get('.approval-result').classes()).toContain('elsewhere')
-      expect(wrapper.text()).toMatch(/closed|关闭/i)
+      expect(wrapper.text()).toMatch(/closed|关闭|submitted|unknown|已提交|未知/i)
       expect(wrapper.findAll('button')).toHaveLength(0)
     },
   )

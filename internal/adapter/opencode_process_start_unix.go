@@ -4,6 +4,7 @@ package adapter
 
 import (
 	"fmt"
+	"os"
 	"os/exec"
 	"strings"
 	"syscall"
@@ -18,7 +19,8 @@ func validateProcessStartedBefore(pid int, notAfter time.Time) error {
 	if notAfter.IsZero() {
 		return fmt.Errorf("missing process identity timestamp")
 	}
-	out, err := exec.Command("ps", "-p", fmt.Sprintf("%d", pid), "-o", "lstart=").Output()
+	cmd := newProcessStartCommand(pid)
+	out, err := cmd.Output()
 	if err != nil {
 		return err
 	}
@@ -30,4 +32,22 @@ func validateProcessStartedBefore(pid int, notAfter time.Time) error {
 		return fmt.Errorf("pid was created after handoff identity")
 	}
 	return nil
+}
+
+func newProcessStartCommand(pid int) *exec.Cmd {
+	// ps localizes lstart according to the inherited locale. Pin it to the C
+	// locale because Go's reference layout only parses the stable English form.
+	cmd := exec.Command("ps", "-p", fmt.Sprintf("%d", pid), "-o", "lstart=")
+	cmd.Env = withCProcessLocale(os.Environ())
+	return cmd
+}
+
+func withCProcessLocale(env []string) []string {
+	filtered := make([]string, 0, len(env)+1)
+	for _, entry := range env {
+		if !strings.HasPrefix(entry, "LC_ALL=") {
+			filtered = append(filtered, entry)
+		}
+	}
+	return append(filtered, "LC_ALL=C")
 }

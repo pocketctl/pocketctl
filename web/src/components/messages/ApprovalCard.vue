@@ -33,20 +33,11 @@
         <button v-if="message.resultUnknown" type="button" @click.stop="$emit('resync')">{{ t('interaction.resync') }}</button>
       </div>
       <div class="approval-actions">
-    <template v-if="isPending && isCodexApproval">
-      <button v-if="canAccept" class="approval-btn once" :disabled="actionsDisabled" @click.stop="respond('once')">{{ t('approval.once') }}</button>
-      <button v-if="canAcceptForSession" class="approval-btn always" :disabled="actionsDisabled" @click.stop="respond('always')">{{ t('approval.always') }}</button>
-      <button v-if="canDecline" class="approval-btn reject" :disabled="actionsDisabled" @click.stop="respond('reject')">{{ t('approval.deny') }}</button>
-      <button v-if="canCancel" class="approval-btn cancel" :disabled="actionsDisabled" @click.stop="respond('cancel')">{{ t('common.cancel') }}</button>
-    </template>
-        <template v-else-if="isPending && supportsActions">
-          <button class="approval-btn once" :disabled="actionsDisabled" @click.stop="respond('once')">{{ t('approval.once') }}</button>
-          <button class="approval-btn always" :disabled="actionsDisabled || !message.always?.length" @click.stop="respond('always')">{{ t('approval.always') }}</button>
-          <button class="approval-btn reject" :disabled="actionsDisabled" @click.stop="respond('reject')">{{ t('approval.deny') }}</button>
-        </template>
-        <template v-else-if="isPending">
-          <button class="approval-btn allow" :disabled="actionsDisabled" @click.stop="respond('once')">{{ t('approval.allow') }}</button>
-          <button class="approval-btn deny" :disabled="actionsDisabled" @click.stop="respond('reject')">{{ t('approval.deny') }}</button>
+        <template v-if="isPending">
+          <button v-if="allowedActions.includes('once')" class="approval-btn once" :disabled="actionsDisabled" @click.stop="respond('once')">{{ supportsActions || hasExplicitDecisions ? t('approval.once') : t('approval.allow') }}</button>
+          <button v-if="allowedActions.includes('always')" class="approval-btn always" :disabled="actionsDisabled || (supportsActions && !hasExplicitDecisions && !message.always?.length)" @click.stop="respond('always')">{{ t('approval.always') }}</button>
+          <button v-if="allowedActions.includes('reject')" class="approval-btn reject" :disabled="actionsDisabled" @click.stop="respond('reject')">{{ t('approval.deny') }}</button>
+          <button v-if="allowedActions.includes('cancel')" class="approval-btn cancel" :disabled="actionsDisabled" @click.stop="respond('cancel')">{{ t('common.cancel') }}</button>
         </template>
         <span v-else :class="['approval-result', resolvedResultClass]">{{ resolvedLabel }}</span>
       </div>
@@ -57,12 +48,14 @@
 <script setup lang="ts">
 import { computed } from 'vue'
 import { useLocale } from '../../composables/useLocale'
+import { trustedApprovalActions } from '../../utils/trustedApprovalActions'
 
 type ApprovalAction = 'once' | 'always' | 'reject' | 'cancel'
 
 const { t } = useLocale()
-const props = withDefaults(defineProps<{ message: any; supportsActions?: boolean; disabled?: boolean; disabledReason?: string }>(), {
+const props = withDefaults(defineProps<{ message: any; supportsActions?: boolean; trustedPolicy?: boolean; disabled?: boolean; disabledReason?: string }>(), {
   supportsActions: false,
+  trustedPolicy: false,
   disabled: false,
   disabledReason: '',
 })
@@ -74,22 +67,24 @@ const emit = defineEmits<{
 const isPending = computed(() => props.message.status === 'pending')
 const actionsDisabled = computed(() => props.disabled || !!props.message.submitting)
 const availableDecisions = computed<string[]>(() => Array.isArray(props.message.availableDecisions) ? props.message.availableDecisions : [])
-const isCodexApproval = computed(() => availableDecisions.value.length > 0)
-const canAccept = computed(() => availableDecisions.value.includes('accept'))
-const canAcceptForSession = computed(() => availableDecisions.value.includes('acceptForSession'))
-const canDecline = computed(() => availableDecisions.value.includes('decline'))
-const canCancel = computed(() => availableDecisions.value.includes('cancel'))
+const hasExplicitDecisions = computed(() => availableDecisions.value.length > 0)
+const allowedActions = computed(() => trustedApprovalActions(props.message, props.supportsActions, props.trustedPolicy))
 const resolvedAction = computed<ApprovalAction>(() => {
   if (props.message.action === 'always' || props.message.action === 'once' || props.message.action === 'reject' || props.message.action === 'cancel') return props.message.action
   return props.message.status === 'allowed' ? 'once' : 'reject'
 })
 const resultClass = computed(() => `result-${isPending.value ? 'pending' : resolvedAction.value}`)
 const resolvedElsewhere = computed(() => props.message.reason === 'resolved_elsewhere')
-const neutralReasons = new Set(['timed_out', 'daemon_restarted', 'hook_disconnected', 'session_drained', 'server_shutdown'])
+const neutralReasons = new Set([
+  'timed_out', 'daemon_restarted', 'hook_disconnected', 'session_drained', 'server_shutdown',
+  'claude_result_unconfirmed', 'result_unknown', 'channel_disconnected', 'channel_write_failed',
+])
 const neutralResolution = computed(() => neutralReasons.has(props.message.reason))
 const resolvedResultClass = computed(() => resolvedElsewhere.value || neutralResolution.value ? 'elsewhere' : resolvedAction.value)
 const resolvedLabel = computed(() => {
   if (resolvedElsewhere.value) return t('approval.resolved_elsewhere')
+  if (props.message.reason === 'claude_result_unconfirmed') return t('approval.submitted_unconfirmed')
+  if (props.message.reason === 'result_unknown' || props.message.reason === 'channel_write_failed') return t('approval.result_unknown')
   if (neutralResolution.value) return t('approval.closed')
   if (resolvedAction.value === 'always') return t('approval.always_resolved')
   if (resolvedAction.value === 'once') return t('approval.allowed')
@@ -106,7 +101,7 @@ const metadataText = computed(() => {
 const hasDetails = computed(() => !!(props.message.patterns?.length || props.message.always?.length || metadataText.value))
 
 function respond(action: ApprovalAction) {
-  if (!isPending.value || actionsDisabled.value) return
+  if (!isPending.value || actionsDisabled.value || !allowedActions.value.includes(action)) return
   emit('respond', props.message, action)
 }
 </script>

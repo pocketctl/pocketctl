@@ -23,9 +23,35 @@ var allowedClaudeJSONLWarnings = map[string]struct{}{
 	"jsonl_record_too_large": {}, "jsonl_parse_error": {},
 }
 
+// allowedClaudeChannel* enums are the ONLY dimensions telemetry may record
+// for the Claude Channel permission relay. Design §Task 11: "禁止维度:
+// session ID、request ID、cwd、tool、description、preview、answer、token、PID".
+var allowedClaudeChannelFallbackReasons = map[string]struct{}{
+	"rollout_disabled": {}, "unsupported_version": {}, "organization_disabled": {},
+	"bootstrap_unavailable": {}, "bootstrap_timeout": {}, "user_mcp_config_present": {},
+	"unsupported_arguments": {}, "probe_failed": {},
+}
+
+var allowedClaudeChannelDisconnectReasons = map[string]struct{}{
+	"channel_exit": {}, "daemon_shutdown": {}, "instance_unknown": {},
+	"token_mismatch": {}, "instance_expired": {}, "duplicate_register": {},
+	"server_error": {}, "ipc_error": {},
+}
+
+var allowedClaudeChannelVerdictBehaviors = map[string]struct{}{
+	"allow": {}, "deny": {},
+}
+
+var allowedClaudeChannelResultUnknownReasons = map[string]struct{}{
+	"channel_write_failed": {}, "channel_disconnected": {}, "daemon_restarted": {},
+	"session_ended": {}, "timed_out": {}, "ipc_error": {},
+}
+
 // ClaudeTelemetry contains only enumerated counters. There is no schema field
 // capable of storing a session ID, request ID, path, prompt, tool input, or
-// approval answer.
+// approval answer. The Channel* fields below were added in Task 11 for the
+// Claude Code Channel permission relay; they follow the same counter-only
+// discipline.
 type ClaudeTelemetry struct {
 	Version           int               `json:"version"`
 	FinishReasons     map[string]uint64 `json:"finish_reasons,omitempty"`
@@ -33,6 +59,17 @@ type ClaudeTelemetry struct {
 	Replayed          uint64            `json:"replayed,omitempty"`
 	OrphanClosed      uint64            `json:"orphan_closed,omitempty"`
 	JSONLWarnings     map[string]uint64 `json:"jsonl_warnings,omitempty"`
+
+	// Claude Channel permission-relay counters (Task 11). Every dimension is
+	// an enumerated reason/behavior; no PII or content is ever recorded.
+	ChannelBootstrapFallback map[string]uint64 `json:"channel_bootstrap_fallback,omitempty"`
+	ChannelRegistered        uint64            `json:"channel_registered,omitempty"`
+	ChannelDisconnected      map[string]uint64 `json:"channel_disconnected,omitempty"`
+	ChannelApprovalObserved  uint64            `json:"channel_approval_observed,omitempty"`
+	ChannelVerdictReserved   map[string]uint64 `json:"channel_verdict_reserved,omitempty"`
+	ChannelVerdictSubmitted  map[string]uint64 `json:"channel_verdict_submitted,omitempty"`
+	ChannelResultUnknown     map[string]uint64 `json:"channel_result_unknown,omitempty"`
+	ChannelTerminalProgress  uint64            `json:"channel_terminal_progress,omitempty"`
 }
 
 func claudeTelemetryPath() string {
@@ -81,6 +118,78 @@ func RecordClaudeJSONLWarning(reason string) error {
 	return updateClaudeTelemetry(func(snapshot *ClaudeTelemetry) { snapshot.JSONLWarnings[reason]++ })
 }
 
+// --- Claude Channel permission-relay counters (Task 11) -------------------
+
+// RecordClaudeChannelBootstrapFallback increments the bootstrap fallback
+// counter for the given reason. reason MUST be one of the enumerated
+// allowedClaudeChannelFallbackReasons values.
+func RecordClaudeChannelBootstrapFallback(reason string) error {
+	if _, ok := allowedClaudeChannelFallbackReasons[reason]; !ok {
+		return fmt.Errorf("unsupported Claude Channel fallback reason %q", reason)
+	}
+	return updateClaudeTelemetry(func(snapshot *ClaudeTelemetry) {
+		snapshot.ChannelBootstrapFallback[reason]++
+	})
+}
+
+// RecordClaudeChannelRegistered increments the channel_registered counter.
+func RecordClaudeChannelRegistered() error {
+	return updateClaudeTelemetry(func(snapshot *ClaudeTelemetry) { snapshot.ChannelRegistered++ })
+}
+
+// RecordClaudeChannelDisconnected increments the channel_disconnected counter
+// for the given reason.
+func RecordClaudeChannelDisconnected(reason string) error {
+	if _, ok := allowedClaudeChannelDisconnectReasons[reason]; !ok {
+		return fmt.Errorf("unsupported Claude Channel disconnect reason %q", reason)
+	}
+	return updateClaudeTelemetry(func(snapshot *ClaudeTelemetry) {
+		snapshot.ChannelDisconnected[reason]++
+	})
+}
+
+// RecordClaudeChannelApprovalObserved increments the approval_observed counter.
+func RecordClaudeChannelApprovalObserved() error {
+	return updateClaudeTelemetry(func(snapshot *ClaudeTelemetry) { snapshot.ChannelApprovalObserved++ })
+}
+
+// RecordClaudeChannelVerdictReserved increments verdict_reserved{behavior}.
+// behavior must be allow or deny.
+func RecordClaudeChannelVerdictReserved(behavior string) error {
+	if _, ok := allowedClaudeChannelVerdictBehaviors[behavior]; !ok {
+		return fmt.Errorf("unsupported Claude Channel verdict behavior %q", behavior)
+	}
+	return updateClaudeTelemetry(func(snapshot *ClaudeTelemetry) {
+		snapshot.ChannelVerdictReserved[behavior]++
+	})
+}
+
+// RecordClaudeChannelVerdictSubmitted increments verdict_submitted{behavior}.
+func RecordClaudeChannelVerdictSubmitted(behavior string) error {
+	if _, ok := allowedClaudeChannelVerdictBehaviors[behavior]; !ok {
+		return fmt.Errorf("unsupported Claude Channel verdict behavior %q", behavior)
+	}
+	return updateClaudeTelemetry(func(snapshot *ClaudeTelemetry) {
+		snapshot.ChannelVerdictSubmitted[behavior]++
+	})
+}
+
+// RecordClaudeChannelResultUnknown increments verdict_result_unknown{reason}.
+func RecordClaudeChannelResultUnknown(reason string) error {
+	if _, ok := allowedClaudeChannelResultUnknownReasons[reason]; !ok {
+		return fmt.Errorf("unsupported Claude Channel result_unknown reason %q", reason)
+	}
+	return updateClaudeTelemetry(func(snapshot *ClaudeTelemetry) {
+		snapshot.ChannelResultUnknown[reason]++
+	})
+}
+
+// RecordClaudeChannelTerminalProgress increments the terminal_progress_inferred
+// counter (the daemon observed JSONL progress and neutrally closed a card).
+func RecordClaudeChannelTerminalProgress() error {
+	return updateClaudeTelemetry(func(snapshot *ClaudeTelemetry) { snapshot.ChannelTerminalProgress++ })
+}
+
 func LoadClaudeTelemetry() (ClaudeTelemetry, error) {
 	path := claudeTelemetryPath()
 	if path == "" {
@@ -102,14 +211,24 @@ func LoadClaudeTelemetry() (ClaudeTelemetry, error) {
 	}
 	snapshot.FinishReasons = filterClaudeCounters(snapshot.FinishReasons, allowedClaudeFinishReasons)
 	snapshot.JSONLWarnings = filterClaudeCounters(snapshot.JSONLWarnings, allowedClaudeJSONLWarnings)
+	snapshot.ChannelBootstrapFallback = filterClaudeCounters(snapshot.ChannelBootstrapFallback, allowedClaudeChannelFallbackReasons)
+	snapshot.ChannelDisconnected = filterClaudeCounters(snapshot.ChannelDisconnected, allowedClaudeChannelDisconnectReasons)
+	snapshot.ChannelVerdictReserved = filterClaudeCounters(snapshot.ChannelVerdictReserved, allowedClaudeChannelVerdictBehaviors)
+	snapshot.ChannelVerdictSubmitted = filterClaudeCounters(snapshot.ChannelVerdictSubmitted, allowedClaudeChannelVerdictBehaviors)
+	snapshot.ChannelResultUnknown = filterClaudeCounters(snapshot.ChannelResultUnknown, allowedClaudeChannelResultUnknownReasons)
 	return snapshot, nil
 }
 
 func newClaudeTelemetry() ClaudeTelemetry {
 	return ClaudeTelemetry{
-		Version:       claudeTelemetryVersion,
-		FinishReasons: make(map[string]uint64),
-		JSONLWarnings: make(map[string]uint64),
+		Version:                  claudeTelemetryVersion,
+		FinishReasons:            make(map[string]uint64),
+		JSONLWarnings:            make(map[string]uint64),
+		ChannelBootstrapFallback: make(map[string]uint64),
+		ChannelDisconnected:      make(map[string]uint64),
+		ChannelVerdictReserved:   make(map[string]uint64),
+		ChannelVerdictSubmitted:  make(map[string]uint64),
+		ChannelResultUnknown:     make(map[string]uint64),
 	}
 }
 

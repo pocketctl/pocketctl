@@ -4,7 +4,7 @@ BINARY = pocketctl
 GOOS ?= $(shell uname -s | tr '[:upper:]' '[:lower:]')
 GOARCH ?= $(shell uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/')
 
-.PHONY: build build-all clean relay web dev dev-relay test test-relay-durable-ingress test-opencode-managed test-opencode-managed-release test-codex-managed test-codex-managed-release release release-dry-run
+.PHONY: build build-all clean relay web dev dev-relay test test-relay-durable-ingress test-opencode-managed test-opencode-managed-release test-codex-managed test-codex-managed-release test-claude-channel-approval release release-dry-run
 
 -include .env
 export JWT_SECRET
@@ -100,6 +100,10 @@ test-codex-managed:
 test-codex-managed-release:
 	POCKETCTL_RELEASE_GATE=1 bash scripts/test-codex-managed.sh
 
+## Claude Channel 多端审批回归（Go race/Windows 编译/Relay/Web/iOS 源码回归）
+test-claude-channel-approval:
+	bash scripts/test-claude-channel-approval.sh
+
 # ---------- iOS ----------
 
 ## iOS Debug 构建
@@ -176,6 +180,7 @@ help:
 	@echo "  make test-opencode-managed-release  运行 OpenCode 受管终端完整发布门禁"
 	@echo "  make test-codex-managed             运行 Codex 受管终端回归"
 	@echo "  make test-codex-managed-release     运行 Codex 受管终端完整发布门禁"
+	@echo "  make test-claude-channel-approval   运行 Claude Channel 多端审批回归"
 	@echo ""
 	@echo "发布:"
 	@echo "  make release VERSION=v0.1.0  创建发布"

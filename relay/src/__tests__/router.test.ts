@@ -1203,6 +1203,53 @@ describe('Router - offline debounce', () => {
     expect(pushQuery).toBeUndefined()
   })
 
+  test('recovery observer follows accepted online and post-grace confirmed offline generations', async () => {
+    const recoveryObserver = {
+      confirmedOffline: vi.fn().mockResolvedValue(undefined),
+      confirmedOnline: vi.fn().mockResolvedValue(undefined),
+    }
+    router = new Router(pool, { recoveryObserver })
+    const ws = createMockWs()
+
+    await router.registerDaemon(ws, {
+      type: 'register', daemon_id: 'daemon-1', hostname: 'host', agents: [],
+    }, 42)
+    await vi.waitFor(() => expect(recoveryObserver.confirmedOnline).toHaveBeenCalledOnce())
+    const generation = recoveryObserver.confirmedOnline.mock.calls[0]?.[0].registrationGeneration
+
+    router.unregisterDaemon('daemon-1', ws)
+    await new Promise(r => setTimeout(r, 20))
+    expect(recoveryObserver.confirmedOffline).not.toHaveBeenCalled()
+    await vi.waitFor(() => expect(recoveryObserver.confirmedOffline).toHaveBeenCalledOnce())
+    expect(recoveryObserver.confirmedOffline).toHaveBeenCalledWith({
+      userId: 42, daemonId: 'daemon-1', registrationGeneration: generation,
+      daemonDisplayName: 'host',
+    })
+  })
+
+  test('does not project offline after reconnect wins and isolates observer failures', async () => {
+    const recoveryObserver = {
+      confirmedOffline: vi.fn().mockRejectedValue(new Error('projection unavailable')),
+      confirmedOnline: vi.fn().mockRejectedValue(new Error('projection unavailable')),
+    }
+    router = new Router(pool, { recoveryObserver })
+    const first = createMockWs()
+    await expect(router.registerDaemon(first, {
+      type: 'register', daemon_id: 'daemon-1', hostname: 'host', agents: [],
+    }, 42)).resolves.toBe(true)
+
+    router.unregisterDaemon('daemon-1', first)
+    await new Promise(r => setTimeout(r, 20))
+    const successor = createMockWs()
+    await expect(router.registerDaemon(successor, {
+      type: 'register', daemon_id: 'daemon-1', hostname: 'host', agents: [],
+    }, 42)).resolves.toBe(true)
+    await new Promise(r => setTimeout(r, 120))
+
+    expect(recoveryObserver.confirmedOffline).not.toHaveBeenCalled()
+    expect(recoveryObserver.confirmedOnline).toHaveBeenCalledTimes(2)
+  })
+
   test('daemon_shutdown declares offline immediately without waiting for grace', async () => {
     const clientWs = createMockWs()
     router.registerClient(clientWs, 42)
@@ -1246,6 +1293,11 @@ describe('Router - offline debounce', () => {
   })
 
   test('graceful shutdown suppresses the offline push (but still broadcasts)', async () => {
+    const recoveryObserver = {
+      confirmedOffline: vi.fn().mockResolvedValue(undefined),
+      confirmedOnline: vi.fn().mockResolvedValue(undefined),
+    }
+    router = new Router(pool, { recoveryObserver })
     const clientWs = createMockWs()
     router.registerClient(clientWs, 42)
 
@@ -1262,6 +1314,7 @@ describe('Router - offline debounce', () => {
     // No APNs push lookup while shutting down...
     const pushQuery = pool._queries.find((q: any) => q.sql.includes('FROM devices'))
     expect(pushQuery).toBeUndefined()
+    expect(recoveryObserver.confirmedOffline).not.toHaveBeenCalled()
   })
 
   test('stale-socket close does not schedule an offline transition for the live connection', async () => {

@@ -34,6 +34,7 @@ type codexPendingInteraction struct {
 	requestID         codexapp.RequestID
 	available         map[string]struct{}
 	permissions       json.RawMessage
+	securityContext   *protocol.ApprovalSecurityContext
 	questions         []codexPendingQuestion
 	hasSecret         bool
 	elicitationMode   string
@@ -194,9 +195,13 @@ func (c *codexInteractions) handleApproval(message codexapp.Inbound, kind string
 		return
 	}
 	available := approvalDecisions(kind, params.AvailableDecisions)
+	riskLevel, riskIncomplete, riskReasons := codexAttentionRisk(kind)
+	incomplete := riskIncomplete == nil || *riskIncomplete
+	securityContext := approvalSecurityContext(riskLevel, incomplete, riskReasons, codexApprovalActions(available))
 	pending := &codexPendingInteraction{
 		threadID: params.ThreadID, turnID: params.TurnID, kind: kind, method: message.Method,
 		requestID: *message.ID, available: make(map[string]struct{}), permissions: append(json.RawMessage(nil), params.Permissions...),
+		securityContext: &securityContext,
 	}
 	for _, decision := range available {
 		pending.available[decision] = struct{}{}
@@ -226,6 +231,8 @@ func (c *codexInteractions) handleApproval(message codexapp.Inbound, kind string
 		ApprovalKind: kind, AvailableDecisions: available, Tool: kind, CallID: params.ItemID,
 		Command: command, Cwd: params.Cwd, Description: description, Files: files,
 	}
+	event.RiskLevel, event.RiskIncomplete, event.RiskReasons = riskLevel, riskIncomplete, riskReasons
+	event.SecurityContext = securityContextForPublication(c.sm.trustedActionPolicy, pending.securityContext)
 	if kind == codexApprovalPermissions && len(params.Permissions) > 0 {
 		event.Input = append(json.RawMessage(nil), params.Permissions...)
 	}
@@ -282,6 +289,7 @@ func (c *codexInteractions) handleQuestion(message codexapp.Inbound) {
 		Type: "question_request", SessionID: params.ThreadID, RequestID: pending.publicID,
 		Questions: questions, CallID: params.ItemID, AutoResolutionMs: params.AutoResolutionMs,
 	}
+	event.RiskLevel, event.RiskIncomplete, event.RiskReasons = codexAttentionRisk(codexQuestion)
 	c.publishPendingTransition(params.ThreadID, protocol.StatusWaitingQuestion, event)
 }
 
@@ -327,6 +335,10 @@ func (c *codexInteractions) ResolveApproval(_ context.Context, threadID, publicI
 	}
 	result, approved, err := codexApprovalResponse(pending, action)
 	if err != nil {
+		c.mu.Unlock()
+		return err
+	}
+	if err := c.sm.enforceTrustedApprovalAction("codex", pending.securityContext, action); err != nil {
 		c.mu.Unlock()
 		return err
 	}
@@ -823,6 +835,23 @@ func approvalDecisions(kind string, raw []json.RawMessage) []string {
 		}
 	}
 	return decisions
+}
+
+func codexApprovalActions(decisions []string) []string {
+	actions := make([]string, 0, len(decisions))
+	for _, decision := range decisions {
+		switch decision {
+		case "accept":
+			actions = append(actions, "once")
+		case "acceptForSession":
+			actions = append(actions, "always")
+		case "decline":
+			actions = append(actions, "reject")
+		case "cancel":
+			actions = append(actions, "cancel")
+		}
+	}
+	return actions
 }
 
 func codexApprovalResponse(pending *codexPendingInteraction, action string) (map[string]any, bool, error) {
