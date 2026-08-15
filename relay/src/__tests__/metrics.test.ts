@@ -20,11 +20,11 @@ describe('protected aggregate relay metrics', () => {
   })
 
   test('metrics route rejects an unauthenticated request without a metrics body', async () => {
-    const server = await import('../server.js') as { registerRelayMetricsRoute?: MetricsRoute }
-    expect(server.registerRelayMetricsRoute).toBeTypeOf('function')
+    const { registerRelayMetricsRoute } = await import('../relay-metrics-route.js') as { registerRelayMetricsRoute?: MetricsRoute }
+    expect(registerRelayMetricsRoute).toBeTypeOf('function')
     const app = Fastify()
     apps.push(app)
-    server.registerRelayMetricsRoute!(app, {
+    registerRelayMetricsRoute!(app, {
       verifyAccessToken: vi.fn(async () => ({ userId: 1 })),
       metrics: vi.fn(async () => 'pocketctl_relay_ingress_events_total 1\n'),
     })
@@ -36,11 +36,11 @@ describe('protected aggregate relay metrics', () => {
   })
 
   test('metrics route rejects an invalid Bearer token without a metrics body', async () => {
-    const server = await import('../server.js') as { registerRelayMetricsRoute?: MetricsRoute }
-    expect(server.registerRelayMetricsRoute).toBeTypeOf('function')
+    const { registerRelayMetricsRoute } = await import('../relay-metrics-route.js') as { registerRelayMetricsRoute?: MetricsRoute }
+    expect(registerRelayMetricsRoute).toBeTypeOf('function')
     const app = Fastify()
     apps.push(app)
-    server.registerRelayMetricsRoute!(app, {
+    registerRelayMetricsRoute!(app, {
       verifyAccessToken: vi.fn(async () => null),
       metrics: vi.fn(async () => 'pocketctl_relay_ingress_events_total 1\n'),
     })
@@ -56,10 +56,10 @@ describe('protected aggregate relay metrics', () => {
   })
 
   test('aggregate registry never exposes daemon or session identifiers as labels', async () => {
-    const server = await import('../server.js') as { relayMetricsRegistry?: MetricsRegistry }
-    expect(server.relayMetricsRegistry).toBeDefined()
+    const { registry: relayMetricsRegistry } = await import('../metrics.js') as { registry?: MetricsRegistry }
+    expect(relayMetricsRegistry).toBeDefined()
 
-    const text = await server.relayMetricsRegistry!.metrics()
+    const text = await relayMetricsRegistry!.metrics()
 
     expect(text).not.toContain('daemon_id=')
     expect(text).not.toContain('session_id=')

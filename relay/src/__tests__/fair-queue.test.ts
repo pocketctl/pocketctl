@@ -49,6 +49,19 @@ test('no daemon contributes more than 25 percent while peers are ready', () => {
   expect(batch.filter((item) => item.daemonId === 'noisy')).toHaveLength(64)
 })
 
+test('does not refill a latency-sensitive peer batch from the noisy daemon', () => {
+  const queue = new FairIngressQueue({ maxEventsPerDaemon: 2_000 })
+  for (let seq = 1; seq <= 1_000; seq++) queue.enqueue(eventFor('noisy', seq, 'replay'))
+  queue.enqueue(eventFor('opencode', 1, 'control'))
+  queue.enqueue(eventFor('claude', 1, 'control'))
+
+  const batch = queue.takeBatch({ maxRows: 256, maxBytes: 1 << 20, maxPerDaemonFraction: 0.25 })
+
+  expect(batch.filter((item) => item.daemonId === 'noisy')).toHaveLength(64)
+  expect(batch.map((item) => item.daemonId)).toEqual(expect.arrayContaining(['opencode', 'claude']))
+  expect(batch).toHaveLength(66)
+})
+
 test('control and live win without starving replay and aggregate', () => {
   const queue = new FairIngressQueue()
   for (let i = 0; i < 100; i++) {

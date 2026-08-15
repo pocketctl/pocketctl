@@ -5,7 +5,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
 echo "[Codex/1] Go launcher, app-server, lifecycle, interaction and E2E race tests"
-go test -race \
+go test -race -p 1 \
   ./internal/agentcontrol \
   ./internal/codexapp \
   ./internal/daemon \

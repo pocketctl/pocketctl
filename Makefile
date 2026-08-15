@@ -4,7 +4,7 @@ BINARY = pocketctl
 GOOS ?= $(shell uname -s | tr '[:upper:]' '[:lower:]')
 GOARCH ?= $(shell uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/')
 
-.PHONY: build build-all clean relay web dev dev-relay test test-relay-durable-ingress test-opencode-managed test-opencode-managed-release test-codex-managed test-codex-managed-release test-claude-channel-approval release release-dry-run
+.PHONY: build build-all clean relay web dev dev-relay test test-relay-durable-ingress test-opencode-managed test-opencode-managed-release test-codex-managed test-codex-managed-release test-claude-channel-approval release-preflight release release-dry-run
 
 -include .env
 export JWT_SECRET
@@ -128,6 +128,10 @@ ios-bump:
 
 # ---------- 发布 ----------
 
+## 在固定 Node 22 / Go 1.25 环境中运行本地发布预验收
+release-preflight:
+	bash scripts/release-preflight.sh
+
 ## 运行完整发布链（Gitee canonical + GitHub filtered mirror）
 release:
 	@if [ "$(VERSION)" = "dev" ]; then echo "❌ 请指定版本: make release VERSION=v0.1.0"; exit 1; fi
@@ -183,6 +187,7 @@ help:
 	@echo "  make test-claude-channel-approval   运行 Claude Channel 多端审批回归"
 	@echo ""
 	@echo "发布:"
+	@echo "  make release-preflight        固定 Node 22 / Go 1.25 本地发布预验收"
 	@echo "  make release VERSION=v0.1.0  创建发布"
 	@echo ""
 	@echo "部署:"

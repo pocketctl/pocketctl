@@ -3396,9 +3396,9 @@ describe('Router - force kick revokes the daemon-specific token (P0-2)', () => {
     }, 7, 'old-token')
 
     await expect(router.handleForceKick('daemon-1', 7)).resolves.toEqual({ success: true })
-    await new Promise((resolve) => setTimeout(resolve, 80))
-
-    expect(offline).toHaveBeenCalledTimes(3)
+    await vi.waitFor(() => {
+      expect(offline).toHaveBeenCalledTimes(3)
+    }, { timeout: 1_000 })
     vi.restoreAllMocks()
   })
 })

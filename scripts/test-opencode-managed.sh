@@ -5,7 +5,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
 echo "[A-D/1] Go control, runtime, interaction, lifecycle and E2E tests"
-go test -race \
+go test -race -p 1 \
   ./internal/agentcontrol \
   ./internal/config \
   ./internal/discovery \
@@ -19,6 +19,12 @@ go test -race \
   ./internal/e2e \
   ./internal/i18n \
   ./cmd/pocketctl \
+  -count=1 \
+  -skip='^TestOpencodeServerSmoke$'
+
+echo "[A-D/1b] Opt-in real OpenCode serve lifecycle smoke (serialized)"
+go test -race ./internal/adapter \
+  -run='^TestOpencodeServerSmoke$' \
   -count=1
 
 echo "[A-D/2] Windows launcher and IPC compile contract"

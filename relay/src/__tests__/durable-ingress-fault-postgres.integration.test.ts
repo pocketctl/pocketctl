@@ -13,6 +13,7 @@ import {
 const databaseUrl = process.env.TEST_DATABASE_URL
 const describeWithDatabase = databaseUrl ? describe : describe.skip
 const OUTAGE_APPLICATION_NAME = 'pocketctl-durable-ingress-outage-gate'
+const TEST_CONNECTION_TIMEOUT_MS = 1_000
 
 function timerStub(): ReturnType<typeof setTimeout> {
   return { unref: vi.fn() } as unknown as ReturnType<typeof setTimeout>
@@ -41,7 +42,7 @@ describeWithDatabase('durable ingress PostgreSQL failure release gate', () => {
       const outagePool = new pg.Pool({
         connectionString: databaseUrl,
         max: 1,
-        connectionTimeoutMillis: 100,
+        connectionTimeoutMillis: TEST_CONNECTION_TIMEOUT_MS,
         application_name: OUTAGE_APPLICATION_NAME,
       })
       const controlPool = new pg.Pool({
@@ -145,7 +146,7 @@ describeWithDatabase('durable ingress PostgreSQL failure release gate', () => {
     const ingestPool = new pg.Pool({
       connectionString: databaseUrl,
       max: 1,
-      connectionTimeoutMillis: 50,
+      connectionTimeoutMillis: TEST_CONNECTION_TIMEOUT_MS,
     })
     await assertDurableIngressTestDatabase(ingestPool, databaseUrl!)
     const held = await ingestPool.connect()

@@ -2,7 +2,7 @@ import Fastify, { type FastifyInstance } from 'fastify';
 import fastifyWebsocket from '@fastify/websocket';
 import fastifyCors from '@fastify/cors';
 import type pg from 'pg';
-import { initDB, parseDBUrl, createUserWithWelcomeEmail, getUserByEmail, getUserById, getUserPlanAndWhitelist, getUserProfile, userExists, deleteUserAccount, registerDevice, removeDevice, cleanStaleTombstones, upsertDaemonAlias, updateDisplayName, updateEmail, addToIOSWaitlist, revokeToken, isTokenRevoked, cleanRevokedTokens, insertAuditLog, bindTokenToDaemon, updateSessionTitle, isSessionOwnedByUser, getSessionAllEvents, getTokenSummary, getTokensByDaemon, backfillSessionTokens, backfillSessionModel, backfillTokenDailyStats, aggregateDayIntoStats, cleanStaleEvents, getTokenDailySeries, getTokenByModel, getTokenByDaemon, getSessionTokenTrend, listProUserIds, getUserDailyTokens, getUserWeeklyTokens, markReportSent, handleRefreshReuse, type User } from './db.js';
+import { initDB, parseDBUrl, createUserWithWelcomeEmail, getUserByEmail, getUserById, getUserPlanAndWhitelist, getUserProfile, userExists, deleteUserAccount, registerDevice, removeDevice, cleanStaleTombstones, upsertDaemonAlias, updateDisplayName, updateEmail, addToIOSWaitlist, revokeToken, isTokenRevoked, cleanRevokedTokens, insertAuditLog, bindTokenToDaemon, updateSessionTitle, isSessionOwnedByUser, getSessionAllEvents, getTokenSummary, getTokensByDaemon, backfillSessionTokens, backfillSessionModel, backfillTokenDailyStats, aggregateDayIntoStats, cleanStaleEvents, getTokenDailySeries, getTokenByModel, getTokenByDaemon, getSessionTokenTrend, listProUserIds, getUserDailyTokens, getUserWeeklyTokens, markReportSent, handleRefreshReuse } from './db.js';
 import { closeRelayPools, createRelayPools } from './db-pools.js';
 import { Router, parseDurableIngressFlag, type FlagConfig } from './router.js';
 import { hashPassword, verifyPassword, signAccessToken, signRefreshToken, verifyRefreshToken, decodeToken, verifyAccessTokenWithRevocation } from './auth.js';
@@ -21,7 +21,8 @@ import { ConnectionRateLimiter } from './rate-limit.js';
 import { isAppReviewEmail, isAppReviewEnabled, isConfiguredAppReviewEmail, verifyAppReviewCode } from './config/app-review-auth.js';
 import { ensureAppReviewDemoData } from './config/app-review-demo.js';
 import { resolveLanguage } from './config/language.js';
-import type { SupportedLanguage } from './config/language.js';
+import { findOrCreateEmailUser } from './email-user.js';
+export { findOrCreateEmailUser } from './email-user.js';
 import { createWelcomeEmailWorker } from './welcome-email-worker.js';
 import { pathToFileURL } from 'node:url';
 import { registerDaemonConnection, type DaemonSocketIdentity } from './daemon-registration.js';
@@ -37,6 +38,8 @@ import {
   tokenUsageDayClosures,
   tokenUsageShadowComparisons,
 } from './metrics.js';
+import { registerRelayMetricsRoute } from './relay-metrics-route.js';
+export { registerRelayMetricsRoute } from './relay-metrics-route.js';
 import {
   RealtimeOutboxConsumer,
   RealtimeOutboxRepository,
@@ -276,26 +279,6 @@ export async function handleDeleteAccountRequest(
   return { success: true };
 }
 
-export async function findOrCreateEmailUser(
-  pool: any,
-  email: string,
-  displayName: string,
-  locale: SupportedLanguage,
-): Promise<User> {
-  const normalizedEmail = email.trim().toLowerCase();
-  const existing = await getUserByEmail(pool, normalizedEmail);
-  if (existing) return existing;
-
-  try {
-    return await createUserWithWelcomeEmail(pool, normalizedEmail, '', displayName, locale);
-  } catch (error: any) {
-    if (error?.code !== '23505') throw error;
-    const winner = await getUserByEmail(pool, normalizedEmail);
-    if (winner) return winner;
-    throw error;
-  }
-}
-
 export async function startRelayBackgroundWorkers(deps: {
   welcome: { start(): void; stop?(): Promise<void> };
   realtimeOutboxConsumer: { start(): Promise<void> };
@@ -327,28 +310,6 @@ export function registerDurableIngressReadinessRoute(
       reply.code(503);
       return { status: 'degraded', ...buildInfo, error: 'db unreachable' };
     }
-  });
-}
-
-export function registerRelayMetricsRoute(
-  app: FastifyInstance,
-  dependencies: {
-    verifyAccessToken(token: string): Promise<unknown>;
-    metrics(): Promise<string>;
-  },
-): void {
-  app.get('/internal/metrics', async (req, reply) => {
-    const authHeader = req.headers.authorization;
-    if (!authHeader?.startsWith('Bearer ')) {
-      reply.code(401);
-      return { error: 'authorization required' };
-    }
-    if (!await dependencies.verifyAccessToken(authHeader.slice(7))) {
-      reply.code(401);
-      return { error: 'invalid token' };
-    }
-    reply.type('text/plain; version=0.0.4; charset=utf-8');
-    return dependencies.metrics();
   });
 }
 

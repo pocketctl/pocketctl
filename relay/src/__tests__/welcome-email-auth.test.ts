@@ -19,7 +19,7 @@ describe('findOrCreateEmailUser', () => {
   test('returns an existing user without creating or enqueueing', async () => {
     const existing = { id: 1, email: 'person@example.com' }
     getUserByEmail.mockResolvedValue(existing)
-    const { findOrCreateEmailUser } = await import('../server.js')
+    const { findOrCreateEmailUser } = await import('../email-user.js')
 
     await expect(findOrCreateEmailUser({} as any, 'person@example.com', 'Person', 'en')).resolves.toBe(existing)
     expect(createUserWithWelcomeEmail).not.toHaveBeenCalled()
@@ -29,7 +29,7 @@ describe('findOrCreateEmailUser', () => {
     const created = { id: 2, email: 'person@example.com' }
     getUserByEmail.mockResolvedValue(null)
     createUserWithWelcomeEmail.mockResolvedValue(created)
-    const { findOrCreateEmailUser } = await import('../server.js')
+    const { findOrCreateEmailUser } = await import('../email-user.js')
 
     await expect(findOrCreateEmailUser({} as any, ' Person@Example.COM ', 'Person', 'zh')).resolves.toBe(created)
     expect(createUserWithWelcomeEmail).toHaveBeenCalledWith({}, 'person@example.com', '', 'Person', 'zh')
@@ -39,7 +39,7 @@ describe('findOrCreateEmailUser', () => {
     const winner = { id: 3, email: 'person@example.com' }
     getUserByEmail.mockResolvedValueOnce(null).mockResolvedValueOnce(winner)
     createUserWithWelcomeEmail.mockRejectedValue(Object.assign(new Error('duplicate'), { code: '23505' }))
-    const { findOrCreateEmailUser } = await import('../server.js')
+    const { findOrCreateEmailUser } = await import('../email-user.js')
 
     await expect(findOrCreateEmailUser({} as any, 'person@example.com', 'Person', 'en')).resolves.toBe(winner)
     expect(createUserWithWelcomeEmail).toHaveBeenCalledTimes(1)
@@ -49,7 +49,7 @@ describe('findOrCreateEmailUser', () => {
     const error = Object.assign(new Error('database unavailable'), { code: '08006' })
     getUserByEmail.mockResolvedValue(null)
     createUserWithWelcomeEmail.mockRejectedValue(error)
-    const { findOrCreateEmailUser } = await import('../server.js')
+    const { findOrCreateEmailUser } = await import('../email-user.js')
 
     await expect(findOrCreateEmailUser({} as any, 'person@example.com', 'Person', 'en')).rejects.toBe(error)
   })

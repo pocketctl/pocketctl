@@ -261,7 +261,10 @@ func TestOpenCodeRestartServeOutputSurvivesDetach(t *testing.T) {
 	}
 	defer srv.Stop()
 	srv.Detach()
-	deadline := time.Now().Add(2 * time.Second)
+	// The release gate runs many race-enabled packages concurrently. This is a
+	// fixture-observation deadline, not a serve latency requirement, so leave
+	// enough time for the child shell to be scheduled before judging delivery.
+	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
 		data, _ := os.ReadFile(srv.OutputPath())
 		if strings.Contains(string(data), "late-after-detach") {
@@ -304,7 +307,10 @@ func TestOpenCodeConcurrentStartsDoNotReadAnotherServersListenURL(t *testing.T) 
 	t.Cleanup(func() { _ = opA.Stop(); _ = opB.Stop() })
 	errA := make(chan error, 1)
 	go func() { errA <- opA.Start(context.Background()) }()
-	deadline := time.Now().Add(2 * time.Second)
+	// readyA only proves that the first fixture process has been scheduled. The
+	// isolation assertion starts below, after both servers publish their own
+	// listen URLs, so do not turn host process-start latency into a false gate.
+	deadline := time.Now().Add(5 * time.Second)
 	for {
 		if _, err := os.Stat(readyA); err == nil {
 			break
@@ -498,10 +504,13 @@ func TestParsePermissionAsked(t *testing.T) {
 
 // TestOpencodeServerSmoke exercises the serve-client lifecycle against a real
 // `opencode serve` process: start, create a session, fetch it back, stop. It is
-// an integration test — skipped when opencode is not installed — and makes no
-// LLM call (session creation is free). Uses temp XDG dirs to avoid touching the
-// user's real opencode data.
+// an opt-in integration test for the dedicated official-CLI compatibility
+// workflow and makes no LLM call (session creation is free). Uses temp XDG dirs
+// to avoid touching the user's real opencode data.
 func TestOpencodeServerSmoke(t *testing.T) {
+	if os.Getenv("POCKETCTL_OPENCODE_SMOKE") != "1" {
+		t.Skip("set POCKETCTL_OPENCODE_SMOKE=1 to run the real OpenCode CLI smoke test")
+	}
 	cli, err := exec.LookPath("opencode")
 	if err != nil {
 		t.Skip("opencode not installed; skipping integration smoke test")
@@ -510,8 +519,6 @@ func TestOpencodeServerSmoke(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 
-	ctx, cancel := context.WithTimeout(context.Background(), 40*time.Second)
-	defer cancel()
 	for _, contract := range []struct {
 		args  []string
 		flags []string
@@ -520,7 +527,9 @@ func TestOpencodeServerSmoke(t *testing.T) {
 		{args: []string{"attach", "--help"}, flags: []string{"--dir", "--session", "--fork"}},
 		{args: []string{"run", "--help"}, flags: []string{"--attach", "--dir"}},
 	} {
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		out, err := exec.CommandContext(ctx, cli, contract.args...).CombinedOutput()
+		cancel()
 		if err != nil {
 			t.Skipf("installed opencode does not expose managed CLI contract %v: %v", contract.args, err)
 		}
@@ -532,7 +541,10 @@ func TestOpencodeServerSmoke(t *testing.T) {
 	}
 
 	srv := NewOpencodeServer(cli)
-	if err := srv.Start(ctx); err != nil {
+	startCtx, startCancel := context.WithTimeout(context.Background(), 40*time.Second)
+	err = srv.Start(startCtx)
+	startCancel()
+	if err != nil {
 		t.Fatalf("Start: %v", err)
 	}
 	defer srv.Stop()
@@ -540,11 +552,16 @@ func TestOpencodeServerSmoke(t *testing.T) {
 	if srv.BaseURL() == "" {
 		t.Fatal("BaseURL empty after Start")
 	}
-	if !srv.Healthy(ctx) {
+	healthCtx, healthCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	healthy := srv.Healthy(healthCtx)
+	healthCancel()
+	if !healthy {
 		t.Fatal("server not healthy after Start")
 	}
 
-	sid, err := srv.CreateSession(ctx, nil, "")
+	createCtx, createCancel := context.WithTimeout(context.Background(), 15*time.Second)
+	sid, err := srv.CreateSession(createCtx, nil, "")
+	createCancel()
 	if err != nil {
 		t.Fatalf("CreateSession: %v", err)
 	}
@@ -552,7 +569,9 @@ func TestOpencodeServerSmoke(t *testing.T) {
 		t.Fatal("CreateSession returned empty id")
 	}
 
-	info, err := srv.GetSession(ctx, sid)
+	getCtx, getCancel := context.WithTimeout(context.Background(), 15*time.Second)
+	info, err := srv.GetSession(getCtx, sid)
+	getCancel()
 	if err != nil {
 		t.Fatalf("GetSession: %v", err)
 	}

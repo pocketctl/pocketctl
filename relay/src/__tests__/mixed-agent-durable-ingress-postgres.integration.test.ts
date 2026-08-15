@@ -92,7 +92,7 @@ describeWithDatabase('mixed-Agent durable ingress PostgreSQL release gate', () =
       available_decisions: ['once', 'reject'],
       seq: 1,
     }
-    const acceptedAt = performance.now()
+    let controlAcceptedAt = 0
     const controlAckLatency: number[] = []
     const ackByDaemon = new Map<string, number>()
     const repository = new InboxRepository(pool)
@@ -106,7 +106,7 @@ describeWithDatabase('mixed-Agent durable ingress PostgreSQL release gate', () =
       sendAck: (daemonId, checkpoint) => {
         ackByDaemon.set(daemonId, checkpoint.ackSeq)
         if (daemonId !== 'mixed-codex-daemon') {
-          controlAckLatency.push(performance.now() - acceptedAt)
+          controlAckLatency.push(performance.now() - controlAcceptedAt)
         }
       },
       disconnectRetryable: () => undefined,
@@ -186,6 +186,7 @@ describeWithDatabase('mixed-Agent durable ingress PostgreSQL release gate', () =
         { agentType: 'codex', cwd: '/repo' },
       )).toEqual({ kind: 'accepted' })
     }
+    controlAcceptedAt = performance.now()
     expect(controller.accept(
       target('mixed-opencode-daemon', 402),
       openCodeQuestion,

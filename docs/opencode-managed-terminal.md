@@ -171,7 +171,7 @@ pocketctl agent opencode help
 
 ## 发布前 smoke checklist
 
-日常 A-D 自动化回归执行 `make test-opencode-managed`；完整本地发布门禁执行 `make test-opencode-managed-release`。测试使用假的 OpenCode HTTP/SSE 服务和本地 IPC，不调用模型；逐项用例和自动化映射见 [OpenCode Managed Terminal Control Milestone A-D 测试用例](opencode-managed-terminal-test-cases.md)。独立的 `OpenCode Official CLI Smoke` workflow 每晚及手动触发时安装当前官方 `opencode-ai`，验证 `serve` health/session API 后运行 Pocketctl managed-runtime 门禁。该 workflow 允许失败，不阻断主 CI 或 release；上游兼容失败仍应在发布前调查。
+日常 A-D 自动化回归执行 `make test-opencode-managed`；完整本地发布门禁执行 `make test-opencode-managed-release`。测试使用假的 OpenCode HTTP/SSE 服务和本地 IPC，不调用模型；逐项用例和自动化映射见 [OpenCode Managed Terminal Control Milestone A-D 测试用例](opencode-managed-terminal-test-cases.md)。真实 CLI 生命周期 smoke 仅在显式设置 `POCKETCTL_OPENCODE_SMOKE=1` 时运行，避免普通发布门禁受宿主机上未固定版本 CLI 的启动延迟影响。独立的 `OpenCode Official CLI Smoke` workflow 每晚及手动触发时安装当前官方 `opencode-ai`，启用该变量并验证 `serve` health/session API 和 Pocketctl managed-runtime 兼容性。该 workflow 允许失败，不阻断主 CI 或 release；上游兼容失败仍应在发布前调查。
 
 每次正式发布还应在一台装有官方 OpenCode 的机器手工验证：
 

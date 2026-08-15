@@ -105,4 +105,6 @@ jobs:
           go-version: '1.25'
 
       - name: Run Pocketctl managed-runtime compatibility tests
+        env:
+          POCKETCTL_OPENCODE_SMOKE: '1'
         run: make test-opencode-managed

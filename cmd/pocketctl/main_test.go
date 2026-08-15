@@ -798,13 +798,18 @@ func TestDaemonRestartTerminationWaitsBeforeCleaningHandshakeFiles(t *testing.T)
 	if err := cmd.Start(); err != nil {
 		t.Fatal(err)
 	}
-	deadline := time.Now().Add(time.Second)
+	// This helper starts a second race-instrumented copy of the test binary.
+	// Under the full release gate the host can still be compiling/running other
+	// packages, so process startup itself may legitimately take over one second.
+	// Keep this setup timeout aligned with the sibling restart-process test;
+	// the behavior under test begins only after the heartbeat is visible.
+	deadline := time.Now().Add(3 * time.Second)
 	for {
 		if _, err := os.Stat(base + ".heartbeat"); err == nil {
 			break
 		}
 		if time.Now().After(deadline) {
-			_ = cmd.Process.Kill()
+			terminateRestartChild(cmd.Process, base)
 			t.Fatal("restart child did not publish heartbeat")
 		}
 		time.Sleep(5 * time.Millisecond)

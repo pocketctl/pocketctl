@@ -137,15 +137,19 @@ export class FairIngressQueue {
     if (maxRows === 0 || maxBytes === 0 || this.activeDaemonIds.length === 0) return [];
     const fraction = Math.max(0, Math.min(1, Number.isFinite(limits.maxPerDaemonFraction) ? limits.maxPerDaemonFraction : 1));
     const perDaemonLimit = Math.max(1, Math.floor(maxRows * fraction));
+    const hadReadyPeers = this.activeDaemonIds.length > 1;
     const batch: IngressEnvelope[] = [];
     const perDaemon = new Map<string, number>();
     let bytes = 0;
 
-    // First pass applies the fairness cap. A second pass relaxes it only after
-    // every ready peer has had a chance, preserving single-daemon throughput.
+    // First pass applies the fairness cap. Relax it only when the batch began
+    // with one ready daemon; refilling a peer batch from a noisy daemon would
+    // make the peers' control ACKs wait for an unnecessarily large write.
     this.drain(batch, perDaemon, maxRows, maxBytes, perDaemonLimit, bytes, false);
     bytes = this.batchBytes(batch);
-    if (batch.length < maxRows) this.drain(batch, perDaemon, maxRows, maxBytes, maxRows, bytes, true);
+    if (!hadReadyPeers && batch.length < maxRows) {
+      this.drain(batch, perDaemon, maxRows, maxBytes, maxRows, bytes, true);
+    }
     return batch;
   }
 

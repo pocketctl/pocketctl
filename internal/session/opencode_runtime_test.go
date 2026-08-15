@@ -111,7 +111,7 @@ func TestOpenCodeRuntimeAcquireDoesNotBlockOnRelayBackpressure(t *testing.T) {
 		if !sm.hasActiveOpenCodeLeases(coord.generation) {
 			t.Fatal("acquire returned without registering its terminal lease")
 		}
-		deadline := time.After(2 * time.Second)
+		deadline := time.After(5 * time.Second)
 		for {
 			select {
 			case event := <-sm.outputCh:
@@ -122,7 +122,11 @@ func TestOpenCodeRuntimeAcquireDoesNotBlockOnRelayBackpressure(t *testing.T) {
 				t.Fatal("managed session discovery was lost after relay backpressure cleared")
 			}
 		}
-	case <-time.After(500 * time.Millisecond):
+	// The invariant is causal, not a sub-second latency target: outputCh
+	// remains full until this branch, so a synchronous enqueue cannot finish
+	// at any speed. Leave enough headroom for the race-enabled full gate to
+	// schedule the fake HTTP server and persist the lease handoff.
+	case <-time.After(5 * time.Second):
 		<-sm.outputCh // unblock the old synchronous implementation before failing
 		<-done
 		t.Fatal("runtime acquire blocked behind relay event backpressure")
