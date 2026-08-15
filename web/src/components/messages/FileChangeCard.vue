@@ -1,5 +1,5 @@
 <template>
-  <article class="file-change-card">
+  <article :class="['file-change-card', { expanded }]">
     <button
       ref="trigger"
       type="button"
@@ -54,8 +54,11 @@ function toggle() {
 </script>
 
 <style scoped>
-.file-change-card { width: min(920px, 100%); min-width: 0; overflow: hidden; border: 1px solid var(--border); border-radius: var(--radius-lg); background: var(--surface); }
+.file-change-card { width: 100%; min-width: 0; overflow: hidden; border: 1px solid var(--border); border-radius: var(--radius-lg); background: var(--surface); }
+.file-change-card.expanded { height: min(74vh, 760px); min-height: 420px; display: flex; flex-direction: column; border-color: var(--border-light); box-shadow: 0 16px 42px rgba(0, 0, 0, .18); }
 .file-change-trigger { width: 100%; min-height: 44px; display: flex; align-items: center; gap: 9px; padding: 8px 11px; border: 0; color: var(--fg-secondary); background: transparent; text-align: left; }
+.file-change-card.expanded .file-change-trigger { flex: 0 0 auto; border-bottom: 1px solid var(--border); }
+.file-change-card.expanded :deep(.file-change-detail) { min-height: 0; flex: 1; }
 .file-change-trigger:hover { background: var(--surface-hover); }
 .file-change-trigger:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
 .file-change-icon { width: 24px; height: 24px; display: grid; place-items: center; flex: 0 0 auto; border-radius: 7px; color: var(--accent); background: var(--accent-muted); font-family: var(--font-mono); font-weight: 700; }
@@ -66,4 +69,5 @@ function toggle() {
 .file-change-chevron { width: 13px; height: 13px; flex: 0 0 auto; fill: none; stroke: currentColor; stroke-width: 1.8; transition: transform 160ms ease; }
 .file-change-chevron.expanded { transform: rotate(90deg); }
 @media (prefers-reduced-motion: reduce) { .file-change-chevron { transition: none; } }
+@media (max-width: 768px) { .file-change-card.expanded { height: auto; min-height: 0; display: block; box-shadow: none; } }
 </style>

@@ -486,9 +486,18 @@
       :connected="connected !== false"
       @close="closePlanPanel"
     />
+    <button
+      v-if="fileChangeMessages.length && fileChangePanelOpen && !focusedSubAgentId"
+      type="button"
+      class="file-change-panel-backdrop"
+      :aria-label="t('session.file_change_close')"
+      @click="closeFileChangePanel"
+    />
     <aside
       v-if="fileChangeMessages.length && fileChangePanelOpen && !focusedSubAgentId"
       class="file-change-side-panel"
+      role="dialog"
+      aria-modal="true"
       :aria-label="t('session.file_change_edited_files', { n: fileChangeFileCount })"
     >
       <header class="file-change-panel-heading">
@@ -2808,7 +2817,7 @@ onMounted(() => {
 </script>
 
 <style>
-.session-layout { display: flex; flex: 1; width: 100%; min-width: 0; height: calc(100dvh - var(--topbar-h)); overflow: hidden; }
+.session-layout { position: relative; display: flex; flex: 1; width: 100%; min-width: 0; height: calc(100dvh - var(--topbar-h)); overflow: hidden; }
 
 /* Session Panel */
 .session-panel { width: 300px; background: var(--sidebar-bg); border-right: 1px solid var(--sidebar-border); display: flex; flex-direction: column; flex-shrink: 0; transition: background var(--transition), border-color var(--transition); }
@@ -2868,17 +2877,18 @@ onMounted(() => {
 .file-change-toolbar-button:hover { color: var(--fg); background: var(--surface-hover); }
 .file-change-toolbar-button.active { border-color: var(--accent); color: var(--accent); background: var(--accent-muted); }
 .file-change-toolbar-button svg { width: 15px; height: 15px; fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; }
-.file-change-side-panel { width: 360px; min-width: 320px; max-width: 440px; height: 100%; display: flex; flex: 0 0 360px; flex-direction: column; overflow: hidden; border-left: 1px solid var(--border); background: var(--surface); }
-.file-change-panel-heading { min-height: 68px; display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 12px 10px 10px 16px; border-bottom: 1px solid var(--border); }
+.file-change-panel-backdrop { position: absolute; z-index: 44; inset: 0; width: 100%; height: 100%; padding: 0; border: 0; background: rgba(1, 4, 9, .48); backdrop-filter: blur(2px); cursor: default; }
+.file-change-side-panel { position: absolute; z-index: 45; inset: 0 0 0 auto; width: clamp(760px, 72vw, 1180px); min-width: 0; max-width: calc(100% - 72px); height: 100%; display: flex; flex-direction: column; overflow: hidden; border-left: 1px solid var(--border-light); background: var(--surface); box-shadow: -24px 0 72px rgba(0, 0, 0, .42); }
+.file-change-panel-heading { min-height: 64px; display: flex; align-items: center; justify-content: space-between; gap: 10px; flex: 0 0 auto; padding: 10px 10px 10px 18px; border-bottom: 1px solid var(--border); }
 .file-change-panel-heading h2 { margin: 0; color: var(--fg); font-size: 14px; font-weight: 650; }
 .file-change-panel-heading span { display: block; margin-top: 4px; color: var(--fg-tertiary); font: 11px/1 var(--font-mono); }
 .file-change-panel-close { width: 44px; height: 44px; display: grid; place-items: center; flex: 0 0 auto; border: 0; border-radius: var(--radius-md); color: var(--fg-secondary); background: transparent; cursor: pointer; }
 .file-change-panel-close:hover { color: var(--fg); background: var(--surface-hover); }
 .file-change-panel-close:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
 .file-change-panel-close svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; }
-.file-change-panel-list { min-height: 0; display: flex; flex: 1; flex-direction: column; gap: 10px; overflow-y: auto; padding: 12px; }
+.file-change-panel-list { min-height: 0; display: flex; flex: 1; flex-direction: column; gap: 10px; overflow-y: auto; padding: 12px 14px 18px; background: var(--bg); scrollbar-gutter: stable; }
 .file-change-panel-list .file-change-card { width: 100%; flex: 0 0 auto; }
-@media (max-width: 1120px) and (min-width: 769px) { .file-change-side-panel { position: absolute; z-index: 45; inset: 0 0 0 auto; box-shadow: -12px 0 32px rgba(0, 0, 0, .18); } }
+@media (max-width: 1120px) and (min-width: 769px) { .file-change-side-panel { width: 94vw; max-width: 94vw; } }
 .status-pill { display: inline-flex; align-items: center; gap: 5px; padding: 4px 10px; border-radius: var(--radius-full); font-size: 12px; font-weight: 600; }
 .status-pill.running { background: var(--success-bg); color: var(--success); }
 .status-pill .pulse { width: 6px; height: 6px; border-radius: 50%; background: currentColor; animation: pulse-green 1.5s infinite; }
@@ -3103,6 +3113,8 @@ onMounted(() => {
 }
 @media (max-width: 768px) {
   .session-layout { height: calc(var(--visual-viewport-height, 100dvh) - var(--mobile-topbar-h)); }
+  .file-change-panel-backdrop,
+  .file-change-side-panel { display: none; }
   .session-panel,
   .chat-toolbar { display: none; }
   .chat-messages { padding: 14px 12px; gap: 12px; }

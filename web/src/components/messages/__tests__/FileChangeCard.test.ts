@@ -53,13 +53,16 @@ describe('FileChangeCard', () => {
     expect(trigger.text()).toContain('-1')
     expect(trigger.attributes('aria-expanded')).toBe('false')
     expect(trigger.attributes('aria-controls')).toBe('file-change-detail-agent-file-change-ses-turn')
+    expect(wrapper.get('.file-change-card').classes()).not.toContain('expanded')
 
     await trigger.trigger('keydown', { key: 'Enter' })
     expect(trigger.attributes('aria-expanded')).toBe('true')
+    expect(wrapper.get('.file-change-card').classes()).toContain('expanded')
     expect(wrapper.get('[data-testid="selected-file-path"]').text()).toBe('a.txt')
 
     await trigger.trigger('keydown', { key: ' ' })
     expect(trigger.attributes('aria-expanded')).toBe('false')
+    expect(wrapper.get('.file-change-card').classes()).not.toContain('expanded')
   })
 
   test('switches only the selected detail and progressively renders rows in windows of 200', async () => {

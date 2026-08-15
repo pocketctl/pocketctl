@@ -126,6 +126,30 @@ describe('SessionDetail processEvent integration', () => {
     wrapper.unmount()
   })
 
+  test('opens Edited files as a modal review workspace and closes from its backdrop', async () => {
+    const wrapper = shallowMount(SessionDetail)
+    const vm = wrapper.vm as any
+    vm.allSessions = [{ session_id: 'ses_1', daemon_id: 'daemon-1', status: 'running' }]
+    vm.processEvent({
+      type: 'agent_file_change', session_id: 'ses_1', turn_id: 'turn-workspace', seq: 14,
+      event_id: 'file-workspace', change_set_id: 'managed:call-workspace', change_index: 0, change_total: 1,
+      path: 'workspace.txt', change_kind: 'update', diff: '@@ -1 +1 @@\n-old\n+new\n',
+      additions: 1, deletions: 1, status: 'completed',
+    })
+    await wrapper.vm.$nextTick()
+
+    await wrapper.get('.file-change-toolbar-button').trigger('click')
+    const panel = wrapper.get('.file-change-side-panel')
+    expect(panel.attributes('role')).toBe('dialog')
+    expect(panel.attributes('aria-modal')).toBe('true')
+    expect(wrapper.get('.file-change-panel-backdrop').attributes('aria-label')).toBe('session.file_change_close')
+
+    await wrapper.get('.file-change-panel-backdrop').trigger('click')
+    expect(wrapper.find('.file-change-side-panel').exists()).toBe(false)
+    expect(wrapper.get('.file-change-toolbar-button').attributes('aria-expanded')).toBe('false')
+    wrapper.unmount()
+  })
+
   test('uses one side-panel slot for Task list and Edited files', async () => {
     resetAgentPlanProgressForTests()
     const wrapper = shallowMount(SessionDetail)
