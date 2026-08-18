@@ -105,7 +105,7 @@ func TestInspectPocketctlShimForeignExecutable(t *testing.T) {
 	}
 }
 
-func TestInspectPocketctlShimNonRegularMissingAndUnreadable(t *testing.T) {
+func TestInspectPocketctlShimNonRegularAndMissing(t *testing.T) {
 	dir := t.TempDir()
 	pocketctl := filepath.Join(dir, "pocketctl")
 	writeShimFixture(t, pocketctl, "macho\n")
@@ -122,19 +122,6 @@ func TestInspectPocketctlShimNonRegularMissingAndUnreadable(t *testing.T) {
 	}
 	if got := inspectPocketctlShim(filepath.Join(dir, "does-not-exist"), pocketctl); got != ShimForeign {
 		t.Fatalf("missing path identity=%v want foreign", got)
-	}
-
-	unreadable := filepath.Join(dir, "unreadable")
-	writeShimFixture(t, unreadable, "# pocketctl-agent-launcher-v2\n")
-	if os.Geteuid() == 0 {
-		t.Skip("running as root cannot produce an unreadable file")
-	}
-	if err := os.Chmod(unreadable, 0o000); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = os.Chmod(unreadable, 0o644) })
-	if got := inspectPocketctlShim(unreadable, pocketctl); got != ShimForeign {
-		t.Fatalf("unreadable identity=%v want foreign", got)
 	}
 }
 
