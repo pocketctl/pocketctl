@@ -27,6 +27,10 @@ jobs:
           set -euo pipefail
           source scripts/lib/release-contract.sh
           require_release_version "$TAG_NAME"
+          # actions/checkout resolves an annotated tag to its commit and can
+          # replace the local tag ref with a lightweight ref. Re-fetch the tag
+          # object so the annotation below remains part of the release proof.
+          git fetch --force origin "refs/tags/$TAG_NAME:refs/tags/$TAG_NAME"
           PUBLIC_SHA=$(git rev-list -n 1 "$TAG_NAME")
           CHECKOUT_SHA=$(git rev-parse HEAD)
           require_full_git_sha "$PUBLIC_SHA"
