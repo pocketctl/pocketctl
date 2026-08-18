@@ -1,6 +1,7 @@
 import { describe, expect, test, vi } from 'vitest'
 import { EventMaterializer } from '../materialization/event-materializer.js'
 import type { MaterializationInput } from '../materialization/types.js'
+import { normalizeSessionId } from '../ingress/event-policy.js'
 import { agentEventContracts } from './fixtures/agent-event-contracts.js'
 import * as db from '../db.js'
 
@@ -25,6 +26,7 @@ function pools() {
   const query = vi.fn(async (sql: string) => {
     if (sql.includes('INSERT INTO events')) return { rows: [{ id: 91, inserted: true, effect_status: 'pending', effect_step: 0 }], rowCount: 1 }
     if (sql.includes('SELECT effect_status')) return { rows: [{ effect_status: 'pending', effect_step: 0 }], rowCount: 1 }
+    if (sql.includes('session_allowed')) return { rows: [{ session_exists: true, session_allowed: true }], rowCount: 1 }
     return { rows: [], rowCount: 1 }
   })
   return { query }
@@ -302,6 +304,9 @@ describe('EventMaterializer', () => {
         if (sql.includes('INSERT INTO subagent_usage_seen')) {
           return { rows: [{ usage_hash: 'hash' }], rowCount: 1 }
         }
+        if (sql.includes('session_allowed')) {
+          return { rows: [{ session_exists: true, session_allowed: true }], rowCount: 1 }
+        }
         return { rows: [], rowCount: 1 }
       }),
       connect: vi.fn().mockRejectedValue(new Error('Client has already been connected. You cannot reuse a client.')),
@@ -324,6 +329,7 @@ describe('EventMaterializer', () => {
       'BEGIN',
       expect.stringContaining('pg_advisory_xact_lock'),
       expect.stringContaining('deleted_sessions'),
+      expect.stringContaining('session_allowed'),
       expect.stringContaining('INSERT INTO subagent_usage_seen'),
       expect.stringContaining('INSERT INTO subagents'),
       'COMMIT',
@@ -629,5 +635,222 @@ describe('zcode observer session source', () => {
     expect(args[11]).toBe('legacy_read_only') // controlMode (index 11)
     expect(args[12]).toEqual(['history_sync']) // capabilities (index 12)
     upsert.mockRestore()
+  })
+})
+
+describe('EventMaterializer daemon session ownership', () => {
+  const ATTACKER_USER = 43
+  const ATTACKER_DAEMON = 'daemon-attacker'
+
+  /** Session rows visible to the authorization probe, keyed by session id. */
+  function ownershipPool(
+    sessions: Record<string, { user_id?: number | null; daemon_id?: string | null }>,
+  ) {
+    const queries: { sql: string; params: any[] }[] = []
+    const pool = {
+      query: vi.fn(async (sql: string, params?: any[]) => {
+        queries.push({ sql, params: params ?? [] })
+        if (sql.includes('INSERT INTO events')) {
+          return { rows: [{ id: 91, inserted: true, effect_status: 'pending', effect_step: 0 }], rowCount: 1 }
+        }
+        if (sql.includes('SELECT effect_status')) {
+          return { rows: [{ effect_status: 'pending', effect_step: 0 }], rowCount: 1 }
+        }
+        if (sql.includes('session_allowed')) {
+          // Mirror the SQL rule: params are [sessionId, userId, daemonId].
+          const row = sessions[params?.[0] ?? '']
+          const userId = params?.[1] ?? null
+          const daemonId = String(params?.[2] ?? '')
+          const allowed = row
+            ? userId !== null
+              ? row.user_id === userId || (row.user_id == null && row.daemon_id === daemonId)
+              : row.user_id == null && row.daemon_id === daemonId
+            : false
+          return { rows: [{ session_exists: Boolean(row), session_allowed: allowed }], rowCount: 1 }
+        }
+        if (sql.includes('INSERT INTO sessions')) {
+          return { rows: [{ session_id: params?.[0] ?? null }], rowCount: 1 }
+        }
+        if (sql.includes('session_status_decision')) {
+          // Mirror the real CTE: the update targets params[3] (session id).
+          const exists = Boolean(sessions[params?.[3] ?? ''])
+          return { rows: [{ session_exists: exists, suppressed: !exists }], rowCount: 1 }
+        }
+        if (sql.includes('UPDATE sessions') || sql.includes('UPDATE events')) {
+          return { rows: [], rowCount: 1 }
+        }
+        return { rows: [], rowCount: 1 }
+      }),
+      _queries: queries,
+    }
+    return pool
+  }
+
+  function attackerInput(
+    eventType: string,
+    payload: Record<string, unknown>,
+    overrides: Partial<MaterializationInput> = {},
+  ): MaterializationInput {
+    return {
+      inboxId: 31,
+      userId: ATTACKER_USER,
+      daemonId: ATTACKER_DAEMON,
+      sessionId: typeof payload.session_id === 'string' ? payload.session_id : 'victim-session',
+      eventType,
+      payload: { type: eventType, session_id: 'victim-session', ...payload },
+      context: { agentType: 'codex', cwd: '/attacker', hostname: 'attacker-host' },
+      ...overrides,
+    }
+  }
+
+  const foreignVictim = {
+    'victim-session': { user_id: 42, daemon_id: 'daemon-victim' },
+  }
+
+  test.each(['session_created', 'session_discovered'])(
+    'attacker %s against a foreign session is a permanent rejection before any write',
+    async (eventType) => {
+      const pool = ownershipPool(foreignVictim)
+      const bindSession = vi.fn()
+      const materializer = new EventMaterializer({ pool: pool as never, hooks: { bindSession } })
+
+      await expect(materializer.materialize(attackerInput(eventType, {
+        title: 'Hijacked', agent: 'codex', cwd: '/attacker', status: 'busy',
+      }))).rejects.toMatchObject({ code: 'session_ownership_violation', permanent: true })
+
+      expect(pool._queries.filter((query) => query.sql.includes('INSERT INTO events'))).toHaveLength(0)
+      expect(pool._queries.filter((query) => query.sql.includes('INSERT INTO sessions'))).toHaveLength(0)
+      expect(bindSession).not.toHaveBeenCalled()
+    },
+  )
+
+  test('attacker session_status against a foreign session is a violation, not suppression', async () => {
+    const pool = ownershipPool(foreignVictim)
+    const materializer = new EventMaterializer({ pool: pool as never })
+
+    await expect(materializer.materialize(attackerInput('session_status', {
+      status: 'completed',
+    }))).rejects.toMatchObject({ code: 'session_ownership_violation', permanent: true })
+
+    expect(pool._queries.filter((query) => query.sql.includes('INSERT INTO events'))).toHaveLength(0)
+    expect(pool._queries.filter((query) => query.sql.includes('UPDATE sessions'))).toHaveLength(0)
+  })
+
+  test.each([
+    ['agent_text', { text: 'injected' }],
+    ['approval_request', { request_id: 'req-approval', tool: 'Bash', input: { command: 'ls' } }],
+    ['question_request', { request_id: 'req-question', questions: [{ question: 'q' }] }],
+    ['subagent_discovered', { agent: 'codex', agent_id: 'child', root_session_id: 'victim-session' }],
+  ])('attacker %s against a foreign session never reaches canonical persistence', async (eventType, extra) => {
+    const pool = ownershipPool(foreignVictim)
+    const notifyUser = vi.fn().mockResolvedValue(undefined)
+    const materializer = new EventMaterializer({
+      pool: pool as never,
+      durableHooks: { releaseQuotaReservation: vi.fn(), notifyUser, notifyProUser: vi.fn() },
+    })
+
+    await expect(materializer.materialize(attackerInput(eventType, extra)))
+      .rejects.toMatchObject({ code: 'session_ownership_violation', permanent: true })
+
+    expect(pool._queries.filter((query) => query.sql.includes('INSERT INTO events'))).toHaveLength(0)
+    expect(notifyUser).not.toHaveBeenCalled()
+  })
+
+  test('ordinary events for a missing session are permanently rejected', async () => {
+    const pool = ownershipPool({})
+    const materializer = new EventMaterializer({ pool: pool as never })
+
+    await expect(materializer.materialize(attackerInput('agent_text', {
+      session_id: 'ghost-session', text: 'orphan',
+    }, { sessionId: 'ghost-session' }))).rejects.toMatchObject({
+      code: 'unknown_daemon_session', permanent: true,
+    })
+
+    expect(pool._queries.filter((query) => query.sql.includes('INSERT INTO events'))).toHaveLength(0)
+  })
+
+  test('unknown session_status for a missing session remains suppressed', async () => {
+    const pool = ownershipPool({})
+    const materializer = new EventMaterializer({ pool: pool as never })
+
+    const result = await materializer.materialize(attackerInput('session_status', {
+      session_id: 'ghost-session', status: 'busy',
+    }, { sessionId: 'ghost-session' }))
+
+    expect(result.deliveries).toEqual([])
+  })
+
+  test('attacker session_id_changed with a foreign old id is rejected without moving rows', async () => {
+    const pool = ownershipPool({
+      ...foreignVictim,
+      'attacker-new-id': {},
+    })
+    const renameSession = vi.fn()
+    const materializer = new EventMaterializer({ pool: pool as never, hooks: { renameSession } })
+
+    await expect(materializer.materialize(attackerInput('session_id_changed', {
+      session_id: 'attacker-new-id', old_session_id: 'victim-session',
+    }, { sessionId: 'attacker-new-id' }))).rejects.toMatchObject({
+      code: 'session_ownership_violation', permanent: true,
+    })
+
+    expect(pool._queries.filter((query) =>
+      query.sql.includes('UPDATE sessions') && query.sql.includes('session_id'))).toHaveLength(0)
+    expect(pool._queries.filter((query) => query.sql.includes('INSERT INTO events'))).toHaveLength(0)
+    expect(renameSession).not.toHaveBeenCalled()
+  })
+
+  test('attacker session_id_changed onto a foreign existing new id is rejected', async () => {
+    const pool = ownershipPool({
+      ...foreignVictim,
+      'attacker-owned': { user_id: ATTACKER_USER, daemon_id: ATTACKER_DAEMON },
+    })
+    const materializer = new EventMaterializer({ pool: pool as never })
+
+    await expect(materializer.materialize(attackerInput('session_id_changed', {
+      session_id: 'victim-session', old_session_id: 'attacker-owned',
+    }))).rejects.toMatchObject({ code: 'session_ownership_violation', permanent: true })
+
+    expect(pool._queries.filter((query) =>
+      query.sql.includes('UPDATE sessions') && query.sql.includes('session_id'))).toHaveLength(0)
+    expect(pool._queries.filter((query) => query.sql.includes('INSERT INTO events'))).toHaveLength(0)
+  })
+
+  test('a same-user or legacy same-daemon owner keeps full lifecycle rights', async () => {
+    const pool = ownershipPool({
+      'victim-session': { user_id: ATTACKER_USER, daemon_id: 'daemon-victim' },
+      'legacy-session': { user_id: null, daemon_id: ATTACKER_DAEMON },
+    })
+    const upsert = vi.spyOn(db, 'upsertSession').mockResolvedValue(undefined)
+    const bindSession = vi.fn()
+    const materializer = new EventMaterializer({ pool: pool as never, hooks: { bindSession } })
+
+    await expect(materializer.materialize(attackerInput('session_discovered', {
+      agent: 'codex', cwd: '/attacker',
+    }))).resolves.toBeTruthy()
+    expect(upsert).toHaveBeenCalled()
+
+    await expect(materializer.materialize(attackerInput('session_status', {
+      session_id: 'legacy-session', status: 'idle',
+    }, { sessionId: 'legacy-session' }))).resolves.toBeTruthy()
+    expect(bindSession).toHaveBeenCalled()
+    upsert.mockRestore()
+  })
+})
+
+describe('normalizeSessionId daemon session identity', () => {
+  test('accepts agent session id formats without a uuid-only regex', () => {
+    expect(normalizeSessionId('a1b2c3d4-e5f6-7890-abcd-ef1234567890')).toBe('a1b2c3d4-e5f6-7890-abcd-ef1234567890')
+    expect(normalizeSessionId('codex-77af52')).toBe('codex-77af52')
+    expect(normalizeSessionId('z'.repeat(64))).toBe('z'.repeat(64))
+  })
+
+  test('rejects non-strings, empty, oversized, padded, and pending- identities', () => {
+    expect(normalizeSessionId(undefined)).toBeNull()
+    expect(normalizeSessionId(1234)).toBeNull()
+    expect(normalizeSessionId('')).toBeNull()
+    expect(normalizeSessionId('z'.repeat(65))).toBeNull()
+    expect(normalizeSessionId(' padded ')).toBeNull()
+    expect(normalizeSessionId('pending-1712345678')).toBeNull()
   })
 })

@@ -4,5 +4,9 @@
 package agentcontrol
 
 func testShimMarker() string {
-	return unixShimMarker
+	return launcherMarkerV3Unix
+}
+
+func testShellQuote(value string) string {
+	return shellQuote(value)
 }

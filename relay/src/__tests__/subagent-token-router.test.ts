@@ -22,7 +22,13 @@ import { Router } from '../router.js'
 import { BoundedExecutor } from '../ingress/bounded-executor.js'
 
 function createMockPool(): any {
-  return { query: vi.fn(async () => ({ rows: [], rowCount: 0 })) }
+  return {
+    query: vi.fn(async (sql: string) => {
+      // Daemon-session ownership probe: treat every session as owned.
+      if (sql.includes('session_allowed')) return { rows: [{ session_exists: true, session_allowed: true }], rowCount: 1 }
+      return { rows: [], rowCount: 0 }
+    }),
+  }
 }
 function createMockWs(): any {
   const sent: any[] = []
@@ -38,7 +44,7 @@ describe('router subagent_usage durable identity and ack', () => {
   beforeEach(() => { vi.restoreAllMocks() })
 
   test('passes stable event_id and all token fields to one transactional DB call', async () => {
-    const usageSpy = vi.spyOn(db, 'recordSubagentUsage').mockResolvedValue(true)
+    const usageSpy = vi.spyOn(db, 'recordSubagentUsageInTransaction').mockResolvedValue(true)
     const router = new Router(createMockPool())
     const { daemonId } = await setupDaemon(router)
 
@@ -58,7 +64,7 @@ describe('router subagent_usage durable identity and ack', () => {
   })
 
   test('passes an empty event id to preserve legacy Claude usage fingerprints', async () => {
-    const usageSpy = vi.spyOn(db, 'recordSubagentUsage').mockResolvedValue(false)
+    const usageSpy = vi.spyOn(db, 'recordSubagentUsageInTransaction').mockResolvedValue(false)
     const router = new Router(createMockPool())
     const { daemonId } = await setupDaemon(router)
 
@@ -75,7 +81,7 @@ describe('router subagent_usage durable identity and ack', () => {
   })
 
   test('withholds ack on transaction failure and accepts retry', async () => {
-    const usageSpy = vi.spyOn(db, 'recordSubagentUsage')
+    const usageSpy = vi.spyOn(db, 'recordSubagentUsageInTransaction')
       .mockRejectedValueOnce(new Error('db failed'))
       .mockResolvedValueOnce(true)
     const router = new Router(createMockPool())
@@ -97,7 +103,7 @@ describe('router subagent_usage durable identity and ack', () => {
   })
 
   test('keeps identical token amounts distinct when event_id differs', async () => {
-    const usageSpy = vi.spyOn(db, 'recordSubagentUsage').mockResolvedValue(true)
+    const usageSpy = vi.spyOn(db, 'recordSubagentUsageInTransaction').mockResolvedValue(true)
     const router = new Router(createMockPool())
     const { daemonId } = await setupDaemon(router)
     const usage = { input_tokens: 100, output_tokens: 20 }
@@ -121,9 +127,14 @@ describe('router subagent_usage durable identity and ack', () => {
         peak = Math.max(peak, active)
         await release.promise
         return {
-          query: vi.fn(async (sql: string) => sql.includes('RETURNING usage_hash')
-            ? { rows: [{ usage_hash: 'seen' }], rowCount: 1 }
-            : { rows: [], rowCount: 0 }),
+          query: vi.fn(async (sql: string) => {
+            if (sql.includes('session_allowed')) {
+              return { rows: [{ session_exists: true, session_allowed: true }], rowCount: 1 }
+            }
+            return sql.includes('RETURNING usage_hash')
+              ? { rows: [{ usage_hash: 'seen' }], rowCount: 1 }
+              : { rows: [], rowCount: 0 }
+          }),
           release: () => { active-- },
         }
       }),
@@ -149,7 +160,9 @@ describe('router subagent_usage durable identity and ack', () => {
 
     ;(router as any).legacyPersist = new BoundedExecutor({ maxConcurrent: 1, maxPending: 1 })
     const held = new Promise<boolean>(() => undefined)
-    vi.spyOn(db, 'recordSubagentUsage').mockReturnValue(held)
+    // The ingest pool supports connect(), so usage records inside the session
+    // fence through the in-transaction variant — that is what must be held.
+    vi.spyOn(db, 'recordSubagentUsageInTransaction').mockReturnValue(held as never)
     router.handleDaemonMessage(daemonId, { type: 'subagent_usage', session_id: 'root', agent_id: 'child', event_id: 'overload-1', seq: 10_001, usage: { input_tokens: 1 } })
     router.handleDaemonMessage(daemonId, { type: 'subagent_usage', session_id: 'root', agent_id: 'child', event_id: 'overload-2', seq: 10_002, usage: { input_tokens: 1 } })
     router.handleDaemonMessage(daemonId, { type: 'subagent_usage', session_id: 'root', agent_id: 'child', event_id: 'overload-3', seq: 10_003, usage: { input_tokens: 1 } })

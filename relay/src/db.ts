@@ -4,6 +4,7 @@ import type { SupportedLanguage } from './config/language.js';
 import { sanitizeJSONBPayload } from './jsonb-payload.js';
 import { initDurableIngressSchema } from './schema/durable-ingress.js';
 import { initAttentionInboxSchema } from './attention-inbox/schema.js';
+import type { DaemonSessionAccess, DaemonSessionPolicy } from './materialization/types.js';
 import {
   countReplayLogicalItems,
   findCompleteForwardReplayBoundary,
@@ -726,9 +727,91 @@ export async function withSessionMaterializationFence<T>(
   }
 }
 
+/** Permanent security rejection: a daemon addressed another tenant's session. */
+export class SessionOwnershipViolationError extends Error {
+  readonly code = 'session_ownership_violation' as const;
+  readonly permanent = true;
+  constructor() {
+    // The message is intentionally generic: it must not reveal whether the
+    // target session exists, who owns it, or any daemon identity.
+    super('daemon session authorization failed');
+    this.name = 'SessionOwnershipViolationError';
+  }
+}
+
+/** Permanent rejection: a durable session event referenced an unknown session. */
+export class UnknownDaemonSessionError extends Error {
+  readonly code = 'unknown_daemon_session' as const;
+  readonly permanent = true;
+  constructor() {
+    super('daemon session not found');
+    this.name = 'UnknownDaemonSessionError';
+  }
+}
+
+export type { DaemonSessionPolicy, DaemonSessionAccess } from './materialization/types.js';
+
+interface DaemonSessionRow {
+  user_id: number | null;
+  daemon_id: string | null;
+}
+
+/** The single cross-tenant authorization rule for daemon session access. */
+function daemonSessionAccessAllowed(
+  existing: DaemonSessionRow,
+  incoming: { userId: number | null; daemonId: string },
+): boolean {
+  if (incoming.userId !== null) {
+    return existing.user_id === incoming.userId
+      || (existing.user_id === null && existing.daemon_id === incoming.daemonId);
+  }
+  return existing.user_id === null && existing.daemon_id === incoming.daemonId;
+}
+
+/**
+ * Authorize a daemon against one session id before any canonical write.
+ * The exists/allowed split is evaluated in SQL; the guarded mutations in this
+ * module remain the authoritative atomic enforcement, so a caller without a
+ * surrounding transaction cannot introduce a TOCTOU takeover.
+ */
+export async function assertDaemonSessionAccess(
+  queryable: Pick<pg.Pool, 'query'>,
+  input: {
+    sessionId: string;
+    daemonId: string;
+    userId: number | null;
+    policy: DaemonSessionPolicy;
+  },
+): Promise<DaemonSessionAccess> {
+  const result = await queryable.query(
+    `SELECT
+       EXISTS (SELECT session_id FROM sessions WHERE session_id = $1) AS session_exists,
+       EXISTS (
+         SELECT session_id FROM sessions
+         WHERE session_id = $1 AND (
+           user_id = $2::int
+           OR (user_id IS NULL AND daemon_id = $3)
+         )
+       ) AS session_allowed`,
+    [input.sessionId, input.userId, input.daemonId],
+  );
+  const row = result.rows[0] as { session_exists?: boolean | 't' | 'f'; session_allowed?: boolean | 't' | 'f' } | undefined;
+  const exists = row
+    ? row.session_exists === true || row.session_exists === 't'
+    : (result.rowCount ?? 0) > 0;
+  const allowed = row
+    ? row.session_allowed === true || row.session_allowed === 't'
+    : true;
+  if (!exists) {
+    if (input.policy === 'must_exist') throw new UnknownDaemonSessionError();
+    return 'missing';
+  }
+  if (!allowed) throw new SessionOwnershipViolationError();
+  return 'owned';
+}
+
 /** Commit all mutable connection identity in one generation transaction. */
-export async function activateDaemonRegistration(
-  pool: pg.Pool,
+export async function activateDaemonRegistration(  pool: pg.Pool,
   input: DaemonRegistrationActivation,
 ): Promise<DaemonRegistrationSnapshot | null> {
   const client = await pool.connect();
@@ -1721,7 +1804,7 @@ export async function getSessionTokenBreakdown(pool: pg.Pool, userId: number, se
 }
 
 export async function upsertSession(pool: pg.Pool, sessionId: string, daemonId: string, agentType: string, cwd: string, status: string, title?: string, source?: string, exitReason?: string, userId?: number, model?: string, controlMode?: string, capabilities?: string[]): Promise<void> {
-  await pool.query(
+  const result = await pool.query(
     `INSERT INTO sessions (session_id, daemon_id, agent_type, cwd, title, source, status, exit_reason, user_id, model, control_mode, capabilities, created_at, updated_at)
      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12::jsonb, NOW(), NOW())
      ON CONFLICT (session_id) DO UPDATE SET
@@ -1739,9 +1822,17 @@ export async function upsertSession(pool: pg.Pool, sessionId: string, daemonId: 
        model = COALESCE($10, sessions.model),
        control_mode = COALESCE($11, sessions.control_mode),
        capabilities = COALESCE($12::jsonb, sessions.capabilities),
-       updated_at = NOW()`,
+       updated_at = NOW()
+     WHERE sessions.user_id = EXCLUDED.user_id
+        OR (sessions.user_id IS NULL AND sessions.daemon_id = EXCLUDED.daemon_id)
+     RETURNING session_id`,
     [sessionId, daemonId, agentType, cwd, title || null, source || 'daemon', status, exitReason || null, userId || null, model || null, controlMode || null, capabilities ? JSON.stringify(capabilities) : null]
   );
+  // A conflict update refused by the ownership guard returns zero rows. That
+  // is a permanent security rejection, never a silent success.
+  if ((result.rowCount ?? 0) === 0 && !result.rows[0]) {
+    throw new SessionOwnershipViolationError();
+  }
 }
 
 export async function updateSessionControl(pool: pg.Pool, sessionId: string, controlMode: string, capabilities: string[]): Promise<void> {
@@ -1752,16 +1843,95 @@ export async function updateSessionControl(pool: pg.Pool, sessionId: string, con
 }
 
 export async function ensureDaemonSessionIdentity(pool: pg.Pool, sessionId: string, daemonId: string, userId?: number): Promise<void> {
-  await pool.query(
+  const result = await pool.query(
     `INSERT INTO sessions (session_id, daemon_id, agent_type, cwd, source, status, user_id, created_at, updated_at)
      VALUES ($1, $2, '', '', 'daemon', 'running', $3, NOW(), NOW())
      ON CONFLICT (session_id) DO UPDATE SET
        daemon_id = $2,
        source = 'daemon',
        user_id = CASE WHEN $3 IS NOT NULL THEN $3 ELSE sessions.user_id END,
-       updated_at = NOW()`,
+       updated_at = NOW()
+     WHERE sessions.user_id = EXCLUDED.user_id
+        OR (sessions.user_id IS NULL AND sessions.daemon_id = EXCLUDED.daemon_id)
+     RETURNING session_id`,
     [sessionId, daemonId, userId || null]
   );
+  if (!result.rows[0] && (result.rowCount ?? 0) === 0) {
+    throw new SessionOwnershipViolationError();
+  }
+}
+
+/**
+ * Atomically rename a daemon session under the cross-tenant ownership rule:
+ * the old id must be owned by the calling daemon/user, the new id must be
+ * free, and events migrate only when the session row update succeeded. Row
+ * locks are taken in sorted id order so two crossing renames cannot deadlock.
+ * Accepts the session-materialization fence client (caller-owned transaction)
+ * or a standalone Pool (own transaction).
+ */
+export async function renameOwnedDaemonSession(
+  queryable: pg.Pool | Pick<pg.PoolClient, 'query'>,
+  input: {
+    oldSessionId: string;
+    newSessionId: string;
+    daemonId: string;
+    userId: number | null;
+  },
+): Promise<boolean> {
+  // A PoolClient from the session fence exposes release(); a standalone Pool
+  // does not. Both happen to expose connect(), so release is the discriminator.
+  const isPool = typeof (queryable as pg.Pool).connect === 'function'
+    && !('release' in (queryable as object));
+  const client: Pick<pg.PoolClient, 'query'> = isPool
+    ? await (queryable as pg.Pool).connect()
+    : (queryable as Pick<pg.PoolClient, 'query'>);
+  const run = async (): Promise<boolean> => {
+    const [first, second] = [input.oldSessionId, input.newSessionId].sort();
+    const locked = await client.query(
+      `SELECT session_id, user_id, daemon_id FROM sessions
+       WHERE session_id IN ($1, $2) ORDER BY session_id FOR UPDATE`,
+      [first, second],
+    );
+    const byId = new Map<string, DaemonSessionRow & { session_id: string }>(
+      locked.rows.map((row) => [String(row.session_id), row]),
+    );
+    const oldRow = byId.get(input.oldSessionId);
+    const newRow = byId.get(input.newSessionId);
+    if (!oldRow) {
+      // Replaying an already-applied rename is idempotent when we still own
+      // the renamed row; any other missing old id is a permanent rejection.
+      if (newRow && daemonSessionAccessAllowed(newRow, input)) return true;
+      throw new UnknownDaemonSessionError();
+    }
+    if (!daemonSessionAccessAllowed(oldRow, input)) throw new SessionOwnershipViolationError();
+    if (newRow) throw new SessionOwnershipViolationError();
+    const moved = await client.query(
+      `UPDATE sessions SET
+         session_id = $2,
+         daemon_id = $3,
+         user_id = COALESCE($4::int, sessions.user_id),
+         updated_at = NOW()
+       WHERE session_id = $1`,
+      [input.oldSessionId, input.newSessionId, input.daemonId, input.userId],
+    );
+    if ((moved.rowCount ?? 0) === 0) throw new UnknownDaemonSessionError();
+    await client.query(
+      `UPDATE events SET session_id = $2 WHERE session_id = $1`,
+      [input.oldSessionId, input.newSessionId],
+    );
+    return true;
+  };
+  try {
+    if (isPool) await client.query('BEGIN');
+    const renamed = await run();
+    if (isPool) await client.query('COMMIT');
+    return renamed;
+  } catch (error) {
+    if (isPool) await client.query('ROLLBACK').catch(() => undefined);
+    throw error;
+  } finally {
+    if (isPool) (client as pg.PoolClient).release();
+  }
 }
 
 /** Increment subagent_count for a session. */
@@ -2689,23 +2859,40 @@ export async function updateSessionStatus(pool: pg.Pool, sessionId: string, daem
   const res = await pool.query(
     `WITH input AS (
        SELECT $3::varchar AS status, $6::timestamptz AS turn_started_at
+     ), locked_target AS (
+       SELECT user_id, daemon_id FROM sessions WHERE session_id = $1 FOR UPDATE
+     ), guarded_update AS (
+       UPDATE sessions SET
+         daemon_id = $2,
+         status = input.status,
+         exit_reason = COALESCE($4, sessions.exit_reason),
+         user_id = COALESCE($5::int, sessions.user_id),
+         turn_started_at = CASE
+           WHEN input.status IN ('running', 'busy', 'retry', 'waiting', 'waiting_approval', 'waiting_question')
+             THEN COALESCE(input.turn_started_at, sessions.turn_started_at, NOW())
+           ELSE NULL
+         END,
+         updated_at = NOW()
+       FROM input, locked_target
+       WHERE sessions.session_id = $1
+         AND (locked_target.user_id = $5::int
+           OR (locked_target.user_id IS NULL AND locked_target.daemon_id = $2))
+       RETURNING 1
      )
-     UPDATE sessions SET
-       daemon_id = $2,
-       status = input.status,
-       exit_reason = COALESCE($4, sessions.exit_reason),
-       user_id = COALESCE($5::int, sessions.user_id),
-       turn_started_at = CASE
-         WHEN input.status IN ('running', 'busy', 'retry', 'waiting', 'waiting_approval', 'waiting_question')
-           THEN COALESCE(input.turn_started_at, sessions.turn_started_at, NOW())
-         ELSE NULL
-       END,
-       updated_at = NOW()
-     FROM input
-     WHERE session_id = $1`,
+     SELECT
+       EXISTS (SELECT 1 FROM locked_target) AS row_exists,
+       EXISTS (SELECT 1 FROM guarded_update) AS updated`,
     [sessionId, daemonId, status, exitReason || null, userId || null, turnStartedAt || null]
   );
-  return (res.rowCount ?? 0) > 0;
+  const outcome = res.rows[0];
+  // Lightweight fakes that answer only the legacy rowCount keep their boolean
+  // semantics; the real database distinguishes missing vs foreign rows.
+  if (!outcome) return (res.rowCount ?? 0) > 0;
+  const rowExists = outcome.row_exists === true || outcome.row_exists === 't';
+  const updated = outcome.updated === true || outcome.updated === 't';
+  if (updated) return true;
+  if (rowExists) throw new SessionOwnershipViolationError();
+  return false;
 }
 
 export const SESSION_STATUS_SUPPRESSED_EFFECT_STEP = 1_000_000_000;
@@ -2729,6 +2916,8 @@ export async function updateSessionStatusForEvent(
   const result = await pool.query(
     `WITH input AS (
        SELECT $6::varchar AS status, $9::timestamptz AS turn_started_at
+     ), locked_target AS (
+       SELECT user_id, daemon_id FROM sessions WHERE session_id = $4 FOR UPDATE
      ), session_status_decision AS (
        UPDATE sessions SET
          daemon_id = $5,
@@ -2741,8 +2930,10 @@ export async function updateSessionStatusForEvent(
            ELSE NULL
          END,
          updated_at = NOW()
-       FROM input
-       WHERE session_id = $4
+       FROM input, locked_target
+       WHERE sessions.session_id = $4
+         AND (locked_target.user_id = $8::int
+           OR (locked_target.user_id IS NULL AND locked_target.daemon_id = $5))
        RETURNING 1
      ), ledger_decision AS (
        UPDATE events SET effect_step = CASE
@@ -2755,7 +2946,9 @@ export async function updateSessionStatusForEvent(
      )
      SELECT
        EXISTS (SELECT 1 FROM session_status_decision) AS session_exists,
-       COALESCE((SELECT effect_step >= $3 FROM ledger_decision), false) AS suppressed`,
+       COALESCE((SELECT effect_step >= $3 FROM ledger_decision), false) AS suppressed,
+       (EXISTS (SELECT 1 FROM locked_target)
+         AND NOT EXISTS (SELECT 1 FROM session_status_decision)) AS foreign_owner`,
     [
       eventID,
       nextStep,
@@ -2772,6 +2965,11 @@ export async function updateSessionStatusForEvent(
   if (!outcome) {
     const sessionExists = (result.rowCount ?? 0) > 0;
     return { sessionExists, suppressed: !sessionExists };
+  }
+  if (outcome.foreign_owner === true || outcome.foreign_owner === 't') {
+    // A foreign existing session is never "unknown": it is a permanent
+    // ownership violation and must not be encoded as ghost suppression.
+    throw new SessionOwnershipViolationError();
   }
   return {
     sessionExists: outcome?.session_exists === true || outcome?.session_exists === 't',

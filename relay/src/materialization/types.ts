@@ -6,6 +6,16 @@ export interface MaterializationContext {
   hostname?: string;
 }
 
+/**
+ * Authorization policy for a daemon-provided session id.
+ * - must_exist: the session row must already exist and be daemon-owned
+ * - allow_create: a missing row is claimable; a foreign row is a violation
+ * - allow_missing_status: session_status keeps its ghost-suppression semantics
+ */
+export type DaemonSessionPolicy = 'must_exist' | 'allow_create' | 'allow_missing_status';
+
+export type DaemonSessionAccess = 'owned' | 'missing';
+
 export interface MaterializationInput {
   inboxId: number;
   userId: number | null;

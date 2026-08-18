@@ -243,7 +243,16 @@ describeWithDatabase('mixed-Agent durable ingress PostgreSQL release gate', () =
       codexReplaySentinel.event_id,
       10_004,
     )
-    expect(sentinelDrainRuns).toBeGreaterThan(1)
+    // The sentinel is an early codex-stream row (seq 3), so a correct
+    // one-head-per-stream worker reaches it inside the first bounded runOnce;
+    // the number of runs is therefore not the bounded-drain guarantee. What
+    // bounded drain must prove is that one run cannot finish the 10k replay:
+    // after the sentinel's run, almost the whole backlog is still unresolved.
+    expect(sentinelDrainRuns).toBeGreaterThanOrEqual(1)
+    const unresolved = await pool.query<{ pending: number }>(
+      `SELECT COUNT(*)::int AS pending FROM event_inbox WHERE status IN (0, 1)`,
+    )
+    expect(unresolved.rows[0].pending).toBeGreaterThan(9_000)
 
     const delivered: Array<{ type: string; sessionId: string | null; payload: Record<string, unknown> }> = []
     const consumer = new RealtimeOutboxConsumer({

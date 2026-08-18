@@ -20,7 +20,7 @@ import (
 //
 // It returns the storage directory (the parent of db/), so Store.Open can be
 // pointed at it exactly as it would be at ~/.zcode/cli.
-func testdb(t *testing.T, opts ...testdbOpt) string {
+func testdb(t testing.TB, opts ...testdbOpt) string {
 	t.Helper()
 	cfg := testdbConfig{}
 	for _, o := range opts {

@@ -1,7 +1,9 @@
 import pg from 'pg'
-import { afterAll, beforeAll, beforeEach, describe, expect, test } from 'vitest'
+import { afterAll, beforeAll, beforeEach, describe, expect, test, vi } from 'vitest'
 import { initDB } from '../db.js'
+import { createInboxWorker } from '../inbox-worker.js'
 import { InboxRepository, LostClaimError } from '../ingress/inbox-repository.js'
+import { RealtimeOutboxWriter } from '../materialization/realtime-outbox.js'
 import type { IngressEnvelope } from '../ingress/types.js'
 
 const databaseUrl = process.env.TEST_DATABASE_URL
@@ -60,7 +62,7 @@ describeWithDatabase('InboxRepository PostgreSQL integration', () => {
 
   beforeEach(async () => {
     await pool.query(
-      'TRUNCATE realtime_outbox, event_inbox_receipt, event_inbox, daemon_ack_checkpoint RESTART IDENTITY CASCADE',
+      'TRUNCATE realtime_outbox, event_inbox_receipt, event_inbox, daemon_ack_checkpoint, events RESTART IDENTITY CASCADE',
     )
   })
 
@@ -402,6 +404,120 @@ describeWithDatabase('InboxRepository PostgreSQL integration', () => {
     expect(second.map((entry) => entry.seq)).toEqual([2])
   })
 
+  test('blocks later rows while the stream head is retry-delayed', async () => {
+    await repo.persistBatch([event(1), event(2), event(3)])
+    const head = (await repo.claimBatch({
+      workerId: 'retry-worker',
+      limit: 1,
+      shardCount: 1,
+      shardIndex: 0,
+    }))[0]
+    expect(head.seq).toBe(1)
+
+    await repo.reschedule(
+      head.inboxId,
+      head.attempts,
+      new Date('2030-01-01T00:00:00.000Z'),
+      'transient materialization error',
+      'retry-worker',
+    )
+
+    const blocked = await repo.claimBatch({
+      workerId: 'retry-worker',
+      limit: 10,
+      shardCount: 1,
+      shardIndex: 0,
+    })
+    expect(blocked).toEqual([])
+
+    await pool.query(
+      `UPDATE event_inbox SET available_at = NOW() - INTERVAL '1 second' WHERE inbox_id = $1`,
+      [head.inboxId],
+    )
+    const released = await repo.claimBatch({
+      workerId: 'retry-worker',
+      limit: 10,
+      shardCount: 1,
+      shardIndex: 0,
+    })
+    expect(released.map((row) => row.seq)).toEqual([1])
+    expect(released[0].attempts).toBe(2)
+  })
+
+  test('does not substitute the next row of a stream whose head another worker locked', async () => {
+    await repo.persistBatch([event(1), event(2)])
+    const workerOneClient = await pool.connect()
+    await workerOneClient.query('BEGIN')
+    try {
+      const workerOne = new InboxRepository({
+        query: (...args: Parameters<typeof workerOneClient.query>) =>
+          (workerOneClient.query as (...queryArgs: typeof args) => Promise<unknown>)(...args),
+      } as never)
+      const claimed = await workerOne.claimBatch({
+        workerId: 'head-holder',
+        limit: 5,
+        shardCount: 1,
+        shardIndex: 0,
+      })
+      expect(claimed.map((row) => row.seq)).toEqual([1])
+
+      const byOther = await repo.claimBatch({
+        workerId: 'other-worker',
+        limit: 5,
+        shardCount: 1,
+        shardIndex: 0,
+      })
+      expect(byOther).toEqual([])
+      await workerOneClient.query('COMMIT')
+    } catch (error) {
+      await workerOneClient.query('ROLLBACK')
+      throw error
+    } finally {
+      workerOneClient.release()
+    }
+  })
+
+  test('releases the successor of a dead-lettered stream head on the next claim', async () => {
+    await repo.persistBatch([event(1), event(2)])
+    const head = (await repo.claimBatch({
+      workerId: 'dead-letter-worker',
+      limit: 1,
+      shardCount: 1,
+      shardIndex: 0,
+    }))[0]
+    expect(head.seq).toBe(1)
+
+    await repo.deadLetter(head.inboxId, head.attempts, 'poison payload', 'dead-letter-worker')
+
+    const successor = await repo.claimBatch({
+      workerId: 'dead-letter-worker',
+      limit: 10,
+      shardCount: 1,
+      shardIndex: 0,
+    })
+    expect(successor.map((row) => row.seq)).toEqual([2])
+    expect(successor[0].attempts).toBe(1)
+  })
+
+  test('yields one independent stream head per daemon generation of the same daemon id', async () => {
+    await repo.persistBatch([
+      event(1, { daemonGeneration: 17, dedupKey: 'gen17-seq1' }),
+      event(2, { daemonGeneration: 17, dedupKey: 'gen17-seq2' }),
+      event(1, { daemonGeneration: 18, registrationId: 'registration-2', dedupKey: 'gen18-seq1' }),
+      event(2, { daemonGeneration: 18, registrationId: 'registration-2', dedupKey: 'gen18-seq2' }),
+    ])
+
+    const claimed = await repo.claimBatch({
+      workerId: 'generation-worker',
+      limit: 10,
+      shardCount: 1,
+      shardIndex: 0,
+    })
+    expect(claimed).toHaveLength(2)
+    expect(claimed.map((row) => [row.daemonGeneration, row.seq]))
+      .toEqual([[17, 1], [18, 1]])
+  })
+
   test('recovers a stale claim without losing payload or attempts and fences the old owner', async () => {
     await repo.persistBatch([event(1)])
     const oldClaim = (await repo.claimBatch({
@@ -528,5 +644,82 @@ describeWithDatabase('InboxRepository PostgreSQL integration', () => {
     `)
     expect(checkpointRow.ackSeq).toBe(10_000)
     expect(counts.rows[0]).toEqual({ inbox: 10_000, receipts: 10_000 })
+  }, 30_000)
+
+  test('worker drains a two-daemon backlog through bounded passes in strict per-daemon seq order', async () => {
+    await repo.persistBatch([
+      ...Array.from({ length: 100 }, (_, index) => event(index + 1)),
+      ...Array.from({ length: 10 }, (_, index) => event(index + 1, {
+        daemonId: 'd2',
+        daemonGeneration: 18,
+        registrationId: 'registration-2',
+        sessionId: 'session-2',
+        dedupKey: `d2-event-${index + 1}`,
+      })),
+    ])
+
+    const seen: Array<{ daemonId: string; seq: number }> = []
+    const materializer = {
+      materialize: vi.fn(async (input: {
+        inboxId: number; daemonId: string; sessionId: string | null;
+        eventType: string; payload: { nested?: { seq?: number } };
+      }) => {
+        seen.push({ daemonId: input.daemonId, seq: Number(input.payload.nested?.seq ?? -1) })
+        const inserted = await pool.query<{ id: string }>(
+          `INSERT INTO events (session_id, event_type, payload)
+           VALUES ($1, $2, $3::jsonb)
+           RETURNING id`,
+          [input.sessionId, input.eventType, JSON.stringify(input.payload)],
+        )
+        const eventId = Number(inserted.rows[0].id)
+        return {
+          eventId,
+          deliveries: [{
+            eventId,
+            userId: null,
+            audience: 'session' as const,
+            sessionId: input.sessionId,
+            requestId: null,
+            ordinal: 0,
+            deliveryKey: `drain:${input.inboxId}`,
+            type: input.eventType,
+            payload: input.payload,
+          }],
+        }
+      }),
+    }
+    const worker = createInboxWorker({
+      repository: new InboxRepository(pool),
+      materializer: materializer as never,
+      outboxWriter: new RealtimeOutboxWriter(pool),
+      workerId: 'drain-worker',
+      shardCount: 1,
+      shardIndex: 0,
+      maxDrainPasses: 8,
+    })
+
+    // Bounded drain forces several outer runs; every run must keep per-daemon
+    // seq order without waiting on a wall-clock timer between claims.
+    for (let round = 0; seen.length < 110 && round < 20; round += 1) {
+      await worker.runOnce()
+    }
+    expect(seen).toHaveLength(110)
+
+    for (const daemonId of ['d1', 'd2']) {
+      const seqs = seen.filter(entry => entry.daemonId === daemonId).map(entry => entry.seq)
+      expect(seqs).toHaveLength(daemonId === 'd1' ? 100 : 10)
+      expect(seqs).toEqual([...seqs].sort((left, right) => left - right))
+    }
+    expect(new Set(seen.map(entry => `${entry.daemonId}:${entry.seq}`)).size).toBe(110)
+
+    const statuses = await pool.query<{ status: number; count: number }>(
+      'SELECT status, COUNT(*)::int AS count FROM event_inbox GROUP BY status ORDER BY status',
+    )
+    expect(statuses.rows).toEqual([{ status: 2, count: 110 }])
+
+    const outbox = await pool.query<{ count: number; inboxes: number }>(
+      'SELECT COUNT(*)::int AS count, COUNT(DISTINCT inbox_id)::int AS inboxes FROM realtime_outbox',
+    )
+    expect(outbox.rows[0]).toEqual({ count: 110, inboxes: 110 })
   }, 30_000)
 })

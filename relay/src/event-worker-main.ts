@@ -152,6 +152,7 @@ export async function assertDurableIngressSchema(pool: Pick<pg.Pool, 'query'>): 
       AND to_regclass('daemon_ack_checkpoint') IS NOT NULL
       AND to_regclass('realtime_outbox') IS NOT NULL
       AND to_regclass('request_push_effect') IS NOT NULL
+      AND to_regclass('idx_event_inbox_stream_unresolved') IS NOT NULL
       AND EXISTS (
         SELECT 1 FROM information_schema.columns
         WHERE table_schema = current_schema()

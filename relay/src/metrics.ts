@@ -46,6 +46,13 @@ export const inboxPoolWait = new Histogram({
   registers: [registry],
 })
 
+export const inboxClaimSeconds = new Histogram({
+  name: 'pocketctl_inbox_claim_seconds',
+  help: 'Inbox claim statement latency',
+  buckets: [.001, .0025, .005, .01, .025, .05, .1, .25, .5, 1, 2, 5],
+  registers: [registry],
+})
+
 export const inboxOldestSeconds = new Gauge({
   name: 'pocketctl_inbox_oldest_seconds',
   help: 'Age of the oldest claimed or pending inbox row observed by a worker',
@@ -69,6 +76,19 @@ export const workerRetries = new Counter({
   name: 'pocketctl_inbox_worker_retries_total',
   help: 'Inbox worker retry and dead-letter outcomes by bounded category',
   labelNames: ['outcome'] as const,
+  registers: [registry],
+})
+
+export const workerClaimedRows = new Counter({
+  name: 'pocketctl_inbox_worker_claimed_rows_total',
+  help: 'Inbox rows claimed by the worker across bounded drain passes',
+  registers: [registry],
+})
+
+export const workerDrainPasses = new Histogram({
+  name: 'pocketctl_inbox_worker_drain_passes',
+  help: 'Productive claim passes per inbox worker drain run',
+  buckets: [0, 1, 2, 4, 8, 16, 32],
   registers: [registry],
 })
 

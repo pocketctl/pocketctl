@@ -19,7 +19,14 @@ const ephemeralAggregate = new Set([
 ]);
 
 export function normalizeSessionId(value: unknown): string | null {
-  return typeof value === 'string' && value.length > 0 ? value : null;
+  if (typeof value !== 'string') return null;
+  if (value.length === 0 || value.length > 64) return null;
+  if (value !== value.trim()) return null;
+  // pending-* identities are client-side placeholders for the create flow,
+  // never daemon-owned canonical sessions: a daemon must not be able to
+  // address, rename onto, or inject into one.
+  if (value.startsWith('pending-')) return null;
+  return value;
 }
 
 export function classifyDaemonEvent(payload: Record<string, unknown>): {

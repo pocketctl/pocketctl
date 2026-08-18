@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"os"
 	"sync"
 	"time"
 
@@ -51,6 +52,96 @@ type BootstrapResult struct {
 	ExpiresAt       time.Time
 }
 
+// handshakeGuard bounds one complete IPC handshake (connect + write + read)
+// with a single absolute deadline derived from a context. If the context is
+// canceled before the I/O returns, the connection is closed so blocked
+// reads/writes fail immediately instead of hanging the launcher.
+type handshakeGuard struct {
+	stop     func() bool
+	cancel   context.CancelFunc
+	ctx      context.Context
+	deadline time.Time
+}
+
+// startHandshake derives handshakeCtx from ctx with the total timeout and
+// attaches its absolute deadline to conn.
+func startHandshake(ctx context.Context, conn net.Conn, timeout time.Duration) (*handshakeGuard, error) {
+	handshakeCtx, cancel := context.WithTimeout(ctx, timeout)
+	return attachHandshake(handshakeCtx, cancel, conn)
+}
+
+// attachHandshake arms deadline enforcement on an existing context-owned
+// connection. Bootstrap/Bind/Claim dial under handshakeCtx first so dial,
+// write, and read share one budget.
+func attachHandshake(handshakeCtx context.Context, cancel context.CancelFunc, conn net.Conn) (*handshakeGuard, error) {
+	deadline, ok := handshakeCtx.Deadline()
+	if !ok {
+		deadline = time.Now().Add(DefaultBootstrapTTL)
+	}
+	if err := conn.SetDeadline(deadline); err != nil {
+		cancel()
+		return nil, err
+	}
+	stop := context.AfterFunc(handshakeCtx, func() { _ = conn.Close() })
+	return &handshakeGuard{stop: stop, cancel: cancel, ctx: handshakeCtx, deadline: deadline}, nil
+}
+
+// finish stops the cancellation hook and releases the context timer. With
+// keepOpen it clears the temporary deadline for a returned long-lived
+// connection; otherwise it closes the connection.
+func (g *handshakeGuard) finish(conn net.Conn, keepOpen bool) {
+	g.stop()
+	g.cancel()
+	if keepOpen {
+		_ = conn.SetDeadline(time.Time{})
+	} else {
+		_ = conn.Close()
+	}
+}
+
+// writeFrame writes one envelope bounded by the handshake deadline instead
+// of the heartbeat-based per-write deadline.
+func (g *handshakeGuard) writeFrame(conn net.Conn, kind string, payload any) error {
+	frame, err := EncodeEnvelope(kind, payload)
+	if err != nil {
+		return err
+	}
+	_ = conn.SetWriteDeadline(g.deadline)
+	return writeFull(conn, frame)
+}
+
+// ioError maps raw I/O errors back to the handshake context error when the
+// guard closed the connection on timeout or cancellation, so callers can
+// classify the failure with errors.Is(err, context.DeadlineExceeded/Canceled).
+func (g *handshakeGuard) ioError(err error) error {
+	if err == nil {
+		return nil
+	}
+	isDeadlineOrClosed := errors.Is(err, os.ErrDeadlineExceeded) ||
+		errors.Is(err, net.ErrClosed) ||
+		errors.Is(err, io.ErrClosedPipe)
+	cerr := g.ctx.Err()
+	if cerr == nil && isDeadlineOrClosed {
+		// The connection deadline and the context timer fire at the same
+		// instant; a deadline/closed I/O error with a not-yet-flipped
+		// context is still the handshake budget expiring.
+		if deadline, ok := g.ctx.Deadline(); ok && !time.Now().Before(deadline) {
+			cerr = context.DeadlineExceeded
+		}
+	}
+	if cerr == nil {
+		return err
+	}
+	if isDeadlineOrClosed {
+		return cerr
+	}
+	var netErr net.Error
+	if errors.As(err, &netErr) {
+		return cerr
+	}
+	return err
+}
+
 // Bootstrap performs the short-lived bootstrap.acquire reservation. The
 // server closes this connection after replying; it is returned only so the
 // caller can close its local handle before exec. Channel uses Claim on a new
@@ -60,38 +151,45 @@ func (c *Client) Bootstrap(ctx context.Context, claudeParentPID int, protocolVer
 	if dial == nil {
 		return BootstrapResult{}, nil, nil, errors.New("claudechannel: no dialer")
 	}
-	connectCtx, cancel := context.WithTimeout(ctx, c.timeout)
-	defer cancel()
-	conn, err := dialContext(connectCtx, c.socketPath, dial)
+	handshakeCtx, hcancel := context.WithTimeout(ctx, c.timeout)
+	conn, err := dialContext(handshakeCtx, c.socketPath, dial)
 	if err != nil {
+		hcancel()
 		return BootstrapResult{}, nil, nil, fmt.Errorf("claudechannel: dial: %w", err)
+	}
+	guard, gerr := attachHandshake(handshakeCtx, hcancel, conn)
+	if gerr != nil {
+		return BootstrapResult{}, nil, nil, fmt.Errorf("claudechannel: handshake deadline: %w", gerr)
 	}
 	reader := bufio.NewReader(conn)
 	processIdentity, _ := platform.ProcessStartIdentity(claudeParentPID)
 	// Send bootstrap.acquire.
-	if err := writeClientFrame(conn, KindBootstrapAcquire, BootstrapAcquire{
+	if err := guard.writeFrame(conn, KindBootstrapAcquire, BootstrapAcquire{
 		ClaudeParentPID:      claudeParentPID,
 		ProtocolVersion:      protocolVersion,
 		ProcessStartIdentity: processIdentity,
 	}); err != nil {
-		_ = conn.Close()
+		err = guard.ioError(err)
+		guard.finish(conn, false)
 		return BootstrapResult{}, nil, nil, err
 	}
 	// Read bootstrap result.
 	env, err := readClientEnvelope(reader)
 	if err != nil {
-		_ = conn.Close()
+		err = guard.ioError(err)
+		guard.finish(conn, false)
 		return BootstrapResult{}, nil, nil, err
 	}
 	if env.Kind != KindBootstrapAcquire {
-		_ = conn.Close()
+		guard.finish(conn, false)
 		return BootstrapResult{}, nil, nil, fmt.Errorf("claudechannel: expected bootstrap reply, got %s", env.Kind)
 	}
 	var result BootstrapAcquireResult
 	if err := json.Unmarshal(env.Payload, &result); err != nil {
-		_ = conn.Close()
+		guard.finish(conn, false)
 		return BootstrapResult{}, nil, nil, fmt.Errorf("claudechannel: bootstrap decode: %w", err)
 	}
+	guard.finish(conn, true)
 	return BootstrapResult{
 		InstanceID:      result.InstanceID,
 		CapabilityToken: result.CapabilityToken,
@@ -110,38 +208,53 @@ func (c *Client) BindReservation(ctx context.Context, instanceID, token string, 
 	if c.Dial == nil {
 		return errors.New("claudechannel: no dialer")
 	}
-	connectCtx, cancel := context.WithTimeout(ctx, c.timeout)
-	defer cancel()
-	conn, err := dialContext(connectCtx, c.socketPath, c.Dial)
+	handshakeCtx, hcancel := context.WithTimeout(ctx, c.timeout)
+	conn, err := dialContext(handshakeCtx, c.socketPath, c.Dial)
 	if err != nil {
+		hcancel()
 		return fmt.Errorf("claudechannel: bind dial: %w", err)
 	}
-	defer conn.Close()
+	guard, gerr := attachHandshake(handshakeCtx, hcancel, conn)
+	if gerr != nil {
+		return fmt.Errorf("claudechannel: bind handshake deadline: %w", gerr)
+	}
 	identity, err := platform.ProcessStartIdentity(claudeParentPID)
 	if err != nil {
+		guard.finish(conn, false)
 		return fmt.Errorf("claudechannel: bind process identity: %w", err)
 	}
-	if err := writeClientFrame(conn, KindBootstrapBind, BootstrapBind{
+	if err := guard.writeFrame(conn, KindBootstrapBind, BootstrapBind{
 		InstanceID: instanceID, CapabilityToken: token,
 		ClaudeParentPID: claudeParentPID, ProcessStartIdentity: identity,
 	}); err != nil {
+		err = guard.ioError(err)
+		guard.finish(conn, false)
 		return err
 	}
 	env, err := readClientEnvelope(bufio.NewReader(conn))
 	if err != nil {
+		err = guard.ioError(err)
+		guard.finish(conn, false)
 		return err
 	}
 	if env.Kind != KindBootstrapBind {
+		guard.finish(conn, false)
 		return fmt.Errorf("claudechannel: expected bootstrap bind reply, got %s", env.Kind)
 	}
+	guard.finish(conn, false)
 	return nil
 }
 
 // Register writes channel.register on a fresh claim connection. Claim is the
 // normal public entry point; tests use this lower-level encoder directly.
 func (c *Client) Register(conn net.Conn, instanceID, token string, channelPID, claudeParentPID int, protocolVersion string) error {
+	reg := channelRegisterPayload(instanceID, token, channelPID, claudeParentPID, protocolVersion)
+	return writeClientFrame(conn, KindChannelRegister, reg)
+}
+
+func channelRegisterPayload(instanceID, token string, channelPID, claudeParentPID int, protocolVersion string) ChannelRegister {
 	identity, _ := platform.ProcessStartIdentity(claudeParentPID)
-	reg := ChannelRegister{
+	return ChannelRegister{
 		InstanceID:           instanceID,
 		CapabilityToken:      token,
 		ChannelPID:           channelPID,
@@ -149,7 +262,6 @@ func (c *Client) Register(conn net.Conn, instanceID, token string, channelPID, c
 		ProtocolVersion:      protocolVersion,
 		ProcessStartIdentity: identity,
 	}
-	return writeClientFrame(conn, KindChannelRegister, reg)
 }
 
 // Claim opens the Channel's long-lived connection and presents credentials
@@ -159,16 +271,26 @@ func (c *Client) Claim(ctx context.Context, instanceID, token string, channelPID
 	if instanceID == "" || token == "" {
 		return nil, nil, errors.New("claudechannel: missing claim credentials")
 	}
-	claimCtx, cancel := context.WithTimeout(ctx, c.timeout)
-	defer cancel()
-	conn, err := dialContext(claimCtx, c.socketPath, c.Dial)
+	handshakeCtx, hcancel := context.WithTimeout(ctx, c.timeout)
+	conn, err := dialContext(handshakeCtx, c.socketPath, c.Dial)
 	if err != nil {
+		hcancel()
 		return nil, nil, fmt.Errorf("claudechannel: claim dial: %w", err)
 	}
-	if err := c.Register(conn, instanceID, token, channelPID, claudeParentPID, protocolVersion); err != nil {
-		_ = conn.Close()
+	guard, gerr := attachHandshake(handshakeCtx, hcancel, conn)
+	if gerr != nil {
+		return nil, nil, fmt.Errorf("claudechannel: claim handshake deadline: %w", gerr)
+	}
+	reg := channelRegisterPayload(instanceID, token, channelPID, claudeParentPID, protocolVersion)
+	if err := guard.writeFrame(conn, KindChannelRegister, reg); err != nil {
+		err = guard.ioError(err)
+		guard.finish(conn, false)
 		return nil, nil, err
 	}
+	// Registration is the whole handshake; the returned connection serves the
+	// long-lived Channel event stream and must not keep the bootstrap
+	// deadline.
+	guard.finish(conn, true)
 	return conn, bufio.NewReader(conn), nil
 }
 

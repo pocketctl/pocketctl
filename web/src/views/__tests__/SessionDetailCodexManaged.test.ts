@@ -91,6 +91,10 @@ describe('SessionDetail managed Codex terminal control', () => {
       text: `${reply}\n\n<oai-mem-citation>internal metadata</oai-mem-citation>`,
     })
     await nextTick()
+    // Live agent text is frame-batched; let the pending batch flush before
+    // asserting the collapsed rendering.
+    await new Promise(resolve => requestAnimationFrame(() => resolve(null)))
+    await nextTick()
 
     expect(wrapper.findAll('message-agent-stub')).toHaveLength(1)
   })

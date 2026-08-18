@@ -38,6 +38,8 @@ function createMockPool(): any {
   return {
     query: vi.fn(async (sql: string) => {
       if (/subagent_usage_seen/i.test(sql)) return { rows: [], rowCount: 1 }
+      // Daemon-session ownership probe: treat every session as owned.
+      if (sql.includes('session_allowed')) return { rows: [{ session_exists: true, session_allowed: true }], rowCount: 1 }
       return { rows: [], rowCount: 0 }
     }),
   }

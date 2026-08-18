@@ -841,6 +841,24 @@ func (sm *SessionManager) KillSession(sessionID string) error {
 	if ps.Cancel != nil {
 		ps.Cancel()
 	}
+	// Daemon-owned one-shot resume: prefer the registry handle so the single
+	// Wait owner reaps the process; never call Wait a second time here.
+	if entry := sm.ownedResumeForSession(sessionID); entry != nil {
+		select {
+		case <-entry.done:
+		default:
+			if entry.cancel != nil {
+				entry.cancel()
+			}
+			killTimer := time.NewTimer(5 * time.Second)
+			select {
+			case <-entry.done:
+				killTimer.Stop()
+			case <-killTimer.C:
+				_ = entry.process.Kill()
+			}
+		}
+	}
 	// Drain any pending tool-use approval so the hook process exits promptly.
 	if sm.approvals != nil {
 		sm.approvals.DrainSession(sessionID)
@@ -871,7 +889,7 @@ func (sm *SessionManager) KillSession(sessionID string) error {
 			// keep polling
 		case <-deadline:
 			// Force kill if still running (PR2: via platform ProcessController, was syscall.SIGKILL)
-			if ps.Cmd.Process != nil {
+			if ps.Cmd != nil && ps.Cmd.Process != nil {
 				_ = defaultProc.Kill(ps.Cmd.Process.Pid)
 			}
 			sm.mu.Lock()

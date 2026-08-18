@@ -4,18 +4,17 @@ package agentcontrol
 
 import (
 	"errors"
-	"fmt"
 	"os"
 	"strings"
 
 	"golang.org/x/sys/windows/registry"
 )
 
-const windowsShimMarker = "@rem pocketctl-agent-launcher"
+const windowsShimMarker = launcherMarkerWindows
 
 func installPlatformShim(shimPath, pocketctlPath, agent string, realBinaries ...string) error {
-	if data, err := os.ReadFile(shimPath); err == nil {
-		if !strings.Contains(string(data), windowsShimMarker) {
+	if _, err := os.Lstat(shimPath); err == nil {
+		if !isPocketctlOwnedShim(shimPath, pocketctlPath) {
 			return ErrForeignShim
 		}
 	} else if !errors.Is(err, os.ErrNotExist) {
@@ -25,24 +24,37 @@ func installPlatformShim(shimPath, pocketctlPath, agent string, realBinaries ...
 	if len(realBinaries) > 0 {
 		realBinary = realBinaries[0]
 	}
-	body := fmt.Sprintf("%s\r\n@if not exist \"%s\" goto fallback\r\n@\"%s\" __agent-launch %s %%*\r\n@exit /b %%errorlevel%%\r\n:fallback\r\n", windowsShimMarker, pocketctlPath, pocketctlPath, agent)
+	// v3 wrapper: the depth fuse makes a second PocketCtl hop fall straight
+	// through to the recorded real binary, so re-entry cannot loop forever.
+	body := launcherMarkerWindowsV3 + "\r\n" +
+		"@setlocal\r\n" +
+		"@if not \"%POCKETCTL_AGENT_LAUNCH_DEPTH%\"==\"\" goto fallback\r\n" +
+		"@if not exist \"" + pocketctlPath + "\" goto fallback\r\n"
 	if realBinary != "" {
-		body += fmt.Sprintf("@\"%s\" %%*\r\n@exit /b %%errorlevel%%\r\n", realBinary)
+		body += "@set \"POCKETCTL_AGENT_REAL_BINARY=" + realBinary + "\"\r\n"
+	}
+	body += "@set \"POCKETCTL_AGENT_LAUNCH_DEPTH=1\"\r\n" +
+		"@\"" + pocketctlPath + "\" __agent-launch " + agent + " %*\r\n" +
+		"@endlocal & exit /b %errorlevel%\r\n" +
+		":fallback\r\n" +
+		"@set \"POCKETCTL_AGENT_LAUNCH_DEPTH=\"\r\n" +
+		"@set \"POCKETCTL_AGENT_REAL_BINARY=\"\r\n"
+	if realBinary != "" {
+		body += "@\"" + realBinary + "\" %*\r\n" +
+			"@exit /b %errorlevel%\r\n"
 	} else {
 		body += "@exit /b 9009\r\n"
 	}
 	return os.WriteFile(shimPath, []byte(body), 0o600)
 }
 
-func removePlatformShim(shimPath, _ string) error {
-	data, err := os.ReadFile(shimPath)
-	if errors.Is(err, os.ErrNotExist) {
+func removePlatformShim(shimPath, pocketctlPath string) error {
+	if _, err := os.Lstat(shimPath); errors.Is(err, os.ErrNotExist) {
 		return nil
-	}
-	if err != nil {
+	} else if err != nil {
 		return err
 	}
-	if !strings.Contains(string(data), windowsShimMarker) {
+	if !isPocketctlOwnedShim(shimPath, pocketctlPath) {
 		return ErrForeignShim
 	}
 	return os.Remove(shimPath)

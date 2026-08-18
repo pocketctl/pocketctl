@@ -67,7 +67,7 @@ func (l CodexLauncher) Run(ctx context.Context, args []string, cwd string) error
 		if err != nil {
 			return err
 		}
-		return l.Execute(ExecSpec{Path: binary, Args: plan.NativeArgs, Env: l.Environ(), Dir: plan.CWD})
+		return l.Execute(ExecSpec{Path: binary, Args: plan.NativeArgs, Env: stripLauncherInternalEnv(l.Environ()), Dir: plan.CWD})
 	}
 
 	acquire := l.Acquire
@@ -99,13 +99,13 @@ func (l CodexLauncher) Run(ctx context.Context, args []string, cwd string) error
 				return err
 			}
 		}
-		return l.Execute(ExecSpec{Path: binary, Args: args, Env: l.Environ(), Dir: plan.CWD})
+		return l.Execute(ExecSpec{Path: binary, Args: args, Env: stripLauncherInternalEnv(l.Environ()), Dir: plan.CWD})
 	}
 	if result.RealBinary == "" || result.RemoteURI == "" {
 		return errors.New("daemon returned an incomplete managed Codex runtime")
 	}
 	spec := ExecSpec{
-		Path: result.RealBinary, Args: plan.ManagedArgs(result.RemoteURI), Env: l.Environ(), Dir: plan.CWD,
+		Path: result.RealBinary, Args: plan.ManagedArgs(result.RemoteURI), Env: stripLauncherInternalEnv(l.Environ()), Dir: plan.CWD,
 	}
 	if result.LeaseID != "" {
 		bind := l.BindLease
@@ -132,13 +132,24 @@ func (l CodexLauncher) Run(ctx context.Context, args []string, cwd string) error
 }
 
 func resolveLauncherCodex() (string, error) {
+	return resolveLauncherCodexWithResolver(NewBinaryResolver())
+}
+
+func resolveLauncherCodexWithResolver(resolver BinaryResolver) (string, error) {
 	cfg, err := LoadConfig()
 	if err == nil && cfg.Codex.RealBinary != "" {
-		resolved, _, inspectErr := inspectExecutable(cfg.Codex.RealBinary)
-		if inspectErr == nil && !sameResolvedPath(resolved, cfg.Codex.ShimPath) && !sameResolvedPath(resolved, defaultCodexShimPath()) {
+		if resolved, ok := validatedRealAgentPath(cfg.Codex.RealBinary); ok &&
+			!sameResolvedPath(resolved, cfg.Codex.ShimPath) && !sameResolvedPath(resolved, defaultCodexShimPath()) {
 			return resolved, nil
 		}
 	}
-	path, _, err := ResolveConfiguredCodex()
+	if hint, ok := validatedLauncherRealBinaryHint(); ok {
+		return hint, nil
+	}
+	if err != nil {
+		path, _, resolveErr := ResolveConfiguredCodex()
+		return path, resolveErr
+	}
+	path, _, err := resolver.ResolveCodex(cfg.Codex)
 	return path, err
 }

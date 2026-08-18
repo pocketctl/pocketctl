@@ -16,6 +16,14 @@ function createRecordingPool(): any {
       if (sql.includes('INSERT INTO daemons') && sql.includes('RETURNING daemon_id')) {
         return { rows: [{ daemon_id: 'daemon-1' }], rowCount: 1 }
       }
+      if (sql.includes('session_allowed')) {
+        // Daemon-session ownership probe: treat every session as owned.
+        return { rows: [{ session_exists: true, session_allowed: true }], rowCount: 1 }
+      }
+      if (sql.includes('INSERT INTO sessions') && sql.includes('RETURNING session_id')) {
+        // Guarded session upsert reports a successful owner-checked write.
+        return { rows: [{ session_id: params?.[0] ?? null }], rowCount: 1 }
+      }
       if (sql.includes('INSERT INTO events') && sql.includes('RETURNING id')) {
         return {
           rows: [{ id: ++eventID, inserted: true, effect_status: 'pending', effect_step: 0 }],

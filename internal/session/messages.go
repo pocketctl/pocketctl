@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"os/exec"
 	"time"
 
 	"github.com/pocketctl/pocketctl/internal/adapter"
@@ -86,7 +85,14 @@ func (sm *SessionManager) PendingInteractivePrompt(sessionID string) (protocol.D
 	}, true
 }
 
-func (sm *SessionManager) readOutput(ctx context.Context, cmd *exec.Cmd, stdout io.Reader, adp adapter.AgentAdapter, ps *ProcessState) {
+func (sm *SessionManager) readOutput(ctx context.Context, proc interface{ Wait() error }, stdout io.Reader, adp adapter.AgentAdapter, ps *ProcessState) {
+	sm.drainStreamOutput(stdout, adp, ps)
+	sm.finalizeProcessExit(ctx, proc.Wait(), ps)
+}
+
+// drainStreamOutput parses the one-shot process stdout into events. It never
+// Waits; the caller owns the single Wait call for the process.
+func (sm *SessionManager) drainStreamOutput(stdout io.Reader, adp adapter.AgentAdapter, ps *ProcessState) {
 	scanner := bufio.NewScanner(stdout)
 	scanner.Buffer(make([]byte, 1024*1024), 1024*1024)
 
@@ -141,8 +147,11 @@ func (sm *SessionManager) readOutput(ctx context.Context, cmd *exec.Cmd, stdout 
 			sm.outputCh <- evt
 		}
 	}
+}
 
-	exitErr := cmd.Wait()
+// finalizeProcessExit applies the terminal status semantics after the
+// process's single Wait returned.
+func (sm *SessionManager) finalizeProcessExit(ctx context.Context, exitErr error, ps *ProcessState) {
 	now := time.Now()
 	status := protocol.StatusCompleted
 	if exitErr != nil {
@@ -306,23 +315,16 @@ func (sm *SessionManager) SendMessage(ctx context.Context, sessionID string, con
 	launcher := adapter.NewLauncher(agentType)
 	args := launcher.BuildResumeArgs(content, sessionID, protocol.SessionConfig{Permission: clonePermission(ps.Permission)})
 	ctx, cancel := context.WithCancel(ctx)
-	cmd := exec.CommandContext(ctx, cliPath, args...)
-	if cwd != "" {
-		cmd.Dir = cwd
-	}
-	stdout, err := cmd.StdoutPipe()
+	proc, err := sm.startResumeProcess(ctx, resumeLaunchSpec{Path: cliPath, Args: args, Dir: cwd})
 	if err != nil {
 		cancel()
-		return fmt.Errorf("stdout pipe: %w", err)
+		return err
 	}
-	if err := cmd.Start(); err != nil {
-		cancel()
-		return fmt.Errorf("start process: %w", err)
-	}
+	entry := sm.registerOwnedResume(sessionID, cancel, proc)
 
 	adp := sm.newStreamAdapter(ps, agentType, content)
 	sm.mu.Lock()
-	ps.Cmd = cmd
+	ps.Cmd = resumeProcessCmd(proc)
 	ps.Cancel = cancel
 	ps.Status = protocol.StatusRunning
 	ps.Source = source // Keep original source
@@ -334,7 +336,12 @@ func (sm *SessionManager) SendMessage(ctx context.Context, sessionID string, con
 		SessionID: ps.SessionID,
 		Text:      content,
 	}
-	go sm.readOutput(ctx, cmd, stdout, adp, ps)
+	go func() {
+		sm.drainStreamOutput(proc.Stdout(), adp, ps)
+		waitErr := proc.Wait()
+		sm.finishOwnedResume(entry, waitErr)
+		sm.finalizeProcessExit(ctx, waitErr, ps)
+	}()
 	return nil
 }
 
@@ -385,24 +392,18 @@ func (sm *SessionManager) sendToIdleTerminal(ctx context.Context, ps *ProcessSta
 	launcher := adapter.NewLauncher(agentType)
 	args := launcher.BuildResumeArgs(content, ps.SessionID, protocol.SessionConfig{Permission: clonePermission(ps.Permission)})
 	ctx, cancel := context.WithCancel(ctx)
-	cmd := exec.CommandContext(ctx, cliPath, args...)
-	cmd.Dir = ps.Cwd
 	// D1: capture stdout stream-json + adapter (unified command feedback path, like daemon sessions).
-	stdout, err := cmd.StdoutPipe()
+	proc, err := sm.startResumeProcess(ctx, resumeLaunchSpec{Path: cliPath, Args: args, Dir: ps.Cwd})
 	if err != nil {
 		cancel()
-		return fmt.Errorf("stdout pipe: %w", err)
+		return err
 	}
-
-	if err := cmd.Start(); err != nil {
-		cancel()
-		return fmt.Errorf("start --resume: %w", err)
-	}
+	entry := sm.registerOwnedResume(ps.SessionID, cancel, proc)
 
 	adp := sm.newStreamAdapter(ps, agentType, content)
 	now := time.Now()
 	sm.mu.Lock()
-	ps.Cmd = cmd
+	ps.Cmd = resumeProcessCmd(proc)
 	ps.Cancel = cancel
 	ps.Status = protocol.StatusRunning
 	ps.LastActivityAt = now
@@ -431,7 +432,7 @@ func (sm *SessionManager) sendToIdleTerminal(ctx context.Context, ps *ProcessSta
 				ps.Tailer.Resume()
 			}
 		}()
-		scanner := bufio.NewScanner(stdout)
+		scanner := bufio.NewScanner(proc.Stdout())
 		scanner.Buffer(make([]byte, 1024*1024), 1024*1024)
 		for scanner.Scan() {
 			if tailerOwnsEvents {
@@ -450,7 +451,8 @@ func (sm *SessionManager) sendToIdleTerminal(ctx context.Context, ps *ProcessSta
 				sm.outputCh <- evt
 			}
 		}
-		cmd.Wait()
+		proc.Wait()
+		sm.finishOwnedResume(entry, nil)
 		resumeNow := time.Now()
 		sm.mu.Lock()
 		// Terminal process is still alive, so go back to idle

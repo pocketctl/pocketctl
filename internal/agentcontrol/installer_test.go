@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -393,5 +394,190 @@ func TestCodexInstallerRejectsOldVersionBeforeInstallingShim(t *testing.T) {
 	}
 	if _, err := os.Lstat(filepath.Join(home, ".pocketctl", "bin", "codex")); !os.IsNotExist(err) {
 		t.Fatalf("old Codex installed shim: %v", err)
+	}
+}
+
+func writeShimV3TestExecutable(t *testing.T, path, body string) {
+	t.Helper()
+	if err := os.WriteFile(path, []byte("#!/bin/sh\n"+body+"\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestUnixShimV3WrapperContract(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Unix shell wrapper behavior")
+	}
+	dir := t.TempDir()
+	shim := filepath.Join(dir, "opencode")
+	pocketctl := filepath.Join(dir, "pocketctl")
+	realBinary := filepath.Join(dir, "real-opencode")
+	writeShimV3TestExecutable(t, pocketctl, "exit 0")
+	writeShimV3TestExecutable(t, realBinary, "exit 0")
+
+	if err := installPlatformShim(shim, pocketctl, AgentOpenCode, realBinary); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(shim)
+	if err != nil {
+		t.Fatal(err)
+	}
+	content := string(data)
+
+	if count := strings.Count(content, launcherMarkerV3Unix); count != 1 {
+		t.Fatalf("v3 marker count=%d content=%q", count, content)
+	}
+	if strings.Contains(content, launcherMarkerV2Unix) {
+		t.Fatalf("wrapper still emits legacy v2 marker: %q", content)
+	}
+	if !strings.Contains(content, testShellQuote(realBinary)) {
+		t.Fatalf("wrapper does not record quoted real binary: %q", content)
+	}
+
+	depthCheck := strings.Index(content, "POCKETCTL_AGENT_LAUNCH_DEPTH")
+	pocketctlHop := strings.Index(content, "__agent-launch")
+	if depthCheck < 0 || pocketctlHop < 0 || depthCheck > pocketctlHop {
+		t.Fatalf("depth fuse must be checked before the PocketCtl hop: %q", content)
+	}
+	if !strings.Contains(content, "unset POCKETCTL_AGENT_LAUNCH_DEPTH POCKETCTL_AGENT_REAL_BINARY") {
+		t.Fatalf("wrapper must unset both internal env variables on fallback: %q", content)
+	}
+	if count := strings.Count(content, "POCKETCTL_AGENT_LAUNCH_DEPTH=1"); count != 1 {
+		t.Fatalf("depth assignment count=%d content=%q", count, content)
+	}
+	if count := strings.Count(content, "POCKETCTL_AGENT_REAL_BINARY="); count != 1 {
+		t.Fatalf("real-binary hint assignment count=%d content=%q", count, content)
+	}
+	if !strings.Contains(content, "exec "+testShellQuote(pocketctl)+" ") {
+		t.Fatalf("wrapper must exec PocketCtl: %q", content)
+	}
+	if !strings.Contains(content, "exec "+testShellQuote(realBinary)) {
+		t.Fatalf("wrapper must exec the real binary directly: %q", content)
+	}
+	if count := strings.Count(content, " \"$@\""); count != 3 {
+		t.Fatalf("wrapper must preserve \"$@\" on every exec, count=%d content=%q", count, content)
+	}
+}
+
+func TestUnixShimV3WrapperRefusesForeignFileAndKeepsContent(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Unix shell wrapper behavior")
+	}
+	dir := t.TempDir()
+	shim := filepath.Join(dir, "opencode")
+	pocketctl := filepath.Join(dir, "pocketctl")
+	realBinary := filepath.Join(dir, "real-opencode")
+	writeShimV3TestExecutable(t, pocketctl, "exit 0")
+	writeShimV3TestExecutable(t, realBinary, "exit 0")
+	foreign := "#!/bin/sh\nexec /usr/local/bin/opencode \"$@\"\n"
+	if err := os.WriteFile(shim, []byte(foreign), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := installPlatformShim(shim, pocketctl, AgentOpenCode, realBinary); err == nil {
+		t.Fatal("installPlatformShim overwrote a foreign wrapper")
+	}
+	data, err := os.ReadFile(shim)
+	if err != nil || string(data) != foreign {
+		t.Fatalf("foreign wrapper changed: %q err=%v", data, err)
+	}
+}
+
+func TestUnixShimV3UpgradesLegacyV2Wrapper(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Unix shell wrapper behavior")
+	}
+	dir := t.TempDir()
+	shim := filepath.Join(dir, "opencode")
+	pocketctl := filepath.Join(dir, "pocketctl")
+	realBinary := filepath.Join(dir, "real-opencode")
+	writeShimV3TestExecutable(t, pocketctl, "exit 0")
+	writeShimV3TestExecutable(t, realBinary, "exit 0")
+
+	legacy := "#!/bin/sh\n" + launcherMarkerV2Unix + "\n" +
+		"if [ -x " + testShellQuote(pocketctl) + " ]; then\n" +
+		"  exec " + testShellQuote(pocketctl) + " __agent-launch " + testShellQuote(AgentOpenCode) + " \"$@\"\n" +
+		"fi\n" +
+		"exec " + testShellQuote(realBinary) + " \"$@\"\n"
+	if err := os.WriteFile(shim, []byte(legacy), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := installPlatformShim(shim, pocketctl, AgentOpenCode, realBinary); err != nil {
+		t.Fatalf("v2 wrapper upgrade failed: %v", err)
+	}
+	data, err := os.ReadFile(shim)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), launcherMarkerV3Unix) {
+		t.Fatalf("upgraded wrapper is not v3: %q", data)
+	}
+}
+
+func TestUnixShimSecondHopFallsBackToRecordedRealBinary(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Unix shell wrapper behavior")
+	}
+	dir := t.TempDir()
+	t.Setenv("PATH", dir) // isolated PATH: only fixtures created by this test resolve
+
+	shim := filepath.Join(dir, "opencode")
+	pocketctlRuns := filepath.Join(dir, "pocketctl-runs")
+	realRuns := filepath.Join(dir, "real-runs")
+	realLeak := filepath.Join(dir, "real-leak")
+	realArgv := filepath.Join(dir, "real-argv")
+
+	// Fake real binary records argv and internal-env leakage once per run.
+	// PATH is isolated, so detection uses shell parameter expansion and
+	// builtins only.
+	realBinary := filepath.Join(dir, "real-opencode")
+	writeShimV3TestExecutable(t, realBinary,
+		"echo run >> "+testShellQuote(realRuns)+
+			"; printf '%s\\n' \"$@\" > "+testShellQuote(realArgv)+
+			"; if [ -n \"${POCKETCTL_AGENT_LAUNCH_DEPTH:-}\" ] || [ -n \"${POCKETCTL_AGENT_REAL_BINARY:-}\" ]; then touch "+testShellQuote(realLeak)+"; fi")
+
+	// Fake PocketCtl reinvokes the wrapper once while preserving env and the
+	// user argv (after stripping its own __agent-launch arguments), simulating
+	// a launcher that re-enters the shim.
+	pocketctl := filepath.Join(dir, "pocketctl")
+	writeShimV3TestExecutable(t, pocketctl,
+		"echo run >> "+testShellQuote(pocketctlRuns)+
+			" && shift 2 && exec "+testShellQuote(shim)+" \"$@\"")
+
+	if err := installPlatformShim(shim, pocketctl, AgentOpenCode, realBinary); err != nil {
+		t.Fatal(err)
+	}
+
+	out, err := exec.Command(shim, "resume", "--flag", "arg with spaces").CombinedOutput()
+	if err != nil {
+		t.Fatalf("wrapper execution failed: %v output=%s", err, out)
+	}
+
+	pocketctlData, err := os.ReadFile(pocketctlRuns)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Count(string(pocketctlData), "run"); got != 1 {
+		t.Fatalf("PocketCtl hop count=%d, want exactly one (output=%s)", got, out)
+	}
+	realData, err := os.ReadFile(realRuns)
+	if err != nil {
+		t.Fatalf("real binary never ran: %v", err)
+	}
+	if got := strings.Count(string(realData), "run"); got != 1 {
+		t.Fatalf("real binary run count=%d, want exactly one", got)
+	}
+	argvData, err := os.ReadFile(realArgv)
+	if err != nil {
+		t.Fatal(err)
+	}
+	argv := strings.Split(strings.TrimRight(string(argvData), "\n"), "\n")
+	wantArgv := []string{"resume", "--flag", "arg with spaces"}
+	if strings.Join(argv, "\x00") != strings.Join(wantArgv, "\x00") {
+		t.Fatalf("real argv=%q, want %q", argv, wantArgv)
+	}
+	if _, err := os.Lstat(realLeak); !os.IsNotExist(err) {
+		t.Fatalf("internal launcher env leaked into the real binary: %v", err)
 	}
 }

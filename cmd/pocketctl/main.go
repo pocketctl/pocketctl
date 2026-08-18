@@ -1593,6 +1593,9 @@ func cmdDaemonStart(args []string) {
 		notify.NotifyTerminal(ttyPath, msg, msg)
 	}
 
+	// Route content-free resume lifecycle counters into telemetry.
+	wireResumeCleanupTelemetry(sm)
+
 	// Context with signal handling
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -1753,26 +1756,192 @@ func cmdDaemonStart(args []string) {
 	}
 	logger.Info("shutting down")
 	fmt.Println(i18n.T("daemon.shutting_down"))
-	// 释放 keep-awake 抑制:正常关闭时主动 Release(进程退出时 caffeinate -w
-	// 也会兜底,但显式释放更及时)。
-	_ = kaMgr.Disable(keepawake.ReasonShutdown)
-	_ = kaServer.Close()
-	// Stop accepting new terminal acquire requests before the shared runtime is
-	// shut down, so a launcher cannot receive credentials for a closing serve.
-	_ = agentControlServer.Close()
-	if err := sm.ShutdownCodex(); err != nil {
-		logger.Warn("Codex app-server shutdown incomplete", "error", err)
-	}
-	// Stop the isolated ZCode observer (closes its read-only DB + poll loop).
-	if zcodeObserver != nil {
-		zcodeObserver.Stop()
-	}
-	// Stop the shared opencode serve process (bound to its own context, not the
-	// daemon ctx) so it doesn't linger and race the next daemon's serve on the
-	// shared SQLite DB.
-	sm.ShutdownOpencode()
+	runDaemonShutdownSequence(daemonShutdownSteps{
+		ReleaseKeepAwake:  func() { _ = kaMgr.Disable(keepawake.ReasonShutdown) },
+		CloseKeepAwake:    func() { _ = kaServer.Close() },
+		CloseAgentControl: func() { _ = agentControlServer.Close() },
+		DrainResumes: func() {
+			drainCtx, drainCancel := context.WithTimeout(context.Background(), daemonResumeDrainTimeout)
+			defer drainCancel()
+			_ = drainResumeProcessesBeforeExit(drainCtx, sm, logger)
+		},
+		ShutdownCodex: func() {
+			if err := sm.ShutdownCodex(); err != nil {
+				logger.Warn("Codex app-server shutdown incomplete", "error", err)
+			}
+		},
+		StopZCodeObserver: func() {
+			if zcodeObserver != nil {
+				zcodeObserver.Stop()
+			}
+		},
+		ShutdownOpencode: func() { sm.ShutdownOpencode() },
+	})
 	cancel()
 	time.Sleep(500 * time.Millisecond)
+}
+
+// daemonResumeDrainTimeout bounds the owned-resume drain before exit.
+const daemonResumeDrainTimeout = 5 * time.Second
+
+// wireResumeCleanupTelemetry routes content-free resume lifecycle counters
+// from the SessionManager into agentcontrol telemetry, preserving package
+// boundaries (session never imports agentcontrol for this).
+func wireResumeCleanupTelemetry(sm *session.SessionManager) func(reason string) {
+	rec := func(reason string) {
+		if err := agentcontrol.RecordResumeCleanup(reason); err != nil {
+			slog.Default().Warn("resume cleanup telemetry rejected", "error", err)
+		}
+	}
+	sm.SetResumeCleanupRecorder(rec)
+	return rec
+}
+
+// resumeShutdowner is the SessionManager seam the exit paths use to drain
+// daemon-owned one-shot resume processes.
+type resumeShutdowner interface {
+	ShutdownResumeProcesses(context.Context) error
+}
+
+// drainResumeProcessesBeforeExit cancels and reaps every daemon-owned
+// one-shot resume within ctx. An error is logged but never blocks exit.
+func drainResumeProcessesBeforeExit(ctx context.Context, sm resumeShutdowner, logger *slog.Logger) error {
+	if sm == nil {
+		return nil
+	}
+	err := sm.ShutdownResumeProcesses(ctx)
+	if err != nil && logger != nil {
+		logger.Warn("daemon resume cleanup incomplete", "error", err)
+	}
+	return err
+}
+
+// daemonShutdownSteps is the normal daemon shutdown sequence as injectable
+// steps so ordering can be regression-tested without a real daemon.
+type daemonShutdownSteps struct {
+	ReleaseKeepAwake  func()
+	CloseKeepAwake    func()
+	CloseAgentControl func()
+	DrainResumes      func()
+	ShutdownCodex     func()
+	StopZCodeObserver func()
+	ShutdownOpencode  func()
+}
+
+// runDaemonShutdownSequence tears the daemon down in the required order:
+// owned one-shot resumes are drained after the daemon stops accepting new
+// launcher requests and before the runtime providers (Codex, ZCode,
+// OpenCode) shut down.
+func runDaemonShutdownSequence(steps daemonShutdownSteps) {
+	if steps.ReleaseKeepAwake != nil {
+		steps.ReleaseKeepAwake()
+	}
+	if steps.CloseKeepAwake != nil {
+		steps.CloseKeepAwake()
+	}
+	if steps.CloseAgentControl != nil {
+		steps.CloseAgentControl()
+	}
+	if steps.DrainResumes != nil {
+		steps.DrainResumes()
+	}
+	if steps.ShutdownCodex != nil {
+		steps.ShutdownCodex()
+	}
+	if steps.StopZCodeObserver != nil {
+		steps.StopZCodeObserver()
+	}
+	if steps.ShutdownOpencode != nil {
+		steps.ShutdownOpencode()
+	}
+}
+
+// restartChildHandle identifies the replacement daemon process of a hot
+// restart.
+type restartChildHandle struct {
+	pid       int
+	readyPath string
+	proc      *os.Process
+}
+
+// daemonRestartDeps is the hot-restart flow as injectable steps so the
+// drain-before-exit ordering and the failure-preservation guarantees are
+// testable without spawning a real daemon.
+type daemonRestartDeps struct {
+	logger           *slog.Logger
+	activeStop       func() bool
+	resolveExe       func() (string, error)
+	prepare          func() error
+	cancelRestart    func()
+	spawnReplacement func(exe string) (restartChildHandle, error)
+	awaitReady       func(restartChildHandle) error
+	alive            func(restartChildHandle) bool
+	terminate        func(restartChildHandle)
+	resumeShutdowner resumeShutdowner
+	exit             func()
+}
+
+// runDaemonHotRestart attempts one hot restart: prepare, spawn, await
+// readiness, then — only once the replacement is provably ready — drain
+// daemon-owned one-shot resumes and exit. Every failure path preserves the
+// current daemon and its active resumes.
+func runDaemonHotRestart(d daemonRestartDeps) {
+	if d.activeStop != nil && d.activeStop() {
+		return
+	}
+	exe, err := d.resolveExe()
+	if err != nil {
+		d.logger.Error("daemon restart failed: get executable", "error", err)
+		return
+	}
+	if err := d.prepare(); err != nil {
+		d.logger.Error("daemon restart aborted: preserve opencode serve", "error", err)
+		return
+	}
+	child, err := d.spawnReplacement(exe)
+	if err != nil {
+		if d.cancelRestart != nil {
+			d.cancelRestart()
+		}
+		d.logger.Error("daemon restart failed: spawn", "error", err)
+		return
+	}
+	if err := d.awaitReady(child); err != nil {
+		if d.cancelRestart != nil {
+			d.cancelRestart()
+		}
+		if d.terminate != nil {
+			d.terminate(child)
+		}
+		d.logger.Error("daemon restart failed: replacement not ready", "error", err)
+		return
+	}
+	if d.alive != nil && !d.alive(child) {
+		if d.cancelRestart != nil {
+			d.cancelRestart()
+		}
+		if d.terminate != nil {
+			d.terminate(child)
+		}
+		d.logger.Error("daemon restart failed: replacement died after readiness")
+		return
+	}
+	if d.activeStop != nil && d.activeStop() {
+		if d.cancelRestart != nil {
+			d.cancelRestart()
+		}
+		if d.terminate != nil {
+			d.terminate(child)
+		}
+		return
+	}
+	d.logger.Info("new daemon spawned, exiting")
+	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), daemonResumeDrainTimeout)
+	_ = drainResumeProcessesBeforeExit(shutdownCtx, d.resumeShutdowner, d.logger)
+	shutdownCancel()
+	if d.exit != nil {
+		d.exit()
+	}
 }
 
 func daemonRuntimeProviders(sm *session.SessionManager) map[string]agentcontrol.RuntimeProvider {
@@ -2956,43 +3125,29 @@ func handleCommands(ctx context.Context, client *ws.Client, sm *session.SessionM
 					if daemon.ExplicitStopIntentActive() {
 						return
 					}
-					// Fork+exec: spawn a new daemon process before exiting
-					exe, err := os.Executable()
-					if err != nil {
-						logger.Error("daemon restart failed: get executable", "error", err)
-						return
-					}
-					if err := prepareDaemonRestart(sm); err != nil {
-						logger.Error("daemon restart aborted: preserve opencode serve", "error", err)
-						return
-					}
-					readyPath := filepath.Join(filepath.Dir(daemon.PIDPath()), fmt.Sprintf("restart-%d-%d.ready", os.Getpid(), time.Now().UnixNano()))
-					childEnv := restartChildEnv(append(os.Environ(), "POCKETCTL_DAEMON_CHILD=1"), readyPath)
-					proc, err := daemonizer.ForkDetached(exe, os.Args[1:], childEnv)
-					if err != nil {
-						sm.CancelDaemonRestart()
-						logger.Error("daemon restart failed: spawn", "error", err)
-						return
-					}
-					if err := waitForRestartReady(readyPath, proc.Pid, 10*time.Second); err != nil {
-						sm.CancelDaemonRestart()
-						terminateRestartChild(proc, readyPath)
-						logger.Error("daemon restart failed: replacement not ready", "error", err)
-						return
-					}
-					if !platform.NewProcessController().IsAlive(proc.Pid) {
-						sm.CancelDaemonRestart()
-						terminateRestartChild(proc, readyPath)
-						logger.Error("daemon restart failed: replacement died after readiness")
-						return
-					}
-					if daemon.ExplicitStopIntentActive() {
-						sm.CancelDaemonRestart()
-						terminateRestartChild(proc, readyPath)
-						return
-					}
-					logger.Info("new daemon spawned, exiting")
-					os.Exit(0)
+					runDaemonHotRestart(daemonRestartDeps{
+						logger:        logger,
+						activeStop:    daemon.ExplicitStopIntentActive,
+						resolveExe:    os.Executable,
+						prepare:       func() error { return prepareDaemonRestart(sm) },
+						cancelRestart: sm.CancelDaemonRestart,
+						spawnReplacement: func(exe string) (restartChildHandle, error) {
+							readyPath := filepath.Join(filepath.Dir(daemon.PIDPath()), fmt.Sprintf("restart-%d-%d.ready", os.Getpid(), time.Now().UnixNano()))
+							childEnv := restartChildEnv(append(os.Environ(), "POCKETCTL_DAEMON_CHILD=1"), readyPath)
+							proc, err := daemonizer.ForkDetached(exe, os.Args[1:], childEnv)
+							if err != nil {
+								return restartChildHandle{}, err
+							}
+							return restartChildHandle{pid: proc.Pid, readyPath: readyPath, proc: proc}, nil
+						},
+						awaitReady: func(child restartChildHandle) error {
+							return waitForRestartReady(child.readyPath, child.pid, 10*time.Second)
+						},
+						alive:            func(child restartChildHandle) bool { return platform.NewProcessController().IsAlive(child.pid) },
+						terminate:        func(child restartChildHandle) { terminateRestartChild(child.proc, child.readyPath) },
+						resumeShutdowner: sm,
+						exit:             func() { os.Exit(0) },
+					})
 				})
 
 			case "user_message":

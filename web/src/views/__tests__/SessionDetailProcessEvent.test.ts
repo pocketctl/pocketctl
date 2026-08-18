@@ -566,4 +566,152 @@ describe('SessionDetail processEvent integration', () => {
     vm.processEvent({ type: 'mcp_elicitation_resolved', request_id: 'mcp_1', action: 'accept', redacted: true })
     expect(vm.messages.find((message: any) => message.request_id === 'mcp_1')).toMatchObject({ status: 'resolved', action: 'accept', redacted: true })
   })
+
+  describe('SessionDetail live content batching', () => {
+    function nextFrame(): Promise<void> {
+      return new Promise(resolve => requestAnimationFrame(() => resolve()))
+    }
+
+    function countScrollWrites(el: HTMLElement): () => number {
+      let writes = 0
+      const descriptor = Object.getOwnPropertyDescriptor(Element.prototype, 'scrollTop')
+      Object.defineProperty(el, 'scrollTop', {
+        configurable: true,
+        get: descriptor?.get ?? (() => 0),
+        set: () => { writes += 1 },
+      })
+      return () => writes
+    }
+
+    function chunkEvents(count: number): Array<Record<string, any>> {
+      const texts = Array.from({ length: count }, (_, index) => `c${index} `)
+      const totalBytes = texts.join('').length
+      let offset = 0
+      return texts.map((text, index) => {
+        const event = {
+          type: 'agent_text', session_id: 'ses_1', stream_id: 'burst-stream',
+          chunk_seq: index, byte_offset: offset, streaming: true,
+          final: index === count - 1, total_bytes: totalBytes, text,
+        }
+        offset += text.length
+        return event
+      })
+    }
+
+    test('coalesces one hundred live agent chunks into one ordered flush and one scroll', async () => {
+      const baseline = shallowMount(SessionDetail)
+      const baselineVm = baseline.vm as any
+      for (const event of chunkEvents(100)) baselineVm.processEvent(event)
+      await baseline.vm.$nextTick()
+      const baselineText = (baselineVm.messages as any[])
+        .filter((message: any) => message.type === 'agent_text')[0]
+      expect(baselineText).toMatchObject({ streaming: false })
+      baseline.unmount()
+
+      const wrapper = shallowMount(SessionDetail)
+      const vm = wrapper.vm as any
+      vm.allSessions = [{ session_id: 'ses_1', daemon_id: 'daemon-1', status: 'running' }]
+      await wrapper.vm.$nextTick()
+      const scrollWrites = countScrollWrites(vm.messagesEl as HTMLElement)
+      const handler = websocketMock.handlers.get('agent_text')!
+      for (const event of chunkEvents(100)) handler(event)
+
+      // Nothing commits before the frame fires: the whole burst lands in one
+      // ordered flush instead of one hundred reactive commits.
+      expect((vm.messages as any[]).filter((message: any) => message.type === 'agent_text')).toHaveLength(0)
+
+      await nextFrame()
+      await wrapper.vm.$nextTick()
+
+      const liveTexts = (vm.messages as any[]).filter((message: any) => message.type === 'agent_text')
+      expect(liveTexts).toHaveLength(1)
+      expect(liveTexts[0].content).toBe(baselineText.content)
+      expect(liveTexts[0].streaming).toBe(false)
+      expect(scrollWrites()).toBe(1)
+      wrapper.unmount()
+    })
+
+    test('control events flush earlier content and keep wire order', () => {
+      const wrapper = shallowMount(SessionDetail)
+      const vm = wrapper.vm as any
+      const handler = (type: string) => websocketMock.handlers.get(type)!
+
+      handler('agent_text')({
+        type: 'agent_text', session_id: 'ses_1', stream_id: 'boundary-stream',
+        chunk_seq: 0, byte_offset: 0, streaming: true, final: false, text: 'A',
+      })
+      handler('tool_call')({ type: 'tool_call', session_id: 'ses_1', call_id: 'call-1', tool: 'Bash', input: {} })
+      handler('agent_text')({
+        type: 'agent_text', session_id: 'ses_1', stream_id: 'boundary-stream',
+        chunk_seq: 1, byte_offset: 1, streaming: true, final: false, text: 'B',
+      })
+      handler('approval_request')({ type: 'approval_request', session_id: 'ses_1', request_id: 'req-1', tool: 'Bash' })
+
+      expect((vm.messages as any[]).map((message: any) => message.type))
+        .toEqual(['agent_text', 'tool_call', 'approval_request'])
+      const texts = (vm.messages as any[]).filter((message: any) => message.type === 'agent_text')
+      expect(texts).toHaveLength(1)
+      expect(texts[0].content).toBe('AB')
+      // The approval card is live without waiting for the next frame.
+      expect(vm.messages.find((message: any) => message.type === 'approval_request')).toMatchObject({
+        status: 'pending', request_id: 'req-1',
+      })
+      wrapper.unmount()
+    })
+
+    test('switching sessions drops the previous session pending batch', async () => {
+      const wrapper = shallowMount(SessionDetail)
+      const vm = wrapper.vm as any
+      const handler = websocketMock.handlers.get('agent_text')!
+      handler({
+        type: 'agent_text', session_id: 'ses_1', stream_id: 'isolation-stream',
+        chunk_seq: 0, byte_offset: 0, streaming: true, final: false, text: 'old-session-content',
+      })
+
+      routeMock.current.params.id = 'ses_2'
+      await wrapper.vm.$nextTick()
+      await nextFrame()
+      await wrapper.vm.$nextTick()
+
+      expect((vm.messages as any[]).some((message: any) => message.type === 'agent_text')).toBe(false)
+
+      handler({
+        type: 'agent_text', session_id: 'ses_2', stream_id: 'isolation-stream-2',
+        chunk_seq: 0, byte_offset: 0, streaming: true, final: false, text: 'new-session-content',
+      })
+      await nextFrame()
+      await wrapper.vm.$nextTick()
+      const texts = (vm.messages as any[]).filter((message: any) => message.type === 'agent_text')
+      expect(texts).toHaveLength(1)
+      expect(texts[0].content).toBe('new-session-content')
+      wrapper.unmount()
+    })
+
+    test('keeps the reading position while the user is away from the bottom', async () => {
+      const wrapper = shallowMount(SessionDetail)
+      const vm = wrapper.vm as any
+      vm.allSessions = [{ session_id: 'ses_1', daemon_id: 'daemon-1', status: 'running' }]
+      await wrapper.vm.$nextTick()
+      vm.autoScroll = false
+      await wrapper.vm.$nextTick()
+      const scrollWrites = countScrollWrites(vm.messagesEl as HTMLElement)
+      const handler = websocketMock.handlers.get('agent_text')!
+      for (const event of chunkEvents(100)) handler(event)
+      await nextFrame()
+      await wrapper.vm.$nextTick()
+
+      const texts = (vm.messages as any[]).filter((message: any) => message.type === 'agent_text')
+      const expectedLength = chunkEvents(100).map(event => event.text).join('').length
+      expect(texts).toHaveLength(1)
+      expect(texts[0].content).toHaveLength(expectedLength)
+      expect(vm.autoScroll).toBe(false)
+      expect(scrollWrites()).toBe(0)
+      expect(wrapper.find('.scroll-to-bottom').exists()).toBe(true)
+
+      await wrapper.find('.scroll-to-bottom').trigger('click')
+      expect(scrollWrites()).toBe(1)
+      expect(vm.autoScroll).toBe(true)
+      wrapper.unmount()
+    })
+  })
 })

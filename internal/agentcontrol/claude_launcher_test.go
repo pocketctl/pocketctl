@@ -564,3 +564,69 @@ func equalStringSlicesAgent(a, b []string) bool {
 	}
 	return true
 }
+
+func TestResolveLauncherClaudeTempHomeRejectsRealHomeShim(t *testing.T) {
+	f := newLauncherResolutionFixture(t, AgentClaudeCLI, "")
+	f.isolate(t, f.shimDir, f.realDir)
+
+	got, err := resolveLauncherClaude()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sameFile(got, f.shim) {
+		t.Fatalf("resolver returned the PocketCtl-owned shim from the real HOME: %q", got)
+	}
+	if !sameFile(got, f.real) {
+		t.Fatalf("resolver path=%q, want real candidate %q", got, f.real)
+	}
+	f.assertShimNeverExecuted(t)
+}
+
+func TestResolveLauncherClaudeOnlyOwnedShimFailsBounded(t *testing.T) {
+	f := newLauncherResolutionFixture(t, AgentClaudeCLI, "")
+	f.isolate(t, f.shimDir)
+
+	started := time.Now()
+	got, err := resolveLauncherClaude()
+	if !errors.Is(err, ErrClaudeNotFound) {
+		t.Fatalf("error=%v path=%q, want ErrClaudeNotFound", err, got)
+	}
+	if elapsed := time.Since(started); elapsed > 2*time.Second {
+		t.Fatalf("resolution took %v, want bounded failure", elapsed)
+	}
+	f.assertShimNeverExecuted(t)
+}
+
+func TestResolveLauncherClaudeUsesValidatedWrapperHint(t *testing.T) {
+	f := newLauncherResolutionFixture(t, AgentClaudeCLI, "")
+	f.isolate(t, f.shimDir) // only the owned shim is discoverable
+	t.Setenv("POCKETCTL_AGENT_REAL_BINARY", f.real)
+
+	got, err := resolveLauncherClaude()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !sameFile(got, f.real) {
+		t.Fatalf("resolver path=%q, want validated hint target %q", got, f.real)
+	}
+	if sameFile(got, f.shim) {
+		t.Fatalf("resolver returned the owned shim despite a valid hint")
+	}
+}
+
+func TestResolveLauncherClaudeRejectsOwnedShimHint(t *testing.T) {
+	f := newLauncherResolutionFixture(t, AgentClaudeCLI, "")
+	f.isolate(t, f.shimDir, f.realDir)
+	t.Setenv("POCKETCTL_AGENT_REAL_BINARY", f.shim)
+
+	got, err := resolveLauncherClaude()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sameFile(got, f.shim) {
+		t.Fatalf("resolver returned the owned shim from an unvalidated hint")
+	}
+	if !sameFile(got, f.real) {
+		t.Fatalf("resolver path=%q, want filtered discovery to select %q", got, f.real)
+	}
+}

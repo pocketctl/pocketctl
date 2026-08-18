@@ -97,8 +97,10 @@ type BinaryResolver struct {
 
 func NewBinaryResolver() BinaryResolver {
 	return BinaryResolver{
-		Timeout:      2 * time.Second,
-		ResolveAgent: discovery.ResolveAgentExcluding,
+		Timeout: 2 * time.Second,
+		ResolveAgent: func(name string, excluded ...string) (string, bool, bool) {
+			return discovery.ResolveAgentFiltered(name, acceptRealAgentCandidate, excluded...)
+		},
 		RunVersion: func(ctx context.Context, path string) (string, error) {
 			out, err := exec.CommandContext(ctx, path, "--version").CombinedOutput()
 			return strings.TrimSpace(string(out)), err
@@ -137,7 +139,20 @@ func ResolveClaude(excluded ...string) (string, string, error) {
 // bounded version probe.
 func ResolveClaudeExecutableFast(excluded ...string) (string, error) {
 	excluded = append(excluded, defaultClaudeShimPath())
-	path, _, found := discovery.ResolveAgentExcluding(AgentClaudeCLI, compactPaths(excluded)...)
+	// Record the safety event once per top-level resolution attempt, not per
+	// rejected PATH candidate.
+	ownedRejected := false
+	filter := func(candidate, resolved string) bool {
+		if !acceptRealAgentCandidate(candidate, resolved) {
+			ownedRejected = true
+			return false
+		}
+		return true
+	}
+	path, _, found := discovery.ResolveAgentFiltered(AgentClaudeCLI, filter, compactPaths(excluded)...)
+	if ownedRejected {
+		_ = RecordLauncherSafety("owned_shim_rejected")
+	}
 	if !found {
 		return "", ErrClaudeNotFound
 	}
@@ -183,6 +198,15 @@ func (r BinaryResolver) resolve(agent string, cfg AgentConfig, notFound, version
 		}
 	}
 
+	// A generated v3 wrapper records the real binary it validated at install
+	// time. The hint is validated exactly like a configured path and never
+	// overrides a working configuration.
+	if hint, ok := validatedLauncherRealBinaryHint(); ok {
+		if path, version, err := r.validate(hint, excluded, notFound, versionError, timeoutError); err == nil {
+			return path, version, nil
+		}
+	}
+
 	path, _, found := r.ResolveAgent(agent, compactPaths(excluded)...)
 	if !found {
 		if storedErr != nil && !errors.Is(storedErr, notFound) {
@@ -218,6 +242,11 @@ func (r BinaryResolver) validate(path string, excluded []string, notFound, versi
 			return "", "", notFound
 		}
 		return "", "", err
+	}
+	// A configured or hinted path that is itself a PocketCtl-owned shim is
+	// rejected before any version probe could execute it.
+	if !acceptRealAgentCandidate(path, resolved) {
+		return "", "", notFound
 	}
 	for _, blocked := range excluded {
 		blockedResolved, blockedInfo, blockedErr := inspectPath(blocked)

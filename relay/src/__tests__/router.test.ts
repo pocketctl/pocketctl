@@ -7,6 +7,7 @@ process.env.DAEMON_REVOCATION_CHECK_TIMEOUT_MS = '20'
 process.env.DAEMON_REVOCATION_GATE_MAX_MESSAGES = '4'
 process.env.DAEMON_REVOCATION_GATE_MAX_BYTES = '1024'
 import { Router } from '../router.js'
+import * as db from '../db.js'
 import { checkpointKey } from '../ingress/controller.js'
 
 function createNamedMockPools() {
@@ -24,6 +25,19 @@ function createMockPool(eventInsertIDs?: number[]) {
       let result: any = { rows: [], rowCount: 0 }
       if (sql.includes('SELECT column_name')) {
         result = { rows: [{ column_name: 'last_activity_at' }, { column_name: 'exit_reason' }] }
+      } else if (sql.includes('session_allowed')) {
+        // Daemon-session ownership probe. The generic mock treats every
+        // session as owned by the requesting daemon; auth-specific behaviour
+        // is exercised by the ownership pool override in the security tests.
+        result = { rows: [{ session_exists: true, session_allowed: true }], rowCount: 1 }
+      } else if (sql.includes('ORDER BY session_id FOR UPDATE')) {
+        // renameOwnedDaemonSession lock: every id resolves to a legacy
+        // null-owner row bound to the generic daemon-1.
+        const locked = (params || []).map((id) => ({ session_id: id, user_id: null, daemon_id: 'daemon-1' }))
+        result = { rows: locked, rowCount: locked.length }
+      } else if (sql.includes('INSERT INTO sessions') && sql.includes('RETURNING session_id')) {
+        // Guarded session upserts report a successful owner-checked write.
+        result = { rows: [{ session_id: params?.[0] }], rowCount: 1 }
       } else if (sql.includes('SELECT 1 FROM sessions')) {
         // isSessionOwnedByUser: ownership gate. The mock treats every session as
         // owned by the requesting user (auth-specific behaviour is exercised by
@@ -277,7 +291,8 @@ test('durable ingress receipt-only title events share the Inbox ACK owner', asyn
     seq: 1,
   })
   const flushing = (router as any).durableIngress.flushNow()
-  await Promise.resolve()
+  // The title path now authorizes against the DB before running its effect.
+  await tick()
 
   expect(titleEffect).toHaveBeenCalledOnce()
   expect(repository.persistBatch).toHaveBeenCalledWith([
@@ -392,9 +407,11 @@ describe.each([
   { mode: 'canary' as const, canaryDaemonIds: ['durable-session-error'] },
 ])('durable ingress $mode session error routing', ({ mode, canaryDaemonIds }) => {
   test.each([
-    { shape: 'ordinary non-empty string', sessionId: 'session-1' },
-    { shape: 'non-empty whitespace string', sessionId: '   ' },
-  ])('accepts $shape into Inbox', async ({ sessionId }) => {
+    // Padded identities are not valid daemon session ids: they normalize to
+    // null and route as host-level errors instead of session-scoped ones.
+    { shape: 'ordinary non-empty string', sessionId: 'session-1', inboxSessionId: 'session-1', originGetsError: false },
+    { shape: 'non-empty whitespace string', sessionId: '   ', inboxSessionId: null, originGetsError: true },
+  ])('accepts $shape into Inbox', async ({ sessionId, inboxSessionId, originGetsError }) => {
     const persisted = deferred<void>()
     const repository = {
       seedCheckpoint: vi.fn(async () => ({
@@ -425,14 +442,20 @@ describe.each([
     await flushing
 
     expect(repository.persistBatch).toHaveBeenCalledWith([
-      expect.objectContaining({ eventType: 'error', sessionId, payload }),
+      expect.objectContaining({ eventType: 'error', sessionId: inboxSessionId, payload }),
     ])
     expect(durableAccept).toHaveBeenCalledWith(
       expect.objectContaining({ daemonId: 'durable-session-error' }),
       payload,
       expect.objectContaining({ hostname: 'h' }),
     )
-    expect(originWs._sent).toEqual([])
+    if (originGetsError) {
+      // A whitespace-only identity is not a session: the error routes as
+      // host-level and reaches the pending session-create origin client.
+      expect(originWs._sent).toEqual([payload])
+    } else {
+      expect(originWs._sent).toEqual([])
+    }
   })
 })
 
@@ -713,7 +736,33 @@ describe('Router - daemon disconnect', () => {
     expect(disconnectUpdate).toBeUndefined()
   })
 
-  test('session_id_changed ensures real Codex id remains a daemon session', async () => {
+  test('session_id_changed renames the owned temp id onto the real Codex id', async () => {
+    const renameQueries: { sql: string; params: any[] }[] = []
+    const pool: any = {
+      query: vi.fn(async (sql: string, params?: any[]) => {
+        renameQueries.push({ sql, params: params || [] })
+        if (sql.includes('ORDER BY session_id FOR UPDATE')) {
+          // Only the temp id exists; the real Codex id is free.
+          const ids = params || []
+          const rows = ids.filter((id) => id === 'temp-id')
+            .map((id) => ({ session_id: id, user_id: null, daemon_id: 'daemon-1' }))
+          return { rows, rowCount: rows.length }
+        }
+        if (sql.includes('INSERT INTO events')) {
+          return { rows: [{ id: 1, inserted: true, effect_status: 'pending', effect_step: 0 }], rowCount: 1 }
+        }
+        if (sql.includes('session_allowed')) {
+          return { rows: [{ session_exists: true, session_allowed: true }], rowCount: 1 }
+        }
+        if (sql.includes('SELECT effect_status')) {
+          return { rows: [{ effect_status: 'pending', effect_step: 0 }], rowCount: 1 }
+        }
+        return { rows: [], rowCount: 1 }
+      }),
+      connect: vi.fn(async () => ({ query: (sql: string, params?: any[]) => pool.query(sql, params), release: vi.fn() })),
+      _queries: renameQueries,
+    }
+    const router = new Router(pool)
     const daemonWs = createMockWs()
     await router.registerDaemon(daemonWs, { type: 'register', daemon_id: 'daemon-1', hostname: 'test', agents: [] }, 7)
 
@@ -724,13 +773,13 @@ describe('Router - daemon disconnect', () => {
     })
     await tick()
 
-    const identityInsert = pool._queries.find((q: any) =>
-      q.sql.includes('INSERT INTO sessions') &&
-      q.sql.includes("source = 'daemon'") &&
-      q.params[0] === 'real-codex-id'
-    )
-    expect(identityInsert).toBeDefined()
-    expect(identityInsert.params).toEqual(['real-codex-id', 'daemon-1', 7])
+    const rename = renameQueries.find((q) =>
+      q.sql.includes('UPDATE sessions SET') && q.sql.includes('session_id = $2'))
+    expect(rename).toBeDefined()
+    expect(rename?.params).toEqual(['temp-id', 'real-codex-id', 'daemon-1', 7])
+    const eventsMove = renameQueries.find((q) =>
+      q.sql.includes('UPDATE events SET session_id = $2'))
+    expect(eventsMove).toBeDefined()
   })
 })
 
@@ -1559,6 +1608,15 @@ describe('Router - event delivery dedup + ack', () => {
   },
   )
 
+  // Fence/authorization infrastructure that necessarily runs for every
+  // daemon event; it is not a business side effect.
+  const infraQuery = (sql: string) =>
+    sql.includes('INSERT INTO events')
+    || sql.includes('SELECT 1 FROM deleted_sessions')
+    || sql === 'BEGIN' || sql === 'COMMIT' || sql === 'ROLLBACK'
+    || sql.includes('pg_advisory_xact_lock')
+    || sql.includes('session_allowed')
+
   test.each([
   { type: 'session_id_changed', extra: { old_session_id: 'old-sess' } },
   { type: 'session_created', extra: { title: 'Created' } },
@@ -1582,9 +1640,7 @@ describe('Router - event delivery dedup + ack', () => {
   })
   await tick()
 
-  const nonEventWrites = conflictPool._queries.filter((q: any) =>
-    !q.sql.includes('INSERT INTO events') && !q.sql.includes('SELECT 1 FROM deleted_sessions'),
-  )
+  const nonEventWrites = conflictPool._queries.filter((q: any) => !infraQuery(q.sql))
   expect(nonEventWrites).toEqual([])
   expect((r as any).sessionToDaemon.has('new-sess')).toBe(false)
   expect((r as any).clients.get(clientWs).subscribedSessions.has('new-sess')).toBe(false)
@@ -1630,6 +1686,9 @@ describe('Router - event delivery dedup + ack', () => {
   r.handleDaemonMessage('daemon-1', { type: 'session_model_changed', session_id: 'sess-1', event_id: 'model:first', model: 'first', seq: 1 })
   r.handleDaemonMessage('daemon-1', { type: 'session_agent_changed', session_id: 'sess-1', event_id: 'agent:build', current_agent: 'build', seq: 2 })
 
+  // The session fence defers the INSERT behind a pool.connect microtask;
+  // flush before releasing so both pending writes exist.
+  await tick()
   releases.get(2)!({ rows: [{ id: 2 }] })
   await tick()
   expect(updates).toEqual([])
@@ -1774,6 +1833,7 @@ describe('Router - event delivery dedup + ack', () => {
     const event = { type: 'agent_text', session_id: 'sess-1', event_id: 'same', text: 'hello', seq: 1 }
     r.handleDaemonMessage('daemon-1', event)
     r.handleDaemonMessage('daemon-1', event)
+    await tick()
     expect(inserts).toBe(1)
     releaseInsert({ rows: [{ id: 1 }] })
     await tick()
@@ -2535,6 +2595,9 @@ describe('Router - event delivery dedup + ack', () => {
         if (sql.includes('RETURNING daemon_id')) {
           return Promise.resolve({ rows: [{ daemon_id: 'daemon-1' }], rowCount: 1 })
         }
+        if (sql.includes('session_allowed')) {
+          return Promise.resolve({ rows: [{ session_exists: true, session_allowed: true }], rowCount: 1 })
+        }
         if (sql.includes('INSERT INTO events')) {
           return new Promise((res) => { releaseInsert = () => res({ rows: [{ id: 1 }] }) })
         }
@@ -2549,7 +2612,9 @@ describe('Router - event delivery dedup + ack', () => {
     await r.registerDaemon(daemonWs, { type: 'register', daemon_id: 'daemon-1', hostname: 'h', agents: [], started_at: 100 }, null)
 
     r.handleDaemonMessage('daemon-1', { type: 'agent_text', session_id: 'sess-1', text: 'x', seq: 1 })
-    // Persist still in flight → ack must NOT cover seq 1 yet.
+    // The fence opens the write behind a connect microtask; flush so the
+    // INSERT is pending, then verify the ack withholds while it is in flight.
+    await tick()
     daemonWs._sent.length = 0
     r.handleDaemonMessage('daemon-1', { type: 'ping' })
     expect(daemonWs._sent.find((m: any) => m.type === 'event_ack')).toBeUndefined()
@@ -3465,5 +3530,225 @@ describe('Router - list_daemons restart grace', () => {
     expect(list.daemons[0].daemon_online).toBe(false)
     expect(list.daemons[0].status).toBe('offline')
     delete process.env.RELAY_LIST_GRACE_MS
+  })
+})
+
+// C1: title generation must never reach the LLM provider during tests.
+vi.mock('../title.js', () => ({
+  generateTitle: vi.fn(async () => 'Mocked Title'),
+  generateSubagentTitle: vi.fn(async () => 'Mocked Subagent Title'),
+}))
+import { generateTitle, generateSubagentTitle } from '../title.js'
+
+describe('Router - daemon session ownership enforcement', () => {
+  const ATTACKER_DAEMON = 'daemon-attacker'
+  const ATTACKER_USER = 2
+
+  /** createMockPool plus a daemon-session ownership probe answer map. */
+  function createOwnershipPool(
+    sessions: Record<string, { user_id?: number | null; daemon_id?: string | null }>,
+  ) {
+    const pool = createMockPool()
+    const original = pool.query
+    pool.query = vi.fn(async (sql: string, params?: any[]) => {
+      if (sql.includes('session_allowed')) {
+        // Mirror the SQL rule: params are [sessionId, userId, daemonId].
+        const row = sessions[params?.[0] ?? '']
+        const userId = params?.[1] ?? null
+        const daemonId = String(params?.[2] ?? '')
+        const allowed = row
+          ? userId !== null
+            ? row.user_id === userId || (row.user_id == null && row.daemon_id === daemonId)
+            : row.user_id == null && row.daemon_id === daemonId
+          : false
+        return { rows: [{ session_exists: Boolean(row), session_allowed: allowed }], rowCount: 1 }
+      }
+      return original(sql, params)
+    })
+    return pool
+  }
+
+  function victimPool() {
+    return createOwnershipPool({
+      'victim-session': { user_id: 1, daemon_id: 'daemon-victim' },
+      'attacker-session': { user_id: ATTACKER_USER, daemon_id: ATTACKER_DAEMON },
+    })
+  }
+
+  async function registerAttacker(router: Router) {
+    const attackerWs = createMockWs()
+    await router.registerDaemon(attackerWs, {
+      type: 'register', daemon_id: ATTACKER_DAEMON, hostname: 'attacker-host', agents: [], started_at: 17,
+    }, ATTACKER_USER)
+    attackerWs._sent.length = 0
+    return attackerWs
+  }
+
+  function subscribeVictimClient(router: Router) {
+    const clientWs = createMockWs()
+    router.registerClient(clientWs, 1)
+    router.handleClientMessage(clientWs, { type: 'set_locale', session_id: 'victim-session', locale: 'zh' })
+    clientWs._sent.length = 0
+    return clientWs
+  }
+
+  test('attacker daemon cannot inject canonical events into a foreign session', async () => {
+    const pool = victimPool()
+    const router = new Router(pool)
+    await registerAttacker(router)
+
+    router.handleDaemonMessage(ATTACKER_DAEMON, {
+      type: 'agent_text', session_id: 'victim-session', text: 'injected', seq: 1,
+    })
+    await tick()
+
+    const injected = pool._queries.filter((q: any) => q.sql.includes('INSERT INTO events'))
+    expect(injected).toHaveLength(0)
+  })
+
+  test('attacker daemon cannot take over routing of a foreign session', async () => {
+    const pool = victimPool()
+    const router = new Router(pool)
+    const attackerWs = await registerAttacker(router)
+    const victimClient = subscribeVictimClient(router)
+    ;(router as any).sessionToDaemon.set('victim-session', 'daemon-victim')
+
+    for (const payload of [
+      { type: 'session_created', session_id: 'victim-session', title: 'Hijacked' },
+      { type: 'session_discovered', session_id: 'victim-session', agent: 'codex' },
+      { type: 'session_status', session_id: 'victim-session', status: 'completed' },
+      { type: 'subagent_discovered', session_id: 'victim-session', agent: 'codex', agent_id: 'child' },
+    ]) {
+      router.handleDaemonMessage(ATTACKER_DAEMON, payload)
+      await tick()
+    }
+
+    expect((router as any).sessionToDaemon.get('victim-session')).toBe('daemon-victim')
+    const client = (router as any).clients.get(victimClient)
+    expect(client.subscribedSessions.has('victim-session')).toBe(true)
+    expect(victimClient._sent.filter((m: any) => m.type === 'session_status')).toHaveLength(0)
+    expect(attackerWs._sent).not.toContainEqual(expect.objectContaining({ type: 'event_ack', up_to_seq: 0 }))
+  })
+
+  test('attacker session_id_changed cannot move a foreign session or its subscribers', async () => {
+    const pool = victimPool()
+    const router = new Router(pool)
+    await registerAttacker(router)
+    const victimClient = subscribeVictimClient(router)
+    ;(router as any).sessionToDaemon.set('victim-session', 'daemon-victim')
+    ;(router as any).pendingOriginClient.set('victim-session', victimClient)
+
+    router.handleDaemonMessage(ATTACKER_DAEMON, {
+      type: 'session_id_changed', session_id: 'attacker-new-id', old_session_id: 'victim-session', seq: 1,
+    })
+    await tick()
+
+    expect((router as any).sessionToDaemon.get('victim-session')).toBe('daemon-victim')
+    expect((router as any).sessionToDaemon.has('attacker-new-id')).toBe(false)
+    expect((router as any).pendingOriginClient.get('victim-session')).toBe(victimClient)
+    expect((router as any).pendingOriginClient.has('attacker-new-id')).toBe(false)
+    const client = (router as any).clients.get(victimClient)
+    expect(client.subscribedSessions.has('victim-session')).toBe(true)
+    expect(client.subscribedSessions.has('attacker-new-id')).toBe(false)
+    const moved = pool._queries.filter((q: any) =>
+      q.sql.startsWith('UPDATE sessions') && q.sql.includes('session_id = $1'))
+    expect(moved).toHaveLength(0)
+  })
+
+  test('attacker session_title_update cannot mutate a foreign title and does not stall the ACK spool', async () => {
+    const pool = victimPool()
+    const router = new Router(pool)
+    const attackerWs = await registerAttacker(router)
+
+    router.handleDaemonMessage(ATTACKER_DAEMON, {
+      type: 'session_title_update', session_id: 'victim-session', title: 'Hijacked Title', seq: 1,
+    })
+    await tick()
+
+    const titleUpdate = pool._queries.filter((q: any) =>
+      q.sql.includes('UPDATE sessions SET title'))
+    expect(titleUpdate).toHaveLength(0)
+    router.handleDaemonMessage(ATTACKER_DAEMON, { type: 'ping' })
+    expect(attackerWs._sent).toContainEqual(expect.objectContaining({ type: 'event_ack', up_to_seq: 1 }))
+  })
+
+  test('attacker generate_title_request never reaches title generation or the title row', async () => {
+    const pool = victimPool()
+    const router = new Router(pool)
+    await registerAttacker(router)
+
+    router.handleDaemonMessage(ATTACKER_DAEMON, {
+      type: 'generate_title_request', session_id: 'victim-session',
+      user_message: 'hi', assistant_message: 'there', seq: 1,
+    })
+    await tick()
+
+    expect(vi.mocked(generateTitle)).not.toHaveBeenCalled()
+    const titleUpdate = pool._queries.filter((q: any) => q.sql.includes('UPDATE sessions SET title'))
+    expect(titleUpdate).toHaveLength(0)
+    vi.mocked(generateTitle).mockClear()
+  })
+
+  test('attacker generate_subagent_title_request never reaches subagent title generation', async () => {
+    const pool = victimPool()
+    const router = new Router(pool)
+    await registerAttacker(router)
+    // A default-titled subagent row exists, so the vulnerable path would run
+    // the full generate → update sequence for the foreign victim session.
+    const hasDefault = vi.spyOn(db, 'hasDefaultSubagentTitle').mockResolvedValue(true)
+    const update = vi.spyOn(db, 'updateSubagentTitleIfDefault').mockResolvedValue(true)
+
+    router.handleDaemonMessage(ATTACKER_DAEMON, {
+      type: 'generate_subagent_title_request', session_id: 'victim-session',
+      agent_id: 'child', user_message: 'hi', seq: 1,
+    })
+    await tick()
+
+    expect(vi.mocked(generateSubagentTitle)).not.toHaveBeenCalled()
+    expect(update).not.toHaveBeenCalled()
+    hasDefault.mockRestore()
+    update.mockRestore()
+    vi.mocked(generateSubagentTitle).mockClear()
+  })
+
+  test('an inline ownership rejection does not poison the daemon ACK spool', async () => {
+    const pool = victimPool()
+    const router = new Router(pool)
+    const attackerWs = await registerAttacker(router)
+
+    router.handleDaemonMessage(ATTACKER_DAEMON, {
+      type: 'agent_text', session_id: 'victim-session', text: 'rejected', seq: 1,
+    })
+    await tick()
+    router.handleDaemonMessage(ATTACKER_DAEMON, {
+      type: 'agent_text', session_id: 'attacker-session', text: 'legitimate', seq: 2,
+    })
+    await tick()
+    router.handleDaemonMessage(ATTACKER_DAEMON, { type: 'ping' })
+
+    expect(attackerWs._sent).toContainEqual(expect.objectContaining({ type: 'event_ack', up_to_seq: 2 }))
+    const injected = pool._queries.filter((q: any) =>
+      q.sql.includes('INSERT INTO events') && q.params[0] === 'victim-session')
+    expect(injected).toHaveLength(0)
+    const legitimate = pool._queries.filter((q: any) =>
+      q.sql.includes('INSERT INTO events') && q.params[0] === 'attacker-session')
+    expect(legitimate).toHaveLength(1)
+  })
+
+  test('an inline ownership rejection policy-closes the attacker connection without leaking target metadata', async () => {
+    const pool = victimPool()
+    const router = new Router(pool)
+    const attackerWs = await registerAttacker(router)
+
+    router.handleDaemonMessage(ATTACKER_DAEMON, {
+      type: 'agent_text', session_id: 'victim-session', text: 'rejected', seq: 1,
+    })
+    await tick()
+
+    expect(attackerWs.close).toHaveBeenCalled()
+    const kicked = attackerWs._sent.find((m: any) => m.type === 'kicked' || m.type === 'disconnect')
+    expect(kicked).toBeDefined()
+    expect(JSON.stringify(kicked)).not.toContain('victim-session')
+    expect(JSON.stringify(kicked)).not.toContain('daemon-victim')
   })
 })

@@ -43,7 +43,13 @@ import { Router } from '../router.js'
 
 // Minimal pool: satisfies Router constructor's type but never used for real queries.
 function createMockPool(): any {
-  return { query: vi.fn().mockResolvedValue({ rows: [], rowCount: 0 }) }
+  return {
+    query: vi.fn(async (sql: string) => {
+      // Daemon-session ownership probe: treat every session as owned.
+      if (sql.includes('session_allowed')) return { rows: [{ session_exists: true, session_allowed: true }], rowCount: 1 }
+      return { rows: [], rowCount: 0 }
+    }),
+  }
 }
 
 function createMockWs(): any {

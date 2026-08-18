@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -515,25 +516,42 @@ func TestSetSessionExited_DoesNotAffectOtherSessions(t *testing.T) {
 }
 
 func TestSendMessage_ExitedSession_Allowed(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Unix sentinel CLI fixture")
+	}
 	outputCh := make(chan protocol.DaemonEvent, 32)
 	sm := NewSessionManager(outputCh)
 
 	// Use a PID that is definitely dead (9999999 does not exist)
 	sm.RegisterTerminalSession("exited-sid", "/tmp", 9999999, "", protocol.StatusExited, "")
 
-	// SendMessage should NOT return "session not found"
-	err := sm.SendMessage(context.Background(), "exited-sid", "hello")
-	// It may fail if claude CLI is not available or session data is missing,
-	// but it should NOT return "session not found" or "session busy in terminal"
-	if err != nil && err.Error() == "session not found: exited-sid" {
-		t.Error("SendMessage should not return 'session not found' for exited session")
+	// Sentinel PATH proves no real claude/shim is ever executed; the fake
+	// starter proves no real process is ever spawned.
+	marker := installSentinelResumeCLI(t, "claude")
+	starter := newRecordingResumeStarter()
+	sm.setResumeStarter(starter.call)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	err := sm.SendMessage(ctx, "exited-sid", "hello")
+	defer starter.finishAll()
+	if err != nil {
+		t.Fatalf("SendMessage returned error: %v", err)
 	}
-	if err != nil && err.Error() == "session busy in terminal" {
-		t.Error("SendMessage should not return 'session busy in terminal' for exited session")
+	specs, _ := starter.snapshot()
+	if len(specs) != 1 {
+		t.Fatalf("resume attempts=%d, want exactly one", len(specs))
+	}
+	assertClaudeResumeSpec(t, specs[0], "exited-sid", "hello")
+	if _, err := os.Lstat(marker); !os.IsNotExist(err) {
+		t.Fatalf("sentinel CLI was executed during resume: %v", err)
 	}
 }
 
 func TestSendMessage_ExitedSession_InvalidPID(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Unix sentinel CLI fixture")
+	}
 	outputCh := make(chan protocol.DaemonEvent, 32)
 	sm := NewSessionManager(outputCh)
 
@@ -541,15 +559,24 @@ func TestSendMessage_ExitedSession_InvalidPID(t *testing.T) {
 	// Use a definitely-dead PID
 	sm.RegisterTerminalSession("dead-sid", os.TempDir(), 9999999, "", protocol.StatusIdle, "")
 
-	// SendMessage should attempt resume (process is dead)
-	err := sm.SendMessage(context.Background(), "dead-sid", "test resume")
+	marker := installSentinelResumeCLI(t, "claude")
+	starter := newRecordingResumeStarter()
+	sm.setResumeStarter(starter.call)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	err := sm.SendMessage(ctx, "dead-sid", "test resume")
+	defer starter.finishAll()
 	if err != nil {
-		// Acceptable errors: CLI not found, etc.
-		t.Logf("SendMessage returned error (expected for missing CLI): %v", err)
+		t.Fatalf("SendMessage returned error: %v", err)
 	}
-	// The key assertion: it should NOT be "session busy in terminal"
-	if err != nil && err.Error() == "session busy in terminal" {
-		t.Error("should not return 'session busy' for dead PID")
+	specs, _ := starter.snapshot()
+	if len(specs) != 1 {
+		t.Fatalf("resume attempts=%d, want exactly one", len(specs))
+	}
+	assertClaudeResumeSpec(t, specs[0], "dead-sid", "test resume")
+	if _, err := os.Lstat(marker); !os.IsNotExist(err) {
+		t.Fatalf("sentinel CLI was executed during resume: %v", err)
 	}
 }
 

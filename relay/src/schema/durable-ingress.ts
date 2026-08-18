@@ -37,6 +37,10 @@ export async function initDurableIngressSchema(pool: pg.Pool): Promise<void> {
     ON event_inbox (priority_class, available_at, inbox_id)
     WHERE status = 0;
 
+    CREATE INDEX IF NOT EXISTS idx_event_inbox_stream_unresolved
+    ON event_inbox (daemon_id, daemon_generation, seq, inbox_id)
+    WHERE status IN (0, 1);
+
     CREATE INDEX IF NOT EXISTS idx_event_inbox_completed_cleanup
     ON event_inbox (completed_at, inbox_id)
     WHERE status = 2;

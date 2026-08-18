@@ -1,7 +1,7 @@
 import type pg from 'pg'
 import type { AckCheckpoint, IngressEnvelope, PriorityClass } from './types.js'
 import type { MaterializationContext } from '../materialization/types.js'
-import { inboxPoolWait } from '../metrics.js'
+import { inboxClaimSeconds, inboxPoolWait } from '../metrics.js'
 
 export interface InboxRow {
   inboxId: number;
@@ -420,23 +420,31 @@ export class InboxRepository {
     if (shardCount < 1 || shardIndex < 0 || shardIndex >= shardCount) {
       throw new Error('invalid inbox shard')
     }
-    const result = await this.pool.query<ClaimedRow>(
-      `WITH candidates AS (
-         SELECT inbox_id
+    const claimStartedAt = performance.now()
+    try {
+      const result = await this.pool.query<ClaimedRow>(
+      `WITH stream_heads AS MATERIALIZED (
+         SELECT DISTINCT ON (daemon_id, daemon_generation)
+                inbox_id
          FROM event_inbox
-         WHERE status = 0
-           AND available_at <= NOW()
-           AND MOD(ABS(hashtext(daemon_id)::bigint), $2::bigint) = $3::bigint
-           AND NOT EXISTS (
-             SELECT 1
-             FROM event_inbox earlier
-             WHERE earlier.daemon_id = event_inbox.daemon_id
-               AND earlier.daemon_generation = event_inbox.daemon_generation
-               AND earlier.seq < event_inbox.seq
-               AND earlier.status IN (0, 1)
-           )
-         ORDER BY priority_class ASC, received_at ASC, inbox_id ASC
-         FOR UPDATE SKIP LOCKED
+         WHERE status IN (0, 1)
+         ORDER BY daemon_id ASC,
+                  daemon_generation ASC,
+                  seq ASC,
+                  inbox_id ASC
+       ),
+       candidates AS (
+         SELECT inbox.inbox_id
+         FROM event_inbox inbox
+         JOIN stream_heads head
+           ON head.inbox_id = inbox.inbox_id
+         WHERE inbox.status = 0
+           AND inbox.available_at <= NOW()
+           AND MOD(ABS(hashtext(inbox.daemon_id)::bigint), $2::bigint) = $3::bigint
+         ORDER BY inbox.priority_class ASC,
+                  inbox.received_at ASC,
+                  inbox.inbox_id ASC
+         FOR UPDATE OF inbox SKIP LOCKED
          LIMIT $4
        ),
        claimed AS (
@@ -448,13 +456,17 @@ export class InboxRepository {
            last_error = NULL
        FROM candidates
        WHERE inbox.inbox_id = candidates.inbox_id
+         AND inbox.status = 0
        RETURNING inbox.*
        )
        SELECT * FROM claimed
        ORDER BY priority_class ASC, received_at ASC, inbox_id ASC`,
-      [options.workerId, shardCount, shardIndex, limit],
-    )
-    return result.rows.map(toInboxRow)
+        [options.workerId, shardCount, shardIndex, limit],
+      )
+      return result.rows.map(toInboxRow)
+    } finally {
+      inboxClaimSeconds.observe(Math.max(0, (performance.now() - claimStartedAt) / 1000))
+    }
   }
 
   async reschedule(

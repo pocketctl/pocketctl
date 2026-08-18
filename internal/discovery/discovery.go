@@ -111,6 +111,17 @@ func resolveFrom(candidates []string, statReal func(string) (string, bool), owne
 // resolveFromExcluding applies the normal ownership preference while skipping
 // candidates whose path or resolved target matches an excluded path.
 func resolveFromExcluding(candidates []string, statReal func(string) (string, bool), ownedByUser func(string) bool, excluded []string) (string, bool, bool) {
+	return resolveFromFiltered(candidates, statReal, ownedByUser, excluded, nil)
+}
+
+// CandidateFilter reports whether a candidate path may be selected. It runs
+// after symlink resolution and explicit-path exclusion but before the
+// ownership preference, so returning false removes the candidate entirely.
+type CandidateFilter func(candidatePath, resolvedPath string) bool
+
+// resolveFromFiltered applies the normal ownership preference while skipping
+// excluded paths and candidates rejected by filter.
+func resolveFromFiltered(candidates []string, statReal func(string) (string, bool), ownedByUser func(string) bool, excluded []string, filter CandidateFilter) (string, bool, bool) {
 	excludedPaths := make(map[string]struct{}, len(excluded))
 	for _, path := range excluded {
 		if normalized := normalizePath(path); normalized != "" {
@@ -124,6 +135,9 @@ func resolveFromExcluding(candidates []string, statReal func(string) (string, bo
 			continue
 		}
 		if pathExcluded(c, real, excludedPaths) {
+			continue
+		}
+		if filter != nil && !filter(c, real) {
 			continue
 		}
 		if firstPath == "" {
@@ -186,6 +200,12 @@ func ResolveAgent(cliName string) (string, bool, bool) {
 // ResolveAgentExcluding locates an agent executable without returning a
 // Pocketctl-owned shim (or any other explicitly excluded path/target).
 func ResolveAgentExcluding(cliName string, excluded ...string) (string, bool, bool) {
+	return ResolveAgentFiltered(cliName, nil, excluded...)
+}
+
+// ResolveAgentFiltered locates an agent executable, additionally rejecting
+// every candidate the filter declines.
+func ResolveAgentFiltered(cliName string, filter CandidateFilter, excluded ...string) (path string, manageable bool, found bool) {
 	home, _ := config.HomeDir()
 	cands := candidatePaths(cliName, home, os.Getenv("PATH"), npmPrefix())
 	statReal := func(p string) (string, bool) {
@@ -198,7 +218,7 @@ func ResolveAgentExcluding(cliName string, excluded ...string) (string, bool, bo
 		}
 		return real, true
 	}
-	return resolveFromExcluding(cands, statReal, fileOwnedByCurrentUser, excluded)
+	return resolveFromFiltered(cands, statReal, fileOwnedByCurrentUser, excluded, filter)
 }
 
 // AgentUpgradeInfo returns the upgrade command and npm package for an agent type.

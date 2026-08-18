@@ -143,7 +143,7 @@ func (l ClaudeLauncher) Run(ctx context.Context, args []string, cwd string) erro
 		if err != nil {
 			return err
 		}
-		return l.Execute(ExecSpec{Path: binary, Args: plan.NativeArgs, Env: l.Environ(), Dir: plan.CWD})
+		return l.Execute(ExecSpec{Path: binary, Args: plan.NativeArgs, Env: stripLauncherInternalEnv(l.Environ()), Dir: plan.CWD})
 	}
 
 	// LaunchChannel: probe the resolved binary's version before anything else.
@@ -157,11 +157,11 @@ func (l ClaudeLauncher) Run(ctx context.Context, args []string, cwd string) erro
 	// explicit enable still must pass version/org/capability gates.
 	if !claudeChannelRolloutEnabled() {
 		fmt.Fprintf(l.Stderr, "pocketctl: Claude Channel approval is disabled; starting native Claude\n")
-		return l.Execute(ExecSpec{Path: binary, Args: args, Env: l.Environ(), Dir: plan.CWD})
+		return l.Execute(ExecSpec{Path: binary, Args: args, Env: stripLauncherInternalEnv(l.Environ()), Dir: plan.CWD})
 	}
 	if !claudeChannelDevelopmentEnabled() {
 		fmt.Fprintf(l.Stderr, "pocketctl: Claude development Channel is not enabled; starting native Claude\n")
-		return l.Execute(ExecSpec{Path: binary, Args: args, Env: l.Environ(), Dir: plan.CWD})
+		return l.Execute(ExecSpec{Path: binary, Args: args, Env: stripLauncherInternalEnv(l.Environ()), Dir: plan.CWD})
 	}
 
 	// One total budget covers every optional enhancement step. Native binary
@@ -171,14 +171,19 @@ func (l ClaudeLauncher) Run(ctx context.Context, args []string, cwd string) erro
 	version, versionErr := claudeBinaryVersion(enhanceCtx, binary, l.Probe)
 	if versionErr != nil || !SupportsClaudeChannelVersion(version) {
 		fmt.Fprintf(l.Stderr, "pocketctl: Claude version does not support channel relay; starting native Claude\n")
-		return l.Execute(ExecSpec{Path: binary, Args: args, Env: l.Environ(), Dir: plan.CWD})
+		return l.Execute(ExecSpec{Path: binary, Args: args, Env: stripLauncherInternalEnv(l.Environ()), Dir: plan.CWD})
 	}
 
 	// Bootstrap within the strict 200ms budget. Any error → native fallback.
 	result, err := l.Bootstrap(enhanceCtx)
 	if err != nil {
+		if errors.Is(err, context.DeadlineExceeded) {
+			// Total connect+write+read budget exceeded; count once here and
+			// nowhere else so the same timeout is never double-counted.
+			_ = RecordLauncherSafety("bootstrap_timeout")
+		}
 		fmt.Fprintf(l.Stderr, "pocketctl: Claude Channel bootstrap unavailable; starting native Claude (%s)\n", oneLine(err.Error()))
-		return l.Execute(ExecSpec{Path: binary, Args: args, Env: l.Environ(), Dir: plan.CWD})
+		return l.Execute(ExecSpec{Path: binary, Args: args, Env: stripLauncherInternalEnv(l.Environ()), Dir: plan.CWD})
 	}
 
 	// Inject: Channel flags PREPENDED to user args (Claude's argv parser
@@ -188,11 +193,11 @@ func (l ClaudeLauncher) Run(ctx context.Context, args []string, cwd string) erro
 		if arg == "--mcp-config" || arg == "--channels" || arg == "--strict-mcp-config" ||
 			len(arg) >= 11 && arg[:11] == "--mcp-config" {
 			fmt.Fprintf(l.Stderr, "pocketctl: user --mcp-config/--channels present; starting native Claude\n")
-			return l.Execute(ExecSpec{Path: binary, Args: args, Env: l.Environ(), Dir: plan.CWD})
+			return l.Execute(ExecSpec{Path: binary, Args: args, Env: stripLauncherInternalEnv(l.Environ()), Dir: plan.CWD})
 		}
 	}
 	injected := claudeInjectChannelArgs(args, result)
-	env := claudeInjectClaimEnv(l.Environ(), result)
+	env := claudeInjectClaimEnv(stripLauncherInternalEnv(l.Environ()), result)
 	spec := ExecSpec{Path: binary, Args: injected, Env: env, Dir: plan.CWD}
 	if l.BindChild != nil {
 		spec.OnStart = func(pid int) error {
@@ -352,15 +357,20 @@ func executeClaudeNative(spec ExecSpec) error {
 	return executeOpenCode(spec)
 }
 
-// resolveLauncherClaude reads the launcher config and falls back to
-// discovery, always excluding the Pocketctl-owned claude shim path.
+// resolveLauncherClaude reads the launcher config, then the validated v3
+// wrapper hint, then falls back to filtered discovery. Every step rejects
+// PocketCtl-owned shims regardless of the current HOME, so a HOME/PATH
+// mismatch cannot resolve the launcher back into itself.
 func resolveLauncherClaude() (string, error) {
 	cfg, err := LoadConfig()
 	if err == nil && cfg.Claude.RealBinary != "" {
-		resolved, _, inspectErr := inspectExecutable(cfg.Claude.RealBinary)
-		if inspectErr == nil && !sameResolvedPath(resolved, cfg.Claude.ShimPath) && !sameResolvedPath(resolved, defaultClaudeShimPath()) {
+		if resolved, ok := validatedRealAgentPath(cfg.Claude.RealBinary); ok &&
+			!sameResolvedPath(resolved, cfg.Claude.ShimPath) && !sameResolvedPath(resolved, defaultClaudeShimPath()) {
 			return resolved, nil
 		}
+	}
+	if hint, ok := validatedLauncherRealBinaryHint(); ok {
+		return hint, nil
 	}
 	return ResolveClaudeExecutableFast()
 }

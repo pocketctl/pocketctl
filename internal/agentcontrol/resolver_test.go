@@ -175,6 +175,77 @@ func testExecutable(t *testing.T, name string) string {
 	return path
 }
 
+// launcherResolutionFixture reproduces the historical incident layout: a
+// temporary HOME with no launcher config while PATH still exposes a
+// PocketCtl-owned shim from a different (simulated real) HOME plus a genuine
+// candidate behind it. Nothing here executes user-installed agents.
+type launcherResolutionFixture struct {
+	dir            string
+	tempHome       string
+	realHome       string
+	shimDir        string
+	realDir        string
+	shim           string
+	real           string
+	shimExecMarker string
+}
+
+func newLauncherResolutionFixture(t *testing.T, cliName, versionOutput string) *launcherResolutionFixture {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("Unix PATH/marker fixture")
+	}
+	f := &launcherResolutionFixture{
+		dir:      t.TempDir(),
+		tempHome: "",
+	}
+	f.tempHome = filepath.Join(f.dir, "temp-home")
+	f.realHome = filepath.Join(f.dir, "real-home")
+	f.shimDir = filepath.Join(f.realHome, ".pocketctl", "bin")
+	f.realDir = filepath.Join(f.realHome, ".local", "bin")
+	for _, d := range []string{f.tempHome, f.shimDir, f.realDir} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	f.shimExecMarker = filepath.Join(f.dir, "shim-executed")
+
+	f.shim = filepath.Join(f.shimDir, cliName)
+	shimBody := "#!/bin/sh\n" + launcherMarkerV2Unix + "\ntouch " + f.shimExecMarker + "\nexit 0\n"
+	if err := os.WriteFile(f.shim, []byte(shimBody), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	f.real = filepath.Join(f.realDir, cliName)
+	realBody := "#!/bin/sh\nprintf '%s\\n' " + testShellQuote(versionOutput) + "\n"
+	if err := os.WriteFile(f.real, []byte(realBody), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return f
+}
+
+func (f *launcherResolutionFixture) isolate(t *testing.T, pathDirs ...string) {
+	t.Helper()
+	t.Setenv("HOME", f.tempHome)
+	pathEnv := ""
+	for _, dir := range pathDirs {
+		if pathEnv != "" {
+			pathEnv += string(os.PathListSeparator)
+		}
+		pathEnv += dir
+	}
+	t.Setenv("PATH", pathEnv)
+	t.Setenv("POCKETCTL_AGENT_REAL_BINARY", "")
+	t.Setenv("POCKETCTL_AGENT_LAUNCH_DEPTH", "")
+}
+
+func (f *launcherResolutionFixture) assertShimNeverExecuted(t *testing.T) {
+	t.Helper()
+	if _, err := os.Lstat(f.shimExecMarker); !os.IsNotExist(err) {
+		t.Fatalf("PocketCtl-owned shim was executed during resolution: %v", err)
+	}
+}
+
 func containsSamePath(paths []string, want string) bool {
 	for _, path := range paths {
 		if sameFile(path, want) {

@@ -47,6 +47,17 @@ var allowedClaudeChannelResultUnknownReasons = map[string]struct{}{
 	"session_ended": {}, "timed_out": {}, "ipc_error": {},
 }
 
+// allowedLauncherSafetyReasons and allowedResumeCleanupReasons enumerate the
+// launcher lifecycle safety counters. Only these content-free labels are
+// ever stored.
+var allowedLauncherSafetyReasons = map[string]struct{}{
+	"owned_shim_rejected": {}, "bootstrap_timeout": {},
+}
+
+var allowedResumeCleanupReasons = map[string]struct{}{
+	"resume_cancelled": {}, "resume_force_killed": {},
+}
+
 // ClaudeTelemetry contains only enumerated counters. There is no schema field
 // capable of storing a session ID, request ID, path, prompt, tool input, or
 // approval answer. The Channel* fields below were added in Task 11 for the
@@ -70,6 +81,12 @@ type ClaudeTelemetry struct {
 	ChannelVerdictSubmitted  map[string]uint64 `json:"channel_verdict_submitted,omitempty"`
 	ChannelResultUnknown     map[string]uint64 `json:"channel_result_unknown,omitempty"`
 	ChannelTerminalProgress  uint64            `json:"channel_terminal_progress,omitempty"`
+
+	// Launcher lifecycle safety counters. Additive, version stays 1: older
+	// files simply initialize empty maps. Every dimension is an enumerated
+	// content-free reason.
+	LauncherSafety map[string]uint64 `json:"launcher_safety,omitempty"`
+	ResumeCleanup  map[string]uint64 `json:"resume_cleanup,omitempty"`
 }
 
 func claudeTelemetryPath() string {
@@ -190,6 +207,31 @@ func RecordClaudeChannelTerminalProgress() error {
 	return updateClaudeTelemetry(func(snapshot *ClaudeTelemetry) { snapshot.ChannelTerminalProgress++ })
 }
 
+// --- Launcher lifecycle safety counters ------------------------------------
+
+// RecordLauncherSafety increments a launcher safety counter (e.g. a resolver
+// refused a PocketCtl-owned shim, or a Channel bootstrap exceeded its total
+// handshake budget). Reasons are enumerated and content-free.
+func RecordLauncherSafety(reason string) error {
+	if _, ok := allowedLauncherSafetyReasons[reason]; !ok {
+		return fmt.Errorf("unsupported launcher safety reason %q", reason)
+	}
+	return updateClaudeTelemetry(func(snapshot *ClaudeTelemetry) {
+		snapshot.LauncherSafety[reason]++
+	})
+}
+
+// RecordResumeCleanup increments a daemon-owned resume cleanup counter
+// (canceled during shutdown, or force killed after the grace period).
+func RecordResumeCleanup(reason string) error {
+	if _, ok := allowedResumeCleanupReasons[reason]; !ok {
+		return fmt.Errorf("unsupported resume cleanup reason %q", reason)
+	}
+	return updateClaudeTelemetry(func(snapshot *ClaudeTelemetry) {
+		snapshot.ResumeCleanup[reason]++
+	})
+}
+
 func LoadClaudeTelemetry() (ClaudeTelemetry, error) {
 	path := claudeTelemetryPath()
 	if path == "" {
@@ -216,6 +258,8 @@ func LoadClaudeTelemetry() (ClaudeTelemetry, error) {
 	snapshot.ChannelVerdictReserved = filterClaudeCounters(snapshot.ChannelVerdictReserved, allowedClaudeChannelVerdictBehaviors)
 	snapshot.ChannelVerdictSubmitted = filterClaudeCounters(snapshot.ChannelVerdictSubmitted, allowedClaudeChannelVerdictBehaviors)
 	snapshot.ChannelResultUnknown = filterClaudeCounters(snapshot.ChannelResultUnknown, allowedClaudeChannelResultUnknownReasons)
+	snapshot.LauncherSafety = filterClaudeCounters(snapshot.LauncherSafety, allowedLauncherSafetyReasons)
+	snapshot.ResumeCleanup = filterClaudeCounters(snapshot.ResumeCleanup, allowedResumeCleanupReasons)
 	return snapshot, nil
 }
 
@@ -229,6 +273,8 @@ func newClaudeTelemetry() ClaudeTelemetry {
 		ChannelVerdictReserved:   make(map[string]uint64),
 		ChannelVerdictSubmitted:  make(map[string]uint64),
 		ChannelResultUnknown:     make(map[string]uint64),
+		LauncherSafety:           make(map[string]uint64),
+		ResumeCleanup:            make(map[string]uint64),
 	}
 }
 

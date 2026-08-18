@@ -591,6 +591,7 @@ import { resolveInteractionReadiness, type InteractionConnectivity } from '../co
 import { canSendClaudeSession } from '../utils/claudeSessionControl'
 import { resolveSessionComposerState } from '../utils/sessionComposerPolicy'
 import { ContentStreamAssembler } from '../utils/contentStream'
+import { createLiveSessionEventBatcher } from '../utils/liveSessionEventBatcher'
 import { ReplayPageBuffer } from '../utils/replayPageBuffer'
 import { useAgentPlanProgress } from '../composables/useAgentPlanProgress'
 import PlanSidePanel from '../components/plan/PlanSidePanel.vue'
@@ -2239,6 +2240,53 @@ function processEvent(evt: any, target: any[] = messages.value, subagentOverride
   }
 }
 
+// --- Live content frame batching -------------------------------------------
+// Managed agents emit dozens of agent_text/agent_reasoning/tool_result chunks
+// per second; reducing each chunk synchronously with its own reactive commit
+// and auto-scroll dominates output latency. Batchable live content is coalesced
+// into one ordered flush per animation frame (plus a short timer fallback for
+// background tabs); every other live event flushes pending content first so
+// control events never reorder ahead of it.
+function isBatchableLiveContent(msg: any): boolean {
+  const type = msg.type || msg.event_type
+  if (type === 'agent_text' || type === 'agent_reasoning') return true
+  if (type === 'tool_result') return Boolean(msg.streaming ?? msg.payload?.streaming)
+  return false
+}
+
+const liveContentContextKey = computed(() => `${sessionId.value || ''}::${focusedSubAgentId.value || ''}`)
+
+const liveContentBatcher = createLiveSessionEventBatcher<any>({
+  flush(events) {
+    if (events.length === 0) return
+    // Capture follow intent before reduction: a user reading history must not
+    // be yanked back to the bottom by output they never followed.
+    const shouldFollow = autoScroll.value
+    for (const evt of events) {
+      processEvent(evt)
+      if ((evt.type || evt.event_type) === 'tool_result') {
+        const callId = evt.call_id || evt.payload?.call_id
+        if (callId) clearToolTimeout(callId)
+      }
+    }
+    if (shouldFollow) nextTick(() => { if (autoScroll.value) scrollToBottom() })
+  },
+})
+
+function enqueueLiveContent(msg: any): void {
+  liveContentBatcher.enqueue(liveContentContextKey.value, msg)
+}
+
+function flushLiveContent(): void {
+  liveContentBatcher.flushNow()
+}
+
+function processImmediateLiveEvent(msg: any, options?: { scroll?: boolean }): void {
+  flushLiveContent()
+  processEvent(msg)
+  if (options?.scroll) nextTick(scrollToBottom)
+}
+
 // Exposed for focused integration tests of the actual event-consumer path.
 defineExpose({ processEvent, messages, status, currentOpenCodeAgent })
 
@@ -2257,6 +2305,7 @@ watch(loadKey, (newKey, oldKey) => {
     interactionResolutions.clear()
     pendingToolResults.clear() // discard buffered out-of-order results
     contentStreams.reset()
+    liveContentBatcher.reset(newKey) // drop live chunks still bound to the old context
     fileChangeReducer.resetTransientStreams()
     fileChangePanelOpen.value = false
     mobileFileChange.value = null
@@ -2408,8 +2457,7 @@ onMounted(() => {
   }))
   cleanups.push(onEvent('command_receipt', (msg: any) => {
     if (msg.session_id !== sessionId.value) return
-    processEvent(msg)
-    nextTick(scrollToBottom)
+    processImmediateLiveEvent(msg, { scroll: true })
   }))
   // session_meta: authoritative model name, in response to get_session_meta.
   // (session_created also carries model as an optimistic early fill below.)
@@ -2537,42 +2585,46 @@ onMounted(() => {
 
   cleanups.push(onEvent('user_text', (msg: any) => {
     if (msg.session_id !== sessionId.value) return
-    processEvent(msg)
-    nextTick(scrollToBottom)
+    processImmediateLiveEvent(msg, { scroll: true })
   }))
 
   cleanups.push(onEvent('agent_text', (msg: any) => {
     if (msg.session_id !== sessionId.value) return
-    processEvent(msg)
-    nextTick(scrollToBottom)
+    enqueueLiveContent(msg)
   }))
 
   cleanups.push(onEvent('agent_plan', (msg: any) => {
     if (msg.session_id !== sessionId.value) return
-    processEvent(msg)
+    processImmediateLiveEvent(msg)
   }))
 
   for (const eventType of ['agent_reasoning', 'agent_retry', 'agent_compaction', 'agent_file_change', ...openCodeStructuredTypes]) {
     cleanups.push(onEvent(eventType, (msg: any) => {
       if (msg.session_id !== sessionId.value) return
-      processEvent(msg)
-      nextTick(scrollToBottom)
+      if (isBatchableLiveContent(msg)) {
+        enqueueLiveContent(msg)
+        return
+      }
+      processImmediateLiveEvent(msg, { scroll: true })
     }))
   }
 
   cleanups.push(onEvent('tool_call', (msg: any) => {
     if (msg.session_id !== sessionId.value) return
-    processEvent(msg)
+    processImmediateLiveEvent(msg, { scroll: true })
     // Arm timeout guard: if no tool_result arrives in time, the card flips to
     // 'timeout' instead of spinning forever (claude died / PTY disconnected).
     const callId = msg.call_id || msg.payload?.call_id
     if (callId) armToolTimeout(callId)
-    nextTick(scrollToBottom)
   }))
 
   cleanups.push(onEvent('tool_result', (msg: any) => {
     if (msg.session_id !== sessionId.value) return
-    processEvent(msg)
+    if (isBatchableLiveContent(msg)) {
+      enqueueLiveContent(msg)
+      return
+    }
+    processImmediateLiveEvent(msg)
     const callId = msg.call_id || msg.payload?.call_id
     if (callId) clearToolTimeout(callId)
   }))
@@ -2583,30 +2635,27 @@ onMounted(() => {
   // them so they show in real time, matching the iOS app's single-dispatch path.
   cleanups.push(onEvent('approval_request', (msg: any) => {
     if (msg.session_id !== sessionId.value) return
-    processEvent(msg)
-    nextTick(scrollToBottom)
+    processImmediateLiveEvent(msg, { scroll: true })
   }))
   cleanups.push(onEvent('approval_resolved', (msg: any) => {
     if (msg.session_id !== sessionId.value) return
-    processEvent(msg)
+    processImmediateLiveEvent(msg)
   }))
   cleanups.push(onEvent('question_request', (msg: any) => {
     if (msg.session_id !== sessionId.value) return
-    processEvent(msg)
-    nextTick(scrollToBottom)
+    processImmediateLiveEvent(msg, { scroll: true })
   }))
   cleanups.push(onEvent('question_resolved', (msg: any) => {
     if (msg.session_id !== sessionId.value) return
-    processEvent(msg)
+    processImmediateLiveEvent(msg)
   }))
   cleanups.push(onEvent('mcp_elicitation_request', (msg: any) => {
     if (msg.session_id !== sessionId.value) return
-    processEvent(msg)
-    nextTick(scrollToBottom)
+    processImmediateLiveEvent(msg, { scroll: true })
   }))
   cleanups.push(onEvent('mcp_elicitation_resolved', (msg: any) => {
     if (msg.session_id !== sessionId.value) return
-    processEvent(msg)
+    processImmediateLiveEvent(msg)
   }))
   cleanups.push(onEvent('interaction_result', (msg: any) => {
     if (msg.session_id !== sessionId.value || !msg.request_id) return
@@ -2630,12 +2679,12 @@ onMounted(() => {
   }))
   cleanups.push(onEvent('interactive_prompt', (msg: any) => {
     if (msg.session_id !== sessionId.value) return
-    processEvent(msg)
-    nextTick(scrollToBottom)
+    processImmediateLiveEvent(msg, { scroll: true })
   }))
 
   cleanups.push(onEvent('subagent_discovered', (msg: any) => {
     if (msg.session_id !== sessionId.value) return
+    flushLiveContent()
     // P2: initialise subagent message bucket so the fold group can render even empty
     const aid = msg.agent_id || 'Agent'
     subagentMessages.value[aid] = subagentMessages.value[aid] || []
@@ -2752,7 +2801,7 @@ onMounted(() => {
     // Native assistant errors are durable events and must share the replay
     // path so live delivery and refresh use the same event-key deduplication.
     if (msg.event_id || msg.message_id || msg.payload?.event_id || msg.payload?.message_id) {
-      processEvent(msg)
+      processImmediateLiveEvent(msg)
     } else {
       messages.value.push({ id: nextId('e'), type: 'error', content: msg.error || '未知错误' })
     }
@@ -2787,6 +2836,7 @@ function onPinned(sessionId: string, pinned: boolean) {
 onUnmounted(() => {
   for (const fn of cleanups) fn()
   cleanups.length = 0
+  liveContentBatcher.dispose()
   document.removeEventListener('click', closePermMenu)
   window.removeEventListener('keydown', onFileChangePanelKeydown)
   if (turnTimer) { clearInterval(turnTimer); turnTimer = null }

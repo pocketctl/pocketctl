@@ -10,20 +10,15 @@ import (
 	"strings"
 )
 
-const unixShimMarker = "# pocketctl-agent-launcher-v2"
+const unixShimMarker = launcherMarkerV2Unix
 
 func installPlatformShim(shimPath, pocketctlPath, agent string, realBinaries ...string) error {
 	realBinary := ""
 	if len(realBinaries) > 0 {
 		realBinary = realBinaries[0]
 	}
-	if info, err := os.Lstat(shimPath); err == nil {
-		owned := sameFilePath(shimPath, pocketctlPath)
-		if !owned && info.Mode().IsRegular() {
-			data, readErr := os.ReadFile(shimPath)
-			owned = readErr == nil && strings.Contains(string(data), unixShimMarker)
-		}
-		if !owned {
+	if _, err := os.Lstat(shimPath); err == nil {
+		if !isPocketctlOwnedShim(shimPath, pocketctlPath) {
 			return ErrForeignShim
 		}
 	} else if !errors.Is(err, os.ErrNotExist) {
@@ -35,8 +30,16 @@ func installPlatformShim(shimPath, pocketctlPath, agent string, realBinaries ...
 		}
 		return nil
 	}
-	body := "#!/bin/sh\n" + unixShimMarker + "\n" +
+	// v3 wrapper: the depth fuse makes a second PocketCtl hop exec the
+	// recorded real binary directly, so re-entry cannot loop forever.
+	body := "#!/bin/sh\n" + launcherMarkerV3Unix + "\n" +
+		"if [ -n \"${POCKETCTL_AGENT_LAUNCH_DEPTH:-}\" ]; then\n" +
+		"  unset POCKETCTL_AGENT_LAUNCH_DEPTH POCKETCTL_AGENT_REAL_BINARY\n" +
+		"  exec " + shellQuote(realBinary) + " \"$@\"\n" +
+		"fi\n" +
 		"if [ -x " + shellQuote(pocketctlPath) + " ]; then\n" +
+		"  POCKETCTL_AGENT_LAUNCH_DEPTH=1 \\\n" +
+		"  POCKETCTL_AGENT_REAL_BINARY=" + shellQuote(realBinary) + " \\\n" +
 		"  exec " + shellQuote(pocketctlPath) + " __agent-launch " + shellQuote(agent) + " \"$@\"\n" +
 		"fi\n" +
 		"exec " + shellQuote(realBinary) + " \"$@\"\n"
@@ -52,12 +55,7 @@ func removePlatformShim(shimPath, pocketctlPath string) error {
 	} else if err != nil {
 		return err
 	}
-	owned := sameFilePath(shimPath, pocketctlPath)
-	if !owned {
-		data, readErr := os.ReadFile(shimPath)
-		owned = readErr == nil && strings.Contains(string(data), unixShimMarker)
-	}
-	if !owned {
+	if !isPocketctlOwnedShim(shimPath, pocketctlPath) {
 		return ErrForeignShim
 	}
 	return os.Remove(shimPath)
@@ -91,12 +89,6 @@ func writeAtomicFile(path string, data []byte, mode os.FileMode) error {
 		return err
 	}
 	return os.Rename(tmpPath, path)
-}
-
-func sameFilePath(left, right string) bool {
-	leftInfo, leftErr := os.Stat(left)
-	rightInfo, rightErr := os.Stat(right)
-	return leftErr == nil && rightErr == nil && os.SameFile(leftInfo, rightInfo)
 }
 
 func ensureLauncherPath(home, binDir, shell string) error {

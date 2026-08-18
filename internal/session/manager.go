@@ -141,6 +141,18 @@ type SessionManager struct {
 	leases                      *agentcontrol.LeaseRegistry
 	recordOpenCodeRuntimeHealth func(bool)
 	trustedActionPolicy         trustedActionPolicyMode
+
+	// resumeStarter spawns daemon-owned one-shot resume processes. Tests
+	// inject fakes; production uses startExecResumeProcess.
+	resumeStarter resumeStarter
+	// resumeCleanupRecorder receives content-free lifecycle reasons from
+	// ShutdownResumeProcesses; wired to telemetry by the daemon.
+	resumeCleanupRecorder func(reason string)
+	// resumeProcesses tracks live daemon-owned one-shot resumes keyed by
+	// session; resumeNextGen disambiguates an old finisher from a new
+	// registration for the same session.
+	resumeProcesses map[string]*ownedResume
+	resumeNextGen   uint64
 }
 
 type createSessionDependencies struct {
@@ -167,6 +179,7 @@ func NewSessionManagerWithTrustedActionPolicy(outputCh chan protocol.DaemonEvent
 		leases:                 agentcontrol.NewLeaseRegistry(),
 		ptyProvider:            defaultPTYProvider,
 		proc:                   defaultProc,
+		resumeProcesses:        make(map[string]*ownedResume),
 		claudeApprovalV2:       claudeApprovalV2Enabled(),
 		claudeApprovals:        make(map[string]*claudeApprovalSession),
 		claudeApprovalResolved: make(map[claudeApprovalKey]time.Time),

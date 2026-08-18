@@ -6,13 +6,14 @@ import {
 } from './ingress/inbox-repository.js'
 import type { EventMaterializer } from './materialization/event-materializer.js'
 import type { RealtimeOutboxWriter } from './materialization/realtime-outbox.js'
-import { observeInboxOldest, workerBacklog, workerBatchSize, workerRetries } from './metrics.js'
+import { observeInboxOldest, workerBacklog, workerBatchSize, workerClaimedRows, workerDrainPasses, workerRetries } from './metrics.js'
 
 const MAX_ATTEMPTS = 12
 const STALE_CLAIM_LEASE_MS = 300_000
 const STALE_CLAIM_SWEEP_LIMIT = 1_000
 const STALE_CLAIM_SWEEP_INTERVAL_MS = 60_000
 const CLAIM_HEARTBEAT_INTERVAL_MS = 100_000
+const DEFAULT_DRAIN_PASSES = 32
 
 export interface InboxWorkerDeps {
   repository: Pick<InboxRepository, 'claimBatch' | 'complete' | 'reschedule' | 'deadLetter' | 'resetStaleClaims' | 'renewClaims'>
@@ -23,6 +24,7 @@ export interface InboxWorkerDeps {
   shardIndex: number
   batchSize?: number
   pollIntervalMs?: number
+  maxDrainPasses?: number
   now?: () => Date
   random?: () => number
   heartbeatIntervalMs?: number
@@ -43,8 +45,18 @@ export function safeMaterializationError(error: unknown): string {
   if (name === 'MaterializationContextError') return 'materialization_context_missing'
   if (name === 'EphemeralMaterializationError') return 'ephemeral_event_rejected'
   const code = error && typeof error === 'object' && 'code' in error ? String(error.code) : ''
+  if (code === 'session_ownership_violation' || code === 'unknown_daemon_session') return code
   if (code.startsWith('08') || code.startsWith('53') || code === '57P01' || code === '57P03') return 'database_unavailable'
   return 'materialization_failed'
+}
+
+/**
+ * Security rejections are permanent: retrying an ownership violation can
+ * never succeed, so the row dead-letters immediately without outbox delivery.
+ */
+export function isPermanentMaterializationError(error: unknown): boolean {
+  const code = error && typeof error === 'object' && 'code' in error ? String(error.code) : ''
+  return code === 'session_ownership_violation' || code === 'unknown_daemon_session'
 }
 
 export function retryDelayMs(attempts: number, random: () => number): number {
@@ -55,6 +67,7 @@ export function retryDelayMs(attempts: number, random: () => number): number {
 export function createInboxWorker(deps: InboxWorkerDeps) {
   const batchSize = Math.max(1, Math.trunc(deps.batchSize ?? 32))
   const pollIntervalMs = Math.max(1, Math.trunc(deps.pollIntervalMs ?? 50))
+  const maxDrainPasses = Math.max(1, Math.trunc(deps.maxDrainPasses ?? DEFAULT_DRAIN_PASSES))
   const now = deps.now ?? (() => new Date())
   const random = deps.random ?? Math.random
   const heartbeatIntervalMs = Math.min(
@@ -67,6 +80,7 @@ export function createInboxWorker(deps: InboxWorkerDeps) {
   let timer: ReturnType<typeof setTimeout> | undefined
   let stopped = true
   let lastRecoveryAt = Number.NEGATIVE_INFINITY
+  let shouldContinueImmediately = false
 
   async function processRow(row: InboxRow, assertClaim: () => Promise<void>): Promise<void> {
     try {
@@ -95,7 +109,7 @@ export function createInboxWorker(deps: InboxWorkerDeps) {
     } catch (error) {
       if (error instanceof LostClaimError) return
       const errorCode = safeMaterializationError(error)
-      if (row.attempts >= MAX_ATTEMPTS) {
+      if (isPermanentMaterializationError(error) || row.attempts >= MAX_ATTEMPTS) {
         try {
           await deps.repository.deadLetter(row.inboxId, row.attempts, errorCode, deps.workerId)
         } catch (writeError) {
@@ -117,7 +131,7 @@ export function createInboxWorker(deps: InboxWorkerDeps) {
     }
   }
 
-  async function processClaimedBatch(): Promise<void> {
+  async function processClaimedBatch(): Promise<number> {
     const rows = await deps.repository.claimBatch({
       workerId: deps.workerId,
       limit: batchSize,
@@ -126,6 +140,7 @@ export function createInboxWorker(deps: InboxWorkerDeps) {
     })
     workerBacklog.set(rows.length)
     workerBatchSize.observe(rows.length)
+    workerClaimedRows.inc(rows.length)
     observeInboxOldest(rows, now())
     const activeClaims = new Map<number, { fence: ClaimFence; owned: boolean }>(
       rows.map((row) => [row.inboxId, {
@@ -181,6 +196,22 @@ export function createInboxWorker(deps: InboxWorkerDeps) {
       if (heartbeatTimer) clearTimer(heartbeatTimer)
       await heartbeatRun
     }
+    return rows.length
+  }
+
+  // Keep claiming while the queue has backlog so a same-daemon stream does not
+  // wait a full poll interval between single-row claims. The budget bounds the
+  // run so stop() and stale-claim maintenance stay responsive; an exhausted
+  // budget with remaining backlog reschedules with a zero delay instead.
+  async function drainClaimedBatches(): Promise<boolean> {
+    let productivePasses = 0
+    for (let pass = 0; pass < maxDrainPasses; pass += 1) {
+      const claimed = await processClaimedBatch()
+      if (claimed === 0) break
+      productivePasses += 1
+    }
+    workerDrainPasses.observe(productivePasses)
+    return productivePasses === maxDrainPasses
   }
 
   async function maybeResetStaleClaims(): Promise<void> {
@@ -195,7 +226,7 @@ export function createInboxWorker(deps: InboxWorkerDeps) {
     timer = setTimer(() => {
       timer = undefined
       void runOnce().then(
-        () => schedule(pollIntervalMs),
+        () => schedule(shouldContinueImmediately ? 0 : pollIntervalMs),
         () => schedule(Math.floor(random() * pollIntervalMs)),
       )
     }, delay)
@@ -204,8 +235,9 @@ export function createInboxWorker(deps: InboxWorkerDeps) {
   async function runOnce(): Promise<void> {
     if (activeRun) return activeRun
     const run = (async () => {
+      shouldContinueImmediately = false
       await maybeResetStaleClaims()
-      await processClaimedBatch()
+      shouldContinueImmediately = await drainClaimedBatches()
     })()
     activeRun = run
     try {

@@ -168,6 +168,72 @@ func TestResolveAgentExcludingNormalizesRelativeExclusion(t *testing.T) {
 	}
 }
 
+func TestResolveFromFilteredRejectsFirstOwnedCandidate(t *testing.T) {
+	candidates := []string{"/shim/claude", "/real/claude"}
+	resolved := map[string]string{
+		"/shim/claude": "/shim/claude",
+		"/real/claude": "/real/claude",
+	}
+	got, _, found := resolveFromFiltered(
+		candidates,
+		func(path string) (string, bool) { return resolved[path], true },
+		func(string) bool { return true },
+		nil,
+		func(candidate, _ string) bool { return candidate != "/shim/claude" },
+	)
+	if !found || got != "/real/claude" {
+		t.Fatalf("resolved (%q,%v), want /real/claude", got, found)
+	}
+}
+
+func TestResolveFromFilteredAllRejectedIsNotFound(t *testing.T) {
+	got, manageable, found := resolveFromFiltered(
+		[]string{"/shim/claude"},
+		func(path string) (string, bool) { return path, true },
+		func(string) bool { return true },
+		nil,
+		func(string, string) bool { return false },
+	)
+	if found || manageable || got != "" {
+		t.Fatalf("resolved (%q,%v,%v), want not found", got, manageable, found)
+	}
+}
+
+func TestResolveAgentFilteredRejectsShimCandidate(t *testing.T) {
+	dir := t.TempDir()
+	shimDir := filepath.Join(dir, "shimbin")
+	realDir := filepath.Join(dir, "realbin")
+	home := filepath.Join(dir, "home")
+	for _, d := range []string{shimDir, realDir, home} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	cliFile := "claude"
+	if runtime.GOOS == "windows" {
+		cliFile = "claude.exe"
+	}
+	shim := filepath.Join(shimDir, cliFile)
+	real := filepath.Join(realDir, cliFile)
+	for _, p := range []string{shim, real} {
+		if err := os.WriteFile(p, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	t.Setenv("HOME", home)
+	t.Setenv("PATH", shimDir+string(os.PathListSeparator)+realDir)
+
+	got, manageable, found := ResolveAgentFiltered(
+		"claude",
+		func(candidate, _ string) bool { return candidate != shim },
+	)
+	if !found || got != real {
+		t.Fatalf("ResolveAgentFiltered = (%q,%v,%v), want real candidate %q", got, manageable, found, real)
+	}
+}
+
 func TestDetectVersionTimesOut(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("shell fixture is Unix-only")

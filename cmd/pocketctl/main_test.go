@@ -12,12 +12,15 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/pocketctl/pocketctl/internal/adapter"
+	"github.com/pocketctl/pocketctl/internal/agentcontrol"
 	"github.com/pocketctl/pocketctl/internal/daemon"
 	"github.com/pocketctl/pocketctl/internal/i18n"
 	"github.com/pocketctl/pocketctl/internal/platform"
@@ -541,9 +544,6 @@ func TestRenderServiceStatusExplainsInstalledButUnloaded(t *testing.T) {
 }
 
 func TestOpenCodeSessionMetaUsesLoadedAuthoritativeState(t *testing.T) {
-	if os.Getenv("POCKETCTL_OPENCODE_SERVE_TEST_HELPER") == "1" {
-		select {}
-	}
 	home := t.TempDir()
 	repo := t.TempDir()
 	t.Setenv("HOME", home)
@@ -560,15 +560,6 @@ func TestOpenCodeSessionMetaUsesLoadedAuthoritativeState(t *testing.T) {
 	if err := os.WriteFile(cli, []byte(cliContents), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	serveProcess := exec.Command(os.Args[0], "-test.run=^TestOpenCodeSessionMetaUsesLoadedAuthoritativeState$")
-	serveProcess.Env = append(os.Environ(), "POCKETCTL_OPENCODE_SERVE_TEST_HELPER=1")
-	if err := serveProcess.Start(); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() {
-		_ = serveProcess.Process.Kill()
-		_, _ = serveProcess.Process.Wait()
-	})
 	serve := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		switch r.URL.Path {
@@ -581,8 +572,12 @@ func TestOpenCodeSessionMetaUsesLoadedAuthoritativeState(t *testing.T) {
 		}
 	}))
 	defer serve.Close()
+	// This test covers metadata restoration through an authenticated handoff.
+	// The adapter package separately covers external PID lifecycle validation,
+	// so use the already-live test process instead of spawning a permanent
+	// helper child whose startup/reaping can flake under parallel package load.
 	if err := daemon.WriteOpenCodeServeState(&daemon.OpenCodeServeState{
-		PID: serveProcess.Process.Pid, BaseURL: serve.URL, Password: "test-secret", Version: "1.2.3",
+		PID: os.Getpid(), BaseURL: serve.URL, Password: "test-secret", Version: "1.2.3",
 		OwnerPID: os.Getpid(), UpdatedAt: time.Now(),
 	}); err != nil {
 		t.Fatal(err)
@@ -1167,4 +1162,234 @@ func TestCodexSubagentDiscoveryEvent(t *testing.T) {
 			}
 		})
 	}
+}
+
+type recordingResumeShutdowner struct {
+	mu       sync.Mutex
+	calls    int
+	err      error
+	deadline time.Time
+	bounded  bool
+}
+
+func (r *recordingResumeShutdowner) ShutdownResumeProcesses(ctx context.Context) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.calls++
+	r.deadline, r.bounded = ctx.Deadline()
+	return r.err
+}
+
+func (r *recordingResumeShutdowner) snapshot() (int, time.Duration) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	budget := time.Duration(0)
+	if r.bounded {
+		budget = time.Until(r.deadline)
+	}
+	return r.calls, budget
+}
+
+func newRestartTestLogger() (*slog.Logger, *bytes.Buffer) {
+	buf := &bytes.Buffer{}
+	return slog.New(slog.NewTextHandler(buf, &slog.HandlerOptions{Level: slog.LevelWarn})), buf
+}
+
+func TestNormalDaemonShutdownDrainsResumeBeforeAgentRuntimes(t *testing.T) {
+	var mu sync.Mutex
+	var order []string
+	record := func(name string) func() {
+		return func() {
+			mu.Lock()
+			defer mu.Unlock()
+			order = append(order, name)
+		}
+	}
+	shutdowner := &recordingResumeShutdowner{}
+
+	runDaemonShutdownSequence(daemonShutdownSteps{
+		ReleaseKeepAwake:  record("keepawake-release"),
+		CloseKeepAwake:    record("keepawake-close"),
+		CloseAgentControl: record("agentcontrol-close"),
+		DrainResumes: func() {
+			_ = drainResumeProcessesBeforeExit(context.Background(), shutdowner, slog.Default())
+			record("drain-resumes")()
+		},
+		ShutdownCodex:     record("codex-shutdown"),
+		StopZCodeObserver: record("zcode-stop"),
+		ShutdownOpencode:  record("opencode-shutdown"),
+	})
+
+	mu.Lock()
+	defer mu.Unlock()
+	want := []string{
+		"keepawake-release", "keepawake-close", "agentcontrol-close",
+		"drain-resumes", "codex-shutdown", "zcode-stop", "opencode-shutdown",
+	}
+	if !reflect.DeepEqual(order, want) {
+		t.Fatalf("shutdown order=%v, want %v", order, want)
+	}
+	if calls, _ := shutdowner.snapshot(); calls != 1 {
+		t.Fatalf("resume drain calls=%d, want 1", calls)
+	}
+}
+
+func TestHotRestartDrainsResumeAfterReplacementReadyBeforeExit(t *testing.T) {
+	var mu sync.Mutex
+	var order []string
+	record := func(name string) func() { return func() { mu.Lock(); defer mu.Unlock(); order = append(order, name) } }
+	shutdowner := &recordingResumeShutdowner{}
+	logger, _ := newRestartTestLogger()
+
+	runDaemonHotRestart(daemonRestartDeps{
+		logger:     logger,
+		activeStop: func() bool { return false },
+		resolveExe: func() (string, error) { return "/pocketctl", nil },
+		prepare:    func() error { return nil },
+		spawnReplacement: func(string) (restartChildHandle, error) {
+			record("spawn")()
+			return restartChildHandle{pid: 4242}, nil
+		},
+		awaitReady: func(restartChildHandle) error {
+			record("ready")()
+			return nil
+		},
+		alive:            func(restartChildHandle) bool { return true },
+		terminate:        func(restartChildHandle) { record("terminate")() },
+		resumeShutdowner: shutdowner,
+		exit:             func() { record("exit")() },
+	})
+
+	mu.Lock()
+	defer mu.Unlock()
+	want := []string{"spawn", "ready", "exit"}
+	if !reflect.DeepEqual(order, want) {
+		t.Fatalf("restart order=%v, want %v (drain must complete before exit)", order, want)
+	}
+	if calls, _ := shutdowner.snapshot(); calls != 1 {
+		t.Fatalf("resume drain calls=%d, want 1", calls)
+	}
+}
+
+func TestHotRestartLogsTimeoutAndStillExitsAfterForceCleanup(t *testing.T) {
+	var mu sync.Mutex
+	exited := false
+	shutdowner := &recordingResumeShutdowner{err: errors.New("resume shutdown: 1 of 1 owned processes were not reaped")}
+	logger, buf := newRestartTestLogger()
+
+	runDaemonHotRestart(daemonRestartDeps{
+		logger:     logger,
+		activeStop: func() bool { return false },
+		resolveExe: func() (string, error) { return "/pocketctl", nil },
+		prepare:    func() error { return nil },
+		spawnReplacement: func(string) (restartChildHandle, error) {
+			return restartChildHandle{pid: 4242}, nil
+		},
+		awaitReady:       func(restartChildHandle) error { return nil },
+		alive:            func(restartChildHandle) bool { return true },
+		terminate:        func(restartChildHandle) {},
+		resumeShutdowner: shutdowner,
+		exit: func() {
+			mu.Lock()
+			defer mu.Unlock()
+			exited = true
+		},
+	})
+
+	mu.Lock()
+	defer mu.Unlock()
+	if !exited {
+		t.Fatal("daemon must still exit after an incomplete resume cleanup")
+	}
+	if calls, _ := shutdowner.snapshot(); calls != 1 {
+		t.Fatalf("resume drain calls=%d, want 1", calls)
+	}
+	if !strings.Contains(buf.String(), "resume cleanup incomplete") {
+		t.Fatalf("missing timeout warning in logs: %q", buf.String())
+	}
+}
+
+func TestFailedReplacementDoesNotDrainCurrentResumeProcesses(t *testing.T) {
+	cases := []struct {
+		name string
+		deps func(*recordingResumeShutdowner, func()) daemonRestartDeps
+	}{
+		{
+			name: "replacement not ready",
+			deps: func(s *recordingResumeShutdowner, exited func()) daemonRestartDeps {
+				return daemonRestartDeps{
+					logger:           slog.Default(),
+					activeStop:       func() bool { return false },
+					resolveExe:       func() (string, error) { return "/pocketctl", nil },
+					prepare:          func() error { return nil },
+					spawnReplacement: func(string) (restartChildHandle, error) { return restartChildHandle{pid: 9}, nil },
+					awaitReady:       func(restartChildHandle) error { return errors.New("not ready") },
+					terminate:        func(restartChildHandle) {},
+					resumeShutdowner: s,
+					exit:             exited,
+				}
+			},
+		},
+		{
+			name: "spawn failure",
+			deps: func(s *recordingResumeShutdowner, exited func()) daemonRestartDeps {
+				return daemonRestartDeps{
+					logger:           slog.Default(),
+					activeStop:       func() bool { return false },
+					resolveExe:       func() (string, error) { return "/pocketctl", nil },
+					prepare:          func() error { return nil },
+					spawnReplacement: func(string) (restartChildHandle, error) { return restartChildHandle{}, errors.New("fork failed") },
+					awaitReady:       func(restartChildHandle) error { return nil },
+					terminate:        func(restartChildHandle) {},
+					resumeShutdowner: s,
+					exit:             exited,
+				}
+			},
+		},
+		{
+			name: "replacement died after readiness",
+			deps: func(s *recordingResumeShutdowner, exited func()) daemonRestartDeps {
+				return daemonRestartDeps{
+					logger:           slog.Default(),
+					activeStop:       func() bool { return false },
+					resolveExe:       func() (string, error) { return "/pocketctl", nil },
+					prepare:          func() error { return nil },
+					spawnReplacement: func(string) (restartChildHandle, error) { return restartChildHandle{pid: 9}, nil },
+					awaitReady:       func(restartChildHandle) error { return nil },
+					alive:            func(restartChildHandle) bool { return false },
+					terminate:        func(restartChildHandle) {},
+					resumeShutdowner: s,
+					exit:             exited,
+				}
+			},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			shutdowner := &recordingResumeShutdowner{}
+			runDaemonHotRestart(tc.deps(shutdowner, func() { t.Fatal("old daemon must not exit when the replacement failed") }))
+			if calls, _ := shutdowner.snapshot(); calls != 0 {
+				t.Fatalf("active resumes were canceled: drain calls=%d", calls)
+			}
+		})
+	}
+}
+
+func TestDaemonWiresResumeCleanupRecorderToTelemetry(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	sm := session.NewSessionManager(make(chan protocol.DaemonEvent, 8))
+	rec := wireResumeCleanupTelemetry(sm)
+	if rec == nil {
+		t.Fatal("resume cleanup recorder was not wired")
+	}
+	rec("resume_cancelled")
+	snapshot, err := agentcontrol.LoadClaudeTelemetry()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snapshot.ResumeCleanup["resume_cancelled"] != 1 {
+		t.Fatalf("resume cleanup counters=%+v", snapshot.ResumeCleanup)
+	}
+	// Forbidden reasons are rejected by telemetry and must not panic.
+	rec("/sessions/secret.jsonl pid=1")
 }

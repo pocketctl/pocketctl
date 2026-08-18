@@ -19,6 +19,9 @@ function createMockPool(): any {
       let result: any = { rows: [], rowCount: 0 }
       if (sql.includes('RETURNING daemon_id')) {
         result = { rows: [{ daemon_id: 'd1' }], rowCount: 1 }
+      } else if (sql.includes('session_allowed')) {
+        // Daemon-session ownership probe: treat every session as owned.
+        result = { rows: [{ session_exists: true, session_allowed: true }], rowCount: 1 }
       } else if (sql.includes('SELECT 1 FROM sessions')) {
         result = { rows: [{ '?column?': 1 }], rowCount: 1 }
       } else if (sql.includes('UPDATE sessions')) {

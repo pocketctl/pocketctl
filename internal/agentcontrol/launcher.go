@@ -95,7 +95,7 @@ func (l Launcher) Run(ctx context.Context, args []string, cwd string) error {
 		if err != nil {
 			return err
 		}
-		return l.Execute(ExecSpec{Path: binary, Args: plan.NativeArgs, Env: l.Environ(), Dir: plan.CWD})
+		return l.Execute(ExecSpec{Path: binary, Args: plan.NativeArgs, Env: stripLauncherInternalEnv(l.Environ()), Dir: plan.CWD})
 	}
 
 	acquire := l.Acquire
@@ -131,12 +131,12 @@ func (l Launcher) Run(ctx context.Context, args []string, cwd string) error {
 				return err
 			}
 		}
-		return l.Execute(ExecSpec{Path: binary, Args: args, Env: l.Environ(), Dir: plan.CWD})
+		return l.Execute(ExecSpec{Path: binary, Args: args, Env: stripLauncherInternalEnv(l.Environ()), Dir: plan.CWD})
 	}
 	if result.RealBinary == "" || result.BaseURL == "" {
 		return errors.New("daemon returned an incomplete managed OpenCode runtime")
 	}
-	env := setEnv(l.Environ(), "OPENCODE_SERVER_PASSWORD", result.Password)
+	env := setEnv(stripLauncherInternalEnv(l.Environ()), "OPENCODE_SERVER_PASSWORD", result.Password)
 	if result.Username != "" {
 		env = setEnv(env, "OPENCODE_SERVER_USERNAME", result.Username)
 	}
@@ -168,10 +168,13 @@ func (l Launcher) Run(ctx context.Context, args []string, cwd string) error {
 func resolveLauncherOpenCode() (string, error) {
 	cfg, err := LoadConfig()
 	if err == nil && cfg.OpenCode.RealBinary != "" {
-		resolved, _, inspectErr := inspectExecutable(cfg.OpenCode.RealBinary)
-		if inspectErr == nil && !sameResolvedPath(resolved, cfg.OpenCode.ShimPath) && !sameResolvedPath(resolved, defaultOpenCodeShimPath()) {
+		if resolved, ok := validatedRealAgentPath(cfg.OpenCode.RealBinary); ok &&
+			!sameResolvedPath(resolved, cfg.OpenCode.ShimPath) && !sameResolvedPath(resolved, defaultOpenCodeShimPath()) {
 			return resolved, nil
 		}
+	}
+	if hint, ok := validatedLauncherRealBinaryHint(); ok {
+		return hint, nil
 	}
 	path, _, err := ResolveConfiguredOpenCode()
 	return path, err

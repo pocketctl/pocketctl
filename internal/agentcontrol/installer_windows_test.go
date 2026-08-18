@@ -18,11 +18,16 @@ func TestOpenCodeInstallerWindowsWrapperRoundTrip(t *testing.T) {
 	if err := installPlatformShim(shim, pocketctl, AgentOpenCode); err != nil {
 		t.Fatal(err)
 	}
-	want := windowsShimMarker + "\r\n" +
+	want := windowsShimMarker + "-v3\r\n" +
+		"@setlocal\r\n" +
+		"@if not \"%POCKETCTL_AGENT_LAUNCH_DEPTH%\"==\"\" goto fallback\r\n" +
 		"@if not exist \"" + pocketctl + "\" goto fallback\r\n" +
+		"@set \"POCKETCTL_AGENT_LAUNCH_DEPTH=1\"\r\n" +
 		"@\"" + pocketctl + "\" __agent-launch opencode %*\r\n" +
-		"@exit /b %errorlevel%\r\n" +
+		"@endlocal & exit /b %errorlevel%\r\n" +
 		":fallback\r\n" +
+		"@set \"POCKETCTL_AGENT_LAUNCH_DEPTH=\"\r\n" +
+		"@set \"POCKETCTL_AGENT_REAL_BINARY=\"\r\n" +
 		"@exit /b 9009\r\n"
 	data, err := os.ReadFile(shim)
 	if err != nil || string(data) != want {
@@ -36,6 +41,49 @@ func TestOpenCodeInstallerWindowsWrapperRoundTrip(t *testing.T) {
 	}
 	if _, err := os.Stat(shim); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("wrapper remains after disable: %v", err)
+	}
+}
+
+func TestWindowsShimV3WrapperContract(t *testing.T) {
+	dir := t.TempDir()
+	shim := filepath.Join(dir, "claude.cmd")
+	pocketctl := filepath.Join(dir, "pocketctl.exe")
+	realBinary := filepath.Join(dir, "real-claude.exe")
+
+	if err := installPlatformShim(shim, pocketctl, AgentClaudeCode, realBinary); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(shim)
+	if err != nil {
+		t.Fatal(err)
+	}
+	content := string(data)
+
+	if count := strings.Count(content, launcherMarkerWindowsV3); count != 1 {
+		t.Fatalf("v3 marker count=%d content=%q", count, content)
+	}
+	if strings.Contains(content, "@rem pocketctl-agent-launcher\r\n") {
+		t.Fatalf("wrapper still emits legacy marker line: %q", content)
+	}
+	if !strings.Contains(content, "@setlocal") {
+		t.Fatalf("wrapper must use setlocal: %q", content)
+	}
+	depthCheck := strings.Index(content, "POCKETCTL_AGENT_LAUNCH_DEPTH")
+	pocketctlHop := strings.Index(content, "__agent-launch")
+	if depthCheck < 0 || pocketctlHop < 0 || depthCheck > pocketctlHop {
+		t.Fatalf("depth fuse must be checked before the PocketCtl hop: %q", content)
+	}
+	if !strings.Contains(content, "@set \"POCKETCTL_AGENT_LAUNCH_DEPTH=\"") || !strings.Contains(content, "@set \"POCKETCTL_AGENT_REAL_BINARY=\"") {
+		t.Fatalf("wrapper must clear both internal env variables on fallback: %q", content)
+	}
+	if !strings.Contains(content, "@set \"POCKETCTL_AGENT_REAL_BINARY="+realBinary+"\"") {
+		t.Fatalf("wrapper must record the real binary hint: %q", content)
+	}
+	if !strings.Contains(content, "__agent-launch claude-code %*") {
+		t.Fatalf("wrapper must forward %%* to PocketCtl: %q", content)
+	}
+	if !strings.Contains(content, "@\""+realBinary+"\" %*") {
+		t.Fatalf("wrapper must forward %%* to the real binary on fallback: %q", content)
 	}
 }
 

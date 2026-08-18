@@ -33,6 +33,15 @@ describe('standalone event worker runtime', () => {
     await expect(assertDurableIngressSchema(stale as any)).rejects.toThrow('durable ingress schema not ready')
   })
 
+  test('readiness contract requires the unresolved-stream index before running stream-head claims', async () => {
+    const ready = { query: vi.fn().mockResolvedValue({ rows: [{ ready: true }] }) }
+
+    await assertDurableIngressSchema(ready as any)
+
+    const sql = ready.query.mock.calls[0][0] as string
+    expect(sql).toContain("to_regclass('idx_event_inbox_stream_unresolved') IS NOT NULL")
+  })
+
   test('starts only after schema readiness and drains before closing the pool', async () => {
     const order: string[] = []
     const deps = {

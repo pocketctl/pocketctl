@@ -1,6 +1,7 @@
 import pg from 'pg'
 import { afterAll, beforeAll, beforeEach, describe, expect, test } from 'vitest'
 import { initDB } from '../db.js'
+import { assertDurableIngressSchema } from '../event-worker-main.js'
 import { initDurableIngressSchema } from '../schema/durable-ingress.js'
 
 const databaseUrl = process.env.TEST_DATABASE_URL
@@ -63,6 +64,7 @@ describeWithDatabase('durable ingress PostgreSQL schema', () => {
           'idx_event_inbox_pending_claim',
           'idx_event_inbox_receipt_daemon_seq',
           'idx_event_inbox_completed_cleanup',
+          'idx_event_inbox_stream_unresolved',
           'idx_realtime_outbox_undelivered'
         )
       ORDER BY indexname
@@ -72,8 +74,47 @@ describeWithDatabase('durable ingress PostgreSQL schema', () => {
       'idx_event_inbox_dedup',
       'idx_event_inbox_pending_claim',
       'idx_event_inbox_receipt_daemon_seq',
+      'idx_event_inbox_stream_unresolved',
       'idx_realtime_outbox_undelivered',
     ])
+  })
+
+  test('creates the unresolved-stream partial index with stream-head column order and predicate', async () => {
+    await initDurableIngressSchema(pool)
+    await initDurableIngressSchema(pool)
+
+    const index = await pool.query<{
+      indexdef: string;
+      predicate: string;
+      indisvalid: boolean;
+      indisready: boolean;
+    }>(`
+      SELECT pg_get_indexdef(i.indexrelid) AS indexdef,
+             pg_get_expr(i.indpred, i.indrelid) AS predicate,
+             i.indisvalid,
+             i.indisready
+      FROM pg_index i
+      WHERE i.indexrelid = 'idx_event_inbox_stream_unresolved'::regclass
+    `)
+    expect(index.rows).toHaveLength(1)
+    expect(index.rows[0].indexdef).toContain(
+      '(daemon_id, daemon_generation, seq, inbox_id)',
+    )
+    expect(index.rows[0].predicate).toBe('(status = ANY (ARRAY[0, 1]))')
+    expect(index.rows[0].indisvalid).toBe(true)
+    expect(index.rows[0].indisready).toBe(true)
+  })
+
+  test('standalone worker readiness fails closed while the unresolved-stream index is missing', async () => {
+    await initDurableIngressSchema(pool)
+    await assertDurableIngressSchema(pool)
+
+    await pool.query('DROP INDEX idx_event_inbox_stream_unresolved')
+    await expect(assertDurableIngressSchema(pool))
+      .rejects.toThrow('durable ingress schema not ready')
+
+    await initDurableIngressSchema(pool)
+    await expect(assertDurableIngressSchema(pool)).resolves.toBeUndefined()
   })
 
   test('declares the required types, defaults, nullability, checks, keys, and foreign-key actions', async () => {

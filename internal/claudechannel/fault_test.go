@@ -8,9 +8,9 @@ import (
 )
 
 // TestFaultBootstrapDialTimeoutRespected verifies the client's dial timeout
-// is respected when the daemon socket does not exist. The full read-deadline
-// enforcement is covered by the launcher's 200ms budget at the shim layer
-// (Task 3); here we only pin the dial path. Design §Task 11.
+// is respected when the daemon socket does not exist. Silent-peer read
+// bounding is covered by the accepted-connection timeout tests.
+// Design §Task 11.
 func TestFaultBootstrapDialTimeoutRespected(t *testing.T) {
 	c := NewClient("/tmp/nonexistent-cc-fault.sock", 100*time.Millisecond)
 	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)

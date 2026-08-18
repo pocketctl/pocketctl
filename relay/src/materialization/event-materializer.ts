@@ -1,5 +1,6 @@
 import type pg from 'pg'
 import * as db from '../db.js'
+import { normalizeSessionId } from '../ingress/event-policy.js'
 import {
   approvalPush,
   highRiskPush,
@@ -32,6 +33,15 @@ export interface EventMaterializerOptions {
   hooks?: MaterializationHooks
   /** Staged-rollout gate; production defaults to TOKEN_USAGE_FACTS_WRITE=false. */
   writeTokenUsageFacts?: boolean
+  /**
+   * Pool used by deferred effect closures. When materialization runs inside
+   * the session fence the scoped pool is the fence's PoolClient, which is
+   * released before deferred effects execute; those closures must run on the
+   * caller's original pools instead.
+   */
+  deferredPool?: pg.Pool
+  /** Post-fence pool for deferred business-effect statements. */
+  deferredEffectPool?: pg.Pool
 }
 
 export interface MaterializationRunOptions {
@@ -205,13 +215,24 @@ export class EventMaterializer {
     const sessionId = input.sessionId ?? ''
     const payload = input.payload
     if (input.eventType === 'session_id_changed') {
-      const oldSessionId = typeof payload.old_session_id === 'string' ? payload.old_session_id : ''
+      const oldSessionId = normalizeSessionId(payload.old_session_id) ?? ''
       await effect.step(async () => {
+        if (!oldSessionId) {
+          // No (or non-canonical) old identity: only establish the new one
+          // under the guarded identity upsert.
+          await db.ensureDaemonSessionIdentity(this.effectPool, sessionId, input.daemonId, input.userId ?? undefined)
+          this.options.hooks?.bindSession?.(sessionId, input.daemonId)
+          return
+        }
+        // renameOwnedDaemonSession validates old ownership and new-id
+        // availability atomically; hooks run only after that success.
+        await db.renameOwnedDaemonSession(this.effectPool, {
+          oldSessionId,
+          newSessionId: sessionId,
+          daemonId: input.daemonId,
+          userId: input.userId,
+        })
         this.options.hooks?.bindSession?.(sessionId, input.daemonId)
-        if (!oldSessionId) return
-        await this.effectPool.query('UPDATE sessions SET session_id = $1 WHERE session_id = $2', [sessionId, oldSessionId])
-        await this.effectPool.query('UPDATE events SET session_id = $1 WHERE session_id = $2', [sessionId, oldSessionId])
-        await db.ensureDaemonSessionIdentity(this.effectPool, sessionId, input.daemonId, input.userId ?? undefined)
         this.options.hooks?.renameSession?.(oldSessionId, sessionId, input.daemonId)
       })
       return true
@@ -223,7 +244,6 @@ export class EventMaterializer {
         throw new MaterializationContextError()
       }
       await effect.step(async () => {
-        this.options.hooks?.bindSession?.(sessionId, input.daemonId)
         await db.upsertSession(
           this.effectPool, sessionId, input.daemonId,
           context.agentType || '', context.cwd || '', 'running',
@@ -233,6 +253,7 @@ export class EventMaterializer {
           typeof payload.control_mode === 'string' ? payload.control_mode : undefined,
           Array.isArray(payload.capabilities) ? payload.capabilities as string[] : undefined,
         )
+        this.options.hooks?.bindSession?.(sessionId, input.daemonId)
       })
       await effect.assertActive()
       this.options.hooks?.prepareSessionCreated?.(
@@ -252,7 +273,6 @@ export class EventMaterializer {
     }
     if (input.eventType === 'session_discovered') {
       await effect.step(async () => {
-        this.options.hooks?.bindSession?.(sessionId, input.daemonId)
         // Source is a strict special case: only zcode observer sessions are
         // recorded with source='observer'. Every other agent — even one that
         // forges source='observer' in its payload — is recorded as 'terminal'.
@@ -272,6 +292,7 @@ export class EventMaterializer {
           typeof payload.control_mode === 'string' ? payload.control_mode : undefined,
           Array.isArray(payload.capabilities) ? payload.capabilities as string[] : undefined,
         )
+        this.options.hooks?.bindSession?.(sessionId, input.daemonId)
       })
       if (input.userId !== null) {
         await effect.step(() => this.options.hooks?.broadcastQuota?.(input.userId!))
@@ -280,8 +301,8 @@ export class EventMaterializer {
     }
     if (input.eventType === 'session_model_changed') {
       await effect.step(async () => {
-        this.options.hooks?.bindSession?.(sessionId, input.daemonId)
         await db.updateSessionModel(this.effectPool, sessionId, String(payload.model ?? ''))
+        this.options.hooks?.bindSession?.(sessionId, input.daemonId)
       })
       return true
     }
@@ -302,7 +323,6 @@ export class EventMaterializer {
     if (input.eventType !== 'session_status') return false
 
     await effect.assertActive()
-    this.options.hooks?.bindSession?.(sessionId, input.daemonId)
     await effect.atomicStep(async (eventID, nextStep) => {
       const outcome = await db.updateSessionStatusForEvent(
         this.effectPool,
@@ -316,6 +336,7 @@ export class EventMaterializer {
         typeof payload.turn_started_at === 'string' ? payload.turn_started_at : undefined,
       )
       if (outcome.suppressed) result.deliveries = []
+      else this.options.hooks?.bindSession?.(sessionId, input.daemonId)
     })
     if (result.deliveries.length === 0) return true
     if (payload.cost_usd != null) {
@@ -490,6 +511,44 @@ export class EventMaterializer {
     }
   }
 
+  /**
+   * Cross-tenant authorization chokepoint: every daemon-provided session id
+   * is untrusted and must prove ownership before canonical persistence, any
+   * lifecycle mutation, accounting effect, push, or delivery construction.
+   */
+  private async authorizeDaemonSession(input: MaterializationInput): Promise<void> {
+    if (!input.sessionId) return
+    if (input.eventType === 'session_id_changed') {
+      const oldSessionId = normalizeSessionId(input.payload.old_session_id)
+      if (oldSessionId) {
+        await db.assertDaemonSessionAccess(this.options.pool, {
+          sessionId: oldSessionId,
+          daemonId: input.daemonId,
+          userId: input.userId,
+          policy: 'must_exist',
+        })
+      }
+      await db.assertDaemonSessionAccess(this.options.pool, {
+        sessionId: input.sessionId,
+        daemonId: input.daemonId,
+        userId: input.userId,
+        policy: 'allow_create',
+      })
+      return
+    }
+    const policy: db.DaemonSessionPolicy = ['session_created', 'session_discovered'].includes(input.eventType)
+      ? 'allow_create'
+      : input.eventType === 'session_status'
+        ? 'allow_missing_status'
+        : 'must_exist'
+    await db.assertDaemonSessionAccess(this.options.pool, {
+      sessionId: input.sessionId,
+      daemonId: input.daemonId,
+      userId: input.userId,
+      policy,
+    })
+  }
+
   private async materializeUnlocked(
     input: MaterializationInput,
     effect?: MaterializationEffect,
@@ -508,6 +567,7 @@ export class EventMaterializer {
       && await db.isSessionDeleted(this.effectPool, input.sessionId)) {
       return this.persistTombstonedEvent(input, assertClaim)
     }
+    await this.authorizeDaemonSession(input)
     if ([
       'session_discovered',
       'interaction_result',
@@ -541,6 +601,53 @@ export class EventMaterializer {
       result.deliveries = []
     }
     if (event.completed) return result
+
+    if (options.deferEffects) {
+      // Deferred effects run after the fence transaction commits, so neither
+      // the ledger helpers nor the effect steps may touch the released
+      // PoolClient. Rebuild the effect against the caller's original pool.
+      const latePool = this.options.deferredPool ?? this.options.pool
+      const lateEffectPool = this.options.deferredEffectPool ?? latePool
+      const lateMaterializer = new EventMaterializer({
+        pool: latePool,
+        effectPool: lateEffectPool,
+        durableHooks: this.options.durableHooks,
+        hooks: this.options.hooks,
+        writeTokenUsageFacts: this.writeTokenUsageFacts,
+      })
+      const lateEffect = effect ?? lateMaterializer.businessEffect(input, result)
+      result.applyEffects = async (): Promise<void> => {
+        const latest = await db.getEventEffectState(latePool, event.rowID)
+        if (latest?.completed) return
+        const nextStep = latest?.nextStep ?? event.nextStep
+        let stepIndex = 0
+        const context: DurableEffectContext = {
+          resuming: nextStep > 0,
+          assertActive: assertClaim,
+          step: async (stepEffect) => {
+            const currentStep = stepIndex++
+            if (currentStep < nextStep) return
+            await assertClaim()
+            await stepEffect()
+            await assertClaim()
+            await db.advanceEventEffectStep(latePool, event.rowID, currentStep + 1)
+          },
+          atomicStep: async (stepEffect) => {
+            const currentStep = stepIndex++
+            if (currentStep < nextStep) return
+            await assertClaim()
+            await stepEffect(event.rowID, currentStep + 1)
+          },
+        }
+        await lateEffect(context)
+      }
+      result.finalizeEffect = async () => {
+        await assertClaim()
+        await db.completeEventEffect(latePool, event.rowID)
+      }
+      return result
+    }
+
     const activeEffect = effect ?? this.businessEffect(input, result)
 
     const applyEffects = async (): Promise<void> => {
@@ -572,11 +679,6 @@ export class EventMaterializer {
       await assertClaim()
       await db.completeEventEffect(this.options.pool, event.rowID)
     }
-    if (options.deferEffects) {
-      result.applyEffects = applyEffects
-      result.finalizeEffect = finalizeEffect
-      return result
-    }
     await applyEffects()
     await finalizeEffect()
     return result
@@ -587,16 +689,22 @@ export class EventMaterializer {
     effect?: MaterializationEffect,
     options: MaterializationRunOptions = {},
   ): Promise<MaterializationResult> {
-    if (input.inboxId <= 0 || !input.sessionId) {
+    if (!input.sessionId) {
       return this.materializeUnlocked(input, effect, options)
     }
+    // Both the durable and the legacy inline path authorize and persist under
+    // the same per-session advisory fence so authorization and the canonical
+    // insert cannot be separated by a cross-tenant race. The fence rides the
+    // canonical-persistence pool (options.pool); business effects keep their
+    // dedicated effect pool for the post-commit deferred phase.
     return db.withSessionMaterializationFence(
-      this.effectPool,
+      this.options.pool,
       input.sessionId,
       (client) => {
         // The advisory transaction owns this client. Every query made by the
         // scoped materializer must reuse it, otherwise a supported pool size of
-        // one would wait on itself forever.
+        // one would wait on itself forever. Deferred effect closures are the
+        // exception: they run post-commit and must use the original pool.
         const queryable = client as unknown as pg.Pool
         const scoped = new EventMaterializer({
           ...this.options,
@@ -604,6 +712,10 @@ export class EventMaterializer {
           effectPool: queryable,
           transactionClient: client,
           durableHooks: this.options.durableHooks,
+          deferredPool: this.options.deferredPool ?? this.options.pool,
+          deferredEffectPool: this.options.deferredEffectPool
+            ?? this.options.effectPool
+            ?? this.options.pool,
         })
         return scoped.materializeUnlocked(input, effect, options)
       },

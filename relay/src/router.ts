@@ -415,6 +415,34 @@ export class Router {
     console.error(`[router] ${scope} failed`, { errorName });
   }
 
+  /**
+   * Title-related ephemeral events never reach the durable materializer, so
+   * they authorize here: a missing or foreign session has no title read, no
+   * generation call, no delivery, and no title-row mutation.
+   */
+  private async authorizeEphemeralTitleSession(daemonId: string, sessionId: string): Promise<boolean> {
+    const daemon = this.daemons.get(daemonId);
+    try {
+      await db.assertDaemonSessionAccess(this.pool, {
+        sessionId,
+        daemonId,
+        userId: daemon?.userId ?? null,
+        policy: 'must_exist',
+      });
+      return true;
+    } catch (error) {
+      if (error instanceof db.SessionOwnershipViolationError
+        || error instanceof db.UnknownDaemonSessionError) {
+        console.error('[router] ephemeral title event rejected', {
+          daemonId,
+          errorName: error instanceof Error ? error.name : typeof error,
+        });
+        return false;
+      }
+      throw error;
+    }
+  }
+
   private runEphemeralTitleEffect(
     daemonId: string,
     msg: Record<string, unknown>,
@@ -1355,6 +1383,11 @@ export class Router {
    * success. If persistEvent exhausts its retries it rejects — we then withhold
    * the ack so the daemon keeps the event buffered and replays it on reconnect
    * (where it is re-persisted), rather than acking-then-losing it.
+   *
+   * Ownership violations are permanent security rejections: the sequence is
+   * marked permanently handled (so the contiguous ACK keeps progressing and
+   * the daemon spool is not poisoned) and the offending connection is closed
+   * without revealing whether the target session exists.
    */
   private persistAndAck(
     daemonId: string,
@@ -1366,37 +1399,104 @@ export class Router {
     receivedAt: Date = new Date(),
   ): void {
     const state = originatingState ?? this.daemonSeq.get(daemonId);
-    this.legacyPersist.run(daemonId, () => this.materializer.materialize({
-      inboxId: 0,
-      userId: this.daemons.get(daemonId)?.userId ?? null,
-      daemonId,
-      sessionId,
-      eventType: type,
-      payload,
-      receivedAt,
-      context: this.materializationContext(daemonId, payload),
-    }, undefined, { deferEffects: true }))
-      .then((result) => {
-        const applyAndDeliver = async () => {
-          await result.applyEffects?.();
-          if (result.eventId !== null && !result.inserted && result.completed) return;
-          for (const delivery of result.deliveries) this.deliverMaterializedEvent(delivery);
-          await result.finalizeEffect?.();
-        };
-        if (!state && result.eventId === null) {
-          void applyAndDeliver().catch((e) => console.error('durable effect:', e));
+    const runMaterialize = (): Promise<import('./materialization/types.js').MaterializationResult> =>
+      this.legacyPersist.run(daemonId, () => this.materializer.materialize({
+        inboxId: 0,
+        userId: this.daemons.get(daemonId)?.userId ?? null,
+        daemonId,
+        sessionId,
+        eventType: type,
+        payload,
+        receivedAt,
+        context: this.materializationContext(daemonId, payload),
+      }, undefined, { deferEffects: true }));
+    const settle = (result: import('./materialization/types.js').MaterializationResult): void => {
+      const applyAndDeliver = async () => {
+        await result.applyEffects?.();
+        if (result.eventId !== null && !result.inserted && result.completed) return;
+        for (const delivery of result.deliveries) this.deliverMaterializedEvent(delivery);
+        await result.finalizeEffect?.();
+      };
+      if (!state && result.eventId === null) {
+        void applyAndDeliver().catch((e) => console.error('durable effect:', e));
+        return;
+      }
+      this.markPersisted(daemonId, seq, applyAndDeliver, state);
+    };
+    const failWith = (e: unknown): void => {
+      if (e instanceof ExecutorOverloadedError) {
+        this.sendRetryableDisconnect(daemonId, 'relay_overloaded', 500);
+        return;
+      }
+      if (e instanceof db.SessionOwnershipViolationError || e instanceof db.UnknownDaemonSessionError) {
+        // Structured security audit without payload, session, or owner details.
+        console.error('[router] daemon event permanently rejected', {
+          daemonId,
+          errorName: e.name,
+          code: (e as { code?: string }).code,
+        });
+        this.markPersisted(daemonId, seq, undefined, state);
+        this.rejectDaemonConnection(daemonId, 'session_ownership_violation');
+        return;
+      }
+      console.error('persistAndAck:', e);
+    };
+    const first = runMaterialize();
+    this.trackPersistInflight(daemonId, seq, first);
+    first.then(settle, (e) => {
+      if (seq) state?.inflight.delete(seq);
+      if (e instanceof db.UnknownDaemonSessionError && seq) {
+        // The legacy inline path materializes same-daemon events concurrently,
+        // so a lower-seq lifecycle event (e.g. session_created) can still be
+        // in flight when this event probes the session. Wait for it and retry
+        // once before classifying the session as permanently unknown.
+        const earlier = this.pendingEarlierPersists(daemonId, seq);
+        if (earlier) {
+          void earlier.then(() => {
+            const retry = runMaterialize();
+            this.trackPersistInflight(daemonId, seq, retry);
+            retry.then(settle, failWith);
+          });
           return;
         }
-        this.markPersisted(daemonId, seq, applyAndDeliver, state);
-      })
-      .catch((e) => {
-        if (seq) state?.inflight.delete(seq);
-        if (e instanceof ExecutorOverloadedError) {
-          this.sendRetryableDisconnect(daemonId, 'relay_overloaded', 500);
-          return;
-        }
-        console.error('persistAndAck:', e);
-      });
+      }
+      failWith(e);
+    });
+  }
+
+  /** In-flight inline materializations per daemon, keyed by transport seq. */
+  private persistInflight = new Map<string, Map<number, Promise<unknown>>>();
+
+  private trackPersistInflight(daemonId: string, seq: number | undefined, promise: Promise<unknown>): void {
+    if (!seq) return;
+    let bySeq = this.persistInflight.get(daemonId);
+    if (!bySeq) {
+      bySeq = new Map();
+      this.persistInflight.set(daemonId, bySeq);
+    }
+    const tracked = bySeq;
+    // The tracked promise only gates later unknown-session retries; it must
+    // never surface the settlement (or rejection) itself.
+    const settled = Promise.resolve(promise).then(() => undefined, () => undefined);
+    tracked.set(seq, settled.finally(() => { tracked.delete(seq); }));
+  }
+
+  private pendingEarlierPersists(daemonId: string, seq: number): Promise<unknown[]> | null {
+    const bySeq = this.persistInflight.get(daemonId);
+    if (!bySeq) return null;
+    const earlier = [...bySeq.entries()]
+      .filter(([inflightSeq]) => inflightSeq < seq)
+      .map(([, promise]) => promise);
+    if (earlier.length === 0) return null;
+    return Promise.allSettled(earlier);
+  }
+
+  /** Policy-close a daemon connection for a security rejection. */
+  private rejectDaemonConnection(daemonId: string, reason: string): void {
+    const daemon = this.daemons.get(daemonId);
+    if (!daemon || daemon.ws.readyState !== 1) return;
+    this.send(daemon.ws, { type: 'kicked', reason, retryable: false });
+    daemon.ws.close(1008, reason);
   }
 
   private sendRetryableDisconnect(daemonId: string, reason: string, retryAfterMs: number): void {
@@ -1684,36 +1784,45 @@ export class Router {
     const sessionId = normalizeSessionId(msg.session_id);
     if (sessionId && msg.type === 'generate_title_request') {
       if (!durableIngressOwnsAck) this.markPersisted(daemonId, msg.seq);
-      this.runEphemeralTitleEffect(
-        daemonId, msg, 'user', (input) => this.generateSessionTitleDelivery(input),
-      );
+      void this.authorizeEphemeralTitleSession(daemonId, sessionId).then((allowed) => {
+        if (!allowed) return;
+        this.runEphemeralTitleEffect(
+          daemonId, msg, 'user', (input) => this.generateSessionTitleDelivery(input),
+        );
+      }).catch((error) => this.logBestEffortFailure('generate_title_request authorization', error));
       return;
     }
     if (sessionId && msg.type === 'generate_subagent_title_request') {
       if (!durableIngressOwnsAck) this.markPersisted(daemonId, msg.seq);
-      this.runEphemeralTitleEffect(
-        daemonId, msg, 'session', (input) => this.generateSubagentTitleDelivery(input),
-      );
+      void this.authorizeEphemeralTitleSession(daemonId, sessionId).then((allowed) => {
+        if (!allowed) return;
+        this.runEphemeralTitleEffect(
+          daemonId, msg, 'session', (input) => this.generateSubagentTitleDelivery(input),
+        );
+      }).catch((error) => this.logBestEffortFailure('generate_subagent_title_request authorization', error));
       return;
     }
     if (sessionId && msg.type === 'session_title_update') {
       if (!durableIngressOwnsAck) this.markPersisted(daemonId, msg.seq);
-      this.deliverMaterializedEvent({
-        eventId: null,
-        userId: this.daemons.get(daemonId)?.userId ?? null,
-        audience: 'user',
-        sessionId,
-        requestId: typeof msg.request_id === 'string' ? msg.request_id : null,
-        ordinal: 0,
-        deliveryKey: `ephemeral:${daemonId}:${String(msg.seq ?? '')}:session_title_update`,
-        type: 'session_title_update',
-        payload: msg,
-      });
-      void this.pool.query(
-        `UPDATE sessions SET title = $1
-         WHERE session_id = $2 AND (title LIKE 'Terminal Session-%' OR title IS NULL)`,
-        [String(msg.title ?? ''), sessionId],
-      ).catch((error) => this.logBestEffortFailure('session_title_update', error));
+      void this.authorizeEphemeralTitleSession(daemonId, sessionId).then((allowed) => {
+        if (!allowed) return;
+        this.deliverMaterializedEvent({
+          eventId: null,
+          userId: this.daemons.get(daemonId)?.userId ?? null,
+          audience: 'user',
+          sessionId,
+          requestId: typeof msg.request_id === 'string' ? msg.request_id : null,
+          ordinal: 0,
+          deliveryKey: `ephemeral:${daemonId}:${String(msg.seq ?? '')}:session_title_update`,
+          type: 'session_title_update',
+          payload: msg,
+        });
+        void this.pool.query(
+          `UPDATE sessions SET title = $1
+           WHERE session_id = $2 AND (title LIKE 'Terminal Session-%' OR title IS NULL)`,
+          [String(msg.title ?? ''), sessionId],
+        ).catch((error) => this.logBestEffortFailure('session_title_update', error));
+      }).catch((error) => this.logBestEffortFailure('session_title_update authorization', error));
       return;
     }
     if (!sessionId) {

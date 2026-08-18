@@ -168,8 +168,53 @@ test('claims by bigint-safe daemon hash expression', async () => {
 
   await repo.claimBatch({ workerId: 'worker', limit: 10, shardCount: 2, shardIndex: 1 })
 
-  expect(claimSql).toContain('ABS(hashtext(daemon_id)::bigint)')
+  expect(claimSql).toContain('ABS(hashtext(inbox.daemon_id)::bigint)')
   expect(claimSql).toContain('MOD(')
+})
+
+test('selects claims from a materialized per-stream head set without a correlated anti-join', async () => {
+  let claimSql = ''
+  const repo = new InboxRepository({
+    query: vi.fn(async (sql: string) => {
+      claimSql = sql
+      return { rows: [], rowCount: 0 }
+    }),
+  } as never)
+
+  await repo.claimBatch({ workerId: 'worker', limit: 10, shardCount: 2, shardIndex: 1 })
+
+  expect(claimSql).toContain('WITH stream_heads AS MATERIALIZED')
+  expect(claimSql).toContain('DISTINCT ON (daemon_id, daemon_generation)')
+  expect(claimSql).toContain('FOR UPDATE OF inbox SKIP LOCKED')
+  expect(claimSql).toContain('inbox.status = 0')
+  expect(claimSql).toContain('inbox.available_at <= NOW()')
+  expect(claimSql).not.toContain('FROM event_inbox earlier')
+})
+
+test('keeps claim validation unchanged for limit zero and invalid shards', async () => {
+  const query = vi.fn(async () => ({ rows: [], rowCount: 0 }))
+  const repo = new InboxRepository({ query } as never)
+
+  await expect(repo.claimBatch({
+    workerId: 'worker',
+    limit: 0,
+    shardCount: 2,
+    shardIndex: 1,
+  })).resolves.toEqual([])
+  expect(query).not.toHaveBeenCalled()
+
+  await expect(repo.claimBatch({
+    workerId: 'worker',
+    limit: 10,
+    shardCount: 0,
+    shardIndex: 0,
+  })).rejects.toThrow('invalid inbox shard')
+  await expect(repo.claimBatch({
+    workerId: 'worker',
+    limit: 10,
+    shardCount: 2,
+    shardIndex: 2,
+  })).rejects.toThrow('invalid inbox shard')
 })
 
 test('rejects a stale completion fence instead of overwriting the new owner', async () => {

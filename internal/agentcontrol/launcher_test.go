@@ -200,3 +200,20 @@ func envValue(env []string, key string) string {
 	}
 	return ""
 }
+
+func TestResolveLauncherOpenCodeTempHomeRejectsRealHomeShim(t *testing.T) {
+	f := newLauncherResolutionFixture(t, AgentOpenCode, "opencode 1.20.0")
+	f.isolate(t, f.shimDir, f.realDir)
+
+	got, err := resolveLauncherOpenCode()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sameFile(got, f.shim) {
+		t.Fatalf("resolver returned the PocketCtl-owned shim from the real HOME: %q", got)
+	}
+	if !sameFile(got, f.real) {
+		t.Fatalf("resolver path=%q, want real candidate %q", got, f.real)
+	}
+	f.assertShimNeverExecuted(t)
+}
