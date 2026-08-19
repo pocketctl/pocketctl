@@ -31,6 +31,27 @@ if pocketctl_resolve_clean_git_sha "$non_git_relay" >/dev/null 2>&1; then
   fail "non-Git copied Relay source was assigned an unverifiable identity"
 fi
 
+# Dependency installation is generated build input, not Relay source. The
+# public GitHub mirror intentionally omits the private root .gitignore, so the
+# identity gate must ignore node_modules itself while continuing to reject
+# actual untracked source files.
+unignored_repo="$fixture/unignored-repo"
+mkdir -p "$unignored_repo/relay/node_modules/example"
+printf '{"name":"identity-fixture"}\n' > "$unignored_repo/relay/package.json"
+printf 'generated dependency\n' > "$unignored_repo/relay/node_modules/example/index.js"
+git -C "$unignored_repo" init -q
+git -C "$unignored_repo" add relay/package.json
+git -C "$unignored_repo" \
+  -c user.name=PocketCtl -c user.email=pocketctl@example.invalid \
+  commit -qm 'test: seed clean relay source'
+generated_sha=$(pocketctl_resolve_clean_git_sha "$unignored_repo/relay")
+[[ "$generated_sha" == "$(git -C "$unignored_repo" rev-parse HEAD)" ]] \
+  || fail "generated Relay dependencies changed the resolved source identity"
+printf 'untracked source\n' > "$unignored_repo/relay/untracked.ts"
+if pocketctl_resolve_clean_git_sha "$unignored_repo/relay" >/dev/null 2>&1; then
+  fail "untracked Relay source was assigned a clean release identity"
+fi
+
 # Generated database credentials must be URI-unreserved so they can be used in
 # PostgreSQL userinfo without ambiguous parsing or percent-encoding bugs.
 for _ in $(seq 1 32); do

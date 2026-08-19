@@ -35,7 +35,7 @@ pocketctl_validate_runtime_identity() {
 }
 
 pocketctl_resolve_clean_git_sha() {
-  local source_dir=$1 git_top git_prefix status sha
+  local source_dir=$1 git_top git_prefix status sha dependency_path
   [[ -d "$source_dir" ]] || {
     echo "Relay source directory does not exist: $source_dir" >&2
     return 1
@@ -46,9 +46,12 @@ pocketctl_resolve_clean_git_sha() {
   }
   git_prefix=$(git -C "$source_dir" rev-parse --show-prefix 2>/dev/null) || return 1
   if [[ -n "$git_prefix" ]]; then
-    status=$(git -C "$git_top" status --porcelain --untracked-files=all -- "$git_prefix") || return 1
+    dependency_path="${git_prefix}node_modules"
+    status=$(git -C "$git_top" status --porcelain --untracked-files=all -- \
+      "$git_prefix" ":(exclude)$dependency_path") || return 1
   else
-    status=$(git -C "$git_top" status --porcelain --untracked-files=all) || return 1
+    status=$(git -C "$git_top" status --porcelain --untracked-files=all -- \
+      . ':(exclude)node_modules') || return 1
   fi
   [[ -z "$status" ]] || {
     echo "Relay source contains tracked or untracked changes; refusing unverifiable release identity" >&2
