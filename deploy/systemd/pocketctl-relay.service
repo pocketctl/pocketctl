@@ -2,17 +2,18 @@
 Description=pocketctl Relay Server
 After=network.target postgresql.service
 Wants=postgresql.service
+StartLimitBurst=5
+StartLimitIntervalSec=60
 
 [Service]
 Type=simple
 User=pocketctl
 Group=pocketctl
 WorkingDirectory=/opt/pocketctl/relay
-ExecStart=/usr/bin/node dist/server.js
+Environment=PATH=/usr/bin:/bin
+ExecStart=/usr/bin/env node dist/server.js
 Restart=on-failure
 RestartSec=5
-StartLimitBurst=5
-StartLimitIntervalSec=60
 
 # 环境变量
 # M-1：Relay 只监听回环，由同机 Nginx 反代；只信任回环上的代理设置的

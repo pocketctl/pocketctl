@@ -86,7 +86,19 @@ grep -q 'listen 443 ssl' "$official" || fail "official script must serve HTTPS"
 
 for unit in "$repo_root/deploy/systemd/pocketctl-relay.service" \
             "$repo_root/deploy/systemd/pocketctl-relay-worker.service"; do
+  unit_section=$(sed -n '/^\[Unit\]$/,/^\[Service\]$/p' "$unit")
+  service_section=$(sed -n '/^\[Service\]$/,/^\[Install\]$/p' "$unit")
+  echo "$unit_section" | grep -q '^StartLimitBurst=' \
+    || fail "$unit must configure StartLimitBurst in [Unit]"
+  echo "$unit_section" | grep -q '^StartLimitIntervalSec=' \
+    || fail "$unit must configure StartLimitIntervalSec in [Unit]"
+  ! echo "$service_section" | grep -q '^StartLimit' \
+    || fail "$unit must not put StartLimit directives in [Service]"
   grep -q 'User=pocketctl' "$unit" || fail "$unit must run as the dedicated user"
+  grep -q '^Environment=PATH=/usr/bin:/bin$' "$unit" \
+    || fail "$unit must pin the executable lookup path"
+  grep -q '^ExecStart=/usr/bin/env node ' "$unit" \
+    || fail "$unit must use a verifiable absolute launcher for Node.js"
   grep -q 'NoNewPrivileges=true' "$unit" || fail "$unit must set NoNewPrivileges"
   grep -q 'ProtectSystem=strict' "$unit" || fail "$unit must set ProtectSystem=strict"
   grep -q 'ProtectHome=true' "$unit" || fail "$unit must set ProtectHome"
