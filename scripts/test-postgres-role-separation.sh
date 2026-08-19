@@ -30,10 +30,17 @@ export JWT_SECRET=throwaway-jwt-32-characters-aaaaaaaaaaaa
 docker compose -p "$PROJECT" -f docker-compose.prod.yml up -d postgres >/dev/null || fail "postgres up failed"
 
 # Wait for health.
+stable_ready=0
 for i in $(seq 1 60); do
-  if docker exec "${PROJECT}-postgres-1" pg_isready -U pocketctl_admin >/dev/null 2>&1; then break; fi
+  if docker exec "${PROJECT}-postgres-1" pg_isready -U pocketctl_admin >/dev/null 2>&1; then
+    stable_ready=$((stable_ready + 1))
+    if [[ "$stable_ready" -ge 3 ]]; then break; fi
+  else
+    stable_ready=0
+  fi
   sleep 1
 done
+[[ "$stable_ready" -ge 3 ]] || fail "postgres did not remain ready"
 
 container="${PROJECT}-postgres-1"
 role_row="$(docker exec "$container" psql -U pocketctl_admin -d pocketctl -tAc \

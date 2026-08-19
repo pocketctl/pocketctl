@@ -31,10 +31,17 @@ build_time=2026-08-18T00:00:00Z
 
 docker run -d --name "$container" -p 127.0.0.1::5432 \
   -e POSTGRES_PASSWORD="$admin_password" postgres:17-alpine >/dev/null
+stable_ready=0
 for _ in $(seq 1 60); do
-  docker exec "$container" pg_isready -U postgres >/dev/null 2>&1 && break
+  if docker exec "$container" pg_isready -U postgres >/dev/null 2>&1; then
+    stable_ready=$((stable_ready + 1))
+    if [[ "$stable_ready" -ge 3 ]]; then break; fi
+  else
+    stable_ready=0
+  fi
   sleep 1
 done
+[[ "$stable_ready" -ge 3 ]] || fail "PostgreSQL did not remain ready"
 docker exec "$container" pg_isready -U postgres >/dev/null 2>&1 \
   || fail "PostgreSQL did not become ready"
 

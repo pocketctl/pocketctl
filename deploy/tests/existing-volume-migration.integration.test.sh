@@ -20,10 +20,17 @@ docker run -d --name "$container" \
   -v "$repo_root/deploy/postgres/configure-roles.sql:/opt/pocketctl/configure-roles.sql:ro" \
   -v "$repo_root/deploy/postgres/check-volume-migration.sh:/opt/pocketctl/check-volume-migration.sh:ro" \
   postgres:17-alpine >/dev/null
+stable_ready=0
 for _ in $(seq 1 60); do
-  docker exec "$container" pg_isready -U pocketctl -d pocketctl >/dev/null 2>&1 && break
+  if docker exec "$container" pg_isready -U pocketctl -d pocketctl >/dev/null 2>&1; then
+    stable_ready=$((stable_ready + 1))
+    if [[ "$stable_ready" -ge 3 ]]; then break; fi
+  else
+    stable_ready=0
+  fi
   sleep 1
 done
+[[ "$stable_ready" -ge 3 ]] || fail "legacy PostgreSQL did not remain ready"
 docker exec "$container" pg_isready -U pocketctl -d pocketctl >/dev/null 2>&1 \
   || fail "legacy PostgreSQL did not become ready"
 
