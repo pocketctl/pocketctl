@@ -70,9 +70,30 @@ describe('auth route integration', () => {
     expect(source).toContain("api('/api/auth/email/verify', { email, code, lang: 'zh' })")
   })
 
-  test('password registration preserves conflict semantics and uses transactional creation', () => {
-    expect(source).toContain("reply.code(409); return { error: 'email already registered' }")
-    expect(source).toMatch(/createUserWithWelcomeEmail\(pool, normalizedEmail, hashPassword\(password\), displayName, locale\)/)
+  test('password registration cannot create an account for an unverified email', () => {
+    const routeStart = source.indexOf("app.post('/api/auth/register'")
+    const nextRoute = source.indexOf("app.post('/api/auth/login'", routeStart)
+    expect(routeStart).toBeGreaterThan(-1)
+    expect(nextRoute).toBeGreaterThan(routeStart)
+
+    const registrationRoute = source.slice(routeStart, nextRoute)
+    expect(registrationRoute).toContain('reply.code(410)')
+    expect(registrationRoute).toContain('/api/auth/email/send')
+    expect(registrationRoute).not.toContain('createUserWithWelcomeEmail')
+  })
+
+  test('legacy password login cannot retain access to a pre-hijacked email account', () => {
+    const routeStart = source.indexOf("app.post('/api/auth/login'")
+    const nextRoute = source.indexOf("app.post('/api/auth/refresh'", routeStart)
+    expect(routeStart).toBeGreaterThan(-1)
+    expect(nextRoute).toBeGreaterThan(routeStart)
+
+    const loginRoute = source.slice(routeStart, nextRoute)
+    expect(loginRoute).toContain('reply.code(410)')
+    expect(loginRoute).toContain('/api/auth/email/send')
+    expect(loginRoute).not.toContain('verifyPassword')
+    expect(loginRoute).not.toContain('signAccessToken')
+    expect(loginRoute).not.toContain('signRefreshToken')
   })
 
   test('worker starts after database initialization unless shutdown already began', () => {

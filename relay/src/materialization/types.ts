@@ -3,7 +3,17 @@ export interface MaterializationContext {
   cwd?: string;
   requestId?: string;
   reservationId?: string | null;
+  quotaOperation?: 'create' | 'resume';
   hostname?: string;
+}
+
+export interface PendingOperationIdentity {
+  reservationId: string | null;
+  userId: number;
+  daemonId: string;
+  requestId: string;
+  operation: 'create' | 'resume';
+  sessionId: string | null;
 }
 
 /**
@@ -29,7 +39,14 @@ export interface MaterializationInput {
 }
 
 export interface DurableMaterializationHooks {
-  releaseQuotaReservation(reservationId: string): Promise<void>;
+  claimQuotaReservationSession(
+    binding: import('../quota.js').QuotaReservationBinding,
+  ): Promise<void>;
+  /** M-4: settlement requires an explicit outcome; nothing is silently released. */
+  settleQuotaReservation(
+    binding: import('../quota.js').QuotaReservationBinding,
+    reason: 'session_created' | 'session_create_failed' | 'session_active',
+  ): Promise<void>;
   notifyUser(userId: number, payload: unknown): Promise<void>;
   notifyProUser(userId: number, payload: unknown): Promise<void>;
 }
@@ -38,7 +55,7 @@ export interface RuntimeMaterializationHooks {
   bindSession?(sessionId: string, daemonId: string): void;
   renameSession?(oldSessionId: string, sessionId: string, daemonId: string): void;
   prepareSessionCreated?(sessionId: string, daemonId: string, requestId: string | null): void;
-  releasePendingOperation?(daemonId: string, requestId: string | null): Promise<void>;
+  releasePendingOperation?(identity: PendingOperationIdentity): Promise<void>;
   clearPendingSession?(daemonId: string): void;
   broadcastQuota?(userId: number): Promise<void>;
   notifyUser?(userId: number, payload: unknown): Promise<void>;

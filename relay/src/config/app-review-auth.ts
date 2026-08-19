@@ -1,5 +1,4 @@
 const DEFAULT_APP_REVIEW_EMAIL = 'appreview@pocketctl.me';
-const DEFAULT_APP_REVIEW_CODE = '123456';
 
 function normalizeEmail(email: string): string {
   return email.trim().toLowerCase();
@@ -18,7 +17,12 @@ export function isAppReviewEmail(email: string): boolean {
   return isAppReviewEnabled() && isConfiguredAppReviewEmail(email);
 }
 
-export function verifyAppReviewCode(email: string, code: string): boolean {
-  const configuredCode = process.env.APP_REVIEW_CODE || DEFAULT_APP_REVIEW_CODE;
-  return isAppReviewEmail(email) && code === configuredCode;
+/**
+ * The reviewer's code must always be provisioned explicitly via
+ * APP_REVIEW_CODE. There is no source-code default: a production relay
+ * without an explicit code simply has no App Review bypass.
+ */
+export function explicitAppReviewCode(): string | null {
+  const code = process.env.APP_REVIEW_CODE?.trim() ?? '';
+  return /^\d{6}$/.test(code) ? code : null;
 }

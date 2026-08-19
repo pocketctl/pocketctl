@@ -70,7 +70,8 @@ describeWithDatabase('durable ingress controlled recovery', () => {
     )
     const notifyUser = vi.fn().mockResolvedValue(undefined)
     const hooks = {
-      releaseQuotaReservation: vi.fn().mockResolvedValue(undefined),
+      claimQuotaReservationSession: vi.fn().mockResolvedValue(undefined),
+      settleQuotaReservation: vi.fn().mockResolvedValue(undefined),
       notifyUser,
       notifyProUser: vi.fn().mockResolvedValue(undefined),
     }
@@ -199,7 +200,8 @@ describeWithDatabase('durable ingress controlled recovery', () => {
     )
     const notifyUser = vi.fn().mockResolvedValue(undefined)
     const hooks = {
-      releaseQuotaReservation: vi.fn().mockResolvedValue(undefined),
+      claimQuotaReservationSession: vi.fn().mockResolvedValue(undefined),
+      settleQuotaReservation: vi.fn().mockResolvedValue(undefined),
       notifyUser,
       notifyProUser: vi.fn().mockResolvedValue(undefined),
     }
@@ -252,7 +254,8 @@ describeWithDatabase('durable ingress controlled recovery', () => {
       },
     }
     const durableHooks = (notifyUser: typeof firstNotify) => ({
-      releaseQuotaReservation: vi.fn().mockResolvedValue(undefined),
+      claimQuotaReservationSession: vi.fn().mockResolvedValue(undefined),
+      settleQuotaReservation: vi.fn().mockResolvedValue(undefined),
       notifyUser,
       notifyProUser: vi.fn().mockResolvedValue(undefined),
     })

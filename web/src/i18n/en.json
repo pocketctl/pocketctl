@@ -667,5 +667,6 @@
   "plan.step_aria": "{{status}}: {{step}}",
   "plan.status.pending": "Pending",
   "plan.status.in_progress": "In progress",
-  "plan.status.completed": "Completed"
+  "plan.status.completed": "Completed",
+  "new_session.failed_cwd_not_authorized_desc": "This directory is not on the host's allowlist. Ask the host operator to start the daemon with --allowed-cwd-root <dir> (or bake it into the service install), then retry."
 }

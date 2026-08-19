@@ -12,16 +12,48 @@ interface StoredTicket {
   expiresAt: number;
 }
 
-function hashTicket(ticket: string): string {
-  return createHash('sha256').update(ticket).digest('hex');
+export interface WsTicketStoreConfig {
+  /** Hard cap on concurrently stored tickets (default 20,000). */
+  maxTickets: number;
 }
 
-export function createWsTicketStore(ttlMs = 60_000, now = () => Date.now()) {
+export const DEFAULT_WS_TICKET_STORE_CONFIG: WsTicketStoreConfig = {
+  maxTickets: 20_000,
+};
+
+/** Raised only when the store is at its hard capacity; message carries no counts. */
+export class WsTicketStoreCapacityError extends Error {
+  constructor() {
+    super('websocket ticket store is at capacity, retry later')
+    this.name = 'WsTicketStoreCapacityError'
+  }
+}
+
+export function createWsTicketStore(
+  ttlMs = 60_000,
+  now: () => number = Date.now,
+  config: Partial<WsTicketStoreConfig> = {},
+) {
+  const resolved = { ...DEFAULT_WS_TICKET_STORE_CONFIG, ...config }
   const tickets = new Map<string, StoredTicket>();
 
+  function hashTicket(ticket: string): string {
+    return createHash('sha256').update(ticket).digest('hex');
+  }
+
   function create(payload: WsTicketPayload): { ticket: string; expiresIn: number } {
+    gc();
+    if (tickets.size >= resolved.maxTickets) {
+      throw new WsTicketStoreCapacityError();
+    }
     const ticket = randomBytes(32).toString('base64url');
-    tickets.set(hashTicket(ticket), {
+    // Keys are SHA-256 digests of the ticket; a generation collision with a
+    // still-live entry cannot happen at 256 bits, but never overwrite anyway.
+    const key = hashTicket(ticket);
+    if (tickets.has(key)) {
+      throw new WsTicketStoreCapacityError();
+    }
+    tickets.set(key, {
       payload,
       expiresAt: now() + ttlMs,
     });
@@ -44,5 +76,5 @@ export function createWsTicketStore(ttlMs = 60_000, now = () => Date.now()) {
     }
   }
 
-  return { create, consume, gc };
+  return { create, consume, gc, size: () => tickets.size };
 }

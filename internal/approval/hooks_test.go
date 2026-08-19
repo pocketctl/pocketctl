@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 )
 
@@ -85,5 +86,123 @@ func TestRemoveUserHookPreservesMalformedSettings(t *testing.T) {
 	}
 	if !bytes.Equal(after, original) {
 		t.Fatalf("malformed settings were rewritten: %q", after)
+	}
+}
+
+// --- H-7: hook installation must never write through symlinks ---
+
+func TestEnsureHooksRejectsSymlinkedClaudeDir(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlink fixture")
+	}
+	base := t.TempDir()
+	target := filepath.Join(base, "target")
+	if err := os.MkdirAll(target, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	cwd := filepath.Join(base, "repo")
+	if err := os.Mkdir(cwd, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, filepath.Join(cwd, ".claude")); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := EnsureHooks(cwd, "/usr/local/bin/pocketctl"); err == nil {
+		t.Fatal("EnsureHooks must refuse a symlinked .claude directory")
+	}
+	if _, err := os.Stat(filepath.Join(target, "settings.local.json")); !os.IsNotExist(err) {
+		t.Fatal("hook installation wrote through the symlink into the target")
+	}
+}
+
+func TestEnsureHooksRejectsSymlinkedSettingsFile(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlink fixture")
+	}
+	base := t.TempDir()
+	cwd := filepath.Join(base, "repo")
+	if err := os.MkdirAll(filepath.Join(cwd, ".claude"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	victim := filepath.Join(base, "victim.json")
+	if err := os.WriteFile(victim, []byte("{}"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(victim, filepath.Join(cwd, ".claude", "settings.local.json")); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := EnsureHooks(cwd, "/usr/local/bin/pocketctl"); err == nil {
+		t.Fatal("EnsureHooks must refuse a symlinked settings.local.json")
+	}
+	data, err := os.ReadFile(victim)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(data), "pocketctl") {
+		t.Fatal("hook installation overwrote the symlink target")
+	}
+}
+
+func TestEnsureHooksWritesAtomicallyAndPreservesUserSettings(t *testing.T) {
+	cwd := t.TempDir()
+	settingsDir := filepath.Join(cwd, ".claude")
+	if err := os.MkdirAll(settingsDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	settingsPath := filepath.Join(settingsDir, "settings.local.json")
+	if err := os.WriteFile(settingsPath, []byte(`{"model":"opus"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := EnsureHooks(cwd, "/usr/local/bin/pocketctl"); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(settingsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var parsed map[string]any
+	if err := json.Unmarshal(data, &parsed); err != nil {
+		t.Fatal(err)
+	}
+	if parsed["model"] != "opus" {
+		t.Fatal("user settings must survive hook installation")
+	}
+	hooks, _ := parsed["hooks"].(map[string]any)
+	arr, _ := hooks["PreToolUse"].([]any)
+	if len(arr) != 1 {
+		t.Fatalf("exactly one managed hook expected, got %d", len(arr))
+	}
+	// No temp files may linger next to the settings file.
+	entries, err := os.ReadDir(settingsDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("settings dir must contain only settings.local.json, got %d entries", len(entries))
+	}
+}
+
+func TestRemoveHooksRejectsSymlink(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlink fixture")
+	}
+	base := t.TempDir()
+	cwd := filepath.Join(base, "repo")
+	if err := os.MkdirAll(filepath.Join(cwd, ".claude"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	victim := filepath.Join(base, "victim.json")
+	if err := os.WriteFile(victim, []byte(`{}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(victim, filepath.Join(cwd, ".claude", "settings.local.json")); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := RemoveHooks(cwd); err == nil {
+		t.Fatal("RemoveHooks must refuse a symlinked settings file")
 	}
 }

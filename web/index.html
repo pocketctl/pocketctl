@@ -10,24 +10,13 @@
   <link rel="apple-touch-icon" href="/app/icons/icon-192.png">
   <link rel="icon" type="image/svg+xml" href="/app/logo-github-org.svg">
   <link rel="stylesheet" href="/src/assets/web-shared.css">
-  <!-- Prevent FOUC: apply saved theme before render -->
-  <script>
-    (function() {
-      var theme = localStorage.getItem('pocketctl-theme');
-      if (theme) {
-        document.documentElement.setAttribute('data-theme', theme);
-      } else if (window.matchMedia && window.matchMedia('(prefers-color-scheme: light)').matches) {
-        document.documentElement.setAttribute('data-theme', 'light');
-      }
-    })();
-  </script>
+  <!-- Prevent FOUC: apply saved theme before render.
+       M-8: logic lives in the same-origin external bootstrap.js (no inline
+       script) so production CSP can ship script-src 'self'. -->
+  <script src="/app/bootstrap.js"></script>
 </head>
 <body>
   <div id="app"></div>
-  <script>
-    window.__APP_BASE__ = location.protocol + '//' + location.host;
-    window.__RELAY_WS__ = (location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/ws';
-  </script>
   <script type="module" src="/src/main.ts"></script>
 </body>
 </html>

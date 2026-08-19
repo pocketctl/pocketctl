@@ -19,7 +19,7 @@ func TestRenderUnit(t *testing.T) {
 	out := renderUnit(cfg)
 
 	wantSubstrings := []string{
-		"ExecStart=/usr/local/bin/pocketctl daemon start --foreground",
+		`ExecStart="/usr/local/bin/pocketctl" "daemon" "start" "--foreground"`,
 		"Restart=always",
 		"OOMScoreAdjust=-500",
 		"WantedBy=default.target",
@@ -37,8 +37,29 @@ func TestRenderUnitQuotesSpaces(t *testing.T) {
 		Args:    []string{"daemon", "start", "--foreground"},
 	}
 	out := renderUnit(cfg)
-	if !strings.Contains(out, `ExecStart="/opt/my apps/pocketctl" daemon start --foreground`) {
+	if !strings.Contains(out, `ExecStart="/opt/my apps/pocketctl" "daemon" "start" "--foreground"`) {
 		t.Errorf("path with spaces not quoted:\n%s", out)
+	}
+}
+
+func TestRenderUnitEncodesEveryExecArgumentWithoutInjection(t *testing.T) {
+	root := "/tmp/root with space\" $HOME %h\\tail\nInjectedDirective=yes\tend"
+	cfg := Config{
+		ExePath: "/usr/local/bin/pocketctl",
+		Args: []string{
+			"daemon", "start", "--allowed-cwd-root", root,
+		},
+	}
+	out := renderUnit(cfg)
+	want := `ExecStart="/usr/local/bin/pocketctl" "daemon" "start" "--allowed-cwd-root" "/tmp/root with space\" $$HOME %%h\\tail\nInjectedDirective=yes\tend"`
+	if !strings.Contains(out, want+"\n") {
+		t.Fatalf("ExecStart argv was not encoded as one token per argument; want %q:\n%s", want, out)
+	}
+	if strings.Contains(out, "\nInjectedDirective=yes\n") {
+		t.Fatalf("argument injected a new unit directive:\n%s", out)
+	}
+	if strings.Contains(out, " --allow-dangerous-remote-permissions ") {
+		t.Fatalf("argument injected a dangerous permission flag:\n%s", out)
 	}
 }
 

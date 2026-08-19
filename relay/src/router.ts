@@ -9,7 +9,16 @@ import { generateTitle, generateSubagentTitle } from './title.js';
 import { notifyUser, daemonOfflinePush, daemonOnlinePush } from './push.js';
 import { PushDeduper } from './push-deduper.js';
 import { quotaEnforcementMode, resolveEntitlements } from './entitlements.js';
-import { claimBoundDaemonSlot, getQuotaSnapshot, releaseQuotaReservation, reserveConcurrentSession } from './quota.js';
+import {
+  claimBoundDaemonSlot,
+  getQuotaSnapshot,
+  markQuotaReservationUncertain,
+  QuotaReservationBindingError,
+  reserveConcurrentSession,
+  settleQuotaReservation,
+  type QuotaReservationBinding,
+  type QuotaSettlementReason,
+} from './quota.js';
 import { classifyDaemonEvent, normalizeSessionId } from './ingress/event-policy.js';
 import type { PriorityClass } from './ingress/types.js';
 import type { AckCheckpoint } from './ingress/types.js';
@@ -72,6 +81,8 @@ interface PendingSessionOperation {
   requestId: string;
   reservationId: string | null;
   daemonId: string;
+  userId: number | null;
+  sessionId: string | null;
   origin: WebSocket;
   operation: 'create' | 'resume';
   agentType: string;
@@ -330,10 +341,18 @@ export class Router {
           this.clients.get(origin)?.subscribedSessions.add(sessionId);
           this.pendingOriginClient.set(sessionId, origin);
         },
-        releasePendingOperation: async (daemonId, requestId) => {
-          await this.settlePendingSessionOperation(
-            this.findPendingSessionOperation(daemonId, requestId ?? undefined),
+        releasePendingOperation: async (identity) => {
+          const pending = this.findPendingSessionOperation(
+            identity.daemonId, identity.requestId, identity.userId,
           );
+          if (!pending || pending.operation !== identity.operation
+            || pending.reservationId !== identity.reservationId
+            || (pending.operation === 'resume' && pending.sessionId !== identity.sessionId)) return;
+          if (pending.timeout) clearTimeout(pending.timeout);
+          await this.broadcastQuotaStatus(identity.userId);
+          this.pendingSessionOperations.delete(this.pendingOperationKey(
+            pending.userId, pending.daemonId, pending.requestId,
+          ));
         },
         clearPendingSession: (daemonId) => {
           this.pendingSessionMeta.delete(daemonId);
@@ -506,16 +525,31 @@ export class Router {
       }
     }
     if (delivery.type === 'session_created' && sessionId) {
-      const pending = this.findPendingSessionOperation(daemonId, delivery.requestId ?? undefined);
+      const pending = this.findPendingSessionOperation(daemonId, delivery.requestId ?? undefined, delivery.userId);
       const origin = pending?.origin ?? this.pendingSessionCreate.get(daemonId);
       if (origin) {
         this.clients.get(origin)?.subscribedSessions.add(sessionId);
         this.pendingOriginClient.set(sessionId, origin);
       }
       if (pending?.timeout) clearTimeout(pending.timeout);
-      if (pending) this.pendingSessionOperations.delete(pending.requestId);
+      if (pending) this.pendingSessionOperations.delete(this.pendingOperationKey(
+        pending.userId, pending.daemonId, pending.requestId,
+      ));
       this.pendingSessionMeta.delete(daemonId);
       this.pendingSessionCreate.delete(daemonId);
+    }
+    if (delivery.type === 'session_create_failed') {
+      const pending = this.findPendingSessionOperation(
+        daemonId, delivery.requestId ?? undefined, delivery.userId,
+      );
+      if (pending?.operation === 'create') {
+        if (pending.timeout) clearTimeout(pending.timeout);
+        this.pendingSessionOperations.delete(this.pendingOperationKey(
+          pending.userId, pending.daemonId, pending.requestId,
+        ));
+        this.pendingSessionCreate.delete(daemonId);
+        this.pendingSessionMeta.delete(daemonId);
+      }
     }
     if (delivery.payload.reason !== 'resolved_elsewhere') {
       if (delivery.type === 'approval_resolved') {
@@ -532,7 +566,7 @@ export class Router {
 
   async deliverDurableMaterializedEvent(delivery: MaterializedDelivery): Promise<boolean> {
     if (delivery.inboxId && delivery.userId !== null
-      && ['session_created', 'session_discovered', 'session_status'].includes(delivery.type)) {
+      && ['session_created', 'session_create_failed', 'session_discovered', 'session_status'].includes(delivery.type)) {
       // Standalone workers have no websocket maps. Recreate the Task 8
       // user-visible quota refresh at the Relay delivery boundary. This await
       // is part of the outbox disposition: a transient quota failure rolls the
@@ -580,12 +614,22 @@ export class Router {
     return true;
   }
 
-  private findPendingSessionOperation(daemonId: string, requestId?: string): PendingSessionOperation | undefined {
-    if (requestId) {
-      const exact = this.pendingSessionOperations.get(requestId);
-      if (exact?.daemonId === daemonId) return exact;
-    }
-    return [...this.pendingSessionOperations.values()].find((pending) => pending.daemonId === daemonId);
+  private pendingOperationKey(userId: number | null, daemonId: string, requestId: string): string {
+    return JSON.stringify([userId, daemonId, requestId]);
+  }
+
+  private findPendingSessionOperation(
+    daemonId: string,
+    requestId?: string,
+    userId?: number | null,
+  ): PendingSessionOperation | undefined {
+    if (!requestId) return undefined;
+    const expectedUserId = userId !== undefined ? userId : this.daemons.get(daemonId)?.userId;
+    if (expectedUserId === undefined) return undefined;
+    const exact = this.pendingSessionOperations.get(this.pendingOperationKey(expectedUserId, daemonId, requestId));
+    if (exact?.daemonId !== daemonId) return undefined;
+    if (userId !== undefined && exact.userId !== userId) return undefined;
+    return exact;
   }
 
   private materializationContext(
@@ -593,33 +637,64 @@ export class Router {
     payload: Record<string, unknown>,
   ): MaterializationContext {
     const requestId = typeof payload.request_id === 'string' ? payload.request_id : undefined;
-    const pending = this.findPendingSessionOperation(daemonId, requestId);
+    const userId = this.daemons.get(daemonId)?.userId ?? null;
+    const pending = this.findPendingSessionOperation(daemonId, requestId, userId);
     const meta = this.pendingSessionMeta.get(daemonId);
     return {
       agentType: pending?.agentType ?? meta?.agent_type ?? '',
       cwd: pending?.cwd ?? meta?.cwd ?? '',
       requestId: pending?.requestId ?? requestId,
-      reservationId: pending?.reservationId
-        ?? (typeof payload.reservation_id === 'string' ? payload.reservation_id : null),
+      reservationId: pending?.reservationId ?? null,
+      quotaOperation: pending?.operation,
       hostname: this.daemons.get(daemonId)?.hostname ?? 'unknown',
     };
   }
 
-  private async settlePendingSessionOperation(pending: PendingSessionOperation | undefined): Promise<void> {
+  /**
+   * M-4: closing a pending operation needs an explicit accounting outcome.
+   * 'settled' frees the reservation for a confirmed reason (daemon-acknowledged
+   * failure or a materialized success). 'uncertain' keeps the reservation
+   * counted — a timed-out or vanished daemon gets no free slot it may still
+   * be using; only audited reconciliation can settle it later.
+   */
+  private async settlePendingSessionOperation(
+    pending: PendingSessionOperation | undefined,
+    outcome: { kind: 'settled'; reason: QuotaSettlementReason } | { kind: 'uncertain'; reason: string },
+  ): Promise<void> {
     if (!pending) return;
-    if (pending.timeout) clearTimeout(pending.timeout);
     if (pending.reservationId) {
-      await releaseQuotaReservation(this.pool, pending.reservationId);
-      const daemon = this.daemons.get(pending.daemonId);
-      if (daemon?.userId) await this.broadcastQuotaStatus(daemon.userId);
+      if (pending.userId === null) return;
+      const binding: QuotaReservationBinding = {
+        reservationId: pending.reservationId,
+        userId: pending.userId,
+        daemonId: pending.daemonId,
+        requestId: pending.requestId,
+        operation: pending.operation,
+        sessionId: pending.sessionId,
+      };
+      let matched: boolean;
+      if (outcome.kind === 'settled') {
+        matched = (await settleQuotaReservation(this.pool, binding, outcome.reason)).matched;
+      } else {
+        matched = (await markQuotaReservationUncertain(this.pool, binding, outcome.reason)).matched;
+      }
+      if (!matched) return;
+      if (pending.timeout) clearTimeout(pending.timeout);
+      await this.broadcastQuotaStatus(pending.userId);
+    } else if (pending.timeout) {
+      clearTimeout(pending.timeout);
     }
-    this.pendingSessionOperations.delete(pending.requestId);
+    this.pendingSessionOperations.delete(this.pendingOperationKey(
+      pending.userId, pending.daemonId, pending.requestId,
+    ));
   }
 
   private trackPendingSessionOperation(pending: PendingSessionOperation, expiresAt: number | null): void {
     if (expiresAt) {
       const timeout = setTimeout(() => {
-        const current = this.pendingSessionOperations.get(pending.requestId);
+        const current = this.pendingSessionOperations.get(this.pendingOperationKey(
+          pending.userId, pending.daemonId, pending.requestId,
+        ));
         if (current !== pending) return;
         if (pending.origin.readyState === 1) {
           if (pending.operation === 'create') {
@@ -628,12 +703,15 @@ export class Router {
             this.send(pending.origin, { type: 'user_message_nack', request_id: pending.requestId, reason: 'timeout' });
           }
         }
-        void this.settlePendingSessionOperation(pending).catch((e) => console.error('release quota reservation:', e));
+        void this.settlePendingSessionOperation(pending, { kind: 'uncertain', reason: 'grant_timeout' })
+          .catch((e) => console.error('mark quota reservation uncertain:', e));
       }, Math.min(2_147_483_647, Math.max(1, expiresAt - Date.now())));
       timeout.unref?.();
       pending.timeout = timeout;
     }
-    this.pendingSessionOperations.set(pending.requestId, pending);
+    this.pendingSessionOperations.set(this.pendingOperationKey(
+      pending.userId, pending.daemonId, pending.requestId,
+    ), pending);
   }
 
   async broadcastQuotaStatus(userId: number): Promise<void> {
@@ -781,6 +859,15 @@ export class Router {
     const hostname = msg.hostname || 'unknown';
     const previousDaemon = this.daemons.get(daemonId);
 
+    // H-3: daemons must register with a real authenticated user. The legacy
+    // null-user (global API key) identity is gone; no owner recovery from
+    // persisted daemon rows, no activation, no socket replacement.
+    if (!userId) {
+      this.send(ws, { type: 'register_rejected', reason: 'auth_required', retryable: false, message: 'daemon registration requires user authentication' });
+      ws.close(4001, 'authentication required');
+      return false;
+    }
+
     // Authentication may have completed before this socket waited behind a
     // force-kick in the per-daemon chain. Recheck the same JTI inside the lock,
     // before quota admission or any activation mutation.
@@ -874,17 +961,8 @@ export class Router {
       }
     }
 
-    // Fallback: if the connecting token didn't carry a userId (e.g. a legacy or
-    // anonymous reconnection), recover the daemon's persisted owner from
-    // daemons.user_id. Without this, sessions created during this connection
-    // land with user_id NULL and vanish from the owner's web list (filtered by
-    // listSessionsByUser). Anonymous legacy reconnects do not create bindings.
-    if (!userId) {
-      try { userId = await db.getDaemonOwner(this.controlPool, daemonId); } catch (e) { /* leave null */ }
-    }
-
     // The server installs a provisional socket identity before awaiting us. A
-    // close during owner/quota admission must not activate a dead socket.
+    // close during quota admission must not activate a dead socket.
     if (ws.readyState !== 1) return false;
 
     let activationSnapshot: db.DaemonRegistrationSnapshot | null;
@@ -995,7 +1073,7 @@ export class Router {
             if (restored) {
               prevSeq.accepting = true;
               if (!prevSeq.draining && prevSeq.pending.has(prevSeq.persistedHigh + 1)) {
-                prevSeq.drainPromise = this.drainPersisted(prevSeq);
+                prevSeq.drainPromise = this.drainPersisted(daemonId, prevSeq);
                 void prevSeq.drainPromise;
               }
             }
@@ -1009,7 +1087,7 @@ export class Router {
           if (restored) {
             prevSeq.accepting = true;
             if (!prevSeq.draining && prevSeq.pending.has(prevSeq.persistedHigh + 1)) {
-              prevSeq.drainPromise = this.drainPersisted(prevSeq);
+              prevSeq.drainPromise = this.drainPersisted(daemonId, prevSeq);
               void prevSeq.drainPromise;
             }
           }
@@ -1162,7 +1240,8 @@ export class Router {
           this.send(pending.origin, { type: 'user_message_nack', request_id: pending.requestId, reason: 'daemon_offline' });
         }
       }
-      void this.settlePendingSessionOperation(pending).catch((e) => console.error('release quota reservation:', e));
+      void this.settlePendingSessionOperation(pending, { kind: 'uncertain', reason: 'daemon_offline' })
+        .catch((e) => console.error('mark quota reservation uncertain:', e));
     }
 
     // Defer the offline declaration behind the grace window. The daemon entry
@@ -1332,7 +1411,14 @@ export class Router {
    */
   private markPersisted(daemonId: string, seq?: number, effect?: () => Promise<void> | void, state?: DaemonSeqState): void {
     if (!seq) {
-      if (effect) void Promise.resolve(effect()).catch((e) => console.error('durable effect:', e));
+      if (effect) void Promise.resolve(effect()).catch((e) => {
+        if (e instanceof QuotaReservationBindingError) {
+          console.error('[router] quota outcome permanently rejected', { daemonId, code: e.code });
+          this.rejectDaemonConnection(daemonId, e.code);
+          return;
+        }
+        console.error('durable effect:', e);
+      });
       return;
     }
     const st = state ?? this.daemonSeq.get(daemonId);
@@ -1344,12 +1430,12 @@ export class Router {
     st.pending.add(seq);
     if (effect) st.effects.set(seq, effect);
     if (!st.draining) {
-      st.drainPromise = this.drainPersisted(st);
+      st.drainPromise = this.drainPersisted(daemonId, st);
       void st.drainPromise;
     }
   }
 
-  private async drainPersisted(st: DaemonSeqState): Promise<void> {
+  private async drainPersisted(daemonId: string, st: DaemonSeqState): Promise<void> {
     if (st.draining) return;
     st.draining = true;
     try {
@@ -1360,6 +1446,30 @@ export class Router {
           try {
             await durableEffect();
           } catch (e) {
+            if (e instanceof QuotaReservationBindingError
+              || e instanceof db.SessionOwnershipViolationError
+              || e instanceof db.UnknownDaemonSessionError) {
+              // The ledger is durable but the claimed quota outcome is
+              // permanently contradictory, or the post-fence mutation found
+              // a permanent ownership violation. Advance exactly this poison
+              // sequence, ACK it, then close so replay cannot pin the spool.
+              st.pending.delete(seq);
+              st.effects.delete(seq);
+              st.persistedHigh = seq;
+              st.inflight.delete(seq);
+              const reason = e instanceof QuotaReservationBindingError
+                ? e.code
+                : 'session_ownership_violation';
+              console.error('[router] daemon effect permanently rejected', {
+                daemonId, errorName: e.name, code: e.code,
+              });
+              const daemon = this.daemons.get(daemonId);
+              if (daemon?.ws.readyState === 1) {
+                this.send(daemon.ws, { type: 'event_ack', up_to_seq: st.persistedHigh });
+              }
+              this.rejectDaemonConnection(daemonId, reason);
+              return;
+            }
             // Keep pending/effect at this seq and withhold the contiguous ack.
             // Clearing in-flight permits a replay to refresh and retry it.
             st.inflight.delete(seq);
@@ -1428,15 +1538,37 @@ export class Router {
         this.sendRetryableDisconnect(daemonId, 'relay_overloaded', 500);
         return;
       }
-      if (e instanceof db.SessionOwnershipViolationError || e instanceof db.UnknownDaemonSessionError) {
+      if (e instanceof db.SessionOwnershipViolationError || e instanceof db.UnknownDaemonSessionError
+        || e instanceof QuotaReservationBindingError) {
         // Structured security audit without payload, session, or owner details.
         console.error('[router] daemon event permanently rejected', {
           daemonId,
           errorName: e.name,
           code: (e as { code?: string }).code,
         });
-        this.markPersisted(daemonId, seq, undefined, state);
-        this.rejectDaemonConnection(daemonId, 'session_ownership_violation');
+        const permanentState = state ?? this.daemonSeq.get(daemonId);
+        const reason = e instanceof QuotaReservationBindingError
+          ? e.code
+          : 'session_ownership_violation';
+        const rejectAfterAck = (ackSeq?: number) => {
+          const activeDaemon = this.daemons.get(daemonId);
+          if (ackSeq && activeDaemon?.ws.readyState === 1) {
+            this.send(activeDaemon.ws, { type: 'event_ack', up_to_seq: ackSeq });
+          }
+          this.rejectDaemonConnection(daemonId, reason);
+        };
+        if (!seq || !permanentState || this.daemonSeq.get(daemonId) !== permanentState
+          || !permanentState.accepting || seq <= permanentState.persistedHigh) {
+          rejectAfterAck(seq && permanentState ? permanentState.persistedHigh : undefined);
+          return;
+        }
+        // Queue the permanent rejection at its contiguous sequence instead of
+        // closing early while a lower durable effect is still in flight.
+        this.markPersisted(daemonId, seq, () => {
+          // This terminal effect runs only after every lower sequence has
+          // completed, so acknowledging this poison sequence is now safe.
+          rejectAfterAck(seq);
+        }, permanentState);
         return;
       }
       console.error('persistAndAck:', e);
@@ -1826,6 +1958,10 @@ export class Router {
       return;
     }
     if (!sessionId) {
+      if (msg.type === 'session_create_failed') {
+        this.persistAndAck(daemonId, msg.seq, '', msg.type, msg, messageState, receivedAt);
+        return;
+      }
       // model_list (host-level response, no session_id): broadcast to the daemon owner's clients
       if (msg.type === 'model_list') {
         const daemon = this.daemons.get(daemonId);
@@ -1838,23 +1974,6 @@ export class Router {
         if (pendingClient && pendingClient.readyState === 1) {
           this.send(pendingClient, msg);
         }
-      }
-      // session_create_failed (no session_id): forward to the originating client
-      if (msg.type === 'session_create_failed') {
-        const pending = this.findPendingSessionOperation(daemonId, msg.request_id);
-        const originClient = pending?.origin ?? this.pendingSessionCreate.get(daemonId);
-        if (originClient && originClient.readyState === 1) {
-          this.send(originClient, {
-            type: 'session_create_failed',
-            request_id: pending?.requestId ?? msg.request_id,
-            reservation_id: pending?.reservationId ?? msg.reservation_id,
-            reason: msg.reason || 'start_fail',
-            error: msg.error,
-          });
-        }
-        void this.settlePendingSessionOperation(pending).catch((e) => console.error('release quota reservation:', e));
-        this.pendingSessionCreate.delete(daemonId);
-        this.pendingSessionMeta?.delete(daemonId);
       }
       // upgrade_result: broadcast to same-user clients (no session_id)
       if (msg.type === 'upgrade_result') {
@@ -2024,12 +2143,13 @@ export class Router {
       const requestId = typeof msg.request_id === 'string' && msg.request_id
         ? msg.request_id
         : randomUUID();
-      const existingPending = this.pendingSessionOperations.get(requestId);
+      const existingPending = this.findPendingSessionOperation(daemonId, requestId, client.userId);
       if (existingPending?.daemonId === daemonId && existingPending.operation === 'create') {
         return;
       }
       let reservationId: string | null = null;
       let expiresAt: number | null = null;
+      let reusedReservation = false;
       if (client.userId !== null) {
         const { plan, whitelist } = await db.getUserPlanAndWhitelist(this.pool, client.userId);
         const entitlements = resolveEntitlements(plan, whitelist);
@@ -2050,9 +2170,22 @@ export class Router {
           requestId,
           operation: 'create',
           daemonId,
+          agentType: msg.agent || 'claude-code',
+          cwd: msg.cwd || '',
           limit: enforcement === 'enforce' ? entitlements.maxConcurrentSessions : null,
         });
         if (!decision.allowed) {
+          if (decision.reason === 'quota_reservation_binding_conflict'
+            || decision.reason === 'quota_request_already_finalized') {
+            this.send(clientWs, {
+              type: 'session_create_failed', request_id: requestId,
+              reason: decision.reason, retryable: false,
+              error: decision.reason === 'quota_request_already_finalized'
+                ? 'request_id already reached a terminal quota outcome'
+                : 'request_id is already bound to another quota operation',
+            });
+            return;
+          }
           this.send(clientWs, {
             type: 'session_create_failed',
             request_id: requestId,
@@ -2069,11 +2202,14 @@ export class Router {
         }
         reservationId = decision.reservationId;
         expiresAt = decision.expiresAt;
+        reusedReservation = decision.reused;
       }
       this.trackPendingSessionOperation({
         requestId,
         reservationId,
         daemonId,
+        userId: client.userId,
+        sessionId: null,
         origin: clientWs,
         operation: 'create',
         agentType: msg.agent || 'claude-code',
@@ -2083,6 +2219,17 @@ export class Router {
       this.pendingSessionCreate.set(daemonId, clientWs);
       this.pendingSessionMeta = this.pendingSessionMeta || new Map();
       this.pendingSessionMeta.set(daemonId, { agent_type: msg.agent || 'claude-code', cwd: msg.cwd || '' });
+      if (reusedReservation) {
+        // The durable row proves this exact request was already admitted, but
+        // cannot prove whether the pre-crash Relay delivered the command.
+        // Choose at-most-once execution: attach this client to the existing
+        // outcome and never make an official daemon reject a duplicate grant.
+        this.send(clientWs, {
+          type: 'session_create_pending', request_id: requestId,
+          reason: 'request_in_progress', retryable: true,
+        });
+        return;
+      }
       this.send(targetDaemon.daemon.ws, {
         ...msg,
         request_id: requestId,
@@ -2157,6 +2304,14 @@ export class Router {
                 limit: enforcement === 'enforce' ? entitlements.maxConcurrentSessions : null,
               });
               if (!decision.allowed) {
+                if (decision.reason === 'quota_reservation_binding_conflict'
+                  || decision.reason === 'quota_request_already_finalized') {
+                  this.send(clientWs, {
+                    type: 'user_message_nack', msg_id: msg.msg_id, request_id: requestId,
+                    reason: decision.reason, retryable: false,
+                  });
+                  return;
+                }
                 this.send(clientWs, {
                   type: 'user_message_nack',
                   msg_id: msg.msg_id,
@@ -2175,12 +2330,21 @@ export class Router {
                 requestId,
                 reservationId: decision.reservationId,
                 daemonId,
+                userId: client.userId,
+                sessionId: msg.session_id,
                 origin: clientWs,
                 operation: 'resume',
                 agentType: '',
                 cwd: '',
               }, decision.expiresAt);
               this.broadcastQuotaStatus(client.userId).catch(console.error);
+              if (decision.reused) {
+                this.send(clientWs, {
+                  type: 'user_message_nack', msg_id: msg.msg_id, request_id: requestId,
+                  reason: 'request_in_progress', retryable: false,
+                });
+                return;
+              }
               outbound = {
                 ...msg,
                 request_id: requestId,
@@ -2453,6 +2617,12 @@ export class Router {
 
   private async handleListSessions(clientWs: WebSocket, userId: number | null, msg: any = {}): Promise<void> {
     try {
+      // H-3: a null user (legacy identity) must never enumerate sessions.
+      // Fail closed for both the global and per-daemon listings.
+      if (userId == null) {
+        this.send(clientWs, { type: 'error', error: 'authentication required' });
+        return;
+      }
       if (typeof msg.daemon_id === 'string' && msg.daemon_id.length > 0) {
         const page = await db.listSessionsPageByDaemon(this.pool, {
           userId: userId ?? undefined,
@@ -2469,9 +2639,7 @@ export class Router {
         });
         return;
       }
-      const sessions = userId
-        ? await db.listSessionsByUser(this.pool, userId)
-        : await db.listSessions(this.pool);
+      const sessions = await db.listSessionsByUser(this.pool, userId);
       this.send(clientWs, { type: 'session_list', sessions });
     } catch (err) { console.error('list_sessions error:', err); this.send(clientWs, { type: 'error', error: 'failed to list sessions' }); }
   }

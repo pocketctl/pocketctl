@@ -265,10 +265,20 @@ func cmdServiceInstall(args []string) {
 	trustedActionPolicy := fs.String("trusted-action-policy", "", "Persist trusted approval action policy: off, observe, or on")
 	noAgentAutoEnable := fs.Bool("no-agent-auto-enable", false, "Skip optional managed-agent auto-enable")
 	noAgentPrompt := fs.Bool("no-agent-prompt", false, "Deprecated alias for --no-agent-auto-enable")
+	allowedCwdRoots := multiFlag{}
+	fs.Var(&allowedCwdRoots, "allowed-cwd-root", "Absolute directory that remote sessions may use as cwd (repeatable; baked into the service argv)")
+	allowDangerousRemotePermissions := fs.Bool("allow-dangerous-remote-permissions", false, "Bake the dangerous remote permission switch into the supervised daemon")
 	fs.Parse(args)
 	normalizedTrustedActionPolicy, policyErr := validateTrustedActionPolicyFlag(*trustedActionPolicy)
 	if policyErr != nil {
 		fmt.Fprintln(os.Stderr, policyErr)
+		os.Exit(2)
+	}
+	// Validate + canonicalize roots now so the installed unit never bakes a
+	// broken path (and no secret ever lands in argv — roots are paths only).
+	policyForService, rootsErr := session.NewCwdPolicy(allowedCwdRoots)
+	if rootsErr != nil {
+		fmt.Fprintln(os.Stderr, rootsErr)
 		os.Exit(2)
 	}
 
@@ -292,12 +302,19 @@ func cmdServiceInstall(args []string) {
 
 	// The supervised process runs in the foreground so the init system owns its
 	// lifecycle (no self-fork). Relay flags are baked in so the unit is explicit.
-	daemonArgs := serviceDaemonArgs(*production, *relayURL, normalizedTrustedActionPolicy)
+	policyArgs := []string{}
+	for _, root := range policyForService.Roots() {
+		policyArgs = append(policyArgs, "--allowed-cwd-root", root)
+	}
+	if *allowDangerousRemotePermissions {
+		policyArgs = append(policyArgs, "--allow-dangerous-remote-permissions")
+	}
+	daemonArgs := serviceDaemonArgs(*production, *relayURL, normalizedTrustedActionPolicy, policyArgs...)
 
 	// Ensure the log dir exists; launchd/systemd open the boot log but won't
 	// create its parent directory.
 	_ = os.MkdirAll(daemon.LogDir(), 0755)
-	cfg := daemonServiceOptions(exe, daemon.ServiceBootLogPath(), *production, *relayURL, normalizedTrustedActionPolicy, os.Getenv("PATH"))
+	cfg := daemonServiceOptions(exe, daemon.ServiceBootLogPath(), daemonArgs, os.Getenv("PATH"))
 
 	// If the daemon is already running standalone, stop it so it doesn't fight
 	// the supervised instance for the relay registration / approval socket.
@@ -328,7 +345,7 @@ func cmdServiceInstall(args []string) {
 	}
 }
 
-func serviceDaemonArgs(production bool, relayURL, trustedActionPolicy string) []string {
+func serviceDaemonArgs(production bool, relayURL, trustedActionPolicy string, extraArgs ...string) []string {
 	args := []string{"daemon", "start", "--foreground", "--no-agent-auto-enable"}
 	if production {
 		args = append(args, "--prod")
@@ -339,13 +356,14 @@ func serviceDaemonArgs(production bool, relayURL, trustedActionPolicy string) []
 	if trustedActionPolicy != "" {
 		args = append(args, "--trusted-action-policy", trustedActionPolicy)
 	}
+	args = append(args, extraArgs...)
 	return args
 }
 
-func daemonServiceOptions(exePath, logPath string, production bool, relayURL, trustedActionPolicy, pathEnv string) platform.ServiceOpts {
+func daemonServiceOptions(exePath, logPath string, daemonArgs []string, pathEnv string) platform.ServiceOpts {
 	return platform.ServiceOpts{
 		ExePath: exePath,
-		Args:    serviceDaemonArgs(production, relayURL, trustedActionPolicy),
+		Args:    append([]string(nil), daemonArgs...),
 		LogPath: logPath,
 		PathEnv: pathEnv,
 	}
@@ -358,6 +376,19 @@ func validateTrustedActionPolicyFlag(value string) (string, error) {
 		return normalized, nil
 	default:
 		return "", fmt.Errorf("--trusted-action-policy must be one of off, observe, or on")
+	}
+}
+
+func effectiveTrustedActionPolicy(explicit string) string {
+	if explicit != "" {
+		return explicit
+	}
+	inherited := strings.ToLower(strings.TrimSpace(os.Getenv("POCKETCTL_TRUSTED_ACTION_POLICY_V1")))
+	switch inherited {
+	case "observe", "on":
+		return inherited
+	default:
+		return "off"
 	}
 }
 
@@ -444,10 +475,27 @@ func cmdUninstall(args []string) {
 			i18n.T("uninstall.desc_config"),
 		})
 	}
-	targets = append(targets, removeTarget{
-		"/tmp/pocketctl",
-		i18n.T("uninstall.desc_runtime"),
-	})
+	if runtime.GOOS != "windows" {
+		// Legacy shared runtime dir (pre-H-6): only consider it for removal
+		// when it is a real directory owned by the current user and not a
+		// symlink. Never auto-remove a directory shared with other users.
+		const legacy = "/tmp/pocketctl"
+		if _, err := os.Lstat(legacy); err == nil {
+			if daemon.OwnedByCurrentUser(legacy) {
+				targets = append(targets, removeTarget{legacy, i18n.T("uninstall.desc_runtime")})
+			} else {
+				fmt.Printf("  • %s (legacy shared dir not owned by you — skipped, review manually)\n", legacy)
+			}
+		}
+	}
+	if dir, dirErr := daemon.RuntimeDir(); dirErr == nil {
+		targets = append(targets, removeTarget{
+			dir,
+			i18n.T("uninstall.desc_runtime"),
+		})
+	} else {
+		fmt.Fprintf(os.Stderr, "uninstall: private runtime dir unavailable: %v\n", dirErr)
+	}
 
 	// Resolve the binary path.
 	exePath, exeErr := os.Executable()
@@ -635,6 +683,63 @@ func cmdLogin(args []string) {
 	fmt.Println(i18n.T("login.next_step"))
 }
 
+// ValidateExternalURL enforces the M-6 contract for any URL the CLI opens
+// or prints from an authentication server response: absolute http(s) only,
+// no userinfo, no control characters, bounded length, and plaintext HTTP is
+// allowed only for loopback hosts (production surfaces are https).
+func ValidateExternalURL(raw string) error {
+	const maxURLLen = 2048
+	if raw == "" {
+		return fmt.Errorf("invalid URL: empty")
+	}
+	if len(raw) > maxURLLen {
+		return fmt.Errorf("invalid URL: exceeds %d characters", maxURLLen)
+	}
+	for i := 0; i < len(raw); i++ {
+		if raw[i] < 0x20 || raw[i] == 0x7f {
+			return fmt.Errorf("invalid URL: control characters")
+		}
+	}
+	u, err := url.Parse(raw)
+	if err != nil {
+		return fmt.Errorf("invalid URL: %w", err)
+	}
+	if !u.IsAbs() || u.Host == "" {
+		return fmt.Errorf("invalid URL: must be absolute with a host")
+	}
+	if u.Scheme != "http" && u.Scheme != "https" {
+		return fmt.Errorf("invalid URL: scheme %q is not allowed", u.Scheme)
+	}
+	if u.User != nil {
+		return fmt.Errorf("invalid URL: userinfo is not allowed")
+	}
+	if u.Scheme == "http" && !isLoopbackHost(u.Hostname()) {
+		return fmt.Errorf("invalid URL: plaintext http is only allowed for loopback hosts")
+	}
+	return nil
+}
+
+func isLoopbackHost(hostname string) bool {
+	host := strings.ToLower(hostname)
+	if host == "localhost" {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
+}
+
+// WSLBrowserArgs builds the direct-argv opener for a WSL environment: the
+// opener binary plus the URL as its own argument. No cmd.exe /c, no shell.
+func WSLBrowserArgs(opener string, rawURL string) []string {
+	switch {
+	case strings.HasSuffix(opener, "rundll32.exe"):
+		return []string{opener, "url.dll,FileProtocolHandler", rawURL}
+	default:
+		// wslview and explorer.exe take the URL as the single argument.
+		return []string{opener, rawURL}
+	}
+}
+
 // canOpenBrowser checks if the current environment can open a browser.
 func canOpenBrowser() bool {
 	if os.Getenv("DISPLAY") != "" || os.Getenv("WAYLAND_DISPLAY") != "" {
@@ -643,10 +748,12 @@ func canOpenBrowser() bool {
 	if runtime.GOOS == "darwin" && os.Getenv("SSH_TTY") == "" {
 		return true
 	}
-	// WSL: cmd.exe can hand off to the Windows host browser
+	// WSL: wslview or a direct Windows opener hands off to the host browser.
 	if runtime.GOOS == "linux" && isWSL() {
-		if _, err := exec.LookPath("cmd.exe"); err == nil {
-			return true
+		for _, candidate := range []string{"wslview", "rundll32.exe", "explorer.exe"} {
+			if _, err := exec.LookPath(candidate); err == nil {
+				return true
+			}
 		}
 	}
 	if _, err := exec.LookPath("open"); err == nil {
@@ -684,12 +791,19 @@ func loginViaDeviceFlow(apiURL string) (string, string, error) {
 	}
 	fmt.Println(i18n.T("login.check_ok"))
 
-	// Open browser
+	// Open browser. M-6: the authorization server's URL is validated before
+	// it is printed or handed to an opener; on rejection only a safe error is
+	// shown — the hostile URL itself is never echoed.
 	fmt.Println(i18n.T("login.opening_browser"))
 	fmt.Println(i18n.T("login.manual_open"))
-	fmt.Printf("  %s\n\n", authResp.VerificationURIComplete)
-
-	openBrowser(authResp.VerificationURIComplete)
+	if err := ValidateExternalURL(authResp.VerificationURIComplete); err != nil {
+		fmt.Fprintf(os.Stderr, "warning: %v — open the login page manually from your relay's web app\n", err)
+	} else {
+		fmt.Printf("  %s\n\n", authResp.VerificationURIComplete)
+		if err := openBrowser(authResp.VerificationURIComplete); err != nil {
+			fmt.Fprintf(os.Stderr, "warning: %v\n", err)
+		}
+	}
 
 	// Poll for token
 	interval := authResp.Interval
@@ -734,32 +848,40 @@ func loginViaDeviceFlow(apiURL string) (string, string, error) {
 	}
 }
 
-// openBrowser opens the given URL in the default browser.
-func openBrowser(url string) {
+// openBrowser opens the given URL in the default browser. The URL is
+// validated first (M-6) and every platform path passes it as a direct argv
+// element — no command interpreter is ever involved.
+func openBrowser(rawURL string) error {
+	if err := ValidateExternalURL(rawURL); err != nil {
+		return fmt.Errorf("%w (refusing to open)", err)
+	}
 	var cmd *exec.Cmd
 	switch runtime.GOOS {
 	case "darwin":
-		cmd = exec.Command("open", url)
+		cmd = exec.Command("open", rawURL)
 	case "linux":
-		// WSL: prefer cmd.exe (hands off to Windows host browser)
+		// WSL: wslview first, then direct Windows openers. Never cmd.exe /c.
 		if isWSL() {
-			if p, err := exec.LookPath("cmd.exe"); err == nil {
-				cmd = exec.Command(p, "/c", "start", "", url)
-				break
+			for _, candidate := range []string{"wslview", "rundll32.exe", "explorer.exe"} {
+				if p, err := exec.LookPath(candidate); err == nil {
+					args := WSLBrowserArgs(p, rawURL)
+					cmd = exec.Command(args[0], args[1:]...)
+					break
+				}
 			}
-		}
-		// wslview (from wslu package)
-		if _, err := exec.LookPath("wslview"); err == nil {
-			cmd = exec.Command("wslview", url)
+			if cmd == nil {
+				return fmt.Errorf("no WSL browser opener found (install wslu for wslview)")
+			}
 			break
 		}
-		cmd = exec.Command("xdg-open", url)
+		cmd = exec.Command("xdg-open", rawURL)
 	default:
-		return
+		return fmt.Errorf("unsupported platform for browser opening")
 	}
 	if err := cmd.Start(); err != nil {
-		fmt.Fprintf(os.Stderr, "warning: failed to open browser: %v\n", err)
+		return fmt.Errorf("failed to open browser: %w", err)
 	}
+	return nil
 }
 
 func loginViaEmail(apiURL string) (string, string, error) {
@@ -872,12 +994,22 @@ func cmdDaemonStart(args []string) {
 	trustedActionPolicy := fs.String("trusted-action-policy", "", "Trusted approval action policy: off, observe, or on")
 	noAgentAutoEnable := fs.Bool("no-agent-auto-enable", false, "Skip optional managed-agent auto-enable")
 	noAgentPrompt := fs.Bool("no-agent-prompt", false, "Deprecated alias for --no-agent-auto-enable")
+	allowedCwdRoots := multiFlag{}
+	fs.Var(&allowedCwdRoots, "allowed-cwd-root", "Absolute directory that remote sessions may use as cwd (repeatable; required for remote session creation)")
+	allowDangerousRemotePermissions := fs.Bool("allow-dangerous-remote-permissions", false, "Allow remote sessions to request bypassPermissions / dangerous bypass / approval never / danger-full-access")
 	fs.Parse(args)
+	cwdPolicy, cwdPolicyErr := session.NewCwdPolicy(allowedCwdRoots)
+	if cwdPolicyErr != nil {
+		fmt.Fprintln(os.Stderr, cwdPolicyErr)
+		os.Exit(2)
+	}
+	fmt.Printf("[daemon] remote cwd policy: %d allowed root(s); dangerous remote permissions=%v\n", len(cwdPolicy.Roots()), *allowDangerousRemotePermissions)
 	normalizedTrustedActionPolicy, policyErr := validateTrustedActionPolicyFlag(*trustedActionPolicy)
 	if policyErr != nil {
 		fmt.Fprintln(os.Stderr, policyErr)
 		os.Exit(2)
 	}
+	effectiveTrustedActionPolicyValue := effectiveTrustedActionPolicy(normalizedTrustedActionPolicy)
 
 	// --debug also implies running in the foreground so the operator sees logs
 	// live on the console (the whole point of debug mode is interactive
@@ -1056,6 +1188,17 @@ func cmdDaemonStart(args []string) {
 		os.Exit(1)
 	}
 	defer instanceLock.Close()
+	// Only the process that owns the singleton lock may publish the effective
+	// restart policy. A failed or concurrent start therefore cannot overwrite
+	// the policy of the daemon that is actually running.
+	if err := persistDaemonSecurityPolicy(
+		cwdPolicy,
+		*allowDangerousRemotePermissions,
+		effectiveTrustedActionPolicyValue,
+	); err != nil {
+		fmt.Fprintln(os.Stderr, "persist daemon security policy:", err)
+		os.Exit(1)
+	}
 	runtimeInstanceToken, err := daemon.CurrentInstanceToken()
 	if err != nil {
 		fmt.Fprintln(os.Stderr, i18n.T("daemon.status_uncertain", err))
@@ -1194,12 +1337,11 @@ func cmdDaemonStart(args []string) {
 	outputCh := make(chan protocol.DaemonEvent, 256)
 
 	// Create session manager
-	var sm *session.SessionManager
-	if normalizedTrustedActionPolicy == "" {
-		sm = session.NewSessionManager(outputCh)
-	} else {
-		sm = session.NewSessionManagerWithTrustedActionPolicy(outputCh, normalizedTrustedActionPolicy)
-	}
+	sm := session.NewSessionManagerWithTrustedActionPolicy(outputCh, effectiveTrustedActionPolicyValue)
+	// H-7: remote session cwd and dangerous-permission gates are configured by
+	// the local operator only; relay clients cannot extend them.
+	sm.SetCwdPolicy(cwdPolicy)
+	sm.SetRemotePermissionPolicy(adapter.RemotePermissionPolicy{AllowDangerous: *allowDangerousRemotePermissions})
 
 	// ZCode read-only observer (only when the user has explicitly enabled the
 	// sync). It is fully isolated from the SessionManager: it never enters
@@ -3651,6 +3793,9 @@ func handleUpgradeAgent(client *ws.Client, logger *slog.Logger, agent string) {
 // classifyCreateError maps a CreateSession error message to a reason code
 // for the session_create_failed event (no_cli, bad_cwd, cwd_in_use, start_fail).
 func classifyCreateError(msg string) string {
+	if strings.Contains(msg, "cwd_not_authorized") {
+		return "cwd_not_authorized"
+	}
 	if strings.Contains(msg, "agent CLI not found") {
 		return "no_cli"
 	}
@@ -3776,4 +3921,26 @@ func cmdDaemonUpdate(args []string) {
 	fmt.Println(i18n.T("update.done"))
 	fmt.Println(i18n.T("update.version_change", version, tag))
 	fmt.Println()
+}
+
+func persistDaemonSecurityPolicy(
+	policy *session.CwdPolicy,
+	allowDangerousRemotePermissions bool,
+	trustedActionPolicy string,
+) error {
+	return config.SaveDaemonSecurityPolicy(config.DaemonSecurityPolicy{
+		AllowedCwdRoots:                 policy.Roots(),
+		AllowDangerousRemotePermissions: allowDangerousRemotePermissions,
+		TrustedActionPolicy:             trustedActionPolicy,
+	})
+}
+
+// multiFlag collects a repeatable string flag (e.g. --allowed-cwd-root).
+type multiFlag []string
+
+func (m *multiFlag) String() string { return strings.Join(*m, ",") }
+
+func (m *multiFlag) Set(v string) error {
+	*m = append(*m, v)
+	return nil
 }

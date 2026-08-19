@@ -6,6 +6,7 @@ import { agentEventContracts } from './fixtures/agent-event-contracts.js'
 import * as db from '../db.js'
 
 function inputFor(payload: Record<string, unknown>): MaterializationInput {
+  const requestId = typeof payload.request_id === 'string' ? payload.request_id : undefined
   return {
     inboxId: 7,
     userId: 42,
@@ -16,7 +17,11 @@ function inputFor(payload: Record<string, unknown>): MaterializationInput {
     context: {
       agentType: 'codex',
       cwd: '/repo',
-      requestId: typeof payload.request_id === 'string' ? payload.request_id : undefined,
+      requestId,
+      reservationId: payload.type === 'session_created' && requestId
+        ? `reservation-${requestId}`
+        : undefined,
+      quotaOperation: payload.type === 'session_created' && requestId ? 'create' : undefined,
       hostname: 'host-1',
     },
   }
@@ -431,57 +436,92 @@ describe('EventMaterializer', () => {
       pool: pool as never,
       hooks: { bindSession, releasePendingOperation },
       durableHooks: {
-        releaseQuotaReservation: vi.fn(),
+        claimQuotaReservationSession: vi.fn(),
+        settleQuotaReservation: vi.fn(),
         notifyUser: vi.fn(),
         notifyProUser: vi.fn(),
       },
     })
 
-    const result = await materializer.materialize(inputFor({
+    const input = inputFor({
       type: 'session_created', session_id: 'ses-new', request_id: 'req-1',
       title: 'Created', model: 'gpt-5', control_mode: 'managed', capabilities: ['approval'],
-    }))
+    })
+    input.context!.quotaOperation = 'create'
+    const result = await materializer.materialize(input)
 
     expect(upsert).toHaveBeenCalledWith(
       pool, 'ses-new', 'daemon-1', 'codex', '/repo', 'running', 'Created', 'daemon',
       undefined, 42, 'gpt-5', 'managed', ['approval'],
     )
     expect(bindSession).toHaveBeenCalledWith('ses-new', 'daemon-1')
-    expect(releasePendingOperation).toHaveBeenCalledWith('daemon-1', 'req-1')
+    expect(releasePendingOperation).toHaveBeenCalledWith({
+      reservationId: 'reservation-req-1',
+      userId: 42,
+      daemonId: 'daemon-1',
+      requestId: 'req-1',
+      operation: 'create',
+      sessionId: 'ses-new',
+    })
     expect(result.deliveries[0]).toMatchObject({ audience: 'user', payload: expect.objectContaining({ type: 'session_created' }) })
     upsert.mockRestore()
   })
 
-  test('rechecks a session tombstone before materialization and emits no delivery', async () => {
+  test('rejects a tombstoned session before any canonical event write', async () => {
     const pool = pools()
     const deleted = vi.spyOn(db, 'isSessionDeleted').mockResolvedValue(true)
     const upsert = vi.spyOn(db, 'upsertSession').mockResolvedValue(undefined)
     const materializer = new EventMaterializer({ pool: pool as never })
 
-    const result = await materializer.materialize(inputFor({
+    await expect(materializer.materialize(inputFor({
       type: 'session_created',
       session_id: 'deleted-session',
       request_id: 'request-deleted',
-    }))
+    }))).rejects.toMatchObject({ code: 'unknown_daemon_session', permanent: true })
 
-    expect(result).toMatchObject({ eventId: 91, completed: true, deliveries: [] })
     expect(upsert).not.toHaveBeenCalled()
-    expect(pool.query).toHaveBeenCalledWith(
-      expect.stringContaining("effect_status = 'completed'"),
-      [91],
-    )
+    expect(pool.query).not.toHaveBeenCalledWith(expect.stringContaining('INSERT INTO events'), expect.anything())
     upsert.mockRestore()
     deleted.mockRestore()
   })
 
+  test('rejects a tombstoned session on the legacy inline path before any canonical event write', async () => {
+    const pool = {
+      query: vi.fn(async (sql: string) => {
+        if (sql.includes('FROM deleted_sessions')) return { rows: [{ exists: true }], rowCount: 1 }
+        if (sql.includes('INSERT INTO events')) {
+          return { rows: [{ id: 91, inserted: true, effect_status: 'pending', effect_step: 0 }], rowCount: 1 }
+        }
+        if (sql.includes('session_allowed')) {
+          return { rows: [{ session_exists: false, session_allowed: false }], rowCount: 1 }
+        }
+        return { rows: [], rowCount: 1 }
+      }),
+    }
+    const materializer = new EventMaterializer({ pool: pool as never })
+    const input = {
+      ...inputFor({ type: 'session_created', session_id: 'deleted-inline-session' }),
+      inboxId: 0,
+    }
+
+    await expect(materializer.materialize(input))
+      .rejects.toMatchObject({ code: 'unknown_daemon_session', permanent: true })
+    expect(pool.query).toHaveBeenCalledWith(
+      expect.stringContaining('FROM deleted_sessions'),
+      ['deleted-inline-session'],
+    )
+    expect(pool.query).not.toHaveBeenCalledWith(expect.stringContaining('INSERT INTO events'), expect.anything())
+  })
+
   test('fresh worker materializes session creation from persisted context and durable hooks', async () => {
-    const releaseQuotaReservation = vi.fn().mockResolvedValue(undefined)
+    const settleQuotaReservationHook = vi.fn().mockResolvedValue(undefined)
     const pool = pools()
     const upsert = vi.spyOn(db, 'upsertSession').mockResolvedValue(undefined)
     const materializer = new EventMaterializer({
       pool: pool as never,
       durableHooks: {
-        releaseQuotaReservation,
+        claimQuotaReservationSession: vi.fn(),
+        settleQuotaReservation: settleQuotaReservationHook,
         notifyUser: vi.fn(),
         notifyProUser: vi.fn(),
       },
@@ -491,7 +531,7 @@ describe('EventMaterializer', () => {
     })
     input.context = {
       agentType: 'opencode', cwd: '/persisted', requestId: 'req-restarted',
-      reservationId: 'reservation-restarted', hostname: 'persisted-host',
+      reservationId: 'reservation-restarted', quotaOperation: 'create', hostname: 'persisted-host',
     }
 
     const result = await materializer.materialize(input)
@@ -500,13 +540,111 @@ describe('EventMaterializer', () => {
       pool, 'ses-restarted', 'daemon-1', 'opencode', '/persisted', 'running',
       undefined, 'daemon', undefined, 42, undefined, undefined, undefined,
     )
-    expect(releaseQuotaReservation).toHaveBeenCalledWith('reservation-restarted')
+    expect(settleQuotaReservationHook).toHaveBeenCalledWith({
+      reservationId: 'reservation-restarted',
+      userId: 42,
+      daemonId: 'daemon-1',
+      requestId: 'req-restarted',
+      operation: 'create',
+      sessionId: 'ses-restarted',
+    }, 'session_created')
     expect(result.deliveries[0]?.payload).toEqual(expect.objectContaining({
       request_id: 'req-restarted',
       reservation_id: 'reservation-restarted',
       hostname: 'persisted-host',
     }))
     upsert.mockRestore()
+  })
+
+  test('active status settles only an exact resume binding, never a create reservation', async () => {
+    const pool = {
+      query: vi.fn(async (sql: string) => {
+        if (sql.includes('INSERT INTO events')) {
+          return { rows: [{ id: 93, inserted: true, effect_status: 'pending', effect_step: 0 }], rowCount: 1 }
+        }
+        if (sql.includes('SELECT effect_status')) {
+          return { rows: [{ effect_status: 'pending', effect_step: 0 }], rowCount: 1 }
+        }
+        if (sql.includes('session_allowed')) {
+          return { rows: [{ session_exists: true, session_allowed: true }], rowCount: 1 }
+        }
+        if (sql.includes('session_status_decision')) {
+          return { rows: [{ session_exists: true, suppressed: false, foreign_owner: false }], rowCount: 1 }
+        }
+        return { rows: [], rowCount: 1 }
+      }),
+    }
+    const settle = vi.fn().mockResolvedValue(undefined)
+    const releasePendingOperation = vi.fn().mockResolvedValue(undefined)
+    const materializer = new EventMaterializer({
+      pool: pool as never,
+      durableHooks: {
+        claimQuotaReservationSession: vi.fn(),
+        settleQuotaReservation: settle, notifyUser: vi.fn(), notifyProUser: vi.fn(),
+      },
+      hooks: { releasePendingOperation },
+    })
+    const createStatus = inputFor({
+      type: 'session_status', session_id: 'existing-session', status: 'running',
+    })
+
+    await materializer.materialize(createStatus)
+
+    expect(settle).not.toHaveBeenCalled()
+    expect(releasePendingOperation).not.toHaveBeenCalled()
+
+    const resumeStatus = inputFor({
+      type: 'session_status', session_id: 'existing-session', request_id: 'request-resume', status: 'running',
+    })
+    resumeStatus.context = {
+      requestId: 'request-resume', reservationId: 'reservation-resume', quotaOperation: 'resume', hostname: 'host-1',
+    }
+    await materializer.materialize(resumeStatus)
+
+    const binding = {
+      reservationId: 'reservation-resume', userId: 42, daemonId: 'daemon-1',
+      requestId: 'request-resume', operation: 'resume', sessionId: 'existing-session',
+    }
+    expect(settle).toHaveBeenCalledWith(binding, 'session_active')
+    expect(releasePendingOperation).toHaveBeenCalledWith(binding)
+  })
+
+  test('durably settles and delivers an exact session_create_failed binding', async () => {
+    const settle = vi.fn().mockResolvedValue(undefined)
+    const releasePendingOperation = vi.fn().mockResolvedValue(undefined)
+    const materializer = new EventMaterializer({
+      pool: pools() as never,
+      durableHooks: {
+        claimQuotaReservationSession: vi.fn(),
+        settleQuotaReservation: settle, notifyUser: vi.fn(), notifyProUser: vi.fn(),
+      },
+      hooks: { releasePendingOperation },
+    })
+    const input = inputFor({
+      type: 'session_create_failed', request_id: 'request-failed',
+      reservation_id: 'daemon-forged', reason: 'start_fail', error: 'boom',
+    })
+    input.context = {
+      requestId: 'request-failed', reservationId: 'reservation-failed',
+      quotaOperation: 'create', hostname: 'host-1',
+    }
+
+    const result = await materializer.materialize(input)
+
+    const binding = {
+      reservationId: 'reservation-failed', userId: 42, daemonId: 'daemon-1',
+      requestId: 'request-failed', operation: 'create', sessionId: null,
+    }
+    expect(settle).toHaveBeenCalledWith(binding, 'session_create_failed')
+    expect(releasePendingOperation).toHaveBeenCalledWith(binding)
+    expect(result.deliveries[0]).toMatchObject({
+      audience: 'user',
+      requestId: 'request-failed',
+      payload: expect.objectContaining({
+        type: 'session_create_failed', request_id: 'request-failed',
+        reservation_id: 'reservation-failed', reason: 'start_fail',
+      }),
+    })
   })
 
   test('fails safely instead of completing session creation without required context', async () => {
@@ -517,7 +655,7 @@ describe('EventMaterializer', () => {
     input.context = {}
 
     await expect(materializer.materialize(input)).rejects.toMatchObject({
-      name: 'MaterializationContextError',
+      code: 'quota_reservation_binding_mismatch',
     })
     expect(upsert).not.toHaveBeenCalled()
     upsert.mockRestore()
@@ -535,7 +673,8 @@ describe('EventMaterializer', () => {
       pool: pool as never,
       hooks: { shouldPush: () => true },
       durableHooks: {
-        releaseQuotaReservation: vi.fn(),
+        claimQuotaReservationSession: vi.fn(),
+        settleQuotaReservation: vi.fn(),
         notifyUser,
         notifyProUser: vi.fn(),
       },
@@ -716,7 +855,12 @@ describe('EventMaterializer daemon session ownership', () => {
 
       await expect(materializer.materialize(attackerInput(eventType, {
         title: 'Hijacked', agent: 'codex', cwd: '/attacker', status: 'busy',
-      }))).rejects.toMatchObject({ code: 'session_ownership_violation', permanent: true })
+      }))).rejects.toMatchObject({
+        code: eventType === 'session_created'
+          ? 'quota_reservation_binding_mismatch'
+          : 'session_ownership_violation',
+        permanent: true,
+      })
 
       expect(pool._queries.filter((query) => query.sql.includes('INSERT INTO events'))).toHaveLength(0)
       expect(pool._queries.filter((query) => query.sql.includes('INSERT INTO sessions'))).toHaveLength(0)
@@ -746,7 +890,10 @@ describe('EventMaterializer daemon session ownership', () => {
     const notifyUser = vi.fn().mockResolvedValue(undefined)
     const materializer = new EventMaterializer({
       pool: pool as never,
-      durableHooks: { releaseQuotaReservation: vi.fn(), notifyUser, notifyProUser: vi.fn() },
+      durableHooks: {
+        claimQuotaReservationSession: vi.fn(),
+        settleQuotaReservation: vi.fn(), notifyUser, notifyProUser: vi.fn(),
+      },
     })
 
     await expect(materializer.materialize(attackerInput(eventType, extra)))

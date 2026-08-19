@@ -38,21 +38,13 @@ func SendDesktopNotification(title, body string) error {
 		return exec.Command("osascript", "-e", script).Run()
 
 	case "linux":
-		// WSL: try powershell.exe toast (hand off to Windows host)
+		// WSL: hand a toast to the Windows host via a FIXED PowerShell script
+		// (M-6). The title and body travel as environment variables for that
+		// subprocess only — they are never spliced into the script source, so
+		// backticks, quotes, dollars and newlines cannot alter the script.
 		if isWSL() {
 			if p, err := exec.LookPath("powershell.exe"); err == nil {
-				psScript := fmt.Sprintf(
-					`[Windows.UI.Notifications.ToastNotificationManager,Windows.UI.Notifications,ContentType=WindowsRuntime] > $null; `+
-						`$template = [Windows.UI.Notifications.ToastNotificationManager]::GetTemplateContent([Windows.UI.Notifications.ToastTemplateType]::ToastText02); `+
-						`$text = $template.GetElementsByTagName("text"); `+
-						`$text.Item(0).AppendChild($template.CreateTextNode("%s")) > $null; `+
-						`$text.Item(1).AppendChild($template.CreateTextNode("%s")) > $null; `+
-						`$toast = [Windows.UI.Notifications.ToastNotification]::new($template); `+
-						`[Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier("pocketctl").Show($toast)`,
-					escapeForPowerShell(title), escapeForPowerShell(body),
-				)
-				// Toast may fail in older Windows; fall through to notify-send.
-				if err := exec.Command(p, "-NoProfile", "-Command", psScript).Run(); err == nil {
+				if err := wslToastCommand(p, title, body).Run(); err == nil {
 					return nil
 				}
 			}
@@ -71,12 +63,27 @@ func SendDesktopNotification(title, body string) error {
 	}
 }
 
-// escapeForPowerShell escapes a string for safe embedding in a PowerShell
-// double-quoted string context.
-func escapeForPowerShell(s string) string {
-	s = strings.ReplaceAll(s, `"`, ``+"`"+`"`)
-	s = strings.ReplaceAll(s, `$`, ``+"`"+`$`)
-	return s
+// wslToastScript is a constant: it reads the notification text from
+// $env:POCKETCTL_NOTIFY_TITLE / $env:POCKETCTL_NOTIFY_BODY and uses
+// CreateTextNode so the XML payload is never string-built.
+const wslToastScript = `[Windows.UI.Notifications.ToastNotificationManager,Windows.UI.Notifications,ContentType=WindowsRuntime] > $null; ` +
+	`$template = [Windows.UI.Notifications.ToastNotificationManager]::GetTemplateContent([Windows.UI.Notifications.ToastTemplateType]::ToastText02); ` +
+	`$text = $template.GetElementsByTagName("text"); ` +
+	`$text.Item(0).AppendChild($template.CreateTextNode($env:POCKETCTL_NOTIFY_TITLE)) > $null; ` +
+	`$text.Item(1).AppendChild($template.CreateTextNode($env:POCKETCTL_NOTIFY_BODY)) > $null; ` +
+	`$toast = [Windows.UI.Notifications.ToastNotification]::new($template); ` +
+	`[Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier("pocketctl").Show($toast)`
+
+// wslToastCommand builds the toast invocation. Data flows exclusively through
+// the child process environment; the argv (and therefore the script source)
+// is identical for every title/body.
+func wslToastCommand(powershellPath, title, body string) *exec.Cmd {
+	cmd := exec.Command(powershellPath, "-NoProfile", "-Command", wslToastScript)
+	cmd.Env = append(os.Environ(),
+		"POCKETCTL_NOTIFY_TITLE="+title,
+		"POCKETCTL_NOTIFY_BODY="+body,
+	)
+	return cmd
 }
 
 // isWSL delegates to daemon.IsWSL (shared implementation).

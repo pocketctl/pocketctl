@@ -2,6 +2,7 @@ import type { PriorityClass } from './types.js';
 
 const control = new Set([
   'session_created', 'session_discovered', 'session_id_changed', 'session_status',
+  'session_create_failed',
   'session_meta', 'session_model_changed', 'session_agent_changed',
   'approval_request', 'approval_resolved', 'question_request', 'question_resolved',
   'interactive_prompt', 'interaction_result', 'permission_config_changed',
@@ -11,7 +12,7 @@ const aggregate = new Set([
   'subagent_usage',
 ]);
 const ephemeralControl = new Set([
-  'ping', 'daemon_shutdown', 'cancel_takeover', 'session_create_failed',
+  'ping', 'daemon_shutdown', 'cancel_takeover',
   'model_list', 'upgrade_result',
 ]);
 const ephemeralAggregate = new Set([

@@ -40,7 +40,29 @@ func (sm *SessionManager) CreateSession(ctx context.Context, config protocol.Ses
 	if err := adapter.ValidatePermissionConfig(config.Agent, config.Permission); err != nil {
 		return "", err
 	}
+	// H-7: dangerous permission shapes (bypassPermissions, dontAsk,
+	// dangerously-bypass, approval never, danger-full-access) are only legal
+	// when the daemon operator flipped the local opt-in switch.
+	sm.mu.RLock()
+	cwdPolicy := sm.cwdPolicy
+	remotePolicy := sm.remotePermission
+	sm.mu.RUnlock()
+	if err := adapter.ValidateRemotePermissionConfigWithPolicy(config.Agent, config.Permission, remotePolicy); err != nil {
+		return "", err
+	}
 	config.Permission = clonePermission(config.Permission)
+
+	// --- Working directory authorization (H-7) -----------------------------
+	// The policy gate runs BEFORE any side effect (worktree creation,
+	// auto-mkdir, hook install, PTY/agent spawn) and applies to every remote
+	// session kind, including server-kind agents. It re-authorizes the
+	// canonical path after creation steps below.
+	authorizedCwd, err := cwdPolicy.AuthorizeProposed(resolveCwd(config.Cwd))
+	if err != nil {
+		return "", err
+	}
+	config.Cwd = authorizedCwd
+
 	cliPath, err := sm.createDeps.resolveAgentCLI(config)
 	if err != nil {
 		return "", err
@@ -53,9 +75,9 @@ func (sm *SessionManager) CreateSession(ctx context.Context, config protocol.Ses
 	}
 
 	// --- Working directory resolution --------------------------------------
-	// Order: resolve → (Scheme D worktree) → (auto-create) → validate →
-	// (Scheme A cwd-in-use) → register. Each step may redirect resolvedCwd.
-	resolvedCwd := resolveCwd(config.Cwd)
+	// Order: authorize (above) → (Scheme D worktree) → (auto-create) →
+	// re-authorize canonical → validate → (Scheme A cwd-in-use) → register.
+	resolvedCwd := authorizedCwd
 
 	// We need the session id early so the worktree branch/path is deterministic
 	// and the cwd registry can record it before any concurrent CreateSession.
@@ -71,6 +93,9 @@ func (sm *SessionManager) CreateSession(ctx context.Context, config protocol.Ses
 		if werr != nil {
 			return "", fmt.Errorf("工作目录 worktree 创建失败: %w", werr)
 		}
+		if werr := cwdPolicy.Allows(wtPath); werr != nil {
+			return "", fmt.Errorf("工作目录 worktree 未通过授权复查: %w", werr)
+		}
 		worktreePath, worktreeBranch = wtPath, branch
 		resolvedCwd = wtPath // all downstream logic targets the worktree
 	} else if config.AutoCreateDir {
@@ -80,6 +105,9 @@ func (sm *SessionManager) CreateSession(ctx context.Context, config protocol.Ses
 		// an opaque PTY/Codex startup failure.
 		if err := os.MkdirAll(resolvedCwd, 0o755); err != nil {
 			return "", fmt.Errorf("工作目录创建失败: %s (%w)", resolvedCwd, err)
+		}
+		if err := cwdPolicy.Allows(resolvedCwd); err != nil {
+			return "", fmt.Errorf("工作目录未通过授权复查: %w", err)
 		}
 	}
 
@@ -128,13 +156,6 @@ func (sm *SessionManager) CreateSession(ctx context.Context, config protocol.Ses
 		return sm.createCodexExecSession(ctx, sessionID, cliPath, resolvedCwd, config, displayModel, worktreePath, worktreeBranch)
 	}
 
-	// Resolve the effective permission mode BEFORE launching. Web/iOS daemon
-	// sessions are unattended, so default to bypassing permission checks —
-	// otherwise Bash/Write tools stall forever on a y/n prompt the UI can't
-	// surface (and Ctrl+C doesn't dismiss). Callers who want stricter modes can
-	// supply a permission object explicitly.
-	permMode := config.Permission.Mode
-
 	// Build launch args via the agent-specific launcher. Claude takes a pinned
 	// --session-id so the JSONL filename is known up front; codex generates its
 	// own rollout filename (discovered later by globbing the sessions dir).
@@ -157,12 +178,25 @@ func (sm *SessionManager) CreateSession(ctx context.Context, config protocol.Ses
 	// Other agents (codex) don't have a PreToolUse hook mechanism, so this is
 	// skipped — they rely on their own --ask-for-approval flag instead.
 	//
-	// Failure to install the hook is non-fatal: the session still runs; the
-	// user simply won't get approval prompts surfaced.
+	// H-7: for modes that depend on remote approval the hook is mandatory —
+	// without it an approval prompt would deadlock the unattended session, so
+	// installation failures now fail closed instead of continuing silently.
 	var extraEnv []string
 	caps := adapter.Capabilities(config.Agent)
 	if caps.SupportsApprovalHook && sm.approvalEnabled && sm.approvals != nil {
-		if err := approval.EnsureHooks(resolvedCwd, sm.pocketctlPath); err == nil {
+		if err := approval.EnsureHooks(resolvedCwd, sm.pocketctlPath); err != nil {
+			needsApprovalLoop := config.Permission == nil ||
+				(config.Permission.Agent == adapter.AgentClaude &&
+					config.Permission.Mode != "bypassPermissions" &&
+					config.Permission.Mode != "dontAsk")
+			if needsApprovalLoop {
+				return "", fmt.Errorf("approval hook 安装失败（fail closed）: %w", err)
+			}
+		} else {
+			permMode := ""
+			if config.Permission != nil {
+				permMode = config.Permission.Mode
+			}
 			extraEnv = append(extraEnv,
 				"POCKETCTL_SESSION_ID="+sessionID,
 				"POCKETCTL_APPROVAL_SOCK="+sm.approvals.SocketPath(),
@@ -855,7 +889,7 @@ func (sm *SessionManager) KillSession(sessionID string) error {
 			case <-entry.done:
 				killTimer.Stop()
 			case <-killTimer.C:
-				_ = entry.process.Kill()
+				sm.killOwnedResume(entry)
 			}
 		}
 	}

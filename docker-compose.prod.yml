@@ -1,17 +1,35 @@
-version: '3.8'
-
 services:
+  postgres-volume-gate:
+    image: postgres:17-alpine
+    restart: "no"
+    entrypoint: ["/bin/sh", "/opt/pocketctl/check-volume-migration.sh", "/var/lib/postgresql/data"]
+    environment:
+      POSTGRES_ADMIN_PASSWORD: ${POSTGRES_ADMIN_PASSWORD:?POSTGRES_ADMIN_PASSWORD is required}
+      POSTGRES_APP_PASSWORD: ${POSTGRES_APP_PASSWORD:?POSTGRES_APP_PASSWORD is required}
+    volumes:
+      - pgdata:/var/lib/postgresql/data:ro
+      - ./deploy/postgres/check-volume-migration.sh:/opt/pocketctl/check-volume-migration.sh:ro
+
   postgres:
     image: postgres:17-alpine
     restart: always
+    depends_on:
+      postgres-volume-gate:
+        condition: service_completed_successfully
     environment:
-      POSTGRES_USER: pocketctl
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
+      # M-7: bootstrap uses a maintenance admin role; the application connects
+      # as the non-superuser pocketctl_app created by the init script below.
+      POSTGRES_USER: pocketctl_admin
+      POSTGRES_PASSWORD: ${POSTGRES_ADMIN_PASSWORD:?POSTGRES_ADMIN_PASSWORD is required}
       POSTGRES_DB: pocketctl
+      POSTGRES_APP_PASSWORD: ${POSTGRES_APP_PASSWORD:?POSTGRES_APP_PASSWORD is required}
     volumes:
       - pgdata:/var/lib/postgresql/data
+      - ./deploy/postgres/001-create-app-role.sh:/docker-entrypoint-initdb.d/001-create-app-role.sh:ro
+    networks:
+      - pocketctl-internal
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U pocketctl"]
+      test: ["CMD-SHELL", "PGPASSWORD=\"$${POSTGRES_APP_PASSWORD}\" psql -X -h 127.0.0.1 -U pocketctl_app -d pocketctl -Atc 'SELECT 1' | grep -qx 1"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -33,7 +51,7 @@ services:
       postgres:
         condition: service_healthy
     environment:
-      DATABASE_URL: postgresql://pocketctl:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}@postgres:5432/pocketctl
+      DATABASE_URL: postgresql://pocketctl_app:${POSTGRES_APP_PASSWORD:?POSTGRES_APP_PASSWORD is required}@postgres:5432/pocketctl
       DB_CONTROL_POOL_MAX: ${DB_CONTROL_POOL_MAX:-4}
       DB_INGEST_POOL_MAX: ${DB_INGEST_POOL_MAX:-8}
       DB_QUERY_POOL_MAX: ${DB_QUERY_POOL_MAX:-8}
@@ -52,26 +70,31 @@ services:
       TOKEN_USAGE_FACTS_WRITE: ${TOKEN_USAGE_FACTS_WRITE:-false}
       TOKEN_USAGE_SHADOW_READ: ${TOKEN_USAGE_SHADOW_READ:-false}
       TOKEN_USAGE_DASHBOARD_V2: ${TOKEN_USAGE_DASHBOARD_V2:-false}
-      POCKETCTL_API_KEY: ${POCKETCTL_API_KEY:-}
       DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-}
       NODE_ENV: production
       POCKETCTL_MODE: saas
-      QUOTA_ENFORCEMENT: ${QUOTA_ENFORCEMENT:-enforce}
+      # 邮箱验证码 pepper：生产必填（>=32 字符），验证码只以 HMAC 摘要落库。
+      # compose 缺少该变量时 config 校验失败、启动中止。
+      AUTH_CODE_PEPPER: ${AUTH_CODE_PEPPER:?AUTH_CODE_PEPPER is required}
+      # JWT 签名密钥同样必填：缺失/为空会让 relay 在容器内反复 FATAL 重启。
+      JWT_SECRET: ${JWT_SECRET:?JWT_SECRET is required}
+      # M-4:production SaaS 固定 enforce;源码在 production+saas 下拒绝任何
+      # 其他值,环境变量无法再静默降级(observe/off 只允许自托管部署显式选择)。
+      QUOTA_ENFORCEMENT: enforce
       FREE_MAX_BOUND_DAEMONS: ${FREE_MAX_BOUND_DAEMONS:-2}
       FREE_MAX_CONCURRENT_SESSIONS: ${FREE_MAX_CONCURRENT_SESSIONS:-2}
       PORT: 8080
+      # M-1：容器内监听所有接口（未发布宿主端口，仅内部网络可达），
+      # 只信任固定内部地址上的 Nginx 所设置的转发头。
+      RELAY_HOST: 0.0.0.0
+      TRUSTED_PROXY_CIDRS: "172.30.0.2/32"
       WEB_APP_URL: "https://www.pocketctl.me"
       PUBLIC_ISSUER_URL: "https://www.pocketctl.me"
       # CORS 白名单：Relay 在 production 下拒绝空值并中止启动。
       # 新增前端域名时在此追加（逗号分隔）。
       ALLOWED_ORIGINS: ${ALLOWED_ORIGINS:-https://www.pocketctl.me,https://pocketctl.me}
-      # 测试账号固定验证码：server.ts 的 DEV_EMAIL 分支在任何 NODE_ENV 下生效，
-      # 匹配该邮箱则跳过 SES、直接用固定码（不发真实邮件），方便测试登录。
-      # 安全：默认留空。server.ts:184 不校验 NODE_ENV，若给默认值则任何 compose
-      # 生产部署都会落入 "test@pocketctl.me / 123456" 固定验证码后门。仅 staging
-      # 等显式设置 DEV_EMAIL/DEV_EMAIL_CODE 时才启用。
-      DEV_EMAIL: ${DEV_EMAIL:-}
-      DEV_EMAIL_CODE: ${DEV_EMAIL_CODE:-}
+      # DEV_EMAIL/DEV_EMAIL_CODE 固定验证码后门已移除：production 下
+      # runtime-config 检测到任一 DEV 变量都会拒绝启动。容器不再注入这两个变量。
       APNS_KEY_PATH: ${APNS_KEY_PATH:-}
       APNS_KEY_ID: ${APNS_KEY_ID:-}
       APNS_TEAM_ID: ${APNS_TEAM_ID:-}
@@ -79,6 +102,17 @@ services:
       APNS_ENVIRONMENT: ${APNS_ENVIRONMENT:-production}
     volumes:
       - "${APNS_KEY_DIR:-./secrets/apns}:/run/secrets/apns:ro"
+    # M-7: least-privilege runtime — non-root, read-only root fs, no caps.
+    user: "10001:10001"
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=16m
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    networks:
+      - pocketctl-internal
     expose:
       - "8080"
 
@@ -97,7 +131,7 @@ services:
       postgres:
         condition: service_healthy
     environment:
-      DATABASE_URL: postgresql://pocketctl:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}@postgres:5432/pocketctl
+      DATABASE_URL: postgresql://pocketctl_app:${POSTGRES_APP_PASSWORD:?POSTGRES_APP_PASSWORD is required}@postgres:5432/pocketctl
       DB_WORKER_POOL_MAX: ${DB_WORKER_POOL_MAX:-8}
       RELAY_MATERIALIZATION_MODE: worker
       RELAY_DURABLE_INGRESS: ${RELAY_DURABLE_INGRESS:-off}
@@ -114,6 +148,17 @@ services:
       APNS_ENVIRONMENT: ${APNS_ENVIRONMENT:-production}
     volumes:
       - "${APNS_KEY_DIR:-./secrets/apns}:/run/secrets/apns:ro"
+    # M-7: least-privilege runtime — non-root, read-only root fs, no caps.
+    user: "10001:10001"
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=16m
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    networks:
+      - pocketctl-internal
 
   nginx:
     image: nginx:alpine
@@ -123,10 +168,24 @@ services:
       - "443:443"
     volumes:
       - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
-      - ./nginx/ssl:/etc/nginx/ssl:ro
+      # H-8：证书必须显式提供宿主路径；缺失时 `docker compose config` 直接失败，
+      # 不允许挂载一个可能为空的目录假装启用了 TLS。
+      - "${TLS_CERT_PATH:?TLS_CERT_PATH is required}:/etc/nginx/ssl/fullchain.pem:ro"
+      - "${TLS_KEY_PATH:?TLS_KEY_PATH is required}:/etc/nginx/ssl/privkey.pem:ro"
       - ./nginx/html:/usr/share/nginx/html:ro
+    networks:
+      pocketctl-internal:
+        # M-1：固定 Nginx 内部地址，Relay 只信任这一跳设置的 X-Forwarded-For。
+        ipv4_address: 172.30.0.2
     depends_on:
       - relay
+
+networks:
+  pocketctl-internal:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.30.0.0/24
 
 volumes:
   pgdata:

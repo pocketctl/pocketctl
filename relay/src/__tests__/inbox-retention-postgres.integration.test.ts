@@ -201,7 +201,7 @@ describeWithDatabase('InboxRetention PostgreSQL integration', () => {
               'retention-race-session', 'session_created', 0,
               '{"type":"session_created","session_id":"retention-race-session"}',
               1, 1, NOW(), 'race-worker',
-              '{"agentType":"codex","cwd":"/repo","hostname":"host","reservationId":"pause"}')
+              '{"agentType":"codex","cwd":"/repo","hostname":"host","reservationId":"pause","quotaOperation":"create","requestId":"retention-race-request"}')
       RETURNING inbox_id
     `, [userId])
     let entered!: () => void
@@ -211,7 +211,8 @@ describeWithDatabase('InboxRetention PostgreSQL integration', () => {
     const materializer = new EventMaterializer({
       pool,
       durableHooks: {
-        releaseQuotaReservation: async () => { entered(); await gate },
+        claimQuotaReservationSession: async () => undefined,
+        settleQuotaReservation: async () => { entered(); await gate },
         notifyUser: async () => undefined,
         notifyProUser: async () => undefined,
       },
@@ -223,7 +224,10 @@ describeWithDatabase('InboxRetention PostgreSQL integration', () => {
       sessionId: 'retention-race-session',
       eventType: 'session_created',
       payload: { type: 'session_created', session_id: 'retention-race-session' },
-      context: { agentType: 'codex', cwd: '/repo', hostname: 'host', reservationId: 'pause' },
+      context: {
+        agentType: 'codex', cwd: '/repo', hostname: 'host', reservationId: 'pause',
+        quotaOperation: 'create', requestId: 'retention-race-request',
+      },
     })
     await paused
     const deleting = deleteSession(pool, 'retention-race-session')
@@ -271,7 +275,7 @@ describeWithDatabase('InboxRetention PostgreSQL integration', () => {
                 'retention-pool-one-session', 'session_created', 0,
                 '{"type":"session_created","session_id":"retention-pool-one-session"}',
                 1, 1, NOW(), 'pool-one-worker',
-                '{"agentType":"codex","cwd":"/repo","hostname":"host","reservationId":"pause"}')
+                '{"agentType":"codex","cwd":"/repo","hostname":"host","reservationId":"pause","quotaOperation":"create","requestId":"retention-pool-one-request"}')
         RETURNING inbox_id
       `, [userId])
       let entered!: () => void
@@ -281,7 +285,8 @@ describeWithDatabase('InboxRetention PostgreSQL integration', () => {
       const materializer = new EventMaterializer({
         pool: poolOne,
         durableHooks: {
-          releaseQuotaReservation: async () => { entered(); await gate },
+          claimQuotaReservationSession: async () => undefined,
+          settleQuotaReservation: async () => { entered(); await gate },
           notifyUser: async () => undefined,
           notifyProUser: async () => undefined,
         },
@@ -293,7 +298,10 @@ describeWithDatabase('InboxRetention PostgreSQL integration', () => {
         sessionId: 'retention-pool-one-session',
         eventType: 'session_created',
         payload: { type: 'session_created', session_id: 'retention-pool-one-session' },
-        context: { agentType: 'codex', cwd: '/repo', hostname: 'host', reservationId: 'pause' },
+        context: {
+          agentType: 'codex', cwd: '/repo', hostname: 'host', reservationId: 'pause',
+          quotaOperation: 'create', requestId: 'retention-pool-one-request',
+        },
       })
       await failureGuard(paused, 'materialization entering durable effect')
       const deleting = deleteSession(poolOne, 'retention-pool-one-session')

@@ -124,8 +124,8 @@ func (l Launcher) Run(ctx context.Context, args []string, cwd string) error {
 			reason = result.Reason
 		}
 		fmt.Fprintf(l.Stderr, "pocketctl: managed OpenCode unavailable; starting native OpenCode (%s)\n", oneLine(reason))
-		binary := result.RealBinary
-		if binary == "" {
+		binary, valid := validatedRealAgentPath(result.RealBinary)
+		if !valid {
 			binary, err = l.ResolveBinary()
 			if err != nil {
 				return err
@@ -133,14 +133,15 @@ func (l Launcher) Run(ctx context.Context, args []string, cwd string) error {
 		}
 		return l.Execute(ExecSpec{Path: binary, Args: args, Env: stripLauncherInternalEnv(l.Environ()), Dir: plan.CWD})
 	}
-	if result.RealBinary == "" || result.BaseURL == "" {
+	managedBinary, valid := validatedRealAgentPath(result.RealBinary)
+	if !valid || result.BaseURL == "" {
 		return errors.New("daemon returned an incomplete managed OpenCode runtime")
 	}
 	env := setEnv(stripLauncherInternalEnv(l.Environ()), "OPENCODE_SERVER_PASSWORD", result.Password)
 	if result.Username != "" {
 		env = setEnv(env, "OPENCODE_SERVER_USERNAME", result.Username)
 	}
-	spec := ExecSpec{Path: result.RealBinary, Args: plan.ManagedArgs(result), Env: env, Dir: plan.CWD}
+	spec := ExecSpec{Path: managedBinary, Args: plan.ManagedArgs(result), Env: env, Dir: plan.CWD}
 	if result.LeaseID != "" {
 		bindLease := l.BindLease
 		if bindLease == nil {

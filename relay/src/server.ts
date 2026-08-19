@@ -2,23 +2,30 @@ import Fastify, { type FastifyInstance } from 'fastify';
 import fastifyWebsocket from '@fastify/websocket';
 import fastifyCors from '@fastify/cors';
 import type pg from 'pg';
-import { initDB, parseDBUrl, createUserWithWelcomeEmail, getUserByEmail, getUserById, getUserPlanAndWhitelist, getUserProfile, userExists, deleteUserAccount, registerDevice, removeDevice, cleanStaleTombstones, upsertDaemonAlias, updateDisplayName, updateEmail, addToIOSWaitlist, revokeToken, isTokenRevoked, cleanRevokedTokens, insertAuditLog, bindTokenToDaemon, updateSessionTitle, isSessionOwnedByUser, getSessionAllEvents, getTokenSummary, getTokensByDaemon, backfillSessionTokens, backfillSessionModel, backfillTokenDailyStats, aggregateDayIntoStats, cleanStaleEvents, getTokenDailySeries, getTokenByModel, getTokenByDaemon, getSessionTokenTrend, listProUserIds, getUserDailyTokens, getUserWeeklyTokens, markReportSent, handleRefreshReuse } from './db.js';
+import { initDB, parseDBUrl, getUserByEmail, getUserById, getUserPlanAndWhitelist, getUserProfile, userExists, deleteUserAccount, registerDevice, removeDevice, cleanStaleTombstones, upsertDaemonAlias, updateDisplayName, addToIOSWaitlist, revokeToken, isTokenRevoked, cleanRevokedTokens, insertAuditLog, bindTokenToDaemon, updateSessionTitle, isSessionOwnedByUser, getSessionAllEvents, getTokenSummary, getTokensByDaemon, backfillSessionTokens, backfillSessionModel, backfillTokenDailyStats, aggregateDayIntoStats, cleanStaleEvents, getTokenDailySeries, getTokenByModel, getTokenByDaemon, getSessionTokenTrend, listProUserIds, getUserDailyTokens, getUserWeeklyTokens, markReportSent, handleRefreshReuse, consumeEmailChallenge, upsertEmailChallenge, cleanExpiredEmailChallenges, cleanStaleAuthRateLimits, bindUserEmailWithChallenge } from './db.js';
 import { closeRelayPools, createRelayPools } from './db-pools.js';
 import { Router, parseDurableIngressFlag, type FlagConfig } from './router.js';
-import { hashPassword, verifyPassword, signAccessToken, signRefreshToken, verifyRefreshToken, decodeToken, verifyAccessTokenWithRevocation } from './auth.js';
+import { signAccessToken, signRefreshToken, verifyRefreshToken, decodeToken, verifyAccessTokenWithRevocation, verifyTokenForRevocation } from './auth.js';
 import { notifyUser, sessionStatusPush, daemonOfflinePush, dailyReportPush, weeklyReportPush } from './push.js';
 import { sendEmailCode } from './config/email.js';
-import { generateCode, storeCode, verifyCode, hasPendingCode } from './config/verification.js';
+import {
+  CODE_TTL_MS,
+  challengeKey,
+  codeHmac,
+  emailFingerprint,
+  generateCode,
+  normalizeEmailAddress,
+} from './config/verification.js';
 import { validateClient } from './config/clients.js';
-import { createSession, getSessionByDeviceCode, getSessionByUserCode, authorizeSession, recordPoll, canPoll, deleteSession } from './config/auth-sessions.js';
-import { createQrSession, getQrSession, markScanned, confirmQrSession, deleteQrSession } from './config/qr-sessions.js';
-import { resolveEntitlements } from './entitlements.js';
+import { createDeviceAuthSessionStore, DeviceAuthStoreCapacityError, type DeviceAuthSessionStore } from './config/auth-sessions.js';
+import { createQrSessionStore, QrSessionStoreCapacityError, type QrSessionStore } from './config/qr-sessions.js';
+import { resolveEntitlements, resolveQuotaEnforcementMode } from './entitlements.js';
 import { getQuotaSnapshot } from './quota.js';
-import { createWsTicketStore } from './config/ws-tickets.js';
+import { createWsTicketStore, WsTicketStoreCapacityError } from './config/ws-tickets.js';
 import type { WsTicketPayload } from './config/ws-tickets.js';
 import { createHash } from 'crypto';
 import { ConnectionRateLimiter } from './rate-limit.js';
-import { isAppReviewEmail, isAppReviewEnabled, isConfiguredAppReviewEmail, verifyAppReviewCode } from './config/app-review-auth.js';
+import { explicitAppReviewCode, isAppReviewEmail, isAppReviewEnabled, isConfiguredAppReviewEmail } from './config/app-review-auth.js';
 import { ensureAppReviewDemoData } from './config/app-review-demo.js';
 import { resolveLanguage } from './config/language.js';
 import { findOrCreateEmailUser } from './email-user.js';
@@ -26,10 +33,11 @@ export { findOrCreateEmailUser } from './email-user.js';
 import { createWelcomeEmailWorker } from './welcome-email-worker.js';
 import { pathToFileURL } from 'node:url';
 import { registerDaemonConnection, type DaemonSocketIdentity } from './daemon-registration.js';
-import { resolveBuildInfo, resolveCorsOrigin, resolvePublicIssuer } from './runtime-config.js';
+import { resolveAuthRateLimitConfig, resolveBuildInfo, resolveCorsOrigin, resolveEmailVerificationConfig, resolvePublicIssuer, resolveRelayListenHost, resolveTrustedProxyConfig, strictPositiveConfig } from './runtime-config.js';
+import { createAuthRateLimiter, applyAuthRateLimitDecision } from './auth-rate-limit.js';
 import { ConnectionAdmission } from './connection-admission.js';
 import { RegistrationDeadline } from './registration-deadline.js';
-import { resolveAdmissionAddress } from './remote-address.js';
+import { canonicalClientAddress } from './remote-address.js';
 import {
   registry as relayMetricsRegistry,
   attentionRecoveryOpen,
@@ -74,13 +82,10 @@ import {
   runTokenUsageCloseSweep,
 } from './token-usage/lifecycle.js';
 
-const API_KEY = process.env.POCKETCTL_API_KEY || '';
 const DB_URL = process.env.DATABASE_URL || 'postgresql://localhost:5432/pocketctl';
 const PORT = parseInt(process.env.PORT || '8080', 10);
 const NODE_ENV = process.env.NODE_ENV || 'development';
 const ALLOWED_ORIGINS = (process.env.ALLOWED_ORIGINS || '').split(',').filter(Boolean);
-const DEV_EMAIL = process.env.DEV_EMAIL || '';
-const DEV_EMAIL_CODE = process.env.DEV_EMAIL_CODE || '';
 const RATE_LIMIT_WINDOW_MS = parseInt(process.env.RATE_LIMIT_WINDOW_MS || '60000', 10);
 const RATE_LIMIT_MAX_CONNECTIONS = parseInt(process.env.RATE_LIMIT_MAX_CONNECTIONS || '30', 10);
 const RATE_LIMIT_BURST_WINDOW_MS = parseInt(process.env.RATE_LIMIT_BURST_WINDOW_MS || '10000', 10);
@@ -89,10 +94,13 @@ const RATE_LIMIT_AUTH_FAIL_THRESHOLD = parseInt(process.env.RATE_LIMIT_AUTH_FAIL
 const REFRESH_COOKIE_NAME = 'pocketctl_refresh_token';
 const REFRESH_COOKIE_MAX_AGE = 7 * 24 * 60 * 60;
 const DAEMON_REGISTRATION_DEADLINE_MS = 10_000;
-const TRUST_PROXY = process.env.TRUST_PROXY === 'true';
 
 const wsDaemonMap = new Map<any, DaemonSocketIdentity>();
 const wsTickets = createWsTicketStore(60_000);
+// M-2: bounded temporary auth-session stores. Hard caps are the last line of
+// defense behind the shared PostgreSQL rate limits; see config/*.ts factories.
+const deviceAuthSessions = createDeviceAuthSessionStore();
+const qrSessions = createQrSessionStore();
 
 function positiveEnvInt(name: string, fallback: number): number {
   const value = Number.parseInt(process.env[name] ?? '', 10);
@@ -107,23 +115,10 @@ export interface RelayRuntimeConfig {
   maxChunkBytes: number;
   replayBatchMaxEvents: number;
   replayBatchMaxBytes: number;
-}
-
-function strictPositiveConfig(
-  env: Record<string, string | undefined>,
-  name: string,
-  fallback: number,
-): number {
-  const raw = env[name];
-  if (raw === undefined) return fallback;
-  if (!/^[1-9]\d*$/.test(raw)) {
-    throw new Error(`${name} must be a positive decimal integer`);
-  }
-  const value = Number(raw);
-  if (!Number.isSafeInteger(value)) {
-    throw new Error(`${name} must be a positive decimal integer`);
-  }
-  return value;
+  /** M-3: max messages buffered per connection before authentication resolves. */
+  preAuthMaxMessages: number;
+  /** M-3: max total bytes buffered per connection before authentication resolves. */
+  preAuthMaxBytes: number;
 }
 
 export function resolveRelayRuntimeConfig(
@@ -149,6 +144,8 @@ export function resolveRelayRuntimeConfig(
   const maxChunkBytes = strictPositiveConfig(env, 'MAX_CHUNK_BYTES', 131_072);
   const replayBatchMaxEvents = strictPositiveConfig(env, 'REPLAY_BATCH_MAX_EVENTS', 50);
   const replayBatchMaxBytes = strictPositiveConfig(env, 'REPLAY_BATCH_MAX_BYTES', 524_288);
+  const preAuthMaxMessages = strictPositiveConfig(env, 'RELAY_PREAUTH_MAX_MESSAGES', 4);
+  const preAuthMaxBytes = strictPositiveConfig(env, 'RELAY_PREAUTH_MAX_BYTES', 2 * maxEventBytes);
   if (eventWindow > 65_536) {
     throw new Error('RELAY_DURABLE_INGRESS_WINDOW must be at most 65536');
   }
@@ -157,6 +154,9 @@ export function resolveRelayRuntimeConfig(
   }
   if (replayBatchMaxBytes > maxEventBytes) {
     throw new Error('REPLAY_BATCH_MAX_BYTES must not exceed MAX_WS_MESSAGE_SIZE');
+  }
+  if (preAuthMaxBytes > 2 * maxEventBytes) {
+    throw new Error('RELAY_PREAUTH_MAX_BYTES must not exceed 2 x MAX_WS_MESSAGE_SIZE');
   }
   if (rawMaterialization === 'inline' && durableIngress.mode !== 'off') {
     throw new Error('RELAY_MATERIALIZATION_MODE=inline requires RELAY_DURABLE_INGRESS=off');
@@ -169,6 +169,8 @@ export function resolveRelayRuntimeConfig(
     maxChunkBytes,
     replayBatchMaxEvents,
     replayBatchMaxBytes,
+    preAuthMaxMessages,
+    preAuthMaxBytes,
   };
 }
 
@@ -279,6 +281,265 @@ export async function handleDeleteAccountRequest(
   return { success: true };
 }
 
+export interface DeviceAuthorizeRouteDeps {
+  store: Pick<DeviceAuthSessionStore, 'create'>;
+  validateClient: (clientId: string) => { token_endpoint_auth_method: string } | null;
+  webAppUrl: string | ((req: any) => string);
+}
+
+/** POST /api/auth/device/authorize — RFC 8628 §3.1 (M-2: bounded store). */
+export async function handleDeviceAuthorizeRequest(
+  req: any,
+  reply: any,
+  deps: DeviceAuthorizeRouteDeps,
+): Promise<Record<string, unknown>> {
+  const { client_id, code_challenge, code_challenge_method, machine_id } = req.body as any;
+
+  if (!client_id) {
+    reply.code(400);
+    return { error: 'invalid_request', error_description: 'client_id is required' };
+  }
+  const client = deps.validateClient(client_id);
+  if (!client) {
+    reply.code(400);
+    return { error: 'invalid_client', error_description: 'Unknown client_id' };
+  }
+  // Public clients MUST use PKCE
+  if (client.token_endpoint_auth_method === 'none') {
+    if (!code_challenge) {
+      reply.code(400);
+      return { error: 'invalid_request', error_description: 'code_challenge is required for public clients' };
+    }
+    if (code_challenge_method && code_challenge_method !== 'S256') {
+      reply.code(400);
+      return { error: 'invalid_request', error_description: 'only S256 code_challenge_method is supported' };
+    }
+  }
+
+  let result: { device_code: string; user_code: string; expires_in: number; interval: number };
+  try {
+    result = deps.store.create(client_id, code_challenge, machine_id);
+  } catch (error) {
+    if (error instanceof DeviceAuthStoreCapacityError || (error as any)?.name === 'DeviceAuthStoreCapacityError') {
+      reply.header('Retry-After', 10);
+      reply.code(503);
+      return { error: 'temporarily_unavailable', error_description: 'server busy, please retry later' };
+    }
+    throw error;
+  }
+  const base = typeof deps.webAppUrl === 'function' ? deps.webAppUrl(req) : deps.webAppUrl;
+  const verificationUri = `${base}/login/cli`;
+  reply.code(200);
+  return {
+    device_code: result.device_code,
+    user_code: result.user_code,
+    verification_uri: verificationUri,
+    verification_uri_complete: `${verificationUri}?code=${result.user_code}`,
+    expires_in: result.expires_in,
+    interval: result.interval,
+  };
+}
+
+export interface DeviceTokenRouteDeps {
+  store: Pick<DeviceAuthSessionStore, 'getByDeviceCode' | 'registerPoll' | 'deleteSession'>;
+  validateClient: (clientId: string) => { token_endpoint_auth_method: string } | null;
+  getUserById(userId: number): Promise<{ id: number; email: string; phone: string | null } | null>;
+  signAccessToken(userId: number, email: string, phone?: string, machineId?: string): Promise<string>;
+  signRefreshToken(userId: number): Promise<string>;
+  insertAuditLog(...args: any[]): Promise<unknown>;
+  setRefreshCookie(reply: any, token: string): void;
+  rejectIfRateLimited(reply: any, ...specs: unknown[]): Promise<boolean>;
+  pollIpMax: number;
+}
+
+/**
+ * POST /api/auth/device/token — RFC 8628 §3.5.
+ *
+ * M-2/M-3: every poll on a live session is recorded before any pending/success
+ * outcome; polls faster than the code's current interval answer slow_down and
+ * increase that code's interval. The client_id must match the authorization
+ * request, and unknown codes create no polling state.
+ */
+export async function handleDeviceTokenRequest(
+  req: any,
+  reply: any,
+  deps: DeviceTokenRouteDeps,
+): Promise<Record<string, unknown>> {
+  const { grant_type, device_code, client_id, code_verifier } = req.body as any;
+
+  if (grant_type !== 'urn:ietf:params:oauth:grant-type:device_code') {
+    reply.code(400);
+    return { error: 'unsupported_grant_type' };
+  }
+  if (!device_code || !client_id) {
+    reply.code(400);
+    return { error: 'invalid_request' };
+  }
+
+  if (await deps.rejectIfRateLimited(reply, {
+    scope: 'auth:device:token',
+    windowMs: 60_000,
+    ip: { value: canonicalClientAddress(req.ip), limit: deps.pollIpMax },
+  })) return { error: 'too many requests, please retry later' };
+
+  const client = deps.validateClient(client_id);
+  if (!client) {
+    reply.code(400);
+    return { error: 'invalid_client' };
+  }
+
+  const session = deps.store.getByDeviceCode(device_code);
+  if (!session) {
+    reply.code(400);
+    return { error: 'expired_token', error_description: 'device_code has expired' };
+  }
+
+  if (session.client_id !== client_id) {
+    reply.code(400);
+    return { error: 'invalid_grant', error_description: 'client_id does not match the authorization request' };
+  }
+
+  const poll = deps.store.registerPoll(device_code);
+  if (poll.action === 'slow_down') {
+    reply.code(400);
+    return { error: 'slow_down', interval: poll.intervalSeconds };
+  }
+
+  if (session.status === 'pending') {
+    reply.code(400);
+    return { error: 'authorization_pending' };
+  }
+
+  // Verify PKCE
+  if (client.token_endpoint_auth_method === 'none') {
+    if (!code_verifier) {
+      reply.code(400);
+      return { error: 'invalid_grant', error_description: 'code_verifier is required' };
+    }
+    const expectedChallenge = session.code_challenge;
+    const actualChallenge = createHash('sha256')
+      .update(code_verifier)
+      .digest('base64url');
+    if (actualChallenge !== expectedChallenge) {
+      reply.code(400);
+      return { error: 'invalid_grant', error_description: 'code_verifier does not match code_challenge' };
+    }
+  }
+
+  // Issue tokens
+  const user = await deps.getUserById(session.user_id!);
+  if (!user) {
+    reply.code(500);
+    return { error: 'server_error', error_description: 'user not found' };
+  }
+
+  const machineId = session.machine_id || 'unknown';
+  const accessToken = await deps.signAccessToken(user.id, user.email, user.phone ?? undefined, machineId);
+  const refreshToken = await deps.signRefreshToken(user.id);
+  deps.setRefreshCookie(reply, refreshToken);
+
+  // Clean up the session and its user-code index atomically with issuance.
+  deps.store.deleteSession(device_code);
+
+  deps.insertAuditLog(user.id, 'token_issued', {
+    client_id,
+    machine_id: machineId,
+    grant_type: 'device_code',
+  }, req.ip).catch(() => {});
+
+  return {
+    access_token: accessToken,
+    refresh_token: refreshToken,
+    token_type: 'Bearer',
+    expires_in: 86400,
+  };
+}
+
+export interface TokenRevocationRouteDeps {
+  pool: any;
+  verifyCallerAccessToken(token: string): Promise<{ userId: number; email: string; jti: string; machine_id: string } | null>;
+  verifyForRevocation(token: string): { type: 'access' | 'refresh'; userId: number; jti: string; exp: number } | null;
+  revokeToken(
+    pool: any,
+    jti: string,
+    userId: number,
+    reason: string,
+    options?: { tokenType?: 'access' | 'refresh'; expiresAt?: Date },
+  ): Promise<void>;
+  insertAuditLog(pool: any, userId: number | null, action: string, details: Record<string, unknown>, ip?: string): Promise<unknown>;
+  pepper: string;
+  rejectIfRateLimited(reply: any, ...specs: unknown[]): Promise<boolean>;
+}
+
+/**
+ * POST /api/auth/revoke — RFC 7009 (M-5).
+ *
+ * The submitted token is verified cryptographically (signature, HS256-only,
+ * exact type, positive userId, bounded jti) before anything is written, and
+ * only the authenticated caller's own tokens are revoked. Invalid, forged or
+ * third-party tokens answer an empty 200 — never 403 — so the endpoint is not
+ * a token-validity oracle. Audits store only short peppered fingerprints.
+ */
+export async function handleTokenRevocationRequest(
+  req: any,
+  reply: any,
+  deps: TokenRevocationRouteDeps,
+): Promise<Record<string, unknown>> {
+  const authHeader = req.headers.authorization;
+  if (!authHeader?.startsWith('Bearer ')) {
+    reply.code(401);
+    return { error: 'authorization required' };
+  }
+  const caller = await deps.verifyCallerAccessToken(authHeader.slice(7));
+  if (!caller) {
+    reply.code(401);
+    return { error: 'invalid token' };
+  }
+
+  const { token, token_type_hint } = (req.body || {}) as any;
+  if (!token) {
+    reply.code(400);
+    return { error: 'invalid_request', error_description: 'token is required' };
+  }
+
+  if (await deps.rejectIfRateLimited(reply, {
+    scope: 'auth:token-ops',
+    windowMs: 60_000,
+    ip: { value: canonicalClientAddress(req.ip), limit: 120 },
+    identity: { value: token, limit: 30 },
+  })) return { error: 'too many requests, please retry later' };
+
+  const jtiFingerprint = (jti: string) =>
+    createHash('sha256').update(`revocation:${jti}`).digest('hex').slice(0, 12);
+
+  const claims = deps.verifyForRevocation(token);
+  if (!claims) {
+    await deps.insertAuditLog(deps.pool, caller.userId, 'token_revoke', {
+      jti_fingerprint: null, outcome: 'invalid_token', token_type_hint: token_type_hint || 'unknown',
+    }, canonicalClientAddress(req.ip)).catch(() => {});
+    reply.code(200);
+    return {};
+  }
+  if (claims.userId !== caller.userId) {
+    await deps.insertAuditLog(deps.pool, caller.userId, 'token_revoke', {
+      jti_fingerprint: jtiFingerprint(claims.jti), outcome: 'not_owner', token_type: claims.type,
+    }, canonicalClientAddress(req.ip)).catch(() => {});
+    reply.code(200);
+    return {};
+  }
+
+  await deps.revokeToken(deps.pool, claims.jti, claims.userId, 'user_revoke', {
+    tokenType: claims.type,
+    expiresAt: new Date(claims.exp * 1000),
+  });
+  await deps.insertAuditLog(deps.pool, caller.userId, 'token_revoke', {
+    jti_fingerprint: jtiFingerprint(claims.jti), outcome: 'revoked', token_type: claims.type,
+  }, canonicalClientAddress(req.ip)).catch(() => {});
+
+  reply.code(200);
+  return {};
+}
+
 export async function startRelayBackgroundWorkers(deps: {
   welcome: { start(): void; stop?(): Promise<void> };
   realtimeOutboxConsumer: { start(): Promise<void> };
@@ -318,8 +579,8 @@ export { relayMetricsRegistry }
 interface RelayWebSocketHandlerDependencies {
   getDatabaseReady(): boolean;
   maxMessageSize: number;
-  apiKey: string;
-  trustProxy: boolean;
+  preAuthMaxMessages: number;
+  preAuthMaxBytes: number;
   random(): number;
   rateLimiter: {
     check(address: string): { allowed: boolean; reason?: string };
@@ -369,11 +630,11 @@ export function createRelayWebSocketHandler(dependencies: RelayWebSocketHandlerD
       return;
     }
 
-    const clientIp = resolveAdmissionAddress({
-      transportAddress: req.socket.remoteAddress,
-      frameworkClientAddress: req.ip,
-      trustProxy: dependencies.trustProxy,
-    });
+    // M-1: req.ip is the Fastify-authoritative client address. With
+    // trustProxy: false | string[] a peer outside the explicit proxy list can
+    // never inject X-Forwarded-For into it, so REST routes, WS admission and
+    // the auth-failure ban share one canonical address.
+    const clientIp = canonicalClientAddress(req.ip);
 
     const decision = dependencies.rateLimiter.check(clientIp);
     if (dependencies.random() < 0.01) dependencies.rateLimiter.gc();
@@ -385,7 +646,6 @@ export function createRelayWebSocketHandler(dependencies: RelayWebSocketHandlerD
     const authHeader = req.headers['authorization'] as string | undefined;
     const token = authHeader?.startsWith('Bearer ') ? authHeader.slice(7).trim() : '';
     const ticket = query.ticket as string;
-    const apiKey = query.api_key as string;
     const admission = dependencies.connectionAdmission.tryAcquire(
       connType === 'daemon' ? 'daemon' : 'client',
       clientIp,
@@ -400,9 +660,23 @@ export function createRelayWebSocketHandler(dependencies: RelayWebSocketHandlerD
       socket.close(1013, 'relay overloaded');
       return;
     }
-    const releaseAdmission = admission.release;
+    // M-3: admission release must be idempotent — overflow, close, auth
+    // failure, the registration deadline and successful registration can all
+    // race on the same connection.
+    let admissionReleased = false;
+    const releaseAdmission = () => {
+      if (admissionReleased) return;
+      admissionReleased = true;
+      admission.release();
+    };
 
     const earlyMessages: Buffer[] = [];
+    // M-3: hard bounds on pre-authentication buffering. Overflow closes the
+    // socket immediately, drops every buffered reference, and marks the
+    // connection so a later auth success can never feed the Router.
+    let preAuthMessageCount = 0;
+    let preAuthTotalBytes = 0;
+    let preAuthTerminated = false;
     let authDone = false;
     let userId: number | null = null;
     let tokenJti: string | undefined;
@@ -420,6 +694,21 @@ export function createRelayWebSocketHandler(dependencies: RelayWebSocketHandlerD
 
     socket.on('message', (raw: Buffer) => {
       if (!authDone) {
+        if (preAuthTerminated) return;
+        if (
+          raw.length > dependencies.preAuthMaxBytes
+          || preAuthMessageCount + 1 > dependencies.preAuthMaxMessages
+          || preAuthTotalBytes + raw.length > dependencies.preAuthMaxBytes
+        ) {
+          preAuthTerminated = true;
+          earlyMessages.length = 0;
+          registrationDeadline?.complete();
+          releaseAdmission();
+          if (socket.readyState === 1) socket.close(1009, 'message too large');
+          return;
+        }
+        preAuthMessageCount += 1;
+        preAuthTotalBytes += raw.length;
         earlyMessages.push(raw);
         return;
       }
@@ -427,6 +716,10 @@ export function createRelayWebSocketHandler(dependencies: RelayWebSocketHandlerD
     });
 
     socket.on('close', () => {
+      preAuthTerminated = true;
+      earlyMessages.length = 0;
+      preAuthMessageCount = 0;
+      preAuthTotalBytes = 0;
       registrationDeadline?.complete();
       releaseAdmission();
       if (connType === 'daemon') {
@@ -525,9 +818,10 @@ export function createRelayWebSocketHandler(dependencies: RelayWebSocketHandlerD
         userId = payload.userId;
         tokenJti = payload.jti;
         tokenMachineId = payload.machine_id;
-      } else if (apiKey && dependencies.apiKey && apiKey === dependencies.apiKey) {
-        userId = null;
       } else {
+        // H-3: the legacy global API key identity is deleted. Any api_key
+        // query parameter falls through here and is rejected exactly like a
+        // missing credential.
         const banSec = dependencies.rateLimiter.recordAuthFailure(clientIp);
         console.log(`WS rejected: type=${connType} ip=${clientIp} reason=auth_required${banSec ? ` banned=${banSec}s` : ''}`);
         registrationDeadline?.complete();
@@ -538,16 +832,26 @@ export function createRelayWebSocketHandler(dependencies: RelayWebSocketHandlerD
 
       if (connType === 'daemon' && !registrationDeadline?.isActive()) return;
 
+      // M-3: the pre-auth queue overflowed and already released admission and
+      // closed the socket; authentication completing afterwards must not feed
+      // the Router or re-register the connection.
+      if (preAuthTerminated || socket.readyState !== 1) {
+        registrationDeadline?.complete();
+        return;
+      }
+
       dependencies.rateLimiter.clearAuthFailure(clientIp);
       authDone = true;
-      console.log(`WS connected: type=${connType} ip=${clientIp} user=${userId || 'legacy'}`);
+      console.log(`WS connected: type=${connType} ip=${clientIp} user=${userId}`);
 
       if (connType !== 'daemon') {
         dependencies.router.registerClient(socket, userId);
         releaseAdmission();
       }
 
-      for (const raw of earlyMessages) enqueueMessage(raw);
+      if (!preAuthTerminated) {
+        for (const raw of earlyMessages) enqueueMessage(raw);
+      }
       earlyMessages.length = 0;
     })().catch((err) => {
       console.error(`ws auth error from ${clientIp}:`, err.message);
@@ -567,6 +871,19 @@ async function main() {
     `http://localhost:${PORT}`,
   )
   const buildInfo = resolveBuildInfo(process.env)
+  // M-1: only explicitly listed reverse proxies may set forwarding headers.
+  // Production fails closed when a non-loopback listener has no trust list.
+  const trustedProxy = resolveTrustedProxyConfig(process.env)
+  const listenHost = resolveRelayListenHost(process.env)
+  // M-4: quota enforcement is fail-closed at startup — production SaaS must
+  // run enforce; invalid or missing values abort the boot.
+  resolveQuotaEnforcementMode(process.env)
+  // Fails startup in production when AUTH_CODE_PEPPER is missing/short or any
+  // DEV_EMAIL/DEV_EMAIL_CODE backdoor variable is present (H-1/H-4).
+  const emailVerification = resolveEmailVerificationConfig(process.env)
+  // M-2: shared PostgreSQL auth rate limiting with HMAC-fingerprinted keys.
+  const authRateLimitPolicy = resolveAuthRateLimitConfig(process.env)
+  const authRateLimiter = createAuthRateLimiter({ pepper: emailVerification.pepper })
   const runtimeConfig = resolveRelayRuntimeConfig(process.env)
   const tokenFeatures = tokenUsageFeatures(process.env)
   const attentionConfig = attentionInboxConfig(process.env)
@@ -719,10 +1036,30 @@ async function main() {
     clientPerAddressMax: positiveEnvInt('RELAY_CLIENT_HANDSHAKE_PER_ADDRESS_MAX', 32),
     jitter: () => Math.floor(Math.random() * 1_000),
   });
-  const app = Fastify({ logger: false, trustProxy: TRUST_PROXY });
+  const app = Fastify({ logger: false, trustProxy: trustedProxy });
+
+  /**
+   * M-2: enforce shared auth rate-limit buckets for a request. Returns true
+   * when the request was rejected (429/503 already set on the reply) — the
+   * caller must return immediately with a generic, non-enumerating body.
+   */
+  const rejectIfRateLimited = async (
+    reply: any,
+    ...specs: Array<{ scope: string; windowMs: number; ip?: { value: string; limit: number }; identity?: { value: string; limit: number } }>
+  ): Promise<boolean> => {
+    for (const spec of specs) {
+      const decision = await authRateLimiter.enforce(pool, spec)
+      if (applyAuthRateLimitDecision(reply, decision)) return true
+    }
+    return false
+  }
 
   await app.register(fastifyCors, { origin: corsOrigin, credentials: true });
-  await app.register(fastifyWebsocket);
+  // M-3: the ws protocol layer enforces maxPayload before a huge frame is
+  // ever assembled; the handler's pre-auth queue adds count/byte caps on top.
+  await app.register(fastifyWebsocket, {
+    options: { maxPayload: runtimeConfig.maxEventBytes },
+  });
   registerSessionShareRoutes(app, { pool, publicIssuer });
   registerAttentionInboxRoutes(app, {
     pool,
@@ -735,60 +1072,27 @@ async function main() {
 
   // ---- REST API: Auth ----
 
-  // Register
-  app.post('/api/auth/register', async (req, reply) => {
-    const { email, password, displayName, lang: bodyLang } = req.body as any;
-    if (!email || !password) {
-      reply.code(400); return { error: 'email and password are required' };
-    }
-    if (password.length < 6) {
-      reply.code(400); return { error: 'password must be at least 6 characters' };
-    }
-    const normalizedEmail = email.trim().toLowerCase();
-    const locale = resolveLanguage(bodyLang, req.headers['accept-language']);
-    const existing = await getUserByEmail(pool, normalizedEmail);
-    if (existing) {
-      reply.code(409); return { error: 'email already registered' };
-    }
-    let user;
-    try {
-      user = await createUserWithWelcomeEmail(pool, normalizedEmail, hashPassword(password), displayName, locale);
-    } catch (error: any) {
-      if (error?.code === '23505') {
-        reply.code(409); return { error: 'email already registered' };
-      }
-      throw error;
-    }
-    const accessToken = await signAccessToken(user.id, user.email);
-    const refreshToken = await signRefreshToken(user.id);
-    setRefreshCookie(reply, refreshToken);
+  // Password registration cannot establish ownership of the supplied mailbox.
+  // Keep an explicit terminal response for older clients instead of allowing
+  // them to pre-claim an address that its owner may later use for code login.
+  app.post('/api/auth/register', async (_req, reply) => {
+    reply.code(410);
     return {
-      access_token: accessToken,
-      refresh_token: refreshToken,
-      user: { id: user.id, email: user.email, phone: user.phone ?? null, display_name: user.display_name, plan: user.plan || 'free' },
+      error: 'password registration has been retired; verify the email address first',
+      verification_endpoint: '/api/auth/email/send',
     };
   });
 
-  // Login (DEPRECATED — use /api/auth/email/verify or /api/auth/sms/verify)
-  app.post('/api/auth/login', async (req, reply) => {
+  // A password stored before email ownership became mandatory cannot prove who
+  // owns that mailbox. Retire this path so pre-hijacked accounts cannot retain
+  // access after the real owner authenticates with a one-time email code.
+  app.post('/api/auth/login', async (_req, reply) => {
     reply.header('Deprecation', 'true');
     reply.header('Sunset', 'Sat, 01 Nov 2026 00:00:00 GMT');
-    const { email, password } = req.body as any;
-    if (!email || !password) {
-      reply.code(400); return { error: 'email and password are required. This endpoint is deprecated — use /api/auth/email/verify instead.' };
-    }
-    const user = await getUserByEmail(pool, email);
-    if (!user || !verifyPassword(password, user.password_hash)) {
-      reply.code(401); return { error: 'invalid email or password. This endpoint is deprecated — use /api/auth/email/verify instead.' };
-    }
-    const accessToken = await signAccessToken(user.id, user.email);
-    const refreshToken = await signRefreshToken(user.id);
-    setRefreshCookie(reply, refreshToken);
+    reply.code(410);
     return {
-      access_token: accessToken,
-      refresh_token: refreshToken,
-      user: { id: user.id, email: user.email, phone: user.phone ?? null, display_name: user.display_name, plan: user.plan || 'free' },
-      _warning: 'This endpoint is deprecated and will be removed. Use /api/auth/email/verify for email-based login.',
+      error: 'password login has been retired; verify the email address instead',
+      verification_endpoint: '/api/auth/email/send',
     };
   });
 
@@ -799,6 +1103,12 @@ async function main() {
     if (!refresh_token) {
       reply.code(400); return { error: 'refresh_token is required' };
     }
+    if (await rejectIfRateLimited(reply, {
+      scope: 'auth:token-ops',
+      windowMs: 60_000,
+      ip: { value: canonicalClientAddress(req.ip), limit: authRateLimitPolicy.tokenOps.ipMax },
+      identity: { value: refresh_token, limit: authRateLimitPolicy.tokenOps.tokenMax },
+    })) return { error: 'too many requests, please retry later' };
     const payload = verifyRefreshToken(refresh_token);
     if (!payload) {
       reply.code(401); return { error: 'invalid or expired refresh token' };
@@ -847,6 +1157,15 @@ async function main() {
   app.post('/api/auth/logout', async (req, reply) => {
     const body = (req.body || {}) as any;
     const refreshToken = parseCookie(req.headers.cookie, REFRESH_COOKIE_NAME) || body.refresh_token;
+    const logoutBuckets: Array<{ scope: string; windowMs: number; ip?: { value: string; limit: number }; identity?: { value: string; limit: number } }> = [{
+      scope: 'auth:token-ops',
+      windowMs: 60_000,
+      ip: { value: canonicalClientAddress(req.ip), limit: authRateLimitPolicy.tokenOps.ipMax },
+    }]
+    if (refreshToken) {
+      logoutBuckets[0].identity = { value: refreshToken, limit: authRateLimitPolicy.tokenOps.tokenMax }
+    }
+    if (await rejectIfRateLimited(reply, ...logoutBuckets)) return { error: 'too many requests, please retry later' };
     if (refreshToken) {
       const payload = verifyRefreshToken(refreshToken);
       if (payload?.jti) revokeToken(pool, payload.jti, payload.userId, 'logout').catch(console.error);
@@ -867,9 +1186,25 @@ async function main() {
     if (!payload) {
       reply.code(401); return { error: 'invalid token' };
     }
+    if (await rejectIfRateLimited(reply, {
+      scope: 'auth:ws-ticket',
+      windowMs: 60_000,
+      ip: { value: canonicalClientAddress(req.ip), limit: authRateLimitPolicy.wsTicket.ipMax },
+      identity: { value: `user:${payload.userId}`, limit: authRateLimitPolicy.wsTicket.userMax },
+    })) return { error: 'too many requests, please retry later' };
     if (Math.random() < 0.01) wsTickets.gc();
-    const { ticket, expiresIn } = wsTickets.create(payload);
-    return { ticket, expires_in: expiresIn };
+    let issued: { ticket: string; expiresIn: number };
+    try {
+      issued = wsTickets.create(payload);
+    } catch (error) {
+      if (error instanceof WsTicketStoreCapacityError) {
+        reply.header('Retry-After', 10);
+        reply.code(503);
+        return { error: 'server busy, please retry later' };
+      }
+      throw error;
+    }
+    return { ticket: issued.ticket, expires_in: issued.expiresIn };
   });
 
   // Apple Sign In (Phase 3)
@@ -882,8 +1217,8 @@ async function main() {
     if (!email) {
       reply.code(400); return { error: 'email is required' };
     }
-    const normalizedEmail = email.trim().toLowerCase();
-    if (!normalizedEmail.includes('@')) {
+    const normalizedEmail = normalizeEmailAddress(email);
+    if (!normalizedEmail) {
       reply.code(400); return { error: 'invalid email format' };
     }
     if (isConfiguredAppReviewEmail(normalizedEmail) && !isAppReviewEnabled()) {
@@ -891,55 +1226,101 @@ async function main() {
     }
 
     const lang = resolveLanguage(bodyLang, req.headers['accept-language']);
+    const now = new Date();
+    const fingerprint = emailFingerprint(normalizedEmail, emailVerification.pepper);
+    const loginChallengeKey = challengeKey(emailVerification.pepper, 'login', normalizedEmail, null);
 
-    // App Review account: the reviewer uses the fixed code documented in
-    // App Store Connect. Do not send email or expose the code in the response.
+    // Database-backed per-IP / per-email send limits, shared across Relay
+    // replicas (M-2: HMAC-fingerprinted keys, fail-closed on backend errors).
+    // The 429 response never reveals whether the email exists.
+    const clientIp = canonicalClientAddress(req.ip);
+    if (await rejectIfRateLimited(reply, {
+      scope: 'auth:email:send',
+      windowMs: 60 * 60_000,
+      ip: { value: clientIp, limit: authRateLimitPolicy.emailSend.ipMax },
+      identity: { value: normalizedEmail, limit: authRateLimitPolicy.emailSend.emailMax },
+    })) return { error: 'too many requests, please retry later' };
+
+    // App Review account: the reviewer's fixed code is issued through the
+    // same challenge store (attempt budget, lockout and cooldown all apply)
+    // and is never emailed or returned. The code must be configured
+    // explicitly; the source-code default is gone.
     if (isAppReviewEmail(normalizedEmail)) {
+      const appReviewCode = explicitAppReviewCode();
+      if (!appReviewCode) {
+        reply.code(403); return { error: 'App Review account is disabled' };
+      }
+      const decision = await upsertEmailChallenge(pool, {
+        challengeKey: loginChallengeKey,
+        purpose: 'login',
+        normalizedEmail,
+        userId: null,
+        codeHmac: codeHmac(appReviewCode, emailVerification.pepper),
+        now,
+      });
+      if (decision.status === 'cooldown') {
+        reply.header('Retry-After', Math.ceil(decision.retryAfterMs / 1000));
+        reply.code(429); return { error: '请等待 60 秒后再重新获取验证码' };
+      }
       return { success: true, message: 'verification code sent' };
     }
 
-    // Dev/test email shortcut: if DEV_EMAIL configured and matches, use fixed code (skip SES)
-    // Works in any NODE_ENV — useful when SES unavailable (e.g. pre-ICP-filing)
-    if (DEV_EMAIL && normalizedEmail === DEV_EMAIL.toLowerCase()) {
-      if (hasPendingCode(normalizedEmail)) {
+    // Dev/test shortcut: only outside production and only when both
+    // DEV_EMAIL and a 6-digit DEV_EMAIL_CODE are explicitly configured
+    // (resolveEmailVerificationConfig fails startup otherwise).
+    if (emailVerification.devShortcutEnabled && normalizedEmail === emailVerification.devEmail) {
+      const decision = await upsertEmailChallenge(pool, {
+        challengeKey: loginChallengeKey,
+        purpose: 'login',
+        normalizedEmail,
+        userId: null,
+        codeHmac: codeHmac(emailVerification.devCode!, emailVerification.pepper),
+        now,
+      });
+      if (decision.status === 'cooldown') {
+        reply.header('Retry-After', Math.ceil(decision.retryAfterMs / 1000));
         reply.code(429); return { error: '请等待 60 秒后再重新获取验证码' };
       }
-      const devCode = DEV_EMAIL_CODE || '888888';
-      storeCode(normalizedEmail, devCode, 5 * 60 * 1000);
-      console.log(`[email] dev code for ${normalizedEmail}: ${devCode} (expires in 5m)`);
-      return { success: true, message: 'verification code sent', code: devCode };
+      return { success: true, message: 'verification code sent', code: emailVerification.devCode };
     }
 
-    // Dev mode without DEV_EMAIL configured
-    if (NODE_ENV !== 'production' && !DEV_EMAIL) {
+    // Dev mode without the DEV shortcut configured
+    if (NODE_ENV !== 'production' && !emailVerification.devShortcutEnabled) {
       reply.code(400);
       return { error: '开发模式邮箱登录未配置，请设置 DEV_EMAIL 和 DEV_EMAIL_CODE 环境变量' };
     }
 
-    // Rate limit: prevent rapid re-send
-    if (hasPendingCode(normalizedEmail)) {
+    // CSPRNG code stored only as a peppered HMAC digest
+    const code = generateCode();
+    const ttlMs = NODE_ENV === 'production' ? 60_000 : CODE_TTL_MS;
+    const decision = await upsertEmailChallenge(pool, {
+      challengeKey: loginChallengeKey,
+      purpose: 'login',
+      normalizedEmail,
+      userId: null,
+      codeHmac: codeHmac(code, emailVerification.pepper),
+      now,
+      ttlMs,
+    });
+    if (decision.status === 'cooldown') {
+      reply.header('Retry-After', Math.ceil(decision.retryAfterMs / 1000));
       reply.code(429); return { error: '请等待 60 秒后再重新获取验证码' };
     }
-
-    // Generate and store 6-digit code
-    const code = generateCode();
-    const expireMinutes = NODE_ENV === 'production' ? 1 : 5;
-    storeCode(normalizedEmail, code, expireMinutes * 60 * 1000);
-    console.log(`[email] code for ${normalizedEmail}: ${code} (expires in ${expireMinutes}m)`);
 
     // Send via Tencent Cloud SES (production) or return code in dev
     if (NODE_ENV === 'production') {
       try {
         await sendEmailCode(normalizedEmail, code, lang);
       } catch (err: any) {
-        console.error(`[email] send failed for ${normalizedEmail}:`, err.message);
+        // Never log the address or the code — fingerprint + error name only.
+        console.error(`[email] send failed for ${fingerprint}:`, err instanceof Error ? err.name : 'unknown');
         reply.code(500);
         return { error: '验证码发送失败，请稍后重试' };
       }
       return { success: true, message: 'verification code sent' };
     }
 
-    // Dev mode: return code in response for testing
+    // Dev mode: return code in response for testing (never in production)
     return { success: true, message: 'verification code sent', code };
   });
 
@@ -949,12 +1330,30 @@ async function main() {
     if (!email || !code) {
       reply.code(400); return { error: 'email and code are required' };
     }
-    const normalizedEmail = email.trim().toLowerCase();
+    const normalizedEmail = normalizeEmailAddress(email);
+    if (!normalizedEmail || typeof code !== 'string' || !/^\d{6}$/.test(code)) {
+      reply.code(400); return { error: 'invalid email or code format' };
+    }
     const locale = resolveLanguage(bodyLang, req.headers['accept-language']);
     if (isConfiguredAppReviewEmail(normalizedEmail) && !isAppReviewEnabled()) {
       reply.code(403); return { error: 'App Review account is disabled' };
     }
-    if (!verifyAppReviewCode(normalizedEmail, code) && !verifyCode(normalizedEmail, code)) {
+    const now = new Date();
+    // Per-IP verify throttle; the per-challenge attempt budget and lockout
+    // are enforced transactionally inside consumeEmailChallenge.
+    const clientIp = canonicalClientAddress(req.ip);
+    if (await rejectIfRateLimited(reply, {
+      scope: 'auth:email:verify',
+      windowMs: 15 * 60_000,
+      ip: { value: clientIp, limit: authRateLimitPolicy.emailVerify.ipMax },
+    })) return { error: 'too many attempts, please retry later' };
+    const status = await consumeEmailChallenge(pool, {
+      challengeKey: challengeKey(emailVerification.pepper, 'login', normalizedEmail, null),
+      presentedCodeHmac: codeHmac(code, emailVerification.pepper),
+      now,
+    });
+    if (status !== 'ok') {
+      // Deliberately generic: locked, invalid and expired are indistinguishable.
       reply.code(400); return { error: 'invalid or expired verification code' };
     }
     // Find or create user by email
@@ -987,6 +1386,11 @@ async function main() {
     if (!identityToken) {
       reply.code(400); return { error: 'identityToken is required' };
     }
+    if (await rejectIfRateLimited(reply, {
+      scope: 'auth:apple',
+      windowMs: 15 * 60_000,
+      ip: { value: canonicalClientAddress(req.ip), limit: authRateLimitPolicy.apple.ipMax },
+    })) return { error: 'too many requests, please retry later' };
     // TODO: Verify Apple identity token with Apple's public keys
     // For now, return a placeholder error
     reply.code(501); return { error: 'Apple Sign In not yet implemented' };
@@ -1336,7 +1740,69 @@ async function main() {
     return { success: true };
   });
 
-  // Bind email to user account
+  // Two-phase verified email binding (H-2): the target address must receive
+  // a bind-scoped code before the account email can change.
+  app.post('/api/user/email/send-code', async (req, reply) => {
+    const authHeader = req.headers.authorization;
+    if (!authHeader?.startsWith('Bearer ')) {
+      reply.code(401); return { error: 'authorization required' };
+    }
+    const payload = await verifyAccessTokenWithRevocation(authHeader.slice(7), pool);
+    if (!payload) {
+      reply.code(401); return { error: 'invalid token' };
+    }
+    const { email, lang: bodyLang } = req.body as any;
+    const normalizedEmail = normalizeEmailAddress(email);
+    if (!normalizedEmail) {
+      reply.code(400); return { error: 'valid email is required' };
+    }
+    const now = new Date();
+    const clientIp = canonicalClientAddress(req.ip);
+    if (await rejectIfRateLimited(reply, {
+      scope: 'auth:bind:send',
+      windowMs: 60 * 60_000,
+      ip: { value: clientIp, limit: authRateLimitPolicy.bindSend.ipMax },
+      identity: { value: normalizedEmail, limit: authRateLimitPolicy.bindSend.emailMax },
+    })) return { error: 'too many requests, please retry later' };
+    const bindChallengeKey = challengeKey(emailVerification.pepper, 'bind_email', normalizedEmail, payload.userId);
+    // Refuse up front when the target already belongs to another account —
+    // no code is mailed for an address the caller cannot obtain.
+    const existing = await getUserByEmail(pool, normalizedEmail);
+    if (existing && existing.id !== payload.userId) {
+      reply.code(409); return { error: '该邮箱已被其他账号绑定' };
+    }
+    if (existing && existing.id === payload.userId) {
+      reply.code(400); return { error: '该邮箱已是当前账号的邮箱' };
+    }
+
+    const code = generateCode();
+    const decision = await upsertEmailChallenge(pool, {
+      challengeKey: bindChallengeKey,
+      purpose: 'bind_email',
+      normalizedEmail,
+      userId: payload.userId,
+      codeHmac: codeHmac(code, emailVerification.pepper),
+      now,
+    });
+    if (decision.status === 'cooldown') {
+      reply.header('Retry-After', Math.ceil(decision.retryAfterMs / 1000));
+      reply.code(429); return { error: '请等待 60 秒后再重新获取验证码' };
+    }
+    if (NODE_ENV === 'production') {
+      try {
+        await sendEmailCode(normalizedEmail, code, resolveLanguage(bodyLang, req.headers['accept-language']));
+      } catch (err: any) {
+        const fingerprint = emailFingerprint(normalizedEmail, emailVerification.pepper);
+        console.error(`[email] bind code send failed for ${fingerprint}:`, err instanceof Error ? err.name : 'unknown');
+        reply.code(500);
+        return { error: '验证码发送失败，请稍后重试' };
+      }
+      return { success: true, message: 'verification code sent' };
+    }
+    return { success: true, message: 'verification code sent', code };
+  });
+
+  // Bind email to user account (requires the bind-scoped verification code)
   app.put('/api/user/email', async (req, reply) => {
     const authHeader = req.headers.authorization;
     if (!authHeader?.startsWith('Bearer ')) {
@@ -1346,19 +1812,47 @@ async function main() {
     if (!payload) {
       reply.code(401); return { error: 'invalid token' };
     }
-    const { email } = req.body as any;
-    if (!email || typeof email !== 'string' || !email.includes('@')) {
-      reply.code(400); return { error: 'valid email is required' };
+    const { email, code } = req.body as any;
+    const normalizedEmail = normalizeEmailAddress(email);
+    if (!normalizedEmail || typeof code !== 'string' || !/^\d{6}$/.test(code)) {
+      reply.code(400); return { error: 'valid email and 6-digit code are required' };
     }
+    const now = new Date();
+    const clientIp = canonicalClientAddress(req.ip);
+    if (await rejectIfRateLimited(reply, {
+      scope: 'auth:bind:verify',
+      windowMs: 15 * 60_000,
+      ip: { value: clientIp, limit: authRateLimitPolicy.bindVerify.ipMax },
+    })) return { error: 'too many attempts, please retry later' };
+    let result;
     try {
-      await updateEmail(pool, payload.userId, email.trim().toLowerCase());
-      return { success: true };
+      result = await bindUserEmailWithChallenge(pool, {
+        userId: payload.userId,
+        email: normalizedEmail,
+        presentedCodeHmac: codeHmac(code, emailVerification.pepper),
+        challengeKey: challengeKey(emailVerification.pepper, 'bind_email', normalizedEmail, payload.userId),
+        now,
+      });
     } catch (err: any) {
       if (err.code === '23505') {
         reply.code(409); return { error: '该邮箱已被其他账号绑定' };
       }
       throw err;
     }
+    const fingerprint = emailFingerprint(normalizedEmail, emailVerification.pepper);
+    if (result === 'ok') {
+      await insertAuditLog(pool, payload.userId, 'email_bind', { target_email_fingerprint: fingerprint, outcome: 'ok' }, clientIp);
+      return { success: true };
+    }
+    if (result === 'conflict') {
+      await insertAuditLog(pool, payload.userId, 'email_bind', { target_email_fingerprint: fingerprint, outcome: 'conflict' }, clientIp);
+      reply.code(409); return { error: '该邮箱已被其他账号绑定' };
+    }
+    if (result === 'invalid_user') {
+      reply.code(401); return { error: 'invalid token' };
+    }
+    await insertAuditLog(pool, payload.userId, 'email_bind', { target_email_fingerprint: fingerprint, outcome: 'invalid_code' }, clientIp);
+    reply.code(400); return { error: 'invalid or expired verification code' };
   });
 
   // ---- iOS Waitlist (with anti-abuse) ----
@@ -1431,43 +1925,24 @@ async function main() {
 
   // Device Authorization Endpoint (§3.1)
   app.post('/api/auth/device/authorize', async (req, reply) => {
-    const { client_id, scope, code_challenge, code_challenge_method, machine_id } = req.body as any;
-
-    // Validate client
-    if (!client_id) {
-      reply.code(400);
-      return { error: 'invalid_request', error_description: 'client_id is required' };
-    }
-    const client = validateClient(client_id);
-    if (!client) {
-      reply.code(400);
-      return { error: 'invalid_client', error_description: 'Unknown client_id' };
-    }
-    // Public clients MUST use PKCE
-    if (client.token_endpoint_auth_method === 'none') {
-      if (!code_challenge) {
-        reply.code(400);
-        return { error: 'invalid_request', error_description: 'code_challenge is required for public clients' };
-      }
-      if (code_challenge_method && code_challenge_method !== 'S256') {
-        reply.code(400);
-        return { error: 'invalid_request', error_description: 'only S256 code_challenge_method is supported' };
-      }
-    }
-
-    const result = createSession(client_id, code_challenge, machine_id);
-    // Use WEB_APP_URL env var for the verification URI, fallback to relay host
-    const webAppUrl = process.env.WEB_APP_URL || `http://${req.hostname}:${PORT}`;
-    const verificationUri = `${webAppUrl}/login/cli`;
-    reply.code(200);
-    return {
-      device_code: result.device_code,
-      user_code: result.user_code,
-      verification_uri: verificationUri,
-      verification_uri_complete: `${verificationUri}?code=${result.user_code}`,
-      expires_in: result.expires_in,
-      interval: result.interval,
-    };
+    const clientIp = canonicalClientAddress(req.ip);
+    if (await rejectIfRateLimited(reply,
+      {
+        scope: 'auth:device:authorize',
+        windowMs: 60_000,
+        ip: { value: clientIp, limit: authRateLimitPolicy.deviceAuthorize.perMinute },
+      },
+      {
+        scope: 'auth:device:authorize:hourly',
+        windowMs: 60 * 60_000,
+        ip: { value: clientIp, limit: authRateLimitPolicy.deviceAuthorize.perHour },
+      },
+    )) return { error: 'too many requests, please retry later' };
+    return handleDeviceAuthorizeRequest(req, reply, {
+      store: deviceAuthSessions,
+      validateClient,
+      webAppUrl: (innerReq) => process.env.WEB_APP_URL || `http://${innerReq.hostname}:${PORT}`,
+    });
   });
 
   // User Code Confirmation Endpoint (browser submits the user_code)
@@ -1489,7 +1964,14 @@ async function main() {
       return { error: 'invalid_request', error_description: 'user_code is required' };
     }
 
-    const ok = authorizeSession(user_code, payload.userId);
+    if (await rejectIfRateLimited(reply, {
+      scope: 'auth:device:confirm',
+      windowMs: 10 * 60_000,
+      ip: { value: canonicalClientAddress(req.ip), limit: authRateLimitPolicy.confirm.ipMax },
+      identity: { value: `user:${payload.userId}`, limit: authRateLimitPolicy.confirm.userMax },
+    })) return { error: 'too many requests, please retry later' };
+
+    const ok = deviceAuthSessions.authorize(user_code, payload.userId);
     if (!ok) {
       reply.code(400);
       return { error: 'invalid_user_code', error_description: 'user_code is invalid or expired' };
@@ -1505,141 +1987,61 @@ async function main() {
 
   // Device Access Token Endpoint (§3.4)
   app.post('/api/auth/device/token', async (req, reply) => {
-    const { grant_type, device_code, client_id, code_verifier } = req.body as any;
-
-    if (grant_type !== 'urn:ietf:params:oauth:grant-type:device_code') {
-      reply.code(400);
-      return { error: 'unsupported_grant_type' };
-    }
-    if (!device_code || !client_id) {
-      reply.code(400);
-      return { error: 'invalid_request' };
-    }
-
-    // Validate client
-    const client = validateClient(client_id);
-    if (!client) {
-      reply.code(400);
-      return { error: 'invalid_client' };
-    }
-
-    // Rate limiting: check polling interval
-    if (!canPoll(device_code, 5)) {
-      reply.code(400);
-      return { error: 'slow_down' };
-    }
-
-    const session = getSessionByDeviceCode(device_code);
-    if (!session) {
-      reply.code(400);
-      return { error: 'expired_token', error_description: 'device_code has expired' };
-    }
-
-    if (session.status === 'pending') {
-      reply.code(400);
-      return { error: 'authorization_pending' };
-    }
-
-    // Verify PKCE
-    if (client.token_endpoint_auth_method === 'none') {
-      if (!code_verifier) {
-        reply.code(400);
-        return { error: 'invalid_grant', error_description: 'code_verifier is required' };
-      }
-      const expectedChallenge = session.code_challenge;
-      const actualChallenge = createHash('sha256')
-        .update(code_verifier)
-        .digest('base64url');
-      if (actualChallenge !== expectedChallenge) {
-        reply.code(400);
-        return { error: 'invalid_grant', error_description: 'code_verifier does not match code_challenge' };
-      }
-    }
-
-    // Issue tokens
-    const user = await getUserById(pool, session.user_id!);
-    if (!user) {
-      reply.code(500);
-      return { error: 'server_error', error_description: 'user not found' };
-    }
-
-    const machineId = session.machine_id || 'unknown';
-    const accessToken = await signAccessToken(user.id, user.email, user.phone, machineId);
-    const refreshToken = await signRefreshToken(user.id);
-    setRefreshCookie(reply, refreshToken);
-
-    // Clean up the session
-    deleteSession(device_code);
-
-    insertAuditLog(pool, user.id, 'token_issued', {
-      client_id,
-      machine_id: machineId,
-      grant_type: 'device_code',
-    }, req.ip).catch(console.error);
-
-    return {
-      access_token: accessToken,
-      refresh_token: refreshToken,
-      token_type: 'Bearer',
-      expires_in: 86400,
-    };
+    return handleDeviceTokenRequest(req, reply, {
+      store: deviceAuthSessions,
+      validateClient,
+      getUserById: (userId: number) => getUserById(pool, userId),
+      signAccessToken,
+      signRefreshToken,
+      insertAuditLog: (userId: number | null, action: string, details: Record<string, unknown>, ip?: string) =>
+        insertAuditLog(pool, userId, action, details, ip),
+      setRefreshCookie: (r: any, token: string) => setRefreshCookie(r, token),
+      rejectIfRateLimited,
+      pollIpMax: authRateLimitPolicy.poll.ipMax,
+    });
   });
 
-  // Token Revocation Endpoint (RFC 7009)
+  // Token Revocation Endpoint (RFC 7009) — signature-verified (M-5)
   app.post('/api/auth/revoke', async (req, reply) => {
-    const authHeader = req.headers.authorization;
-    if (!authHeader?.startsWith('Bearer ')) {
-      reply.code(401);
-      return { error: 'authorization required' };
-    }
-    const payload = await verifyAccessTokenWithRevocation(authHeader.slice(7), pool);
-    if (!payload) {
-      reply.code(401);
-      return { error: 'invalid token' };
-    }
-
-    const { token, token_type_hint } = req.body as any;
-    if (!token) {
-      reply.code(400);
-      return { error: 'invalid_request', error_description: 'token is required' };
-    }
-
-    // Extract jti from the submitted token (without verifying expiry)
-    try {
-      const parts = token.split('.');
-      if (parts.length === 3) {
-        const rawPayload = Buffer.from(parts[1], 'base64url').toString('utf8');
-        const claims = JSON.parse(rawPayload);
-        const jti = claims.jti;
-        const tokenUserId = claims.userId;
-
-        // Only allow revoking own tokens
-        if (tokenUserId && tokenUserId !== payload.userId) {
-          reply.code(403);
-          return { error: 'forbidden', error_description: 'cannot revoke another user\'s token' };
-        }
-
-        if (jti) {
-          await revokeToken(pool, jti, payload.userId, 'user_revoke');
-          await insertAuditLog(pool, payload.userId, 'token_revoke', {
-            jti,
-            token_type_hint: token_type_hint || 'unknown',
-          }, req.ip);
-        }
-      }
-    } catch {
-      // Token parse error — still return 200 per RFC 7009
-    }
-
-    reply.code(200);
-    return {};
+    return handleTokenRevocationRequest(req, reply, {
+      pool,
+      verifyCallerAccessToken: (token) => verifyAccessTokenWithRevocation(token, pool),
+      verifyForRevocation: verifyTokenForRevocation,
+      revokeToken,
+      insertAuditLog,
+      pepper: emailVerification.pepper,
+      rejectIfRateLimited,
+    });
   });
 
   // ---- QR Scan-Login (web displays QR → iOS scans → iOS confirms → web polls for token) ----
 
   // Web creates a QR login session and renders the QR payload
   app.post('/api/auth/qr/create', async (req, reply) => {
-    const result = createQrSession();
+    const clientIp = canonicalClientAddress(req.ip);
+    if (await rejectIfRateLimited(reply,
+      {
+        scope: 'auth:qr:create',
+        windowMs: 60_000,
+        ip: { value: clientIp, limit: authRateLimitPolicy.qrCreate.perMinute },
+      },
+      {
+        scope: 'auth:qr:create:hourly',
+        windowMs: 60 * 60_000,
+        ip: { value: clientIp, limit: authRateLimitPolicy.qrCreate.perHour },
+      },
+    )) return { error: 'too many requests, please retry later' };
+    let result: { qr_token: string; expires_in: number };
+    try {
+      result = qrSessions.create();
+    } catch (error) {
+      if (error instanceof QrSessionStoreCapacityError) {
+        reply.header('Retry-After', 10);
+        reply.code(503);
+        return { error: 'temporarily_unavailable', error_description: 'server busy, please retry later' };
+      }
+      throw error;
+    }
     const webAppUrl = process.env.WEB_APP_URL || `http://${req.hostname}:${PORT}`;
     // Payload written into the QR: a URL the iOS scanner parses to extract qr_token.
     const qr_payload = `${webAppUrl}/login/qr?token=${result.qr_token}`;
@@ -1658,7 +2060,12 @@ async function main() {
     if (!qr_token) {
       reply.code(400); return { error: 'qr_token is required' };
     }
-    const session = getQrSession(qr_token);
+    if (await rejectIfRateLimited(reply, {
+      scope: 'auth:qr:status',
+      windowMs: 60_000,
+      ip: { value: canonicalClientAddress(req.ip), limit: authRateLimitPolicy.poll.ipMax },
+    })) return { error: 'too many requests, please retry later' };
+    const session = qrSessions.get(qr_token);
     if (!session) {
       reply.code(200);
       return { status: 'expired' as const };
@@ -1667,7 +2074,7 @@ async function main() {
     // Once confirmed, issue JWTs and consume the session.
     if (session.status === 'confirmed' && session.user_id != null) {
       const user = await getUserById(pool, session.user_id);
-      deleteQrSession(qr_token); // single-use
+      qrSessions.delete(qr_token); // single-use
       if (!user) {
         reply.code(200);
         return { status: 'expired' as const };
@@ -1705,7 +2112,14 @@ async function main() {
       reply.code(400); return { error: 'qr_token is required' };
     }
 
-    const ok = confirmQrSession(qr_token, payload.userId);
+    if (await rejectIfRateLimited(reply, {
+      scope: 'auth:qr:confirm',
+      windowMs: 10 * 60_000,
+      ip: { value: canonicalClientAddress(req.ip), limit: authRateLimitPolicy.confirm.ipMax },
+      identity: { value: `user:${payload.userId}`, limit: authRateLimitPolicy.confirm.userMax },
+    })) return { error: 'too many requests, please retry later' };
+
+    const ok = qrSessions.confirm(qr_token, payload.userId);
     if (!ok) {
       reply.code(400); return { error: 'invalid_or_expired_qr_token' };
     }
@@ -1790,8 +2204,8 @@ async function main() {
   app.get('/ws', { websocket: true }, createRelayWebSocketHandler({
     getDatabaseReady: () => databaseReady,
     maxMessageSize: runtimeConfig.maxEventBytes,
-    apiKey: API_KEY,
-    trustProxy: TRUST_PROXY,
+    preAuthMaxMessages: runtimeConfig.preAuthMaxMessages,
+    preAuthMaxBytes: runtimeConfig.preAuthMaxBytes,
     random: Math.random,
     rateLimiter,
     connectionAdmission,
@@ -1812,7 +2226,7 @@ async function main() {
   }));
 
   try {
-    await app.listen({ port: PORT, host: '0.0.0.0' })
+    await app.listen({ port: PORT, host: listenHost })
     const tListen = (typeof performance !== 'undefined' ? performance.now() : Date.now())
     console.log(`pocketctl relay listening on port ${PORT} [${NODE_ENV}]`)
     console.log(`[startup] pool=${(tPool - tStart).toFixed(0)}ms initDB=${(tInit - tPool).toFixed(0)}ms listen=${(tListen - tInit).toFixed(0)}ms total=${(tListen - tStart).toFixed(0)}ms`)
@@ -1856,8 +2270,10 @@ async function main() {
     try {
       const tombstoneCount = await cleanStaleTombstones(pool);
       const { accessPurged, refreshPurged } = await cleanRevokedTokens(pool);
-      const totalPurged = tombstoneCount + accessPurged + refreshPurged;
-      if (totalPurged > 0) console.log(`[cleanup] removed ${tombstoneCount} tombstones, ${accessPurged} access tokens, ${refreshPurged} refresh tokens`);
+      const challengeCount = await cleanExpiredEmailChallenges(pool);
+      const rateLimitCount = await cleanStaleAuthRateLimits(pool);
+      const totalPurged = tombstoneCount + accessPurged + refreshPurged + challengeCount + rateLimitCount;
+      if (totalPurged > 0) console.log(`[cleanup] removed ${tombstoneCount} tombstones, ${accessPurged} access tokens, ${refreshPurged} refresh tokens, ${challengeCount} email challenges, ${rateLimitCount} rate-limit windows`);
     } catch (err) { console.error('[cleanup] cleanup error:', (err as Error).message); }
   }, 6 * 60 * 60 * 1000);
 

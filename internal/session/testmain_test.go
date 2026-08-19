@@ -21,3 +21,14 @@ func TestMain(m *testing.M) {
 	_ = os.RemoveAll(testHome)
 	os.Exit(code)
 }
+
+// allowCwdForTest installs a permissive cwd policy rooted at the OS temp base
+// so legacy CreateSession tests keep working under the H-7 fail-closed gate.
+func allowCwdForTest(t *testing.T, sm *SessionManager) {
+	t.Helper()
+	policy, err := NewCwdPolicy([]string{os.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sm.SetCwdPolicy(policy)
+}

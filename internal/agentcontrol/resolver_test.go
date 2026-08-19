@@ -175,6 +175,16 @@ func testExecutable(t *testing.T, name string) string {
 	return path
 }
 
+func validatedTestExecutable(t *testing.T, name string) string {
+	t.Helper()
+	path := testExecutable(t, name)
+	validated, ok := validatedRealAgentPath(path)
+	if !ok {
+		t.Fatalf("test executable %q did not pass real-agent validation", path)
+	}
+	return validated
+}
+
 // launcherResolutionFixture reproduces the historical incident layout: a
 // temporary HOME with no launcher config while PATH still exposes a
 // PocketCtl-owned shim from a different (simulated real) HOME plus a genuine

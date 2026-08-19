@@ -65,8 +65,8 @@ describe('Codex managed lifecycle relay contract', () => {
       daemon_id: 'daemon-1',
       hostname: 'host',
       agents: [],
-    }, null)
-    router.registerClient(client, null)
+    }, 1)
+    router.registerClient(client, 1)
 
     router.handleDaemonMessage('daemon-1', {
       type: 'session_discovered',
@@ -80,10 +80,13 @@ describe('Codex managed lifecycle relay contract', () => {
 
     await vi.waitFor(() => {
       expect(queriesMatching(pool, 'INSERT INTO sessions')).toContainEqual(expect.objectContaining({
-        params: ['thr_1', 'daemon-1', 'codex', '', null, 'terminal', 'running', null, null, null, 'managed', null],
+        params: ['thr_1', 'daemon-1', 'codex', '', null, 'terminal', 'running', null, 1, null, 'managed', null],
       }))
       expect(queriesMatching(pool, 'INSERT INTO events')).toContainEqual(expect.objectContaining({
-        params: ['thr_1', 'session_discovered', expect.stringContaining('"control_mode":"managed"'), expect.any(String)],
+        params: [
+          'thr_1', 'session_discovered', expect.stringContaining('"control_mode":"managed"'),
+          expect.any(String), 1,
+        ],
       }))
       expect(queriesMatching(pool, "UPDATE events SET effect_status = 'completed'")).toContainEqual(expect.objectContaining({
         params: [1],
@@ -102,10 +105,13 @@ describe('Codex managed lifecycle relay contract', () => {
 
     await vi.waitFor(() => {
       expect(queriesMatching(pool, 'session_status_decision')).toContainEqual(expect.objectContaining({
-        params: [2, 1, 1_000_000_000, 'thr_1', 'daemon-1', 'idle', null, null, null],
+        params: [2, 1, 1_000_000_000, 'thr_1', 'daemon-1', 'idle', null, 1, null],
       }))
       expect(queriesMatching(pool, 'INSERT INTO events')).toContainEqual(expect.objectContaining({
-        params: ['thr_1', 'session_status', expect.stringContaining('"status":"idle"'), expect.any(String)],
+        params: [
+          'thr_1', 'session_status', expect.stringContaining('"status":"idle"'),
+          expect.any(String), 1,
+        ],
       }))
       expect(queriesMatching(pool, "UPDATE events SET effect_status = 'completed'")).toContainEqual(expect.objectContaining({
         params: [2],
@@ -127,7 +133,7 @@ describe('Codex managed lifecycle relay contract', () => {
 
     await vi.waitFor(() => {
       expect(queriesMatching(pool, 'session_status_decision')).toContainEqual(expect.objectContaining({
-        params: [3, 1, 1_000_000_000, 'thr_1', 'daemon-1', 'completed', null, null, null],
+        params: [3, 1, 1_000_000_000, 'thr_1', 'daemon-1', 'completed', null, 1, null],
       }))
       expect(client._sent).toContainEqual(expect.objectContaining({
         type: 'session_status',

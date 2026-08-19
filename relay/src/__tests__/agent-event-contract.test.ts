@@ -44,7 +44,7 @@ describe('daemon event ingress policy', () => {
     { name: 'title update is ephemeral aggregate', payload: { type: 'session_title_update' }, durable: false, priority: 'aggregate' },
     { name: 'daemon shutdown is ephemeral control', payload: { type: 'daemon_shutdown' }, durable: false, priority: 'control' },
     { name: 'takeover cancellation is ephemeral control', payload: { type: 'cancel_takeover' }, durable: false, priority: 'control' },
-    { name: 'session create failure is ephemeral control', payload: { type: 'session_create_failed' }, durable: false, priority: 'control' },
+    { name: 'session create failure is durable control', payload: { type: 'session_create_failed' }, durable: true, priority: 'control' },
     { name: 'model list is ephemeral control', payload: { type: 'model_list' }, durable: false, priority: 'control' },
     { name: 'upgrade result is ephemeral control', payload: { type: 'upgrade_result' }, durable: false, priority: 'control' },
     { name: 'host-level error is ephemeral control', payload: { type: 'error' }, durable: false, priority: 'control' },
@@ -90,7 +90,7 @@ describe('daemon event ingress policy', () => {
     try {
       await router.registerDaemon(daemonWs, {
         type: 'register', daemon_id: 'daemon-1', hostname: 'host', agents: [], started_at: 100,
-      }, null);
+      }, 1);
       daemonWs._sent.length = 0;
 
       expect(() => router.handleDaemonMessage('daemon-1', {

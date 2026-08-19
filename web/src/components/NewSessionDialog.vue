@@ -206,7 +206,7 @@ const form = reactive({
   permission: defaultPermission('claude-code') as PermissionConfig | undefined,
   model: '',  // '' = follow host default | opus | sonnet | haiku alias
   // Scheme A/C/D advanced options
-  autoCreateDir: true,   // 目录不存在时自动创建（默认开）
+  autoCreateDir: false,  // 目录不存在时自动创建（默认关，H-7：需操作者显式选择）
   worktree: false,       // Git worktree 隔离（默认关）
   force: false,          // 明知 cwd 被占用仍强制创建（cwd_in_use 错误后出现）
 })
@@ -275,6 +275,7 @@ function showError(reason: string, err?: string) {
     timeout: { title: t('new_session.error_title', { host }), desc: t('new_session.failed_timeout_desc') },
     daemon_offline: { title: t('new_session.error_title', { host }), desc: t('new_session.failed_offline_desc') },
     concurrent_session_quota_exceeded: { title: t('quota.session_reached_title'), desc: t('quota.session_reached_desc') },
+    cwd_not_authorized: { title: t('new_session.error_title', { host }), desc: t('new_session.failed_cwd_not_authorized_desc') },
   }
   // Scheme A: cwd_in_use 进入"确认覆盖"状态，用户可勾选强制创建后重试
   if (reason === 'cwd_in_use') {

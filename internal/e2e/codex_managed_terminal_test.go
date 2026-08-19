@@ -23,11 +23,12 @@ import (
 )
 
 type codexManagedProvider struct {
-	endpoint string
-	mu       sync.Mutex
-	acquire  agentcontrol.AcquireRequest
-	bound    agentcontrol.LeaseBindRequest
-	released agentcontrol.ReleaseRequest
+	endpoint   string
+	realBinary string
+	mu         sync.Mutex
+	acquire    agentcontrol.AcquireRequest
+	bound      agentcontrol.LeaseBindRequest
+	released   agentcontrol.ReleaseRequest
 }
 
 func (p *codexManagedProvider) Acquire(_ context.Context, req agentcontrol.AcquireRequest) (agentcontrol.AcquireResult, error) {
@@ -36,7 +37,7 @@ func (p *codexManagedProvider) Acquire(_ context.Context, req agentcontrol.Acqui
 	p.mu.Unlock()
 	return agentcontrol.AcquireResult{
 		Mode: string(agentcontrol.LaunchManaged), RemoteURI: p.endpoint,
-		RealBinary: "/fixture/codex", ResolvedSessionID: "thr_e2e",
+		RealBinary: p.realBinary, ResolvedSessionID: "thr_e2e",
 		LeaseID: "lease-codex", Generation: 23,
 	}, nil
 }
@@ -215,7 +216,8 @@ func TestCodexManagedTerminalSharesAppServerAndWebFirstResolution(t *testing.T) 
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = os.RemoveAll(dir) })
-	provider := &codexManagedProvider{endpoint: fake.endpoint()}
+	realBinary := writeRealAgentFixture(t, dir, "codex")
+	provider := &codexManagedProvider{endpoint: fake.endpoint(), realBinary: realBinary}
 	control := filepath.Join(dir, "control.sock")
 	server := agentcontrol.NewServer(control, map[string]agentcontrol.RuntimeProvider{agentcontrol.AgentCodex: provider})
 	if err := server.Start(); err != nil {
@@ -255,7 +257,7 @@ func TestCodexManagedTerminalSharesAppServerAndWebFirstResolution(t *testing.T) 
 		}
 	})
 	wantArgs := []string{"resume", "thr_e2e", "--remote", fake.endpoint()}
-	if executed.Path != "/fixture/codex" || !reflect.DeepEqual(executed.Args, wantArgs) {
+	if executed.Path != realBinary || !reflect.DeepEqual(executed.Args, wantArgs) {
 		t.Fatalf("official TUI invocation=%+v", executed)
 	}
 

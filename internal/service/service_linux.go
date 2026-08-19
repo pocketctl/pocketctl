@@ -145,12 +145,9 @@ func systemctlUnitNotFound(out string) bool {
 }
 
 func renderUnit(cfg Config) string {
-	// Quote each arg defensively; paths with spaces are rare but cheap to guard.
 	parts := append([]string{cfg.ExePath}, cfg.Args...)
 	for i, p := range parts {
-		if strings.ContainsAny(p, " \t") {
-			parts[i] = "\"" + p + "\""
-		}
+		parts[i] = quoteSystemdExecArg(p)
 	}
 	execStart := strings.Join(parts, " ")
 	pathEnvironment := ""
@@ -175,6 +172,41 @@ OOMScoreAdjust=-500
 [Install]
 WantedBy=default.target
 `, execStart, pathEnvironment)
+}
+
+// quoteSystemdExecArg mirrors systemd's own ExecStart serialization rules:
+// quote every argv element, escape syntax characters, suppress specifier and
+// environment expansion, and keep control bytes on the directive's one line.
+func quoteSystemdExecArg(value string) string {
+	var escaped strings.Builder
+	escaped.Grow(len(value) + 2)
+	escaped.WriteByte('"')
+	for i := 0; i < len(value); i++ {
+		switch c := value[i]; c {
+		case '\\':
+			escaped.WriteString(`\\`)
+		case '"':
+			escaped.WriteString(`\"`)
+		case '$':
+			escaped.WriteString(`$$`)
+		case '%':
+			escaped.WriteString(`%%`)
+		case '\n':
+			escaped.WriteString(`\n`)
+		case '\r':
+			escaped.WriteString(`\r`)
+		case '\t':
+			escaped.WriteString(`\t`)
+		default:
+			if c < 0x20 || c == 0x7f {
+				fmt.Fprintf(&escaped, `\x%02x`, c)
+			} else {
+				escaped.WriteByte(c)
+			}
+		}
+	}
+	escaped.WriteByte('"')
+	return escaped.String()
 }
 
 func quoteSystemdEnvironment(value string) string {

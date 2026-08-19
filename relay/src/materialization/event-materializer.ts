@@ -1,3 +1,4 @@
+import { createHash } from 'crypto'
 import type pg from 'pg'
 import * as db from '../db.js'
 import { normalizeSessionId } from '../ingress/event-policy.js'
@@ -11,7 +12,14 @@ import {
   summarizeToolInput,
 } from '../push.js'
 import { notifyUser } from '../push.js'
-import { releaseQuotaReservation } from '../quota.js'
+import {
+  claimQuotaReservationSession,
+  recoverQuotaReservation,
+  QuotaReservationBindingError,
+  settleQuotaReservation,
+  type QuotaOperation,
+  type QuotaReservationBinding,
+} from '../quota.js'
 import { tokenUsageFeatures } from '../config/token-usage.js'
 import type {
   DurableMaterializationHooks,
@@ -21,6 +29,7 @@ import type {
   MaterializationHooks,
   MaterializationInput,
   MaterializationResult,
+  PendingOperationIdentity,
 } from './types.js'
 
 export type MaterializationEffect = (effect: DurableEffectContext) => Promise<void> | void
@@ -65,7 +74,14 @@ export class EphemeralMaterializationError extends Error {
 
 export function createDatabaseMaterializationHooks(pool: pg.Pool): DurableMaterializationHooks {
   return {
-    releaseQuotaReservation: (reservationId) => releaseQuotaReservation(pool, reservationId),
+    claimQuotaReservationSession: async (binding) => {
+      const result = await claimQuotaReservationSession(pool, binding)
+      if (!result.matched) throw new QuotaReservationBindingError()
+    },
+    settleQuotaReservation: async (binding, reason) => {
+      const result = await settleQuotaReservation(pool, binding, reason)
+      if (!result.matched) throw new QuotaReservationBindingError()
+    },
     notifyUser: (userId, payload) => notifyUser(pool, userId, payload as never),
     notifyProUser: async (userId, payload) => {
       const { plan, whitelist } = await db.getUserPlanAndWhitelist(pool, userId)
@@ -91,6 +107,116 @@ export class EventMaterializer {
 
   private get effectPool(): pg.Pool {
     return this.options.effectPool ?? this.options.pool
+  }
+
+  private quotaOutcome(input: MaterializationInput): {
+    operation: QuotaOperation
+    reason: 'session_created' | 'session_create_failed' | 'session_active'
+  } | null {
+    if (input.eventType === 'session_created') return { operation: 'create', reason: 'session_created' }
+    if (input.eventType === 'session_create_failed') {
+      return { operation: 'create', reason: 'session_create_failed' }
+    }
+    if (input.eventType !== 'session_status') return null
+    const status = typeof input.payload.status === 'string' ? input.payload.status : ''
+    return ['running', 'busy', 'retry', 'idle', 'waiting', 'waiting_approval', 'waiting_question'].includes(status)
+      ? { operation: 'resume', reason: 'session_active' }
+      : null
+  }
+
+  private async recoverQuotaContext(input: MaterializationInput): Promise<MaterializationInput> {
+    const outcome = this.quotaOutcome(input)
+    if (!outcome) return input
+    // This recovery runs before materializeUnlocked(), which owns the fenced
+    // tombstone check. Reject a deleted session here as well so a stale quota
+    // binding cannot mask the permanent unknown-session outcome. The fenced
+    // check remains the authoritative TOCTOU guard before persistence.
+    if (input.sessionId && await db.isSessionDeleted(this.effectPool, input.sessionId)) {
+      throw new db.UnknownDaemonSessionError()
+    }
+    const requestId = typeof input.context?.requestId === 'string' && input.context.requestId
+      ? input.context.requestId
+      : typeof input.payload.request_id === 'string' && input.payload.request_id
+        ? input.payload.request_id
+        : null
+    const strictLifecycleOutcome = input.eventType === 'session_created'
+      || input.eventType === 'session_create_failed'
+      || (input.eventType === 'session_status' && requestId !== null)
+    if (input.userId === null || !requestId) {
+      if (strictLifecycleOutcome) throw new QuotaReservationBindingError()
+      return input
+    }
+    const recovered = await recoverQuotaReservation(this.options.pool, {
+      userId: input.userId,
+      daemonId: input.daemonId,
+      requestId,
+      operation: outcome.operation,
+      sessionId: outcome.operation === 'resume' || input.eventType === 'session_created'
+        ? input.sessionId
+        : null,
+    }, outcome.reason)
+    // Persisted ingress context is an acceptable fast path only when it already
+    // contains the complete server-issued tuple. The first durable transition
+    // still revalidates it. A daemon payload alone is never authority to create
+    // a session, deliver a failure, or close a resume reservation.
+    if (!recovered) {
+      const context = input.context
+      const sessionMatches = outcome.operation === 'create'
+        ? input.eventType === 'session_create_failed' || Boolean(input.sessionId)
+        : Boolean(input.sessionId)
+      if (context?.reservationId && context.requestId === requestId
+        && context.quotaOperation === outcome.operation && sessionMatches) {
+        return input
+      }
+      throw new QuotaReservationBindingError()
+    }
+    return {
+      ...input,
+      context: {
+        ...input.context,
+        requestId: recovered.binding.requestId,
+        reservationId: recovered.binding.reservationId,
+        quotaOperation: recovered.binding.operation,
+        agentType: recovered.agentType || input.context?.agentType || 'unknown',
+        cwd: recovered.cwd ?? input.context?.cwd ?? '',
+        hostname: recovered.hostname,
+      },
+    }
+  }
+
+  /**
+   * Events without a canonical session still need a bounded, server-derived
+   * effect-ledger namespace. The event hash contributes type + request id;
+   * this prefix contributes authenticated tenant + registered daemon.
+   */
+  private ledgerSessionId(input: MaterializationInput): string {
+    if (input.eventType !== 'session_create_failed') return input.sessionId ?? ''
+    const namespace = createHash('sha256')
+      .update(JSON.stringify([input.userId ?? 0, input.daemonId]))
+      .digest('hex')
+      .slice(0, 48)
+    return `quota-failure:${namespace}`
+  }
+
+  private pendingOperationIdentity(input: MaterializationInput): PendingOperationIdentity | null {
+    const context = input.context
+    if (input.userId === null || !context?.requestId || !context.quotaOperation) return null
+    if (!input.sessionId
+      && !(input.eventType === 'session_create_failed' && context.quotaOperation === 'create')) return null
+    return {
+      reservationId: context.reservationId ?? null,
+      userId: input.userId,
+      daemonId: input.daemonId,
+      requestId: context.requestId,
+      operation: context.quotaOperation,
+      sessionId: input.sessionId || null,
+    }
+  }
+
+  private quotaReservationBinding(input: MaterializationInput): QuotaReservationBinding | null {
+    const identity = this.pendingOperationIdentity(input)
+    if (!identity?.reservationId) return null
+    return { ...identity, reservationId: identity.reservationId }
   }
 
   private delivery(
@@ -124,9 +250,18 @@ export class EventMaterializer {
       return {
         ...input.payload,
         request_id: context.requestId ?? input.payload.request_id,
-        reservation_id: context.reservationId ?? input.payload.reservation_id,
+        reservation_id: context.reservationId ?? undefined,
         daemon_id: input.daemonId,
         hostname: context.hostname ?? 'unknown',
+      }
+    }
+    if (input.eventType === 'session_create_failed') {
+      const context = input.context ?? {}
+      return {
+        ...input.payload,
+        request_id: context.requestId ?? input.payload.request_id,
+        reservation_id: context.reservationId ?? undefined,
+        daemon_id: input.daemonId,
       }
     }
     if (input.eventType === 'session_discovered') {
@@ -179,32 +314,9 @@ export class EventMaterializer {
   }
 
   private deliveryAudience(input: MaterializationInput): MaterializedAudience {
-    return ['session_created', 'session_discovered', 'session_model_changed'].includes(input.eventType)
+    return ['session_created', 'session_create_failed', 'session_discovered', 'session_model_changed'].includes(input.eventType)
       ? 'user'
       : 'session'
-  }
-
-  private async persistTombstonedEvent(
-    input: MaterializationInput,
-    assertClaim: () => Promise<void>,
-  ): Promise<MaterializationResult> {
-    await assertClaim()
-    const event = await db.persistEventWithEffect(
-      this.options.pool,
-      input.sessionId ?? '',
-      input.eventType,
-      input.payload,
-    )
-    if (!event.completed) {
-      await assertClaim()
-      await db.completeEventEffect(this.options.pool, event.rowID)
-    }
-    return {
-      eventId: event.rowID,
-      inserted: event.inserted,
-      completed: true,
-      deliveries: [],
-    }
   }
 
   private async materializeSessionLifecycle(
@@ -214,6 +326,17 @@ export class EventMaterializer {
   ): Promise<boolean> {
     const sessionId = input.sessionId ?? ''
     const payload = input.payload
+    if (input.eventType === 'session_create_failed') {
+      const identity = this.pendingOperationIdentity(input)
+      const binding = this.quotaReservationBinding(input)
+      if (binding?.operation === 'create') {
+        await effect.step(() => this.durableHooks.settleQuotaReservation(binding, 'session_create_failed'))
+      }
+      if (identity?.operation === 'create') {
+        await effect.step(() => this.options.hooks?.releasePendingOperation?.(identity))
+      }
+      return true
+    }
     if (input.eventType === 'session_id_changed') {
       const oldSessionId = normalizeSessionId(payload.old_session_id) ?? ''
       await effect.step(async () => {
@@ -243,6 +366,11 @@ export class EventMaterializer {
         || (input.inboxId > 0 && context.agentType === '')) {
         throw new MaterializationContextError()
       }
+      const identity = this.pendingOperationIdentity(input)
+      const binding = this.quotaReservationBinding(input)
+      if (binding?.operation === 'create') {
+        await effect.step(() => this.durableHooks.claimQuotaReservationSession(binding))
+      }
       await effect.step(async () => {
         await db.upsertSession(
           this.effectPool, sessionId, input.daemonId,
@@ -259,14 +387,14 @@ export class EventMaterializer {
       this.options.hooks?.prepareSessionCreated?.(
         sessionId,
         input.daemonId,
-        typeof payload.request_id === 'string' ? payload.request_id : null,
+        context.requestId ?? null,
       )
-      if (context.reservationId) {
-        await effect.step(() => this.durableHooks.releaseQuotaReservation(context.reservationId!))
+      if (binding?.operation === 'create') {
+        await effect.step(() => this.durableHooks.settleQuotaReservation(binding, 'session_created'))
       }
-      await effect.step(() => this.options.hooks?.releasePendingOperation?.(
-        input.daemonId, context.requestId ?? null,
-      ))
+      if (identity?.operation === 'create') {
+        await effect.step(() => this.options.hooks?.releasePendingOperation?.(identity))
+      }
       await effect.assertActive()
       this.options.hooks?.clearPendingSession?.(input.daemonId)
       return true
@@ -344,13 +472,14 @@ export class EventMaterializer {
     }
     const status = typeof payload.status === 'string' ? payload.status : 'unknown'
     if (['running', 'busy', 'retry', 'idle', 'waiting', 'waiting_approval', 'waiting_question'].includes(status)) {
-      if (input.context?.reservationId) {
-        await effect.step(() => this.durableHooks.releaseQuotaReservation(input.context!.reservationId!))
+      const identity = this.pendingOperationIdentity(input)
+      const binding = this.quotaReservationBinding(input)
+      if (binding?.operation === 'resume') {
+        await effect.step(() => this.durableHooks.settleQuotaReservation(binding, 'session_active'))
       }
-      await effect.step(() => this.options.hooks?.releasePendingOperation?.(
-        input.daemonId, input.context?.requestId
-          ?? (typeof payload.request_id === 'string' ? payload.request_id : null),
-      ))
+      if (identity?.operation === 'resume') {
+        await effect.step(() => this.options.hooks?.releasePendingOperation?.(identity))
+      }
     }
     if (input.userId !== null) {
       await effect.step(() => this.options.hooks?.broadcastQuota?.(input.userId!))
@@ -562,10 +691,13 @@ export class EventMaterializer {
       throw new EphemeralMaterializationError()
     }
     const assertClaim = options.assertClaim ?? (async () => undefined)
-    if (input.inboxId > 0
-      && input.sessionId
+    if (input.sessionId
       && await db.isSessionDeleted(this.effectPool, input.sessionId)) {
-      return this.persistTombstonedEvent(input, assertClaim)
+      // Tombstones intentionally do not retain an owner identity. Treat every
+      // daemon event for one as permanently unknown instead of persisting an
+      // unauthorizable canonical event. The transport layer classifies this
+      // error as permanent so ACK/dead-letter progress remains possible.
+      throw new db.UnknownDaemonSessionError()
     }
     await this.authorizeDaemonSession(input)
     if ([
@@ -579,9 +711,11 @@ export class EventMaterializer {
     }
     const event = await db.persistEventWithEffect(
       this.options.pool,
-      input.sessionId ?? '',
+      this.ledgerSessionId(input),
       input.eventType,
       input.payload,
+      5,
+      input.userId,
     )
     const result: MaterializationResult = {
       eventId: event.rowID,
@@ -689,8 +823,9 @@ export class EventMaterializer {
     effect?: MaterializationEffect,
     options: MaterializationRunOptions = {},
   ): Promise<MaterializationResult> {
-    if (!input.sessionId) {
-      return this.materializeUnlocked(input, effect, options)
+    const recoveredInput = await this.recoverQuotaContext(input)
+    if (!recoveredInput.sessionId) {
+      return this.materializeUnlocked(recoveredInput, effect, options)
     }
     // Both the durable and the legacy inline path authorize and persist under
     // the same per-session advisory fence so authorization and the canonical
@@ -699,7 +834,7 @@ export class EventMaterializer {
     // dedicated effect pool for the post-commit deferred phase.
     return db.withSessionMaterializationFence(
       this.options.pool,
-      input.sessionId,
+      recoveredInput.sessionId,
       (client) => {
         // The advisory transaction owns this client. Every query made by the
         // scoped materializer must reuse it, otherwise a supported pool size of
@@ -717,7 +852,7 @@ export class EventMaterializer {
             ?? this.options.effectPool
             ?? this.options.pool,
         })
-        return scoped.materializeUnlocked(input, effect, options)
+        return scoped.materializeUnlocked(recoveredInput, effect, options)
       },
     )
   }

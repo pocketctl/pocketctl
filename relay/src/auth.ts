@@ -12,6 +12,10 @@ if (!JWT_SECRET) {
 const ACCESS_TOKEN_TTL = '24h';
 const REFRESH_TOKEN_TTL = '7d';
 const SESSION_SHARE_TOKEN_TTL = '15m';
+// Security cutover: tokens issued before verified-email-only authentication
+// did not carry this claim and may belong to a pre-hijacked mailbox account.
+// Reject them globally so deploying this release forces one clean re-login.
+const AUTH_TOKEN_SCHEMA = 1;
 
 export function hashPassword(password: string): string {
   return bcrypt.hashSync(password, 10);
@@ -38,6 +42,7 @@ export async function signAccessToken(
       email,
       phone: phone || undefined,
       type: 'access',
+      auth_schema: AUTH_TOKEN_SCHEMA,
       jti,
       machine_id: machineId || 'unknown',
     },
@@ -52,6 +57,7 @@ export async function signRefreshToken(userId: number): Promise<string> {
     {
       userId,
       type: 'refresh',
+      auth_schema: AUTH_TOKEN_SCHEMA,
       jti,
     },
     JWT_SECRET,
@@ -66,6 +72,7 @@ export function verifyAccessToken(
   try {
     const decoded = jwt.verify(token, JWT_SECRET) as any;
     if (decoded.type !== 'access') return null;
+    if (decoded.auth_schema !== AUTH_TOKEN_SCHEMA) return null;
     return {
       userId: decoded.userId,
       email: decoded.email,
@@ -112,7 +119,40 @@ export function verifyRefreshToken(token: string): { userId: number; jti: string
   try {
     const decoded = jwt.verify(token, JWT_SECRET) as any;
     if (decoded.type !== 'refresh') return null;
+    if (decoded.auth_schema !== AUTH_TOKEN_SCHEMA) return null;
     return { userId: decoded.userId, jti: decoded.jti || '' };
+  } catch {
+    return null;
+  }
+}
+
+export interface RevocableTokenClaims {
+  type: 'access' | 'refresh';
+  userId: number;
+  jti: string;
+  exp: number;
+}
+
+/**
+ * M-5: verify a token presented for revocation. Signature first (algorithms
+ * pinned to HS256; alg=none and wrong keys fail), then structure: exact
+ * access|refresh type, positive-integer userId, bounded base64url jti, finite
+ * iat/exp. Expiry is deliberately ignored so a just-expired token can still be
+ * revoked, but an unsigned or malformed one never is. This is the ONLY path
+ * allowed to decide whether a revocation is written — decodeToken and manual
+ * payload splitting must not be used for authorization.
+ */
+export function verifyTokenForRevocation(token: string): RevocableTokenClaims | null {
+  if (typeof token !== 'string' || token.length === 0 || token.length > 4096) return null;
+  try {
+    const decoded = jwt.verify(token, JWT_SECRET, { algorithms: ['HS256'], ignoreExpiration: true }) as any;
+    if (!decoded || typeof decoded === 'string') return null;
+    if (decoded.type !== 'access' && decoded.type !== 'refresh') return null;
+    if (!Number.isSafeInteger(decoded.userId) || decoded.userId <= 0) return null;
+    if (typeof decoded.jti !== 'string' || !/^[A-Za-z0-9_-]{8,128}$/.test(decoded.jti)) return null;
+    if (typeof decoded.iat !== 'number' || !Number.isFinite(decoded.iat)) return null;
+    if (typeof decoded.exp !== 'number' || !Number.isFinite(decoded.exp) || decoded.exp <= 0) return null;
+    return { type: decoded.type, userId: decoded.userId, jti: decoded.jti, exp: decoded.exp };
   } catch {
     return null;
   }

@@ -5,9 +5,37 @@ export interface Entitlements {
 
 export type QuotaEnforcementMode = 'off' | 'observe' | 'enforce'
 
+/**
+ * M-4: quota enforcement is a startup-validated contract, not a silent
+ * fallback. Invalid values fail in every environment (previously any illegal
+ * value quietly became `off`). Production requires an explicit value; the
+ * SaaS production profile accepts only `enforce` — `off`/`observe` would let
+ * a misconfigured deploy bill nothing while users run unlimited sessions.
+ */
+export function resolveQuotaEnforcementMode(env: NodeJS.ProcessEnv = process.env): QuotaEnforcementMode {
+  const raw = env.QUOTA_ENFORCEMENT
+  const production = env.NODE_ENV === 'production'
+  const mode = env.POCKETCTL_MODE?.trim() || 'saas'
+
+  if (raw === undefined) {
+    if (production) {
+      throw new Error(
+        'QUOTA_ENFORCEMENT is required in production: enforce (SaaS default) or an explicit off/observe for self-hosted',
+      )
+    }
+    return 'off'
+  }
+  if (raw !== 'off' && raw !== 'observe' && raw !== 'enforce') {
+    throw new Error(`invalid QUOTA_ENFORCEMENT: ${raw} (allowed: off | observe | enforce)`)
+  }
+  if (production && mode === 'saas' && raw !== 'enforce') {
+    throw new Error('QUOTA_ENFORCEMENT must be enforce for production SaaS deployments')
+  }
+  return raw
+}
+
 export function quotaEnforcementMode(): QuotaEnforcementMode {
-  const value = process.env.QUOTA_ENFORCEMENT
-  return value === 'observe' || value === 'enforce' ? value : 'off'
+  return resolveQuotaEnforcementMode(process.env)
 }
 
 function positiveInt(value: string | undefined, fallback: number): number {

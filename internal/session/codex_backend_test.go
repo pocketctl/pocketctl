@@ -215,6 +215,7 @@ func TestCodexAppServerBackendReturnsDisconnect(t *testing.T) {
 
 func TestCreateSessionSelectsManagedCodexBackendWhenAvailable(t *testing.T) {
 	sm := NewSessionManager(make(chan protocol.DaemonEvent, 2))
+	allowCwdForTest(t, sm)
 	sm.createDeps.resolveAgentCLI = func(protocol.SessionConfig) (string, error) { return "/opt/codex", nil }
 	called := false
 	sm.createDeps.startCodexManaged = func(_ *SessionManager, _ context.Context, config protocol.SessionConfig, cliPath, cwd, model, worktreePath, worktreeBranch string) (string, bool, error) {
@@ -238,6 +239,7 @@ func TestCreateSessionSelectsManagedCodexBackendWhenAvailable(t *testing.T) {
 
 func TestCreateSessionDoesNotFallbackApprovalPromptToExecJSON(t *testing.T) {
 	sm := NewSessionManager(make(chan protocol.DaemonEvent, 1))
+	allowCwdForTest(t, sm)
 	sm.createDeps.resolveAgentCLI = func(protocol.SessionConfig) (string, error) { return "/opt/codex", nil }
 	sm.createDeps.startCodexManaged = func(*SessionManager, context.Context, protocol.SessionConfig, string, string, string, string, string) (string, bool, error) {
 		return "", false, nil

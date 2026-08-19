@@ -1,9 +1,12 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { isAppReviewEnabled, isAppReviewEmail, verifyAppReviewCode } from '../app-review-auth.js';
+import { explicitAppReviewCode, isAppReviewEmail, isAppReviewEnabled } from '../app-review-auth.js';
 
 describe('App Review email authentication', () => {
   beforeEach(() => { process.env.APP_REVIEW_ENABLED = 'true'; });
-  afterEach(() => { delete process.env.APP_REVIEW_ENABLED; });
+  afterEach(() => {
+    delete process.env.APP_REVIEW_ENABLED;
+    delete process.env.APP_REVIEW_CODE;
+  });
 
   it('is disabled by default and enabled only by an explicit true value', () => {
     delete process.env.APP_REVIEW_ENABLED;
@@ -20,15 +23,14 @@ describe('App Review email authentication', () => {
     expect(isAppReviewEmail('reviewer@pocketctl.me')).toBe(false);
   });
 
-  it('accepts the fixed code only for the review email', () => {
-    expect(verifyAppReviewCode('appreview@pocketctl.me', '123456')).toBe(true);
-    expect(verifyAppReviewCode('appreview@pocketctl.me', '654321')).toBe(false);
-    expect(verifyAppReviewCode('user@example.com', '123456')).toBe(false);
-  });
-
-  it('rejects the review email and fixed code when disabled', () => {
-    process.env.APP_REVIEW_ENABLED = 'false';
-    expect(isAppReviewEmail('appreview@pocketctl.me')).toBe(false);
-    expect(verifyAppReviewCode('appreview@pocketctl.me', '123456')).toBe(false);
+  it('has no source-code default code: unset or malformed APP_REVIEW_CODE yields null', () => {
+    delete process.env.APP_REVIEW_CODE;
+    expect(explicitAppReviewCode()).toBeNull();
+    process.env.APP_REVIEW_CODE = '12345';
+    expect(explicitAppReviewCode()).toBeNull();
+    process.env.APP_REVIEW_CODE = 'not-a-code';
+    expect(explicitAppReviewCode()).toBeNull();
+    process.env.APP_REVIEW_CODE = '654321';
+    expect(explicitAppReviewCode()).toBe('654321');
   });
 });

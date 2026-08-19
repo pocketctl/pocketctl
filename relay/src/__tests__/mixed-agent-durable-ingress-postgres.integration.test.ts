@@ -226,7 +226,8 @@ describeWithDatabase('mixed-Agent durable ingress PostgreSQL release gate', () =
       materializer: new EventMaterializer({
         pool,
         durableHooks: {
-          releaseQuotaReservation: async () => undefined,
+          claimQuotaReservationSession: async () => undefined,
+          settleQuotaReservation: async () => undefined,
           notifyUser: async () => undefined,
           notifyProUser: async () => undefined,
         },

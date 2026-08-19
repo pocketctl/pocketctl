@@ -35,8 +35,8 @@ function websocketDependencies(databaseReady: boolean, order: string[] = []) {
   const dependencies = {
     getDatabaseReady: () => databaseReady,
     maxMessageSize: 1_048_576,
-    apiKey: '',
-    trustProxy: false,
+    preAuthMaxMessages: 4,
+    preAuthMaxBytes: 2 * 1_048_576,
     random: () => 1,
     rateLimiter: {
       check: vi.fn(() => {

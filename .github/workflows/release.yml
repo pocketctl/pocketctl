@@ -65,6 +65,28 @@ jobs:
           npm test
           npm run build
 
+  deployment-security-gate:
+    needs: public-fact-contract
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: |
+            relay/package-lock.json
+            web/package-lock.json
+
+      - name: Install Relay and Web dependencies
+        run: |
+          npm ci --prefix relay
+          npm ci --prefix web
+
+      - name: Production deployment security gate
+        run: bash scripts/test-production-deployment-gate.sh --with-docker
+
   windows-launcher-tests:
     runs-on: windows-latest
     steps:
@@ -78,7 +100,7 @@ jobs:
         run: go test ./internal/platform ./internal/agentcontrol ./internal/codexapp ./internal/session ./cmd/pocketctl -count=1
 
   build:
-    needs: [managed-agent-gate, windows-launcher-tests]
+    needs: [managed-agent-gate, deployment-security-gate, windows-launcher-tests]
     strategy:
       matrix:
         include:

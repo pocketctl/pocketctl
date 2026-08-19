@@ -21,23 +21,26 @@ var (
 	defaultLocker = platform.NewInstanceLocker()
 )
 
-const defaultRuntimeDir = "/tmp/pocketctl"
-
 var (
 	stopGracePeriod           = 5 * time.Second
 	stopPollInterval          = 100 * time.Millisecond
 	stopOwnershipSettlePeriod = 500 * time.Millisecond
 )
 
-func PIDPath() string {
-	return filepath.Join(runtimeDir(), "daemon.pid")
+// RuntimeDir returns this user's private runtime directory, creating and
+// hardening it (0700, euid-owned, non-symlink) when necessary. Callers that
+// only need a best-effort path for reads may use PIDPath()/instanceLockPath()
+// which degrade to "" when the secure dir cannot be established.
+func RuntimeDir() (string, error) {
+	return secureRuntimeDir()
 }
 
-func runtimeDir() string {
-	if dir := os.Getenv("POCKETCTL_RUNTIME_DIR"); dir != "" {
-		return dir
+func PIDPath() string {
+	dir, err := secureRuntimeDir()
+	if err != nil {
+		return ""
 	}
-	return defaultRuntimeDir
+	return filepath.Join(dir, "daemon.pid")
 }
 
 // logPrefix is the filename prefix for dated daemon log files
@@ -48,12 +51,15 @@ const logPrefix = "daemon"
 func LogPrefix() string { return logPrefix }
 
 // LogDir returns the directory holding daemon log files, split by date:
-// ~/.pocketctl/logs. Falls back to /tmp/pocketctl/logs only if the home
-// directory can't be resolved.
+// ~/.pocketctl/logs. Falls back to the private runtime dir's logs/ only if
+// the home directory can't be resolved.
 func LogDir() string {
 	home, err := config.HomeDir()
 	if err != nil || home == "" {
-		return filepath.Join(runtimeDir(), "logs")
+		if dir, dirErr := secureRuntimeDir(); dirErr == nil {
+			return filepath.Join(dir, "logs")
+		}
+		return filepath.Join(os.TempDir(), fmt.Sprintf("pocketctl-%d-logs", os.Getuid()))
 	}
 	return filepath.Join(home, ".pocketctl", "logs")
 }
@@ -83,14 +89,22 @@ func WritePID(pid int) error {
 	if pid <= 0 {
 		return fmt.Errorf("invalid pid %d", pid)
 	}
-	if err := os.MkdirAll(runtimeDir(), 0755); err != nil {
+	dir, err := secureRuntimeDir()
+	if err != nil {
 		return err
 	}
-	return os.WriteFile(PIDPath(), []byte(strconv.Itoa(pid)), 0644)
+	return os.WriteFile(filepath.Join(dir, "daemon.pid"), []byte(strconv.Itoa(pid)), 0o600)
 }
 
 func ReadPID() (int, error) {
-	data, err := os.ReadFile(PIDPath())
+	return readPIDAt(PIDPath())
+}
+
+func readPIDAt(path string) (int, error) {
+	if path == "" {
+		return 0, fmt.Errorf("daemon not running (pid path unavailable)")
+	}
+	data, err := os.ReadFile(path)
 	if err != nil {
 		return 0, fmt.Errorf("daemon not running (no pid file): %w", err)
 	}
@@ -119,17 +133,120 @@ func RuntimeStatus() (int, bool, error) {
 	return pid, running, err
 }
 
+type runtimeIdentity struct {
+	PID          int
+	RuntimeToken string
+	Dir          string
+}
+
 func runtimeIdentityStatus() (int, string, bool, error) {
-	pid, err := ReadPID()
+	currentDir, legacyDir, err := runtimeDirectories()
+	if err != nil {
+		return 0, "", false, err
+	}
+	identity, running, err := runtimeIdentityAcross(currentDir, legacyDir)
+	return identity.PID, identity.RuntimeToken, running, err
+}
+
+func runtimeDirectories() (string, string, error) {
+	currentDir, err := secureRuntimeDir()
+	if err != nil {
+		return "", "", err
+	}
+	legacyDir, err := legacyRuntimeDirCandidate()
+	if err != nil {
+		return "", "", fmt.Errorf("%w: validate legacy runtime directory: %v", ErrRuntimeStatusUncertain, err)
+	}
+	if legacyDir == currentDir {
+		legacyDir = ""
+	}
+	return currentDir, legacyDir, nil
+}
+
+func runtimeIdentityAcross(currentDir, legacyDir string) (runtimeIdentity, bool, error) {
+	current, currentRunning, err := runtimeIdentityStatusAt(currentDir)
+	if err != nil {
+		return runtimeIdentity{}, false, err
+	}
+	if legacyDir == "" {
+		return current, currentRunning, nil
+	}
+	legacy, legacyRunning, err := runtimeIdentityStatusAt(legacyDir)
+	if err != nil {
+		return runtimeIdentity{}, false, err
+	}
+	if currentRunning && legacyRunning {
+		return runtimeIdentity{}, false, fmt.Errorf(
+			"%w: current and legacy daemon runtime locks are both held",
+			ErrRuntimeStatusUncertain,
+		)
+	}
+	if currentRunning {
+		return current, true, nil
+	}
+	return legacy, legacyRunning, nil
+}
+
+func runtimeIdentityStatusAt(dir string) (runtimeIdentity, bool, error) {
+	pidPath := filepath.Join(dir, "daemon.pid")
+	lockPath := filepath.Join(dir, "daemon.lock")
+	pid, err := readPIDAt(pidPath)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			running, statusErr := runtimeStatusWhenPIDMissing(instanceLockOwner)
-			return 0, "", running, statusErr
+			running, statusErr := runtimeStatusWhenPIDMissing(func() (instanceOwner, bool, error) {
+				return instanceLockOwnerAt(lockPath)
+			})
+			return runtimeIdentity{}, running, statusErr
 		}
-		return 0, "", false, fmt.Errorf("%w: %v", ErrRuntimeStatusUncertain, err)
+		return runtimeIdentity{}, false, fmt.Errorf("%w: %v", ErrRuntimeStatusUncertain, err)
 	}
-	token, running, err := verifyRuntimeIdentitySnapshot(pid)
-	return pid, token, running, err
+	token, running, err := verifyRuntimeIdentitySnapshotAt(dir, pid)
+	if errors.Is(err, ErrInstanceOwnerMismatch) {
+		owner, recoveryErr := verifiedRuntimeOwnerFromStateAt(dir)
+		if recoveryErr != nil {
+			return runtimeIdentity{PID: pid, Dir: dir}, false, recoveryErr
+		}
+		return runtimeIdentity{PID: owner.PID, RuntimeToken: owner.RuntimeToken, Dir: dir}, true, nil
+	}
+	return runtimeIdentity{PID: pid, RuntimeToken: token, Dir: dir}, running, err
+}
+
+// verifiedRuntimeOwnerFromState recovers from a stale pidfile only when the
+// live lock owner and the daemon state independently name the same per-run
+// identity. The lock snapshot verifies the owner's OS process-start identity,
+// so this cannot turn a reused PID into an authorized daemon.
+func verifiedRuntimeOwnerFromState() (instanceOwner, error) {
+	dir, err := secureRuntimeDir()
+	if err != nil {
+		return instanceOwner{}, err
+	}
+	return verifiedRuntimeOwnerFromStateAt(dir)
+}
+
+func verifiedRuntimeOwnerFromStateAt(dir string) (instanceOwner, error) {
+	lockPath := filepath.Join(dir, "daemon.lock")
+	owner, held, err := instanceLockOwnerAt(lockPath)
+	if err != nil {
+		return instanceOwner{}, err
+	}
+	if !held {
+		return instanceOwner{}, fmt.Errorf("%w: daemon instance lock was released during stale pidfile recovery", ErrRuntimeStatusUncertain)
+	}
+	state, err := ReadState()
+	if err != nil {
+		return instanceOwner{}, fmt.Errorf("%w: read daemon state for stale pidfile recovery: %v", ErrRuntimeStatusUncertain, err)
+	}
+	if state.PID != owner.PID || state.RuntimeInstanceToken != owner.RuntimeToken {
+		return instanceOwner{}, fmt.Errorf("%w: daemon state does not match the verified instance owner", ErrRuntimeStatusUncertain)
+	}
+	matched, err := instanceLockIdentityMatchesAt(lockPath, owner.PID, owner.RuntimeToken)
+	if err != nil {
+		return instanceOwner{}, err
+	}
+	if !matched {
+		return instanceOwner{}, fmt.Errorf("%w: daemon instance owner changed during stale pidfile recovery", ErrRuntimeStatusUncertain)
+	}
+	return owner, nil
 }
 
 func runtimeStatusWhenPIDMissing(
@@ -148,29 +265,45 @@ func runtimeStatusWhenPIDMissing(
 // VerifyRuntimePID re-reads the pidfile around the owner probe so callers can
 // validate a previously observed state snapshot without accepting a PID change.
 func VerifyRuntimePID(expectedPID int) (bool, error) {
-	_, running, err := verifyRuntimeIdentitySnapshot(expectedPID)
-	return running, err
+	pid, _, running, err := runtimeIdentityStatus()
+	if err != nil || !running {
+		return false, err
+	}
+	if pid != expectedPID {
+		return false, fmt.Errorf("%w: runtime owner pid %d, expected %d", ErrRuntimeStatusUncertain, pid, expectedPID)
+	}
+	return true, nil
 }
 
 func verifyRuntimeIdentitySnapshot(expectedPID int) (string, bool, error) {
+	dir, err := secureRuntimeDir()
+	if err != nil {
+		return "", false, err
+	}
+	return verifyRuntimeIdentitySnapshotAt(dir, expectedPID)
+}
+
+func verifyRuntimeIdentitySnapshotAt(dir string, expectedPID int) (string, bool, error) {
 	if expectedPID <= 0 {
 		return "", false, fmt.Errorf("%w: invalid expected pid %d", ErrRuntimeStatusUncertain, expectedPID)
 	}
-	before, err := ReadPID()
+	pidPath := filepath.Join(dir, "daemon.pid")
+	lockPath := filepath.Join(dir, "daemon.lock")
+	before, err := readPIDAt(pidPath)
 	if err != nil {
 		return "", false, fmt.Errorf("%w: re-read pidfile before owner probe: %v", ErrRuntimeStatusUncertain, err)
 	}
 	if before != expectedPID {
 		return "", false, fmt.Errorf("%w: pidfile changed from %d to %d", ErrRuntimeStatusUncertain, expectedPID, before)
 	}
-	owner, held, err := instanceLockOwner()
+	owner, held, err := instanceLockOwnerAt(lockPath)
 	if err != nil || !held {
 		return "", false, err
 	}
 	if owner.PID != expectedPID {
 		return "", false, instanceOwnerMismatchError(owner, expectedPID, "")
 	}
-	after, err := ReadPID()
+	after, err := readPIDAt(pidPath)
 	if err != nil {
 		return "", false, fmt.Errorf("%w: re-read pidfile after owner probe: %v", ErrRuntimeStatusUncertain, err)
 	}
@@ -186,23 +319,12 @@ func VerifyRuntimeIdentity(expectedPID int, expectedToken string) (bool, error) 
 	if expectedPID <= 0 || expectedToken == "" {
 		return false, fmt.Errorf("%w: incomplete expected runtime identity", ErrRuntimeStatusUncertain)
 	}
-	before, err := ReadPID()
-	if err != nil {
-		return false, fmt.Errorf("%w: re-read pidfile before identity probe: %v", ErrRuntimeStatusUncertain, err)
+	pid, token, running, err := runtimeIdentityStatus()
+	if err != nil || !running {
+		return false, err
 	}
-	if before != expectedPID {
-		return false, fmt.Errorf("%w: pidfile changed from %d to %d", ErrRuntimeStatusUncertain, expectedPID, before)
-	}
-	matched, err := InstanceLockIdentityMatches(expectedPID, expectedToken)
-	if err != nil || !matched {
-		return matched, err
-	}
-	after, err := ReadPID()
-	if err != nil {
-		return false, fmt.Errorf("%w: re-read pidfile after identity probe: %v", ErrRuntimeStatusUncertain, err)
-	}
-	if after != expectedPID {
-		return false, fmt.Errorf("%w: pidfile changed from %d to %d", ErrRuntimeStatusUncertain, expectedPID, after)
+	if pid != expectedPID || token != expectedToken {
+		return false, instanceOwnerMismatchError(instanceOwner{PID: pid, RuntimeToken: token}, expectedPID, expectedToken)
 	}
 	return true, nil
 }
@@ -251,7 +373,7 @@ func Stop() error {
 		}
 		break
 	}
-	_ = os.Remove(PIDPath())
+	removeRuntimePIDFiles()
 	if err := CleanupOpenCodeServeAfterForcedStop(); err != nil {
 		return fmt.Errorf("daemon stopped but opencode cleanup failed: %w", err)
 	}
@@ -293,6 +415,17 @@ func waitForReplacementIdentity(previousPID int, previousToken string) (int, str
 		time.Sleep(stopPollInterval)
 	}
 	return 0, "", false, nil
+}
+
+func removeRuntimePIDFiles() {
+	currentDir, legacyDir, err := runtimeDirectories()
+	if err != nil {
+		return
+	}
+	_ = os.Remove(filepath.Join(currentDir, "daemon.pid"))
+	if legacyDir != "" {
+		_ = os.Remove(filepath.Join(legacyDir, "daemon.pid"))
+	}
 }
 
 func stopDaemonProcessWithIdentity(

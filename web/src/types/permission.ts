@@ -13,9 +13,11 @@ export interface PermissionOption { value: string; titleKey: string; description
 const claudeModes: ClaudeMode[] = ['manual', 'auto', 'acceptEdits', 'dontAsk', 'plan', 'bypassPermissions']
 const codexPresets: CodexPreset[] = ['request_approval', 'agent_managed', 'full_access', 'custom']
 
+// H-7 unattended-safe defaults: Claude asks for approval; Codex runs
+// on-request approvals inside a workspace-write sandbox.
 export function defaultPermission(agent: AgentType): PermissionConfig | undefined {
-  if (agent === 'claude-code') return { agent, mode: 'acceptEdits' }
-  if (agent === 'codex') return { agent, preset: 'custom' }
+  if (agent === 'claude-code') return { agent, mode: 'manual' }
+  if (agent === 'codex') return expandCodexPreset('request_approval')
 }
 
 export function expandCodexPreset(preset: CodexPreset): CodexPermission {

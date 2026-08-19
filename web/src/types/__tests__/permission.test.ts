@@ -3,8 +3,8 @@ import { defaultPermission, expandCodexPreset, permissionOptions, permissionTitl
 
 describe('agent permissions', () => {
   test('uses identical product defaults', () => {
-    expect(defaultPermission('claude-code')).toEqual({ agent: 'claude-code', mode: 'acceptEdits' })
-    expect(defaultPermission('codex')).toEqual({ agent: 'codex', preset: 'custom' })
+    expect(defaultPermission('claude-code')).toEqual({ agent: 'claude-code', mode: 'manual' })
+    expect(defaultPermission('codex')).toEqual({ agent: 'codex', preset: 'request_approval', approval_policy: 'on-request', sandbox_mode: 'workspace-write' })
     expect(defaultPermission('opencode')).toBeUndefined()
   })
 

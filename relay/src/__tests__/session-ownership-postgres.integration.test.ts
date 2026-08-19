@@ -1,8 +1,9 @@
 import pg from 'pg'
 import { afterAll, beforeAll, beforeEach, describe, expect, test } from 'vitest'
-import { initDB } from '../db.js'
+import { deleteSession, initDB } from '../db.js'
 import { EventMaterializer } from '../materialization/event-materializer.js'
 import type { MaterializationInput } from '../materialization/types.js'
+import { reserveConcurrentSession } from '../quota.js'
 
 const databaseUrl = process.env.TEST_DATABASE_URL
 const integrationEnabled = Boolean(databaseUrl && process.env.RUN_POSTGRES_INTEGRATION === '1')
@@ -88,10 +89,33 @@ describeWithDatabase('daemon session ownership PostgreSQL integration', () => {
       context: {
         agentType: 'codex',
         cwd: '/attacker',
-        requestId: typeof payload.request_id === 'string' ? payload.request_id : undefined,
+        requestId: typeof payload.request_id === 'string'
+          ? payload.request_id
+          : eventType === 'session_created' ? 'ownership-probe' : undefined,
+        reservationId: eventType === 'session_created' ? 'ownership-probe-reservation' : undefined,
+        quotaOperation: eventType === 'session_created' ? 'create' : undefined,
         hostname: 'host-b',
       },
       ...overrides,
+    }
+  }
+
+  async function createGrantContext(
+    userId: number,
+    daemonId: string,
+    requestId: string,
+    agentType: string,
+    cwd: string,
+    hostname: string,
+  ): Promise<NonNullable<MaterializationInput['context']>> {
+    const decision = await reserveConcurrentSession(pool, {
+      userId, daemonId, requestId, operation: 'create', limit: null, agentType, cwd,
+    })
+    if (!decision.allowed || !decision.reservationId) throw new Error('expected create grant')
+    return {
+      agentType, cwd, hostname, requestId,
+      reservationId: decision.reservationId,
+      quotaOperation: 'create',
     }
   }
 
@@ -228,6 +252,23 @@ describeWithDatabase('daemon session ownership PostgreSQL integration', () => {
     expect(await victimSnapshot()).toEqual(before)
   })
 
+  test('tombstoned session ids reject durable and inline recreation without canonical writes', async () => {
+    await deleteSession(pool, VICTIM_SESSION)
+
+    for (const inboxId of [510, 0]) {
+      await expect(materializer.materialize(attackerInput('session_created', {
+        title: 'Recreated', model: 'gpt-5',
+      }, { inboxId }))).rejects.toMatchObject({
+        code: 'unknown_daemon_session', permanent: true,
+      })
+    }
+
+    const session = await pool.query('SELECT 1 FROM sessions WHERE session_id = $1', [VICTIM_SESSION])
+    const events = await pool.query('SELECT 1 FROM events WHERE session_id = $1', [VICTIM_SESSION])
+    expect(session.rowCount ?? 0).toBe(0)
+    expect(events.rowCount ?? 0).toBe(0)
+  })
+
   test('attacker title events cannot change victim titles', async () => {
     await pool.query(
       `UPDATE sessions SET title = 'Terminal Session-1' WHERE session_id = $1`,
@@ -248,6 +289,9 @@ describeWithDatabase('daemon session ownership PostgreSQL integration', () => {
   })
 
   test('legitimate owner creation, rebind, claim, and rename still work', async () => {
+    const freshContext = await createGrantContext(
+      tenant.userA, DAEMON_A, 'req-fresh', 'codex', '/new', 'host-a',
+    )
     const result = await materializer.materialize({
       inboxId: 511,
       userId: tenant.userA,
@@ -255,7 +299,7 @@ describeWithDatabase('daemon session ownership PostgreSQL integration', () => {
       sessionId: 'own-fresh-session',
       eventType: 'session_created',
       payload: { type: 'session_created', session_id: 'own-fresh-session', title: 'Fresh' },
-      context: { agentType: 'codex', cwd: '/new', requestId: 'req-fresh', hostname: 'host-a' },
+      context: freshContext,
     })
     expect(result.eventId).not.toBeNull()
     const fresh = await pool.query(
@@ -389,6 +433,10 @@ describeWithDatabase('daemon session ownership PostgreSQL integration', () => {
   })
 
   test('concurrent creation of one session id yields exactly one owner', async () => {
+    const [contextA, contextB] = await Promise.all([
+      createGrantContext(tenant.userA, DAEMON_A, 'req-race-a', 'codex', '/a', 'host-a'),
+      createGrantContext(tenant.userB, DAEMON_B, 'req-race-b', 'codex', '/b', 'host-b'),
+    ])
     const attempts = await Promise.allSettled([
       materializer.materialize({
         inboxId: 520,
@@ -397,7 +445,7 @@ describeWithDatabase('daemon session ownership PostgreSQL integration', () => {
         sessionId: 'own-race-session',
         eventType: 'session_created',
         payload: { type: 'session_created', session_id: 'own-race-session', title: 'A' },
-        context: { agentType: 'codex', cwd: '/a', requestId: 'req-race-a', hostname: 'host-a' },
+        context: contextA,
       }),
       materializer.materialize({
         inboxId: 521,
@@ -406,7 +454,7 @@ describeWithDatabase('daemon session ownership PostgreSQL integration', () => {
         sessionId: 'own-race-session',
         eventType: 'session_created',
         payload: { type: 'session_created', session_id: 'own-race-session', title: 'B' },
-        context: { agentType: 'codex', cwd: '/b', requestId: 'req-race-b', hostname: 'host-b' },
+        context: contextB,
       }),
     ])
 

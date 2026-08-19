@@ -4,10 +4,15 @@ import (
 	"bytes"
 	"context"
 	"os"
+	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
 	"github.com/pocketctl/pocketctl/internal/agentcontrol"
+	"github.com/pocketctl/pocketctl/internal/config"
+	"github.com/pocketctl/pocketctl/internal/platform"
+	"github.com/pocketctl/pocketctl/internal/session"
 )
 
 func TestAgentHelpListsOpenCodeLifecycleCommands(t *testing.T) {
@@ -91,15 +96,125 @@ func TestValidateTrustedActionPolicyFlagRejectsUnknownMode(t *testing.T) {
 	}
 }
 
+func TestEffectiveTrustedActionPolicyUsesExplicitThenEnvironmentThenOff(t *testing.T) {
+	t.Setenv("POCKETCTL_TRUSTED_ACTION_POLICY_V1", " ON ")
+	if got := effectiveTrustedActionPolicy("observe"); got != "observe" {
+		t.Fatalf("explicit effective policy=%q want observe", got)
+	}
+	if got := effectiveTrustedActionPolicy(""); got != "on" {
+		t.Fatalf("environment effective policy=%q want on", got)
+	}
+	t.Setenv("POCKETCTL_TRUSTED_ACTION_POLICY_V1", "invalid")
+	if got := effectiveTrustedActionPolicy(""); got != "off" {
+		t.Fatalf("invalid inherited policy=%q want fail-closed off", got)
+	}
+}
+
 func TestDaemonServiceOptionsPreservesPath(t *testing.T) {
 	pathEnv := "/opt/homebrew/bin:/usr/bin:/bin"
-	got := daemonServiceOptions("/usr/local/bin/pocketctl", "/tmp/pocketctl.log", false, "", "", pathEnv)
+	daemonArgs := serviceDaemonArgs(false, "", "")
+	got := daemonServiceOptions("/usr/local/bin/pocketctl", "/tmp/pocketctl.log", daemonArgs, pathEnv)
 	if got.PathEnv != pathEnv {
 		t.Fatalf("PATH=%q want %q", got.PathEnv, pathEnv)
 	}
 	if !strings.Contains(strings.Join(got.Args, " "), "--no-agent-auto-enable") {
 		t.Fatalf("args=%v missing --no-agent-auto-enable", got.Args)
 	}
+}
+
+func TestServiceInstallPassesCanonicalSecurityPolicyToSupervisor(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	if err := config.SaveAuth("wss://relay.example/ws", "test-access-token", "test-refresh-token"); err != nil {
+		t.Fatalf("SaveAuth: %v", err)
+	}
+
+	root := filepath.Join(home, "allowed root")
+	if err := os.MkdirAll(root, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	canonicalRoot, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	capture := &capturingServiceManager{}
+	previous := serviceMgr
+	serviceMgr = capture
+	t.Cleanup(func() { serviceMgr = previous })
+
+	cmdServiceInstall([]string{
+		"--relay", "wss://relay.example/ws",
+		"--no-agent-auto-enable",
+		"--allowed-cwd-root", root,
+		"--allow-dangerous-remote-permissions",
+	})
+
+	want := []string{
+		"daemon", "start", "--foreground", "--no-agent-auto-enable",
+		"--relay", "wss://relay.example/ws",
+		"--allowed-cwd-root", canonicalRoot,
+		"--allow-dangerous-remote-permissions",
+	}
+	if !reflect.DeepEqual(capture.installed.Args, want) {
+		t.Fatalf("installed service argv=%q want %q", capture.installed.Args, want)
+	}
+}
+
+func TestPersistDaemonSecurityPolicyStoresEffectiveCanonicalPolicy(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	root := filepath.Join(home, "workspace")
+	if err := os.MkdirAll(root, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	alias := filepath.Join(home, "workspace-link")
+	if err := os.Symlink(root, alias); err != nil {
+		t.Fatal(err)
+	}
+	canonicalRoot, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	policy, err := session.NewCwdPolicy([]string{alias})
+	if err != nil {
+		t.Fatalf("NewCwdPolicy: %v", err)
+	}
+	if err := persistDaemonSecurityPolicy(policy, true, "on"); err != nil {
+		t.Fatalf("persistDaemonSecurityPolicy: %v", err)
+	}
+	wantRoots := []string{canonicalRoot}
+	if !reflect.DeepEqual(policy.Roots(), wantRoots) {
+		t.Fatalf("effective roots=%q want %q", policy.Roots(), wantRoots)
+	}
+	persisted, err := config.LoadDaemonSecurityPolicy()
+	if err != nil {
+		t.Fatalf("LoadDaemonSecurityPolicy: %v", err)
+	}
+	want := config.DaemonSecurityPolicy{
+		AllowedCwdRoots:                 wantRoots,
+		AllowDangerousRemotePermissions: true,
+		TrustedActionPolicy:             "on",
+	}
+	if !reflect.DeepEqual(persisted, want) {
+		t.Fatalf("persisted policy=%+v want %+v", persisted, want)
+	}
+}
+
+type capturingServiceManager struct {
+	installed platform.ServiceOpts
+}
+
+func (m *capturingServiceManager) Install(opts platform.ServiceOpts) error {
+	m.installed = opts
+	return nil
+}
+
+func (m *capturingServiceManager) Uninstall() error { return nil }
+
+func (m *capturingServiceManager) Status() (platform.ServiceStatus, error) {
+	return platform.ServiceStatus{Installed: true, UnitPath: "/tmp/pocketctl.service"}, nil
 }
 
 func TestDaemonAgentAutoEnableContextOnlyUserParentCanMutate(t *testing.T) {

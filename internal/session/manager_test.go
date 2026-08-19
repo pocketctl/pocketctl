@@ -244,13 +244,16 @@ func TestCreateSessionPermissionDefaults(t *testing.T) {
 		{
 			name:            "claude receives its default",
 			agent:           adapter.AgentClaude,
-			wantPermission:  &protocol.PermissionConfig{Agent: adapter.AgentClaude, Mode: "acceptEdits"},
+			wantPermission:  &protocol.PermissionConfig{Agent: adapter.AgentClaude, Mode: "manual"},
 			wantStartupStop: true,
 		},
 		{
 			name:            "codex receives its default",
 			agent:           adapter.AgentCodex,
-			wantPermission:  &protocol.PermissionConfig{Agent: adapter.AgentCodex, Preset: "custom"},
+			wantPermission: &protocol.PermissionConfig{
+				Agent: adapter.AgentCodex, Preset: "request_approval",
+				ApprovalPolicy: "on-request", SandboxMode: "workspace-write",
+			},
 			wantStartupStop: true,
 		},
 		{
@@ -268,6 +271,7 @@ func TestCreateSessionPermissionDefaults(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			sm := NewSessionManager(make(chan protocol.DaemonEvent, 1))
+			allowCwdForTest(t, sm)
 			var capturedConfig *protocol.SessionConfig
 			sm.createDeps.resolveAgentCLI = func(config protocol.SessionConfig) (string, error) {
 				captured := config
@@ -1061,5 +1065,54 @@ func TestCreateSessionZcodeObserverRejected(t *testing.T) {
 	// No session registered.
 	if sm.CwdSessionCount(tmp) != 0 {
 		t.Fatalf("CwdSessionCount = %d, want 0 (no session should be registered)", sm.CwdSessionCount(tmp))
+	}
+}
+
+// --- H-7: remote creation without allowed roots fails closed ---
+
+func TestCreateSessionFailsClosedWithoutCwdRoots(t *testing.T) {
+	sm := NewSessionManager(make(chan protocol.DaemonEvent, 1))
+	// No SetCwdPolicy: the default policy authorizes nothing.
+	var resolved bool
+	sm.createDeps.resolveAgentCLI = func(protocol.SessionConfig) (string, error) {
+		resolved = true
+		return "/opt/claude", nil
+	}
+	cwd := t.TempDir()
+	_, err := sm.CreateSession(context.Background(), protocol.SessionConfig{
+		Agent: adapter.AgentClaude, Cwd: cwd,
+	})
+	if err == nil || !errors.Is(err, ErrCwdNotAuthorized) {
+		t.Fatalf("error=%v, want cwd_not_authorized", err)
+	}
+	if resolved {
+		t.Fatal("CLI resolution ran before the cwd gate")
+	}
+	// No side effects: nothing created under the cwd, no process spawned.
+	if _, statErr := os.Stat(filepath.Join(cwd, ".claude")); !os.IsNotExist(statErr) {
+		t.Fatal("hook directory created despite failed authorization")
+	}
+}
+
+func TestCreateSessionRejectsDangerousPermissionWithoutLocalSwitch(t *testing.T) {
+	sm := NewSessionManager(make(chan protocol.DaemonEvent, 1))
+	allowCwdForTest(t, sm)
+	_, err := sm.CreateSession(context.Background(), protocol.SessionConfig{
+		Agent: adapter.AgentClaude, Cwd: t.TempDir(),
+		Permission: &protocol.PermissionConfig{Agent: adapter.AgentClaude, Mode: "bypassPermissions"},
+	})
+	if err == nil || !strings.Contains(err.Error(), "--allow-dangerous-remote-permissions") {
+		t.Fatalf("error=%v, want dangerous-mode rejection naming the local switch", err)
+	}
+
+	sm.SetRemotePermissionPolicy(adapter.RemotePermissionPolicy{AllowDangerous: true})
+	sm.createDeps.resolveAgentCLI = func(protocol.SessionConfig) (string, error) {
+		return "", errors.New("stop before pty")
+	}
+	if _, err := sm.CreateSession(context.Background(), protocol.SessionConfig{
+		Agent: adapter.AgentClaude, Cwd: t.TempDir(),
+		Permission: &protocol.PermissionConfig{Agent: adapter.AgentClaude, Mode: "bypassPermissions"},
+	}); err == nil || !strings.Contains(err.Error(), "stop before pty") {
+		t.Fatalf("with the local switch the dangerous mode must proceed, got %v", err)
 	}
 }

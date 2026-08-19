@@ -21,15 +21,46 @@ const HookMarker = "pocketctl-managed-approval"
 // Claude's hook payload from stdin and blocks on the approval socket. The
 // injected entry is tagged with HookMarker so RemoveHooks can strip only ours.
 //
-// This is idempotent: repeated calls do not duplicate the entry. Existing user
-// settings/hooks are preserved.
+// H-7 safety: `.claude` must be a real directory inside cwd (never a symlink)
+// and an existing settings file must be a plain regular file. The merged
+// content is written to a private temp file in the same directory and renamed
+// atomically, so a partial write can never corrupt user settings and no write
+// ever follows a symlink. This is idempotent; existing user settings/hooks are
+// preserved.
 func EnsureHooks(cwd, pocketctlPath string) error {
 	settingsDir := filepath.Join(cwd, ".claude")
-	if err := os.MkdirAll(settingsDir, 0755); err != nil {
-		return fmt.Errorf("create .claude dir: %w", err)
+	if info, err := os.Lstat(settingsDir); err == nil {
+		if info.Mode()&os.ModeSymlink != 0 {
+			return fmt.Errorf(".claude is a symlink; refusing to write hooks through it")
+		}
+		if !info.IsDir() {
+			return fmt.Errorf(".claude is not a directory")
+		}
+	} else if os.IsNotExist(err) {
+		if err := os.Mkdir(settingsDir, 0o755); err != nil {
+			return fmt.Errorf("create .claude dir: %w", err)
+		}
+	} else {
+		return fmt.Errorf("inspect .claude dir: %w", err)
 	}
 	settingsPath := filepath.Join(settingsDir, "settings.local.json")
-	return mergeHookEntry(settingsPath, pocketctlPath)
+	if info, err := os.Lstat(settingsPath); err == nil {
+		if info.Mode()&os.ModeSymlink != 0 {
+			return fmt.Errorf("settings.local.json is a symlink; refusing to overwrite its target")
+		}
+		if !info.Mode().IsRegular() {
+			return fmt.Errorf("settings.local.json is not a regular file")
+		}
+	}
+	if err := mergeHookEntry(settingsPath, pocketctlPath); err != nil {
+		return err
+	}
+	// The settings file carries a hook command and lives in the user's tree;
+	// keep it private to the owner.
+	if info, err := os.Lstat(settingsPath); err == nil && info.Mode().IsRegular() {
+		_ = os.Chmod(settingsPath, 0o600)
+	}
+	return nil
 }
 
 // EnsureUserHook is retained only for backwards-compatible tooling/tests. New
@@ -180,11 +211,22 @@ func isPocketctlManagedHook(entry any) bool {
 
 // RemoveHooks strips the daemon-injected PreToolUse entry from <cwd>/.claude/
 // settings.local.json, leaving any user-authored hooks intact. If the file
-// would end up empty of hooks, the hooks key is removed for tidiness.
+// would end up empty of hooks, the hooks key is removed for tidiness. A
+// symlinked settings file is refused — cleanup must not touch its target.
 func RemoveHooks(cwd string) error {
 	settingsPath := filepath.Join(cwd, ".claude", "settings.local.json")
-	if _, err := os.Stat(settingsPath); err != nil {
-		return nil // nothing to clean
+	info, err := os.Lstat(settingsPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil // nothing to clean
+		}
+		return err
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("settings.local.json is a symlink; refusing to modify its target")
+	}
+	if !info.Mode().IsRegular() {
+		return fmt.Errorf("settings.local.json is not a regular file")
 	}
 	return stripHookEntry(settingsPath)
 }
@@ -226,10 +268,43 @@ func loadSettingsStrict(path string) (map[string]any, error) {
 	return settings, nil
 }
 
+// saveSettings writes settings through a same-directory private temp file and
+// an atomic rename (H-7): readers observe either the old or the new file, and
+// a symlinked destination can never be followed because rename replaces the
+// link itself — callers additionally reject symlinks before getting here.
 func saveSettings(path string, settings map[string]any) error {
 	data, err := json.MarshalIndent(settings, "", "  ")
 	if err != nil {
 		return fmt.Errorf("marshal settings: %w", err)
 	}
-	return os.WriteFile(path, data, 0644)
+	dir := filepath.Dir(path)
+	tmp, err := os.CreateTemp(dir, ".settings-*")
+	if err != nil {
+		return fmt.Errorf("create temp settings: %w", err)
+	}
+	tmpPath := tmp.Name()
+	defer func() {
+		if err != nil {
+			_ = os.Remove(tmpPath)
+		}
+	}()
+	if err = tmp.Chmod(0o600); err != nil {
+		_ = tmp.Close()
+		return fmt.Errorf("chmod temp settings: %w", err)
+	}
+	if _, err = tmp.Write(data); err != nil {
+		_ = tmp.Close()
+		return fmt.Errorf("write temp settings: %w", err)
+	}
+	if err = tmp.Sync(); err != nil {
+		_ = tmp.Close()
+		return fmt.Errorf("sync temp settings: %w", err)
+	}
+	if err = tmp.Close(); err != nil {
+		return fmt.Errorf("close temp settings: %w", err)
+	}
+	if err = os.Rename(tmpPath, path); err != nil {
+		return fmt.Errorf("replace settings atomically: %w", err)
+	}
+	return nil
 }

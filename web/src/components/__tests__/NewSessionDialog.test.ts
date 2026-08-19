@@ -68,14 +68,14 @@ describe('NewSessionDialog permission serialization', () => {
     await agentButtons[0].trigger('click')
     const restoredClaudePermission = wrapper.find('select.input-field')
     expect(restoredClaudePermission.element).toBeInstanceOf(HTMLSelectElement)
-    expect((restoredClaudePermission.element as HTMLSelectElement).value).toBe('acceptEdits')
+    expect((restoredClaudePermission.element as HTMLSelectElement).value).toBe('manual')
 
     await wrapper.find('button.btn-start').trigger('click')
     const claudeCreateMessage = ws.send.mock.calls.map(([message]) => message)
       .find(message => message.type === 'session_create' && message.agent === 'claude-code')
     expect(JSON.parse(JSON.stringify(claudeCreateMessage))).toMatchObject({
       agent: 'claude-code',
-      permission: { agent: 'claude-code', mode: 'acceptEdits' },
+      permission: { agent: 'claude-code', mode: 'manual' },
     })
 
     ws.handlers.get('session_create_failed')?.({ request_id: 'request-1', reason: 'start_fail' })

@@ -5,8 +5,11 @@ vi.mock('../quota.js', async (importOriginal) => {
   return {
     ...actual,
     claimBoundDaemonSlot: vi.fn(async () => ({ allowed: true, reconnect: false, used: 1, limit: 2 })),
+    claimQuotaReservationSession: vi.fn(async () => ({ matched: true, changed: true })),
     reserveConcurrentSession: vi.fn(),
     releaseQuotaReservation: vi.fn(async () => undefined),
+    settleQuotaReservation: vi.fn(async () => ({ matched: true, changed: true })),
+    markQuotaReservationUncertain: vi.fn(async () => ({ matched: true, changed: true })),
     getQuotaSnapshot: vi.fn(async () => ({
       resources: {
         bound_hosts: { used: 1, limit: 2, over_limit: false },
@@ -17,7 +20,14 @@ vi.mock('../quota.js', async (importOriginal) => {
 })
 
 import { Router } from '../router.js'
-import { getQuotaSnapshot, releaseQuotaReservation, reserveConcurrentSession } from '../quota.js'
+import {
+  claimQuotaReservationSession,
+  getQuotaSnapshot,
+  markQuotaReservationUncertain,
+  releaseQuotaReservation,
+  reserveConcurrentSession,
+  settleQuotaReservation,
+} from '../quota.js'
 
 process.env.QUOTA_ENFORCEMENT = 'enforce'
 
@@ -34,6 +44,12 @@ function ws(): any {
 function pool(): any {
   const value: any = {
     query: vi.fn(async (sql: string) => {
+      if (sql.includes('INSERT INTO events')) {
+        return { rows: [{ id: 31, inserted: true, effect_status: 'pending', effect_step: 0 }], rowCount: 1 }
+      }
+      if (sql.includes('SELECT effect_status')) {
+        return { rows: [{ effect_status: 'pending', effect_step: 0 }], rowCount: 1 }
+      }
       if (sql.includes('RETURNING daemon_id')) return { rows: [{ daemon_id: 'd1' }], rowCount: 1 }
       if (sql.includes('SELECT plan, whitelist')) return { rows: [{ plan: 'free', whitelist: false }] }
       if (sql.includes('SELECT alias FROM daemons')) return { rows: [] }
@@ -132,7 +148,10 @@ describe('Router active-session quota', () => {
     router.handleDaemonMessage('d1', {
       type: 'session_create_failed', request_id: 'request-1', reservation_id: 'reservation-1', reason: 'start_fail', error: 'boom',
     })
-    await vi.waitFor(() => expect(releaseQuotaReservation).toHaveBeenCalledWith(expect.anything(), 'reservation-1'))
+    await vi.waitFor(() => expect(settleQuotaReservation).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({
+      reservationId: 'reservation-1', userId: 7, daemonId: 'd1', requestId: 'request-1',
+      operation: 'create', sessionId: null,
+    }), 'session_create_failed'))
     expect(client._sent).toContainEqual(expect.objectContaining({ type: 'session_create_failed', request_id: 'request-1', error: 'boom' }))
   })
 
@@ -144,7 +163,9 @@ describe('Router active-session quota', () => {
       reused: false,
     })
     let release!: () => void
-    vi.mocked(releaseQuotaReservation).mockImplementationOnce(() => new Promise<void>(resolve => { release = resolve }))
+    vi.mocked(settleQuotaReservation).mockImplementationOnce(() => new Promise(resolve => {
+      release = () => resolve({ matched: true, changed: true })
+    }))
     const value = pool()
     value.query = vi.fn(async (sql: string) => {
       if (sql.includes('SELECT plan, whitelist')) return { rows: [{ plan: 'free', whitelist: false }] }
@@ -169,7 +190,10 @@ describe('Router active-session quota', () => {
     router.handleDaemonMessage('d1', {
       type: 'session_created', session_id: 'sess-1', event_id: 'created-ordered', request_id: 'request-ordered', seq: 1,
     })
-    await vi.waitFor(() => expect(releaseQuotaReservation).toHaveBeenCalledWith(expect.anything(), 'reservation-ordered'))
+    await vi.waitFor(() => expect(settleQuotaReservation).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({
+      reservationId: 'reservation-ordered', userId: 7, daemonId: 'd1', requestId: 'request-ordered',
+      operation: 'create', sessionId: 'sess-1',
+    }), 'session_created'))
     expect(getQuotaSnapshot).not.toHaveBeenCalled()
     release()
     await vi.waitFor(() => expect(getQuotaSnapshot).toHaveBeenCalled())
@@ -197,7 +221,41 @@ describe('Router active-session quota', () => {
 
     expect(reserveConcurrentSession).toHaveBeenCalledTimes(1)
     expect(daemon._sent.filter((event: any) => event.type === 'session_create')).toHaveLength(1)
-    expect(releaseQuotaReservation).not.toHaveBeenCalled()
+    expect(settleQuotaReservation).not.toHaveBeenCalled()
+  })
+
+  test('a durable reused create attaches to the outcome without redispatching the grant', async () => {
+    vi.mocked(reserveConcurrentSession).mockResolvedValue({
+      allowed: true,
+      reservationId: 'reservation-reused',
+      expiresAt: Date.now() + 60_000,
+      reused: true,
+    })
+    const router = new Router(pool())
+    const daemon = ws()
+    const client = ws()
+    await router.registerDaemon(daemon, {
+      type: 'register', daemon_id: 'd1', hostname: 'host', agents: [],
+      supports_quota_grant: true, started_at: 100,
+    }, 7)
+    router.registerClient(client, 7)
+    daemon._sent.length = 0
+
+    await router.handleClientMessage(client, {
+      type: 'session_create', daemon_id: 'd1', request_id: 'request-reused',
+      agent: 'codex', cwd: '/repo',
+    })
+
+    expect(daemon._sent.some((event: any) => event.type === 'session_create')).toBe(false)
+    expect(client._sent).toContainEqual({
+      type: 'session_create_pending', request_id: 'request-reused',
+      reason: 'request_in_progress', retryable: true,
+    })
+    expect((router as any).materializationContext('d1', {
+      type: 'session_created', request_id: 'request-reused', session_id: 'reused-session',
+    })).toMatchObject({
+      requestId: 'request-reused', reservationId: 'reservation-reused', quotaOperation: 'create',
+    })
   })
 
   test('applies the same quota when a message revives an exited session', async () => {
@@ -252,5 +310,327 @@ describe('Router active-session quota', () => {
         operation: 'resume',
       }),
     }))
+  })
+})
+
+
+describe('Router unresolved quota grants fail closed (M-4)', () => {
+  beforeEach(() => vi.clearAllMocks())
+
+  async function setupPendingCreate(expiresAt: number) {
+    vi.mocked(reserveConcurrentSession).mockResolvedValue({
+      allowed: true,
+      reservationId: 'reservation-m4',
+      expiresAt,
+      reused: false,
+    })
+    const router = new Router(pool())
+    const daemon = ws()
+    const client = ws()
+    await router.registerDaemon(daemon, { type: 'register', daemon_id: 'd1', hostname: 'host', agents: [], supports_quota_grant: true }, 7)
+    router.registerClient(client, 7)
+    daemon._sent.length = 0
+    await router.handleClientMessage(client, {
+      type: 'session_create', daemon_id: 'd1', request_id: 'request-m4', agent: 'codex', cwd: '/repo',
+    })
+    return { router, daemon, client }
+  }
+
+  test('a silent daemon grant timeout marks the reservation uncertain instead of releasing it', async () => {
+    const { client } = await setupPendingCreate(Date.now() + 40)
+    await new Promise((r) => setTimeout(r, 80))
+    await vi.waitFor(() => expect(markQuotaReservationUncertain).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({
+      reservationId: 'reservation-m4', userId: 7, daemonId: 'd1', requestId: 'request-m4',
+      operation: 'create', sessionId: null,
+    }), 'grant_timeout'))
+    expect(settleQuotaReservation).not.toHaveBeenCalled()
+    expect(client._sent).toContainEqual(expect.objectContaining({
+      type: 'session_create_failed',
+      request_id: 'request-m4',
+      reason: 'timeout',
+    }))
+  })
+
+  test('a daemon disconnect mid-create marks the reservation uncertain, not settled', async () => {
+    const { router, client } = await setupPendingCreate(Date.now() + 60_000)
+    router.unregisterDaemon('d1')
+    await vi.waitFor(() => expect(markQuotaReservationUncertain).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({
+      reservationId: 'reservation-m4', userId: 7, daemonId: 'd1', requestId: 'request-m4',
+      operation: 'create', sessionId: null,
+    }), 'daemon_offline'))
+    expect(settleQuotaReservation).not.toHaveBeenCalled()
+    expect(settleQuotaReservation).not.toHaveBeenCalled()
+    expect(client._sent).toContainEqual(expect.objectContaining({
+      type: 'session_create_failed',
+      reason: 'daemon_offline',
+    }))
+  })
+
+  test('an explicit daemon failure settles the reservation with a reason', async () => {
+    const { router, client } = await setupPendingCreate(Date.now() + 60_000)
+    router.handleDaemonMessage('d1', {
+      type: 'session_create_failed', request_id: 'request-m4', reason: 'start_fail', error: 'boom',
+    })
+    await vi.waitFor(() => expect(settleQuotaReservation).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({
+      reservationId: 'reservation-m4', userId: 7, daemonId: 'd1', requestId: 'request-m4',
+      operation: 'create', sessionId: null,
+    }), 'session_create_failed'))
+    expect(markQuotaReservationUncertain).not.toHaveBeenCalled()
+    expect(releaseQuotaReservation).not.toHaveBeenCalled()
+    await vi.waitFor(() => expect(client._sent).toContainEqual(expect.objectContaining({
+      type: 'session_create_failed', request_id: 'request-m4',
+    })))
+  })
+
+  test('a mismatched request cannot borrow another create reservation on the same daemon', async () => {
+    const { router } = await setupPendingCreate(Date.now() + 60_000)
+
+    const context = (router as any).materializationContext('d1', {
+      type: 'session_status',
+      session_id: 'already-running-session',
+      status: 'running',
+      request_id: 'attacker-request',
+      reservation_id: 'reservation-m4',
+    })
+
+    expect(context).toMatchObject({
+      requestId: 'attacker-request',
+      reservationId: null,
+    })
+  })
+
+  test('a daemon-reported reservation id is never accepted without a server-side pending request', async () => {
+    const router = new Router(pool())
+
+    const context = (router as any).materializationContext('d1', {
+      type: 'session_created',
+      session_id: 'forged-session',
+      request_id: 'forged-request',
+      reservation_id: 'forged-reservation',
+    })
+
+    expect(context).toMatchObject({
+      requestId: 'forged-request',
+      reservationId: null,
+    })
+  })
+
+  test('materialized session_created settles the reservation as session_created', async () => {
+    vi.mocked(reserveConcurrentSession).mockResolvedValue({
+      allowed: true,
+      reservationId: 'reservation-ok',
+      expiresAt: Date.now() + 60_000,
+      reused: false,
+    })
+    const value = pool()
+    value.query = vi.fn(async (sql: string) => {
+      if (sql.includes('SELECT plan, whitelist')) return { rows: [{ plan: 'free', whitelist: false }] }
+      if (sql.includes('INSERT INTO events')) {
+        return { rows: [{ id: 21, inserted: true, effect_status: 'pending', effect_step: 0 }] }
+      }
+      return { rows: [], rowCount: 1 }
+    })
+    const router = new Router(value)
+    const daemon = ws()
+    const client = ws()
+    await router.registerDaemon(daemon, { type: 'register', daemon_id: 'd1', hostname: 'host', agents: [], supports_quota_grant: true, started_at: 100 }, 7)
+    await vi.waitFor(() => expect(getQuotaSnapshot).toHaveBeenCalled())
+    vi.mocked(getQuotaSnapshot).mockClear()
+    router.registerClient(client, 7)
+    await router.handleClientMessage(client, {
+      type: 'session_create', daemon_id: 'd1', request_id: 'request-ok', agent: 'codex', cwd: '/repo',
+    })
+    router.handleDaemonMessage('d1', {
+      type: 'session_created', session_id: 'sess-m4', event_id: 'created-m4', request_id: 'request-ok', seq: 1,
+    })
+    await vi.waitFor(() => expect(settleQuotaReservation).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({
+      reservationId: 'reservation-ok', userId: 7, daemonId: 'd1', requestId: 'request-ok',
+      operation: 'create', sessionId: 'sess-m4',
+    }), 'session_created'))
+    expect(markQuotaReservationUncertain).not.toHaveBeenCalled()
+  })
+
+  test('a contradictory legacy quota outcome is ACKed and the daemon is permanently rejected', async () => {
+    vi.mocked(reserveConcurrentSession).mockResolvedValue({
+      allowed: true,
+      reservationId: 'reservation-conflict',
+      expiresAt: Date.now() + 60_000,
+      reused: false,
+    })
+    vi.mocked(claimQuotaReservationSession).mockResolvedValueOnce({ matched: false, changed: false })
+    const router = new Router(pool())
+    const daemon = ws()
+    const client = ws()
+    await router.registerDaemon(daemon, {
+      type: 'register', daemon_id: 'd1', hostname: 'host', agents: [],
+      supports_quota_grant: true, started_at: 100,
+    }, 7)
+    router.registerClient(client, 7)
+    daemon._sent.length = 0
+    await router.handleClientMessage(client, {
+      type: 'session_create', daemon_id: 'd1', request_id: 'request-conflict',
+      agent: 'codex', cwd: '/repo',
+    })
+
+    router.handleDaemonMessage('d1', {
+      type: 'session_created', session_id: 'conflicting-session',
+      event_id: 'conflicting-event', request_id: 'request-conflict', seq: 1,
+    })
+
+    await vi.waitFor(() => expect(daemon.close).toHaveBeenCalledWith(
+      1008, 'quota_reservation_binding_mismatch',
+    ))
+    expect(daemon._sent).toContainEqual({ type: 'event_ack', up_to_seq: 1 })
+    expect(daemon._sent).toContainEqual({
+      type: 'kicked', reason: 'quota_reservation_binding_mismatch', retryable: false,
+    })
+    expect(settleQuotaReservation).not.toHaveBeenCalled()
+  })
+
+  test('an effect-stage ownership race is ACKed and permanently rejected', async () => {
+    vi.mocked(reserveConcurrentSession).mockResolvedValue({
+      allowed: true,
+      reservationId: 'reservation-ownership-race',
+      expiresAt: Date.now() + 60_000,
+      reused: false,
+    })
+    const value = pool()
+    const baseQuery = value.query
+    value.query = vi.fn(async (sql: string, params?: unknown[]) => {
+      if (sql.includes('INSERT INTO sessions') && sql.includes('RETURNING session_id')) {
+        // Authorization observed the id as free, but another tenant claimed it
+        // before this deferred upsert reached the ownership-guarded conflict.
+        return { rows: [], rowCount: 0 }
+      }
+      return baseQuery(sql, params)
+    })
+    const router = new Router(value)
+    const daemon = ws()
+    const client = ws()
+    await router.registerDaemon(daemon, {
+      type: 'register', daemon_id: 'd1', hostname: 'host', agents: [],
+      supports_quota_grant: true, started_at: 100,
+    }, 7)
+    router.registerClient(client, 7)
+    daemon._sent.length = 0
+    await router.handleClientMessage(client, {
+      type: 'session_create', daemon_id: 'd1', request_id: 'request-ownership-race',
+      agent: 'codex', cwd: '/repo',
+    })
+
+    router.handleDaemonMessage('d1', {
+      type: 'session_created', session_id: 'contended-session',
+      event_id: 'contended-event', request_id: 'request-ownership-race', seq: 1,
+    })
+
+    await vi.waitFor(() => expect(daemon.close).toHaveBeenCalledWith(
+      1008, 'session_ownership_violation',
+    ))
+    expect(daemon._sent).toContainEqual({ type: 'event_ack', up_to_seq: 1 })
+    expect(daemon._sent).toContainEqual({
+      type: 'kicked', reason: 'session_ownership_violation', retryable: false,
+    })
+    expect(settleQuotaReservation).not.toHaveBeenCalled()
+  })
+
+  test('an initial recovery mismatch is explicitly ACKed before permanent disconnect', async () => {
+    const value = pool()
+    const baseQuery = value.query
+    value.query = vi.fn(async (sql: string, params?: unknown[]) => {
+      if (sql.includes('FROM quota_reservations reservation')) {
+        return {
+          rows: [{
+            id: '00000000-0000-0000-0000-000000000777',
+            resource: 'concurrent_session', operation: 'create', daemon_id: 'd1',
+            session_id: null, state: 'settled', settlement_reason: 'session_create_failed',
+            agent_type: 'codex', cwd: '/repo', hostname: 'host',
+          }],
+          rowCount: 1,
+        }
+      }
+      return baseQuery(sql, params)
+    })
+    const router = new Router(value)
+    const daemon = ws()
+    await router.registerDaemon(daemon, {
+      type: 'register', daemon_id: 'd1', hostname: 'host', agents: [],
+      supports_quota_grant: true, started_at: 100,
+    }, 7)
+    daemon._sent.length = 0
+
+    router.handleDaemonMessage('d1', {
+      type: 'session_created', session_id: 'recovery-conflict-session',
+      request_id: 'recovery-conflict-request', event_id: 'recovery-conflict-event', seq: 1,
+    })
+
+    await vi.waitFor(() => expect(daemon.close).toHaveBeenCalledWith(
+      1008, 'quota_reservation_binding_mismatch',
+    ))
+    expect(daemon._sent).toContainEqual({ type: 'event_ack', up_to_seq: 1 })
+  })
+
+  test('a queued recovery mismatch waits for the lower durable effect before ACK and disconnect', async () => {
+    vi.mocked(reserveConcurrentSession).mockResolvedValue({
+      allowed: true,
+      reservationId: 'reservation-seq-1',
+      expiresAt: Date.now() + 60_000,
+      reused: false,
+    })
+    let releaseClaim!: () => void
+    vi.mocked(claimQuotaReservationSession).mockImplementationOnce(() => new Promise(resolve => {
+      releaseClaim = () => resolve({ matched: true, changed: true })
+    }))
+    const value = pool()
+    const baseQuery = value.query
+    value.query = vi.fn(async (sql: string, params?: unknown[]) => {
+      if (sql.includes('FROM quota_reservations reservation')
+        && params?.[1] === 'queued-recovery-conflict') {
+        return {
+          rows: [{
+            id: '00000000-0000-0000-0000-000000000778',
+            resource: 'concurrent_session', operation: 'create', daemon_id: 'd1',
+            session_id: null, state: 'settled', settlement_reason: 'session_create_failed',
+            agent_type: 'codex', cwd: '/repo', hostname: 'host',
+          }],
+          rowCount: 1,
+        }
+      }
+      if (sql.includes('INSERT INTO sessions') && sql.includes('RETURNING session_id')) {
+        return { rows: [{ session_id: 'seq-1-session' }], rowCount: 1 }
+      }
+      return baseQuery(sql, params)
+    })
+    const router = new Router(value)
+    const daemon = ws()
+    const client = ws()
+    await router.registerDaemon(daemon, {
+      type: 'register', daemon_id: 'd1', hostname: 'host', agents: [],
+      supports_quota_grant: true, started_at: 100,
+    }, 7)
+    router.registerClient(client, 7)
+    await router.handleClientMessage(client, {
+      type: 'session_create', daemon_id: 'd1', request_id: 'seq-1-request',
+      agent: 'codex', cwd: '/repo',
+    })
+    daemon._sent.length = 0
+
+    router.handleDaemonMessage('d1', {
+      type: 'session_created', session_id: 'seq-1-session',
+      request_id: 'seq-1-request', event_id: 'seq-1-event', seq: 1,
+    })
+    await vi.waitFor(() => expect(claimQuotaReservationSession).toHaveBeenCalled())
+    router.handleDaemonMessage('d1', {
+      type: 'session_created', session_id: 'queued-conflict-session',
+      request_id: 'queued-recovery-conflict', event_id: 'queued-conflict-event', seq: 2,
+    })
+    await new Promise(resolve => setTimeout(resolve, 20))
+    expect(daemon.close).not.toHaveBeenCalled()
+    expect(daemon._sent).not.toContainEqual({ type: 'event_ack', up_to_seq: 2 })
+
+    releaseClaim()
+    await vi.waitFor(() => expect(daemon.close).toHaveBeenCalledWith(
+      1008, 'quota_reservation_binding_mismatch',
+    ))
+    expect(daemon._sent).toContainEqual({ type: 'event_ack', up_to_seq: 2 })
   })
 })

@@ -45,7 +45,8 @@ export function safeMaterializationError(error: unknown): string {
   if (name === 'MaterializationContextError') return 'materialization_context_missing'
   if (name === 'EphemeralMaterializationError') return 'ephemeral_event_rejected'
   const code = error && typeof error === 'object' && 'code' in error ? String(error.code) : ''
-  if (code === 'session_ownership_violation' || code === 'unknown_daemon_session') return code
+  if (code === 'session_ownership_violation' || code === 'unknown_daemon_session'
+    || code === 'quota_reservation_binding_mismatch') return code
   if (code.startsWith('08') || code.startsWith('53') || code === '57P01' || code === '57P03') return 'database_unavailable'
   return 'materialization_failed'
 }
@@ -57,6 +58,7 @@ export function safeMaterializationError(error: unknown): string {
 export function isPermanentMaterializationError(error: unknown): boolean {
   const code = error && typeof error === 'object' && 'code' in error ? String(error.code) : ''
   return code === 'session_ownership_violation' || code === 'unknown_daemon_session'
+    || code === 'quota_reservation_binding_mismatch'
 }
 
 export function retryDelayMs(attempts: number, random: () => number): number {

@@ -12,8 +12,8 @@ func TestDefaultPermissionConfig(t *testing.T) {
 		agent string
 		want  protocol.PermissionConfig
 	}{
-		{AgentClaude, protocol.PermissionConfig{Agent: AgentClaude, Mode: "acceptEdits"}},
-		{AgentCodex, protocol.PermissionConfig{Agent: AgentCodex, Preset: "custom"}},
+		{AgentClaude, protocol.PermissionConfig{Agent: AgentClaude, Mode: "manual"}},
+		{AgentCodex, protocol.PermissionConfig{Agent: AgentCodex, Preset: "request_approval", ApprovalPolicy: "on-request", SandboxMode: "workspace-write"}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.agent, func(t *testing.T) {
@@ -77,5 +77,57 @@ func TestPermissionArgs(t *testing.T) {
 				t.Fatalf("got %v want %v", got, tt.want)
 			}
 		})
+	}
+}
+
+
+// --- H-7: dangerous remote permissions are local opt-in only ---
+
+func TestValidateRemotePermissionRejectsDangerousModes(t *testing.T) {
+	cases := []struct {
+		name string
+		cfg  protocol.PermissionConfig
+	}{
+		{"claude bypassPermissions", protocol.PermissionConfig{Agent: AgentClaude, Mode: "bypassPermissions"}},
+		{"claude dontAsk", protocol.PermissionConfig{Agent: AgentClaude, Mode: "dontAsk"}},
+		{"codex dangerous bypass", protocol.PermissionConfig{Agent: AgentCodex, Preset: "custom", DangerousBypass: true}},
+		{"codex approval never", protocol.PermissionConfig{Agent: AgentCodex, Preset: "custom", ApprovalPolicy: "never"}},
+		{"codex danger-full-access", protocol.PermissionConfig{Agent: AgentCodex, Preset: "custom", SandboxMode: "danger-full-access"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if err := ValidateRemotePermissionConfig(tc.cfg.Agent, &tc.cfg); err == nil {
+				t.Fatal("dangerous permission must be rejected without the local opt-in switch")
+			}
+		})
+	}
+}
+
+func TestValidateRemotePermissionAllowsSafeModes(t *testing.T) {
+	cases := []protocol.PermissionConfig{
+		{Agent: AgentClaude, Mode: "manual"},
+		{Agent: AgentClaude, Mode: "acceptEdits"},
+		{Agent: AgentClaude, Mode: "plan"},
+		{Agent: AgentCodex, Preset: "request_approval", ApprovalPolicy: "on-request", SandboxMode: "workspace-write"},
+		{Agent: AgentCodex, Preset: "agent_managed", ApprovalPolicy: "untrusted", SandboxMode: "workspace-write"},
+	}
+	for _, cfg := range cases {
+		if err := ValidateRemotePermissionConfig(cfg.Agent, &cfg); err != nil {
+			t.Fatalf("safe permission %+v rejected: %v", cfg, err)
+		}
+	}
+}
+
+func TestValidateRemotePermissionHonorsLocalDangerousSwitch(t *testing.T) {
+	dangerous := []protocol.PermissionConfig{
+		{Agent: AgentClaude, Mode: "bypassPermissions"},
+		{Agent: AgentCodex, Preset: "custom", DangerousBypass: true},
+		{Agent: AgentCodex, Preset: "custom", ApprovalPolicy: "never"},
+		{Agent: AgentCodex, Preset: "custom", SandboxMode: "danger-full-access"},
+	}
+	for _, cfg := range dangerous {
+		if err := ValidateRemotePermissionConfigWithPolicy(cfg.Agent, &cfg, RemotePermissionPolicy{AllowDangerous: true}); err != nil {
+			t.Fatalf("dangerous permission %+v must pass with the explicit local switch: %v", cfg, err)
+		}
 	}
 }

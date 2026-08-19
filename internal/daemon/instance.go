@@ -27,7 +27,11 @@ type instanceOwner struct {
 var processStartIdentity = platform.ProcessStartIdentity
 
 func instanceLockPath() string {
-	return filepath.Join(runtimeDir(), "daemon.lock")
+	dir, err := secureRuntimeDir()
+	if err != nil {
+		return ""
+	}
+	return filepath.Join(dir, "daemon.lock")
 }
 
 // InstanceLockHeld non-destructively verifies that a daemon process owns the
@@ -68,10 +72,14 @@ func InstanceLockOwnedBy(expectedPID int) (bool, error) {
 // InstanceLockIdentityMatches binds a state snapshot to one lock acquisition,
 // not merely to a PID that the operating system may later reuse.
 func InstanceLockIdentityMatches(expectedPID int, expectedToken string) (bool, error) {
+	return instanceLockIdentityMatchesAt(instanceLockPath(), expectedPID, expectedToken)
+}
+
+func instanceLockIdentityMatchesAt(path string, expectedPID int, expectedToken string) (bool, error) {
 	if expectedToken == "" {
 		return false, fmt.Errorf("%w: state has no runtime instance token", ErrRuntimeStatusUncertain)
 	}
-	owner, held, err := instanceLockOwner()
+	owner, held, err := instanceLockOwnerAt(path)
 	if err != nil || !held {
 		return false, err
 	}
@@ -82,7 +90,13 @@ func InstanceLockIdentityMatches(expectedPID int, expectedToken string) (bool, e
 }
 
 func instanceLockOwner() (instanceOwner, bool, error) {
-	path := instanceLockPath()
+	return instanceLockOwnerAt(instanceLockPath())
+}
+
+func instanceLockOwnerAt(path string) (instanceOwner, bool, error) {
+	if path == "" {
+		return instanceOwner{}, false, fmt.Errorf("%w: daemon instance lock path is unavailable", ErrRuntimeStatusUncertain)
+	}
 	return stableInstanceOwnerSnapshot(
 		path,
 		instanceLockHeldAt,
@@ -196,17 +210,20 @@ func CurrentInstanceToken() (string, error) {
 // modification. Replaces the former instance_unix.go / instance_windows.go
 // build-tag split (platform now owns the platform split).
 func AcquireInstanceLock() (io.Closer, error) {
-	dir := runtimeDir()
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return nil, fmt.Errorf("create %s: %w", dir, err)
+	dir, err := secureRuntimeDir()
+	if err != nil {
+		return nil, err
 	}
-	return AcquireInstanceLockAt(instanceLockPath())
+	return AcquireInstanceLockAt(filepath.Join(dir, "daemon.lock"))
 }
 
 // AcquireInstanceLockAt is the path-selectable form used by restart ownership
 // handoff and process-level tests.
 func AcquireInstanceLockAt(path string) (io.Closer, error) {
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+	if path == "" {
+		return nil, fmt.Errorf("daemon instance lock path is unavailable")
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return nil, fmt.Errorf("create %s: %w", filepath.Dir(path), err)
 	}
 	lock, err := defaultLocker.Acquire(path)
@@ -261,11 +278,11 @@ func writeInstanceOwner(path string, owner instanceOwner) error {
 		return err
 	}
 	data = append(data, '\n')
-	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o644)
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
 	if err != nil {
 		return err
 	}
-	if err := f.Chmod(0o644); err != nil {
+	if err := f.Chmod(0o600); err != nil {
 		_ = f.Close()
 		return err
 	}

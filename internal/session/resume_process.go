@@ -2,6 +2,7 @@ package session
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os/exec"
@@ -28,6 +29,13 @@ type resumeProcess interface {
 	Kill() error
 }
 
+type resumeProcessTree interface {
+	Configure(*exec.Cmd) error
+	Attach(*exec.Cmd) error
+	Kill(*exec.Cmd) error
+	Close() error
+}
+
 // resumeStarter starts a resume process under the given context. Canceling
 // the context must terminate the process.
 type resumeStarter func(context.Context, resumeLaunchSpec) (resumeProcess, error)
@@ -42,24 +50,46 @@ type ownedResume struct {
 	generation uint64
 	cancel     context.CancelFunc
 	process    resumeProcess
+	ready      chan struct{}
 	done       chan struct{}
 	waitErr    error
+	readyOnce  sync.Once
 	waitOnce   sync.Once
 }
 
 // resumeShutdownFinalWait bounds the final reaping pass after force kill.
 const resumeShutdownFinalWait = time.Second
 
+var (
+	errResumeBusy         = errors.New("session busy: resume already running")
+	errResumeShuttingDown = errors.New("session resume shutdown in progress")
+)
+
 // execResumeProcess adapts *exec.Cmd to the resumeProcess seam.
 type execResumeProcess struct {
 	cmd    *exec.Cmd
 	stdout io.Reader
+	tree   resumeProcessTree
 }
 
 // startExecResumeProcess is the production starter: exec.CommandContext with
 // cwd/env applied, stdout piped before start, started exactly once.
 func startExecResumeProcess(ctx context.Context, spec resumeLaunchSpec) (resumeProcess, error) {
 	cmd := exec.CommandContext(ctx, spec.Path, spec.Args...)
+	tree, err := newResumeProcessTree()
+	if err != nil {
+		return nil, fmt.Errorf("create process tree: %w", err)
+	}
+	closeTree := true
+	defer func() {
+		if closeTree {
+			_ = tree.Close()
+		}
+	}()
+	if err := tree.Configure(cmd); err != nil {
+		return nil, fmt.Errorf("configure process tree: %w", err)
+	}
+	cmd.Cancel = func() error { return tree.Kill(cmd) }
 	if spec.Dir != "" {
 		cmd.Dir = spec.Dir
 	}
@@ -73,7 +103,13 @@ func startExecResumeProcess(ctx context.Context, spec resumeLaunchSpec) (resumeP
 	if err := cmd.Start(); err != nil {
 		return nil, fmt.Errorf("start process: %w", err)
 	}
-	return &execResumeProcess{cmd: cmd, stdout: stdout}, nil
+	if err := tree.Attach(cmd); err != nil {
+		_ = tree.Kill(cmd)
+		_ = cmd.Wait()
+		return nil, fmt.Errorf("attach process tree: %w", err)
+	}
+	closeTree = false
+	return &execResumeProcess{cmd: cmd, stdout: stdout, tree: tree}, nil
 }
 
 func (p *execResumeProcess) PID() int {
@@ -86,13 +122,20 @@ func (p *execResumeProcess) PID() int {
 func (p *execResumeProcess) Stdout() io.Reader { return p.stdout }
 
 // Wait is the single terminal Wait owner for the underlying command.
-func (p *execResumeProcess) Wait() error { return p.cmd.Wait() }
+func (p *execResumeProcess) Wait() error {
+	waitErr := p.cmd.Wait()
+	closeErr := p.tree.Close()
+	if waitErr != nil {
+		return waitErr
+	}
+	if closeErr != nil {
+		return fmt.Errorf("close process tree: %w", closeErr)
+	}
+	return nil
+}
 
 func (p *execResumeProcess) Kill() error {
-	if p.cmd.Process == nil {
-		return nil
-	}
-	return p.cmd.Process.Kill()
+	return p.tree.Kill(p.cmd)
 }
 
 // resumeProcessCmd extracts the underlying *exec.Cmd so legacy ProcessState
@@ -124,39 +167,65 @@ func (sm *SessionManager) setResumeStarter(starter resumeStarter) {
 	sm.resumeStarter = starter
 }
 
-// registerOwnedResume records a started resume process under the next
-// generation for sessionID. If a previous entry is still live it is canceled
-// (product behavior serializes resumes via the busy check, so this is a
-// defensive path only); its goroutine still finishes safely because removal
-// compares the entry pointer.
-func (sm *SessionManager) registerOwnedResume(sessionID string, cancel context.CancelFunc, process resumeProcess) *ownedResume {
+// reserveOwnedResume atomically closes the gap between admission and process
+// start. A live resume for the same session is never replaced, and shutdown
+// can cancel an admitted start even before its starter returns a process.
+func (sm *SessionManager) reserveOwnedResume(sessionID string, cancel context.CancelFunc) (*ownedResume, error) {
 	sm.mu.Lock()
+	defer sm.mu.Unlock()
+	if sm.resumeClosing {
+		return nil, errResumeShuttingDown
+	}
+	if old := sm.resumeProcesses[sessionID]; old != nil {
+		select {
+		case <-old.done:
+			delete(sm.resumeProcesses, sessionID)
+		default:
+			return nil, errResumeBusy
+		}
+	}
 	sm.resumeNextGen++
 	entry := &ownedResume{
 		sessionID:  sessionID,
 		generation: sm.resumeNextGen,
 		cancel:     cancel,
-		process:    process,
+		ready:      make(chan struct{}),
 		done:       make(chan struct{}),
 	}
-	if old := sm.resumeProcesses[sessionID]; old != nil {
-		select {
-		case <-old.done:
-		default:
-			if old.cancel != nil {
-				old.cancel()
-			}
-		}
-	}
 	sm.resumeProcesses[sessionID] = entry
-	sm.mu.Unlock()
-	return entry
+	return entry, nil
+}
+
+func (sm *SessionManager) attachOwnedResume(entry *ownedResume, process resumeProcess) bool {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+	if sm.resumeProcesses[entry.sessionID] != entry {
+		return false
+	}
+	entry.process = process
+	entry.readyOnce.Do(func() { close(entry.ready) })
+	return true
+}
+
+// registerOwnedResume is used by lifecycle tests that already own a started
+// process. Production SendMessage reserves before starting to avoid the
+// start/register shutdown race.
+func (sm *SessionManager) registerOwnedResume(sessionID string, cancel context.CancelFunc, process resumeProcess) (*ownedResume, error) {
+	entry, err := sm.reserveOwnedResume(sessionID, cancel)
+	if err != nil {
+		return nil, err
+	}
+	if !sm.attachOwnedResume(entry, process) {
+		return nil, errResumeShuttingDown
+	}
+	return entry, nil
 }
 
 // finishOwnedResume is called exactly once by the single Wait owner after the
 // process exited. It closes done and removes the registry entry only when it
 // is still the current (sessionID, generation) owner.
 func (sm *SessionManager) finishOwnedResume(entry *ownedResume, waitErr error) {
+	entry.readyOnce.Do(func() { close(entry.ready) })
 	entry.waitOnce.Do(func() {
 		entry.waitErr = waitErr
 		close(entry.done)
@@ -166,6 +235,16 @@ func (sm *SessionManager) finishOwnedResume(entry *ownedResume, waitErr error) {
 		delete(sm.resumeProcesses, entry.sessionID)
 	}
 	sm.mu.Unlock()
+}
+
+func (sm *SessionManager) killOwnedResume(entry *ownedResume) {
+	select {
+	case <-entry.ready:
+		if entry.process != nil {
+			_ = entry.process.Kill()
+		}
+	default:
+	}
 }
 
 func (sm *SessionManager) ownedResumeForSession(sessionID string) *ownedResume {
@@ -201,6 +280,7 @@ func (sm *SessionManager) recordResumeCleanup(reason string) {
 // prompts. Duplicate calls and already-exited processes are tolerated.
 func (sm *SessionManager) ShutdownResumeProcesses(ctx context.Context) error {
 	sm.mu.Lock()
+	sm.resumeClosing = true
 	entries := make([]*ownedResume, 0, len(sm.resumeProcesses))
 	for _, entry := range sm.resumeProcesses {
 		entries = append(entries, entry)
@@ -239,7 +319,7 @@ func (sm *SessionManager) ShutdownResumeProcesses(ctx context.Context) error {
 	unreaped := 0
 	if len(pending) > 0 {
 		for _, entry := range pending {
-			_ = entry.process.Kill()
+			sm.killOwnedResume(entry)
 			sm.recordResumeCleanup("resume_force_killed")
 		}
 		finalCtx, finalCancel := context.WithTimeout(context.Background(), resumeShutdownFinalWait)

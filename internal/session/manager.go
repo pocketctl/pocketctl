@@ -153,6 +153,13 @@ type SessionManager struct {
 	// registration for the same session.
 	resumeProcesses map[string]*ownedResume
 	resumeNextGen   uint64
+	resumeClosing   bool
+
+	// H-7: remotely created sessions are constrained to operator-configured
+	// cwd roots (nil policy = fail closed) and by the local dangerous-
+	// permission switch.
+	cwdPolicy        *CwdPolicy
+	remotePermission adapter.RemotePermissionPolicy
 }
 
 type createSessionDependencies struct {
@@ -209,6 +216,24 @@ func (sm *SessionManager) SetProviders(pty platform.PTYProvider, proc platform.P
 	defer sm.mu.Unlock()
 	sm.ptyProvider = pty
 	sm.proc = proc
+}
+
+// SetCwdPolicy installs the operator-configured allowed cwd roots for remote
+// session creation. Without a policy every remote create fails closed with
+// the stable cwd_not_authorized reason. Only the local daemon process calls
+// this; no client-supplied field can extend the roots.
+func (sm *SessionManager) SetCwdPolicy(policy *CwdPolicy) {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+	sm.cwdPolicy = policy
+}
+
+// SetRemotePermissionPolicy installs the daemon-local dangerous-permission
+// switch for remote sessions.
+func (sm *SessionManager) SetRemotePermissionPolicy(policy adapter.RemotePermissionPolicy) {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+	sm.remotePermission = policy
 }
 
 // SetOpenCodeRuntimeHealthRecorder installs the content-free rollout counter

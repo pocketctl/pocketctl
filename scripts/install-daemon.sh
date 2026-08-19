@@ -133,37 +133,51 @@ download_file() {
   fi
 }
 
-# Try GitHub releases first, then Gitee
+# Try GitHub releases first, then Gitee. H-5: the checksum is established
+# ONLY from the official GitHub-direct sidecar before anything is downloaded;
+# both binary sources are then verified against that same official digest —
+# a mirror/Gitee sidecar can never become the trust root.
 GITHUB_URL="https://github.com/${GITHUB_REPO}/releases/download/${LATEST_VERSION}/${BINARY_FILENAME}"
 GITEE_URL="https://gitee.com/${GITEE_REPO}/releases/download/${LATEST_VERSION}/${BINARY_FILENAME}"
 
-if download_file "$GITHUB_URL" "$TEMP_FILE" &&
-   download_file "${GITHUB_URL}.sha256" "$SHA_FILE"; then
-  info "从 GitHub 下载成功"
-elif download_file "$GITEE_URL" "$TEMP_FILE" &&
-     download_file "${GITEE_URL}.sha256" "$SHA_FILE"; then
-  info "从 Gitee 下载成功"
-else
-  error "下载失败: 尝试了 GitHub 和 Gitee 源"
+if ! download_file "${GITHUB_URL}.sha256" "$SHA_FILE"; then
+  error "无法建立可信校验链：GitHub 官方校验文件不可达（镜像校验不作为信任来源）"
 fi
-
-# ---------- 4. 强制校验同一来源的 SHA256 ----------
 EXPECTED_SHA=$(awk 'NR == 1 { print $1 }' "$SHA_FILE")
 if [[ ! "$EXPECTED_SHA" =~ ^[0-9a-fA-F]{64}$ ]]; then
-  error "SHA256 校验文件格式无效"
+  error "官方校验文件格式无效"
 fi
+EXPECTED_SHA_LOWER=$(printf '%s' "$EXPECTED_SHA" | tr '[:upper:]' '[:lower:]')
+
 if command -v shasum &>/dev/null; then
-  ACTUAL_SHA=$(shasum -a 256 "$TEMP_FILE" | awk '{print $1}')
+  SHA_TOOL="shasum -a 256"
 elif command -v sha256sum &>/dev/null; then
-  ACTUAL_SHA=$(sha256sum "$TEMP_FILE" | awk '{print $1}')
+  SHA_TOOL="sha256sum"
 else
   error "缺少 shasum 或 sha256sum，无法安全安装"
 fi
-ACTUAL_SHA_LOWER=$(printf '%s' "$ACTUAL_SHA" | tr '[:upper:]' '[:lower:]')
-EXPECTED_SHA_LOWER=$(printf '%s' "$EXPECTED_SHA" | tr '[:upper:]' '[:lower:]')
-[[ "$ACTUAL_SHA_LOWER" == "$EXPECTED_SHA_LOWER" ]] ||
-  error "文件校验失败！SHA256 不匹配\n  期望: ${EXPECTED_SHA}\n  实际: ${ACTUAL_SHA}"
-info "文件校验通过 ✓"
+
+verify_official() {
+  local actual
+  actual=$($SHA_TOOL "$TEMP_FILE" | awk '{print $1}')
+  local actual_lower
+  actual_lower=$(printf '%s' "$actual" | tr '[:upper:]' '[:lower:]')
+  [[ "$actual_lower" == "$EXPECTED_SHA_LOWER" ]]
+}
+
+DOWNLOADED=0
+for url in "$GITHUB_URL" "$GITEE_URL"; do
+  if download_file "$url" "$TEMP_FILE" && verify_official; then
+    DOWNLOADED=1
+    break
+  fi
+  : > "$TEMP_FILE"
+done
+
+if [[ "$DOWNLOADED" -ne 1 ]]; then
+  error "下载失败：没有源能提供与 GitHub 官方校验一致的文件"
+fi
+info "文件已通过 GitHub 官方校验 ✓"
 
 # ---------- 5. 安装 ----------
 info "安装到 ${INSTALL_DIR}/${BINARY_NAME}..."

@@ -18,10 +18,11 @@ import (
 )
 
 type managedTerminalProvider struct {
-	mu       sync.Mutex
-	acquire  agentcontrol.AcquireRequest
-	bound    agentcontrol.LeaseBindRequest
-	released agentcontrol.ReleaseRequest
+	realBinary string
+	mu         sync.Mutex
+	acquire    agentcontrol.AcquireRequest
+	bound      agentcontrol.LeaseBindRequest
+	released   agentcontrol.ReleaseRequest
 }
 
 func (p *managedTerminalProvider) Acquire(_ context.Context, req agentcontrol.AcquireRequest) (agentcontrol.AcquireResult, error) {
@@ -33,7 +34,7 @@ func (p *managedTerminalProvider) Acquire(_ context.Context, req agentcontrol.Ac
 		BaseURL:           "http://127.0.0.1:4096",
 		Password:          "release-gate-secret",
 		Username:          "pocketctl",
-		RealBinary:        "/fixture/opencode",
+		RealBinary:        p.realBinary,
 		ResolvedSessionID: "ses_shared",
 		LeaseID:           "lease-terminal",
 		Generation:        17,
@@ -58,6 +59,19 @@ func (*managedTerminalProvider) Status(context.Context, agentcontrol.RuntimeStat
 	return agentcontrol.RuntimeStatusResult{Mode: string(agentcontrol.LaunchManaged), BaseURL: "http://127.0.0.1:4096", Generation: 17}, nil
 }
 
+func writeRealAgentFixture(t *testing.T, dir, name string) string {
+	t.Helper()
+	path := filepath.Join(dir, name)
+	if err := os.WriteFile(path, []byte("test executable"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	canonical, err := filepath.EvalSymlinks(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return canonical
+}
+
 func TestOpenCodeManagedTerminalUsesSharedRuntimeThroughRealIPC(t *testing.T) {
 	dir, err := os.MkdirTemp("/tmp", "pocketctl-managed-e2e-")
 	if err != nil {
@@ -65,7 +79,8 @@ func TestOpenCodeManagedTerminalUsesSharedRuntimeThroughRealIPC(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = os.RemoveAll(dir) })
 	socket := filepath.Join(dir, "control.sock")
-	provider := &managedTerminalProvider{}
+	realBinary := writeRealAgentFixture(t, dir, "opencode")
+	provider := &managedTerminalProvider{realBinary: realBinary}
 	server := agentcontrol.NewServer(socket, map[string]agentcontrol.RuntimeProvider{agentcontrol.AgentOpenCode: provider})
 	if err := server.Start(); err != nil {
 		t.Fatal(err)
@@ -93,7 +108,7 @@ func TestOpenCodeManagedTerminalUsesSharedRuntimeThroughRealIPC(t *testing.T) {
 	}
 
 	wantArgs := []string{"attach", "http://127.0.0.1:4096", "--dir", "/fixture/repo", "--session", "ses_shared"}
-	if executed.Path != "/fixture/opencode" || !reflect.DeepEqual(executed.Args, wantArgs) || executed.Dir != "/fixture/repo" {
+	if executed.Path != realBinary || !reflect.DeepEqual(executed.Args, wantArgs) || executed.Dir != "/fixture/repo" {
 		t.Fatalf("managed execution=%+v", executed)
 	}
 	if strings.Contains(strings.Join(executed.Args, " "), "release-gate-secret") || envValue(executed.Env, "OPENCODE_SERVER_PASSWORD") != "release-gate-secret" {

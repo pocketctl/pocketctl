@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
+	"strings"
 	"testing"
 	"time"
 
@@ -509,6 +511,41 @@ func TestRuntimeStatusReturnsDetailedOwnerTruth(t *testing.T) {
 	}
 }
 
+func TestRuntimeStatusAndIdentityRecoverVerifiedOwnerWhenPIDFileIsStale(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("POCKETCTL_RUNTIME_DIR", t.TempDir())
+	lock, err := AcquireInstanceLock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lock.Close()
+	token, err := CurrentInstanceToken()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := WritePID(os.Getpid() + 1); err != nil {
+		t.Fatal(err)
+	}
+	if err := WriteState(&DaemonState{
+		PID:                  os.Getpid(),
+		RuntimeInstanceToken: token,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	pid, running, err := RuntimeStatus()
+	if err != nil || !running || pid != os.Getpid() {
+		t.Fatalf("RuntimeStatus = (%d, %v, %v), want verified lock owner", pid, running, err)
+	}
+	if running, err := VerifyRuntimeIdentity(os.Getpid(), token); err != nil || !running {
+		t.Fatalf("VerifyRuntimeIdentity = (%v, %v), want verified lock owner", running, err)
+	}
+	if running, err := VerifyRuntimeIdentity(os.Getpid(), "stale-runtime-token"); running ||
+		!errors.Is(err, ErrInstanceOwnerMismatch) {
+		t.Fatalf("VerifyRuntimeIdentity with stale token = (%v, %v), want owner mismatch", running, err)
+	}
+}
+
 func TestVerifyRuntimePIDRejectsPIDFileChange(t *testing.T) {
 	t.Setenv("POCKETCTL_RUNTIME_DIR", t.TempDir())
 	lock, err := AcquireInstanceLock()
@@ -727,4 +764,91 @@ func TestStopFallbackKillRequiresSameRuntimeIdentity(t *testing.T) {
 			}
 		})
 	}
+}
+
+// --- H-6: per-UID private runtime directory ---
+
+func TestDefaultRuntimeDirIsUIDScoped(t *testing.T) {
+	t.Setenv("POCKETCTL_RUNTIME_DIR", "")
+	if runtime.GOOS == "windows" {
+		t.Skip("unix-scoped default path")
+	}
+	want := filepath.Join(os.TempDir(), fmt.Sprintf("pocketctl-%d", os.Getuid()))
+	if PIDPath() != filepath.Join(want, "daemon.pid") {
+		t.Fatalf("PIDPath()=%q want %q", PIDPath(), filepath.Join(want, "daemon.pid"))
+	}
+	if dir := PIDPath(); strings.Contains(filepath.Dir(dir), "pocketctl") && filepath.Dir(dir) == "/tmp/pocketctl" {
+		t.Fatal("runtime dir must not be the shared legacy /tmp/pocketctl")
+	}
+}
+
+func TestRuntimeDirRejectsRelativeOverride(t *testing.T) {
+	t.Setenv("POCKETCTL_RUNTIME_DIR", "relative/path")
+	if err := WritePID(42); err == nil {
+		t.Fatal("WritePID accepted a relative runtime dir override")
+	}
+}
+
+func TestRuntimeDirRejectsSymlinkOverrideAndNeverWritesTarget(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlink semantics are unix-only here")
+	}
+	base := t.TempDir()
+	target := filepath.Join(base, "target")
+	if err := os.Mkdir(target, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(base, "runtime-link")
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("POCKETCTL_RUNTIME_DIR", link)
+
+	if err := WritePID(42); err == nil {
+		t.Fatal("WritePID accepted a symlinked runtime dir")
+	}
+	if _, err := os.Stat(filepath.Join(target, "daemon.pid")); !os.IsNotExist(err) {
+		t.Fatal("write followed the symlink into the target directory")
+	}
+}
+
+func TestRuntimeDirRejectsPlainFileOverride(t *testing.T) {
+	base := t.TempDir()
+	plain := filepath.Join(base, "not-a-dir")
+	if err := os.WriteFile(plain, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("POCKETCTL_RUNTIME_DIR", plain)
+	if err := WritePID(42); err == nil {
+		t.Fatal("WritePID accepted a regular-file runtime dir path")
+	}
+}
+
+func TestRuntimeDirEnforcesPrivateModeAndOwner(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("unix permission bits")
+	}
+	t.Setenv("POCKETCTL_RUNTIME_DIR", "")
+	if err := WritePID(4242); err != nil {
+		t.Fatal(err)
+	}
+	dir := filepath.Dir(PIDPath())
+	info, err := os.Lstat(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		t.Fatal("runtime dir resolved through a symlink")
+	}
+	if info.Mode().Perm() != 0o700 {
+		t.Fatalf("runtime dir mode = %o, want 0700", info.Mode().Perm())
+	}
+	pidInfo, err := os.Lstat(PIDPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pidInfo.Mode().Perm() != 0o600 {
+		t.Fatalf("pid file mode = %o, want 0600", pidInfo.Mode().Perm())
+	}
+	assertRuntimeDirOwner(t, info)
 }

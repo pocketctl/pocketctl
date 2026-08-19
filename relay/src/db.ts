@@ -6,6 +6,16 @@ import { initDurableIngressSchema } from './schema/durable-ingress.js';
 import { initAttentionInboxSchema } from './attention-inbox/schema.js';
 import type { DaemonSessionAccess, DaemonSessionPolicy } from './materialization/types.js';
 import {
+  CODE_HMAC_LENGTH,
+  CODE_TTL_MS,
+  FAILURE_WINDOW_MS,
+  LOCKOUT_MS,
+  MAX_VERIFY_ATTEMPTS,
+  SEND_COOLDOWN_MS,
+  digestEquals,
+  type EmailChallengePurpose,
+} from './config/verification.js';
+import {
   countReplayLogicalItems,
   findCompleteForwardReplayBoundary,
   findCompleteReplayBoundary,
@@ -204,6 +214,12 @@ async function initDBUnlocked(pool: pg.Pool): Promise<void> {
       created_at TIMESTAMPTZ DEFAULT NOW()
     )
   `);
+  // Synthetic lifecycle ledgers are not backed by a sessions row. Retain the
+  // authenticated owner directly so account deletion cascades even if the
+  // daemon was unregistered before the account itself is removed. This must
+  // run after users exists so a fresh database can create the FK.
+  await pool.query(`ALTER TABLE events ADD COLUMN IF NOT EXISTS user_id INT REFERENCES users(id) ON DELETE CASCADE`);
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_events_user_id ON events(user_id) WHERE user_id IS NOT NULL`);
   // Durable request-level push-effect grant. Agent event identity remains
   // event_id-based, while approval/question notifications retain the legacy
   // request_id dedup contract across Worker restarts. The winning event FK
@@ -276,6 +292,45 @@ async function initDBUnlocked(pool: pg.Pool): Promise<void> {
   await pool.query(`
     CREATE INDEX IF NOT EXISTS idx_quota_reservations_active
     ON quota_reservations (user_id, resource, expires_at)
+  `);
+  // M-4: separate the grant TTL from the accounting state. expires_at only
+  // bounds how long a daemon may still accept the grant; unsettled rows
+  // (pending/uncertain) keep consuming the quota budget until an explicit,
+  // audited settlement.
+  await pool.query(`ALTER TABLE quota_reservations ADD COLUMN IF NOT EXISTS state VARCHAR(16) NOT NULL DEFAULT 'pending'`);
+  await pool.query(`ALTER TABLE quota_reservations ADD COLUMN IF NOT EXISTS settled_at TIMESTAMPTZ`);
+  await pool.query(`ALTER TABLE quota_reservations ADD COLUMN IF NOT EXISTS settlement_reason VARCHAR(32)`);
+  // Creation metadata must survive a Relay restart between grant and daemon
+  // outcome. It is captured from the authenticated client request, never from
+  // the later daemon event that claims the reservation.
+  await pool.query(`ALTER TABLE quota_reservations ADD COLUMN IF NOT EXISTS agent_type VARCHAR(64)`);
+  await pool.query(`ALTER TABLE quota_reservations ADD COLUMN IF NOT EXISTS cwd TEXT`);
+  // Versioned cutover: legacy rows have no trustworthy outcome, so the first
+  // strong-binding deployment keeps them counted as uncertain. The marker and
+  // transition share the schema-init transaction, making this truly one-time
+  // across restarts and multi-instance startup. Runtime pending rows are never
+  // age-released by initDB.
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS quota_reservation_migrations (
+      key VARCHAR(64) PRIMARY KEY,
+      completed_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )
+  `);
+  await pool.query(`
+    WITH cutover AS (
+      INSERT INTO quota_reservation_migrations (key)
+      VALUES ('strong-binding-v1')
+      ON CONFLICT (key) DO NOTHING
+      RETURNING key
+    )
+    UPDATE quota_reservations
+    SET state = 'uncertain', settlement_reason = 'strong_binding_cutover'
+    WHERE state = 'pending' AND EXISTS (SELECT 1 FROM cutover)
+  `);
+  await pool.query(`
+    CREATE INDEX IF NOT EXISTS idx_quota_reservations_unsettled
+    ON quota_reservations (user_id, resource)
+    WHERE state IN ('pending', 'uncertain')
   `);
 
   // Phase 3: devices table for push notifications
@@ -598,6 +653,17 @@ async function initDBUnlocked(pool: pg.Pool): Promise<void> {
     )
   `);
   await pool.query(`CREATE INDEX IF NOT EXISTS idx_revoked_tokens_user ON revoked_tokens(user_id)`);
+  // M-5: revocations carry the token type and its own expiry so cleanup can
+  // not purge a still-valid refresh revocation on the 25h access schedule.
+  await pool.query(`ALTER TABLE revoked_tokens ADD COLUMN IF NOT EXISTS token_type VARCHAR(16)`);
+  await pool.query(`ALTER TABLE revoked_tokens ADD COLUMN IF NOT EXISTS expires_at TIMESTAMPTZ`);
+  // Legacy rows cannot prove their type: backfill them as refresh with the
+  // conservative 8-day retention instead of risking an early 25h purge.
+  await pool.query(
+    `UPDATE revoked_tokens
+     SET token_type = 'refresh', expires_at = revoked_at + interval '8 days'
+     WHERE token_type IS NULL`,
+  );
 
   // OAuth Device Flow: audit log table
   await pool.query(`
@@ -625,8 +691,361 @@ async function initDBUnlocked(pool: pg.Pool): Promise<void> {
   // User daemon limit control
   await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS max_daemons INT DEFAULT 1`);
 
+  // Email verification challenges: codes are stored only as peppered HMAC
+  // digests bound to purpose + normalized email + optional user scope. The
+  // failed-attempt budget survives resends (cooldowns update the digest but
+  // never reset failed_attempts) so a locked challenge cannot be unlocked by
+  // requesting a fresh code.
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS email_verification_challenges (
+      challenge_key VARCHAR(64) PRIMARY KEY,
+      purpose VARCHAR(16) NOT NULL,
+      normalized_email VARCHAR(254) NOT NULL,
+      user_id INT,
+      code_hmac CHAR(64) NOT NULL,
+      expires_at TIMESTAMPTZ NOT NULL,
+      last_sent_at TIMESTAMPTZ NOT NULL,
+      failed_attempts INT NOT NULL DEFAULT 0,
+      failure_window_started_at TIMESTAMPTZ,
+      locked_until TIMESTAMPTZ,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )
+  `);
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_email_challenges_expiry ON email_verification_challenges(expires_at)`);
+
+  // Shared atomic window counters for send/verify rate limiting across Relay
+  // instances (single-statement upsert keeps the check-and-count atomic).
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS auth_rate_limits (
+      limit_key VARCHAR(160) PRIMARY KEY,
+      window_started_at TIMESTAMPTZ NOT NULL,
+      count INT NOT NULL DEFAULT 0,
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )
+  `);
+
   await initDurableIngressSchema(pool);
   await initAttentionInboxSchema(pool);
+}
+
+export interface EmailChallengeSendDecision {
+  status: 'created' | 'cooldown';
+  retryAfterMs: number;
+}
+
+/**
+ * Create or refresh a challenge. The write is two single-statement operations
+ * so concurrent sends on the same key resolve atomically: INSERT ON CONFLICT
+ * DO NOTHING, then a guarded UPDATE whose cooldown predicate only one racer
+ * can satisfy. failed_attempts / lockout state is deliberately preserved so
+ * resending cannot reset an active attempt budget.
+ */
+export async function upsertEmailChallenge(
+  pool: pg.Pool,
+  params: {
+    challengeKey: string;
+    purpose: EmailChallengePurpose;
+    normalizedEmail: string;
+    userId: number | null;
+    codeHmac: string;
+    now: Date;
+    ttlMs?: number;
+    cooldownMs?: number;
+  },
+): Promise<EmailChallengeSendDecision> {
+  const ttlMs = params.ttlMs ?? CODE_TTL_MS;
+  const cooldownMs = params.cooldownMs ?? SEND_COOLDOWN_MS;
+  const expiresAt = new Date(params.now.getTime() + ttlMs);
+
+  const inserted = await pool.query(
+    `INSERT INTO email_verification_challenges
+       (challenge_key, purpose, normalized_email, user_id, code_hmac, expires_at, last_sent_at)
+     VALUES ($1, $2, $3, $4, $5, $6, $7)
+     ON CONFLICT (challenge_key) DO NOTHING`,
+    [params.challengeKey, params.purpose, params.normalizedEmail, params.userId,
+     params.codeHmac, expiresAt, params.now],
+  );
+  if (inserted.rowCount && inserted.rowCount > 0) {
+    return { status: 'created', retryAfterMs: 0 };
+  }
+
+  const updated = await pool.query(
+    `UPDATE email_verification_challenges
+     SET code_hmac = $2, expires_at = $3, last_sent_at = $4, updated_at = NOW()
+     WHERE challenge_key = $1 AND last_sent_at <= $4::timestamptz - make_interval(secs => $5::float8)
+     RETURNING last_sent_at`,
+    [params.challengeKey, params.codeHmac, expiresAt, params.now, cooldownMs / 1000],
+  );
+  if (updated.rowCount && updated.rowCount > 0) {
+    return { status: 'created', retryAfterMs: 0 };
+  }
+
+  const existing = await pool.query<{ last_sent_at: Date }>(
+    `SELECT last_sent_at FROM email_verification_challenges WHERE challenge_key = $1`,
+    [params.challengeKey],
+  );
+  const lastSent = existing.rows[0]?.last_sent_at
+  const retryAfterMs = lastSent
+    ? Math.max(1000, cooldownMs - (params.now.getTime() - new Date(lastSent).getTime()))
+    : cooldownMs;
+  return { status: 'cooldown', retryAfterMs };
+}
+
+export type EmailChallengeVerifyStatus = 'ok' | 'invalid' | 'expired' | 'locked' | 'not_found';
+
+/**
+ * Consume a challenge under FOR UPDATE: exactly one concurrent verify can
+ * succeed; wrong codes burn the attempt budget, and exhausting it inside the
+ * failure window locks the challenge (across resends) for LOCKOUT_MS. Expired
+ * challenges keep their row — deleting it would also drop the accumulated
+ * failure budget — and are reaped later by cleanExpiredEmailChallenges.
+ */
+export async function consumeEmailChallenge(
+  pool: pg.Pool,
+  params: {
+    challengeKey: string;
+    presentedCodeHmac: string;
+    now: Date;
+    maxAttempts?: number;
+    windowMs?: number;
+    lockoutMs?: number;
+  },
+): Promise<EmailChallengeVerifyStatus> {
+  const maxAttempts = params.maxAttempts ?? MAX_VERIFY_ATTEMPTS;
+  const windowMs = params.windowMs ?? FAILURE_WINDOW_MS;
+  const lockoutMs = params.lockoutMs ?? LOCKOUT_MS;
+
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const selected = await client.query<{
+      code_hmac: string;
+      expires_at: Date;
+      failed_attempts: number;
+      failure_window_started_at: Date | null;
+      locked_until: Date | null;
+    }>(
+      `SELECT code_hmac, expires_at, failed_attempts, failure_window_started_at, locked_until
+       FROM email_verification_challenges
+       WHERE challenge_key = $1
+       FOR UPDATE`,
+      [params.challengeKey],
+    );
+    const row = selected.rows[0];
+    if (!row) {
+      await client.query('COMMIT');
+      return 'not_found';
+    }
+    const nowMs = params.now.getTime();
+    if (row.locked_until && new Date(row.locked_until).getTime() > nowMs) {
+      await client.query('COMMIT');
+      return 'locked';
+    }
+    if (new Date(row.expires_at).getTime() <= nowMs) {
+      await client.query('COMMIT');
+      return 'expired';
+    }
+    if (digestEquals(params.presentedCodeHmac, String(row.code_hmac).slice(0, CODE_HMAC_LENGTH))) {
+      await client.query(
+        'DELETE FROM email_verification_challenges WHERE challenge_key = $1',
+        [params.challengeKey],
+      );
+      await client.query('COMMIT');
+      return 'ok';
+    }
+    const windowStartedAt = row.failure_window_started_at
+      ? new Date(row.failure_window_started_at).getTime()
+      : null;
+    const withinWindow = windowStartedAt !== null && nowMs - windowStartedAt <= windowMs;
+    const nextAttempts = withinWindow ? Number(row.failed_attempts) + 1 : 1;
+    const nextWindowStartedAt = withinWindow && windowStartedAt !== null
+      ? new Date(windowStartedAt)
+      : params.now;
+    const lockedUntil = nextAttempts >= maxAttempts
+      ? new Date(nowMs + lockoutMs)
+      : null;
+    await client.query(
+      `UPDATE email_verification_challenges
+       SET failed_attempts = $2, failure_window_started_at = $3, locked_until = $4, updated_at = NOW()
+       WHERE challenge_key = $1`,
+      [params.challengeKey, nextAttempts, nextWindowStartedAt, lockedUntil],
+    );
+    await client.query('COMMIT');
+    return 'invalid';
+  } catch (err) {
+    await client.query('ROLLBACK').catch(() => {});
+    throw err;
+  } finally {
+    client.release();
+  }
+}
+
+export interface AuthRateLimitDecision {
+  allowed: boolean;
+  retryAfterMs: number;
+  count: number;
+}
+
+/** Atomic fixed-window counter shared across Relay instances. */
+export async function hitAuthRateLimit(
+  pool: pg.Pool,
+  params: { limitKey: string; limit: number; windowMs: number; now: Date },
+): Promise<AuthRateLimitDecision> {
+  const result = await pool.query<{ count: number; window_started_at: Date }>(
+    `INSERT INTO auth_rate_limits (limit_key, window_started_at, count)
+     VALUES ($1, $2, 1)
+     ON CONFLICT (limit_key) DO UPDATE SET
+       count = CASE
+         WHEN auth_rate_limits.window_started_at <= $2::timestamptz - make_interval(secs => $3::float8)
+         THEN 1 ELSE auth_rate_limits.count + 1 END,
+       window_started_at = CASE
+         WHEN auth_rate_limits.window_started_at <= $2::timestamptz - make_interval(secs => $3::float8)
+         THEN $2 ELSE auth_rate_limits.window_started_at END,
+       updated_at = NOW()
+     RETURNING count, window_started_at`,
+    [params.limitKey, params.now, params.windowMs / 1000],
+  );
+  const row = result.rows[0];
+  const count = Number(row?.count ?? 0);
+  const allowed = count <= params.limit;
+  const retryAfterMs = allowed
+    ? 0
+    : Math.max(1000, new Date(row.window_started_at).getTime() + params.windowMs - params.now.getTime());
+  return { allowed, retryAfterMs, count };
+}
+
+/** Maintenance-only cleanup; never call on the request hot path. */
+export async function cleanExpiredEmailChallenges(pool: pg.Pool): Promise<number> {
+  const result = await pool.query(
+    `DELETE FROM email_verification_challenges
+     WHERE expires_at < NOW() - interval '24 hours'
+       AND (locked_until IS NULL OR locked_until < NOW() - interval '24 hours')`,
+  );
+  return result.rowCount ?? 0;
+}
+
+/** Maintenance-only cleanup for stale rate-limit windows. */
+export async function cleanStaleAuthRateLimits(pool: pg.Pool): Promise<number> {
+  const result = await pool.query(
+    `DELETE FROM auth_rate_limits WHERE window_started_at < NOW() - interval '48 hours'`,
+  );
+  return result.rowCount ?? 0;
+}
+
+export type EmailBindResult = 'ok' | 'conflict' | 'invalid_code' | 'invalid_user';
+
+/**
+ * Bind an email to an account only after the authenticated user proves
+ * ownership of the target address. The challenge consumption, the uniqueness
+ * check and the users.email update run in one transaction: a raced address is
+ * reported as conflict without overwriting the other owner, and a failed code
+ * leaves both the account and the challenge budget intact.
+ */
+export async function bindUserEmailWithChallenge(
+  pool: pg.Pool,
+  params: {
+    userId: number;
+    email: string;
+    presentedCodeHmac: string;
+    challengeKey: string;
+    now: Date;
+    maxAttempts?: number;
+    windowMs?: number;
+    lockoutMs?: number;
+  },
+): Promise<EmailBindResult> {
+  const maxAttempts = params.maxAttempts ?? MAX_VERIFY_ATTEMPTS;
+  const windowMs = params.windowMs ?? FAILURE_WINDOW_MS;
+  const lockoutMs = params.lockoutMs ?? LOCKOUT_MS;
+
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const selected = await client.query<{
+      code_hmac: string;
+      expires_at: Date;
+      failed_attempts: number;
+      failure_window_started_at: Date | null;
+      locked_until: Date | null;
+    }>(
+      `SELECT code_hmac, expires_at, failed_attempts, failure_window_started_at, locked_until
+       FROM email_verification_challenges
+       WHERE challenge_key = $1
+       FOR UPDATE`,
+      [params.challengeKey],
+    );
+    const row = selected.rows[0];
+    const nowMs = params.now.getTime();
+    const locked = Boolean(row?.locked_until && new Date(row.locked_until).getTime() > nowMs);
+    const expired = Boolean(row && new Date(row.expires_at).getTime() <= nowMs);
+    const codeMatches = Boolean(row)
+      && digestEquals(params.presentedCodeHmac, String(row.code_hmac).slice(0, CODE_HMAC_LENGTH));
+
+    if (!row || locked || expired || !codeMatches) {
+      if (row && !locked && !expired) {
+        // Wrong code: burn the attempt budget exactly like login challenges.
+        const windowStartedAt = row.failure_window_started_at
+          ? new Date(row.failure_window_started_at).getTime()
+          : null;
+        const withinWindow = windowStartedAt !== null && nowMs - windowStartedAt <= windowMs;
+        const nextAttempts = withinWindow ? Number(row.failed_attempts) + 1 : 1;
+        const nextWindowStartedAt = withinWindow && windowStartedAt !== null
+          ? new Date(windowStartedAt)
+          : params.now;
+        const lockedUntil = nextAttempts >= maxAttempts ? new Date(nowMs + lockoutMs) : null;
+        await client.query(
+          `UPDATE email_verification_challenges
+           SET failed_attempts = $2, failure_window_started_at = $3, locked_until = $4, updated_at = NOW()
+           WHERE challenge_key = $1`,
+          [params.challengeKey, nextAttempts, nextWindowStartedAt, lockedUntil],
+        );
+      }
+      await client.query('COMMIT');
+      return 'invalid_code';
+    }
+
+    const userExists = await client.query(
+      'SELECT id FROM users WHERE id = $1',
+      [params.userId],
+    );
+    if (!userExists.rowCount) {
+      await client.query('ROLLBACK');
+      return 'invalid_user';
+    }
+
+    let updated;
+    try {
+      updated = await client.query(
+        `UPDATE users SET email = $2 WHERE id = $1
+         AND NOT EXISTS (SELECT 1 FROM users other WHERE other.email = $2 AND other.id <> $1)
+         RETURNING id`,
+        [params.userId, params.email],
+      );
+    } catch (err: any) {
+      // Concurrent claim won the unique index between check and update.
+      if (err.code === '23505') {
+        await client.query('ROLLBACK');
+        return 'conflict';
+      }
+      throw err;
+    }
+    if (!updated.rowCount) {
+      await client.query('ROLLBACK');
+      return 'conflict';
+    }
+    await client.query(
+      'DELETE FROM email_verification_challenges WHERE challenge_key = $1',
+      [params.challengeKey],
+    );
+    await client.query('COMMIT');
+    return 'ok';
+  } catch (err) {
+    await client.query('ROLLBACK').catch(() => {});
+    throw err;
+  } finally {
+    client.release();
+  }
 }
 
 export async function upsertDaemon(pool: pg.Pool, daemonId: string, hostname: string, agents: any[], arch?: string, version?: string, startedAt?: number): Promise<void> {
@@ -955,14 +1374,6 @@ export async function getDaemonAlias(pool: pg.Pool, daemonId: string): Promise<s
   return result.rows[0]?.alias ?? null;
 }
 
-// getDaemonOwner returns the persisted owner (daemons.user_id) of a daemon, or
-// null if the daemon isn't bound to any user. Used by registerDaemon to recover
-// the owner when a reconnecting daemon's token doesn't carry a userId.
-export async function getDaemonOwner(pool: pg.Pool, daemonId: string): Promise<number | null> {
-  const result = await pool.query(`SELECT user_id FROM daemons WHERE daemon_id = $1`, [daemonId]);
-  return result.rows[0]?.user_id ?? null;
-}
-
 export async function updateHeartbeat(pool: pg.Pool, daemonId: string): Promise<void> {
   await pool.query(`UPDATE daemons SET last_heartbeat = NOW() WHERE daemon_id = $1`, [daemonId]);
 }
@@ -1039,6 +1450,7 @@ export async function persistEventWithEffect(
   eventType: string,
   payload: any,
   attempts = 5,
+  userId: number | null = null,
 ): Promise<PersistedEventEffect> {
   const persistedPayload = sanitizeJSONBPayload(payload);
   const payloadStr = JSON.stringify(persistedPayload);
@@ -1048,11 +1460,13 @@ export async function persistEventWithEffect(
   for (let i = 0; i < attempts; i++) {
     try {
       const result = await pool.query(
-        `INSERT INTO events (session_id, event_type, payload, event_hash, effect_status, effect_step)
-         VALUES ($1, $2, $3, $4, 'pending', 0)
-         ON CONFLICT (session_id, event_hash) DO UPDATE SET event_hash = EXCLUDED.event_hash
+        `INSERT INTO events (session_id, event_type, payload, event_hash, effect_status, effect_step, user_id)
+         VALUES ($1, $2, $3, $4, 'pending', 0, $5)
+         ON CONFLICT (session_id, event_hash) DO UPDATE
+         SET event_hash = EXCLUDED.event_hash,
+             user_id = COALESCE(events.user_id, EXCLUDED.user_id)
          RETURNING id, (xmax = 0) AS inserted, effect_status, effect_step`,
-        [sessionId, eventType, payloadStr, hash],
+        [sessionId, eventType, payloadStr, hash, userId],
       );
       const row = result.rows[0];
       if (!row) throw new Error('event ledger row unavailable');
@@ -1647,10 +2061,6 @@ function serializeSessionRow(row: any, byParent: Map<string, any[]>, sumChildren
     subagent_count: children.length,
     children,
   };
-}
-
-export async function listSessions(pool: pg.Pool): Promise<any[]> {
-  return listSessionsWithChildren(pool);
 }
 
 function decodeSessionListCursor(cursor?: string | null): SessionListCursor | null {
@@ -2369,6 +2779,13 @@ export async function deleteUserAccount(pool: pg.Pool, userId: number): Promise<
     );
     const sessionIds = sessions.rows.map((row: any) => row.session_id as string);
     const daemonIds = daemons.rows.map((row: any) => row.daemon_id as string);
+    const quotaFailureLedgerIds = daemonIds.map((daemonId) => {
+      const namespace = createHash('sha256')
+        .update(JSON.stringify([userId, daemonId]))
+        .digest('hex')
+        .slice(0, 48);
+      return `quota-failure:${namespace}`;
+    });
 
     await client.query(
       `DELETE FROM realtime_outbox
@@ -2376,7 +2793,10 @@ export async function deleteUserAccount(pool: pg.Pool, userId: number): Promise<
       [userId],
     );
     await client.query(`DELETE FROM event_inbox WHERE user_id = $1`, [userId]);
-    await client.query(`DELETE FROM events WHERE session_id = ANY($1::varchar[])`, [sessionIds]);
+    await client.query(
+      `DELETE FROM events WHERE session_id = ANY($1::varchar[])`,
+      [[...sessionIds, ...quotaFailureLedgerIds]],
+    );
     await client.query(`DELETE FROM subagents WHERE parent_session_id = ANY($1::varchar[])`, [sessionIds]);
     await client.query(`DELETE FROM subagent_usage_seen WHERE daemon_id = ANY($1::text[])`, [daemonIds]);
     await client.query(`DELETE FROM deleted_sessions WHERE session_id = ANY($1::varchar[])`, [sessionIds]);
@@ -2733,15 +3153,36 @@ export async function isTokenRevokedWithTimeout(
   }
 }
 
-/** Revoke a token by jti. */
-export async function revokeToken(pool: pg.Pool, jti: string, userId: number, reason: string): Promise<void> {
+/** Conservative retention upper bounds when the caller has no JWT exp handy. */
+export const REVOCATION_DEFAULT_RETENTION_MS = {
+  access: 24 * 3600_000,
+  refresh: 7 * 24 * 3600_000,
+} as const;
+
+/**
+ * Revoke a token by jti (M-5). When the caller knows the token's type/exp it
+ * must pass them so cleanup keeps the row exactly as long as the token could
+ * still be presented; without them the issuing TTL upper bound is used.
+ */
+export async function revokeToken(
+  pool: pg.Pool,
+  jti: string,
+  userId: number,
+  reason: string,
+  options?: { tokenType?: 'access' | 'refresh'; expiresAt?: Date },
+): Promise<void> {
+  const tokenType = options?.tokenType
+    ?? (reason === 'rotation' || reason === 'logout' ? 'refresh' : 'access');
+  const expiresAt = options?.expiresAt
+    ?? new Date(Date.now() + REVOCATION_DEFAULT_RETENTION_MS[tokenType]);
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
     await lockTokenRevocationFence(client, jti);
     await client.query(
-      `INSERT INTO revoked_tokens (jti, user_id, reason) VALUES ($1, $2, $3) ON CONFLICT DO NOTHING`,
-      [jti, userId, reason]
+      `INSERT INTO revoked_tokens (jti, user_id, reason, token_type, expires_at)
+       VALUES ($1, $2, $3, $4, $5) ON CONFLICT DO NOTHING`,
+      [jti, userId, reason, tokenType, expiresAt]
     );
     await client.query('COMMIT');
   } catch (error) {
@@ -2803,15 +3244,17 @@ export async function revokeAllUserTokens(pool: pg.Pool, userId: number, reason:
   );
 }
 
-/** Clean up expired entries from revoked_tokens.
- *  Access tokens expire in 24h → purge entries older than 25h.
- *  Refresh tokens expire in 7d → purge entries older than 8d. */
+/** M-5 cleanup: a revocation row is purged only after its own token has
+ *  expired plus a 1h clock-skew margin. Rows without an expiry (should not
+ *  exist after the backfill) are never purged. */
 export async function cleanRevokedTokens(pool: pg.Pool): Promise<{ accessPurged: number; refreshPurged: number }> {
   const accessResult = await pool.query(
-    `DELETE FROM revoked_tokens WHERE reason IN ('user_revoke', 'new_login', 'force_kick', 'logout', 'admin') AND revoked_at < NOW() - INTERVAL '25 hours'`
+    `DELETE FROM revoked_tokens
+     WHERE token_type = 'access' AND expires_at IS NOT NULL AND expires_at < NOW() - INTERVAL '1 hour'`
   );
   const refreshResult = await pool.query(
-    `DELETE FROM revoked_tokens WHERE reason = 'rotation' AND revoked_at < NOW() - INTERVAL '8 days'`
+    `DELETE FROM revoked_tokens
+     WHERE (token_type = 'refresh' OR token_type IS NULL) AND expires_at IS NOT NULL AND expires_at < NOW() - INTERVAL '1 hour'`
   );
   return {
     accessPurged: accessResult.rowCount ?? 0,

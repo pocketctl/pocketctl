@@ -315,12 +315,24 @@ func (sm *SessionManager) SendMessage(ctx context.Context, sessionID string, con
 	launcher := adapter.NewLauncher(agentType)
 	args := launcher.BuildResumeArgs(content, sessionID, protocol.SessionConfig{Permission: clonePermission(ps.Permission)})
 	ctx, cancel := context.WithCancel(ctx)
-	proc, err := sm.startResumeProcess(ctx, resumeLaunchSpec{Path: cliPath, Args: args, Dir: cwd})
+	entry, err := sm.reserveOwnedResume(sessionID, cancel)
 	if err != nil {
 		cancel()
 		return err
 	}
-	entry := sm.registerOwnedResume(sessionID, cancel, proc)
+	proc, err := sm.startResumeProcess(ctx, resumeLaunchSpec{Path: cliPath, Args: args, Dir: cwd})
+	if err != nil {
+		cancel()
+		sm.finishOwnedResume(entry, err)
+		return err
+	}
+	if !sm.attachOwnedResume(entry, proc) {
+		cancel()
+		_ = proc.Kill()
+		waitErr := proc.Wait()
+		sm.finishOwnedResume(entry, waitErr)
+		return errResumeShuttingDown
+	}
 
 	adp := sm.newStreamAdapter(ps, agentType, content)
 	sm.mu.Lock()
@@ -339,8 +351,8 @@ func (sm *SessionManager) SendMessage(ctx context.Context, sessionID string, con
 	go func() {
 		sm.drainStreamOutput(proc.Stdout(), adp, ps)
 		waitErr := proc.Wait()
-		sm.finishOwnedResume(entry, waitErr)
 		sm.finalizeProcessExit(ctx, waitErr, ps)
+		sm.finishOwnedResume(entry, waitErr)
 	}()
 	return nil
 }
@@ -392,13 +404,25 @@ func (sm *SessionManager) sendToIdleTerminal(ctx context.Context, ps *ProcessSta
 	launcher := adapter.NewLauncher(agentType)
 	args := launcher.BuildResumeArgs(content, ps.SessionID, protocol.SessionConfig{Permission: clonePermission(ps.Permission)})
 	ctx, cancel := context.WithCancel(ctx)
-	// D1: capture stdout stream-json + adapter (unified command feedback path, like daemon sessions).
-	proc, err := sm.startResumeProcess(ctx, resumeLaunchSpec{Path: cliPath, Args: args, Dir: ps.Cwd})
+	entry, err := sm.reserveOwnedResume(ps.SessionID, cancel)
 	if err != nil {
 		cancel()
 		return err
 	}
-	entry := sm.registerOwnedResume(ps.SessionID, cancel, proc)
+	// D1: capture stdout stream-json + adapter (unified command feedback path, like daemon sessions).
+	proc, err := sm.startResumeProcess(ctx, resumeLaunchSpec{Path: cliPath, Args: args, Dir: ps.Cwd})
+	if err != nil {
+		cancel()
+		sm.finishOwnedResume(entry, err)
+		return err
+	}
+	if !sm.attachOwnedResume(entry, proc) {
+		cancel()
+		_ = proc.Kill()
+		waitErr := proc.Wait()
+		sm.finishOwnedResume(entry, waitErr)
+		return errResumeShuttingDown
+	}
 
 	adp := sm.newStreamAdapter(ps, agentType, content)
 	now := time.Now()
@@ -451,23 +475,35 @@ func (sm *SessionManager) sendToIdleTerminal(ctx context.Context, ps *ProcessSta
 				sm.outputCh <- evt
 			}
 		}
-		proc.Wait()
-		sm.finishOwnedResume(entry, nil)
+		waitErr := proc.Wait()
 		resumeNow := time.Now()
+		status := protocol.StatusIdle
+		if waitErr != nil {
+			status = protocol.StatusError
+			if ctx.Err() == context.Canceled {
+				status = protocol.StatusKilled
+			}
+		}
 		sm.mu.Lock()
-		// Terminal process is still alive, so go back to idle
-		ps.Status = protocol.StatusIdle
+		// Only a successful one-shot returns the still-live terminal session to
+		// idle. Preserve failures so callers do not mistake a rejected resume for
+		// a completed turn.
+		ps.Status = status
 		ps.LastActivityAt = resumeNow
 		sm.mu.Unlock()
+		sm.finishOwnedResume(entry, waitErr)
 
 		sm.outputCh <- protocol.DaemonEvent{
 			Type:           "session_status",
 			SessionID:      ps.SessionID,
-			Status:         protocol.StatusIdle,
-			LastActivityAt: time.Now().UTC().Format(time.RFC3339),
+			Status:         status,
+			LastActivityAt: resumeNow.UTC().Format(time.RFC3339),
 		}
 
-		// Trigger notification callback
+		if waitErr != nil {
+			return
+		}
+		// Trigger notification callback only after a successful resume.
 		if sm.OnNotifyTerminal != nil {
 			sm.OnNotifyTerminal(ps.SessionID, ps.TTY)
 		}

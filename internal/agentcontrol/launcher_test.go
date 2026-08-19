@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -49,11 +50,12 @@ func TestOpenCodeLauncherDaemonUnavailableFallsBack(t *testing.T) {
 
 func TestOpenCodeLauncherDefaultAllowsManagedPreparationPastConnectBudget(t *testing.T) {
 	launcher := NewLauncher()
+	daemonBinary := validatedTestExecutable(t, "daemon-opencode")
 	var executed ExecSpec
 	launcher.Acquire = func(ctx context.Context, _ AcquirePayload) (AcquireResult, error) {
 		select {
 		case <-time.After(2 * DefaultLauncherTimeout):
-			return AcquireResult{Mode: string(LaunchManaged), BaseURL: "http://127.0.0.1:4096", RealBinary: "/daemon/opencode"}, nil
+			return AcquireResult{Mode: string(LaunchManaged), BaseURL: "http://127.0.0.1:4096", RealBinary: daemonBinary}, nil
 		case <-ctx.Done():
 			return AcquireResult{}, ctx.Err()
 		}
@@ -66,7 +68,7 @@ func TestOpenCodeLauncherDefaultAllowsManagedPreparationPastConnectBudget(t *tes
 	if err := launcher.Run(context.Background(), nil, "/repo"); err != nil {
 		t.Fatal(err)
 	}
-	if executed.Path != "/daemon/opencode" || len(executed.Args) == 0 || executed.Args[0] != "attach" {
+	if executed.Path != daemonBinary || len(executed.Args) == 0 || executed.Args[0] != "attach" {
 		t.Fatalf("slow managed preparation fell back to native: %+v", executed)
 	}
 }
@@ -93,12 +95,13 @@ func TestOpenCodeLauncherNativePlanDoesNotDial(t *testing.T) {
 
 func TestOpenCodeLauncherManagedAttachKeepsPasswordOutOfArgs(t *testing.T) {
 	repo := t.TempDir()
+	daemonBinary := validatedTestExecutable(t, "daemon-opencode")
 	var payload AcquirePayload
 	var executed ExecSpec
 	launcher := Launcher{
 		Acquire: func(_ context.Context, got AcquirePayload) (AcquireResult, error) {
 			payload = got
-			return AcquireResult{Mode: string(LaunchManaged), BaseURL: "http://127.0.0.1:4096", Password: "secret", Username: "pocketctl", RealBinary: "/daemon/opencode", ResolvedSessionID: "ses_1"}, nil
+			return AcquireResult{Mode: string(LaunchManaged), BaseURL: "http://127.0.0.1:4096", Password: "secret", Username: "pocketctl", RealBinary: daemonBinary, ResolvedSessionID: "ses_1"}, nil
 		},
 		ResolveBinary: func() (string, error) { return "/fallback/opencode", nil },
 		Execute:       func(spec ExecSpec) error { executed = spec; return nil },
@@ -110,7 +113,7 @@ func TestOpenCodeLauncherManagedAttachKeepsPasswordOutOfArgs(t *testing.T) {
 	if payload.Intent != IntentResume || payload.SessionID != "ses_1" || payload.CWD != repo || payload.OperationID == "" {
 		t.Fatalf("payload=%+v", payload)
 	}
-	if executed.Path != "/daemon/opencode" || strings.Contains(strings.Join(executed.Args, " "), "secret") {
+	if executed.Path != daemonBinary || strings.Contains(strings.Join(executed.Args, " "), "secret") {
 		t.Fatalf("exec=%+v", executed)
 	}
 	if got := envValue(executed.Env, "OPENCODE_SERVER_PASSWORD"); got != "secret" {
@@ -124,9 +127,10 @@ func TestOpenCodeLauncherManagedAttachKeepsPasswordOutOfArgs(t *testing.T) {
 func TestOpenCodeLauncherManagedProcessBindsAndReleasesLease(t *testing.T) {
 	var bound LeaseBindPayload
 	var released ReleasePayload
+	daemonBinary := validatedTestExecutable(t, "daemon-opencode")
 	launcher := Launcher{
 		Acquire: func(context.Context, AcquirePayload) (AcquireResult, error) {
-			return AcquireResult{Mode: string(LaunchManaged), BaseURL: "http://127.0.0.1:4096", RealBinary: "/daemon/opencode", LeaseID: "lease-1"}, nil
+			return AcquireResult{Mode: string(LaunchManaged), BaseURL: "http://127.0.0.1:4096", RealBinary: daemonBinary, LeaseID: "lease-1"}, nil
 		},
 		BindLease: func(_ context.Context, payload LeaseBindPayload) error { bound = payload; return nil },
 		Release:   func(_ context.Context, payload ReleasePayload) error { released = payload; return nil },
@@ -151,9 +155,10 @@ func TestOpenCodeLauncherManagedProcessBindsAndReleasesLease(t *testing.T) {
 
 func TestOpenCodeLauncherNativeResponseDoesNotLeakCredentials(t *testing.T) {
 	var executed ExecSpec
+	realBinary := validatedTestExecutable(t, "real-opencode")
 	launcher := Launcher{
 		Acquire: func(context.Context, AcquirePayload) (AcquireResult, error) {
-			return AcquireResult{Mode: string(LaunchNative), RealBinary: "/real/opencode", Password: "must-not-leak", Reason: "disabled"}, nil
+			return AcquireResult{Mode: string(LaunchNative), RealBinary: realBinary, Password: "must-not-leak", Reason: "disabled"}, nil
 		},
 		ResolveBinary: func() (string, error) { return "", errors.New("should not resolve") },
 		Execute:       func(spec ExecSpec) error { executed = spec; return nil },
@@ -162,8 +167,59 @@ func TestOpenCodeLauncherNativeResponseDoesNotLeakCredentials(t *testing.T) {
 	if err := launcher.Run(context.Background(), []string{"-c"}, "/repo"); err != nil {
 		t.Fatal(err)
 	}
-	if executed.Path != "/real/opencode" || envValue(executed.Env, "OPENCODE_SERVER_PASSWORD") != "" {
+	if executed.Path != realBinary || envValue(executed.Env, "OPENCODE_SERVER_PASSWORD") != "" {
 		t.Fatalf("exec=%+v", executed)
+	}
+}
+
+func TestOpenCodeLauncherRejectsOwnedShimFromDaemonNativeResponse(t *testing.T) {
+	ownedShim := filepath.Join(t.TempDir(), "opencode")
+	writeShimFixture(t, ownedShim, "#!/bin/sh\n"+launcherMarkerV3Unix+"\nexit 0\n")
+	realBinary := testExecutable(t, "real-opencode")
+	resolved := false
+	var executed ExecSpec
+	launcher := Launcher{
+		Acquire: func(context.Context, AcquirePayload) (AcquireResult, error) {
+			return AcquireResult{Mode: string(LaunchNative), RealBinary: ownedShim, Reason: "disabled"}, nil
+		},
+		ResolveBinary: func() (string, error) {
+			resolved = true
+			return realBinary, nil
+		},
+		Execute: func(spec ExecSpec) error { executed = spec; return nil },
+		Environ: func() []string {
+			return []string{launcherEnvDepth + "=1", launcherEnvRealBinary + "=" + realBinary, "KEEP=yes"}
+		},
+	}
+
+	if err := launcher.Run(context.Background(), nil, t.TempDir()); err != nil {
+		t.Fatal(err)
+	}
+	if !resolved || executed.Path != realBinary {
+		t.Fatalf("resolved=%v exec path=%q, want validated fallback %q", resolved, executed.Path, realBinary)
+	}
+	if got := executed.Env; !reflect.DeepEqual(got, []string{"KEEP=yes"}) {
+		t.Fatalf("internal launcher env leaked: %v", got)
+	}
+}
+
+func TestOpenCodeLauncherRejectsOwnedShimFromDaemonManagedResponse(t *testing.T) {
+	ownedShim := filepath.Join(t.TempDir(), "opencode")
+	writeShimFixture(t, ownedShim, "#!/bin/sh\n"+launcherMarkerV3Unix+"\nexit 0\n")
+	executed := false
+	launcher := Launcher{
+		Acquire: func(context.Context, AcquirePayload) (AcquireResult, error) {
+			return AcquireResult{Mode: string(LaunchManaged), BaseURL: "http://127.0.0.1:4096", RealBinary: ownedShim}, nil
+		},
+		Execute: func(ExecSpec) error { executed = true; return nil },
+		Environ: os.Environ,
+	}
+
+	if err := launcher.Run(context.Background(), nil, t.TempDir()); err == nil {
+		t.Fatal("managed daemon response pointing at an owned shim must fail closed")
+	}
+	if executed {
+		t.Fatal("owned daemon shim was executed")
 	}
 }
 

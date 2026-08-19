@@ -684,10 +684,10 @@ describe('Router - daemon disconnect', () => {
       daemon_id: 'daemon-1',
       hostname: 'test-macbook',
       agents: ['claude-code'],
-    }, null)
+    }, 1)
 
     const clientWs = createMockWs()
-    router.registerClient(clientWs, null)
+    router.registerClient(clientWs, 1)
 
     router.unregisterDaemon('daemon-1')
     // Offline is now deferred behind the grace window (20ms), then broadcast
@@ -703,7 +703,7 @@ describe('Router - daemon disconnect', () => {
 
   test('unregisterDaemon does not overwrite subscribed session lifecycle with disconnected', async () => {
     const daemonWs = createMockWs()
-    await router.registerDaemon(daemonWs, { type: 'register', daemon_id: 'daemon-1', hostname: 'test', agents: [] }, null)
+    await router.registerDaemon(daemonWs, { type: 'register', daemon_id: 'daemon-1', hostname: 'test', agents: [] }, 1)
 
     const clientWs = createMockWs()
     router.registerClient(clientWs, 1)
@@ -726,7 +726,7 @@ describe('Router - daemon disconnect', () => {
 
   test('unregisterDaemon does NOT persist disconnected to DB', async () => {
     const daemonWs = createMockWs()
-    await router.registerDaemon(daemonWs, { type: 'register', daemon_id: 'daemon-1', hostname: 'test', agents: [] }, null)
+    await router.registerDaemon(daemonWs, { type: 'register', daemon_id: 'daemon-1', hostname: 'test', agents: [] }, 1)
     router.unregisterDaemon('daemon-1')
     await new Promise(r => setTimeout(r, 80))
 
@@ -794,12 +794,12 @@ describe('Router - daemon reconnect', () => {
 
   test('registerDaemon broadcasts daemon_status: online with hostname and agents', async () => {
     const clientWs = createMockWs()
-    router.registerClient(clientWs, null)
+    router.registerClient(clientWs, 1)
 
     const daemonWs = createMockWs()
     await router.registerDaemon(daemonWs, {
       type: 'register', daemon_id: 'daemon-2', hostname: 'mac-pro', agents: ['claude-code', 'opencode'],
-    }, null)
+    }, 1)
 
     const onlineEvent = clientWs._sent.find((m: any) => m.type === 'daemon_status' && m.status === 'online')
     expect(onlineEvent).toBeDefined()
@@ -822,7 +822,7 @@ describe('Router - session_status with exit_reason', () => {
 
   test('session_status is UPDATE-only and never INSERTs a (phantom) session row', async () => {
     const daemonWs = createMockWs()
-    router.registerDaemon(daemonWs, { type: 'register', daemon_id: 'daemon-1', hostname: 'test', agents: [] }, null)
+    router.registerDaemon(daemonWs, { type: 'register', daemon_id: 'daemon-1', hostname: 'test', agents: [] }, 1)
 
     router.handleDaemonMessage('daemon-1', {
       type: 'session_status', session_id: 'sess-exit', status: 'exited', exit_reason: 'user_interrupt',
@@ -849,7 +849,7 @@ describe('Router - session_status with exit_reason', () => {
 
   test('session_status without exit_reason does not null existing reason (COALESCE)', async () => {
     const daemonWs = createMockWs()
-    router.registerDaemon(daemonWs, { type: 'register', daemon_id: 'daemon-1', hostname: 'test', agents: [] }, null)
+    router.registerDaemon(daemonWs, { type: 'register', daemon_id: 'daemon-1', hostname: 'test', agents: [] }, 1)
 
     router.handleDaemonMessage('daemon-1', {
       type: 'session_status', session_id: 'sess-2', status: 'exited', exit_reason: 'normal_exit',
@@ -882,7 +882,7 @@ describe('Router - event insertion updates last_activity_at', () => {
 
   test('insertEvent triggers last_activity_at update', async () => {
     const daemonWs = createMockWs()
-    router.registerDaemon(daemonWs, { type: 'register', daemon_id: 'daemon-1', hostname: 'test', agents: [] }, null)
+    router.registerDaemon(daemonWs, { type: 'register', daemon_id: 'daemon-1', hostname: 'test', agents: [] }, 1)
 
     router.handleDaemonMessage('daemon-1', {
       type: 'agent_text', session_id: 'sess-3', text: 'hello', streaming: false,
@@ -998,7 +998,7 @@ describe('Router - list_sessions includes extended fields', () => {
 
   test('handleListSessions returns daemon_online field', async () => {
     const clientWs = createMockWs()
-    router.registerClient(clientWs, null)
+    router.registerClient(clientWs, 1)
 
     router.handleClientMessage(clientWs, { type: 'list_sessions' })
 
@@ -1087,7 +1087,7 @@ describe('Router - session→daemon routing resilience', () => {
     await router.registerDaemon(daemonWs, {
       type: 'register', daemon_id: 'daemon-1', hostname: 'test', agents: [],
       active_session_ids: ['sess-a', 'sess-b'],
-    }, null)
+    }, 1)
     // rebuildSessionRoutes fires async on register — let it settle.
     await new Promise(r => setTimeout(r, 20))
 
@@ -1121,14 +1121,14 @@ describe('Router - session→daemon routing resilience', () => {
     const r = new Router(reconcilePool)
 
     const clientWs = createMockWs()
-    r.registerClient(clientWs, null)
+    r.registerClient(clientWs, 1)
 
     const daemonWs = createMockWs()
     // Daemon reports only 'live-1' as active; 'zombie-1' is stale running/busy in DB.
     await r.registerDaemon(daemonWs, {
       type: 'register', daemon_id: 'daemon-1', hostname: 'test', agents: [],
       active_session_ids: ['live-1'],
-    }, null)
+    }, 1)
     await new Promise(res => setTimeout(res, 20))
 
     // Reconcile UPDATE ran with the daemon's live set as the exclusion array.
@@ -1152,7 +1152,7 @@ describe('Router - session→daemon routing resilience', () => {
     const r = new Router(reconcilePool)
     const daemonWs = createMockWs()
     // No active_session_ids field → must NOT run the reconcile UPDATE.
-    await r.registerDaemon(daemonWs, { type: 'register', daemon_id: 'daemon-1', hostname: 'test', agents: [] }, null)
+    await r.registerDaemon(daemonWs, { type: 'register', daemon_id: 'daemon-1', hostname: 'test', agents: [] }, 1)
     await new Promise(res => setTimeout(res, 20))
 
     const ranReconcile = reconcilePool.query.mock.calls.some(
@@ -1163,7 +1163,7 @@ describe('Router - session→daemon routing resilience', () => {
 
   test('routing falls back to DB daemon_id when in-memory map misses', async () => {
     const daemonWs = createMockWs()
-    await router.registerDaemon(daemonWs, { type: 'register', daemon_id: 'daemon-1', hostname: 'test', agents: [] }, null)
+    await router.registerDaemon(daemonWs, { type: 'register', daemon_id: 'daemon-1', hostname: 'test', agents: [] }, 1)
     await new Promise(r => setTimeout(r, 20))
 
     const clientWs = createMockWs()
@@ -1197,7 +1197,7 @@ describe('Router - session→daemon routing resilience', () => {
     await router.registerDaemon(daemonWs, {
       type: 'register', daemon_id: 'daemon-1', hostname: 'test', agents: [],
       active_session_ids: ['sess-a'],
-    }, null)
+    }, 1)
     await new Promise(r => setTimeout(r, 20))
 
     router.unregisterDaemon('daemon-1')
@@ -1413,7 +1413,7 @@ describe('Router - event delivery dedup + ack', () => {
       },
     })
     const daemonWs = createMockWs()
-    await router.registerDaemon(daemonWs, { type: 'register', daemon_id: 'daemon-1', hostname: 'h', agents: [], started_at: 100 }, null)
+    await router.registerDaemon(daemonWs, { type: 'register', daemon_id: 'daemon-1', hostname: 'h', agents: [], started_at: 100 }, 1)
     const ack = daemonWs._sent.find((m: any) => m.type === 'register_ack')
     expect(ack).toEqual(expect.objectContaining({
       supports_event_ack: true,
@@ -1425,7 +1425,7 @@ describe('Router - event delivery dedup + ack', () => {
 
   test('an already-persisted seq is dropped on replay; a new seq is forwarded', async () => {
     const daemonWs = createMockWs()
-    await router.registerDaemon(daemonWs, { type: 'register', daemon_id: 'daemon-1', hostname: 'h', agents: [], started_at: 100 }, null)
+    await router.registerDaemon(daemonWs, { type: 'register', daemon_id: 'daemon-1', hostname: 'h', agents: [], started_at: 100 }, 1)
     const clientWs = createMockWs()
     router.registerClient(clientWs, 1)
     await router.handleClientMessage(clientWs, { type: 'replay', session_id: 'sess-1', last_seq: 0 }) // subscribe
@@ -1583,7 +1583,7 @@ describe('Router - event delivery dedup + ack', () => {
   expect(daemonWs._sent.find((m: any) => m.type === 'event_ack')?.up_to_seq).toBe(2)
   })
 
-  test.each(['session_created', 'session_discovered'])(
+  test.each(['session_discovered'])(
   '%s upsert replay only fans out the inserted event while acking both seqs',
   async (type) => {
     const dedupPool = createMockPool([51, 0])
@@ -1678,9 +1678,9 @@ describe('Router - event delivery dedup + ack', () => {
   }
   const r = new Router(orderedPool)
   const daemonWs = createMockWs()
-  await r.registerDaemon(daemonWs, { type: 'register', daemon_id: 'daemon-1', hostname: 'h', agents: [], started_at: 100 }, null)
+  await r.registerDaemon(daemonWs, { type: 'register', daemon_id: 'daemon-1', hostname: 'h', agents: [], started_at: 100 }, 1)
   const clientWs = createMockWs()
-  r.registerClient(clientWs, null)
+  r.registerClient(clientWs, 1)
   ;(r as any).clients.get(clientWs).subscribedSessions.add('sess-1')
   clientWs._sent.length = 0
   r.handleDaemonMessage('daemon-1', { type: 'session_model_changed', session_id: 'sess-1', event_id: 'model:first', model: 'first', seq: 1 })
@@ -1713,6 +1713,17 @@ describe('Router - event delivery dedup + ack', () => {
     let eventID = 0
     const orderedPool: any = {
       query: vi.fn((sql: string) => {
+        if (sql.includes('WITH target AS MATERIALIZED')) {
+          return Promise.resolve({ rows: [{ matched: true, changed: true }], rowCount: 1 })
+        }
+        if (sql.includes('FROM quota_reservations reservation')) {
+          return Promise.resolve({ rows: [{
+            id: '00000000-0000-0000-0000-000000000771',
+            resource: 'concurrent_session', operation: 'create', daemon_id: 'daemon-1',
+            session_id: null, state: 'pending', settlement_reason: null,
+            agent_type: 'codex', cwd: '/repo', hostname: 'h',
+          }], rowCount: 1 })
+        }
         if (sql.includes('INSERT INTO events')) return Promise.resolve({ rows: [{ id: ++eventID }] })
         if (sql.includes('INSERT INTO sessions')) {
           writes.push('create')
@@ -1729,8 +1740,11 @@ describe('Router - event delivery dedup + ack', () => {
     }
     const r = new Router(orderedPool)
     const daemonWs = createMockWs()
-    await r.registerDaemon(daemonWs, { type: 'register', daemon_id: 'daemon-1', hostname: 'h', agents: [], started_at: 100 }, null)
-    r.handleDaemonMessage('daemon-1', { type: 'session_created', session_id: 'sess-1', event_id: 'create', seq: 1 })
+    await r.registerDaemon(daemonWs, { type: 'register', daemon_id: 'daemon-1', hostname: 'h', agents: [], started_at: 100 }, 1)
+    r.handleDaemonMessage('daemon-1', {
+      type: 'session_created', session_id: 'sess-1', event_id: 'create',
+      request_id: 'create-request', seq: 1,
+    })
     r.handleDaemonMessage('daemon-1', { type: 'session_status', session_id: 'sess-1', event_id: 'status', status: 'completed', seq: 2 })
     await tick()
     expect(writes).toEqual(['create'])
@@ -1751,7 +1765,7 @@ describe('Router - event delivery dedup + ack', () => {
   }
   const r = new Router(rejectedPool)
   const daemonWs = createMockWs()
-  await r.registerDaemon(daemonWs, { type: 'register', daemon_id: 'daemon-1', hostname: 'h', agents: [], started_at: 100 }, null)
+  await r.registerDaemon(daemonWs, { type: 'register', daemon_id: 'daemon-1', hostname: 'h', agents: [], started_at: 100 }, 1)
   const clientWs = createMockWs()
   r.registerClient(clientWs, null)
   clientWs._sent.length = 0
@@ -1785,7 +1799,7 @@ describe('Router - event delivery dedup + ack', () => {
     }
     const r = new Router(missingRootPool)
     const daemonWs = createMockWs()
-    await r.registerDaemon(daemonWs, { type: 'register', daemon_id: 'daemon-1', hostname: 'h', agents: [], started_at: 100 }, null)
+    await r.registerDaemon(daemonWs, { type: 'register', daemon_id: 'daemon-1', hostname: 'h', agents: [], started_at: 100 }, 1)
 
     r.handleDaemonMessage('daemon-1', {
       type: 'agent_text', session_id: 'root-not-yet-discovered', agent_id: 'child-1', is_subagent: true,
@@ -1799,7 +1813,7 @@ describe('Router - event delivery dedup + ack', () => {
 
   test('ping piggybacks event_ack with the highest CONTIGUOUS persisted seq', async () => {
     const daemonWs = createMockWs()
-    await router.registerDaemon(daemonWs, { type: 'register', daemon_id: 'daemon-1', hostname: 'h', agents: [], started_at: 100 }, null)
+    await router.registerDaemon(daemonWs, { type: 'register', daemon_id: 'daemon-1', hostname: 'h', agents: [], started_at: 100 }, 1)
     router.handleDaemonMessage('daemon-1', { type: 'agent_text', session_id: 'sess-1', text: 'a', seq: 1 })
     router.handleDaemonMessage('daemon-1', { type: 'agent_text', session_id: 'sess-1', text: 'b', seq: 2 })
     router.handleDaemonMessage('daemon-1', { type: 'agent_text', session_id: 'sess-1', text: 'c', seq: 3 })
@@ -1829,7 +1843,7 @@ describe('Router - event delivery dedup + ack', () => {
     }
     const r = new Router(inflightPool)
     const daemonWs = createMockWs()
-    await r.registerDaemon(daemonWs, { type: 'register', daemon_id: 'daemon-1', hostname: 'h', agents: [], started_at: 100 }, null)
+    await r.registerDaemon(daemonWs, { type: 'register', daemon_id: 'daemon-1', hostname: 'h', agents: [], started_at: 100 }, 1)
     const event = { type: 'agent_text', session_id: 'sess-1', event_id: 'same', text: 'hello', seq: 1 }
     r.handleDaemonMessage('daemon-1', event)
     r.handleDaemonMessage('daemon-1', event)
@@ -1862,11 +1876,11 @@ describe('Router - event delivery dedup + ack', () => {
     }
     const r = new Router(racePool)
     const oldWs = createMockWs()
-    await r.registerDaemon(oldWs, { type: 'register', daemon_id: 'daemon-1', hostname: 'h', agents: [], started_at: 100 }, null)
+    await r.registerDaemon(oldWs, { type: 'register', daemon_id: 'daemon-1', hostname: 'h', agents: [], started_at: 100 }, 1)
     r.handleDaemonMessage('daemon-1', { type: 'session_model_changed', session_id: 'sess-1', event_id: 'old', model: 'old', seq: 7 })
 
     const newWs = createMockWs()
-    await r.registerDaemon(newWs, { type: 'register', daemon_id: 'daemon-1', hostname: 'h', agents: [], started_at: 200 }, null)
+    await r.registerDaemon(newWs, { type: 'register', daemon_id: 'daemon-1', hostname: 'h', agents: [], started_at: 200 }, 1)
     r.handleDaemonMessage('daemon-1', { type: 'session_model_changed', session_id: 'sess-1', event_id: 'new', model: 'new', seq: 1 })
 
     releases.get('old')!({ rows: [{ id: 1 }] })
@@ -1903,8 +1917,8 @@ describe('Router - event delivery dedup + ack', () => {
     const r = new Router(pool)
     const oldWs = createMockWs()
     const newWs = createMockWs()
-    await r.registerDaemon(oldWs, { type: 'register', daemon_id: 'daemon-1', hostname: 'old', agents: [], started_at: 100 }, null)
-    await r.registerDaemon(newWs, { type: 'register', daemon_id: 'daemon-1', hostname: 'new', agents: [], started_at: 200 }, null)
+    await r.registerDaemon(oldWs, { type: 'register', daemon_id: 'daemon-1', hostname: 'old', agents: [], started_at: 100 }, 1)
+    await r.registerDaemon(newWs, { type: 'register', daemon_id: 'daemon-1', hostname: 'new', agents: [], started_at: 200 }, 1)
 
     expect(oldWs.close).toHaveBeenCalledWith(4009, 'replaced by new incarnation')
     r.handleDaemonMessage('daemon-1', {
@@ -1926,10 +1940,10 @@ describe('Router - event delivery dedup + ack', () => {
     const oldWs = createMockWs()
     const middleWs = createMockWs()
     const newestWs = createMockWs()
-    await r.registerDaemon(oldWs, { type: 'register', daemon_id: 'daemon-1', hostname: 'old', agents: [], started_at: 100 }, null)
+    await r.registerDaemon(oldWs, { type: 'register', daemon_id: 'daemon-1', hostname: 'old', agents: [], started_at: 100 }, 1)
     await Promise.all([
-      r.registerDaemon(middleWs, { type: 'register', daemon_id: 'daemon-1', hostname: 'middle', agents: [], started_at: 200 }, null),
-      r.registerDaemon(newestWs, { type: 'register', daemon_id: 'daemon-1', hostname: 'newest', agents: [], started_at: 300 }, null),
+      r.registerDaemon(middleWs, { type: 'register', daemon_id: 'daemon-1', hostname: 'middle', agents: [], started_at: 200 }, 1),
+      r.registerDaemon(newestWs, { type: 'register', daemon_id: 'daemon-1', hostname: 'newest', agents: [], started_at: 300 }, 1),
     ])
 
     expect(oldWs.close).toHaveBeenCalledWith(4009, 'replaced by new incarnation')
@@ -1954,7 +1968,7 @@ describe('Router - event delivery dedup + ack', () => {
     const ws = createMockWs()
     const registering = r.registerDaemon(ws, {
       type: 'register', daemon_id: 'daemon-1', hostname: 'h', agents: [], started_at: 100,
-    }, null)
+    }, 1)
     while (!releaseUpsert) await Promise.resolve()
     ws.readyState = 3
     releaseUpsert()
@@ -1975,10 +1989,10 @@ describe('Router - event delivery dedup + ack', () => {
     const second = createMockWs()
     await expect(r.registerDaemon(first, {
       type: 'register', daemon_id: 'daemon-1', hostname: 'one', agents: [], started_at: 100,
-    }, null)).resolves.toBe(true)
+    }, 1)).resolves.toBe(true)
     await expect(r.registerDaemon(second, {
       type: 'register', daemon_id: 'daemon-1', hostname: 'two', agents: [], started_at: 200,
-    }, null)).resolves.toBe(true)
+    }, 1)).resolves.toBe(true)
     expect((r as any).daemons.get('daemon-1').ws).toBe(second)
   })
 
@@ -1995,11 +2009,11 @@ describe('Router - event delivery dedup + ack', () => {
     ])
     expect(await outcome(r.registerDaemon(createMockWs(), {
       type: 'register', daemon_id: 'daemon-1', hostname: 'one', agents: [], started_at: 100,
-    }, null))).toBe('registered')
+    }, 1))).toBe('registered')
     const contender = createMockWs()
     expect(await outcome(r.registerDaemon(contender, {
       type: 'register', daemon_id: 'daemon-1', hostname: 'two', agents: [], started_at: 200,
-    }, null))).toBe('registered')
+    }, 1))).toBe('registered')
     expect((r as any).daemons.get('daemon-1').ws).toBe(contender)
   })
 
@@ -2010,15 +2024,15 @@ describe('Router - event delivery dedup + ack', () => {
       .mockResolvedValueOnce([])
     const r = new Router(createMockPool())
     const client = createMockWs()
-    r.registerClient(client, null)
+    r.registerClient(client, 1)
     await r.registerDaemon(createMockWs(), {
       type: 'register', daemon_id: 'daemon-1', hostname: 'old', agents: [], started_at: 100,
       active_session_ids: ['A'],
-    }, null)
+    }, 1)
     await r.registerDaemon(createMockWs(), {
       type: 'register', daemon_id: 'daemon-1', hostname: 'new', agents: [], started_at: 200,
       active_session_ids: ['B'],
-    }, null)
+    }, 1)
     client._sent.length = 0
     releaseOld(['B'])
     await tick()
@@ -2033,15 +2047,15 @@ describe('Router - event delivery dedup + ack', () => {
       .mockResolvedValueOnce([])
     const r = new Router(createMockPool())
     const client = createMockWs()
-    r.registerClient(client, null)
+    r.registerClient(client, 1)
     await r.registerDaemon(createMockWs(), {
       type: 'register', daemon_id: 'daemon-1', hostname: 'old-socket', agents: [], started_at: 100,
       active_session_ids: ['A'],
-    }, null)
+    }, 1)
     await r.registerDaemon(createMockWs(), {
       type: 'register', daemon_id: 'daemon-1', hostname: 'new-socket', agents: [], started_at: 100,
       active_session_ids: ['B'],
-    }, null)
+    }, 1)
     client._sent.length = 0
     releaseOld(['B'])
     await tick()
@@ -2092,12 +2106,12 @@ describe('Router - event delivery dedup + ack', () => {
     const r = new Router(createMockPool())
     await r.registerDaemon(createMockWs(), {
       type: 'register', daemon_id: 'daemon-1', hostname: 'old', agents: [], started_at: 100,
-    }, null, 'old-token')
+    }, 1, 'old-token')
 
     const contenderWs = createMockWs()
     const contender = r.registerDaemon(contenderWs, {
       type: 'register', daemon_id: 'daemon-1', hostname: 'contender', agents: [], started_at: 200,
-    }, null, 'contender-token')
+    }, 1, 'contender-token')
     while (!releaseContender) await Promise.resolve()
     contenderWs.readyState = 3
     releaseContender()
@@ -2106,7 +2120,7 @@ describe('Router - event delivery dedup + ack', () => {
 
     await r.registerDaemon(createMockWs(), {
       type: 'register', daemon_id: 'daemon-1', hostname: 'successor', agents: [], started_at: 300,
-    }, null, 'successor-token')
+    }, 1, 'successor-token')
     expect(persisted).toMatchObject({ hostname: 'successor', startedAt: 300, token: 'successor-token' })
     expect(restore).toHaveBeenCalledTimes(2)
     activation.mockRestore()
@@ -2127,11 +2141,11 @@ describe('Router - event delivery dedup + ack', () => {
     const oldWs = createMockWs()
     await r.registerDaemon(oldWs, {
       type: 'register', daemon_id: 'daemon-1', hostname: 'old', agents: [], started_at: 100,
-    }, null)
+    }, 1)
     contenderWs = createMockWs()
     await expect(r.registerDaemon(contenderWs, {
       type: 'register', daemon_id: 'daemon-1', hostname: 'contender', agents: [], started_at: 200,
-    }, null)).resolves.toBe(false)
+    }, 1)).resolves.toBe(false)
 
     expect(restore).toHaveBeenCalledTimes(3)
     expect(oldWs.close).toHaveBeenCalled()
@@ -2155,7 +2169,7 @@ describe('Router - event delivery dedup + ack', () => {
     const oldWs = createMockWs()
     await r.registerDaemon(oldWs, {
       type: 'register', daemon_id: 'daemon-1', hostname: 'old', agents: [], started_at: 100,
-    }, null)
+    }, 1)
     const successorWs = createMockWs()
     const restore = vi.spyOn(dbModule, 'restoreDaemonRegistration').mockImplementation(async () => {
       ;(r as any).daemons.set('daemon-1', {
@@ -2167,7 +2181,7 @@ describe('Router - event delivery dedup + ack', () => {
     contenderWs = createMockWs()
     await r.registerDaemon(contenderWs, {
       type: 'register', daemon_id: 'daemon-1', hostname: 'contender', agents: [], started_at: 200,
-    }, null)
+    }, 1)
     expect((r as any).daemons.get('daemon-1').ws).toBe(successorWs)
     expect(successorWs.close).not.toHaveBeenCalled()
     activation.mockRestore()
@@ -2181,12 +2195,12 @@ describe('Router - event delivery dedup + ack', () => {
     const oldWs = createMockWs()
     await r.registerDaemon(oldWs, {
       type: 'register', daemon_id: 'daemon-1', hostname: 'old', agents: [], started_at: 100,
-    }, null)
+    }, 1)
     const capturedOld = (r as any).daemons.get('daemon-1')
     const successorWs = createMockWs()
     await r.registerDaemon(successorWs, {
       type: 'register', daemon_id: 'daemon-1', hostname: 'successor', agents: [], started_at: 200,
-    }, null)
+    }, 1)
     await (r as any).finalizeDaemonOffline('daemon-1', capturedOld)
     expect((r as any).daemons.get('daemon-1').ws).toBe(successorWs)
     expect(offline).not.toHaveBeenCalled()
@@ -2201,10 +2215,10 @@ describe('Router - event delivery dedup + ack', () => {
     const first = new Router(createMockPool())
     const firstWs = createMockWs()
     const firstClient = createMockWs()
-    first.registerClient(firstClient, null)
+    first.registerClient(firstClient, 1)
     await first.registerDaemon(firstWs, {
       type: 'register', daemon_id: 'daemon-1', hostname: 'first', agents: [], started_at: 100,
-    }, null)
+    }, 1)
     const capturedFirst = (first as any).daemons.get('daemon-1')
     firstClient._sent.length = 0
     await (first as any).finalizeDaemonOffline('daemon-1', capturedFirst)
@@ -2217,10 +2231,10 @@ describe('Router - event delivery dedup + ack', () => {
     const second = new Router(createMockPool())
     const secondWs = createMockWs()
     const secondClient = createMockWs()
-    second.registerClient(secondClient, null)
+    second.registerClient(secondClient, 1)
     await second.registerDaemon(secondWs, {
       type: 'register', daemon_id: 'daemon-2', hostname: 'second', agents: [], started_at: 100,
-    }, null)
+    }, 1)
     const capturedSecond = (second as any).daemons.get('daemon-2')
     secondClient._sent.length = 0
     await (second as any).finalizeDaemonOffline('daemon-2', capturedSecond)
@@ -2263,7 +2277,7 @@ describe('Router - event delivery dedup + ack', () => {
     }
     const r = new Router(pool)
     const ws = createMockWs()
-    await r.registerDaemon(ws, { type: 'register', daemon_id: 'daemon-1', hostname: 'h', agents: [], started_at: 100 }, null)
+    await r.registerDaemon(ws, { type: 'register', daemon_id: 'daemon-1', hostname: 'h', agents: [], started_at: 100 }, 1)
     const event = {
       type: 'agent_text', session_id: 'sess-late', event_id: 'token-late', snapshot: 'done',
       usage: { input_tokens: 3, output_tokens: 4 }, seq: 1,
@@ -2307,12 +2321,12 @@ describe('Router - event delivery dedup + ack', () => {
       connect: vi.fn(async () => ({ query: (sql: string, params?: any[]) => pool.query(sql, params), release: vi.fn() })), end: vi.fn(),
     }
     const r = new Router(pool)
-    await r.registerDaemon(createMockWs(), { type: 'register', daemon_id: 'daemon-1', hostname: 'h', agents: [], started_at: 100 }, null)
+    await r.registerDaemon(createMockWs(), { type: 'register', daemon_id: 'daemon-1', hostname: 'h', agents: [], started_at: 100 }, 1)
     r.handleDaemonMessage('daemon-1', { type: 'session_model_changed', session_id: 'sess-1', event_id: 'old', model: 'old', seq: 1 })
     await tick()
     let registered = false
     const newWs = createMockWs()
-    const registering = r.registerDaemon(newWs, { type: 'register', daemon_id: 'daemon-1', hostname: 'h', agents: [], started_at: 200 }, null)
+    const registering = r.registerDaemon(newWs, { type: 'register', daemon_id: 'daemon-1', hostname: 'h', agents: [], started_at: 200 }, 1)
       .then(() => { registered = true })
     await Promise.resolve()
     expect(registered).toBe(false)
@@ -2336,12 +2350,12 @@ describe('Router - event delivery dedup + ack', () => {
       connect: vi.fn(async () => ({ query: (sql: string, params?: any[]) => pool.query(sql, params), release: vi.fn() })), end: vi.fn(),
     }
     const r = new Router(pool)
-    await r.registerDaemon(createMockWs(), { type: 'register', daemon_id: 'daemon-1', hostname: 'h', agents: [], started_at: 100 }, null)
+    await r.registerDaemon(createMockWs(), { type: 'register', daemon_id: 'daemon-1', hostname: 'h', agents: [], started_at: 100 }, 1)
     r.handleDaemonMessage('daemon-1', { type: 'session_model_changed', session_id: 'sess-1', event_id: 'old', model: 'old', seq: 1 })
     await tick()
     await expect(r.registerDaemon(createMockWs(), {
       type: 'register', daemon_id: 'daemon-1', hostname: 'h', agents: [], started_at: 200,
-    }, null)).resolves.toBe(true)
+    }, 1)).resolves.toBe(true)
     expect((r as any).daemonSeq.get('daemon-1').startedAt).toBe(200)
   })
 
@@ -2362,11 +2376,11 @@ describe('Router - event delivery dedup + ack', () => {
     }
     try {
       const r = new Router(pool)
-      await r.registerDaemon(createMockWs(), { type: 'register', daemon_id: 'daemon-1', hostname: 'h', agents: [], started_at: 100 }, null)
+      await r.registerDaemon(createMockWs(), { type: 'register', daemon_id: 'daemon-1', hostname: 'h', agents: [], started_at: 100 }, 1)
       r.handleDaemonMessage('daemon-1', { type: 'session_model_changed', session_id: 'sess-1', event_id: 'old', model: 'old', seq: 1 })
       await tick()
       const newWs = createMockWs()
-      await r.registerDaemon(newWs, { type: 'register', daemon_id: 'daemon-1', hostname: 'h', agents: [], started_at: 200 }, null)
+      await r.registerDaemon(newWs, { type: 'register', daemon_id: 'daemon-1', hostname: 'h', agents: [], started_at: 200 }, 1)
       expect(newWs._sent).toContainEqual(expect.objectContaining({ type: 'register_rejected', reason: 'previous_effect_draining' }))
       expect(newWs.close).toHaveBeenCalledWith(4012, 'previous effect still draining')
       releaseOld({ rows: [], rowCount: 1 })
@@ -2396,7 +2410,7 @@ describe('Router - event delivery dedup + ack', () => {
     }
     const r = new Router(costPool)
     const daemonWs = createMockWs()
-    await r.registerDaemon(daemonWs, { type: 'register', daemon_id: 'daemon-1', hostname: 'h', agents: [], started_at: 100 }, null)
+    await r.registerDaemon(daemonWs, { type: 'register', daemon_id: 'daemon-1', hostname: 'h', agents: [], started_at: 100 }, 1)
     r.handleDaemonMessage('daemon-1', { type: 'session_status', session_id: 'sess-1', event_id: 'cost-1', status: 'running', cost_usd: '1', seq: 1 })
     r.handleDaemonMessage('daemon-1', { type: 'session_status', session_id: 'sess-1', event_id: 'cost-2', status: 'running', cost_usd: '2', seq: 2 })
     await tick()
@@ -2429,7 +2443,7 @@ describe('Router - event delivery dedup + ack', () => {
     }
     const r = new Router(retryPool)
     const daemonWs = createMockWs()
-    await r.registerDaemon(daemonWs, { type: 'register', daemon_id: 'daemon-1', hostname: 'h', agents: [], started_at: 100 }, null)
+    await r.registerDaemon(daemonWs, { type: 'register', daemon_id: 'daemon-1', hostname: 'h', agents: [], started_at: 100 }, 1)
     const event = { type: 'session_model_changed', session_id: 'sess-1', event_id: 'model-retry', model: 'new', seq: 1 }
     r.handleDaemonMessage('daemon-1', event)
     await tick()
@@ -2535,14 +2549,14 @@ describe('Router - event delivery dedup + ack', () => {
     const event = { type: 'session_model_changed', session_id: 'sess-1', event_id: 'restart-pending', model: 'new', seq: 1 }
     const first = new Router(restartPool)
     const firstWs = createMockWs()
-    await first.registerDaemon(firstWs, { type: 'register', daemon_id: 'daemon-1', hostname: 'h', agents: [], started_at: 100 }, null)
+    await first.registerDaemon(firstWs, { type: 'register', daemon_id: 'daemon-1', hostname: 'h', agents: [], started_at: 100 }, 1)
     first.handleDaemonMessage('daemon-1', event)
     await tick()
     first.stop()
 
     const restarted = new Router(restartPool)
     const restartedWs = createMockWs()
-    await restarted.registerDaemon(restartedWs, { type: 'register', daemon_id: 'daemon-1', hostname: 'h', agents: [], started_at: 100 }, null)
+    await restarted.registerDaemon(restartedWs, { type: 'register', daemon_id: 'daemon-1', hostname: 'h', agents: [], started_at: 100 }, 1)
     restarted.handleDaemonMessage('daemon-1', event)
     await tick()
     expect(attempts).toBe(2)
@@ -2578,7 +2592,7 @@ describe('Router - event delivery dedup + ack', () => {
       connect: vi.fn(async () => ({ query: (sql: string, params?: any[]) => pool.query(sql, params), release: vi.fn() })), end: vi.fn(),
     }
     const r = new Router(pool)
-    await r.registerDaemon(createMockWs(), { type: 'register', daemon_id: 'daemon-1', hostname: 'h', agents: [], started_at: 100 }, null)
+    await r.registerDaemon(createMockWs(), { type: 'register', daemon_id: 'daemon-1', hostname: 'h', agents: [], started_at: 100 }, 1)
     const event = { type: 'session_model_changed', session_id: 'sess-1', event_id: 'same-event', model: 'new' }
     r.handleDaemonMessage('daemon-1', { ...event, seq: 1 })
     r.handleDaemonMessage('daemon-1', { ...event, seq: 2 })
@@ -2609,7 +2623,7 @@ describe('Router - event delivery dedup + ack', () => {
     pendingPool.connect = vi.fn(async () => ({ query: pendingPool.query, release: vi.fn() }))
     const r = new Router(pendingPool)
     const daemonWs = createMockWs()
-    await r.registerDaemon(daemonWs, { type: 'register', daemon_id: 'daemon-1', hostname: 'h', agents: [], started_at: 100 }, null)
+    await r.registerDaemon(daemonWs, { type: 'register', daemon_id: 'daemon-1', hostname: 'h', agents: [], started_at: 100 }, 1)
 
     r.handleDaemonMessage('daemon-1', { type: 'agent_text', session_id: 'sess-1', text: 'x', seq: 1 })
     // The fence opens the write behind a connect microtask; flush so the
@@ -2631,7 +2645,7 @@ describe('Router - event delivery dedup + ack', () => {
 
   test('daemon restart (changed started_at) resets the seq cursor', async () => {
     const ws1 = createMockWs()
-    await router.registerDaemon(ws1, { type: 'register', daemon_id: 'daemon-1', hostname: 'h', agents: [], started_at: 100 }, null)
+    await router.registerDaemon(ws1, { type: 'register', daemon_id: 'daemon-1', hostname: 'h', agents: [], started_at: 100 }, 1)
     const clientWs = createMockWs()
     router.registerClient(clientWs, 1)
     await router.handleClientMessage(clientWs, { type: 'replay', session_id: 'sess-1', last_seq: 0 })
@@ -2640,7 +2654,7 @@ describe('Router - event delivery dedup + ack', () => {
 
     // Daemon process restarts: new started_at, seq counter back to 1.
     const ws2 = createMockWs()
-    await router.registerDaemon(ws2, { type: 'register', daemon_id: 'daemon-1', hostname: 'h', agents: [], started_at: 200 }, null)
+    await router.registerDaemon(ws2, { type: 'register', daemon_id: 'daemon-1', hostname: 'h', agents: [], started_at: 200 }, 1)
 
     clientWs._sent.length = 0
     // seq 1 from the new process must NOT be treated as a duplicate of the old 9.
@@ -2653,7 +2667,7 @@ describe('Router - event delivery dedup + ack', () => {
     const daemonWs = createMockWs()
     // Daemon reconnected after the grace window (our entry was dropped) reporting
     // it already had seq 50 acked, and replays only its unacked tail 51,52.
-    await router.registerDaemon(daemonWs, { type: 'register', daemon_id: 'daemon-1', hostname: 'h', agents: [], started_at: 100, acked_seq: 50 }, null)
+    await router.registerDaemon(daemonWs, { type: 'register', daemon_id: 'daemon-1', hostname: 'h', agents: [], started_at: 100, acked_seq: 50 }, 1)
     router.handleDaemonMessage('daemon-1', { type: 'agent_text', session_id: 'sess-1', text: 'a', seq: 51 })
     router.handleDaemonMessage('daemon-1', { type: 'agent_text', session_id: 'sess-1', text: 'b', seq: 52 })
     await tick()
@@ -2667,7 +2681,7 @@ describe('Router - event delivery dedup + ack', () => {
 
   test('a legacy daemon (no acked_seq) replaying a tail still acks via the first-seq floor', async () => {
     const daemonWs = createMockWs()
-    await router.registerDaemon(daemonWs, { type: 'register', daemon_id: 'daemon-1', hostname: 'h', agents: [], started_at: 100 }, null) // no acked_seq
+    await router.registerDaemon(daemonWs, { type: 'register', daemon_id: 'daemon-1', hostname: 'h', agents: [], started_at: 100 }, 1) // no acked_seq
     // Replays its unacked tail 71,72 — nothing below was resent.
     router.handleDaemonMessage('daemon-1', { type: 'agent_text', session_id: 'sess-1', text: 'a', seq: 71 })
     router.handleDaemonMessage('daemon-1', { type: 'agent_text', session_id: 'sess-1', text: 'b', seq: 72 })
@@ -2682,7 +2696,7 @@ describe('Router - event delivery dedup + ack', () => {
 
   test('legacy events without seq are always processed', async () => {
     const daemonWs = createMockWs()
-    await router.registerDaemon(daemonWs, { type: 'register', daemon_id: 'daemon-1', hostname: 'h', agents: [], started_at: 100 }, null)
+    await router.registerDaemon(daemonWs, { type: 'register', daemon_id: 'daemon-1', hostname: 'h', agents: [], started_at: 100 }, 1)
     const clientWs = createMockWs()
     router.registerClient(clientWs, 1)
     await router.handleClientMessage(clientWs, { type: 'replay', session_id: 'sess-1', last_seq: 0 })
@@ -3475,9 +3489,9 @@ describe('Router - shutdown connections', () => {
 
   test('terminateAllConnections terminates every daemon and client socket', async () => {
     const daemonWs = createMockWs()
-    await router.registerDaemon(daemonWs, { type: 'register', daemon_id: 'd1', hostname: 'h', agents: [] }, null)
+    await router.registerDaemon(daemonWs, { type: 'register', daemon_id: 'd1', hostname: 'h', agents: [] }, 1)
     const clientWs = createMockWs()
-    router.registerClient(clientWs, null)
+    router.registerClient(clientWs, 1)
 
     router.terminateAllConnections()
 
@@ -3487,7 +3501,7 @@ describe('Router - shutdown connections', () => {
 
   test('broadcastRelayRestarting notifies clients too', () => {
     const clientWs = createMockWs()
-    router.registerClient(clientWs, null)
+    router.registerClient(clientWs, 1)
 
     router.broadcastRelayRestarting()
 
@@ -3750,5 +3764,55 @@ describe('Router - daemon session ownership enforcement', () => {
     expect(kicked).toBeDefined()
     expect(JSON.stringify(kicked)).not.toContain('victim-session')
     expect(JSON.stringify(kicked)).not.toContain('daemon-victim')
+  })
+})
+
+describe('Router - legacy null-user identity fail-closed (H-3)', () => {
+  test('registerDaemon with userId=null rejects without owner lookup or activation', async () => {
+    const pool = createMockPool()
+    const router = new Router(pool)
+    const ws = createMockWs()
+
+    const registered = await router.registerDaemon(ws, {
+      type: 'register', daemon_id: 'legacy-daemon', hostname: 'h', agents: [], started_at: 1,
+    }, null)
+
+    expect(registered).toBe(false)
+    const rejection = ws._sent.find((m: any) => m.type === 'register_rejected')
+    expect(rejection?.reason).toBe('auth_required')
+    expect(ws.close).toHaveBeenCalledWith(4001, expect.any(String))
+    // No owner recovery, no quota probe, no activation: the only observable
+    // effect is the rejection itself.
+    const observed = pool._queries.map((q: any) => q.sql).join('\n')
+    expect(observed).not.toContain('FROM daemons')
+    expect((router as any).daemons.has('legacy-daemon')).toBe(false)
+  })
+
+  test('list_sessions from a null-user client fails closed without a global query', async () => {
+    const pool = createMockPool()
+    const router = new Router(pool)
+    const clientWs = createMockWs()
+    router.registerClient(clientWs, null)
+
+    await router.handleClientMessage(clientWs, { type: 'list_sessions' })
+
+    const reply = clientWs._sent.at(-1)
+    expect(reply?.type).toBe('error')
+    // The unfiltered session enumeration query must never run.
+    const observed = pool._queries.map((q: any) => q.sql).join('\n')
+    expect(observed).not.toContain('FROM sessions')
+    expect(JSON.stringify(clientWs._sent)).not.toContain('test-sid')
+  })
+
+  test('a null-user list_sessions with daemon_id also fails closed', async () => {
+    const pool = createMockPool()
+    const router = new Router(pool)
+    const clientWs = createMockWs()
+    router.registerClient(clientWs, null)
+
+    await router.handleClientMessage(clientWs, { type: 'list_sessions', daemon_id: 'daemon-1' })
+
+    const reply = clientWs._sent.at(-1)
+    expect(reply?.type).toBe('error')
   })
 })

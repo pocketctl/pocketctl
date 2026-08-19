@@ -50,7 +50,8 @@ dev:
 	@$(MAKE) web
 	@echo ""
 	@echo "重启 Docker 服务（volume mount 本地 web/dist/）..."
-	@docker compose up -d landing web relay relay-worker
+	@docker compose up -d web relay relay-worker
+	@docker compose up -d --force-recreate --no-deps landing
 	@echo ""
 	@echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 	@echo "  ✅ 开发环境已就绪"

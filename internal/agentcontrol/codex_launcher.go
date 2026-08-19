@@ -92,8 +92,8 @@ func (l CodexLauncher) Run(ctx context.Context, args []string, cwd string) error
 			reason = result.Reason
 		}
 		fmt.Fprintf(l.Stderr, "pocketctl: managed Codex unavailable; starting native Codex (%s)\n", oneLine(reason))
-		binary := result.RealBinary
-		if binary == "" {
+		binary, valid := validatedRealAgentPath(result.RealBinary)
+		if !valid {
 			binary, err = l.ResolveBinary()
 			if err != nil {
 				return err
@@ -101,11 +101,12 @@ func (l CodexLauncher) Run(ctx context.Context, args []string, cwd string) error
 		}
 		return l.Execute(ExecSpec{Path: binary, Args: args, Env: stripLauncherInternalEnv(l.Environ()), Dir: plan.CWD})
 	}
-	if result.RealBinary == "" || result.RemoteURI == "" {
+	managedBinary, valid := validatedRealAgentPath(result.RealBinary)
+	if !valid || result.RemoteURI == "" {
 		return errors.New("daemon returned an incomplete managed Codex runtime")
 	}
 	spec := ExecSpec{
-		Path: result.RealBinary, Args: plan.ManagedArgs(result.RemoteURI), Env: stripLauncherInternalEnv(l.Environ()), Dir: plan.CWD,
+		Path: managedBinary, Args: plan.ManagedArgs(result.RemoteURI), Env: stripLauncherInternalEnv(l.Environ()), Dir: plan.CWD,
 	}
 	if result.LeaseID != "" {
 		bind := l.BindLease

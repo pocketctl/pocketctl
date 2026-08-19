@@ -667,5 +667,6 @@
   "plan.step_aria": "{{status}}：{{step}}",
   "plan.status.pending": "待执行",
   "plan.status.in_progress": "进行中",
-  "plan.status.completed": "已完成"
+  "plan.status.completed": "已完成",
+  "new_session.failed_cwd_not_authorized_desc": "该目录不在主机的允许列表内。请让主机操作者运行 pocketctl daemon start --allowed-cwd-root <目录>（或 service install 时写入）后重试。"
 }

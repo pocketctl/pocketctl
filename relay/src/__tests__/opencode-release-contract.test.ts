@@ -68,7 +68,7 @@ describe('OpenCode shared release contract', () => {
     const router = new Router(db)
     const daemon = socket()
     const client = socket()
-    await router.registerDaemon(daemon, { type: 'register', daemon_id: 'd1', hostname: 'host', agents: ['opencode'] }, null)
+    await router.registerDaemon(daemon, { type: 'register', daemon_id: 'd1', hostname: 'host', agents: ['opencode'] }, 1)
     router.registerClient(client, 7)
     ;(router as any).clients.get(client).subscribedSessions.add(contract.session_id)
     ;(router as any).sessionToDaemon.set(contract.session_id, 'd1')

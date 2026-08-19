@@ -1393,3 +1393,79 @@ func TestDaemonWiresResumeCleanupRecorderToTelemetry(t *testing.T) {
 	// Forbidden reasons are rejected by telemetry and must not panic.
 	rec("/sessions/secret.jsonl pid=1")
 }
+
+// --- M-6: no command interpreter in platform integrations ---
+
+func TestValidateExternalURLRejectsDangerousSchemesAndShapes(t *testing.T) {
+	valid := []string{
+		"https://www.pocketctl.me/login/cli?code=ABCD-EFGH",
+		"https://example.com/path",
+		"http://localhost:8080/login/cli?code=ABCD-EFGH",
+		"http://127.0.0.1:3000/login",
+		"http://[::1]:9000/login/cli",
+	}
+	for _, raw := range valid {
+		if err := ValidateExternalURL(raw); err != nil {
+			t.Errorf("ValidateExternalURL(%q) = %v, want nil", raw, err)
+		}
+	}
+	invalid := map[string]string{
+		"javascript:alert(1)":                    "scheme",
+		"file:///etc/passwd":                     "scheme",
+		"ms-settings:windows-defender":           "scheme",
+		"pocketctl://callback":                   "scheme",
+		"https://user:pass@example.com/login":    "userinfo",
+		"http://192.168.1.10:8080/login":         "loopback",
+		"http://www.example.com/login":           "loopback",
+		"/login/cli?code=ABCD":                   "absolute",
+		"login/cli":                              "absolute",
+		"https://example.com/\n/login":           "control",
+		"https://example.com/\x00/login":         "control",
+		"https://example.com/" + strings.Repeat("a", 2100): "length",
+		"":                                       "empty",
+	}
+	for raw, category := range invalid {
+		err := ValidateExternalURL(raw)
+		if err == nil {
+			t.Errorf("ValidateExternalURL(%q) = nil, want error (%s)", raw, category)
+		}
+	}
+}
+
+func TestOpenBrowserRejectsInvalidURLBeforeAnyExec(t *testing.T) {
+	err := openBrowser("javascript:alert(document.domain)")
+	if err == nil {
+		t.Fatal("openBrowser(javascript:...) = nil, want validation error")
+	}
+	if !strings.Contains(err.Error(), "invalid URL") && !strings.Contains(err.Error(), "URL") {
+		t.Fatalf("openBrowser error should mention URL, got: %v", err)
+	}
+}
+
+func TestWSLOpenArgsNeverUseCmdExeOrShell(t *testing.T) {
+	hostile := "https://example.com/login?next=$(rm -rf ~)&x=`id`|whoami<>&^\n"
+	for _, opener := range []string{"/usr/bin/wslview", "/mnt/c/Windows/System32/rundll32.exe", "/mnt/c/Windows/explorer.exe"} {
+		args := WSLBrowserArgs(opener, hostile)
+		if len(args) < 2 {
+			t.Fatalf("WSLBrowserArgs(%q) returned %v, want opener + URL argv", opener, args)
+		}
+		if args[0] != opener {
+			t.Fatalf("argv[0] = %q, want opener path", args[0])
+		}
+		if args[len(args)-1] != hostile {
+			t.Fatalf("URL must round-trip as a single argv element, got %q", args[len(args)-1])
+		}
+		joined := strings.Join(args, " ")
+		if strings.Contains(joined, "cmd.exe") {
+			t.Fatalf("cmd.exe must never appear in WSL browser args: %q", joined)
+		}
+		for _, shellFlag := range []string{"/c start", " -c ", "sh ", "/bin/sh"} {
+			if strings.Contains(joined, shellFlag) {
+				t.Fatalf("shell flag %q leaked into argv: %q", shellFlag, joined)
+			}
+		}
+		if opener == "/mnt/c/Windows/System32/rundll32.exe" && args[1] != "url.dll,FileProtocolHandler" {
+			t.Fatalf("rundll32 argv must pass FileProtocolHandler as a direct argument, got %v", args)
+		}
+	}
+}

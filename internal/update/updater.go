@@ -12,10 +12,14 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"time"
 
+	"github.com/pocketctl/pocketctl/internal/config"
+	"github.com/pocketctl/pocketctl/internal/daemon"
 	"github.com/pocketctl/pocketctl/internal/i18n"
+	"github.com/pocketctl/pocketctl/internal/session"
 )
 
 const (
@@ -25,14 +29,25 @@ const (
 
 	defaultBin          = "pocketctl"
 	maxDownloadRetries  = 3 // retry count per URL on transient download errors
+	maxChecksumBodySize = 1 << 10
+)
+
+// Base URLs and mirror prefixes are package variables so tests can point them
+// at local fixtures. Only these holders are mutable — the trust rule is not:
+// digests are accepted exclusively from the official GitHub API or the
+// official GitHub-direct .sha256 sidecar; mirror sidecars are never trusted.
+var (
+	githubAPIBase = githubAPI
+	githubDLBase  = githubDL
+	proxyPrefixes = ghProxies
 )
 
 // ghProxies is the ordered list of public GitHub acceleration proxies for
 // users in mainland China. They mirror the full GitHub URL as a prefix.
 //
-// These are community-run and can go down at any time — we keep several and
-// try them in sequence so a single proxy outage no longer blocks downloads.
-// GitHub direct is always appended as the final fallback (see ResolveBinary).
+// These are community-run and untrusted: they may serve arbitrary bytes for
+// both the binary and any .sha256 sidecar, so they are only ever used as
+// download candidates whose bytes are checked against the official digest.
 // Last health check: 2026-06-26 (gh-proxy.com, ghfast.top, ghproxy.net OK;
 // mirror.ghproxy.com and github.moeyy.xyz deprecated/removed).
 var ghProxies = []string{
@@ -55,7 +70,7 @@ var downloadClient = &http.Client{Timeout: 3 * time.Minute}
 
 // CheckLatest queries the GitHub releases API for the latest version tag.
 func CheckLatest() (tag string, err error) {
-	return queryLatest(githubAPI)
+	return queryLatest(githubAPIBase)
 }
 
 // queryLatest fetched the /latest release tag from a single API base URL.
@@ -82,144 +97,191 @@ func queryLatest(api string) (string, error) {
 	return rel.TagName, nil
 }
 
-// CheckVersion verifies a specific version tag exists on GitHub.
+// CheckVersion verifies a specific version tag exists on GitHub and that the
+// release carries a verifiable official checksum for this platform's asset.
 func CheckVersion(version string) (tag string, err error) {
 	if !strings.HasPrefix(version, "v") {
 		return "", fmt.Errorf("version must start with 'v', got: %s", version)
 	}
-	return queryVersionTag(githubAPI, version)
+	if err := queryVersionTagStatus(githubAPIBase, version); err != nil {
+		return "", err
+	}
+	if _, _, err := resolveOfficialChecksum(version, platformAssetName()); err != nil {
+		return "", err
+	}
+	return version, nil
 }
 
-// queryVersionTag verifies a specific version tag exists on a single API base URL.
-func queryVersionTag(api, version string) (string, error) {
+// queryVersionTagStatus confirms a tag exists on the official release API.
+func queryVersionTagStatus(api, version string) error {
 	url := fmt.Sprintf("%s/tags/%s", api, version)
 	req, _ := http.NewRequest("GET", url, nil)
 	req.Header.Set("Accept", "application/json")
 	resp, err := apiClient.Do(req)
 	if err != nil {
-		return "", err
+		return err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode == http.StatusNotFound {
-		return "", fmt.Errorf("version %s not found on %s", version, api)
+		return fmt.Errorf("version %s not found on %s", version, api)
 	}
 	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("%s returned %s", api, resp.Status)
+		return fmt.Errorf("%s returned %s", api, resp.Status)
 	}
-	return version, nil
+	return nil
 }
 
 // BinaryInfo describes a downloadable binary.
 type BinaryInfo struct {
 	OS   string
 	Arch string
-	// URL is the primary download URL (first source that returned a valid SHA).
+	// URL is the primary download candidate.
 	URL string
 	// FallbackURLs are tried (in order) if URL fails to download or verify.
-	// They are constructed so the SHA256 fetched from URL's source still
-	// applies — all candidates below share the same binary bytes per release.
 	FallbackURLs []string
-	// SHA is the SHA256 checksum shared by every candidate URL (same release
-	// asset mirrored across proxies, so a single checksum covers them all).
-	SHA  string
+	// SHA is the official SHA256 checksum. It comes from the GitHub release
+	// API asset digest (or, for legacy releases without digests, the official
+	// GitHub-direct .sha256 sidecar) — never from a mirror.
+	SHA string
+	// Size is the official asset size in bytes (0 = unknown, legacy fallback).
+	Size int64
 	Name string // binary filename (e.g. pocketctl_darwin_arm64)
 }
 
-// ResolveBinary constructs the download URL and fetches the SHA256 checksum.
-//
-// It probes sources in order: each public acceleration proxy, then GitHub
-// direct. The first source whose <url>.sha256 is fetchable becomes the primary
-// URL; the remaining sources are appended as fallbacks. Because every source
-// serves the identical release asset, the SHA256 from the primary source
-// transitively validates downloads from any fallback.
-func ResolveBinary(tag string) (*BinaryInfo, error) {
+func platformAssetName() string {
 	goos := runtime.GOOS
 	goarch := runtime.GOARCH
-
-	// Normalize arch names
 	switch goarch {
 	case "x86_64":
 		goarch = "amd64"
 	case "aarch64":
 		goarch = "arm64"
 	}
+	return fmt.Sprintf("pocketctl_%s_%s", goos, goarch)
+}
 
-	name := fmt.Sprintf("pocketctl_%s_%s", goos, goarch)
-	ghURL := fmt.Sprintf("%s/%s/%s", githubDL, tag, name)
+type officialAsset struct {
+	Name   string `json:"name"`
+	Digest string `json:"digest"`
+	Size   int64  `json:"size"`
+}
 
-	// Build the full ordered candidate list: each proxy prefix + the GitHub
-	// direct URL as the final fallback. Deduplicate in case a proxy equals
-	// the direct URL (defensive; keeps the list clean).
-	candidates := make([]string, 0, len(ghProxies)+1)
-	for _, p := range ghProxies {
+// resolveOfficialChecksum obtains the trusted digest for one asset:
+// first from the official GitHub release API metadata, then — only for legacy
+// releases that predate asset digests — from the official GitHub-direct
+// .sha256 sidecar. Mirror-sidecar fallbacks are structurally impossible here.
+func resolveOfficialChecksum(tag, assetName string) (shaHex string, size int64, err error) {
+	url := fmt.Sprintf("%s/tags/%s", githubAPIBase, tag)
+	req, _ := http.NewRequest("GET", url, nil)
+	req.Header.Set("Accept", "application/vnd.github+json")
+	resp, err := apiClient.Do(req)
+	if err == nil {
+		defer resp.Body.Close()
+		if resp.StatusCode == http.StatusOK {
+			var rel struct {
+				Assets []officialAsset `json:"assets"`
+			}
+			if jsonErr := json.NewDecoder(io.LimitReader(resp.Body, 8<<20)).Decode(&rel); jsonErr == nil {
+				for _, a := range rel.Assets {
+					if a.Name != assetName {
+						continue
+					}
+					if a.Digest != "" {
+						hex, digestErr := parseDigest(a.Digest)
+						if digestErr != nil {
+							return "", 0, digestErr
+						}
+						if a.Size <= 0 {
+							return "", 0, fmt.Errorf("official asset %s has invalid size %d", assetName, a.Size)
+						}
+						return hex, a.Size, nil
+					}
+					break // exact asset found but no digest: legacy release
+				}
+			}
+		}
+	}
+
+	// Legacy path: only the official GitHub-direct sidecar may establish trust.
+	sidecarURL := fmt.Sprintf("%s/%s/%s.sha256", githubDLBase, tag, assetName)
+	hex, sidecarErr := fetchSHA256(sidecarURL)
+	if sidecarErr != nil {
+		return "", 0, fmt.Errorf("cannot establish a trusted checksum chain: official release metadata and direct sidecar unavailable for %s (%v / %v)", assetName, err, sidecarErr)
+	}
+	return hex, 0, nil
+}
+
+// parseDigest validates a GitHub asset digest of the form sha256:<64 hex>.
+func parseDigest(digest string) (string, error) {
+	prefix := "sha256:"
+	if !strings.HasPrefix(digest, prefix) {
+		return "", fmt.Errorf("official digest must be sha256:<64 hex>, got %q", digest)
+	}
+	hex := strings.TrimPrefix(digest, prefix)
+	if len(hex) != 64 {
+		return "", fmt.Errorf("official digest must be sha256:<64 hex>, got %q", digest)
+	}
+	for _, c := range hex {
+		if !(c >= '0' && c <= '9' || c >= 'a' && c <= 'f') {
+			return "", fmt.Errorf("official digest contains non-hex characters: %q", digest)
+		}
+	}
+	return hex, nil
+}
+
+// ResolveBinary builds the ordered download candidate list and pins the
+// official checksum the bytes must match, regardless of which candidate
+// serves them. Mirrors only ever contribute URLs, never trust.
+func ResolveBinary(tag string) (*BinaryInfo, error) {
+	name := platformAssetName()
+	ghURL := fmt.Sprintf("%s/%s/%s", githubDLBase, tag, name)
+
+	sha, size, err := resolveOfficialChecksum(tag, name)
+	if err != nil {
+		return nil, err
+	}
+
+	candidates := make([]string, 0, len(proxyPrefixes)+1)
+	for _, p := range proxyPrefixes {
 		candidates = append(candidates, p+ghURL)
 	}
 	candidates = append(candidates, ghURL)
 
-	// Find the first source that can provide a SHA256 checksum. That checksum
-	// is valid for every candidate (identical bytes per release), so once we
-	// have it we can offer all sources as download candidates.
-	var sha string
-	primaryIdx := -1
-	for i, u := range candidates {
-		s, err := fetchSHA256(u + ".sha256")
-		if err == nil && s != "" {
-			sha = s
-			primaryIdx = i
-			break
-		}
-	}
-	if primaryIdx < 0 {
-		return nil, fmt.Errorf("binary %s not found on any source (tag=%s)", name, tag)
-	}
-
-	// Primary URL first; the rest become fallbacks (same checksum applies).
-	primary := candidates[primaryIdx]
-	fallbacks := make([]string, 0, len(candidates)-1)
-	for i, u := range candidates {
-		if i == primaryIdx {
-			continue
-		}
-		fallbacks = append(fallbacks, u)
-	}
-
 	return &BinaryInfo{
-		OS:           goos,
-		Arch:         goarch,
-		URL:          primary,
-		FallbackURLs: fallbacks,
+		OS:           runtime.GOOS,
+		Arch:         runtime.GOARCH,
+		URL:          candidates[0],
+		FallbackURLs: candidates[1:],
 		SHA:          sha,
+		Size:         size,
 		Name:         name,
 	}, nil
 }
 
-// DownloadAndVerify downloads the binary, verifies SHA256, and returns the temp path.
-//
-// It tries info.URL first, then each entry in info.FallbackURLs. Retries up to
-// maxDownloadRetries per URL on transient errors (unexpected EOF, connection
-// reset, timeout) before moving to the next source. Permanent errors (SHA256
-// mismatch, 404) abort immediately — retrying another source won't help for a
-// checksum mismatch, and a 404 on one mirror usually means the asset genuinely
-// doesn't exist.
+// DownloadAndVerify downloads the binary, verifies the official SHA256 and
+// size, and returns the temp path. Every candidate is validated against the
+// same official digest; a mismatch (e.g. a poisoned mirror) only eliminates
+// that candidate and the chain continues to the next mirror.
 func DownloadAndVerify(info *BinaryInfo) (tmpPath string, err error) {
 	urls := append([]string{info.URL}, info.FallbackURLs...)
 
 	var lastErr error
 	for _, url := range urls {
-		tmpPath, lastErr = downloadOne(url, info.SHA)
+		tmpPath, lastErr = downloadOne(url, info.SHA, info.Size)
 		if lastErr == nil {
 			return tmpPath, nil
 		}
-		// Don't try another URL for permanent errors (SHA mismatch, 404, etc.)
-		if isPermanent(lastErr) {
-			return "", lastErr
-		}
+		// All errors, including digest mismatches and 404s, only eliminate
+		// the current candidate; safe mirrors later in the chain may still
+		// serve the officially digested bytes.
 	}
 	return "", lastErr
 }
 
 // downloadOne downloads from a single URL with retries on transient errors.
-func downloadOne(url, expectedSHA string) (string, error) {
+// A digest or size mismatch eliminates this candidate immediately (no retry);
+// the caller continues with the next mirror.
+func downloadOne(url, expectedSHA string, expectedSize int64) (string, error) {
 	var lastErr error
 	for attempt := 0; attempt < maxDownloadRetries; attempt++ {
 		if attempt > 0 {
@@ -246,7 +308,8 @@ func downloadOne(url, expectedSHA string) (string, error) {
 			tmpFile.Close()
 			os.Remove(tmpPath)
 			lastErr = fmt.Errorf("download %s returned %s", url, resp.Status)
-			// 404 / 410 are permanent — don't retry
+			// 404 / 410 eliminate this candidate — don't retry it, let the
+			// caller fall through to the next mirror.
 			if resp.StatusCode == http.StatusNotFound || resp.StatusCode == http.StatusGone {
 				return "", lastErr
 			}
@@ -273,18 +336,26 @@ func downloadOne(url, expectedSHA string) (string, error) {
 			continue
 		}
 
-		// SHA256 verification
-		if expectedSHA != "" {
-			actual, err := fileSHA256(tmpPath)
-			if err != nil {
-				os.Remove(tmpPath)
-				lastErr = fmt.Errorf("compute SHA256: %w", err)
-				continue
-			}
-			if !strings.EqualFold(actual, expectedSHA) {
-				os.Remove(tmpPath)
-				return "", fmt.Errorf("SHA256 mismatch: expected %s, got %s", expectedSHA, actual)
-			}
+		// Official size check (skipped for legacy sidecar-only releases).
+		if expectedSize > 0 && written != expectedSize {
+			os.Remove(tmpPath)
+			return "", fmt.Errorf("size mismatch for %s: official %d bytes, got %d", url, expectedSize, written)
+		}
+
+		// SHA256 verification against the official digest — always required.
+		if expectedSHA == "" {
+			os.Remove(tmpPath)
+			return "", fmt.Errorf("no official checksum available for %s", url)
+		}
+		actual, err := fileSHA256(tmpPath)
+		if err != nil {
+			os.Remove(tmpPath)
+			lastErr = fmt.Errorf("compute SHA256: %w", err)
+			continue
+		}
+		if !strings.EqualFold(actual, expectedSHA) {
+			os.Remove(tmpPath)
+			return "", fmt.Errorf("SHA256 mismatch: expected %s, got %s", expectedSHA, actual)
 		}
 
 		// Make executable
@@ -296,18 +367,6 @@ func downloadOne(url, expectedSHA string) (string, error) {
 		return tmpPath, nil
 	}
 	return "", lastErr
-}
-
-// isPermanent returns true for errors that won't be fixed by retrying another URL.
-func isPermanent(err error) bool {
-	if err == nil {
-		return false
-	}
-	msg := err.Error()
-	return strings.Contains(msg, "SHA256 mismatch") ||
-		strings.Contains(msg, "chmod") ||
-		strings.Contains(msg, "create temp file") ||
-		strings.Contains(msg, "compute SHA256")
 }
 
 // ReplaceBinary safely replaces the running binary with a new one at tmpPath.
@@ -391,43 +450,99 @@ func ReplaceBinary(tmpPath string) (err error) {
 	return nil
 }
 
-// RestartDaemon restarts the daemon process (if running via systemd/launchd or direct exec).
-// Returns the previous PID or 0 if not running.
+// DaemonProcessController is the authoritative daemon lifecycle surface the
+// updater must reuse. The daemon package's implementation verifies the PID
+// file against the singleton lock's owner token and process-start identity;
+// the updater never signals a PID it merely read from disk.
+type DaemonProcessController interface {
+	RuntimeStatus() (pid int, running bool, err error)
+	Stop() error
+}
+
+type daemonProcessAdapter struct {
+	status func() (int, bool, error)
+	stop   func() error
+}
+
+func (a daemonProcessAdapter) RuntimeStatus() (int, bool, error) { return a.status() }
+func (a daemonProcessAdapter) Stop() error                       { return a.stop() }
+
+// daemonProcesses is swappable for tests.
+var daemonProcesses DaemonProcessController = daemonProcessAdapter{
+	status: daemon.RuntimeStatus,
+	stop:   daemon.Stop,
+}
+
+// startDaemonAfterUpdate is swappable for tests.
+var startDaemonAfterUpdate = func(args []string) (int, error) {
+	execPath, err := os.Executable()
+	if err != nil {
+		return 0, err
+	}
+	cmd := exec.Command(execPath, args...)
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	if err := cmd.Start(); err != nil {
+		return 0, err
+	}
+	return cmd.Process.Pid, nil
+}
+
+// RestartDaemon restarts the daemon only after the daemon package's verified
+// lifecycle authority confirms it was running and has been safely stopped.
+// Any uncertain status aborts the restart without signaling anything.
 func RestartDaemon() error {
-	// Check if daemon is running
-	if pid, running := isDaemonRunning(); running {
-		fmt.Println(i18n.T("update.daemon_restarting", pid))
-
-		// Kill the current daemon
-		if err := killDaemon(pid); err != nil {
-			return fmt.Errorf("stop daemon (PID %d): %w", pid, err)
-		}
-
-		// Wait for process to exit
-		waitForExit(pid, 5)
-
-		// Start daemon with stored config
-		execPath, _ := os.Executable()
-		cmd := exec.Command(execPath, "daemon", "start")
-		cmd.Stdout = os.Stdout
-		cmd.Stderr = os.Stderr
-
-		if err := cmd.Start(); err != nil {
-			return fmt.Errorf("restart daemon: %w", err)
-		}
-
-		fmt.Println(i18n.T("update.daemon_restarted", cmd.Process.Pid))
-	} else {
+	pid, running, err := daemonProcesses.RuntimeStatus()
+	if err != nil {
+		return fmt.Errorf("abort daemon restart, runtime status uncertain: %w", err)
+	}
+	if !running {
 		fmt.Println(i18n.T("update.daemon_idle"))
+		return nil
+	}
+	policy, err := config.LoadDaemonSecurityPolicy()
+	if err != nil {
+		return fmt.Errorf("abort daemon restart, load security policy: %w", err)
+	}
+	validatedPolicy, err := session.NewCwdPolicy(policy.AllowedCwdRoots)
+	if err != nil {
+		return fmt.Errorf("abort daemon restart, validate security policy: %w", err)
+	}
+	if !slices.Equal(validatedPolicy.Roots(), policy.AllowedCwdRoots) {
+		return fmt.Errorf("abort daemon restart, persisted security policy is not canonical")
+	}
+	restartArgs := []string{"daemon", "start"}
+	for _, root := range policy.AllowedCwdRoots {
+		restartArgs = append(restartArgs, "--allowed-cwd-root", root)
+	}
+	if policy.AllowDangerousRemotePermissions {
+		restartArgs = append(restartArgs, "--allow-dangerous-remote-permissions")
+	}
+	restartArgs = append(restartArgs, "--trusted-action-policy", policy.TrustedActionPolicy)
+
+	fmt.Println(i18n.T("update.daemon_restarting", pid))
+	if err := daemonProcesses.Stop(); err != nil {
+		return fmt.Errorf("stop daemon before restart (PID %d): %w", pid, err)
 	}
 
+	newPid, err := startDaemonAfterUpdate(restartArgs)
+	if err != nil {
+		return fmt.Errorf("restart daemon: %w", err)
+	}
+	fmt.Println(i18n.T("update.daemon_restarted", newPid))
 	return nil
 }
 
 // --- helpers ---
 
+// fetchSHA256 fetches a checksum sidecar from an official GitHub-direct URL
+// with a bounded, status-checked, timeout-guarded client.
 func fetchSHA256(url string) (string, error) {
-	resp, err := http.Get(url)
+	req, err := http.NewRequest("GET", url, nil)
+	if err != nil {
+		return "", err
+	}
+	resp, err := apiClient.Do(req)
 	if err != nil {
 		return "", err
 	}
@@ -437,7 +552,7 @@ func fetchSHA256(url string) (string, error) {
 		return "", fmt.Errorf("HTTP %s", resp.Status)
 	}
 
-	body, err := io.ReadAll(resp.Body)
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxChecksumBodySize))
 	if err != nil {
 		return "", err
 	}
@@ -495,56 +610,4 @@ func isCrossDevice(err error) bool {
 	return strings.Contains(err.Error(), "invalid cross-device link")
 }
 
-func isDaemonRunning() (int, bool) {
-	// Try reading PID file
-	pidPath := "/tmp/pocketctl/daemon.pid"
-	data, err := os.ReadFile(pidPath)
-	if err != nil {
-		return 0, false
-	}
-
-	var pid int
-	if _, err := fmt.Sscanf(string(data), "%d", &pid); err != nil {
-		return 0, false
-	}
-
-	// Check if process exists
-	proc, err := os.FindProcess(pid)
-	if err != nil {
-		return 0, false
-	}
-
-	// On Unix, FindProcess always succeeds; send signal 0 to check alive
-	if err := proc.Signal(os.Signal(nil)); err != nil {
-		return 0, false
-	}
-
-	return pid, true
-}
-
-func killDaemon(pid int) error {
-	proc, err := os.FindProcess(pid)
-	if err != nil {
-		return err
-	}
-	return proc.Signal(os.Interrupt)
-}
-
-func waitForExit(pid int, maxSeconds int) {
-	for i := 0; i < maxSeconds; i++ {
-		proc, err := os.FindProcess(pid)
-		if err != nil || proc.Signal(os.Signal(nil)) != nil {
-			return // process exited
-		}
-		timeSleep(1)
-	}
-	// Force kill if still running
-	if proc, err := os.FindProcess(pid); err == nil {
-		proc.Signal(os.Kill)
-	}
-}
-
-// timeSleep exists so we can substitute in tests
-var timeSleep = func(d int) {
-	time.Sleep(time.Duration(d) * time.Second)
-}
+// (isDaemonRunning/killDaemon/waitForExit PID-trust helpers were removed in H-6.)

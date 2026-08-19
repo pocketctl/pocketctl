@@ -3,6 +3,7 @@ package session
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -13,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/pocketctl/pocketctl/internal/adapter"
 	"github.com/pocketctl/pocketctl/internal/protocol"
 )
 
@@ -209,14 +211,25 @@ func (p *countingFakeResumeProcess) Wait() error {
 	return p.fakeResumeProcess.Wait()
 }
 
+func mustRegisterOwnedResume(t *testing.T, sm *SessionManager, sessionID string, cancel context.CancelFunc, process resumeProcess) *ownedResume {
+	t.Helper()
+	entry, err := sm.registerOwnedResume(sessionID, cancel, process)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return entry
+}
+
 func TestResumeRegistryOldGenerationCannotDeleteNewProcess(t *testing.T) {
 	sm := NewSessionManager(make(chan protocol.DaemonEvent, 8))
 	p1 := newFakeResumeProcess(101, "")
 	p2 := newFakeResumeProcess(102, "")
-	entry1 := sm.registerOwnedResume("sid", func() {}, p1)
-	entry2 := sm.registerOwnedResume("sid", func() {}, p2)
+	entry1 := mustRegisterOwnedResume(t, sm, "sid", func() {}, p1)
+	sm.finishOwnedResume(entry1, nil)
+	entry2 := mustRegisterOwnedResume(t, sm, "sid", func() {}, p2)
 
-	// The old generation's goroutine finishes after the new registration.
+	// A stale duplicate cleanup from the old generation cannot remove the new
+	// current entry.
 	sm.finishOwnedResume(entry1, nil)
 	if got := sm.ownedResumeForSession("sid"); got != entry2 {
 		t.Fatalf("old generation cleanup removed the newer entry: %v", got)
@@ -230,6 +243,147 @@ func TestResumeRegistryOldGenerationCannotDeleteNewProcess(t *testing.T) {
 	p2.release(nil)
 }
 
+func TestSendMessageRejectsSecondLiveResume(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Unix sentinel CLI fixture")
+	}
+	output := make(chan protocol.DaemonEvent, 32)
+	sm := NewSessionManager(output)
+	sm.RegisterTerminalSession("live-resume-sid", t.TempDir(), 9999999, "", protocol.StatusExited, "")
+	installSentinelResumeCLI(t, "claude")
+	starter := newRecordingResumeStarter()
+	sm.setResumeStarter(starter.call)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if err := sm.SendMessage(ctx, "live-resume-sid", "first"); err != nil {
+		t.Fatal(err)
+	}
+	if err := sm.SendMessage(ctx, "live-resume-sid", "second"); err == nil || !strings.Contains(err.Error(), "busy") {
+		t.Fatalf("second live resume error=%v, want busy rejection", err)
+	}
+	specs, procs := starter.snapshot()
+	if len(specs) != 1 || len(procs) != 1 {
+		t.Fatalf("resume starts=%d, want exactly one", len(specs))
+	}
+	procs[0].release(nil)
+	entry := sm.ownedResumeForSession("live-resume-sid")
+	if entry != nil {
+		select {
+		case <-entry.done:
+		case <-time.After(time.Second):
+			t.Fatal("first resume did not finish")
+		}
+	}
+}
+
+func TestIdleTerminalResumePreservesWaitError(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Unix sentinel CLI fixture")
+	}
+	output := make(chan protocol.DaemonEvent, 32)
+	sm := NewSessionManager(output)
+	sm.RegisterTerminalSession("idle-resume-sid", t.TempDir(), os.Getpid(), "/dev/ttys-test", protocol.StatusIdle, adapter.AgentClaude)
+	installSentinelResumeCLI(t, "claude")
+	starter := newRecordingResumeStarter()
+	sm.setResumeStarter(starter.call)
+	notified := make(chan struct{}, 1)
+	sm.OnNotifyTerminal = func(_, _ string) { notified <- struct{}{} }
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if err := sm.SendMessage(ctx, "idle-resume-sid", "fail this resume"); err != nil {
+		t.Fatal(err)
+	}
+	_, procs := starter.snapshot()
+	if len(procs) != 1 {
+		t.Fatalf("resume processes=%d, want one", len(procs))
+	}
+	entry := sm.ownedResumeForSession("idle-resume-sid")
+	if entry == nil {
+		t.Fatal("resume was not registered")
+	}
+	wantErr := errors.New("resume exit failure")
+	procs[0].release(wantErr)
+
+	var terminalStatus string
+	deadline := time.After(time.Second)
+	for terminalStatus == "" {
+		select {
+		case event := <-output:
+			if event.Type == "session_status" && event.Status != protocol.StatusRunning {
+				terminalStatus = event.Status
+			}
+		case <-deadline:
+			t.Fatal("timed out waiting for terminal resume status")
+		}
+	}
+	if terminalStatus != protocol.StatusError {
+		t.Fatalf("terminal status=%q, want error", terminalStatus)
+	}
+	select {
+	case <-entry.done:
+	case <-time.After(time.Second):
+		t.Fatal("failed resume was not reaped")
+	}
+	if !errors.Is(entry.waitErr, wantErr) {
+		t.Fatalf("recorded Wait error=%v, want %v", entry.waitErr, wantErr)
+	}
+	select {
+	case <-notified:
+		t.Fatal("failed resume triggered success notification")
+	case <-time.After(50 * time.Millisecond):
+	}
+}
+
+func TestShutdownResumeProcessesCancelsInFlightStart(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Unix sentinel CLI fixture")
+	}
+	output := make(chan protocol.DaemonEvent, 32)
+	sm := NewSessionManager(output)
+	sm.RegisterTerminalSession("starting-resume-sid", t.TempDir(), 9999999, "", protocol.StatusExited, "")
+	installSentinelResumeCLI(t, "claude")
+	starterEntered := make(chan struct{})
+	starterCanceled := make(chan struct{})
+	var enteredOnce sync.Once
+	var canceledOnce sync.Once
+	sm.setResumeStarter(func(ctx context.Context, _ resumeLaunchSpec) (resumeProcess, error) {
+		enteredOnce.Do(func() { close(starterEntered) })
+		<-ctx.Done()
+		canceledOnce.Do(func() { close(starterCanceled) })
+		return nil, ctx.Err()
+	})
+
+	requestCtx, requestCancel := context.WithCancel(context.Background())
+	defer requestCancel()
+	sendDone := make(chan error, 1)
+	go func() {
+		sendDone <- sm.SendMessage(requestCtx, "starting-resume-sid", "hello")
+	}()
+	<-starterEntered
+
+	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), time.Second)
+	defer shutdownCancel()
+	shutdownErr := sm.ShutdownResumeProcesses(shutdownCtx)
+	select {
+	case <-starterCanceled:
+	default:
+		requestCancel()
+		<-sendDone
+		t.Fatal("shutdown returned without canceling the admitted in-flight start")
+	}
+	if shutdownErr != nil {
+		t.Fatalf("shutdown error=%v", shutdownErr)
+	}
+	if err := <-sendDone; !errors.Is(err, context.Canceled) {
+		t.Fatalf("SendMessage error=%v, want context cancellation", err)
+	}
+	if got := sm.ownedResumeForSession("starting-resume-sid"); got != nil {
+		t.Fatalf("failed start remained registered: %+v", got)
+	}
+}
+
 func TestShutdownResumeProcessesCancelsAndWaits(t *testing.T) {
 	sm := NewSessionManager(make(chan protocol.DaemonEvent, 8))
 	cancelObserved := make(chan struct{})
@@ -237,7 +391,7 @@ func TestShutdownResumeProcessesCancelsAndWaits(t *testing.T) {
 	cancel := func() { cancelOnce.Do(func() { close(cancelObserved) }) }
 	proc := newFakeResumeProcess(201, "")
 
-	entry := sm.registerOwnedResume("sid-a", cancel, proc)
+	entry := mustRegisterOwnedResume(t, sm, "sid-a", cancel, proc)
 	go func() {
 		<-cancelObserved
 		proc.release(nil)
@@ -260,7 +414,7 @@ func TestShutdownResumeProcessesCancelsAndWaits(t *testing.T) {
 func TestShutdownResumeProcessesForceKillsAfterDeadline(t *testing.T) {
 	sm := NewSessionManager(make(chan protocol.DaemonEvent, 8))
 	proc := &killableFakeResumeProcess{fakeResumeProcess: newFakeResumeProcess(202, "")}
-	entry := sm.registerOwnedResume("sid-b", func() {}, proc)
+	entry := mustRegisterOwnedResume(t, sm, "sid-b", func() {}, proc)
 	go func() {
 		waitErr := proc.Wait()
 		sm.finishOwnedResume(entry, waitErr)
@@ -290,7 +444,7 @@ func TestShutdownResumeProcessesForceKillsAfterDeadline(t *testing.T) {
 func TestShutdownResumeProcessesIsIdempotent(t *testing.T) {
 	sm := NewSessionManager(make(chan protocol.DaemonEvent, 8))
 	proc := newFakeResumeProcess(203, "")
-	entry := sm.registerOwnedResume("sid-c", func() {}, proc)
+	entry := mustRegisterOwnedResume(t, sm, "sid-c", func() {}, proc)
 
 	ctx, cancelCtx := context.WithTimeout(context.Background(), time.Second)
 	defer cancelCtx()
@@ -313,7 +467,7 @@ func TestKillSessionUsesOwnedResumeHandle(t *testing.T) {
 	proc := newCountingFakeResumeProcess(301)
 	cancelObserved := make(chan struct{})
 	var cancelOnce sync.Once
-	entry := sm.registerOwnedResume("kill-sid", func() {
+	entry := mustRegisterOwnedResume(t, sm, "kill-sid", func() {
 		cancelOnce.Do(func() { close(cancelObserved) })
 	}, proc)
 	// Model the production resume goroutine: the single Wait owner responds to
@@ -371,42 +525,46 @@ func TestTerminalObservedProcessIsNeverAddedToResumeRegistry(t *testing.T) {
 }
 
 func TestResumeCleanupRecorderReceivesCancelAndForceKillOnce(t *testing.T) {
-	sm := NewSessionManager(make(chan protocol.DaemonEvent, 8))
 	var mu sync.Mutex
 	var reasons []string
-	sm.SetResumeCleanupRecorder(func(reason string) {
+	recorder := func(reason string) {
 		mu.Lock()
 		defer mu.Unlock()
 		reasons = append(reasons, reason)
-	})
+	}
 
 	// Graceful path: cancel is observed and the fake finishes.
+	gracefulManager := NewSessionManager(make(chan protocol.DaemonEvent, 8))
+	gracefulManager.SetResumeCleanupRecorder(recorder)
 	proc1 := newFakeResumeProcess(701, "")
 	cancelObserved := make(chan struct{})
 	var cancelOnce sync.Once
-	entry1 := sm.registerOwnedResume("rec-a", func() {
+	entry1 := mustRegisterOwnedResume(t, gracefulManager, "rec-a", func() {
 		cancelOnce.Do(func() { close(cancelObserved) })
 	}, proc1)
 	go func() {
 		<-cancelObserved
 		proc1.release(nil)
-		sm.finishOwnedResume(entry1, proc1.Wait())
+		gracefulManager.finishOwnedResume(entry1, proc1.Wait())
 	}()
 	gracefulCtx, gracefulCancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer gracefulCancel()
-	if err := sm.ShutdownResumeProcesses(gracefulCtx); err != nil {
+	if err := gracefulManager.ShutdownResumeProcesses(gracefulCtx); err != nil {
 		t.Fatalf("graceful shutdown error=%v", err)
 	}
 
-	// Force-kill path: the fake ignores cancel and only finishes after Kill.
+	// Shutdown permanently closes admission on a manager, so exercise the
+	// independent force-kill outcome on a second lifecycle instance.
+	forceManager := NewSessionManager(make(chan protocol.DaemonEvent, 8))
+	forceManager.SetResumeCleanupRecorder(recorder)
 	proc2 := &killableFakeResumeProcess{fakeResumeProcess: newFakeResumeProcess(702, "")}
-	entry2 := sm.registerOwnedResume("rec-b", func() {}, proc2)
+	entry2 := mustRegisterOwnedResume(t, forceManager, "rec-b", func() {}, proc2)
 	go func() {
-		sm.finishOwnedResume(entry2, proc2.Wait())
+		forceManager.finishOwnedResume(entry2, proc2.Wait())
 	}()
 	deadlineCtx, deadlineCancel := context.WithTimeout(context.Background(), time.Millisecond)
 	defer deadlineCancel()
-	if err := sm.ShutdownResumeProcesses(deadlineCtx); err != nil {
+	if err := forceManager.ShutdownResumeProcesses(deadlineCtx); err != nil {
 		t.Fatalf("force-kill shutdown error=%v", err)
 	}
 

@@ -229,6 +229,16 @@ pocketctl/
 | Relay | TypeScript, Fastify v5, @fastify/websocket, PostgreSQL |
 | Web UI | Vue 3, Vue Router 4, Vite 6, TypeScript |
 
+## Deployment
+
+The only supported self-hosting entry points are the hardened paths:
+
+- `docker-compose.prod.yml` — compose deployment; `TLS_CERT_PATH`/`TLS_KEY_PATH`/`AUTH_CODE_PEPPER`/`POSTGRES_PASSWORD` are required, port 80 redirects to HTTPS.
+- `deploy/deploy.sh` — bare-metal deployment: non-root `pocketctl` systemd units, PostgreSQL SCRAM (`scram-sha-256`) limited to a localhost app rule, TLS-only nginx.
+- `docs/operations/tls-rollout.md` — TLS rollout/rollback runbook.
+
+`scripts/deploy.sh` (the legacy cloud-server script) is **retired** and exits with guidance; it ran the relay as root, globally downgraded `pg_hba.conf` auth, and served HTTP only. Do not resurrect it.
+
 ## License
 
 [MIT](LICENSE)

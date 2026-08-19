@@ -4,6 +4,16 @@ import { describe, test, expect, vi, beforeEach } from 'vitest'
 process.env.DAEMON_OFFLINE_GRACE_MS = '20'
 
 // Mock DB functions so registerDaemon / persistAndAck don't touch real PG.
+// Authenticated registrations go through the quota claim path; stub it so the
+// minimal mock pool is never asked for a transaction.
+vi.mock('../quota.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../quota.js')>()
+  return {
+    ...actual,
+    claimBoundDaemonSlot: vi.fn().mockResolvedValue({ allowed: true, used: 1, limit: null, reconnect: false }),
+  }
+})
+
 vi.mock('../db.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../db.js')>()
   return {
@@ -57,7 +67,7 @@ function createMockWs(): any {
 
 /**
  * Register a daemon and return its daemonId and ws.
- * Uses userId=null so registerDaemon skips the getUserPlanAndWhitelist path.
+ * Registers with an authenticated userId (H-3: null-user registration is rejected).
  */
 async function setupDaemon(router: Router, daemonId = 'd1') {
   const ws = createMockWs()
@@ -66,7 +76,7 @@ async function setupDaemon(router: Router, daemonId = 'd1') {
     daemon_id: daemonId,
     hostname: 'h',
     agents: [],
-  }, null)
+  }, 1)
   return { ws, daemonId }
 }
 
