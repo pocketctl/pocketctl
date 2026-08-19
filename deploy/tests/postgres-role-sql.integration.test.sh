@@ -14,10 +14,18 @@ docker run -d --name "$container" \
   -v "$sql:/opt/pocketctl/configure-roles.sql:ro" \
   postgres:17-alpine >/dev/null
 
+stable_ready=0
 for _ in $(seq 1 60); do
-  if docker exec "$container" pg_isready -U postgres >/dev/null 2>&1; then break; fi
+  if docker exec "$container" pg_isready -U postgres >/dev/null 2>&1; then
+    stable_ready=$((stable_ready + 1))
+    if [[ "$stable_ready" -ge 3 ]]; then break; fi
+  else
+    stable_ready=0
+  fi
   sleep 1
 done
+[[ "$stable_ready" -ge 3 ]] \
+  || { echo "postgres role SQL integration failed: postgres did not remain ready" >&2; exit 1; }
 docker exec "$container" pg_isready -U postgres >/dev/null 2>&1 \
   || { echo "postgres role SQL integration failed: postgres not ready" >&2; exit 1; }
 
