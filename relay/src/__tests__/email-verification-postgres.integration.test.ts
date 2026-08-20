@@ -120,7 +120,7 @@ describeWithDatabase('email verification challenge PostgreSQL integration', () =
 
   test('expired challenges fail consistently; the row keeps the failure budget', async () => {
     await sendChallenge('654321')
-    const expired = new Date(now.getTime() + 5 * 60_000 + 1000)
+    const expired = new Date(now.getTime() + 60_000 + 1000)
     await expect(verifyChallenge('654321', expired)).resolves.toBe('expired')
     await expect(verifyChallenge('654321', expired)).resolves.toBe('expired')
   })

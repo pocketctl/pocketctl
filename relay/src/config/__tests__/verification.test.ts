@@ -1,5 +1,6 @@
 import { describe, expect, test, vi } from 'vitest'
 import {
+  CODE_TTL_MS,
   CODE_HMAC_LENGTH,
   FAILURE_WINDOW_MS,
   LOCKOUT_MS,
@@ -82,7 +83,8 @@ describe('challengeKey', () => {
 })
 
 describe('challenge policy constants', () => {
-  test('lockout and cooldown constants match the security invariants', () => {
+  test('TTL, lockout, and cooldown constants match the security invariants', () => {
+    expect(CODE_TTL_MS).toBe(60_000)
     expect(MAX_VERIFY_ATTEMPTS).toBe(5)
     expect(SEND_COOLDOWN_MS).toBe(60_000)
     expect(FAILURE_WINDOW_MS).toBe(15 * 60_000)

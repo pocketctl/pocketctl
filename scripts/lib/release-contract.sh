@@ -261,7 +261,10 @@ wait_for_github_release_candidate() (
       --jq ".[] | select(.displayTitle == \"$expected_title\" and .headSha == \"$commit_sha\") | \"\(.databaseId)\\t\(.status)\\t\(.conclusion // \"\")\\t\(.displayTitle)\\t\(.headSha)\"") || return 1
 
     run_id=""
-    while IFS=$'\t' read -r candidate_id candidate_status candidate_conclusion candidate_title candidate_head_sha; do
+    # Bash treats tab as IFS whitespace and collapses adjacent delimiters, so
+    # an empty in-progress conclusion would shift title/SHA into the wrong
+    # fields. Translate TSV to a non-whitespace delimiter before parsing.
+    while IFS=$'\x1f' read -r candidate_id candidate_status candidate_conclusion candidate_title candidate_head_sha; do
       [[ -n "$candidate_id" ]] || continue
       if ! grep -Fxq "$candidate_id" "$existing_runs"; then
         run_id="$candidate_id"
@@ -271,7 +274,7 @@ wait_for_github_release_candidate() (
         head_sha="$candidate_head_sha"
         break
       fi
-    done <<< "$run_rows"
+    done <<< "${run_rows//$'\t'/$'\x1f'}"
 
     if [[ -n "$run_id" ]]; then
       [[ "$display_title" == "$expected_title" && "$head_sha" == "$commit_sha" ]] || {
@@ -326,7 +329,8 @@ wait_for_github_tag_promotion() {
       --jq 'if length == 0 then "" else "\(.[0].databaseId)\t\(.[0].status)\t\(.[0].conclusion // "")\t\(.[0].headSha)" end') || return 1
 
     if [[ -n "$run_row" ]]; then
-      IFS=$'\t' read -r run_id status conclusion head_sha <<< "$run_row"
+      # Preserve the empty conclusion field while this run is in progress.
+      IFS=$'\x1f' read -r run_id status conclusion head_sha <<< "${run_row//$'\t'/$'\x1f'}"
       [[ "$head_sha" == "$commit_sha" ]] || {
         release_contract_error "release promotion run $run_id SHA '$head_sha' does not match '$commit_sha'"
         return 1

@@ -11,7 +11,7 @@
 import { createHmac, randomInt, timingSafeEqual } from 'node:crypto'
 
 /** How long a freshly issued code stays valid. */
-export const CODE_TTL_MS = 5 * 60_000
+export const CODE_TTL_MS = 60_000
 /** Minimum delay between two sends for the same challenge. */
 export const SEND_COOLDOWN_MS = 60_000
 /** Maximum failed verifies per challenge inside the failure window. */

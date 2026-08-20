@@ -9,7 +9,6 @@ import { signAccessToken, signRefreshToken, verifyRefreshToken, decodeToken, ver
 import { notifyUser, sessionStatusPush, daemonOfflinePush, dailyReportPush, weeklyReportPush } from './push.js';
 import { sendEmailCode } from './config/email.js';
 import {
-  CODE_TTL_MS,
   challengeKey,
   codeHmac,
   emailFingerprint,
@@ -21,7 +20,7 @@ import { createDeviceAuthSessionStore, DeviceAuthStoreCapacityError, type Device
 import { createQrSessionStore, QrSessionStoreCapacityError, type QrSessionStore } from './config/qr-sessions.js';
 import { resolveEntitlements, resolveQuotaEnforcementMode } from './entitlements.js';
 import { getQuotaSnapshot } from './quota.js';
-import { createWsTicketStore, WsTicketStoreCapacityError } from './config/ws-tickets.js';
+import { createPostgresWsTicketPersistence, createWsTicketStore, WsTicketStoreCapacityError } from './config/ws-tickets.js';
 import type { WsTicketPayload } from './config/ws-tickets.js';
 import { createHash } from 'crypto';
 import { ConnectionRateLimiter } from './rate-limit.js';
@@ -96,7 +95,6 @@ const REFRESH_COOKIE_MAX_AGE = 7 * 24 * 60 * 60;
 const DAEMON_REGISTRATION_DEADLINE_MS = 10_000;
 
 const wsDaemonMap = new Map<any, DaemonSocketIdentity>();
-const wsTickets = createWsTicketStore(60_000);
 // M-2: bounded temporary auth-session stores. Hard caps are the last line of
 // defense behind the shared PostgreSQL rate limits; see config/*.ts factories.
 const deviceAuthSessions = createDeviceAuthSessionStore();
@@ -241,11 +239,11 @@ function clearRefreshCookie(reply: any) {
 }
 
 export async function consumeLiveUserWsTicket(
-  store: { consume(ticket: string): WsTicketPayload | null },
+  store: { consume(ticket: string): Promise<WsTicketPayload | null> },
   ticket: string,
   pool: any,
 ): Promise<WsTicketPayload | null> {
-  const payload = store.consume(ticket);
+  const payload = await store.consume(ticket);
   if (!payload) return null;
   try {
     return await userExists(pool, payload.userId) ? payload : null;
@@ -890,6 +888,7 @@ async function main() {
   assertTokenUsageFeatureDependencies(tokenFeatures, runtimeConfig.durableIngress.mode)
   const pools = createRelayPools(parseDBUrl(DB_URL))
   const pool = pools.query
+  const wsTickets = createWsTicketStore(createPostgresWsTicketPersistence(pools.control), 60_000)
   const welcomeEmailWorker = createWelcomeEmailWorker({ pool: pools.worker })
   const attentionRepository = new AttentionInboxRepository(
     pools.query,
@@ -1192,10 +1191,9 @@ async function main() {
       ip: { value: canonicalClientAddress(req.ip), limit: authRateLimitPolicy.wsTicket.ipMax },
       identity: { value: `user:${payload.userId}`, limit: authRateLimitPolicy.wsTicket.userMax },
     })) return { error: 'too many requests, please retry later' };
-    if (Math.random() < 0.01) wsTickets.gc();
     let issued: { ticket: string; expiresIn: number };
     try {
-      issued = wsTickets.create(payload);
+      issued = await wsTickets.create(payload);
     } catch (error) {
       if (error instanceof WsTicketStoreCapacityError) {
         reply.header('Retry-After', 10);
@@ -1292,7 +1290,6 @@ async function main() {
 
     // CSPRNG code stored only as a peppered HMAC digest
     const code = generateCode();
-    const ttlMs = NODE_ENV === 'production' ? 60_000 : CODE_TTL_MS;
     const decision = await upsertEmailChallenge(pool, {
       challengeKey: loginChallengeKey,
       purpose: 'login',
@@ -1300,7 +1297,6 @@ async function main() {
       userId: null,
       codeHmac: codeHmac(code, emailVerification.pepper),
       now,
-      ttlMs,
     });
     if (decision.status === 'cooldown') {
       reply.header('Retry-After', Math.ceil(decision.retryAfterMs / 1000));

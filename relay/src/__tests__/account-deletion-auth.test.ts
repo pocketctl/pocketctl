@@ -95,17 +95,23 @@ describe('deleted-account authorization boundary', () => {
   })
 
   test('rejects a pre-issued websocket ticket after account deletion', async () => {
-    const { createWsTicketStore } = await import('../config/ws-tickets.js')
     const { consumeLiveUserWsTicket } = await import('../server.js')
-    const store = createWsTicketStore()
-    const { ticket } = store.create({
+    let issued = true
+    const payload = {
       userId: 7,
       email: 'deleted@example.com',
       jti: 'jti-7',
       machine_id: 'web',
-    })
+    }
+    const store = {
+      consume: vi.fn(async () => {
+        if (!issued) return null
+        issued = false
+        return payload
+      }),
+    }
 
-    await expect(consumeLiveUserWsTicket(store, ticket, authPool(false))).resolves.toBeNull()
+    await expect(consumeLiveUserWsTicket(store, 'opaque-ticket', authPool(false))).resolves.toBeNull()
   })
 
   test('terminates only the deleted user app and daemon sockets', async () => {

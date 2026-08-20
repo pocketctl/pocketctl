@@ -220,6 +220,21 @@ async function initDBUnlocked(pool: pg.Pool): Promise<void> {
   // run after users exists so a fresh database can create the FK.
   await pool.query(`ALTER TABLE events ADD COLUMN IF NOT EXISTS user_id INT REFERENCES users(id) ON DELETE CASCADE`);
   await pool.query(`CREATE INDEX IF NOT EXISTS idx_events_user_id ON events(user_id) WHERE user_id IS NOT NULL`);
+  // Browser WebSocket authentication crosses two independent HTTP requests.
+  // Persist only the ticket digest so issuance and upgrade may land on
+  // different Relay processes without exposing a reusable bearer secret.
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS websocket_tickets (
+      ticket_hash CHAR(64) PRIMARY KEY,
+      user_id INT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      email VARCHAR(255) NOT NULL,
+      token_jti VARCHAR(255) NOT NULL,
+      machine_id VARCHAR(255) NOT NULL,
+      expires_at TIMESTAMPTZ NOT NULL,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )
+  `);
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_websocket_tickets_expiry ON websocket_tickets(expires_at)`);
   // Durable request-level push-effect grant. Agent event identity remains
   // event_id-based, while approval/question notifications retain the legacy
   // request_id dedup contract across Worker restarts. The winning event FK
