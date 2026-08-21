@@ -666,6 +666,7 @@ func (c *Client) connectAndServe(ctx context.Context) error {
 		AgentLatests:    c.agentLatests,
 		AgentManageable: c.agentManageable,
 		OS:              c.osName, IP: c.localIP, Arch: c.arch, Version: c.version, StartedAt: c.startedAt,
+		SupportsQuotaGrant: true,
 	}
 	if c.activeSessionIDsFn != nil {
 		register.ActiveSessionIDs = c.activeSessionIDsFn()
