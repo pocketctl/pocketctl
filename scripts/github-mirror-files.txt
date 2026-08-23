@@ -5,6 +5,7 @@ internal
 relay
 web
 testdata/contracts
+testdata/turn_projection_golden.json
 .github
 docker-compose.prod.yml
 deploy

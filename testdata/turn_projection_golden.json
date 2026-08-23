@@ -1,0 +1,29 @@
+{
+  "name": "contiguous-turn-segments-fail-open-classification",
+  "messages": [
+    { "id": 1, "bucket": "root", "type": "agent_text", "turn_id": "shared-turn", "flow_scope": "main", "content_class": "dialogue" },
+    { "id": 2, "bucket": "root", "type": "agent_text" },
+    { "id": 3, "bucket": "root", "type": "tool_call", "turn_id": "shared-turn", "flow_scope": "auxiliary", "content_class": "execution" },
+    { "id": 4, "bucket": "root", "type": "future_missing_flow", "turn_id": "missing-flow" },
+    { "id": 5, "bucket": "root", "type": "future_unknown_flow", "turn_id": "unknown-flow", "flow_scope": "future-scope", "content_class": "unknown" },
+    { "id": 6, "bucket": "child", "type": "agent_text", "turn_id": "shared-turn", "flow_scope": "main", "content_class": "dialogue" },
+    { "id": 7, "bucket": "root", "type": "turn_status", "turn_id": "interrupted-turn", "turn_status": "interrupted" },
+    { "id": 8, "bucket": "root", "type": "user_text", "turn_id": "continued-turn", "previous_turn_id": "interrupted-turn", "continuation_reason": "after_interrupt", "flow_scope": "main" },
+    { "id": 9, "bucket": "root", "type": "approval_request", "turn_id": "pending-turn", "flow_scope": "auxiliary", "status": "pending" }
+  ],
+  "expected": {
+    "root": [
+      { "kind": "turn", "turn_id": "shared-turn", "message_ids": [1], "main_ids": [1], "auxiliary_ids": [], "status": "", "interrupted": false, "continued_after_interrupt": false, "previous_turn_id": "" },
+      { "kind": "legacy", "message_ids": [2] },
+      { "kind": "turn", "turn_id": "shared-turn", "message_ids": [3], "main_ids": [], "auxiliary_ids": [3], "status": "", "interrupted": false, "continued_after_interrupt": false, "previous_turn_id": "" },
+      { "kind": "turn", "turn_id": "missing-flow", "message_ids": [4], "main_ids": [4], "auxiliary_ids": [], "status": "", "interrupted": false, "continued_after_interrupt": false, "previous_turn_id": "" },
+      { "kind": "turn", "turn_id": "unknown-flow", "message_ids": [5], "main_ids": [5], "auxiliary_ids": [], "status": "", "interrupted": false, "continued_after_interrupt": false, "previous_turn_id": "" },
+      { "kind": "turn", "turn_id": "interrupted-turn", "message_ids": [7], "main_ids": [], "auxiliary_ids": [], "status": "interrupted", "interrupted": true, "continued_after_interrupt": false, "previous_turn_id": "" },
+      { "kind": "turn", "turn_id": "continued-turn", "message_ids": [8], "main_ids": [8], "auxiliary_ids": [], "status": "", "interrupted": false, "continued_after_interrupt": true, "previous_turn_id": "interrupted-turn" },
+      { "kind": "turn", "turn_id": "pending-turn", "message_ids": [9], "main_ids": [9], "auxiliary_ids": [], "status": "", "interrupted": false, "continued_after_interrupt": false, "previous_turn_id": "" }
+    ],
+    "child": [
+      { "kind": "turn", "turn_id": "shared-turn", "message_ids": [6], "main_ids": [6], "auxiliary_ids": [], "status": "", "interrupted": false, "continued_after_interrupt": false, "previous_turn_id": "" }
+    ]
+  }
+}
