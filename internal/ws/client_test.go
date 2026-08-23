@@ -161,6 +161,54 @@ func TestRunStopsCleanlyWhenOutputChannelCloses(t *testing.T) {
 	}
 }
 
+// TestInitialRegisterAdvertisesQuotaGrant catches the production failure where
+// quota-enforcing Relays rejected a daemon before any later resend could add
+// the capability to its register payload.
+func TestInitialRegisterAdvertisesQuotaGrant(t *testing.T) {
+	received := make(chan protocol.RegisterMessage, 1)
+	upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+
+		_, raw, err := conn.ReadMessage()
+		if err != nil {
+			return
+		}
+		var register protocol.RegisterMessage
+		if err := json.Unmarshal(raw, &register); err != nil || register.Type != "register" {
+			return
+		}
+		received <- register
+		_ = conn.WriteJSON(protocol.RegisterAckMessage{Type: "register_ack", SupportsEventAck: true})
+		<-r.Context().Done()
+	}))
+	defer server.Close()
+
+	client := newTestClient(wsURL(server.URL))
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	finished := make(chan error, 1)
+	go func() { finished <- client.Run(ctx) }()
+
+	select {
+	case register := <-received:
+		if !register.SupportsQuotaGrant {
+			t.Fatal("initial register omitted supports_quota_grant")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("did not receive initial register")
+	}
+
+	cancel()
+	if err := <-finished; !errors.Is(err, context.Canceled) {
+		t.Fatalf("Run error = %v, want context cancellation", err)
+	}
+}
+
 func TestBlockingConnectionStatusObserverDoesNotBlockRunStop(t *testing.T) {
 	upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
