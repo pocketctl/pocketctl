@@ -47,16 +47,14 @@ assets=(
   pocketctl_darwin_arm64
   pocketctl_linux_amd64
   pocketctl_linux_arm64
-  pocketctl_windows_amd64.exe
-  pocketctl_windows_arm64.exe
 )
 manifest="$INPUT_DIR/release-candidate-manifest.json"
 
-# The promoted directory is a closed bundle: six binaries, six sidecars, and
+# The promoted directory is a closed bundle: four binaries, four sidecars, and
 # one manifest. Directories, symlinks, and extra files are rejected so a
 # downloaded artifact cannot smuggle unverified release content.
 actual_entries=$(find "$INPUT_DIR" -mindepth 1 -maxdepth 1 -print | wc -l | tr -d ' ')
-[[ "$actual_entries" == 13 ]] || fail "bundle must contain exactly 13 top-level entries; found $actual_entries"
+[[ "$actual_entries" == 9 ]] || fail "bundle must contain exactly 9 top-level entries; found $actual_entries"
 if find "$INPUT_DIR" -mindepth 1 \( ! -type f -o -type l \) -print -quit | grep -q .; then
   fail "bundle may contain only regular files"
 fi
@@ -85,7 +83,7 @@ jq -e \
    .source_sha == $sha and
    .repository == $repository and
    .workflow_run_id == $run_id and
-   (.assets | type == "array" and length == 6) and
+   (.assets | type == "array" and length == 4) and
    all(.assets[];
      type == "object" and
      (keys | sort) == (["name", "sha256", "size"] | sort) and

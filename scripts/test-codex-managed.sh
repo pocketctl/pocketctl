@@ -89,7 +89,7 @@ if [[ "${POCKETCTL_RELEASE_GATE:-0}" == "1" ]]; then
   (cd relay && env -u TEST_DATABASE_URL -u RUN_POSTGRES_INTEGRATION npm test && npm run build)
   (cd web && npm test && npm run build)
 
-  echo "[Codex/6] Pocketctl six-platform build matrix"
+  echo "[Codex/6] Pocketctl four-platform release build matrix"
   make build-all
 
   if [[ -d ios ]] && command -v xcodebuild >/dev/null 2>&1; then

@@ -28,17 +28,15 @@ web:
 	cd web && npm run build && rm -f vite.config.js vite.config.d.ts
 	@echo "✅ Web UI 构建完成"
 
-## 构建所有平台二进制
+## 构建发布平台二进制（macOS / Linux）
 build-all:
-	@echo "构建所有平台..."
+	@echo "构建发布平台（macOS / Linux）..."
 	@mkdir -p dist
 	GOOS=darwin GOARCH=arm64 go build $(LDFLAGS) -o dist/pocketctl_darwin_arm64 ./cmd/pocketctl
 	GOOS=darwin GOARCH=amd64 go build $(LDFLAGS) -o dist/pocketctl_darwin_amd64 ./cmd/pocketctl
 	GOOS=linux  GOARCH=amd64 go build $(LDFLAGS) -o dist/pocketctl_linux_amd64 ./cmd/pocketctl
 	GOOS=linux  GOARCH=arm64 go build $(LDFLAGS) -o dist/pocketctl_linux_arm64 ./cmd/pocketctl
-	GOOS=windows GOARCH=amd64 go build $(LDFLAGS) -o dist/pocketctl_windows_amd64.exe ./cmd/pocketctl
-	GOOS=windows GOARCH=arm64 go build $(LDFLAGS) -o dist/pocketctl_windows_arm64.exe ./cmd/pocketctl
-	@echo "✅ 全平台构建完成，正在生成 SHA256 校验和..."
+	@echo "✅ 发布平台构建完成，正在生成 SHA256 校验和..."
 	@cd dist && for f in pocketctl_*; do if [ -f "$$f" ]; then shasum -a 256 "$$f" | awk '{print $$1}' > "$${f}.sha256"; fi; done
 	@echo "✅ SHA256 校验和已生成: dist/*.sha256"
 

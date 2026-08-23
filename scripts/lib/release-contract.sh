@@ -362,8 +362,6 @@ require_release_assets() {
     pocketctl_darwin_amd64
     pocketctl_linux_arm64
     pocketctl_linux_amd64
-    pocketctl_windows_arm64.exe
-    pocketctl_windows_amd64.exe
   )
   local binary
   for binary in "${binaries[@]}"; do
@@ -384,8 +382,8 @@ require_promoted_release_assets() {
 
   total_count=$(awk 'NF { count++ } END { print count + 0 }' "$asset_list_file")
   unique_count=$(awk 'NF' "$asset_list_file" | sort -u | wc -l | tr -d '[:space:]')
-  [[ "$total_count" == 13 && "$unique_count" == 13 ]] || {
-    release_contract_error "promoted release must contain exactly 13 unique assets (found $total_count entries, $unique_count unique)"
+  [[ "$total_count" == 9 && "$unique_count" == 9 ]] || {
+    release_contract_error "promoted release must contain exactly 9 unique assets (found $total_count entries, $unique_count unique)"
     return 1
   }
 }

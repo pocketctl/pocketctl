@@ -45,8 +45,6 @@ assets=(
   pocketctl_darwin_arm64
   pocketctl_linux_amd64
   pocketctl_linux_arm64
-  pocketctl_windows_amd64.exe
-  pocketctl_windows_arm64.exe
 )
 source_paths=()
 
@@ -84,7 +82,7 @@ fi
 mkdir -p "$OUTPUT_DIR"
 
 assets_json='[]'
-for index in 0 1 2 3 4 5; do
+for index in "${!assets[@]}"; do
   asset="${assets[$index]}"
   source_path="${source_paths[$index]}"
   destination="$OUTPUT_DIR/$asset"
