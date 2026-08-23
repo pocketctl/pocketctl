@@ -27,15 +27,7 @@ go test -race ./internal/adapter \
   -run='^TestOpencodeServerSmoke$' \
   -count=1
 
-echo "[A-D/2] Windows launcher and IPC compile contract"
-GOOS=windows GOARCH=amd64 go test -exec=true \
-  ./internal/agentcontrol \
-  ./internal/config \
-  ./internal/platform \
-  ./cmd/pocketctl \
-  -count=1
-
-echo "[C-D/3] Relay persistence, routing and release-contract tests"
+echo "[C-D/2] Relay persistence, routing and release-contract tests"
 (
   cd relay
   npx vitest run \
@@ -46,7 +38,7 @@ echo "[C-D/3] Relay persistence, routing and release-contract tests"
     src/__tests__/opencode-telemetry.test.ts
 )
 
-echo "[C-D/4] Web managed-session and interaction-card tests"
+echo "[C-D/3] Web managed-session and interaction-card tests"
 (
   cd web
   npx vitest run \
@@ -56,24 +48,24 @@ echo "[C-D/4] Web managed-session and interaction-card tests"
 )
 
 if [[ -d ios ]] && command -v swift >/dev/null 2>&1; then
-  echo "[C-D/5] iOS OpenCode source-regression tests"
+  echo "[C-D/4] iOS OpenCode source-regression tests"
   for test_file in ios/Tests/OpenCode*RegressionTests.swift; do
     swift "$test_file"
   done
 else
-  echo "[C-D/5] SKIP iOS source-regression tests: iOS source or swift is unavailable"
+  echo "[C-D/4] SKIP iOS source-regression tests: iOS source or swift is unavailable"
 fi
 
 if [[ "${POCKETCTL_RELEASE_GATE:-0}" == "1" ]]; then
-  echo "[D/6] Relay and Web production builds"
+  echo "[D/5] Relay and Web production builds"
   (cd relay && npm run build)
   (cd web && npm run build)
 
-  echo "[D/7] Pocketctl four-platform release build matrix"
+  echo "[D/6] Pocketctl four-platform release build matrix"
   make build-all
 
   if [[ -d ios ]] && command -v xcodebuild >/dev/null 2>&1; then
-    echo "[D/8] iOS simulator Debug build"
+    echo "[D/7] iOS simulator Debug build"
     xcodebuild \
       -project ios/Pocketctl.xcodeproj \
       -scheme Pocketctl \
@@ -82,7 +74,7 @@ if [[ "${POCKETCTL_RELEASE_GATE:-0}" == "1" ]]; then
       build \
       CODE_SIGNING_ALLOWED=NO
   else
-    echo "[D/8] SKIP iOS simulator build: iOS source or xcodebuild is unavailable"
+    echo "[D/7] SKIP iOS simulator build: iOS source or xcodebuild is unavailable"
   fi
 fi
 

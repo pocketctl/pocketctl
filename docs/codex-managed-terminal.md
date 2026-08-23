@@ -28,7 +28,7 @@ pocketctl agent codex disable
 
 `enable` 和 `disable` 都不要求重启 daemon。启用后若当前 shell 尚未加载新的 PATH，请开启新 shell 或重新加载登录 shell；daemon 会在第一次受管启动时按需创建 app-server。
 
-`enable` 只安装 Pocketctl 的透明 launcher，不重新安装 Codex。Unix 默认在 `~/.pocketctl/bin/codex` 创建 shim；Windows 创建当前用户的 `.cmd` wrapper。`disable` 只移除 Pocketctl 创建的 launcher/PATH 配置，不卸载 Codex，也不删除 `$CODEX_HOME` 中的 thread 数据。
+`enable` 只安装 Pocketctl 的透明 launcher，不重新安装 Codex。Pocketctl 仅支持 macOS/Linux，默认在 `~/.pocketctl/bin/codex` 创建 shim；Windows 不再提供 launcher、二进制或验证支持。`disable` 只移除 Pocketctl 创建的 launcher/PATH 配置，不卸载 Codex，也不删除 `$CODEX_HOME` 中的 thread 数据。
 
 ## 终端命令是否变化
 
@@ -47,7 +47,7 @@ codex --remote unix:///private/path/pocketctl-codex.sock
 codex resume <thread-id> --remote unix:///private/path/pocketctl-codex.sock
 ```
 
-这部分参数由 launcher 自动追加，用户不需要先执行“连接 App Server”命令，也不需要手工维护 socket。Windows 使用随机 loopback WebSocket 地址。
+这部分参数由 launcher 自动追加，用户不需要先执行“连接 App Server”命令，也不需要手工维护 socket。
 
 `exec`、`review`、`login`、`logout`、`mcp`、`plugin`、`app-server`、`completion`、`update`、`doctor`、`sandbox` 等非交互或管理命令保持 Codex 原生执行；用户已明确传入 `--remote` 时也不会重写。
 
@@ -143,7 +143,7 @@ Codex app-server 的 native event 是 lifecycle 的唯一输入；Pocketctl 只�
 ## 安全与可观测性
 
 - Unix app-server socket 位于当前用户私有 `0700` 目录，socket/handoff/config 文件为当前用户私有权限；endpoint 不经 Relay 暴露。
-- Windows 首版仅绑定随机 `127.0.0.1` WebSocket 端口，不监听非 loopback。由于 app-server WebSocket transport 仍属实验能力，Windows 发布门禁单独验证启动与连接。
+- Windows 不在支持或发布验证范围内。
 - Relay 只接收规范化后的 thread/turn/item 与交互投影；不会接收 app-server endpoint、认证材料或 MCP 表单提交内容。
 - JSON-RPC request ID 保留 number/string 类型并绑定 generation、thread 和 request；旧 generation 或已解决请求会被拒绝。
 - 日志不记录 prompt、answer、secret、token、认证头或私有路径。

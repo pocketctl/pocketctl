@@ -17,7 +17,6 @@ docs/codex-managed-terminal.md
 docs/claude-cross-device-control.md
 docs/opencode-managed-terminal.md
 scripts/install-daemon.sh
-scripts/ci-windows-smoke.ps1
 scripts/test-opencode-managed.sh
 scripts/test-codex-managed.sh
 scripts/test-relay-durable-ingress.sh

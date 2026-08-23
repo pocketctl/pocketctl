@@ -184,9 +184,10 @@
           <span>{{ t('session.zcode_observer_readonly') }}</span>
         </div>
         <!-- L1: send failed (ws not open at send time) -->
-        <div v-if="sendError" class="banner banner-warning" style="flex-shrink:0;">
+        <div v-if="sendError || interruptPendingDraft" class="banner banner-warning" style="flex-shrink:0;">
           <svg class="banner-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><path d="M12 9v4"/><path d="M12 17h.01"/></svg>
           <span>{{ t('session.send_failed') }}</span>
+          <button v-if="interruptPendingDraft" type="button" class="interrupt-pending-retry" @click="restoreInterruptPendingDraft">{{ t('common.retry') }}</button>
         </div>
 
         <!-- Timeline -->
@@ -212,6 +213,14 @@
 
         <!-- Messages -->
         <template v-for="msg in renderMessages" :key="msg.id">
+          <div v-if="turnHeaderFor(msg)" class="turn-group-header" :data-turn-id="msg.turn_id" :data-turn-segment-id="turnHeaderFor(msg)?.id">
+            <span class="turn-group-label">Turn</span>
+            <span v-if="turnHeaderFor(msg)?.interrupted" class="turn-group-state">已中断</span>
+            <span v-else-if="turnHeaderFor(msg)?.status" class="turn-group-state">{{ turnHeaderFor(msg)?.status }}</span>
+            <span v-if="turnHeaderFor(msg)?.continuedAfterInterrupt" class="turn-group-continuation">中断后继续</span>
+            <button v-if="turnHeaderFor(msg)?.auxiliary.length" type="button" class="turn-group-aux-toggle" :aria-expanded="isAuxiliaryExpanded(turnHeaderFor(msg)?.id)" :aria-label="`Turn ${msg.turn_id} 辅助流`" @click="toggleAuxiliary(turnHeaderFor(msg)?.id)">辅助流（{{ turnHeaderFor(msg)?.auxiliary.length }}）</button>
+          </div>
+          <template v-if="!isHiddenAuxiliary(msg)">
           <!-- User message (right bubble) -->
           <MessageUser
             v-if="msg.role === 'user'"
@@ -334,6 +343,8 @@
             @respond="onChoiceRespond"
             @resync="resyncInteractionState"
           />
+          <div v-else-if="msg.type !== 'turn_status' && msg.type !== 'agent_file_change'" class="turn-unknown-event">{{ msg.content || msg.error || msg.type }}</div>
+          </template>
         </template>
 
         <!-- Turn status bar: lives inside the message stream (visually part of
@@ -592,11 +603,13 @@ import { canSendClaudeSession } from '../utils/claudeSessionControl'
 import { resolveSessionComposerState } from '../utils/sessionComposerPolicy'
 import { ContentStreamAssembler } from '../utils/contentStream'
 import { createLiveSessionEventBatcher } from '../utils/liveSessionEventBatcher'
-import { ReplayPageBuffer } from '../utils/replayPageBuffer'
+import { ReplaySessionTrustBuffer, type ReplaySessionTrustContext } from '../utils/replaySessionTrust'
 import { useAgentPlanProgress } from '../composables/useAgentPlanProgress'
 import PlanSidePanel from '../components/plan/PlanSidePanel.vue'
 import { completedPlanItemCount } from '../utils/agentPlanMerge'
 import { createAgentFileChangeReducer, type AgentFileChangeMessage } from '../utils/agentFileChange'
+import { projectTurns, TurnSegmentCollapseRegistry, TurnSegmentIdentityRegistry } from '../utils/turnProjection'
+import { isKnownNonTimelineControlEvent, knownNonTimelineControlEventTypes, unknownTimelineEventIdentity } from '../utils/timelineEventRegistry'
 
 const { renamingId, renameInput, startRename, commitRename, cancelRename } = useSessionRename()
 
@@ -605,7 +618,7 @@ const router = useRouter()
 useVisualViewport()
 const { isMobile } = useResponsiveLayout()
 const { setSessionHeader, clearSessionHeader } = useSessionHeader()
-const { connect, send, onEvent, connected, reconnecting } = useWebSocket()
+const { connect, send, sendUserMessage, onEvent, connected, reconnecting } = useWebSocket()
 const { t } = useLocale()
 
 const sessionId = computed(() => route.params.id as string)
@@ -655,6 +668,26 @@ const openCodeStructuredTypes = new Set<OpenCodeStructuredType>(['agent_file', '
 function isOpenCodeStructuredType(type: string): type is OpenCodeStructuredType {
   return openCodeStructuredTypes.has(type as OpenCodeStructuredType)
 }
+// Every named live consumer below is excluded from the generic subscription,
+// so a websocket broadcast can never render it twice. Keep this complete even
+// for non-rendering session handlers: unknown future event types need not carry
+// classification metadata to get a visible fallback row.
+const explicitlyRoutedLiveEventTypes = new Set<string>([
+  ...knownNonTimelineControlEventTypes,
+  'connection_restored', 'session_list', 'session_created', 'daemon_list',
+  'daemon_status', 'command_list', 'session_agent_list', 'session_agent_changed',
+  'session_meta', 'session_model_changed', 'replay_batch', 'replay_end',
+  'user_message_ack', 'user_message_nack', 'user_message_receipt',
+  'user_text', 'agent_text', 'agent_plan', 'agent_reasoning', 'agent_retry',
+  'agent_compaction', 'agent_file_change', ...openCodeStructuredTypes,
+  'tool_call', 'tool_result', 'approval_request', 'approval_resolved',
+  'question_request', 'question_resolved', 'mcp_elicitation_request',
+  'mcp_elicitation_resolved', 'interactive_prompt', 'turn_status', 'error',
+  'command_receipt', 'interaction_result', 'subagent_discovered',
+  'subagent_title_update', 'subagent_usage', 'permission_config_changed',
+  'session_status', 'session_title_update', 'session_deleted', 'session_pinned',
+  'session_id_changed',
+])
 const allSessions = ref<any[]>([])
 // P2: per-agent message buckets for sub-agent events (keyed by agentId)
 const subagentMessages = ref<Record<string, any[]>>({})
@@ -678,7 +711,15 @@ const pageSize = computed(() => 50)  // session-history-pagination: 一次加载
 const loadedMinId = ref(0)      // oldest loaded event id (backward cursor)
 const isLoadingBackward = ref(false)  // a pagination (scroll-up) request in flight
 const hasMore = ref(false)      // relay signaled older events exist
-const olderReplayEvents = new ReplayPageBuffer<any>()
+// One trust buffer spans every sequential replay page for this load. Pages do
+// not overlap, so sharing it also carries explicit session-ID aliases from the
+// newest page into older history without mixing event ordering.
+const replayTrustEvents = new ReplaySessionTrustBuffer<any>()
+const progressiveReplayEvents = replayTrustEvents
+const olderReplayEvents = replayTrustEvents
+function resetReplayTrustBuffers() {
+  replayTrustEvents.reset()
+}
 let olderReplayScrollHeight = 0
 let olderReplayScrollTop = 0
 const resumeCopied = ref(false)  // session-resume-command: 复制恢复命令反馈
@@ -728,6 +769,7 @@ const status = ref('running')
 const awaitingStart = ref(false)
 // L1: transient "send failed" banner (ws not open at send time).
 const sendError = ref(false)
+const interruptPendingDraft = ref('')
 // Relay forwarding is acknowledged per prompt. Managed Codex prompts carrying
 // message_acceptance_receipt then wait for a second, app-server acceptance event.
 const pendingAckTimers = new Map<string, ReturnType<typeof setTimeout>>()
@@ -909,6 +951,45 @@ const focusedSubAgentTokenTotal = computed(() => {
 const renderMessages = computed(() =>
   focusedSubAgentId.value ? (subagentMessages.value[focusedSubAgentId.value] || []) : messages.value,
 )
+// Projection happens only after the established root/subagent bucket selection.
+// It is display-only; reducers and replay storage retain their original order.
+const turnSegmentIdentityRegistry = new TurnSegmentIdentityRegistry()
+const turnSegmentCollapseRegistry = new TurnSegmentCollapseRegistry()
+const turnSegmentContext = computed(() => ({
+  sessionId: sessionId.value || '', focusedAgentId: focusedSubAgentId.value || undefined,
+}))
+const turnCollapseRevision = ref(0)
+const turnRows = computed(() => {
+  const rows = turnSegmentIdentityRegistry.reconcile(projectTurns(renderMessages.value), turnSegmentContext.value)
+  turnSegmentCollapseRegistry.reconcile(new Set(rows.flatMap(row => row.kind === 'turn' ? [row.id] : [])), turnSegmentContext.value)
+  return rows
+})
+const turnMessageProjection = computed(() => {
+  const rows = new Map<any, { row: any; main: boolean }>()
+  for (const row of turnRows.value) {
+    if (row.kind !== 'turn') continue
+    const main = new Set(row.main)
+    for (const message of row.messages) rows.set(message, { row, main: main.has(message) })
+  }
+  return rows
+})
+function turnHeaderFor(message: any) {
+  const row = turnMessageProjection.value.get(message)?.row
+  return row?.messages[0] === message ? row : null
+}
+function isAuxiliaryExpanded(segmentId?: string): boolean {
+  void turnCollapseRevision.value
+  return !segmentId || !turnSegmentCollapseRegistry.isCollapsed(segmentId, turnSegmentContext.value)
+}
+function toggleAuxiliary(segmentId?: string): void {
+  if (!segmentId) return
+  turnSegmentCollapseRegistry.toggle(segmentId, turnSegmentContext.value)
+  turnCollapseRevision.value++
+}
+function isHiddenAuxiliary(message: any): boolean {
+  const entry = turnMessageProjection.value.get(message)
+  return !!entry && !entry.main && !isAuxiliaryExpanded(entry.row.id)
+}
 const requestDeepLinkId = computed(() => normalizeRequestId(route.query.request_id))
 watch(
   [
@@ -1296,7 +1377,9 @@ function prependOlderReplayEvents(events: any[]) {
   if (events.length === 0) return
   const tempMsgs: any[] = []
   const tempSubagent: Record<string, any[]> = {}
-  for (const evt of events) processEvent(evt, tempMsgs, tempSubagent)
+  for (const evt of events) {
+    processEvent(evt, tempMsgs, tempSubagent)
+  }
   if (tempMsgs.length) {
     const existingPartKeys = new Set(messages.value.map((message: any) => message.partKey).filter(Boolean))
     const uniqueTemp = tempMsgs.filter((message: any) => !message.partKey || !existingPartKeys.has(message.partKey))
@@ -1313,6 +1396,13 @@ function prependOlderReplayEvents(events: any[]) {
   })
 }
 
+function replaySessionTrustContext(): ReplaySessionTrustContext {
+  return {
+    key: `${sessionId.value || ''}::${focusedSubAgentId.value || ''}`,
+    currentSessionId: sessionId.value || '',
+  }
+}
+
 // Unified history loader: clears local message state and requests the first
 // backward page. In focused-sub-agent mode it sends `replay_subagent` (relay
 // filters events by agent_id); otherwise the regular parent-session `replay`.
@@ -1324,7 +1414,7 @@ function loadHistory() {
   loadedMinId.value = 0
   isLoadingBackward.value = false
   hasMore.value = false
-  olderReplayEvents.reset()
+  resetReplayTrustBuffers()
   if (focusedSubAgentId.value) {
     send({ type: 'replay_subagent', session_id: sessionId.value, agent_id: focusedSubAgentId.value, limit: pageSize.value, req_id: replayReqId.value })
   } else {
@@ -1342,7 +1432,6 @@ function onMessagesScroll() {
   if (scrollTop < 60 && hasMore.value && !isLoadingBackward.value && !isLoading.value && loadedMinId.value > 0) {
     isLoadingBackward.value = true
     replayReqId.value++
-    olderReplayEvents.reset()
     olderReplayScrollHeight = scrollHeight
     olderReplayScrollTop = scrollTop
     if (focusedSubAgentId.value) {
@@ -1418,7 +1507,7 @@ const toolTimeouts = new Map<string, ReturnType<typeof setTimeout>>()
 // land before its tool_call. On replay (ordered by id) the result then arrives
 // first and finds no tool_call to attach to. Buffer orphan results here and
 // apply them when the matching tool_call is created.
-const pendingToolResults = new Map<string, { output: string | null; status: string }>()
+const pendingToolResults = new Map<string, { output: string | null; status: string; metadata: Record<string, unknown> }>()
 const contentStreams = new ContentStreamAssembler()
 const fileChangeReducer = createAgentFileChangeReducer()
 function armToolTimeout(callId: string) {
@@ -1457,7 +1546,114 @@ const LOCAL_COMMANDS = POCKETCTL_LOCAL_COMMANDS.map(command => command.name)
 // approval_response command, which the relay forwards to the owning daemon.
 const interactionSubmitTimers = new Map<string, ReturnType<typeof setTimeout>>()
 type InteractionCardType = 'approval_request' | 'question_request' | 'mcp_elicitation_request'
-const interactionResolutions = new Map<string, { type: InteractionCardType; resolution: Record<string, unknown> }>()
+const interactionResolutions = new Map<string, { type: InteractionCardType; resolution: Record<string, unknown>; metadata: Record<string, unknown> }>()
+
+function uniqueBuckets(buckets: any[][]): any[][] {
+  return [...new Set(buckets)]
+}
+
+function rootInteractionBuckets(rootTarget: any[]): any[][] {
+  return uniqueBuckets([messages.value, rootTarget])
+}
+
+function childInteractionBuckets(subagentOverride?: Record<string, any[]>): any[][] {
+  const buckets: any[][] = []
+  for (const agentId of Object.keys(subagentMessages.value).sort()) buckets.push(subagentMessages.value[agentId])
+  if (subagentOverride && subagentOverride !== subagentMessages.value) {
+    for (const agentId of Object.keys(subagentOverride).sort()) buckets.push(subagentOverride[agentId])
+  }
+  return uniqueBuckets(buckets)
+}
+
+function findInteractionOwner(type: InteractionCardType, requestId: string, rootTarget: any[], subagentOverride?: Record<string, any[]>): any[] | undefined {
+  const owns = (bucket: any[]) => bucket.some(message => message.type === type && message.request_id === requestId)
+  return rootInteractionBuckets(rootTarget).find(owns) ?? childInteractionBuckets(subagentOverride).find(owns)
+}
+
+function removeInteractionRequest(bucket: any[], type: InteractionCardType, requestId: string): void {
+  for (let index = bucket.length - 1; index >= 0; index--) {
+    if (bucket[index].type === type && bucket[index].request_id === requestId) bucket.splice(index, 1)
+  }
+}
+
+function claimInteractionRequestTarget(
+  evt: any,
+  type: InteractionCardType,
+  requestId: string,
+  rootTarget: any[],
+  routedTarget: any[],
+  subagentOverride?: Record<string, any[]>,
+): any[] {
+  const rootOwner = rootInteractionBuckets(rootTarget).find(bucket =>
+    bucket.some(message => message.type === type && message.request_id === requestId))
+  if (rootOwner) return rootOwner
+  const children = childInteractionBuckets(subagentOverride)
+  if (!(evt.agent_id || evt.agentId)) {
+    let migratingRequest: any | undefined
+    for (const bucket of children) {
+      migratingRequest ??= bucket.find(message => message.type === type && message.request_id === requestId)
+      removeInteractionRequest(bucket, type, requestId)
+    }
+    if (migratingRequest && !rootTarget.some(message => message.type === type && message.request_id === requestId)) {
+      rootTarget.push(migratingRequest)
+    }
+    return rootTarget
+  }
+  return children.find(bucket => bucket.some(message => message.type === type && message.request_id === requestId)) ?? routedTarget
+}
+
+function recordInteractionResolution(
+  type: InteractionCardType,
+  requestId: string,
+  resolution: Record<string, unknown>,
+  evt: any,
+  rootTarget: any[],
+  subagentOverride?: Record<string, any[]>,
+): void {
+  const prior = interactionResolutions.get(requestId)
+  const entry = {
+    type, resolution,
+    metadata: { ...(prior?.metadata ?? {}), ...eventWithTurnMetadata(evt) },
+  }
+  const owner = findInteractionOwner(type, requestId, rootTarget, subagentOverride)
+  if (!owner) {
+    interactionResolutions.set(requestId, entry)
+    return
+  }
+  const request = owner.find(message => message.type === type && message.request_id === requestId)
+  if (request) preserveTurnMetadataRecord(request, entry.metadata)
+  resolveInteractionRequest(owner, type, requestId, resolution)
+  interactionResolutions.delete(requestId)
+  clearInteractionSubmitting(requestId)
+}
+
+function consumeInteractionResolution(type: InteractionCardType, requestId: string, request: any, owner: any[]): void {
+  const known = interactionResolutions.get(requestId)
+  if (known?.type !== type) return
+  preserveTurnMetadataRecord(request, known.metadata)
+  resolveInteractionRequest(owner, type, requestId, known.resolution)
+  interactionResolutions.delete(requestId)
+}
+
+function interactionResultResolution(evt: any): { type: InteractionCardType; resolution: Record<string, unknown> } | null {
+  let type: InteractionCardType
+  if (evt.operation === 'approval_response') type = 'approval_request'
+  else if (evt.operation === 'question_response' || evt.operation === 'question_reject') type = 'question_request'
+  else if (evt.operation === 'mcp_elicitation_response') type = 'mcp_elicitation_request'
+  else return null
+  const isClaudeNeutralResult = type === 'approval_request' && (evt.status === 'submitted' || evt.status === 'result_unknown')
+  if (evt.status !== 'resolved_elsewhere' && !isClaudeNeutralResult) return null
+  const reason = evt.status === 'resolved_elsewhere'
+    ? 'resolved_elsewhere'
+    : (evt.reason || (evt.status === 'submitted' ? 'claude_result_unconfirmed' : 'result_unknown'))
+  return {
+    type,
+    resolution: {
+      reason,
+      ...(isClaudeNeutralResult ? { action: evt.status, resultUnknown: evt.status === 'result_unknown' } : {}),
+    },
+  }
+}
 function markInteractionSubmitting(msg: any, operation: string): boolean {
   const readiness = resolveInteractionReadiness({
     connectivity: interactionConnectivity.value,
@@ -1485,10 +1681,12 @@ function clearInteractionSubmitting(requestId: string) {
   const timer = interactionSubmitTimers.get(requestId)
   if (timer) clearTimeout(timer)
   interactionSubmitTimers.delete(requestId)
-  const card = messages.value.find((message: any) => message.request_id === requestId)
-  if (card) {
-    card.submitting = false
-    card.resultUnknown = false
+  for (const bucket of uniqueBuckets([messages.value, ...Object.values(subagentMessages.value)])) {
+    const card = bucket.find((message: any) => message.request_id === requestId)
+    if (card) {
+      card.submitting = false
+      card.resultUnknown = false
+    }
   }
 }
 
@@ -1576,6 +1774,10 @@ function sendMessage() {
       return
     }
   }
+  if (sendPromptText(text)) messageInput.value = ''
+}
+
+function sendPromptText(text: string): boolean {
   // C (web-post-send-feedback): optimistic echo — push user bubble immediately.
   // Relay's user_text echo is deduped by isDuplicate (same pattern as
   // handleLocalCommand), so no double bubble.
@@ -1591,15 +1793,15 @@ function sendMessage() {
     deliveryStatus: 'pending',
   })
   nextTick(scrollToBottom)
-  const sent = send({ type: 'user_message', session_id: sessionId.value, content: text, msg_id: msgId })
+  const sent = sendUserMessage({ session_id: sessionId.value, content: text, msg_id: msgId, input_mode: 'auto' })
   if (!sent) {
     failOrRollbackOptimistic(msgId)  // L1: WebSocket not open
-    return
+    return false
   }
-  messageInput.value = ''
   startTurnTimer()  // begin turn timer (stops when isExecuting → false)
   awaitingStart.value = true  // A: show turn-bar until first running/agent_text
   armAckTimeout(msgId)  // L2: roll back if relay doesn't ack within 3s
+  return true
 }
 
 // L1/L2 (web-post-send-feedback): remove the optimistic user bubble + reset
@@ -1615,6 +1817,12 @@ function showSendFailure() {
   awaitingStart.value = false
   sendError.value = true
   setTimeout(() => { sendError.value = false }, 3000)
+}
+function restoreInterruptPendingDraft() {
+  if (!interruptPendingDraft.value) return
+  if (!composerState.value.sendEnabled || isPendingSession.value) return
+  const retryText = interruptPendingDraft.value
+  if (sendPromptText(retryText)) interruptPendingDraft.value = ''
 }
 
 function rollbackOptimistic(msgId?: string) {
@@ -1876,17 +2084,66 @@ function isDuplicate(type: string, text: string, target = messages.value): boole
   return type === 'agent_text' && cleanContent(last.content || '') === cleanContent(text)
 }
 
+const turnMetadataKeys = ['turn_id', 'source_turn_id', 'turn_status', 'turn_reason', 'turn_origin', 'turn_confidence', 'previous_turn_id', 'continuation_reason', 'actor_scope', 'flow_scope', 'content_class', 'classifier_version'] as const
+function eventWithTurnMetadata(evt: any): Record<string, unknown> {
+  const payload = evt.payload && typeof evt.payload === 'object' ? evt.payload : {}
+  const metadata: Record<string, unknown> = {}
+  for (const key of turnMetadataKeys) {
+    const value = evt[key] ?? payload[key]
+    if (value !== undefined) metadata[key] = value
+  }
+  return metadata
+}
+function preserveTurnMetadata(message: any, evt: any): void {
+  Object.assign(message, eventWithTurnMetadata(evt))
+}
+function preserveTurnMetadataRecord(message: any, metadata: Record<string, unknown>): void {
+  Object.assign(message, metadata)
+}
+
+function findAffectedFileChangeCard(target: any[], evt: any): any | undefined {
+  const payload = evt.payload && typeof evt.payload === 'object' ? evt.payload : {}
+  const eventId = evt.event_id ?? payload.event_id
+  const changeSetId = evt.change_set_id ?? payload.change_set_id
+  const changeIndex = evt.change_index ?? payload.change_index
+  const path = evt.path ?? payload.path
+  return [...target].reverse().find((message: any) => message.type === 'agent_file_change'
+    && message.fileChange?.files.some((file: any) => file.edits.some((edit: any) =>
+      (eventId && edit.eventId === eventId)
+      || (!eventId && edit.changeSetId === changeSetId && edit.changeIndex === changeIndex && file.path === path),
+    )))
+}
+
 function processEvent(evt: any, target: any[] = messages.value, subagentOverride?: Record<string, any[]>) {
   const type = evt.type || evt.event_type
+  if (isKnownNonTimelineControlEvent(type)) return
   if (type === 'agent_plan') {
     if (!evt.agent_id && !evt.payload?.agent_id) acceptAgentPlan(evt)
     return
   }
+  const rootTarget = target
+  const interactionBuckets = subagentOverride ?? subagentMessages.value
+  // interaction_result is terminal control, not a timeline row. Resolve by the
+  // request's canonical owner before agent routing, or buffer by request ID
+  // until that owner appears.
+  if (type === 'interaction_result') {
+    const payload = evt.payload && typeof evt.payload === 'object' ? evt.payload : {}
+    const normalized = { ...payload, ...evt, request_id: evt.request_id || payload.request_id }
+    const requestId = normalized.request_id
+    const result = interactionResultResolution(normalized)
+    if (requestId && result) recordInteractionResolution(result.type, requestId, result.resolution, evt, rootTarget, interactionBuckets)
+    return
+  }
   // P2: route sub-agent events to per-agent buckets; parent events keep default target
-  target = resolveAgentTarget(evt, subagentOverride ?? subagentMessages.value, target)
+  target = resolveAgentTarget(evt, interactionBuckets, target)
   if (type === 'user_text') {
     const text = evt.text || evt.content || evt.payload?.text || evt.payload?.content || ''
-    if (text && !isDuplicate('user_text', text, target)) target.push({ id: nextId('u'), type: 'user_text', role: 'user', content: text })
+    if (!text) return
+    if (isDuplicate('user_text', text, target)) {
+      preserveTurnMetadata(target[target.length - 1], evt)
+      return
+    }
+    target.push({ id: nextId('u'), type: 'user_text', role: 'user', content: text, ...eventWithTurnMetadata(evt) })
   } else if (type === 'agent_text') {
     // A: model started responding — end optimistic window (fallback if the
     // running status was missed, e.g. PTY race).
@@ -1921,12 +2178,17 @@ function processEvent(evt: any, target: any[] = messages.value, subagentOverride
         if (last) {
           last.streaming = false
           if (usage) last.usage = usage
+          preserveTurnMetadata(last, evt)
         }
         return
       }
       if (usage) {
         for (let i = target.length - 1; i >= 0; i--) {
-          if ((target[i] as any).type === 'agent_text') { (target[i] as any).usage = usage; break }
+          if ((target[i] as any).type === 'agent_text') {
+            ;(target[i] as any).usage = usage
+            preserveTurnMetadata(target[i], evt)
+            break
+          }
         }
       }
       return
@@ -1942,6 +2204,7 @@ function processEvent(evt: any, target: any[] = messages.value, subagentOverride
       replace: evt.replace ?? evt.payload?.replace,
       streaming: evt.streaming ?? evt.payload?.streaming ?? false,
       usage,
+      ...eventWithTurnMetadata(evt),
     })
     if (merged !== 'legacy') return
     if (streamId) {
@@ -1951,22 +2214,27 @@ function processEvent(evt: any, target: any[] = messages.value, subagentOverride
         existing.content += content
         existing.streaming = streaming
         if (usage) existing.usage = usage
+        preserveTurnMetadata(existing, evt)
       } else if (content) {
         target.push({
           id: nextId('a'), type: 'agent_text', role: 'agent',
-          content, streaming, usage, streamId,
+          content, streaming, usage, streamId, ...eventWithTurnMetadata(evt),
         })
       }
       return
     }
-    if (isDuplicate('agent_text', content, target)) return
+    if (isDuplicate('agent_text', content, target)) {
+      preserveTurnMetadata(target[target.length - 1], evt)
+      return
+    }
     const last = target[target.length - 1]
     if (last && last.type === 'agent_text' && last.streaming && !content.startsWith('\n')) {
       last.content += content
       if (!streaming) last.streaming = false
       if (usage) last.usage = usage
+      preserveTurnMetadata(last, evt)
     } else {
-      target.push({ id: nextId('a'), type: 'agent_text', role: 'agent', content, streaming, usage })
+      target.push({ id: nextId('a'), type: 'agent_text', role: 'agent', content, streaming, usage, ...eventWithTurnMetadata(evt) })
     }
   } else if (type === 'agent_reasoning') {
     let content = evt.text || evt.content || evt.payload?.text || evt.payload?.content || ''
@@ -1987,10 +2255,11 @@ function processEvent(evt: any, target: any[] = messages.value, subagentOverride
       if (existing) {
         existing.content += content
         existing.streaming = !update.completed
+        preserveTurnMetadata(existing, evt)
       } else if (content) {
         target.push({
           id: nextId('or'), type: 'agent_reasoning', role: 'agent',
-          content, streaming: !update.completed, streamId,
+          content, streaming: !update.completed, streamId, ...eventWithTurnMetadata(evt),
         })
       }
       return
@@ -2006,29 +2275,43 @@ function processEvent(evt: any, target: any[] = messages.value, subagentOverride
       previous_event_id: evt.previous_event_id || evt.payload?.previous_event_id,
       replace: evt.replace ?? evt.payload?.replace,
       streaming: evt.streaming ?? evt.payload?.streaming ?? false,
+      ...eventWithTurnMetadata(evt),
     })
-    if (merged === 'legacy' && !isDuplicate('agent_reasoning', content, target)) {
-      target.push({ id: nextId('or'), type: 'agent_reasoning', role: 'agent', content, streaming: false })
+    if (merged === 'legacy') {
+      if (isDuplicate('agent_reasoning', content, target)) preserveTurnMetadata(target[target.length - 1], evt)
+      else target.push({ id: nextId('or'), type: 'agent_reasoning', role: 'agent', content, streaming: false, ...eventWithTurnMetadata(evt) })
     }
   } else if (type === 'agent_retry') {
     const partId = evt.part_id || evt.payload?.part_id
-    if (partId && target.some((m: any) => m.type === 'agent_retry' && m.partId === partId)) return
+    const existing = partId && target.find((m: any) => m.type === 'agent_retry' && m.partId === partId)
+    if (existing) {
+      preserveTurnMetadata(existing, evt)
+      return
+    }
     target.push({
       id: nextId('or'), type: 'agent_retry', role: 'agent', partId,
       attempt: evt.attempt || evt.payload?.attempt || 1,
       error: evt.error || evt.payload?.error || '',
       retryAt: evt.retry_at || evt.payload?.retry_at,
+      ...eventWithTurnMetadata(evt),
     })
   } else if (type === 'agent_compaction') {
     const partId = evt.part_id || evt.payload?.part_id
-    if (partId && target.some((m: any) => m.type === 'agent_compaction' && m.partId === partId)) return
+    const existing = partId && target.find((m: any) => m.type === 'agent_compaction' && m.partId === partId)
+    if (existing) {
+      preserveTurnMetadata(existing, evt)
+      return
+    }
     target.push({
       id: nextId('oc'), type: 'agent_compaction', role: 'agent', partId,
       auto: evt.auto ?? evt.payload?.auto ?? false,
       overflow: evt.overflow ?? evt.payload?.overflow ?? false,
+      ...eventWithTurnMetadata(evt),
     })
   } else if (type === 'agent_file_change') {
     fileChangeReducer.accept(evt, target)
+    const card = findAffectedFileChangeCard(target, evt)
+    if (card) preserveTurnMetadata(card, evt)
   } else if (isOpenCodeStructuredType(type)) {
     const payload = evt.payload && typeof evt.payload === 'object' ? evt.payload : {}
     mergeStructuredPart(target, {
@@ -2052,9 +2335,11 @@ function processEvent(evt: any, target: any[] = messages.value, subagentOverride
       existing.tool = tool
       existing.input = input
       existing.inputDesc = inputDesc
+      preserveTurnMetadata(existing, evt)
       if (pending) {
         existing.output = pending.output
         existing.status = pending.status
+        preserveTurnMetadataRecord(existing, pending.metadata)
       }
     } else {
       target.push({
@@ -2062,6 +2347,8 @@ function processEvent(evt: any, target: any[] = messages.value, subagentOverride
         tool, input, inputDesc,
         output: pending?.output ?? null, status: pending?.status ?? 'running',
         expanded: false, outputExpanded: false,
+        ...eventWithTurnMetadata(evt),
+        ...(pending?.metadata ?? {}),
       })
     }
     if (pending) pendingToolResults.delete(callId)
@@ -2095,10 +2382,11 @@ function processEvent(evt: any, target: any[] = messages.value, subagentOverride
     if (idx >= 0) {
       if (output !== undefined && output !== null) target[idx].output = output
       target[idx].status = resultStatus
+      preserveTurnMetadata(target[idx], evt)
     } else {
       // tool_call hasn't been created yet (out-of-order replay) — buffer the
       // result so it's applied when the matching tool_call arrives.
-      pendingToolResults.set(callId, { output: output ?? null, status: resultStatus })
+      pendingToolResults.set(callId, { output: output ?? null, status: resultStatus, metadata: eventWithTurnMetadata(evt) })
     }
   } else if (type === 'error') {
     // Durable OpenCode errors can arrive both as live events and replay_batch.
@@ -2106,8 +2394,23 @@ function processEvent(evt: any, target: any[] = messages.value, subagentOverride
     // and reconnect never render the same assistant error twice.
     const errorText = evt.error || evt.content || evt.payload?.error || evt.payload?.content || 'Unknown error'
     const eventKey = evt.event_id || evt.payload?.event_id || (evt.message_id || evt.payload?.message_id ? `message:${evt.message_id || evt.payload?.message_id}` : '')
-    if (eventKey && target.some((m: any) => m.type === 'error' && m.eventKey === eventKey)) return
-    target.push({ id: nextId('e'), type: 'error', role: 'agent', content: errorText, error: errorText, eventKey, message_id: evt.message_id || evt.payload?.message_id })
+    const existing = eventKey && target.find((m: any) => m.type === 'error' && m.eventKey === eventKey)
+    if (existing) {
+      preserveTurnMetadata(existing, evt)
+      return
+    }
+    target.push({ id: nextId('e'), type: 'error', role: 'agent', content: errorText, error: errorText, eventKey, message_id: evt.message_id || evt.payload?.message_id, ...eventWithTurnMetadata(evt) })
+  } else if (type === 'turn_status') {
+    const turnId = evt.turn_id || evt.payload?.turn_id
+    const turnStatus = evt.turn_status || evt.payload?.turn_status
+    if (!turnId || !turnStatus) return
+    const eventId = evt.event_id || evt.payload?.event_id
+    const existing = eventId && target.find((message: any) => message.type === 'turn_status' && message.eventId === eventId)
+    if (existing) {
+      preserveTurnMetadata(existing, evt)
+      return
+    }
+    target.push({ id: nextId('ts'), type: 'turn_status', role: 'agent', eventId, ...eventWithTurnMetadata(evt) })
   } else if (type === 'session_status') {
     const s = evt.status || evt.payload?.status
     if (s) status.value = s
@@ -2127,15 +2430,15 @@ function processEvent(evt: any, target: any[] = messages.value, subagentOverride
       id: nextId('r'), type: 'command_receipt',
       command: evt.command || '', receiptStatus: evt.receipt_status || 'success',
       message: evt.message || '',
+      ...eventWithTurnMetadata(evt),
     })
   } else if (type === 'approval_request') {
     const requestId = evt.request_id || evt.payload?.request_id
     if (!requestId) return
     const tool = evt.tool || evt.payload?.tool || ''
     const input = evt.input || evt.payload?.input
-    const requestTarget = target !== messages.value && messages.value.some((message: any) => message.type === 'approval_request' && message.request_id === requestId)
-      ? messages.value : target
-    upsertInteractionRequest(requestTarget, 'approval_request', requestId, {
+    const requestTarget = claimInteractionRequestTarget(evt, 'approval_request', requestId, rootTarget, target, interactionBuckets)
+    const request = upsertInteractionRequest(requestTarget, 'approval_request', requestId, {
       id: nextId('ap'), type: 'approval_request', request_id: requestId,
       call_id: evt.call_id || evt.payload?.call_id,
       tool, input,
@@ -2153,35 +2456,33 @@ function processEvent(evt: any, target: any[] = messages.value, subagentOverride
       cwd: evt.cwd || evt.payload?.cwd,
       description: evt.description || evt.payload?.description,
       inputDesc: evt.command || evt.payload?.command || evt.description || evt.payload?.description || formatToolInput(tool, input),
+      ...eventWithTurnMetadata(evt),
     })
-    const knownResolution = interactionResolutions.get(requestId)
-    if (knownResolution?.type === 'approval_request') resolveInteractionRequest(requestTarget, 'approval_request', requestId, knownResolution.resolution)
+    preserveTurnMetadata(request, evt)
+    consumeInteractionResolution('approval_request', requestId, request, requestTarget)
   } else if (type === 'approval_resolved') {
     const requestId = evt.request_id || evt.payload?.request_id
     if (!requestId) return
     const approved = evt.approved ?? evt.payload?.approved
     const action = evt.action || evt.payload?.action || (approved ? 'once' : 'reject')
     const resolution = { action, reason: evt.reason || evt.payload?.reason }
-    interactionResolutions.set(requestId, { type: 'approval_request', resolution })
-    resolveInteractionRequest(target, 'approval_request', requestId, resolution)
-    if (target !== messages.value) resolveInteractionRequest(messages.value, 'approval_request', requestId, resolution)
-    clearInteractionSubmitting(requestId)
+    recordInteractionResolution('approval_request', requestId, resolution, evt, rootTarget, interactionBuckets)
   } else if (type === 'question_request') {
     const requestId = evt.request_id || evt.payload?.request_id
     if (!requestId) return
     const questions = evt.questions || evt.payload?.questions
     if (!Array.isArray(questions) || questions.length === 0) return
-    const requestTarget = target !== messages.value && messages.value.some((message: any) => message.type === 'question_request' && message.request_id === requestId)
-      ? messages.value : target
-    upsertInteractionRequest(requestTarget, 'question_request', requestId, {
+    const requestTarget = claimInteractionRequestTarget(evt, 'question_request', requestId, rootTarget, target, interactionBuckets)
+    const request = upsertInteractionRequest(requestTarget, 'question_request', requestId, {
       id: nextId('oq'),
       questions,
       autoResolutionMs: evt.auto_resolution_ms || evt.payload?.auto_resolution_ms,
+      ...eventWithTurnMetadata(evt),
       toolMessageId: evt.tool_message_id || evt.payload?.tool_message_id,
       toolCallId: evt.tool_call_id || evt.payload?.tool_call_id,
     })
-    const knownResolution = interactionResolutions.get(requestId)
-    if (knownResolution?.type === 'question_request') resolveInteractionRequest(requestTarget, 'question_request', requestId, knownResolution.resolution)
+    preserveTurnMetadata(request, evt)
+    consumeInteractionResolution('question_request', requestId, request, requestTarget)
   } else if (type === 'question_resolved') {
     const requestId = evt.request_id || evt.payload?.request_id
     if (!requestId) return
@@ -2191,32 +2492,26 @@ function processEvent(evt: any, target: any[] = messages.value, subagentOverride
       reason: evt.reason || evt.payload?.reason,
       redacted: !!(evt.redacted ?? evt.payload?.redacted),
     }
-    interactionResolutions.set(requestId, { type: 'question_request', resolution })
-    resolveInteractionRequest(target, 'question_request', requestId, resolution)
-    if (target !== messages.value) resolveInteractionRequest(messages.value, 'question_request', requestId, resolution)
-    clearInteractionSubmitting(requestId)
+    recordInteractionResolution('question_request', requestId, resolution, evt, rootTarget, interactionBuckets)
   } else if (type === 'mcp_elicitation_request') {
     const requestId = evt.request_id || evt.payload?.request_id
     if (!requestId) return
-    const requestTarget = target !== messages.value && messages.value.some((message: any) => message.type === 'mcp_elicitation_request' && message.request_id === requestId)
-      ? messages.value : target
-    upsertInteractionRequest(requestTarget, 'mcp_elicitation_request', requestId, {
+    const requestTarget = claimInteractionRequestTarget(evt, 'mcp_elicitation_request', requestId, rootTarget, target, interactionBuckets)
+    const request = upsertInteractionRequest(requestTarget, 'mcp_elicitation_request', requestId, {
       id: nextId('mcp'), mcpServer: evt.mcp_server || evt.payload?.mcp_server,
       elicitationMode: evt.elicitation_mode || evt.payload?.elicitation_mode,
       elicitationId: evt.elicitation_id || evt.payload?.elicitation_id,
       elicitationSchema: evt.elicitation_schema || evt.payload?.elicitation_schema,
       message: evt.message || evt.payload?.message, url: evt.url || evt.payload?.url,
+      ...eventWithTurnMetadata(evt),
     })
-    const knownResolution = interactionResolutions.get(requestId)
-    if (knownResolution?.type === 'mcp_elicitation_request') resolveInteractionRequest(requestTarget, 'mcp_elicitation_request', requestId, knownResolution.resolution)
+    preserveTurnMetadata(request, evt)
+    consumeInteractionResolution('mcp_elicitation_request', requestId, request, requestTarget)
   } else if (type === 'mcp_elicitation_resolved') {
     const requestId = evt.request_id || evt.payload?.request_id
     if (!requestId) return
     const resolution = { action: evt.action || evt.payload?.action, reason: evt.reason || evt.payload?.reason, redacted: !!(evt.redacted ?? evt.payload?.redacted) }
-    interactionResolutions.set(requestId, { type: 'mcp_elicitation_request', resolution })
-    resolveInteractionRequest(target, 'mcp_elicitation_request', requestId, resolution)
-    if (target !== messages.value) resolveInteractionRequest(messages.value, 'mcp_elicitation_request', requestId, resolution)
-    clearInteractionSubmitting(requestId)
+    recordInteractionResolution('mcp_elicitation_request', requestId, resolution, evt, rootTarget, interactionBuckets)
   } else if (type === 'interactive_prompt') {
     // Daemon scanned a selection menu the agent's TUI drew to the PTY (e.g. a
     // host PreToolUse hook's "Do you want to proceed? ❶Yes ❷No" prompt that
@@ -2224,7 +2519,11 @@ function processEvent(evt: any, target: any[] = messages.value, subagentOverride
     // selection is sent back via interactive_response.
     const requestId = evt.request_id || evt.payload?.request_id
     if (!requestId) return
-    if (target.some((m: any) => m.type === 'interactive_prompt' && m.request_id === requestId)) return
+    const existing = target.find((m: any) => m.type === 'interactive_prompt' && m.request_id === requestId)
+    if (existing) {
+      preserveTurnMetadata(existing, evt)
+      return
+    }
     const rawInput = evt.input || evt.payload?.input
     let promptText = ''
     let options: Array<{ index: string; label: string }> = []
@@ -2236,6 +2535,20 @@ function processEvent(evt: any, target: any[] = messages.value, subagentOverride
     target.push({
       id: nextId('ip'), type: 'interactive_prompt', request_id: requestId,
       prompt: promptText, options, status: 'pending', selectedChoice: '',
+      ...eventWithTurnMetadata(evt),
+    })
+  } else {
+    const payload = evt.payload && typeof evt.payload === 'object' ? evt.payload : {}
+    const stableIdentity = unknownTimelineEventIdentity(evt, type)
+    const existing = stableIdentity && target.find((message: any) => message.type === type && message.eventKey === stableIdentity)
+    if (existing) {
+      preserveTurnMetadata(existing, evt)
+      return
+    }
+    target.push({
+      id: stableIdentity ? `unknown:${stableIdentity}` : nextId('unknown'), type, role: 'agent',
+      eventKey: stableIdentity || '', content: evt.text ?? evt.content ?? payload.text ?? payload.content ?? '',
+      ...eventWithTurnMetadata(evt),
     })
   }
 }
@@ -2303,6 +2616,7 @@ watch(loadKey, (newKey, oldKey) => {
     for (const timer of interactionSubmitTimers.values()) clearTimeout(timer)
     interactionSubmitTimers.clear()
     interactionResolutions.clear()
+    interruptPendingDraft.value = ''
     pendingToolResults.clear() // discard buffered out-of-order results
     contentStreams.reset()
     liveContentBatcher.reset(newKey) // drop live chunks still bound to the old context
@@ -2310,7 +2624,7 @@ watch(loadKey, (newKey, oldKey) => {
     fileChangePanelOpen.value = false
     mobileFileChange.value = null
     fileChangeOpener.value = null
-    olderReplayEvents.reset()
+    resetReplayTrustBuffers()
     // Gate the turn-timer watch: the placeholder status='running' below must
     // not start the timer from zero. The real turn start (if executing) is
     // recovered from the last executing session_status once replay completes.
@@ -2495,10 +2809,12 @@ onMounted(() => {
     // batch boundaries lets stream assemblers receive chunk zero before later chunks.
     const evts = Array.isArray(msg.events) ? msg.events : []
     if (isLoadingBackward.value && isBackward) {
-      olderReplayEvents.append(evts)
+      olderReplayEvents.append(replaySessionTrustContext(), evts)
     } else {
       // Initial backward page and forward replay can render progressively.
-      for (const evt of evts) processEvent(evt)
+      const replayContext = replaySessionTrustContext()
+      progressiveReplayEvents.append(replayContext, evts)
+      for (const evt of progressiveReplayEvents.takeReady(replayContext)) processEvent(evt)
       nextTick(scrollToBottom)
     }
   }))
@@ -2506,8 +2822,13 @@ onMounted(() => {
     if (msg.session_id !== sessionId.value) return
     if (msg.req_id !== undefined && msg.req_id !== replayReqId.value) return
     const wasLoadingBackward = isLoadingBackward.value
-    if (wasLoadingBackward) prependOlderReplayEvents(olderReplayEvents.take())
-    else olderReplayEvents.reset()
+    const replayContext = replaySessionTrustContext()
+    if (wasLoadingBackward) {
+      prependOlderReplayEvents(olderReplayEvents.takeFinal(replayContext))
+    } else {
+      for (const evt of progressiveReplayEvents.takeFinal(replayContext)) processEvent(evt)
+      nextTick(scrollToBottom)
+    }
     isLoading.value = false
     isLoadingBackward.value = false
     if (msg.has_more !== undefined) hasMore.value = !!msg.has_more
@@ -2572,6 +2893,18 @@ onMounted(() => {
     if (msg.session_id !== sessionId.value || !msg.msg_id) return
     clearAckTimeout(msg.msg_id)
     const message = messages.value.find((item: any) => item.__msg_id === msg.msg_id)
+    // An input received while interrupt confirmation is outstanding did not
+    // enter the old turn. Remove the optimistic echo and restore the draft so
+    // the user can retry after the terminal lifecycle event arrives.
+    if (msg.status === 'rejected' && msg.reason === 'turn_interrupt_pending' && msg.retryable === true && message) {
+      const rejectedText = message.content || ''
+      if (messageInput.value.trim()) interruptPendingDraft.value = rejectedText
+      else messageInput.value = rejectedText
+      const index = messages.value.indexOf(message)
+      if (index >= 0) messages.value.splice(index, 1)
+      showSendFailure()
+      return
+    }
     if (!message?.__expects_receipt) return
     if (msg.status === 'accepted') {
       message.deliveryStatus = 'accepted'
@@ -2659,26 +2992,23 @@ onMounted(() => {
   }))
   cleanups.push(onEvent('interaction_result', (msg: any) => {
     if (msg.session_id !== sessionId.value || !msg.request_id) return
-    let type: InteractionCardType
-    if (msg.operation === 'approval_response') type = 'approval_request'
-    else if (msg.operation === 'question_response' || msg.operation === 'question_reject') type = 'question_request'
-    else if (msg.operation === 'mcp_elicitation_response') type = 'mcp_elicitation_request'
-    else return
-    const isClaudeNeutralResult = type === 'approval_request' && (msg.status === 'submitted' || msg.status === 'result_unknown')
-    if (msg.status !== 'resolved_elsewhere' && !isClaudeNeutralResult) return
-    const reason = msg.status === 'resolved_elsewhere'
-      ? 'resolved_elsewhere'
-      : (msg.reason || (msg.status === 'submitted' ? 'claude_result_unconfirmed' : 'result_unknown'))
-    const resolution = {
-      reason,
-      ...(isClaudeNeutralResult ? { action: msg.status, resultUnknown: msg.status === 'result_unknown' } : {}),
-    }
-    interactionResolutions.set(msg.request_id, { type, resolution })
-    resolveInteractionRequest(messages.value, type, msg.request_id, resolution)
-    clearInteractionSubmitting(msg.request_id)
+    processImmediateLiveEvent(msg)
   }))
   cleanups.push(onEvent('interactive_prompt', (msg: any) => {
     if (msg.session_id !== sessionId.value) return
+    processImmediateLiveEvent(msg, { scroll: true })
+  }))
+
+  cleanups.push(onEvent('turn_status', (msg: any) => {
+    if (msg.session_id !== sessionId.value) return
+    processImmediateLiveEvent(msg, { scroll: true })
+  }))
+
+  // Keep future/unclassified events visible, while avoiding the duplicate work
+  // a catch-all listener would otherwise perform for named handlers.
+  cleanups.push(onEvent((msg: any) => {
+    const type = msg.type || msg.event_type || ''
+    if (!type || msg.session_id !== sessionId.value || explicitlyRoutedLiveEventTypes.has(type)) return
     processImmediateLiveEvent(msg, { scroll: true })
   }))
 
@@ -2754,7 +3084,7 @@ onMounted(() => {
       router.replace(`/session/${msg.session_id}`)
       // 清空旧消息，重新拉取真实 ID 的历史
       messages.value = []
-      olderReplayEvents.reset()
+      resetReplayTrustBuffers()
       replayReqId.value++
       isLoading.value = true
       send({ type: 'replay', session_id: msg.session_id, direction: 'backward', limit: pageSize.value, req_id: replayReqId.value })
@@ -2849,6 +3179,7 @@ onUnmounted(() => {
   for (const timer of pendingAckTimers.values()) clearTimeout(timer)
   pendingAckTimers.clear()
   interactionResolutions.clear()
+  interruptPendingDraft.value = ''
   clearSessionHeader()
 })
 
@@ -2973,6 +3304,13 @@ onMounted(() => {
 /* Tool cards: left-aligned, not centered. */
 .chat-messages > .tool-wrap { min-width: 0; max-width: 820px; width: 100%; align-self: flex-start; }
 .chat-messages > *.msg { min-width: 0; max-width: 85%; }
+.turn-group-header { display: flex; align-items: center; gap: 8px; min-width: 0; max-width: 820px; width: 100%; align-self: center; padding: 7px 10px; border: 1px solid var(--border); border-radius: var(--radius-md); color: var(--fg-secondary); background: var(--surface); font: 600 11px/1 var(--font-mono); }
+.turn-group-label { color: var(--fg-tertiary); text-transform: uppercase; letter-spacing: .04em; }
+.turn-group-state { color: var(--warning); }
+.turn-group-continuation { color: var(--accent); }
+.turn-group-aux-toggle { margin-left: auto; padding: 3px 6px; border: 0; border-radius: 4px; color: var(--fg-secondary); background: var(--surface-hover); font: inherit; cursor: pointer; }
+.turn-group-aux-toggle:hover { color: var(--fg); }
+.turn-unknown-event { min-width: 0; max-width: 820px; width: 100%; align-self: center; padding: 10px 12px; border-left: 3px solid var(--warning); color: var(--fg-secondary); background: var(--surface); font: 12px/1.45 var(--font-mono); }
 .request-deep-link-target { animation: request-deep-link-highlight 1.8s ease-out; }
 @keyframes request-deep-link-highlight {
   0%, 30% { outline: 3px solid var(--warning); outline-offset: 3px; }

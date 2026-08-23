@@ -10,11 +10,13 @@ export interface RevisionedPartEvent {
   replace?: boolean
   streaming?: boolean
   usage?: unknown
+  [key: string]: unknown
 }
 
 export type PartMergeResult = 'inserted' | 'updated' | 'deferred' | 'ignored' | 'legacy'
 
 const MAX_DEFERRED_PART_EVENTS = 32
+const turnMetadataKeys = ['turn_id', 'source_turn_id', 'turn_status', 'turn_reason', 'turn_origin', 'turn_confidence', 'previous_turn_id', 'continuation_reason', 'actor_scope', 'flow_scope', 'content_class', 'classifier_version'] as const
 
 function enqueueDeferredPartEvent(deferred: RevisionedPartEvent[], event: RevisionedPartEvent): void {
   if (deferred.some(item => item.event_id === event.event_id)) return
@@ -50,6 +52,19 @@ function applyPartEvent(existing: any, event: RevisionedPartEvent): void {
   existing.streaming = event.streaming ?? false
   if (event.message_id) existing.messageId = event.message_id
   if (event.usage) existing.usage = event.usage
+  copyTurnMetadata(existing, event)
+}
+
+function copyTurnMetadata(target: any, event: RevisionedPartEvent): void {
+  for (const key of turnMetadataKeys) {
+    if (event[key] !== undefined) target[key] = event[key]
+  }
+}
+
+function turnMetadata(event: RevisionedPartEvent): Record<string, unknown> {
+  return Object.fromEntries(turnMetadataKeys
+    .filter(key => event[key] !== undefined)
+    .map(key => [key, event[key]]))
 }
 
 function drainDeferredPartEvents(existing: any): void {
@@ -86,10 +101,14 @@ export function mergeRevisionedPart(target: any[], event: RevisionedPartEvent): 
       partId,
       revision,
       eventId: event.event_id,
-      usage: event.usage,
+      usage: event.usage, ...turnMetadata(event),
     })
     return 'inserted'
   }
+
+  // Presentation enrichment can arrive on an equal/stale replay copy. Merge it
+  // before every causal/revision early return without touching canonical data.
+  copyTurnMetadata(existing, event)
 
   const eventId = event.event_id
   const previousEventId = event.previous_event_id

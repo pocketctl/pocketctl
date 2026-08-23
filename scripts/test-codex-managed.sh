@@ -16,18 +16,7 @@ go test -race -p 1 \
   ./cmd/pocketctl \
   -count=1
 
-echo "[Codex/2] Windows app-server, launcher and daemon compile contract"
-GOOS=windows GOARCH=amd64 go test -exec=true \
-  ./internal/agentcontrol \
-  ./internal/codexapp \
-  ./internal/daemon \
-  ./internal/platform \
-  ./internal/protocol \
-  ./internal/session \
-  ./cmd/pocketctl \
-  -count=1
-
-echo "[Codex/3] Web managed composer, interaction projection and cards"
+echo "[Codex/2] Web managed composer, interaction projection and cards"
 (
   cd web
   npx vitest run \
@@ -43,7 +32,7 @@ echo "[Codex/3] Web managed composer, interaction projection and cards"
 )
 
 if [[ -d ios ]] && command -v swift >/dev/null 2>&1 && command -v swiftc >/dev/null 2>&1; then
-  echo "[Codex/4] iOS Codex and generic session source-regression tests"
+  echo "[Codex/3] iOS Codex and generic session source-regression tests"
   for test_file in ios/Tests/Codex*RegressionTests.swift; do
     swift "$test_file"
   done
@@ -81,19 +70,19 @@ if [[ -d ios ]] && command -v swift >/dev/null 2>&1 && command -v swiftc >/dev/n
     "$swift_test_dir/AgentFileChangeRegressionTests"
   )
 else
-  echo "[Codex/4] SKIP iOS source-regression tests: iOS source or swift/swiftc is unavailable"
+  echo "[Codex/3] SKIP iOS source-regression tests: iOS source or swift/swiftc is unavailable"
 fi
 
 if [[ "${POCKETCTL_RELEASE_GATE:-0}" == "1" ]]; then
-  echo "[Codex/5] Full Relay and Web tests/builds"
+  echo "[Codex/4] Full Relay and Web tests/builds"
   (cd relay && env -u TEST_DATABASE_URL -u RUN_POSTGRES_INTEGRATION npm test && npm run build)
   (cd web && npm test && npm run build)
 
-  echo "[Codex/6] Pocketctl four-platform release build matrix"
+  echo "[Codex/5] Pocketctl four-platform release build matrix"
   make build-all
 
   if [[ -d ios ]] && command -v xcodebuild >/dev/null 2>&1; then
-    echo "[Codex/7] iOS simulator Debug build"
+    echo "[Codex/6] iOS simulator Debug build"
     xcodebuild \
       -project ios/Pocketctl.xcodeproj \
       -scheme Pocketctl \
@@ -102,7 +91,7 @@ if [[ "${POCKETCTL_RELEASE_GATE:-0}" == "1" ]]; then
       build \
       CODE_SIGNING_ALLOWED=NO
   else
-    echo "[Codex/7] SKIP iOS simulator build: iOS source or xcodebuild is unavailable"
+    echo "[Codex/6] SKIP iOS simulator build: iOS source or xcodebuild is unavailable"
   fi
 fi
 

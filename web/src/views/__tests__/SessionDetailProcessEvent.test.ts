@@ -10,8 +10,9 @@ import OpenCodePartCard from '../../components/messages/OpenCodePartCard.vue'
 import FileChangeCard from '../../components/messages/FileChangeCard.vue'
 import FileChangeBottomSheet from '../../components/messages/FileChangeBottomSheet.vue'
 
-const websocketMock = vi.hoisted(() => ({ handlers: new Map<string, (message: any) => void>() }))
+const websocketMock = vi.hoisted(() => ({ handlers: new Map<string, (message: any) => void>(), allHandlers: new Set<(message: any) => void>() }))
 const routeMock = vi.hoisted(() => ({ current: null as any }))
+const responsiveMock = vi.hoisted(() => ({ isMobile: { __v_isRef: true, value: false } }))
 
 vi.mock('vue-router', () => ({
   useRoute: () => routeMock.current,
@@ -20,10 +21,14 @@ vi.mock('vue-router', () => ({
 
 vi.mock('../../composables/useWebSocket', () => ({
   useWebSocket: () => ({
-    connect: vi.fn(), send: vi.fn(() => true),
-    onEvent: vi.fn((type: string, handler: (message: any) => void) => {
-      websocketMock.handlers.set(type, handler)
-      return () => websocketMock.handlers.delete(type)
+    connect: vi.fn(), send: vi.fn(() => true), sendUserMessage: vi.fn(() => true),
+    onEvent: vi.fn((typeOrHandler: string | ((message: any) => void), handler?: (message: any) => void) => {
+      if (typeof typeOrHandler === 'function') {
+        websocketMock.allHandlers.add(typeOrHandler)
+        return () => websocketMock.allHandlers.delete(typeOrHandler)
+      }
+      websocketMock.handlers.set(typeOrHandler, handler!)
+      return () => websocketMock.handlers.delete(typeOrHandler)
     }),
   }),
 }))
@@ -34,10 +39,12 @@ vi.mock('../../composables/useSessionRename', () => ({
     renamingId: ref(''), renameInput: ref(''), startRename: vi.fn(), commitRename: vi.fn(), cancelRename: vi.fn(),
   }),
 }))
+vi.mock('../../composables/useResponsiveLayout', () => ({ useResponsiveLayout: () => responsiveMock }))
 
 describe('SessionDetail processEvent integration', () => {
   beforeEach(() => {
     routeMock.current = reactive({ params: { id: 'ses_1' }, query: {} as Record<string, string> })
+    responsiveMock.isMobile.value = false
   })
 
   test('isolates Edited files reduction from legacy tool results and OpenCode parts', async () => {
@@ -97,10 +104,31 @@ describe('SessionDetail processEvent integration', () => {
 
     expect(vm.messages.filter((item: any) => item.type === 'agent_file_change')).toHaveLength(1)
     expect(wrapper.findComponent(FileChangeCard).exists()).toBe(false)
+    expect(wrapper.find('.turn-unknown-event').exists()).toBe(false)
     const toolbarButton = wrapper.find('.file-change-toolbar-button')
     expect(toolbarButton.exists()).toBe(true)
     await toolbarButton.trigger('click')
     expect(wrapper.findComponent(FileChangeCard).exists()).toBe(true)
+  })
+
+  test('keeps agent file changes on the mobile card path instead of unknown fallback text', async () => {
+    responsiveMock.isMobile.value = true
+    const wrapper = shallowMount(SessionDetail)
+    const vm = wrapper.vm as any
+    vm.allSessions = [{ session_id: 'ses_1', daemon_id: 'daemon-1', status: 'running' }]
+    vm.processEvent({
+      type: 'agent_file_change', session_id: 'ses_1', turn_id: 'turn-mobile', seq: 15,
+      event_id: 'file-mobile', change_set_id: 'managed:call-mobile', change_index: 0, change_total: 1,
+      path: 'mobile.txt', change_kind: 'update', diff: '@@ -1 +1 @@\n-old\n+new\n',
+      additions: 1, deletions: 1, status: 'completed', flow_scope: 'auxiliary', content_class: 'execution',
+    })
+    await wrapper.vm.$nextTick()
+
+    expect((wrapper.vm as any).$?.setupState.isMobile).toBe(true)
+    expect(vm.renderMessages).toHaveLength(1)
+    expect(vm.turnRows[0].auxiliary).toHaveLength(1)
+    expect(wrapper.findComponent(FileChangeCard).exists()).toBe(true)
+    expect(wrapper.find('.turn-unknown-event').exists()).toBe(false)
   })
 
   test('closes the desktop Edited files panel with Escape', async () => {
@@ -267,6 +295,363 @@ describe('SessionDetail processEvent integration', () => {
     })
 
     expect((wrapper.vm as any).messages.map((message: any) => message.content)).toEqual(['older', 'newer'])
+  })
+
+  test('admits a historical session ID linked inside one correlated replay batch', () => {
+    const wrapper = shallowMount(SessionDetail)
+    const vm = wrapper.vm as any
+    const replay = websocketMock.handlers.get('replay_batch')!
+
+    replay({
+      type: 'replay_batch', session_id: 'ses_1', events: [
+        { type: 'agent_text', session_id: 'historical-1', event_id: 'historical-before', text: 'before id change' },
+        { type: 'session_id_changed', session_id: 'ses_1', old_session_id: 'historical-1', event_id: 'historical-link' },
+        { type: 'agent_text', session_id: 'ses_1', event_id: 'historical-after', text: 'after id change' },
+      ],
+    })
+
+    expect(vm.messages.map((message: any) => message.content)).toEqual(['before id change', 'after id change'])
+    expect(vm.messages.some((message: any) => message.type === 'session_id_changed')).toBe(false)
+  })
+
+  test('reconsiders a deferred historical event when a later progressive replay batch links it', () => {
+    const wrapper = shallowMount(SessionDetail)
+    const vm = wrapper.vm as any
+    const replay = websocketMock.handlers.get('replay_batch')!
+
+    replay({
+      type: 'replay_batch', session_id: 'ses_1', events: [
+        { type: 'agent_text', session_id: 'historical-progressive', event_id: 'progressive-before', text: 'progressive before' },
+      ],
+    })
+    expect(vm.messages).toEqual([])
+
+    replay({
+      type: 'replay_batch', session_id: 'ses_1', events: [
+        { type: 'session_id_changed', session_id: 'ses_1', old_session_id: 'historical-progressive', event_id: 'progressive-link' },
+        { type: 'agent_text', session_id: 'ses_1', event_id: 'progressive-after', text: 'progressive after' },
+      ],
+    })
+
+    expect(vm.messages.map((message: any) => message.content)).toEqual(['progressive before', 'progressive after'])
+    expect(vm.messages.filter((message: any) => message.content === 'progressive before')).toHaveLength(1)
+  })
+
+  test('prepends a historical alias from a complete backward replay page in source order', () => {
+    const wrapper = shallowMount(SessionDetail)
+    const vm = wrapper.vm as any
+    const replay = websocketMock.handlers.get('replay_batch')!
+    const replayEnd = websocketMock.handlers.get('replay_end')!
+    vm.processEvent({ type: 'agent_text', session_id: 'ses_1', event_id: 'already-loaded', text: 'already loaded' })
+    vm.isLoadingBackward = true
+
+    replay({
+      type: 'replay_batch', session_id: 'ses_1', direction: 'backward', events: [
+        { type: 'agent_text', session_id: 'historical-page', event_id: 'page-before', text: 'page before' },
+        { type: 'session_id_changed', session_id: 'ses_1', old_session_id: 'historical-page', event_id: 'page-link' },
+        { type: 'agent_text', session_id: 'ses_1', event_id: 'page-after', text: 'page after' },
+      ],
+    })
+    expect(vm.messages.map((message: any) => message.content)).toEqual(['already loaded'])
+
+    replayEnd({ type: 'replay_end', session_id: 'ses_1', direction: 'backward' })
+
+    expect(vm.messages.map((message: any) => message.content)).toEqual(['page before', 'page after', 'already loaded'])
+  })
+
+  test('retains historical session aliases across replay page boundaries', () => {
+    const wrapper = shallowMount(SessionDetail)
+    const vm = wrapper.vm as any
+    const replay = websocketMock.handlers.get('replay_batch')!
+    const replayEnd = websocketMock.handlers.get('replay_end')!
+
+    replay({
+      type: 'replay_batch', session_id: 'ses_1', events: [
+        { type: 'session_id_changed', session_id: 'ses_1', old_session_id: 'historical-previous-page', event_id: 'page-one-link' },
+        { type: 'agent_text', session_id: 'ses_1', event_id: 'page-one-current', text: 'current page' },
+      ],
+    })
+    replayEnd({ type: 'replay_end', session_id: 'ses_1', has_more: true })
+
+    vm.isLoadingBackward = true
+    replay({
+      type: 'replay_batch', session_id: 'ses_1', direction: 'backward', events: [
+        { type: 'agent_text', session_id: 'historical-previous-page', event_id: 'page-two-old', text: 'older page' },
+      ],
+    })
+    replayEnd({ type: 'replay_end', session_id: 'ses_1', direction: 'backward', has_more: false })
+
+    expect(vm.messages.map((message: any) => message.content)).toEqual(['older page', 'current page'])
+  })
+
+  test('computes transitive replay aliases while rejecting an unrelated foreign ID', () => {
+    const wrapper = shallowMount(SessionDetail)
+    const vm = wrapper.vm as any
+    const replay = websocketMock.handlers.get('replay_batch')!
+    const replayEnd = websocketMock.handlers.get('replay_end')!
+
+    replay({
+      type: 'replay_batch', session_id: 'ses_1', events: [
+        { type: 'agent_text', session_id: 'historical-old-1', event_id: 'transitive-before', text: 'transitive before' },
+        { type: 'session_id_changed', session_id: 'historical-old-2', old_session_id: 'historical-old-1', event_id: 'transitive-link-1' },
+        { type: 'session_id_changed', session_id: 'ses_1', old_session_id: 'historical-old-2', event_id: 'transitive-link-2' },
+        { type: 'agent_text', session_id: 'unrelated-foreign', event_id: 'foreign-replay', text: 'foreign replay' },
+        { type: 'agent_text', session_id: 'ses_1', event_id: 'transitive-after', text: 'transitive after' },
+      ],
+    })
+    replayEnd({ type: 'replay_end', session_id: 'ses_1' })
+
+    expect(vm.messages.map((message: any) => message.content)).toEqual(['transitive before', 'transitive after'])
+    expect(vm.messages.some((message: any) => message.content === 'foreign replay')).toBe(false)
+  })
+
+  test('keeps live delivery strict after replay establishes a historical alias', () => {
+    const wrapper = shallowMount(SessionDetail)
+    const vm = wrapper.vm as any
+    websocketMock.handlers.get('replay_batch')?.({
+      type: 'replay_batch', session_id: 'ses_1', events: [
+        { type: 'user_text', session_id: 'historical-live-check', event_id: 'trusted-replay', text: 'trusted replay' },
+        { type: 'session_id_changed', session_id: 'ses_1', old_session_id: 'historical-live-check', event_id: 'trusted-link' },
+      ],
+    })
+
+    websocketMock.handlers.get('user_text')?.({ type: 'user_text', session_id: 'historical-live-check', event_id: 'historical-live', text: 'historical live' })
+    websocketMock.handlers.get('user_text')?.({ type: 'user_text', session_id: 'foreign-live', event_id: 'foreign-live', text: 'foreign live' })
+    websocketMock.handlers.get('user_text')?.({ type: 'user_text', session_id: 'ses_1', event_id: 'current-live', text: 'current live' })
+
+    expect(vm.messages.map((message: any) => message.content)).toEqual(['trusted replay', 'current live'])
+  })
+
+  test('resets replay alias trust when the session load key changes', async () => {
+    const wrapper = shallowMount(SessionDetail)
+    const vm = wrapper.vm as any
+    const replay = websocketMock.handlers.get('replay_batch')!
+    const replayEnd = websocketMock.handlers.get('replay_end')!
+    replay({
+      type: 'replay_batch', session_id: 'ses_1', events: [
+        { type: 'user_text', session_id: 'historical-reset', event_id: 'reset-trusted', text: 'session one history' },
+        { type: 'session_id_changed', session_id: 'ses_1', old_session_id: 'historical-reset', event_id: 'reset-link' },
+      ],
+    })
+    expect(vm.messages.map((message: any) => message.content)).toEqual(['session one history'])
+
+    routeMock.current.params.id = 'ses_2'
+    await wrapper.vm.$nextTick()
+    replay({
+      type: 'replay_batch', session_id: 'ses_2', events: [
+        { type: 'user_text', session_id: 'historical-reset', event_id: 'leaked-alias', text: 'must not leak' },
+        { type: 'user_text', session_id: 'ses_2', event_id: 'session-two', text: 'session two history' },
+      ],
+    })
+    replayEnd({ type: 'replay_end', session_id: 'ses_2' })
+
+    expect(vm.messages.map((message: any) => message.content)).toEqual(['session two history'])
+  })
+
+  test('keeps unknown events as metadata-bearing rows with their stable event identity', () => {
+    const wrapper = shallowMount(SessionDetail)
+    const vm = wrapper.vm as any
+    vm.processEvent({ type: 'future_signal', event_id: 'future-1', turn_id: 'turn-future', flow_scope: 'unclassified', content_class: 'unknown' })
+
+    expect(vm.messages).toContainEqual(expect.objectContaining({
+      id: 'unknown:future-1', type: 'future_signal', turn_id: 'turn-future', flow_scope: 'unclassified', content_class: 'unknown',
+    }))
+  })
+
+  test('deduplicates seq-only unknown replay copies without merging a distinct reused sequence', () => {
+    const wrapper = shallowMount(SessionDetail)
+    const vm = wrapper.vm as any
+    const live = { type: 'future_seq_signal', session_id: 'ses_1', seq: 41, text: 'first generation' }
+    const replayCopy = { type: 'future_seq_signal', session_id: 'ses_1', payload: { seq: '41', text: 'first generation' } }
+    const restarted = { type: 'future_seq_signal', session_id: 'ses_1', seq: 41, text: 'second generation' }
+
+    vm.processEvent(live)
+    vm.processEvent(replayCopy)
+    vm.processEvent(restarted)
+
+    expect(vm.messages.filter((message: any) => message.type === 'future_seq_signal')).toHaveLength(2)
+    expect(vm.messages.map((message: any) => message.content)).toEqual(['first generation', 'second generation'])
+  })
+
+  test('renders session-filtered live lifecycle and unknown events exactly once', () => {
+    const wrapper = shallowMount(SessionDetail)
+    const vm = wrapper.vm as any
+    websocketMock.handlers.get('turn_status')?.({ type: 'turn_status', session_id: 'ses_1', event_id: 'live-turn', turn_id: 'turn-live', turn_status: 'interrupted' })
+    const duplicateUnknown = { type: 'future_live', session_id: 'ses_1', event_id: 'live-unknown', turn_id: 'turn-live' }
+    for (const handler of websocketMock.allHandlers) handler(duplicateUnknown)
+    for (const handler of websocketMock.allHandlers) handler(duplicateUnknown)
+    for (const handler of websocketMock.allHandlers) handler({ type: 'future_live', session_id: 'other-session', event_id: 'other-unknown', turn_id: 'turn-other', flow_scope: 'unclassified', content_class: 'unknown' })
+
+    expect(vm.messages.filter((message: any) => message.type === 'turn_status')).toHaveLength(1)
+    expect(vm.messages.filter((message: any) => message.id === 'unknown:live-unknown')).toHaveLength(1)
+    expect(vm.messages.some((message: any) => message.id === 'unknown:other-unknown')).toBe(false)
+  })
+
+  test('keeps a lifecycle-only Turn header free of phantom auxiliary controls', async () => {
+    const wrapper = shallowMount(SessionDetail)
+    const vm = wrapper.vm as any
+    vm.allSessions = [{ session_id: 'ses_1', daemon_id: 'daemon-1', status: 'running' }]
+    vm.processEvent({ type: 'turn_status', session_id: 'ses_1', event_id: 'terminal-only', turn_id: 'turn-terminal', turn_status: 'completed' })
+    await wrapper.vm.$nextTick()
+
+    expect(vm.turnRows[0]).toMatchObject({ turnId: 'turn-terminal', status: 'completed', auxiliary: [] })
+    expect(wrapper.find('.turn-group-header').exists()).toBe(true)
+    expect(wrapper.find('.turn-group-aux-toggle').exists()).toBe(false)
+    expect(wrapper.find('.turn-unknown-event').exists()).toBe(false)
+  })
+
+  test('preserves metadata on authoritative user echoes and early agent-text paths', () => {
+    const wrapper = shallowMount(SessionDetail)
+    const vm = wrapper.vm as any
+    vm.messages.push({ id: 'optimistic', type: 'user_text', role: 'user', content: 'prompt', __msg_id: 'm1' })
+    vm.processEvent({ type: 'user_text', text: 'prompt', turn_id: 'turn-user', flow_scope: 'main' })
+    vm.processEvent({ type: 'agent_text', text: 'answer', stream_id: 'stream-early', chunk_seq: 0, byte_offset: 0, streaming: true, turn_id: 'turn-stream' })
+    vm.processEvent({ type: 'agent_text', text: '', stream_id: 'stream-early', chunk_seq: 1, byte_offset: 6, final: true, turn_id: 'turn-stream-final', content_class: 'dialogue' })
+    vm.processEvent({ type: 'agent_text', text: 'duplicate', turn_id: 'turn-first' })
+    vm.processEvent({ type: 'agent_text', text: 'duplicate', turn_id: 'turn-duplicate', flow_scope: 'main' })
+
+    expect(vm.messages.find((message: any) => message.id === 'optimistic')).toMatchObject({ turn_id: 'turn-user', flow_scope: 'main' })
+    expect(vm.messages.find((message: any) => message.streamId === 'stream-early')).toMatchObject({ turn_id: 'turn-stream-final', content_class: 'dialogue', streaming: false })
+    expect(vm.messages.filter((message: any) => message.content === 'duplicate')).toHaveLength(1)
+    expect(vm.messages.find((message: any) => message.content === 'duplicate')).toMatchObject({ turn_id: 'turn-duplicate', flow_scope: 'main' })
+  })
+
+  test('applies buffered resolution metadata when each request arrives later', () => {
+    const wrapper = shallowMount(SessionDetail)
+    const vm = wrapper.vm as any
+    vm.processEvent({ type: 'approval_resolved', request_id: 'later-approval', action: 'once', turn_id: 'turn-approval-resolution' })
+    vm.processEvent({ type: 'question_resolved', request_id: 'later-question', answers: ['yes'], turn_id: 'turn-question-resolution' })
+    vm.processEvent({ type: 'mcp_elicitation_resolved', request_id: 'later-mcp', action: 'accept', turn_id: 'turn-mcp-resolution' })
+    vm.processEvent({ type: 'approval_request', request_id: 'later-approval', tool: 'bash', agent_id: 'sub-1', turn_id: 'turn-approval-request' })
+    vm.processEvent({ type: 'question_request', request_id: 'later-question', questions: [{ question: 'Continue?' }], agent_id: 'sub-1', turn_id: 'turn-question-request' })
+    vm.processEvent({ type: 'mcp_elicitation_request', request_id: 'later-mcp', agent_id: 'sub-1', turn_id: 'turn-mcp-request' })
+
+    const child = vm.subagentMessages['sub-1']
+    expect(child.find((message: any) => message.request_id === 'later-approval')).toMatchObject({ status: 'resolved', turn_id: 'turn-approval-resolution' })
+    expect(child.find((message: any) => message.request_id === 'later-question')).toMatchObject({ status: 'resolved', turn_id: 'turn-question-resolution' })
+    expect(child.find((message: any) => message.request_id === 'later-mcp')).toMatchObject({ status: 'resolved', turn_id: 'turn-mcp-resolution' })
+  })
+
+  test('merges tool-result metadata for direct and deferred results', () => {
+    const wrapper = shallowMount(SessionDetail)
+    const vm = wrapper.vm as any
+    vm.processEvent({ type: 'tool_call', call_id: 'direct', tool: 'Read', input: {} })
+    vm.processEvent({ type: 'tool_result', call_id: 'direct', output: 'ok', turn_id: 'turn-direct', flow_scope: 'auxiliary', content_class: 'execution' })
+    vm.processEvent({ type: 'tool_result', call_id: 'deferred', output: 'later', turn_id: 'turn-deferred', flow_scope: 'auxiliary', content_class: 'execution' })
+    vm.processEvent({ type: 'tool_call', call_id: 'deferred', tool: 'Read', input: {} })
+    vm.processEvent({ type: 'tool_call', call_id: 'metadata-only', tool: 'Read', input: {} })
+    vm.processEvent({ type: 'tool_result', call_id: 'metadata-only', turn_id: 'turn-metadata-only', flow_scope: 'auxiliary', content_class: 'execution' })
+
+    expect(vm.messages.find((message: any) => message.call_id === 'direct')).toMatchObject({ turn_id: 'turn-direct', output: 'ok' })
+    expect(vm.messages.find((message: any) => message.call_id === 'deferred')).toMatchObject({ turn_id: 'turn-deferred', output: 'later' })
+    expect(vm.messages.find((message: any) => message.call_id === 'metadata-only')).toMatchObject({ turn_id: 'turn-metadata-only', content_class: 'execution' })
+  })
+
+  test('merges late revision metadata after its deferred predecessor arrives', () => {
+    const wrapper = shallowMount(SessionDetail)
+    const vm = wrapper.vm as any
+    vm.processEvent({ type: 'agent_text', text: 'one', snapshot: 'one', part_id: 'part-late', revision: 1, event_id: 'part-a', turn_id: 'turn-a' })
+    vm.processEvent({ type: 'agent_text', text: 'three', snapshot: 'one two three', part_id: 'part-late', revision: 3, event_id: 'part-c', previous_event_id: 'part-b', turn_id: 'turn-c' })
+    vm.processEvent({ type: 'agent_text', text: 'two', snapshot: 'one two', part_id: 'part-late', revision: 2, event_id: 'part-b', previous_event_id: 'part-a', turn_id: 'turn-b' })
+
+    expect(vm.messages.find((message: any) => message.partId === 'part-late')).toMatchObject({ content: 'one two three', turn_id: 'turn-c' })
+  })
+
+  test('copies resolution metadata to the visible canonical request when routed target differs', () => {
+    const wrapper = shallowMount(SessionDetail)
+    const vm = wrapper.vm as any
+    vm.processEvent({ type: 'approval_request', request_id: 'cross-target', tool: 'bash', turn_id: 'turn-request' })
+    vm.processEvent({ type: 'approval_resolved', request_id: 'cross-target', agent_id: 'sub-1', action: 'once', turn_id: 'turn-resolution', flow_scope: 'main' })
+
+    expect(vm.messages.find((message: any) => message.request_id === 'cross-target')).toMatchObject({ status: 'resolved', turn_id: 'turn-resolution', flow_scope: 'main' })
+  })
+
+  test('preserves question and MCP resolution metadata across routed canonical rows', () => {
+    const wrapper = shallowMount(SessionDetail)
+    const vm = wrapper.vm as any
+    vm.processEvent({ type: 'question_request', request_id: 'question-cross', questions: [{ question: 'Continue?' }], turn_id: 'turn-question' })
+    vm.processEvent({ type: 'mcp_elicitation_request', request_id: 'mcp-cross', turn_id: 'turn-mcp' })
+    vm.processEvent({ type: 'question_resolved', request_id: 'question-cross', agent_id: 'sub-1', answers: ['yes'], turn_id: 'turn-question-resolved' })
+    vm.processEvent({ type: 'mcp_elicitation_resolved', request_id: 'mcp-cross', agent_id: 'sub-1', action: 'accept', turn_id: 'turn-mcp-resolved' })
+
+    expect(vm.messages.find((message: any) => message.request_id === 'question-cross')).toMatchObject({ status: 'resolved', turn_id: 'turn-question-resolved' })
+    expect(vm.messages.find((message: any) => message.request_id === 'mcp-cross')).toMatchObject({ status: 'resolved', turn_id: 'turn-mcp-resolved' })
+  })
+
+  test('attaches file-change metadata to the exact changed card when multiple same-turn cards exist', () => {
+    const wrapper = shallowMount(SessionDetail)
+    const vm = wrapper.vm as any
+    const card = (id: string, eventId: string, changeSetId: string, path: string) => ({
+      id, type: 'agent_file_change', role: 'agent', fileChange: {
+        turnId: 'turn-files', additions: 1, deletions: 0, selectedPath: path,
+        files: [{ path, kind: 'update', additions: 1, deletions: 0, edits: [{ id: eventId, eventId, changeSetId, changeIndex: 0, sequence: 1, diff: '+x', additions: 1, deletions: 0, integrity: 'complete' }] }],
+      },
+    })
+    vm.messages.push(card('card-a', 'file-a', 'set-a', 'a.txt'), card('card-b', 'file-b', 'set-b', 'b.txt'))
+    vm.processEvent({ type: 'agent_file_change', session_id: 'ses_1', turn_id: 'turn-files', event_id: 'file-b', change_set_id: 'set-b', change_index: 0, change_total: 1, path: 'b.txt', change_kind: 'update', diff: '+x', additions: 1, deletions: 0, status: 'completed', flow_scope: 'auxiliary', content_class: 'execution' })
+
+    const [first, second] = vm.messages
+    expect(first.turn_id).toBeUndefined()
+    expect(first.content_class).toBeUndefined()
+    expect(second).toMatchObject({ turn_id: 'turn-files', content_class: 'execution' })
+  })
+
+  test('routes root and focused-subagent same/new Turn metadata without crossing buckets', async () => {
+    const wrapper = shallowMount(SessionDetail)
+    const vm = wrapper.vm as any
+    vm.processEvent({ type: 'user_text', text: 'root prompt', turn_id: 'turn-root', flow_scope: 'main' })
+    vm.processEvent({ type: 'agent_text', text: 'root reply', turn_id: 'turn-root', flow_scope: 'main' })
+    vm.processEvent({ type: 'agent_text', text: 'child same turn', agent_id: 'sub-1', turn_id: 'turn-root', flow_scope: 'main' })
+    vm.processEvent({ type: 'agent_text', text: 'child next turn', agent_id: 'sub-1', turn_id: 'turn-child-next', flow_scope: 'main' })
+
+    expect(vm.turnRows).toHaveLength(1)
+    expect(vm.turnRows[0].messages.map((message: any) => message.content)).toEqual(['root prompt', 'root reply'])
+    expect(vm.subagentMessages['sub-1'].map((message: any) => message.turn_id)).toEqual(['turn-root', 'turn-child-next'])
+
+    routeMock.current.query.subagent = 'sub-1'
+    await wrapper.vm.$nextTick()
+    vm.processEvent({ type: 'agent_text', text: 'focused child', agent_id: 'sub-1', turn_id: 'turn-focused', flow_scope: 'main' })
+    expect(vm.subagentMessages['sub-1'][0]).toMatchObject({ content: 'focused child', turn_id: 'turn-focused' })
+    expect(vm.messages).toEqual([])
+  })
+
+  test('aggregates one turn across replay pages without reordering its addendum', () => {
+    const wrapper = shallowMount(SessionDetail)
+    const vm = wrapper.vm as any
+    const replay = websocketMock.handlers.get('replay_batch')!
+    replay({ type: 'replay_batch', session_id: 'ses_1', events: [
+      { type: 'user_text', text: 'prompt', turn_id: 'turn-page', flow_scope: 'main' },
+      { type: 'user_text', text: 'addendum', turn_id: 'turn-page', flow_scope: 'main' },
+    ] })
+    replay({ type: 'replay_batch', session_id: 'ses_1', events: [
+      { type: 'agent_text', text: 'reply', turn_id: 'turn-page', flow_scope: 'main' },
+    ] })
+
+    expect(vm.turnRows).toHaveLength(1)
+    expect(vm.turnRows[0].messages.map((message: any) => message.content)).toEqual(['prompt', 'addendum', 'reply'])
+  })
+
+  test('preserves turn metadata across parts, interaction, file cards, and lifecycle without changing session status', () => {
+    const wrapper = shallowMount(SessionDetail)
+    const vm = wrapper.vm as any
+    const metadata = {
+      turn_id: 'turn-meta', source_turn_id: 'source-meta', turn_origin: 'request', turn_confidence: 'derived',
+      actor_scope: 'root', flow_scope: 'main', content_class: 'dialogue', classifier_version: 'v1',
+    }
+    vm.processEvent({ type: 'agent_text', text: 'reply', part_id: 'part-meta', revision: 1, ...metadata })
+    vm.processEvent({ type: 'approval_request', request_id: 'approval-meta', tool: 'bash', ...metadata })
+    vm.processEvent({
+      ...metadata, type: 'agent_file_change', session_id: 'ses_1', event_id: 'file-meta', change_set_id: 'set-meta',
+      change_index: 0, change_total: 1, path: 'meta.txt', change_kind: 'update', diff: '+meta', additions: 1, deletions: 0,
+      flow_scope: 'auxiliary', content_class: 'execution',
+    })
+    vm.processEvent({ ...metadata, type: 'turn_status', turn_status: 'interrupted' })
+
+    expect(vm.status).toBe('running')
+    expect(vm.messages.find((message: any) => message.partId === 'part-meta')).toMatchObject(metadata)
+    expect(vm.messages.find((message: any) => message.request_id === 'approval-meta')).toMatchObject(metadata)
+    expect(vm.messages.find((message: any) => message.type === 'agent_file_change')).toMatchObject({ turn_id: 'turn-meta', content_class: 'execution' })
+    expect(vm.turnRows[0]).toMatchObject({ turnId: 'turn-meta', interrupted: true })
   })
 
   test('marks an unresolved replayed tool unknown after idle replay completion', () => {
@@ -565,6 +950,178 @@ describe('SessionDetail processEvent integration', () => {
     })
     vm.processEvent({ type: 'mcp_elicitation_resolved', request_id: 'mcp_1', action: 'accept', redacted: true })
     expect(vm.messages.find((message: any) => message.request_id === 'mcp_1')).toMatchObject({ status: 'resolved', action: 'accept', redacted: true })
+  })
+
+  test.each(['live', 'replay'] as const)(
+    'routes %s interaction_result to the canonical root/child owner before or after every request kind',
+    async (delivery) => {
+      const wrapper = shallowMount(SessionDetail)
+      const vm = wrapper.vm as any
+      const replay = websocketMock.handlers.get('replay_batch')!
+      const deliver = (event: Record<string, any>) => {
+        if (delivery === 'replay') replay({ type: 'replay_batch', session_id: 'ses_1', events: [event] })
+        else websocketMock.handlers.get(event.type)?.(event)
+      }
+      const kinds = [
+        { type: 'approval_request', operation: 'approval_response', fields: { tool: 'Read' } },
+        { type: 'question_request', operation: 'question_response', fields: { questions: [{ question: 'Continue?' }] } },
+        { type: 'mcp_elicitation_request', operation: 'mcp_elicitation_response', fields: { elicitation_mode: 'form' } },
+      ]
+
+      for (const owner of ['root', 'child'] as const) {
+        for (const order of ['request-first', 'terminal-first'] as const) {
+          for (const kind of kinds) {
+            const requestId = `${delivery}-${owner}-${order}-${kind.type}`
+            const request = {
+              type: kind.type, session_id: 'ses_1', request_id: requestId,
+              ...(owner === 'child' ? { agent_id: 'owner-child' } : {}), ...kind.fields,
+            }
+            const terminal = {
+              type: 'interaction_result', session_id: 'ses_1', request_id: requestId,
+              agent_id: owner === 'root' ? 'foreign-emitter' : 'different-child-emitter',
+              operation: kind.operation, status: 'resolved_elsewhere', turn_id: `terminal-${requestId}`,
+            }
+            for (const event of order === 'request-first' ? [request, terminal] : [terminal, request]) deliver(event)
+          }
+        }
+      }
+      await wrapper.vm.$nextTick()
+
+      const root = vm.messages as any[]
+      const children = Object.values(vm.subagentMessages as Record<string, any[]>).flat() as any[]
+      const all = [...root, ...children]
+      for (const owner of ['root', 'child'] as const) {
+        for (const order of ['request-first', 'terminal-first'] as const) {
+          for (const kind of kinds) {
+            const requestId = `${delivery}-${owner}-${order}-${kind.type}`
+            const cards = all.filter(message => message.request_id === requestId)
+            expect(cards, requestId).toHaveLength(1)
+            expect(cards[0]).toMatchObject({ type: kind.type, status: 'resolved', turn_id: `terminal-${requestId}` })
+            expect(root.some(message => message.request_id === requestId)).toBe(owner === 'root')
+            expect(children.some(message => message.request_id === requestId)).toBe(owner === 'child')
+          }
+        }
+      }
+      expect(all.some(message => message.type === 'interaction_result')).toBe(false)
+      wrapper.unmount()
+    },
+  )
+
+  test.each(['live', 'replay'] as const)(
+    'migrates a resolved child request to a later canonical root owner for %s delivery',
+    async (delivery) => {
+      const wrapper = shallowMount(SessionDetail)
+      const vm = wrapper.vm as any
+      const deliver = (event: Record<string, any>) => {
+        if (delivery === 'replay') websocketMock.handlers.get('replay_batch')?.({ type: 'replay_batch', session_id: 'ses_1', events: [event] })
+        else websocketMock.handlers.get(event.type)?.(event)
+      }
+      const requestId = `owner-migration-${delivery}`
+      deliver({ type: 'question_request', session_id: 'ses_1', agent_id: 'child-owner', request_id: requestId, questions: [{ question: 'child?' }] })
+      deliver({ type: 'interaction_result', session_id: 'ses_1', request_id: requestId, operation: 'question_response', status: 'resolved_elsewhere', turn_id: 'terminal-owner' })
+      deliver({ type: 'question_request', session_id: 'ses_1', request_id: requestId, questions: [{ question: 'root canonical?' }] })
+      await wrapper.vm.$nextTick()
+
+      expect(vm.messages.filter((message: any) => message.request_id === requestId)).toHaveLength(1)
+      expect(vm.messages.find((message: any) => message.request_id === requestId)).toMatchObject({ status: 'resolved', turn_id: 'terminal-owner' })
+      expect(Object.values(vm.subagentMessages as Record<string, any[]>).flat().some((message: any) => message.request_id === requestId)).toBe(false)
+      wrapper.unmount()
+    },
+  )
+
+  test.each(['live', 'replay'] as const)(
+    'merges %s presentation metadata before duplicate reducer early returns without replacing canonical payloads',
+    async (delivery) => {
+      const wrapper = shallowMount(SessionDetail)
+      const vm = wrapper.vm as any
+      const deliver = (event: Record<string, any>) => {
+        if (delivery === 'replay') websocketMock.handlers.get('replay_batch')?.({ type: 'replay_batch', session_id: 'ses_1', events: [event] })
+        else websocketMock.handlers.get(event.type)?.({ session_id: 'ses_1', ...event })
+      }
+
+      deliver({ type: 'agent_reasoning', text: 'canonical reasoning', turn_id: 'reason-old' })
+      deliver({ type: 'agent_reasoning', text: 'canonical reasoning', turn_id: 'reason-late', content_class: 'execution' })
+      deliver({ type: 'agent_retry', part_id: 'retry-meta', attempt: 1, error: 'canonical retry', turn_id: 'retry-old' })
+      deliver({ type: 'agent_retry', part_id: 'retry-meta', attempt: 9, error: 'must not replace', turn_id: 'retry-late', actor_scope: 'root' })
+      deliver({ type: 'agent_compaction', part_id: 'compact-meta', auto: false, overflow: false, turn_id: 'compact-old' })
+      deliver({ type: 'agent_compaction', part_id: 'compact-meta', auto: true, overflow: true, turn_id: 'compact-late', classifier_version: 'v2' })
+      deliver({ type: 'interactive_prompt', request_id: 'prompt-meta', input: { prompt: 'canonical prompt', options: [{ index: '1', label: 'yes' }] }, turn_id: 'prompt-old' })
+      deliver({ type: 'interactive_prompt', request_id: 'prompt-meta', input: { prompt: 'must not replace', options: [] }, turn_id: 'prompt-late', flow_scope: 'main' })
+      deliver({ type: 'error', event_id: 'error-meta', error: 'canonical error', turn_id: 'error-old' })
+      deliver({ type: 'error', event_id: 'error-meta', error: 'must not replace', turn_id: 'error-late', content_class: 'dialogue' })
+
+      await new Promise(resolve => requestAnimationFrame(() => resolve(undefined)))
+      await wrapper.vm.$nextTick()
+      expect(vm.messages.filter((message: any) => message.type === 'agent_reasoning')).toHaveLength(1)
+      expect(vm.messages.find((message: any) => message.type === 'agent_reasoning')).toMatchObject({ content: 'canonical reasoning', turn_id: 'reason-late', content_class: 'execution' })
+      expect(vm.messages.find((message: any) => message.partId === 'retry-meta')).toMatchObject({ attempt: 1, error: 'canonical retry', turn_id: 'retry-late', actor_scope: 'root' })
+      expect(vm.messages.find((message: any) => message.partId === 'compact-meta')).toMatchObject({ auto: false, overflow: false, turn_id: 'compact-late', classifier_version: 'v2' })
+      expect(vm.messages.find((message: any) => message.request_id === 'prompt-meta')).toMatchObject({ prompt: 'canonical prompt', options: [{ index: '1', label: 'yes' }], turn_id: 'prompt-late', flow_scope: 'main' })
+      expect(vm.messages.filter((message: any) => message.eventKey === 'error-meta')).toHaveLength(1)
+      expect(vm.messages.find((message: any) => message.eventKey === 'error-meta')).toMatchObject({ content: 'canonical error', turn_id: 'error-late', content_class: 'dialogue' })
+      wrapper.unmount()
+    },
+  )
+
+  test('keeps known controls out of the timeline while retaining genuinely unknown live and replay events', () => {
+    const wrapper = shallowMount(SessionDetail)
+    const vm = wrapper.vm as any
+    const known = { type: 'session_discovered', session_id: 'ses_1', event_id: 'known-control' }
+    for (const handler of websocketMock.allHandlers) handler(known)
+    websocketMock.handlers.get('replay_batch')?.({ type: 'replay_batch', session_id: 'ses_1', events: [known] })
+
+    const unknown = { type: 'future_control_like_event', session_id: 'ses_1', event_id: 'genuine-unknown', text: 'keep me' }
+    for (const handler of websocketMock.allHandlers) handler(unknown)
+    websocketMock.handlers.get('replay_batch')?.({ type: 'replay_batch', session_id: 'ses_1', events: [unknown] })
+    websocketMock.handlers.get('replay_batch')?.({
+      type: 'replay_batch', session_id: 'ses_1',
+      events: [{ type: 'future_control_like_event', session_id: 'foreign-session', event_id: 'foreign-replay-unknown', text: 'drop me' }],
+    })
+
+    expect(vm.messages.some((message: any) => message.type === 'session_discovered')).toBe(false)
+    expect(vm.messages.filter((message: any) => message.id === 'unknown:genuine-unknown')).toHaveLength(1)
+    expect(vm.messages.some((message: any) => message.id === 'unknown:foreign-replay-unknown')).toBe(false)
+  })
+
+  test('renders repeated contiguous Turn segments in chronology with stable context-scoped collapse identity', async () => {
+    const wrapper = shallowMount(SessionDetail)
+    const vm = wrapper.vm as any
+    vm.allSessions = [{ session_id: 'ses_1', daemon_id: 'daemon-1', status: 'running' }]
+    vm.processEvent({ type: 'agent_text', text: 'first A', turn_id: 'A', flow_scope: 'main' })
+    vm.processEvent({ type: 'agent_text', text: 'legacy separator' })
+    vm.processEvent({ type: 'future_aux', event_id: 'aux-a', text: 'second A auxiliary', turn_id: 'A', flow_scope: 'auxiliary' })
+    await wrapper.vm.$nextTick()
+
+    const turnRows = () => (vm.turnRows as any[]).filter(row => row.kind === 'turn')
+    expect(turnRows().map(row => row.messages.map((message: any) => message.content))).toEqual([['first A'], ['second A auxiliary']])
+    const initialIDs = turnRows().map(row => row.id)
+    expect(new Set(initialIDs).size).toBe(2)
+    let headers = wrapper.findAll('.turn-group-header')
+    expect(headers.map(header => header.attributes('data-turn-segment-id'))).toEqual(initialIDs)
+    expect(wrapper.text().indexOf('first A')).toBeLessThan(wrapper.text().indexOf('legacy separator'))
+    expect(wrapper.text().indexOf('legacy separator')).toBeLessThan(wrapper.text().indexOf('second A auxiliary'))
+
+    vm.messages.unshift({ id: 'older-a', type: 'agent_text', role: 'agent', content: 'older A', turn_id: 'A', flow_scope: 'main' })
+    vm.processEvent({ type: 'agent_text', text: 'second separator' })
+    vm.processEvent({ type: 'agent_text', text: 'third A', turn_id: 'A', flow_scope: 'main' })
+    await wrapper.vm.$nextTick()
+    expect(turnRows().slice(0, 2).map(row => row.id)).toEqual(initialIDs)
+    expect(new Set(turnRows().map(row => row.id)).size).toBe(3)
+
+    headers = wrapper.findAll('.turn-group-header')
+    const secondToggle = headers[1].find('.turn-group-aux-toggle')
+    expect(secondToggle.attributes('aria-expanded')).toBe('true')
+    await secondToggle.trigger('click')
+    expect(headers[1].find('.turn-group-aux-toggle').attributes('aria-expanded')).toBe('false')
+    expect(wrapper.text()).not.toContain('second A auxiliary')
+
+    routeMock.current.params.id = 'ses_2'
+    await wrapper.vm.$nextTick()
+    vm.allSessions = [{ session_id: 'ses_2', daemon_id: 'daemon-1', status: 'running' }]
+    vm.processEvent({ type: 'future_aux', event_id: 'aux-new-context', text: 'new context auxiliary', turn_id: 'A', flow_scope: 'auxiliary' })
+    await wrapper.vm.$nextTick()
+    expect(wrapper.get('.turn-group-aux-toggle').attributes('aria-expanded')).toBe('true')
+    wrapper.unmount()
   })
 
   describe('SessionDetail live content batching', () => {

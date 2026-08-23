@@ -110,23 +110,8 @@ jobs:
       - name: Vet Go packages
         run: go vet ./...
 
-  windows-launcher-tests:
-    needs: validate
-    runs-on: windows-latest
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: ${{ inputs.candidate_sha }}
-
-      - uses: actions/setup-go@v5
-        with:
-          go-version: '1.25'
-
-      - name: Windows wrapper, app-server, PATH, and exit propagation tests
-        run: go test ./internal/platform ./internal/agentcontrol ./internal/codexapp ./internal/session ./cmd/pocketctl -count=1
-
   build:
-    needs: [managed-agent-gate, windows-launcher-tests]
+    needs: managed-agent-gate
     strategy:
       matrix:
         include:
@@ -167,7 +152,7 @@ jobs:
           retention-days: 14
 
   package:
-    needs: [validate, managed-agent-gate, windows-launcher-tests, build]
+    needs: [validate, managed-agent-gate, build]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

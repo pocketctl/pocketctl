@@ -13,6 +13,11 @@ export interface OpenCodeStructuredEvent {
 export type StructuredMergeResult = 'inserted' | 'updated' | 'deferred' | 'ignored'
 
 const MAX_DEFERRED_STRUCTURED_EVENTS = 32
+const turnMetadataKeys = ['turn_id', 'source_turn_id', 'turn_status', 'turn_reason', 'turn_origin', 'turn_confidence', 'previous_turn_id', 'continuation_reason', 'actor_scope', 'flow_scope', 'content_class', 'classifier_version'] as const
+
+function copyTurnMetadata(target: any, event: OpenCodeStructuredEvent): void {
+  for (const key of turnMetadataKeys) if (event[key] !== undefined) target[key] = event[key]
+}
 
 function enqueueDeferredStructuredEvent(deferred: OpenCodeStructuredEvent[], event: OpenCodeStructuredEvent): void {
   if (deferred.some(item => item.event_id === event.event_id)) return
@@ -65,6 +70,7 @@ export function mergeStructuredPart(target: any[], event: OpenCodeStructuredEven
   const partKey = structuredPartKey(event)
   const existing = partKey ? target.find((message) => message.partKey === partKey) : undefined
   if (existing) {
+    copyTurnMetadata(existing, event)
     const eventId = event.event_id
     let causalSuccessor = false
     if (eventId && !existing.eventId) {

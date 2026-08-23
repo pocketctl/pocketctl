@@ -17,7 +17,7 @@ pocketctl agent opencode enable
 pocketctl agent opencode status
 ```
 
-`enable` 安装的是 **Pocketctl 提供的透明 launcher**，不是 OpenCode 官方另一个 launcher，也不会重新安装 OpenCode。Unix 上 Pocketctl 在 `~/.pocketctl/bin/opencode` 创建 standalone resilient shim，将共享 PATH 配置写入 `~/.pocketctl/shell/path.sh`，并从 `~/.zshrc`、`~/.bash_profile`、`~/.bashrc` 加载；Windows 上创建受管 `.cmd` wrapper 并更新当前用户 PATH。重复执行 `enable` 或再次启动 daemon 会 reconciliation launcher、真实 binary 路径和 PATH 配置。
+`enable` 安装的是 **Pocketctl 提供的透明 launcher**，不是 OpenCode 官方另一个 launcher，也不会重新安装 OpenCode。Pocketctl 仅支持 macOS/Linux：在 `~/.pocketctl/bin/opencode` 创建 standalone resilient shim，将共享 PATH 配置写入 `~/.pocketctl/shell/path.sh`，并从 `~/.zshrc`、`~/.bash_profile`、`~/.bashrc` 加载。Windows 不再提供 launcher、二进制或验证支持。重复执行 `enable` 或再次启动 daemon 会 reconciliation launcher、真实 binary 路径和 PATH 配置。
 
 新 shell 会自动加载 launcher。已有 shell 可执行：
 
@@ -136,7 +136,7 @@ launcher 的 continue/resume 请求是显式提升信号；coordinator 确认没
 
 - OpenCode 自己的 session 数据仍由 OpenCode 保存在其本地存储中。Pocketctl 不会默认启用 OpenCode `/share`；OpenCode Share 是一条独立于 Pocketctl Relay 的链路。
 - 为实现远程查看和控制，daemon 会把规范化后的会话内容、状态、permission/question 以及处理结果发送到用户配置并已认证的 Pocketctl Relay。不要把不受信任的 Relay 当作本地存储。
-- Unix local IPC 使用当前用户私有目录和 `0600` 权限；Windows 使用当前用户 named pipe/配置边界。OpenCode server 只绑定 loopback。
+- macOS/Linux local IPC 使用当前用户私有目录和 `0600` 权限。OpenCode server 只绑定 loopback；Windows 不在支持范围内。
 - launcher 配置原子写入 `~/.pocketctl/agent-launchers.json`，权限为 `0600`。损坏或未知版本配置会 fail closed，不静默覆盖。
 - command/Agent 名称由 daemon 向 OpenCode 实时验证；permission action、question 结构、文本长度和 request/session 所有权都在 daemon/Relay 边界校验。
 - lifecycle 日志不记录 server 密码、完整 prompt 或 question answer。

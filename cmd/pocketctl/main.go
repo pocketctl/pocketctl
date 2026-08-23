@@ -3175,6 +3175,9 @@ func deliverUserMessage(
 	cmd protocol.ClientMessage,
 	send func(protocol.DaemonEvent),
 ) error {
+	agent, exists := sm.GetSessionAgent(cmd.SessionID)
+	expectsAcceptanceReceipt := exists && agent == adapter.AgentCodex &&
+		sm.SessionControlMode(cmd.SessionID) == protocol.ControlManaged && cmd.MsgID != ""
 	err := sm.SendMessageWithInput(ctx, session.UserMessageInput{
 		SessionID: cmd.SessionID,
 		Content:   cmd.Content,
@@ -3199,10 +3202,7 @@ func deliverUserMessage(
 		})
 		return err
 	}
-	agent, exists := sm.GetSessionAgent(cmd.SessionID)
-	if !exists || agent != adapter.AgentCodex ||
-		sm.SessionControlMode(cmd.SessionID) != protocol.ControlManaged ||
-		cmd.MsgID == "" {
+	if !expectsAcceptanceReceipt {
 		return err
 	}
 	status := "accepted"

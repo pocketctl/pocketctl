@@ -1,21 +1,23 @@
 import { shallowMount } from '@vue/test-utils'
-import { afterEach, describe, expect, test, vi } from 'vitest'
-import { nextTick, ref } from 'vue'
+import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest'
+import { nextTick, reactive, ref } from 'vue'
 import SessionDetail from '../SessionDetail.vue'
 
 const websocketMock = vi.hoisted(() => ({
   handlers: new Map<string, (message: any) => void>(),
   send: vi.fn((_payload: any) => true),
 }))
+const routeMock = vi.hoisted(() => ({ current: null as any }))
 
 vi.mock('vue-router', () => ({
-  useRoute: () => ({ params: { id: 'thr_1' }, query: {} }),
+  useRoute: () => routeMock.current,
   useRouter: () => ({ push: vi.fn(), replace: vi.fn() }),
 }))
 
 vi.mock('../../composables/useWebSocket', () => ({
   useWebSocket: () => ({
     connect: vi.fn(), send: websocketMock.send,
+    sendUserMessage: vi.fn((payload: Record<string, unknown>) => websocketMock.send({ type: 'user_message', ...payload })),
     connected: ref(true), reconnecting: ref(false),
     onEvent: vi.fn((type: string, handler: (message: any) => void) => {
       websocketMock.handlers.set(type, handler)
@@ -32,6 +34,9 @@ vi.mock('../../composables/useSessionRename', () => ({
 }))
 
 const mounted: Array<ReturnType<typeof shallowMount>> = []
+beforeEach(() => {
+  routeMock.current = reactive({ params: { id: 'thr_1' }, query: {} as Record<string, string> })
+})
 afterEach(() => {
   for (const wrapper of mounted.splice(0)) wrapper.unmount()
   websocketMock.handlers.clear()
@@ -230,5 +235,93 @@ describe('SessionDetail managed Codex terminal control', () => {
     expect(deliveryStatus(wrapper, 'keep this prompt')).toBe('failed')
     expect(wrapper.text()).toContain('session.send_failed')
     expect(websocketMock.send.mock.calls.filter(([payload]) => payload.type === 'user_message')).toHaveLength(sendsBeforeReceipt)
+  })
+
+  test('removes an interrupt-pending optimistic bubble and restores its draft without resending', async () => {
+    const wrapper = mountSession()
+    setTerminalSession({ control_mode: 'managed', capabilities: ['message_acceptance_receipt'] })
+    await nextTick()
+
+    const msgId = await sendPrompt(wrapper, 'retry after interrupt')
+    const sent = websocketMock.send.mock.calls.filter(([payload]) => payload.type === 'user_message')
+    expect(sent.at(-1)?.[0]).toMatchObject({ input_mode: 'auto' })
+
+    websocketMock.handlers.get('user_message_receipt')?.({
+      type: 'user_message_receipt', session_id: 'thr_1', msg_id: msgId,
+      status: 'rejected', reason: 'turn_interrupt_pending', retryable: true,
+    })
+    await nextTick()
+
+    expect(wrapper.findAll('message-user-stub').find(node => node.attributes('content') === 'retry after interrupt')).toBeUndefined()
+    expect((wrapper.find('.chat-textarea').element as HTMLTextAreaElement).value).toBe('retry after interrupt')
+    expect(websocketMock.send.mock.calls.filter(([payload]) => payload.type === 'user_message')).toHaveLength(sent.length)
+  })
+
+  test('only handles rejected interrupt-pending receipts and never overwrites a newer draft', async () => {
+    const wrapper = mountSession()
+    setTerminalSession({ control_mode: 'managed', capabilities: ['message_acceptance_receipt'] })
+    await nextTick()
+
+    const msgId = await sendPrompt(wrapper, 'rejected prompt')
+    await wrapper.find('.chat-textarea').setValue('newer draft')
+    const receipt = websocketMock.handlers.get('user_message_receipt')!
+    receipt({ type: 'user_message_receipt', session_id: 'thr_1', msg_id: msgId, status: 'accepted', reason: 'turn_interrupt_pending', retryable: true })
+    await nextTick()
+    expect(deliveryStatus(wrapper, 'rejected prompt')).toBe('accepted')
+    expect((wrapper.find('.chat-textarea').element as HTMLTextAreaElement).value).toBe('newer draft')
+
+    receipt({ type: 'user_message_receipt', session_id: 'thr_1', msg_id: msgId, status: 'rejected', reason: 'turn_interrupt_pending', retryable: true })
+    await nextTick()
+    expect(deliveryStatus(wrapper, 'rejected prompt')).toBeUndefined()
+    expect((wrapper.find('.chat-textarea').element as HTMLTextAreaElement).value).toBe('newer draft')
+    expect(wrapper.find('.interrupt-pending-retry').exists()).toBe(true)
+    const sendsBeforeRetry = websocketMock.send.mock.calls.filter(([payload]) => payload.type === 'user_message').length
+    await wrapper.find('.interrupt-pending-retry').trigger('click')
+    expect((wrapper.find('.chat-textarea').element as HTMLTextAreaElement).value).toBe('newer draft')
+    const sendsAfterRetry = websocketMock.send.mock.calls.filter(([payload]) => payload.type === 'user_message')
+    expect(sendsAfterRetry).toHaveLength(sendsBeforeRetry + 1)
+    expect(sendsAfterRetry.at(-1)?.[0]).toMatchObject({ content: 'rejected prompt', input_mode: 'auto' })
+    expect(wrapper.find('.interrupt-pending-retry').exists()).toBe(false)
+  })
+
+  test('clears interrupt-pending retry state on session/focus reset and unmount', async () => {
+    const wrapper = mountSession()
+    setTerminalSession({ control_mode: 'managed', capabilities: ['message_acceptance_receipt'] })
+    await nextTick()
+    const reject = async (content: string) => {
+      const msgId = await sendPrompt(wrapper, content)
+      await wrapper.find('.chat-textarea').setValue('newer draft')
+      websocketMock.handlers.get('user_message_receipt')?.({
+        type: 'user_message_receipt', session_id: routeMock.current.params.id, msg_id: msgId,
+        status: 'rejected', reason: 'turn_interrupt_pending', retryable: true,
+      })
+      await nextTick()
+      expect(wrapper.find('.interrupt-pending-retry').exists()).toBe(true)
+    }
+
+    await reject('session-A prompt')
+    routeMock.current.params.id = 'thr_2'
+    await nextTick()
+    expect(wrapper.find('.interrupt-pending-retry').exists()).toBe(false)
+    wrapper.unmount()
+    expect(websocketMock.handlers.has('user_message_receipt')).toBe(false)
+
+    routeMock.current = reactive({ params: { id: 'thr_1' }, query: {} as Record<string, string> })
+    const focusWrapper = mountSession()
+    setTerminalSession({ control_mode: 'managed', capabilities: ['message_acceptance_receipt'] })
+    await nextTick()
+    const focusMsgId = await sendPrompt(focusWrapper, 'focused prompt')
+    await focusWrapper.find('.chat-textarea').setValue('newer draft')
+    websocketMock.handlers.get('user_message_receipt')?.({
+      type: 'user_message_receipt', session_id: 'thr_1', msg_id: focusMsgId,
+      status: 'rejected', reason: 'turn_interrupt_pending', retryable: true,
+    })
+    await nextTick()
+    expect(focusWrapper.find('.interrupt-pending-retry').exists()).toBe(true)
+    routeMock.current.query.subagent = 'sub-1'
+    await nextTick()
+    expect(focusWrapper.find('.interrupt-pending-retry').exists()).toBe(false)
+    focusWrapper.unmount()
+    expect(websocketMock.handlers.has('user_message_receipt')).toBe(false)
   })
 })
