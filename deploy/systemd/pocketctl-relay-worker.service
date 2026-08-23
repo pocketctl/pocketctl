@@ -1,0 +1,35 @@
+[Unit]
+Description=pocketctl Relay Durable Inbox Worker
+After=network.target postgresql.service
+Wants=postgresql.service
+StartLimitBurst=5
+StartLimitIntervalSec=60
+
+[Service]
+Type=simple
+User=pocketctl
+Group=pocketctl
+WorkingDirectory=/opt/pocketctl/relay
+Environment=PATH=/usr/bin:/bin
+Environment=RELAY_MATERIALIZATION_MODE=worker
+EnvironmentFile=/opt/pocketctl/relay/.env
+ExecStart=/usr/bin/env node dist/event-worker-main.js
+Restart=on-failure
+RestartSec=5
+
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=pocketctl-relay-worker
+
+[Install]
+WantedBy=multi-user.target

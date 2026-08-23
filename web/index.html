@@ -1,0 +1,22 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="dark">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>pocketctl</title>
+  <meta name="theme-color" content="#0d1117">
+  <meta name="mobile-web-app-capable" content="yes">
+  <link rel="manifest" href="/app/manifest.webmanifest">
+  <link rel="apple-touch-icon" href="/app/icons/icon-192.png">
+  <link rel="icon" type="image/svg+xml" href="/app/logo-github-org.svg">
+  <link rel="stylesheet" href="/src/assets/web-shared.css">
+  <!-- Prevent FOUC: apply saved theme before render.
+       M-8: logic lives in the same-origin external bootstrap.js (no inline
+       script) so production CSP can ship script-src 'self'. -->
+  <script src="/app/bootstrap.js"></script>
+</head>
+<body>
+  <div id="app"></div>
+  <script type="module" src="/src/main.ts"></script>
+</body>
+</html>

@@ -1,0 +1,46 @@
+[Unit]
+Description=pocketctl Relay Server
+After=network.target postgresql.service
+Wants=postgresql.service
+StartLimitBurst=5
+StartLimitIntervalSec=60
+
+[Service]
+Type=simple
+User=pocketctl
+Group=pocketctl
+WorkingDirectory=/opt/pocketctl/relay
+Environment=PATH=/usr/bin:/bin
+ExecStart=/usr/bin/env node dist/server.js
+Restart=on-failure
+RestartSec=5
+
+# 环境变量
+# M-1：Relay 只监听回环，由同机 Nginx 反代；只信任回环上的代理设置的
+# X-Forwarded-For，公网客户端自报的转发头一律忽略。
+Environment=RELAY_HOST=127.0.0.1
+Environment=TRUSTED_PROXY_CIDRS=127.0.0.1/8,::1/128
+Environment=RELAY_DURABLE_INGRESS=off
+Environment=RELAY_DURABLE_INGRESS_DAEMONS=
+Environment=RELAY_DURABLE_INGRESS_WINDOW=128
+Environment=RELAY_MATERIALIZATION_MODE=inline
+EnvironmentFile=/opt/pocketctl/relay/.env
+
+# 安全限制
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+
+# 日志
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=pocketctl-relay
+
+[Install]
+WantedBy=multi-user.target

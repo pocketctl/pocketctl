@@ -1,0 +1,86 @@
+{
+  "agent": "codex",
+  "scenarios": [
+    {
+      "name": "native-turn-completed",
+      "expectation": "completed",
+      "notes": "managed app-server turn/start response carries native turn id; logical id is namespaced-deterministic.",
+      "events": [
+        {"type": "turn_status", "session_id": "codex-fixture-session-01", "turn_id": "turn:v1:codex:Zml4dHVyZS1jb2RleC0wMQ", "turn_status": "running", "turn_origin": "native", "turn_confidence": "native", "source_turn_id": "codex-native-turn-0001", "actor_scope": "root", "agent_id": "", "event_id": "turn:fixturehash-codex-01:status:running", "flow_scope": "auxiliary", "content_class": "lifecycle", "classifier_version": "v1"},
+        {"type": "user_text", "session_id": "codex-fixture-session-01", "request_id": "req-fixture-codex-001", "msg_id": "msg-fixture-codex-001", "text": "fixture-prompt: summarize the three steps", "turn_id": "turn:v1:codex:Zml4dHVyZS1jb2RleC0wMQ", "source_turn_id": "codex-native-turn-0001", "turn_origin": "native", "turn_confidence": "native", "actor_scope": "root", "flow_scope": "main", "content_class": "dialogue", "classifier_version": "v1"},
+        {"type": "agent_text", "session_id": "codex-fixture-session-01", "text": "fixture-response: the plan has three steps", "turn_id": "turn:v1:codex:Zml4dHVyZS1jb2RleC0wMQ", "source_turn_id": "codex-native-turn-0001", "turn_origin": "native", "turn_confidence": "native", "actor_scope": "root", "flow_scope": "main", "content_class": "dialogue", "classifier_version": "v1"},
+        {"type": "turn_status", "session_id": "codex-fixture-session-01", "turn_id": "turn:v1:codex:Zml4dHVyZS1jb2RleC0wMQ", "turn_status": "completed", "turn_origin": "native", "turn_confidence": "native", "source_turn_id": "codex-native-turn-0001", "actor_scope": "root", "agent_id": "", "event_id": "turn:fixturehash-codex-01:status:completed", "flow_scope": "auxiliary", "content_class": "lifecycle", "classifier_version": "v1"},
+        {"type": "session_status", "session_id": "codex-fixture-session-01", "status": "idle", "turn_origin": "native", "actor_scope": "root", "flow_scope": "auxiliary", "content_class": "lifecycle", "classifier_version": "v1"}
+      ]
+    },
+    {
+      "name": "native-turn-interrupted",
+      "expectation": "interrupted",
+      "notes": "turn/interrupt ack drives interrupt_requested then interrupted; session stays alive and idle.",
+      "events": [
+        {"type": "turn_status", "session_id": "codex-fixture-session-01", "turn_id": "turn:v1:codex:Zml4dHVyZS1jb2RleC0wMg", "turn_status": "running", "turn_origin": "native", "turn_confidence": "native", "source_turn_id": "codex-native-turn-0002", "actor_scope": "root", "agent_id": "", "event_id": "turn:fixturehash-codex-02:status:running"},
+        {"type": "user_text", "session_id": "codex-fixture-session-01", "request_id": "req-fixture-codex-002", "text": "fixture-prompt: run the long refactor", "turn_id": "turn:v1:codex:Zml4dHVyZS1jb2RleC0wMg", "source_turn_id": "codex-native-turn-0002", "turn_origin": "native", "turn_confidence": "native", "actor_scope": "root", "flow_scope": "main", "content_class": "dialogue"},
+        {"type": "turn_status", "session_id": "codex-fixture-session-01", "turn_id": "turn:v1:codex:Zml4dHVyZS1jb2RleC0wMg", "turn_status": "interrupt_requested", "turn_reason": "user_requested", "turn_origin": "native", "turn_confidence": "native", "source_turn_id": "codex-native-turn-0002", "actor_scope": "root", "agent_id": "", "event_id": "turn:fixturehash-codex-02:status:interrupt_requested"},
+        {"type": "turn_status", "session_id": "codex-fixture-session-01", "turn_id": "turn:v1:codex:Zml4dHVyZS1jb2RleC0wMg", "turn_status": "interrupted", "turn_reason": "turn_interrupt_confirmed", "turn_origin": "native", "turn_confidence": "native", "source_turn_id": "codex-native-turn-0002", "actor_scope": "root", "agent_id": "", "event_id": "turn:fixturehash-codex-02:status:interrupted"},
+        {"type": "session_status", "session_id": "codex-fixture-session-01", "status": "idle", "actor_scope": "root", "flow_scope": "auxiliary", "content_class": "lifecycle"}
+      ]
+    },
+    {
+      "name": "native-turn-interrupted-then-continue",
+      "expectation": "interrupted",
+      "notes": "interrupt confirmed, session exits, then a fresh user input opens a new turn linked via previous_turn_id/after_interrupt.",
+      "events": [
+        {"type": "turn_status", "session_id": "codex-fixture-session-02", "turn_id": "turn:v1:codex:Zml4dHVyZS1jb2RleC0wMw", "turn_status": "running", "turn_origin": "native", "turn_confidence": "native", "source_turn_id": "codex-native-turn-0003", "actor_scope": "root", "agent_id": "", "event_id": "turn:fixturehash-codex-03:status:running"},
+        {"type": "user_text", "session_id": "codex-fixture-session-02", "request_id": "req-fixture-codex-003", "text": "fixture-prompt: continue the migration", "turn_id": "turn:v1:codex:Zml4dHVyZS1jb2RleC0wMw", "source_turn_id": "codex-native-turn-0003", "turn_origin": "native", "turn_confidence": "native", "actor_scope": "root", "flow_scope": "main", "content_class": "dialogue"},
+        {"type": "turn_status", "session_id": "codex-fixture-session-02", "turn_id": "turn:v1:codex:Zml4dHVyZS1jb2RleC0wMw", "turn_status": "interrupt_requested", "turn_reason": "user_requested", "turn_origin": "native", "turn_confidence": "native", "source_turn_id": "codex-native-turn-0003", "actor_scope": "root", "agent_id": "", "event_id": "turn:fixturehash-codex-03:status:interrupt_requested"},
+        {"type": "turn_status", "session_id": "codex-fixture-session-02", "turn_id": "turn:v1:codex:Zml4dHVyZS1jb2RleC0wMw", "turn_status": "interrupted", "turn_reason": "turn_interrupt_confirmed", "turn_origin": "native", "turn_confidence": "native", "source_turn_id": "codex-native-turn-0003", "actor_scope": "root", "agent_id": "", "event_id": "turn:fixturehash-codex-03:status:interrupted"},
+        {"type": "session_status", "session_id": "codex-fixture-session-02", "status": "exited", "exit_reason": "user_interrupt", "actor_scope": "root", "flow_scope": "auxiliary", "content_class": "lifecycle"},
+        {"type": "turn_status", "session_id": "codex-fixture-session-02", "turn_id": "turn:v1:codex:Zml4dHVyZS1jb2RleC0wNA", "turn_status": "running", "turn_origin": "native", "turn_confidence": "native", "source_turn_id": "codex-native-turn-0004", "previous_turn_id": "turn:v1:codex:Zml4dHVyZS1jb2RleC0wMw", "continuation_reason": "after_interrupt", "actor_scope": "root", "agent_id": "", "event_id": "turn:fixturehash-codex-04:status:running"},
+        {"type": "user_text", "session_id": "codex-fixture-session-02", "request_id": "req-fixture-codex-004", "text": "fixture-prompt: pick up where we stopped", "turn_id": "turn:v1:codex:Zml4dHVyZS1jb2RleC0wNA", "source_turn_id": "codex-native-turn-0004", "previous_turn_id": "turn:v1:codex:Zml4dHVyZS1jb2RleC0wMw", "continuation_reason": "after_interrupt", "turn_origin": "native", "turn_confidence": "native", "actor_scope": "root", "flow_scope": "main", "content_class": "dialogue"}
+      ]
+    },
+    {
+      "name": "native-turn-failed",
+      "expectation": "failed",
+      "notes": "native turn notification reports failure; session may surface error afterwards.",
+      "events": [
+        {"type": "turn_status", "session_id": "codex-fixture-session-03", "turn_id": "turn:v1:codex:Zml4dHVyZS1jb2RleC0wNQ", "turn_status": "running", "turn_origin": "native", "turn_confidence": "native", "source_turn_id": "codex-native-turn-0005", "actor_scope": "root", "agent_id": "", "event_id": "turn:fixturehash-codex-05:status:running"},
+        {"type": "user_text", "session_id": "codex-fixture-session-03", "request_id": "req-fixture-codex-005", "text": "fixture-prompt: execute the failing task", "turn_id": "turn:v1:codex:Zml4dHVyZS1jb2RleC0wNQ", "source_turn_id": "codex-native-turn-0005", "turn_origin": "native", "turn_confidence": "native", "actor_scope": "root", "flow_scope": "main", "content_class": "dialogue"},
+        {"type": "turn_status", "session_id": "codex-fixture-session-03", "turn_id": "turn:v1:codex:Zml4dHVyZS1jb2RleC0wNQ", "turn_status": "failed", "turn_reason": "turn_failed", "turn_origin": "native", "turn_confidence": "native", "source_turn_id": "codex-native-turn-0005", "actor_scope": "root", "agent_id": "", "event_id": "turn:fixturehash-codex-05:status:failed"}
+      ]
+    },
+    {
+      "name": "native-steer-addendum",
+      "expectation": "addendum",
+      "notes": "turn/steer while running binds the second input to the same native turn; no second running status is emitted.",
+      "events": [
+        {"type": "turn_status", "session_id": "codex-fixture-session-04", "turn_id": "turn:v1:codex:Zml4dHVyZS1jb2RleC0wNg", "turn_status": "running", "turn_origin": "native", "turn_confidence": "native", "source_turn_id": "codex-native-turn-0006", "actor_scope": "root", "agent_id": "", "event_id": "turn:fixturehash-codex-06:status:running"},
+        {"type": "user_text", "session_id": "codex-fixture-session-04", "request_id": "req-fixture-codex-006", "text": "fixture-prompt: start the analysis", "turn_id": "turn:v1:codex:Zml4dHVyZS1jb2RleC0wNg", "source_turn_id": "codex-native-turn-0006", "turn_origin": "native", "turn_confidence": "native", "actor_scope": "root", "flow_scope": "main", "content_class": "dialogue"},
+        {"type": "user_text", "session_id": "codex-fixture-session-04", "request_id": "req-fixture-codex-007", "text": "fixture-prompt: also cover the edge cases", "turn_id": "turn:v1:codex:Zml4dHVyZS1jb2RleC0wNg", "source_turn_id": "codex-native-turn-0006", "turn_origin": "native", "turn_confidence": "native", "actor_scope": "root", "flow_scope": "main", "content_class": "dialogue"},
+        {"type": "agent_text", "session_id": "codex-fixture-session-04", "text": "fixture-response: analysis with edge cases", "turn_id": "turn:v1:codex:Zml4dHVyZS1jb2RleC0wNg", "source_turn_id": "codex-native-turn-0006", "turn_origin": "native", "turn_confidence": "native", "actor_scope": "root", "flow_scope": "main", "content_class": "dialogue"},
+        {"type": "turn_status", "session_id": "codex-fixture-session-04", "turn_id": "turn:v1:codex:Zml4dHVyZS1jb2RleC0wNg", "turn_status": "completed", "turn_origin": "native", "turn_confidence": "native", "source_turn_id": "codex-native-turn-0006", "actor_scope": "root", "agent_id": "", "event_id": "turn:fixturehash-codex-06:status:completed"}
+      ]
+    },
+    {
+      "name": "native-subagent-turn",
+      "expectation": "subagent",
+      "notes": "child agent events carry their own actor key and turn lifecycle; root session status is untouched.",
+      "events": [
+        {"type": "subagent_discovered", "session_id": "codex-fixture-session-05", "agent_id": "agent-fixture-sub-01", "is_subagent": true, "parent_session_id": "codex-fixture-session-05", "root_session_id": "codex-fixture-session-05", "subagent_desc": "fixture-subagent: explore the module", "actor_scope": "subagent", "flow_scope": "auxiliary", "content_class": "lifecycle"},
+        {"type": "turn_status", "session_id": "codex-fixture-session-05", "turn_id": "turn:v1:codex:Zml4dHVyZS1jb2RleC1wMQ", "turn_status": "running", "turn_origin": "native", "turn_confidence": "native", "source_turn_id": "codex-native-turn-sub-0001", "agent_id": "agent-fixture-sub-01", "actor_scope": "subagent", "event_id": "turn:fixturehash-codex-sub-01:status:running"},
+        {"type": "agent_text", "session_id": "codex-fixture-session-05", "agent_id": "agent-fixture-sub-01", "is_subagent": true, "text": "fixture-response: subagent findings", "turn_id": "turn:v1:codex:Zml4dHVyZS1jb2RleC1wMQ", "source_turn_id": "codex-native-turn-sub-0001", "turn_origin": "native", "turn_confidence": "native", "actor_scope": "subagent", "flow_scope": "main", "content_class": "dialogue"},
+        {"type": "turn_status", "session_id": "codex-fixture-session-05", "turn_id": "turn:v1:codex:Zml4dHVyZS1jb2RleC1wMQ", "turn_status": "completed", "turn_origin": "native", "turn_confidence": "native", "source_turn_id": "codex-native-turn-sub-0001", "agent_id": "agent-fixture-sub-01", "actor_scope": "subagent", "event_id": "turn:fixturehash-codex-sub-01:status:completed"}
+      ]
+    },
+    {
+      "name": "terminal-rollout-legacy-unassigned",
+      "expectation": "legacy_unassigned",
+      "notes": "terminal TUI watcher rollout records expose session identity but no native turn id; events stay unassigned instead of being guessed into a turn.",
+      "events": [
+        {"type": "user_text", "session_id": "codex-fixture-session-06", "text": "fixture-prompt: legacy rollout user message", "turn_origin": "legacy_unassigned", "actor_scope": "root", "flow_scope": "main", "content_class": "dialogue"},
+        {"type": "agent_text", "session_id": "codex-fixture-session-06", "text": "fixture-response: legacy rollout assistant message", "turn_origin": "legacy_unassigned", "actor_scope": "root", "flow_scope": "main", "content_class": "dialogue"},
+        {"type": "session_status", "session_id": "codex-fixture-session-06", "status": "idle", "actor_scope": "root", "flow_scope": "auxiliary", "content_class": "lifecycle"}
+      ]
+    }
+  ]
+}

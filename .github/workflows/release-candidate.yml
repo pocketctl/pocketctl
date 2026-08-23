@@ -1,0 +1,196 @@
+name: Release Candidate
+run-name: Release candidate ${{ inputs.version }} @ ${{ inputs.candidate_sha }}
+
+"on":
+  workflow_dispatch:
+    inputs:
+      candidate_sha:
+        description: Full SHA of the current filtered public master commit
+        required: true
+        type: string
+      version:
+        description: Candidate version in vX.Y.Z or vX.Y.Z-rcN format
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-candidate-${{ inputs.version }}-${{ inputs.candidate_sha }}
+  cancel-in-progress: false
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.candidate_sha }}
+          fetch-depth: 0
+
+      - name: Validate exact public master and version identity
+        env:
+          CANDIDATE_SHA: ${{ inputs.candidate_sha }}
+          CANDIDATE_VERSION: ${{ inputs.version }}
+        run: |
+          git fetch --no-tags origin refs/heads/master:refs/remotes/origin/master
+          CHECKOUT_SHA=$(git rev-parse HEAD)
+          PUBLIC_MASTER_SHA=$(git rev-parse refs/remotes/origin/master)
+          SOURCE_VERSION=$(sed -n 's/.*var version = "\([^"]*\)".*/\1/p' cmd/pocketctl/main.go)
+          source scripts/lib/release-contract.sh
+          require_release_candidate_identity \
+            "$CANDIDATE_SHA" \
+            "$CANDIDATE_VERSION" \
+            "$CHECKOUT_SHA" \
+            "$PUBLIC_MASTER_SHA" \
+            "$SOURCE_VERSION"
+
+  public-fact-contract:
+    needs: validate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.candidate_sha }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Scan tracked source for secrets
+        run: bash scripts/secret-scan.sh
+
+      - name: Verify public mirror dependencies
+        run: node scripts/tests/github-mirror-contract.test.mjs
+
+  managed-agent-gate:
+    needs: public-fact-contract
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.candidate_sha }}
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.25'
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: |
+            relay/package-lock.json
+            web/package-lock.json
+
+      - name: Install Relay and Web dependencies
+        run: |
+          npm ci --prefix relay
+          npm ci --prefix web
+
+      - name: OpenCode managed terminal gate (Unix launcher and IPC)
+        run: make test-opencode-managed
+
+      - name: Codex managed terminal gate (official TUI and app-server)
+        run: make test-codex-managed
+
+      - name: Relay tests and build
+        working-directory: relay
+        run: |
+          npm test
+          npm run build
+
+      - name: Web tests and build
+        working-directory: web
+        run: |
+          npm test
+          npm run build
+
+      - name: Vet Go packages
+        run: go vet ./...
+
+  windows-launcher-tests:
+    needs: validate
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.candidate_sha }}
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.25'
+
+      - name: Windows wrapper, app-server, PATH, and exit propagation tests
+        run: go test ./internal/platform ./internal/agentcontrol ./internal/codexapp ./internal/session ./cmd/pocketctl -count=1
+
+  build:
+    needs: [managed-agent-gate, windows-launcher-tests]
+    strategy:
+      matrix:
+        include:
+          - os: darwin
+            arch: arm64
+            ext: ""
+          - os: darwin
+            arch: amd64
+            ext: ""
+          - os: linux
+            arch: amd64
+            ext: ""
+          - os: linux
+            arch: arm64
+            ext: ""
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.candidate_sha }}
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.25'
+
+      - name: Build exact candidate binary
+        env:
+          GOOS: ${{ matrix.os }}
+          GOARCH: ${{ matrix.arch }}
+          VERSION: ${{ inputs.version }}
+        run: go build -ldflags "-X main.version=$VERSION" -o pocketctl_${{ matrix.os }}_${{ matrix.arch }}${{ matrix.ext }} ./cmd/pocketctl
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pocketctl_${{ matrix.os }}_${{ matrix.arch }}${{ matrix.ext }}
+          path: pocketctl_${{ matrix.os }}_${{ matrix.arch }}${{ matrix.ext }}
+          if-no-files-found: error
+          retention-days: 14
+
+  package:
+    needs: [validate, managed-agent-gate, windows-launcher-tests, build]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.candidate_sha }}
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Prepare checksummed release candidate bundle
+        run: |
+          bash scripts/package-release-candidate.sh \
+            --input artifacts \
+            --output candidate \
+            --version "${{ inputs.version }}" \
+            --sha "${{ inputs.candidate_sha }}" \
+            --repository "${{ github.repository }}" \
+            --run-id "${{ github.run_id }}"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-candidate-${{ inputs.version }}-${{ inputs.candidate_sha }}
+          path: candidate
+          if-no-files-found: error
+          retention-days: 14

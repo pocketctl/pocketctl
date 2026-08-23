@@ -1,0 +1,300 @@
+import { ref, computed } from 'vue'
+import { getRelayOrigin } from './useEnv'
+import { useLocale } from './useLocale'
+import { applyQuotaPayload } from './useQuota'
+
+export interface UserInfo {
+  id: number
+  email: string | null
+  phone: string | null
+  display_name: string | null
+  plan?: string | null
+  quota?: any
+}
+
+const user = ref<UserInfo | null>(null)
+const accessToken = ref('')
+const refreshToken = ref('')
+const { locale } = useLocale()
+
+// Restore user from localStorage
+const savedUser = localStorage.getItem('pocketctl_user')
+if (savedUser) {
+  try { user.value = JSON.parse(savedUser) } catch {}
+}
+
+async function apiRequest(path: string, body: any, auth?: boolean): Promise<{ ok: boolean; data: any }> {
+  let result = await fetchOnce(path, body, auth)
+  // 携带 access token 的请求遇 401（token 过期/吊销）：刷新后用新 token 重试一次。
+  // refresh 请求自身不带 auth，不会进入此分支，因此不会递归。
+  if (auth && result.status === 401) {
+    const refreshed = await doRefreshToken()
+    if (refreshed) result = await fetchOnce(path, body, auth)
+  }
+  return { ok: result.ok, data: result.data }
+}
+
+async function fetchOnce(path: string, body: any, auth?: boolean): Promise<{ ok: boolean; status: number; data: any }> {
+  const origin = getRelayOrigin()
+  const url = origin ? `${origin}${path}` : path
+  const headers: Record<string, string> = { 'Content-Type': 'application/json' }
+  if (auth && accessToken.value) {
+    headers['Authorization'] = `Bearer ${accessToken.value}`
+  }
+  try {
+    const res = await fetch(url, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify(body),
+      credentials: 'include',
+    })
+    const data = await res.json()
+    return { ok: res.ok, status: res.status, data }
+  } catch (e) {
+    return { ok: false, status: 0, data: { error: '网络请求失败' } }
+  }
+}
+
+/** GET variant for endpoints like QR status polling (no body, no auth). */
+async function apiGet(path: string): Promise<{ ok: boolean; data: any }> {
+  const origin = getRelayOrigin()
+  const url = origin ? `${origin}${path}` : path
+  try {
+    const res = await fetch(url, {
+      method: 'GET',
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'include',
+    })
+    const data = await res.json()
+    return { ok: res.ok, data }
+  } catch (e) {
+    return { ok: false, data: { error: '网络请求失败' } }
+  }
+}
+
+/** Authenticated GET with 401 → refresh → retry (mirrors apiRequest semantics). */
+async function apiGetAuth(path: string): Promise<{ ok: boolean; data: any }> {
+  let result = await fetchGetAuth(path)
+  if (result.status === 401) {
+    const refreshed = await doRefreshToken()
+    if (refreshed) result = await fetchGetAuth(path)
+  }
+  return { ok: result.ok, data: result.data }
+}
+
+async function fetchGetAuth(path: string): Promise<{ ok: boolean; status: number; data: any }> {
+  const origin = getRelayOrigin()
+  const url = origin ? `${origin}${path}` : path
+  const headers: Record<string, string> = { 'Content-Type': 'application/json' }
+  if (accessToken.value) headers['Authorization'] = `Bearer ${accessToken.value}`
+  try {
+    const res = await fetch(url, { method: 'GET', headers, credentials: 'include' })
+    const data = await res.json()
+    return { ok: res.ok, status: res.status, data }
+  } catch {
+    return { ok: false, status: 0, data: { error: '网络请求失败' } }
+  }
+}
+
+/**
+ * 拉取最新 profile 补全用户信息(主要是 plan 字段)。
+ * 老的 localStorage 里可能没有 plan,且 plan 可能在后台被改动,
+ * 登录后/恢复登录态后各调一次保持同步。失败静默,不影响登录。
+ */
+async function fetchProfile() {
+  if (!accessToken.value) return
+  const { ok, data } = await apiGetAuth('/api/user/profile')
+  if (!ok || !data?.id) return
+  user.value = {
+    id: data.id,
+    email: data.email ?? null,
+    phone: data.phone ?? null,
+    display_name: data.display_name ?? null,
+    plan: data.plan || 'free',
+    quota: data.quota,
+  }
+  applyQuotaPayload(data)
+  localStorage.setItem('pocketctl_user', JSON.stringify(user.value))
+}
+
+// --- Email Verification Code Auth ---
+
+async function sendEmailCode(email: string): Promise<string | null> {
+  const { ok, data } = await apiRequest('/api/auth/email/send', { email, lang: locale.value })
+  if (!ok) return data.error || '发送失败'
+  return null
+}
+
+async function loginViaEmail(email: string, code: string): Promise<string | null> {
+  const { ok, data } = await apiRequest('/api/auth/email/verify', { email, code, lang: locale.value })
+  if (!ok) return data.error || '验证失败'
+  saveTokens(data)
+  return null
+}
+
+// --- Device Authorization ---
+
+async function confirmDeviceAuth(userCode: string): Promise<string | null> {
+  const { ok, data } = await apiRequest('/api/auth/device/confirm', { user_code: userCode }, true)
+  if (!ok) return data.error_description || data.error || '授权失败'
+  return null
+}
+
+// --- QR Scan-Login (web shows QR → iOS scans/confirms → web polls for token) ---
+
+export interface QrCreateResult {
+  qr_token: string
+  qr_payload: string
+  expires_in: number
+  interval: number
+}
+
+export type QrStatus = 'pending' | 'scanned' | 'confirmed' | 'expired'
+
+/** Web starts a QR login session. Returns the payload to render into the QR. */
+async function createQrLogin(): Promise<{ data: QrCreateResult | null; error: string | null }> {
+  const { ok, data } = await apiRequest('/api/auth/qr/create', {})
+  if (!ok) return { data: null, error: data.error || '生成二维码失败' }
+  return { data, error: null }
+}
+
+/**
+ * Web polls the QR session status. On 'confirmed' the tokens are already saved
+ * here (single call site) and the caller can redirect.
+ * Returns: 'pending' | 'scanned' | 'confirmed' (tokens saved) | 'expired' | '<error msg>'
+ */
+async function pollQrLogin(qrToken: string): Promise<QrStatus | string> {
+  const { ok, data } = await apiGet(`/api/auth/qr/status?qr_token=${encodeURIComponent(qrToken)}`)
+  if (!ok) return data.error || '查询失败'
+  if (data.status === 'confirmed') {
+    saveTokens(data)
+    return 'confirmed'
+  }
+  return data.status as QrStatus
+}
+
+// --- Force Kick Daemon ---
+
+async function forceKickDaemon(daemonId: string, emailCode: string): Promise<string | null> {
+  // First verify email code
+  const verifyResult = await apiRequest('/api/auth/email/verify', { email: user.value?.email, code: emailCode }, true)
+  if (!verifyResult.ok) return verifyResult.data.error || '验证码错误'
+
+  // Then force kick
+  const kickResult = await apiRequest(`/api/daemons/${daemonId}/forceKick`, {}, true)
+  if (!kickResult.ok) return kickResult.data.error || '踢下线失败'
+  return null
+}
+
+// --- Session Rename ---
+
+async function renameSession(sessionId: string, title: string): Promise<string | null> {
+  const origin = getRelayOrigin()
+  const url = origin ? `${origin}/api/sessions/${sessionId}/title` : `/api/sessions/${sessionId}/title`
+  try {
+    const res = await fetch(url, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${accessToken.value}` },
+      body: JSON.stringify({ title }),
+      credentials: 'include',
+    })
+    const data = await res.json()
+    if (!res.ok) return data.error || '重命名失败'
+    return null
+  } catch {
+    return '网络请求失败'
+  }
+}
+
+// --- Legacy (deprecated) ---
+
+async function login(email: string, password: string): Promise<string | null> {
+  const { ok, data } = await apiRequest('/api/auth/login', { email, password })
+  if (!ok) return data.error || '登录失败'
+  saveTokens(data)
+  return null
+}
+
+// --- Token Management ---
+
+/**
+ * 判断 access token 是否已过期/无效。解码 JWT payload 段读 exp（秒），
+ * 与传入时钟比较；exp 不足 skewSec 缓冲也视为过期，以便提前刷新。
+ * 纯函数 + 可注入时钟（参考 rate-limit.ts 风格），便于单测。
+ * 任何解码失败 / 无 exp / 空串 → 保守返回 true，触发刷新而非带过期 token 请求。
+ */
+export function isTokenExpired(token: string, skewSec = 30, nowSec = Math.floor(Date.now() / 1000)): boolean {
+  if (!token) return true
+  const parts = token.split('.')
+  if (parts.length < 2) return true
+  try {
+    // payload 段是 base64url：转标准 base64 并补齐 padding 再 atob
+    let b64 = parts[1].replace(/-/g, '+').replace(/_/g, '/')
+    while (b64.length % 4) b64 += '='
+    const payload = JSON.parse(atob(b64))
+    if (typeof payload.exp !== 'number') return true
+    return payload.exp - skewSec <= nowSec
+  } catch {
+    return true
+  }
+}
+
+function saveTokens(data: any) {
+  accessToken.value = data.access_token
+  refreshToken.value = ''
+  user.value = data.user
+  localStorage.removeItem('pocketctl_access_token')
+  localStorage.removeItem('pocketctl_refresh_token')
+  localStorage.setItem('pocketctl_user', JSON.stringify(data.user))
+}
+
+async function doRefreshToken(): Promise<boolean> {
+  const legacyRefreshToken = localStorage.getItem('pocketctl_refresh_token') || refreshToken.value
+  const body = legacyRefreshToken ? { refresh_token: legacyRefreshToken } : {}
+  const { ok, data } = await apiRequest('/api/auth/refresh', body)
+  localStorage.removeItem('pocketctl_access_token')
+  localStorage.removeItem('pocketctl_refresh_token')
+  if (!ok) {
+    clearAuthState()
+    return false
+  }
+  saveTokens(data)
+  return true
+}
+
+function clearAuthState() {
+  user.value = null
+  accessToken.value = ''
+  refreshToken.value = ''
+  localStorage.removeItem('pocketctl_access_token')
+  localStorage.removeItem('pocketctl_refresh_token')
+  localStorage.removeItem('pocketctl_user')
+}
+
+async function logout() {
+  const legacyRefreshToken = localStorage.getItem('pocketctl_refresh_token') || refreshToken.value
+  // 先调 relay 清 HttpOnly cookie(必须带 credentials:include 让浏览器接受 Set-Cookie),
+  // 再清内存。如果先 clearAuthState,accessToken 变空 → router.beforeEach 触发
+  // doRefreshToken → cookie 还在 → relay 返回新 token → 恢复登录态 → 退出失效。
+  try {
+    await apiRequest('/api/auth/logout', legacyRefreshToken ? { refresh_token: legacyRefreshToken } : {})
+  } catch {}
+  clearAuthState()
+}
+
+const isLoggedIn = computed(() => !!accessToken.value && !!user.value)
+
+export function useAuth() {
+  return {
+    user, accessToken, refreshToken, isLoggedIn,
+    login,                            // legacy (deprecated)
+    sendEmailCode, loginViaEmail,     // email verification code
+    confirmDeviceAuth,                // device authorization
+    createQrLogin, pollQrLogin,       // QR scan-login (web side)
+    forceKickDaemon,                  // force kick daemon
+    renameSession,                    // session rename
+    fetchProfile,                     // refresh user profile (e.g. after plan change)
+    apiGetAuth,                       // authenticated GET with one token-refresh retry
+    doRefreshToken, logout,
+  }
+}

@@ -1,0 +1,99 @@
+{
+  "agent": "opencode",
+  "scenarios": [
+    {
+      "name": "message-anchored-completed",
+      "expectation": "completed",
+      "notes": "stable message id anchors the logical turn; assistant time.completed closes it.",
+      "events": [
+        {"type": "user_text", "session_id": "opencode-fixture-session-01", "message_id": "msg_fxt_oc_001", "part_id": "prt_fxt_oc_001", "event_id": "opencode:user:msg_fxt_oc_001:prt_fxt_oc_001", "request_id": "req-fixture-oc-001", "text": "fixture-prompt: draft the release notes", "turn_id": "turn:v1:opencode:Zml4dHVyZS1vcC0wMQ", "turn_origin": "request", "turn_confidence": "derived", "actor_scope": "root", "flow_scope": "main", "content_class": "dialogue", "classifier_version": "v1"},
+        {"type": "turn_status", "session_id": "opencode-fixture-session-01", "turn_id": "turn:v1:opencode:Zml4dHVyZS1vcC0wMQ", "turn_status": "running", "turn_origin": "request", "turn_confidence": "derived", "actor_scope": "root", "agent_id": "", "event_id": "turn:fixturehash-oc-01:status:running"},
+        {"type": "agent_text", "session_id": "opencode-fixture-session-01", "message_id": "msg_fxt_oc_002", "part_id": "prt_fxt_oc_002", "revision": 1, "replace": true, "text": "fixture-response: release notes draft", "turn_id": "turn:v1:opencode:Zml4dHVyZS1vcC0wMQ", "turn_origin": "source_message", "turn_confidence": "derived", "actor_scope": "root", "flow_scope": "main", "content_class": "dialogue"},
+        {"type": "turn_status", "session_id": "opencode-fixture-session-01", "turn_id": "turn:v1:opencode:Zml4dHVyZS1vcC0wMQ", "turn_status": "completed", "turn_reason": "message_completed", "turn_origin": "source_message", "turn_confidence": "derived", "actor_scope": "root", "agent_id": "", "event_id": "turn:fixturehash-oc-01:status:completed"},
+        {"type": "session_status", "session_id": "opencode-fixture-session-01", "status": "idle", "actor_scope": "root", "flow_scope": "auxiliary", "content_class": "lifecycle"}
+      ]
+    },
+    {
+      "name": "abort-interrupted",
+      "expectation": "interrupted",
+      "notes": "POST /session/{id}/abort accepted first, SSE/authoritative status confirms interruption.",
+      "events": [
+        {"type": "turn_status", "session_id": "opencode-fixture-session-02", "turn_id": "turn:v1:opencode:Zml4dHVyZS1vcC0wMg", "turn_status": "running", "turn_origin": "request", "turn_confidence": "derived", "actor_scope": "root", "agent_id": "", "event_id": "turn:fixturehash-oc-02:status:running"},
+        {"type": "user_text", "session_id": "opencode-fixture-session-02", "message_id": "msg_fxt_oc_011", "part_id": "prt_fxt_oc_011", "request_id": "req-fixture-oc-011", "text": "fixture-prompt: run the long generation", "turn_id": "turn:v1:opencode:Zml4dHVyZS1vcC0wMg", "turn_origin": "request", "turn_confidence": "derived", "actor_scope": "root", "flow_scope": "main", "content_class": "dialogue"},
+        {"type": "turn_status", "session_id": "opencode-fixture-session-02", "turn_id": "turn:v1:opencode:Zml4dHVyZS1vcC0wMg", "turn_status": "interrupt_requested", "turn_reason": "abort_requested", "turn_origin": "request", "turn_confidence": "derived", "actor_scope": "root", "agent_id": "", "event_id": "turn:fixturehash-oc-02:status:interrupt_requested"},
+        {"type": "turn_status", "session_id": "opencode-fixture-session-02", "turn_id": "turn:v1:opencode:Zml4dHVyZS1vcC0wMg", "turn_status": "interrupted", "turn_reason": "abort_confirmed", "turn_origin": "source_message", "turn_confidence": "derived", "actor_scope": "root", "agent_id": "", "event_id": "turn:fixturehash-oc-02:status:interrupted"},
+        {"type": "session_status", "session_id": "opencode-fixture-session-02", "status": "idle", "actor_scope": "root", "flow_scope": "auxiliary", "content_class": "lifecycle"}
+      ]
+    },
+    {
+      "name": "abort-interrupted-then-continue",
+      "expectation": "interrupted",
+      "notes": "after interrupted a new prompt opens a new turn linked via previous_turn_id/after_interrupt.",
+      "events": [
+        {"type": "turn_status", "session_id": "opencode-fixture-session-03", "turn_id": "turn:v1:opencode:Zml4dHVyZS1vcC0wMw", "turn_status": "running", "turn_origin": "request", "turn_confidence": "derived", "actor_scope": "root", "agent_id": "", "event_id": "turn:fixturehash-oc-03:status:running"},
+        {"type": "user_text", "session_id": "opencode-fixture-session-03", "message_id": "msg_fxt_oc_021", "part_id": "prt_fxt_oc_021", "request_id": "req-fixture-oc-021", "text": "fixture-prompt: generate the report", "turn_id": "turn:v1:opencode:Zml4dHVyZS1vcC0wMw", "turn_origin": "request", "turn_confidence": "derived", "actor_scope": "root", "flow_scope": "main", "content_class": "dialogue"},
+        {"type": "turn_status", "session_id": "opencode-fixture-session-03", "turn_id": "turn:v1:opencode:Zml4dHVyZS1vcC0wMw", "turn_status": "interrupt_requested", "turn_reason": "abort_requested", "turn_origin": "request", "turn_confidence": "derived", "actor_scope": "root", "agent_id": "", "event_id": "turn:fixturehash-oc-03:status:interrupt_requested"},
+        {"type": "turn_status", "session_id": "opencode-fixture-session-03", "turn_id": "turn:v1:opencode:Zml4dHVyZS1vcC0wMw", "turn_status": "interrupted", "turn_reason": "abort_confirmed", "turn_origin": "source_message", "turn_confidence": "derived", "actor_scope": "root", "agent_id": "", "event_id": "turn:fixturehash-oc-03:status:interrupted"},
+        {"type": "turn_status", "session_id": "opencode-fixture-session-03", "turn_id": "turn:v1:opencode:Zml4dHVyZS1vcC0wNA", "turn_status": "running", "previous_turn_id": "turn:v1:opencode:Zml4dHVyZS1vcC0wMw", "continuation_reason": "after_interrupt", "turn_origin": "request", "turn_confidence": "derived", "actor_scope": "root", "agent_id": "", "event_id": "turn:fixturehash-oc-04:status:running"},
+        {"type": "user_text", "session_id": "opencode-fixture-session-03", "message_id": "msg_fxt_oc_022", "part_id": "prt_fxt_oc_022", "request_id": "req-fixture-oc-022", "text": "fixture-prompt: retry with a narrower scope", "turn_id": "turn:v1:opencode:Zml4dHVyZS1vcC0wNA", "previous_turn_id": "turn:v1:opencode:Zml4dHVyZS1vcC0wMw", "continuation_reason": "after_interrupt", "turn_origin": "request", "turn_confidence": "derived", "actor_scope": "root", "flow_scope": "main", "content_class": "dialogue"}
+      ]
+    },
+    {
+      "name": "prompt-error-failed",
+      "expectation": "failed",
+      "notes": "POST /session/{id}/message returns an error; the reserved turn terminalizes as failed.",
+      "events": [
+        {"type": "turn_status", "session_id": "opencode-fixture-session-04", "turn_id": "turn:v1:opencode:Zml4dHVyZS1vcC0wNQ", "turn_status": "running", "turn_origin": "request", "turn_confidence": "derived", "actor_scope": "root", "agent_id": "", "event_id": "turn:fixturehash-oc-05:status:running"},
+        {"type": "user_text", "session_id": "opencode-fixture-session-04", "message_id": "msg_fxt_oc_031", "part_id": "prt_fxt_oc_031", "request_id": "req-fixture-oc-031", "text": "fixture-prompt: trigger the failing prompt", "turn_id": "turn:v1:opencode:Zml4dHVyZS1vcC0wNQ", "turn_origin": "request", "turn_confidence": "derived", "actor_scope": "root", "flow_scope": "main", "content_class": "dialogue"},
+        {"type": "turn_status", "session_id": "opencode-fixture-session-04", "turn_id": "turn:v1:opencode:Zml4dHVyZS1vcC0wNQ", "turn_status": "failed", "turn_reason": "prompt_error", "turn_origin": "request", "turn_confidence": "derived", "actor_scope": "root", "agent_id": "", "event_id": "turn:fixturehash-oc-05:status:failed"},
+        {"type": "error", "session_id": "opencode-fixture-session-04", "error": "fixture-error: opencode prompt rejected", "actor_scope": "root", "flow_scope": "auxiliary", "content_class": "lifecycle"}
+      ]
+    },
+    {
+      "name": "steer-addendum",
+      "expectation": "addendum",
+      "notes": "input while running stays in the same turn; no additional running status is emitted.",
+      "events": [
+        {"type": "turn_status", "session_id": "opencode-fixture-session-05", "turn_id": "turn:v1:opencode:Zml4dHVyZS1vcC0wNg", "turn_status": "running", "turn_origin": "request", "turn_confidence": "derived", "actor_scope": "root", "agent_id": "", "event_id": "turn:fixturehash-oc-06:status:running"},
+        {"type": "user_text", "session_id": "opencode-fixture-session-05", "message_id": "msg_fxt_oc_041", "part_id": "prt_fxt_oc_041", "request_id": "req-fixture-oc-041", "text": "fixture-prompt: start the review", "turn_id": "turn:v1:opencode:Zml4dHVyZS1vcC0wNg", "turn_origin": "request", "turn_confidence": "derived", "actor_scope": "root", "flow_scope": "main", "content_class": "dialogue"},
+        {"type": "user_text", "session_id": "opencode-fixture-session-05", "message_id": "msg_fxt_oc_042", "part_id": "prt_fxt_oc_042", "request_id": "req-fixture-oc-042", "text": "fixture-prompt: focus on the parser", "turn_id": "turn:v1:opencode:Zml4dHVyZS1vcC0wNg", "turn_origin": "request", "turn_confidence": "derived", "actor_scope": "root", "flow_scope": "main", "content_class": "dialogue"},
+        {"type": "agent_text", "session_id": "opencode-fixture-session-05", "message_id": "msg_fxt_oc_043", "part_id": "prt_fxt_oc_043", "revision": 1, "text": "fixture-response: parser-focused review", "turn_id": "turn:v1:opencode:Zml4dHVyZS1vcC0wNg", "turn_origin": "source_message", "turn_confidence": "derived", "actor_scope": "root", "flow_scope": "main", "content_class": "dialogue"},
+        {"type": "turn_status", "session_id": "opencode-fixture-session-05", "turn_id": "turn:v1:opencode:Zml4dHVyZS1vcC0wNg", "turn_status": "completed", "turn_reason": "message_completed", "turn_origin": "source_message", "turn_confidence": "derived", "actor_scope": "root", "agent_id": "", "event_id": "turn:fixturehash-oc-06:status:completed"}
+      ]
+    },
+    {
+      "name": "retry-compaction-lifecycle",
+      "expectation": "completed",
+      "notes": "retry and compaction parts belong to the running turn as auxiliary lifecycle events, never a new turn.",
+      "events": [
+        {"type": "turn_status", "session_id": "opencode-fixture-session-06", "turn_id": "turn:v1:opencode:Zml4dHVyZS1vcC0wNw", "turn_status": "running", "turn_origin": "request", "turn_confidence": "derived", "actor_scope": "root", "agent_id": "", "event_id": "turn:fixturehash-oc-07:status:running"},
+        {"type": "user_text", "session_id": "opencode-fixture-session-06", "message_id": "msg_fxt_oc_051", "part_id": "prt_fxt_oc_051", "request_id": "req-fixture-oc-051", "text": "fixture-prompt: run with retries", "turn_id": "turn:v1:opencode:Zml4dHVyZS1vcC0wNw", "turn_origin": "request", "turn_confidence": "derived", "actor_scope": "root", "flow_scope": "main", "content_class": "dialogue"},
+        {"type": "agent_retry", "session_id": "opencode-fixture-session-06", "message_id": "msg_fxt_oc_052", "part_id": "prt_fxt_oc_052", "attempt": 1, "turn_id": "turn:v1:opencode:Zml4dHVyZS1vcC0wNw", "turn_origin": "source_message", "turn_confidence": "derived", "actor_scope": "root", "flow_scope": "auxiliary", "content_class": "lifecycle"},
+        {"type": "agent_compaction", "session_id": "opencode-fixture-session-06", "message_id": "msg_fxt_oc_053", "part_id": "prt_fxt_oc_053", "auto": true, "overflow": true, "turn_id": "turn:v1:opencode:Zml4dHVyZS1vcC0wNw", "turn_origin": "source_message", "turn_confidence": "derived", "actor_scope": "root", "flow_scope": "auxiliary", "content_class": "lifecycle"},
+        {"type": "agent_text", "session_id": "opencode-fixture-session-06", "message_id": "msg_fxt_oc_054", "part_id": "prt_fxt_oc_054", "text": "fixture-response: completed after retry", "turn_id": "turn:v1:opencode:Zml4dHVyZS1vcC0wNw", "turn_origin": "source_message", "turn_confidence": "derived", "actor_scope": "root", "flow_scope": "main", "content_class": "dialogue"},
+        {"type": "turn_status", "session_id": "opencode-fixture-session-06", "turn_id": "turn:v1:opencode:Zml4dHVyZS1vcC0wNw", "turn_status": "completed", "turn_reason": "message_completed", "turn_origin": "source_message", "turn_confidence": "derived", "actor_scope": "root", "agent_id": "", "event_id": "turn:fixturehash-oc-07:status:completed"}
+      ]
+    },
+    {
+      "name": "subagent-part",
+      "expectation": "subagent",
+      "notes": "agent-scoped parts carry the subagent actor key and their own turn; root status is untouched.",
+      "events": [
+        {"type": "agent_subtask", "session_id": "opencode-fixture-session-07", "agent_id": "agent-fixture-oc-sub", "is_subagent": true, "parent_session_id": "opencode-fixture-session-07", "root_session_id": "opencode-fixture-session-07", "turn_id": "turn:v1:opencode:Zml4dHVyZS1vcC1wMQ", "actor_scope": "subagent", "flow_scope": "auxiliary", "content_class": "execution"},
+        {"type": "turn_status", "session_id": "opencode-fixture-session-07", "turn_id": "turn:v1:opencode:Zml4dHVyZS1vcC1wMQ", "turn_status": "running", "turn_origin": "source_message", "turn_confidence": "derived", "agent_id": "agent-fixture-oc-sub", "actor_scope": "subagent", "event_id": "turn:fixturehash-oc-sub-01:status:running"},
+        {"type": "agent_text", "session_id": "opencode-fixture-session-07", "agent_id": "agent-fixture-oc-sub", "is_subagent": true, "message_id": "msg_fxt_oc_sub_1", "part_id": "prt_fxt_oc_sub_1", "text": "fixture-response: subagent output", "turn_id": "turn:v1:opencode:Zml4dHVyZS1vcC1wMQ", "turn_origin": "source_message", "turn_confidence": "derived", "actor_scope": "subagent", "flow_scope": "main", "content_class": "dialogue"},
+        {"type": "turn_status", "session_id": "opencode-fixture-session-07", "turn_id": "turn:v1:opencode:Zml4dHVyZS1vcC1wMQ", "turn_status": "completed", "turn_origin": "source_message", "turn_confidence": "derived", "agent_id": "agent-fixture-oc-sub", "actor_scope": "subagent", "event_id": "turn:fixturehash-oc-sub-01:status:completed"}
+      ]
+    },
+    {
+      "name": "legacy-storage-unassigned",
+      "expectation": "legacy_unassigned",
+      "notes": "old storage rows without message ids (semantic fallback only) stay unassigned; no time-based grouping.",
+      "events": [
+        {"type": "user_text", "session_id": "opencode-fixture-session-08", "text": "fixture-prompt: legacy storage user message", "turn_origin": "legacy_unassigned", "actor_scope": "root", "flow_scope": "main", "content_class": "dialogue"},
+        {"type": "agent_text", "session_id": "opencode-fixture-session-08", "text": "fixture-response: legacy storage assistant message", "turn_origin": "legacy_unassigned", "actor_scope": "root", "flow_scope": "main", "content_class": "dialogue"},
+        {"type": "session_status", "session_id": "opencode-fixture-session-08", "status": "idle", "actor_scope": "root", "flow_scope": "auxiliary", "content_class": "lifecycle"}
+      ]
+    }
+  ]
+}

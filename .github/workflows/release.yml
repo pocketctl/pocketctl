@@ -1,0 +1,138 @@
+name: Build & Release
+
+on:
+  push:
+    branches: [master]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  public-fact-contract:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Scan tracked source for secrets
+        run: bash scripts/secret-scan.sh
+
+      - name: Verify public mirror dependencies
+        run: node scripts/tests/github-mirror-contract.test.mjs
+
+  managed-agent-gate:
+    needs: public-fact-contract
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.25'
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: |
+            relay/package-lock.json
+            web/package-lock.json
+
+      - name: Install Relay and Web dependencies
+        run: |
+          npm ci --prefix relay
+          npm ci --prefix web
+
+      - name: OpenCode managed terminal gate (Unix launcher + IPC)
+        run: make test-opencode-managed
+
+      - name: Codex managed terminal gate (official TUI + app-server)
+        run: make test-codex-managed
+
+      - name: Relay tests and build
+        working-directory: relay
+        run: |
+          npm test
+          npm run build
+
+      - name: Web tests and build
+        working-directory: web
+        run: |
+          npm test
+          npm run build
+
+  deployment-security-gate:
+    needs: public-fact-contract
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: |
+            relay/package-lock.json
+            web/package-lock.json
+
+      - name: Install Relay and Web dependencies
+        run: |
+          npm ci --prefix relay
+          npm ci --prefix web
+
+      - name: Production deployment security gate
+        run: bash scripts/test-production-deployment-gate.sh --with-docker
+
+  windows-launcher-tests:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.25'
+
+      - name: Windows wrapper, app-server, PATH, and exit propagation tests
+        run: go test ./internal/platform ./internal/agentcontrol ./internal/codexapp ./internal/session ./cmd/pocketctl -count=1
+
+  build:
+    needs: [managed-agent-gate, deployment-security-gate, windows-launcher-tests]
+    strategy:
+      matrix:
+        include:
+          - os: darwin
+            arch: arm64
+            ext: ""
+          - os: darwin
+            arch: amd64
+            ext: ""
+          - os: linux
+            arch: amd64
+            ext: ""
+          - os: linux
+            arch: arm64
+            ext: ""
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.25'
+
+      - name: Build
+        env:
+          GOOS: ${{ matrix.os }}
+          GOARCH: ${{ matrix.arch }}
+        run: |
+          VERSION=${GITHUB_REF_NAME:-dev}
+          go build -ldflags "-X main.version=$VERSION" -o pocketctl_${{ matrix.os }}_${{ matrix.arch }}${{ matrix.ext }} ./cmd/pocketctl
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pocketctl_${{ matrix.os }}_${{ matrix.arch }}${{ matrix.ext }}
+          path: pocketctl_${{ matrix.os }}_${{ matrix.arch }}${{ matrix.ext }}
