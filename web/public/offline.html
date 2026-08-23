@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="theme-color" content="#0d1117">
+  <title>PocketCtl · Offline</title>
+  <style>
+    :root { color-scheme: dark; font-family: system-ui, sans-serif; background: #0d1117; color: #e6edf3; }
+    body { min-height: 100dvh; margin: 0; display: grid; place-items: center; padding: 24px; box-sizing: border-box; }
+    main { max-width: 420px; text-align: center; }
+    .icon { width: 56px; height: 56px; margin: 0 auto 18px; display: grid; place-items: center; border-radius: 14px; background: #58a6ff; color: #0d1117; font-size: 24px; font-weight: 800; }
+    h1 { margin: 0 0 10px; font-size: 22px; }
+    p { color: #8b949e; line-height: 1.6; }
+    button { min-height: 44px; margin-top: 12px; padding: 0 18px; border: 0; border-radius: 8px; background: #238636; color: white; font-weight: 600; }
+  </style>
+</head>
+<body>
+  <main>
+    <div class="icon">P</div>
+    <h1>当前处于离线状态</h1>
+    <p>PocketCtl 不会离线保存会话、命令或审批内容。网络恢复后请重新加载。</p>
+    <button type="button" onclick="location.reload()">重新加载</button>
+  </main>
+</body>
+</html>

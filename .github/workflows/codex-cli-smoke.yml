@@ -1,0 +1,51 @@
+name: Codex Official CLI Smoke
+
+on:
+  schedule:
+    - cron: '17 20 * * *'
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+jobs:
+  official-cli-smoke:
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Install the current official Codex CLI
+        run: npm install --global @openai/codex
+
+      - name: Install Pocketctl Web test dependencies
+        run: npm ci --prefix web
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.25'
+
+      - name: Verify version, generated schema, Unix transport, and second client
+        env:
+          POCKETCTL_CODEX_SMOKE: '1'
+        run: |
+          set -euo pipefail
+          codex --version
+          codex --help | grep -- '--remote'
+          codex app-server --help | grep -- '--listen'
+          schema_dir="$(mktemp -d)"
+          trap 'rm -rf "$schema_dir"' EXIT
+          codex app-server generate-json-schema --experimental --out "$schema_dir"
+          grep -R --quiet 'thread/resume' "$schema_dir"
+          grep -R --quiet 'serverRequest/resolved' "$schema_dir"
+          go test ./internal/codexapp ./internal/session \
+            -run 'TestInstalledCodex(AppServerUnixInitialize|RuntimeAcquireAndSecondClient)' \
+            -count=1 -timeout=60s
+
+      - name: Run Pocketctl Codex managed-runtime compatibility gate
+        run: make test-codex-managed

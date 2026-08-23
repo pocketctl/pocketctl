@@ -1,0 +1,116 @@
+{
+  "description": "Sanitized e2e fixture for the ZCode read-only session content sync. Contains one full round of events a daemon observer would emit for a single ZCode session: session_discovered, title/model updates, user_text, agent_reasoning, tool_call, tool_result, agent_text (usage-only from step-finish), and agent_todo. No real session content — every value is synthetic test data. Used by Relay materialization / replay regression.",
+  "agent": "zcode",
+  "source": "observer",
+  "wire_session_id": "zcode-aabbccddee00112233445566778899aa",
+  "source_id": "aabbccddeeff00112233445566778899",
+  "events": [
+    {
+      "type": "session_discovered",
+      "session_id": "zcode-aabbccddee00112233445566778899aa",
+      "agent": "zcode",
+      "source": "observer",
+      "control_mode": "legacy_read_only",
+      "capabilities": ["history_sync"],
+      "status": "completed",
+      "title": "Test session",
+      "cwd": "/tmp/test-project",
+      "model": "anthropic/claude-test",
+      "event_id": "zcode:aabbccddeeff:session:hash:discovered",
+      "seq": 1
+    },
+    {
+      "type": "session_title_update",
+      "session_id": "zcode-aabbccddee00112233445566778899aa",
+      "title": "Updated test session",
+      "previous_event_id": "zcode:aabbccddeeff:session:hash:discovered",
+      "event_id": "zcode:aabbccddeeff:title:hash:titlehash1",
+      "seq": 2
+    },
+    {
+      "type": "session_model_changed",
+      "session_id": "zcode-aabbccddee00112233445566778899aa",
+      "model": "openai/gpt-test",
+      "previous_event_id": "zcode:aabbccddeeff:title:hash:titlehash1",
+      "event_id": "zcode:aabbccddeeff:model:hash:modelhash1",
+      "seq": 3
+    },
+    {
+      "type": "user_text",
+      "session_id": "zcode-aabbccddee00112233445566778899aa",
+      "message_id": "zcodem-msghash1",
+      "text": "Please run the test command.",
+      "previous_event_id": "zcode:aabbccddeeff:model:hash:modelhash1",
+      "event_id": "zcode:aabbccddeeff:user:msghash1:userhash1",
+      "seq": 4
+    },
+    {
+      "type": "agent_reasoning",
+      "session_id": "zcode-aabbccddee00112233445566778899aa",
+      "message_id": "zcodem-msghash2",
+      "part_id": "zcodep-parthash1",
+      "model": "openai/gpt-test",
+      "text": "I will run the test command and report the result.",
+      "snapshot": "I will run the test command and report the result.",
+      "replace": true,
+      "revision": 1,
+      "previous_event_id": "zcode:aabbccddeeff:user:msghash1:userhash1",
+      "event_id": "zcode:aabbccddeeff:reasoning:parthash1:reasonhash1",
+      "seq": 5
+    },
+    {
+      "type": "tool_call",
+      "session_id": "zcode-aabbccddee00112233445566778899aa",
+      "message_id": "zcodem-msghash2",
+      "part_id": "zcodep-parthash2",
+      "call_id": "call_test_1",
+      "tool": "bash",
+      "status": "running",
+      "input": "{\"command\":\"echo hello\"}",
+      "previous_event_id": "zcode:aabbccddeeff:reasoning:parthash1:reasonhash1",
+      "event_id": "zcode:aabbccddeeff:tool:parthash2:running:toolhash1",
+      "seq": 6
+    },
+    {
+      "type": "tool_result",
+      "session_id": "zcode-aabbccddee00112233445566778899aa",
+      "message_id": "zcodem-msghash2",
+      "part_id": "zcodep-parthash2",
+      "call_id": "call_test_1",
+      "tool": "bash",
+      "status": "completed",
+      "output": "hello",
+      "revision": 2,
+      "replace": true,
+      "previous_event_id": "zcode:aabbccddeeff:tool:parthash2:running:toolhash1",
+      "event_id": "zcode:aabbccddeeff:tool:parthash2:completed:toolhash2",
+      "seq": 7
+    },
+    {
+      "type": "agent_text",
+      "session_id": "zcode-aabbccddee00112233445566778899aa",
+      "message_id": "zcodem-msghash2",
+      "part_id": "zcodep-parthash3",
+      "model": "openai/gpt-test",
+      "text": "The test command completed successfully.",
+      "snapshot": "The test command completed successfully.",
+      "replace": true,
+      "revision": 1,
+      "usage": {"input_tokens": 100, "output_tokens": 50},
+      "previous_event_id": "zcode:aabbccddeeff:tool:parthash2:completed:toolhash2",
+      "event_id": "zcode:aabbccddeeff:text:parthash3:texthash1",
+      "seq": 8
+    },
+    {
+      "type": "agent_todo",
+      "session_id": "zcode-aabbccddee00112233445566778899aa",
+      "todos": [
+        {"content": "Run tests", "status": "completed", "priority": "high"},
+        {"content": "Report results", "status": "in_progress", "priority": "normal"}
+      ],
+      "previous_event_id": "zcode:aabbccddeeff:text:parthash3:texthash1",
+      "event_id": "zcode:aabbccddeeff:todo:sessionhash:todohash1",
+      "seq": 9
+    }
+  ]
+}

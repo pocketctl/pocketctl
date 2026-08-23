@@ -1,0 +1,73 @@
+{
+  "agent": "zcode",
+  "scenarios": [
+    {
+      "name": "sequence-anchored-completed",
+      "expectation": "completed",
+      "notes": "read-only observer derives the turn from stable message sequence + part ids; no ProcessState, no quota.",
+      "events": [
+        {"type": "session_discovered", "session_id": "zcode-fixture-wire-01", "title": "fixture-title: observer session", "source": "observer", "actor_scope": "root", "flow_scope": "auxiliary", "content_class": "lifecycle", "classifier_version": "v1"},
+        {"type": "user_text", "session_id": "zcode-fixture-wire-01", "part_id": "zcodep-fxt-u-001", "event_id": "zcode:part:zcodep-fxt-u-001:final:ab12cd34", "text": "fixture-prompt: outline the migration", "turn_id": "turn:v1:zcode:Zml4dHVyZS16Yy0wMQ", "turn_origin": "source_message", "turn_confidence": "derived", "actor_scope": "root", "flow_scope": "main", "content_class": "dialogue"},
+        {"type": "turn_status", "session_id": "zcode-fixture-wire-01", "turn_id": "turn:v1:zcode:Zml4dHVyZS16Yy0wMQ", "turn_status": "running", "turn_origin": "source_message", "turn_confidence": "derived", "actor_scope": "root", "agent_id": "", "event_id": "turn:fixturehash-zc-01:status:running"},
+        {"type": "agent_text", "session_id": "zcode-fixture-wire-01", "part_id": "zcodep-fxt-a-001", "revision": 1, "text": "fixture-response: migration outline", "turn_id": "turn:v1:zcode:Zml4dHVyZS16Yy0wMQ", "turn_origin": "source_message", "turn_confidence": "derived", "actor_scope": "root", "flow_scope": "main", "content_class": "dialogue"},
+        {"type": "turn_status", "session_id": "zcode-fixture-wire-01", "turn_id": "turn:v1:zcode:Zml4dHVyZS16Yy0wMQ", "turn_status": "completed", "turn_reason": "assistant_finish", "turn_origin": "source_message", "turn_confidence": "derived", "actor_scope": "root", "agent_id": "", "event_id": "turn:fixturehash-zc-01:status:completed"},
+        {"type": "session_status", "session_id": "zcode-fixture-wire-01", "status": "idle", "actor_scope": "root", "flow_scope": "auxiliary", "content_class": "lifecycle"}
+      ]
+    },
+    {
+      "name": "observed-externally-interrupted",
+      "expectation": "interrupted",
+      "notes": "observer-only: a historical turn the desktop runtime interrupted (no finish, tool state stuck) is derived as interrupted; no remote interrupt is ever issued.",
+      "events": [
+        {"type": "turn_status", "session_id": "zcode-fixture-wire-02", "turn_id": "turn:v1:zcode:Zml4dHVyZS16Yy0wMg", "turn_status": "running", "turn_origin": "source_message", "turn_confidence": "derived", "actor_scope": "root", "agent_id": "", "event_id": "turn:fixturehash-zc-02:status:running"},
+        {"type": "user_text", "session_id": "zcode-fixture-wire-02", "part_id": "zcodep-fxt-u-011", "event_id": "zcode:part:zcodep-fxt-u-011:final:ab12cd35", "text": "fixture-prompt: run the interrupted task", "turn_id": "turn:v1:zcode:Zml4dHVyZS16Yy0wMg", "turn_origin": "source_message", "turn_confidence": "derived", "actor_scope": "root", "flow_scope": "main", "content_class": "dialogue"},
+        {"type": "tool_call", "session_id": "zcode-fixture-wire-02", "part_id": "zcodep-fxt-t-011", "call_id": "call-fixture-zc-011", "tool": "Read", "status": "running", "turn_id": "turn:v1:zcode:Zml4dHVyZS16Yy0wMg", "turn_origin": "source_message", "turn_confidence": "derived", "actor_scope": "root", "flow_scope": "auxiliary", "content_class": "execution"},
+        {"type": "turn_status", "session_id": "zcode-fixture-wire-02", "turn_id": "turn:v1:zcode:Zml4dHVyZS16Yy0wMg", "turn_status": "interrupted", "turn_reason": "observer_derived_no_finish", "turn_origin": "source_message", "turn_confidence": "derived", "actor_scope": "root", "agent_id": "", "event_id": "turn:fixturehash-zc-02:status:interrupted"},
+        {"type": "session_status", "session_id": "zcode-fixture-wire-02", "status": "idle", "actor_scope": "root", "flow_scope": "auxiliary", "content_class": "lifecycle"}
+      ]
+    },
+    {
+      "name": "observed-error-failed",
+      "expectation": "failed",
+      "notes": "message data carries a failure finish; the derived turn terminalizes as failed.",
+      "events": [
+        {"type": "turn_status", "session_id": "zcode-fixture-wire-03", "turn_id": "turn:v1:zcode:Zml4dHVyZS16Yy0wMw", "turn_status": "running", "turn_origin": "source_message", "turn_confidence": "derived", "actor_scope": "root", "agent_id": "", "event_id": "turn:fixturehash-zc-03:status:running"},
+        {"type": "user_text", "session_id": "zcode-fixture-wire-03", "part_id": "zcodep-fxt-u-021", "event_id": "zcode:part:zcodep-fxt-u-021:final:ab12cd36", "text": "fixture-prompt: trigger the error path", "turn_id": "turn:v1:zcode:Zml4dHVyZS16Yy0wMw", "turn_origin": "source_message", "turn_confidence": "derived", "actor_scope": "root", "flow_scope": "main", "content_class": "dialogue"},
+        {"type": "turn_status", "session_id": "zcode-fixture-wire-03", "turn_id": "turn:v1:zcode:Zml4dHVyZS16Yy0wMw", "turn_status": "failed", "turn_reason": "part_error_state", "turn_origin": "source_message", "turn_confidence": "derived", "actor_scope": "root", "agent_id": "", "event_id": "turn:fixturehash-zc-03:status:failed"}
+      ]
+    },
+    {
+      "name": "part-append-same-turn",
+      "expectation": "addendum",
+      "notes": "growing part revisions within one message stay in the same derived turn; no new running status.",
+      "events": [
+        {"type": "turn_status", "session_id": "zcode-fixture-wire-04", "turn_id": "turn:v1:zcode:Zml4dHVyZS16Yy0wNQ", "turn_status": "running", "turn_origin": "source_message", "turn_confidence": "derived", "actor_scope": "root", "agent_id": "", "event_id": "turn:fixturehash-zc-04:status:running"},
+        {"type": "user_text", "session_id": "zcode-fixture-wire-04", "part_id": "zcodep-fxt-u-031", "event_id": "zcode:part:zcodep-fxt-u-031:final:ab12cd37", "text": "fixture-prompt: iterate on the summary", "turn_id": "turn:v1:zcode:Zml4dHVyZS16Yy0wNQ", "turn_origin": "source_message", "turn_confidence": "derived", "actor_scope": "root", "flow_scope": "main", "content_class": "dialogue"},
+        {"type": "agent_text", "session_id": "zcode-fixture-wire-04", "part_id": "zcodep-fxt-a-031", "revision": 1, "text": "fixture-response: first chunk", "turn_id": "turn:v1:zcode:Zml4dHVyZS16Yy0wNQ", "turn_origin": "source_message", "turn_confidence": "derived", "actor_scope": "root", "flow_scope": "main", "content_class": "dialogue"},
+        {"type": "agent_text", "session_id": "zcode-fixture-wire-04", "part_id": "zcodep-fxt-a-031", "revision": 2, "text": "fixture-response: appended chunk", "turn_id": "turn:v1:zcode:Zml4dHVyZS16Yy0wNQ", "turn_origin": "source_message", "turn_confidence": "derived", "actor_scope": "root", "flow_scope": "main", "content_class": "dialogue"},
+        {"type": "turn_status", "session_id": "zcode-fixture-wire-04", "turn_id": "turn:v1:zcode:Zml4dHVyZS16Yy0wNQ", "turn_status": "completed", "turn_reason": "assistant_finish", "turn_origin": "source_message", "turn_confidence": "derived", "actor_scope": "root", "agent_id": "", "event_id": "turn:fixturehash-zc-04:status:completed"}
+      ]
+    },
+    {
+      "name": "subagent-child-session",
+      "expectation": "subagent",
+      "notes": "TaskType=subagent_child session rows map to the subagent actor scope with their own derived turn.",
+      "events": [
+        {"type": "subagent_discovered", "session_id": "zcode-fixture-wire-05", "agent_id": "zcode-fixture-sub-session", "is_subagent": true, "parent_session_id": "zcode-fixture-wire-05", "root_session_id": "zcode-fixture-wire-05", "actor_scope": "subagent", "flow_scope": "auxiliary", "content_class": "lifecycle"},
+        {"type": "turn_status", "session_id": "zcode-fixture-wire-05", "turn_id": "turn:v1:zcode:Zml4dHVyZS16Yy0wNg", "turn_status": "running", "turn_origin": "source_message", "turn_confidence": "derived", "agent_id": "zcode-fixture-sub-session", "actor_scope": "subagent", "event_id": "turn:fixturehash-zc-sub-01:status:running"},
+        {"type": "agent_text", "session_id": "zcode-fixture-wire-05", "agent_id": "zcode-fixture-sub-session", "is_subagent": true, "part_id": "zcodep-fxt-sub-041", "text": "fixture-response: subagent child output", "turn_id": "turn:v1:zcode:Zml4dHVyZS16Yy0wNg", "turn_origin": "source_message", "turn_confidence": "derived", "actor_scope": "subagent", "flow_scope": "main", "content_class": "dialogue"},
+        {"type": "turn_status", "session_id": "zcode-fixture-wire-05", "turn_id": "turn:v1:zcode:Zml4dHVyZS16Yy0wNg", "turn_status": "completed", "turn_origin": "source_message", "turn_confidence": "derived", "agent_id": "zcode-fixture-sub-session", "actor_scope": "subagent", "event_id": "turn:fixturehash-zc-sub-01:status:completed"}
+      ]
+    },
+    {
+      "name": "incomplete-rows-unassigned",
+      "expectation": "legacy_unassigned",
+      "notes": "DB rows missing stable sequence/parent evidence stay unassigned and the watcher keeps going (fail-open).",
+      "events": [
+        {"type": "user_text", "session_id": "zcode-fixture-wire-06", "text": "fixture-prompt: incomplete row user text", "turn_origin": "legacy_unassigned", "actor_scope": "root", "flow_scope": "main", "content_class": "dialogue"},
+        {"type": "agent_text", "session_id": "zcode-fixture-wire-06", "text": "fixture-response: incomplete row assistant text", "turn_origin": "legacy_unassigned", "actor_scope": "root", "flow_scope": "main", "content_class": "dialogue"},
+        {"type": "session_status", "session_id": "zcode-fixture-wire-06", "status": "idle", "actor_scope": "root", "flow_scope": "auxiliary", "content_class": "lifecycle"}
+      ]
+    }
+  ]
+}

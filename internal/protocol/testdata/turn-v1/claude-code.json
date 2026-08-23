@@ -1,0 +1,87 @@
+{
+  "agent": "claude-code",
+  "scenarios": [
+    {
+      "name": "record-anchored-completed",
+      "expectation": "completed",
+      "notes": "JSONL user record anchors the turn by stable record identity (file + line index); result line closes it.",
+      "events": [
+        {"type": "user_text", "session_id": "claude-fixture-session-01", "event_id": "jsonl:fxt-claude-01:14:0", "request_id": "req-fixture-cl-001", "text": "fixture-prompt: explain the parser design", "turn_id": "turn:v1:claude-code:Zml4dHVyZS1jbC0wMQ", "turn_origin": "request", "turn_confidence": "derived", "actor_scope": "root", "flow_scope": "main", "content_class": "dialogue", "classifier_version": "v1"},
+        {"type": "turn_status", "session_id": "claude-fixture-session-01", "turn_id": "turn:v1:claude-code:Zml4dHVyZS1jbC0wMQ", "turn_status": "running", "turn_origin": "request", "turn_confidence": "derived", "actor_scope": "root", "agent_id": "", "event_id": "turn:fixturehash-cl-01:status:running"},
+        {"type": "agent_text", "session_id": "claude-fixture-session-01", "event_id": "jsonl:fxt-claude-01:15:0", "text": "fixture-response: the parser is two-pass", "turn_id": "turn:v1:claude-code:Zml4dHVyZS1jbC0wMQ", "turn_origin": "source_message", "turn_confidence": "derived", "actor_scope": "root", "flow_scope": "main", "content_class": "dialogue"},
+        {"type": "turn_status", "session_id": "claude-fixture-session-01", "turn_id": "turn:v1:claude-code:Zml4dHVyZS1jbC0wMQ", "turn_status": "completed", "turn_reason": "result_record", "turn_origin": "source_message", "turn_confidence": "derived", "actor_scope": "root", "agent_id": "", "event_id": "turn:fixturehash-cl-01:status:completed"},
+        {"type": "session_status", "session_id": "claude-fixture-session-01", "status": "idle", "actor_scope": "root", "flow_scope": "auxiliary", "content_class": "lifecycle"}
+      ]
+    },
+    {
+      "name": "pty-inferred-interrupted",
+      "expectation": "interrupted",
+      "notes": "daemon writes Ctrl+C, no terminal JSONL record appears; bounded inference marks interrupted with confidence=inferred, then idle.",
+      "events": [
+        {"type": "turn_status", "session_id": "claude-fixture-session-02", "turn_id": "turn:v1:claude-code:Zml4dHVyZS1jbC0wMg", "turn_status": "running", "turn_origin": "request", "turn_confidence": "derived", "actor_scope": "root", "agent_id": "", "event_id": "turn:fixturehash-cl-02:status:running"},
+        {"type": "user_text", "session_id": "claude-fixture-session-02", "event_id": "jsonl:fxt-claude-02:8:0", "request_id": "req-fixture-cl-002", "text": "fixture-prompt: run the broad search", "turn_id": "turn:v1:claude-code:Zml4dHVyZS1jbC0wMg", "turn_origin": "request", "turn_confidence": "derived", "actor_scope": "root", "flow_scope": "main", "content_class": "dialogue"},
+        {"type": "turn_status", "session_id": "claude-fixture-session-02", "turn_id": "turn:v1:claude-code:Zml4dHVyZS1jbC0wMg", "turn_status": "interrupt_requested", "turn_reason": "pty_ctrl_c_written", "turn_origin": "request", "turn_confidence": "derived", "actor_scope": "root", "agent_id": "", "event_id": "turn:fixturehash-cl-02:status:interrupt_requested"},
+        {"type": "turn_status", "session_id": "claude-fixture-session-02", "turn_id": "turn:v1:claude-code:Zml4dHVyZS1jbC0wMg", "turn_status": "interrupted", "turn_reason": "pty_prompt_idle_confirmed", "turn_origin": "request", "turn_confidence": "inferred", "actor_scope": "root", "agent_id": "", "event_id": "turn:fixturehash-cl-02:status:interrupted"},
+        {"type": "session_status", "session_id": "claude-fixture-session-02", "status": "idle", "actor_scope": "root", "flow_scope": "auxiliary", "content_class": "lifecycle"}
+      ]
+    },
+    {
+      "name": "pty-interrupted-then-exit-and-continue",
+      "expectation": "interrupted",
+      "notes": "interrupt confirmed, PTY session exits, a later resume input opens a new turn linked via previous_turn_id/after_interrupt.",
+      "events": [
+        {"type": "turn_status", "session_id": "claude-fixture-session-03", "turn_id": "turn:v1:claude-code:Zml4dHVyZS1jbC0wMw", "turn_status": "running", "turn_origin": "request", "turn_confidence": "derived", "actor_scope": "root", "agent_id": "", "event_id": "turn:fixturehash-cl-03:status:running"},
+        {"type": "user_text", "session_id": "claude-fixture-session-03", "event_id": "jsonl:fxt-claude-03:5:0", "request_id": "req-fixture-cl-003", "text": "fixture-prompt: start the refactor session", "turn_id": "turn:v1:claude-code:Zml4dHVyZS1jbC0wMw", "turn_origin": "request", "turn_confidence": "derived", "actor_scope": "root", "flow_scope": "main", "content_class": "dialogue"},
+        {"type": "turn_status", "session_id": "claude-fixture-session-03", "turn_id": "turn:v1:claude-code:Zml4dHVyZS1jbC0wMw", "turn_status": "interrupt_requested", "turn_reason": "pty_ctrl_c_written", "turn_origin": "request", "turn_confidence": "derived", "actor_scope": "root", "agent_id": "", "event_id": "turn:fixturehash-cl-03:status:interrupt_requested"},
+        {"type": "turn_status", "session_id": "claude-fixture-session-03", "turn_id": "turn:v1:claude-code:Zml4dHVyZS1jbC0wMw", "turn_status": "interrupted", "turn_reason": "turn_interrupt_confirmed", "turn_origin": "request", "turn_confidence": "inferred", "actor_scope": "root", "agent_id": "", "event_id": "turn:fixturehash-cl-03:status:interrupted"},
+        {"type": "session_status", "session_id": "claude-fixture-session-03", "status": "exited", "exit_reason": "user_interrupt", "actor_scope": "root", "flow_scope": "auxiliary", "content_class": "lifecycle"},
+        {"type": "turn_status", "session_id": "claude-fixture-session-03", "turn_id": "turn:v1:claude-code:Zml4dHVyZS1jbC0wNA", "turn_status": "running", "previous_turn_id": "turn:v1:claude-code:Zml4dHVyZS1jbC0wMw", "continuation_reason": "after_interrupt", "turn_origin": "request", "turn_confidence": "derived", "actor_scope": "root", "agent_id": "", "event_id": "turn:fixturehash-cl-04:status:running"},
+        {"type": "user_text", "session_id": "claude-fixture-session-03", "event_id": "jsonl:fxt-claude-03:19:0", "request_id": "req-fixture-cl-004", "text": "fixture-prompt: resume with a smaller scope", "turn_id": "turn:v1:claude-code:Zml4dHVyZS1jbC0wNA", "previous_turn_id": "turn:v1:claude-code:Zml4dHVyZS1jbC0wMw", "continuation_reason": "after_interrupt", "turn_origin": "request", "turn_confidence": "derived", "actor_scope": "root", "flow_scope": "main", "content_class": "dialogue"}
+      ]
+    },
+    {
+      "name": "crash-failed",
+      "expectation": "failed",
+      "notes": "process exits non-zero without a result record; turn terminalizes as failed(process_crash) before the session error status.",
+      "events": [
+        {"type": "turn_status", "session_id": "claude-fixture-session-04", "turn_id": "turn:v1:claude-code:Zml4dHVyZS1jbC0wNQ", "turn_status": "running", "turn_origin": "request", "turn_confidence": "derived", "actor_scope": "root", "agent_id": "", "event_id": "turn:fixturehash-cl-05:status:running"},
+        {"type": "user_text", "session_id": "claude-fixture-session-04", "event_id": "jsonl:fxt-claude-04:3:0", "request_id": "req-fixture-cl-005", "text": "fixture-prompt: trigger the crash path", "turn_id": "turn:v1:claude-code:Zml4dHVyZS1jbC0wNQ", "turn_origin": "request", "turn_confidence": "derived", "actor_scope": "root", "flow_scope": "main", "content_class": "dialogue"},
+        {"type": "turn_status", "session_id": "claude-fixture-session-04", "turn_id": "turn:v1:claude-code:Zml4dHVyZS1jbC0wNQ", "turn_status": "failed", "turn_reason": "process_crash", "turn_origin": "request", "turn_confidence": "inferred", "actor_scope": "root", "agent_id": "", "event_id": "turn:fixturehash-cl-05:status:failed"},
+        {"type": "session_status", "session_id": "claude-fixture-session-04", "status": "error", "actor_scope": "root", "flow_scope": "auxiliary", "content_class": "lifecycle"}
+      ]
+    },
+    {
+      "name": "steer-addendum",
+      "expectation": "addendum",
+      "notes": "remote addendum while running binds to the current turn; the turn is not cut.",
+      "events": [
+        {"type": "turn_status", "session_id": "claude-fixture-session-05", "turn_id": "turn:v1:claude-code:Zml4dHVyZS1jbC0wNg", "turn_status": "running", "turn_origin": "request", "turn_confidence": "derived", "actor_scope": "root", "agent_id": "", "event_id": "turn:fixturehash-cl-06:status:running"},
+        {"type": "user_text", "session_id": "claude-fixture-session-05", "event_id": "jsonl:fxt-claude-05:21:0", "request_id": "req-fixture-cl-006", "text": "fixture-prompt: begin the audit", "turn_id": "turn:v1:claude-code:Zml4dHVyZS1jbC0wNg", "turn_origin": "request", "turn_confidence": "derived", "actor_scope": "root", "flow_scope": "main", "content_class": "dialogue"},
+        {"type": "user_text", "session_id": "claude-fixture-session-05", "event_id": "jsonl:fxt-claude-05:22:0", "request_id": "req-fixture-cl-007", "text": "fixture-prompt: also check the fixtures", "turn_id": "turn:v1:claude-code:Zml4dHVyZS1jbC0wNg", "turn_origin": "request", "turn_confidence": "derived", "actor_scope": "root", "flow_scope": "main", "content_class": "dialogue"},
+        {"type": "agent_text", "session_id": "claude-fixture-session-05", "event_id": "jsonl:fxt-claude-05:23:0", "text": "fixture-response: audit including fixtures", "turn_id": "turn:v1:claude-code:Zml4dHVyZS1jbC0wNg", "turn_origin": "source_message", "turn_confidence": "derived", "actor_scope": "root", "flow_scope": "main", "content_class": "dialogue"},
+        {"type": "turn_status", "session_id": "claude-fixture-session-05", "turn_id": "turn:v1:claude-code:Zml4dHVyZS1jbC0wNg", "turn_status": "completed", "turn_reason": "result_record", "turn_origin": "source_message", "turn_confidence": "derived", "actor_scope": "root", "agent_id": "", "event_id": "turn:fixturehash-cl-06:status:completed"}
+      ]
+    },
+    {
+      "name": "subagent-response",
+      "expectation": "subagent",
+      "notes": "subagent reply keeps actor_scope=subagent; without a reliable parent-turn edge only the actor is classified, never a guessed parent turn.",
+      "events": [
+        {"type": "subagent_discovered", "session_id": "claude-fixture-session-06", "agent_id": "agent-fixture-cl-sub", "is_subagent": true, "parent_session_id": "claude-fixture-session-06", "root_session_id": "claude-fixture-session-06", "subagent_desc": "fixture-subagent: scan logs", "actor_scope": "subagent", "flow_scope": "auxiliary", "content_class": "lifecycle"},
+        {"type": "turn_status", "session_id": "claude-fixture-session-06", "turn_id": "turn:v1:claude-code:Zml4dHVyZS1jbC1wMQ", "turn_status": "running", "turn_origin": "source_message", "turn_confidence": "derived", "agent_id": "agent-fixture-cl-sub", "actor_scope": "subagent", "event_id": "turn:fixturehash-cl-sub-01:status:running"},
+        {"type": "agent_text", "session_id": "claude-fixture-session-06", "agent_id": "agent-fixture-cl-sub", "is_subagent": true, "event_id": "jsonl:fxt-claude-sub-01:4:0", "text": "fixture-response: subagent scan results", "turn_id": "turn:v1:claude-code:Zml4dHVyZS1jbC1wMQ", "turn_origin": "source_message", "turn_confidence": "derived", "actor_scope": "subagent", "flow_scope": "main", "content_class": "dialogue"},
+        {"type": "turn_status", "session_id": "claude-fixture-session-06", "turn_id": "turn:v1:claude-code:Zml4dHVyZS1jbC1wMQ", "turn_status": "completed", "turn_origin": "source_message", "turn_confidence": "derived", "agent_id": "agent-fixture-cl-sub", "actor_scope": "subagent", "event_id": "turn:fixturehash-cl-sub-01:status:completed"}
+      ]
+    },
+    {
+      "name": "legacy-jsonl-unassigned",
+      "expectation": "legacy_unassigned",
+      "notes": "records without stable identity (no request id, unrecoverable record anchor) stay unassigned; no nearest-user-message grouping.",
+      "events": [
+        {"type": "user_text", "session_id": "claude-fixture-session-07", "text": "fixture-prompt: legacy unanchored user message", "turn_origin": "legacy_unassigned", "actor_scope": "root", "flow_scope": "main", "content_class": "dialogue"},
+        {"type": "agent_text", "session_id": "claude-fixture-session-07", "text": "fixture-response: legacy unanchored assistant message", "turn_origin": "legacy_unassigned", "actor_scope": "root", "flow_scope": "main", "content_class": "dialogue"},
+        {"type": "session_status", "session_id": "claude-fixture-session-07", "status": "idle", "actor_scope": "root", "flow_scope": "auxiliary", "content_class": "lifecycle"}
+      ]
+    }
+  ]
+}

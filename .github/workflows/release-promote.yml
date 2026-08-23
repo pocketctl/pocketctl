@@ -1,0 +1,88 @@
+name: Promote Release Candidate
+run-name: Promote ${{ github.ref_name }}
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  actions: read
+  contents: write
+
+jobs:
+  promote:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Validate tag and bound release candidate
+        id: identity
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG_NAME: ${{ github.ref_name }}
+          EXPECTED_REPOSITORY: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          source scripts/lib/release-contract.sh
+          require_release_version "$TAG_NAME"
+          # actions/checkout resolves an annotated tag to its commit and can
+          # replace the local tag ref with a lightweight ref. Re-fetch the tag
+          # object so the annotation below remains part of the release proof.
+          git fetch --force origin "refs/tags/$TAG_NAME:refs/tags/$TAG_NAME"
+          PUBLIC_SHA=$(git rev-list -n 1 "$TAG_NAME")
+          CHECKOUT_SHA=$(git rev-parse HEAD)
+          require_full_git_sha "$PUBLIC_SHA"
+          [[ "$PUBLIC_SHA" == "$CHECKOUT_SHA" ]] || {
+            echo "tag commit $PUBLIC_SHA does not match checkout $CHECKOUT_SHA" >&2
+            exit 1
+          }
+          git tag -l --format='%(contents)' "$TAG_NAME" > /tmp/release-tag-annotation.txt
+          RUN_ID=$(require_release_candidate_tag_annotation \
+            /tmp/release-tag-annotation.txt "$TAG_NAME" "$PUBLIC_SHA")
+          require_github_release_candidate_run \
+            "$EXPECTED_REPOSITORY" "$RUN_ID" "$PUBLIC_SHA" "$TAG_NAME"
+          echo "run_id=$RUN_ID" >> "$GITHUB_OUTPUT"
+          echo "public_sha=$PUBLIC_SHA" >> "$GITHUB_OUTPUT"
+          echo "artifact_name=release-candidate-$TAG_NAME-$PUBLIC_SHA" >> "$GITHUB_OUTPUT"
+
+      - name: Download bound release candidate
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ steps.identity.outputs.artifact_name }}
+          path: candidate
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: ${{ steps.identity.outputs.run_id }}
+
+      - name: Verify release candidate bundle
+        env:
+          TAG_NAME: ${{ github.ref_name }}
+          EXPECTED_REPOSITORY: ${{ github.repository }}
+        run: |
+          bash scripts/verify-release-candidate.sh \
+            --input candidate \
+            --version "$TAG_NAME" \
+            --sha "${{ steps.identity.outputs.public_sha }}" \
+            --repository "$EXPECTED_REPOSITORY" \
+            --run-id "${{ steps.identity.outputs.run_id }}"
+
+      - name: Create GitHub Release from verified candidate
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG_NAME: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          args=(
+            "$TAG_NAME"
+            candidate/*
+            --repo "$GITHUB_REPOSITORY"
+            --verify-tag
+            --notes-file /tmp/release-tag-annotation.txt
+            --title "PocketCtl $TAG_NAME"
+          )
+          if [[ "$TAG_NAME" == *-rc* ]]; then
+            args+=(--prerelease --latest=false)
+          fi
+          gh release create "${args[@]}"
