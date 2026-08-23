@@ -32,6 +32,15 @@ describe('mergeRevisionedPart', () => {
     expect(messages[0].content).toBe('current')
   })
 
+  test('merges presentation metadata from stale and equal revisions without replacing canonical content', () => {
+    const target: any[] = []
+    mergeRevisionedPart(target, { type: 'agent_text', part_id: 'p-meta', revision: 2, text: 'canonical', turn_id: 'old' })
+
+    expect(mergeRevisionedPart(target, { type: 'agent_text', part_id: 'p-meta', revision: 2, text: 'equal rewrite', turn_id: 'equal', flow_scope: 'main' })).toBe('ignored')
+    expect(mergeRevisionedPart(target, { type: 'agent_text', part_id: 'p-meta', revision: 1, text: 'stale rewrite', content_class: 'dialogue' })).toBe('ignored')
+    expect(target[0]).toMatchObject({ content: 'canonical', revision: 2, turn_id: 'equal', flow_scope: 'main', content_class: 'dialogue' })
+  })
+
   test('finds the target Part when a tool card follows it', () => {
     const messages: any[] = [
       { id: 'part:prt_1', type: 'agent_reasoning', content: 'think', partId: 'prt_1', revision: 1, streaming: true },

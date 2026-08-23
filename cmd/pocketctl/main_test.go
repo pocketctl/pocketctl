@@ -34,6 +34,8 @@ type promptReceiptSessionStub struct {
 	agent       string
 	controlMode string
 	sendErr     error
+	onSend      func()
+	mode        func() string
 }
 
 func (s promptReceiptSessionStub) SendMessage(context.Context, string, string) error {
@@ -41,6 +43,9 @@ func (s promptReceiptSessionStub) SendMessage(context.Context, string, string) e
 }
 
 func (s promptReceiptSessionStub) SendMessageWithInput(_ context.Context, in session.UserMessageInput) error {
+	if s.onSend != nil {
+		s.onSend()
+	}
 	return s.sendErr
 }
 
@@ -49,7 +54,38 @@ func (s promptReceiptSessionStub) GetSessionAgent(string) (string, bool) {
 }
 
 func (s promptReceiptSessionStub) SessionControlMode(string) string {
+	if s.mode != nil {
+		return s.mode()
+	}
 	return s.controlMode
+}
+
+func TestDeliverUserMessageFreezesReceiptContractBeforeDispatch(t *testing.T) {
+	controlMode := protocol.ControlManaged
+	sm := promptReceiptSessionStub{
+		agent: adapter.AgentCodex,
+		mode:  func() string { return controlMode },
+		onSend: func() {
+			controlMode = protocol.ControlUnmanagedActive
+		},
+	}
+	var events []protocol.DaemonEvent
+	err := deliverUserMessage(
+		context.Background(),
+		sm,
+		protocol.ClientMessage{
+			Type: "user_message", SessionID: "thr_contract", Content: "continue",
+			MsgID: "message-contract", RequestID: "request-contract",
+		},
+		func(event protocol.DaemonEvent) { events = append(events, event) },
+	)
+	if err != nil {
+		t.Fatalf("deliverUserMessage() error=%v", err)
+	}
+	if len(events) != 1 || events[0].Type != "user_message_receipt" ||
+		events[0].MsgID != "message-contract" || events[0].Status != "accepted" {
+		t.Fatalf("events=%+v, want the dispatch-time managed Codex receipt contract", events)
+	}
 }
 
 func TestDeliverUserMessageScopesAcceptanceReceiptToManagedCodex(t *testing.T) {

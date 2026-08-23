@@ -83,7 +83,7 @@ test-e2e:
 test-relay-durable-ingress:
 	bash scripts/test-relay-durable-ingress.sh
 
-## OpenCode 受管终端 A-D 回归（Go/Windows 编译/Relay/Web/iOS 源码回归）
+## OpenCode 受管终端 A-D 回归（Go/Relay/Web/iOS 源码回归）
 test-opencode-managed:
 	bash scripts/test-opencode-managed.sh
 
@@ -91,7 +91,7 @@ test-opencode-managed:
 test-opencode-managed-release:
 	POCKETCTL_RELEASE_GATE=1 bash scripts/test-opencode-managed.sh
 
-## Codex 受管终端回归（Go race/Windows 编译/Web/iOS 源码回归）
+## Codex 受管终端回归（Go race/Web/iOS 源码回归）
 test-codex-managed:
 	bash scripts/test-codex-managed.sh
 
@@ -99,7 +99,7 @@ test-codex-managed:
 test-codex-managed-release:
 	POCKETCTL_RELEASE_GATE=1 bash scripts/test-codex-managed.sh
 
-## Claude Channel 多端审批回归（Go race/Windows 编译/Relay/Web/iOS 源码回归）
+## Claude Channel 多端审批回归（Go race/Relay/Web/iOS 源码回归）
 test-claude-channel-approval:
 	bash scripts/test-claude-channel-approval.sh
 

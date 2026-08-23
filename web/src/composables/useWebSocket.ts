@@ -40,6 +40,32 @@ export interface DaemonEvent {
   command?: string
   receipt_status?: 'success' | 'failed' | 'unavailable'
   message?: string
+  msg_id?: string
+  reason?: string
+  turn_id?: string
+  source_turn_id?: string
+  turn_status?: string
+  turn_reason?: string
+  turn_origin?: string
+  turn_confidence?: string
+  previous_turn_id?: string
+  continuation_reason?: string
+  actor_scope?: string
+  flow_scope?: string
+  content_class?: string
+  classifier_version?: string
+  retryable?: boolean
+}
+
+export type InputMode = 'new_turn' | 'steer' | 'auto'
+
+/** The only browser-originated command that carries user-provided turn input. */
+export interface UserMessageCommand {
+  type: 'user_message'
+  session_id: string
+  content: string
+  msg_id: string
+  input_mode?: InputMode
 }
 
 // CommandItem represents a slash command or skill available for autocompletion.
@@ -75,7 +101,7 @@ let reconnectTimer: ReturnType<typeof setTimeout> | null = null
 let reconnectAttempt = 0
 let currentUrl = ''
 let currentBaseUrl = ''
-let pendingMessages: any[] = []
+let pendingMessages: Record<string, unknown>[] = []
 let hasOpened = false
 // 连接流程进行中标志（含 connect 前的 token 刷新）。send 在此期间把消息 buffer 到
 // pendingMessages，等 onopen flush——否则 DashboardView 的 `connect(); send()` 在 async
@@ -248,7 +274,7 @@ async function handleAuthRejected(): Promise<void> {
   }
 }
 
-function send(data: any): boolean {
+function send(data: Record<string, unknown>): boolean {
   try {
     if (ws.value && ws.value.readyState === WebSocket.OPEN) {
       ws.value.send(JSON.stringify(data))
@@ -263,6 +289,14 @@ function send(data: any): boolean {
   } catch {
     return false
   }
+}
+
+/**
+ * Typed user-input path. Keep the generic command sender for existing control
+ * commands, but do not let the composer depend on an untyped `send(any)`.
+ */
+function sendUserMessage(data: Omit<UserMessageCommand, 'type'>): boolean {
+  return send({ type: 'user_message', ...data })
 }
 
 function reportLocale() {
@@ -293,5 +327,5 @@ function onEvent(typeOrHandler: string | EventHandler, maybeHandler?: EventHandl
 }
 
 export function useWebSocket() {
-  return { ws, connected, reconnecting, daemons, isDaemonOnline, effectiveStatus, connect, send, onEvent, reportLocale }
+  return { ws, connected, reconnecting, daemons, isDaemonOnline, effectiveStatus, connect, send, sendUserMessage, onEvent, reportLocale }
 }

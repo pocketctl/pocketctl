@@ -1,4 +1,20 @@
 import { describe, test, expect, beforeEach } from 'vitest'
+import type { DaemonEvent, UserMessageCommand } from '../useWebSocket'
+
+describe('websocket turn command contract', () => {
+  test('models receipt identifiers/reasons inbound and composer input outbound', () => {
+    const receipt: DaemonEvent = {
+      type: 'user_message_receipt', msg_id: 'message-1', reason: 'turn_interrupt_pending', status: 'rejected', retryable: true,
+    }
+    const command: UserMessageCommand = {
+      type: 'user_message', session_id: 'session-1', content: 'retry this', msg_id: 'message-1', input_mode: 'auto',
+    }
+
+    expect(receipt.msg_id).toBe('message-1')
+    expect(receipt.reason).toBe('turn_interrupt_pending')
+    expect(command.input_mode).toBe('auto')
+  })
+})
 
 // Test the logic from useWebSocket composable as pure functions
 // (the composable uses module-level singletons that are hard to reset between tests)

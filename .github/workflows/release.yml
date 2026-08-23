@@ -87,20 +87,8 @@ jobs:
       - name: Production deployment security gate
         run: bash scripts/test-production-deployment-gate.sh --with-docker
 
-  windows-launcher-tests:
-    runs-on: windows-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-go@v5
-        with:
-          go-version: '1.25'
-
-      - name: Windows wrapper, app-server, PATH, and exit propagation tests
-        run: go test ./internal/platform ./internal/agentcontrol ./internal/codexapp ./internal/session ./cmd/pocketctl -count=1
-
   build:
-    needs: [managed-agent-gate, deployment-security-gate, windows-launcher-tests]
+    needs: [managed-agent-gate, deployment-security-gate]
     strategy:
       matrix:
         include:

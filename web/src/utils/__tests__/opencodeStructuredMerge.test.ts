@@ -14,6 +14,14 @@ describe('mergeStructuredPart', () => {
     expect(messages[0]).toMatchObject({ partKey: 'agent_patch:prt_1', hash: 'h1' })
   })
 
+  test('merges only presentation metadata from a duplicate structured Part', () => {
+    const target: any[] = []
+    mergeStructuredPart(target, { type: 'agent_patch', part_id: 'patch-meta', event_id: 'patch-1', files: ['canonical.txt'], turn_id: 'old' })
+
+    expect(mergeStructuredPart(target, { type: 'agent_patch', part_id: 'patch-meta', event_id: 'patch-1', files: ['must-not-replace.txt'], turn_id: 'late', flow_scope: 'auxiliary' })).toBe('ignored')
+    expect(target[0]).toMatchObject({ files: ['canonical.txt'], eventId: 'patch-1', turn_id: 'late', flow_scope: 'auxiliary' })
+  })
+
   test('replaces a session Todo snapshot including an empty clear', () => {
     const messages: any[] = []
     expect(mergeStructuredPart(messages, {
