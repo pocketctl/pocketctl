@@ -66,6 +66,11 @@ assert.ok(
   'agent file change contract fixtures are absent from the public mirror',
 )
 
+assert.ok(
+  mirrored.has('testdata/turn_projection_golden.json'),
+  'turn lifecycle projection fixture is absent from the public mirror',
+)
+
 const mirrorCovers = (relativePath) =>
   [...mirrored].some(
     (entry) => relativePath === entry || relativePath.startsWith(`${entry}/`),
