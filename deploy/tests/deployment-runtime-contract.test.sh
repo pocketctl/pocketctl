@@ -3,9 +3,11 @@ set -euo pipefail
 
 repo_root=$(cd "$(dirname "$0")/../.." && pwd)
 helpers="$repo_root/deploy/lib/deployment-helpers.sh"
+deploy_script="$repo_root/deploy/deploy.sh"
 volume_gate="$repo_root/deploy/postgres/check-volume-migration.sh"
 compose="$repo_root/docker-compose.prod.yml"
 migration_runbook="$repo_root/deploy/postgres/migrate-existing-superuser.md"
+extension_env_validator="$repo_root/relay/dist/extensions/validate-production-env.js"
 
 fail() {
   echo "deployment runtime contract failed: $*" >&2
@@ -13,6 +15,20 @@ fail() {
 }
 
 [[ -f "$helpers" ]] || fail "missing deployment helper library"
+grep -q 'load_relay_env_value RELAY_EXTENSIONS RELAY_EXTENSIONS RELAY_EXTENSIONS' "$deploy_script" \
+  || fail "redeploy does not preserve the Extension mode"
+extension_validation_line=$(grep -n 'validate-production-env.js.*RELAY_ENV_STAGED' "$deploy_script" | cut -d: -f1)
+postgres_mutation_line=$(grep -n '^# ---------- 5\. 配置 PostgreSQL' "$deploy_script" | cut -d: -f1)
+[[ -n "$extension_validation_line" && -n "$postgres_mutation_line" \
+  && "$extension_validation_line" -lt "$postgres_mutation_line" ]] \
+  || fail "Relay runtime Extension validation must precede every PostgreSQL mutation"
+for persisted in EXTENSION_PROVIDER_JWT_SECRET EXTENSION_CURSOR_SECRET \
+  EXTENSION_GRANT_PRIVATE_KEY_B64 EXTENSION_GRANT_PUBLIC_KEY_B64 \
+  RELAY_EXTENSION_PROJECTOR_BATCH RELAY_EXTENSION_FEED_RETENTION_DAYS \
+  RELAY_EXTENSION_LEASE_TTL_SECONDS RELAY_EXTENSION_RATE_LIMIT_FEED; do
+  grep -q "load_relay_env_value .* ${persisted} ${persisted}" "$deploy_script" \
+    || fail "redeploy does not preserve ${persisted}"
+done
 # shellcheck source=/dev/null
 source "$helpers"
 fixture=$(mktemp -d)
@@ -73,6 +89,21 @@ RELAY_PORT=8080
 POSTGRES_APP_PASSWORD='safe-Database_Password.0123456789~'
 JWT_SECRET_VALUE='jwt-secret-0123456789abcdef0123456789abcdef'
 AUTH_CODE_PEPPER_VALUE='pepper-0123456789abcdef0123456789abcdef'
+RELAY_EXTENSIONS=enabled
+EXTENSION_PROVIDER_JWT_SECRET_VALUE='provider-jwt-secret-0123456789abcdef'
+EXTENSION_CURSOR_SECRET_VALUE='cursor-secret-0123456789abcdef0123'
+grant_private_key="$fixture/extension-grant-private.pem"
+grant_public_key="$fixture/extension-grant-public.pem"
+openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 \
+  -out "$grant_private_key" >/dev/null 2>&1
+openssl pkey -in "$grant_private_key" -pubout -out "$grant_public_key" >/dev/null 2>&1
+EXTENSION_GRANT_PRIVATE_KEY_B64_VALUE=$(openssl base64 -A -in "$grant_private_key")
+EXTENSION_GRANT_PUBLIC_KEY_B64_VALUE=$(openssl base64 -A -in "$grant_public_key")
+EXTENSION_GRANT_KEY_ID_VALUE='grant-key-2026-08'
+EXTENSION_PROVIDER_PUBLIC_ORIGINS_VALUE='{"pocketctl-memory":"https://memory.relay.contract.test"}'
+RELAY_EXTENSION_PROJECTOR_BATCH_VALUE=123
+RELAY_EXTENSION_FEED_RETENTION_DAYS_VALUE=14
+RELAY_EXTENSION_LEASE_TTL_SECONDS_VALUE=90
 QUOTA_ENFORCEMENT=enforce
 RELEASE_VERSION_VALUE=v9.8.7
 GIT_SHA_VALUE=0123456789abcdef0123456789abcdef01234567
@@ -97,6 +128,31 @@ for expected in \
   'BUILD_TIME=2026-08-18T00:00:00Z'; do
   grep -qxF "$expected" "$env_file" || fail "production env missing $expected"
 done
+for expected in \
+  'RELAY_EXTENSIONS=enabled' \
+  'EXTENSION_PROVIDER_JWT_SECRET=provider-jwt-secret-0123456789abcdef' \
+  'EXTENSION_CURSOR_SECRET=cursor-secret-0123456789abcdef0123' \
+  'EXTENSION_GRANT_KEY_ID=grant-key-2026-08' \
+  'RELAY_EXTENSION_PROJECTOR_BATCH=123' \
+  'RELAY_EXTENSION_FEED_RETENTION_DAYS=14' \
+  'RELAY_EXTENSION_LEASE_TTL_SECONDS=90'; do
+  grep -qxF "$expected" "$env_file" || fail "production env missing $expected"
+done
+grep -qxF "EXTENSION_GRANT_PRIVATE_KEY_B64=$EXTENSION_GRANT_PRIVATE_KEY_B64_VALUE" "$env_file" \
+  || fail "production env changed the RSA private key encoding"
+grep -qxF "EXTENSION_GRANT_PUBLIC_KEY_B64=$EXTENSION_GRANT_PUBLIC_KEY_B64_VALUE" "$env_file" \
+  || fail "production env changed the RSA public key encoding"
+[[ -f "$extension_env_validator" ]] || fail "Relay Extension runtime validator was not built"
+node "$extension_env_validator" "$env_file" >/dev/null \
+  || fail "valid production Extension EnvironmentFile failed runtime validation"
+invalid_env_file="$fixture/relay-invalid-key.env"
+invalid_private_key_b64=$(printf 'not-a-private-key%.0s' {1..3} | openssl base64 -A)
+awk -v replacement="EXTENSION_GRANT_PRIVATE_KEY_B64=$invalid_private_key_b64" \
+  '/^EXTENSION_GRANT_PRIVATE_KEY_B64=/{print replacement; next} {print}' \
+  "$env_file" > "$invalid_env_file"
+if node "$extension_env_validator" "$invalid_env_file" >/dev/null 2>&1; then
+  fail "canonical base64 containing a non-PEM private key passed runtime validation"
+fi
 database_url=$(grep '^DATABASE_URL=' "$env_file" | cut -d= -f2-)
 DATABASE_URL="$database_url" EXPECTED_PASSWORD="$POSTGRES_APP_PASSWORD" node <<'NODE'
 const parsed = new URL(process.env.DATABASE_URL)

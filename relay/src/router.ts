@@ -1,4 +1,5 @@
 import type { WebSocket } from 'ws';
+import { handleMemoryMcpGrantMessage, type MemoryMcpGrantBroker } from './extensions/grant-service.js';
 import type pg from 'pg';
 import type { RelayPools } from './db-pools.js';
 import { randomUUID } from 'crypto';
@@ -28,6 +29,7 @@ import type { AuthLeaseOptions } from './ingress/auth-lease.js';
 import { InboxRepository } from './ingress/inbox-repository.js';
 import { IngressController, type IngressTarget } from './ingress/controller.js';
 import { EventMaterializer } from './materialization/event-materializer.js';
+import { createExtensionJournalSinkFromEnv, type ExtensionJournalSink } from './extensions/journal.js';
 import type {
   MaterializationContext,
   MaterializationInput,
@@ -119,11 +121,15 @@ interface DaemonRevocationGateState {
 }
 
 export interface RouterOptions {
+  /** Agent MCP grant broker; absent disables the memory_mcp_grant leg. */
+  memoryMcpGrantBroker?: MemoryMcpGrantBroker;
   observeIngressClass?: (daemonId: string, priority: PriorityClass) => void;
   authLeaseOptions?: AuthLeaseOptions;
   tokenUsageFactsAuthoritative?: boolean;
   writeTokenUsageFacts?: boolean;
   recoveryObserver?: AttentionRecoveryTransitionObserver;
+  /** ADR-0003 Source Journal sink; undefined resolves from RELAY_EXTENSIONS. */
+  extensionJournalSink?: ExtensionJournalSink | null;
   transport?: {
     maxEventBytes?: number;
     maxChunkBytes?: number;
@@ -190,6 +196,7 @@ function isRelayPools(value: RelayPools | pg.Pool): value is RelayPools {
 export class Router {
   private daemons = new Map<string, DaemonConnection>();
   private daemonMetrics = new Map<string, DaemonMetrics>();
+  private memoryMcpGrantBroker?: MemoryMcpGrantBroker;
   private clients = new Map<WebSocket, ClientConnection>();
   private sessionToDaemon = new Map<string, string>();
   private pendingSessionCreate = new Map<string, WebSocket>();
@@ -291,6 +298,7 @@ export class Router {
   // naturally suppresses the first online push — desirable.
   private knownOffline = new Set<string>();
   private materializer: EventMaterializer;
+  private readonly extensionJournalSink: ExtensionJournalSink | null;
 
   constructor(pools: RelayPools | pg.Pool, options: RouterOptions = {}) {
     this.tokenUsageFactsAuthoritative = options.tokenUsageFactsAuthoritative === true;
@@ -300,6 +308,7 @@ export class Router {
       control: pools, ingest: pools, query: pools, worker: pools,
     };
     this.controlPool = normalized.control;
+    this.memoryMcpGrantBroker = options.memoryMcpGrantBroker;
     this.ingestPool = normalized.ingest;
     this.queryPool = normalized.query;
     this.workerPool = normalized.worker;
@@ -316,10 +325,14 @@ export class Router {
     this.replayBatchMaxBytes = this.positiveTransportOption(
       options.transport?.replayBatchMaxBytes, 524_288,
     );
+    this.extensionJournalSink = options.extensionJournalSink !== undefined
+      ? options.extensionJournalSink
+      : createExtensionJournalSinkFromEnv();
     this.materializer = new EventMaterializer({
       pool: this.ingestPool,
       effectPool: this.pool,
       writeTokenUsageFacts: this.writeTokenUsageFacts,
+      extensionJournalSink: this.extensionJournalSink,
       hooks: {
         bindSession: (sessionId, daemonId) => this.sessionToDaemon.set(sessionId, daemonId),
         renameSession: (oldSessionId, sessionId, daemonId) => {
@@ -1901,6 +1914,18 @@ export class Router {
       return;
     }
 
+    // Agent MCP grant brokerage: control-plane only, derived entirely from
+    // the authenticated daemon connection; never persisted to events.
+    if (msg.type === 'memory_mcp_grant') {
+      const daemon = originDaemon ?? this.daemons.get(daemonId);
+      const broker = this.memoryMcpGrantBroker;
+      if (!daemon || !broker || !originWs) return;
+      void handleMemoryMcpGrantMessage(
+        broker, daemon, msg, (payload) => { if (originWs.readyState === originWs.OPEN) originWs.send(payload) },
+      ).catch((error) => this.logBestEffortFailure?.('memory_mcp_grant', error));
+      return;
+    }
+
     // Handle cancel_takeover: old daemon confirms it has stopped
     if (msg.type === 'cancel_takeover') {
       const takeover = this.takeoverTimers.get(daemonId);
@@ -2026,15 +2051,26 @@ export class Router {
 
     if (msg.type === 'local_command_log') {
       // Locally-handled slash command (/model, /cost, /status): the user msg + receipt
-      // are built client-side (no daemon round-trip). Persist both as events so they
-      // survive refresh, and broadcast to OTHER same-user clients for multi-device sync.
-      // Origin already rendered both locally, so skip echoing back to avoid duplicates.
+      // are built client-side (no daemon round-trip). Persist both as owned events so
+      // they survive refresh, then broadcast to OTHER same-user clients for
+      // multi-device sync. Origin already rendered both locally, so skip echoing
+      // back to avoid duplicates. Broadcast happens only after BOTH rows (and
+      // their extension journal appends) have committed durably.
       const sessionId = msg.session_id;
-      if (!sessionId) return;
+      if (!sessionId || client.userId == null) return;
       const userEvt = { type: 'user_text', session_id: sessionId, text: msg.user_text };
       const receiptEvt = { type: 'command_receipt', session_id: sessionId, command: msg.command, receipt_status: msg.receipt_status, message: msg.message };
-      db.persistEvent(this.ingestPool, sessionId, 'user_text', userEvt).catch(console.error);
-      db.persistEvent(this.ingestPool, sessionId, 'command_receipt', receiptEvt).catch(console.error);
+      try {
+        await Promise.all([
+          db.persistOwnedClientEvent(this.ingestPool, client.userId, sessionId, 'user_text', userEvt, this.extensionJournalSink),
+          db.persistOwnedClientEvent(this.ingestPool, client.userId, sessionId, 'command_receipt', receiptEvt, this.extensionJournalSink),
+        ]);
+      } catch (error) {
+        console.error('[router] local_command_log persistence failed', {
+          errorName: error instanceof Error ? error.name : typeof error,
+        });
+        return;
+      }
       for (const [ws, c] of this.clients) {
         if (ws === clientWs || ws.readyState !== 1) continue;
         if (this.sameUser(c.userId, client.userId)) {
@@ -2048,13 +2084,23 @@ export class Router {
     if (msg.type === 'session_delete') {
       const sessionId = msg.session_id;
       if (!sessionId) { this.send(clientWs, { type: 'error', error: 'session_id required' }); return; }
-      // Ownership check
-      db.isSessionOwnedByUser(this.pool, client.userId!, sessionId).then((owned) => {
+      // Ownership check, then delete under the session fence. The deletion
+      // transaction also clears extension feed/journal content and journals a
+      // tombstone (ADR-0003), so the broadcast only happens after commit.
+      db.isSessionOwnedByUser(this.pool, client.userId!, sessionId).then(async (owned) => {
         if (!owned) { this.send(clientWs, { type: 'error', error: 'session not found or not owned' }); return; }
-        db.deleteSession(this.pool, sessionId, {
-          usageFactsAuthoritative: this.tokenUsageFactsAuthoritative,
-          writeUsageFacts: this.writeTokenUsageFacts,
-        }).catch(console.error);
+        try {
+          await db.deleteSession(this.pool, sessionId, {
+            usageFactsAuthoritative: this.tokenUsageFactsAuthoritative,
+            writeUsageFacts: this.writeTokenUsageFacts,
+            extensionMode: this.extensionJournalSink === null ? 'off' : 'enabled',
+          });
+        } catch (error) {
+          console.error('[router] session delete failed', {
+            errorName: error instanceof Error ? error.name : typeof error,
+          });
+          return;
+        }
         this.sessionToDaemon.delete(sessionId);
         for (const [ws, c] of this.clients) {
           if (ws.readyState === 1 && this.sameUser(c.userId, client.userId)) {

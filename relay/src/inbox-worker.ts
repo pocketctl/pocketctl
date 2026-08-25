@@ -44,6 +44,10 @@ export function safeMaterializationError(error: unknown): string {
   if (name === 'OwnershipError') return 'ownership_mismatch'
   if (name === 'MaterializationContextError') return 'materialization_context_missing'
   if (name === 'EphemeralMaterializationError') return 'ephemeral_event_rejected'
+  // ADR-0003: journaling an unownable canonical event is an authorization
+  // defect, not a transient failure.
+  if (name === 'ExtensionJournalOwnerMissingError') return 'extension_journal_owner_missing'
+  if (name === 'ClientEventOwnershipError') return 'client_event_ownership_mismatch'
   const code = error && typeof error === 'object' && 'code' in error ? String(error.code) : ''
   if (code === 'session_ownership_violation' || code === 'unknown_daemon_session'
     || code === 'quota_reservation_binding_mismatch') return code
@@ -57,8 +61,14 @@ export function safeMaterializationError(error: unknown): string {
  */
 export function isPermanentMaterializationError(error: unknown): boolean {
   const code = error && typeof error === 'object' && 'code' in error ? String(error.code) : ''
-  return code === 'session_ownership_violation' || code === 'unknown_daemon_session'
-    || code === 'quota_reservation_binding_mismatch'
+  if (code === 'session_ownership_violation' || code === 'unknown_daemon_session'
+    || code === 'quota_reservation_binding_mismatch') return true
+  const name = errorName(error)
+  // Authorization defects identified by class: an unownable event can never
+  // succeed on retry, so it dead-letters immediately. ClientEventOwnership
+  // currently rejects synchronously on the WebSocket path; the entry stays
+  // so future inbox ingestion of client events keeps the same semantics.
+  return name === 'ExtensionJournalOwnerMissingError' || name === 'ClientEventOwnershipError'
 }
 
 export function retryDelayMs(attempts: number, random: () => number): number {

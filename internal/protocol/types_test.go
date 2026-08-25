@@ -604,3 +604,67 @@ func indexOf(s, sub string) int {
 	}
 	return -1
 }
+
+func TestMemoryMcpGrantWireRoundTrip(t *testing.T) {
+	request := MemoryMcpGrantRequest{Type: "memory_mcp_grant", RequestID: "corr-1"}
+	encoded, err := json.Marshal(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(encoded), `"type":"memory_mcp_grant"`) ||
+		!strings.Contains(string(encoded), `"request_id":"corr-1"`) {
+		t.Fatalf("request wire shape changed: %s", encoded)
+	}
+
+	result := MemoryMcpGrantResult{
+		Type: "memory_mcp_grant_result", RequestID: "corr-1",
+		Grant: "token", ExpiresIn: 300, TokenType: "extension_capability",
+		InstallationID: "i-1", ProviderPublicOrigin: "https://memory.example",
+		Services: []string{"memory.mcp"},
+	}
+	encodedResult, err := json.Marshal(result)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		`"type":"memory_mcp_grant_result"`, `"expires_in":300`,
+		`"installation_id":"i-1"`, `"provider_public_origin":"https://memory.example"`,
+	} {
+		if !strings.Contains(string(encodedResult), want) {
+			t.Fatalf("result wire missing %s: %s", want, encodedResult)
+		}
+	}
+
+	failure := MemoryMcpGrantError{Type: "memory_mcp_grant_error", RequestID: "corr-2", Code: "no_installation"}
+	encodedFailure, err := json.Marshal(failure)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(encodedFailure), `"code":"no_installation"`) {
+		t.Fatalf("error wire shape changed: %s", encodedFailure)
+	}
+}
+
+func TestClientMessageDecodesMemoryMcpReplies(t *testing.T) {
+	inbound := `{"type":"memory_mcp_grant_result","request_id":"r1","grant":"g","expires_in":240,` +
+		`"token_type":"extension_capability","installation_id":"i1",` +
+		`"provider_public_origin":"https://memory.example","services":["memory.mcp"]}`
+	var message ClientMessage
+	if err := json.Unmarshal([]byte(inbound), &message); err != nil {
+		t.Fatal(err)
+	}
+	if message.Type != "memory_mcp_grant_result" || message.Grant != "g" ||
+		message.ExpiresIn != 240 || message.InstallationID != "i1" ||
+		message.ProviderPublicOrigin != "https://memory.example" {
+		t.Fatalf("decode mismatch: %+v", message)
+	}
+
+	errorInbound := `{"type":"memory_mcp_grant_error","request_id":"r2","code":"service_disabled"}`
+	var errorMessage ClientMessage
+	if err := json.Unmarshal([]byte(errorInbound), &errorMessage); err != nil {
+		t.Fatal(err)
+	}
+	if errorMessage.GrantErrorCode != "service_disabled" {
+		t.Fatalf("error code decode mismatch: %+v", errorMessage)
+	}
+}

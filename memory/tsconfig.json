@@ -1,0 +1,15 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "outDir": "dist",
+    "rootDir": "src",
+    "strict": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "declaration": true
+  },
+  "include": ["src"],
+  "exclude": ["node_modules", "dist", "src/__tests__/phase0-e2e-postgres.integration.test.ts", "src/__tests__/memory-api-postgres.integration.test.ts", "src/__tests__/memory-mcp.test.ts"]
+}

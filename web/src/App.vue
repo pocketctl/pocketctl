@@ -35,6 +35,11 @@
           <span class="badge" v-if="attentionInbox.actionableCount({ type: 'global' }) > 0">{{ attentionInbox.actionableCount({ type: 'global' }) > 99 ? '99+' : attentionInbox.actionableCount({ type: 'global' }) }}</span>
         </router-link>
 
+        <router-link to="/memory" class="sidebar-link" active-class="active">
+          <span class="link-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 3v18M5 8l7-5 7 5M5 16l7 5 7-5"/></svg></span>
+          <span class="link-text">{{ t('memory.title') }}</span>
+        </router-link>
+
         <router-link to="/tokens" class="sidebar-link" active-class="active">
           <span class="link-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 20V10M12 20V4M6 20v-6"/></svg></span>
           <span class="link-text">{{ t('nav.tokens') }}</span>
@@ -181,6 +186,7 @@ const pageTitle = computed(() => {
     '/hosts': t('nav.hosts'),
     '/tokens': t('nav.tokens'),
     '/inbox': t('attention.title'),
+    '/memory': t('memory.title'),
   }
   if (route.path.startsWith('/session/')) return t('nav.session_detail')
   return titles[route.path] || t('nav.overview')

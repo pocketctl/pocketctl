@@ -222,6 +222,48 @@ export function resolveAuthRateLimitConfig(
   }
 }
 
+/**
+ * ADR-0003 grant key material resolution lives in extensions/capability-grant.ts
+ * (resolveGrantKeyMaterial); re-exported here so the startup validation chain
+ * has a single runtime-config surface.
+ */
+export { resolveGrantKeyMaterial } from './extensions/capability-grant.js'
+import {
+  DEFAULT_EXTENSION_RATE_LIMITS,
+  type ExtensionRateLimitPolicies,
+} from './extensions/rate-limit.js'
+
+/**
+ * ADR-0003 extension control-plane rate budgets. Every value is strictly
+ * parsed as a positive decimal integer; malformed values fail startup in
+ * every environment rather than silently disabling a limit.
+ */
+export function resolveExtensionRateLimitConfig(
+  env: Record<string, string | undefined> = process.env,
+): ExtensionRateLimitPolicies {
+  const entries: Array<[keyof ExtensionRateLimitPolicies, string]> = [
+    ['token', 'RELAY_EXTENSION_RATE_LIMIT_TOKEN'],
+    ['feed', 'RELAY_EXTENSION_RATE_LIMIT_FEED'],
+    ['ack', 'RELAY_EXTENSION_RATE_LIMIT_ACK'],
+    ['snapshot', 'RELAY_EXTENSION_RATE_LIMIT_SNAPSHOT'],
+    ['status', 'RELAY_EXTENSION_RATE_LIMIT_STATUS'],
+    ['usage', 'RELAY_EXTENSION_RATE_LIMIT_USAGE'],
+    ['purge', 'RELAY_EXTENSION_RATE_LIMIT_PURGE'],
+    ['grant', 'RELAY_EXTENSION_RATE_LIMIT_GRANT'],
+    ['installations', 'RELAY_EXTENSION_RATE_LIMIT_INSTALLATIONS'],
+  ]
+  const resolved: ExtensionRateLimitPolicies = { ...DEFAULT_EXTENSION_RATE_LIMITS }
+  for (const [key, name] of entries) {
+    const raw = env[name]
+    if (raw === undefined) continue
+    if (!/^[1-9]\d*$/.test(raw) || !Number.isSafeInteger(Number(raw))) {
+      throw new Error(`${name} must be a positive decimal integer`)
+    }
+    resolved[key] = Number(raw)
+  }
+  return resolved
+}
+
 const DEV_ONLY_PEPPER = 'dev-only-insecure-email-pepper-do-not-use-in-prod'
 
 export interface EmailVerificationConfig {

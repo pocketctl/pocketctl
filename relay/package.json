@@ -8,6 +8,8 @@
     "build": "tsc",
     "start": "node dist/server.js",
     "start:worker": "node dist/event-worker-main.js",
+    "extension:provision-provider": "node dist/extensions/provision-provider-main.js",
+    "extension:validate-production-env": "node dist/extensions/validate-production-env.js",
     "preflight:token-usage": "node dist/token-usage-preflight-main.js",
     "test": "vitest run --maxWorkers=4",
     "test:watch": "vitest"

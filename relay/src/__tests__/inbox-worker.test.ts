@@ -1,4 +1,6 @@
 import { describe, expect, test, vi } from 'vitest'
+import { ExtensionJournalOwnerMissingError } from '../extensions/journal.js'
+import { ClientEventOwnershipError } from '../db.js'
 import { createInboxWorker, safeMaterializationError } from '../inbox-worker.js'
 import { LostClaimError, type InboxRow } from '../ingress/inbox-repository.js'
 import { EventMaterializer } from '../materialization/event-materializer.js'
@@ -813,5 +815,16 @@ describe('inbox worker permanent security rejections', () => {
 
     expect(repository.reschedule).toHaveBeenCalledOnce()
     expect(repository.deadLetter).not.toHaveBeenCalled()
+  })
+})
+
+
+describe('extension authorization defects dead-letter immediately', () => {
+  test('journal owner missing and client ownership errors are permanent', async () => {
+    const { isPermanentMaterializationError, safeMaterializationError } = await import('../inbox-worker.js')
+    expect(isPermanentMaterializationError(new ExtensionJournalOwnerMissingError())).toBe(true)
+    expect(isPermanentMaterializationError(new ClientEventOwnershipError())).toBe(true)
+    expect(safeMaterializationError(new ExtensionJournalOwnerMissingError())).toBe('extension_journal_owner_missing')
+    expect(safeMaterializationError(new ClientEventOwnershipError())).toBe('client_event_ownership_mismatch')
   })
 })

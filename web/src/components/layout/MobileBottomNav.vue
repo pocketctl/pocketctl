@@ -15,6 +15,12 @@
       </svg>
       <span>{{ t('nav.hosts') }}</span>
     </router-link>
+    <router-link to="/memory" class="mobile-nav-link" :aria-label="t('memory.title')" data-testid="mobile-nav-memory">
+      <svg viewBox="0 0 24 24" aria-hidden="true">
+        <path d="M12 3v18M5 8l7-5 7 5M5 16l7 5 7-5" />
+      </svg>
+      <span>{{ t('memory.title') }}</span>
+    </router-link>
     <router-link to="/settings" class="mobile-nav-link" :aria-label="t('nav.settings')">
       <svg viewBox="0 0 24 24" aria-hidden="true">
         <circle cx="12" cy="12" r="3" />

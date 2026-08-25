@@ -51,6 +51,15 @@ describe('mobile application shell', () => {
     expect(wrapper.get('[role="status"]').text()).not.toBe('')
   })
 
+  test('mobile navigation carries the Memory entry alongside sessions and hosts', async () => {
+    const router = testRouter('/settings')
+    await router.isReady()
+    const App = (await import('../../../App.vue')).default
+    const wrapper = mount(App, { global: { plugins: [router] } })
+    expect(wrapper.find('[data-testid="mobile-nav-memory"]').exists()).toBe(true)
+    expect(wrapper.get('a[href="/memory"]').attributes('aria-label')).toBeTruthy()
+  })
+
   test('lets the session list render its iOS-style navigation chrome', async () => {
     const router = testRouter()
     await router.isReady()

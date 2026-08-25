@@ -4,6 +4,14 @@ import type { SupportedLanguage } from './config/language.js';
 import { sanitizeJSONBPayload } from './jsonb-payload.js';
 import { initDurableIngressSchema } from './schema/durable-ingress.js';
 import { initAttentionInboxSchema } from './attention-inbox/schema.js';
+import { initExtensionSchema } from './extensions/schema.js';
+import { extensionModeFromEnv } from './extensions/config.js';
+import type { ExtensionMode } from './extensions/types.js';
+import {
+  extensionJournalEligibility,
+  ExtensionJournalOwnerMissingError,
+  type ExtensionJournalSink,
+} from './extensions/journal.js';
 import type { DaemonSessionAccess, DaemonSessionPolicy } from './materialization/types.js';
 import {
   CODE_HMAC_LENGTH,
@@ -742,6 +750,9 @@ async function initDBUnlocked(pool: pg.Pool): Promise<void> {
 
   await initDurableIngressSchema(pool);
   await initAttentionInboxSchema(pool);
+  // ADR-0003: extension tables exist in every flag mode so flipping
+  // RELAY_EXTENSIONS never needs a schema deployment window.
+  await initExtensionSchema(pool);
 }
 
 export interface EmailChallengeSendDecision {
@@ -1469,6 +1480,90 @@ export async function persistEvent(pool: pg.Pool, sessionId: string, eventType: 
     }
   }
   /* unreachable */ return 0;
+}
+
+/** Raised when a client event names a session the caller does not own. */
+export class ClientEventOwnershipError extends Error {
+  constructor() {
+    super('session not found or not owned')
+    this.name = 'ClientEventOwnershipError'
+  }
+}
+
+export interface OwnedClientEventResult {
+  eventId: number;
+  inserted: boolean;
+}
+
+/**
+ * ADR-0003 client-event persistence: ownership check, dedup insert and the
+ * extension Source Journal append all run inside one session fence
+ * transaction, so a local_command_log pair either lands durably with its
+ * journal rows or not at all. The DO UPDATE conflict path returns the
+ * existing row id, letting a replay repair a journal row lost to an older
+ * crash without duplicating feed identity.
+ */
+export async function persistOwnedClientEvent(
+  pool: pg.Pool,
+  userId: number,
+  sessionId: string,
+  eventType: string,
+  payload: any,
+  journalSink: ExtensionJournalSink | null,
+): Promise<OwnedClientEventResult> {
+  return withSessionMaterializationFence(pool, sessionId, async (client) => {
+    const session = await client.query<{ user_id: number | null; source: string | null }>(
+      `SELECT user_id, source FROM sessions WHERE session_id = $1`,
+      [sessionId],
+    );
+    const row = session.rows[0];
+    if (!row || row.user_id !== userId || sessionId.startsWith('pending-')) {
+      throw new ClientEventOwnershipError();
+    }
+    const persistedPayload = sanitizeJSONBPayload(payload);
+    const payloadStr = JSON.stringify(persistedPayload);
+    const hash = createHash('md5')
+      .update(eventHashInput(sessionId, eventType, persistedPayload))
+      .digest('hex').slice(0, 16);
+    const result = await client.query(
+      `INSERT INTO events (session_id, event_type, payload, event_hash, user_id)
+       VALUES ($1, $2, $3, $4, $5)
+       ON CONFLICT (session_id, event_hash) DO UPDATE
+         SET user_id = COALESCE(events.user_id, EXCLUDED.user_id)
+       RETURNING id, (xmax = 0) AS inserted`,
+      [sessionId, eventType, payloadStr, hash, userId],
+    );
+    const eventRow = result.rows[0];
+    if (!eventRow) throw new Error('owned client event row unavailable');
+    const inserted = eventRow.inserted === undefined || eventRow.inserted === true || eventRow.inserted === 't';
+    if (inserted) {
+      await client.query(
+        `UPDATE sessions SET last_activity_at = NOW(), updated_at = NOW() WHERE session_id = $1`,
+        [sessionId],
+      );
+    }
+    if (journalSink) {
+      const eligibility = extensionJournalEligibility({
+        ownerUserId: row.user_id,
+        ledgerSessionId: sessionId,
+        sessionId,
+        sessionSource: row.source,
+      });
+      if (!eligibility.journal) {
+        if (eligibility.reason === 'skipped_no_owner') throw new ExtensionJournalOwnerMissingError()
+      } else {
+        await journalSink.appendCanonicalEvent(client, {
+          sourceEventId: Number(eventRow.id),
+          ownerUserId: userId,
+          sessionId,
+          eventType,
+          occurredAt: null,
+          payload,
+        })
+      }
+    }
+    return { eventId: Number(eventRow.id), inserted }
+  })
 }
 
 export interface PersistedEventEffect {
@@ -2808,6 +2903,10 @@ export async function deleteUserAccount(pool: pg.Pool, userId: number): Promise<
       return false;
     }
 
+    // ADR-0003: provider purge evidence must be created before the user rows
+    // disappear; it carries no user FK and survives until the provider acks.
+    await revokeExtensionDataForUser(client, userId);
+
     const sessions = await client.query(
       `SELECT session_id FROM sessions WHERE user_id = $1`,
       [userId],
@@ -2912,10 +3011,81 @@ export async function listSessionsByUser(pool: pg.Pool, userId: number): Promise
 
 // --- Session deletion ---
 
+/**
+ * ADR-0003 narrow helper: clear a session's extension content and journal a
+ * generic tombstone, when Extension delivery is active, inside the caller's
+ * fenced transaction. Runs before the
+ * canonical session deletes so the Relay never keeps exposing deleted
+ * content through Feed or Snapshot. The tombstone source row survives to be
+ * projected into the shared feed so providers can reconcile.
+ */
+export async function purgeExtensionContentForSession(
+  client: Pick<pg.PoolClient, 'query'>,
+  sessionId: string,
+  options: { emitTombstone?: boolean } = {},
+): Promise<void> {
+  const owner = await client.query<{ user_id: number | null }>(
+    `SELECT user_id FROM sessions WHERE session_id = $1`,
+    [sessionId],
+  );
+  const ownerId = owner.rows[0]?.user_id ?? null;
+  // Unprojected journal content for this session must not outlive it.
+  await client.query(
+    `DELETE FROM extension_source_outbox WHERE session_id = $1 AND source_kind = 'canonical_event'`,
+    [sessionId],
+  );
+  // Feed content rows (tombstone rows keep a different source_kind).
+  await client.query(
+    `DELETE FROM extension_feed WHERE session_id = $1 AND source_kind = 'canonical_event'`,
+    [sessionId],
+  );
+  if (options.emitTombstone !== false && ownerId !== null && ownerId !== undefined) {
+    await client.query(
+      `INSERT INTO extension_source_outbox
+         (source_kind, source_id, owner_user_id, session_id, event_type, occurred_at, payload)
+       VALUES ('session_deleted', 'session_deleted:' || $2, $1, $2::varchar(64), 'session_deleted', NOW(), $3::jsonb)
+       ON CONFLICT (source_kind, source_id) DO NOTHING`,
+      [ownerId, sessionId, JSON.stringify({ session_id: sessionId })],
+    );
+  }
+}
+
+/**
+ * ADR-0003 account deletion: create provider purge requests (no content,
+ * no user FK — they must survive the account), revoke installations, then
+ * clear the user's extension journal and feed rows explicitly.
+ */
+export async function revokeExtensionDataForUser(
+  client: Pick<pg.PoolClient, 'query'>,
+  userId: number,
+): Promise<void> {
+  await client.query(`
+    INSERT INTO extension_purge_requests
+      (request_id, provider_id, installation_id, reason, expires_at)
+    SELECT gen_random_uuid(), provider_id, installation_id, 'account_deleted',
+           NOW() + INTERVAL '30 days'
+    FROM extension_installations
+    WHERE owner_user_id = $1 AND status <> 'revoked'
+    ON CONFLICT (provider_id, installation_id, reason) DO NOTHING
+  `, [userId]);
+  await client.query(
+    `UPDATE extension_installations
+     SET status = 'revoking', config_version = config_version + 1, updated_at = NOW()
+     WHERE owner_user_id = $1 AND status NOT IN ('revoking', 'revoked')`,
+    [userId],
+  );
+  await client.query(`DELETE FROM extension_source_outbox WHERE owner_user_id = $1`, [userId]);
+  await client.query(`DELETE FROM extension_feed WHERE owner_user_id = $1`, [userId]);
+}
+
 export async function deleteSession(
   pool: pg.Pool,
   sessionId: string,
-  options: { usageFactsAuthoritative?: boolean; writeUsageFacts?: boolean } = {},
+  options: {
+    usageFactsAuthoritative?: boolean;
+    writeUsageFacts?: boolean;
+    extensionMode?: ExtensionMode;
+  } = {},
 ): Promise<void> {
   const client = await pool.connect();
   try {
@@ -2991,6 +3161,12 @@ export async function deleteSession(
     );
     await client.query(`DELETE FROM event_inbox WHERE session_id = $1 AND status <> 3`, [sessionId]);
     await client.query(`DELETE FROM events WHERE session_id = $1`, [sessionId]);
+    // ADR-0003: extension content is purged in the same fenced transaction;
+    // shadow/enabled additionally journal a generic provider tombstone.
+    const extensionMode = options.extensionMode ?? extensionModeFromEnv();
+    await purgeExtensionContentForSession(client, sessionId, {
+      emitTombstone: extensionMode !== 'off',
+    });
     await client.query(`DELETE FROM token_session_daily_stats WHERE session_id = $1`, [sessionId]);
     await client.query(`DELETE FROM sessions WHERE session_id = $1`, [sessionId]);
     await client.query(

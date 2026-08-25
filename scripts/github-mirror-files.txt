@@ -2,6 +2,7 @@
 # Keep this list minimal, but every workflow dependency must be present.
 cmd
 internal
+memory
 relay
 web
 testdata/contracts

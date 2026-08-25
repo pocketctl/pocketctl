@@ -21,6 +21,12 @@ import {
   type QuotaReservationBinding,
 } from '../quota.js'
 import { tokenUsageFeatures } from '../config/token-usage.js'
+import {
+  createExtensionJournalSinkFromEnv,
+  extensionJournalEligibility,
+  ExtensionJournalOwnerMissingError,
+  type ExtensionJournalSink,
+} from '../extensions/journal.js'
 import type {
   DurableMaterializationHooks,
   DurableEffectContext,
@@ -51,6 +57,13 @@ export interface EventMaterializerOptions {
   deferredPool?: pg.Pool
   /** Post-fence pool for deferred business-effect statements. */
   deferredEffectPool?: pg.Pool
+  /**
+   * ADR-0003 Source Journal sink. When present, every ownable canonical
+   * event appends exactly one journal row on the same transaction client as
+   * the events insert — a journal failure rolls the canonical write back.
+   * Undefined resolves from RELAY_EXTENSIONS (off → no sink).
+   */
+  extensionJournalSink?: ExtensionJournalSink | null
 }
 
 export interface MaterializationRunOptions {
@@ -97,12 +110,18 @@ export function createDatabaseMaterializationHooks(pool: pg.Pool): DurableMateri
  * share exactly the same crash-resume and deduplication contract.
  */
 export class EventMaterializer {
+  private readonly options: EventMaterializerOptions
   private readonly durableHooks: DurableMaterializationHooks
   private readonly writeTokenUsageFacts: boolean
+  private readonly extensionJournalSink: ExtensionJournalSink | null
 
-  constructor(private readonly options: EventMaterializerOptions) {
+  constructor(options: EventMaterializerOptions) {
+    this.options = options
     this.durableHooks = options.durableHooks ?? createDatabaseMaterializationHooks(options.effectPool ?? options.pool)
     this.writeTokenUsageFacts = options.writeTokenUsageFacts ?? tokenUsageFeatures().writeFacts
+    this.extensionJournalSink = options.extensionJournalSink !== undefined
+      ? options.extensionJournalSink
+      : createExtensionJournalSinkFromEnv()
   }
 
   private get effectPool(): pg.Pool {
@@ -678,6 +697,42 @@ export class EventMaterializer {
     })
   }
 
+  /**
+   * ADR-0003 journal append. Runs on the scoped pool, which inside a fence is
+   * the advisory-locked transaction client, so the source row commits with
+   * the canonical events row or not at all. Dedup replays re-append through
+   * ON CONFLICT DO NOTHING, repairing a journal row lost to an older crash
+   * without duplicating feed identity.
+   */
+  private async appendExtensionJournal(
+    input: MaterializationInput,
+    eventId: number,
+  ): Promise<void> {
+    if (!this.extensionJournalSink) return
+    const eligibility = extensionJournalEligibility({
+      ownerUserId: input.userId,
+      ledgerSessionId: this.ledgerSessionId(input),
+      sessionId: input.sessionId,
+    })
+    if (!eligibility.journal) {
+      // An ownable event without a server-derived owner is an authorization
+      // defect: fail loudly instead of journaling unisolated content.
+      if (eligibility.reason === 'skipped_no_owner') throw new ExtensionJournalOwnerMissingError()
+      return
+    }
+    await this.extensionJournalSink.appendCanonicalEvent(
+      this.options.pool as unknown as Pick<pg.PoolClient, 'query'>,
+      {
+        sourceEventId: eventId,
+        ownerUserId: input.userId!,
+        sessionId: this.ledgerSessionId(input),
+        eventType: input.eventType,
+        occurredAt: input.receivedAt ?? null,
+        payload: input.payload,
+      },
+    )
+  }
+
   private async materializeUnlocked(
     input: MaterializationInput,
     effect?: MaterializationEffect,
@@ -717,6 +772,7 @@ export class EventMaterializer {
       5,
       input.userId,
     )
+    await this.appendExtensionJournal(input, event.rowID)
     const result: MaterializationResult = {
       eventId: event.rowID,
       inserted: event.inserted,
@@ -824,7 +880,13 @@ export class EventMaterializer {
     options: MaterializationRunOptions = {},
   ): Promise<MaterializationResult> {
     const recoveredInput = await this.recoverQuotaContext(input)
-    if (!recoveredInput.sessionId) {
+    // With a journal sink injected, quota-failure ledger events (the only
+    // persisted events without a wire session id) are fenced on their
+    // synthetic ledger identity so the journal append stays inside the same
+    // transaction as the canonical insert.
+    const fenceSessionId = recoveredInput.sessionId
+      || (this.extensionJournalSink ? this.ledgerSessionId(recoveredInput) : '')
+    if (!fenceSessionId) {
       return this.materializeUnlocked(recoveredInput, effect, options)
     }
     // Both the durable and the legacy inline path authorize and persist under
@@ -834,7 +896,7 @@ export class EventMaterializer {
     // dedicated effect pool for the post-commit deferred phase.
     return db.withSessionMaterializationFence(
       this.options.pool,
-      recoveredInput.sessionId,
+      fenceSessionId,
       (client) => {
         // The advisory transaction owns this client. Every query made by the
         // scoped materializer must reuse it, otherwise a supported pool size of

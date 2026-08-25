@@ -52,6 +52,21 @@ import {
   RealtimeOutboxRepository,
 } from './materialization/realtime-outbox.js';
 import { assertDurableIngressSchema } from './event-worker-main.js';
+import { resolveExtensionConfig } from './extensions/config.js';
+import { initializeExtensionProviderCatalog } from './extensions/catalog.js';
+import { registerExtensionInstallationRoutes } from './extensions/installation-routes.js';
+import { registerProviderTokenRoute } from './extensions/provider-auth-routes.js';
+import { registerFeedRoutes } from './extensions/feed-routes.js';
+import { registerSnapshotRoutes } from './extensions/snapshot-routes.js';
+import { registerProviderInstallationRoutes } from './extensions/provider-installation-routes.js';
+import { registerCapabilityRoutes } from './extensions/capability-routes.js';
+import { resolveGrantKeyMaterial } from './extensions/capability-grant.js';
+import { createMemoryMcpGrantBroker } from './extensions/grant-service.js';
+import { registerStatusRoutes } from './extensions/status-routes.js';
+import { registerUsageRoutes } from './extensions/usage-routes.js';
+import { registerPurgeRoutes } from './extensions/purge-routes.js';
+import { createExtensionRateLimiterSet } from './extensions/rate-limit.js';
+import { resolveExtensionRateLimitConfig } from './runtime-config.js';
 import { registerSessionShareRoutes } from './session-share-routes.js';
 import { attentionInboxConfig } from './attention-inbox/config.js';
 import { serializeAttentionItem, serializeAttentionRecovery } from './attention-inbox/dto.js';
@@ -883,6 +898,9 @@ async function main() {
   const authRateLimitPolicy = resolveAuthRateLimitConfig(process.env)
   const authRateLimiter = createAuthRateLimiter({ pepper: emailVerification.pepper })
   const runtimeConfig = resolveRelayRuntimeConfig(process.env)
+  // ADR-0003: extension flag fails closed — invalid values or an
+  // enabled production deployment without provider key material abort boot.
+  const extensionConfig = resolveExtensionConfig(process.env)
   const tokenFeatures = tokenUsageFeatures(process.env)
   const attentionConfig = attentionInboxConfig(process.env)
   assertTokenUsageFeatureDependencies(tokenFeatures, runtimeConfig.durableIngress.mode)
@@ -930,6 +948,17 @@ async function main() {
     tokenUsageFactsAuthoritative: useFactAuthoritativeSessionDeletion(tokenFeatures),
     writeTokenUsageFacts: tokenFeatures.writeFacts,
     recoveryObserver,
+    ...(extensionConfig.mode === 'enabled' ? {
+      memoryMcpGrantBroker: createMemoryMcpGrantBroker({
+        pool: pools.control,
+        issuer: publicIssuer,
+        mode: extensionConfig.mode,
+        providerPublicOrigins: extensionConfig.providerPublicOrigins,
+        grantKeys: resolveGrantKeyMaterial(process.env, {
+          strictProduction: extensionConfig.mode === 'enabled',
+        }),
+      }),
+    } : {}),
   });
   const realtimeOutboxConsumer = new RealtimeOutboxConsumer({
     repository: new RealtimeOutboxRepository(pools.query),
@@ -989,6 +1018,8 @@ async function main() {
   // 表可能短暂不存在，但生产不触发该路径。失败仍致命 → exit。
   initDB(pools.query)
     .then(async () => {
+      const catalogReady = await initializeExtensionProviderCatalog(pools.query, extensionConfig.mode)
+      if (!catalogReady) console.warn('[extensions] provider catalog unavailable while extensions are off')
       await assertRelayMaterializationReady(runtimeConfig.materializationMode, pools.query)
       await assertTokenUsageWriteContinuity(pool, tokenFeatures)
       const t = (typeof performance !== 'undefined' ? performance.now() : Date.now());
@@ -1067,6 +1098,82 @@ async function main() {
     recoveryRepository,
     service: attentionService,
     verifyAccessToken: (token, authPool) => verifyAccessTokenWithRevocation(token, authPool),
+  });
+  // ADR-0003 extension user control plane. Catalog initialization is awaited
+  // in the database readiness chain after initDB creates its schema.
+  registerExtensionInstallationRoutes(app, {
+    pool,
+    verifyAccessToken: (token) => verifyAccessTokenWithRevocation(token, pool),
+    mode: extensionConfig.mode,
+    cursorSecret: extensionConfig.cursorSecret || publicIssuer,
+  });
+  const extensionRateLimits = createExtensionRateLimiterSet(
+    resolveExtensionRateLimitConfig(process.env),
+  )
+  registerProviderTokenRoute(app, {
+    pool,
+    mode: extensionConfig.mode,
+    providerJwtSecret: extensionConfig.providerJwtSecret,
+    issuer: publicIssuer,
+    rateLimiter: extensionRateLimits.token,
+  });
+  registerFeedRoutes(app, {
+    pool,
+    mode: extensionConfig.mode,
+    providerJwtSecret: extensionConfig.providerJwtSecret,
+    issuer: publicIssuer,
+    cursorSecret: extensionConfig.cursorSecret || publicIssuer,
+    leaseTtlSeconds: extensionConfig.leaseTtlSeconds,
+    rateLimiter: extensionRateLimits.feed,
+    ackRateLimiter: extensionRateLimits.ack,
+  });
+  registerSnapshotRoutes(app, {
+    pool,
+    mode: extensionConfig.mode,
+    providerJwtSecret: extensionConfig.providerJwtSecret,
+    issuer: publicIssuer,
+    cursorSecret: extensionConfig.cursorSecret || publicIssuer,
+    rateLimiter: extensionRateLimits.snapshot,
+  });
+  registerCapabilityRoutes(app, {
+    pool,
+    verifyAccessToken: (token, authPool) => verifyAccessTokenWithRevocation(token, authPool as typeof pool),
+    mode: extensionConfig.mode,
+    issuer: publicIssuer,
+    rateLimiter: extensionRateLimits.grant,
+    providerPublicOrigins: extensionConfig.providerPublicOrigins,
+  });
+  registerStatusRoutes(app, {
+    pool,
+    mode: extensionConfig.mode,
+    providerJwtSecret: extensionConfig.providerJwtSecret,
+    issuer: publicIssuer,
+    verifyAccessToken: (token) => verifyAccessTokenWithRevocation(token, pool),
+    rateLimiter: extensionRateLimits.status,
+  });
+  registerUsageRoutes(app, {
+    pool,
+    mode: extensionConfig.mode,
+    providerJwtSecret: extensionConfig.providerJwtSecret,
+    issuer: publicIssuer,
+    verifyAccessToken: (token) => verifyAccessTokenWithRevocation(token, pool),
+    rateLimiter: extensionRateLimits.usage,
+  });
+  registerPurgeRoutes(app, {
+    pool,
+    mode: extensionConfig.mode,
+    providerJwtSecret: extensionConfig.providerJwtSecret,
+    issuer: publicIssuer,
+    rateLimiter: extensionRateLimits.purge,
+    ackRateLimiter: extensionRateLimits.ack,
+  });
+  registerProviderInstallationRoutes(app, {
+    pool,
+    mode: extensionConfig.mode,
+    providerJwtSecret: extensionConfig.providerJwtSecret,
+    issuer: publicIssuer,
+    cursorSecret: extensionConfig.cursorSecret || publicIssuer,
+    rateLimiter: extensionRateLimits.installations,
   });
 
   // ---- REST API: Auth ----

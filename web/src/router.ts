@@ -8,6 +8,7 @@ import SessionList from './views/SessionList.vue'
 import SettingsView from './views/SettingsView.vue'
 import TokenUsage from './views/TokenUsage.vue'
 import AttentionInboxView from './views/AttentionInboxView.vue'
+import MemoryView from './views/MemoryView.vue'
 import { useAuth } from './composables/useAuth'
 import { isPwaMobileShellEnabled } from './composables/useEnv'
 import { isMobileViewport } from './composables/useResponsiveLayout'
@@ -22,6 +23,7 @@ export const appRoutes: RouteRecordRaw[] = [
   { path: '/settings', component: SettingsView, meta: { requiresAuth: true } },
   { path: '/hosts', component: HostsView, meta: { requiresAuth: true } },
   { path: '/inbox', component: AttentionInboxView, meta: { requiresAuth: true } },
+  { path: '/memory', component: MemoryView, meta: { requiresAuth: true } },
 ]
 
 export function resolveAuthenticatedLanding(

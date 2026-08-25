@@ -49,12 +49,12 @@ const (
 
 	// ActorScope / FlowScope / ContentClass classification axes (plan §1/§4).
 	// Orthogonal to the existing agent hierarchy fields.
-	ActorScopeRoot      = "root"
-	ActorScopeSubagent  = "subagent"
-	ActorScopeUnknown   = "unknown"
-	FlowScopeMain       = "main"
-	FlowScopeAuxiliary  = "auxiliary"
-	FlowScopeUnClassified = "unclassified"
+	ActorScopeRoot          = "root"
+	ActorScopeSubagent      = "subagent"
+	ActorScopeUnknown       = "unknown"
+	FlowScopeMain           = "main"
+	FlowScopeAuxiliary      = "auxiliary"
+	FlowScopeUnClassified   = "unclassified"
 	ContentClassDialogue    = "dialogue"
 	ContentClassExecution   = "execution"
 	ContentClassInteraction = "interaction"
@@ -65,12 +65,12 @@ const (
 	ClassifierVersionV1 = "v1"
 
 	// Terminal turn reasons (plan §3.3).
-	TurnReasonUserRequested                   = "user_requested"
-	TurnReasonProcessCrash                    = "process_crash"
-	TurnReasonSessionExitWithoutTurnTerminal  = "session_exit_without_turn_terminal"
-	TurnReasonActivityTimeout                 = "activity_timeout"
-	TurnReasonInputDispatchFailed             = "input_dispatch_failed"
-	TurnReasonParentTurnInterrupted           = "parent_turn_interrupted"
+	TurnReasonUserRequested                  = "user_requested"
+	TurnReasonProcessCrash                   = "process_crash"
+	TurnReasonSessionExitWithoutTurnTerminal = "session_exit_without_turn_terminal"
+	TurnReasonActivityTimeout                = "activity_timeout"
+	TurnReasonInputDispatchFailed            = "input_dispatch_failed"
+	TurnReasonParentTurnInterrupted          = "parent_turn_interrupted"
 
 	// Typed nack reason for input arriving while a turn is interrupt_pending.
 	ReasonTurnInterruptPending = "turn_interrupt_pending"
@@ -98,6 +98,14 @@ type ClientMessage struct {
 	// durable daemon event after the native app-server accepts it.
 	ElicitationAction  string          `json:"elicitation_action,omitempty"`
 	ElicitationContent json.RawMessage `json:"elicitation_content,omitempty"`
+	// Phase 1 memory MCP grant broker (daemon<->relay control plane).
+	Grant                string   `json:"grant,omitempty"`
+	ExpiresIn            int      `json:"expires_in,omitempty"`
+	TokenType            string   `json:"token_type,omitempty"`
+	InstallationID       string   `json:"installation_id,omitempty"`
+	ProviderPublicOrigin string   `json:"provider_public_origin,omitempty"`
+	GrantServices        []string `json:"services,omitempty"`
+	GrantErrorCode       string   `json:"code,omitempty"`
 	// AgentName is an OpenCode session profile name, distinct from Agent (the
 	// CLI type: claude-code/codex/opencode).
 	AgentName string `json:"agent_name,omitempty"`
@@ -613,3 +621,32 @@ const (
 const (
 	ReasonPermissionDenied = "permission_denied"
 )
+
+// MemoryMcpGrantRequest is the daemon->relay WS control message asking for a
+// short memory.mcp capability grant (Phase 1). The relay derives the user
+// from the AUTHENTICATED connection; the payload never carries identity.
+type MemoryMcpGrantRequest struct {
+	Type      string `json:"type"` // "memory_mcp_grant"
+	RequestID string `json:"request_id,omitempty"`
+}
+
+// MemoryMcpGrantResult is the relay->daemon success reply. The grant itself
+// is a short-lived RS256 capability token; nothing here is persisted.
+type MemoryMcpGrantResult struct {
+	Type                 string   `json:"type"` // "memory_mcp_grant_result"
+	RequestID            string   `json:"request_id,omitempty"`
+	Grant                string   `json:"grant"`
+	ExpiresIn            int      `json:"expires_in"`
+	TokenType            string   `json:"token_type"`
+	InstallationID       string   `json:"installation_id"`
+	ProviderPublicOrigin string   `json:"provider_public_origin"`
+	Services             []string `json:"services"`
+}
+
+// MemoryMcpGrantError is the bounded failure reply. Codes are a fixed
+// allowlist; the relay never echoes error details or secrets.
+type MemoryMcpGrantError struct {
+	Type      string `json:"type"` // "memory_mcp_grant_error"
+	RequestID string `json:"request_id,omitempty"`
+	Code      string `json:"code"`
+}

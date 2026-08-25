@@ -24,6 +24,17 @@ export TLS_CERT_PATH=/tmp/does-not-matter
 export TLS_KEY_PATH=/tmp/does-not-matter
 export AUTH_CODE_PEPPER=throwaway-32-characters-aaaaaaaaaaaaa
 export JWT_SECRET=throwaway-jwt-32-characters-aaaaaaaaaaaa
+export RELAY_EXTENSIONS=off
+# docker-compose.prod.yml validates the independent Memory deployment even
+# when this test starts only PostgreSQL. Supply test-only values so this gate
+# remains self-contained without weakening the production fail-closed contract.
+export MEMORY_MODE=off
+export MEMORY_POSTGRES_PASSWORD=throwaway-memory-postgres-password
+export MEMORY_RELAY_URL=http://relay:8080
+export MEMORY_RELAY_ISSUER=http://relay:8080
+export MEMORY_PROVIDER_CLIENT_ID=throwaway-memory-client
+export MEMORY_PROVIDER_CLIENT_SECRET=throwaway-memory-client-secret
+export MEMORY_HMAC_KEY=throwaway-memory-hmac-key-0123456789
 
 [[ "$POSTGRES_ADMIN_PASSWORD" != "$POSTGRES_APP_PASSWORD" ]] || fail "test setup requires distinct passwords"
 

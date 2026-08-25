@@ -125,12 +125,92 @@ export const attentionRecoveryOpen = new Gauge({
   registers: [registry],
 })
 
+// ADR-0003 extension platform projector metrics. Labels stay bounded: topics
+// come from the frozen allowlist and outcomes from a closed set. No user,
+// session, installation, provider version, or feed identifiers appear here.
+export const extensionSourceBacklog = new Gauge({
+  name: 'pocketctl_extension_source_backlog',
+  help: 'Unprojected extension source journal rows',
+  registers: [registry],
+})
+
+export const extensionFeedProjected = new Counter({
+  name: 'pocketctl_extension_feed_projected_total',
+  help: 'Extension feed rows projected by bounded topic and result',
+  labelNames: ['topic', 'result'] as const,
+  registers: [registry],
+})
+
+export const extensionProjectorBatchSize = new Histogram({
+  name: 'pocketctl_extension_projector_batch_size',
+  help: 'Extension projector batch size',
+  buckets: [1, 4, 16, 32, 64, 128, 256, 500],
+  registers: [registry],
+})
+
+export const extensionProjectorLagSeconds = new Gauge({
+  name: 'pocketctl_extension_projector_lag_seconds',
+  help: 'Age of the oldest unprojected extension source row in seconds',
+  registers: [registry],
+})
+
+export const extensionProjectorRetries = new Counter({
+  name: 'pocketctl_extension_projector_retries_total',
+  help: 'Extension projector batch retries by bounded outcome',
+  labelNames: ['outcome'] as const,
+  registers: [registry],
+})
+
+// ADR-0003 provider control-plane metrics. The provider label only ever
+// carries catalog allowlist ids (unknown ids collapse to 'unknown').
+export function boundedProviderLabel(providerId: string | undefined | null): string {
+  const ALLOWED = new Set(['pocketctl-memory'])
+  return ALLOWED.has(providerId ?? '') ? (providerId as string) : 'unknown'
+}
+
+export const extensionProviderStatusReports = new Counter({
+  name: 'pocketctl_extension_provider_status_reports_total',
+  help: 'Provider status reports by bounded provider and result',
+  labelNames: ['provider', 'result'] as const,
+  registers: [registry],
+})
+
+export const extensionFeedPulls = new Counter({
+  name: 'pocketctl_extension_feed_pull_total',
+  help: 'Extension feed pulls by bounded provider and result',
+  labelNames: ['provider', 'result'] as const,
+  registers: [registry],
+})
+
+export const extensionFeedAcks = new Counter({
+  name: 'pocketctl_extension_feed_ack_total',
+  help: 'Extension feed acks by bounded provider and result',
+  labelNames: ['provider', 'result'] as const,
+  registers: [registry],
+})
+
+export const extensionPurgePending = new Gauge({
+  name: 'pocketctl_extension_purge_pending',
+  help: 'Pending provider purge requests',
+  registers: [registry],
+})
+
+export const extensionUsageIngested = new Counter({
+  name: 'pocketctl_extension_usage_ingested_total',
+  help: 'Provider usage facts ingested by allowlisted operation and result',
+  labelNames: ['operation', 'result'] as const,
+  registers: [registry],
+})
+
 // Emit zero-value gauges immediately so a freshly started Relay has a stable
 // diagnostic surface before the first ingress event or worker poll.
 ingressQueueDepth.set(0)
 inboxOldestSeconds.set(0)
 workerBacklog.set(0)
 attentionRecoveryOpen.set(0)
+extensionSourceBacklog.set(0)
+extensionProjectorLagSeconds.set(0)
+extensionPurgePending.set(0)
 
 export function observeInboxOldest(rows: ReadonlyArray<{ receivedAt: Date }>, now: Date): void {
   if (rows.length === 0) {

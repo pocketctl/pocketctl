@@ -36,6 +36,7 @@ import (
 	"github.com/pocketctl/pocketctl/internal/discovery"
 	"github.com/pocketctl/pocketctl/internal/i18n"
 	"github.com/pocketctl/pocketctl/internal/keepawake"
+	"github.com/pocketctl/pocketctl/internal/memorymcp"
 	"github.com/pocketctl/pocketctl/internal/notify"
 	"github.com/pocketctl/pocketctl/internal/platform"
 	"github.com/pocketctl/pocketctl/internal/protocol"
@@ -48,7 +49,7 @@ import (
 	"github.com/pocketctl/pocketctl/internal/zcode"
 )
 
-var version = "0.4.1"
+var version = "0.4.3"
 
 // PR2 platform defaults for the daemon entry: daemonize + service via platform
 // interface (was direct syscall.SysProcAttr{Setsid} + internal/service).
@@ -128,6 +129,15 @@ func main() {
 			fmt.Fprintln(os.Stderr, "pocketctl: claude channel exited:", err)
 		}
 		os.Exit(0)
+	case "memory-mcp":
+		// Local stdio<->remote MCP bridge for the PocketCtl Memory provider.
+		// Grants refresh through the daemon's user-private socket and live
+		// only in process memory; diagnostics go to stderr so the hosting
+		// agent's stdio framing is never corrupted.
+		if err := memorymcp.RunBridgeStdio(context.Background()); err != nil {
+			fmt.Fprintln(os.Stderr, "pocketctl memory-mcp:", err)
+			os.Exit(1)
+		}
 	case "version":
 		fmt.Println("pocketctl", version)
 	case "uninstall":
@@ -1859,7 +1869,23 @@ func cmdDaemonStart(args []string) {
 
 	// Handle commands from relay
 	daemon.RunLoop(ctx, "commands", logger, func() {
-		handleCommands(ctx, client, sm, logger, &stateDirty)
+		// Phase 1 memory MCP: bridge processes ask this daemon for short
+		// memory.mcp grants over a dedicated user-private socket; the daemon
+		// brokers them over its authenticated relay connection.
+		memoryMcpBroker := memorymcp.NewWsBroker(client)
+		memoryMcpServer := &memorymcp.Server{
+			SocketPath: config.MemoryMcpSocketPath(),
+			Request:    memoryMcpBroker.Request,
+			Logger:     logger,
+		}
+		if ln, err := memoryMcpServer.Start(); err != nil {
+			logger.Warn("memory-mcp bridge socket not started", "error", err)
+		} else {
+			logger.Info("memory-mcp bridge socket listening", "path", config.MemoryMcpSocketPath())
+			daemon.Go("memory-mcp-server", logger, func() { memoryMcpServer.Serve(ctx, ln) })
+		}
+
+		handleCommands(ctx, client, sm, logger, &stateDirty, memoryMcpBroker)
 	})
 
 	// Periodic state update. Durable-ingress diagnostics are refreshed on this
@@ -3224,7 +3250,7 @@ func deliverUserMessage(
 	return err
 }
 
-func handleCommands(ctx context.Context, client *ws.Client, sm *session.SessionManager, logger *slog.Logger, stateDirty *atomic.Bool) {
+func handleCommands(ctx context.Context, client *ws.Client, sm *session.SessionManager, logger *slog.Logger, stateDirty *atomic.Bool, memoryMcpBroker *memorymcp.WsBroker) {
 	quotaGrants := session.NewQuotaGrantValidator()
 	for {
 		select {
@@ -3232,6 +3258,9 @@ func handleCommands(ctx context.Context, client *ws.Client, sm *session.SessionM
 			return
 		case cmd := <-client.CommandCh:
 			switch cmd.Type {
+			case "memory_mcp_grant_result", "memory_mcp_grant_error":
+				memoryMcpBroker.Dispatch(cmd)
+				continue
 			case "session_create":
 				duplicate, grantErr := quotaGrants.Validate(cmd.RequestID, cmd.QuotaGrant, "create", time.Now())
 				if grantErr != nil || duplicate {
