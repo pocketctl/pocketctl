@@ -145,7 +145,8 @@ describe('POST /api/auth/device/token (RFC 8628 polling contract)', () => {
     const challenge = Buffer.from(
       await crypto.subtle.digest('SHA-256', new TextEncoder().encode(codeVerifier)),
     ).toString('base64url')
-    const created = store.create('pocketctl-cli', challenge, 'machine-1')
+    const machineId = 'machine-0123456789abcdef0123456789abcdef'
+    const created = store.create('pocketctl-cli', challenge, machineId)
     store.authorize(created.user_code, 7)
     const reply = new FakeReply()
     const body = await handleDeviceTokenRequest(
@@ -155,6 +156,8 @@ describe('POST /api/auth/device/token (RFC 8628 polling contract)', () => {
     )
     expect(reply.statusCode).toBe(200)
     expect(body.access_token).toBe('access-token')
+    expect(deps.signAccessToken).toHaveBeenCalledWith(7, 'u@example.test', undefined, machineId)
+    expect(deps.signRefreshToken).toHaveBeenCalledWith(7, machineId)
     expect(deps.setRefreshCookie).toHaveBeenCalled()
     expect(store.getByDeviceCode(created.device_code)).toBeUndefined()
     expect(store.userCodeIndexSize()).toBe(store.size())

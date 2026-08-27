@@ -36,7 +36,7 @@ async function main(): Promise<void> {
       cursorSigningKey: config.hmacKey,
       ...(config.embeddingModel ? {
         embeddingConsentFingerprint: createHash('sha256')
-          .update(`${config.embeddingModel.provider}\n${config.embeddingModel.baseUrl}\n${config.embeddingModel.model}`)
+          .update(`${config.embeddingModel.provider}\n${config.embeddingModel.baseUrl}\n${config.embeddingModel.model}\n${config.embeddingModel.dimensions}`)
           .digest('hex'),
         embed: Object.assign(createOpenAICompatibleEmbeddingProvider({
           baseUrl: config.embeddingModel.baseUrl,

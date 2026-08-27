@@ -138,8 +138,13 @@ func SendEmailCode(baseURL, email, lang string) error {
 }
 
 // VerifyEmailCode verifies the email code and returns access/refresh tokens.
-func VerifyEmailCode(baseURL, email, code, lang string) (accessToken, refreshToken string, err error) {
-	resp, err := postJSON(baseURL+"/api/auth/email/verify", map[string]string{"email": email, "code": code, "lang": lang})
+// machineID binds the issued token pair to this local Pocketctl installation.
+func VerifyEmailCode(baseURL, email, code, lang, machineID string) (accessToken, refreshToken string, err error) {
+	body := map[string]string{"email": email, "code": code, "lang": lang}
+	if machineID != "" {
+		body["machine_id"] = machineID
+	}
+	resp, err := postJSON(baseURL+"/api/auth/email/verify", body)
 	if err != nil {
 		return "", "", err
 	}
@@ -156,9 +161,14 @@ func VerifyEmailCode(baseURL, email, code, lang string) (accessToken, refreshTok
 
 // ---- Token Management ----
 
-// RefreshToken refreshes an access token using a refresh token.
-func RefreshToken(baseURL, refreshToken string) (accessToken, newRefreshToken string, err error) {
-	resp, err := postJSON(baseURL+"/api/auth/refresh", map[string]string{"refresh_token": refreshToken})
+// RefreshToken refreshes an access token using a refresh token. machineID is
+// used only to backfill legacy refresh tokens that predate machine binding.
+func RefreshToken(baseURL, refreshToken, machineID string) (accessToken, newRefreshToken string, err error) {
+	body := map[string]string{"refresh_token": refreshToken}
+	if machineID != "" {
+		body["machine_id"] = machineID
+	}
+	resp, err := postJSON(baseURL+"/api/auth/refresh", body)
 	if err != nil {
 		return "", "", err
 	}

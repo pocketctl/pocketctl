@@ -85,6 +85,30 @@ describeWithDatabase('extension installations (PostgreSQL)', () => {
     await expect(repository.createInstallation(createInput(otherUserId))).resolves.toBeDefined()
   })
 
+  test('keeps a revoked installation as a fence while allowing a new installation id', async () => {
+    const revoked = await repository.createInstallation(createInput(userId))
+    await pool.query(`
+      UPDATE extension_installations
+      SET status = 'revoked', config_version = config_version + 1
+      WHERE installation_id = $1
+    `, [revoked.installation_id])
+
+    const replacement = await repository.createInstallation(createInput(userId))
+    expect(replacement.installation_id).not.toBe(revoked.installation_id)
+    expect(replacement.status).toBe('pending')
+
+    const rows = await pool.query<{ installation_id: string; status: string }>(`
+      SELECT installation_id::text, status
+      FROM extension_installations
+      WHERE owner_user_id = $1 AND provider_id = 'pocketctl-memory'
+      ORDER BY created_at
+    `, [userId])
+    expect(rows.rows).toEqual([
+      { installation_id: revoked.installation_id, status: 'revoked' },
+      { installation_id: replacement.installation_id, status: 'pending' },
+    ])
+  })
+
   test('optimistic locking increments config_version and rejects stale writes', async () => {
     const installation = await repository.createInstallation(createInput(userId))
     const updated = await repository.updateInstallation(

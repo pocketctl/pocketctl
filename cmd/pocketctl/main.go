@@ -921,7 +921,7 @@ func loginViaEmail(apiURL string) (string, string, error) {
 	}
 
 	fmt.Print(i18n.T("login.verifying"))
-	return api.VerifyEmailCode(apiURL, email, code, i18n.CurrentCode())
+	return api.VerifyEmailCode(apiURL, email, code, i18n.CurrentCode(), daemon.MachineID())
 }
 
 // ---------- daemon start (continued) ----------
@@ -1583,7 +1583,7 @@ func cmdDaemonStart(args []string) {
 		baseURL = strings.TrimSuffix(baseURL, "/")
 		baseURL = strings.Replace(baseURL, "wss://", "https://", 1)
 		baseURL = strings.Replace(baseURL, "ws://", "http://", 1)
-		newAccess, newRefresh, err := api.RefreshToken(baseURL, refreshToken)
+		newAccess, newRefresh, err := api.RefreshToken(baseURL, refreshToken, daemon.MachineID())
 		if err != nil {
 			logger.Error("token refresh failed; refresh token may be expired", "error", err)
 			return "", false

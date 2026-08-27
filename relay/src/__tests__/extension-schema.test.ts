@@ -31,7 +31,9 @@ describe('extension platform schema bootstrap', () => {
     await initExtensionSchema({ query } as never)
     const sql = String(query.mock.calls[0]?.[0])
 
-    expect(sql).toContain('UNIQUE (owner_user_id, provider_id)')
+    expect(sql).toContain('CREATE UNIQUE INDEX IF NOT EXISTS idx_extension_installations_live_owner_provider')
+    expect(sql).toContain("WHERE status IN ('pending', 'active', 'paused', 'revoking')")
+    expect(sql).toContain('DROP CONSTRAINT IF EXISTS extension_installations_owner_user_id_provider_id_key')
     expect(sql).toContain('UNIQUE (source_kind, source_id)')
     expect(sql).toContain('UNIQUE (source_kind, source_id, topic, envelope_version)')
     expect(sql).toContain('UNIQUE (provider_id, client_id)')

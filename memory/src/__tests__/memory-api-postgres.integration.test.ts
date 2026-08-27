@@ -444,4 +444,72 @@ describeWithDatabase('memory api under real capability grants (PostgreSQL)', () 
       await configured.close()
     }
   })
+
+  test('re-enabling extraction requeues a job that completed while consent was off', async () => {
+    await pool.query(`
+      UPDATE work_episodes SET source_digest = decode(repeat('ab', 32), 'hex'),
+        document_compiler_version = 'packet-v1'
+      WHERE installation_id = $1
+    `, [INSTALLATION])
+
+    const configured = Fastify()
+    registerManageRoutes(configured, {
+      pool, guard, policy, textConfigured: true, embeddingConfigured: false,
+      extractionAdapter: {
+        provider: 'openai-compatible', origin: 'https://text.example', model: 'text-v1', fingerprint: 'a'.repeat(64), pricing_configured: false,
+      },
+      tombstoneHmacKeys: [{ version: 'v1', key: 't'.repeat(32) }],
+    })
+    try {
+      const enable = await configured.inject({
+        method: 'PATCH', url: '/api/v1/memory/settings',
+        headers: { ...authHeaders(['memory.manage']), 'idempotency-key': 'settings-enable-first' },
+        payload: {
+          expected_revision: 1,
+          extraction_mode: 'enabled',
+          confirm_extraction_fingerprint: 'a'.repeat(64),
+        },
+      })
+      expect(enable.statusCode).toBe(200)
+      const disable = await configured.inject({
+        method: 'PATCH', url: '/api/v1/memory/settings',
+        headers: { ...authHeaders(['memory.manage']), 'idempotency-key': 'settings-disable' },
+        payload: { expected_revision: 2, extraction_mode: 'off' },
+      })
+      expect(disable.statusCode).toBe(200)
+
+      await pool.query(`
+        UPDATE memory_jobs
+        SET state = 'completed', attempts = 1, completed_at = NOW(),
+            claimed_by = 'worker-that-observed-off', claim_expires_at = NULL
+        WHERE installation_id = $1 AND job_type = 'extract_candidates'
+      `, [INSTALLATION])
+
+      const reenable = await configured.inject({
+        method: 'PATCH', url: '/api/v1/memory/settings',
+        headers: { ...authHeaders(['memory.manage']), 'idempotency-key': 'settings-enable-again' },
+        payload: {
+          expected_revision: 3,
+          extraction_mode: 'enabled',
+          confirm_extraction_fingerprint: 'a'.repeat(64),
+        },
+      })
+      expect(reenable.statusCode).toBe(200)
+      const job = await pool.query<{
+        state: string
+        attempts: number
+        claimed_by: string | null
+        completed_at: Date | null
+      }>(`
+        SELECT state, attempts, claimed_by, completed_at
+        FROM memory_jobs
+        WHERE installation_id = $1 AND job_type = 'extract_candidates'
+      `, [INSTALLATION])
+      expect(job.rows[0]).toEqual({
+        state: 'pending', attempts: 0, claimed_by: null, completed_at: null,
+      })
+    } finally {
+      await configured.close()
+    }
+  })
 })

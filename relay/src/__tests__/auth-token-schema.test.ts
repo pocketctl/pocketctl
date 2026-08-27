@@ -6,6 +6,7 @@ let signAccessToken: typeof import('../auth.js').signAccessToken
 let signRefreshToken: typeof import('../auth.js').signRefreshToken
 let verifyAccessToken: typeof import('../auth.js').verifyAccessToken
 let verifyRefreshToken: typeof import('../auth.js').verifyRefreshToken
+let resolveRefreshMachineId: typeof import('../auth.js').resolveRefreshMachineId
 
 beforeAll(async () => {
   vi.stubEnv('JWT_SECRET', secret)
@@ -14,6 +15,7 @@ beforeAll(async () => {
   signRefreshToken = auth.signRefreshToken
   verifyAccessToken = auth.verifyAccessToken
   verifyRefreshToken = auth.verifyRefreshToken
+  resolveRefreshMachineId = auth.resolveRefreshMachineId
 })
 
 describe('authentication token schema cutover', () => {
@@ -41,5 +43,19 @@ describe('authentication token schema cutover', () => {
 
     expect(verifyAccessToken(access)).toMatchObject({ userId: 7, email: 'owner@example.test' })
     expect(verifyRefreshToken(refresh)).toMatchObject({ userId: 7 })
+  })
+
+  test('retains a bound machine identity across refresh rotation and safely migrates legacy tokens', async () => {
+    const boundMachine = 'daemon-622f9090'
+    const differentMachine = 'machine-0123456789abcdef0123456789abcdef'
+    const access = await signAccessToken(7, 'owner@example.test', undefined, boundMachine)
+    const refresh = await signRefreshToken(7, boundMachine)
+    const payload = verifyRefreshToken(refresh)
+
+    expect(verifyAccessToken(access)).toMatchObject({ userId: 7, machine_id: boundMachine })
+    expect(payload).toMatchObject({ userId: 7, machine_id: boundMachine })
+    expect(resolveRefreshMachineId(payload?.machine_id, differentMachine)).toBe(boundMachine)
+    expect(resolveRefreshMachineId(undefined, boundMachine)).toBe(boundMachine)
+    expect(resolveRefreshMachineId(undefined, 'unknown')).toBeUndefined()
   })
 })

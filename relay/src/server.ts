@@ -5,7 +5,7 @@ import type pg from 'pg';
 import { initDB, parseDBUrl, getUserByEmail, getUserById, getUserPlanAndWhitelist, getUserProfile, userExists, deleteUserAccount, registerDevice, removeDevice, cleanStaleTombstones, upsertDaemonAlias, updateDisplayName, addToIOSWaitlist, revokeToken, isTokenRevoked, cleanRevokedTokens, insertAuditLog, bindTokenToDaemon, updateSessionTitle, isSessionOwnedByUser, getSessionAllEvents, getTokenSummary, getTokensByDaemon, backfillSessionTokens, backfillSessionModel, backfillTokenDailyStats, aggregateDayIntoStats, cleanStaleEvents, getTokenDailySeries, getTokenByModel, getTokenByDaemon, getSessionTokenTrend, listProUserIds, getUserDailyTokens, getUserWeeklyTokens, markReportSent, handleRefreshReuse, consumeEmailChallenge, upsertEmailChallenge, cleanExpiredEmailChallenges, cleanStaleAuthRateLimits, bindUserEmailWithChallenge } from './db.js';
 import { closeRelayPools, createRelayPools } from './db-pools.js';
 import { Router, parseDurableIngressFlag, type FlagConfig } from './router.js';
-import { signAccessToken, signRefreshToken, verifyRefreshToken, decodeToken, verifyAccessTokenWithRevocation, verifyTokenForRevocation } from './auth.js';
+import { signAccessToken, signRefreshToken, verifyRefreshToken, decodeToken, resolveRefreshMachineId, stableMachineId, verifyAccessTokenWithRevocation, verifyTokenForRevocation } from './auth.js';
 import { notifyUser, sessionStatusPush, daemonOfflinePush, dailyReportPush, weeklyReportPush } from './push.js';
 import { sendEmailCode } from './config/email.js';
 import {
@@ -358,7 +358,7 @@ export interface DeviceTokenRouteDeps {
   validateClient: (clientId: string) => { token_endpoint_auth_method: string } | null;
   getUserById(userId: number): Promise<{ id: number; email: string; phone: string | null } | null>;
   signAccessToken(userId: number, email: string, phone?: string, machineId?: string): Promise<string>;
-  signRefreshToken(userId: number): Promise<string>;
+  signRefreshToken(userId: number, machineId?: string): Promise<string>;
   insertAuditLog(...args: any[]): Promise<unknown>;
   setRefreshCookie(reply: any, token: string): void;
   rejectIfRateLimited(reply: any, ...specs: unknown[]): Promise<boolean>;
@@ -446,9 +446,9 @@ export async function handleDeviceTokenRequest(
     return { error: 'server_error', error_description: 'user not found' };
   }
 
-  const machineId = session.machine_id || 'unknown';
+  const machineId = stableMachineId(session.machine_id);
   const accessToken = await deps.signAccessToken(user.id, user.email, user.phone ?? undefined, machineId);
-  const refreshToken = await deps.signRefreshToken(user.id);
+  const refreshToken = await deps.signRefreshToken(user.id, machineId);
   deps.setRefreshCookie(reply, refreshToken);
 
   // Clean up the session and its user-code index atomically with issuance.
@@ -456,7 +456,7 @@ export async function handleDeviceTokenRequest(
 
   deps.insertAuditLog(user.id, 'token_issued', {
     client_id,
-    machine_id: machineId,
+    machine_id: machineId || 'unknown',
     grant_type: 'device_code',
   }, req.ip).catch(() => {});
 
@@ -901,6 +901,13 @@ async function main() {
   // ADR-0003: extension flag fails closed — invalid values or an
   // enabled production deployment without provider key material abort boot.
   const extensionConfig = resolveExtensionConfig(process.env)
+  // Resolve capability signing material exactly once. In development the
+  // fallback key is generated in memory, so resolving separately for the
+  // HTTP route and daemon broker would produce grants that the published
+  // JWKS cannot verify.
+  const extensionGrantKeys = resolveGrantKeyMaterial(process.env, {
+    strictProduction: extensionConfig.mode === 'enabled',
+  })
   const tokenFeatures = tokenUsageFeatures(process.env)
   const attentionConfig = attentionInboxConfig(process.env)
   assertTokenUsageFeatureDependencies(tokenFeatures, runtimeConfig.durableIngress.mode)
@@ -954,9 +961,7 @@ async function main() {
         issuer: publicIssuer,
         mode: extensionConfig.mode,
         providerPublicOrigins: extensionConfig.providerPublicOrigins,
-        grantKeys: resolveGrantKeyMaterial(process.env, {
-          strictProduction: extensionConfig.mode === 'enabled',
-        }),
+        grantKeys: extensionGrantKeys,
       }),
     } : {}),
   });
@@ -1142,6 +1147,7 @@ async function main() {
     issuer: publicIssuer,
     rateLimiter: extensionRateLimits.grant,
     providerPublicOrigins: extensionConfig.providerPublicOrigins,
+    grantKeys: extensionGrantKeys,
   });
   registerStatusRoutes(app, {
     pool,
@@ -1250,8 +1256,9 @@ async function main() {
       revokeToken(pool, payload.jti, payload.userId, 'rotation').catch(console.error);
     }
 
-    const accessToken = await signAccessToken(user.id, user.email, user.phone);
-    const newRefreshToken = await signRefreshToken(user.id);
+    const machineId = resolveRefreshMachineId(payload.machine_id, body.machine_id);
+    const accessToken = await signAccessToken(user.id, user.email, user.phone, machineId);
+    const newRefreshToken = await signRefreshToken(user.id, machineId);
     setRefreshCookie(reply, newRefreshToken);
     return {
       access_token: accessToken,
@@ -1429,7 +1436,7 @@ async function main() {
 
   // Verify email code and login/register
   app.post('/api/auth/email/verify', async (req, reply) => {
-    const { email, code, lang: bodyLang } = req.body as any;
+    const { email, code, lang: bodyLang, machine_id: requestedMachineId } = req.body as any;
     if (!email || !code) {
       reply.code(400); return { error: 'email and code are required' };
     }
@@ -1475,8 +1482,9 @@ async function main() {
         reply.code(500); return { error: '审核演示数据准备失败' };
       }
     }
-    const accessToken = await signAccessToken(user.id, user.email, user.phone ?? undefined);
-    const refreshToken = await signRefreshToken(user.id);
+    const machineId = stableMachineId(requestedMachineId);
+    const accessToken = await signAccessToken(user.id, user.email, user.phone ?? undefined, machineId);
+    const refreshToken = await signRefreshToken(user.id, machineId);
     setRefreshCookie(reply, refreshToken);
     return {
       access_token: accessToken,

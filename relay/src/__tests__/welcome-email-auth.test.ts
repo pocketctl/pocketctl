@@ -58,10 +58,13 @@ describe('findOrCreateEmailUser', () => {
 describe('auth route integration', () => {
   const source = readFileSync(fileURLToPath(new URL('../../src/server.ts', import.meta.url)), 'utf8')
 
-  test('verification resolves locale from body lang and Accept-Language', () => {
-    expect(source).toMatch(/const \{ email, code, lang: bodyLang \} = req\.body as any/)
+  test('verification resolves locale and binds a supplied stable machine ID', () => {
+    expect(source).toMatch(/const \{ email, code, lang: bodyLang, machine_id: requestedMachineId \} = req\.body as any/)
     expect(source).toContain("resolveLanguage(bodyLang, req.headers['accept-language'])")
     expect(source).toContain('findOrCreateEmailUser(pool, normalizedEmail, displayName, locale)')
+    expect(source).toContain('const machineId = stableMachineId(requestedMachineId)')
+    expect(source).toContain('signAccessToken(user.id, user.email, user.phone ?? undefined, machineId)')
+    expect(source).toContain('signRefreshToken(user.id, machineId)')
   })
 
   test('Chinese device authorization page explicitly sends its displayed language', () => {

@@ -224,7 +224,32 @@ export function registerManageRoutes(app: FastifyInstance, deps: ManageRouteDeps
           FROM work_episodes e
           WHERE e.installation_id = $1 AND e.source_digest IS NOT NULL
             AND e.document_compiler_version IS NOT NULL
-          ON CONFLICT DO NOTHING
+          ON CONFLICT (installation_id, job_type, idempotency_key) DO UPDATE SET
+            state = CASE
+              WHEN memory_jobs.state IN ('completed', 'dead') THEN 'pending'
+              ELSE memory_jobs.state
+            END,
+            available_at = NOW(),
+            attempts = CASE
+              WHEN memory_jobs.state = 'running' THEN memory_jobs.attempts
+              ELSE 0
+            END,
+            claimed_by = CASE
+              WHEN memory_jobs.state IN ('completed', 'dead') THEN NULL
+              ELSE memory_jobs.claimed_by
+            END,
+            claim_expires_at = CASE
+              WHEN memory_jobs.state IN ('completed', 'dead') THEN NULL
+              ELSE memory_jobs.claim_expires_at
+            END,
+            last_error_code = CASE
+              WHEN memory_jobs.state = 'running' THEN 'rerun_required'
+              ELSE NULL
+            END,
+            completed_at = CASE
+              WHEN memory_jobs.state IN ('completed', 'dead') THEN NULL
+              ELSE memory_jobs.completed_at
+            END
         `, [grant.installationId, deps.extractionAdapter.fingerprint])
       }
       if (result.settings.embeddingMode !== 'off' && deps.embeddingAdapter

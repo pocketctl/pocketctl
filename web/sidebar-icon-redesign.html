@@ -1,0 +1,318 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>pocketctl · Sidebar Icon Redesign</title>
+<style>
+/* ============================================
+   pocketctl design tokens (synced from web-shared.css)
+   ============================================ */
+:root, [data-theme="dark"] {
+  --bg: #0d1117;  --bg-secondary: #010409;
+  --surface: #161b22;  --surface-hover: #1c2129;  --surface-active: #21262d;
+  --border: #21262d;  --border-light: #30363d;
+  --accent: #58a6ff;  --accent-hover: #79c0ff;
+  --accent-muted: rgba(88,166,255,.15);  --accent-subtle: rgba(88,166,255,.08);
+  --fg: #e6edf3;  --fg-secondary: #8b949e;  --fg-tertiary: #484f58;
+  --error: #f85149;
+  --sidebar-bg: #010409;  --sidebar-border: #21262d;  --sidebar-active: rgba(88,166,255,.12);
+  --radius-md: 8px;  --radius-full: 9999px;
+  --sidebar-w: 260px;
+  --font-display: 'SF Pro Display', -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+}
+[data-theme="light"] {
+  --bg: #ffffff;  --bg-secondary: #f6f8fa;
+  --surface: #ffffff;  --surface-hover: #f3f4f6;  --surface-active: #eaeef2;
+  --border: #d0d7de;  --border-light: #e1e4e8;
+  --accent: #1f6feb;  --accent-hover: #388bfd;
+  --accent-muted: rgba(31,111,235,.12);  --accent-subtle: rgba(31,111,235,.06);
+  --fg: #1f2328;  --fg-secondary: #656d76;  --fg-tertiary: #8b949e;
+  --error: #cf222e;
+  --sidebar-bg: #f6f8fa;  --sidebar-border: #d0d7de;  --sidebar-active: rgba(31,111,235,.1);
+}
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+html { font-size: 16px; -webkit-font-smoothing: antialiased; }
+body {
+  font-family: var(--font-display);
+  background: var(--bg); color: var(--fg);
+  padding: 40px 32px 80px;
+  transition: background .2s ease, color .2s ease;
+}
+.page { max-width: 1180px; margin: 0 auto; }
+
+/* ---- page chrome ---- */
+.page-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; margin-bottom: 36px; }
+h1 { font-size: 24px; font-weight: 700; letter-spacing: -.02em; }
+h1 .tag { font-size: 11px; font-weight: 600; color: var(--accent); background: var(--accent-muted); padding: 3px 9px; border-radius: var(--radius-full); vertical-align: 3px; margin-left: 10px; }
+.subtitle { margin-top: 8px; font-size: 13.5px; color: var(--fg-secondary); line-height: 1.6; max-width: 640px; }
+.theme-toggle {
+  flex-shrink: 0; display: inline-flex; align-items: center; gap: 7px;
+  padding: 8px 14px; font-size: 12.5px; font-weight: 600; font-family: inherit;
+  color: var(--fg-secondary); background: var(--surface);
+  border: 1px solid var(--border); border-radius: var(--radius-md); cursor: pointer;
+}
+.theme-toggle:hover { background: var(--surface-hover); color: var(--fg); }
+.section-title { font-size: 13px; font-weight: 700; text-transform: uppercase; letter-spacing: .08em; color: var(--fg-tertiary); margin: 40px 0 16px; }
+code.inline { font-family: ui-monospace, 'SF Mono', Menlo, monospace; font-size: 12px; background: var(--surface); border: 1px solid var(--border); border-radius: 5px; padding: 1px 6px; }
+
+/* ============================================
+   Sidebar mockup (faithful to .sidebar styles)
+   ============================================ */
+.mock-row { display: flex; gap: 28px; flex-wrap: wrap; align-items: flex-start; }
+.mock-frame {
+  background: var(--bg-secondary);
+  border: 1px solid var(--border); border-radius: 14px;
+  padding: 22px; display: flex; gap: 22px; flex-wrap: wrap;
+}
+.mock-label { font-size: 12px; font-weight: 600; color: var(--fg-tertiary); margin-bottom: 10px; }
+.sidebar {
+  width: var(--sidebar-w);
+  background: var(--sidebar-bg);
+  border: 1px solid var(--sidebar-border); border-radius: 10px;
+  display: flex; flex-direction: column; overflow: hidden;
+  box-shadow: 0 4px 12px rgba(0,0,0,.25);
+}
+.sidebar.collapsed { width: 72px; }
+.sidebar-logo {
+  display: flex; align-items: center; gap: 10px;
+  padding: 16px 20px; border-bottom: 1px solid var(--sidebar-border);
+}
+.sidebar.collapsed .sidebar-logo { justify-content: center; padding: 16px 8px; }
+.logo-mark {
+  width: 32px; height: 32px; border-radius: 6px; flex-shrink: 0;
+  background: linear-gradient(135deg, var(--accent), #a371f7);
+  display: grid; place-items: center; color: #fff; font-weight: 800; font-size: 15px;
+}
+.brand-name { font-size: 18px; font-weight: 700; color: var(--accent); }
+.sidebar-nav { flex: 1; padding: 12px; }
+.sidebar-section-label {
+  font-size: 11px; font-weight: 600; color: var(--fg-tertiary);
+  text-transform: uppercase; letter-spacing: .05em;
+  padding: 12px 12px 6px;
+}
+.sidebar-link {
+  display: flex; align-items: center; gap: 10px;
+  padding: 8px 12px; border-radius: var(--radius-md);
+  font-size: 14px; font-weight: 500; color: var(--fg-secondary);
+  text-decoration: none; cursor: pointer; position: relative;
+  transition: background .15s, color .15s;
+}
+.sidebar-link:hover { background: var(--surface-hover); color: var(--fg); }
+.sidebar-link.active { background: var(--sidebar-active); color: var(--accent); }
+.link-icon { width: 20px; height: 20px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; }
+.link-icon svg { width: 18px; height: 18px; }
+.sidebar-link .badge {
+  margin-left: auto; font-size: 11px; font-weight: 600;
+  padding: 2px 7px; border-radius: var(--radius-full);
+  background: var(--accent-muted); color: var(--accent);
+}
+.sidebar.collapsed .sidebar-link { justify-content: center; padding: 10px; }
+.sidebar.collapsed .brand-name,
+.sidebar.collapsed .sidebar-section-label,
+.sidebar.collapsed .link-text,
+.sidebar.collapsed .badge { display: none; }
+.sidebar-footer { padding: 12px; border-top: 1px solid var(--sidebar-border); }
+.sidebar-user { display: flex; align-items: center; gap: 10px; padding: 8px 12px; border-radius: var(--radius-md); }
+.sidebar.collapsed .sidebar-user { justify-content: center; padding: 12px 8px; }
+.user-avatar {
+  width: 32px; height: 32px; border-radius: 50%; flex-shrink: 0;
+  background: var(--surface); border: 1px solid var(--border);
+  display: grid; place-items: center; font-size: 14px; font-weight: 600; color: var(--fg-secondary);
+}
+.user-name { font-size: 13px; font-weight: 600; color: var(--fg); }
+.user-plan { font-size: 11px; color: var(--fg-tertiary); }
+.user-plan.pro { color: var(--accent); font-weight: 600; }
+.sidebar.collapsed .user-info { display: none; }
+.tip { font-size: 12px; color: var(--fg-tertiary); margin-top: 10px; }
+
+/* ============================================
+   Old vs New gallery
+   ============================================ */
+.gallery { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 14px; }
+.gcard {
+  display: flex; align-items: center; gap: 14px;
+  background: var(--surface); border: 1px solid var(--border); border-radius: 12px;
+  padding: 16px;
+}
+.gcard .swatch {
+  width: 52px; height: 52px; border-radius: 10px; flex-shrink: 0;
+  display: grid; place-items: center;
+}
+.gcard .swatch.old { background: var(--bg-secondary); border: 1px dashed var(--border-light); }
+.gcard .swatch.new { background: var(--accent-subtle); border: 1px solid var(--accent-muted); }
+.swatch svg { width: 24px; height: 24px; }
+.gmeta { flex: 1; min-width: 0; }
+.gmeta .name { font-size: 14px; font-weight: 700; }
+.gmeta .name small { font-weight: 500; color: var(--fg-tertiary); margin-left: 6px; }
+.gmeta .why { font-size: 12.5px; color: var(--fg-secondary); line-height: 1.55; margin-top: 4px; }
+.gmeta .route { font-size: 11px; font-family: ui-monospace, 'SF Mono', Menlo, monospace; color: var(--fg-tertiary); margin-top: 5px; }
+.arrow-col { align-self: center; color: var(--fg-tertiary); font-size: 15px; flex-shrink: 0; }
+
+/* ============================================
+   Mobile bottom nav mockup
+   ============================================ */
+.phone {
+  width: 300px; border: 1px solid var(--border); border-radius: 26px;
+  background: var(--bg); overflow: hidden; box-shadow: 0 4px 12px rgba(0,0,0,.25);
+}
+.phone-screen { height: 120px; background: var(--bg-secondary); }
+.mobile-bottom-nav {
+  display: grid; grid-template-columns: repeat(4, minmax(0, 1fr));
+  border-top: 1px solid var(--border); background: var(--bg);
+  padding: 6px 16px 12px;
+}
+.mobile-nav-link {
+  position: relative; min-height: 48px;
+  display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 2px;
+  border-radius: var(--radius-md);
+  color: var(--fg-tertiary); font-size: 11px; font-weight: 600;
+}
+.mobile-nav-link.active { color: var(--accent); background: var(--accent-muted); }
+.mobile-nav-link svg { width: 21px; height: 21px; }
+</style>
+</head>
+<body>
+<div class="page">
+
+  <div class="page-header">
+    <div>
+      <h1>Sidebar Icon Redesign<span class="tag">feature/web-sidebar-icon</span></h1>
+      <p class="subtitle">
+        桌面侧栏 7 个导航图标全部重绘，移动端底部导航同步对齐。全部为 24×24 inline stroke SVG（stroke-width 2、round cap），沿用现有 <code class="inline">.link-icon</code> 18px 渲染尺寸。原则：一个图标只承载一个功能隐喻，小尺寸下轮廓可辨。
+      </p>
+    </div>
+    <button class="theme-toggle" onclick="toggleTheme()">
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>
+      <span id="theme-label">浅色模式</span>
+    </button>
+  </div>
+
+  <!-- ============ Sidebar live mockup ============ -->
+  <div class="section-title">Sidebar 实际效果（展开 260px / 收起 72px）</div>
+  <div class="mock-frame">
+    <div>
+      <div class="mock-label">展开态 · 「用量分析」选中</div>
+      <nav class="sidebar" id="sidebar-expanded"></nav>
+    </div>
+    <div>
+      <div class="mock-label">收起态 · 仅图标</div>
+      <nav class="sidebar collapsed" id="sidebar-collapsed"></nav>
+      <div class="tip">悬停可预览 hover 态，收起态依赖 tooltip（title）补充语义。</div>
+    </div>
+  </div>
+
+  <!-- ============ Old vs New ============ -->
+  <div class="section-title">逐项对比：旧 → 新</div>
+  <div class="gallery" id="gallery"></div>
+
+  <!-- ============ Mobile ============ -->
+  <div class="section-title">移动端底部导航（同步对齐）</div>
+  <div class="mock-frame">
+    <div>
+      <div class="mock-label">会话 tab 选中</div>
+      <div class="phone"><div class="phone-screen"></div><nav class="mobile-bottom-nav" id="mobile-nav"></nav></div>
+    </div>
+  </div>
+
+</div>
+
+<script>
+/* ---- icon registry: new icons exactly as implemented in App.vue / MobileBottomNav.vue ---- */
+const ICONS = {
+  dashboard: '<path d="m12 14 4-4"/><path d="M3.34 19a10 10 0 1 1 17.32 0"/>',
+  sessions:  '<path d="M14 9a2 2 0 0 1-2 2H6l-4 4V4a2 2 0 0 1 2-2h8a2 2 0 0 1 2 2z"/><path d="M18 9h2a2 2 0 0 1 2 2v11l-4-4h-6a2 2 0 0 1-2-2v-1"/>',
+  inbox:     '<path d="M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9"/><path d="M10.3 21a1.94 1.94 0 0 0 3.4 0"/>',
+  memory:    '<path d="M12 5a3 3 0 1 0-5.997.125 4 4 0 0 0-2.526 5.77 4 4 0 0 0 .556 6.588A4 4 0 1 0 12 18Z"/><path d="M12 5a3 3 0 1 1 5.997.125 4 4 0 0 1 2.526 5.77 4 4 0 0 1-.556 6.588A4 4 0 1 1 12 18Z"/><path d="M15 13a4.5 4.5 0 0 1-3-4 4.5 4.5 0 0 1-3 4"/><path d="M17.599 6.5a3 3 0 0 0 .399-1.375"/><path d="M6.003 5.125A3 3 0 0 0 6.401 6.5"/><path d="M3.477 10.896a4 4 0 0 1 .585-.396"/><path d="M19.938 10.5a4 4 0 0 1 .585.396"/><path d="M6 18a4 4 0 0 1-1.967-.516"/><path d="M19.967 17.484A4 4 0 0 1 18 18"/>',
+  tokens:    '<path d="M3 3v18h18"/><path d="M18 17V9"/><path d="M13 17V5"/><path d="M8 17v-3"/>',
+  hosts:     '<rect width="20" height="8" x="2" y="2" rx="2"/><rect width="20" height="8" x="2" y="14" rx="2"/><path d="M6 6h.01M6 18h.01"/>',
+  settings:  '<path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"/><circle cx="12" cy="12" r="3"/>',
+};
+/* ---- old icons (pre-redesign, for comparison) ---- */
+const OLD_ICONS = {
+  dashboard: '<rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/>',
+  sessions:  '<path d="M21 15a2 2 0 01-2 2H7l-4 4V5a2 2 0 012-2h14a2 2 0 012 2z"/>',
+  inbox:     '<path d="M4 4h16v14H4z"/><path d="M4 13h5l2 2h2l2-2h5"/>',
+  memory:    '<path d="M12 3v18M5 8l7-5 7 5M5 16l7 5 7-5"/>',
+  tokens:    '<path d="M18 20V10M12 20V4M6 20v-6"/>',
+  hosts:     '<rect x="2" y="2" width="20" height="20" rx="3"/><path d="M7 2v20M17 2v20M2 12h20"/>',
+  settings:  '<circle cx="12" cy="12" r="3"/><path d="M12 1v2M12 21v2M4.22 4.22l1.42 1.42M18.36 18.36l1.42 1.42M1 12h2M21 12h2M4.22 19.78l1.42-1.42M18.36 5.64l1.42-1.42"/>',
+};
+
+const svg = (body, size = 18) =>
+  `<svg width="${size}" height="${size}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">${body}</svg>`;
+
+const NAV = [
+  { section: '概览' },
+  { key: 'dashboard', label: '仪表盘', en: 'Dashboard',        route: '/',        why: '速度表指针 = 总览监控台。旧四宫格易与「应用/模块」混淆，gauge 强调「看整体状态」。' },
+  { key: 'sessions',  label: '会话',   en: 'Sessions',         route: '/session/default', badge: 3, why: '双气泡表达「多个会话的列表」，旧单气泡更像单个聊天窗口。' },
+  { key: 'inbox',     label: 'Attention Inbox', en: 'Attention', route: '/inbox',  badge: '2', why: '铃铛 = 等你处理的通知/审批；旧图形是畸形托盘，几乎无法识别。' },
+  { key: 'memory',    label: '工程记忆', en: 'Memory',          route: '/memory',  why: '大脑是 AI 记忆的通用隐喻；旧枝杈图形无任何语义指向。' },
+  { key: 'tokens',    label: '用量分析', en: 'Usage',           route: '/tokens',  why: '带坐标轴的柱状图 = 统计图表；旧裸柱条易被当成均衡器/信号强度。' },
+  { section: '管理' },
+  { key: 'hosts',     label: '主机',   en: 'Hosts',            route: '/hosts',   why: '服务器机架（双机柜 + 指示灯）= 机器；旧十字分格窗口像布局编辑器。' },
+  { key: 'settings',  label: '设置',   en: 'Settings',         route: '/settings', why: '标准齿轮 = 设置的行业默认符号；旧图形牙齿过细、实为「太阳」。' },
+];
+
+/* ---- render expanded + collapsed sidebars ---- */
+function sidebarHTML(collapsed) {
+  let html = `
+    <div class="sidebar-logo"><div class="logo-mark">p</div><span class="brand-name">pocketctl</span></div>
+    <div class="sidebar-nav">`;
+  for (const item of NAV) {
+    if (item.section) { html += `<div class="sidebar-section-label">${item.section}</div>`; continue; }
+    html += `
+      <a class="sidebar-link${item.key === 'tokens' && !collapsed ? ' active' : ''}" href="${item.route}"
+         ${collapsed ? `title="${item.label}" aria-label="${item.label}"` : ''}>
+        <span class="link-icon">${svg(ICONS[item.key])}</span>
+        <span class="link-text">${item.label}</span>
+        ${item.badge && !collapsed ? `<span class="badge">${item.badge}</span>` : ''}
+      </a>`;
+  }
+  html += `</div>
+    <div class="sidebar-footer">
+      <div class="sidebar-user">
+        <div class="user-avatar">M</div>
+        <div class="user-info"><div class="user-name">muwenbin</div><div class="user-plan pro">Pro</div></div>
+      </div>
+    </div>`;
+  return html;
+}
+document.getElementById('sidebar-expanded').innerHTML = sidebarHTML(false);
+document.getElementById('sidebar-collapsed').innerHTML = sidebarHTML(true);
+
+/* ---- render old vs new gallery ---- */
+document.getElementById('gallery').innerHTML = NAV.filter(i => i.key).map(item => `
+  <div class="gcard">
+    <div class="swatch old" title="旧图标">${svg(OLD_ICONS[item.key], 24)}</div>
+    <div class="arrow-col">→</div>
+    <div class="swatch new" title="新图标">${svg(ICONS[item.key], 24)}</div>
+    <div class="gmeta">
+      <div class="name">${item.label}<small>${item.en}</small></div>
+      <div class="why">${item.why}</div>
+      <div class="route">${item.route}</div>
+    </div>
+  </div>`).join('');
+
+/* ---- render mobile bottom nav ---- */
+document.getElementById('mobile-nav').innerHTML = [
+  { key: 'sessions', label: '会话',   active: true },
+  { key: 'hosts',    label: '主机' },
+  { key: 'memory',   label: '记忆' },
+  { key: 'settings', label: '设置' },
+].map(item => `
+  <a class="mobile-nav-link${item.active ? ' active' : ''}" href="#">
+    ${svg(ICONS[item.key], 21)}
+    <span>${item.label}</span>
+  </a>`).join('');
+
+/* ---- theme toggle ---- */
+function toggleTheme() {
+  const el = document.documentElement;
+  const next = el.getAttribute('data-theme') === 'dark' ? 'light' : 'dark';
+  el.setAttribute('data-theme', next);
+  document.getElementById('theme-label').textContent = next === 'dark' ? '浅色模式' : '深色模式';
+}
+</script>
+</body>
+</html>

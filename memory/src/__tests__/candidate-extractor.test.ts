@@ -133,6 +133,21 @@ describe('extraction prompts', () => {
     expect(prompt).toContain('For task scope, scope_key MUST be exactly turn-synthetic-123')
   })
 
+  test('the system prompt gives JSON-only models the exact claim and scope literals', () => {
+    const prompt = buildExtractionSystemPrompt(['h0-aaaaaaaa'], 'turn-synthetic-123')
+    const allowedClaimTypes = [
+      'architecture_decision', 'repository_convention', 'bug_root_cause',
+      'rejected_hypothesis', 'test_invariant', 'implementation_map',
+      'operational_runbook', 'work_method', 'reusable_skill_candidate',
+    ]
+    for (const claimType of allowedClaimTypes) {
+      expect(prompt).toContain(`"${claimType}"`)
+    }
+    expect(prompt).toContain('For installation scope, scope_key MUST be exactly "global"')
+    expect(prompt).toContain('scope_key must always be a non-empty string and must never be null')
+    expect(prompt).toContain('If record.repository has no usable identifier, use installation or task scope')
+  })
+
   test('the repair prompt repeats the bounded contract and evidence allowlist', () => {
     const prompt = buildRepairSystemPrompt(
       ['candidates.0.confidence:too_big'],

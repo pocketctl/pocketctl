@@ -39,9 +39,15 @@ export function initExtensionSchema(pool: Pick<pg.Pool, 'query'>): Promise<unkno
       start_feed_id     BIGINT NOT NULL DEFAULT 0,
       config_version    BIGINT NOT NULL DEFAULT 1,
       created_at        TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-      updated_at        TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-      UNIQUE (owner_user_id, provider_id)
+      updated_at        TIMESTAMPTZ NOT NULL DEFAULT NOW()
     );
+
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_extension_installations_live_owner_provider
+      ON extension_installations (owner_user_id, provider_id)
+      WHERE status IN ('pending', 'active', 'paused', 'revoking');
+
+    ALTER TABLE extension_installations
+      DROP CONSTRAINT IF EXISTS extension_installations_owner_user_id_provider_id_key;
 
     CREATE TABLE IF NOT EXISTS extension_source_outbox (
       source_seq        BIGSERIAL PRIMARY KEY,
@@ -166,6 +172,7 @@ export async function assertExtensionSchema(pool: Pick<pg.Pool, 'query'>): Promi
       AND to_regclass('extension_provider_status') IS NOT NULL
       AND to_regclass('extension_provider_usage_facts') IS NOT NULL
       AND to_regclass('extension_purge_requests') IS NOT NULL
+      AND to_regclass('idx_extension_installations_live_owner_provider') IS NOT NULL
       AND to_regclass('idx_extension_feed_owner_id_feed_id') IS NOT NULL
       AND to_regclass('idx_extension_feed_owner_topic_feed_id') IS NOT NULL
       AND to_regclass('idx_extension_feed_session_id_feed_id') IS NOT NULL

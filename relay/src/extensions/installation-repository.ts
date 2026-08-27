@@ -155,7 +155,9 @@ export class ExtensionInstallationRepository {
          (installation_id, provider_id, owner_user_id, status, granted_scopes,
           subscriptions, enabled_services, event_filter, start_policy, start_feed_id, config_version)
        VALUES ($1, $2, $3, 'pending', $4, $5, $6, $7::jsonb, $8, $9, 1)
-       ON CONFLICT (owner_user_id, provider_id) DO NOTHING
+       ON CONFLICT (owner_user_id, provider_id)
+         WHERE status IN ('pending', 'active', 'paused', 'revoking')
+       DO NOTHING
        RETURNING ${INSTALLATION_COLUMNS}`,
       [
         randomUUID(), input.providerId, input.ownerUserId,
