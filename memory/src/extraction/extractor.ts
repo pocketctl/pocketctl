@@ -82,7 +82,7 @@ export function createCandidateExtractor(deps: CandidateExtractorDeps) {
         .filter(([, raw]) => !(raw !== null && typeof raw === 'object'
           && (raw as Record<string, unknown>).omitted === true))
         .map(([handle]) => handle)
-      const systemPrompt = buildExtractionSystemPrompt(manifestHandles)
+      const systemPrompt = buildExtractionSystemPrompt(manifestHandles, episode.turnId)
       let usage = { inputTokens: 0, outputTokens: 0 }
       let totalCostMicros = 0
 
@@ -136,7 +136,7 @@ export function createCandidateExtractor(deps: CandidateExtractorDeps) {
         const failureCodes = outcome.errorCode.slice('invalid_output:'.length).split('|')
         outcome = await attempt(
           'candidate_repair',
-          buildRepairSystemPrompt(failureCodes, manifestHandles),
+          buildRepairSystemPrompt(failureCodes, manifestHandles, episode.turnId),
         )
       }
 

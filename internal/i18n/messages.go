@@ -408,6 +408,7 @@ var messages = map[string]msg{
 	"status.unknown":      {"unknown", "未知"},
 	"status.pid":          {"PID:    %d", "PID:    %d"},
 	"status.relay":        {"Relay:  %s", "Relay:  %s"},
+	"status.account":      {"Account: %s", "登录邮箱: %s"},
 	"status.status_line":  {"Status: %s", "Status: %s"},
 	"status.started":      {"Started: %s", "Started: %s"},
 	"status.connected":    {"connected", "已连接"},

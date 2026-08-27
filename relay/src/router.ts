@@ -940,7 +940,7 @@ export class Router {
           return false;
         }
         const decision = await claimBoundDaemonSlot(this.controlPool, {
-          userId, daemonId, hostname, agents,
+          userId, daemonId, machineId, hostname, agents,
           arch: daemonArch, version: daemonVersion, startedAt: daemonStartedAt,
           limit: enforcement === 'enforce' ? entitlements.maxBoundDaemons : null,
         });
@@ -955,7 +955,9 @@ export class Router {
             retryable: false,
             message: decision.reason === 'host_quota_exceeded'
               ? `免费版最多连接 ${decision.limit} 台主机`
-              : '该主机已绑定其他账号',
+              : decision.reason === 'machine_already_online'
+                ? '该设备已有在线 daemon，请先停止另一实例后重试'
+                : '该主机已绑定其他账号',
           });
           ws.close(4008, decision.reason);
           return false;
@@ -989,6 +991,14 @@ export class Router {
       if (e instanceof db.TokenRevokedDuringActivationError) {
         this.send(ws, { type: 'register_rejected', reason: 'token_revoked', retryable: false });
         ws.close(4001, 'token revoked');
+        return false;
+      }
+      if (e instanceof db.MachineAlreadyOnlineError) {
+        this.send(ws, {
+          type: 'register_rejected', reason: 'machine_already_online', retryable: false,
+          message: '该设备已有在线 daemon，请先停止另一实例后重试',
+        });
+        ws.close(4008, 'machine already online');
         return false;
       }
       this.send(ws, { type: 'register_rejected', reason: 'activation_failed', retryable: true });
@@ -1114,6 +1124,16 @@ export class Router {
         startedAt: daemonStartedAt, persistedHigh: baseline, pending: new Set(), effects: new Map(),
         draining: false, inflight: new Set(), baselineSet: baseline > 0, accepting: true,
       });
+    }
+
+    try {
+      await db.consolidateOfflineMachineDaemons(this.controlPool, { userId, daemonId, machineId });
+    } catch (e) {
+      console.error('consolidate offline machine daemons:', e);
+      await compensateActivation();
+      this.send(ws, { type: 'register_rejected', reason: 'machine_consolidation_failed', retryable: true });
+      ws.close(1011, 'machine consolidation failed');
+      return false;
     }
 
     if (previousDaemon && previousDaemon.ws !== ws) {

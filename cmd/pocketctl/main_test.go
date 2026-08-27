@@ -248,6 +248,18 @@ func TestDaemonStatusRendersDurableIngressDiagnostics(t *testing.T) {
 	}
 }
 
+func TestDaemonStatusRendersStartupAccountEmail(t *testing.T) {
+	t.Cleanup(func() { i18n.Set(i18n.English) })
+	i18n.Set(i18n.English)
+	var out bytes.Buffer
+	renderDaemonStatus(&out, daemon.DaemonState{
+		DaemonID: "d1", PID: os.Getpid(), AccountEmail: "daemon@example.com",
+	}, os.Getpid(), func(int) bool { return true })
+	if got := out.String(); !strings.Contains(got, "Account: daemon@example.com") {
+		t.Fatalf("output=%q", got)
+	}
+}
+
 func TestDaemonStatePersistenceRecordsDurableIngressSnapshot(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	persistence := newDaemonStatePersistence(daemon.DaemonState{PID: os.Getpid(), EventWindow: -1, UnackedEvents: -1})

@@ -23,6 +23,7 @@ type DaemonState struct {
 	RuntimeInstanceToken string         `json:"runtime_instance_token,omitempty"`
 	Version              string         `json:"version"`
 	RelayURL             string         `json:"relay_url"`
+	AccountEmail         string         `json:"account_email,omitempty"`
 	Connected            bool           `json:"connected"`
 	ConnectionStatus     string         `json:"connection_status,omitempty"`
 	ConnectionReason     string         `json:"connection_reason,omitempty"`

@@ -300,7 +300,7 @@ describeWithDatabase('hybrid claim search (PostgreSQL)', () => {
     expect(current.hits.map(hit => hit.versionId)).toEqual([second.rows[0].version_id])
   })
 
-  test('lexical recall covers the full 10k corpus before vector candidate capping', async () => {
+  test('lexical recall covers 10k active versions with p95 below 500ms', async () => {
     const episode = await pool.query<{ episode_id: string }>(`
       SELECT episode_id::text FROM work_episodes WHERE installation_id = $1 LIMIT 1
     `, [INSTALLATION])
@@ -309,12 +309,12 @@ describeWithDatabase('hybrid claim search (PostgreSQL)', () => {
         (substr(md5('claim-' || g::text),1,8) || '-' || substr(md5('claim-' || g::text),9,4)
           || '-4' || substr(md5('claim-' || g::text),14,3) || '-8'
           || substr(md5('claim-' || g::text),18,3) || '-' || substr(md5('claim-' || g::text),21,12))::uuid AS claim_id,
-        CASE WHEN g = 2001 THEN 'ffffffff-ffff-4fff-8fff-ffffffffffff'::uuid ELSE
+        CASE WHEN g = 9999 THEN 'ffffffff-ffff-4fff-8fff-ffffffffffff'::uuid ELSE
           (substr(md5('version-' || g::text),1,8) || '-' || substr(md5('version-' || g::text),9,4)
             || '-4' || substr(md5('version-' || g::text),14,3) || '-8'
             || substr(md5('version-' || g::text),18,3) || '-' || substr(md5('version-' || g::text),21,12))::uuid END AS version_id,
-        CASE WHEN g = 2001 THEN 'needle beyond arbitrary prefilter' ELSE 'unrelated filler ' || g::text END AS statement
-      FROM generate_series(1, 2001) g
+        CASE WHEN g = 9999 THEN 'needle beyond arbitrary prefilter' ELSE 'unrelated filler ' || g::text END AS statement
+      FROM generate_series(1, 10000) g
     `
     await pool.query(`
       WITH generated AS (${generatedRows})
@@ -355,6 +355,30 @@ describeWithDatabase('hybrid claim search (PostgreSQL)', () => {
     })
     expect(result.hits.map(hit => hit.versionId))
       .toContain('ffffffff-ffff-4fff-8fff-ffffffffffff')
+
+    // Warm the PostgreSQL relation/index pages, then measure the same service
+    // boundary used by REST and MCP. The target is frozen in plan section 14.
+    await service().search({ installationId: INSTALLATION, query: 'unrelated filler 5000' })
+    const durations: number[] = []
+    for (let index = 0; index < 25; index += 1) {
+      const started = performance.now()
+      await service().search({
+        installationId: INSTALLATION,
+        query: index % 2 === 0 ? 'needle beyond arbitrary prefilter' : `unrelated filler ${index + 1}`,
+      })
+      durations.push(performance.now() - started)
+    }
+    durations.sort((left, right) => left - right)
+    const p95 = durations[Math.ceil(durations.length * 0.95) - 1]
+    console.info(JSON.stringify({
+      gate: 'memory_lexical_10k',
+      activeVersions: 10_000,
+      samples: durations.length,
+      medianMs: Number(durations[Math.floor(durations.length / 2)].toFixed(2)),
+      p95Ms: Number(p95.toFixed(2)),
+      maxMs: Number(durations.at(-1)!.toFixed(2)),
+    }))
+    expect(p95).toBeLessThan(500)
   }, 30_000)
 
   test('English FTS and Chinese/code trigram recall both work', async () => {

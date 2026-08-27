@@ -478,7 +478,44 @@ func (sm *SessionManager) confirmPTYInterrupt(sessionID string) {
 		return // already terminalized by native evidence or exit
 	}
 	sm.terminalizeTurn(key, rec, protocol.TurnStateInterrupted, "pty_ctrl_c_confirmed", protocol.TurnConfidenceInferred)
-	sm.SetSessionStatus(sessionID, protocol.StatusIdle)
+	sm.publishInferredPTYIdle(sessionID, rec.TurnID)
+}
+
+// publishInferredPTYIdle publishes the session-idle side of a confirmed PTY
+// interrupt without treating it as fresh agent completion evidence. A user can
+// start a continuation as soon as the interrupted turn is published; that
+// successor owns the session lifecycle, so the old inference must not overwrite
+// its running state or terminalize it as completed.
+func (sm *SessionManager) publishInferredPTYIdle(sessionID, interruptedTurnID string) {
+	if interruptedTurnID == "" {
+		return
+	}
+	key := turn.ActorKey{SessionID: sessionID}
+	last, ok := sm.turns.Last(key)
+	if !ok || last.TurnID != interruptedTurnID || last.State != protocol.TurnStateInterrupted {
+		return
+	}
+	if _, ok := sm.turns.Active(key); ok {
+		return
+	}
+
+	sm.mu.Lock()
+	ps, ok := sm.sessions[sessionID]
+	if !ok {
+		sm.mu.Unlock()
+		return
+	}
+	now := time.Now()
+	ps.Status = protocol.StatusIdle
+	ps.LastActivityAt = now
+	sm.mu.Unlock()
+
+	sm.outputCh <- protocol.DaemonEvent{
+		Type:           "session_status",
+		SessionID:      sessionID,
+		Status:         protocol.StatusIdle,
+		LastActivityAt: now.UTC().Format(time.RFC3339),
+	}
 }
 
 // confirmAbortInterrupt is the opencode counterpart: after POST /abort was

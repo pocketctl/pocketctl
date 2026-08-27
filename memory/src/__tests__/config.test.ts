@@ -21,6 +21,7 @@ describe('memory config', () => {
     const config = loadMemoryConfig(baseEnv())
     expect(config.mode).toBe('enabled')
     expect(config.port).toBe(8090)
+    expect(config.apiBind).toBe('all')
     expect(config.dbPoolMax).toBe(12)
     expect(config.providerId).toBe('pocketctl-memory')
     expect(config.providerVersion).toBe('0.1.0')
@@ -124,5 +125,11 @@ describe('memory config', () => {
   test('accepts only known log levels', () => {
     expect(loadMemoryConfig(baseEnv({ MEMORY_LOG_LEVEL: 'debug' })).logLevel).toBe('debug')
     expect(() => loadMemoryConfig(baseEnv({ MEMORY_LOG_LEVEL: 'verbose' }))).toThrow(/MEMORY_LOG_LEVEL/)
+  })
+
+  test('supports an explicit loopback-only API bind for native production', () => {
+    expect(loadMemoryConfig(baseEnv({ MEMORY_API_BIND: 'loopback' })).apiBind).toBe('loopback')
+    expect(loadMemoryConfig(baseEnv({ MEMORY_API_BIND: 'all' })).apiBind).toBe('all')
+    expect(() => loadMemoryConfig(baseEnv({ MEMORY_API_BIND: 'public' }))).toThrow(/MEMORY_API_BIND/)
   })
 })

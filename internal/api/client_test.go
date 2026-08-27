@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -55,5 +56,44 @@ func TestVerifyEmailCodeIncludesLanguage(t *testing.T) {
 	}
 	if accessToken != "access" || refreshToken != "refresh" {
 		t.Fatalf("VerifyEmailCode() = (%q, %q), want (%q, %q)", accessToken, refreshToken, "access", "refresh")
+	}
+}
+
+func TestParseJWTEmail(t *testing.T) {
+	tests := []struct {
+		name    string
+		token   string
+		want    string
+		wantErr string
+	}{
+		{
+			name:  "email claim",
+			token: "header.eyJlbWFpbCI6InVzZXJAZXhhbXBsZS5jb20ifQ.signature",
+			want:  "user@example.com",
+		},
+		{
+			name:    "missing email claim",
+			token:   "header.eyJleHAiOjF9.signature",
+			wantErr: "no email claim",
+		},
+		{
+			name:    "invalid token",
+			token:   "not-a-jwt",
+			wantErr: "invalid JWT format",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := ParseJWTEmail(tt.token)
+			if tt.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+					t.Fatalf("ParseJWTEmail() error = %v, want %q", err, tt.wantErr)
+				}
+				return
+			}
+			if err != nil || got != tt.want {
+				t.Fatalf("ParseJWTEmail() = (%q, %v), want (%q, nil)", got, err, tt.want)
+			}
+		})
 	}
 }

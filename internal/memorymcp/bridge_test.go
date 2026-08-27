@@ -42,11 +42,13 @@ func (f *fakeSource) Grant(ctx context.Context) (Grant, error) {
 func TestBridgeForwardsRequestsVerbatim(t *testing.T) {
 	var received []byte
 	var authHeader string
+	var acceptHeader string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		buf := new(bytes.Buffer)
 		_, _ = buf.ReadFrom(r.Body)
 		received = buf.Bytes()
 		authHeader = r.Header.Get("authorization")
+		acceptHeader = r.Header.Get("accept")
 		w.Header().Set("content-type", "application/json")
 		_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":1,"result":{"ok":true}}`))
 	}))
@@ -67,6 +69,9 @@ func TestBridgeForwardsRequestsVerbatim(t *testing.T) {
 	}
 	if !strings.Contains(authHeader, "grant-token") {
 		t.Fatalf("authorization header missing grant, got %q", authHeader)
+	}
+	if acceptHeader != "application/json, text/event-stream" {
+		t.Fatalf("bridge must advertise both supported MCP response modes, got %q", acceptHeader)
 	}
 	if !bytes.Contains(received, []byte(`"method":"tools/list"`)) {
 		t.Fatalf("forwarded body altered: %s", received)
@@ -158,6 +163,27 @@ func TestBridgeRejectsNonJSONSuccessResponses(t *testing.T) {
 	}
 	if !strings.Contains(stdout.String(), `"message":"invalid_response"`) {
 		t.Fatalf("expected bounded invalid response, got %q", stdout.String())
+	}
+}
+
+func TestBridgeForwardsSingleSSEJsonResponseAsJSONLine(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("content-type", "text/event-stream")
+		_, _ = w.Write([]byte("event: message\ndata: {\"jsonrpc\":\"2.0\",\"id\":11,\"result\":{\"ok\":true}}\n\n"))
+	}))
+	defer server.Close()
+	source := &fakeSource{grant: Grant{Token: "t", ExpiresAt: time.Now().Add(time.Minute), Origin: server.URL}}
+	stdout := &bytes.Buffer{}
+	bridge := &Bridge{
+		Grants: &CachingGrantSource{Inner: source, Now: time.Now},
+		Stdin:  strings.NewReader(`{"jsonrpc":"2.0","id":11,"method":"tools/list"}` + "\n"),
+		Stdout: stdout,
+	}
+	if err := bridge.Run(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if got := stdout.String(); got != "{\"jsonrpc\":\"2.0\",\"id\":11,\"result\":{\"ok\":true}}\n" {
+		t.Fatalf("single SSE response was not normalized to one JSON line: %q", got)
 	}
 }
 

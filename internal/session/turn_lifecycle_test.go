@@ -195,6 +195,56 @@ func TestTurnInputAfterConfirmedInterruptStartsNewTurn(t *testing.T) {
 	}
 }
 
+// The bounded PTY interrupt inference owns the idle transition for the turn it
+// just closed. If a continuation reserves a successor before that cleanup
+// publishes, the old inferred idle must not complete or overwrite the new turn.
+func TestTurnInferredPTYIdleDoesNotCompleteSuccessor(t *testing.T) {
+	sm, _ := newTurnTestManager(t)
+	ctx := context.Background()
+	if err := sm.SendMessageWithInput(ctx, UserMessageInput{SessionID: "turn-sess", Content: "one", RequestID: "req-1"}); err != nil {
+		t.Fatal(err)
+	}
+	drainEvents(sm.outputCh)
+
+	key := turn.ActorKey{SessionID: "turn-sess"}
+	interrupted, err := sm.turns.RequestInterrupt(key, protocol.TurnReasonUserRequested)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sm.terminalizeTurn(key, interrupted, protocol.TurnStateInterrupted, "pty_ctrl_c_confirmed", protocol.TurnConfidenceInferred)
+	drainEvents(sm.outputCh)
+
+	if err := sm.SendMessageWithInput(ctx, UserMessageInput{SessionID: "turn-sess", Content: "next", RequestID: "req-2"}); err != nil {
+		t.Fatal(err)
+	}
+	successor, ok := sm.ActiveTurn("turn-sess")
+	if !ok || successor.State != protocol.TurnStateRunning {
+		t.Fatalf("successor before inferred idle = %+v", successor)
+	}
+
+	// This is the exact late cleanup window from confirmPTYInterrupt.
+	sm.publishInferredPTYIdle("turn-sess", interrupted.TurnID)
+
+	active, ok := sm.ActiveTurn("turn-sess")
+	if !ok || active.TurnID != successor.TurnID || active.State != protocol.TurnStateRunning {
+		t.Fatalf("inferred idle changed successor = %+v", active)
+	}
+	sm.mu.RLock()
+	status := sm.sessions["turn-sess"].Status
+	sm.mu.RUnlock()
+	if status != protocol.StatusRunning {
+		t.Fatalf("session status = %q, want running", status)
+	}
+	for _, event := range drainEvents(sm.outputCh) {
+		if event.Type == protocol.EventTypeTurnStatus && event.TurnStatus == protocol.TurnStateCompleted {
+			t.Fatalf("inferred idle completed successor: %+v", event)
+		}
+		if event.Type == "session_status" && event.Status == protocol.StatusIdle {
+			t.Fatalf("inferred idle overwrote successor status: %+v", event)
+		}
+	}
+}
+
 // --- 5. interrupt then exit ordering ----------------------------------------
 
 func TestTurnInterruptThenExitOrdering(t *testing.T) {

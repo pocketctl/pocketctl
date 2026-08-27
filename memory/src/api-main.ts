@@ -180,7 +180,7 @@ async function main(): Promise<void> {
   }
 
   const port = config.port
-  await app.listen({ port, host: '0.0.0.0' })
+  await app.listen({ port, host: config.apiBind === 'all' ? '0.0.0.0' : '127.0.0.1' })
 
   const shutdown = async () => {
     await app.close()

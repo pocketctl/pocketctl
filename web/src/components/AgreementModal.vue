@@ -8,7 +8,7 @@
         </button>
       </div>
       <div class="modal-body">
-        <div class="update-date">{{ locale === 'zh' ? '更新日期：2026年7月26日' : 'Updated: July 26, 2026' }}</div>
+        <div class="update-date">{{ locale === 'zh' ? '更新日期：2026年8月26日' : 'Updated: August 26, 2026' }}</div>
 
         <!-- Chinese version -->
         <template v-if="locale === 'zh'">

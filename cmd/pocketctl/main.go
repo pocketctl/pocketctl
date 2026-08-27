@@ -1061,6 +1061,10 @@ func cmdDaemonStart(args []string) {
 		fmt.Fprintln(os.Stderr, i18n.T("error.token_required"))
 		os.Exit(1)
 	}
+	// Persist the identity that this daemon starts with. Status must not consult
+	// auth.json later: a subsequent `pocketctl login` may replace those tokens
+	// while this daemon is still connected as the original account.
+	accountEmail, _ := api.ParseJWTEmail(tok)
 
 	restartReadyFile := consumeRestartReadyEnv()
 	observedIntent, observedIntentExists, intentErr := daemon.ObserveStopIntent()
@@ -1234,6 +1238,7 @@ func cmdDaemonStart(args []string) {
 		RuntimeInstanceToken: runtimeInstanceToken,
 		Version:              version,
 		RelayURL:             url,
+		AccountEmail:         accountEmail,
 		ConnectionStatus:     string(ws.ConnectionReconnecting),
 		UpdatedAt:            daemonStartedAt.UTC(),
 		StartedAt:            daemonStartedAt,
@@ -2496,6 +2501,11 @@ func renderDaemonStatus(out io.Writer, state daemon.DaemonState, pidfilePID int,
 	fmt.Fprintln(out, i18n.T("status.version", ver))
 	fmt.Fprintln(out, i18n.T("status.pid", state.PID))
 	fmt.Fprintln(out, i18n.T("status.relay", state.RelayURL))
+	accountEmail := state.AccountEmail
+	if accountEmail == "" {
+		accountEmail = i18n.T("status.unknown")
+	}
+	fmt.Fprintln(out, i18n.T("status.account", accountEmail))
 	conn := localizedConnectionStatus(state)
 	fmt.Fprintln(out, i18n.T("status.status_line", conn))
 	if state.ConnectionReason != "" {

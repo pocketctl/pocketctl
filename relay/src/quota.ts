@@ -72,6 +72,7 @@ export interface QuotaSnapshot {
 export interface ClaimBoundDaemonInput {
   userId: number
   daemonId: string
+  machineId?: string
   hostname: string
   agents: any[]
   arch?: string
@@ -82,7 +83,13 @@ export interface ClaimBoundDaemonInput {
 
 export type BoundDaemonDecision =
   | { allowed: true; reconnect: boolean; used: number; limit: number | null }
-  | { allowed: false; reason: 'host_quota_exceeded' | 'daemon_owned_by_other_user'; used: number; limit: number | null }
+  | { allowed: false; reason: 'host_quota_exceeded' | 'daemon_owned_by_other_user' | 'machine_already_online'; used: number; limit: number | null }
+
+const STABLE_MACHINE_ID = /^(?:machine-[a-f0-9]{32}|daemon-[a-f0-9]{8})$/
+
+function isStableMachineID(machineId: string | undefined): machineId is string {
+  return typeof machineId === 'string' && STABLE_MACHINE_ID.test(machineId)
+}
 
 const ACTIVE_ROOT_SESSION_SQL = `
   SELECT COUNT(*)::int AS active_count
@@ -374,8 +381,28 @@ export async function claimBoundDaemonSlot(pool: pg.Pool, input: ClaimBoundDaemo
     }
 
     const reconnect = existing.rows.length > 0 && Number(existingOwner) === input.userId
+    let replacesOfflineMachine = false
+    if (!reconnect && isStableMachineID(input.machineId)) {
+      const machineRows = await client.query(
+        `SELECT status
+         FROM daemons
+         WHERE user_id = $1
+           AND daemon_id <> $2
+           AND (
+             machine_id = $3
+             OR (COALESCE(machine_id, '') IN ('', 'unknown') AND daemon_id = $3)
+           )
+         FOR UPDATE`,
+        [input.userId, input.daemonId, input.machineId],
+      )
+      if (machineRows.rows.some((row: { status?: string | null }) => row.status === 'online')) {
+        await client.query('COMMIT')
+        return { allowed: false, reason: 'machine_already_online', used: 0, limit: input.limit }
+      }
+      replacesOfflineMachine = machineRows.rows.some((row: { status?: string | null }) => row.status === 'offline')
+    }
     const used = await countBoundDaemonsLocked(client, input.userId)
-    if (!reconnect && input.limit !== null && used >= input.limit) {
+    if (!reconnect && !replacesOfflineMachine && input.limit !== null && used >= input.limit) {
       await client.query('COMMIT')
       return { allowed: false, reason: 'host_quota_exceeded', used, limit: input.limit }
     }
@@ -385,14 +412,19 @@ export async function claimBoundDaemonSlot(pool: pg.Pool, input: ClaimBoundDaemo
     // generation-guarded activation transaction.
     if (!reconnect) {
       await client.query(
-        `INSERT INTO daemons (daemon_id, user_id, status)
-         VALUES ($1, $2, 'offline')
+        `INSERT INTO daemons (daemon_id, user_id, machine_id, status)
+         VALUES ($1, $2, $3, 'offline')
          ON CONFLICT (daemon_id) DO NOTHING`,
-        [input.daemonId, input.userId],
+        [input.daemonId, input.userId, isStableMachineID(input.machineId) ? input.machineId : null],
       )
     }
     await client.query('COMMIT')
-    return { allowed: true, reconnect, used: reconnect ? used : used + 1, limit: input.limit }
+    return {
+      allowed: true,
+      reconnect,
+      used: reconnect || replacesOfflineMachine ? used : used + 1,
+      limit: input.limit,
+    }
   } catch (error) {
     await client.query('ROLLBACK')
     throw error

@@ -7,6 +7,7 @@
 export type MemoryMode = 'off' | 'shadow' | 'enabled'
 export type MemoryLogLevel = 'debug' | 'info' | 'warn' | 'error'
 export type MemoryMetricsBind = 'loopback' | 'all'
+export type MemoryApiBind = 'loopback' | 'all'
 
 export const MEMORY_PROVIDER_ID = 'pocketctl-memory' as const
 
@@ -33,6 +34,7 @@ export interface TombstoneHmacKey {
 export interface MemoryConfig {
   mode: MemoryMode
   port: number
+  apiBind: MemoryApiBind
   metricsPort: number
   metricsBind: MemoryMetricsBind
   databaseUrl: string
@@ -314,6 +316,7 @@ export function loadMemoryConfig(env: Record<string, string | undefined> = proce
   return {
     mode,
     port: parseBoundedInteger('MEMORY_PORT', env.MEMORY_PORT, 8090, 1, 65535),
+    apiBind: parseEnum('MEMORY_API_BIND', env.MEMORY_API_BIND, METRICS_BINDS, 'all'),
     metricsPort: parseBoundedInteger('MEMORY_METRICS_PORT', env.MEMORY_METRICS_PORT, 8091, 1, 65535),
     metricsBind: parseEnum('MEMORY_METRICS_BIND', env.MEMORY_METRICS_BIND, METRICS_BINDS, 'loopback'),
     databaseUrl,

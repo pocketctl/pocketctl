@@ -119,8 +119,8 @@ func (b *Bridge) Run(ctx context.Context) error {
 		if !hasID {
 			continue
 		}
-		contentType := strings.ToLower(response.Header.Get("content-type"))
-		if !strings.HasPrefix(contentType, "application/json") || !json.Valid(body) {
+		body, ok := normalizedJSONRPCResponse(response.Header.Get("content-type"), body)
+		if !ok {
 			b.writeRpcError(message.ID, -32050, "invalid_response")
 			continue
 		}
@@ -157,6 +157,8 @@ func callMemory(
 		return nil, nil, errors.New("internal_error")
 	}
 	request.Header.Set("content-type", "application/json")
+	// MCP servers may choose either a JSON body or a single SSE-framed JSON-RPC
+	// response. normalizedJSONRPCResponse below supports both encodings.
 	request.Header.Set("accept", "application/json, text/event-stream")
 	request.Header.Set("authorization", "Bearer "+grant.Token)
 	response, err := client.Do(request)
@@ -169,6 +171,33 @@ func callMemory(
 		return nil, nil, errors.New("response_too_large")
 	}
 	return response, body, nil
+}
+
+// normalizedJSONRPCResponse accepts the two MCP response encodings permitted
+// by the SDK. Stdio hosts receive exactly one JSON-RPC object per line, so a
+// single SSE data field is unwrapped only after its JSON is validated; multiple
+// data fields are deliberately rejected rather than ambiguously concatenated.
+func normalizedJSONRPCResponse(contentType string, body []byte) ([]byte, bool) {
+	contentType = strings.ToLower(contentType)
+	if strings.HasPrefix(contentType, "application/json") {
+		return body, json.Valid(body)
+	}
+	if !strings.HasPrefix(contentType, "text/event-stream") {
+		return nil, false
+	}
+
+	var data []byte
+	for _, rawLine := range bytes.Split(body, []byte{'\n'}) {
+		line := bytes.TrimSuffix(rawLine, []byte{'\r'})
+		if !bytes.HasPrefix(line, []byte("data:")) {
+			continue
+		}
+		if data != nil {
+			return nil, false
+		}
+		data = bytes.TrimSpace(bytes.TrimPrefix(line, []byte("data:")))
+	}
+	return data, len(data) > 0 && json.Valid(data)
 }
 
 func (b *Bridge) writeRpcError(id *json.RawMessage, code int, message string) {

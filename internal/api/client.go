@@ -196,13 +196,9 @@ func HealthCheck(baseURL string) (string, error) {
 
 // ParseJWTExpiry parses the exp claim from a JWT token without verifying the signature.
 func ParseJWTExpiry(tokenStr string) (time.Time, error) {
-	parts := strings.Split(tokenStr, ".")
-	if len(parts) != 3 {
-		return time.Time{}, fmt.Errorf("invalid JWT format")
-	}
-	payload, err := base64.RawURLEncoding.DecodeString(parts[1])
+	payload, err := jwtPayload(tokenStr)
 	if err != nil {
-		return time.Time{}, fmt.Errorf("decode payload: %w", err)
+		return time.Time{}, err
 	}
 	var claims struct {
 		Exp int64 `json:"exp"`
@@ -214,6 +210,38 @@ func ParseJWTExpiry(tokenStr string) (time.Time, error) {
 		return time.Time{}, fmt.Errorf("no exp claim in token")
 	}
 	return time.Unix(claims.Exp, 0), nil
+}
+
+// ParseJWTEmail returns the authenticated account email embedded in a JWT.
+// Like ParseJWTExpiry, it only decodes the locally held token; the relay
+// remains authoritative for token signature validation and account identity.
+func ParseJWTEmail(tokenStr string) (string, error) {
+	payload, err := jwtPayload(tokenStr)
+	if err != nil {
+		return "", err
+	}
+	var claims struct {
+		Email string `json:"email"`
+	}
+	if err := json.Unmarshal(payload, &claims); err != nil {
+		return "", fmt.Errorf("parse claims: %w", err)
+	}
+	if claims.Email == "" {
+		return "", fmt.Errorf("no email claim in token")
+	}
+	return claims.Email, nil
+}
+
+func jwtPayload(tokenStr string) ([]byte, error) {
+	parts := strings.Split(tokenStr, ".")
+	if len(parts) != 3 {
+		return nil, fmt.Errorf("invalid JWT format")
+	}
+	payload, err := base64.RawURLEncoding.DecodeString(parts[1])
+	if err != nil {
+		return nil, fmt.Errorf("decode payload: %w", err)
+	}
+	return payload, nil
 }
 
 // ---- Helpers ----

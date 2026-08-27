@@ -710,6 +710,12 @@ async function initDBUnlocked(pool: pg.Pool): Promise<void> {
   await pool.query(`ALTER TABLE daemons ADD COLUMN IF NOT EXISTS version VARCHAR(32)`);
   await pool.query(`ALTER TABLE daemons ADD COLUMN IF NOT EXISTS started_at BIGINT`);
   await pool.query(`ALTER TABLE daemons ADD COLUMN IF NOT EXISTS registration_id VARCHAR(64)`);
+  // machine_id is an installation identity, while daemon_id identifies one
+  // daemon process. It is intentionally non-unique: older deployments may
+  // already have duplicate offline rows which are consolidated on reconnect.
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_daemons_user_machine_id
+    ON daemons (user_id, machine_id)
+    WHERE machine_id IS NOT NULL AND machine_id <> 'unknown'`);
 
   // User daemon limit control
   await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS max_daemons INT DEFAULT 1`);
@@ -1125,12 +1131,26 @@ export class TokenRevokedDuringActivationError extends Error {
   }
 }
 
+/** The same authenticated installation is already connected under another daemon id. */
+export class MachineAlreadyOnlineError extends Error {
+  constructor() {
+    super('machine already has an online daemon');
+    this.name = 'MachineAlreadyOnlineError';
+  }
+}
+
 // PostgreSQL evaluates hashtext on the database server, so every relay uses the
 // same key. Hash collisions only add harmless serialization; they cannot admit
 // a revoked token. The namespace keeps these locks separate from other users of
 // two-key advisory locks in the application.
 const TOKEN_REVOCATION_LOCK_NAMESPACE = 1885566060;
 const SESSION_MATERIALIZATION_LOCK_NAMESPACE = 1885566061;
+const MACHINE_IDENTITY_LOCK_NAMESPACE = 1885566062;
+const STABLE_MACHINE_ID = /^(?:machine-[a-f0-9]{32}|daemon-[a-f0-9]{8})$/;
+
+function isStableMachineID(machineId: string | undefined): machineId is string {
+  return typeof machineId === 'string' && STABLE_MACHINE_ID.test(machineId);
+}
 
 async function lockTokenRevocationFence(client: pg.PoolClient, jti: string): Promise<void> {
   await client.query(
@@ -1146,6 +1166,17 @@ async function lockSessionMaterializationFence(
   await client.query(
     `SELECT pg_advisory_xact_lock($1, hashtext($2))`,
     [SESSION_MATERIALIZATION_LOCK_NAMESPACE, sessionId],
+  );
+}
+
+async function lockMachineIdentityFence(
+  client: Pick<pg.PoolClient, 'query'>,
+  userId: number,
+  machineId: string,
+): Promise<void> {
+  await client.query(
+    `SELECT pg_advisory_xact_lock($1, hashtext($2))`,
+    [MACHINE_IDENTITY_LOCK_NAMESPACE, `${userId}:${machineId}`],
   );
 }
 
@@ -1270,6 +1301,25 @@ export async function activateDaemonRegistration(  pool: pg.Pool,
       const revoked = await client.query(`SELECT 1 FROM revoked_tokens WHERE jti = $1`, [input.tokenJti]);
       if ((revoked.rowCount ?? 0) > 0) throw new TokenRevokedDuringActivationError();
     }
+    if (input.userId !== null && isStableMachineID(input.machineId)) {
+      await lockMachineIdentityFence(client, input.userId, input.machineId);
+      const onlinePeer = await client.query(
+        `SELECT daemon_id
+         FROM daemons
+         WHERE user_id = $1
+           AND daemon_id <> $2
+           AND status = 'online'
+           AND (
+             machine_id = $3
+             OR (COALESCE(machine_id, '') IN ('', 'unknown') AND daemon_id = $3)
+           )
+         FOR UPDATE`,
+        [input.userId, input.daemonId, input.machineId],
+      );
+      if ((onlinePeer.rowCount ?? onlinePeer.rows.length) > 0) {
+        throw new MachineAlreadyOnlineError();
+      }
+    }
     const previous = await client.query(
       `SELECT hostname, agents, status, last_heartbeat, arch, version, started_at,
               active_token_jti, machine_id, last_login_at, registration_id
@@ -1307,7 +1357,180 @@ export async function activateDaemonRegistration(  pool: pg.Pool,
   }
 }
 
+export interface MachineDaemonConsolidationInput {
+  userId: number;
+  daemonId: string;
+  machineId?: string;
+}
+
+export interface MachineDaemonConsolidationResult {
+  mergedDaemonIds: string[];
+}
+
+/**
+ * Fold offline legacy daemon rows for one authenticated installation into its
+ * newly registered daemon row. This runs only after all registration steps
+ * that can require activation compensation have succeeded; a failed
+ * consolidation therefore rolls back on its own without losing the old host.
+ */
+export async function consolidateOfflineMachineDaemons(
+  pool: pg.Pool,
+  input: MachineDaemonConsolidationInput,
+): Promise<MachineDaemonConsolidationResult> {
+  if (!isStableMachineID(input.machineId)) return { mergedDaemonIds: [] };
+
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    await lockMachineIdentityFence(client, input.userId, input.machineId);
+    const current = await client.query(
+      `SELECT daemon_id, alias FROM daemons
+       WHERE daemon_id = $1 AND user_id = $2
+       FOR UPDATE`,
+      [input.daemonId, input.userId],
+    );
+    if ((current.rowCount ?? current.rows.length) === 0) {
+      throw new Error(`activated daemon is no longer owned by user: ${input.daemonId}`);
+    }
+    const candidates = await client.query(
+      `SELECT daemon_id, alias
+       FROM daemons
+       WHERE user_id = $1
+         AND daemon_id <> $2
+         AND status = 'offline'
+         AND (
+           machine_id = $3
+           OR (COALESCE(machine_id, '') IN ('', 'unknown') AND daemon_id = $3)
+         )
+       FOR UPDATE`,
+      [input.userId, input.daemonId, input.machineId],
+    );
+    const oldDaemonIds = candidates.rows.map((row: { daemon_id: string }) => row.daemon_id);
+    if (oldDaemonIds.length === 0) {
+      await client.query('COMMIT');
+      return { mergedDaemonIds: [] };
+    }
+
+    const currentAlias = current.rows[0]?.alias as string | null | undefined;
+    const legacyAlias = candidates.rows.find((row: { alias?: string | null }) => row.alias)?.alias as string | null | undefined;
+    if ((!currentAlias || !currentAlias.trim()) && legacyAlias?.trim()) {
+      await client.query(`UPDATE daemons SET alias = $1 WHERE daemon_id = $2`, [legacyAlias, input.daemonId]);
+    }
+
+    // A historical daemon row can predate tenant ownership and still be
+    // referenced by sessions from another account. Never move those sessions
+    // across accounts: detach them before deleting the legacy host, while only
+    // this account's sessions are rebound to its new daemon id.
+    await client.query(
+      `UPDATE sessions SET daemon_id = NULL
+       WHERE daemon_id = ANY($1::varchar[])
+         AND (user_id IS NULL OR user_id <> $2)`,
+      [oldDaemonIds, input.userId],
+    );
+    await client.query(
+      `UPDATE sessions SET daemon_id = $1
+       WHERE user_id = $2 AND daemon_id = ANY($3::varchar[])`,
+      [input.daemonId, input.userId, oldDaemonIds],
+    );
+    await client.query(
+      `UPDATE quota_reservations SET daemon_id = $1
+       WHERE user_id = $2 AND daemon_id = ANY($3::varchar[])`,
+      [input.daemonId, input.userId, oldDaemonIds],
+    );
+    await client.query(
+      `UPDATE token_usage_facts SET daemon_id = $1
+       WHERE user_id = $2 AND daemon_id = ANY($3::varchar[])`,
+      [input.daemonId, input.userId, oldDaemonIds],
+    );
+    await client.query(
+      `INSERT INTO token_daily_stats
+         (user_id, daemon_id, date, model, input, output, cache_read, cache_create, requests)
+       SELECT user_id, $1, date, model,
+              SUM(input), SUM(output), SUM(cache_read), SUM(cache_create), SUM(requests)
+       FROM token_daily_stats
+       WHERE user_id = $2 AND daemon_id = ANY($3::varchar[])
+       GROUP BY user_id, date, model
+       ON CONFLICT (user_id, daemon_id, date, model) DO UPDATE SET
+         input = token_daily_stats.input + EXCLUDED.input,
+         output = token_daily_stats.output + EXCLUDED.output,
+         cache_read = token_daily_stats.cache_read + EXCLUDED.cache_read,
+         cache_create = token_daily_stats.cache_create + EXCLUDED.cache_create,
+         requests = token_daily_stats.requests + EXCLUDED.requests`,
+      [input.daemonId, input.userId, oldDaemonIds],
+    );
+    await client.query(
+      `DELETE FROM token_daily_stats
+       WHERE user_id = $1 AND daemon_id = ANY($2::varchar[])`,
+      [input.userId, oldDaemonIds],
+    );
+    await client.query(
+      `INSERT INTO subagent_usage_seen (daemon_id, usage_hash, seq, agent_id, seen_at)
+       SELECT $1, usage_hash, seq, agent_id, seen_at
+       FROM subagent_usage_seen
+       WHERE daemon_id = ANY($2::text[])
+       ON CONFLICT (daemon_id, usage_hash) DO NOTHING`,
+      [input.daemonId, oldDaemonIds],
+    );
+    await client.query(
+      `DELETE FROM subagent_usage_seen WHERE daemon_id = ANY($1::text[])`,
+      [oldDaemonIds],
+    );
+
+    // Both attention tables key the daemon into an account-scoped unique key.
+    // Preserve the current daemon's record if the same request/generation
+    // already exists, then move every remaining legacy record.
+    await client.query(
+      `DELETE FROM attention_items legacy
+       USING attention_items current_item
+       WHERE legacy.user_id = $1
+         AND legacy.daemon_id = ANY($2::varchar[])
+         AND current_item.user_id = legacy.user_id
+         AND current_item.daemon_id = $3
+         AND current_item.session_id = legacy.session_id
+         AND current_item.request_id = legacy.request_id
+         AND current_item.kind = legacy.kind`,
+      [input.userId, oldDaemonIds, input.daemonId],
+    );
+    await client.query(
+      `UPDATE attention_items SET daemon_id = $1
+       WHERE user_id = $2 AND daemon_id = ANY($3::varchar[])`,
+      [input.daemonId, input.userId, oldDaemonIds],
+    );
+    await client.query(
+      `DELETE FROM attention_recovery_items legacy
+       USING attention_recovery_items current_item
+       WHERE legacy.user_id = $1
+         AND legacy.daemon_id = ANY($2::varchar[])
+         AND current_item.user_id = legacy.user_id
+         AND current_item.daemon_id = $3
+         AND current_item.registration_generation = legacy.registration_generation`,
+      [input.userId, oldDaemonIds, input.daemonId],
+    );
+    await client.query(
+      `UPDATE attention_recovery_items SET daemon_id = $1
+       WHERE user_id = $2 AND daemon_id = ANY($3::varchar[])`,
+      [input.daemonId, input.userId, oldDaemonIds],
+    );
+    await client.query(
+      `DELETE FROM daemons
+       WHERE user_id = $1 AND daemon_id = ANY($2::varchar[]) AND status = 'offline'`,
+      [input.userId, oldDaemonIds],
+    );
+    await client.query('COMMIT');
+    return { mergedDaemonIds: oldDaemonIds };
+  } catch (error) {
+    await client.query('ROLLBACK');
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
 /** Restore a failed activation only while its exact generation is still current. */
+function jsonbParameter(value: unknown): string {
+  return typeof value === 'string' ? value : JSON.stringify(value ?? []);
+}
+
 export async function restoreDaemonRegistration(
   pool: pg.Pool,
   daemonId: string,
@@ -1322,7 +1545,7 @@ export async function restoreDaemonRegistration(
            hostname = $3, agents = $4, status = $5, last_heartbeat = $6, arch = $7, version = $8,
            started_at = $9, active_token_jti = $10, machine_id = $11, last_login_at = $12, registration_id = $13
          WHERE daemon_id = $1 AND registration_id = $2`,
-        [daemonId, registrationId, snapshot.hostname, snapshot.agents, snapshot.status, snapshot.last_heartbeat,
+        [daemonId, registrationId, snapshot.hostname, jsonbParameter(snapshot.agents), snapshot.status, snapshot.last_heartbeat,
          snapshot.arch, snapshot.version, snapshot.started_at, snapshot.active_token_jti, snapshot.machine_id,
          snapshot.last_login_at, snapshot.registration_id],
       );

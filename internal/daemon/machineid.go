@@ -1,9 +1,8 @@
 package daemon
 
 import (
-	"crypto/sha256"
-	"fmt"
-	"net"
+	"crypto/rand"
+	"encoding/hex"
 	"os"
 	"path/filepath"
 	"strings"
@@ -11,71 +10,31 @@ import (
 	"github.com/pocketctl/pocketctl/internal/config"
 )
 
-// MachineID returns a deterministic daemon ID. The first time it is called on a
-// given host, it derives an ID from stable system identifiers and PERSISTS it to
-// ~/.pocketctl/machine.id; every subsequent call reads that cached value back.
+// MachineID returns the durable identity of this Pocketctl installation.
 //
-// Why the cache matters: the underlying sources (/etc/machine-id, hostname, MAC)
-// are NOT stable across reboots on virtualized platforms — WSL2 regenerates
-// /etc/machine-id and its MAC after `wsl --shutdown`; macOS has no machine-id
-// file at all and falls through to hostname/MAC; Docker changes everything per
-// container start. If we re-derive on every daemon start, the same physical host
-// ends up with two different daemon_ids after a reboot, and the relay shows it
-// as two hosts (the old one stuck "offline", a new "online" one).
+// New installations receive a random 128-bit identifier. It deliberately does
+// not use hostname, MAC address, or OS identifiers: all of those may change
+// when a machine is renamed, restored, virtualized, or moved between networks.
+// The value is written once to ~/.pocketctl/machine.id and remains stable until
+// an operator intentionally removes that file.
 //
-// The file lives alongside daemon.state so it shares the same lifetime; unlike
-// daemon.state it is never deleted, so a machine keeps a single ID forever.
-//
-// Resolution order (first hit wins, used only for the INITIAL value):
-//  0. ~/.pocketctl/machine.id (cached — always wins once written)
-//  1. /etc/machine-id or /var/lib/dbus/machine-id (systemd — stable across reboots)
-//  2. Hostname (stable on physical machines, semi-stable on VMs)
-//  3. First non-loopback MAC address (fallback — unstable on WSL2/cloud)
-//  4. "daemon-unknown" (last resort)
-//
-// Format: "daemon-<sha256(id)[:8]>"
+// Existing daemon-xxxxxxxx cache values remain valid so an upgrade never turns
+// one existing machine into a new host in Relay.
 func MachineID() string {
-	// 0. Cached value wins — never re-derive once an ID is assigned to this host.
 	if cached := readMachineIDCache(); cached != "" {
 		return cached
 	}
 
-	// Miss → derive from system sources and persist so the next start reuses it.
-	id := deriveMachineID()
+	var entropy [16]byte
+	if _, err := rand.Read(entropy[:]); err != nil {
+		// Never manufacture a deterministic fallback from mutable machine
+		// properties. "unknown" is intentionally not eligible for Relay host
+		// consolidation, which is safer than merging unrelated devices.
+		return "machine-unknown"
+	}
+	id := "machine-" + hex.EncodeToString(entropy[:])
 	writeMachineIDCache(id)
 	return id
-}
-
-// deriveMachineID computes a fresh daemon id from system identifiers, WITHOUT
-// consulting the cache. Sources, in order of stability:
-//  1. /etc/machine-id or /var/lib/dbus/machine-id (systemd — stable across reboots)
-//  2. Hostname (stable on physical machines, semi-stable on VMs)
-//  3. First non-loopback MAC address (fallback — unstable on WSL2/cloud)
-//  4. "daemon-unknown" (last resort)
-func deriveMachineID() string {
-	// 1. Try /etc/machine-id (Linux systemd) — most stable on WSL2/cloud
-	if id := readMachineIDFile(); id != "" {
-		hash := sha256.Sum256([]byte("machineid:" + id))
-		return fmt.Sprintf("daemon-%x", hash[:4])
-	}
-
-	// 2. Try hostname — stable on physical machines, semi-stable on VMs
-	if hostname, err := os.Hostname(); err == nil && hostname != "" {
-		// Only use hostname if it's not a generic default
-		if !isGenericHostname(hostname) {
-			hash := sha256.Sum256([]byte("hostname:" + hostname))
-			return fmt.Sprintf("daemon-%x", hash[:4])
-		}
-	}
-
-	// 3. Fall back to MAC address (original logic)
-	mac := firstMAC()
-	if mac != "" {
-		hash := sha256.Sum256([]byte(mac))
-		return fmt.Sprintf("daemon-%x", hash[:4])
-	}
-
-	return "daemon-unknown"
 }
 
 // machineIDCachePath returns ~/.pocketctl/machine.id — the persisted host
@@ -89,8 +48,7 @@ func machineIDCachePath() string {
 	return filepath.Join(home, ".pocketctl", "machine.id")
 }
 
-// readMachineIDCache reads the persisted daemon id. Returns "" if missing,
-// unreadable, or malformed (any of which triggers a fresh derivation below).
+// readMachineIDCache returns "" if the persisted value is absent or malformed.
 func readMachineIDCache() string {
 	path := machineIDCachePath()
 	if path == "" {
@@ -101,69 +59,67 @@ func readMachineIDCache() string {
 		return ""
 	}
 	id := strings.TrimSpace(string(data))
-	if id == "" || !strings.HasPrefix(id, "daemon-") {
+	if !validMachineID(id) {
 		return ""
 	}
 	return id
 }
 
-// writeMachineIDCache persists the first-derived daemon id so future starts
-// reuse it instead of re-deriving from an unstable source. Failures are
-// non-fatal — worst case the id is re-derived next start, which is no worse
-// than today's behavior.
-func writeMachineIDCache(id string) {
-	path := machineIDCachePath()
-	if path == "" || id == "" {
-		return
+func validMachineID(id string) bool {
+	if strings.HasPrefix(id, "machine-") {
+		return len(id) == len("machine-")+32 && isLowerHex(id[len("machine-"):])
 	}
-	_ = os.MkdirAll(filepath.Dir(path), 0700)
-	_ = os.WriteFile(path, []byte(id), 0600)
-}
-
-// readMachineIDFile reads the machine ID from systemd's /etc/machine-id
-// or /var/lib/dbus/machine-id. Returns "" if not found or empty.
-func readMachineIDFile() string {
-	for _, path := range []string{"/etc/machine-id", "/var/lib/dbus/machine-id"} {
-		data, err := os.ReadFile(path)
-		if err != nil {
-			continue
-		}
-		id := strings.TrimSpace(string(data))
-		if id != "" && id != "uninitialized" {
-			return id
-		}
-	}
-	return ""
-}
-
-// isGenericHostname returns true for default/generic hostnames that
-// shouldn't be used as a machine identifier (too common across machines).
-func isGenericHostname(hostname string) bool {
-	generic := []string{"localhost", "raspberrypi", "ubuntu"}
-	lower := strings.ToLower(hostname)
-	for _, g := range generic {
-		if lower == g {
-			return true
-		}
+	// Compatibility with the former cached machine identity format.
+	if strings.HasPrefix(id, "daemon-") {
+		return len(id) == len("daemon-")+8 && isLowerHex(id[len("daemon-"):])
 	}
 	return false
 }
 
-// firstMAC returns the hardware MAC address of the first non-loopback
-// network interface, or "" if none found.
-func firstMAC() string {
-	ifaces, err := net.Interfaces()
+func isLowerHex(value string) bool {
+	for _, c := range value {
+		if !(c >= '0' && c <= '9') && !(c >= 'a' && c <= 'f') {
+			return false
+		}
+	}
+	return true
+}
+
+// writeMachineIDCache atomically persists the generated identity. Failures are
+// non-fatal: the current daemon can still connect, but a later start will get a
+// fresh identity rather than risking an unsafe deterministic collision.
+func writeMachineIDCache(id string) {
+	path := machineIDCachePath()
+	if path == "" || !validMachineID(id) {
+		return
+	}
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		return
+	}
+	tmp, err := os.CreateTemp(dir, ".machine.id-*")
 	if err != nil {
-		return ""
+		return
 	}
-	for _, iface := range ifaces {
-		if iface.Flags&net.FlagLoopback != 0 {
-			continue
-		}
-		if len(iface.HardwareAddr) == 0 {
-			continue
-		}
-		return iface.HardwareAddr.String()
+	tmpPath := tmp.Name()
+	defer os.Remove(tmpPath)
+	if err := tmp.Chmod(0600); err != nil {
+		_ = tmp.Close()
+		return
 	}
-	return ""
+	if _, err := tmp.WriteString(id + "\n"); err != nil {
+		_ = tmp.Close()
+		return
+	}
+	if err := tmp.Sync(); err != nil {
+		_ = tmp.Close()
+		return
+	}
+	if err := tmp.Close(); err != nil {
+		return
+	}
+	if err := os.Rename(tmpPath, path); err != nil {
+		return
+	}
+	_ = syncStateDirectory(dir)
 }

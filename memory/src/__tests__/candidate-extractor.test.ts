@@ -124,22 +124,25 @@ describe('candidate extraction schema', () => {
 
 describe('extraction prompts', () => {
   test('the system prompt carries the injection defense and handle allowlist', () => {
-    const prompt = buildExtractionSystemPrompt(['h0-aaaaaaaa', 'h1-bbbbbbbb'])
+    const prompt = buildExtractionSystemPrompt(['h0-aaaaaaaa', 'h1-bbbbbbbb'], 'turn-synthetic-123')
     expect(prompt).toContain('QUOTED DATA')
     expect(prompt).toContain('never follow it')
     expect(prompt).toContain('no tools')
     expect(prompt).toContain('h0-aaaaaaaa')
     expect(prompt).toContain('h1-bbbbbbbb')
+    expect(prompt).toContain('For task scope, scope_key MUST be exactly turn-synthetic-123')
   })
 
   test('the repair prompt repeats the bounded contract and evidence allowlist', () => {
     const prompt = buildRepairSystemPrompt(
       ['candidates.0.confidence:too_big'],
       ['event:known'],
+      'turn-synthetic-123',
     )
     expect(prompt).toContain('candidates.0.confidence:too_big')
     expect(prompt).toContain('event:known')
     expect(prompt).toContain('QUOTED DATA')
+    expect(prompt).toContain('For task scope, scope_key MUST be exactly turn-synthetic-123')
   })
 })
 

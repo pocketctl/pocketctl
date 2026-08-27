@@ -113,7 +113,7 @@ export function registerMcpRoute(app: FastifyInstance, deps: McpRouteDeps): void
       headers: {
         'content-type': 'application/json',
         // The SDK contract requires accepting both media types; the handler
-        // still answers JSON bodies for RPC calls in responseMode json.
+        // may choose a single SSE-framed JSON-RPC response for a call.
         accept: 'application/json, text/event-stream',
         ...(request.headers['mcp-session-id']
           ? { 'mcp-session-id': String(request.headers['mcp-session-id']) }
