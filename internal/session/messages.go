@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"github.com/pocketctl/pocketctl/internal/memorycontext"
 	"io"
 	"time"
 
@@ -187,6 +188,10 @@ func (sm *SessionManager) finalizeProcessExit(ctx context.Context, exitErr error
 // dispatchUserMessage is the legacy send path (backend / PTY / resume) — the
 // turn reservation and addendum logic in SendMessageWithInput wraps it.
 func (sm *SessionManager) dispatchUserMessage(ctx context.Context, sessionID string, content string) error {
+	return sm.dispatchUserMessageWithContext(ctx, sessionID, content, nil)
+}
+
+func (sm *SessionManager) dispatchUserMessageWithContext(ctx context.Context, sessionID string, content string, hidden *memorycontext.PreparedContext) error {
 	sm.mu.RLock()
 	ps, ok := sm.sessions[sessionID]
 	sm.mu.RUnlock()
@@ -221,6 +226,13 @@ func (sm *SessionManager) dispatchUserMessage(ctx context.Context, sessionID str
 		// would duplicate.
 		if src != "terminal" && agent != adapter.AgentCodex {
 			sm.outputCh <- protocol.DaemonEvent{Type: "user_text", SessionID: sessionID, Text: content}
+		}
+		if hidden != nil {
+			if aware, ok := ps.Backend.(interface {
+				SendWithContext(ctx context.Context, sessionID, content string, hidden *memorycontext.PreparedContext) error
+			}); ok {
+				return aware.SendWithContext(ctx, sessionID, content, hidden)
+			}
 		}
 		return ps.Backend.Send(ctx, sessionID, content)
 	}
@@ -325,8 +337,14 @@ func (sm *SessionManager) dispatchUserMessage(ctx context.Context, sessionID str
 	if err != nil {
 		return err
 	}
-	launcher := adapter.NewLauncher(agentType)
-	args := launcher.BuildResumeArgs(content, sessionID, protocol.SessionConfig{Permission: clonePermission(ps.Permission)})
+	resumeConfig := protocol.SessionConfig{Permission: clonePermission(ps.Permission)}
+	var args []string
+	if agentType == adapter.AgentClaude && hidden != nil {
+		args = adapter.BuildClaudeArgsWithContext(content, sessionID, resumeConfig, hidden)
+	} else {
+		launcher := adapter.NewLauncher(agentType)
+		args = launcher.BuildResumeArgs(content, sessionID, resumeConfig)
+	}
 	ctx, cancel := context.WithCancel(ctx)
 	entry, err := sm.reserveOwnedResume(sessionID, cancel)
 	if err != nil {

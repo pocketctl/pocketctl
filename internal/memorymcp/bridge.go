@@ -33,6 +33,8 @@ type Bridge struct {
 type jsonRpcMessage struct {
 	JSONRPC string           `json:"jsonrpc"`
 	ID      *json.RawMessage `json:"id"`
+	Method  string           `json:"method"`
+	Params  json.RawMessage  `json:"params"`
 	Error   *struct {
 		Code    int    `json:"code"`
 		Message string `json:"message"`
@@ -81,7 +83,14 @@ func (b *Bridge) Run(ctx context.Context) error {
 		if json.Unmarshal(raw, &message) == nil && message.ID != nil {
 			hasID = true
 		}
-		grant, err := b.Grants.Token(ctx)
+		selectedScopes, selectionErr := selectedScopesForMCPMessage(message)
+		if selectionErr != nil {
+			if hasID {
+				b.writeRpcError(message.ID, -32602, "invalid_scope_selection")
+			}
+			continue
+		}
+		grant, err := b.Grants.Token(ctx, selectedScopes)
 		if err != nil {
 			if hasID {
 				b.writeRpcError(message.ID, -32050, boundedCode(err))
@@ -97,7 +106,7 @@ func (b *Bridge) Run(ctx context.Context) error {
 		}
 		if response.StatusCode == http.StatusUnauthorized {
 			b.Grants.Invalidate(grant.Token)
-			grant, err = b.Grants.Token(ctx)
+			grant, err = b.Grants.Token(ctx, selectedScopes)
 			if err == nil {
 				response, body, err = callMemory(ctx, client, raw, grant)
 			}
@@ -135,6 +144,58 @@ func (b *Bridge) Run(ctx context.Context) error {
 		}
 		_, _ = b.Stdout.Write(body)
 	}
+}
+
+// selectedScopesForMCPMessage extracts only the bounded selection field from
+// the two federated read tools. The bridge neither interprets permissions nor
+// parses the returned JWT; it forwards the requested installation IDs to the
+// authenticated daemon so Relay can make the authorization decision.
+func selectedScopesForMCPMessage(message jsonRpcMessage) ([]string, error) {
+	if message.Method != "tools/call" || len(message.Params) == 0 {
+		return nil, nil
+	}
+	var params struct {
+		Name      string          `json:"name"`
+		Arguments json.RawMessage `json:"arguments"`
+	}
+	if json.Unmarshal(message.Params, &params) != nil {
+		return nil, nil // the MCP server owns general JSON-RPC validation
+	}
+	var args map[string]json.RawMessage
+	if len(params.Arguments) == 0 || json.Unmarshal(params.Arguments, &args) != nil {
+		return nil, nil
+	}
+	if params.Name == "memory_search" || params.Name == "memory_recall" {
+		raw, present := args["scope_installation_ids"]
+		if !present {
+			return nil, nil
+		}
+		var selected []string
+		if json.Unmarshal(raw, &selected) != nil {
+			return nil, errors.New("invalid_scope_selection")
+		}
+		bounded, ok := BoundedSelectedScopes(selected)
+		if !ok {
+			return nil, errors.New("invalid_scope_selection")
+		}
+		return bounded, nil
+	}
+	if params.Name == "memory_get_claim" || params.Name == "memory_get_evidence" {
+		raw, present := args["installation_id"]
+		if !present {
+			return nil, nil
+		}
+		var installationID string
+		if json.Unmarshal(raw, &installationID) != nil {
+			return nil, errors.New("invalid_scope_selection")
+		}
+		bounded, ok := BoundedSelectedScopes([]string{installationID})
+		if !ok {
+			return nil, errors.New("invalid_scope_selection")
+		}
+		return bounded, nil
+	}
+	return nil, nil
 }
 
 func withoutRedirects(client *http.Client) *http.Client {

@@ -1,6 +1,7 @@
 import type { InstallationsClient } from '../relay/installations.js'
 import type { InstallationRegistry } from './repository.js'
-import type { ProviderInstallationItem } from '../relay/contracts.js'
+import type { ProviderInstallationItem, ProviderInstallationItemV2 } from '../relay/contracts.js'
+import { RelayRequestError } from '../relay/errors.js'
 
 export interface DiscoveryWorkerOptions {
   installations: InstallationsClient
@@ -33,12 +34,41 @@ export function createDiscoveryWorker(options: DiscoveryWorkerOptions) {
   let running: Promise<void> | undefined
 
   async function discoverOnce(): Promise<number> {
-    const items: ProviderInstallationItem[] = []
+    // ADR-0005: the v2 inventory mirrors v1 and adds owner-scope metadata;
+    // a Relay without v2 answers feature_disabled and we fall back to v1
+    // items (personal backfill shape) so discovery never regresses.
+    let useV2 = typeof options.installations.listInstallationsV2 === 'function'
+    let firstV2Page: Awaited<ReturnType<InstallationsClient['listInstallationsV2']>> | undefined
+    if (useV2) {
+      try {
+        firstV2Page = await options.installations.listInstallationsV2()
+      } catch (error) {
+        // Backward compatibility is limited to a Relay that genuinely lacks
+        // the v2 route/flag. Network, auth, or malformed-response failures
+        // abort the generation so shared installations are not falsely marked
+        // missing by a v1-only fallback snapshot.
+        if (error instanceof RelayRequestError
+          && (error.code === 'feature_disabled' || error.status === 404)) {
+          useV2 = false
+        } else {
+          throw error
+        }
+      }
+    }
+    const items: Array<ProviderInstallationItem | ProviderInstallationItemV2> = []
     let cursor: string | undefined
     let lastCursor: string | null = null
     let complete = false
     for (let page = 0; page < maxPages; page++) {
-      const result = await options.installations.listInstallations(cursor)
+      const result = useV2
+        ? ((page === 0 && firstV2Page
+            ? firstV2Page
+            : await options.installations.listInstallationsV2(cursor)) as unknown as {
+            installations: ProviderInstallationItemV2[]
+            next_cursor: string | null
+            has_more: boolean
+          })
+        : await options.installations.listInstallations(cursor)
       items.push(...result.installations)
       lastCursor = result.next_cursor
       if (!result.has_more) {

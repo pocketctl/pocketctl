@@ -127,6 +127,30 @@ describeWithDatabase('candidate review ledger transactions (PostgreSQL)', () => 
     expect(candidate.rows[0].status).toBe('accepted')
   })
 
+  test('explicit acceptance resolves a conflict candidate into active knowledge', async () => {
+    await pool.query(`
+      UPDATE memory_candidates SET status = 'conflict'
+      WHERE installation_id = $1 AND candidate_id = $2
+    `, [INSTALLATION, candidateId])
+
+    const result = await review.acceptCandidate({
+      installationId: INSTALLATION, candidateId, expectedRevision: 1,
+    })
+
+    expect(result.ok).toBe(true)
+    if (!result.ok) return
+    const candidate = await pool.query<{ status: string }>(`
+      SELECT status FROM memory_candidates
+      WHERE installation_id = $1 AND candidate_id = $2
+    `, [INSTALLATION, candidateId])
+    expect(candidate.rows[0].status).toBe('accepted')
+    const claim = await pool.query<{ state: string }>(`
+      SELECT state FROM knowledge_claims
+      WHERE installation_id = $1 AND claim_id = $2
+    `, [INSTALLATION, result.claimId])
+    expect(claim.rows[0].state).toBe('active')
+  })
+
   test('accept with correction records user_corrected authority and the edited statement', async () => {
     const result = await review.acceptCandidate({
       installationId: INSTALLATION, candidateId, expectedRevision: 1,

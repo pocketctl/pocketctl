@@ -1,5 +1,5 @@
 import type pg from 'pg'
-import type { ProviderInstallationItem } from '../relay/contracts.js'
+import type { ProviderInstallationItem, ProviderInstallationItemV2 } from '../relay/contracts.js'
 
 export interface DiscoveryApplyResult {
   applied: number
@@ -23,7 +23,10 @@ export function createInstallationRegistry(pool: pg.Pool) {
 
     async applyDiscovery(input: {
       generation: number
-      items: ProviderInstallationItem[]
+      items: Array<Omit<ProviderInstallationItem, 'subscriptions'> & {
+        subscriptions: string[]
+      } & Partial<Pick<ProviderInstallationItemV2,
+        'owner_scope_kind' | 'owner_scope_id' | 'parent_organization_id' | 'authorization_epoch'>>>
       installationCursor?: string
     }): Promise<DiscoveryApplyResult> {
       const client = await pool.connect()
@@ -100,6 +103,29 @@ export function createInstallationRegistry(pool: pg.Pool) {
             WHERE installation_id = ANY($1::uuid[])
             ON CONFLICT (installation_id) DO NOTHING
           `, [seen])
+
+          // ADR-0005: mirror the v2 owner-scope facts for every installation;
+          // v1-only items default to the personal backfill shape.
+          for (const item of input.items) {
+            await client.query(`
+              INSERT INTO memory_owner_scopes
+                (installation_id, owner_scope_kind, owner_scope_id, parent_organization_id,
+                 state, authorization_epoch)
+              VALUES ($1, $2, $3, $4, 'active', $5)
+              ON CONFLICT (installation_id) DO UPDATE SET
+                owner_scope_kind = EXCLUDED.owner_scope_kind,
+                owner_scope_id = EXCLUDED.owner_scope_id,
+                parent_organization_id = EXCLUDED.parent_organization_id,
+                authorization_epoch = GREATEST(memory_owner_scopes.authorization_epoch, EXCLUDED.authorization_epoch),
+                updated_at = NOW()
+            `, [
+              item.installation_id,
+              item.owner_scope_kind ?? 'personal',
+              item.owner_scope_id ?? item.installation_id,
+              item.parent_organization_id ?? null,
+              item.authorization_epoch ?? '1',
+            ])
+          }
 
           await client.query(`
             INSERT INTO memory_provider_state (provider_id, installation_cursor, last_discovery_at, updated_at)

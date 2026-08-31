@@ -127,6 +127,32 @@ async function purgeSessionRows(
     ON CONFLICT (installation_id, session_id) DO NOTHING
   `, [input.installationId, input.sessionId, input.reason, input.sourceFeedId])
 
+  // Phase 2 purge order: stop session-scoped context generation and remove
+  // every pack whose turn or Evidence source belongs to the purged Session
+  // before deleting the Evidence/Version joins that make that dependency
+  // discoverable. This applies to delivered history too: privacy deletion
+  // wins over audit-content retention.
+  await client.query(`
+    UPDATE memory_generation_runs
+    SET state = 'cancelled', error_code = 'source_purged', completed_at = NOW()
+    WHERE installation_id = $1 AND operation = 'compile_context'
+      AND subject_kind = 'session'
+      AND subject_key_hash = decode(md5($2), 'hex')
+      AND state IN ('queued','running')
+  `, [input.installationId, input.sessionId])
+  await client.query(`
+    DELETE FROM memory_context_packs p
+    WHERE p.installation_id = $1
+      AND (p.session_id = $2 OR EXISTS (
+        SELECT 1
+        FROM memory_context_pack_evidence pe
+        JOIN knowledge_evidence e
+          ON e.installation_id = pe.installation_id AND e.evidence_id = pe.evidence_id
+        JOIN work_episodes w
+          ON w.installation_id = e.installation_id AND w.episode_id = e.episode_id
+        WHERE pe.pack_id = p.pack_id AND w.session_id = $2))
+  `, [input.installationId, input.sessionId])
+
   // Remove only immutable Versions whose complete evidence set belongs to
   // this session. A Version with evidence from another session survives; the
   // episode delete below removes only the purged evidence rows. If the
@@ -384,6 +410,13 @@ async function purgeInstallationRows(
     'memory_feature_settings',
     'work_episodes', 'source_artifacts', 'source_turns', 'source_events',
     'repo_snapshots', 'repositories', 'source_sessions',
+    'memory_context_feedback', 'memory_context_injections',
+    'memory_context_pack_evidence', 'memory_context_pack_items',
+    'memory_context_packs', 'memory_retrieval_candidates',
+    'memory_retrieval_trajectories',
+    'memory_generation_runs',
+    'memory_context_loadout_items', 'memory_context_loadouts',
+    'memory_context_settings', 'memory_policy_sets',
   ]) {
     await client.query(
       `DELETE FROM ${table} WHERE installation_id = $1`,

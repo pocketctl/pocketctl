@@ -76,4 +76,5 @@ export const MEMORY_TEST_DATABASE_TABLES = [
   'memory_session_tombstones',
   'memory_purge_receipts',
   'memory_usage_outbox',
+  'memory_provider_budget_reservations',
 ] as const

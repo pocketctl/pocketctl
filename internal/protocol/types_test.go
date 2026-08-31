@@ -668,3 +668,31 @@ func TestClientMessageDecodesMemoryMcpReplies(t *testing.T) {
 		t.Fatalf("error code decode mismatch: %+v", errorMessage)
 	}
 }
+
+func TestPhase2ContextMessagesRoundTrip(t *testing.T) {
+	req := MemoryContextGrantRequest{Type: "memory_context_grant", RequestID: "r1", SessionID: "ses-1"}
+	encoded, err := json.Marshal(req)
+	if err != nil {
+		t.Fatalf("marshal grant request: %v", err)
+	}
+	var decodedReq MemoryContextGrantRequest
+	if err := json.Unmarshal(encoded, &decodedReq); err != nil {
+		t.Fatalf("unmarshal grant request: %v", err)
+	}
+	if decodedReq.SessionID != "ses-1" || decodedReq.RequestID != "r1" {
+		t.Fatalf("grant request round trip mismatch: %+v", decodedReq)
+	}
+
+	ack := SessionRegistrationAck{Type: "session_registration_ack", SessionID: "ses-1", Status: "ready"}
+	ackEncoded, err := json.Marshal(ack)
+	if err != nil {
+		t.Fatalf("marshal ack: %v", err)
+	}
+	var decodedAck SessionRegistrationAck
+	if err := json.Unmarshal(ackEncoded, &decodedAck); err != nil {
+		t.Fatalf("unmarshal ack: %v", err)
+	}
+	if decodedAck.Status != "ready" || decodedAck.SessionID != "ses-1" {
+		t.Fatalf("ack round trip mismatch: %+v", decodedAck)
+	}
+}

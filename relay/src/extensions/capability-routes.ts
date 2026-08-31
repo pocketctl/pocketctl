@@ -7,13 +7,17 @@ import {
   resolveGrantKeyMaterial,
   signCapabilityGrant,
   CAPABILITY_GRANT_MAX_TTL_SECONDS,
+  CAPABILITY_GRANT_V2_TOKEN_TYPE,
   type GrantKeyMaterial,
 } from './capability-grant.js'
+import { createV2GrantService } from './v2-grant-service.js'
 
 export interface CapabilityRouteDeps {
   pool: pg.Pool
   verifyAccessToken(token: string, pool?: unknown): Promise<{ userId: number } | null>
   mode: ExtensionMode
+  /** Independent Protocol v2 flag (ADR-P3-13); defaults to off. */
+  v2Mode?: ExtensionMode
   issuer: string
   grantKeys?: GrantKeyMaterial
   ttlSeconds?: number
@@ -230,6 +234,78 @@ export function registerCapabilityRoutes(app: FastifyInstance, deps: CapabilityR
       expires_in: minted.expiresInSeconds,
       token_type: 'extension_capability',
       ...('providerPublicOrigin' in minted && minted.providerPublicOrigin
+        ? { provider_public_origin: minted.providerPublicOrigin }
+        : {}),
+    }
+  })
+}
+
+/**
+ * Protocol v2 grant surface (ADR-P3-05): one route that mints a bounded
+ * federated scope grant for an explicit list of at most 16 accessible
+ * installations. Bindings derive only from the authenticated user's own
+ * installations and active memberships; the audit trail carries a binding
+ * count category, never grant material.
+ */
+export function registerCapabilityV2GrantRoutes(app: FastifyInstance, deps: CapabilityRouteDeps): void {
+  const grantKeys = deps.grantKeys ?? resolveGrantKeyMaterial(process.env, {
+    strictProduction: deps.mode === 'enabled',
+  })
+  const grantService = createV2GrantService({
+    pool: deps.pool,
+    issuer: deps.issuer,
+    v2Mode: deps.v2Mode ?? 'off',
+    grantKeys,
+    ttlSeconds: deps.ttlSeconds,
+    providerPublicOrigins: deps.providerPublicOrigins,
+  })
+
+  app.post('/api/extensions/v2/grants', { bodyLimit: 8192 }, async (req, reply) => {
+    if (deps.rateLimiter) {
+      const decision = deps.rateLimiter.check(`grant:${String(req.ip ?? '-')}`)
+      if (!decision.allowed) {
+        reply.code(429)
+        return { error: { code: 'invalid_request', message: 'rate limit exceeded' } }
+      }
+    }
+    const header = req.headers.authorization
+    if (!header?.startsWith('Bearer ')) {
+      return fail(reply, new ExtensionApiError('unauthorized', 'authorization required'))
+    }
+    const payload = await deps.verifyAccessToken(header.slice(7), deps.pool)
+    if (!payload) {
+      return fail(reply, new ExtensionApiError('unauthorized', 'invalid token'))
+    }
+    const body = req.body as Record<string, unknown> | null
+    const installationIds = body?.installation_ids
+    if (!Array.isArray(installationIds)
+      || installationIds.some(id => typeof id !== 'string')) {
+      return fail(reply, new ExtensionApiError('invalid_request', 'installation_ids must be a list of installation UUIDs'))
+    }
+    const callerType = body?.caller_type ?? 'web'
+    if (typeof callerType !== 'string') {
+      return fail(reply, new ExtensionApiError('invalid_request', 'caller_type must be a string'))
+    }
+    const services = Array.isArray(body?.services) ? body.services as string[] : undefined
+    if (services && services.some(service => typeof service !== 'string')) {
+      return fail(reply, new ExtensionApiError('invalid_request', 'services must be a list of service ids'))
+    }
+
+    const minted = await grantService.mint({
+      userId: payload.userId,
+      installationIds,
+      callerType: callerType as 'web' | 'daemon' | 'agent',
+      services,
+    })
+    if (!minted.ok) {
+      return fail(reply, new ExtensionApiError(minted.code, minted.message))
+    }
+    return {
+      grant: minted.token,
+      expires_in: minted.expiresInSeconds,
+      token_type: CAPABILITY_GRANT_V2_TOKEN_TYPE,
+      provider_id: minted.providerId,
+      ...(minted.providerPublicOrigin
         ? { provider_public_origin: minted.providerPublicOrigin }
         : {}),
     }

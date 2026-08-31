@@ -4,6 +4,56 @@ import type pg from 'pg'
 /** Shared installation-scoped read semantics used by REST and MCP. */
 export function createMemoryReadService(pool: pg.Pool, cursorSigningKey: string) {
   return {
+    async listActiveClaims(
+      installationId: string,
+      input: { limit?: number; cursor?: string | null } = {},
+    ) {
+      const limit = Math.min(Math.max(1, input.limit ?? 50), 100)
+      const before = decodeClaimListCursor(input.cursor, installationId, cursorSigningKey)
+      const [claims, count] = await Promise.all([
+        pool.query(`
+          SELECT c.claim_id::text, c.claim_type, c.scope_kind, c.scope_key,
+                 c.state, c.revision::text, c.current_version_id::text,
+                 c.created_at, c.updated_at,
+                 v.statement, v.authority, v.repository_id::text,
+                 v.repo_snapshot_id::text, v.branch, v.freshness_at,
+                 v.created_at AS version_created_at
+          FROM knowledge_claims c
+          JOIN knowledge_versions v
+            ON v.installation_id = c.installation_id
+           AND v.version_id = c.current_version_id
+          WHERE c.installation_id = $1 AND c.state = 'active'
+            AND ($2::timestamptz IS NULL
+              OR (c.updated_at, c.claim_id) < ($2::timestamptz, $3::uuid))
+          ORDER BY c.updated_at DESC, c.claim_id DESC
+          LIMIT $4
+        `, [installationId, before?.updatedAt ?? null, before?.claimId ?? null, limit + 1]),
+        pool.query(`
+          SELECT COUNT(*)::int AS count
+          FROM knowledge_claims c
+          JOIN knowledge_versions v
+            ON v.installation_id = c.installation_id
+           AND v.version_id = c.current_version_id
+          WHERE c.installation_id = $1 AND c.state = 'active'
+        `, [installationId]),
+      ])
+      const hasMore = claims.rows.length > limit
+      const page = hasMore ? claims.rows.slice(0, limit) : claims.rows
+      const last = page.at(-1)
+      return {
+        claims: page,
+        next_cursor: hasMore && last
+          ? encodeClaimListCursor(
+            installationId,
+            timestampIso(last.updated_at),
+            String(last.claim_id),
+            cursorSigningKey,
+          )
+          : null,
+        total_count: Number(count.rows[0]?.count ?? 0),
+      }
+    },
+
     async getClaim(
       installationId: string,
       claimId: string,
@@ -111,6 +161,52 @@ export function createMemoryReadService(pool: pg.Pool, cursorSigningKey: string)
 }
 
 export type MemoryReadService = ReturnType<typeof createMemoryReadService>
+
+function encodeClaimListCursor(
+  installationId: string,
+  updatedAt: string,
+  claimId: string,
+  key: string,
+): string {
+  const payload = Buffer.from(JSON.stringify({ p: 'active-claims', n: installationId, u: updatedAt, i: claimId }), 'utf8').toString('base64url')
+  const signature = createHmac('sha256', key).update(payload).digest('base64url')
+  return `${payload}.${signature}`
+}
+
+function decodeClaimListCursor(
+  cursor: string | null | undefined,
+  installationId: string,
+  key: string,
+): { updatedAt: string; claimId: string } | null {
+  if (!cursor) return null
+  try {
+    const [payload, suppliedSignature, extra] = cursor.split('.')
+    if (!payload || !suppliedSignature || extra !== undefined) throw new Error('invalid_cursor')
+    const expected = createHmac('sha256', key).update(payload).digest()
+    const supplied = Buffer.from(suppliedSignature, 'base64url')
+    if (supplied.length !== expected.length || !timingSafeEqual(supplied, expected)) throw new Error('invalid_cursor')
+    const parsed = JSON.parse(Buffer.from(payload, 'base64url').toString('utf8')) as {
+      p?: unknown
+      n?: unknown
+      u?: unknown
+      i?: unknown
+    }
+    if (parsed.p !== 'active-claims' || parsed.n !== installationId
+      || typeof parsed.u !== 'string' || timestampIso(parsed.u) !== parsed.u
+      || typeof parsed.i !== 'string' || !UUID_PATTERN.test(parsed.i)) throw new Error('invalid_cursor')
+    return { updatedAt: parsed.u, claimId: parsed.i }
+  } catch {
+    throw new Error('invalid_cursor')
+  }
+}
+
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
+
+function timestampIso(value: unknown): string {
+  const date = value instanceof Date ? value : new Date(String(value))
+  if (Number.isNaN(date.getTime())) throw new Error('invalid_cursor')
+  return date.toISOString()
+}
 
 function encodeVersionCursor(claimId: string, beforeVersion: number, key: string): string {
   const payload = Buffer.from(JSON.stringify({ c: claimId, b: beforeVersion }), 'utf8').toString('base64url')

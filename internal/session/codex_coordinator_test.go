@@ -82,6 +82,59 @@ func TestCodexCoordinatorIdleAndTurnCompletionOrderAlwaysSettlesIdle(t *testing.
 	}
 }
 
+func TestCodexCoordinatorProjectsTerminalStatusWithEndTime(t *testing.T) {
+	output := make(chan protocol.DaemonEvent, 8)
+	sm := NewSessionManager(output)
+	coord := newCodexCoordinator(sm)
+	coord.projectLive(newCodexProjection(1), codexNotification("turn/completed", `{"threadId":"thr_completed","turn":{"id":"turn_1","status":"completed"}}`))
+
+	deadline := time.After(time.Second)
+	for {
+		select {
+		case event := <-output:
+			if event.Type == "session_status" && event.Status == protocol.StatusIdle {
+				if event.LastActivityAt == "" {
+					t.Fatalf("terminal status missing last_activity_at: %+v", event)
+				}
+				return
+			}
+		case <-deadline:
+			t.Fatal("did not project a terminal session_status event")
+		}
+	}
+}
+
+func TestCodexCoordinatorReportsManagedModelChangeAtNextTurnStart(t *testing.T) {
+	output := make(chan protocol.DaemonEvent, 8)
+	sm := NewSessionManager(output)
+	coord := newCodexCoordinator(sm)
+	rpc := newFakeCodexRuntimeClient()
+	rpc.results["thread/resume"] = json.RawMessage(`{"model":"gpt-5.6","thread":{"id":"thr_model"}}`)
+	coord.runtime = &codexAppServerRuntime{Client: rpc}
+	coord.generation = 6
+	sm.sessions["thr_model"] = &ProcessState{
+		SessionID: "thr_model", Agent: "codex", Source: "terminal",
+		ControlMode: protocol.ControlManaged, Model: "gpt-5.5",
+	}
+
+	coord.projectLive(newCodexProjection(6), codexNotification("turn/started", `{"threadId":"thr_model","turn":{"id":"turn_1","status":"inProgress"}}`))
+
+	deadline := time.After(time.Second)
+	for {
+		select {
+		case event := <-output:
+			if event.Type == "session_model_changed" {
+				if event.SessionID != "thr_model" || event.Model != "gpt-5.6" {
+					t.Fatalf("model change = %+v", event)
+				}
+				return
+			}
+		case <-deadline:
+			t.Fatal("did not report the app-server model change at turn start")
+		}
+	}
+}
+
 func TestCodexCoordinatorResumesAndHydratesTerminalThread(t *testing.T) {
 	output := make(chan protocol.DaemonEvent, 16)
 	sm := NewSessionManager(output)

@@ -1,6 +1,6 @@
 import { randomUUID } from 'crypto'
 import type pg from 'pg'
-import type { ExtensionScope, ExtensionTopic, InstallationStatus } from './types.js'
+import type { ExtensionScope, ExtensionTopicV2, InstallationStatus } from './types.js'
 
 export interface ExtensionInstallation {
   installation_id: string
@@ -114,7 +114,7 @@ export interface CreateInstallationInput {
   ownerUserId: number
   providerId: string
   grantedScopes: ExtensionScope[]
-  subscriptions: ExtensionTopic[]
+  subscriptions: ExtensionTopicV2[]
   enabledServices: string[]
   eventFilter: Record<string, unknown>
   startPolicy: 'from_now' | 'retained_history'

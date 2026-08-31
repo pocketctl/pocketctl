@@ -301,6 +301,11 @@ func TestCodexJSONLParser_StampsNativeTurnLifecycleAndContent(t *testing.T) {
 	wantTurnID := turn.LogicalTurnID(AgentCodex, sessionID, "", "native", sourceTurnID)
 
 	parse(`{"type":"session_meta","payload":{"id":"` + sessionID + `"}}`)
+	modelChange := parse(`{"type":"turn_context","payload":{"model":"gpt-5.6"}}`)
+	if len(modelChange) != 1 || modelChange[0].Type != "session_model_changed" ||
+		modelChange[0].SessionID != sessionID || modelChange[0].Model != "gpt-5.6" {
+		t.Fatalf("pre-turn model change = %+v, want session-stamped model event", modelChange)
+	}
 	started := parse(`{"type":"event_msg","payload":{"type":"task_started","turn_id":"` + sourceTurnID + `"}}`)
 	if len(started) != 2 || started[0].Type != protocol.EventTypeTurnStatus ||
 		started[0].TurnStatus != protocol.TurnStateRunning || started[0].TurnID != wantTurnID ||
@@ -434,8 +439,8 @@ func TestCodexTurnContextEmitsEffort(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(events) != 1 || events[0].Type != "session_meta" || events[0].Effort != "high" {
-		t.Fatalf("events = %+v, want session_meta effort=high", events)
+	if len(events) != 2 || events[0].Type != "session_model_changed" || events[0].Model != "gpt-5.4" || events[1].Type != "session_meta" || events[1].Effort != "high" {
+		t.Fatalf("events = %+v, want model change followed by session_meta effort=high", events)
 	}
 }
 

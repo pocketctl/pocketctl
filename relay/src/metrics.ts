@@ -220,3 +220,21 @@ export function observeInboxOldest(rows: ReadonlyArray<{ receivedAt: Date }>, no
   const oldest = Math.min(...rows.map((row) => row.receivedAt.getTime()))
   inboxOldestSeconds.set(Math.max(0, (now.getTime() - oldest) / 1000))
 }
+
+// --- ADR-0005 Phase 3 scope observability (§11.2) ------------------------------
+// Fixed allowlist labels only: never installation, Organization, Team,
+// membership, user, Claim, candidate, policy, or repository identifiers.
+
+export const extensionScopeMutationsTotal = new Counter({
+  name: 'pocketctl_extension_scope_mutations_total',
+  help: 'Scope/membership/lifecycle mutations by kind and result.',
+  labelNames: ['kind', 'result'],
+  registers: [registry],
+})
+
+export const extensionV2GrantsTotal = new Counter({
+  name: 'pocketctl_extension_v2_grants_total',
+  help: 'Federated v2 grants minted by caller, result, and bounded scope-count bucket.',
+  labelNames: ['caller', 'result', 'scope_count_bucket'],
+  registers: [registry],
+})

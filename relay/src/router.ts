@@ -1,5 +1,11 @@
 import type { WebSocket } from 'ws';
-import { handleMemoryMcpGrantMessage, type MemoryMcpGrantBroker } from './extensions/grant-service.js';
+import {
+  handleMemoryContextGrantMessage,
+  handleMemoryMcpGrantMessage,
+  handleSessionRegistrationMessage,
+  type MemoryContextGrantBroker,
+  type MemoryMcpGrantBroker,
+} from './extensions/grant-service.js';
 import type pg from 'pg';
 import type { RelayPools } from './db-pools.js';
 import { randomUUID } from 'crypto';
@@ -121,6 +127,8 @@ interface DaemonRevocationGateState {
 }
 
 export interface RouterOptions {
+  /** Session-bound context grant broker (Phase 2); absent disables the leg. */
+  memoryContextGrantBroker?: MemoryContextGrantBroker;
   /** Agent MCP grant broker; absent disables the memory_mcp_grant leg. */
   memoryMcpGrantBroker?: MemoryMcpGrantBroker;
   observeIngressClass?: (daemonId: string, priority: PriorityClass) => void;
@@ -197,6 +205,7 @@ export class Router {
   private daemons = new Map<string, DaemonConnection>();
   private daemonMetrics = new Map<string, DaemonMetrics>();
   private memoryMcpGrantBroker?: MemoryMcpGrantBroker;
+  private memoryContextGrantBroker?: MemoryContextGrantBroker;
   private clients = new Map<WebSocket, ClientConnection>();
   private sessionToDaemon = new Map<string, string>();
   private pendingSessionCreate = new Map<string, WebSocket>();
@@ -309,6 +318,7 @@ export class Router {
     };
     this.controlPool = normalized.control;
     this.memoryMcpGrantBroker = options.memoryMcpGrantBroker;
+    this.memoryContextGrantBroker = options.memoryContextGrantBroker;
     this.ingestPool = normalized.ingest;
     this.queryPool = normalized.query;
     this.workerPool = normalized.worker;
@@ -1947,6 +1957,31 @@ export class Router {
     }
 
     // Handle cancel_takeover: old daemon confirms it has stopped
+    // Phase 2 session-bound context grant brokerage: same control-plane
+    // rules as memory_mcp_grant — identity from the authenticated daemon,
+    // session ownership verified inside the broker's SQL boundary.
+    if (msg.type === 'memory_context_grant') {
+      const daemon = originDaemon ?? this.daemons.get(daemonId);
+      const broker = this.memoryContextGrantBroker;
+      if (!daemon || !broker || !originWs) return;
+      void handleMemoryContextGrantMessage(
+        broker, daemon, msg, (payload) => { if (originWs.readyState === originWs.OPEN) originWs.send(payload) },
+      ).catch(() => undefined);
+      return;
+    }
+
+    // Two-phase managed-session registration ack (Phase 2): durable session
+    // row first, then a bounded ready ack. Never an authorization token.
+    if (msg.type === 'session_registration') {
+      const daemon = originDaemon ?? this.daemons.get(daemonId);
+      if (!daemon || daemon.userId === null || !originWs) return;
+      void handleSessionRegistrationMessage(
+        { pool: this.pool }, { userId: daemon.userId, daemonId }, msg,
+        (payload) => { if (originWs.readyState === originWs.OPEN) originWs.send(payload) },
+      ).catch(() => undefined);
+      return;
+    }
+
     if (msg.type === 'cancel_takeover') {
       const takeover = this.takeoverTimers.get(daemonId);
       if (takeover) {

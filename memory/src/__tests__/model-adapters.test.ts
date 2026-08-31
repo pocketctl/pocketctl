@@ -30,6 +30,7 @@ describe('openai-compatible text adapter', () => {
     const fetchImpl = vi.fn(async () => jsonResponse(chatCompletion('{"candidates":[]}')))
     const generator = createOpenAICompatibleTextGenerator({
       ...TEXT_OPTIONS, fetchImpl,
+      maxOutputTokens: 4096,
       inputCostMicrosPerMillionTokens: 2_000_000,
       outputCostMicrosPerMillionTokens: 4_000_000,
     })
@@ -49,9 +50,30 @@ describe('openai-compatible text adapter', () => {
     const [, init] = fetchImpl.mock.calls[0] as unknown as [string, RequestInit]
     const payload = JSON.parse(String(init.body)) as Record<string, unknown>
     expect(payload.response_format).toEqual({ type: 'json_object' })
+    expect(payload.max_tokens).toBe(4096)
     const headers = new Headers(init.headers)
     expect(headers.get('authorization')).toBe('Bearer secret-text-key')
     expect(init.redirect).toBe('error')
+  })
+
+  test('forwards an explicit disabled thinking mode for bounded JSON output', async () => {
+    const fetchImpl = vi.fn(async () => jsonResponse(chatCompletion('{"candidates":[]}')))
+    const options = { ...TEXT_OPTIONS, fetchImpl, thinking: 'disabled' as const }
+    const generator = createOpenAICompatibleTextGenerator(options)
+
+    const result = await generator.generateJson({
+      operation: 'candidate_extract',
+      system: 'return JSON',
+      document: { episode: 1 },
+      schema: { type: 'object' },
+      timeoutMs: 5_000,
+      signal: new AbortController().signal,
+    })
+
+    expect(result.ok).toBe(true)
+    const [, init] = fetchImpl.mock.calls[0] as unknown as [string, RequestInit]
+    const payload = JSON.parse(String(init.body)) as Record<string, unknown>
+    expect(payload.thinking).toEqual({ type: 'disabled' })
   })
 
   test('non-JSON model output is a non-retryable invalid_json result', async () => {

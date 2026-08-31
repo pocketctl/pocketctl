@@ -11,12 +11,23 @@ export const EpisodesQuerySchema = z.strictObject({
 })
 
 export const ClaimVersionsQuerySchema = z.strictObject({
+  installation_id: UUID.optional(),
   version_limit: z.coerce.number().int().min(1).max(20).default(20),
   version_cursor: z.string().min(1).max(512).optional(),
 })
 
+export const ClaimsQuerySchema = z.strictObject({
+  state: z.literal('active').default('active'),
+  limit: z.coerce.number().int().min(1).max(100).default(50),
+  cursor: z.string().min(1).max(2048).optional(),
+})
+
 export const SearchRequestSchema = z.strictObject({
   query: z.string().min(1).max(2000),
+  scope_installation_ids: z.array(UUID).min(1).max(16).refine(
+    ids => new Set(ids).size === ids.length,
+    { message: 'scope_installation_ids must be unique' },
+  ).nullish(),
   repository_id: UUID.nullish(),
   repo_snapshot_id: UUID.nullish(),
   branch: z.string().min(1).max(255).nullish(),

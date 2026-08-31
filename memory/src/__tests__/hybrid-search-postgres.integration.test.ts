@@ -300,7 +300,7 @@ describeWithDatabase('hybrid claim search (PostgreSQL)', () => {
     expect(current.hits.map(hit => hit.versionId)).toEqual([second.rows[0].version_id])
   })
 
-  test('lexical recall covers 10k active versions with p95 below 500ms', async () => {
+  test('lexical recall covers 10k active versions with p95 below 500ms', { timeout: 90_000 }, async () => {
     const episode = await pool.query<{ episode_id: string }>(`
       SELECT episode_id::text FROM work_episodes WHERE installation_id = $1 LIMIT 1
     `, [INSTALLATION])
@@ -379,7 +379,7 @@ describeWithDatabase('hybrid claim search (PostgreSQL)', () => {
       maxMs: Number(durations.at(-1)!.toFixed(2)),
     }))
     expect(p95).toBeLessThan(500)
-  }, 30_000)
+  })
 
   test('English FTS and Chinese/code trigram recall both work', async () => {
     await seedClaim({

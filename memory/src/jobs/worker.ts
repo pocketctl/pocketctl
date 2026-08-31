@@ -1,8 +1,17 @@
 import type pg from 'pg'
-import type { JobClaim, JobType } from './types.js'
+import type { JobClaim, JobFence, JobType } from './types.js'
 import type { JobRepository } from './repository.js'
 
-export type JobHandler = (job: JobClaim, signal: AbortSignal) => Promise<void>
+export interface JobHandlerContext {
+  /** Per-job ownership fence for generation persistence and follow-on enqueue. */
+  fence: JobFence
+}
+
+export type JobHandler = (
+  job: JobClaim,
+  signal: AbortSignal,
+  ctx?: JobHandlerContext,
+) => Promise<void>
 
 export interface JobWorkerOptions {
   pool: pg.Pool
@@ -21,12 +30,20 @@ const DEFAULT_CLAIM_LIMIT = 8
 const DEFAULT_POLL_INTERVAL_MS = 500
 const DEFAULT_DRAIN_MS = 20_000
 
+interface InFlightEntry {
+  claim: JobClaim
+  controller: AbortController
+  abort: () => void
+}
+
 /**
- * Claim/dispatch loop over the fenced job queue. On shutdown it stops
- * claiming immediately, waits up to the drain deadline for the in-flight
- * handler, then exits non-zero so the supervisor surfaces the interrupted
- * batch (the database stays consistent: unfinished claims expire and are
- * reclaimed with a bumped epoch).
+ * Claim/dispatch loop over the fenced job queue. Renewal is per-claim
+ * (ADR-P2-09): a false or erroring renewal for one job aborts only that
+ * job's handler signal, so a lost lease can never strand or cancel unrelated
+ * work. On shutdown it stops claiming immediately, waits up to the drain
+ * deadline for the in-flight handlers, then exits non-zero so the supervisor
+ * surfaces the interrupted batch (the database stays consistent: unfinished
+ * claims expire and are reclaimed with a bumped epoch).
  */
 export function createJobWorker(options: JobWorkerOptions) {
   const handlers = new Map<JobType, JobHandler>()
@@ -39,6 +56,7 @@ export function createJobWorker(options: JobWorkerOptions) {
   let renewTimer: ReturnType<typeof setInterval> | undefined
   let stopped = false
   let inFlight: Array<Promise<void>> = []
+  const runningClaims = new Map<string, InFlightEntry>()
 
   async function dispatch(claims: JobClaim[]): Promise<void> {
     await Promise.all(claims.map(async claim => {
@@ -56,9 +74,18 @@ export function createJobWorker(options: JobWorkerOptions) {
       const controller = new AbortController()
       const abort = () => controller.abort()
       options.signal.addEventListener('abort', abort, { once: true })
+      const entry: InFlightEntry = { claim, controller, abort }
+      runningClaims.set(claim.job_id, entry)
+      const ctx: JobHandlerContext = {
+        fence: {
+          jobId: claim.job_id,
+          claimedBy: options.workerId,
+          claimEpoch: claim.claim_epoch,
+        },
+      }
       const run = (async () => {
         try {
-          await handler(claim, controller.signal)
+          await handler(claim, controller.signal, ctx)
           await options.jobs.completeJob({
             jobId: claim.job_id, claimedBy: options.workerId, claimEpoch: claim.claim_epoch,
           })
@@ -71,6 +98,7 @@ export function createJobWorker(options: JobWorkerOptions) {
             errorCode: boundedErrorCode(error),
           }).catch(() => undefined)
         } finally {
+          runningClaims.delete(claim.job_id)
           options.signal.removeEventListener('abort', abort)
         }
       })()
@@ -110,16 +138,35 @@ export function createJobWorker(options: JobWorkerOptions) {
   }
 
   /**
-   * Lease renewal: without it, a handler that outlives its lease gets its job
-   * reset to pending by the next claim pass and re-executed concurrently.
-   * Renewal only runs while claims are actually in flight.
+   * Per-claim lease renewal: each in-flight job renews its own
+   * (job_id, claimed_by, claim_epoch) fence. A false result or an error
+   * aborts exactly that claim's handler signal — the worker keeps running
+   * its other claims, and the stale owner can no longer finalize work the
+   * new owner already holds (the completion fence rejects it).
    */
   function startRenewal(): void {
     if (renewTimer) return
     renewTimer = setInterval(() => {
-      if (stopped || options.signal.aborted || inFlight.length === 0) return
-      void options.jobs.renewClaims({ workerId: options.workerId, leaseMs })
-        .catch(error => options.onError?.(error))
+      if (stopped || options.signal.aborted || runningClaims.size === 0) return
+      for (const entry of [...runningClaims.values()]) {
+        void options.jobs.renewClaim({
+          jobId: entry.claim.job_id,
+          claimedBy: options.workerId,
+          claimEpoch: entry.claim.claim_epoch,
+          leaseMs,
+        })
+          .then(owned => {
+            if (!owned && runningClaims.get(entry.claim.job_id) === entry) {
+              entry.abort()
+            }
+          })
+          .catch(error => {
+            options.onError?.(error, entry.claim)
+            if (runningClaims.get(entry.claim.job_id) === entry) {
+              entry.abort()
+            }
+          })
+      }
     }, Math.max(250, Math.floor(leaseMs / 3)))
     renewTimer.unref?.()
   }

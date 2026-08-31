@@ -21,6 +21,38 @@ import (
 	"github.com/pocketctl/pocketctl/internal/platform"
 )
 
+func TestOpenCodeProbePerMessageSystemRequiresLiveSchemaEvidence(t *testing.T) {
+	tests := []struct {
+		name string
+		doc  string
+		want bool
+	}{
+		{name: "supported", doc: `{"paths":{"/session/{sessionID}/message":{"post":{"requestBody":{"content":{"application/json":{"schema":{"properties":{"system":{"type":"string"}}}}}}}}}}`, want: true},
+		{name: "supported through local schema ref", doc: `{"paths":{"/session/{sessionID}/message":{"post":{"requestBody":{"content":{"application/json":{"schema":{"$ref":"#/components/schemas/MessageInput"}}}}}}},"components":{"schemas":{"MessageInput":{"type":"object","properties":{"system":{"type":"string"}}}}}}`, want: true},
+		{name: "missing field", doc: `{"paths":{"/session/{sessionID}/message":{"post":{"requestBody":{"content":{"application/json":{"schema":{"properties":{"parts":{"type":"array"}}}}}}}}}}`, want: false},
+		{name: "response field is not request capability", doc: `{"paths":{"/session/{sessionID}/message":{"post":{"responses":{"200":{"content":{"application/json":{"schema":{"properties":{"system":{"type":"string"}}}}}}}}}}}`, want: false},
+		{name: "get request is not post capability", doc: `{"paths":{"/session/{sessionID}/message":{"get":{"requestBody":{"content":{"application/json":{"schema":{"properties":{"system":{"type":"string"}}}}}}}}}}`, want: false},
+		{name: "non-string system is unsupported", doc: `{"paths":{"/session/{sessionID}/message":{"post":{"requestBody":{"content":{"application/json":{"schema":{"properties":{"system":{"type":"object"}}}}}}}}}}`, want: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path != "/doc" {
+					http.NotFound(w, r)
+					return
+				}
+				fmt.Fprint(w, tt.doc)
+			}))
+			defer server.Close()
+			srv := NewOpencodeServer("unused")
+			srv.baseURL = server.URL
+			if got := srv.ProbePerMessageSystem(context.Background()); got != tt.want {
+				t.Fatalf("probe=%v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestOpenCodeGetMessagesUsesSessionDirectory(t *testing.T) {
 	const directory = "/tmp/opencode-cli-project"
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

@@ -24,6 +24,7 @@ import { insertKnowledgeTombstones } from '../claims/tombstones.js'
 import { normalizedClaimKey } from '../retrieval/query-normalizer.js'
 import type { Phase1Metrics } from '../metrics.js'
 import { createTransactionBoundPool } from './transaction-bound-pool.js'
+import { createInvalidationService } from '../context/invalidation-service.js'
 
 /**
  * Management routes (plan §7.2). Every mutation requires memory.manage, an
@@ -431,6 +432,9 @@ export function registerManageRoutes(app: FastifyInstance, deps: ManageRouteDeps
         })),
       })
       if (!corrected.ok) return { ok: false, error: corrected.error }
+      await createInvalidationService({ pool: transactionPool }).onClaimStateChange({
+        installationId: grant.installationId, claimIds: [id],
+      })
       return {
         ok: true,
         metadata: {
@@ -461,6 +465,9 @@ export function registerManageRoutes(app: FastifyInstance, deps: ManageRouteDeps
         expectedRevision: parsed.data.expected_revision,
       })
       if (!transitioned.ok) return { ok: false, error: transitioned.error }
+      await createInvalidationService({ pool: transactionPool }).onClaimStateChange({
+        installationId: grant.installationId, claimIds: [id],
+      })
       return { ok: true, metadata: { claim_id: id, state: 'expired' } }
     })
     if (result !== undefined) return result
@@ -483,6 +490,9 @@ export function registerManageRoutes(app: FastifyInstance, deps: ManageRouteDeps
         expectedRevision: parsed.data.expected_revision,
       })
       if (!transitioned.ok) return { ok: false, error: transitioned.error }
+      await createInvalidationService({ pool: transactionPool }).onClaimStateChange({
+        installationId: grant.installationId, claimIds: [id],
+      })
       return { ok: true, metadata: { claim_id: id, state: 'revoked' } }
     })
     if (result !== undefined) return result
@@ -496,7 +506,7 @@ export function registerManageRoutes(app: FastifyInstance, deps: ManageRouteDeps
       reply.code(400).send(errorBody(new MemoryApiError('invalid_request', 'invalid delete body')))
       return
     }
-    const result = await mutation(request, reply, 'delete_claim', async (grant, _transactionPool, client) => {
+    const result = await mutation(request, reply, 'delete_claim', async (grant, transactionPool, client) => {
       const claim = await client.query<{
         claim_type: string
         scope_key: string
@@ -536,6 +546,11 @@ export function registerManageRoutes(app: FastifyInstance, deps: ManageRouteDeps
         reason: 'privacy_delete',
         keys: deps.tombstoneHmacKeys,
       })
+      // Invalidate while pack dependency rows still exist; the following Claim
+      // cascade removes those joins and would make post-delete discovery impossible.
+      await createInvalidationService({ pool: transactionPool }).onClaimStateChange({
+        installationId: grant.installationId, claimIds: [id],
+      })
       await client.query(`
         DELETE FROM knowledge_claims WHERE installation_id = $1 AND claim_id = $2
       `, [grant.installationId, id])
@@ -573,8 +588,8 @@ export function registerManageRoutes(app: FastifyInstance, deps: ManageRouteDeps
 
 function isManageRequest(method: string, rawUrl: string): boolean {
   const path = rawUrl.split('?')[0]
-  if (path === '/api/v1/memory/candidates' || path === '/api/v1/memory/settings'
-    || path === '/api/v1/memory/feedback') return true
+  if (method === 'GET' && (path === '/api/v1/memory/candidates' || path === '/api/v1/memory/settings')) return true
+  if (method === 'POST' && path === '/api/v1/memory/feedback') return true
   if (method === 'POST' && /^\/api\/v1\/memory\/candidates\/[^/]+\/(accept|reject)$/.test(path)) return true
   if (method === 'POST' && /^\/api\/v1\/memory\/claims\/[^/]+\/(correct|expire|revoke)$/.test(path)) return true
   return method === 'DELETE' && /^\/api\/v1\/memory\/claims\/[^/]+$/.test(path)

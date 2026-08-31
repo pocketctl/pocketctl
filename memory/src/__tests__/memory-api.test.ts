@@ -65,6 +65,24 @@ function makeManageApp(options: { mode?: 'ok' | 'reject' | 'wrong-service'; limi
   return app
 }
 
+function makeFullMemoryApp(mode: 'ok' | 'reject' | 'wrong-service' = 'ok') {
+  const { guard, seen } = fakeGuard(mode)
+  const app = Fastify()
+  const shared = { pool: fakePool(), guard, policy: policy() }
+  registerReadRoutes(app, {
+    ...shared,
+    recallEmbeddingTimeoutMs: 100,
+    cursorSigningKey: 'test-cursor-signing-key',
+  })
+  registerManageRoutes(app, {
+    ...shared,
+    textConfigured: false,
+    embeddingConfigured: false,
+    tombstoneHmacKeys: [{ version: 'v1', key: 't'.repeat(32) }],
+  })
+  return { app, seen }
+}
+
 describe('memory api read routes', () => {
   const apps: Array<FastifyInstance> = []
   afterEach(async () => {
@@ -111,12 +129,13 @@ describe('memory api read routes', () => {
     apps.push(app)
     await app.inject({ method: 'POST', url: '/api/v1/memory/search', headers: { host: 'memory.example', authorization: 'Bearer t' }, payload: { query: 'vitest' } })
     await app.inject({ method: 'POST', url: '/api/v1/memory/recall', headers: { host: 'memory.example', authorization: 'Bearer t' }, payload: { query: 'vitest' } })
+    await app.inject({ method: 'GET', url: '/api/v1/memory/claims', headers: { host: 'memory.example', authorization: 'Bearer t' } })
     await app.inject({ method: 'GET', url: '/api/v1/memory/claims/11111111-1111-4111-8111-111111111111', headers: { host: 'memory.example', authorization: 'Bearer t' } })
     await app.inject({ method: 'GET', url: '/api/v1/memory/evidence/11111111-1111-4111-8111-111111111111', headers: { host: 'memory.example', authorization: 'Bearer t' } })
     await app.inject({ method: 'GET', url: '/api/v1/memory/episodes', headers: { host: 'memory.example', authorization: 'Bearer t' } })
     await app.inject({ method: 'GET', url: '/api/v1/memory/repositories/11111111-1111-4111-8111-111111111111/context', headers: { host: 'memory.example', authorization: 'Bearer t' } })
     expect(seen).toEqual([
-      'memory.search', 'memory.recall', 'memory.search', 'memory.search',
+      'memory.search', 'memory.recall', 'memory.search', 'memory.search', 'memory.search',
       'memory.search', 'memory.recall',
     ])
   })
@@ -131,6 +150,49 @@ describe('memory api read routes', () => {
     })
     expect(response.statusCode).toBe(401)
     expect(response.json()).toEqual({ error: { code: 'unauthorized', message: 'grant rejected' } })
+  })
+
+  test('a shared-primary v2 grant cannot read implicitly without a scope selector', async () => {
+    const pool = fakePool() as unknown as { query: ReturnType<typeof vi.fn> }
+    const sharedGrant = {
+      version: 'v2' as const,
+      installationId: INSTALLATION,
+      primaryInstallationId: INSTALLATION,
+      services: ['memory.search'],
+      configVersion: '1',
+      callerType: 'web',
+      scopeBindings: [{
+        installation_id: INSTALLATION,
+        owner_scope_kind: 'team' as const,
+        owner_scope_id: '22222222-2222-4222-8222-222222222222',
+        membership_id: '33333333-3333-4333-8333-333333333333',
+        membership_revision: '1',
+        authorization_epoch: '1',
+        permissions: ['read'],
+      }],
+    }
+    const app = Fastify()
+    apps.push(app)
+    registerReadRoutes(app, {
+      pool: pool as never,
+      guard: {
+        guardMcp: vi.fn(async () => sharedGrant),
+        guardV2: vi.fn(async () => sharedGrant),
+      } as never,
+      policy: policy(),
+      recallEmbeddingTimeoutMs: 100,
+      cursorSigningKey: 'test-cursor-signing-key',
+      sharedScopesEnabled: true,
+    })
+
+    const response = await app.inject({
+      method: 'POST', url: '/api/v1/memory/search',
+      headers: { host: 'memory.example', authorization: 'Bearer v2' },
+      payload: { query: 'implicit shared read' },
+    })
+    expect(response.statusCode).toBe(400)
+    expect(response.json().error.code).toBe('invalid_request')
+    expect(pool.query).not.toHaveBeenCalled()
   })
 
   test('rejected grants win over malformed bodies and resource ids', async () => {
@@ -191,6 +253,10 @@ describe('memory api read routes', () => {
     apps.push(app)
     const headers = { host: 'memory.example', authorization: 'Bearer t' }
     for (const url of [
+      '/api/v1/memory/claims?limit=0',
+      '/api/v1/memory/claims?limit=101',
+      '/api/v1/memory/claims?state=revoked',
+      '/api/v1/memory/claims?cursor=bad',
       '/api/v1/memory/claims/not-a-uuid',
       '/api/v1/memory/claims/11111111-1111-4111-8111-111111111111?version_limit=21',
       '/api/v1/memory/claims/11111111-1111-4111-8111-111111111111?version_cursor=bad',
@@ -212,6 +278,19 @@ describe('memory api manage routes', () => {
   const apps: Array<FastifyInstance> = []
   afterEach(async () => {
     await Promise.all(apps.splice(0).map(app => app.close()))
+  })
+
+  test('management preflight remains unauthenticated when read and manage routes share an app', async () => {
+    const { app, seen } = makeFullMemoryApp('reject')
+    apps.push(app)
+    const response = await app.inject({
+      method: 'OPTIONS', url: '/api/v1/memory/candidates',
+      headers: { host: 'memory.example', origin: 'https://web.example' },
+    })
+    expect(response.statusCode).toBeLessThan(400)
+    expect(response.headers['access-control-allow-methods']).toContain('GET')
+    expect(response.headers['access-control-allow-headers']).toContain('authorization')
+    expect(seen).toEqual([])
   })
 
   test('mutations refuse to run without an Idempotency-Key', async () => {

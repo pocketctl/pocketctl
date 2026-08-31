@@ -1,6 +1,7 @@
 package session
 
 import (
+	"github.com/pocketctl/pocketctl/internal/memorycontext"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -86,6 +87,8 @@ type codexThreadItem struct {
 type codexUserInput struct {
 	Type string `json:"type"`
 	Text string `json:"text,omitempty"`
+	Role string `json:"role,omitempty"`
+	Tag  string `json:"tag,omitempty"`
 }
 
 type codexFileEdit struct {
@@ -380,6 +383,12 @@ func (p *codexProjection) convertItem(method, threadID, turnID string, item code
 		var texts []string
 		for _, content := range contentItems {
 			if content.Type == "text" && content.Text != "" {
+				// Phase 2 no-recursive-capture: the synthetic developer
+				// context item is dropped by explicit tag, never by matching
+				// user text (plan 11.4).
+				if content.Role == "developer" && content.Tag == memorycontext.CodexDeveloperItemTag {
+					continue
+				}
 				texts = append(texts, content.Text)
 			}
 		}

@@ -43,6 +43,7 @@ export interface ModelHttpClientOptions {
   maxResponseBytes?: number
   fetchImpl?: typeof fetch
   sleep?: (ms: number) => Promise<void>
+  maxAttempts?: number
 }
 
 export interface ModelHttpClient {
@@ -102,12 +103,16 @@ export function createModelHttpClient(options: ModelHttpClientOptions): ModelHtt
   const doFetch = options.fetchImpl ?? fetch
   const sleep = options.sleep
   const maxResponseBytes = options.maxResponseBytes ?? DEFAULT_MAX_RESPONSE_BYTES
+  const maxAttempts = options.maxAttempts ?? MAX_ATTEMPTS
+  if (!Number.isInteger(maxAttempts) || maxAttempts < 1 || maxAttempts > MAX_ATTEMPTS) {
+    throw new Error(`model http maxAttempts must be between 1 and ${MAX_ATTEMPTS}`)
+  }
 
   return {
     async postJson(path, body, requestOptions): Promise<unknown> {
       const timeoutMs = requestOptions.timeoutMs ?? options.timeoutMs
       const lastError: ModelHttpError[] = []
-      for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+      for (let attempt = 1; attempt <= maxAttempts; attempt++) {
         if (requestOptions.signal.aborted) {
           throw new ModelHttpError({ code: 'timeout', retryable: false })
         }
@@ -157,7 +162,7 @@ export function createModelHttpClient(options: ModelHttpClientOptions): ModelHtt
             classified = new ModelHttpError({ code: 'network', retryable: true })
           }
           lastError.push(classified)
-          if (!classified.retryable || attempt === MAX_ATTEMPTS) throw classified
+          if (!classified.retryable || attempt === maxAttempts) throw classified
           const backoff = classified.retryAfterMs
             ?? Math.min(BASE_BACKOFF_MS * 2 ** (attempt - 1), MAX_BACKOFF_MS)
           await abortableSleep(sleep, backoff, requestOptions.signal)

@@ -52,6 +52,39 @@ describeWithDatabase('fenced background jobs (PostgreSQL)', () => {
     `, [INSTALLATION])
   })
 
+  test('renewClaim is fenced per job and a reclaimed neighbour cannot renew', async () => {
+    await jobs.enqueueJob({
+      installationId: INSTALLATION, jobType: 'project_feed', idempotencyKey: 'fence:a',
+    })
+    await jobs.enqueueJob({
+      installationId: INSTALLATION, jobType: 'project_feed', idempotencyKey: 'fence:b',
+    })
+    const claims = await jobs.claimJobs({ workerId: 'worker-a', limit: 2, leaseMs: 60_000 })
+    expect(claims).toHaveLength(2)
+    const jobA = claims.find(c => c.idempotency_key === 'fence:a')!
+    const jobB = claims.find(c => c.idempotency_key === 'fence:b')!
+
+    // The owned job renews under its own fence.
+    await expect(jobs.renewClaim({
+      jobId: jobA.job_id, claimedBy: 'worker-a', claimEpoch: jobA.claim_epoch, leaseMs: 60_000,
+    })).resolves.toBe(true)
+
+    // Expire B's lease; worker-b reclaims it under a bumped epoch.
+    await pool.query(`UPDATE memory_jobs SET claim_expires_at = NOW() - INTERVAL '1 second' WHERE job_id = $1`, [jobB.job_id])
+    const reclaimed = await jobs.claimJobs({ workerId: 'worker-b', limit: 1, leaseMs: 60_000 })
+    expect(reclaimed).toHaveLength(1)
+    expect(reclaimed[0].job_id).toBe(jobB.job_id)
+    expect(reclaimed[0].claim_epoch).toBe(jobB.claim_epoch + 1)
+
+    // The stale owner cannot renew its lost claim, but its other claim is unaffected.
+    await expect(jobs.renewClaim({
+      jobId: jobB.job_id, claimedBy: 'worker-a', claimEpoch: jobB.claim_epoch, leaseMs: 60_000,
+    })).resolves.toBe(false)
+    await expect(jobs.renewClaim({
+      jobId: jobA.job_id, claimedBy: 'worker-a', claimEpoch: jobA.claim_epoch, leaseMs: 60_000,
+    })).resolves.toBe(true)
+  })
+
   test('enqueue is idempotent on installation, type and key', async () => {
     await jobs.enqueueJob({
       installationId: INSTALLATION, jobType: 'project_feed', idempotencyKey: 'feed:101', priority: 50,
@@ -138,16 +171,23 @@ describeWithDatabase('fenced background jobs (PostgreSQL)', () => {
     expect(state.rows[0].claimed_by).toBe('w2')
   })
 
-  test('renewClaims extends the lease of the caller only', async () => {
+  test('renewClaim extends the lease of the caller only', async () => {
     await jobs.enqueueJob({
       installationId: INSTALLATION, jobType: 'project_feed', idempotencyKey: 'feed:2', priority: 50,
     })
     await jobs.enqueueJob({
       installationId: INSTALLATION, jobType: 'project_feed', idempotencyKey: 'feed:3', priority: 50,
     })
-    await jobs.claimJobs({ workerId: 'w1', limit: 2, leaseMs: 60_000 })
-    const renewed = await jobs.renewClaims({ workerId: 'w1', leaseMs: 60_000 })
-    expect(renewed).toBe(2)
+    const claims = await jobs.claimJobs({ workerId: 'w1', limit: 2, leaseMs: 60_000 })
+    for (const claim of claims) {
+      await expect(jobs.renewClaim({
+        jobId: claim.job_id, claimedBy: 'w1', claimEpoch: claim.claim_epoch, leaseMs: 60_000,
+      })).resolves.toBe(true)
+    }
+    // Another worker's claim cannot be renewed through this fence.
+    await expect(jobs.renewClaim({
+      jobId: claims[0].job_id, claimedBy: 'someone-else', claimEpoch: claims[0].claim_epoch, leaseMs: 60_000,
+    })).resolves.toBe(false)
   })
 
   test('reschedules with the bounded ladder and dead-letters at attempt 12', async () => {

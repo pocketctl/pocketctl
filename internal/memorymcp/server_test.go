@@ -29,7 +29,7 @@ func TestServerAnswersGrantRequestsAndBoundedErrors(t *testing.T) {
 	server := &Server{
 		SocketPath: socketPath,
 		Timeout:    2 * time.Second,
-		Request: func(ctx context.Context) (Grant, error) {
+		Request: func(ctx context.Context, _ []string) (Grant, error) {
 			requests <- struct{}{}
 			return Grant{
 				Token: "g-1", ExpiresAt: time.Now().Add(time.Minute),
@@ -66,7 +66,7 @@ func TestServerAnswersGrantRequestsAndBoundedErrors(t *testing.T) {
 	failing := &Server{
 		SocketPath: socketPath + "2",
 		Timeout:    time.Second,
-		Request: func(ctx context.Context) (Grant, error) {
+		Request: func(ctx context.Context, _ []string) (Grant, error) {
 			return Grant{}, errCode("no_installation")
 		},
 	}
@@ -97,7 +97,7 @@ func TestServerRejectsMalformedRequests(t *testing.T) {
 	server := &Server{
 		SocketPath: socketPath,
 		Timeout:    time.Second,
-		Request:    func(ctx context.Context) (Grant, error) { return Grant{}, nil },
+		Request:    func(ctx context.Context, _ []string) (Grant, error) { return Grant{}, nil },
 	}
 	ln, err := server.Start()
 	if err != nil {
@@ -129,7 +129,7 @@ func TestServerRejectsOversizedIPCFramesBeforeGrantMint(t *testing.T) {
 	server := &Server{
 		SocketPath: socketPath,
 		Timeout:    time.Second,
-		Request: func(context.Context) (Grant, error) {
+		Request: func(context.Context, []string) (Grant, error) {
 			called <- struct{}{}
 			return Grant{}, nil
 		},
@@ -167,7 +167,7 @@ func TestIPCGrantSourceRejectsOversizedResponses(t *testing.T) {
 		SocketPath: "ignored",
 		Dial:       func(context.Context, string) (net.Conn, error) { return client, nil },
 	}
-	if _, err := source.Grant(context.Background()); err == nil || !strings.Contains(err.Error(), "ipc_frame_too_large") {
+	if _, err := source.Grant(context.Background(), nil); err == nil || !strings.Contains(err.Error(), "ipc_frame_too_large") {
 		t.Fatalf("expected bounded frame error, got %v", err)
 	}
 }

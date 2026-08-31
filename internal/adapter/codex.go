@@ -361,16 +361,21 @@ func convertCodexPayload(topType string, p codexPayload, session *CodexAdapter, 
 		return nil
 
 	case "turn_context":
-		// codex ≥0.142 only carries the model here (not on assistant messages).
-		// Record it on the streaming adapter so the daemon's OnEvent hook can
-		// derive a session_model_changed for live daemon sessions.
-		if session != nil && p.Model != "" {
-			session.model = CleanModelName(p.Model)
+		// codex ≥0.142 only carries the selected model here (not on assistant
+		// messages). Emit this record directly so a /model switch reaches the
+		// relay before the next reply, rather than waiting for agent_text.
+		model := CleanModelName(p.Model)
+		if session != nil && model != "" {
+			session.model = model
+		}
+		events := make([]protocol.DaemonEvent, 0, 2)
+		if model != "" {
+			events = append(events, protocol.DaemonEvent{Type: "session_model_changed", Model: model})
 		}
 		if effort := strings.TrimSpace(p.Effort); effort != "" {
-			return []protocol.DaemonEvent{{Type: "session_meta", Effort: effort}}
+			events = append(events, protocol.DaemonEvent{Type: "session_meta", Effort: effort})
 		}
-		return nil
+		return events
 
 	case "response_item":
 		return convertCodexResponseItem(p, session, plan)

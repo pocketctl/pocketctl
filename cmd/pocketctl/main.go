@@ -36,10 +36,12 @@ import (
 	"github.com/pocketctl/pocketctl/internal/discovery"
 	"github.com/pocketctl/pocketctl/internal/i18n"
 	"github.com/pocketctl/pocketctl/internal/keepawake"
+	"github.com/pocketctl/pocketctl/internal/memorycontext"
 	"github.com/pocketctl/pocketctl/internal/memorymcp"
 	"github.com/pocketctl/pocketctl/internal/notify"
 	"github.com/pocketctl/pocketctl/internal/platform"
 	"github.com/pocketctl/pocketctl/internal/protocol"
+	"github.com/pocketctl/pocketctl/internal/repositoryidentity"
 	"github.com/pocketctl/pocketctl/internal/session"
 	"github.com/pocketctl/pocketctl/internal/sysinfo"
 	"github.com/pocketctl/pocketctl/internal/turn"
@@ -1547,6 +1549,8 @@ func cmdDaemonStart(args []string) {
 
 	// Create WebSocket client
 	client := ws.NewClient(url, tok, id, agentTypes, agentVersions, agentLatests, outputCh, logger)
+	memoryContextGrants := wireMemoryContext(sm, client)
+	client.OnControlMessage = sm.DispatchMemoryContextControl
 	client.SetAgentManageable(agentManageable)
 	client.SetVersion(version)
 	client.SetStartedAt(time.Now().Unix())
@@ -1740,6 +1744,7 @@ func cmdDaemonStart(args []string) {
 	// session_model_changed event so the relay + Web/iOS clients reflect the
 	// /model switch in real time.
 	client.OnEvent = func(evt protocol.DaemonEvent) []protocol.DaemonEvent {
+		enrichRepositoryFacts(context.Background(), &evt)
 		// Turn lifecycle chokepoint: registry sync + single (turn, state)
 		// emission dedup for every producer (codex projection, claude JSONL
 		// tracker, opencode backend). Dropped duplicates never reach the relay.
@@ -1753,6 +1758,22 @@ func cmdDaemonStart(args []string) {
 		// Central outgoing classifier: metadata-only enrichment (actor/flow/
 		// content class + unassigned-event counter), never filtering.
 		sm.EnrichOutgoingEvent(&evt)
+		if evt.Type == "session_model_changed" && evt.Model != "" && evt.SessionID != "" {
+			current, _ := sm.GetSessionModel(evt.SessionID)
+			if evt.Model == current {
+				return nil
+			}
+			sm.SetSessionModel(evt.SessionID, evt.Model)
+			if current == "" {
+				// This is first discovery, not an explicit user model switch. Keep
+				// it durable for the session list while clients suppress the stream
+				// notice and only update their model badge.
+				evt.Reason = "initial_model"
+				return []protocol.DaemonEvent{evt}
+			}
+			logger.Info("session model changed", "session", evt.SessionID, "model", evt.Model, "prev", current)
+			return []protocol.DaemonEvent{evt}
+		}
 		if evt.Type != "agent_text" || evt.Model == "" || evt.SessionID == "" {
 			return []protocol.DaemonEvent{evt}
 		}
@@ -1762,7 +1783,8 @@ func cmdDaemonStart(args []string) {
 		}
 		sm.SetSessionModel(evt.SessionID, evt.Model)
 		logger.Info("session model changed", "session", evt.SessionID, "model", evt.Model, "prev", current)
-		// Forward the original agent_text, then the derived change notification.
+		// Older agents report only on agent_text. New Codex turn_context records
+		// are handled above and therefore reach clients before this reply.
 		return []protocol.DaemonEvent{evt, {
 			Type:      "session_model_changed",
 			SessionID: evt.SessionID,
@@ -1890,7 +1912,7 @@ func cmdDaemonStart(args []string) {
 			daemon.Go("memory-mcp-server", logger, func() { memoryMcpServer.Serve(ctx, ln) })
 		}
 
-		handleCommands(ctx, client, sm, logger, &stateDirty, memoryMcpBroker)
+		handleCommands(ctx, client, sm, logger, &stateDirty, memoryMcpBroker, memoryContextGrants)
 	})
 
 	// Periodic state update. Durable-ingress diagnostics are refreshed on this
@@ -2151,7 +2173,7 @@ func daemonRuntimeProviders(sm *session.SessionManager) map[string]agentcontrol.
 }
 
 func reconnectDiscoveryEvent(s session.SessionInfo) protocol.DaemonEvent {
-	return protocol.DaemonEvent{
+	event := protocol.DaemonEvent{
 		Type:         "session_discovered",
 		SessionID:    s.SessionID,
 		Cwd:          s.Cwd,
@@ -2163,6 +2185,22 @@ func reconnectDiscoveryEvent(s session.SessionInfo) protocol.DaemonEvent {
 		Capabilities: s.Capabilities,
 		Resync:       true,
 	}
+	enrichRepositoryFacts(context.Background(), &event)
+	return event
+}
+
+func enrichRepositoryFacts(ctx context.Context, event *protocol.DaemonEvent) {
+	if event == nil || event.Cwd == "" ||
+		(event.Type != "session_discovered" && event.Type != "session_created") {
+		return
+	}
+	observation, ok := repositoryidentity.Resolve(ctx, event.Cwd)
+	if !ok {
+		return
+	}
+	event.RepositoryID = observation.RepositoryID
+	event.Branch = observation.Branch
+	event.CommitSHA = observation.CommitSHA
 }
 
 func observeTerminalLifecycle(sm *session.SessionManager, event protocol.DaemonEvent) bool {
@@ -3137,7 +3175,13 @@ func quotaReservationID(grant *protocol.QuotaGrant) string {
 }
 
 func buildSessionMeta(ctx context.Context, sm *session.SessionManager, sessionID string, logger *slog.Logger) protocol.DaemonEvent {
-	sm.EnsureOpencodeSessionLoaded(sessionID)
+	// Historical Claude/Codex sessions are JSONL-backed. Restore them before
+	// consulting OpenCode: when the optional OpenCode serve is unavailable,
+	// EnsureOpencodeSessionLoaded intentionally reports no authoritative result
+	// and used to prevent a valid Codex rollout from being loaded at all.
+	if !sm.EnsureSessionLoaded(sessionID) {
+		sm.EnsureOpencodeSessionLoaded(sessionID)
+	}
 	agentType, _ := sm.GetSessionAgent(sessionID)
 	storage := adapter.NewStorage(agentType)
 	model, exists := sm.GetSessionModel(sessionID)
@@ -3260,13 +3304,52 @@ func deliverUserMessage(
 	return err
 }
 
-func handleCommands(ctx context.Context, client *ws.Client, sm *session.SessionManager, logger *slog.Logger, stateDirty *atomic.Bool, memoryMcpBroker *memorymcp.WsBroker) {
+type memoryContextControlSender interface {
+	SendControlPayload([]byte) error
+}
+
+// wireMemoryContext installs the authenticated daemon→Relay broker and the
+// direct Memory client. Relay/Memory failures remain fail-open inside the
+// coordinator; only an exact per-session runtime probe can enable injection.
+func wireMemoryContext(sm *session.SessionManager, sender memoryContextControlSender) *memorycontext.GrantClient {
+	grants := &memorycontext.GrantClient{
+		Send:    func(_ context.Context, payload []byte) error { return sender.SendControlPayload(payload) },
+		Timeout: 750 * time.Millisecond,
+	}
+	grants.Reply = grants.WaitReply
+	sm.SetMemoryContext(&memorycontext.Coordinator{
+		Grants: grants, Memory: memorycontext.NewMemoryClient(), Deadline: 750 * time.Millisecond,
+	}, func() bool { return true }, sm.MemoryContextCapability)
+	return grants
+}
+
+func deliverDeferredInitialPrompt(
+	ctx context.Context,
+	grants *memorycontext.GrantClient,
+	sessionID, prompt, requestID string,
+	send func(session.UserMessageInput) error,
+) error {
+	registrationID := "memory-register-" + requestID
+	if requestID == "" {
+		registrationID = "memory-register-" + strconv.FormatInt(time.Now().UnixNano(), 36)
+	}
+	_, registrationErr := grants.RegisterSession(ctx, registrationID, sessionID)
+	return send(session.UserMessageInput{
+		SessionID: sessionID, Content: prompt, RequestID: requestID,
+		SkipMemoryContext: registrationErr != nil,
+	})
+}
+
+func handleCommands(ctx context.Context, client *ws.Client, sm *session.SessionManager, logger *slog.Logger, stateDirty *atomic.Bool, memoryMcpBroker *memorymcp.WsBroker, memoryContextGrants *memorycontext.GrantClient) {
 	quotaGrants := session.NewQuotaGrantValidator()
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case cmd := <-client.CommandCh:
+			if sm.DispatchMemoryContextControl(cmd) {
+				continue
+			}
 			switch cmd.Type {
 			case "memory_mcp_grant_result", "memory_mcp_grant_error":
 				memoryMcpBroker.Dispatch(cmd)
@@ -3302,6 +3385,9 @@ func handleCommands(ctx context.Context, client *ws.Client, sm *session.SessionM
 				}
 				if config.Agent == "" {
 					config.Agent = "claude-code"
+				}
+				if config.Prompt != "" && (config.Agent == adapter.AgentCodex || config.Agent == adapter.AgentOpencode) {
+					config.DeferInitialPrompt = true
 				}
 				sessionID, err := sm.CreateSession(ctx, config)
 				if err != nil {
@@ -3339,9 +3425,21 @@ func handleCommands(ctx context.Context, client *ws.Client, sm *session.SessionM
 				}
 				// Scheme A: let the client know how many sessions now share this cwd.
 				if cwd, ok := sm.GetSessionCwd(sessionID); ok {
+					evt.Cwd = cwd
 					evt.CwdSessions = sm.CwdSessionCount(cwd)
 				}
+				enrichRepositoryFacts(ctx, &evt)
 				client.SendMsg(evt)
+				if prompt, deferred := sm.TakeDeferredInitialPrompt(sessionID); deferred {
+					// The command loop must remain free to receive and dispatch the
+					// registration ACK that this goroutine is waiting for.
+					daemon.Go("memory-context-initial-prompt", logger, func() {
+						if err := deliverDeferredInitialPrompt(ctx, memoryContextGrants, sessionID, prompt, cmd.RequestID,
+							func(input session.UserMessageInput) error { return sm.SendMessageWithInput(ctx, input) }); err != nil {
+							logger.Warn("managed initial prompt dispatch failed", "session", sessionID, "error", err)
+						}
+					})
+				}
 
 			case "abort_create":
 				logger.Info("abort create session", "session", cmd.SessionID)

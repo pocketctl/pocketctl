@@ -782,6 +782,721 @@ export const MEMORY_MIGRATIONS: readonly Migration[] = [
          ALTER COLUMN freshness_at SET NOT NULL`,
     ],
   },
+  {
+    // v13 (Phase 2 plan section 9): versioned policies, shared generation
+    // provenance, context settings/loadouts, retrieval trajectory, context
+    // packs/injections/feedback. Migrations 1-12 stay frozen.
+    version: 13,
+    statements: [
+      `ALTER TABLE memory_jobs DROP CONSTRAINT memory_jobs_job_type_check`,
+      `ALTER TABLE memory_jobs ADD CONSTRAINT memory_jobs_job_type_check
+         CHECK (job_type IN
+         ('project_feed','compile_episode','snapshot_reconcile','session_purge',
+          'installation_purge','report_status','report_usage',
+          'extract_candidates','index_claim_version','rebuild_claim_index','expire_claims',
+          'recompile_extraction_policy','compile_context_shadow',
+          'record_context_delivery','invalidate_context_packs'))`,
+      `ALTER TABLE repositories
+         ADD CONSTRAINT uq_repositories_installation_repository
+         UNIQUE (installation_id, repository_id)`,
+      `ALTER TABLE knowledge_claims
+         ADD CONSTRAINT uq_knowledge_claims_installation_claim
+         UNIQUE (installation_id, claim_id)`,
+      `ALTER TABLE knowledge_versions
+         ADD CONSTRAINT uq_knowledge_versions_installation_version
+         UNIQUE (installation_id, version_id)`,
+      `ALTER TABLE knowledge_evidence
+         ADD CONSTRAINT uq_knowledge_evidence_installation_evidence
+         UNIQUE (installation_id, evidence_id)`,
+      `CREATE TABLE memory_policy_sets (
+         policy_id UUID PRIMARY KEY,
+         installation_id UUID REFERENCES memory_installations(installation_id) ON DELETE CASCADE,
+         policy_kind TEXT NOT NULL CHECK (policy_kind IN ('extraction','context','ranking')),
+         layer TEXT NOT NULL CHECK (layer IN ('system','organization','team','repository','user')),
+         scope_key TEXT NOT NULL,
+         created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+         UNIQUE NULLS NOT DISTINCT (installation_id, policy_kind, layer, scope_key)
+       )`,
+      `CREATE TABLE memory_policy_versions (
+         policy_version_id UUID PRIMARY KEY,
+         policy_id UUID NOT NULL REFERENCES memory_policy_sets(policy_id) ON DELETE CASCADE,
+         version_number INTEGER NOT NULL CHECK (version_number > 0),
+         schema_version INTEGER NOT NULL CHECK (schema_version > 0),
+         document JSONB NOT NULL,
+         content_hash BYTEA NOT NULL,
+         created_by TEXT NOT NULL CHECK (created_by IN ('system','user')),
+         created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+         UNIQUE (policy_id, version_number),
+         UNIQUE (policy_id, content_hash),
+         UNIQUE (policy_id, policy_version_id)
+       )`,
+      `CREATE TABLE memory_policy_heads (
+         policy_id UUID PRIMARY KEY REFERENCES memory_policy_sets(policy_id) ON DELETE CASCADE,
+         active_version_id UUID NOT NULL,
+         revision BIGINT NOT NULL DEFAULT 1 CHECK (revision > 0),
+         updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+         FOREIGN KEY (policy_id, active_version_id)
+           REFERENCES memory_policy_versions(policy_id, policy_version_id)
+       )`,
+      `CREATE TABLE memory_generation_runs (
+         run_id UUID PRIMARY KEY,
+         installation_id UUID NOT NULL REFERENCES memory_installations(installation_id) ON DELETE CASCADE,
+         operation TEXT NOT NULL CHECK (operation IN
+           ('extract_candidates','compile_context','compress_context_shadow')),
+         subject_kind TEXT NOT NULL,
+         subject_key_hash BYTEA NOT NULL,
+         input_digest BYTEA NOT NULL,
+         effective_policy_hash BYTEA NOT NULL,
+         state TEXT NOT NULL CHECK (state IN
+           ('queued','running','succeeded','failed','quarantined','cancelled','superseded')),
+         provider TEXT,
+         model TEXT,
+         model_config_hash BYTEA,
+         job_id UUID REFERENCES memory_jobs(job_id) ON DELETE SET NULL,
+         job_claim_epoch BIGINT,
+         output_kind TEXT,
+         output_id UUID,
+         input_tokens BIGINT NOT NULL DEFAULT 0,
+         output_tokens BIGINT NOT NULL DEFAULT 0,
+         cached_tokens BIGINT NOT NULL DEFAULT 0,
+         cost_micros BIGINT NOT NULL DEFAULT 0,
+         duration_ms INTEGER,
+         error_code TEXT,
+         started_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+         completed_at TIMESTAMPTZ
+       )`,
+      `CREATE TABLE memory_generation_run_policies (
+         run_id UUID NOT NULL REFERENCES memory_generation_runs(run_id) ON DELETE CASCADE,
+         ordinal SMALLINT NOT NULL,
+         policy_version_id UUID NOT NULL REFERENCES memory_policy_versions(policy_version_id),
+         PRIMARY KEY (run_id, ordinal),
+         UNIQUE (run_id, policy_version_id)
+       )`,
+      `ALTER TABLE memory_extraction_runs ADD COLUMN generation_run_id UUID`,
+      `INSERT INTO memory_generation_runs
+         (run_id, installation_id, operation, subject_kind, subject_key_hash,
+          input_digest, effective_policy_hash, state, provider, model,
+          model_config_hash, input_tokens, output_tokens, cost_micros,
+          error_code, started_at, completed_at)
+       WITH ranked_legacy_runs AS (
+         SELECT er.*, ROW_NUMBER() OVER (
+           PARTITION BY er.installation_id, er.episode_id, er.episode_source_digest
+           ORDER BY CASE er.state
+             WHEN 'succeeded' THEN 0
+             WHEN 'quarantined' THEN 1
+             WHEN 'running' THEN 2
+             ELSE 3
+           END,
+           er.completed_at DESC NULLS LAST, er.started_at DESC, er.run_id DESC
+         ) AS active_rank
+         FROM memory_extraction_runs er
+       )
+       SELECT
+         er.run_id, er.installation_id, 'extract_candidates', 'episode',
+         decode(md5(er.episode_id::text), 'hex'),
+         er.episode_source_digest,
+         decode(md5('phase1:no-policy'), 'hex'),
+         CASE
+           WHEN er.state IN ('queued','running','succeeded','quarantined')
+             AND er.active_rank > 1 THEN 'superseded'
+           ELSE er.state
+         END,
+         er.provider, er.model,
+         er.model_config_hash, er.input_tokens, er.output_tokens, er.cost_micros,
+         er.error_code, er.started_at, er.completed_at
+       FROM ranked_legacy_runs er`,
+      `UPDATE memory_extraction_runs er
+       SET generation_run_id = er.run_id
+       WHERE er.generation_run_id IS NULL`,
+      `CREATE UNIQUE INDEX uq_generation_runs_active
+         ON memory_generation_runs
+           (installation_id, operation, subject_kind, subject_key_hash, input_digest, effective_policy_hash)
+         WHERE state IN ('queued','running','succeeded','quarantined')`,
+      `CREATE UNIQUE INDEX uq_extraction_runs_generation_run
+         ON memory_extraction_runs(generation_run_id)
+         WHERE generation_run_id IS NOT NULL`,
+      `CREATE TABLE memory_context_settings (
+         setting_id UUID PRIMARY KEY,
+         installation_id UUID NOT NULL REFERENCES memory_installations(installation_id) ON DELETE CASCADE,
+         scope_kind TEXT NOT NULL CHECK (scope_kind IN ('installation','repository','session')),
+         scope_key TEXT NOT NULL,
+         agent TEXT,
+         mode TEXT NOT NULL CHECK (mode IN ('off','shadow','enabled')),
+         max_tokens INTEGER CHECK (max_tokens BETWEEN 1 AND 2000),
+         revision BIGINT NOT NULL DEFAULT 1 CHECK (revision > 0),
+         updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+         UNIQUE NULLS NOT DISTINCT (installation_id, scope_kind, scope_key, agent)
+       )`,
+      `CREATE TABLE memory_context_loadouts (
+         loadout_id UUID PRIMARY KEY,
+         installation_id UUID NOT NULL REFERENCES memory_installations(installation_id) ON DELETE CASCADE,
+         repository_id UUID,
+         agent TEXT,
+         revision BIGINT NOT NULL DEFAULT 1 CHECK (revision > 0),
+         updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+         UNIQUE NULLS NOT DISTINCT (installation_id, repository_id, agent),
+         UNIQUE (loadout_id, installation_id),
+         FOREIGN KEY (installation_id, repository_id)
+           REFERENCES repositories(installation_id, repository_id)
+       )`,
+      `CREATE TABLE memory_context_loadout_items (
+         loadout_id UUID NOT NULL,
+         item_id UUID NOT NULL,
+         asset_kind TEXT NOT NULL CHECK (asset_kind IN
+           ('claim','persona','runbook','wiki','skill')),
+         installation_id UUID NOT NULL,
+         claim_id UUID,
+         external_asset_ref TEXT,
+         representation TEXT NOT NULL CHECK (representation IN
+           ('summary','on_demand','reference')),
+         priority SMALLINT NOT NULL CHECK (priority BETWEEN 0 AND 100),
+         PRIMARY KEY (loadout_id, item_id),
+         UNIQUE NULLS NOT DISTINCT (loadout_id, asset_kind, claim_id, external_asset_ref),
+         CHECK (
+           (asset_kind IN ('claim','persona','runbook')
+             AND claim_id IS NOT NULL AND external_asset_ref IS NULL)
+           OR
+           (asset_kind IN ('wiki','skill')
+             AND claim_id IS NULL AND external_asset_ref IS NOT NULL)
+         ),
+         FOREIGN KEY (loadout_id, installation_id)
+           REFERENCES memory_context_loadouts(loadout_id, installation_id) ON DELETE CASCADE,
+         FOREIGN KEY (installation_id, claim_id)
+           REFERENCES knowledge_claims(installation_id, claim_id) ON DELETE CASCADE
+       )`,
+      `CREATE TABLE memory_retrieval_trajectories (
+         trajectory_id UUID PRIMARY KEY,
+         installation_id UUID NOT NULL REFERENCES memory_installations(installation_id) ON DELETE CASCADE,
+         request_hmac BYTEA NOT NULL,
+         request_key_id TEXT NOT NULL,
+         repository_id UUID,
+         repo_snapshot_id UUID,
+         branch TEXT,
+         ranking_policy_version_id UUID REFERENCES memory_policy_versions(policy_version_id),
+         backend_plan JSONB NOT NULL,
+         result_state TEXT NOT NULL CHECK (result_state IN
+           ('completed','empty','degraded','retrieval_failed')),
+         degraded_components TEXT[] NOT NULL DEFAULT '{}',
+         started_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+         ended_at TIMESTAMPTZ
+       )`,
+      `CREATE TABLE memory_retrieval_stages (
+         trajectory_id UUID NOT NULL REFERENCES memory_retrieval_trajectories(trajectory_id) ON DELETE CASCADE,
+         ordinal SMALLINT NOT NULL,
+         stage TEXT NOT NULL,
+         outcome TEXT NOT NULL,
+         candidate_count INTEGER NOT NULL DEFAULT 0,
+         duration_ms INTEGER NOT NULL DEFAULT 0,
+         degraded_reason TEXT,
+         PRIMARY KEY (trajectory_id, ordinal)
+       )`,
+      `CREATE TABLE memory_retrieval_candidates (
+         trajectory_id UUID NOT NULL REFERENCES memory_retrieval_trajectories(trajectory_id) ON DELETE CASCADE,
+         installation_id UUID NOT NULL,
+         version_id UUID NOT NULL,
+         metadata_rank INTEGER,
+         lexical_rank INTEGER,
+         vector_rank INTEGER,
+         fused_score REAL NOT NULL,
+         authority_score REAL NOT NULL DEFAULT 0,
+         freshness_score REAL NOT NULL DEFAULT 0,
+         scope_score REAL NOT NULL DEFAULT 0,
+         loadout_score REAL NOT NULL DEFAULT 0,
+         estimated_tokens INTEGER NOT NULL DEFAULT 0,
+         decision TEXT NOT NULL CHECK (decision IN ('selected','dropped','pruned','excluded','shadowed')),
+         reason_code TEXT NOT NULL,
+         final_ordinal INTEGER,
+         PRIMARY KEY (trajectory_id, version_id),
+         FOREIGN KEY (installation_id, version_id)
+           REFERENCES knowledge_versions(installation_id, version_id) ON DELETE CASCADE
+       )`,
+      `CREATE TABLE memory_context_packs (
+         pack_id UUID PRIMARY KEY,
+         installation_id UUID NOT NULL REFERENCES memory_installations(installation_id) ON DELETE CASCADE,
+         generation_run_id UUID UNIQUE REFERENCES memory_generation_runs(run_id) ON DELETE SET NULL,
+         session_id TEXT NOT NULL,
+         client_request_id TEXT NOT NULL,
+         agent TEXT NOT NULL,
+         mode TEXT NOT NULL CHECK (mode IN ('shadow','enabled')),
+         effective_policy_hash BYTEA NOT NULL,
+         input_digest BYTEA NOT NULL,
+         policy_revision BIGINT NOT NULL DEFAULT 1,
+         settings_revision BIGINT NOT NULL DEFAULT 1,
+         loadout_revision BIGINT NOT NULL DEFAULT 1,
+         stable_text TEXT NOT NULL DEFAULT '',
+         dynamic_text TEXT NOT NULL DEFAULT '',
+         stable_hash BYTEA,
+         dynamic_hash BYTEA,
+         stable_tokens INTEGER NOT NULL DEFAULT 0,
+         dynamic_tokens INTEGER NOT NULL DEFAULT 0,
+         stable_cache_hit BOOLEAN NOT NULL DEFAULT FALSE,
+         state TEXT NOT NULL CHECK (state IN
+           ('compiling','ready','shadow','empty','failed','invalidated')),
+         error_code TEXT,
+         generated_at TIMESTAMPTZ,
+         invalidated_at TIMESTAMPTZ,
+         created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+       )`,
+      `CREATE UNIQUE INDEX uq_context_packs_active
+         ON memory_context_packs
+           (installation_id, session_id, client_request_id, effective_policy_hash, input_digest)
+         WHERE state <> 'invalidated'`,
+      `CREATE TABLE memory_context_pack_items (
+         pack_id UUID NOT NULL REFERENCES memory_context_packs(pack_id) ON DELETE CASCADE,
+         item_id UUID NOT NULL,
+         installation_id UUID NOT NULL,
+         claim_id UUID NOT NULL,
+         version_id UUID NOT NULL,
+         claim_type TEXT NOT NULL,
+         layer TEXT NOT NULL CHECK (layer IN ('L2','L3')),
+         section TEXT NOT NULL CHECK (section IN ('stable','dynamic')),
+         representation TEXT NOT NULL CHECK (representation IN ('summary','on_demand','reference')),
+         rendered_text TEXT NOT NULL,
+         reason_codes TEXT[] NOT NULL DEFAULT '{}',
+         token_count INTEGER NOT NULL DEFAULT 0,
+         ordinal SMALLINT NOT NULL,
+         PRIMARY KEY (pack_id, item_id),
+         FOREIGN KEY (installation_id, claim_id)
+           REFERENCES knowledge_claims(installation_id, claim_id) ON DELETE CASCADE,
+         FOREIGN KEY (installation_id, version_id)
+           REFERENCES knowledge_versions(installation_id, version_id) ON DELETE CASCADE
+       )`,
+      `CREATE TABLE memory_context_pack_evidence (
+         pack_id UUID NOT NULL,
+         item_id UUID NOT NULL,
+         installation_id UUID NOT NULL,
+         evidence_id UUID NOT NULL,
+         occurred_at TIMESTAMPTZ,
+         PRIMARY KEY (pack_id, item_id, evidence_id),
+         FOREIGN KEY (pack_id, item_id)
+           REFERENCES memory_context_pack_items(pack_id, item_id) ON DELETE CASCADE,
+         FOREIGN KEY (installation_id, evidence_id)
+           REFERENCES knowledge_evidence(installation_id, evidence_id) ON DELETE CASCADE
+       )`,
+      `CREATE TABLE memory_context_injections (
+         injection_id UUID PRIMARY KEY,
+         installation_id UUID NOT NULL REFERENCES memory_installations(installation_id) ON DELETE CASCADE,
+         pack_id UUID NOT NULL REFERENCES memory_context_packs(pack_id) ON DELETE CASCADE,
+         session_id TEXT NOT NULL,
+         client_request_id TEXT NOT NULL,
+         agent TEXT NOT NULL,
+         adapter TEXT NOT NULL,
+         adapter_version TEXT,
+         admission_nonce_hmac BYTEA NOT NULL,
+         state TEXT NOT NULL CHECK (state IN
+           ('prepared','admitted','delivered','skipped','delivery_failed','expired')),
+         outcome_code TEXT,
+         admitted_at TIMESTAMPTZ,
+         admission_expires_at TIMESTAMPTZ,
+         delivered_at TIMESTAMPTZ,
+         usage_input_tokens BIGINT NOT NULL DEFAULT 0,
+         usage_output_tokens BIGINT NOT NULL DEFAULT 0,
+         usage_cached_tokens BIGINT NOT NULL DEFAULT 0,
+         created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+         UNIQUE (installation_id, session_id, client_request_id, pack_id)
+       )`,
+      `CREATE UNIQUE INDEX uq_context_admission_active
+         ON memory_context_injections(installation_id, session_id, client_request_id)
+         WHERE state IN ('prepared','admitted')`,
+      `CREATE TABLE memory_context_feedback (
+         feedback_id UUID PRIMARY KEY,
+         installation_id UUID NOT NULL REFERENCES memory_installations(installation_id) ON DELETE CASCADE,
+         injection_id UUID REFERENCES memory_context_injections(injection_id) ON DELETE CASCADE,
+         pack_id UUID REFERENCES memory_context_packs(pack_id) ON DELETE CASCADE,
+         item_id UUID,
+         actor TEXT NOT NULL CHECK (actor IN ('user','agent')),
+         action TEXT NOT NULL CHECK (action IN ('used','ignored','incorrect','harmful')),
+         reason_code TEXT,
+         created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+         CHECK (injection_id IS NOT NULL OR pack_id IS NOT NULL)
+       )`,
+    ],
+  },
+  {
+    // v14 (plan section 6.1): the extraction run uniqueness must include the
+    // effective policy hash so a policy change creates a new run instead of
+    // colliding with the pre-policy key.
+    version: 14,
+    statements: [
+      `ALTER TABLE memory_extraction_runs
+         ADD COLUMN IF NOT EXISTS effective_policy_hash BYTEA
+         NOT NULL DEFAULT decode(md5('phase1:no-policy'), 'hex')`,
+      `ALTER TABLE memory_extraction_runs
+         DROP CONSTRAINT IF EXISTS
+         memory_extraction_runs_installation_id_episode_id_episode_s_key`,
+      `ALTER TABLE memory_extraction_runs
+         ADD CONSTRAINT memory_extraction_runs_policy_bound_key
+         UNIQUE (installation_id, episode_id, episode_source_digest,
+                 extractor_version, model_config_hash, effective_policy_hash)`,
+    ],
+  },
+  {
+    // Admission must compare the ready pack against the exact repository and
+    // effective settings snapshot compiled for that request.
+    version: 15,
+    statements: [
+      `ALTER TABLE memory_context_packs
+         ADD COLUMN IF NOT EXISTS repository_id UUID`,
+      `ALTER TABLE memory_context_packs
+         ADD COLUMN IF NOT EXISTS settings_fingerprint BYTEA`,
+      `ALTER TABLE memory_context_packs
+         ADD COLUMN IF NOT EXISTS loadout_fingerprint BYTEA`,
+      `ALTER TABLE memory_context_packs
+         ADD CONSTRAINT memory_context_packs_repository_fk
+         FOREIGN KEY (installation_id, repository_id)
+         REFERENCES repositories(installation_id, repository_id)`,
+    ],
+  },
+  {
+    // Link the immutable pack to its content-free retrieval audit so the
+    // management surface can explain selected and dropped candidates.
+    version: 16,
+    statements: [
+      `ALTER TABLE memory_context_packs
+         ADD COLUMN IF NOT EXISTS trajectory_id UUID
+         REFERENCES memory_retrieval_trajectories(trajectory_id) ON DELETE SET NULL`,
+    ],
+  },
+  {
+    // Retrieval prefilter indexes. PostgreSQL does not automatically index
+    // referencing FK columns; without these, the evidence/applicability fence
+    // can devolve into repeated scans as a personal corpus approaches 10k
+    // active versions.
+    version: 17,
+    statements: [
+      `CREATE INDEX IF NOT EXISTS knowledge_claims_active_installation_idx
+         ON knowledge_claims (installation_id, claim_id)
+         WHERE state = 'active'`,
+      `CREATE INDEX IF NOT EXISTS knowledge_versions_applicability_idx
+         ON knowledge_versions (installation_id, claim_id, created_at)`,
+      `CREATE INDEX IF NOT EXISTS knowledge_evidence_installation_version_idx
+         ON knowledge_evidence (installation_id, version_id)`,
+    ],
+  },
+  {
+    // Episode Packet v3 can inherit an explicit repository fact from the
+    // same session's lifecycle event. Re-run only old repository-less ready
+    // episodes for which that trusted, pre-terminal fact is still resolvable;
+    // never infer repository identity from cwd or another session.
+    version: 18,
+    statements: [
+      `INSERT INTO memory_jobs
+         (job_id, installation_id, job_type, idempotency_key, priority, payload)
+       SELECT gen_random_uuid(), w.installation_id, 'compile_episode',
+              'compile_episode:' || w.turn_id, 80, '{}'::jsonb
+       FROM work_episodes w
+       WHERE w.repository_id IS NULL
+         AND w.state = 'ready'
+         AND w.terminal_at IS NOT NULL
+         AND EXISTS (
+           SELECT 1
+           FROM source_events e
+           JOIN repositories r
+             ON r.installation_id = e.installation_id
+            AND r.repository_key = e.payload->>'repository_id'
+           WHERE e.installation_id = w.installation_id
+             AND e.session_id = w.session_id
+             AND e.turn_id IS NULL
+             AND e.event_type IN ('session_created', 'session_discovered')
+             AND e.payload->>'repository_id' IS NOT NULL
+             AND e.occurred_at <= w.terminal_at
+         )
+       ON CONFLICT (installation_id, job_type, idempotency_key) DO UPDATE SET
+         state = 'pending',
+         attempts = 0,
+         available_at = NOW(),
+         claimed_by = NULL,
+         claim_expires_at = NULL,
+         last_error_code = NULL,
+         completed_at = NULL
+       WHERE memory_jobs.state IN ('completed', 'dead')`,
+    ],
+  },
+  {
+    // ADR-0005 Phase 3 scope mirror (§7.2): Relay-owned control facts —
+    // owner scope, memberships, tombstones — replicated from the v2
+    // scope-control feed. Existing installations backfill as personal scopes.
+    version: 19,
+    statements: [
+      `CREATE TABLE IF NOT EXISTS memory_owner_scopes (
+         installation_id     UUID PRIMARY KEY REFERENCES memory_installations(installation_id) ON DELETE CASCADE,
+         owner_scope_kind    TEXT NOT NULL CHECK (owner_scope_kind IN ('personal', 'team', 'organization')),
+         owner_scope_id      UUID NOT NULL,
+         parent_organization_id UUID,
+         state               TEXT NOT NULL DEFAULT 'active' CHECK (state IN ('active', 'suspended', 'dissolving', 'dissolved')),
+         authorization_epoch BIGINT NOT NULL DEFAULT 1 CHECK (authorization_epoch > 0),
+         last_feed_id        BIGINT NOT NULL DEFAULT 0,
+         updated_at          TIMESTAMPTZ NOT NULL DEFAULT NOW()
+       )`,
+      `CREATE UNIQUE INDEX IF NOT EXISTS memory_owner_scopes_shared_scope_idx
+         ON memory_owner_scopes (owner_scope_kind, owner_scope_id)
+         WHERE owner_scope_kind IN ('team', 'organization')`,
+      `CREATE TABLE IF NOT EXISTS memory_scope_memberships (
+         installation_id     UUID NOT NULL REFERENCES memory_installations(installation_id) ON DELETE CASCADE,
+         membership_id       UUID NOT NULL,
+         roles               TEXT[] NOT NULL DEFAULT '{}',
+         state               TEXT NOT NULL DEFAULT 'active' CHECK (state IN ('invited', 'active', 'suspended', 'revoked')),
+         membership_revision BIGINT NOT NULL DEFAULT 1 CHECK (membership_revision > 0),
+         valid_from          TIMESTAMPTZ,
+         valid_until         TIMESTAMPTZ,
+         last_feed_id        BIGINT NOT NULL DEFAULT 0,
+         updated_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+         PRIMARY KEY (installation_id, membership_id)
+       )`,
+      `CREATE TABLE IF NOT EXISTS memory_scope_tombstones (
+         owner_scope_kind    TEXT NOT NULL CHECK (owner_scope_kind IN ('team', 'organization')),
+         owner_scope_id      UUID NOT NULL,
+         authorization_epoch BIGINT NOT NULL CHECK (authorization_epoch > 0),
+         reason              TEXT NOT NULL,
+         tombstoned_at       TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+         PRIMARY KEY (owner_scope_kind, owner_scope_id)
+       )`,
+      `INSERT INTO memory_owner_scopes (installation_id, owner_scope_kind, owner_scope_id)
+       SELECT installation_id, 'personal', installation_id FROM memory_installations
+       ON CONFLICT (installation_id) DO NOTHING`,
+    ],
+  },
+  {
+    // ADR-0005 Phase 3 governance ledger (§7.2): review policy versions with
+    // CAS heads, promotion candidates with immutable revisions and evidence
+    // copies, review decisions, authority provenance, content-free governance
+    // audit, and team-dissolution transfer runs.
+    version: 20,
+    statements: [
+      `CREATE TABLE IF NOT EXISTS memory_review_policy_sets (
+         policy_id          UUID PRIMARY KEY,
+         installation_id    UUID NOT NULL UNIQUE REFERENCES memory_installations(installation_id) ON DELETE CASCADE,
+         created_at         TIMESTAMPTZ NOT NULL DEFAULT NOW()
+       )`,
+      `CREATE TABLE IF NOT EXISTS memory_review_policy_versions (
+         policy_version_id  UUID PRIMARY KEY,
+         policy_id          UUID NOT NULL REFERENCES memory_review_policy_sets(policy_id) ON DELETE CASCADE,
+         version_number     BIGINT NOT NULL CHECK (version_number > 0),
+         document           JSONB NOT NULL,
+         content_hash       TEXT NOT NULL,
+         created_by_membership_id UUID,
+         created_at         TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+         UNIQUE (policy_id, version_number)
+       )`,
+      `CREATE TABLE IF NOT EXISTS memory_review_policy_heads (
+         policy_id          UUID PRIMARY KEY REFERENCES memory_review_policy_sets(policy_id) ON DELETE CASCADE,
+         active_version_id  UUID NOT NULL REFERENCES memory_review_policy_versions(policy_version_id),
+         revision           BIGINT NOT NULL DEFAULT 1 CHECK (revision > 0),
+         updated_at         TIMESTAMPTZ NOT NULL DEFAULT NOW()
+       )`,
+      `CREATE TABLE IF NOT EXISTS memory_promotion_candidates (
+         candidate_id       UUID PRIMARY KEY,
+         target_installation_id UUID NOT NULL REFERENCES memory_installations(installation_id) ON DELETE CASCADE,
+         source_installation_id UUID NOT NULL,
+         source_scope_kind  TEXT NOT NULL CHECK (source_scope_kind IN ('personal', 'team')),
+         source_claim_id    UUID NOT NULL,
+         source_version_id  UUID NOT NULL,
+         source_content_hash TEXT NOT NULL,
+         target_claim_type  TEXT NOT NULL,
+         scope_kind         TEXT NOT NULL DEFAULT 'installation'
+                            CHECK (scope_kind IN ('installation','repository','snapshot','branch','task')),
+         scope_key          TEXT NOT NULL DEFAULT '',
+         normalized_key     TEXT NOT NULL,
+         state              TEXT NOT NULL DEFAULT 'proposed' CHECK (state IN
+                            ('proposed','changes_requested','approved','rejected','withdrawn','expired','conflict','published')),
+         conflict_group_id  UUID,
+         duplicate_of_claim_id UUID,
+         expires_at         TIMESTAMPTZ NOT NULL,
+         revision           BIGINT NOT NULL DEFAULT 1 CHECK (revision > 0),
+         created_by_membership_id UUID,
+         created_at         TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+         updated_at         TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+         UNIQUE (target_installation_id, candidate_id),
+         CHECK (source_installation_id <> target_installation_id)
+       )`,
+      `CREATE INDEX IF NOT EXISTS memory_promotion_candidates_target_state_idx
+         ON memory_promotion_candidates (target_installation_id, state, created_at)`,
+      `CREATE TABLE IF NOT EXISTS memory_promotion_candidate_versions (
+         candidate_revision_id UUID PRIMARY KEY,
+         candidate_id       UUID NOT NULL REFERENCES memory_promotion_candidates(candidate_id) ON DELETE CASCADE,
+         revision_number    BIGINT NOT NULL CHECK (revision_number > 0),
+         statement          TEXT NOT NULL CHECK (char_length(statement) BETWEEN 1 AND 4000),
+         structured_content JSONB NOT NULL DEFAULT '{}'::jsonb,
+         content_hash       TEXT NOT NULL,
+         review_policy_version_id UUID NOT NULL REFERENCES memory_review_policy_versions(policy_version_id),
+         created_by_membership_id UUID,
+         created_at         TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+         UNIQUE (candidate_id, revision_number)
+       )`,
+      `CREATE TABLE IF NOT EXISTS memory_promotion_evidence (
+         candidate_revision_id UUID NOT NULL REFERENCES memory_promotion_candidate_versions(candidate_revision_id) ON DELETE CASCADE,
+         ordinal            INTEGER NOT NULL CHECK (ordinal BETWEEN 1 AND 8),
+         evidence_kind      TEXT NOT NULL,
+         excerpt            TEXT NOT NULL CHECK (char_length(excerpt) BETWEEN 1 AND 4000),
+         excerpt_hash       TEXT NOT NULL,
+         sanitized_locator  TEXT,
+         source_evidence_hash TEXT NOT NULL,
+         occurred_at        TIMESTAMPTZ,
+         PRIMARY KEY (candidate_revision_id, ordinal)
+       )`,
+      `CREATE TABLE IF NOT EXISTS memory_review_decisions (
+         decision_id        UUID PRIMARY KEY,
+         candidate_revision_id UUID NOT NULL REFERENCES memory_promotion_candidate_versions(candidate_revision_id) ON DELETE CASCADE,
+         membership_id      UUID NOT NULL,
+         membership_revision BIGINT NOT NULL CHECK (membership_revision > 0),
+         decision           TEXT NOT NULL CHECK (decision IN ('approve','request_changes','reject')),
+         reason_code        TEXT,
+         created_at         TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+         UNIQUE (candidate_revision_id, membership_id)
+       )`,
+      `CREATE TABLE IF NOT EXISTS memory_authority_records (
+         authority_id       UUID PRIMARY KEY,
+         installation_id    UUID NOT NULL REFERENCES memory_installations(installation_id) ON DELETE CASCADE,
+         version_id         UUID NOT NULL,
+         candidate_revision_id UUID NOT NULL,
+         review_policy_version_id UUID NOT NULL REFERENCES memory_review_policy_versions(policy_version_id),
+         counted_decision_ids UUID[] NOT NULL,
+         publisher_membership_id UUID,
+         source_scope_kind  TEXT NOT NULL,
+         source_content_hash TEXT NOT NULL,
+         published_at       TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+         UNIQUE (installation_id, version_id)
+       )`,
+      `CREATE TABLE IF NOT EXISTS memory_governance_events (
+         event_id           UUID PRIMARY KEY,
+         installation_id    UUID NOT NULL REFERENCES memory_installations(installation_id) ON DELETE CASCADE,
+         actor_membership_id UUID,
+         action             TEXT NOT NULL,
+         target_kind        TEXT NOT NULL,
+         target_id          UUID,
+         request_hash       TEXT,
+         previous_state     TEXT,
+         next_state         TEXT,
+         metadata           JSONB NOT NULL DEFAULT '{}'::jsonb,
+         created_at         TIMESTAMPTZ NOT NULL DEFAULT NOW()
+       )`,
+      `CREATE INDEX IF NOT EXISTS memory_governance_events_page_idx
+         ON memory_governance_events (installation_id, created_at DESC, event_id)`,
+      `CREATE TABLE IF NOT EXISTS memory_transfer_runs (
+         transfer_id        UUID PRIMARY KEY,
+         source_installation_id UUID NOT NULL REFERENCES memory_installations(installation_id) ON DELETE CASCADE,
+         target_installation_id UUID NOT NULL REFERENCES memory_installations(installation_id) ON DELETE CASCADE,
+         state              TEXT NOT NULL DEFAULT 'running' CHECK (state IN ('running','completed','failed')),
+         source_revision    BIGINT,
+         created_by_membership_id UUID,
+         created_at         TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+         completed_at       TIMESTAMPTZ,
+         CHECK (source_installation_id <> target_installation_id)
+       )`,
+      `ALTER TABLE knowledge_claims
+         ADD COLUMN IF NOT EXISTS owner_scope_kind TEXT NOT NULL DEFAULT 'personal'`,
+      `ALTER TABLE knowledge_claims
+         ADD COLUMN IF NOT EXISTS owner_scope_id UUID`,
+      `ALTER TABLE knowledge_claims
+         ADD COLUMN IF NOT EXISTS conflict_group_id UUID`,
+      `ALTER TABLE knowledge_claims
+         ADD COLUMN IF NOT EXISTS conflict_variant INTEGER NOT NULL DEFAULT 0`,
+      `UPDATE knowledge_claims SET owner_scope_id = installation_id WHERE owner_scope_id IS NULL`,
+      `CREATE OR REPLACE FUNCTION knowledge_claim_personal_scope() RETURNS trigger AS $fn$
+         BEGIN
+           IF NEW.owner_scope_kind = 'personal' AND NEW.owner_scope_id IS NULL THEN
+             NEW.owner_scope_id := NEW.installation_id;
+           END IF;
+           RETURN NEW;
+         END;
+         $fn$ LANGUAGE plpgsql`,
+      `DROP TRIGGER IF EXISTS trg_knowledge_claims_owner_scope ON knowledge_claims`,
+      `CREATE TRIGGER trg_knowledge_claims_owner_scope
+         BEFORE INSERT OR UPDATE ON knowledge_claims
+         FOR EACH ROW EXECUTE FUNCTION knowledge_claim_personal_scope()`,
+      `ALTER TABLE knowledge_versions
+         ADD COLUMN IF NOT EXISTS source_promotion_candidate_id UUID`,
+      `ALTER TABLE knowledge_evidence
+         ADD COLUMN IF NOT EXISTS visibility TEXT NOT NULL DEFAULT 'personal'`,
+      `ALTER TABLE knowledge_evidence DROP CONSTRAINT IF EXISTS knowledge_evidence_visibility_check`,
+      `ALTER TABLE knowledge_evidence
+         ADD CONSTRAINT knowledge_evidence_visibility_check CHECK (visibility IN ('personal','shared'))`,
+      `ALTER TABLE knowledge_evidence
+         ADD COLUMN IF NOT EXISTS source_evidence_hash TEXT`,
+      `ALTER TABLE knowledge_evidence
+         ADD COLUMN IF NOT EXISTS contributor_membership_id UUID`,
+      `ALTER TABLE knowledge_versions DROP CONSTRAINT IF EXISTS knowledge_versions_authority_check`,
+      `ALTER TABLE knowledge_versions
+         ADD CONSTRAINT knowledge_versions_authority_check CHECK (authority IN
+           ('user_accepted','user_corrected','team_reviewed','team_published',
+            'organization_reviewed','organization_published'))`,
+      `ALTER TABLE memory_jobs DROP CONSTRAINT IF EXISTS memory_jobs_job_type_check`,
+      `ALTER TABLE memory_jobs
+         ADD CONSTRAINT memory_jobs_job_type_check CHECK (job_type IN
+           ('project_feed','compile_episode','snapshot_reconcile','session_purge',
+            'installation_purge','report_status','report_usage',
+            'extract_candidates','index_claim_version','rebuild_claim_index',
+            'expire_claims','recompile_extraction_policy',
+            'compile_context_shadow','record_context_delivery','invalidate_context_packs',
+            'expire_promotion_candidates','index_shared_claim',
+            'invalidate_scope_authorization','transfer_scope_claims'))`,
+    ],
+  },
+  {
+    // ADR-P3-08 conflict-aware Claim identity. The strict identity
+    // uniqueness becomes variant-aware: parallel variants of one conflict
+    // group coexist (distinct conflict_variant), canonical personal rows
+    // stay variant 0, and superseded/revoked rows free their slot. All
+    // pre-existing rows are preserved as canonical variant 0.
+    version: 21,
+    statements: [
+      `ALTER TABLE knowledge_claims
+         DROP CONSTRAINT IF EXISTS uq_knowledge_claims_installation_claim`,
+      `ALTER TABLE knowledge_claims
+         DROP CONSTRAINT IF EXISTS knowledge_claims_installation_id_claim_type_scope_key_norma_key`,
+      `CREATE UNIQUE INDEX IF NOT EXISTS knowledge_claims_active_identity_variant_idx
+         ON knowledge_claims (installation_id, claim_type, scope_key, normalized_key, conflict_variant)
+         WHERE state = 'active'`,
+      `CREATE INDEX IF NOT EXISTS knowledge_claims_conflict_group_idx
+         ON knowledge_claims (installation_id, conflict_group_id)
+         WHERE conflict_group_id IS NOT NULL`,
+    ],
+  },
+  {
+    // Phase 3 review hardening: a Team may have only one transfer run. The
+    // constraint, rather than a SELECT-then-INSERT check, closes concurrent
+    // transfer races across API processes.
+    version: 22,
+    statements: [
+      `CREATE UNIQUE INDEX IF NOT EXISTS memory_transfer_runs_source_once_idx
+         ON memory_transfer_runs (source_installation_id)`,
+    ],
+  },
+  {
+    // A Team candidate is governed by two independently mutable policy heads:
+    // its own and its parent Organization's. Fence both on immutable proposal
+    // revisions and retain the complete policy provenance after publication.
+    version: 23,
+    statements: [
+      `ALTER TABLE memory_promotion_candidate_versions
+         ADD COLUMN IF NOT EXISTS parent_review_policy_version_id UUID
+         REFERENCES memory_review_policy_versions(policy_version_id) ON DELETE RESTRICT`,
+      `ALTER TABLE memory_authority_records
+         ADD COLUMN IF NOT EXISTS parent_review_policy_version_id UUID
+         REFERENCES memory_review_policy_versions(policy_version_id) ON DELETE RESTRICT`,
+    ],
+  },
+  {
+    // Provider spend is fenced before dispatch. Reserved rows survive worker
+    // crashes and restarts; only trustworthy provider usage settles them.
+    version: 24,
+    statements: [
+      `CREATE TABLE IF NOT EXISTS memory_provider_budget_reservations (
+         reservation_id       UUID PRIMARY KEY,
+         budget_key           TEXT NOT NULL CHECK (char_length(budget_key) BETWEEN 1 AND 128),
+         provider_kind        TEXT NOT NULL CHECK (provider_kind IN ('text', 'embedding')),
+         state                TEXT NOT NULL DEFAULT 'reserved' CHECK (state IN ('reserved', 'settled')),
+         reserved_input_tokens BIGINT NOT NULL CHECK (reserved_input_tokens >= 0),
+         reserved_output_tokens BIGINT NOT NULL CHECK (reserved_output_tokens >= 0),
+         actual_input_tokens  BIGINT NOT NULL DEFAULT 0 CHECK (actual_input_tokens >= 0),
+         actual_output_tokens BIGINT NOT NULL DEFAULT 0 CHECK (actual_output_tokens >= 0),
+         created_at           TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+         settled_at           TIMESTAMPTZ
+       )`,
+      `CREATE INDEX IF NOT EXISTS memory_provider_budget_reservations_key_kind_idx
+         ON memory_provider_budget_reservations (budget_key, provider_kind)`,
+    ],
+  },
 ]
 
 /** Apply every pending migration exactly once under a startup lock. */

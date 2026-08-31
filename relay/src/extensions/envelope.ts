@@ -1,7 +1,8 @@
-import type { ExtensionTopic } from './types.js'
-import { extensionTopicForEventType } from './types.js'
+import type { ExtensionTopic, ScopeControlTopic } from './types.js'
+import { extensionTopicForEventType, isScopeControlTopic } from './types.js'
 
 export const EXTENSION_ENVELOPE_VERSION = 1
+export const EXTENSION_ENVELOPE_VERSION_V2 = 2
 export const SESSION_DELETED_SOURCE_KIND = 'session_deleted'
 export const SESSION_ACCESS_REVOKED_SOURCE_KIND = 'session_access_revoked'
 
@@ -103,5 +104,116 @@ export function buildStoredFeedPayload(
     },
     classification,
     data: payload,
+  }
+}
+
+// --- extension-feed.v2 scope-control envelopes (ADR-0005 §5.2) ---------------
+
+export interface ScopeOutboxRow {
+  outbox_id: number | string
+  scope_kind: 'team' | 'organization'
+  scope_id: string
+  topic: string
+  payload: Record<string, unknown>
+  recorded_at: Date | string
+}
+
+export interface ExtensionScopeFeedEnvelope {
+  envelope_version: number
+  feed_id: string
+  topic: ScopeControlTopic
+  owner_scope: {
+    kind: 'team' | 'organization'
+    id: string
+    authorization_epoch: string
+  }
+  source: {
+    kind: 'scope_membership' | 'scope_lifecycle' | 'scope_installation'
+    id: string
+    recorded_at: string
+  }
+  subject: {
+    membership_id?: string
+    event_type: string
+  }
+  classification: Record<string, never>
+  data: Record<string, unknown>
+}
+
+/**
+ * Build the v2 scope-control envelope from a scope-outbox row. The data
+ * allowlist is opaque ids, state, roles, and revisions only (§5.2): no email,
+ * display name, claim text, grant, token, or arbitrary metadata can pass.
+ * Malformed or foreign payloads throw instead of degrading to a partial
+ * envelope — the projector must fail closed.
+ */
+export function buildScopeFeedEnvelope(
+  row: ScopeOutboxRow,
+  feedId: number | string,
+): ExtensionScopeFeedEnvelope {
+  if (!isScopeControlTopic(row.topic)) {
+    throw new Error(`scope feed envelope requires a control topic, got ${row.topic}`)
+  }
+  const payload = row.payload ?? {}
+  const eventType = typeof payload.event_type === 'string' ? payload.event_type : ''
+  if (!eventType) throw new Error('scope feed envelope requires an event_type')
+  const epoch = Number(payload.authorization_epoch)
+  if (!Number.isSafeInteger(epoch) || epoch < 1) {
+    throw new Error('scope feed envelope requires a positive authorization_epoch')
+  }
+
+  const isMembership = row.topic === 'scope.membership.v2'
+  if (isMembership && typeof payload.membership_id !== 'string') {
+    throw new Error('membership envelopes require a membership_id')
+  }
+  const sourceId = isMembership
+    ? payload.membership_id as string
+    : row.scope_id
+
+  const data: Record<string, unknown> = {}
+  if (isMembership) {
+    const revision = Number(payload.membership_revision)
+    if (!Number.isSafeInteger(revision) || revision < 1) {
+      throw new Error('membership envelopes require a positive membership_revision')
+    }
+    if (typeof payload.state !== 'string') {
+      throw new Error('membership envelopes require a state')
+    }
+    data.membership_revision = String(revision)
+    data.state = payload.state
+    data.roles = Array.isArray(payload.roles)
+      ? payload.roles.filter((role): role is string => typeof role === 'string')
+      : []
+  } else if (row.topic === 'scope.lifecycle.v2') {
+    if (typeof payload.state !== 'string') {
+      throw new Error('lifecycle envelopes require a state')
+    }
+    data.state = payload.state
+  } else {
+    data.state = typeof payload.state === 'string' ? payload.state : 'active'
+  }
+
+  return {
+    envelope_version: EXTENSION_ENVELOPE_VERSION_V2,
+    feed_id: String(feedId),
+    topic: row.topic,
+    owner_scope: {
+      kind: row.scope_kind,
+      id: row.scope_id,
+      authorization_epoch: String(epoch),
+    },
+    source: {
+      kind: isMembership
+        ? 'scope_membership'
+        : row.topic === 'scope.lifecycle.v2' ? 'scope_lifecycle' : 'scope_installation',
+      id: sourceId,
+      recorded_at: new Date(row.recorded_at).toISOString(),
+    },
+    subject: {
+      ...(isMembership ? { membership_id: payload.membership_id as string } : {}),
+      event_type: eventType,
+    },
+    classification: {},
+    data,
   }
 }

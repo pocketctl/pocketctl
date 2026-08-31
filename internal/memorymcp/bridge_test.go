@@ -22,7 +22,17 @@ type rotatingSource struct {
 	calls  int
 }
 
-func (s *rotatingSource) Grant(context.Context) (Grant, error) {
+type recordingSource struct {
+	grant      Grant
+	selections [][]string
+}
+
+func (s *recordingSource) Grant(_ context.Context, selected []string) (Grant, error) {
+	s.selections = append(s.selections, append([]string(nil), selected...))
+	return s.grant, nil
+}
+
+func (s *rotatingSource) Grant(context.Context, []string) (Grant, error) {
 	index := s.calls
 	s.calls++
 	if index >= len(s.grants) {
@@ -31,7 +41,7 @@ func (s *rotatingSource) Grant(context.Context) (Grant, error) {
 	return s.grants[index], nil
 }
 
-func (f *fakeSource) Grant(ctx context.Context) (Grant, error) {
+func (f *fakeSource) Grant(ctx context.Context, _ []string) (Grant, error) {
 	f.calls++
 	if f.err != nil {
 		return Grant{}, f.err
@@ -81,6 +91,43 @@ func TestBridgeForwardsRequestsVerbatim(t *testing.T) {
 	}
 	if !strings.HasSuffix(stdout.String(), "\n") {
 		t.Fatalf("successful response must preserve stdio JSON-lines framing: %q", stdout.String())
+	}
+}
+
+func TestBridgeRequestsSelectionSpecificGrantForFederatedReadTools(t *testing.T) {
+	const team = "11111111-1111-4111-8111-111111111111"
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("content-type", "application/json")
+		_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":1,"result":{"ok":true}}`))
+	}))
+	defer server.Close()
+	source := &recordingSource{grant: Grant{
+		Token: "selected", ExpiresAt: time.Now().Add(time.Minute), Origin: server.URL,
+	}}
+	bridge := &Bridge{
+		Grants: &CachingGrantSource{Inner: source, Now: time.Now},
+		Stdin: strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"memory_search","arguments":{"query":"q","scope_installation_ids":["` + team + `"]}}}` + "\n"),
+		Stdout: &bytes.Buffer{},
+	}
+	if err := bridge.Run(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if len(source.selections) != 1 || len(source.selections[0]) != 1 || source.selections[0][0] != team {
+		t.Fatalf("selection did not reach grant source: %#v", source.selections)
+	}
+}
+
+func TestBridgeDoesNotReuseGrantAcrossDifferentScopeSelections(t *testing.T) {
+	const teamA = "11111111-1111-4111-8111-111111111111"
+	const teamB = "22222222-2222-4222-8222-222222222222"
+	source := &recordingSource{grant: Grant{
+		Token: "selected", ExpiresAt: time.Now().Add(time.Minute), Origin: "https://memory.example",
+	}}
+	caching := &CachingGrantSource{Inner: source, Now: time.Now}
+	if _, err := caching.Token(context.Background(), []string{teamA}); err != nil { t.Fatal(err) }
+	if _, err := caching.Token(context.Background(), []string{teamB}); err != nil { t.Fatal(err) }
+	if len(source.selections) != 2 {
+		t.Fatalf("different selections shared one cached grant: %#v", source.selections)
 	}
 }
 
@@ -295,14 +342,14 @@ func TestCachingGrantSourceRefreshesUnderThirtySeconds(t *testing.T) {
 		Token: "fresh", ExpiresAt: now.Add(2 * time.Minute), Origin: "https://memory.example",
 	}}
 	caching := &CachingGrantSource{Inner: source, Now: func() time.Time { return now }}
-	if _, err := caching.Token(context.Background()); err != nil {
+	if _, err := caching.Token(context.Background(), nil); err != nil {
 		t.Fatal(err)
 	}
 	if source.calls != 1 {
 		t.Fatalf("expected 1 call, got %d", source.calls)
 	}
 	// Plenty of validity left: no refresh.
-	if _, err := caching.Token(context.Background()); err != nil {
+	if _, err := caching.Token(context.Background(), nil); err != nil {
 		t.Fatal(err)
 	}
 	if source.calls != 1 {
@@ -311,7 +358,7 @@ func TestCachingGrantSourceRefreshesUnderThirtySeconds(t *testing.T) {
 	// 10 seconds left: refresh fires.
 	now = now.Add(110 * time.Second)
 	source.grant = Grant{Token: "newer", ExpiresAt: now.Add(2 * time.Minute)}
-	if _, err := caching.Token(context.Background()); err != nil {
+	if _, err := caching.Token(context.Background(), nil); err != nil {
 		t.Fatal(err)
 	}
 	if source.calls != 2 {

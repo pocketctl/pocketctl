@@ -14,6 +14,7 @@ export interface OpenAICompatibleEmbeddingOptions {
   fetchImpl?: typeof fetch
   sleep?: (ms: number) => Promise<void>
   inputCostMicrosPerMillionTokens?: number
+  maxAttempts?: number
 }
 
 interface EmbeddingsPayload {
@@ -39,6 +40,7 @@ export function createOpenAICompatibleEmbeddingProvider(
     maxResponseBytes: options.maxResponseBytes,
     fetchImpl: options.fetchImpl,
     sleep: options.sleep,
+    maxAttempts: options.maxAttempts,
   })
 
   return {

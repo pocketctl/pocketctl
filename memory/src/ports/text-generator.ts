@@ -21,7 +21,7 @@ export type ModelJsonResult<T> =
   | { ok: true; value: T; usage: ModelUsage }
   | {
       ok: false
-      code: 'invalid_json' | 'empty_content' | 'invalid_usage' | 'http_error' | 'aborted'
+      code: 'invalid_json' | 'empty_content' | 'invalid_usage' | 'http_error' | 'aborted' | 'budget_exceeded' | 'budget_unavailable'
       retryable: boolean
       /** Bounded machine code only — never raw provider text. */
       detail?: string

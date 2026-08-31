@@ -9,6 +9,8 @@
 import { createHash } from 'crypto'
 
 export const PACKET_POLICY_VERSION = 'episode-packet-policy-v2'
+/** ADR-P3-06: per-item cap for re-redacted shared evidence copies. */
+export const SHARED_EVIDENCE_MAX_CHARS = 4000
 
 export interface SanitizedText {
   text: string
@@ -142,4 +144,22 @@ export function basenameOnly(path: string): string {
   const normalized = path.replace(/\\/g, '/')
   const segments = normalized.split('/').filter(segment => segment.length > 0)
   return segments.slice(-2).join('/')
+}
+
+/**
+ * ADR-P3-06 shared-evidence re-redaction. Every promotion copy passes
+ * through this wrapper: secrets are stripped, absolute paths minimized, and
+ * the excerpt hard-capped at 4,000 characters before it ever lands in a
+ * target installation. Returns null when nothing survives redaction.
+ */
+export function sanitizeSharedEvidenceExcerpt(raw: string): {
+  text: string
+  excerptHash: string
+} | null {
+  const sanitized = sanitizeText(raw, SHARED_EVIDENCE_MAX_CHARS)
+  if (sanitized.text.length === 0) return null
+  return {
+    text: sanitized.text,
+    excerptHash: createHash('sha256').update(sanitized.text, 'utf8').digest('hex'),
+  }
 }

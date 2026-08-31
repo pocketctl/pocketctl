@@ -266,3 +266,36 @@ export function createPhase1Metrics(registry = new Registry()) {
 }
 
 export type Phase1Metrics = ReturnType<typeof createPhase1Metrics>
+
+// ---- Phase 2 context observability (plan 17): bounded outcome codes only —
+// never query text, pack content, grants, paths or high-cardinality labels.
+
+export interface Phase2ContextMetrics {
+  contextCompiles: { inc(labels: { outcome: string; mode: string }): void }
+  contextAdmissions: { inc(labels: { result: string }): void }
+  contextDeliveries: { inc(labels: { state: string; adapter: string }): void }
+  contextLatency: { observe(labels: { stage: string }, seconds: number): void }
+  contextInvalidations: { inc(labels: { reason: string }): void }
+}
+
+export function createPhase2ContextMetrics(): Phase2ContextMetrics {
+  const counters = new Map<string, number>()
+  const histograms = new Map<string, number[]>()
+  const bump = (map: Map<string, number>, key: string) => {
+    map.set(key, (map.get(key) ?? 0) + 1)
+  }
+  return {
+    contextCompiles: { inc: (labels) => bump(counters, `compile:${labels.outcome}:${labels.mode}`) },
+    contextAdmissions: { inc: (labels) => bump(counters, `admit:${labels.result}`) },
+    contextDeliveries: { inc: (labels) => bump(counters, `deliver:${labels.state}:${labels.adapter}`) },
+    contextLatency: {
+      observe: (labels, seconds) => {
+        const key = `latency:${labels.stage}`
+        const list = histograms.get(key) ?? []
+        list.push(seconds)
+        histograms.set(key, list)
+      },
+    },
+    contextInvalidations: { inc: (labels) => bump(counters, `invalidate:${labels.reason}`) },
+  }
+}

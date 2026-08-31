@@ -41,6 +41,7 @@ afterEach(() => {
   for (const wrapper of mounted.splice(0)) wrapper.unmount()
   websocketMock.handlers.clear()
   websocketMock.send.mockClear()
+  vi.unstubAllGlobals()
 })
 
 function mountSession() {
@@ -121,6 +122,79 @@ describe('SessionDetail managed Codex terminal control', () => {
     await nextTick()
 
     expect(wrapper.find('.chat-input-container').exists()).toBe(true)
+  })
+
+  test('keeps the last message clear of a resized floating composer', async () => {
+    let onResize: ResizeObserverCallback | undefined
+    vi.stubGlobal('ResizeObserver', class {
+      constructor(callback: ResizeObserverCallback) { onResize = callback }
+      observe() {}
+      unobserve() {}
+      disconnect() {}
+    })
+
+    const wrapper = mountSession()
+    setTerminalSession({
+      control_mode: 'managed',
+      capabilities: ['message_acceptance_receipt'],
+    })
+    await nextTick()
+
+    expect(onResize).toBeTypeOf('function')
+    onResize!([{ contentRect: { height: 220 } } as ResizeObserverEntry], {} as ResizeObserver)
+    await nextTick()
+
+    expect(wrapper.get('.chat-messages').attributes('style')).toContain('--composer-float-clearance: 236px')
+  })
+
+  test('shows the persisted session-list model before daemon metadata arrives', async () => {
+    const wrapper = mountSession()
+    setTerminalSession({
+      control_mode: 'managed',
+      capabilities: ['message_acceptance_receipt'],
+      model: 'gpt-5.6',
+    })
+    await nextTick()
+
+    expect(wrapper.get('.input-meta .model-pill').text()).toContain('gpt-5.6')
+  })
+
+  test('renders a model switch notice in the conversation before the next reply', async () => {
+    const wrapper = mountSession()
+    setTerminalSession({
+      control_mode: 'managed',
+      capabilities: ['message_acceptance_receipt'],
+      model: 'gpt-5.5',
+    })
+    await nextTick()
+
+    websocketMock.handlers.get('session_model_changed')?.({
+      type: 'session_model_changed', session_id: 'thr_1', model: 'gpt-5.6', event_id: 'model-56',
+    })
+    await nextTick()
+
+    expect(wrapper.get('.model-switch-notice').text()).toContain('gpt-5.6')
+    expect(wrapper.get('.input-meta .model-pill').text()).toContain('gpt-5.6')
+  })
+
+  test('shows the response end time beside retry after a turn finishes', async () => {
+    const wrapper = mountSession()
+    setTerminalSession({
+      control_mode: 'managed',
+      capabilities: ['message_acceptance_receipt'],
+    })
+    await nextTick()
+
+    websocketMock.handlers.get('user_text')?.({ type: 'user_text', session_id: 'thr_1', text: 'retry me' })
+    websocketMock.handlers.get('agent_text')?.({ type: 'agent_text', session_id: 'thr_1', text: 'done' })
+    await new Promise(resolve => requestAnimationFrame(() => resolve(null)))
+    websocketMock.handlers.get('session_status')?.({ type: 'session_status', session_id: 'thr_1', status: 'running' })
+    websocketMock.handlers.get('session_status')?.({
+      type: 'session_status', session_id: 'thr_1', status: 'completed', last_activity_at: '2026-08-27T08:30:00Z',
+    })
+    await nextTick()
+
+    expect(wrapper.get('.status-ended-at').text()).toContain('session.ended_at')
   })
 
   test('unmanaged Codex stays read-only after a terminal status', async () => {

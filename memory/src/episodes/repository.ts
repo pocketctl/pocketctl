@@ -21,9 +21,10 @@ import { PACKET_POLICY_VERSION } from './content-policy.js'
  */
 export function createEpisodeRepository(
   pool: pg.Pool,
-  options: { stabilizationMs?: number; extractionMaxChars?: number } = {},
+  options: { stabilizationMs?: number; extractionMaxChars?: number; extractionDebounceMs?: number } = {},
 ) {
   const stabilizationMs = options.stabilizationMs ?? 30_000
+  const extractionDebounceMs = options.extractionDebounceMs ?? 120_000
 
   const repository = {
     async compileTurn(installationId: string, turnId: string): Promise<void> {
@@ -120,8 +121,10 @@ export function createEpisodeRepository(
             stabilizationMs,
           })
 
-          // Repository identity reuses only Phase 0 facts recorded for this
-          // turn's events — never cwd or absolute-path guesses.
+          // Repository identity reuses only explicit Phase 0 facts — never
+          // cwd or absolute-path guesses. A turn-scoped observation wins;
+          // managed sessions otherwise inherit the latest trusted lifecycle
+          // observation for the same session that predates the terminal turn.
           const repositoryFact = await client.query<{
             repository_id: string
             repo_snapshot_id: string | null
@@ -129,9 +132,30 @@ export function createEpisodeRepository(
             branch: string | null
             worktree_identity: string | null
           }>(`
+            WITH repository_observation AS (
+              SELECT e.payload->>'repository_id' AS repository_key
+              FROM source_events e
+              WHERE e.installation_id = $1
+                AND e.session_id = $4
+                AND e.payload->>'repository_id' IS NOT NULL
+                AND (
+                  e.turn_id = $2
+                  OR (
+                    e.turn_id IS NULL
+                    AND e.event_type IN ('session_created', 'session_discovered')
+                    AND e.occurred_at <= $3
+                  )
+                )
+              ORDER BY CASE WHEN e.turn_id = $2 THEN 0 ELSE 1 END,
+                       e.occurred_at DESC, e.source_event_id DESC
+              LIMIT 1
+            )
             SELECT r.repository_id::text, rs.repo_snapshot_id::text, rs.commit_sha,
                    rs.branch, rs.worktree_identity
-            FROM repositories r
+            FROM repository_observation observation
+            JOIN repositories r
+              ON r.installation_id = $1
+             AND r.repository_key = observation.repository_key
             LEFT JOIN LATERAL (
               SELECT s.repo_snapshot_id, s.commit_sha, s.branch, s.worktree_identity
               FROM repo_snapshots s
@@ -141,15 +165,8 @@ export function createEpisodeRepository(
               ORDER BY s.observed_at DESC, s.repo_snapshot_id DESC
               LIMIT 1
             ) rs ON TRUE
-            WHERE r.installation_id = $1
-              AND EXISTS (
-                SELECT 1 FROM source_events e
-                WHERE e.installation_id = $1 AND e.turn_id = $2
-                  AND e.payload->>'repository_id' = r.repository_key
-              )
-            ORDER BY r.last_observed_at DESC, r.repository_id DESC
             LIMIT 1
-          `, [installationId, turnId, row.terminal_at])
+          `, [installationId, turnId, row.terminal_at, row.session_id])
           const packetRepository: PacketRepositoryFact | null = repositoryFact.rows[0]
             ? {
               repository_id: repositoryFact.rows[0].repository_id,
@@ -266,24 +283,34 @@ export function createEpisodeRepository(
           `, [installationId])
           const extractionMode = settings.rows[0]?.extraction_mode ?? 'off'
 
-          // Extraction jobs exist only for stable, changed packets and only
-          // when the installation opted in; the digest-keyed idempotency key
-          // makes identical input structurally incapable of duplicating.
+          // One job per turn coalesces late packet revisions. Each revision
+          // pushes availability beyond the extraction quiet window; if the
+          // job is already running it is rerun once against the latest packet.
           if (packetWrite.rows[0] && extractionMode !== 'off') {
             await client.query(`
               INSERT INTO memory_jobs
-                (job_id, installation_id, job_type, idempotency_key, priority, payload)
-              VALUES (gen_random_uuid(), $1, 'extract_candidates', $2, 85, $3::jsonb)
-              ON CONFLICT DO NOTHING
+                (job_id, installation_id, job_type, idempotency_key, priority, payload, available_at)
+              VALUES (gen_random_uuid(), $1, 'extract_candidates', $2, 85, $3::jsonb,
+                      NOW() + ($4 * INTERVAL '1 millisecond'))
+              ON CONFLICT (installation_id, job_type, idempotency_key) DO UPDATE SET
+                payload = EXCLUDED.payload,
+                state = CASE WHEN memory_jobs.state IN ('completed', 'dead') THEN 'pending' ELSE memory_jobs.state END,
+                available_at = EXCLUDED.available_at,
+                attempts = CASE WHEN memory_jobs.state = 'running' THEN memory_jobs.attempts ELSE 0 END,
+                claimed_by = CASE WHEN memory_jobs.state IN ('completed', 'dead') THEN NULL ELSE memory_jobs.claimed_by END,
+                claim_expires_at = CASE WHEN memory_jobs.state IN ('completed', 'dead') THEN NULL ELSE memory_jobs.claim_expires_at END,
+                last_error_code = CASE WHEN memory_jobs.state = 'running' THEN 'rerun_required' ELSE NULL END,
+                completed_at = CASE WHEN memory_jobs.state IN ('completed', 'dead') THEN NULL ELSE memory_jobs.completed_at END
             `, [
               installationId,
-              `extract:${turnId}:${digestHex}`,
+              `extract:${turnId}`,
               JSON.stringify({
                 turn_id: turnId,
                 source_digest: digestHex,
                 compiler_version: packet.compilerVersion,
                 policy_version: PACKET_POLICY_VERSION,
               }),
+              extractionDebounceMs,
             ])
           }
 

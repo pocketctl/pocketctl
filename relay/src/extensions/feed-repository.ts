@@ -88,7 +88,7 @@ export async function countSourceBacklog(
 export interface InstallationWithCheckpointRow {
   installation_id: string
   provider_id: string
-  owner_user_id: number
+  owner_user_id: number | null
   status: string
   granted_scopes: string[]
   subscriptions: string[]
@@ -261,7 +261,7 @@ export async function resetCheckpointForReplay(
      SET start_feed_id = LEAST(start_feed_id, $2), updated_at = NOW()
      WHERE installation_id = $1`,
     [input.installationId, input.startFeedId],
-  )
+  );
   const result = await client.query<{ lease_epoch: string }>(`
     UPDATE extension_checkpoints
     SET ack_feed_id = $2, lease_epoch = lease_epoch + 1,
@@ -269,6 +269,123 @@ export async function resetCheckpointForReplay(
         snapshot_required_at = NULL, updated_at = NOW()
     WHERE installation_id = $1
     RETURNING lease_epoch
-  `, [input.installationId, input.ackFeedId])
-  return { lease_epoch: Number(result.rows[0]?.lease_epoch ?? 0) }
+  `, [input.installationId, input.ackFeedId]);
+  return { lease_epoch: Number(result.rows[0]?.lease_epoch ?? 0) };
+}
+
+// --- extension-feed.v2 shared-scope consumption path ---------------------------
+
+/**
+ * Shared installations only: like getInstallationWithCheckpointForUpdate but
+ * requires a team/organization owner scope and also returns the scope fence
+ * columns. A personal (or missing/cross-provider) installation resolves to
+ * null with no existence leak.
+ */
+export interface SharedInstallationWithCheckpointRow extends InstallationWithCheckpointRow {
+  owner_user_id: number | null
+  owner_scope_kind: 'team' | 'organization'
+  owner_scope_id: string
+  scope_authorization_epoch: string | number
+}
+
+export async function getSharedInstallationWithCheckpointForUpdate(
+  client: Pick<pg.PoolClient, 'query'>,
+  installationId: string,
+  providerId: string,
+): Promise<SharedInstallationWithCheckpointRow | null> {
+  const installation = await client.query<{
+    installation_id: string
+    provider_id: string
+    owner_user_id: number | null
+    status: string
+    granted_scopes: string[]
+    subscriptions: string[]
+    event_filter: Record<string, unknown>
+    start_feed_id: string | number
+    config_version: string | number
+    owner_scope_kind: 'team' | 'organization' | 'personal'
+    owner_scope_id: string
+    authorization_epoch: string | number
+  }>(`
+    SELECT installation_id, provider_id, owner_user_id, status, granted_scopes,
+           subscriptions, event_filter, start_feed_id, config_version,
+           owner_scope_kind, owner_scope_id, authorization_epoch
+    FROM extension_installations
+    WHERE installation_id = $1 AND provider_id = $2
+      AND owner_scope_kind IN ('team', 'organization')
+    FOR UPDATE
+  `, [installationId, providerId]);
+  const row = installation.rows[0];
+  if (!row) return null;
+
+  await client.query(
+    `INSERT INTO extension_checkpoints (installation_id) VALUES ($1)
+     ON CONFLICT (installation_id) DO NOTHING`,
+    [installationId],
+  );
+  const checkpoint = await client.query<{
+    ack_feed_id: string | number
+    lease_epoch: string | number
+    lease_token_hash: Buffer | null
+    lease_expires_at: Date | null
+    snapshot_required_at: Date | null
+  }>(`
+    SELECT ack_feed_id, lease_epoch, lease_token_hash, lease_expires_at, snapshot_required_at
+    FROM extension_checkpoints
+    WHERE installation_id = $1
+    FOR UPDATE
+  `, [installationId]);
+  return {
+    ...row,
+    ...checkpoint.rows[0],
+    // The WHERE clause already restricted this to shared kinds.
+    owner_scope_kind: row.owner_scope_kind as 'team' | 'organization',
+    scope_authorization_epoch: row.authorization_epoch,
+  };
+}
+
+export interface ScopeOutboxQueryRow {
+  outbox_id: string | number
+  scope_kind: 'team' | 'organization'
+  scope_id: string
+  topic: string
+  payload: Record<string, unknown>
+  recorded_at: Date
+}
+
+export async function queryScopeOutboxRows(
+  client: Pick<pg.PoolClient, 'query'>,
+  options: {
+    scopeKind: 'team' | 'organization'
+    scopeId: string
+    topics: string[]
+    afterOutboxId: number
+    limit: number
+  },
+): Promise<ScopeOutboxQueryRow[]> {
+  const result = await client.query<ScopeOutboxQueryRow>(`
+    SELECT outbox_id, scope_kind, scope_id, topic, payload, recorded_at
+    FROM extension_scope_outbox
+    WHERE scope_kind = $1
+      AND scope_id = $2
+      AND topic = ANY($3)
+      AND outbox_id > $4
+    ORDER BY outbox_id ASC
+    LIMIT ${Math.max(1, Math.trunc(options.limit))}
+  `, [options.scopeKind, options.scopeId, options.topics, options.afterOutboxId]);
+  return result.rows;
+}
+
+/** Mark delivered rows as projected; idempotent and informational only. */
+export async function markOutboxProjected(
+  client: Pick<pg.PoolClient, 'query'>,
+  outboxIds: Array<number | string>,
+): Promise<void> {
+  if (outboxIds.length === 0) return;
+  await client.query(
+    `UPDATE extension_scope_outbox
+     SET projected_at = COALESCE(projected_at, NOW())
+     WHERE outbox_id = ANY($1::bigint[])`,
+    [outboxIds.map(id => Number(id))],
+  );
 }

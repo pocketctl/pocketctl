@@ -14,6 +14,52 @@ export interface VerifiedGrant {
   configVersion: string
 }
 
+export interface VerifiedScopeBinding {
+  installation_id: string
+  owner_scope_kind: 'personal' | 'team' | 'organization'
+  owner_scope_id: string
+  membership_id: string | null
+  membership_revision: string
+  authorization_epoch: string
+  permissions: string[]
+}
+
+export interface VerifiedGrantV2 {
+  userId: number
+  installationId: string
+  callerType: string
+  services: string[]
+  configVersion: string
+  scopeBindings: VerifiedScopeBinding[]
+}
+
+const CAPABILITY_GRANT_V2_MAX_TTL_SECONDS = 60
+const CAPABILITY_GRANT_V2_MAX_BINDINGS = 16
+const GRANT_PERMISSION_ALLOWLIST = new Set([
+  'read', 'contribute', 'review', 'publish', 'policy_admin', 'scope_admin',
+])
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+
+function isValidScopeBinding(value: unknown): value is VerifiedScopeBinding {
+  if (value === null || typeof value !== 'object') return false
+  const binding = value as Record<string, unknown>
+  if (typeof binding.installation_id !== 'string' || !UUID_PATTERN.test(binding.installation_id)) return false
+  if (binding.owner_scope_kind !== 'personal' && binding.owner_scope_kind !== 'team'
+    && binding.owner_scope_kind !== 'organization') return false
+  if (typeof binding.owner_scope_id !== 'string' || !UUID_PATTERN.test(binding.owner_scope_id)) return false
+  if (binding.membership_id !== null
+    && (typeof binding.membership_id !== 'string' || !UUID_PATTERN.test(binding.membership_id))) return false
+  if (binding.owner_scope_kind === 'personal' && binding.membership_id !== null) return false
+  if (typeof binding.membership_revision !== 'string' || !/^[0-9]+$/.test(binding.membership_revision)) return false
+  if (typeof binding.authorization_epoch !== 'string'
+    || !/^[1-9][0-9]*$/.test(binding.authorization_epoch)) return false
+  if (!Array.isArray(binding.permissions)
+    || binding.permissions.some(permission =>
+      typeof permission !== 'string' || !GRANT_PERMISSION_ALLOWLIST.has(permission))) return false
+  if (new Set(binding.permissions as string[]).size !== (binding.permissions as string[]).length) return false
+  return true
+}
+
 export interface CapabilityVerifierOptions {
   relayUrl: string
   issuer: string
@@ -145,6 +191,67 @@ export function createCapabilityVerifier(options: CapabilityVerifierOptions) {
         ...(typeof grantSession === 'string' ? { sessionId: grantSession } : {}),
         services: payload.services as string[],
         configVersion: payload.config_version,
+      }
+    },
+
+    /**
+     * Verify a Protocol v2 federated scope grant (ADR-P3-05). Cryptographic
+     * and shape checks only — TTL is hard-capped at 60 seconds, bindings at
+     * 16 unique entries — because mirror revalidation belongs to the scope
+     * authorization layer, which sees the database fences.
+     */
+    async verifyV2(token: string, requiredService: string): Promise<VerifiedGrantV2 | null> {
+      let header: { kid?: unknown; alg?: unknown }
+      try {
+        const decoded = jwt.decode(token, { complete: true })
+        header = (decoded as { header: { kid?: unknown; alg?: unknown } }).header
+      } catch {
+        return null
+      }
+      if (header?.alg !== 'RS256' || typeof header.kid !== 'string') return null
+      const key = await keyFor(header.kid)
+      if (!key) return null
+
+      let payload: Record<string, unknown>
+      try {
+        payload = jwt.verify(token, key, {
+          algorithms: ['RS256'],
+          issuer: options.issuer,
+          audience: providerId,
+          clockTolerance: CLOCK_TOLERANCE_SECONDS,
+        }) as Record<string, unknown>
+      } catch {
+        return null
+      }
+
+      if (payload.token_type !== 'extension_capability_v2') return null
+      const currentEpochSeconds = Math.floor(Date.now() / 1000)
+      if (typeof payload.iat !== 'number' || !Number.isFinite(payload.iat)
+        || typeof payload.exp !== 'number' || !Number.isFinite(payload.exp)
+        || payload.iat > currentEpochSeconds + CLOCK_TOLERANCE_SECONDS
+        || payload.exp <= payload.iat
+        || payload.exp - payload.iat > CAPABILITY_GRANT_V2_MAX_TTL_SECONDS) return null
+      const subject = typeof payload.sub === 'string' ? /^user:([1-9]\d*)$/.exec(payload.sub) : null
+      if (!subject) return null
+      if (typeof payload.primary_installation_id !== 'string'
+        || !Array.isArray(payload.services) || typeof payload.config_version !== 'string') return null
+      if (!(payload.services as unknown[]).includes(requiredService)) return null
+      if (!Array.isArray(payload.scope_bindings)
+        || payload.scope_bindings.length === 0
+        || payload.scope_bindings.length > CAPABILITY_GRANT_V2_MAX_BINDINGS
+        || !payload.scope_bindings.every(binding => isValidScopeBinding(binding))) return null
+      const bindings = payload.scope_bindings as VerifiedScopeBinding[]
+      const installationIds = new Set(bindings.map(binding => binding.installation_id))
+      if (installationIds.size !== bindings.length) return null
+      if (!installationIds.has(payload.primary_installation_id)) return null
+
+      return {
+        userId: Number(subject[1]),
+        installationId: payload.primary_installation_id,
+        callerType: typeof payload.caller_type === 'string' ? payload.caller_type : '',
+        services: payload.services as string[],
+        configVersion: payload.config_version,
+        scopeBindings: bindings,
       }
     },
   }

@@ -43,6 +43,8 @@ export interface SearchHit {
   branch: string | null
   score: number
   sources: string[]
+  /** Raw cosine from the configured embedding family; null outside vector recall. */
+  vectorSimilarity: number | null
 }
 
 export interface SearchResult {
@@ -134,6 +136,7 @@ export function createSearchService(deps: SearchServiceDeps) {
       const versionIds = rows.map(row => row.version_id)
 
       const pools: RankedPool[] = []
+      const vectorSimilarityByVersion = new Map<string, number>()
 
       // 2. Metadata pool: query tokens hit the normalized identity.
       const queryTokensLower = new Set(
@@ -272,6 +275,9 @@ export function createSearchService(deps: SearchServiceDeps) {
                 || compareRankingRows(byVersion.get(a.versionId)!, byVersion.get(b.versionId)!))
               .slice(0, 200)
             const vectorRanked = scored.map(entry => entry.versionId)
+            for (const entry of scored) {
+              vectorSimilarityByVersion.set(entry.versionId, entry.score)
+            }
             if (mode === 'enabled') {
               pools.push({ name: 'vector', ranked: vectorRanked })
             } else {
@@ -327,6 +333,9 @@ export function createSearchService(deps: SearchServiceDeps) {
           branch: row.branch,
           score: Number(score.toFixed(6)),
           sources: entry.sources,
+          vectorSimilarity: entry.sources.includes('vector')
+            ? vectorSimilarityByVersion.get(entry.versionId) ?? null
+            : null,
         })),
         nextCursor: nextOffset < adjusted.length
           ? encodeCursor(nextOffset, cursorContext, asOf, deps.cursorSigningKey)

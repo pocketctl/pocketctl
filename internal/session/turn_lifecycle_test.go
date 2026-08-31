@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"github.com/pocketctl/pocketctl/internal/memorycontext"
 	"os"
 	"path/filepath"
 	"testing"
@@ -19,6 +20,53 @@ type turnTestPTY struct {
 	bytes.Buffer
 	writeErr error
 }
+
+type contextCaptureBackend struct {
+	sentContent string
+	hidden      *memorycontext.PreparedContext
+	native      bool
+}
+
+type sessionMemoryContextClient struct {
+	compiles int
+	receipts int
+}
+
+func (m *sessionMemoryContextClient) Compile(context.Context, string, string, memorycontext.CompileRequest) (*memorycontext.CompileResponse, error) {
+	m.compiles++
+	return &memorycontext.CompileResponse{
+		Outcome: "ready", Pack: &memorycontext.WirePack{PackID: "pack-1"}, AdmissionRequired: true,
+	}, nil
+}
+func (*sessionMemoryContextClient) ConsumePack(context.Context, string, string, string, string, string, string) (*memorycontext.PackText, error) {
+	return &memorycontext.PackText{PackID: "pack-1", StableText: "stable"}, nil
+}
+func (*sessionMemoryContextClient) Admit(context.Context, string, string, string, memorycontext.AdmitRequest) (*memorycontext.AdmitResponse, error) {
+	return &memorycontext.AdmitResponse{
+		InjectionID: "inj-1", Nonce: "nonce-1", ExpiresAt: time.Now().Add(5 * time.Second),
+	}, nil
+}
+func (m *sessionMemoryContextClient) Receipt(context.Context, string, string, string, memorycontext.ReceiptRequest) error {
+	m.receipts++
+	return nil
+}
+
+func (*contextCaptureBackend) Start(context.Context, protocol.SessionConfig) (string, error) {
+	return "", nil
+}
+func (b *contextCaptureBackend) Send(_ context.Context, _ string, content string) error {
+	b.sentContent = content
+	b.hidden = nil
+	return nil
+}
+func (b *contextCaptureBackend) SendWithContext(_ context.Context, _ string, content string, hidden *memorycontext.PreparedContext) error {
+	b.sentContent = content
+	b.hidden = hidden
+	return nil
+}
+func (b *contextCaptureBackend) memoryContextNativeSupported(context.Context) bool { return b.native }
+func (*contextCaptureBackend) Interrupt(string) error                              { return nil }
+func (*contextCaptureBackend) Close(string) error                                  { return nil }
 
 func (p *turnTestPTY) Close() error                    { return nil }
 func (p *turnTestPTY) SetSize(rows, cols uint16) error { return nil }
@@ -543,4 +591,174 @@ func TestTurnObserveModeAcceptsInputWhileInterruptPending(t *testing.T) {
 	if pty.String() == before {
 		t.Error("observe mode input should still dispatch")
 	}
+}
+
+// Phase 2 fail-open seam: a coordinator failure can never block dispatch.
+func TestMemoryContextSeamFailsOpen(t *testing.T) {
+	sm, pty := newTurnTestManager(t)
+	sm.turnMode = turnEnrichmentObserve
+	called := false
+	coordinator := &memorycontext.Coordinator{
+		Grants: grantTransportFunc(func(ctx context.Context, requestID, sessionID string) (*protocol.MemoryContextGrantResult, error) {
+			called = true
+			return nil, errors.New("relay unreachable")
+		}),
+	}
+	sm.SetMemoryContext(coordinator, func() bool { return true },
+		func(context.Context, string, string) memorycontext.Capability {
+			return memorycontext.CapabilityNativeHiddenV1
+		})
+	err := sm.SendMessage(context.Background(), "turn-sess", "hello with context seam")
+	if err != nil {
+		t.Fatalf("dispatch must succeed despite coordinator failure: %v", err)
+	}
+	if !called {
+		t.Fatal("coordinator should have been consulted on a fresh turn")
+	}
+	if pty.Len() == 0 {
+		t.Fatal("original input must still be dispatched to the PTY")
+	}
+}
+
+func TestMemoryContextCapabilityRequiresOwnedLiveRuntimeEvidence(t *testing.T) {
+	sm := NewSessionManager(make(chan protocol.DaemonEvent, 4))
+	sm.sessions["owned"] = &ProcessState{
+		SessionID: "owned", Source: "daemon", Agent: "opencode", Backend: &contextCaptureBackend{native: true},
+	}
+	sm.sessions["observed"] = &ProcessState{
+		SessionID: "observed", Source: "terminal", Agent: "opencode", Backend: &contextCaptureBackend{native: true},
+	}
+	if got := sm.MemoryContextCapability(context.Background(), "owned", "opencode"); got != memorycontext.CapabilityNativeHiddenV1 {
+		t.Fatalf("owned probed backend capability=%s", got)
+	}
+	if got := sm.MemoryContextCapability(context.Background(), "observed", "opencode"); got != memorycontext.CapabilityShadowOnly {
+		t.Fatalf("observed terminal capability=%s", got)
+	}
+	if got := sm.MemoryContextCapability(context.Background(), "missing", "opencode"); got != memorycontext.CapabilityShadowOnly {
+		t.Fatalf("missing runtime capability=%s", got)
+	}
+}
+
+func TestFreshTurnDispatchesPreparedContextThroughAwareBackend(t *testing.T) {
+	backend := &contextCaptureBackend{}
+	sm := NewSessionManager(make(chan protocol.DaemonEvent, 16))
+	sm.turnMode = turnEnrichmentObserve
+	sm.sessions["context-sess"] = &ProcessState{
+		SessionID: "context-sess", Source: "daemon", Status: protocol.StatusIdle,
+		Agent: "opencode", Backend: backend,
+	}
+	pack := &memorycontext.PreparedContext{
+		PackID: "pack-1", StableText: "stable", DynamicText: "dynamic",
+	}
+
+	if err := sm.SendMessageWithInput(context.Background(), UserMessageInput{
+		SessionID: "context-sess", Content: "unchanged user text", RequestID: "req-context",
+		HiddenContext: pack,
+	}); err != nil {
+		t.Fatalf("dispatch: %v", err)
+	}
+	if backend.sentContent != "unchanged user text" {
+		t.Fatalf("user content changed: %q", backend.sentContent)
+	}
+	if backend.hidden != pack {
+		t.Fatalf("prepared context was dropped: got %+v", backend.hidden)
+	}
+}
+
+func TestManagedCodexFreshTurnDoesNotBypassPreparedContext(t *testing.T) {
+	backend := &contextCaptureBackend{}
+	sm := NewSessionManager(make(chan protocol.DaemonEvent, 16))
+	sm.turnMode = turnEnrichmentObserve
+	sm.sessions["managed-codex-context"] = &ProcessState{
+		SessionID: "managed-codex-context", Source: "daemon", Status: protocol.StatusIdle,
+		Agent: "codex", Backend: backend, ControlMode: protocol.ControlManaged,
+	}
+	pack := &memorycontext.PreparedContext{PackID: "pack-codex", StableText: "stable"}
+
+	if err := sm.SendMessageWithInput(context.Background(), UserMessageInput{
+		SessionID: "managed-codex-context", Content: "unchanged codex text", RequestID: "req-codex-context",
+		HiddenContext: pack,
+	}); err != nil {
+		t.Fatalf("dispatch: %v", err)
+	}
+	if backend.sentContent != "unchanged codex text" || backend.hidden != pack {
+		t.Fatalf("managed codex dropped context: content=%q hidden=%+v", backend.sentContent, backend.hidden)
+	}
+}
+
+func TestFreshTurnRecordsAcceptedReceiptAfterContextAwareDispatch(t *testing.T) {
+	backend := &contextCaptureBackend{}
+	memory := &sessionMemoryContextClient{}
+	sm := NewSessionManager(make(chan protocol.DaemonEvent, 16))
+	sm.turnMode = turnEnrichmentObserve
+	sm.sessions["context-sess"] = &ProcessState{
+		SessionID: "context-sess", Source: "daemon", Status: protocol.StatusIdle,
+		Agent: "opencode", Backend: backend,
+	}
+	sm.SetMemoryContext(&memorycontext.Coordinator{
+		Grants: grantTransportFunc(func(context.Context, string, string) (*protocol.MemoryContextGrantResult, error) {
+			return &protocol.MemoryContextGrantResult{
+				Type: "memory_context_grant_result", Grant: "grant", ExpiresIn: 300,
+				InstallationID: "install-1", SessionID: "context-sess",
+				ProviderPublicOrigin: "https://memory.example", Services: []string{"memory.context"},
+			}, nil
+		}),
+		Memory: memory,
+	}, func() bool { return true }, func(context.Context, string, string) memorycontext.Capability {
+		return memorycontext.CapabilityNativeHiddenV1
+	})
+
+	if err := sm.SendMessageWithInput(context.Background(), UserMessageInput{
+		SessionID: "context-sess", Content: "unchanged", RequestID: "req-receipt",
+	}); err != nil {
+		t.Fatalf("dispatch: %v", err)
+	}
+	if memory.receipts != 1 {
+		t.Fatalf("accepted delivery receipts = %d, want 1", memory.receipts)
+	}
+}
+
+func TestSlashCommandSkipsMemoryContextPreparation(t *testing.T) {
+	backend := &contextCaptureBackend{}
+	memory := &sessionMemoryContextClient{}
+	sm := NewSessionManager(make(chan protocol.DaemonEvent, 16))
+	sm.turnMode = turnEnrichmentObserve
+	sm.sessions["command-sess"] = &ProcessState{
+		SessionID: "command-sess", Source: "daemon", Status: protocol.StatusIdle,
+		Agent: "opencode", Backend: backend,
+	}
+	sm.SetMemoryContext(&memorycontext.Coordinator{
+		Grants: grantTransportFunc(func(context.Context, string, string) (*protocol.MemoryContextGrantResult, error) {
+			return &protocol.MemoryContextGrantResult{
+				Type: "memory_context_grant_result", Grant: "grant", ExpiresIn: 300,
+				InstallationID: "install-1", SessionID: "command-sess",
+				ProviderPublicOrigin: "https://memory.example", Services: []string{"memory.context"},
+			}, nil
+		}),
+		Memory: memory,
+	}, func() bool { return true }, func(context.Context, string, string) memorycontext.Capability {
+		return memorycontext.CapabilityNativeHiddenV1
+	})
+
+	if err := sm.SendMessageWithInput(context.Background(), UserMessageInput{
+		SessionID: "command-sess", Content: "/help", RequestID: "req-command",
+	}); err != nil {
+		t.Fatalf("dispatch command: %v", err)
+	}
+	if memory.compiles != 0 || memory.receipts != 0 {
+		t.Fatalf("slash command touched memory context: compiles=%d receipts=%d", memory.compiles, memory.receipts)
+	}
+	if backend.sentContent != "/help" || backend.hidden != nil {
+		t.Fatalf("command dispatch = content %q hidden %+v", backend.sentContent, backend.hidden)
+	}
+}
+
+type grantTransportFunc func(ctx context.Context, requestID, sessionID string) (*protocol.MemoryContextGrantResult, error)
+
+func (f grantTransportFunc) RequestContextGrant(ctx context.Context, requestID, sessionID string) (*protocol.MemoryContextGrantResult, error) {
+	return f(ctx, requestID, sessionID)
+}
+
+func (f grantTransportFunc) RegisterSession(ctx context.Context, requestID, sessionID string) (*protocol.SessionRegistrationAck, error) {
+	return nil, errors.New("unsupported in test")
 }

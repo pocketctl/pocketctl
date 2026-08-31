@@ -78,6 +78,16 @@ describe('phase one model provider configuration', () => {
     })
   })
 
+  test('an explicit text thinking mode resolves for the provider adapter', () => {
+    const config = configWith({ ...TEXT_ENV, MEMORY_TEXT_THINKING: 'disabled' })
+    expect(config.textModel).toMatchObject({ thinking: 'disabled' })
+  })
+
+  test('an unknown text thinking mode fails closed', () => {
+    expect(() => configWith({ ...TEXT_ENV, MEMORY_TEXT_THINKING: 'sometimes' }))
+      .toThrow('MEMORY_TEXT_THINKING')
+  })
+
   test('model identifiers and explicit token prices match Relay usage bounds', () => {
     expect(() => configWith({ ...TEXT_ENV, MEMORY_TEXT_MODEL: 'm'.repeat(129) }))
       .toThrow('MEMORY_TEXT_MODEL')

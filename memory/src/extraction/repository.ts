@@ -1,4 +1,10 @@
 import type pg from 'pg'
+import type { JobFence } from '../jobs/types.js'
+import { assertJobFence } from '../generation/fence.js'
+import { createHash } from 'crypto'
+
+/** Pre-policy default hash, identical to the v13/v14 migration constant. */
+const DEFAULT_POLICY_HASH = createHash('md5').update('phase1:no-policy').digest()
 
 /**
  * Persistence for candidate extraction runs. The run uniqueness key is
@@ -14,6 +20,7 @@ export interface ReservedRun {
   /** True when this caller created the run and owns the model call. */
   owner: boolean
   existingState: ExtractionRunState | null
+  limitReached?: boolean
 }
 
 export interface EpisodeForExtraction {
@@ -26,6 +33,7 @@ export interface EpisodeForExtraction {
   repositoryId: string | null
   repoSnapshotId: string | null
   branch: string | null
+  sessionFirstRecordedAt: Date
 }
 
 export interface CandidateRow {
@@ -65,11 +73,15 @@ export function createExtractionRepository(pool: pg.Pool) {
         repository_id: string | null
         repo_snapshot_id: string | null
         branch: string | null
+        first_recorded_at: Date
       }>(`
         SELECT e.episode_id::text, e.turn_id, e.source_digest, e.document,
                e.evidence_manifest, COALESCE(f.extraction_mode, 'off') AS extraction_mode,
-               e.repository_id::text, e.repo_snapshot_id::text, e.branch
+               e.repository_id::text, e.repo_snapshot_id::text, e.branch,
+               s.first_recorded_at
         FROM work_episodes e
+        JOIN source_sessions s
+          ON s.installation_id = e.installation_id AND s.session_id = e.session_id
         LEFT JOIN memory_feature_settings f ON f.installation_id = e.installation_id
         WHERE e.installation_id = $1 AND e.turn_id = $2 AND e.compiled_at IS NOT NULL
       `, [installationId, turnId])
@@ -87,6 +99,7 @@ export function createExtractionRepository(pool: pg.Pool) {
         repositoryId: row.repository_id,
         repoSnapshotId: row.repo_snapshot_id,
         branch: row.branch,
+        sessionFirstRecordedAt: row.first_recorded_at,
       }
     },
 
@@ -106,32 +119,53 @@ export function createExtractionRepository(pool: pg.Pool) {
       provider: string
       model: string
       staleAfterMs: number
+      /** Effective extraction policy hash (v14 uniqueness key member). */
+      effectivePolicyHash?: Buffer
+      maxRunsPerEpisode?: number
     }): Promise<ReservedRun> {
+      const effectivePolicyHashValue = input.effectivePolicyHash ?? DEFAULT_POLICY_HASH
       const client = await pool.connect()
       try {
         await client.query('BEGIN')
         try {
+          await client.query(`SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`, [
+            `extraction-run:${input.installationId}:${input.episodeId}`,
+          ])
+          if (input.maxRunsPerEpisode !== undefined) {
+            const count = await client.query<{ count: string }>(`
+              SELECT COUNT(*)::text AS count FROM memory_extraction_runs
+              WHERE installation_id = $1 AND episode_id = $2
+            `, [input.installationId, input.episodeId])
+            if (Number(count.rows[0]?.count ?? 0) >= input.maxRunsPerEpisode) {
+              await client.query('COMMIT')
+              return { runId: '', owner: false, existingState: null, limitReached: true }
+            }
+          }
           await client.query(`
             DELETE FROM memory_extraction_runs
             WHERE installation_id = $1 AND episode_id = $2
               AND episode_source_digest = $3
               AND extractor_version = $4 AND model_config_hash = $5
+              AND effective_policy_hash = $6
               AND (state = 'failed'
                 OR (state = 'running'
-                  AND started_at < NOW() - ($6 * INTERVAL '1 millisecond')))
+                  AND started_at < NOW() - ($7 * INTERVAL '1 millisecond')))
           `, [input.installationId, input.episodeId, input.sourceDigest,
-            input.extractorVersion, input.modelConfigHash, Math.max(60_000, input.staleAfterMs)])
+            input.extractorVersion, input.modelConfigHash, effectivePolicyHashValue,
+            Math.max(60_000, input.staleAfterMs)])
           const inserted = await client.query<{ run_id: string }>(`
             INSERT INTO memory_extraction_runs
               (run_id, installation_id, episode_id, episode_source_digest, extractor_version,
-               prompt_version, model_config_hash, input_digest, mode, state, provider, model)
-            VALUES (gen_random_uuid(), $1, $2, $3, $4, $5, $6, $7, $8, 'running', $9, $10)
+               prompt_version, model_config_hash, input_digest, mode, state, provider, model,
+               effective_policy_hash)
+            VALUES (gen_random_uuid(), $1, $2, $3, $4, $5, $6, $7, $8, 'running', $9, $10, $11)
             ON CONFLICT DO NOTHING
             RETURNING run_id::text
           `, [
             input.installationId, input.episodeId, input.sourceDigest,
             input.extractorVersion, input.promptVersion, input.modelConfigHash,
             input.sourceDigest, input.mode, input.provider, input.model,
+            effectivePolicyHashValue,
           ])
           if (inserted.rows[0]) {
             await client.query('COMMIT')
@@ -142,7 +176,8 @@ export function createExtractionRepository(pool: pg.Pool) {
             WHERE installation_id = $1 AND episode_id = $2
               AND episode_source_digest = $3
               AND extractor_version = $4 AND model_config_hash = $5
-          `, [input.installationId, input.episodeId, input.sourceDigest, input.extractorVersion, input.modelConfigHash])
+              AND effective_policy_hash = $6
+          `, [input.installationId, input.episodeId, input.sourceDigest, input.extractorVersion, input.modelConfigHash, effectivePolicyHashValue])
           await client.query('COMMIT')
           const row = existing.rows[0]
           return {
@@ -167,10 +202,13 @@ export function createExtractionRepository(pool: pg.Pool) {
       outputTokens?: number
       costMicros?: number
       candidateCount?: number
+      /** When present, the write must pass the owning job's fence first. */
+      fence?: JobFence
     }): Promise<void> {
       const client = await pool.connect()
       try {
         await client.query('BEGIN')
+        if (input.fence) await assertJobFence(client, input.fence)
         const updated = await client.query<{
           installation_id: string
           model: string
@@ -216,6 +254,24 @@ export function createExtractionRepository(pool: pg.Pool) {
       }
     },
 
+    /** Remove an owned placeholder only when no Provider request was sent. */
+    async discardRun(input: { runId: string; fence?: JobFence }): Promise<void> {
+      const client = await pool.connect()
+      try {
+        await client.query('BEGIN')
+        if (input.fence) await assertJobFence(client, input.fence)
+        await client.query(`
+          DELETE FROM memory_extraction_runs WHERE run_id = $1 AND state = 'running'
+        `, [input.runId])
+        await client.query('COMMIT')
+      } catch (error) {
+        await client.query('ROLLBACK').catch(() => undefined)
+        throw error
+      } finally {
+        client.release()
+      }
+    },
+
     /** Persist run outcome and candidates in one transaction. */
     async persistCandidates(input: {
       runId: string
@@ -224,11 +280,14 @@ export function createExtractionRepository(pool: pg.Pool) {
       candidateStatus: 'shadow' | 'validated'
       candidates: readonly CandidateRow[]
       usage: { inputTokens: number; outputTokens: number; costMicros: number }
+      /** When present, the write must pass the owning job's fence first. */
+      fence?: JobFence
     }): Promise<void> {
       const client = await pool.connect()
       try {
         await client.query('BEGIN')
         try {
+          if (input.fence) await assertJobFence(client, input.fence)
           for (const candidate of input.candidates) {
             await client.query(`
               INSERT INTO memory_candidates

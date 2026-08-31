@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/pocketctl/pocketctl/internal/adapter"
+	"github.com/pocketctl/pocketctl/internal/memorycontext"
 	"github.com/pocketctl/pocketctl/internal/protocol"
 )
 
@@ -274,6 +275,52 @@ func TestSendMessageRejectsSecondLiveResume(t *testing.T) {
 		case <-time.After(time.Second):
 			t.Fatal("first resume did not finish")
 		}
+	}
+}
+
+func TestClaudeDormantResumeCarriesHiddenContextOutsideVisiblePrompt(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Unix sentinel CLI fixture")
+	}
+	output := make(chan protocol.DaemonEvent, 32)
+	sm := NewSessionManager(output)
+	sm.RegisterTerminalSession("claude-context-sid", t.TempDir(), 9999999, "", protocol.StatusExited, adapter.AgentClaude)
+	installSentinelResumeCLI(t, "claude")
+	starter := newRecordingResumeStarter()
+	sm.setResumeStarter(starter.call)
+
+	const visible = "keep this prompt byte-identical"
+	hidden := &memorycontext.PreparedContext{StableText: "private stable memory", DynamicText: "private dynamic memory"}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if err := sm.dispatchUserMessageWithContext(ctx, "claude-context-sid", visible, hidden); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(starter.finishAll)
+
+	specs, _ := starter.snapshot()
+	if len(specs) != 1 {
+		t.Fatalf("resume starts=%d, want exactly one", len(specs))
+	}
+	args := specs[0].Args
+	promptIndex := -1
+	contextIndex := -1
+	for i, arg := range args {
+		switch arg {
+		case "-p":
+			promptIndex = i
+		case "--append-system-prompt":
+			contextIndex = i
+		}
+	}
+	if promptIndex < 0 || promptIndex+1 >= len(args) || args[promptIndex+1] != visible {
+		t.Fatalf("resume args %v changed visible prompt %q", args, visible)
+	}
+	if contextIndex < 0 || contextIndex+1 >= len(args) {
+		t.Fatalf("resume args %v missing hidden system prompt", args)
+	}
+	if got := args[contextIndex+1]; !strings.Contains(got, hidden.StableText) || !strings.Contains(got, hidden.DynamicText) {
+		t.Fatalf("hidden system prompt %q missing prepared context", got)
 	}
 }
 

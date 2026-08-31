@@ -17,6 +17,9 @@ export interface OpenAICompatibleTextOptions {
   sleep?: (ms: number) => Promise<void>
   inputCostMicrosPerMillionTokens?: number
   outputCostMicrosPerMillionTokens?: number
+  maxOutputTokens?: number
+  maxAttempts?: number
+  thinking?: 'enabled' | 'disabled'
 }
 
 interface ChatCompletionPayload {
@@ -41,6 +44,7 @@ export function createOpenAICompatibleTextGenerator(options: OpenAICompatibleTex
     maxResponseBytes: options.maxResponseBytes,
     fetchImpl: options.fetchImpl,
     sleep: options.sleep,
+    maxAttempts: options.maxAttempts,
   })
 
   return {
@@ -62,6 +66,8 @@ export function createOpenAICompatibleTextGenerator(options: OpenAICompatibleTex
           ],
           response_format: { type: 'json_object' },
           temperature: 0,
+          ...(options.thinking === undefined ? {} : { thinking: { type: options.thinking } }),
+          ...(options.maxOutputTokens === undefined ? {} : { max_tokens: options.maxOutputTokens }),
         }, { signal: input.signal, timeoutMs: input.timeoutMs })
       } catch (error) {
         if (error instanceof ModelHttpError) {

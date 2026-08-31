@@ -110,6 +110,11 @@ export function registerFeedRoutes(app: FastifyInstance, deps: FeedRouteDeps): v
         if (!installation) {
           throw new ExtensionApiError('not_found', 'installation not found')
         }
+        // ADR-P3-02: shared Team/Organization installations are v2-only; the
+        // v1 session feed never serves an ownerless row.
+        if (installation.owner_user_id === null || installation.owner_user_id === undefined) {
+          throw new ExtensionApiError('not_found', 'installation not found')
+        }
         if (installation.status === 'paused') {
           throw new ExtensionApiError('installation_paused', 'installation is paused')
         }

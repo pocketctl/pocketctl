@@ -13,5 +13,7 @@ describe('extension capability grant runtime wiring', () => {
     expect(source).toContain('const extensionGrantKeys = resolveGrantKeyMaterial(process.env')
     expect(source).toMatch(/createMemoryMcpGrantBroker\([\s\S]*?grantKeys: extensionGrantKeys/)
     expect(source).toMatch(/registerCapabilityRoutes\(app,[\s\S]*?grantKeys: extensionGrantKeys/)
+    expect(source).toMatch(/registerCapabilityV2GrantRoutes\(app,[\s\S]*?grantKeys: extensionGrantKeys/)
+    expect(source).toMatch(/registerCapabilityV2GrantRoutes\(app,[\s\S]*?providerPublicOrigins: extensionConfig\.providerPublicOrigins/)
   })
 })

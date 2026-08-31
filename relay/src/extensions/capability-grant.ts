@@ -175,6 +175,154 @@ export function verifyCapabilityGrant(
   }
 }
 
+// --- Protocol v2 federated scope grants (ADR-P3-05) ----------------------------
+
+export const CAPABILITY_GRANT_V2_TOKEN_TYPE = 'extension_capability_v2'
+/** Frozen v2 ceiling: a v2 grant lives at most 60 seconds (ADR-P3-05/09). */
+export const CAPABILITY_GRANT_V2_MAX_TTL_SECONDS = 60
+/** Frozen v2 ceiling: at most 16 explicitly selected scope bindings. */
+export const CAPABILITY_GRANT_V2_MAX_BINDINGS = 16
+
+export type GrantOwnerScopeKind = 'personal' | 'team' | 'organization'
+
+export interface ScopeBindingV2 {
+  installation_id: string
+  owner_scope_kind: GrantOwnerScopeKind
+  owner_scope_id: string
+  membership_id: string | null
+  membership_revision: string
+  authorization_epoch: string
+  permissions: string[]
+}
+
+export interface CapabilityGrantV2Input {
+  issuer: string
+  providerId: string
+  userId: number
+  callerType: 'web' | 'daemon' | 'agent'
+  services: string[]
+  primaryInstallationId: string
+  scopeBindings: ScopeBindingV2[]
+  configVersion: number | string
+  ttlSeconds?: number
+  jti?: string
+}
+
+/** Sign a v2 grant; RS256 only, TTL hard-clamped to the 60-second fence. */
+export function signCapabilityGrantV2(
+  keys: GrantKeyMaterial,
+  input: CapabilityGrantV2Input,
+): string {
+  const ttl = Math.min(
+    Math.max(1, Math.trunc(input.ttlSeconds ?? CAPABILITY_GRANT_V2_MAX_TTL_SECONDS)),
+    CAPABILITY_GRANT_V2_MAX_TTL_SECONDS,
+  )
+  return jwt.sign(
+    {
+      token_type: CAPABILITY_GRANT_V2_TOKEN_TYPE,
+      caller_type: input.callerType,
+      services: input.services,
+      primary_installation_id: input.primaryInstallationId,
+      scope_bindings: input.scopeBindings,
+      config_version: String(input.configVersion),
+    },
+    keys.privateKeyPem,
+    {
+      algorithm: 'RS256',
+      keyid: keys.kid,
+      issuer: input.issuer,
+      audience: input.providerId,
+      subject: `user:${input.userId}`,
+      expiresIn: ttl,
+      jwtid: input.jti ?? randomUUID(),
+    },
+  )
+}
+
+export interface VerifiedCapabilityGrantV2 {
+  userId: number
+  providerId: string
+  callerType: string
+  services: string[]
+  primaryInstallationId: string
+  scopeBindings: ScopeBindingV2[]
+  configVersion: string
+}
+
+const GRANT_PERMISSION_ALLOWLIST = [
+  'read', 'contribute', 'review', 'publish', 'policy_admin', 'scope_admin',
+]
+const GRANT_SCOPE_KINDS = ['personal', 'team', 'organization']
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+const POSITIVE_INT_PATTERN = /^[0-9]+$/
+
+function isValidBindingV2(binding: unknown): binding is ScopeBindingV2 {
+  if (binding === null || typeof binding !== 'object') return false
+  const value = binding as Record<string, unknown>
+  if (typeof value.installation_id !== 'string' || !UUID_PATTERN.test(value.installation_id)) return false
+  if (typeof value.owner_scope_kind !== 'string' || !GRANT_SCOPE_KINDS.includes(value.owner_scope_kind)) return false
+  if (typeof value.owner_scope_id !== 'string' || !UUID_PATTERN.test(value.owner_scope_id)) return false
+  if (value.membership_id !== null
+    && (typeof value.membership_id !== 'string' || !UUID_PATTERN.test(value.membership_id))) return false
+  if (value.owner_scope_kind === 'personal' && value.membership_id !== null) return false
+  if (typeof value.membership_revision !== 'string' || !POSITIVE_INT_PATTERN.test(value.membership_revision)) return false
+  if (typeof value.authorization_epoch !== 'string'
+    || !POSITIVE_INT_PATTERN.test(value.authorization_epoch)
+    || Number(value.authorization_epoch) < 1) return false
+  if (!Array.isArray(value.permissions)
+    || value.permissions.some(permission =>
+      typeof permission !== 'string' || !GRANT_PERMISSION_ALLOWLIST.includes(permission))) return false
+  if (new Set(value.permissions).size !== value.permissions.length) return false
+  return true
+}
+
+/**
+ * Verify a v2 grant against the public key only (provider-side semantics).
+ * Shape failures — wrong token type, oversized/duplicated bindings, unknown
+ * permissions or scope kinds, malformed fences — all return null: the guard
+ * never distinguishes foreign from malformed.
+ */
+export function verifyCapabilityGrantV2(
+  publicKeyPem: string,
+  token: string,
+  issuer: string,
+): VerifiedCapabilityGrantV2 | null {
+  let payload: Record<string, unknown>
+  try {
+    payload = jwt.verify(token, publicKeyPem, {
+      algorithms: ['RS256'],
+      issuer,
+    }) as Record<string, unknown>
+  } catch {
+    return null
+  }
+  if (payload.token_type !== CAPABILITY_GRANT_V2_TOKEN_TYPE) return null
+  const match = typeof payload.sub === 'string' ? /^user:(\d+)$/.exec(payload.sub) : null
+  if (!match) return null
+  if (typeof payload.aud !== 'string' || typeof payload.caller_type !== 'string'
+    || !Array.isArray(payload.services)
+    || payload.services.some(service => typeof service !== 'string')
+    || typeof payload.primary_installation_id !== 'string'
+    || !Array.isArray(payload.scope_bindings)
+    || typeof payload.config_version !== 'string') {
+    return null
+  }
+  const bindings = payload.scope_bindings
+  if (bindings.length === 0 || bindings.length > CAPABILITY_GRANT_V2_MAX_BINDINGS) return null
+  if (!bindings.every(binding => isValidBindingV2(binding))) return null
+  const installationIds = new Set(bindings.map(binding => (binding as ScopeBindingV2).installation_id))
+  if (installationIds.size !== bindings.length) return null
+  return {
+    userId: Number(match[1]),
+    providerId: payload.aud,
+    callerType: payload.caller_type,
+    services: payload.services as string[],
+    primaryInstallationId: payload.primary_installation_id,
+    scopeBindings: payload.scope_bindings as ScopeBindingV2[],
+    configVersion: payload.config_version,
+  }
+}
+
 export interface JsonWebKey {
   kty: string
   n: string

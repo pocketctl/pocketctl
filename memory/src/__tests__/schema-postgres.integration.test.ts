@@ -68,7 +68,7 @@ describeWithDatabase('memory schema (PostgreSQL)', () => {
     const versions = await pool.query<{ version: number }>(
       `SELECT version FROM memory_schema_migrations ORDER BY version`,
     )
-    expect(versions.rows.map(row => Number(row.version))).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12])
+    expect(versions.rows.map(row => Number(row.version))).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24])
 
     // v4 must have removed the obsolete observed_at-bearing unique that v2
     // failed to drop (its auto-generated name is truncated past 63 chars);
@@ -209,6 +209,101 @@ describeWithDatabase('memory schema (PostgreSQL)', () => {
         ALTER TABLE memory_snapshot_runs
         ADD COLUMN IF NOT EXISTS relay_acked_at TIMESTAMPTZ
       `)
+      await pool.query(`DELETE FROM memory_installations WHERE installation_id = $1`, [installation])
+    }
+  })
+
+  test('migration v18 requeues only repository-less episodes with a trusted same-session lifecycle fact', async () => {
+    const installation = '18181818-1818-4818-8818-181818181818'
+    const terminalAt = new Date('2026-08-29T06:00:00.000Z')
+    await pool.query(`
+      INSERT INTO memory_installations
+        (installation_id, provider_id, relay_status, local_status, config_version)
+      VALUES ($1, 'pocketctl-memory', 'active', 'ready', 1)
+    `, [installation])
+
+    try {
+      await pool.query(`
+        INSERT INTO source_sessions
+          (installation_id, session_id, agent_type, first_recorded_at, last_recorded_at)
+        VALUES ($1, 'ses-repository', 'codex', $2, $2),
+               ($1, 'ses-without-repository', 'opencode', $2, $2)
+      `, [installation, terminalAt])
+      await pool.query(`
+        INSERT INTO repositories
+          (repository_id, installation_id, repository_key, first_observed_at, last_observed_at)
+        VALUES (gen_random_uuid(), $1, 'gitee.com/muwb123/pocketctl', $2, $2)
+      `, [installation, terminalAt])
+      await pool.query(`
+        INSERT INTO source_events
+          (source_event_id, installation_id, origin, origin_position, session_id,
+           turn_id, event_type, occurred_at, payload, payload_hash)
+        VALUES (gen_random_uuid(), $1, 'feed', 'v18:lifecycle', 'ses-repository',
+                NULL, 'session_created', $2::timestamptz - INTERVAL '1 minute',
+                '{"repository_id":"gitee.com/muwb123/pocketctl"}'::jsonb,
+                decode(md5('v18:lifecycle'), 'hex'))
+      `, [installation, terminalAt])
+      await pool.query(`
+        INSERT INTO work_episodes
+          (installation_id, episode_id, session_id, turn_id, state, outcome,
+           terminal_at, ready_at, compiler_version, document_compiler_version)
+        VALUES ($1, gen_random_uuid(), 'ses-repository', 'turn-repository',
+                'ready', 'completed', $2, $2, 'memory-episode-v1', 'memory-episode-packet-v2'),
+               ($1, gen_random_uuid(), 'ses-without-repository', 'turn-without-repository',
+                'ready', 'completed', $2, $2, 'memory-episode-v1', 'memory-episode-packet-v2')
+      `, [installation, terminalAt])
+      await pool.query(`
+        INSERT INTO memory_jobs
+          (job_id, installation_id, job_type, idempotency_key, priority, state,
+           attempts, claimed_by, claim_expires_at, last_error_code, completed_at)
+        VALUES (gen_random_uuid(), $1, 'compile_episode', 'compile_episode:turn-repository',
+                80, 'completed', 3, 'old-worker', $2, 'old-error', $2),
+               (gen_random_uuid(), $1, 'compile_episode', 'compile_episode:turn-without-repository',
+                80, 'completed', 2, NULL, NULL, NULL, $2)
+      `, [installation, terminalAt])
+
+      const v18 = MEMORY_MIGRATIONS.find(migration => migration.version === 18)
+      expect(v18).toBeDefined()
+      for (let pass = 0; pass < 2; pass++) {
+        for (const statement of v18!.statements) await pool.query(statement)
+      }
+
+      const jobs = await pool.query<{
+        idempotency_key: string
+        state: string
+        attempts: number
+        claimed_by: string | null
+        claim_expires_at: Date | null
+        last_error_code: string | null
+        completed_at: Date | null
+      }>(`
+        SELECT idempotency_key, state, attempts, claimed_by, claim_expires_at,
+               last_error_code, completed_at
+        FROM memory_jobs
+        WHERE installation_id = $1 AND job_type = 'compile_episode'
+        ORDER BY idempotency_key
+      `, [installation])
+      expect(jobs.rows).toEqual([
+        {
+          idempotency_key: 'compile_episode:turn-repository',
+          state: 'pending',
+          attempts: 0,
+          claimed_by: null,
+          claim_expires_at: null,
+          last_error_code: null,
+          completed_at: null,
+        },
+        {
+          idempotency_key: 'compile_episode:turn-without-repository',
+          state: 'completed',
+          attempts: 2,
+          claimed_by: null,
+          claim_expires_at: null,
+          last_error_code: null,
+          completed_at: terminalAt,
+        },
+      ])
+    } finally {
       await pool.query(`DELETE FROM memory_installations WHERE installation_id = $1`, [installation])
     }
   })

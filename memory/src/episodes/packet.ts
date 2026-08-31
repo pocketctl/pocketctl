@@ -13,7 +13,7 @@ import {
   sanitizeText,
 } from './content-policy.js'
 
-export const EPISODE_PACKET_COMPILER_VERSION = 'memory-episode-packet-v2'
+export const EPISODE_PACKET_COMPILER_VERSION = 'memory-episode-packet-v3'
 export const PACKET_SCHEMA_VERSION = 1 as const
 
 export interface EvidenceStatement {

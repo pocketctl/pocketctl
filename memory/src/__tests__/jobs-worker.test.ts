@@ -1,7 +1,7 @@
 import { describe, expect, test } from 'vitest'
 import { createJobWorker, type JobWorkerOptions } from '../jobs/worker.js'
 import type { JobRepository } from '../jobs/repository.js'
-import type { JobClaim } from '../jobs/types.js'
+import type { JobClaim, JobFence } from '../jobs/types.js'
 
 function claim(overrides: Partial<JobClaim> = {}): JobClaim {
   return {
@@ -16,23 +16,30 @@ function claim(overrides: Partial<JobClaim> = {}): JobClaim {
   }
 }
 
-function fakeJobs(claims: JobClaim[]): { jobs: JobRepository; renews: number[]; claims: JobClaim[] } {
-  const state = { renews: [] as number[], claims }
+interface RenewCall { jobId: string; claimedBy: string; claimEpoch: number; leaseMs: number }
+
+function fakeJobs(claims: JobClaim[], behavior: {
+  renewResult?: (call: RenewCall) => boolean | Error
+} = {}): { jobs: JobRepository; renewCalls: RenewCall[] } {
+  const renewCalls: RenewCall[] = []
   const jobs = {
     enqueueJob: async () => undefined,
     claimJobs: async () => {
-      const batch = state.claims
-      state.claims = []
+      const batch = claims
+      claims = []
       return batch
     },
-    renewClaims: async (input: { workerId: string; leaseMs: number }) => {
-      state.renews.push(input.leaseMs)
-      return 1
+    renewClaim: async (input: { jobId: string; claimedBy: string; claimEpoch: number; leaseMs: number }) => {
+      const call: RenewCall = { ...input }
+      renewCalls.push(call)
+      const result = behavior.renewResult?.(call) ?? true
+      if (result instanceof Error) throw result
+      return result
     },
     completeJob: async () => true,
     rescheduleJob: async () => false,
   } as unknown as JobRepository
-  return { jobs, renews: state.renews, claims: state.claims }
+  return { jobs, renewCalls }
 }
 
 function workerOptions(overrides: Partial<JobWorkerOptions> = {}): JobWorkerOptions {
@@ -48,9 +55,10 @@ function workerOptions(overrides: Partial<JobWorkerOptions> = {}): JobWorkerOpti
   }
 }
 
-describe('job worker lease renewal', () => {
-  test('renews claims while a handler runs past the lease interval', async () => {
-    const { jobs, renews } = fakeJobs([claim()])
+describe('job worker per-claim lease renewal', () => {
+  test('renews each in-flight claim individually with its own fence', async () => {
+    const first = claim({ job_id: 'job-a', claim_epoch: 3 })
+    const { jobs, renewCalls } = fakeJobs([first])
     const options = workerOptions({ jobs })
     let release!: () => void
     const gate = new Promise<void>(resolve => {
@@ -61,25 +69,110 @@ describe('job worker lease renewal', () => {
       await gate
     })
     worker.start()
-    // Handler still running well past leaseMs/3 → renewal must have fired.
     await new Promise(resolve => setTimeout(resolve, 400))
     release()
     const outcome = await worker.stop()
     expect(outcome).toBe('drained')
-    expect(renews.length).toBeGreaterThanOrEqual(1)
-    expect(renews.every(leaseMs => leaseMs === 150)).toBe(true)
+    expect(renewCalls.length).toBeGreaterThanOrEqual(1)
+    for (const call of renewCalls) {
+      expect(call.jobId).toBe('job-a')
+      expect(call.claimedBy).toBe('worker-1')
+      expect(call.claimEpoch).toBe(3)
+      expect(call.leaseMs).toBe(150)
+    }
   })
 
   test('stops renewing after stop() and does not renew while idle', async () => {
-    const { jobs, renews } = fakeJobs([])
+    const { jobs, renewCalls } = fakeJobs([])
     const options = workerOptions({ jobs })
     const worker = createJobWorker(options)
     worker.register('compile_episode', async () => undefined)
     worker.start()
     await new Promise(resolve => setTimeout(resolve, 100))
     await worker.stop()
-    const count = renews.length
-    await new Promise(resolve => setTimeout(resolve, 200))
-    expect(renews.length).toBe(count)
+    const count = renewCalls.length
+    await new Promise(resolve => setTimeout(resolve, 300))
+    expect(renewCalls.length).toBe(count)
+  })
+
+  test('renewal loss aborts only the affected claim, not its neighbours', async () => {
+    const lost = claim({ job_id: 'job-lost', claim_epoch: 1 })
+    const kept = claim({ job_id: 'job-kept', claim_epoch: 7 })
+    const { jobs } = fakeJobs([lost, kept], {
+      renewResult: call => call.jobId !== 'job-lost',
+    })
+    const options = workerOptions({ jobs })
+    const signals = new Map<string, AbortSignal>()
+    let releaseKept!: () => void
+    const keptGate = new Promise<void>(resolve => {
+      releaseKept = resolve
+    })
+    const worker = createJobWorker(options)
+    worker.register('compile_episode', async (job, signal) => {
+      signals.set(job.job_id, signal)
+      // Both handlers stay in flight so the renewal tick observes both.
+      if (job.job_id === 'job-kept') await keptGate
+      else await new Promise<void>(resolve => {
+        if (signal.aborted) resolve()
+        signal.addEventListener('abort', () => resolve(), { once: true })
+      })
+    })
+    worker.start()
+    // Wait for a renewal tick to observe the loss and abort job-lost.
+    await new Promise(resolve => setTimeout(resolve, 700))
+    expect(signals.get('job-lost')?.aborted).toBe(true)
+    expect(signals.get('job-kept')?.aborted).toBe(false)
+    releaseKept()
+    const outcome = await worker.stop()
+    expect(outcome).toBe('drained')
+  })
+
+  test('a renewal error aborts that claim immediately', async () => {
+    const only = claim({ job_id: 'job-x', claim_epoch: 2 })
+    const { jobs } = fakeJobs([only], {
+      renewResult: () => new Error('connection refused'),
+    })
+    const options = workerOptions({ jobs })
+    let release!: () => void
+    const gate = new Promise<void>(resolve => {
+      release = resolve
+    })
+    const worker = createJobWorker(options)
+    let observedAbort = false
+    worker.register('compile_episode', async (_job, signal) => {
+      await new Promise<void>(resolve => {
+        if (signal.aborted) {
+          observedAbort = true
+          resolve()
+        } else {
+          signal.addEventListener('abort', () => {
+            observedAbort = true
+            resolve()
+          }, { once: true })
+        }
+      })
+      await gate
+    })
+    worker.start()
+    await new Promise(resolve => setTimeout(resolve, 700))
+    expect(observedAbort).toBe(true)
+    release()
+    await worker.stop()
+  })
+
+  test('handlers receive a job fence bound to claim epoch and worker id', async () => {
+    const target = claim({ job_id: 'job-f', claim_epoch: 9 })
+    const { jobs } = fakeJobs([target])
+    const options = workerOptions({ jobs })
+    const fences: JobFence[] = []
+    const worker = createJobWorker(options)
+    worker.register('compile_episode', async (_job, _signal, ctx) => {
+      if (ctx) fences.push(ctx.fence)
+    })
+    worker.start()
+    // Let the first poll tick dispatch before stopping.
+    await new Promise(resolve => setTimeout(resolve, 60))
+    await worker.stop()
+    expect(fences).toEqual([{ jobId: 'job-f', claimedBy: 'worker-1', claimEpoch: 9 }])
   })
 })

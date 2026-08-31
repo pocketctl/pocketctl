@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"strings"
 	"sync"
 	"time"
 )
@@ -15,7 +16,7 @@ import (
 // GrantSource produces fresh grants. Implementations: IPCGrantSource (bridge
 // process -> daemon socket) and test fakes.
 type GrantSource interface {
-	Grant(ctx context.Context) (Grant, error)
+	Grant(ctx context.Context, scopeInstallationIDs []string) (Grant, error)
 }
 
 // IPCGrantSource asks the daemon over the user-private memory-mcp socket.
@@ -25,7 +26,7 @@ type IPCGrantSource struct {
 }
 
 // Grant performs one request/response exchange on a fresh connection.
-func (s *IPCGrantSource) Grant(ctx context.Context) (Grant, error) {
+func (s *IPCGrantSource) Grant(ctx context.Context, scopeInstallationIDs []string) (Grant, error) {
 	dial := s.Dial
 	if dial == nil {
 		dial = dialUnix
@@ -36,7 +37,9 @@ func (s *IPCGrantSource) Grant(ctx context.Context) (Grant, error) {
 	}
 	defer conn.Close()
 	_ = conn.SetDeadline(time.Now().Add(5 * time.Second))
-	request, err := json.Marshal(IpcGrantRequest{Type: "memory_mcp_grant_request"})
+	request, err := json.Marshal(IpcGrantRequest{
+		Type: "memory_mcp_grant_request", ScopeInstallationIDs: scopeInstallationIDs,
+	})
 	if err != nil {
 		return Grant{}, err
 	}
@@ -88,13 +91,14 @@ type CachingGrantSource struct {
 	Now   func() time.Time
 
 	mu     sync.Mutex
-	cached Grant
+	cached map[string]Grant
 }
 
 // Token returns a grant with more than RefreshLead of validity left.
-func (c *CachingGrantSource) Token(ctx context.Context) (Grant, error) {
+func (c *CachingGrantSource) Token(ctx context.Context, scopeInstallationIDs []string) (Grant, error) {
+	cacheKey := strings.Join(scopeInstallationIDs, "\x00")
 	c.mu.Lock()
-	cached := c.cached
+	cached := c.cached[cacheKey]
 	c.mu.Unlock()
 	now := c.Now
 	if now == nil {
@@ -103,7 +107,7 @@ func (c *CachingGrantSource) Token(ctx context.Context) (Grant, error) {
 	if cached.Token != "" && cached.Remaining(now()) > RefreshLead {
 		return cached, nil
 	}
-	fresh, err := c.Inner.Grant(ctx)
+	fresh, err := c.Inner.Grant(ctx, scopeInstallationIDs)
 	if err != nil {
 		return Grant{}, err
 	}
@@ -112,7 +116,10 @@ func (c *CachingGrantSource) Token(ctx context.Context) (Grant, error) {
 		fresh.ExpiresAt = now().Add(2 * time.Second)
 	}
 	c.mu.Lock()
-	c.cached = fresh
+	if c.cached == nil {
+		c.cached = make(map[string]Grant)
+	}
+	c.cached[cacheKey] = fresh
 	c.mu.Unlock()
 	return fresh, nil
 }
@@ -122,8 +129,10 @@ func (c *CachingGrantSource) Token(ctx context.Context) (Grant, error) {
 func (c *CachingGrantSource) Invalidate(token string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if c.cached.Token == token {
-		c.cached = Grant{}
+	for key, grant := range c.cached {
+		if grant.Token == token {
+			delete(c.cached, key)
+		}
 	}
 }
 

@@ -103,6 +103,22 @@ export function extensionModeFromEnv(
   return rawMode
 }
 
+/**
+ * ADR-P3-13: the Protocol v2 flag is independent of RELAY_EXTENSIONS and
+ * never implicitly changes v1 behavior. Invalid values fail startup instead
+ * of degrading to off.
+ */
+export function extensionV2ModeFromEnv(
+  env: Record<string, string | undefined> = process.env,
+): ExtensionMode {
+  const rawMode = env.RELAY_EXTENSION_V2?.trim() ?? ''
+  if (!rawMode) return 'off'
+  if (!isExtensionMode(rawMode)) {
+    throw new Error(`invalid RELAY_EXTENSION_V2 value: ${rawMode} (expected off | shadow | enabled)`)
+  }
+  return rawMode
+}
+
 export const EXTENSION_PROVIDER_PUBLIC_ORIGINS_ENV = 'EXTENSION_PROVIDER_PUBLIC_ORIGINS'
 
 /**

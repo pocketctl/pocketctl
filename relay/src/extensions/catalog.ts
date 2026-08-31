@@ -1,9 +1,10 @@
 import type pg from 'pg'
 import {
+  isScopeControlTopic,
   requiredExtensionScopeForTopic,
   type ExtensionMode,
   type ExtensionScope,
-  type ExtensionTopic,
+  type ExtensionTopicV2,
 } from './types.js'
 
 /**
@@ -28,7 +29,7 @@ export interface ExtensionProviderManifest {
   readonly display_name: string
   readonly provider_version: string
   readonly protocol_versions: readonly string[]
-  readonly subscriptions: readonly ExtensionTopic[]
+  readonly subscriptions: readonly ExtensionTopicV2[]
   readonly requested_scopes: readonly ExtensionScope[]
   readonly services: readonly ExtensionProviderService[]
 }
@@ -45,22 +46,28 @@ function deepFreeze<T>(value: T): T {
 
 const POCKETCTL_MEMORY_MANIFEST: ExtensionProviderManifest = deepFreeze({
   provider_id: 'pocketctl-memory',
-  // v2 adds memory.manage (write mode) for Phase 1 human review flows.
-  manifest_version: 2,
+  // v3 adds memory.context. v4 adds the v2 scope-control topics/scope for
+  // shared Team/Organization installations. Existing installations are never
+  // widened by the catalog upsert; users must explicitly include new grants.
+  manifest_version: 4,
   display_name: 'PocketCtl Memory',
   provider_version: '1.0.0',
-  protocol_versions: Object.freeze(['extension-feed.v1']),
+  protocol_versions: Object.freeze(['extension-feed.v1', 'extension-feed.v2']),
   subscriptions: Object.freeze([
     'session.event.v1',
     'session.lifecycle.v1',
     'turn.lifecycle.v1',
     'session.deleted.v1',
     'session.access.revoked.v1',
+    'scope.membership.v2',
+    'scope.lifecycle.v2',
+    'scope.installation.v2',
   ]),
   requested_scopes: Object.freeze([
     'session:events:read',
     'session:snapshot:read',
     'session:deletion:read',
+    'scope:control:read',
   ]),
   services: Object.freeze([
     Object.freeze({ service_id: 'memory.search', mode: 'read', metered: true }),
@@ -68,6 +75,7 @@ const POCKETCTL_MEMORY_MANIFEST: ExtensionProviderManifest = deepFreeze({
     Object.freeze({ service_id: 'knowledge.query', mode: 'read', metered: true }),
     Object.freeze({ service_id: 'memory.mcp', mode: 'mcp', metered: true }),
     Object.freeze({ service_id: 'memory.manage', mode: 'write', metered: false }),
+    Object.freeze({ service_id: 'memory.context', mode: 'agent_tool', metered: true }),
   ]),
 })
 
@@ -124,7 +132,7 @@ export interface InstallationGrantInput {
 export interface InstallationGrantValidation {
   valid: boolean
   granted_scopes?: ExtensionScope[]
-  subscriptions?: ExtensionTopic[]
+  subscriptions?: ExtensionTopicV2[]
   enabled_services?: string[]
   event_filter?: Record<string, unknown>
 }
@@ -187,7 +195,10 @@ export function validateInstallationGrant(
   if (!topics.every(topic => (manifest.subscriptions as readonly string[]).includes(topic))) {
     return { valid: false }
   }
-  if (!topics.every(topic => scopes.includes(requiredExtensionScopeForTopic(topic as ExtensionTopic)))) {
+  if (!topics.every(topic => typeof topic === 'string'
+    && (isScopeControlTopic(topic)
+      ? scopes.includes('scope:control:read')
+      : scopes.includes(requiredExtensionScopeForTopic(topic as ExtensionTopicV2))))) {
     return { valid: false }
   }
   if (!services.every(service => manifest.services.some(entry => entry.service_id === service))) {
@@ -198,7 +209,7 @@ export function validateInstallationGrant(
   return {
     valid: true,
     granted_scopes: scopes as ExtensionScope[],
-    subscriptions: topics as ExtensionTopic[],
+    subscriptions: topics as ExtensionTopicV2[],
     enabled_services: services,
     event_filter: eventFilter,
   }

@@ -3,6 +3,8 @@ import { afterAll, beforeAll, beforeEach, describe, expect, test, vi } from 'vit
 import { applyMemorySchema } from '../schema.js'
 import { assertMemoryTestDatabase } from '../testing/test-db.js'
 import { createExtractionRepository } from '../extraction/repository.js'
+import { createJobRepository } from '../jobs/repository.js'
+import { StaleJobFenceError } from '../generation/fence.js'
 import { createCandidateExtractor } from '../extraction/extractor.js'
 import { canonicalPayloadHash } from '../inbox/canonical-json.js'
 import type { ModelJsonResult } from '../ports/text-generator.js'
@@ -133,7 +135,11 @@ describeWithDatabase('candidate extraction (PostgreSQL)', () => {
     return fn
   }
 
-  function extractorWith(fn: ReturnType<typeof generator>, modelConfigFingerprint?: string) {
+  function extractorWith(
+    fn: ReturnType<typeof generator>,
+    modelConfigFingerprint?: string,
+    maxRunsPerEpisode?: number,
+  ) {
     return createCandidateExtractor({
       store,
       textGenerator: { generateJson: fn as never },
@@ -141,6 +147,7 @@ describeWithDatabase('candidate extraction (PostgreSQL)', () => {
       model: 'extractor-small',
       modelConfigFingerprint,
       timeoutMs: 5_000,
+      maxRunsPerEpisode,
     })
   }
 
@@ -237,6 +244,18 @@ describeWithDatabase('candidate extraction (PostgreSQL)', () => {
     expect(fn).toHaveBeenCalledTimes(2)
   })
 
+  test('a pre-dispatch budget rejection leaves no run counted against the episode ceiling', async () => {
+    const rejected = generator([{
+      ok: false, code: 'budget_exceeded', retryable: false, detail: 'text_requests',
+    }])
+    const outcome = await extractorWith(rejected, undefined, 1).extract({
+      installationId: INSTALLATION, turnId: 'turn-1', signal: new AbortController().signal,
+    })
+    expect(outcome).toMatchObject({ kind: 'failed', errorCode: 'budget_exceeded' })
+    const runs = await pool.query(`SELECT COUNT(*)::int AS count FROM memory_extraction_runs`)
+    expect(runs.rows[0].count).toBe(0)
+  })
+
   test('two invalid outputs quarantine the run with no candidates', async () => {
     const extractor = extractorWith(generator([invalidResult(), invalidResult()]))
     const outcome = await extractor.extract({
@@ -285,4 +304,135 @@ describeWithDatabase('candidate extraction (PostgreSQL)', () => {
     const runs = await pool.query(`SELECT COUNT(*)::int AS count FROM memory_extraction_runs`)
     expect(runs.rows[0].count).toBe(0)
   })
+
+  describe('fenced extraction writes (ADR-P2-09)', () => {
+    async function freshRun() {
+      const episode = await pool.query<{ episode_id: string }>(
+        `SELECT episode_id::text FROM work_episodes LIMIT 1`)
+      const reserved = await store.reserveRun({
+        installationId: INSTALLATION,
+        episodeId: episode.rows[0].episode_id,
+        sourceDigest: SOURCE_DIGEST,
+        extractorVersion: 'ext-v1',
+        promptVersion: 'prompt-v1',
+        modelConfigHash: Buffer.alloc(32, 9),
+        mode: 'enabled',
+        provider: 'openai-compatible',
+        model: 'extractor-small',
+        staleAfterMs: 60_000,
+      })
+      expect(reserved.owner).toBe(true)
+      return { runId: reserved.runId!, episodeId: episode.rows[0].episode_id }
+    }
+
+    async function claimedFence(idemKey: string) {
+      const jobs = createJobRepository(pool)
+      await jobs.enqueueJob({
+        installationId: INSTALLATION,
+        jobType: 'extract_candidates',
+        idempotencyKey: idemKey,
+      })
+      const [claim] = await jobs.claimJobs({ workerId: 'w1', limit: 1, leaseMs: 60_000 })
+      return { jobs, claim }
+    }
+
+    async function staleIt(fence: { job_id: string; claim_epoch: number }) {
+      await pool.query(
+        `UPDATE memory_jobs SET claim_expires_at = NOW() - INTERVAL '1 second' WHERE job_id = $1`,
+        [fence.job_id],
+      )
+    }
+
+    const candidateRow = (ordinal: number) => ({
+      ordinal,
+      claimType: 'test_invariant',
+      statement: `fenced statement ${ordinal}`,
+      structuredContent: {},
+      normalizedKey: `fence-nk-${ordinal}`,
+      scopeKind: 'task',
+      scopeKey: 'turn:fence',
+      repositoryId: null,
+      repoSnapshotId: null,
+      branch: null,
+      evidenceHandles: ['h0-aaaaaaaa'],
+      confidence: '0.9000',
+      freshnessAt: new Date(),
+      validFrom: null,
+      validUntil: null,
+      status: 'validated' as const,
+      validation: {},
+      duplicateOfClaimId: null,
+    })
+
+    test('persistCandidates rejects a stale fence: no candidates, no usage, run stays running', async () => {
+      const { runId, episodeId } = await freshRun()
+      const { jobs, claim } = await claimedFence('extract:turn-1:fence-stale')
+      await staleIt(claim)
+      await jobs.claimJobs({ workerId: 'w2', limit: 1, leaseMs: 60_000 })
+
+      await expect(store.persistCandidates({
+        runId,
+        installationId: INSTALLATION,
+        episodeId,
+        candidateStatus: 'validated',
+        candidates: [candidateRow(0), candidateRow(1)],
+        usage: { inputTokens: 10, outputTokens: 5, costMicros: 1 },
+        fence: { jobId: claim.job_id, claimedBy: 'w1', claimEpoch: claim.claim_epoch },
+      })).rejects.toBeInstanceOf(StaleJobFenceError)
+
+      const candidates = await pool.query(`SELECT COUNT(*)::int AS n FROM memory_candidates WHERE run_id = $1`, [runId])
+      expect(candidates.rows[0].n).toBe(0)
+      const run = await pool.query<{ state: string }>(`SELECT state FROM memory_extraction_runs WHERE run_id = $1`, [runId])
+      expect(run.rows[0].state).toBe('running')
+      const usage = await pool.query(`SELECT COUNT(*)::int AS n FROM memory_usage_outbox WHERE usage_id = $1`, [`extraction:${runId}`])
+      expect(usage.rows[0].n).toBe(0)
+    })
+
+    test('markRun rejects a stale fence and leaves run + usage untouched', async () => {
+      const { runId } = await freshRun()
+      const { jobs, claim } = await claimedFence('extract:turn-2:fence-stale')
+      await staleIt(claim)
+      await jobs.claimJobs({ workerId: 'w2', limit: 1, leaseMs: 60_000 })
+
+      await expect(store.markRun({
+        runId,
+        state: 'failed',
+        errorCode: 'late_owner',
+        inputTokens: 3,
+        outputTokens: 2,
+        costMicros: 0,
+        fence: { jobId: claim.job_id, claimedBy: 'w1', claimEpoch: claim.claim_epoch },
+      })).rejects.toBeInstanceOf(StaleJobFenceError)
+
+      const run = await pool.query<{ state: string; error_code: string | null }>(
+        `SELECT state, error_code FROM memory_extraction_runs WHERE run_id = $1`, [runId])
+      expect(run.rows[0].state).toBe('running')
+      expect(run.rows[0].error_code).toBeNull()
+      const usage = await pool.query(`SELECT COUNT(*)::int AS n FROM memory_usage_outbox WHERE usage_id = $1`, [`extraction:${runId}`])
+      expect(usage.rows[0].n).toBe(0)
+    })
+
+    test('a valid fence persists candidates, run completion and usage exactly once', async () => {
+      const { runId, episodeId } = await freshRun()
+      const { claim } = await claimedFence('extract:turn-3:fence-ok')
+
+      await store.persistCandidates({
+        runId,
+        installationId: INSTALLATION,
+        episodeId,
+        candidateStatus: 'validated',
+        candidates: [candidateRow(0)],
+        usage: { inputTokens: 7, outputTokens: 4, costMicros: 2 },
+        fence: { jobId: claim.job_id, claimedBy: 'w1', claimEpoch: claim.claim_epoch },
+      })
+
+      const candidates = await pool.query(`SELECT COUNT(*)::int AS n FROM memory_candidates WHERE run_id = $1`, [runId])
+      expect(candidates.rows[0].n).toBe(1)
+      const run = await pool.query<{ state: string }>(`SELECT state FROM memory_extraction_runs WHERE run_id = $1`, [runId])
+      expect(run.rows[0].state).toBe('succeeded')
+      const usage = await pool.query(`SELECT COUNT(*)::int AS n FROM memory_usage_outbox WHERE usage_id = $1`, [`extraction:${runId}`])
+      expect(usage.rows[0].n).toBe(1)
+    })
+  })
+
 })

@@ -14,8 +14,11 @@ describe('extension provider catalog', () => {
     const manifest = getExtensionProviderManifest('pocketctl-memory')
     expect(manifest).toBeDefined()
     expect(manifest!.display_name).toBe('PocketCtl Memory')
-    expect(manifest!.protocol_versions).toEqual(['extension-feed.v1'])
+    expect(manifest!.protocol_versions).toEqual(['extension-feed.v1', 'extension-feed.v2'])
     expect([...manifest!.subscriptions].sort()).toEqual([
+      'scope.installation.v2',
+      'scope.lifecycle.v2',
+      'scope.membership.v2',
       'session.access.revoked.v1',
       'session.deleted.v1',
       'session.event.v1',
@@ -23,14 +26,15 @@ describe('extension provider catalog', () => {
       'turn.lifecycle.v1',
     ])
     expect([...manifest!.requested_scopes].sort()).toEqual([
+      'scope:control:read',
       'session:deletion:read',
       'session:events:read',
       'session:snapshot:read',
     ])
     expect(manifest!.services.map(service => service.service_id).sort()).toEqual([
-      'knowledge.query', 'memory.manage', 'memory.mcp', 'memory.recall', 'memory.search',
+      'knowledge.query', 'memory.context', 'memory.manage', 'memory.mcp', 'memory.recall', 'memory.search',
     ])
-    expect(manifest!.manifest_version).toBe(2)
+    expect(manifest!.manifest_version).toBe(4)
     const manage = manifest!.services.find(service => service.service_id === 'memory.manage')
     expect(manage).toMatchObject({ mode: 'write', metered: false })
   })
@@ -70,7 +74,7 @@ describe('extension provider catalog', () => {
       expect(sql).toContain('extension_providers')
       expect(sql).not.toContain('extension_installations')
     }
-    expect(query.mock.calls[0][1]).toContain(2)
+    expect(query.mock.calls[0][1]).toContain(4)
   })
 
   test('memory.manage is a grantable service but never auto-granted', () => {
@@ -86,6 +90,19 @@ describe('extension provider catalog', () => {
       subscriptions: ['session.event.v1'],
       enabled_services: ['memory.search'],
     }).enabled_services).toEqual(['memory.search'])
+  })
+
+  test('memory.context is grantable only when the user explicitly includes it', () => {
+    expect(validateInstallationGrant('pocketctl-memory', {
+      granted_scopes: ['session:events:read'],
+      subscriptions: ['session.event.v1'],
+      enabled_services: ['memory.search', 'memory.context'],
+    })).toMatchObject({ valid: true, enabled_services: ['memory.search', 'memory.context'] })
+    expect(validateInstallationGrant('pocketctl-memory', {
+      granted_scopes: ['session:events:read'],
+      subscriptions: ['session.event.v1'],
+      enabled_services: ['memory.search'],
+    })).toMatchObject({ valid: true, enabled_services: ['memory.search'] })
   })
 
   test('enabled startup awaits catalog seeding and propagates failures', async () => {

@@ -1,4 +1,4 @@
-import type { ProviderInstallationItem, ProviderInstallationPage } from './contracts.js'
+import type { ProviderInstallationItem, ProviderInstallationItemV2, ProviderInstallationPage } from './contracts.js'
 import type { RelayHttpClient } from './http-client.js'
 import type { ProviderTokenClient } from './token-client.js'
 import { withProviderAuthRetry } from './token-client.js'
@@ -36,10 +36,34 @@ function parseInstallationItem(input: unknown): ProviderInstallationItem | null 
   }
 }
 
+/** Parse the v2 owner-scope metadata; personal rows always carry their own id. */
+function parseOwnerScopeFields(row: Record<string, unknown>): {
+  owner_scope_kind: ProviderInstallationItemV2['owner_scope_kind']
+  owner_scope_id: string
+  parent_organization_id: string | null
+  authorization_epoch: string
+} | null {
+  const kind = row.owner_scope_kind
+  if (kind !== 'personal' && kind !== 'team' && kind !== 'organization') return null
+  if (typeof row.owner_scope_id !== 'string' || !UUID_PATTERN.test(row.owner_scope_id)) return null
+  const parentOrganizationId = row.parent_organization_id
+  if (kind === 'team') {
+    if (typeof parentOrganizationId !== 'string' || !UUID_PATTERN.test(parentOrganizationId)) return null
+  } else if (parentOrganizationId !== null) return null
+  if (typeof row.authorization_epoch !== 'string' || !/^[1-9][0-9]*$/.test(row.authorization_epoch)) return null
+  return {
+    owner_scope_kind: kind,
+    owner_scope_id: row.owner_scope_id,
+    parent_organization_id: parentOrganizationId as string | null,
+    authorization_epoch: row.authorization_epoch,
+  }
+}
+
 /**
  * Provider installation inventory (R0). Response shapes are validated
  * strictly: anything malformed fails the page so discovery never commits a
- * partial generation.
+ * partial generation. The v2 variant adds owner-scope metadata and mirrors
+ * every v1 field, so discovery uses it first and falls back to v1.
  */
 export function createInstallationsClient(options: InstallationsClientOptions) {
   const { http, tokens } = options
@@ -68,6 +92,42 @@ export function createInstallationsClient(options: InstallationsClientOptions) {
         const parsedItem = parseInstallationItem(entry)
         if (!parsedItem) throw new Error('list_installations returned a malformed item')
         installations.push(parsedItem)
+      }
+      return {
+        installations,
+        next_cursor: parsed.next_cursor as string | null,
+        has_more: parsed.has_more as boolean,
+      }
+    },
+
+    async listInstallationsV2(cursor?: string): Promise<{
+      installations: ProviderInstallationItemV2[]
+      next_cursor: string | null
+      has_more: boolean
+    }> {
+      const query = cursor ? `cursor=${encodeURIComponent(cursor)}` : ''
+      const body = await withProviderAuthRetry(tokens, 'list_installations_v2', token =>
+        http.request('GET', `/api/extensions/v2/provider/installations${query ? `?${query}` : ''}`, {
+          operation: 'list_installations_v2',
+          token,
+        }))
+      const parsed = body as {
+        installations?: unknown
+        next_cursor?: unknown
+        has_more?: unknown
+      } | null
+      if (!Array.isArray(parsed?.installations)
+        || (typeof parsed?.next_cursor !== 'string' && parsed?.next_cursor !== null)
+        || typeof parsed?.has_more !== 'boolean') {
+        throw new Error('list_installations_v2 returned a malformed page')
+      }
+      const installations: ProviderInstallationItemV2[] = []
+      for (const entry of parsed.installations) {
+        const parsedItem = parseInstallationItem(entry)
+        if (!parsedItem) throw new Error('list_installations_v2 returned a malformed item')
+        const ownerScope = parseOwnerScopeFields(entry as Record<string, unknown>)
+        if (!ownerScope) throw new Error('list_installations_v2 returned malformed owner-scope metadata')
+        installations.push({ ...parsedItem, ...ownerScope })
       }
       return {
         installations,

@@ -1,6 +1,6 @@
 import pg from 'pg'
 import { afterAll, beforeAll, describe, expect, test } from 'vitest'
-import { initDB } from '../db.js'
+import { deleteUserAccount, initDB } from '../db.js'
 import {
   assertExtensionSchema,
   initExtensionSchema,
@@ -47,12 +47,17 @@ describeWithDatabase('extension platform PostgreSQL schema', () => {
       'extension_checkpoints',
       'extension_feed',
       'extension_installations',
+      'extension_organizations',
       'extension_provider_credentials',
       'extension_provider_status',
       'extension_provider_usage_facts',
       'extension_providers',
       'extension_purge_requests',
+      'extension_scope_idempotency',
+      'extension_scope_memberships',
+      'extension_scope_outbox',
       'extension_source_outbox',
+      'extension_teams',
     ])
   })
 
@@ -187,7 +192,7 @@ describeWithDatabase('extension platform PostgreSQL schema', () => {
     expect(checkpoint.rowCount).toBe(0)
   })
 
-  test('deleting the owning user leaves purge requests intact', async () => {
+  test('deleting the owning user leaves purge requests intact and detaches the installation', async () => {
     await assertDurableIngressTestDatabase(pool, databaseUrl!)
     await resetDurableIngressTestDatabase(pool, databaseUrl!)
     await pool.query(`
@@ -195,7 +200,7 @@ describeWithDatabase('extension platform PostgreSQL schema', () => {
       VALUES ('extension-schema-purge@example.test', 'x')
     `)
     const user = await pool.query<{ id: number }>(
-      `SELECT id FROM users WHERE email = 'extension-schema-purge@example.test'`,
+      `SELECT id FROM users WHERE email = 'extension-schema-purge@example.test'`
     )
     const userId = user.rows[0].id
     await pool.query(`
@@ -206,16 +211,23 @@ describeWithDatabase('extension platform PostgreSQL schema', () => {
       INSERT INTO extension_installations (installation_id, provider_id, owner_user_id, status, granted_scopes, subscriptions, enabled_services, start_policy)
       VALUES ('aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa', 'extension-schema-provider', $1, 'active', ARRAY['session:events:read'], ARRAY['session.event.v1'], ARRAY['memory.search'], 'from_now')
     `, [userId])
-    await pool.query(`
-      INSERT INTO extension_purge_requests (request_id, provider_id, installation_id, reason, expires_at)
-      VALUES ('bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb', 'extension-schema-provider', 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa', 'account_deleted', NOW() + INTERVAL '30 days')
-    `)
 
-    await pool.query(`DELETE FROM users WHERE id = $1`, [userId])
+    // ADR-0005: account deletion goes through the revoking transaction; the
+    // personal installation is revoked and detached rather than cascaded away.
+    expect(await deleteUserAccount(pool, userId)).toBe(true)
+
+    const installation = await pool.query<{ status: string; owner_user_id: number | null }>(`
+      SELECT status, owner_user_id FROM extension_installations
+      WHERE installation_id = 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa'
+    `)
+    expect(installation.rowCount).toBe(1)
+    expect(installation.rows[0].status).toBe('revoked')
+    expect(installation.rows[0].owner_user_id).toBeNull()
 
     const purge = await pool.query(`
       SELECT status FROM extension_purge_requests
-      WHERE request_id = 'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb'
+      WHERE installation_id = 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa'
+        AND reason = 'account_deleted'
     `)
     expect(purge.rowCount).toBe(1)
     expect(purge.rows[0].status).toBe('pending')

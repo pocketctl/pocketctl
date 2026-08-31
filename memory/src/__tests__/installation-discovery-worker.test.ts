@@ -1,5 +1,6 @@
 import { describe, expect, test, vi } from 'vitest'
 import { createDiscoveryWorker } from '../installations/discovery-worker.js'
+import { RelayRequestError } from '../relay/errors.js'
 
 function workerFor(page: Record<string, unknown>, maxPages = 1) {
   const applyDiscovery = vi.fn(async () => ({ applied: 0 }))
@@ -32,5 +33,35 @@ describe('installation discovery pagination', () => {
     })
     await expect(worker.discoverOnce()).rejects.toThrow(/pagination incomplete/)
     expect(applyDiscovery).not.toHaveBeenCalled()
+  })
+
+  test('uses the probed v2 first page instead of fetching it twice', async () => {
+    const listInstallationsV2 = vi.fn(async () => ({
+      installations: [], next_cursor: null, has_more: false,
+    }))
+    const applyDiscovery = vi.fn(async () => ({ applied: 0 }))
+    const worker = createDiscoveryWorker({
+      installations: { listInstallationsV2, listInstallations: vi.fn() } as never,
+      registry: { currentGeneration: vi.fn(async () => 0), applyDiscovery } as never,
+      signal: new AbortController().signal,
+    })
+    await expect(worker.discoverOnce()).resolves.toBe(0)
+    expect(listInstallationsV2).toHaveBeenCalledTimes(1)
+  })
+
+  test('does not turn a transient v2 failure into a destructive v1-only generation', async () => {
+    const listInstallations = vi.fn()
+    const worker = createDiscoveryWorker({
+      installations: {
+        listInstallations,
+        listInstallationsV2: vi.fn(async () => {
+          throw new RelayRequestError({ operation: 'list_installations_v2', code: 'network' })
+        }),
+      } as never,
+      registry: { currentGeneration: vi.fn(async () => 0), applyDiscovery: vi.fn() } as never,
+      signal: new AbortController().signal,
+    })
+    await expect(worker.discoverOnce()).rejects.toMatchObject({ code: 'network' })
+    expect(listInstallations).not.toHaveBeenCalled()
   })
 })

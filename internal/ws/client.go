@@ -162,6 +162,11 @@ type Client struct {
 	// Callbacks are configured before Run and not replaced while it is running,
 	// matching the existing OnStateChange configuration contract.
 	OnStateChange OnConnectStateChange
+	// OnControlMessage handles correlated control-plane replies directly from
+	// the read pump. It must be configured before Run and return true only when
+	// the message was consumed, keeping synchronous request/reply flows from
+	// deadlocking behind the ordinary serial CommandCh consumer.
+	OnControlMessage func(protocol.ClientMessage) bool
 	// OnConnectionStatus receives asynchronously dispatched connection states.
 	// Configure it before Run; replacing callback fields during Run is unsafe.
 	OnConnectionStatus func(ConnectionStatus, string)
@@ -868,6 +873,9 @@ func (c *Client) readPump(ctx context.Context, done chan struct{}, readErr chan<
 		if err := json.Unmarshal(msg, &cmdMsg); err != nil {
 			continue
 		}
+		if c.OnControlMessage != nil && c.OnControlMessage(cmdMsg) {
+			continue
+		}
 		select {
 		case c.CommandCh <- cmdMsg:
 		default:
@@ -948,23 +956,35 @@ func (c *Client) sendHeartbeat() {
 }
 
 func (c *Client) SendMsg(v any) {
+	if err := c.sendMsg(v); err != nil {
+		c.logger.Error("send msg failed", "error", err)
+	}
+}
+
+// SendControlPayload writes one already-marshaled control-plane request and
+// reports transport failure to its bounded request/reply caller.
+func (c *Client) SendControlPayload(data []byte) error {
+	if !json.Valid(data) {
+		return fmt.Errorf("invalid control payload")
+	}
+	return c.sendMsg(json.RawMessage(data))
+}
+
+func (c *Client) sendMsg(v any) error {
 	data, err := json.Marshal(v)
 	if err != nil {
-		c.logger.Error("send msg marshal error", "error", err)
-		return
+		return fmt.Errorf("marshal: %w", err)
 	}
 	c.connMu.Lock()
 	conn := c.conn
 	c.connMu.Unlock()
 	if conn == nil {
-		c.logger.Error("send msg: conn is nil")
-		return
+		return fmt.Errorf("websocket disconnected")
 	}
 	c.writeMu.Lock()
 	defer c.writeMu.Unlock()
 	_ = conn.SetWriteDeadline(time.Now().Add(c.writeWait))
 	if err := conn.WriteMessage(websocket.TextMessage, data); err != nil {
-		c.logger.Error("send msg write error", "error", err, "len", len(data))
 		// On a half-open socket a write fails (TCP eventually gives up) while the
 		// read side stays blocked. Close the conn so readPump's ReadMessage
 		// errors out, closes `done`, and Run reconnects — otherwise a failed ping
@@ -972,7 +992,9 @@ func (c *Client) SendMsg(v any) {
 		// Closing the captured conn is safe even if it's already been replaced by
 		// a fresh connection (we only close this specific one).
 		conn.Close()
+		return fmt.Errorf("write: %w", err)
 	}
+	return nil
 }
 
 // sendEvent delivers a daemon event to the relay with at-least-once semantics:

@@ -72,17 +72,19 @@ func (t *codexTurnTracker) end(sourceTurnID string) (protocol.DaemonEvent, bool)
 }
 
 func (t *codexTurnTracker) stamp(events []protocol.DaemonEvent) {
-	if t.activeLogical == "" {
-		return
-	}
 	for i := range events {
+		// turn_context arrives before task_started, so metadata emitted from it
+		// still needs the rollout's true session ID even without an active turn.
+		if events[i].SessionID == "" && events[i].Type != "session_status" {
+			events[i].SessionID = t.sessionID
+		}
+		if t.activeLogical == "" {
+			continue
+		}
 		// Session status remains terminal/session-level state. turn_status is
 		// emitted separately and owns the canonical lifecycle identity.
 		if events[i].Type == "session_status" {
 			continue
-		}
-		if events[i].SessionID == "" {
-			events[i].SessionID = t.sessionID
 		}
 		events[i].TurnID = t.activeLogical
 		events[i].SourceTurnID = t.activeSource

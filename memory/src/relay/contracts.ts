@@ -54,6 +54,47 @@ export interface ProviderInstallationItem {
   updated_at: string
 }
 
+// --- extension-feed.v2 scope-control contract (ADR-0005 §5.2) ---------------
+
+export type ScopeControlTopic =
+  | 'scope.membership.v2'
+  | 'scope.lifecycle.v2'
+  | 'scope.installation.v2'
+
+export const SCOPE_CONTROL_TOPICS: readonly ScopeControlTopic[] = Object.freeze([
+  'scope.membership.v2',
+  'scope.lifecycle.v2',
+  'scope.installation.v2',
+])
+
+export interface ExtensionScopeFeedEnvelopeV2 {
+  envelope_version: 2
+  feed_id: string
+  topic: ScopeControlTopic
+  owner_scope: { kind: 'team' | 'organization'; id: string; authorization_epoch: string }
+  source: { kind: string; id: string; recorded_at: string }
+  subject: { membership_id?: string; event_type: string }
+  classification: Record<string, unknown>
+  data: Record<string, unknown>
+}
+
+export interface ScopeControlFeedBatch {
+  installation_id: string
+  items: ExtensionScopeFeedEnvelopeV2[]
+  next_cursor: string
+  lease_token: string
+  lease_expires_at: string
+}
+
+export interface ProviderInstallationItemV2
+  extends Omit<ProviderInstallationItem, 'subscriptions'> {
+  owner_scope_kind: 'personal' | 'team' | 'organization'
+  owner_scope_id: string
+  parent_organization_id: string | null
+  authorization_epoch: string
+  subscriptions: (ExtensionTopic | ScopeControlTopic)[]
+}
+
 export interface ProviderInstallationPage {
   installations: ProviderInstallationItem[]
   next_cursor: string | null
@@ -62,6 +103,13 @@ export interface ProviderInstallationPage {
 
 export interface RelayExtensionClient {
   listInstallations(cursor?: string): Promise<ProviderInstallationPage>
+  listInstallationsV2(cursor?: string): Promise<{
+    installations: ProviderInstallationItemV2[]
+    next_cursor: string | null
+    has_more: boolean
+  }>
+  pullScopeControlFeed(installationId: string, limit: number): Promise<ScopeControlFeedBatch>
+  ackScopeControlFeed(input: { installation_id: string; cursor: string; lease_token: string }): Promise<number>
   pullFeed(installationId: string, limit: number): Promise<FeedBatch>
   ackFeed(input: { installation_id: string; cursor: string; lease_token: string }): Promise<number>
   listSessions(installationId: string, cursor?: string): Promise<{

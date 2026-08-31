@@ -48,9 +48,9 @@ export interface CorrectInput {
 export function createClaimRepository(pool: pg.Pool) {
   return {
     /**
-     * Accept a validated candidate. Locks the candidate row, re-checks
-     * reviewability and revision, then creates claim + version + evidence +
-     * pointer + feedback + index job atomically.
+     * Explicitly accept a validated or conflict candidate. Locks the candidate
+     * row, re-checks reviewability and revision, then creates claim + version +
+     * evidence + pointer + feedback + index job atomically.
      */
     async acceptCandidate(input: AcceptInput): Promise<
       { ok: true; claimId: string; versionId: string; reviewDecision: 'accepted_as_is' | 'light_edit' | 'major_edit' }
@@ -106,7 +106,7 @@ export function createClaimRepository(pool: pg.Pool) {
             await client.query('ROLLBACK')
             return { ok: false, error: { code: 'candidate_not_found' } }
           }
-          if (row.status !== 'validated') {
+          if (row.status !== 'validated' && row.status !== 'conflict') {
             await client.query('ROLLBACK')
             return { ok: false, error: { code: 'candidate_not_reviewable' } }
           }

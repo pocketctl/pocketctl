@@ -8,11 +8,33 @@ import { createMemoryMetrics } from './metrics.js'
 import { createGrantGuard } from './auth/grant-guard.js'
 import { createCorsHostPolicy } from './auth/cors-host-policy.js'
 import { registerReadRoutes } from './api/read-routes.js'
+import { registerGovernanceRoutes } from './api/governance-routes.js'
 import { registerManageRoutes } from './api/manage-routes.js'
+import { registerContextRoutes } from './api/context-routes.js'
+import { registerPolicyRoutes } from './api/policy-routes.js'
+import { createTrajectoryRepository } from './context/trajectory-repository.js'
+import { createContextRetrieval } from './context/retrieval.js'
+import { createContextSettingsRepository } from './context/settings-repository.js'
+import { createLoadoutRepository } from './context/loadout-repository.js'
+import { createScopeResolver } from './context/scope-resolver.js'
+import { createPackRepository } from './context/pack-repository.js'
+import { createGenerationRunRepository } from './generation/repository.js'
+import { createContextCompiler } from './context/compiler.js'
+import { createAdmissionService } from './context/admission-service.js'
+import { createFeedbackService } from './context/feedback-service.js'
+import { createInvalidationService } from './context/invalidation-service.js'
+import { createPolicyRepository } from './policies/repository.js'
+import { createPolicyResolver } from './policies/resolver.js'
+import { createPolicyService } from './policies/service.js'
+import { createSearchService } from './retrieval/search-service.js'
 import { registerMcpRoute } from './mcp/server.js'
 import { validateTombstoneKeyring } from './claims/tombstones.js'
 import { createOpenAICompatibleEmbeddingProvider } from './model/openai-compatible-embedding.js'
 import { createRateLimiter } from './api/rate-limiter.js'
+import {
+  createProviderBudgetStore,
+  withEmbeddingProviderBudget,
+} from './model/provider-budget.js'
 
 /**
  * memory-api entry point: health/ready/metrics plus the Capability-Grant
@@ -29,6 +51,7 @@ async function main(): Promise<void> {
   const config = loadMemoryConfig()
   const pool = createMemoryPool(config)
   await applyMemorySchema(pool)
+  const providerBudgetStore = config.providerBudget ? createProviderBudgetStore(pool) : undefined
   await validateTombstoneKeyring(pool, config.tombstoneHmacKeys)
   const schemaReady = true
   const app = Fastify({ logger: false, bodyLimit: 64 * 1024 })
@@ -119,15 +142,26 @@ async function main(): Promise<void> {
             .digest('hex'),
         }
       : undefined
-    const embeddingProvider = config.embeddingModel
-      ? Object.assign(createOpenAICompatibleEmbeddingProvider({
+    const rawEmbeddingProvider = config.embeddingModel
+      ? createOpenAICompatibleEmbeddingProvider({
           baseUrl: config.embeddingModel.baseUrl,
           model: config.embeddingModel.model,
           apiKey: config.embeddingModel.apiKey,
           dimensions: config.embeddingModel.dimensions,
           timeoutMs: config.recallEmbeddingTimeoutMs,
           inputCostMicrosPerMillionTokens: config.embeddingModel.inputCostMicrosPerMillionTokens,
-        }), {
+          maxAttempts: config.providerBudget ? 1 : undefined,
+        })
+      : undefined
+    const budgetedEmbeddingProvider = rawEmbeddingProvider && config.providerBudget && providerBudgetStore
+      ? withEmbeddingProviderBudget(rawEmbeddingProvider, providerBudgetStore, {
+          key: config.providerBudget.key,
+          maxRequests: config.providerBudget.embeddingMaxRequests,
+          maxTokens: config.providerBudget.embeddingMaxTokens,
+        })
+      : rawEmbeddingProvider
+    const embeddingProvider = budgetedEmbeddingProvider && config.embeddingModel
+      ? Object.assign(budgetedEmbeddingProvider, {
           provider: config.embeddingModel.provider,
           model: config.embeddingModel.model,
         })
@@ -152,7 +186,14 @@ async function main(): Promise<void> {
       cursorSigningKey: config.hmacKey,
       ...(embeddingAdapter ? { embeddingConsentFingerprint: embeddingAdapter.fingerprint } : {}),
       phase1Metrics: metrics.phase1,
+      sharedScopesEnabled: config.sharedScopesMode === 'enabled',
       ...(embeddingProvider ? { embed: embeddingProvider } : {}),
+    })
+    registerGovernanceRoutes(app, {
+      pool,
+      guard,
+      sharedScopesEnabled: config.sharedScopesMode === 'enabled',
+      cursorSigningKey: config.hmacKey,
     })
     registerManageRoutes(app, {
       pool,
@@ -166,6 +207,68 @@ async function main(): Promise<void> {
       tombstoneHmacKeys: config.tombstoneHmacKeys,
       phase1Metrics: metrics.phase1,
     })
+    const policyRepository = createPolicyRepository(pool)
+    const policyResolver = createPolicyResolver({ pool, repository: policyRepository })
+		const invalidation = createInvalidationService({ pool })
+		const policyService = createPolicyService({
+			pool, repository: policyRepository, resolver: policyResolver, invalidation,
+		})
+    const trajectoryRepository = createTrajectoryRepository(pool)
+    const contextSettings = createContextSettingsRepository(pool)
+    const contextPacks = createPackRepository(pool)
+		const contextLoadouts = createLoadoutRepository(pool)
+    const contextCompiler = createContextCompiler({
+      pool,
+      retrieval: createContextRetrieval({
+        pool,
+        search: createSearchService({
+          pool,
+          recallEmbeddingTimeoutMs: config.recallEmbeddingTimeoutMs,
+          cursorSigningKey: config.hmacKey,
+          ...(embeddingProvider ? { embed: embeddingProvider } : {}),
+          ...(embeddingAdapter ? { embeddingConsentFingerprint: embeddingAdapter.fingerprint } : {}),
+        }),
+        trajectory: trajectoryRepository,
+      }),
+      scope: createScopeResolver(pool),
+      loadouts: contextLoadouts,
+      settings: contextSettings,
+      packs: contextPacks,
+      generation: createGenerationRunRepository(pool),
+      policyResolver,
+    })
+    registerContextRoutes(app, {
+      pool,
+      guard,
+      policy,
+      rateLimiter,
+      compiler: contextCompiler,
+      admission: createAdmissionService({ pool, nonceHmacKey: Buffer.from(config.hmacKey) }),
+      feedback: createFeedbackService({ pool }),
+      packs: contextPacks,
+      settings: contextSettings,
+		loadouts: contextLoadouts,
+      requestKey: { keyId: 'context-v1', hmacKey: Buffer.from(config.hmacKey) },
+    })
+    registerPolicyRoutes(app, {
+      pool,
+      guard,
+      policy,
+      rateLimiter,
+      policies: policyService,
+      transactionalPolicies: transactionPool => {
+        const repository = createPolicyRepository(transactionPool)
+        return createPolicyService({
+          pool: transactionPool,
+          repository,
+          resolver: createPolicyResolver({ pool: transactionPool, repository }),
+          invalidation: createInvalidationService({ pool: transactionPool }),
+        })
+      },
+      onPolicyActivated: async () => {
+        policyResolver.clearCache()
+      },
+    })
     registerMcpRoute(app, {
       pool,
       guard,
@@ -174,6 +277,7 @@ async function main(): Promise<void> {
       providerVersion: config.providerVersion,
       recallEmbeddingTimeoutMs: config.recallEmbeddingTimeoutMs,
       cursorSigningKey: config.hmacKey,
+      sharedScopesEnabled: config.sharedScopesMode === 'enabled',
       ...(embeddingAdapter ? { embeddingConsentFingerprint: embeddingAdapter.fingerprint } : {}),
       ...(embeddingProvider ? { embed: embeddingProvider } : {}),
     })

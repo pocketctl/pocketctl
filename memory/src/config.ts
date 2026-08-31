@@ -22,6 +22,10 @@ export interface ModelAdapterSettings {
   outputCostMicrosPerMillionTokens: number
 }
 
+export interface TextAdapterSettings extends ModelAdapterSettings {
+  thinking?: 'enabled' | 'disabled'
+}
+
 export interface EmbeddingAdapterSettings extends ModelAdapterSettings {
   dimensions: number
 }
@@ -31,8 +35,19 @@ export interface TombstoneHmacKey {
   key: string
 }
 
+export interface ProviderBudgetSettings {
+  key: string
+  textMaxRequests: number
+  textMaxInputTokens: number
+  textMaxOutputTokens: number
+  textMaxOutputTokensPerRequest: number
+  embeddingMaxRequests: number
+  embeddingMaxTokens: number
+}
+
 export interface MemoryConfig {
   mode: MemoryMode
+  sharedScopesMode: SharedScopesMode
   port: number
   apiBind: MemoryApiBind
   metricsPort: number
@@ -50,17 +65,61 @@ export interface MemoryConfig {
   httpTimeoutMs: number
   jobLeaseMs: number
   episodeStabilizationMs: number
+  extractionDebounceMs: number
+  extractionMaxRunsPerEpisode: number
+  extractionNotBefore: Date | null
   hmacKey: string
   logLevel: MemoryLogLevel
   isProduction: boolean
-  textModel: ModelAdapterSettings | undefined
+  textModel: TextAdapterSettings | undefined
   embeddingModel: EmbeddingAdapterSettings | undefined
+  providerBudget: ProviderBudgetSettings | undefined
   modelTimeoutMs: number
   recallEmbeddingTimeoutMs: number
   extractionMaxChars: number
   allowedOrigins: readonly string[]
   allowedHosts: readonly string[]
   tombstoneHmacKeys: readonly TombstoneHmacKey[]
+}
+
+function parseUtcTimestamp(envName: string, raw: string | undefined): Date | null {
+  if (raw === undefined || raw === '') return null
+  if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{3})?Z$/.test(raw)) {
+    throw new ConfigError(`${envName} must be an ISO-8601 UTC timestamp`)
+  }
+  const value = new Date(raw)
+  if (Number.isNaN(value.getTime())) throw new ConfigError(`${envName} must be an ISO-8601 UTC timestamp`)
+  return value
+}
+
+function parseProviderBudget(env: Record<string, string | undefined>): ProviderBudgetSettings | undefined {
+  const names = [
+    'MEMORY_PROVIDER_BUDGET_KEY',
+    'MEMORY_TEXT_BUDGET_MAX_REQUESTS',
+    'MEMORY_TEXT_BUDGET_MAX_INPUT_TOKENS',
+    'MEMORY_TEXT_BUDGET_MAX_OUTPUT_TOKENS',
+    'MEMORY_TEXT_MAX_OUTPUT_TOKENS_PER_REQUEST',
+    'MEMORY_EMBEDDING_BUDGET_MAX_REQUESTS',
+    'MEMORY_EMBEDDING_BUDGET_MAX_TOKENS',
+  ] as const
+  const configured = names.filter(name => env[name] !== undefined && env[name] !== '')
+  if (configured.length === 0) return undefined
+  for (const name of names) {
+    if (env[name] === undefined || env[name] === '') throw new ConfigError(`${name} is required when provider budget is configured`)
+  }
+  const key = env.MEMORY_PROVIDER_BUDGET_KEY!
+  if (!/^[a-zA-Z0-9][a-zA-Z0-9._:-]{0,127}$/.test(key)) {
+    throw new ConfigError('MEMORY_PROVIDER_BUDGET_KEY must be a bounded identifier')
+  }
+  return {
+    key,
+    textMaxRequests: parseBoundedInteger('MEMORY_TEXT_BUDGET_MAX_REQUESTS', env.MEMORY_TEXT_BUDGET_MAX_REQUESTS, 0, 0, 1_000_000),
+    textMaxInputTokens: parseBoundedInteger('MEMORY_TEXT_BUDGET_MAX_INPUT_TOKENS', env.MEMORY_TEXT_BUDGET_MAX_INPUT_TOKENS, 0, 0, 1_000_000_000),
+    textMaxOutputTokens: parseBoundedInteger('MEMORY_TEXT_BUDGET_MAX_OUTPUT_TOKENS', env.MEMORY_TEXT_BUDGET_MAX_OUTPUT_TOKENS, 0, 0, 1_000_000_000),
+    textMaxOutputTokensPerRequest: parseBoundedInteger('MEMORY_TEXT_MAX_OUTPUT_TOKENS_PER_REQUEST', env.MEMORY_TEXT_MAX_OUTPUT_TOKENS_PER_REQUEST, 0, 1, 1_000_000),
+    embeddingMaxRequests: parseBoundedInteger('MEMORY_EMBEDDING_BUDGET_MAX_REQUESTS', env.MEMORY_EMBEDDING_BUDGET_MAX_REQUESTS, 0, 0, 1_000_000),
+    embeddingMaxTokens: parseBoundedInteger('MEMORY_EMBEDDING_BUDGET_MAX_TOKENS', env.MEMORY_EMBEDDING_BUDGET_MAX_TOKENS, 0, 0, 1_000_000_000),
+  }
 }
 
 const MODES: readonly MemoryMode[] = ['off', 'shadow', 'enabled']
@@ -293,7 +352,18 @@ export function loadMemoryConfig(env: Record<string, string | undefined> = proce
     }
   }
 
-  const textModel = parseModelAdapter(env, 'MEMORY_TEXT')
+  const textModelBase = parseModelAdapter(env, 'MEMORY_TEXT')
+  let textModel: TextAdapterSettings | undefined
+  if (textModelBase) {
+    const thinking = env.MEMORY_TEXT_THINKING
+    if (thinking !== undefined && thinking !== '' && thinking !== 'enabled' && thinking !== 'disabled') {
+      throw new ConfigError('MEMORY_TEXT_THINKING must be one of enabled|disabled')
+    }
+    textModel = {
+      ...textModelBase,
+      ...(thinking === 'enabled' || thinking === 'disabled' ? { thinking } : {}),
+    }
+  }
   const embeddingModelBase = parseModelAdapter(env, 'MEMORY_EMBEDDING')
   let embeddingModel: EmbeddingAdapterSettings | undefined
   if (embeddingModelBase) {
@@ -312,9 +382,11 @@ export function loadMemoryConfig(env: Record<string, string | undefined> = proce
   const tombstoneHmacKeys = configuredTombstoneHmacKeys.length > 0
     ? configuredTombstoneHmacKeys
     : [{ version: 'legacy', key: hmacKey }]
+  const providerBudget = parseProviderBudget(env)
 
   return {
     mode,
+    sharedScopesMode: sharedScopesModeFromEnv(env),
     port: parseBoundedInteger('MEMORY_PORT', env.MEMORY_PORT, 8090, 1, 65535),
     apiBind: parseEnum('MEMORY_API_BIND', env.MEMORY_API_BIND, METRICS_BINDS, 'all'),
     metricsPort: parseBoundedInteger('MEMORY_METRICS_PORT', env.MEMORY_METRICS_PORT, 8091, 1, 65535),
@@ -334,11 +406,19 @@ export function loadMemoryConfig(env: Record<string, string | undefined> = proce
     episodeStabilizationMs: parseBoundedInteger(
       'MEMORY_EPISODE_STABILIZATION_MS', env.MEMORY_EPISODE_STABILIZATION_MS, 30_000, 0, 3_600_000,
     ),
+    extractionDebounceMs: parseBoundedInteger(
+      'MEMORY_EXTRACTION_DEBOUNCE_MS', env.MEMORY_EXTRACTION_DEBOUNCE_MS, 120_000, 0, 3_600_000,
+    ),
+    extractionMaxRunsPerEpisode: parseBoundedInteger(
+      'MEMORY_EXTRACTION_MAX_RUNS_PER_EPISODE', env.MEMORY_EXTRACTION_MAX_RUNS_PER_EPISODE, 1, 1, 100,
+    ),
+    extractionNotBefore: parseUtcTimestamp('MEMORY_EXTRACTION_NOT_BEFORE', env.MEMORY_EXTRACTION_NOT_BEFORE),
     hmacKey,
     logLevel,
     isProduction,
     textModel,
     embeddingModel,
+    providerBudget,
     modelTimeoutMs: parseBoundedInteger('MEMORY_MODEL_TIMEOUT_MS', env.MEMORY_MODEL_TIMEOUT_MS, 30_000, 1000, 300_000),
     recallEmbeddingTimeoutMs: parseBoundedInteger(
       'MEMORY_RECALL_EMBEDDING_TIMEOUT_MS', env.MEMORY_RECALL_EMBEDDING_TIMEOUT_MS, 2_000, 100, 60_000,
@@ -350,4 +430,22 @@ export function loadMemoryConfig(env: Record<string, string | undefined> = proce
     allowedHosts: parseAllowedHosts(env.MEMORY_ALLOWED_HOSTS),
     tombstoneHmacKeys,
   }
+}
+
+export type SharedScopesMode = 'off' | 'shadow' | 'enabled'
+
+/**
+ * ADR-P3-13: the Memory shared-scope flag is independent of MEMORY_MODE and
+ * never implicitly changes extraction, embedding, or Context settings. The
+ * default and every production example stay `off`.
+ */
+export function sharedScopesModeFromEnv(
+  env: Record<string, string | undefined> = process.env,
+): SharedScopesMode {
+  const raw = env.MEMORY_SHARED_SCOPES?.trim() ?? ''
+  if (!raw) return 'off'
+  if (raw !== 'off' && raw !== 'shadow' && raw !== 'enabled') {
+    throw new Error(`invalid MEMORY_SHARED_SCOPES value: ${raw} (expected off | shadow | enabled)`)
+  }
+  return raw
 }

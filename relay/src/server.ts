@@ -55,13 +55,17 @@ import { assertDurableIngressSchema } from './event-worker-main.js';
 import { resolveExtensionConfig } from './extensions/config.js';
 import { initializeExtensionProviderCatalog } from './extensions/catalog.js';
 import { registerExtensionInstallationRoutes } from './extensions/installation-routes.js';
+import { registerExtensionScopeRoutes } from './extensions/scope-routes.js';
+import { extensionV2ModeFromEnv } from './extensions/config.js';
+import { registerV2Routes } from './extensions/v2-routes.js';
+import { registerCapabilityV2GrantRoutes } from './extensions/capability-routes.js';
 import { registerProviderTokenRoute } from './extensions/provider-auth-routes.js';
 import { registerFeedRoutes } from './extensions/feed-routes.js';
 import { registerSnapshotRoutes } from './extensions/snapshot-routes.js';
 import { registerProviderInstallationRoutes } from './extensions/provider-installation-routes.js';
 import { registerCapabilityRoutes } from './extensions/capability-routes.js';
 import { resolveGrantKeyMaterial } from './extensions/capability-grant.js';
-import { createMemoryMcpGrantBroker } from './extensions/grant-service.js';
+import { createMemoryContextGrantBroker, createMemoryMcpGrantBroker } from './extensions/grant-service.js';
 import { registerStatusRoutes } from './extensions/status-routes.js';
 import { registerUsageRoutes } from './extensions/usage-routes.js';
 import { registerPurgeRoutes } from './extensions/purge-routes.js';
@@ -963,6 +967,13 @@ async function main() {
         providerPublicOrigins: extensionConfig.providerPublicOrigins,
         grantKeys: extensionGrantKeys,
       }),
+      memoryContextGrantBroker: createMemoryContextGrantBroker({
+        pool: pools.control,
+        issuer: publicIssuer,
+        mode: extensionConfig.mode,
+        providerPublicOrigins: extensionConfig.providerPublicOrigins,
+        grantKeys: extensionGrantKeys,
+      }),
     } : {}),
   });
   const realtimeOutboxConsumer = new RealtimeOutboxConsumer({
@@ -1112,6 +1123,13 @@ async function main() {
     mode: extensionConfig.mode,
     cursorSecret: extensionConfig.cursorSecret || publicIssuer,
   });
+  // ADR-0005 v2 scope administration. Independent flag (ADR-P3-13): flipping
+  // RELAY_EXTENSION_V2 never changes v1 extension behavior.
+  registerExtensionScopeRoutes(app, {
+    pool,
+    verifyAccessToken: (token) => verifyAccessTokenWithRevocation(token, pool),
+    v2Mode: extensionV2ModeFromEnv(),
+  });
   const extensionRateLimits = createExtensionRateLimiterSet(
     resolveExtensionRateLimitConfig(process.env),
   )
@@ -1132,6 +1150,15 @@ async function main() {
     rateLimiter: extensionRateLimits.feed,
     ackRateLimiter: extensionRateLimits.ack,
   });
+  registerV2Routes(app, {
+    pool,
+    verifyAccessToken: (token) => verifyAccessTokenWithRevocation(token, pool),
+    v2Mode: extensionV2ModeFromEnv(),
+    providerJwtSecret: extensionConfig.providerJwtSecret,
+    issuer: publicIssuer,
+    cursorSecret: extensionConfig.cursorSecret || publicIssuer,
+    leaseTtlSeconds: extensionConfig.leaseTtlSeconds,
+  });
   registerSnapshotRoutes(app, {
     pool,
     mode: extensionConfig.mode,
@@ -1146,6 +1173,16 @@ async function main() {
     mode: extensionConfig.mode,
     issuer: publicIssuer,
     rateLimiter: extensionRateLimits.grant,
+    providerPublicOrigins: extensionConfig.providerPublicOrigins,
+    grantKeys: extensionGrantKeys,
+  });
+  registerCapabilityV2GrantRoutes(app, {
+    pool,
+    verifyAccessToken: (token, authPool) => verifyAccessTokenWithRevocation(token, authPool as typeof pool),
+    mode: extensionConfig.mode,
+    v2Mode: extensionV2ModeFromEnv(),
+    issuer: publicIssuer,
+    ttlSeconds: 60,
     providerPublicOrigins: extensionConfig.providerPublicOrigins,
     grantKeys: extensionGrantKeys,
   });

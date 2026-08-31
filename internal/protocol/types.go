@@ -79,6 +79,7 @@ const (
 // Client → Daemon commands
 type ClientMessage struct {
 	Type       string      `json:"type"`
+	Status     string      `json:"status,omitempty"`
 	SessionID  string      `json:"session_id,omitempty"`
 	Content    string      `json:"content,omitempty"`
 	Agent      string      `json:"agent,omitempty"`
@@ -243,6 +244,9 @@ type DaemonEvent struct {
 	CwdSessions            int                      `json:"cwd_sessions,omitempty"`    // active session count on the same cwd (cwd_in_use/session_created)
 	WorktreePath           string                   `json:"worktree_path,omitempty"`   // worktree absolute path when the session is isolated (Scheme D)
 	WorktreeBranch         string                   `json:"worktree_branch,omitempty"` // git branch backing the worktree (Scheme D)
+	RepositoryID           string                   `json:"repository_id,omitempty"`   // credential-free canonical Git remote identity
+	Branch                 string                   `json:"branch,omitempty"`          // symbolic Git branch observation; never grants scope
+	CommitSHA              string                   `json:"commit_sha,omitempty"`      // full Git HEAD observation when available
 	CurrentAgent           string                   `json:"current_agent,omitempty"`   // selected OpenCode profile; Agent remains the CLI type
 	Agents                 []SessionAgentOption     `json:"agents,omitempty"`
 	Capabilities           []string                 `json:"capabilities,omitempty"`
@@ -589,6 +593,10 @@ type SessionConfig struct {
 	Worktree      bool              `json:"worktree,omitempty"`
 	AutoCreateDir bool              `json:"auto_create_dir,omitempty"`
 	Force         bool              `json:"force,omitempty"`
+	// DeferInitialPrompt is an internal daemon orchestration flag. Managed
+	// runtimes create their native session first; Relay registration completes
+	// before the exact prompt enters the ordinary turn path. Never wire-visible.
+	DeferInitialPrompt bool `json:"-"`
 }
 
 // Session states
@@ -628,6 +636,10 @@ const (
 type MemoryMcpGrantRequest struct {
 	Type      string `json:"type"` // "memory_mcp_grant"
 	RequestID string `json:"request_id,omitempty"`
+	// ScopeInstallationIDs is an OPTIONAL explicit Phase 3 selection of at
+	// most 16 installation ids. Empty keeps the personal-only default. The
+	// daemon never parses the returned JWT and persists no scope list.
+	ScopeInstallationIDs []string `json:"scope_installation_ids,omitempty"`
 }
 
 // MemoryMcpGrantResult is the relay->daemon success reply. The grant itself
@@ -649,4 +661,53 @@ type MemoryMcpGrantError struct {
 	Type      string `json:"type"` // "memory_mcp_grant_error"
 	RequestID string `json:"request_id,omitempty"`
 	Code      string `json:"code"`
+}
+
+// MemoryContextGrantRequest is the daemon->relay WS control message asking
+// for a session-bound `memory.context` capability grant (Phase 2 plan 10.1).
+// The session must be owned by the authenticated daemon's user; identity is
+// derived from the connection, never from this payload.
+type MemoryContextGrantRequest struct {
+	Type      string `json:"type"` // "memory_context_grant"
+	RequestID string `json:"request_id,omitempty"`
+	SessionID string `json:"session_id"`
+}
+
+// MemoryContextGrantResult is the relay->daemon success reply. TTL <= 300s.
+type MemoryContextGrantResult struct {
+	Type                 string   `json:"type"` // "memory_context_grant_result"
+	RequestID            string   `json:"request_id,omitempty"`
+	Grant                string   `json:"grant"`
+	ExpiresIn            int      `json:"expires_in"`
+	TokenType            string   `json:"token_type"`
+	InstallationID       string   `json:"installation_id"`
+	SessionID            string   `json:"session_id"`
+	ProviderPublicOrigin string   `json:"provider_public_origin"`
+	Services             []string `json:"services"`
+}
+
+// MemoryContextGrantError is the bounded failure reply.
+type MemoryContextGrantError struct {
+	Type      string `json:"type"` // "memory_context_grant_error"
+	RequestID string `json:"request_id,omitempty"`
+	Code      string `json:"code"`
+}
+
+// SessionRegistration is the daemon->relay WS message durably registering a
+// managed native session BEFORE its initial prompt dispatch (Phase 2 plan
+// 10.1 two-phase handshake step 2).
+type SessionRegistration struct {
+	Type      string `json:"type"` // "session_registration"
+	RequestID string `json:"request_id,omitempty"`
+	SessionID string `json:"session_id"`
+}
+
+// SessionRegistrationAck is the bounded readiness reply. It is NOT an
+// authorization token; a missing/old relay or an ACK timeout makes the
+// daemon proceed without context — session creation never fails for it.
+type SessionRegistrationAck struct {
+	Type      string `json:"type"` // "session_registration_ack"
+	RequestID string `json:"request_id,omitempty"`
+	SessionID string `json:"session_id"`
+	Status    string `json:"status"` // "ready"
 }

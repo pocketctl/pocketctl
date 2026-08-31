@@ -45,7 +45,10 @@ export function createStatusWorker(options: StatusWorkerOptions) {
                    WHERE j.installation_id = i.installation_id AND j.state = 'dead'
                      AND j.created_at > NOW() - INTERVAL '24 hours')::text AS failed_jobs_24h
           FROM memory_installations i
-          WHERE i.local_status NOT IN ('purged')
+          -- Relay rejects heartbeats after revocation. Reporting only the
+          -- statuses it accepts avoids a retrying not_found loop while the
+          -- purge worker completes its local cleanup.
+          WHERE i.relay_status IN ('pending', 'active', 'paused')
         `)
         for (const row of rows.rows) {
           await options.reportStatus({

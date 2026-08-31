@@ -29,10 +29,19 @@ import { createClaimRepository } from './claims/repository.js'
 import { createLifecycleService } from './claims/lifecycle-service.js'
 import { createClaimIndexer } from './retrieval/indexer.js'
 import { createOpenAICompatibleEmbeddingProvider } from './model/openai-compatible-embedding.js'
+import {
+  createProviderBudgetStore,
+  withEmbeddingProviderBudget,
+  withTextProviderBudget,
+} from './model/provider-budget.js'
 import { createInstallationRegistry } from './installations/repository.js'
 import { createDiscoveryWorker } from './installations/discovery-worker.js'
 import { createJobRepository } from './jobs/repository.js'
 import { createJobWorker } from './jobs/worker.js'
+import { createInvalidationService } from './context/invalidation-service.js'
+import { createPolicyRepository } from './policies/repository.js'
+import { createPolicyResolver } from './policies/resolver.js'
+import type { ExtractionPolicyDocument } from './policies/schemas.js'
 import { createMemoryMetrics, updateFeedLagGauge, type MemoryMetrics } from './metrics.js'
 import { createMemoryLogger } from './logging.js'
 import type pg from 'pg'
@@ -47,6 +56,9 @@ const JOB_TYPES = [
   'project_feed', 'compile_episode', 'snapshot_reconcile', 'session_purge',
   'installation_purge', 'report_status', 'report_usage',
   'extract_candidates', 'index_claim_version', 'rebuild_claim_index', 'expire_claims',
+	'index_shared_claim',
+	'recompile_extraction_policy', 'compile_context_shadow',
+	'record_context_delivery', 'invalidate_context_packs',
 ] as const
 const JOB_STATES = ['pending', 'running', 'completed', 'dead'] as const
 
@@ -108,6 +120,7 @@ async function main(): Promise<void> {
   const config = loadMemoryConfig()
   const pool = createMemoryPool(config)
   await applyMemorySchema(pool)
+  const providerBudgetStore = config.providerBudget ? createProviderBudgetStore(pool) : undefined
   await validateTombstoneKeyring(pool, config.tombstoneHmacKeys)
   const { signal, wait } = createShutdownSignal()
   const logger = createMemoryLogger(config.logLevel)
@@ -228,6 +241,12 @@ async function main(): Promise<void> {
       signal,
       pollLeaseMs: 10_000,
       onError: loopError('feed_installation'),
+      ...(config.sharedScopesMode !== 'off' ? {
+        pullScopeControlFeed: (installationId: string, limit: number) =>
+          feedClient.pullScopeControlFeed(installationId, limit),
+        ackScopeControlFeed: (input: { installation_id: string; cursor: string; lease_token: string }) =>
+          feedClient.ackScopeControlFeed(input),
+      } : {}),
     })
     feedTimer = setInterval(() => {
       const run = feedConsumer.runOnce().then(() => undefined, loopError('feed'))
@@ -282,6 +301,7 @@ async function main(): Promise<void> {
     const episodes = createEpisodeRepository(pool, {
       stabilizationMs: config.episodeStabilizationMs,
       extractionMaxChars: config.extractionMaxChars,
+      extractionDebounceMs: config.extractionDebounceMs,
     })
     jobWorker.register('compile_episode', episodes.handleCompileEpisode)
     jobWorker.register('snapshot_reconcile', snapshotReconciler.handleSnapshotReconcile)
@@ -291,25 +311,55 @@ async function main(): Promise<void> {
         .update(`${config.textModel.provider}\n${config.textModel.baseUrl}\n${config.textModel.model}`)
         .digest('hex')
       const extractionStore = createExtractionRepository(pool)
+      const extractionPolicyResolver = createPolicyResolver({
+        pool,
+        repository: createPolicyRepository(pool),
+      })
+      const rawTextGenerator = createOpenAICompatibleTextGenerator({
+        baseUrl: config.textModel.baseUrl,
+        model: config.textModel.model,
+        apiKey: config.textModel.apiKey,
+        timeoutMs: config.modelTimeoutMs,
+        inputCostMicrosPerMillionTokens: config.textModel.inputCostMicrosPerMillionTokens,
+        outputCostMicrosPerMillionTokens: config.textModel.outputCostMicrosPerMillionTokens,
+        maxOutputTokens: config.providerBudget?.textMaxOutputTokensPerRequest,
+        maxAttempts: config.providerBudget ? 1 : undefined,
+        thinking: config.textModel.thinking,
+      })
+      const textGenerator = config.providerBudget && providerBudgetStore
+        ? withTextProviderBudget(rawTextGenerator, providerBudgetStore, {
+            key: config.providerBudget.key,
+            maxRequests: config.providerBudget.textMaxRequests,
+            maxInputTokens: config.providerBudget.textMaxInputTokens,
+            maxOutputTokens: config.providerBudget.textMaxOutputTokens,
+            maxOutputTokensPerRequest: config.providerBudget.textMaxOutputTokensPerRequest,
+          })
+        : rawTextGenerator
       const extractor = createCandidateExtractor({
         store: extractionStore,
-        textGenerator: createOpenAICompatibleTextGenerator({
-          baseUrl: config.textModel.baseUrl,
-          model: config.textModel.model,
-          apiKey: config.textModel.apiKey,
-          timeoutMs: config.modelTimeoutMs,
-          inputCostMicrosPerMillionTokens: config.textModel.inputCostMicrosPerMillionTokens,
-          outputCostMicrosPerMillionTokens: config.textModel.outputCostMicrosPerMillionTokens,
-        }),
+        textGenerator,
         provider: config.textModel.provider,
         model: config.textModel.model,
         modelConfigFingerprint: extractionConsentFingerprint,
         timeoutMs: config.modelTimeoutMs,
+        extractionNotBefore: config.extractionNotBefore,
+        maxRunsPerEpisode: config.extractionMaxRunsPerEpisode,
         deduper: createCandidateDeduper(pool, {
           tombstoneHmacKeys: config.tombstoneHmacKeys,
         }),
+        resolvePolicy: async (installationId, repositoryId) => {
+          const effective = await extractionPolicyResolver.resolve({
+            installationId,
+            kind: 'extraction',
+            repositoryId: repositoryId ?? null,
+          })
+          return {
+            document: effective.document as ExtractionPolicyDocument,
+            effectivePolicyHash: effective.effectivePolicyHash,
+          }
+        },
       })
-      jobWorker.register('extract_candidates', async (job, signal) => {
+      jobWorker.register('extract_candidates', async (job, signal, ctx) => {
         if (!job.installation_id) return
         const consent = await pool.query<{
           extraction_mode: string
@@ -329,6 +379,7 @@ async function main(): Promise<void> {
           installationId: job.installation_id,
           turnId,
           signal,
+          fence: ctx?.fence,
         })
         const result = outcome.kind === 'succeeded'
           ? 'succeeded'
@@ -381,6 +432,49 @@ async function main(): Promise<void> {
 
     const claimRepository = createClaimRepository(pool)
     const lifecycle = createLifecycleService(pool, claimRepository)
+		const contextInvalidation = createInvalidationService({ pool })
+		jobWorker.register('invalidate_context_packs', async job => {
+			if (!job.installation_id) return
+			const claimIds = Array.isArray(job.payload.claim_ids)
+				? job.payload.claim_ids.filter((value): value is string => typeof value === 'string') : []
+			const versionIds = Array.isArray(job.payload.version_ids)
+				? job.payload.version_ids.filter((value): value is string => typeof value === 'string') : []
+			if (claimIds.length > 0) {
+				await contextInvalidation.onClaimStateChange({ installationId: job.installation_id, claimIds })
+			} else if (versionIds.length > 0) {
+				await contextInvalidation.onEvidencePurge({ installationId: job.installation_id, versionIds })
+			} else {
+				const reason = String(job.payload.reason ?? 'settings_changed')
+				const boundedReason = ['settings_changed', 'policy_changed', 'loadout_changed', 'service_disabled'].includes(reason)
+					? reason as 'settings_changed' | 'policy_changed' | 'loadout_changed' | 'service_disabled'
+					: 'settings_changed'
+				await contextInvalidation.onConfigurationChange({
+					installationId: job.installation_id, reason: boundedReason,
+				})
+			}
+		})
+		jobWorker.register('recompile_extraction_policy', async job => {
+			if (!job.installation_id) return
+			const turns = await pool.query<{ turn_id: string }>(`
+				SELECT turn_id FROM work_episodes
+				WHERE installation_id = $1 AND state = 'ready'
+				ORDER BY ready_at DESC NULLS LAST LIMIT 1000
+			`, [job.installation_id])
+			const policyKey = String(job.payload.policy_hash ?? 'current').slice(0, 64)
+			for (const row of turns.rows) {
+				await jobRepository.enqueueJob({
+					installationId: job.installation_id, jobType: 'extract_candidates', priority: 85,
+					idempotencyKey: `extract:${row.turn_id}:policy:${policyKey}`,
+					payload: { turn_id: row.turn_id },
+				})
+			}
+		})
+		// Shadow compilation is synchronous because the minimized query must never
+		// be persisted in a job payload. Delivery receipts are likewise committed
+		// synchronously by the session-bound API. Register terminal compatibility
+		// handlers so legacy queued rows complete instead of looping as no_handler.
+		jobWorker.register('compile_context_shadow', async () => undefined)
+		jobWorker.register('record_context_delivery', async () => undefined)
     jobWorker.register('expire_claims', async () => {
       await lifecycle.expireDueClaims()
     })
@@ -394,18 +488,29 @@ async function main(): Promise<void> {
       void enqueueExpirySweep().catch(loopError('expire_schedule'))
     }, 60_000)
     maintenanceTimer.unref?.()
+    const rawWorkerEmbeddingProvider = config.embeddingModel
+      ? createOpenAICompatibleEmbeddingProvider({
+          baseUrl: config.embeddingModel.baseUrl,
+          model: config.embeddingModel.model,
+          apiKey: config.embeddingModel.apiKey,
+          dimensions: config.embeddingModel.dimensions,
+          timeoutMs: config.modelTimeoutMs,
+          inputCostMicrosPerMillionTokens: config.embeddingModel.inputCostMicrosPerMillionTokens,
+          maxAttempts: config.providerBudget ? 1 : undefined,
+        })
+      : undefined
+    const workerEmbeddingProvider = rawWorkerEmbeddingProvider && config.providerBudget && providerBudgetStore
+      ? withEmbeddingProviderBudget(rawWorkerEmbeddingProvider, providerBudgetStore, {
+          key: config.providerBudget.key,
+          maxRequests: config.providerBudget.embeddingMaxRequests,
+          maxTokens: config.providerBudget.embeddingMaxTokens,
+        })
+      : rawWorkerEmbeddingProvider
     const claimIndexer = createClaimIndexer({
       pool,
-      ...(config.embeddingModel ? {
+      ...(config.embeddingModel && workerEmbeddingProvider ? {
         embed: Object.assign(
-          createOpenAICompatibleEmbeddingProvider({
-            baseUrl: config.embeddingModel.baseUrl,
-            model: config.embeddingModel.model,
-            apiKey: config.embeddingModel.apiKey,
-            dimensions: config.embeddingModel.dimensions,
-            timeoutMs: config.modelTimeoutMs,
-            inputCostMicrosPerMillionTokens: config.embeddingModel.inputCostMicrosPerMillionTokens,
-          }),
+          workerEmbeddingProvider,
           { provider: config.embeddingModel.provider, model: config.embeddingModel.model },
         ),
       } : {}),
@@ -415,7 +520,7 @@ async function main(): Promise<void> {
           .digest('hex'),
       } : {}),
     })
-    jobWorker.register('index_claim_version', async (job, signal) => {
+    const indexClaimVersion = async (job: import('./jobs/types.js').JobClaim, signal: AbortSignal) => {
       try {
         await claimIndexer.handleIndexClaimVersion(job, signal)
         metrics.phase1.indexJobs.inc({ result: 'success' })
@@ -423,7 +528,9 @@ async function main(): Promise<void> {
         metrics.phase1.indexJobs.inc({ result: 'failed' })
         throw error
       }
-    })
+    }
+    jobWorker.register('index_claim_version', indexClaimVersion)
+    jobWorker.register('index_shared_claim', indexClaimVersion)
     jobWorker.register('rebuild_claim_index', claimIndexer.handleRebuildClaimIndex.bind(claimIndexer))
     if (config.embeddingModel) {
       const enabledInstallations = await pool.query<{ installation_id: string }>(`

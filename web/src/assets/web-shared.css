@@ -161,7 +161,6 @@ body {
   align-items: center;
   gap: 10px;
   padding: 16px 20px;
-  border-bottom: 1px solid var(--sidebar-border);
   text-decoration: none;
   color: var(--fg);
 }
@@ -181,7 +180,7 @@ body {
 
 .sidebar-nav {
   flex: 1;
-  padding: 12px 12px;
+  padding: 4px 12px 12px;
   overflow-y: auto;
 }
 

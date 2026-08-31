@@ -1,0 +1,101 @@
+{
+  "schema_version": 1,
+  "organization": {
+    "organization_id": "f1f1f1f1-0000-4000-8000-000000000001",
+    "name": "fixture-org"
+  },
+  "teams": [
+    {
+      "team_id": "f1f1f1f1-0000-4000-8000-000000000011",
+      "name": "fixture-team-a"
+    },
+    {
+      "team_id": "f1f1f1f1-0000-4000-8000-000000000012",
+      "name": "fixture-team-b"
+    }
+  ],
+  "users": [
+    {
+      "user_id": 1,
+      "email": "scope-admin@fixture.test",
+      "roles": {
+        "organization": "scope_administrator"
+      }
+    },
+    {
+      "user_id": 2,
+      "email": "reviewer-one@fixture.test",
+      "roles": {
+        "team-a": "reviewer"
+      }
+    },
+    {
+      "user_id": 3,
+      "email": "reviewer-two@fixture.test",
+      "roles": {
+        "team-a": "reviewer",
+        "organization": "reviewer"
+      }
+    },
+    {
+      "user_id": 4,
+      "email": "publisher@fixture.test",
+      "roles": {
+        "team-a": "publisher"
+      }
+    },
+    {
+      "user_id": 5,
+      "email": "contributor@fixture.test",
+      "roles": {
+        "team-a": "contributor"
+      }
+    },
+    {
+      "user_id": 6,
+      "email": "reader@fixture.test",
+      "roles": {
+        "team-a": "reader"
+      }
+    }
+  ],
+  "installations": {
+    "personal": [
+      "f1f1f1f1-0000-4000-8000-000000000101",
+      "f1f1f1f1-0000-4000-8000-000000000102",
+      "f1f1f1f1-0000-4000-8000-000000000103"
+    ],
+    "team": [
+      "f1f1f1f1-0000-4000-8000-000000000111",
+      "f1f1f1f1-0000-4000-8000-000000000112"
+    ],
+    "organization": [
+      "f1f1f1f1-0000-4000-8000-000000000121"
+    ]
+  },
+  "claims": {
+    "personal_active": 12,
+    "team_proposals": 8,
+    "team_active": 4,
+    "organization_proposals": 3,
+    "organization_active": 2
+  },
+  "scenarios": [
+    "exact_duplicate",
+    "semantic_conflict",
+    "explicit_parallel",
+    "supersede",
+    "expired_proposal",
+    "withdrawn_proposal",
+    "revoked_membership",
+    "role_change",
+    "suspended_team",
+    "dissolved_team_transfer",
+    "account_deletion",
+    "replay"
+  ],
+  "expectations": {
+    "external_provider_calls": 0,
+    "real_user_content": false
+  }
+}

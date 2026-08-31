@@ -84,6 +84,31 @@ describe('memoryClient', () => {
     expect((calls[0].init.headers as Record<string, string>).Authorization).toBe('Bearer user-token')
   })
 
+  test('prefers the active installation over an older revoked one', async () => {
+    const fetchImpl = vi.fn(async () => new Response(JSON.stringify({
+      installations: [
+        { ...INSTALLATION, installation_id: 'inst-revoked', status: 'revoked' },
+        { ...INSTALLATION, installation_id: 'inst-active', status: 'active' },
+      ],
+    }), { status: 200, headers: { 'content-type': 'application/json' } }))
+    vi.stubGlobal('fetch', fetchImpl)
+    const installation = await discoverMemoryInstallation()
+    expect(installation?.installation_id).toBe('inst-active')
+    expect(installation?.status).toBe('active')
+  })
+
+  test('falls back to the first installation when none is active', async () => {
+    const fetchImpl = vi.fn(async () => new Response(JSON.stringify({
+      installations: [
+        { ...INSTALLATION, installation_id: 'inst-revoked', status: 'revoked' },
+        { ...INSTALLATION, installation_id: 'inst-paused', status: 'paused' },
+      ],
+    }), { status: 200, headers: { 'content-type': 'application/json' } }))
+    vi.stubGlobal('fetch', fetchImpl)
+    const installation = await discoverMemoryInstallation()
+    expect(installation?.installation_id).toBe('inst-revoked')
+  })
+
   test('enabling services patches only the relay installation', async () => {
     const { calls } = relayAndProviderFetch({})
     const updated = await enableMemoryServices('inst-1', 3, ['memory.search', 'memory.mcp'])
@@ -220,4 +245,36 @@ describe('memoryClient', () => {
     vi.stubGlobal('fetch', fetchImpl)
     await expect(searchMemory('vitest')).rejects.toBeInstanceOf(MemoryClientError)
   })
+  test('phase two management calls go directly with the manage grant', async () => {
+    const { calls } = relayAndProviderFetch({})
+    const client = await import('../../services/memoryClient')
+    await client.listContextSettings()
+    await client.getEffectivePolicy('context')
+    const manageCalls = calls.filter(call => call.path.includes('/memory/context') || call.path.includes('/memory/policies'))
+    expect(manageCalls.length).toBeGreaterThanOrEqual(2)
+    expect(manageCalls.every(call => call.origin === 'https://memory.example')).toBe(true)
+  })
+
+  test('context settings PUT carries the CAS revision', async () => {
+    const { calls } = relayAndProviderFetch({})
+    const client = await import('../../services/memoryClient')
+    await client.putContextSetting({
+      scope_kind: 'installation', scope_key: 'global', mode: 'shadow', expected_revision: 3,
+    })
+    const put = calls.find(call => call.path === '/api/v1/memory/context/settings')
+    expect(put?.init.method).toBe('PUT')
+    expect((put?.init.headers as Record<string, string>)['idempotency-key'])
+      .toMatch(/^web-context-setting-/)
+    expect(JSON.parse(String(put?.init.body))).toMatchObject({ expected_revision: 3, mode: 'shadow' })
+  })
+
+	test('policy diff uses a browser-compatible POST body', async () => {
+		const { calls } = relayAndProviderFetch({})
+		const client = await import('../../services/memoryClient')
+		await client.previewPolicyDiff({ kind: 'context', document: { max_items: 4 } })
+		const request = calls.find(call => call.path === '/api/v1/memory/policies/context/diff')
+		expect(request?.init.method).toBe('POST')
+		expect(JSON.parse(String(request?.init.body))).toEqual({ document: { max_items: 4 } })
+	})
+
 })

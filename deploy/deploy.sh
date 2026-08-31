@@ -194,6 +194,40 @@ load_relay_env_value RELAY_EXTENSION_RATE_LIMIT_USAGE_VALUE RELAY_EXTENSION_RATE
 load_relay_env_value RELAY_EXTENSION_RATE_LIMIT_PURGE_VALUE RELAY_EXTENSION_RATE_LIMIT_PURGE RELAY_EXTENSION_RATE_LIMIT_PURGE
 load_relay_env_value RELAY_EXTENSION_RATE_LIMIT_GRANT_VALUE RELAY_EXTENSION_RATE_LIMIT_GRANT RELAY_EXTENSION_RATE_LIMIT_GRANT
 
+# The Web client intentionally calls provider public origins directly with a
+# short-lived grant. Derive CSP sources from the same operator-owned catalog,
+# rejecting anything that cannot be a safe production origin before it is
+# interpolated into the generated Nginx configuration.
+provider_connect_sources() {
+  local raw=$1
+  [[ -n "$raw" ]] || return 0
+  node - "$raw" <<'NODE'
+const raw = process.argv[2]
+let origins
+try {
+  origins = Object.values(JSON.parse(raw))
+} catch {
+  process.exit(1)
+}
+if (!origins.every(origin => typeof origin === 'string')) process.exit(1)
+for (const origin of origins) {
+  let url
+  try {
+    url = new URL(origin)
+  } catch {
+    process.exit(1)
+  }
+  if (url.protocol !== 'https:' || url.username || url.password
+    || (url.pathname !== '/' && url.pathname !== '') || url.search || url.hash) {
+    process.exit(1)
+  }
+  process.stdout.write(`${url.origin} `)
+}
+NODE
+}
+EXTENSION_PROVIDER_CONNECT_SOURCES="$(provider_connect_sources "$EXTENSION_PROVIDER_PUBLIC_ORIGINS_VALUE")" \
+  || error 'EXTENSION_PROVIDER_PUBLIC_ORIGINS 必须是安全的 HTTPS provider origin 映射'
+
 RELEASE_VERSION_VALUE=${RELEASE_VERSION:-}
 if [[ -z "$RELEASE_VERSION_VALUE" ]]; then
   PACKAGE_VERSION=$(node -p "require('${INSTALL_DIR}/relay/package.json').version")
@@ -397,7 +431,7 @@ server {
     add_header X-Content-Type-Options "nosniff" always;
     add_header X-XSS-Protection "1; mode=block" always;
     add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;
-    add_header Content-Security-Policy "default-src 'self'; connect-src 'self' wss:; style-src 'self' 'unsafe-inline'; script-src 'self'; object-src 'none'; frame-ancestors 'none'; base-uri 'self'" always;
+    add_header Content-Security-Policy "default-src 'self'; connect-src 'self' ${EXTENSION_PROVIDER_CONNECT_SOURCES}wss:; style-src 'self' 'unsafe-inline'; script-src 'self'; object-src 'none'; frame-ancestors 'none'; base-uri 'self'" always;
 
     # Web 静态文件
     root /var/www/pocketctl;

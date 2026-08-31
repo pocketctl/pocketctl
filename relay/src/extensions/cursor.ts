@@ -69,6 +69,61 @@ function timingSafeEqualString(a: string, b: string): boolean {
   return diff === 0
 }
 
+// --- extension-feed.v2 scope cursor -------------------------------------------
+
+/**
+ * Relay-signed opaque scope-feed cursor (v2). Binds the pull position to one
+ * shared installation, its lease epoch, config version, and — the v2 fence —
+ * the owning scope's authorization epoch: any membership/role/lifecycle
+ * change that advances the epoch invalidates every outstanding cursor.
+ */
+export interface ScopeFeedCursorV2 {
+  v: 2
+  installation_id: string
+  feed_id: string
+  lease_epoch: string
+  config_version: string
+  authorization_epoch: string
+  exp: number
+}
+
+export function encodeScopeFeedCursor(cursor: ScopeFeedCursorV2, secret: string): string {
+  const payload = Buffer.from(JSON.stringify(cursor), 'utf8').toString('base64url')
+  return `${payload}.${hmac(`${secret}:scope-feed`, payload)}`
+}
+
+export function decodeScopeFeedCursor(
+  token: string,
+  secret: string,
+  now: number = Date.now(),
+): ScopeFeedCursorV2 | null {
+  if (typeof token !== 'string' || token.length === 0 || token.length > 2048) return null
+  const separator = token.lastIndexOf('.')
+  if (separator <= 0) return null
+  const payload = token.slice(0, separator)
+  const signature = token.slice(separator + 1)
+  const expected = hmac(`${secret}:scope-feed`, payload)
+  if (signature.length !== expected.length) return null
+  if (!timingSafeEqualString(signature, expected)) return null
+  let cursor: ScopeFeedCursorV2
+  try {
+    cursor = JSON.parse(Buffer.from(payload, 'base64url').toString('utf8'))
+  } catch {
+    return null
+  }
+  if (cursor.v !== 2
+    || typeof cursor.installation_id !== 'string'
+    || !/^[0-9]+$/.test(cursor.feed_id)
+    || !/^[0-9]+$/.test(cursor.lease_epoch)
+    || !/^[0-9]+$/.test(cursor.config_version)
+    || !/^[0-9]+$/.test(cursor.authorization_epoch)
+    || typeof cursor.exp !== 'number' || !Number.isFinite(cursor.exp)) {
+    return null
+  }
+  if (cursor.exp * 1000 <= now) return null
+  return cursor
+}
+
 /** Stable fingerprint of an installation's effective event filter. */
 export function filterHashForInstallation(eventFilter: Record<string, unknown>): string {
   const canonical = JSON.stringify({

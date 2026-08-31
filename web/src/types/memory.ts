@@ -35,6 +35,11 @@ export interface MemorySearchHit {
   branch: string | null
   score: number
   sources: string[]
+  installationId?: string
+  ownerScopeKind?: 'personal' | 'team' | 'organization'
+  ownerScopeId?: string
+  conflictGroupId?: string | null
+  conflictVariant?: number | null
 }
 
 export interface MemorySearchResult {
@@ -125,6 +130,31 @@ export interface MemoryClaimDetail {
   next_version_cursor: string | null
 }
 
+export interface MemoryClaimSummary {
+  claim_id: string
+  claim_type: MemoryClaimType
+  scope_kind: string
+  scope_key: string
+  state: 'active'
+  revision: string
+  current_version_id: string
+  statement: string
+  authority: string
+  repository_id: string | null
+  repo_snapshot_id: string | null
+  branch: string | null
+  freshness_at: string | null
+  created_at: string
+  updated_at: string
+  version_created_at: string
+}
+
+export interface MemoryClaimList {
+  claims: MemoryClaimSummary[]
+  next_cursor: string | null
+  total_count: number
+}
+
 /** Wire shape of the provider's version-evidence listing (snake_case). */
 export interface MemoryEvidenceRow {
   evidence_id: string
@@ -161,4 +191,152 @@ export interface MemoryModelDisclosure {
   model: string
   fingerprint: string
   pricing_configured: boolean
+}
+
+// ---- Phase 2: context, policies, loadouts (plan sections 9-13) ----
+
+export interface ContextSettings {
+  settingId: string
+  scopeKind: 'installation' | 'repository' | 'session'
+  scopeKey: string
+  agent: string | null
+  mode: 'off' | 'shadow' | 'enabled'
+  maxTokens: number | null
+  revision: number
+}
+
+export interface ContextPackListEntry {
+  pack_id: string
+  state: string
+  client_request_id: string
+  created_at: string
+  delivery: { state: string; outcome_code: string | null } | null
+  mode: string
+  agent: string
+  stable_text: string
+  dynamic_text: string
+  stable_tokens: number
+  dynamic_tokens: number
+  error_code: string | null
+  policy_revision: number
+  settings_revision: number
+  loadout_revision: number
+  items: Array<{
+    item_id: string
+    claim_id: string
+    version_id: string
+    claim_type: string
+    layer: string
+    section: string
+    representation: string
+    reason_codes: string[]
+    token_count: number
+    ordinal: number
+    evidence_ids: string[]
+  }>
+  trajectory: null | {
+    result_state: string
+    degraded_components: string[]
+    candidates: Array<{
+      version_id: string
+      decision: string
+      reason_code: string
+      final_ordinal: number | null
+    }>
+  }
+}
+
+export interface PolicyVersionSummary {
+	policy_version_id: string
+	version_number: number
+  document: Record<string, unknown>
+  active: boolean
+	head_revision: number
+}
+
+export interface EffectivePolicy {
+  document: Record<string, unknown>
+  policy_version_ids: string[]
+  effective_policy_hash: string
+}
+
+export interface LoadoutItemSummary {
+  itemId: string
+  assetKind: string
+  representation: string
+  priority: number
+  claimId: string | null
+  status: 'resolved' | 'asset_unavailable' | 'claim_inactive'
+  claimType: string | null
+  versionId: string | null
+}
+
+export interface ContextFeedbackAction {
+  injectionId?: string
+  packId?: string
+  itemId?: string
+  action: 'used' | 'ignored' | 'incorrect' | 'harmful'
+  reasonCode?: string
+}
+
+// --- ADR-0005 Phase 3 governance types ---
+
+export interface MemoryGovernanceScope {
+  installation_id: string
+  owner_scope_kind: 'personal' | 'team' | 'organization'
+  owner_scope_id: string
+  authorization_epoch: string
+  permissions: string[]
+  state?: string
+  revision?: number
+  name?: string
+  parent_organization_id?: string | null
+}
+
+export interface MemoryGovernanceQueueEntry {
+  candidate: {
+    candidate_id: string
+    target_installation_id: string
+    source_scope_kind: string
+    normalized_key: string
+    state: string
+    conflict_group_id: string | null
+    duplicate_of_claim_id: string | null
+    expires_at: string
+    revision: number
+  }
+  current_revision: { revision_number: number; statement: string } | null
+  decisions: Array<{ decision: string; membership_id: string; created_at: string }>
+  conflict_claims: Array<{ claim_id: string; statement: string; conflict_variant: number }>
+}
+
+export interface MemoryScopeMember {
+  membership_id: string
+  display_label: string
+  roles: string[]
+  state: string
+  membership_revision: number
+}
+
+export interface MemoryReviewPolicyState {
+  versions: Array<{
+    policyVersionId: string
+    versionNumber: number
+    document: MemoryReviewPolicyDocument
+    createdAt: string
+  }>
+  head: { activeVersionId: string; revision: number } | null
+}
+
+export interface MemoryReviewPolicyDocument {
+  schema_version: 1
+  minimum_approvals: number
+  require_independent_reviewer: boolean
+  require_publisher: boolean
+  publisher_may_count_as_reviewer: boolean
+  allow_self_publish: boolean
+  candidate_ttl_days: number
+  max_shared_evidence: number
+  retention_days_after_revoke: number
+  allow_parallel_conflicts: boolean
 }

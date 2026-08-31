@@ -52,23 +52,26 @@ describe('extension topic allowlist', () => {
     expect(extensionTopicForEventType('session_status')).toBe('session.lifecycle.v1')
   })
 
-  test('protocol versions only contain extension-feed.v1', () => {
-    expect([...EXTENSION_PROTOCOL_VERSIONS]).toEqual(['extension-feed.v1'])
+  test('protocol versions contain the frozen v1 and additive v2 feeds', () => {
+    expect([...EXTENSION_PROTOCOL_VERSIONS]).toEqual(['extension-feed.v1', 'extension-feed.v2'])
   })
 })
 
 describe('extension scope and service allowlists', () => {
-  test('contains exactly the three frozen scopes', () => {
+  test('contains the frozen session scopes plus the v2 control scope', () => {
     expect([...EXTENSION_SCOPES].sort()).toEqual([
+      'scope:control:read',
       'session:deletion:read',
       'session:events:read',
       'session:snapshot:read',
     ])
+    expect(isExtensionScope('scope:control:read')).toBe(true)
   })
 
   test('contains exactly the first-party memory services', () => {
     expect([...EXTENSION_SERVICE_IDS].sort()).toEqual([
       'knowledge.query',
+      'memory.context',
       'memory.manage',
       'memory.mcp',
       'memory.recall',
@@ -172,6 +175,7 @@ describe('extension error contract', () => {
       'installation_revoked',
       'invalid_request',
       'not_found',
+      'revision_conflict',
       'stale_lease',
       'unauthorized',
     ])

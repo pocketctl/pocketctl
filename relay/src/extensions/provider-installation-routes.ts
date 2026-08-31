@@ -212,8 +212,110 @@ export function registerProviderInstallationRoutes(
     }
   })
 
-  app.post('/api/extensions/v1/provider/installations/:installationId/reconciled', async (req, reply) => {
+
+  // --- v2 provider inventory (ADR-P3-02) ---------------------------------------
+  // Same keyset pagination and provider binding as v1, plus owner-scope
+  // metadata. Still zero user PII: owner identity remains absent from the
+  // provider surface.
+
+  app.get('/api/extensions/v2/provider/installations', async (req, reply) => {
     if (deps.rateLimiter) {
+      const decision = deps.rateLimiter.check(`installations:${String(req.ip ?? '-')}`)
+      if (!decision.allowed) return rateLimited(reply, decision.retryAfterMs)
+    }
+    if (deps.mode !== 'enabled') {
+      return fail(reply, new ExtensionApiError('feature_disabled', 'installation discovery requires RELAY_EXTENSIONS=enabled'))
+    }
+    const identity = authenticateProvider(req, deps)
+    if (!identity) {
+      return fail(reply, new ExtensionApiError('unauthorized', 'provider token required'))
+    }
+    const query = req.query as Record<string, unknown>
+    const rawLimit = Number(query.limit ?? defaultPageSize)
+    const limit = Number.isSafeInteger(rawLimit)
+      ? Math.min(Math.max(1, rawLimit), maxPageSize)
+      : defaultPageSize
+    const scopeKindFilter = typeof query.owner_scope_kind === 'string'
+      && ['personal', 'team', 'organization'].includes(query.owner_scope_kind)
+      ? query.owner_scope_kind
+      : null
+
+    let afterInstallationId: string | null = null
+    const rawCursor = typeof query.cursor === 'string' && query.cursor.length > 0 ? query.cursor : null
+    if (rawCursor) {
+      const cursor = decodeProviderInstallationCursor(rawCursor, deps.cursorSecret, identity.providerId)
+      if (!cursor) {
+        return fail(reply, new ExtensionApiError('cursor_expired', 'cursor no longer valid'))
+      }
+      afterInstallationId = cursor.after_installation_id
+    }
+
+    const result = await deps.pool.query<InventoryRow & {
+      owner_scope_kind: string
+      owner_scope_id: string
+      parent_organization_id: string | null
+      authorization_epoch: string | number
+    }>(`
+      SELECT i.installation_id, i.status, i.config_version, i.granted_scopes,
+             i.subscriptions, i.enabled_services, i.event_filter,
+             i.created_at, i.updated_at,
+             i.owner_scope_kind, i.owner_scope_id,
+             CASE WHEN i.owner_scope_kind = 'team' THEN t.organization_id ELSE NULL END
+               AS parent_organization_id,
+             CASE i.owner_scope_kind
+               WHEN 'team' THEN t.authorization_epoch
+               WHEN 'organization' THEN o.authorization_epoch
+               ELSE i.authorization_epoch
+             END AS authorization_epoch,
+             (c.snapshot_required_at IS NOT NULL) AS snapshot_required
+      FROM extension_installations i
+      LEFT JOIN extension_checkpoints c ON c.installation_id = i.installation_id
+      LEFT JOIN extension_teams t
+        ON i.owner_scope_kind = 'team' AND t.team_id = i.owner_scope_id
+      LEFT JOIN extension_organizations o
+        ON i.owner_scope_kind = 'organization' AND o.organization_id = i.owner_scope_id
+      WHERE i.provider_id = $1
+        AND ($2::uuid IS NULL OR i.installation_id > $2::uuid)
+        AND ($3::text IS NULL OR i.owner_scope_kind = $3::text)
+      ORDER BY i.installation_id
+      LIMIT $4
+    `, [identity.providerId, afterInstallationId, scopeKindFilter, limit])
+
+    const rows = result.rows
+    const hasMore = rows.length === limit
+    const last = rows[rows.length - 1]
+    const nextCursor = hasMore && last
+      ? encodeProviderInstallationCursor({
+        v: 1,
+        provider_id: identity.providerId,
+        after_installation_id: last.installation_id,
+        exp: Math.floor(Date.now() / 1000) + CURSOR_TTL_SECONDS,
+      }, deps.cursorSecret)
+      : null
+
+    return {
+      installations: rows.map(row => ({
+        installation_id: row.installation_id,
+        status: row.status,
+        config_version: String(row.config_version),
+        owner_scope_kind: row.owner_scope_kind,
+        owner_scope_id: row.owner_scope_id,
+        parent_organization_id: row.parent_organization_id,
+        authorization_epoch: String(row.authorization_epoch),
+        granted_scopes: row.granted_scopes ?? [],
+        subscriptions: row.subscriptions ?? [],
+        enabled_services: row.enabled_services ?? [],
+        event_filter: row.event_filter ?? {},
+        snapshot_required: row.snapshot_required === true,
+        created_at: new Date(row.created_at).toISOString(),
+        updated_at: new Date(row.updated_at).toISOString(),
+      })),
+      next_cursor: nextCursor,
+      has_more: hasMore,
+    }
+  })
+
+  app.post('/api/extensions/v1/provider/installations/:installationId/reconciled', async (req, reply) => {    if (deps.rateLimiter) {
       const decision = deps.rateLimiter.check(`installations:${String(req.ip ?? '-')}`)
       if (!decision.allowed) return rateLimited(reply, decision.retryAfterMs)
     }

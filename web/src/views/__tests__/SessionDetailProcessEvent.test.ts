@@ -6,6 +6,7 @@ import { resolve } from 'node:path'
 import SessionDetail from '../SessionDetail.vue'
 import { resetAgentPlanProgressForTests } from '../../composables/useAgentPlanProgress'
 import PlanSidePanel from '../../components/plan/PlanSidePanel.vue'
+import MessageAgent from '../../components/messages/MessageAgent.vue'
 import OpenCodePartCard from '../../components/messages/OpenCodePartCard.vue'
 import FileChangeCard from '../../components/messages/FileChangeCard.vue'
 import FileChangeBottomSheet from '../../components/messages/FileChangeBottomSheet.vue'
@@ -456,6 +457,18 @@ describe('SessionDetail processEvent integration', () => {
     expect(vm.messages).toContainEqual(expect.objectContaining({
       id: 'unknown:future-1', type: 'future_signal', turn_id: 'turn-future', flow_scope: 'unclassified', content_class: 'unknown',
     }))
+  })
+
+  test('renders agent text only through MessageAgent without the unknown-event fallback', async () => {
+    const wrapper = shallowMount(SessionDetail)
+    const vm = wrapper.vm as any
+    vm.allSessions = [{ session_id: 'ses_1', daemon_id: 'daemon-1', status: 'running' }]
+
+    vm.processEvent({ type: 'agent_text', session_id: 'ses_1', text: 'single assistant message' })
+    await wrapper.vm.$nextTick()
+
+    expect(wrapper.getComponent(MessageAgent).props('content')).toBe('single assistant message')
+    expect(wrapper.find('.turn-unknown-event').exists()).toBe(false)
   })
 
   test('deduplicates seq-only unknown replay copies without merging a distinct reused sequence', () => {
@@ -1098,8 +1111,9 @@ describe('SessionDetail processEvent integration', () => {
     expect(new Set(initialIDs).size).toBe(2)
     let headers = wrapper.findAll('.turn-group-header')
     expect(headers.map(header => header.attributes('data-turn-segment-id'))).toEqual(initialIDs)
-    expect(wrapper.text().indexOf('first A')).toBeLessThan(wrapper.text().indexOf('legacy separator'))
-    expect(wrapper.text().indexOf('legacy separator')).toBeLessThan(wrapper.text().indexOf('second A auxiliary'))
+    expect(vm.renderMessages.map((message: any) => message.content)).toEqual([
+      'first A', 'legacy separator', 'second A auxiliary',
+    ])
 
     vm.messages.unshift({ id: 'older-a', type: 'agent_text', role: 'agent', content: 'older A', turn_id: 'A', flow_scope: 'main' })
     vm.processEvent({ type: 'agent_text', text: 'second separator' })

@@ -68,15 +68,16 @@ describe('extension platform schema bootstrap', () => {
     expect(sql).toContain(
       'REFERENCES extension_providers(provider_id)',
     )
-    expect(sql).toContain('REFERENCES users(id) ON DELETE CASCADE')
+    // ADR-0005: installation owners detach on account deletion instead of
+    // cascading, so shared-scope evidence survives the user row.
+    expect(sql).toContain('REFERENCES users(id) ON DELETE SET NULL')
     expect(sql).toContain(
       'REFERENCES extension_installations(installation_id) ON DELETE CASCADE',
     )
     // Purge evidence survives account deletion: no FK on provider/installation.
     const normalized = sql.replace(/\s+/g, ' ')
-    const purge = normalized.slice(
-      normalized.indexOf('CREATE TABLE IF NOT EXISTS extension_purge_requests'),
-    )
+    const purgeStart = normalized.indexOf('CREATE TABLE IF NOT EXISTS extension_purge_requests')
+    const purge = normalized.slice(purgeStart, normalized.indexOf(');', purgeStart) + 2)
     expect(purge).toContain('installation_id UUID NOT NULL')
     expect(purge).not.toContain('REFERENCES')
   })

@@ -18,7 +18,7 @@ import (
 
 // RelayGrantRequester obtains a grant by sending memory_mcp_grant over the
 // daemon's authenticated Relay WebSocket and awaiting the correlated reply.
-type RelayGrantRequester func(ctx context.Context) (Grant, error)
+type RelayGrantRequester func(ctx context.Context, scopeInstallationIDs []string) (Grant, error)
 
 // Server listens on the user-private memory-mcp socket and answers bridge
 // processes with refreshed grants.
@@ -74,7 +74,16 @@ func (s *Server) serveOne(ctx context.Context, conn net.Conn) {
 		writeJSON(conn, IpcGrantResponse{Error: "invalid_request"})
 		return
 	}
-	grant, err := s.Request(ctx)
+	selected := request.ScopeInstallationIDs
+	if len(selected) > 0 {
+		var ok bool
+		selected, ok = BoundedSelectedScopes(selected)
+		if !ok {
+			writeJSON(conn, IpcGrantResponse{Error: "invalid_request"})
+			return
+		}
+	}
+	grant, err := s.Request(ctx, selected)
 	if err != nil {
 		// Bounded machine code only — never the underlying error text.
 		writeJSON(conn, IpcGrantResponse{Error: boundedCode(err)})
@@ -124,7 +133,7 @@ func NewWsBroker(client *ws.Client) *WsBroker {
 }
 
 // Request sends one memory_mcp_grant and awaits its correlated reply.
-func (b *WsBroker) Request(ctx context.Context) (Grant, error) {
+func (b *WsBroker) Request(ctx context.Context, scopeInstallationIDs []string) (Grant, error) {
 	id := fmt.Sprintf("mcp-%d-%d", time.Now().UnixNano(), atomic.AddUint64(&requestCounter, 1))
 	reply := make(chan protocol.ClientMessage, 1)
 	b.mu.Lock()
@@ -136,7 +145,9 @@ func (b *WsBroker) Request(ctx context.Context) (Grant, error) {
 		b.mu.Unlock()
 	}()
 
-	b.client.SendMsg(protocol.MemoryMcpGrantRequest{Type: "memory_mcp_grant", RequestID: id})
+	b.client.SendMsg(protocol.MemoryMcpGrantRequest{
+		Type: "memory_mcp_grant", RequestID: id, ScopeInstallationIDs: scopeInstallationIDs,
+	})
 
 	select {
 	case msg := <-reply:

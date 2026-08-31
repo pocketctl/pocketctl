@@ -159,7 +159,7 @@
       </div>
 
       <!-- Messages -->
-      <div class="chat-messages" ref="messagesEl" @scroll="onMessagesScroll">
+      <div class="chat-messages" ref="messagesEl" :style="{ '--composer-float-clearance': `${composerFloatClearance}px` }" @scroll="onMessagesScroll">
         <!-- Exit Banner -->
         <div v-if="status === 'exited'" class="banner banner-info" style="flex-shrink:0;">
           <svg class="banner-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><path d="M16 17l5-5-5-5"/><path d="M21 12H9"/></svg>
@@ -243,7 +243,7 @@
 
           <!-- AskUserQuestion (question card, not a tool card) -->
           <QuestionCard
-            v-if="msg.type === 'tool_call' && msg.tool === 'AskUserQuestion'"
+            v-else-if="msg.type === 'tool_call' && msg.tool === 'AskUserQuestion'"
             :message="msg"
           />
 
@@ -290,6 +290,11 @@
           </div>
           <div v-else-if="msg.type === 'agent_compaction'" class="opencode-notice">
             {{ t(msg.auto ? 'session.opencode_compaction_auto' : 'session.opencode_compaction') }}<span v-if="msg.overflow"> · {{ t('session.opencode_compaction_overflow') }}</span>
+          </div>
+          <div v-else-if="msg.type === 'session_model_changed'" class="model-switch-notice" role="status">
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M12 1v6M12 17v6M4.22 4.22l4.24 4.24M15.54 15.54l4.24 4.24M1 12h6M17 12h6M4.22 19.78l4.24-4.24M15.54 8.46l4.24-4.24"/></svg>
+            <span>{{ t('session.model_changed') }}</span>
+            <code>{{ msg.content }}</code>
           </div>
 
           <!-- Command execution receipt -->
@@ -369,12 +374,15 @@
               <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 1 0 3-6.7L3 8"/><path d="M3 3v5h5"/></svg>
               <span>{{ t('common.retry') }}</span>
             </button>
+            <span v-if="completedTurnEndedAt" class="status-ended-at" :title="completedTurnEndedAt">
+              {{ t('session.ended_at', { time: formatDateTime(completedTurnEndedAt) }) }}
+            </span>
           </template>
         </div>
       </div>
 
       <!-- Chat Input — unified container with embedded controls -->
-      <div class="chat-input-area" :class="{ ended: !composerState.visible }">
+      <div ref="composerEl" class="chat-input-area" :class="{ ended: !composerState.visible }">
         <!-- Scroll-to-bottom: absolute child of chat-input-area, floats above
              its top edge. Doesn't take up flex space in chat-messages. -->
         <Transition name="scroll-btn">
@@ -446,7 +454,7 @@
                   @retry="requestSessionAgents"
                 />
                 <!-- Current model (resolved from session_meta) -->
-                <span v-if="currentModel" class="model-pill" :title="t('session.current_model')">
+                <span v-if="currentModel" class="model-pill" :title="t('session.current_model') + ': ' + currentModel">
                   <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M12 1v6M12 17v6M4.22 4.22l4.24 4.24M15.54 15.54l4.24 4.24M1 12h6M17 12h6M4.22 19.78l4.24-4.24M15.54 8.46l4.24-4.24"/></svg>
                   <span class="model-name">{{ currentModel }}</span>
                 </span>
@@ -789,6 +797,12 @@ const exitedAt = ref('')
 const autoScroll = ref(true)
 const copied = ref(false)
 const messagesEl = ref<HTMLDivElement | null>(null)
+const composerEl = ref<HTMLElement | null>(null)
+const composerHeight = ref(0)
+const composerFloatClearance = computed(() => Math.max(
+  isMobile.value ? 188 : 156,
+  composerHeight.value + 16,
+))
 const inputEl = ref<HTMLTextAreaElement | null>(null)
 const permDropdownEl = ref<HTMLElement | null>(null)
 const isInputFocused = ref(false)
@@ -1058,6 +1072,7 @@ const isExecuting = computed(() => status.value === 'running' || status.value ==
 const turnStartTime = ref<number | null>(null)   // 本轮开始时间戳
 const turnElapsed = ref(0)                        // 实时计时（秒）
 const lastTurnDuration = ref<number | null>(null) // 完成后的总耗时（秒）
+const lastTurnEndedAt = ref('')                    // 服务端确认的本轮结束时刻
 let turnTimer: ReturnType<typeof setInterval> | null = null
 let sessionSwitching = false                        // true while switching sessions (suppress timer)
 let resumeStartAt: number | null = null           // turn start recovered from replay (ms epoch)
@@ -1068,6 +1083,7 @@ function startTurnTimer(startAt?: number) {
   // session switch; default (now) for a fresh turn triggered by sendMessage.
   turnStartTime.value = startAt ?? Date.now()
   lastTurnDuration.value = null
+  lastTurnEndedAt.value = ''
   turnElapsed.value = Math.floor((Date.now() - turnStartTime.value) / 1000)
   turnTimer = setInterval(() => {
     if (turnStartTime.value) {
@@ -1118,6 +1134,11 @@ const completedBarVisible = computed(() => {
   if (isExecuting.value || lastTurnDuration.value !== null) return false
   return ['idle', 'completed', 'exited', 'error', 'killed'].includes(status.value) && hasLastAgentReply.value
 })
+// A reload has no in-memory transition to populate lastTurnEndedAt. In that
+// case the materialized session activity time is the persisted end timestamp.
+const completedTurnEndedAt = computed(() => lastTurnEndedAt.value || (
+  completedBarVisible.value ? currentSession.value?.last_activity_at || '' : ''
+))
 
 function fmtTokens(n: number): string {
   return formatTokenCount(n)
@@ -1129,6 +1150,13 @@ function fmtDuration(sec: number): string {
   const m = Math.floor((sec % 3600) / 60)
   const s = sec % 60
   return h > 0 ? `${h}h ${m}m ${s}s` : `${m}m ${s}s`
+}
+
+function formatDateTime(ts: string): string {
+  const date = new Date(ts)
+  if (Number.isNaN(date.getTime())) return '—'
+  const pad = (value: number) => value.toString().padStart(2, '0')
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`
 }
 
 // Copy the last agent_text reply (already clean Markdown source) to clipboard.
@@ -1331,6 +1359,28 @@ function emitNewSession() { showNewSession.value = true }
 function scrollToBottom() {
   if (messagesEl.value) { messagesEl.value.scrollTop = messagesEl.value.scrollHeight; autoScroll.value = true }
 }
+
+let composerResizeObserver: ResizeObserver | null = null
+function setComposerHeight(height: number) {
+  const nextHeight = Math.max(0, Math.ceil(height))
+  if (nextHeight === composerHeight.value) return
+  composerHeight.value = nextHeight
+  if (autoScroll.value) nextTick(scrollToBottom)
+}
+
+// The composer overlays the message stream. Measure its live height so a
+// manually resized textarea never covers the final message.
+watch(composerEl, (element) => {
+  composerResizeObserver?.disconnect()
+  composerResizeObserver = null
+  composerHeight.value = 0
+  if (!element || typeof ResizeObserver === 'undefined') return
+  composerResizeObserver = new ResizeObserver((entries) => {
+    setComposerHeight(entries[0]?.contentRect.height ?? element.getBoundingClientRect().height)
+  })
+  composerResizeObserver.observe(element)
+  setComposerHeight(element.getBoundingClientRect().height)
+}, { flush: 'post' })
 
 let sessionAgentListTimer: ReturnType<typeof setTimeout> | null = null
 let sessionAgentSwitchTimer: ReturnType<typeof setTimeout> | null = null
@@ -2136,7 +2186,16 @@ function processEvent(evt: any, target: any[] = messages.value, subagentOverride
   }
   // P2: route sub-agent events to per-agent buckets; parent events keep default target
   target = resolveAgentTarget(evt, interactionBuckets, target)
-  if (type === 'user_text') {
+  if (type === 'session_model_changed') {
+    const model = evt.model || evt.payload?.model || ''
+    if (!model) return
+    if (evt.session_id === sessionId.value) currentModel.value = model
+    if ((evt.reason || evt.payload?.reason) === 'initial_model') return
+    const eventId = evt.event_id || evt.payload?.event_id
+    if (eventId && target.some((message: any) => message.type === type && message.eventId === eventId)) return
+    if (!eventId && isDuplicate(type, model, target)) return
+    target.push({ id: nextId('model'), type, role: 'agent', content: model, eventId, ...eventWithTurnMetadata(evt) })
+  } else if (type === 'user_text') {
     const text = evt.text || evt.content || evt.payload?.text || evt.payload?.content || ''
     if (!text) return
     if (isDuplicate('user_text', text, target)) {
@@ -2681,6 +2740,10 @@ onMounted(() => {
     if (cur && interactionCapabilities.value.length === 0 && Array.isArray(cur.capabilities)) {
       interactionCapabilities.value = cur.capabilities
     }
+    // The relay persists the model with the session. Use it immediately as a
+    // fallback while the daemon's authoritative get_session_meta response is
+    // still in flight (or unavailable for an offline terminal session).
+    if (cur?.model && !currentModel.value) currentModel.value = cur.model
     if (cur?.active_agent && !currentOpenCodeAgent.value) currentOpenCodeAgent.value = cur.active_agent
     if (cur?.children) {
       for (const c of cur.children) {
@@ -2799,6 +2862,7 @@ onMounted(() => {
   cleanups.push(onEvent('session_model_changed', (msg: any) => {
     if (msg.session_id !== sessionId.value) return
     if (msg.model) currentModel.value = msg.model
+    processImmediateLiveEvent(msg, { scroll: true })
   }))
 
   cleanups.push(onEvent('replay_batch', (msg: any) => {
@@ -3057,13 +3121,16 @@ onMounted(() => {
     // reads meta.statusEffective/status from allSessions, so a stale mount-time
     // snapshot would leave a just-finished session looking "running" after a
     // switch (timer stuck/from zero). Update it on every status event.
+    const lastActivityAt = msg.last_activity_at || msg.payload?.last_activity_at || new Date().toISOString()
     if (ls) {
       ls.status = msg.status
       ls.statusEffective = msg.status
-      ls.last_activity_at = new Date().toISOString()
+      ls.last_activity_at = lastActivityAt
     }
     if (msg.session_id === sessionId.value) {
+      const wasExecuting = isExecuting.value
       status.value = msg.status
+      if (wasExecuting && !isExecuting.value) lastTurnEndedAt.value = lastActivityAt
       reconcileVisibleUnresolvedTools(msg.status)
       if (msg.exit_reason) exitReason.value = msg.exit_reason
       if (msg.exited_at) exitedAt.value = msg.exited_at
@@ -3164,6 +3231,8 @@ function onPinned(sessionId: string, pinned: boolean) {
 }
 
 onUnmounted(() => {
+  composerResizeObserver?.disconnect()
+  composerResizeObserver = null
   for (const fn of cleanups) fn()
   cleanups.length = 0
   liveContentBatcher.dispose()
@@ -3232,7 +3301,7 @@ onMounted(() => {
 .session-list-item .sl-meta .agent-badge { flex-shrink: 0; }
 
 /* Chat Area */
-.chat-area { flex: 1; display: flex; flex-direction: column; position: relative; min-width: 0; max-width: 100%; overflow: hidden; background: var(--bg); transition: background var(--transition); }
+.chat-area { --composer-float-clearance: 156px; flex: 1; display: flex; flex-direction: column; position: relative; min-width: 0; max-width: 100%; overflow: hidden; background: var(--bg); transition: background var(--transition); }
 
 /* Toolbar: identity is allowed to shrink; actions always retain a stable lane. */
 .chat-toolbar { min-height: 60px; border-bottom: 1px solid var(--border); display: flex; align-items: center; padding: 7px 20px; gap: 16px; background: var(--surface); transition: background var(--transition), border-color var(--transition); }
@@ -3292,7 +3361,7 @@ onMounted(() => {
 .toolbar-overflow-item code { color: var(--fg-tertiary); font: 11px/1 var(--font-mono); }
 
 /* Messages */
-.chat-messages { flex: 1; min-height: 0; width: 100%; overflow-y: auto; overflow-x: hidden; padding: 20px; display: flex; flex-direction: column; align-items: stretch; gap: 16px; position: relative; overflow-anchor: none; }
+.chat-messages { flex: 1; min-height: 0; width: 100%; overflow-y: auto; overflow-x: hidden; padding: 20px 20px calc(20px + var(--composer-float-clearance)); display: flex; flex-direction: column; align-items: stretch; gap: 16px; position: relative; overflow-anchor: none; background: var(--bg); }
 /* min-width:0 lets long content (code/URLs) wrap instead of overflowing
    horizontally. max-width + center keeps lines readable on wide screens.
    User bubbles are excluded (they use fit-content + right align). */
@@ -3333,7 +3402,7 @@ onMounted(() => {
    when content is already scrolled to the bottom (autoScroll === true). */
 /* Scroll-to-bottom: absolute child of chat-input-area, pinned above its top
    edge. Takes zero flex space — doesn't shrink chat-messages. */
-.scroll-to-bottom { position: absolute; top: -40px; left: 50%; transform: translateX(-50%); width: 32px; height: 32px; border-radius: 50%; border: 1px solid var(--border); background: var(--surface); color: var(--fg-secondary); cursor: pointer; display: flex; align-items: center; justify-content: center; box-shadow: 0 2px 10px rgba(0,0,0,0.3); transition: background 0.15s, color 0.15s; z-index: 50; }
+.scroll-to-bottom { position: absolute; top: -40px; left: 50%; transform: translateX(-50%); width: 32px; height: 32px; border-radius: 50%; border: 1px solid var(--border); background: var(--surface); color: var(--fg-secondary); cursor: pointer; display: flex; align-items: center; justify-content: center; box-shadow: 0 2px 10px rgba(0,0,0,0.3); transition: background 0.15s, color 0.15s; z-index: 50; pointer-events: auto; }
 .scroll-to-bottom:hover { background: var(--surface-hover); color: var(--fg); }
 .scroll-btn-enter-active, .scroll-btn-leave-active { transition: opacity 0.25s ease; }
 .scroll-btn-enter-from, .scroll-btn-leave-to { opacity: 0; }
@@ -3355,18 +3424,16 @@ onMounted(() => {
 .timeline .line { flex: 1; height: 1px; background: var(--border); margin: 0 12px; align-self: flex-start; margin-top: 4px; }
 .timeline .line.done { background: var(--success); }
 
-/* Chat Input — unified container.
-   flex-shrink:0 is essential: as the textarea grows (drag-resize), the input
-   area must expand to fit it so that .chat-messages (flex:1) shrinks in
-   tandem. Without it the flex column can compress the input area, letting the
-   textarea/controls overflow under the messages region. */
-.chat-input-area { position: relative; flex-shrink: 0; border-top: 1px solid var(--border); padding: 12px 20px; background: var(--surface); transition: background var(--transition), border-color var(--transition); }
-.chat-input-area.ended { display: flex; align-items: center; justify-content: center; padding: 14px 20px; }
+/* Floating composer: sits on the session surface without reserving a separate
+   footer. The message list owns matching bottom clearance so its final row can
+   still scroll above the composer. */
+.chat-input-area { position: absolute; z-index: 4; right: 0; bottom: 0; left: 0; padding: 0 20px 20px; background: transparent; pointer-events: none; }
+.chat-input-area.ended { display: flex; align-items: center; justify-content: center; padding: 0 20px 20px; }
 .ended-text { color: var(--fg-tertiary); font-size: 13px; }
 .readonly-hint { color: var(--fg-tertiary); font-size: 13px; font-style: italic; }
 
-.chat-input-container { position: relative; container-type: inline-size; background: var(--bg); border: 1px solid var(--border); border-radius: var(--radius-xl); transition: border-color 0.15s, box-shadow 0.15s; }
-.chat-input-container.focused { border-color: var(--border-focus); box-shadow: 0 0 0 3px var(--accent-muted); }
+.chat-input-container { position: relative; container-type: inline-size; pointer-events: auto; background: var(--bg); border: 1px solid var(--border); border-radius: var(--radius-xl); box-shadow: var(--shadow-lg); transition: border-color 0.15s, box-shadow 0.15s; }
+.chat-input-container.focused { border-color: var(--border-focus); box-shadow: var(--shadow-lg), 0 0 0 3px var(--accent-muted); }
 
 .chat-textarea { width: 100%; background: none; border: none; color: var(--fg); font-size: 14px; font-family: var(--font-body); line-height: 1.5; outline: none; resize: none; padding: 12px 16px 4px; min-height: 60px; max-height: 400px; overflow-y: auto; }
 /* Drag handle above the textarea — user drags up/down to resize; the handle
@@ -3406,7 +3473,7 @@ onMounted(() => {
 
 /* Metadata can shrink independently; actions always keep their hit target. */
 .input-meta { min-width: 0; display: flex; align-items: center; justify-content: flex-end; gap: 8px; }
-.input-meta .model-pill { min-width: 0; flex: 0 1 180px; }
+.input-meta .model-pill { min-width: 0; flex: 0 1 auto; max-width: 180px; }
 .input-actions { display: flex; align-items: center; gap: 8px; }
 .ctx-indicator { display: inline-flex; align-items: center; gap: 4px; padding: 4px 8px; font-size: 11px; color: var(--fg-tertiary); font-family: var(--font-mono); cursor: help; white-space: pre-line; }
 
@@ -3446,6 +3513,18 @@ onMounted(() => {
   color: var(--fg-tertiary);
   font-size: 12px;
 }
+.model-switch-notice {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  align-self: flex-start;
+  max-width: 720px;
+  padding: 5px 2px;
+  color: var(--fg-tertiary);
+  font-size: 12px;
+}
+.model-switch-notice svg { flex-shrink: 0; color: var(--accent); }
+.model-switch-notice code { color: var(--fg-secondary); font: 600 11px/1.2 var(--font-mono); }
 .fade-enter-active, .fade-leave-active { transition: opacity 0.25s ease; }
 .fade-enter-from, .fade-leave-to { opacity: 0; }
 
@@ -3471,6 +3550,7 @@ onMounted(() => {
   font-family: var(--font-mono); font-weight: 600; color: var(--fg);
 }
 .turn-status-bar .status-tokens { color: var(--fg-tertiary); }
+.turn-status-bar .status-ended-at { color: var(--fg-tertiary); font: 11px/1.2 var(--font-mono); white-space: nowrap; }
 .turn-status-bar .status-copy-btn {
   display: inline-flex; align-items: center; gap: 5px;
   font-size: 11px; color: var(--fg-tertiary);
@@ -3501,13 +3581,14 @@ onMounted(() => {
 }
 @media (max-width: 768px) {
   .session-layout { height: calc(var(--visual-viewport-height, 100dvh) - var(--mobile-topbar-h)); }
+  .chat-area { --composer-float-clearance: 188px; }
   .file-change-panel-backdrop,
   .file-change-side-panel { display: none; }
   .session-panel,
   .chat-toolbar { display: none; }
-  .chat-messages { padding: 14px 12px; gap: 12px; }
+  .chat-messages { padding: 14px 12px calc(14px + var(--composer-float-clearance)); gap: 12px; }
   .chat-input-area {
-    padding: 8px 10px max(8px, env(safe-area-inset-bottom));
+    padding: 0 10px max(10px, env(safe-area-inset-bottom));
   }
   .textarea-resize-handle { display: none; }
   .chat-textarea { resize: none; padding-top: 10px; }

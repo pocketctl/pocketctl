@@ -3,6 +3,7 @@ import type { FeedBatch } from '../relay/contracts.js'
 import { classifyEnvelope } from '../relay/validation.js'
 import { RelayRequestError } from '../relay/errors.js'
 import { createInboxRepository, FeedIntegrityError } from './repository.js'
+import { createScopeControlProjector } from '../governance/membership-projector.js'
 
 export interface FeedConsumerOptions {
   pool: pg.Pool
@@ -13,6 +14,9 @@ export interface FeedConsumerOptions {
   batchLimit?: number
   pollLeaseMs?: number
   onError?(error: unknown): void
+  /** Optional v2 scope-control stream; absent keeps the consumer v1-only. */
+  pullScopeControlFeed?(installationId: string, limit: number): Promise<unknown>
+  ackScopeControlFeed?(input: { installation_id: string; cursor: string; lease_token: string }): Promise<number>
 }
 
 const DEFAULT_BATCH_LIMIT = 100
@@ -111,11 +115,29 @@ export function createFeedConsumer(options: FeedConsumerOptions) {
     return true
   }
 
+  const scopeControlProjector = options.pullScopeControlFeed && options.ackScopeControlFeed
+    ? createScopeControlProjector({
+        pool: options.pool,
+        workerId: options.workerId,
+        pullScopeControlFeed: options.pullScopeControlFeed,
+        ackScopeControlFeed: options.ackScopeControlFeed,
+        batchLimit,
+        onError: options.onError,
+      })
+    : null
+
   return {
     async runOnce(): Promise<{ installations: number }> {
       if (currentPass) return currentPass
       currentPass = (async () => {
         if (options.signal.aborted) return { installations: 0 }
+        if (scopeControlProjector) {
+          try {
+            await scopeControlProjector.runOnce()
+          } catch (error) {
+            options.onError?.(error)
+          }
+        }
         const rows = await options.pool.query<{ installation_id: string }>(`
           SELECT installation_id FROM memory_installations
           WHERE relay_status IN ('pending', 'active')

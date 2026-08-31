@@ -1,0 +1,983 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="dark">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>PocketCtl · 工程记忆工作台</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #0d1117;
+      --bg-secondary: #090d12;
+      --surface: #151b23;
+      --surface-raised: #19212b;
+      --surface-hover: #1d2631;
+      --surface-active: #222d39;
+      --border: #27313d;
+      --border-light: #344252;
+      --fg: #e8edf2;
+      --fg-secondary: #9aa7b5;
+      --fg-tertiary: #687787;
+      --accent: #61a9ff;
+      --accent-strong: #86beff;
+      --accent-muted: rgba(97, 169, 255, .12);
+      --accent-subtle: rgba(97, 169, 255, .06);
+      --success: #55c980;
+      --success-muted: rgba(85, 201, 128, .11);
+      --warning: #e6b85c;
+      --warning-muted: rgba(230, 184, 92, .11);
+      --error: #f27983;
+      --error-muted: rgba(242, 121, 131, .11);
+      --violet: #b19bff;
+      --violet-muted: rgba(177, 155, 255, .11);
+      --shadow: 0 18px 60px rgba(0, 0, 0, .32);
+      --font-body: "Avenir Next", Avenir, "Segoe UI Variable", sans-serif;
+      --font-display: "Avenir Next", Avenir, sans-serif;
+      --font-mono: "IBM Plex Mono", "SFMono-Regular", Consolas, monospace;
+      --sidebar-w: 248px;
+      --topbar-h: 58px;
+      --radius-sm: 6px;
+      --radius-md: 9px;
+      --radius-lg: 13px;
+      --transition: 170ms ease;
+    }
+
+    html[data-theme="light"] {
+      color-scheme: light;
+      --bg: #ffffff;
+      --bg-secondary: #f5f7f9;
+      --surface: #ffffff;
+      --surface-raised: #f7f9fb;
+      --surface-hover: #f0f3f6;
+      --surface-active: #e8edf2;
+      --border: #d5dde5;
+      --border-light: #bdc8d3;
+      --fg: #1d2732;
+      --fg-secondary: #5c6a78;
+      --fg-tertiary: #84909c;
+      --accent: #176cc2;
+      --accent-strong: #0f5da8;
+      --accent-muted: rgba(23, 108, 194, .10);
+      --accent-subtle: rgba(23, 108, 194, .05);
+      --success: #167844;
+      --success-muted: rgba(22, 120, 68, .09);
+      --warning: #9a6814;
+      --warning-muted: rgba(154, 104, 20, .09);
+      --error: #bf3544;
+      --error-muted: rgba(191, 53, 68, .08);
+      --violet: #7057ce;
+      --violet-muted: rgba(112, 87, 206, .09);
+      --shadow: 0 18px 50px rgba(36, 48, 62, .15);
+    }
+
+    * { box-sizing: border-box; }
+    html, body { min-width: 320px; min-height: 100%; margin: 0; }
+    body { color: var(--fg); background: var(--bg); font-family: var(--font-body); line-height: 1.45; }
+    button, input, textarea, select { color: inherit; font: inherit; }
+    button { border: 0; }
+    svg { display: block; }
+    [hidden] { display: none !important; }
+
+    button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-visible {
+      outline: 2px solid var(--accent);
+      outline-offset: 2px;
+    }
+
+    .app-shell { min-height: 100vh; display: grid; grid-template-columns: var(--sidebar-w) minmax(0, 1fr); }
+    .sidebar {
+      position: fixed; z-index: 40; inset: 0 auto 0 0; width: var(--sidebar-w);
+      display: flex; flex-direction: column; padding: 14px 12px;
+      border-right: 1px solid var(--border); background: var(--bg-secondary);
+    }
+    .brand { height: 44px; display: flex; align-items: center; gap: 11px; padding: 0 9px 12px; color: var(--fg); text-decoration: none; }
+    .brand-mark { width: 29px; height: 29px; display: grid; place-items: center; border: 1px solid color-mix(in srgb, var(--accent) 55%, var(--border)); border-radius: 8px; color: var(--accent); background: var(--accent-muted); }
+    .brand-mark svg { width: 18px; fill: none; stroke: currentColor; stroke-width: 1.8; }
+    .brand-name { font-size: 15px; font-weight: 700; letter-spacing: -.02em; }
+    .brand-name small { display: block; margin-top: 2px; color: var(--fg-tertiary); font: 8px/1 var(--font-mono); letter-spacing: .12em; text-transform: uppercase; }
+    .sidebar-section { margin: 15px 9px 6px; color: var(--fg-tertiary); font: 650 9px/1 var(--font-mono); letter-spacing: .12em; text-transform: uppercase; }
+    .sidebar-nav { display: grid; gap: 2px; }
+    .sidebar-link { min-height: 38px; display: flex; align-items: center; gap: 10px; padding: 0 10px; border-radius: 8px; color: var(--fg-secondary); background: transparent; font-size: 12.5px; text-align: left; cursor: pointer; }
+    .sidebar-link:hover { color: var(--fg); background: var(--surface-hover); }
+    .sidebar-link.active { color: var(--fg); background: var(--accent-muted); box-shadow: inset 2px 0 0 var(--accent); }
+    .sidebar-link svg { width: 17px; height: 17px; fill: none; stroke: currentColor; stroke-linecap: round; stroke-linejoin: round; stroke-width: 1.75; }
+    .sidebar-link.active svg { color: var(--accent); }
+    .sidebar-link .nav-count { margin-left: auto; color: var(--fg-tertiary); font: 9px var(--font-mono); }
+    .sidebar-spacer { flex: 1; }
+    .account { display: flex; align-items: center; gap: 9px; margin: 10px 3px 0; padding: 10px 8px; border-top: 1px solid var(--border); }
+    .avatar { width: 29px; height: 29px; display: grid; place-items: center; border-radius: 50%; color: var(--accent); background: var(--accent-muted); font-size: 11px; font-weight: 700; }
+    .account-text { min-width: 0; }
+    .account-text strong, .account-text span { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .account-text strong { font-size: 11px; }
+    .account-text span { margin-top: 2px; color: var(--fg-tertiary); font-size: 9px; }
+
+    .app-main { min-width: 0; grid-column: 2; }
+    .topbar { position: sticky; z-index: 30; top: 0; height: var(--topbar-h); display: flex; align-items: center; gap: 12px; padding: 0 22px; border-bottom: 1px solid var(--border); background: color-mix(in srgb, var(--bg) 88%, transparent); backdrop-filter: blur(14px); }
+    .breadcrumb { min-width: 0; display: flex; align-items: center; gap: 8px; color: var(--fg-tertiary); font-size: 11px; }
+    .breadcrumb strong { color: var(--fg); font-weight: 650; }
+    .breadcrumb i { width: 1px; height: 14px; background: var(--border); }
+    .topbar-spacer { flex: 1; }
+    .connection { display: flex; align-items: center; gap: 6px; color: var(--success); font: 650 9px var(--font-mono); letter-spacing: .05em; text-transform: uppercase; }
+    .connection i { width: 6px; height: 6px; border-radius: 50%; background: currentColor; box-shadow: 0 0 9px color-mix(in srgb, currentColor 65%, transparent); }
+    .scenario-select { height: 32px; padding: 0 27px 0 9px; border: 1px solid var(--border); border-radius: 7px; color: var(--fg-secondary); background: var(--surface); font-size: 10px; cursor: pointer; }
+    .icon-btn { width: 32px; height: 32px; display: grid; place-items: center; border: 1px solid var(--border); border-radius: 7px; color: var(--fg-secondary); background: var(--surface); cursor: pointer; }
+    .icon-btn:hover { color: var(--fg); border-color: var(--border-light); background: var(--surface-hover); }
+    .icon-btn svg { width: 15px; height: 15px; fill: none; stroke: currentColor; stroke-linecap: round; stroke-width: 1.8; }
+
+    .page { width: min(1480px, 100%); margin: 0 auto; padding: 30px clamp(20px, 3.1vw, 48px) 64px; }
+    .page-head { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: end; gap: 28px; margin-bottom: 24px; }
+    .eyebrow { margin-bottom: 8px; color: var(--accent); font: 650 9px/1 var(--font-mono); letter-spacing: .16em; text-transform: uppercase; }
+    .page-title { margin: 0; font: 650 clamp(28px, 3vw, 39px)/1.1 var(--font-display); letter-spacing: -.035em; }
+    .page-subtitle { max-width: 670px; margin: 8px 0 0; color: var(--fg-secondary); font-size: 12.5px; line-height: 1.65; }
+    .head-stats { display: grid; grid-template-columns: repeat(3, auto); gap: 0; border: 1px solid var(--border); border-radius: 10px; background: var(--surface); }
+    .head-stat { min-width: 94px; padding: 10px 14px; border-left: 1px solid var(--border); }
+    .head-stat:first-child { border-left: 0; }
+    .head-stat strong { display: block; font: 650 16px/1 var(--font-mono); letter-spacing: -.03em; }
+    .head-stat span { display: block; margin-top: 5px; color: var(--fg-tertiary); font-size: 9px; }
+
+    .degraded-banner { display: none; align-items: center; gap: 9px; margin-bottom: 12px; padding: 9px 12px; border: 1px solid color-mix(in srgb, var(--warning) 32%, var(--border)); border-radius: 8px; color: var(--warning); background: var(--warning-muted); font-size: 10.5px; }
+    .degraded-banner svg { width: 15px; height: 15px; fill: none; stroke: currentColor; stroke-width: 1.8; }
+    body.is-degraded .degraded-banner { display: flex; }
+
+    .memory-workspace { min-height: 0; }
+    .workspace-toolbar {
+      min-height: 54px; display: flex; align-items: center; gap: 10px; margin-bottom: 10px; padding: 6px;
+      border: 1px solid var(--border); border-radius: 11px; background: color-mix(in srgb, var(--surface) 92%, transparent);
+      box-shadow: 0 7px 24px rgba(0, 0, 0, .07); backdrop-filter: blur(12px);
+    }
+    .module-tabs { min-width: 0; display: flex; align-items: center; gap: 4px; }
+    .module-tab { min-height: 40px; display: inline-grid; grid-template-columns: 25px minmax(0, auto) auto; align-items: center; gap: 7px; padding: 0 10px; border-radius: 8px; color: var(--fg-secondary); background: transparent; text-align: left; white-space: nowrap; cursor: pointer; }
+    .module-tab:hover { color: var(--fg); background: var(--surface-hover); }
+    .module-tab.active { color: var(--fg); background: var(--surface-active); box-shadow: inset 0 0 0 1px var(--border-light); }
+    .module-tab-icon { width: 25px; height: 25px; display: grid; place-items: center; border-radius: 7px; color: var(--fg-tertiary); background: var(--surface-raised); }
+    .module-tab.active .module-tab-icon { color: var(--accent); background: var(--accent-muted); }
+    .module-tab svg { width: 14px; height: 14px; fill: none; stroke: currentColor; stroke-linecap: round; stroke-linejoin: round; stroke-width: 1.8; }
+    .module-tab strong { display: block; font-size: 11.5px; font-weight: 600; }
+    .module-tab small { display: none; }
+    .tab-badge { min-width: 19px; height: 19px; display: grid; place-items: center; padding: 0 5px; border-radius: 10px; color: var(--warning); background: var(--warning-muted); font: 650 9px var(--font-mono); }
+    .workspace-separator { width: 1px; height: 24px; flex: 0 0 auto; background: var(--border); }
+    .workspace-description { min-width: 0; flex: 1; margin: 0; overflow: hidden; color: var(--fg-tertiary); font-size: 9.5px; text-overflow: ellipsis; white-space: nowrap; }
+    .workspace-actions { flex: 0 0 auto; }
+    .workspace-action-group { display: flex; align-items: center; gap: 7px; }
+    .workspace-health { min-height: 30px; display: flex; align-items: center; gap: 7px; flex: 0 0 auto; padding: 0 9px; border-left: 1px solid var(--border); color: var(--success); font: 650 8.5px var(--font-mono); letter-spacing: .04em; text-transform: uppercase; }
+    .workspace-health i { width: 6px; height: 6px; border-radius: 50%; background: currentColor; box-shadow: 0 0 8px color-mix(in srgb, currentColor 60%, transparent); }
+
+    .module-stage { min-width: 0; min-height: 600px; overflow: hidden; border: 1px solid var(--border); border-radius: 13px; background: var(--surface); box-shadow: 0 10px 36px rgba(0, 0, 0, .08); }
+    .module-view { display: none; min-height: 100%; animation: view-enter 220ms cubic-bezier(.2, .8, .2, 1) both; }
+    .module-view.active { display: block; }
+    @keyframes view-enter { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: none; } }
+
+    .button { min-height: 32px; display: inline-flex; align-items: center; justify-content: center; gap: 7px; padding: 0 12px; border: 1px solid var(--border); border-radius: 7px; color: var(--fg-secondary); background: var(--surface); font-size: 10.5px; font-weight: 600; cursor: pointer; transition: border-color var(--transition), background var(--transition), transform var(--transition); }
+    .button:hover { color: var(--fg); border-color: var(--border-light); background: var(--surface-hover); }
+    .button:active { transform: translateY(1px); }
+    .button.primary { color: #fff; border-color: var(--accent); background: #2477ca; }
+    .button.primary:hover { background: #2f86dd; }
+    .button.success { color: #07150d; border-color: var(--success); background: var(--success); }
+    .button.danger { color: var(--error); border-color: color-mix(in srgb, var(--error) 35%, var(--border)); background: var(--error-muted); }
+    .button.ghost { border-color: transparent; background: transparent; }
+    .button svg { width: 13px; height: 13px; fill: none; stroke: currentColor; stroke-linecap: round; stroke-width: 1.9; }
+
+    .search-workspace { min-height: 600px; display: grid; grid-template-columns: minmax(350px, 1fr) minmax(340px, 42%); }
+    .search-column { min-width: 0; border-right: 1px solid var(--border); }
+    .search-hero { padding: 20px; border-bottom: 1px solid var(--border); background: linear-gradient(135deg, var(--accent-subtle), transparent 48%); }
+    .search-box { height: 46px; display: flex; align-items: center; gap: 10px; padding: 0 8px 0 13px; border: 1px solid var(--border-light); border-radius: 10px; background: var(--bg); box-shadow: 0 8px 26px rgba(0, 0, 0, .08); }
+    .search-box:focus-within { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-muted); }
+    .search-box svg { width: 17px; flex: 0 0 auto; fill: none; stroke: var(--fg-tertiary); stroke-width: 1.8; }
+    .search-box input { min-width: 0; flex: 1; border: 0; outline: 0; color: var(--fg); background: transparent; font-size: 12px; }
+    .search-box input::placeholder { color: var(--fg-tertiary); }
+    .search-shortcut { padding: 3px 6px; border: 1px solid var(--border); border-radius: 5px; color: var(--fg-tertiary); background: var(--surface); font: 8px var(--font-mono); }
+    .quick-queries { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
+    .quick-query { padding: 5px 8px; border: 1px solid var(--border); border-radius: 12px; color: var(--fg-tertiary); background: transparent; font-size: 9px; cursor: pointer; }
+    .quick-query:hover { color: var(--fg-secondary); border-color: var(--border-light); background: var(--surface-hover); }
+    .results-head { display: flex; align-items: center; justify-content: space-between; padding: 13px 20px 8px; color: var(--fg-tertiary); font: 9px var(--font-mono); }
+    .result-list { display: grid; gap: 3px; padding: 0 10px 18px; }
+    .result-item { width: 100%; display: grid; grid-template-columns: 17px minmax(0, 1fr) auto; gap: 9px; padding: 13px 10px; border: 1px solid transparent; border-radius: 9px; color: var(--fg-secondary); background: transparent; text-align: left; cursor: pointer; }
+    .result-item:hover { background: var(--surface-hover); }
+    .result-item.selected { border-color: color-mix(in srgb, var(--accent) 36%, var(--border)); background: var(--accent-subtle); }
+    .result-pin { width: 9px; height: 9px; margin-top: 5px; border: 2px solid var(--fg-tertiary); border-radius: 50%; }
+    .result-item.selected .result-pin { border-color: var(--accent); box-shadow: inset 0 0 0 2px var(--surface), 0 0 0 1px var(--accent); background: var(--accent); }
+    .result-content { min-width: 0; overflow: hidden; }
+    .result-type { display: block; color: var(--accent); font: 650 8px/1 var(--font-mono); letter-spacing: .07em; text-transform: uppercase; }
+    .result-statement { display: block; margin: 6px 0 7px; overflow-wrap: anywhere; color: var(--fg); font-size: 11.5px; line-height: 1.55; }
+    .result-meta { display: flex; flex-wrap: wrap; gap: 6px 9px; color: var(--fg-tertiary); font: 8.5px var(--font-mono); }
+    .result-score { margin-top: 2px; color: var(--fg-tertiary); font: 9px var(--font-mono); }
+
+    .detail-panel { min-width: 0; background: var(--surface-raised); }
+    .detail-toolbar { min-height: 43px; display: flex; align-items: center; gap: 7px; padding: 0 14px; border-bottom: 1px solid var(--border); }
+    .detail-toolbar span { color: var(--fg-tertiary); font: 8.5px var(--font-mono); letter-spacing: .08em; text-transform: uppercase; }
+    .detail-toolbar .icon-btn { margin-left: auto; width: 27px; height: 27px; border-color: transparent; background: transparent; }
+    .mobile-close { display: none; }
+    .detail-scroll { padding: 18px 18px 30px; }
+    .claim-kicker { display: flex; flex-wrap: wrap; align-items: center; gap: 7px; }
+    .chip { display: inline-flex; align-items: center; gap: 5px; min-height: 20px; padding: 0 7px; border-radius: 5px; color: var(--fg-secondary); background: var(--surface-active); font: 8px var(--font-mono); }
+    .chip.active { color: var(--success); background: var(--success-muted); }
+    .chip.warning { color: var(--warning); background: var(--warning-muted); }
+    .chip.violet { color: var(--violet); background: var(--violet-muted); }
+    .claim-title { margin: 13px 0 15px; color: var(--fg); font-size: 14px; line-height: 1.58; letter-spacing: -.01em; }
+    .claim-facts { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); margin-bottom: 20px; border: 1px solid var(--border); border-radius: 8px; overflow: hidden; }
+    .claim-fact { padding: 9px 10px; border-left: 1px solid var(--border); border-top: 1px solid var(--border); }
+    .claim-fact:nth-child(odd) { border-left: 0; }
+    .claim-fact:nth-child(-n+2) { border-top: 0; }
+    .claim-fact span { display: block; color: var(--fg-tertiary); font-size: 8px; }
+    .claim-fact strong { display: block; margin-top: 4px; overflow: hidden; color: var(--fg-secondary); font: 9px var(--font-mono); text-overflow: ellipsis; white-space: nowrap; }
+    .section-label { display: flex; align-items: center; gap: 8px; margin: 18px 0 10px; color: var(--fg-secondary); font-size: 9px; font-weight: 650; letter-spacing: .08em; text-transform: uppercase; }
+    .section-label::after { content: ""; height: 1px; flex: 1; background: var(--border); }
+    .evidence-thread { position: relative; display: grid; gap: 10px; padding-left: 21px; }
+    .evidence-thread::before { content: ""; position: absolute; top: 5px; bottom: 5px; left: 5px; width: 1px; background: linear-gradient(var(--accent), var(--border)); }
+    .evidence-item { position: relative; padding: 10px 11px; border: 1px solid var(--border); border-radius: 8px; background: var(--surface); }
+    .evidence-item::before { content: ""; position: absolute; top: 14px; left: -20px; width: 8px; height: 8px; border: 2px solid var(--accent); border-radius: 50%; background: var(--surface-raised); }
+    .evidence-item blockquote { margin: 0; color: var(--fg-secondary); font: 9.5px/1.65 var(--font-mono); }
+    .evidence-item footer { display: flex; gap: 7px; margin-top: 7px; color: var(--fg-tertiary); font: 8px var(--font-mono); }
+    .version-row { display: flex; align-items: flex-start; gap: 9px; padding: 9px 0; border-bottom: 1px solid var(--border); }
+    .version-row:last-child { border-bottom: 0; }
+    .version-dot { width: 8px; height: 8px; margin-top: 5px; border: 2px solid var(--fg-tertiary); border-radius: 50%; }
+    .version-row.current .version-dot { border-color: var(--success); background: var(--success); }
+    .version-copy { min-width: 0; flex: 1; }
+    .version-copy strong { display: block; color: var(--fg-secondary); font-size: 9.5px; }
+    .version-copy span { display: block; margin-top: 3px; color: var(--fg-tertiary); font: 8px var(--font-mono); }
+
+    .review-workspace, .claims-workspace { min-height: 600px; display: grid; grid-template-columns: 350px minmax(0, 1fr); }
+    .queue-column, .claims-column { min-width: 0; border-right: 1px solid var(--border); background: var(--surface); }
+    .filter-row { display: flex; align-items: center; gap: 7px; padding: 10px; border-bottom: 1px solid var(--border); }
+    .mini-search { height: 31px; min-width: 0; flex: 1; display: flex; align-items: center; gap: 7px; padding: 0 9px; border: 1px solid var(--border); border-radius: 7px; background: var(--bg); }
+    .mini-search svg { width: 12px; fill: none; stroke: var(--fg-tertiary); stroke-width: 1.8; }
+    .mini-search input { min-width: 0; width: 100%; border: 0; outline: 0; background: transparent; font-size: 9.5px; }
+    .filter-button { height: 31px; padding: 0 9px; border: 1px solid var(--border); border-radius: 7px; color: var(--fg-tertiary); background: var(--surface); font-size: 9px; cursor: pointer; }
+    .queue-list { display: grid; gap: 2px; padding: 8px; }
+    .queue-item { width: 100%; padding: 11px; border: 1px solid transparent; border-radius: 8px; color: var(--fg-secondary); background: transparent; text-align: left; cursor: pointer; }
+    .queue-item:hover { background: var(--surface-hover); }
+    .queue-item.selected { border-color: var(--border-light); background: var(--surface-raised); box-shadow: inset 2px 0 0 var(--warning); }
+    .queue-top { display: flex; align-items: center; gap: 7px; }
+    .queue-type { color: var(--violet); font: 650 7.5px var(--font-mono); letter-spacing: .06em; text-transform: uppercase; }
+    .confidence { margin-left: auto; color: var(--fg-tertiary); font: 8px var(--font-mono); }
+    .queue-copy { display: -webkit-box; margin: 7px 0 8px; overflow: hidden; color: var(--fg); font-size: 10.5px; line-height: 1.5; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
+    .queue-meta { display: flex; justify-content: space-between; color: var(--fg-tertiary); font: 8px var(--font-mono); }
+    .review-detail, .claim-library-detail { min-width: 0; padding: 22px 24px 70px; background: var(--surface-raised); }
+    .review-header { display: flex; align-items: flex-start; gap: 18px; }
+    .review-header-copy { min-width: 0; flex: 1; }
+    .review-overline { color: var(--warning); font: 650 8px var(--font-mono); letter-spacing: .12em; text-transform: uppercase; }
+    .review-header h3 { margin: 7px 0 0; font-size: 16px; line-height: 1.5; letter-spacing: -.015em; }
+    .confidence-ring { --p: 88%; width: 54px; height: 54px; display: grid; place-items: center; flex: 0 0 auto; border-radius: 50%; background: conic-gradient(var(--warning) var(--p), var(--surface-active) 0); }
+    .confidence-ring::before { content: ""; width: 44px; height: 44px; border-radius: 50%; background: var(--surface-raised); }
+    .confidence-ring span { position: absolute; color: var(--fg-secondary); font: 650 10px var(--font-mono); }
+    .fact-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 7px; }
+    .fact-card { padding: 9px 10px; border: 1px solid var(--border); border-radius: 7px; background: var(--surface); }
+    .fact-card span { display: block; color: var(--fg-tertiary); font-size: 8px; }
+    .fact-card strong { display: block; margin-top: 4px; overflow: hidden; color: var(--fg-secondary); font: 9px var(--font-mono); text-overflow: ellipsis; white-space: nowrap; }
+    .structured-data { display: grid; grid-template-columns: 120px minmax(0, 1fr); overflow: hidden; border: 1px solid var(--border); border-radius: 8px; }
+    .structured-data dt, .structured-data dd { margin: 0; padding: 9px 10px; border-top: 1px solid var(--border); font-size: 9.5px; }
+    .structured-data dt:first-of-type, .structured-data dt:first-of-type + dd { border-top: 0; }
+    .structured-data dt { color: var(--fg-tertiary); background: var(--surface); font-family: var(--font-mono); }
+    .structured-data dd { color: var(--fg-secondary); }
+    .edit-box { margin-top: 14px; }
+    .edit-box textarea { width: 100%; min-height: 92px; resize: vertical; padding: 11px; border: 1px solid var(--accent); border-radius: 8px; outline: 0; color: var(--fg); background: var(--bg); font-size: 11px; line-height: 1.6; }
+    .review-actions { position: sticky; bottom: 0; display: flex; justify-content: flex-end; gap: 7px; margin: 22px -24px -70px; padding: 12px 24px; border-top: 1px solid var(--border); background: color-mix(in srgb, var(--surface-raised) 93%, transparent); backdrop-filter: blur(12px); }
+
+    .claims-workspace { grid-template-columns: minmax(420px, 52%) minmax(340px, 1fr); }
+    .claim-table-head, .claim-row { display: grid; grid-template-columns: minmax(0, 1fr) 94px 78px; gap: 10px; align-items: center; }
+    .claim-table-head { padding: 8px 14px; border-bottom: 1px solid var(--border); color: var(--fg-tertiary); background: var(--bg-secondary); font: 8px var(--font-mono); text-transform: uppercase; }
+    .claim-rows { padding: 5px 7px 16px; }
+    .claim-row { width: 100%; min-height: 66px; padding: 9px 8px; border: 1px solid transparent; border-radius: 8px; color: var(--fg-secondary); background: transparent; text-align: left; cursor: pointer; }
+    .claim-row:hover { background: var(--surface-hover); }
+    .claim-row.selected { border-color: color-mix(in srgb, var(--accent) 30%, var(--border)); background: var(--accent-subtle); }
+    .claim-main { min-width: 0; }
+    .claim-main strong { display: -webkit-box; overflow: hidden; color: var(--fg); font-size: 10.5px; font-weight: 550; line-height: 1.45; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
+    .claim-main span { display: block; margin-top: 5px; color: var(--accent); font: 7.5px var(--font-mono); text-transform: uppercase; }
+    .claim-scope, .claim-updated { overflow: hidden; color: var(--fg-tertiary); font: 8px var(--font-mono); text-overflow: ellipsis; white-space: nowrap; }
+    .library-actions { display: flex; flex-wrap: wrap; gap: 7px; margin-top: 20px; padding-top: 15px; border-top: 1px solid var(--border); }
+
+    .settings-body { max-width: 960px; padding: 20px 20px 90px; }
+    .settings-section { margin-bottom: 22px; }
+    .settings-heading { margin-bottom: 10px; }
+    .settings-heading h3 { margin: 0; font-size: 12.5px; }
+    .settings-heading p { margin: 4px 0 0; color: var(--fg-tertiary); font-size: 9.5px; }
+    .setting-card { display: grid; grid-template-columns: 42px minmax(0, 1fr) auto; gap: 12px; align-items: center; padding: 14px; border: 1px solid var(--border); border-radius: 9px; background: var(--surface-raised); }
+    .setting-card + .setting-card { margin-top: 8px; }
+    .setting-icon { width: 37px; height: 37px; display: grid; place-items: center; border-radius: 9px; color: var(--accent); background: var(--accent-muted); }
+    .setting-icon.violet { color: var(--violet); background: var(--violet-muted); }
+    .setting-icon svg { width: 17px; fill: none; stroke: currentColor; stroke-linecap: round; stroke-linejoin: round; stroke-width: 1.7; }
+    .setting-copy { min-width: 0; }
+    .setting-copy strong { display: block; font-size: 11px; }
+    .setting-copy span { display: block; margin-top: 4px; color: var(--fg-tertiary); font-size: 9px; line-height: 1.5; }
+    .mode-switch { display: flex; padding: 3px; border: 1px solid var(--border); border-radius: 7px; background: var(--bg); }
+    .mode-button { min-width: 58px; height: 25px; padding: 0 9px; border-radius: 5px; color: var(--fg-tertiary); background: transparent; font: 8.5px var(--font-mono); cursor: pointer; }
+    .mode-button:hover { color: var(--fg-secondary); }
+    .mode-button.active { color: var(--fg); background: var(--surface-active); box-shadow: 0 1px 4px rgba(0, 0, 0, .14); }
+    .provider-card { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 20px; padding: 14px; border: 1px solid var(--border); border-radius: 9px; background: var(--surface-raised); }
+    .provider-name { display: flex; align-items: center; gap: 8px; }
+    .provider-mark { width: 25px; height: 25px; display: grid; place-items: center; border-radius: 6px; color: var(--violet); background: var(--violet-muted); font: 700 8px var(--font-mono); }
+    .provider-name strong { font-size: 10.5px; }
+    .provider-name span { display: block; margin-top: 2px; color: var(--fg-tertiary); font: 8px var(--font-mono); }
+    .provider-meta { display: grid; gap: 4px; text-align: right; }
+    .provider-meta span { color: var(--fg-tertiary); font-size: 8.5px; }
+    .provider-meta code { color: var(--fg-secondary); font: 8px var(--font-mono); }
+    .service-list { overflow: hidden; border: 1px solid var(--border); border-radius: 9px; }
+    .service-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 12px; align-items: center; min-height: 48px; padding: 8px 13px; border-top: 1px solid var(--border); background: var(--surface-raised); }
+    .service-row:first-child { border-top: 0; }
+    .service-row code { display: block; color: var(--fg-secondary); font: 9px var(--font-mono); }
+    .service-row span { display: block; margin-top: 3px; color: var(--fg-tertiary); font-size: 8.5px; }
+    .service-state { color: var(--success); font: 8px var(--font-mono); }
+    .service-state.optional { color: var(--fg-tertiary); }
+    .settings-savebar { position: sticky; bottom: 12px; display: none; align-items: center; gap: 12px; margin: 18px 0 0; padding: 10px 12px; border: 1px solid var(--border-light); border-radius: 9px; background: color-mix(in srgb, var(--surface) 92%, transparent); box-shadow: var(--shadow); backdrop-filter: blur(12px); }
+    .settings-savebar.visible { display: flex; }
+    .settings-savebar span { color: var(--fg-secondary); font-size: 9.5px; }
+    .settings-savebar .button:first-of-type { margin-left: auto; }
+
+    .gate-stage { display: none; min-height: 680px; place-items: center; padding: 24px; border: 1px solid var(--border); border-radius: 14px; background: var(--surface); }
+    .gate-card { width: min(520px, 100%); text-align: center; }
+    .gate-mark { width: 60px; height: 60px; display: grid; place-items: center; margin: 0 auto 18px; border: 1px solid color-mix(in srgb, var(--accent) 42%, var(--border)); border-radius: 17px; color: var(--accent); background: var(--accent-muted); }
+    .gate-mark svg { width: 29px; height: 29px; fill: none; stroke: currentColor; stroke-linecap: round; stroke-linejoin: round; stroke-width: 1.5; }
+    .gate-card h2 { margin: 0; font-size: 20px; letter-spacing: -.02em; }
+    .gate-card p { margin: 9px auto 0; max-width: 430px; color: var(--fg-secondary); font-size: 11px; line-height: 1.65; }
+    .gate-actions { display: flex; justify-content: center; gap: 8px; margin-top: 20px; }
+    .gate-status { display: inline-flex; align-items: center; gap: 6px; margin-top: 14px; color: var(--warning); font: 8px var(--font-mono); }
+    .gate-status i { width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
+    .skeleton { overflow: hidden; background: linear-gradient(90deg, var(--surface-active), var(--surface-hover), var(--surface-active)); background-size: 200% 100%; animation: shimmer 1.4s linear infinite; }
+    @keyframes shimmer { to { background-position: -200% 0; } }
+
+    .modal-backdrop { position: fixed; z-index: 90; inset: 0; display: none; place-items: center; padding: 18px; background: rgba(3, 6, 10, .64); backdrop-filter: blur(4px); }
+    .modal-backdrop.open { display: grid; }
+    .modal { width: min(520px, 100%); overflow: hidden; border: 1px solid var(--border-light); border-radius: 13px; background: var(--surface); box-shadow: var(--shadow); animation: modal-enter 180ms cubic-bezier(.2, .8, .2, 1) both; }
+    @keyframes modal-enter { from { opacity: 0; transform: translateY(8px) scale(.985); } }
+    .modal-head { display: flex; align-items: center; gap: 11px; padding: 15px 17px; border-bottom: 1px solid var(--border); }
+    .modal-icon { width: 31px; height: 31px; display: grid; place-items: center; border-radius: 8px; color: var(--warning); background: var(--warning-muted); }
+    .modal-icon.danger { color: var(--error); background: var(--error-muted); }
+    .modal-icon svg { width: 16px; fill: none; stroke: currentColor; stroke-width: 1.8; }
+    .modal-head h3 { margin: 0; font-size: 13px; }
+    .modal-head p { margin: 3px 0 0; color: var(--fg-tertiary); font-size: 8.5px; }
+    .modal-body { padding: 16px 17px; color: var(--fg-secondary); font-size: 10px; line-height: 1.65; }
+    .disclosure { display: grid; gap: 7px; margin-top: 12px; padding: 11px; border: 1px solid var(--border); border-radius: 8px; background: var(--bg-secondary); }
+    .disclosure div { display: flex; justify-content: space-between; gap: 14px; }
+    .disclosure span { color: var(--fg-tertiary); }
+    .disclosure code { color: var(--fg-secondary); font: 8.5px var(--font-mono); text-align: right; }
+    .modal-actions { display: flex; justify-content: flex-end; gap: 7px; padding: 11px 17px; border-top: 1px solid var(--border); background: var(--surface-raised); }
+
+    .toast { position: fixed; z-index: 120; right: 22px; bottom: 22px; display: flex; align-items: center; gap: 9px; max-width: 340px; padding: 11px 13px; border: 1px solid var(--border-light); border-radius: 9px; color: var(--fg-secondary); background: var(--surface); box-shadow: var(--shadow); font-size: 10px; opacity: 0; pointer-events: none; transform: translateY(8px); transition: opacity 160ms ease, transform 160ms ease; }
+    .toast.show { opacity: 1; transform: none; }
+    .toast i { width: 7px; height: 7px; border-radius: 50%; background: var(--success); }
+
+    .mobile-nav { display: none; }
+    .mobile-brand { display: none; }
+
+    @media (max-width: 1120px) {
+      :root { --sidebar-w: 72px; }
+      .brand { justify-content: center; padding-inline: 0; }
+      .brand-name, .sidebar-section, .sidebar-link span, .sidebar-link .nav-count, .account-text { display: none; }
+      .sidebar-link { justify-content: center; padding: 0; }
+      .account { justify-content: center; padding-inline: 0; }
+      .workspace-description { display: none; }
+      .review-workspace { grid-template-columns: 310px minmax(0, 1fr); }
+      .claims-workspace { grid-template-columns: minmax(360px, 50%) minmax(300px, 1fr); }
+    }
+
+    @media (max-width: 860px) {
+      :root { --topbar-h: 52px; }
+      .app-shell { display: block; }
+      .sidebar { display: none; }
+      .app-main { grid-column: auto; padding-bottom: 62px; }
+      .topbar { padding: 0 14px; }
+      .mobile-brand { display: flex; align-items: center; gap: 7px; font-size: 12px; font-weight: 700; }
+      .mobile-brand .brand-mark { width: 25px; height: 25px; }
+      .breadcrumb { display: none; }
+      .connection { display: none; }
+      .scenario-select { max-width: 128px; }
+      .page { padding: 22px 14px 30px; }
+      .page-head { display: block; margin-bottom: 16px; }
+      .page-title { font-size: 27px; }
+      .page-subtitle { font-size: 11px; }
+      .head-stats { width: 100%; margin-top: 16px; }
+      .head-stat { min-width: 0; flex: 1; padding: 9px 11px; }
+      .head-stat strong { font-size: 14px; }
+      .workspace-toolbar { position: sticky; z-index: 20; top: var(--topbar-h); overflow-x: auto; margin-inline: 0; padding: 7px; border-radius: 10px; white-space: nowrap; scrollbar-width: none; }
+      .workspace-toolbar::-webkit-scrollbar { display: none; }
+      .module-view { animation: none; }
+      .module-tabs { flex: 0 0 auto; }
+      .module-tab { min-width: max-content; min-height: 35px; display: inline-flex; padding: 0 10px; }
+      .module-tab-icon { width: 21px; height: 21px; }
+      .workspace-separator, .workspace-description, .workspace-health { display: none; }
+      .workspace-actions { margin-left: auto; }
+      .workspace-action-group .button:not(.mobile-essential) { display: none; }
+      .module-stage { min-height: 0; border-radius: 11px; }
+      .search-workspace, .review-workspace, .claims-workspace { min-height: 0; display: block; }
+      .search-column, .queue-column, .claims-column { border-right: 0; }
+      .search-hero { padding: 14px; }
+      .detail-panel { display: none; }
+      .detail-panel.mobile-open { position: fixed; z-index: 80; inset: var(--topbar-h) 0 0; display: block; overflow: auto; background: var(--surface-raised); animation: mobile-slide 220ms cubic-bezier(.2, .8, .2, 1) both; }
+      @keyframes mobile-slide { from { transform: translateX(100%); } }
+      .detail-panel.mobile-open .detail-toolbar { position: sticky; z-index: 2; top: 0; background: var(--surface); }
+      .mobile-close { display: grid !important; }
+      .review-detail, .claim-library-detail { min-height: 520px; padding: 20px 16px 80px; }
+      .review-actions { margin-inline: -16px; padding-inline: 16px; }
+      .claims-workspace .claim-library-detail { display: none; }
+      .claims-workspace .claim-library-detail.mobile-open { position: fixed; z-index: 80; inset: var(--topbar-h) 0 0; display: block; overflow: auto; animation: mobile-slide 220ms cubic-bezier(.2, .8, .2, 1) both; }
+      .claim-table-head, .claim-row { grid-template-columns: minmax(0, 1fr) 70px; }
+      .claim-updated { display: none; }
+      .settings-body { padding: 14px 12px 80px; }
+      .setting-card { grid-template-columns: 36px minmax(0, 1fr); }
+      .mode-switch { grid-column: 1 / -1; justify-self: stretch; }
+      .mode-button { flex: 1; }
+      .provider-card { grid-template-columns: 1fr; }
+      .provider-meta { text-align: left; }
+      .mobile-nav { position: fixed; z-index: 70; inset: auto 0 0; display: grid; grid-template-columns: repeat(4, 1fr); padding: 6px 12px max(8px, env(safe-area-inset-bottom)); border-top: 1px solid var(--border); background: color-mix(in srgb, var(--bg) 94%, transparent); backdrop-filter: blur(16px); }
+      .mobile-nav button { min-height: 44px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 3px; border-radius: 8px; color: var(--fg-tertiary); background: transparent; font-size: 8px; }
+      .mobile-nav button.active { color: var(--accent); background: var(--accent-muted); }
+      .mobile-nav svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width: 1.8; }
+    }
+
+    @media (max-width: 520px) {
+      .scenario-select { width: 104px; padding-left: 7px; font-size: 9px; }
+      .page-head { margin-bottom: 13px; }
+      .eyebrow { font-size: 8px; }
+      .page-title { font-size: 24px; }
+      .head-stat span { font-size: 8px; }
+      .workspace-actions { display: none; }
+      .quick-queries { flex-wrap: nowrap; overflow-x: auto; padding-bottom: 2px; }
+      .quick-query { flex: 0 0 auto; }
+      .search-shortcut { display: none; }
+      .result-list { padding-inline: 5px; }
+      .result-item { padding: 12px 8px; }
+      .fact-grid { grid-template-columns: 1fr 1fr; }
+      .fact-card:last-child { grid-column: 1 / -1; }
+      .structured-data { grid-template-columns: 98px minmax(0, 1fr); }
+      .review-header { gap: 10px; }
+      .confidence-ring { width: 48px; height: 48px; }
+      .confidence-ring::before { width: 38px; height: 38px; }
+      .settings-heading p { line-height: 1.55; }
+      .toast { right: 12px; bottom: 74px; left: 12px; }
+    }
+  </style>
+</head>
+<body>
+  <div class="app-shell">
+    <aside class="sidebar" aria-label="PocketCtl 主导航">
+      <a class="brand" href="#">
+        <span class="brand-mark" aria-hidden="true">
+          <svg viewBox="0 0 24 24"><path d="M7 4.5 12 2l5 2.5v6c0 5-2.6 8.4-5 9.5-2.4-1.1-5-4.5-5-9.5z"/><path d="M9.5 11.3 11.2 13l3.6-4"/></svg>
+        </span>
+        <span class="brand-name">PocketCtl<small>Control surface</small></span>
+      </a>
+
+      <div class="sidebar-section">Workspace</div>
+      <nav class="sidebar-nav">
+        <button class="sidebar-link"><svg viewBox="0 0 24 24"><path d="M3.5 18.5a9 9 0 1 1 17 0"/><path d="m12 14 4-4"/></svg><span>概览</span></button>
+        <button class="sidebar-link"><svg viewBox="0 0 24 24"><path d="M14 9a2 2 0 0 1-2 2H6l-4 4V4a2 2 0 0 1 2-2h8a2 2 0 0 1 2 2z"/><path d="M18 9h2a2 2 0 0 1 2 2v9l-4-4h-4"/></svg><span>会话</span><span class="nav-count">24</span></button>
+        <button class="sidebar-link"><svg viewBox="0 0 24 24"><path d="M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9"/><path d="M10 21h4"/></svg><span>收件箱</span><span class="nav-count">3</span></button>
+        <button class="sidebar-link active"><svg viewBox="0 0 24 24"><path d="M12 5a3 3 0 1 0-6 .5A4 4 0 0 0 4 12a4 4 0 0 0 2 6.5A3 3 0 0 0 12 19z"/><path d="M12 5a3 3 0 1 1 6 .5A4 4 0 0 1 20 12a4 4 0 0 1-2 6.5A3 3 0 0 1 12 19z"/><path d="M12 7v10M8 9.5c2 0 4 1.5 4 3.5m4-3.5c-2 0-4 1.5-4 3.5"/></svg><span>工程记忆</span><span class="nav-count" id="sidebar-review-count">6</span></button>
+      </nav>
+
+      <div class="sidebar-section">System</div>
+      <nav class="sidebar-nav">
+        <button class="sidebar-link"><svg viewBox="0 0 24 24"><path d="M3 3v18h18"/><path d="M7 17v-4m5 4V7m5 10v-7"/></svg><span>用量分析</span></button>
+        <button class="sidebar-link"><svg viewBox="0 0 24 24"><rect x="2" y="3" width="20" height="7" rx="2"/><rect x="2" y="14" width="20" height="7" rx="2"/><path d="M6 6.5h.01M6 17.5h.01"/></svg><span>主机</span></button>
+        <button class="sidebar-link"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.9l.1.1-2.8 2.8-.1-.1a1.7 1.7 0 0 0-1.9-.3 1.7 1.7 0 0 0-1 1.6v.2h-4V21a1.7 1.7 0 0 0-1-1.6 1.7 1.7 0 0 0-1.9.3l-.1.1L4.2 17l.1-.1a1.7 1.7 0 0 0 .3-1.9A1.7 1.7 0 0 0 3 14H2.8v-4H3a1.7 1.7 0 0 0 1.6-1 1.7 1.7 0 0 0-.3-1.9L4.2 7 7 4.2l.1.1a1.7 1.7 0 0 0 1.9.3A1.7 1.7 0 0 0 10 3V2.8h4V3a1.7 1.7 0 0 0 1 1.6 1.7 1.7 0 0 0 1.9-.3l.1-.1L19.8 7l-.1.1a1.7 1.7 0 0 0-.3 1.9 1.7 1.7 0 0 0 1.6 1h.2v4H21a1.7 1.7 0 0 0-1.6 1z"/></svg><span>设置</span></button>
+      </nav>
+
+      <div class="sidebar-spacer"></div>
+      <div class="account"><div class="avatar">W</div><div class="account-text"><strong>muwenbin</strong><span>专业版 · 已连接</span></div></div>
+    </aside>
+
+    <main class="app-main">
+      <header class="topbar">
+        <div class="mobile-brand"><span class="brand-mark"><svg viewBox="0 0 24 24"><path d="M7 4.5 12 2l5 2.5v6c0 5-2.6 8.4-5 9.5-2.4-1.1-5-4.5-5-9.5z"/><path d="M9.5 11.3 11.2 13l3.6-4"/></svg></span>PocketCtl</div>
+        <div class="breadcrumb"><span>Workspace</span><i></i><strong>工程记忆</strong></div>
+        <div class="topbar-spacer"></div>
+        <div class="connection"><i></i>Memory online</div>
+        <select class="scenario-select" id="scenario-select" aria-label="原型状态预览">
+          <option value="active">状态：正常运行</option>
+          <option value="degraded">状态：检索降级</option>
+          <option value="first-run">状态：尚未安装</option>
+          <option value="disabled">状态：服务未启用</option>
+          <option value="loading">状态：正在连接</option>
+        </select>
+        <button class="icon-btn" id="theme-toggle" aria-label="切换深浅主题" title="切换深浅主题">
+          <svg viewBox="0 0 24 24"><path d="M20.5 14.2A8 8 0 0 1 9.8 3.5 8.5 8.5 0 1 0 20.5 14.2z"/></svg>
+        </button>
+      </header>
+
+      <div class="page">
+        <section class="page-head">
+          <div>
+            <div class="eyebrow">Personal engineering memory</div>
+            <h1 class="page-title">工程记忆</h1>
+            <p class="page-subtitle">把跨会话经验整理为可审核、可追溯、可撤销的工程知识。每一条结论都保留版本与原始证据，不让“记住了”变成不可验证的黑箱。</p>
+          </div>
+          <div class="head-stats" aria-label="工程记忆摘要">
+            <div class="head-stat"><strong>142</strong><span>活跃知识</span></div>
+            <div class="head-stat"><strong id="header-review-count">6</strong><span>待审核</span></div>
+            <div class="head-stat"><strong>98%</strong><span>证据覆盖</span></div>
+          </div>
+        </section>
+
+        <div class="degraded-banner">
+          <svg viewBox="0 0 24 24"><path d="M12 3 2.5 20h19z"/><path d="M12 9v4m0 3h.01"/></svg>
+          <span>嵌入服务暂不可用，当前搜索已安全回退到关键词检索；知识审核和管理不受影响。</span>
+        </div>
+
+        <section class="memory-workspace" id="memory-workspace">
+          <header class="workspace-toolbar">
+            <nav class="module-tabs" role="tablist" aria-label="工程记忆功能导航" aria-orientation="horizontal">
+              <button class="module-tab active" type="button" role="tab" aria-selected="true" data-page="search">
+                <span class="module-tab-icon"><svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="m16.5 16.5 4 4"/></svg></span>
+                <span><strong>搜索</strong><small>检索工程知识</small></span>
+              </button>
+              <button class="module-tab" type="button" role="tab" aria-selected="false" data-page="review">
+                <span class="module-tab-icon"><svg viewBox="0 0 24 24"><path d="M4 4h16v16H4z"/><path d="m8 12 2.5 2.5L16 9"/></svg></span>
+                <span><strong>候选审核</strong><small>人工确认后入库</small></span>
+                <span class="tab-badge" id="tab-review-count">6</span>
+              </button>
+              <button class="module-tab" type="button" role="tab" aria-selected="false" data-page="claims">
+                <span class="module-tab-icon"><svg viewBox="0 0 24 24"><path d="M5 4h14v16H5z"/><path d="M8 8h8m-8 4h8m-8 4h5"/></svg></span>
+                <span><strong>知识库</strong><small>版本与证据</small></span>
+              </button>
+              <button class="module-tab" type="button" role="tab" aria-selected="false" data-page="settings">
+                <span class="module-tab-icon"><svg viewBox="0 0 24 24"><path d="M4 7h10m4 0h2M4 17h2m4 0h10"/><circle cx="16" cy="7" r="2"/><circle cx="8" cy="17" r="2"/></svg></span>
+                <span><strong>设置</strong><small>模式与服务权限</small></span>
+              </button>
+            </nav>
+            <span class="workspace-separator" aria-hidden="true"></span>
+            <p class="workspace-description" id="workspace-description">同时检索语义、关键词与作用域；结果只返回已经人工确认的知识。</p>
+            <div class="workspace-actions">
+              <div class="workspace-action-group" data-actions="search"><button class="button"><svg viewBox="0 0 24 24"><path d="M4 5h16M7 12h10m-7 7h4"/></svg>筛选作用域</button></div>
+              <div class="workspace-action-group" data-actions="review" hidden><button class="button">跳过低置信度</button><button class="button mobile-essential">审核历史</button></div>
+              <div class="workspace-action-group" data-actions="claims" hidden><button class="button"><svg viewBox="0 0 24 24"><path d="M12 5v14m-7-7h14"/></svg>新建知识</button></div>
+              <div class="workspace-action-group" data-actions="settings" hidden></div>
+            </div>
+            <div class="workspace-health"><i></i><span>服务正常</span></div>
+          </header>
+
+          <div class="module-stage">
+            <section class="module-view active" data-view="search">
+              <div class="search-workspace">
+                <div class="search-column">
+                  <div class="search-hero">
+                    <form class="search-box" id="memory-search-form">
+                      <svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="m16.5 16.5 4 4"/></svg>
+                      <input id="memory-search-input" value="Memory 模块部署后如何验证健康状态？" aria-label="搜索个人工程知识">
+                      <span class="search-shortcut">⌘ K</span>
+                      <button class="button primary" type="submit">搜索</button>
+                    </form>
+                    <div class="quick-queries">
+                      <button class="quick-query">Phase 2 Gate</button>
+                      <button class="quick-query">Relay 扩展边界</button>
+                      <button class="quick-query">本地部署检查</button>
+                    </div>
+                  </div>
+                  <div class="results-head"><span>3 条相关知识</span><span>按相关性排序</span></div>
+                  <div class="result-list" id="search-results">
+                    <button class="result-item selected" data-result="0">
+                      <span class="result-pin"></span>
+                      <span class="result-content"><span class="result-type">Operational runbook</span><span class="result-statement">Memory-only 刷新后，必须分别验证 API、Worker、PostgreSQL 与 Provider 同步状态；HTTP 健康不等于数据流已经恢复。</span><span class="result-meta"><span>pocketctl</span><span>develop</span><span>2026-08-24</span></span></span>
+                      <span class="result-score">0.94</span>
+                    </button>
+                    <button class="result-item" data-result="1">
+                      <span class="result-pin"></span>
+                      <span class="result-content"><span class="result-type">Test invariant</span><span class="result-statement">Phase 1 产品 Gate 与单元测试/构建成功必须分开记录，缺少真实 Compose E2E 时不得宣称产品 Gate 通过。</span><span class="result-meta"><span>pocketctl</span><span>feature/memory</span><span>2026-08-26</span></span></span>
+                      <span class="result-score">0.88</span>
+                    </button>
+                    <button class="result-item" data-result="2">
+                      <span class="result-pin"></span>
+                      <span class="result-content"><span class="result-type">Architecture decision</span><span class="result-statement">Relay 只签发短期 Capability Grant，不代理 Memory 业务流量；Web 使用受信任来源直接访问 Memory API。</span><span class="result-meta"><span>pocketctl</span><span>all branches</span><span>2026-08-24</span></span></span>
+                      <span class="result-score">0.82</span>
+                    </button>
+                  </div>
+                </div>
+
+                <aside class="detail-panel" id="search-detail">
+                  <div class="detail-toolbar"><span>知识详情</span><button class="icon-btn mobile-close" data-close-detail aria-label="关闭详情"><svg viewBox="0 0 24 24"><path d="m15 18-6-6 6-6"/></svg></button></div>
+                  <div class="detail-scroll">
+                    <div class="claim-kicker"><span class="chip active">ACTIVE</span><span class="chip" id="detail-type">OPERATIONAL RUNBOOK</span><span class="chip violet">USER VALIDATED</span></div>
+                    <h3 class="claim-title" id="detail-statement">Memory-only 刷新后，必须分别验证 API、Worker、PostgreSQL 与 Provider 同步状态；HTTP 健康不等于数据流已经恢复。</h3>
+                    <div class="claim-facts">
+                      <div class="claim-fact"><span>作用域</span><strong id="detail-scope">repository · pocketctl</strong></div>
+                      <div class="claim-fact"><span>当前版本</span><strong id="detail-version">v3 · 2026-08-24</strong></div>
+                      <div class="claim-fact"><span>分支</span><strong id="detail-branch">develop</strong></div>
+                      <div class="claim-fact"><span>权威来源</span><strong>user_validated</strong></div>
+                    </div>
+                    <div class="section-label">证据链</div>
+                    <div class="evidence-thread" id="detail-evidence">
+                      <article class="evidence-item"><blockquote>“Passing /health and /ready proves deployment health, not Provider data flow.”</blockquote><footer><span>session event</span><span>2026-08-24 16:42</span></footer></article>
+                      <article class="evidence-item"><blockquote>memory-api 与 memory-worker 重建后均为 healthy，restart_count=0；provider_token_exchange 仍返回 provider_auth_failed。</blockquote><footer><span>tool result</span><span>2026-08-24 16:47</span></footer></article>
+                    </div>
+                    <div class="section-label">版本</div>
+                    <div class="version-row current"><span class="version-dot"></span><span class="version-copy"><strong>v3 · 补充 Provider 同步验证边界</strong><span>2026-08-24 · user validated</span></span></div>
+                    <div class="version-row"><span class="version-dot"></span><span class="version-copy"><strong>v2 · 明确 API/Worker 分工</strong><span>2026-08-24 · corrected</span></span></div>
+                    <div class="version-row"><span class="version-dot"></span><span class="version-copy"><strong>v1 · 初始候选</strong><span>2026-08-24 · extracted</span></span></div>
+                  </div>
+                </aside>
+              </div>
+            </section>
+
+            <section class="module-view" data-view="review">
+              <div class="review-workspace">
+                <div class="queue-column">
+                  <div class="filter-row"><label class="mini-search"><svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="m16.5 16.5 4 4"/></svg><input placeholder="筛选候选"></label><button class="filter-button">全部类型</button></div>
+                  <div class="queue-list" id="candidate-queue">
+                    <button class="queue-item selected" data-candidate="0"><span class="queue-top"><span class="queue-type">Repository convention</span><span class="confidence">88%</span></span><span class="queue-copy">PocketCtl 的正式 Phase 分支必须从最新合并的 develop 串行创建，并通过独立 Gate 后再开始下一阶段。</span><span class="queue-meta"><span>pocketctl</span><span>2 分钟前</span></span></button>
+                    <button class="queue-item" data-candidate="1"><span class="queue-top"><span class="queue-type">Bug root cause</span><span class="confidence">81%</span></span><span class="queue-copy">项目内 worktree 被桌面工作区管理器移除，会造成依赖缺失与 cwd not found 的假性基线失败。</span><span class="queue-meta"><span>pocketctl</span><span>18 分钟前</span></span></button>
+                    <button class="queue-item" data-candidate="2"><span class="queue-top"><span class="queue-type">Work method</span><span class="confidence">72%</span></span><span class="queue-copy">清理 iTerm2 会话日志之前，应先检查活跃写入句柄，并关闭自动日志记录。</span><span class="queue-meta"><span>global</span><span>1 小时前</span></span></button>
+                  </div>
+                </div>
+                <article class="review-detail">
+                  <div class="review-header">
+                    <div class="review-header-copy"><div class="review-overline">Candidate · Repository convention</div><h3 id="candidate-statement">PocketCtl 的正式 Phase 分支必须从最新合并的 develop 串行创建，并通过独立 Gate 后再开始下一阶段。</h3></div>
+                    <div class="confidence-ring" style="--p:88%"><span>88%</span></div>
+                  </div>
+                  <div class="section-label">作用域与上下文</div>
+                  <div class="fact-grid"><div class="fact-card"><span>作用域</span><strong>repository</strong></div><div class="fact-card"><span>仓库</span><strong>pocketctl</strong></div><div class="fact-card"><span>分支</span><strong>develop</strong></div></div>
+                  <div class="section-label">结构化字段</div>
+                  <dl class="structured-data"><dt>branch_order</dt><dd>develop → phase branch → Gate → merge</dd><dt>rollout_mode</dt><dd>off → shadow → canary → enabled</dd><dt>merge_policy</dt><dd>Serial; no long-lived branches from stale develop</dd></dl>
+                  <div class="section-label">候选证据</div>
+                  <div class="evidence-thread"><article class="evidence-item"><blockquote>“Keep one shared Phase 2–6 design but formally implement serially from the latest merged develop.”</blockquote><footer><span>assistant summary</span><span>episode: mem-p2-06</span></footer></article><article class="evidence-item"><blockquote>用户确认 Phase 2～6 使用五个分支分别实施，并要求每阶段 Gate 完成后再创建下一阶段。</blockquote><footer><span>user message</span><span>episode: mem-p2-06</span></footer></article></div>
+                  <div class="edit-box" id="candidate-edit-box" hidden><textarea id="candidate-edit-text">PocketCtl 的正式 Phase 分支必须从最新合并的 develop 串行创建，并通过独立 Gate 后再开始下一阶段。</textarea></div>
+                  <div class="review-actions"><button class="button danger" data-review-action="reject">拒绝</button><button class="button" data-review-action="edit">修改</button><button class="button success" data-review-action="accept">接受并入库</button></div>
+                </article>
+              </div>
+            </section>
+
+            <section class="module-view" data-view="claims">
+              <div class="claims-workspace">
+                <div class="claims-column">
+                  <div class="filter-row"><label class="mini-search"><svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="m16.5 16.5 4 4"/></svg><input placeholder="搜索知识正文或作用域"></label><button class="filter-button">Active</button></div>
+                  <div class="claim-table-head"><span>知识</span><span>作用域</span><span>更新</span></div>
+                  <div class="claim-rows">
+                    <button class="claim-row selected" data-claim="0"><span class="claim-main"><strong>Memory-only 刷新后，必须分别验证 API、Worker、PostgreSQL 与 Provider 同步状态。</strong><span>Operational runbook</span></span><span class="claim-scope">pocketctl</span><span class="claim-updated">4 天前</span></button>
+                    <button class="claim-row" data-claim="1"><span class="claim-main"><strong>Phase 1 产品 Gate 与代码测试成功必须分开记录。</strong><span>Test invariant</span></span><span class="claim-scope">pocketctl</span><span class="claim-updated">2 天前</span></button>
+                    <button class="claim-row" data-claim="2"><span class="claim-main"><strong>只修改 UI 时，必须保留 API、事件、路由、WebSocket 与后端行为。</strong><span>Work method</span></span><span class="claim-scope">global</span><span class="claim-updated">1 天前</span></button>
+                    <button class="claim-row" data-claim="3"><span class="claim-main"><strong>Relay 只签发短期 Capability Grant，不代理 Memory 业务流量。</strong><span>Architecture decision</span></span><span class="claim-scope">pocketctl</span><span class="claim-updated">4 天前</span></button>
+                  </div>
+                </div>
+                <aside class="claim-library-detail" id="claim-library-detail">
+                  <div class="detail-toolbar" style="margin:-22px -24px 18px"><span>知识详情</span><button class="icon-btn mobile-close" data-close-claim aria-label="返回知识列表"><svg viewBox="0 0 24 24"><path d="m15 18-6-6 6-6"/></svg></button></div>
+                  <div class="claim-kicker"><span class="chip active">ACTIVE</span><span class="chip" id="library-type">OPERATIONAL RUNBOOK</span></div>
+                  <h3 class="claim-title" id="library-statement">Memory-only 刷新后，必须分别验证 API、Worker、PostgreSQL 与 Provider 同步状态；HTTP 健康不等于数据流已经恢复。</h3>
+                  <div class="claim-facts"><div class="claim-fact"><span>Claim ID</span><strong>clm_7f0c…42a1</strong></div><div class="claim-fact"><span>当前版本</span><strong>v3</strong></div><div class="claim-fact"><span>作用域</span><strong id="library-scope">repository · pocketctl</strong></div><div class="claim-fact"><span>新鲜度</span><strong>2026-08-24</strong></div></div>
+                  <div class="section-label">版本历史</div>
+                  <div class="version-row current"><span class="version-dot"></span><span class="version-copy"><strong>v3 · 当前版本</strong><span>user_validated · 2026-08-24 16:51</span></span><span class="chip active">CURRENT</span></div>
+                  <div class="version-row"><span class="version-dot"></span><span class="version-copy"><strong>v2 · 用户修正</strong><span>user_corrected · 2026-08-24 16:44</span></span></div>
+                  <div class="version-row"><span class="version-dot"></span><span class="version-copy"><strong>v1 · 初始候选</strong><span>model_extracted · 2026-08-24 16:41</span></span></div>
+                  <div class="section-label">证据摘要</div>
+                  <div class="evidence-thread"><article class="evidence-item"><blockquote>健康接口与零重启能够证明部署进程健康，不能证明 Provider token exchange 和数据同步已经恢复。</blockquote><footer><span>2 条证据</span><span>查看完整证据</span></footer></article></div>
+                  <div class="library-actions"><button class="button" data-library-action="correct">修正并创建新版本</button><button class="button" data-library-action="revoke">撤销</button><button class="button danger" data-library-action="delete">永久删除</button></div>
+                </aside>
+              </div>
+            </section>
+
+            <section class="module-view" data-view="settings">
+              <div class="settings-body">
+                <section class="settings-section">
+                  <div class="settings-heading"><h3>自动功能模式</h3><p>Shadow 只计算和记录比较结果，不会改变用户可见知识；Enabled 才会生成待审核候选或向量索引。</p></div>
+                  <article class="setting-card">
+                    <div class="setting-icon"><svg viewBox="0 0 24 24"><path d="M12 3v18M5 8l7-5 7 5M5 16l7 5 7-5"/></svg></div>
+                    <div class="setting-copy"><strong>知识提取</strong><span>发送有界 Episode Packet，生成只能由用户审核后激活的知识候选。</span></div>
+                    <div class="mode-switch" data-setting="extraction"><button class="mode-button">off</button><button class="mode-button">shadow</button><button class="mode-button active">enabled</button></div>
+                  </article>
+                  <article class="setting-card">
+                    <div class="setting-icon violet"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><circle cx="12" cy="12" r="8"/><path d="M4 12h16M12 4c2.5 2.2 3.8 4.8 3.8 8S14.5 17.8 12 20c-2.5-2.2-3.8-4.8-3.8-8S9.5 6.2 12 4z"/></svg></div>
+                    <div class="setting-copy"><strong>语义嵌入</strong><span>为 Active Claim 建立向量索引；不可用时搜索会自动回退到关键词检索。</span></div>
+                    <div class="mode-switch" data-setting="embedding"><button class="mode-button">off</button><button class="mode-button active">shadow</button><button class="mode-button">enabled</button></div>
+                  </article>
+                </section>
+
+                <section class="settings-section">
+                  <div class="settings-heading"><h3>模型提供方披露</h3><p>模型、来源与费率配置由服务端声明，浏览器不会静默切换提供方。</p></div>
+                  <div class="provider-card"><div class="provider-name"><div class="provider-mark">AI</div><div><strong>Configured model adapter</strong><span>Extraction + Embedding</span></div></div><div class="provider-meta"><code>https://api.provider.example/v1</code><span>Token 用量已记录 · 成本费率已配置</span></div></div>
+                </section>
+
+                <section class="settings-section">
+                  <div class="settings-heading"><h3>服务权限</h3><p>基础服务由用户显式启用；MCP 保持独立可选。</p></div>
+                  <div class="service-list">
+                    <div class="service-row"><div><code>memory.search</code><span>搜索已验证的活跃知识</span></div><span class="service-state">ENABLED</span></div>
+                    <div class="service-row"><div><code>memory.recall</code><span>按上下文召回知识与证据</span></div><span class="service-state">ENABLED</span></div>
+                    <div class="service-row"><div><code>memory.manage</code><span>审核候选、修正、撤销和删除</span></div><span class="service-state">ENABLED</span></div>
+                    <div class="service-row"><div><code>memory.mcp</code><span>允许受信任 Agent 通过只读 MCP 查询</span></div><span class="service-state optional">OPTIONAL · OFF</span></div>
+                  </div>
+                </section>
+
+                <div class="settings-savebar" id="settings-savebar"><span>自动功能模式有未保存的更改</span><button class="button ghost" id="settings-cancel">取消</button><button class="button primary" id="settings-save">保存设置</button></div>
+              </div>
+            </section>
+          </div>
+        </section>
+
+        <section class="gate-stage" id="gate-stage">
+          <div class="gate-card" data-gate="first-run">
+            <div class="gate-mark"><svg viewBox="0 0 24 24"><path d="M12 5a3 3 0 1 0-6 .5A4 4 0 0 0 4 12a4 4 0 0 0 2 6.5A3 3 0 0 0 12 19z"/><path d="M12 5a3 3 0 1 1 6 .5A4 4 0 0 1 20 12a4 4 0 0 1-2 6.5A3 3 0 0 1 12 19z"/><path d="M12 7v10"/></svg></div>
+            <h2>尚未安装工程记忆</h2><p>在主机页为一台受信任主机安装 PocketCtl Memory。安装完成后，这里会出现你的个人工程知识库。</p>
+            <div class="gate-actions"><button class="button primary">前往主机页</button><button class="button">查看安装说明</button></div>
+          </div>
+          <div class="gate-card" data-gate="disabled" hidden>
+            <div class="gate-mark"><svg viewBox="0 0 24 24"><path d="M5 12a7 7 0 1 0 7-7"/><path d="M12 2v10m-3-7h6"/></svg></div>
+            <h2>启用记忆服务</h2><p>搜索、召回和管理权限需要由你显式启用；MCP 将继续保持关闭，除非稍后单独授权。</p>
+            <div class="gate-status"><i></i>安装已连接 · 服务尚未授权</div>
+            <div class="gate-actions"><button class="button primary" id="enable-services">启用基础服务</button><button class="button">稍后处理</button></div>
+          </div>
+          <div class="gate-card" data-gate="loading" hidden>
+            <div class="gate-mark skeleton"></div>
+            <h2>正在连接记忆服务</h2><p>正在确认安装状态、服务权限与索引版本。连接期间不会展示过早的空状态。</p>
+            <div style="width:220px;height:7px;margin:20px auto 0;border-radius:5px" class="skeleton"></div>
+            <div style="width:150px;height:7px;margin:9px auto 0;border-radius:5px" class="skeleton"></div>
+          </div>
+        </section>
+      </div>
+    </main>
+  </div>
+
+  <nav class="mobile-nav" aria-label="移动端主导航">
+    <button><svg viewBox="0 0 24 24"><path d="M3.5 18.5a9 9 0 1 1 17 0"/><path d="m12 14 4-4"/></svg>概览</button>
+    <button><svg viewBox="0 0 24 24"><path d="M4 4h16v13H8l-4 4z"/></svg>会话</button>
+    <button class="active"><svg viewBox="0 0 24 24"><path d="M12 5a3 3 0 1 0-6 .5A4 4 0 0 0 4 12a4 4 0 0 0 2 6.5A3 3 0 0 0 12 19z"/><path d="M12 5a3 3 0 1 1 6 .5A4 4 0 0 1 20 12a4 4 0 0 1-2 6.5A3 3 0 0 1 12 19z"/><path d="M12 7v10"/></svg>记忆</button>
+    <button><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M12 2v3m0 14v3M2 12h3m14 0h3"/></svg>设置</button>
+  </nav>
+
+  <div class="modal-backdrop" id="consent-modal" role="dialog" aria-modal="true" aria-labelledby="consent-title">
+    <div class="modal">
+      <div class="modal-head"><div class="modal-icon"><svg viewBox="0 0 24 24"><path d="M12 3 2.5 20h19z"/><path d="M12 9v4m0 3h.01"/></svg></div><div><h3 id="consent-title">确认启用模型处理</h3><p>该更改会使内容离开 PocketCtl 的本地边界</p></div></div>
+      <div class="modal-body">提取会发送有界 Episode Packet；嵌入会发送 Active Claim 正文和检索查询。PocketCtl 不保存原始模型响应，但提供方处理与留存仍受其自身条款约束。
+        <div class="disclosure"><div><span>提供方</span><code>Configured model adapter</code></div><div><span>模型</span><code>production-model-v1</code></div><div><span>来源</span><code>api.provider.example</code></div><div><span>成本</span><code>explicit rates configured</code></div></div>
+      </div>
+      <div class="modal-actions"><button class="button" data-modal-close>取消</button><button class="button primary" id="consent-confirm">确认并保存</button></div>
+    </div>
+  </div>
+
+  <div class="modal-backdrop" id="danger-modal" role="dialog" aria-modal="true" aria-labelledby="danger-title">
+    <div class="modal">
+      <div class="modal-head"><div class="modal-icon danger"><svg viewBox="0 0 24 24"><path d="M4 7h16M9 7V4h6v3m-8 0 1 14h8l1-14M10 11v6m4-6v6"/></svg></div><div><h3 id="danger-title">永久删除这条知识？</h3><p>此操作不可恢复</p></div></div>
+      <div class="modal-body">正文、所有版本、证据与检索投影都会被物理抹除，只留下不包含内容的墓碑记录，防止知识在重放或重建后复活。</div>
+      <div class="modal-actions"><button class="button" data-modal-close>取消</button><button class="button danger" id="danger-confirm">永久删除</button></div>
+    </div>
+  </div>
+
+  <div class="toast" id="toast" aria-live="polite"><i></i><span></span></div>
+
+  <script>
+    const root = document.documentElement;
+    const body = document.body;
+    const workspace = document.getElementById('memory-workspace');
+    const gateStage = document.getElementById('gate-stage');
+    const scenarioSelect = document.getElementById('scenario-select');
+    const toast = document.getElementById('toast');
+    let toastTimer;
+    let reviewCount = 6;
+    let pendingSetting = null;
+
+    const pageDescriptions = {
+      search: '同时检索语义、关键词与作用域；结果只返回已经人工确认的知识。',
+      review: '模型只能提出候选；接受、修正或拒绝之后，候选才会进入不可变版本账本。',
+      claims: '查看活跃知识、版本历史与证据；修正会创建新版本，删除会物理抹除内容。',
+      settings: '所有自动功能默认关闭；任何发送到模型提供方的内容都需要显式确认。'
+    };
+
+    const searchDetails = [
+      {
+        type: 'OPERATIONAL RUNBOOK',
+        statement: 'Memory-only 刷新后，必须分别验证 API、Worker、PostgreSQL 与 Provider 同步状态；HTTP 健康不等于数据流已经恢复。',
+        scope: 'repository · pocketctl', branch: 'develop', version: 'v3 · 2026-08-24',
+        evidence: [
+          ['“Passing /health and /ready proves deployment health, not Provider data flow.”', 'session event · 2026-08-24 16:42'],
+          ['memory-api 与 memory-worker 均为 healthy，restart_count=0；provider_token_exchange 仍返回 provider_auth_failed。', 'tool result · 2026-08-24 16:47']
+        ]
+      },
+      {
+        type: 'TEST INVARIANT',
+        statement: 'Phase 1 产品 Gate 与单元测试/构建成功必须分开记录，缺少真实 Compose E2E 时不得宣称产品 Gate 通过。',
+        scope: 'repository · pocketctl', branch: 'feature/memory', version: 'v2 · 2026-08-26',
+        evidence: [
+          ['Phase 1 Gate remains BLOCKED pending private Golden Set, real Compose/Web/MCP E2E and Docker deployment evidence.', 'gate report · 2026-08-26 11:36'],
+          ['单元测试与构建可作为工程基线，不能替代历史数据和真实运行链路的产品证据。', 'review note · 2026-08-26 11:41']
+        ]
+      },
+      {
+        type: 'ARCHITECTURE DECISION',
+        statement: 'Relay 只签发短期 Capability Grant，不代理 Memory 业务流量；Web 使用受信任来源直接访问 Memory API。',
+        scope: 'system · memory', branch: 'all branches', version: 'v1 · 2026-08-24',
+        evidence: [
+          ['Web and agents mint short Relay Capability Grants and call Memory directly; Relay never proxies Memory business traffic.', 'ADR-P1-01 · 2026-08-24'],
+          ['Provider origins are operator configuration, never provider-submitted manifest data.', 'security boundary · 2026-08-24']
+        ]
+      }
+    ];
+
+    const libraryClaims = [
+      ['OPERATIONAL RUNBOOK', 'Memory-only 刷新后，必须分别验证 API、Worker、PostgreSQL 与 Provider 同步状态；HTTP 健康不等于数据流已经恢复。', 'repository · pocketctl'],
+      ['TEST INVARIANT', 'Phase 1 产品 Gate 与代码测试成功必须分开记录；产品 Gate 必须附真实运行证据。', 'repository · pocketctl'],
+      ['WORK METHOD', '只修改 UI 时，必须保留 API、事件、路由、WebSocket 与后端行为。', 'global · UI boundary'],
+      ['ARCHITECTURE DECISION', 'Relay 只签发短期 Capability Grant，不代理 Memory 业务流量。', 'system · memory']
+    ];
+
+    function showToast(message, tone = 'success') {
+      toast.querySelector('span').textContent = message;
+      toast.querySelector('i').style.background = tone === 'danger' ? 'var(--error)' : 'var(--success)';
+      toast.classList.add('show');
+      clearTimeout(toastTimer);
+      toastTimer = setTimeout(() => toast.classList.remove('show'), 2400);
+    }
+
+    function setPage(page) {
+      document.querySelectorAll('.module-tab').forEach(tab => {
+        const active = tab.dataset.page === page;
+        tab.classList.toggle('active', active);
+        tab.setAttribute('aria-selected', String(active));
+      });
+      document.querySelectorAll('.module-view').forEach(view => view.classList.toggle('active', view.dataset.view === page));
+      document.querySelectorAll('.workspace-action-group').forEach(group => { group.hidden = group.dataset.actions !== page; });
+      document.getElementById('workspace-description').textContent = pageDescriptions[page];
+      document.querySelectorAll('.detail-panel.mobile-open, .claim-library-detail.mobile-open').forEach(panel => panel.classList.remove('mobile-open'));
+    }
+
+    document.querySelectorAll('.module-tab').forEach(tab => tab.addEventListener('click', () => setPage(tab.dataset.page)));
+
+    document.getElementById('theme-toggle').addEventListener('click', () => {
+      root.dataset.theme = root.dataset.theme === 'light' ? 'dark' : 'light';
+    });
+
+    scenarioSelect.addEventListener('change', () => {
+      const scenario = scenarioSelect.value;
+      body.classList.toggle('is-degraded', scenario === 'degraded');
+      const gated = ['first-run', 'disabled', 'loading'].includes(scenario);
+      workspace.style.display = gated ? 'none' : '';
+      gateStage.style.display = gated ? 'grid' : 'none';
+      gateStage.querySelectorAll('[data-gate]').forEach(card => card.hidden = card.dataset.gate !== scenario);
+    });
+
+    document.getElementById('enable-services').addEventListener('click', () => {
+      scenarioSelect.value = 'active';
+      scenarioSelect.dispatchEvent(new Event('change'));
+      showToast('基础记忆服务已启用，MCP 仍保持关闭');
+    });
+
+    document.getElementById('memory-search-form').addEventListener('submit', event => {
+      event.preventDefault();
+      const input = document.getElementById('memory-search-input');
+      if (!input.value.trim()) return;
+      document.querySelector('.results-head span').textContent = '正在检索…';
+      setTimeout(() => {
+        document.querySelector('.results-head span').textContent = '3 条相关知识';
+        showToast('已完成混合检索');
+      }, 520);
+    });
+
+    document.querySelectorAll('.quick-query').forEach(button => button.addEventListener('click', () => {
+      document.getElementById('memory-search-input').value = button.textContent;
+      document.getElementById('memory-search-form').requestSubmit();
+    }));
+
+    document.querySelectorAll('.result-item').forEach(item => item.addEventListener('click', () => {
+      const index = Number(item.dataset.result);
+      const data = searchDetails[index];
+      document.querySelectorAll('.result-item').forEach(row => row.classList.toggle('selected', row === item));
+      document.getElementById('detail-type').textContent = data.type;
+      document.getElementById('detail-statement').textContent = data.statement;
+      document.getElementById('detail-scope').textContent = data.scope;
+      document.getElementById('detail-branch').textContent = data.branch;
+      document.getElementById('detail-version').textContent = data.version;
+      document.getElementById('detail-evidence').innerHTML = data.evidence.map(([quote, meta]) => `<article class="evidence-item"><blockquote>${quote}</blockquote><footer><span>${meta}</span></footer></article>`).join('');
+      if (window.innerWidth <= 860) document.getElementById('search-detail').classList.add('mobile-open');
+    }));
+
+    document.querySelector('[data-close-detail]').addEventListener('click', () => document.getElementById('search-detail').classList.remove('mobile-open'));
+
+    document.querySelectorAll('.queue-item').forEach(item => item.addEventListener('click', () => {
+      document.querySelectorAll('.queue-item').forEach(row => row.classList.toggle('selected', row === item));
+      const statement = item.querySelector('.queue-copy').textContent;
+      document.getElementById('candidate-statement').textContent = statement;
+      document.getElementById('candidate-edit-text').value = statement;
+      document.getElementById('candidate-edit-box').hidden = true;
+    }));
+
+    function updateReviewCount() {
+      ['header-review-count', 'sidebar-review-count', 'tab-review-count'].forEach(id => document.getElementById(id).textContent = reviewCount);
+    }
+
+    document.querySelectorAll('[data-review-action]').forEach(button => button.addEventListener('click', () => {
+      const action = button.dataset.reviewAction;
+      const editBox = document.getElementById('candidate-edit-box');
+      if (action === 'edit') {
+        editBox.hidden = !editBox.hidden;
+        if (!editBox.hidden) document.getElementById('candidate-edit-text').focus();
+        return;
+      }
+      const selected = document.querySelector('.queue-item.selected');
+      if (selected) selected.remove();
+      reviewCount = Math.max(0, reviewCount - 1);
+      updateReviewCount();
+      const next = document.querySelector('.queue-item');
+      if (next) next.click();
+      showToast(action === 'accept' ? '候选已接受并创建 Active Claim' : '候选已拒绝，不会进入知识库', action === 'reject' ? 'danger' : 'success');
+    }));
+
+    document.querySelectorAll('.claim-row').forEach(row => row.addEventListener('click', () => {
+      const index = Number(row.dataset.claim);
+      const [type, statement, scope] = libraryClaims[index];
+      document.querySelectorAll('.claim-row').forEach(item => item.classList.toggle('selected', item === row));
+      document.getElementById('library-type').textContent = type;
+      document.getElementById('library-statement').textContent = statement;
+      document.getElementById('library-scope').textContent = scope;
+      if (window.innerWidth <= 860) document.getElementById('claim-library-detail').classList.add('mobile-open');
+    }));
+
+    document.querySelector('[data-close-claim]').addEventListener('click', () => document.getElementById('claim-library-detail').classList.remove('mobile-open'));
+
+    document.querySelectorAll('[data-library-action]').forEach(button => button.addEventListener('click', () => {
+      const action = button.dataset.libraryAction;
+      if (action === 'delete') {
+        document.getElementById('danger-modal').classList.add('open');
+      } else if (action === 'correct') {
+        showToast('修正编辑器将在实现阶段复用当前正文与证据');
+      } else {
+        showToast('知识已撤销；历史版本仍可审计', 'danger');
+      }
+    }));
+
+    document.querySelectorAll('.mode-switch').forEach(group => {
+      group.querySelectorAll('.mode-button').forEach(button => button.addEventListener('click', () => {
+        if (button.classList.contains('active')) return;
+        group.querySelectorAll('.mode-button').forEach(item => item.classList.remove('active'));
+        button.classList.add('active');
+        pendingSetting = button.textContent;
+        document.getElementById('settings-savebar').classList.add('visible');
+      }));
+    });
+
+    document.getElementById('settings-cancel').addEventListener('click', () => {
+      document.getElementById('settings-savebar').classList.remove('visible');
+      pendingSetting = null;
+      showToast('已放弃未保存的模式更改');
+    });
+
+    document.getElementById('settings-save').addEventListener('click', () => {
+      if (pendingSetting && pendingSetting !== 'off') {
+        document.getElementById('consent-modal').classList.add('open');
+      } else {
+        document.getElementById('settings-savebar').classList.remove('visible');
+        showToast('自动功能模式已保存');
+      }
+    });
+
+    document.querySelectorAll('[data-modal-close]').forEach(button => button.addEventListener('click', () => button.closest('.modal-backdrop').classList.remove('open')));
+    document.querySelectorAll('.modal-backdrop').forEach(backdrop => backdrop.addEventListener('click', event => {
+      if (event.target === backdrop) backdrop.classList.remove('open');
+    }));
+    document.addEventListener('keydown', event => {
+      if (event.key === 'Escape') document.querySelectorAll('.modal-backdrop.open').forEach(modal => modal.classList.remove('open'));
+      if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'k') {
+        event.preventDefault();
+        setPage('search');
+        document.getElementById('memory-search-input').focus();
+      }
+    });
+
+    document.getElementById('consent-confirm').addEventListener('click', () => {
+      document.getElementById('consent-modal').classList.remove('open');
+      document.getElementById('settings-savebar').classList.remove('visible');
+      pendingSetting = null;
+      showToast('已记录提供方披露确认并保存设置');
+    });
+
+    document.getElementById('danger-confirm').addEventListener('click', () => {
+      document.getElementById('danger-modal').classList.remove('open');
+      const selected = document.querySelector('.claim-row.selected');
+      if (selected) selected.remove();
+      showToast('知识内容已删除，仅保留无内容墓碑', 'danger');
+    });
+  </script>
+</body>
+</html>

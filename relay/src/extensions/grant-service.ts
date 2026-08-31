@@ -5,6 +5,7 @@ import {
   createCapabilityGrantService,
   type CapabilityRouteDeps,
 } from './capability-routes.js'
+import { createV2GrantService } from './v2-grant-service.js'
 import { ExtensionApiError } from './errors.js'
 
 /**
@@ -21,6 +22,12 @@ export interface MemoryMcpGrantRequestMessage {
   type: 'memory_mcp_grant'
   /** Caller-supplied correlation id echoed verbatim. */
   request_id?: string
+  /**
+   * ADR-P3-05 explicit bounded scope selection (1..16 installation ids).
+   * Absent keeps the frozen personal-only v1 grant; the daemon never
+   * parses the resulting JWT and persists neither token nor scope list.
+   */
+  scope_installation_ids?: string[]
 }
 
 export interface MemoryMcpGrantResult {
@@ -28,7 +35,7 @@ export interface MemoryMcpGrantResult {
   request_id?: string
   grant: string
   expires_in: number
-  token_type: 'extension_capability'
+  token_type: 'extension_capability' | 'extension_capability_v2'
   installation_id: string
   provider_public_origin: string
   services: string[]
@@ -39,6 +46,7 @@ export interface MemoryMcpGrantError {
   request_id?: string
   code:
     | 'unauthenticated'
+    | 'invalid_request'
     | 'no_installation'
     | 'service_disabled'
     | 'installation_not_active'
@@ -53,6 +61,8 @@ export interface MemoryMcpGrantBrokerDeps {
   providerPublicOrigins: ReadonlyMap<string, string>
   grantKeys: NonNullable<CapabilityRouteDeps['grantKeys']>
   ttlSeconds?: number
+  /** ADR-P3-13 independent v2 flag; enables explicit scope selections. */
+  v2Mode?: ExtensionMode
 }
 
 interface AuthenticatedDaemon {
@@ -108,9 +118,48 @@ export function createMemoryMcpGrantBroker(deps: MemoryMcpGrantBrokerDeps) {
 
     async requestGrant(
     daemon: AuthenticatedDaemon,
+    scopeInstallationIds?: string[],
   ): Promise<MemoryMcpGrantResult | MemoryMcpGrantError> {
     if (daemon.userId === null || !Number.isInteger(daemon.userId) || daemon.userId <= 0) {
       return { type: 'memory_mcp_grant_error', code: 'unauthenticated' }
+    }
+    if (scopeInstallationIds !== undefined) {
+      // Explicit bounded selection mints a federated v2 grant; every binding
+      // still derives from the authenticated user inside the mint service.
+      if (!Array.isArray(scopeInstallationIds)
+        || scopeInstallationIds.length === 0
+        || scopeInstallationIds.length > 16
+        || scopeInstallationIds.some(id => typeof id !== 'string')) {
+        return { type: 'memory_mcp_grant_error', code: 'invalid_request' }
+      }
+      const v2 = createV2GrantService({
+        pool: deps.pool,
+        issuer: deps.issuer,
+        v2Mode: deps.v2Mode ?? 'off',
+        grantKeys: deps.grantKeys,
+        ttlSeconds: 60,
+      })
+      const mintedV2 = await v2.mint({
+        userId: daemon.userId,
+        installationIds: scopeInstallationIds,
+        callerType: 'agent',
+        services: ['memory.mcp'],
+      })
+      if (!mintedV2.ok) {
+        const code = mintedV2.code === 'feature_disabled' ? 'feature_disabled'
+          : mintedV2.code === 'not_found' ? 'no_installation'
+            : 'internal_error'
+        return { type: 'memory_mcp_grant_error', code }
+      }
+      return {
+        type: 'memory_mcp_grant_result',
+        grant: mintedV2.token,
+        expires_in: mintedV2.expiresInSeconds,
+        token_type: 'extension_capability_v2',
+        installation_id: scopeInstallationIds[0],
+        provider_public_origin: deps.providerPublicOrigins.get('pocketctl-memory') ?? '',
+        services: ['memory.mcp'],
+      }
     }
       const resolved = await this.resolveInstallation(daemon.userId)
     if ('error' in resolved) {
@@ -156,8 +205,11 @@ export async function handleMemoryMcpGrantMessage(
   const requestId = typeof message?.request_id === 'string'
     ? message.request_id.slice(0, 128)
     : undefined
+  const scopeInstallationIds = Array.isArray(message?.scope_installation_ids)
+    ? (message.scope_installation_ids as string[])
+    : undefined
   try {
-    const result = await broker.requestGrant(daemon)
+    const result = await broker.requestGrant(daemon, scopeInstallationIds)
     send(JSON.stringify(
       'grant' in result ? { ...result, ...(requestId ? { request_id: requestId } : {}) }
         : { ...result, ...(requestId ? { request_id: requestId } : {}) },
@@ -171,4 +223,230 @@ export async function handleMemoryMcpGrantMessage(
     // Bounded code only — never the error message or stack.
     send(JSON.stringify({ type: 'memory_mcp_grant_error', ...(requestId ? { request_id: requestId } : {}), code: 'internal_error' }))
   }
+}
+
+/**
+ * Phase 2 session-bound context grant broker (plan 10.1). The daemon asks
+ * for a `memory.context` grant bound to one of its OWN sessions; Relay
+ * derives the user from the authenticated connection and verifies session
+ * ownership + exactly one active Memory installation + the enabled service
+ * inside one SQL authorization boundary. Existing installations never get
+ * the service implicitly — the operator enables it explicitly.
+ */
+export interface MemoryContextGrantRequestMessage {
+  type: 'memory_context_grant'
+  request_id?: string
+  session_id: string
+}
+
+export interface MemoryContextGrantResult {
+  type: 'memory_context_grant_result'
+  request_id?: string
+  grant: string
+  expires_in: number
+  token_type: 'extension_capability'
+  installation_id: string
+  session_id: string
+  provider_public_origin: string
+  services: string[]
+}
+
+export interface MemoryContextGrantError {
+  type: 'memory_context_grant_error'
+  request_id?: string
+  code:
+    | 'unauthenticated'
+    | 'invalid_request'
+    | 'no_installation'
+    | 'service_disabled'
+    | 'installation_not_active'
+    | 'session_not_owned'
+    | 'feature_disabled'
+    | 'internal_error'
+}
+
+export interface ContextGrantResolution {
+  installationId: string
+}
+
+export function createMemoryContextGrantBroker(deps: MemoryMcpGrantBrokerDeps & {
+  ttlSeconds?: number
+}) {
+  const ttl = Math.min(deps.ttlSeconds ?? 300, 300)
+  const routeDeps: CapabilityRouteDeps = {
+    pool: deps.pool,
+    verifyAccessToken: async () => null,
+    mode: deps.mode,
+    issuer: deps.issuer,
+    providerPublicOrigins: deps.providerPublicOrigins,
+    ttlSeconds: ttl,
+  }
+  const mint = createCapabilityGrantService(routeDeps, deps.grantKeys)
+
+  return {
+    /**
+     * Resolve (installation, session ownership) in ONE query: the session
+     * must belong to the authenticated user and exactly one active Memory
+     * installation must carry memory.context.
+     */
+    async resolveForSession(input: {
+      userId: number
+      sessionId: string
+    }): Promise<ContextGrantResolution | {
+      error: 'no_installation' | 'service_disabled' | 'installation_not_active' | 'session_not_owned'
+    }> {
+      const result = await deps.pool.query<{
+        installation_id: string
+        status: string
+        enabled_services: string[]
+        session_owned: boolean
+      }>(`
+        SELECT i.installation_id::text, i.status, i.enabled_services,
+               EXISTS (
+                 SELECT 1 FROM sessions s
+                 WHERE s.session_id = $2 AND s.user_id = $1
+               ) AS session_owned
+        FROM extension_installations i
+        WHERE i.owner_user_id = $1 AND i.provider_id = 'pocketctl-memory'
+        ORDER BY i.created_at
+      `, [input.userId, input.sessionId])
+      const rows = result.rows
+      if (rows.length === 0) return { error: 'no_installation' }
+      if (!rows.some(row => row.session_owned)) return { error: 'session_not_owned' }
+      const active = rows.filter(row => row.status === 'active')
+      if (active.length === 0) return { error: 'installation_not_active' }
+      if (active.length !== 1) return { error: 'no_installation' }
+      if (!active[0].enabled_services.includes('memory.context')) return { error: 'service_disabled' }
+      return { installationId: active[0].installation_id }
+    },
+
+    async requestGrant(daemon: {
+      userId: number | null
+    }, sessionId: string): Promise<MemoryContextGrantResult | MemoryContextGrantError> {
+      if (daemon.userId === null || !Number.isInteger(daemon.userId) || daemon.userId <= 0) {
+        return { type: 'memory_context_grant_error', code: 'unauthenticated' }
+      }
+      if (typeof sessionId !== 'string' || sessionId.length === 0 || sessionId.length > 64) {
+        return { type: 'memory_context_grant_error', code: 'invalid_request' }
+      }
+      const resolved = await this.resolveForSession({ userId: daemon.userId, sessionId })
+      if ('error' in resolved) {
+        return { type: 'memory_context_grant_error', code: resolved.error }
+      }
+      const minted = await mint.mint({
+        userId: daemon.userId,
+        installationId: resolved.installationId,
+        callerType: 'daemon',
+        services: ['memory.context'],
+        sessionId,
+      })
+      if (!minted.ok) {
+        const code = minted.error.code === 'feature_disabled' ? 'feature_disabled' : 'internal_error'
+        return { type: 'memory_context_grant_error', code }
+      }
+      return {
+        type: 'memory_context_grant_result',
+        grant: minted.token,
+        expires_in: Math.min(minted.expiresInSeconds, ttl),
+        token_type: 'extension_capability',
+        installation_id: resolved.installationId,
+        session_id: sessionId,
+        provider_public_origin: minted.providerPublicOrigin ?? '',
+        services: ['memory.context'],
+      }
+    },
+  }
+}
+
+export type MemoryContextGrantBroker = ReturnType<typeof createMemoryContextGrantBroker>
+
+export async function handleMemoryContextGrantMessage(
+  broker: MemoryContextGrantBroker,
+  daemon: { userId: number | null },
+  msg: unknown,
+  send: (payload: string) => void,
+): Promise<void> {
+  const message = msg as Partial<MemoryContextGrantRequestMessage>
+  const requestId = typeof message?.request_id === 'string'
+    ? message.request_id.slice(0, 128)
+    : undefined
+  const sessionId = typeof message?.session_id === 'string' ? message.session_id : ''
+  try {
+    const result = await broker.requestGrant(daemon, sessionId)
+    send(JSON.stringify(
+      'grant' in result ? { ...result, ...(requestId ? { request_id: requestId } : {}) }
+        : { ...result, ...(requestId ? { request_id: requestId } : {}) },
+    ))
+  } catch {
+    send(JSON.stringify({
+      type: 'memory_context_grant_error',
+      ...(requestId ? { request_id: requestId } : {}),
+      code: 'internal_error',
+    }))
+  }
+}
+
+/**
+ * Two-phase managed-session registration (plan 10.1): Relay durably
+ * registers the daemon-created session BEFORE the initial prompt dispatch,
+ * then answers a bounded ack. The ack is a readiness signal, never an
+ * authorization token.
+ */
+export interface SessionRegistrationMessage {
+  type: 'session_registration'
+  request_id?: string
+  session_id: string
+}
+
+export interface SessionRegistrationAck {
+  type: 'session_registration_ack'
+  request_id?: string
+  session_id: string
+  status: 'ready'
+}
+
+export async function handleSessionRegistrationMessage(
+  deps: { pool: pg.Pool },
+  daemon: { userId: number; daemonId?: string },
+  msg: unknown,
+  send: (payload: string) => void,
+): Promise<void> {
+  const message = msg as Partial<SessionRegistrationMessage>
+  const requestId = typeof message?.request_id === 'string'
+    ? message.request_id.slice(0, 128)
+    : undefined
+  const sessionId = typeof message?.session_id === 'string' ? message.session_id : ''
+  if (!sessionId || sessionId.length > 64 || !daemon.daemonId) {
+    send(JSON.stringify({
+      type: 'session_registration_error',
+      ...(requestId ? { request_id: requestId } : {}),
+      code: 'invalid_request',
+    }))
+    return
+  }
+  // Durable write first: an owned session row exists before the ack fires.
+  const registered = await deps.pool.query<{ session_id: string }>(`
+    INSERT INTO sessions (session_id, user_id, daemon_id, source, status, created_at, updated_at)
+    VALUES ($1, $2, $3, 'daemon', 'active', NOW(), NOW())
+    ON CONFLICT (session_id) DO UPDATE
+      SET updated_at = NOW(), last_activity_at = NOW()
+      WHERE sessions.user_id = EXCLUDED.user_id
+        AND sessions.daemon_id = EXCLUDED.daemon_id
+    RETURNING session_id
+  `, [sessionId, daemon.userId, daemon.daemonId])
+  if (registered.rows.length !== 1) {
+    send(JSON.stringify({
+      type: 'session_registration_error',
+      ...(requestId ? { request_id: requestId } : {}),
+      code: 'forbidden',
+    }))
+    return
+  }
+  const ack: SessionRegistrationAck = {
+    type: 'session_registration_ack',
+    session_id: sessionId,
+    status: 'ready',
+    ...(requestId ? { request_id: requestId } : {}),
+  }
+  send(JSON.stringify(ack))
 }

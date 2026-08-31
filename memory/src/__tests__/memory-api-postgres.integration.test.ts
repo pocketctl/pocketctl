@@ -16,6 +16,7 @@ import { registerManageRoutes } from '../api/manage-routes.js'
 import { createSettingsRepository } from '../settings/repository.js'
 import { normalizedClaimKey } from '../retrieval/query-normalizer.js'
 import { tombstoneIdentityHmac } from '../claims/tombstones.js'
+import { createPackRepository } from '../context/pack-repository.js'
 
 const databaseUrl = process.env.MEMORY_TEST_DATABASE_URL
 const integrationEnabled = Boolean(
@@ -102,7 +103,10 @@ describeWithDatabase('memory api under real capability grants (PostgreSQL)', () 
     reviewDecisionMetrics = 0
     candidateStatusMetrics = 0
     await pool.query(`
-      TRUNCATE memory_idempotency_keys, memory_feedback, memory_jobs,
+      TRUNCATE memory_context_feedback, memory_context_injections,
+               memory_context_pack_evidence, memory_context_pack_items,
+               memory_context_packs, memory_generation_runs,
+               memory_idempotency_keys, memory_feedback, memory_jobs,
                claim_search_documents, knowledge_evidence, memory_candidates,
                memory_extraction_runs, knowledge_versions, knowledge_claims,
                knowledge_tombstones, work_episodes, source_turns, source_events,
@@ -227,6 +231,87 @@ describeWithDatabase('memory api under real capability grants (PostgreSQL)', () 
     const body = response.json()
     expect(body.error.code).toBe('not_found')
     expect(JSON.stringify(body)).not.toContain(OTHER_INSTALLATION)
+  })
+
+  test('lists only active claims for the granted installation with stable pagination', async () => {
+    const seedClaim = async (input: {
+      installationId: string
+      state: 'active' | 'revoked'
+      statement: string
+      updatedAt: string
+    }) => {
+      const claim = await pool.query<{ claim_id: string }>(`
+        INSERT INTO knowledge_claims
+          (claim_id, installation_id, claim_type, scope_kind, scope_key,
+           normalized_key, state, updated_at)
+        VALUES (gen_random_uuid(), $1, 'work_method', 'installation', 'global',
+                $2, $3, $4::timestamptz)
+        RETURNING claim_id::text
+      `, [input.installationId, `list-${input.statement}`, input.state, input.updatedAt])
+      const version = await pool.query<{ version_id: string }>(`
+        INSERT INTO knowledge_versions
+          (version_id, installation_id, claim_id, version_number, statement,
+           authority, confidence, freshness_at)
+        VALUES (gen_random_uuid(), $1, $2, 1, $3, 'user_accepted', 1, $4::timestamptz)
+        RETURNING version_id::text
+      `, [input.installationId, claim.rows[0].claim_id, input.statement, input.updatedAt])
+      await pool.query(`
+        UPDATE knowledge_claims
+        SET current_version_id = $2, updated_at = $3::timestamptz
+        WHERE installation_id = $1 AND claim_id = $4
+      `, [input.installationId, version.rows[0].version_id, input.updatedAt, claim.rows[0].claim_id])
+      return claim.rows[0].claim_id
+    }
+
+    const olderClaimId = await seedClaim({
+      installationId: INSTALLATION,
+      state: 'active',
+      statement: 'Older active knowledge',
+      updatedAt: '2026-08-27T10:00:00.000Z',
+    })
+    const newerClaimId = await seedClaim({
+      installationId: INSTALLATION,
+      state: 'active',
+      statement: 'Newer active knowledge',
+      updatedAt: '2026-08-28T10:00:00.000Z',
+    })
+    await seedClaim({
+      installationId: INSTALLATION,
+      state: 'revoked',
+      statement: 'Revoked knowledge',
+      updatedAt: '2026-08-29T10:00:00.000Z',
+    })
+    await seedClaim({
+      installationId: OTHER_INSTALLATION,
+      state: 'active',
+      statement: 'Other installation knowledge',
+      updatedAt: '2026-08-30T10:00:00.000Z',
+    })
+
+    const first = await app.inject({
+      method: 'GET', url: '/api/v1/memory/claims?state=active&limit=1',
+      headers: authHeaders(['memory.search']),
+    })
+    expect(first.statusCode).toBe(200)
+    expect(first.json()).toMatchObject({
+      total_count: 2,
+      claims: [{ claim_id: newerClaimId, statement: 'Newer active knowledge', state: 'active' }],
+    })
+    expect(first.json().next_cursor).toEqual(expect.any(String))
+
+    const second = await app.inject({
+      method: 'GET',
+      url: `/api/v1/memory/claims?state=active&limit=1&cursor=${encodeURIComponent(first.json().next_cursor)}`,
+      headers: authHeaders(['memory.search']),
+    })
+    expect(second.statusCode).toBe(200)
+    expect(second.json()).toMatchObject({
+      total_count: 2,
+      claims: [{ claim_id: olderClaimId, statement: 'Older active knowledge', state: 'active' }],
+      next_cursor: null,
+    })
+    expect(JSON.stringify([first.json(), second.json()])).not.toContain('Other installation knowledge')
+    expect(JSON.stringify([first.json(), second.json()])).not.toContain('Revoked knowledge')
   })
 
   test('accept runs end-to-end with idempotent replay', async () => {
@@ -389,6 +474,57 @@ describeWithDatabase('memory api under real capability grants (PostgreSQL)', () 
       `, [INSTALLATION, tombstoneIdentityHmac(key, 't'.repeat(32))])
       expect(tombstone.rows[0].count).toBe(1)
     }
+  })
+
+  test('claim revocation atomically invalidates dependent pending context packs', async () => {
+    const claim = await pool.query<{ claim_id: string }>(`
+      INSERT INTO knowledge_claims
+        (claim_id, installation_id, claim_type, scope_kind, scope_key, normalized_key, state, revision)
+      VALUES (gen_random_uuid(), $1, 'repository_convention', 'installation', 'global',
+              'revoke-context-pack', 'active', 1)
+      RETURNING claim_id::text
+    `, [INSTALLATION])
+    const version = await pool.query<{ version_id: string }>(`
+      INSERT INTO knowledge_versions
+        (version_id, installation_id, claim_id, version_number, statement, authority, confidence, freshness_at)
+      VALUES (gen_random_uuid(), $1, $2, 1, 'context pack source', 'user_accepted', 1, NOW())
+      RETURNING version_id::text
+    `, [INSTALLATION, claim.rows[0].claim_id])
+    await pool.query(`UPDATE knowledge_claims SET current_version_id = $2 WHERE claim_id = $1`,
+      [claim.rows[0].claim_id, version.rows[0].version_id])
+    const evidence = await pool.query<{ evidence_id: string }>(`
+      INSERT INTO knowledge_evidence
+        (evidence_id, installation_id, version_id, episode_id, evidence_kind,
+         excerpt, excerpt_hash, occurred_at, ordinal)
+      SELECT gen_random_uuid(), $1, $2, episode_id, 'episode', 'context source',
+             sha256(convert_to('context source', 'utf8')), NOW(), 0
+      FROM work_episodes WHERE installation_id = $1 LIMIT 1
+      RETURNING evidence_id::text
+    `, [INSTALLATION, version.rows[0].version_id])
+    const packId = await createPackRepository(pool).persist({
+      installationId: INSTALLATION, generationRunId: null, trajectoryId: null, sessionId: 'ses-1',
+      clientRequestId: 'cr-claim-revoke', agent: 'codex', repositoryId: null, mode: 'enabled',
+      effectivePolicyHash: Buffer.alloc(32, 1), settingsFingerprint: Buffer.alloc(32, 2),
+      loadoutFingerprint: Buffer.alloc(32, 3), inputDigest: Buffer.alloc(32, 4),
+      policyRevision: 1, settingsRevision: 1, loadoutRevision: 1, state: 'ready',
+      items: [{
+        itemId: crypto.randomUUID(), claimId: claim.rows[0].claim_id,
+        versionId: version.rows[0].version_id, claimType: 'repository_convention',
+        layer: 'L2', section: 'dynamic', representation: 'summary',
+        statement: 'context pack source', scopeKind: 'installation',
+        reasonCodes: ['ranked'], evidenceIds: [evidence.rows[0].evidence_id],
+      }],
+    })
+
+    const response = await app.inject({
+      method: 'POST', url: `/api/v1/memory/claims/${claim.rows[0].claim_id}/revoke`,
+      headers: { ...authHeaders(['memory.manage']), 'idempotency-key': 'revoke-context-pack' },
+      payload: { expected_revision: 1 },
+    })
+    expect(response.statusCode).toBe(200)
+    const pack = await pool.query<{ state: string; error_code: string }>(
+      `SELECT state, error_code FROM memory_context_packs WHERE pack_id = $1`, [packId])
+    expect(pack.rows[0]).toEqual({ state: 'invalidated', error_code: 'claim_state_changed' })
   })
 
   test('enabling configured modes backfills stable episodes and active claim indexes', async () => {

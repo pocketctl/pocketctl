@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -649,6 +650,32 @@ func TestOpenCodeSessionMetaUsesLoadedAuthoritativeState(t *testing.T) {
 	sm.ShutdownOpencode()
 }
 
+func TestBuildSessionMetaLoadsHistoricalCodexBeforeTryingUnavailableOpenCode(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("CODEX_HOME", filepath.Join(home, ".codex"))
+	// Keep this fixture hermetic: a historical Codex lookup must not depend on
+	// an OpenCode executable or server being available on the host.
+	t.Setenv("PATH", filepath.Join(home, "bin"))
+
+	const sessionID = "01a04272-2da9-7bd1-b95b-5fd6e0fea150"
+	rolloutDir := filepath.Join(home, ".codex", "sessions", "2026", "08", "27")
+	if err := os.MkdirAll(rolloutDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	rollout := filepath.Join(rolloutDir, "rollout-2026-08-27T16-59-34-"+sessionID+".jsonl")
+	lines := "{\"type\":\"session_meta\",\"payload\":{\"id\":\"" + sessionID + "\",\"cwd\":\"/repo\"}}\n" +
+		"{\"type\":\"turn_context\",\"payload\":{\"model\":\"gpt-5.6-terra\",\"effort\":\"xhigh\"}}\n"
+	if err := os.WriteFile(rollout, []byte(lines), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	meta := buildSessionMeta(context.Background(), session.NewSessionManager(make(chan protocol.DaemonEvent, 8)), sessionID, slog.Default())
+	if meta.Model != "gpt-5.6-terra" || meta.Effort != "xhigh" || meta.Cwd != "/repo" {
+		t.Fatalf("meta=%+v", meta)
+	}
+}
+
 func TestOpenCodeInteractionRaceResolvedElsewhereIsSuccessResult(t *testing.T) {
 	event := interactionCommandResultEvent(
 		"approval_response", "ses_1", "per_1",
@@ -1123,6 +1150,45 @@ func TestReconnectDiscoveryEventIsMarkedAsResync(t *testing.T) {
 	}
 	if event.SessionID != "session-a" || event.Source != "terminal" {
 		t.Fatalf("event = %#v, want session identity and source preserved", event)
+	}
+}
+
+func TestReconnectDiscoveryEventCarriesExplicitRepositoryFacts(t *testing.T) {
+	repo := t.TempDir()
+	for _, args := range [][]string{
+		{"init", repo},
+		{"-C", repo, "remote", "add", "origin", "git@gitee.com:muwb123/pocketctl.git"},
+		{"-C", repo, "config", "user.name", "PocketCtl Test"},
+		{"-C", repo, "config", "user.email", "test@pocketctl.invalid"},
+		{"-C", repo, "commit", "--allow-empty", "-m", "initial"},
+	} {
+		if output, err := exec.Command("git", args...).CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v: %s", args, err, output)
+		}
+	}
+
+	event := reconnectDiscoveryEvent(session.SessionInfo{
+		SessionID: "session-repository", Cwd: repo, Status: protocol.StatusIdle, Agent: adapter.AgentCodex,
+	})
+	encoded, err := json.Marshal(event)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(encoded, &payload); err != nil {
+		t.Fatal(err)
+	}
+	if got := payload["repository_id"]; got != "gitee.com/muwb123/pocketctl" {
+		t.Fatalf("repository_id = %#v, want explicit canonical remote", got)
+	}
+	if branch, ok := payload["branch"].(string); !ok || branch == "" || branch == "HEAD" {
+		t.Fatalf("branch = %#v, want current symbolic branch", payload["branch"])
+	}
+	if commit, ok := payload["commit_sha"].(string); !ok || len(commit) != 40 {
+		t.Fatalf("commit_sha = %#v, want full Git commit", payload["commit_sha"])
+	}
+	if _, leaked := payload["cwd_fingerprint"]; leaked {
+		t.Fatalf("unexpected cwd-derived identity in payload: %#v", payload)
 	}
 }
 

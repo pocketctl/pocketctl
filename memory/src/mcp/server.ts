@@ -7,6 +7,7 @@ import type { CorsHostPolicy } from '../auth/cors-host-policy.js'
 import { MemoryApiError, errorBody } from '../api/errors.js'
 import { registerMemoryTools } from './tools.js'
 import type { EmbeddingProvider } from '../ports/embedding-provider.js'
+import type { VerifiedMemoryGrant } from '../auth/grant-guard.js'
 
 /**
  * Stateless read-only MCP endpoint (ADR-P1-05). The bearer Capability Grant
@@ -17,7 +18,7 @@ import type { EmbeddingProvider } from '../ports/embedding-provider.js'
  * write tools, or server-initiated notifications exist.
  */
 
-const requestScope = new AsyncLocalStorage<{ installationId: string }>()
+const requestScope = new AsyncLocalStorage<{ grant: VerifiedMemoryGrant }>()
 
 export interface McpRouteDeps {
   pool: pg.Pool
@@ -29,6 +30,7 @@ export interface McpRouteDeps {
   cursorSigningKey: string
   embed?: EmbeddingProvider & { provider: string; model: string }
   embeddingConsentFingerprint?: string
+  sharedScopesEnabled?: boolean
 }
 
 export function createMemoryMcpHandler(deps: McpRouteDeps): McpHttpHandler {
@@ -36,7 +38,8 @@ export function createMemoryMcpHandler(deps: McpRouteDeps): McpHttpHandler {
     const server = new McpServer({ name: 'pocketctl-memory', version: deps.providerVersion })
     registerMemoryTools(server, {
       pool: deps.pool,
-      installationId: () => requestScope.getStore()?.installationId ?? '',
+      grant: () => requestScope.getStore()?.grant,
+      sharedScopesEnabled: deps.sharedScopesEnabled === true,
       recallEmbeddingTimeoutMs: deps.recallEmbeddingTimeoutMs,
       cursorSigningKey: deps.cursorSigningKey,
       ...(deps.embed ? { embed: deps.embed } : {}),
@@ -50,7 +53,7 @@ export function createMemoryMcpHandler(deps: McpRouteDeps): McpHttpHandler {
 
 export function registerMcpRoute(app: FastifyInstance, deps: McpRouteDeps): void {
   const handler = createMemoryMcpHandler(deps)
-  const authenticated = new WeakMap<object, string>()
+  const authenticated = new WeakMap<object, VerifiedMemoryGrant>()
 
   app.addHook('onRequest', async (request, reply) => {
     if (request.url.split('?')[0] !== '/mcp') return
@@ -64,7 +67,7 @@ export function registerMcpRoute(app: FastifyInstance, deps: McpRouteDeps): void
     }
     if (request.method === 'POST') {
       try {
-        const grant = await deps.guard.guard({
+        const grant = await deps.guard.guardMcp({
           authorization: request.headers.authorization,
           requiredService: 'memory.mcp',
         })
@@ -72,7 +75,7 @@ export function registerMcpRoute(app: FastifyInstance, deps: McpRouteDeps): void
           reply.code(429).send(errorBody(new MemoryApiError('rate_limited', 'rate limit exceeded')))
           return reply
         }
-        authenticated.set(request, grant.installationId)
+        authenticated.set(request, grant)
       } catch (error) {
         if (error instanceof MemoryApiError) {
           reply.code(error.httpStatus).send(errorBody(error))
@@ -96,8 +99,8 @@ export function registerMcpRoute(app: FastifyInstance, deps: McpRouteDeps): void
       reply.code(415)
       return errorBody(new MemoryApiError('invalid_request', 'content-type must be application/json'))
     }
-    const installationId = authenticated.get(request)
-    if (!installationId) {
+    const grant = authenticated.get(request)
+    if (!grant) {
       reply.code(401)
       return errorBody(new MemoryApiError('unauthorized', 'grant rejected'))
     }
@@ -121,7 +124,7 @@ export function registerMcpRoute(app: FastifyInstance, deps: McpRouteDeps): void
       },
       ...(body !== undefined ? { body: body as string } : {}),
     })
-    const response = await requestScope.run({ installationId }, () => handler.fetch(incoming))
+    const response = await requestScope.run({ grant }, () => handler.fetch(incoming))
     reply.code(response.status)
     const responseContentType = response.headers.get('content-type')
     if (responseContentType) reply.header('content-type', responseContentType)

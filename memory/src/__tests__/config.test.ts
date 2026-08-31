@@ -30,6 +30,10 @@ describe('memory config', () => {
     expect(config.httpTimeoutMs).toBe(10000)
     expect(config.jobLeaseMs).toBe(30000)
     expect(config.episodeStabilizationMs).toBe(30000)
+    expect(config.extractionDebounceMs).toBe(120000)
+    expect(config.extractionMaxRunsPerEpisode).toBe(1)
+    expect(config.extractionNotBefore).toBeNull()
+    expect(config.providerBudget).toBeUndefined()
     expect(config.logLevel).toBe('info')
   })
 
@@ -38,6 +42,14 @@ describe('memory config', () => {
     expect(loadMemoryConfig(baseEnv({ MEMORY_MODE: 'shadow' })).mode).toBe('shadow')
     expect(() => loadMemoryConfig(baseEnv({ MEMORY_MODE: 'verbose' }))).toThrow(/MEMORY_MODE/)
     expect(() => loadMemoryConfig(baseEnv({ MEMORY_MODE: '' }))).toThrow(/MEMORY_MODE/)
+  })
+
+  test('loads the independent shared-scope mode into the runtime config', () => {
+    expect(loadMemoryConfig(baseEnv()).sharedScopesMode).toBe('off')
+    expect(loadMemoryConfig(baseEnv({ MEMORY_SHARED_SCOPES: 'shadow' })).sharedScopesMode).toBe('shadow')
+    expect(loadMemoryConfig(baseEnv({ MEMORY_SHARED_SCOPES: 'enabled' })).sharedScopesMode).toBe('enabled')
+    expect(() => loadMemoryConfig(baseEnv({ MEMORY_SHARED_SCOPES: 'invalid' })))
+      .toThrow(/MEMORY_SHARED_SCOPES/)
   })
 
   test('pins the provider id to pocketctl-memory', () => {
@@ -81,6 +93,41 @@ describe('memory config', () => {
     expect(() => loadMemoryConfig(baseEnv({ MEMORY_HTTP_TIMEOUT_MS: '1' }))).toThrow(/MEMORY_HTTP_TIMEOUT_MS/)
     expect(() => loadMemoryConfig(baseEnv({ MEMORY_JOB_LEASE_MS: '10' }))).toThrow(/MEMORY_JOB_LEASE_MS/)
     expect(() => loadMemoryConfig(baseEnv({ MEMORY_EPISODE_STABILIZATION_MS: '-1' }))).toThrow(/MEMORY_EPISODE_STABILIZATION_MS/)
+    expect(() => loadMemoryConfig(baseEnv({ MEMORY_EXTRACTION_DEBOUNCE_MS: '-1' }))).toThrow(/MEMORY_EXTRACTION_DEBOUNCE_MS/)
+    expect(() => loadMemoryConfig(baseEnv({ MEMORY_EXTRACTION_MAX_RUNS_PER_EPISODE: '0' }))).toThrow(/MEMORY_EXTRACTION_MAX_RUNS_PER_EPISODE/)
+  })
+
+  test('parses the extraction cutoff and rejects ambiguous timestamps', () => {
+    expect(loadMemoryConfig(baseEnv({
+      MEMORY_EXTRACTION_NOT_BEFORE: '2026-08-31T00:00:00.000Z',
+    })).extractionNotBefore?.toISOString()).toBe('2026-08-31T00:00:00.000Z')
+    expect(() => loadMemoryConfig(baseEnv({ MEMORY_EXTRACTION_NOT_BEFORE: '2026-08-31' })))
+      .toThrow(/MEMORY_EXTRACTION_NOT_BEFORE/)
+  })
+
+  test('provider budget configuration is all-or-nothing and bounded', () => {
+    const budget = {
+      MEMORY_PROVIDER_BUDGET_KEY: 'phase3-pilot-b',
+      MEMORY_TEXT_BUDGET_MAX_REQUESTS: '8',
+      MEMORY_TEXT_BUDGET_MAX_INPUT_TOKENS: '100000',
+      MEMORY_TEXT_BUDGET_MAX_OUTPUT_TOKENS: '50000',
+      MEMORY_TEXT_MAX_OUTPUT_TOKENS_PER_REQUEST: '4096',
+      MEMORY_EMBEDDING_BUDGET_MAX_REQUESTS: '20',
+      MEMORY_EMBEDDING_BUDGET_MAX_TOKENS: '20000',
+    }
+    expect(loadMemoryConfig(baseEnv(budget)).providerBudget).toEqual({
+      key: 'phase3-pilot-b',
+      textMaxRequests: 8,
+      textMaxInputTokens: 100000,
+      textMaxOutputTokens: 50000,
+      textMaxOutputTokensPerRequest: 4096,
+      embeddingMaxRequests: 20,
+      embeddingMaxTokens: 20000,
+    })
+    expect(() => loadMemoryConfig(baseEnv({ MEMORY_PROVIDER_BUDGET_KEY: 'phase3-pilot-b' })))
+      .toThrow(/MEMORY_TEXT_BUDGET_MAX_REQUESTS/)
+    expect(() => loadMemoryConfig(baseEnv({ MEMORY_TEXT_BUDGET_MAX_REQUESTS: '8' })))
+      .toThrow(/MEMORY_PROVIDER_BUDGET_KEY/)
   })
 
   test('bounds the worker id to 64 characters', () => {

@@ -522,7 +522,7 @@ describeWithDatabase('episode packet persistence (PostgreSQL)', () => {
     expect((document.timeline?.length ?? 0)).toBeGreaterThanOrEqual(3)
     expect(Object.keys(row.evidence_manifest).length).toBeGreaterThan(0)
     expect(row.source_digest).not.toBeNull()
-    expect(row.document_compiler_version).toBe('memory-episode-packet-v2')
+    expect(row.document_compiler_version).toBe('memory-episode-packet-v3')
     expect(row.compiled_at).not.toBeNull()
     expect(await extractionJobs()).toBe(1)
   })
@@ -537,7 +537,7 @@ describeWithDatabase('episode packet persistence (PostgreSQL)', () => {
     expect(await extractionJobs()).toBe(1)
   })
 
-  test('a late same-turn event rebuilds the packet and enqueues exactly one new job per digest', async () => {
+  test('a late same-turn event rebuilds the packet but coalesces extraction by turn', async () => {
     await episodes.compileTurn(INSTALLATION, 'turn-1')
     const first = await episodeRow()
     await insertInboxRow(pool, {
@@ -549,7 +549,11 @@ describeWithDatabase('episode packet persistence (PostgreSQL)', () => {
     await episodes.compileTurn(INSTALLATION, 'turn-1')
     const second = await episodeRow()
     expect(second.source_digest!.equals(first.source_digest!)).toBe(false)
-    expect(await extractionJobs()).toBe(2)
+    expect(await extractionJobs()).toBe(1)
+    const job = await pool.query<{ idempotency_key: string; state: string }>(`
+      SELECT idempotency_key, state FROM memory_jobs WHERE job_type = 'extract_candidates'
+    `)
+    expect(job.rows).toEqual([{ idempotency_key: 'extract:turn-1', state: 'pending' }])
     const episodesCount = await pool.query<{ count: string }>(
       `SELECT COUNT(*)::text AS count FROM work_episodes WHERE installation_id = $1`, [INSTALLATION],
     )
@@ -588,6 +592,81 @@ describeWithDatabase('episode packet persistence (PostgreSQL)', () => {
     const repository = (result.rows[0].document as { repository?: { repository_id?: string | null; commit_sha?: string | null } }).repository
     expect(repository?.repository_id).toBe(observedId)
     expect(repository?.commit_sha).toBe('abc123def4567890')
+    expect(JSON.stringify(result.rows[0].document)).not.toContain('/home/alice')
+  })
+
+  test('inherits repository identity only from the same-session lifecycle when turn events omit it', async () => {
+    const repositoryKey = 'gitee.com/muwb123/pocketctl'
+    const otherRepositoryKey = 'gitee.com/muwb123/other-project'
+    const commitSha = '0123456789abcdef0123456789abcdef01234567'
+    const observedAt = new Date('2026-08-29T00:00:00.000Z')
+    await insertInboxRow(pool, {
+      feed_id: 5,
+      session_id: 'ses-lifecycle',
+      turn_id: null,
+      event_type: 'session_created',
+      recorded_at: observedAt,
+      data: {
+        agent_type: 'codex',
+        cwd: '/home/alice/pocketctl',
+        repository_id: repositoryKey,
+        branch: 'develop',
+        commit_sha: commitSha,
+      },
+    })
+    await insertInboxRow(pool, {
+      feed_id: 6,
+      session_id: 'ses-other',
+      turn_id: null,
+      event_type: 'session_discovered',
+      recorded_at: new Date(observedAt.getTime() + 500),
+      data: {
+        agent_type: 'codex',
+        repository_id: otherRepositoryKey,
+        branch: 'main',
+        commit_sha: 'abcdef0123456789abcdef0123456789abcdef01',
+      },
+    })
+    await insertInboxRow(pool, {
+      feed_id: 7,
+      session_id: 'ses-lifecycle',
+      turn_id: 'turn-lifecycle',
+      event_type: 'user_goal',
+      recorded_at: new Date(observedAt.getTime() + 1_000),
+      data: { text: 'Verify repository inheritance', event_id: 'goal-lifecycle' },
+    })
+    await insertInboxRow(pool, {
+      feed_id: 8,
+      session_id: 'ses-lifecycle',
+      turn_id: 'turn-lifecycle',
+      event_type: 'turn_status',
+      recorded_at: new Date(observedAt.getTime() + 2_000),
+      data: { turn_status: 'completed' },
+    })
+
+    const projector = createSourceProjector(pool)
+    await projector.projectOnce(INSTALLATION)
+    await episodes.compileTurn(INSTALLATION, 'turn-lifecycle')
+
+    const observedRepository = await pool.query<{ repository_id: string }>(`
+      SELECT repository_id::text FROM repositories
+      WHERE installation_id = $1 AND repository_key = $2
+    `, [INSTALLATION, repositoryKey])
+    const result = await pool.query<{
+      repository_id: string | null
+      document: Record<string, unknown>
+    }>(`
+      SELECT repository_id::text, document
+      FROM work_episodes WHERE turn_id = 'turn-lifecycle'
+    `)
+    const observedId = observedRepository.rows[0]?.repository_id
+    const repository = (result.rows[0].document as {
+      repository?: { repository_id?: string | null; commit_sha?: string | null }
+    }).repository
+    expect(observedId).toBeTruthy()
+    expect(result.rows[0].repository_id).toBe(observedId)
+    expect(repository?.repository_id).toBe(observedId)
+    expect(repository?.commit_sha).toBe(commitSha)
     expect(JSON.stringify(result.rows[0].document)).not.toContain('/home/alice')
   })
 

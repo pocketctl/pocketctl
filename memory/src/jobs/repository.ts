@@ -99,14 +99,24 @@ export function createJobRepository(pool: pg.Pool) {
       return result.rows.map(toClaim)
     },
 
-    /** Extend every running claim owned by this worker; returns the count. */
-    async renewClaims(input: { workerId: string; leaseMs: number }): Promise<number> {
+    /**
+     * Fenced per-job renewal (ADR-P2-09): renews exactly one claim and
+     * returns false when the caller no longer owns the job (lease expired and
+     * reclaimed under a bumped epoch, or completed by someone else). A false
+     * result must abort that job's handler immediately.
+     */
+    async renewClaim(input: {
+      jobId: string
+      claimedBy: string
+      claimEpoch: number
+      leaseMs: number
+    }): Promise<boolean> {
       const result = await pool.query(`
         UPDATE memory_jobs
-        SET claim_expires_at = NOW() + ($2 * INTERVAL '1 millisecond')
-        WHERE claimed_by = $1 AND state = 'running'
-      `, [input.workerId, input.leaseMs])
-      return result.rowCount ?? 0
+        SET claim_expires_at = NOW() + ($4 * INTERVAL '1 millisecond')
+        WHERE job_id = $1 AND claimed_by = $2 AND claim_epoch = $3 AND state = 'running'
+      `, [input.jobId, input.claimedBy, input.claimEpoch, input.leaseMs])
+      return (result.rowCount ?? 0) > 0
     },
 
     /** Fenced completion; false means the caller no longer owns the job. */

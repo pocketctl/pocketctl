@@ -10,6 +10,7 @@ const ERROR_STATUS_BY_CODE: Record<ExtensionErrorCode, number> = Object.freeze({
   cursor_expired: 410,
   installation_revoked: 403,
   feature_disabled: 503,
+  revision_conflict: 409,
 })
 
 /** Fixed HTTP status for a frozen extension error code. */

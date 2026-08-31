@@ -25,6 +25,36 @@ export function buildExtractionSystemPrompt(evidenceHandles: readonly string[], 
   ].join('\n')
 }
 
+/**
+ * Policy-driven extraction prompt: identical frozen template, plus the
+ * validated structured policy's bounded claim types and topic labels. Free
+ * text can never enter the prompt through a policy.
+ */
+export function buildExtractionSystemPromptFromPolicy(
+  policy: {
+    focus: {
+      claim_types: readonly string[]
+      include_topics: readonly string[]
+      exclude_topics: readonly string[]
+    }
+  },
+  evidenceHandles: readonly string[],
+  turnId: string,
+): string {
+  const base = buildExtractionSystemPrompt(evidenceHandles, turnId)
+  const lines: string[] = [base]
+  if (policy.focus.claim_types.length > 0 && policy.focus.claim_types.length < CLAIM_TYPES.length) {
+    lines.push(`Restrict claim_type to exactly these values: ${JSON.stringify(policy.focus.claim_types)}.`)
+  }
+  if (policy.focus.include_topics.length > 0) {
+    lines.push(`Prefer candidates about these bounded topic labels: ${policy.focus.include_topics.join(', ')}.`)
+  }
+  if (policy.focus.exclude_topics.length > 0) {
+    lines.push(`Do not propose candidates about these bounded topic labels: ${policy.focus.exclude_topics.join(', ')}.`)
+  }
+  return lines.join('\n')
+}
+
 /** Repair prompt: only bounded validation codes travel back to the model. */
 export function buildRepairSystemPrompt(
   failureCodes: readonly string[],

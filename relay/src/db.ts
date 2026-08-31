@@ -3274,8 +3274,11 @@ export async function purgeExtensionContentForSession(
 }
 
 /**
- * ADR-0003 account deletion: create provider purge requests (no content,
- * no user FK — they must survive the account), revoke installations, then
+ * ADR-0003/ADR-0005 account deletion: create provider purge requests (no
+ * content, no user FK — they must survive the account), revoke and detach
+ * personal installations (never cascade-delete; shared Team/Organization
+ * installations carry no owner and survive untouched), revoke scope
+ * memberships while advancing the owning scopes' authorization epochs, then
  * clear the user's extension journal and feed rows explicitly.
  */
 export async function revokeExtensionDataForUser(
@@ -3293,8 +3296,59 @@ export async function revokeExtensionDataForUser(
   `, [userId]);
   await client.query(
     `UPDATE extension_installations
-     SET status = 'revoking', config_version = config_version + 1, updated_at = NOW()
-     WHERE owner_user_id = $1 AND status NOT IN ('revoking', 'revoked')`,
+     SET status = 'revoked', owner_user_id = NULL,
+         config_version = config_version + 1, updated_at = NOW()
+     WHERE owner_user_id = $1 AND status <> 'revoked'`,
+    [userId],
+  );
+  // Revoke scope memberships and advance every affected scope's authorization
+  // epoch so outstanding v2 grants fail at the next mirror comparison.
+  await client.query(`
+    UPDATE extension_organizations
+    SET authorization_epoch = authorization_epoch + 1, revision = revision + 1, updated_at = NOW()
+    WHERE EXISTS (
+      SELECT 1 FROM extension_scope_memberships m
+      WHERE m.scope_kind = 'organization'
+        AND m.scope_id = extension_organizations.organization_id
+        AND m.user_id = $1 AND m.state <> 'revoked'
+    )
+  `, [userId]);
+  await client.query(`
+    UPDATE extension_teams
+    SET authorization_epoch = authorization_epoch + 1, revision = revision + 1, updated_at = NOW()
+    WHERE EXISTS (
+      SELECT 1 FROM extension_scope_memberships m
+      WHERE m.scope_kind = 'team'
+        AND m.scope_id = extension_teams.team_id
+        AND m.user_id = $1 AND m.state <> 'revoked'
+    )
+  `, [userId]);
+  await client.query(`
+    INSERT INTO extension_scope_outbox (scope_kind, scope_id, topic, payload)
+    SELECT m.scope_kind, m.scope_id, 'scope.membership.v2',
+           jsonb_build_object(
+             'membership_id', m.membership_id,
+             'event_type', 'membership_state_changed',
+             'membership_revision', m.membership_revision + 1,
+             'state', 'revoked',
+             'roles', to_jsonb(m.roles),
+             'authorization_epoch', CASE m.scope_kind
+               WHEN 'organization' THEN o.authorization_epoch
+               ELSE t.authorization_epoch
+             END
+           )
+    FROM extension_scope_memberships m
+    LEFT JOIN extension_organizations o
+      ON m.scope_kind = 'organization' AND o.organization_id = m.scope_id
+    LEFT JOIN extension_teams t
+      ON m.scope_kind = 'team' AND t.team_id = m.scope_id
+    WHERE m.user_id = $1 AND m.state <> 'revoked'
+  `, [userId]);
+  await client.query(
+    `UPDATE extension_scope_memberships
+     SET state = 'revoked', membership_revision = membership_revision + 1,
+         revoked_at = NOW(), updated_at = NOW()
+     WHERE user_id = $1 AND state <> 'revoked'`,
     [userId],
   );
   await client.query(`DELETE FROM extension_source_outbox WHERE owner_user_id = $1`, [userId]);

@@ -1,5 +1,6 @@
 import { createHash } from 'crypto'
 import type { TextGenerator, ModelJsonResult } from '../ports/text-generator.js'
+import type { JobFence } from '../jobs/types.js'
 import type { ExtractionRepository } from './repository.js'
 import type { CandidateDeduper } from './deduper.js'
 import { validateCandidate, type ValidationContext } from './validator.js'
@@ -7,9 +8,10 @@ import { normalizedClaimKey } from '../retrieval/query-normalizer.js'
 import {
   EXTRACTION_EXTRACTOR_VERSION,
   EXTRACTION_PROMPT_VERSION,
-  buildExtractionSystemPrompt,
+  buildExtractionSystemPromptFromPolicy,
   buildRepairSystemPrompt,
 } from './prompt.js'
+import { canonicalPolicyHash, SYSTEM_EXTRACTION_POLICY_V1 } from '../policies/schemas.js'
 import {
   normalizedKeyForCandidate,
   validateExtractionOutput,
@@ -31,14 +33,23 @@ export interface CandidateExtractorDeps {
   /** Stable hash input covering provider, origin and model configuration. */
   modelConfigFingerprint?: string
   timeoutMs: number
+  extractionNotBefore?: Date | null
+  maxRunsPerEpisode?: number
   /** Optional deterministic validator/deduper for enabled-mode runs. */
   deduper?: CandidateDeduper
+  /** Effective extraction policy per installation; defaults to system V1. */
+  resolvePolicy?: (installationId: string, repositoryId?: string | null) => Promise<{
+    document: typeof SYSTEM_EXTRACTION_POLICY_V1
+    effectivePolicyHash: Buffer
+  }>
 }
 
 export type ExtractionOutcome =
   | { kind: 'succeeded'; runId: string; candidateCount: number }
   | { kind: 'skipped_existing'; runId: string; state: string }
   | { kind: 'skipped_mode_off' }
+  | { kind: 'skipped_before_cutoff' }
+  | { kind: 'skipped_run_limit' }
   | { kind: 'episode_missing' }
   | { kind: 'quarantined'; runId: string }
   | { kind: 'failed'; runId: string; errorCode: string; retryable: boolean }
@@ -54,23 +65,41 @@ export function createCandidateExtractor(deps: CandidateExtractorDeps) {
       installationId: string
       turnId: string
       signal: AbortSignal
+      /** Owning job fence; side-effect writes reject on ownership loss. */
+      fence?: JobFence
     }): Promise<ExtractionOutcome> {
       const episode = await deps.store.loadEpisodeForExtraction(input.installationId, input.turnId)
       if (!episode) return { kind: 'episode_missing' }
       if (episode.extractionMode === 'off') return { kind: 'skipped_mode_off' }
+      if (deps.extractionNotBefore
+        && episode.sessionFirstRecordedAt.getTime() < deps.extractionNotBefore.getTime()) {
+        return { kind: 'skipped_before_cutoff' }
+      }
+
+      // Prompt text and run identity both derive from the validated policy
+      // (plan section 6.1): no free text reaches the model through this path.
+      const policy = deps.resolvePolicy
+        ? await deps.resolvePolicy(input.installationId, episode.repositoryId)
+        : { document: SYSTEM_EXTRACTION_POLICY_V1, effectivePolicyHash: canonicalPolicyHash(SYSTEM_EXTRACTION_POLICY_V1) }
+      if (policy.document.mode === 'off') return { kind: 'skipped_mode_off' }
+      const extractionMode: 'shadow' | 'enabled' = episode.extractionMode === 'shadow'
+        || policy.document.mode === 'shadow' ? 'shadow' : 'enabled'
 
       const reserved = await deps.store.reserveRun({
         installationId: input.installationId,
         episodeId: episode.episodeId,
         sourceDigest: episode.sourceDigest,
         extractorVersion: EXTRACTION_EXTRACTOR_VERSION,
-        promptVersion: EXTRACTION_PROMPT_VERSION,
+        promptVersion: policy.document.versions.prompt,
         modelConfigHash,
-        mode: episode.extractionMode,
+        mode: extractionMode,
         provider: deps.provider,
         model: deps.model,
         staleAfterMs: deps.timeoutMs * 3 + 70_000,
+        effectivePolicyHash: policy.effectivePolicyHash,
+        maxRunsPerEpisode: deps.maxRunsPerEpisode,
       })
+      if (reserved.limitReached) return { kind: 'skipped_run_limit' }
       if (!reserved.owner) {
         if (reserved.existingState === 'running') {
           return { kind: 'failed', runId: reserved.runId, errorCode: 'run_in_progress', retryable: true }
@@ -82,9 +111,10 @@ export function createCandidateExtractor(deps: CandidateExtractorDeps) {
         .filter(([, raw]) => !(raw !== null && typeof raw === 'object'
           && (raw as Record<string, unknown>).omitted === true))
         .map(([handle]) => handle)
-      const systemPrompt = buildExtractionSystemPrompt(manifestHandles, episode.turnId)
+      const systemPrompt = buildExtractionSystemPromptFromPolicy(policy.document, manifestHandles, episode.turnId)
       let usage = { inputTokens: 0, outputTokens: 0 }
       let totalCostMicros = 0
+      let providerCallsObserved = 0
 
       const attempt = async (
         operation: 'candidate_extract' | 'candidate_repair',
@@ -100,6 +130,9 @@ export function createCandidateExtractor(deps: CandidateExtractorDeps) {
           timeoutMs: deps.timeoutMs,
           signal: input.signal,
         })
+        if (result.ok || (result.code !== 'budget_exceeded' && result.code !== 'budget_unavailable')) {
+          providerCallsObserved += 1
+        }
         if (!result.ok) {
           if (result.usage) {
             usage = {
@@ -141,6 +174,14 @@ export function createCandidateExtractor(deps: CandidateExtractorDeps) {
       }
 
       if (!outcome.ok) {
+        if ((outcome.errorCode === 'budget_exceeded' || outcome.errorCode === 'budget_unavailable')
+          && providerCallsObserved === 0) {
+          await deps.store.discardRun({ runId: reserved.runId, fence: input.fence })
+          return {
+            kind: 'failed', runId: reserved.runId,
+            errorCode: outcome.errorCode, retryable: outcome.retryable,
+          }
+        }
         const quarantined = outcome.errorCode.startsWith('invalid_output')
         await deps.store.markRun({
           runId: reserved.runId,
@@ -149,6 +190,7 @@ export function createCandidateExtractor(deps: CandidateExtractorDeps) {
           inputTokens: usage.inputTokens,
           outputTokens: usage.outputTokens,
           costMicros: totalCostMicros,
+          fence: input.fence,
         })
         return quarantined
           ? { kind: 'quarantined', runId: reserved.runId }
@@ -177,7 +219,7 @@ export function createCandidateExtractor(deps: CandidateExtractorDeps) {
       // Enabled mode runs deterministic validation and duplicate/conflict
       // classification; shadow mode keeps raw shadow candidates for metrics.
       const verdicts = new Map<number, ReturnType<typeof validateCandidate>>()
-      if (episode.extractionMode === 'enabled' && deps.deduper) {
+      if (extractionMode === 'enabled' && deps.deduper) {
         const tombstonedKeys = await deps.deduper.tombstonedKeys({
           installationId: input.installationId,
           candidateKeys: baseRows.map(row => row.normalizedKey),
@@ -218,7 +260,7 @@ export function createCandidateExtractor(deps: CandidateExtractorDeps) {
         }
       }
 
-      const candidateStatus = episode.extractionMode === 'enabled' && deps.deduper
+      const candidateStatus = extractionMode === 'enabled' && deps.deduper
         ? 'validated'
         : 'shadow'
       const rows = baseRows.map(row => {
@@ -253,6 +295,7 @@ export function createCandidateExtractor(deps: CandidateExtractorDeps) {
         candidateStatus,
         candidates: rows,
         usage: { inputTokens: usage.inputTokens, outputTokens: usage.outputTokens, costMicros: totalCostMicros },
+        fence: input.fence,
       })
       return { kind: 'succeeded', runId: reserved.runId, candidateCount: rows.length }
     },

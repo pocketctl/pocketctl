@@ -2,6 +2,7 @@ package session
 
 import (
 	"context"
+	"github.com/pocketctl/pocketctl/internal/memorycontext"
 	"os"
 	"os/exec"
 	"sync"
@@ -48,6 +49,7 @@ type ProcessState struct {
 	PendingPermissions      map[string]PendingOpenCodePermission
 	PendingQuestions        map[string]PendingOpenCodeQuestion
 	InitialPrompt           string              // prompt submitted when a daemon PTY session starts
+	DeferredInitialPrompt   string              // managed-only prompt waiting for Relay registration ACK
 	JSONLExcludeIDs         map[string]struct{} // rollout/session ids that existed before this PTY launch
 	PTYOutputTail           []byte              // recent raw PTY output for startup diagnostics
 	WorktreePath            string              // Scheme D: non-empty when the session runs inside a git worktree
@@ -109,6 +111,12 @@ type SessionManager struct {
 	ptyProvider         platform.PTYProvider                   // PR2: daemon-session PTY backend (was direct creack/pty)
 	proc                platform.ProcessController             // PR2: process alive/kill (was syscall; used by Task 3)
 	createDeps          createSessionDependencies
+
+	// memoryContext is the Phase 2 context coordinator; nil until the relay
+	// grant transport is attached, which keeps the enrichment seam inert.
+	memoryContext           *memorycontext.Coordinator
+	memoryContextReady      func() bool
+	memoryContextCapability func(context.Context, string, string) memorycontext.Capability
 
 	// approvals brokers PreToolUse hook approvals for non-bypass daemon sessions.
 	// nil on daemons that don't surface approvals (or before wiring).
