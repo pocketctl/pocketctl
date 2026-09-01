@@ -71,6 +71,7 @@ describe('extension scope and service allowlists', () => {
   test('contains exactly the first-party memory services', () => {
     expect([...EXTENSION_SERVICE_IDS].sort()).toEqual([
       'knowledge.query',
+      'memory.codegraph.write',
       'memory.context',
       'memory.manage',
       'memory.mcp',

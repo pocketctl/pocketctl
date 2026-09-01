@@ -1,0 +1,6 @@
+{
+  "name": "phase4-fixture",
+  "dependencies": {
+    "left-pad": "^1.3.0"
+  }
+}

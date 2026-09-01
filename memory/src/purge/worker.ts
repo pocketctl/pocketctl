@@ -59,6 +59,10 @@ export function createPurgeWorker(options: PurgeWorkerOptions) {
             `, [installationId]).catch(() => undefined)
           }
         }
+        // Retention cleanup is local and bounded; failures are observable but
+        // never change a successfully committed/ACKed purge result.
+        await options.purge.cleanupSupersededSnapshots({ limit: 100 })
+          .catch(error => options.onError?.(error))
         return handled
       } finally {
         current = undefined

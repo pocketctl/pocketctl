@@ -198,6 +198,32 @@ export function createJobRepository(pool: pg.Pool) {
                 VALUES ($1, $2, $3, $4, $5, $6)
                 ON CONFLICT (job_id) DO NOTHING
               `, [input.jobId, dead.installation_id, dead.job_type, attempts, input.errorCode, digest])
+              if (dead.job_type === 'parse_code_snapshot'
+                && typeof dead.payload?.snapshot_id === 'string') {
+                await client.query(`
+                  UPDATE memory_source_snapshots
+                  SET state = 'failed', completed_at = NOW()
+                  WHERE installation_id = $1 AND snapshot_id = $2
+                    AND state IN ('ready','parsing')
+                `, [dead.installation_id, dead.payload.snapshot_id])
+              }
+              if (dead.job_type === 'build_wiki'
+                && typeof dead.payload?.run_id === 'string') {
+                await client.query(`
+                  UPDATE memory_wiki_build_runs
+                  SET state = 'failed', error_code = $3, completed_at = NOW()
+                  WHERE installation_id = $1 AND run_id = $2
+                    AND state IN ('queued','running','validating')
+                `, [dead.installation_id, dead.payload.run_id, input.errorCode])
+                await client.query(`
+                  UPDATE memory_generation_runs g
+                  SET state = 'failed', error_code = $3, completed_at = NOW()
+                  FROM memory_wiki_build_runs r
+                  WHERE r.installation_id = $1 AND r.run_id = $2
+                    AND r.generation_run_id = g.run_id
+                    AND g.state IN ('queued','running')
+                `, [dead.installation_id, dead.payload.run_id, input.errorCode])
+              }
             }
             await client.query('COMMIT')
             return true

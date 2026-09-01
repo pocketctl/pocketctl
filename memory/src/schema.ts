@@ -1497,6 +1497,493 @@ export const MEMORY_MIGRATIONS: readonly Migration[] = [
          ON memory_provider_budget_reservations (budget_key, provider_kind)`,
     ],
   },
+  {
+    // Phase 4 source ingestion (ADR-0006 §2): immutable, content-addressed
+    // committed snapshots. Every child row is installation-bound through a
+    // composite foreign key so cross-installation references are impossible,
+    // and blobs deduplicate only inside one installation.
+    version: 25,
+    statements: [
+      `DO $$
+       BEGIN
+         IF NOT EXISTS (
+           SELECT 1 FROM pg_constraint
+           WHERE conname = 'repositories_installation_repository_uni'
+             AND conrelid = 'repositories'::regclass
+         ) THEN
+           ALTER TABLE repositories
+             ADD CONSTRAINT repositories_installation_repository_uni
+             UNIQUE (installation_id, repository_id);
+         END IF;
+       END $$`,
+      `CREATE TABLE IF NOT EXISTS memory_source_snapshots (
+         snapshot_id          UUID PRIMARY KEY,
+         installation_id      UUID NOT NULL,
+         repository_id        UUID NOT NULL,
+         commit_sha           TEXT NOT NULL CHECK (commit_sha ~ '^[0-9a-f]{40}$' OR commit_sha ~ '^[0-9a-f]{64}$'),
+         git_object_format    TEXT NOT NULL CHECK (git_object_format IN ('sha1','sha256')),
+         manifest_hash        TEXT NOT NULL CHECK (manifest_hash ~ '^[0-9a-f]{64}$'),
+         state                TEXT NOT NULL DEFAULT 'staging' CHECK (state IN
+                              ('staging','ready','parsing','active','superseded','failed','purged')),
+         generation           BIGINT NOT NULL CHECK (generation >= 0),
+         parser_matrix_version TEXT NOT NULL,
+         file_count           BIGINT NOT NULL CHECK (file_count >= 0),
+         byte_count           BIGINT NOT NULL CHECK (byte_count >= 0),
+         created_at           TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+         completed_at         TIMESTAMPTZ,
+         UNIQUE (installation_id, snapshot_id),
+         UNIQUE (installation_id, repository_id, commit_sha, manifest_hash),
+         FOREIGN KEY (installation_id, repository_id)
+           REFERENCES repositories (installation_id, repository_id) ON DELETE CASCADE
+       )`,
+      `CREATE INDEX IF NOT EXISTS memory_source_snapshots_repo_state_idx
+         ON memory_source_snapshots (installation_id, repository_id, state)`,
+      `CREATE TABLE IF NOT EXISTS memory_source_blobs (
+         installation_id  UUID NOT NULL REFERENCES memory_installations(installation_id) ON DELETE CASCADE,
+         blob_hash        TEXT NOT NULL CHECK (blob_hash ~ '^[0-9a-f]{64}$'),
+         byte_count       BIGINT NOT NULL CHECK (byte_count >= 0),
+         utf8_content     TEXT NOT NULL,
+         created_at       TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+         PRIMARY KEY (installation_id, blob_hash)
+       )`,
+      `CREATE TABLE IF NOT EXISTS memory_source_snapshot_entries (
+         snapshot_id      UUID NOT NULL,
+         installation_id  UUID NOT NULL,
+         path             TEXT NOT NULL CHECK (
+                            path <> '' AND char_length(path) <= 1024
+                            AND path NOT LIKE '/%'
+                            AND path NOT LIKE '%//%'
+                            AND path NOT LIKE '%.git/%'
+                            AND NOT (string_to_array(path, '/') && ARRAY['.', '..'])),
+         blob_hash        TEXT NOT NULL,
+         language         TEXT NOT NULL,
+         capability       TEXT NOT NULL CHECK (capability IN ('symbols_and_edges','file_only')),
+         byte_count       BIGINT NOT NULL CHECK (byte_count >= 0),
+         mode             TEXT NOT NULL CHECK (mode IN ('100644','100755')),
+         PRIMARY KEY (snapshot_id, path),
+         FOREIGN KEY (installation_id, snapshot_id)
+           REFERENCES memory_source_snapshots (installation_id, snapshot_id) ON DELETE CASCADE,
+         FOREIGN KEY (installation_id, blob_hash)
+           REFERENCES memory_source_blobs (installation_id, blob_hash) ON DELETE RESTRICT
+       )`,
+      `CREATE INDEX IF NOT EXISTS memory_source_snapshot_entries_blob_idx
+         ON memory_source_snapshot_entries (installation_id, blob_hash)`,
+      `CREATE TABLE IF NOT EXISTS memory_source_snapshot_tombstones (
+         installation_id  UUID NOT NULL REFERENCES memory_installations(installation_id) ON DELETE CASCADE,
+         snapshot_id      UUID NOT NULL,
+         repository_id    UUID NOT NULL,
+         commit_sha       TEXT NOT NULL,
+         reason_code      TEXT NOT NULL,
+         tombstoned_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+         PRIMARY KEY (installation_id, snapshot_id)
+       )`,
+      `CREATE TABLE IF NOT EXISTS memory_repository_tombstones (
+         installation_id  UUID NOT NULL REFERENCES memory_installations(installation_id) ON DELETE CASCADE,
+         repository_id    UUID NOT NULL,
+         reason_code      TEXT NOT NULL,
+         tombstoned_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+         PRIMARY KEY (installation_id, repository_id)
+       )`,
+    ],
+  },
+  {
+    // Phase 4 CodeGraph versions (ADR-0006 §4): immutable per-parser-version
+    // graph rows scoped to one snapshot, with one active head per repository.
+    version: 26,
+    statements: [
+      `CREATE TABLE IF NOT EXISTS memory_code_graph_versions (
+         graph_version_id  UUID PRIMARY KEY,
+         installation_id   UUID NOT NULL,
+         repository_id     UUID NOT NULL,
+         snapshot_id       UUID NOT NULL,
+         generation        BIGINT NOT NULL CHECK (generation >= 1),
+         parser_version    TEXT NOT NULL,
+         state             TEXT NOT NULL DEFAULT 'candidate' CHECK (state IN
+                           ('candidate','active','superseded','failed','purged')),
+         coverage          TEXT NOT NULL CHECK (coverage IN
+                           ('complete','partial','unsupported','degraded')),
+         content_hash      TEXT NOT NULL CHECK (content_hash ~ '^[0-9a-f]{64}$'),
+         created_at        TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+         activated_at      TIMESTAMPTZ,
+         UNIQUE (installation_id, graph_version_id),
+         UNIQUE (installation_id, snapshot_id, parser_version, generation),
+         FOREIGN KEY (installation_id, repository_id)
+           REFERENCES repositories (installation_id, repository_id) ON DELETE CASCADE,
+         FOREIGN KEY (installation_id, snapshot_id)
+           REFERENCES memory_source_snapshots (installation_id, snapshot_id) ON DELETE CASCADE
+       )`,
+      `CREATE INDEX IF NOT EXISTS memory_code_graph_versions_repo_state_idx
+         ON memory_code_graph_versions (installation_id, repository_id, state)`,
+      `CREATE TABLE IF NOT EXISTS memory_code_graph_heads (
+         installation_id         UUID NOT NULL,
+         repository_id           UUID NOT NULL,
+         active_graph_version_id UUID NOT NULL,
+         revision                BIGINT NOT NULL CHECK (revision >= 1),
+         updated_at              TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+         PRIMARY KEY (installation_id, repository_id),
+         FOREIGN KEY (installation_id, repository_id)
+           REFERENCES repositories (installation_id, repository_id) ON DELETE CASCADE,
+         FOREIGN KEY (installation_id, active_graph_version_id)
+           REFERENCES memory_code_graph_versions (installation_id, graph_version_id) ON DELETE CASCADE
+       )`,
+      `CREATE TABLE IF NOT EXISTS memory_code_nodes (
+         graph_version_id UUID NOT NULL,
+         installation_id  UUID NOT NULL,
+         node_id          UUID NOT NULL,
+         kind             TEXT NOT NULL CHECK (kind IN
+                          ('repository','file','symbol','external_package')),
+         stable_key       TEXT NOT NULL,
+         path             TEXT,
+         name             TEXT NOT NULL,
+         symbol_kind      TEXT,
+         start_line       INTEGER CHECK (start_line IS NULL OR start_line >= 1),
+         start_column     INTEGER CHECK (start_column IS NULL OR start_column >= 1),
+         end_line         INTEGER CHECK (end_line IS NULL OR end_line >= 1),
+         end_column       INTEGER CHECK (end_column IS NULL OR end_column >= 1),
+         signature_hash   TEXT,
+         metadata         JSONB NOT NULL DEFAULT '{}'::jsonb,
+         PRIMARY KEY (graph_version_id, node_id),
+         UNIQUE (graph_version_id, stable_key),
+         FOREIGN KEY (installation_id, graph_version_id)
+           REFERENCES memory_code_graph_versions (installation_id, graph_version_id) ON DELETE CASCADE
+       )`,
+      `CREATE INDEX IF NOT EXISTS memory_code_nodes_path_idx
+         ON memory_code_nodes (graph_version_id, path)`,
+      `CREATE TABLE IF NOT EXISTS memory_code_edges (
+         graph_version_id UUID NOT NULL,
+         installation_id  UUID NOT NULL,
+         edge_id          UUID NOT NULL,
+         kind             TEXT NOT NULL CHECK (kind IN
+                          ('definition','reference','import','call','dependency','test')),
+         from_node_id     UUID NOT NULL,
+         to_node_id       UUID NOT NULL,
+         source_path      TEXT NOT NULL,
+         source_line      INTEGER CHECK (source_line IS NULL OR source_line >= 1),
+         resolution       TEXT NOT NULL CHECK (resolution IN ('resolved','unresolved','dynamic')),
+         metadata         JSONB NOT NULL DEFAULT '{}'::jsonb,
+         PRIMARY KEY (graph_version_id, edge_id),
+         FOREIGN KEY (installation_id, graph_version_id)
+           REFERENCES memory_code_graph_versions (installation_id, graph_version_id) ON DELETE CASCADE,
+         FOREIGN KEY (graph_version_id, from_node_id)
+           REFERENCES memory_code_nodes (graph_version_id, node_id) ON DELETE CASCADE,
+         FOREIGN KEY (graph_version_id, to_node_id)
+           REFERENCES memory_code_nodes (graph_version_id, node_id) ON DELETE CASCADE
+       )`,
+      `CREATE INDEX IF NOT EXISTS memory_code_edges_from_idx
+         ON memory_code_edges (graph_version_id, from_node_id, kind)`,
+      `CREATE INDEX IF NOT EXISTS memory_code_edges_to_idx
+         ON memory_code_edges (graph_version_id, to_node_id, kind)`,
+    ],
+  },
+  {
+    // Phase 4 Living Wiki ledger (ADR-0006 §5-§7): serial builds per Wiki,
+    // immutable versions with one active head, frozen manual authority, and
+    // content-free audit.
+    version: 27,
+    statements: [
+      `CREATE TABLE IF NOT EXISTS memory_wikis (
+         wiki_id         UUID PRIMARY KEY,
+         installation_id UUID NOT NULL,
+         repository_id   UUID NOT NULL,
+         generation      BIGINT NOT NULL DEFAULT 0 CHECK (generation >= 0),
+         created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+         updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+         UNIQUE (installation_id, wiki_id),
+         UNIQUE (installation_id, repository_id),
+         FOREIGN KEY (installation_id, repository_id)
+           REFERENCES repositories (installation_id, repository_id) ON DELETE CASCADE
+       )`,
+      `CREATE TABLE IF NOT EXISTS memory_wiki_build_runs (
+         run_id             UUID PRIMARY KEY,
+         installation_id    UUID NOT NULL,
+         wiki_id            UUID NOT NULL,
+         generation         BIGINT NOT NULL CHECK (generation >= 1),
+         source_snapshot_id UUID NOT NULL,
+         graph_version_id   UUID,
+         state              TEXT NOT NULL CHECK (state IN
+                            ('queued','running','validating','candidate','published',
+                             'failed','superseded','cancelled','stale_generation')),
+         input_digest       TEXT NOT NULL,
+         prompt_version     TEXT,
+         model_version      TEXT,
+         policy_version     TEXT,
+         parser_version     TEXT,
+         budget_reservation_id UUID,
+         error_code         TEXT,
+         created_at         TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+         started_at         TIMESTAMPTZ,
+         completed_at       TIMESTAMPTZ,
+         UNIQUE (installation_id, run_id),
+         UNIQUE (installation_id, wiki_id, generation),
+         FOREIGN KEY (installation_id, wiki_id)
+           REFERENCES memory_wikis (installation_id, wiki_id) ON DELETE CASCADE,
+         FOREIGN KEY (installation_id, source_snapshot_id)
+           REFERENCES memory_source_snapshots (installation_id, snapshot_id) ON DELETE CASCADE
+       )`,
+      `CREATE UNIQUE INDEX IF NOT EXISTS memory_wiki_build_runs_one_active_idx
+         ON memory_wiki_build_runs (wiki_id)
+         WHERE state IN ('queued','running','validating')`,
+      `CREATE TABLE IF NOT EXISTS memory_wiki_versions (
+         wiki_version_id    UUID PRIMARY KEY,
+         installation_id    UUID NOT NULL,
+         wiki_id            UUID NOT NULL,
+         revision           BIGINT NOT NULL CHECK (revision >= 1),
+         source_snapshot_id UUID NOT NULL,
+         graph_version_id   UUID NOT NULL,
+         build_run_id       UUID,
+         state              TEXT NOT NULL DEFAULT 'active' CHECK (state IN
+                            ('active','superseded','purged')),
+         content_hash       TEXT NOT NULL,
+         created_at         TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+         UNIQUE (installation_id, wiki_version_id),
+         UNIQUE (installation_id, wiki_id, revision),
+         FOREIGN KEY (installation_id, wiki_id)
+           REFERENCES memory_wikis (installation_id, wiki_id) ON DELETE CASCADE,
+         FOREIGN KEY (installation_id, source_snapshot_id)
+           REFERENCES memory_source_snapshots (installation_id, snapshot_id) ON DELETE CASCADE,
+         FOREIGN KEY (installation_id, graph_version_id)
+           REFERENCES memory_code_graph_versions (installation_id, graph_version_id) ON DELETE CASCADE,
+         FOREIGN KEY (installation_id, build_run_id)
+           REFERENCES memory_wiki_build_runs (installation_id, run_id) ON DELETE SET NULL
+       )`,
+      `CREATE UNIQUE INDEX IF NOT EXISTS memory_wiki_versions_one_active_idx
+         ON memory_wiki_versions (installation_id, wiki_id)
+         WHERE state = 'active'`,
+      `CREATE TABLE IF NOT EXISTS memory_wiki_heads (
+         installation_id UUID NOT NULL,
+         repository_id   UUID NOT NULL,
+         wiki_id         UUID NOT NULL,
+         active_version_id UUID NOT NULL,
+         revision        BIGINT NOT NULL CHECK (revision >= 1),
+         updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+         PRIMARY KEY (installation_id, repository_id),
+         FOREIGN KEY (installation_id, repository_id)
+           REFERENCES repositories (installation_id, repository_id) ON DELETE CASCADE,
+         FOREIGN KEY (installation_id, wiki_id)
+           REFERENCES memory_wikis (installation_id, wiki_id) ON DELETE CASCADE,
+         FOREIGN KEY (installation_id, active_version_id)
+           REFERENCES memory_wiki_versions (installation_id, wiki_version_id) ON DELETE CASCADE
+       )`,
+      `CREATE TABLE IF NOT EXISTS memory_wiki_pages (
+         wiki_version_id UUID NOT NULL,
+         installation_id UUID NOT NULL,
+         page_id         UUID NOT NULL,
+         page_key        TEXT NOT NULL CHECK (page_key <> '' AND char_length(page_key) <= 128),
+         title           TEXT NOT NULL CHECK (char_length(title) <= 200),
+         position        INTEGER NOT NULL CHECK (position >= 0),
+         PRIMARY KEY (wiki_version_id, page_id),
+         UNIQUE (wiki_version_id, page_key),
+         FOREIGN KEY (installation_id, wiki_version_id)
+           REFERENCES memory_wiki_versions (installation_id, wiki_version_id) ON DELETE CASCADE
+       )`,
+      `CREATE TABLE IF NOT EXISTS memory_wiki_sections (
+         wiki_version_id UUID NOT NULL,
+         installation_id UUID NOT NULL,
+         section_id      UUID NOT NULL,
+         page_id         UUID NOT NULL,
+         section_key     TEXT NOT NULL CHECK (section_key <> '' AND char_length(section_key) <= 128),
+         heading         TEXT NOT NULL CHECK (char_length(heading) <= 200),
+         markdown        TEXT NOT NULL,
+         authority       TEXT NOT NULL CHECK (authority IN ('generated','manual','locked')),
+         coverage        TEXT NOT NULL CHECK (coverage IN
+                         ('complete','partial','unsupported','degraded')),
+         position        INTEGER NOT NULL CHECK (position >= 0),
+         PRIMARY KEY (wiki_version_id, section_id),
+         UNIQUE (wiki_version_id, page_id, section_key),
+         FOREIGN KEY (installation_id, wiki_version_id)
+           REFERENCES memory_wiki_versions (installation_id, wiki_version_id) ON DELETE CASCADE,
+         FOREIGN KEY (wiki_version_id, page_id)
+           REFERENCES memory_wiki_pages (wiki_version_id, page_id) ON DELETE CASCADE
+       )`,
+      `CREATE INDEX IF NOT EXISTS memory_wiki_sections_key_idx
+         ON memory_wiki_sections (wiki_version_id, section_key)`,
+      `CREATE TABLE IF NOT EXISTS memory_wiki_source_bindings (
+         wiki_version_id    UUID NOT NULL,
+         installation_id    UUID NOT NULL,
+         section_id         UUID NOT NULL,
+         binding_id         UUID NOT NULL,
+         source_kind        TEXT NOT NULL CHECK (source_kind IN
+                            ('file','symbol','claim_version','evidence')),
+         source_token       TEXT NOT NULL,
+         source_snapshot_id UUID,
+         commit_sha         TEXT,
+         created_at         TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+         PRIMARY KEY (wiki_version_id, binding_id),
+         FOREIGN KEY (installation_id, wiki_version_id)
+           REFERENCES memory_wiki_versions (installation_id, wiki_version_id) ON DELETE CASCADE,
+         FOREIGN KEY (wiki_version_id, section_id)
+           REFERENCES memory_wiki_sections (wiki_version_id, section_id) ON DELETE CASCADE
+       )`,
+      `CREATE INDEX IF NOT EXISTS memory_wiki_source_bindings_section_idx
+         ON memory_wiki_source_bindings (wiki_version_id, section_id)`,
+      `CREATE TABLE IF NOT EXISTS memory_wiki_manual_section_versions (
+         manual_version_id  UUID PRIMARY KEY,
+         installation_id    UUID NOT NULL,
+         wiki_id            UUID NOT NULL,
+         section_key        TEXT NOT NULL,
+         markdown           TEXT NOT NULL,
+         content_hash       TEXT NOT NULL,
+         actor_scope_kind   TEXT NOT NULL,
+         actor_scope_id     TEXT NOT NULL,
+         reason_code        TEXT,
+         previous_version_id UUID,
+         created_at         TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+         UNIQUE (installation_id, manual_version_id),
+         FOREIGN KEY (installation_id, wiki_id)
+           REFERENCES memory_wikis (installation_id, wiki_id) ON DELETE CASCADE
+       )`,
+      `CREATE TABLE IF NOT EXISTS memory_wiki_manual_section_heads (
+         installation_id  UUID NOT NULL,
+         wiki_id          UUID NOT NULL,
+         section_key      TEXT NOT NULL,
+         current_version_id UUID NOT NULL,
+         locked           BOOLEAN NOT NULL DEFAULT FALSE,
+         lock_version     BIGINT NOT NULL DEFAULT 0 CHECK (lock_version >= 0),
+         updated_at       TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+         PRIMARY KEY (installation_id, wiki_id, section_key),
+         FOREIGN KEY (installation_id, wiki_id)
+           REFERENCES memory_wikis (installation_id, wiki_id) ON DELETE CASCADE,
+         FOREIGN KEY (installation_id, current_version_id)
+           REFERENCES memory_wiki_manual_section_versions (installation_id, manual_version_id) ON DELETE CASCADE
+       )`,
+      `CREATE TABLE IF NOT EXISTS memory_wiki_stale_marks (
+         installation_id   UUID NOT NULL,
+         wiki_id           UUID NOT NULL,
+         section_key       TEXT NOT NULL,
+         reason            TEXT NOT NULL,
+         source_snapshot_id UUID,
+         graph_version_id  UUID,
+         marked_at         TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+         cleared_at        TIMESTAMPTZ,
+         PRIMARY KEY (installation_id, wiki_id, section_key),
+         FOREIGN KEY (installation_id, wiki_id)
+           REFERENCES memory_wikis (installation_id, wiki_id) ON DELETE CASCADE
+       )`,
+      `CREATE TABLE IF NOT EXISTS memory_wiki_audit_events (
+         audit_id         UUID PRIMARY KEY,
+         installation_id  UUID NOT NULL REFERENCES memory_installations(installation_id) ON DELETE CASCADE,
+         wiki_id          UUID NOT NULL,
+         action           TEXT NOT NULL,
+         result           TEXT NOT NULL,
+         reason_code      TEXT,
+         old_content_hash TEXT,
+         new_content_hash TEXT,
+         actor_scope_kind TEXT NOT NULL,
+         actor_scope_id   TEXT NOT NULL,
+         head_revision    BIGINT,
+         created_at       TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+         FOREIGN KEY (installation_id, wiki_id)
+           REFERENCES memory_wikis (installation_id, wiki_id) ON DELETE CASCADE
+       )`,
+      `CREATE INDEX IF NOT EXISTS memory_wiki_audit_events_wiki_idx
+         ON memory_wiki_audit_events (installation_id, wiki_id, created_at)`,
+    ],
+  },
+  {
+    // Phase 4 parsing job (plan §7 Task 4): finalize enqueues exactly one
+    // fenced parse job per snapshot generation. The allowlist CHECK grows
+    // additively, mirroring the migration 5 pattern.
+    version: 28,
+    statements: [
+      `ALTER TABLE memory_jobs DROP CONSTRAINT memory_jobs_job_type_check`,
+      `ALTER TABLE memory_jobs ADD CONSTRAINT memory_jobs_job_type_check
+        CHECK (job_type IN
+        ('project_feed','compile_episode','snapshot_reconcile','session_purge',
+         'installation_purge','report_status','report_usage',
+         'extract_candidates','index_claim_version','rebuild_claim_index','expire_claims',
+         'recompile_extraction_policy','compile_context_shadow','record_context_delivery',
+         'invalidate_context_packs','expire_promotion_candidates','index_shared_claim',
+         'invalidate_scope_authorization','transfer_scope_claims','parse_code_snapshot'))`,
+    ],
+  },
+  {
+    // Phase 4 Wiki build execution ledger (plan §7 Tasks 8-9): build jobs
+    // receive normal generation provenance and capture the exact immutable
+    // source registry plus validated candidate before publication.
+    version: 29,
+    statements: [
+      `ALTER TABLE memory_generation_runs
+         DROP CONSTRAINT IF EXISTS memory_generation_runs_operation_check`,
+      `ALTER TABLE memory_generation_runs
+         ADD CONSTRAINT memory_generation_runs_operation_check CHECK (operation IN
+           ('extract_candidates','compile_context','compress_context_shadow','build_wiki'))`,
+      `ALTER TABLE memory_jobs DROP CONSTRAINT IF EXISTS memory_jobs_job_type_check`,
+      `ALTER TABLE memory_jobs ADD CONSTRAINT memory_jobs_job_type_check
+        CHECK (job_type IN
+        ('project_feed','compile_episode','snapshot_reconcile','session_purge',
+         'installation_purge','report_status','report_usage',
+         'extract_candidates','index_claim_version','rebuild_claim_index','expire_claims',
+         'recompile_extraction_policy','compile_context_shadow','record_context_delivery',
+         'invalidate_context_packs','expire_promotion_candidates','index_shared_claim',
+         'invalidate_scope_authorization','transfer_scope_claims','parse_code_snapshot',
+         'build_wiki'))`,
+      `ALTER TABLE memory_wiki_build_runs
+         ADD COLUMN IF NOT EXISTS generation_run_id UUID UNIQUE
+           REFERENCES memory_generation_runs(run_id) ON DELETE SET NULL`,
+      `CREATE TABLE IF NOT EXISTS memory_wiki_build_sources (
+         run_id             UUID NOT NULL,
+         installation_id    UUID NOT NULL,
+         source_token       TEXT NOT NULL CHECK (source_token <> '' AND char_length(source_token) <= 256),
+         ordinal            INTEGER NOT NULL CHECK (ordinal >= 0),
+         source_kind        TEXT NOT NULL CHECK (source_kind IN
+                            ('file','symbol','claim_version','evidence')),
+         stable_key         TEXT NOT NULL CHECK (stable_key <> ''),
+         source_ref_id      UUID,
+         source_snapshot_id UUID,
+         commit_sha         TEXT,
+         path               TEXT,
+         content_hash       TEXT NOT NULL CHECK (content_hash ~ '^[0-9a-f]{64}$'),
+         excerpt            TEXT,
+         created_at         TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+         PRIMARY KEY (run_id, source_token),
+         UNIQUE (run_id, ordinal),
+         FOREIGN KEY (installation_id, run_id)
+           REFERENCES memory_wiki_build_runs (installation_id, run_id) ON DELETE CASCADE,
+         FOREIGN KEY (installation_id, source_snapshot_id)
+           REFERENCES memory_source_snapshots (installation_id, snapshot_id) ON DELETE CASCADE
+       )`,
+      `CREATE INDEX IF NOT EXISTS memory_wiki_build_sources_ref_idx
+         ON memory_wiki_build_sources (installation_id, source_kind, source_ref_id)`,
+      `CREATE TABLE IF NOT EXISTS memory_wiki_build_candidates (
+         run_id          UUID PRIMARY KEY,
+         installation_id UUID NOT NULL,
+         wiki_id         UUID NOT NULL,
+         document        JSONB NOT NULL,
+         content_hash    TEXT NOT NULL CHECK (content_hash ~ '^[0-9a-f]{64}$'),
+         validated_at    TIMESTAMPTZ NOT NULL,
+         created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+         UNIQUE (installation_id, run_id),
+         FOREIGN KEY (installation_id, run_id)
+           REFERENCES memory_wiki_build_runs (installation_id, run_id) ON DELETE CASCADE,
+         FOREIGN KEY (installation_id, wiki_id)
+           REFERENCES memory_wikis (installation_id, wiki_id) ON DELETE CASCADE
+       )`,
+    ],
+  },
+  {
+    // Phase 4 Minimum Product Contract: every denied shared mutation has a
+    // durable, content-free record. Deliberately omit request/resource data,
+    // grants, user identities, paths, symbols, and Wiki text.
+    version: 30,
+    statements: [
+      `CREATE TABLE IF NOT EXISTS memory_phase4_authorization_audit_events (
+         audit_id             UUID PRIMARY KEY,
+         installation_id      UUID NOT NULL
+           REFERENCES memory_installations(installation_id) ON DELETE CASCADE,
+         action               TEXT NOT NULL CHECK (action IN
+                              ('source_upload','publish','manual_edit','unlock')),
+         result               TEXT NOT NULL CHECK (result = 'unauthorized'),
+         actor_scope_kind     TEXT NOT NULL CHECK (actor_scope_kind IN ('team','organization')),
+         actor_scope_id       UUID NOT NULL,
+         membership_id        UUID NOT NULL,
+         membership_revision  BIGINT NOT NULL CHECK (membership_revision >= 1),
+         authorization_epoch  BIGINT NOT NULL CHECK (authorization_epoch >= 1),
+         created_at           TIMESTAMPTZ NOT NULL DEFAULT NOW()
+       )`,
+      `CREATE INDEX IF NOT EXISTS memory_phase4_authorization_audit_events_installation_idx
+         ON memory_phase4_authorization_audit_events (installation_id, created_at)`,
+    ],
+  },
 ]
 
 /** Apply every pending migration exactly once under a startup lock. */

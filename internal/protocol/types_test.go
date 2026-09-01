@@ -696,3 +696,65 @@ func TestPhase2ContextMessagesRoundTrip(t *testing.T) {
 		t.Fatalf("ack round trip mismatch: %+v", decodedAck)
 	}
 }
+
+func TestPhase4CodegraphGrantMessagesRoundTrip(t *testing.T) {
+	request := MemoryCodegraphGrantRequest{
+		Type: "memory_codegraph_grant", RequestID: "corr-4",
+		ScopeInstallationIDs: []string{"22222222-2222-4222-8222-222222222222"},
+	}
+	encoded, err := json.Marshal(request)
+	if err != nil {
+		t.Fatalf("marshal codegraph grant request: %v", err)
+	}
+	for _, want := range []string{
+		`"type":"memory_codegraph_grant"`, `"request_id":"corr-4"`,
+		`"scope_installation_ids":["22222222-2222-4222-8222-222222222222"]`,
+	} {
+		if !strings.Contains(string(encoded), want) {
+			t.Fatalf("request wire missing %s: %s", want, encoded)
+		}
+	}
+	var decoded MemoryCodegraphGrantRequest
+	if err := json.Unmarshal(encoded, &decoded); err != nil {
+		t.Fatalf("unmarshal codegraph grant request: %v", err)
+	}
+	if len(decoded.ScopeInstallationIDs) != 1 || decoded.ScopeInstallationIDs[0] != "22222222-2222-4222-8222-222222222222" {
+		t.Fatalf("scope selection round trip mismatch: %+v", decoded)
+	}
+
+	result := MemoryCodegraphGrantResult{
+		Type: "memory_codegraph_grant_result", RequestID: "corr-4",
+		Grant: "token", ExpiresIn: 60, TokenType: "extension_capability_v2",
+		InstallationID: "22222222-2222-4222-8222-222222222222",
+		ProviderPublicOrigin: "https://memory.example",
+		Services: []string{MemoryCodegraphWriteService},
+	}
+	encodedResult, err := json.Marshal(result)
+	if err != nil {
+		t.Fatalf("marshal codegraph grant result: %v", err)
+	}
+	for _, want := range []string{
+		`"type":"memory_codegraph_grant_result"`, `"expires_in":60`,
+		`"token_type":"extension_capability_v2"`,
+		`"services":["memory.codegraph.write"]`,
+	} {
+		if !strings.Contains(string(encodedResult), want) {
+			t.Fatalf("result wire missing %s: %s", want, encodedResult)
+		}
+	}
+
+	failure := MemoryCodegraphGrantError{
+		Type: "memory_codegraph_grant_error", RequestID: "corr-5",
+		Code: MemoryCodegraphErrNotContributor,
+	}
+	encodedFailure, err := json.Marshal(failure)
+	if err != nil {
+		t.Fatalf("marshal codegraph grant error: %v", err)
+	}
+	if !strings.Contains(string(encodedFailure), `"code":"not_contributor"`) {
+		t.Fatalf("error wire shape changed: %s", encodedFailure)
+	}
+	if !MemoryCodegraphGrantErrorCodes[MemoryCodegraphErrNotContributor] {
+		t.Fatal("not_contributor must be part of the frozen error allowlist")
+	}
+}

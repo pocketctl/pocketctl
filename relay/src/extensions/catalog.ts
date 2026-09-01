@@ -47,9 +47,10 @@ function deepFreeze<T>(value: T): T {
 const POCKETCTL_MEMORY_MANIFEST: ExtensionProviderManifest = deepFreeze({
   provider_id: 'pocketctl-memory',
   // v3 adds memory.context. v4 adds the v2 scope-control topics/scope for
-  // shared Team/Organization installations. Existing installations are never
+  // shared Team/Organization installations. v5 adds the Phase 4
+  // least-privilege source-sync service. Existing installations are never
   // widened by the catalog upsert; users must explicitly include new grants.
-  manifest_version: 4,
+  manifest_version: 5,
   display_name: 'PocketCtl Memory',
   provider_version: '1.0.0',
   protocol_versions: Object.freeze(['extension-feed.v1', 'extension-feed.v2']),
@@ -76,6 +77,7 @@ const POCKETCTL_MEMORY_MANIFEST: ExtensionProviderManifest = deepFreeze({
     Object.freeze({ service_id: 'memory.mcp', mode: 'mcp', metered: true }),
     Object.freeze({ service_id: 'memory.manage', mode: 'write', metered: false }),
     Object.freeze({ service_id: 'memory.context', mode: 'agent_tool', metered: true }),
+    Object.freeze({ service_id: 'memory.codegraph.write', mode: 'write', metered: false }),
   ]),
 })
 

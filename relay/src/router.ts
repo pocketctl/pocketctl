@@ -1,8 +1,10 @@
 import type { WebSocket } from 'ws';
 import {
   handleMemoryContextGrantMessage,
+  handleMemoryCodegraphGrantMessage,
   handleMemoryMcpGrantMessage,
   handleSessionRegistrationMessage,
+  type MemoryCodegraphGrantBroker,
   type MemoryContextGrantBroker,
   type MemoryMcpGrantBroker,
 } from './extensions/grant-service.js';
@@ -131,6 +133,8 @@ export interface RouterOptions {
   memoryContextGrantBroker?: MemoryContextGrantBroker;
   /** Agent MCP grant broker; absent disables the memory_mcp_grant leg. */
   memoryMcpGrantBroker?: MemoryMcpGrantBroker;
+  /** Phase 4 source-sync grant broker; absent disables the memory_codegraph_grant leg. */
+  memoryCodegraphGrantBroker?: MemoryCodegraphGrantBroker;
   observeIngressClass?: (daemonId: string, priority: PriorityClass) => void;
   authLeaseOptions?: AuthLeaseOptions;
   tokenUsageFactsAuthoritative?: boolean;
@@ -206,6 +210,7 @@ export class Router {
   private daemonMetrics = new Map<string, DaemonMetrics>();
   private memoryMcpGrantBroker?: MemoryMcpGrantBroker;
   private memoryContextGrantBroker?: MemoryContextGrantBroker;
+  private memoryCodegraphGrantBroker?: MemoryCodegraphGrantBroker;
   private clients = new Map<WebSocket, ClientConnection>();
   private sessionToDaemon = new Map<string, string>();
   private pendingSessionCreate = new Map<string, WebSocket>();
@@ -319,6 +324,7 @@ export class Router {
     this.controlPool = normalized.control;
     this.memoryMcpGrantBroker = options.memoryMcpGrantBroker;
     this.memoryContextGrantBroker = options.memoryContextGrantBroker;
+    this.memoryCodegraphGrantBroker = options.memoryCodegraphGrantBroker;
     this.ingestPool = normalized.ingest;
     this.queryPool = normalized.query;
     this.workerPool = normalized.worker;
@@ -1965,6 +1971,19 @@ export class Router {
       const broker = this.memoryContextGrantBroker;
       if (!daemon || !broker || !originWs) return;
       void handleMemoryContextGrantMessage(
+        broker, daemon, msg, (payload) => { if (originWs.readyState === originWs.OPEN) originWs.send(payload) },
+      ).catch(() => undefined);
+      return;
+    }
+
+    // Phase 4 least-privilege source-sync grant brokerage: identity derives
+    // from the authenticated daemon; the payload may never carry repository
+    // content, paths, or commit facts (strict request allowlist).
+    if (msg.type === 'memory_codegraph_grant') {
+      const daemon = originDaemon ?? this.daemons.get(daemonId);
+      const broker = this.memoryCodegraphGrantBroker;
+      if (!daemon || !broker || !originWs) return;
+      void handleMemoryCodegraphGrantMessage(
         broker, daemon, msg, (payload) => { if (originWs.readyState === originWs.OPEN) originWs.send(payload) },
       ).catch(() => undefined);
       return;

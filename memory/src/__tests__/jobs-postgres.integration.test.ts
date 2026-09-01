@@ -6,6 +6,7 @@ import {
   createJobRepository,
   retryDelayMs,
 } from '../jobs/repository.js'
+import { insertWikiCandidateFixture } from './helpers/phase4-wiki-fixture.js'
 
 const databaseUrl = process.env.MEMORY_TEST_DATABASE_URL
 const integrationEnabled = Boolean(
@@ -242,6 +243,48 @@ describeWithDatabase('fenced background jobs (PostgreSQL)', () => {
     expect(letters.rows[0].payload_hash.length).toBeGreaterThan(0)
     // The DLQ never carries the payload itself.
     expect(letters.rows[0].payload_present).toBe(false)
+  })
+
+  test('dead-lettering a Wiki build closes the run instead of blocking future builds', async () => {
+    const fixture = await insertWikiCandidateFixture(pool, 'dead-wiki-build')
+    await pool.query(`
+      UPDATE memory_wiki_build_runs SET state = 'running', completed_at = NULL WHERE run_id = $1
+    `, [fixture.runId])
+    await jobs.enqueueJob({
+      installationId: fixture.installationId,
+      jobType: 'build_wiki', idempotencyKey: 'build-dead',
+      payload: { run_id: fixture.runId, wiki_id: fixture.wikiId, generation: 1 },
+    })
+    await pool.query(`UPDATE memory_jobs SET attempts = 11 WHERE idempotency_key = 'build-dead'`)
+    const [claim] = await jobs.claimJobs({ workerId: 'w1', limit: 1, leaseMs: 60_000 })
+    await expect(jobs.rescheduleJob({
+      jobId: claim.job_id, claimedBy: 'w1', claimEpoch: claim.claim_epoch,
+      errorCode: 'handler_failed_Error',
+    })).resolves.toBe(true)
+    const run = await pool.query<{ state: string; error_code: string }>(`
+      SELECT state, error_code FROM memory_wiki_build_runs WHERE run_id = $1
+    `, [fixture.runId])
+    expect(run.rows[0]).toEqual({ state: 'failed', error_code: 'handler_failed_Error' })
+  })
+
+  test('dead-lettering a parser marks its snapshot failed', async () => {
+    const fixture = await insertWikiCandidateFixture(pool, 'dead-codegraph-build')
+    await pool.query(`UPDATE memory_source_snapshots SET state = 'parsing' WHERE snapshot_id = $1`, [fixture.snapshotId])
+    await jobs.enqueueJob({
+      installationId: fixture.installationId,
+      jobType: 'parse_code_snapshot', idempotencyKey: 'parse-dead',
+      payload: { snapshot_id: fixture.snapshotId },
+    })
+    await pool.query(`UPDATE memory_jobs SET attempts = 11 WHERE idempotency_key = 'parse-dead'`)
+    const [claim] = await jobs.claimJobs({ workerId: 'w1', limit: 1, leaseMs: 60_000 })
+    await expect(jobs.rescheduleJob({
+      jobId: claim.job_id, claimedBy: 'w1', claimEpoch: claim.claim_epoch,
+      errorCode: 'handler_failed_Error',
+    })).resolves.toBe(true)
+    const snapshot = await pool.query<{ state: string }>(`
+      SELECT state FROM memory_source_snapshots WHERE snapshot_id = $1
+    `, [fixture.snapshotId])
+    expect(snapshot.rows[0]!.state).toBe('failed')
   })
 
   test('available_at gates claiming until the retry delay elapses', async () => {

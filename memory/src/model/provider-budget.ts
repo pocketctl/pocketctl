@@ -110,6 +110,8 @@ export function withTextProviderBudget(
       // UTF-8 bytes are a conservative upper bound for tokenizer input units.
       const inputTokens = Buffer.byteLength(input.system, 'utf8')
         + Buffer.byteLength(JSON.stringify(input.document), 'utf8')
+        + Buffer.byteLength(JSON.stringify(input.schema), 'utf8')
+        + Buffer.byteLength('\n\nOutput JSON Schema:\n', 'utf8')
         + 1_024 // fixed conservative allowance for message framing/tokenizer overhead
       let reservation: ProviderBudgetReservation
       try {
@@ -136,7 +138,7 @@ export function withTextProviderBudget(
           outputTokens: usage.outputTokens,
         })
       }
-      return result
+      return { ...result, budgetReservationId: reservation.reservationId }
     },
   }
 }

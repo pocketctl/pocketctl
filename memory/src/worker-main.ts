@@ -20,6 +20,9 @@ import { createPurgeWorker } from './purge/worker.js'
 import { createFeedConsumer } from './inbox/feed-worker.js'
 import { createProjectionHandler } from './projection/repository.js'
 import { createEpisodeRepository } from './episodes/repository.js'
+import { createCodeGraphBuildService } from './codegraph/build-service.js'
+import { createWikiBuildService } from './wiki/build-service.js'
+import { createWikiGenerator } from './wiki/generator.js'
 import { createExtractionRepository } from './extraction/repository.js'
 import { createCandidateExtractor } from './extraction/extractor.js'
 import { createCandidateDeduper } from './extraction/deduper.js'
@@ -42,7 +45,12 @@ import { createInvalidationService } from './context/invalidation-service.js'
 import { createPolicyRepository } from './policies/repository.js'
 import { createPolicyResolver } from './policies/resolver.js'
 import type { ExtractionPolicyDocument } from './policies/schemas.js'
-import { createMemoryMetrics, updateFeedLagGauge, type MemoryMetrics } from './metrics.js'
+import {
+  createMemoryMetrics,
+  updateFeedLagGauge,
+  updatePhase4Gauges,
+  type MemoryMetrics,
+} from './metrics.js'
 import { createMemoryLogger } from './logging.js'
 import type pg from 'pg'
 
@@ -59,6 +67,7 @@ const JOB_TYPES = [
 	'index_shared_claim',
 	'recompile_extraction_policy', 'compile_context_shadow',
 	'record_context_delivery', 'invalidate_context_packs',
+	'parse_code_snapshot', 'build_wiki',
 ] as const
 const JOB_STATES = ['pending', 'running', 'completed', 'dead'] as const
 
@@ -108,6 +117,7 @@ async function updateGauges(pool: pg.Pool, metrics: MemoryMetrics): Promise<void
   metrics.usageOutboxRows.set({ state: 'dead_letter' }, Number(outbox.rows[0]?.dead_letter ?? 0))
 
   await updateFeedLagGauge(pool, metrics.feedLag)
+  await updatePhase4Gauges(pool, metrics.phase4)
 }
 
 /**
@@ -120,7 +130,9 @@ async function main(): Promise<void> {
   const config = loadMemoryConfig()
   const pool = createMemoryPool(config)
   await applyMemorySchema(pool)
-  const providerBudgetStore = config.providerBudget ? createProviderBudgetStore(pool) : undefined
+  const providerBudgetStore = config.providerBudget || config.wikiProviderBudget
+    ? createProviderBudgetStore(pool)
+    : undefined
   await validateTombstoneKeyring(pool, config.tombstoneHmacKeys)
   const { signal, wait } = createShutdownSignal()
   const logger = createMemoryLogger(config.logLevel)
@@ -229,6 +241,7 @@ async function main(): Promise<void> {
       registry: createInstallationRegistry(pool),
       signal,
       intervalMs: 30_000,
+      installationAllowlist: new Set(config.installationAllowlist),
       onError: loopError('discovery'),
     })
     discovery.start()
@@ -264,11 +277,16 @@ async function main(): Promise<void> {
       workerId: config.workerId,
       signal,
       leaseMs: config.jobLeaseMs,
+      concurrencyLimits: {
+        parse_code_snapshot: config.codegraphMaxConcurrency,
+        build_wiki: config.wikiMaxConcurrency,
+      },
       onError: loopError('jobs'),
     })
     const purgeRepository = createPurgeRepository(pool, {
       hmacKey: config.hmacKey,
       tombstoneHmacKeys: config.tombstoneHmacKeys,
+      codeSnapshotRetentionDays: config.codeSnapshotRetentionDays,
       onInvalidated: (scope, count) => {
         if (count > 0) metrics.phase1.purgeInvalidations.inc({ scope }, count)
       },
@@ -305,8 +323,74 @@ async function main(): Promise<void> {
     })
     jobWorker.register('compile_episode', episodes.handleCompileEpisode)
     jobWorker.register('snapshot_reconcile', snapshotReconciler.handleSnapshotReconcile)
+    const codeGraphBuild = createCodeGraphBuildService({
+      pool,
+      metrics: metrics.phase4,
+      mode: config.codegraphMode === 'enabled' ? 'enabled' : 'shadow',
+    })
+    jobWorker.register('parse_code_snapshot', codeGraphBuild.handleParseCodeSnapshot)
+    const rawTextGenerator = config.textModel
+      ? createOpenAICompatibleTextGenerator({
+          baseUrl: config.textModel.baseUrl,
+          model: config.textModel.model,
+          apiKey: config.textModel.apiKey,
+          timeoutMs: config.modelTimeoutMs,
+          inputCostMicrosPerMillionTokens: config.textModel.inputCostMicrosPerMillionTokens,
+          outputCostMicrosPerMillionTokens: config.textModel.outputCostMicrosPerMillionTokens,
+          maxOutputTokens: config.providerBudget?.textMaxOutputTokensPerRequest,
+          maxAttempts: config.providerBudget ? 1 : undefined,
+          thinking: config.textModel.thinking,
+        })
+      : undefined
+    const textGenerator = rawTextGenerator && config.providerBudget && providerBudgetStore
+      ? withTextProviderBudget(rawTextGenerator, providerBudgetStore, {
+          key: config.providerBudget.key,
+          maxRequests: config.providerBudget.textMaxRequests,
+          maxInputTokens: config.providerBudget.textMaxInputTokens,
+          maxOutputTokens: config.providerBudget.textMaxOutputTokens,
+          maxOutputTokensPerRequest: config.providerBudget.textMaxOutputTokensPerRequest,
+        })
+      : rawTextGenerator
+    const rawWikiTextGenerator = config.textModel && config.wikiProviderBudget
+      ? createOpenAICompatibleTextGenerator({
+          baseUrl: config.textModel.baseUrl,
+          model: config.textModel.model,
+          apiKey: config.textModel.apiKey,
+          timeoutMs: config.modelTimeoutMs,
+          inputCostMicrosPerMillionTokens: config.textModel.inputCostMicrosPerMillionTokens,
+          outputCostMicrosPerMillionTokens: config.textModel.outputCostMicrosPerMillionTokens,
+          maxOutputTokens: config.wikiProviderBudget.textMaxOutputTokensPerRequest,
+          maxAttempts: 1,
+          thinking: config.textModel.thinking,
+        })
+      : undefined
+    const wikiTextGenerator = rawWikiTextGenerator && config.wikiProviderBudget && providerBudgetStore
+      ? withTextProviderBudget(rawWikiTextGenerator, providerBudgetStore, {
+          key: config.wikiProviderBudget.key,
+          maxRequests: config.wikiProviderBudget.textRequestLimit,
+          maxInputTokens: config.wikiProviderBudget.textInputTokenLimit,
+          maxOutputTokens: config.wikiProviderBudget.textOutputTokenLimit,
+          maxOutputTokensPerRequest: config.wikiProviderBudget.textMaxOutputTokensPerRequest,
+        })
+      : undefined
+    const wikiBuild = createWikiBuildService({
+      pool,
+      maxSections: config.wikiMaxSections,
+      metrics: metrics.phase4,
+      mode: config.wikiMode === 'enabled' ? 'enabled' : 'shadow',
+      generator: wikiTextGenerator
+        ? createWikiGenerator({
+            provider: wikiTextGenerator,
+            timeoutMs: config.modelTimeoutMs,
+            maxPages: config.wikiMaxPages,
+            maxSections: config.wikiMaxSections,
+            maxSourceChars: config.wikiMaxSourceChars,
+          })
+        : undefined,
+    })
+    jobWorker.register('build_wiki', wikiBuild.handleBuildWiki)
 
-    if (config.textModel) {
+    if (config.textModel && textGenerator) {
       const extractionConsentFingerprint = createHash('sha256')
         .update(`${config.textModel.provider}\n${config.textModel.baseUrl}\n${config.textModel.model}`)
         .digest('hex')
@@ -315,26 +399,6 @@ async function main(): Promise<void> {
         pool,
         repository: createPolicyRepository(pool),
       })
-      const rawTextGenerator = createOpenAICompatibleTextGenerator({
-        baseUrl: config.textModel.baseUrl,
-        model: config.textModel.model,
-        apiKey: config.textModel.apiKey,
-        timeoutMs: config.modelTimeoutMs,
-        inputCostMicrosPerMillionTokens: config.textModel.inputCostMicrosPerMillionTokens,
-        outputCostMicrosPerMillionTokens: config.textModel.outputCostMicrosPerMillionTokens,
-        maxOutputTokens: config.providerBudget?.textMaxOutputTokensPerRequest,
-        maxAttempts: config.providerBudget ? 1 : undefined,
-        thinking: config.textModel.thinking,
-      })
-      const textGenerator = config.providerBudget && providerBudgetStore
-        ? withTextProviderBudget(rawTextGenerator, providerBudgetStore, {
-            key: config.providerBudget.key,
-            maxRequests: config.providerBudget.textMaxRequests,
-            maxInputTokens: config.providerBudget.textMaxInputTokens,
-            maxOutputTokens: config.providerBudget.textMaxOutputTokens,
-            maxOutputTokensPerRequest: config.providerBudget.textMaxOutputTokensPerRequest,
-          })
-        : rawTextGenerator
       const extractor = createCandidateExtractor({
         store: extractionStore,
         textGenerator,

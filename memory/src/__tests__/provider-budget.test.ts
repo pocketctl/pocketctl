@@ -47,9 +47,16 @@ describe('provider budget guard', () => {
       maxOutputTokensPerRequest: 10,
     })
     await guarded.generateJson({
-      operation: 'candidate_extract', system: 's', document: {}, schema: {},
+      operation: 'candidate_extract', system: 's', document: {}, schema: { type: 'object' },
       timeoutMs: 1000, signal: new AbortController().signal,
     })
+    expect(store.reserve).toHaveBeenCalledWith(expect.objectContaining({
+      inputTokens: Buffer.byteLength('s')
+        + Buffer.byteLength('{}')
+        + Buffer.byteLength('{"type":"object"}')
+        + Buffer.byteLength('\n\nOutput JSON Schema:\n')
+        + 1_024,
+    }))
     expect(store.settle).toHaveBeenCalledWith('r1', { inputTokens: 7, outputTokens: 3 })
   })
 

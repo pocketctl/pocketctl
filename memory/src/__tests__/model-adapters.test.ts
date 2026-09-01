@@ -51,6 +51,11 @@ describe('openai-compatible text adapter', () => {
     const payload = JSON.parse(String(init.body)) as Record<string, unknown>
     expect(payload.response_format).toEqual({ type: 'json_object' })
     expect(payload.max_tokens).toBe(4096)
+    expect(payload.messages).toEqual(expect.arrayContaining([
+      expect.objectContaining({ role: 'system', content: expect.stringContaining('Output JSON Schema') }),
+    ]))
+    const messages = payload.messages as Array<{ role: string; content: string }>
+    expect(messages[0]!.content).toContain('{"type":"object"}')
     const headers = new Headers(init.headers)
     expect(headers.get('authorization')).toBe('Bearer secret-text-key')
     expect(init.redirect).toBe('error')

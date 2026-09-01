@@ -56,6 +56,61 @@ function workerOptions(overrides: Partial<JobWorkerOptions> = {}): JobWorkerOpti
 }
 
 describe('job worker per-claim lease renewal', () => {
+  test('serializes Phase 4 handlers by configured job-type concurrency', async () => {
+    const claims = [
+      claim({ job_id: 'parse-a', job_type: 'parse_code_snapshot' }),
+      claim({ job_id: 'parse-b', job_type: 'parse_code_snapshot' }),
+    ]
+    const { jobs } = fakeJobs(claims)
+    const worker = createJobWorker(workerOptions({
+      jobs,
+      claimLimit: 2,
+      concurrencyLimits: { parse_code_snapshot: 1 },
+    }))
+    let active = 0
+    let maximum = 0
+    worker.register('parse_code_snapshot', async () => {
+      active++
+      maximum = Math.max(maximum, active)
+      await new Promise(resolve => setTimeout(resolve, 40))
+      active--
+    })
+    worker.start()
+    await new Promise(resolve => setTimeout(resolve, 140))
+    await worker.stop()
+    expect(maximum).toBe(1)
+  })
+
+  test('does not start a concurrency-queued handler after worker shutdown', async () => {
+    const controller = new AbortController()
+    const { jobs } = fakeJobs([
+      claim({ job_id: 'parse-a', job_type: 'parse_code_snapshot' }),
+      claim({ job_id: 'parse-b', job_type: 'parse_code_snapshot' }),
+    ])
+    const worker = createJobWorker(workerOptions({
+      jobs,
+      signal: controller.signal,
+      claimLimit: 2,
+      concurrencyLimits: { parse_code_snapshot: 1 },
+    }))
+    const started: string[] = []
+    let firstStarted!: () => void
+    const firstStartedPromise = new Promise<void>(resolve => { firstStarted = resolve })
+    worker.register('parse_code_snapshot', async (job, signal) => {
+      started.push(job.job_id)
+      firstStarted()
+      await new Promise<void>(resolve => {
+        if (signal.aborted) resolve()
+        else signal.addEventListener('abort', () => resolve(), { once: true })
+      })
+    })
+    worker.start()
+    await firstStartedPromise
+    controller.abort()
+    await worker.stop()
+    expect(started).toEqual(['parse-a'])
+  })
+
   test('renews each in-flight claim individually with its own fence', async () => {
     const first = claim({ job_id: 'job-a', claim_epoch: 3 })
     const { jobs, renewCalls } = fakeJobs([first])

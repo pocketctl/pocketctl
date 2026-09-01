@@ -58,10 +58,11 @@ export function createOpenAICompatibleTextGenerator(options: OpenAICompatibleTex
     }): Promise<ModelJsonResult<T>> {
       let payload: unknown
       try {
+        const schemaContract = JSON.stringify(input.schema)
         payload = await client.postJson('/chat/completions', {
           model: options.model,
           messages: [
-            { role: 'system', content: input.system },
+            { role: 'system', content: `${input.system}\n\nOutput JSON Schema:\n${schemaContract}` },
             { role: 'user', content: JSON.stringify(input.document) },
           ],
           response_format: { type: 'json_object' },

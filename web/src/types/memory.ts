@@ -340,3 +340,159 @@ export interface MemoryReviewPolicyDocument {
   retention_days_after_revoke: number
   allow_parallel_conflicts: boolean
 }
+
+// --- ADR-0006 Phase 4 source graph and Living Wiki wire types ---
+
+export type MemorySourceCoverage = 'complete' | 'partial' | 'unsupported' | 'degraded'
+
+export interface MemoryCodeGraphNode {
+  node_id: string
+  kind: 'repository' | 'file' | 'symbol' | 'external_package'
+  stable_key: string
+  path: string | null
+  name: string
+  symbol_kind?: string | null
+  start_line?: number | null
+  start_column?: number | null
+  end_line?: number | null
+  end_column?: number | null
+  metadata: Record<string, unknown>
+}
+
+export interface MemoryCodeGraphEdge {
+  edge_id: string
+  kind: string
+  from_stable_key: string
+  to_stable_key: string
+  source_path: string
+  source_line?: number | null
+  resolution: 'resolved' | 'unresolved' | 'dynamic'
+}
+
+export interface MemoryCodeGraphPage {
+  repository_id: string
+  owner_scope_kind: string | null
+  owner_scope_id: string | null
+  snapshot_id: string
+  commit_sha: string
+  graph_version_id: string
+  parser_version: string
+  coverage: MemorySourceCoverage
+  content_hash: string
+  nodes: MemoryCodeGraphNode[]
+  edges: MemoryCodeGraphEdge[]
+  next_cursor: string | null
+}
+
+export interface MemoryChangeImpact {
+  repository_id: string
+  owner_scope_kind?: string | null
+  owner_scope_id?: string | null
+  snapshot_id: string
+  commit_sha: string
+  graph_version_id: string
+  paths: string[]
+  nodeKeys: string[]
+  edgeCount: number
+  coverage: MemorySourceCoverage
+  reasons: string[]
+}
+
+export interface MemoryWikiCitation {
+  source_kind: 'file' | 'symbol' | 'claim_version' | 'evidence'
+  source_token: string
+  source_snapshot_id: string | null
+  commit_sha: string | null
+  stable_key: string | null
+  path: string | null
+  content_hash: string | null
+}
+
+export interface MemoryWikiSection {
+  section_id: string
+  page_id: string
+  section_key: string
+  heading: string
+  markdown: string
+  authority: 'generated' | 'manual' | 'locked'
+  coverage: MemorySourceCoverage
+  position: number
+  stale: boolean
+  stale_reason: string | null
+  locked?: boolean
+  lock_version?: number
+  citations: MemoryWikiCitation[]
+}
+
+export interface MemoryWikiPage {
+  page_id: string
+  page_key: string
+  title: string
+  position: number
+  sections: MemoryWikiSection[]
+}
+
+export interface MemoryActiveWiki {
+  repository_id: string
+  owner_scope_kind: string | null
+  owner_scope_id: string | null
+  wiki_id: string
+  wiki_version_id: string
+  generation: number
+  revision: number
+  snapshot_id: string
+  graph_version_id: string
+  commit_sha: string
+  coverage: MemorySourceCoverage
+  content_hash: string
+  stale: boolean
+  pages: MemoryWikiPage[]
+}
+
+export interface MemoryWikiBuild {
+  run_id: string
+  generation: string
+  source_snapshot_id: string
+  graph_version_id: string | null
+  state: string
+  input_digest: string
+  prompt_version?: string | null
+  model_version?: string | null
+  policy_version?: string | null
+  parser_version?: string | null
+  error_code?: string | null
+  created_at?: string
+  started_at?: string | null
+  completed_at?: string | null
+}
+
+export interface MemoryWikiBuildList {
+  builds: MemoryWikiBuild[]
+  next_cursor: string | null
+}
+
+export interface MemoryWikiCandidateSection {
+  section_key: string
+  heading: string
+  markdown: string
+  source_tokens: string[]
+  coverage: MemorySourceCoverage
+}
+
+export interface MemoryWikiCandidate {
+  generation: string
+  commit_sha: string
+  content_hash: string
+  validated_at?: string
+  source_snapshot_id?: string
+  graph_version_id?: string
+  state?: string
+  document: {
+    schema_version: 'wiki-candidate.v1'
+    pages: Array<{
+      page_key: string
+      title: string
+      sections: MemoryWikiCandidateSection[]
+    }>
+  }
+}

@@ -192,6 +192,236 @@ export function createMemoryMcpGrantBroker(deps: MemoryMcpGrantBrokerDeps) {
 export type MemoryMcpGrantBroker = ReturnType<typeof createMemoryMcpGrantBroker>
 
 /**
+ * Phase 4 least-privilege source-sync grant broker (ADR-0006 §2). The daemon
+ * asks for a `memory.codegraph.write` Capability Grant before uploading a
+ * committed snapshot to Memory. The request payload carries no identity, path,
+ * commit, or repository facts — Relay derives the user from the AUTHENTICATED
+ * connection and resolves the target installation itself:
+ *
+ * - No scope selection: the user's one active PERSONAL installation with the
+ *   service enabled mints a v1 grant.
+ * - Exactly one explicit installation id: a federated v2 grant whose binding
+ *   must carry `contribute`; publication rights are deliberately absent and
+ *   stay with the Memory publication flow.
+ *
+ * TTL is at most 60 seconds; the client refreshes between batches.
+ */
+export interface MemoryCodegraphGrantRequestMessage {
+  type: 'memory_codegraph_grant'
+  /** Caller-supplied correlation id echoed verbatim. */
+  request_id?: string
+  /** Optional explicit shared target: exactly one installation id. */
+  scope_installation_ids?: string[]
+}
+
+export interface MemoryCodegraphGrantResult {
+  type: 'memory_codegraph_grant_result'
+  request_id?: string
+  grant: string
+  expires_in: number
+  token_type: 'extension_capability' | 'extension_capability_v2'
+  installation_id: string
+  provider_public_origin: string
+  services: string[]
+}
+
+export interface MemoryCodegraphGrantError {
+  type: 'memory_codegraph_grant_error'
+  request_id?: string
+  code:
+    | 'unauthenticated'
+    | 'invalid_request'
+    | 'no_installation'
+    | 'service_disabled'
+    | 'installation_not_active'
+    | 'not_contributor'
+    | 'feature_disabled'
+    | 'internal_error'
+}
+
+const CODEGRAPH_SERVICE = 'memory.codegraph.write'
+const CODEGRAPH_REQUEST_KEYS = new Set(['type', 'request_id', 'scope_installation_ids'])
+
+export function createMemoryCodegraphGrantBroker(deps: MemoryMcpGrantBrokerDeps) {
+  const routeDeps: CapabilityRouteDeps = {
+    pool: deps.pool,
+    verifyAccessToken: async () => null,
+    mode: deps.mode,
+    issuer: deps.issuer,
+    providerPublicOrigins: deps.providerPublicOrigins,
+    ttlSeconds: Math.min(deps.ttlSeconds ?? 60, 60),
+  }
+  const mint = createCapabilityGrantService(routeDeps, deps.grantKeys)
+
+  return {
+    /** Resolve the user's one active personal installation carrying the service. */
+    async resolvePersonalInstallation(userId: number): Promise<{
+      installationId: string
+    } | { error: 'no_installation' | 'service_disabled' | 'installation_not_active' }> {
+      const rows = await deps.pool.query<{
+        installation_id: string
+        status: string
+        enabled_services: string[]
+        owner_scope_kind: string
+      }>(`
+        SELECT installation_id::text, status, enabled_services, owner_scope_kind
+        FROM extension_installations
+        WHERE owner_user_id = $1 AND provider_id = 'pocketctl-memory'
+        ORDER BY created_at
+      `, [userId])
+      // Only personal installations qualify for the implicit target; shared
+      // installations must be selected explicitly and mint through v2.
+      const personalAll = rows.rows.filter(row => row.owner_scope_kind === 'personal')
+      const personal = personalAll.filter(row => !['revoking', 'revoked'].includes(row.status))
+      if (personal.length === 0) {
+        return personalAll.length > 0 ? { error: 'installation_not_active' } : { error: 'no_installation' }
+      }
+      const active = personal.filter(row => row.status === 'active')
+      if (active.length !== 1) return { error: 'installation_not_active' }
+      if (!active[0].enabled_services.includes(CODEGRAPH_SERVICE)) {
+        return { error: 'service_disabled' }
+      }
+      return { installationId: active[0].installation_id }
+    },
+
+    async requestGrant(
+      daemon: { userId: number | null },
+      scopeInstallationIds?: string[],
+    ): Promise<MemoryCodegraphGrantResult | MemoryCodegraphGrantError> {
+      if (daemon.userId === null || !Number.isInteger(daemon.userId) || daemon.userId <= 0) {
+        return { type: 'memory_codegraph_grant_error', code: 'unauthenticated' }
+      }
+      if (scopeInstallationIds !== undefined) {
+        // Exactly one explicit shared target; duplicates and lists are refused
+        // before any database work.
+        if (!Array.isArray(scopeInstallationIds)
+          || scopeInstallationIds.length !== 1
+          || typeof scopeInstallationIds[0] !== 'string'
+          || scopeInstallationIds[0].length === 0
+          || scopeInstallationIds[0].length > 64) {
+          return { type: 'memory_codegraph_grant_error', code: 'invalid_request' }
+        }
+        const v2 = createV2GrantService({
+          pool: deps.pool,
+          issuer: deps.issuer,
+          v2Mode: deps.v2Mode ?? 'off',
+          grantKeys: deps.grantKeys,
+          ttlSeconds: 60,
+        })
+        const minted = await v2.mint({
+          userId: daemon.userId,
+          installationIds: scopeInstallationIds,
+          callerType: 'agent',
+          services: [CODEGRAPH_SERVICE],
+        })
+        if (!minted.ok) {
+          const code = minted.code === 'feature_disabled' ? 'feature_disabled'
+            : minted.code === 'not_found' ? 'no_installation'
+              : minted.code === 'forbidden' ? 'service_disabled'
+                : minted.code === 'installation_paused' ? 'installation_not_active'
+                  : 'internal_error'
+          return { type: 'memory_codegraph_grant_error', code }
+        }
+        // The upload mutation requires contribute; publication is a separate
+        // Memory-side action and its permission is deliberately not minted.
+        const binding = minted.bindings[0]
+        if (!binding || !binding.permissions.includes('contribute')) {
+          return { type: 'memory_codegraph_grant_error', code: 'not_contributor' }
+        }
+        return {
+          type: 'memory_codegraph_grant_result',
+          grant: minted.token,
+          expires_in: minted.expiresInSeconds,
+          token_type: 'extension_capability_v2',
+          installation_id: scopeInstallationIds[0],
+          provider_public_origin: deps.providerPublicOrigins.get('pocketctl-memory') ?? '',
+          services: [CODEGRAPH_SERVICE],
+        }
+      }
+      const resolved = await this.resolvePersonalInstallation(daemon.userId)
+      if ('error' in resolved) {
+        return { type: 'memory_codegraph_grant_error', code: resolved.error }
+      }
+      const minted = await mint.mint({
+        userId: daemon.userId,
+        installationId: resolved.installationId,
+        callerType: 'agent',
+        services: [CODEGRAPH_SERVICE],
+        sessionId: null,
+      })
+      if (!minted.ok) {
+        const code = minted.error.code === 'feature_disabled' ? 'feature_disabled' : 'internal_error'
+        return { type: 'memory_codegraph_grant_error', code }
+      }
+      return {
+        type: 'memory_codegraph_grant_result',
+        grant: minted.token,
+        expires_in: minted.expiresInSeconds,
+        token_type: 'extension_capability',
+        installation_id: resolved.installationId,
+        provider_public_origin: minted.providerPublicOrigin ?? '',
+        services: [CODEGRAPH_SERVICE],
+      }
+    },
+  }
+}
+
+export type MemoryCodegraphGrantBroker = ReturnType<typeof createMemoryCodegraphGrantBroker>
+
+/**
+ * Handle one daemon WS message for the Phase 4 source-sync grant. The request
+ * shape is a strict allowlist: any identity-, path-, or commit-bearing field
+ * is rejected with invalid_request before a mint is attempted.
+ */
+export async function handleMemoryCodegraphGrantMessage(
+  broker: MemoryCodegraphGrantBroker,
+  daemon: { userId: number | null },
+  msg: unknown,
+  send: (payload: string) => void,
+): Promise<void> {
+  if (msg === null || typeof msg !== 'object' || Array.isArray(msg)) {
+    send(JSON.stringify({ type: 'memory_codegraph_grant_error', code: 'invalid_request' }))
+    return
+  }
+  const message = msg as Record<string, unknown>
+  if (message.type !== 'memory_codegraph_grant') {
+    send(JSON.stringify({ type: 'memory_codegraph_grant_error', code: 'invalid_request' }))
+    return
+  }
+  for (const key of Object.keys(message)) {
+    if (!CODEGRAPH_REQUEST_KEYS.has(key)) {
+      send(JSON.stringify({ type: 'memory_codegraph_grant_error', code: 'invalid_request' }))
+      return
+    }
+  }
+  const requestId = typeof message.request_id === 'string'
+    ? message.request_id.slice(0, 128)
+    : undefined
+  let scopeInstallationIds: string[] | undefined
+  if (message.scope_installation_ids !== undefined) {
+    if (!Array.isArray(message.scope_installation_ids)) {
+      send(JSON.stringify({ type: 'memory_codegraph_grant_error', code: 'invalid_request' }))
+      return
+    }
+    scopeInstallationIds = message.scope_installation_ids as string[]
+  }
+  try {
+    const result = await broker.requestGrant(daemon, scopeInstallationIds)
+    send(JSON.stringify(
+      'grant' in result ? { ...result, ...(requestId ? { request_id: requestId } : {}) }
+        : { ...result, ...(requestId ? { request_id: requestId } : {}) },
+    ))
+  } catch {
+    // Bounded code only — never the error message, stack, or echo of input.
+    send(JSON.stringify({
+      type: 'memory_codegraph_grant_error',
+      ...(requestId ? { request_id: requestId } : {}),
+      code: 'internal_error',
+    }))
+  }
+}
+
+/**
  * Handle one daemon WS message: correlate request_id, answer on the daemon
  * socket, and never let an error escape to the connection loop.
  */

@@ -11,6 +11,8 @@ export interface DiscoveryWorkerOptions {
   maxBackoffMs?: number
   /** Safety cap for a malformed or cycling pagination chain. */
   maxPages?: number
+  /** Optional provider-side processing boundary; an empty set means unrestricted. */
+  installationAllowlist?: ReadonlySet<string>
   onError?(error: unknown): void
   setTimer?(callback: () => void, delayMs: number): ReturnType<typeof setTimeout>
 }
@@ -80,9 +82,16 @@ export function createDiscoveryWorker(options: DiscoveryWorkerOptions) {
       if (options.signal.aborted) throw new Error('discovery aborted')
     }
     if (!complete) throw new Error('installation discovery pagination incomplete')
+    const allowedItems = options.installationAllowlist && options.installationAllowlist.size > 0
+      ? items.filter(item => options.installationAllowlist!.has(item.installation_id.toLowerCase()))
+      : items
     const generation = await options.registry.currentGeneration() + 1
-    await options.registry.applyDiscovery({ generation, items, installationCursor: lastCursor ?? undefined })
-    return items.length
+    await options.registry.applyDiscovery({
+      generation,
+      items: allowedItems,
+      installationCursor: lastCursor ?? undefined,
+    })
+    return allowedItems.length
   }
 
   function schedule(delayMs: number): void {

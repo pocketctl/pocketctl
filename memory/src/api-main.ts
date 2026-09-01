@@ -8,6 +8,8 @@ import { createMemoryMetrics } from './metrics.js'
 import { createGrantGuard } from './auth/grant-guard.js'
 import { createCorsHostPolicy } from './auth/cors-host-policy.js'
 import { registerReadRoutes } from './api/read-routes.js'
+import { registerCodegraphRoutes } from './api/codegraph-routes.js'
+import { registerWikiRoutes } from './api/wiki-routes.js'
 import { registerGovernanceRoutes } from './api/governance-routes.js'
 import { registerManageRoutes } from './api/manage-routes.js'
 import { registerContextRoutes } from './api/context-routes.js'
@@ -177,6 +179,23 @@ async function main(): Promise<void> {
       isProduction: config.isProduction,
     })
     const rateLimiter = createRateLimiter(120, 60_000)
+    registerCodegraphRoutes(app, {
+      pool,
+      guard,
+      codegraphMode: config.codegraphMode,
+      sharedScopesMode: config.sharedScopesMode,
+      cursorSigningKey: config.hmacKey,
+      phase4Metrics: metrics.phase4,
+    })
+    registerWikiRoutes(app, {
+      pool,
+      guard,
+      wikiMode: config.wikiMode,
+      sharedScopesMode: config.sharedScopesMode,
+      cursorSigningKey: config.hmacKey,
+      purgeHmacKey: config.hmacKey,
+      phase4Metrics: metrics.phase4,
+    })
     registerReadRoutes(app, {
       pool,
       guard,

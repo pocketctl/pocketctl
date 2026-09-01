@@ -19,6 +19,8 @@ export type JobType =
   | 'compile_context_shadow'
   | 'record_context_delivery'
   | 'invalidate_context_packs'
+  | 'parse_code_snapshot'
+  | 'build_wiki'
 
 export const JOB_TYPES: readonly JobType[] = Object.freeze([
   'expire_promotion_candidates',
@@ -40,6 +42,8 @@ export const JOB_TYPES: readonly JobType[] = Object.freeze([
   'compile_context_shadow',
   'record_context_delivery',
   'invalidate_context_packs',
+  'parse_code_snapshot',
+  'build_wiki',
 ])
 
 /**
@@ -64,6 +68,8 @@ export const JOB_PRIORITIES = Object.freeze({
   recompile_extraction_policy: 84,
   compile_context_shadow: 88,
   invalidate_context_packs: 10,
+  parse_code_snapshot: 70,
+  build_wiki: 75,
   report_status: 100,
   report_usage: 100,
   record_context_delivery: 100,

@@ -34,14 +34,14 @@ function relayAndProviderFetch(options: {
   grantResponse?: unknown
   providerHandler?: (url: string, init: RequestInit) => Response | Promise<Response>
 }) {
-  const calls: Array<{ origin: string; path: string; init: RequestInit }> = []
+  const calls: Array<{ origin: string; path: string; search: string; init: RequestInit }> = []
   const grantResponse = options.grantResponse ?? {
     grant: 'grant-token-1', expires_in: 300, token_type: 'extension_capability',
     provider_public_origin: 'https://memory.example',
   }
   const fetchImpl = vi.fn(async (input: string | URL, init: RequestInit = {}) => {
     const url = String(input)
-    calls.push({ origin: new URL(url).origin, path: new URL(url).pathname, init })
+    calls.push({ origin: new URL(url).origin, path: new URL(url).pathname, search: new URL(url).search, init })
     if (url.includes('/api/extensions/v1/')) {
       if (url.includes('/grants')) {
         if (options.grantResponse instanceof Response) return options.grantResponse
@@ -266,6 +266,46 @@ describe('memoryClient', () => {
     expect((put?.init.headers as Record<string, string>)['idempotency-key'])
       .toMatch(/^web-context-setting-/)
     expect(JSON.parse(String(put?.init.body))).toMatchObject({ expected_revision: 3, mode: 'shadow' })
+  })
+
+  test('phase four graph and Wiki calls preserve bounded cursors and CAS bodies', async () => {
+    const { calls } = relayAndProviderFetch({
+      providerHandler: () => new Response(JSON.stringify({}), {
+        status: 200, headers: { 'content-type': 'application/json' },
+      }),
+    })
+    const client = await import('../../services/memoryClient')
+    await client.getMemoryCodeGraph('repo-1', 'signed graph cursor')
+    await client.analyzeMemoryChangeImpact('repo-1', {
+      entry_paths: ['src/index.ts'], depth: 2, max_nodes: 50, max_edges: 100,
+    })
+    await client.getMemoryWiki('repo-1')
+    await client.listMemoryWikiBuilds('wiki-1', 'signed wiki cursor')
+    await client.scheduleMemoryWikiBuild('wiki-1', 4)
+    await client.publishMemoryWikiCandidate('wiki-1', 'build-1', 4, 2)
+    await client.editMemoryWikiSection('wiki-1', 'operations', 'Manual runbook', 3)
+    await client.setMemoryWikiSectionLock('wiki-1', 'operations', 'lock', 4)
+
+    expect(calls.find(call => call.path.endsWith('/repo-1/codegraph'))?.path).toBe(
+      '/api/v1/memory/repositories/repo-1/codegraph',
+    )
+    const graphCall = calls.find(call => String(call.init.method ?? 'GET') === 'GET'
+      && call.path.includes('/codegraph'))!
+    expect(graphCall.search).toContain('cursor=signed+graph+cursor')
+    const buildsList = calls.find(call => call.path.endsWith('/wiki-1/builds') && !call.init.method)!
+    expect(buildsList.search).toContain('cursor=signed+wiki+cursor')
+    const impact = calls.find(call => call.path.endsWith('/impact'))!
+    expect(JSON.parse(String(impact.init.body))).toMatchObject({ entry_paths: ['src/index.ts'], depth: 2 })
+    const build = calls.find(call => call.path.endsWith('/wiki-1/builds') && call.init.method === 'POST')!
+    expect(JSON.parse(String(build.init.body))).toEqual({ expected_generation: 4 })
+    const publish = calls.find(call => call.path.endsWith('/publish'))!
+    expect(JSON.parse(String(publish.init.body))).toEqual({ expected_generation: 4, expected_head_revision: 2 })
+    const edit = calls.find(call => call.path.includes('/manual-sections/operations') && call.init.method === 'PUT')!
+    expect(JSON.parse(String(edit.init.body))).toMatchObject({ markdown: 'Manual runbook', expected_lock_version: 3 })
+    const lock = calls.find(call => call.path.endsWith('/operations/lock'))!
+    expect(JSON.parse(String(lock.init.body))).toEqual({ expected_lock_version: 4 })
+    expect(calls.filter(call => call.origin === 'https://memory.example').every(call =>
+      (call.init.headers as Record<string, string>).Authorization === 'Bearer grant-token-1')).toBe(true)
   })
 
 	test('policy diff uses a browser-compatible POST body', async () => {

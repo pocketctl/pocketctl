@@ -34,7 +34,18 @@ describe('memory config', () => {
     expect(config.extractionMaxRunsPerEpisode).toBe(1)
     expect(config.extractionNotBefore).toBeNull()
     expect(config.providerBudget).toBeUndefined()
+    expect(config.installationAllowlist).toEqual([])
     expect(config.logLevel).toBe('info')
+  })
+
+  test('validates and normalizes the optional installation allowlist', () => {
+    const first = 'AAAAAAAA-AAAA-4AAA-8AAA-AAAAAAAAAAAA'
+    const second = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb'
+    expect(loadMemoryConfig(baseEnv({
+      MEMORY_INSTALLATION_ALLOWLIST: `${first}, ${second}, ${first}`,
+    })).installationAllowlist).toEqual([first.toLowerCase(), second])
+    expect(() => loadMemoryConfig(baseEnv({ MEMORY_INSTALLATION_ALLOWLIST: 'not-a-uuid' })))
+      .toThrow(/MEMORY_INSTALLATION_ALLOWLIST/)
   })
 
   test('accepts only off, shadow and enabled modes', () => {

@@ -66,6 +66,8 @@
               <svg v-if="tab === 'search'" viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="m16.5 16.5 4 4"/></svg>
               <svg v-else-if="tab === 'review'" viewBox="0 0 24 24"><path d="M4 4h16v16H4z"/><path d="m8 12 2.5 2.5L16 9"/></svg>
               <svg v-else-if="tab === 'claims'" viewBox="0 0 24 24"><path d="M5 4h14v16H5z"/><path d="M8 8h8M8 12h8M8 16h5"/></svg>
+              <svg v-else-if="tab === 'wiki'" viewBox="0 0 24 24"><path d="M4 5.5A3.5 3.5 0 0 1 7.5 2H12v18H7.5A3.5 3.5 0 0 0 4 23z"/><path d="M20 5.5A3.5 3.5 0 0 0 16.5 2H12v18h4.5A3.5 3.5 0 0 1 20 23z"/></svg>
+              <svg v-else-if="tab === 'codegraph'" viewBox="0 0 24 24"><circle cx="5" cy="12" r="2"/><circle cx="18" cy="5" r="2"/><circle cx="19" cy="18" r="2"/><path d="m7 11 9.2-5M7 13l10 4"/></svg>
               <svg v-else viewBox="0 0 24 24"><path d="M4 7h10M18 7h2M4 17h2M10 17h10"/><circle cx="16" cy="7" r="2"/><circle cx="8" cy="17" r="2"/></svg>
             </span>
             <span class="memory-tab-copy"><strong>{{ t(`memory.tab_${tab}`) }}</strong><small>{{ t(`memory.tab_${tab}_desc`) }}</small></span>
@@ -140,6 +142,9 @@
           <ClaimDetailPanel v-if="active === 'claims'" :claim-id="claimId"
             :installation-id="claimSourceInstallationId" @changed="refreshReview"
             @propose="openPromotion"/>
+          <MemoryWikiPanel v-if="active === 'wiki'" v-model:repository-id="phase4RepositoryId"
+            :can-contribute="canContributePhase4" :can-publish="canPublishPhase4" />
+          <MemoryCodeGraphPanel v-if="active === 'codegraph'" v-model:repository-id="phase4RepositoryId" />
           <MemorySettingsCard v-if="active === 'settings'" :services="installation.enabled_services"
             :installation-status="installation.status" @changed="reload"/>
         </div>
@@ -216,6 +221,8 @@ import MemoryConflictPanel from '../components/memory/MemoryConflictPanel.vue'
 import MemoryScopeMembers from '../components/memory/MemoryScopeMembers.vue'
 import MemoryReviewPolicyEditor from '../components/memory/MemoryReviewPolicyEditor.vue'
 import MemoryPromotionDialog from '../components/memory/MemoryPromotionDialog.vue'
+import MemoryWikiPanel from '../components/memory/MemoryWikiPanel.vue'
+import MemoryCodeGraphPanel from '../components/memory/MemoryCodeGraphPanel.vue'
 
 const { t } = useLocale()
 const { isMobile } = useResponsiveLayout()
@@ -225,7 +232,8 @@ const installation = ref<MemoryInstallation | null>(null)
 const loading = ref(true)
 const busy = ref(false)
 const error = ref('')
-const active = ref<'search' | 'review' | 'claims' | 'context' | 'persona' | 'policies' | 'loadouts' | 'settings'>('search')
+const active = ref<'search' | 'review' | 'claims' | 'wiki' | 'codegraph' | 'context' | 'persona' | 'policies' | 'loadouts' | 'settings'>('search')
+const phase4RepositoryId = ref('')
 const claimId = ref<string | null>(null)
 const claimSourceInstallationId = ref<string | null>(null)
 const reviewCount = ref<number | null>(null)
@@ -244,13 +252,18 @@ const promotionEvidence = ref<MemoryEvidence[]>([])
 const promotionSourceInstallationId = ref<string | null>(null)
 const pendingLifecycleState = ref<'suspended' | 'dissolving' | null>(null)
 
-const tabs = ['search', 'review', 'claims', 'context', 'persona', 'policies', 'loadouts', 'settings'] as const
+const tabs = ['search', 'review', 'claims', 'wiki', 'codegraph', 'context', 'persona', 'policies', 'loadouts', 'settings'] as const
 const requiredServices = ['memory.search', 'memory.recall', 'memory.manage', 'memory.context']
 const servicesEnabled = computed(() => requiredServices.every(service => installation.value?.enabled_services.includes(service)))
 const selectedGovernanceScope = computed(() => governanceScopes.value.find(
   scope => scope.installation_id === governanceTarget.value) ?? null)
 const canManageScope = computed(() => selectedGovernanceScope.value?.permissions.includes('scope_admin') === true)
 const canEditReviewPolicy = computed(() => selectedGovernanceScope.value?.permissions.includes('policy_admin') === true)
+const primaryGovernanceScope = computed(() => governanceScopes.value.find(
+  scope => scope.installation_id === installation.value?.installation_id,
+))
+const canContributePhase4 = computed(() => primaryGovernanceScope.value?.permissions.includes('contribute') === true)
+const canPublishPhase4 = computed(() => primaryGovernanceScope.value?.permissions.includes('publish') === true)
 const conflictCandidates = computed(() => governanceQueue.value
   .filter(entry => entry.candidate.state === 'conflict')
   .map(entry => ({

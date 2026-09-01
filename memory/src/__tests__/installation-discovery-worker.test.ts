@@ -64,4 +64,32 @@ describe('installation discovery pagination', () => {
     await expect(worker.discoverOnce()).rejects.toMatchObject({ code: 'network' })
     expect(listInstallations).not.toHaveBeenCalled()
   })
+
+  test('applies only explicitly allowlisted installations', async () => {
+    const allowed = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa'
+    const denied = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb'
+    const applyDiscovery = vi.fn(async () => ({ applied: 0 }))
+    const filtered = createDiscoveryWorker({
+      installations: {
+        listInstallations: vi.fn(async () => ({
+          installations: [
+            { installation_id: allowed },
+            { installation_id: denied },
+          ],
+          next_cursor: null,
+          has_more: false,
+        })),
+      } as never,
+      registry: {
+        currentGeneration: vi.fn(async () => 0),
+        applyDiscovery,
+      } as never,
+      signal: new AbortController().signal,
+      installationAllowlist: new Set([allowed]),
+    })
+    await expect(filtered.discoverOnce()).resolves.toBe(1)
+    expect(applyDiscovery).toHaveBeenCalledWith(expect.objectContaining({
+      items: [{ installation_id: allowed }],
+    }))
+  })
 })

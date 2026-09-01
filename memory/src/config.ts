@@ -45,9 +45,25 @@ export interface ProviderBudgetSettings {
   embeddingMaxTokens: number
 }
 
+export interface WikiProviderBudgetSettings {
+  key: string
+  textRequestLimit: number
+  textInputTokenLimit: number
+  textOutputTokenLimit: number
+  textMaxOutputTokensPerRequest: number
+}
+
 export interface MemoryConfig {
   mode: MemoryMode
   sharedScopesMode: SharedScopesMode
+  codegraphMode: SharedScopesMode
+  wikiMode: SharedScopesMode
+  codegraphMaxConcurrency: number
+  wikiMaxConcurrency: number
+  wikiMaxPages: number
+  wikiMaxSections: number
+  wikiMaxSourceChars: number
+  codeSnapshotRetentionDays: number
   port: number
   apiBind: MemoryApiBind
   metricsPort: number
@@ -74,12 +90,59 @@ export interface MemoryConfig {
   textModel: TextAdapterSettings | undefined
   embeddingModel: EmbeddingAdapterSettings | undefined
   providerBudget: ProviderBudgetSettings | undefined
+  wikiProviderBudget: WikiProviderBudgetSettings | undefined
   modelTimeoutMs: number
   recallEmbeddingTimeoutMs: number
   extractionMaxChars: number
   allowedOrigins: readonly string[]
   allowedHosts: readonly string[]
+  installationAllowlist: readonly string[]
   tombstoneHmacKeys: readonly TombstoneHmacKey[]
+}
+
+function parseWikiProviderBudget(
+  env: Record<string, string | undefined>,
+): WikiProviderBudgetSettings | undefined {
+  const names = [
+    'MEMORY_WIKI_PROVIDER_BUDGET_KEY',
+    'MEMORY_WIKI_TEXT_REQUEST_LIMIT',
+    'MEMORY_WIKI_TEXT_INPUT_TOKEN_LIMIT',
+    'MEMORY_WIKI_TEXT_OUTPUT_TOKEN_LIMIT',
+    'MEMORY_WIKI_TEXT_MAX_OUTPUT_TOKENS_PER_REQUEST',
+  ] as const
+  const configured = names.filter(name => env[name] !== undefined && env[name] !== '')
+  if (configured.length === 0) return undefined
+  for (const name of names) {
+    if (env[name] === undefined || env[name] === '') {
+      throw new ConfigError(`${name} is required when Wiki provider budget is configured`)
+    }
+  }
+  const key = env.MEMORY_WIKI_PROVIDER_BUDGET_KEY!
+  if (!/^[a-zA-Z0-9][a-zA-Z0-9._:-]{0,127}$/.test(key)) {
+    throw new ConfigError('MEMORY_WIKI_PROVIDER_BUDGET_KEY must be a bounded identifier')
+  }
+  const textOutputTokenLimit = parseBoundedInteger(
+    'MEMORY_WIKI_TEXT_OUTPUT_TOKEN_LIMIT', env.MEMORY_WIKI_TEXT_OUTPUT_TOKEN_LIMIT, 0, 1, 1_000_000_000,
+  )
+  const textMaxOutputTokensPerRequest = parseBoundedInteger(
+    'MEMORY_WIKI_TEXT_MAX_OUTPUT_TOKENS_PER_REQUEST',
+    env.MEMORY_WIKI_TEXT_MAX_OUTPUT_TOKENS_PER_REQUEST,
+    0, 1, 1_000_000,
+  )
+  if (textMaxOutputTokensPerRequest > textOutputTokenLimit) {
+    throw new ConfigError('MEMORY_WIKI_TEXT_MAX_OUTPUT_TOKENS_PER_REQUEST must not exceed MEMORY_WIKI_TEXT_OUTPUT_TOKEN_LIMIT')
+  }
+  return {
+    key,
+    textRequestLimit: parseBoundedInteger(
+      'MEMORY_WIKI_TEXT_REQUEST_LIMIT', env.MEMORY_WIKI_TEXT_REQUEST_LIMIT, 0, 1, 1_000_000,
+    ),
+    textInputTokenLimit: parseBoundedInteger(
+      'MEMORY_WIKI_TEXT_INPUT_TOKEN_LIMIT', env.MEMORY_WIKI_TEXT_INPUT_TOKEN_LIMIT, 0, 1, 1_000_000_000,
+    ),
+    textOutputTokenLimit,
+    textMaxOutputTokensPerRequest,
+  }
 }
 
 function parseUtcTimestamp(envName: string, raw: string | undefined): Date | null {
@@ -283,6 +346,16 @@ function parseAllowedHosts(raw: string | undefined): string[] {
   return [...new Set(items.map(item => item.toLowerCase()))]
 }
 
+function parseInstallationAllowlist(raw: string | undefined): string[] {
+  const items = parseStringList('MEMORY_INSTALLATION_ALLOWLIST', raw, 128)
+  for (const item of items) {
+    if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(item)) {
+      throw new ConfigError('MEMORY_INSTALLATION_ALLOWLIST entries must be UUIDs')
+    }
+  }
+  return [...new Set(items.map(item => item.toLowerCase()))]
+}
+
 function parseTombstoneHmacKeys(raw: string | undefined): TombstoneHmacKey[] {
   if (raw === undefined || raw.trim() === '') return []
   const entries = raw.split(',').map(item => item.trim()).filter(item => item.length > 0)
@@ -313,6 +386,9 @@ export function loadMemoryConfig(env: Record<string, string | undefined> = proce
 
   const mode = parseEnum('MEMORY_MODE', env.MEMORY_MODE, MODES, 'enabled')
   const logLevel = parseEnum('MEMORY_LOG_LEVEL', env.MEMORY_LOG_LEVEL, LOG_LEVELS, 'info')
+  const sharedScopesMode = sharedScopesModeFromEnv(env)
+  const codegraphMode = codegraphModeFromEnv(env)
+  const wikiMode = wikiModeFromEnv(env)
 
   const databaseUrl = env.MEMORY_DATABASE_URL ?? ''
   const relayUrl = parseHttpOrigin('MEMORY_RELAY_URL', env.MEMORY_RELAY_URL)
@@ -350,6 +426,23 @@ export function loadMemoryConfig(env: Record<string, string | undefined> = proce
     ] as const) {
       if (value === '') throw new ConfigError(`${name} is required in production`)
     }
+    const requiredPhase4Bounds = [
+      ...(codegraphMode !== 'off' ? [
+        'MEMORY_CODEGRAPH_MAX_CONCURRENCY',
+        'MEMORY_CODE_SNAPSHOT_RETENTION_DAYS',
+      ] : []),
+      ...(wikiMode !== 'off' ? [
+        'MEMORY_WIKI_MAX_CONCURRENCY',
+        'MEMORY_WIKI_MAX_PAGES',
+        'MEMORY_WIKI_MAX_SECTIONS',
+        'MEMORY_WIKI_MAX_SOURCE_CHARS',
+      ] : []),
+    ]
+    for (const name of requiredPhase4Bounds) {
+      if (env[name] === undefined || env[name] === '') {
+        throw new ConfigError(`${name} is required when its Phase 4 feature is active in production`)
+      }
+    }
   }
 
   const textModelBase = parseModelAdapter(env, 'MEMORY_TEXT')
@@ -383,10 +476,29 @@ export function loadMemoryConfig(env: Record<string, string | undefined> = proce
     ? configuredTombstoneHmacKeys
     : [{ version: 'legacy', key: hmacKey }]
   const providerBudget = parseProviderBudget(env)
+  const wikiProviderBudget = parseWikiProviderBudget(env)
 
   return {
     mode,
-    sharedScopesMode: sharedScopesModeFromEnv(env),
+    sharedScopesMode,
+    codegraphMode,
+    wikiMode,
+    codegraphMaxConcurrency: parseBoundedInteger(
+      'MEMORY_CODEGRAPH_MAX_CONCURRENCY', env.MEMORY_CODEGRAPH_MAX_CONCURRENCY, 1, 1, 1,
+    ),
+    wikiMaxConcurrency: parseBoundedInteger(
+      'MEMORY_WIKI_MAX_CONCURRENCY', env.MEMORY_WIKI_MAX_CONCURRENCY, 1, 1, 1,
+    ),
+    wikiMaxPages: parseBoundedInteger('MEMORY_WIKI_MAX_PAGES', env.MEMORY_WIKI_MAX_PAGES, 32, 1, 32),
+    wikiMaxSections: parseBoundedInteger(
+      'MEMORY_WIKI_MAX_SECTIONS', env.MEMORY_WIKI_MAX_SECTIONS, 256, 1, 256,
+    ),
+    wikiMaxSourceChars: parseBoundedInteger(
+      'MEMORY_WIKI_MAX_SOURCE_CHARS', env.MEMORY_WIKI_MAX_SOURCE_CHARS, 200_000, 1, 200_000,
+    ),
+    codeSnapshotRetentionDays: parseBoundedInteger(
+      'MEMORY_CODE_SNAPSHOT_RETENTION_DAYS', env.MEMORY_CODE_SNAPSHOT_RETENTION_DAYS, 30, 1, 365,
+    ),
     port: parseBoundedInteger('MEMORY_PORT', env.MEMORY_PORT, 8090, 1, 65535),
     apiBind: parseEnum('MEMORY_API_BIND', env.MEMORY_API_BIND, METRICS_BINDS, 'all'),
     metricsPort: parseBoundedInteger('MEMORY_METRICS_PORT', env.MEMORY_METRICS_PORT, 8091, 1, 65535),
@@ -419,6 +531,7 @@ export function loadMemoryConfig(env: Record<string, string | undefined> = proce
     textModel,
     embeddingModel,
     providerBudget,
+    wikiProviderBudget,
     modelTimeoutMs: parseBoundedInteger('MEMORY_MODEL_TIMEOUT_MS', env.MEMORY_MODEL_TIMEOUT_MS, 30_000, 1000, 300_000),
     recallEmbeddingTimeoutMs: parseBoundedInteger(
       'MEMORY_RECALL_EMBEDDING_TIMEOUT_MS', env.MEMORY_RECALL_EMBEDDING_TIMEOUT_MS, 2_000, 100, 60_000,
@@ -428,6 +541,7 @@ export function loadMemoryConfig(env: Record<string, string | undefined> = proce
     ),
     allowedOrigins: parseAllowedOrigins(env.MEMORY_ALLOWED_ORIGINS),
     allowedHosts: parseAllowedHosts(env.MEMORY_ALLOWED_HOSTS),
+    installationAllowlist: parseInstallationAllowlist(env.MEMORY_INSTALLATION_ALLOWLIST),
     tombstoneHmacKeys,
   }
 }
@@ -435,10 +549,47 @@ export function loadMemoryConfig(env: Record<string, string | undefined> = proce
 export type SharedScopesMode = 'off' | 'shadow' | 'enabled'
 
 /**
+ * Shared Phase 4 work is fenced by the stricter of the feature and shared
+ * scope modes. Personal work is governed only by the feature mode. Context
+ * delivery remains a separate Phase 2/3 decision and is never enabled here.
+ */
+export function phase4ModeForScope(
+  featureMode: SharedScopesMode,
+  sharedScopesMode: SharedScopesMode,
+  ownerScopeKind: 'personal' | 'shared',
+): SharedScopesMode {
+  if (ownerScopeKind === 'personal') return featureMode
+  const rank: Record<SharedScopesMode, number> = { off: 0, shadow: 1, enabled: 2 }
+  return rank[featureMode] <= rank[sharedScopesMode] ? featureMode : sharedScopesMode
+}
+
+/**
  * ADR-P3-13: the Memory shared-scope flag is independent of MEMORY_MODE and
  * never implicitly changes extraction, embedding, or Context settings. The
  * default and every production example stay `off`.
  */
+export function codegraphModeFromEnv(
+  env: Record<string, string | undefined> = process.env,
+): SharedScopesMode {
+  const raw = env.MEMORY_CODEGRAPH_MODE?.trim() ?? ''
+  if (!raw) return 'off'
+  if (raw !== 'off' && raw !== 'shadow' && raw !== 'enabled') {
+    throw new Error(`invalid MEMORY_CODEGRAPH_MODE value: ${raw} (expected off | shadow | enabled)`)
+  }
+  return raw
+}
+
+export function wikiModeFromEnv(
+  env: Record<string, string | undefined> = process.env,
+): SharedScopesMode {
+  const raw = env.MEMORY_WIKI_MODE?.trim() ?? ''
+  if (!raw) return 'off'
+  if (raw !== 'off' && raw !== 'shadow' && raw !== 'enabled') {
+    throw new Error(`invalid MEMORY_WIKI_MODE value: ${raw} (expected off | shadow | enabled)`)
+  }
+  return raw
+}
+
 export function sharedScopesModeFromEnv(
   env: Record<string, string | undefined> = process.env,
 ): SharedScopesMode {

@@ -90,6 +90,15 @@ const memoryClient = vi.hoisted(() => ({
   updateScopeLifecycle: vi.fn(async () => undefined),
   startScopeTransfer: vi.fn(async () => undefined),
   proposeGovernanceClaim: vi.fn(async () => ({ candidate: { candidate_id: 'proposal-1' } })),
+  getMemoryCodeGraph: vi.fn(async () => null),
+  analyzeMemoryChangeImpact: vi.fn(async () => null),
+  getMemoryWiki: vi.fn(async () => null),
+  listMemoryWikiBuilds: vi.fn(async () => ({ builds: [], next_cursor: null })),
+  getMemoryWikiCandidate: vi.fn(async () => null),
+  scheduleMemoryWikiBuild: vi.fn(async () => null),
+  publishMemoryWikiCandidate: vi.fn(async () => null),
+  editMemoryWikiSection: vi.fn(async () => null),
+  setMemoryWikiSectionLock: vi.fn(async () => null),
 }))
 
 vi.mock('../../services/memoryClient', () => memoryClient)
@@ -152,7 +161,7 @@ describe('MemoryView', () => {
     expect(view.get('[data-testid="memory-tabs"]').attributes('aria-orientation')).toBe('horizontal')
     expect(view.find('[data-testid="memory-workbench-frame"]').exists()).toBe(false)
     expect(view.find('[data-testid="memory-module-rail"]').exists()).toBe(false)
-    for (const tab of ['search', 'review', 'claims', 'context', 'persona', 'policies', 'loadouts', 'settings']) {
+    for (const tab of ['search', 'review', 'claims', 'wiki', 'codegraph', 'context', 'persona', 'policies', 'loadouts', 'settings']) {
       expect(view.find(`[data-testid="memory-tab-${tab}"]`).exists()).toBe(true)
     }
     expect(view.get('[data-testid="memory-tab-search"]').attributes('aria-selected')).toBe('true')
@@ -160,6 +169,24 @@ describe('MemoryView', () => {
     expect(view.get('[data-testid="memory-workspace-health"]').text()).toContain('记忆服务正常')
     expect(view.get('[data-testid="memory-filter-scope"]').attributes('disabled')).toBeDefined()
     expect(view.find('[data-testid="memory-search-panel"]').exists()).toBe(true)
+  })
+
+  test('Wiki and CodeGraph tabs share a repository selector without removing existing modules', async () => {
+    memoryInstallation.value = activeInstallation()
+    const view = mountView()
+    await flushPromises()
+    await view.get('[data-testid="memory-tab-wiki"]').trigger('click')
+    expect(view.find('[data-testid="memory-wiki-panel"]').exists()).toBe(true)
+    await view.get('[data-testid="memory-wiki-repository"]').setValue(
+      '11111111-1111-4111-8111-111111111111',
+    )
+    await view.get('[data-testid="memory-tab-codegraph"]').trigger('click')
+    expect(view.find('[data-testid="memory-codegraph-panel"]').exists()).toBe(true)
+    expect(view.get('[data-testid="memory-codegraph-repository"]').element).toHaveProperty(
+      'value', '11111111-1111-4111-8111-111111111111',
+    )
+    expect(view.find('[data-testid="memory-tab-search"]').exists()).toBe(true)
+    expect(view.find('[data-testid="memory-tab-settings"]').exists()).toBe(true)
   })
 
   test('claims header keeps the design create action visible but disabled without an API', async () => {

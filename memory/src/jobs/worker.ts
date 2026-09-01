@@ -20,6 +20,7 @@ export interface JobWorkerOptions {
   signal: AbortSignal
   pollIntervalMs?: number
   claimLimit?: number
+  concurrencyLimits?: Partial<Record<JobType, number>>
   leaseMs?: number
   /** Bounded wait for in-flight handlers after abort (plan: 20s). */
   drainDeadlineMs?: number
@@ -57,6 +58,28 @@ export function createJobWorker(options: JobWorkerOptions) {
   let stopped = false
   let inFlight: Array<Promise<void>> = []
   const runningClaims = new Map<string, InFlightEntry>()
+  const activeByType = new Map<JobType, number>()
+  const waitersByType = new Map<JobType, Array<() => void>>()
+
+  async function acquire(jobType: JobType): Promise<() => void> {
+    const limit = options.concurrencyLimits?.[jobType]
+    if (!limit) return () => undefined
+    while ((activeByType.get(jobType) ?? 0) >= limit) {
+      await new Promise<void>(resolve => {
+        const waiters = waitersByType.get(jobType) ?? []
+        waiters.push(resolve)
+        waitersByType.set(jobType, waiters)
+      })
+    }
+    activeByType.set(jobType, (activeByType.get(jobType) ?? 0) + 1)
+    let released = false
+    return () => {
+      if (released) return
+      released = true
+      activeByType.set(jobType, Math.max(0, (activeByType.get(jobType) ?? 1) - 1))
+      waitersByType.get(jobType)?.shift()?.()
+    }
+  }
 
   async function dispatch(claims: JobClaim[]): Promise<void> {
     await Promise.all(claims.map(async claim => {
@@ -84,7 +107,14 @@ export function createJobWorker(options: JobWorkerOptions) {
         },
       }
       const run = (async () => {
+        let release: () => void = () => undefined
         try {
+          release = await acquire(claim.job_type)
+          if (controller.signal.aborted) {
+            const error = new Error('job_aborted_before_dispatch')
+            error.name = 'AbortError'
+            throw error
+          }
           await handler(claim, controller.signal, ctx)
           await options.jobs.completeJob({
             jobId: claim.job_id, claimedBy: options.workerId, claimEpoch: claim.claim_epoch,
@@ -98,6 +128,7 @@ export function createJobWorker(options: JobWorkerOptions) {
             errorCode: boundedErrorCode(error),
           }).catch(() => undefined)
         } finally {
+          release()
           runningClaims.delete(claim.job_id)
           options.signal.removeEventListener('abort', abort)
         }

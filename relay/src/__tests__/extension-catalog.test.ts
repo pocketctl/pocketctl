@@ -32,9 +32,10 @@ describe('extension provider catalog', () => {
       'session:snapshot:read',
     ])
     expect(manifest!.services.map(service => service.service_id).sort()).toEqual([
-      'knowledge.query', 'memory.context', 'memory.manage', 'memory.mcp', 'memory.recall', 'memory.search',
+      'knowledge.query', 'memory.codegraph.write', 'memory.context', 'memory.manage', 'memory.mcp',
+      'memory.recall', 'memory.search',
     ])
-    expect(manifest!.manifest_version).toBe(4)
+    expect(manifest!.manifest_version).toBe(5)
     const manage = manifest!.services.find(service => service.service_id === 'memory.manage')
     expect(manage).toMatchObject({ mode: 'write', metered: false })
   })
@@ -74,7 +75,7 @@ describe('extension provider catalog', () => {
       expect(sql).toContain('extension_providers')
       expect(sql).not.toContain('extension_installations')
     }
-    expect(query.mock.calls[0][1]).toContain(4)
+    expect(query.mock.calls[0][1]).toContain(5)
   })
 
   test('memory.manage is a grantable service but never auto-granted', () => {

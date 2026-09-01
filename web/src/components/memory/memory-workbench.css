@@ -936,6 +936,182 @@
   .memory-structured-data { grid-template-columns: 92px minmax(0, 1fr); }
 }
 
+/* --- ADR-0006 Phase 4: source-bound Wiki and CodeGraph workspace --- */
+.memory-phase4-workspace { min-height: 620px; padding: 14px; background: var(--surface-hover); }
+.memory-phase4-commandbar { display: flex; align-items: end; gap: 8px; margin-bottom: 12px; }
+.memory-phase4-repository-field { min-width: 220px; flex: 1; }
+.memory-phase4-field > span,
+.memory-phase4-repository-field > span { display: block; margin-bottom: 5px; color: var(--fg-tertiary); font-family: var(--font-mono); font-size: 8px; letter-spacing: .08em; text-transform: uppercase; }
+.memory-phase4-field textarea,
+.memory-phase4-repository-field input { width: 100%; border: 1px solid var(--border); border-radius: 7px; color: var(--fg); background: var(--surface); font-family: var(--font-mono); font-size: 10px; }
+.memory-phase4-repository-field input { height: 34px; padding: 0 10px; }
+.memory-phase4-field textarea { resize: vertical; padding: 9px 10px; line-height: 1.5; }
+.memory-phase4-state { min-height: 430px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 8px; padding: 32px; border: 1px dashed var(--border); border-radius: var(--radius-lg); color: var(--fg-tertiary); text-align: center; }
+.memory-phase4-state strong { color: var(--fg); font-size: 12px; }
+.memory-phase4-state p { max-width: 420px; margin: 0; font-size: 9.5px; line-height: 1.6; }
+.memory-phase4-state.is-error { border-color: color-mix(in srgb, var(--error) 35%, var(--border)); color: var(--error); background: var(--error-bg); }
+.memory-phase4-kicker { margin: 0 0 5px; color: var(--accent); font-family: var(--font-mono); font-size: 8px; letter-spacing: .1em; text-transform: uppercase; }
+.memory-phase4-status-line { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.memory-phase4-status-line code { color: var(--fg-tertiary); font-family: var(--font-mono); font-size: 8.5px; }
+.memory-phase4-badge { min-height: 20px; display: inline-flex; align-items: center; padding: 0 7px; border-radius: 5px; color: var(--fg-secondary); background: var(--surface-active); font-family: var(--font-mono); font-size: 8px; text-transform: uppercase; }
+.memory-phase4-badge[data-status="complete"] { color: var(--success); background: var(--success-bg); }
+.memory-phase4-badge[data-status="partial"],
+.memory-phase4-badge[data-status="stale"],
+.memory-phase4-badge[data-status="candidate"] { color: var(--warning); background: var(--warning-bg); }
+.memory-phase4-badge[data-status="unsupported"],
+.memory-phase4-badge[data-status="degraded"] { color: var(--error); background: var(--error-bg); }
+.memory-phase4-badge[data-status="manual"] { color: var(--accent); background: var(--accent-muted); }
+.memory-phase4-badge[data-status="locked"] { color: var(--sub-agent); background: var(--sub-agent-bg); }
+
+/* The source spine is the one expressive gesture: every derived view visually
+   terminates at the exact commit that authorized it. */
+.memory-provenance-spine { position: relative; min-height: 48px; display: grid; grid-template-columns: 18px minmax(180px, 1fr) auto auto; align-items: center; gap: 10px; margin-bottom: 12px; padding: 8px 11px 8px 5px; border: 1px solid var(--border); border-radius: 8px; background: var(--surface); }
+.memory-provenance-spine::before { content: ""; position: absolute; left: 13px; top: 0; bottom: 0; width: 1px; background: linear-gradient(var(--accent), color-mix(in srgb, var(--accent) 16%, transparent)); }
+.memory-provenance-dot { position: relative; z-index: 1; width: 7px; height: 7px; display: inline-block; border: 2px solid var(--surface); border-radius: 50%; background: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
+.memory-provenance-spine div { min-width: 0; }
+.memory-provenance-spine small,
+.memory-provenance-spine code { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.memory-provenance-spine small { color: var(--fg-tertiary); font-size: 8px; }
+.memory-provenance-spine code { margin-top: 3px; color: var(--fg-secondary); font-family: var(--font-mono); font-size: 9px; }
+
+.memory-codegraph-grid { display: grid; grid-template-columns: minmax(280px, .9fr) minmax(320px, 1.1fr); min-height: 360px; overflow: hidden; border: 1px solid var(--border); border-radius: var(--radius-lg); background: var(--surface); }
+.memory-codegraph-nodes { min-width: 0; border-right: 1px solid var(--border); }
+.memory-codegraph-nodes > header,
+.memory-codegraph-relations > header { min-height: 39px; display: flex; align-items: center; justify-content: space-between; padding: 0 12px; border-bottom: 1px solid var(--border); }
+.memory-codegraph-nodes h3,
+.memory-codegraph-relations h3 { margin: 0; color: var(--fg); font-size: 10px; }
+.memory-codegraph-nodes > header span { color: var(--fg-tertiary); font-family: var(--font-mono); font-size: 9px; }
+.memory-codegraph-nodes ol { max-height: 430px; margin: 0; padding: 5px; overflow-y: auto; list-style: none; }
+.memory-codegraph-nodes li + li { margin-top: 2px; }
+.memory-codegraph-nodes li button { width: 100%; display: grid; grid-template-columns: 66px minmax(0, 1fr); gap: 2px 9px; padding: 9px; border: 1px solid transparent; border-radius: 7px; color: var(--fg-secondary); background: transparent; text-align: left; cursor: pointer; }
+.memory-codegraph-nodes li button:hover { background: var(--surface-hover); }
+.memory-codegraph-nodes li button.selected { border-color: color-mix(in srgb, var(--accent) 34%, var(--border)); background: var(--accent-subtle); }
+.memory-codegraph-node-kind { grid-row: 1 / 3; align-self: center; color: var(--accent); font-family: var(--font-mono); font-size: 8px; text-transform: uppercase; }
+.memory-codegraph-nodes li strong { overflow: hidden; color: var(--fg); font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
+.memory-codegraph-nodes li code { overflow: hidden; color: var(--fg-tertiary); font-family: var(--font-mono); font-size: 8px; text-overflow: ellipsis; white-space: nowrap; }
+.memory-codegraph-more { margin: 7px 10px 12px; }
+.memory-codegraph-relations { min-width: 0; }
+.memory-phase4-inline-empty { min-height: 240px; display: grid; place-items: center; padding: 20px; color: var(--fg-tertiary); font-size: 9px; text-align: center; }
+.memory-codegraph-selection { padding: 16px; border-bottom: 1px solid var(--border); background: var(--surface-hover); }
+.memory-codegraph-selection strong,
+.memory-codegraph-selection code { display: block; overflow-wrap: anywhere; }
+.memory-codegraph-selection strong { color: var(--fg); font-size: 12px; }
+.memory-codegraph-selection code { margin-top: 5px; color: var(--accent); font-family: var(--font-mono); font-size: 8.5px; }
+.memory-codegraph-relations ul { margin: 0; padding: 6px 12px 18px; list-style: none; }
+.memory-codegraph-relations li { display: grid; grid-template-columns: 70px minmax(0, 1fr) auto; gap: 8px; align-items: center; padding: 9px 0; border-bottom: 1px solid var(--border); }
+.memory-codegraph-relations li span,
+.memory-codegraph-relations li small { color: var(--fg-tertiary); font-family: var(--font-mono); font-size: 8px; }
+.memory-codegraph-relations li code { overflow: hidden; color: var(--fg-secondary); font-family: var(--font-mono); font-size: 8.5px; text-overflow: ellipsis; white-space: nowrap; }
+.memory-impact-panel { margin-top: 12px; padding: 13px; border: 1px solid var(--border); border-radius: var(--radius-lg); background: var(--surface); }
+.memory-impact-panel > header { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 10px; }
+.memory-impact-panel h3 { margin: 0; color: var(--fg); font-size: 11px; }
+.memory-impact-result { margin-top: 10px; padding: 11px; border: 1px solid var(--border); border-radius: 7px; background: var(--surface-hover); }
+.memory-impact-reasons { display: flex; flex-wrap: wrap; gap: 5px; margin: 9px 0; padding: 0; list-style: none; }
+.memory-impact-reasons li { padding: 3px 6px; border-radius: 4px; color: var(--warning); background: var(--warning-bg); font-family: var(--font-mono); font-size: 8px; }
+.memory-impact-path-list { margin: 10px 0 0; padding-left: 24px; color: var(--fg-tertiary); }
+.memory-impact-path-list code { color: var(--fg-secondary); font-family: var(--font-mono); font-size: 8.5px; }
+
+.memory-wiki-layout { display: grid; grid-template-columns: 210px minmax(0, 1fr); align-items: start; gap: 12px; }
+.memory-wiki-page-index { position: sticky; top: 8px; overflow: hidden; border: 1px solid var(--border); border-radius: var(--radius-lg); background: var(--surface); }
+.memory-wiki-page-index > a { display: flex; justify-content: space-between; gap: 8px; padding: 10px 11px; border-bottom: 1px solid var(--border); color: var(--fg-secondary); font-size: 9px; text-decoration: none; }
+.memory-wiki-page-index > a:hover { color: var(--fg); background: var(--surface-hover); }
+.memory-wiki-page-index > a small { color: var(--fg-tertiary); font-family: var(--font-mono); }
+.memory-wiki-build-list { padding: 10px; }
+.memory-wiki-build-list > strong { display: block; margin-bottom: 7px; color: var(--fg-tertiary); font-size: 8px; text-transform: uppercase; }
+.memory-wiki-build-list button { width: 100%; display: flex; justify-content: space-between; gap: 8px; padding: 7px; border: 0; border-radius: 6px; color: var(--fg-secondary); background: var(--warning-bg); cursor: pointer; }
+.memory-wiki-build-list button + button { margin-top: 5px; }
+.memory-wiki-build-list button span,
+.memory-wiki-build-list button code { font-family: var(--font-mono); font-size: 8px; }
+.memory-wiki-build-status { display: grid; grid-template-columns: auto auto; gap: 4px 8px; margin-top: 5px; padding: 7px; border-radius: 6px; color: var(--fg-tertiary); background: var(--surface-hover); }
+.memory-wiki-build-status[data-status="failed"] { color: var(--error); background: var(--error-bg); }
+.memory-wiki-build-status span,
+.memory-wiki-build-status code,
+.memory-wiki-build-status small { font-family: var(--font-mono); font-size: 8px; }
+.memory-wiki-build-status small { grid-column: 1 / -1; overflow-wrap: anywhere; }
+.memory-wiki-build-list .memory-wiki-build-more { margin-top: 7px; color: var(--accent); background: var(--accent-subtle); }
+.memory-wiki-document { min-width: 0; }
+.memory-wiki-page { overflow: hidden; border: 1px solid var(--border); border-radius: var(--radius-lg); background: var(--surface); }
+.memory-wiki-page + .memory-wiki-page { margin-top: 12px; }
+.memory-wiki-page > header { padding: 18px 20px 14px; border-bottom: 1px solid var(--border); background: var(--surface-hover); }
+.memory-wiki-page > header h2 { margin: 0; color: var(--fg); font-family: var(--font-display); font-size: 19px; letter-spacing: -.02em; }
+.memory-wiki-section { position: relative; padding: 18px 20px; }
+.memory-wiki-section + .memory-wiki-section { border-top: 1px solid var(--border); }
+.memory-wiki-section.is-stale { background: linear-gradient(90deg, var(--warning-bg), transparent 42%); }
+.memory-wiki-section > header { display: flex; align-items: start; justify-content: space-between; gap: 12px; margin-bottom: 12px; }
+.memory-wiki-section h3 { margin: 0; color: var(--fg); font-size: 13px; }
+.memory-wiki-section > header code { display: block; margin-top: 4px; color: var(--fg-tertiary); font-family: var(--font-mono); font-size: 8px; }
+.memory-wiki-stale-note { margin: 0 0 12px; padding: 7px 9px; border-left: 2px solid var(--warning); color: var(--warning); background: var(--warning-bg); font-size: 9px; }
+.memory-wiki-citations { position: relative; margin: 16px 0 0; padding: 0 0 0 18px; list-style: none; }
+.memory-wiki-citations::before { content: ""; position: absolute; left: 4px; top: 0; bottom: 0; width: 1px; background: var(--border-light); }
+.memory-wiki-citations li { display: grid; grid-template-columns: 10px minmax(140px, 1fr) auto auto; gap: 8px; align-items: center; padding: 6px 0; }
+.memory-wiki-citations .memory-provenance-dot { margin-left: -17px; }
+.memory-wiki-citations code,
+.memory-wiki-citations span,
+.memory-wiki-citations small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.memory-wiki-citations code { color: var(--accent); font-family: var(--font-mono); font-size: 8.5px; }
+.memory-wiki-citations span,
+.memory-wiki-citations small { color: var(--fg-tertiary); font-family: var(--font-mono); font-size: 7.5px; }
+.memory-wiki-editor { margin-top: 10px; overflow: hidden; border: 1px solid var(--border); border-radius: 8px; background: var(--surface-hover); }
+.memory-wiki-editor > header,
+.memory-wiki-editor > footer { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 9px 10px; }
+.memory-wiki-editor > header { border-bottom: 1px solid var(--border); }
+.memory-wiki-editor > header strong,
+.memory-wiki-editor > header small { display: block; }
+.memory-wiki-editor > header strong { color: var(--fg); font-size: 9.5px; }
+.memory-wiki-editor > header small { margin-top: 2px; color: var(--fg-tertiary); font-family: var(--font-mono); font-size: 7.5px; }
+.memory-wiki-editor textarea { width: 100%; display: block; resize: vertical; padding: 11px; border: 0; color: var(--fg); background: var(--surface); font-family: var(--font-mono); font-size: 9px; line-height: 1.6; }
+.memory-wiki-editor > footer { justify-content: flex-end; border-top: 1px solid var(--border); }
+.memory-wiki-candidate { position: relative; margin-top: 12px; padding: 14px; border: 1px solid color-mix(in srgb, var(--warning) 30%, var(--border)); border-radius: var(--radius-lg); background: var(--surface); }
+.memory-wiki-candidate > header { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 12px; }
+.memory-wiki-candidate h3 { margin: 0; color: var(--fg); font-size: 12px; }
+.memory-wiki-diff > article { overflow: hidden; border: 1px solid var(--border); border-radius: 8px; }
+.memory-wiki-diff > article + article { margin-top: 8px; }
+.memory-wiki-diff > article > header,
+.memory-wiki-diff > article > footer { display: flex; align-items: center; gap: 8px; padding: 8px 10px; background: var(--surface-hover); }
+.memory-wiki-diff > article > header { justify-content: space-between; border-bottom: 1px solid var(--border); }
+.memory-wiki-diff > article > header strong { color: var(--fg); font-size: 9.5px; }
+.memory-wiki-diff code { color: var(--fg-tertiary); font-family: var(--font-mono); font-size: 8px; }
+.memory-wiki-diff-columns { display: grid; grid-template-columns: 1fr 1fr; }
+.memory-wiki-diff-columns > section { min-width: 0; padding: 10px; }
+.memory-wiki-diff-columns > section + section { border-left: 1px solid var(--border); background: var(--success-bg); }
+.memory-wiki-diff-columns small { color: var(--fg-tertiary); font-size: 8px; text-transform: uppercase; }
+.memory-wiki-diff-columns pre { margin: 7px 0 0; overflow: auto; color: var(--fg-secondary); font-family: var(--font-mono); font-size: 8.5px; line-height: 1.55; white-space: pre-wrap; }
+.memory-wiki-candidate-actions { display: flex; justify-content: flex-end; margin-top: 12px; }
+.memory-wiki-confirm { position: absolute; z-index: 3; inset: auto 14px 14px auto; width: min(420px, calc(100% - 28px)); padding: 13px; border: 1px solid var(--border-light); border-radius: 9px; background: var(--surface); box-shadow: var(--shadow-lg); }
+.memory-wiki-confirm strong { color: var(--fg); font-size: 11px; }
+.memory-wiki-confirm p { margin: 6px 0 11px; color: var(--fg-secondary); font-size: 9px; line-height: 1.55; }
+.memory-wiki-confirm > div { display: flex; justify-content: flex-end; gap: 7px; }
+
+@media (max-width: 760px) {
+  .memory-phase4-workspace { padding: 10px; }
+  .memory-phase4-commandbar { align-items: stretch; flex-wrap: wrap; }
+  .memory-phase4-repository-field { width: 100%; flex-basis: 100%; }
+  .memory-provenance-spine { grid-template-columns: 18px minmax(0, 1fr) auto; }
+  .memory-provenance-spine > code:last-child { display: none; }
+  .memory-codegraph-grid,
+  .memory-wiki-layout { grid-template-columns: 1fr; }
+  .memory-codegraph-nodes { border-right: 0; border-bottom: 1px solid var(--border); }
+  .memory-codegraph-nodes ol { max-height: 320px; }
+  .memory-wiki-page-index { position: static; display: flex; overflow-x: auto; }
+  .memory-wiki-page-index > a { min-width: max-content; border-right: 1px solid var(--border); border-bottom: 0; }
+  .memory-wiki-build-list { min-width: 170px; }
+  .memory-wiki-page > header,
+  .memory-wiki-section { padding-inline: 14px; }
+  .memory-wiki-diff-columns { grid-template-columns: 1fr; }
+  .memory-wiki-diff-columns > section + section { border-top: 1px solid var(--border); border-left: 0; }
+  .memory-wiki-citations li { grid-template-columns: 10px minmax(0, 1fr); }
+  .memory-wiki-citations li span,
+  .memory-wiki-citations li small { grid-column: 2; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .memory-phase4-workspace *, .memory-phase4-workspace *::before, .memory-phase4-workspace *::after {
+    scroll-behavior: auto !important;
+    transition-duration: .01ms !important;
+    animation-duration: .01ms !important;
+  }
+}
+
 /* --- ADR-0005 Phase 3 governance workspace --- */
 .memory-scope-switcher { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 12px; }
 .memory-scope-chip {

@@ -399,6 +399,31 @@ describeWithDatabase('hybrid claim search (PostgreSQL)', () => {
     expect(code.hits.length).toBeGreaterThanOrEqual(1)
   })
 
+  test('implicit as_of uses the database clock for immediately committed versions', async () => {
+    const seeded = await seedClaim({
+      installationId: INSTALLATION,
+      key: 'database-clock-authority',
+      statement: 'Database clock authority keeps committed claims visible',
+    })
+    await pool.query(`
+      UPDATE knowledge_versions
+      SET created_at = '2026-08-25T00:00:00.000500Z'::timestamptz
+      WHERE installation_id = $1 AND version_id = $2
+    `, [INSTALLATION, seeded.versionId])
+
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date('2026-08-25T00:00:00.000Z'))
+    try {
+      const result = await service().search({
+        installationId: INSTALLATION,
+        query: 'database clock authority',
+      })
+      expect(result.hits.map(hit => hit.versionId)).toContain(seeded.versionId)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
   test('embedding failures degrade to lexical with a flag, never an error', async () => {
     await pool.query(`
       UPDATE memory_feature_settings SET embedding_mode = 'enabled' WHERE installation_id = $1
@@ -484,35 +509,33 @@ describeWithDatabase('hybrid claim search (PostgreSQL)', () => {
     })).rejects.toThrow(/invalid_cursor/)
   })
 
-  test('an implicit as_of is frozen in the signed pagination cursor', async () => {
-    const initial = new Date('2026-08-25T00:00:00.000Z')
-    vi.useFakeTimers()
-    vi.setSystemTime(initial)
-    try {
-      for (let i = 0; i < 4; i++) {
-        await seedClaim({
-          installationId: INSTALLATION, key: `clock-page-${i}`,
-          statement: `Cursor clock candidate vitest ${i}`,
-          ...(i === 3 ? { validUntil: new Date(initial.getTime() + 500) } : {}),
-        })
-      }
-      const search = service()
-      const fullAtInitial = await search.search({
-        installationId: INSTALLATION, query: 'cursor clock candidate vitest', limit: 10,
-        asOf: initial,
+  test('an implicit database as_of is frozen in the signed pagination cursor', async () => {
+    for (let i = 0; i < 4; i++) {
+      await seedClaim({
+        installationId: INSTALLATION, key: `clock-page-${i}`,
+        statement: `Cursor clock candidate vitest ${i}`,
       })
-      const first = await search.search({
-        installationId: INSTALLATION, query: 'cursor clock candidate vitest', limit: 2,
-      })
-      vi.advanceTimersByTime(1_000)
-      const second = await search.search({
-        installationId: INSTALLATION, query: 'cursor clock candidate vitest', limit: 2,
-        cursor: first.nextCursor,
-      })
-      expect([...first.hits, ...second.hits].map(hit => hit.versionId))
-        .toEqual(fullAtInitial.hits.map(hit => hit.versionId))
-    } finally {
-      vi.useRealTimers()
     }
+    const search = service()
+    const first = await search.search({
+      installationId: INSTALLATION, query: 'cursor clock candidate vitest', limit: 2,
+    })
+    const late = await seedClaim({
+      installationId: INSTALLATION,
+      key: 'clock-page-late',
+      statement: 'Cursor clock candidate vitest late',
+    })
+    const second = await search.search({
+      installationId: INSTALLATION, query: 'cursor clock candidate vitest', limit: 2,
+      cursor: first.nextCursor,
+    })
+    const frozenIds = [...first.hits, ...second.hits].map(hit => hit.versionId)
+    expect(frozenIds).toHaveLength(4)
+    expect(frozenIds).not.toContain(late.versionId)
+
+    const fresh = await search.search({
+      installationId: INSTALLATION, query: 'cursor clock candidate vitest', limit: 10,
+    })
+    expect(fresh.hits.map(hit => hit.versionId)).toContain(late.versionId)
   })
 })

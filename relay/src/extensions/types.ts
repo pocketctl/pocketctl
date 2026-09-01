@@ -28,6 +28,7 @@ export type ExtensionServiceId =
   | 'memory.mcp'
   | 'memory.manage'
   | 'memory.context'
+  | 'memory.codegraph.write'
 
 export type InstallationStatus =
   | 'pending'
@@ -70,6 +71,7 @@ export const EXTENSION_SERVICE_IDS: readonly ExtensionServiceId[] = Object.freez
   'memory.mcp',
   'memory.manage',
   'memory.context',
+  'memory.codegraph.write',
 ])
 
 export const EXTENSION_ERROR_CODES: readonly ExtensionErrorCode[] = Object.freeze([

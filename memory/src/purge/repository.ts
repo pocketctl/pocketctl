@@ -24,13 +24,239 @@ export function createPurgeRepository(
   options: {
     hmacKey: string
     tombstoneHmacKeys?: readonly TombstoneHmacKey[]
+    codeSnapshotRetentionDays?: number
     onInvalidated?: (scope: 'session' | 'installation', count: number) => void
   },
 ) {
   const tombstoneHmacKeys = options.tombstoneHmacKeys?.length
     ? options.tombstoneHmacKeys
     : [{ version: 'legacy', key: options.hmacKey }]
+  const codeSnapshotRetentionDays = options.codeSnapshotRetentionDays ?? 30
   return {
+    async purgeRepository(input: {
+      installationId: string
+      repositoryId: string
+      reasonCode: string
+    }): Promise<{ purged: boolean }> {
+      const client = await pool.connect()
+      try {
+        await client.query('BEGIN')
+        await client.query(`
+          SELECT pg_advisory_xact_lock(hashtextextended('purge:repository:' || $1 || ':' || $2, 0))
+        `, [input.installationId, input.repositoryId])
+        const already = await client.query(`
+          SELECT 1 FROM memory_repository_tombstones
+          WHERE installation_id = $1 AND repository_id = $2
+        `, [input.installationId, input.repositoryId])
+        if (already.rows[0]) {
+          await client.query('COMMIT')
+          return { purged: false }
+        }
+        const repository = await client.query(`
+          SELECT 1 FROM repositories
+          WHERE installation_id = $1 AND repository_id = $2 FOR UPDATE
+        `, [input.installationId, input.repositoryId])
+        if (!repository.rows[0]) {
+          await client.query('COMMIT')
+          return { purged: false }
+        }
+        await client.query(`
+          INSERT INTO memory_repository_tombstones
+            (installation_id, repository_id, reason_code)
+          VALUES ($1, $2, $3)
+        `, [input.installationId, input.repositoryId, input.reasonCode])
+        await client.query(`
+          UPDATE memory_generation_runs gr
+          SET state = 'cancelled', error_code = 'repository_purged', completed_at = NOW()
+          WHERE gr.installation_id = $1 AND gr.state IN ('queued','running')
+            AND EXISTS (
+              SELECT 1 FROM memory_wiki_build_runs br
+              JOIN memory_wikis w
+                ON w.installation_id = br.installation_id AND w.wiki_id = br.wiki_id
+              WHERE br.generation_run_id = gr.run_id AND w.repository_id = $2
+            )
+        `, [input.installationId, input.repositoryId])
+        await client.query(`
+          UPDATE memory_wiki_build_runs br
+          SET state = 'cancelled', error_code = 'repository_purged', completed_at = NOW()
+          FROM memory_wikis w
+          WHERE br.installation_id = $1 AND w.repository_id = $2
+            AND w.installation_id = br.installation_id AND w.wiki_id = br.wiki_id
+            AND br.state IN ('queued','running','validating','candidate')
+        `, [input.installationId, input.repositoryId])
+        await client.query(`
+          DELETE FROM memory_jobs j
+          WHERE j.installation_id = $1 AND (
+            (j.job_type = 'parse_code_snapshot' AND EXISTS (
+              SELECT 1 FROM memory_source_snapshots s
+              WHERE s.installation_id = $1 AND s.repository_id = $2
+                AND s.snapshot_id::text = j.payload->>'snapshot_id'
+            )) OR
+            (j.job_type = 'build_wiki' AND EXISTS (
+              SELECT 1 FROM memory_wiki_build_runs br
+              JOIN memory_wikis w
+                ON w.installation_id = br.installation_id AND w.wiki_id = br.wiki_id
+              WHERE w.repository_id = $2 AND br.run_id::text = j.payload->>'run_id'
+            )))
+        `, [input.installationId, input.repositoryId])
+        await client.query(`
+          DELETE FROM memory_wikis WHERE installation_id = $1 AND repository_id = $2
+        `, [input.installationId, input.repositoryId])
+        await client.query(`
+          DELETE FROM memory_source_snapshots
+          WHERE installation_id = $1 AND repository_id = $2
+        `, [input.installationId, input.repositoryId])
+        await client.query(`
+          DELETE FROM memory_source_blobs b
+          WHERE b.installation_id = $1 AND NOT EXISTS (
+            SELECT 1 FROM memory_source_snapshot_entries e
+            WHERE e.installation_id = b.installation_id AND e.blob_hash = b.blob_hash
+          )
+        `, [input.installationId])
+        await client.query(`
+          UPDATE repositories SET canonical_remote = NULL, last_observed_at = NOW()
+          WHERE installation_id = $1 AND repository_id = $2
+        `, [input.installationId, input.repositoryId])
+        await client.query('COMMIT')
+        return { purged: true }
+      } catch (error) {
+        await client.query('ROLLBACK').catch(() => undefined)
+        throw error
+      } finally {
+        client.release()
+      }
+    },
+
+    async purgeSourceSnapshot(input: {
+      installationId: string
+      snapshotId: string
+      reasonCode: string
+    }): Promise<{ purged: boolean }> {
+      const client = await pool.connect()
+      try {
+        await client.query('BEGIN')
+        await client.query(`
+          SELECT pg_advisory_xact_lock(hashtextextended('purge:snapshot:' || $1 || ':' || $2, 0))
+        `, [input.installationId, input.snapshotId])
+        const tombstone = await client.query(`
+          SELECT 1 FROM memory_source_snapshot_tombstones
+          WHERE installation_id = $1 AND snapshot_id = $2
+        `, [input.installationId, input.snapshotId])
+        if (tombstone.rows[0]) {
+          await client.query('COMMIT')
+          return { purged: false }
+        }
+        const snapshot = await client.query<{
+          repository_id: string
+          commit_sha: string
+        }>(`
+          SELECT repository_id::text, commit_sha FROM memory_source_snapshots
+          WHERE installation_id = $1 AND snapshot_id = $2 FOR UPDATE
+        `, [input.installationId, input.snapshotId])
+        const row = snapshot.rows[0]
+        if (!row) {
+          await client.query('COMMIT')
+          return { purged: false }
+        }
+        await client.query(`
+          INSERT INTO memory_source_snapshot_tombstones
+            (installation_id, snapshot_id, repository_id, commit_sha, reason_code)
+          VALUES ($1, $2, $3, $4, $5)
+        `, [input.installationId, input.snapshotId, row.repository_id,
+          row.commit_sha, input.reasonCode])
+        await client.query(`
+          UPDATE memory_generation_runs gr
+          SET state = 'cancelled', error_code = 'snapshot_purged', completed_at = NOW()
+          WHERE gr.installation_id = $1 AND gr.state IN ('queued','running')
+            AND EXISTS (
+              SELECT 1 FROM memory_wiki_build_runs br
+              WHERE br.generation_run_id = gr.run_id AND br.source_snapshot_id = $2
+            )
+        `, [input.installationId, input.snapshotId])
+        await client.query(`
+          DELETE FROM memory_jobs
+          WHERE installation_id = $1 AND (
+            payload->>'snapshot_id' = $2::text OR payload->>'run_id' IN (
+              SELECT run_id::text FROM memory_wiki_build_runs
+              WHERE installation_id = $1 AND source_snapshot_id = $2::uuid
+            ))
+        `, [input.installationId, input.snapshotId])
+        await client.query(`
+          DELETE FROM memory_source_snapshots
+          WHERE installation_id = $1 AND snapshot_id = $2
+        `, [input.installationId, input.snapshotId])
+        await client.query(`
+          DELETE FROM memory_source_blobs b
+          WHERE b.installation_id = $1 AND NOT EXISTS (
+            SELECT 1 FROM memory_source_snapshot_entries e
+            WHERE e.installation_id = b.installation_id AND e.blob_hash = b.blob_hash
+          )
+        `, [input.installationId])
+        await client.query('COMMIT')
+        return { purged: true }
+      } catch (error) {
+        await client.query('ROLLBACK').catch(() => undefined)
+        throw error
+      } finally {
+        client.release()
+      }
+    },
+
+    async cleanupSupersededSnapshots(input: {
+      limit: number
+      now?: Date
+    }): Promise<{ snapshots: number; blobs: number }> {
+      const limit = Math.max(1, Math.min(1_000, Math.floor(input.limit)))
+      const client = await pool.connect()
+      try {
+        await client.query('BEGIN')
+        const deleted = await client.query<{ snapshot_id: string }>(`
+          WITH eligible AS (
+            SELECT s.snapshot_id
+            FROM memory_source_snapshots s
+            WHERE s.state = 'superseded'
+              AND s.created_at < COALESCE($1::timestamptz, NOW()) - ($3 * INTERVAL '1 day')
+              AND NOT EXISTS (
+                SELECT 1 FROM memory_code_graph_versions g
+                WHERE g.installation_id = s.installation_id AND g.snapshot_id = s.snapshot_id
+                  AND g.state IN ('candidate','active')
+              )
+              AND NOT EXISTS (
+                SELECT 1 FROM memory_wiki_versions v
+                WHERE v.installation_id = s.installation_id
+                  AND v.source_snapshot_id = s.snapshot_id AND v.state <> 'purged'
+              )
+              AND NOT EXISTS (
+                SELECT 1 FROM memory_wiki_build_runs r
+                WHERE r.installation_id = s.installation_id
+                  AND r.source_snapshot_id = s.snapshot_id
+                  AND r.state IN ('queued','running','validating','candidate','published')
+              )
+            ORDER BY s.created_at, s.snapshot_id
+            FOR UPDATE OF s SKIP LOCKED
+            LIMIT $2
+          )
+          DELETE FROM memory_source_snapshots s USING eligible e
+          WHERE s.snapshot_id = e.snapshot_id
+          RETURNING s.snapshot_id::text
+        `, [input.now ?? null, limit, codeSnapshotRetentionDays])
+        const orphaned = await client.query(`
+          DELETE FROM memory_source_blobs b
+          WHERE NOT EXISTS (
+            SELECT 1 FROM memory_source_snapshot_entries e
+            WHERE e.installation_id = b.installation_id AND e.blob_hash = b.blob_hash
+          )
+        `)
+        await client.query('COMMIT')
+        return { snapshots: deleted.rowCount ?? 0, blobs: orphaned.rowCount ?? 0 }
+      } catch (error) {
+        await client.query('ROLLBACK').catch(() => undefined)
+        throw error
+      } finally {
+        client.release()
+      }
+    },
+
     async purgeSession(input: SessionPurgeInput, transactionClient?: QueryClient): Promise<number> {
       if (transactionClient) {
         // The caller owns the transaction and must publish metrics only after
@@ -398,6 +624,20 @@ async function purgeInstallationRows(
   await client.query(`
     SELECT pg_advisory_xact_lock(hashtextextended('purge:installation:' || $1, 0))
   `, [input.installationId])
+  // Phase 4 authoritative/derived content is removed before the generic
+  // repository row and before the content-free installation receipt.
+  for (const table of [
+    'memory_wikis',
+    'memory_source_snapshots',
+    'memory_repository_tombstones',
+    'memory_source_snapshot_tombstones',
+    'memory_source_blobs',
+  ]) {
+    await client.query(
+      `DELETE FROM ${table} WHERE installation_id = $1`,
+      [input.installationId],
+    )
+  }
   const invalidated = await client.query<{ count: string }>(`
     SELECT COUNT(*)::text AS count FROM knowledge_claims WHERE installation_id = $1
   `, [input.installationId])

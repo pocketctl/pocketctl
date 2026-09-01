@@ -23,6 +23,11 @@ import type {
   MemoryScopeMember,
   MemoryRecallBundle,
   MemorySearchResult,
+  MemoryActiveWiki,
+  MemoryChangeImpact,
+  MemoryCodeGraphPage,
+  MemoryWikiBuildList,
+  MemoryWikiCandidate,
   MintedGrant,
 } from '../types/memory'
 
@@ -377,6 +382,124 @@ export function sendMemoryFeedback(
     headers: { 'idempotency-key': `web-feedback-${requestId ?? 'anonymous'}-${action}-${Date.now()}` },
     body: JSON.stringify({ action, ...(requestId ? { request_id: requestId } : {}) }),
   })
+}
+
+// --- Phase 4 source graph and Living Wiki client surface ---
+
+export function getMemoryCodeGraph(
+  repositoryId: string,
+  cursor?: string | null,
+  limit = 50,
+): Promise<MemoryCodeGraphPage> {
+  const query = new URLSearchParams({ limit: String(limit) })
+  if (cursor) query.set('cursor', cursor)
+  return memoryJson(
+    'memory.search',
+    `/api/v1/memory/repositories/${encodeURIComponent(repositoryId)}/codegraph?${query.toString()}`,
+  )
+}
+
+export function analyzeMemoryChangeImpact(
+  repositoryId: string,
+  input: {
+    entry_paths: string[]
+    depth?: number
+    max_nodes?: number
+    max_edges?: number
+  },
+): Promise<MemoryChangeImpact> {
+  return memoryJson(
+    'memory.search',
+    `/api/v1/memory/repositories/${encodeURIComponent(repositoryId)}/impact`,
+    { method: 'POST', body: JSON.stringify(input) },
+  )
+}
+
+export function getMemoryWiki(repositoryId: string): Promise<MemoryActiveWiki> {
+  return memoryJson(
+    'memory.search',
+    `/api/v1/memory/repositories/${encodeURIComponent(repositoryId)}/wiki`,
+  )
+}
+
+export function listMemoryWikiBuilds(
+  wikiId: string,
+  cursor?: string | null,
+  limit = 20,
+): Promise<MemoryWikiBuildList> {
+  const query = new URLSearchParams({ limit: String(limit) })
+  if (cursor) query.set('cursor', cursor)
+  return memoryJson(
+    'memory.search',
+    `/api/v1/memory/wikis/${encodeURIComponent(wikiId)}/builds?${query.toString()}`,
+  )
+}
+
+export function getMemoryWikiCandidate(wikiId: string, buildId: string): Promise<MemoryWikiCandidate> {
+  return memoryJson(
+    'memory.search',
+    `/api/v1/memory/wikis/${encodeURIComponent(wikiId)}/candidates/${encodeURIComponent(buildId)}`,
+  )
+}
+
+export function scheduleMemoryWikiBuild(
+  wikiId: string,
+  expectedGeneration: number,
+): Promise<{ run_id: string; generation: number }> {
+  return memoryJson('memory.manage', `/api/v1/memory/wikis/${encodeURIComponent(wikiId)}/builds`, {
+    method: 'POST', body: JSON.stringify({ expected_generation: expectedGeneration }),
+  })
+}
+
+export function publishMemoryWikiCandidate(
+  wikiId: string,
+  buildId: string,
+  expectedGeneration: number,
+  expectedHeadRevision: number,
+): Promise<{ wikiVersionId: string; revision: number }> {
+  return memoryJson(
+    'memory.manage',
+    `/api/v1/memory/wikis/${encodeURIComponent(wikiId)}/candidates/${encodeURIComponent(buildId)}/publish`,
+    {
+      method: 'POST',
+      body: JSON.stringify({
+        expected_generation: expectedGeneration,
+        expected_head_revision: expectedHeadRevision,
+      }),
+    },
+  )
+}
+
+export function editMemoryWikiSection(
+  wikiId: string,
+  sectionKey: string,
+  markdown: string,
+  expectedLockVersion: number,
+): Promise<{ manualVersionId: string; lockVersion: number }> {
+  return memoryJson(
+    'memory.manage',
+    `/api/v1/memory/wikis/${encodeURIComponent(wikiId)}/manual-sections/${encodeURIComponent(sectionKey)}`,
+    {
+      method: 'PUT',
+      body: JSON.stringify({ markdown, expected_lock_version: expectedLockVersion }),
+    },
+  )
+}
+
+export function setMemoryWikiSectionLock(
+  wikiId: string,
+  sectionKey: string,
+  action: 'lock' | 'unlock',
+  expectedLockVersion: number,
+): Promise<{ lockVersion: number }> {
+  return memoryJson(
+    'memory.manage',
+    `/api/v1/memory/wikis/${encodeURIComponent(wikiId)}/manual-sections/${encodeURIComponent(sectionKey)}/${action}`,
+    {
+      method: 'POST',
+      body: JSON.stringify({ expected_lock_version: expectedLockVersion }),
+    },
+  )
 }
 
 // ---- Phase 2 context management client (plan 10.3) ----

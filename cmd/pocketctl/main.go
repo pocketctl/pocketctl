@@ -131,6 +131,10 @@ func main() {
 			fmt.Fprintln(os.Stderr, "pocketctl: claude channel exited:", err)
 		}
 		os.Exit(0)
+	case "memory":
+		// Explicit Phase 4 repository source sync (ADR-0006): never
+		// background capture, never Session-triggered.
+		cmdMemory(os.Args[2:])
 	case "memory-mcp":
 		// Local stdio<->remote MCP bridge for the PocketCtl Memory provider.
 		// Grants refresh through the daemon's user-private socket and live

@@ -105,3 +105,31 @@ func canonicalRemote(raw string) (string, bool) {
 	}
 	return identity, true
 }
+
+// CredentialFreeRemote preserves a usable network remote while removing
+// transport credentials and URL query/fragment material. The same validation
+// as repository identity derivation applies, so local and ambiguous remotes
+// are rejected rather than persisted.
+func CredentialFreeRemote(raw string) (string, bool) {
+	remote := strings.TrimSpace(raw)
+	if _, ok := canonicalRemote(remote); !ok {
+		return "", false
+	}
+	if strings.Contains(remote, "://") {
+		parsed, err := url.Parse(remote)
+		if err != nil {
+			return "", false
+		}
+		parsed.User = nil
+		parsed.RawQuery = ""
+		parsed.ForceQuery = false
+		parsed.Fragment = ""
+		return parsed.String(), true
+	}
+	colon := strings.IndexByte(remote, ':')
+	hostPart := remote[:colon]
+	if at := strings.LastIndexByte(hostPart, '@'); at >= 0 {
+		hostPart = hostPart[at+1:]
+	}
+	return hostPart + remote[colon:], true
+}

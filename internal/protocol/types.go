@@ -663,6 +663,69 @@ type MemoryMcpGrantError struct {
 	Code      string `json:"code"`
 }
 
+// MemoryCodegraphGrantRequest is the daemon->relay WS control message asking
+// for a Phase 4 least-privilege `memory.codegraph.write` capability grant
+// (ADR-0006). The payload never carries identity, repository paths, commits,
+// or file facts; Relay derives the user from the AUTHENTICATED connection.
+type MemoryCodegraphGrantRequest struct {
+	Type      string `json:"type"` // "memory_codegraph_grant"
+	RequestID string `json:"request_id,omitempty"`
+	// ScopeInstallationIDs optionally names EXACTLY ONE explicit shared
+	// installation target; empty keeps the personal-only default. The daemon
+	// never parses the returned JWT and persists no scope list.
+	ScopeInstallationIDs []string `json:"scope_installation_ids,omitempty"`
+}
+
+// MemoryCodegraphGrantResult is the relay->daemon success reply. TTL <= 60s;
+// the client refreshes between upload batches.
+type MemoryCodegraphGrantResult struct {
+	Type                 string   `json:"type"` // "memory_codegraph_grant_result"
+	RequestID            string   `json:"request_id,omitempty"`
+	Grant                string   `json:"grant"`
+	ExpiresIn            int      `json:"expires_in"`
+	TokenType            string   `json:"token_type"`
+	InstallationID       string   `json:"installation_id"`
+	ProviderPublicOrigin string   `json:"provider_public_origin"`
+	Services             []string `json:"services"`
+}
+
+// MemoryCodegraphGrantError is the bounded failure reply. Codes are a fixed
+// allowlist; the relay never echoes error details, repository paths, or
+// membership facts.
+type MemoryCodegraphGrantError struct {
+	Type      string `json:"type"` // "memory_codegraph_grant_error"
+	RequestID string `json:"request_id,omitempty"`
+	Code      string `json:"code"`
+}
+
+// MemoryCodegraphWriteService is the frozen Phase 4 least-privilege upload
+// service id in the Relay extension catalog.
+const MemoryCodegraphWriteService = "memory.codegraph.write"
+
+// Frozen bounded error-code allowlist for the codegraph grant broker.
+const (
+	MemoryCodegraphErrUnauthenticated       = "unauthenticated"
+	MemoryCodegraphErrInvalidRequest        = "invalid_request"
+	MemoryCodegraphErrNoInstallation        = "no_installation"
+	MemoryCodegraphErrServiceDisabled       = "service_disabled"
+	MemoryCodegraphErrInstallationNotActive = "installation_not_active"
+	MemoryCodegraphErrNotContributor        = "not_contributor"
+	MemoryCodegraphErrFeatureDisabled       = "feature_disabled"
+	MemoryCodegraphErrInternalError         = "internal_error"
+)
+
+// MemoryCodegraphGrantErrorCodes is the exhaustive allowlist a client may see.
+var MemoryCodegraphGrantErrorCodes = map[string]bool{
+	MemoryCodegraphErrUnauthenticated:       true,
+	MemoryCodegraphErrInvalidRequest:        true,
+	MemoryCodegraphErrNoInstallation:        true,
+	MemoryCodegraphErrServiceDisabled:       true,
+	MemoryCodegraphErrInstallationNotActive: true,
+	MemoryCodegraphErrNotContributor:        true,
+	MemoryCodegraphErrFeatureDisabled:       true,
+	MemoryCodegraphErrInternalError:         true,
+}
+
 // MemoryContextGrantRequest is the daemon->relay WS control message asking
 // for a session-bound `memory.context` capability grant (Phase 2 plan 10.1).
 // The session must be owned by the authenticated daemon's user; identity is

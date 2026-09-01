@@ -4,6 +4,8 @@ import type pg from 'pg'
 import { createSearchService } from '../retrieval/search-service.js'
 import { createRecallService } from '../retrieval/recall-service.js'
 import { createMemoryReadService } from '../retrieval/read-service.js'
+import { createCodeGraphReadService } from '../codegraph/read-service.js'
+import { createWikiReadService } from '../wiki/read-service.js'
 import type { EmbeddingProvider } from '../ports/embedding-provider.js'
 import type { VerifiedMemoryGrant } from '../auth/grant-guard.js'
 import type { RouteV2Grant } from '../governance/authorization.js'
@@ -20,7 +22,7 @@ import {
 } from '../retrieval/federated-search-service.js'
 
 /**
- * The six read-only MCP tools (plan §12). They call the same application
+ * The bounded read-only MCP tools (plans Phase 1 §12 and Phase 4 §4.2). They call the same application
  * services as REST with the same limits — MCP adapts schemas and output
  * formatting only; it never issues its own SQL or widens result bounds.
  */
@@ -52,6 +54,8 @@ export function registerMemoryTools(server: McpServer, deps: MemoryToolDeps): vo
   })
   const recall = createRecallService(deps.pool, search)
   const reads = createMemoryReadService(deps.pool, deps.cursorSigningKey)
+  const graphReads = createCodeGraphReadService(deps.pool, deps.cursorSigningKey)
+  const wikiReads = createWikiReadService(deps.pool)
 
   const currentGrant = (): VerifiedMemoryGrant => {
     const grant = deps.grant()
@@ -303,5 +307,59 @@ export function registerMemoryTools(server: McpServer, deps: MemoryToolDeps): vo
     inputSchema: { repository_id: z.string().uuid() },
   }, async args => {
     return textResult(await reads.getRepositoryContext(installationId(), args.repository_id))
+  })
+
+  server.registerTool('memory_get_code_graph', {
+    description: 'Read one bounded page of the active repository code graph with exact provenance.',
+    inputSchema: {
+      repository_id: z.string().uuid(),
+      installation_id: z.string().uuid().optional(),
+      limit: z.number().int().min(1).max(100).optional(),
+      cursor: z.string().min(1).max(2048).optional(),
+    },
+  }, async args => {
+    const graph = await graphReads.getGraph({
+      installationId: qualifiedInstallation(args.installation_id),
+      repositoryId: args.repository_id,
+      ...(args.limit !== undefined ? { limit: args.limit } : {}),
+      ...(args.cursor !== undefined ? { cursor: args.cursor } : {}),
+    })
+    return textResult(graph ?? { error: { code: 'not_found' } })
+  })
+
+  server.registerTool('memory_analyze_change_impact', {
+    description: 'Analyze bounded change impact from repository paths against the active graph.',
+    inputSchema: {
+      repository_id: z.string().uuid(),
+      installation_id: z.string().uuid().optional(),
+      entry_paths: z.array(z.string().min(1).max(1024)).min(1).max(20),
+      depth: z.number().int().min(0).max(3).optional(),
+      max_nodes: z.number().int().min(1).max(500).optional(),
+      max_edges: z.number().int().min(1).max(2000).optional(),
+    },
+  }, async args => {
+    const impact = await graphReads.analyzeImpact({
+      installationId: qualifiedInstallation(args.installation_id),
+      repositoryId: args.repository_id,
+      entryPaths: args.entry_paths,
+      ...(args.depth !== undefined ? { depth: args.depth } : {}),
+      ...(args.max_nodes !== undefined ? { maxNodes: args.max_nodes } : {}),
+      ...(args.max_edges !== undefined ? { maxEdges: args.max_edges } : {}),
+    })
+    return textResult(impact ?? { error: { code: 'not_found' } })
+  })
+
+  server.registerTool('memory_get_wiki_page', {
+    description: 'Read active Wiki pages, exact source bindings, and stale state for a repository.',
+    inputSchema: {
+      repository_id: z.string().uuid(),
+      installation_id: z.string().uuid().optional(),
+    },
+  }, async args => {
+    const wiki = await wikiReads.getActiveWiki({
+      installationId: qualifiedInstallation(args.installation_id),
+      repositoryId: args.repository_id,
+    })
+    return textResult(wiki ?? { error: { code: 'not_found' } })
   })
 }

@@ -65,7 +65,11 @@ import { registerSnapshotRoutes } from './extensions/snapshot-routes.js';
 import { registerProviderInstallationRoutes } from './extensions/provider-installation-routes.js';
 import { registerCapabilityRoutes } from './extensions/capability-routes.js';
 import { resolveGrantKeyMaterial } from './extensions/capability-grant.js';
-import { createMemoryContextGrantBroker, createMemoryMcpGrantBroker } from './extensions/grant-service.js';
+import {
+  createMemoryCodegraphGrantBroker,
+  createMemoryContextGrantBroker,
+  createMemoryMcpGrantBroker,
+} from './extensions/grant-service.js';
 import { registerStatusRoutes } from './extensions/status-routes.js';
 import { registerUsageRoutes } from './extensions/usage-routes.js';
 import { registerPurgeRoutes } from './extensions/purge-routes.js';
@@ -971,6 +975,14 @@ async function main() {
         pool: pools.control,
         issuer: publicIssuer,
         mode: extensionConfig.mode,
+        providerPublicOrigins: extensionConfig.providerPublicOrigins,
+        grantKeys: extensionGrantKeys,
+      }),
+      memoryCodegraphGrantBroker: createMemoryCodegraphGrantBroker({
+        pool: pools.control,
+        issuer: publicIssuer,
+        mode: extensionConfig.mode,
+        v2Mode: extensionV2ModeFromEnv(),
         providerPublicOrigins: extensionConfig.providerPublicOrigins,
         grantKeys: extensionGrantKeys,
       }),

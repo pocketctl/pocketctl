@@ -5,7 +5,7 @@
  * `../model/` and must never log prompts, documents, or outputs.
  */
 
-export type TextGeneratorOperation = 'candidate_extract' | 'candidate_repair'
+export type TextGeneratorOperation = 'candidate_extract' | 'candidate_repair' | 'wiki_build'
 
 /** A JSON Schema object describing the expected model output shape. */
 export type JsonSchema = Record<string, unknown>
@@ -18,7 +18,7 @@ export interface ModelUsage {
 }
 
 export type ModelJsonResult<T> =
-  | { ok: true; value: T; usage: ModelUsage }
+  | { ok: true; value: T; usage: ModelUsage; budgetReservationId?: string }
   | {
       ok: false
       code: 'invalid_json' | 'empty_content' | 'invalid_usage' | 'http_error' | 'aborted' | 'budget_exceeded' | 'budget_unavailable'
@@ -27,6 +27,8 @@ export type ModelJsonResult<T> =
       detail?: string
       /** Provider-reported content-free usage, when a response was received. */
       usage?: ModelUsage
+      /** Opaque local reservation provenance; never a Provider credential. */
+      budgetReservationId?: string
     }
 
 export interface TextGenerator {

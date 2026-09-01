@@ -68,6 +68,7 @@ interface PrefilteredRow {
   repository_id: string | null
   repo_snapshot_id: string | null
   branch: string | null
+  search_as_of: string
 }
 
 export interface SearchServiceDeps {
@@ -89,7 +90,7 @@ export function createSearchService(deps: SearchServiceDeps) {
       }
       const cursorContext = cursorContextFor(input)
       const cursorState = decodeCursor(input.cursor, cursorContext, deps.cursorSigningKey, input.asOf)
-      const asOf = cursorState?.asOf ?? input.asOf ?? new Date()
+      const requestedAsOf = cursorState?.asOf ?? input.asOf?.toISOString() ?? null
       const degraded: string[] = []
 
       const claimTypes = input.claimTypes && input.claimTypes.length > 0
@@ -100,17 +101,23 @@ export function createSearchService(deps: SearchServiceDeps) {
       //    from the full supported personal corpus. The smaller 2,000-row cap
       //    applies only after those pools prioritize vector candidates.
       const prefiltered = await deps.pool.query<PrefilteredRow>(`
+        WITH search_clock AS (
+          SELECT COALESCE($2::timestamptz, statement_timestamp()) AS as_of
+        )
         SELECT v.version_id::text, c.claim_id::text, c.claim_type, v.statement,
                c.scope_kind, c.scope_key, v.valid_from, v.freshness_at, v.repository_id::text,
-               v.repo_snapshot_id::text, v.branch, v.authority
-        FROM knowledge_claims c
+               v.repo_snapshot_id::text, v.branch, v.authority,
+               to_char(search_clock.as_of AT TIME ZONE 'UTC',
+                 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS search_as_of
+        FROM search_clock
+        CROSS JOIN knowledge_claims c
         JOIN knowledge_versions v ON v.claim_id = c.claim_id
                                   AND v.installation_id = c.installation_id
         WHERE c.installation_id = $1
           AND c.state = 'active'
-          AND v.created_at <= $2
-          AND COALESCE(v.valid_from, v.created_at) <= $2
-          AND (v.valid_until IS NULL OR v.valid_until > $2)
+          AND v.created_at <= search_clock.as_of
+          AND COALESCE(v.valid_from, v.created_at) <= search_clock.as_of
+          AND (v.valid_until IS NULL OR v.valid_until > search_clock.as_of)
           AND EXISTS (
             SELECT 1 FROM knowledge_evidence e
             WHERE e.installation_id = c.installation_id AND e.version_id = v.version_id
@@ -122,7 +129,7 @@ export function createSearchService(deps: SearchServiceDeps) {
         ORDER BY v.version_id
         LIMIT ${MAX_AUTHORIZED_VERSIONS}
       `, [
-        input.installationId, asOf,
+        input.installationId, requestedAsOf,
         input.repositoryId ?? null,
         input.repoSnapshotId ?? null,
         input.branch ?? null,
@@ -133,6 +140,7 @@ export function createSearchService(deps: SearchServiceDeps) {
         return { hits: [], nextCursor: null, degradedComponents: [], poolSizes: {} }
       }
       const byVersion = new Map(rows.map(row => [row.version_id, row]))
+      const asOf = requestedAsOf ?? rows[0].search_as_of
       const versionIds = rows.map(row => row.version_id)
 
       const pools: RankedPool[] = []
@@ -375,8 +383,8 @@ function compareRankingRows(a: PrefilteredRow, b: PrefilteredRow): number {
     || (a.version_id === b.version_id ? 0 : a.version_id < b.version_id ? -1 : 1)
 }
 
-function encodeCursor(offset: number, context: string, asOf: Date, key: string): string {
-  const payload = Buffer.from(JSON.stringify({ o: offset, q: context, a: asOf.toISOString() }), 'utf8').toString('base64url')
+function encodeCursor(offset: number, context: string, asOf: string, key: string): string {
+  const payload = Buffer.from(JSON.stringify({ o: offset, q: context, a: asOf }), 'utf8').toString('base64url')
   const signature = createHmac('sha256', key).update(payload).digest('base64url')
   return `${payload}.${signature}`
 }
@@ -386,7 +394,7 @@ function decodeCursor(
   context: string,
   key: string,
   requestedAsOf?: Date | null,
-): { offset: number; asOf: Date } | null {
+): { offset: number; asOf: string } | null {
   if (!cursor) return null
   try {
     const [payload, suppliedSignature, extra] = cursor.split('.')
@@ -400,9 +408,10 @@ function decodeCursor(
       ? parsed.o
       : NaN
     if (!Number.isFinite(offset) || typeof parsed.a !== 'string') throw new Error('invalid_cursor')
-    const asOf = new Date(parsed.a)
-    if (Number.isNaN(asOf.getTime()) || asOf.toISOString() !== parsed.a) throw new Error('invalid_cursor')
-    if (requestedAsOf && requestedAsOf.getTime() !== asOf.getTime()) throw new Error('invalid_cursor')
+    const asOf = parsed.a
+    if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.(?:\d{3}|\d{6})Z$/.test(asOf)
+      || Number.isNaN(Date.parse(asOf))) throw new Error('invalid_cursor')
+    if (requestedAsOf && requestedAsOf.toISOString() !== asOf) throw new Error('invalid_cursor')
     return { offset: Math.min(offset, 100_000), asOf }
   } catch {
     throw new Error('invalid_cursor')
