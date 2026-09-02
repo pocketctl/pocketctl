@@ -4,6 +4,8 @@
  * configuration, and error messages must never echo secret values.
  */
 
+import { loadSkillConfig, type SkillConfig } from './skills/config.js'
+
 export type MemoryMode = 'off' | 'shadow' | 'enabled'
 export type MemoryLogLevel = 'debug' | 'info' | 'warn' | 'error'
 export type MemoryMetricsBind = 'loopback' | 'all'
@@ -54,6 +56,7 @@ export interface WikiProviderBudgetSettings {
 }
 
 export interface MemoryConfig {
+  skill: SkillConfig
   mode: MemoryMode
   sharedScopesMode: SharedScopesMode
   codegraphMode: SharedScopesMode
@@ -383,6 +386,7 @@ function parseTombstoneHmacKeys(raw: string | undefined): TombstoneHmacKey[] {
 
 export function loadMemoryConfig(env: Record<string, string | undefined> = process.env): MemoryConfig {
   const isProduction = env.NODE_ENV === 'production'
+  const skill = loadSkillConfig(env)
 
   const mode = parseEnum('MEMORY_MODE', env.MEMORY_MODE, MODES, 'enabled')
   const logLevel = parseEnum('MEMORY_LOG_LEVEL', env.MEMORY_LOG_LEVEL, LOG_LEVELS, 'info')
@@ -477,9 +481,16 @@ export function loadMemoryConfig(env: Record<string, string | undefined> = proce
     : [{ version: 'legacy', key: hmacKey }]
   const providerBudget = parseProviderBudget(env)
   const wikiProviderBudget = parseWikiProviderBudget(env)
+  const dbPoolMax = parseBoundedInteger('MEMORY_DB_POOL_MAX', env.MEMORY_DB_POOL_MAX, 12, 1, 64)
+  // Skill holds a per-task advisory connection while transactions and failure
+  // finalization acquire pool clients. Reject starvation instead of hanging.
+  if (skill.mode !== 'off' && dbPoolMax < 3) {
+    throw new ConfigError('MEMORY_DB_POOL_MAX must be at least 3 when Skill is active')
+  }
 
   return {
     mode,
+    skill,
     sharedScopesMode,
     codegraphMode,
     wikiMode,
@@ -504,7 +515,7 @@ export function loadMemoryConfig(env: Record<string, string | undefined> = proce
     metricsPort: parseBoundedInteger('MEMORY_METRICS_PORT', env.MEMORY_METRICS_PORT, 8091, 1, 65535),
     metricsBind: parseEnum('MEMORY_METRICS_BIND', env.MEMORY_METRICS_BIND, METRICS_BINDS, 'loopback'),
     databaseUrl,
-    dbPoolMax: parseBoundedInteger('MEMORY_DB_POOL_MAX', env.MEMORY_DB_POOL_MAX, 12, 1, 64),
+    dbPoolMax,
     relayUrl,
     relayIssuer,
     providerId: MEMORY_PROVIDER_ID,

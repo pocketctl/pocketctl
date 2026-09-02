@@ -83,6 +83,12 @@ func (b *Bridge) Run(ctx context.Context) error {
 		if json.Unmarshal(raw, &message) == nil && message.ID != nil {
 			hasID = true
 		}
+		if !allowedMemoryTool(message) {
+			if hasID {
+				b.writeRpcError(message.ID, -32601, "tool_not_allowed")
+			}
+			continue
+		}
 		selectedScopes, selectionErr := selectedScopesForMCPMessage(message)
 		if selectionErr != nil {
 			if hasID {
@@ -146,6 +152,28 @@ func (b *Bridge) Run(ctx context.Context) error {
 	}
 }
 
+// The bridge exposes only the server's bounded read tools; mutations never
+// obtain a grant or reach the remote endpoint.
+func allowedMemoryTool(message jsonRpcMessage) bool {
+	if message.Method != "tools/call" {
+		return true
+	}
+	var params struct {
+		Name string `json:"name"`
+	}
+	if json.Unmarshal(message.Params, &params) != nil {
+		return false
+	}
+	switch params.Name {
+	case "memory_search", "memory_recall", "memory_get_claim", "memory_get_evidence",
+		"memory_find_related_episodes", "memory_get_repository_context", "memory_get_code_graph",
+		"memory_analyze_change_impact", "memory_get_wiki_page", "memory_list_skills", "memory_get_skill", "memory_resolve_skill":
+		return true
+	default:
+		return false
+	}
+}
+
 // selectedScopesForMCPMessage extracts only the bounded selection field from
 // the two federated read tools. The bridge neither interprets permissions nor
 // parses the returned JWT; it forwards the requested installation IDs to the
@@ -180,7 +208,8 @@ func selectedScopesForMCPMessage(message jsonRpcMessage) ([]string, error) {
 		}
 		return bounded, nil
 	}
-	if params.Name == "memory_get_claim" || params.Name == "memory_get_evidence" {
+	if params.Name == "memory_get_claim" || params.Name == "memory_get_evidence" ||
+		params.Name == "memory_list_skills" || params.Name == "memory_get_skill" || params.Name == "memory_resolve_skill" {
 		raw, present := args["installation_id"]
 		if !present {
 			return nil, nil

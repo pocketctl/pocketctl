@@ -3,6 +3,7 @@ import type pg from 'pg'
 import type { GrantGuard, VerifiedMemoryGrant } from '../auth/grant-guard.js'
 import type { CorsHostPolicy } from '../auth/cors-host-policy.js'
 import { MemoryApiError, errorBody } from './errors.js'
+import { registerMemoryCors } from './cors.js'
 import {
   EpisodesQuerySchema,
   ClaimsQuerySchema,
@@ -55,6 +56,7 @@ interface ReplyLike {
 }
 
 export function registerReadRoutes(app: FastifyInstance, deps: ReadRouteDeps): void {
+  registerMemoryCors(app, deps.policy)
   const search = createSearchService({
     pool: deps.pool,
     ...(deps.embed ? { embed: deps.embed } : {}),
@@ -77,34 +79,11 @@ export function registerReadRoutes(app: FastifyInstance, deps: ReadRouteDeps): v
   }
 
   app.addHook('onRequest', async (request, reply) => {
-    if (!deps.policy.hostAllowed(request.headers.host)) {
-      reply.code(403).send(errorBody(new MemoryApiError('forbidden', 'host rejected')))
-      return reply
-    }
-    if (!deps.policy.originAllowed(request.headers.origin)) {
-      reply.code(403).send(errorBody(new MemoryApiError('forbidden', 'origin rejected')))
-      return reply
-    }
-    if (request.headers.origin) {
-      reply.header('access-control-allow-origin', request.headers.origin)
-      reply.header('vary', 'origin')
-    }
     const service = readServiceFor(request.method, request.url)
     if (service) {
       const grant = await authenticateRead(request, reply, service)
       if (!grant) return reply
     }
-  })
-
-  app.options('/api/v1/memory/*', async (request, reply) => {
-    if (request.headers.origin && deps.policy.originAllowed(request.headers.origin)) {
-      reply.header('access-control-allow-origin', request.headers.origin)
-      reply.header('vary', 'origin')
-    }
-    reply.header('access-control-allow-methods', 'GET, POST, PATCH, DELETE, OPTIONS')
-    reply.header('access-control-allow-headers', 'authorization, content-type, idempotency-key')
-    reply.header('access-control-max-age', '600')
-    return ''
   })
 
   const guardRoute = async <T>(

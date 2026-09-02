@@ -24,6 +24,7 @@ export function createMemoryMetrics() {
   const registry = new Registry()
   const phase1 = createPhase1Metrics(registry)
   const phase4 = createPhase4Metrics(registry)
+  const phase5 = createPhase5Metrics(registry)
 
   const installations = new Gauge({
     name: 'pocketctl_memory_installations',
@@ -125,10 +126,74 @@ export function createMemoryMetrics() {
     usageOutboxRows,
     phase1,
     phase4,
+    phase5,
   }
 }
 
 export type MemoryMetrics = ReturnType<typeof createMemoryMetrics>
+
+const SKILL_LEDGER_STATES = {
+  task: ['pending','running','candidate','cancelled','dead'],
+  candidate: ['candidate','superseded','revoked'],
+  replay: ['running','passed','failed','cancelled'],
+  execution: ['started','succeeded','failed','taken_over','cancelled'],
+  review: ['approve','request_changes','reject'],
+  review_outcome: ['accepted_as_is','light_edit','major_edit'],
+  publication: ['manual','auto','rollback'],
+} as const
+const SKILL_PROVENANCE = ['ledger','fixture','recorded'] as const
+export function createPhase5Metrics(registry = new Registry()) {
+  const actions = new Counter({name:'pocketctl_memory_skill_actions_total',help:'Skill REST mutations by bounded action and authorization result',labelNames:['action','result'] as const,registers:[registry]})
+  const admissions = new Counter({name:'pocketctl_memory_skill_admissions_total',help:'Skill admission outcomes, including deduplicated requests',labelNames:['result'] as const,registers:[registry]})
+  const ledger = new Gauge({ name:'pocketctl_memory_skill_ledger_rows',help:'Retained Skill ledger rows; fixture/recorded are not natural executions',labelNames:['stage','state','provenance'] as const,registers:[registry] })
+  const queueAge = new Gauge({ name:'pocketctl_memory_skill_queue_oldest_seconds',help:'Age of oldest pending Skill generation job',registers:[registry] })
+  const retries = new Gauge({ name:'pocketctl_memory_skill_retained_retries',help:'Retry attempts of retained Skill jobs; job retention applies',registers:[registry] })
+  const deadJobs = new Gauge({ name:'pocketctl_memory_skill_dead_jobs',help:'Retained Skill DLQ jobs',registers:[registry] })
+  const naturalExecutions = new Gauge({name:'pocketctl_memory_skill_natural_executions',help:'Real Skill execution denominator; disabled by current product gate',registers:[registry]})
+  const generation = new Counter({name:'pocketctl_memory_skill_generation_results_total',help:'Skill generator returns, including budget denials',labelNames:['result'] as const,registers:[registry]})
+  const tokens = new Counter({name:'pocketctl_memory_skill_provider_tokens_total',help:'Reported Skill generation tokens; no model/identity labels',labelNames:['direction'] as const,registers:[registry]})
+  const cost = new Counter({name:'pocketctl_memory_skill_provider_cost_micros_total',help:'Estimated Skill cost in micros from configured rates; unpriced usage is unknown',registers:[registry]})
+  const costReports = new Counter({name:'pocketctl_memory_skill_provider_cost_reports_total',help:'Responses with an available Skill cost estimate',registers:[registry]})
+  const revocationLag = new Histogram({name:'pocketctl_memory_skill_revocation_propagation_seconds',help:'Relay scope control recording to committed local invalidation; not an end-to-end client probe',buckets:[0.01,0.1,0.5,1,2,5,10,30,60],registers:[registry]})
+  return {
+    queueAge,retries,deadJobs,naturalExecutions,
+    recordAdmission(result:'admitted'|'deduplicated'|'rejected'){if(['admitted','deduplicated','rejected'].includes(result))admissions.inc({result})},
+    recordAction(action:'admission'|'review'|'replay'|'publish'|'revoke'|'rollback'|'policy'|'execution',result:'allowed'|'denied') {
+      if(['admission','review','replay','publish','revoke','rollback','policy','execution'].includes(action)&&['allowed','denied'].includes(result))actions.inc({action,result})
+    },
+    setLedger(stage:string,state:string,provenance:string,count:number) {
+      const states=SKILL_LEDGER_STATES[stage as keyof typeof SKILL_LEDGER_STATES] as readonly string[]|undefined
+      if(!states?.includes(state)||!(SKILL_PROVENANCE as readonly string[]).includes(provenance)||!Number.isFinite(count)||count<0)return
+      ledger.set({stage,state,provenance},count)
+    },
+    clearLedger() {for(const [stage,states] of Object.entries(SKILL_LEDGER_STATES))for(const state of states)for(const provenance of SKILL_PROVENANCE)ledger.set({stage,state,provenance},0)},
+    recordGeneration(result:'success'|'failed'|'budget_denied',usage?:{inputTokens:number;outputTokens:number;costMicros?:number}) {
+      if(!['success','failed','budget_denied'].includes(result))return
+      generation.inc({result})
+      if(!usage)return
+      for(const [direction,value] of [['input',usage.inputTokens],['output',usage.outputTokens]] as const)if(Number.isFinite(value)&&value>=0)tokens.inc({direction},value)
+      if(usage.costMicros!==undefined&&Number.isFinite(usage.costMicros)&&usage.costMicros>=0){cost.inc(usage.costMicros);costReports.inc()}
+    },
+    observeRevocationLag(seconds:number){if(Number.isFinite(seconds)&&seconds>=0)revocationLag.observe(seconds)},
+  }
+}
+export type Phase5Metrics=ReturnType<typeof createPhase5Metrics>
+export async function updatePhase5Gauges(pool:Pick<pg.Pool,'query'>,metrics:Phase5Metrics):Promise<void>{
+  const rows=await pool.query<{stage:string;state:string;provenance:string;count:string}>(`
+    SELECT 'task' AS stage,state,'ledger' AS provenance,COUNT(*)::text AS count FROM memory_skill_tasks GROUP BY state
+    UNION ALL SELECT 'candidate',state,'ledger',COUNT(*)::text FROM memory_skill_candidates GROUP BY state
+    UNION ALL SELECT 'replay',r.state,c.provenance,COUNT(DISTINCT r.run_id)::text FROM memory_skill_replay_runs r JOIN memory_skill_replay_cases c USING(installation_id,run_id) GROUP BY r.state,c.provenance
+    UNION ALL SELECT 'execution',state,provenance,COUNT(*)::text FROM memory_skill_executions GROUP BY state,provenance
+    UNION ALL SELECT 'review',decision,'ledger',COUNT(*)::text FROM memory_skill_review_decisions GROUP BY decision
+    UNION ALL SELECT 'review_outcome',review_outcome,'ledger',COUNT(*)::text FROM memory_skill_review_decisions WHERE review_outcome IS NOT NULL GROUP BY review_outcome
+    UNION ALL SELECT 'publication',mode,provenance,COUNT(*)::text FROM memory_skill_publication_events GROUP BY mode,provenance`)
+  const queue=(await pool.query<{age:string;retries:string;dead:string}>(`SELECT COALESCE(EXTRACT(EPOCH FROM (NOW()-MIN(created_at) FILTER(WHERE state='pending'))),0)::text AS age,
+    COALESCE(SUM(GREATEST(attempts-1,0)),0)::text AS retries,COUNT(*) FILTER(WHERE state='dead')::text AS dead FROM memory_jobs WHERE job_type='extract_skill_candidate'`)).rows[0]
+  metrics.clearLedger()
+  for(const row of rows.rows)metrics.setLedger(row.stage,row.state,row.provenance,Number(row.count))
+  metrics.queueAge.set(Math.max(0,Number(queue?.age??0)));metrics.retries.set(Number(queue?.retries??0));metrics.deadJobs.set(Number(queue?.dead??0))
+  metrics.naturalExecutions.set(0)
+}
 
 
 const EXTRACTION_RESULTS = new Set(['succeeded', 'failed', 'quarantined', 'skipped'])

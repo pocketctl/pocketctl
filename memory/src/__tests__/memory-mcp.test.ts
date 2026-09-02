@@ -146,7 +146,7 @@ describeWithDatabase('memory MCP endpoint (PostgreSQL + real grants)', () => {
     expect((body.result as { protocolVersion: string }).protocolVersion).toBeTruthy()
   })
 
-  test('tools/list exposes exactly the nine read-only tools', async () => {
+  test('tools/list exposes exactly the twelve read-only tools', async () => {
     const response = await post(rpc('tools/list', {}))
     expect(response.statusCode).toBe(200)
     const parsed = parseRpc(response)
@@ -158,8 +158,11 @@ describeWithDatabase('memory MCP endpoint (PostgreSQL + real grants)', () => {
       'memory_get_code_graph',
       'memory_get_evidence',
       'memory_get_repository_context',
+      'memory_get_skill',
       'memory_get_wiki_page',
+      'memory_list_skills',
       'memory_recall',
+      'memory_resolve_skill',
       'memory_search',
     ])
   })

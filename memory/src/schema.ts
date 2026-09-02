@@ -1,4 +1,12 @@
 import type pg from 'pg'
+import { SKILL_ARCHIVE_MIGRATION } from './skills/migration.js'
+import { SKILL_TASK_MIGRATION } from './skills/task-migration.js'
+import { SKILL_GOVERNANCE_MIGRATION } from './skills/governance-migration.js'
+import { SKILL_REPLAY_MIGRATION } from './skills/replay-migration.js'
+import { SKILL_PUBLICATION_MIGRATION } from './skills/publication-migration.js'
+import { SKILL_EXECUTION_MIGRATION } from './skills/execution-migration.js'
+import { SKILL_LIFECYCLE_MIGRATION } from './skills/lifecycle-migration.js'
+import { SKILL_REVIEW_FIXES_MIGRATION } from './skills/review-fixes-migration.js'
 
 /**
  * Versioned, idempotent migrations for the independent Memory database.
@@ -1984,6 +1992,14 @@ export const MEMORY_MIGRATIONS: readonly Migration[] = [
          ON memory_phase4_authorization_audit_events (installation_id, created_at)`,
     ],
   },
+  SKILL_ARCHIVE_MIGRATION,
+  SKILL_TASK_MIGRATION,
+  SKILL_GOVERNANCE_MIGRATION,
+  SKILL_REPLAY_MIGRATION,
+  SKILL_PUBLICATION_MIGRATION,
+  SKILL_EXECUTION_MIGRATION,
+  SKILL_LIFECYCLE_MIGRATION,
+  SKILL_REVIEW_FIXES_MIGRATION,
 ]
 
 /** Apply every pending migration exactly once under a startup lock. */

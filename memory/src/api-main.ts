@@ -9,6 +9,8 @@ import { createGrantGuard } from './auth/grant-guard.js'
 import { createCorsHostPolicy } from './auth/cors-host-policy.js'
 import { registerReadRoutes } from './api/read-routes.js'
 import { registerCodegraphRoutes } from './api/codegraph-routes.js'
+import { registerSkillRoutes } from './api/skill-routes.js'
+import { createFileSkillCaseRegistry } from './skills/case-registry.js'
 import { registerWikiRoutes } from './api/wiki-routes.js'
 import { registerGovernanceRoutes } from './api/governance-routes.js'
 import { registerManageRoutes } from './api/manage-routes.js'
@@ -121,8 +123,18 @@ async function main(): Promise<void> {
     }
   })
 
-  // Phase 1 REST surface: registered only in enabled mode; shadow/off keeps
-  // the Phase 0 surface exactly as it was.
+  const skillContext = { globalMode: config.mode, sharedMode: config.sharedScopesMode, config: config.skill }
+  const skillCases = createFileSkillCaseRegistry(process.env.MEMORY_SKILL_REPLAY_REGISTRY_PATH)
+  const policy = createCorsHostPolicy({
+    allowedOrigins: config.allowedOrigins,
+    allowedHosts: config.allowedHosts,
+    isProduction: config.isProduction,
+  })
+  registerSkillRoutes(app, { pool, policy, guard: createGrantGuard({ pool, relayUrl: config.relayUrl, relayIssuer: config.relayIssuer }),
+    context: skillContext, cursorSigningKey: config.hmacKey, cases: skillCases, metrics: metrics.phase5 })
+
+  // Other REST surfaces require enabled mode. Skill routes above enforce
+  // their own effective mode and retain CORS support in shadow mode.
   if (config.mode === 'enabled') {
     const disclosure = (adapter: { provider: string; baseUrl: string; model: string; pricingConfigured: boolean } | undefined) => adapter
       ? {
@@ -172,11 +184,6 @@ async function main(): Promise<void> {
       pool,
       relayUrl: config.relayUrl,
       relayIssuer: config.relayIssuer,
-    })
-    const policy = createCorsHostPolicy({
-      allowedOrigins: config.allowedOrigins,
-      allowedHosts: config.allowedHosts,
-      isProduction: config.isProduction,
     })
     const rateLimiter = createRateLimiter(120, 60_000)
     registerCodegraphRoutes(app, {
@@ -289,6 +296,7 @@ async function main(): Promise<void> {
       },
     })
     registerMcpRoute(app, {
+      skillContext,
       pool,
       guard,
       policy,

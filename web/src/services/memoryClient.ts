@@ -183,6 +183,7 @@ export function currentMemoryInstallation(): MemoryInstallation | null {
 export function resetMemoryClient(): void {
   state.installation = undefined
   state.grant = undefined
+  v2Grant = null
 }
 
 /** Search; superseded calls are aborted so only the newest response lands. */
@@ -683,6 +684,7 @@ async function governanceFetch(
   const grant = await mintV2Grant(installationIds, services)
   return fetch(`${grant.origin}${path}`, {
     ...init,
+    redirect: 'error',
     headers: {
       ...(init.body !== undefined ? { 'content-type': 'application/json' } : {}),
       authorization: `Bearer ${grant.token}`,
@@ -715,6 +717,16 @@ async function governanceJson<T>(
     )
   }
   return response.json() as Promise<T>
+}
+
+/** Reuse the v2 scope-bound transport without widening the requested service. */
+export function scopedMemoryJson<T>(
+  installationId: string,
+  service: 'memory.search' | 'memory.manage',
+  path: string,
+  init: RequestInit = {},
+): Promise<T> {
+  return governanceJson<T>(path, [installationId], init, true, [service])
 }
 
 export async function listGovernanceScopes(): Promise<{ scopes: MemoryGovernanceScope[] }> {

@@ -135,6 +135,10 @@ export function createPurgeRepository(
       const client = await pool.connect()
       try {
         await client.query('BEGIN')
+        // Skill sources use the repository fence for their exact commit snapshot.
+        // Acquire it before the snapshot row so purge and Skill completion share one order.
+        const observed = await client.query<{ repository_id: string }>(`SELECT repository_id FROM memory_source_snapshots WHERE installation_id=$1 AND snapshot_id=$2`, [input.installationId,input.snapshotId])
+        if (observed.rows[0]) await client.query(`SELECT pg_advisory_xact_lock(hashtextextended('purge:repository:' || $1 || ':' || $2,0))`, [input.installationId,observed.rows[0].repository_id])
         await client.query(`
           SELECT pg_advisory_xact_lock(hashtextextended('purge:snapshot:' || $1 || ':' || $2, 0))
         `, [input.installationId, input.snapshotId])

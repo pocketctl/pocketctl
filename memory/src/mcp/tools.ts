@@ -1,3 +1,6 @@
+import { createSkillReadService, SkillReadError, skillJson } from '../skills/read-service.js'
+import { loadSkillConfig } from '../skills/config.js'
+import type { SkillSourceContext } from '../skills/source-resolver.js'
 import { z } from 'zod'
 import type { McpServer } from '@modelcontextprotocol/server'
 import type pg from 'pg'
@@ -28,6 +31,7 @@ import {
  */
 
 export interface MemoryToolDeps {
+  skillContext?: SkillSourceContext
   pool: pg.Pool
   /** Verified grant context — set per request by the MCP route. */
   grant(): VerifiedMemoryGrant | undefined
@@ -362,4 +366,30 @@ export function registerMemoryTools(server: McpServer, deps: MemoryToolDeps): vo
     })
     return textResult(wiki ?? { error: { code: 'not_found' } })
   })
+  const skillContext = deps.skillContext ?? { globalMode: 'off', sharedMode: 'off', config: loadSkillConfig({}) }
+  const skillReads = createSkillReadService({ pool: deps.pool, context: skillContext, cursorSigningKey: deps.cursorSigningKey })
+  const skillCall = async (operation: (identity: {installationId: string;grant: RouteV2Grant}) => Promise<unknown>, requested?: string) => {
+    try {
+      if (skillContext.config.mode === 'off' || skillContext.globalMode === 'off') throw new SkillReadError('feature_disabled')
+      const current = currentGrant()
+      if (!('version' in current) || current.version !== 'v2') throw new SkillReadError('forbidden')
+      const grant = current
+      return textResult(skillJson(await operation({installationId:qualifiedInstallation(requested),grant})))
+    } catch (error) {
+      return { ...textResult({error:{code:error instanceof SkillReadError ? error.code : 'internal_error'}}), isError:true }
+    }
+  }
+  server.registerTool('memory_list_skills', {
+    description: 'List bounded governed Skill metadata with current source authorization (read-only).',
+    inputSchema: z.object({installation_id:z.uuid().optional(),repository_id:z.uuid().optional(),state:z.enum(['draft','reviewed','rejected','revoked']).optional(),limit:z.number().int().min(1).max(50).optional(),cursor:z.string().min(1).max(2048).optional()}).strict(),
+  }, async args => skillCall(id => {const {installation_id,...query}=args;return skillReads.list(id,query)},args.installation_id))
+  server.registerTool('memory_get_skill', {
+    description: 'Read one governed Skill and bounded immutable version metadata; never generate or execute.',
+    inputSchema:z.object({skill_id:z.uuid(),installation_id:z.uuid().optional()}).strict(),
+  }, async args => skillCall(id=>skillReads.get(id,args.skill_id),args.installation_id))
+  server.registerTool('memory_resolve_skill', {
+    description: 'Preview a governed Skill version. Execution remains gated; this read creates no execution or assignment.',
+    inputSchema:z.object({skill_id:z.uuid(),installation_id:z.uuid().optional()}).strict(),
+  }, async args => skillCall(id=>skillReads.resolve(id,args.skill_id),args.installation_id))
+
 }

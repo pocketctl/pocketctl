@@ -145,6 +145,17 @@
           <MemoryWikiPanel v-if="active === 'wiki'" v-model:repository-id="phase4RepositoryId"
             :can-contribute="canContributePhase4" :can-publish="canPublishPhase4" />
           <MemoryCodeGraphPanel v-if="active === 'codegraph'" v-model:repository-id="phase4RepositoryId" />
+          <template v-if="active === 'skills'">
+            <div v-if="governanceScopesError" class="memory-notice is-error" role="alert" data-testid="skill-scope-error">
+              <strong>{{ t('memory.skills.scope_failed') }}</strong><p>{{ governanceScopesError }}</p>
+              <button class="memory-button" :disabled="governanceScopesLoading" data-testid="skill-scope-retry" @click="loadGovernanceScopes">{{ t('memory.skills.retry') }}</button>
+            </div>
+            <p v-else-if="governanceScopesLoading" role="status">{{ t('memory.skills.loading') }}</p>
+            <template v-else>
+              <MemoryScopeSwitcher v-model="governanceTarget" :scopes="governanceScopes" />
+              <MemorySkillsView :scope-id="governanceTarget" />
+            </template>
+          </template>
           <MemorySettingsCard v-if="active === 'settings'" :services="installation.enabled_services"
             :installation-status="installation.status" @changed="reload"/>
         </div>
@@ -223,6 +234,7 @@ import MemoryReviewPolicyEditor from '../components/memory/MemoryReviewPolicyEdi
 import MemoryPromotionDialog from '../components/memory/MemoryPromotionDialog.vue'
 import MemoryWikiPanel from '../components/memory/MemoryWikiPanel.vue'
 import MemoryCodeGraphPanel from '../components/memory/MemoryCodeGraphPanel.vue'
+import MemorySkillsView from './MemorySkillsView.vue'
 
 const { t } = useLocale()
 const { isMobile } = useResponsiveLayout()
@@ -232,13 +244,15 @@ const installation = ref<MemoryInstallation | null>(null)
 const loading = ref(true)
 const busy = ref(false)
 const error = ref('')
-const active = ref<'search' | 'review' | 'claims' | 'wiki' | 'codegraph' | 'context' | 'persona' | 'policies' | 'loadouts' | 'settings'>('search')
+const active = ref<'search' | 'review' | 'claims' | 'wiki' | 'codegraph' | 'skills' | 'context' | 'persona' | 'policies' | 'loadouts' | 'settings'>('search')
 const phase4RepositoryId = ref('')
 const claimId = ref<string | null>(null)
 const claimSourceInstallationId = ref<string | null>(null)
 const reviewCount = ref<number | null>(null)
 const reviewList = ref<InstanceType<typeof CandidateReviewList> | null>(null)
 const governanceScopes = ref<MemoryGovernanceScope[]>([])
+const governanceScopesLoading = ref(false)
+const governanceScopesError = ref('')
 const governanceTarget = ref('')
 const governanceQueue = ref<MemoryGovernanceQueueEntry[]>([])
 const governanceLoading = ref(false)
@@ -252,7 +266,7 @@ const promotionEvidence = ref<MemoryEvidence[]>([])
 const promotionSourceInstallationId = ref<string | null>(null)
 const pendingLifecycleState = ref<'suspended' | 'dissolving' | null>(null)
 
-const tabs = ['search', 'review', 'claims', 'wiki', 'codegraph', 'context', 'persona', 'policies', 'loadouts', 'settings'] as const
+const tabs = ['search', 'review', 'claims', 'wiki', 'codegraph', 'skills', 'context', 'persona', 'policies', 'loadouts', 'settings'] as const
 const requiredServices = ['memory.search', 'memory.recall', 'memory.manage', 'memory.context']
 const servicesEnabled = computed(() => requiredServices.every(service => installation.value?.enabled_services.includes(service)))
 const selectedGovernanceScope = computed(() => governanceScopes.value.find(
@@ -325,6 +339,8 @@ function selectClaim(id: string, hit?: { installationId?: string; ownerScopeKind
 }
 
 async function loadGovernanceScopes(): Promise<void> {
+  governanceScopesLoading.value = true
+  governanceScopesError.value = ''
   try {
     const previous = governanceTarget.value
     governanceScopes.value = (await listGovernanceScopes()).scopes
@@ -334,6 +350,11 @@ async function loadGovernanceScopes(): Promise<void> {
     governanceTarget.value = preferred?.installation_id ?? ''
   } catch (err) {
     governanceError.value = err instanceof Error ? err.message : 'governance unavailable'
+    const status = err && typeof err === 'object' && 'status' in err ? Number(err.status) : 0
+    const kind = status === 403 ? 'forbidden' : status === 503 ? 'off' : 'request_failed'
+    governanceScopesError.value = `${t(`memory.skills.${kind}`)} · ${governanceError.value}`
+  } finally {
+    governanceScopesLoading.value = false
   }
 }
 

@@ -161,7 +161,7 @@ describe('MemoryView', () => {
     expect(view.get('[data-testid="memory-tabs"]').attributes('aria-orientation')).toBe('horizontal')
     expect(view.find('[data-testid="memory-workbench-frame"]').exists()).toBe(false)
     expect(view.find('[data-testid="memory-module-rail"]').exists()).toBe(false)
-    for (const tab of ['search', 'review', 'claims', 'wiki', 'codegraph', 'context', 'persona', 'policies', 'loadouts', 'settings']) {
+    for (const tab of ['search', 'review', 'claims', 'wiki', 'codegraph', 'skills', 'context', 'persona', 'policies', 'loadouts', 'settings']) {
       expect(view.find(`[data-testid="memory-tab-${tab}"]`).exists()).toBe(true)
     }
     expect(view.get('[data-testid="memory-tab-search"]').attributes('aria-selected')).toBe('true')
@@ -187,6 +187,32 @@ describe('MemoryView', () => {
     )
     expect(view.find('[data-testid="memory-tab-search"]').exists()).toBe(true)
     expect(view.find('[data-testid="memory-tab-settings"]').exists()).toBe(true)
+  })
+
+  test('Skills navigation renders the scope-aware governance workspace', async () => {
+    memoryInstallation.value = activeInstallation()
+    const view = mountView()
+    await flushPromises()
+    await view.get('[data-testid="memory-tab-skills"]').trigger('click')
+    expect(view.find('[data-testid="memory-skills-panel"]').exists()).toBe(true)
+    expect(view.get('[data-testid="memory-module-stage"]').get('[role="tabpanel"]').attributes('aria-labelledby')).toBe('memory-tab-skills')
+  })
+
+  test.each([403, 503])('Skills shows failed scope discovery (%s) and can retry into a usable scope', async status => {
+    memoryInstallation.value = activeInstallation()
+    memoryClient.listGovernanceScopes.mockRejectedValueOnce(Object.assign(new Error('scope lookup failed'), { status }))
+      .mockResolvedValueOnce({ scopes: [{ installation_id: 'scope-recovered', owner_scope_kind: 'personal',
+        owner_scope_id: 'owner-1', state: 'active', permissions: ['read'], authorization_epoch: '1' }] })
+    const view = mount(MemoryView, { global: { stubs: { MemorySkillsView: {
+      props: ['scopeId'], template: '<div data-testid="recovered-skills">{{ scopeId }}</div>',
+    } } } })
+    await flushPromises(); await view.get('[data-testid="memory-tab-skills"]').trigger('click')
+    expect(view.get('[data-testid="skill-scope-error"]').text()).toContain(String(status))
+    expect(view.get('[data-testid="skill-scope-error"]').text()).toContain('scope lookup failed')
+    expect(view.find('[data-testid="recovered-skills"]').exists()).toBe(false)
+    await view.get('[data-testid="skill-scope-retry"]').trigger('click'); await flushPromises()
+    expect(view.find('[data-testid="skill-scope-error"]').exists()).toBe(false)
+    expect(view.get('[data-testid="recovered-skills"]').text()).toBe('scope-recovered')
   })
 
   test('claims header keeps the design create action visible but disabled without an API', async () => {

@@ -5,7 +5,7 @@
  * `../model/` and must never log prompts, documents, or outputs.
  */
 
-export type TextGeneratorOperation = 'candidate_extract' | 'candidate_repair' | 'wiki_build'
+export type TextGeneratorOperation = 'candidate_extract' | 'candidate_repair' | 'wiki_build' | 'skill_extract'
 
 /** A JSON Schema object describing the expected model output shape. */
 export type JsonSchema = Record<string, unknown>

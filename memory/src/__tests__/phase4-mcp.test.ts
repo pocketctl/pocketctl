@@ -25,6 +25,7 @@ describe('Phase 4 read-only MCP surface', () => {
       'memory_search', 'memory_recall', 'memory_get_claim', 'memory_get_evidence',
       'memory_find_related_episodes', 'memory_get_repository_context',
       'memory_get_code_graph', 'memory_analyze_change_impact', 'memory_get_wiki_page',
+      'memory_list_skills', 'memory_get_skill', 'memory_resolve_skill',
     ])
     for (const forbidden of ['upload', 'build', 'publish', 'edit', 'lock', 'unlock', 'delete']) {
       expect([...registrations.keys()].some(name => name.includes(forbidden))).toBe(false)

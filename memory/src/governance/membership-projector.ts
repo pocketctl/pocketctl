@@ -13,6 +13,7 @@ export interface ScopeControlProjectorOptions {
   batchLimit?: number
   mirror?: ScopeMirrorRepository
   onError?(error: unknown): void
+  onScopeInvalidated?(lagSeconds: number): void
 }
 
 const DEFAULT_BATCH_LIMIT = 100
@@ -185,6 +186,12 @@ export function createScopeControlProjector(options: ScopeControlProjectorOption
           // scope.installation.v2: informational; advance the watermark only.
           await mirror.advanceEpoch({ installationId, authorizationEpoch: '0', lastFeedId: feedId })
           skipped++
+        }
+        if ((envelope.topic === 'scope.membership.v2' || envelope.topic === 'scope.lifecycle.v2') && envelope.data.state !== 'active') {
+          const recorded = Date.parse(envelope.source.recorded_at)
+          // The row update and its Skill invalidation triggers have committed before this observation.
+          // Telemetry must never interrupt the feed/ACK path.
+          if (Number.isFinite(recorded)) { try { options.onScopeInvalidated?.(Math.max(0,(Date.now()-recorded)/1000)) } catch { /* telemetry only */ } }
         }
         scope.last_feed_id = decimalMax(scope.last_feed_id, feedId)
         scope.authorization_epoch = decimalMax(scope.authorization_epoch, epoch)

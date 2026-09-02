@@ -14,6 +14,7 @@ export interface FeedConsumerOptions {
   batchLimit?: number
   pollLeaseMs?: number
   onError?(error: unknown): void
+  onScopeInvalidated?(lagSeconds: number): void
   /** Optional v2 scope-control stream; absent keeps the consumer v1-only. */
   pullScopeControlFeed?(installationId: string, limit: number): Promise<unknown>
   ackScopeControlFeed?(input: { installation_id: string; cursor: string; lease_token: string }): Promise<number>
@@ -123,6 +124,7 @@ export function createFeedConsumer(options: FeedConsumerOptions) {
         ackScopeControlFeed: options.ackScopeControlFeed,
         batchLimit,
         onError: options.onError,
+        onScopeInvalidated: options.onScopeInvalidated,
       })
     : null
 

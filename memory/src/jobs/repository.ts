@@ -152,6 +152,18 @@ export function createJobRepository(pool: pg.Pool) {
       try {
         await client.query('BEGIN')
         try {
+          // Skill writers take task -> run -> job. Read metadata without a row lock,
+          // then join that order before taking the fenced job lock below.
+          const skill = await client.query<{ installation_id: string; payload: Record<string, unknown> }>(`
+            SELECT installation_id,payload FROM memory_jobs WHERE job_id=$1 AND job_type='extract_skill_candidate'
+          `, [input.jobId])
+          const skillJob = skill.rows[0]
+          if (skillJob && typeof skillJob.payload.task_id === 'string') {
+            await client.query(`SELECT 1 FROM memory_skill_tasks WHERE installation_id=$1 AND task_id::text=$2 FOR UPDATE`,
+              [skillJob.installation_id, skillJob.payload.task_id])
+            await client.query(`SELECT 1 FROM memory_skill_task_runs WHERE installation_id=$1 AND task_id::text=$2 AND generation::text=$3 FOR UPDATE`,
+              [skillJob.installation_id, skillJob.payload.task_id, String(skillJob.payload.generation)])
+          }
           const claimed = await client.query<{ attempts: number; last_error_code: string | null }>(`
             SELECT attempts, last_error_code FROM memory_jobs
             WHERE job_id = $1 AND claimed_by = $2 AND claim_epoch = $3 AND state = 'running'
@@ -223,6 +235,16 @@ export function createJobRepository(pool: pg.Pool) {
                     AND r.generation_run_id = g.run_id
                     AND g.state IN ('queued','running')
                 `, [dead.installation_id, dead.payload.run_id, input.errorCode])
+              }
+              if (dead.job_type === 'extract_skill_candidate' && typeof dead.payload?.task_id === 'string') {
+                const values = [dead.installation_id, dead.payload.task_id, String(dead.payload.generation), input.errorCode]
+                await client.query(`UPDATE memory_skill_task_runs SET state='failed',error_code=$4,completed_at=NOW()
+                  WHERE installation_id=$1 AND task_id::text=$2 AND generation::text=$3 AND state IN('pending','running')`, values)
+                await client.query(`UPDATE memory_generation_runs g SET state='failed',error_code=$4,completed_at=NOW()
+                  FROM memory_skill_task_runs r WHERE r.installation_id=$1 AND r.task_id::text=$2 AND r.generation::text=$3
+                    AND r.generation_run_id=g.run_id AND g.state IN('queued','running')`, values)
+                await client.query(`UPDATE memory_skill_tasks SET state='dead',updated_at=NOW()
+                  WHERE installation_id=$1 AND task_id::text=$2 AND current_generation::text=$3`, values.slice(0, 3))
               }
             }
             await client.query('COMMIT')

@@ -98,7 +98,7 @@ describeWithDatabase('memory phase4 schema (migrations 25-30)', () => {
     expect(versions.slice(0, 24)).toEqual(
       Array.from({ length: 24 }, (_, index) => index + 1),
     )
-    expect(versions.slice(24)).toEqual([25, 26, 27, 28, 29, 30])
+    expect(versions.slice(24, 30)).toEqual([25, 26, 27, 28, 29, 30])
   })
 
   test('creates every phase4 table and reruns idempotently', async () => {
@@ -118,7 +118,7 @@ describeWithDatabase('memory phase4 schema (migrations 25-30)', () => {
     const applied = await pool.query<{ version: number }>(
       `SELECT version FROM memory_schema_migrations ORDER BY version`,
     )
-    expect(applied.rows.map(row => Number(row.version))).toHaveLength(30)
+    expect(applied.rows.map(row => Number(row.version))).toHaveLength(38)
   })
 
   test('upgrades a populated v24 database without touching existing rows', async () => {
@@ -158,7 +158,7 @@ describeWithDatabase('memory phase4 schema (migrations 25-30)', () => {
     const versions = await pool.query<{ version: number }>(
       `SELECT version FROM memory_schema_migrations ORDER BY version`,
     )
-    expect(versions.rows.map(row => Number(row.version))).toHaveLength(30)
+    expect(versions.rows.map(row => Number(row.version))).toHaveLength(38)
   })
 
   test('snapshots are unique per installation/repo/commit/manifest and state-checked', async () => {

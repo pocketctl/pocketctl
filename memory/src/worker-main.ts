@@ -23,6 +23,8 @@ import { createEpisodeRepository } from './episodes/repository.js'
 import { createCodeGraphBuildService } from './codegraph/build-service.js'
 import { createWikiBuildService } from './wiki/build-service.js'
 import { createWikiGenerator } from './wiki/generator.js'
+import { createSkillGenerator } from './skills/generator.js'
+import { createSkillWorker } from './skills/worker.js'
 import { createExtractionRepository } from './extraction/repository.js'
 import { createCandidateExtractor } from './extraction/extractor.js'
 import { createCandidateDeduper } from './extraction/deduper.js'
@@ -49,6 +51,7 @@ import {
   createMemoryMetrics,
   updateFeedLagGauge,
   updatePhase4Gauges,
+  updatePhase5Gauges,
   type MemoryMetrics,
 } from './metrics.js'
 import { createMemoryLogger } from './logging.js'
@@ -68,6 +71,7 @@ const JOB_TYPES = [
 	'recompile_extraction_policy', 'compile_context_shadow',
 	'record_context_delivery', 'invalidate_context_packs',
 	'parse_code_snapshot', 'build_wiki',
+	'extract_skill_candidate',
 ] as const
 const JOB_STATES = ['pending', 'running', 'completed', 'dead'] as const
 
@@ -118,6 +122,7 @@ async function updateGauges(pool: pg.Pool, metrics: MemoryMetrics): Promise<void
 
   await updateFeedLagGauge(pool, metrics.feedLag)
   await updatePhase4Gauges(pool, metrics.phase4)
+  await updatePhase5Gauges(pool, metrics.phase5)
 }
 
 /**
@@ -130,7 +135,7 @@ async function main(): Promise<void> {
   const config = loadMemoryConfig()
   const pool = createMemoryPool(config)
   await applyMemorySchema(pool)
-  const providerBudgetStore = config.providerBudget || config.wikiProviderBudget
+  const providerBudgetStore = config.providerBudget || config.wikiProviderBudget || config.skill.providerBudget
     ? createProviderBudgetStore(pool)
     : undefined
   await validateTombstoneKeyring(pool, config.tombstoneHmacKeys)
@@ -254,6 +259,7 @@ async function main(): Promise<void> {
       signal,
       pollLeaseMs: 10_000,
       onError: loopError('feed_installation'),
+      onScopeInvalidated: metrics.phase5.observeRevocationLag,
       ...(config.sharedScopesMode !== 'off' ? {
         pullScopeControlFeed: (installationId: string, limit: number) =>
           feedClient.pullScopeControlFeed(installationId, limit),
@@ -280,6 +286,7 @@ async function main(): Promise<void> {
       concurrencyLimits: {
         parse_code_snapshot: config.codegraphMaxConcurrency,
         build_wiki: config.wikiMaxConcurrency,
+        extract_skill_candidate: config.skill.maxConcurrency,
       },
       onError: loopError('jobs'),
     })
@@ -335,8 +342,10 @@ async function main(): Promise<void> {
           model: config.textModel.model,
           apiKey: config.textModel.apiKey,
           timeoutMs: config.modelTimeoutMs,
-          inputCostMicrosPerMillionTokens: config.textModel.inputCostMicrosPerMillionTokens,
-          outputCostMicrosPerMillionTokens: config.textModel.outputCostMicrosPerMillionTokens,
+          ...(config.textModel.pricingConfigured ? {
+            inputCostMicrosPerMillionTokens: config.textModel.inputCostMicrosPerMillionTokens,
+            outputCostMicrosPerMillionTokens: config.textModel.outputCostMicrosPerMillionTokens,
+          } : {}),
           maxOutputTokens: config.providerBudget?.textMaxOutputTokensPerRequest,
           maxAttempts: config.providerBudget ? 1 : undefined,
           thinking: config.textModel.thinking,
@@ -357,8 +366,10 @@ async function main(): Promise<void> {
           model: config.textModel.model,
           apiKey: config.textModel.apiKey,
           timeoutMs: config.modelTimeoutMs,
-          inputCostMicrosPerMillionTokens: config.textModel.inputCostMicrosPerMillionTokens,
-          outputCostMicrosPerMillionTokens: config.textModel.outputCostMicrosPerMillionTokens,
+          ...(config.textModel.pricingConfigured ? {
+            inputCostMicrosPerMillionTokens: config.textModel.inputCostMicrosPerMillionTokens,
+            outputCostMicrosPerMillionTokens: config.textModel.outputCostMicrosPerMillionTokens,
+          } : {}),
           maxOutputTokens: config.wikiProviderBudget.textMaxOutputTokensPerRequest,
           maxAttempts: 1,
           thinking: config.textModel.thinking,
@@ -373,6 +384,31 @@ async function main(): Promise<void> {
           maxOutputTokensPerRequest: config.wikiProviderBudget.textMaxOutputTokensPerRequest,
         })
       : undefined
+    const rawSkillTextGenerator = config.textModel && config.skill.providerBudget
+      ? createOpenAICompatibleTextGenerator({
+          baseUrl: config.textModel.baseUrl, model: config.textModel.model, apiKey: config.textModel.apiKey,
+          timeoutMs: config.modelTimeoutMs,
+          ...(config.textModel.pricingConfigured ? {
+            inputCostMicrosPerMillionTokens: config.textModel.inputCostMicrosPerMillionTokens,
+            outputCostMicrosPerMillionTokens: config.textModel.outputCostMicrosPerMillionTokens,
+          } : {}),
+          maxOutputTokens: config.skill.providerBudget.textMaxOutputTokensPerRequest,
+          maxAttempts: 1, thinking: config.textModel.thinking,
+        }) : undefined
+    const skillTextGenerator = rawSkillTextGenerator && config.skill.providerBudget && providerBudgetStore
+      ? withTextProviderBudget(rawSkillTextGenerator, providerBudgetStore, {
+          key: config.skill.providerBudget.key,
+          maxRequests: config.skill.providerBudget.textRequestLimit,
+          maxInputTokens: config.skill.providerBudget.textInputTokenLimit,
+          maxOutputTokens: config.skill.providerBudget.textOutputTokenLimit,
+          maxOutputTokensPerRequest: config.skill.providerBudget.textMaxOutputTokensPerRequest,
+        }) : undefined
+    const skillWorker = createSkillWorker({ pool,
+      context: { globalMode: config.mode, sharedMode: config.sharedScopesMode, config: config.skill },
+      generator: skillTextGenerator ? createSkillGenerator({ provider: skillTextGenerator, timeoutMs: config.modelTimeoutMs, maxCandidateChars: config.skill.maxCandidateChars,
+        onResult: metrics.phase5.recordGeneration }) : undefined,
+    })
+    jobWorker.register('extract_skill_candidate', skillWorker.handle)
     const wikiBuild = createWikiBuildService({
       pool,
       maxSections: config.wikiMaxSections,

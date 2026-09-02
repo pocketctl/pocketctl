@@ -85,13 +85,13 @@ export function createOpenAICompatibleTextGenerator(options: OpenAICompatibleTex
         return { ok: false, code: 'http_error', retryable: false, detail: 'unknown' }
       }
 
-      const completion = payload as ChatCompletionPayload
+      const completion = payload && typeof payload === 'object' ? payload as ChatCompletionPayload : {}
       const content = completion.choices?.[0]?.message?.content
       const usage = completionUsage(
         completion,
         options.model,
-        options.inputCostMicrosPerMillionTokens ?? 0,
-        options.outputCostMicrosPerMillionTokens ?? 0,
+        options.inputCostMicrosPerMillionTokens,
+        options.outputCostMicrosPerMillionTokens,
       )
       if (!usage) {
         return { ok: false, code: 'invalid_usage', retryable: false, detail: 'invalid_usage' }
@@ -115,24 +115,24 @@ export function createOpenAICompatibleTextGenerator(options: OpenAICompatibleTex
 function completionUsage(
   completion: ChatCompletionPayload,
   fallbackModel: string,
-  inputRate: number,
-  outputRate: number,
+  inputRate: number | undefined,
+  outputRate: number | undefined,
 ): ModelUsage | null {
   const inputTokens = boundedCounter(completion.usage?.prompt_tokens)
   const outputTokens = boundedCounter(completion.usage?.completion_tokens)
   if (inputTokens === null || outputTokens === null) return null
+  // Unknown or partial pricing must not be reported as a free response.
+  const costMicros = typeof inputRate === 'number' && Number.isFinite(inputRate) && inputRate >= 0
+    && typeof outputRate === 'number' && Number.isFinite(outputRate) && outputRate >= 0
+    ? tokenCostMicros(inputTokens, outputTokens, inputRate, outputRate)
+    : undefined
   return {
     inputTokens,
     outputTokens,
     model: typeof completion.model === 'string' && completion.model.length <= 128
       ? completion.model
       : fallbackModel,
-    costMicros: tokenCostMicros(
-      inputTokens,
-      outputTokens,
-      inputRate,
-      outputRate,
-    ),
+    ...(costMicros !== undefined && Number.isSafeInteger(costMicros) ? { costMicros } : {}),
   }
 }
 
@@ -146,7 +146,7 @@ export function tokenCostMicros(
 }
 
 function boundedCounter(value: unknown): number | null {
-  if (value === undefined) return 0
+  // Missing usage remains unknown so the budget wrapper keeps its reservation.
   return typeof value === 'number' && Number.isSafeInteger(value)
     && value >= 0 && value <= MAX_PROVIDER_TOKENS
     ? value

@@ -2,6 +2,7 @@ import { describe, expect, test, vi } from 'vitest'
 import { createOpenAICompatibleTextGenerator } from '../model/openai-compatible-text.js'
 import { createOpenAICompatibleEmbeddingProvider } from '../model/openai-compatible-embedding.js'
 import { ModelHttpError } from '../model/http.js'
+import { withTextProviderBudget, type ProviderBudgetStore } from '../model/provider-budget.js'
 
 const TEXT_OPTIONS = {
   baseUrl: 'https://api.model.example/v1',
@@ -113,6 +114,59 @@ describe('openai-compatible text adapter', () => {
         })
       expect(result).toMatchObject({ ok: false, code: 'invalid_usage', retryable: false })
     }
+  })
+
+  test.each([
+    ['missing', undefined], ['null', null], ['empty', {}],
+    ['input only', { prompt_tokens: 11 }], ['output only', { completion_tokens: 7 }],
+    ['total only', { total_tokens: 18 }],
+  ])('rejects %s usage without settling the worst-case reservation', async (_name, usage) => {
+    const fetchImpl = vi.fn(async () => jsonResponse({ ...chatCompletion('{"ok":true}'), usage }))
+    const store: ProviderBudgetStore = {
+      reserve: vi.fn(async () => ({ ok: true as const, reservationId: 'reserved-unknown-usage' })),
+      settle: vi.fn(async () => undefined),
+    }
+    const provider = createOpenAICompatibleTextGenerator({ ...TEXT_OPTIONS, fetchImpl })
+    const guarded = withTextProviderBudget(provider, store, {
+      key: 'adapter-usage', maxRequests: 1, maxInputTokens: 10_000, maxOutputTokens: 100,
+      maxOutputTokensPerRequest: 100,
+    })
+    const result = await guarded.generateJson({
+      operation: 'skill_extract', system: 's', document: {}, schema: {},
+      timeoutMs: 5_000, signal: new AbortController().signal,
+    })
+    expect(result).toMatchObject({ ok: false, code: 'invalid_usage', retryable: false })
+    expect(result).not.toHaveProperty('usage')
+    expect(store.reserve).toHaveBeenCalledWith(expect.objectContaining({ outputTokens: 100 }))
+    expect(store.settle).not.toHaveBeenCalled()
+    expect(fetchImpl).toHaveBeenCalledTimes(1)
+  })
+
+  test.each([
+    ['unconfigured', {}],
+    ['input only', { inputCostMicrosPerMillionTokens: 2_000_000 }],
+    ['output only', { outputCostMicrosPerMillionTokens: 4_000_000 }],
+    ['negative input', { inputCostMicrosPerMillionTokens: -1, outputCostMicrosPerMillionTokens: 1 }],
+    ['negative output', { inputCostMicrosPerMillionTokens: 1, outputCostMicrosPerMillionTokens: -1 }],
+    ['nonfinite input', { inputCostMicrosPerMillionTokens: NaN, outputCostMicrosPerMillionTokens: 1 }],
+    ['nonfinite output', { inputCostMicrosPerMillionTokens: 1, outputCostMicrosPerMillionTokens: Infinity }],
+    ['unrepresentable estimate', { inputCostMicrosPerMillionTokens: Number.MAX_VALUE, outputCostMicrosPerMillionTokens: Number.MAX_VALUE }],
+  ])('omits unknown cost for %s prices but preserves trustworthy tokens', async (_name, prices) => {
+    const fetchImpl = vi.fn(async () => jsonResponse(chatCompletion('{"ok":true}')))
+    const result = await createOpenAICompatibleTextGenerator({ ...TEXT_OPTIONS, ...prices, fetchImpl })
+      .generateJson({ operation: 'skill_extract', system: 's', document: {}, schema: {},
+        timeoutMs: 5_000, signal: new AbortController().signal })
+    expect(result).toMatchObject({ ok: true, usage: { inputTokens: 11, outputTokens: 7, model: 'extractor-small' } })
+    expect(result.usage).not.toHaveProperty('costMicros')
+  })
+
+  test.each([{ prompt_tokens: 0, completion_tokens: 0 }, { prompt_tokens: 11, completion_tokens: 7 }])('preserves explicit token counters %j with two explicit zero prices', async counters => {
+    const fetchImpl = vi.fn(async () => jsonResponse(chatCompletion('{}', counters)))
+    const result = await createOpenAICompatibleTextGenerator({ ...TEXT_OPTIONS, fetchImpl,
+      inputCostMicrosPerMillionTokens: 0, outputCostMicrosPerMillionTokens: 0,
+    }).generateJson({ operation: 'skill_extract', system: 's', document: {}, schema: {},
+      timeoutMs: 5_000, signal: new AbortController().signal })
+    expect(result).toMatchObject({ ok: true, usage: { inputTokens: counters.prompt_tokens, outputTokens: counters.completion_tokens, costMicros: 0 } })
   })
 
   test('retries rate limits and server errors, then succeeds', async () => {

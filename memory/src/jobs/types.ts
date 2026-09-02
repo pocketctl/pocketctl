@@ -21,6 +21,7 @@ export type JobType =
   | 'invalidate_context_packs'
   | 'parse_code_snapshot'
   | 'build_wiki'
+  | 'extract_skill_candidate'
 
 export const JOB_TYPES: readonly JobType[] = Object.freeze([
   'expire_promotion_candidates',
@@ -44,6 +45,7 @@ export const JOB_TYPES: readonly JobType[] = Object.freeze([
   'invalidate_context_packs',
   'parse_code_snapshot',
   'build_wiki',
+  'extract_skill_candidate',
 ])
 
 /**
@@ -70,6 +72,7 @@ export const JOB_PRIORITIES = Object.freeze({
   invalidate_context_packs: 10,
   parse_code_snapshot: 70,
   build_wiki: 75,
+  extract_skill_candidate: 78,
   report_status: 100,
   report_usage: 100,
   record_context_delivery: 100,

@@ -12,7 +12,7 @@ export function createGenerationRunRepository(pool: pg.Pool) {
   return {
     async reserve(input: {
       installationId: string
-      operation: 'extract_candidates' | 'compile_context' | 'compress_context_shadow' | 'build_wiki'
+      operation: 'extract_candidates' | 'compile_context' | 'compress_context_shadow' | 'build_wiki' | 'extract_skill_candidate'
       subjectKind: string
       subjectKeyHash: Buffer
       inputDigest: Buffer
