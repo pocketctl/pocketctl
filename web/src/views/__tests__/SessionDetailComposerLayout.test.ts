@@ -10,7 +10,7 @@ function cssRule(selector: string): string {
 }
 
 describe('SessionDetail floating composer layout', () => {
-  test('overlays the message stream while reserving clearance with the same backdrop', () => {
+  test('overlays the message stream while keeping the composer on a distinct surface', () => {
     const chatArea = cssRule('.chat-area')
     const messages = cssRule('.chat-messages')
     const composer = cssRule('.chat-input-area')
@@ -22,6 +22,16 @@ describe('SessionDetail floating composer layout', () => {
     expect(composer).toContain('position: absolute')
     expect(composer).toContain('bottom: 0')
     expect(composer).toContain('background: transparent')
-    expect(composerContainer).toContain('background: var(--bg)')
+    expect(composerContainer).toContain('background: var(--surface)')
+  })
+
+  test('aligns the message stream and composer to one shared reading column', () => {
+    const chatArea = cssRule('.chat-area')
+    const messages = cssRule('.chat-messages')
+    const composer = cssRule('.chat-input-area')
+
+    expect(chatArea).toContain('--session-content-gutter: max(20px, calc(50% - 460px))')
+    expect(messages).toContain('var(--session-content-gutter)')
+    expect(composer).toContain('var(--session-content-gutter)')
   })
 })

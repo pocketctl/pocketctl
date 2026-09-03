@@ -113,6 +113,21 @@ describe('SessionDetail managed Codex terminal control', () => {
     expect(wrapper.find('.chat-input-container').exists()).toBe(false)
   })
 
+  test('labels an unmanaged Codex terminal session as locally controlled instead of ended', async () => {
+    const wrapper = mountSession()
+    websocketMock.handlers.get('session_list')?.({
+      sessions: [session({ status: 'running', control_mode: null, capabilities: [] })],
+    })
+    websocketMock.handlers.get('session_status')?.({ session_id: 'thr_1', status: 'running' })
+    await nextTick()
+
+    const notice = wrapper.get('.unmanaged-readonly-notice')
+    expect(notice.text()).toContain('session.unmanaged_readonly_title')
+    expect(notice.text()).toContain('session.unmanaged_readonly_description')
+    expect(wrapper.find('.ended-text').exists()).toBe(false)
+    expect(wrapper.get('.chat-messages').attributes('style')).toContain('--composer-float-clearance: 96px')
+  })
+
   test('managed Codex keeps composer available after a terminal status', async () => {
     const wrapper = mountSession()
     setTerminalSession({
@@ -157,6 +172,38 @@ describe('SessionDetail managed Codex terminal control', () => {
     await nextTick()
 
     expect(wrapper.get('.input-meta .model-pill').text()).toContain('gpt-5.6')
+  })
+
+  test('restores the persisted model immediately when switching sessions in place', async () => {
+    const wrapper = mountSession()
+    websocketMock.handlers.get('session_list')?.({
+      sessions: [
+        session({ model: 'gpt-5.5' }),
+        session({ session_id: 'thr_2', model: 'gpt-5.6-sol', title: 'Second Codex' }),
+      ],
+    })
+    await nextTick()
+    expect(wrapper.get('.session-toolbar-host').text()).toContain('gpt-5.5')
+
+    routeMock.current.params.id = 'thr_2'
+    await nextTick()
+
+    expect(wrapper.get('.session-toolbar-host').text()).toContain('gpt-5.6-sol')
+  })
+
+  test('uses a fresh request id for every session metadata refresh', async () => {
+    mountSession()
+    const metadataRequests = () => websocketMock.send.mock.calls
+      .map(([payload]) => payload)
+      .filter((payload: any) => payload.type === 'get_session_meta')
+
+    const firstRequest = metadataRequests().at(-1)
+    websocketMock.handlers.get('connection_restored')?.({ type: 'connection_restored' })
+    const secondRequest = metadataRequests().at(-1)
+
+    expect(firstRequest).toMatchObject({ session_id: 'thr_1', request_id: expect.any(String) })
+    expect(secondRequest).toMatchObject({ session_id: 'thr_1', request_id: expect.any(String) })
+    expect(secondRequest.request_id).not.toBe(firstRequest.request_id)
   })
 
   test('renders a model switch notice in the conversation before the next reply', async () => {

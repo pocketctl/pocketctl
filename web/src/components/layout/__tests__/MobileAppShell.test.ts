@@ -81,7 +81,7 @@ describe('mobile application shell', () => {
     expect(wrapper.find('.mobile-bottom-nav').exists()).toBe(false)
   })
 
-  test('opens the shared plan as a 65 percent sheet and browser back closes it first', async () => {
+  test('opens the shared plan from the session actions request and browser back closes it first', async () => {
     resetAgentPlanProgressForTests()
     useAgentPlanProgress().acceptAgentPlan({
       type: 'agent_plan', session_id: 'ses_1', event_id: 'plan-1', revision: 1,
@@ -95,13 +95,12 @@ describe('mobile application shell', () => {
     document.body.appendChild(input)
     input.focus()
 
-    const trigger = wrapper.get('.mobile-plan-action')
-    expect(trigger.attributes('aria-expanded')).toBe('false')
-    await trigger.trigger('click')
+    expect(wrapper.find('.mobile-plan-action').exists()).toBe(false)
+    window.dispatchEvent(new CustomEvent('pocketctl:open-mobile-session-plan'))
+    await wrapper.vm.$nextTick()
 
     expect(document.activeElement).not.toBe(input)
     expect(wrapper.get('.plan-bottom-sheet').classes()).not.toContain('expanded')
-    expect(trigger.attributes('aria-expanded')).toBe('true')
 
     window.dispatchEvent(new PopStateEvent('popstate'))
     await wrapper.vm.$nextTick()
@@ -120,11 +119,13 @@ describe('mobile application shell', () => {
     const App = (await import('../../../App.vue')).default
     const wrapper = mount(App, { global: { plugins: [router] } })
 
-    expect(wrapper.find('.mobile-plan-action').exists()).toBe(true)
+    expect(wrapper.find('.mobile-plan-action').exists()).toBe(false)
     await router.push('/session/ses_1?subagent=child-1')
     await wrapper.vm.$nextTick()
 
     expect(wrapper.find('.mobile-plan-action').exists()).toBe(false)
+    window.dispatchEvent(new CustomEvent('pocketctl:open-mobile-session-plan'))
+    await wrapper.vm.$nextTick()
     expect(wrapper.find('.plan-bottom-sheet').exists()).toBe(false)
   })
 
@@ -137,6 +138,22 @@ describe('mobile application shell', () => {
 
     expect(wrapper.find('.sidebar').exists()).toBe(true)
     expect(wrapper.find('.mobile-app-shell').exists()).toBe(false)
+    mobile.value = true
+  })
+
+  test('collapses the desktop sidebar on session routes and still allows manual expansion', async () => {
+    mobile.value = false
+    localStorage.removeItem('pocketctl_sidebar_collapsed')
+    const router = testRouter('/session/ses_1')
+    await router.isReady()
+    const App = (await import('../../../App.vue')).default
+    const wrapper = mount(App, { global: { plugins: [router] } })
+
+    expect(wrapper.get('.app-layout').classes()).toContain('sidebar-collapsed')
+    await wrapper.get('.sidebar-toggle-btn').trigger('click')
+    expect(wrapper.get('.app-layout').classes()).not.toContain('sidebar-collapsed')
+
+    wrapper.unmount()
     mobile.value = true
   })
 })

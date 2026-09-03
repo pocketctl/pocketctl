@@ -637,7 +637,7 @@ func TestOpenCodeSessionMetaUsesLoadedAuthoritativeState(t *testing.T) {
 	}
 	sm := session.NewSessionManager(make(chan protocol.DaemonEvent, 8))
 
-	meta := buildSessionMeta(context.Background(), sm, "ses_1", slog.Default())
+	meta := buildSessionMeta(context.Background(), sm, "ses_1", "", slog.Default())
 	if meta.Model != "opencode/deepseek-v4-flash-free" || meta.Cwd != repo || meta.CurrentAgent != "build" {
 		t.Fatalf("meta=%+v", meta)
 	}
@@ -670,9 +670,13 @@ func TestBuildSessionMetaLoadsHistoricalCodexBeforeTryingUnavailableOpenCode(t *
 		t.Fatal(err)
 	}
 
-	meta := buildSessionMeta(context.Background(), session.NewSessionManager(make(chan protocol.DaemonEvent, 8)), sessionID, slog.Default())
+	const requestID = "session-meta-request-1"
+	meta := buildSessionMeta(context.Background(), session.NewSessionManager(make(chan protocol.DaemonEvent, 8)), sessionID, requestID, slog.Default())
 	if meta.Model != "gpt-5.6-terra" || meta.Effort != "xhigh" || meta.Cwd != "/repo" {
 		t.Fatalf("meta=%+v", meta)
+	}
+	if meta.RequestID != requestID {
+		t.Fatalf("request id=%q, want %q", meta.RequestID, requestID)
 	}
 }
 

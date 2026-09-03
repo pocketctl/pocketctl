@@ -42,10 +42,178 @@ vi.mock('../../composables/useSessionRename', () => ({
 }))
 vi.mock('../../composables/useResponsiveLayout', () => ({ useResponsiveLayout: () => responsiveMock }))
 
+async function openToolbarOverflow(wrapper: ReturnType<typeof shallowMount>) {
+  if (!wrapper.find('.toolbar-overflow-menu').exists()) {
+    await wrapper.get('.toolbar-more-btn').trigger('click')
+  }
+}
+
 describe('SessionDetail processEvent integration', () => {
   beforeEach(() => {
     routeMock.current = reactive({ params: { id: 'ses_1' }, query: {} as Record<string, string> })
     responsiveMock.isMobile.value = false
+  })
+
+  test('filters the current host session rail with the scheme A agent popover', async () => {
+    const wrapper = shallowMount(SessionDetail)
+    const vm = wrapper.vm as any
+    vm.allSessions = [
+      { session_id: 'ses_1', daemon_id: 'daemon-1', title: 'Codex one', agent_type: 'codex', status: 'running' },
+      { session_id: 'ses_2', daemon_id: 'daemon-1', title: 'Claude one', agent_type: 'claude-code', status: 'idle' },
+      { session_id: 'ses_3', daemon_id: 'daemon-1', title: 'Codex two', agent_type: 'codex', status: 'exited' },
+      { session_id: 'ses_4', daemon_id: 'daemon-2', title: 'OpenCode other host', agent_type: 'opencode', status: 'idle' },
+    ]
+    vm.selectedHostId = 'daemon-1'
+    await wrapper.vm.$nextTick()
+
+    expect(wrapper.find('.host-tabs').exists()).toBe(false)
+    expect(wrapper.findAll('.session-list-item')).toHaveLength(3)
+
+    const trigger = wrapper.get('.agent-filter-trigger')
+    expect(trigger.attributes('aria-expanded')).toBe('false')
+    await trigger.trigger('click')
+
+    const options = wrapper.findAll('.agent-filter-option')
+    expect(options.map(option => option.attributes('data-agent-filter'))).toEqual(['all', 'codex', 'claude-code'])
+    expect(options.map(option => option.get('.agent-filter-count').text())).toEqual(['3', '2', '1'])
+
+    await wrapper.get('[data-agent-filter="codex"]').trigger('click')
+    expect(trigger.attributes('aria-expanded')).toBe('false')
+    expect(wrapper.findAll('.session-list-item')).toHaveLength(2)
+    expect(wrapper.find('.session-list').text()).toContain('Codex one')
+    expect(wrapper.find('.session-list').text()).not.toContain('Claude one')
+    wrapper.unmount()
+  })
+
+  test('keeps plan and edited files actions inside the toolbar overflow menu', async () => {
+    resetAgentPlanProgressForTests()
+    const wrapper = shallowMount(SessionDetail)
+    const vm = wrapper.vm as any
+    vm.allSessions = [{ session_id: 'ses_1', daemon_id: 'daemon-1', status: 'running' }]
+    vm.processEvent({
+      type: 'agent_plan', session_id: 'ses_1', event_id: 'plan-menu', revision: 1,
+      plan: [{ step: 'Polish workspace', status: 'in_progress' }],
+    })
+    vm.processEvent({
+      type: 'agent_file_change', session_id: 'ses_1', turn_id: 'turn-menu', seq: 1,
+      event_id: 'file-menu', change_set_id: 'managed:menu', change_index: 0, change_total: 1,
+      path: 'workspace.vue', change_kind: 'update', diff: '@@ -1 +1 @@\n-old\n+new\n',
+      additions: 1, deletions: 1, status: 'completed',
+    })
+    await wrapper.vm.$nextTick()
+
+    expect(wrapper.find('.plan-toolbar-button').exists()).toBe(false)
+    expect(wrapper.find('.file-change-toolbar-button').exists()).toBe(false)
+
+    await wrapper.get('.toolbar-more-btn').trigger('click')
+    expect(wrapper.get('.toolbar-overflow-menu').attributes('role')).toBe('menu')
+    expect(wrapper.get('.plan-toolbar-button').text()).toContain('1')
+    expect(wrapper.get('.file-change-toolbar-button').text()).toContain('1')
+
+    await wrapper.get('.plan-toolbar-button').trigger('click')
+    expect(wrapper.find('.toolbar-overflow-menu').exists()).toBe(false)
+    expect(wrapper.findComponent(PlanSidePanel).exists()).toBe(true)
+    wrapper.unmount()
+  })
+
+  test('exposes every desktop overflow action from the mobile session header', async () => {
+    responsiveMock.isMobile.value = true
+    resetAgentPlanProgressForTests()
+    localStorage.setItem('pocketctl_plan_panel_open', 'true')
+    const wrapper = shallowMount(SessionDetail)
+    localStorage.removeItem('pocketctl_plan_panel_open')
+    const vm = wrapper.vm as any
+    vm.allSessions = [{
+      session_id: 'ses_1', daemon_id: 'daemon-1', agent_type: 'codex', status: 'running',
+      cwd: '/workspace', totalTokens: 1200,
+    }]
+    vm.processEvent({
+      type: 'agent_plan', session_id: 'ses_1', event_id: 'plan-mobile-menu', revision: 1,
+      plan: [{ step: 'Mobile actions', status: 'in_progress' }],
+    })
+    vm.processEvent({
+      type: 'agent_file_change', session_id: 'ses_1', turn_id: 'turn-mobile-menu', seq: 1,
+      event_id: 'file-mobile-menu', change_set_id: 'managed:mobile-menu', change_index: 0, change_total: 1,
+      path: 'mobile.vue', change_kind: 'update', diff: '@@ -1 +1 @@\n-old\n+new\n',
+      additions: 1, deletions: 1, status: 'completed',
+    })
+    await wrapper.vm.$nextTick()
+
+    expect(wrapper.findComponent(PlanSidePanel).exists()).toBe(false)
+    const mobileOverflow = wrapper.get('.mobile-session-toolbar-overflow')
+    await mobileOverflow.get('.toolbar-more-btn').trigger('click')
+
+    expect(mobileOverflow.get('.toolbar-overflow-menu').attributes('role')).toBe('menu')
+    expect(mobileOverflow.findAll('[data-toolbar-action]').map(item => item.attributes('data-toolbar-action'))).toEqual([
+      'plan', 'edited-files', 'copy-id', 'resume',
+    ])
+
+    let planRequests = 0
+    const onPlanRequest = () => { planRequests += 1 }
+    window.addEventListener('pocketctl:open-mobile-session-plan', onPlanRequest)
+    await mobileOverflow.get('[data-toolbar-action="plan"]').trigger('click')
+    expect(planRequests).toBe(1)
+    expect(wrapper.find('.toolbar-overflow-menu').exists()).toBe(false)
+    window.removeEventListener('pocketctl:open-mobile-session-plan', onPlanRequest)
+
+    await mobileOverflow.get('.toolbar-more-btn').trigger('click')
+    await mobileOverflow.get('[data-toolbar-action="edited-files"]').trigger('click')
+    expect(wrapper.get('.file-change-side-panel').attributes('aria-modal')).toBe('true')
+    wrapper.unmount()
+  })
+
+  test('matches the toolbar overflow information hierarchy from the approved design', async () => {
+    const wrapper = shallowMount(SessionDetail)
+    const vm = wrapper.vm as any
+    vm.allSessions = [{
+      session_id: 'ses_1', daemon_id: 'daemon-1', agent_type: 'codex', status: 'running', totalTokens: 42800,
+    }]
+    vm.currentModel = 'gpt-5.4'
+    vm.currentEffort = 'high'
+    await wrapper.vm.$nextTick()
+
+    await openToolbarOverflow(wrapper)
+
+    expect(wrapper.findAll('.toolbar-overflow-metric').map(item => item.text())).toEqual([
+      'gpt-5.4',
+      'session.effort.high',
+      '43K',
+    ])
+    const items = wrapper.findAll('.toolbar-overflow-item')
+    expect(items.at(-1)?.find('code').text()).toBe('resume')
+    wrapper.unmount()
+  })
+
+  test('keeps an open toolbar menu in a stacking layer above the message surface', async () => {
+    const wrapper = shallowMount(SessionDetail)
+    const vm = wrapper.vm as any
+    vm.allSessions = [{ session_id: 'ses_1', daemon_id: 'daemon-1', status: 'running' }]
+    await wrapper.vm.$nextTick()
+
+    await wrapper.get('.toolbar-more-btn').trigger('click')
+
+    const toolbar = wrapper.get('.chat-toolbar').element as HTMLElement
+    const messages = wrapper.get('.chat-messages').element as HTMLElement
+    expect(toolbar.style.position).toBe('relative')
+    expect(Number(toolbar.style.zIndex)).toBeGreaterThan(Number(messages.style.zIndex) || 0)
+    wrapper.unmount()
+  })
+
+  test('bottom-aligns short unmanaged session content above the read-only notice', async () => {
+    const wrapper = shallowMount(SessionDetail)
+    const vm = wrapper.vm as any
+    vm.allSessions = [{
+      session_id: 'ses_1', daemon_id: 'daemon-1', agent_type: 'zcode',
+      status: 'completed', source: 'terminal',
+    }]
+    vm.status = 'completed'
+    await wrapper.vm.$nextTick()
+
+    expect(wrapper.find('.chat-input-container').exists()).toBe(false)
+    expect(wrapper.find('.messages-bottom-spacer').exists()).toBe(true)
+    expect(wrapper.find('.unmanaged-readonly-notice').exists()).toBe(true)
+    expect(wrapper.get('.chat-messages').attributes('style')).toContain('--composer-float-clearance: 96px')
+    wrapper.unmount()
   })
 
   test('isolates Edited files reduction from legacy tool results and OpenCode parts', async () => {
@@ -106,6 +274,7 @@ describe('SessionDetail processEvent integration', () => {
     expect(vm.messages.filter((item: any) => item.type === 'agent_file_change')).toHaveLength(1)
     expect(wrapper.findComponent(FileChangeCard).exists()).toBe(false)
     expect(wrapper.find('.turn-unknown-event').exists()).toBe(false)
+    await openToolbarOverflow(wrapper)
     const toolbarButton = wrapper.find('.file-change-toolbar-button')
     expect(toolbarButton.exists()).toBe(true)
     await toolbarButton.trigger('click')
@@ -144,6 +313,7 @@ describe('SessionDetail processEvent integration', () => {
     })
     await wrapper.vm.$nextTick()
 
+    await openToolbarOverflow(wrapper)
     await wrapper.get('.file-change-toolbar-button').trigger('click')
     expect(wrapper.find('.file-change-side-panel').exists()).toBe(true)
 
@@ -151,6 +321,7 @@ describe('SessionDetail processEvent integration', () => {
     await wrapper.vm.$nextTick()
 
     expect(wrapper.find('.file-change-side-panel').exists()).toBe(false)
+    await openToolbarOverflow(wrapper)
     expect(wrapper.get('.file-change-toolbar-button').attributes('aria-expanded')).toBe('false')
     wrapper.unmount()
   })
@@ -167,6 +338,7 @@ describe('SessionDetail processEvent integration', () => {
     })
     await wrapper.vm.$nextTick()
 
+    await openToolbarOverflow(wrapper)
     await wrapper.get('.file-change-toolbar-button').trigger('click')
     const panel = wrapper.get('.file-change-side-panel')
     expect(panel.attributes('role')).toBe('dialog')
@@ -175,6 +347,7 @@ describe('SessionDetail processEvent integration', () => {
 
     await wrapper.get('.file-change-panel-backdrop').trigger('click')
     expect(wrapper.find('.file-change-side-panel').exists()).toBe(false)
+    await openToolbarOverflow(wrapper)
     expect(wrapper.get('.file-change-toolbar-button').attributes('aria-expanded')).toBe('false')
     wrapper.unmount()
   })
@@ -196,14 +369,17 @@ describe('SessionDetail processEvent integration', () => {
     })
     await wrapper.vm.$nextTick()
 
+    await openToolbarOverflow(wrapper)
     await wrapper.get('.plan-toolbar-button').trigger('click')
     expect(wrapper.findComponent(PlanSidePanel).exists()).toBe(true)
     expect(wrapper.find('.file-change-side-panel').exists()).toBe(false)
 
+    await openToolbarOverflow(wrapper)
     await wrapper.get('.file-change-toolbar-button').trigger('click')
     expect(wrapper.findComponent(PlanSidePanel).exists()).toBe(false)
     expect(wrapper.find('.file-change-side-panel').exists()).toBe(true)
 
+    await openToolbarOverflow(wrapper)
     await wrapper.get('.plan-toolbar-button').trigger('click')
     expect(wrapper.findComponent(PlanSidePanel).exists()).toBe(true)
     expect(wrapper.find('.file-change-side-panel').exists()).toBe(false)
@@ -223,7 +399,8 @@ describe('SessionDetail processEvent integration', () => {
     await wrapper.vm.$nextTick()
     const opener = document.createElement('button')
     document.body.append(opener)
-    await wrapper.find('.file-change-toolbar-button').trigger('click')
+    await openToolbarOverflow(wrapper)
+    await wrapper.get('.file-change-toolbar-button').trigger('click')
     wrapper.findComponent(FileChangeCard).vm.$emit('open-mobile', opener)
     await wrapper.vm.$nextTick()
     expect(wrapper.findComponent(FileChangeBottomSheet).exists()).toBe(true)
@@ -272,10 +449,13 @@ describe('SessionDetail processEvent integration', () => {
     await wrapper.vm.$nextTick()
 
     expect(wrapper.findComponent(PlanSidePanel).exists()).toBe(false)
-    const button = wrapper.get('.plan-toolbar-button')
+    await openToolbarOverflow(wrapper)
+    let button = wrapper.get('.plan-toolbar-button')
     expect(button.attributes('aria-expanded')).toBe('false')
     await button.trigger('click')
     expect(wrapper.findComponent(PlanSidePanel).exists()).toBe(true)
+    await openToolbarOverflow(wrapper)
+    button = wrapper.get('.plan-toolbar-button')
     expect(button.attributes('aria-expanded')).toBe('true')
 
     wrapper.findComponent(PlanSidePanel).vm.$emit('close')

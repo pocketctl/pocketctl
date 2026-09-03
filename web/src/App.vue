@@ -222,10 +222,18 @@ function toggleTheme() {
   setTheme(saved === 'light' ? 'dark' : 'light')
 }
 
-function toggleSidebar() {
-  sidebarCollapsed.value = !sidebarCollapsed.value
-  localStorage.setItem('pocketctl_sidebar_collapsed', String(sidebarCollapsed.value))
+function setSidebarCollapsed(collapsed: boolean) {
+  sidebarCollapsed.value = collapsed
+  localStorage.setItem('pocketctl_sidebar_collapsed', String(collapsed))
 }
+
+function toggleSidebar() { setSidebarCollapsed(!sidebarCollapsed.value) }
+
+// Session detail owns a second navigation rail. Collapse the application rail
+// when entering it, while keeping the existing toggle available to expand it.
+watch(isSessionRoute, active => {
+  if (active) setSidebarCollapsed(true)
+}, { immediate: true })
 
 // Watch system theme changes when in "system" mode
 if (window.matchMedia) {

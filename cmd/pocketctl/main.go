@@ -3178,7 +3178,7 @@ func quotaReservationID(grant *protocol.QuotaGrant) string {
 	return grant.ReservationID
 }
 
-func buildSessionMeta(ctx context.Context, sm *session.SessionManager, sessionID string, logger *slog.Logger) protocol.DaemonEvent {
+func buildSessionMeta(ctx context.Context, sm *session.SessionManager, sessionID string, requestID string, logger *slog.Logger) protocol.DaemonEvent {
 	// Historical Claude/Codex sessions are JSONL-backed. Restore them before
 	// consulting OpenCode: when the optional OpenCode serve is unavailable,
 	// EnsureOpencodeSessionLoaded intentionally reports no authoritative result
@@ -3226,6 +3226,7 @@ func buildSessionMeta(ctx context.Context, sm *session.SessionManager, sessionID
 	meta := protocol.DaemonEvent{
 		Type:      "session_meta",
 		SessionID: sessionID,
+		RequestID: requestID,
 		Cwd:       cwd,
 		Model:     model,
 		Effort:    effort,
@@ -3630,7 +3631,7 @@ func handleCommands(ctx context.Context, client *ws.Client, sm *session.SessionM
 				// Web client queries a session's resolved model (for the /model
 				// command). Unlike session_created (one-shot, fired before the web
 				// subscribes), this is a request/response the client issues on mount.
-				client.SendMsg(buildSessionMeta(ctx, sm, cmd.SessionID, logger))
+				client.SendMsg(buildSessionMeta(ctx, sm, cmd.SessionID, cmd.RequestID, logger))
 				if evt, ok := sm.PendingInteractivePrompt(cmd.SessionID); ok {
 					logger.Info("get_session_meta: replay pending interactive prompt", "session", cmd.SessionID, "req", evt.RequestID)
 					client.SendMsg(evt)
