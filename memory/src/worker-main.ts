@@ -43,6 +43,10 @@ import { createInstallationRegistry } from './installations/repository.js'
 import { createDiscoveryWorker } from './installations/discovery-worker.js'
 import { createJobRepository } from './jobs/repository.js'
 import { createJobWorker } from './jobs/worker.js'
+import { createGitSyncWorker } from './git-sync/worker.js'
+import { loadGitSyncConfig } from './git-sync/config.js'
+import { createGitRuntime,createGitPollingScheduler } from './git-sync/runtime.js'
+import { createFileSkillCaseRegistry } from './skills/case-registry.js'
 import { createInvalidationService } from './context/invalidation-service.js'
 import { createPolicyRepository } from './policies/repository.js'
 import { createPolicyResolver } from './policies/resolver.js'
@@ -64,6 +68,7 @@ const LOCAL_INSTALLATION_STATES = [
 ] as const
 const INBOX_STATES = ['pending', 'projected', 'quarantined', 'purged'] as const
 const JOB_TYPES = [
+  'git_ingest', 'git_export', 'git_reconcile',
   'project_feed', 'compile_episode', 'snapshot_reconcile', 'session_purge',
   'installation_purge', 'report_status', 'report_usage',
   'extract_candidates', 'index_claim_version', 'rebuild_claim_index', 'expire_claims',
@@ -206,6 +211,7 @@ async function main(): Promise<void> {
   let usageWorker: ReturnType<typeof createUsageWorker> | undefined
   let feedTimer: ReturnType<typeof setInterval> | undefined
   let maintenanceTimer: ReturnType<typeof setInterval> | undefined
+  let gitPolling: ReturnType<typeof createGitPollingScheduler> | undefined
   const feedInFlight = new Set<Promise<void>>()
   if (config.mode !== 'off') {
     const http: RelayHttpClient = createRelayHttpClient({
@@ -290,6 +296,14 @@ async function main(): Promise<void> {
       },
       onError: loopError('jobs'),
     })
+    const gitConfig=config.gitSync??loadGitSyncConfig({})
+    const gitRuntime=await createGitRuntime({pool,config:gitConfig,globalMode:config.mode,sharedMode:config.sharedScopesMode})
+    const gitDeps={pool,config:gitConfig,...gitRuntime,outcomeKind:'natural' as const,
+      skill:{context:{globalMode:config.mode,sharedMode:config.sharedScopesMode,config:config.skill},cases:createFileSkillCaseRegistry(process.env.MEMORY_SKILL_REPLAY_REGISTRY_PATH)}}
+    const gitWorker=createGitSyncWorker(gitDeps)
+    for(const type of ['git_ingest','git_export','git_reconcile'] as const)jobWorker.register(type,gitWorker.handle)
+    gitPolling=createGitPollingScheduler({...gitDeps,signal,onError:()=>loopError('git_poll')(new Error('git_poll_failed'))})
+    gitPolling.start()
     const purgeRepository = createPurgeRepository(pool, {
       hmacKey: config.hmacKey,
       tombstoneHmacKeys: config.tombstoneHmacKeys,
@@ -691,6 +705,7 @@ async function main(): Promise<void> {
   clearInterval(gaugeTimer)
   clearInterval(retentionTimer)
   await Promise.all([
+    gitPolling?.stop(),
     purgeWorker?.stop(),
     statusWorker?.stop(),
     usageWorker?.stop(),

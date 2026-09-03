@@ -7,6 +7,38 @@
   color: var(--fg);
 }
 
+.memory-git { min-width: 0; }
+.memory-git-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-bottom: 16px; min-width: 0; }
+.memory-git h3, .memory-git h4 { font-family: var(--font-display); margin: 0 0 6px; }
+.memory-git p { margin: 6px 0 12px; }
+.memory-git-workspace { display: grid; grid-template-columns: minmax(180px, 240px) minmax(0, 1fr); gap: 20px; align-items: start; }
+.memory-git-queue { min-width: 0; border-right: 1px solid var(--border); padding-right: 16px; }
+.memory-git-connection { display: grid; gap: 6px; text-align: left; width: 100%; padding: 12px; margin-bottom: 8px; border: 1px solid var(--border); border-radius: 8px; color: var(--fg); background: var(--surface); cursor: pointer; }
+.memory-git-connection.active { border-color: var(--accent); box-shadow: inset 3px 0 var(--accent); }
+.memory-git-queue p { display: grid; gap: 4px; font-size: 12px; }
+.memory-git-detail { min-width: 0; }
+.memory-git-status { display: flex; flex-wrap: wrap; gap: 12px 24px; font-size: 12px; }
+.memory-git-status dt, .memory-git-muted { color: var(--fg-secondary); }
+.memory-git-status dd { margin: 4px 0; }
+.memory-git-actions { display: flex; align-items: end; flex-wrap: wrap; gap: 8px; margin: 12px 0; }
+.memory-git-actions label { display: grid; gap: 4px; font-size: 12px; min-width: 0; }
+.memory-git input, .memory-git select { min-width: 0; max-width: 100%; padding: 7px; border: 1px solid var(--border); border-radius: 6px; background: var(--surface); color: var(--fg); }
+.memory-git code { display: block; min-width: 0; max-width: 100%; overflow: auto; font-family: var(--font-mono); font-size: 11px; }
+.memory-git-proposals { display: flex; gap: 6px; flex-wrap: wrap; margin: 16px 0; }
+.memory-git-versions { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 1px; border: 1px solid var(--border); border-radius: 8px; overflow: hidden; background: var(--border); }
+.memory-git-versions section { padding: 12px; min-width: 0; background: var(--surface); }
+.memory-git-versions h4 { color: var(--accent); font-size: 13px; }
+.memory-git-versions pre { font-family: var(--font-mono); font-size: 12px; line-height: 1.6; max-height: 380px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; }
+.memory-git-conflicts { margin: 12px 0; padding: 12px 12px 12px 28px; color: var(--error); border-left: 2px solid var(--error); background: var(--surface); }
+.memory-git-preview { margin: 12px 0; }
+.memory-git-preview summary { cursor: pointer; }
+@media (max-width: 800px) {
+  .memory-git-workspace { grid-template-columns: 1fr; }
+  .memory-git-queue { border-right: 0; border-bottom: 1px solid var(--border); padding: 0 0 12px; }
+  .memory-git-versions { grid-template-columns: 1fr; }
+  .memory-git-toolbar { align-items: start; flex-wrap: wrap; }
+}
+
 .memory-workbench button,
 .memory-workbench input,
 .memory-workbench textarea,
@@ -1111,6 +1143,10 @@
     animation-duration: .01ms !important;
   }
 }
+
+.memory-git-result { margin-block: 16px; padding: 16px; border: 1px solid var(--border); border-radius: 8px; background: var(--bg-secondary); }
+.memory-git-result pre { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 420px; overflow: auto; }
+.memory-git-result code { overflow-wrap: anywhere; }
 
 /* --- ADR-0005 Phase 3 governance workspace --- */
 .memory-scope-switcher { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 12px; }

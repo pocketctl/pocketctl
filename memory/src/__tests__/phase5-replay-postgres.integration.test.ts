@@ -59,7 +59,7 @@ db('Phase 5 durable offline Replay', () => {
   test('migration 34 preserves governed versions; both case kinds pass with zero natural executions', async () => {
     const f = await fixture()
     await applyMemorySchema(pool); await applyMemorySchema(pool)
-    expect((await pool.query(`SELECT MAX(version) AS version FROM memory_schema_migrations`)).rows[0].version).toBe(38)
+    expect((await pool.query(`SELECT MAX(version) AS version FROM memory_schema_migrations`)).rows[0].version).toBe(46)
     const result = await f.service.execute(f.author, f.request)
     expect(result).toMatchObject({ state: 'passed', eligible: true, naturalExecutionCount: 0,
       kinds: { historical_session: { total: 1, passed: 1 }, golden_task: { total: 1, passed: 1 } } })

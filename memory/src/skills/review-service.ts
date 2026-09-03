@@ -9,9 +9,11 @@ import { currentReviewDecisions, evaluateQuorum } from '../governance/authority.
 import { canonicalJsonString } from '../inbox/canonical-json.js'
 import { SkillCandidateDocumentSchema, skillDocumentHash } from './types.js'
 import { assessSkillRisk } from './risk-policy.js'
-import { resolveSkillSource, SkillWorkError, type SkillSourceContext } from './source-resolver.js'
+import { resolveSkillSource, SkillWorkError, type SkillSourceContext, type SkillPrelockedLifecycle } from './source-resolver.js'
 import { appendSkillAudit, SKILL_AUDIT_ACTIONS, type SkillAuditInput } from './audit-repository.js'
 import { appendSkillVersion, archiveSourceRequest, findSkillArchive, findSkillVersion, type SkillVersionRow } from './version-repository.js'
+import { assertImportApproval, type GovernedImport } from '../git-sync/governance-adapter.js'
+import { loadGitSkillCoauthors } from './git-coauthors.js'
 
 const revision = z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER - 1)
 const subject = { skillId: z.uuid(), expectedRevision: revision }
@@ -42,8 +44,8 @@ function fail(code: ErrorCode): never { throw new SkillReviewError(code) }
 
 /** Internal governance boundary. Verified identity context is separate from strict request JSON. */
 export function createSkillReviewService(deps: { pool: pg.Pool; context: SkillSourceContext }) {
-  return {
-    async execute(identity: { installationId: string; grant: V2GrantFacts }, rawRequest: unknown): Promise<SkillReviewResult> {
+    async function execute(identity: { installationId: string; grant: V2GrantFacts }, rawRequest: unknown,
+      git?:{author:{membershipId:string;membershipRevision:string;authorizationEpoch:string};prelockedLifecycle:SkillPrelockedLifecycle;governed:GovernedImport}): Promise<SkillReviewResult> {
       const client = await deps.pool.connect()
       let actor: Actor | null = null
       let result: SkillReviewResult | undefined
@@ -53,10 +55,17 @@ export function createSkillReviewService(deps: { pool: pg.Pool; context: SkillSo
       let request: RequestBody | undefined
       try {
         await client.query('BEGIN')
+        if(git)await assertImportApproval(client,git.governed)
         const parsed = Request.safeParse(rawRequest)
         if (!parsed.success) fail('invalid_request')
         request = parsed.data
-        const requiredPermission = request.action === 'draft' || request.action === 'edit' ? 'contribute'
+        if(git) {
+          const approved=git.governed.proposal.proposed_document.result
+          if(request.action!=='edit'||approved.kind==='conflict'||git.governed.author?.membershipId!==git.author.membershipId
+            ||git.governed.current.asset.key.id!==request.skillId||canonicalJsonString(approved.asset.asset.editable)!==canonicalJsonString({document:request.document}))throw new Error('git_governance_required')
+        }
+        if(git&&request.action!=='edit')fail('invalid_request')
+        const requiredPermission = git?'publish':request.action === 'draft' || request.action === 'edit' ? 'contribute'
           : request.action === 'revoke' ? 'publish' : 'review'
         // Early check avoids disclosing resource existence. Revalidated under source/scope locks below.
         const auth = createScopeAuthorization(createTransactionBoundPool(client))
@@ -67,13 +76,24 @@ export function createSkillReviewService(deps: { pool: pg.Pool; context: SkillSo
         const archive = await findSkillArchive(client, identity.installationId,
           request.action === 'draft' ? request.candidateId : observedVersion!.candidate_id)
         if (!archive) fail('not_found')
-        const source = await resolveSkillSource(client, { ...identity, source: archiveSourceRequest(archive), requiredPermission }, deps.context)
+        const source = await resolveSkillSource(client, { ...identity, source: archiveSourceRequest(archive), requiredPermission,
+          ...(git?{prelockedLifecycle:git.prelockedLifecycle}:{}) }, deps.context)
         if (source.sourceDigest !== archive.source_digest || source.inputDigest !== archive.input_digest) fail('source_invalid')
         const currentGrant = await auth.validateV2Grant(identity.grant)
         const binding = currentGrant?.scopeBindings.find(b => b.installation_id === identity.installationId)
         if (!binding || !binding.permissions.includes(requiredPermission)) fail('forbidden')
+        if(git)await assertImportApproval(client,git.governed,binding.membership_id)
         actor = binding.owner_scope_kind === 'personal' ? { actorKind: 'personal', actorId: binding.owner_scope_id }
           : { actorKind: 'membership', actorId: binding.membership_id! }
+        let documentAuthor=actor
+        if(git) {
+          const author=await client.query(`SELECT 1 FROM memory_scope_memberships WHERE installation_id=$1 AND membership_id=$2 AND membership_revision=$3
+            AND state='active' AND roles && ARRAY['contributor','scope_administrator']::text[]
+            AND (valid_from IS NULL OR valid_from<=clock_timestamp()) AND (valid_until IS NULL OR valid_until>clock_timestamp())`,
+          [identity.installationId,git.author.membershipId,git.author.membershipRevision])
+          if(!author.rowCount||git.author.authorizationEpoch!==binding.authorization_epoch||binding.owner_scope_kind==='personal')fail('forbidden')
+          documentAuthor={actorKind:'membership',actorId:git.author.membershipId}
+        }
         // Preserve Task4/5 ordering; source invalidation and candidate replacement also lock this task.
         const task = await client.query<{ current_generation: string }>(`SELECT current_generation::text FROM memory_skill_tasks
           WHERE installation_id=$1 AND task_id=$2 FOR UPDATE`, [identity.installationId,archive.task_id])
@@ -104,7 +124,7 @@ export function createSkillReviewService(deps: { pool: pg.Pool; context: SkillSo
           const policy = await policySnapshot(client, identity.installationId, binding)
           const versionId = await appendSkillVersion(client, { installationId: identity.installationId, skillId, source: archive,
             document: doc, documentHash: skillDocumentHash(doc), policySnapshot: policy.snapshot, policyHash: policy.hash,
-            risk: risk.risk, ...actor, authorizationEpoch: binding.authorization_epoch })
+            risk: risk.risk, ...documentAuthor, authorizationEpoch: binding.authorization_epoch })
           if (current) {
             const changed = await client.query(`UPDATE memory_skill_heads SET current_version_id=$3,state='draft',revision=$4,updated_at=NOW()
               WHERE installation_id=$1 AND skill_id=$2 AND revision=$5`, [identity.installationId,skillId,versionId,nextRevision,request.expectedRevision])
@@ -120,10 +140,12 @@ export function createSkillReviewService(deps: { pool: pg.Pool; context: SkillSo
           result = { skillId, versionId: current!.version_id, revision: nextRevision, state: 'revoked' }
         } else {
           const version = current!
+          const coauthors=await loadGitSkillCoauthors(client,identity.installationId,version.version_id)
           const policy = await policySnapshot(client, identity.installationId, binding)
           if (policy.hash !== version.policy_hash) fail('policy_changed')
           if (request.action === 'approve' && actor.actorKind === version.author_kind && actor.actorId === version.author_id
             && (version.risk !== 'low' || policy.snapshot.policy.require_independent_reviewer)) fail('self_review_denied')
+          if(request.action==='approve'&&actor.actorKind==='membership'&&coauthors.has(actor.actorId))fail('self_review_denied')
           const duplicate = await client.query(`SELECT 1 FROM memory_skill_review_decisions
             WHERE installation_id=$1 AND version_id=$2 AND actor_kind=$3 AND actor_id=$4`, [identity.installationId,version.version_id,actor.actorKind,actor.actorId])
           if (duplicate.rowCount) fail('duplicate_decision')
@@ -147,7 +169,7 @@ export function createSkillReviewService(deps: { pool: pg.Pool; context: SkillSo
               SELECT membership_id,membership_revision::text,state,roles FROM memory_scope_memberships
               WHERE installation_id=$1 AND membership_id=ANY($2::uuid[]) ORDER BY membership_id FOR SHARE`,
             [identity.installationId,decisions.rows.filter(d => d.actor_kind === 'membership').map(d => d.actor_id)])
-            counted = currentReviewDecisions(decisions.rows.filter(d => d.actor_kind === 'membership').map(d => ({
+            counted = currentReviewDecisions(decisions.rows.filter(d => d.actor_kind === 'membership'&&(d.decision!=='approve'||!coauthors.has(d.actor_id))).map(d => ({
               decisionId: d.decision_id, membershipId: d.actor_id, membershipRevision: d.membership_revision!, decision: d.decision,
             })), memberships.rows.filter(m => policy.snapshot.policy.publisher_may_count_as_reviewer || !m.roles.includes('publisher'))
               .map(m => ({ membershipId: m.membership_id, membershipRevision: m.membership_revision, state: m.state, roles: m.roles })))
@@ -183,6 +205,12 @@ export function createSkillReviewService(deps: { pool: pg.Pool; context: SkillSo
         }
         throw error
       } finally { client.release() }
-    },
+    }
+  return {
+    execute:(identity:{installationId:string;grant:V2GrantFacts},rawRequest:unknown)=>execute(identity,rawRequest),
+    /** Internal Git edit boundary: verified author is separate from the real
+     * publisher grant, while all ordinary risk/source/policy gates are reused. */
+    executeGitEdit:(identity:{installationId:string;grant:V2GrantFacts},rawRequest:unknown,
+      provenance:{author:{membershipId:string;membershipRevision:string;authorizationEpoch:string};prelockedLifecycle:SkillPrelockedLifecycle;governed:GovernedImport})=>execute(identity,rawRequest,provenance),
   }
 }

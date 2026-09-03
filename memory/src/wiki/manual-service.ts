@@ -130,8 +130,7 @@ export function createWikiManualService(
     })
   }
 
-  return {
-    async edit(input: ManualActionInput & { markdown: string }): Promise<{
+    async function edit(input: ManualActionInput & { markdown: string },governed?:{sourceSectionKey:string}): Promise<{
       manualVersionId: string
       lockVersion: number
     }> {
@@ -140,7 +139,7 @@ export function createWikiManualService(
         return transact(async client => {
         const binding = await requireCurrentWikiPermission({
           client, grant: input.grant, targetInstallationId: input.targetInstallationId,
-          permission: 'contribute',
+          permission: governed?'publish':'contribute',
         })
         const wiki = await client.query(`
           SELECT 1 FROM memory_wikis w
@@ -165,13 +164,20 @@ export function createWikiManualService(
            AND v.manual_version_id = h.current_version_id
           WHERE h.installation_id = $1 AND h.wiki_id = $2 AND h.section_key = $3
           FOR UPDATE OF h
-        `, [input.targetInstallationId, input.wikiId, input.sectionKey])
+        `, [input.targetInstallationId, input.wikiId, governed?.sourceSectionKey??input.sectionKey])
         const previous = current.rows[0]
         const currentLockVersion = Number(previous?.lock_version ?? 0)
         if (currentLockVersion !== input.expectedLockVersion) {
           throw new WikiManualError('revision_conflict')
         }
         if (previous?.locked) throw new WikiManualError('locked')
+        if(governed&&governed.sourceSectionKey!==input.sectionKey) {
+          const collision=await client.query('SELECT 1 FROM memory_wiki_manual_section_heads WHERE installation_id=$1 AND wiki_id=$2 AND section_key=$3',
+            [input.targetInstallationId,input.wikiId,input.sectionKey])
+          if(collision.rowCount)throw new WikiManualError('revision_conflict')
+          await client.query('DELETE FROM memory_wiki_manual_section_heads WHERE installation_id=$1 AND wiki_id=$2 AND section_key=$3',
+            [input.targetInstallationId,input.wikiId,governed.sourceSectionKey])
+        }
         const manualVersionId = randomUUID()
         const contentHash = hash(input.markdown)
         await client.query(`
@@ -211,7 +217,12 @@ export function createWikiManualService(
           return { manualVersionId, lockVersion: next }
         })
       })
-    },
+    }
+  return {
+    edit:(input:ManualActionInput & {markdown:string})=>edit(input),
+    /** Domain publication has a real publisher binding; it does not invent a
+     * contributor grant just to append the same guarded manual revision. */
+    appendGoverned:(input:ManualActionInput & {markdown:string},sourceSectionKey:string)=>edit(input,{sourceSectionKey}),
     lock: (input: ManualActionInput) => observe('lock', () => lockState(input, true)),
     unlock: (input: ManualActionInput) => observe('unlock', () => lockState(input, false)),
   }

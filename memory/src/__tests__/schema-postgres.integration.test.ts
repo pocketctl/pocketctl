@@ -68,7 +68,7 @@ describeWithDatabase('memory schema (PostgreSQL)', () => {
     const versions = await pool.query<{ version: number }>(
       `SELECT version FROM memory_schema_migrations ORDER BY version`,
     )
-    expect(versions.rows.map(row => Number(row.version))).toEqual(Array.from({ length: 38 }, (_, index) => index + 1))
+    expect(versions.rows.map(row => Number(row.version))).toEqual(Array.from({ length: 46 }, (_, index) => index + 1))
 
     // v4 must have removed the obsolete observed_at-bearing unique that v2
     // failed to drop (its auto-generated name is truncated past 63 chars);

@@ -4,13 +4,21 @@ import { loadMemoryConfig } from './config.js'
 import { createMemoryPool } from './db.js'
 import { applyMemorySchema } from './schema.js'
 import { createCapabilityVerifier } from './relay/capability-verifier.js'
-import { createMemoryMetrics } from './metrics.js'
+import { createMemoryMetrics, updatePhase6Gauges } from './metrics.js'
 import { createGrantGuard } from './auth/grant-guard.js'
 import { createCorsHostPolicy } from './auth/cors-host-policy.js'
 import { registerReadRoutes } from './api/read-routes.js'
 import { registerCodegraphRoutes } from './api/codegraph-routes.js'
 import { registerSkillRoutes } from './api/skill-routes.js'
+import { registerGitRoutes } from './api/git-routes.js'
+import { createGitReadService } from './git-sync/read-service.js'
 import { createFileSkillCaseRegistry } from './skills/case-registry.js'
+import { createGitRuntime } from './git-sync/runtime.js'
+import { createGitRecoveryService } from './git-sync/recovery-service.js'
+import { loadGitSyncConfig } from './git-sync/config.js'
+import { createGitRepository } from './git-sync/repository.js'
+import { createGitExportService } from './git-sync/export-service.js'
+import { createGitInboxService } from './git-sync/inbox-service.js'
 import { registerWikiRoutes } from './api/wiki-routes.js'
 import { registerGovernanceRoutes } from './api/governance-routes.js'
 import { registerManageRoutes } from './api/manage-routes.js'
@@ -79,6 +87,7 @@ async function main(): Promise<void> {
   // Bounded Prometheus metrics with the frozen label allowlists.
   const metrics = createMemoryMetrics()
   app.get('/metrics', async (_req, reply) => {
+    if(schemaReady)await updatePhase6Gauges(pool,metrics.phase6)
     reply.header('content-type', metrics.registry.contentType)
     return metrics.registry.metrics()
   })
@@ -125,6 +134,19 @@ async function main(): Promise<void> {
 
   const skillContext = { globalMode: config.mode, sharedMode: config.sharedScopesMode, config: config.skill }
   const skillCases = createFileSkillCaseRegistry(process.env.MEMORY_SKILL_REPLAY_REGISTRY_PATH)
+  const gitConfig=config.gitSync??loadGitSyncConfig({})
+  const gitRuntime=await createGitRuntime({pool,config:gitConfig,globalMode:config.mode,sharedMode:config.sharedScopesMode})
+  const gitDeps={pool,config:gitConfig,targets:gitRuntime.targets,keys:gitRuntime.keys,scopeMode:gitRuntime.scopeMode,
+    recoveryReads:gitRuntime.recoveryReads,webhookRegistration:gitRuntime.webhookRegistration,skill:{context:skillContext,cases:skillCases},outcomeKind:'natural' as const}
+  const gitReads=createGitReadService(gitDeps)
+  // Internal services for Task9 foreground routes. No Git write capability exists
+  // in this composition; no key/credential-bearing runtime object is a DTO.
+  app.decorate('memoryGitServices',{
+    repository:createGitRepository({pool,targets:gitRuntime.targets}),
+    exports:gitRuntime.keys?createGitExportService({pool,keys:gitRuntime.keys,skill:{context:skillContext,cases:skillCases}}):undefined,
+    inbox:createGitInboxService({pool,config:gitConfig,scopeMode:gitRuntime.scopeMode,outcomeKind:'natural'}),
+    recovery:createGitRecoveryService({pool,config:gitConfig,scopeMode:gitRuntime.scopeMode,recoveryReads:gitRuntime.recoveryReads,outcomeKind:'natural'}),
+  })
   const policy = createCorsHostPolicy({
     allowedOrigins: config.allowedOrigins,
     allowedHosts: config.allowedHosts,
@@ -132,6 +154,10 @@ async function main(): Promise<void> {
   })
   registerSkillRoutes(app, { pool, policy, guard: createGrantGuard({ pool, relayUrl: config.relayUrl, relayIssuer: config.relayIssuer }),
     context: skillContext, cursorSigningKey: config.hmacKey, cases: skillCases, metrics: metrics.phase5 })
+  registerGitRoutes(app,{...gitDeps,policy,guard:createGrantGuard({pool,relayUrl:config.relayUrl,relayIssuer:config.relayIssuer})})
+  // Git and Skill reads report their own disabled/shadow states explicitly.
+  if(config.mode!=='enabled')registerMcpRoute(app,{pool,policy,guard:createGrantGuard({pool,relayUrl:config.relayUrl,relayIssuer:config.relayIssuer}),
+    skillContext,gitReads,gitOnly:true,providerVersion:config.providerVersion,recallEmbeddingTimeoutMs:config.recallEmbeddingTimeoutMs,cursorSigningKey:config.hmacKey,sharedScopesEnabled:false})
 
   // Other REST surfaces require enabled mode. Skill routes above enforce
   // their own effective mode and retain CORS support in shadow mode.
@@ -296,6 +322,7 @@ async function main(): Promise<void> {
       },
     })
     registerMcpRoute(app, {
+      gitReads,
       skillContext,
       pool,
       guard,

@@ -23,6 +23,8 @@ export function createIdempotencyStore(pool: pg.Pool) {
       key: string
       /** Canonical serialization of the request used to detect key reuse. */
       requestCanonical: string
+      /** Git source readers require READ COMMITTED even on a differently configured server. */
+      isolation?: 'read_committed'
       /** Runs the mutation and returns bounded metadata. */
       /** Runs inside the same transaction that records the completed result. */
       run: (client: pg.PoolClient) => Promise<{ ok: true; metadata: Record<string, unknown> } | { ok: false; error: unknown }>
@@ -36,7 +38,7 @@ export function createIdempotencyStore(pool: pg.Pool) {
       const requestHash = this.hash(input.requestCanonical)
       const client = await pool.connect()
       try {
-        await client.query('BEGIN')
+        await client.query(input.isolation === 'read_committed' ? 'BEGIN ISOLATION LEVEL READ COMMITTED' : 'BEGIN')
         await client.query(`
           DELETE FROM memory_idempotency_keys
           WHERE installation_id = $1 AND operation = $2 AND key_hash = $3

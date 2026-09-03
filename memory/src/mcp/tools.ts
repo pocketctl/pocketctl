@@ -1,4 +1,5 @@
 import { createSkillReadService, SkillReadError, skillJson } from '../skills/read-service.js'
+import { GitApiError, gitApiError, GitListQuery, type GitReadService } from '../git-sync/read-service.js'
 import { loadSkillConfig } from '../skills/config.js'
 import type { SkillSourceContext } from '../skills/source-resolver.js'
 import { z } from 'zod'
@@ -31,6 +32,8 @@ import {
  */
 
 export interface MemoryToolDeps {
+  gitOnly?: boolean
+  gitReads?: GitReadService
   skillContext?: SkillSourceContext
   pool: pg.Pool
   /** Verified grant context — set per request by the MCP route. */
@@ -47,6 +50,23 @@ function textResult(value: unknown): { content: Array<{ type: 'text'; text: stri
 }
 
 export function registerMemoryTools(server: McpServer, deps: MemoryToolDeps): void {
+  const gitStatusSchema=GitListQuery.extend({installation_id:z.uuid().optional(),run_id:z.uuid().optional(),connection_id:z.uuid().optional(),list:z.enum(['proposals','cleanup']).optional()}).strict()
+    .refine(v=>Boolean(v.connection_id)===Boolean(v.list)&&!(v.run_id&&(v.connection_id||v.list||v.cursor)),{message:'ambiguous Git status selector'})
+  const gitDiffSchema=z.object({installation_id:z.uuid().optional(),proposal_id:z.uuid()}).strict()
+  async function gitRead(raw:unknown,diff:boolean) {
+    try {
+      const grant=deps.grant()
+      if(!grant||!('version' in grant)||grant.version!=='v2')throw new GitApiError('forbidden')
+      const args=diff?gitDiffSchema.parse(raw):gitStatusSchema.parse(raw)
+      if(!deps.gitReads)throw new GitApiError('feature_disabled')
+      const identity={installationId:args.installation_id??grant.installationId,grant}
+      const value='proposal_id' in args?await deps.gitReads.proposal(identity,args.proposal_id):args.run_id?await deps.gitReads.run(identity,args.run_id):args.connection_id&&args.list?await deps.gitReads.children(identity,args.connection_id,args.list,{limit:args.limit,cursor:args.cursor}):await deps.gitReads.connections(identity,{limit:args.limit,cursor:args.cursor})
+      return textResult(value)
+    }catch(error){return {...textResult({error:{code:gitApiError(error).code}}),isError:true}}
+  }
+  server.registerTool('memory_git_status',{description:'Read current Git connection/run status in one authorized shared scope.',inputSchema:gitStatusSchema,annotations:{readOnlyHint:true,destructiveHint:false,idempotentHint:true}},args=>gitRead(args,false))
+  server.registerTool('memory_git_diff',{description:'Read lifecycle-checked common base, Memory now, and Git change; no Git mutation.',inputSchema:gitDiffSchema,annotations:{readOnlyHint:true,destructiveHint:false,idempotentHint:true}},args=>gitRead(args,true))
+  if(deps.gitOnly)return
   const search = createSearchService({
     pool: deps.pool,
     recallEmbeddingTimeoutMs: deps.recallEmbeddingTimeoutMs,

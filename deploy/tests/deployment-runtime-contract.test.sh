@@ -251,4 +251,7 @@ grep -qF '.pocketctl-role-split-v1' "$migration_runbook" \
 grep -qF 'check-volume-migration.sh' "$migration_runbook" \
   || fail "existing-volume runbook does not require a final gate verification"
 
+"$repo_root/memory/node_modules/.bin/tsx" "$repo_root/memory/eval/fixtures/phase6/compose-contract.ts" docker-compose.prod.yml \
+  || fail "Phase 6 production Memory configuration/runtime contract"
+
 echo "deployment runtime contract passed"

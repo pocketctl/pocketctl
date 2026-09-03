@@ -25,6 +25,7 @@ export function createMemoryMetrics() {
   const phase1 = createPhase1Metrics(registry)
   const phase4 = createPhase4Metrics(registry)
   const phase5 = createPhase5Metrics(registry)
+  const phase6 = createPhase6Metrics(registry)
 
   const installations = new Gauge({
     name: 'pocketctl_memory_installations',
@@ -127,6 +128,7 @@ export function createMemoryMetrics() {
     phase1,
     phase4,
     phase5,
+    phase6,
   }
 }
 
@@ -178,6 +180,163 @@ export function createPhase5Metrics(registry = new Registry()) {
   }
 }
 export type Phase5Metrics=ReturnType<typeof createPhase5Metrics>
+const GIT_METRIC_STATES={observation:['completed','unfinished','failed'],canonical_change:['completed','partial','unfinished','failed','unattributed'],asset_outcome:['published','draft_appended','linked','revoked','unfinished']} as const
+const GIT_METRIC_PROVENANCE=['fixture','shadow','consented_mpc','natural','unattributed'] as const
+const GIT_OPERATIONS=['repository','merge','commit','tree','poll','write_tree','write_commit','write_branch','write_file','write_pull_request','reconcile']
+const GIT_REQUEST_STATES=['reserved','responded','failed','aborted']
+const GIT_DECISIONS=['approve','request_changes','reject']
+const GIT_OPERATIONAL_STATES={
+  observation:['received','verified','planned','duplicate','rejected','cancelled','invalidated','dead'],
+  proposal:['received','verified','planned','awaiting_review','conflicted','awaiting_identity','applied','authorization_stale','cancelled','invalidated','dead','noop','purged_unfinished'],
+  outbox_step:['pending','dispatching','reconciling','completed','conflicted'],
+  job:['pending','running','completed','dead'],
+} as const
+const GIT_AGES=['unfinished_observation','reserved_request','pending_proposal','pending_job']
+const GIT_MEASUREMENTS=['request_duration','review_duration','projection_invalidation','request_budget','byte_budget',...GIT_AGES]
+export function createPhase6Metrics(registry=new Registry()) {
+  const ledger=new Gauge({name:'pocketctl_memory_git_ledger_rows',help:'Durable Git observations, canonical eligible changes and asset outcomes; stages have distinct denominators; unattributed is legacy evidence',labelNames:['stage','state','provenance'] as const,registers:[registry]})
+  const operational=new Map<string,{gauge:Gauge;labels:string[];allowed:readonly (readonly string[])[]}>()
+  const add=(name:string,help:string,labels:string[]=[],allowed:readonly (readonly string[])[]=[])=>{
+    const gauge=new Gauge({name:`pocketctl_memory_git_${name}`,help,labelNames:labels,registers:[registry]})
+    if(name.startsWith('projection_invalidation_seconds_'))gauge.remove()
+    operational.set(name,{gauge,labels,allowed})
+  }
+  add('request_rows','Retained request reservations, including unfinished and failed attempts',['operation','state'],[GIT_OPERATIONS,GIT_REQUEST_STATES])
+  add('response_bytes','Known decompressed response bytes; reserved/aborted are lower bounds, not measured wire traffic',['operation','state'],[GIT_OPERATIONS,GIT_REQUEST_STATES])
+  for(const suffix of ['sum','count']){
+    add(`request_duration_seconds_${suffix}`,'Retained first terminal local request durations; excludes reservation and settlement SQL; missing rows omitted',['operation','state'],[GIT_OPERATIONS,GIT_REQUEST_STATES])
+    add(`review_duration_seconds_${suffix}`,'Elapsed wall time from exact governed revision creation to recorded decision, not active reviewer labor',['decision'],[GIT_DECISIONS])
+    add(`projection_invalidation_seconds_${suffix}`,'Per-export local DELETE trigger interval through synchronous FK cleanup; excludes earlier waits, outer commit, notification and remote cleanup')
+  }
+  add('operational_rows','Distinct retained observations/proposal identities/outbox steps, or current retained Git jobs; stages are separate denominators',['stage','state'],[Object.keys(GIT_OPERATIONAL_STATES),[...new Set(Object.values(GIT_OPERATIONAL_STATES).flat())]])
+  add('reviews','Retained exact Git revision decisions, including superseded revisions',['decision'],[GIT_DECISIONS])
+  add('cleanup_rows','Retained remote cleanup records; recognized pending remains unfinished',['state'],[['pending_unrecognized','pending_recognized','complete']])
+  add('actions','Retained audit events; actions are not unique assets or requests',['action','outcome'],[['connection','mapping','snapshot','import','review','apply','dispatch','reconcile','invalidate','purge'],['allowed','denied','noop','invalidated','pending']])
+  add('oldest_seconds','Age of oldest record in the named stage; absent without a valid sample',['stage'],[GIT_AGES])
+  add('run_attempts','Sum of retained observation receipt HTTP attempts')
+  add('run_failures','Sum of retained observation receipt failure counts')
+  add('retry_attempts','Retry attempts of retained Git jobs beyond first attempt; job retention applies')
+  add('budget_remaining','Sum of last recorded worker limit headroom on live nonterminal runs; observed-byte headroom is an upper bound, not current authorization',['unit'],[['requests','bytes']])
+  add('budget_runs','Live nonterminal runs by last recorded limit headroom; unavailable historical limits stay unknown',['unit','state'],[['requests','bytes'],['available','exhausted','unknown']])
+  add('measurement_available','One iff at least one valid measurement exists; partial missing samples remain separately counted',['measurement'],[GIT_MEASUREMENTS])
+  add('measurement_missing_rows','Rows without the named usable measurement, including old records, unsettled requests and clock anomalies',['measurement'],[GIT_MEASUREMENTS])
+  return {
+    clearLedger(){ledger.reset()},
+    clearOperational(){for(const [name,{gauge}] of operational){gauge.reset()
+      // prom-client initializes an unlabelled Gauge to zero even after reset.
+      // Remove that default: no measured interval must not look like zero lag.
+      if(name.startsWith('projection_invalidation_seconds_'))gauge.remove()}},
+    setOperational(name:string,values:string[],count:number){
+      const spec=operational.get(name)
+      if(!spec||!Number.isFinite(count)||count<0||values.length!==spec.labels.length||values.some((v,i)=>!spec.allowed[i]?.includes(v)))return
+      if(name==='operational_rows'&&!(GIT_OPERATIONAL_STATES[values[0] as keyof typeof GIT_OPERATIONAL_STATES] as readonly string[])?.includes(values[1]))return
+      spec.gauge.set(Object.fromEntries(spec.labels.map((label,i)=>[label,values[i]])),count)
+    },
+    setLedger(stage:string,state:string,provenance:string,count:number){
+      const states=GIT_METRIC_STATES[stage as keyof typeof GIT_METRIC_STATES] as readonly string[]|undefined
+      if(!states?.includes(state)||!(GIT_METRIC_PROVENANCE as readonly string[]).includes(provenance)||!Number.isFinite(count)||count<0)return
+      ledger.set({stage,state,provenance},count)
+    },
+  }
+}
+export type Phase6Metrics=ReturnType<typeof createPhase6Metrics>
+export async function updatePhase6Gauges(pool:Pick<pg.Pool,'query'>,metrics:Phase6Metrics):Promise<void> {
+  const result=await pool.query<{stage:string;state:string;provenance:string;count:string}>(`WITH outcomes AS (
+      SELECT DISTINCT ON(installation_id,proposal_id) installation_id,proposal_id,outcome FROM (
+        SELECT installation_id,proposal_id,outcome FROM memory_git_import_outcomes
+        UNION ALL SELECT installation_id,proposal_id,outcome FROM memory_git_retained_outcomes
+      ) o ORDER BY installation_id,proposal_id
+    ), assets AS (
+      SELECT i.installation_id,i.connection_id,i.export_id,i.proposal_id,b.run_id,COALESCE(r.outcome_kind,'unattributed') AS provenance,o.outcome
+      FROM memory_git_proposal_identities i LEFT JOIN memory_git_proposal_runs b USING(installation_id,connection_id,proposal_id)
+      LEFT JOIN memory_git_run_receipts r ON r.installation_id=b.installation_id AND r.run_id=b.run_id
+      LEFT JOIN outcomes o ON o.installation_id=i.installation_id AND o.proposal_id=i.proposal_id
+    ), canonical AS (
+      SELECT r.installation_id,r.run_id,r.outcome_kind,r.failures,r.state,r.unfinished,COUNT(a.proposal_id) AS expected,COUNT(a.outcome) AS completed,
+        bool_or(EXISTS(SELECT 1 FROM assets unknown WHERE unknown.installation_id=a.installation_id AND unknown.connection_id=a.connection_id AND unknown.export_id=a.export_id AND unknown.run_id IS NULL)) AS unattributed
+      FROM memory_git_run_receipts r LEFT JOIN assets a ON a.installation_id=r.installation_id AND a.run_id=r.run_id
+      WHERE r.eligible AND r.canonical_run_id IS NULL GROUP BY r.installation_id,r.run_id
+    ), rows AS (
+      SELECT 'observation' AS stage,CASE WHEN failures>0 THEN 'failed' WHEN unfinished THEN 'unfinished' ELSE 'completed' END AS state,outcome_kind AS provenance FROM memory_git_run_receipts
+      UNION ALL SELECT 'canonical_change',CASE WHEN completed>0 AND unattributed THEN 'unattributed' WHEN expected>0 AND completed=expected THEN 'completed' WHEN completed>0 THEN 'partial' WHEN failures>0 OR state IN('dead','rejected') THEN 'failed' ELSE 'unfinished' END,outcome_kind FROM canonical
+      UNION ALL SELECT 'asset_outcome',COALESCE(outcome,'unfinished'),provenance FROM assets
+    ) SELECT stage,state,provenance,COUNT(*)::text AS count FROM rows GROUP BY stage,state,provenance`)
+  metrics.clearLedger()
+  for(const row of result.rows)metrics.setLedger(row.stage,row.state,row.provenance,Number(row.count))
+  // These queries aggregate durable metadata only. No body, path, repository,
+  // tenant or credential can become a metric label.
+  const requests=await pool.query<{operation:string;state:string;count:string;bytes:string;duration_count:string;duration_sum:string|null}>(`SELECT operation,state,COUNT(*)::text AS count,SUM(response_bytes)::text AS bytes,
+    COUNT(duration_seconds)::text AS duration_count,SUM(duration_seconds)::text AS duration_sum FROM memory_git_request_reservations GROUP BY operation,state`)
+  const rows=await pool.query<{stage:string;state:string;count:string}>(`WITH proposal AS (
+    SELECT i.proposal_id,COALESCE(p.state,CASE WHEN o.proposal_id IS NOT NULL THEN 'applied' ELSE 'purged_unfinished' END) AS state
+    FROM memory_git_proposal_identities i LEFT JOIN memory_git_import_proposals p USING(installation_id,connection_id,proposal_id)
+    LEFT JOIN memory_git_retained_outcomes o USING(installation_id,connection_id,proposal_id)
+  ), steps AS (
+    SELECT DISTINCT ON(installation_id,connection_id,outbox_id,step) installation_id,connection_id,outbox_id,step,state FROM (
+      SELECT installation_id,connection_id,outbox_id,step,state FROM memory_git_outbox_steps
+      UNION ALL SELECT installation_id,connection_id,outbox_id,step,state FROM memory_git_retained_steps
+    ) s ORDER BY installation_id,connection_id,outbox_id,step
+  ), operational AS (
+    SELECT 'observation' AS stage,state FROM memory_git_run_receipts UNION ALL SELECT 'proposal',state FROM proposal
+    UNION ALL SELECT 'outbox_step',state FROM steps
+    UNION ALL SELECT 'job',state FROM memory_jobs WHERE job_type IN('git_ingest','git_export','git_reconcile')
+  ) SELECT stage,state,COUNT(*)::text AS count FROM operational GROUP BY stage,state`)
+  const reviews=await pool.query<{decision:string;count:string;duration_count:string;duration_sum:string|null}>(`WITH reviews AS (
+    SELECT d.decision,CASE WHEN d.created_at>=r.created_at THEN EXTRACT(EPOCH FROM(d.created_at-r.created_at)) END AS seconds
+    FROM memory_git_revision_reviews d JOIN memory_git_governed_revisions r USING(installation_id,revision_id)
+  ) SELECT decision,COUNT(*)::text AS count,COUNT(seconds)::text AS duration_count,SUM(seconds)::text AS duration_sum FROM reviews GROUP BY decision`)
+  const cleanup=await pool.query<{state:string;count:string}>(`SELECT CASE WHEN NOT cleanup_pending THEN 'complete' WHEN recognized_at IS NULL THEN 'pending_unrecognized' ELSE 'pending_recognized' END AS state,
+    COUNT(*)::text AS count FROM memory_git_remote_cleanup GROUP BY 1`)
+  const actions=await pool.query<{action:string;outcome:string;count:string}>('SELECT action,outcome,COUNT(*)::text AS count FROM memory_git_audit_events GROUP BY action,outcome')
+  const invalidation=(await pool.query<{count:string;duration_count:string;duration_sum:string|null}>(`SELECT COUNT(*)::text AS count,COUNT(duration_seconds)::text AS duration_count,
+    SUM(duration_seconds)::text AS duration_sum FROM memory_git_projection_invalidations`)).rows[0]
+  const totals=(await pool.query<{attempts:string;failures:string;retries:string}>(`SELECT COALESCE(SUM(attempts),0)::text AS attempts,COALESCE(SUM(failures),0)::text AS failures,
+    (SELECT COALESCE(SUM(GREATEST(attempts-1,0)),0)::text FROM memory_jobs WHERE job_type IN('git_ingest','git_export','git_reconcile')) AS retries FROM memory_git_run_receipts`)).rows[0]
+  const ages=await pool.query<{stage:string;seconds:string|null;missing:string}>(`WITH pending AS (
+    SELECT 'unfinished_observation' AS stage,created_at FROM memory_git_run_receipts WHERE unfinished
+    UNION ALL SELECT 'reserved_request',created_at FROM memory_git_request_reservations WHERE state='reserved'
+    UNION ALL SELECT 'pending_proposal',created_at FROM memory_git_import_proposals WHERE state IN('received','verified','planned','awaiting_review','conflicted','awaiting_identity')
+    UNION ALL SELECT 'pending_job',created_at FROM memory_jobs WHERE job_type IN('git_ingest','git_export','git_reconcile') AND state='pending'
+  ) SELECT stage,EXTRACT(EPOCH FROM(NOW()-MIN(created_at) FILTER(WHERE created_at<=NOW())))::text AS seconds,
+    COUNT(*) FILTER(WHERE created_at>NOW())::text AS missing FROM pending GROUP BY stage`)
+  const budgets=await pool.query<{unit:string;state:string;count:string;remaining:string|null}>(`WITH runs AS (
+    SELECT r.installation_id,r.run_id,r.http_attempts,q.request_limit,q.byte_limit,
+      (SELECT COALESCE(SUM(response_bytes),0) FROM memory_git_request_reservations a WHERE a.installation_id=r.installation_id AND a.run_id=r.run_id) AS bytes
+    FROM memory_git_runs r LEFT JOIN LATERAL (SELECT request_limit,byte_limit FROM memory_git_request_reservations a
+      WHERE a.installation_id=r.installation_id AND a.run_id=r.run_id ORDER BY attempt DESC LIMIT 1) q ON true
+    WHERE r.state NOT IN('closed','cancelled','invalidated','dead')
+  ), budget AS (
+    SELECT 'requests' AS unit,request_limit-http_attempts AS remaining FROM runs
+    UNION ALL SELECT 'bytes',byte_limit-bytes FROM runs
+  ) SELECT unit,CASE WHEN remaining IS NULL THEN 'unknown' WHEN remaining<=0 THEN 'exhausted' ELSE 'available' END AS state,
+    COUNT(*)::text AS count,SUM(GREATEST(remaining,0)) FILTER(WHERE remaining IS NOT NULL)::text AS remaining FROM budget GROUP BY 1,2`)
+  metrics.clearOperational()
+  const set=(name:string,labels:string[],value:unknown)=>metrics.setOperational(name,labels,Number(value))
+  const measurement=(name:string,count:number,missing:number)=>{set('measurement_available',[name],count>0?1:0);set('measurement_missing_rows',[name],missing)}
+  let requestCount=0,requestMissing=0,reviewCount=0,reviewMissing=0
+  for(const row of requests.rows){const labels=[row.operation,row.state],count=Number(row.duration_count)
+    set('request_rows',labels,row.count);set('response_bytes',labels,row.bytes)
+    if(count){set('request_duration_seconds_count',labels,count);set('request_duration_seconds_sum',labels,row.duration_sum)}
+    requestCount+=count;requestMissing+=Number(row.count)-count}
+  measurement('request_duration',requestCount,requestMissing)
+  for(const row of rows.rows)set('operational_rows',[row.stage,row.state],row.count)
+  for(const row of reviews.rows){const count=Number(row.duration_count);set('reviews',[row.decision],row.count)
+    if(count){set('review_duration_seconds_count',[row.decision],count);set('review_duration_seconds_sum',[row.decision],row.duration_sum)}
+    reviewCount+=count;reviewMissing+=Number(row.count)-count}
+  measurement('review_duration',reviewCount,reviewMissing)
+  for(const row of cleanup.rows)set('cleanup_rows',[row.state],row.count)
+  for(const row of actions.rows)set('actions',[row.action,row.outcome],row.count)
+  const invalidationCount=Number(invalidation?.duration_count??0)
+  measurement('projection_invalidation',invalidationCount,Number(invalidation?.count??0)-invalidationCount)
+  if(invalidationCount){set('projection_invalidation_seconds_count',[],invalidationCount);set('projection_invalidation_seconds_sum',[],invalidation.duration_sum)}
+  set('run_attempts',[],totals.attempts);set('run_failures',[],totals.failures);set('retry_attempts',[],totals.retries)
+  for(const stage of GIT_AGES){const row=ages.rows.find(r=>r.stage===stage),available=row?.seconds!==null&&row?.seconds!==undefined
+    measurement(stage,available?1:0,Number(row?.missing??0));if(available)set('oldest_seconds',[stage],row!.seconds)}
+  for(const unit of ['requests','bytes']){const selected=budgets.rows.filter(r=>r.unit===unit),known=selected.filter(r=>r.state!=='unknown')
+    for(const state of ['available','exhausted','unknown'])set('budget_runs',[unit,state],selected.find(r=>r.state===state)?.count??0)
+    measurement(unit==='requests'?'request_budget':'byte_budget',known.reduce((n,r)=>n+Number(r.count),0),Number(selected.find(r=>r.state==='unknown')?.count??0))
+    if(known.length)set('budget_remaining',[unit],known.reduce((n,r)=>n+Number(r.remaining),0))}
+}
 export async function updatePhase5Gauges(pool:Pick<pg.Pool,'query'>,metrics:Phase5Metrics):Promise<void>{
   const rows=await pool.query<{stage:string;state:string;provenance:string;count:string}>(`
     SELECT 'task' AS stage,state,'ledger' AS provenance,COUNT(*)::text AS count FROM memory_skill_tasks GROUP BY state

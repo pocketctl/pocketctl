@@ -222,8 +222,15 @@ describeWithDatabase('candidate extraction (PostgreSQL)', () => {
       extractor.extract({ installationId: INSTALLATION, turnId: 'turn-1', signal: new AbortController().signal }),
       extractor.extract({ installationId: INSTALLATION, turnId: 'turn-1', signal: new AbortController().signal }),
     ])
-    const kinds = [a.kind, b.kind].sort()
-    expect(kinds).toEqual(['skipped_existing', 'succeeded'])
+    const outcomes = [a, b]
+    expect(outcomes.filter(outcome => outcome.kind === 'succeeded')).toHaveLength(1)
+    const duplicate = outcomes.find(outcome => outcome.kind !== 'succeeded')
+    expect(duplicate).toBeDefined()
+    if (duplicate?.kind === 'failed') {
+      expect(duplicate).toMatchObject({ errorCode: 'run_in_progress', retryable: true })
+    } else {
+      expect(duplicate).toMatchObject({ kind: 'skipped_existing', state: 'succeeded' })
+    }
     expect(fn).toHaveBeenCalledTimes(1)
   })
 

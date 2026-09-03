@@ -6,6 +6,7 @@ import type { GrantGuard } from '../auth/grant-guard.js'
 import type { CorsHostPolicy } from '../auth/cors-host-policy.js'
 import { MemoryApiError, errorBody } from '../api/errors.js'
 import type { SkillSourceContext } from '../skills/source-resolver.js'
+import type { GitReadService } from '../git-sync/read-service.js'
 import { registerMemoryTools } from './tools.js'
 import type { EmbeddingProvider } from '../ports/embedding-provider.js'
 import type { VerifiedMemoryGrant } from '../auth/grant-guard.js'
@@ -22,6 +23,8 @@ import type { VerifiedMemoryGrant } from '../auth/grant-guard.js'
 const requestScope = new AsyncLocalStorage<{ grant: VerifiedMemoryGrant }>()
 
 export interface McpRouteDeps {
+  gitOnly?: boolean
+  gitReads?: GitReadService
   skillContext?: SkillSourceContext
   pool: pg.Pool
   guard: GrantGuard
@@ -40,6 +43,8 @@ export function createMemoryMcpHandler(deps: McpRouteDeps): McpHttpHandler {
     const server = new McpServer({ name: 'pocketctl-memory', version: deps.providerVersion })
     registerMemoryTools(server, {
       pool: deps.pool,
+      gitOnly: deps.gitOnly,
+      ...(deps.gitReads ? { gitReads: deps.gitReads } : {}),
       ...(deps.skillContext ? { skillContext: deps.skillContext } : {}),
       grant: () => requestScope.getStore()?.grant,
       sharedScopesEnabled: deps.sharedScopesEnabled === true,

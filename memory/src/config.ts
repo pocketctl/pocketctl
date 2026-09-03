@@ -5,6 +5,7 @@
  */
 
 import { loadSkillConfig, type SkillConfig } from './skills/config.js'
+import { loadGitSyncConfig, type GitSyncConfig } from './git-sync/config.js'
 
 export type MemoryMode = 'off' | 'shadow' | 'enabled'
 export type MemoryLogLevel = 'debug' | 'info' | 'warn' | 'error'
@@ -56,6 +57,8 @@ export interface WikiProviderBudgetSettings {
 }
 
 export interface MemoryConfig {
+  /** Always set by loadMemoryConfig; optional for historical explicit fixtures. */
+  gitSync?: GitSyncConfig
   skill: SkillConfig
   mode: MemoryMode
   sharedScopesMode: SharedScopesMode
@@ -482,6 +485,10 @@ export function loadMemoryConfig(env: Record<string, string | undefined> = proce
   const providerBudget = parseProviderBudget(env)
   const wikiProviderBudget = parseWikiProviderBudget(env)
   const dbPoolMax = parseBoundedInteger('MEMORY_DB_POOL_MAX', env.MEMORY_DB_POOL_MAX, 12, 1, 64)
+  const gitSync = loadGitSyncConfig(env)
+  if (gitSync.mode !== 'off' && dbPoolMax < 2) {
+    throw new ConfigError('MEMORY_DB_POOL_MAX must be at least 2 when Git is active')
+  }
   // Skill holds a per-task advisory connection while transactions and failure
   // finalization acquire pool clients. Reject starvation instead of hanging.
   if (skill.mode !== 'off' && dbPoolMax < 3) {
@@ -491,6 +498,7 @@ export function loadMemoryConfig(env: Record<string, string | undefined> = proce
   return {
     mode,
     skill,
+    gitSync,
     sharedScopesMode,
     codegraphMode,
     wikiMode,

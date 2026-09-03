@@ -156,6 +156,15 @@
               <MemorySkillsView :scope-id="governanceTarget" />
             </template>
           </template>
+          <template v-if="active === 'git'">
+            <div v-if="governanceScopesError" class="memory-notice is-error" role="alert" data-testid="git-scope-error"><p>{{ governanceScopesError }}</p><button class="memory-button" :disabled="governanceScopesLoading" @click="loadGovernanceScopes">{{ t('memory.git.refresh') }}</button></div>
+            <p v-else-if="governanceScopesLoading" role="status">{{ t('memory.git.loading') }}</p>
+            <template v-else>
+              <MemoryScopeSwitcher v-model="gitTarget" :scopes="gitScopes" />
+              <MemoryGitPanel v-if="gitTarget" :scope-id="gitTarget" />
+              <p v-else role="status">{{ t('memory.git.shared_scope_required') }}</p>
+            </template>
+          </template>
           <MemorySettingsCard v-if="active === 'settings'" :services="installation.enabled_services"
             :installation-status="installation.status" @changed="reload"/>
         </div>
@@ -235,6 +244,7 @@ import MemoryPromotionDialog from '../components/memory/MemoryPromotionDialog.vu
 import MemoryWikiPanel from '../components/memory/MemoryWikiPanel.vue'
 import MemoryCodeGraphPanel from '../components/memory/MemoryCodeGraphPanel.vue'
 import MemorySkillsView from './MemorySkillsView.vue'
+import MemoryGitPanel from '../components/memory/MemoryGitPanel.vue'
 
 const { t } = useLocale()
 const { isMobile } = useResponsiveLayout()
@@ -244,7 +254,7 @@ const installation = ref<MemoryInstallation | null>(null)
 const loading = ref(true)
 const busy = ref(false)
 const error = ref('')
-const active = ref<'search' | 'review' | 'claims' | 'wiki' | 'codegraph' | 'skills' | 'context' | 'persona' | 'policies' | 'loadouts' | 'settings'>('search')
+const active = ref<'search' | 'review' | 'claims' | 'wiki' | 'codegraph' | 'skills' | 'git' | 'context' | 'persona' | 'policies' | 'loadouts' | 'settings'>('search')
 const phase4RepositoryId = ref('')
 const claimId = ref<string | null>(null)
 const claimSourceInstallationId = ref<string | null>(null)
@@ -266,7 +276,9 @@ const promotionEvidence = ref<MemoryEvidence[]>([])
 const promotionSourceInstallationId = ref<string | null>(null)
 const pendingLifecycleState = ref<'suspended' | 'dissolving' | null>(null)
 
-const tabs = ['search', 'review', 'claims', 'wiki', 'codegraph', 'skills', 'context', 'persona', 'policies', 'loadouts', 'settings'] as const
+const tabs = ['search', 'review', 'claims', 'wiki', 'codegraph', 'skills', 'git', 'context', 'persona', 'policies', 'loadouts', 'settings'] as const
+const gitScopes=computed(()=>governanceScopes.value.filter(scope=>scope.owner_scope_kind!=='personal'&&scope.state==='active'&&scope.permissions.includes('read')))
+const gitTarget=computed({get:()=>gitScopes.value.some(scope=>scope.installation_id===governanceTarget.value)?governanceTarget.value:gitScopes.value[0]?.installation_id??'',set:(value:string)=>{governanceTarget.value=value}})
 const requiredServices = ['memory.search', 'memory.recall', 'memory.manage', 'memory.context']
 const servicesEnabled = computed(() => requiredServices.every(service => installation.value?.enabled_services.includes(service)))
 const selectedGovernanceScope = computed(() => governanceScopes.value.find(

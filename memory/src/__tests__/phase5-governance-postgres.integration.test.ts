@@ -43,7 +43,7 @@ db('Phase 5 Skill versions and human governance', () => {
     const f = await fixture()
     await applyMemorySchema(pool)
     await applyMemorySchema(pool)
-    expect((await pool.query(`SELECT MAX(version) AS version FROM memory_schema_migrations`)).rows[0].version).toBe(38)
+    expect((await pool.query(`SELECT MAX(version) AS version FROM memory_schema_migrations`)).rows[0].version).toBe(46)
     expect((await pool.query(`SELECT 1 FROM memory_skill_candidates WHERE candidate_id=$1`, [f.candidateId])).rowCount).toBe(1)
     expect(await draft(f)).toMatchObject({ state: 'draft', revision: 1 })
   })

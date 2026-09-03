@@ -17,6 +17,11 @@ function baseEnv(overrides: Record<string, string> = {}): Record<string, string>
 }
 
 describe('memory config', () => {
+  test('active Git requires two pool slots and off retains the one-slot configuration',()=>{
+    for(const mode of ['shadow','enabled'])expect(()=>loadMemoryConfig(baseEnv({MEMORY_GIT_SYNC_MODE:mode,MEMORY_DB_POOL_MAX:'1'}))).toThrow(/at least 2.*Git/)
+    expect(loadMemoryConfig(baseEnv({MEMORY_GIT_SYNC_MODE:'shadow',MEMORY_DB_POOL_MAX:'2'})).dbPoolMax).toBe(2)
+    expect(loadMemoryConfig(baseEnv({MEMORY_GIT_SYNC_MODE:'off',MEMORY_DB_POOL_MAX:'1'})).dbPoolMax).toBe(1)
+  })
   test('parses the full environment with defaults', () => {
     const config = loadMemoryConfig(baseEnv())
     expect(config.mode).toBe('enabled')

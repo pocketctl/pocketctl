@@ -7,7 +7,15 @@ import type pg from 'pg'
  */
 export function createTransactionBoundPool(client: pg.PoolClient): pg.Pool {
   let sequence = 0
-  const query = client.query.bind(client) as pg.Pool['query']
+  const commandOf=(input:unknown)=>{
+    const sql=typeof input==='string'?input:input&&typeof input==='object'&&'text' in input&&typeof input.text==='string'?input.text:''
+    return sql.trim().toUpperCase()
+  }
+  const control=/^(?:BEGIN|START\s+TRANSACTION|COMMIT|END|ROLLBACK|ABORT|SET\s+(?:LOCAL\s+)?TRANSACTION)\b/
+  const query = (async(text:unknown,values?:unknown[])=>{
+    if(control.test(commandOf(text)))throw new Error('unsupported_transaction_control')
+    return client.query(text as never,values as never)
+  }) as pg.Pool['query']
   return {
     query,
     async connect() {
@@ -15,9 +23,10 @@ export function createTransactionBoundPool(client: pg.PoolClient): pg.Pool {
       let active = false
       return {
         query: (async (text: unknown, values?: unknown[]) => {
-          if (typeof text === 'string') {
-            const command = text.trim().toUpperCase()
-            if (command === 'BEGIN') {
+          {
+            const command = commandOf(text)
+            if (command === 'BEGIN' || command === 'BEGIN ISOLATION LEVEL READ COMMITTED') {
+              if (active) throw new Error('nested_transaction_active')
               await client.query(`SAVEPOINT ${savepoint}`)
               active = true
               return { rows: [], rowCount: null }
@@ -34,6 +43,9 @@ export function createTransactionBoundPool(client: pg.PoolClient): pg.Pool {
               }
               active = false
               return { rows: [], rowCount: null }
+            }
+            if (control.test(command)) {
+              throw new Error('unsupported_transaction_control')
             }
           }
           return client.query(text as never, values as never)

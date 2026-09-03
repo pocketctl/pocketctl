@@ -118,7 +118,7 @@ describeWithDatabase('memory phase4 schema (migrations 25-30)', () => {
     const applied = await pool.query<{ version: number }>(
       `SELECT version FROM memory_schema_migrations ORDER BY version`,
     )
-    expect(applied.rows.map(row => Number(row.version))).toHaveLength(38)
+    expect(applied.rows.map(row => Number(row.version))).toHaveLength(46)
   })
 
   test('upgrades a populated v24 database without touching existing rows', async () => {
@@ -158,7 +158,7 @@ describeWithDatabase('memory phase4 schema (migrations 25-30)', () => {
     const versions = await pool.query<{ version: number }>(
       `SELECT version FROM memory_schema_migrations ORDER BY version`,
     )
-    expect(versions.rows.map(row => Number(row.version))).toHaveLength(38)
+    expect(versions.rows.map(row => Number(row.version))).toHaveLength(46)
   })
 
   test('snapshots are unique per installation/repo/commit/manifest and state-checked', async () => {

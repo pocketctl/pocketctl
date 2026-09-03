@@ -197,6 +197,19 @@ describe('MemoryView', () => {
     expect(view.find('[data-testid="memory-skills-panel"]').exists()).toBe(true)
     expect(view.get('[data-testid="memory-module-stage"]').get('[role="tabpanel"]').attributes('aria-labelledby')).toBe('memory-tab-skills')
   })
+  test('Git requires a current shared scope and never substitutes personal scope on discovery failure',async()=>{
+    memoryInstallation.value=activeInstallation()
+    memoryClient.listGovernanceScopes.mockRejectedValueOnce(Object.assign(new Error('scope unavailable'),{status:403}))
+      .mockResolvedValueOnce({scopes:[{installation_id:'personal',owner_scope_kind:'personal',state:'active',permissions:['read'],owner_scope_id:'personal',authorization_epoch:'1'},
+        {installation_id:'team-authorized',owner_scope_kind:'team',state:'active',permissions:['read'],owner_scope_id:'team',authorization_epoch:'1'}]})
+    const view=mount(MemoryView,{global:{stubs:{MemoryGitPanel:{props:['scopeId'],template:'<div data-testid="git-selected-scope">{{ scopeId }}</div>'}}}})
+    await flushPromises();await view.get('[data-testid="memory-tab-git"]').trigger('click')
+    expect(view.get('[data-testid="git-scope-error"]').text()).toContain('scope unavailable')
+    expect(view.find('[data-testid="git-selected-scope"]').exists()).toBe(false)
+    await view.get('[data-testid="git-scope-error"] button').trigger('click');await flushPromises()
+    expect(view.get('[data-testid="git-selected-scope"]').text()).toBe('team-authorized')
+    view.unmount()
+  })
 
   test.each([403, 503])('Skills shows failed scope discovery (%s) and can retry into a usable scope', async status => {
     memoryInstallation.value = activeInstallation()

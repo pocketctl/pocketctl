@@ -57,7 +57,7 @@ db('Phase 5 source admission and atomic scheduling', () => {
     }
   })
   test('migration 32 is additive and enables exactly one task/job for concurrent duplicate input', async () => {
-    expect(MEMORY_MIGRATIONS.map(m => m.version)).toEqual(Array.from({ length: 38 }, (_, i) => i + 1))
+    expect(MEMORY_MIGRATIONS.map(m => m.version)).toEqual(Array.from({ length: 46 }, (_, i) => i + 1))
     const f = await fixture(), input = { installationId: f.installationId, grant: f.grant, candidateKey: 'tests', source: { kind: 'episode', episodeId: f.episodeId } }
     const outcomes: string[] = []
     const results = await Promise.all(Array.from({ length: 8 }, () => service(outcome => outcomes.push(outcome)).schedule(input)))

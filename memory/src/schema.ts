@@ -7,6 +7,13 @@ import { SKILL_PUBLICATION_MIGRATION } from './skills/publication-migration.js'
 import { SKILL_EXECUTION_MIGRATION } from './skills/execution-migration.js'
 import { SKILL_LIFECYCLE_MIGRATION } from './skills/lifecycle-migration.js'
 import { SKILL_REVIEW_FIXES_MIGRATION } from './skills/review-fixes-migration.js'
+import { GIT_CONNECTION_MIGRATION, GIT_LEDGER_MIGRATION } from './git-sync/migration.js'
+import { GIT_QUEUE_MIGRATION } from './git-sync/queue-migration.js'
+import { GIT_OUTBOX_MIGRATION } from './git-sync/outbox-migration.js'
+import { GIT_IMPORT_MIGRATION } from './git-sync/import-migration.js'
+import { GIT_LIFECYCLE_MIGRATION } from './git-sync/lifecycle-migration.js'
+import { GIT_METRICS_MIGRATION } from './git-sync/metrics-migration.js'
+import { GIT_OBSERVABILITY_MIGRATION } from './git-sync/observability-migration.js'
 
 /**
  * Versioned, idempotent migrations for the independent Memory database.
@@ -2000,6 +2007,14 @@ export const MEMORY_MIGRATIONS: readonly Migration[] = [
   SKILL_EXECUTION_MIGRATION,
   SKILL_LIFECYCLE_MIGRATION,
   SKILL_REVIEW_FIXES_MIGRATION,
+  GIT_CONNECTION_MIGRATION,
+  GIT_LEDGER_MIGRATION,
+  GIT_QUEUE_MIGRATION,
+  GIT_OUTBOX_MIGRATION,
+  GIT_IMPORT_MIGRATION,
+  GIT_LIFECYCLE_MIGRATION,
+  GIT_METRICS_MIGRATION,
+  GIT_OBSERVABILITY_MIGRATION,
 ]
 
 /** Apply every pending migration exactly once under a startup lock. */

@@ -39,7 +39,7 @@ describeWithDatabase('memory phase3 governance schema (migration 20)', () => {
 
   test('appends migration 20 after 19 without renumbering', () => {
     const versions = MEMORY_MIGRATIONS.map(migration => migration.version)
-    expect(versions).toHaveLength(38)
+    expect(versions).toHaveLength(46)
     expect(versions[19]).toBe(20)
     expect(versions[20]).toBe(21)
     expect(versions[21]).toBe(22)

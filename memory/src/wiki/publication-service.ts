@@ -9,6 +9,12 @@ import { wikiCandidateContentHash } from './skeleton-builder.js'
 import type { WikiCandidateDocumentV1, WikiCoverage } from './types.js'
 import { validateWikiCandidate } from './validator.js'
 import type { Phase4Metrics } from '../metrics.js'
+import { createTransactionBoundPool } from '../api/transaction-bound-pool.js'
+import { canonicalJsonString } from '../inbox/canonical-json.js'
+import { readGitAssets, type GitReaderInput } from '../git-sync/asset-reader.js'
+import { WikiAssetSchema, type WikiAsset } from '../git-sync/types.js'
+import { createWikiManualService } from './manual-service.js'
+import { assertImportApproval, type GovernedImport } from '../git-sync/governance-adapter.js'
 
 export type WikiPublicationErrorCode =
   | 'forbidden'
@@ -49,6 +55,94 @@ export function createWikiPublicationService(
   options: { metrics?: Phase4Metrics } = {},
 ) {
   return {
+    /** Intentional withdrawal retains version/section history and permanently
+     * retires this Wiki identity. Git caller owns the original transaction. */
+    async revoke(input:{grant:ValidatedV2Grant;targetInstallationId:string;current:WikiAsset;sourceContext:GitReaderInput;governed:GovernedImport}):Promise<{wikiVersionId:string;revision:number}> {
+      const current=WikiAssetSchema.parse(input.current),client=await pool.connect()
+      try {
+        await client.query('BEGIN')
+        await assertImportApproval(client,input.governed)
+        const approved=input.governed.proposal.proposed_document.result
+        if(approved.kind!=='proposal'||!approved.asset.deleted||canonicalJsonString(input.governed.current.asset)!==canonicalJsonString(current))throw new Error('git_governance_required')
+        const actor=await requireCurrentWikiPermission({client,grant:input.grant,targetInstallationId:input.targetInstallationId,permission:'publish'})
+        await assertImportApproval(client,input.governed,actor.membership_id)
+        if(current.immutable.installationId!==input.targetInstallationId||current.immutable.ownerScopeKind!==actor.owner_scope_kind
+          ||current.immutable.ownerScopeId!==actor.owner_scope_id||!Number.isSafeInteger(Number(current.baseRevision)))throw new WikiPublicationError('revision_conflict')
+        const [fresh]=await readGitAssets(client,{...input.sourceContext,grant:input.grant},[current.key]);fresh.path=current.path
+        if(canonicalJsonString(fresh)!==canonicalJsonString(current))throw new WikiPublicationError('source_missing')
+        const h=(await client.query(`SELECT h.active_version_id,h.revision::text,w.state,w.generation::text FROM memory_wiki_heads h JOIN memory_wikis w USING(installation_id,wiki_id)
+          WHERE h.installation_id=$1 AND h.wiki_id=$2 FOR UPDATE OF h,w`,[input.targetInstallationId,current.key.id])).rows[0]
+        if(!h||h.state!=='active'||h.active_version_id!==current.baseVersionId||h.revision!==current.baseRevision||h.generation!==current.serverOnly.generation)throw new WikiPublicationError('revision_conflict')
+        const revision=Number(current.baseRevision)+1
+        await client.query("UPDATE memory_wiki_versions SET state='revoked' WHERE installation_id=$1 AND wiki_version_id=$2",[input.targetInstallationId,current.baseVersionId])
+        await client.query('UPDATE memory_wiki_heads SET active_version_id=NULL,revision=revision+1,updated_at=NOW() WHERE installation_id=$1 AND wiki_id=$2',[input.targetInstallationId,current.key.id])
+        await client.query("UPDATE memory_wikis SET state='revoked',generation=generation+1,updated_at=NOW() WHERE installation_id=$1 AND wiki_id=$2",[input.targetInstallationId,current.key.id])
+        await client.query('COMMIT');return {wikiVersionId:current.baseVersionId,revision}
+      }catch(error){await client.query('ROLLBACK');throw error}finally{client.release()}
+    },
+    /** Publish an independently governed same-Scope whole-page revision. Exact
+     * source projection is shared with export; never forge a generator run.
+     * All generated provenance stays attached to its original published build. */
+    async publishRevision(input:{grant:ValidatedV2Grant;targetInstallationId:string;current:WikiAsset;proposed:WikiAsset;sourceContext:GitReaderInput;governed:GovernedImport}):Promise<{wikiVersionId:string;revision:number}> {
+      const current=WikiAssetSchema.parse(input.current),proposed=WikiAssetSchema.parse(input.proposed)
+      if(!Number.isSafeInteger(Number(current.baseRevision))||Number(current.baseRevision)>=Number.MAX_SAFE_INTEGER
+        ||!Number.isSafeInteger(Number(current.serverOnly.generation)))throw new WikiPublicationError('revision_conflict')
+      const client=await pool.connect()
+      try {
+        await client.query('BEGIN')
+        await assertImportApproval(client,input.governed)
+        const approved=input.governed.proposal.proposed_document.result
+        if(approved.kind==='conflict'||canonicalJsonString(input.governed.current.asset)!==canonicalJsonString(current)
+          ||canonicalJsonString(approved.asset.asset)!==canonicalJsonString(proposed))throw new Error('git_governance_required')
+        const actor=await requireCurrentWikiPermission({client,grant:input.grant,targetInstallationId:input.targetInstallationId,permission:'publish'})
+        await assertImportApproval(client,input.governed,actor.membership_id)
+        if(input.sourceContext.connection.installationId!==input.targetInstallationId||current.immutable.installationId!==input.targetInstallationId
+          ||current.immutable.ownerScopeKind!==actor.owner_scope_kind||current.immutable.ownerScopeId!==actor.owner_scope_id
+          ||canonicalJsonString({...proposed,editable:current.editable,path:current.path})!==canonicalJsonString(current))throw new WikiPublicationError('candidate_invalid')
+        const [fresh]=await readGitAssets(client,{...input.sourceContext,grant:input.grant},[current.key])
+        fresh.path=current.path
+        if(canonicalJsonString(fresh)!==canonicalJsonString(current))throw new WikiPublicationError('source_missing')
+        const head=(await client.query('SELECT active_version_id,revision::text FROM memory_wiki_heads WHERE installation_id=$1 AND wiki_id=$2 FOR UPDATE',[input.targetInstallationId,current.key.id])).rows[0]
+        if(!head||head.active_version_id!==current.baseVersionId||head.revision!==current.baseRevision)throw new WikiPublicationError('revision_conflict')
+        const authorities=new Map<string,string>(),manual=createWikiManualService(createTransactionBoundPool(client))
+        for(const [pi,page] of proposed.editable.pages.entries())for(const [si,section] of page.sections.entries()) {
+          const original=current.editable.pages[pi].sections[si],meta=current.immutable.pages[pi].sections[si]
+          const changed=canonicalJsonString(original)!==canonicalJsonString(section)
+          if(changed&&meta.authority==='locked')throw new WikiPublicationError('state_conflict')
+          authorities.set(section.sectionId,changed?'manual':meta.authority)
+          if(changed) {
+            if(!Number.isSafeInteger(Number(meta.lockVersion))||Number(meta.lockVersion)>=Number.MAX_SAFE_INTEGER)throw new WikiPublicationError('revision_conflict')
+            await manual.appendGoverned({grant:input.grant,targetInstallationId:input.targetInstallationId,wikiId:current.key.id,
+              sectionKey:section.sectionKey,expectedLockVersion:Number(meta.lockVersion),markdown:section.markdown,reasonCode:'git_governed_revision'},original.sectionKey)
+          }
+        }
+        const wikiVersionId=randomUUID(),revision=Number(current.baseRevision)+1
+        const contentHash=createHash('sha256').update(canonicalJsonString({editable:proposed.editable,sourceVersionId:current.baseVersionId})).digest('hex')
+        await client.query("UPDATE memory_wiki_versions SET state='superseded' WHERE installation_id=$1 AND wiki_version_id=$2 AND state='active'",[input.targetInstallationId,current.baseVersionId])
+        await client.query(`INSERT INTO memory_wiki_versions(wiki_version_id,installation_id,wiki_id,revision,source_snapshot_id,graph_version_id,build_run_id,state,content_hash)
+          VALUES($1,$2,$3,$4,$5,$6,$7,'active',$8)`,[wikiVersionId,input.targetInstallationId,current.key.id,revision,current.serverOnly.sourceSnapshotId,
+          current.serverOnly.graphVersionId,current.serverOnly.buildRunId,contentHash])
+        for(const [pi,page] of proposed.editable.pages.entries()) {
+          const meta=current.immutable.pages[pi]
+          await client.query('INSERT INTO memory_wiki_pages(wiki_version_id,installation_id,page_id,page_key,title,position) VALUES($1,$2,$3,$4,$5,$6)',
+            [wikiVersionId,input.targetInstallationId,page.pageId,meta.pageKey,page.title,meta.position])
+          for(const [si,section] of page.sections.entries()) {
+            await client.query(`INSERT INTO memory_wiki_sections(wiki_version_id,installation_id,section_id,page_id,section_key,heading,markdown,authority,coverage,position)
+              VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,[wikiVersionId,input.targetInstallationId,section.sectionId,page.pageId,section.sectionKey,section.heading,
+              section.markdown,authorities.get(section.sectionId),section.coverage,meta.sections[si].position])
+          }
+        }
+        await client.query(`INSERT INTO memory_wiki_source_bindings(wiki_version_id,installation_id,section_id,binding_id,source_kind,source_token,source_snapshot_id,commit_sha,created_at)
+          SELECT $1,installation_id,section_id,binding_id,source_kind,source_token,source_snapshot_id,commit_sha,created_at
+          FROM memory_wiki_source_bindings WHERE installation_id=$2 AND wiki_version_id=$3`,[wikiVersionId,input.targetInstallationId,current.baseVersionId])
+        const switched=await client.query(`UPDATE memory_wiki_heads SET active_version_id=$3,revision=$4,updated_at=NOW()
+          WHERE installation_id=$1 AND wiki_id=$2 AND revision=$5`,[input.targetInstallationId,current.key.id,wikiVersionId,revision,current.baseRevision])
+        if(switched.rowCount!==1)throw new WikiPublicationError('revision_conflict')
+        await client.query(`INSERT INTO memory_wiki_audit_events(audit_id,installation_id,wiki_id,action,result,old_content_hash,new_content_hash,actor_scope_kind,actor_scope_id,head_revision)
+          VALUES($1,$2,$3,'publish','success',$4,$5,$6,$7,$8)`,[randomUUID(),input.targetInstallationId,current.key.id,current.serverOnly.contentHash,contentHash,actor.owner_scope_kind,actor.owner_scope_id,revision])
+        await client.query('COMMIT');return {wikiVersionId,revision}
+      }catch(error){await client.query('ROLLBACK');throw error}finally{client.release()}
+    },
     async publish(input: PublishInput): Promise<{ wikiVersionId: string; revision: number }> {
       if (!Number.isSafeInteger(input.expectedGeneration) || input.expectedGeneration < 1
         || !Number.isSafeInteger(input.expectedHeadRevision) || input.expectedHeadRevision < 0) {

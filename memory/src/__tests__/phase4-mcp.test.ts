@@ -22,6 +22,7 @@ describe('Phase 4 read-only MCP surface', () => {
       cursorSigningKey: 'phase4-mcp-cursor',
     })
     expect([...registrations.keys()].filter(name => name.startsWith('memory_'))).toEqual([
+      'memory_git_status', 'memory_git_diff',
       'memory_search', 'memory_recall', 'memory_get_claim', 'memory_get_evidence',
       'memory_find_related_episodes', 'memory_get_repository_context',
       'memory_get_code_graph', 'memory_analyze_change_impact', 'memory_get_wiki_page',

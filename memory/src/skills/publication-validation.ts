@@ -5,7 +5,7 @@ import { currentReviewDecisions,evaluateQuorum } from '../governance/authority.j
 import { canonicalJsonString } from '../inbox/canonical-json.js'
 import { EPISODE_COMPILER_VERSION } from '../episodes/compiler.js'
 import { EPISODE_PACKET_COMPILER_VERSION } from '../episodes/packet.js'
-import { resolveSkillSource,SkillWorkError,type SkillSourceContext } from './source-resolver.js'
+import { resolveSkillSource,SkillWorkError,type SkillSourceContext,type SkillPrelockedLifecycle } from './source-resolver.js'
 import { archiveSourceRequest,findSkillArchive,type SkillVersionRow } from './version-repository.js'
 import { loadSkillReviewPolicySnapshot } from './review-policy-binding.js'
 import { loadSkillPublicationPolicy } from './policy-service.js'
@@ -14,6 +14,7 @@ import { skillDocumentHash } from './types.js'
 import type { SkillAuditInput } from './audit-repository.js'
 import type { SkillReplayCaseRegistry } from './replay-service.js'
 import { ReplayCaseSchema,replayCaseHash,replayTextHash,SKILL_REPLAY_RUNNER_VERSION } from './replay-runner.js'
+import { loadGitSkillCoauthors } from './git-coauthors.js'
 
 export type SkillPublicationIdentity={installationId:string;grant:V2GrantFacts}
 export type SkillPublicationErrorCode=Exclude<SkillAuditInput['code'],'ok'>
@@ -29,14 +30,17 @@ export function publicationDomainError(error:unknown):SkillPublicationError {
 }
 export interface SkillPublicationValidationDeps {context:SkillSourceContext;cases:SkillReplayCaseRegistry}
 export interface SkillPublicationTarget {
-  skillId:string;versionId:string;expectedRevision:number;mode:'manual'|'auto'|'execution'
+  skillId:string;versionId:string;expectedRevision:number|string;mode:'manual'|'auto'|'execution'
   allowHistoricalVersion?:boolean;additionalSessionIds?:readonly string[]
+  prelockedLifecycle?:SkillPrelockedLifecycle
 }
 type ReplayRow={run_id:string;head_revision:string;document_hash:string;source_digest:string;policy_hash:string;input_hash:string;runner_version:string;state:string}
 type CaseRow={case_id:string;kind:'historical_session'|'golden_task';provenance:string;reference_id:string;input_hash:string;state:string}
 
 /** Caller owns BEGIN/COMMIT. Acquire session/scope/source locks before task/head, then publication/rollout locks. */
 export async function validateSkillPublicationTarget(client:pg.PoolClient,identity:SkillPublicationIdentity,request:SkillPublicationTarget,deps:SkillPublicationValidationDeps){
+  if((typeof request.expectedRevision==='number'&&!Number.isSafeInteger(request.expectedRevision))
+    || !/^[1-9][0-9]{0,18}$/.test(String(request.expectedRevision)) || BigInt(request.expectedRevision)>9223372036854775807n)publicationFailure('revision_conflict')
   const permission=request.mode==='execution'?'read':'publish'
   const auth=createScopeAuthorization(createTransactionBoundPool(client)),early=await auth.validateV2Grant(identity.grant)
   if(!early||!auth.hasPermission(early,identity.installationId,permission))publicationFailure('forbidden')
@@ -49,7 +53,7 @@ export async function validateSkillPublicationTarget(client:pg.PoolClient,identi
   const caseRows=observedRun?(await client.query<CaseRow>(`SELECT * FROM memory_skill_replay_cases WHERE installation_id=$1 AND run_id=$2 ORDER BY case_id`,[identity.installationId,observedRun.run_id])).rows:[]
   const history=caseRows.filter(c=>c.kind==='historical_session').map(c=>c.reference_id)
   const source=await resolveSkillSource(client,{...identity,source:archiveSourceRequest(archive),requiredPermission:permission,
-    additionalSessionIds:[...history,...(request.additionalSessionIds??[])]},deps.context)
+    additionalSessionIds:[...history,...(request.additionalSessionIds??[])],prelockedLifecycle:request.prelockedLifecycle},deps.context)
   if(source.sourceDigest!==archive.source_digest||source.inputDigest!==archive.input_digest)publicationFailure('source_invalid')
   const grant=await auth.validateV2Grant(identity.grant),binding=grant?.scopeBindings.find(b=>b.installation_id===identity.installationId)
   if(!binding||!binding.permissions.includes(permission))publicationFailure('forbidden')
@@ -74,12 +78,14 @@ export async function validateSkillPublicationTarget(client:pg.PoolClient,identi
   }
   const members=(await client.query<{membership_id:string;membership_revision:string;state:string;roles:string[]}>(`
     SELECT membership_id,membership_revision::text,state,roles FROM memory_scope_memberships
-    WHERE installation_id=$1 AND membership_id=ANY($2::uuid[]) ORDER BY membership_id FOR SHARE`,
+    WHERE installation_id=$1 AND membership_id=ANY($2::uuid[])
+      AND (valid_from IS NULL OR valid_from<=clock_timestamp()) AND (valid_until IS NULL OR valid_until>clock_timestamp())
+    ORDER BY membership_id FOR SHARE`,
   [identity.installationId,[...decisions.filter(d=>d.actor_kind==='membership').map(d=>d.actor_id),...(publisher.actorKind==='membership'?[publisher.actorId]:[])]] )).rows
   if(publisher.actorKind==='membership'&&!members.some(m=>m.membership_id===publisher.actorId&&m.state==='active'&&(!publisherRevision||m.membership_revision===publisherRevision)&&m.roles.some(r=>r==='publisher'||r==='scope_administrator')))publicationFailure('forbidden')
   const task=(await client.query<{current_generation:string;state:string}>(`SELECT current_generation::text,state FROM memory_skill_tasks WHERE installation_id=$1 AND task_id=$2 FOR UPDATE`,[identity.installationId,archive.task_id])).rows[0]
   const head=(await client.query<{current_version_id:string;revision:string;state:string}>(`SELECT current_version_id,revision::text,state FROM memory_skill_heads WHERE installation_id=$1 AND skill_id=$2 FOR UPDATE`,[identity.installationId,request.skillId])).rows[0]
-  if(!head||Number(head.revision)!==request.expectedRevision)publicationFailure('revision_conflict')
+  if(!head||head.revision!==String(request.expectedRevision))publicationFailure('revision_conflict')
   if(head.state==='revoked'||(await client.query(`SELECT 1 FROM memory_skill_version_revocations WHERE installation_id=$1 AND version_id=$2`,[identity.installationId,request.versionId])).rowCount)publicationFailure('target_revoked')
   if(!request.allowHistoricalVersion&&(head.current_version_id!==request.versionId||head.state!=='reviewed'))publicationFailure('review_required')
   if(!task||['cancelled','dead'].includes(task.state)||(!request.allowHistoricalVersion&&task.current_generation!==archive.generation))publicationFailure('generation_invalid')
@@ -104,14 +110,16 @@ export async function validateSkillPublicationTarget(client:pg.PoolClient,identi
   if(request.mode==='auto'&&risk.risk!=='low')publicationFailure('risk_denied')
   // An author never publishes their own high/unknown-risk version; independent reviewer and publisher are distinct.
   if(risk.risk!=='low'&&publisher.actorKind===observed.author_kind&&publisher.actorId===observed.author_id)publicationFailure('self_publish_denied')
+  const coauthors=await loadGitSkillCoauthors(client,identity.installationId,request.versionId)
   const counted=binding.owner_scope_kind==='personal'?decisions.filter(d=>d.actor_kind==='personal'&&d.actor_id===binding.owner_scope_id).map(d=>({membershipId:d.actor_id,decision:d.decision}))
-    :currentReviewDecisions(decisions.filter(d=>d.actor_kind==='membership').map(d=>({decisionId:d.decision_id,membershipId:d.actor_id,membershipRevision:d.membership_revision,decision:d.decision})),
+    :currentReviewDecisions(decisions.filter(d=>d.actor_kind==='membership'&&(d.decision!=='approve'||!coauthors.has(d.actor_id))).map(d=>({decisionId:d.decision_id,membershipId:d.actor_id,membershipRevision:d.membership_revision,decision:d.decision})),
       members.filter(m=>(policy.snapshot.policy.publisher_may_count_as_reviewer||!m.roles.includes('publisher'))&&(risk.risk==='low'||m.membership_id!==publisher.actorId))
         .map(m=>({membershipId:m.membership_id,membershipRevision:m.membership_revision,state:m.state,roles:m.roles})))
-  if(!evaluateQuorum({decisions:counted,policy:policy.snapshot.policy,proposerMembershipId:observed.author_id,publisherMembershipId:publisher.actorId}).ok)publicationFailure('review_required')
+  const quorum=evaluateQuorum({decisions:counted,policy:policy.snapshot.policy,proposerMembershipId:observed.author_id,publisherMembershipId:publisher.actorId})
+  if(!quorum.ok)publicationFailure('review_required')
   const latest=(await client.query<ReplayRow>(`SELECT * FROM memory_skill_replay_runs WHERE installation_id=$1 AND version_id=$2 ORDER BY sequence DESC LIMIT 1 FOR SHARE`,[identity.installationId,request.versionId])).rows[0]
   if(!latest||latest.run_id!==observedRun?.run_id||latest.state!=='passed'||latest.document_hash!==observed.document_hash||latest.source_digest!==source.sourceDigest||latest.policy_hash!==policy.hash||latest.runner_version!==SKILL_REPLAY_RUNNER_VERSION)publicationFailure('replay_failed')
-  if(!request.allowHistoricalVersion&&Number(latest.head_revision)!==request.expectedRevision)publicationFailure('replay_failed')
+  if(!request.allowHistoricalVersion&&latest.head_revision!==String(request.expectedRevision))publicationFailure('replay_failed')
   if(!['historical_session','golden_task'].every(k=>caseRows.some(c=>c.kind===k))||caseRows.some(c=>c.state!=='passed'))publicationFailure('replay_failed')
   for(const sessionId of history){
     const valid=await client.query(`SELECT 1 FROM source_sessions s JOIN work_episodes e USING(installation_id,session_id)
@@ -140,5 +148,10 @@ export async function validateSkillPublicationTarget(client:pg.PoolClient,identi
       AND NOT EXISTS(SELECT 1 FROM memory_session_tombstones t WHERE t.installation_id=e.installation_id AND t.session_id=e.session_id)`,[identity.installationId,archive.repository_id,archive.repo_snapshot_id,archive.episode_id,archive.archive_id,EPISODE_COMPILER_VERSION,EPISODE_PACKET_COMPILER_VERSION])).rows
   const independentSuccesses=natural.length
   if(request.mode==='auto'&&independentSuccesses<publicationPolicy.policy.minimumIndependentSuccesses)publicationFailure('independent_successes_required')
-  return {version:observed,archive,actor,binding,replayRunId:latest.run_id,independentSuccesses,policyHash:policy.hash,requiredIndependentSuccesses:publicationPolicy.policy.minimumIndependentSuccesses}
+  // Internal temporal dependencies, never a portable asset field. Consumers
+  // waiting on later locks can recheck exactly the successful quorum/publisher.
+  const authorizationMembershipIds=binding.owner_scope_kind==='personal'?[]:[...new Set([
+    ...quorum.countedDecisionMemberships,...(publisher.actorKind==='membership'?[publisher.actorId]:[]),
+  ])].sort()
+  return {version:observed,archive,actor,binding,replayRunId:latest.run_id,independentSuccesses,policyHash:policy.hash,requiredIndependentSuccesses:publicationPolicy.policy.minimumIndependentSuccesses,authorizationMembershipIds}
 }

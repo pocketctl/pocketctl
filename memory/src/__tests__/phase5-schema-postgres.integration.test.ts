@@ -73,7 +73,7 @@ db('Phase 5 immutable archive schema (migration 31)', () => {
 
   test('upgrades populated v30 and v37 databases idempotently without changing archive content', async () => {
     const f = await fixture()
-    expect(MEMORY_MIGRATIONS.map(m => m.version)).toEqual(Array.from({ length: 38 }, (_, i) => i + 1))
+    expect(MEMORY_MIGRATIONS.map(m => m.version)).toEqual(Array.from({ length: 46 }, (_, i) => i + 1))
     const client=await pool.connect()
     try {
       for(const migration of MEMORY_MIGRATIONS.filter(m=>m.version>30&&m.version<=37)) {
