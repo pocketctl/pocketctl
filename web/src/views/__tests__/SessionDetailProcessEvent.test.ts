@@ -10,6 +10,7 @@ import MessageAgent from '../../components/messages/MessageAgent.vue'
 import OpenCodePartCard from '../../components/messages/OpenCodePartCard.vue'
 import FileChangeCard from '../../components/messages/FileChangeCard.vue'
 import FileChangeBottomSheet from '../../components/messages/FileChangeBottomSheet.vue'
+import ToolCallGroup from '../../components/messages/ToolCallGroup.vue'
 
 const websocketMock = vi.hoisted(() => ({ handlers: new Map<string, (message: any) => void>(), allHandlers: new Set<(message: any) => void>() }))
 const routeMock = vi.hoisted(() => ({ current: null as any }))
@@ -196,6 +197,25 @@ describe('SessionDetail processEvent integration', () => {
     const messages = wrapper.get('.chat-messages').element as HTMLElement
     expect(toolbar.style.position).toBe('relative')
     expect(Number(toolbar.style.zIndex)).toBeGreaterThan(Number(messages.style.zIndex) || 0)
+    wrapper.unmount()
+  })
+
+  test('groups consecutive ordinary tool calls without crossing a diff card boundary', async () => {
+    const wrapper = shallowMount(SessionDetail)
+    const vm = wrapper.vm as any
+    vm.allSessions = [{ session_id: 'ses_1', daemon_id: 'daemon-1', status: 'running' }]
+
+    vm.processEvent({ type: 'tool_call', call_id: 'read-1', tool: 'Read', input: { path: 'a.ts' }, turn_id: 'turn-1', flow_scope: 'auxiliary' })
+    vm.processEvent({ type: 'tool_call', call_id: 'bash-1', tool: 'Bash', input: { command: 'npm test' }, turn_id: 'turn-1', flow_scope: 'auxiliary' })
+    vm.processEvent({ type: 'tool_call', call_id: 'edit-1', tool: 'Edit', input: { file_path: 'a.ts', old_string: 'a', new_string: 'b' }, turn_id: 'turn-1', flow_scope: 'auxiliary' })
+    vm.processEvent({ type: 'tool_call', call_id: 'read-2', tool: 'Read', input: { path: 'b.ts' }, turn_id: 'turn-1', flow_scope: 'auxiliary' })
+    await wrapper.vm.$nextTick()
+
+    const groups = wrapper.findAllComponents(ToolCallGroup)
+    expect(groups).toHaveLength(2)
+    expect(groups[0].props('messages').map((message: any) => message.call_id)).toEqual(['read-1', 'bash-1'])
+    expect(groups[1].props('messages').map((message: any) => message.call_id)).toEqual(['read-2'])
+    expect(wrapper.find('diff-card-stub').exists()).toBe(true)
     wrapper.unmount()
   })
 

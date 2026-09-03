@@ -51,6 +51,19 @@ function mountSession() {
   return wrapper
 }
 
+function useMobileViewport() {
+  vi.stubGlobal('matchMedia', vi.fn(() => ({
+    matches: true,
+    media: '(max-width: 768px)',
+    onchange: null,
+    addEventListener: vi.fn(),
+    removeEventListener: vi.fn(),
+    addListener: vi.fn(),
+    removeListener: vi.fn(),
+    dispatchEvent: vi.fn(),
+  })))
+}
+
 function setTerminalSession(overrides: Record<string, unknown>) {
   websocketMock.handlers.get('session_list')?.({ sessions: [session(overrides)] })
   websocketMock.handlers.get('session_status')?.({ session_id: 'thr_1', status: 'completed' })
@@ -83,6 +96,36 @@ function deliveryStatus(wrapper: ReturnType<typeof shallowMount>, content: strin
 }
 
 describe('SessionDetail managed Codex terminal control', () => {
+  test('keeps the mobile composer compact and caps wrapped input at five lines', async () => {
+    useMobileViewport()
+    const wrapper = mountSession()
+    setTerminalSession({
+      control_mode: 'managed',
+      capabilities: ['message_acceptance_receipt'],
+    })
+    await nextTick()
+
+    const textarea = wrapper.get('.chat-textarea')
+    expect(textarea.attributes('rows')).toBe('1')
+    expect((textarea.element as HTMLTextAreaElement).style.height).toBe('50px')
+
+    await textarea.trigger('focus')
+    await nextTick()
+    expect(wrapper.get('.chat-input-area').classes()).toContain('composer-focused')
+    expect((textarea.element as HTMLTextAreaElement).style.height).toBe('46px')
+
+    Object.defineProperty(textarea.element, 'scrollHeight', { configurable: true, value: 160 })
+    await textarea.setValue('A wrapped mobile prompt that needs several visible lines before scrolling.')
+    await nextTick()
+
+    expect((textarea.element as HTMLTextAreaElement).style.height).toBe('112px')
+
+    Object.defineProperty(textarea.element, 'scrollHeight', { configurable: true, value: 180 })
+    await textarea.setValue('A still longer wrapped mobile prompt that must remain internally scrollable.')
+    await nextTick()
+    expect((textarea.element as HTMLTextAreaElement).style.height).toBe('112px')
+  })
+
   test('collapses adjacent historical Codex replies that differ only by a memory citation', async () => {
     const wrapper = mountSession()
     const reply = 'Only the adapter and clients changed.'

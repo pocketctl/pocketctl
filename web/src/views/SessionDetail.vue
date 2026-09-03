@@ -225,7 +225,7 @@
             <span v-if="turnHeaderFor(msg)?.continuedAfterInterrupt" class="turn-group-continuation">中断后继续</span>
             <button v-if="turnHeaderFor(msg)?.auxiliary.length" type="button" class="turn-group-aux-toggle" :aria-expanded="isAuxiliaryExpanded(turnHeaderFor(msg)?.id)" :aria-label="`Turn ${msg.turn_id} 辅助流`" @click="toggleAuxiliary(turnHeaderFor(msg)?.id)">辅助流（{{ turnHeaderFor(msg)?.auxiliary.length }}）</button>
           </div>
-          <template v-if="!isHiddenAuxiliary(msg)">
+          <template v-if="!isHiddenAuxiliary(msg) && !isToolGroupContinuation(msg)">
           <!-- User message (right bubble) -->
           <MessageUser
             v-if="msg.role === 'user'"
@@ -274,6 +274,10 @@
             :token-usage="msg.tokenUsage || childrenToken[msg.tool]"
             :messages="subagentMessages[msg.tool] || []"
             :parent-title="sessionTitle || ''"
+          />
+          <ToolCallGroup
+            v-else-if="toolGroupFor(msg)"
+            :messages="toolGroupFor(msg) || [msg]"
           />
           <ToolCallCard
             v-else-if="msg.type === 'tool_call'"
@@ -387,7 +391,7 @@
       </div>
 
       <!-- Chat Input — unified container with embedded controls -->
-      <div ref="composerEl" class="chat-input-area" :class="{ ended: !composerState.visible }">
+      <div ref="composerEl" class="chat-input-area" :class="{ ended: !composerState.visible, 'composer-focused': isInputFocused }">
         <!-- Scroll-to-bottom: absolute child of chat-input-area, floats above
              its top edge. Doesn't take up flex space in chat-messages. -->
         <Transition name="scroll-btn">
@@ -413,14 +417,14 @@
             <textarea
               v-model="messageInput"
               class="chat-textarea"
-              :style="{ height: textareaHeight + 'px' }"
+              :style="{ height: composerTextareaHeight + 'px' }"
               :placeholder="isPendingSession ? t('session.input_creating') : (isDaemonSession && isTerminalStatus ? t('session.input_resume') : t('session.input_send'))"
               @keydown="onInputKeydown"
-              @focus="isInputFocused = true"
-              @blur="isInputFocused = false"
+              @focus="handleComposerFocus"
+              @blur="handleComposerBlur"
               :disabled="!composerState.editable || isPendingSession"
               ref="inputEl"
-              rows="3"
+              :rows="isMobile ? 1 : 3"
             ></textarea>
 
             <!-- Bottom control row -->
@@ -598,6 +602,7 @@ import MessageAgent from '../components/messages/MessageAgent.vue'
 import MessageError from '../components/messages/MessageError.vue'
 import { useLocale } from '../composables/useLocale'
 import ToolCallCard from '../components/messages/ToolCallCard.vue'
+import ToolCallGroup from '../components/messages/ToolCallGroup.vue'
 import QuestionCard from '../components/messages/QuestionCard.vue'
 import ApprovalCard from '../components/messages/ApprovalCard.vue'
 import { trustedApprovalActions } from '../utils/trustedApprovalActions'
@@ -615,6 +620,7 @@ import { isZcodeObserverSession as isZcodeObserverSessionHelper } from '../utils
 import { resolveAgentTarget } from './classifyByAgent'
 import { formatToolInput } from '../utils/toolDisplay'
 import { isDiffTool } from '../utils/diffRender'
+import { buildToolCallGrouping } from '../utils/toolGrouping'
 import { formatTokenCount } from '../utils/tokenFormat'
 import { agentDisplayName } from '../utils/agentDisplay'
 import { useSessionRename } from '../composables/useSessionRename'
@@ -836,7 +842,7 @@ const messagesEl = ref<HTMLDivElement | null>(null)
 const composerEl = ref<HTMLElement | null>(null)
 const composerHeight = ref(0)
 const composerFloatClearance = computed(() => Math.max(
-  isMobile.value ? 188 : 156,
+  isMobile.value ? 112 : 156,
   composerHeight.value + 16,
 ))
 const inputEl = ref<HTMLTextAreaElement | null>(null)
@@ -846,7 +852,12 @@ const isInputFocused = ref(false)
 const DEFAULT_TEXTAREA_HEIGHT = 72  // ~3 rows
 const MIN_TEXTAREA_HEIGHT = 60
 const MAX_TEXTAREA_HEIGHT = 400
+const MOBILE_MIN_TEXTAREA_HEIGHT = 50
+const MOBILE_FOCUSED_MIN_TEXTAREA_HEIGHT = 46
+const MOBILE_MAX_TEXTAREA_HEIGHT = 112
 const textareaHeight = ref(DEFAULT_TEXTAREA_HEIGHT)
+const mobileTextareaHeight = ref(MOBILE_MIN_TEXTAREA_HEIGHT)
+const composerTextareaHeight = computed(() => isMobile.value ? mobileTextareaHeight.value : textareaHeight.value)
 const daemons = ref<Record<string, any>>({})
 
 function setDaemonConnectivity(daemonId: string, online: boolean, update: any = {}) {
@@ -1042,6 +1053,13 @@ const focusedSubAgentTokenTotal = computed(() => {
 const renderMessages = computed(() =>
   focusedSubAgentId.value ? (subagentMessages.value[focusedSubAgentId.value] || []) : messages.value,
 )
+const toolGrouping = computed(() => buildToolCallGrouping(renderMessages.value))
+function toolGroupFor(message: any): any[] | undefined {
+  return toolGrouping.value.groups.get(message)
+}
+function isToolGroupContinuation(message: any): boolean {
+  return toolGrouping.value.continuations.has(message)
+}
 // Projection happens only after the established root/subagent bucket selection.
 // It is display-only; reducers and replay storage retain their original order.
 const turnSegmentIdentityRegistry = new TurnSegmentIdentityRegistry()
@@ -2132,7 +2150,39 @@ const showPopover = computed(() => !popoverDismissed.value && filteredCommands.v
 watch(messageInput, () => {
   selectedIndex.value = 0
   popoverDismissed.value = false
+  if (isMobile.value) nextTick(resizeMobileComposerTextarea)
 })
+
+watch(isMobile, (mobile) => {
+  if (mobile) nextTick(resizeMobileComposerTextarea)
+})
+
+function resizeMobileComposerTextarea() {
+  const element = inputEl.value
+  if (!isMobile.value || !element) return
+  element.style.height = 'auto'
+  const minimumHeight = isInputFocused.value
+    ? MOBILE_FOCUSED_MIN_TEXTAREA_HEIGHT
+    : MOBILE_MIN_TEXTAREA_HEIGHT
+  const nextHeight = Math.min(
+    MOBILE_MAX_TEXTAREA_HEIGHT,
+    Math.max(minimumHeight, element.scrollHeight),
+  )
+  mobileTextareaHeight.value = nextHeight
+  // Keep the DOM constrained even when Vue sees the same numeric value and
+  // therefore skips patching the inline height after the temporary `auto`.
+  element.style.height = `${nextHeight}px`
+}
+
+function handleComposerFocus() {
+  isInputFocused.value = true
+  nextTick(resizeMobileComposerTextarea)
+}
+
+function handleComposerBlur() {
+  isInputFocused.value = false
+  nextTick(resizeMobileComposerTextarea)
+}
 
 // --- Textarea resize via drag handle ---
 function startResize(e: MouseEvent) {
@@ -3507,9 +3557,9 @@ onMounted(() => {
    Left-aligned (natural document flow), unlike centered tool cards. */
 .chat-messages > .agent-block { min-width: 0; max-width: 760px; width: fit-content; align-self: flex-start; }
 /* Errors / banners: full width within 860px, centered. (tool-wrap + receipt-card excluded — left-aligned) */
-.chat-messages > *:not(.msg):not(.agent-block):not(.tool-wrap):not(.receipt-card):not(.turn-status-bar) { min-width: 0; max-width: 860px; width: 100%; align-self: center; }
+.chat-messages > *:not(.msg):not(.agent-block):not(.tool-wrap):not(.tool-call-group):not(.receipt-card):not(.turn-status-bar) { min-width: 0; max-width: 860px; width: 100%; align-self: center; }
 /* Tool cards: left-aligned, not centered. */
-.chat-messages > .tool-wrap { min-width: 0; max-width: 860px; width: 100%; align-self: flex-start; }
+.chat-messages > .tool-wrap, .chat-messages > .tool-call-group { min-width: 0; max-width: 860px; width: 100%; align-self: flex-start; }
 .chat-messages > *.msg { min-width: 0; max-width: 78%; }
 .chat-messages > .banner { margin-bottom: 0; }
 .chat-messages > .messages-bottom-spacer { width: 100%; max-width: none; min-height: 0; flex: 1 0 0; }
@@ -3733,7 +3783,7 @@ onMounted(() => {
 }
 @media (max-width: 768px) {
   .session-layout { height: calc(var(--visual-viewport-height, 100dvh) - var(--mobile-topbar-h)); }
-  .chat-area { --composer-float-clearance: 188px; --session-content-gutter: 12px; }
+  .chat-area { --composer-float-clearance: 112px; --session-content-gutter: 14px; }
   .session-panel,
   .chat-toolbar { display: none; }
   .mobile-session-toolbar-overflow {
@@ -3786,14 +3836,141 @@ onMounted(() => {
   .file-change-panel-list { padding: 10px 10px max(18px, env(safe-area-inset-bottom)); }
   .chat-messages { padding: 14px var(--session-content-gutter) calc(14px + var(--composer-float-clearance)); gap: 12px; }
   .chat-input-area {
-    padding: 0 var(--session-content-gutter) max(10px, env(safe-area-inset-bottom));
+    padding: 0 10px max(10px, env(safe-area-inset-bottom));
   }
+  .chat-input-area.composer-focused { padding-bottom: 7px; }
   .unmanaged-readonly-notice { grid-template-columns: 34px minmax(0, 1fr); gap: 10px; padding: 10px; border-radius: var(--radius-md); }
   .unmanaged-readonly-icon { width: 34px; height: 34px; border-radius: 10px; }
   .unmanaged-readonly-agent { display: none; }
   .unmanaged-readonly-description { white-space: normal; }
   .textarea-resize-handle { display: none; }
-  .chat-textarea { resize: none; padding-top: 10px; }
+  .chat-input-container {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) 44px;
+    grid-template-rows: minmax(31px, auto) auto;
+    column-gap: 6px;
+    overflow: visible;
+    padding: 0 6px 6px 11px;
+    border-radius: 15px;
+    background: color-mix(in srgb, var(--surface) 96%, transparent);
+    box-shadow: 0 12px 32px rgba(0, 0, 0, .38);
+    backdrop-filter: blur(18px);
+    -webkit-backdrop-filter: blur(18px);
+  }
+  .chat-input-container.focused {
+    border-color: var(--border-light);
+    box-shadow: 0 12px 32px rgba(0, 0, 0, .38);
+  }
+  .chat-textarea {
+    grid-column: 1;
+    grid-row: 2;
+    min-width: 0;
+    min-height: 50px;
+    max-height: 112px;
+    display: block;
+    overflow-y: auto;
+    resize: none;
+    padding: 8px 2px 7px;
+    font-size: 16px;
+    line-height: 1.45;
+    caret-color: var(--accent);
+  }
+  .chat-input-container.focused .chat-textarea { min-height: 46px; }
+  .input-controls { display: contents; }
+  .perm-dropdown {
+    grid-column: 1;
+    grid-row: 1;
+    align-self: center;
+    justify-self: start;
+    min-width: 0;
+    margin-left: -3px;
+    z-index: 2;
+  }
+  .perm-trigger {
+    min-width: 0;
+    height: 25px;
+    gap: 4px;
+    padding: 0 7px;
+    border-radius: 7px;
+    font-size: 10px;
+    white-space: nowrap;
+  }
+  .perm-trigger > svg:first-child { width: 12px; height: 12px; flex: 0 0 auto; }
+  .perm-label { overflow: hidden; text-overflow: ellipsis; }
+  .perm-menu {
+    bottom: calc(100% + 7px);
+    left: -8px;
+    width: min(250px, calc(100vw - 40px));
+    padding: 5px;
+    border-color: var(--border-light);
+    border-radius: 12px;
+    box-shadow: var(--shadow-lg);
+  }
+  .perm-menu-item { min-height: 48px; padding: 7px 9px; border-radius: 8px; }
+  .perm-menu-copy small { margin-top: 2px; font-size: 10px; }
+  .input-meta {
+    grid-column: 1 / 3;
+    grid-row: 1;
+    align-self: center;
+    justify-self: end;
+    max-width: calc(100% - 112px);
+    gap: 5px;
+    margin-right: 2px;
+    overflow: hidden;
+  }
+  .input-meta .model-pill {
+    height: 25px;
+    max-width: 100px;
+    gap: 4px;
+    padding: 0 7px;
+    border-radius: 7px;
+    font-size: 10px;
+  }
+  .input-meta .model-pill svg { width: 12px; height: 12px; }
+  .ctx-indicator {
+    height: 25px;
+    flex: 0 0 auto;
+    gap: 4px;
+    padding: 0 4px;
+    font-size: 9px;
+    white-space: nowrap;
+  }
+  .ctx-indicator svg { width: 12px; height: 12px; }
+  .chat-input-container.focused .ctx-indicator { display: none; }
+  .input-actions {
+    grid-column: 2;
+    grid-row: 2;
+    align-self: end;
+    justify-self: end;
+    position: relative;
+    display: grid;
+    place-items: center;
+    gap: 0;
+    padding-bottom: 1px;
+  }
+  .action-btn {
+    width: 42px;
+    height: 42px;
+    border-radius: 12px;
+    transition: transform 100ms ease, opacity 100ms ease, background 100ms ease;
+  }
+  .action-btn:active:not(:disabled) { transform: scale(.94); }
+  .send-btn:disabled,
+  .stop-btn:disabled { color: var(--fg-tertiary); background: var(--surface-active); }
+  .stop-btn { color: var(--error); background: var(--error-bg); }
+  .stop-error-hint {
+    position: absolute;
+    right: 0;
+    bottom: calc(100% + 7px);
+    max-width: calc(100vw - 40px);
+    overflow: hidden;
+    padding: 6px 8px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: var(--surface);
+    box-shadow: var(--shadow-md);
+    text-overflow: ellipsis;
+  }
 }
 @media (prefers-reduced-motion: reduce) {
   .request-deep-link-target { animation: none; outline: 2px solid var(--warning); }
