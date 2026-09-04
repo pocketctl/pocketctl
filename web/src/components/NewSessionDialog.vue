@@ -187,6 +187,7 @@ import { useRouter } from 'vue-router'
 import { useWebSocket } from '../composables/useWebSocket'
 import { useLocale } from '../composables/useLocale'
 import { useQuota } from '../composables/useQuota'
+import { createClientId } from '../utils/clientId'
 import { defaultPermission, expandCodexPreset, permissionOptions, type AgentType, type ClaudeMode, type CodexPreset, type PermissionConfig } from '../types/permission'
 
 const props = defineProps<{ daemons?: any[]; preSelectedDaemonId?: string }>()
@@ -298,7 +299,7 @@ function startSession() {
     showError('concurrent_session_quota_exceeded')
     return
   }
-  currentRequestId = crypto.randomUUID()
+  currentRequestId = createClientId()
   creating.value = true
   phase.value = 'submitting'
   hideError()

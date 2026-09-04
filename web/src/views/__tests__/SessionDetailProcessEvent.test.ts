@@ -35,7 +35,7 @@ vi.mock('../../composables/useWebSocket', () => ({
   }),
 }))
 
-vi.mock('../../composables/useLocale', () => ({ useLocale: () => ({ t: (key: string) => key }) }))
+vi.mock('../../composables/useLocale', () => ({ useLocale: () => ({ t: (key: string) => key, locale: ref('en') }) }))
 vi.mock('../../composables/useSessionRename', () => ({
   useSessionRename: () => ({
     renamingId: ref(''), renameInput: ref(''), startRename: vi.fn(), commitRename: vi.fn(), cancelRename: vi.fn(),
@@ -890,6 +890,43 @@ describe('SessionDetail processEvent integration', () => {
       status: 'completed', output: 'received later',
     })
   })
+
+  test.each(['codex', 'claude-code'])(
+    'keeps a stale-running %s session running at replay end while work is unresolved',
+    (agentType) => {
+      const wrapper = shallowMount(SessionDetail)
+      const vm = wrapper.vm as any
+      const batch = websocketMock.handlers.get('replay_batch')!
+      const end = websocketMock.handlers.get('replay_end')!
+
+      websocketMock.handlers.get('session_list')?.({
+        type: 'session_list',
+        sessions: [{
+          session_id: 'ses_1', daemon_id: 'daemon-1', agent_type: agentType, status: 'running',
+          created_at: '2000-01-01T00:00:00.000Z', last_activity_at: '2000-01-01T00:00:00.000Z',
+          children: [{ agentId: 'child-running', status: 'running' }],
+        }],
+      })
+      batch({
+        type: 'replay_batch', session_id: 'ses_1', events: [
+          { type: 'tool_call', session_id: 'ses_1', call_id: 'still-running', tool: 'wait', input: '{}' },
+          {
+            type: 'turn_status', session_id: 'ses_1', agent_id: 'child-running',
+            turn_id: 'turn-child-running', turn_status: 'running',
+          },
+        ],
+      })
+
+      end({ type: 'replay_end', session_id: 'ses_1' })
+
+      expect(vm.status).toBe('running')
+      expect(vm.messages.find((message: any) => message.call_id === 'still-running')).toMatchObject({ status: 'running' })
+      expect(vm.subagentMessages['child-running']).toContainEqual(expect.objectContaining({
+        type: 'turn_status', turn_id: 'turn-child-running', turn_status: 'running',
+      }))
+      wrapper.unmount()
+    },
+  )
 
   test('consumes the shared OpenCode release contract with request and Part deduplication', () => {
     const contract = JSON.parse(readFileSync(resolve(process.cwd(), '../internal/e2e/testdata/opencode_release_gate.json'), 'utf8')) as {

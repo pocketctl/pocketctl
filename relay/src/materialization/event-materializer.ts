@@ -37,6 +37,11 @@ import type {
   MaterializationResult,
   PendingOperationIdentity,
 } from './types.js'
+import { resolveSessionActivityAt } from './session-activity-policy.js'
+
+const subagentTurnStatuses = new Set([
+  'running', 'interrupt_requested', 'completed', 'interrupted', 'failed', 'abandoned',
+])
 
 export type MaterializationEffect = (effect: DurableEffectContext) => Promise<void> | void
 
@@ -565,9 +570,21 @@ export class EventMaterializer {
     input: MaterializationInput,
     effect: DurableEffectContext,
   ): Promise<boolean> {
-    if (input.eventType !== 'subagent_discovered') return false
     const payload = input.payload
     const sessionId = input.sessionId ?? ''
+    if (input.eventType === 'turn_status') {
+      const agentId = typeof payload.agent_id === 'string' ? payload.agent_id : ''
+      const status = typeof payload.turn_status === 'string' ? payload.turn_status : ''
+      if (!sessionId || !agentId || !subagentTurnStatuses.has(status)) return false
+      await effect.step(() => db.upsertSubagentStatus(
+        this.options.transactionClient ?? this.effectPool,
+        sessionId,
+        agentId,
+        status,
+      ))
+      return true
+    }
+    if (input.eventType !== 'subagent_discovered') return false
     await effect.step(async () => {
       const relation = {
         parentSessionId: sessionId,
@@ -614,6 +631,17 @@ export class EventMaterializer {
     result: MaterializationResult,
   ): MaterializationEffect {
     return async (effect) => {
+      // Activity is appended after every event's existing effects so durable
+      // effect-step ordinals remain compatible with rows created by older relays.
+      const materializeActivity = async () => {
+        const activityAt = resolveSessionActivityAt(input)
+        if (activityAt && input.sessionId) {
+          const writeActivity = input.eventType === 'session_discovered'
+            ? db.restoreSessionActivity
+            : db.advanceSessionActivity
+          await effect.step(() => writeActivity(this.effectPool, input.sessionId!, activityAt))
+        }
+      }
       // Preserve the legacy generic session accumulator for older payloads
       // carrying usage, while restricting immutable accounting facts to the
       // canonical agent_text event. subagent_usage is paired bookkeeping and
@@ -652,10 +680,20 @@ export class EventMaterializer {
           },
         ))
       }
-      if (await this.materializeSessionLifecycle(input, result, effect)) return
-      if (await this.materializeInteraction(input, result.eventId, effect)) return
-      if (await this.materializeSubagent(input, effect)) return
+      if (await this.materializeSessionLifecycle(input, result, effect)) {
+        await materializeActivity()
+        return
+      }
+      if (await this.materializeInteraction(input, result.eventId, effect)) {
+        await materializeActivity()
+        return
+      }
+      if (await this.materializeSubagent(input, effect)) {
+        await materializeActivity()
+        return
+      }
       await this.materializeGenericEvent(input, effect)
+      await materializeActivity()
     }
   }
 

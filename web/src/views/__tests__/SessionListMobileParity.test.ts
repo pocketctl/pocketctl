@@ -5,10 +5,11 @@ import SessionList from '../SessionList.vue'
 
 let emitEvent: ((event: any) => void) | undefined
 const push = vi.fn()
+const routeQuery = ref<Record<string, string>>({})
 
 vi.mock('vue-router', () => ({
   useRouter: () => ({ push }),
-  useRoute: () => ({ query: { host: 'daemon-1' } }),
+  useRoute: () => ({ query: routeQuery.value }),
 }))
 
 vi.mock('../../composables/useResponsiveLayout', () => ({
@@ -41,6 +42,7 @@ describe('SessionList latest iOS mobile parity', () => {
   beforeEach(() => {
     push.mockClear()
     emitEvent = undefined
+    routeQuery.value = { host: 'daemon-1' }
   })
 
   test('renders host navigation, daemon status, fixed search and new-session controls', async () => {
@@ -82,6 +84,52 @@ describe('SessionList latest iOS mobile parity', () => {
 
     expect(wrapper.get('.mobile-daemon-status-copy').text()).toContain('在线')
     expect(wrapper.get('.mobile-daemon-dot').classes()).toContain('online')
+  })
+
+  test('shows a connecting state instead of a false offline while daemon list is in flight', async () => {
+    const wrapper = mount(SessionList)
+    await nextTick()
+
+    expect(wrapper.get('.mobile-daemon-status-copy').text()).toBe('连接中…')
+    expect(wrapper.get('.mobile-daemon-dot').classes()).not.toContain('online')
+  })
+
+  test('inserts replayed discovery at its source activity time instead of promoting it', async () => {
+    const wrapper = mount(SessionList)
+    emitEvent?.({ type: 'session_list', daemon_id: 'daemon-1', sessions })
+    emitEvent?.({
+      type: 'session_discovered',
+      session_id: 'historical-session',
+      daemon_id: 'daemon-1',
+      title: 'Historical Session',
+      agent: 'codex',
+      status: 'idle',
+      resync: true,
+      last_activity_at: '2026-08-01T08:00:00Z',
+    })
+    await nextTick()
+
+    const text = wrapper.text()
+    expect(text).toContain('Historical Session')
+    expect(text.indexOf('Alpha Local Session')).toBeLessThan(text.indexOf('Historical Session'))
+  })
+
+  test('hides the host status line when the daemon list has no such host', async () => {
+    const wrapper = mount(SessionList)
+    emitEvent?.({ type: 'daemon_list', daemons: [{ daemon_id: 'daemon-other', hostname: 'other-host', daemon_online: true }] })
+    await nextTick()
+
+    expect(wrapper.find('.mobile-daemon-status').exists()).toBe(false)
+  })
+
+  test('hides the host status line when opened without a host context', async () => {
+    routeQuery.value = {}
+    const wrapper = mount(SessionList)
+    emitEvent?.({ type: 'daemon_list', daemons: [{ daemon_id: 'daemon-1', hostname: 'mac-studio', daemon_online: true }] })
+    await nextTick()
+
+    expect(wrapper.get('.mobile-session-nav-title').text()).toBe('会话列表')
+    expect(wrapper.find('.mobile-daemon-status').exists()).toBe(false)
   })
 
   test('searches every loaded session by title, model and agent and closes cleanly', async () => {

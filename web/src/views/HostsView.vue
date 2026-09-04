@@ -572,7 +572,7 @@ function hostSessionCount(daemonId: string): number {
 }
 function hostLastActivityLabel(d: any): string {
   const latest = sessionsForHost(d.daemon_id)
-    .map(session => session.last_activity_at || session.updated_at || session.created_at)
+    .map(session => session.last_activity_at || session.created_at)
     .filter(Boolean)
     .sort((a, b) => new Date(b).getTime() - new Date(a).getTime())[0]
   const value = latest || d.last_heartbeat

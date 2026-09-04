@@ -57,7 +57,7 @@
                   @click.stop @keydown.enter="commitRename(s)" @keydown.escape="cancelRename" @blur="commitRename(s)" />
                 <template v-else>{{ s.title || s.session_id.slice(0, 8) }}</template>
               </div>
-              <div class="sl-meta"><AgentBadge :agent="s.agent_type" size="sm" />{{ formatRelativeTime(s.last_activity_at || s.updated_at) }}<span v-if="s.subagent_count > 0"> · {{ t('session.sub_agents', { n: s.subagent_count }) }}</span></div>
+              <div class="sl-meta"><AgentBadge :agent="s.agent_type" size="sm" />{{ formatRelativeTime(s.last_activity_at || s.created_at) }}<span v-if="s.subagent_count > 0"> · {{ t('session.sub_agents', { n: s.subagent_count }) }}</span></div>
             </div>
             <SessionActions :session="s" @startRename="startRename" @deleted="onDeleted" @pinned="onPinned" />
           </div>
@@ -77,8 +77,29 @@
 
     <!-- Chat Main Area -->
     <div class="chat-area">
+      <!-- The session list can arrive after the replay request on a direct URL. -->
+      <div
+        v-if="hasNoSessions && isLoading"
+        class="session-history-loading"
+        data-testid="session-history-loading"
+        role="status"
+        aria-live="polite"
+      >
+        <span class="session-history-spinner" aria-hidden="true"></span>
+        <div class="session-history-loading-title">{{ t('session.loading_history') }}</div>
+        <template v-if="isSlowLoading">
+          <div class="session-history-loading-slow">{{ t('session.loading_slow') }}</div>
+          <button
+            type="button"
+            class="session-history-retry"
+            data-testid="session-history-retry"
+            @click="retryHistory"
+          >{{ t('common.retry') }}</button>
+        </template>
+      </div>
+
       <!-- Full-area empty state when no sessions exist at all -->
-      <div v-if="hasNoSessions" class="chat-welcome">
+      <div v-else-if="hasNoSessions" class="chat-welcome">
         <svg class="welcome-icon" width="64" height="64" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round">
           <path d="M12 2a10 10 0 1 0 10 10A10 10 0 0 0 12 2z"/><path d="M8 14s1.5 2 4 2 4-2 4-2"/><line x1="9" y1="9" x2="9.01" y2="9"/><line x1="15" y1="9" x2="15.01" y2="9"/>
         </svg>
@@ -207,8 +228,28 @@
           </template>
         </div>
 
+        <div
+          v-if="isLoading && renderMessages.length === 0"
+          class="session-history-loading"
+          data-testid="session-history-loading"
+          role="status"
+          aria-live="polite"
+        >
+          <span class="session-history-spinner" aria-hidden="true"></span>
+          <div class="session-history-loading-title">{{ t('session.loading_history') }}</div>
+          <template v-if="isSlowLoading">
+            <div class="session-history-loading-slow">{{ t('session.loading_slow') }}</div>
+            <button
+              type="button"
+              class="session-history-retry"
+              data-testid="session-history-retry"
+              @click="retryHistory"
+            >{{ t('common.retry') }}</button>
+          </template>
+        </div>
+
         <!-- Empty state when no messages -->
-        <div v-if="renderMessages.length === 0" class="chat-empty-state">
+        <div v-else-if="renderMessages.length === 0" class="chat-empty-state">
           <svg class="empty-icon" width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
             <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>
           </svg>
@@ -643,6 +684,7 @@ import { completedPlanItemCount } from '../utils/agentPlanMerge'
 import { createAgentFileChangeReducer, type AgentFileChangeMessage } from '../utils/agentFileChange'
 import { projectTurns, TurnSegmentCollapseRegistry, TurnSegmentIdentityRegistry } from '../utils/turnProjection'
 import { isKnownNonTimelineControlEvent, knownNonTimelineControlEventTypes, unknownTimelineEventIdentity } from '../utils/timelineEventRegistry'
+import { createClientId } from '../utils/clientId'
 
 const { renamingId, renameInput, startRename, commitRename, cancelRename } = useSessionRename()
 
@@ -756,6 +798,9 @@ const sessionAgentSubmitting = ref(false)
 const showHelpModal = ref(false)        // /help local command → full-screen modal
 const replayReqId = ref(0)
 const isLoading = ref(false)
+const isSlowLoading = ref(false)
+const HISTORY_SLOW_THRESHOLD_MS = 8_000
+let historySlowTimer: ReturnType<typeof setTimeout> | null = null
 // session-history-pagination: backward pagination state
 const pageSize = computed(() => 50)  // session-history-pagination: 一次加载 50 条（平衡首屏/翻页性能）
 const loadedMinId = ref(0)      // oldest loaded event id (backward cursor)
@@ -1331,10 +1376,11 @@ const mobileSessionTitle = computed(() => focusedSubAgentId.value
   ? focusedSubAgentInfo.value?.title || focusedSubAgentId.value.slice(0, 8)
   : sessionTitle.value || sessionId.value?.slice(0, 8) || '')
 
-watch([mobileSessionTitle, daemonName, status, statusLabel], () => {
+watch([mobileSessionTitle, daemonName, selectedHostId, status, statusLabel], () => {
   setSessionHeader({
     title: mobileSessionTitle.value,
     host: daemonName.value,
+    hostId: selectedHostId.value,
     status: status.value,
     statusLabel: statusLabel.value,
   })
@@ -1393,7 +1439,7 @@ const milestones = computed(() => {
   const s = allSessions.value.find(s => s.session_id === sessionId.value)
   if (!s) return ms
   if (s.created_at) ms.push({ label: t('session.milestone_created'), time: formatTime(s.created_at), state: 'active' })
-  ms.push({ label: t('session.status.running'), time: formatTime(s.last_activity_at || s.updated_at || s.created_at), state: status.value === 'running' || status.value === 'busy' || status.value === 'retry' ? 'current' : 'active' })
+  ms.push({ label: t('session.status.running'), time: formatTime(s.last_activity_at || s.created_at), state: status.value === 'running' || status.value === 'busy' || status.value === 'retry' ? 'current' : 'active' })
   ms.push({ label: statusLabel.value, time: '—', state: isTerminalStatus.value ? 'active' : '' })
   return ms
 })
@@ -1575,8 +1621,13 @@ function replaySessionTrustContext(): ReplaySessionTrustContext {
 // Shared by onMounted and the loadKey watcher so every entry/exit/switch path
 // is consistent.
 function loadHistory() {
+  clearHistorySlowTimer()
+  isSlowLoading.value = false
   replayReqId.value++
   isLoading.value = true
+  historySlowTimer = setTimeout(() => {
+    if (isLoading.value) isSlowLoading.value = true
+  }, HISTORY_SLOW_THRESHOLD_MS)
   loadedMinId.value = 0
   isLoadingBackward.value = false
   hasMore.value = false
@@ -1585,17 +1636,35 @@ function loadHistory() {
     send({ type: 'replay_subagent', session_id: sessionId.value, agent_id: focusedSubAgentId.value, limit: pageSize.value, req_id: replayReqId.value })
   } else {
     send({ type: 'replay', session_id: sessionId.value, direction: 'backward', limit: pageSize.value, req_id: replayReqId.value })
-    send({ type: 'list_commands', session_id: sessionId.value })
+    try {
+      send({ type: 'list_commands', session_id: sessionId.value })
+    } catch (error) {
+      console.warn('[session-history] auxiliary request failed', { operation: 'list_commands', error })
+    }
     requestSessionMeta()
   }
 }
 
+function clearHistorySlowTimer() {
+  if (historySlowTimer) clearTimeout(historySlowTimer)
+  historySlowTimer = null
+}
+
+function retryHistory() {
+  loadHistory()
+}
+
 function requestSessionMeta() {
-  send({
-    type: 'get_session_meta',
-    session_id: sessionId.value,
-    request_id: `session-meta-${crypto.randomUUID()}`,
-  })
+  try {
+    return send({
+      type: 'get_session_meta',
+      session_id: sessionId.value,
+      request_id: `session-meta-${createClientId()}`,
+    })
+  } catch (error) {
+    console.warn('[session-history] auxiliary request failed', { operation: 'get_session_meta', error })
+    return false
+  }
 }
 
 function onMessagesScroll() {
@@ -2876,14 +2945,6 @@ watch(loadKey, (newKey, oldKey) => {
 const cleanups: (() => void)[] = []
 
 onMounted(() => {
-  connect()
-  send({ type: 'list_sessions' })
-  send({ type: 'list_daemons' })
-  // Gate the timer watch for the initial load too: status defaults to 'running'
-  // (a placeholder) and would start the timer from zero before the real status
-  // arrives via replay. replay_end un-gates and resumes correctly.
-	sessionSwitching = true
-	loadHistory()
 	cleanups.push(onEvent('connection_restored', () => {
 		send({ type: 'list_sessions' })
 		send({ type: 'list_daemons' })
@@ -3051,6 +3112,8 @@ onMounted(() => {
       nextTick(scrollToBottom)
     }
     isLoading.value = false
+    clearHistorySlowTimer()
+    isSlowLoading.value = false
     isLoadingBackward.value = false
     if (msg.has_more !== undefined) hasMore.value = !!msg.has_more
     // backward: last_seq is the oldest id of the returned page → next page cursor
@@ -3076,13 +3139,14 @@ onMounted(() => {
         const meta = allSessions.value.find((s: any) => s.session_id === sessionId.value)
         if (meta) {
           let st = meta.statusEffective === 'disconnected' ? meta.status : (meta.statusEffective || meta.status)
-          // A "running/busy" status that hasn't seen activity recently is stale:
-          // the daemon isn't actively syncing this session (an actively-running
-          // session refreshes last_activity_at every poll). Treat it as idle so the
-          // timer doesn't start from zero on a session that isn't really working
-          // (e.g. an opencode turn that was abandoned and fell out of the sync window).
-          if (st === 'running' || st === 'busy' || st === 'retry' || st === 'waiting') {
-            const la = meta.last_activity_at || meta.updated_at
+          // OpenCode polling can leave an abandoned turn marked executing after
+          // it falls out of the sync window. Codex and Claude instead publish
+          // explicit lifecycle events, and long-running tools/subagents can be
+          // quiet for more than two minutes, so their persisted status must not
+          // be overridden by this OpenCode-specific fallback.
+          if (normalizedAgentType(meta) === 'opencode'
+            && (st === 'running' || st === 'busy' || st === 'retry' || st === 'waiting')) {
+            const la = meta.last_activity_at || meta.created_at
             const ageMs = la ? Date.now() - new Date(la).getTime() : Infinity
             if (ageMs > 120000) st = 'idle'
           }
@@ -3278,16 +3342,17 @@ onMounted(() => {
     // reads meta.statusEffective/status from allSessions, so a stale mount-time
     // snapshot would leave a just-finished session looking "running" after a
     // switch (timer stuck/from zero). Update it on every status event.
-    const lastActivityAt = msg.last_activity_at || msg.payload?.last_activity_at || new Date().toISOString()
+    const sourceActivityAt = msg.last_activity_at || msg.payload?.last_activity_at
+    const lastActivityAt = sourceActivityAt || (msg.resync === true ? ls?.last_activity_at || '' : new Date().toISOString())
     if (ls) {
       ls.status = msg.status
       ls.statusEffective = msg.status
-      ls.last_activity_at = lastActivityAt
+      if (lastActivityAt) ls.last_activity_at = lastActivityAt
     }
     if (msg.session_id === sessionId.value) {
       const wasExecuting = isExecuting.value
       status.value = msg.status
-      if (wasExecuting && !isExecuting.value) lastTurnEndedAt.value = lastActivityAt
+      if (wasExecuting && !isExecuting.value && lastActivityAt) lastTurnEndedAt.value = lastActivityAt
       reconcileVisibleUnresolvedTools(msg.status)
       if (msg.exit_reason) exitReason.value = msg.exit_reason
       if (msg.exited_at) exitedAt.value = msg.exited_at
@@ -3378,6 +3443,17 @@ onMounted(() => {
     const s = allSessions.value.find((x: any) => x.session_id === msg.session_id)
     if (s) s.title = msg.title
   }))
+
+  // Register every consumer before connecting and requesting replay. A fast
+  // replay must never race ahead of its handlers, and auxiliary requests below
+  // cannot prevent already-sent history from being consumed.
+  connect()
+  send({ type: 'list_sessions' })
+  send({ type: 'list_daemons' })
+  // Gate the timer watch for the initial load too: status defaults to 'running'
+  // until replay/session metadata supplies the authoritative state.
+  sessionSwitching = true
+  loadHistory()
 })
 
 // SessionActions handlers (optimistic local updates)
@@ -3388,6 +3464,7 @@ function onPinned(sessionId: string, pinned: boolean) {
 }
 
 onUnmounted(() => {
+  clearHistorySlowTimer()
   composerResizeObserver?.disconnect()
   composerResizeObserver = null
   for (const fn of cleanups) fn()
@@ -3577,6 +3654,14 @@ onMounted(() => {
 }
 
 /* Empty state */
+.session-history-loading { min-height: 180px; display: flex; flex: 1; flex-direction: column; align-items: center; justify-content: center; gap: 10px; padding: 40px 20px; color: var(--fg-secondary); text-align: center; }
+.session-history-spinner { width: 28px; height: 28px; border: 2px solid var(--border-light); border-top-color: var(--accent); border-radius: 50%; animation: session-history-spin .8s linear infinite; }
+.session-history-loading-title { font-size: 14px; font-weight: 600; }
+.session-history-loading-slow { max-width: 360px; color: var(--fg-tertiary); font-size: 12px; line-height: 1.5; }
+.session-history-retry { min-height: 36px; margin-top: 2px; padding: 7px 16px; border: 1px solid var(--border-light); border-radius: var(--radius-md); color: var(--accent); background: var(--surface); font: 600 13px/1 var(--font-body); cursor: pointer; }
+.session-history-retry:hover { border-color: var(--accent); background: var(--accent-muted); }
+.session-history-retry:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+@keyframes session-history-spin { to { transform: rotate(360deg); } }
 .chat-empty-state { display: flex; flex-direction: column; align-items: center; justify-content: center; flex: 1; gap: 12px; padding: 40px 20px; text-align: center; }
 .chat-empty-state .empty-icon { color: var(--fg-tertiary); opacity: 0.4; }
 .chat-empty-state .empty-title { font-size: 16px; font-weight: 600; color: var(--fg-secondary); }
@@ -3782,7 +3867,7 @@ onMounted(() => {
   .session-toolbar-identity { min-width: 0; }
 }
 @media (max-width: 768px) {
-  .session-layout { height: calc(var(--visual-viewport-height, 100dvh) - var(--mobile-topbar-h)); }
+  .session-layout { height: calc(var(--visual-viewport-bottom, 100dvh) - var(--mobile-topbar-h)); }
   .chat-area { --composer-float-clearance: 112px; --session-content-gutter: 14px; }
   .session-panel,
   .chat-toolbar { display: none; }
@@ -3973,6 +4058,7 @@ onMounted(() => {
   }
 }
 @media (prefers-reduced-motion: reduce) {
+  .session-history-spinner { animation-duration: 1.8s; }
   .request-deep-link-target { animation: none; outline: 2px solid var(--warning); }
 }
 </style>

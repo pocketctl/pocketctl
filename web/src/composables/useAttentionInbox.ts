@@ -25,6 +25,7 @@ import type {
   AttentionRecoveryResponse,
 } from '../types/attentionInbox'
 import { useWebSocket } from './useWebSocket'
+import { createClientId } from '../utils/clientId'
 
 export type AttentionLifecycleFilter = 'active' | 'snoozed' | 'handled'
 
@@ -637,7 +638,7 @@ export function useAttentionInbox(): AttentionInboxStore {
         submit: submitAttentionAction,
       },
       webSocket: { connect: socket.connect, onEvent: socket.onEvent as (handler: (event: any) => void) => () => unknown },
-      uuid: () => crypto.randomUUID(),
+      uuid: createClientId,
     })
   }
   return singleton

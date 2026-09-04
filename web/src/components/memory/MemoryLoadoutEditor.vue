@@ -26,6 +26,7 @@ import { onMounted, ref } from 'vue'
 import { useLocale } from '../../composables/useLocale'
 import { getContextLoadout, replaceContextLoadout } from '../../services/memoryClient'
 import type { LoadoutItemSummary } from '../../types/memory'
+import { createClientId } from '../../utils/clientId'
 const { t } = useLocale()
 const items = ref<LoadoutItemSummary[]>([])
 const revision = ref(1)
@@ -66,7 +67,7 @@ async function save(next: Array<{
 function add(): void {
 	const next = items.value.map(item => ({ ...item }))
 	next.push({
-		itemId: crypto.randomUUID(), assetKind: assetKind.value, claimId: claimId.value,
+		itemId: createClientId(), assetKind: assetKind.value, claimId: claimId.value,
 		representation: 'summary', priority: priority.value,
 		status: 'claim_inactive', claimType: null, versionId: null,
 	})

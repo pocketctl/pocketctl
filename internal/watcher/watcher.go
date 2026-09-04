@@ -380,3 +380,11 @@ func parseSessionFile(path string) (DiscoveredSession, error) {
 	}
 	return sess, nil
 }
+
+// ReadSessionMetadata returns the latest Claude session metadata stored at
+// path. The daemon uses this while waiting for a late JSONL to distinguish a
+// still-live session from a transient ID that has been replaced by --continue
+// or /clear.
+func ReadSessionMetadata(path string) (DiscoveredSession, error) {
+	return parseSessionFile(path)
+}

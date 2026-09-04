@@ -85,6 +85,7 @@
       :session-count="sessionCount"
       :plan="mobileCurrentPlan"
       :session-host="sessionHeader.host"
+      :session-host-id="sessionHeader.hostId"
       :session-status="sessionHeader.status"
       :session-status-label="sessionHeader.statusLabel"
       @new-session="triggerNewSession++"

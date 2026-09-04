@@ -898,6 +898,43 @@ describe('Router - event insertion updates last_activity_at', () => {
     expect(activityUpdate.params).toContain('sess-3')
   })
 
+  test('session_meta persistence does not update last_activity_at', async () => {
+    const daemonWs = createMockWs()
+    router.registerDaemon(daemonWs, { type: 'register', daemon_id: 'daemon-1', hostname: 'test', agents: [] }, 1)
+
+    router.handleDaemonMessage('daemon-1', {
+      type: 'session_meta', session_id: 'sess-3', request_id: 'session-meta-open-1', model: 'gpt-5.6-terra',
+    })
+
+    await new Promise(r => setTimeout(r, 50))
+
+    const activityUpdate = pool._queries.find((q: any) =>
+      q.sql.includes('UPDATE sessions') && q.sql.includes('last_activity_at')
+    )
+    expect(activityUpdate).toBeUndefined()
+  })
+
+  test('replayed discovery restores its source activity time', async () => {
+    const daemonWs = createMockWs()
+    router.registerDaemon(daemonWs, { type: 'register', daemon_id: 'daemon-1', hostname: 'test', agents: [] }, 1)
+    const sourceActivity = '2026-08-01T12:30:00.000Z'
+
+    router.handleDaemonMessage('daemon-1', {
+      type: 'session_discovered', session_id: 'sess-3', status: 'idle', agent: 'codex',
+      resync: true, last_activity_at: sourceActivity,
+    })
+
+    await new Promise(r => setTimeout(r, 50))
+
+    const activityUpdate = pool._queries.find((q: any) =>
+      q.sql.includes('UPDATE sessions') && q.sql.includes('last_activity_at')
+    )
+    expect(activityUpdate).toBeDefined()
+    expect(activityUpdate.params[0]).toBe('sess-3')
+    expect(activityUpdate.params[1]).toEqual(new Date(sourceActivity))
+    expect(activityUpdate.sql).not.toContain('GREATEST')
+  })
+
   test('OpenCode Part revisions are persisted and broadcast unchanged', async () => {
     const daemonWs = createMockWs()
     await router.registerDaemon(daemonWs, { type: 'register', daemon_id: 'daemon-1', hostname: 'test', agents: ['opencode'] }, 1)
@@ -1046,6 +1083,7 @@ describe('Router - list_sessions includes extended fields', () => {
     const clientWs = createMockWs()
     router.registerClient(clientWs, 1)
     const cursor = Buffer.from(JSON.stringify({
+      version: 2,
       pinned: 0,
       pinnedAt: '1970-01-01T00:00:00.000Z',
       activityAt: '2026-01-02T03:04:05.000Z',

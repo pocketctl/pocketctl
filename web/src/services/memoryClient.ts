@@ -9,6 +9,7 @@
 
 import { useAuth } from '../composables/useAuth'
 import { getRelayOrigin } from '../composables/useEnv'
+import { createClientId } from '../utils/clientId'
 import type {
   MemoryCandidate,
   MemoryClaimDetail,
@@ -506,7 +507,7 @@ export function setMemoryWikiSectionLock(
 // ---- Phase 2 context management client (plan 10.3) ----
 
 function phase2IdempotencyKey(operation: string): string {
-  return `web-${operation}-${crypto.randomUUID()}`
+  return `web-${operation}-${createClientId()}`
 }
 
 export async function listContextSettings(): Promise<{ settings: import('../types/memory.js').ContextSettings[] }> {

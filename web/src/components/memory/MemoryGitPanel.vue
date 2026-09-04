@@ -3,6 +3,7 @@ import {computed,onBeforeUnmount,ref,watch} from 'vue'
 import {useLocale} from '../../composables/useLocale'
 import {memoryGit} from '../../services/memoryGit'
 import type {MemoryGitConnection,MemoryGitExpected,MemoryGitPage,MemoryGitProposal} from '../../types/memoryGit'
+import {createClientId} from '../../utils/clientId'
 const props=defineProps<{scopeId:string}>(),{t}=useLocale()
 const page=ref<MemoryGitPage|null>(null),selected=ref(''),detail=ref<MemoryGitProposal|null>(null),error=ref(''),loading=ref(false),busy=ref(false),unavailable=ref(false)
 const exportId=ref(''),assetId=ref(''),assetKind=ref<'claim'|'rule'|'wiki'|'skill'>('rule')
@@ -141,7 +142,7 @@ function action(operation:Operation,resource:string,body:unknown){
   if(busy.value)return
   if(intents.value.some(i=>i.scope===props.scopeId&&i.connection===selected.value&&i.resource===resource&&i.operation===operation)){error.value=t('memory.git.intent_unknown');return}
   if(intents.value.length>=8){error.value=t('memory.git.intent_capacity');return}
-  const intent:Intent={scope:props.scopeId,connection:selected.value,resource,operation,key:`git-${crypto.randomUUID()}`,state:'unknown',createdAt:Date.now(),request:JSON.stringify(body)}
+  const intent:Intent={scope:props.scopeId,connection:selected.value,resource,operation,key:`git-${createClientId()}`,state:'unknown',createdAt:Date.now(),request:JSON.stringify(body)}
   intents.value.push(intent);persistIntents();void retryIntent(intents.value[intents.value.length-1])
 }
 function review(){const d=detail.value;if(d?.capabilities.can_review)action('review',d.proposal_id,{...expected(d),decision:'approve'})}

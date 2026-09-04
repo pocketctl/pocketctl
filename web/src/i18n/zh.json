@@ -386,6 +386,7 @@
   "interactive.waiting": "等待你的选择",
   "interactive.selected": "已选择",
   "session.loading_history": "加载历史中…",
+  "session.loading_slow": "加载时间较长，请检查网络后重试。",
   "session.no_more": "没有更多",
   "new_session.title": "新建会话",
   "new_session.agent_label": "Agent",

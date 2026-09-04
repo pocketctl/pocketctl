@@ -96,6 +96,26 @@ function deliveryStatus(wrapper: ReturnType<typeof shallowMount>, content: strin
 }
 
 describe('SessionDetail managed Codex terminal control', () => {
+  test('replayed status without a source timestamp preserves the listed activity time', async () => {
+    const wrapper = mountSession()
+    websocketMock.handlers.get('session_list')?.({
+      sessions: [session({
+        status: 'idle',
+        last_activity_at: '2026-08-01T02:03:04Z',
+        updated_at: '2026-08-01T02:03:04Z',
+      })],
+    })
+    await nextTick()
+    const before = wrapper.get('.sl-meta').text()
+
+    websocketMock.handlers.get('session_status')?.({
+      type: 'session_status', session_id: 'thr_1', status: 'idle', resync: true,
+    })
+    await nextTick()
+
+    expect(wrapper.get('.sl-meta').text()).toBe(before)
+  })
+
   test('keeps the mobile composer compact and caps wrapped input at five lines', async () => {
     useMobileViewport()
     const wrapper = mountSession()

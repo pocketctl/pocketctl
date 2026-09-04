@@ -734,6 +734,7 @@ func (sm *SessionManager) tryResumeHistorical(sessionID string) bool {
 		agent      string
 		cwd        string
 		permission *protocol.PermissionConfig
+		activityAt time.Time
 	}
 
 	var historical *historicalSession
@@ -753,7 +754,14 @@ func (sm *SessionManager) tryResumeHistorical(sessionID string) bool {
 				cwd = cwdFromProjectsDir(jsonlPath)
 			}
 		}
-		historical = &historicalSession{agent: agentType, cwd: cwd}
+		activityAt := time.Now()
+		if info, statErr := os.Stat(jsonlPath); statErr == nil {
+			activityAt = info.ModTime()
+			if now := time.Now(); activityAt.After(now) {
+				activityAt = now
+			}
+		}
+		historical = &historicalSession{agent: agentType, cwd: cwd, activityAt: activityAt}
 		if agentType == adapter.AgentClaude {
 			historical.permission = extractClaudePermissionFromJSONL(jsonlPath)
 		} else {
@@ -777,7 +785,7 @@ func (sm *SessionManager) tryResumeHistorical(sessionID string) bool {
 		Status:         protocol.StatusExited,
 		Source:         "terminal",
 		StartedAt:      now,
-		LastActivityAt: now,
+		LastActivityAt: historical.activityAt,
 		Cwd:            historical.cwd,
 		Agent:          historical.agent,
 		Permission:     clonePermission(historical.permission),

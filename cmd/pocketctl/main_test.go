@@ -1141,12 +1141,14 @@ func TestPruneOrphanSpools(t *testing.T) {
 }
 
 func TestReconnectDiscoveryEventIsMarkedAsResync(t *testing.T) {
+	lastActivity := time.Date(2026, time.August, 1, 12, 30, 0, 0, time.UTC)
 	event := reconnectDiscoveryEvent(session.SessionInfo{
-		SessionID: "session-a",
-		Cwd:       "/tmp/project",
-		Status:    protocol.StatusCompleted,
-		Agent:     "codex",
-		Model:     "gpt-5.3-codex",
+		SessionID:      "session-a",
+		Cwd:            "/tmp/project",
+		Status:         protocol.StatusCompleted,
+		Agent:          "codex",
+		Model:          "gpt-5.3-codex",
+		LastActivityAt: lastActivity,
 	})
 
 	if event.Type != "session_discovered" || !event.Resync {
@@ -1154,6 +1156,9 @@ func TestReconnectDiscoveryEventIsMarkedAsResync(t *testing.T) {
 	}
 	if event.SessionID != "session-a" || event.Source != "terminal" {
 		t.Fatalf("event = %#v, want session identity and source preserved", event)
+	}
+	if event.LastActivityAt != lastActivity.Format(time.RFC3339Nano) {
+		t.Fatalf("last_activity_at=%q, want %q", event.LastActivityAt, lastActivity.Format(time.RFC3339Nano))
 	}
 }
 
@@ -1246,6 +1251,11 @@ func TestTerminalHydrationEventsKeepsCurrentStatusAuthoritative(t *testing.T) {
 	}
 	if got[2].Type != "session_status" || got[2].SessionID != "session-a" || got[2].Status != protocol.StatusBusy {
 		t.Fatalf("final event=%+v, want authoritative busy status", got[2])
+	}
+	for _, event := range got {
+		if !event.Resync {
+			t.Fatalf("hydrated event=%+v, want resync=true", event)
+		}
 	}
 }
 

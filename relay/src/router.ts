@@ -57,6 +57,8 @@ const openCodeFallbackCategories = new Set([
   'unsupported_arguments', 'daemon_unavailable', 'runtime_unavailable',
   'session_busy', 'invalid_request', 'native_response',
 ]);
+const INITIAL_REPLAY_PAYLOAD_WARNING_BYTES = 1_048_576;
+const INITIAL_REPLAY_DURATION_WARNING_MS = 1_000;
 
 function nonNegativeCounter(value: unknown): number {
   return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0 ? value : 0;
@@ -2577,6 +2579,7 @@ export class Router {
   }
 
   private async handleReplay(clientWs: WebSocket, sessionId: string, lastSeq: number, reqId?: number, direction?: string, limit?: number): Promise<void> {
+    const startedAt = Date.now();
     const withReq = (obj: any) => reqId !== undefined ? { ...obj, req_id: reqId } : obj;
     // Explicit forward/backward requests are paginated by complete logical
     // streams. Direction-less forward replay remains the legacy unbounded path.
@@ -2626,6 +2629,11 @@ export class Router {
         replayNewestSeq = events.length > 0 ? events[events.length - 1].id : (lastSeq ?? 0);
       }
       if (events.length === 0) {
+        this.observeInitialReplayPage({
+          sessionId, isInitialPage: isBackward && (!lastSeq || lastSeq <= 0),
+          eventCount: 0, logicalCount: 0, batchCount: 0, payloadBytes: 0,
+          durationMs: Date.now() - startedAt, hasMore,
+        });
         this.send(clientWs, withReq({ type: 'replay_end', session_id: sessionId, count: 0, logical_count: 0, last_seq: replayLastSeq, newest_seq: replayNewestSeq, has_more: hasMore, status: currentStatus, turn_started_at: runtime.turnStartedAt, last_activity_at: runtime.lastActivityAt }));
         return;
       }
@@ -2639,6 +2647,15 @@ export class Router {
           last_seq: isBackward ? slice[0].id : slice[slice.length - 1].id,
           direction: direction || 'forward',
       }));
+      const payloadBytes = batches.reduce(
+        (total, batch) => total + Buffer.byteLength(JSON.stringify(batch), 'utf8'),
+        0,
+      );
+      this.observeInitialReplayPage({
+        sessionId, isInitialPage: isBackward && (!lastSeq || lastSeq <= 0),
+        eventCount: events.length, logicalCount, batchCount: batches.length,
+        payloadBytes, durationMs: Date.now() - startedAt, hasMore,
+      });
       for (const batch of batches) {
         this.send(clientWs, batch);
       }
@@ -2659,6 +2676,23 @@ export class Router {
       // Always send replay_end so the client doesn't hang on isLoading
       this.send(clientWs, withReq({ type: 'replay_end', session_id: sessionId, count: 0, last_seq: lastSeq, has_more: false }));
     }
+  }
+
+  private observeInitialReplayPage(metrics: {
+    sessionId: string;
+    isInitialPage: boolean;
+    eventCount: number;
+    logicalCount: number;
+    batchCount: number;
+    payloadBytes: number;
+    durationMs: number;
+    hasMore: boolean;
+  }): void {
+    if (!metrics.isInitialPage) return;
+    if (metrics.payloadBytes < INITIAL_REPLAY_PAYLOAD_WARNING_BYTES
+      && metrics.durationMs < INITIAL_REPLAY_DURATION_WARNING_MS) return;
+    const { isInitialPage: _isInitialPage, ...observed } = metrics;
+    console.warn('[history-replay] initial page threshold exceeded', observed);
   }
 
   private async handleReplaySubagent(clientWs: WebSocket, sessionId: string, agentId: string, lastSeq?: number, reqId?: number, limit?: number, direction?: string): Promise<void> {

@@ -50,6 +50,52 @@ func TestCodexCoordinatorProjectsRuntimeEventsIntoSessionManager(t *testing.T) {
 	}
 }
 
+func TestCodexCoordinatorHistoricalProjectionDoesNotAdvanceActivity(t *testing.T) {
+	output := make(chan protocol.DaemonEvent, 4)
+	sm := NewSessionManager(output)
+	coord := newCodexCoordinator(sm)
+	oldActivity := time.Date(2026, time.August, 1, 12, 0, 0, 0, time.UTC)
+	sm.sessions["thr_1"] = &ProcessState{
+		SessionID: "thr_1", Agent: "codex", LastActivityAt: oldActivity,
+	}
+
+	coord.applyProjectedEvent(protocol.DaemonEvent{
+		Type: "agent_text", SessionID: "thr_1", Text: "historical", Resync: true,
+	})
+	if got := sm.sessions["thr_1"].LastActivityAt; !got.Equal(oldActivity) {
+		t.Fatalf("historical projection activity=%s, want %s", got, oldActivity)
+	}
+
+	coord.applyProjectedEvent(protocol.DaemonEvent{
+		Type: "agent_text", SessionID: "thr_1", Text: "live",
+	})
+	if got := sm.sessions["thr_1"].LastActivityAt; !got.After(oldActivity) {
+		t.Fatalf("live projection activity=%s, want after %s", got, oldActivity)
+	}
+}
+
+func TestCodexCoordinatorDoesNotTimestampReplayedStatusAsLive(t *testing.T) {
+	output := make(chan protocol.DaemonEvent, 4)
+	sm := NewSessionManager(output)
+	coord := newCodexCoordinator(sm)
+	oldActivity := time.Date(2026, time.August, 1, 12, 0, 0, 0, time.UTC)
+	sm.sessions["thr_1"] = &ProcessState{
+		SessionID: "thr_1", Agent: "codex", LastActivityAt: oldActivity,
+	}
+
+	coord.publishProjected([]protocol.DaemonEvent{{
+		Type: "session_status", SessionID: "thr_1", Status: protocol.StatusIdle, Resync: true,
+	}})
+
+	event := <-output
+	if event.LastActivityAt != "" {
+		t.Fatalf("replayed status activity=%q, want empty", event.LastActivityAt)
+	}
+	if got := sm.sessions["thr_1"].LastActivityAt; !got.Equal(oldActivity) {
+		t.Fatalf("replayed status advanced activity=%s, want %s", got, oldActivity)
+	}
+}
+
 func TestCodexCoordinatorIdleAndTurnCompletionOrderAlwaysSettlesIdle(t *testing.T) {
 	orders := [][]codexapp.Inbound{
 		{
@@ -204,6 +250,14 @@ func TestCodexCoordinatorResumedThreadStatusWinsHistoricalHydration(t *testing.T
 			t.Setenv("HOME", t.TempDir())
 			output := make(chan protocol.DaemonEvent, 32)
 			sm := NewSessionManager(output)
+			restoredActivity := time.Date(2026, time.August, 1, 2, 3, 4, 0, time.UTC)
+			sm.sessions["thr_terminal"] = &ProcessState{
+				SessionID:      "thr_terminal",
+				Agent:          "codex",
+				Source:         "terminal",
+				Status:         protocol.StatusExited,
+				LastActivityAt: restoredActivity,
+			}
 			coord := newCodexCoordinator(sm)
 			rpc := newFakeCodexRuntimeClient()
 			rpc.results["thread/resume"] = json.RawMessage(`{"model":"gpt-5.6","cwd":"/repo","thread":{"id":"thr_terminal","cwd":"/repo","status":{"type":"` + tt.native + `"},"turns":[]}}`)
@@ -226,10 +280,31 @@ func TestCodexCoordinatorResumedThreadStatusWinsHistoricalHydration(t *testing.T
 			if got := coord.currentTurn("thr_terminal"); got != wantTurn {
 				t.Fatalf("active turn=%q, want %q for resumed %s", got, wantTurn, tt.native)
 			}
+			seenMeta := false
+			seenDiscovery := false
 			for len(output) > 0 {
-				if event := <-output; event.Type == "error" {
+				event := <-output
+				if event.Type == "error" {
 					t.Fatalf("historical failed turn emitted live error: %+v", event)
 				}
+				if event.Type == "session_meta" {
+					seenMeta = true
+				}
+				if event.Type == "session_discovered" {
+					seenDiscovery = true
+					if event.LastActivityAt != restoredActivity.Format(time.RFC3339Nano) {
+						t.Fatalf("discovery activity=%q, want %q", event.LastActivityAt, restoredActivity.Format(time.RFC3339Nano))
+					}
+				}
+				if (event.Type == "session_discovered" || event.Type == "session_meta" || event.Type == "agent_text") && !event.Resync {
+					t.Fatalf("restored event=%+v, want resync=true", event)
+				}
+			}
+			if !seenMeta {
+				t.Fatal("restored thread did not emit session_meta")
+			}
+			if !seenDiscovery {
+				t.Fatal("restored thread did not emit session_discovered")
 			}
 		})
 	}

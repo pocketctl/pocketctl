@@ -2189,6 +2189,9 @@ func reconnectDiscoveryEvent(s session.SessionInfo) protocol.DaemonEvent {
 		Capabilities: s.Capabilities,
 		Resync:       true,
 	}
+	if !s.LastActivityAt.IsZero() {
+		event.LastActivityAt = s.LastActivityAt.UTC().Format(time.RFC3339Nano)
+	}
 	enrichRepositoryFacts(context.Background(), &event)
 	return event
 }
@@ -2260,12 +2263,14 @@ func terminalHydrationEvents(events []protocol.DaemonEvent, sessionID, currentSt
 		if event.SessionID == "" {
 			event.SessionID = sessionID
 		}
+		event.Resync = true
 		projected = append(projected, event)
 	}
 	projected = append(projected, protocol.DaemonEvent{
 		Type:      "session_status",
 		SessionID: sessionID,
 		Status:    currentStatus,
+		Resync:    true,
 	})
 	return projected
 }
@@ -2994,86 +2999,97 @@ func handleWatcherEvents(ctx context.Context, events <-chan watcher.SessionEvent
 						shortID = shortID[len(shortID)-8:]
 					}
 					defaultTitle := "Terminal Session-" + shortID
-					var tailer *watcher.JSONLTailer
-					// Retry: the agent may not have created the JSONL file yet
-					for retry := 0; retry < 30; retry++ {
-						jsonlPath, err := adapter.ResolveJSONLPathFor(agentType, evt.Session.SessionID, evt.Session.Cwd)
-						if err == nil {
-							if agentType == adapter.AgentClaude && watcher.ClaudeJSONLV2Enabled() {
-								tailer, err = watcher.NewClaudeJSONLTailerFromStart(jsonlPath, evt.Session.SessionID)
-							} else {
-								tailer, err = watcher.NewJSONLTailerFromStart(jsonlPath, agentType)
-							}
-							if err == nil {
-								model := ""
-								if data, readErr := os.ReadFile(jsonlPath); readErr == nil {
-									model = adapter.NewStorage(agentType).ExtractModel(strings.Split(string(data), "\n"))
-									if model != "" {
-										sm.SetSessionModel(evt.Session.SessionID, model)
-									}
-								}
-								// Associate tailer with session so sendToIdleTerminal can pause/resume it (D2)
-								sm.SetTailer(evt.Session.SessionID, tailer)
-								// Tailer started successfully — now emit session_discovered
-								outputCh <- protocol.DaemonEvent{
-									Type:         "session_discovered",
-									SessionID:    evt.Session.SessionID,
-									Cwd:          evt.Session.Cwd,
-									Status:       evt.Session.Status,
-									Source:       "terminal",
-									Agent:        agentType,
-									Title:        defaultTitle,
-									Model:        model,
-									Capabilities: sm.SessionCapabilities(evt.Session.SessionID),
-								}
-								// codex/opencode terminal 会话:session_discovered 带的 model 受
-								// upsertSession 的 COALESCE 约束(空值不覆盖、已有非空值不覆盖),
-								// 历史 rollout 解析出的 model 可能写不进已有空记录。补发一个
-								// session_model_changed —— relay 侧无条件覆盖,确保 DB 一定刷新。
-								if model != "" {
-									outputCh <- protocol.DaemonEvent{
-										Type:      "session_model_changed",
-										SessionID: evt.Session.SessionID,
-										Model:     model,
-									}
-								}
-								// P0: start sub-agent discoverer (only Claude Code has subagents/ dir)
-								if agentType == adapter.AgentClaude {
-									disc := watcher.NewSubAgentDiscoverer(jsonlPath, evt.Session.SessionID, outputCh, 2*time.Second)
-									go disc.Run(ctx)
-								}
-								break
-							}
+					resolution, resolveErr := resolveTerminalJSONLForSession(
+						ctx, sm, evt, agentType, defaultTerminalJSONLResolvePolicy(), logger,
+					)
+					if resolveErr != nil {
+						if ctx.Err() != nil {
+							return
 						}
-						time.Sleep(2 * time.Second)
-					}
-					if tailer == nil {
-						// The JSONL never appeared — this is a ghost session id (e.g. the
-						// transient ~/.claude/sessions/<pid>.json Claude Code writes on
-						// --continue, whose conversation lands in the resumed <id>.jsonl).
-						// Drop it so it doesn't linger as a tailer-less entry that later
-						// emits a phantom session_status. No session_discovered was ever
-						// sent for it, so nothing on the relay/web side references it.
-						if sm.DropGhostSession(evt.Session.SessionID) {
-							logger.Info("dropped ghost session (jsonl never resolved)", "session", evt.Session.SessionID)
-						} else {
-							logger.Warn("tailer start failed after retries; session left without tailer", "session", evt.Session.SessionID)
+						if errors.Is(resolveErr, errTerminalJSONLSessionRetired) {
+							logger.Info("ghost session retired (metadata no longer references unresolved jsonl)",
+								"session", evt.Session.SessionID)
+							// This function is supervised by RunLoop. A true ghost must stay
+							// parked or a clean return would restart its resolver forever.
+							<-ctx.Done()
+							return
 						}
-						// PARK, do NOT return. This fn runs under daemon.RunLoop, which
-						// restarts fn whenever it returns — so a bare return here re-runs
-						// the 30×2s retry loop forever (the ghost JSONL never appears),
-						// producing an unbounded restart loop that destabilized the daemon
-						// (the macmini incident: tailer ghost → restart loop → daemon
-						// shutdown). Block until shutdown; the ghost was never announced,
-						// so nothing on the relay side waits on it.
-						<-ctx.Done()
+						logger.Warn("terminal jsonl resolution failed", "session", evt.Session.SessionID, "error", resolveErr)
 						return
+					}
+					jsonlPath := resolution.path
+					sessionSnapshot := resolution.session
+					jsonlActivityAt := time.Time{}
+					if info, statErr := os.Stat(jsonlPath); statErr == nil {
+						jsonlActivityAt, _ = sm.RestoreSessionActivity(sessionSnapshot.SessionID, info.ModTime())
+					}
+					if resolution.recoveredLate {
+						if sessionSnapshot.Pid > 0 {
+							if ttyPath, ttyErr := notify.GetTTYForPID(sessionSnapshot.Pid); ttyErr == nil {
+								sm.RegisterTerminalSession(sessionSnapshot.SessionID, sessionSnapshot.Cwd,
+									sessionSnapshot.Pid, ttyPath, sessionSnapshot.Status, agentType)
+							}
+						}
+						logger.Info("late session jsonl resolved", "session", sessionSnapshot.SessionID, "path", jsonlPath)
+					}
+
+					var tailer *watcher.JSONLTailer
+					var err error
+					if agentType == adapter.AgentClaude && watcher.ClaudeJSONLV2Enabled() {
+						tailer, err = watcher.NewClaudeJSONLTailerFromStart(jsonlPath, sessionSnapshot.SessionID)
+					} else {
+						tailer, err = watcher.NewJSONLTailerFromStart(jsonlPath, agentType)
+					}
+					if err != nil {
+						logger.Warn("terminal jsonl tailer start failed", "session", sessionSnapshot.SessionID, "error", err)
+						return
+					}
+					model := ""
+					if data, readErr := os.ReadFile(jsonlPath); readErr == nil {
+						model = adapter.NewStorage(agentType).ExtractModel(strings.Split(string(data), "\n"))
+						if model != "" {
+							sm.SetSessionModel(sessionSnapshot.SessionID, model)
+						}
+					}
+					// Associate tailer with session so sendToIdleTerminal can pause/resume it (D2)
+					sm.SetTailer(sessionSnapshot.SessionID, tailer)
+					// Tailer started successfully — now emit session_discovered
+					discoveryEvent := protocol.DaemonEvent{
+						Type:         "session_discovered",
+						SessionID:    sessionSnapshot.SessionID,
+						Cwd:          sessionSnapshot.Cwd,
+						Status:       sessionSnapshot.Status,
+						Source:       "terminal",
+						Agent:        agentType,
+						Title:        defaultTitle,
+						Model:        model,
+						Capabilities: sm.SessionCapabilities(sessionSnapshot.SessionID),
+					}
+					if !jsonlActivityAt.IsZero() {
+						discoveryEvent.LastActivityAt = jsonlActivityAt.UTC().Format(time.RFC3339Nano)
+					}
+					outputCh <- discoveryEvent
+					// codex/opencode terminal 会话:session_discovered 带的 model 受
+					// upsertSession 的 COALESCE 约束(空值不覆盖、已有非空值不覆盖),
+					// 历史 rollout 解析出的 model 可能写不进已有空记录。补发一个
+					// session_model_changed —— relay 侧无条件覆盖,确保 DB 一定刷新。
+					if model != "" {
+						outputCh <- protocol.DaemonEvent{
+							Type:      "session_model_changed",
+							SessionID: sessionSnapshot.SessionID,
+							Model:     model,
+						}
+					}
+					// P0: start sub-agent discoverer (only Claude Code has subagents/ dir)
+					if agentType == adapter.AgentClaude {
+						disc := watcher.NewSubAgentDiscoverer(jsonlPath, sessionSnapshot.SessionID, outputCh, 2*time.Second)
+						go disc.Run(ctx)
 					}
 					defer tailer.Close()
 
 					// Mirror the default title locally too (session_discovered already
 					// carries it), so the daemon's in-memory state agrees with the relay row.
-					sm.UpdateSessionTitle(evt.Session.SessionID, defaultTitle)
+					sm.UpdateSessionTitle(sessionSnapshot.SessionID, defaultTitle)
 
 					// Tail loop: send parsed events with session_id stamped
 					ticker := time.NewTicker(1 * time.Second)
@@ -3093,7 +3109,7 @@ func handleWatcherEvents(ctx context.Context, events <-chan watcher.SessionEvent
 							}
 							initialHydration := hydrating && (len(events) > 0 || len(rawLines) > 0)
 							if initialHydration {
-								events = terminalHydrationEvents(events, evt.Session.SessionID, evt.Session.Status)
+								events = terminalHydrationEvents(events, sessionSnapshot.SessionID, sessionSnapshot.Status)
 								hydrating = false
 							}
 							// Fresh tail output: refresh activity and, if the session had
@@ -3101,11 +3117,11 @@ func handleWatcherEvents(ctx context.Context, events <-chan watcher.SessionEvent
 							// `claude --continue` resume reappears as live instead of staying
 							// frozen at "exited".
 							if len(events) > 0 && !initialHydration {
-								sm.ReviveTerminalSessionOnActivity(evt.Session.SessionID)
+								sm.ReviveTerminalSessionOnActivity(sessionSnapshot.SessionID)
 							}
 							for i := range events {
 								if events[i].SessionID == "" {
-									events[i].SessionID = evt.Session.SessionID
+									events[i].SessionID = sessionSnapshot.SessionID
 								}
 								if observeTerminalLifecycle(sm, events[i]) {
 									stateDirty.Store(true)
@@ -3133,7 +3149,7 @@ func handleWatcherEvents(ctx context.Context, events <-chan watcher.SessionEvent
 									userMsg := adapter.ExtractFirstUserMessageFor(allLines, 200, agentType)
 									assistantMsg := adapter.ExtractFirstAssistantMessageFor(allLines, 200, agentType)
 									if userMsg != "" && assistantMsg != "" {
-										sm.GenerateTitle(evt.Session.SessionID, userMsg, assistantMsg)
+										sm.GenerateTitle(sessionSnapshot.SessionID, userMsg, assistantMsg)
 									}
 								}
 							}

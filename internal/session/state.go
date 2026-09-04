@@ -94,15 +94,13 @@ func (sm *SessionManager) SetSessionExited(sessionID string, exitReason string) 
 	}
 }
 
-// DropGhostSession removes a terminal session that was registered from a
-// ~/.claude/sessions/<pid>.json metadata file but whose JSONL never materialised
-// (so the tailer could never start). Claude Code writes such transient metadata
-// on `--continue` (a short-lived session id whose conversation actually lands in
-// the original/resumed <id>.jsonl), and pocketctl would otherwise leave a dangling
-// tailer-less entry in sm.sessions — the daemon-side seed of the "phantom session
-// with only status + time" symptom. Only drops if no tailer was ever attached and
-// the session is terminal-sourced (never daemon-spawned). Returns true if dropped.
-func (sm *SessionManager) DropGhostSession(sessionID string) bool {
+// DetachUnresolvedTerminalSession removes the provisional SessionManager entry
+// for a terminal session whose JSONL did not appear during the eager lookup
+// window. This does not classify the session as a ghost: its resolver remains
+// active and may re-register it if the JSONL appears later. Detaching prevents
+// process/status signals from creating a phantom relay session before a tailer
+// exists. Returns true if the unresolved terminal entry was detached.
+func (sm *SessionManager) DetachUnresolvedTerminalSession(sessionID string) bool {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
 	ps, ok := sm.sessions[sessionID]
@@ -290,6 +288,37 @@ func (sm *SessionManager) UpdateLastActivity(sessionID string) {
 	if ps, ok := sm.sessions[sessionID]; ok {
 		ps.LastActivityAt = time.Now()
 	}
+}
+
+// RestoreSessionActivity replaces the registration-time placeholder with a
+// source-backed timestamp while a JSONL history is being attached. It may move
+// activity backwards, which is intentional for sessions discovered on restart.
+func (sm *SessionManager) RestoreSessionActivity(sessionID string, observedAt time.Time) (time.Time, bool) {
+	if observedAt.IsZero() {
+		return time.Time{}, false
+	}
+	if now := time.Now(); observedAt.After(now) {
+		observedAt = now
+	}
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+	ps, ok := sm.sessions[sessionID]
+	if !ok {
+		return time.Time{}, false
+	}
+	ps.LastActivityAt = observedAt
+	return observedAt, true
+}
+
+// SessionActivityAt returns the current source-backed or live activity time.
+func (sm *SessionManager) SessionActivityAt(sessionID string) (time.Time, bool) {
+	sm.mu.RLock()
+	defer sm.mu.RUnlock()
+	ps, ok := sm.sessions[sessionID]
+	if !ok {
+		return time.Time{}, false
+	}
+	return ps.LastActivityAt, true
 }
 
 func (sm *SessionManager) remapSessionID(oldID, newID string) (cwd, agent string, changed bool) {

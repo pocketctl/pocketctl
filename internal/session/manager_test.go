@@ -738,6 +738,26 @@ func TestUpdateLastActivity_NonexistentSession(t *testing.T) {
 	sm.UpdateLastActivity("nonexistent")
 }
 
+func TestRestoreSessionActivityUsesSourceTimeAndClampsFutureValues(t *testing.T) {
+	sm := NewSessionManager(make(chan protocol.DaemonEvent, 16))
+	sm.RegisterTerminalSession("test-sid", "/tmp", 12345, "/dev/ttys001", protocol.StatusRunning, "")
+	sourceTime := time.Now().Add(-2 * time.Hour)
+
+	stored, ok := sm.RestoreSessionActivity("test-sid", sourceTime)
+	if !ok || !stored.Equal(sourceTime) {
+		t.Fatalf("restored activity=(%v, %v), want (%v, true)", stored, ok, sourceTime)
+	}
+	if got := sm.sessions["test-sid"].LastActivityAt; !got.Equal(sourceTime) {
+		t.Fatalf("session activity=%v, want %v", got, sourceTime)
+	}
+
+	beforeFutureRestore := time.Now()
+	stored, ok = sm.RestoreSessionActivity("test-sid", time.Now().Add(time.Hour))
+	if !ok || stored.Before(beforeFutureRestore) || stored.After(time.Now()) {
+		t.Fatalf("future activity was not clamped to now: (%v, %v)", stored, ok)
+	}
+}
+
 func TestRemapSessionIDUpdatesSessionMapAndCwdRegistry(t *testing.T) {
 	outputCh := make(chan protocol.DaemonEvent, 16)
 	sm := NewSessionManager(outputCh)
@@ -1014,12 +1034,14 @@ func TestResyncSessionsMarksDiscoveryEvents(t *testing.T) {
 	outputCh := make(chan protocol.DaemonEvent, 16)
 	sm := NewSessionManager(outputCh)
 	sm.mu.Lock()
+	lastActivity := time.Date(2026, time.August, 2, 3, 4, 5, 0, time.UTC)
 	sm.sessions["session-a"] = &ProcessState{
-		SessionID: "session-a",
-		Cwd:       "/tmp/project",
-		Agent:     adapter.AgentCodex,
-		Source:    "daemon",
-		Status:    protocol.StatusCompleted,
+		SessionID:      "session-a",
+		Cwd:            "/tmp/project",
+		Agent:          adapter.AgentCodex,
+		Source:         "daemon",
+		Status:         protocol.StatusCompleted,
+		LastActivityAt: lastActivity,
 	}
 	sm.mu.Unlock()
 
@@ -1027,6 +1049,9 @@ func TestResyncSessionsMarksDiscoveryEvents(t *testing.T) {
 	evt := <-outputCh
 	if evt.Type != "session_discovered" || !evt.Resync {
 		t.Fatalf("event = %#v, want resync session_discovered", evt)
+	}
+	if evt.LastActivityAt != lastActivity.Format(time.RFC3339Nano) {
+		t.Fatalf("last_activity_at=%q, want %q", evt.LastActivityAt, lastActivity.Format(time.RFC3339Nano))
 	}
 }
 

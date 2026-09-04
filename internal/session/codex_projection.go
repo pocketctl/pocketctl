@@ -1,7 +1,6 @@
 package session
 
 import (
-	"github.com/pocketctl/pocketctl/internal/memorycontext"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -11,6 +10,7 @@ import (
 
 	"github.com/pocketctl/pocketctl/internal/adapter"
 	"github.com/pocketctl/pocketctl/internal/codexapp"
+	"github.com/pocketctl/pocketctl/internal/memorycontext"
 	"github.com/pocketctl/pocketctl/internal/protocol"
 	"github.com/pocketctl/pocketctl/internal/turn"
 )
@@ -117,7 +117,11 @@ func (p *codexProjection) Project(in codexapp.Inbound) []protocol.DaemonEvent {
 // ProjectHistorical hydrates persisted turn content into a fresh projector
 // without presenting historical lifecycle transitions as live events.
 func (p *codexProjection) ProjectHistorical(in codexapp.Inbound) []protocol.DaemonEvent {
-	return p.project(in, true)
+	events := p.project(in, true)
+	for i := range events {
+		events[i].Resync = true
+	}
+	return events
 }
 
 func (p *codexProjection) project(in codexapp.Inbound, historical bool) []protocol.DaemonEvent {
@@ -627,7 +631,11 @@ func (p *codexProjection) ProjectResumedThread(raw json.RawMessage, threadID str
 		thread["status"] = map[string]any{"type": status}
 	}
 	params, _ := json.Marshal(map[string]any{"thread": thread})
-	return p.projectThreadStarted(params), status
+	events := p.projectThreadStarted(params)
+	for i := range events {
+		events[i].Resync = true
+	}
+	return events, status
 }
 
 func (p *codexProjection) mark(key string) bool {

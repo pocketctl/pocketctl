@@ -386,6 +386,7 @@
   "interactive.waiting": "Awaiting your selection",
   "interactive.selected": "Selected",
   "session.loading_history": "Loading history…",
+  "session.loading_slow": "This is taking longer than expected. Check your connection and retry.",
   "session.no_more": "No more",
   "new_session.title": "New Session",
   "new_session.agent_label": "Agent",

@@ -709,6 +709,35 @@ describe('EventMaterializer', () => {
     bindSession.mockRestore()
     reconcile.mockRestore()
   })
+
+  test.each([
+    'running', 'interrupt_requested', 'completed', 'interrupted', 'failed', 'abandoned',
+  ])('persists tagged subagent turn lifecycle status %s', async (turnStatus) => {
+    const persistStatus = vi.spyOn(db, 'upsertSubagentStatus').mockResolvedValue(undefined)
+    const pool = pools()
+    const payload = {
+      type: 'turn_status', session_id: 'thr_parent', agent_id: 'thr_child',
+      turn_id: 'turn-child', turn_status: turnStatus,
+    }
+
+    const result = await new EventMaterializer({ pool: pool as never }).materialize(inputFor(payload))
+
+    expect(persistStatus).toHaveBeenCalledWith(pool, 'thr_parent', 'thr_child', turnStatus)
+    expect(result.deliveries[0]?.payload).toEqual(payload)
+    persistStatus.mockRestore()
+  })
+
+  test('does not mutate subagent lifecycle for a root turn status', async () => {
+    const persistStatus = vi.spyOn(db, 'upsertSubagentStatus').mockResolvedValue(undefined)
+
+    await new EventMaterializer({ pool: pools() as never }).materialize(inputFor({
+      type: 'turn_status', session_id: 'thr_parent', agent_id: '',
+      turn_id: 'turn-root', turn_status: 'completed',
+    }))
+
+    expect(persistStatus).not.toHaveBeenCalled()
+    persistStatus.mockRestore()
+  })
 })
 
 describe('zcode observer session source', () => {

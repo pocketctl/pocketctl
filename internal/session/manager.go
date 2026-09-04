@@ -298,7 +298,7 @@ func (sm *SessionManager) ResyncSessions() {
 	sm.mu.RLock()
 	defer sm.mu.RUnlock()
 	for sessionID, ps := range sm.sessions {
-		sm.outputCh <- protocol.DaemonEvent{
+		event := protocol.DaemonEvent{
 			Type:         "session_discovered",
 			SessionID:    sessionID,
 			Cwd:          ps.Cwd,
@@ -310,5 +310,9 @@ func (sm *SessionManager) ResyncSessions() {
 			Capabilities: sm.sessionCapabilitiesLocked(ps),
 			Resync:       true,
 		}
+		if !ps.LastActivityAt.IsZero() {
+			event.LastActivityAt = ps.LastActivityAt.UTC().Format(time.RFC3339Nano)
+		}
+		sm.outputCh <- event
 	}
 }

@@ -116,6 +116,9 @@ func TestTryResumeHistorical_RegistersCodexRollout(t *testing.T) {
 	if ps.Source != "terminal" || ps.Status != protocol.StatusExited {
 		t.Errorf("source/status = %q/%q, want terminal/exited", ps.Source, ps.Status)
 	}
+	if !ps.LastActivityAt.Equal(old) {
+		t.Errorf("last activity = %v, want rollout modtime %v", ps.LastActivityAt, old)
+	}
 }
 
 // TestTryResumeHistorical_NoJSONLReturnsFalse verifies an unknown session with

@@ -3,11 +3,13 @@ import { readonly, ref } from 'vue'
 export interface SessionHeaderState {
   title: string
   host: string
+  /** daemon_id of the session's host — lets the mobile back button restore ?host= context. */
+  hostId: string
   status: string
   statusLabel: string
 }
 
-const emptyHeader = (): SessionHeaderState => ({ title: '', host: '', status: '', statusLabel: '' })
+const emptyHeader = (): SessionHeaderState => ({ title: '', host: '', hostId: '', status: '', statusLabel: '' })
 
 // The mobile shell is above route views. A small shared state keeps its session
 // identity in sync without creating a second session store in App.

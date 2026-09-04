@@ -387,14 +387,14 @@ async function initDBUnlocked(pool: pg.Pool): Promise<void> {
   await pool.query(`ALTER TABLE sessions ADD COLUMN IF NOT EXISTS pinned_at TIMESTAMPTZ`);
   await pool.query(`CREATE INDEX IF NOT EXISTS idx_sessions_pinned ON sessions(user_id, pinned) WHERE pinned = true`);
   await pool.query(`
-    CREATE INDEX IF NOT EXISTS idx_sessions_daemon_user_keyset
+    CREATE INDEX IF NOT EXISTS idx_sessions_daemon_user_keyset_v2
     ON sessions (
       user_id,
       daemon_id,
       (COALESCE(is_subagent, false)),
       (CASE WHEN pinned THEN 1 ELSE 0 END) DESC,
       (COALESCE(pinned_at, '1970-01-01T00:00:00Z'::timestamptz)) DESC,
-      (COALESCE(last_activity_at, updated_at)) DESC,
+      (COALESCE(last_activity_at, created_at)) DESC,
       session_id DESC
     )
     WHERE session_id NOT LIKE 'pending-%'
@@ -1675,7 +1675,6 @@ export async function insertEvent(pool: pg.Pool, sessionId: string, eventType: s
     [sessionId, eventType, payloadStr, hash]
   );
   if (result.rows.length > 0) {
-    pool.query(`UPDATE sessions SET last_activity_at = NOW(), updated_at = NOW() WHERE session_id = $1`, [sessionId]).catch(console.error);
     return result.rows[0].id;
   }
   return 0; // deduplicated
@@ -1759,11 +1758,8 @@ export async function persistOwnedClientEvent(
     const eventRow = result.rows[0];
     if (!eventRow) throw new Error('owned client event row unavailable');
     const inserted = eventRow.inserted === undefined || eventRow.inserted === true || eventRow.inserted === 't';
-    if (inserted) {
-      await client.query(
-        `UPDATE sessions SET last_activity_at = NOW(), updated_at = NOW() WHERE session_id = $1`,
-        [sessionId],
-      );
+    if (inserted && eventType === 'user_text') {
+      await advanceSessionActivity(client, sessionId, new Date());
     }
     if (journalSink) {
       const eligibility = extensionJournalEligibility({
@@ -1794,6 +1790,29 @@ export interface PersistedEventEffect {
   inserted: boolean;
   completed: boolean;
   nextStep: number;
+}
+
+export async function advanceSessionActivity(pool: Pick<pg.Pool, 'query'>, sessionId: string, activityAt: Date): Promise<void> {
+  await pool.query(
+    `UPDATE sessions
+     SET last_activity_at = GREATEST(COALESCE(last_activity_at, $2::timestamptz), $2::timestamptz),
+         updated_at = NOW()
+     WHERE session_id = $1`,
+    [sessionId, activityAt],
+  );
+}
+
+// Discovery carries a source snapshot (normally JSONL mtime), not a new
+// activity edge. Exact replacement repairs timestamps previously polluted by
+// reconnect-time metadata while later live events still advance monotonically.
+export async function restoreSessionActivity(pool: Pick<pg.Pool, 'query'>, sessionId: string, activityAt: Date): Promise<void> {
+  await pool.query(
+    `UPDATE sessions
+     SET last_activity_at = $2::timestamptz,
+         updated_at = NOW()
+     WHERE session_id = $1`,
+    [sessionId, activityAt],
+  );
 }
 
 /**
@@ -1828,9 +1847,6 @@ export async function persistEventWithEffect(
       const row = result.rows[0];
       if (!row) throw new Error('event ledger row unavailable');
       const inserted = row.inserted === undefined || row.inserted === true || row.inserted === 't';
-      if (inserted) {
-        pool.query(`UPDATE sessions SET last_activity_at = NOW(), updated_at = NOW() WHERE session_id = $1`, [sessionId]).catch(console.error);
-      }
       return {
         rowID: Number(row.id),
         inserted,
@@ -2340,6 +2356,7 @@ export interface SessionListPage {
 }
 
 interface SessionListCursor {
+  version: 2;
   pinned: number;
   pinnedAt: string;
   activityAt: string;
@@ -2362,7 +2379,7 @@ export async function listSessionsWithChildren(pool: pg.Pool, whereUser?: number
      LEFT JOIN daemons d ON s.daemon_id = d.daemon_id
      WHERE s.session_id NOT LIKE 'pending-%'
        AND COALESCE(s.is_subagent, false) = false ${userClause}
-     ORDER BY s.pinned DESC, s.pinned_at DESC NULLS LAST, COALESCE(s.last_activity_at, s.updated_at) DESC`,
+     ORDER BY s.pinned DESC, s.pinned_at DESC NULLS LAST, COALESCE(s.last_activity_at, s.created_at) DESC`,
     baseParams
   );
   // 一次查全部 subagents，按 parent 分组（避免 N+1）
@@ -2426,6 +2443,7 @@ function decodeSessionListCursor(cursor?: string | null): SessionListCursor | nu
     const raw = Buffer.from(cursor, 'base64url').toString('utf8');
     const parsed = JSON.parse(raw);
     if (
+      parsed.version === 2 &&
       (parsed.pinned === 0 || parsed.pinned === 1) &&
       typeof parsed.pinnedAt === 'string' &&
       typeof parsed.activityAt === 'string' &&
@@ -2441,6 +2459,7 @@ function decodeSessionListCursor(cursor?: string | null): SessionListCursor | nu
 
 function encodeSessionListCursor(row: any): string {
   const cursor: SessionListCursor = {
+    version: 2,
     pinned: Number(row.sort_pinned ?? 0),
     pinnedAt: new Date(row.sort_pinned_at).toISOString(),
     activityAt: new Date(row.sort_activity_at).toISOString(),
@@ -2469,7 +2488,7 @@ export async function listSessionsPageByDaemon(pool: pg.Pool, opts: {
        AND (
          (CASE WHEN s.pinned THEN 1 ELSE 0 END),
          COALESCE(s.pinned_at, '1970-01-01T00:00:00Z'::timestamptz),
-         COALESCE(s.last_activity_at, s.updated_at),
+         COALESCE(s.last_activity_at, s.created_at),
          s.session_id
        ) < ($${start}, $${start + 1}::timestamptz, $${start + 2}::timestamptz, $${start + 3})`;
   }
@@ -2484,7 +2503,7 @@ export async function listSessionsPageByDaemon(pool: pg.Pool, opts: {
             d.status AS daemon_status, d.hostname AS hostname, d.alias AS daemon_alias,
             CASE WHEN s.pinned THEN 1 ELSE 0 END AS sort_pinned,
             COALESCE(s.pinned_at, '1970-01-01T00:00:00Z'::timestamptz) AS sort_pinned_at,
-            COALESCE(s.last_activity_at, s.updated_at) AS sort_activity_at
+            COALESCE(s.last_activity_at, s.created_at) AS sort_activity_at
      FROM sessions s
      LEFT JOIN daemons d ON s.daemon_id = d.daemon_id
      WHERE s.session_id NOT LIKE 'pending-%'
@@ -2494,7 +2513,7 @@ export async function listSessionsPageByDaemon(pool: pg.Pool, opts: {
        ${cursorClause}
      ORDER BY CASE WHEN s.pinned THEN 1 ELSE 0 END DESC,
               COALESCE(s.pinned_at, '1970-01-01T00:00:00Z'::timestamptz) DESC,
-              COALESCE(s.last_activity_at, s.updated_at) DESC,
+              COALESCE(s.last_activity_at, s.created_at) DESC,
               s.session_id DESC
      LIMIT $2`,
     params
@@ -2722,6 +2741,24 @@ export async function upsertSubagent(pool: pg.Pool, parentSessionId: string, age
        updated_at = NOW()`,
     [parentSessionId, agentId, kind, toolUseId || null, agentType || null, title || null]
   );
+}
+
+/** Persist a child turn lifecycle, creating a placeholder when lifecycle
+ * arrives before subagent_discovered. The later relation upsert preserves it. */
+export async function upsertSubagentStatus(
+  pool: Pick<pg.Pool, 'query'>,
+  parentSessionId: string,
+  agentId: string,
+  status: string,
+): Promise<void> {
+  await pool.query(
+    `INSERT INTO subagents (parent_session_id, agent_id, status, updated_at)
+     VALUES ($1, $2, $3, NOW())
+     ON CONFLICT (parent_session_id, agent_id) DO UPDATE SET
+       status = EXCLUDED.status,
+       updated_at = NOW()`,
+    [parentSessionId, agentId, status],
+  )
 }
 
 export interface SubagentRelation {
@@ -4360,7 +4397,7 @@ export async function getTokensByDaemon(
            created_at, COALESCE(parent_session_id, '') AS parent_session_id
     FROM sessions
     WHERE user_id = $1 AND daemon_id = $2 AND session_id NOT LIKE 'pending-%'
-    ORDER BY COALESCE(last_activity_at, updated_at) DESC
+    ORDER BY COALESCE(last_activity_at, created_at) DESC
   `, [userId, daemonId]);
 
   const byAgentTotals = await pool.query(`
