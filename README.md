@@ -23,6 +23,9 @@ off your development machine.
   for replay, and the daemon reconciles supported managed sessions after restart.
 - **Focus attention** — the optional Attention Inbox groups pending questions,
   approvals, high-risk actions, and recovery signals with their session context.
+- **Grow governed project knowledge** — the optional Memory workbench turns
+  repository sources into a review-gated wiki and a dependency code graph with
+  impact analysis, and keeps skill documents under explicit governance.
 
 ## Agent support
 
