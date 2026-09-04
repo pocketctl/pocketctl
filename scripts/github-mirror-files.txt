@@ -37,6 +37,7 @@ scripts/tests/github-mirror-contract.test.mjs
 scripts/tests/nginx-online-bootstrap.test.sh
 scripts/tests/production-deploy-hardening.test.sh
 scripts/tests/production-tls-contract.test.sh
+scripts/tests/relay-extension-compose-contract.test.mjs
 go.mod
 go.sum
 Makefile
