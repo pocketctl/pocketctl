@@ -9,6 +9,7 @@ testdata/contracts
 testdata/turn_projection_golden.json
 .github
 docker-compose.prod.yml
+docker-compose.yml
 deploy
 landing/nginx.conf
 landing/nginx-docker.conf
