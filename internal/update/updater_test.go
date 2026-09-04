@@ -5,11 +5,13 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strconv"
 	"strings"
 	"testing"
@@ -23,6 +25,13 @@ const testHTTPTimeout = 5 * time.Second
 func hexSHA(data []byte) string {
 	sum := sha256.Sum256(data)
 	return hex.EncodeToString(sum[:])
+}
+
+// testAssetName mirrors the production asset naming (see assetNameForPlatform)
+// so fixtures serve the asset ResolveBinary actually requests on this platform
+// instead of pinning darwin/arm64 and breaking on the Linux CI runners.
+func testAssetName() string {
+	return fmt.Sprintf("pocketctl_%s_%s", runtime.GOOS, runtime.GOARCH)
 }
 
 // These tests pin the H-5 trust model: the community mirrors may only serve
@@ -57,13 +66,13 @@ func (f *mirrorFixture) install(t *testing.T) {
 		f.apiDigest = "sha256:" + f.goodSHA
 	}
 	if f.apiAssetName == "" {
-		f.apiAssetName = "pocketctl_darwin_arm64"
+		f.apiAssetName = testAssetName()
 	}
 	if f.mirrorSidecar == "" {
 		f.mirrorSidecar = strings.Repeat("e", 64)
 	}
 
-	assetName := "pocketctl_darwin_arm64"
+	assetName := testAssetName()
 	f.officialAPI = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if f.apiStatus != 0 {
 			w.WriteHeader(f.apiStatus)
@@ -133,7 +142,7 @@ func (f *mirrorFixture) install(t *testing.T) {
 func goodTempBinary(t *testing.T) string {
 	t.Helper()
 	dir := t.TempDir()
-	path := filepath.Join(dir, "pocketctl_darwin_arm64")
+	path := filepath.Join(dir, testAssetName())
 	if err := os.WriteFile(path, []byte("good-pocketctl-binary-bytes"), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -257,8 +266,8 @@ func TestDownloadMismatchContinuesToNextMirror(t *testing.T) {
 	defer goodServer.Close()
 
 	info := &BinaryInfo{
-		URL:          evilServer.URL + "/pocketctl_darwin_arm64",
-		FallbackURLs: []string{goodServer.URL + "/pocketctl_darwin_arm64"},
+		URL:          evilServer.URL + "/" + testAssetName(),
+		FallbackURLs: []string{goodServer.URL + "/" + testAssetName()},
 		SHA:          fileSHAOf(t, goodPath),
 	}
 	tmp, err := DownloadAndVerify(info)
