@@ -78,11 +78,13 @@ jobs:
           cache-dependency-path: |
             relay/package-lock.json
             web/package-lock.json
+            memory/package-lock.json
 
-      - name: Install Relay and Web dependencies
+      - name: Install Relay, Web, and Memory dependencies
         run: |
           npm ci --prefix relay
           npm ci --prefix web
+          npm ci --prefix memory
 
       - name: Production deployment security gate
         run: bash scripts/test-production-deployment-gate.sh --with-docker

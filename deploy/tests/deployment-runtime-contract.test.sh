@@ -63,6 +63,16 @@ git -C "$unignored_repo" \
 generated_sha=$(pocketctl_resolve_clean_git_sha "$unignored_repo/relay")
 [[ "$generated_sha" == "$(git -C "$unignored_repo" rev-parse HEAD)" ]] \
   || fail "generated Relay dependencies changed the resolved source identity"
+# Compiled output and stray tsc artifacts beside sources are regenerable
+# build products the canonical root .gitignore ignores; the gate must ignore
+# them on the unignored public mirror too.
+mkdir -p "$unignored_repo/relay/dist/extensions" "$unignored_repo/relay/src/domain"
+printf 'compiled\n' > "$unignored_repo/relay/dist/extensions/validate.js"
+printf 'stray\n' > "$unignored_repo/relay/src/domain/stray.js"
+printf 'typed\n' > "$unignored_repo/relay/src/domain/stray.d.ts"
+compiled_sha=$(pocketctl_resolve_clean_git_sha "$unignored_repo/relay")
+[[ "$compiled_sha" == "$(git -C "$unignored_repo" rev-parse HEAD)" ]] \
+  || fail "regenerable build output changed the resolved source identity"
 printf 'untracked source\n' > "$unignored_repo/relay/untracked.ts"
 if pocketctl_resolve_clean_git_sha "$unignored_repo/relay" >/dev/null 2>&1; then
   fail "untracked Relay source was assigned a clean release identity"
