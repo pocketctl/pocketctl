@@ -1,10 +1,13 @@
 package watcher
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/pocketctl/pocketctl/internal/adapter"
 )
 
 func writeRollout(t *testing.T, dir, name, content string, mtime time.Time) string {
@@ -34,6 +37,11 @@ func drainEvents(ch chan SessionEvent) []SessionEvent {
 			return out
 		}
 	}
+}
+
+func setCodexMetadataReader(t *testing.T, cw *CodexSessionWatcher, reader func(string) (adapter.CodexRolloutMetadata, bool)) {
+	t.Helper()
+	cw.readMetadata = reader
 }
 
 func TestCodexWatcher_DiscoversFreshSkipsHistorical(t *testing.T) {
@@ -66,6 +74,74 @@ func TestCodexWatcher_DiscoversFreshSkipsHistorical(t *testing.T) {
 	cw.scan(now)
 	if extra := drainEvents(cw.eventsCh); len(extra) != 0 {
 		t.Fatalf("re-scan should emit nothing, got %+v", extra)
+	}
+}
+
+func TestCodexWatcher_ClassifiesFreshDesktopAndTerminalRollouts(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("CODEX_HOME", tmp)
+	now := time.Now()
+	dayDir := filepath.Join(tmp, "sessions", now.Format("2006"), now.Format("01"), now.Format("02"))
+
+	writeRollout(t, dayDir, "rollout-desktop.jsonl",
+		`{"type":"session_meta","payload":{"id":"desktop","cwd":"/work/desktop","originator":"Codex Desktop"}}`+"\n", now)
+	writeRollout(t, dayDir, "rollout-cli.jsonl",
+		`{"type":"session_meta","payload":{"id":"cli","cwd":"/work/cli","originator":"codex-tui"}}`+"\n", now)
+
+	cw := NewCodexSessionWatcher()
+	cw.scan(now)
+	events := drainEvents(cw.eventsCh)
+	if len(events) != 2 {
+		t.Fatalf("want 2 discoveries, got %+v", events)
+	}
+
+	got := make(map[string]DiscoveredSession, len(events))
+	for _, event := range events {
+		got[event.Session.SessionID] = event.Session
+	}
+	if session := got["desktop"]; session.AgentType != adapter.AgentCodexDesktop ||
+		session.Source != "observer" || session.ControlMode != "legacy_read_only" ||
+		len(session.Capabilities) != 1 || session.Capabilities[0] != "history_sync" {
+		t.Fatalf("desktop projection = %+v", session)
+	}
+	if session := got["cli"]; session.AgentType != adapter.AgentCodex ||
+		session.Source != "terminal" || session.ControlMode == "managed" {
+		t.Fatalf("terminal projection = %+v", session)
+	}
+}
+
+func TestCodexWatcher_DiscoversFreshRolloutAcrossOlderDateDirectory(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("CODEX_HOME", tmp)
+	now := time.Now()
+	threeDaysAgo := now.AddDate(0, 0, -3)
+	dayDir := filepath.Join(tmp, "sessions", threeDaysAgo.Format("2006"), threeDaysAgo.Format("01"), threeDaysAgo.Format("02"))
+
+	writeRollout(t, dayDir, "rollout-fresh-in-old-directory.jsonl",
+		`{"type":"session_meta","payload":{"id":"fresh-old-dir","cwd":"/work/a","originator":"codex-tui"}}`+"\n", now)
+
+	cw := NewCodexSessionWatcher()
+	cw.scan(now)
+	got := drainEvents(cw.eventsCh)
+	if len(got) != 1 || got[0].Session.SessionID != "fresh-old-dir" {
+		t.Fatalf("fresh old-directory rollout = %+v", got)
+	}
+}
+
+func TestCodexWatcher_SkipsStaleRolloutAcrossOlderDateDirectory(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("CODEX_HOME", tmp)
+	now := time.Now()
+	threeDaysAgo := now.AddDate(0, 0, -3)
+	dayDir := filepath.Join(tmp, "sessions", threeDaysAgo.Format("2006"), threeDaysAgo.Format("01"), threeDaysAgo.Format("02"))
+
+	writeRollout(t, dayDir, "rollout-stale-in-old-directory.jsonl",
+		`{"type":"session_meta","payload":{"id":"stale-old-dir","cwd":"/work/a"}}`+"\n", now.Add(-codexFreshWindow-time.Second))
+
+	cw := NewCodexSessionWatcher()
+	cw.scan(now)
+	if got := drainEvents(cw.eventsCh); len(got) != 0 {
+		t.Fatalf("stale old-directory rollout must be skipped, got %+v", got)
 	}
 }
 
@@ -104,7 +180,7 @@ func TestCodexWatcher_ClassifiesFreshSubagentWithoutTopLevelDiscovery(t *testing
 	now := time.Now()
 	dayDir := filepath.Join(tmp, "sessions", now.Format("2006"), now.Format("01"), now.Format("02"))
 	path := writeRollout(t, dayDir, "rollout-child.jsonl",
-		`{"type":"session_meta","payload":{"id":"child","session_id":"root","parent_thread_id":"root","thread_source":"subagent","cwd":"/work/a","agent_nickname":"Newton","agent_path":"/root/task"}}`+"\n", now)
+		`{"type":"session_meta","payload":{"id":"child","session_id":"root","parent_thread_id":"root","thread_source":"subagent","cwd":"/work/a","agent_nickname":"Newton","agent_path":"/root/task","originator":"Codex Desktop"}}`+"\n", now)
 
 	cw := NewCodexSessionWatcher()
 	cw.scan(now)
@@ -115,8 +191,38 @@ func TestCodexWatcher_ClassifiesFreshSubagentWithoutTopLevelDiscovery(t *testing
 	ev := got[0]
 	if ev.Action != "subagent_discovered" || ev.Filepath != path || ev.Session.SessionID != "child" ||
 		ev.Session.ParentSessionID != "root" || ev.Session.RootSessionID != "root" ||
-		!ev.Session.IsSubagent || ev.Session.AgentNickname != "Newton" || ev.Session.AgentPath != "/root/task" {
+		!ev.Session.IsSubagent || ev.Session.AgentNickname != "Newton" || ev.Session.AgentPath != "/root/task" ||
+		ev.Session.AgentType != adapter.AgentCodex || ev.Session.Source != "observer" {
 		t.Fatalf("unexpected subagent event: %+v", ev)
+	}
+}
+
+func TestCodexWatcher_ReadsMetadataOnlyForFreshCandidates(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("CODEX_HOME", tmp)
+	now := time.Now()
+	staleDay := now.AddDate(0, 0, -3)
+	staleDir := filepath.Join(tmp, "sessions", staleDay.Format("2006"), staleDay.Format("01"), staleDay.Format("02"))
+	for i := 0; i < 10_000; i++ {
+		writeRollout(t, staleDir, fmt.Sprintf("rollout-stale-%05d.jsonl", i), "not metadata\n", now.Add(-codexFreshWindow-time.Second))
+	}
+	dayDir := filepath.Join(tmp, "sessions", now.Format("2006"), now.Format("01"), now.Format("02"))
+	writeRollout(t, dayDir, "rollout-fresh.jsonl",
+		`{"type":"session_meta","payload":{"id":"fresh","cwd":"/work/a","originator":"codex-tui"}}`+"\n", now)
+
+	cw := NewCodexSessionWatcher()
+	reads := 0
+	setCodexMetadataReader(t, cw, func(path string) (adapter.CodexRolloutMetadata, bool) {
+		reads++
+		return adapter.ReadCodexRolloutMetadata(path)
+	})
+	cw.scan(now)
+
+	if reads != 1 {
+		t.Fatalf("metadata reads = %d, want 1 fresh candidate only", reads)
+	}
+	if got := drainEvents(cw.eventsCh); len(got) != 1 || got[0].Session.SessionID != "fresh" {
+		t.Fatalf("fresh discovery = %+v", got)
 	}
 }
 

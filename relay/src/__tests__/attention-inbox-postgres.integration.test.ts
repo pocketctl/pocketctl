@@ -290,6 +290,56 @@ describeWithDatabase('Attention Inbox PostgreSQL transaction boundaries', () => 
     }
   })
 
+  test('observer HTTP action returns observer_read_only, restores open state, and sends nothing', async () => {
+    await insertRequest('observer-http')
+    await createAttentionProjectionWorker({ pool, repository }).runOnce()
+    await pool.query(
+      `UPDATE sessions
+       SET agent_type = 'codex-desktop', source = 'observer',
+           control_mode = 'legacy_read_only', capabilities = '["history_sync"]'::jsonb
+       WHERE session_id = 'attention-session'`,
+    )
+    const row = await pool.query(
+      `SELECT item_id, revision FROM attention_items
+       WHERE user_id = $1 AND request_id = 'observer-http'`,
+      [userId],
+    )
+    const router = new Router(pool)
+    const daemon = daemonSocket()
+    ;(router as any).daemons.set('attention-daemon', {
+      ws: daemon, daemonId: 'attention-daemon', userId,
+    })
+    const app = httpApp(router)
+    const key = '99999999-9999-4999-8999-999999999999'
+    const request = {
+      method: 'POST' as const,
+      url: `/api/attention-inbox/v1/items/${row.rows[0].item_id}/actions`,
+      headers: { authorization: 'Bearer valid', 'idempotency-key': key },
+      payload: { expected_revision: Number(row.rows[0].revision), action_id: 'once' },
+    }
+    try {
+      const rejected = await app.inject(request)
+      expect(rejected.statusCode).toBe(409)
+      expect(rejected.json()).toEqual({
+        error: {
+          code: 'observer_read_only', message: 'Observer session is read-only', retryable: false,
+        },
+      })
+      expect(daemon._sent).toEqual([])
+      expect((await pool.query(
+        `SELECT state, last_error_code FROM attention_items WHERE item_id = $1`,
+        [row.rows[0].item_id],
+      )).rows[0]).toEqual({ state: 'open', last_error_code: 'observer_read_only' })
+
+      const replay = await app.inject(request)
+      expect(replay.statusCode).toBe(409)
+      expect(replay.json().error.code).toBe('observer_read_only')
+      expect(daemon._sent).toEqual([])
+    } finally {
+      await app.close()
+    }
+  })
+
   test('terminal-first resolution wins before HTTP submission and emits no daemon command', async () => {
     await insertRequest('terminal-first')
     await createAttentionProjectionWorker({ pool, repository }).runOnce()

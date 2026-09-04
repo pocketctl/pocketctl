@@ -649,7 +649,7 @@
   "hosts.status_online": "Online",
   "hosts.status_offline": "Offline",
   "hosts.agent_system_install": "System install — pocketctl can't auto-upgrade. Reinstall sudo-free on the host.",
-  "hosts.agent_readonly_sync": "Read-only sync (local ZCode storage)",
+  "hosts.agent_readonly_sync": "Read-only observer sync",
   "hosts.agent_none": "No coding agent detected. Install one (e.g. Claude Code) on the host and retry.",
   "hosts.token_host_total": "Host Total",
   "hosts.token_today_consumed": "Today",

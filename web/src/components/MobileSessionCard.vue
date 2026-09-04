@@ -76,13 +76,15 @@
       <button v-if="hasChildren" type="button" @click="$emit('toggle-subagents')">
         {{ session.children.length }} 子智能体 <span aria-hidden="true">›</span>
       </button>
-      <button type="button" class="mobile-resume" @click="$emit('open')">恢复会话</button>
+      <button v-if="!isReadOnlyObserver" type="button" class="mobile-resume" @click="$emit('open')">恢复会话</button>
     </div>
   </div>
 </template>
 
 <script setup lang="ts">
 import { computed, onBeforeUnmount, ref } from 'vue'
+import { agentDisplayName } from '../utils/agentDisplay'
+import { isReadOnlyObserverAgent } from '../utils/observerSession'
 
 const props = defineProps<{
   session: any
@@ -114,13 +116,9 @@ const hasChildren = computed(() => Boolean(props.session.children?.length))
 const canInlineExpand = computed(() => hasChildren.value && !isExited.value)
 const hasContext = computed(() => Boolean(agentLabel.value || props.session.model || props.session.subagent_count > 0 || isExited.value))
 const actionWidth = computed(() => isTerminal.value ? 144 : 72)
-const agentLabel = computed(() => ({
-  'claude-code': 'Claude Code',
-  claude: 'Claude Code',
-  codex: 'Codex',
-  opencode: 'OpenCode',
-  zcode: 'ZCode',
-} as Record<string, string>)[props.session.agent] || props.session.agent || '')
+const normalizedAgent = computed(() => props.session.agent === 'claude' ? 'claude-code' : props.session.agent || '')
+const isReadOnlyObserver = computed(() => isReadOnlyObserverAgent(normalizedAgent.value))
+const agentLabel = computed(() => agentDisplayName(normalizedAgent.value))
 const exitReasonLabel = computed(() => ({
   normal_exit: '进程正常退出',
   user_interrupt: '由用户结束',

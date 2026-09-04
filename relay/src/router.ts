@@ -47,6 +47,12 @@ import type {
   AttentionInteractionCommand,
   AttentionInteractionRouteResult,
 } from './attention-inbox/types.js';
+import {
+  isCreateCapableAgentType,
+  isObserverAgentType,
+  isObserverSessionMessageAllowed,
+  OBSERVER_READ_ONLY_CODE,
+} from './session-observer-policy.js';
 
 interface DaemonConnection { ws: WebSocket; daemonId: string; hostname: string; agents: any[]; userId: number | null; os?: string; ip?: string; port?: string; arch?: string; version?: string; startedAt?: number; registrationId: string; tokenJti?: string }
 interface ClientConnection { ws: WebSocket; subscribedSessions: Set<string>; userId: number | null; locale: string }
@@ -2095,6 +2101,45 @@ export class Router {
   async handleClientMessage(clientWs: WebSocket, msg: any): Promise<void> {
     const client = this.clients.get(clientWs);
     if (!client) return;
+    const sessionId = typeof msg.session_id === 'string' && msg.session_id
+      ? msg.session_id
+      : null;
+    const needsControlFence = sessionId !== null
+      && msg.type !== 'local_command_log'
+      && !isObserverSessionMessageAllowed(msg.type);
+    if (!needsControlFence || client.userId === null) {
+      await this.handleClientMessageWithRuntimePolicy(clientWs, msg, null);
+      return;
+    }
+    try {
+      await db.withSessionMaterializationFence(this.controlPool, sessionId, async (lockedClient) => {
+        const policy = await db.getSessionRuntimePolicy(
+          lockedClient as unknown as pg.Pool,
+          sessionId,
+          client.userId!,
+        );
+        if (!policy) {
+          this.send(clientWs, {
+            type: 'error', session_id: sessionId, error: 'session not found or not owned',
+          });
+          return;
+        }
+        await this.handleClientMessageWithRuntimePolicy(clientWs, msg, policy);
+      });
+    } catch {
+      this.send(clientWs, {
+        type: 'error', session_id: sessionId, error: 'session not found or not owned',
+      });
+    }
+  }
+
+  private async handleClientMessageWithRuntimePolicy(
+    clientWs: WebSocket,
+    msg: any,
+    sessionRuntimePolicy: db.SessionRuntimePolicy | null,
+  ): Promise<void> {
+    const client = this.clients.get(clientWs);
+    if (!client) return;
     // Authorization chokepoint: every client message that references an existing
     // session_id must be owned by the requesting user. This single gate closes
     // both the replay IDOR (越权读历史对话) and the generic client→daemon routing
@@ -2109,9 +2154,35 @@ export class Router {
         this.send(clientWs, { type: 'error', session_id: msg.session_id, error: 'forbidden' });
         return;
       }
-      const owned = await db.isSessionOwnedByUser(this.pool, client.userId, msg.session_id).catch(() => false);
-      if (!owned) {
+      sessionRuntimePolicy = sessionRuntimePolicy ?? await db.getSessionRuntimePolicy(
+        this.pool, msg.session_id, client.userId,
+      ).catch(() => null);
+      if (!sessionRuntimePolicy) {
         this.send(clientWs, { type: 'error', session_id: msg.session_id, error: 'session not found or not owned' });
+        return;
+      }
+      if (isObserverAgentType(sessionRuntimePolicy.agentType)
+        && !isObserverSessionMessageAllowed(msg.type)) {
+        if (msg.type === 'user_message') {
+          this.send(clientWs, {
+            type: 'user_message_nack',
+            session_id: msg.session_id,
+            request_id: msg.request_id,
+            msg_id: msg.msg_id,
+            reason: OBSERVER_READ_ONLY_CODE,
+            retryable: false,
+          });
+        } else {
+          this.send(clientWs, {
+            type: 'error',
+            session_id: msg.session_id,
+            request_id: msg.request_id,
+            operation: msg.type,
+            code: OBSERVER_READ_ONLY_CODE,
+            reason: OBSERVER_READ_ONLY_CODE,
+            error: 'observer session is read-only',
+          });
+        }
         return;
       }
       client.subscribedSessions.add(msg.session_id);
@@ -2137,11 +2208,33 @@ export class Router {
       const userEvt = { type: 'user_text', session_id: sessionId, text: msg.user_text };
       const receiptEvt = { type: 'command_receipt', session_id: sessionId, command: msg.command, receipt_status: msg.receipt_status, message: msg.message };
       try {
-        await Promise.all([
-          db.persistOwnedClientEvent(this.ingestPool, client.userId, sessionId, 'user_text', userEvt, this.extensionJournalSink),
-          db.persistOwnedClientEvent(this.ingestPool, client.userId, sessionId, 'command_receipt', receiptEvt, this.extensionJournalSink),
-        ]);
+        await db.persistOwnedLocalCommandPair(
+          this.ingestPool,
+          client.userId,
+          sessionId,
+          userEvt,
+          receiptEvt,
+          this.extensionJournalSink,
+        );
       } catch (error) {
+        if (error instanceof db.ClientEventObserverReadOnlyError) {
+          this.send(clientWs, {
+            type: 'error',
+            session_id: sessionId,
+            request_id: msg.request_id,
+            operation: msg.type,
+            code: OBSERVER_READ_ONLY_CODE,
+            reason: OBSERVER_READ_ONLY_CODE,
+            error: 'observer session is read-only',
+          });
+          return;
+        }
+        if (error instanceof db.ClientEventOwnershipError) {
+          this.send(clientWs, {
+            type: 'error', session_id: sessionId, error: 'session not found or not owned',
+          });
+          return;
+        }
         console.error('[router] local_command_log persistence failed', {
           errorName: error instanceof Error ? error.name : typeof error,
         });
@@ -2232,12 +2325,38 @@ export class Router {
     }
 
     if (msg.type === 'session_create') {
+      const requestId = typeof msg.request_id === 'string' && msg.request_id
+        ? msg.request_id
+        : randomUUID();
       if (isAppReviewDemoDaemon(msg.daemon_id)) {
         this.send(clientWs, {
           type: 'session_create_failed',
-          request_id: msg.request_id,
+          request_id: requestId,
           reason: 'demo_read_only',
           error: 'App Review 演示数据为只读模式',
+        });
+        return;
+      }
+      if (isObserverAgentType(msg.agent)) {
+        this.send(clientWs, {
+          type: 'session_create_failed',
+          request_id: requestId,
+          reason: OBSERVER_READ_ONLY_CODE,
+          retryable: false,
+          error: 'observer agents are read-only',
+        });
+        return;
+      }
+      const createAgentType = msg.agent === '' || msg.agent == null
+        ? 'claude-code'
+        : msg.agent;
+      if (!isCreateCapableAgentType(createAgentType)) {
+        this.send(clientWs, {
+          type: 'session_create_failed',
+          request_id: requestId,
+          reason: 'unsupported_agent',
+          retryable: false,
+          error: 'unsupported agent',
         });
         return;
       }
@@ -2258,13 +2377,13 @@ export class Router {
         }
       }
       if (!targetDaemon) {
-        this.send(clientWs, { type: 'session_create_failed', reason: 'daemon_offline', error: 'no daemons available' });
+        this.send(clientWs, {
+          type: 'session_create_failed', request_id: requestId,
+          reason: 'daemon_offline', error: 'no daemons available',
+        });
         return;
       }
       const { id: daemonId } = targetDaemon;
-      const requestId = typeof msg.request_id === 'string' && msg.request_id
-        ? msg.request_id
-        : randomUUID();
       const existingPending = this.findPendingSessionOperation(daemonId, requestId, client.userId);
       if (existingPending?.daemonId === daemonId && existingPending.operation === 'create') {
         return;
@@ -2292,7 +2411,7 @@ export class Router {
           requestId,
           operation: 'create',
           daemonId,
-          agentType: msg.agent || 'claude-code',
+          agentType: createAgentType,
           cwd: msg.cwd || '',
           limit: enforcement === 'enforce' ? entitlements.maxConcurrentSessions : null,
         });
@@ -2334,13 +2453,13 @@ export class Router {
         sessionId: null,
         origin: clientWs,
         operation: 'create',
-        agentType: msg.agent || 'claude-code',
+        agentType: createAgentType,
         cwd: msg.cwd || '',
       }, expiresAt);
       if (client.userId !== null) this.broadcastQuotaStatus(client.userId).catch(console.error);
       this.pendingSessionCreate.set(daemonId, clientWs);
       this.pendingSessionMeta = this.pendingSessionMeta || new Map();
-      this.pendingSessionMeta.set(daemonId, { agent_type: msg.agent || 'claude-code', cwd: msg.cwd || '' });
+      this.pendingSessionMeta.set(daemonId, { agent_type: createAgentType, cwd: msg.cwd || '' });
       if (reusedReservation) {
         // The durable row proves this exact request was already admitted, but
         // cannot prove whether the pre-crash Relay delivered the command.
@@ -2354,6 +2473,7 @@ export class Router {
       }
       this.send(targetDaemon.daemon.ws, {
         ...msg,
+        agent: createAgentType,
         request_id: requestId,
         quota_grant: {
           reservation_id: reservationId ?? `unlimited-${requestId}`,
@@ -2383,7 +2503,9 @@ export class Router {
       // fast path, but it is volatile (cleared on relay restart, stale after a
       // daemon reconnect with a new id, never pruned on disconnect). Fall back
       // to the DB-backed daemon_id so historical sessions remain routable.
-      let daemonId = this.sessionToDaemon.get(msg.session_id) ?? null;
+      let daemonId = sessionRuntimePolicy?.daemonId
+        ?? this.sessionToDaemon.get(msg.session_id)
+        ?? null;
       if (!daemonId) {
         try { daemonId = await db.getSessionDaemonId(this.pool, msg.session_id); }
         catch (e) { console.error('getSessionDaemonId:', e); }
@@ -2397,7 +2519,8 @@ export class Router {
         if (daemon && daemon.ws.readyState === 1) {
           let outbound = msg;
           if (msg.type === 'user_message' && client.userId !== null) {
-            const status = await db.getSessionStatus(this.pool, msg.session_id);
+            const status = sessionRuntimePolicy?.status
+              ?? await db.getSessionStatus(this.pool, msg.session_id);
             const isActive = ['running', 'busy', 'retry', 'idle', 'waiting', 'waiting_approval', 'waiting_question'].includes(status || '');
             const requestId = typeof msg.request_id === 'string' && msg.request_id
               ? msg.request_id
@@ -2536,46 +2659,62 @@ export class Router {
     userId: number,
     command: AttentionInteractionCommand,
   ): Promise<AttentionInteractionRouteResult> {
-    const owned = await db.isSessionOwnedByUser(this.pool, userId, command.session_id)
-      .catch(() => false);
-    if (!owned) return { accepted: false, code: 'session_not_found' };
+    try {
+      return await db.withSessionMaterializationFence(
+        this.controlPool,
+        command.session_id,
+        async (lockedClient): Promise<AttentionInteractionRouteResult> => {
+          const policy = await db.getSessionRuntimePolicy(
+            lockedClient as unknown as pg.Pool,
+            command.session_id,
+            userId,
+          ).catch(() => null);
+          if (!policy) return { accepted: false, code: 'session_not_found' };
+          if (isObserverAgentType(policy.agentType)) {
+            return { accepted: false, code: OBSERVER_READ_ONLY_CODE };
+          }
+          if (!['approval_response', 'question_response', 'question_reject'].includes(command.type)) {
+            return { accepted: false, code: 'interaction_unsupported' };
+          }
 
-    let daemonId = this.sessionToDaemon.get(command.session_id) ?? null;
-    if (!daemonId) {
-      daemonId = await db.getSessionDaemonId(this.pool, command.session_id).catch(() => null);
-      if (daemonId) this.sessionToDaemon.set(command.session_id, daemonId);
-    }
-    if (!daemonId) return { accepted: false, code: 'daemon_unreachable' };
+          const daemonId = policy.daemonId;
+          if (daemonId) this.sessionToDaemon.set(command.session_id, daemonId);
+          if (!daemonId) return { accepted: false, code: 'daemon_unreachable' };
 
-    const daemon = this.daemons.get(daemonId);
-    if (!daemon || daemon.ws.readyState !== 1 || daemon.userId !== userId) {
+          const daemon = this.daemons.get(daemonId);
+          if (!daemon || daemon.ws.readyState !== 1 || daemon.userId !== userId) {
+            return { accepted: false, code: 'daemon_unreachable' };
+          }
+
+          // Rebuild the outbound object so API-only or caller-controlled fields can
+          // never leak into the daemon protocol.
+          if (command.type === 'approval_response') {
+            this.send(daemon.ws, {
+              type: command.type,
+              session_id: command.session_id,
+              request_id: command.request_id,
+              action: command.action,
+            });
+          } else if (command.type === 'question_response') {
+            this.send(daemon.ws, {
+              type: command.type,
+              session_id: command.session_id,
+              request_id: command.request_id,
+              answers: command.answers,
+            });
+          } else {
+            this.send(daemon.ws, {
+              type: command.type,
+              session_id: command.session_id,
+              request_id: command.request_id,
+            });
+          }
+          return { accepted: true };
+        },
+      );
+    } catch {
       return { accepted: false, code: 'daemon_unreachable' };
     }
-
-    // Rebuild the outbound object so API-only or caller-controlled fields can
-    // never leak into the daemon protocol.
-    if (command.type === 'approval_response') {
-      this.send(daemon.ws, {
-        type: command.type,
-        session_id: command.session_id,
-        request_id: command.request_id,
-        action: command.action,
-      });
-    } else if (command.type === 'question_response') {
-      this.send(daemon.ws, {
-        type: command.type,
-        session_id: command.session_id,
-        request_id: command.request_id,
-        answers: command.answers,
-      });
-    } else {
-      this.send(daemon.ws, {
-        type: command.type,
-        session_id: command.session_id,
-        request_id: command.request_id,
-      });
-    }
-    return { accepted: true };
   }
 
   private async handleReplay(clientWs: WebSocket, sessionId: string, lastSeq: number, reqId?: number, direction?: string, limit?: number): Promise<void> {

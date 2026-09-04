@@ -47,6 +47,8 @@ type CodexRolloutMetadata struct {
 	ThreadSource   string
 	AgentNickname  string
 	AgentPath      string
+	Originator     string
+	NativeSource   json.RawMessage
 	IsSubagent     bool
 }
 
@@ -86,6 +88,8 @@ func ReadCodexRolloutMetadata(path string) (CodexRolloutMetadata, bool) {
 				ThreadSource:   p.ThreadSource,
 				AgentNickname:  p.AgentNickname,
 				AgentPath:      p.AgentPath,
+				Originator:     p.Originator,
+				NativeSource:   p.NativeSource,
 				IsSubagent:     p.ThreadSource == "subagent" && relationID != "" && relationID != p.ID,
 			}, true
 		}
@@ -168,14 +172,16 @@ type codexPayload struct {
 		LastTokenUsage *codexTokenUsage `json:"last_token_usage,omitempty"`
 	} `json:"info,omitempty"` // token_count in Codex exec/rollout v0.143+
 	// session_meta
-	ID             string `json:"id,omitempty"`
-	SessionID      string `json:"session_id,omitempty"`
-	ParentThreadID string `json:"parent_thread_id,omitempty"`
-	ThreadSource   string `json:"thread_source,omitempty"`
-	AgentNickname  string `json:"agent_nickname,omitempty"`
-	AgentPath      string `json:"agent_path,omitempty"`
-	Cwd            string `json:"cwd,omitempty"`
-	CLIVersion     string `json:"cli_version,omitempty"`
+	ID             string          `json:"id,omitempty"`
+	SessionID      string          `json:"session_id,omitempty"`
+	ParentThreadID string          `json:"parent_thread_id,omitempty"`
+	ThreadSource   string          `json:"thread_source,omitempty"`
+	AgentNickname  string          `json:"agent_nickname,omitempty"`
+	AgentPath      string          `json:"agent_path,omitempty"`
+	Originator     string          `json:"originator,omitempty"`
+	NativeSource   json.RawMessage `json:"source,omitempty"`
+	Cwd            string          `json:"cwd,omitempty"`
+	CLIVersion     string          `json:"cli_version,omitempty"`
 }
 
 type codexTokenUsage struct {

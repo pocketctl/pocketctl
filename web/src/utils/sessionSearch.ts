@@ -22,6 +22,8 @@ export function matchesSessionSearch(session: SearchableSession, query: string):
   const needle = normalizeSessionSearch(query)
   if (!needle) return true
 
-  return [session.title || '', session.model || '', session.agent || session.agent_type || '']
+  const agent = session.agent || session.agent_type || ''
+  const agentAliases = agent === 'codex-desktop' ? 'desktop Codex Desktop 客户端' : ''
+  return [session.title || '', session.model || '', agent, agentAliases]
     .some(value => normalizeSessionSearch(value).includes(needle))
 }

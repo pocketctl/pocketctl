@@ -21,7 +21,7 @@ export interface AttentionActionRepository {
     userId: number
     itemId: string
     idempotencyKey: string
-    errorCode: 'daemon_unreachable' | 'submission_failed' | 'answers_invalid'
+    errorCode: 'daemon_unreachable' | 'submission_failed' | 'answers_invalid' | 'observer_read_only'
   }): Promise<void>
 }
 
@@ -49,6 +49,7 @@ export type AttentionSubmissionResult =
         | 'provider_not_enabled'
         | 'answers_invalid'
         | 'daemon_unreachable'
+        | 'observer_read_only'
         | 'submission_failed'
       item?: AttentionItemRecord
     }
@@ -151,7 +152,9 @@ export class AttentionInboxService {
       case 'resolved_elsewhere': return { outcome: claim.outcome, item: claim.item, final: true }
       case 'idempotent':
         if (claim.status === 'rejected') {
-          const code = claim.errorCode === 'daemon_unreachable' || claim.errorCode === 'answers_invalid'
+          const code = claim.errorCode === 'daemon_unreachable'
+            || claim.errorCode === 'answers_invalid'
+            || claim.errorCode === 'observer_read_only'
             ? claim.errorCode
             : 'submission_failed'
           return { outcome: 'error', code }
@@ -184,7 +187,9 @@ export class AttentionInboxService {
       routed = { accepted: false, code: 'daemon_unreachable' }
     }
     if (!routed.accepted) {
-      const errorCode = routed.code === 'daemon_unreachable' ? 'daemon_unreachable' : 'submission_failed'
+      const errorCode = routed.code === 'daemon_unreachable' || routed.code === 'observer_read_only'
+        ? routed.code
+        : 'submission_failed'
       await this.dependencies.repository.restoreSubmission({
         userId: input.userId, itemId: input.itemId,
         idempotencyKey: input.idempotencyKey, errorCode,

@@ -31,9 +31,13 @@ var turnV1OptionalFields = []string{
 	"classifier_version",
 }
 
-var turnV1FixtureAgents = []string{"claude-code", "codex", "opencode", "zcode"}
+// These labels select parser contracts, not distinct fixture identities.
+// codex-desktop deliberately re-runs the Codex parser fixture because Desktop
+// rollouts use that parser. Its distinct public agent identity and observer
+// policy are asserted by the cross-layer E2E, not by this fixture alias.
+var turnV1ParserContractLabels = []string{"claude-code", "codex", "codex-desktop", "opencode", "zcode"}
 
-// Every agent fixture must cover the five canonical lifecycle scenarios; the
+// Every parser-contract label must cover the canonical lifecycle scenarios; the
 // legacy_unassigned scenario marks a reviewed gap where no stable source
 // identity exists (never silently guessed into a turn).
 var turnV1RequiredScenarios = []string{
@@ -61,35 +65,44 @@ type turnFixtureFile struct {
 	Scenarios []turnFixtureScenario `json:"scenarios"`
 }
 
-func loadTurnFixture(t *testing.T, agent string) turnFixtureFile {
+func turnV1ParserFixtureAgent(contractLabel string) string {
+	if contractLabel == "codex-desktop" {
+		return "codex"
+	}
+	return contractLabel
+}
+
+func loadTurnFixture(t *testing.T, contractLabel string) turnFixtureFile {
 	t.Helper()
-	raw, err := os.ReadFile(filepath.Join("testdata", "turn-v1", agent+".json"))
+	fixtureAgent := turnV1ParserFixtureAgent(contractLabel)
+	raw, err := os.ReadFile(filepath.Join("testdata", "turn-v1", fixtureAgent+".json"))
 	if err != nil {
-		t.Fatalf("read turn-v1 fixture for %s: %v", agent, err)
+		t.Fatalf("read turn-v1 parser fixture for contract %s: %v", contractLabel, err)
 	}
 	var f turnFixtureFile
 	if err := json.Unmarshal(raw, &f); err != nil {
-		t.Fatalf("parse turn-v1 fixture for %s: %v", agent, err)
+		t.Fatalf("parse turn-v1 fixture for contract %s: %v", contractLabel, err)
 	}
-	if f.Agent != agent {
-		t.Fatalf("fixture agent field %q does not match filename %q", f.Agent, agent)
+	if f.Agent != fixtureAgent {
+		t.Fatalf("fixture agent field %q does not match parser contract %q selected by label %q", f.Agent, fixtureAgent, contractLabel)
 	}
 	return f
 }
 
-func turnFixtureText(t *testing.T, agent string) string {
+func turnFixtureText(t *testing.T, contractLabel string) string {
 	t.Helper()
-	raw, err := os.ReadFile(filepath.Join("testdata", "turn-v1", agent+".json"))
+	fixtureAgent := turnV1ParserFixtureAgent(contractLabel)
+	raw, err := os.ReadFile(filepath.Join("testdata", "turn-v1", fixtureAgent+".json"))
 	if err != nil {
-		t.Fatalf("read turn-v1 fixture for %s: %v", agent, err)
+		t.Fatalf("read turn-v1 parser fixture for contract %s: %v", contractLabel, err)
 	}
 	return string(raw)
 }
 
 func loadAllTurnFixtures(t *testing.T) map[string]turnFixtureFile {
 	t.Helper()
-	out := make(map[string]turnFixtureFile, len(turnV1FixtureAgents))
-	for _, agent := range turnV1FixtureAgents {
+	out := make(map[string]turnFixtureFile, len(turnV1ParserContractLabels))
+	for _, agent := range turnV1ParserContractLabels {
 		out[agent] = loadTurnFixture(t, agent)
 	}
 	return out
@@ -113,10 +126,10 @@ func allowedValue(list []string, got string) bool {
 	return false
 }
 
-// 1. Inventory: every agent covers the canonical scenarios with parseable,
+// 1. Inventory: every parser-contract label covers the canonical scenarios with parseable,
 // non-empty event streams.
 func TestTurnV1FixtureInventory(t *testing.T) {
-	for _, agent := range turnV1FixtureAgents {
+	for _, agent := range turnV1ParserContractLabels {
 		fixture := loadTurnFixture(t, agent)
 		seen := make(map[string]bool)
 		for _, sc := range fixture.Scenarios {
@@ -148,7 +161,7 @@ func TestTurnV1FixtureInventory(t *testing.T) {
 // and every text body is explicitly synthetic.
 func TestTurnV1FixturesSanitized(t *testing.T) {
 	home, _ := os.UserHomeDir()
-	for _, agent := range turnV1FixtureAgents {
+	for _, agent := range turnV1ParserContractLabels {
 		text := turnFixtureText(t, agent)
 		for _, banned := range []string{"/Users/", "/home/", home + "/"} {
 			if banned != "/" && strings.Contains(text, banned) {
@@ -180,7 +193,7 @@ func TestTurnV1FixturesSanitized(t *testing.T) {
 // payload the current (pre-v1) DaemonEvent decodes identically, and the raw
 // payload with unknown fields must also decode without error.
 func TestTurnV1LegacyClientCompatibility(t *testing.T) {
-	for _, agent := range turnV1FixtureAgents {
+	for _, agent := range turnV1ParserContractLabels {
 		fixture := loadTurnFixture(t, agent)
 		for _, sc := range fixture.Scenarios {
 			for i, ev := range sc.Events {
@@ -216,9 +229,9 @@ func TestTurnV1LegacyClientCompatibility(t *testing.T) {
 }
 
 // 4. Source-identity evidence: each non-legacy scenario must carry at least one
-// stable identity anchor per agent; legacy scenarios must stay unassigned.
+// stable identity anchor for its parser contract; legacy scenarios stay unassigned.
 func TestTurnV1SourceIdentityEvidence(t *testing.T) {
-	for _, agent := range turnV1FixtureAgents {
+	for _, agent := range turnV1ParserContractLabels {
 		fixture := loadTurnFixture(t, agent)
 		for _, sc := range fixture.Scenarios {
 			hasTurnID := false
@@ -228,7 +241,7 @@ func TestTurnV1SourceIdentityEvidence(t *testing.T) {
 					hasTurnID = true
 				}
 				switch agent {
-				case "codex":
+				case "codex", "codex-desktop":
 					agentEvidence = agentEvidence || strField(ev, "source_turn_id") != ""
 				case "opencode":
 					agentEvidence = agentEvidence || strField(ev, "message_id") != ""
@@ -268,7 +281,7 @@ func TestTurnV1SourceIdentityEvidence(t *testing.T) {
 // matching the emitted state, frozen vocabularies, and at most one emission per
 // (turn_id, state) inside a scenario.
 func TestTurnV1TurnStatusEventContract(t *testing.T) {
-	for _, agent := range turnV1FixtureAgents {
+	for _, agent := range turnV1ParserContractLabels {
 		fixture := loadTurnFixture(t, agent)
 		for _, sc := range fixture.Scenarios {
 			emitted := make(map[string]bool)
@@ -334,7 +347,7 @@ func TestTurnV1Vocabulary(t *testing.T) {
 // ends in interruption plus session exit, turn terminal state must be observed
 // before the session exit status.
 func TestTurnV1InterruptThenExitOrdering(t *testing.T) {
-	for _, agent := range turnV1FixtureAgents {
+	for _, agent := range turnV1ParserContractLabels {
 		fixture := loadTurnFixture(t, agent)
 		for _, sc := range fixture.Scenarios {
 			var turnTerminalIdx, sessionExitIdx = -1, -1
@@ -395,7 +408,7 @@ func TestTurnV1FixtureEventTypesAreReal(t *testing.T) {
 		"approval_resolved": true, "question_request": true, "question_resolved": true,
 		"user_message_receipt": true, "agent_todo": true, "error": true,
 	}
-	for _, agent := range turnV1FixtureAgents {
+	for _, agent := range turnV1ParserContractLabels {
 		fixture := loadTurnFixture(t, agent)
 		for _, sc := range fixture.Scenarios {
 			for i, ev := range sc.Events {

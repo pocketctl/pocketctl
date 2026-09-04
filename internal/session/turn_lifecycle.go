@@ -258,6 +258,11 @@ func (sm *SessionManager) deferTurnReserveToBackend(sessionID string) bool {
 // input binds as an addendum (steer); after a terminal turn it opens a new
 // turn linked to the interrupted predecessor.
 func (sm *SessionManager) SendMessageWithInput(ctx context.Context, in UserMessageInput) error {
+	ctx, release, err := sm.acquireObserverDrive(ctx, in.SessionID)
+	if err != nil {
+		return err
+	}
+	defer release()
 	if !sm.turnEnabled() {
 		return sm.dispatchUserMessage(ctx, in.SessionID, in.Content)
 	}

@@ -95,6 +95,33 @@ describe('extension snapshot routes', () => {
     expect(calls[0].sql).toContain('s.agent_type = ANY($6::varchar[])')
   })
 
+  test.each([
+    [['codex'], ['codex']],
+    [['codex-desktop'], ['codex-desktop']],
+    [['codex', 'codex-desktop'], ['codex', 'codex-desktop']],
+  ] as const)('keeps extension agent filters exact for %j', async (agentTypes, expected) => {
+    const actual = await vi.importActual<typeof import('../extensions/snapshot-repository.js')>(
+      '../extensions/snapshot-repository.js',
+    )
+    const calls: Array<{ sql: string; params: unknown[] }> = []
+    const pool = {
+      query: vi.fn(async (sql: string, params: unknown[]) => {
+        calls.push({ sql, params })
+        return { rows: [] }
+      }),
+    }
+
+    await actual.listInventorySessions(pool as never, {
+      installationId: INSTALLATION,
+      providerId: 'pocketctl-memory',
+      ownerUserId: 1,
+      eventFilter: { agent_types: [...agentTypes] },
+    }, { afterSessionRowId: 0, limit: 10 })
+
+    expect(calls[0].params.at(-1)).toEqual(expected)
+    expect(calls[0].sql).toContain('s.agent_type = ANY($5::varchar[])')
+  })
+
   test('repository inventory and event reads exclude immutable app review demo sessions', async () => {
     const actual = await vi.importActual<typeof import('../extensions/snapshot-repository.js')>(
       '../extensions/snapshot-repository.js',

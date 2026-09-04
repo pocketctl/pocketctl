@@ -202,6 +202,21 @@ describe('SessionDetail managed Codex terminal control', () => {
     expect(wrapper.find('.chat-input-container').exists()).toBe(true)
   })
 
+  test('uses the Codex CLI public name in the local status receipt', async () => {
+    const wrapper = mountSession()
+    setTerminalSession({
+      control_mode: 'managed',
+      capabilities: ['message_acceptance_receipt'],
+      agent_version: '1.2.3',
+    })
+    await nextTick()
+
+    await wrapper.find('.chat-textarea').setValue('/status')
+    await wrapper.find('.send-btn').trigger('click')
+
+    expect(wrapper.get('command-receipt-card-stub').attributes('message')).toContain('Codex CLI v1.2.3')
+  })
+
   test('keeps the last message clear of a resized floating composer', async () => {
     let onResize: ResizeObserverCallback | undefined
     vi.stubGlobal('ResizeObserver', class {

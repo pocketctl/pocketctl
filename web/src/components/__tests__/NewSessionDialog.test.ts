@@ -51,6 +51,57 @@ describe('NewSessionDialog permission serialization', () => {
 
   afterEach(() => vi.unstubAllGlobals())
 
+  test('offers Codex CLI only and sends the codex wire value', async () => {
+    const wrapper = mount(NewSessionDialog, {
+      props: {
+        daemons: [{ daemon_id: 'daemon-1', daemon_online: true, hostname: 'host' }],
+      },
+    })
+
+    const agentButtons = wrapper.findAll('button.agent-pill')
+    expect(agentButtons.map(button => button.text())).toEqual(['Claude Code', 'Codex CLI', 'OpenCode'])
+    expect(wrapper.text()).not.toContain('Codex Desktop')
+
+    await agentButtons[1].trigger('click')
+    await wrapper.find('button.btn-start').trigger('click')
+
+    const createMessages = ws.send.mock.calls
+      .map(([message]) => message)
+      .filter(message => message.type === 'session_create')
+    expect(createMessages).toHaveLength(1)
+    expect(createMessages[0].agent).toBe('codex')
+    expect(createMessages.some(message => message.agent === 'codex-desktop')).toBe(false)
+    wrapper.unmount()
+  })
+
+  test.each(['codex-desktop', 'zcode', 'unknown-agent'])(
+    'rejects programmatic selection and forged create payload for %s',
+    async (agent) => {
+      const wrapper = mount(NewSessionDialog, {
+        props: {
+          daemons: [{ daemon_id: 'daemon-1', daemon_online: true, hostname: 'host' }],
+        },
+      })
+      const vm = wrapper.vm as any
+      ws.send.mockClear()
+
+      vm.selectAgent(agent)
+      await nextTick()
+      expect(vm.form.agent).toBe('claude-code')
+      expect(ws.send.mock.calls.map(([message]) => message)).not.toContainEqual(
+        expect.objectContaining({ type: 'list_models', agent }),
+      )
+
+      vm.form.agent = agent
+      await nextTick()
+      expect(wrapper.get('button.btn-start').attributes('disabled')).toBeDefined()
+      vm.startSession()
+
+      expect(ws.send.mock.calls.map(([message]) => message.type)).not.toContain('session_create')
+      wrapper.unmount()
+    },
+  )
+
   test('omits permission after switching from Claude to OpenCode', async () => {
     const wrapper = mount(NewSessionDialog, {
       props: {

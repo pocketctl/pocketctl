@@ -10,6 +10,14 @@ describe('AgentBadge', () => {
     expect(w.find('.agent-badge.claude').exists()).toBe(false)
   })
 
+  test('Codex Desktop renders a distinguishable desktop badge in the Codex family', () => {
+    const w = mount(AgentBadge, { props: { agent: 'codex-desktop' } })
+    expect(w.text()).toContain('Codex Desktop')
+    expect(w.find('.agent-badge.codex-desktop').exists()).toBe(true)
+    expect(w.find('[data-agent-icon="codex-desktop"]').exists()).toBe(true)
+    expect(w.find('.agent-badge.claude').exists()).toBe(false)
+  })
+
   test('unknown agent keeps pre-change Claude fallback (no generic kind)', () => {
     const w = mount(AgentBadge, { props: { agent: 'something-unknown' } })
     expect(w.find('.agent-badge.claude').exists()).toBe(true)

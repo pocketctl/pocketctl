@@ -89,6 +89,30 @@ function activeSessionPool(): any {
   return value
 }
 
+function observerSessionPool(): any {
+  const value = pool()
+  value.query = vi.fn(async (sql: string, params?: any[]) => {
+    if (sql.includes('WITH owned_session')) {
+      const owned = params?.[0] === 'observer-session' && params?.[1] === 7
+      return {
+        rows: owned ? [{
+          daemon_id: 'd1', agent_type: 'codex-desktop', status: 'exited',
+          source: 'observer', control_mode: 'legacy_read_only', capabilities: ['history_sync'],
+        }] : [],
+        rowCount: owned ? 1 : 0,
+      }
+    }
+    if (sql.includes('RETURNING daemon_id')) return { rows: [{ daemon_id: 'd1' }], rowCount: 1 }
+    if (sql.includes('SELECT plan, whitelist')) return { rows: [{ plan: 'free', whitelist: false }] }
+    if (sql.includes('SELECT 1 FROM sessions')) return { rows: [{ '?column?': 1 }], rowCount: 1 }
+    if (sql.includes('SELECT status FROM sessions')) return { rows: [{ status: 'exited' }] }
+    if (sql.includes('SELECT daemon_id FROM sessions')) return { rows: [{ daemon_id: 'd1' }], rowCount: 1 }
+    if (sql.includes('SELECT alias FROM daemons')) return { rows: [] }
+    return { rows: [], rowCount: 0 }
+  })
+  return value
+}
+
 describe('Router active-session quota', () => {
   beforeEach(() => vi.clearAllMocks())
 
@@ -309,6 +333,61 @@ describe('Router active-session quota', () => {
         reservation_id: 'active-session-message-active',
         operation: 'resume',
       }),
+    }))
+  })
+
+  test.each(['codex-desktop', 'zcode'])('rejects %s create before reserving quota or tracking pending work', async (agent) => {
+    vi.mocked(reserveConcurrentSession).mockResolvedValue({
+      allowed: true, reservationId: 'must-not-reserve', expiresAt: Date.now() + 60_000, reused: false,
+    })
+    const router = new Router(pool())
+    const daemon = ws()
+    const client = ws()
+    await router.registerDaemon(daemon, {
+      type: 'register', daemon_id: 'd1', hostname: 'host', agents: [], supports_quota_grant: true,
+    }, 7)
+    router.registerClient(client, 7)
+    daemon._sent.length = 0
+    vi.mocked(reserveConcurrentSession).mockClear()
+
+    await router.handleClientMessage(client, {
+      type: 'session_create', daemon_id: 'd1', request_id: `create-${agent}`, agent, cwd: '/repo',
+    })
+
+    expect(reserveConcurrentSession).not.toHaveBeenCalled()
+    expect((router as any).pendingSessionOperations.size).toBe(0)
+    expect(daemon._sent).toEqual([])
+    expect(client._sent).toContainEqual(expect.objectContaining({
+      type: 'session_create_failed', request_id: `create-${agent}`,
+      reason: 'observer_read_only', retryable: false,
+    }))
+  })
+
+  test('rejects an exited observer message before resume quota reservation and pending tracking', async () => {
+    vi.mocked(reserveConcurrentSession).mockResolvedValue({
+      allowed: true, reservationId: 'must-not-resume', expiresAt: Date.now() + 60_000, reused: false,
+    })
+    const router = new Router(observerSessionPool())
+    const daemon = ws()
+    const client = ws()
+    await router.registerDaemon(daemon, {
+      type: 'register', daemon_id: 'd1', hostname: 'host', agents: [], supports_quota_grant: true,
+    }, 7)
+    router.registerClient(client, 7)
+    daemon._sent.length = 0
+    vi.mocked(reserveConcurrentSession).mockClear()
+
+    await router.handleClientMessage(client, {
+      type: 'user_message', session_id: 'observer-session', request_id: 'resume-observer',
+      msg_id: 'observer-message', content: 'must not resume',
+    })
+
+    expect(reserveConcurrentSession).not.toHaveBeenCalled()
+    expect((router as any).pendingSessionOperations.size).toBe(0)
+    expect(daemon._sent).toEqual([])
+    expect(client._sent).toContainEqual(expect.objectContaining({
+      type: 'user_message_nack', session_id: 'observer-session', request_id: 'resume-observer',
+      msg_id: 'observer-message', reason: 'observer_read_only', retryable: false,
     }))
   })
 })

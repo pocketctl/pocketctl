@@ -48,7 +48,7 @@
         </div>
         <div class="agent-pills">
           <button :class="['agent-pill', { selected: form.agent === 'claude-code' }]" @click="selectAgent('claude-code')">Claude Code</button>
-          <button :class="['agent-pill', { selected: form.agent === 'codex' }]" @click="selectAgent('codex')">Codex</button>
+          <button :class="['agent-pill', { selected: form.agent === 'codex' }]" @click="selectAgent('codex')">Codex CLI</button>
           <button :class="['agent-pill', { selected: form.agent === 'opencode' }]" @click="selectAgent('opencode')">OpenCode</button>
         </div>
 
@@ -226,7 +226,12 @@ const selectedDaemonName = computed(() => {
   return d?.daemon_alias || d?.hostname || t('nav.hosts')
 })
 
-const canStart = computed(() => !!(form.daemonId && form.agent))
+const CREATE_CAPABLE_AGENTS = new Set<AgentType>(['claude-code', 'codex', 'opencode'])
+function isCreateCapableAgent(agent: string): agent is AgentType {
+  return CREATE_CAPABLE_AGENTS.has(agent as AgentType)
+}
+
+const canStart = computed(() => !!form.daemonId && isCreateCapableAgent(form.agent))
 const creationPermissionOptions = computed(() => permissionOptions(form.agent as AgentType, true))
 const codexPermission = computed(() => form.permission?.agent === 'codex' ? form.permission : undefined)
 const permissionValue = computed({
@@ -237,8 +242,6 @@ const permissionValue = computed({
       : expandCodexPreset(value as CodexPreset)
   },
 })
-const isAgentAvailable = computed(() => form.agent === 'claude-code' || form.agent === 'codex' || form.agent === 'opencode')
-
 function selectHost(d: any) {
   if (!d.daemon_online) return
   form.daemonId = form.daemonId === d.daemon_id ? '' : d.daemon_id
@@ -248,9 +251,10 @@ function selectHost(d: any) {
 // selected host (Claude/Codex). opencode models come from its serve API and are
 // not yet surfaced, so its picker stays hidden.
 function selectAgent(agent: string) {
+  if (!isCreateCapableAgent(agent)) return
   if (form.agent === agent) return
   form.agent = agent
-  form.permission = defaultPermission(agent as AgentType)
+  form.permission = defaultPermission(agent)
   models.value = []
   modelsLoaded.value = false
   form.model = ''
@@ -294,6 +298,7 @@ let done = false
 let currentRequestId = ''
 
 function startSession() {
+  if (!isCreateCapableAgent(form.agent)) return
   if (!canStart.value || creating.value) return
   if (sessionQuotaReached.value) {
     showError('concurrent_session_quota_exceeded')

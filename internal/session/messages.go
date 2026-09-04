@@ -20,6 +20,11 @@ import (
 // requestID must match the scanner's currently-active prompt or the response is
 // rejected (stale/late answer for an already-resolved or superseded prompt).
 func (sm *SessionManager) ResolveInteractivePrompt(sessionID, requestID, choice string) error {
+	_, release, err := sm.acquireObserverDrive(context.Background(), sessionID)
+	if err != nil {
+		return err
+	}
+	defer release()
 	if choice == "" {
 		return fmt.Errorf("empty choice")
 	}
@@ -32,6 +37,10 @@ func (sm *SessionManager) ResolveInteractivePrompt(sessionID, requestID, choice 
 
 	sm.mu.Lock()
 	ps, ok := sm.sessions[sessionID]
+	if !ok {
+		sm.mu.Unlock()
+		return fmt.Errorf("session not found: %s", sessionID)
+	}
 	scanner := ps.PTYScanner
 	ptyFile := ps.PTY
 	// Validate and claim the pending prompt atomically: a matching requestID
@@ -50,9 +59,6 @@ func (sm *SessionManager) ResolveInteractivePrompt(sessionID, requestID, choice 
 	}
 	sm.mu.Unlock()
 
-	if !ok {
-		return fmt.Errorf("session not found: %s", sessionID)
-	}
 	if ptyFile == nil {
 		return fmt.Errorf("session %s PTY already closed", sessionID)
 	}
@@ -192,25 +198,18 @@ func (sm *SessionManager) dispatchUserMessage(ctx context.Context, sessionID str
 }
 
 func (sm *SessionManager) dispatchUserMessageWithContext(ctx context.Context, sessionID string, content string, hidden *memorycontext.PreparedContext) error {
+	ctx, release, err := sm.acquireObserverDrive(ctx, sessionID)
+	if err != nil {
+		return err
+	}
+	defer release()
 	sm.mu.RLock()
 	ps, ok := sm.sessions[sessionID]
 	sm.mu.RUnlock()
 	if !ok {
-		// Not in memory. A daemon restart loses the in-memory map, but a session
-		// still shown in the web UI (persisted in the relay DB) usually has its
-		// JSONL history on disk. Resume it via `claude --resume` so the user can
-		// keep talking instead of hitting "session not found". Registered as
-		// source=terminal/status=exited, so the --resume path below drives it.
-		// Falls back to "session not found" only if no JSONL exists either.
-		if !sm.tryResumeHistorical(sessionID) {
-			return fmt.Errorf("session not found: %s", sessionID)
-		}
-		sm.mu.RLock()
-		ps, ok = sm.sessions[sessionID]
-		sm.mu.RUnlock()
-		if !ok {
-			return fmt.Errorf("session not found: %s", sessionID)
-		}
+		// acquireObserverDrive performs the single history hydration before it
+		// grants a stable lease. Never discover new authority after that point.
+		return fmt.Errorf("session not found: %s", sessionID)
 	}
 	// Server-kind sessions (opencode) are driven via their SessionBackend over
 	// HTTP; the reply is forwarded by the SSE demux (owned) or DirWatch (terminal).

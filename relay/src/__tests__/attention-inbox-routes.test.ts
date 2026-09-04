@@ -219,6 +219,29 @@ describe('Attention Inbox REST routes', () => {
     expect((await app.inject(request)).statusCode).toBe(409)
   })
 
+  test('maps observer_read_only to a stable non-retryable HTTP conflict', async () => {
+    const deps = dependencies('on')
+    deps.service.submitAction.mockResolvedValueOnce({ outcome: 'error', code: 'observer_read_only' } as any)
+    const app = Fastify()
+    registerAttentionInboxRoutes(app, deps)
+
+    const response = await app.inject({
+      method: 'POST', url: `/api/attention-inbox/v1/items/${itemID}/actions`,
+      headers: {
+        authorization: 'Bearer valid',
+        'idempotency-key': '11111111-1111-4111-8111-111111111111',
+      },
+      payload: { expected_revision: 1, action_id: 'once' },
+    })
+
+    expect(response.statusCode).toBe(409)
+    expect(response.json()).toEqual({
+      error: {
+        code: 'observer_read_only', message: 'Observer session is read-only', retryable: false,
+      },
+    })
+  })
+
   test('rejects malformed item identifiers without reaching the repository or service', async () => {
     const deps = dependencies('on')
     const app = Fastify()

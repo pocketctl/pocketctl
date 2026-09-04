@@ -184,7 +184,7 @@
           </button>
           <div v-if="(currentPlan || fileChangeMessages.length) && !focusedSubAgentId" class="toolbar-overflow-separator"></div>
           <button type="button" class="toolbar-overflow-item" data-toolbar-action="copy-id" role="menuitem" @click="copySessionId"><span>{{ copied ? t('common.copied') : t('session.actions.copy_id') }}</span><code>{{ sessionId?.slice(0, 8) }}</code></button>
-          <button v-if="!focusedSubAgentId" type="button" class="toolbar-overflow-item" data-toolbar-action="resume" role="menuitem" @click="copyResumeCmd"><span>{{ resumeCopied ? t('session.actions.resume_toast') : t('session.actions.resume') }}</span><code>resume</code></button>
+          <button v-if="!focusedSubAgentId && !isReadOnlyObserverSession" type="button" class="toolbar-overflow-item" data-toolbar-action="resume" role="menuitem" @click="copyResumeCmd"><span>{{ resumeCopied ? t('session.actions.resume_toast') : t('session.actions.resume') }}</span><code>resume</code></button>
         </div>
       </div>
 
@@ -201,7 +201,7 @@
           <svg class="banner-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><path d="M16 17l5-5-5-5"/><path d="M21 12H9"/></svg>
           <span>{{ t('session.exited_banner') }}</span>
           <span v-if="exitReason" style="margin-left:4px;">· {{ exitReasonLabel(exitReason) }}</span>
-          <button v-if="isDaemonOnline" class="btn btn-accent" style="margin-left:auto;padding:4px 12px;font-size:12px;" @click="focusResumeInput">Resume</button>
+          <button v-if="isDaemonOnline && !isReadOnlyObserverSession" class="btn btn-accent" style="margin-left:auto;padding:4px 12px;font-size:12px;" @click="focusResumeInput">Resume</button>
         </div>
 
         <!-- Disconnected Banner -->
@@ -657,7 +657,7 @@ import FileChangeCard from '../components/messages/FileChangeCard.vue'
 import FileChangeBottomSheet from '../components/messages/FileChangeBottomSheet.vue'
 import SubAgentFoldGroup from '../components/messages/SubAgentFoldGroup.vue'
 import { buildResumeCommand } from '../utils/resumeCommand'
-import { isZcodeObserverSession as isZcodeObserverSessionHelper } from '../utils/zcodeObserver'
+import { isReadOnlyObserverAgent } from '../utils/observerSession'
 import { resolveAgentTarget } from './classifyByAgent'
 import { formatToolInput } from '../utils/toolDisplay'
 import { isDiffTool } from '../utils/diffRender'
@@ -834,12 +834,12 @@ const isManagedOpenCode = computed(() => isManagedOpenCodeSession(
   currentSessionCapabilities.value,
 ))
 const isLegacyOpenCodeSession = computed(() => currentSessionAgent.value === 'opencode' && !isManagedOpenCode.value)
-// ZCode observer sessions are read-only sync from the local ZCode store. They
+// Observer sessions are read-only sync from their local stores. They
 // can be viewed but never driven: no composer, no stop/approval/permission, no
 // resume command (see buildResumeCommand). Used as a fail-closed gate for
 // canWriteWhenConnected and the read-only banner.
-const isZcodeObserverSession = computed(() => isZcodeObserverSessionHelper(currentSessionAgent.value))
-const interactionCardsDisabled = computed(() => isDisconnected.value || (
+const isReadOnlyObserverSession = computed(() => isReadOnlyObserverAgent(currentSessionAgent.value))
+const interactionCardsDisabled = computed(() => isReadOnlyObserverSession.value || isDisconnected.value || (
   interactionConnectivity.value !== 'ready' || (
   currentSessionAgent.value === 'opencode'
   && !canControlOpenCodeInteractions(currentSessionAgent.value, currentSession.value?.control_mode, currentSessionCapabilities.value)
@@ -879,7 +879,7 @@ const showPermMenu = ref(false)
 const runtimePermissionOptions = computed(() => permissionOptions(currentSessionAgent.value as AgentType, false, permissionMutableModes.value))
 const currentPermissionValue = computed(() => currentPermission.value?.agent === 'claude-code' ? currentPermission.value.mode : currentPermission.value?.preset || '')
 const currentPermLabel = computed(() => permissionTitleKey(currentPermission.value))
-const permissionCanChange = computed(() => permissionMutable.value && !isExecuting.value && !isDisconnected.value && !pendingPermission.value)
+const permissionCanChange = computed(() => !isReadOnlyObserverSession.value && permissionMutable.value && !isExecuting.value && !isDisconnected.value && !pendingPermission.value)
 const exitedAt = ref('')
 const autoScroll = ref(true)
 const copied = ref(false)
@@ -952,7 +952,7 @@ const agentFilterOptions = computed(() => {
     const agent = normalizedAgentType(session)
     counts.set(agent, (counts.get(agent) || 0) + 1)
   }
-  const order = ['codex', 'zcode', 'opencode', 'claude-code']
+  const order = ['codex', 'codex-desktop', 'zcode', 'opencode', 'claude-code']
   const agents = [...counts.keys()].sort((left, right) => {
     const leftIndex = order.indexOf(left)
     const rightIndex = order.indexOf(right)
@@ -1071,7 +1071,7 @@ const isSubagent = computed(() => !!allSessions.value.find((s: any) => s.session
 // query (set when clicking a child row in any list); the authoritative
 // title/agentType/token/status come from session_list's children[].
 const focusedSubAgentId = computed(() => (route.query.subagent as string) || '')
-const showSessionAgentPicker = computed(() => shouldShowSessionAgentPicker(
+const showSessionAgentPicker = computed(() => !isReadOnlyObserverSession.value && shouldShowSessionAgentPicker(
   currentSessionAgent.value,
   interactionCapabilities.value,
   isSubagent.value,
@@ -1158,11 +1158,10 @@ watch(
   { immediate: true },
 )
 const canWriteWhenConnected = computed(() => {
-  // Fail-closed gate: a ZCode observer session is read-only sync content from
-  // the local ZCode store. It can NEVER be written to, regardless of status,
-  // source, control_mode, or capabilities — including forged managed/acceptance
-  // fields. This check takes precedence over every other writeability rule.
-  if (isZcodeObserverSession.value) {
+  // Fail-closed agent gate: permanent observer sessions can NEVER be written
+  // to, regardless of status, source, control_mode, or capabilities. This check
+  // takes precedence over every other writeability rule.
+  if (isReadOnlyObserverSession.value) {
     return false
   }
   if (currentSessionAgent.value === 'claude-code') {
@@ -1196,14 +1195,14 @@ const composerState = computed(() => resolveSessionComposerState(
   interactionConnectivity.value,
 ))
 const isUnmanagedReadOnlySession = computed(() => !!currentSession.value
-  && currentSession.value?.source !== 'daemon'
+  && (isReadOnlyObserverSession.value || currentSession.value?.source !== 'daemon')
   && !canWriteWhenConnected.value
   && !isSubagent.value
   && !focusedSubAgentId.value)
 const unmanagedReadOnlyAgent = computed(() => agentDisplayName(normalizedAgentType(currentSession.value)))
 const unmanagedReadOnlyDescription = computed(() => {
   if (isLegacyOpenCodeSession.value) return t('session.opencode_legacy_readonly')
-  if (isZcodeObserverSession.value) return t('session.zcode_observer_readonly')
+  if (currentSessionAgent.value === 'zcode') return t('session.zcode_observer_readonly')
   return t('session.unmanaged_readonly_description', { agent: unmanagedReadOnlyAgent.value })
 })
 const messageBottomClearance = computed(() => composerState.value.visible
@@ -1547,6 +1546,7 @@ watch(composerEl, (element) => {
 let sessionAgentListTimer: ReturnType<typeof setTimeout> | null = null
 let sessionAgentSwitchTimer: ReturnType<typeof setTimeout> | null = null
 function requestSessionAgents() {
+  if (isReadOnlyObserverSession.value) return
   if (!showSessionAgentPicker.value || sessionAgentsLoading.value) return
   sessionAgentsLoading.value = true
   sessionAgentError.value = ''
@@ -1564,6 +1564,7 @@ function requestSessionAgents() {
 }
 
 function requestSessionAgentSwitch(name: string) {
+  if (isReadOnlyObserverSession.value) return
   if (!name || name === currentOpenCodeAgent.value || sessionAgentDisabled.value) return
   sessionAgentSubmitting.value = true
   sessionAgentError.value = ''
@@ -1720,6 +1721,7 @@ const stopError = ref('')
 let stopErrorTimer: ReturnType<typeof setTimeout> | null = null
 let stopResetTimer: ReturnType<typeof setTimeout> | null = null
 function interruptSession() {
+  if (isReadOnlyObserverSession.value) return
   // Defensive guard: the stop button is :disabled while disconnected, but a
   // stale "running" status (relay restart, missed session_status) could leave
   // it clickable briefly. Bail instead of firing an unroutable interrupt that
@@ -1898,6 +1900,7 @@ function interactionResultResolution(evt: any): { type: InteractionCardType; res
   }
 }
 function markInteractionSubmitting(msg: any, operation: string): boolean {
+  if (isReadOnlyObserverSession.value) return false
   const readiness = resolveInteractionReadiness({
     connectivity: interactionConnectivity.value,
     requestStatus: msg.status,
@@ -2004,6 +2007,7 @@ function onChoiceRespond(msg: any, choice: string) {
 }
 
 function sendMessage() {
+  if (isReadOnlyObserverSession.value) return
   const text = messageInput.value.trim()
   if (!text || !composerState.value.sendEnabled) return
   if (isPendingSession.value) return // D3: pending-id 窗口期不发命令（--resume pending-xxx 必失败）
@@ -2021,6 +2025,7 @@ function sendMessage() {
 }
 
 function sendPromptText(text: string): boolean {
+  if (isReadOnlyObserverSession.value) return false
   // C (web-post-send-feedback): optimistic echo — push user bubble immediately.
   // Relay's user_text echo is deduped by isDuplicate (same pattern as
   // handleLocalCommand), so no double bubble.
@@ -2185,7 +2190,7 @@ function buildStatusMessage(): string {
   const parts = [`主机 ${online}`]
   if (s.daemon_version) parts.push(`daemon v${s.daemon_version}`)
   const agentVer = s.agent_version || s.agentVersion
-  const agentLabel = s.agent_type === 'codex' ? 'Codex' : (s.agent_type === 'opencode' ? 'OpenCode' : 'Claude Code')
+  const agentLabel = agentDisplayName(normalizedAgentType(s))
   if (agentVer) parts.push(`${agentLabel} v${agentVer}`)
   parts.push('账户登录状态请在终端运行 pocketctl status 查看')
   return parts.join(' · ')

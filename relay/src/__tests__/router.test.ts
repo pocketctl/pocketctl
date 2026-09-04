@@ -1215,6 +1215,36 @@ describe('Router - session→daemon routing resilience', () => {
     expect(daemonWs._sent.some((m: any) => m.type === 'session_interrupt')).toBe(true)
   })
 
+  test('fails closed before native routing when the ownership-scoped runtime policy lookup fails', async () => {
+    const policyPool = createMockPool()
+    const originalQuery = policyPool.query.getMockImplementation()!
+    policyPool.query = vi.fn((sql: string, params?: any[]) => {
+      if (sql.includes('WITH owned_session')) {
+        return Promise.reject(new Error('runtime policy unavailable'))
+      }
+      return originalQuery(sql, params)
+    })
+    const guardedRouter = new Router(policyPool)
+    const daemonWs = createMockWs()
+    await guardedRouter.registerDaemon(daemonWs, {
+      type: 'register', daemon_id: 'daemon-1', hostname: 'test', agents: [],
+      active_session_ids: ['test-sid'],
+    }, 1)
+    const clientWs = createMockWs()
+    guardedRouter.registerClient(clientWs, 1)
+    daemonWs._sent.length = 0
+
+    await guardedRouter.handleClientMessage(clientWs, {
+      type: 'session_interrupt', session_id: 'test-sid', request_id: 'interrupt-policy-outage',
+    })
+
+    expect(daemonWs._sent).toEqual([])
+    expect(clientWs._sent).toContainEqual(expect.objectContaining({
+      type: 'error', session_id: 'test-sid', error: 'session not found or not owned',
+    }))
+    expect((guardedRouter as any).clients.get(clientWs).subscribedSessions.has('test-sid')).toBe(false)
+  })
+
   test('error for unroutable session includes session_id', async () => {
     const clientWs = createMockWs()
     router.registerClient(clientWs, 1)

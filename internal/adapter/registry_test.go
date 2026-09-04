@@ -66,3 +66,31 @@ func TestExistingAgentsUnchangedByZcode(t *testing.T) {
 		t.Fatalf("opencode backend/discovery changed: backend=%v discovery=%v", opencode.Backend, opencode.Discovery)
 	}
 }
+
+func TestCreateCapableAgentTypesRequireExactRegistryOptIn(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		agent string
+		want  bool
+	}{
+		{agent: AgentClaude, want: true},
+		{agent: AgentCodex, want: true},
+		{agent: AgentOpencode, want: true},
+		{agent: "", want: false},
+		{agent: AgentZcode, want: false},
+		{agent: AgentCodexDesktop, want: false},
+		{agent: "claude", want: false},
+		{agent: "Codex", want: false},
+		{agent: "codex-desktop-preview", want: false},
+		{agent: "future-agent", want: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.agent, func(t *testing.T) {
+			if got := IsCreateCapableAgent(tt.agent); got != tt.want {
+				t.Fatalf("IsCreateCapableAgent(%q) = %v, want %v", tt.agent, got, tt.want)
+			}
+		})
+	}
+}

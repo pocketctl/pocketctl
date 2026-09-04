@@ -29,7 +29,7 @@ type ProcessState struct {
 	TurnStartedAt        time.Time // start of the current turn; zero while idle
 	Cwd                  string
 	Agent                string
-	Source               string               // "daemon" or "terminal"
+	Source               string               // "daemon", "terminal", or "observer"
 	SlashCommands        []string             // slash commands the agent reported as available (init event)
 	Pid                  int                  // terminal session's original PID
 	ProcessStartIdentity string               // OS process-birth identity; prevents PID-reuse binding
@@ -101,16 +101,18 @@ var (
 )
 
 type SessionManager struct {
-	mu                  sync.RWMutex
-	sessions            map[string]*ProcessState
-	outputCh            chan protocol.DaemonEvent
-	childPids           map[int]bool                           // PIDs of daemon-spawned processes
-	OnNotifyTerminal    NotifyFunc                             // callback after --resume on terminal session
-	OnSessionIDResolved func(realSessionID, cwd, agent string) // callback when daemon session gets real ID
-	OnStateChanged      func()                                 // callback when in-memory session state should be persisted
-	ptyProvider         platform.PTYProvider                   // PR2: daemon-session PTY backend (was direct creack/pty)
-	proc                platform.ProcessController             // PR2: process alive/kill (was syscall; used by Task 3)
-	createDeps          createSessionDependencies
+	mu                   sync.RWMutex
+	sessions             map[string]*ProcessState
+	observerDriveGatesMu sync.Mutex
+	observerDriveGates   map[string]*observerDriveGate
+	outputCh             chan protocol.DaemonEvent
+	childPids            map[int]bool                           // PIDs of daemon-spawned processes
+	OnNotifyTerminal     NotifyFunc                             // callback after --resume on terminal session
+	OnSessionIDResolved  func(realSessionID, cwd, agent string) // callback when daemon session gets real ID
+	OnStateChanged       func()                                 // callback when in-memory session state should be persisted
+	ptyProvider          platform.PTYProvider                   // PR2: daemon-session PTY backend (was direct creack/pty)
+	proc                 platform.ProcessController             // PR2: process alive/kill (was syscall; used by Task 3)
+	createDeps           createSessionDependencies
 
 	// memoryContext is the Phase 2 context coordinator; nil until the relay
 	// grant transport is attached, which keeps the enrichment seam inert.
@@ -196,6 +198,7 @@ func NewSessionManager(outputCh chan protocol.DaemonEvent) *SessionManager {
 func NewSessionManagerWithTrustedActionPolicy(outputCh chan protocol.DaemonEvent, trustedActionPolicy string) *SessionManager {
 	return &SessionManager{
 		sessions:               make(map[string]*ProcessState),
+		observerDriveGates:     make(map[string]*observerDriveGate),
 		outputCh:               outputCh,
 		childPids:              make(map[int]bool),
 		cwdSessions:            make(map[string]map[string]struct{}),

@@ -12,6 +12,10 @@ import {
   ExtensionJournalOwnerMissingError,
   type ExtensionJournalSink,
 } from './extensions/journal.js';
+import {
+  isObserverAgentType,
+  OBSERVER_READ_ONLY_CODE,
+} from './session-observer-policy.js';
 import type { DaemonSessionAccess, DaemonSessionPolicy } from './materialization/types.js';
 import {
   CODE_HMAC_LENGTH,
@@ -1712,18 +1716,82 @@ export class ClientEventOwnershipError extends Error {
   }
 }
 
+/** Raised when a client-only event races with observer reclassification. */
+export class ClientEventObserverReadOnlyError extends Error {
+  readonly code = OBSERVER_READ_ONLY_CODE;
+  readonly permanent = true;
+  constructor() {
+    super('observer session is read-only')
+    this.name = 'ClientEventObserverReadOnlyError'
+  }
+}
+
 export interface OwnedClientEventResult {
   eventId: number;
   inserted: boolean;
 }
 
+interface OwnedClientSessionRow {
+  user_id: number | null;
+  source: string | null;
+}
+
+async function persistOwnedClientEventInTransaction(
+  client: Pick<pg.PoolClient, 'query'>,
+  userId: number,
+  sessionId: string,
+  eventType: string,
+  payload: any,
+  journalSink: ExtensionJournalSink | null,
+  session: OwnedClientSessionRow,
+): Promise<OwnedClientEventResult> {
+  const persistedPayload = sanitizeJSONBPayload(payload);
+  const payloadStr = JSON.stringify(persistedPayload);
+  const hash = createHash('md5')
+    .update(eventHashInput(sessionId, eventType, persistedPayload))
+    .digest('hex').slice(0, 16);
+  const result = await client.query(
+    `INSERT INTO events (session_id, event_type, payload, event_hash, user_id)
+     VALUES ($1, $2, $3, $4, $5)
+     ON CONFLICT (session_id, event_hash) DO UPDATE
+       SET user_id = COALESCE(events.user_id, EXCLUDED.user_id)
+     RETURNING id, (xmax = 0) AS inserted`,
+    [sessionId, eventType, payloadStr, hash, userId],
+  );
+  const eventRow = result.rows[0];
+  if (!eventRow) throw new Error('owned client event row unavailable');
+  const inserted = eventRow.inserted === undefined || eventRow.inserted === true || eventRow.inserted === 't';
+  if (inserted && eventType === 'user_text') {
+    await advanceSessionActivity(client, sessionId, new Date());
+  }
+  if (journalSink) {
+    const eligibility = extensionJournalEligibility({
+      ownerUserId: session.user_id,
+      ledgerSessionId: sessionId,
+      sessionId,
+      sessionSource: session.source,
+    });
+    if (!eligibility.journal) {
+      if (eligibility.reason === 'skipped_no_owner') throw new ExtensionJournalOwnerMissingError()
+    } else {
+      await journalSink.appendCanonicalEvent(client, {
+        sourceEventId: Number(eventRow.id),
+        ownerUserId: userId,
+        sessionId,
+        eventType,
+        occurredAt: null,
+        payload,
+      })
+    }
+  }
+  return { eventId: Number(eventRow.id), inserted }
+}
+
 /**
- * ADR-0003 client-event persistence: ownership check, dedup insert and the
- * extension Source Journal append all run inside one session fence
- * transaction, so a local_command_log pair either lands durably with its
- * journal rows or not at all. The DO UPDATE conflict path returns the
- * existing row id, letting a replay repair a journal row lost to an older
- * crash without duplicating feed identity.
+ * ADR-0003 single client-event persistence: ownership check, dedup insert and
+ * Source Journal append share one session-fenced transaction. The DO UPDATE
+ * path returns the existing row so replay can repair an older missing journal
+ * row without duplicating feed identity.
  */
 export async function persistOwnedClientEvent(
   pool: pg.Pool,
@@ -1742,46 +1810,51 @@ export async function persistOwnedClientEvent(
     if (!row || row.user_id !== userId || sessionId.startsWith('pending-')) {
       throw new ClientEventOwnershipError();
     }
-    const persistedPayload = sanitizeJSONBPayload(payload);
-    const payloadStr = JSON.stringify(persistedPayload);
-    const hash = createHash('md5')
-      .update(eventHashInput(sessionId, eventType, persistedPayload))
-      .digest('hex').slice(0, 16);
-    const result = await client.query(
-      `INSERT INTO events (session_id, event_type, payload, event_hash, user_id)
-       VALUES ($1, $2, $3, $4, $5)
-       ON CONFLICT (session_id, event_hash) DO UPDATE
-         SET user_id = COALESCE(events.user_id, EXCLUDED.user_id)
-       RETURNING id, (xmax = 0) AS inserted`,
-      [sessionId, eventType, payloadStr, hash, userId],
+    return persistOwnedClientEventInTransaction(
+      client, userId, sessionId, eventType, payload, journalSink, row,
+    )
+  })
+}
+
+export interface OwnedLocalCommandPairResult {
+  userText: OwnedClientEventResult;
+  commandReceipt: OwnedClientEventResult;
+}
+
+/**
+ * Persist one client-side slash-command projection as a single atomic unit.
+ * The authoritative session row is re-read only after the cross-process fence
+ * is held, closing the stale-policy window against observer reclassification.
+ * Both canonical rows, activity, and both journal appends commit or roll back
+ * together; the internal primitive avoids a nested advisory transaction.
+ */
+export async function persistOwnedLocalCommandPair(
+  pool: pg.Pool,
+  userId: number,
+  sessionId: string,
+  userTextPayload: any,
+  commandReceiptPayload: any,
+  journalSink: ExtensionJournalSink | null,
+): Promise<OwnedLocalCommandPairResult> {
+  return withSessionMaterializationFence(pool, sessionId, async (client) => {
+    const session = await client.query<OwnedClientSessionRow & { agent_type: string | null }>(
+      `SELECT user_id, agent_type, source FROM sessions WHERE session_id = $1`,
+      [sessionId],
     );
-    const eventRow = result.rows[0];
-    if (!eventRow) throw new Error('owned client event row unavailable');
-    const inserted = eventRow.inserted === undefined || eventRow.inserted === true || eventRow.inserted === 't';
-    if (inserted && eventType === 'user_text') {
-      await advanceSessionActivity(client, sessionId, new Date());
+    const row = session.rows[0];
+    if (!row || row.user_id !== userId || sessionId.startsWith('pending-')) {
+      throw new ClientEventOwnershipError();
     }
-    if (journalSink) {
-      const eligibility = extensionJournalEligibility({
-        ownerUserId: row.user_id,
-        ledgerSessionId: sessionId,
-        sessionId,
-        sessionSource: row.source,
-      });
-      if (!eligibility.journal) {
-        if (eligibility.reason === 'skipped_no_owner') throw new ExtensionJournalOwnerMissingError()
-      } else {
-        await journalSink.appendCanonicalEvent(client, {
-          sourceEventId: Number(eventRow.id),
-          ownerUserId: userId,
-          sessionId,
-          eventType,
-          occurredAt: null,
-          payload,
-        })
-      }
+    if (isObserverAgentType(row.agent_type)) {
+      throw new ClientEventObserverReadOnlyError();
     }
-    return { eventId: Number(eventRow.id), inserted }
+    const userText = await persistOwnedClientEventInTransaction(
+      client, userId, sessionId, 'user_text', userTextPayload, journalSink, row,
+    );
+    const commandReceipt = await persistOwnedClientEventInTransaction(
+      client, userId, sessionId, 'command_receipt', commandReceiptPayload, journalSink, row,
+    );
+    return { userText, commandReceipt }
   })
 }
 
@@ -2314,6 +2387,48 @@ export async function getSessionStatus(pool: pg.Pool, sessionId: string): Promis
   return result.rows[0]?.status ?? null;
 }
 
+export interface SessionRuntimePolicy {
+  daemonId: string | null;
+  agentType: string;
+  source: string | null;
+  controlMode: string | null;
+  capabilities: string[];
+  status: string | null;
+}
+
+/**
+ * Load the server-owned routing/control facts for one user session. Ownership
+ * is part of the lookup itself: callers cannot first authorize one row and
+ * later derive policy from a different tenant's row.
+ */
+export async function getSessionRuntimePolicy(
+  pool: pg.Pool,
+  sessionId: string,
+  userId: number,
+): Promise<SessionRuntimePolicy | null> {
+  const result = await pool.query(
+    `WITH owned_session AS (
+       SELECT 1 FROM sessions
+       WHERE session_id = $1 AND user_id = $2 AND session_id NOT LIKE 'pending-%'
+     )
+     SELECT s.daemon_id, s.agent_type, s.source, s.control_mode, s.capabilities, s.status
+     FROM sessions s
+     WHERE EXISTS (SELECT 1 FROM owned_session)
+       AND s.session_id = $1 AND s.user_id = $2 AND s.session_id NOT LIKE 'pending-%'`,
+    [sessionId, userId],
+  );
+  const row = result.rows[0];
+  if (!row) return null;
+  return {
+    daemonId: typeof row.daemon_id === 'string' ? row.daemon_id : null,
+    agentType: typeof row.agent_type === 'string' ? row.agent_type : '',
+    source: typeof row.source === 'string' ? row.source : null,
+    controlMode: typeof row.control_mode === 'string' ? row.control_mode : null,
+    capabilities: Array.isArray(row.capabilities) ? row.capabilities : [],
+    status: typeof row.status === 'string' ? row.status : null,
+  };
+}
+
 export async function getSessionRuntime(pool: pg.Pool, sessionId: string): Promise<{ status: string | null; turnStartedAt: string | null; lastActivityAt: string | null }> {
   const result = await pool.query(
     `SELECT status, turn_started_at, last_activity_at FROM sessions WHERE session_id = $1`,
@@ -2619,6 +2734,32 @@ export async function upsertSession(pool: pg.Pool, sessionId: string, daemonId: 
   if ((result.rowCount ?? 0) === 0 && !result.rows[0]) {
     throw new SessionOwnershipViolationError();
   }
+}
+
+/**
+ * Reclassify historical facts only after the ownership-guarded observer upsert
+ * has established the exact session identity. The materializer calls this in
+ * the same per-session fenced transaction and effect step as that upsert, so a
+ * crash cannot checkpoint one half without the other. No accounting value or
+ * source event is rewritten.
+ */
+export async function reclassifyCodexDesktopTokenUsageFacts(
+  pool: pg.Pool,
+  sessionId: string,
+  userId: number,
+): Promise<void> {
+  await pool.query(
+    `UPDATE token_usage_facts AS fact
+     SET agent_type = 'codex-desktop'
+     FROM sessions AS session
+     WHERE session.session_id = $1
+       AND session.user_id = $2
+       AND session.agent_type = 'codex-desktop'
+       AND fact.session_id = session.session_id
+       AND fact.user_id = session.user_id
+       AND fact.agent_type = 'codex'`,
+    [sessionId, userId],
+  )
 }
 
 export async function updateSessionControl(pool: pg.Pool, sessionId: string, controlMode: string, capabilities: string[]): Promise<void> {

@@ -1,6 +1,7 @@
 package session
 
 import (
+	"context"
 	"fmt"
 	"strings"
 	"time"
@@ -38,6 +39,11 @@ func isValidEffort(level string) bool {
 // to JSONL or ~/.claude/settings.json, so this recorded value reflects only what
 // was set via pocketctl, not what a user may type directly in the terminal.
 func (sm *SessionManager) SetEffort(sessionID, level string) error {
+	_, release, err := sm.acquireObserverDrive(context.Background(), sessionID)
+	if err != nil {
+		return err
+	}
+	defer release()
 	if !isValidEffort(level) {
 		return fmt.Errorf("unsupported effort level: %s (use one of %v)", level, ValidEffortLevels)
 	}
@@ -93,6 +99,11 @@ func (sm *SessionManager) SetSessionEffort(sessionID, effort string) {
 // sessions it cancels the --resume subprocess. The session stays alive and
 // returns to idle state (driven by the JSONL tailer or the resume goroutine).
 func (sm *SessionManager) InterruptSession(sessionID string) error {
+	_, release, err := sm.acquireObserverDrive(context.Background(), sessionID)
+	if err != nil {
+		return err
+	}
+	defer release()
 	sm.mu.RLock()
 	ps, ok := sm.sessions[sessionID]
 	sm.mu.RUnlock()
@@ -149,6 +160,11 @@ func (sm *SessionManager) InterruptSession(sessionID string) error {
 }
 
 func (sm *SessionManager) SetPermissionConfig(sessionID string, cfg *protocol.PermissionConfig) error {
+	_, release, err := sm.acquireObserverDrive(context.Background(), sessionID)
+	if err != nil {
+		return err
+	}
+	defer release()
 	if cfg == nil {
 		return fmt.Errorf("permission config is required")
 	}

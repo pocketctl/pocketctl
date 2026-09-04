@@ -9,7 +9,40 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/pocketctl/pocketctl/internal/adapter"
 )
+
+// TestDiscoverAgentsSkipsCodexDesktopSessionOnly verifies that a session-only
+// observer is not reported as an installed/upgradeable host agent.
+func TestDiscoverAgentsSkipsCodexDesktopSessionOnly(t *testing.T) {
+	home := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(home, ".local", "bin"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// Without the DiscoverySessionOnly skip, the empty CLI name would resolve
+	// this existing directory and incorrectly surface codex-desktop. Keep the
+	// fixture deterministic rather than depending on the developer's host.
+	t.Setenv("HOME", home)
+	t.Setenv("PATH", "")
+
+	for _, info := range DiscoverAgents() {
+		if info.Type == adapter.AgentCodexDesktop {
+			t.Fatalf("DiscoverAgents() included session-only observer: %+v", info)
+		}
+	}
+}
+
+// TestAgentTypeToCLIRejectsEveryNonCLIProvider guards the direct upgrade path:
+// neither session-only nor storage-discovered observers may resolve an empty
+// CLI name to a directory and reach the npm fallback.
+func TestAgentTypeToCLIRejectsEveryNonCLIProvider(t *testing.T) {
+	for _, agent := range []string{adapter.AgentCodexDesktop, adapter.AgentZcode} {
+		if cli, err := AgentTypeToCLI(agent); err == nil {
+			t.Errorf("AgentTypeToCLI(%s) = (%q, nil), want non-CLI provider rejection", agent, cli)
+		}
+	}
+}
 
 func TestCandidatePaths_UserLocalFirstAndDedup(t *testing.T) {
 	home := "/home/u"

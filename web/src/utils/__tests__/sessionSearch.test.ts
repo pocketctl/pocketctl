@@ -19,4 +19,15 @@ describe('sessionSearch', () => {
     expect(hasSessionSearchQuery('  \n ')).toBe(false)
     expect(hasSessionSearchQuery('codex')).toBe(true)
   })
+
+  test.each(['desktop', 'Codex Desktop', '客户端'])(
+    'matches a Codex Desktop session through the %s alias',
+    (query) => {
+      expect(matchesSessionSearch({
+        title: 'Observer session',
+        model: 'gpt-5.6',
+        agent_type: 'codex-desktop',
+      }, query)).toBe(true)
+    },
+  )
 })

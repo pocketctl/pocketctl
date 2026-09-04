@@ -16,17 +16,21 @@ import (
 
 // DiscoveredSession represents a Claude Code session found in ~/.claude/sessions/
 type DiscoveredSession struct {
-	Pid             int    `json:"pid"`
-	SessionID       string `json:"sessionId"`
-	Cwd             string `json:"cwd"`
-	Status          string `json:"status"`
-	StartedAt       int64  `json:"startedAt"`
-	Version         string `json:"version"`
-	ParentSessionID string `json:"parentSessionId,omitempty"`
-	RootSessionID   string `json:"rootSessionId,omitempty"`
-	IsSubagent      bool   `json:"isSubagent,omitempty"`
-	AgentNickname   string `json:"agentNickname,omitempty"`
-	AgentPath       string `json:"agentPath,omitempty"`
+	Pid             int      `json:"pid"`
+	SessionID       string   `json:"sessionId"`
+	Cwd             string   `json:"cwd"`
+	Status          string   `json:"status"`
+	StartedAt       int64    `json:"startedAt"`
+	Version         string   `json:"version"`
+	ParentSessionID string   `json:"parentSessionId,omitempty"`
+	RootSessionID   string   `json:"rootSessionId,omitempty"`
+	IsSubagent      bool     `json:"isSubagent,omitempty"`
+	AgentNickname   string   `json:"agentNickname,omitempty"`
+	AgentPath       string   `json:"agentPath,omitempty"`
+	AgentType       string   `json:"agentType,omitempty"`
+	Source          string   `json:"source,omitempty"`
+	ControlMode     string   `json:"controlMode,omitempty"`
+	Capabilities    []string `json:"capabilities,omitempty"`
 }
 
 // SessionEvent is emitted when a session is discovered or changes

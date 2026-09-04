@@ -160,13 +160,25 @@ func (sm *SessionManager) SetSessionStatus(sessionID, status string) {
 // ObserveTerminalSessionStatus records a lifecycle event that is already being
 // forwarded to the relay. It intentionally does not publish another event.
 func (sm *SessionManager) ObserveTerminalSessionStatus(sessionID, status string) bool {
+	return sm.observeJSONLSessionStatus(sessionID, status, false)
+}
+
+// ObserveJSONLSessionStatus records lifecycle emitted by a read-only JSONL
+// tailer. Observer sessions share persisted lifecycle with terminal sessions,
+// but this method changes only status/activity/turn timestamps and never grants
+// a backend, PID, TTY, or managed control mode.
+func (sm *SessionManager) ObserveJSONLSessionStatus(sessionID, status string) bool {
+	return sm.observeJSONLSessionStatus(sessionID, status, true)
+}
+
+func (sm *SessionManager) observeJSONLSessionStatus(sessionID, status string, allowObserver bool) bool {
 	if sessionID == "" || status == "" {
 		return false
 	}
 
 	sm.mu.Lock()
 	ps, ok := sm.sessions[sessionID]
-	if !ok || ps.Source != "terminal" {
+	if !ok || (ps.Source != "terminal" && (!allowObserver || ps.Source != "observer")) {
 		sm.mu.Unlock()
 		return false
 	}
@@ -234,13 +246,12 @@ func (sm *SessionManager) ListSessions() []SessionInfo {
 			StartedAt:      ps.StartedAt,
 			LastActivityAt: ps.LastActivityAt,
 			Agent:          ps.Agent,
+			Source:         ps.Source,
 			Cwd:            ps.Cwd,
 			Model:          ps.Model,
 			ControlMode:    ps.ControlMode,
 		}
-		if ps.Agent == adapter.AgentOpencode || ps.Agent == adapter.AgentClaude || ps.Agent == adapter.AgentCodex {
-			info.Capabilities = sm.sessionCapabilitiesLocked(ps)
-		}
+		info.Capabilities = sm.sessionCapabilitiesLocked(ps)
 		if ps.Status == protocol.StatusExited || ps.Status == protocol.StatusCompleted ||
 			ps.Status == protocol.StatusError || ps.Status == protocol.StatusKilled {
 			exited = append(exited, info)
@@ -437,6 +448,7 @@ type SessionInfo struct {
 	StartedAt      time.Time `json:"started_at"`
 	LastActivityAt time.Time `json:"last_activity_at"`
 	Agent          string    `json:"agent"`
+	Source         string    `json:"source,omitempty"`
 	Cwd            string    `json:"cwd"`
 	Model          string    `json:"model,omitempty"`
 	ControlMode    string    `json:"control_mode,omitempty"`

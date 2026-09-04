@@ -2,6 +2,7 @@ package adapter
 
 import (
 	"context"
+	"errors"
 
 	"github.com/pocketctl/pocketctl/internal/protocol"
 )
@@ -46,7 +47,8 @@ type Provider struct {
 	UpdateCmd string // built-in upgrade command ("" = npm install -g <pkg>@latest)
 
 	// How the agent is discovered/version-probed. Defaults to DiscoveryCLI for
-	// subprocess/server agents; observer agents use DiscoveryStorage.
+	// subprocess/server agents; observers use DiscoveryStorage or
+	// DiscoverySessionOnly.
 	Discovery DiscoveryKind
 
 	// Session driving.
@@ -66,7 +68,20 @@ type Provider struct {
 var (
 	registry      = map[string]Provider{}
 	registryOrder []string
+
+	// Creating a runtime is a separate, explicit capability from being
+	// registered for discovery/history. New providers fail closed until they
+	// are deliberately added here and their lifecycle side effects are audited.
+	createCapableAgentTypes = map[string]struct{}{
+		AgentClaude:   {},
+		AgentCodex:    {},
+		AgentOpencode: {},
+	}
 )
+
+// ErrUnsupportedAgent is returned when remote session creation names an agent
+// that has not explicitly opted into the create-capable registry.
+var ErrUnsupportedAgent = errors.New("unsupported_agent")
 
 // Register adds (or replaces) a Provider in the registry. Called from init() in
 // each agent's file.
@@ -90,6 +105,14 @@ func All() []Provider {
 		out = append(out, registry[t])
 	}
 	return out
+}
+
+// IsCreateCapableAgent reports whether the exact canonical agent type may
+// create a daemon-owned runtime. It intentionally performs no case folding,
+// substring matching, or fallback normalization.
+func IsCreateCapableAgent(agentType string) bool {
+	_, ok := createCapableAgentTypes[agentType]
+	return ok
 }
 
 // BackendKindFor returns how to drive an agent's sessions. Unknown/unregistered

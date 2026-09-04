@@ -1937,6 +1937,11 @@ func (sm *SessionManager) CurrentSessionAgent(ctx context.Context, sessionID str
 }
 
 func (sm *SessionManager) SetSessionAgent(ctx context.Context, sessionID, agentName string) error {
+	ctx, release, err := sm.acquireObserverDrive(ctx, sessionID)
+	if err != nil {
+		return err
+	}
+	defer release()
 	b := sm.opencodeBackendFor(sessionID)
 	if b == nil || b.coord == nil {
 		return fmt.Errorf("not an opencode session")

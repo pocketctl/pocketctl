@@ -97,6 +97,7 @@ const ACTIVE_ROOT_SESSION_SQL = `
   WHERE user_id = $1
     AND status IN ('running', 'busy', 'retry', 'idle', 'waiting', 'waiting_approval', 'waiting_question')
     AND COALESCE(is_subagent, false) = false
+    AND (agent_type IS NULL OR agent_type NOT IN ('zcode', 'codex-desktop'))
     AND session_id NOT LIKE 'pending-%'`
 
 /**

@@ -23,7 +23,7 @@
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><path d="M7 10l5 5 5-5"/><path d="M12 15V3"/></svg>
         <span>{{ t('session.actions.export') }}</span>
       </button>
-      <button class="ss-menu-item" @click="copyResumeCmd">
+      <button v-if="resumeCommand" class="ss-menu-item" @click="copyResumeCmd">
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg>
         <span>{{ t('session.actions.resume') }}</span>
       </button>
@@ -81,7 +81,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, nextTick, onUnmounted } from 'vue'
+import { computed, ref, nextTick, onUnmounted } from 'vue'
 import { useWebSocket } from '../composables/useWebSocket'
 import { useAuth } from '../composables/useAuth'
 import { useLocale } from '../composables/useLocale'
@@ -113,6 +113,7 @@ let deleteTimer: ReturnType<typeof setTimeout> | null = null
 let toastTimer: ReturnType<typeof setTimeout> | null = null
 
 const displayTitle = () => props.session.title || props.session.session_id?.slice(0, 8) || t('session.title_default')
+const resumeCommand = computed(() => buildResumeCommand(props.session))
 
 function toggleMenu(e: MouseEvent) {
   if (menuOpen.value) { menuOpen.value = false; return }
@@ -149,7 +150,7 @@ async function copyId() {
 
 // 1b. Copy resume command
 async function copyResumeCmd() {
-  const cmd = buildResumeCommand(props.session)
+  const cmd = resumeCommand.value
   if (!cmd) return
   try { await navigator.clipboard.writeText(cmd) }
   catch { const ta = document.createElement('textarea'); ta.value = cmd; document.body.appendChild(ta); ta.select(); document.execCommand('copy'); document.body.removeChild(ta) }

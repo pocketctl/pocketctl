@@ -3,6 +3,7 @@ package watcher
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -34,6 +35,7 @@ type CodexSessionWatcher struct {
 	seen            map[string]bool // rollout path → already processed
 	replayCursor    *CodexReplayCursorStore
 	replayNotBefore time.Time
+	readMetadata    func(string) (adapter.CodexRolloutMetadata, bool)
 }
 
 // NewCodexSessionWatcher creates a watcher over the CODEX_HOME-aware sessions dir.
@@ -47,6 +49,7 @@ func NewCodexSessionWatcherWithReplayCursor(cursor *CodexReplayCursorStore) *Cod
 		eventsCh:     make(chan SessionEvent, 32),
 		seen:         make(map[string]bool),
 		replayCursor: cursor,
+		readMetadata: adapter.ReadCodexRolloutMetadata,
 	}
 }
 
@@ -82,33 +85,63 @@ func (cw *CodexSessionWatcher) loop(ctx context.Context) {
 	}
 }
 
-// scan checks today's and yesterday's date directories (where any active rollout
-// lives) for new fresh rollout files and emits a "discovered" event for each.
+// scan traverses all valid YYYY/MM/DD leaves. The directory date records when
+// Codex created a rollout, not whether it is still active, so freshness comes
+// exclusively from the rollout file's mtime.
 func (cw *CodexSessionWatcher) scan(now time.Time) {
-	for _, day := range []time.Time{now, now.AddDate(0, 0, -1)} {
-		dir := filepath.Join(cw.sessionsDir, day.Format("2006"), day.Format("01"), day.Format("02"))
-		entries, err := os.ReadDir(dir)
-		if err != nil {
-			continue // dir doesn't exist yet (no codex sessions that day)
+	cutoff := now.Add(-codexFreshWindow)
+	cw.forEachRollout(func(path string) {
+		info, err := os.Stat(path)
+		if err != nil || info.IsDir() || info.ModTime().Before(cutoff) {
+			return
 		}
-		for _, e := range entries {
-			name := e.Name()
-			if e.IsDir() || !strings.HasPrefix(name, "rollout-") || !strings.HasSuffix(name, ".jsonl") {
-				continue
-			}
-			path := filepath.Join(dir, name)
-			if cw.seen[path] {
-				continue
-			}
+		cw.inspectRollout(path, true)
+	})
+}
 
-			info, err := e.Info()
+// forEachRollout enumerates only valid Codex date leaves. It intentionally
+// does not use a session index: a fresh rollout can remain under an older
+// directory after midnight or after its original creation date.
+func (cw *CodexSessionWatcher) forEachRollout(fn func(string)) {
+	years, err := os.ReadDir(cw.sessionsDir)
+	if err != nil {
+		return
+	}
+	for _, year := range years {
+		if !year.IsDir() || len(year.Name()) != len("2006") {
+			continue
+		}
+		months, err := os.ReadDir(filepath.Join(cw.sessionsDir, year.Name()))
+		if err != nil {
+			continue
+		}
+		for _, month := range months {
+			if !month.IsDir() || len(month.Name()) != len("01") {
+				continue
+			}
+			days, err := os.ReadDir(filepath.Join(cw.sessionsDir, year.Name(), month.Name()))
 			if err != nil {
 				continue
 			}
-			if now.Sub(info.ModTime()) > codexFreshWindow {
-				continue // historical rollout — not an active terminal session
+			for _, day := range days {
+				if !day.IsDir() || len(day.Name()) != len("02") {
+					continue
+				}
+				if _, err := time.Parse("2006/01/02", year.Name()+"/"+month.Name()+"/"+day.Name()); err != nil {
+					continue
+				}
+				dir := filepath.Join(cw.sessionsDir, year.Name(), month.Name(), day.Name())
+				entries, err := os.ReadDir(dir)
+				if err != nil {
+					continue
+				}
+				for _, entry := range entries {
+					if entry.IsDir() || !strings.HasPrefix(entry.Name(), "rollout-") || !strings.HasSuffix(entry.Name(), ".jsonl") {
+						continue
+					}
+					fn(filepath.Join(dir, entry.Name()))
+				}
 			}
-			cw.inspectRollout(path, true)
 		}
 	}
 }
@@ -162,11 +195,16 @@ func (cw *CodexSessionWatcher) inspectRollout(path string, fresh bool) {
 	if cw.seen[path] {
 		return
 	}
-	meta, ok := adapter.ReadCodexRolloutMetadata(path)
+	readMetadata := cw.readMetadata
+	if readMetadata == nil {
+		readMetadata = adapter.ReadCodexRolloutMetadata
+	}
+	meta, ok := readMetadata(path)
 	if !ok || meta.ID == "" {
 		return
 	}
 	if meta.IsSubagent {
+		session := cw.projectSession(path, meta)
 		replayStartLine := int64(0)
 		replayNotBefore := time.Time{}
 		if !fresh {
@@ -174,17 +212,8 @@ func (cw *CodexSessionWatcher) inspectRollout(path string, fresh bool) {
 			replayNotBefore = cw.replayNotBefore
 		}
 		cw.eventsCh <- SessionEvent{
-			Action: "subagent_discovered",
-			Session: DiscoveredSession{
-				SessionID:       meta.ID,
-				Cwd:             meta.Cwd,
-				Status:          "busy",
-				ParentSessionID: meta.ParentThreadID,
-				RootSessionID:   meta.RootSessionID,
-				IsSubagent:      true,
-				AgentNickname:   meta.AgentNickname,
-				AgentPath:       meta.AgentPath,
-			},
+			Action:          "subagent_discovered",
+			Session:         session,
 			Filepath:        path,
 			Replay:          !fresh,
 			ReplayNotBefore: replayNotBefore,
@@ -196,14 +225,47 @@ func (cw *CodexSessionWatcher) inspectRollout(path string, fresh bool) {
 	if !fresh {
 		return
 	}
+	session := cw.projectSession(path, meta)
 	cw.eventsCh <- SessionEvent{
-		Action: "discovered",
-		Session: DiscoveredSession{
-			SessionID: meta.ID,
-			Cwd:       meta.Cwd,
-			Status:    "busy",
-		},
+		Action:   "discovered",
+		Session:  session,
 		Filepath: path,
 	}
 	cw.seen[path] = true
+}
+
+func (cw *CodexSessionWatcher) projectSession(path string, meta adapter.CodexRolloutMetadata) DiscoveredSession {
+	classification := adapter.ClassifyCodexOrigin(meta)
+	if !classification.Classified {
+		slog.Warn("codex rollout origin unclassified; using terminal projection",
+			"rollout", path,
+			"session_id", meta.ID,
+			"originator", meta.Originator,
+			"native_source", string(meta.NativeSource))
+	}
+
+	agentType := classification.AgentType
+	source := "terminal"
+	if agentType == adapter.AgentCodexDesktop {
+		source = "observer"
+	}
+	// Child rollout history is always parsed through Codex's subagent parser,
+	// including children emitted by Desktop-owned parent rollouts.
+	if meta.IsSubagent {
+		agentType = adapter.AgentCodex
+	}
+	return DiscoveredSession{
+		SessionID:       meta.ID,
+		Cwd:             meta.Cwd,
+		Status:          "busy",
+		ParentSessionID: meta.ParentThreadID,
+		RootSessionID:   meta.RootSessionID,
+		IsSubagent:      meta.IsSubagent,
+		AgentNickname:   meta.AgentNickname,
+		AgentPath:       meta.AgentPath,
+		AgentType:       agentType,
+		Source:          source,
+		ControlMode:     "legacy_read_only",
+		Capabilities:    []string{"history_sync"},
+	}
 }

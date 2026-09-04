@@ -28,6 +28,34 @@ function fakePool(handler: (sql: string, params?: any[]) => any) {
 }
 
 describe('reserveConcurrentSession', () => {
+  test.each(['create', 'resume'] as const)(
+    'observer sessions do not block a Codex CLI %s reservation',
+    async (operation) => {
+      const { pool, client } = fakePool((sql) => {
+        if (sql.includes('SELECT id, expires_at')) return { rows: [] }
+        if (sql.includes('AS active_count')) {
+          const excludesObservers = sql.includes("agent_type NOT IN ('zcode', 'codex-desktop')")
+          return { rows: [{ active_count: excludesObservers ? 0 : 2 }] }
+        }
+        if (sql.includes('AS reservation_count')) return { rows: [{ reservation_count: 0 }] }
+        return { rows: [] }
+      })
+
+      const decision = await reserveConcurrentSession(pool, {
+        userId: 7,
+        requestId: `observer-safe-${operation}`,
+        operation,
+        daemonId: 'daemon-1',
+        sessionId: operation === 'resume' ? 'codex-cli-session' : undefined,
+        limit: 1,
+      })
+
+      expect(decision).toEqual(expect.objectContaining({ allowed: true, reused: false }))
+      const activeSql = String(client.query.mock.calls.find(([sql]) => String(sql).includes('AS active_count'))?.[0])
+      expect(activeSql).toContain("agent_type NOT IN ('zcode', 'codex-desktop')")
+    },
+  )
+
   test('locks the user and reserves the last available root-session slot', async () => {
     const { pool, client } = fakePool((sql) => {
       if (sql.includes('SELECT id, expires_at')) return { rows: [] }

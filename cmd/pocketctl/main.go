@@ -2176,13 +2176,24 @@ func daemonRuntimeProviders(sm *session.SessionManager) map[string]agentcontrol.
 	}
 }
 
+func parserAgentForPublicAgent(agent string) string {
+	if agent == adapter.AgentCodexDesktop {
+		return adapter.AgentCodex
+	}
+	return agent
+}
+
 func reconnectDiscoveryEvent(s session.SessionInfo) protocol.DaemonEvent {
+	source := s.Source
+	if source == "" {
+		source = "terminal"
+	}
 	event := protocol.DaemonEvent{
 		Type:         "session_discovered",
 		SessionID:    s.SessionID,
 		Cwd:          s.Cwd,
 		Status:       s.Status,
-		Source:       "terminal",
+		Source:       source,
 		Agent:        s.Agent,
 		Model:        s.Model,
 		ControlMode:  s.ControlMode,
@@ -2210,11 +2221,11 @@ func enrichRepositoryFacts(ctx context.Context, event *protocol.DaemonEvent) {
 	event.CommitSHA = observation.CommitSHA
 }
 
-func observeTerminalLifecycle(sm *session.SessionManager, event protocol.DaemonEvent) bool {
-	if sm == nil || event.Type != "session_status" {
+func observeJSONLLifecycle(sm *session.SessionManager, event protocol.DaemonEvent) bool {
+	if sm == nil || event.Type != "session_status" || event.Resync {
 		return false
 	}
-	return sm.ObserveTerminalSessionStatus(event.SessionID, event.Status)
+	return sm.ObserveJSONLSessionStatus(event.SessionID, event.Status)
 }
 
 // reconnectSessionEvents keeps the existing discovery stream intact and then
@@ -2276,6 +2287,9 @@ func terminalHydrationEvents(events []protocol.DaemonEvent, sessionID, currentSt
 }
 
 func interactionCommandResultEvent(operation, sessionID, requestID string, err error) protocol.DaemonEvent {
+	if errors.Is(err, adapter.ErrObserverReadOnly) {
+		return session.ObserverReadOnlyEvent(operation, sessionID, requestID, "", err)
+	}
 	var resolved *session.ResolvedElsewhereError
 	if errors.As(err, &resolved) {
 		return protocol.DaemonEvent{
@@ -2286,6 +2300,15 @@ func interactionCommandResultEvent(operation, sessionID, requestID string, err e
 	return protocol.DaemonEvent{
 		Type: "error", SessionID: sessionID, RequestID: requestID,
 		Operation: operation, Error: err.Error(),
+	}
+}
+
+func controlCommandErrorEvent(operation, sessionID, requestID string, err error) protocol.DaemonEvent {
+	if errors.Is(err, adapter.ErrObserverReadOnly) {
+		return session.ObserverReadOnlyEvent(operation, sessionID, requestID, "", err)
+	}
+	return protocol.DaemonEvent{
+		Type: "error", SessionID: sessionID, RequestID: requestID, Operation: operation, Error: err.Error(),
 	}
 }
 
@@ -2965,7 +2988,28 @@ func handleWatcherEvents(ctx context.Context, events <-chan watcher.SessionEvent
 
 			case "discovered":
 				logger.Info("session discovered", "session", evt.Session.SessionID, "pid", evt.Session.Pid)
-				registered := sm.RegisterTerminalSession(evt.Session.SessionID, evt.Session.Cwd, evt.Session.Pid, "", evt.Session.Status, agentType)
+				publishedAgent := evt.Session.AgentType
+				if publishedAgent == "" {
+					publishedAgent = agentType
+				}
+				parserAgent := parserAgentForPublicAgent(publishedAgent)
+				source := evt.Session.Source
+				if source == "" {
+					source = "terminal"
+				}
+				startTailer := false
+				reclassified := false
+				if source == "observer" {
+					registration := sm.RegisterObservedSession(
+						evt.Session.SessionID, evt.Session.Cwd, evt.Session.Status, publishedAgent,
+					)
+					startTailer = registration == session.ObservedSessionNew
+					reclassified = registration == session.ObservedSessionReclassified
+				} else {
+					startTailer = sm.RegisterTerminalSession(
+						evt.Session.SessionID, evt.Session.Cwd, evt.Session.Pid, "", evt.Session.Status, publishedAgent,
+					)
+				}
 				// Register with process monitor
 				if evt.Session.Pid > 0 {
 					pm.Register(evt.Session.Pid, evt.Session.SessionID)
@@ -2974,11 +3018,30 @@ func handleWatcherEvents(ctx context.Context, events <-chan watcher.SessionEvent
 				if evt.Session.Pid > 0 {
 					if ttyPath, err := notify.GetTTYForPID(evt.Session.Pid); err == nil {
 						// Update TTY info (returns false if already registered, that is fine)
-						sm.RegisterTerminalSession(evt.Session.SessionID, evt.Session.Cwd, evt.Session.Pid, ttyPath, evt.Session.Status, agentType)
+						sm.RegisterTerminalSession(evt.Session.SessionID, evt.Session.Cwd, evt.Session.Pid, ttyPath, evt.Session.Status, publishedAgent)
 					}
 				}
 				// Only start JSONL tailer if this is a genuinely new session
-				if !registered {
+				if reclassified {
+					model, _ := sm.GetSessionModel(evt.Session.SessionID)
+					discoveryEvent := protocol.DaemonEvent{
+						Type:         "session_discovered",
+						SessionID:    evt.Session.SessionID,
+						Cwd:          evt.Session.Cwd,
+						Status:       evt.Session.Status,
+						Source:       "observer",
+						Agent:        publishedAgent,
+						Model:        model,
+						ControlMode:  sm.SessionControlMode(evt.Session.SessionID),
+						Capabilities: sm.SessionCapabilities(evt.Session.SessionID),
+					}
+					if activity, ok := sm.SessionActivityAt(evt.Session.SessionID); ok && !activity.IsZero() {
+						discoveryEvent.LastActivityAt = activity.UTC().Format(time.RFC3339Nano)
+					}
+					outputCh <- discoveryEvent
+					stateDirty.Store(true)
+				}
+				if !startTailer {
 					logger.Debug("session already known, skipping tailer", "session", evt.Session.SessionID)
 					// Re-discovered (e.g. --continue): tailer already running on same JSONL,
 					// but emit session_status so relay/DB updates from "exited" → current status.
@@ -3000,7 +3063,7 @@ func handleWatcherEvents(ctx context.Context, events <-chan watcher.SessionEvent
 					}
 					defaultTitle := "Terminal Session-" + shortID
 					resolution, resolveErr := resolveTerminalJSONLForSession(
-						ctx, sm, evt, agentType, defaultTerminalJSONLResolvePolicy(), logger,
+						ctx, sm, evt, parserAgent, defaultTerminalJSONLResolvePolicy(), logger,
 					)
 					if resolveErr != nil {
 						if ctx.Err() != nil {
@@ -3024,10 +3087,13 @@ func handleWatcherEvents(ctx context.Context, events <-chan watcher.SessionEvent
 						jsonlActivityAt, _ = sm.RestoreSessionActivity(sessionSnapshot.SessionID, info.ModTime())
 					}
 					if resolution.recoveredLate {
-						if sessionSnapshot.Pid > 0 {
+						if source == "observer" {
+							sm.RegisterObservedSession(sessionSnapshot.SessionID, sessionSnapshot.Cwd,
+								sessionSnapshot.Status, publishedAgent)
+						} else if sessionSnapshot.Pid > 0 {
 							if ttyPath, ttyErr := notify.GetTTYForPID(sessionSnapshot.Pid); ttyErr == nil {
 								sm.RegisterTerminalSession(sessionSnapshot.SessionID, sessionSnapshot.Cwd,
-									sessionSnapshot.Pid, ttyPath, sessionSnapshot.Status, agentType)
+									sessionSnapshot.Pid, ttyPath, sessionSnapshot.Status, publishedAgent)
 							}
 						}
 						logger.Info("late session jsonl resolved", "session", sessionSnapshot.SessionID, "path", jsonlPath)
@@ -3035,10 +3101,12 @@ func handleWatcherEvents(ctx context.Context, events <-chan watcher.SessionEvent
 
 					var tailer *watcher.JSONLTailer
 					var err error
-					if agentType == adapter.AgentClaude && watcher.ClaudeJSONLV2Enabled() {
+					if parserAgent == adapter.AgentClaude && watcher.ClaudeJSONLV2Enabled() {
 						tailer, err = watcher.NewClaudeJSONLTailerFromStart(jsonlPath, sessionSnapshot.SessionID)
+					} else if publishedAgent == adapter.AgentCodexDesktop {
+						tailer, err = watcher.NewCodexObserverJSONLTailerFromStart(jsonlPath)
 					} else {
-						tailer, err = watcher.NewJSONLTailerFromStart(jsonlPath, agentType)
+						tailer, err = watcher.NewJSONLTailerFromStart(jsonlPath, parserAgent)
 					}
 					if err != nil {
 						logger.Warn("terminal jsonl tailer start failed", "session", sessionSnapshot.SessionID, "error", err)
@@ -3046,7 +3114,7 @@ func handleWatcherEvents(ctx context.Context, events <-chan watcher.SessionEvent
 					}
 					model := ""
 					if data, readErr := os.ReadFile(jsonlPath); readErr == nil {
-						model = adapter.NewStorage(agentType).ExtractModel(strings.Split(string(data), "\n"))
+						model = adapter.NewStorage(parserAgent).ExtractModel(strings.Split(string(data), "\n"))
 						if model != "" {
 							sm.SetSessionModel(sessionSnapshot.SessionID, model)
 						}
@@ -3059,10 +3127,11 @@ func handleWatcherEvents(ctx context.Context, events <-chan watcher.SessionEvent
 						SessionID:    sessionSnapshot.SessionID,
 						Cwd:          sessionSnapshot.Cwd,
 						Status:       sessionSnapshot.Status,
-						Source:       "terminal",
-						Agent:        agentType,
+						Source:       source,
+						Agent:        publishedAgent,
 						Title:        defaultTitle,
 						Model:        model,
+						ControlMode:  sm.SessionControlMode(sessionSnapshot.SessionID),
 						Capabilities: sm.SessionCapabilities(sessionSnapshot.SessionID),
 					}
 					if !jsonlActivityAt.IsZero() {
@@ -3081,7 +3150,7 @@ func handleWatcherEvents(ctx context.Context, events <-chan watcher.SessionEvent
 						}
 					}
 					// P0: start sub-agent discoverer (only Claude Code has subagents/ dir)
-					if agentType == adapter.AgentClaude {
+					if parserAgent == adapter.AgentClaude {
 						disc := watcher.NewSubAgentDiscoverer(jsonlPath, sessionSnapshot.SessionID, outputCh, 2*time.Second)
 						go disc.Run(ctx)
 					}
@@ -3123,11 +3192,11 @@ func handleWatcherEvents(ctx context.Context, events <-chan watcher.SessionEvent
 								if events[i].SessionID == "" {
 									events[i].SessionID = sessionSnapshot.SessionID
 								}
-								if observeTerminalLifecycle(sm, events[i]) {
+								if observeJSONLLifecycle(sm, events[i]) {
 									stateDirty.Store(true)
 								}
 								protocol.FinalizeAgentPlanEvent(&events[i])
-								if agentType == adapter.AgentClaude && events[i].Type == "sync_warning" {
+								if parserAgent == adapter.AgentClaude && events[i].Type == "sync_warning" {
 									_ = agentcontrol.RecordClaudeJSONLWarning(events[i].Reason)
 								}
 								sm.ObservePermissionEvent(events[i])
@@ -3144,10 +3213,10 @@ func handleWatcherEvents(ctx context.Context, events <-chan watcher.SessionEvent
 								// 直接读全量 JSONL 提取首条 user+assistant 确保凑齐。本地 IO 不增 token
 								// (ExtractFirst 只取首条截断 200;GenerateTitle 有 MaxTitleAttempts + relay
 								// hasDefaultTitle 防重复调 DeepSeek)。
-								if jsonlPath, perr := adapter.ResolveJSONLPathFor(agentType, evt.Session.SessionID, evt.Session.Cwd); perr == nil {
+								if jsonlPath, perr := adapter.ResolveJSONLPathFor(parserAgent, evt.Session.SessionID, evt.Session.Cwd); perr == nil {
 									allLines := readJSONLLines(jsonlPath, 500)
-									userMsg := adapter.ExtractFirstUserMessageFor(allLines, 200, agentType)
-									assistantMsg := adapter.ExtractFirstAssistantMessageFor(allLines, 200, agentType)
+									userMsg := adapter.ExtractFirstUserMessageFor(allLines, 200, parserAgent)
+									assistantMsg := adapter.ExtractFirstAssistantMessageFor(allLines, 200, parserAgent)
 									if userMsg != "" && assistantMsg != "" {
 										sm.GenerateTitle(sessionSnapshot.SessionID, userMsg, assistantMsg)
 									}
@@ -3194,6 +3263,37 @@ func quotaReservationID(grant *protocol.QuotaGrant) string {
 	return grant.ReservationID
 }
 
+// observerCommandRejection is the daemon command-loop preflight. The caller
+// runs it before quota validation, state-dirty markers, or any native resolver.
+func observerCommandRejection(sm *session.SessionManager, cmd protocol.ClientMessage) (protocol.DaemonEvent, bool) {
+	if cmd.Type == "upgrade_agent" && adapter.IsObserverAgent(cmd.Agent) {
+		return session.ObserverUpgradeRejectedEvent(cmd.Agent, cmd.RequestID), true
+	}
+	if cmd.Type == "session_create" {
+		agent := cmd.Agent
+		if agent == "" {
+			agent = adapter.AgentClaude
+		}
+		if adapter.IsObserverAgent(agent) {
+			return session.ObserverCreateRejectedEvent(cmd.RequestID, quotaReservationID(cmd.QuotaGrant)), true
+		}
+		return protocol.DaemonEvent{}, false
+	}
+	if !session.IsObserverDriveCommand(cmd.Type) {
+		return protocol.DaemonEvent{}, false
+	}
+	var err error
+	if cmd.Type == "user_message" {
+		err = sm.RejectObserverUserMessage(cmd.SessionID)
+	} else {
+		err = sm.RejectObserverDrive(cmd.SessionID)
+	}
+	if err == nil {
+		return protocol.DaemonEvent{}, false
+	}
+	return session.ObserverReadOnlyEvent(cmd.Type, cmd.SessionID, cmd.RequestID, cmd.MsgID, err), true
+}
+
 func buildSessionMeta(ctx context.Context, sm *session.SessionManager, sessionID string, requestID string, logger *slog.Logger) protocol.DaemonEvent {
 	// Historical Claude/Codex sessions are JSONL-backed. Restore them before
 	// consulting OpenCode: when the optional OpenCode serve is unavailable,
@@ -3203,14 +3303,15 @@ func buildSessionMeta(ctx context.Context, sm *session.SessionManager, sessionID
 		sm.EnsureOpencodeSessionLoaded(sessionID)
 	}
 	agentType, _ := sm.GetSessionAgent(sessionID)
-	storage := adapter.NewStorage(agentType)
+	parserAgent := parserAgentForPublicAgent(agentType)
+	storage := adapter.NewStorage(parserAgent)
 	model, exists := sm.GetSessionModel(sessionID)
 	effort := sm.GetSessionEffort(sessionID)
 	if model == "" && agentType == adapter.AgentOpencode {
 		model = sm.OpencodeSessionModelFromServe(sessionID)
 	}
 	needsModel := model == "" && agentType != adapter.AgentOpencode
-	needsCodexEffort := effort == "" && agentType == adapter.AgentCodex
+	needsCodexEffort := effort == "" && parserAgent == adapter.AgentCodex
 	if needsModel || needsCodexEffort {
 		cwd, cwdOk := sm.GetSessionCwd(sessionID)
 		if !cwdOk {
@@ -3247,7 +3348,7 @@ func buildSessionMeta(ctx context.Context, sm *session.SessionManager, sessionID
 		Model:     model,
 		Effort:    effort,
 	}
-	if agentType == adapter.AgentCodex {
+	if parserAgent == adapter.AgentCodex {
 		meta.Capabilities = sm.SessionCapabilities(sessionID)
 		meta.ControlMode = sm.SessionControlMode(sessionID)
 	} else if agentType == adapter.AgentOpencode {
@@ -3286,6 +3387,10 @@ func deliverUserMessage(
 		MsgID:     cmd.MsgID,
 		InputMode: protocol.InputModeAuto,
 	})
+	if errors.Is(err, adapter.ErrObserverReadOnly) {
+		send(session.ObserverReadOnlyEvent("user_message", cmd.SessionID, cmd.RequestID, cmd.MsgID, err))
+		return err
+	}
 	// Typed interrupt-pending nack reaches the client for EVERY agent (review
 	// P1-3): without request_id/reason/retryable a client can neither correlate
 	// the rejection nor perform a controlled retry.
@@ -3323,6 +3428,60 @@ func deliverUserMessage(
 		Retryable: &retryable,
 	})
 	return err
+}
+
+func handleUserMessageCommand(
+	ctx context.Context,
+	sm *session.SessionManager,
+	cmd protocol.ClientMessage,
+	quotaGrants *session.QuotaGrantValidator,
+	stateDirty *atomic.Bool,
+	logger *slog.Logger,
+	send func(protocol.DaemonEvent),
+) {
+	err := sm.WithObserverDrive(ctx, cmd.SessionID, func(driveCtx context.Context) error {
+		logger.Info("user message", "session", cmd.SessionID)
+		stateDirty.Store(true)
+		requiresResume := sm.RequiresResume(cmd.SessionID)
+		if requiresResume {
+			duplicate, grantErr := quotaGrants.Validate(cmd.RequestID, cmd.QuotaGrant, "resume", time.Now())
+			if grantErr != nil || duplicate {
+				errText := "resume request already processed"
+				if grantErr != nil {
+					errText = grantErr.Error()
+				}
+				send(protocol.DaemonEvent{
+					Type: "error", SessionID: cmd.SessionID, RequestID: cmd.RequestID,
+					ReservationID: quotaReservationID(cmd.QuotaGrant), Reason: "quota_grant_invalid", Error: errText,
+				})
+				return nil
+			}
+		}
+		if err := deliverUserMessage(driveCtx, sm, cmd, send); err != nil {
+			if errors.Is(err, adapter.ErrObserverReadOnly) {
+				return nil // deliverUserMessage already sent the single typed nack.
+			}
+			logger.Error("send message failed", "error", err)
+			send(protocol.DaemonEvent{
+				Type: "error", SessionID: cmd.SessionID, RequestID: cmd.RequestID,
+				Operation: "user_message", Error: err.Error(),
+			})
+		} else if requiresResume {
+			send(protocol.DaemonEvent{
+				Type: "session_status", SessionID: cmd.SessionID, Status: protocol.StatusRunning,
+				RequestID: cmd.RequestID, ReservationID: quotaReservationID(cmd.QuotaGrant),
+			})
+		}
+		return nil
+	})
+	if errors.Is(err, adapter.ErrObserverReadOnly) {
+		send(session.ObserverReadOnlyEvent("user_message", cmd.SessionID, cmd.RequestID, cmd.MsgID, err))
+		return
+	}
+	if err != nil {
+		logger.Error("authorize user message failed", "session", cmd.SessionID, "error", err)
+		send(controlCommandErrorEvent("user_message", cmd.SessionID, cmd.RequestID, err))
+	}
 }
 
 type memoryContextControlSender interface {
@@ -3369,6 +3528,10 @@ func handleCommands(ctx context.Context, client *ws.Client, sm *session.SessionM
 			return
 		case cmd := <-client.CommandCh:
 			if sm.DispatchMemoryContextControl(cmd) {
+				continue
+			}
+			if event, rejected := observerCommandRejection(sm, cmd); rejected {
+				client.SendMsg(event)
 				continue
 			}
 			switch cmd.Type {
@@ -3465,7 +3628,9 @@ func handleCommands(ctx context.Context, client *ws.Client, sm *session.SessionM
 			case "abort_create":
 				logger.Info("abort create session", "session", cmd.SessionID)
 				if cmd.SessionID != "" {
-					sm.AbortSession(cmd.SessionID)
+					if _, err := sm.AbortSessionWithError(cmd.SessionID); err != nil {
+						client.SendMsg(controlCommandErrorEvent("abort_create", cmd.SessionID, cmd.RequestID, err))
+					}
 				}
 
 			case "daemon_restart":
@@ -3501,68 +3666,30 @@ func handleCommands(ctx context.Context, client *ws.Client, sm *session.SessionM
 				})
 
 			case "user_message":
-				logger.Info("user message", "session", cmd.SessionID)
-				stateDirty.Store(true)
-				requiresResume := sm.RequiresResume(cmd.SessionID)
-				if requiresResume {
-					duplicate, grantErr := quotaGrants.Validate(cmd.RequestID, cmd.QuotaGrant, "resume", time.Now())
-					if grantErr != nil || duplicate {
-						errText := "resume request already processed"
-						if grantErr != nil {
-							errText = grantErr.Error()
-						}
-						client.SendMsg(protocol.DaemonEvent{
-							Type: "error", SessionID: cmd.SessionID, RequestID: cmd.RequestID,
-							ReservationID: quotaReservationID(cmd.QuotaGrant), Reason: "quota_grant_invalid", Error: errText,
-						})
-						continue
-					}
-				}
-				if err := deliverUserMessage(ctx, sm, cmd, func(event protocol.DaemonEvent) {
+				handleUserMessageCommand(ctx, sm, cmd, quotaGrants, stateDirty, logger, func(event protocol.DaemonEvent) {
 					client.SendMsg(event)
-				}); err != nil {
-					logger.Error("send message failed", "error", err)
-					client.SendMsg(protocol.DaemonEvent{
-						Type: "error", SessionID: cmd.SessionID, Error: err.Error(),
-					})
-				} else if requiresResume {
-					client.SendMsg(protocol.DaemonEvent{
-						Type: "session_status", SessionID: cmd.SessionID, Status: protocol.StatusRunning,
-						RequestID: cmd.RequestID, ReservationID: quotaReservationID(cmd.QuotaGrant),
-					})
-				}
+				})
 
 			case "session_kill":
 				logger.Info("kill session", "session", cmd.SessionID)
-				stateDirty.Store(true)
 				if err := sm.KillSession(cmd.SessionID); err != nil {
 					logger.Error("kill session failed", "error", err)
-					client.SendMsg(protocol.DaemonEvent{
-						Type:      "error",
-						SessionID: cmd.SessionID,
-						Error:     err.Error(),
-					})
+					client.SendMsg(controlCommandErrorEvent("session_kill", cmd.SessionID, cmd.RequestID, err))
+				} else {
+					stateDirty.Store(true)
 				}
 
 			case "session_interrupt":
 				logger.Info("interrupt session", "session", cmd.SessionID)
 				if err := sm.InterruptSession(cmd.SessionID); err != nil {
 					logger.Error("interrupt session failed", "error", err)
-					client.SendMsg(protocol.DaemonEvent{
-						Type:      "error",
-						SessionID: cmd.SessionID,
-						Error:     err.Error(),
-					})
+					client.SendMsg(controlCommandErrorEvent("session_interrupt", cmd.SessionID, cmd.RequestID, err))
 				}
 
 			case "set_permission_config":
 				if err := sm.SetPermissionConfig(cmd.SessionID, cmd.Permission); err != nil {
 					logger.Error("set permission config failed", "error", err)
-					client.SendMsg(protocol.DaemonEvent{
-						Type:      "error",
-						SessionID: cmd.SessionID,
-						Error:     err.Error(),
-					})
+					client.SendMsg(controlCommandErrorEvent("set_permission_config", cmd.SessionID, cmd.RequestID, err))
 				}
 
 			case "set_effort":
@@ -3581,11 +3708,7 @@ func handleCommands(ctx context.Context, client *ws.Client, sm *session.SessionM
 				}
 				if err := sm.SetEffort(cmd.SessionID, cmd.Content); err != nil {
 					logger.Error("set effort failed", "error", err)
-					client.SendMsg(protocol.DaemonEvent{
-						Type:      "error",
-						SessionID: cmd.SessionID,
-						Error:     err.Error(),
-					})
+					client.SendMsg(controlCommandErrorEvent("set_effort", cmd.SessionID, cmd.RequestID, err))
 				}
 
 			case "list_commands":
@@ -3640,7 +3763,7 @@ func handleCommands(ctx context.Context, client *ws.Client, sm *session.SessionM
 				cancel()
 				if err != nil {
 					logger.Error("set session agent failed", "session", cmd.SessionID, "agent", cmd.AgentName, "error", err)
-					client.SendMsg(protocol.DaemonEvent{Type: "error", SessionID: cmd.SessionID, Operation: "set_session_agent", RequestID: cmd.RequestID, Error: err.Error()})
+					client.SendMsg(controlCommandErrorEvent("set_session_agent", cmd.SessionID, cmd.RequestID, err))
 				}
 
 			case "get_session_meta":
@@ -3737,11 +3860,7 @@ func handleCommands(ctx context.Context, client *ws.Client, sm *session.SessionM
 				logger.Info("interactive response", "session", cmd.SessionID, "req", cmd.RequestID, "choice", cmd.Choice)
 				if err := sm.ResolveInteractivePrompt(cmd.SessionID, cmd.RequestID, cmd.Choice); err != nil {
 					logger.Error("resolve interactive prompt failed", "error", err)
-					client.SendMsg(protocol.DaemonEvent{
-						Type:      "error",
-						SessionID: cmd.SessionID,
-						Error:     err.Error(),
-					})
+					client.SendMsg(controlCommandErrorEvent("interactive_response", cmd.SessionID, cmd.RequestID, err))
 				}
 
 			default:
@@ -3924,10 +4043,22 @@ func upgradeGateDecision(found, manageable bool, agentName, path string) (procee
 	return true, "", "", ""
 }
 
-func handleUpgradeAgent(client *ws.Client, logger *slog.Logger, agent string) {
+type daemonMessageSender interface {
+	SendMsg(any)
+	SetAgentVersions(map[string]string)
+	SetAgentLatests(map[string]string)
+	SetAgentManageable(map[string]bool)
+	ResendRegister()
+}
+
+func handleUpgradeAgent(client daemonMessageSender, logger *slog.Logger, agent string) {
 	agentName := agent
 	if agentName == "" {
 		agentName = "claude-code"
+	}
+	if adapter.IsObserverAgent(agentName) {
+		client.SendMsg(session.ObserverUpgradeRejectedEvent(agentName, ""))
+		return
 	}
 	cli, err := discovery.AgentTypeToCLI(agentName)
 	if err != nil {
@@ -4003,6 +4134,9 @@ func handleUpgradeAgent(client *ws.Client, logger *slog.Logger, agent string) {
 func classifyCreateError(msg string) string {
 	if strings.Contains(msg, "cwd_not_authorized") {
 		return "cwd_not_authorized"
+	}
+	if strings.Contains(msg, adapter.ErrUnsupportedAgent.Error()) {
+		return "unsupported_agent"
 	}
 	if strings.Contains(msg, "agent CLI not found") {
 		return "no_cli"

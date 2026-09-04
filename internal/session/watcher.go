@@ -204,6 +204,75 @@ func (sm *SessionManager) RegisterTerminalSession(sessionID, cwd string, pid int
 	return true
 }
 
+type ObservedSessionRegistration uint8
+
+const (
+	ObservedSessionAlreadyKnown ObservedSessionRegistration = iota
+	ObservedSessionNew
+	ObservedSessionReclassified
+)
+
+// RegisterObservedSession registers a read-only session discovered from an
+// external application's persisted history. Its result tells the caller
+// whether to attach the first history tailer, publish an in-place
+// reclassification, or do neither for an already-known/protected session.
+// Reclassification preserves the existing parser tailer and LastActivityAt.
+func (sm *SessionManager) RegisterObservedSession(sessionID, cwd, status, agent string) ObservedSessionRegistration {
+	gate := sm.observerDriveGateFor(sessionID)
+	gate.mu.Lock()
+	gate.classificationPending = true
+	gate.changed.Broadcast()
+	for gate.activeDrives > 0 {
+		gate.changed.Wait()
+	}
+	defer func() {
+		gate.classificationPending = false
+		gate.changed.Broadcast()
+		gate.mu.Unlock()
+	}()
+
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+
+	if ps, ok := sm.sessions[sessionID]; ok {
+		// A Desktop rollout observation cannot revoke ownership of a live
+		// PocketCtl-managed Codex thread or orphan its app-server backend.
+		if ps.Agent == adapter.AgentCodex && ps.Source == "daemon" && ps.ControlMode == protocol.ControlManaged {
+			return ObservedSessionAlreadyKnown
+		}
+		if ps.Agent == agent && ps.Source == "observer" &&
+			ps.ControlMode == protocol.ControlLegacyReadOnly && ps.Backend == nil {
+			return ObservedSessionAlreadyKnown
+		}
+		ps.Agent = agent
+		ps.Source = "observer"
+		ps.ControlMode = protocol.ControlLegacyReadOnly
+		ps.Backend = nil
+		ps.Pid = 0
+		ps.ProcessStartIdentity = ""
+		ps.TTY = ""
+		ps.Status = status
+		ps.ExitReason = ""
+		if cwd != "" {
+			ps.Cwd = cwd
+		}
+		return ObservedSessionReclassified
+	}
+
+	now := time.Now()
+	sm.sessions[sessionID] = &ProcessState{
+		SessionID:      sessionID,
+		Status:         status,
+		StartedAt:      now,
+		LastActivityAt: now,
+		Cwd:            cwd,
+		Agent:          agent,
+		Source:         "observer",
+		ControlMode:    protocol.ControlLegacyReadOnly,
+	}
+	return ObservedSessionNew
+}
+
 // ReviveTerminalSessionOnActivity is called from the JSONL tail loop when fresh
 // events arrive. It always refreshes LastActivityAt; additionally, if the session
 // had gone dormant (exited/completed/error/killed) it flips it back to running and

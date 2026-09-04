@@ -161,6 +161,27 @@ func NewJSONLTailerFromStart(filePath, agentType string) (*JSONLTailer, error) {
 	return newJSONLTailerFromStart(filePath, agentType, false)
 }
 
+// NewCodexObserverJSONLTailerFromStart reads a Desktop-owned Codex rollout
+// with deterministic fallback record identities. Desktop history is replayed
+// from the beginning after daemon restarts, so projections without a native
+// semantic ID need an ID stable across tailer instances for Relay deduplication.
+// The ordinary Codex CLI constructor intentionally keeps its legacy identity
+// behavior.
+func NewCodexObserverJSONLTailerFromStart(filePath string) (*JSONLTailer, error) {
+	absolutePath, err := filepath.Abs(filePath)
+	if err != nil {
+		return nil, fmt.Errorf("canonicalize Codex observer jsonl path: %w", err)
+	}
+	tailer, err := newJSONLTailerFromStart(filePath, adapter.AgentCodex, true)
+	if err != nil {
+		return nil, err
+	}
+	// Equivalent relative/absolute spellings name one source. A move or rename
+	// intentionally changes this canonical path and therefore starts a new source.
+	tailer.eventSourceID = CodexReplaySourceID(filepath.Clean(absolutePath))
+	return tailer, nil
+}
+
 // NewClaudeJSONLTailerFromStart enables the Claude-only loss-aware reader and
 // deterministic record identities. Codex callers continue using
 // NewJSONLTailerFromStart and retain their existing behavior.

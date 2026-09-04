@@ -44,6 +44,19 @@ func TestManagedCodexAdvertisesMessageAcceptanceReceiptOnly(t *testing.T) {
 	}
 }
 
+func TestCodexDesktopObserverAdvertisesHistorySyncOnly(t *testing.T) {
+	sm := NewSessionManager(nil)
+
+	got := sm.sessionCapabilitiesLocked(&ProcessState{
+		Agent:       adapter.AgentCodexDesktop,
+		Source:      "observer",
+		ControlMode: protocol.ControlLegacyReadOnly,
+	})
+	if !sameStrings(got, []string{ClaudeCapabilityHistorySync}) {
+		t.Fatalf("Codex Desktop observer capabilities=%v, want history_sync only", got)
+	}
+}
+
 func TestSessionCapabilitiesAdvertiseTrustedActionPolicyOnlyForManagedCodexAndOpenCode(t *testing.T) {
 	t.Setenv("POCKETCTL_TRUSTED_ACTION_POLICY_V1", "on")
 	sm := NewSessionManager(nil)

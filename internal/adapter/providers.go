@@ -72,4 +72,17 @@ func init() {
 		NewLauncher: func() SessionLauncher { return observerLauncher{} },
 		NewStorage:  func() SessionStorage { return observerStorage{} },
 	})
+
+	// Codex Desktop — read-only observer for Desktop-owned session rollouts.
+	// Unlike ZCode, it has no host-level installation or upgrade discovery:
+	// session data is recognized only when a dedicated observer finds it.
+	Register(Provider{
+		Type:        AgentCodexDesktop,
+		Discovery:   DiscoverySessionOnly,
+		Backend:     BackendObserver,
+		NewAdapter:  func(prompt string) AgentAdapter { return observerAdapter{} },
+		NewParser:   func() JSONLParser { return observerParser{} },
+		NewLauncher: func() SessionLauncher { return observerLauncher{} },
+		NewStorage:  func() SessionStorage { return observerStorage{} },
+	})
 }

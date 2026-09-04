@@ -210,7 +210,9 @@ async function upsertSession(
   row: InboxRow,
 ): Promise<void> {
   const data = row.data ?? {}
-  const agentType = typeof data.agent_type === 'string' ? data.agent_type : null
+  const agentType = row.event_type === 'session_discovered' && typeof data.agent === 'string'
+    ? data.agent
+    : typeof data.agent_type === 'string' ? data.agent_type : null
   const daemonId = typeof data.daemon_id === 'string' ? data.daemon_id : null
   const cwd = typeof data.cwd === 'string' ? data.cwd : null
   const worktreePath = typeof data.worktree_path === 'string' ? data.worktree_path : null
