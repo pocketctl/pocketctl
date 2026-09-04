@@ -7,7 +7,7 @@
       :reconnecting="reconnecting"
       :is-session="isSession"
       :show-new-session="showNewSession"
-      :show-plan="!!plan"
+      :show-plan="!!plan && !isSession"
       :plan-label="planLabel"
       :plan-open="planOpen"
       :plan-complete="planComplete"
@@ -83,6 +83,10 @@ function requestClosePlan() {
   else closeFromHistory()
 }
 
+function openPlanFromSessionActions() {
+  if (props.isSession && props.plan) openPlan()
+}
+
 watch(planOpen, (open) => {
   if (open) {
     previousBodyOverflow = document.body.style.overflow
@@ -96,9 +100,13 @@ watch(() => props.plan, plan => {
   if (!plan && planOpen.value) requestClosePlan()
 })
 
-onMounted(() => window.addEventListener('popstate', closeFromHistory))
+onMounted(() => {
+  window.addEventListener('popstate', closeFromHistory)
+  window.addEventListener('pocketctl:open-mobile-session-plan', openPlanFromSessionActions)
+})
 onUnmounted(() => {
   window.removeEventListener('popstate', closeFromHistory)
+  window.removeEventListener('pocketctl:open-mobile-session-plan', openPlanFromSessionActions)
   document.body.style.overflow = previousBodyOverflow
 })
 </script>

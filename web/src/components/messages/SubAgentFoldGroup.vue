@@ -26,6 +26,7 @@
       <!-- Expanded body: render subagent messages reusing existing components -->
       <div v-if="expanded" class="safg-body">
         <template v-for="msg in messages" :key="msg.id">
+          <template v-if="!isToolGroupContinuation(msg)">
           <MessageUser v-if="msg.role === 'user'" :content="msg.content" />
           <MessageAgent
             v-else-if="msg.type === 'agent_text'"
@@ -38,6 +39,10 @@
             @toggleExpand="msg.expanded = !msg.expanded"
             @toggleOutput="msg.outputExpanded = !msg.outputExpanded"
           />
+          <ToolCallGroup
+            v-else-if="toolGroupFor(msg)"
+            :messages="toolGroupFor(msg) || [msg]"
+          />
           <ToolCallCard
             v-else-if="msg.type === 'tool_call'"
             :message="msg"
@@ -46,6 +51,7 @@
           />
           <!-- Fallback: render content text if type is unknown -->
           <div v-else class="safg-fallback">{{ msg.content || msg.input || '' }}</div>
+          </template>
         </template>
         <!-- Empty state when no messages yet -->
         <div v-if="messages.length === 0" class="safg-empty">{{ t('session.creating') }}</div>
@@ -60,9 +66,11 @@ import { useLocale } from '../../composables/useLocale'
 import { formatTokenCount } from '../../utils/tokenFormat'
 import MessageUser from './MessageUser.vue'
 import MessageAgent from './MessageAgent.vue'
+import ToolCallGroup from './ToolCallGroup.vue'
 import ToolCallCard from './ToolCallCard.vue'
 import DiffCard from './DiffCard.vue'
 import { isDiffTool } from '../../utils/diffRender'
+import { buildToolCallGrouping } from '../../utils/toolGrouping'
 
 const { t } = useLocale()
 
@@ -79,6 +87,13 @@ const props = defineProps<{
 const expanded = ref(true)
 
 const displayTitle = computed(() => props.title || props.desc || props.agentId)
+const toolGrouping = computed(() => buildToolCallGrouping(props.messages))
+function toolGroupFor(message: any): any[] | undefined {
+  return toolGrouping.value.groups.get(message)
+}
+function isToolGroupContinuation(message: any): boolean {
+  return toolGrouping.value.continuations.has(message)
+}
 
 </script>
 

@@ -61,6 +61,22 @@ for conf in "${configs[@]}"; do
   done
 done
 
+# Memory business requests intentionally bypass Relay and connect directly to
+# the provider origin delivered by the extension catalog. Keep the static
+# local and canonical-production entrypoints in sync with that contract.
+for conf in web/nginx.conf landing/nginx.conf landing/nginx-docker.conf; do
+  grep -q "connect-src[^;]*http://127.0.0.1:8090" "$conf" \
+    || fail "$conf: CSP blocks the local Memory provider"
+  grep -q "connect-src[^;]*http://localhost:8090" "$conf" \
+    || fail "$conf: CSP blocks the localhost Memory provider"
+done
+for conf in landing/nginx-online.conf deploy/nginx/pocketctl.conf nginx/nginx.conf; do
+  grep -q "connect-src[^;]*https://memory.pocketctl.me" "$conf" \
+    || fail "$conf: CSP blocks the canonical Memory provider"
+done
+grep -q 'EXTENSION_PROVIDER_CONNECT_SOURCES' deploy/deploy.sh \
+  || fail "deploy/deploy.sh: generated CSP ignores configured provider origins"
+
 # 3. bootstrap.js must not be long-cached (environment logic without hashes).
 found_nocache=0
 for conf in landing/nginx.conf landing/nginx-online.conf landing/nginx-docker.conf; do

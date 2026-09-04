@@ -49,12 +49,12 @@ const (
 
 	// ActorScope / FlowScope / ContentClass classification axes (plan §1/§4).
 	// Orthogonal to the existing agent hierarchy fields.
-	ActorScopeRoot      = "root"
-	ActorScopeSubagent  = "subagent"
-	ActorScopeUnknown   = "unknown"
-	FlowScopeMain       = "main"
-	FlowScopeAuxiliary  = "auxiliary"
-	FlowScopeUnClassified = "unclassified"
+	ActorScopeRoot          = "root"
+	ActorScopeSubagent      = "subagent"
+	ActorScopeUnknown       = "unknown"
+	FlowScopeMain           = "main"
+	FlowScopeAuxiliary      = "auxiliary"
+	FlowScopeUnClassified   = "unclassified"
 	ContentClassDialogue    = "dialogue"
 	ContentClassExecution   = "execution"
 	ContentClassInteraction = "interaction"
@@ -65,12 +65,12 @@ const (
 	ClassifierVersionV1 = "v1"
 
 	// Terminal turn reasons (plan §3.3).
-	TurnReasonUserRequested                   = "user_requested"
-	TurnReasonProcessCrash                    = "process_crash"
-	TurnReasonSessionExitWithoutTurnTerminal  = "session_exit_without_turn_terminal"
-	TurnReasonActivityTimeout                 = "activity_timeout"
-	TurnReasonInputDispatchFailed             = "input_dispatch_failed"
-	TurnReasonParentTurnInterrupted           = "parent_turn_interrupted"
+	TurnReasonUserRequested                  = "user_requested"
+	TurnReasonProcessCrash                   = "process_crash"
+	TurnReasonSessionExitWithoutTurnTerminal = "session_exit_without_turn_terminal"
+	TurnReasonActivityTimeout                = "activity_timeout"
+	TurnReasonInputDispatchFailed            = "input_dispatch_failed"
+	TurnReasonParentTurnInterrupted          = "parent_turn_interrupted"
 
 	// Typed nack reason for input arriving while a turn is interrupt_pending.
 	ReasonTurnInterruptPending = "turn_interrupt_pending"
@@ -79,6 +79,7 @@ const (
 // Client → Daemon commands
 type ClientMessage struct {
 	Type       string      `json:"type"`
+	Status     string      `json:"status,omitempty"`
 	SessionID  string      `json:"session_id,omitempty"`
 	Content    string      `json:"content,omitempty"`
 	Agent      string      `json:"agent,omitempty"`
@@ -98,6 +99,14 @@ type ClientMessage struct {
 	// durable daemon event after the native app-server accepts it.
 	ElicitationAction  string          `json:"elicitation_action,omitempty"`
 	ElicitationContent json.RawMessage `json:"elicitation_content,omitempty"`
+	// Phase 1 memory MCP grant broker (daemon<->relay control plane).
+	Grant                string   `json:"grant,omitempty"`
+	ExpiresIn            int      `json:"expires_in,omitempty"`
+	TokenType            string   `json:"token_type,omitempty"`
+	InstallationID       string   `json:"installation_id,omitempty"`
+	ProviderPublicOrigin string   `json:"provider_public_origin,omitempty"`
+	GrantServices        []string `json:"services,omitempty"`
+	GrantErrorCode       string   `json:"code,omitempty"`
 	// AgentName is an OpenCode session profile name, distinct from Agent (the
 	// CLI type: claude-code/codex/opencode).
 	AgentName string `json:"agent_name,omitempty"`
@@ -235,6 +244,9 @@ type DaemonEvent struct {
 	CwdSessions            int                      `json:"cwd_sessions,omitempty"`    // active session count on the same cwd (cwd_in_use/session_created)
 	WorktreePath           string                   `json:"worktree_path,omitempty"`   // worktree absolute path when the session is isolated (Scheme D)
 	WorktreeBranch         string                   `json:"worktree_branch,omitempty"` // git branch backing the worktree (Scheme D)
+	RepositoryID           string                   `json:"repository_id,omitempty"`   // credential-free canonical Git remote identity
+	Branch                 string                   `json:"branch,omitempty"`          // symbolic Git branch observation; never grants scope
+	CommitSHA              string                   `json:"commit_sha,omitempty"`      // full Git HEAD observation when available
 	CurrentAgent           string                   `json:"current_agent,omitempty"`   // selected OpenCode profile; Agent remains the CLI type
 	Agents                 []SessionAgentOption     `json:"agents,omitempty"`
 	Capabilities           []string                 `json:"capabilities,omitempty"`
@@ -581,6 +593,10 @@ type SessionConfig struct {
 	Worktree      bool              `json:"worktree,omitempty"`
 	AutoCreateDir bool              `json:"auto_create_dir,omitempty"`
 	Force         bool              `json:"force,omitempty"`
+	// DeferInitialPrompt is an internal daemon orchestration flag. Managed
+	// runtimes create their native session first; Relay registration completes
+	// before the exact prompt enters the ordinary turn path. Never wire-visible.
+	DeferInitialPrompt bool `json:"-"`
 }
 
 // Session states
@@ -613,3 +629,148 @@ const (
 const (
 	ReasonPermissionDenied = "permission_denied"
 )
+
+// MemoryMcpGrantRequest is the daemon->relay WS control message asking for a
+// short memory.mcp capability grant (Phase 1). The relay derives the user
+// from the AUTHENTICATED connection; the payload never carries identity.
+type MemoryMcpGrantRequest struct {
+	Type      string `json:"type"` // "memory_mcp_grant"
+	RequestID string `json:"request_id,omitempty"`
+	// ScopeInstallationIDs is an OPTIONAL explicit Phase 3 selection of at
+	// most 16 installation ids. Empty keeps the personal-only default. The
+	// daemon never parses the returned JWT and persists no scope list.
+	ScopeInstallationIDs []string `json:"scope_installation_ids,omitempty"`
+}
+
+// MemoryMcpGrantResult is the relay->daemon success reply. The grant itself
+// is a short-lived RS256 capability token; nothing here is persisted.
+type MemoryMcpGrantResult struct {
+	Type                 string   `json:"type"` // "memory_mcp_grant_result"
+	RequestID            string   `json:"request_id,omitempty"`
+	Grant                string   `json:"grant"`
+	ExpiresIn            int      `json:"expires_in"`
+	TokenType            string   `json:"token_type"`
+	InstallationID       string   `json:"installation_id"`
+	ProviderPublicOrigin string   `json:"provider_public_origin"`
+	Services             []string `json:"services"`
+}
+
+// MemoryMcpGrantError is the bounded failure reply. Codes are a fixed
+// allowlist; the relay never echoes error details or secrets.
+type MemoryMcpGrantError struct {
+	Type      string `json:"type"` // "memory_mcp_grant_error"
+	RequestID string `json:"request_id,omitempty"`
+	Code      string `json:"code"`
+}
+
+// MemoryCodegraphGrantRequest is the daemon->relay WS control message asking
+// for a Phase 4 least-privilege `memory.codegraph.write` capability grant
+// (ADR-0006). The payload never carries identity, repository paths, commits,
+// or file facts; Relay derives the user from the AUTHENTICATED connection.
+type MemoryCodegraphGrantRequest struct {
+	Type      string `json:"type"` // "memory_codegraph_grant"
+	RequestID string `json:"request_id,omitempty"`
+	// ScopeInstallationIDs optionally names EXACTLY ONE explicit shared
+	// installation target; empty keeps the personal-only default. The daemon
+	// never parses the returned JWT and persists no scope list.
+	ScopeInstallationIDs []string `json:"scope_installation_ids,omitempty"`
+}
+
+// MemoryCodegraphGrantResult is the relay->daemon success reply. TTL <= 60s;
+// the client refreshes between upload batches.
+type MemoryCodegraphGrantResult struct {
+	Type                 string   `json:"type"` // "memory_codegraph_grant_result"
+	RequestID            string   `json:"request_id,omitempty"`
+	Grant                string   `json:"grant"`
+	ExpiresIn            int      `json:"expires_in"`
+	TokenType            string   `json:"token_type"`
+	InstallationID       string   `json:"installation_id"`
+	ProviderPublicOrigin string   `json:"provider_public_origin"`
+	Services             []string `json:"services"`
+}
+
+// MemoryCodegraphGrantError is the bounded failure reply. Codes are a fixed
+// allowlist; the relay never echoes error details, repository paths, or
+// membership facts.
+type MemoryCodegraphGrantError struct {
+	Type      string `json:"type"` // "memory_codegraph_grant_error"
+	RequestID string `json:"request_id,omitempty"`
+	Code      string `json:"code"`
+}
+
+// MemoryCodegraphWriteService is the frozen Phase 4 least-privilege upload
+// service id in the Relay extension catalog.
+const MemoryCodegraphWriteService = "memory.codegraph.write"
+
+// Frozen bounded error-code allowlist for the codegraph grant broker.
+const (
+	MemoryCodegraphErrUnauthenticated       = "unauthenticated"
+	MemoryCodegraphErrInvalidRequest        = "invalid_request"
+	MemoryCodegraphErrNoInstallation        = "no_installation"
+	MemoryCodegraphErrServiceDisabled       = "service_disabled"
+	MemoryCodegraphErrInstallationNotActive = "installation_not_active"
+	MemoryCodegraphErrNotContributor        = "not_contributor"
+	MemoryCodegraphErrFeatureDisabled       = "feature_disabled"
+	MemoryCodegraphErrInternalError         = "internal_error"
+)
+
+// MemoryCodegraphGrantErrorCodes is the exhaustive allowlist a client may see.
+var MemoryCodegraphGrantErrorCodes = map[string]bool{
+	MemoryCodegraphErrUnauthenticated:       true,
+	MemoryCodegraphErrInvalidRequest:        true,
+	MemoryCodegraphErrNoInstallation:        true,
+	MemoryCodegraphErrServiceDisabled:       true,
+	MemoryCodegraphErrInstallationNotActive: true,
+	MemoryCodegraphErrNotContributor:        true,
+	MemoryCodegraphErrFeatureDisabled:       true,
+	MemoryCodegraphErrInternalError:         true,
+}
+
+// MemoryContextGrantRequest is the daemon->relay WS control message asking
+// for a session-bound `memory.context` capability grant (Phase 2 plan 10.1).
+// The session must be owned by the authenticated daemon's user; identity is
+// derived from the connection, never from this payload.
+type MemoryContextGrantRequest struct {
+	Type      string `json:"type"` // "memory_context_grant"
+	RequestID string `json:"request_id,omitempty"`
+	SessionID string `json:"session_id"`
+}
+
+// MemoryContextGrantResult is the relay->daemon success reply. TTL <= 300s.
+type MemoryContextGrantResult struct {
+	Type                 string   `json:"type"` // "memory_context_grant_result"
+	RequestID            string   `json:"request_id,omitempty"`
+	Grant                string   `json:"grant"`
+	ExpiresIn            int      `json:"expires_in"`
+	TokenType            string   `json:"token_type"`
+	InstallationID       string   `json:"installation_id"`
+	SessionID            string   `json:"session_id"`
+	ProviderPublicOrigin string   `json:"provider_public_origin"`
+	Services             []string `json:"services"`
+}
+
+// MemoryContextGrantError is the bounded failure reply.
+type MemoryContextGrantError struct {
+	Type      string `json:"type"` // "memory_context_grant_error"
+	RequestID string `json:"request_id,omitempty"`
+	Code      string `json:"code"`
+}
+
+// SessionRegistration is the daemon->relay WS message durably registering a
+// managed native session BEFORE its initial prompt dispatch (Phase 2 plan
+// 10.1 two-phase handshake step 2).
+type SessionRegistration struct {
+	Type      string `json:"type"` // "session_registration"
+	RequestID string `json:"request_id,omitempty"`
+	SessionID string `json:"session_id"`
+}
+
+// SessionRegistrationAck is the bounded readiness reply. It is NOT an
+// authorization token; a missing/old relay or an ACK timeout makes the
+// daemon proceed without context — session creation never fails for it.
+type SessionRegistrationAck struct {
+	Type      string `json:"type"` // "session_registration_ack"
+	RequestID string `json:"request_id,omitempty"`
+	SessionID string `json:"session_id"`
+	Status    string `json:"status"` // "ready"
+}

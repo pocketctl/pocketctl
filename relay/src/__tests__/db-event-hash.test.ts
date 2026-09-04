@@ -78,4 +78,17 @@ describe('db event fallback hash excludes turn enrichment (review P1-8)', () => 
     });
     expect(withId.captured[0].hash).toBe(withIdBare.captured[0].hash);
   });
+
+  test('request_id tier keeps repeated metadata responses independently deliverable', async () => {
+    const first = captureHashPool();
+    await insertEvent(first.pool, 'session-1', 'session_meta', {
+      type: 'session_meta', session_id: 'session-1', request_id: 'meta-1', model: 'gpt-5.6-sol', effort: 'high',
+    });
+    const second = captureHashPool();
+    await insertEvent(second.pool, 'session-1', 'session_meta', {
+      type: 'session_meta', session_id: 'session-1', request_id: 'meta-2', model: 'gpt-5.6-sol', effort: 'high',
+    });
+
+    expect(first.captured[0].hash).not.toBe(second.captured[0].hash);
+  });
 });

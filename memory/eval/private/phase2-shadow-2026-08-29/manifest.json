@@ -1,0 +1,37 @@
+{
+  "schema_version": 1,
+  "dataset_id": "phase2-shadow-2026-08-29",
+  "generated_at": "2026-08-29T05:03:11.065Z",
+  "candidate_sha": "2594713c5e5db8e9b5791bf83d4f05fff54b88d3",
+  "privacy": "private-local-only-gitignored",
+  "query_source_note": "Query text is reconstructed from the nearest authorized user_text event because compile query bodies are intentionally not persisted.",
+  "counts": {
+    "eligible_turns": 115,
+    "sessions": 26,
+    "repositories": 3,
+    "adapters": 2,
+    "selected_items": 345
+  },
+  "repositories": [
+    "gitee.com/muwb123/exam-graph",
+    "gitee.com/muwb123/pocketctl",
+    "gitee.com/muwb123/yujian-map"
+  ],
+  "adapters": [
+    "codex",
+    "opencode"
+  ],
+  "gate_minimums": {
+    "eligible_turns": 100,
+    "sessions": 20,
+    "repositories": 3,
+    "adapters": 2
+  },
+  "labels": [
+    "useful",
+    "irrelevant",
+    "duplicate",
+    "incorrect",
+    "harmful"
+  ]
+}

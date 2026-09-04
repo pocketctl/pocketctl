@@ -193,6 +193,7 @@ type CodexAdapter struct {
 	sessionID string
 	model     string
 	plan      *codexPlanTracker
+	turns     codexTurnTracker
 }
 
 // NewCodexAdapter creates an adapter for a single codex exec spawn.
@@ -211,7 +212,11 @@ func (a *CodexAdapter) SessionID() string       { return a.sessionID }
 func (a *CodexAdapter) SlashCommands() []string { return nil } // codex has no slash-command surface
 
 func (a *CodexAdapter) ParseStreamLine(line string) ([]protocol.DaemonEvent, error) {
-	return parseCodexLine(line, a, a.plan)
+	events, err := parseCodexLine(line, a, a.plan)
+	if err != nil {
+		return nil, err
+	}
+	return decorateCodexTurnEvents(line, &a.turns, events), nil
 }
 
 // ---- CodexJSONLParser (persisted JSONL history) ----
@@ -221,12 +226,20 @@ func (a *CodexAdapter) ParseStreamLine(line string) ([]protocol.DaemonEvent, err
 // SetPendingCmd is a no-op.
 type CodexJSONLParser struct {
 	plan                    codexPlanTracker
+	turns                   codexTurnTracker
 	pendingAgentMessageText string
 }
 
 func NewCodexJSONLParser() *CodexJSONLParser { return &CodexJSONLParser{} }
 
 func (p *CodexJSONLParser) SetPendingCmd(string) {} // no-op: codex has no slash commands
+
+// SetSessionID seeds a live tailer that starts after the persisted
+// session_meta record. Historical replay learns the same identity by parsing
+// that record in order.
+func (p *CodexJSONLParser) SetSessionID(sessionID string) {
+	p.turns.setSessionID(sessionID)
+}
 
 func (p *CodexJSONLParser) Parse(line string) ([]protocol.DaemonEvent, error) {
 	events, err := parseCodexLine(line, nil, &p.plan)
@@ -239,6 +252,7 @@ func (p *CodexJSONLParser) Parse(line string) ([]protocol.DaemonEvent, error) {
 	if json.Unmarshal([]byte(line), &raw) != nil || json.Unmarshal(raw.Payload, &payload) != nil {
 		return events, nil
 	}
+	events = p.turns.decorate(raw.Type, payload, events)
 
 	if raw.Type == "event_msg" && payload.Type == "agent_message" && len(events) == 1 && events[0].Type == "agent_text" {
 		p.pendingAgentMessageText = normalizeCodexAgentMessage(events[0].Text)
@@ -264,6 +278,18 @@ func (p *CodexJSONLParser) Parse(line string) ([]protocol.DaemonEvent, error) {
 	// later, unrelated record suppress a legitimate assistant response.
 	p.pendingAgentMessageText = ""
 	return events, nil
+}
+
+func decorateCodexTurnEvents(line string, turns *codexTurnTracker, events []protocol.DaemonEvent) []protocol.DaemonEvent {
+	if turns == nil {
+		return events
+	}
+	var raw codexLine
+	var payload codexPayload
+	if json.Unmarshal([]byte(line), &raw) != nil || json.Unmarshal(raw.Payload, &payload) != nil {
+		return events
+	}
+	return turns.decorate(raw.Type, payload, events)
 }
 
 func normalizeCodexAgentMessage(text string) string {
@@ -335,16 +361,21 @@ func convertCodexPayload(topType string, p codexPayload, session *CodexAdapter, 
 		return nil
 
 	case "turn_context":
-		// codex ≥0.142 only carries the model here (not on assistant messages).
-		// Record it on the streaming adapter so the daemon's OnEvent hook can
-		// derive a session_model_changed for live daemon sessions.
-		if session != nil && p.Model != "" {
-			session.model = CleanModelName(p.Model)
+		// codex ≥0.142 only carries the selected model here (not on assistant
+		// messages). Emit this record directly so a /model switch reaches the
+		// relay before the next reply, rather than waiting for agent_text.
+		model := CleanModelName(p.Model)
+		if session != nil && model != "" {
+			session.model = model
+		}
+		events := make([]protocol.DaemonEvent, 0, 2)
+		if model != "" {
+			events = append(events, protocol.DaemonEvent{Type: "session_model_changed", Model: model})
 		}
 		if effort := strings.TrimSpace(p.Effort); effort != "" {
-			return []protocol.DaemonEvent{{Type: "session_meta", Effort: effort}}
+			events = append(events, protocol.DaemonEvent{Type: "session_meta", Effort: effort})
 		}
-		return nil
+		return events
 
 	case "response_item":
 		return convertCodexResponseItem(p, session, plan)

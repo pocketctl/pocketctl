@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
+	"github.com/pocketctl/pocketctl/internal/memorycontext"
 	"sync/atomic"
 	"time"
 
@@ -62,6 +63,172 @@ type UserMessageInput struct {
 	RequestID string
 	MsgID     string
 	InputMode string // auto|new_turn|steer; empty = auto
+	// HiddenContext is the Phase 2 native hidden-context payload for this
+	// new turn. Content stays the exact user input for echo, receipts,
+	// titles, Relay events and turn identity.
+	HiddenContext *memorycontext.PreparedContext
+	// SkipMemoryContext is internal fail-open state for an initial prompt whose
+	// Relay session-registration ACK timed out. The prompt still dispatches.
+	SkipMemoryContext bool
+}
+
+// SetMemoryContext attaches the Phase 2 context coordinator. The ready
+// predicate resolves the local effective-mode ceiling; the capability
+// resolver reports the probed native-hidden support for one agent (the
+// adapters from Tasks 12-14 install it; absent means Shadow-only).
+func (sm *SessionManager) SetMemoryContext(
+	coordinator *memorycontext.Coordinator,
+	ready func() bool,
+	capabilityFor func(context.Context, string, string) memorycontext.Capability,
+) {
+	sm.mu.Lock()
+	sm.memoryContext = coordinator
+	sm.memoryContextReady = ready
+	sm.memoryContextCapability = capabilityFor
+	sm.mu.Unlock()
+}
+
+type memoryContextNativeBackend interface {
+	memoryContextNativeSupported(context.Context) bool
+}
+
+// memoryContextReceiptDeferrer is implemented by a backend whose Send call
+// only starts an asynchronous native request. Such a backend must record the
+// receipt itself once the native API returns an authoritative result.
+type memoryContextReceiptDeferrer interface {
+	defersMemoryContextReceipt() bool
+}
+
+// MemoryContextCapability resolves one exact owned runtime instance. Observed
+// terminal sessions and interactive PTYs are permanently Shadow-only. Managed
+// backends must expose evidence from their live schema probe; dormant daemon-
+// owned Claude resumes probe the exact CLI binary help before each upgrade.
+func (sm *SessionManager) MemoryContextCapability(ctx context.Context, sessionID, agent string) memorycontext.Capability {
+	sm.mu.RLock()
+	ps := sm.sessions[sessionID]
+	sm.mu.RUnlock()
+	if ps == nil || ps.Source != "daemon" {
+		return memorycontext.CapabilityShadowOnly
+	}
+	if backend, ok := ps.Backend.(memoryContextNativeBackend); ok && backend.memoryContextNativeSupported(ctx) {
+		switch ps.Agent {
+		case adapter.AgentCodex:
+			return memorycontext.ResolveCapability(memorycontext.RuntimeCodexAppServer, memorycontext.ProbeSupported)
+		case adapter.AgentOpencode:
+			return memorycontext.ResolveCapability(memorycontext.RuntimeOpenCodeServer, memorycontext.ProbeSupported)
+		}
+	}
+	if agent == adapter.AgentClaude && (ps.Status == protocol.StatusExited || ps.Status == protocol.StatusCompleted) {
+		binary, err := findAgentCLI(adapter.AgentClaude)
+		if err == nil {
+			return memorycontext.ResolveCapability(memorycontext.RuntimeClaudePrintResume, memorycontext.ProbeClaudeRuntime(ctx, binary))
+		}
+	}
+	return memorycontext.CapabilityShadowOnly
+}
+
+// DispatchMemoryContextControl routes an inbound Relay control reply to the
+// installed Phase 2 grant transport. It returns true only for recognized
+// context messages; callers can keep them out of the ordinary session-command
+// switch without exposing the coordinator or grant token.
+func (sm *SessionManager) DispatchMemoryContextControl(msg protocol.ClientMessage) bool {
+	switch msg.Type {
+	case "memory_context_grant_result", "memory_context_grant_error",
+		"session_registration_ack", "session_registration_error":
+	default:
+		return false
+	}
+	sm.mu.RLock()
+	coordinator := sm.memoryContext
+	sm.mu.RUnlock()
+	if coordinator == nil || coordinator.Grants == nil {
+		return true
+	}
+	if dispatcher, ok := coordinator.Grants.(interface{ Dispatch(protocol.ClientMessage) }); ok {
+		dispatcher.Dispatch(msg)
+	}
+	return true
+}
+
+// prepareMemoryContext runs the fail-open enrichment seam. Every path —
+// coordinator absent, mode off, grant/compile/admission failure, deadline —
+// returns nil and the caller dispatches the original input unchanged.
+func (sm *SessionManager) prepareMemoryContext(ctx context.Context, in UserMessageInput, requestID, agent string) *memorycontext.PreparedContext {
+	sm.mu.RLock()
+	coordinator := sm.memoryContext
+	ready := sm.memoryContextReady
+	capabilityFor := sm.memoryContextCapability
+	sm.mu.RUnlock()
+	if coordinator == nil {
+		return nil
+	}
+	mode := memorycontext.ModeOff
+	if ready != nil && ready() {
+		mode = memorycontext.ModeEnabled
+	}
+	capability := memorycontext.CapabilityShadowOnly
+	if capabilityFor != nil {
+		capability = capabilityFor(ctx, in.SessionID, agent)
+	}
+	pack, _ := coordinator.Prepare(ctx, memorycontext.TurnRequest{
+		ClientRequestID: requestID,
+		SessionID:       in.SessionID,
+		Agent:           agent,
+		Cwd:             sm.cwdFor(in.SessionID),
+		UserContent:     in.Content,
+		IsNewTurn:       true,
+		Mode:            mode,
+		Capability:      capability,
+	})
+	return pack
+}
+
+func (sm *SessionManager) recordMemoryContextReceipt(ctx context.Context, pack *memorycontext.PreparedContext, delivered bool, outcome string) {
+	if pack == nil {
+		return
+	}
+	sm.mu.RLock()
+	coordinator := sm.memoryContext
+	sm.mu.RUnlock()
+	if coordinator != nil {
+		coordinator.Receipt(ctx, pack, memorycontext.DeliveryResult{
+			Delivered: delivered, OutcomeCode: outcome,
+		})
+	}
+}
+
+func (sm *SessionManager) defersMemoryContextReceipt(sessionID string) bool {
+	sm.mu.RLock()
+	defer sm.mu.RUnlock()
+	ps := sm.sessions[sessionID]
+	if ps == nil || ps.Backend == nil {
+		return false
+	}
+	deferred, ok := ps.Backend.(memoryContextReceiptDeferrer)
+	return ok && deferred.defersMemoryContextReceipt()
+}
+
+func (sm *SessionManager) cwdFor(sessionID string) string {
+	sm.mu.RLock()
+	defer sm.mu.RUnlock()
+	if ps, ok := sm.sessions[sessionID]; ok {
+		return ps.Cwd
+	}
+	return ""
+}
+
+// TakeDeferredInitialPrompt claims the managed-session prompt exactly once
+// after session_created has been sent to Relay.
+func (sm *SessionManager) TakeDeferredInitialPrompt(sessionID string) (string, bool) {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+	ps := sm.sessions[sessionID]
+	if ps == nil || ps.DeferredInitialPrompt == "" {
+		return "", false
+	}
+	prompt := ps.DeferredInitialPrompt
+	ps.DeferredInitialPrompt = ""
+	return prompt, true
 }
 
 // SendMessage keeps the legacy signature: it forwards through the turn-aware
@@ -94,6 +261,11 @@ func (sm *SessionManager) SendMessageWithInput(ctx context.Context, in UserMessa
 	if !sm.turnEnabled() {
 		return sm.dispatchUserMessage(ctx, in.SessionID, in.Content)
 	}
+	// Native slash commands are control operations rather than model turns. They
+	// must not reserve a canonical turn or compile/consume a hidden context pack.
+	if _, _, ok := parseOpenCodeSlashCommand(in.Content); ok {
+		return sm.dispatchUserMessage(ctx, in.SessionID, in.Content)
+	}
 	key := turn.ActorKey{SessionID: in.SessionID}
 	requestID := in.RequestID
 	if requestID == "" {
@@ -116,17 +288,38 @@ func (sm *SessionManager) SendMessageWithInput(ctx context.Context, in UserMessa
 		sm.terminalizeTurn(key, rec, protocol.TurnStateAbandoned, "daemon_restart_reconcile", protocol.TurnConfidenceInferred)
 	}
 
-	// Managed codex defers the reservation to turn/start (native anchor).
+	agent := sm.agentTypeFor(in.SessionID)
+	// Managed Codex defers the turn reservation to the native turn/start reply,
+	// but it must not bypass the Phase 2 preparation/delivery seam. A steer to
+	// an already-running native turn remains context-free.
 	if sm.deferTurnReserveToBackend(in.SessionID) {
-		return sm.dispatchUserMessage(ctx, in.SessionID, in.Content)
+		if active, ok := sm.turns.Active(key); ok && active.State == protocol.TurnStateRunning && in.InputMode != protocol.InputModeNewTurn {
+			return sm.dispatchUserMessage(ctx, in.SessionID, in.Content)
+		}
+		if in.HiddenContext == nil && !in.SkipMemoryContext {
+			in.HiddenContext = sm.prepareMemoryContext(ctx, in, requestID, agent)
+		}
+		if err := sm.dispatchUserMessageWithContext(ctx, in.SessionID, in.Content, in.HiddenContext); err != nil {
+			sm.recordMemoryContextReceipt(ctx, in.HiddenContext, false, "dispatch_failed")
+			return err
+		}
+		sm.recordMemoryContextReceipt(ctx, in.HiddenContext, true, "accepted")
+		return nil
 	}
 
-	agent := sm.agentTypeFor(in.SessionID)
 	if active, ok := sm.turns.Active(key); ok && active.State == protocol.TurnStateRunning && in.InputMode != protocol.InputModeNewTurn {
 		if _, err := sm.turns.Addendum(key, requestID); err != nil {
 			return err
 		}
+		// Steer/addendum never creates a pack or injection (plan 8.3).
 		return sm.dispatchUserMessage(ctx, in.SessionID, in.Content)
+	}
+
+	// Phase 2 context enrichment: only the fresh-turn path may prepare. The
+	// coordinator is nil until the relay grant transport is attached; every
+	// outcome (including errors) dispatches the original input unchanged.
+	if in.HiddenContext == nil && !in.SkipMemoryContext {
+		in.HiddenContext = sm.prepareMemoryContext(ctx, in, requestID, agent)
 	}
 
 	start := turn.StartInput{
@@ -148,7 +341,8 @@ func (sm *SessionManager) SendMessageWithInput(ctx context.Context, in UserMessa
 	}
 	sm.emitTurnStatus(rec, protocol.TurnStateRunning, "")
 
-	if dispatchErr := sm.dispatchUserMessage(ctx, in.SessionID, in.Content); dispatchErr != nil {
+	if dispatchErr := sm.dispatchUserMessageWithContext(ctx, in.SessionID, in.Content, in.HiddenContext); dispatchErr != nil {
+		sm.recordMemoryContextReceipt(ctx, in.HiddenContext, false, "dispatch_failed")
 		sm.outputCh <- protocol.DaemonEvent{
 			Type:           "error",
 			SessionID:      rec.Actor.SessionID,
@@ -161,6 +355,9 @@ func (sm *SessionManager) SendMessageWithInput(ctx context.Context, in UserMessa
 		}
 		sm.terminalizeTurn(key, rec, protocol.TurnStateFailed, protocol.TurnReasonInputDispatchFailed, protocol.TurnConfidenceDerived)
 		return dispatchErr
+	}
+	if !sm.defersMemoryContextReceipt(in.SessionID) {
+		sm.recordMemoryContextReceipt(ctx, in.HiddenContext, true, "accepted")
 	}
 	return nil
 }
@@ -478,7 +675,44 @@ func (sm *SessionManager) confirmPTYInterrupt(sessionID string) {
 		return // already terminalized by native evidence or exit
 	}
 	sm.terminalizeTurn(key, rec, protocol.TurnStateInterrupted, "pty_ctrl_c_confirmed", protocol.TurnConfidenceInferred)
-	sm.SetSessionStatus(sessionID, protocol.StatusIdle)
+	sm.publishInferredPTYIdle(sessionID, rec.TurnID)
+}
+
+// publishInferredPTYIdle publishes the session-idle side of a confirmed PTY
+// interrupt without treating it as fresh agent completion evidence. A user can
+// start a continuation as soon as the interrupted turn is published; that
+// successor owns the session lifecycle, so the old inference must not overwrite
+// its running state or terminalize it as completed.
+func (sm *SessionManager) publishInferredPTYIdle(sessionID, interruptedTurnID string) {
+	if interruptedTurnID == "" {
+		return
+	}
+	key := turn.ActorKey{SessionID: sessionID}
+	last, ok := sm.turns.Last(key)
+	if !ok || last.TurnID != interruptedTurnID || last.State != protocol.TurnStateInterrupted {
+		return
+	}
+	if _, ok := sm.turns.Active(key); ok {
+		return
+	}
+
+	sm.mu.Lock()
+	ps, ok := sm.sessions[sessionID]
+	if !ok {
+		sm.mu.Unlock()
+		return
+	}
+	now := time.Now()
+	ps.Status = protocol.StatusIdle
+	ps.LastActivityAt = now
+	sm.mu.Unlock()
+
+	sm.outputCh <- protocol.DaemonEvent{
+		Type:           "session_status",
+		SessionID:      sessionID,
+		Status:         protocol.StatusIdle,
+		LastActivityAt: now.UTC().Format(time.RFC3339),
+	}
 }
 
 // confirmAbortInterrupt is the opencode counterpart: after POST /abort was

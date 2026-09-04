@@ -45,17 +45,43 @@ describe('SessionList latest iOS mobile parity', () => {
 
   test('renders host navigation, daemon status, fixed search and new-session controls', async () => {
     const wrapper = mount(SessionList)
-    emitEvent?.({ type: 'daemon_list', daemons: [{ daemon_id: 'daemon-1', alias: 'Mac Studio', online: true }] })
+    emitEvent?.({ type: 'daemon_list', daemons: [{ daemon_id: 'daemon-1', daemon_alias: 'Mac Studio', hostname: 'mac-studio.local', daemon_online: true }] })
     emitEvent?.({ type: 'session_list', daemon_id: 'daemon-1', sessions })
     await flushPromises()
 
     expect(wrapper.get('.mobile-session-nav-title').text()).toBe('Mac Studio')
-    expect(wrapper.get('.mobile-daemon-status').text()).toContain('在线 · 最后心跳 刚刚')
+    expect(wrapper.get('.mobile-session-nav-title').attributes('title')).toBe('Mac Studio')
+    expect(wrapper.get('.mobile-session-nav .mobile-daemon-status').text()).toContain('在线 · 最后心跳 刚刚')
     expect(wrapper.get('[data-testid="session-list-search-toggle"]').attributes('aria-label')).toBe('搜索会话')
     expect(wrapper.get('[data-testid="session-list-new-session"]').attributes('aria-label')).toBe('新建会话')
 
     await wrapper.get('.mobile-session-back').trigger('click')
     expect(push).toHaveBeenCalledWith('/hosts')
+  })
+
+  test('falls back to the full hostname when a host has no alias', async () => {
+    const wrapper = mount(SessionList)
+    const hostname = 'muwenbin-macbook-pro-with-a-very-long-local-hostname.local'
+    emitEvent?.({ type: 'daemon_list', daemons: [{ daemon_id: 'daemon-1', hostname, daemon_online: true }] })
+    await nextTick()
+
+    const title = wrapper.get('.mobile-session-nav-title')
+    expect(title.text()).toBe(hostname)
+    expect(title.attributes('title')).toBe(hostname)
+  })
+
+  test('keeps the selected host status in sync with daemon status events', async () => {
+    const wrapper = mount(SessionList)
+    emitEvent?.({ type: 'daemon_list', daemons: [{ daemon_id: 'daemon-1', alias: 'Mac Studio', daemon_online: false }] })
+    await nextTick()
+
+    expect(wrapper.get('.mobile-daemon-status-copy').text()).toBe('离线')
+
+    emitEvent?.({ type: 'daemon_status', daemon_id: 'daemon-1', status: 'online', hostname: 'mac-studio' })
+    await nextTick()
+
+    expect(wrapper.get('.mobile-daemon-status-copy').text()).toContain('在线')
+    expect(wrapper.get('.mobile-daemon-dot').classes()).toContain('online')
   })
 
   test('searches every loaded session by title, model and agent and closes cleanly', async () => {

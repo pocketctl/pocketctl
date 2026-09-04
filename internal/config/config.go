@@ -121,6 +121,24 @@ func agentControlSocketPathFor(goos, home string) string {
 // claudeChannelSocketPathFor is the pure core of ClaudeChannelSocketPath
 // (injectable GOOS for unit tests). Unix: ~/.pocketctl/claude-channel.sock.
 // Windows: named pipe \\.\pipe\pocketctl-claude-channel.
+// MemoryMcpSocketPath returns the dedicated user-private endpoint for the
+// local memory MCP bridge (pocketctl memory-mcp <-> daemon). It is a
+// SEPARATE socket from approval/keep-awake/claude-channel on purpose.
+func MemoryMcpSocketPath() string {
+	home, err := HomeDir()
+	if err != nil {
+		return ""
+	}
+	return memoryMcpSocketPathFor(runtime.GOOS, home)
+}
+
+func memoryMcpSocketPathFor(goos, home string) string {
+	if goos == "windows" {
+		return `\\.\pipe\pocketctl-memory-mcp`
+	}
+	return filepath.Join(home, ".pocketctl", "memory-mcp.sock")
+}
+
 func claudeChannelSocketPathFor(goos, home string) string {
 	if goos == "windows" {
 		return `\\.\pipe\pocketctl-claude-channel`

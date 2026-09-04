@@ -149,11 +149,84 @@ npm prune --omit=dev
 # 与最终 .env 位于同一 root-owned 目录，cutover 时使用原子 rename。
 RELAY_ENV="${INSTALL_DIR}/relay/.env"
 RELAY_ENV_STAGED="${RELAY_ENV}.next"
-JWT_SECRET_VALUE="$(grep -E '^JWT_SECRET=' "$RELAY_ENV" 2>/dev/null | cut -d= -f2- || true)"
-AUTH_CODE_PEPPER_VALUE="$(grep -E '^AUTH_CODE_PEPPER=' "$RELAY_ENV" 2>/dev/null | cut -d= -f2- || true)"
+relay_env_value() {
+  local key=$1
+  [[ -f "$RELAY_ENV" ]] || return 0
+  awk -v prefix="${key}=" 'index($0, prefix) == 1 { print substr($0, length(prefix) + 1); exit }' "$RELAY_ENV"
+}
+load_relay_env_value() {
+  local target=$1 input_name=$2 persisted_name=$3 value
+  [[ -n "${!target:-}" ]] && return 0
+  if [[ -n "${!input_name:-}" ]]; then
+    value=${!input_name}
+  else
+    value=$(relay_env_value "$persisted_name")
+  fi
+  printf -v "$target" '%s' "$value"
+}
+
+JWT_SECRET_VALUE="$(relay_env_value JWT_SECRET)"
+AUTH_CODE_PEPPER_VALUE="$(relay_env_value AUTH_CODE_PEPPER)"
 [[ -n "$JWT_SECRET_VALUE" ]] || JWT_SECRET_VALUE="$(gen_secret)"
 [[ -n "$AUTH_CODE_PEPPER_VALUE" ]] || AUTH_CODE_PEPPER_VALUE="$(gen_secret)"
 [[ "$JWT_SECRET_VALUE" != "$AUTH_CODE_PEPPER_VALUE" ]] || AUTH_CODE_PEPPER_VALUE="$(gen_secret)"
+
+# Preserve the complete Extension Platform contract across redeploys. Explicit
+# operator environment values win; otherwise the last root-owned EnvironmentFile
+# is carried forward atomically instead of silently reverting enabled to off.
+load_relay_env_value RELAY_EXTENSIONS RELAY_EXTENSIONS RELAY_EXTENSIONS
+RELAY_EXTENSIONS=${RELAY_EXTENSIONS:-off}
+load_relay_env_value EXTENSION_PROVIDER_JWT_SECRET_VALUE EXTENSION_PROVIDER_JWT_SECRET EXTENSION_PROVIDER_JWT_SECRET
+load_relay_env_value EXTENSION_CURSOR_SECRET_VALUE EXTENSION_CURSOR_SECRET EXTENSION_CURSOR_SECRET
+load_relay_env_value EXTENSION_GRANT_PRIVATE_KEY_B64_VALUE EXTENSION_GRANT_PRIVATE_KEY_B64 EXTENSION_GRANT_PRIVATE_KEY_B64
+load_relay_env_value EXTENSION_GRANT_PUBLIC_KEY_B64_VALUE EXTENSION_GRANT_PUBLIC_KEY_B64 EXTENSION_GRANT_PUBLIC_KEY_B64
+load_relay_env_value EXTENSION_GRANT_KEY_ID_VALUE EXTENSION_GRANT_KEY_ID EXTENSION_GRANT_KEY_ID
+load_relay_env_value EXTENSION_PROVIDER_PUBLIC_ORIGINS_VALUE EXTENSION_PROVIDER_PUBLIC_ORIGINS EXTENSION_PROVIDER_PUBLIC_ORIGINS
+load_relay_env_value RELAY_EXTENSION_PROJECTOR_BATCH_VALUE RELAY_EXTENSION_PROJECTOR_BATCH RELAY_EXTENSION_PROJECTOR_BATCH
+load_relay_env_value RELAY_EXTENSION_FEED_RETENTION_DAYS_VALUE RELAY_EXTENSION_FEED_RETENTION_DAYS RELAY_EXTENSION_FEED_RETENTION_DAYS
+load_relay_env_value RELAY_EXTENSION_LEASE_TTL_SECONDS_VALUE RELAY_EXTENSION_LEASE_TTL_SECONDS RELAY_EXTENSION_LEASE_TTL_SECONDS
+load_relay_env_value RELAY_EXTENSION_RATE_LIMIT_TOKEN_VALUE RELAY_EXTENSION_RATE_LIMIT_TOKEN RELAY_EXTENSION_RATE_LIMIT_TOKEN
+load_relay_env_value RELAY_EXTENSION_RATE_LIMIT_FEED_VALUE RELAY_EXTENSION_RATE_LIMIT_FEED RELAY_EXTENSION_RATE_LIMIT_FEED
+load_relay_env_value RELAY_EXTENSION_RATE_LIMIT_ACK_VALUE RELAY_EXTENSION_RATE_LIMIT_ACK RELAY_EXTENSION_RATE_LIMIT_ACK
+load_relay_env_value RELAY_EXTENSION_RATE_LIMIT_SNAPSHOT_VALUE RELAY_EXTENSION_RATE_LIMIT_SNAPSHOT RELAY_EXTENSION_RATE_LIMIT_SNAPSHOT
+load_relay_env_value RELAY_EXTENSION_RATE_LIMIT_STATUS_VALUE RELAY_EXTENSION_RATE_LIMIT_STATUS RELAY_EXTENSION_RATE_LIMIT_STATUS
+load_relay_env_value RELAY_EXTENSION_RATE_LIMIT_USAGE_VALUE RELAY_EXTENSION_RATE_LIMIT_USAGE RELAY_EXTENSION_RATE_LIMIT_USAGE
+load_relay_env_value RELAY_EXTENSION_RATE_LIMIT_PURGE_VALUE RELAY_EXTENSION_RATE_LIMIT_PURGE RELAY_EXTENSION_RATE_LIMIT_PURGE
+load_relay_env_value RELAY_EXTENSION_RATE_LIMIT_GRANT_VALUE RELAY_EXTENSION_RATE_LIMIT_GRANT RELAY_EXTENSION_RATE_LIMIT_GRANT
+
+# The Web client intentionally calls provider public origins directly with a
+# short-lived grant. Derive CSP sources from the same operator-owned catalog,
+# rejecting anything that cannot be a safe production origin before it is
+# interpolated into the generated Nginx configuration.
+provider_connect_sources() {
+  local raw=$1
+  [[ -n "$raw" ]] || return 0
+  node - "$raw" <<'NODE'
+const raw = process.argv[2]
+let origins
+try {
+  origins = Object.values(JSON.parse(raw))
+} catch {
+  process.exit(1)
+}
+if (!origins.every(origin => typeof origin === 'string')) process.exit(1)
+for (const origin of origins) {
+  let url
+  try {
+    url = new URL(origin)
+  } catch {
+    process.exit(1)
+  }
+  if (url.protocol !== 'https:' || url.username || url.password
+    || (url.pathname !== '/' && url.pathname !== '') || url.search || url.hash) {
+    process.exit(1)
+  }
+  process.stdout.write(`${url.origin} `)
+}
+NODE
+}
+EXTENSION_PROVIDER_CONNECT_SOURCES="$(provider_connect_sources "$EXTENSION_PROVIDER_PUBLIC_ORIGINS_VALUE")" \
+  || error 'EXTENSION_PROVIDER_PUBLIC_ORIGINS 必须是安全的 HTTPS provider origin 映射'
 
 RELEASE_VERSION_VALUE=${RELEASE_VERSION:-}
 if [[ -z "$RELEASE_VERSION_VALUE" ]]; then
@@ -173,6 +246,8 @@ APNS_BUNDLE_ID_VALUE=${APNS_BUNDLE_ID:-com.pocketctl.app}
 APNS_ENVIRONMENT_VALUE=${APNS_ENVIRONMENT:-production}
 pocketctl_write_relay_production_env "$RELAY_ENV_STAGED" \
   || error "无法生成完整的 Relay production 环境暂存文件"
+node "${INSTALL_DIR}/relay/dist/extensions/validate-production-env.js" "$RELAY_ENV_STAGED" \
+  || error "Relay production 环境未通过运行时 Extension/RSA 配置校验"
 
 chown -R root:root "${INSTALL_DIR}/relay"
 find "${INSTALL_DIR}/relay" -type d -exec chmod go-w {} +
@@ -356,7 +431,7 @@ server {
     add_header X-Content-Type-Options "nosniff" always;
     add_header X-XSS-Protection "1; mode=block" always;
     add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;
-    add_header Content-Security-Policy "default-src 'self'; connect-src 'self' wss:; style-src 'self' 'unsafe-inline'; script-src 'self'; object-src 'none'; frame-ancestors 'none'; base-uri 'self'" always;
+    add_header Content-Security-Policy "default-src 'self'; connect-src 'self' ${EXTENSION_PROVIDER_CONNECT_SOURCES}wss:; style-src 'self' 'unsafe-inline'; script-src 'self'; object-src 'none'; frame-ancestors 'none'; base-uri 'self'" always;
 
     # Web 静态文件
     root /var/www/pocketctl;

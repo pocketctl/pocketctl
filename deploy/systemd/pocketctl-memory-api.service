@@ -1,0 +1,37 @@
+[Unit]
+Description=pocketctl Memory API
+After=network-online.target
+Wants=network-online.target
+StartLimitBurst=5
+StartLimitIntervalSec=60
+
+[Service]
+Type=simple
+User=pocketctl
+Group=pocketctl
+WorkingDirectory=/opt/pocketctl/memory
+Environment=PATH=/usr/bin:/bin
+EnvironmentFile=/opt/pocketctl/memory/.env
+ExecStart=/usr/bin/env node dist/api-main.js
+Restart=on-failure
+RestartSec=5
+UMask=0027
+
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+LockPersonality=true
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=pocketctl-memory-api
+
+[Install]
+WantedBy=multi-user.target

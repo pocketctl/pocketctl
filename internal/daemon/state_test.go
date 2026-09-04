@@ -51,6 +51,7 @@ func TestDaemonStateRoundTripsConnectionStatus(t *testing.T) {
 	want := &DaemonState{
 		DaemonID:             "d1",
 		PID:                  os.Getpid(),
+		AccountEmail:         "daemon@example.com",
 		Connected:            false,
 		RuntimeInstanceToken: "runtime-token-1",
 		ConnectionStatus:     "auth_uncertain",
@@ -65,7 +66,7 @@ func TestDaemonStateRoundTripsConnectionStatus(t *testing.T) {
 		t.Fatal(err)
 	}
 	if got.ConnectionStatus != want.ConnectionStatus || got.ConnectionReason != want.ConnectionReason ||
-		got.RuntimeInstanceToken != want.RuntimeInstanceToken || !got.UpdatedAt.Equal(want.UpdatedAt) {
+		got.RuntimeInstanceToken != want.RuntimeInstanceToken || got.AccountEmail != want.AccountEmail || !got.UpdatedAt.Equal(want.UpdatedAt) {
 		t.Fatalf("got %#v", got)
 	}
 }

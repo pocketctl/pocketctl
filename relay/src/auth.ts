@@ -12,10 +12,26 @@ if (!JWT_SECRET) {
 const ACCESS_TOKEN_TTL = '24h';
 const REFRESH_TOKEN_TTL = '7d';
 const SESSION_SHARE_TOKEN_TTL = '15m';
+const STABLE_MACHINE_ID = /^(?:machine-[a-f0-9]{32}|daemon-[a-f0-9]{8})$/;
 // Security cutover: tokens issued before verified-email-only authentication
 // did not carry this claim and may belong to a pre-hijacked mailbox account.
 // Reject them globally so deploying this release forces one clean re-login.
 const AUTH_TOKEN_SCHEMA = 1;
+
+/** Return a Relay-safe persistent installation identity, if supplied. */
+export function stableMachineId(machineId: unknown): string | undefined {
+  return typeof machineId === 'string' && STABLE_MACHINE_ID.test(machineId)
+    ? machineId
+    : undefined;
+}
+
+/**
+ * Preserve an identity already bound to a refresh token. Only legacy refresh
+ * tokens without that claim may be bound from the requesting CLI's machine ID.
+ */
+export function resolveRefreshMachineId(tokenMachineId: unknown, requestedMachineId: unknown): string | undefined {
+  return stableMachineId(tokenMachineId) ?? stableMachineId(requestedMachineId);
+}
 
 export function hashPassword(password: string): string {
   return bcrypt.hashSync(password, 10);
@@ -44,14 +60,14 @@ export async function signAccessToken(
       type: 'access',
       auth_schema: AUTH_TOKEN_SCHEMA,
       jti,
-      machine_id: machineId || 'unknown',
+      machine_id: stableMachineId(machineId) || 'unknown',
     },
     JWT_SECRET,
     { expiresIn: ACCESS_TOKEN_TTL }
   );
 }
 
-export async function signRefreshToken(userId: number): Promise<string> {
+export async function signRefreshToken(userId: number, machineId?: string): Promise<string> {
   const jti = generateJTI();
   return jwt.sign(
     {
@@ -59,6 +75,7 @@ export async function signRefreshToken(userId: number): Promise<string> {
       type: 'refresh',
       auth_schema: AUTH_TOKEN_SCHEMA,
       jti,
+      machine_id: stableMachineId(machineId),
     },
     JWT_SECRET,
     { expiresIn: REFRESH_TOKEN_TTL }
@@ -77,7 +94,7 @@ export function verifyAccessToken(
       userId: decoded.userId,
       email: decoded.email,
       jti: decoded.jti || '',
-      machine_id: decoded.machine_id || 'unknown',
+      machine_id: stableMachineId(decoded.machine_id) || 'unknown',
     };
   } catch {
     return null;
@@ -115,12 +132,12 @@ export async function verifyAccessTokenWithRevocation(
   return payload;
 }
 
-export function verifyRefreshToken(token: string): { userId: number; jti: string } | null {
+export function verifyRefreshToken(token: string): { userId: number; jti: string; machine_id?: string } | null {
   try {
     const decoded = jwt.verify(token, JWT_SECRET) as any;
     if (decoded.type !== 'refresh') return null;
     if (decoded.auth_schema !== AUTH_TOKEN_SCHEMA) return null;
-    return { userId: decoded.userId, jti: decoded.jti || '' };
+    return { userId: decoded.userId, jti: decoded.jti || '', machine_id: stableMachineId(decoded.machine_id) };
   } catch {
     return null;
   }

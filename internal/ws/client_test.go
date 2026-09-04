@@ -37,6 +37,68 @@ func TestKickedTokenCheckUnavailableDoesNotExitAndReconnects(t *testing.T) {
 	}
 }
 
+func TestSendControlPayloadReportsDisconnectedTransport(t *testing.T) {
+	c := newTestClient("ws://example")
+	if err := c.SendControlPayload([]byte(`{"type":"memory_context_grant"}`)); err == nil {
+		t.Fatal("disconnected control-plane send must report an error")
+	}
+}
+
+func TestControlMessageHandlerBypassesCommandQueue(t *testing.T) {
+	upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
+	sent := make(chan struct{}, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		_, _, _ = conn.ReadMessage()
+		_ = conn.WriteJSON(protocol.RegisterAckMessage{
+			Type: "register_ack", Status: "ok", SupportsEventAck: true,
+		})
+		_ = conn.WriteJSON(map[string]any{
+			"type": "memory_context_grant_result", "request_id": "context-1",
+			"session_id": "ses-1", "grant": "grant",
+		})
+		sent <- struct{}{}
+		<-r.Context().Done()
+	}))
+	defer server.Close()
+
+	handled := make(chan protocol.ClientMessage, 1)
+	client := newTestClient(wsURL(server.URL))
+	client.OnControlMessage = func(message protocol.ClientMessage) bool {
+		if message.Type != "memory_context_grant_result" {
+			return false
+		}
+		handled <- message
+		return true
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go client.Run(ctx)
+
+	select {
+	case <-sent:
+	case <-time.After(2 * time.Second):
+		t.Fatal("relay did not send control reply")
+	}
+	select {
+	case message := <-handled:
+		if message.RequestID != "context-1" {
+			t.Fatalf("request id=%q want context-1", message.RequestID)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("control reply was not dispatched from read pump")
+	}
+	select {
+	case message := <-client.CommandCh:
+		t.Fatalf("handled control reply leaked to command queue: %+v", message)
+	case <-time.After(50 * time.Millisecond):
+	}
+}
+
 func TestDurableIngressDiagnosticsSnapshotIsAggregateAndLocked(t *testing.T) {
 	c := newTestClient("ws://example")
 	c.outMu.Lock()

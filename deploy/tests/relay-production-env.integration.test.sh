@@ -62,6 +62,7 @@ env -u DEV_EMAIL -u DEV_EMAIL_CODE \
   QUOTA_ENFORCEMENT=enforce \
   JWT_SECRET=jwt-secret-0123456789abcdef0123456789abcdef \
   AUTH_CODE_PEPPER=pepper-0123456789abcdef0123456789abcdef \
+  RELAY_EXTENSIONS=off \
   ALLOWED_ORIGINS=https://relay.contract.test \
   WEB_APP_URL=https://relay.contract.test \
   PUBLIC_ISSUER_URL=https://relay.contract.test \

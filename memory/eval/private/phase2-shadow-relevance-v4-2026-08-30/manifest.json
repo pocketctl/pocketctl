@@ -1,0 +1,75 @@
+{
+  "dataset_id": "phase2-shadow-relevance-v4-2026-08-30",
+  "generated_at": "2026-08-30T01:45:58.785Z",
+  "privacy": "private-gitignored-account-4-authorized",
+  "sample": {
+    "sessions": 20,
+    "turns": 100,
+    "unique_sessions": 20,
+    "unique_prompts": 100,
+    "repos": {
+      "pocketctl": 8,
+      "examGraph": 6,
+      "yujianMap": 6
+    },
+    "agents": {
+      "opencode": 10,
+      "codex": 10
+    },
+    "expected_relevant": 80,
+    "expected_negative": 20
+  },
+  "pack_summary": {
+    "total": 100,
+    "unique_requests": 100,
+    "unique_sessions": 20,
+    "states": {
+      "empty": 46,
+      "shadow": 54
+    },
+    "modes": {
+      "shadow": 100
+    },
+    "repos": {
+      "gitee.com/muwb123/pocketctl": 40,
+      "gitee.com/muwb123/exam-graph": 30,
+      "gitee.com/muwb123/yujian-map": 30
+    },
+    "agents": {
+      "codex": 50,
+      "opencode": 50
+    },
+    "repo_mismatch": 0,
+    "agent_mismatch": 0,
+    "null_repository": 0,
+    "failed": 0,
+    "bad_error": 0,
+    "bad_trajectory": 0,
+    "degraded": 0,
+    "wrong_policy_version": 0,
+    "wrong_per_session": 0
+  },
+  "retrieval_summary": {
+    "candidate_decisions": {
+      "dropped:relevance_below_threshold": 245,
+      "selected:ranked": 55
+    },
+    "selected_items": 55,
+    "injections": 0
+  },
+  "automated_proxy_only_not_human_gate": {
+    "expected_relevant_nonempty": 54,
+    "expected_relevant_empty": 26,
+    "expected_negative_empty": 20,
+    "expected_negative_nonempty": 0
+  },
+  "label_values": [
+    "useful",
+    "irrelevant",
+    "duplicate",
+    "incorrect",
+    "harmful"
+  ],
+  "case_count": 100,
+  "selected_item_count": 55
+}

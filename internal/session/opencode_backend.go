@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/pocketctl/pocketctl/internal/memorycontext"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -1293,7 +1294,21 @@ func (c *opencodeCoordinator) untrack(sessionID string) {
 // ---- serverBackend: SessionBackend implementation for opencode ----
 
 type serverBackend struct {
-	coord *opencodeCoordinator
+	coord            *opencodeCoordinator
+	contextProbeOnce sync.Once
+	contextNative    bool
+}
+
+func (b *serverBackend) memoryContextNativeSupported(ctx context.Context) bool {
+	if b == nil || b.coord == nil || b.coord.srv() == nil {
+		return false
+	}
+	b.contextProbeOnce.Do(func() {
+		probeCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+		defer cancel()
+		b.contextNative = b.coord.srv().ProbePerMessageSystem(probeCtx)
+	})
+	return b.contextNative
 }
 
 func parseOpenCodeSlashCommand(content string) (name, arguments string, ok bool) {
@@ -1370,7 +1385,23 @@ func (b *serverBackend) Start(ctx context.Context, config protocol.SessionConfig
 	return sid, nil
 }
 
+// SendWithContext delivers the pack through the per-message system field
+// (Phase 2, plan 11.3); the user parts stay byte-identical.
+func (b *serverBackend) SendWithContext(ctx context.Context, sessionID, content string, hidden *memorycontext.PreparedContext) error {
+	return b.send(ctx, sessionID, content, hidden)
+}
+
 func (b *serverBackend) Send(ctx context.Context, sessionID, content string) error {
+	return b.send(ctx, sessionID, content, nil)
+}
+
+// OpenCode's legacy message endpoint blocks until the native turn completes,
+// while send deliberately runs it in a goroutine. The backend therefore owns
+// the delivery receipt and emits it only after that native call succeeds or
+// fails; the generic lifecycle must not mark a queued goroutine as accepted.
+func (*serverBackend) defersMemoryContextReceipt() bool { return true }
+
+func (b *serverBackend) send(ctx context.Context, sessionID, content string, hidden *memorycontext.PreparedContext) error {
 	if err := b.coord.ensureStarted(); err != nil {
 		return err
 	}
@@ -1452,14 +1483,79 @@ func (b *serverBackend) Send(ctx context.Context, sessionID, content string) err
 			}
 		}
 	}
+	if hidden != nil && sourceMessageID == "" {
+		if historyErr != nil {
+			return fmt.Errorf("opencode memory source identity preflight: %w", historyErr)
+		}
+		reserved, err := adapter.ReserveOpencodeMessageID(ctx, messages)
+		if err != nil {
+			return err
+		}
+		sourceMessageID = reserved
+	}
 	// opencode POST /prompt blocks until the turn completes; run it in the
 	// background so Send returns promptly (mirrors claude/codex). The message
 	// poller surfaces the streaming response; errors are forwarded to the client.
 	model, _ := b.coord.sm.GetSessionModel(sessionID) // "providerID/modelID"; Prompt falls back to the session's own model when empty
+	baselineMessageIDs := make(map[string]struct{}, len(messages))
+	for _, message := range messages {
+		baselineMessageIDs[message.Info.ID] = struct{}{}
+	}
+	cwd, _ := b.coord.sm.GetSessionCwd(sessionID)
 	go func() {
+		var receiptOnce sync.Once
+		recordReceipt := func(delivered bool, code string) {
+			receiptOnce.Do(func() {
+				b.coord.sm.recordMemoryContextReceipt(context.Background(), hidden, delivered, code)
+			})
+		}
+		acceptanceCtx, cancelAcceptance := context.WithCancel(context.Background())
+		defer cancelAcceptance()
+		if hidden != nil {
+			go func() {
+				ticker := time.NewTicker(25 * time.Millisecond)
+				defer ticker.Stop()
+				deadline := time.NewTimer(5 * time.Second)
+				defer deadline.Stop()
+				for {
+					select {
+					case <-acceptanceCtx.Done():
+						return
+					case <-deadline.C:
+						return
+					case <-ticker.C:
+						pollCtx, cancel := context.WithTimeout(acceptanceCtx, 500*time.Millisecond)
+						observed, pollErr := b.coord.srv().GetMessages(pollCtx, sessionID, cwd)
+						cancel()
+						if pollErr == nil && opencodeUserMessageAccepted(
+							observed, sourceMessageID, baselineMessageIDs, content,
+						) {
+							recordReceipt(true, "accepted")
+							return
+						}
+					}
+				}
+			}()
+		}
 		slog.Default().Info("opencode prompt POST", "session", sessionID, "model", model, "len", len(content))
-		result, err := b.coord.srv().Prompt(context.Background(), sessionID, model, sourceMessageID, content)
+		result, err := b.coord.srv().PromptWithSystem(
+			context.Background(), sessionID, model, sourceMessageID, content,
+			memorycontext.BuildOpenCodeSystem(hidden),
+		)
 		if err != nil {
+			// The blocking request can fail after OpenCode has already persisted
+			// the user row. Recheck native history before declaring delivery
+			// failure so an accepted hidden context is never retried.
+			pollCtx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+			observed, pollErr := b.coord.srv().GetMessages(pollCtx, sessionID, cwd)
+			cancel()
+			if pollErr == nil && opencodeUserMessageAccepted(
+				observed, sourceMessageID, baselineMessageIDs, content,
+			) {
+				recordReceipt(true, "accepted")
+			} else {
+				recordReceipt(false, "dispatch_failed")
+			}
 			slog.Default().Error("opencode prompt POST failed", "session", sessionID, "error", err)
 			if !b.coord.sm.finishOpenCodePromptDispatch(sessionID, sourceMessageID, adapter.OpencodeMessageWithParts{}, err) {
 				b.coord.sm.outputCh <- protocol.DaemonEvent{
@@ -1469,11 +1565,42 @@ func (b *serverBackend) Send(ctx context.Context, sessionID, content string) err
 				}
 			}
 		} else {
+			// A successful blocking response is a final acceptance proof if the
+			// message poll could not observe the user row sooner.
+			recordReceipt(true, "accepted")
 			b.coord.sm.finishOpenCodePromptDispatch(sessionID, sourceMessageID, result, nil)
 			slog.Default().Info("opencode prompt POST ok", "session", sessionID)
 		}
 	}()
 	return nil
+}
+
+func opencodeUserMessageAccepted(
+	messages []adapter.OpencodeMessageWithParts,
+	sourceMessageID string,
+	baseline map[string]struct{},
+	content string,
+) bool {
+	for _, message := range messages {
+		if !strings.EqualFold(message.Info.Role, "user") {
+			continue
+		}
+		if sourceMessageID != "" {
+			if message.Info.ID == sourceMessageID {
+				return true
+			}
+			continue
+		}
+		if _, existed := baseline[message.Info.ID]; existed {
+			continue
+		}
+		for _, part := range message.Parts {
+			if part.Type == "text" && part.Text == content {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // finishOpenCodePromptDispatch applies the blocking POST's authoritative
@@ -1991,6 +2118,9 @@ func (sm *SessionManager) createOpencodeSession(ctx context.Context, config prot
 		Backend:        backend,
 		ControlMode:    protocol.ControlManaged,
 	}
+	if config.DeferInitialPrompt {
+		ps.DeferredInitialPrompt = config.Prompt
+	}
 	sm.mu.Lock()
 	sm.sessions[sid] = ps
 	sm.mu.Unlock()
@@ -2001,7 +2131,7 @@ func (sm *SessionManager) createOpencodeSession(ctx context.Context, config prot
 	coord.startSync(sid, false)
 
 	slog.Default().Info("opencode owned session ready", "session", sid, "model", cfg.Model, "has_initial_prompt", config.Prompt != "")
-	if config.Prompt != "" {
+	if config.Prompt != "" && !config.DeferInitialPrompt {
 		if err := sm.SendMessageWithInput(ctx, UserMessageInput{SessionID: sid, Content: config.Prompt}); err != nil {
 			// Turn-aware sends publish an attributed error before failed. The
 			// feature-flag rollback path bypasses that lifecycle wrapper, so retain

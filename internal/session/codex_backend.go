@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/pocketctl/pocketctl/internal/memorycontext"
 	"log/slog"
 	"time"
 
@@ -25,6 +26,14 @@ type CodexAppServerBackend struct {
 
 func newCodexAppServerBackend(sm *SessionManager, coord *codexCoordinator, client codexRuntimeClient, generation uint64) *CodexAppServerBackend {
 	return &CodexAppServerBackend{sm: sm, coord: coord, client: client, generation: generation}
+}
+
+func (b *CodexAppServerBackend) memoryContextNativeSupported(context.Context) bool {
+	// The managed-runtime probe currently proves the ordinary turn/start surface,
+	// but not a native hidden developer/history item with persistence and replay
+	// filtering guarantees. Stay fail-closed until that exact mechanism is
+	// represented in the generated schema and proven by a runtime canary.
+	return false
 }
 
 // tryCreateManagedCodexSession selects app-server only after enablement and a
@@ -68,6 +77,9 @@ func (sm *SessionManager) tryCreateManagedCodexSession(ctx context.Context, conf
 	managedConfig := config
 	managedConfig.Cwd = cwd
 	managedConfig.Model = model
+	if config.DeferInitialPrompt {
+		managedConfig.Prompt = ""
+	}
 	sessionID, err := backend.Start(ctx, managedConfig)
 	if err != nil {
 		// thread/start may have crossed the process boundary, so do not create a
@@ -84,6 +96,9 @@ func (sm *SessionManager) tryCreateManagedCodexSession(ctx context.Context, conf
 		Cwd: cwd, Agent: adapter.AgentCodex, Source: "daemon", Permission: clonePermission(config.Permission),
 		Model: model, WorktreePath: worktreePath, WorktreeBranch: worktreeBranch,
 		Backend: backend, ControlMode: protocol.ControlManaged,
+	}
+	if config.DeferInitialPrompt {
+		ps.DeferredInitialPrompt = config.Prompt
 	}
 	sm.mu.Lock()
 	sm.sessions[sessionID] = ps
@@ -138,6 +153,24 @@ func (b *CodexAppServerBackend) Resume(ctx context.Context, threadID string) err
 	return nil
 }
 
+// SendWithContext delivers the hidden developer item before the unchanged
+// user text in one ordered turn/start input array (plan 11.3).
+func (b *CodexAppServerBackend) SendWithContext(ctx context.Context, sessionID, content string, hidden *memorycontext.PreparedContext) error {
+	if turnID := b.coord.currentTurn(sessionID); turnID != "" {
+		// Steering stays addendum-only: no pack, no injection.
+		return b.Send(ctx, sessionID, content)
+	}
+	config := protocol.SessionConfig{}
+	b.sm.mu.RLock()
+	if ps := b.sm.sessions[sessionID]; ps != nil {
+		config.Cwd = ps.Cwd
+		config.Model = ps.Model
+		config.Permission = clonePermission(ps.Permission)
+	}
+	b.sm.mu.RUnlock()
+	return b.startTurnWithContext(ctx, sessionID, content, config, hidden)
+}
+
 func (b *CodexAppServerBackend) Send(ctx context.Context, sessionID, content string) error {
 	input := []map[string]string{{"type": "text", "text": content}}
 	if turnID := b.coord.currentTurn(sessionID); turnID != "" {
@@ -163,9 +196,22 @@ func (b *CodexAppServerBackend) Send(ctx context.Context, sessionID, content str
 }
 
 func (b *CodexAppServerBackend) startTurn(ctx context.Context, threadID, content string, config protocol.SessionConfig) error {
+	return b.startTurnWithContext(ctx, threadID, content, config, nil)
+}
+
+// startTurnWithContext is the Phase 2 delivery path: a prepared hidden
+// context rides an ordered developer item BEFORE the unchanged user text.
+// Without a pack the wire shape is byte-identical to the legacy startTurn.
+func (b *CodexAppServerBackend) startTurnWithContext(ctx context.Context, threadID, content string, config protocol.SessionConfig, hidden *memorycontext.PreparedContext) error {
+	var input []map[string]any
+	if hidden != nil {
+		input = memorycontext.BuildCodexInput(hidden, content)
+	} else {
+		input = []map[string]any{{"type": "text", "text": content}}
+	}
 	params := map[string]any{
 		"threadId": threadID,
-		"input":    []map[string]string{{"type": "text", "text": content}},
+		"input":    input,
 	}
 	if config.Cwd != "" {
 		params["cwd"] = config.Cwd

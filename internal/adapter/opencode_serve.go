@@ -371,6 +371,53 @@ func (s *OpencodeServer) Healthy(ctx context.Context) bool {
 	return err == nil && out.Healthy
 }
 
+// ProbePerMessageSystem reads the live runtime's OpenAPI document and accepts
+// the hidden channel only when the exact message route documents a `system`
+// request field. A version string or successful health response is not proof.
+func (s *OpencodeServer) ProbePerMessageSystem(ctx context.Context) bool {
+	var doc map[string]any
+	if err := s.get(ctx, "/doc", &doc); err != nil {
+		return false
+	}
+	paths, _ := doc["paths"].(map[string]any)
+	for path, raw := range paths {
+		if !strings.Contains(path, "/session/") || !strings.HasSuffix(path, "/message") {
+			continue
+		}
+		operation, _ := raw.(map[string]any)
+		post, _ := operation["post"].(map[string]any)
+		requestBody := resolveOpenAPILocalRef(doc, post["requestBody"])
+		content, _ := requestBody["content"].(map[string]any)
+		jsonBody, _ := content["application/json"].(map[string]any)
+		schema := resolveOpenAPILocalRef(doc, jsonBody["schema"])
+		properties, _ := schema["properties"].(map[string]any)
+		system := resolveOpenAPILocalRef(doc, properties["system"])
+		if system["type"] == "string" {
+			return true
+		}
+	}
+	return false
+}
+
+func resolveOpenAPILocalRef(root map[string]any, value any) map[string]any {
+	node, _ := value.(map[string]any)
+	ref, _ := node["$ref"].(string)
+	if !strings.HasPrefix(ref, "#/") {
+		return node
+	}
+	var current any = root
+	for _, raw := range strings.Split(strings.TrimPrefix(ref, "#/"), "/") {
+		key := strings.ReplaceAll(strings.ReplaceAll(raw, "~1", "/"), "~0", "~")
+		object, ok := current.(map[string]any)
+		if !ok {
+			return nil
+		}
+		current = object[key]
+	}
+	resolved, _ := current.(map[string]any)
+	return resolved
+}
+
 // ---- REST operations ----
 
 // OpencodeModelRef identifies a model in opencode's provider/model space.
@@ -539,6 +586,12 @@ func (s *OpencodeServer) Compact(ctx context.Context, sessionID, model string) e
 // session's own model is fetched. Blocks until the turn completes (no-timeout
 // client); callers run it in a goroutine and the message poller surfaces output.
 func (s *OpencodeServer) Prompt(ctx context.Context, sessionID, model, sourceMessageID, text string) (OpencodeMessageWithParts, error) {
+	return s.PromptWithSystem(ctx, sessionID, model, sourceMessageID, text, "")
+}
+
+// PromptWithSystem carries a per-message system field (Phase 2 hidden
+// context). An empty system keeps the wire body byte-identical to Prompt.
+func (s *OpencodeServer) PromptWithSystem(ctx context.Context, sessionID, model, sourceMessageID, text, system string) (OpencodeMessageWithParts, error) {
 	providerID, modelID := splitModel(model)
 	if providerID == "" || modelID == "" {
 		if info, err := s.GetSession(ctx, sessionID); err == nil {
@@ -547,6 +600,9 @@ func (s *OpencodeServer) Prompt(ctx context.Context, sessionID, model, sourceMes
 	}
 	body := map[string]any{
 		"parts": []map[string]any{{"type": "text", "text": text}},
+	}
+	if system != "" {
+		body["system"] = system
 	}
 	if sourceMessageID != "" {
 		body["messageID"] = sourceMessageID

@@ -13,6 +13,13 @@ import {
   tokenUsageFeatures,
 } from './config/token-usage.js'
 import { assertTokenUsageWriteContinuity } from './token-usage/lifecycle.js'
+import { resolveExtensionConfig } from './extensions/config.js'
+import { assertExtensionSchema } from './extensions/schema.js'
+import { projectFeedBatch, observeProjectorBacklog, recordProjectorRetry } from './extensions/feed-projector.js'
+import { runFeedRetentionOnce } from './extensions/retention.js'
+import { createExtensionProjectorRuntime } from './extensions/runtime.js'
+
+const EXTENSION_PROJECTOR_INTERVAL_MS = 500
 
 const RETENTION_INTERVAL_MS = 60_000
 // Connection checkout remains 1s; a claimed durable batch needs enough time
@@ -85,6 +92,8 @@ interface WorkerRuntimeDeps {
   assertSchemaReady(): Promise<void>;
   worker: { start(): void; stop(): Promise<void> };
   retention: { start(): void; stop(): Promise<void> };
+  /** ADR-0003 feed projector; absent in off mode. */
+  extensionProjector?: { start(): void; stop(): Promise<void> };
   pool: { end(): Promise<void> };
 }
 
@@ -110,11 +119,13 @@ export function createWorkerRuntime(deps: WorkerRuntimeDeps) {
         workerStarted = true
         deps.retention.start()
         retentionStarted = true
+        deps.extensionProjector?.start()
         started = true
       } catch (error) {
         await Promise.allSettled([
           ...(workerStarted ? [deps.worker.stop()] : []),
           ...(retentionStarted ? [deps.retention.stop()] : []),
+          ...(deps.extensionProjector ? [deps.extensionProjector.stop()] : []),
         ])
         workerStarted = false
         retentionStarted = false
@@ -130,6 +141,7 @@ export function createWorkerRuntime(deps: WorkerRuntimeDeps) {
           const drained = await Promise.allSettled([
             deps.worker.stop(),
             deps.retention.stop(),
+            ...(deps.extensionProjector ? [deps.extensionProjector.stop()] : []),
           ])
           drainFailure = drained.find((result) => result.status === 'rejected')?.reason
           started = false
@@ -203,6 +215,9 @@ export async function main(): Promise<void> {
   if (shardIndex >= shardCount) throw new Error('RELAY_WORKER_SHARD_INDEX must be less than RELAY_WORKER_SHARD_COUNT')
   const tokenFeatures = tokenUsageFeatures(process.env)
   assertTokenUsageFeatureDependencies(tokenFeatures, process.env.RELAY_DURABLE_INGRESS ?? 'off')
+  // ADR-0003: the worker owns the feed projector, so its extension flag and
+  // numeric bounds must validate at startup like the API server's.
+  const extensionConfig = resolveExtensionConfig(process.env)
   const pool = createPool(parseDBUrl(databaseUrl), {
     name: 'event-worker',
     max: strictPositiveEnvInt('DB_WORKER_POOL_MAX', 8),
@@ -226,13 +241,41 @@ export async function main(): Promise<void> {
     retention: new InboxRetention(pool),
     intervalMs: RETENTION_INTERVAL_MS,
   })
+  const extensionProjector = extensionConfig.mode === 'off' ? undefined : createExtensionProjectorRuntime({
+    mode: extensionConfig.mode,
+    intervalMs: EXTENSION_PROJECTOR_INTERVAL_MS,
+    runOnce: async () => {
+      const result = await projectFeedBatch(pool, { batchSize: extensionConfig.projectorBatchSize })
+      await observeProjectorBacklog(pool).catch(() => undefined)
+      return result
+    },
+    onError: (error) => {
+      recordProjectorRetry(error instanceof Error ? error.name : 'unknown')
+      console.error('[extension-projector] batch failed', {
+        errorName: error instanceof Error ? error.name : typeof error,
+      })
+    },
+    retention: {
+      everyMs: 60_000,
+      runOnce: () => runFeedRetentionOnce(pool, {
+        retentionDays: extensionConfig.feedRetentionDays,
+      }),
+    },
+    onRetentionError: (error) => {
+      console.error('[extension-retention] pass failed', {
+        errorName: error instanceof Error ? error.name : typeof error,
+      })
+    },
+  })
   const runtime = createWorkerRuntime({
     assertSchemaReady: async () => {
       await assertDurableIngressSchema(pool)
       await assertTokenUsageWriteContinuity(pool, tokenFeatures)
+      if (extensionConfig.mode !== 'off') await assertExtensionSchema(pool)
     },
     worker,
     retention,
+    extensionProjector,
     pool,
   })
   await runtime.start()

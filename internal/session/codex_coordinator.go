@@ -513,6 +513,12 @@ func (c *codexCoordinator) interactionBroker() *codexInteractions {
 
 func (c *codexCoordinator) publishProjected(events []protocol.DaemonEvent) {
 	for _, event := range events {
+		// Codex app-server lifecycle notifications have no timestamp field. Stamp
+		// the daemon's receipt time before fan-out so clients can present the
+		// actual response end time instead of their local WebSocket arrival time.
+		if event.Type == "session_status" && event.LastActivityAt == "" {
+			event.LastActivityAt = time.Now().UTC().Format(time.RFC3339Nano)
+		}
 		if event.Type == protocol.EventTypeTurnStatus {
 			// Registry sync happens here; emission dedup and forwarding are
 			// owned by the daemon's outgoing chokepoint (ObserveTurnStatusEvent).
@@ -658,6 +664,60 @@ func (c *codexCoordinator) projectLive(projector *codexProjection, message codex
 		c.reconcileActiveTurnStatus(threadID, status)
 	}
 	c.publishProjected(projector.Project(message))
+	if threadID := codexTurnStartedThreadID(message); threadID != "" {
+		c.refreshManagedThreadModelAsync(threadID)
+	}
+}
+
+// codexTurnStartedThreadID identifies the lifecycle point at which the Codex
+// app-server has committed the GUI's currently selected model to a new turn.
+func codexTurnStartedThreadID(message codexapp.Inbound) string {
+	if message.Method != "turn/started" {
+		return ""
+	}
+	var params struct {
+		ThreadID string `json:"threadId"`
+	}
+	if json.Unmarshal(message.Params, &params) != nil {
+		return ""
+	}
+	return strings.TrimSpace(params.ThreadID)
+}
+
+// refreshManagedThreadModelAsync reads the current model from the same
+// thread/resume result already used for managed-session hydration. App-server
+// notifications do not expose a separate model-change frame, so turn start is
+// the first authoritative point after a GUI selection takes effect.
+func (c *codexCoordinator) refreshManagedThreadModelAsync(threadID string) {
+	client, generation, ok := c.backendClient()
+	if !ok || threadID == "" {
+		return
+	}
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		var resumed struct {
+			Model string `json:"model"`
+		}
+		if err := client.Call(ctx, "thread/resume", map[string]any{"threadId": threadID, "excludeTurns": true}, &resumed); err != nil {
+			slog.Default().Debug("Codex model refresh failed", "thread", threadID, "generation", generation, "error", err)
+			return
+		}
+		model := strings.TrimSpace(resumed.Model)
+		current, exists := c.sm.GetSessionModel(threadID)
+		if !exists || model == "" || model == current {
+			return
+		}
+		if current == "" {
+			// Initial discovery is metadata, not a user-visible model switch.
+			c.sm.SetSessionModel(threadID, model)
+			c.sm.outputCh <- protocol.DaemonEvent{Type: "session_meta", SessionID: threadID, Model: model}
+			return
+		}
+		// The daemon's central outgoing classifier commits this new model and
+		// keeps it durable before Relay fans it out to Web/iOS.
+		c.sm.outputCh <- protocol.DaemonEvent{Type: "session_model_changed", SessionID: threadID, Model: model}
+	}()
 }
 
 func (c *codexCoordinator) projectHistorical(projector *codexProjection, message codexapp.Inbound) {

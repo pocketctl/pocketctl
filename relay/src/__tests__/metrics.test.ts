@@ -1,7 +1,15 @@
 import Fastify from 'fastify'
 import { afterEach, beforeAll, describe, expect, test, vi } from 'vitest'
 import { createInboxWorker } from '../inbox-worker.js'
-import { registry } from '../metrics.js'
+import {
+  registry,
+  extensionSourceBacklog,
+  extensionFeedProjected,
+  extensionProjectorBatchSize,
+  extensionProjectorLagSeconds,
+  extensionProjectorRetries,
+  boundedProviderLabel,
+} from '../metrics.js'
 import type { InboxRow } from '../ingress/inbox-repository.js'
 
 type MetricsRoute = (
@@ -213,5 +221,42 @@ describe('inbox claim latency histogram', () => {
       expect(text).not.toContain(`pocketctl_inbox_claim_seconds_bucket{le="0.001", ${forbidden}`)
       expect(text).not.toContain(`pocketctl_inbox_claim_seconds_bucket{${forbidden}`)
     }
+  })
+})
+
+
+describe('extension platform metrics registration', () => {
+  test('registers every projector metric under its frozen name', async () => {
+    const metrics = await registry.getMetricsAsJSON()
+    const names = new Set(metrics.map((family: { name: string }) => family.name))
+    expect(names.has('pocketctl_extension_source_backlog')).toBe(true)
+    expect(names.has('pocketctl_extension_feed_projected_total')).toBe(true)
+    expect(names.has('pocketctl_extension_projector_batch_size')).toBe(true)
+    expect(names.has('pocketctl_extension_projector_lag_seconds')).toBe(true)
+    expect(names.has('pocketctl_extension_projector_retries_total')).toBe(true)
+    expect(names.has('pocketctl_extension_purge_pending')).toBe(true)
+    expect(names.has('pocketctl_extension_feed_pull_total')).toBe(true)
+    expect(names.has('pocketctl_extension_feed_ack_total')).toBe(true)
+    expect(names.has('pocketctl_extension_usage_ingested_total')).toBe(true)
+    expect(names.has('pocketctl_extension_provider_status_reports_total')).toBe(true)
+  })
+
+  test('provider labels collapse to the allowlist; topic boundedness stays call-site enforced', () => {
+    extensionFeedProjected.inc({ topic: 'session.event.v1', result: 'projected' })
+    extensionProjectorRetries.inc({ outcome: 'connection_error' })
+    expect(() => extensionFeedProjected.inc({ topic: 'not-a-topic' as never, result: 'projected' }))
+      .not.toThrow() // counter labels are strings; boundedness is enforced at call sites
+    expect(boundedProviderLabel('pocketctl-memory')).toBe('pocketctl-memory')
+    expect(boundedProviderLabel('evil-provider')).toBe('unknown')
+    expect(boundedProviderLabel(undefined)).toBe('unknown')
+    expect(boundedProviderLabel('')).toBe('unknown')
+  })
+
+  test('gauges and histograms observe without label cardinality', async () => {
+    extensionSourceBacklog.set(3)
+    extensionProjectorLagSeconds.set(12)
+    extensionProjectorBatchSize.observe(42)
+    const snapshot = await extensionSourceBacklog.get()
+    expect(snapshot.values[0].value).toBe(3)
   })
 })

@@ -13,6 +13,8 @@ entries=(
   "$repo_root/deploy/deploy.sh"
   "$repo_root/deploy/systemd/pocketctl-relay.service"
   "$repo_root/deploy/systemd/pocketctl-relay-worker.service"
+  "$repo_root/deploy/systemd/pocketctl-memory-api.service"
+  "$repo_root/deploy/systemd/pocketctl-memory-worker.service"
 )
 for entry in "${entries[@]}"; do
   [[ -f "$entry" ]] || fail "missing deploy entry: $entry"
@@ -85,7 +87,9 @@ grep -q 'listen 443 ssl' "$official" || fail "official script must serve HTTPS"
 # --- systemd units keep the non-root hardened baseline ------------------------
 
 for unit in "$repo_root/deploy/systemd/pocketctl-relay.service" \
-            "$repo_root/deploy/systemd/pocketctl-relay-worker.service"; do
+            "$repo_root/deploy/systemd/pocketctl-relay-worker.service" \
+            "$repo_root/deploy/systemd/pocketctl-memory-api.service" \
+            "$repo_root/deploy/systemd/pocketctl-memory-worker.service"; do
   unit_section=$(sed -n '/^\[Unit\]$/,/^\[Service\]$/p' "$unit")
   service_section=$(sed -n '/^\[Service\]$/,/^\[Install\]$/p' "$unit")
   echo "$unit_section" | grep -q '^StartLimitBurst=' \
@@ -120,6 +124,8 @@ if command -v systemd-analyze >/dev/null 2>&1; then
   systemd-analyze verify \
     "$repo_root/deploy/systemd/pocketctl-relay.service" \
     "$repo_root/deploy/systemd/pocketctl-relay-worker.service" \
+    "$repo_root/deploy/systemd/pocketctl-memory-api.service" \
+    "$repo_root/deploy/systemd/pocketctl-memory-worker.service" \
     || fail "systemd-analyze rejected the units"
 else
   echo "NOT RUN: systemd-analyze unavailable (CI/Linux must run it)"

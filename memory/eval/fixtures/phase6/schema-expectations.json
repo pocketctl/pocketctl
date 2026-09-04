@@ -1,0 +1,8 @@
+{
+  "fromSchema": "memory-git.v1",
+  "toSchema": "memory-git.v2",
+  "renamedContainer": "document",
+  "kinds": ["claim", "rule", "skill", "wiki"],
+  "rule": {"statement": "Synthetic statement", "structuredContent": {"value": null, "flags": ["strict"], "retries": 7}},
+  "wiki": {"title": "Complete overview", "markdown": "  Keep CRLF\r\n", "lockVersion": "9007199254740995"}
+}

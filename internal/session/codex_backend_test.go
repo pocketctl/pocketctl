@@ -52,6 +52,13 @@ func (f *fakeCodexRuntimeClient) Respond(codexapp.RequestID, any, *codexapp.RPCE
 	return nil
 }
 
+func TestCodexMemoryContextStaysShadowOnlyWithoutExactInjectionProbe(t *testing.T) {
+	backend := newCodexAppServerBackend(nil, nil, newFakeCodexRuntimeClient(), 1)
+	if backend.memoryContextNativeSupported(context.Background()) {
+		t.Fatal("managed Codex must stay shadow-only until the exact hidden-item schema is probed")
+	}
+}
+
 func (f *fakeCodexRuntimeClient) lastCall(t *testing.T, method string) fakeCodexCall {
 	t.Helper()
 	f.mu.Lock()

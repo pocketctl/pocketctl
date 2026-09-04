@@ -17,6 +17,7 @@ import (
 	"github.com/pocketctl/pocketctl/internal/adapter"
 	"github.com/pocketctl/pocketctl/internal/config"
 	"github.com/pocketctl/pocketctl/internal/protocol"
+	"github.com/pocketctl/pocketctl/internal/turn"
 )
 
 // SubAgentMeta holds metadata parsed from a sub-agent's .meta.json file.
@@ -92,6 +93,23 @@ type JSONLTailer struct {
 	maxRecordBytes int
 }
 
+type codexSessionSeedable interface {
+	SetSessionID(string)
+}
+
+func seedCodexTailerSession(parser adapter.JSONLParser, agentType, filePath string) {
+	if agentType != adapter.AgentCodex {
+		return
+	}
+	meta, ok := adapter.ReadCodexRolloutMetadata(filePath)
+	if !ok || meta.ID == "" {
+		return
+	}
+	if seedable, ok := parser.(codexSessionSeedable); ok {
+		seedable.SetSessionID(meta.ID)
+	}
+}
+
 // Pause stops the tailer from forwarding new lines (used during sendToIdleTerminal
 // to avoid double-forwarding stdout-captured events via adapter).
 func (t *JSONLTailer) Pause() { t.paused.Store(true) }
@@ -126,12 +144,14 @@ func NewJSONLTailer(filePath, agentType string) (*JSONLTailer, error) {
 	if err != nil {
 		return nil, fmt.Errorf("open jsonl file: %w", err)
 	}
+	parser := adapter.NewJSONLParser(agentType)
+	seedCodexTailerSession(parser, agentType, filePath)
 	return &JSONLTailer{
 		filePath: filePath,
 		offset:   info.Size(), // Start from end
 		file:     f,
 		scanBuf:  make([]byte, 1024*1024),
-		parser:   adapter.NewJSONLParser(agentType),
+		parser:   parser,
 	}, nil
 }
 
@@ -180,7 +200,16 @@ func newJSONLTailerFromLine(filePath, agentType string, stableEventIDs bool, sta
 	if err != nil {
 		return nil, fmt.Errorf("open jsonl file: %w", err)
 	}
-	offset, lineIndex, err := seekJSONLLine(f, startLine)
+	parser := adapter.NewJSONLParser(agentType)
+	seedCodexTailerSession(parser, agentType, filePath)
+	var stateParser adapter.JSONLParser
+	if agentType == adapter.AgentCodex {
+		// ACK cursors suppress already-delivered output, but stateful Codex
+		// parsing still needs the skipped prefix to recover Plan deduplication and
+		// the native turn that may span the cursor.
+		stateParser = parser
+	}
+	offset, lineIndex, err := seekJSONLLine(f, startLine, stateParser)
 	if err != nil {
 		f.Close()
 		return nil, fmt.Errorf("seek jsonl replay cursor: %w", err)
@@ -190,14 +219,14 @@ func newJSONLTailerFromLine(filePath, agentType string, stableEventIDs bool, sta
 		offset:         offset,
 		file:           f,
 		scanBuf:        make([]byte, 1024*1024),
-		parser:         adapter.NewJSONLParser(agentType),
+		parser:         parser,
 		stableEventIDs: stableEventIDs,
 		eventSourceID:  CodexReplaySourceID(filePath),
 		lineIndex:      lineIndex,
 	}, nil
 }
 
-func seekJSONLLine(f *os.File, startLine int64) (int64, int64, error) {
+func seekJSONLLine(f *os.File, startLine int64, stateParser adapter.JSONLParser) (int64, int64, error) {
 	if startLine <= 0 {
 		return 0, 0, nil
 	}
@@ -212,6 +241,11 @@ func seekJSONLLine(f *os.File, startLine int64) (int64, int64, error) {
 		}
 		if err != nil {
 			return 0, 0, err
+		}
+		if stateParser != nil {
+			text := strings.TrimSuffix(string(record), "\n")
+			text = strings.TrimSuffix(text, "\r")
+			_, _ = stateParser.Parse(text)
 		}
 		line++
 	}
@@ -613,6 +647,14 @@ func (t *SubAgentTailer) TailNewLines() ([]protocol.DaemonEvent, error) {
 		events[i].RootSessionID = t.parentSessionID
 		events[i].AgentID = t.agentID
 		events[i].IsSubagent = true
+		if t.dropChildStatus && events[i].TurnID != "" && events[i].SourceTurnID != "" {
+			logicalTurnID := turn.LogicalTurnID(adapter.AgentCodex, t.parentSessionID, t.agentID, "native", events[i].SourceTurnID)
+			events[i].TurnID = logicalTurnID
+			events[i].ActorScope = protocol.ActorScopeSubagent
+			if events[i].Type == protocol.EventTypeTurnStatus {
+				events[i].EventID = turn.StatusEventID(logicalTurnID, events[i].TurnStatus)
+			}
+		}
 		stamped = append(stamped, events[i])
 	}
 	return stamped, nil

@@ -38,7 +38,7 @@ function testStore(available: boolean, count: number): {
   } }
 }
 
-async function render(input: { scope: AttentionInboxScope; available?: boolean; count?: number }) {
+async function render(input: { scope: AttentionInboxScope; available?: boolean; count?: number; variant?: 'default' | 'nav' }) {
   const router = createRouter({
     history: createMemoryHistory(),
     routes: [{ path: '/', component: { template: '<div />' } }, { path: '/inbox', component: { template: '<div />' } }],
@@ -48,7 +48,7 @@ async function render(input: { scope: AttentionInboxScope; available?: boolean; 
   const Component = (await import('../AttentionInboxEntryButton.vue')).default
   const fakeStore = testStore(input.available ?? true, input.count ?? 0)
   const wrapper = mount(Component, {
-    props: { scope: input.scope, store: fakeStore.value },
+    props: { scope: input.scope, store: fakeStore.value, variant: input.variant },
     global: { plugins: [router] },
   })
   await flushPromises()
@@ -70,6 +70,15 @@ describe('AttentionInboxEntryButton', () => {
     await button.trigger('click')
     await flushPromises()
     expect(router.currentRoute.value.fullPath).toBe('/inbox')
+  })
+
+  test('renders the compact navigation treatment without putting the badge in layout flow', async () => {
+    const { wrapper } = await render({ scope: { type: 'global' }, count: 7, variant: 'nav' })
+    const button = wrapper.get('[data-testid="attention-inbox-entry"]')
+
+    expect(button.classes()).toContain('attention-entry-button--nav')
+    expect(button.classes()).toContain('has-attention')
+    expect(button.get('b').text()).toBe('7')
   })
 
   test('preserves daemon id and display name in the scoped target', async () => {

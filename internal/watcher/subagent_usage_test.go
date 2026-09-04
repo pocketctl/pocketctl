@@ -10,6 +10,7 @@ import (
 
 	"github.com/pocketctl/pocketctl/internal/adapter"
 	"github.com/pocketctl/pocketctl/internal/protocol"
+	"github.com/pocketctl/pocketctl/internal/turn"
 )
 
 func TestSubAgentTailerCodexStampsRootAndAgent(t *testing.T) {
@@ -102,6 +103,44 @@ func TestSubAgentTailerCodexDoesNotCompleteParentSession(t *testing.T) {
 	}
 }
 
+func TestSubAgentTailerCodexRestampsNativeTurnForParent(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "rollout-child.jsonl")
+	const sourceTurnID = "child-native-turn"
+	lines := `{"type":"session_meta","payload":{"id":"child-rollout"}}` + "\n" +
+		`{"type":"event_msg","payload":{"type":"task_started","turn_id":"` + sourceTurnID + `"}}` + "\n" +
+		`{"type":"event_msg","payload":{"type":"agent_message","message":"child output"}}` + "\n" +
+		`{"type":"event_msg","payload":{"type":"task_complete","turn_id":"` + sourceTurnID + `"}}` + "\n"
+	if err := os.WriteFile(path, []byte(lines), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	tailer, err := NewSubAgentTailerForAgent(path, "child-agent", "root-session", adapter.AgentCodex, adapter.AgentCodex)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tailer.tailer.Close()
+	events, err := tailer.TailNewLines()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 3 {
+		t.Fatalf("events = %+v", events)
+	}
+	wantTurnID := turn.LogicalTurnID(adapter.AgentCodex, "root-session", "child-agent", "native", sourceTurnID)
+	for _, index := range []int{0, 1, 2} {
+		event := events[index]
+		if event.SessionID != "root-session" || event.TurnID != wantTurnID || event.SourceTurnID != sourceTurnID ||
+			event.AgentID != "child-agent" || !event.IsSubagent || event.ActorScope != protocol.ActorScopeSubagent {
+			t.Fatalf("event[%d] was not restamped for parent turn: %+v", index, event)
+		}
+	}
+	if events[0].Type != protocol.EventTypeTurnStatus || events[0].EventID != turn.StatusEventID(wantTurnID, protocol.TurnStateRunning) ||
+		events[1].Type != "agent_text" || events[2].Type != protocol.EventTypeTurnStatus || events[2].EventID != turn.StatusEventID(wantTurnID, protocol.TurnStateCompleted) {
+		t.Fatalf("unexpected child turn lifecycle: %+v", events)
+	}
+}
+
 func TestSubAgentTailerCodexEventIDsAreStableAndDistinct(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "rollout-child.jsonl")
@@ -188,6 +227,46 @@ func TestCodexReplaySubAgentTailerFiltersNativeTimestampsAndKeepsStableIDs(t *te
 	}
 	if !strings.Contains(events[0].EventID, ":1:0") || !strings.Contains(events[1].EventID, ":2:0") {
 		t.Fatalf("event IDs lost source line indexes: %q %q", events[0].EventID, events[1].EventID)
+	}
+}
+
+func TestCodexReplaySubAgentTailerRestoresTurnStateBeforeAckCursor(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "rollout-child.jsonl")
+	const sourceTurnID = "child-turn-before-cursor"
+	lines := []string{
+		`{"type":"session_meta","payload":{"id":"child-rollout"}}`,
+		`{"type":"event_msg","payload":{"type":"task_started","turn_id":"` + sourceTurnID + `"}}`,
+		`{"type":"event_msg","payload":{"type":"agent_message","message":"acked output"}}`,
+		`{"type":"event_msg","payload":{"type":"agent_message","message":"pending output"}}`,
+		`{"type":"event_msg","payload":{"type":"task_complete","turn_id":"` + sourceTurnID + `"}}`,
+	}
+	if err := os.WriteFile(path, []byte(strings.Join(lines, "\n")+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	// The persisted cursor replays its highest ACKed source line, so lines before
+	// startLine are state-only history and must not be emitted again.
+	tailer, err := NewCodexReplaySubAgentTailer(
+		path, "child-agent", "root-session", adapter.AgentCodex, time.Time{}, 2,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tailer.tailer.Close()
+	events, err := tailer.TailNewLines()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 3 || events[0].Type != "agent_text" || events[1].Type != "agent_text" ||
+		events[2].Type != protocol.EventTypeTurnStatus || events[2].TurnStatus != protocol.TurnStateCompleted {
+		t.Fatalf("unexpected cursor replay events: %+v", events)
+	}
+	wantTurnID := turn.LogicalTurnID(adapter.AgentCodex, "root-session", "child-agent", "native", sourceTurnID)
+	for i, event := range events {
+		if event.TurnID != wantTurnID || event.SourceTurnID != sourceTurnID ||
+			event.SessionID != "root-session" || event.ActorScope != protocol.ActorScopeSubagent {
+			t.Fatalf("event[%d] lost turn state restored before the cursor: %+v", i, event)
+		}
 	}
 }
 

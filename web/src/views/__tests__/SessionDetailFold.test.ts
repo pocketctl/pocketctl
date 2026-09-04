@@ -1,11 +1,13 @@
 import { describe, test, expect } from 'vitest'
 import { mount } from '@vue/test-utils'
 import SubAgentFoldGroup from '../../components/messages/SubAgentFoldGroup.vue'
+import ToolCallGroup from '../../components/messages/ToolCallGroup.vue'
 
 // Stubs for child components used inside the fold group
 const globalStubs = {
   MessageUser: true,
   MessageAgent: true,
+  ToolCallGroup: true,
   ToolCallCard: true,
   DiffCard: true,
   MarkdownRenderer: true,
@@ -15,6 +17,7 @@ const baseMessages = [
   { id: 'u1', type: 'user_text', role: 'user', content: 'hello from user' },
   { id: 'a1', type: 'agent_text', role: 'agent', content: 'hello from agent', streaming: false },
   { id: 't1', type: 'tool_call', tool: 'Bash', call_id: 'tc1', input: 'ls', status: 'completed', expanded: false, outputExpanded: false },
+  { id: 't2', type: 'tool_call', tool: 'Read', call_id: 'tc2', input: { path: 'README.md' }, status: 'completed', expanded: false, outputExpanded: false },
 ]
 
 describe('SubAgentFoldGroup', () => {
@@ -118,10 +121,14 @@ describe('SubAgentFoldGroup', () => {
       },
       global: { stubs: globalStubs },
     })
-    // MessageUser, MessageAgent, ToolCallCard are stubbed — their tags should exist
+    // MessageUser, MessageAgent, ToolCallGroup are stubbed — their tags should exist
     expect(w.html()).toContain('message-user-stub')
     expect(w.html()).toContain('message-agent-stub')
-    expect(w.html()).toContain('tool-call-card-stub')
+    expect(w.html()).toContain('tool-call-group-stub')
+    expect(w.html()).not.toContain('tool-call-card-stub')
+    const groups = w.findAllComponents(ToolCallGroup)
+    expect(groups).toHaveLength(1)
+    expect(groups[0].props('messages')).toEqual(baseMessages.slice(2))
   })
 
   test('collapsed hides messages', async () => {

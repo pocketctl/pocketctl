@@ -1,6 +1,7 @@
 package adapter
 
 import (
+	"github.com/pocketctl/pocketctl/internal/memorycontext"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -296,7 +297,16 @@ func (a *ClaudeAdapter) convertResult(raw ClaudeStreamEvent, sid string) ([]prot
 }
 
 func BuildClaudeArgs(prompt string, sessionID string, config protocol.SessionConfig) []string {
+	return BuildClaudeArgsWithContext(prompt, sessionID, config, nil)
+}
+
+// BuildClaudeArgsWithContext appends the hidden system prompt ONLY when a
+// probed runtime supplied a pack; the visible prompt stays byte-identical.
+func BuildClaudeArgsWithContext(prompt string, sessionID string, config protocol.SessionConfig, hidden *memorycontext.PreparedContext) []string {
 	args := []string{"-p", prompt}
+	if hidden != nil {
+		args = memorycontext.AppendClaudeSystemPrompt(args, hidden)
+	}
 
 	if sessionID != "" {
 		args = append(args, "--resume", sessionID)

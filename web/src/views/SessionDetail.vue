@@ -3,26 +3,46 @@
     <!-- Session List Panel -->
     <div class="session-panel">
       <div class="session-panel-header">
-        <h3>{{ uniqueHosts.length > 1 ? t('nav.sessions') : daemonName }}</h3>
-        <button class="btn-icon" style="width:28px;height:28px;border:none;background:var(--accent);color:#fff;" :title="t('session.new_session')" @click="emitNewSession">
+        <div class="session-panel-heading-copy">
+          <h3>{{ uniqueHosts.length > 1 ? t('nav.sessions') : daemonName }}</h3>
+          <span>{{ t('session.count_summary', { total: hostScopedSessions.length, running: runningSessionCount }) }}</span>
+        </div>
+        <button class="btn-icon session-new-button" :title="t('session.new_session')" @click="emitNewSession">
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M12 5v14M5 12h14"/></svg>
         </button>
       </div>
-      <!-- Host selector tabs (only when multiple hosts have sessions) -->
-      <div v-if="uniqueHosts.length > 1" class="host-tabs">
+      <div v-if="!hasNoSessions" ref="agentFilterEl" class="agent-filter-popover">
         <button
-          v-for="h in uniqueHosts"
-          :key="h.daemon_id"
-          :class="['host-tab', { active: selectedHostId === h.daemon_id }]"
-          @click="selectedHostId = h.daemon_id"
+          type="button"
+          class="agent-filter-trigger"
+          aria-haspopup="menu"
+          :aria-expanded="agentFilterOpen"
+          @click.stop="agentFilterOpen = !agentFilterOpen"
         >
-          <span :class="['status-dot', { online: h.online }]" style="width:6px;height:6px;flex-shrink:0;"></span>
-          <span class="host-tab-name">{{ h.name }}</span>
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h16M7 12h10M10 18h4"/></svg>
+          <span class="agent-filter-trigger-label">{{ activeAgentFilter.label }}（{{ activeAgentFilter.count }}）</span>
+          <svg class="agent-filter-chevron" viewBox="0 0 24 24" aria-hidden="true"><path d="m7 10 5 5 5-5"/></svg>
         </button>
+        <div v-if="agentFilterOpen" class="agent-filter-menu" role="menu" :aria-label="t('session.agent_filter_label')">
+          <button
+            v-for="option in agentFilterOptions"
+            :key="option.value"
+            type="button"
+            class="agent-filter-option"
+            role="menuitemradio"
+            :aria-checked="selectedAgentType === option.value"
+            :data-agent-filter="option.value"
+            @click="selectAgentFilter(option.value)"
+          >
+            <svg class="agent-filter-check" viewBox="0 0 24 24" aria-hidden="true"><path d="m5 12 4 4 10-10"/></svg>
+            <span class="agent-filter-option-label">{{ option.label }}</span>
+            <span class="agent-filter-count">{{ option.count }}</span>
+          </button>
+        </div>
       </div>
-      <div v-if="!hasNoSessions" style="padding:4px 8px;display:flex;align-items:center;gap:6px;">
-        <span :class="['status-dot', { online: isDaemonOnline }]" style="width:6px;height:6px;"></span>
-        <span style="font-size:11px;color:var(--fg-tertiary);">{{ isDaemonOnline ? t('dashboard.online') : t('dashboard.offline') }} · {{ statusSubtext }}</span>
+      <div v-if="!hasNoSessions" class="session-panel-presence">
+        <span :class="['status-dot', { online: isDaemonOnline }]"></span>
+        <span class="session-panel-presence-copy">{{ isDaemonOnline ? t('dashboard.online') : t('dashboard.offline') }} · {{ statusSubtext }}</span>
       </div>
       <div class="session-list">
         <template v-for="s in visibleSessions" :key="s.session_id">
@@ -70,7 +90,7 @@
       <!-- Normal chat UI (only when sessions exist) -->
       <template v-else>
       <!-- Chat Toolbar -->
-      <div class="chat-toolbar">
+      <div class="chat-toolbar" :style="{ position: 'relative', zIndex: toolbarOverflowOpen ? 50 : undefined }">
         <div class="session-toolbar-identity">
           <button
             type="button"
@@ -84,82 +104,77 @@
           <div class="session-toolbar-titles">
             <span v-if="focusedSubAgentId" class="session-toolbar-title" :title="`${sessionTitle || sessionId?.slice(0, 8)} › ${focusedSubAgentInfo?.title || focusedSubAgentId.slice(0, 8)}`">{{ sessionTitle || sessionId?.slice(0, 8) }} › {{ focusedSubAgentInfo?.title || focusedSubAgentId.slice(0, 8) }}</span>
             <span v-else class="session-toolbar-title" :title="sessionTitle || sessionId?.slice(0, 8)">{{ sessionTitle || sessionId?.slice(0, 8) }}</span>
-            <span class="session-toolbar-host" :title="daemonName">{{ daemonName }}</span>
+            <span class="session-toolbar-host" :title="toolbarContextParts.join(' · ')">
+              <template v-for="(part, index) in toolbarContextParts" :key="`${part}-${index}`">
+                <i v-if="index" aria-hidden="true"></i><span>{{ part }}</span>
+              </template>
+            </span>
           </div>
         </div>
         <div class="session-toolbar-actions">
           <span :class="['status-pill', statusClass]"><span class="pulse"></span><span class="status-pill-label">{{ statusLabel }}</span></span>
-        <span v-if="focusedSubAgentId && focusedSubAgentTokenTotal > 0" class="context-pill" :title="t('session.total_incl_subagent')" style="cursor:default;">
-          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M16 8h-6a2 2 0 1 0 0 4h4a2 2 0 1 1 0 4H8"/><path d="M12 18V6"/></svg>
-          {{ fmtTk(focusedSubAgentTokenTotal) }}
-        </span>
-        <span v-if="!focusedSubAgentId && parentTotalTokens !== null" class="context-pill" :title="t('session.total_incl_subagent')" style="cursor:default;">
-          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M16 8h-6a2 2 0 1 0 0 4h4a2 2 0 1 1 0 4H8"/><path d="M12 18V6"/></svg>
-          {{ fmtTk(parentTotalTokens) }}
-        </span>
-        <span v-if="!focusedSubAgentId && currentModel" class="model-pill" :title="'当前模型：' + currentModel">
-          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.6 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.6a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
-          {{ currentModel }}
-        </span>
-        <span v-if="!focusedSubAgentId && effortVisible" class="effort-pill"
-          :title="`${t('session.effort_level')}：${effortLabel}`">
-          <svg aria-hidden="true" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 3v3M12 18v3M3 12h3M18 12h3M5.64 5.64l2.12 2.12M16.24 16.24l2.12 2.12M18.36 5.64l-2.12 2.12M7.76 16.24l-2.12 2.12"/><circle cx="12" cy="12" r="3"/></svg>
-          <span class="effort-prefix">{{ t('session.effort_short') }} · </span>{{ effortLabel }}
-        </span>
-        <button
-          v-if="currentPlan && !focusedSubAgentId"
-          type="button"
-          :class="['plan-toolbar-button', { active: planPanelOpen, complete: planCompleted === currentPlan.items.length }]"
-          :aria-label="planButtonLabel"
-          :aria-expanded="planPanelOpen"
-          @click="togglePlanPanel"
-        >
-          <svg viewBox="0 0 20 20" aria-hidden="true"><path d="m3.5 5 1.5 1.5L8 3.5M10 5h6M3.5 11 5 12.5 8 9.5M10 11h6M3.5 17 5 18.5l3-3M10 17h6" /></svg>
-          <span>{{ planCompleted }}/{{ currentPlan.items.length }}</span>
-        </button>
-        <button
-          v-if="fileChangeMessages.length && !focusedSubAgentId"
-          type="button"
-          :class="['file-change-toolbar-button', { active: fileChangePanelOpen }]"
-          :aria-label="fileChangeButtonLabel"
-          :aria-expanded="fileChangePanelOpen"
-          @click="toggleFileChangePanel"
-        >
-          <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M4 3.5h12v13H4zM7 7h6M7 10h6M7 13h4" /></svg>
-          <span>{{ fileChangeFileCount }}</span>
-        </button>
         <div class="session-id-box">
           <code class="session-id-text">{{ sessionId?.slice(0, 8) }}</code>
           <button class="copy-btn" @click="copySessionId" :title="copied ? t('common.copied') : t('session.actions.copy_id')">
             <svg v-if="!copied" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"/></svg>
             <svg v-else width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M20 6L9 17l-5-5"/></svg>
           </button>
-          <button v-if="!focusedSubAgentId" class="copy-btn" style="margin-left:6px;" :title="resumeCopied ? t('session.actions.resume_toast') : t('session.actions.resume') + t('session.actions.resume_hint')" @click="copyResumeCmd">
-            <svg v-if="!resumeCopied" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8"/><path d="M12 17v4"/></svg>
-            <svg v-else width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M20 6L9 17l-5-5"/></svg>
-          </button>
-        </div>
-        <div ref="toolbarOverflowEl" class="toolbar-overflow">
-          <button type="button" class="toolbar-more-btn" :aria-label="t('session.actions.more')" :aria-expanded="toolbarOverflowOpen" @click.stop="toolbarOverflowOpen = !toolbarOverflowOpen">
-            <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="5" cy="12" r="1.6"/><circle cx="12" cy="12" r="1.6"/><circle cx="19" cy="12" r="1.6"/></svg>
-          </button>
-          <div v-if="toolbarOverflowOpen" class="toolbar-overflow-menu" role="menu">
-            <div v-if="contextTokens || focusedSubAgentTokenTotal > 0 || parentTotalTokens !== null || currentModel || effortVisible" class="toolbar-overflow-metrics">
-              <span v-if="contextTokens" class="context-pill">{{ contextTokens }}</span>
-              <span v-if="focusedSubAgentId && focusedSubAgentTokenTotal > 0" class="context-pill">{{ fmtTk(focusedSubAgentTokenTotal) }}</span>
-              <span v-if="!focusedSubAgentId && parentTotalTokens !== null" class="context-pill">{{ fmtTk(parentTotalTokens) }}</span>
-              <span v-if="!focusedSubAgentId && currentModel" class="model-pill">{{ currentModel }}</span>
-              <span v-if="!focusedSubAgentId && effortVisible" class="effort-pill">{{ effortLabel }}</span>
-            </div>
-            <button type="button" class="toolbar-overflow-item" role="menuitem" @click="copySessionId"><span>{{ copied ? t('common.copied') : t('session.actions.copy_id') }}</span><code>{{ sessionId?.slice(0, 8) }}</code></button>
-            <button v-if="!focusedSubAgentId" type="button" class="toolbar-overflow-item" role="menuitem" @click="copyResumeCmd">{{ resumeCopied ? t('session.actions.resume_toast') : t('session.actions.resume') }}</button>
-          </div>
         </div>
         </div>
       </div>
 
+      <div ref="toolbarOverflowEl" :class="['toolbar-overflow', { 'mobile-session-toolbar-overflow': isMobile }]">
+        <button type="button" class="toolbar-more-btn" :aria-label="t('session.actions.more')" :aria-expanded="toolbarOverflowOpen" @click.stop="toolbarOverflowOpen = !toolbarOverflowOpen">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="5" cy="12" r="1.6"/><circle cx="12" cy="12" r="1.6"/><circle cx="19" cy="12" r="1.6"/></svg>
+        </button>
+        <div v-if="toolbarOverflowOpen" class="toolbar-overflow-menu" role="menu">
+          <div v-if="contextTokens || focusedSubAgentTokenTotal > 0 || parentTotalTokens !== null || currentModel || effortVisible" class="toolbar-overflow-metrics">
+            <span v-if="!focusedSubAgentId && currentModel" class="toolbar-overflow-metric">{{ currentModel }}</span>
+            <span v-if="!focusedSubAgentId && effortVisible" class="toolbar-overflow-metric">{{ effortLabel }}</span>
+            <span v-if="contextTokens" class="toolbar-overflow-metric">{{ contextTokens }}</span>
+            <span v-if="focusedSubAgentId && focusedSubAgentTokenTotal > 0" class="toolbar-overflow-metric">{{ fmtTk(focusedSubAgentTokenTotal) }}</span>
+            <span v-if="!focusedSubAgentId && parentTotalTokens !== null" class="toolbar-overflow-metric">{{ fmtTk(parentTotalTokens) }}</span>
+          </div>
+          <button
+            v-if="currentPlan && !focusedSubAgentId"
+            type="button"
+            data-toolbar-action="plan"
+            :class="['toolbar-overflow-item', 'toolbar-overflow-action', 'plan-toolbar-button', { active: !isMobile && planPanelOpen, complete: planCompleted === currentPlan.items.length }]"
+            role="menuitem"
+            :aria-label="planButtonLabel"
+            :aria-expanded="!isMobile && planPanelOpen"
+            @click="togglePlanFromOverflow"
+          >
+            <span class="toolbar-overflow-item-label"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="m3.5 5 1.5 1.5L8 3.5M10 5h6M3.5 11 5 12.5 8 9.5M10 11h6M3.5 17 5 18.5l3-3M10 17h6" /></svg><span>{{ t('plan.title') }}</span></span>
+            <code>{{ planCompleted }} / {{ currentPlan.items.length }}</code>
+          </button>
+          <button
+            v-if="fileChangeMessages.length && !focusedSubAgentId"
+            type="button"
+            data-toolbar-action="edited-files"
+            :class="['toolbar-overflow-item', 'toolbar-overflow-action', 'file-change-toolbar-button', { active: fileChangePanelOpen }]"
+            role="menuitem"
+            :aria-label="fileChangeButtonLabel"
+            :aria-expanded="fileChangePanelOpen"
+            @click="toggleFileChangeFromOverflow"
+          >
+            <span class="toolbar-overflow-item-label"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M4 3.5h12v13H4zM7 7h6M7 10h6M7 13h4" /></svg><span>{{ t('session.file_change_title') }}</span></span>
+            <code>{{ fileChangeFileCount }}</code>
+          </button>
+          <div v-if="(currentPlan || fileChangeMessages.length) && !focusedSubAgentId" class="toolbar-overflow-separator"></div>
+          <button type="button" class="toolbar-overflow-item" data-toolbar-action="copy-id" role="menuitem" @click="copySessionId"><span>{{ copied ? t('common.copied') : t('session.actions.copy_id') }}</span><code>{{ sessionId?.slice(0, 8) }}</code></button>
+          <button v-if="!focusedSubAgentId" type="button" class="toolbar-overflow-item" data-toolbar-action="resume" role="menuitem" @click="copyResumeCmd"><span>{{ resumeCopied ? t('session.actions.resume_toast') : t('session.actions.resume') }}</span><code>resume</code></button>
+        </div>
+      </div>
+
       <!-- Messages -->
-      <div class="chat-messages" ref="messagesEl" @scroll="onMessagesScroll">
+      <div
+        ref="messagesEl"
+        class="chat-messages"
+        :style="{ '--composer-float-clearance': `${messageBottomClearance}px` }"
+        @scroll="onMessagesScroll"
+      >
+        <div v-if="!composerState.visible" class="messages-bottom-spacer" aria-hidden="true"></div>
         <!-- Exit Banner -->
         <div v-if="status === 'exited'" class="banner banner-info" style="flex-shrink:0;">
           <svg class="banner-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><path d="M16 17l5-5-5-5"/><path d="M21 12H9"/></svg>
@@ -172,16 +187,6 @@
         <div v-if="isDisconnected" class="banner banner-warning" style="flex-shrink:0;">
           <svg class="banner-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><path d="M12 9v4"/><path d="M12 17h.01"/></svg>
           <span>{{ t('session.daemon_offline') }}</span>
-        </div>
-        <div v-if="isLegacyOpenCodeSession" class="banner banner-info opencode-legacy-banner" style="flex-shrink:0;">
-          <svg class="banner-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M12 16v-4"/><path d="M12 8h.01"/></svg>
-          <span>{{ t('session.opencode_legacy_readonly') }}</span>
-        </div>
-        <!-- ZCode observer sessions are read-only sync from the local ZCode
-             store; no remote input, approval, resume, or control is possible. -->
-        <div v-if="isZcodeObserverSession" class="banner banner-info zcode-observer-banner" style="flex-shrink:0;">
-          <svg class="banner-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M12 16v-4"/><path d="M12 8h.01"/></svg>
-          <span>{{ t('session.zcode_observer_readonly') }}</span>
         </div>
         <!-- L1: send failed (ws not open at send time) -->
         <div v-if="sendError || interruptPendingDraft" class="banner banner-warning" style="flex-shrink:0;">
@@ -220,7 +225,7 @@
             <span v-if="turnHeaderFor(msg)?.continuedAfterInterrupt" class="turn-group-continuation">中断后继续</span>
             <button v-if="turnHeaderFor(msg)?.auxiliary.length" type="button" class="turn-group-aux-toggle" :aria-expanded="isAuxiliaryExpanded(turnHeaderFor(msg)?.id)" :aria-label="`Turn ${msg.turn_id} 辅助流`" @click="toggleAuxiliary(turnHeaderFor(msg)?.id)">辅助流（{{ turnHeaderFor(msg)?.auxiliary.length }}）</button>
           </div>
-          <template v-if="!isHiddenAuxiliary(msg)">
+          <template v-if="!isHiddenAuxiliary(msg) && !isToolGroupContinuation(msg)">
           <!-- User message (right bubble) -->
           <MessageUser
             v-if="msg.role === 'user'"
@@ -243,7 +248,7 @@
 
           <!-- AskUserQuestion (question card, not a tool card) -->
           <QuestionCard
-            v-if="msg.type === 'tool_call' && msg.tool === 'AskUserQuestion'"
+            v-else-if="msg.type === 'tool_call' && msg.tool === 'AskUserQuestion'"
             :message="msg"
           />
 
@@ -270,6 +275,10 @@
             :messages="subagentMessages[msg.tool] || []"
             :parent-title="sessionTitle || ''"
           />
+          <ToolCallGroup
+            v-else-if="toolGroupFor(msg)"
+            :messages="toolGroupFor(msg) || [msg]"
+          />
           <ToolCallCard
             v-else-if="msg.type === 'tool_call'"
             :message="msg"
@@ -290,6 +299,11 @@
           </div>
           <div v-else-if="msg.type === 'agent_compaction'" class="opencode-notice">
             {{ t(msg.auto ? 'session.opencode_compaction_auto' : 'session.opencode_compaction') }}<span v-if="msg.overflow"> · {{ t('session.opencode_compaction_overflow') }}</span>
+          </div>
+          <div v-else-if="msg.type === 'session_model_changed'" class="model-switch-notice" role="status">
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M12 1v6M12 17v6M4.22 4.22l4.24 4.24M15.54 15.54l4.24 4.24M1 12h6M17 12h6M4.22 19.78l4.24-4.24M15.54 8.46l4.24-4.24"/></svg>
+            <span>{{ t('session.model_changed') }}</span>
+            <code>{{ msg.content }}</code>
           </div>
 
           <!-- Command execution receipt -->
@@ -369,12 +383,15 @@
               <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 1 0 3-6.7L3 8"/><path d="M3 3v5h5"/></svg>
               <span>{{ t('common.retry') }}</span>
             </button>
+            <span v-if="completedTurnEndedAt" class="status-ended-at" :title="completedTurnEndedAt">
+              {{ t('session.ended_at', { time: formatDateTime(completedTurnEndedAt) }) }}
+            </span>
           </template>
         </div>
       </div>
 
       <!-- Chat Input — unified container with embedded controls -->
-      <div class="chat-input-area" :class="{ ended: !composerState.visible }">
+      <div ref="composerEl" class="chat-input-area" :class="{ ended: !composerState.visible, 'composer-focused': isInputFocused }">
         <!-- Scroll-to-bottom: absolute child of chat-input-area, floats above
              its top edge. Doesn't take up flex space in chat-messages. -->
         <Transition name="scroll-btn">
@@ -400,14 +417,14 @@
             <textarea
               v-model="messageInput"
               class="chat-textarea"
-              :style="{ height: textareaHeight + 'px' }"
+              :style="{ height: composerTextareaHeight + 'px' }"
               :placeholder="isPendingSession ? t('session.input_creating') : (isDaemonSession && isTerminalStatus ? t('session.input_resume') : t('session.input_send'))"
               @keydown="onInputKeydown"
-              @focus="isInputFocused = true"
-              @blur="isInputFocused = false"
+              @focus="handleComposerFocus"
+              @blur="handleComposerBlur"
               :disabled="!composerState.editable || isPendingSession"
               ref="inputEl"
-              rows="3"
+              :rows="isMobile ? 1 : 3"
             ></textarea>
 
             <!-- Bottom control row -->
@@ -446,7 +463,7 @@
                   @retry="requestSessionAgents"
                 />
                 <!-- Current model (resolved from session_meta) -->
-                <span v-if="currentModel" class="model-pill" :title="t('session.current_model')">
+                <span v-if="currentModel" class="model-pill" :title="t('session.current_model') + ': ' + currentModel">
                   <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M12 1v6M12 17v6M4.22 4.22l4.24 4.24M15.54 15.54l4.24 4.24M1 12h6M17 12h6M4.22 19.78l4.24-4.24M15.54 8.46l4.24-4.24"/></svg>
                   <span class="model-name">{{ currentModel }}</span>
                 </span>
@@ -487,12 +504,25 @@
           </div>
         </template>
         <div v-else-if="isSubagent || focusedSubAgentId" class="readonly-hint">{{ t('session.subagent_readonly') }}</div>
+        <div v-else-if="isUnmanagedReadOnlySession" class="unmanaged-readonly-notice" role="note">
+          <span class="unmanaged-readonly-icon" aria-hidden="true">
+            <svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="3"/><path d="m7 9 3 3-3 3M13 15h4"/></svg>
+          </span>
+          <span class="unmanaged-readonly-copy">
+            <span class="unmanaged-readonly-heading">
+              <strong>{{ t('session.unmanaged_readonly_title') }}</strong>
+              <small>{{ t('session.unmanaged_readonly_badge') }}</small>
+            </span>
+            <span class="unmanaged-readonly-description">{{ unmanagedReadOnlyDescription }}</span>
+          </span>
+          <span class="unmanaged-readonly-agent">{{ unmanagedReadOnlyAgent }}</span>
+        </div>
         <div v-else class="ended-text">{{ t('session.ended') }}</div>
       </div>
       </template><!-- /v-else hasNoSessions -->
     </div>
     <PlanSidePanel
-      v-if="currentPlan && planPanelOpen && !focusedSubAgentId"
+      v-if="currentPlan && planPanelOpen && !focusedSubAgentId && !isMobile"
       :plan="currentPlan"
       :connected="connected !== false"
       @close="closePlanPanel"
@@ -572,6 +602,7 @@ import MessageAgent from '../components/messages/MessageAgent.vue'
 import MessageError from '../components/messages/MessageError.vue'
 import { useLocale } from '../composables/useLocale'
 import ToolCallCard from '../components/messages/ToolCallCard.vue'
+import ToolCallGroup from '../components/messages/ToolCallGroup.vue'
 import QuestionCard from '../components/messages/QuestionCard.vue'
 import ApprovalCard from '../components/messages/ApprovalCard.vue'
 import { trustedApprovalActions } from '../utils/trustedApprovalActions'
@@ -589,7 +620,9 @@ import { isZcodeObserverSession as isZcodeObserverSessionHelper } from '../utils
 import { resolveAgentTarget } from './classifyByAgent'
 import { formatToolInput } from '../utils/toolDisplay'
 import { isDiffTool } from '../utils/diffRender'
+import { buildToolCallGrouping } from '../utils/toolGrouping'
 import { formatTokenCount } from '../utils/tokenFormat'
+import { agentDisplayName } from '../utils/agentDisplay'
 import { useSessionRename } from '../composables/useSessionRename'
 import type { CommandItem } from '../composables/useWebSocket'
 import { canControlOpenCodeInteractions, isManagedOpenCodeSession, normalizeSessionAgents, resolveInteractionRequest, sessionAgentSwitchDisabled, shouldShowSessionAgentPicker, upsertInteractionRequest, type SessionAgentOption } from '../types/opencode-interactions'
@@ -627,6 +660,9 @@ const currentPlan = planForSession(sessionId)
 const planPanelOpen = ref(localStorage.getItem('pocketctl_plan_panel_open') === 'true')
 const toolbarOverflowOpen = ref(false)
 const toolbarOverflowEl = ref<HTMLElement | null>(null)
+const agentFilterOpen = ref(false)
+const agentFilterEl = ref<HTMLElement | null>(null)
+const selectedAgentType = ref('all')
 const planCompleted = computed(() => currentPlan.value ? completedPlanItemCount(currentPlan.value) : 0)
 const planButtonLabel = computed(() => currentPlan.value
   ? t('plan.open', { completed: planCompleted.value, total: currentPlan.value.items.length })
@@ -637,6 +673,15 @@ function setPlanPanelOpen(open: boolean) {
   if (open) fileChangePanelOpen.value = false
 }
 function togglePlanPanel() { setPlanPanelOpen(!planPanelOpen.value) }
+function togglePlanFromOverflow() {
+  if (isMobile.value) {
+    setFileChangePanelOpen(false)
+    window.dispatchEvent(new CustomEvent('pocketctl:open-mobile-session-plan'))
+  } else {
+    togglePlanPanel()
+  }
+  toolbarOverflowOpen.value = false
+}
 function closePlanPanel() { setPlanPanelOpen(false) }
 const fileChangePanelOpen = ref(false)
 const fileChangeMessages = computed(() => messages.value.filter((message: any) => message.type === 'agent_file_change'))
@@ -649,10 +694,15 @@ function setFileChangePanelOpen(open: boolean) {
   if (open) setPlanPanelOpen(false)
 }
 function toggleFileChangePanel() { setFileChangePanelOpen(!fileChangePanelOpen.value) }
+function toggleFileChangeFromOverflow() {
+  toggleFileChangePanel()
+  toolbarOverflowOpen.value = false
+}
 function closeFileChangePanel() { setFileChangePanelOpen(false) }
 function onFileChangePanelKeydown(event: KeyboardEvent) {
   if (event.key === 'Escape' && fileChangePanelOpen.value) closeFileChangePanel()
   if (event.key === 'Escape' && toolbarOverflowOpen.value) toolbarOverflowOpen.value = false
+  if (event.key === 'Escape' && agentFilterOpen.value) agentFilterOpen.value = false
 }
 const mobileFileChange = ref<AgentFileChangeMessage | null>(null)
 const fileChangeOpener = ref<HTMLElement | null>(null)
@@ -789,6 +839,12 @@ const exitedAt = ref('')
 const autoScroll = ref(true)
 const copied = ref(false)
 const messagesEl = ref<HTMLDivElement | null>(null)
+const composerEl = ref<HTMLElement | null>(null)
+const composerHeight = ref(0)
+const composerFloatClearance = computed(() => Math.max(
+  isMobile.value ? 112 : 156,
+  composerHeight.value + 16,
+))
 const inputEl = ref<HTMLTextAreaElement | null>(null)
 const permDropdownEl = ref<HTMLElement | null>(null)
 const isInputFocused = ref(false)
@@ -796,7 +852,12 @@ const isInputFocused = ref(false)
 const DEFAULT_TEXTAREA_HEIGHT = 72  // ~3 rows
 const MIN_TEXTAREA_HEIGHT = 60
 const MAX_TEXTAREA_HEIGHT = 400
+const MOBILE_MIN_TEXTAREA_HEIGHT = 50
+const MOBILE_FOCUSED_MIN_TEXTAREA_HEIGHT = 46
+const MOBILE_MAX_TEXTAREA_HEIGHT = 112
 const textareaHeight = ref(DEFAULT_TEXTAREA_HEIGHT)
+const mobileTextareaHeight = ref(MOBILE_MIN_TEXTAREA_HEIGHT)
+const composerTextareaHeight = computed(() => isMobile.value ? mobileTextareaHeight.value : textareaHeight.value)
 const daemons = ref<Record<string, any>>({})
 
 function setDaemonConnectivity(daemonId: string, online: boolean, update: any = {}) {
@@ -832,10 +893,44 @@ const uniqueHosts = computed(() => {
   }
   return hosts
 })
-const visibleSessions = computed(() => {
+const hostScopedSessions = computed(() => {
   if (!selectedHostId.value) return allSessions.value
   return allSessions.value.filter((s: any) => s.daemon_id === selectedHostId.value)
 })
+function normalizedAgentType(session: any): string {
+  const raw = String(session?.agent_type || session?.agent || 'claude-code').toLowerCase()
+  return raw === 'claude' ? 'claude-code' : raw
+}
+const agentFilterOptions = computed(() => {
+  const counts = new Map<string, number>()
+  for (const session of hostScopedSessions.value) {
+    const agent = normalizedAgentType(session)
+    counts.set(agent, (counts.get(agent) || 0) + 1)
+  }
+  const order = ['codex', 'zcode', 'opencode', 'claude-code']
+  const agents = [...counts.keys()].sort((left, right) => {
+    const leftIndex = order.indexOf(left)
+    const rightIndex = order.indexOf(right)
+    if (leftIndex === -1 && rightIndex === -1) return left.localeCompare(right)
+    if (leftIndex === -1) return 1
+    if (rightIndex === -1) return -1
+    return leftIndex - rightIndex
+  })
+  return [
+    { value: 'all', label: t('session.agent_filter_all'), count: hostScopedSessions.value.length },
+    ...agents.map(value => ({ value, label: agentDisplayName(value), count: counts.get(value) || 0 })),
+  ]
+})
+const activeAgentFilter = computed(() => agentFilterOptions.value.find(option => option.value === selectedAgentType.value) || agentFilterOptions.value[0])
+const visibleSessions = computed(() => {
+  if (selectedAgentType.value === 'all') return hostScopedSessions.value
+  return hostScopedSessions.value.filter((session: any) => normalizedAgentType(session) === selectedAgentType.value)
+})
+const runningSessionCount = computed(() => hostScopedSessions.value.filter((session: any) => ['running', 'busy', 'retry'].includes(session.statusEffective || session.status)).length)
+function selectAgentFilter(agent: string) {
+  selectedAgentType.value = agent
+  agentFilterOpen.value = false
+}
 
 // subagent 折叠组：sidebar 会话列表展开/收起子代理
 const folded = ref<Record<string, boolean>>({})
@@ -848,12 +943,19 @@ watch(uniqueHosts, (hosts) => {
   }
 }, { immediate: true })
 
+watch(agentFilterOptions, (options) => {
+  if (!options.some(option => option.value === selectedAgentType.value)) selectedAgentType.value = 'all'
+})
+
 // When navigating directly to a session that belongs to a different host, follow it
 watch(() => sessionId.value, (sid) => {
   if (!sid || sid.startsWith('pending-')) return
   const s = allSessions.value.find((s: any) => s.session_id === sid)
   if (s?.daemon_id && s.daemon_id !== selectedHostId.value) {
     selectedHostId.value = s.daemon_id
+  }
+  if (s && selectedAgentType.value !== 'all' && normalizedAgentType(s) !== selectedAgentType.value) {
+    selectedAgentType.value = 'all'
   }
 })
 
@@ -951,6 +1053,13 @@ const focusedSubAgentTokenTotal = computed(() => {
 const renderMessages = computed(() =>
   focusedSubAgentId.value ? (subagentMessages.value[focusedSubAgentId.value] || []) : messages.value,
 )
+const toolGrouping = computed(() => buildToolCallGrouping(renderMessages.value))
+function toolGroupFor(message: any): any[] | undefined {
+  return toolGrouping.value.groups.get(message)
+}
+function isToolGroupContinuation(message: any): boolean {
+  return toolGrouping.value.continuations.has(message)
+}
 // Projection happens only after the established root/subagent bucket selection.
 // It is display-only; reducers and replay storage retain their original order.
 const turnSegmentIdentityRegistry = new TurnSegmentIdentityRegistry()
@@ -1041,6 +1150,20 @@ const composerState = computed(() => resolveSessionComposerState(
   canWriteWhenConnected.value,
   interactionConnectivity.value,
 ))
+const isUnmanagedReadOnlySession = computed(() => !!currentSession.value
+  && currentSession.value?.source !== 'daemon'
+  && !canWriteWhenConnected.value
+  && !isSubagent.value
+  && !focusedSubAgentId.value)
+const unmanagedReadOnlyAgent = computed(() => agentDisplayName(normalizedAgentType(currentSession.value)))
+const unmanagedReadOnlyDescription = computed(() => {
+  if (isLegacyOpenCodeSession.value) return t('session.opencode_legacy_readonly')
+  if (isZcodeObserverSession.value) return t('session.zcode_observer_readonly')
+  return t('session.unmanaged_readonly_description', { agent: unmanagedReadOnlyAgent.value })
+})
+const messageBottomClearance = computed(() => composerState.value.visible
+  ? composerFloatClearance.value
+  : (isUnmanagedReadOnlySession.value ? (isMobile.value ? 128 : 96) : 52))
 const canInput = computed(() => composerState.value.sendEnabled)
 // Agent is actively generating (send button → stop button)
 // Agent is actively working — includes 'waiting' (tool execution in progress),
@@ -1058,6 +1181,7 @@ const isExecuting = computed(() => status.value === 'running' || status.value ==
 const turnStartTime = ref<number | null>(null)   // 本轮开始时间戳
 const turnElapsed = ref(0)                        // 实时计时（秒）
 const lastTurnDuration = ref<number | null>(null) // 完成后的总耗时（秒）
+const lastTurnEndedAt = ref('')                    // 服务端确认的本轮结束时刻
 let turnTimer: ReturnType<typeof setInterval> | null = null
 let sessionSwitching = false                        // true while switching sessions (suppress timer)
 let resumeStartAt: number | null = null           // turn start recovered from replay (ms epoch)
@@ -1068,6 +1192,7 @@ function startTurnTimer(startAt?: number) {
   // session switch; default (now) for a fresh turn triggered by sendMessage.
   turnStartTime.value = startAt ?? Date.now()
   lastTurnDuration.value = null
+  lastTurnEndedAt.value = ''
   turnElapsed.value = Math.floor((Date.now() - turnStartTime.value) / 1000)
   turnTimer = setInterval(() => {
     if (turnStartTime.value) {
@@ -1118,6 +1243,11 @@ const completedBarVisible = computed(() => {
   if (isExecuting.value || lastTurnDuration.value !== null) return false
   return ['idle', 'completed', 'exited', 'error', 'killed'].includes(status.value) && hasLastAgentReply.value
 })
+// A reload has no in-memory transition to populate lastTurnEndedAt. In that
+// case the materialized session activity time is the persisted end timestamp.
+const completedTurnEndedAt = computed(() => lastTurnEndedAt.value || (
+  completedBarVisible.value ? currentSession.value?.last_activity_at || '' : ''
+))
 
 function fmtTokens(n: number): string {
   return formatTokenCount(n)
@@ -1129,6 +1259,13 @@ function fmtDuration(sec: number): string {
   const m = Math.floor((sec % 3600) / 60)
   const s = sec % 60
   return h > 0 ? `${h}h ${m}m ${s}s` : `${m}m ${s}s`
+}
+
+function formatDateTime(ts: string): string {
+  const date = new Date(ts)
+  if (Number.isNaN(date.getTime())) return '—'
+  const pad = (value: number) => value.toString().padStart(2, '0')
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`
 }
 
 // Copy the last agent_text reply (already clean Markdown source) to clipboard.
@@ -1176,6 +1313,13 @@ const daemonName = computed(() => {
   }
   const s = allSessions.value.find((s: any) => s.session_id === sessionId.value)
   return s?.daemon_alias || s?.hostname || s?.daemon_id?.slice(0, 8) || t('session.unknown_host')
+})
+
+const toolbarContextParts = computed(() => {
+  const parts = [currentSessionAgent.value ? agentDisplayName(normalizedAgentType(currentSession.value)) : '', daemonName.value]
+  if (!focusedSubAgentId.value && currentModel.value) parts.push(currentModel.value)
+  if (!focusedSubAgentId.value && effortVisible.value && effortLabel.value) parts.push(effortLabel.value)
+  return parts.filter(Boolean)
 })
 
 const sessionTitle = computed(() => {
@@ -1332,6 +1476,28 @@ function scrollToBottom() {
   if (messagesEl.value) { messagesEl.value.scrollTop = messagesEl.value.scrollHeight; autoScroll.value = true }
 }
 
+let composerResizeObserver: ResizeObserver | null = null
+function setComposerHeight(height: number) {
+  const nextHeight = Math.max(0, Math.ceil(height))
+  if (nextHeight === composerHeight.value) return
+  composerHeight.value = nextHeight
+  if (autoScroll.value) nextTick(scrollToBottom)
+}
+
+// The composer overlays the message stream. Measure its live height so a
+// manually resized textarea never covers the final message.
+watch(composerEl, (element) => {
+  composerResizeObserver?.disconnect()
+  composerResizeObserver = null
+  composerHeight.value = 0
+  if (!element || typeof ResizeObserver === 'undefined') return
+  composerResizeObserver = new ResizeObserver((entries) => {
+    setComposerHeight(entries[0]?.contentRect.height ?? element.getBoundingClientRect().height)
+  })
+  composerResizeObserver.observe(element)
+  setComposerHeight(element.getBoundingClientRect().height)
+}, { flush: 'post' })
+
 let sessionAgentListTimer: ReturnType<typeof setTimeout> | null = null
 let sessionAgentSwitchTimer: ReturnType<typeof setTimeout> | null = null
 function requestSessionAgents() {
@@ -1420,8 +1586,16 @@ function loadHistory() {
   } else {
     send({ type: 'replay', session_id: sessionId.value, direction: 'backward', limit: pageSize.value, req_id: replayReqId.value })
     send({ type: 'list_commands', session_id: sessionId.value })
-    send({ type: 'get_session_meta', session_id: sessionId.value })
+    requestSessionMeta()
   }
+}
+
+function requestSessionMeta() {
+  send({
+    type: 'get_session_meta',
+    session_id: sessionId.value,
+    request_id: `session-meta-${crypto.randomUUID()}`,
+  })
 }
 
 function onMessagesScroll() {
@@ -1459,7 +1633,7 @@ function requestPermission(value: string) {
   permissionTimer = setTimeout(() => {
     pendingPermission.value = undefined
     permissionError.value = t('session.permission.failed')
-    send({ type: 'get_session_meta', session_id: sessionId.value })
+    requestSessionMeta()
   }, 10000)
 }
 
@@ -1976,7 +2150,39 @@ const showPopover = computed(() => !popoverDismissed.value && filteredCommands.v
 watch(messageInput, () => {
   selectedIndex.value = 0
   popoverDismissed.value = false
+  if (isMobile.value) nextTick(resizeMobileComposerTextarea)
 })
+
+watch(isMobile, (mobile) => {
+  if (mobile) nextTick(resizeMobileComposerTextarea)
+})
+
+function resizeMobileComposerTextarea() {
+  const element = inputEl.value
+  if (!isMobile.value || !element) return
+  element.style.height = 'auto'
+  const minimumHeight = isInputFocused.value
+    ? MOBILE_FOCUSED_MIN_TEXTAREA_HEIGHT
+    : MOBILE_MIN_TEXTAREA_HEIGHT
+  const nextHeight = Math.min(
+    MOBILE_MAX_TEXTAREA_HEIGHT,
+    Math.max(minimumHeight, element.scrollHeight),
+  )
+  mobileTextareaHeight.value = nextHeight
+  // Keep the DOM constrained even when Vue sees the same numeric value and
+  // therefore skips patching the inline height after the temporary `auto`.
+  element.style.height = `${nextHeight}px`
+}
+
+function handleComposerFocus() {
+  isInputFocused.value = true
+  nextTick(resizeMobileComposerTextarea)
+}
+
+function handleComposerBlur() {
+  isInputFocused.value = false
+  nextTick(resizeMobileComposerTextarea)
+}
 
 // --- Textarea resize via drag handle ---
 function startResize(e: MouseEvent) {
@@ -2136,7 +2342,16 @@ function processEvent(evt: any, target: any[] = messages.value, subagentOverride
   }
   // P2: route sub-agent events to per-agent buckets; parent events keep default target
   target = resolveAgentTarget(evt, interactionBuckets, target)
-  if (type === 'user_text') {
+  if (type === 'session_model_changed') {
+    const model = evt.model || evt.payload?.model || ''
+    if (!model) return
+    if (evt.session_id === sessionId.value) currentModel.value = model
+    if ((evt.reason || evt.payload?.reason) === 'initial_model') return
+    const eventId = evt.event_id || evt.payload?.event_id
+    if (eventId && target.some((message: any) => message.type === type && message.eventId === eventId)) return
+    if (!eventId && isDuplicate(type, model, target)) return
+    target.push({ id: nextId('model'), type, role: 'agent', content: model, eventId, ...eventWithTurnMetadata(evt) })
+  } else if (type === 'user_text') {
     const text = evt.text || evt.content || evt.payload?.text || evt.payload?.content || ''
     if (!text) return
     if (isDuplicate('user_text', text, target)) {
@@ -2643,7 +2858,8 @@ watch(loadKey, (newKey, oldKey) => {
     exitReason.value = ''
     exitedAt.value = ''
     commandsCache.value = []
-    currentModel.value = '' // clear; refilled by get_session_meta below
+    const nextSession = allSessions.value.find((item: any) => item.session_id === sessionId.value)
+    currentModel.value = nextSession?.model || '' // immediate persisted fallback; refreshed by get_session_meta below
     currentEffort.value = '' // clear; refilled by authoritative get_session_meta
     interactionCapabilities.value = []
     sessionAgents.value = []
@@ -2681,6 +2897,10 @@ onMounted(() => {
     if (cur && interactionCapabilities.value.length === 0 && Array.isArray(cur.capabilities)) {
       interactionCapabilities.value = cur.capabilities
     }
+    // The relay persists the model with the session. Use it immediately as a
+    // fallback while the daemon's authoritative get_session_meta response is
+    // still in flight (or unavailable for an offline terminal session).
+    if (cur?.model && !currentModel.value) currentModel.value = cur.model
     if (cur?.active_agent && !currentOpenCodeAgent.value) currentOpenCodeAgent.value = cur.active_agent
     if (cur?.children) {
       for (const c of cur.children) {
@@ -2799,6 +3019,7 @@ onMounted(() => {
   cleanups.push(onEvent('session_model_changed', (msg: any) => {
     if (msg.session_id !== sessionId.value) return
     if (msg.model) currentModel.value = msg.model
+    processImmediateLiveEvent(msg, { scroll: true })
   }))
 
   cleanups.push(onEvent('replay_batch', (msg: any) => {
@@ -3057,13 +3278,16 @@ onMounted(() => {
     // reads meta.statusEffective/status from allSessions, so a stale mount-time
     // snapshot would leave a just-finished session looking "running" after a
     // switch (timer stuck/from zero). Update it on every status event.
+    const lastActivityAt = msg.last_activity_at || msg.payload?.last_activity_at || new Date().toISOString()
     if (ls) {
       ls.status = msg.status
       ls.statusEffective = msg.status
-      ls.last_activity_at = new Date().toISOString()
+      ls.last_activity_at = lastActivityAt
     }
     if (msg.session_id === sessionId.value) {
+      const wasExecuting = isExecuting.value
       status.value = msg.status
+      if (wasExecuting && !isExecuting.value) lastTurnEndedAt.value = lastActivityAt
       reconcileVisibleUnresolvedTools(msg.status)
       if (msg.exit_reason) exitReason.value = msg.exit_reason
       if (msg.exited_at) exitedAt.value = msg.exited_at
@@ -3115,7 +3339,7 @@ onMounted(() => {
       pendingPermission.value = undefined
       if (permissionTimer) { clearTimeout(permissionTimer); permissionTimer = null }
       permissionError.value = msg.error || t('session.permission.failed')
-      send({ type: 'get_session_meta', session_id: sessionId.value })
+      requestSessionMeta()
       return
     }
     // 带可区分 code 的错误(来自 relay 路由层):停止操作的失败显示为按钮旁的
@@ -3164,6 +3388,8 @@ function onPinned(sessionId: string, pinned: boolean) {
 }
 
 onUnmounted(() => {
+  composerResizeObserver?.disconnect()
+  composerResizeObserver = null
   for (const fn of cleanups) fn()
   cleanups.length = 0
   liveContentBatcher.dispose()
@@ -3190,6 +3416,9 @@ function closePermMenu(e: MouseEvent) {
   if (toolbarOverflowEl.value && !toolbarOverflowEl.value.contains(e.target as Node)) {
     toolbarOverflowOpen.value = false
   }
+  if (agentFilterEl.value && !agentFilterEl.value.contains(e.target as Node)) {
+    agentFilterOpen.value = false
+  }
 }
 onMounted(() => {
   document.addEventListener('click', closePermMenu)
@@ -3201,16 +3430,33 @@ onMounted(() => {
 .session-layout { position: relative; display: flex; flex: 1; width: 100%; min-width: 0; height: calc(100dvh - var(--topbar-h)); overflow: hidden; }
 
 /* Session Panel */
-.session-panel { width: 300px; background: var(--sidebar-bg); border-right: 1px solid var(--sidebar-border); display: flex; flex-direction: column; flex-shrink: 0; transition: background var(--transition), border-color var(--transition); }
-.session-panel-header { padding: 16px; border-bottom: 1px solid var(--sidebar-border); display: flex; align-items: center; justify-content: space-between; }
-.session-panel-header h3 { font-size: 14px; font-weight: 600; color: var(--fg); }
-.host-tabs { display: flex; gap: 4px; padding: 6px 8px; overflow-x: auto; scrollbar-width: none; border-bottom: 1px solid var(--sidebar-border); }
-.host-tabs::-webkit-scrollbar { display: none; }
-.host-tab { display: flex; align-items: center; gap: 5px; padding: 4px 10px; border-radius: var(--radius-full); border: 1px solid var(--sidebar-border); background: none; color: var(--fg-secondary); font-size: 12px; font-weight: 500; cursor: pointer; white-space: nowrap; transition: background 0.15s, border-color 0.15s, color 0.15s; flex-shrink: 0; }
-.host-tab:hover { background: var(--surface-hover); color: var(--fg); }
-.host-tab.active { background: var(--accent-muted); border-color: var(--accent); color: var(--accent); }
-.host-tab .host-tab-name { max-width: 100px; overflow: hidden; text-overflow: ellipsis; }
-.session-list { flex: 1; overflow-y: auto; padding: 8px; }
+.session-panel { width: 282px; background: var(--bg-secondary); border-right: 1px solid var(--sidebar-border); display: flex; flex-direction: column; flex-shrink: 0; transition: background var(--transition), border-color var(--transition); }
+.session-panel-header { min-height: 66px; padding: 10px 14px 10px 16px; border-bottom: 1px solid var(--sidebar-border); display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.session-panel-heading-copy { min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.session-panel-header h3 { min-width: 0; overflow: hidden; color: var(--fg); font-size: 13px; font-weight: 650; line-height: 18px; text-overflow: ellipsis; white-space: nowrap; }
+.session-panel-heading-copy > span { overflow: hidden; color: var(--fg-tertiary); font: 10px/14px var(--font-mono); text-overflow: ellipsis; white-space: nowrap; }
+.session-new-button { width: 32px; height: 32px; flex: 0 0 auto; border-color: var(--border); background: var(--surface); color: var(--accent); box-shadow: none; }
+.session-new-button:hover { border-color: var(--border-light); background: var(--surface-hover); color: var(--accent-hover); }
+.agent-filter-popover { position: relative; padding: 8px 10px; border-bottom: 1px solid var(--sidebar-border); }
+.agent-filter-trigger { width: 100%; min-width: 0; height: 34px; display: grid; grid-template-columns: 18px minmax(0, 1fr) 18px; align-items: center; gap: 8px; padding: 0 10px; overflow: hidden; border: 1px solid var(--border); border-radius: var(--radius-md); color: var(--fg-secondary); background: var(--surface); cursor: pointer; transition: color .15s, border-color .15s, background .15s; }
+.agent-filter-trigger:hover, .agent-filter-trigger[aria-expanded="true"] { border-color: var(--border-light); color: var(--fg); background: var(--surface-hover); }
+.agent-filter-trigger:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.agent-filter-trigger > svg { width: 15px; height: 15px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+.agent-filter-chevron { justify-self: end; transition: transform .15s ease; }
+.agent-filter-trigger[aria-expanded="true"] .agent-filter-chevron { transform: rotate(180deg); }
+.agent-filter-trigger-label { min-width: 0; overflow: hidden; font-size: 11.5px; font-weight: 600; line-height: 1; text-align: center; text-overflow: ellipsis; white-space: nowrap; }
+.agent-filter-menu { position: absolute; z-index: 60; top: calc(100% - 3px); right: 10px; left: 10px; display: flex; flex-direction: column; gap: 2px; padding: 5px; border: 1px solid var(--border); border-radius: var(--radius-lg); background: var(--surface); box-shadow: var(--shadow-lg); }
+.agent-filter-option { width: 100%; min-width: 0; min-height: 34px; display: grid; grid-template-columns: 16px minmax(0, 1fr) auto; align-items: center; gap: 8px; padding: 6px 8px; overflow: hidden; border: 0; border-radius: var(--radius-sm); color: var(--fg-secondary); background: transparent; font: 12px/1.2 var(--font-body); text-align: left; cursor: pointer; }
+.agent-filter-option:hover, .agent-filter-option:focus-visible { color: var(--fg); background: var(--surface-hover); outline: none; }
+.agent-filter-option[aria-checked="true"] { color: var(--fg); background: var(--accent-muted); }
+.agent-filter-check { width: 14px; height: 14px; opacity: 0; fill: none; stroke: var(--accent); stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+.agent-filter-option[aria-checked="true"] .agent-filter-check { opacity: 1; }
+.agent-filter-option-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.agent-filter-count { min-width: 20px; color: var(--fg-tertiary); font: 10.5px/1 var(--font-mono); text-align: right; }
+.session-panel-presence { display: flex; align-items: center; gap: 7px; min-height: 30px; padding: 7px 14px 5px; }
+.session-panel-presence .status-dot { width: 6px; height: 6px; flex: 0 0 auto; }
+.session-panel-presence-copy { min-width: 0; overflow: hidden; color: var(--fg-tertiary); font-size: 11px; line-height: 16px; text-overflow: ellipsis; white-space: nowrap; }
+.session-list { flex: 1; overflow-y: auto; padding: 6px 8px 16px; scrollbar-gutter: stable; }
 .sl-fold { cursor: pointer; font-size: 12px; color: var(--fg-tertiary); user-select: none; line-height: 1; flex-shrink: 0; width: 12px; text-align: center; transition: color 0.15s; }
 .sl-fold:hover { color: var(--fg); }
 .sl-children { padding: 2px 0 6px 26px; display: flex; flex-direction: column; gap: 2px; }
@@ -3219,23 +3465,23 @@ onMounted(() => {
 .sl-child.active { background: var(--accent-bg, rgba(99,102,241,0.12)); color: var(--accent); }
 .sl-child-indent { color: var(--fg-tertiary); flex-shrink: 0; }
 .sl-child-title { color: var(--fg); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.session-list-item { display: flex; align-items: center; gap: 10px; padding: 10px 12px; border-radius: var(--radius-md); cursor: pointer; transition: background 0.1s, opacity 0.25s ease; margin-bottom: 2px; }
-.session-list-item:hover { background: var(--surface-hover); }
+.session-list-item { display: flex; align-items: center; gap: 9px; min-height: 54px; padding: 8px 9px; border: 1px solid transparent; border-radius: var(--radius-md); cursor: pointer; transition: background 0.15s, border-color 0.15s, opacity 0.25s ease, transform .15s ease; margin-bottom: 3px; }
+.session-list-item:hover { border-color: var(--border); background: var(--surface-hover); }
 .session-list-item.pending-delete { opacity: 0.35; pointer-events: none; }
-.session-list-item.active { background: var(--sidebar-active); }
+.session-list-item.active { border-color: color-mix(in srgb, var(--accent) 28%, transparent); background: var(--sidebar-active); box-shadow: inset 2px 0 0 var(--accent); }
 .session-list-item .sl-info { flex: 1; min-width: 0; }
-.session-list-item .sl-title { font-size: 13px; font-weight: 500; color: var(--fg); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.session-list-item .sl-title { overflow: hidden; color: var(--fg); font-size: 13px; font-weight: 600; line-height: 18px; text-overflow: ellipsis; white-space: nowrap; }
 .session-list-item .pin-icon { color: var(--accent); flex-shrink: 0; vertical-align: middle; }
 .session-list-item .ss-rename-input { background: var(--bg); border: 1px solid var(--accent); border-radius: var(--radius-sm); box-shadow: 0 0 0 3px var(--accent-muted); color: var(--fg); font-family: var(--font-body); font-size: 13px; font-weight: 500; padding: 3px 6px; outline: none; width: 100%; }
 .session-list-item .sl-title.mono { font-family: var(--font-mono); font-size: 12px; color: var(--accent); }
-.session-list-item .sl-meta { display: flex; align-items: center; gap: 6px; font-size: 11px; color: var(--fg-tertiary); margin-top: 2px; min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.session-list-item .sl-meta { display: flex; align-items: center; gap: 6px; min-width: 0; margin-top: 3px; overflow: hidden; color: var(--fg-tertiary); font-size: 11px; line-height: 15px; text-overflow: ellipsis; white-space: nowrap; }
 .session-list-item .sl-meta .agent-badge { flex-shrink: 0; }
 
 /* Chat Area */
-.chat-area { flex: 1; display: flex; flex-direction: column; position: relative; min-width: 0; max-width: 100%; overflow: hidden; background: var(--bg); transition: background var(--transition); }
+.chat-area { --composer-float-clearance: 156px; --session-content-gutter: max(20px, calc(50% - 460px)); flex: 1; display: flex; flex-direction: column; position: relative; min-width: 0; max-width: 100%; overflow: hidden; background: var(--bg); transition: background var(--transition); }
 
 /* Toolbar: identity is allowed to shrink; actions always retain a stable lane. */
-.chat-toolbar { min-height: 60px; border-bottom: 1px solid var(--border); display: flex; align-items: center; padding: 7px 20px; gap: 16px; background: var(--surface); transition: background var(--transition), border-color var(--transition); }
+.chat-toolbar { min-height: 62px; border-bottom: 1px solid var(--border); display: flex; align-items: center; padding: 7px 58px 7px 18px; gap: 16px; background: color-mix(in srgb, var(--topbar-bg) 92%, transparent); backdrop-filter: blur(16px); -webkit-backdrop-filter: blur(16px); transition: background var(--transition), border-color var(--transition); }
 .session-toolbar-identity { flex: 1 1 auto; min-width: 120px; display: flex; align-items: center; gap: 10px; }
 .session-toolbar-back { width: 34px; height: 34px; flex: 0 0 auto; display: grid; place-items: center; border: 1px solid transparent; border-radius: var(--radius-md); color: var(--fg-secondary); background: transparent; cursor: pointer; }
 .session-toolbar-back:hover { color: var(--fg); border-color: var(--border); background: var(--surface-hover); }
@@ -3243,9 +3489,11 @@ onMounted(() => {
 .session-toolbar-back svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
 .session-toolbar-titles { min-width: 0; display: flex; flex: 1; flex-direction: column; gap: 2px; }
 .session-toolbar-title, .session-toolbar-host { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.session-toolbar-title { color: var(--fg); font-size: 14px; font-weight: 650; line-height: 18px; }
-.session-toolbar-host { color: var(--fg-tertiary); font: 11px/14px var(--font-mono); }
-.session-toolbar-actions { flex: 0 0 auto; display: flex; align-items: center; gap: 6px; }
+.session-toolbar-title { color: var(--fg); font-size: 14px; font-weight: 650; line-height: 19px; letter-spacing: -0.01em; }
+.session-toolbar-host { display: flex; align-items: center; gap: 6px; color: var(--fg-tertiary); font: 10.5px/14px var(--font-mono); }
+.session-toolbar-host i { width: 3px; height: 3px; flex: 0 0 auto; border-radius: 50%; background: currentColor; opacity: .7; }
+.session-toolbar-host span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.session-toolbar-actions { flex: 0 0 auto; display: flex; align-items: center; gap: 7px; }
 .session-toolbar-actions > .context-pill,
 .session-toolbar-actions > .model-pill,
 .session-toolbar-actions > .effort-pill { display: none; }
@@ -3276,39 +3524,50 @@ onMounted(() => {
 .model-pill { display: inline-flex; align-items: center; gap: 5px; padding: 4px 10px; border-radius: var(--radius-full); font-size: 12px; font-weight: 600; background: var(--accent-muted); color: var(--accent); max-width: 180px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .effort-pill { display: inline-flex; align-items: center; gap: 5px; padding: 4px 10px; border-radius: var(--radius-full); font-size: 12px; font-weight: 600; background: var(--warning-bg); color: var(--warning); white-space: nowrap; }
 
-.session-id-box { display: flex; align-items: center; gap: 6px; padding: 3px 8px; background: var(--bg); border: 1px solid var(--border); border-radius: var(--radius-md); }
+.session-id-box { min-height: 32px; display: flex; align-items: center; gap: 6px; padding: 3px 5px 3px 9px; background: transparent; border: 1px solid var(--border); border-radius: var(--radius-md); }
 .session-id-text { font-family: var(--font-mono); font-size: 12px; color: var(--fg-secondary); }
 .copy-btn { display: flex; align-items: center; justify-content: center; width: 22px; height: 22px; background: none; border: none; color: var(--fg-tertiary); cursor: pointer; border-radius: 4px; padding: 0; transition: color 0.15s, background 0.15s; }
 .copy-btn:hover { color: var(--accent); background: var(--accent-muted); }
-.toolbar-overflow { position: relative; flex: 0 0 auto; }
+.toolbar-overflow { position: absolute; z-index: 55; top: 15px; right: 18px; flex: 0 0 auto; }
 .toolbar-more-btn { width: 32px; height: 32px; display: grid; place-items: center; border: 1px solid var(--border); border-radius: var(--radius-md); color: var(--fg-secondary); background: transparent; cursor: pointer; }
 .toolbar-more-btn:hover, .toolbar-more-btn[aria-expanded="true"] { color: var(--fg); border-color: var(--accent); background: var(--accent-muted); }
 .toolbar-more-btn svg { width: 17px; height: 17px; fill: currentColor; }
-.toolbar-overflow-menu { position: absolute; z-index: 55; top: calc(100% + 8px); right: 0; width: min(280px, calc(100vw - 32px)); display: flex; flex-direction: column; gap: 4px; padding: 6px; border: 1px solid var(--border); border-radius: var(--radius-lg); box-shadow: var(--shadow-lg); background: var(--surface); }
-.toolbar-overflow-metrics { display: flex; flex-wrap: wrap; gap: 5px; padding: 4px; border-bottom: 1px solid var(--border); }
+.toolbar-overflow-menu { position: absolute; z-index: 55; top: calc(100% + 8px); right: 0; width: 248px; display: block; padding: 6px; border: 1px solid var(--border); border-radius: var(--radius-lg); background: var(--surface); box-shadow: var(--shadow-lg); animation: menu-in .14s ease-out; }
+.toolbar-overflow-metrics { display: flex; flex-wrap: wrap; gap: 5px; padding: 5px 5px 9px; border-bottom: 1px solid var(--border); }
 .toolbar-overflow-metrics:empty { display: none; }
-.toolbar-overflow-item { min-height: 34px; display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 7px 9px; border: 0; border-radius: var(--radius-sm); color: var(--fg-secondary); background: transparent; font: 13px/1.2 var(--font-body); text-align: left; cursor: pointer; }
+.toolbar-overflow-metric { max-width: 100%; overflow: hidden; padding: 4px 7px; border-radius: var(--radius-full); color: var(--fg-secondary); background: var(--surface-active); font: 10px/1 var(--font-mono); text-overflow: ellipsis; white-space: nowrap; }
+.toolbar-overflow-item { width: 100%; display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 8px 9px; border: 0; border-radius: var(--radius-sm); color: var(--fg-secondary); background: transparent; font: 12px/1.5 var(--font-body); text-align: left; cursor: pointer; }
 .toolbar-overflow-item:hover { color: var(--fg); background: var(--surface-hover); }
-.toolbar-overflow-item code { color: var(--fg-tertiary); font: 11px/1 var(--font-mono); }
+.toolbar-overflow-item code { color: var(--fg-tertiary); font: 10px/1 var(--font-mono); }
+.toolbar-overflow-action { width: 100%; font: 12px/1.5 var(--font-body); }
+.toolbar-overflow-action.active { color: var(--accent); background: var(--accent-muted); }
+.toolbar-overflow-action.complete { color: var(--success); }
+.toolbar-overflow-item-label { min-width: 0; display: inline-flex; align-items: center; gap: 8px; overflow: hidden; }
+.toolbar-overflow-item-label > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.toolbar-overflow-item-label svg { width: 15px; height: 15px; flex: 0 0 auto; fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; }
+.toolbar-overflow-separator { height: 1px; margin: 5px 4px; background: var(--border); }
+@keyframes menu-in { from { opacity: 0; transform: translateY(-4px); } to { opacity: 1; transform: translateY(0); } }
 
 /* Messages */
-.chat-messages { flex: 1; min-height: 0; width: 100%; overflow-y: auto; overflow-x: hidden; padding: 20px; display: flex; flex-direction: column; align-items: stretch; gap: 16px; position: relative; overflow-anchor: none; }
+.chat-messages { flex: 1; min-height: 0; width: 100%; overflow-y: auto; overflow-x: hidden; padding: 24px var(--session-content-gutter) calc(24px + var(--composer-float-clearance)); display: flex; flex-direction: column; align-items: stretch; gap: 14px; position: relative; overflow-anchor: none; scrollbar-gutter: stable; background: var(--bg); }
 /* min-width:0 lets long content (code/URLs) wrap instead of overflowing
    horizontally. max-width + center keeps lines readable on wide screens.
    User bubbles are excluded (they use fit-content + right align). */
-/* Agent text: adaptive width — short replies stay narrow, long content grows to 720px.
+/* Agent text: adaptive width — short replies stay narrow, long content grows to 760px.
    Left-aligned (natural document flow), unlike centered tool cards. */
-.chat-messages > .agent-block { min-width: 0; max-width: 720px; width: fit-content; align-self: flex-start; }
-/* Errors / banners: full width within 820px, centered. (tool-wrap + receipt-card excluded — left-aligned) */
-.chat-messages > *:not(.msg):not(.agent-block):not(.tool-wrap):not(.receipt-card):not(.turn-status-bar) { min-width: 0; max-width: 820px; width: 100%; align-self: center; }
+.chat-messages > .agent-block { min-width: 0; max-width: 760px; width: fit-content; align-self: flex-start; }
+/* Errors / banners: full width within 860px, centered. (tool-wrap + receipt-card excluded — left-aligned) */
+.chat-messages > *:not(.msg):not(.agent-block):not(.tool-wrap):not(.tool-call-group):not(.receipt-card):not(.turn-status-bar) { min-width: 0; max-width: 860px; width: 100%; align-self: center; }
 /* Tool cards: left-aligned, not centered. */
-.chat-messages > .tool-wrap { min-width: 0; max-width: 820px; width: 100%; align-self: flex-start; }
-.chat-messages > *.msg { min-width: 0; max-width: 85%; }
-.turn-group-header { display: flex; align-items: center; gap: 8px; min-width: 0; max-width: 820px; width: 100%; align-self: center; padding: 7px 10px; border: 1px solid var(--border); border-radius: var(--radius-md); color: var(--fg-secondary); background: var(--surface); font: 600 11px/1 var(--font-mono); }
+.chat-messages > .tool-wrap, .chat-messages > .tool-call-group { min-width: 0; max-width: 860px; width: 100%; align-self: flex-start; }
+.chat-messages > *.msg { min-width: 0; max-width: 78%; }
+.chat-messages > .banner { margin-bottom: 0; }
+.chat-messages > .messages-bottom-spacer { width: 100%; max-width: none; min-height: 0; flex: 1 0 0; }
+.turn-group-header { display: flex; align-items: center; gap: 8px; min-width: 0; max-width: 860px; width: 100%; align-self: center; padding: 9px 2px 2px; border: 0; border-top: 1px solid var(--border); border-radius: 0; color: var(--fg-secondary); background: transparent; font: 600 11px/1 var(--font-mono); }
 .turn-group-label { color: var(--fg-tertiary); text-transform: uppercase; letter-spacing: .04em; }
 .turn-group-state { color: var(--warning); }
 .turn-group-continuation { color: var(--accent); }
-.turn-group-aux-toggle { margin-left: auto; padding: 3px 6px; border: 0; border-radius: 4px; color: var(--fg-secondary); background: var(--surface-hover); font: inherit; cursor: pointer; }
+.turn-group-aux-toggle { margin-left: auto; padding: 4px 7px; border: 1px solid var(--border); border-radius: var(--radius-sm); color: var(--fg-secondary); background: transparent; font: inherit; cursor: pointer; }
 .turn-group-aux-toggle:hover { color: var(--fg); }
 .turn-unknown-event { min-width: 0; max-width: 820px; width: 100%; align-self: center; padding: 10px 12px; border-left: 3px solid var(--warning); color: var(--fg-secondary); background: var(--surface); font: 12px/1.45 var(--font-mono); }
 .request-deep-link-target { animation: request-deep-link-highlight 1.8s ease-out; }
@@ -3333,7 +3592,7 @@ onMounted(() => {
    when content is already scrolled to the bottom (autoScroll === true). */
 /* Scroll-to-bottom: absolute child of chat-input-area, pinned above its top
    edge. Takes zero flex space — doesn't shrink chat-messages. */
-.scroll-to-bottom { position: absolute; top: -40px; left: 50%; transform: translateX(-50%); width: 32px; height: 32px; border-radius: 50%; border: 1px solid var(--border); background: var(--surface); color: var(--fg-secondary); cursor: pointer; display: flex; align-items: center; justify-content: center; box-shadow: 0 2px 10px rgba(0,0,0,0.3); transition: background 0.15s, color 0.15s; z-index: 50; }
+.scroll-to-bottom { position: absolute; top: -40px; left: 50%; transform: translateX(-50%); width: 32px; height: 32px; border-radius: 50%; border: 1px solid var(--border); background: var(--surface); color: var(--fg-secondary); cursor: pointer; display: flex; align-items: center; justify-content: center; box-shadow: 0 2px 10px rgba(0,0,0,0.3); transition: background 0.15s, color 0.15s; z-index: 50; pointer-events: auto; }
 .scroll-to-bottom:hover { background: var(--surface-hover); color: var(--fg); }
 .scroll-btn-enter-active, .scroll-btn-leave-active { transition: opacity 0.25s ease; }
 .scroll-btn-enter-from, .scroll-btn-leave-to { opacity: 0; }
@@ -3344,7 +3603,7 @@ onMounted(() => {
    of this view, not reusable message rendering. */
 
 /* Timeline */
-.timeline { display: flex; align-items: center; justify-content: space-between; padding: 12px 20px; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-md); margin-bottom: 4px; flex-shrink: 0; }
+.timeline { display: flex; align-items: center; justify-content: space-between; padding: 12px 18px; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-lg); margin-bottom: 2px; flex-shrink: 0; }
 .timeline .milestone { display: flex; flex-direction: column; align-items: center; gap: 4px; }
 .timeline .milestone .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--border); }
 .timeline .milestone .dot.active { background: var(--success); }
@@ -3355,20 +3614,27 @@ onMounted(() => {
 .timeline .line { flex: 1; height: 1px; background: var(--border); margin: 0 12px; align-self: flex-start; margin-top: 4px; }
 .timeline .line.done { background: var(--success); }
 
-/* Chat Input — unified container.
-   flex-shrink:0 is essential: as the textarea grows (drag-resize), the input
-   area must expand to fit it so that .chat-messages (flex:1) shrinks in
-   tandem. Without it the flex column can compress the input area, letting the
-   textarea/controls overflow under the messages region. */
-.chat-input-area { position: relative; flex-shrink: 0; border-top: 1px solid var(--border); padding: 12px 20px; background: var(--surface); transition: background var(--transition), border-color var(--transition); }
-.chat-input-area.ended { display: flex; align-items: center; justify-content: center; padding: 14px 20px; }
+/* Floating composer: sits on the session surface without reserving a separate
+   footer. The message list owns matching bottom clearance so its final row can
+   still scroll above the composer. */
+.chat-input-area { position: absolute; z-index: 4; right: 0; bottom: 0; left: 0; padding: 0 var(--session-content-gutter) 20px; background: transparent; pointer-events: none; }
+.chat-input-area.ended { display: flex; align-items: center; justify-content: center; padding: 0 var(--session-content-gutter) 20px; }
 .ended-text { color: var(--fg-tertiary); font-size: 13px; }
 .readonly-hint { color: var(--fg-tertiary); font-size: 13px; font-style: italic; }
+.unmanaged-readonly-notice { width: min(760px, 100%); display: grid; grid-template-columns: 38px minmax(0, 1fr) auto; align-items: center; gap: 12px; padding: 11px 12px; border: 1px solid color-mix(in srgb, var(--accent) 22%, var(--border)); border-radius: var(--radius-lg); color: var(--fg-secondary); background: color-mix(in srgb, var(--surface) 94%, transparent); box-shadow: var(--shadow-md), inset 3px 0 0 color-mix(in srgb, var(--accent) 70%, transparent); backdrop-filter: blur(14px); -webkit-backdrop-filter: blur(14px); animation: bar-in .18s ease-out; }
+.unmanaged-readonly-icon { width: 38px; height: 38px; display: grid; place-items: center; border: 1px solid color-mix(in srgb, var(--accent) 28%, var(--border)); border-radius: 11px; color: var(--accent); background: var(--accent-muted); }
+.unmanaged-readonly-icon svg { width: 19px; height: 19px; fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; }
+.unmanaged-readonly-copy { min-width: 0; display: flex; flex-direction: column; gap: 3px; }
+.unmanaged-readonly-heading { display: flex; align-items: center; gap: 7px; }
+.unmanaged-readonly-heading strong { color: var(--fg); font-size: 12px; font-weight: 650; letter-spacing: .01em; }
+.unmanaged-readonly-heading small { padding: 2px 6px; border-radius: var(--radius-full); color: var(--accent); background: var(--accent-muted); font-size: 9px; font-weight: 650; line-height: 1.3; }
+.unmanaged-readonly-description { overflow: hidden; color: var(--fg-tertiary); font-size: 11px; line-height: 1.45; text-overflow: ellipsis; white-space: nowrap; }
+.unmanaged-readonly-agent { max-width: 112px; overflow: hidden; padding: 5px 8px; border: 1px solid var(--border); border-radius: var(--radius-full); color: var(--fg-secondary); background: var(--surface-active); font: 10px/1 var(--font-mono); text-overflow: ellipsis; white-space: nowrap; }
 
-.chat-input-container { position: relative; container-type: inline-size; background: var(--bg); border: 1px solid var(--border); border-radius: var(--radius-xl); transition: border-color 0.15s, box-shadow 0.15s; }
-.chat-input-container.focused { border-color: var(--border-focus); box-shadow: 0 0 0 3px var(--accent-muted); }
+.chat-input-container { position: relative; container-type: inline-size; pointer-events: auto; background: var(--surface); border: 1px solid var(--border-light); border-radius: var(--radius-xl); box-shadow: var(--shadow-md); transition: border-color 0.15s, box-shadow 0.15s, background var(--transition); }
+.chat-input-container.focused { border-color: var(--border-focus); box-shadow: var(--shadow-md), 0 0 0 3px var(--accent-muted); }
 
-.chat-textarea { width: 100%; background: none; border: none; color: var(--fg); font-size: 14px; font-family: var(--font-body); line-height: 1.5; outline: none; resize: none; padding: 12px 16px 4px; min-height: 60px; max-height: 400px; overflow-y: auto; }
+.chat-textarea { width: 100%; background: none; border: none; color: var(--fg); font-size: 14px; font-family: var(--font-body); line-height: 1.55; outline: none; resize: none; padding: 13px 16px 5px; min-height: 64px; max-height: 400px; overflow-y: auto; }
 /* Drag handle above the textarea — user drags up/down to resize; the handle
    rides the container's top edge and moves with it as height changes. */
 .textarea-resize-handle { height: 6px; margin: 4px 8px 0; cursor: ns-resize; display: flex; align-items: center; justify-content: center; border-radius: 3px; transition: background 0.15s; }
@@ -3378,7 +3644,7 @@ onMounted(() => {
 .chat-textarea:disabled { opacity: 0.5; }
 
 /* Bottom control row */
-.input-controls { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; padding: 6px 8px 8px 12px; gap: 8px; }
+.input-controls { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; padding: 7px 9px 9px 12px; gap: 8px; }
 
 /* Permission dropdown (left) */
 .perm-dropdown { position: relative; }
@@ -3406,7 +3672,7 @@ onMounted(() => {
 
 /* Metadata can shrink independently; actions always keep their hit target. */
 .input-meta { min-width: 0; display: flex; align-items: center; justify-content: flex-end; gap: 8px; }
-.input-meta .model-pill { min-width: 0; flex: 0 1 180px; }
+.input-meta .model-pill { min-width: 0; flex: 0 1 auto; max-width: 180px; }
 .input-actions { display: flex; align-items: center; gap: 8px; }
 .ctx-indicator { display: inline-flex; align-items: center; gap: 4px; padding: 4px 8px; font-size: 11px; color: var(--fg-tertiary); font-family: var(--font-mono); cursor: help; white-space: pre-line; }
 
@@ -3446,6 +3712,18 @@ onMounted(() => {
   color: var(--fg-tertiary);
   font-size: 12px;
 }
+.model-switch-notice {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  align-self: flex-start;
+  max-width: 720px;
+  padding: 5px 2px;
+  color: var(--fg-tertiary);
+  font-size: 12px;
+}
+.model-switch-notice svg { flex-shrink: 0; color: var(--accent); }
+.model-switch-notice code { color: var(--fg-secondary); font: 600 11px/1.2 var(--font-mono); }
 .fade-enter-active, .fade-leave-active { transition: opacity 0.25s ease; }
 .fade-enter-from, .fade-leave-to { opacity: 0; }
 
@@ -3471,6 +3749,7 @@ onMounted(() => {
   font-family: var(--font-mono); font-weight: 600; color: var(--fg);
 }
 .turn-status-bar .status-tokens { color: var(--fg-tertiary); }
+.turn-status-bar .status-ended-at { color: var(--fg-tertiary); font: 11px/1.2 var(--font-mono); white-space: nowrap; }
 .turn-status-bar .status-copy-btn {
   display: inline-flex; align-items: center; gap: 5px;
   font-size: 11px; color: var(--fg-tertiary);
@@ -3486,7 +3765,10 @@ onMounted(() => {
 @keyframes fade-in { from { opacity: 0; } to { opacity: 1; } }
 @keyframes bar-in { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: translateY(0); } }
 
-@media (max-width: 1024px) { .session-layout { height: calc(100dvh - var(--topbar-h)); } }
+@media (max-width: 1024px) {
+  .session-layout { height: calc(100dvh - var(--topbar-h)); }
+  .session-panel { width: 260px; }
+}
 @media (max-width: 1180px) and (min-width: 769px) {
   .session-toolbar-actions > .context-pill,
   .session-toolbar-actions > .model-pill,
@@ -3494,23 +3776,201 @@ onMounted(() => {
   .session-id-box { display: none; }
 }
 @media (max-width: 900px) and (min-width: 769px) {
-  .chat-toolbar { padding-inline: 12px; gap: 8px; }
+  .chat-toolbar { padding: 7px 52px 7px 12px; gap: 8px; }
   .status-pill { padding: 5px 7px; }
   .status-pill-label { display: none; }
   .session-toolbar-identity { min-width: 0; }
 }
 @media (max-width: 768px) {
   .session-layout { height: calc(var(--visual-viewport-height, 100dvh) - var(--mobile-topbar-h)); }
-  .file-change-panel-backdrop,
-  .file-change-side-panel { display: none; }
+  .chat-area { --composer-float-clearance: 112px; --session-content-gutter: 14px; }
   .session-panel,
   .chat-toolbar { display: none; }
-  .chat-messages { padding: 14px 12px; gap: 12px; }
-  .chat-input-area {
-    padding: 8px 10px max(8px, env(safe-area-inset-bottom));
+  .mobile-session-toolbar-overflow {
+    position: fixed;
+    z-index: 82;
+    top: max(6px, env(safe-area-inset-top));
+    right: 12px;
   }
+  .mobile-session-toolbar-overflow .toolbar-more-btn {
+    width: 44px;
+    height: 44px;
+    border-color: transparent;
+    border-radius: var(--radius-md);
+    color: var(--fg);
+    background: transparent;
+  }
+  .mobile-session-toolbar-overflow .toolbar-more-btn:active,
+  .mobile-session-toolbar-overflow .toolbar-more-btn[aria-expanded="true"] { border-color: transparent; color: var(--accent); background: var(--accent-muted); }
+  .mobile-session-toolbar-overflow .toolbar-more-btn svg { width: 21px; height: 21px; }
+  .mobile-session-toolbar-overflow .toolbar-overflow-menu {
+    position: fixed;
+    top: calc(var(--mobile-topbar-h) + 7px);
+    right: 10px;
+    width: min(300px, calc(100vw - 20px));
+    max-height: calc(var(--visual-viewport-height, 100dvh) - var(--mobile-topbar-h) - 20px);
+    overflow-y: auto;
+    padding: 8px;
+    border-color: var(--border-light);
+    border-radius: var(--radius-xl);
+    box-shadow: 0 18px 48px rgba(0, 0, 0, .34);
+  }
+  .mobile-session-toolbar-overflow .toolbar-overflow-metrics { gap: 6px; padding: 6px 6px 10px; }
+  .mobile-session-toolbar-overflow .toolbar-overflow-item { min-height: 44px; padding: 10px 11px; font-size: 14px; }
+  .mobile-session-toolbar-overflow .toolbar-overflow-item code { font-size: 11px; }
+  .file-change-panel-backdrop { position: fixed; z-index: 88; inset: 0; display: block; background: rgba(0, 0, 0, .42); backdrop-filter: blur(2px); }
+  .file-change-side-panel {
+    position: fixed;
+    z-index: 89;
+    inset: auto 0 0;
+    width: 100%;
+    max-width: none;
+    height: min(72%, 680px);
+    display: flex;
+    border: 1px solid var(--border-light);
+    border-bottom: 0;
+    border-radius: 18px 18px 0 0;
+    box-shadow: 0 -14px 42px rgba(0, 0, 0, .34);
+  }
+  .file-change-panel-heading { min-height: 58px; padding: 8px 8px 8px 16px; }
+  .file-change-panel-list { padding: 10px 10px max(18px, env(safe-area-inset-bottom)); }
+  .chat-messages { padding: 14px var(--session-content-gutter) calc(14px + var(--composer-float-clearance)); gap: 12px; }
+  .chat-input-area {
+    padding: 0 10px max(10px, env(safe-area-inset-bottom));
+  }
+  .chat-input-area.composer-focused { padding-bottom: 7px; }
+  .unmanaged-readonly-notice { grid-template-columns: 34px minmax(0, 1fr); gap: 10px; padding: 10px; border-radius: var(--radius-md); }
+  .unmanaged-readonly-icon { width: 34px; height: 34px; border-radius: 10px; }
+  .unmanaged-readonly-agent { display: none; }
+  .unmanaged-readonly-description { white-space: normal; }
   .textarea-resize-handle { display: none; }
-  .chat-textarea { resize: none; padding-top: 10px; }
+  .chat-input-container {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) 44px;
+    grid-template-rows: minmax(31px, auto) auto;
+    column-gap: 6px;
+    overflow: visible;
+    padding: 0 6px 6px 11px;
+    border-radius: 15px;
+    background: color-mix(in srgb, var(--surface) 96%, transparent);
+    box-shadow: 0 12px 32px rgba(0, 0, 0, .38);
+    backdrop-filter: blur(18px);
+    -webkit-backdrop-filter: blur(18px);
+  }
+  .chat-input-container.focused {
+    border-color: var(--border-light);
+    box-shadow: 0 12px 32px rgba(0, 0, 0, .38);
+  }
+  .chat-textarea {
+    grid-column: 1;
+    grid-row: 2;
+    min-width: 0;
+    min-height: 50px;
+    max-height: 112px;
+    display: block;
+    overflow-y: auto;
+    resize: none;
+    padding: 8px 2px 7px;
+    font-size: 16px;
+    line-height: 1.45;
+    caret-color: var(--accent);
+  }
+  .chat-input-container.focused .chat-textarea { min-height: 46px; }
+  .input-controls { display: contents; }
+  .perm-dropdown {
+    grid-column: 1;
+    grid-row: 1;
+    align-self: center;
+    justify-self: start;
+    min-width: 0;
+    margin-left: -3px;
+    z-index: 2;
+  }
+  .perm-trigger {
+    min-width: 0;
+    height: 25px;
+    gap: 4px;
+    padding: 0 7px;
+    border-radius: 7px;
+    font-size: 10px;
+    white-space: nowrap;
+  }
+  .perm-trigger > svg:first-child { width: 12px; height: 12px; flex: 0 0 auto; }
+  .perm-label { overflow: hidden; text-overflow: ellipsis; }
+  .perm-menu {
+    bottom: calc(100% + 7px);
+    left: -8px;
+    width: min(250px, calc(100vw - 40px));
+    padding: 5px;
+    border-color: var(--border-light);
+    border-radius: 12px;
+    box-shadow: var(--shadow-lg);
+  }
+  .perm-menu-item { min-height: 48px; padding: 7px 9px; border-radius: 8px; }
+  .perm-menu-copy small { margin-top: 2px; font-size: 10px; }
+  .input-meta {
+    grid-column: 1 / 3;
+    grid-row: 1;
+    align-self: center;
+    justify-self: end;
+    max-width: calc(100% - 112px);
+    gap: 5px;
+    margin-right: 2px;
+    overflow: hidden;
+  }
+  .input-meta .model-pill {
+    height: 25px;
+    max-width: 100px;
+    gap: 4px;
+    padding: 0 7px;
+    border-radius: 7px;
+    font-size: 10px;
+  }
+  .input-meta .model-pill svg { width: 12px; height: 12px; }
+  .ctx-indicator {
+    height: 25px;
+    flex: 0 0 auto;
+    gap: 4px;
+    padding: 0 4px;
+    font-size: 9px;
+    white-space: nowrap;
+  }
+  .ctx-indicator svg { width: 12px; height: 12px; }
+  .chat-input-container.focused .ctx-indicator { display: none; }
+  .input-actions {
+    grid-column: 2;
+    grid-row: 2;
+    align-self: end;
+    justify-self: end;
+    position: relative;
+    display: grid;
+    place-items: center;
+    gap: 0;
+    padding-bottom: 1px;
+  }
+  .action-btn {
+    width: 42px;
+    height: 42px;
+    border-radius: 12px;
+    transition: transform 100ms ease, opacity 100ms ease, background 100ms ease;
+  }
+  .action-btn:active:not(:disabled) { transform: scale(.94); }
+  .send-btn:disabled,
+  .stop-btn:disabled { color: var(--fg-tertiary); background: var(--surface-active); }
+  .stop-btn { color: var(--error); background: var(--error-bg); }
+  .stop-error-hint {
+    position: absolute;
+    right: 0;
+    bottom: calc(100% + 7px);
+    max-width: calc(100vw - 40px);
+    overflow: hidden;
+    padding: 6px 8px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: var(--surface);
+    box-shadow: var(--shadow-md);
+    text-overflow: ellipsis;
+  }
 }
 @media (prefers-reduced-motion: reduce) {
   .request-deep-link-target { animation: none; outline: 2px solid var(--warning); }

@@ -604,3 +604,157 @@ func indexOf(s, sub string) int {
 	}
 	return -1
 }
+
+func TestMemoryMcpGrantWireRoundTrip(t *testing.T) {
+	request := MemoryMcpGrantRequest{Type: "memory_mcp_grant", RequestID: "corr-1"}
+	encoded, err := json.Marshal(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(encoded), `"type":"memory_mcp_grant"`) ||
+		!strings.Contains(string(encoded), `"request_id":"corr-1"`) {
+		t.Fatalf("request wire shape changed: %s", encoded)
+	}
+
+	result := MemoryMcpGrantResult{
+		Type: "memory_mcp_grant_result", RequestID: "corr-1",
+		Grant: "token", ExpiresIn: 300, TokenType: "extension_capability",
+		InstallationID: "i-1", ProviderPublicOrigin: "https://memory.example",
+		Services: []string{"memory.mcp"},
+	}
+	encodedResult, err := json.Marshal(result)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		`"type":"memory_mcp_grant_result"`, `"expires_in":300`,
+		`"installation_id":"i-1"`, `"provider_public_origin":"https://memory.example"`,
+	} {
+		if !strings.Contains(string(encodedResult), want) {
+			t.Fatalf("result wire missing %s: %s", want, encodedResult)
+		}
+	}
+
+	failure := MemoryMcpGrantError{Type: "memory_mcp_grant_error", RequestID: "corr-2", Code: "no_installation"}
+	encodedFailure, err := json.Marshal(failure)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(encodedFailure), `"code":"no_installation"`) {
+		t.Fatalf("error wire shape changed: %s", encodedFailure)
+	}
+}
+
+func TestClientMessageDecodesMemoryMcpReplies(t *testing.T) {
+	inbound := `{"type":"memory_mcp_grant_result","request_id":"r1","grant":"g","expires_in":240,` +
+		`"token_type":"extension_capability","installation_id":"i1",` +
+		`"provider_public_origin":"https://memory.example","services":["memory.mcp"]}`
+	var message ClientMessage
+	if err := json.Unmarshal([]byte(inbound), &message); err != nil {
+		t.Fatal(err)
+	}
+	if message.Type != "memory_mcp_grant_result" || message.Grant != "g" ||
+		message.ExpiresIn != 240 || message.InstallationID != "i1" ||
+		message.ProviderPublicOrigin != "https://memory.example" {
+		t.Fatalf("decode mismatch: %+v", message)
+	}
+
+	errorInbound := `{"type":"memory_mcp_grant_error","request_id":"r2","code":"service_disabled"}`
+	var errorMessage ClientMessage
+	if err := json.Unmarshal([]byte(errorInbound), &errorMessage); err != nil {
+		t.Fatal(err)
+	}
+	if errorMessage.GrantErrorCode != "service_disabled" {
+		t.Fatalf("error code decode mismatch: %+v", errorMessage)
+	}
+}
+
+func TestPhase2ContextMessagesRoundTrip(t *testing.T) {
+	req := MemoryContextGrantRequest{Type: "memory_context_grant", RequestID: "r1", SessionID: "ses-1"}
+	encoded, err := json.Marshal(req)
+	if err != nil {
+		t.Fatalf("marshal grant request: %v", err)
+	}
+	var decodedReq MemoryContextGrantRequest
+	if err := json.Unmarshal(encoded, &decodedReq); err != nil {
+		t.Fatalf("unmarshal grant request: %v", err)
+	}
+	if decodedReq.SessionID != "ses-1" || decodedReq.RequestID != "r1" {
+		t.Fatalf("grant request round trip mismatch: %+v", decodedReq)
+	}
+
+	ack := SessionRegistrationAck{Type: "session_registration_ack", SessionID: "ses-1", Status: "ready"}
+	ackEncoded, err := json.Marshal(ack)
+	if err != nil {
+		t.Fatalf("marshal ack: %v", err)
+	}
+	var decodedAck SessionRegistrationAck
+	if err := json.Unmarshal(ackEncoded, &decodedAck); err != nil {
+		t.Fatalf("unmarshal ack: %v", err)
+	}
+	if decodedAck.Status != "ready" || decodedAck.SessionID != "ses-1" {
+		t.Fatalf("ack round trip mismatch: %+v", decodedAck)
+	}
+}
+
+func TestPhase4CodegraphGrantMessagesRoundTrip(t *testing.T) {
+	request := MemoryCodegraphGrantRequest{
+		Type: "memory_codegraph_grant", RequestID: "corr-4",
+		ScopeInstallationIDs: []string{"22222222-2222-4222-8222-222222222222"},
+	}
+	encoded, err := json.Marshal(request)
+	if err != nil {
+		t.Fatalf("marshal codegraph grant request: %v", err)
+	}
+	for _, want := range []string{
+		`"type":"memory_codegraph_grant"`, `"request_id":"corr-4"`,
+		`"scope_installation_ids":["22222222-2222-4222-8222-222222222222"]`,
+	} {
+		if !strings.Contains(string(encoded), want) {
+			t.Fatalf("request wire missing %s: %s", want, encoded)
+		}
+	}
+	var decoded MemoryCodegraphGrantRequest
+	if err := json.Unmarshal(encoded, &decoded); err != nil {
+		t.Fatalf("unmarshal codegraph grant request: %v", err)
+	}
+	if len(decoded.ScopeInstallationIDs) != 1 || decoded.ScopeInstallationIDs[0] != "22222222-2222-4222-8222-222222222222" {
+		t.Fatalf("scope selection round trip mismatch: %+v", decoded)
+	}
+
+	result := MemoryCodegraphGrantResult{
+		Type: "memory_codegraph_grant_result", RequestID: "corr-4",
+		Grant: "token", ExpiresIn: 60, TokenType: "extension_capability_v2",
+		InstallationID: "22222222-2222-4222-8222-222222222222",
+		ProviderPublicOrigin: "https://memory.example",
+		Services: []string{MemoryCodegraphWriteService},
+	}
+	encodedResult, err := json.Marshal(result)
+	if err != nil {
+		t.Fatalf("marshal codegraph grant result: %v", err)
+	}
+	for _, want := range []string{
+		`"type":"memory_codegraph_grant_result"`, `"expires_in":60`,
+		`"token_type":"extension_capability_v2"`,
+		`"services":["memory.codegraph.write"]`,
+	} {
+		if !strings.Contains(string(encodedResult), want) {
+			t.Fatalf("result wire missing %s: %s", want, encodedResult)
+		}
+	}
+
+	failure := MemoryCodegraphGrantError{
+		Type: "memory_codegraph_grant_error", RequestID: "corr-5",
+		Code: MemoryCodegraphErrNotContributor,
+	}
+	encodedFailure, err := json.Marshal(failure)
+	if err != nil {
+		t.Fatalf("marshal codegraph grant error: %v", err)
+	}
+	if !strings.Contains(string(encodedFailure), `"code":"not_contributor"`) {
+		t.Fatalf("error wire shape changed: %s", encodedFailure)
+	}
+	if !MemoryCodegraphGrantErrorCodes[MemoryCodegraphErrNotContributor] {
+		t.Fatal("not_contributor must be part of the frozen error allowlist")
+	}
+}

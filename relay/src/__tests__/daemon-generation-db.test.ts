@@ -1,6 +1,7 @@
 import { describe, expect, test, vi } from 'vitest'
 import {
   activateDaemonRegistration,
+  consolidateOfflineMachineDaemons,
   revokeToken,
   restoreDaemonRegistration,
   reconcileDaemonSessions,
@@ -13,6 +14,40 @@ function transactionalPool(handler: (sql: string, params?: any[]) => any) {
 }
 
 describe('daemon registration generation DB guards', () => {
+  test('consolidates only offline same-machine history into the newly activated daemon', async () => {
+    const { pool, query } = transactionalPool((sql) => {
+      if (sql.includes('WHERE daemon_id = $1 AND user_id = $2')) {
+        return { rows: [{ daemon_id: 'daemon-new', alias: null }], rowCount: 1 }
+      }
+      if (sql.includes("status = 'offline'")) {
+        return { rows: [{ daemon_id: 'daemon-legacy', alias: 'm3' }], rowCount: 1 }
+      }
+      return { rows: [], rowCount: 1 }
+    })
+
+    await expect(consolidateOfflineMachineDaemons(pool, {
+      userId: 7,
+      daemonId: 'daemon-new',
+      machineId: 'machine-0123456789abcdef0123456789abcdef',
+    })).resolves.toEqual({ mergedDaemonIds: ['daemon-legacy'] })
+
+    const sql = query.mock.calls.map(([statement]) => String(statement))
+    expect(sql.some((statement) => statement.includes('UPDATE sessions SET daemon_id = NULL'))).toBe(true)
+    expect(sql.some((statement) => statement.includes('UPDATE sessions SET daemon_id'))).toBe(true)
+    expect(sql.some((statement) => statement.includes('UPDATE token_usage_facts SET daemon_id'))).toBe(true)
+    expect(sql.some((statement) => statement.includes('INSERT INTO token_daily_stats'))).toBe(true)
+    expect(sql.some((statement) => statement.includes('DELETE FROM daemons'))).toBe(true)
+  })
+
+  test('does not touch Relay state for an untrusted machine id', async () => {
+    const { pool, query } = transactionalPool(() => ({ rows: [], rowCount: 1 }))
+
+    await expect(consolidateOfflineMachineDaemons(pool, {
+      userId: 7, daemonId: 'daemon-new', machineId: 'unknown',
+    })).resolves.toEqual({ mergedDaemonIds: [] })
+    expect(query).not.toHaveBeenCalled()
+  })
+
   test('takes the token advisory fence and rechecks revocation before daemon mutation', async () => {
     const { pool, query } = transactionalPool((sql) => {
       if (sql.includes('revoked_tokens')) return { rows: [], rowCount: 0 }
@@ -184,6 +219,7 @@ describe('daemon registration generation DB guards', () => {
       .resolves.toEqual({ status: 'confirmed_restored' })
     const restoreCall = query.mock.calls.find(([sql]) => String(sql).includes('WHERE daemon_id') && String(sql).includes('registration_id ='))
     expect(restoreCall?.[1]).toContain('generation-2')
+    expect(restoreCall?.[1]?.[3]).toBe(JSON.stringify(previous.agents))
   })
 
   test('distinguishes a successor CAS miss from a restoration SQL failure', async () => {

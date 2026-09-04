@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/pocketctl/pocketctl/internal/protocol"
+	"github.com/pocketctl/pocketctl/internal/turn"
 )
 
 func TestReadCodexRolloutMetadata_ClassifiesSubagentsStrictly(t *testing.T) {
@@ -280,6 +281,96 @@ func TestCodex_TaskStartedMarksTerminalSessionRunning(t *testing.T) {
 	}
 }
 
+// task_started/task_complete carry Codex's native opaque turn_id. The JSONL
+// parser must preserve that anchor as a turn lifecycle and attribute the
+// intervening persisted content to exactly that turn; otherwise Memory cannot
+// materialize a work episode from native Codex history.
+func TestCodexJSONLParser_StampsNativeTurnLifecycleAndContent(t *testing.T) {
+	p := NewCodexJSONLParser()
+	parse := func(line string) []protocol.DaemonEvent {
+		t.Helper()
+		events, err := p.Parse(line)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return events
+	}
+
+	const sessionID = "codex-persisted-session"
+	const sourceTurnID = "codex-native-turn-42"
+	wantTurnID := turn.LogicalTurnID(AgentCodex, sessionID, "", "native", sourceTurnID)
+
+	parse(`{"type":"session_meta","payload":{"id":"` + sessionID + `"}}`)
+	modelChange := parse(`{"type":"turn_context","payload":{"model":"gpt-5.6"}}`)
+	if len(modelChange) != 1 || modelChange[0].Type != "session_model_changed" ||
+		modelChange[0].SessionID != sessionID || modelChange[0].Model != "gpt-5.6" {
+		t.Fatalf("pre-turn model change = %+v, want session-stamped model event", modelChange)
+	}
+	started := parse(`{"type":"event_msg","payload":{"type":"task_started","turn_id":"` + sourceTurnID + `"}}`)
+	if len(started) != 2 || started[0].Type != protocol.EventTypeTurnStatus ||
+		started[0].TurnStatus != protocol.TurnStateRunning || started[0].TurnID != wantTurnID ||
+		started[0].SourceTurnID != sourceTurnID || started[0].TurnOrigin != protocol.TurnOriginNative ||
+		started[0].TurnConfidence != protocol.TurnConfidenceNative ||
+		started[1].Type != "session_status" || started[1].Status != protocol.StatusRunning {
+		t.Fatalf("task_started events = %+v", started)
+	}
+
+	content := append(
+		parse(`{"type":"event_msg","payload":{"type":"agent_message","message":"fixture output"}}`),
+		parse(`{"type":"response_item","payload":{"type":"function_call","call_id":"call-42","name":"exec","arguments":"{}"}}`)...,
+	)
+	if len(content) != 2 || content[0].Type != "agent_text" || content[1].Type != "tool_call" {
+		t.Fatalf("content events = %+v", content)
+	}
+	for _, event := range content {
+		if event.SessionID != sessionID || event.TurnID != wantTurnID ||
+			event.SourceTurnID != sourceTurnID || event.TurnOrigin != protocol.TurnOriginNative ||
+			event.TurnConfidence != protocol.TurnConfidenceNative {
+			t.Fatalf("content was not stamped with the native turn: %+v", event)
+		}
+	}
+
+	completed := parse(`{"type":"event_msg","payload":{"type":"task_complete","turn_id":"` + sourceTurnID + `"}}`)
+	if len(completed) != 2 || completed[0].Type != protocol.EventTypeTurnStatus ||
+		completed[0].TurnStatus != protocol.TurnStateCompleted || completed[0].TurnID != wantTurnID ||
+		completed[0].SourceTurnID != sourceTurnID || completed[1].Type != "session_status" ||
+		completed[1].Status != protocol.StatusIdle {
+		t.Fatalf("task_complete events = %+v", completed)
+	}
+}
+
+func TestCodexJSONLParser_IdlessCompletionDoesNotPoisonFollowingTurn(t *testing.T) {
+	p := NewCodexJSONLParser()
+	parse := func(line string) []protocol.DaemonEvent {
+		t.Helper()
+		events, err := p.Parse(line)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return events
+	}
+
+	const sessionID = "codex-idless-completion"
+	parse(`{"type":"session_meta","payload":{"id":"` + sessionID + `"}}`)
+	parse(`{"type":"event_msg","payload":{"type":"task_started","turn_id":"turn-1"}}`)
+	completed := parse(`{"type":"event_msg","payload":{"type":"task_complete","last_agent_message":"done"}}`)
+	firstTurnID := turn.LogicalTurnID(AgentCodex, sessionID, "", "native", "turn-1")
+	if len(completed) != 2 || completed[0].Type != protocol.EventTypeTurnStatus ||
+		completed[0].TurnStatus != protocol.TurnStateCompleted || completed[0].TurnID != firstTurnID {
+		t.Fatalf("id-less completion did not close the active turn: %+v", completed)
+	}
+
+	started := parse(`{"type":"event_msg","payload":{"type":"task_started","turn_id":"turn-2"}}`)
+	secondTurnID := turn.LogicalTurnID(AgentCodex, sessionID, "", "native", "turn-2")
+	if len(started) != 2 || started[0].Type != protocol.EventTypeTurnStatus || started[0].TurnID != secondTurnID {
+		t.Fatalf("following turn did not start independently: %+v", started)
+	}
+	content := parse(`{"type":"event_msg","payload":{"type":"agent_message","message":"second turn"}}`)
+	if len(content) != 1 || content[0].TurnID != secondTurnID || content[0].SourceTurnID != "turn-2" {
+		t.Fatalf("following content remained attached to the old turn: %+v", content)
+	}
+}
+
 func TestCodex_UserMessageWithEnvironmentContextFiltered(t *testing.T) {
 	// The <environment_context> wrapper codex injects is not real user input.
 	line := `{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"<environment_context>\n  <cwd>/tmp</cwd>\n</environment_context>"}]}}`
@@ -348,8 +439,8 @@ func TestCodexTurnContextEmitsEffort(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(events) != 1 || events[0].Type != "session_meta" || events[0].Effort != "high" {
-		t.Fatalf("events = %+v, want session_meta effort=high", events)
+	if len(events) != 2 || events[0].Type != "session_model_changed" || events[0].Model != "gpt-5.4" || events[1].Type != "session_meta" || events[1].Effort != "high" {
+		t.Fatalf("events = %+v, want model change followed by session_meta effort=high", events)
 	}
 }
 

@@ -4,7 +4,7 @@ BINARY = pocketctl
 GOOS ?= $(shell uname -s | tr '[:upper:]' '[:lower:]')
 GOARCH ?= $(shell uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/')
 
-.PHONY: build build-all clean relay web dev dev-relay test test-relay-durable-ingress test-opencode-managed test-opencode-managed-release test-codex-managed test-codex-managed-release test-claude-channel-approval release-preflight release release-dry-run
+.PHONY: build build-all clean relay web memory dev dev-relay test test-relay-durable-ingress test-relay-extensions test-pocketctl-memory test-pocketctl-memory-integration test-opencode-managed test-opencode-managed-release test-codex-managed test-codex-managed-release test-claude-channel-approval release-preflight release release-dry-run
 
 -include .env
 export JWT_SECRET
@@ -27,6 +27,11 @@ relay:
 web:
 	cd web && npm run build && rm -f vite.config.js vite.config.d.ts
 	@echo "✅ Web UI 构建完成"
+
+## 构建 Memory 服务（独立 pocketctl-memory）
+memory:
+	cd memory && npm run build
+	@echo "✅ Memory 构建完成"
 
 ## 构建发布平台二进制（macOS / Linux）
 build-all:
@@ -82,6 +87,18 @@ test-e2e:
 ## Durable Inbox PostgreSQL 故障与混合 Agent 发布门禁
 test-relay-durable-ingress:
 	bash scripts/test-relay-durable-ingress.sh
+
+## Relay Extension Platform 门禁（ADR-0003）：unit/build + PG integration + Mock Consumer E2E
+test-relay-extensions:
+	bash scripts/test-relay-extensions.sh
+
+## PocketCtl Memory 门禁（DB-free）：unit + build + 容器合同
+test-pocketctl-memory:
+	bash scripts/test-pocketctl-memory.sh
+
+## PocketCtl Memory 集成门禁：双 purpose-named PostgreSQL + 真实 E2E
+test-pocketctl-memory-integration:
+	bash scripts/test-pocketctl-memory-integration.sh
 
 ## OpenCode 受管终端 A-D 回归（Go/Relay/Web/iOS 源码回归）
 test-opencode-managed:

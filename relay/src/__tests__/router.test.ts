@@ -49,6 +49,7 @@ function createMockPool(eventInsertIDs?: number[]) {
         result = {
           rows: [{
             session_id: 'test-sid',
+            user_id: 1,
             daemon_id: 'daemon-1',
             agent_type: 'claude-code',
             cwd: '/tmp',
@@ -644,7 +645,7 @@ test('local command events use ingest while token revocations use control', asyn
   const router = new Router(pools)
   const clientWs = createMockWs()
   router.registerClient(clientWs, 1)
-  router.handleClientMessage(clientWs, {
+  await router.handleClientMessage(clientWs, {
     type: 'local_command_log', session_id: 'pool-session', user_text: '/model', command: '/model', receipt_status: 'ok', message: 'done',
   })
   await tick()

@@ -159,3 +159,40 @@ describe('relay background runtime', () => {
     expect(deps.welcome.stop).toHaveBeenCalledOnce()
   })
 })
+
+
+describe('worker runtime extension projector composition', () => {
+  test('starts and drains the projector after the schema gate passes', async () => {
+    const order: string[] = []
+    const runtime = createWorkerRuntime({
+      assertSchemaReady: async () => { order.push('schema') },
+      worker: { start: () => { order.push('worker') }, stop: async () => { order.push('worker-stop') } },
+      retention: { start: () => {}, stop: async () => {} },
+      extensionProjector: {
+        start: () => { order.push('projector') },
+        stop: async () => { order.push('projector-stop') },
+      },
+      pool: { end: async () => {} },
+    })
+    await runtime.start()
+    expect(order).toEqual(['schema', 'worker', 'projector'])
+    await runtime.stop()
+    expect(order.slice(-2)).toEqual(['worker-stop', 'projector-stop'])
+  })
+
+  test('a failing projector start rolls back and closes the pool', async () => {
+    const stopped: string[] = []
+    const runtime = createWorkerRuntime({
+      assertSchemaReady: async () => undefined,
+      worker: { start: () => {}, stop: async () => { stopped.push('worker') } },
+      retention: { start: () => {}, stop: async () => {} },
+      extensionProjector: {
+        start: () => { throw new Error('projector refused') },
+        stop: async () => { stopped.push('projector') },
+      },
+      pool: { end: async () => { stopped.push('pool') } },
+    })
+    await expect(runtime.start()).rejects.toThrow('projector refused')
+    expect(stopped).toContain('pool')
+  })
+})

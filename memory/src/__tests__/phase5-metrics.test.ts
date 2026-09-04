@@ -1,0 +1,35 @@
+import {describe,expect,test,vi} from 'vitest'
+import {createMemoryMetrics,updatePhase5Gauges} from '../metrics.js'
+describe('Skill bounded observability',()=>{
+  test('only fixed labels escape and unreported costs remain distinguishable',async()=>{
+    const metrics=createMemoryMetrics(),m=metrics.phase5
+    m.setLedger('execution','started','fixture',2)
+    m.setLedger('execution','succeeded','fixture',3)
+    m.setLedger('execution','/private/user-name','fixture',99)
+    m.setLedger('private-scope','started','fixture',99)
+    m.recordGeneration('success',{inputTokens:10,outputTokens:3})
+    m.recordGeneration('failed',{inputTokens:4,outputTokens:2,costMicros:7})
+    m.recordGeneration('budget_denied')
+    m.recordAction('publish','denied');m.observeRevocationLag(0.25)
+    m.recordAdmission('admitted');m.recordAdmission('deduplicated');m.recordAdmission('rejected')
+    m.setLedger('review_outcome','light_edit','recorded',1)
+    const text=await metrics.registry.metrics()
+    expect(text).toContain('pocketctl_memory_skill_ledger_rows{stage="execution",state="started",provenance="fixture"} 2')
+    expect(text).toContain('pocketctl_memory_skill_provider_cost_reports_total 1')
+    expect(text).toContain('pocketctl_memory_skill_provider_cost_micros_total 7')
+    expect(text).toContain('pocketctl_memory_skill_provider_tokens_total{direction="input"} 14')
+    expect(text).toContain('pocketctl_memory_skill_admissions_total{result="deduplicated"} 1')
+    expect(text).toContain('pocketctl_memory_skill_ledger_rows{stage="review_outcome",state="light_edit",provenance="recorded"} 1')
+    expect(text).not.toContain('/private/');expect(text).not.toContain('private-scope')
+  })
+  test('DB snapshots reset removed rows and never turn fixture successes into natural executions',async()=>{
+    const metrics=createMemoryMetrics(),query=vi.fn().mockResolvedValueOnce({rows:[{stage:'execution',state:'succeeded',provenance:'fixture',count:'4'}]})
+      .mockResolvedValueOnce({rows:[{age:'12',retries:'2',dead:'1'}]}).mockResolvedValueOnce({rows:[]}).mockResolvedValueOnce({rows:[{age:'0',retries:'0',dead:'0'}]})
+    await updatePhase5Gauges({query} as never,metrics.phase5)
+    expect(await metrics.registry.metrics()).toContain('pocketctl_memory_skill_natural_executions 0')
+    await updatePhase5Gauges({query} as never,metrics.phase5)
+    const text=await metrics.registry.metrics()
+    expect(text).toContain('pocketctl_memory_skill_ledger_rows{stage="execution",state="succeeded",provenance="fixture"} 0')
+    expect(text).toContain('pocketctl_memory_skill_queue_oldest_seconds 0')
+  })
+})

@@ -6,8 +6,20 @@
           <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m15 18-6-6 6-6" /></svg>
           <span>我的主机</span>
         </button>
-        <h1 class="mobile-session-nav-title">{{ daemonDisplayName }}</h1>
+        <div class="mobile-session-host">
+          <h1 class="mobile-session-nav-title" :title="daemonDisplayName">{{ daemonDisplayName }}</h1>
+          <div class="mobile-daemon-status" role="status" aria-live="polite">
+            <span :class="['mobile-daemon-dot', { online: selectedDaemonOnline }]" aria-hidden="true"></span>
+            <span class="mobile-daemon-status-copy">{{ selectedDaemonOnline ? '在线 · 最后心跳 刚刚' : '离线' }}</span>
+          </div>
+        </div>
         <div class="mobile-session-nav-actions">
+          <AttentionInboxEntryButton
+            v-if="hostId"
+            class="mobile-session-inbox"
+            variant="nav"
+            :scope="{ type: 'daemon', daemonId: hostId, daemonName: daemonDisplayName }"
+          />
           <button
             type="button"
             data-testid="session-list-search-toggle"
@@ -22,16 +34,6 @@
           </button>
         </div>
       </header>
-      <div class="mobile-daemon-status">
-        <span :class="['mobile-daemon-dot', { online: selectedDaemon?.online }]" aria-hidden="true"></span>
-        <span>{{ selectedDaemon?.online ? '在线 · 最后心跳 刚刚' : '离线' }}</span>
-        <AttentionInboxEntryButton
-          v-if="hostId"
-          class="mobile-session-inbox"
-          :scope="{ type: 'daemon', daemonId: hostId, daemonName: daemonDisplayName }"
-          show-label
-        />
-      </div>
       <div v-if="searchPresented" class="mobile-session-search">
         <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="6" /><path d="m16 16 4 4" /></svg>
         <input
@@ -241,7 +243,8 @@ const searchResults = computed(() => hasSearchQuery.value
   : [])
 const renderedSessions = computed(() => hasSearchQuery.value ? searchResults.value : displayedSessions.value)
 const selectedDaemon = computed(() => daemons.value.find(daemon => daemon.daemon_id === hostId.value))
-const daemonDisplayName = computed(() => selectedDaemon.value?.alias || selectedDaemon.value?.hostname || '会话列表')
+const selectedDaemonOnline = computed(() => selectedDaemon.value?.daemon_online === true)
+const daemonDisplayName = computed(() => selectedDaemon.value?.daemon_alias || selectedDaemon.value?.hostname || '会话列表')
 const canLoadMore = computed(() =>
   visibleCount.value < sortedSessions.value.length ||
   (Boolean(hostId.value) && hasMoreRemoteSessions.value),
@@ -417,6 +420,31 @@ onMounted(() => {
     }
     if (evt.type === 'daemon_list') {
       daemons.value = (evt as any).daemons || []
+    }
+    if (evt.type === 'daemon_status') {
+      const event = evt as any
+      const index = daemons.value.findIndex(daemon => daemon.daemon_id === event.daemon_id)
+      if (index >= 0) {
+        const daemon = daemons.value[index]
+        daemons.value[index] = {
+          ...daemon,
+          ...(event.hostname ? { hostname: event.hostname } : {}),
+          ...(event.agents ? { agents: event.agents } : {}),
+          ...(event.alias !== undefined ? { daemon_alias: event.alias } : {}),
+          ...(event.status === 'online' ? { daemon_online: true } : {}),
+          ...(event.status === 'offline' ? { daemon_online: false } : {}),
+          status: event.status,
+        }
+      } else if (event.status === 'online') {
+        daemons.value.push({
+          daemon_id: event.daemon_id,
+          hostname: event.hostname || 'unknown',
+          agents: event.agents || [],
+          daemon_alias: event.alias || null,
+          daemon_online: true,
+          status: 'online',
+        })
+      }
     }
     if (evt.type === 'session_status' && evt.session_id) {
       const existing = sessions.value.find(s => s.session_id === evt.session_id)
@@ -610,11 +638,11 @@ function handleLogout() {
     top: 0;
     z-index: 60;
     display: grid;
-    min-height: calc(48px + env(safe-area-inset-top));
-    grid-template-columns: minmax(82px, 1fr) minmax(0, 1fr) minmax(82px, 1fr);
-    align-items: end;
+    min-height: calc(56px + env(safe-area-inset-top));
+    grid-template-columns: minmax(82px, auto) minmax(0, 1fr) auto;
+    align-items: center;
     margin: 0 -10px;
-    padding: max(6px, env(safe-area-inset-top)) 10px 8px;
+    padding: max(6px, env(safe-area-inset-top)) 10px 7px;
     background: color-mix(in srgb, var(--bg) 94%, transparent);
     backdrop-filter: blur(14px);
   }
@@ -632,8 +660,11 @@ function handleLogout() {
     white-space: nowrap;
   }
   .mobile-session-back svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
-  .mobile-session-nav-title { align-self: center; min-width: 0; margin: 0; overflow: hidden; color: var(--fg); font: 600 17px/22px var(--font-display); text-align: center; text-overflow: ellipsis; white-space: nowrap; }
-  .mobile-session-nav-actions { display: flex; justify-content: flex-end; gap: 8px; }
+  .mobile-session-host { min-width: 0; display: grid; justify-items: center; gap: 1px; }
+  .mobile-session-nav-title { width: 100%; min-width: 0; max-width: 100%; margin: 0; overflow: hidden; color: var(--fg); font: 600 17px/21px var(--font-display); text-align: center; text-overflow: ellipsis; white-space: nowrap; }
+  .mobile-daemon-status { min-width: 0; display: flex; align-items: center; justify-content: center; gap: 5px; color: var(--fg-secondary); font-size: 11px; line-height: 14px; }
+  .mobile-daemon-status-copy { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .mobile-session-nav-actions { display: flex; align-items: center; justify-content: flex-end; gap: 6px; }
   .mobile-session-nav-actions button {
     width: 32px;
     height: 32px;
@@ -647,8 +678,24 @@ function handleLogout() {
   }
   .mobile-session-nav-actions .mobile-new-session { border-color: var(--primary-btn); color: var(--bg); background: var(--primary-btn); }
   .mobile-session-nav-actions svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; }
-  .mobile-daemon-status { display: flex; align-items: center; gap: 6px; min-height: 33px; color: var(--fg-secondary); font-size: 13px; }
-  .mobile-session-inbox { margin-left: auto; }
+  .mobile-session-nav-actions .mobile-session-inbox {
+    width: 32px;
+    height: 32px;
+    min-width: 32px;
+    min-height: 32px;
+    overflow: visible;
+    padding: 0;
+    border-color: color-mix(in srgb, var(--accent) 28%, var(--border-light));
+    color: var(--accent);
+    background: color-mix(in srgb, var(--accent) 10%, var(--surface-hover));
+  }
+  .mobile-session-nav-actions .mobile-session-inbox.has-attention {
+    border-color: color-mix(in srgb, var(--warning) 38%, var(--border-light));
+    color: var(--warning);
+    background: color-mix(in srgb, var(--warning) 10%, var(--surface-hover));
+  }
+  .mobile-session-nav-actions .mobile-session-inbox:active { background: var(--surface-active); }
+  .mobile-session-nav-actions .mobile-session-inbox:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
   .mobile-daemon-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--fg-tertiary); }
   .mobile-daemon-dot.online { background: var(--success); }
   .mobile-session-search {

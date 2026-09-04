@@ -4,6 +4,14 @@ import type { SupportedLanguage } from './config/language.js';
 import { sanitizeJSONBPayload } from './jsonb-payload.js';
 import { initDurableIngressSchema } from './schema/durable-ingress.js';
 import { initAttentionInboxSchema } from './attention-inbox/schema.js';
+import { initExtensionSchema } from './extensions/schema.js';
+import { extensionModeFromEnv } from './extensions/config.js';
+import type { ExtensionMode } from './extensions/types.js';
+import {
+  extensionJournalEligibility,
+  ExtensionJournalOwnerMissingError,
+  type ExtensionJournalSink,
+} from './extensions/journal.js';
 import type { DaemonSessionAccess, DaemonSessionPolicy } from './materialization/types.js';
 import {
   CODE_HMAC_LENGTH,
@@ -702,6 +710,12 @@ async function initDBUnlocked(pool: pg.Pool): Promise<void> {
   await pool.query(`ALTER TABLE daemons ADD COLUMN IF NOT EXISTS version VARCHAR(32)`);
   await pool.query(`ALTER TABLE daemons ADD COLUMN IF NOT EXISTS started_at BIGINT`);
   await pool.query(`ALTER TABLE daemons ADD COLUMN IF NOT EXISTS registration_id VARCHAR(64)`);
+  // machine_id is an installation identity, while daemon_id identifies one
+  // daemon process. It is intentionally non-unique: older deployments may
+  // already have duplicate offline rows which are consolidated on reconnect.
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_daemons_user_machine_id
+    ON daemons (user_id, machine_id)
+    WHERE machine_id IS NOT NULL AND machine_id <> 'unknown'`);
 
   // User daemon limit control
   await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS max_daemons INT DEFAULT 1`);
@@ -742,6 +756,9 @@ async function initDBUnlocked(pool: pg.Pool): Promise<void> {
 
   await initDurableIngressSchema(pool);
   await initAttentionInboxSchema(pool);
+  // ADR-0003: extension tables exist in every flag mode so flipping
+  // RELAY_EXTENSIONS never needs a schema deployment window.
+  await initExtensionSchema(pool);
 }
 
 export interface EmailChallengeSendDecision {
@@ -1114,12 +1131,26 @@ export class TokenRevokedDuringActivationError extends Error {
   }
 }
 
+/** The same authenticated installation is already connected under another daemon id. */
+export class MachineAlreadyOnlineError extends Error {
+  constructor() {
+    super('machine already has an online daemon');
+    this.name = 'MachineAlreadyOnlineError';
+  }
+}
+
 // PostgreSQL evaluates hashtext on the database server, so every relay uses the
 // same key. Hash collisions only add harmless serialization; they cannot admit
 // a revoked token. The namespace keeps these locks separate from other users of
 // two-key advisory locks in the application.
 const TOKEN_REVOCATION_LOCK_NAMESPACE = 1885566060;
 const SESSION_MATERIALIZATION_LOCK_NAMESPACE = 1885566061;
+const MACHINE_IDENTITY_LOCK_NAMESPACE = 1885566062;
+const STABLE_MACHINE_ID = /^(?:machine-[a-f0-9]{32}|daemon-[a-f0-9]{8})$/;
+
+function isStableMachineID(machineId: string | undefined): machineId is string {
+  return typeof machineId === 'string' && STABLE_MACHINE_ID.test(machineId);
+}
 
 async function lockTokenRevocationFence(client: pg.PoolClient, jti: string): Promise<void> {
   await client.query(
@@ -1135,6 +1166,17 @@ async function lockSessionMaterializationFence(
   await client.query(
     `SELECT pg_advisory_xact_lock($1, hashtext($2))`,
     [SESSION_MATERIALIZATION_LOCK_NAMESPACE, sessionId],
+  );
+}
+
+async function lockMachineIdentityFence(
+  client: Pick<pg.PoolClient, 'query'>,
+  userId: number,
+  machineId: string,
+): Promise<void> {
+  await client.query(
+    `SELECT pg_advisory_xact_lock($1, hashtext($2))`,
+    [MACHINE_IDENTITY_LOCK_NAMESPACE, `${userId}:${machineId}`],
   );
 }
 
@@ -1259,6 +1301,25 @@ export async function activateDaemonRegistration(  pool: pg.Pool,
       const revoked = await client.query(`SELECT 1 FROM revoked_tokens WHERE jti = $1`, [input.tokenJti]);
       if ((revoked.rowCount ?? 0) > 0) throw new TokenRevokedDuringActivationError();
     }
+    if (input.userId !== null && isStableMachineID(input.machineId)) {
+      await lockMachineIdentityFence(client, input.userId, input.machineId);
+      const onlinePeer = await client.query(
+        `SELECT daemon_id
+         FROM daemons
+         WHERE user_id = $1
+           AND daemon_id <> $2
+           AND status = 'online'
+           AND (
+             machine_id = $3
+             OR (COALESCE(machine_id, '') IN ('', 'unknown') AND daemon_id = $3)
+           )
+         FOR UPDATE`,
+        [input.userId, input.daemonId, input.machineId],
+      );
+      if ((onlinePeer.rowCount ?? onlinePeer.rows.length) > 0) {
+        throw new MachineAlreadyOnlineError();
+      }
+    }
     const previous = await client.query(
       `SELECT hostname, agents, status, last_heartbeat, arch, version, started_at,
               active_token_jti, machine_id, last_login_at, registration_id
@@ -1296,7 +1357,180 @@ export async function activateDaemonRegistration(  pool: pg.Pool,
   }
 }
 
+export interface MachineDaemonConsolidationInput {
+  userId: number;
+  daemonId: string;
+  machineId?: string;
+}
+
+export interface MachineDaemonConsolidationResult {
+  mergedDaemonIds: string[];
+}
+
+/**
+ * Fold offline legacy daemon rows for one authenticated installation into its
+ * newly registered daemon row. This runs only after all registration steps
+ * that can require activation compensation have succeeded; a failed
+ * consolidation therefore rolls back on its own without losing the old host.
+ */
+export async function consolidateOfflineMachineDaemons(
+  pool: pg.Pool,
+  input: MachineDaemonConsolidationInput,
+): Promise<MachineDaemonConsolidationResult> {
+  if (!isStableMachineID(input.machineId)) return { mergedDaemonIds: [] };
+
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    await lockMachineIdentityFence(client, input.userId, input.machineId);
+    const current = await client.query(
+      `SELECT daemon_id, alias FROM daemons
+       WHERE daemon_id = $1 AND user_id = $2
+       FOR UPDATE`,
+      [input.daemonId, input.userId],
+    );
+    if ((current.rowCount ?? current.rows.length) === 0) {
+      throw new Error(`activated daemon is no longer owned by user: ${input.daemonId}`);
+    }
+    const candidates = await client.query(
+      `SELECT daemon_id, alias
+       FROM daemons
+       WHERE user_id = $1
+         AND daemon_id <> $2
+         AND status = 'offline'
+         AND (
+           machine_id = $3
+           OR (COALESCE(machine_id, '') IN ('', 'unknown') AND daemon_id = $3)
+         )
+       FOR UPDATE`,
+      [input.userId, input.daemonId, input.machineId],
+    );
+    const oldDaemonIds = candidates.rows.map((row: { daemon_id: string }) => row.daemon_id);
+    if (oldDaemonIds.length === 0) {
+      await client.query('COMMIT');
+      return { mergedDaemonIds: [] };
+    }
+
+    const currentAlias = current.rows[0]?.alias as string | null | undefined;
+    const legacyAlias = candidates.rows.find((row: { alias?: string | null }) => row.alias)?.alias as string | null | undefined;
+    if ((!currentAlias || !currentAlias.trim()) && legacyAlias?.trim()) {
+      await client.query(`UPDATE daemons SET alias = $1 WHERE daemon_id = $2`, [legacyAlias, input.daemonId]);
+    }
+
+    // A historical daemon row can predate tenant ownership and still be
+    // referenced by sessions from another account. Never move those sessions
+    // across accounts: detach them before deleting the legacy host, while only
+    // this account's sessions are rebound to its new daemon id.
+    await client.query(
+      `UPDATE sessions SET daemon_id = NULL
+       WHERE daemon_id = ANY($1::varchar[])
+         AND (user_id IS NULL OR user_id <> $2)`,
+      [oldDaemonIds, input.userId],
+    );
+    await client.query(
+      `UPDATE sessions SET daemon_id = $1
+       WHERE user_id = $2 AND daemon_id = ANY($3::varchar[])`,
+      [input.daemonId, input.userId, oldDaemonIds],
+    );
+    await client.query(
+      `UPDATE quota_reservations SET daemon_id = $1
+       WHERE user_id = $2 AND daemon_id = ANY($3::varchar[])`,
+      [input.daemonId, input.userId, oldDaemonIds],
+    );
+    await client.query(
+      `UPDATE token_usage_facts SET daemon_id = $1
+       WHERE user_id = $2 AND daemon_id = ANY($3::varchar[])`,
+      [input.daemonId, input.userId, oldDaemonIds],
+    );
+    await client.query(
+      `INSERT INTO token_daily_stats
+         (user_id, daemon_id, date, model, input, output, cache_read, cache_create, requests)
+       SELECT user_id, $1, date, model,
+              SUM(input), SUM(output), SUM(cache_read), SUM(cache_create), SUM(requests)
+       FROM token_daily_stats
+       WHERE user_id = $2 AND daemon_id = ANY($3::varchar[])
+       GROUP BY user_id, date, model
+       ON CONFLICT (user_id, daemon_id, date, model) DO UPDATE SET
+         input = token_daily_stats.input + EXCLUDED.input,
+         output = token_daily_stats.output + EXCLUDED.output,
+         cache_read = token_daily_stats.cache_read + EXCLUDED.cache_read,
+         cache_create = token_daily_stats.cache_create + EXCLUDED.cache_create,
+         requests = token_daily_stats.requests + EXCLUDED.requests`,
+      [input.daemonId, input.userId, oldDaemonIds],
+    );
+    await client.query(
+      `DELETE FROM token_daily_stats
+       WHERE user_id = $1 AND daemon_id = ANY($2::varchar[])`,
+      [input.userId, oldDaemonIds],
+    );
+    await client.query(
+      `INSERT INTO subagent_usage_seen (daemon_id, usage_hash, seq, agent_id, seen_at)
+       SELECT $1, usage_hash, seq, agent_id, seen_at
+       FROM subagent_usage_seen
+       WHERE daemon_id = ANY($2::text[])
+       ON CONFLICT (daemon_id, usage_hash) DO NOTHING`,
+      [input.daemonId, oldDaemonIds],
+    );
+    await client.query(
+      `DELETE FROM subagent_usage_seen WHERE daemon_id = ANY($1::text[])`,
+      [oldDaemonIds],
+    );
+
+    // Both attention tables key the daemon into an account-scoped unique key.
+    // Preserve the current daemon's record if the same request/generation
+    // already exists, then move every remaining legacy record.
+    await client.query(
+      `DELETE FROM attention_items legacy
+       USING attention_items current_item
+       WHERE legacy.user_id = $1
+         AND legacy.daemon_id = ANY($2::varchar[])
+         AND current_item.user_id = legacy.user_id
+         AND current_item.daemon_id = $3
+         AND current_item.session_id = legacy.session_id
+         AND current_item.request_id = legacy.request_id
+         AND current_item.kind = legacy.kind`,
+      [input.userId, oldDaemonIds, input.daemonId],
+    );
+    await client.query(
+      `UPDATE attention_items SET daemon_id = $1
+       WHERE user_id = $2 AND daemon_id = ANY($3::varchar[])`,
+      [input.daemonId, input.userId, oldDaemonIds],
+    );
+    await client.query(
+      `DELETE FROM attention_recovery_items legacy
+       USING attention_recovery_items current_item
+       WHERE legacy.user_id = $1
+         AND legacy.daemon_id = ANY($2::varchar[])
+         AND current_item.user_id = legacy.user_id
+         AND current_item.daemon_id = $3
+         AND current_item.registration_generation = legacy.registration_generation`,
+      [input.userId, oldDaemonIds, input.daemonId],
+    );
+    await client.query(
+      `UPDATE attention_recovery_items SET daemon_id = $1
+       WHERE user_id = $2 AND daemon_id = ANY($3::varchar[])`,
+      [input.daemonId, input.userId, oldDaemonIds],
+    );
+    await client.query(
+      `DELETE FROM daemons
+       WHERE user_id = $1 AND daemon_id = ANY($2::varchar[]) AND status = 'offline'`,
+      [input.userId, oldDaemonIds],
+    );
+    await client.query('COMMIT');
+    return { mergedDaemonIds: oldDaemonIds };
+  } catch (error) {
+    await client.query('ROLLBACK');
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
 /** Restore a failed activation only while its exact generation is still current. */
+function jsonbParameter(value: unknown): string {
+  return typeof value === 'string' ? value : JSON.stringify(value ?? []);
+}
+
 export async function restoreDaemonRegistration(
   pool: pg.Pool,
   daemonId: string,
@@ -1311,7 +1545,7 @@ export async function restoreDaemonRegistration(
            hostname = $3, agents = $4, status = $5, last_heartbeat = $6, arch = $7, version = $8,
            started_at = $9, active_token_jti = $10, machine_id = $11, last_login_at = $12, registration_id = $13
          WHERE daemon_id = $1 AND registration_id = $2`,
-        [daemonId, registrationId, snapshot.hostname, snapshot.agents, snapshot.status, snapshot.last_heartbeat,
+        [daemonId, registrationId, snapshot.hostname, jsonbParameter(snapshot.agents), snapshot.status, snapshot.last_heartbeat,
          snapshot.arch, snapshot.version, snapshot.started_at, snapshot.active_token_jti, snapshot.machine_id,
          snapshot.last_login_at, snapshot.registration_id],
       );
@@ -1469,6 +1703,90 @@ export async function persistEvent(pool: pg.Pool, sessionId: string, eventType: 
     }
   }
   /* unreachable */ return 0;
+}
+
+/** Raised when a client event names a session the caller does not own. */
+export class ClientEventOwnershipError extends Error {
+  constructor() {
+    super('session not found or not owned')
+    this.name = 'ClientEventOwnershipError'
+  }
+}
+
+export interface OwnedClientEventResult {
+  eventId: number;
+  inserted: boolean;
+}
+
+/**
+ * ADR-0003 client-event persistence: ownership check, dedup insert and the
+ * extension Source Journal append all run inside one session fence
+ * transaction, so a local_command_log pair either lands durably with its
+ * journal rows or not at all. The DO UPDATE conflict path returns the
+ * existing row id, letting a replay repair a journal row lost to an older
+ * crash without duplicating feed identity.
+ */
+export async function persistOwnedClientEvent(
+  pool: pg.Pool,
+  userId: number,
+  sessionId: string,
+  eventType: string,
+  payload: any,
+  journalSink: ExtensionJournalSink | null,
+): Promise<OwnedClientEventResult> {
+  return withSessionMaterializationFence(pool, sessionId, async (client) => {
+    const session = await client.query<{ user_id: number | null; source: string | null }>(
+      `SELECT user_id, source FROM sessions WHERE session_id = $1`,
+      [sessionId],
+    );
+    const row = session.rows[0];
+    if (!row || row.user_id !== userId || sessionId.startsWith('pending-')) {
+      throw new ClientEventOwnershipError();
+    }
+    const persistedPayload = sanitizeJSONBPayload(payload);
+    const payloadStr = JSON.stringify(persistedPayload);
+    const hash = createHash('md5')
+      .update(eventHashInput(sessionId, eventType, persistedPayload))
+      .digest('hex').slice(0, 16);
+    const result = await client.query(
+      `INSERT INTO events (session_id, event_type, payload, event_hash, user_id)
+       VALUES ($1, $2, $3, $4, $5)
+       ON CONFLICT (session_id, event_hash) DO UPDATE
+         SET user_id = COALESCE(events.user_id, EXCLUDED.user_id)
+       RETURNING id, (xmax = 0) AS inserted`,
+      [sessionId, eventType, payloadStr, hash, userId],
+    );
+    const eventRow = result.rows[0];
+    if (!eventRow) throw new Error('owned client event row unavailable');
+    const inserted = eventRow.inserted === undefined || eventRow.inserted === true || eventRow.inserted === 't';
+    if (inserted) {
+      await client.query(
+        `UPDATE sessions SET last_activity_at = NOW(), updated_at = NOW() WHERE session_id = $1`,
+        [sessionId],
+      );
+    }
+    if (journalSink) {
+      const eligibility = extensionJournalEligibility({
+        ownerUserId: row.user_id,
+        ledgerSessionId: sessionId,
+        sessionId,
+        sessionSource: row.source,
+      });
+      if (!eligibility.journal) {
+        if (eligibility.reason === 'skipped_no_owner') throw new ExtensionJournalOwnerMissingError()
+      } else {
+        await journalSink.appendCanonicalEvent(client, {
+          sourceEventId: Number(eventRow.id),
+          ownerUserId: userId,
+          sessionId,
+          eventType,
+          occurredAt: null,
+          payload,
+        })
+      }
+    }
+    return { eventId: Number(eventRow.id), inserted }
+  })
 }
 
 export interface PersistedEventEffect {
@@ -2808,6 +3126,10 @@ export async function deleteUserAccount(pool: pg.Pool, userId: number): Promise<
       return false;
     }
 
+    // ADR-0003: provider purge evidence must be created before the user rows
+    // disappear; it carries no user FK and survives until the provider acks.
+    await revokeExtensionDataForUser(client, userId);
+
     const sessions = await client.query(
       `SELECT session_id FROM sessions WHERE user_id = $1`,
       [userId],
@@ -2912,10 +3234,135 @@ export async function listSessionsByUser(pool: pg.Pool, userId: number): Promise
 
 // --- Session deletion ---
 
+/**
+ * ADR-0003 narrow helper: clear a session's extension content and journal a
+ * generic tombstone, when Extension delivery is active, inside the caller's
+ * fenced transaction. Runs before the
+ * canonical session deletes so the Relay never keeps exposing deleted
+ * content through Feed or Snapshot. The tombstone source row survives to be
+ * projected into the shared feed so providers can reconcile.
+ */
+export async function purgeExtensionContentForSession(
+  client: Pick<pg.PoolClient, 'query'>,
+  sessionId: string,
+  options: { emitTombstone?: boolean } = {},
+): Promise<void> {
+  const owner = await client.query<{ user_id: number | null }>(
+    `SELECT user_id FROM sessions WHERE session_id = $1`,
+    [sessionId],
+  );
+  const ownerId = owner.rows[0]?.user_id ?? null;
+  // Unprojected journal content for this session must not outlive it.
+  await client.query(
+    `DELETE FROM extension_source_outbox WHERE session_id = $1 AND source_kind = 'canonical_event'`,
+    [sessionId],
+  );
+  // Feed content rows (tombstone rows keep a different source_kind).
+  await client.query(
+    `DELETE FROM extension_feed WHERE session_id = $1 AND source_kind = 'canonical_event'`,
+    [sessionId],
+  );
+  if (options.emitTombstone !== false && ownerId !== null && ownerId !== undefined) {
+    await client.query(
+      `INSERT INTO extension_source_outbox
+         (source_kind, source_id, owner_user_id, session_id, event_type, occurred_at, payload)
+       VALUES ('session_deleted', 'session_deleted:' || $2, $1, $2::varchar(64), 'session_deleted', NOW(), $3::jsonb)
+       ON CONFLICT (source_kind, source_id) DO NOTHING`,
+      [ownerId, sessionId, JSON.stringify({ session_id: sessionId })],
+    );
+  }
+}
+
+/**
+ * ADR-0003/ADR-0005 account deletion: create provider purge requests (no
+ * content, no user FK — they must survive the account), revoke and detach
+ * personal installations (never cascade-delete; shared Team/Organization
+ * installations carry no owner and survive untouched), revoke scope
+ * memberships while advancing the owning scopes' authorization epochs, then
+ * clear the user's extension journal and feed rows explicitly.
+ */
+export async function revokeExtensionDataForUser(
+  client: Pick<pg.PoolClient, 'query'>,
+  userId: number,
+): Promise<void> {
+  await client.query(`
+    INSERT INTO extension_purge_requests
+      (request_id, provider_id, installation_id, reason, expires_at)
+    SELECT gen_random_uuid(), provider_id, installation_id, 'account_deleted',
+           NOW() + INTERVAL '30 days'
+    FROM extension_installations
+    WHERE owner_user_id = $1 AND status <> 'revoked'
+    ON CONFLICT (provider_id, installation_id, reason) DO NOTHING
+  `, [userId]);
+  await client.query(
+    `UPDATE extension_installations
+     SET status = 'revoked', owner_user_id = NULL,
+         config_version = config_version + 1, updated_at = NOW()
+     WHERE owner_user_id = $1 AND status <> 'revoked'`,
+    [userId],
+  );
+  // Revoke scope memberships and advance every affected scope's authorization
+  // epoch so outstanding v2 grants fail at the next mirror comparison.
+  await client.query(`
+    UPDATE extension_organizations
+    SET authorization_epoch = authorization_epoch + 1, revision = revision + 1, updated_at = NOW()
+    WHERE EXISTS (
+      SELECT 1 FROM extension_scope_memberships m
+      WHERE m.scope_kind = 'organization'
+        AND m.scope_id = extension_organizations.organization_id
+        AND m.user_id = $1 AND m.state <> 'revoked'
+    )
+  `, [userId]);
+  await client.query(`
+    UPDATE extension_teams
+    SET authorization_epoch = authorization_epoch + 1, revision = revision + 1, updated_at = NOW()
+    WHERE EXISTS (
+      SELECT 1 FROM extension_scope_memberships m
+      WHERE m.scope_kind = 'team'
+        AND m.scope_id = extension_teams.team_id
+        AND m.user_id = $1 AND m.state <> 'revoked'
+    )
+  `, [userId]);
+  await client.query(`
+    INSERT INTO extension_scope_outbox (scope_kind, scope_id, topic, payload)
+    SELECT m.scope_kind, m.scope_id, 'scope.membership.v2',
+           jsonb_build_object(
+             'membership_id', m.membership_id,
+             'event_type', 'membership_state_changed',
+             'membership_revision', m.membership_revision + 1,
+             'state', 'revoked',
+             'roles', to_jsonb(m.roles),
+             'authorization_epoch', CASE m.scope_kind
+               WHEN 'organization' THEN o.authorization_epoch
+               ELSE t.authorization_epoch
+             END
+           )
+    FROM extension_scope_memberships m
+    LEFT JOIN extension_organizations o
+      ON m.scope_kind = 'organization' AND o.organization_id = m.scope_id
+    LEFT JOIN extension_teams t
+      ON m.scope_kind = 'team' AND t.team_id = m.scope_id
+    WHERE m.user_id = $1 AND m.state <> 'revoked'
+  `, [userId]);
+  await client.query(
+    `UPDATE extension_scope_memberships
+     SET state = 'revoked', membership_revision = membership_revision + 1,
+         revoked_at = NOW(), updated_at = NOW()
+     WHERE user_id = $1 AND state <> 'revoked'`,
+    [userId],
+  );
+  await client.query(`DELETE FROM extension_source_outbox WHERE owner_user_id = $1`, [userId]);
+  await client.query(`DELETE FROM extension_feed WHERE owner_user_id = $1`, [userId]);
+}
+
 export async function deleteSession(
   pool: pg.Pool,
   sessionId: string,
-  options: { usageFactsAuthoritative?: boolean; writeUsageFacts?: boolean } = {},
+  options: {
+    usageFactsAuthoritative?: boolean;
+    writeUsageFacts?: boolean;
+    extensionMode?: ExtensionMode;
+  } = {},
 ): Promise<void> {
   const client = await pool.connect();
   try {
@@ -2991,6 +3438,12 @@ export async function deleteSession(
     );
     await client.query(`DELETE FROM event_inbox WHERE session_id = $1 AND status <> 3`, [sessionId]);
     await client.query(`DELETE FROM events WHERE session_id = $1`, [sessionId]);
+    // ADR-0003: extension content is purged in the same fenced transaction;
+    // shadow/enabled additionally journal a generic provider tombstone.
+    const extensionMode = options.extensionMode ?? extensionModeFromEnv();
+    await purgeExtensionContentForSession(client, sessionId, {
+      emitTombstone: extensionMode !== 'off',
+    });
     await client.query(`DELETE FROM token_session_daily_stats WHERE session_id = $1`, [sessionId]);
     await client.query(`DELETE FROM sessions WHERE session_id = $1`, [sessionId]);
     await client.query(

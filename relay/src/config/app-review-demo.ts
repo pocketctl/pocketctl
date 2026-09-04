@@ -25,7 +25,7 @@ interface DemoSession {
 const demoSessions: DemoSession[] = [
   {
     id: 'app-review-demo-ios-release',
-    agent: 'codex', cwd: '~/projects/pocketctl', source: 'daemon', status: 'running',
+    agent: 'codex', cwd: '~/projects/pocketctl', source: 'app_review_demo', status: 'running',
     title: '准备 iOS 1.0 App Store 发布', model: 'gpt-5.3-codex', minutesAgo: 2,
     events: [
       { type: 'user_text', payload: { type: 'user_text', content: '检查 iOS 发版配置和 App Store 提交材料。' } },
@@ -37,7 +37,7 @@ const demoSessions: DemoSession[] = [
   },
   {
     id: 'app-review-demo-session-sync',
-    agent: 'claude-code', cwd: '~/projects/pocketctl', source: 'terminal', status: 'completed',
+    agent: 'claude-code', cwd: '~/projects/pocketctl', source: 'app_review_demo', status: 'completed',
     title: '优化跨设备会话同步', model: 'claude-opus-4-6', minutesAgo: 18,
     events: [
       { type: 'user_text', payload: { type: 'user_text', content: '检查会话在手机和电脑之间的同步状态。' } },
@@ -46,7 +46,7 @@ const demoSessions: DemoSession[] = [
   },
   {
     id: 'app-review-demo-host-monitoring',
-    agent: 'opencode', cwd: '~/projects/demo', source: 'web', status: 'completed',
+    agent: 'opencode', cwd: '~/projects/demo', source: 'app_review_demo', status: 'completed',
     title: '查看开发主机运行状态', model: 'anthropic/claude-sonnet-4', minutesAgo: 45,
     events: [
       { type: 'user_text', payload: { type: 'user_text', content: '汇总当前开发主机和 Agent 状态。' } },
