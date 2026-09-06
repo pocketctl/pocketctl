@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"testing/synctest"
 	"time"
@@ -19,9 +20,11 @@ func TestDeviceAuthorizationCountdownExpires(t *testing.T) {
 			synctest.Test(t, func(t *testing.T) {
 				start := time.Now()
 				var out bytes.Buffer
-				calls := 0
+				// The poll closure runs on its own goroutine inside
+				// waitForDeviceAuthorization; count atomically.
+				var calls atomic.Int32
 				_, _, err := waitForDeviceAuthorization(start.Add(12*time.Second), 5*time.Second, &out, func(ctx context.Context) (*api.DeviceTokenResponse, error) {
-					calls++
+					calls.Add(1)
 					if mode == "blocked" {
 						<-ctx.Done()
 						return nil, ctx.Err()
@@ -42,12 +45,12 @@ func TestDeviceAuthorizationCountdownExpires(t *testing.T) {
 						t.Fatalf("missing countdown %d: %q", remaining, out.String())
 					}
 				}
-				wantCalls := 2
+				wantCalls := int32(2)
 				if mode == "blocked" || mode == "slow_down" {
 					wantCalls = 1
 				}
-				if calls != wantCalls {
-					t.Fatalf("poll calls = %d, want %d", calls, wantCalls)
+				if got := calls.Load(); got != wantCalls {
+					t.Fatalf("poll calls = %d, want %d", got, wantCalls)
 				}
 			})
 		})

@@ -9,7 +9,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/pocketctl/pocketctl/internal/adapter"
 	"github.com/pocketctl/pocketctl/internal/protocol"
 	"github.com/pocketctl/pocketctl/internal/session"
 	"github.com/pocketctl/pocketctl/internal/watcher"
@@ -34,15 +33,32 @@ func TestIsSDKSpawnedSession(t *testing.T) {
 	}
 }
 
-func TestHandleSDKSpawnedSession(t *testing.T) {
+// handleSDKSpawnedSession drops SDK sessions without a live host synchronously.
+func TestHandleSDKSpawnedSessionDropsWithoutHost(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(os.Stderr, nil))
+	out := make(chan protocol.DaemonEvent, 8)
+	sm := session.NewSessionManager(out)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	handleSDKSpawnedSession(ctx, sm, watcher.SessionEvent{Session: watcher.DiscoveredSession{
+		SessionID: "sdk-2", Cwd: "/repo", Entrypoint: "sdk-py",
+	}}, logger, out)
+
+	select {
+	case ev := <-out:
+		t.Fatalf("expected no events, got %q", ev.Type)
+	default:
+	}
+}
+
+func TestAttachSDKSession(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(os.Stderr, nil))
 	const cwd = "/repo"
 
-	// Attachment runs on its own goroutine; shrink the retry cadence so the
-	// failure paths return promptly instead of waiting the production budget.
-	origInterval, origAttempts := sdkJSONLRetryInterval, sdkJSONLRetryAttempts
-	sdkJSONLRetryInterval, sdkJSONLRetryAttempts = 5*time.Millisecond, 3
-	t.Cleanup(func() { sdkJSONLRetryInterval, sdkJSONLRetryAttempts = origInterval, origAttempts })
+	fastOpts := func(resolve func(string, string) (string, error)) sdkAttachOptions {
+		return sdkAttachOptions{resolve: resolve, retryInterval: 5 * time.Millisecond, retryAttempts: 3}
+	}
 
 	writeJSONL := func(t *testing.T) string {
 		t.Helper()
@@ -52,12 +68,6 @@ func TestHandleSDKSpawnedSession(t *testing.T) {
 			t.Fatal(err)
 		}
 		return path
-	}
-
-	restoreResolver := func(fn func(string, string) (string, error)) func() {
-		orig := resolveSDKJSONLPath
-		resolveSDKJSONLPath = fn
-		return func() { resolveSDKJSONLPath = orig }
 	}
 
 	awaitEvent := func(t *testing.T, out chan protocol.DaemonEvent) protocol.DaemonEvent {
@@ -80,25 +90,16 @@ func TestHandleSDKSpawnedSession(t *testing.T) {
 		}
 	}
 
-	registerHost := func() (*session.SessionManager, chan protocol.DaemonEvent) {
-		out := make(chan protocol.DaemonEvent, 8)
-		sm := session.NewSessionManager(out)
-		sm.RegisterTerminalSession("host-1", cwd, 0, "", "busy", adapter.AgentClaude)
-		sm.RestoreSessionActivity("host-1", time.Now())
-		return sm, out
-	}
-
 	t.Run("attaches to host with sdk_session kind and title", func(t *testing.T) {
 		jsonlPath := writeJSONL(t)
-		defer restoreResolver(func(string, string) (string, error) { return jsonlPath, nil })()
-
-		sm, out := registerHost()
+		out := make(chan protocol.DaemonEvent, 8)
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
 
-		handleSDKSpawnedSession(ctx, sm, watcher.SessionEvent{Session: watcher.DiscoveredSession{
-			SessionID: "sdk-1", Cwd: cwd, Entrypoint: "sdk-py",
-		}}, logger, out)
+		if _, attached := attachSDKSession(ctx, "sdk-1", cwd, "host-1", logger, out,
+			fastOpts(func(string, string) (string, error) { return jsonlPath, nil })); !attached {
+			t.Fatal("expected successful attachment")
+		}
 
 		ev := awaitEvent(t, out)
 		if ev.Type != "subagent_discovered" {
@@ -121,52 +122,35 @@ func TestHandleSDKSpawnedSession(t *testing.T) {
 	t.Run("retries jsonl resolution across the cold-start window", func(t *testing.T) {
 		jsonlPath := writeJSONL(t)
 		calls := 0
-		defer restoreResolver(func(string, string) (string, error) {
-			calls++
-			if calls < 3 {
-				return "", os.ErrNotExist // per-PID file beats jsonl on disk
-			}
-			return jsonlPath, nil
-		})()
-
-		sm, out := registerHost()
+		out := make(chan protocol.DaemonEvent, 8)
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
 
-		handleSDKSpawnedSession(ctx, sm, watcher.SessionEvent{Session: watcher.DiscoveredSession{
-			SessionID: "sdk-1", Cwd: cwd, Entrypoint: "sdk-py",
-		}}, logger, out)
+		if _, attached := attachSDKSession(ctx, "sdk-1", cwd, "host-1", logger, out,
+			fastOpts(func(string, string) (string, error) {
+				calls++
+				if calls < 3 {
+					return "", os.ErrNotExist // per-PID file beats jsonl on disk
+				}
+				return jsonlPath, nil
+			})); !attached {
+			t.Fatal("expected successful attachment after retry")
+		}
 
 		if ev := awaitEvent(t, out); ev.AgentID != "sdk-1" {
 			t.Fatalf("agent id = %q, want sdk-1 after retry", ev.AgentID)
 		}
 	})
 
-	t.Run("drops session when no host is active", func(t *testing.T) {
-		defer restoreResolver(func(string, string) (string, error) { return writeJSONL(t), nil })()
-
-		out := make(chan protocol.DaemonEvent, 8)
-		sm := session.NewSessionManager(out)
-		ctx, cancel := context.WithCancel(context.Background())
-		defer cancel()
-
-		handleSDKSpawnedSession(ctx, sm, watcher.SessionEvent{Session: watcher.DiscoveredSession{
-			SessionID: "sdk-2", Cwd: cwd, Entrypoint: "sdk-py",
-		}}, logger, out)
-
-		assertNoEvent(t, out)
-	})
-
 	t.Run("drops session when jsonl never resolves", func(t *testing.T) {
-		defer restoreResolver(func(string, string) (string, error) { return "", os.ErrNotExist })()
-
-		sm, out := registerHost()
+		out := make(chan protocol.DaemonEvent, 8)
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
 
-		handleSDKSpawnedSession(ctx, sm, watcher.SessionEvent{Session: watcher.DiscoveredSession{
-			SessionID: "sdk-3", Cwd: cwd, Entrypoint: "sdk-py",
-		}}, logger, out)
+		if _, attached := attachSDKSession(ctx, "sdk-3", cwd, "host-1", logger, out,
+			fastOpts(func(string, string) (string, error) { return "", os.ErrNotExist })); attached {
+			t.Fatal("expected attachment to give up")
+		}
 
 		assertNoEvent(t, out)
 	})
