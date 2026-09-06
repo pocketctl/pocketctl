@@ -2047,8 +2047,20 @@ export class Router {
     }
     if (sessionId && msg.type === 'session_title_update') {
       if (!durableIngressOwnsAck) this.markPersisted(daemonId, msg.seq);
-      void this.authorizeEphemeralTitleSession(daemonId, sessionId).then((allowed) => {
+      void this.authorizeEphemeralTitleSession(daemonId, sessionId).then(async (allowed) => {
         if (!allowed) return;
+        if (msg.title_source === 'codex-desktop') {
+          if (typeof msg.title !== 'string' || typeof msg.title_updated_at !== 'string' ||
+            !await db.updateCodexDesktopTitle(this.pool, sessionId, msg.title, msg.title_updated_at)) return;
+        } else {
+          const result = await this.pool.query(
+            `UPDATE sessions SET title = $1
+             WHERE session_id = $2 AND COALESCE(title_source, '') NOT IN ('manual', 'codex-desktop')
+               AND (title LIKE 'Terminal Session-%' OR title IS NULL)`,
+            [String(msg.title ?? ''), sessionId],
+          );
+          if (!(result.rowCount ?? 0)) return;
+        }
         this.deliverMaterializedEvent({
           eventId: null,
           userId: this.daemons.get(daemonId)?.userId ?? null,
@@ -2060,11 +2072,6 @@ export class Router {
           type: 'session_title_update',
           payload: msg,
         });
-        void this.pool.query(
-          `UPDATE sessions SET title = $1
-           WHERE session_id = $2 AND (title LIKE 'Terminal Session-%' OR title IS NULL)`,
-          [String(msg.title ?? ''), sessionId],
-        ).catch((error) => this.logBestEffortFailure('session_title_update', error));
       }).catch((error) => this.logBestEffortFailure('session_title_update authorization', error));
       return;
     }

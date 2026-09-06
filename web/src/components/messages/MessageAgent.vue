@@ -1,12 +1,12 @@
 <template>
   <!-- Agent text: clean full-width text block, no left bar.
-       A subtle "assistant" label + relaxed typography separates turns —
+       A subtle agent label + relaxed typography separates turns —
        closer to codex / zcode client content-first layout. While streaming,
        the growing text renders as plain pre-wrapped text nodes: re-running
        markdown + highlight + sanitize on every chunk dominates output latency.
        The final content switches back to the full markdown renderer. -->
   <div class="agent-block">
-    <div class="block-role">assistant</div>
+    <div class="block-role">{{ agentReplyLabel(agentType) }}</div>
     <div :class="['agent-body', { streaming }]">
       <div v-if="streaming" class="streaming-text">{{ content }}</div>
       <MarkdownRenderer v-else :content="content" />
@@ -17,8 +17,9 @@
 
 <script setup lang="ts">
 import MarkdownRenderer from '../MarkdownRenderer.vue'
+import { agentReplyLabel } from '../../utils/agentDisplay'
 
-defineProps<{ content: string; streaming?: boolean }>()
+defineProps<{ content: string; streaming?: boolean; agentType?: string }>()
 </script>
 
 <style scoped>
@@ -32,7 +33,6 @@ defineProps<{ content: string; streaming?: boolean }>()
   font-size: 11px;
   font-weight: 600;
   color: var(--fg-tertiary);
-  text-transform: uppercase;
   letter-spacing: 0.6px;
   margin-bottom: 6px;
 }

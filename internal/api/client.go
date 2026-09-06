@@ -2,6 +2,7 @@ package api
 
 import (
 	"bytes"
+	"context"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
@@ -85,6 +86,11 @@ func DeviceAuthorize(baseURL, clientID, codeChallenge, machineID string) (*Devic
 
 // DeviceToken polls the token endpoint for an access token per RFC 8628 §3.4.
 func DeviceToken(baseURL, deviceCode, clientID, codeVerifier string) (*DeviceTokenResponse, error) {
+	return DeviceTokenContext(context.Background(), baseURL, deviceCode, clientID, codeVerifier)
+}
+
+// DeviceTokenContext polls for a token with cancellation and deadline support.
+func DeviceTokenContext(ctx context.Context, baseURL, deviceCode, clientID, codeVerifier string) (*DeviceTokenResponse, error) {
 	body := map[string]string{
 		"grant_type":    "urn:ietf:params:oauth:grant-type:device_code",
 		"device_code":   deviceCode,
@@ -92,7 +98,7 @@ func DeviceToken(baseURL, deviceCode, clientID, codeVerifier string) (*DeviceTok
 		"code_verifier": codeVerifier,
 	}
 
-	resp, err := postJSON(baseURL+"/api/auth/device/token", body)
+	resp, err := postJSONContext(ctx, baseURL+"/api/auth/device/token", body)
 	if err != nil {
 		return nil, err
 	}
@@ -257,11 +263,15 @@ func jwtPayload(tokenStr string) ([]byte, error) {
 // ---- Helpers ----
 
 func postJSON(url string, body map[string]string) (map[string]any, error) {
+	return postJSONContext(context.Background(), url, body)
+}
+
+func postJSONContext(ctx context.Context, url string, body map[string]string) (map[string]any, error) {
 	raw, err := json.Marshal(body)
 	if err != nil {
 		return nil, fmt.Errorf("marshal body: %w", err)
 	}
-	req, err := http.NewRequest("POST", url, bytes.NewReader(raw))
+	req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(raw))
 	if err != nil {
 		return nil, fmt.Errorf("create request: %w", err)
 	}

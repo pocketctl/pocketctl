@@ -211,6 +211,8 @@ type DaemonEvent struct {
 	ReservationID          string                   `json:"reservation_id,omitempty"`
 	Approved               bool                     `json:"approved,omitempty"` // for approval_resolved: how it was answered (terminal-side)
 	Title                  string                   `json:"title,omitempty"`
+	TitleSource            string                   `json:"title_source,omitempty"`
+	TitleUpdatedAt         string                   `json:"title_updated_at,omitempty"`
 	Cwd                    string                   `json:"cwd,omitempty"`
 	Source                 string                   `json:"source,omitempty"`
 	Resync                 bool                     `json:"resync,omitempty"` // reconnect replay, not a newly discovered session
