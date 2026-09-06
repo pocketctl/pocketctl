@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/pocketctl/pocketctl/internal/adapter"
+	"github.com/pocketctl/pocketctl/internal/platform"
 )
 
 // Codex stores every session as a persistent append-only rollout file under
@@ -36,6 +37,7 @@ type CodexSessionWatcher struct {
 	replayCursor    *CodexReplayCursorStore
 	replayNotBefore time.Time
 	readMetadata    func(string) (adapter.CodexRolloutMetadata, bool)
+	listProcesses   func() ([]platform.ProcessSnapshot, error)
 }
 
 // NewCodexSessionWatcher creates a watcher over the CODEX_HOME-aware sessions dir.
@@ -45,11 +47,12 @@ func NewCodexSessionWatcher() *CodexSessionWatcher {
 
 func NewCodexSessionWatcherWithReplayCursor(cursor *CodexReplayCursorStore) *CodexSessionWatcher {
 	return &CodexSessionWatcher{
-		sessionsDir:  adapter.CodexSessionsDir(),
-		eventsCh:     make(chan SessionEvent, 32),
-		seen:         make(map[string]bool),
-		replayCursor: cursor,
-		readMetadata: adapter.ReadCodexRolloutMetadata,
+		sessionsDir:   adapter.CodexSessionsDir(),
+		eventsCh:      make(chan SessionEvent, 32),
+		seen:          make(map[string]bool),
+		replayCursor:  cursor,
+		readMetadata:  adapter.ReadCodexRolloutMetadata,
+		listProcesses: platform.NewProcessInspector().List,
 	}
 }
 
@@ -254,9 +257,16 @@ func (cw *CodexSessionWatcher) projectSession(path string, meta adapter.CodexRol
 	if meta.IsSubagent {
 		agentType = adapter.AgentCodex
 	}
+	pid := 0
+	if agentType == adapter.AgentCodex && source == "terminal" && !meta.IsSubagent && cw.listProcesses != nil {
+		if processes, err := cw.listProcesses(); err == nil {
+			pid = NativeCodexTerminalPID(processes, meta.Cwd)
+		}
+	}
 	return DiscoveredSession{
 		SessionID:       meta.ID,
 		Cwd:             meta.Cwd,
+		Pid:             pid,
 		Status:          "busy",
 		ParentSessionID: meta.ParentThreadID,
 		RootSessionID:   meta.RootSessionID,

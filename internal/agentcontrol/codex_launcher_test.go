@@ -87,6 +87,71 @@ func TestCodexLauncherNativeCommandNeverAcquires(t *testing.T) {
 		t.Fatalf("called=%v exec=%+v", called, executed)
 	}
 }
+
+func TestCodexLauncherStripsInheritedDesktopOriginFromCLIProcess(t *testing.T) {
+	realBinary := validatedTestExecutable(t, "real-codex")
+	tests := []struct {
+		name    string
+		args    []string
+		acquire func(context.Context, AcquirePayload) (AcquireResult, error)
+	}{
+		{
+			name: "managed",
+			acquire: func(context.Context, AcquirePayload) (AcquireResult, error) {
+				return AcquireResult{
+					Mode: string(LaunchManaged), RemoteURI: "unix:///tmp/pocketctl-codex.sock",
+					RealBinary: realBinary,
+				}, nil
+			},
+		},
+		{
+			name: "daemon fallback",
+			acquire: func(context.Context, AcquirePayload) (AcquireResult, error) {
+				return AcquireResult{Mode: string(LaunchNative), RealBinary: realBinary, Reason: "disabled"}, nil
+			},
+		},
+		{
+			name: "native command",
+			args: []string{"exec", "--json", "hello"},
+			acquire: func(context.Context, AcquirePayload) (AcquireResult, error) {
+				t.Fatal("native command must not acquire a managed session")
+				return AcquireResult{}, nil
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var executed ExecSpec
+			launcher := CodexLauncher{
+				Acquire:       tt.acquire,
+				ResolveBinary: func() (string, error) { return realBinary, nil },
+				Execute:       func(spec ExecSpec) error { executed = spec; return nil },
+				Environ: func() []string {
+					return []string{
+						"HOME=/tmp/home",
+						"CODEX_INTERNAL_ORIGINATOR_OVERRIDE=Codex Desktop",
+						"CODEX_INTERNAL_ORIGINATOR_OVERRIDE_SUFFIX=keep",
+						"KEEP=yes",
+					}
+				},
+			}
+
+			if err := launcher.Run(context.Background(), tt.args, "/repo"); err != nil {
+				t.Fatal(err)
+			}
+			want := []string{
+				"HOME=/tmp/home",
+				"CODEX_INTERNAL_ORIGINATOR_OVERRIDE_SUFFIX=keep",
+				"KEEP=yes",
+			}
+			if !reflect.DeepEqual(executed.Env, want) {
+				t.Fatalf("Codex CLI environment=%v, want %v", executed.Env, want)
+			}
+		})
+	}
+}
+
 func TestCodexLauncherRejectsOwnedShimFromDaemonNativeResponse(t *testing.T) {
 	ownedShim := filepath.Join(t.TempDir(), "codex")
 	writeShimFixture(t, ownedShim, "#!/bin/sh\n"+launcherMarkerV3Unix+"\nexit 0\n")

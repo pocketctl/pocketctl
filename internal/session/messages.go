@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"github.com/pocketctl/pocketctl/internal/memorycontext"
 	"io"
+	"log/slog"
+	"path/filepath"
 	"time"
 
 	"github.com/pocketctl/pocketctl/internal/adapter"
@@ -198,6 +200,7 @@ func (sm *SessionManager) dispatchUserMessage(ctx context.Context, sessionID str
 }
 
 func (sm *SessionManager) dispatchUserMessageWithContext(ctx context.Context, sessionID string, content string, hidden *memorycontext.PreparedContext) error {
+	correlation := userMessageCorrelationFrom(ctx)
 	ctx, release, err := sm.acquireObserverDrive(ctx, sessionID)
 	if err != nil {
 		return err
@@ -377,12 +380,16 @@ func (sm *SessionManager) dispatchUserMessageWithContext(ctx context.Context, se
 		Type:      "user_text",
 		SessionID: ps.SessionID,
 		Text:      content,
+		RequestID: correlation.RequestID,
+		MsgID:     correlation.MsgID,
+		TurnID:    correlation.TurnID,
 	}
 	go func() {
 		sm.drainStreamOutput(proc.Stdout(), adp, ps)
 		waitErr := proc.Wait()
 		sm.finalizeProcessExit(ctx, waitErr, ps)
 		sm.finishOwnedResume(entry, waitErr)
+		sm.publishResumeFailure(ctx, proc, waitErr, sessionID, cwd, correlation, agentType, cliPath)
 	}()
 	return nil
 }
@@ -438,6 +445,8 @@ func (sm *SessionManager) sendToIdleTerminal(ctx context.Context, ps *ProcessSta
 	if agentType == "" {
 		agentType = adapter.AgentClaude
 	}
+	correlation := userMessageCorrelationFrom(ctx)
+	launchSessionID, launchCwd := ps.SessionID, ps.Cwd
 	cliPath, err := findAgentCLI(agentType)
 	if err != nil {
 		return err
@@ -544,6 +553,7 @@ func (sm *SessionManager) sendToIdleTerminal(ctx context.Context, ps *ProcessSta
 		ps.LastActivityAt = resumeNow
 		sm.mu.Unlock()
 		sm.finishOwnedResume(entry, waitErr)
+		sm.publishResumeFailure(ctx, proc, waitErr, launchSessionID, launchCwd, correlation, agentType, cliPath)
 
 		sm.outputCh <- protocol.DaemonEvent{
 			Type:           "session_status",
@@ -563,6 +573,33 @@ func (sm *SessionManager) sendToIdleTerminal(ctx context.Context, ps *ProcessSta
 	}()
 
 	return nil
+}
+
+func (sm *SessionManager) publishResumeFailure(ctx context.Context, proc resumeProcess, waitErr error, launchSessionID, launchCwd string, correlation userMessageCorrelation, agentType, cliPath string) {
+	if waitErr == nil || ctx.Err() == context.Canceled {
+		return
+	}
+	diagnostic := ResumeProcessDiagnostic{ExitCode: -1}
+	if source, ok := proc.(interface {
+		ResumeDiagnostic() ResumeProcessDiagnostic
+	}); ok {
+		diagnostic = source.ResumeDiagnostic()
+	}
+	// Raw stderr can contain prompt fragments or credentials. Keep it only in
+	// the bounded process-local buffer and record a content-free classification.
+	slog.Warn("agent resume process failed",
+		"session_id", launchSessionID, "request_id", correlation.RequestID, "msg_id", correlation.MsgID, "turn_id", correlation.TurnID,
+		"agent", agentType, "executable", filepath.Base(cliPath), "cwd", launchCwd,
+		"exit_code", diagnostic.ExitCode, "context_canceled", false,
+		"stderr_present", diagnostic.Stderr != "", "stderr_bytes", len(diagnostic.Stderr))
+	errorText := "Agent process exited unexpectedly"
+	if diagnostic.ExitCode >= 0 {
+		errorText = fmt.Sprintf("Agent process exited with code %d", diagnostic.ExitCode)
+	}
+	sm.outputCh <- protocol.DaemonEvent{
+		Type: "error", SessionID: launchSessionID, RequestID: correlation.RequestID, MsgID: correlation.MsgID,
+		TurnID: correlation.TurnID, Operation: "user_message", Reason: "execution_failed", Error: errorText,
+	}
 }
 
 func (sm *SessionManager) newStreamAdapter(ps *ProcessState, agentType, prompt string) adapter.AgentAdapter {

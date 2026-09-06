@@ -11,6 +11,7 @@ import {
 import type pg from 'pg';
 import type { RelayPools } from './db-pools.js';
 import { randomUUID } from 'crypto';
+import { admitSessionMessage, resolveMessageSessionId, type MessageAdmissionDecision } from './session-message-admissions.js';
 import { isAppReviewDemoDaemon, isAppReviewDemoSession } from './config/app-review-demo.js';
 import * as db from './db.js';
 import { sanitizeJSONBPayload } from './jsonb-payload.js';
@@ -603,7 +604,7 @@ export class Router {
 
   async deliverDurableMaterializedEvent(delivery: MaterializedDelivery): Promise<boolean> {
     if (delivery.inboxId && delivery.userId !== null
-      && ['session_created', 'session_create_failed', 'session_discovered', 'session_status'].includes(delivery.type)) {
+      && ['session_created', 'session_create_failed', 'session_discovered', 'session_status', 'user_message_receipt'].includes(delivery.type)) {
       // Standalone workers have no websocket maps. Recreate the Task 8
       // user-visible quota refresh at the Relay delivery boundary. This await
       // is part of the outbox disposition: a transient quota failure rolls the
@@ -1597,11 +1598,14 @@ export class Router {
       }
       if (e instanceof db.SessionOwnershipViolationError || e instanceof db.UnknownDaemonSessionError
         || e instanceof QuotaReservationBindingError) {
-        // Structured security audit without payload, session, or owner details.
+        // Server-side correlation only; never include message payload or secrets.
         console.error('[router] daemon event permanently rejected', {
           daemonId,
           errorName: e.name,
           code: (e as { code?: string }).code,
+          event_type: type, session_id: sessionId,
+          request_id: typeof payload.request_id === 'string' ? payload.request_id : null,
+          seq: seq ?? null, phase: 'materialize',
         });
         const permanentState = state ?? this.daemonSeq.get(daemonId);
         const reason = e instanceof QuotaReservationBindingError
@@ -2101,11 +2105,22 @@ export class Router {
   async handleClientMessage(clientWs: WebSocket, msg: any): Promise<void> {
     const client = this.clients.get(clientWs);
     if (!client) return;
+    if (msg.type === 'user_message' && client.userId !== null) {
+      try {
+        const canonical = await resolveMessageSessionId(this.pool,client.userId,msg);
+        if (canonical && canonical !== msg.session_id) msg = {...msg,session_id:canonical};
+      } catch {
+        this.send(clientWs,{type:'user_message_nack',msg_id:msg.msg_id,request_id:msg.request_id ?? msg.msg_id,
+          reason:'quota_check_failed',retryable:true});
+        return;
+      }
+    }
     const sessionId = typeof msg.session_id === 'string' && msg.session_id
       ? msg.session_id
       : null;
     const needsControlFence = sessionId !== null
       && msg.type !== 'local_command_log'
+      && msg.type !== 'user_message'
       && !isObserverSessionMessageAllowed(msg.type);
     if (!needsControlFence || client.userId === null) {
       await this.handleClientMessageWithRuntimePolicy(clientWs, msg, null);
@@ -2185,7 +2200,7 @@ export class Router {
         }
         return;
       }
-      client.subscribedSessions.add(msg.session_id);
+      if (msg.type !== 'user_message') client.subscribedSessions.add(msg.session_id);
     }
     if (msg.type === 'replay') { this.handleReplay(clientWs, msg.session_id, msg.last_seq, msg.req_id, msg.direction, msg.limit); return; }
     if (msg.type === 'replay_subagent') { this.handleReplaySubagent(clientWs, msg.session_id, msg.agent_id, msg.last_seq, msg.req_id, msg.limit, msg.direction); return; }
@@ -2519,20 +2534,55 @@ export class Router {
         if (daemon && daemon.ws.readyState === 1) {
           let outbound = msg;
           if (msg.type === 'user_message' && client.userId !== null) {
-            const status = sessionRuntimePolicy?.status
-              ?? await db.getSessionStatus(this.pool, msg.session_id);
-            const isActive = ['running', 'busy', 'retry', 'idle', 'waiting', 'waiting_approval', 'waiting_question'].includes(status || '');
             const requestId = typeof msg.request_id === 'string' && msg.request_id
               ? msg.request_id
               : (typeof msg.msg_id === 'string' && msg.msg_id ? msg.msg_id : randomUUID());
-            if (!isActive) {
-              const { plan, whitelist } = await db.getUserPlanAndWhitelist(this.pool, client.userId);
-              const entitlements = resolveEntitlements(plan, whitelist);
-              const enforcement = quotaEnforcementMode();
-              if (enforcement === 'observe' && entitlements.maxConcurrentSessions !== null) {
+            const { plan, whitelist } = await db.getUserPlanAndWhitelist(this.pool, client.userId);
+            const entitlements = resolveEntitlements(plan, whitelist);
+            let admitted: MessageAdmissionDecision;
+            try {
+              admitted = await admitSessionMessage(this.pool, {
+                userId: client.userId, daemonId, sessionId: msg.session_id, requestId,
+                command: msg,
+                limit: quotaEnforcementMode() === 'enforce' ? entitlements.maxConcurrentSessions : null,
+              });
+            } catch (error) {
+              console.error('[router] session message admission failed', {
+                event_type: msg.type, session_id: msg.session_id, request_id: requestId,
+                phase: 'admission', errorName: error instanceof Error ? error.name : 'unknown',
+              });
+              this.send(clientWs, { type: 'user_message_nack', msg_id: msg.msg_id,
+                request_id: requestId, reason: 'quota_check_failed', retryable: true });
+              return;
+            }
+            if (admitted.kind === 'conflict' || admitted.kind === 'forbidden') {
+              this.send(clientWs, { type: 'user_message_nack', msg_id: msg.msg_id,
+                request_id: requestId, reason: admitted.kind === 'conflict'
+                  ? 'quota_reservation_binding_conflict' : admitted.reason ?? 'session_not_found', retryable: false });
+              return;
+            }
+            const decision = admitted.kind === 'resume' ? admitted.decision : {
+              allowed: true as const, reservationId: admitted.admission.id,
+              expiresAt: admitted.admission.expiresAt.getTime(), reused: admitted.reused,
+            };
+            if (!decision.allowed) {
+              this.send(clientWs, { type: 'user_message_nack', msg_id: msg.msg_id,
+                request_id: requestId, ...decision, plan,
+                retryable: decision.reason === 'concurrent_session_quota_exceeded' });
+              return;
+            }
+            client.subscribedSessions.add(msg.session_id);
+            if (decision.reused) {
+              // A durable admission proves acceptance, never permission to resend.
+              this.send(clientWs, { type: 'user_message_ack', msg_id: msg.msg_id,
+                request_id: requestId, reason: 'request_in_progress' });
+              return;
+            }
+            if (admitted.kind === 'resume') {
+              if (quotaEnforcementMode() === 'observe' && entitlements.maxConcurrentSessions !== null) {
                 const snapshot = await getQuotaSnapshot(this.pool, client.userId, entitlements);
                 const usage = snapshot.resources.concurrent_sessions;
-                if (usage.used + (usage.reserved || 0) >= entitlements.maxConcurrentSessions) {
+                if (usage.used + (usage.reserved || 0) > entitlements.maxConcurrentSessions) {
                   db.insertAuditLog(this.pool, client.userId, 'quota_would_reject', {
                     resource: 'concurrent_sessions', operation: 'resume', used: usage.used,
                     reserved: usage.reserved || 0, limit: entitlements.maxConcurrentSessions,
@@ -2540,76 +2590,14 @@ export class Router {
                   }).catch(console.error);
                 }
               }
-              const decision = await reserveConcurrentSession(this.pool, {
-                userId: client.userId,
-                requestId,
-                operation: 'resume',
-                daemonId,
-                sessionId: msg.session_id,
-                limit: enforcement === 'enforce' ? entitlements.maxConcurrentSessions : null,
-              });
-              if (!decision.allowed) {
-                if (decision.reason === 'quota_reservation_binding_conflict'
-                  || decision.reason === 'quota_request_already_finalized') {
-                  this.send(clientWs, {
-                    type: 'user_message_nack', msg_id: msg.msg_id, request_id: requestId,
-                    reason: decision.reason, retryable: false,
-                  });
-                  return;
-                }
-                this.send(clientWs, {
-                  type: 'user_message_nack',
-                  msg_id: msg.msg_id,
-                  request_id: requestId,
-                  reason: decision.reason,
-                  resource: 'concurrent_sessions',
-                  plan,
-                  used: decision.used,
-                  reserved: decision.reserved,
-                  limit: decision.limit,
-                  retryable: true,
-                });
-                return;
-              }
-              this.trackPendingSessionOperation({
-                requestId,
-                reservationId: decision.reservationId,
-                daemonId,
-                userId: client.userId,
-                sessionId: msg.session_id,
-                origin: clientWs,
-                operation: 'resume',
-                agentType: '',
-                cwd: '',
-              }, decision.expiresAt);
-              this.broadcastQuotaStatus(client.userId).catch(console.error);
-              if (decision.reused) {
-                this.send(clientWs, {
-                  type: 'user_message_nack', msg_id: msg.msg_id, request_id: requestId,
-                  reason: 'request_in_progress', retryable: false,
-                });
-                return;
-              }
-              outbound = {
-                ...msg,
-                request_id: requestId,
-                quota_grant: {
-                  reservation_id: decision.reservationId ?? `unlimited-${requestId}`,
-                  expires_at: decision.expiresAt ?? (Date.now() + 20_000),
-                  operation: 'resume',
-                },
-              };
-            } else {
-              outbound = {
-                ...msg,
-                request_id: requestId,
-                quota_grant: {
-                  reservation_id: `active-session-${requestId}`,
-                  expires_at: Date.now() + 20_000,
-                  operation: 'resume',
-                },
-              };
+              this.trackPendingSessionOperation({ requestId, reservationId: decision.reservationId,
+                daemonId, userId: client.userId, sessionId: msg.session_id, origin: clientWs,
+                operation: 'resume', agentType: '', cwd: '' }, decision.expiresAt);
             }
+            this.broadcastQuotaStatus(client.userId).catch(console.error);
+            outbound = { ...msg, request_id: requestId, quota_grant: {
+              reservation_id: decision.reservationId, expires_at: decision.expiresAt, operation: 'resume',
+            } };
           }
           if (['approval_response', 'question_response', 'question_reject'].includes(msg.type) && typeof msg.request_id === 'string') {
             this.trackInteractionClient(msg.session_id, msg.request_id, msg.type, clientWs);

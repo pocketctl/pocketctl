@@ -5,6 +5,9 @@ vi.mock('../quota.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../quota.js')>()
   return {
     ...actual,
+    reserveConcurrentSessionInTransaction: vi.fn(async () => ({
+      allowed: true, reservationId: 'managed-message-reservation', expiresAt: Date.now() + 60_000, reused: false,
+    })),
     reserveConcurrentSession: vi.fn(async () => ({
       allowed: true,
       reservationId: 'unexpected-observer-reservation',
@@ -16,7 +19,7 @@ vi.mock('../quota.js', async (importOriginal) => {
 
 import { Router } from '../router.js'
 import { EventMaterializer } from '../materialization/event-materializer.js'
-import { reserveConcurrentSession } from '../quota.js'
+import { reserveConcurrentSession, reserveConcurrentSessionInTransaction } from '../quota.js'
 import * as db from '../db.js'
 import { createPostgresExtensionJournalSink } from '../extensions/journal.js'
 
@@ -113,6 +116,7 @@ function sessionPool(
     queries,
     query: vi.fn(async (sql: string, params: any[] = []) => {
       queries.push({ sql, params })
+      if (sql.includes('SELECT 1 FROM daemons')) return { rows: [{ owned: true }], rowCount: 1 }
       if (sql.includes('WITH owned_session')) {
         const owned = sessionExists && !state.deleted
           && params[0] === state.sessionId && params[1] === state.userId
@@ -251,6 +255,7 @@ function sessionPool(
     return {
       query: async (sql: string, params: any[] = []) => {
         if (sql === 'BEGIN') return { rows: [], rowCount: 0 }
+        if (sql.includes('pg_advisory_xact_lock') && params.length === 1) return { rows: [], rowCount: 1 }
         if (sql.includes('pg_advisory_xact_lock')) {
           releaseFence = await acquireFence(String(params[1]))
           return { rows: [], rowCount: 1 }
@@ -807,7 +812,7 @@ describe('Codex Desktop observer Relay boundary', () => {
       expiresAt: number
       reused: false
     }>()
-    vi.mocked(reserveConcurrentSession).mockImplementationOnce(async () => {
+    vi.mocked(reserveConcurrentSessionInTransaction).mockImplementationOnce(async () => {
       quotaEntered.resolve()
       return allowQuota.promise
     })
@@ -836,7 +841,7 @@ describe('Codex Desktop observer Relay boundary', () => {
     })
     await Promise.all([routed, classification])
 
-    expect(reserveConcurrentSession).toHaveBeenCalledTimes(1)
+    expect(reserveConcurrentSessionInTransaction).toHaveBeenCalledTimes(1)
     expect(daemon._sent).toContainEqual(expect.objectContaining({
       type: 'user_message', request_id: 'route-wins',
     }))

@@ -1,11 +1,13 @@
 package session
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
 	"io"
 	"os/exec"
+	"strings"
 	"sync"
 	"time"
 )
@@ -27,6 +29,14 @@ type resumeProcess interface {
 	Stdout() io.Reader
 	Wait() error
 	Kill() error
+}
+
+// ResumeProcessDiagnostic is optional bounded process-exit evidence. Process
+// implementations may expose it without widening the lifecycle seam used by
+// narrow fakes.
+type ResumeProcessDiagnostic struct {
+	ExitCode int
+	Stderr   string
 }
 
 type resumeProcessTree interface {
@@ -70,6 +80,30 @@ type execResumeProcess struct {
 	cmd    *exec.Cmd
 	stdout io.Reader
 	tree   resumeProcessTree
+	stderr *boundedProcessBuffer
+}
+
+const resumeStderrLimit = 2048
+
+type boundedProcessBuffer struct {
+	mu sync.Mutex
+	b  []byte
+}
+
+func (b *boundedProcessBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	remaining := resumeStderrLimit - len(b.b)
+	if remaining > 0 {
+		b.b = append(b.b, p[:min(len(p), remaining)]...)
+	}
+	return len(p), nil
+}
+
+func (b *boundedProcessBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return string(bytes.Clone(b.b))
 }
 
 // startExecResumeProcess is the production starter: exec.CommandContext with
@@ -100,6 +134,8 @@ func startExecResumeProcess(ctx context.Context, spec resumeLaunchSpec) (resumeP
 	if err != nil {
 		return nil, fmt.Errorf("stdout pipe: %w", err)
 	}
+	stderr := &boundedProcessBuffer{}
+	cmd.Stderr = stderr
 	if err := cmd.Start(); err != nil {
 		return nil, fmt.Errorf("start process: %w", err)
 	}
@@ -109,7 +145,7 @@ func startExecResumeProcess(ctx context.Context, spec resumeLaunchSpec) (resumeP
 		return nil, fmt.Errorf("attach process tree: %w", err)
 	}
 	closeTree = false
-	return &execResumeProcess{cmd: cmd, stdout: stdout, tree: tree}, nil
+	return &execResumeProcess{cmd: cmd, stdout: stdout, tree: tree, stderr: stderr}, nil
 }
 
 func (p *execResumeProcess) PID() int {
@@ -136,6 +172,14 @@ func (p *execResumeProcess) Wait() error {
 
 func (p *execResumeProcess) Kill() error {
 	return p.tree.Kill(p.cmd)
+}
+
+func (p *execResumeProcess) ResumeDiagnostic() ResumeProcessDiagnostic {
+	exitCode := -1
+	if p.cmd.ProcessState != nil {
+		exitCode = p.cmd.ProcessState.ExitCode()
+	}
+	return ResumeProcessDiagnostic{ExitCode: exitCode, Stderr: strings.TrimSpace(p.stderr.String())}
 }
 
 // resumeProcessCmd extracts the underlying *exec.Cmd so legacy ProcessState

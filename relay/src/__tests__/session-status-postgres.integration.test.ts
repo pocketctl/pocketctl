@@ -83,6 +83,33 @@ describeWithDatabase('session status PostgreSQL integration', () => {
     expect(row.rows[0]).toEqual({ status: 'completed', turn_started_at: null })
   })
 
+  test('clears exit_reason when a verified continuation becomes live again', async () => {
+    expect(await updateSessionStatus(
+      pool,
+      'session-status-test',
+      'daemon-status-test',
+      'exited',
+      'normal_exit',
+    )).toBe(true)
+
+    let row = await pool.query(
+      `SELECT status, exit_reason FROM sessions WHERE session_id = 'session-status-test'`,
+    )
+    expect(row.rows[0]).toEqual({ status: 'exited', exit_reason: 'normal_exit' })
+
+    expect(await updateSessionStatus(
+      pool,
+      'session-status-test',
+      'daemon-status-test',
+      'idle',
+    )).toBe(true)
+
+    row = await pool.query(
+      `SELECT status, exit_reason FROM sessions WHERE session_id = 'session-status-test'`,
+    )
+    expect(row.rows[0]).toEqual({ status: 'idle', exit_reason: null })
+  })
+
   test('keeps session_status update-only semantics', async () => {
     expect(await updateSessionStatus(
       pool,

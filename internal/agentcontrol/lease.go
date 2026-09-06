@@ -30,6 +30,7 @@ type processIdentityFunc func(pid int) (int64, error)
 type LeaseRegistry struct {
 	mu       sync.Mutex
 	leases   map[string]Lease
+	pruned   []Lease
 	identity processIdentityFunc
 	now      func() time.Time
 }
@@ -97,6 +98,17 @@ func (r *LeaseRegistry) Release(id string) {
 	r.mu.Unlock()
 }
 
+// DrainPruned returns leases removed by liveness checks since the previous
+// drain. Snapshot and Active also prune, so retaining these records lets the
+// runtime owner publish terminal exits even when another reader pruned first.
+func (r *LeaseRegistry) DrainPruned() []Lease {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	removed := append([]Lease(nil), r.pruned...)
+	r.pruned = nil
+	return removed
+}
+
 // Prune removes leases whose process exited or whose PID was reused. It reports
 // whether the registry changed so callers can avoid unnecessary persistence.
 func (r *LeaseRegistry) Prune() bool {
@@ -151,6 +163,7 @@ func (r *LeaseRegistry) pruneLocked() bool {
 		identity, err := r.identity(lease.PID)
 		if err != nil || identity != lease.ProcessStart {
 			delete(r.leases, id)
+			r.pruned = append(r.pruned, lease)
 			changed = true
 			continue
 		}

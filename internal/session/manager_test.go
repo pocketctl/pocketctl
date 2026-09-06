@@ -573,6 +573,96 @@ func TestSetSessionExited_DoesNotAffectOtherSessions(t *testing.T) {
 	}
 }
 
+func TestSyncLiveTerminalSessionRejectsExitedProcessBinding(t *testing.T) {
+	outputCh := make(chan protocol.DaemonEvent, 8)
+	sm := NewSessionManager(outputCh)
+	pid := os.Getpid()
+	if !sm.RegisterTerminalSession(
+		"same-process", "/work/old", pid, "", protocol.StatusRunning, adapter.AgentClaude,
+	) {
+		t.Fatal("terminal session was not registered")
+	}
+	sm.SetSessionExited("same-process", protocol.ExitReasonNormalExit)
+	<-outputCh
+
+	if sm.SyncLiveTerminalSession(
+		"same-process", "/work/new", pid, "", protocol.StatusRunning, adapter.AgentClaude,
+	) {
+		t.Fatal("the exiting process binding must not reactivate its session")
+	}
+	sm.mu.RLock()
+	state := *sm.sessions["same-process"]
+	sm.mu.RUnlock()
+	if state.Status != protocol.StatusExited || state.ExitReason != protocol.ExitReasonNormalExit || state.Cwd != "/work/old" {
+		t.Fatalf("rejected watcher update changed state: %+v", state)
+	}
+	select {
+	case event := <-outputCh:
+		t.Fatalf("rejected watcher update published event: %+v", event)
+	default:
+	}
+}
+
+func TestSyncLiveTerminalSessionAcceptsVerifiedContinueProcess(t *testing.T) {
+	outputCh := make(chan protocol.DaemonEvent, 8)
+	sm := NewSessionManager(outputCh)
+	sm.mu.Lock()
+	sm.sessions["continued-session"] = &ProcessState{
+		SessionID: "continued-session", Cwd: "/work/old", Agent: adapter.AgentClaude,
+		Source: "terminal", Status: protocol.StatusExited, ExitReason: protocol.ExitReasonNormalExit,
+		Pid: 9999999, ProcessStartIdentity: "old-process",
+	}
+	sm.mu.Unlock()
+
+	pid := os.Getpid()
+	identity, err := platform.ProcessStartIdentity(pid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !sm.SyncLiveTerminalSession(
+		"continued-session", "/work/new", pid, "/dev/ttys-test", protocol.StatusRunning, adapter.AgentClaude,
+	) {
+		t.Fatal("verified continue process did not reactivate the session")
+	}
+	sm.mu.RLock()
+	state := *sm.sessions["continued-session"]
+	sm.mu.RUnlock()
+	if state.Status != protocol.StatusRunning || state.ExitReason != "" || state.Pid != pid ||
+		state.ProcessStartIdentity != identity || state.Cwd != "/work/new" || state.TTY != "/dev/ttys-test" {
+		t.Fatalf("continued watcher state=%+v", state)
+	}
+	select {
+	case event := <-outputCh:
+		if event.Type != "session_status" || event.Status != protocol.StatusRunning || event.SessionID != "continued-session" {
+			t.Fatalf("continue event=%+v", event)
+		}
+	default:
+		t.Fatal("verified continue did not publish running status")
+	}
+}
+
+func TestObserveJSONLSessionStatusDoesNotReviveExitedTerminal(t *testing.T) {
+	outputCh := make(chan protocol.DaemonEvent, 8)
+	sm := NewSessionManager(outputCh)
+	if !sm.RegisterTerminalSession(
+		"exited-jsonl", "/work/project", 0, "", protocol.StatusIdle, adapter.AgentCodex,
+	) {
+		t.Fatal("terminal session was not registered")
+	}
+	sm.SetSessionExited("exited-jsonl", protocol.ExitReasonNormalExit)
+	<-outputCh
+
+	if sm.ObserveJSONLSessionStatus("exited-jsonl", protocol.StatusRunning) {
+		t.Fatal("JSONL lifecycle must not reactivate an exited terminal session")
+	}
+	sm.mu.RLock()
+	state := *sm.sessions["exited-jsonl"]
+	sm.mu.RUnlock()
+	if state.Status != protocol.StatusExited || state.ExitReason != protocol.ExitReasonNormalExit {
+		t.Fatalf("JSONL lifecycle changed exited state: %+v", state)
+	}
+}
+
 func TestSendMessage_ExitedSession_Allowed(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("Unix sentinel CLI fixture")
@@ -581,7 +671,7 @@ func TestSendMessage_ExitedSession_Allowed(t *testing.T) {
 	sm := NewSessionManager(outputCh)
 
 	// Use a PID that is definitely dead (9999999 does not exist)
-	sm.RegisterTerminalSession("exited-sid", "/tmp", 9999999, "", protocol.StatusExited, "")
+	sm.RegisterTerminalSession("exited-sid", "/tmp", 9999999, "", protocol.StatusExited, adapter.AgentClaude)
 
 	// Sentinel PATH proves no real claude/shim is ever executed; the fake
 	// starter proves no real process is ever spawned.
@@ -615,7 +705,7 @@ func TestSendMessage_ExitedSession_InvalidPID(t *testing.T) {
 
 	// PID 0 — special case, isProcessAlive(0) returns true on some systems
 	// Use a definitely-dead PID
-	sm.RegisterTerminalSession("dead-sid", os.TempDir(), 9999999, "", protocol.StatusIdle, "")
+	sm.RegisterTerminalSession("dead-sid", os.TempDir(), 9999999, "", protocol.StatusIdle, adapter.AgentClaude)
 
 	marker := installSentinelResumeCLI(t, "claude")
 	starter := newRecordingResumeStarter()

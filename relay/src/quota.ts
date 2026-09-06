@@ -19,6 +19,7 @@ export interface QuotaTransitionResult {
 }
 
 export interface ReserveConcurrentSessionInput {
+  commandHash?: string
   userId: number
   requestId: string
   operation: QuotaOperation
@@ -108,9 +109,22 @@ const ACTIVE_ROOT_SESSION_SQL = `
  * may still accept the grant, it never frees quota by itself.
  */
 const UNSETTLED_RESERVATION_COUNT_SQL = `
-  SELECT COUNT(*)::int AS reservation_count
-  FROM quota_reservations
-  WHERE user_id = $1 AND resource = 'concurrent_session' AND state IN ('pending', 'uncertain')`
+  WITH slots AS (
+    SELECT CASE WHEN session_id IS NOT NULL THEN 'session:' || session_id ELSE 'create:' || id::text END AS slot,
+           session_id
+    FROM quota_reservations WHERE user_id = $1 AND resource = 'concurrent_session' AND state IN ('pending', 'uncertain')
+    UNION
+    SELECT 'session:' || COALESCE(canonical_session_id,session_id), COALESCE(canonical_session_id,session_id) FROM session_message_admissions
+    WHERE user_id = $1 AND state IN ('issued','uncertain')
+  )
+  SELECT (SELECT active_count FROM (${ACTIVE_ROOT_SESSION_SQL}) active) AS active_count, COUNT(*)::int AS reservation_count FROM slots h
+  WHERE NOT EXISTS (
+    SELECT 1 FROM sessions s WHERE s.user_id = $1 AND s.session_id = h.session_id
+      AND s.status IN ('running','busy','retry','idle','waiting','waiting_approval','waiting_question')
+      AND COALESCE(s.is_subagent,false) = false
+      AND (s.agent_type IS NULL OR s.agent_type NOT IN ('zcode','codex-desktop'))
+      AND s.session_id NOT LIKE 'pending-%'
+  )`
 
 export type QuotaSettlementReason =
   | 'session_created'
@@ -434,8 +448,22 @@ export async function claimBoundDaemonSlot(pool: pg.Pool, input: ClaimBoundDaemo
   }
 }
 
-export async function reserveConcurrentSession(
-  pool: pg.Pool,
+export async function reserveConcurrentSession(pool: pg.Pool, input: ReserveConcurrentSessionInput): Promise<QuotaDecision> {
+  const client = await pool.connect()
+  try {
+    await client.query('BEGIN')
+    await client.query('SELECT pg_advisory_xact_lock($1)', [input.userId])
+    const result = await reserveConcurrentSessionInTransaction(client, input)
+    await client.query('COMMIT')
+    return result
+  } catch (error) {
+    await client.query('ROLLBACK')
+    throw error
+  } finally { client.release() }
+}
+
+export async function reserveConcurrentSessionInTransaction(
+  client: pg.PoolClient,
   input: ReserveConcurrentSessionInput,
 ): Promise<QuotaDecision> {
   if (!Number.isSafeInteger(input.userId) || input.userId <= 0 || !input.requestId || !input.daemonId) {
@@ -444,89 +472,89 @@ export async function reserveConcurrentSession(
   if (input.operation === 'resume' && !input.sessionId) {
     throw new Error('resume quota reservation requires a session binding')
   }
-  const client = await pool.connect()
   const now = input.now ?? new Date()
   const ttlMs = input.ttlMs ?? 20_000
   const expiresAt = new Date(now.getTime() + ttlMs)
-  try {
-    await client.query('BEGIN')
-    await client.query('SELECT pg_advisory_xact_lock($1)', [input.userId])
-    await client.query(
-      `DELETE FROM quota_reservations
-       WHERE user_id = $1 AND state = 'settled'
-         AND settled_at <= $2::timestamptz - interval '24 hours'`,
-      [input.userId, now],
-    )
+  await client.query(
+    `DELETE FROM quota_reservations
+     WHERE user_id = $1 AND state = 'settled'
+       AND settled_at <= $2::timestamptz - interval '24 hours'`,
+    [input.userId, now],
+  )
 
-    const existing = await client.query(
-      `SELECT id, expires_at, operation, daemon_id, session_id, state
-       FROM quota_reservations
-       WHERE user_id = $1 AND request_id = $2`,
-      [input.userId, input.requestId],
-    )
-    if (existing.rows[0]) {
-      const row = existing.rows[0]
-      const sameSession = input.operation === 'create' && !input.sessionId
-        ? true
-        : (row.session_id ?? null) === (input.sessionId ?? null)
-      const sameBinding = row.operation === input.operation
-        && row.daemon_id === input.daemonId
-        && sameSession
-      if (sameBinding && row.state !== 'settled' && input.operation === 'create') {
-        await client.query(
-          `UPDATE quota_reservations
-           SET agent_type = COALESCE(agent_type, $3), cwd = COALESCE(cwd, $4)
-           WHERE user_id = $1 AND request_id = $2`,
-          [input.userId, input.requestId, input.agentType?.slice(0, 64) || null, input.cwd ?? null],
-        )
-      }
-      await client.query('COMMIT')
-      if (!sameBinding) return { allowed: false, reason: 'quota_reservation_binding_conflict' }
-      if (row.state === 'settled') return { allowed: false, reason: 'quota_request_already_finalized' }
-      const existingExpiry = new Date(existing.rows[0].expires_at).getTime()
-      return {
-        allowed: true,
-        reservationId: existing.rows[0].id,
-        expiresAt: existingExpiry,
-        reused: true,
-      }
+  const admission = await client.query(
+    'SELECT id FROM session_message_admissions WHERE user_id = $1 AND request_id = $2',
+    [input.userId, input.requestId],
+  )
+  if (admission.rows[0]) return { allowed: false, reason: 'quota_reservation_binding_conflict' }
+  const existing = await client.query(
+    `SELECT id, expires_at, operation, daemon_id, session_id, state, command_hash
+     FROM quota_reservations
+     WHERE user_id = $1 AND request_id = $2`,
+    [input.userId, input.requestId],
+  )
+  if (existing.rows[0]) {
+    const row = existing.rows[0]
+    const sameSession = input.operation === 'create' && !input.sessionId
+      ? true
+      : (row.session_id ?? null) === (input.sessionId ?? null)
+    const sameBinding = row.operation === input.operation
+      && row.daemon_id === input.daemonId
+      && sameSession
+      && (row.command_hash ?? null) === (input.commandHash ?? null)
+    if (sameBinding && row.state !== 'settled' && input.operation === 'create') {
+      await client.query(
+        `UPDATE quota_reservations
+         SET agent_type = COALESCE(agent_type, $3), cwd = COALESCE(cwd, $4)
+         WHERE user_id = $1 AND request_id = $2`,
+        [input.userId, input.requestId, input.agentType?.slice(0, 64) || null, input.cwd ?? null],
+      )
     }
-
-    if (input.limit !== null) {
-      const activeResult = await client.query(ACTIVE_ROOT_SESSION_SQL, [input.userId])
-      const reservationResult = await client.query(UNSETTLED_RESERVATION_COUNT_SQL, [input.userId])
-      const used = Number(activeResult.rows[0]?.active_count || 0)
-      const reserved = Number(reservationResult.rows[0]?.reservation_count || 0)
-      if (used + reserved >= input.limit) {
-        await client.query('COMMIT')
-        return {
-          allowed: false,
-          reason: 'concurrent_session_quota_exceeded',
-          used,
-          reserved,
-          limit: input.limit,
-        }
-      }
+    if (!sameBinding) return { allowed: false, reason: 'quota_reservation_binding_conflict' }
+    if (row.state === 'settled') return { allowed: false, reason: 'quota_request_already_finalized' }
+    const existingExpiry = new Date(existing.rows[0].expires_at).getTime()
+    return {
+      allowed: true,
+      reservationId: existing.rows[0].id,
+      expiresAt: existingExpiry,
+      reused: true,
     }
-
-    const reservationId = randomUUID()
-    await client.query(
-      `INSERT INTO quota_reservations
-         (id, user_id, resource, operation, daemon_id, session_id, request_id, expires_at, agent_type, cwd)
-       VALUES ($1, $2, 'concurrent_session', $3, $4, $5, $6, $7, $8, $9)`,
-      [
-        reservationId, input.userId, input.operation, input.daemonId, input.sessionId || null,
-        input.requestId, expiresAt, input.agentType?.slice(0, 64) || null, input.cwd ?? null,
-      ],
-    )
-    await client.query('COMMIT')
-    return { allowed: true, reservationId, expiresAt: expiresAt.getTime(), reused: false }
-  } catch (error) {
-    await client.query('ROLLBACK')
-    throw error
-  } finally {
-    client.release()
   }
+
+  if (input.limit !== null) {
+    const reservationResult = await client.query(UNSETTLED_RESERVATION_COUNT_SQL, [input.userId])
+    const used = Number(reservationResult.rows[0]?.active_count || 0)
+    const reserved = Number(reservationResult.rows[0]?.reservation_count || 0)
+    // Reusing the same logical slot must not consume a second slot.
+    const held = input.operation === 'resume' && input.sessionId
+      ? await client.query(`SELECT 1 FROM (
+          SELECT session_id FROM quota_reservations WHERE user_id = $1 AND resource = 'concurrent_session' AND state IN ('pending', 'uncertain')
+          UNION SELECT COALESCE(canonical_session_id,session_id) FROM session_message_admissions WHERE user_id = $1 AND state IN ('issued','uncertain')
+          UNION SELECT session_id FROM sessions WHERE user_id = $1 AND status IN ('running','busy','retry','idle','waiting','waiting_approval','waiting_question')
+        ) slots WHERE session_id = $2 LIMIT 1`, [input.userId, input.sessionId])
+      : { rows: [] }
+    if (!held.rows[0] && used + reserved >= input.limit) {
+      return {
+        allowed: false,
+        reason: 'concurrent_session_quota_exceeded',
+        used,
+        reserved,
+        limit: input.limit,
+      }
+    }
+  }
+
+  const reservationId = randomUUID()
+  await client.query(
+    `INSERT INTO quota_reservations
+       (id, user_id, resource, operation, daemon_id, session_id, request_id, expires_at, agent_type, cwd, command_hash)
+     VALUES ($1, $2, 'concurrent_session', $3, $4, $5, $6, $7, $8, $9, $10)`,
+    [
+      reservationId, input.userId, input.operation, input.daemonId, input.sessionId || null,
+      input.requestId, expiresAt, input.agentType?.slice(0, 64) || null, input.cwd ?? null, input.commandHash ?? null,
+    ],
+  )
+  return { allowed: true, reservationId, expiresAt: expiresAt.getTime(), reused: false }
 }
 
 /**
@@ -546,13 +574,12 @@ export async function getQuotaSnapshot(
   userId: number,
   entitlements: Entitlements,
 ): Promise<QuotaSnapshot> {
-  const [hostResult, activeResult, reservationResult] = await Promise.all([
+  const [hostResult, reservationResult] = await Promise.all([
     pool.query(`SELECT COUNT(*)::int AS count FROM daemons WHERE user_id = $1`, [userId]),
-    pool.query(ACTIVE_ROOT_SESSION_SQL, [userId]),
     pool.query(UNSETTLED_RESERVATION_COUNT_SQL, [userId]),
   ])
   const hostUsed = Number(hostResult.rows[0]?.count || 0)
-  const sessionUsed = Number(activeResult.rows[0]?.active_count || 0)
+  const sessionUsed = Number(reservationResult.rows[0]?.active_count || 0)
   const reserved = Number(reservationResult.rows[0]?.reservation_count || 0)
   const hostLimit = entitlements.maxBoundDaemons
   const sessionLimit = entitlements.maxConcurrentSessions

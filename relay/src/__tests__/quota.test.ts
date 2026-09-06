@@ -86,8 +86,7 @@ describe('reserveConcurrentSession', () => {
   test('rejects when confirmed sessions plus reservations reach the limit', async () => {
     const { pool } = fakePool((sql) => {
       if (sql.includes('SELECT id, expires_at')) return { rows: [] }
-      if (sql.includes('AS active_count')) return { rows: [{ active_count: 1 }] }
-      if (sql.includes('AS reservation_count')) return { rows: [{ reservation_count: 1 }] }
+      if (sql.includes('AS reservation_count')) return { rows: [{ active_count: 1, reservation_count: 1 }] }
       return { rows: [] }
     })
 
@@ -302,8 +301,7 @@ describe('quota reservation accounting state machine (M-4)', () => {
   test('snapshot reserved count reads unsettled rows', async () => {
     const { pool, client } = fakePool((sql) => {
       if (sql.includes('FROM daemons')) return { rows: [{ count: 1 }] }
-      if (sql.includes('AS active_count')) return { rows: [{ active_count: 1 }] }
-      if (sql.includes('AS reservation_count')) return { rows: [{ reservation_count: 1 }] }
+      if (sql.includes('AS reservation_count')) return { rows: [{ active_count: 1, reservation_count: 1 }] }
       return { rows: [] }
     })
     const snapshot = await getQuotaSnapshot(pool, 7, { maxBoundDaemons: 2, maxConcurrentSessions: 2 })

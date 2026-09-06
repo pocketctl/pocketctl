@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/pocketctl/pocketctl/internal/adapter"
+	"github.com/pocketctl/pocketctl/internal/platform"
 )
 
 func writeRollout(t *testing.T, dir, name, content string, mtime time.Time) string {
@@ -74,6 +75,21 @@ func TestCodexWatcher_DiscoversFreshSkipsHistorical(t *testing.T) {
 	cw.scan(now)
 	if extra := drainEvents(cw.eventsCh); len(extra) != 0 {
 		t.Fatalf("re-scan should emit nothing, got %+v", extra)
+	}
+}
+
+func TestCodexWatcher_AttachesNativeTerminalPID(t *testing.T) {
+	repo := t.TempDir()
+	cw := NewCodexSessionWatcher()
+	cw.listProcesses = func() ([]platform.ProcessSnapshot, error) {
+		return []platform.ProcessSnapshot{{PID: 42, Executable: "/opt/codex", Args: []string{"/opt/codex"}, CWD: repo}}, nil
+	}
+
+	got := cw.projectSession("rollout.jsonl", adapter.CodexRolloutMetadata{
+		ID: "native", Cwd: repo, Originator: "codex-tui",
+	})
+	if got.Pid != 42 || got.Source != "terminal" || got.AgentType != adapter.AgentCodex {
+		t.Fatalf("projected session=%+v, want native terminal pid", got)
 	}
 }
 

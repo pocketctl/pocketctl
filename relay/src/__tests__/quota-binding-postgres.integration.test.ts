@@ -7,6 +7,7 @@ import { InboxRepository } from '../ingress/inbox-repository.js'
 import { EventMaterializer } from '../materialization/event-materializer.js'
 import { RealtimeOutboxWriter } from '../materialization/realtime-outbox.js'
 import {
+  getQuotaSnapshot,
   markQuotaReservationUncertain,
   reserveConcurrentSession,
   settleQuotaReservation,
@@ -712,4 +713,15 @@ describeWithDatabase('quota reservation binding PostgreSQL integration', () => {
        WHERE request_id = 'ungranted-durable-request'`,
     )).rows[0]).toEqual({ count: 0 })
   })
+  test('a claimed create reservation and its active root session count as one slot before settlement', async () => {
+    const binding = await createReservation('claimed-window')
+    await pool.query("UPDATE quota_reservations SET session_id=$1 WHERE id=$2",[binding.sessionId,binding.reservationId])
+    await pool.query("INSERT INTO sessions(session_id,daemon_id,agent_type,cwd,status,user_id) VALUES($1,$2,'codex','/repo','running',$3)",[binding.sessionId,binding.daemonId,userId])
+    const snapshot = await getQuotaSnapshot(pool,userId,{maxBoundDaemons:2,maxConcurrentSessions:2})
+    expect(snapshot.resources.concurrent_sessions).toMatchObject({used:1,reserved:0})
+    await pool.query("UPDATE sessions SET status='exited' WHERE session_id=$1",[binding.sessionId])
+    expect(await reserveConcurrentSession(pool,{userId,daemonId:binding.daemonId,sessionId:binding.sessionId!,requestId:'resume-claimed-slot',operation:'resume',limit:1})).toMatchObject({allowed:true})
+    expect((await getQuotaSnapshot(pool,userId,{maxBoundDaemons:2,maxConcurrentSessions:1})).resources.concurrent_sessions).toMatchObject({used:0,reserved:1})
+  })
+
 })

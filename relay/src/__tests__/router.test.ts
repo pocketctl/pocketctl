@@ -848,7 +848,7 @@ describe('Router - session_status with exit_reason', () => {
     expect(updateCall!.sql).toMatch(/COALESCE\(\$8::int/i)
   })
 
-  test('session_status without exit_reason does not null existing reason (COALESCE)', async () => {
+  test('non-terminal session_status clears a previous exit_reason', async () => {
     const daemonWs = createMockWs()
     router.registerDaemon(daemonWs, { type: 'register', daemon_id: 'daemon-1', hostname: 'test', agents: [] }, 1)
 
@@ -866,9 +866,10 @@ describe('Router - session_status with exit_reason', () => {
     )
     expect(statusUpdates.length).toBeGreaterThanOrEqual(2)
     // updateSessionStatusForEvent params prefix the event ledger coordinates;
-    // exitReason remains nullable at index 6.
-    // The second call carried no exit_reason → null, and COALESCE keeps the old value.
+    // exitReason remains nullable at index 6. The SQL must clear a stale reason
+    // when a verified continuation moves the session back to a non-terminal state.
     expect(statusUpdates[1].params[6]).toBeNull()
+    expect(statusUpdates[1].sql).toMatch(/exit_reason\s*=\s*CASE[\s\S]*ELSE\s+NULL\s+END/i)
   })
 })
 

@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/pocketctl/pocketctl/internal/adapter"
 	"github.com/pocketctl/pocketctl/internal/agentcontrol"
 	"github.com/pocketctl/pocketctl/internal/daemon"
 	"github.com/pocketctl/pocketctl/internal/platform"
@@ -272,8 +273,17 @@ func TestOpenCodeLeaseReaperPersistsTerminalExit(t *testing.T) {
 	if err := terminal.Start(); err != nil {
 		t.Fatal(err)
 	}
+	const sessionID = "ses_lease_exit"
+	sm.mu.Lock()
+	sm.sessions[sessionID] = &ProcessState{
+		SessionID: sessionID, Agent: adapter.AgentOpencode, Source: "terminal", Status: protocol.StatusIdle,
+	}
+	sm.mu.Unlock()
+	var stateChanges atomic.Int32
+	sm.OnStateChanged = func() { stateChanges.Add(1) }
 	if err := sm.leases.Register(agentcontrol.Lease{
-		ID: "lease-exit", Agent: agentcontrol.AgentOpenCode, PID: terminal.Process.Pid, Generation: coord.generation,
+		ID: "lease-exit", Agent: agentcontrol.AgentOpenCode, SessionID: sessionID,
+		PID: terminal.Process.Pid, Generation: coord.generation,
 	}); err != nil {
 		_ = terminal.Process.Kill()
 		t.Fatal(err)
@@ -296,6 +306,77 @@ func TestOpenCodeLeaseReaperPersistsTerminalExit(t *testing.T) {
 	}
 	if len(handoff.Leases) != 0 {
 		t.Fatalf("dead terminal lease remained in handoff: %+v", handoff.Leases)
+	}
+	sm.mu.RLock()
+	status, exitReason := sm.sessions[sessionID].Status, sm.sessions[sessionID].ExitReason
+	sm.mu.RUnlock()
+	if status != protocol.StatusExited || exitReason != protocol.ExitReasonNormalExit {
+		t.Fatalf("session status=%q reason=%q, want exited normal_exit", status, exitReason)
+	}
+	if stateChanges.Load() == 0 {
+		t.Fatal("terminal exit did not mark daemon state dirty")
+	}
+	select {
+	case event := <-sm.outputCh:
+		if event.Type != "session_status" || event.SessionID != sessionID || event.Status != protocol.StatusExited {
+			t.Fatalf("exit event=%+v", event)
+		}
+	default:
+		t.Fatal("terminal exit event was not emitted")
+	}
+}
+
+func TestOpenCodeLeaseReaperKeepsSessionLiveWithAnotherTerminalLease(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	sm, coord := newOpenCodeRuntimeTestManagerWithHealth(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode([]any{})
+	}), nil)
+	first, second := sleepCommand(t, 30), sleepCommand(t, 30)
+	if err := first.Start(); err != nil {
+		t.Fatal(err)
+	}
+	if err := second.Start(); err != nil {
+		_ = first.Process.Kill()
+		t.Fatal(err)
+	}
+	defer func() {
+		_ = first.Process.Kill()
+		_ = second.Process.Kill()
+		_ = first.Wait()
+		_ = second.Wait()
+	}()
+
+	const sessionID = "ses_shared_lease"
+	sm.mu.Lock()
+	sm.sessions[sessionID] = &ProcessState{
+		SessionID: sessionID, Agent: adapter.AgentOpencode, Source: "terminal", Status: protocol.StatusIdle,
+	}
+	sm.mu.Unlock()
+	for id, pid := range map[string]int{"lease-first": first.Process.Pid, "lease-second": second.Process.Pid} {
+		if err := sm.leases.Register(agentcontrol.Lease{
+			ID: id, Agent: agentcontrol.AgentOpenCode, SessionID: sessionID, PID: pid, Generation: coord.generation,
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := first.Process.Kill(); err != nil {
+		t.Fatal(err)
+	}
+	_ = first.Wait()
+	if err := coord.reapTerminalLeases(); err != nil {
+		t.Fatal(err)
+	}
+
+	sm.mu.RLock()
+	status := sm.sessions[sessionID].Status
+	sm.mu.RUnlock()
+	if status != protocol.StatusIdle {
+		t.Fatalf("status=%q, want idle while another terminal lease is live", status)
+	}
+	select {
+	case event := <-sm.outputCh:
+		t.Fatalf("unexpected lifecycle event while lease remains: %+v", event)
+	default:
 	}
 }
 

@@ -1,3 +1,4 @@
+import { recoverContinueAdmission, completeContinueAdmission, claimContinueAdmissionOutcome, AdmissionSessionMovedError, mutateContinueAdmissionSession } from '../session-message-admissions.js'
 import { createHash } from 'crypto'
 import type pg from 'pg'
 import * as db from '../db.js'
@@ -150,6 +151,18 @@ export class EventMaterializer {
   }
 
   private async recoverQuotaContext(input: MaterializationInput): Promise<MaterializationInput> {
+    if (input.eventType === 'user_message_receipt' && input.userId !== null && input.sessionId
+      && typeof input.payload.request_id === 'string'
+      && ['accepted','rejected'].includes(String(input.payload.status))) {
+      const admission = await recoverContinueAdmission(this.options.pool, {
+        userId: input.userId, daemonId: input.daemonId, sessionId: input.sessionId,
+        requestId: input.payload.request_id,
+      }, typeof input.payload.msg_id === 'string' ? input.payload.msg_id : null, input.payload.status as 'accepted' | 'rejected')
+      if (admission) return { ...input, sessionId: admission.canonicalSessionId ?? admission.sessionId,
+        payload: {...input.payload,session_id:admission.canonicalSessionId ?? admission.sessionId}, context: { ...input.context, admission,
+        requestId: admission.requestId, reservationId: null, quotaOperation: undefined } }
+      return input
+    }
     const outcome = this.quotaOutcome(input)
     if (!outcome) return input
     // This recovery runs before materializeUnlocked(), which owns the fenced
@@ -185,6 +198,14 @@ export class EventMaterializer {
     // still revalidates it. A daemon payload alone is never authority to create
     // a session, deliver a failure, or close a resume reservation.
     if (!recovered) {
+      if (input.eventType === 'session_status' && input.sessionId) {
+        const admission = await recoverContinueAdmission(this.options.pool, {
+          userId: input.userId, daemonId: input.daemonId, sessionId: input.sessionId, requestId,
+        })
+        if (admission) return { ...input, sessionId: admission.canonicalSessionId ?? admission.sessionId,
+        payload: {...input.payload,session_id:admission.canonicalSessionId ?? admission.sessionId}, context: { ...input.context, requestId,
+          admission, reservationId: null, quotaOperation: undefined } }
+      }
       const context = input.context
       const sessionMatches = outcome.operation === 'create'
         ? input.eventType === 'session_create_failed' || Boolean(input.sessionId)
@@ -413,7 +434,7 @@ export class EventMaterializer {
       bindObserverSession?: boolean
     } = {},
   ): Promise<boolean> {
-    const sessionId = input.sessionId ?? ''
+    let sessionId = input.sessionId ?? ''
     const payload = input.payload
     if (input.eventType === 'session_create_failed') {
       const identity = this.pendingOperationIdentity(input)
@@ -526,17 +547,28 @@ export class EventMaterializer {
 
     await effect.assertActive()
     await effect.atomicStep(async (eventID, nextStep) => {
-      const outcome = await db.updateSessionStatusForEvent(
-        this.effectPool,
+      const updateStatus = (pool: pg.Pool, canonicalSessionId: string) => db.updateSessionStatusForEvent(
+        pool,
         eventID,
         nextStep,
-        sessionId,
+        canonicalSessionId,
         input.daemonId,
         typeof payload.status === 'string' ? payload.status : 'unknown',
         typeof payload.exit_reason === 'string' ? payload.exit_reason : undefined,
         input.userId ?? undefined,
         typeof payload.turn_started_at === 'string' ? payload.turn_started_at : undefined,
       )
+      const mutation = input.context?.admission
+        ? await mutateContinueAdmissionSession(this.effectPool, input.context.admission, updateStatus)
+        : { sessionId, value: await updateStatus(this.effectPool, sessionId) }
+      const outcome = mutation.value
+      if (mutation.sessionId !== sessionId) {
+        sessionId = mutation.sessionId
+        input.sessionId = sessionId
+        payload.session_id = sessionId
+        result.deliveries = result.deliveries.map(delivery => ({ ...delivery, sessionId,
+          payload: { ...delivery.payload, session_id: sessionId } }))
+      }
       if (outcome.suppressed) result.deliveries = []
       else this.options.hooks?.bindSession?.(sessionId, input.daemonId)
     })
@@ -691,6 +723,14 @@ export class EventMaterializer {
             ? db.restoreSessionActivity
             : db.advanceSessionActivity
           await effect.step(() => writeActivity(this.effectPool, input.sessionId!, activityAt))
+        }
+        // New effects append after all legacy effects, including activity.
+        if (input.context?.admission) {
+          await effect.step(() => completeContinueAdmission(this.effectPool, input.context!.admission!,
+            input.eventType === 'user_message_receipt' ? String(input.payload.status) as 'accepted' | 'rejected' : 'session_active'))
+          if (input.eventType === 'user_message_receipt' && input.userId !== null) {
+            await effect.step(() => this.options.hooks?.broadcastQuota?.(input.userId!))
+          }
         }
       }
       // Preserve the legacy generic session accumulator for older payloads
@@ -886,6 +926,10 @@ export class EventMaterializer {
       // error as permanent so ACK/dead-letter progress remains possible.
       throw new db.UnknownDaemonSessionError()
     }
+    if (input.context?.admission) {
+      await claimContinueAdmissionOutcome(this.options.pool,input.context.admission,
+        input.eventType === 'user_message_receipt' ? input.payload.status as 'accepted' | 'rejected' : 'session_active')
+    }
     await this.authorizeDaemonSession(input)
     input = await this.normalizeObserverPolicy(input)
     if ([
@@ -904,6 +948,7 @@ export class EventMaterializer {
       input.payload,
       5,
       input.userId,
+      input.context?.admission?.sessionId ?? this.ledgerSessionId(input),
     )
     await this.appendExtensionJournal(input, event.rowID)
     const result: MaterializationResult = {
@@ -953,11 +998,17 @@ export class EventMaterializer {
         hooks: this.options.hooks,
         writeTokenUsageFacts: this.writeTokenUsageFacts,
       })
-      const lateEffect = effect ?? lateMaterializer.businessEffect(input, result)
       result.applyEffects = async (): Promise<void> => {
         const latest = await db.getEventEffectState(latePool, event.rowID)
         if (latest?.completed) return
         const nextStep = latest?.nextStep ?? event.nextStep
+        // A trusted rename may commit while these effects are deferred.
+        const currentInput = input.context?.admission ? await lateMaterializer.recoverQuotaContext(input) : input
+        if (currentInput.sessionId !== input.sessionId) {
+          result.deliveries = result.deliveries.map(delivery => ({...delivery,sessionId:currentInput.sessionId,
+            payload:{...delivery.payload,session_id:currentInput.sessionId}}))
+        }
+        const lateEffect = effect ?? lateMaterializer.businessEffect(currentInput, result)
         await lateEffect(this.createEffectContext(
           latePool, event.rowID, nextStep, assertClaim,
         ))
@@ -988,7 +1039,15 @@ export class EventMaterializer {
     return result
   }
 
-  async materialize(
+  async materialize(input: MaterializationInput, effect?: MaterializationEffect, options: MaterializationRunOptions = {}): Promise<MaterializationResult> {
+    for (let attempt=0; attempt<3; attempt++) {
+      try { return await this.materializeAttempt(input,effect,options) }
+      catch (error) { if (!(error instanceof AdmissionSessionMovedError) || attempt === 2) throw error }
+    }
+    throw new AdmissionSessionMovedError('session identity did not stabilize')
+  }
+
+  private async materializeAttempt(
     input: MaterializationInput,
     effect?: MaterializationEffect,
     options: MaterializationRunOptions = {},

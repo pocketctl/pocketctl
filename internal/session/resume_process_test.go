@@ -28,6 +28,12 @@ type fakeResumeProcess struct {
 	wait     chan error
 	killOnce sync.Once
 	killed   chan struct{}
+	stderr   string
+	exitCode int
+}
+
+func (p *fakeResumeProcess) ResumeDiagnostic() ResumeProcessDiagnostic {
+	return ResumeProcessDiagnostic{ExitCode: p.exitCode, Stderr: p.stderr}
 }
 
 func newFakeResumeProcess(pid int, stdout string) *fakeResumeProcess {
@@ -98,7 +104,7 @@ func TestStartExecResumeProcess(t *testing.T) {
 	}
 	dir := t.TempDir()
 	script := filepath.Join(dir, "fake-agent")
-	body := "#!/bin/sh\nprintf '%s\\n' \"$1\"\nexit 7\n"
+	body := "#!/bin/sh\nprintf '%s\\n' \"$1\"\nhead -c 5000 /dev/zero | tr '\\000' 'e' >&2\nexit 7\n"
 	if err := os.WriteFile(script, []byte(body), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -126,6 +132,15 @@ func TestStartExecResumeProcess(t *testing.T) {
 	waitErr := proc.Wait()
 	if waitErr == nil || !strings.Contains(waitErr.Error(), "exit status") {
 		t.Fatalf("Wait error=%v, want exit status 7", waitErr)
+	}
+	diagnostic, ok := proc.(interface {
+		ResumeDiagnostic() ResumeProcessDiagnostic
+	})
+	if !ok {
+		t.Fatal("real resume process did not expose bounded diagnostics")
+	}
+	if got := diagnostic.ResumeDiagnostic(); got.ExitCode != 7 || len(got.Stderr) != resumeStderrLimit {
+		t.Fatalf("diagnostic exit=%d stderr=%d bytes, want exit=7 stderr=%d", got.ExitCode, len(got.Stderr), resumeStderrLimit)
 	}
 }
 
@@ -250,7 +265,7 @@ func TestSendMessageRejectsSecondLiveResume(t *testing.T) {
 	}
 	output := make(chan protocol.DaemonEvent, 32)
 	sm := NewSessionManager(output)
-	sm.RegisterTerminalSession("live-resume-sid", t.TempDir(), 9999999, "", protocol.StatusExited, "")
+	sm.RegisterTerminalSession("live-resume-sid", t.TempDir(), 9999999, "", protocol.StatusExited, adapter.AgentClaude)
 	installSentinelResumeCLI(t, "claude")
 	starter := newRecordingResumeStarter()
 	sm.setResumeStarter(starter.call)
@@ -383,13 +398,83 @@ func TestIdleTerminalResumePreservesWaitError(t *testing.T) {
 	}
 }
 
+func TestIdleTerminalResumePublishesCorrelatedSanitizedExecutionFailure(t *testing.T) {
+	output := make(chan protocol.DaemonEvent, 32)
+	sm := NewSessionManager(output)
+	sm.RegisterTerminalSession("failed-resume-sid", t.TempDir(), os.Getpid(), "/dev/ttys-test", protocol.StatusIdle, adapter.AgentClaude)
+	installSentinelResumeCLI(t, "claude")
+	starter := newRecordingResumeStarter()
+	sm.setResumeStarter(starter.call)
+
+	err := sm.SendMessageWithInput(context.Background(), UserMessageInput{
+		SessionID: "failed-resume-sid", Content: "secret prompt", RequestID: "req-failure", MsgID: "msg-failure",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, procs := starter.snapshot()
+	procs[0].stderr = "provider exploded with secret prompt\n"
+	procs[0].exitCode = 17
+	procs[0].release(errors.New("exit status 17"))
+
+	deadline := time.After(time.Second)
+	for {
+		select {
+		case event := <-output:
+			if event.Type != "error" || event.Operation != "user_message" {
+				continue
+			}
+			if event.SessionID != "failed-resume-sid" || event.RequestID != "req-failure" || event.MsgID != "msg-failure" {
+				t.Fatalf("uncorrelated execution failure: %+v", event)
+			}
+			if event.Reason != "execution_failed" || event.Error == "" || strings.Contains(event.Error, "secret prompt") {
+				t.Fatalf("unsafe or unstable execution failure: %+v", event)
+			}
+			return
+		case <-deadline:
+			t.Fatal("timed out waiting for correlated execution failure")
+		}
+	}
+}
+
+func TestDormantResumePublishesCorrelatedExecutionFailure(t *testing.T) {
+	output := make(chan protocol.DaemonEvent, 32)
+	sm := NewSessionManager(output)
+	sm.RegisterTerminalSession("dormant-resume-sid", t.TempDir(), 0, "", protocol.StatusExited, adapter.AgentClaude)
+	installSentinelResumeCLI(t, "claude")
+	starter := newRecordingResumeStarter()
+	sm.setResumeStarter(starter.call)
+	if err := sm.SendMessageWithInput(context.Background(), UserMessageInput{
+		SessionID: "dormant-resume-sid", Content: "private input", RequestID: "req-dormant", MsgID: "msg-dormant",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	_, procs := starter.snapshot()
+	procs[0].exitCode = 23
+	procs[0].release(errors.New("exit status 23"))
+	deadline := time.After(time.Second)
+	for {
+		select {
+		case event := <-output:
+			if event.Type == "error" && event.Operation == "user_message" {
+				if event.RequestID != "req-dormant" || event.MsgID != "msg-dormant" || event.Reason != "execution_failed" {
+					t.Fatalf("failure=%+v", event)
+				}
+				return
+			}
+		case <-deadline:
+			t.Fatal("timed out waiting for dormant resume failure")
+		}
+	}
+}
+
 func TestShutdownResumeProcessesCancelsInFlightStart(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("Unix sentinel CLI fixture")
 	}
 	output := make(chan protocol.DaemonEvent, 32)
 	sm := NewSessionManager(output)
-	sm.RegisterTerminalSession("starting-resume-sid", t.TempDir(), 9999999, "", protocol.StatusExited, "")
+	sm.RegisterTerminalSession("starting-resume-sid", t.TempDir(), 9999999, "", protocol.StatusExited, adapter.AgentClaude)
 	installSentinelResumeCLI(t, "claude")
 	starterEntered := make(chan struct{})
 	starterCanceled := make(chan struct{})

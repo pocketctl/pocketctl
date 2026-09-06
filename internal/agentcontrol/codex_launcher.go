@@ -6,8 +6,11 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strings"
 	"time"
 )
+
+const codexOriginatorOverrideEnv = "CODEX_INTERNAL_ORIGINATOR_OVERRIDE"
 
 type CodexLauncher struct {
 	Acquire        func(context.Context, AcquirePayload) (AcquireResult, error)
@@ -67,7 +70,7 @@ func (l CodexLauncher) Run(ctx context.Context, args []string, cwd string) error
 		if err != nil {
 			return err
 		}
-		return l.Execute(ExecSpec{Path: binary, Args: plan.NativeArgs, Env: stripLauncherInternalEnv(l.Environ()), Dir: plan.CWD})
+		return l.Execute(ExecSpec{Path: binary, Args: plan.NativeArgs, Env: codexCLIEnvironment(l.Environ()), Dir: plan.CWD})
 	}
 
 	acquire := l.Acquire
@@ -99,14 +102,14 @@ func (l CodexLauncher) Run(ctx context.Context, args []string, cwd string) error
 				return err
 			}
 		}
-		return l.Execute(ExecSpec{Path: binary, Args: args, Env: stripLauncherInternalEnv(l.Environ()), Dir: plan.CWD})
+		return l.Execute(ExecSpec{Path: binary, Args: args, Env: codexCLIEnvironment(l.Environ()), Dir: plan.CWD})
 	}
 	managedBinary, valid := validatedRealAgentPath(result.RealBinary)
 	if !valid || result.RemoteURI == "" {
 		return errors.New("daemon returned an incomplete managed Codex runtime")
 	}
 	spec := ExecSpec{
-		Path: managedBinary, Args: plan.ManagedArgs(result.RemoteURI), Env: stripLauncherInternalEnv(l.Environ()), Dir: plan.CWD,
+		Path: managedBinary, Args: plan.ManagedArgs(result.RemoteURI), Env: codexCLIEnvironment(l.Environ()), Dir: plan.CWD,
 	}
 	if result.LeaseID != "" {
 		bind := l.BindLease
@@ -130,6 +133,19 @@ func (l CodexLauncher) Run(ctx context.Context, args []string, cwd string) error
 		releaseCancel()
 	}
 	return err
+}
+
+func codexCLIEnvironment(env []string) []string {
+	env = stripLauncherInternalEnv(env)
+	out := make([]string, 0, len(env))
+	prefix := codexOriginatorOverrideEnv + "="
+	for _, item := range env {
+		if strings.HasPrefix(item, prefix) {
+			continue
+		}
+		out = append(out, item)
+	}
+	return out
 }
 
 func resolveLauncherCodex() (string, error) {

@@ -300,6 +300,32 @@ async function initDBUnlocked(pool: pg.Pool): Promise<void> {
   await pool.query(`ALTER TABLE daemons ADD COLUMN IF NOT EXISTS user_id INT`);
   await pool.query(`CREATE INDEX IF NOT EXISTS idx_sessions_user_id ON sessions(user_id)`);
 
+  // Execution TTL is independent from retained outcome/replay authority.
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS session_message_admissions (
+      id UUID PRIMARY KEY,
+      user_id INT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      daemon_id VARCHAR(64) NOT NULL,
+      session_id VARCHAR(64) NOT NULL,
+      request_id VARCHAR(64) NOT NULL,
+      msg_id TEXT,
+      command_hash TEXT NOT NULL,
+      kind VARCHAR(16) NOT NULL DEFAULT 'continue' CHECK (kind = 'continue'),
+      state VARCHAR(16) NOT NULL DEFAULT 'issued' CHECK (state IN ('issued','completed','uncertain')),
+      issued_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      expires_at TIMESTAMPTZ NOT NULL,
+      completed_at TIMESTAMPTZ,
+      outcome TEXT,
+      UNIQUE(user_id, request_id)
+    )
+  `);
+  await pool.query(`ALTER TABLE session_message_admissions ADD COLUMN IF NOT EXISTS claimed_outcome TEXT`);
+  await pool.query(`ALTER TABLE session_message_admissions ADD COLUMN IF NOT EXISTS canonical_session_id VARCHAR(64)`);
+  await pool.query(`ALTER TABLE session_message_admissions ADD COLUMN IF NOT EXISTS session_aliases JSONB NOT NULL DEFAULT '[]'::jsonb`);
+  await pool.query(`UPDATE session_message_admissions SET canonical_session_id = session_id WHERE canonical_session_id IS NULL`);
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_session_message_admissions_canonical ON session_message_admissions(canonical_session_id)`);
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_session_message_admissions_unresolved
+    ON session_message_admissions(user_id, session_id) WHERE state IN ('issued','uncertain')`);
   // Short-lived, transactionally allocated quota slots. These close the race
   // where two clients on different hosts create or revive a session at once.
   await pool.query(`
@@ -332,6 +358,7 @@ async function initDBUnlocked(pool: pg.Pool): Promise<void> {
   // the later daemon event that claims the reservation.
   await pool.query(`ALTER TABLE quota_reservations ADD COLUMN IF NOT EXISTS agent_type VARCHAR(64)`);
   await pool.query(`ALTER TABLE quota_reservations ADD COLUMN IF NOT EXISTS cwd TEXT`);
+  await pool.query(`ALTER TABLE quota_reservations ADD COLUMN IF NOT EXISTS command_hash TEXT`);
   // Versioned cutover: legacy rows have no trustworthy outcome, so the first
   // strong-binding deployment keeps them counted as uncertain. The marker and
   // transition share the schema-init transaction, making this truly one-time
@@ -1163,7 +1190,7 @@ async function lockTokenRevocationFence(client: pg.PoolClient, jti: string): Pro
   );
 }
 
-async function lockSessionMaterializationFence(
+export async function lockSessionMaterializationFence(
   client: Pick<pg.PoolClient, 'query'>,
   sessionId: string,
 ): Promise<void> {
@@ -1386,6 +1413,7 @@ export async function consolidateOfflineMachineDaemons(
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
+    await client.query('SELECT id FROM users WHERE id = $1 FOR KEY SHARE',[input.userId]);
     await lockMachineIdentityFence(client, input.userId, input.machineId);
     const current = await client.query(
       `SELECT daemon_id, alias FROM daemons
@@ -1433,6 +1461,11 @@ export async function consolidateOfflineMachineDaemons(
     );
     await client.query(
       `UPDATE sessions SET daemon_id = $1
+       WHERE user_id = $2 AND daemon_id = ANY($3::varchar[])`,
+      [input.daemonId, input.userId, oldDaemonIds],
+    );
+    await client.query(
+      `UPDATE session_message_admissions SET daemon_id = $1
        WHERE user_id = $2 AND daemon_id = ANY($3::varchar[])`,
       [input.daemonId, input.userId, oldDaemonIds],
     );
@@ -1606,11 +1639,24 @@ export async function setDaemonReconnecting(pool: pg.Pool, daemonId: string): Pr
 
 /** Delete a daemon (unregister from account). Sessions are preserved with daemon_id nulled. */
 export async function deleteDaemon(pool: pg.Pool, userId: number, daemonId: string): Promise<boolean> {
-  const check = await pool.query(`SELECT 1 FROM daemons WHERE daemon_id = $1 AND user_id = $2`, [daemonId, userId]);
-  if ((check.rowCount ?? 0) === 0) return false;
-  await pool.query(`UPDATE sessions SET daemon_id = NULL WHERE daemon_id = $1`, [daemonId]);
-  await pool.query(`DELETE FROM daemons WHERE daemon_id = $1`, [daemonId]);
-  return true;
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    await client.query('SELECT pg_advisory_xact_lock($1)', [userId]);
+    await client.query('SELECT id FROM users WHERE id = $1 FOR KEY SHARE',[userId]);
+    const check = await client.query(`SELECT 1 FROM daemons WHERE daemon_id = $1 AND user_id = $2 FOR UPDATE`, [daemonId,userId]);
+    if ((check.rowCount ?? 0) === 0) { await client.query('COMMIT'); return false; }
+    const sessions = await client.query(`SELECT session_id FROM sessions WHERE daemon_id = $1 ORDER BY session_id`, [daemonId]);
+    for (const row of sessions.rows) await lockSessionMaterializationFence(client,row.session_id);
+    await client.query(`SELECT session_id FROM sessions WHERE daemon_id = $1 ORDER BY session_id FOR UPDATE`,[daemonId]);
+    await client.query(`UPDATE session_message_admissions SET state = 'completed', completed_at = COALESCE(completed_at,NOW()), outcome = 'daemon_deleted'
+      WHERE user_id = $1 AND daemon_id = $2`, [userId,daemonId]);
+    await client.query(`UPDATE sessions SET daemon_id = NULL WHERE daemon_id = $1`, [daemonId]);
+    await client.query(`DELETE FROM daemons WHERE daemon_id = $1`, [daemonId]);
+    await client.query('COMMIT');
+    return true;
+  } catch (error) { await client.query('ROLLBACK'); throw error; }
+  finally { client.release(); }
 }
 
 export async function upsertDaemonAlias(pool: pg.Pool, userId: number, daemonId: string, alias: string | null): Promise<string | null> {
@@ -1900,10 +1946,11 @@ export async function persistEventWithEffect(
   payload: any,
   attempts = 5,
   userId: number | null = null,
+  hashSessionId: string = sessionId,
 ): Promise<PersistedEventEffect> {
   const persistedPayload = sanitizeJSONBPayload(payload);
   const payloadStr = JSON.stringify(persistedPayload);
-  const hashInput = eventHashInput(sessionId, eventType, persistedPayload);
+  const hashInput = eventHashInput(hashSessionId, eventType, persistedPayload);
   const hash = createHash('md5').update(hashInput).digest('hex').slice(0, 16);
   let delay = 100;
   for (let i = 0; i < attempts; i++) {
@@ -2718,7 +2765,11 @@ export async function upsertSession(pool: pg.Pool, sessionId: string, daemonId: 
          WHEN sessions.source = 'daemon' AND $6 = 'terminal' THEN sessions.source
          ELSE COALESCE($6, sessions.source)
        END,
-       exit_reason = COALESCE($8, sessions.exit_reason),
+       exit_reason = CASE
+         WHEN $7 IN ('exited', 'completed', 'error', 'killed')
+           THEN COALESCE($8, sessions.exit_reason)
+         ELSE NULL
+       END,
        user_id = CASE WHEN $9 IS NOT NULL THEN $9 ELSE sessions.user_id END,
        model = COALESCE($10, sessions.model),
        control_mode = COALESCE($11, sessions.control_mode),
@@ -2842,6 +2893,13 @@ export async function renameOwnedDaemonSession(
       [input.oldSessionId, input.newSessionId, input.daemonId, input.userId],
     );
     if ((moved.rowCount ?? 0) === 0) throw new UnknownDaemonSessionError();
+    await client.query(
+      `UPDATE session_message_admissions
+       SET canonical_session_id = $2,
+           session_aliases = CASE WHEN session_aliases ? $1 THEN session_aliases ELSE session_aliases || to_jsonb($1::text) END
+       WHERE COALESCE(canonical_session_id,session_id) = $1 AND user_id = $3 AND daemon_id = $4`,
+      [input.oldSessionId,input.newSessionId,input.userId,input.daemonId],
+    );
     await client.query(
       `UPDATE events SET session_id = $2 WHERE session_id = $1`,
       [input.oldSessionId, input.newSessionId],
@@ -3549,6 +3607,7 @@ export async function deleteSession(
     if (options.writeUsageFacts) {
       await client.query(`SELECT pg_advisory_xact_lock(hashtext('token-usage-accounting-global'))`);
     }
+    await client.query(`SELECT session_id FROM sessions WHERE session_id = $1 FOR UPDATE`,[sessionId]);
     if (options.writeUsageFacts) await client.query(`
       INSERT INTO token_usage_facts (
         fact_key, source_event_id, user_id, daemon_id, session_id,
@@ -3623,6 +3682,9 @@ export async function deleteSession(
       emitTombstone: extensionMode !== 'off',
     });
     await client.query(`DELETE FROM token_session_daily_stats WHERE session_id = $1`, [sessionId]);
+    await client.query(`UPDATE session_message_admissions
+      SET state = 'completed', completed_at = NOW(), outcome = 'user_deleted'
+      WHERE COALESCE(canonical_session_id,session_id) = $1 AND state <> 'completed'`, [sessionId]);
     await client.query(`DELETE FROM sessions WHERE session_id = $1`, [sessionId]);
     await client.query(
       `INSERT INTO deleted_sessions (session_id) VALUES ($1) ON CONFLICT (session_id) DO UPDATE SET deleted_at = NOW()`,
@@ -3978,7 +4040,11 @@ export async function updateSessionStatus(pool: pg.Pool, sessionId: string, daem
        UPDATE sessions SET
          daemon_id = $2,
          status = input.status,
-         exit_reason = COALESCE($4, sessions.exit_reason),
+         exit_reason = CASE
+           WHEN input.status IN ('exited', 'completed', 'error', 'killed')
+             THEN COALESCE($4, sessions.exit_reason)
+           ELSE NULL
+         END,
          user_id = COALESCE($5::int, sessions.user_id),
          turn_started_at = CASE
            WHEN input.status IN ('running', 'busy', 'retry', 'waiting', 'waiting_approval', 'waiting_question')
@@ -4035,7 +4101,11 @@ export async function updateSessionStatusForEvent(
        UPDATE sessions SET
          daemon_id = $5,
          status = input.status,
-         exit_reason = COALESCE($7, sessions.exit_reason),
+         exit_reason = CASE
+           WHEN input.status IN ('exited', 'completed', 'error', 'killed')
+             THEN COALESCE($7, sessions.exit_reason)
+           ELSE NULL
+         END,
          user_id = COALESCE($8::int, sessions.user_id),
          turn_started_at = CASE
            WHEN input.status IN ('running', 'busy', 'retry', 'waiting', 'waiting_approval', 'waiting_question')

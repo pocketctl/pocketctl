@@ -882,6 +882,53 @@ func TestObserverPolicyManagedCodexDriveRemainsWritable(t *testing.T) {
 	}
 }
 
+func TestUserMessageRejectsUnknownExecutionIdentityWhenTurnEnrichmentIsOff(t *testing.T) {
+	sm := NewSessionManager(make(chan protocol.DaemonEvent, 8))
+	sm.turnMode = turnEnrichmentOff
+	started := false
+	sm.setResumeStarter(func(context.Context, resumeLaunchSpec) (resumeProcess, error) {
+		started = true
+		return nil, errors.New("must not start")
+	})
+
+	err := sm.SendMessageWithInput(context.Background(), UserMessageInput{
+		SessionID: "missing-session", Content: "must not execute", RequestID: "req-missing", MsgID: "msg-missing",
+	})
+	if err == nil || !strings.Contains(err.Error(), "execution identity") {
+		t.Fatalf("SendMessageWithInput error=%v, want explicit execution identity rejection", err)
+	}
+	if started {
+		t.Fatal("unknown identity reached the resume launcher")
+	}
+}
+
+func TestUserMessageRejectsEmptyAndUnsupportedExecutionIdentityBeforeTurnStart(t *testing.T) {
+	for _, tc := range []struct{ name, agent string }{
+		{name: "empty agent"},
+		{name: "unsupported agent", agent: "future-agent"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			output := make(chan protocol.DaemonEvent, 8)
+			sm := NewSessionManager(output)
+			sm.turnMode = turnEnrichmentEnforce
+			sm.sessions["identity-session"] = &ProcessState{SessionID: "identity-session", Agent: tc.agent, Source: "daemon", Status: protocol.StatusIdle}
+			started := false
+			sm.setResumeStarter(func(context.Context, resumeLaunchSpec) (resumeProcess, error) {
+				started = true
+				return nil, errors.New("must not start")
+			})
+			err := sm.SendMessageWithInput(context.Background(), UserMessageInput{SessionID: "identity-session", Content: "do not run", RequestID: "req-id", MsgID: "msg-id"})
+			if err == nil || !strings.Contains(err.Error(), "execution identity") { t.Fatalf("error=%v", err) }
+			if started { t.Fatal("invalid identity reached launcher") }
+			select {
+			case event := <-output:
+				if event.Type == protocol.EventTypeTurnStatus { t.Fatalf("invalid identity created turn: %+v", event) }
+			default:
+			}
+		})
+	}
+}
+
 func TestObserverPolicyCommandMatrixPreservesReadOnlyAndRelayOnlyOperations(t *testing.T) {
 	for _, commandType := range []string{
 		"user_message",

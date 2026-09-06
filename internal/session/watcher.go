@@ -204,6 +204,66 @@ func (sm *SessionManager) RegisterTerminalSession(sessionID, cwd string, pid int
 	return true
 }
 
+// SyncLiveTerminalSession applies a Claude watcher update only when it is tied
+// to a live process with a verifiable birth identity. An exited session may be
+// reactivated only by a different process binding, as created by a real
+// `claude --continue`; late metadata from the exiting process is ignored.
+func (sm *SessionManager) SyncLiveTerminalSession(sessionID, cwd string, pid int, ttyPath, status, agent string) bool {
+	if sessionID == "" || agent != adapter.AgentClaude || pid <= 0 || status == "" ||
+		status == protocol.StatusExited || status == protocol.StatusCompleted ||
+		status == protocol.StatusError || status == protocol.StatusKilled {
+		return false
+	}
+	if sm.proc == nil || !sm.proc.IsAlive(pid) {
+		return false
+	}
+	processIdentity, err := platform.ProcessStartIdentity(pid)
+	if err != nil || processIdentity == "" {
+		return false
+	}
+
+	sm.mu.Lock()
+	ps, ok := sm.sessions[sessionID]
+	if !ok || ps.Source != "terminal" || ps.Agent != adapter.AgentClaude {
+		sm.mu.Unlock()
+		return false
+	}
+	dormant := ps.Status == protocol.StatusExited || ps.Status == protocol.StatusCompleted ||
+		ps.Status == protocol.StatusError || ps.Status == protocol.StatusKilled
+	if dormant {
+		bindingChanged := ps.Pid != pid ||
+			(ps.ProcessStartIdentity != "" && ps.ProcessStartIdentity != processIdentity)
+		if !bindingChanged {
+			sm.mu.Unlock()
+			return false
+		}
+	}
+
+	now := time.Now()
+	ps.Pid = pid
+	ps.ProcessStartIdentity = processIdentity
+	ps.Status = status
+	ps.ExitReason = ""
+	ps.LastActivityAt = now
+	if cwd != "" {
+		ps.Cwd = cwd
+	}
+	if ttyPath != "" {
+		ps.TTY = ttyPath
+	}
+	sm.mu.Unlock()
+
+	sm.bindClaudeChannelForSession(sessionID)
+	sm.observeAgentStatusForTurn(sessionID, status)
+	sm.outputCh <- protocol.DaemonEvent{
+		Type:           "session_status",
+		SessionID:      sessionID,
+		Status:         status,
+		LastActivityAt: now.UTC().Format(time.RFC3339),
+	}
+	return true
+}
+
 type ObservedSessionRegistration uint8
 
 const (
@@ -213,11 +273,21 @@ const (
 )
 
 // RegisterObservedSession registers a read-only session discovered from an
-// external application's persisted history. Its result tells the caller
-// whether to attach the first history tailer, publish an in-place
-// reclassification, or do neither for an already-known/protected session.
-// Reclassification preserves the existing parser tailer and LastActivityAt.
+// external application's persisted history. Reclassification preserves the
+// existing parser tailer and LastActivityAt.
 func (sm *SessionManager) RegisterObservedSession(sessionID, cwd, status, agent string) ObservedSessionRegistration {
+	registration, _ := sm.registerObservedSession(sessionID, cwd, status, agent)
+	return registration
+}
+
+// RegisterObservedSessionForHistory registers an observed session and reports
+// whether this call owns starting its first history tailer. A reclassification
+// only needs a new tailer when the previous state did not already have one.
+func (sm *SessionManager) RegisterObservedSessionForHistory(sessionID, cwd, status, agent string) (ObservedSessionRegistration, bool) {
+	return sm.registerObservedSession(sessionID, cwd, status, agent)
+}
+
+func (sm *SessionManager) registerObservedSession(sessionID, cwd, status, agent string) (ObservedSessionRegistration, bool) {
 	gate := sm.observerDriveGateFor(sessionID)
 	gate.mu.Lock()
 	gate.classificationPending = true
@@ -238,12 +308,13 @@ func (sm *SessionManager) RegisterObservedSession(sessionID, cwd, status, agent 
 		// A Desktop rollout observation cannot revoke ownership of a live
 		// PocketCtl-managed Codex thread or orphan its app-server backend.
 		if ps.Agent == adapter.AgentCodex && ps.Source == "daemon" && ps.ControlMode == protocol.ControlManaged {
-			return ObservedSessionAlreadyKnown
+			return ObservedSessionAlreadyKnown, false
 		}
 		if ps.Agent == agent && ps.Source == "observer" &&
 			ps.ControlMode == protocol.ControlLegacyReadOnly && ps.Backend == nil {
-			return ObservedSessionAlreadyKnown
+			return ObservedSessionAlreadyKnown, false
 		}
+		startHistoryTailer := ps.Tailer == nil
 		ps.Agent = agent
 		ps.Source = "observer"
 		ps.ControlMode = protocol.ControlLegacyReadOnly
@@ -256,7 +327,7 @@ func (sm *SessionManager) RegisterObservedSession(sessionID, cwd, status, agent 
 		if cwd != "" {
 			ps.Cwd = cwd
 		}
-		return ObservedSessionReclassified
+		return ObservedSessionReclassified, startHistoryTailer
 	}
 
 	now := time.Now()
@@ -270,41 +341,7 @@ func (sm *SessionManager) RegisterObservedSession(sessionID, cwd, status, agent 
 		Source:         "observer",
 		ControlMode:    protocol.ControlLegacyReadOnly,
 	}
-	return ObservedSessionNew
-}
-
-// ReviveTerminalSessionOnActivity is called from the JSONL tail loop when fresh
-// events arrive. It always refreshes LastActivityAt; additionally, if the session
-// had gone dormant (exited/completed/error/killed) it flips it back to running and
-// emits session_status. This is what makes an `exit` → `claude --continue` resume
-// reappear as live: the original session's tailer stays alive across the exit, so
-// when --continue appends to the same <id>.jsonl the renewed output revives the
-// original card instead of leaving it frozen at "exited".
-func (sm *SessionManager) ReviveTerminalSessionOnActivity(sessionID string) {
-	sm.mu.Lock()
-	ps, ok := sm.sessions[sessionID]
-	if !ok {
-		sm.mu.Unlock()
-		return
-	}
-	now := time.Now()
-	ps.LastActivityAt = now
-	dormant := ps.Status == protocol.StatusExited || ps.Status == protocol.StatusCompleted ||
-		ps.Status == protocol.StatusError || ps.Status == protocol.StatusKilled
-	if !dormant {
-		sm.mu.Unlock()
-		return
-	}
-	ps.Status = protocol.StatusRunning
-	ps.ExitReason = ""
-	sm.mu.Unlock()
-
-	sm.outputCh <- protocol.DaemonEvent{
-		Type:           "session_status",
-		SessionID:      sessionID,
-		Status:         protocol.StatusRunning,
-		LastActivityAt: now.UTC().Format(time.RFC3339),
-	}
+	return ObservedSessionNew, true
 }
 
 // extractCwdFromJSONL reads the first records of a session's JSONL and returns

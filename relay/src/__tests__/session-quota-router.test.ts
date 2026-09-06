@@ -19,6 +19,12 @@ vi.mock('../quota.js', async (importOriginal) => {
   }
 })
 
+vi.mock('../session-message-admissions.js', async (original) => ({
+  ...await original<typeof import('../session-message-admissions.js')>(),
+  admitSessionMessage: vi.fn(),
+}))
+
+import { admitSessionMessage } from '../session-message-admissions.js'
 import { Router } from '../router.js'
 import {
   claimQuotaReservationSession,
@@ -114,6 +120,18 @@ function observerSessionPool(): any {
 }
 
 describe('Router active-session quota', () => {
+  test('admission database failure nacks without forwarding or subscribing', async () => {
+    vi.mocked(admitSessionMessage).mockRejectedValueOnce(new Error('database unavailable'))
+    const router = new Router(activeSessionPool()), daemon = ws(), client = ws()
+    await router.registerDaemon(daemon, { type:'register',daemon_id:'d1',hostname:'host',agents:[],supports_quota_grant:true },7)
+    router.registerClient(client,7)
+    daemon._sent.length = 0
+    await router.handleClientMessage(client,{type:'user_message',session_id:'active-session',msg_id:'failure',content:'continue'})
+    expect(daemon._sent).toEqual([])
+    expect((router as any).clients.get(client).subscribedSessions.size).toBe(0)
+    expect(client._sent).toContainEqual(expect.objectContaining({type:'user_message_nack',reason:'quota_check_failed',retryable:true}))
+  })
+
   beforeEach(() => vi.clearAllMocks())
 
   test('rejects a third remote create before it reaches the daemon', async () => {
@@ -283,6 +301,7 @@ describe('Router active-session quota', () => {
   })
 
   test('applies the same quota when a message revives an exited session', async () => {
+    vi.mocked(admitSessionMessage).mockResolvedValue({ kind: 'resume', decision: { allowed: false, reason: 'concurrent_session_quota_exceeded', used: 2, reserved: 0, limit: 2 } })
     vi.mocked(reserveConcurrentSession).mockResolvedValue({
       allowed: false,
       reason: 'concurrent_session_quota_exceeded',
@@ -312,6 +331,7 @@ describe('Router active-session quota', () => {
   })
 
   test('forwards an active-session message without reserving another concurrent slot', async () => {
+    vi.mocked(admitSessionMessage).mockResolvedValue({ kind: 'continue', reused: false, admission: { id: '550e8400-e29b-41d4-a716-446655440000', userId: 7, daemonId: 'd1', sessionId: 'active-session', requestId: 'message-active', state: 'issued', expiresAt: new Date(Date.now() + 20000) } })
     const router = new Router(activeSessionPool())
     const daemon = ws()
     const client = ws()
@@ -330,7 +350,7 @@ describe('Router active-session quota', () => {
       msg_id: 'message-active',
       request_id: 'message-active',
       quota_grant: expect.objectContaining({
-        reservation_id: 'active-session-message-active',
+        reservation_id: '550e8400-e29b-41d4-a716-446655440000',
         operation: 'resume',
       }),
     }))

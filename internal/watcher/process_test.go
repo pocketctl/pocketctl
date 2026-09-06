@@ -32,6 +32,24 @@ func TestOpenCodeAdoptionProcessClassification(t *testing.T) {
 	}
 }
 
+func TestNativeCodexTerminalPID(t *testing.T) {
+	repo := t.TempDir()
+	processes := []platform.ProcessSnapshot{
+		{PID: 11, Executable: "/opt/codex", Args: []string{"/opt/codex", "--dangerously-bypass-approvals-and-sandbox"}, CWD: repo},
+		{PID: 12, Executable: "/opt/node", Args: []string{"node", "/opt/codex.js"}, CWD: repo},
+		{PID: 13, Executable: "/opt/codex", Args: []string{"/opt/codex", "app-server", "--listen", "stdio://"}, CWD: repo},
+		{PID: 14, Executable: "/opt/codex", Args: []string{"/opt/codex", "--remote", "unix:///tmp/app.sock"}, CWD: repo},
+		{PID: 15, Executable: "/opt/codex", Args: []string{"/opt/codex"}, CWD: t.TempDir()},
+	}
+	if got := NativeCodexTerminalPID(processes, filepath.Join(repo, ".")); got != 11 {
+		t.Fatalf("pid=%d, want native terminal pid 11", got)
+	}
+	processes = append(processes, platform.ProcessSnapshot{PID: 16, Executable: "/opt/codex", Args: []string{"/opt/codex"}, CWD: repo})
+	if got := NativeCodexTerminalPID(processes, repo); got != 0 {
+		t.Fatalf("ambiguous pid=%d, want 0", got)
+	}
+}
+
 func TestProcessMonitorDetectsExit(t *testing.T) {
 	pm := NewProcessMonitor()
 	// Use current process PID — it's alive

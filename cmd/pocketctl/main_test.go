@@ -38,6 +38,7 @@ type promptReceiptSessionStub struct {
 	sendErr     error
 	onSend      func()
 	mode        func() string
+	exists      *bool
 }
 
 type recordingDaemonMessageSender struct {
@@ -65,6 +66,9 @@ func (s promptReceiptSessionStub) SendMessageWithInput(_ context.Context, in ses
 }
 
 func (s promptReceiptSessionStub) GetSessionAgent(string) (string, bool) {
+	if s.exists != nil {
+		return s.agent, *s.exists
+	}
 	return s.agent, true
 }
 
@@ -127,19 +131,23 @@ func TestDeliverUserMessageScopesAcceptanceReceiptToManagedCodex(t *testing.T) {
 			},
 			wantReceipt: true,
 			wantStatus:  "rejected",
-			wantReason:  rejected.Error(),
+			wantReason:  "dispatch_failed",
 		},
 		{
-			name: "managed OpenCode unchanged",
+			name: "managed OpenCode accepted",
 			session: promptReceiptSessionStub{
 				agent: adapter.AgentOpencode, controlMode: protocol.ControlManaged,
 			},
+			wantReceipt: true,
+			wantStatus:  "accepted",
 		},
 		{
-			name: "Claude unchanged",
+			name: "Claude accepted",
 			session: promptReceiptSessionStub{
 				agent: adapter.AgentClaude, controlMode: protocol.ControlManaged,
 			},
+			wantReceipt: true,
+			wantStatus:  "accepted",
 		},
 	}
 
@@ -175,6 +183,46 @@ func TestDeliverUserMessageScopesAcceptanceReceiptToManagedCodex(t *testing.T) {
 				t.Fatalf("receipt=%+v", got)
 			}
 		})
+	}
+}
+
+func TestDeliverUserMessageRejectsUnknownIdentityWithStableCorrelation(t *testing.T) {
+	sessionExists := false
+	sm := promptReceiptSessionStub{
+		sendErr: fmt.Errorf("%w: session missing", session.ErrSessionExecutionIdentityUnavailable),
+		exists:  &sessionExists,
+	}
+	var events []protocol.DaemonEvent
+	err := deliverUserMessage(context.Background(), sm, protocol.ClientMessage{
+		Type: "user_message", SessionID: "missing", Content: "hidden", RequestID: "req-missing", MsgID: "msg-missing",
+	}, func(event protocol.DaemonEvent) { events = append(events, event) })
+	if err == nil {
+		t.Fatal("deliverUserMessage returned nil")
+	}
+	if len(events) != 1 || events[0].Type != "user_message_receipt" || events[0].Status != "rejected" ||
+		events[0].RequestID != "req-missing" || events[0].MsgID != "msg-missing" || events[0].Reason != "session_identity_unavailable" {
+		t.Fatalf("events=%+v, want stable correlated identity rejection", events)
+	}
+}
+
+func TestHandleUserMessageRejectsUnknownIdentityBeforeResumeGrantConsumption(t *testing.T) {
+	sm := session.NewSessionManager(make(chan protocol.DaemonEvent, 8))
+	grants := session.NewQuotaGrantValidator()
+	grant := &protocol.QuotaGrant{ReservationID: "identity-reservation", Operation: "resume", ExpiresAt: time.Now().Add(time.Minute).UnixMilli()}
+	cmd := protocol.ClientMessage{Type: "user_message", SessionID: "missing-session", RequestID: "req-identity", MsgID: "msg-identity", QuotaGrant: grant}
+	var dirty atomic.Bool
+	var events []protocol.DaemonEvent
+	handleUserMessageCommand(context.Background(), sm, cmd, grants, &dirty,
+		slog.New(slog.NewTextHandler(io.Discard, nil)), func(event protocol.DaemonEvent) { events = append(events, event) })
+	if dirty.Load() {
+		t.Fatal("identity rejection dirtied session state")
+	}
+	if len(events) != 1 || events[0].Type != "user_message_receipt" || events[0].Reason != "session_identity_unavailable" {
+		t.Fatalf("events=%+v", events)
+	}
+	duplicate, err := grants.Validate(cmd.RequestID, grant, "resume", time.Now())
+	if err != nil || duplicate {
+		t.Fatalf("grant was consumed before identity validation: duplicate=%v err=%v", duplicate, err)
 	}
 }
 
@@ -1443,6 +1491,140 @@ func TestReconnectDiscoveryEventIsMarkedAsResync(t *testing.T) {
 	}
 }
 
+func TestTerminalJSONLTailAfterExitDoesNotReviveSession(t *testing.T) {
+	t.Setenv("POCKETCTL_CLAUDE_JSONL_V2", "")
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	const sessionID = "claude-exit-tail-session"
+	const cwd = "/work/exit-tail"
+	rolloutDir := filepath.Join(home, ".claude", "projects", "-work-exit-tail")
+	if err := os.MkdirAll(rolloutDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(rolloutDir, sessionID+".jsonl")
+	initial := `{"type":"assistant","sessionId":"` + sessionID + `","message":{"role":"assistant","content":[{"type":"text","text":"before exit"}]}}` + "\n"
+	if err := os.WriteFile(path, []byte(initial), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	input := make(chan watcher.SessionEvent, 1)
+	output := make(chan protocol.DaemonEvent, 32)
+	sm := session.NewSessionManager(output)
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	go handleWatcherEvents(ctx, input, adapter.AgentClaude, sm, watcher.NewProcessMonitor(), output,
+		slog.New(slog.NewTextHandler(io.Discard, nil)), &atomic.Bool{})
+	input <- watcher.SessionEvent{
+		Action:   "discovered",
+		Filepath: path,
+		Session: watcher.DiscoveredSession{
+			SessionID: sessionID, Cwd: cwd, Status: protocol.StatusRunning,
+			AgentType: adapter.AgentClaude, Source: "terminal",
+		},
+	}
+
+	waitForEvent := func(wantType, wantText string) protocol.DaemonEvent {
+		t.Helper()
+		deadline := time.After(4 * time.Second)
+		for {
+			select {
+			case event := <-output:
+				if event.Type == wantType && (wantText == "" || event.Text == wantText) {
+					return event
+				}
+			case <-deadline:
+				t.Fatalf("timed out waiting for %s %q", wantType, wantText)
+			}
+		}
+	}
+	waitForEvent("session_discovered", "")
+	waitForEvent("agent_text", "before exit")
+
+	sm.SetSessionExited(sessionID, protocol.ExitReasonNormalExit)
+	exited := waitForEvent("session_status", "")
+	for exited.Status != protocol.StatusExited {
+		exited = waitForEvent("session_status", "")
+	}
+	if exited.Status != protocol.StatusExited || exited.ExitReason != protocol.ExitReasonNormalExit {
+		t.Fatalf("exit event=%+v", exited)
+	}
+
+	tail := `{"type":"user","sessionId":"` + sessionID + `","message":{"role":"user","content":"/exit"}}` + "\n" +
+		`{"type":"assistant","sessionId":"` + sessionID + `","message":{"role":"assistant","content":[{"type":"text","text":"Catch you later!"}]}}` + "\n"
+	file, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := file.WriteString(tail); err != nil {
+		_ = file.Close()
+		t.Fatal(err)
+	}
+	if err := file.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	seenTail := map[string]bool{}
+	runningPublished := false
+	deadline := time.After(4 * time.Second)
+	for !seenTail["/exit"] || !seenTail["Catch you later!"] {
+		select {
+		case event := <-output:
+			if event.Type == "session_status" && event.Status == protocol.StatusRunning {
+				runningPublished = true
+			}
+			if event.Type == "user_text" || event.Type == "agent_text" {
+				seenTail[event.Text] = true
+			}
+		case <-deadline:
+			t.Fatalf("timed out waiting for exit tail messages: seen=%v", seenTail)
+		}
+	}
+
+	if runningPublished {
+		t.Fatal("JSONL exit tail published a false running status")
+	}
+	sessions := sm.ListSessions()
+	if len(sessions) != 1 || sessions[0].Status != protocol.StatusExited {
+		t.Fatalf("session after exit tail=%+v, want exited", sessions)
+	}
+}
+
+func TestClaudeWatcherRemovedMarksSessionStateDirty(t *testing.T) {
+	output := make(chan protocol.DaemonEvent, 8)
+	sm := session.NewSessionManager(output)
+	if !sm.RegisterTerminalSession(
+		"removed-session", "/work/project", 0, "", protocol.StatusIdle, adapter.AgentClaude,
+	) {
+		t.Fatal("terminal session was not registered")
+	}
+
+	input := make(chan watcher.SessionEvent, 1)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	var stateDirty atomic.Bool
+	go handleWatcherEvents(ctx, input, adapter.AgentClaude, sm, watcher.NewProcessMonitor(), output,
+		slog.New(slog.NewTextHandler(io.Discard, nil)), &stateDirty)
+	input <- watcher.SessionEvent{
+		Action: "removed",
+		Session: watcher.DiscoveredSession{
+			SessionID: "removed-session", Status: protocol.StatusIdle,
+			AgentType: adapter.AgentClaude, Source: "terminal",
+		},
+	}
+
+	select {
+	case event := <-output:
+		if event.Type != "session_status" || event.Status != protocol.StatusExited {
+			t.Fatalf("removed event=%+v, want exited session_status", event)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for removed session status")
+	}
+	if !stateDirty.Load() {
+		t.Fatal("removed watcher event did not mark daemon state dirty")
+	}
+}
+
 func TestCodexDesktopWatcherPublishesObserverWhileParsingCodexHistory(t *testing.T) {
 	codexHome := t.TempDir()
 	t.Setenv("CODEX_HOME", codexHome)
@@ -1684,6 +1866,66 @@ func TestCodexDesktopSameIDReclassificationPublishesWithoutSecondTailer(t *testi
 	}
 }
 
+func TestCodexDesktopSameIDReclassificationStartsMissingHistoryTailer(t *testing.T) {
+	codexHome := t.TempDir()
+	t.Setenv("CODEX_HOME", codexHome)
+	const sessionID = "desktop-reclassified-missing-tailer"
+	rolloutDir := filepath.Join(codexHome, "sessions", "2026", "09", "05")
+	if err := os.MkdirAll(rolloutDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(rolloutDir, "rollout-2026-09-05T07-33-36-"+sessionID+".jsonl")
+	lines := `{"type":"session_meta","payload":{"id":"` + sessionID + `","cwd":"/work/desktop","originator":"Codex Desktop","source":"vscode"}}` + "\n" +
+		`{"type":"event_msg","payload":{"type":"user_message","message":"history user prompt"}}` + "\n" +
+		`{"type":"event_msg","payload":{"type":"agent_message","message":"history assistant reply"}}` + "\n"
+	if err := os.WriteFile(path, []byte(lines), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	output := make(chan protocol.DaemonEvent, 16)
+	sm := session.NewSessionManager(output)
+	if !sm.RegisterTerminalSession(sessionID, "/work/desktop", 0, "", protocol.StatusIdle, adapter.AgentCodex) {
+		t.Fatal("provisional Codex state was not registered")
+	}
+
+	input := make(chan watcher.SessionEvent, 1)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go handleWatcherEvents(ctx, input, adapter.AgentCodex, sm, watcher.NewProcessMonitor(), output,
+		slog.New(slog.NewTextHandler(io.Discard, nil)), &atomic.Bool{})
+	input <- watcher.SessionEvent{
+		Action:   "discovered",
+		Filepath: path,
+		Session: watcher.DiscoveredSession{
+			SessionID: sessionID, Cwd: "/work/desktop", Status: protocol.StatusBusy,
+			AgentType: adapter.AgentCodexDesktop, Source: "observer",
+			ControlMode: protocol.ControlLegacyReadOnly, Capabilities: []string{"history_sync"},
+		},
+	}
+
+	want := map[string]string{
+		"user_text":  "history user prompt",
+		"agent_text": "history assistant reply",
+	}
+	deadline := time.After(3 * time.Second)
+	for len(want) > 0 {
+		select {
+		case event := <-output:
+			if text, ok := want[event.Type]; ok && event.Text == text {
+				delete(want, event.Type)
+			}
+		case <-deadline:
+			t.Fatalf("timed out waiting for reclassified Desktop history: missing=%v", want)
+		}
+	}
+
+	sessions := sm.ListSessions()
+	if len(sessions) != 1 || sessions[0].Agent != adapter.AgentCodexDesktop ||
+		sessions[0].Source != "observer" || sessions[0].ControlMode != protocol.ControlLegacyReadOnly {
+		t.Fatalf("reclassified observer state=%+v", sessions)
+	}
+}
+
 func TestReconnectDiscoveryEventCarriesExplicitRepositoryFacts(t *testing.T) {
 	repo := t.TempDir()
 	for _, args := range [][]string{
@@ -1865,6 +2107,29 @@ func TestTerminalHydrationEventsKeepsCurrentStatusAuthoritative(t *testing.T) {
 		if !event.Resync {
 			t.Fatalf("hydrated event=%+v, want resync=true", event)
 		}
+	}
+}
+
+func TestTerminalHydrationEventsOmitsMissingStatus(t *testing.T) {
+	got := terminalHydrationEvents([]protocol.DaemonEvent{
+		{Type: "agent_text", Text: "historical answer"},
+	}, "session-a", "")
+	if len(got) != 1 || got[0].Type != "agent_text" || !got[0].Resync {
+		t.Fatalf("events=%+v, want only historical content", got)
+	}
+}
+
+func TestNormalizeClaudeWatcherSessionStatus(t *testing.T) {
+	session := watcher.DiscoveredSession{Pid: 1234}
+	normalizeWatcherSessionStatus(adapter.AgentClaude, &session)
+	if session.Status != protocol.StatusIdle {
+		t.Fatalf("status=%q, want idle", session.Status)
+	}
+
+	codex := watcher.DiscoveredSession{Pid: 1234}
+	normalizeWatcherSessionStatus(adapter.AgentCodex, &codex)
+	if codex.Status != "" {
+		t.Fatalf("Codex status=%q, want unchanged", codex.Status)
 	}
 }
 

@@ -212,7 +212,7 @@
         <!-- L1: send failed (ws not open at send time) -->
         <div v-if="sendError || interruptPendingDraft" class="banner banner-warning" style="flex-shrink:0;">
           <svg class="banner-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><path d="M12 9v4"/><path d="M12 17h.01"/></svg>
-          <span>{{ t('session.send_failed') }}</span>
+          <span>{{ sendFailureKey ? t(sendFailureKey) : t('session.send_failed') }}</span>
           <button v-if="interruptPendingDraft" type="button" class="interrupt-pending-retry" @click="restoreInterruptPendingDraft">{{ t('common.retry') }}</button>
         </div>
 
@@ -864,6 +864,7 @@ const status = ref('running')
 const awaitingStart = ref(false)
 // L1: transient "send failed" banner (ws not open at send time).
 const sendError = ref(false)
+const sendFailureKey = ref('')
 const interruptPendingDraft = ref('')
 // Relay forwarding is acknowledged per prompt. Managed Codex prompts carrying
 // message_acceptance_receipt then wait for a second, app-server acceptance event.
@@ -2061,10 +2062,18 @@ function clearAckTimeout(msgId: string) {
   pendingAckTimers.delete(msgId)
 }
 
-function showSendFailure() {
+function showSendFailure(key = '') {
   awaitingStart.value = false
+  sendFailureKey.value = key
   sendError.value = true
-  setTimeout(() => { sendError.value = false }, 3000)
+  setTimeout(() => { sendError.value = false; sendFailureKey.value = '' }, 3000)
+}
+
+function userMessageFailureKey(reason: string) {
+  if (reason === 'session_identity_unavailable') return 'session.recovery_failed'
+  if (reason === 'observer_read_only') return 'session.control_restricted'
+  if (reason === 'execution_failed') return 'session.execution_failed'
+  return ''
 }
 function restoreInterruptPendingDraft() {
   if (!interruptPendingDraft.value) return
@@ -2364,6 +2373,48 @@ function isDuplicate(type: string, text: string, target = messages.value): boole
   return type === 'agent_text' && cleanContent(last.content || '') === cleanContent(text)
 }
 
+function eventCorrelation(evt: any) {
+  const payload = evt?.payload && typeof evt.payload === 'object' ? evt.payload : {}
+  return {
+    requestId: evt?.request_id || payload.request_id || '',
+    msgId: evt?.msg_id || payload.msg_id || '',
+  }
+}
+
+function messageCorrelation(message: any) {
+  return {
+    requestId: message?.request_id || message?.__request_id || '',
+    msgId: message?.msg_id || message?.__msg_id || '',
+  }
+}
+
+function correlationsConflict(left: ReturnType<typeof eventCorrelation>, right: ReturnType<typeof eventCorrelation>) {
+  return Boolean(
+    (left.requestId && right.requestId && left.requestId !== right.requestId)
+    || (left.msgId && right.msgId && left.msgId !== right.msgId),
+  )
+}
+
+function findMessageByCorrelation(correlation: ReturnType<typeof eventCorrelation>, target = messages.value) {
+  if (!correlation.requestId && !correlation.msgId) return undefined
+  return target.find((message: any) => {
+    const candidate = messageCorrelation(message)
+    if (correlationsConflict(correlation, candidate)) return false
+    return Boolean(
+      (correlation.msgId && candidate.msgId === correlation.msgId)
+      || (correlation.requestId && candidate.requestId === correlation.requestId),
+    )
+  })
+}
+
+function applyCanonicalCorrelation(message: any, correlation: ReturnType<typeof eventCorrelation>) {
+  if (correlation.requestId) {
+    message.request_id = correlation.requestId
+    message.__request_id = correlation.requestId
+  }
+  if (correlation.msgId) message.msg_id = correlation.msgId
+}
+
 const turnMetadataKeys = ['turn_id', 'source_turn_id', 'turn_status', 'turn_reason', 'turn_origin', 'turn_confidence', 'previous_turn_id', 'continuation_reason', 'actor_scope', 'flow_scope', 'content_class', 'classifier_version'] as const
 function eventWithTurnMetadata(evt: any): Record<string, unknown> {
   const payload = evt.payload && typeof evt.payload === 'object' ? evt.payload : {}
@@ -2428,11 +2479,27 @@ function processEvent(evt: any, target: any[] = messages.value, subagentOverride
   } else if (type === 'user_text') {
     const text = evt.text || evt.content || evt.payload?.text || evt.payload?.content || ''
     if (!text) return
-    if (isDuplicate('user_text', text, target)) {
-      preserveTurnMetadata(target[target.length - 1], evt)
+    const correlation = eventCorrelation(evt)
+    const correlated = findMessageByCorrelation(correlation, target)
+    if (correlated) {
+      preserveTurnMetadata(correlated, evt)
+      applyCanonicalCorrelation(correlated, correlation)
       return
     }
-    target.push({ id: nextId('u'), type: 'user_text', role: 'user', content: text, ...eventWithTurnMetadata(evt) })
+    const last = target[target.length - 1]
+    if (last?.type === 'user_text' && (last.content || '') === text
+      && !correlationsConflict(correlation, messageCorrelation(last))) {
+      const existing = last
+      preserveTurnMetadata(existing, evt)
+      applyCanonicalCorrelation(existing, correlation)
+      return
+    }
+    target.push({
+      id: nextId('u'), type: 'user_text', role: 'user', content: text,
+      request_id: correlation.requestId,
+      msg_id: correlation.msgId,
+      ...eventWithTurnMetadata(evt),
+    })
   } else if (type === 'agent_text') {
     // A: model started responding — end optimistic window (fallback if the
     // running status was missed, e.g. PTY race).
@@ -3180,9 +3247,9 @@ onMounted(() => {
     failOrRollbackOptimistic(msg.msg_id, msg.reason || '')
   }))
   cleanups.push(onEvent('user_message_receipt', (msg: any) => {
-    if (msg.session_id !== sessionId.value || !msg.msg_id) return
-    clearAckTimeout(msg.msg_id)
-    const message = messages.value.find((item: any) => item.__msg_id === msg.msg_id)
+    if (msg.session_id !== sessionId.value || (!msg.msg_id && !msg.request_id)) return
+    if (msg.msg_id) clearAckTimeout(msg.msg_id)
+      const message = findMessageByCorrelation(eventCorrelation(msg))
     // An input received while interrupt confirmation is outstanding did not
     // enter the old turn. Remove the optimistic echo and restore the draft so
     // the user can retry after the terminal lifecycle event arrives.
@@ -3195,15 +3262,16 @@ onMounted(() => {
       showSendFailure()
       return
     }
-    if (!message?.__expects_receipt) return
+    if (!message) return
     if (msg.status === 'accepted') {
+      if (message.deliveryStatus === 'failed') return
       message.deliveryStatus = 'accepted'
       message.deliveryReason = ''
       return
     }
     message.deliveryStatus = 'failed'
     message.deliveryReason = msg.reason || ''
-    showSendFailure()
+    showSendFailure(userMessageFailureKey(msg.reason || ''))
   }))
 
   cleanups.push(onEvent('user_text', (msg: any) => {
@@ -3387,6 +3455,16 @@ onMounted(() => {
 
   cleanups.push(onEvent('error', (msg: any) => {
     if (msg.session_id && msg.session_id !== sessionId.value) return
+    if (msg.operation === 'user_message' && (msg.msg_id || msg.request_id)) {
+      const message = findMessageByCorrelation(eventCorrelation(msg))
+      if (message) {
+        clearAckTimeout(message.__msg_id)
+        message.deliveryStatus = 'failed'
+        message.deliveryReason = msg.reason || ''
+        showSendFailure(userMessageFailureKey(msg.reason || ''))
+        return
+      }
+    }
     if (['approval_response', 'question_response', 'question_reject', 'mcp_elicitation_response'].includes(msg.operation) && msg.request_id) {
       clearInteractionSubmitting(msg.request_id)
       const type = msg.operation === 'approval_response' ? 'approval_request' : msg.operation === 'mcp_elicitation_response' ? 'mcp_elicitation_request' : 'question_request'

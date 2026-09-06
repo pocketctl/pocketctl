@@ -38,6 +38,15 @@ function pools() {
 }
 
 describe('EventMaterializer', () => {
+  test('a mismatched real reservation cannot fall through to a continue admission', async () => {
+    const pool = {query:vi.fn(async (sql:string) => {
+      if (sql.includes('FROM quota_reservations reservation')) return {rows:[{id:'real-reservation',resource:'concurrent_session',operation:'resume',daemon_id:'wrong-daemon',session_id:'ses-1',state:'pending'}]}
+      return {rows:[]}
+    })}
+    await expect(new EventMaterializer({pool:pool as never}).materialize(inputFor({type:'session_status',session_id:'ses-1',request_id:'request-1',status:'running'}))).rejects.toMatchObject({code:'quota_reservation_binding_mismatch'})
+    expect(pool.query.mock.calls.some(([sql]) => sql.includes('FROM session_message_admissions'))).toBe(false)
+  })
+
   test('passes server receipt time to the immutable fact writer only when explicitly enabled', async () => {
     const increment = vi.spyOn(db, 'incrementSessionTokensForEvent').mockResolvedValue(undefined)
     const receivedAt = new Date('2026-08-09T12:34:56.000Z')

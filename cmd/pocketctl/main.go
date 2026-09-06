@@ -2277,13 +2277,25 @@ func terminalHydrationEvents(events []protocol.DaemonEvent, sessionID, currentSt
 		event.Resync = true
 		projected = append(projected, event)
 	}
-	projected = append(projected, protocol.DaemonEvent{
-		Type:      "session_status",
-		SessionID: sessionID,
-		Status:    currentStatus,
-		Resync:    true,
-	})
+	if currentStatus != "" {
+		projected = append(projected, protocol.DaemonEvent{
+			Type:      "session_status",
+			SessionID: sessionID,
+			Status:    currentStatus,
+			Resync:    true,
+		})
+	}
 	return projected
+}
+
+// Claude rewrites its watcher metadata in place during continue. A watcher can
+// observe the live PID before the status field is present; treat that transient
+// snapshot as idle instead of publishing an empty lifecycle status.
+func normalizeWatcherSessionStatus(agentType string, discovered *watcher.DiscoveredSession) {
+	if discovered == nil || discovered.Status != "" || discovered.Pid <= 0 || agentType != adapter.AgentClaude {
+		return
+	}
+	discovered.Status = protocol.StatusIdle
 }
 
 func interactionCommandResultEvent(operation, sessionID, requestID string, err error) protocol.DaemonEvent {
@@ -2987,6 +2999,7 @@ func handleWatcherEvents(ctx context.Context, events <-chan watcher.SessionEvent
 				})
 
 			case "discovered":
+				normalizeWatcherSessionStatus(agentType, &evt.Session)
 				logger.Info("session discovered", "session", evt.Session.SessionID, "pid", evt.Session.Pid)
 				publishedAgent := evt.Session.AgentType
 				if publishedAgent == "" {
@@ -3000,10 +3013,10 @@ func handleWatcherEvents(ctx context.Context, events <-chan watcher.SessionEvent
 				startTailer := false
 				reclassified := false
 				if source == "observer" {
-					registration := sm.RegisterObservedSession(
+					registration, shouldStartHistoryTailer := sm.RegisterObservedSessionForHistory(
 						evt.Session.SessionID, evt.Session.Cwd, evt.Session.Status, publishedAgent,
 					)
-					startTailer = registration == session.ObservedSessionNew
+					startTailer = shouldStartHistoryTailer
 					reclassified = registration == session.ObservedSessionReclassified
 				} else {
 					startTailer = sm.RegisterTerminalSession(
@@ -3181,18 +3194,14 @@ func handleWatcherEvents(ctx context.Context, events <-chan watcher.SessionEvent
 								events = terminalHydrationEvents(events, sessionSnapshot.SessionID, sessionSnapshot.Status)
 								hydrating = false
 							}
-							// Fresh tail output: refresh activity and, if the session had
-							// gone dormant (e.g. after `exit`), revive it so an `exit` →
-							// `claude --continue` resume reappears as live instead of staying
-							// frozen at "exited".
-							if len(events) > 0 && !initialHydration {
-								sm.ReviveTerminalSessionOnActivity(sessionSnapshot.SessionID)
-							}
 							for i := range events {
 								if events[i].SessionID == "" {
 									events[i].SessionID = sessionSnapshot.SessionID
 								}
-								if observeJSONLLifecycle(sm, events[i]) {
+								if events[i].Type == "session_status" && !events[i].Resync {
+									if !observeJSONLLifecycle(sm, events[i]) {
+										continue
+									}
 									stateDirty.Store(true)
 								}
 								protocol.FinalizeAgentPlanEvent(&events[i])
@@ -3227,12 +3236,29 @@ func handleWatcherEvents(ctx context.Context, events <-chan watcher.SessionEvent
 				})
 
 			case "changed":
+				normalizeWatcherSessionStatus(agentType, &evt.Session)
 				logger.Debug("session changed", "session", evt.Session.SessionID, "status", evt.Session.Status)
-				sm.SetSessionStatus(evt.Session.SessionID, evt.Session.Status)
+				if agentType == adapter.AgentClaude {
+					ttyPath := ""
+					if evt.Session.Pid > 0 {
+						ttyPath, _ = notify.GetTTYForPID(evt.Session.Pid)
+					}
+					if sm.SyncLiveTerminalSession(
+						evt.Session.SessionID, evt.Session.Cwd, evt.Session.Pid, ttyPath,
+						evt.Session.Status, adapter.AgentClaude,
+					) {
+						pm.Register(evt.Session.Pid, evt.Session.SessionID)
+					} else {
+						logger.Debug("ignored unverified Claude watcher status", "session", evt.Session.SessionID, "pid", evt.Session.Pid)
+					}
+				} else {
+					sm.SetSessionStatus(evt.Session.SessionID, evt.Session.Status)
+				}
 
 			case "removed":
 				logger.Info("session removed", "session", evt.Session.SessionID)
 				sm.SetSessionExited(evt.Session.SessionID, protocol.ExitReasonNormalExit)
+				stateDirty.Store(true)
 				if evt.Session.Pid > 0 {
 					pm.Unregister(evt.Session.Pid)
 				}
@@ -3378,8 +3404,7 @@ func deliverUserMessage(
 	send func(protocol.DaemonEvent),
 ) error {
 	agent, exists := sm.GetSessionAgent(cmd.SessionID)
-	expectsAcceptanceReceipt := exists && agent == adapter.AgentCodex &&
-		sm.SessionControlMode(cmd.SessionID) == protocol.ControlManaged && cmd.MsgID != ""
+	emitsReceipt := exists && agent != "" && cmd.MsgID != ""
 	err := sm.SendMessageWithInput(ctx, session.UserMessageInput{
 		SessionID: cmd.SessionID,
 		Content:   cmd.Content,
@@ -3408,7 +3433,19 @@ func deliverUserMessage(
 		})
 		return err
 	}
-	if !expectsAcceptanceReceipt {
+	if err != nil && cmd.MsgID != "" {
+		reason := "dispatch_failed"
+		if errors.Is(err, session.ErrSessionExecutionIdentityUnavailable) {
+			reason = "session_identity_unavailable"
+		}
+		retryable := false
+		send(protocol.DaemonEvent{
+			Type: "user_message_receipt", SessionID: cmd.SessionID, MsgID: cmd.MsgID, RequestID: cmd.RequestID,
+			Status: "rejected", Reason: reason, Retryable: &retryable,
+		})
+		return err
+	}
+	if !emitsReceipt {
 		return err
 	}
 	status := "accepted"
@@ -3441,6 +3478,14 @@ func handleUserMessageCommand(
 ) {
 	err := sm.WithObserverDrive(ctx, cmd.SessionID, func(driveCtx context.Context) error {
 		logger.Info("user message", "session", cmd.SessionID)
+		if identityErr := sm.ValidateExecutionIdentity(cmd.SessionID); identityErr != nil {
+			retryable := false
+			send(protocol.DaemonEvent{
+				Type: "user_message_receipt", SessionID: cmd.SessionID, RequestID: cmd.RequestID, MsgID: cmd.MsgID,
+				Status: "rejected", Reason: "session_identity_unavailable", Retryable: &retryable,
+			})
+			return nil
+		}
 		stateDirty.Store(true)
 		requiresResume := sm.RequiresResume(cmd.SessionID)
 		if requiresResume {
@@ -3450,9 +3495,11 @@ func handleUserMessageCommand(
 				if grantErr != nil {
 					errText = grantErr.Error()
 				}
+				retryable := false
 				send(protocol.DaemonEvent{
-					Type: "error", SessionID: cmd.SessionID, RequestID: cmd.RequestID,
-					ReservationID: quotaReservationID(cmd.QuotaGrant), Reason: "quota_grant_invalid", Error: errText,
+					Type: "user_message_receipt", SessionID: cmd.SessionID, RequestID: cmd.RequestID, MsgID: cmd.MsgID,
+					ReservationID: quotaReservationID(cmd.QuotaGrant), Status: "rejected", Reason: "quota_grant_invalid",
+					Error: errText, Retryable: &retryable,
 				})
 				return nil
 			}
@@ -3462,9 +3509,13 @@ func handleUserMessageCommand(
 				return nil // deliverUserMessage already sent the single typed nack.
 			}
 			logger.Error("send message failed", "error", err)
+			reason := "dispatch_failed"
+			if errors.Is(err, session.ErrSessionExecutionIdentityUnavailable) {
+				reason = "session_identity_unavailable"
+			}
 			send(protocol.DaemonEvent{
 				Type: "error", SessionID: cmd.SessionID, RequestID: cmd.RequestID,
-				Operation: "user_message", Error: err.Error(),
+				MsgID: cmd.MsgID, Operation: "user_message", Reason: reason, Error: err.Error(),
 			})
 		} else if requiresResume {
 			send(protocol.DaemonEvent{

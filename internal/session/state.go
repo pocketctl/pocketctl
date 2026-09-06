@@ -92,6 +92,9 @@ func (sm *SessionManager) SetSessionExited(sessionID string, exitReason string) 
 		ExitReason:     exitReason,
 		LastActivityAt: now.UTC().Format(time.RFC3339),
 	}
+	if sm.OnStateChanged != nil {
+		sm.OnStateChanged()
+	}
 }
 
 // DetachUnresolvedTerminalSession removes the provisional SessionManager entry
@@ -179,6 +182,15 @@ func (sm *SessionManager) observeJSONLSessionStatus(sessionID, status string, al
 	sm.mu.Lock()
 	ps, ok := sm.sessions[sessionID]
 	if !ok || (ps.Source != "terminal" && (!allowObserver || ps.Source != "observer")) {
+		sm.mu.Unlock()
+		return false
+	}
+	terminalEnded := ps.Source == "terminal" && (ps.Status == protocol.StatusExited ||
+		ps.Status == protocol.StatusCompleted || ps.Status == protocol.StatusError ||
+		ps.Status == protocol.StatusKilled)
+	if terminalEnded {
+		// JSONL can lag behind process removal. Keep lifecycle terminal until the
+		// process watcher verifies and binds a newly started continuation process.
 		sm.mu.Unlock()
 		return false
 	}
