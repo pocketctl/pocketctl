@@ -22,6 +22,7 @@ type DiscoveredSession struct {
 	Status          string   `json:"status"`
 	StartedAt       int64    `json:"startedAt"`
 	Version         string   `json:"version"`
+	Entrypoint      string   `json:"entrypoint,omitempty"` // e.g. "cli" (interactive), "sdk-py" (Agent SDK headless)
 	ParentSessionID string   `json:"parentSessionId,omitempty"`
 	RootSessionID   string   `json:"rootSessionId,omitempty"`
 	IsSubagent      bool     `json:"isSubagent,omitempty"`

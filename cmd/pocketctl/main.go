@@ -2985,6 +2985,13 @@ func handleWatcherEvents(ctx context.Context, events <-chan watcher.SessionEvent
 
 			case "discovered":
 				normalizeWatcherSessionStatus(agentType, &evt.Session)
+				if isSDKSpawnedSession(evt.Session) {
+					// SDK-spawned headless sessions (entrypoint sdk*) are never
+					// top-level sessions: attach to the inferred host instead.
+					logger.Info("sdk session discovered", "session", evt.Session.SessionID, "pid", evt.Session.Pid)
+					handleSDKSpawnedSession(ctx, sm, evt, logger, outputCh)
+					break
+				}
 				logger.Info("session discovered", "session", evt.Session.SessionID, "pid", evt.Session.Pid)
 				publishedAgent := evt.Session.AgentType
 				if publishedAgent == "" {

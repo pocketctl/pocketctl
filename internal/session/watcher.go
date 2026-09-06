@@ -344,6 +344,28 @@ func (sm *SessionManager) registerObservedSession(sessionID, cwd, status, agent 
 	return ObservedSessionNew, true
 }
 
+// InferSDKHostSession returns the id of the session that most plausibly
+// spawned a headless SDK session in cwd: the non-exited registered session
+// with the latest LastActivityAt. SDK sessions are never registered in the
+// manager, so candidates are inherently interactive/managed sessions.
+func (sm *SessionManager) InferSDKHostSession(cwd string) (string, bool) {
+	if cwd == "" {
+		return "", false
+	}
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+	best, bestAt := "", time.Time{}
+	for id, ps := range sm.sessions {
+		if ps.Cwd != cwd || ps.Status == "exited" {
+			continue
+		}
+		if ps.LastActivityAt.After(bestAt) {
+			best, bestAt = id, ps.LastActivityAt
+		}
+	}
+	return best, best != ""
+}
+
 // extractCwdFromJSONL reads the first records of a session's JSONL and returns
 // the cwd field. Each line is a JSON object; cwd is present on most records.
 func extractCwdFromJSONL(path string) string {

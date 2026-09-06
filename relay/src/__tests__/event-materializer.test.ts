@@ -719,6 +719,27 @@ describe('EventMaterializer', () => {
     reconcile.mockRestore()
   })
 
+  test('materializes SDK session relation with sdk_session kind overriding agent inference', async () => {
+    const reconcile = vi.spyOn(db, 'reconcileSubagentInTransaction').mockResolvedValue(undefined)
+    const pool = pools()
+    const payload = {
+      type: 'subagent_discovered', session_id: 'host_session', agent: 'claude-code',
+      agent_id: 'sdk_session_id', parent_session_id: 'host_session', root_session_id: 'host_session',
+      subagent_kind: 'sdk_session', subagent_desc: 'Review this change for security vulnerabilities.',
+    }
+    const materializer = new EventMaterializer({ pool: pool as never } as never)
+
+    const result = await materializer.materialize(inputFor(payload))
+
+    expect(reconcile).toHaveBeenCalledWith(pool, {
+      parentSessionId: 'host_session', agentId: 'sdk_session_id', rootSessionId: 'host_session',
+      kind: 'sdk_session', toolUseId: undefined, agentType: undefined,
+      title: 'Review this change for security vulnerabilities.',
+    })
+    expect(result.deliveries[0]?.payload).toEqual(payload)
+    reconcile.mockRestore()
+  })
+
   test.each([
     'running', 'interrupt_requested', 'completed', 'interrupted', 'failed', 'abandoned',
   ])('persists tagged subagent turn lifecycle status %s', async (turnStatus) => {
