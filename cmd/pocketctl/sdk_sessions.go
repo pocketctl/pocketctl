@@ -24,16 +24,26 @@ const sdkSessionSubagentKind = "sdk_session"
 // sdkSessionAgentType labels the SDK child inside subagent-scoped events.
 const sdkSessionAgentType = "sdk"
 
-// The per-PID session file appears before the projects JSONL: at discovery
-// the SDK runtime may not have flushed its jsonl yet, so resolution retries
-// briefly instead of dropping the session on a cold-start race.
-var (
-	resolveSDKJSONLPath = func(sessionID, cwd string) (string, error) {
-		return adapter.ResolveJSONLPathFor(adapter.AgentClaude, sessionID, cwd)
+// sdkAttachOptions bundles the injectable knobs of SDK session attachment so
+// tests can shrink the retry budget without touching shared mutable state.
+type sdkAttachOptions struct {
+	resolve       func(sessionID, cwd string) (string, error)
+	retryInterval time.Duration
+	retryAttempts int
+}
+
+func defaultSDKAttachOptions() sdkAttachOptions {
+	return sdkAttachOptions{
+		resolve: func(sessionID, cwd string) (string, error) {
+			return adapter.ResolveJSONLPathFor(adapter.AgentClaude, sessionID, cwd)
+		},
+		// The per-PID session file appears before the projects JSONL: at
+		// discovery the SDK runtime may not have flushed its jsonl yet, so
+		// resolution retries briefly instead of dropping the session.
+		retryInterval: 500 * time.Millisecond,
+		retryAttempts: 30,
 	}
-	sdkJSONLRetryInterval = 500 * time.Millisecond
-	sdkJSONLRetryAttempts = 30
-)
+}
 
 // isSDKSpawnedSession reports whether a discovered Claude Code session was
 // spawned by an Agent SDK runtime (entrypoint prefix "sdk", e.g. sdk-py).
@@ -65,56 +75,73 @@ func handleSDKSpawnedSession(
 	}
 
 	daemon.RunLoop(ctx, "sdk-attach:"+sid, logger, func() {
-		jsonlPath := resolveSDKJSONLPathWithRetry(ctx, sid, evt.Session.Cwd)
-		if jsonlPath == "" {
-			logger.Warn("sdk session jsonl resolution failed, dropped",
-				"session", sid, "cwd", evt.Session.Cwd)
-			return
-		}
-		title := sdkSessionTitle(jsonlPath)
-
-		select {
-		case outputCh <- protocol.DaemonEvent{
-			Type:            "subagent_discovered",
-			SessionID:       host,
-			AgentID:         sid,
-			SubAgentType:    sdkSessionAgentType,
-			SubAgentDesc:    title,
-			SubagentKind:    sdkSessionSubagentKind,
-			ParentSessionID: host,
-			IsSubagent:      true,
-			RootSessionID:   host,
-		}:
-		case <-ctx.Done():
-			return
-		}
-
-		tailer, err := watcher.NewSubAgentTailerForAgent(jsonlPath, sid, host, sdkSessionAgentType, adapter.AgentClaude)
-		if err != nil {
-			logger.Warn("sdk session tailer start failed; relation kept without content tail",
-				"session", sid, "error", err)
+		tailer, attached := attachSDKSession(ctx, sid, evt.Session.Cwd, host, logger, outputCh, defaultSDKAttachOptions())
+		if !attached || tailer == nil {
 			return
 		}
 		tailer.Run(ctx, outputCh)
 	})
 }
 
+// attachSDKSession resolves the SDK session's jsonl (retrying out the
+// cold-start window), emits the subagent_discovered relation, and builds its
+// content tailer. It returns (tailer, true) on success — the caller owns
+// running (and thereby the lifetime of) the returned tailer.
+func attachSDKSession(
+	ctx context.Context,
+	sid, cwd, host string,
+	logger *slog.Logger,
+	outputCh chan<- protocol.DaemonEvent,
+	opts sdkAttachOptions,
+) (*watcher.SubAgentTailer, bool) {
+	jsonlPath := resolveSDKJSONLPathWithRetry(ctx, sid, cwd, opts)
+	if jsonlPath == "" {
+		logger.Warn("sdk session jsonl resolution failed, dropped",
+			"session", sid, "cwd", cwd)
+		return nil, false
+	}
+
+	select {
+	case outputCh <- protocol.DaemonEvent{
+		Type:            "subagent_discovered",
+		SessionID:       host,
+		AgentID:         sid,
+		SubAgentType:    sdkSessionAgentType,
+		SubAgentDesc:    sdkSessionTitle(jsonlPath),
+		SubagentKind:    sdkSessionSubagentKind,
+		ParentSessionID: host,
+		IsSubagent:      true,
+		RootSessionID:   host,
+	}:
+	case <-ctx.Done():
+		return nil, false
+	}
+
+	tailer, err := watcher.NewSubAgentTailerForAgent(jsonlPath, sid, host, sdkSessionAgentType, adapter.AgentClaude)
+	if err != nil {
+		logger.Warn("sdk session tailer start failed; relation kept without content tail",
+			"session", sid, "error", err)
+		return nil, true
+	}
+	return tailer, true
+}
+
 // resolveSDKJSONLPathWithRetry waits out the cold-start window between the
 // per-PID metadata file and the projects JSONL. Returns "" when the jsonl
 // never appears within the retry budget or the daemon shuts down.
-func resolveSDKJSONLPathWithRetry(ctx context.Context, sessionID, cwd string) string {
+func resolveSDKJSONLPathWithRetry(ctx context.Context, sessionID, cwd string, opts sdkAttachOptions) string {
 	for attempt := 0; ; attempt++ {
-		path, err := resolveSDKJSONLPath(sessionID, cwd)
+		path, err := opts.resolve(sessionID, cwd)
 		if err == nil && path != "" {
 			return path
 		}
-		if attempt >= sdkJSONLRetryAttempts {
+		if attempt >= opts.retryAttempts {
 			return ""
 		}
 		select {
 		case <-ctx.Done():
 			return ""
-		case <-time.After(sdkJSONLRetryInterval):
+		case <-time.After(opts.retryInterval):
 		}
 	}
 }
