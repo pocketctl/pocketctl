@@ -14,7 +14,10 @@ const session = {
   hostname: 'Mac Studio',
   subagent_count: 2,
   pinned: true,
-  children: [{ agentId: 'child-1' }],
+  children: [
+    { agentId: 'child-1', kind: 'claude_subagent' },
+    { agentId: 'child-2', kind: 'claude_subagent' },
+  ],
 }
 
 describe('MobileSessionCard', () => {
@@ -153,5 +156,43 @@ describe('MobileSessionCard', () => {
 
     expect(source).toMatch(/\.mobile-subagent-toggle::before[^}]*background:\s*var\(--accent-muted/m)
     expect(source).toMatch(/\.mobile-subagent-toggle svg[^}]*stroke:\s*var\(--accent/m)
+  })
+
+  test('counts subagents and sdk system sessions separately', () => {
+    const wrapper = mount(MobileSessionCard, {
+      props: {
+        session: {
+          ...session,
+          subagent_count: 5,
+          children: [
+            { agentId: 'sub-1', kind: 'claude_subagent' },
+            { agentId: 'sub-2', kind: 'claude_subagent' },
+            { agentId: 'sdk-1', kind: 'sdk_session' },
+            { agentId: 'sdk-2', kind: 'sdk_session' },
+            { agentId: 'sdk-3', kind: 'sdk_session' },
+          ],
+        },
+        effectiveStatus: 'running',
+        relativeTime: '刚刚',
+        expanded: false,
+      },
+    })
+
+    const context = wrapper.get('.mobile-card-context').text()
+    expect(context).toContain('2 子智能体')
+    expect(context).toContain('3 系统审查')
+  })
+
+  test('falls back to scalar subagent count when children carry no kind', () => {
+    const wrapper = mount(MobileSessionCard, {
+      props: {
+        session: { ...session, children: [{ agentId: 'child-1' }] },
+        effectiveStatus: 'running',
+        relativeTime: '刚刚',
+        expanded: false,
+      },
+    })
+
+    expect(wrapper.get('.mobile-card-context').text()).toContain('1 子智能体')
   })
 })

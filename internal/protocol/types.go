@@ -211,6 +211,8 @@ type DaemonEvent struct {
 	ReservationID          string                   `json:"reservation_id,omitempty"`
 	Approved               bool                     `json:"approved,omitempty"` // for approval_resolved: how it was answered (terminal-side)
 	Title                  string                   `json:"title,omitempty"`
+	TitleSource            string                   `json:"title_source,omitempty"`
+	TitleUpdatedAt         string                   `json:"title_updated_at,omitempty"`
 	Cwd                    string                   `json:"cwd,omitempty"`
 	Source                 string                   `json:"source,omitempty"`
 	Resync                 bool                     `json:"resync,omitempty"` // reconnect replay, not a newly discovered session
@@ -221,6 +223,7 @@ type DaemonEvent struct {
 	ParentSessionID        string                   `json:"parent_session_id,omitempty"` // subagent's parent session (P0 subagent relation)
 	IsSubagent             bool                     `json:"is_subagent,omitempty"`       // true for subagent-scoped events
 	RootSessionID          string                   `json:"root_session_id,omitempty"`   // root session for multi-level aggregation
+	SubagentKind           string                   `json:"subagent_kind,omitempty"`     // relation kind override (e.g. "sdk_session" for SDK-spawned claude sessions)
 	Agent                  string                   `json:"agent,omitempty"`             // agent type for upgrade_result (claude-code, codex)
 	SubAgentDesc           string                   `json:"subagent_desc,omitempty"`     // sub-agent task description
 	SubAgentType           string                   `json:"subagent_type,omitempty"`     // sub-agent type (Explore, general-purpose, etc.)

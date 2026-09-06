@@ -43,8 +43,10 @@
           <template v-if="agentLabel"><span>{{ agentLabel }}</span></template>
           <span v-if="agentLabel && session.model" class="context-separator" aria-hidden="true"></span>
           <span v-if="session.model" class="mobile-model" :title="session.model">{{ session.model }}</span>
-          <span v-if="(agentLabel || session.model) && session.subagent_count > 0" class="context-separator" aria-hidden="true"></span>
-          <span v-if="session.subagent_count > 0" class="mobile-subagents">{{ session.subagent_count }} 子智能体</span>
+          <span v-if="(agentLabel || session.model) && subagentBadgeCount > 0" class="context-separator" aria-hidden="true"></span>
+          <span v-if="subagentBadgeCount > 0" class="mobile-subagents">{{ subagentBadgeCount }} 子智能体</span>
+          <span v-if="subagentBadgeCount > 0 && sdkChildCount > 0" class="context-separator" aria-hidden="true"></span>
+          <span v-if="sdkChildCount > 0" class="mobile-system-sessions">{{ sdkChildCount }} 系统审查</span>
           <span v-if="(agentLabel || session.model || session.subagent_count > 0) && isExited" class="context-separator" aria-hidden="true"></span>
           <span v-if="isExited" class="mobile-exited-label">已退出</span>
         </div>
@@ -113,6 +115,16 @@ const isActive = computed(() => ['running', 'busy', 'retry'].includes(props.effe
 const isExited = computed(() => props.session.status === 'exited' || props.effectiveStatus === 'exited')
 const isTerminal = computed(() => ['exited', 'completed', 'killed', 'error'].includes(props.session.status))
 const hasChildren = computed(() => Boolean(props.session.children?.length))
+// Children mix real subagents and SDK-spawned system sessions (kind
+// sdk_session); badges count them separately, falling back to the scalar
+// subagent_count when the children array is not loaded yet.
+const subagentBadgeCount = computed(() => {
+  if (props.session.children?.length) {
+    return props.session.children.filter((c: any) => c.kind !== 'sdk_session').length
+  }
+  return props.session.subagent_count || 0
+})
+const sdkChildCount = computed(() => (props.session.children || []).filter((c: any) => c.kind === 'sdk_session').length)
 const canInlineExpand = computed(() => hasChildren.value && !isExited.value)
 const hasContext = computed(() => Boolean(agentLabel.value || props.session.model || props.session.subagent_count > 0 || isExited.value))
 const actionWidth = computed(() => isTerminal.value ? 144 : 72)
@@ -298,6 +310,7 @@ onBeforeUnmount(() => {
 }
 .mobile-model { min-width: 0; overflow: hidden; font-family: var(--font-mono, ui-monospace, monospace); text-overflow: ellipsis; }
 .mobile-subagents { flex: 0 0 auto; }
+.mobile-system-sessions { flex: 0 0 auto; color: #d2a8ff; }
 .mobile-exited-label { flex: 0 0 auto; color: var(--warning, #d29922); }
 .context-separator { width: 3px; height: 3px; flex: 0 0 3px; border-radius: 50%; background: var(--fg-tertiary, #6e7681); }
 .mobile-card-trailing { width: 42px; flex: 0 0 42px; display: flex; flex-direction: column; align-items: flex-end; gap: 5px; }

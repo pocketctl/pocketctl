@@ -111,7 +111,8 @@
           <div class="session-meta">
             <span class="source-badge" :class="s.source">{{ s.source === 'terminal' ? '📺 终端' : '🌐 Web' }}</span>
             <span v-if="s.hostname" class="hostname-badge">💻 {{ s.hostname }}</span>
-            <span v-if="s.subagent_count > 0" class="subagent-badge">🤖 {{ s.subagent_count }}</span>
+            <span v-if="subagentBadgeCount(s) > 0" class="subagent-badge">🤖 {{ subagentBadgeCount(s) }}</span>
+            <span v-if="sdkChildCount(s) > 0" class="system-badge" title="SDK 派生的系统会话(如插件安全审查)">⚙️ {{ sdkChildCount(s) }}</span>
             <span v-if="s.totalTokens > 0" class="token-badge" :title="t('session.total_incl_subagent')">🪙 {{ formatTokenCount(s.totalTokens) }}</span>
             <span v-if="s.exit_reason" class="exit-reason">{{ exitReasonLabel(s.exit_reason) }}</span>
             <span class="session-id">{{ s.session_id.slice(0, 8) }}</span>
@@ -124,24 +125,25 @@
       </div>
       <div v-if="s.children && s.children.length && folded[s.session_id]" :class="['child-rows', { 'mobile-child-panel': isMobile }]">
         <div v-if="isMobile" class="mobile-child-header">
-          <strong>子智能体 · {{ s.children.length }}</strong>
+          <strong>派生活动 · {{ s.children.length }}</strong>
           <button type="button" @click="showAllChildren[s.session_id] = !showAllChildren[s.session_id]">
             {{ showAllChildren[s.session_id] ? '收起' : '查看全部' }} <span aria-hidden="true">›</span>
           </button>
         </div>
-        <div v-for="c in visibleChildren(s)" :key="c.agentId" class="child-row" role="button" tabindex="0"
+        <div v-for="c in visibleChildren(s)" :key="c.agentId" :class="['child-row', { 'child-row-sdk': c.kind === 'sdk_session' }]" role="button" tabindex="0"
           :title="c.title || c.agentId.slice(0, 8)"
           @click.stop="$router.push(`/session/${s.session_id}?subagent=${c.agentId}`)"
           @keydown.enter="$router.push(`/session/${s.session_id}?subagent=${c.agentId}`)">
           <span class="child-indent">↳</span>
           <span v-if="isMobile" :class="['child-status-dot', c.status || 'completed']" aria-hidden="true"></span>
+          <span v-if="c.kind === 'sdk_session'" class="child-kind-icon" aria-hidden="true">⚙️</span>
           <span class="child-title">{{ c.title || c.agentId.slice(0, 8) }}</span>
           <span v-if="childAgentTokenTotal(c) > 0" class="child-token">
             {{ isMobile ? `↑${formatCompactToken(c.tokenIn || 0)} ↓${formatCompactToken(c.tokenOut || 0)}` : `🪙 ${formatTokenCount(childAgentTokenTotal(c))}` }}
           </span>
         </div>
         <button v-if="isMobile && !showAllChildren[s.session_id] && s.children.length > 2" class="mobile-child-more" type="button" @click="showAllChildren[s.session_id] = true">
-          还有 {{ s.children.length - 2 }} 个子智能体
+          还有 {{ s.children.length - 2 }} 个派生活动
         </button>
       </div>
     </div>
@@ -316,6 +318,19 @@ function toggleFold(id: string) {
 function visibleChildren(session: any) {
   if (!isMobile.value || showAllChildren.value[session.session_id]) return session.children
   return session.children.slice(0, 2)
+}
+
+// SDK-spawned system sessions (kind sdk_session, e.g. plugin security
+// reviews) ride the children list; the 🤖 badge counts only real subagents.
+function subagentBadgeCount(session: any): number {
+  if (session.children?.length) {
+    return session.children.filter((c: any) => c.kind !== 'sdk_session').length
+  }
+  return session.subagent_count || 0
+}
+
+function sdkChildCount(session: any): number {
+  return (session.children || []).filter((c: any) => c.kind === 'sdk_session').length
 }
 
 function formatCompactToken(value: number): string {
@@ -621,6 +636,9 @@ function handleLogout() {
 .source-badge.daemon { background: #1a3a2a; color: #7ee787; }
 .hostname-badge { font-size: 11px; padding: 1px 6px; border-radius: 8px; background: #1c2333; color: #8b949e; }
 .subagent-badge { font-size: 11px; padding: 1px 6px; border-radius: 8px; background: #2d1a3e; color: #c084fc; }
+.system-badge { font-size: 11px; padding: 1px 6px; border-radius: 8px; background: rgba(210,168,255,.08); color: #d2a8ff; border: 1px solid rgba(210,168,255,.4); }
+.child-kind-icon { font-size: 11px; }
+.child-row-sdk .child-title { color: #d2a8ff; }
 .token-badge { font-size: 11px; padding: 1px 6px; border-radius: 8px; background: #1a2e1a; color: #7ee787; }
 
 /* Fold toggle */

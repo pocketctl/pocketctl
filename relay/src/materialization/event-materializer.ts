@@ -672,7 +672,8 @@ export class EventMaterializer {
         parentSessionId: sessionId,
         agentId: String(payload.agent_id ?? ''),
         rootSessionId: String(payload.root_session_id ?? sessionId),
-        kind: payload.agent === 'codex' ? 'codex_subagent'
+        kind: payload.subagent_kind === 'sdk_session' ? 'sdk_session'
+            : payload.agent === 'codex' ? 'codex_subagent'
             : payload.agent === 'zcode' ? 'zcode_subagent'
             : 'claude_subagent',
         toolUseId: typeof payload.call_id === 'string' ? payload.call_id : undefined,

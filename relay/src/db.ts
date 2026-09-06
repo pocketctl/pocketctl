@@ -140,6 +140,8 @@ async function initDBUnlocked(pool: pg.Pool): Promise<void> {
   await pool.query(`CREATE UNIQUE INDEX IF NOT EXISTS idx_events_dedup ON events(session_id, event_hash)`);
   // Migration: add title and source columns to existing sessions table
   await pool.query(`ALTER TABLE sessions ADD COLUMN IF NOT EXISTS title TEXT`);
+  await pool.query(`ALTER TABLE sessions ADD COLUMN IF NOT EXISTS title_source TEXT`);
+  await pool.query(`ALTER TABLE sessions ADD COLUMN IF NOT EXISTS title_source_updated_at TIMESTAMPTZ`);
   await pool.query(`ALTER TABLE sessions ADD COLUMN IF NOT EXISTS source VARCHAR(16) DEFAULT 'daemon'`);
   // OpenCode's runtime agent (build/plan/...) is independent from agent_type.
   await pool.query(`ALTER TABLE sessions ADD COLUMN IF NOT EXISTS active_agent VARCHAR(128)`);
@@ -3723,7 +3725,7 @@ export async function hasDefaultTitle(pool: pg.Pool, sessionId: string): Promise
     // NULL 也算默认: terminal session 的默认标题因时序竞争可能未写入 (session_discovered
     // 不带 title → INSERT NULL)。若不把 NULL 当默认，这类 session 会被判为「已有自定义标题」
     // 而永久跳过 AI 生成 (2fec2498 案例)。
-    `SELECT 1 FROM sessions WHERE session_id = $1 AND (title LIKE 'Terminal Session-%' OR title IS NULL)`,
+    `SELECT 1 FROM sessions WHERE session_id = $1 AND COALESCE(title_source, '') NOT IN ('manual', 'codex-desktop') AND (title LIKE 'Terminal Session-%' OR title IS NULL)`,
     [sessionId]
   );
   return (result.rowCount ?? 0) > 0;
@@ -3732,7 +3734,7 @@ export async function hasDefaultTitle(pool: pg.Pool, sessionId: string): Promise
 /** Update session title only if it still has the default pattern. Returns true if updated. */
 export async function updateTitleIfDefault(pool: pg.Pool, sessionId: string, newTitle: string): Promise<boolean> {
   const result = await pool.query(
-    `UPDATE sessions SET title = $1, updated_at = NOW() WHERE session_id = $2 AND (title LIKE 'Terminal Session-%' OR title IS NULL)`,
+    `UPDATE sessions SET title = $1, title_source = 'ai', updated_at = NOW() WHERE session_id = $2 AND COALESCE(title_source, '') NOT IN ('manual', 'codex-desktop') AND (title LIKE 'Terminal Session-%' OR title IS NULL)`,
     [newTitle, sessionId]
   );
   return (result.rowCount ?? 0) > 0;
@@ -3756,10 +3758,25 @@ export async function updateSubagentTitleIfDefault(pool: pg.Pool, parentSessionI
   return (result.rowCount ?? 0) > 0;
 }
 
+/** Sync a native Desktop name without replacing manual/unknown titles or newer source updates. */
+export async function updateCodexDesktopTitle(pool: pg.Pool, sessionId: string, title: string, updatedAt: string): Promise<boolean> {
+  if (!title.trim() || !Number.isFinite(Date.parse(updatedAt))) return false;
+  const result = await pool.query(
+    `UPDATE sessions SET title = $1, title_source = 'codex-desktop', title_source_updated_at = $3::timestamptz
+     WHERE session_id = $2 AND agent_type = 'codex-desktop' AND source = 'observer'
+       AND title_source IS DISTINCT FROM 'manual'
+       AND (title_source IN ('codex-desktop', 'ai') OR title IS NULL OR title LIKE 'Terminal Session-%')
+       AND (title_source_updated_at IS NULL OR title_source_updated_at < $3::timestamptz
+         OR (title_source_updated_at = $3::timestamptz AND title IS DISTINCT FROM $1))`,
+    [title.trim(), sessionId, updatedAt],
+  );
+  return (result.rowCount ?? 0) > 0;
+}
+
 /** Unconditionally update session title (user rename), with ownership check. Returns true if updated. */
 export async function updateSessionTitle(pool: pg.Pool, userId: number, sessionId: string, title: string): Promise<boolean> {
   const result = await pool.query(
-    `UPDATE sessions SET title = $1, updated_at = NOW() WHERE session_id = $2 AND user_id = $3 AND session_id NOT LIKE 'pending-%'`,
+    `UPDATE sessions SET title = $1, title_source = 'manual', updated_at = NOW() WHERE session_id = $2 AND user_id = $3 AND session_id NOT LIKE 'pending-%'`,
     [title, sessionId, userId]
   );
   return (result.rowCount ?? 0) > 0;

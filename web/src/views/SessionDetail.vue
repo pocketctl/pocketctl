@@ -279,6 +279,7 @@
             v-else-if="msg.type === 'agent_text'"
             :content="cleanContent(msg.content)"
             :streaming="msg.streaming"
+            :agent-type="focusedSubAgentId ? focusedSubAgentInfo?.agentType : currentSessionAgent"
           />
 
           <OpenCodeReasoningCard

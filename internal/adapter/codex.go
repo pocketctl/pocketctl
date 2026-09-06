@@ -813,15 +813,26 @@ func CodexExtractFirstUserMessage(lines []string, maxLen int) string {
 			continue
 		}
 		var raw codexLine
-		if json.Unmarshal([]byte(line), &raw) != nil || raw.Type != "event_msg" {
+		if json.Unmarshal([]byte(line), &raw) != nil {
 			continue
 		}
 		var p codexPayload
 		if json.Unmarshal(raw.Payload, &p) != nil {
 			continue
 		}
-		if p.Type == "user_message" && p.Message != "" {
+		if raw.Type == "event_msg" && p.Type == "user_message" && p.Message != "" {
 			return truncateCodex(p.Message, maxLen)
+		}
+		if raw.Type == "response_item" && p.Type == "message" && strings.EqualFold(p.Role, "user") {
+			var text strings.Builder
+			for _, content := range p.Content {
+				text.WriteString(content.Text)
+			}
+			message := strings.TrimSpace(text.String())
+			if message != "" && !strings.Contains(message, "<environment_context>") &&
+				!strings.HasPrefix(message, "# AGENTS.md instructions") {
+				return truncateCodex(message, maxLen)
+			}
 		}
 	}
 	return ""

@@ -313,6 +313,27 @@ func (sm *SessionManager) UpdateLastActivity(sessionID string) {
 	}
 }
 
+// RestoreCodexObserverStatus restores a Desktop observer's latest persisted
+// lifecycle without treating history as new activity or completing a live turn.
+// Managed sessions retain their backend's authority if ownership has changed.
+func (sm *SessionManager) RestoreCodexObserverStatus(sessionID, status string) bool {
+	if status != protocol.StatusIdle && status != protocol.StatusRunning {
+		return false
+	}
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+	ps, ok := sm.sessions[sessionID]
+	if !ok || ps.Agent != adapter.AgentCodexDesktop || ps.Source != "observer" ||
+		ps.ControlMode != protocol.ControlLegacyReadOnly || ps.Backend != nil {
+		return false
+	}
+	ps.Status = status
+	if status == protocol.StatusIdle {
+		ps.TurnStartedAt = time.Time{}
+	}
+	return true
+}
+
 // RestoreSessionActivity replaces the registration-time placeholder with a
 // source-backed timestamp while a JSONL history is being attached. It may move
 // activity backwards, which is intentional for sessions discovered on restart.

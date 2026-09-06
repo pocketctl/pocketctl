@@ -15,6 +15,17 @@ export function agentDisplayName(raw: string): string {
   return AGENT_DISPLAY_NAMES[raw] || raw
 }
 
+export function agentReplyLabel(raw?: string): string {
+  switch (raw?.trim().toLowerCase()) {
+    case 'claude-code': return 'claude'
+    case 'codex': return 'codex'
+    case 'codex-desktop': return 'codex desktop'
+    case 'opencode': return 'opencode'
+    case 'zcode': return 'zcode'
+    default: return 'assistant'
+  }
+}
+
 export function agentShortLabel(raw: string): string {
   const n = raw.toLowerCase()
   if (n === 'codex-desktop') return 'CD'

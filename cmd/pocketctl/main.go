@@ -822,47 +822,14 @@ func loginViaDeviceFlow(apiURL string) (string, string, error) {
 		}
 	}
 
-	// Poll for token
-	interval := authResp.Interval
-	if interval < 5 {
-		interval = 5
+	interval := time.Duration(authResp.Interval) * time.Second
+	if interval < 5*time.Second {
+		interval = 5 * time.Second
 	}
-
-	fmt.Print(i18n.T("login.waiting"))
-	startTime := time.Now()
-	for {
-		select {
-		case <-time.After(time.Duration(interval) * time.Second):
-			elapsed := int(time.Since(startTime).Seconds())
-			fmt.Printf(i18n.T("login.waiting_auth"), elapsed)
-
-			result, err := api.DeviceToken(apiURL, authResp.DeviceCode, "pocketctl-cli", codeVerifier)
-			if err != nil {
-				continue // network error, retry
-			}
-
-			switch result.Error {
-			case "":
-				if result.AccessToken != "" {
-					fmt.Println(i18n.T("login.auth_ok"))
-					return result.AccessToken, result.RefreshToken, nil
-				}
-			case "authorization_pending":
-				continue
-			case "slow_down":
-				interval += 5
-				continue
-			case "expired_token":
-				return "", "", fmt.Errorf("%s", i18n.T("login.auth_timeout"))
-			default:
-				return "", "", fmt.Errorf("%s", i18n.T("login.auth_failed", result.Error))
-			}
-
-			if elapsed > authResp.ExpiresIn {
-				return "", "", fmt.Errorf("%s", i18n.T("login.auth_timeout"))
-			}
-		}
-	}
+	deadline := time.Now().Add(120 * time.Second)
+	return waitForDeviceAuthorization(deadline, interval, os.Stdout, func(ctx context.Context) (*api.DeviceTokenResponse, error) {
+		return api.DeviceTokenContext(ctx, apiURL, authResp.DeviceCode, "pocketctl-cli", codeVerifier)
+	})
 }
 
 // openBrowser opens the given URL in the default browser. The URL is
@@ -2288,6 +2255,23 @@ func terminalHydrationEvents(events []protocol.DaemonEvent, sessionID, currentSt
 	return projected
 }
 
+// Desktop discovery only knows that a rollout is recent. Unlike a process
+// watcher, its default busy status is not authoritative. Restore the latest
+// native lifecycle in the initial read, then publish a single resync snapshot.
+func codexObserverHydrationEvents(sm *session.SessionManager, events []protocol.DaemonEvent, sessionID, currentStatus string) []protocol.DaemonEvent {
+	latestStatus := ""
+	for _, event := range events {
+		if event.Type == "session_status" && (event.SessionID == "" || event.SessionID == sessionID) &&
+			(event.Status == protocol.StatusIdle || event.Status == protocol.StatusRunning) {
+			latestStatus = event.Status
+		}
+	}
+	if sm.RestoreCodexObserverStatus(sessionID, latestStatus) {
+		currentStatus = latestStatus
+	}
+	return terminalHydrationEvents(events, sessionID, currentStatus)
+}
+
 // Claude rewrites its watcher metadata in place during continue. A watcher can
 // observe the live PID before the status field is present; treat that transient
 // snapshot as idle instead of publishing an empty lifecycle status.
@@ -2958,6 +2942,7 @@ func cmdDoctor() {
 // SessionWatcher or Codex's CodexSessionWatcher — both emit watcher.SessionEvent)
 // and registers/tails them under the given agentType.
 func handleWatcherEvents(ctx context.Context, events <-chan watcher.SessionEvent, agentType string, sm *session.SessionManager, pm *watcher.ProcessMonitor, outputCh chan protocol.DaemonEvent, logger *slog.Logger, stateDirty *atomic.Bool) {
+	codexTitles := watcher.NewCodexTitleIndex()
 	for {
 		select {
 		case <-ctx.Done():
@@ -3000,6 +2985,13 @@ func handleWatcherEvents(ctx context.Context, events <-chan watcher.SessionEvent
 
 			case "discovered":
 				normalizeWatcherSessionStatus(agentType, &evt.Session)
+				if isSDKSpawnedSession(evt.Session) {
+					// SDK-spawned headless sessions (entrypoint sdk*) are never
+					// top-level sessions: attach to the inferred host instead.
+					logger.Info("sdk session discovered", "session", evt.Session.SessionID, "pid", evt.Session.Pid)
+					handleSDKSpawnedSession(ctx, sm, evt, logger, outputCh)
+					break
+				}
 				logger.Info("session discovered", "session", evt.Session.SessionID, "pid", evt.Session.Pid)
 				publishedAgent := evt.Session.AgentType
 				if publishedAgent == "" {
@@ -3177,6 +3169,8 @@ func handleWatcherEvents(ctx context.Context, events <-chan watcher.SessionEvent
 					ticker := time.NewTicker(1 * time.Second)
 					defer ticker.Stop()
 					hydrating := true
+					var lastNativeTitle watcher.CodexTitle
+					var lastNativeTitleSent time.Time
 					for {
 						select {
 						case <-ctx.Done():
@@ -3191,7 +3185,12 @@ func handleWatcherEvents(ctx context.Context, events <-chan watcher.SessionEvent
 							}
 							initialHydration := hydrating && (len(events) > 0 || len(rawLines) > 0)
 							if initialHydration {
-								events = terminalHydrationEvents(events, sessionSnapshot.SessionID, sessionSnapshot.Status)
+								if publishedAgent == adapter.AgentCodexDesktop {
+									events = codexObserverHydrationEvents(sm, events, sessionSnapshot.SessionID, sessionSnapshot.Status)
+									stateDirty.Store(true)
+								} else {
+									events = terminalHydrationEvents(events, sessionSnapshot.SessionID, sessionSnapshot.Status)
+								}
 								hydrating = false
 							}
 							for i := range events {
@@ -3215,7 +3214,23 @@ func handleWatcherEvents(ctx context.Context, events <-chan watcher.SessionEvent
 							// ready). Re-fires each new conversation round; GenerateTitle caps
 							// total attempts at MaxTitleAttempts and the relay skips once an AI
 							// title is written, so re-evaluating per tick is safe.
-							if len(rawLines) > 0 {
+							hasNativeTitle := false
+							if publishedAgent == adapter.AgentCodexDesktop {
+								if title, ok := codexTitles.Lookup(sessionSnapshot.SessionID); ok {
+									hasNativeTitle = true
+									// Retry ephemeral delivery after registration races/reconnects,
+									// even when the idle rollout receives no new content.
+									if title != lastNativeTitle || time.Since(lastNativeTitleSent) >= 30*time.Second {
+										outputCh <- protocol.DaemonEvent{
+											Type: "session_title_update", SessionID: sessionSnapshot.SessionID,
+											Title: title.Name, TitleSource: "codex-desktop",
+											TitleUpdatedAt: title.UpdatedAt.UTC().Format(time.RFC3339Nano),
+										}
+										lastNativeTitle, lastNativeTitleSent = title, time.Now()
+									}
+								}
+							}
+							if len(rawLines) > 0 && !hasNativeTitle {
 								// title 提取需 user+assistant 都有。增量 rawLines 常把两者拆到不同
 								// tick(codex discovered 早时 user_message 在一增量、agent_message 在另一
 								// 增量),ExtractFirst(当前增量)永远凑不齐 → 永不触发 GenerateTitle。

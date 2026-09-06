@@ -461,7 +461,7 @@ var messages = map[string]msg{
 	"login.opening_browser": {"\nOpening browser for authorization...", "\n正在打开浏览器进行授权..."},
 	"login.manual_open":     {"If the browser does not open, visit:", "如果浏览器未自动打开，请手动访问:"},
 	"login.waiting":         {"Waiting for authorization", "等待授权"},
-	"login.waiting_auth":    {"\rWaiting for authorization... (%ds elapsed)", "\r等待授权... (已等待 %ds)"},
+	"login.waiting_auth":    {"\rWaiting for authorization... (%ds remaining)", "\r等待授权... (剩余 %ds)"},
 	"login.auth_ok":         {"\n✅ Authorization successful!", "\n✅ 授权成功!"},
 	"login.email_prompt":    {"Email address: ", "邮箱地址: "},
 	"login.sending_code":    {"Sending verification code...", "正在发送验证码..."},
