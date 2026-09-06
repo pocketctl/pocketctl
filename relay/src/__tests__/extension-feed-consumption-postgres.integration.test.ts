@@ -258,6 +258,37 @@ describeWithDatabase('extension feed consumption (PostgreSQL)', () => {
     expect(items.every((item: { data: { text: string } }) => item.data.text.startsWith('b-'))).toBe(true)
   })
 
+  test.each([
+    { agentTypes: ['codex'], expected: ['cli'] },
+    { agentTypes: ['codex-desktop'], expected: ['desktop'] },
+    { agentTypes: ['codex', 'codex-desktop'], expected: ['cli', 'desktop'] },
+  ])('matches extension agent_types exactly: $agentTypes', async ({ agentTypes, expected }) => {
+    await pool.query(`UPDATE sessions SET agent_type = 'codex-desktop' WHERE session_id = 'consume-session-b'`)
+    await pool.query(`UPDATE sessions SET user_id = $1 WHERE session_id = 'consume-session-b'`, [userIdA])
+    await pool.query(`UPDATE daemons SET user_id = $1 WHERE daemon_id = 'consume-session-b-daemon'`, [userIdA])
+    await pool.query(`DELETE FROM extension_installations WHERE installation_id = $1`, [installationA])
+    const filtered = await repository().createInstallation({
+      ownerUserId: userIdA,
+      providerId: 'pocketctl-memory',
+      grantedScopes: ['session:events:read'],
+      subscriptions: ['session.event.v1'],
+      enabledServices: ['memory.search'],
+      eventFilter: { agent_types: agentTypes },
+      startPolicy: 'retained_history',
+    })
+    installationA = filtered.installation_id
+
+    await persistOwnedClientEvent(pool, userIdA, 'consume-session-a', 'agent_text',
+      { type: 'agent_text', text: 'cli' }, createPostgresExtensionJournalSink())
+    await persistOwnedClientEvent(pool, userIdA, 'consume-session-b', 'agent_text',
+      { type: 'agent_text', text: 'desktop' }, createPostgresExtensionJournalSink())
+    await projectFeedBatch(pool, { batchSize: 100 })
+
+    const response = await pull(installationA)
+    expect(response.statusCode).toBe(200)
+    expect(response.json().items.map((item: { data: { text: string } }) => item.data.text)).toEqual(expected)
+  })
+
   test('a stale-epoch cursor can never wind the lease epoch back', async () => {
     await seedFeed(2)
     const first = await pull(installationA)

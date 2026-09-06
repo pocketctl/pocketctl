@@ -4,6 +4,8 @@ Pocketctl 可以让新启动的 Codex 终端会话与 Web/iOS 共享同一个长
 
 该能力使用 Codex 官方 `--remote` 接口，不自行复刻 TUI。最低支持版本为 Codex CLI `0.144.1`，并且启用时还会生成本机 schema 检查必需的 app-server 能力。
 
+> 本文只描述 **Codex CLI** 的受管控制。OpenAI Codex Desktop 创建的 rollout 会由 daemon 自动监听并以独立的 `codex-desktop` Agent 类型同步，但属于只读 Observer：Web/iOS 可查看历史和后续增量，不可输入、审批、中断、终止、恢复或创建 Desktop 会话。PocketCtl 的新建会话入口始终创建 `codex` CLI 会话。
+
 ## daemon 启动与启用
 
 正常执行：

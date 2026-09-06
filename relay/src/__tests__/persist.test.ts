@@ -1,5 +1,14 @@
 import { describe, test, expect, vi } from 'vitest'
-import { completeEventEffect, incrementSessionTokensForEvent, insertEvent, persistEvent, persistEventWithEffect } from '../db.js'
+import {
+  ClientEventObserverReadOnlyError,
+  completeEventEffect,
+  incrementSessionTokensForEvent,
+  insertEvent,
+  persistEvent,
+  persistEventWithEffect,
+  persistOwnedClientEvent,
+  persistOwnedLocalCommandPair,
+} from '../db.js'
 
 // persistEvent wraps insertEvent with bounded retries so a transient DB blip
 // (e.g. a Postgres restart on deploy) no longer silently drops a daemon event.
@@ -119,6 +128,114 @@ describe('db.persistEvent - retry on transient failure', () => {
     }
     // 2 attempts → one ~100ms backoff, then reject.
     await expect(persistEvent(pool, 'sess-1', 'agent_text', {}, 2)).rejects.toThrow('db down')
+  })
+})
+
+describe('owned client event activity', () => {
+  function ownedPool() {
+    const queries: string[] = []
+    const pool: any = {
+      query: vi.fn(async (sql: string) => {
+        queries.push(sql)
+        if (sql.includes('SELECT user_id, source FROM sessions')) {
+          return { rows: [{ user_id: 7, source: 'daemon' }], rowCount: 1 }
+        }
+        if (sql.includes('INSERT INTO events')) {
+          return { rows: [{ id: 41, inserted: true }], rowCount: 1 }
+        }
+        return { rows: [], rowCount: 1 }
+      }),
+    }
+    return { pool, queries }
+  }
+
+  test('command_receipt does not advance session activity', async () => {
+    const { pool, queries } = ownedPool()
+
+    await persistOwnedClientEvent(pool, 7, 'sess-1', 'command_receipt', {
+      type: 'command_receipt', session_id: 'sess-1', command: '/model',
+    }, null)
+
+    expect(queries.some(sql => sql.includes('last_activity_at'))).toBe(false)
+  })
+
+  test('user_text advances session activity', async () => {
+    const { pool, queries } = ownedPool()
+
+    await persistOwnedClientEvent(pool, 7, 'sess-1', 'user_text', {
+      type: 'user_text', session_id: 'sess-1', text: 'hello',
+    }, null)
+
+    expect(queries.some(sql => sql.includes('last_activity_at'))).toBe(true)
+  })
+
+  test.each(['codex-desktop', 'zcode'])(
+    'local command pair rejects %s before event, activity, or journal effects',
+    async (agentType) => {
+      const queries: string[] = []
+      const journalSink = { appendCanonicalEvent: vi.fn(async (_client: any, _event: any) => undefined) }
+      const pool: any = {
+        query: vi.fn(async (sql: string) => {
+          queries.push(sql)
+          if (sql.includes('FROM sessions')) {
+            return { rows: [{ user_id: 7, agent_type: agentType, source: 'observer' }], rowCount: 1 }
+          }
+          if (sql.includes('INSERT INTO events')) {
+            return { rows: [{ id: 41, inserted: true }], rowCount: 1 }
+          }
+          return { rows: [], rowCount: 1 }
+        }),
+      }
+
+      await expect(persistOwnedLocalCommandPair(
+        pool,
+        7,
+        'sess-1',
+        { type: 'user_text', session_id: 'sess-1', text: '/model' },
+        { type: 'command_receipt', session_id: 'sess-1', command: '/model' },
+        journalSink,
+      )).rejects.toBeInstanceOf(ClientEventObserverReadOnlyError)
+
+      expect(queries.some(sql => sql.includes('INSERT INTO events'))).toBe(false)
+      expect(queries.some(sql => sql.includes('last_activity_at'))).toBe(false)
+      expect(journalSink.appendCanonicalEvent).not.toHaveBeenCalled()
+    },
+  )
+
+  test('local command pair writes both rows and advances activity once for new user text', async () => {
+    const queries: string[] = []
+    let nextEventId = 40
+    const journalSink = { appendCanonicalEvent: vi.fn(async (_client: any, _event: any) => undefined) }
+    const pool: any = {
+      query: vi.fn(async (sql: string) => {
+        queries.push(sql)
+        if (sql.includes('FROM sessions')) {
+          return { rows: [{ user_id: 7, agent_type: 'codex', source: 'daemon' }], rowCount: 1 }
+        }
+        if (sql.includes('INSERT INTO events')) {
+          nextEventId += 1
+          return { rows: [{ id: nextEventId, inserted: true }], rowCount: 1 }
+        }
+        return { rows: [], rowCount: 1 }
+      }),
+    }
+
+    await expect(persistOwnedLocalCommandPair(
+      pool,
+      7,
+      'sess-1',
+      { type: 'user_text', session_id: 'sess-1', text: '/model' },
+      { type: 'command_receipt', session_id: 'sess-1', command: '/model' },
+      journalSink,
+    )).resolves.toEqual({
+      userText: { eventId: 41, inserted: true },
+      commandReceipt: { eventId: 42, inserted: true },
+    })
+
+    expect(queries.filter(sql => sql.includes('INSERT INTO events'))).toHaveLength(2)
+    expect(queries.filter(sql => sql.includes('last_activity_at'))).toHaveLength(1)
+    expect(journalSink.appendCanonicalEvent.mock.calls.map(([, event]) => event.eventType))
+      .toEqual(['user_text', 'command_receipt'])
   })
 })
 

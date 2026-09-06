@@ -7,12 +7,14 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/pocketctl/pocketctl/internal/adapter"
 	"github.com/pocketctl/pocketctl/internal/agentcontrol"
 	"github.com/pocketctl/pocketctl/internal/codexapp"
 	"github.com/pocketctl/pocketctl/internal/daemon"
@@ -47,6 +49,100 @@ func TestCodexCoordinatorProjectsRuntimeEventsIntoSessionManager(t *testing.T) {
 	if first.Type != "session_discovered" || second.Type != protocol.EventTypeTurnStatus ||
 		second.SourceTurnID != "turn_1" || third.Type != "session_status" {
 		t.Fatalf("events=%+v %+v %+v", first, second, third)
+	}
+}
+
+func TestCodexCoordinatorHistoricalProjectionDoesNotAdvanceActivity(t *testing.T) {
+	output := make(chan protocol.DaemonEvent, 4)
+	sm := NewSessionManager(output)
+	coord := newCodexCoordinator(sm)
+	oldActivity := time.Date(2026, time.August, 1, 12, 0, 0, 0, time.UTC)
+	sm.sessions["thr_1"] = &ProcessState{
+		SessionID: "thr_1", Agent: "codex", LastActivityAt: oldActivity,
+	}
+
+	coord.applyProjectedEvent(protocol.DaemonEvent{
+		Type: "agent_text", SessionID: "thr_1", Text: "historical", Resync: true,
+	})
+	if got := sm.sessions["thr_1"].LastActivityAt; !got.Equal(oldActivity) {
+		t.Fatalf("historical projection activity=%s, want %s", got, oldActivity)
+	}
+
+	coord.applyProjectedEvent(protocol.DaemonEvent{
+		Type: "agent_text", SessionID: "thr_1", Text: "live",
+	})
+	if got := sm.sessions["thr_1"].LastActivityAt; !got.After(oldActivity) {
+		t.Fatalf("live projection activity=%s, want after %s", got, oldActivity)
+	}
+}
+
+func TestCodexCoordinatorDoesNotTimestampReplayedStatusAsLive(t *testing.T) {
+	output := make(chan protocol.DaemonEvent, 4)
+	sm := NewSessionManager(output)
+	coord := newCodexCoordinator(sm)
+	oldActivity := time.Date(2026, time.August, 1, 12, 0, 0, 0, time.UTC)
+	sm.sessions["thr_1"] = &ProcessState{
+		SessionID: "thr_1", Agent: "codex", LastActivityAt: oldActivity,
+	}
+
+	coord.publishProjected([]protocol.DaemonEvent{{
+		Type: "session_status", SessionID: "thr_1", Status: protocol.StatusIdle, Resync: true,
+	}})
+
+	event := <-output
+	if event.LastActivityAt != "" {
+		t.Fatalf("replayed status activity=%q, want empty", event.LastActivityAt)
+	}
+	if got := sm.sessions["thr_1"].LastActivityAt; !got.Equal(oldActivity) {
+		t.Fatalf("replayed status advanced activity=%s, want %s", got, oldActivity)
+	}
+}
+
+func TestCodexCoordinatorDisconnectedStatusDoesNotAdvanceActivity(t *testing.T) {
+	output := make(chan protocol.DaemonEvent, 4)
+	sm := NewSessionManager(output)
+	coord := newCodexCoordinator(sm)
+	oldActivity := time.Date(2026, time.August, 1, 12, 0, 0, 0, time.UTC)
+	sm.sessions["thr_1"] = &ProcessState{
+		SessionID: "thr_1", Agent: "codex", LastActivityAt: oldActivity,
+	}
+
+	coord.projectLive(
+		newCodexProjection(1),
+		codexNotification("thread/status/changed", `{"threadId":"thr_1","status":{"type":"notLoaded"}}`),
+	)
+
+	event := <-output
+	if event.Type != "session_status" || event.Status != protocol.StatusDisconnected {
+		t.Fatalf("event=%+v, want disconnected session_status", event)
+	}
+	if event.LastActivityAt != "" {
+		t.Fatalf("disconnected status activity=%q, want empty", event.LastActivityAt)
+	}
+	if got := sm.sessions["thr_1"].LastActivityAt; !got.Equal(oldActivity) {
+		t.Fatalf("disconnected status advanced activity=%s, want %s", got, oldActivity)
+	}
+}
+
+func TestCodexCoordinatorDisconnectedUnknownThreadHasNoSyntheticActivity(t *testing.T) {
+	output := make(chan protocol.DaemonEvent, 4)
+	sm := NewSessionManager(output)
+	coord := newCodexCoordinator(sm)
+
+	coord.projectLive(
+		newCodexProjection(1),
+		codexNotification("thread/status/changed", `{"threadId":"thr_unknown","status":{"type":"notLoaded"}}`),
+	)
+
+	discovered, status := <-output, <-output
+	if discovered.Type != "session_discovered" || status.Type != "session_status" {
+		t.Fatalf("events=%+v %+v, want discovery then status", discovered, status)
+	}
+	if discovered.LastActivityAt != "" || status.LastActivityAt != "" {
+		t.Fatalf("synthetic disconnected activity discovery=%q status=%q, want empty", discovered.LastActivityAt, status.LastActivityAt)
+	}
+	if got := sm.sessions["thr_unknown"].LastActivityAt; !got.IsZero() {
+		t.Fatalf("synthetic disconnected activity=%s, want zero", got)
 	}
 }
 
@@ -204,6 +300,14 @@ func TestCodexCoordinatorResumedThreadStatusWinsHistoricalHydration(t *testing.T
 			t.Setenv("HOME", t.TempDir())
 			output := make(chan protocol.DaemonEvent, 32)
 			sm := NewSessionManager(output)
+			restoredActivity := time.Date(2026, time.August, 1, 2, 3, 4, 0, time.UTC)
+			sm.sessions["thr_terminal"] = &ProcessState{
+				SessionID:      "thr_terminal",
+				Agent:          "codex",
+				Source:         "terminal",
+				Status:         protocol.StatusExited,
+				LastActivityAt: restoredActivity,
+			}
 			coord := newCodexCoordinator(sm)
 			rpc := newFakeCodexRuntimeClient()
 			rpc.results["thread/resume"] = json.RawMessage(`{"model":"gpt-5.6","cwd":"/repo","thread":{"id":"thr_terminal","cwd":"/repo","status":{"type":"` + tt.native + `"},"turns":[]}}`)
@@ -226,10 +330,31 @@ func TestCodexCoordinatorResumedThreadStatusWinsHistoricalHydration(t *testing.T
 			if got := coord.currentTurn("thr_terminal"); got != wantTurn {
 				t.Fatalf("active turn=%q, want %q for resumed %s", got, wantTurn, tt.native)
 			}
+			seenMeta := false
+			seenDiscovery := false
 			for len(output) > 0 {
-				if event := <-output; event.Type == "error" {
+				event := <-output
+				if event.Type == "error" {
 					t.Fatalf("historical failed turn emitted live error: %+v", event)
 				}
+				if event.Type == "session_meta" {
+					seenMeta = true
+				}
+				if event.Type == "session_discovered" {
+					seenDiscovery = true
+					if event.LastActivityAt != restoredActivity.Format(time.RFC3339Nano) {
+						t.Fatalf("discovery activity=%q, want %q", event.LastActivityAt, restoredActivity.Format(time.RFC3339Nano))
+					}
+				}
+				if (event.Type == "session_discovered" || event.Type == "session_meta" || event.Type == "agent_text") && !event.Resync {
+					t.Fatalf("restored event=%+v, want resync=true", event)
+				}
+			}
+			if !seenMeta {
+				t.Fatal("restored thread did not emit session_meta")
+			}
+			if !seenDiscovery {
+				t.Fatal("restored thread did not emit session_discovered")
 			}
 		})
 	}
@@ -949,6 +1074,158 @@ drained:
 	coord.mu.Lock()
 	coord.stopEventPumpLocked()
 	coord.mu.Unlock()
+}
+
+func TestCodexCoordinatorDesktopObserverWinsLateAppServerSubscription(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	codexHome := t.TempDir()
+	t.Setenv("CODEX_HOME", codexHome)
+	const threadID = "desktop-observer-late-app-server"
+	writeCodexCoordinatorRollout(t, codexHome, threadID, "Codex Desktop")
+
+	output := make(chan protocol.DaemonEvent, 32)
+	sm := NewSessionManager(output)
+	if result := sm.RegisterObservedSession(
+		threadID, "/work/desktop", protocol.StatusBusy, adapter.AgentCodexDesktop,
+	); result != ObservedSessionNew {
+		t.Fatalf("observer registration=%v, want new", result)
+	}
+	rpc := newFakeCodexRuntimeClient()
+	rpc.results["thread/resume"] = json.RawMessage(`{"model":"gpt-5.6","cwd":"/work/desktop","thread":{"id":"` + threadID + `","cwd":"/work/desktop","status":{"type":"active"},"turns":[]}}`)
+	rpc.results["thread/turns/list"] = json.RawMessage(`{"data":[]}`)
+	coord := newCodexCoordinator(sm)
+	coord.runtime = &codexAppServerRuntime{
+		PID: 123, Endpoint: "/tmp/codex.sock", RemoteURI: "unix:///tmp/codex.sock", Client: rpc,
+	}
+	coord.generation = 7
+
+	coord.subscribeTerminalThread(context.Background(), rpc, coord.generation, threadID, newCodexProjection(coord.generation))
+
+	sm.mu.RLock()
+	state := sm.sessions[threadID]
+	sm.mu.RUnlock()
+	if state == nil || state.Agent != adapter.AgentCodexDesktop || state.Source != "observer" ||
+		state.ControlMode != protocol.ControlLegacyReadOnly || state.Backend != nil {
+		t.Fatalf("late app-server subscription overrode observer authority: %+v", state)
+	}
+	rpc.mu.Lock()
+	calls := append([]fakeCodexCall(nil), rpc.calls...)
+	rpc.mu.Unlock()
+	if len(calls) != 0 {
+		t.Fatalf("Desktop observer was resumed through managed app-server: %+v", calls)
+	}
+	if threads := coord.managedThreadSnapshot(); len(threads) != 0 {
+		t.Fatalf("Desktop observer entered managed registry: %v", threads)
+	}
+}
+
+func TestCodexCoordinatorDesktopObserverWinsInFlightAppServerSubscription(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	codexHome := t.TempDir()
+	t.Setenv("CODEX_HOME", codexHome)
+	const threadID = "desktop-observer-in-flight"
+
+	output := make(chan protocol.DaemonEvent, 32)
+	sm := NewSessionManager(output)
+	sm.mu.Lock()
+	sm.sessions[threadID] = &ProcessState{
+		SessionID: threadID, Agent: adapter.AgentCodex, Source: "terminal",
+		ControlMode: protocol.ControlManaged, Status: protocol.StatusBusy, Cwd: "/work/desktop",
+	}
+	sm.mu.Unlock()
+	base := newFakeCodexRuntimeClient()
+	base.results["thread/turns/list"] = json.RawMessage(`{"data":[]}`)
+	rpc := &blockingResumeClient{
+		fakeCodexRuntimeClient: base,
+		blockedThread:          threadID,
+		entered:                make(chan struct{}),
+		release:                make(chan struct{}),
+		responses: map[string]json.RawMessage{
+			threadID: json.RawMessage(`{"model":"gpt-5.6","cwd":"/work/desktop","thread":{"id":"` + threadID + `","cwd":"/work/desktop","status":{"type":"active"},"turns":[]}}`),
+		},
+	}
+	coord := newCodexCoordinator(sm)
+	coord.runtime = &codexAppServerRuntime{
+		PID: 123, Endpoint: "/tmp/codex.sock", RemoteURI: "unix:///tmp/codex.sock", Client: rpc,
+	}
+	coord.generation = 8
+	done := make(chan struct{})
+	go func() {
+		coord.subscribeTerminalThread(context.Background(), rpc, coord.generation, threadID, newCodexProjection(coord.generation))
+		close(done)
+	}()
+	select {
+	case <-rpc.entered:
+	case <-time.After(time.Second):
+		t.Fatal("app-server resume did not enter")
+	}
+	writeCodexCoordinatorRollout(t, codexHome, threadID, "Codex Desktop")
+	if result := sm.RegisterObservedSession(
+		threadID, "/work/desktop", protocol.StatusBusy, adapter.AgentCodexDesktop,
+	); result != ObservedSessionReclassified {
+		t.Fatalf("observer registration=%v, want in-place reclassification", result)
+	}
+	close(rpc.release)
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("app-server subscription did not return")
+	}
+
+	sm.mu.RLock()
+	state := sm.sessions[threadID]
+	sm.mu.RUnlock()
+	if state == nil || state.Agent != adapter.AgentCodexDesktop || state.Source != "observer" ||
+		state.ControlMode != protocol.ControlLegacyReadOnly || state.Backend != nil {
+		t.Fatalf("in-flight app-server subscription overrode observer authority: %+v", state)
+	}
+	base.mu.Lock()
+	calls := append([]fakeCodexCall(nil), base.calls...)
+	base.mu.Unlock()
+	if len(calls) != 1 || calls[0].method != "thread/resume" {
+		t.Fatalf("Desktop observer continued managed hydration after origin became authoritative: %+v", calls)
+	}
+	if threads := coord.managedThreadSnapshot(); len(threads) != 0 {
+		t.Fatalf("Desktop observer entered managed registry: %v", threads)
+	}
+	select {
+	case event := <-output:
+		t.Fatalf("late managed subscription published over observer identity: %+v", event)
+	default:
+	}
+}
+
+func TestCodexCoordinatorPersistedRegistryDropsDesktopOriginBeforeRecovery(t *testing.T) {
+	codexHome := t.TempDir()
+	t.Setenv("CODEX_HOME", codexHome)
+	writeCodexCoordinatorRollout(t, codexHome, "desktop-persisted", "Codex Desktop")
+	writeCodexCoordinatorRollout(t, codexHome, "cli-persisted", "pocketctl")
+
+	coord := newCodexCoordinator(NewSessionManager(make(chan protocol.DaemonEvent, 8)))
+	coord.restoreManagedThreads([]string{"desktop-persisted", "cli-persisted"})
+
+	threads := coord.managedThreadSnapshot()
+	if len(threads) != 1 || threads[0] != "cli-persisted" {
+		t.Fatalf("restored managed threads=%v, want only authoritative PocketCtl thread", threads)
+	}
+}
+
+func writeCodexCoordinatorRollout(t *testing.T, codexHome, threadID, originator string) {
+	t.Helper()
+	dir := filepath.Join(codexHome, "sessions", "2026", "09", "05")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "rollout-2026-09-05T00-00-00-"+threadID+".jsonl")
+	line := fmt.Sprintf(
+		`{"type":"session_meta","payload":{"id":%q,"cwd":"/work/desktop","originator":%q,"source":"vscode"}}`+"\n",
+		threadID, originator,
+	)
+	if err := os.WriteFile(path, []byte(line), 0o600); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func sessionStatus(sm *SessionManager, sessionID string) string {

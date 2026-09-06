@@ -106,6 +106,35 @@ describe('Attention Inbox action service', () => {
     })
   })
 
+  test('preserves observer_read_only through routing, restoration, and the public service result', async () => {
+    const subject = service({ route: { accepted: false, code: 'observer_read_only' } })
+    const result = await subject.value.submitAction({
+      userId: 7, itemId: 'i1', idempotencyKey: '11111111-1111-4111-8111-111111111111',
+      request: { expectedRevision: 1, actionId: 'once' },
+    })
+
+    expect(result).toEqual({ outcome: 'error', code: 'observer_read_only' })
+    expect(subject.repository.restoreSubmission).toHaveBeenCalledWith({
+      userId: 7, itemId: 'i1', idempotencyKey: '11111111-1111-4111-8111-111111111111',
+      errorCode: 'observer_read_only',
+    })
+  })
+
+  test('replays a persisted observer_read_only rejection without routing again', async () => {
+    const subject = service({ claim: {
+      outcome: 'idempotent', item: item({ state: 'open' }), receiptId: '42',
+      status: 'rejected', errorCode: 'observer_read_only',
+    } })
+
+    const result = await subject.value.submitAction({
+      userId: 7, itemId: 'i1', idempotencyKey: '11111111-1111-4111-8111-111111111111',
+      request: { expectedRevision: 1, actionId: 'once' },
+    })
+
+    expect(result).toEqual({ outcome: 'error', code: 'observer_read_only' })
+    expect(subject.router.submitAttentionInboxInteraction).not.toHaveBeenCalled()
+  })
+
   test('validates question answers before claiming and never logs or persists answer text', async () => {
     const subject = service()
     const result = await subject.value.submitAction({

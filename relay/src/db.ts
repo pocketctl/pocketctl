@@ -12,6 +12,10 @@ import {
   ExtensionJournalOwnerMissingError,
   type ExtensionJournalSink,
 } from './extensions/journal.js';
+import {
+  isObserverAgentType,
+  OBSERVER_READ_ONLY_CODE,
+} from './session-observer-policy.js';
 import type { DaemonSessionAccess, DaemonSessionPolicy } from './materialization/types.js';
 import {
   CODE_HMAC_LENGTH,
@@ -296,6 +300,32 @@ async function initDBUnlocked(pool: pg.Pool): Promise<void> {
   await pool.query(`ALTER TABLE daemons ADD COLUMN IF NOT EXISTS user_id INT`);
   await pool.query(`CREATE INDEX IF NOT EXISTS idx_sessions_user_id ON sessions(user_id)`);
 
+  // Execution TTL is independent from retained outcome/replay authority.
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS session_message_admissions (
+      id UUID PRIMARY KEY,
+      user_id INT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      daemon_id VARCHAR(64) NOT NULL,
+      session_id VARCHAR(64) NOT NULL,
+      request_id VARCHAR(64) NOT NULL,
+      msg_id TEXT,
+      command_hash TEXT NOT NULL,
+      kind VARCHAR(16) NOT NULL DEFAULT 'continue' CHECK (kind = 'continue'),
+      state VARCHAR(16) NOT NULL DEFAULT 'issued' CHECK (state IN ('issued','completed','uncertain')),
+      issued_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      expires_at TIMESTAMPTZ NOT NULL,
+      completed_at TIMESTAMPTZ,
+      outcome TEXT,
+      UNIQUE(user_id, request_id)
+    )
+  `);
+  await pool.query(`ALTER TABLE session_message_admissions ADD COLUMN IF NOT EXISTS claimed_outcome TEXT`);
+  await pool.query(`ALTER TABLE session_message_admissions ADD COLUMN IF NOT EXISTS canonical_session_id VARCHAR(64)`);
+  await pool.query(`ALTER TABLE session_message_admissions ADD COLUMN IF NOT EXISTS session_aliases JSONB NOT NULL DEFAULT '[]'::jsonb`);
+  await pool.query(`UPDATE session_message_admissions SET canonical_session_id = session_id WHERE canonical_session_id IS NULL`);
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_session_message_admissions_canonical ON session_message_admissions(canonical_session_id)`);
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_session_message_admissions_unresolved
+    ON session_message_admissions(user_id, session_id) WHERE state IN ('issued','uncertain')`);
   // Short-lived, transactionally allocated quota slots. These close the race
   // where two clients on different hosts create or revive a session at once.
   await pool.query(`
@@ -328,6 +358,7 @@ async function initDBUnlocked(pool: pg.Pool): Promise<void> {
   // the later daemon event that claims the reservation.
   await pool.query(`ALTER TABLE quota_reservations ADD COLUMN IF NOT EXISTS agent_type VARCHAR(64)`);
   await pool.query(`ALTER TABLE quota_reservations ADD COLUMN IF NOT EXISTS cwd TEXT`);
+  await pool.query(`ALTER TABLE quota_reservations ADD COLUMN IF NOT EXISTS command_hash TEXT`);
   // Versioned cutover: legacy rows have no trustworthy outcome, so the first
   // strong-binding deployment keeps them counted as uncertain. The marker and
   // transition share the schema-init transaction, making this truly one-time
@@ -387,14 +418,14 @@ async function initDBUnlocked(pool: pg.Pool): Promise<void> {
   await pool.query(`ALTER TABLE sessions ADD COLUMN IF NOT EXISTS pinned_at TIMESTAMPTZ`);
   await pool.query(`CREATE INDEX IF NOT EXISTS idx_sessions_pinned ON sessions(user_id, pinned) WHERE pinned = true`);
   await pool.query(`
-    CREATE INDEX IF NOT EXISTS idx_sessions_daemon_user_keyset
+    CREATE INDEX IF NOT EXISTS idx_sessions_daemon_user_keyset_v2
     ON sessions (
       user_id,
       daemon_id,
       (COALESCE(is_subagent, false)),
       (CASE WHEN pinned THEN 1 ELSE 0 END) DESC,
       (COALESCE(pinned_at, '1970-01-01T00:00:00Z'::timestamptz)) DESC,
-      (COALESCE(last_activity_at, updated_at)) DESC,
+      (COALESCE(last_activity_at, created_at)) DESC,
       session_id DESC
     )
     WHERE session_id NOT LIKE 'pending-%'
@@ -1159,7 +1190,7 @@ async function lockTokenRevocationFence(client: pg.PoolClient, jti: string): Pro
   );
 }
 
-async function lockSessionMaterializationFence(
+export async function lockSessionMaterializationFence(
   client: Pick<pg.PoolClient, 'query'>,
   sessionId: string,
 ): Promise<void> {
@@ -1382,6 +1413,7 @@ export async function consolidateOfflineMachineDaemons(
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
+    await client.query('SELECT id FROM users WHERE id = $1 FOR KEY SHARE',[input.userId]);
     await lockMachineIdentityFence(client, input.userId, input.machineId);
     const current = await client.query(
       `SELECT daemon_id, alias FROM daemons
@@ -1429,6 +1461,11 @@ export async function consolidateOfflineMachineDaemons(
     );
     await client.query(
       `UPDATE sessions SET daemon_id = $1
+       WHERE user_id = $2 AND daemon_id = ANY($3::varchar[])`,
+      [input.daemonId, input.userId, oldDaemonIds],
+    );
+    await client.query(
+      `UPDATE session_message_admissions SET daemon_id = $1
        WHERE user_id = $2 AND daemon_id = ANY($3::varchar[])`,
       [input.daemonId, input.userId, oldDaemonIds],
     );
@@ -1602,11 +1639,24 @@ export async function setDaemonReconnecting(pool: pg.Pool, daemonId: string): Pr
 
 /** Delete a daemon (unregister from account). Sessions are preserved with daemon_id nulled. */
 export async function deleteDaemon(pool: pg.Pool, userId: number, daemonId: string): Promise<boolean> {
-  const check = await pool.query(`SELECT 1 FROM daemons WHERE daemon_id = $1 AND user_id = $2`, [daemonId, userId]);
-  if ((check.rowCount ?? 0) === 0) return false;
-  await pool.query(`UPDATE sessions SET daemon_id = NULL WHERE daemon_id = $1`, [daemonId]);
-  await pool.query(`DELETE FROM daemons WHERE daemon_id = $1`, [daemonId]);
-  return true;
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    await client.query('SELECT pg_advisory_xact_lock($1)', [userId]);
+    await client.query('SELECT id FROM users WHERE id = $1 FOR KEY SHARE',[userId]);
+    const check = await client.query(`SELECT 1 FROM daemons WHERE daemon_id = $1 AND user_id = $2 FOR UPDATE`, [daemonId,userId]);
+    if ((check.rowCount ?? 0) === 0) { await client.query('COMMIT'); return false; }
+    const sessions = await client.query(`SELECT session_id FROM sessions WHERE daemon_id = $1 ORDER BY session_id`, [daemonId]);
+    for (const row of sessions.rows) await lockSessionMaterializationFence(client,row.session_id);
+    await client.query(`SELECT session_id FROM sessions WHERE daemon_id = $1 ORDER BY session_id FOR UPDATE`,[daemonId]);
+    await client.query(`UPDATE session_message_admissions SET state = 'completed', completed_at = COALESCE(completed_at,NOW()), outcome = 'daemon_deleted'
+      WHERE user_id = $1 AND daemon_id = $2`, [userId,daemonId]);
+    await client.query(`UPDATE sessions SET daemon_id = NULL WHERE daemon_id = $1`, [daemonId]);
+    await client.query(`DELETE FROM daemons WHERE daemon_id = $1`, [daemonId]);
+    await client.query('COMMIT');
+    return true;
+  } catch (error) { await client.query('ROLLBACK'); throw error; }
+  finally { client.release(); }
 }
 
 export async function upsertDaemonAlias(pool: pg.Pool, userId: number, daemonId: string, alias: string | null): Promise<string | null> {
@@ -1675,7 +1725,6 @@ export async function insertEvent(pool: pg.Pool, sessionId: string, eventType: s
     [sessionId, eventType, payloadStr, hash]
   );
   if (result.rows.length > 0) {
-    pool.query(`UPDATE sessions SET last_activity_at = NOW(), updated_at = NOW() WHERE session_id = $1`, [sessionId]).catch(console.error);
     return result.rows[0].id;
   }
   return 0; // deduplicated
@@ -1713,18 +1762,82 @@ export class ClientEventOwnershipError extends Error {
   }
 }
 
+/** Raised when a client-only event races with observer reclassification. */
+export class ClientEventObserverReadOnlyError extends Error {
+  readonly code = OBSERVER_READ_ONLY_CODE;
+  readonly permanent = true;
+  constructor() {
+    super('observer session is read-only')
+    this.name = 'ClientEventObserverReadOnlyError'
+  }
+}
+
 export interface OwnedClientEventResult {
   eventId: number;
   inserted: boolean;
 }
 
+interface OwnedClientSessionRow {
+  user_id: number | null;
+  source: string | null;
+}
+
+async function persistOwnedClientEventInTransaction(
+  client: Pick<pg.PoolClient, 'query'>,
+  userId: number,
+  sessionId: string,
+  eventType: string,
+  payload: any,
+  journalSink: ExtensionJournalSink | null,
+  session: OwnedClientSessionRow,
+): Promise<OwnedClientEventResult> {
+  const persistedPayload = sanitizeJSONBPayload(payload);
+  const payloadStr = JSON.stringify(persistedPayload);
+  const hash = createHash('md5')
+    .update(eventHashInput(sessionId, eventType, persistedPayload))
+    .digest('hex').slice(0, 16);
+  const result = await client.query(
+    `INSERT INTO events (session_id, event_type, payload, event_hash, user_id)
+     VALUES ($1, $2, $3, $4, $5)
+     ON CONFLICT (session_id, event_hash) DO UPDATE
+       SET user_id = COALESCE(events.user_id, EXCLUDED.user_id)
+     RETURNING id, (xmax = 0) AS inserted`,
+    [sessionId, eventType, payloadStr, hash, userId],
+  );
+  const eventRow = result.rows[0];
+  if (!eventRow) throw new Error('owned client event row unavailable');
+  const inserted = eventRow.inserted === undefined || eventRow.inserted === true || eventRow.inserted === 't';
+  if (inserted && eventType === 'user_text') {
+    await advanceSessionActivity(client, sessionId, new Date());
+  }
+  if (journalSink) {
+    const eligibility = extensionJournalEligibility({
+      ownerUserId: session.user_id,
+      ledgerSessionId: sessionId,
+      sessionId,
+      sessionSource: session.source,
+    });
+    if (!eligibility.journal) {
+      if (eligibility.reason === 'skipped_no_owner') throw new ExtensionJournalOwnerMissingError()
+    } else {
+      await journalSink.appendCanonicalEvent(client, {
+        sourceEventId: Number(eventRow.id),
+        ownerUserId: userId,
+        sessionId,
+        eventType,
+        occurredAt: null,
+        payload,
+      })
+    }
+  }
+  return { eventId: Number(eventRow.id), inserted }
+}
+
 /**
- * ADR-0003 client-event persistence: ownership check, dedup insert and the
- * extension Source Journal append all run inside one session fence
- * transaction, so a local_command_log pair either lands durably with its
- * journal rows or not at all. The DO UPDATE conflict path returns the
- * existing row id, letting a replay repair a journal row lost to an older
- * crash without duplicating feed identity.
+ * ADR-0003 single client-event persistence: ownership check, dedup insert and
+ * Source Journal append share one session-fenced transaction. The DO UPDATE
+ * path returns the existing row so replay can repair an older missing journal
+ * row without duplicating feed identity.
  */
 export async function persistOwnedClientEvent(
   pool: pg.Pool,
@@ -1743,49 +1856,51 @@ export async function persistOwnedClientEvent(
     if (!row || row.user_id !== userId || sessionId.startsWith('pending-')) {
       throw new ClientEventOwnershipError();
     }
-    const persistedPayload = sanitizeJSONBPayload(payload);
-    const payloadStr = JSON.stringify(persistedPayload);
-    const hash = createHash('md5')
-      .update(eventHashInput(sessionId, eventType, persistedPayload))
-      .digest('hex').slice(0, 16);
-    const result = await client.query(
-      `INSERT INTO events (session_id, event_type, payload, event_hash, user_id)
-       VALUES ($1, $2, $3, $4, $5)
-       ON CONFLICT (session_id, event_hash) DO UPDATE
-         SET user_id = COALESCE(events.user_id, EXCLUDED.user_id)
-       RETURNING id, (xmax = 0) AS inserted`,
-      [sessionId, eventType, payloadStr, hash, userId],
+    return persistOwnedClientEventInTransaction(
+      client, userId, sessionId, eventType, payload, journalSink, row,
+    )
+  })
+}
+
+export interface OwnedLocalCommandPairResult {
+  userText: OwnedClientEventResult;
+  commandReceipt: OwnedClientEventResult;
+}
+
+/**
+ * Persist one client-side slash-command projection as a single atomic unit.
+ * The authoritative session row is re-read only after the cross-process fence
+ * is held, closing the stale-policy window against observer reclassification.
+ * Both canonical rows, activity, and both journal appends commit or roll back
+ * together; the internal primitive avoids a nested advisory transaction.
+ */
+export async function persistOwnedLocalCommandPair(
+  pool: pg.Pool,
+  userId: number,
+  sessionId: string,
+  userTextPayload: any,
+  commandReceiptPayload: any,
+  journalSink: ExtensionJournalSink | null,
+): Promise<OwnedLocalCommandPairResult> {
+  return withSessionMaterializationFence(pool, sessionId, async (client) => {
+    const session = await client.query<OwnedClientSessionRow & { agent_type: string | null }>(
+      `SELECT user_id, agent_type, source FROM sessions WHERE session_id = $1`,
+      [sessionId],
     );
-    const eventRow = result.rows[0];
-    if (!eventRow) throw new Error('owned client event row unavailable');
-    const inserted = eventRow.inserted === undefined || eventRow.inserted === true || eventRow.inserted === 't';
-    if (inserted) {
-      await client.query(
-        `UPDATE sessions SET last_activity_at = NOW(), updated_at = NOW() WHERE session_id = $1`,
-        [sessionId],
-      );
+    const row = session.rows[0];
+    if (!row || row.user_id !== userId || sessionId.startsWith('pending-')) {
+      throw new ClientEventOwnershipError();
     }
-    if (journalSink) {
-      const eligibility = extensionJournalEligibility({
-        ownerUserId: row.user_id,
-        ledgerSessionId: sessionId,
-        sessionId,
-        sessionSource: row.source,
-      });
-      if (!eligibility.journal) {
-        if (eligibility.reason === 'skipped_no_owner') throw new ExtensionJournalOwnerMissingError()
-      } else {
-        await journalSink.appendCanonicalEvent(client, {
-          sourceEventId: Number(eventRow.id),
-          ownerUserId: userId,
-          sessionId,
-          eventType,
-          occurredAt: null,
-          payload,
-        })
-      }
+    if (isObserverAgentType(row.agent_type)) {
+      throw new ClientEventObserverReadOnlyError();
     }
-    return { eventId: Number(eventRow.id), inserted }
+    const userText = await persistOwnedClientEventInTransaction(
+      client, userId, sessionId, 'user_text', userTextPayload, journalSink, row,
+    );
+    const commandReceipt = await persistOwnedClientEventInTransaction(
+      client, userId, sessionId, 'command_receipt', commandReceiptPayload, journalSink, row,
+    );
+    return { userText, commandReceipt }
   })
 }
 
@@ -1794,6 +1909,29 @@ export interface PersistedEventEffect {
   inserted: boolean;
   completed: boolean;
   nextStep: number;
+}
+
+export async function advanceSessionActivity(pool: Pick<pg.Pool, 'query'>, sessionId: string, activityAt: Date): Promise<void> {
+  await pool.query(
+    `UPDATE sessions
+     SET last_activity_at = GREATEST(COALESCE(last_activity_at, $2::timestamptz), $2::timestamptz),
+         updated_at = NOW()
+     WHERE session_id = $1`,
+    [sessionId, activityAt],
+  );
+}
+
+// Discovery carries a source snapshot (normally JSONL mtime), not a new
+// activity edge. Exact replacement repairs timestamps previously polluted by
+// reconnect-time metadata while later live events still advance monotonically.
+export async function restoreSessionActivity(pool: Pick<pg.Pool, 'query'>, sessionId: string, activityAt: Date): Promise<void> {
+  await pool.query(
+    `UPDATE sessions
+     SET last_activity_at = $2::timestamptz,
+         updated_at = NOW()
+     WHERE session_id = $1`,
+    [sessionId, activityAt],
+  );
 }
 
 /**
@@ -1808,10 +1946,11 @@ export async function persistEventWithEffect(
   payload: any,
   attempts = 5,
   userId: number | null = null,
+  hashSessionId: string = sessionId,
 ): Promise<PersistedEventEffect> {
   const persistedPayload = sanitizeJSONBPayload(payload);
   const payloadStr = JSON.stringify(persistedPayload);
-  const hashInput = eventHashInput(sessionId, eventType, persistedPayload);
+  const hashInput = eventHashInput(hashSessionId, eventType, persistedPayload);
   const hash = createHash('md5').update(hashInput).digest('hex').slice(0, 16);
   let delay = 100;
   for (let i = 0; i < attempts; i++) {
@@ -1828,9 +1967,6 @@ export async function persistEventWithEffect(
       const row = result.rows[0];
       if (!row) throw new Error('event ledger row unavailable');
       const inserted = row.inserted === undefined || row.inserted === true || row.inserted === 't';
-      if (inserted) {
-        pool.query(`UPDATE sessions SET last_activity_at = NOW(), updated_at = NOW() WHERE session_id = $1`, [sessionId]).catch(console.error);
-      }
       return {
         rowID: Number(row.id),
         inserted,
@@ -2298,6 +2434,48 @@ export async function getSessionStatus(pool: pg.Pool, sessionId: string): Promis
   return result.rows[0]?.status ?? null;
 }
 
+export interface SessionRuntimePolicy {
+  daemonId: string | null;
+  agentType: string;
+  source: string | null;
+  controlMode: string | null;
+  capabilities: string[];
+  status: string | null;
+}
+
+/**
+ * Load the server-owned routing/control facts for one user session. Ownership
+ * is part of the lookup itself: callers cannot first authorize one row and
+ * later derive policy from a different tenant's row.
+ */
+export async function getSessionRuntimePolicy(
+  pool: pg.Pool,
+  sessionId: string,
+  userId: number,
+): Promise<SessionRuntimePolicy | null> {
+  const result = await pool.query(
+    `WITH owned_session AS (
+       SELECT 1 FROM sessions
+       WHERE session_id = $1 AND user_id = $2 AND session_id NOT LIKE 'pending-%'
+     )
+     SELECT s.daemon_id, s.agent_type, s.source, s.control_mode, s.capabilities, s.status
+     FROM sessions s
+     WHERE EXISTS (SELECT 1 FROM owned_session)
+       AND s.session_id = $1 AND s.user_id = $2 AND s.session_id NOT LIKE 'pending-%'`,
+    [sessionId, userId],
+  );
+  const row = result.rows[0];
+  if (!row) return null;
+  return {
+    daemonId: typeof row.daemon_id === 'string' ? row.daemon_id : null,
+    agentType: typeof row.agent_type === 'string' ? row.agent_type : '',
+    source: typeof row.source === 'string' ? row.source : null,
+    controlMode: typeof row.control_mode === 'string' ? row.control_mode : null,
+    capabilities: Array.isArray(row.capabilities) ? row.capabilities : [],
+    status: typeof row.status === 'string' ? row.status : null,
+  };
+}
+
 export async function getSessionRuntime(pool: pg.Pool, sessionId: string): Promise<{ status: string | null; turnStartedAt: string | null; lastActivityAt: string | null }> {
   const result = await pool.query(
     `SELECT status, turn_started_at, last_activity_at FROM sessions WHERE session_id = $1`,
@@ -2340,6 +2518,7 @@ export interface SessionListPage {
 }
 
 interface SessionListCursor {
+  version: 2;
   pinned: number;
   pinnedAt: string;
   activityAt: string;
@@ -2362,7 +2541,7 @@ export async function listSessionsWithChildren(pool: pg.Pool, whereUser?: number
      LEFT JOIN daemons d ON s.daemon_id = d.daemon_id
      WHERE s.session_id NOT LIKE 'pending-%'
        AND COALESCE(s.is_subagent, false) = false ${userClause}
-     ORDER BY s.pinned DESC, s.pinned_at DESC NULLS LAST, COALESCE(s.last_activity_at, s.updated_at) DESC`,
+     ORDER BY s.pinned DESC, s.pinned_at DESC NULLS LAST, COALESCE(s.last_activity_at, s.created_at) DESC`,
     baseParams
   );
   // 一次查全部 subagents，按 parent 分组（避免 N+1）
@@ -2426,6 +2605,7 @@ function decodeSessionListCursor(cursor?: string | null): SessionListCursor | nu
     const raw = Buffer.from(cursor, 'base64url').toString('utf8');
     const parsed = JSON.parse(raw);
     if (
+      parsed.version === 2 &&
       (parsed.pinned === 0 || parsed.pinned === 1) &&
       typeof parsed.pinnedAt === 'string' &&
       typeof parsed.activityAt === 'string' &&
@@ -2441,6 +2621,7 @@ function decodeSessionListCursor(cursor?: string | null): SessionListCursor | nu
 
 function encodeSessionListCursor(row: any): string {
   const cursor: SessionListCursor = {
+    version: 2,
     pinned: Number(row.sort_pinned ?? 0),
     pinnedAt: new Date(row.sort_pinned_at).toISOString(),
     activityAt: new Date(row.sort_activity_at).toISOString(),
@@ -2469,7 +2650,7 @@ export async function listSessionsPageByDaemon(pool: pg.Pool, opts: {
        AND (
          (CASE WHEN s.pinned THEN 1 ELSE 0 END),
          COALESCE(s.pinned_at, '1970-01-01T00:00:00Z'::timestamptz),
-         COALESCE(s.last_activity_at, s.updated_at),
+         COALESCE(s.last_activity_at, s.created_at),
          s.session_id
        ) < ($${start}, $${start + 1}::timestamptz, $${start + 2}::timestamptz, $${start + 3})`;
   }
@@ -2484,7 +2665,7 @@ export async function listSessionsPageByDaemon(pool: pg.Pool, opts: {
             d.status AS daemon_status, d.hostname AS hostname, d.alias AS daemon_alias,
             CASE WHEN s.pinned THEN 1 ELSE 0 END AS sort_pinned,
             COALESCE(s.pinned_at, '1970-01-01T00:00:00Z'::timestamptz) AS sort_pinned_at,
-            COALESCE(s.last_activity_at, s.updated_at) AS sort_activity_at
+            COALESCE(s.last_activity_at, s.created_at) AS sort_activity_at
      FROM sessions s
      LEFT JOIN daemons d ON s.daemon_id = d.daemon_id
      WHERE s.session_id NOT LIKE 'pending-%'
@@ -2494,7 +2675,7 @@ export async function listSessionsPageByDaemon(pool: pg.Pool, opts: {
        ${cursorClause}
      ORDER BY CASE WHEN s.pinned THEN 1 ELSE 0 END DESC,
               COALESCE(s.pinned_at, '1970-01-01T00:00:00Z'::timestamptz) DESC,
-              COALESCE(s.last_activity_at, s.updated_at) DESC,
+              COALESCE(s.last_activity_at, s.created_at) DESC,
               s.session_id DESC
      LIMIT $2`,
     params
@@ -2584,7 +2765,11 @@ export async function upsertSession(pool: pg.Pool, sessionId: string, daemonId: 
          WHEN sessions.source = 'daemon' AND $6 = 'terminal' THEN sessions.source
          ELSE COALESCE($6, sessions.source)
        END,
-       exit_reason = COALESCE($8, sessions.exit_reason),
+       exit_reason = CASE
+         WHEN $7 IN ('exited', 'completed', 'error', 'killed')
+           THEN COALESCE($8, sessions.exit_reason)
+         ELSE NULL
+       END,
        user_id = CASE WHEN $9 IS NOT NULL THEN $9 ELSE sessions.user_id END,
        model = COALESCE($10, sessions.model),
        control_mode = COALESCE($11, sessions.control_mode),
@@ -2600,6 +2785,32 @@ export async function upsertSession(pool: pg.Pool, sessionId: string, daemonId: 
   if ((result.rowCount ?? 0) === 0 && !result.rows[0]) {
     throw new SessionOwnershipViolationError();
   }
+}
+
+/**
+ * Reclassify historical facts only after the ownership-guarded observer upsert
+ * has established the exact session identity. The materializer calls this in
+ * the same per-session fenced transaction and effect step as that upsert, so a
+ * crash cannot checkpoint one half without the other. No accounting value or
+ * source event is rewritten.
+ */
+export async function reclassifyCodexDesktopTokenUsageFacts(
+  pool: pg.Pool,
+  sessionId: string,
+  userId: number,
+): Promise<void> {
+  await pool.query(
+    `UPDATE token_usage_facts AS fact
+     SET agent_type = 'codex-desktop'
+     FROM sessions AS session
+     WHERE session.session_id = $1
+       AND session.user_id = $2
+       AND session.agent_type = 'codex-desktop'
+       AND fact.session_id = session.session_id
+       AND fact.user_id = session.user_id
+       AND fact.agent_type = 'codex'`,
+    [sessionId, userId],
+  )
 }
 
 export async function updateSessionControl(pool: pg.Pool, sessionId: string, controlMode: string, capabilities: string[]): Promise<void> {
@@ -2683,6 +2894,13 @@ export async function renameOwnedDaemonSession(
     );
     if ((moved.rowCount ?? 0) === 0) throw new UnknownDaemonSessionError();
     await client.query(
+      `UPDATE session_message_admissions
+       SET canonical_session_id = $2,
+           session_aliases = CASE WHEN session_aliases ? $1 THEN session_aliases ELSE session_aliases || to_jsonb($1::text) END
+       WHERE COALESCE(canonical_session_id,session_id) = $1 AND user_id = $3 AND daemon_id = $4`,
+      [input.oldSessionId,input.newSessionId,input.userId,input.daemonId],
+    );
+    await client.query(
       `UPDATE events SET session_id = $2 WHERE session_id = $1`,
       [input.oldSessionId, input.newSessionId],
     );
@@ -2722,6 +2940,24 @@ export async function upsertSubagent(pool: pg.Pool, parentSessionId: string, age
        updated_at = NOW()`,
     [parentSessionId, agentId, kind, toolUseId || null, agentType || null, title || null]
   );
+}
+
+/** Persist a child turn lifecycle, creating a placeholder when lifecycle
+ * arrives before subagent_discovered. The later relation upsert preserves it. */
+export async function upsertSubagentStatus(
+  pool: Pick<pg.Pool, 'query'>,
+  parentSessionId: string,
+  agentId: string,
+  status: string,
+): Promise<void> {
+  await pool.query(
+    `INSERT INTO subagents (parent_session_id, agent_id, status, updated_at)
+     VALUES ($1, $2, $3, NOW())
+     ON CONFLICT (parent_session_id, agent_id) DO UPDATE SET
+       status = EXCLUDED.status,
+       updated_at = NOW()`,
+    [parentSessionId, agentId, status],
+  )
 }
 
 export interface SubagentRelation {
@@ -3371,6 +3607,7 @@ export async function deleteSession(
     if (options.writeUsageFacts) {
       await client.query(`SELECT pg_advisory_xact_lock(hashtext('token-usage-accounting-global'))`);
     }
+    await client.query(`SELECT session_id FROM sessions WHERE session_id = $1 FOR UPDATE`,[sessionId]);
     if (options.writeUsageFacts) await client.query(`
       INSERT INTO token_usage_facts (
         fact_key, source_event_id, user_id, daemon_id, session_id,
@@ -3445,6 +3682,9 @@ export async function deleteSession(
       emitTombstone: extensionMode !== 'off',
     });
     await client.query(`DELETE FROM token_session_daily_stats WHERE session_id = $1`, [sessionId]);
+    await client.query(`UPDATE session_message_admissions
+      SET state = 'completed', completed_at = NOW(), outcome = 'user_deleted'
+      WHERE COALESCE(canonical_session_id,session_id) = $1 AND state <> 'completed'`, [sessionId]);
     await client.query(`DELETE FROM sessions WHERE session_id = $1`, [sessionId]);
     await client.query(
       `INSERT INTO deleted_sessions (session_id) VALUES ($1) ON CONFLICT (session_id) DO UPDATE SET deleted_at = NOW()`,
@@ -3800,7 +4040,11 @@ export async function updateSessionStatus(pool: pg.Pool, sessionId: string, daem
        UPDATE sessions SET
          daemon_id = $2,
          status = input.status,
-         exit_reason = COALESCE($4, sessions.exit_reason),
+         exit_reason = CASE
+           WHEN input.status IN ('exited', 'completed', 'error', 'killed')
+             THEN COALESCE($4, sessions.exit_reason)
+           ELSE NULL
+         END,
          user_id = COALESCE($5::int, sessions.user_id),
          turn_started_at = CASE
            WHEN input.status IN ('running', 'busy', 'retry', 'waiting', 'waiting_approval', 'waiting_question')
@@ -3857,7 +4101,11 @@ export async function updateSessionStatusForEvent(
        UPDATE sessions SET
          daemon_id = $5,
          status = input.status,
-         exit_reason = COALESCE($7, sessions.exit_reason),
+         exit_reason = CASE
+           WHEN input.status IN ('exited', 'completed', 'error', 'killed')
+             THEN COALESCE($7, sessions.exit_reason)
+           ELSE NULL
+         END,
          user_id = COALESCE($8::int, sessions.user_id),
          turn_started_at = CASE
            WHEN input.status IN ('running', 'busy', 'retry', 'waiting', 'waiting_approval', 'waiting_question')
@@ -4360,7 +4608,7 @@ export async function getTokensByDaemon(
            created_at, COALESCE(parent_session_id, '') AS parent_session_id
     FROM sessions
     WHERE user_id = $1 AND daemon_id = $2 AND session_id NOT LIKE 'pending-%'
-    ORDER BY COALESCE(last_activity_at, updated_at) DESC
+    ORDER BY COALESCE(last_activity_at, created_at) DESC
   `, [userId, daemonId]);
 
   const byAgentTotals = await pool.query(`

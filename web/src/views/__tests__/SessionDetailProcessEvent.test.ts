@@ -35,7 +35,7 @@ vi.mock('../../composables/useWebSocket', () => ({
   }),
 }))
 
-vi.mock('../../composables/useLocale', () => ({ useLocale: () => ({ t: (key: string) => key }) }))
+vi.mock('../../composables/useLocale', () => ({ useLocale: () => ({ t: (key: string) => key, locale: ref('en') }) }))
 vi.mock('../../composables/useSessionRename', () => ({
   useSessionRename: () => ({
     renamingId: ref(''), renameInput: ref(''), startRename: vi.fn(), commitRename: vi.fn(), cancelRename: vi.fn(),
@@ -60,6 +60,9 @@ describe('SessionDetail processEvent integration', () => {
     const vm = wrapper.vm as any
     vm.allSessions = [
       { session_id: 'ses_1', daemon_id: 'daemon-1', title: 'Codex one', agent_type: 'codex', status: 'running' },
+      { session_id: 'ses_desktop', daemon_id: 'daemon-1', title: 'Desktop observer', agent_type: 'codex-desktop', status: 'completed' },
+      { session_id: 'ses_zcode', daemon_id: 'daemon-1', title: 'ZCode observer', agent_type: 'zcode', status: 'completed' },
+      { session_id: 'ses_oc', daemon_id: 'daemon-1', title: 'OpenCode one', agent_type: 'opencode', status: 'idle' },
       { session_id: 'ses_2', daemon_id: 'daemon-1', title: 'Claude one', agent_type: 'claude-code', status: 'idle' },
       { session_id: 'ses_3', daemon_id: 'daemon-1', title: 'Codex two', agent_type: 'codex', status: 'exited' },
       { session_id: 'ses_4', daemon_id: 'daemon-2', title: 'OpenCode other host', agent_type: 'opencode', status: 'idle' },
@@ -68,15 +71,17 @@ describe('SessionDetail processEvent integration', () => {
     await wrapper.vm.$nextTick()
 
     expect(wrapper.find('.host-tabs').exists()).toBe(false)
-    expect(wrapper.findAll('.session-list-item')).toHaveLength(3)
+    expect(wrapper.findAll('.session-list-item')).toHaveLength(6)
 
     const trigger = wrapper.get('.agent-filter-trigger')
     expect(trigger.attributes('aria-expanded')).toBe('false')
     await trigger.trigger('click')
 
     const options = wrapper.findAll('.agent-filter-option')
-    expect(options.map(option => option.attributes('data-agent-filter'))).toEqual(['all', 'codex', 'claude-code'])
-    expect(options.map(option => option.get('.agent-filter-count').text())).toEqual(['3', '2', '1'])
+    expect(options.map(option => option.attributes('data-agent-filter'))).toEqual([
+      'all', 'codex', 'codex-desktop', 'zcode', 'opencode', 'claude-code',
+    ])
+    expect(options.map(option => option.get('.agent-filter-count').text())).toEqual(['6', '2', '1', '1', '1', '1'])
 
     await wrapper.get('[data-agent-filter="codex"]').trigger('click')
     expect(trigger.attributes('aria-expanded')).toBe('false')
@@ -890,6 +895,43 @@ describe('SessionDetail processEvent integration', () => {
       status: 'completed', output: 'received later',
     })
   })
+
+  test.each(['codex', 'claude-code'])(
+    'keeps a stale-running %s session running at replay end while work is unresolved',
+    (agentType) => {
+      const wrapper = shallowMount(SessionDetail)
+      const vm = wrapper.vm as any
+      const batch = websocketMock.handlers.get('replay_batch')!
+      const end = websocketMock.handlers.get('replay_end')!
+
+      websocketMock.handlers.get('session_list')?.({
+        type: 'session_list',
+        sessions: [{
+          session_id: 'ses_1', daemon_id: 'daemon-1', agent_type: agentType, status: 'running',
+          created_at: '2000-01-01T00:00:00.000Z', last_activity_at: '2000-01-01T00:00:00.000Z',
+          children: [{ agentId: 'child-running', status: 'running' }],
+        }],
+      })
+      batch({
+        type: 'replay_batch', session_id: 'ses_1', events: [
+          { type: 'tool_call', session_id: 'ses_1', call_id: 'still-running', tool: 'wait', input: '{}' },
+          {
+            type: 'turn_status', session_id: 'ses_1', agent_id: 'child-running',
+            turn_id: 'turn-child-running', turn_status: 'running',
+          },
+        ],
+      })
+
+      end({ type: 'replay_end', session_id: 'ses_1' })
+
+      expect(vm.status).toBe('running')
+      expect(vm.messages.find((message: any) => message.call_id === 'still-running')).toMatchObject({ status: 'running' })
+      expect(vm.subagentMessages['child-running']).toContainEqual(expect.objectContaining({
+        type: 'turn_status', turn_id: 'turn-child-running', turn_status: 'running',
+      }))
+      wrapper.unmount()
+    },
+  )
 
   test('consumes the shared OpenCode release contract with request and Part deduplication', () => {
     const contract = JSON.parse(readFileSync(resolve(process.cwd(), '../internal/e2e/testdata/opencode_release_gate.json'), 'utf8')) as {

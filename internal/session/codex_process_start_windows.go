@@ -25,7 +25,7 @@ var codexWebSocketListenRE = regexp.MustCompile(`listening on:\s*(ws://127\.0\.0
 
 func startCodexAppServer(ctx context.Context, binary, _ string, _ uint64) (*codexAppServerRuntime, error) {
 	cmd := exec.Command(binary, "app-server", "--listen", "ws://127.0.0.1:0")
-	cmd.Env = os.Environ()
+	cmd.Env = codexAppServerEnv(os.Environ())
 	cmd.SysProcAttr = &syscall.SysProcAttr{CreationFlags: windows.CREATE_NO_WINDOW}
 	reader, writer := io.Pipe()
 	cmd.Stdout, cmd.Stderr = writer, writer

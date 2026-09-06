@@ -73,6 +73,7 @@ func startCodexAppServerWithFactory(ctx context.Context, binary, _ string, gener
 	}
 	cmd := factory(binary, socketPath)
 	cmd.Env = append(cmd.Env, os.Environ()...)
+	cmd.Env = codexAppServerEnv(cmd.Env)
 	cmd.Env = append(cmd.Env, "POCKETCTL_CODEX_SOCKET="+socketPath)
 	cmd.Stdout, cmd.Stderr = io.Discard, io.Discard
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}

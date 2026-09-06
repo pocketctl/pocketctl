@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"github.com/pocketctl/pocketctl/internal/memorycontext"
 	"sync/atomic"
@@ -70,6 +71,51 @@ type UserMessageInput struct {
 	// SkipMemoryContext is internal fail-open state for an initial prompt whose
 	// Relay session-registration ACK timed out. The prompt still dispatches.
 	SkipMemoryContext bool
+}
+
+var ErrSessionExecutionIdentityUnavailable = errors.New("session execution identity unavailable")
+
+type userMessageCorrelation struct {
+	RequestID string
+	MsgID     string
+	TurnID    string
+}
+
+type userMessageCorrelationKey struct{}
+
+func withUserMessageCorrelation(ctx context.Context, correlation userMessageCorrelation) context.Context {
+	return context.WithValue(ctx, userMessageCorrelationKey{}, correlation)
+}
+
+func userMessageCorrelationFrom(ctx context.Context) userMessageCorrelation {
+	correlation, _ := ctx.Value(userMessageCorrelationKey{}).(userMessageCorrelation)
+	return correlation
+}
+
+func (sm *SessionManager) executionAgent(sessionID string) (string, error) {
+	sm.mu.RLock()
+	ps := sm.sessions[sessionID]
+	agent := ""
+	if ps != nil {
+		agent = ps.Agent
+	}
+	sm.mu.RUnlock()
+	if ps == nil || agent == "" {
+		return "", fmt.Errorf("%w: session %s", ErrSessionExecutionIdentityUnavailable, sessionID)
+	}
+	switch agent {
+	case adapter.AgentClaude, adapter.AgentCodex, adapter.AgentOpencode:
+		return agent, nil
+	default:
+		return "", fmt.Errorf("%w: unsupported agent %q", ErrSessionExecutionIdentityUnavailable, agent)
+	}
+}
+
+// ValidateExecutionIdentity confirms that a drive command has a recovered,
+// supported agent identity before quota admission or turn creation.
+func (sm *SessionManager) ValidateExecutionIdentity(sessionID string) error {
+	_, err := sm.executionAgent(sessionID)
+	return err
 }
 
 // SetMemoryContext attaches the Phase 2 context coordinator. The ready
@@ -258,6 +304,16 @@ func (sm *SessionManager) deferTurnReserveToBackend(sessionID string) bool {
 // input binds as an addendum (steer); after a terminal turn it opens a new
 // turn linked to the interrupted predecessor.
 func (sm *SessionManager) SendMessageWithInput(ctx context.Context, in UserMessageInput) error {
+	ctx, release, err := sm.acquireObserverDrive(ctx, in.SessionID)
+	if err != nil {
+		return err
+	}
+	defer release()
+	agent, err := sm.executionAgent(in.SessionID)
+	if err != nil {
+		return err
+	}
+	ctx = withUserMessageCorrelation(ctx, userMessageCorrelation{RequestID: in.RequestID, MsgID: in.MsgID})
 	if !sm.turnEnabled() {
 		return sm.dispatchUserMessage(ctx, in.SessionID, in.Content)
 	}
@@ -288,7 +344,6 @@ func (sm *SessionManager) SendMessageWithInput(ctx context.Context, in UserMessa
 		sm.terminalizeTurn(key, rec, protocol.TurnStateAbandoned, "daemon_restart_reconcile", protocol.TurnConfidenceInferred)
 	}
 
-	agent := sm.agentTypeFor(in.SessionID)
 	// Managed Codex defers the turn reservation to the native turn/start reply,
 	// but it must not bypass the Phase 2 preparation/delivery seam. A steer to
 	// an already-running native turn remains context-free.
@@ -340,6 +395,7 @@ func (sm *SessionManager) SendMessageWithInput(ctx context.Context, in UserMessa
 		return err
 	}
 	sm.emitTurnStatus(rec, protocol.TurnStateRunning, "")
+	ctx = withUserMessageCorrelation(ctx, userMessageCorrelation{RequestID: in.RequestID, MsgID: in.MsgID, TurnID: rec.TurnID})
 
 	if dispatchErr := sm.dispatchUserMessageWithContext(ctx, in.SessionID, in.Content, in.HiddenContext); dispatchErr != nil {
 		sm.recordMemoryContextReceipt(ctx, in.HiddenContext, false, "dispatch_failed")

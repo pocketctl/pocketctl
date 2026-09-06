@@ -4,9 +4,9 @@ import { describe, expect, test } from 'vitest'
 
 const source = readFileSync(resolve(process.cwd(), 'src/views/SessionDetail.vue'), 'utf8')
 
-function cssRule(selector: string): string {
+function cssRule(selector: string, css = source): string {
   const escaped = selector.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
-  return new RegExp(`${escaped}\\s*\\{([^}]*)\\}`).exec(source)?.[1] ?? ''
+  return new RegExp(`${escaped}\\s*\\{([^}]*)\\}`).exec(css)?.[1] ?? ''
 }
 
 describe('SessionDetail floating composer layout', () => {
@@ -33,5 +33,13 @@ describe('SessionDetail floating composer layout', () => {
     expect(chatArea).toContain('--session-content-gutter: max(20px, calc(50% - 460px))')
     expect(messages).toContain('var(--session-content-gutter)')
     expect(composer).toContain('var(--session-content-gutter)')
+  })
+
+  test('anchors the mobile composer to the panned visual viewport bottom', () => {
+    const mobileStyles = source.slice(source.indexOf('@media (max-width: 768px)'))
+    const sessionLayout = cssRule('.session-layout', mobileStyles)
+
+    expect(sessionLayout).toContain('var(--visual-viewport-bottom, 100dvh)')
+    expect(sessionLayout).not.toContain('var(--visual-viewport-height, 100dvh)')
   })
 })

@@ -113,6 +113,59 @@ describeWithDatabase('L0/L0.5 source projector (PostgreSQL)', () => {
     expect(turn.rows[0].terminal_at).not.toBeNull()
   })
 
+  test('uses the session_discovered wire agent to reclassify the same read-only source session', async () => {
+    await insertInboxRow(pool, {
+      feed_id: 1,
+      session_id: 'desktop-observer',
+      event_type: 'session_created',
+      data: { agent_type: 'codex' },
+    })
+    await insertInboxRow(pool, {
+      feed_id: 2,
+      session_id: 'desktop-observer',
+      event_type: 'session_discovered',
+      data: {
+        agent: 'codex-desktop',
+        agent_type: 'codex',
+        source: 'observer',
+        control_mode: 'legacy_read_only',
+        capabilities: ['history_sync'],
+      },
+    })
+
+    await expect(projector.projectOnce(INSTALLATION)).resolves.toEqual({ projected: 2 })
+    expect((await pool.query(`
+      SELECT agent_type, last_feed_id::text FROM source_sessions
+      WHERE installation_id = $1 AND session_id = 'desktop-observer'
+    `, [INSTALLATION])).rows).toEqual([{
+      agent_type: 'codex-desktop',
+      last_feed_id: '2',
+    }])
+    expect((await pool.query(`
+      SELECT extraction_mode, embedding_mode FROM memory_feature_settings
+      WHERE installation_id = $1
+    `, [INSTALLATION])).rows).toEqual([])
+  })
+
+  test('keeps agent_type-only session_discovered payloads as a legacy compatibility path', async () => {
+    await insertInboxRow(pool, {
+      feed_id: 1,
+      session_id: 'legacy-desktop-observer',
+      event_type: 'session_discovered',
+      data: {
+        agent_type: 'codex-desktop',
+        source: 'observer',
+        control_mode: 'legacy_read_only',
+      },
+    })
+
+    await expect(projector.projectOnce(INSTALLATION)).resolves.toEqual({ projected: 1 })
+    expect((await pool.query(`
+      SELECT agent_type FROM source_sessions
+      WHERE installation_id = $1 AND session_id = 'legacy-desktop-observer'
+    `, [INSTALLATION])).rows).toEqual([{ agent_type: 'codex-desktop' }])
+  })
+
   test('re-projecting the same rows is idempotent', async () => {
     await insertInboxRow(pool, {
       feed_id: 1, session_id: 'ses-1', turn_id: 'turn-1', event_type: 'agent_text',

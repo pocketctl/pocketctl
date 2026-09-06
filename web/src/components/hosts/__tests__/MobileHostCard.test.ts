@@ -86,6 +86,22 @@ describe('MobileHostCard', () => {
     expect(wrapper.get('[data-action="token"]').attributes('disabled')).toBeUndefined()
   })
 
+  test('shows Codex Desktop without an upgrade affordance', () => {
+    const wrapper = mount(MobileHostCard, {
+      props: {
+        daemon: {
+          daemon_id: 'daemon-1', hostname: 'mac-studio', daemon_online: true,
+          agents: [{ type: 'codex-desktop', version: '0.1.0', latest: '0.2.0' }],
+        },
+        activeSessions: 0,
+        totalSessions: 1,
+      },
+    })
+
+    expect(wrapper.get('.mobile-agent-tag').text()).toContain('Codex Desktop')
+    expect(wrapper.find('.mobile-agent-tag .upgrade').exists()).toBe(false)
+  })
+
   test('keeps the more-button click from reaching the document close handler', async () => {
     const host = document.createElement('div')
     document.body.appendChild(host)

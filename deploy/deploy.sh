@@ -384,6 +384,9 @@ fi
 
 mkdir -p /var/www/pocketctl
 cp -r ${INSTALL_DIR}/web/dist/* /var/www/pocketctl/
+# Daemon 安装脚本：nginx `location = /install.sh` 指向此处，缺失会导致
+# `curl … | bash` 拿到 SPA fallback 的 index.html（GitHub issue #6）。
+cp ${INSTALL_DIR}/nginx/html/install.sh /var/www/pocketctl/install.sh
 chown -R root:www-data /var/www/pocketctl
 find /var/www/pocketctl -type d -exec chmod 755 {} +
 find /var/www/pocketctl -type f -exec chmod 644 {} +
@@ -439,6 +442,12 @@ server {
 
     location / {
         try_files \$uri \$uri/ /index.html;
+    }
+
+    # Daemon 安装脚本（精确匹配，避免被 SPA fallback 吞掉）
+    location = /install.sh {
+        alias /var/www/pocketctl/install.sh;
+        default_type application/x-sh;
     }
 
     # WebSocket 代理 -> Relay

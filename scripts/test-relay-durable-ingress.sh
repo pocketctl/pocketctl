@@ -12,6 +12,8 @@ go test -p 1 ./internal/protocol ./internal/ws ./internal/session ./internal/dae
 (cd relay && RUN_POSTGRES_INTEGRATION=1 TEST_DATABASE_URL="$TEST_DATABASE_URL" npx vitest run --no-file-parallelism \
   src/__tests__/durable-ingress-fault-postgres.integration.test.ts \
   src/__tests__/mixed-agent-durable-ingress-postgres.integration.test.ts \
-  src/__tests__/token-usage-postgres.integration.test.ts)
+  src/__tests__/token-usage-postgres.integration.test.ts \
+  src/__tests__/quota-binding-postgres.integration.test.ts \
+  src/__tests__/session-message-admission-postgres.integration.test.ts)
 make test-opencode-managed
 make test-codex-managed

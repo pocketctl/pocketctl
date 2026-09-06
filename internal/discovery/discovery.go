@@ -38,6 +38,11 @@ const (
 func DiscoverAgents() []AgentInfo {
 	var agents []AgentInfo
 	for _, a := range adapter.All() {
+		// Session-only observers (codex-desktop) are valid session identities but
+		// intentionally have no host installation/version/upgrade presence.
+		if a.Discovery == adapter.DiscoverySessionOnly {
+			continue
+		}
 		// Storage-discovered agents (zcode) are surfaced only when the user has
 		// explicitly enabled the read-only sync AND the local store probe passes.
 		// They have no CLI/npm metadata, are never manageable, and never trigger
@@ -261,6 +266,9 @@ func detectLatest(pkg string) string {
 
 func AgentTypeToCLI(agentType string) (string, error) {
 	if a, ok := adapter.Get(agentType); ok {
+		if a.Discovery != adapter.DiscoveryCLI {
+			return "", fmt.Errorf("agent type has no host CLI: %s", agentType)
+		}
 		return a.CLIName, nil
 	}
 	return "", fmt.Errorf("unknown agent type: %s", agentType)

@@ -88,6 +88,7 @@ function actionError(reply: FastifyReply, result: any) {
     feature_disabled: [503, 'Attention Inbox is disabled', true],
     remote_response_disabled: [503, 'Remote response is disabled', true],
     daemon_unreachable: [503, 'Daemon is unreachable', true],
+    observer_read_only: [409, 'Observer session is read-only', false],
     submission_failed: [500, 'Submission failed', true],
   }
   const [status, message, retryable] = definitions[result.code] ?? [500, 'Submission failed', true]

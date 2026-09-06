@@ -7,7 +7,7 @@ import { InboxRepository } from '../ingress/inbox-repository.js'
 import { createInboxWorker } from '../inbox-worker.js'
 import { EventMaterializer } from '../materialization/event-materializer.js'
 import { RealtimeOutboxConsumer, RealtimeOutboxRepository, RealtimeOutboxWriter } from '../materialization/realtime-outbox.js'
-import { getRecentEvents } from '../db.js'
+import { getRecentEvents, listSessionsPageByDaemon } from '../db.js'
 import {
   assertDurableIngressTestDatabase,
   resetDurableIngressTestDatabase,
@@ -295,4 +295,249 @@ describeWithDatabase('mixed-Agent durable ingress PostgreSQL release gate', () =
     `)
     expect(usage.rows[0]).toEqual({ tok_input: 7, tok_output: 5, usage_events: 1 })
   }, 120_000)
+
+  test('materializes a replayed Codex Desktop history once with observer policy and stable session activity', async () => {
+    const user = await pool.query<{ id: number }>(
+      `INSERT INTO users (email, password_hash)
+       VALUES ('desktop-observer-e2e@example.test', '') RETURNING id`,
+    )
+    const userId = user.rows[0].id
+    const daemonId = 'desktop-observer-e2e-daemon'
+    const sessionId = 'desktop-observer-e2e-12345678'
+    await pool.query(
+      `INSERT INTO daemons (daemon_id, user_id, hostname, status)
+       VALUES ($1, $2, 'fixture-host', 'online')`,
+      [daemonId, userId],
+    )
+    await pool.query(
+      `INSERT INTO sessions (
+         session_id, daemon_id, user_id, agent_type, source, control_mode,
+         capabilities, status, cwd, title, model, last_activity_at
+       ) VALUES (
+         $1, $2, $3, 'codex', 'terminal', 'legacy_read_only', '[]'::jsonb,
+         'exited', '/fixture/project', 'old fixture title', 'old-fixture-model',
+         '2026-09-01T00:00:00.000Z'::timestamptz
+       )`,
+      [sessionId, daemonId, userId],
+    )
+
+    const sourceActivity = '2026-09-01T01:02:03.000Z'
+    const history: Array<Record<string, any>> = [
+      {
+        type: 'session_discovered', session_id: sessionId,
+        agent: 'codex-desktop', source: 'observer', control_mode: 'legacy_read_only',
+        capabilities: ['history_sync'], status: 'busy', cwd: '/fixture/project',
+        title: 'Terminal Session-12345678', model: 'gpt-5.6-fixture',
+        last_activity_at: sourceActivity,
+      },
+      {
+        type: 'session_model_changed', session_id: sessionId,
+        model: 'gpt-5.6-fixture',
+      },
+      {
+        type: 'session_model_changed', session_id: sessionId, event_id: 'jsonl:desktop-source:1:0',
+        model: 'gpt-5.6-fixture', resync: true,
+      },
+      {
+        type: 'session_meta', session_id: sessionId, event_id: 'jsonl:desktop-source:1:1',
+        effort: 'high', resync: true,
+      },
+      {
+        type: 'turn_status', session_id: sessionId, event_id: 'turn:desktop-fixture:status:running',
+        turn_id: 'turn:v1:codex:fixture', source_turn_id: 'fixture-turn-1',
+        turn_status: 'running', turn_reason: 'task_started_event', turn_origin: 'native', turn_confidence: 'native',
+        actor_scope: 'root', flow_scope: 'auxiliary', content_class: 'lifecycle', classifier_version: 'v1', resync: true,
+      },
+      {
+        type: 'user_text', session_id: sessionId, event_id: 'jsonl:desktop-source:3:0',
+        turn_id: 'turn:v1:codex:fixture', source_turn_id: 'fixture-turn-1',
+        turn_origin: 'native', turn_confidence: 'native', text: 'fixture user request', resync: true,
+      },
+      {
+        type: 'tool_call', session_id: sessionId, event_id: 'jsonl:desktop-source:4:0',
+        turn_id: 'turn:v1:codex:fixture', source_turn_id: 'fixture-turn-1',
+        turn_origin: 'native', turn_confidence: 'native', call_id: 'fixture-call-1', tool: 'exec',
+        input: { cmd: 'printf fixture' }, resync: true,
+      },
+      {
+        type: 'tool_result', session_id: sessionId, event_id: 'jsonl:desktop-source:5:0',
+        turn_id: 'turn:v1:codex:fixture', source_turn_id: 'fixture-turn-1',
+        turn_origin: 'native', turn_confidence: 'native', call_id: 'fixture-call-1',
+        output: 'fixture tool result', resync: true,
+      },
+      {
+        type: 'agent_file_change', session_id: sessionId, event_id: 'codex:file-change:fixture',
+        turn_id: 'turn:v1:codex:fixture', source_turn_id: 'fixture-turn-1',
+        turn_origin: 'native', turn_confidence: 'native', change_set_id: 'native:fixture-patch-1',
+        call_id: 'fixture-patch-1', change_index: 0, change_total: 1,
+        path: 'fixture.txt', change_kind: 'create', status: 'completed',
+        diff: '--- /dev/null\n+++ b/fixture.txt\n@@ -0,0 +1 @@\n+fixture file\n',
+        additions: 1, deletions: 0, resync: true,
+      },
+      {
+        type: 'tool_call', session_id: sessionId, event_id: 'jsonl:desktop-source:7:0',
+        turn_id: 'turn:v1:codex:fixture', source_turn_id: 'fixture-turn-1',
+        turn_origin: 'native', turn_confidence: 'native', call_id: 'fixture-plan-1', tool: 'update_plan',
+        input: { explanation: 'fixture plan', plan: [{ step: 'fixture step', status: 'completed' }] },
+        resync: true,
+      },
+      {
+        type: 'agent_plan', session_id: sessionId, event_id: 'codex:plan:fixture-plan-1',
+        turn_id: 'turn:v1:codex:fixture', source_turn_id: 'fixture-turn-1',
+        turn_origin: 'native', turn_confidence: 'native', part_id: `plan:${sessionId}`, revision: 1,
+        explanation: 'fixture plan', plan: [{ step: 'fixture step', status: 'completed' }],
+        resync: true,
+      },
+      {
+        type: 'agent_text', session_id: sessionId, event_id: 'jsonl:desktop-source:8:0',
+        turn_id: 'turn:v1:codex:fixture', source_turn_id: 'fixture-turn-1',
+        turn_origin: 'native', turn_confidence: 'native', text: 'fixture assistant response',
+        resync: true,
+      },
+      {
+        type: 'agent_text', session_id: sessionId, event_id: 'jsonl:desktop-source:10:0',
+        turn_id: 'turn:v1:codex:fixture', source_turn_id: 'fixture-turn-1',
+        turn_origin: 'native', turn_confidence: 'native',
+        usage: { input_tokens: 13, output_tokens: 8, cache_read_tokens: 5, reasoning_tokens: 3, total_tokens: 21 },
+        resync: true,
+      },
+      {
+        type: 'turn_status', session_id: sessionId, event_id: 'turn:desktop-fixture:status:completed',
+        turn_id: 'turn:v1:codex:fixture', source_turn_id: 'fixture-turn-1',
+        turn_status: 'completed', turn_reason: 'task_complete_event', turn_origin: 'native', turn_confidence: 'native',
+        actor_scope: 'root', flow_scope: 'auxiliary', content_class: 'lifecycle', classifier_version: 'v1', resync: true,
+      },
+      {
+        type: 'session_status', session_id: sessionId,
+        status: 'busy', resync: true,
+      },
+    ]
+
+    const repository = new InboxRepository(pool)
+    const acked = new Map<number, number>()
+    const ingest = async (generation: number) => {
+      const controller = new IngressController({
+        repository,
+        queue: new FairIngressQueue({ maxEventsPerDaemon: 64, maxEvents: 128 }),
+        sendAck: (_ackedDaemon, checkpoint) => acked.set(generation, checkpoint.ackSeq),
+        disconnectRetryable: () => undefined,
+        setTimer: () => ({ unref() {} }) as unknown as ReturnType<typeof setTimeout>,
+        clearTimer: () => undefined,
+      })
+      for (const [index, event] of history.entries()) {
+        expect(controller.accept(
+          { daemonId, registrationId: `desktop-registration-${generation}`, userId, daemonGeneration: generation },
+          { ...event, seq: index + 1 },
+          { agentType: 'codex', cwd: '/fixture/project' },
+        )).toEqual({ kind: 'accepted' })
+      }
+      await controller.flushNow()
+    }
+
+    await ingest(901)
+    await ingest(902)
+    expect(acked).toEqual(new Map([[901, history.length], [902, history.length]]))
+
+    const worker = createInboxWorker({
+      repository,
+      materializer: new EventMaterializer({
+        pool,
+        durableHooks: {
+          claimQuotaReservationSession: async () => undefined,
+          settleQuotaReservation: async () => undefined,
+          notifyUser: async () => undefined,
+          notifyProUser: async () => undefined,
+        },
+      }),
+      workerId: 'desktop-observer-e2e-worker',
+      shardCount: 1,
+      shardIndex: 0,
+      batchSize: 32,
+      outboxWriter: new RealtimeOutboxWriter(pool),
+    })
+    await drainWorkerUntilCompleted(pool, worker, 'turn:desktop-fixture:status:completed', 32)
+    await worker.runOnce()
+
+    const durable = await pool.query<{
+      canonical: number; receipts: number; events: number;
+      stable_inbox: number; generation_scoped_inbox: number;
+      stable_events: number; no_id_events: number;
+    }>(
+      `SELECT
+         (SELECT COUNT(*)::int FROM event_inbox WHERE daemon_id = $1) AS canonical,
+         (SELECT COUNT(*)::int FROM event_inbox_receipt WHERE daemon_id = $1) AS receipts,
+         (SELECT COUNT(*)::int FROM events WHERE session_id = $2) AS events,
+         (SELECT COUNT(*)::int FROM event_inbox WHERE daemon_id = $1 AND payload ? 'event_id') AS stable_inbox,
+         (SELECT COUNT(*)::int FROM event_inbox WHERE daemon_id = $1 AND NOT payload ? 'event_id') AS generation_scoped_inbox,
+         (SELECT COUNT(*)::int FROM events WHERE session_id = $2 AND payload ? 'event_id') AS stable_events,
+         (SELECT COUNT(*)::int FROM events WHERE session_id = $2 AND NOT payload ? 'event_id') AS no_id_events`,
+      [daemonId, sessionId],
+    )
+    // The actual main handler emits three no-ID frames per generation:
+    // discovery, its separately extracted model, and the current status after
+    // hydration. They remain generation-scoped in the inbox, while identical
+    // payload hashes converge in events. The twelve retained JSONL projections
+    // use stable IDs and deduplicate in both layers.
+    expect(durable.rows[0]).toEqual({
+      canonical: 18,
+      receipts: history.length * 2,
+      events: history.length,
+      stable_inbox: 12,
+      generation_scoped_inbox: 6,
+      stable_events: 12,
+      no_id_events: 3,
+    })
+
+    const persisted = await pool.query<{
+      agent_type: string; source: string; control_mode: string; capabilities: string[];
+      status: string; cwd: string; title: string; model: string; last_activity_at: Date;
+      total_tokens: number; tok_input: number; tok_output: number; tok_cache_read: number;
+    }>(
+      `SELECT agent_type, source, control_mode, capabilities, status, cwd, title, model,
+              last_activity_at, total_tokens::int, tok_input::int, tok_output::int, tok_cache_read::int
+       FROM sessions WHERE session_id = $1 AND user_id = $2`,
+      [sessionId, userId],
+    )
+    expect({ ...persisted.rows[0], last_activity_at: persisted.rows[0].last_activity_at.toISOString() }).toEqual({
+      agent_type: 'codex-desktop', source: 'observer', control_mode: 'legacy_read_only',
+      capabilities: ['history_sync'], status: 'busy', cwd: '/fixture/project',
+      title: 'Terminal Session-12345678', model: 'gpt-5.6-fixture', last_activity_at: sourceActivity,
+      total_tokens: 26, tok_input: 13, tok_output: 8, tok_cache_read: 5,
+    })
+
+    const list = await listSessionsPageByDaemon(pool, { userId, daemonId, limit: 20 })
+    expect(list.sessions).toHaveLength(1)
+    expect(list.sessions[0]).toMatchObject({
+      session_id: sessionId, agent_type: 'codex-desktop', source: 'observer',
+      control_mode: 'legacy_read_only', capabilities: ['history_sync'], status: 'busy',
+      title: 'Terminal Session-12345678', model: 'gpt-5.6-fixture', totalTokens: 26,
+    })
+    expect(new Date(list.sessions[0].last_activity_at).toISOString()).toBe(sourceActivity)
+
+    const replay = (await getRecentEvents(pool, sessionId, 100)).reverse()
+    expect(replay).toHaveLength(history.length)
+    expect(replay.filter((row) => row.payload.event_id).map((row) => row.payload.event_id)).toEqual(
+      history.filter((event) => event.event_id).map((event) => event.event_id),
+    )
+    expect(replay.filter((row) => !row.payload.event_id).map((row) => row.event_type)).toEqual(expect.arrayContaining([
+      'session_discovered', 'session_model_changed', 'session_status',
+    ]))
+    expect(replay.filter((row) => !row.payload.event_id)).toHaveLength(3)
+    expect(replay.filter((row) => row.event_type === 'session_model_changed')).toHaveLength(2)
+    expect(replay.filter((row) => row.event_type === 'session_meta')).toHaveLength(1)
+    expect(replay.filter((row) => row.event_type === 'session_status')).toHaveLength(1)
+    expect(replay.filter((row) => row.event_type === 'tool_call')).toHaveLength(2)
+    expect(replay.filter((row) => row.event_type === 'agent_plan')).toHaveLength(1)
+    const assistantEvents = replay.filter((row) => row.event_type === 'agent_text')
+    expect(assistantEvents).toHaveLength(2)
+    expect(assistantEvents.filter((row) => row.payload.text === 'fixture assistant response')).toHaveLength(1)
+    expect(assistantEvents.find((row) => row.payload.text === 'fixture assistant response')?.payload.usage).toBeUndefined()
+    expect(assistantEvents.find((row) => row.payload.usage)?.payload.text).toBeUndefined()
+    expect(assistantEvents.find((row) => row.payload.usage)?.payload.usage).toEqual({
+      input_tokens: 13, output_tokens: 8, cache_read_tokens: 5, reasoning_tokens: 3, total_tokens: 21,
+    })
+    expect(replay.find((row) => row.event_type === 'user_text')?.payload.text).toBe('fixture user request')
+    expect(replay.find((row) => row.event_type === 'tool_result')?.payload.output).toBe('fixture tool result')
+    expect(replay.find((row) => row.event_type === 'agent_file_change')?.payload.path).toBe('fixture.txt')
+  }, 30_000)
 })

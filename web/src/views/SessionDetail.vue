@@ -57,7 +57,7 @@
                   @click.stop @keydown.enter="commitRename(s)" @keydown.escape="cancelRename" @blur="commitRename(s)" />
                 <template v-else>{{ s.title || s.session_id.slice(0, 8) }}</template>
               </div>
-              <div class="sl-meta"><AgentBadge :agent="s.agent_type" size="sm" />{{ formatRelativeTime(s.last_activity_at || s.updated_at) }}<span v-if="s.subagent_count > 0"> · {{ t('session.sub_agents', { n: s.subagent_count }) }}</span></div>
+              <div class="sl-meta"><AgentBadge :agent="s.agent_type" size="sm" />{{ formatRelativeTime(s.last_activity_at || s.created_at) }}<span v-if="s.subagent_count > 0"> · {{ t('session.sub_agents', { n: s.subagent_count }) }}</span></div>
             </div>
             <SessionActions :session="s" @startRename="startRename" @deleted="onDeleted" @pinned="onPinned" />
           </div>
@@ -77,8 +77,29 @@
 
     <!-- Chat Main Area -->
     <div class="chat-area">
+      <!-- The session list can arrive after the replay request on a direct URL. -->
+      <div
+        v-if="hasNoSessions && isLoading"
+        class="session-history-loading"
+        data-testid="session-history-loading"
+        role="status"
+        aria-live="polite"
+      >
+        <span class="session-history-spinner" aria-hidden="true"></span>
+        <div class="session-history-loading-title">{{ t('session.loading_history') }}</div>
+        <template v-if="isSlowLoading">
+          <div class="session-history-loading-slow">{{ t('session.loading_slow') }}</div>
+          <button
+            type="button"
+            class="session-history-retry"
+            data-testid="session-history-retry"
+            @click="retryHistory"
+          >{{ t('common.retry') }}</button>
+        </template>
+      </div>
+
       <!-- Full-area empty state when no sessions exist at all -->
-      <div v-if="hasNoSessions" class="chat-welcome">
+      <div v-else-if="hasNoSessions" class="chat-welcome">
         <svg class="welcome-icon" width="64" height="64" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round">
           <path d="M12 2a10 10 0 1 0 10 10A10 10 0 0 0 12 2z"/><path d="M8 14s1.5 2 4 2 4-2 4-2"/><line x1="9" y1="9" x2="9.01" y2="9"/><line x1="15" y1="9" x2="15.01" y2="9"/>
         </svg>
@@ -163,7 +184,7 @@
           </button>
           <div v-if="(currentPlan || fileChangeMessages.length) && !focusedSubAgentId" class="toolbar-overflow-separator"></div>
           <button type="button" class="toolbar-overflow-item" data-toolbar-action="copy-id" role="menuitem" @click="copySessionId"><span>{{ copied ? t('common.copied') : t('session.actions.copy_id') }}</span><code>{{ sessionId?.slice(0, 8) }}</code></button>
-          <button v-if="!focusedSubAgentId" type="button" class="toolbar-overflow-item" data-toolbar-action="resume" role="menuitem" @click="copyResumeCmd"><span>{{ resumeCopied ? t('session.actions.resume_toast') : t('session.actions.resume') }}</span><code>resume</code></button>
+          <button v-if="!focusedSubAgentId && !isReadOnlyObserverSession" type="button" class="toolbar-overflow-item" data-toolbar-action="resume" role="menuitem" @click="copyResumeCmd"><span>{{ resumeCopied ? t('session.actions.resume_toast') : t('session.actions.resume') }}</span><code>resume</code></button>
         </div>
       </div>
 
@@ -180,7 +201,7 @@
           <svg class="banner-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><path d="M16 17l5-5-5-5"/><path d="M21 12H9"/></svg>
           <span>{{ t('session.exited_banner') }}</span>
           <span v-if="exitReason" style="margin-left:4px;">· {{ exitReasonLabel(exitReason) }}</span>
-          <button v-if="isDaemonOnline" class="btn btn-accent" style="margin-left:auto;padding:4px 12px;font-size:12px;" @click="focusResumeInput">Resume</button>
+          <button v-if="isDaemonOnline && !isReadOnlyObserverSession" class="btn btn-accent" style="margin-left:auto;padding:4px 12px;font-size:12px;" @click="focusResumeInput">Resume</button>
         </div>
 
         <!-- Disconnected Banner -->
@@ -191,7 +212,7 @@
         <!-- L1: send failed (ws not open at send time) -->
         <div v-if="sendError || interruptPendingDraft" class="banner banner-warning" style="flex-shrink:0;">
           <svg class="banner-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><path d="M12 9v4"/><path d="M12 17h.01"/></svg>
-          <span>{{ t('session.send_failed') }}</span>
+          <span>{{ sendFailureKey ? t(sendFailureKey) : t('session.send_failed') }}</span>
           <button v-if="interruptPendingDraft" type="button" class="interrupt-pending-retry" @click="restoreInterruptPendingDraft">{{ t('common.retry') }}</button>
         </div>
 
@@ -207,8 +228,28 @@
           </template>
         </div>
 
+        <div
+          v-if="isLoading && renderMessages.length === 0"
+          class="session-history-loading"
+          data-testid="session-history-loading"
+          role="status"
+          aria-live="polite"
+        >
+          <span class="session-history-spinner" aria-hidden="true"></span>
+          <div class="session-history-loading-title">{{ t('session.loading_history') }}</div>
+          <template v-if="isSlowLoading">
+            <div class="session-history-loading-slow">{{ t('session.loading_slow') }}</div>
+            <button
+              type="button"
+              class="session-history-retry"
+              data-testid="session-history-retry"
+              @click="retryHistory"
+            >{{ t('common.retry') }}</button>
+          </template>
+        </div>
+
         <!-- Empty state when no messages -->
-        <div v-if="renderMessages.length === 0" class="chat-empty-state">
+        <div v-else-if="renderMessages.length === 0" class="chat-empty-state">
           <svg class="empty-icon" width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
             <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>
           </svg>
@@ -616,7 +657,7 @@ import FileChangeCard from '../components/messages/FileChangeCard.vue'
 import FileChangeBottomSheet from '../components/messages/FileChangeBottomSheet.vue'
 import SubAgentFoldGroup from '../components/messages/SubAgentFoldGroup.vue'
 import { buildResumeCommand } from '../utils/resumeCommand'
-import { isZcodeObserverSession as isZcodeObserverSessionHelper } from '../utils/zcodeObserver'
+import { isReadOnlyObserverAgent } from '../utils/observerSession'
 import { resolveAgentTarget } from './classifyByAgent'
 import { formatToolInput } from '../utils/toolDisplay'
 import { isDiffTool } from '../utils/diffRender'
@@ -643,6 +684,7 @@ import { completedPlanItemCount } from '../utils/agentPlanMerge'
 import { createAgentFileChangeReducer, type AgentFileChangeMessage } from '../utils/agentFileChange'
 import { projectTurns, TurnSegmentCollapseRegistry, TurnSegmentIdentityRegistry } from '../utils/turnProjection'
 import { isKnownNonTimelineControlEvent, knownNonTimelineControlEventTypes, unknownTimelineEventIdentity } from '../utils/timelineEventRegistry'
+import { createClientId } from '../utils/clientId'
 
 const { renamingId, renameInput, startRename, commitRename, cancelRename } = useSessionRename()
 
@@ -756,6 +798,9 @@ const sessionAgentSubmitting = ref(false)
 const showHelpModal = ref(false)        // /help local command → full-screen modal
 const replayReqId = ref(0)
 const isLoading = ref(false)
+const isSlowLoading = ref(false)
+const HISTORY_SLOW_THRESHOLD_MS = 8_000
+let historySlowTimer: ReturnType<typeof setTimeout> | null = null
 // session-history-pagination: backward pagination state
 const pageSize = computed(() => 50)  // session-history-pagination: 一次加载 50 条（平衡首屏/翻页性能）
 const loadedMinId = ref(0)      // oldest loaded event id (backward cursor)
@@ -789,12 +834,12 @@ const isManagedOpenCode = computed(() => isManagedOpenCodeSession(
   currentSessionCapabilities.value,
 ))
 const isLegacyOpenCodeSession = computed(() => currentSessionAgent.value === 'opencode' && !isManagedOpenCode.value)
-// ZCode observer sessions are read-only sync from the local ZCode store. They
+// Observer sessions are read-only sync from their local stores. They
 // can be viewed but never driven: no composer, no stop/approval/permission, no
 // resume command (see buildResumeCommand). Used as a fail-closed gate for
 // canWriteWhenConnected and the read-only banner.
-const isZcodeObserverSession = computed(() => isZcodeObserverSessionHelper(currentSessionAgent.value))
-const interactionCardsDisabled = computed(() => isDisconnected.value || (
+const isReadOnlyObserverSession = computed(() => isReadOnlyObserverAgent(currentSessionAgent.value))
+const interactionCardsDisabled = computed(() => isReadOnlyObserverSession.value || isDisconnected.value || (
   interactionConnectivity.value !== 'ready' || (
   currentSessionAgent.value === 'opencode'
   && !canControlOpenCodeInteractions(currentSessionAgent.value, currentSession.value?.control_mode, currentSessionCapabilities.value)
@@ -819,6 +864,7 @@ const status = ref('running')
 const awaitingStart = ref(false)
 // L1: transient "send failed" banner (ws not open at send time).
 const sendError = ref(false)
+const sendFailureKey = ref('')
 const interruptPendingDraft = ref('')
 // Relay forwarding is acknowledged per prompt. Managed Codex prompts carrying
 // message_acceptance_receipt then wait for a second, app-server acceptance event.
@@ -834,7 +880,7 @@ const showPermMenu = ref(false)
 const runtimePermissionOptions = computed(() => permissionOptions(currentSessionAgent.value as AgentType, false, permissionMutableModes.value))
 const currentPermissionValue = computed(() => currentPermission.value?.agent === 'claude-code' ? currentPermission.value.mode : currentPermission.value?.preset || '')
 const currentPermLabel = computed(() => permissionTitleKey(currentPermission.value))
-const permissionCanChange = computed(() => permissionMutable.value && !isExecuting.value && !isDisconnected.value && !pendingPermission.value)
+const permissionCanChange = computed(() => !isReadOnlyObserverSession.value && permissionMutable.value && !isExecuting.value && !isDisconnected.value && !pendingPermission.value)
 const exitedAt = ref('')
 const autoScroll = ref(true)
 const copied = ref(false)
@@ -907,7 +953,7 @@ const agentFilterOptions = computed(() => {
     const agent = normalizedAgentType(session)
     counts.set(agent, (counts.get(agent) || 0) + 1)
   }
-  const order = ['codex', 'zcode', 'opencode', 'claude-code']
+  const order = ['codex', 'codex-desktop', 'zcode', 'opencode', 'claude-code']
   const agents = [...counts.keys()].sort((left, right) => {
     const leftIndex = order.indexOf(left)
     const rightIndex = order.indexOf(right)
@@ -1026,7 +1072,7 @@ const isSubagent = computed(() => !!allSessions.value.find((s: any) => s.session
 // query (set when clicking a child row in any list); the authoritative
 // title/agentType/token/status come from session_list's children[].
 const focusedSubAgentId = computed(() => (route.query.subagent as string) || '')
-const showSessionAgentPicker = computed(() => shouldShowSessionAgentPicker(
+const showSessionAgentPicker = computed(() => !isReadOnlyObserverSession.value && shouldShowSessionAgentPicker(
   currentSessionAgent.value,
   interactionCapabilities.value,
   isSubagent.value,
@@ -1113,11 +1159,10 @@ watch(
   { immediate: true },
 )
 const canWriteWhenConnected = computed(() => {
-  // Fail-closed gate: a ZCode observer session is read-only sync content from
-  // the local ZCode store. It can NEVER be written to, regardless of status,
-  // source, control_mode, or capabilities — including forged managed/acceptance
-  // fields. This check takes precedence over every other writeability rule.
-  if (isZcodeObserverSession.value) {
+  // Fail-closed agent gate: permanent observer sessions can NEVER be written
+  // to, regardless of status, source, control_mode, or capabilities. This check
+  // takes precedence over every other writeability rule.
+  if (isReadOnlyObserverSession.value) {
     return false
   }
   if (currentSessionAgent.value === 'claude-code') {
@@ -1151,14 +1196,14 @@ const composerState = computed(() => resolveSessionComposerState(
   interactionConnectivity.value,
 ))
 const isUnmanagedReadOnlySession = computed(() => !!currentSession.value
-  && currentSession.value?.source !== 'daemon'
+  && (isReadOnlyObserverSession.value || currentSession.value?.source !== 'daemon')
   && !canWriteWhenConnected.value
   && !isSubagent.value
   && !focusedSubAgentId.value)
 const unmanagedReadOnlyAgent = computed(() => agentDisplayName(normalizedAgentType(currentSession.value)))
 const unmanagedReadOnlyDescription = computed(() => {
   if (isLegacyOpenCodeSession.value) return t('session.opencode_legacy_readonly')
-  if (isZcodeObserverSession.value) return t('session.zcode_observer_readonly')
+  if (currentSessionAgent.value === 'zcode') return t('session.zcode_observer_readonly')
   return t('session.unmanaged_readonly_description', { agent: unmanagedReadOnlyAgent.value })
 })
 const messageBottomClearance = computed(() => composerState.value.visible
@@ -1331,10 +1376,11 @@ const mobileSessionTitle = computed(() => focusedSubAgentId.value
   ? focusedSubAgentInfo.value?.title || focusedSubAgentId.value.slice(0, 8)
   : sessionTitle.value || sessionId.value?.slice(0, 8) || '')
 
-watch([mobileSessionTitle, daemonName, status, statusLabel], () => {
+watch([mobileSessionTitle, daemonName, selectedHostId, status, statusLabel], () => {
   setSessionHeader({
     title: mobileSessionTitle.value,
     host: daemonName.value,
+    hostId: selectedHostId.value,
     status: status.value,
     statusLabel: statusLabel.value,
   })
@@ -1393,7 +1439,7 @@ const milestones = computed(() => {
   const s = allSessions.value.find(s => s.session_id === sessionId.value)
   if (!s) return ms
   if (s.created_at) ms.push({ label: t('session.milestone_created'), time: formatTime(s.created_at), state: 'active' })
-  ms.push({ label: t('session.status.running'), time: formatTime(s.last_activity_at || s.updated_at || s.created_at), state: status.value === 'running' || status.value === 'busy' || status.value === 'retry' ? 'current' : 'active' })
+  ms.push({ label: t('session.status.running'), time: formatTime(s.last_activity_at || s.created_at), state: status.value === 'running' || status.value === 'busy' || status.value === 'retry' ? 'current' : 'active' })
   ms.push({ label: statusLabel.value, time: '—', state: isTerminalStatus.value ? 'active' : '' })
   return ms
 })
@@ -1501,6 +1547,7 @@ watch(composerEl, (element) => {
 let sessionAgentListTimer: ReturnType<typeof setTimeout> | null = null
 let sessionAgentSwitchTimer: ReturnType<typeof setTimeout> | null = null
 function requestSessionAgents() {
+  if (isReadOnlyObserverSession.value) return
   if (!showSessionAgentPicker.value || sessionAgentsLoading.value) return
   sessionAgentsLoading.value = true
   sessionAgentError.value = ''
@@ -1518,6 +1565,7 @@ function requestSessionAgents() {
 }
 
 function requestSessionAgentSwitch(name: string) {
+  if (isReadOnlyObserverSession.value) return
   if (!name || name === currentOpenCodeAgent.value || sessionAgentDisabled.value) return
   sessionAgentSubmitting.value = true
   sessionAgentError.value = ''
@@ -1575,8 +1623,13 @@ function replaySessionTrustContext(): ReplaySessionTrustContext {
 // Shared by onMounted and the loadKey watcher so every entry/exit/switch path
 // is consistent.
 function loadHistory() {
+  clearHistorySlowTimer()
+  isSlowLoading.value = false
   replayReqId.value++
   isLoading.value = true
+  historySlowTimer = setTimeout(() => {
+    if (isLoading.value) isSlowLoading.value = true
+  }, HISTORY_SLOW_THRESHOLD_MS)
   loadedMinId.value = 0
   isLoadingBackward.value = false
   hasMore.value = false
@@ -1585,17 +1638,35 @@ function loadHistory() {
     send({ type: 'replay_subagent', session_id: sessionId.value, agent_id: focusedSubAgentId.value, limit: pageSize.value, req_id: replayReqId.value })
   } else {
     send({ type: 'replay', session_id: sessionId.value, direction: 'backward', limit: pageSize.value, req_id: replayReqId.value })
-    send({ type: 'list_commands', session_id: sessionId.value })
+    try {
+      send({ type: 'list_commands', session_id: sessionId.value })
+    } catch (error) {
+      console.warn('[session-history] auxiliary request failed', { operation: 'list_commands', error })
+    }
     requestSessionMeta()
   }
 }
 
+function clearHistorySlowTimer() {
+  if (historySlowTimer) clearTimeout(historySlowTimer)
+  historySlowTimer = null
+}
+
+function retryHistory() {
+  loadHistory()
+}
+
 function requestSessionMeta() {
-  send({
-    type: 'get_session_meta',
-    session_id: sessionId.value,
-    request_id: `session-meta-${crypto.randomUUID()}`,
-  })
+  try {
+    return send({
+      type: 'get_session_meta',
+      session_id: sessionId.value,
+      request_id: `session-meta-${createClientId()}`,
+    })
+  } catch (error) {
+    console.warn('[session-history] auxiliary request failed', { operation: 'get_session_meta', error })
+    return false
+  }
 }
 
 function onMessagesScroll() {
@@ -1651,6 +1722,7 @@ const stopError = ref('')
 let stopErrorTimer: ReturnType<typeof setTimeout> | null = null
 let stopResetTimer: ReturnType<typeof setTimeout> | null = null
 function interruptSession() {
+  if (isReadOnlyObserverSession.value) return
   // Defensive guard: the stop button is :disabled while disconnected, but a
   // stale "running" status (relay restart, missed session_status) could leave
   // it clickable briefly. Bail instead of firing an unroutable interrupt that
@@ -1829,6 +1901,7 @@ function interactionResultResolution(evt: any): { type: InteractionCardType; res
   }
 }
 function markInteractionSubmitting(msg: any, operation: string): boolean {
+  if (isReadOnlyObserverSession.value) return false
   const readiness = resolveInteractionReadiness({
     connectivity: interactionConnectivity.value,
     requestStatus: msg.status,
@@ -1935,6 +2008,7 @@ function onChoiceRespond(msg: any, choice: string) {
 }
 
 function sendMessage() {
+  if (isReadOnlyObserverSession.value) return
   const text = messageInput.value.trim()
   if (!text || !composerState.value.sendEnabled) return
   if (isPendingSession.value) return // D3: pending-id 窗口期不发命令（--resume pending-xxx 必失败）
@@ -1952,6 +2026,7 @@ function sendMessage() {
 }
 
 function sendPromptText(text: string): boolean {
+  if (isReadOnlyObserverSession.value) return false
   // C (web-post-send-feedback): optimistic echo — push user bubble immediately.
   // Relay's user_text echo is deduped by isDuplicate (same pattern as
   // handleLocalCommand), so no double bubble.
@@ -1987,10 +2062,18 @@ function clearAckTimeout(msgId: string) {
   pendingAckTimers.delete(msgId)
 }
 
-function showSendFailure() {
+function showSendFailure(key = '') {
   awaitingStart.value = false
+  sendFailureKey.value = key
   sendError.value = true
-  setTimeout(() => { sendError.value = false }, 3000)
+  setTimeout(() => { sendError.value = false; sendFailureKey.value = '' }, 3000)
+}
+
+function userMessageFailureKey(reason: string) {
+  if (reason === 'session_identity_unavailable') return 'session.recovery_failed'
+  if (reason === 'observer_read_only') return 'session.control_restricted'
+  if (reason === 'execution_failed') return 'session.execution_failed'
+  return ''
 }
 function restoreInterruptPendingDraft() {
   if (!interruptPendingDraft.value) return
@@ -2116,7 +2199,7 @@ function buildStatusMessage(): string {
   const parts = [`主机 ${online}`]
   if (s.daemon_version) parts.push(`daemon v${s.daemon_version}`)
   const agentVer = s.agent_version || s.agentVersion
-  const agentLabel = s.agent_type === 'codex' ? 'Codex' : (s.agent_type === 'opencode' ? 'OpenCode' : 'Claude Code')
+  const agentLabel = agentDisplayName(normalizedAgentType(s))
   if (agentVer) parts.push(`${agentLabel} v${agentVer}`)
   parts.push('账户登录状态请在终端运行 pocketctl status 查看')
   return parts.join(' · ')
@@ -2290,6 +2373,48 @@ function isDuplicate(type: string, text: string, target = messages.value): boole
   return type === 'agent_text' && cleanContent(last.content || '') === cleanContent(text)
 }
 
+function eventCorrelation(evt: any) {
+  const payload = evt?.payload && typeof evt.payload === 'object' ? evt.payload : {}
+  return {
+    requestId: evt?.request_id || payload.request_id || '',
+    msgId: evt?.msg_id || payload.msg_id || '',
+  }
+}
+
+function messageCorrelation(message: any) {
+  return {
+    requestId: message?.request_id || message?.__request_id || '',
+    msgId: message?.msg_id || message?.__msg_id || '',
+  }
+}
+
+function correlationsConflict(left: ReturnType<typeof eventCorrelation>, right: ReturnType<typeof eventCorrelation>) {
+  return Boolean(
+    (left.requestId && right.requestId && left.requestId !== right.requestId)
+    || (left.msgId && right.msgId && left.msgId !== right.msgId),
+  )
+}
+
+function findMessageByCorrelation(correlation: ReturnType<typeof eventCorrelation>, target = messages.value) {
+  if (!correlation.requestId && !correlation.msgId) return undefined
+  return target.find((message: any) => {
+    const candidate = messageCorrelation(message)
+    if (correlationsConflict(correlation, candidate)) return false
+    return Boolean(
+      (correlation.msgId && candidate.msgId === correlation.msgId)
+      || (correlation.requestId && candidate.requestId === correlation.requestId),
+    )
+  })
+}
+
+function applyCanonicalCorrelation(message: any, correlation: ReturnType<typeof eventCorrelation>) {
+  if (correlation.requestId) {
+    message.request_id = correlation.requestId
+    message.__request_id = correlation.requestId
+  }
+  if (correlation.msgId) message.msg_id = correlation.msgId
+}
+
 const turnMetadataKeys = ['turn_id', 'source_turn_id', 'turn_status', 'turn_reason', 'turn_origin', 'turn_confidence', 'previous_turn_id', 'continuation_reason', 'actor_scope', 'flow_scope', 'content_class', 'classifier_version'] as const
 function eventWithTurnMetadata(evt: any): Record<string, unknown> {
   const payload = evt.payload && typeof evt.payload === 'object' ? evt.payload : {}
@@ -2354,11 +2479,27 @@ function processEvent(evt: any, target: any[] = messages.value, subagentOverride
   } else if (type === 'user_text') {
     const text = evt.text || evt.content || evt.payload?.text || evt.payload?.content || ''
     if (!text) return
-    if (isDuplicate('user_text', text, target)) {
-      preserveTurnMetadata(target[target.length - 1], evt)
+    const correlation = eventCorrelation(evt)
+    const correlated = findMessageByCorrelation(correlation, target)
+    if (correlated) {
+      preserveTurnMetadata(correlated, evt)
+      applyCanonicalCorrelation(correlated, correlation)
       return
     }
-    target.push({ id: nextId('u'), type: 'user_text', role: 'user', content: text, ...eventWithTurnMetadata(evt) })
+    const last = target[target.length - 1]
+    if (last?.type === 'user_text' && (last.content || '') === text
+      && !correlationsConflict(correlation, messageCorrelation(last))) {
+      const existing = last
+      preserveTurnMetadata(existing, evt)
+      applyCanonicalCorrelation(existing, correlation)
+      return
+    }
+    target.push({
+      id: nextId('u'), type: 'user_text', role: 'user', content: text,
+      request_id: correlation.requestId,
+      msg_id: correlation.msgId,
+      ...eventWithTurnMetadata(evt),
+    })
   } else if (type === 'agent_text') {
     // A: model started responding — end optimistic window (fallback if the
     // running status was missed, e.g. PTY race).
@@ -2876,14 +3017,6 @@ watch(loadKey, (newKey, oldKey) => {
 const cleanups: (() => void)[] = []
 
 onMounted(() => {
-  connect()
-  send({ type: 'list_sessions' })
-  send({ type: 'list_daemons' })
-  // Gate the timer watch for the initial load too: status defaults to 'running'
-  // (a placeholder) and would start the timer from zero before the real status
-  // arrives via replay. replay_end un-gates and resumes correctly.
-	sessionSwitching = true
-	loadHistory()
 	cleanups.push(onEvent('connection_restored', () => {
 		send({ type: 'list_sessions' })
 		send({ type: 'list_daemons' })
@@ -3051,6 +3184,8 @@ onMounted(() => {
       nextTick(scrollToBottom)
     }
     isLoading.value = false
+    clearHistorySlowTimer()
+    isSlowLoading.value = false
     isLoadingBackward.value = false
     if (msg.has_more !== undefined) hasMore.value = !!msg.has_more
     // backward: last_seq is the oldest id of the returned page → next page cursor
@@ -3076,13 +3211,14 @@ onMounted(() => {
         const meta = allSessions.value.find((s: any) => s.session_id === sessionId.value)
         if (meta) {
           let st = meta.statusEffective === 'disconnected' ? meta.status : (meta.statusEffective || meta.status)
-          // A "running/busy" status that hasn't seen activity recently is stale:
-          // the daemon isn't actively syncing this session (an actively-running
-          // session refreshes last_activity_at every poll). Treat it as idle so the
-          // timer doesn't start from zero on a session that isn't really working
-          // (e.g. an opencode turn that was abandoned and fell out of the sync window).
-          if (st === 'running' || st === 'busy' || st === 'retry' || st === 'waiting') {
-            const la = meta.last_activity_at || meta.updated_at
+          // OpenCode polling can leave an abandoned turn marked executing after
+          // it falls out of the sync window. Codex and Claude instead publish
+          // explicit lifecycle events, and long-running tools/subagents can be
+          // quiet for more than two minutes, so their persisted status must not
+          // be overridden by this OpenCode-specific fallback.
+          if (normalizedAgentType(meta) === 'opencode'
+            && (st === 'running' || st === 'busy' || st === 'retry' || st === 'waiting')) {
+            const la = meta.last_activity_at || meta.created_at
             const ageMs = la ? Date.now() - new Date(la).getTime() : Infinity
             if (ageMs > 120000) st = 'idle'
           }
@@ -3111,9 +3247,9 @@ onMounted(() => {
     failOrRollbackOptimistic(msg.msg_id, msg.reason || '')
   }))
   cleanups.push(onEvent('user_message_receipt', (msg: any) => {
-    if (msg.session_id !== sessionId.value || !msg.msg_id) return
-    clearAckTimeout(msg.msg_id)
-    const message = messages.value.find((item: any) => item.__msg_id === msg.msg_id)
+    if (msg.session_id !== sessionId.value || (!msg.msg_id && !msg.request_id)) return
+    if (msg.msg_id) clearAckTimeout(msg.msg_id)
+      const message = findMessageByCorrelation(eventCorrelation(msg))
     // An input received while interrupt confirmation is outstanding did not
     // enter the old turn. Remove the optimistic echo and restore the draft so
     // the user can retry after the terminal lifecycle event arrives.
@@ -3126,15 +3262,16 @@ onMounted(() => {
       showSendFailure()
       return
     }
-    if (!message?.__expects_receipt) return
+    if (!message) return
     if (msg.status === 'accepted') {
+      if (message.deliveryStatus === 'failed') return
       message.deliveryStatus = 'accepted'
       message.deliveryReason = ''
       return
     }
     message.deliveryStatus = 'failed'
     message.deliveryReason = msg.reason || ''
-    showSendFailure()
+    showSendFailure(userMessageFailureKey(msg.reason || ''))
   }))
 
   cleanups.push(onEvent('user_text', (msg: any) => {
@@ -3278,16 +3415,17 @@ onMounted(() => {
     // reads meta.statusEffective/status from allSessions, so a stale mount-time
     // snapshot would leave a just-finished session looking "running" after a
     // switch (timer stuck/from zero). Update it on every status event.
-    const lastActivityAt = msg.last_activity_at || msg.payload?.last_activity_at || new Date().toISOString()
+    const sourceActivityAt = msg.last_activity_at || msg.payload?.last_activity_at
+    const lastActivityAt = sourceActivityAt || (msg.resync === true ? ls?.last_activity_at || '' : new Date().toISOString())
     if (ls) {
       ls.status = msg.status
       ls.statusEffective = msg.status
-      ls.last_activity_at = lastActivityAt
+      if (lastActivityAt) ls.last_activity_at = lastActivityAt
     }
     if (msg.session_id === sessionId.value) {
       const wasExecuting = isExecuting.value
       status.value = msg.status
-      if (wasExecuting && !isExecuting.value) lastTurnEndedAt.value = lastActivityAt
+      if (wasExecuting && !isExecuting.value && lastActivityAt) lastTurnEndedAt.value = lastActivityAt
       reconcileVisibleUnresolvedTools(msg.status)
       if (msg.exit_reason) exitReason.value = msg.exit_reason
       if (msg.exited_at) exitedAt.value = msg.exited_at
@@ -3317,6 +3455,16 @@ onMounted(() => {
 
   cleanups.push(onEvent('error', (msg: any) => {
     if (msg.session_id && msg.session_id !== sessionId.value) return
+    if (msg.operation === 'user_message' && (msg.msg_id || msg.request_id)) {
+      const message = findMessageByCorrelation(eventCorrelation(msg))
+      if (message) {
+        clearAckTimeout(message.__msg_id)
+        message.deliveryStatus = 'failed'
+        message.deliveryReason = msg.reason || ''
+        showSendFailure(userMessageFailureKey(msg.reason || ''))
+        return
+      }
+    }
     if (['approval_response', 'question_response', 'question_reject', 'mcp_elicitation_response'].includes(msg.operation) && msg.request_id) {
       clearInteractionSubmitting(msg.request_id)
       const type = msg.operation === 'approval_response' ? 'approval_request' : msg.operation === 'mcp_elicitation_response' ? 'mcp_elicitation_request' : 'question_request'
@@ -3378,6 +3526,17 @@ onMounted(() => {
     const s = allSessions.value.find((x: any) => x.session_id === msg.session_id)
     if (s) s.title = msg.title
   }))
+
+  // Register every consumer before connecting and requesting replay. A fast
+  // replay must never race ahead of its handlers, and auxiliary requests below
+  // cannot prevent already-sent history from being consumed.
+  connect()
+  send({ type: 'list_sessions' })
+  send({ type: 'list_daemons' })
+  // Gate the timer watch for the initial load too: status defaults to 'running'
+  // until replay/session metadata supplies the authoritative state.
+  sessionSwitching = true
+  loadHistory()
 })
 
 // SessionActions handlers (optimistic local updates)
@@ -3388,6 +3547,7 @@ function onPinned(sessionId: string, pinned: boolean) {
 }
 
 onUnmounted(() => {
+  clearHistorySlowTimer()
   composerResizeObserver?.disconnect()
   composerResizeObserver = null
   for (const fn of cleanups) fn()
@@ -3577,6 +3737,14 @@ onMounted(() => {
 }
 
 /* Empty state */
+.session-history-loading { min-height: 180px; display: flex; flex: 1; flex-direction: column; align-items: center; justify-content: center; gap: 10px; padding: 40px 20px; color: var(--fg-secondary); text-align: center; }
+.session-history-spinner { width: 28px; height: 28px; border: 2px solid var(--border-light); border-top-color: var(--accent); border-radius: 50%; animation: session-history-spin .8s linear infinite; }
+.session-history-loading-title { font-size: 14px; font-weight: 600; }
+.session-history-loading-slow { max-width: 360px; color: var(--fg-tertiary); font-size: 12px; line-height: 1.5; }
+.session-history-retry { min-height: 36px; margin-top: 2px; padding: 7px 16px; border: 1px solid var(--border-light); border-radius: var(--radius-md); color: var(--accent); background: var(--surface); font: 600 13px/1 var(--font-body); cursor: pointer; }
+.session-history-retry:hover { border-color: var(--accent); background: var(--accent-muted); }
+.session-history-retry:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+@keyframes session-history-spin { to { transform: rotate(360deg); } }
 .chat-empty-state { display: flex; flex-direction: column; align-items: center; justify-content: center; flex: 1; gap: 12px; padding: 40px 20px; text-align: center; }
 .chat-empty-state .empty-icon { color: var(--fg-tertiary); opacity: 0.4; }
 .chat-empty-state .empty-title { font-size: 16px; font-weight: 600; color: var(--fg-secondary); }
@@ -3782,7 +3950,7 @@ onMounted(() => {
   .session-toolbar-identity { min-width: 0; }
 }
 @media (max-width: 768px) {
-  .session-layout { height: calc(var(--visual-viewport-height, 100dvh) - var(--mobile-topbar-h)); }
+  .session-layout { height: calc(var(--visual-viewport-bottom, 100dvh) - var(--mobile-topbar-h)); }
   .chat-area { --composer-float-clearance: 112px; --session-content-gutter: 14px; }
   .session-panel,
   .chat-toolbar { display: none; }
@@ -3973,6 +4141,7 @@ onMounted(() => {
   }
 }
 @media (prefers-reduced-motion: reduce) {
+  .session-history-spinner { animation-duration: 1.8s; }
   .request-deep-link-target { animation: none; outline: 2px solid var(--warning); }
 }
 </style>

@@ -25,13 +25,13 @@ func (sm *SessionManager) CreateSession(ctx context.Context, config protocol.Ses
 	if config.Agent == "" {
 		config.Agent = adapter.AgentClaude
 	}
-	// Observer agents (zcode) expose read-only historical content only — there is
-	// no process to spawn, no PTY, no CLI to resume. Reject before any side
-	// effect (CLI resolution, cwd/worktree creation, PTY spawn) so the request
-	// can never accidentally drive a ZCode session. This is the single fail-closed
-	// gate; the adapter's typed factory helpers surface the same error too.
-	if adapter.BackendKindFor(config.Agent) == adapter.BackendObserver {
-		return "", adapter.ErrObserverReadOnly
+	// Observer agents expose read-only historical content only. Reject before
+	// permission validation, CLI/cwd resolution, worktree creation, or spawning.
+	if err := rejectObserverAgent(config.Agent, ""); err != nil {
+		return "", err
+	}
+	if !adapter.IsCreateCapableAgent(config.Agent) {
+		return "", fmt.Errorf("%w: %s", adapter.ErrUnsupportedAgent, config.Agent)
 	}
 	if config.Permission == nil && (config.Agent == adapter.AgentClaude || config.Agent == adapter.AgentCodex) {
 		cfg := adapter.DefaultPermissionConfig(config.Agent)
@@ -698,29 +698,45 @@ func (sm *SessionManager) handlePTYExit(ps *ProcessState) {
 // If the session has already resolved to a real ID (not pending-*), returns false
 // without killing (the session is already established and should not be aborted).
 func (sm *SessionManager) AbortSession(sessionID string) bool {
+	aborted, _ := sm.AbortSessionWithError(sessionID)
+	return aborted
+}
+
+// AbortSessionWithError preserves the legacy boolean result while surfacing a
+// typed observer rejection to daemon protocol handlers.
+func (sm *SessionManager) AbortSessionWithError(sessionID string) (bool, error) {
+	_, release, err := sm.acquireObserverDrive(context.Background(), sessionID)
+	if err != nil {
+		return false, err
+	}
+	defer release()
 	sm.mu.Lock()
 	ps, ok := sm.sessions[sessionID]
 	if !ok {
 		sm.mu.Unlock()
-		return false
+		return false, nil
 	}
 	// Don't abort sessions that have resolved to a real ID (not pending-*)
 	if !strings.HasPrefix(sessionID, "pending-") {
 		sm.mu.Unlock()
-		return false
+		return false, nil
 	}
 	delete(sm.sessions, sessionID)
 	if ps.Cancel != nil {
 		ps.Cancel()
 	}
 	if ps.Cmd != nil && ps.Cmd.Process != nil {
-		ps.Cmd.Process.Kill()
+		if sm.proc != nil {
+			_ = sm.proc.Kill(ps.Cmd.Process.Pid)
+		} else {
+			_ = ps.Cmd.Process.Kill()
+		}
 	}
 	if ps.Cmd != nil && ps.Cmd.Process != nil {
 		delete(sm.childPids, ps.Cmd.Process.Pid)
 	}
 	sm.mu.Unlock()
-	return true
+	return true, nil
 }
 
 // tryResumeHistorical re-registers a session that exists on disk (JSONL
@@ -732,8 +748,11 @@ func (sm *SessionManager) AbortSession(sessionID string) bool {
 func (sm *SessionManager) tryResumeHistorical(sessionID string) bool {
 	type historicalSession struct {
 		agent      string
+		source     string
+		control    string
 		cwd        string
 		permission *protocol.PermissionConfig
+		activityAt time.Time
 	}
 
 	var historical *historicalSession
@@ -743,8 +762,19 @@ func (sm *SessionManager) tryResumeHistorical(sessionID string) bool {
 			continue
 		}
 		cwd := ""
+		resolvedAgent := agentType
+		source := "terminal"
+		control := ""
 		if agentType == adapter.AgentCodex {
-			_, cwd, _ = adapter.CodexRolloutMeta(jsonlPath)
+			if meta, metaOK := adapter.ReadCodexRolloutMetadata(jsonlPath); metaOK {
+				cwd = meta.Cwd
+				classification := adapter.ClassifyCodexOrigin(meta)
+				if classification.Classified && adapter.IsObserverAgent(classification.AgentType) {
+					resolvedAgent = classification.AgentType
+					source = "observer"
+					control = protocol.ControlLegacyReadOnly
+				}
+			}
 		} else {
 			cwd = extractCwdFromJSONL(jsonlPath)
 			if cwd == "" {
@@ -753,10 +783,19 @@ func (sm *SessionManager) tryResumeHistorical(sessionID string) bool {
 				cwd = cwdFromProjectsDir(jsonlPath)
 			}
 		}
-		historical = &historicalSession{agent: agentType, cwd: cwd}
+		activityAt := time.Now()
+		if info, statErr := os.Stat(jsonlPath); statErr == nil {
+			activityAt = info.ModTime()
+			if now := time.Now(); activityAt.After(now) {
+				activityAt = now
+			}
+		}
+		historical = &historicalSession{
+			agent: resolvedAgent, source: source, control: control, cwd: cwd, activityAt: activityAt,
+		}
 		if agentType == adapter.AgentClaude {
 			historical.permission = extractClaudePermissionFromJSONL(jsonlPath)
-		} else {
+		} else if !adapter.IsObserverAgent(resolvedAgent) {
 			cfg := adapter.DefaultPermissionConfig(agentType)
 			historical.permission = &cfg
 		}
@@ -775,9 +814,10 @@ func (sm *SessionManager) tryResumeHistorical(sessionID string) bool {
 	sm.sessions[sessionID] = &ProcessState{
 		SessionID:      sessionID,
 		Status:         protocol.StatusExited,
-		Source:         "terminal",
+		Source:         historical.source,
+		ControlMode:    historical.control,
 		StartedAt:      now,
-		LastActivityAt: now,
+		LastActivityAt: historical.activityAt,
 		Cwd:            historical.cwd,
 		Agent:          historical.agent,
 		Permission:     clonePermission(historical.permission),
@@ -844,6 +884,11 @@ func isProcessAlive(pid int) bool {
 }
 
 func (sm *SessionManager) KillSession(sessionID string) error {
+	_, release, err := sm.acquireObserverDrive(context.Background(), sessionID)
+	if err != nil {
+		return err
+	}
+	defer release()
 	sm.mu.Lock()
 	ps, ok := sm.sessions[sessionID]
 	cwd := ""

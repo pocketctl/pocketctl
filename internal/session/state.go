@@ -92,17 +92,18 @@ func (sm *SessionManager) SetSessionExited(sessionID string, exitReason string) 
 		ExitReason:     exitReason,
 		LastActivityAt: now.UTC().Format(time.RFC3339),
 	}
+	if sm.OnStateChanged != nil {
+		sm.OnStateChanged()
+	}
 }
 
-// DropGhostSession removes a terminal session that was registered from a
-// ~/.claude/sessions/<pid>.json metadata file but whose JSONL never materialised
-// (so the tailer could never start). Claude Code writes such transient metadata
-// on `--continue` (a short-lived session id whose conversation actually lands in
-// the original/resumed <id>.jsonl), and pocketctl would otherwise leave a dangling
-// tailer-less entry in sm.sessions — the daemon-side seed of the "phantom session
-// with only status + time" symptom. Only drops if no tailer was ever attached and
-// the session is terminal-sourced (never daemon-spawned). Returns true if dropped.
-func (sm *SessionManager) DropGhostSession(sessionID string) bool {
+// DetachUnresolvedTerminalSession removes the provisional SessionManager entry
+// for a terminal session whose JSONL did not appear during the eager lookup
+// window. This does not classify the session as a ghost: its resolver remains
+// active and may re-register it if the JSONL appears later. Detaching prevents
+// process/status signals from creating a phantom relay session before a tailer
+// exists. Returns true if the unresolved terminal entry was detached.
+func (sm *SessionManager) DetachUnresolvedTerminalSession(sessionID string) bool {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
 	ps, ok := sm.sessions[sessionID]
@@ -162,13 +163,34 @@ func (sm *SessionManager) SetSessionStatus(sessionID, status string) {
 // ObserveTerminalSessionStatus records a lifecycle event that is already being
 // forwarded to the relay. It intentionally does not publish another event.
 func (sm *SessionManager) ObserveTerminalSessionStatus(sessionID, status string) bool {
+	return sm.observeJSONLSessionStatus(sessionID, status, false)
+}
+
+// ObserveJSONLSessionStatus records lifecycle emitted by a read-only JSONL
+// tailer. Observer sessions share persisted lifecycle with terminal sessions,
+// but this method changes only status/activity/turn timestamps and never grants
+// a backend, PID, TTY, or managed control mode.
+func (sm *SessionManager) ObserveJSONLSessionStatus(sessionID, status string) bool {
+	return sm.observeJSONLSessionStatus(sessionID, status, true)
+}
+
+func (sm *SessionManager) observeJSONLSessionStatus(sessionID, status string, allowObserver bool) bool {
 	if sessionID == "" || status == "" {
 		return false
 	}
 
 	sm.mu.Lock()
 	ps, ok := sm.sessions[sessionID]
-	if !ok || ps.Source != "terminal" {
+	if !ok || (ps.Source != "terminal" && (!allowObserver || ps.Source != "observer")) {
+		sm.mu.Unlock()
+		return false
+	}
+	terminalEnded := ps.Source == "terminal" && (ps.Status == protocol.StatusExited ||
+		ps.Status == protocol.StatusCompleted || ps.Status == protocol.StatusError ||
+		ps.Status == protocol.StatusKilled)
+	if terminalEnded {
+		// JSONL can lag behind process removal. Keep lifecycle terminal until the
+		// process watcher verifies and binds a newly started continuation process.
 		sm.mu.Unlock()
 		return false
 	}
@@ -236,13 +258,12 @@ func (sm *SessionManager) ListSessions() []SessionInfo {
 			StartedAt:      ps.StartedAt,
 			LastActivityAt: ps.LastActivityAt,
 			Agent:          ps.Agent,
+			Source:         ps.Source,
 			Cwd:            ps.Cwd,
 			Model:          ps.Model,
 			ControlMode:    ps.ControlMode,
 		}
-		if ps.Agent == adapter.AgentOpencode || ps.Agent == adapter.AgentClaude || ps.Agent == adapter.AgentCodex {
-			info.Capabilities = sm.sessionCapabilitiesLocked(ps)
-		}
+		info.Capabilities = sm.sessionCapabilitiesLocked(ps)
 		if ps.Status == protocol.StatusExited || ps.Status == protocol.StatusCompleted ||
 			ps.Status == protocol.StatusError || ps.Status == protocol.StatusKilled {
 			exited = append(exited, info)
@@ -290,6 +311,37 @@ func (sm *SessionManager) UpdateLastActivity(sessionID string) {
 	if ps, ok := sm.sessions[sessionID]; ok {
 		ps.LastActivityAt = time.Now()
 	}
+}
+
+// RestoreSessionActivity replaces the registration-time placeholder with a
+// source-backed timestamp while a JSONL history is being attached. It may move
+// activity backwards, which is intentional for sessions discovered on restart.
+func (sm *SessionManager) RestoreSessionActivity(sessionID string, observedAt time.Time) (time.Time, bool) {
+	if observedAt.IsZero() {
+		return time.Time{}, false
+	}
+	if now := time.Now(); observedAt.After(now) {
+		observedAt = now
+	}
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+	ps, ok := sm.sessions[sessionID]
+	if !ok {
+		return time.Time{}, false
+	}
+	ps.LastActivityAt = observedAt
+	return observedAt, true
+}
+
+// SessionActivityAt returns the current source-backed or live activity time.
+func (sm *SessionManager) SessionActivityAt(sessionID string) (time.Time, bool) {
+	sm.mu.RLock()
+	defer sm.mu.RUnlock()
+	ps, ok := sm.sessions[sessionID]
+	if !ok {
+		return time.Time{}, false
+	}
+	return ps.LastActivityAt, true
 }
 
 func (sm *SessionManager) remapSessionID(oldID, newID string) (cwd, agent string, changed bool) {
@@ -408,6 +460,7 @@ type SessionInfo struct {
 	StartedAt      time.Time `json:"started_at"`
 	LastActivityAt time.Time `json:"last_activity_at"`
 	Agent          string    `json:"agent"`
+	Source         string    `json:"source,omitempty"`
 	Cwd            string    `json:"cwd"`
 	Model          string    `json:"model,omitempty"`
 	ControlMode    string    `json:"control_mode,omitempty"`

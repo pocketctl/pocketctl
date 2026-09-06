@@ -86,9 +86,10 @@ type SessionStorage interface {
 
 // Agent types known to the daemon.
 const (
-	AgentClaude   = "claude-code"
-	AgentCodex    = "codex"
-	AgentOpencode = "opencode"
+	AgentClaude       = "claude-code"
+	AgentCodex        = "codex"
+	AgentCodexDesktop = "codex-desktop"
+	AgentOpencode     = "opencode"
 )
 
 // ExtractFirstUserMessageFor 按 agentType 选首条 user 消息提取函数。

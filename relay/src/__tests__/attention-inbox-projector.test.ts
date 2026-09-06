@@ -260,4 +260,19 @@ describe('Attention Inbox event projector', () => {
     expect(projectAttentionEvent(row({ provider: 'opencode', controlMode: 'legacy_read_only' }))).toBeNull()
     expect(projectAttentionEvent(row({ userId: null }))).toBeNull()
   })
+
+  test.each(['approval_request', 'question_request'])(
+    'does not project Codex Desktop %s events into executable attention items',
+    (eventType) => {
+      expect(projectAttentionEvent(row({
+        provider: 'codex-desktop',
+        eventType,
+        controlMode: 'legacy_read_only',
+        capabilities: ['history_sync'],
+        payload: eventType === 'approval_request'
+          ? { request_id: 'desktop-approval', available_decisions: ['accept', 'decline'] }
+          : { request_id: 'desktop-question', questions: [{ id: 'q', question: 'Proceed?' }] },
+      }))).toBeNull()
+    },
+  )
 })

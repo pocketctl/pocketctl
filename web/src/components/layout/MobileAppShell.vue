@@ -11,6 +11,10 @@
       :plan-label="planLabel"
       :plan-open="planOpen"
       :plan-complete="planComplete"
+      :session-host="sessionHost"
+      :session-host-id="sessionHostId"
+      :session-status="sessionStatus"
+      :session-status-label="sessionStatusLabel"
       @new-session="$emit('new-session')"
       @open-plan="openPlan"
     />
@@ -42,6 +46,10 @@ const props = defineProps<{
   showNewSession: boolean
   sessionCount: number
   plan?: AgentPlanSnapshot
+  sessionHost?: string
+  sessionHostId?: string
+  sessionStatus?: string
+  sessionStatusLabel?: string
 }>()
 
 defineEmits<{ (event: 'new-session'): void }>()

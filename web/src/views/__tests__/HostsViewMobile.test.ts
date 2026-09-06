@@ -125,6 +125,46 @@ describe('HostsView mobile iOS parity', () => {
     expect(wrapper.get('.mobile-agent-manager').text()).toContain('0.145.0')
   })
 
+  test('renders Codex Desktop as a non-upgradable read-only observer', async () => {
+    isMobile.value = false
+    const wrapper = mountView()
+    handlers.get('daemon_list')?.({
+      daemons: [{
+        ...online,
+        agents: [{ type: 'codex-desktop', version: '0.1.0', latest: '0.2.0', manageable: true }],
+      }],
+    })
+    await flushPromises()
+
+    expect(wrapper.get('.agent-card .ag-name').text()).toContain('Codex Desktop')
+    expect(wrapper.get('.agent-card .ag-icon.codex-desktop').text()).toBe('CD')
+    expect(wrapper.find('.agent-card .ag-upgrade-btn').exists()).toBe(false)
+    expect(wrapper.get('.agent-card .ag-readonly').text()).toBe('Read-only observer sync')
+  })
+
+  test('blocks direct desktop and mobile observer upgrade handlers before POST', async () => {
+    const desktopObserverHost = {
+      ...online,
+      agents: [{ type: 'codex-desktop', version: '0.1.0', latest: '9.9.9', manageable: true }],
+    }
+    const wrapper = mountView()
+    handlers.get('daemon_list')?.({ daemons: [desktopObserverHost] })
+    await flushPromises()
+
+    await wrapper.get('.mobile-host-card [data-action="agent"]').trigger('click')
+    expect(wrapper.find('.mobile-agent-manager .mobile-agent-card > button').exists()).toBe(false)
+
+    const fetchMock = vi.mocked(fetch)
+    fetchMock.mockClear()
+    const vm = wrapper.vm as any
+    await vm.upgradeAgent('codex-desktop', desktopObserverHost)
+    vm.upgradeMobileAgent('codex-desktop')
+    await vm.upgradeAgent('zcode', { ...desktopObserverHost, agents: [{ type: 'zcode', manageable: true }] })
+    vm.upgradeMobileAgent('zcode')
+
+    expect(fetchMock).not.toHaveBeenCalled()
+  })
+
   test('closes agent management before browser back leaves the host list', async () => {
     const wrapper = mountView()
     handlers.get('daemon_list')?.({ daemons: [online] })

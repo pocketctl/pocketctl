@@ -85,6 +85,26 @@ func TestReadCodexRolloutMetadata_ClassifiesSubagentsStrictly(t *testing.T) {
 	}
 }
 
+func TestReadCodexRolloutMetadata_PreservesOriginMetadata(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "rollout.jsonl")
+	const payload = `{"id":"desktop-subagent","session_id":"root","parent_thread_id":"root","thread_source":"subagent","originator":"Codex Desktop","source":{"subagent":"review"}}`
+	line := fmt.Sprintf(`{"type":"session_meta","payload":%s}`+"\n", payload)
+	if err := os.WriteFile(path, []byte(line), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	got, ok := ReadCodexRolloutMetadata(path)
+	if !ok {
+		t.Fatal("metadata not parsed")
+	}
+	if got.Originator != "Codex Desktop" {
+		t.Fatalf("Originator = %q, want %q", got.Originator, "Codex Desktop")
+	}
+	if got.NativeSource == nil || string(got.NativeSource) != `{"subagent":"review"}` {
+		t.Fatalf("NativeSource = %s, want object source preserved", got.NativeSource)
+	}
+}
+
 // helper: parse a codex line via the JSONL parser and return events.
 func codexParse(t *testing.T, line string) []protocol.DaemonEvent {
 	t.Helper()

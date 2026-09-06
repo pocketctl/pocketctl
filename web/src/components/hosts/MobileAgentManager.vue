@@ -44,6 +44,7 @@
 import { computed } from 'vue'
 import { useLocale } from '../../composables/useLocale'
 import { agentDisplayName, agentShortLabel } from '../../utils/agentDisplay'
+import { isReadOnlyObserverAgent } from '../../utils/observerSession'
 
 const props = defineProps<{
   daemon: any
@@ -61,14 +62,15 @@ const agents = computed(() => (Array.isArray(props.daemon.agents) ? props.daemon
   const raw = typeof agent === 'string' ? agent : agent.type || agent.name || 'agent'
   const version = typeof agent === 'object' ? agent.version || '' : ''
   const latest = typeof agent === 'object' ? agent.latest || '' : ''
+  const isObserver = isReadOnlyObserverAgent(raw)
   return {
     raw,
     label: agentDisplayName(raw),
     short: agentShortLabel(raw),
     version,
     latest,
-    canUpgrade: !!latest && latest !== version,
-    manageable: typeof agent !== 'object' || agent.manageable !== false,
+    canUpgrade: !isObserver && !!latest && latest !== version,
+    manageable: !isObserver && (typeof agent !== 'object' || agent.manageable !== false),
   }
 }))
 </script>

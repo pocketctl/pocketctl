@@ -38,12 +38,41 @@ describe('MobileSessionCard', () => {
     expect(wrapper.get('.mobile-card-title-row').text()).toContain('修复登录流程')
     expect(wrapper.find('.mobile-source-chip').exists()).toBe(false)
     expect(wrapper.find('.mobile-card-footer').exists()).toBe(false)
-    expect(wrapper.get('.mobile-card-context').text()).toContain('Codex')
+    expect(wrapper.get('.mobile-card-context').text()).toContain('Codex CLI')
     expect(wrapper.get('.mobile-card-context').text()).toContain('gpt-5.4')
     expect(wrapper.get('.mobile-card-context').text()).toContain('2 子智能体')
     expect(wrapper.get('.mobile-card-trailing').text()).toContain('3 分钟前')
     expect(wrapper.find('.mobile-navigation-chevron').exists()).toBe(false)
     expect(wrapper.find('.mobile-subagent-toggle').exists()).toBe(true)
+  })
+
+  test('distinguishes Codex Desktop from Codex CLI in mobile session context', () => {
+    const wrapper = mount(MobileSessionCard, {
+      props: {
+        session: { ...session, agent: 'codex-desktop' },
+        effectiveStatus: 'completed',
+        relativeTime: '刚刚',
+        expanded: false,
+      },
+    })
+
+    expect(wrapper.get('.mobile-card-context').text()).toContain('Codex Desktop')
+    expect(wrapper.get('.mobile-card-context').text()).not.toContain('Codex CLI')
+  })
+
+  test('keeps observer pin/delete access without offering mobile resume', () => {
+    const wrapper = mount(MobileSessionCard, {
+      props: {
+        session: { ...session, agent: 'codex-desktop', status: 'exited' },
+        effectiveStatus: 'exited',
+        relativeTime: '1 小时前',
+        expanded: false,
+      },
+    })
+
+    expect(wrapper.find('.mobile-action-pin').exists()).toBe(true)
+    expect(wrapper.find('.mobile-action-delete').exists()).toBe(true)
+    expect(wrapper.find('.mobile-resume').exists()).toBe(false)
   })
 
   test('uses a neutral navigation affordance when inline children are unavailable', () => {

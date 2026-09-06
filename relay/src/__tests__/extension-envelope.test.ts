@@ -94,6 +94,35 @@ describe('extension feed envelope v1', () => {
     expect(envelope.classification.actor_scope).toBeUndefined()
   })
 
+  test('preserves the authoritative session_discovered wire agent alongside legacy fields', () => {
+    const envelope = buildFeedEnvelope(sourceRow({
+      session_id: 'desktop-observer',
+      event_type: 'session_discovered',
+      payload: {
+        type: 'session_discovered',
+        session_id: 'desktop-observer',
+        agent: 'codex-desktop',
+        agent_type: 'codex',
+        source: 'observer',
+        control_mode: 'legacy_read_only',
+        capabilities: ['history_sync'],
+      },
+    }), 6)
+
+    expect(envelope.topic).toBe('session.lifecycle.v1')
+    expect(envelope.subject).toEqual({
+      session_id: 'desktop-observer',
+      event_type: 'session_discovered',
+    })
+    expect(envelope.data).toMatchObject({
+      agent: 'codex-desktop',
+      agent_type: 'codex',
+      source: 'observer',
+      control_mode: 'legacy_read_only',
+      capabilities: ['history_sync'],
+    })
+  })
+
   test('tombstone envelopes keep the tombstone topic and payload', () => {
     const envelope = buildFeedEnvelope(sourceRow({
       source_kind: SESSION_DELETED_SOURCE_KIND,

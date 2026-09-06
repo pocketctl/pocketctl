@@ -116,7 +116,14 @@ export type AttentionInteractionCommand =
 
 export type AttentionInteractionRouteResult =
   | { accepted: true }
-  | { accepted: false; code: 'session_not_found' | 'daemon_unreachable' }
+  | {
+      accepted: false
+      code:
+        | 'session_not_found'
+        | 'daemon_unreachable'
+        | 'observer_read_only'
+        | 'interaction_unsupported'
+    }
 
 export interface AttentionItemRecord {
   itemId: string

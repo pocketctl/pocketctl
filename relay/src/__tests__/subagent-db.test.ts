@@ -1,6 +1,6 @@
 import { describe, test, expect, vi } from 'vitest'
 import { createHash } from 'crypto'
-import { upsertSubagent, addSubagentUsage, listSubagentsByParent, listSessionsWithChildren, reconcileSubagent, recordSubagentUsage } from '../db.js'
+import { upsertSubagent, upsertSubagentStatus, addSubagentUsage, listSubagentsByParent, listSessionsWithChildren, reconcileSubagent, recordSubagentUsage } from '../db.js'
 
 describe('db subagent layer', () => {
   test('recordSubagentUsage preserves the exact legacy Claude fingerprint', async () => {
@@ -130,6 +130,21 @@ describe('db subagent layer', () => {
     expect(calls[0].params).toEqual(['parent-1', 'agent-abc', 'claude_subagent', 'call_xyz', 'Explore', 'find foo'])
   })
 
+  test('upsertSubagentStatus creates an out-of-order lifecycle row and updates an existing one', async () => {
+    const calls: any[] = []
+    const pool: any = { query: vi.fn((sql: string, params: any[]) => {
+      calls.push({ sql, params })
+      return Promise.resolve({ rows: [] })
+    }) }
+
+    await upsertSubagentStatus(pool, 'parent-1', 'agent-abc', 'completed')
+
+    expect(calls).toHaveLength(1)
+    expect(calls[0].sql).toMatch(/INSERT INTO subagents.*status/is)
+    expect(calls[0].sql).toMatch(/ON CONFLICT.*status = EXCLUDED\.status/is)
+    expect(calls[0].params).toEqual(['parent-1', 'agent-abc', 'completed'])
+  })
+
   test('addSubagentUsage accumulates token columns (INSERT ON CONFLICT)', async () => {
     const calls: any[] = []
     const pool: any = { query: vi.fn((sql: string, params: any[]) => { calls.push({ sql, params }); return Promise.resolve({ rows: [] }) }) }
@@ -171,6 +186,8 @@ describe('db listSessions children aggregation', () => {
     const out = await listSessionsWithChildren(pool)
     expect(out).toHaveLength(2)
     expect(calls[0].sql).toMatch(/COALESCE\(s\.is_subagent, false\) = false/i)
+    expect(calls[0].sql).toContain('COALESCE(s.last_activity_at, s.created_at)')
+    expect(calls[0].sql).not.toContain('COALESCE(s.last_activity_at, s.updated_at)')
     expect(out[0].children).toHaveLength(1)
     expect(out[0].children[0]).toMatchObject({ agentId: 'agent-a', agentType: 'Explore' })
     expect(out[1].children).toEqual([])

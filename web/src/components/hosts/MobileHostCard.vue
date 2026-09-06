@@ -89,6 +89,7 @@
 import { computed, nextTick, ref } from 'vue'
 import { useLocale } from '../../composables/useLocale'
 import { agentDisplayName } from '../../utils/agentDisplay'
+import { isReadOnlyObserverAgent } from '../../utils/observerSession'
 
 const props = defineProps<{
   daemon: any
@@ -119,7 +120,7 @@ const agents = computed(() => (Array.isArray(props.daemon.agents) ? props.daemon
     raw,
     label: agentDisplayName(raw),
     version: typeof agent === 'object' ? agent.version || '' : '',
-    canUpgrade: typeof agent === 'object' && !!agent.latest && agent.latest !== agent.version,
+    canUpgrade: !isReadOnlyObserverAgent(raw) && typeof agent === 'object' && !!agent.latest && agent.latest !== agent.version,
   }
 }))
 const upgradableCount = computed(() => agents.value.filter((agent: { canUpgrade: boolean }) => agent.canUpgrade).length)

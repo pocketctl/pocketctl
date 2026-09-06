@@ -2,6 +2,7 @@
 import { computed, onBeforeUnmount, ref, watch } from 'vue'
 import { useLocale } from '../composables/useLocale'
 import { memorySkills } from '../services/memorySkills'
+import { createClientId } from '../utils/clientId'
 import type { MemorySkillCandidate, MemorySkillDetail, MemorySkillDiff, MemorySkillDocument,
   MemorySkillModes, MemorySkillPolicy, MemorySkillPolicyState, MemorySkillReplayCase, MemorySkillReviewOutcome, MemorySkillSummary } from '../types/memorySkills'
 import MemorySkillDocumentView from '../components/memory/MemorySkillDocument.vue'
@@ -156,7 +157,7 @@ function replay() {
   const value = detail.value
   if (editing.value || !value?.permissions.can_replay || !selectedCases.value.length) return
   const input = { version_id: value.version_id, expected_revision: value.revision,
-    case_ids: selectedCases.value.filter(id => cases.value.some(c => c.case_id === id)), idempotency_key: crypto.randomUUID() }
+    case_ids: selectedCases.value.filter(id => cases.value.some(c => c.case_id === id)), idempotency_key: createClientId() }
   void mutate((scope, signal) => memorySkills.replay(scope, value.skill_id, input, signal), value.skill_id)
 }
 function requestConfirmation(action: 'publish' | 'rollback' | 'revoke') {

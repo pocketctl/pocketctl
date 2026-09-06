@@ -41,6 +41,45 @@ func HasUnmanagedOpenCodeProcessInCWD(processes []platform.ProcessSnapshot, cwd,
 	return false
 }
 
+// NativeCodexTerminalPID returns the only native Codex process in cwd. Node
+// launchers, app-server processes, and managed --remote clients are excluded.
+// Multiple matches are left unbound because a rollout cannot safely identify
+// which terminal process owns it from cwd alone.
+func NativeCodexTerminalPID(processes []platform.ProcessSnapshot, cwd string) int {
+	want := canonicalProcessCWD(cwd)
+	if want == "" {
+		return 0
+	}
+	matched := 0
+	for _, process := range processes {
+		name := strings.TrimSuffix(strings.ToLower(filepath.Base(process.Executable)), ".exe")
+		if name != "codex" || canonicalProcessCWD(process.CWD) != want || !isNativeCodexTerminalInvocation(process.Args) {
+			continue
+		}
+		if matched != 0 && matched != process.PID {
+			return 0
+		}
+		matched = process.PID
+	}
+	return matched
+}
+
+func isNativeCodexTerminalInvocation(args []string) bool {
+	for _, arg := range args {
+		if arg == "--remote" || strings.HasPrefix(arg, "--remote=") {
+			return false
+		}
+	}
+	commandIndex := 0
+	if len(args) > 0 && strings.TrimSuffix(strings.ToLower(filepath.Base(args[0])), ".exe") == "codex" {
+		commandIndex = 1
+	}
+	if commandIndex < len(args) && args[commandIndex] == "app-server" {
+		return false
+	}
+	return true
+}
+
 func openCodeArgIndex(process platform.ProcessSnapshot) int {
 	for i, arg := range process.Args {
 		name := strings.TrimSuffix(strings.ToLower(filepath.Base(arg)), ".exe")

@@ -338,7 +338,7 @@ export class AttentionInboxRepository {
     userId: number
     itemId: string
     idempotencyKey: string
-    errorCode: 'daemon_unreachable' | 'submission_failed' | 'answers_invalid'
+    errorCode: 'daemon_unreachable' | 'submission_failed' | 'answers_invalid' | 'observer_read_only'
   }): Promise<void> {
     if (!this.pool) throw new Error('AttentionInboxRepository pool is required for actions')
     const client = await this.pool.connect()

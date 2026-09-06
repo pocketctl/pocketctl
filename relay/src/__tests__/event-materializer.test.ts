@@ -1,4 +1,4 @@
-import { describe, expect, test, vi } from 'vitest'
+import { afterEach, describe, expect, test, vi } from 'vitest'
 import { EventMaterializer } from '../materialization/event-materializer.js'
 import type { MaterializationInput } from '../materialization/types.js'
 import { normalizeSessionId } from '../ingress/event-policy.js'
@@ -38,6 +38,15 @@ function pools() {
 }
 
 describe('EventMaterializer', () => {
+  test('a mismatched real reservation cannot fall through to a continue admission', async () => {
+    const pool = {query:vi.fn(async (sql:string) => {
+      if (sql.includes('FROM quota_reservations reservation')) return {rows:[{id:'real-reservation',resource:'concurrent_session',operation:'resume',daemon_id:'wrong-daemon',session_id:'ses-1',state:'pending'}]}
+      return {rows:[]}
+    })}
+    await expect(new EventMaterializer({pool:pool as never}).materialize(inputFor({type:'session_status',session_id:'ses-1',request_id:'request-1',status:'running'}))).rejects.toMatchObject({code:'quota_reservation_binding_mismatch'})
+    expect(pool.query.mock.calls.some(([sql]) => sql.includes('FROM session_message_admissions'))).toBe(false)
+  })
+
   test('passes server receipt time to the immutable fact writer only when explicitly enabled', async () => {
     const increment = vi.spyOn(db, 'incrementSessionTokensForEvent').mockResolvedValue(undefined)
     const receivedAt = new Date('2026-08-09T12:34:56.000Z')
@@ -709,9 +718,40 @@ describe('EventMaterializer', () => {
     bindSession.mockRestore()
     reconcile.mockRestore()
   })
+
+  test.each([
+    'running', 'interrupt_requested', 'completed', 'interrupted', 'failed', 'abandoned',
+  ])('persists tagged subagent turn lifecycle status %s', async (turnStatus) => {
+    const persistStatus = vi.spyOn(db, 'upsertSubagentStatus').mockResolvedValue(undefined)
+    const pool = pools()
+    const payload = {
+      type: 'turn_status', session_id: 'thr_parent', agent_id: 'thr_child',
+      turn_id: 'turn-child', turn_status: turnStatus,
+    }
+
+    const result = await new EventMaterializer({ pool: pool as never }).materialize(inputFor(payload))
+
+    expect(persistStatus).toHaveBeenCalledWith(pool, 'thr_parent', 'thr_child', turnStatus)
+    expect(result.deliveries[0]?.payload).toEqual(payload)
+    persistStatus.mockRestore()
+  })
+
+  test('does not mutate subagent lifecycle for a root turn status', async () => {
+    const persistStatus = vi.spyOn(db, 'upsertSubagentStatus').mockResolvedValue(undefined)
+
+    await new EventMaterializer({ pool: pools() as never }).materialize(inputFor({
+      type: 'turn_status', session_id: 'thr_parent', agent_id: '',
+      turn_id: 'turn-root', turn_status: 'completed',
+    }))
+
+    expect(persistStatus).not.toHaveBeenCalled()
+    persistStatus.mockRestore()
+  })
 })
 
-describe('zcode observer session source', () => {
+describe('observer session projection', () => {
+  afterEach(() => vi.restoreAllMocks())
+
   function materializerFor() {
     const pool = pools()
     const upsert = vi.spyOn(db, 'upsertSession').mockResolvedValue(undefined)
@@ -719,18 +759,34 @@ describe('zcode observer session source', () => {
     return { pool, upsert, materializer }
   }
 
-  test('zcode observer session_discovered is recorded with source=observer', async () => {
+  test('zcode observer session_discovered is recorded with server-derived read-only policy', async () => {
     const { upsert, materializer } = materializerFor()
     await materializer.materialize(inputFor({
       type: 'session_discovered', session_id: 'zcode-wire1',
-      agent: 'zcode', source: 'observer', control_mode: 'legacy_read_only',
-      capabilities: ['history_sync'], status: 'completed', title: 't', model: 'm',
+      agent: 'zcode', source: 'terminal', control_mode: 'managed',
+      capabilities: ['shared_runtime', 'message_acceptance_receipt'],
+      status: 'completed', title: 't', model: 'm',
     }))
-    // 8th positional arg (index 7) is source.
-    const args = upsert.mock.calls[0]
+    const args = upsert.mock.calls.at(-1)!
     expect(args[7]).toBe('observer')
     expect(args[3]).toBe('zcode') // agentType
-    upsert.mockRestore()
+    expect(args[11]).toBe('legacy_read_only')
+    expect(args[12]).toEqual(['history_sync'])
+  })
+
+  test('codex-desktop cannot forge terminal managed write capabilities during discovery', async () => {
+    const { upsert, materializer } = materializerFor()
+    await materializer.materialize(inputFor({
+      type: 'session_discovered', session_id: 'desktop-wire1',
+      agent: 'codex-desktop', source: 'terminal', control_mode: 'managed',
+      capabilities: ['shared_runtime', 'message_acceptance_receipt'],
+    }))
+
+    const args = upsert.mock.calls.at(-1)!
+    expect(args[3]).toBe('codex-desktop')
+    expect(args[7]).toBe('observer')
+    expect(args[11]).toBe('legacy_read_only')
+    expect(args[12]).toEqual(['history_sync'])
   })
 
   test('non-zcode agent forging source=observer is recorded as terminal', async () => {
@@ -739,18 +795,18 @@ describe('zcode observer session source', () => {
       type: 'session_discovered', session_id: 'ses1',
       agent: 'claude-code', source: 'observer', // forged
     }))
-    expect(upsert.mock.calls[0][7]).toBe('terminal')
-    upsert.mockRestore()
+    expect(upsert.mock.calls.at(-1)![7]).toBe('terminal')
   })
 
-  test('zcode without source=observer falls back to terminal', async () => {
+  test('zcode remains observer when the daemon omits its source claim', async () => {
     const { upsert, materializer } = materializerFor()
     await materializer.materialize(inputFor({
       type: 'session_discovered', session_id: 'ses2',
       agent: 'zcode', // missing source=observer
     }))
-    expect(upsert.mock.calls[0][7]).toBe('terminal')
-    upsert.mockRestore()
+    expect(upsert.mock.calls.at(-1)![7]).toBe('observer')
+    expect(upsert.mock.calls.at(-1)![11]).toBe('legacy_read_only')
+    expect(upsert.mock.calls.at(-1)![12]).toEqual(['history_sync'])
   })
 
   test('legacy daemon without source field is terminal', async () => {
@@ -759,21 +815,20 @@ describe('zcode observer session source', () => {
       type: 'session_discovered', session_id: 'ses3',
       agent: 'claude-code', // no source field
     }))
-    expect(upsert.mock.calls[0][7]).toBe('terminal')
-    upsert.mockRestore()
+    expect(upsert.mock.calls.at(-1)![7]).toBe('terminal')
   })
 
-  test('control_mode and capabilities persist for zcode observer', async () => {
+  test('non-observer control metadata is preserved without granting observer identity', async () => {
     const { upsert, materializer } = materializerFor()
     await materializer.materialize(inputFor({
-      type: 'session_discovered', session_id: 'zcode-wire2',
-      agent: 'zcode', source: 'observer',
-      control_mode: 'legacy_read_only', capabilities: ['history_sync'],
+      type: 'session_discovered', session_id: 'managed-wire2',
+      agent: 'opencode', source: 'observer',
+      control_mode: 'managed', capabilities: ['shared_runtime', 'questions'],
     }))
-    const args = upsert.mock.calls[0]
-    expect(args[11]).toBe('legacy_read_only') // controlMode (index 11)
-    expect(args[12]).toEqual(['history_sync']) // capabilities (index 12)
-    upsert.mockRestore()
+    const args = upsert.mock.calls.at(-1)!
+    expect(args[7]).toBe('terminal')
+    expect(args[11]).toBe('managed')
+    expect(args[12]).toEqual(['shared_runtime', 'questions'])
   })
 })
 

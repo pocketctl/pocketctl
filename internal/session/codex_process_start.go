@@ -1,5 +1,11 @@
 package session
 
+import "github.com/pocketctl/pocketctl/internal/adapter"
+
+func codexAppServerEnv(env []string) []string {
+	return sanitizePTYEnv(env, adapter.AgentCodex)
+}
+
 func codexInitializeParams() map[string]any {
 	// Standard MCP form and URL elicitations need no opt-in. Do not advertise
 	// mcpServerOpenaiFormElicitation: that capability enables a provider-specific

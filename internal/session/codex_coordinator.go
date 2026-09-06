@@ -516,7 +516,7 @@ func (c *codexCoordinator) publishProjected(events []protocol.DaemonEvent) {
 		// Codex app-server lifecycle notifications have no timestamp field. Stamp
 		// the daemon's receipt time before fan-out so clients can present the
 		// actual response end time instead of their local WebSocket arrival time.
-		if event.Type == "session_status" && event.LastActivityAt == "" {
+		if event.Type == "session_status" && event.LastActivityAt == "" && !event.Resync && event.Status != protocol.StatusDisconnected {
 			event.LastActivityAt = time.Now().UTC().Format(time.RFC3339Nano)
 		}
 		if event.Type == protocol.EventTypeTurnStatus {
@@ -740,6 +740,9 @@ func (c *codexCoordinator) maybeSubscribeTerminalThread(parent context.Context, 
 	if json.Unmarshal(message.Params, &params) != nil || params.ThreadID == "" {
 		return
 	}
+	if c.rejectCodexDesktopManagedThread(params.ThreadID) {
+		return
+	}
 	c.sm.mu.RLock()
 	ps := c.sm.sessions[params.ThreadID]
 	alreadyOwned := ps != nil && ps.Source == "daemon" && ps.Backend != nil
@@ -801,10 +804,56 @@ func (c *codexCoordinator) restoreManagedThreads(threadIDs []string) {
 	c.subscribing = make(map[string]struct{})
 	c.managedThreads = make(map[string]struct{}, len(threadIDs))
 	for _, threadID := range threadIDs {
-		if threadID != "" {
+		if threadID != "" && !c.isCodexDesktopOrigin(threadID) {
 			c.managedThreads[threadID] = struct{}{}
 		}
 	}
+}
+
+// isCodexDesktopOrigin treats the rollout's immutable creation metadata as
+// authoritative. App-server visibility or a successful thread/resume does not
+// transfer ownership of a thread created by Codex Desktop to PocketCtl.
+func (c *codexCoordinator) isCodexDesktopOrigin(threadID string) bool {
+	if threadID == "" {
+		return false
+	}
+	if c.sm != nil {
+		c.sm.mu.RLock()
+		state := c.sm.sessions[threadID]
+		observer := state != nil && state.Agent == adapter.AgentCodexDesktop && state.Source == "observer"
+		c.sm.mu.RUnlock()
+		if observer {
+			return true
+		}
+	}
+	path, err := adapter.ResolveJSONLPathFor(adapter.AgentCodex, threadID, "")
+	if err != nil {
+		return false
+	}
+	meta, ok := adapter.ReadCodexRolloutMetadata(path)
+	if !ok || meta.ID != threadID || meta.IsSubagent {
+		return false
+	}
+	classification := adapter.ClassifyCodexOrigin(meta)
+	return classification.Classified && classification.AgentType == adapter.AgentCodexDesktop
+}
+
+func (c *codexCoordinator) rejectCodexDesktopManagedThread(threadID string) bool {
+	if !c.isCodexDesktopOrigin(threadID) {
+		return false
+	}
+	c.subscribeMu.Lock()
+	_, persisted := c.managedThreads[threadID]
+	delete(c.managedThreads, threadID)
+	delete(c.subscribed, threadID)
+	delete(c.subscribing, threadID)
+	c.subscribeMu.Unlock()
+	if persisted && c.sm != nil {
+		if err := c.persist(); err != nil {
+			slog.Default().Warn("remove Codex Desktop observer from managed registry", "thread", threadID, "error", err)
+		}
+	}
+	return true
 }
 
 func (c *codexCoordinator) managedThreadSnapshot() []string {
@@ -819,6 +868,11 @@ func (c *codexCoordinator) managedThreadSnapshot() []string {
 }
 
 func (c *codexCoordinator) subscribeTerminalThread(parent context.Context, client codexRuntimeClient, generation uint64, threadID string, projector *codexProjection) {
+	if c.rejectCodexDesktopManagedThread(threadID) {
+		return
+	}
+	c.sm.EnsureSessionLoaded(threadID)
+	restoredActivityAt, hasRestoredActivity := c.sm.SessionActivityAt(threadID)
 	ctx, cancel := context.WithTimeout(parent, 15*time.Second)
 	defer cancel()
 	var resumed struct {
@@ -829,6 +883,9 @@ func (c *codexCoordinator) subscribeTerminalThread(parent context.Context, clien
 	statusRevision := projector.ThreadStatusRevision(threadID)
 	_, turnRevision := c.turnSnapshot(threadID)
 	err := client.Call(ctx, "thread/resume", map[string]any{"threadId": threadID, "excludeTurns": true}, &resumed)
+	if c.rejectCodexDesktopManagedThread(threadID) {
+		return
+	}
 	c.projectionMu.Lock()
 	if err == nil && len(resumed.Thread) > 0 {
 		overrideStatus := ""
@@ -840,6 +897,13 @@ func (c *codexCoordinator) subscribeTerminalThread(parent context.Context, clien
 			}
 		}
 		events, _ := projector.ProjectResumedThread(resumed.Thread, threadID, statusRevision, overrideStatus)
+		if hasRestoredActivity && !restoredActivityAt.IsZero() {
+			for i := range events {
+				if events[i].Type == "session_discovered" && events[i].LastActivityAt == "" {
+					events[i].LastActivityAt = restoredActivityAt.UTC().Format(time.RFC3339Nano)
+				}
+			}
+		}
 		c.publishProjected(events)
 	}
 	c.projectionMu.Unlock()
@@ -853,6 +917,9 @@ func (c *codexCoordinator) subscribeTerminalThread(parent context.Context, clien
 	visitedCursors := map[string]struct{}{"": {}}
 	hydrationComplete := false
 	for {
+		if c.rejectCodexDesktopManagedThread(threadID) {
+			return
+		}
 		var page struct {
 			Data       []json.RawMessage `json:"data"`
 			NextCursor string            `json:"nextCursor"`
@@ -889,6 +956,9 @@ func (c *codexCoordinator) subscribeTerminalThread(parent context.Context, clien
 	if !current || currentGeneration != generation || currentClient != client {
 		return
 	}
+	if c.rejectCodexDesktopManagedThread(threadID) {
+		return
+	}
 	backend := newCodexAppServerBackend(c.sm, c, client, generation)
 	c.sm.mu.Lock()
 	if ps := c.sm.sessions[threadID]; ps != nil {
@@ -906,7 +976,7 @@ func (c *codexCoordinator) subscribeTerminalThread(parent context.Context, clien
 	}
 	c.sm.mu.Unlock()
 	if resumed.Model != "" {
-		c.sm.outputCh <- protocol.DaemonEvent{Type: "session_meta", SessionID: threadID, Model: resumed.Model}
+		c.sm.outputCh <- protocol.DaemonEvent{Type: "session_meta", SessionID: threadID, Model: resumed.Model, Resync: true}
 	}
 	c.finishSubscription(threadID, true)
 }
@@ -1033,13 +1103,21 @@ func (c *codexCoordinator) applyProjectedEvent(event protocol.DaemonEvent) (prot
 		return protocol.DaemonEvent{}, false
 	}
 	now := time.Now()
+	activityAt := now
+	if event.LastActivityAt != "" {
+		if parsed, err := time.Parse(time.RFC3339Nano, event.LastActivityAt); err == nil {
+			activityAt = parsed
+		}
+	} else if event.Resync || event.Status == protocol.StatusDisconnected {
+		activityAt = time.Time{}
+	}
 	c.sm.mu.Lock()
 	defer c.sm.mu.Unlock()
 	ps, exists := c.sm.sessions[event.SessionID]
 	if event.Type == "session_discovered" {
 		if !exists {
 			ps = &ProcessState{
-				SessionID: event.SessionID, Status: event.Status, StartedAt: now, LastActivityAt: now,
+				SessionID: event.SessionID, Status: event.Status, StartedAt: now, LastActivityAt: activityAt,
 				Cwd: event.Cwd, Agent: adapter.AgentCodex, Source: event.Source,
 				ControlMode: protocol.ControlManaged,
 			}
@@ -1054,13 +1132,15 @@ func (c *codexCoordinator) applyProjectedEvent(event protocol.DaemonEvent) (prot
 			if event.Status != "" {
 				ps.Status = event.Status
 			}
-			ps.LastActivityAt = now
+			if !activityAt.IsZero() && activityAt.After(ps.LastActivityAt) {
+				ps.LastActivityAt = activityAt
+			}
 		}
 		return protocol.DaemonEvent{}, false
 	}
 	if !exists {
 		ps = &ProcessState{
-			SessionID: event.SessionID, Status: protocol.StatusIdle, StartedAt: now, LastActivityAt: now,
+			SessionID: event.SessionID, Status: protocol.StatusIdle, StartedAt: now, LastActivityAt: activityAt,
 			Agent: adapter.AgentCodex, Source: "terminal", ControlMode: protocol.ControlManaged,
 		}
 		c.sm.sessions[event.SessionID] = ps
@@ -1076,7 +1156,9 @@ func (c *codexCoordinator) applyProjectedEvent(event protocol.DaemonEvent) (prot
 	if event.Type == "session_status" && event.Status != "" {
 		ps.Status = event.Status
 	}
-	ps.LastActivityAt = now
+	if !activityAt.IsZero() && activityAt.After(ps.LastActivityAt) {
+		ps.LastActivityAt = activityAt
+	}
 	return protocol.DaemonEvent{}, false
 }
 

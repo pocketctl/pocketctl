@@ -313,7 +313,16 @@ func (c *codexInteractions) addPending(pending *codexPendingInteraction) bool {
 	return true
 }
 
-func (c *codexInteractions) ResolveApproval(_ context.Context, threadID, publicID, action string) error {
+func (c *codexInteractions) ResolveApproval(ctx context.Context, threadID, publicID, action string) error {
+	releaseDrive := func() {}
+	if c.sm != nil {
+		var err error
+		ctx, releaseDrive, err = c.sm.acquireObserverDrive(ctx, threadID)
+		if err != nil {
+			return err
+		}
+	}
+	defer releaseDrive()
 	release, open := c.beginLifecycle(threadID)
 	if !open {
 		return fmt.Errorf("Codex interaction broker is closed")
@@ -396,7 +405,16 @@ func (c *codexInteractions) KnowsMcpElicitation(threadID, publicID string) bool 
 	return resolved && resolvedKind == codexMcpElicitation
 }
 
-func (c *codexInteractions) ResolveMcpElicitation(_ context.Context, threadID, publicID, action string, content json.RawMessage) error {
+func (c *codexInteractions) ResolveMcpElicitation(ctx context.Context, threadID, publicID, action string, content json.RawMessage) error {
+	releaseDrive := func() {}
+	if c.sm != nil {
+		var err error
+		ctx, releaseDrive, err = c.sm.acquireObserverDrive(ctx, threadID)
+		if err != nil {
+			return err
+		}
+	}
+	defer releaseDrive()
 	release, open := c.beginLifecycle(threadID)
 	if !open {
 		return fmt.Errorf("Codex interaction broker is closed")
@@ -486,7 +504,16 @@ func (c *codexInteractions) PublishProjectedStatus(event protocol.DaemonEvent, p
 	}
 }
 
-func (c *codexInteractions) ResolveQuestion(_ context.Context, threadID, publicID string, answers [][]string) error {
+func (c *codexInteractions) ResolveQuestion(ctx context.Context, threadID, publicID string, answers [][]string) error {
+	releaseDrive := func() {}
+	if c.sm != nil {
+		var err error
+		ctx, releaseDrive, err = c.sm.acquireObserverDrive(ctx, threadID)
+		if err != nil {
+			return err
+		}
+	}
+	defer releaseDrive()
 	release, open := c.beginLifecycle(threadID)
 	if !open {
 		return fmt.Errorf("Codex interaction broker is closed")
@@ -539,7 +566,16 @@ func (c *codexInteractions) ResolveQuestion(_ context.Context, threadID, publicI
 	return nil
 }
 
-func (c *codexInteractions) RejectQuestion(_ context.Context, threadID, publicID string) error {
+func (c *codexInteractions) RejectQuestion(ctx context.Context, threadID, publicID string) error {
+	releaseDrive := func() {}
+	if c.sm != nil {
+		var err error
+		ctx, releaseDrive, err = c.sm.acquireObserverDrive(ctx, threadID)
+		if err != nil {
+			return err
+		}
+	}
+	defer releaseDrive()
 	release, open := c.beginLifecycle(threadID)
 	if !open {
 		return fmt.Errorf("Codex interaction broker is closed")

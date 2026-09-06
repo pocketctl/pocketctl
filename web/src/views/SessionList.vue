@@ -8,9 +8,9 @@
         </button>
         <div class="mobile-session-host">
           <h1 class="mobile-session-nav-title" :title="daemonDisplayName">{{ daemonDisplayName }}</h1>
-          <div class="mobile-daemon-status" role="status" aria-live="polite">
-            <span :class="['mobile-daemon-dot', { online: selectedDaemonOnline }]" aria-hidden="true"></span>
-            <span class="mobile-daemon-status-copy">{{ selectedDaemonOnline ? '在线 · 最后心跳 刚刚' : '离线' }}</span>
+          <div v-if="hostStatus !== 'unknown'" class="mobile-daemon-status" role="status" aria-live="polite">
+            <span :class="['mobile-daemon-dot', { online: hostStatus === 'online' }]" aria-hidden="true"></span>
+            <span class="mobile-daemon-status-copy">{{ hostStatus === 'online' ? '在线 · 最后心跳 刚刚' : hostStatus === 'offline' ? '离线' : '连接中…' }}</span>
           </div>
         </div>
         <div class="mobile-session-nav-actions">
@@ -243,7 +243,15 @@ const searchResults = computed(() => hasSearchQuery.value
   : [])
 const renderedSessions = computed(() => hasSearchQuery.value ? searchResults.value : displayedSessions.value)
 const selectedDaemon = computed(() => daemons.value.find(daemon => daemon.daemon_id === hostId.value))
-const selectedDaemonOnline = computed(() => selectedDaemon.value?.daemon_online === true)
+// 主机状态三态：daemon_list 未到(loading)不误报离线；无主机上下文或未知主机(unknown)隐藏状态行
+const hasLoadedDaemons = ref(false)
+const hostStatus = computed<'loading' | 'unknown' | 'online' | 'offline'>(() => {
+  if (!hostId.value) return 'unknown'
+  if (!hasLoadedDaemons.value) return 'loading'
+  return selectedDaemon.value
+    ? (selectedDaemon.value.daemon_online === true ? 'online' : 'offline')
+    : 'unknown'
+})
 const daemonDisplayName = computed(() => selectedDaemon.value?.daemon_alias || selectedDaemon.value?.hostname || '会话列表')
 const canLoadMore = computed(() =>
   visibleCount.value < sortedSessions.value.length ||
@@ -420,9 +428,11 @@ onMounted(() => {
     }
     if (evt.type === 'daemon_list') {
       daemons.value = (evt as any).daemons || []
+      hasLoadedDaemons.value = true
     }
     if (evt.type === 'daemon_status') {
       const event = evt as any
+      hasLoadedDaemons.value = true
       const index = daemons.value.findIndex(daemon => daemon.daemon_id === event.daemon_id)
       if (index >= 0) {
         const daemon = daemons.value[index]
@@ -468,9 +478,31 @@ onMounted(() => {
     }
     if (evt.type === 'session_discovered' && evt.session_id) {
       if ((!hostId.value || (evt as any).daemon_id === hostId.value) && !sessions.value.find(s => s.session_id === evt.session_id)) {
-        liveSessionIds.add(evt.session_id)
+        const replayed = evt.resync === true
+        const sourceActivityAt = evt.last_activity_at ? new Date(evt.last_activity_at) : undefined
+        // Older daemons cannot provide a trustworthy timestamp for replayed
+        // discoveries. The authoritative session_list refresh will add those
+        // without manufacturing "now" in the browser.
+        if (replayed && (!sourceActivityAt || Number.isNaN(sourceActivityAt.getTime()))) return
+        if (!replayed) liveSessionIds.add(evt.session_id)
         hasLoadedSessions.value = true
-        sessions.value.unshift({ session_id: evt.session_id, status: 'busy', agent: (evt as any).agent || 'claude-code', started_at: new Date(), title: evt.title || 'Terminal Session', source: 'terminal', cwd: evt.cwd, last_activity_at: new Date(), subagent_count: (evt as any).subagent_count || 0, daemon_id: (evt as any).daemon_id || '', hostname: (evt as any).hostname || '', model: (evt as any).model || '' })
+        const activityAt = sourceActivityAt || new Date()
+        const discovered = {
+          session_id: evt.session_id,
+          status: evt.status || 'busy',
+          agent: (evt as any).agent || 'claude-code',
+          started_at: activityAt,
+          title: evt.title || 'Terminal Session',
+          source: 'terminal',
+          cwd: evt.cwd,
+          last_activity_at: activityAt,
+          subagent_count: (evt as any).subagent_count || 0,
+          daemon_id: (evt as any).daemon_id || '',
+          hostname: (evt as any).hostname || '',
+          model: (evt as any).model || '',
+        }
+        if (replayed) sessions.value.push(discovered)
+        else sessions.value.unshift(discovered)
       }
     }
     if (evt.type === 'session_model_changed' && evt.session_id) {

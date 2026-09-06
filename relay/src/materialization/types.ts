@@ -1,4 +1,5 @@
 export interface MaterializationContext {
+  admission?: import('../session-message-admissions.js').ContinueAdmission;
   agentType?: string;
   cwd?: string;
   requestId?: string;

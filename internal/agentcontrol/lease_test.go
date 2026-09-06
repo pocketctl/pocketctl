@@ -82,6 +82,13 @@ func TestLeaseRegistryPruneReportsOnlyActualRemovals(t *testing.T) {
 	if !registry.Prune() {
 		t.Fatal("dead lease removal was not reported")
 	}
+	removed := registry.DrainPruned()
+	if len(removed) != 1 || removed[0].ID != "lease-live" {
+		t.Fatalf("removed leases=%+v, want lease-live", removed)
+	}
+	if again := registry.DrainPruned(); len(again) != 0 {
+		t.Fatalf("pruned leases were reported twice: %+v", again)
+	}
 	if registry.Prune() {
 		t.Fatal("empty registry repeatedly reported a removal")
 	}

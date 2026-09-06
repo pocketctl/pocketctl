@@ -96,6 +96,26 @@ function deliveryStatus(wrapper: ReturnType<typeof shallowMount>, content: strin
 }
 
 describe('SessionDetail managed Codex terminal control', () => {
+  test('replayed status without a source timestamp preserves the listed activity time', async () => {
+    const wrapper = mountSession()
+    websocketMock.handlers.get('session_list')?.({
+      sessions: [session({
+        status: 'idle',
+        last_activity_at: '2026-08-01T02:03:04Z',
+        updated_at: '2026-08-01T02:03:04Z',
+      })],
+    })
+    await nextTick()
+    const before = wrapper.get('.sl-meta').text()
+
+    websocketMock.handlers.get('session_status')?.({
+      type: 'session_status', session_id: 'thr_1', status: 'idle', resync: true,
+    })
+    await nextTick()
+
+    expect(wrapper.get('.sl-meta').text()).toBe(before)
+  })
+
   test('keeps the mobile composer compact and caps wrapped input at five lines', async () => {
     useMobileViewport()
     const wrapper = mountSession()
@@ -180,6 +200,21 @@ describe('SessionDetail managed Codex terminal control', () => {
     await nextTick()
 
     expect(wrapper.find('.chat-input-container').exists()).toBe(true)
+  })
+
+  test('uses the Codex CLI public name in the local status receipt', async () => {
+    const wrapper = mountSession()
+    setTerminalSession({
+      control_mode: 'managed',
+      capabilities: ['message_acceptance_receipt'],
+      agent_version: '1.2.3',
+    })
+    await nextTick()
+
+    await wrapper.find('.chat-textarea').setValue('/status')
+    await wrapper.find('.send-btn').trigger('click')
+
+    expect(wrapper.get('command-receipt-card-stub').attributes('message')).toContain('Codex CLI v1.2.3')
   })
 
   test('keeps the last message clear of a resized floating composer', async () => {
@@ -399,6 +434,127 @@ describe('SessionDetail managed Codex terminal control', () => {
     expect(deliveryStatus(wrapper, 'keep this prompt')).toBe('failed')
     expect(wrapper.text()).toContain('session.send_failed')
     expect(websocketMock.send.mock.calls.filter(([payload]) => payload.type === 'user_message')).toHaveLength(sendsBeforeReceipt)
+  })
+
+  test('marks an accepted prompt failed when its correlated execution later fails', async () => {
+	const wrapper = mountSession()
+	setTerminalSession({ control_mode: 'managed', capabilities: ['message_acceptance_receipt'] })
+	await nextTick()
+	const msgId = await sendPrompt(wrapper, 'accepted then crashed')
+	const sent = websocketMock.send.mock.calls.map(([payload]) => payload)
+	  .find((payload: any) => payload.type === 'user_message' && payload.msg_id === msgId)
+	websocketMock.handlers.get('user_message_receipt')?.({
+	  type: 'user_message_receipt', session_id: 'thr_1', request_id: sent.request_id, msg_id: msgId, status: 'accepted',
+	})
+	await nextTick()
+	expect(deliveryStatus(wrapper, 'accepted then crashed')).toBe('accepted')
+
+	websocketMock.handlers.get('error')?.({
+	  type: 'error', session_id: 'thr_1', operation: 'user_message', reason: 'execution_failed',
+	  request_id: sent.request_id, msg_id: msgId, error: 'Agent process exited with code 17',
+	})
+	await nextTick()
+	expect(deliveryStatus(wrapper, 'accepted then crashed')).toBe('failed')
+	expect(wrapper.text()).toContain('session.execution_failed')
+  })
+
+  test('does not let a late accepted receipt overwrite a correlated execution failure', async () => {
+	const wrapper = mountSession()
+	setTerminalSession({ control_mode: 'managed', capabilities: ['message_acceptance_receipt'] })
+	await nextTick()
+	const msgId = await sendPrompt(wrapper, 'fast crash')
+	websocketMock.handlers.get('error')?.({
+	  type: 'error', session_id: 'thr_1', operation: 'user_message', reason: 'execution_failed', msg_id: msgId,
+	})
+	websocketMock.handlers.get('user_message_receipt')?.({
+	  type: 'user_message_receipt', session_id: 'thr_1', msg_id: msgId, status: 'accepted',
+	})
+	await nextTick()
+	expect(deliveryStatus(wrapper, 'fast crash')).toBe('failed')
+  })
+
+  test('preserves canonical request and message linkage when user_text merges the optimistic bubble', async () => {
+	const wrapper = mountSession()
+	setTerminalSession({ control_mode: 'managed', capabilities: ['message_acceptance_receipt'] })
+	await nextTick()
+	const msgId = await sendPrompt(wrapper, 'canonical echo')
+	websocketMock.handlers.get('user_text')?.({
+	  type: 'user_text', session_id: 'thr_1', text: 'canonical echo', request_id: 'req-canonical', msg_id: msgId,
+	})
+	await nextTick()
+	const message = (wrapper.vm as any).messages.find((item: any) => item.__msg_id === msgId)
+	expect(message).toMatchObject({ request_id: 'req-canonical', msg_id: msgId })
+  })
+
+  test('keeps a canonical-only prompt failed after a late accepted receipt', async () => {
+    const wrapper = mountSession()
+    setTerminalSession({ control_mode: 'managed', capabilities: ['message_acceptance_receipt'] })
+    await nextTick()
+
+    websocketMock.handlers.get('user_text')?.({
+      type: 'user_text', session_id: 'thr_1', text: 'replayed prompt',
+      request_id: 'req-replayed', msg_id: 'msg-replayed',
+    })
+    websocketMock.handlers.get('error')?.({
+      type: 'error', session_id: 'thr_1', operation: 'user_message', reason: 'execution_failed',
+      request_id: 'req-replayed', msg_id: 'msg-replayed',
+    })
+    websocketMock.handlers.get('user_message_receipt')?.({
+      type: 'user_message_receipt', session_id: 'thr_1', request_id: 'req-replayed',
+      msg_id: 'msg-replayed', status: 'accepted',
+    })
+    await nextTick()
+
+    const rows = (wrapper.vm as any).messages.filter((item: any) => item.content === 'replayed prompt')
+    expect(rows).toHaveLength(1)
+    expect(rows[0]).toMatchObject({ request_id: 'req-replayed', msg_id: 'msg-replayed', deliveryStatus: 'failed' })
+  })
+
+  test('does not migrate equal-text correlation when canonical echoes arrive out of order', async () => {
+    const wrapper = mountSession()
+    setTerminalSession({ control_mode: 'managed', capabilities: ['message_acceptance_receipt'] })
+    await nextTick()
+
+    const msgA = await sendPrompt(wrapper, 'same prompt')
+    const msgB = await sendPrompt(wrapper, 'same prompt')
+    websocketMock.handlers.get('user_text')?.({
+      type: 'user_text', session_id: 'thr_1', text: 'same prompt', request_id: 'req-b', msg_id: msgB,
+    })
+    websocketMock.handlers.get('user_text')?.({
+      type: 'user_text', session_id: 'thr_1', text: 'same prompt', request_id: 'req-a', msg_id: msgA,
+    })
+    websocketMock.handlers.get('error')?.({
+      type: 'error', session_id: 'thr_1', operation: 'user_message', reason: 'execution_failed', request_id: 'req-a',
+    })
+    await nextTick()
+
+    const rows = (wrapper.vm as any).messages.filter((item: any) => item.content === 'same prompt')
+    expect(rows).toHaveLength(2)
+    expect(rows.find((item: any) => item.__msg_id === msgA)).toMatchObject({ request_id: 'req-a', msg_id: msgA, deliveryStatus: 'failed' })
+    expect(rows.find((item: any) => item.__msg_id === msgB)).toMatchObject({ request_id: 'req-b', msg_id: msgB, deliveryStatus: 'pending' })
+  })
+
+  test('shows recovery and read-only receipt failures for prompts without receipt capability', async () => {
+	const wrapper = mountSession()
+	setTerminalSession({ control_mode: 'managed', capabilities: ['message_acceptance_receipt'] })
+	await nextTick()
+	const msgId = await sendPrompt(wrapper, 'recover me')
+	;(wrapper.vm as any).messages.find((item: any) => item.__msg_id === msgId).__expects_receipt = false
+	websocketMock.handlers.get('user_message_receipt')?.({
+	  type: 'user_message_receipt', session_id: 'thr_1', msg_id: msgId,
+	  status: 'rejected', reason: 'session_identity_unavailable', retryable: false,
+	})
+	await nextTick()
+	expect(deliveryStatus(wrapper, 'recover me')).toBe('failed')
+	expect(wrapper.text()).toContain('session.recovery_failed')
+
+	const secondId = await sendPrompt(wrapper, 'read only')
+	websocketMock.handlers.get('user_message_receipt')?.({
+	  type: 'user_message_receipt', session_id: 'thr_1', msg_id: secondId,
+	  status: 'rejected', reason: 'observer_read_only', retryable: false,
+	})
+	await nextTick()
+	expect(wrapper.text()).toContain('session.control_restricted')
   })
 
   test('removes an interrupt-pending optimistic bubble and restores its draft without resending', async () => {

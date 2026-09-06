@@ -2,7 +2,11 @@ import pg from 'pg'
 import { afterAll, beforeAll, describe, expect, test } from 'vitest'
 import { deleteSession, deleteUserAccount, initDB } from '../db.js'
 import { EventMaterializer } from '../materialization/event-materializer.js'
-import { getSessionTokenTrendV2, getTokenDashboardV2 } from '../token-usage/dashboard-v2.js'
+import {
+  getSessionTokenTrendV2,
+  getTodayTokenUsageByAgentV2,
+  getTokenDashboardV2,
+} from '../token-usage/dashboard-v2.js'
 import { closeEligibleTokenUsageDays, closeTokenUsageDay } from '../token-usage/day-closer.js'
 import { migrateTokenUsageAccounting } from '../token-usage/migration.js'
 
@@ -266,6 +270,112 @@ describeWithDatabase('token usage Task 2 PostgreSQL contracts', () => {
       `SELECT input, output FROM token_usage_facts WHERE fact_key = 'inbox:987654'`,
     )
     expect(subagent.rows[0]).toEqual({ input: '7', output: '3' })
+  })
+
+  test('reclassifies only one Desktop session token dimension without changing totals or source facts', async () => {
+    const user = await pool.query<{ id: number }>(`
+      INSERT INTO users (email, password_hash) VALUES ('desktop-reclass@example.test', '') RETURNING id
+    `)
+    const userId = user.rows[0].id
+    await pool.query(`INSERT INTO daemons (daemon_id, user_id) VALUES ('desktop-reclass-daemon', $1)`, [userId])
+    await pool.query(`
+      INSERT INTO sessions (
+        session_id, daemon_id, user_id, model, agent_type, source,
+        total_tokens, tok_input, tok_output, tok_cache_read, tok_cache_create, cost_usd
+      )
+      VALUES
+        ('desktop-reclass-session', 'desktop-reclass-daemon', $1, 'gpt-test', 'codex', 'terminal',
+         26, 11, 7, 5, 3, 0.0125),
+        ('cli-control-session', 'desktop-reclass-daemon', $1, 'gpt-test', 'codex', 'terminal',
+         13, 13, 0, 0, 0, 0.0025)
+    `, [userId])
+    const sourcePayload = {
+      type: 'agent_text', event_id: 'desktop-original-turn', text: 'unchanged',
+      usage: {
+        input_tokens: 11, output_tokens: 7, cache_read_tokens: 5,
+        cache_create_tokens: 3, reasoning_tokens: 2, total_tokens: 28,
+      },
+    }
+    const sourceEvent = await pool.query<{ id: string }>(`
+      INSERT INTO events (session_id, event_type, payload, event_hash, effect_status, effect_step)
+      VALUES ('desktop-reclass-session', 'agent_text', $1::jsonb, 'desktop-original-hash', 'completed', 1)
+      RETURNING id
+    `, [JSON.stringify(sourcePayload)])
+    await pool.query(`
+      INSERT INTO token_usage_facts (
+        fact_key, source_event_id, user_id, daemon_id, session_id, agent_type, model,
+        usage_date, recorded_at, input, output, cache_read, cache_create,
+        reasoning, reported_total, requests
+      ) VALUES
+        ('desktop-original-fact', $1, $2, 'desktop-reclass-daemon',
+         'desktop-reclass-session', 'codex', 'gpt-test', CURRENT_DATE,
+         TIMESTAMPTZ '2026-09-04 01:02:03+00', 11, 7, 5, 3, 2, 28, 4),
+        ('cli-control-fact', NULL, $2, 'desktop-reclass-daemon',
+         'cli-control-session', 'codex', 'gpt-test', CURRENT_DATE,
+         TIMESTAMPTZ '2026-09-04 01:02:03+00', 13, 0, 0, 0, 0, 13, 1)
+    `, [sourceEvent.rows[0].id, userId])
+
+    const factBefore = (await pool.query(`
+      SELECT fact_key, source_event_id::text, user_id, daemon_id, session_id, model,
+             usage_date::text, recorded_at, input::text, output::text, cache_read::text,
+             cache_create::text, reasoning::text, reported_total::text, requests::text,
+             session_attribution_revoked
+      FROM token_usage_facts WHERE fact_key = 'desktop-original-fact'
+    `)).rows[0]
+    const sessionAccountingBefore = (await pool.query(`
+      SELECT total_tokens::text, tok_input::text, tok_output::text,
+             tok_cache_read::text, tok_cache_create::text, cost_usd
+      FROM sessions WHERE session_id = 'desktop-reclass-session'
+    `)).rows[0]
+    const dashboardBefore = await getTokenDashboardV2(pool, userId, 'desktop-reclass-daemon', 30)
+
+    const materializer = new EventMaterializer({ pool, writeTokenUsageFacts: true })
+    const discovery = {
+      inboxId: 700_001,
+      userId,
+      daemonId: 'desktop-reclass-daemon',
+      sessionId: 'desktop-reclass-session',
+      eventType: 'session_discovered',
+      receivedAt: new Date('2026-09-04T02:03:04.000Z'),
+      payload: {
+        type: 'session_discovered', event_id: 'desktop-discovery',
+        agent: 'codex-desktop', status: 'idle', cwd: '/repo', title: 'Desktop observer',
+      },
+      context: { hostname: 'desktop.local' },
+    }
+    await materializer.materialize(discovery)
+    await materializer.materialize(discovery)
+
+    const factAfter = (await pool.query(`
+      SELECT fact_key, source_event_id::text, user_id, daemon_id, session_id, model,
+             usage_date::text, recorded_at, input::text, output::text, cache_read::text,
+             cache_create::text, reasoning::text, reported_total::text, requests::text,
+             session_attribution_revoked
+      FROM token_usage_facts WHERE fact_key = 'desktop-original-fact'
+    `)).rows[0]
+    expect(factAfter).toEqual(factBefore)
+    expect((await pool.query(`
+      SELECT fact_key, agent_type FROM token_usage_facts
+      WHERE fact_key IN ('desktop-original-fact', 'cli-control-fact') ORDER BY fact_key
+    `)).rows).toEqual([
+      { fact_key: 'cli-control-fact', agent_type: 'codex' },
+      { fact_key: 'desktop-original-fact', agent_type: 'codex-desktop' },
+    ])
+    expect((await pool.query(`SELECT payload FROM events WHERE id = $1`, [sourceEvent.rows[0].id])).rows[0].payload)
+      .toEqual(sourcePayload)
+    expect((await pool.query(`
+      SELECT total_tokens::text, tok_input::text, tok_output::text,
+             tok_cache_read::text, tok_cache_create::text, cost_usd
+      FROM sessions WHERE session_id = 'desktop-reclass-session'
+    `)).rows[0]).toEqual(sessionAccountingBefore)
+
+    const dashboardAfter = await getTokenDashboardV2(pool, userId, 'desktop-reclass-daemon', 30)
+    expect(dashboardAfter.summary).toEqual(dashboardBefore.summary)
+    expect((await getTodayTokenUsageByAgentV2(pool, userId, 'desktop-reclass-daemon'))
+      .sort((a, b) => a.agent_type.localeCompare(b.agent_type))).toEqual([
+      { agent_type: 'codex', today: 13 },
+      { agent_type: 'codex-desktop', today: 26 },
+    ])
   })
 
   test('serializes concurrent close attempts and waits for pre-cutoff inbox work', async () => {

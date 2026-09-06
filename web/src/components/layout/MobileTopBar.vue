@@ -5,7 +5,7 @@
       type="button"
       class="mobile-topbar-back"
       :aria-label="t('mobile.back_to_sessions')"
-      @click="router.push('/sessions')"
+      @click="router.push(sessionHostId ? hostSessionsLocation(sessionHostId) : '/sessions')"
     >
       <svg viewBox="0 0 24 24" aria-hidden="true">
         <path d="m15 18-6-6 6-6" />
@@ -53,6 +53,7 @@
 import { computed } from 'vue'
 import { useRouter } from 'vue-router'
 import { useLocale } from '../../composables/useLocale'
+import { hostSessionsLocation } from '../../utils/hostNavigation'
 
 const props = defineProps<{
   title: string
@@ -65,6 +66,7 @@ const props = defineProps<{
   planOpen?: boolean
   planComplete?: boolean
   sessionHost?: string
+  sessionHostId?: string
   sessionStatus?: string
   sessionStatusLabel?: string
 }>()

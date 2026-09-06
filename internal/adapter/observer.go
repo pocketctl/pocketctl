@@ -35,7 +35,16 @@ const (
 	// DiscoveryStorage: version detection via a read-only storage probe, with no
 	// npm/CLI query (zcode). The daemon never launches this agent's binary.
 	DiscoveryStorage
+	// DiscoverySessionOnly: this identity is only assigned by session observers;
+	// it must never appear in host install/upgrade discovery (codex-desktop).
+	DiscoverySessionOnly
 )
+
+// IsObserverAgent reports whether an agent is a read-only observer. Callers
+// use this single classification to reject all session-driving paths.
+func IsObserverAgent(agentType string) bool {
+	return BackendKindFor(agentType) == BackendObserver
+}
 
 // ---- fail-closed sentinels ----
 //
@@ -88,7 +97,7 @@ func (observerParser) SetPendingCmd(content string) {}
 // ErrObserverReadOnly for observer agents. It is the typed-error companion to
 // NewStorage (which cannot return an error and therefore falls back to Claude).
 func NewStorageTyped(agentType string) (SessionStorage, error) {
-	if p, ok := Get(agentType); ok && p.Backend == BackendObserver {
+	if IsObserverAgent(agentType) {
 		return observerStorage{}, ErrObserverReadOnly
 	}
 	return NewStorage(agentType), nil
@@ -97,7 +106,7 @@ func NewStorageTyped(agentType string) (SessionStorage, error) {
 // NewLauncherTyped returns the SessionLauncher for an agent type, or
 // ErrObserverReadOnly for observer agents.
 func NewLauncherTyped(agentType string) (SessionLauncher, error) {
-	if p, ok := Get(agentType); ok && p.Backend == BackendObserver {
+	if IsObserverAgent(agentType) {
 		return observerLauncher{}, ErrObserverReadOnly
 	}
 	return NewLauncher(agentType), nil
@@ -106,7 +115,7 @@ func NewLauncherTyped(agentType string) (SessionLauncher, error) {
 // NewAdapterTyped returns the streaming-stdout adapter for an agent type, or
 // ErrObserverReadOnly for observer agents.
 func NewAdapterTyped(agentType, prompt string) (AgentAdapter, error) {
-	if p, ok := Get(agentType); ok && p.Backend == BackendObserver {
+	if IsObserverAgent(agentType) {
 		return observerAdapter{}, ErrObserverReadOnly
 	}
 	return NewAdapter(agentType, prompt), nil
@@ -115,7 +124,7 @@ func NewAdapterTyped(agentType, prompt string) (AgentAdapter, error) {
 // NewParserTyped returns the JSONL-history parser for an agent type, or
 // ErrObserverReadOnly for observer agents.
 func NewParserTyped(agentType string) (JSONLParser, error) {
-	if p, ok := Get(agentType); ok && p.Backend == BackendObserver {
+	if IsObserverAgent(agentType) {
 		return observerParser{}, ErrObserverReadOnly
 	}
 	return NewJSONLParser(agentType), nil

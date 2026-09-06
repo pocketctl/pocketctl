@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"runtime"
@@ -17,7 +18,9 @@ import (
 
 	"github.com/pocketctl/pocketctl/internal/adapter"
 	"github.com/pocketctl/pocketctl/internal/config"
+	"github.com/pocketctl/pocketctl/internal/platform"
 	"github.com/pocketctl/pocketctl/internal/protocol"
+	"github.com/pocketctl/pocketctl/internal/watcher"
 )
 
 func TestEnsureOpenCodeSessionLoadedBeforeDiscovery(t *testing.T) {
@@ -273,6 +276,7 @@ func TestCreateSessionPermissionDefaults(t *testing.T) {
 	tests := []struct {
 		name            string
 		agent           string
+		wantAgent       string
 		permission      *protocol.PermissionConfig
 		wantPermission  *protocol.PermissionConfig
 		wantErr         string
@@ -281,12 +285,20 @@ func TestCreateSessionPermissionDefaults(t *testing.T) {
 		{
 			name:            "claude receives its default",
 			agent:           adapter.AgentClaude,
+			wantAgent:       adapter.AgentClaude,
 			wantPermission:  &protocol.PermissionConfig{Agent: adapter.AgentClaude, Mode: "manual"},
 			wantStartupStop: true,
 		},
 		{
-			name:  "codex receives its default",
-			agent: adapter.AgentCodex,
+			name:            "legacy empty agent normalizes to claude",
+			wantAgent:       adapter.AgentClaude,
+			wantPermission:  &protocol.PermissionConfig{Agent: adapter.AgentClaude, Mode: "manual"},
+			wantStartupStop: true,
+		},
+		{
+			name:      "codex receives its default",
+			agent:     adapter.AgentCodex,
+			wantAgent: adapter.AgentCodex,
 			wantPermission: &protocol.PermissionConfig{
 				Agent: adapter.AgentCodex, Preset: "request_approval",
 				ApprovalPolicy: "on-request", SandboxMode: "workspace-write",
@@ -294,12 +306,14 @@ func TestCreateSessionPermissionDefaults(t *testing.T) {
 			wantStartupStop: true,
 		},
 		{
-			name:  "opencode keeps permission nil",
-			agent: adapter.AgentOpencode,
+			name:      "opencode keeps permission nil",
+			agent:     adapter.AgentOpencode,
+			wantAgent: adapter.AgentOpencode,
 		},
 		{
 			name:       "opencode rejects explicit permission",
 			agent:      adapter.AgentOpencode,
+			wantAgent:  adapter.AgentOpencode,
 			permission: &protocol.PermissionConfig{Agent: adapter.AgentOpencode},
 			wantErr:    "opencode does not support permission configuration",
 		},
@@ -351,6 +365,9 @@ func TestCreateSessionPermissionDefaults(t *testing.T) {
 			}
 			if capturedConfig == nil {
 				t.Fatal("CreateSession() did not reach downstream lifecycle boundary")
+			}
+			if capturedConfig.Agent != tt.wantAgent {
+				t.Fatalf("CreateSession() agent = %q, want %q", capturedConfig.Agent, tt.wantAgent)
 			}
 			if !reflect.DeepEqual(capturedConfig.Permission, tt.wantPermission) {
 				t.Fatalf("CreateSession() permission = %+v, want %+v", capturedConfig.Permission, tt.wantPermission)
@@ -556,6 +573,96 @@ func TestSetSessionExited_DoesNotAffectOtherSessions(t *testing.T) {
 	}
 }
 
+func TestSyncLiveTerminalSessionRejectsExitedProcessBinding(t *testing.T) {
+	outputCh := make(chan protocol.DaemonEvent, 8)
+	sm := NewSessionManager(outputCh)
+	pid := os.Getpid()
+	if !sm.RegisterTerminalSession(
+		"same-process", "/work/old", pid, "", protocol.StatusRunning, adapter.AgentClaude,
+	) {
+		t.Fatal("terminal session was not registered")
+	}
+	sm.SetSessionExited("same-process", protocol.ExitReasonNormalExit)
+	<-outputCh
+
+	if sm.SyncLiveTerminalSession(
+		"same-process", "/work/new", pid, "", protocol.StatusRunning, adapter.AgentClaude,
+	) {
+		t.Fatal("the exiting process binding must not reactivate its session")
+	}
+	sm.mu.RLock()
+	state := *sm.sessions["same-process"]
+	sm.mu.RUnlock()
+	if state.Status != protocol.StatusExited || state.ExitReason != protocol.ExitReasonNormalExit || state.Cwd != "/work/old" {
+		t.Fatalf("rejected watcher update changed state: %+v", state)
+	}
+	select {
+	case event := <-outputCh:
+		t.Fatalf("rejected watcher update published event: %+v", event)
+	default:
+	}
+}
+
+func TestSyncLiveTerminalSessionAcceptsVerifiedContinueProcess(t *testing.T) {
+	outputCh := make(chan protocol.DaemonEvent, 8)
+	sm := NewSessionManager(outputCh)
+	sm.mu.Lock()
+	sm.sessions["continued-session"] = &ProcessState{
+		SessionID: "continued-session", Cwd: "/work/old", Agent: adapter.AgentClaude,
+		Source: "terminal", Status: protocol.StatusExited, ExitReason: protocol.ExitReasonNormalExit,
+		Pid: 9999999, ProcessStartIdentity: "old-process",
+	}
+	sm.mu.Unlock()
+
+	pid := os.Getpid()
+	identity, err := platform.ProcessStartIdentity(pid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !sm.SyncLiveTerminalSession(
+		"continued-session", "/work/new", pid, "/dev/ttys-test", protocol.StatusRunning, adapter.AgentClaude,
+	) {
+		t.Fatal("verified continue process did not reactivate the session")
+	}
+	sm.mu.RLock()
+	state := *sm.sessions["continued-session"]
+	sm.mu.RUnlock()
+	if state.Status != protocol.StatusRunning || state.ExitReason != "" || state.Pid != pid ||
+		state.ProcessStartIdentity != identity || state.Cwd != "/work/new" || state.TTY != "/dev/ttys-test" {
+		t.Fatalf("continued watcher state=%+v", state)
+	}
+	select {
+	case event := <-outputCh:
+		if event.Type != "session_status" || event.Status != protocol.StatusRunning || event.SessionID != "continued-session" {
+			t.Fatalf("continue event=%+v", event)
+		}
+	default:
+		t.Fatal("verified continue did not publish running status")
+	}
+}
+
+func TestObserveJSONLSessionStatusDoesNotReviveExitedTerminal(t *testing.T) {
+	outputCh := make(chan protocol.DaemonEvent, 8)
+	sm := NewSessionManager(outputCh)
+	if !sm.RegisterTerminalSession(
+		"exited-jsonl", "/work/project", 0, "", protocol.StatusIdle, adapter.AgentCodex,
+	) {
+		t.Fatal("terminal session was not registered")
+	}
+	sm.SetSessionExited("exited-jsonl", protocol.ExitReasonNormalExit)
+	<-outputCh
+
+	if sm.ObserveJSONLSessionStatus("exited-jsonl", protocol.StatusRunning) {
+		t.Fatal("JSONL lifecycle must not reactivate an exited terminal session")
+	}
+	sm.mu.RLock()
+	state := *sm.sessions["exited-jsonl"]
+	sm.mu.RUnlock()
+	if state.Status != protocol.StatusExited || state.ExitReason != protocol.ExitReasonNormalExit {
+		t.Fatalf("JSONL lifecycle changed exited state: %+v", state)
+	}
+}
+
 func TestSendMessage_ExitedSession_Allowed(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("Unix sentinel CLI fixture")
@@ -564,7 +671,7 @@ func TestSendMessage_ExitedSession_Allowed(t *testing.T) {
 	sm := NewSessionManager(outputCh)
 
 	// Use a PID that is definitely dead (9999999 does not exist)
-	sm.RegisterTerminalSession("exited-sid", "/tmp", 9999999, "", protocol.StatusExited, "")
+	sm.RegisterTerminalSession("exited-sid", "/tmp", 9999999, "", protocol.StatusExited, adapter.AgentClaude)
 
 	// Sentinel PATH proves no real claude/shim is ever executed; the fake
 	// starter proves no real process is ever spawned.
@@ -598,7 +705,7 @@ func TestSendMessage_ExitedSession_InvalidPID(t *testing.T) {
 
 	// PID 0 — special case, isProcessAlive(0) returns true on some systems
 	// Use a definitely-dead PID
-	sm.RegisterTerminalSession("dead-sid", os.TempDir(), 9999999, "", protocol.StatusIdle, "")
+	sm.RegisterTerminalSession("dead-sid", os.TempDir(), 9999999, "", protocol.StatusIdle, adapter.AgentClaude)
 
 	marker := installSentinelResumeCLI(t, "claude")
 	starter := newRecordingResumeStarter()
@@ -738,6 +845,26 @@ func TestUpdateLastActivity_NonexistentSession(t *testing.T) {
 	sm.UpdateLastActivity("nonexistent")
 }
 
+func TestRestoreSessionActivityUsesSourceTimeAndClampsFutureValues(t *testing.T) {
+	sm := NewSessionManager(make(chan protocol.DaemonEvent, 16))
+	sm.RegisterTerminalSession("test-sid", "/tmp", 12345, "/dev/ttys001", protocol.StatusRunning, "")
+	sourceTime := time.Now().Add(-2 * time.Hour)
+
+	stored, ok := sm.RestoreSessionActivity("test-sid", sourceTime)
+	if !ok || !stored.Equal(sourceTime) {
+		t.Fatalf("restored activity=(%v, %v), want (%v, true)", stored, ok, sourceTime)
+	}
+	if got := sm.sessions["test-sid"].LastActivityAt; !got.Equal(sourceTime) {
+		t.Fatalf("session activity=%v, want %v", got, sourceTime)
+	}
+
+	beforeFutureRestore := time.Now()
+	stored, ok = sm.RestoreSessionActivity("test-sid", time.Now().Add(time.Hour))
+	if !ok || stored.Before(beforeFutureRestore) || stored.After(time.Now()) {
+		t.Fatalf("future activity was not clamped to now: (%v, %v)", stored, ok)
+	}
+}
+
 func TestRemapSessionIDUpdatesSessionMapAndCwdRegistry(t *testing.T) {
 	outputCh := make(chan protocol.DaemonEvent, 16)
 	sm := NewSessionManager(outputCh)
@@ -869,6 +996,152 @@ func TestRegisterTerminalSessionCodexWatcherDoesNotTailAppServerManagedSessionWi
 	}
 }
 
+func TestRegisterObservedSessionCodexDesktopReclassifiesExistingStateWithoutNewTailer(t *testing.T) {
+	sm := NewSessionManager(make(chan protocol.DaemonEvent, 8))
+	oldActivity := time.Date(2025, time.September, 3, 4, 5, 6, 0, time.UTC)
+	existingTailer := &watcher.JSONLTailer{}
+	sm.mu.Lock()
+	sm.sessions["desktop-reclassified"] = &ProcessState{
+		SessionID:      "desktop-reclassified",
+		Agent:          adapter.AgentCodex,
+		Source:         "terminal",
+		ControlMode:    protocol.ControlLegacyReadOnly,
+		Status:         protocol.StatusIdle,
+		Cwd:            "/old",
+		LastActivityAt: oldActivity,
+		Tailer:         existingTailer,
+	}
+	sm.mu.Unlock()
+
+	if result := sm.RegisterObservedSession(
+		"desktop-reclassified", "/work/desktop", protocol.StatusBusy, adapter.AgentCodexDesktop,
+	); result != ObservedSessionReclassified {
+		t.Fatalf("reclassifying registration=%v, want reclassified without another tailer", result)
+	}
+
+	sm.mu.RLock()
+	state := sm.sessions["desktop-reclassified"]
+	count := len(sm.sessions)
+	sm.mu.RUnlock()
+	if count != 1 {
+		t.Fatalf("session count=%d, want one reclassified state", count)
+	}
+	if state.Agent != adapter.AgentCodexDesktop || state.Source != "observer" ||
+		state.ControlMode != protocol.ControlLegacyReadOnly || state.Backend != nil {
+		t.Fatalf("reclassified state=%+v", state)
+	}
+	if state.Cwd != "/work/desktop" || state.Status != protocol.StatusBusy {
+		t.Fatalf("reclassified metadata cwd=%q status=%q", state.Cwd, state.Status)
+	}
+	if state.Tailer != existingTailer {
+		t.Fatal("reclassification replaced the existing Codex parser tailer")
+	}
+	if !state.LastActivityAt.Equal(oldActivity) {
+		t.Fatalf("metadata-only reclassification changed activity from %v to %v", oldActivity, state.LastActivityAt)
+	}
+}
+
+func TestRegisterObservedSessionCodexDesktopDoesNotDowngradeManagedCodexOwnership(t *testing.T) {
+	output := make(chan protocol.DaemonEvent, 8)
+	sm := NewSessionManager(output)
+	backend := newCodexAppServerBackend(sm, newCodexCoordinator(sm), newFakeCodexRuntimeClient(), 1)
+	existingTailer := &watcher.JSONLTailer{}
+	activity := time.Date(2025, time.September, 4, 10, 11, 12, 0, time.UTC)
+	sm.mu.Lock()
+	sm.sessions["managed-same-id"] = &ProcessState{
+		SessionID:      "managed-same-id",
+		Agent:          adapter.AgentCodex,
+		Source:         "daemon",
+		ControlMode:    protocol.ControlManaged,
+		Backend:        backend,
+		Pid:            4242,
+		TTY:            "/dev/ttys042",
+		Status:         protocol.StatusRunning,
+		Cwd:            "/work/managed",
+		LastActivityAt: activity,
+		Tailer:         existingTailer,
+	}
+	sm.mu.Unlock()
+
+	if result := sm.RegisterObservedSession(
+		"managed-same-id", "/work/desktop", protocol.StatusBusy, adapter.AgentCodexDesktop,
+	); result != ObservedSessionAlreadyKnown {
+		t.Fatalf("managed Desktop observation registration=%v, want protected already-known", result)
+	}
+
+	sm.mu.RLock()
+	state := sm.sessions["managed-same-id"]
+	sm.mu.RUnlock()
+	if state.Agent != adapter.AgentCodex || state.Source != "daemon" ||
+		state.ControlMode != protocol.ControlManaged || state.Backend != backend ||
+		state.Pid != 4242 || state.TTY != "/dev/ttys042" || state.Tailer != existingTailer ||
+		state.Status != protocol.StatusRunning || state.Cwd != "/work/managed" ||
+		!state.LastActivityAt.Equal(activity) {
+		t.Fatalf("managed ownership was downgraded by Desktop observation: %+v", state)
+	}
+	select {
+	case event := <-output:
+		t.Fatalf("protected managed ownership published observer metadata: %+v", event)
+	default:
+	}
+}
+
+func TestCodexDesktopObserverResyncPreservesClassificationActivityAndOrder(t *testing.T) {
+	output := make(chan protocol.DaemonEvent, 8)
+	sm := NewSessionManager(output)
+	if result := sm.RegisterObservedSession("desktop-old", "/work/old", protocol.StatusIdle, adapter.AgentCodexDesktop); result != ObservedSessionNew {
+		t.Fatalf("new observer registration=%v", result)
+	}
+	if result := sm.RegisterObservedSession("desktop-new", "/work/new", protocol.StatusBusy, adapter.AgentCodexDesktop); result != ObservedSessionNew {
+		t.Fatalf("second observer registration=%v", result)
+	}
+	if result := sm.RegisterObservedSession("desktop-new", "/ignored", protocol.StatusCompleted, adapter.AgentCodexDesktop); result != ObservedSessionAlreadyKnown {
+		t.Fatalf("known observer registration=%v, want already-known", result)
+	}
+	oldActivity := time.Date(2025, time.September, 2, 1, 2, 3, 0, time.UTC)
+	newActivity := oldActivity.Add(2 * time.Hour)
+	sm.mu.Lock()
+	sm.sessions["desktop-old"].LastActivityAt = oldActivity
+	sm.sessions["desktop-new"].LastActivityAt = newActivity
+	sm.mu.Unlock()
+
+	before := sm.ListSessions()
+	if len(before) != 2 || before[0].SessionID != "desktop-new" || before[1].SessionID != "desktop-old" {
+		t.Fatalf("initial observer order=%+v", before)
+	}
+	for _, info := range before {
+		if info.Agent != adapter.AgentCodexDesktop || info.Source != "observer" ||
+			info.ControlMode != protocol.ControlLegacyReadOnly ||
+			!sameStrings(info.Capabilities, []string{ClaudeCapabilityHistorySync}) {
+			t.Fatalf("listed observer=%+v", info)
+		}
+	}
+
+	sm.ResyncSessions()
+	events := map[string]protocol.DaemonEvent{}
+	for i := 0; i < 2; i++ {
+		event := <-output
+		events[event.SessionID] = event
+	}
+	for id, wantActivity := range map[string]time.Time{"desktop-old": oldActivity, "desktop-new": newActivity} {
+		event := events[id]
+		if !event.Resync || event.Agent != adapter.AgentCodexDesktop || event.Source != "observer" ||
+			event.ControlMode != protocol.ControlLegacyReadOnly ||
+			!sameStrings(event.Capabilities, []string{ClaudeCapabilityHistorySync}) {
+			t.Fatalf("resync observer %q=%+v", id, event)
+		}
+		if event.LastActivityAt != wantActivity.Format(time.RFC3339Nano) {
+			t.Fatalf("resync activity %q=%q, want %q", id, event.LastActivityAt, wantActivity.Format(time.RFC3339Nano))
+		}
+	}
+
+	after := sm.ListSessions()
+	if len(after) != 2 || after[0].SessionID != "desktop-new" || after[1].SessionID != "desktop-old" ||
+		!after[0].LastActivityAt.Equal(newActivity) || !after[1].LastActivityAt.Equal(oldActivity) {
+		t.Fatalf("metadata-only resync changed activity order: before=%+v after=%+v", before, after)
+	}
+}
+
 func TestSyncRediscoveredTerminalStatusEmitsForTerminalSession(t *testing.T) {
 	outputCh := make(chan protocol.DaemonEvent, 16)
 	sm := NewSessionManager(outputCh)
@@ -947,6 +1220,62 @@ func TestObserveTerminalSessionStatusUpdatesStateWithoutEmitting(t *testing.T) {
 	}
 }
 
+func TestObserveJSONLSessionStatusKeepsLiveTurnSemanticsForTerminalAndObserver(t *testing.T) {
+	tests := []struct {
+		name     string
+		session  string
+		register func(*SessionManager, string)
+	}{
+		{
+			name:    "terminal",
+			session: "codex-terminal-jsonl",
+			register: func(sm *SessionManager, sessionID string) {
+				sm.RegisterTerminalSession(
+					sessionID, "/tmp/project", 0, "", protocol.StatusIdle, adapter.AgentCodex,
+				)
+			},
+		},
+		{
+			name:    "desktop observer",
+			session: "codex-desktop-jsonl",
+			register: func(sm *SessionManager, sessionID string) {
+				sm.RegisterObservedSession(
+					sessionID, "/tmp/project", protocol.StatusIdle, adapter.AgentCodexDesktop,
+				)
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			sm := NewSessionManager(make(chan protocol.DaemonEvent, 8))
+			tt.register(sm, tt.session)
+			oldActivity := time.Now().Add(-time.Hour)
+			sm.RestoreSessionActivity(tt.session, oldActivity)
+
+			if updated := sm.ObserveJSONLSessionStatus(tt.session, protocol.StatusRunning); !updated {
+				t.Fatal("live task_started status was not observed")
+			}
+			sm.mu.RLock()
+			running := *sm.sessions[tt.session]
+			sm.mu.RUnlock()
+			if running.Status != protocol.StatusRunning || !running.LastActivityAt.After(oldActivity) || running.TurnStartedAt.IsZero() {
+				t.Fatalf("task_started state = %+v, want running activity and turn start", running)
+			}
+
+			if updated := sm.ObserveJSONLSessionStatus(tt.session, protocol.StatusIdle); !updated {
+				t.Fatal("live task_complete status was not observed")
+			}
+			sm.mu.RLock()
+			idle := *sm.sessions[tt.session]
+			sm.mu.RUnlock()
+			if idle.Status != protocol.StatusIdle || idle.LastActivityAt.Before(running.LastActivityAt) || !idle.TurnStartedAt.IsZero() {
+				t.Fatalf("task_complete state = %+v, want idle with closed turn", idle)
+			}
+		})
+	}
+}
+
 func TestRegisterTerminalSessionCodexWatcherTakesOverExitedDaemonSessionWithoutPID(t *testing.T) {
 	outputCh := make(chan protocol.DaemonEvent, 16)
 	sm := NewSessionManager(outputCh)
@@ -1014,12 +1343,14 @@ func TestResyncSessionsMarksDiscoveryEvents(t *testing.T) {
 	outputCh := make(chan protocol.DaemonEvent, 16)
 	sm := NewSessionManager(outputCh)
 	sm.mu.Lock()
+	lastActivity := time.Date(2026, time.August, 2, 3, 4, 5, 0, time.UTC)
 	sm.sessions["session-a"] = &ProcessState{
-		SessionID: "session-a",
-		Cwd:       "/tmp/project",
-		Agent:     adapter.AgentCodex,
-		Source:    "daemon",
-		Status:    protocol.StatusCompleted,
+		SessionID:      "session-a",
+		Cwd:            "/tmp/project",
+		Agent:          adapter.AgentCodex,
+		Source:         "daemon",
+		Status:         protocol.StatusCompleted,
+		LastActivityAt: lastActivity,
 	}
 	sm.mu.Unlock()
 
@@ -1027,6 +1358,9 @@ func TestResyncSessionsMarksDiscoveryEvents(t *testing.T) {
 	evt := <-outputCh
 	if evt.Type != "session_discovered" || !evt.Resync {
 		t.Fatalf("event = %#v, want resync session_discovered", evt)
+	}
+	if evt.LastActivityAt != lastActivity.Format(time.RFC3339Nano) {
+		t.Fatalf("last_activity_at=%q, want %q", evt.LastActivityAt, lastActivity.Format(time.RFC3339Nano))
 	}
 }
 
@@ -1102,6 +1436,79 @@ func TestCreateSessionZcodeObserverRejected(t *testing.T) {
 	// No session registered.
 	if sm.CwdSessionCount(tmp) != 0 {
 		t.Fatalf("CwdSessionCount = %d, want 0 (no session should be registered)", sm.CwdSessionCount(tmp))
+	}
+}
+
+// TestCreateSessionCodexDesktopObserverRejected verifies Codex Desktop's
+// session-only observer identity is rejected before CLI resolution, cwd
+// creation, worktree creation, or process startup.
+func TestCreateSessionCodexDesktopObserverRejected(t *testing.T) {
+	cliCalled := false
+	sm := NewSessionManager(make(chan protocol.DaemonEvent, 1))
+	sm.createDeps.resolveAgentCLI = func(protocol.SessionConfig) (string, error) {
+		cliCalled = true
+		return "/should/not/be/called", nil
+	}
+
+	missingCwd := filepath.Join(t.TempDir(), "missing")
+	_, err := sm.CreateSession(context.Background(), protocol.SessionConfig{
+		Agent:         adapter.AgentCodexDesktop,
+		Cwd:           missingCwd,
+		AutoCreateDir: true,
+		Worktree:      true,
+	})
+	if !errors.Is(err, adapter.ErrObserverReadOnly) {
+		t.Fatalf("CreateSession(codex-desktop) err = %v, want ErrObserverReadOnly", err)
+	}
+	if cliCalled {
+		t.Fatal("resolveAgentCLI was called for codex-desktop; observer must be rejected before CLI resolution")
+	}
+	if _, statErr := os.Stat(missingCwd); !os.IsNotExist(statErr) {
+		t.Fatalf("cwd %q was created before observer rejection: stat err = %v", missingCwd, statErr)
+	}
+}
+
+type createPTYProviderSpy struct {
+	starts int
+}
+
+func (p *createPTYProviderSpy) Start(*exec.Cmd, *platform.Size) (platform.PTY, error) {
+	p.starts++
+	return nil, errors.New("unexpected PTY start")
+}
+
+func TestCreateSessionUnknownAgentRejectedBeforeAnySideEffect(t *testing.T) {
+	cliCalled := false
+	pty := &createPTYProviderSpy{}
+	sm := NewSessionManager(make(chan protocol.DaemonEvent, 1))
+	sm.SetProviders(pty, fixedProcessController{alive: map[int]bool{}})
+	sm.createDeps.resolveAgentCLI = func(config protocol.SessionConfig) (string, error) {
+		cliCalled = true
+		return "/opt/resolvable-future-agent", nil
+	}
+
+	missingCwd := filepath.Join(t.TempDir(), "missing")
+	_, err := sm.CreateSession(context.Background(), protocol.SessionConfig{
+		Agent:         "future-agent",
+		Cwd:           missingCwd,
+		Permission:    nil,
+		AutoCreateDir: true,
+		Worktree:      true,
+	})
+	if !errors.Is(err, adapter.ErrUnsupportedAgent) {
+		t.Fatalf("CreateSession(unknown) err = %v, want ErrUnsupportedAgent", err)
+	}
+	if cliCalled {
+		t.Fatal("unknown agent reached otherwise-resolvable CLI lookup")
+	}
+	if pty.starts != 0 {
+		t.Fatalf("unknown agent started %d PTY processes", pty.starts)
+	}
+	if _, statErr := os.Stat(missingCwd); !os.IsNotExist(statErr) {
+		t.Fatalf("unknown agent touched cwd/worktree path %q: stat err = %v", missingCwd, statErr)
+	}
+	if got := sm.CwdSessionCount(missingCwd); got != 0 {
+		t.Fatalf("unknown agent registered cwd/session state: count = %d", got)
 	}
 }
 

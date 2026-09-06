@@ -388,10 +388,41 @@ func (c *opencodeCoordinator) supervise(ctx context.Context) {
 }
 
 func (c *opencodeCoordinator) reapTerminalLeases() error {
-	if !c.sm.leases.Prune() {
+	changed := c.sm.leases.Prune()
+	removed := c.sm.leases.DrainPruned()
+	if len(removed) > 0 {
+		c.finishExitedTerminalSessions(removed)
+	}
+	if !changed && len(removed) == 0 {
 		return nil
 	}
 	return c.persistLeaseHandoff()
+}
+
+func (c *opencodeCoordinator) finishExitedTerminalSessions(removed []agentcontrol.Lease) {
+	activeSessions := make(map[string]struct{})
+	for _, lease := range c.sm.leases.Active(0) {
+		if lease.Agent == agentcontrol.AgentOpenCode && lease.SessionID != "" {
+			activeSessions[lease.SessionID] = struct{}{}
+		}
+	}
+	// Active performs its own liveness pruning. Include anything it removed so
+	// simultaneous terminal exits are handled in this pass without duplicates.
+	removed = append(removed, c.sm.leases.DrainPruned()...)
+	exitedSessions := make(map[string]struct{})
+	for _, lease := range removed {
+		if lease.Agent != agentcontrol.AgentOpenCode || lease.SessionID == "" {
+			continue
+		}
+		if _, active := activeSessions[lease.SessionID]; active {
+			continue
+		}
+		exitedSessions[lease.SessionID] = struct{}{}
+	}
+	for sessionID := range exitedSessions {
+		c.untrack(sessionID)
+		c.sm.SetSessionExited(sessionID, protocol.ExitReasonNormalExit)
+	}
 }
 
 func (c *opencodeCoordinator) leaseReaper(ctx context.Context) {
@@ -1937,6 +1968,11 @@ func (sm *SessionManager) CurrentSessionAgent(ctx context.Context, sessionID str
 }
 
 func (sm *SessionManager) SetSessionAgent(ctx context.Context, sessionID, agentName string) error {
+	ctx, release, err := sm.acquireObserverDrive(ctx, sessionID)
+	if err != nil {
+		return err
+	}
+	defer release()
 	b := sm.opencodeBackendFor(sessionID)
 	if b == nil || b.coord == nil {
 		return fmt.Errorf("not an opencode session")

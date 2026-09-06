@@ -407,12 +407,17 @@ func (sm *SessionManager) reconcileOpencodeQuestionSnapshot(targetSession, versi
 // PreToolUse hook and returns the session to running. Called from the
 // approval_response command handler.
 func (sm *SessionManager) ResolveApproval(sessionID, requestID string, approved bool) error {
+	ctx, release, err := sm.acquireObserverDrive(context.Background(), sessionID)
+	if err != nil {
+		return err
+	}
+	defer release()
 	if broker := sm.codexInteractionBroker(); broker != nil && broker.KnowsApproval(sessionID, requestID) {
 		action := "reject"
 		if approved {
 			action = "once"
 		}
-		return broker.ResolveApproval(context.Background(), sessionID, requestID, action)
+		return broker.ResolveApproval(ctx, sessionID, requestID, action)
 	}
 	// opencode sessions answer permission prompts via the serve API, not the
 	// claude PreToolUse hook socket.
@@ -422,7 +427,7 @@ func (sm *SessionManager) ResolveApproval(sessionID, requestID string, approved 
 			decision = "once"
 		}
 		_ = b
-		return sm.ResolveApprovalAction(sessionID, requestID, decision)
+		return sm.resolveApprovalAction(ctx, sessionID, requestID, decision)
 	}
 	if sm.ClaudeChannelApprovalKnowsPublicRequest(sessionID, requestID) {
 		action := "reject"
@@ -469,8 +474,17 @@ func (sm *SessionManager) ResolveApproval(sessionID, requestID string, approved 
 }
 
 func (sm *SessionManager) ResolveApprovalAction(sessionID, requestID, action string) error {
+	ctx, release, err := sm.acquireObserverDrive(context.Background(), sessionID)
+	if err != nil {
+		return err
+	}
+	defer release()
+	return sm.resolveApprovalAction(ctx, sessionID, requestID, action)
+}
+
+func (sm *SessionManager) resolveApprovalAction(ctx context.Context, sessionID, requestID, action string) error {
 	if broker := sm.codexInteractionBroker(); broker != nil && broker.KnowsApproval(sessionID, requestID) {
-		return broker.ResolveApproval(context.Background(), sessionID, requestID, action)
+		return broker.ResolveApproval(ctx, sessionID, requestID, action)
 	}
 	if !protocol.ValidApprovalAction(action) {
 		return fmt.Errorf("invalid approval action %q", action)
@@ -583,8 +597,13 @@ func permissionStillPending(observed []adapter.PermissionAsked, sessionID, reque
 }
 
 func (sm *SessionManager) ResolveQuestion(sessionID, requestID string, answers [][]string) error {
+	ctx, release, err := sm.acquireObserverDrive(context.Background(), sessionID)
+	if err != nil {
+		return err
+	}
+	defer release()
 	if broker := sm.codexInteractionBroker(); broker != nil && broker.KnowsQuestion(sessionID, requestID) {
-		return broker.ResolveQuestion(context.Background(), sessionID, requestID, answers)
+		return broker.ResolveQuestion(ctx, sessionID, requestID, answers)
 	}
 	b := sm.opencodeBackendFor(sessionID)
 	if b == nil || b.coord == nil || b.coord.srv() == nil {
@@ -680,8 +699,13 @@ func questionStillPending(observed []adapter.QuestionAsked, sessionID, requestID
 }
 
 func (sm *SessionManager) RejectQuestion(sessionID, requestID string) error {
+	ctx, release, err := sm.acquireObserverDrive(context.Background(), sessionID)
+	if err != nil {
+		return err
+	}
+	defer release()
 	if broker := sm.codexInteractionBroker(); broker != nil && broker.KnowsQuestion(sessionID, requestID) {
-		return broker.RejectQuestion(context.Background(), sessionID, requestID)
+		return broker.RejectQuestion(ctx, sessionID, requestID)
 	}
 	b := sm.opencodeBackendFor(sessionID)
 	if b == nil || b.coord == nil || b.coord.srv() == nil {
@@ -735,11 +759,16 @@ func (sm *SessionManager) RejectQuestion(sessionID, requestID string) error {
 // ResolveMcpElicitation answers a Codex app-server MCP elicitation through the
 // same first-writer-wins interaction broker used by approvals and questions.
 func (sm *SessionManager) ResolveMcpElicitation(sessionID, requestID, action string, content json.RawMessage) error {
+	ctx, release, err := sm.acquireObserverDrive(context.Background(), sessionID)
+	if err != nil {
+		return err
+	}
+	defer release()
 	broker := sm.codexInteractionBroker()
 	if broker == nil || !broker.KnowsMcpElicitation(sessionID, requestID) {
 		return fmt.Errorf("Codex MCP elicitation is not pending")
 	}
-	return broker.ResolveMcpElicitation(context.Background(), sessionID, requestID, action, content)
+	return broker.ResolveMcpElicitation(ctx, sessionID, requestID, action, content)
 }
 
 func (sm *SessionManager) reconcileOpencodeInteractionStatus(sessionID string, b *serverBackend) {

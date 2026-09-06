@@ -75,6 +75,39 @@ func TestZcodeAgentConstant(t *testing.T) {
 	}
 }
 
+// TestCodexDesktopProviderIsSessionOnlyObserver pins Codex Desktop's distinct
+// session identity: it is valid observer content, but has no host CLI/package
+// identity and cannot be launched through generic typed factories.
+func TestCodexDesktopProviderIsSessionOnlyObserver(t *testing.T) {
+	t.Parallel()
+
+	if AgentCodexDesktop != "codex-desktop" {
+		t.Fatalf("AgentCodexDesktop = %q, want %q", AgentCodexDesktop, "codex-desktop")
+	}
+	p, ok := Get(AgentCodexDesktop)
+	if !ok {
+		t.Fatalf("Get(%q) = false, want registered session observer", AgentCodexDesktop)
+	}
+	if p.Backend != BackendObserver {
+		t.Fatalf("Provider.Backend = %v, want BackendObserver", p.Backend)
+	}
+	if p.Discovery != DiscoverySessionOnly {
+		t.Fatalf("Provider.Discovery = %v, want DiscoverySessionOnly", p.Discovery)
+	}
+	if p.CLIName != "" || p.Package != "" || p.UpdateCmd != "" {
+		t.Fatalf("session-only observer host metadata = CLI %q package %q update %q, want all empty", p.CLIName, p.Package, p.UpdateCmd)
+	}
+	if !IsObserverAgent(AgentCodexDesktop) {
+		t.Fatal("IsObserverAgent(codex-desktop) = false, want true")
+	}
+	if _, err := NewLauncherTyped(AgentCodexDesktop); !errors.Is(err, ErrObserverReadOnly) {
+		t.Fatalf("NewLauncherTyped(codex-desktop) err = %v, want ErrObserverReadOnly", err)
+	}
+	if _, err := NewJSONLParser(AgentCodexDesktop).Parse("{}"); !errors.Is(err, ErrObserverReadOnly) {
+		t.Fatalf("NewJSONLParser(codex-desktop).Parse() err = %v, want ErrObserverReadOnly", err)
+	}
+}
+
 // TestBackendObserverDistinctFromOthers ensures BackendObserver is a distinct
 // value, not accidentally equal to Subprocess/Server.
 func TestBackendObserverDistinctFromOthers(t *testing.T) {

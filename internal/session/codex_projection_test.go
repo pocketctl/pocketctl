@@ -165,6 +165,24 @@ func TestCodexProjectionHistoricalAndLiveFailedTurnProvenance(t *testing.T) {
 	}
 }
 
+func TestCodexProjectionMarksHistoricalAndResumedEventsAsResync(t *testing.T) {
+	p := newCodexProjection(7)
+	historical := p.ProjectHistorical(codexNotification("item/completed", `{
+		"threadId":"thr_1","turnId":"turn_1",
+		"item":{"id":"item_1","type":"agentMessage","text":"old answer"}
+	}`))
+	if len(historical) != 1 || historical[0].Type != "agent_text" || !historical[0].Resync {
+		t.Fatalf("historical=%+v, want one resync agent_text", historical)
+	}
+
+	resumed, _ := p.ProjectResumedThread(json.RawMessage(`{
+		"id":"thr_2","cwd":"/repo","status":{"type":"idle"}
+	}`), "thr_2", 0, "")
+	if len(resumed) != 1 || resumed[0].Type != "session_discovered" || !resumed[0].Resync {
+		t.Fatalf("resumed=%+v, want resync session_discovered", resumed)
+	}
+}
+
 func TestCodexProjectionIdleAndTurnCompletionOrderAlwaysSettlesIdle(t *testing.T) {
 	orders := [][]codexapp.Inbound{
 		{

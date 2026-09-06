@@ -848,7 +848,7 @@ describe('Router - session_status with exit_reason', () => {
     expect(updateCall!.sql).toMatch(/COALESCE\(\$8::int/i)
   })
 
-  test('session_status without exit_reason does not null existing reason (COALESCE)', async () => {
+  test('non-terminal session_status clears a previous exit_reason', async () => {
     const daemonWs = createMockWs()
     router.registerDaemon(daemonWs, { type: 'register', daemon_id: 'daemon-1', hostname: 'test', agents: [] }, 1)
 
@@ -866,9 +866,10 @@ describe('Router - session_status with exit_reason', () => {
     )
     expect(statusUpdates.length).toBeGreaterThanOrEqual(2)
     // updateSessionStatusForEvent params prefix the event ledger coordinates;
-    // exitReason remains nullable at index 6.
-    // The second call carried no exit_reason → null, and COALESCE keeps the old value.
+    // exitReason remains nullable at index 6. The SQL must clear a stale reason
+    // when a verified continuation moves the session back to a non-terminal state.
     expect(statusUpdates[1].params[6]).toBeNull()
+    expect(statusUpdates[1].sql).toMatch(/exit_reason\s*=\s*CASE[\s\S]*ELSE\s+NULL\s+END/i)
   })
 })
 
@@ -896,6 +897,43 @@ describe('Router - event insertion updates last_activity_at', () => {
     )
     expect(activityUpdate).toBeDefined()
     expect(activityUpdate.params).toContain('sess-3')
+  })
+
+  test('session_meta persistence does not update last_activity_at', async () => {
+    const daemonWs = createMockWs()
+    router.registerDaemon(daemonWs, { type: 'register', daemon_id: 'daemon-1', hostname: 'test', agents: [] }, 1)
+
+    router.handleDaemonMessage('daemon-1', {
+      type: 'session_meta', session_id: 'sess-3', request_id: 'session-meta-open-1', model: 'gpt-5.6-terra',
+    })
+
+    await new Promise(r => setTimeout(r, 50))
+
+    const activityUpdate = pool._queries.find((q: any) =>
+      q.sql.includes('UPDATE sessions') && q.sql.includes('last_activity_at')
+    )
+    expect(activityUpdate).toBeUndefined()
+  })
+
+  test('replayed discovery restores its source activity time', async () => {
+    const daemonWs = createMockWs()
+    router.registerDaemon(daemonWs, { type: 'register', daemon_id: 'daemon-1', hostname: 'test', agents: [] }, 1)
+    const sourceActivity = '2026-08-01T12:30:00.000Z'
+
+    router.handleDaemonMessage('daemon-1', {
+      type: 'session_discovered', session_id: 'sess-3', status: 'idle', agent: 'codex',
+      resync: true, last_activity_at: sourceActivity,
+    })
+
+    await new Promise(r => setTimeout(r, 50))
+
+    const activityUpdate = pool._queries.find((q: any) =>
+      q.sql.includes('UPDATE sessions') && q.sql.includes('last_activity_at')
+    )
+    expect(activityUpdate).toBeDefined()
+    expect(activityUpdate.params[0]).toBe('sess-3')
+    expect(activityUpdate.params[1]).toEqual(new Date(sourceActivity))
+    expect(activityUpdate.sql).not.toContain('GREATEST')
   })
 
   test('OpenCode Part revisions are persisted and broadcast unchanged', async () => {
@@ -1046,6 +1084,7 @@ describe('Router - list_sessions includes extended fields', () => {
     const clientWs = createMockWs()
     router.registerClient(clientWs, 1)
     const cursor = Buffer.from(JSON.stringify({
+      version: 2,
       pinned: 0,
       pinnedAt: '1970-01-01T00:00:00.000Z',
       activityAt: '2026-01-02T03:04:05.000Z',
@@ -1175,6 +1214,36 @@ describe('Router - session→daemon routing resilience', () => {
     await router.handleClientMessage(clientWs, { type: 'session_interrupt', session_id: 'test-sid' })
 
     expect(daemonWs._sent.some((m: any) => m.type === 'session_interrupt')).toBe(true)
+  })
+
+  test('fails closed before native routing when the ownership-scoped runtime policy lookup fails', async () => {
+    const policyPool = createMockPool()
+    const originalQuery = policyPool.query.getMockImplementation()!
+    policyPool.query = vi.fn((sql: string, params?: any[]) => {
+      if (sql.includes('WITH owned_session')) {
+        return Promise.reject(new Error('runtime policy unavailable'))
+      }
+      return originalQuery(sql, params)
+    })
+    const guardedRouter = new Router(policyPool)
+    const daemonWs = createMockWs()
+    await guardedRouter.registerDaemon(daemonWs, {
+      type: 'register', daemon_id: 'daemon-1', hostname: 'test', agents: [],
+      active_session_ids: ['test-sid'],
+    }, 1)
+    const clientWs = createMockWs()
+    guardedRouter.registerClient(clientWs, 1)
+    daemonWs._sent.length = 0
+
+    await guardedRouter.handleClientMessage(clientWs, {
+      type: 'session_interrupt', session_id: 'test-sid', request_id: 'interrupt-policy-outage',
+    })
+
+    expect(daemonWs._sent).toEqual([])
+    expect(clientWs._sent).toContainEqual(expect.objectContaining({
+      type: 'error', session_id: 'test-sid', error: 'session not found or not owned',
+    }))
+    expect((guardedRouter as any).clients.get(clientWs).subscribedSessions.has('test-sid')).toBe(false)
   })
 
   test('error for unroutable session includes session_id', async () => {

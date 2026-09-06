@@ -180,7 +180,7 @@
           </div>
 
           <div class="dashboard-session-side">
-            <span class="dashboard-session-time">{{ formatRelativeTime(s.last_activity_at || s.updated_at) }}</span>
+            <span class="dashboard-session-time">{{ formatRelativeTime(s.last_activity_at || s.created_at) }}</span>
             <SessionActions :session="s" @startRename="sessStartRename" @deleted="onDeleted" @pinned="onPinned" />
           </div>
         </div>

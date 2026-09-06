@@ -190,7 +190,7 @@
                 <button v-if="selectedDaemon?.daemon_online && !isAgentLatest(a) && agentManageable(a)" class="ag-upgrade-btn" :class="{ upgrading: upgrading === agentRawName(a) }" :disabled="upgrading === agentRawName(a)" @click="upgradeAgent(agentRawName(a))">
                   {{ t('settings.upgrade_btn') }}
                 </button>
-                <span v-else-if="isZcodeAgent(a)" class="ag-readonly">{{ t('hosts.agent_readonly_sync') }}</span>
+                <span v-else-if="isReadOnlyObserver(a)" class="ag-readonly">{{ t('hosts.agent_readonly_sync') }}</span>
                 <span v-else-if="!agentManageable(a)" class="ag-sysinstall">{{ t('hosts.agent_system_install') }}</span>
                 <span v-else-if="isAgentLatest(a)" class="ag-latest">✓ {{ t('settings.installed') }}</span>
               </div>
@@ -323,7 +323,8 @@ import { useAuth } from '../composables/useAuth'
 import { formatRelativeTime } from '../composables/useRelativeTime'
 import { useLocale } from '../composables/useLocale'
 import { useQuota } from '../composables/useQuota'
-import { agentDisplayName, agentShortLabel, agentIconClass as agentIconClassHelper, isZcodeAgent as isZcodeAgentHelper } from '../utils/agentDisplay'
+import { agentDisplayName, agentShortLabel, agentIconClass as agentIconClassHelper } from '../utils/agentDisplay'
+import { isReadOnlyObserverAgent } from '../utils/observerSession'
 import RegisterDaemonDialog from '../components/RegisterDaemonDialog.vue'
 import NewSessionDialog from '../components/NewSessionDialog.vue'
 import MobileHostCard from '../components/hosts/MobileHostCard.vue'
@@ -480,8 +481,8 @@ function agentVersionLabel(a: any): string {
 function isAgentLatest(a: any): boolean {
   return typeof a === 'object' && !!a?.latest && a?.version === a?.latest
 }
-function agentManageable(a: any): boolean { return typeof a !== 'object' || a?.manageable !== false }
-function isZcodeAgent(a: any): boolean { return isZcodeAgentHelper(agentRawName(a)) }
+function isReadOnlyObserver(a: any): boolean { return isReadOnlyObserverAgent(agentRawName(a)) }
+function agentManageable(a: any): boolean { return !isReadOnlyObserver(a) && (typeof a !== 'object' || a?.manageable !== false) }
 function agentMetaLabel(a: any): string {
   if (typeof a === 'object' && a?.version) {
     return a.latest && a.version !== a.latest ? t('settings.upgrade_available') : t('settings.installed')
@@ -489,6 +490,7 @@ function agentMetaLabel(a: any): string {
   return t('settings.version_pending')
 }
 async function upgradeAgent(name: string, target?: any) {
+  if (isReadOnlyObserverAgent(name)) return
   if (upgrading.value) return
   const d = target || selectedDaemon.value
   if (!d) return
@@ -555,6 +557,7 @@ function closeMobileAgentFromHistory() {
 }
 
 function upgradeMobileAgent(name: string) {
+  if (isReadOnlyObserverAgent(name)) return
   upgradeAgent(name, mobileAgentHost.value)
 }
 
@@ -572,7 +575,7 @@ function hostSessionCount(daemonId: string): number {
 }
 function hostLastActivityLabel(d: any): string {
   const latest = sessionsForHost(d.daemon_id)
-    .map(session => session.last_activity_at || session.updated_at || session.created_at)
+    .map(session => session.last_activity_at || session.created_at)
     .filter(Boolean)
     .sort((a, b) => new Date(b).getTime() - new Date(a).getTime())[0]
   const value = latest || d.last_heartbeat
@@ -910,6 +913,7 @@ onUnmounted(() => {
 .agent-card .ag-icon { width: 32px; height: 32px; border-radius: var(--radius-sm); display: flex; align-items: center; justify-content: center; flex-shrink: 0; font-size: 14px; font-weight: 700; }
 .agent-card .ag-icon.claude { background: rgba(88,166,255,0.15); color: var(--accent); }
 .agent-card .ag-icon.codex { background: rgba(63,185,80,0.15); color: var(--success); }
+.agent-card .ag-icon.codex-desktop { background: rgba(63,185,80,0.22); color: var(--success); box-shadow: inset 0 0 0 1px rgba(63,185,80,0.2); }
 .agent-card .ag-icon.zcode { background: rgba(20,184,166,0.15); color: #14b8a6; }
 .agent-card .ag-info { flex: 1; min-width: 0; }
 .agent-card .ag-name { font-size: 14px; font-weight: 600; color: var(--fg); display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }

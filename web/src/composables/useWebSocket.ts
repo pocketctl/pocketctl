@@ -55,6 +55,7 @@ export interface DaemonEvent {
   content_class?: string
   classifier_version?: string
   retryable?: boolean
+  resync?: boolean
 }
 
 export type InputMode = 'new_turn' | 'steer' | 'auto'

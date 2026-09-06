@@ -1,6 +1,6 @@
 import { describe, test, expect, vi, beforeEach } from 'vitest'
 import { Router } from '../router.js'
-import { getCompleteBackwardReplayPage, getCompleteForwardReplayPage, getLatestAgentPlan, getRecentEvents, getEventsBefore, getRecentSubagentEvents, getSubagentEventsBefore } from '../db.js'
+import { getCompleteBackwardReplayPage, getCompleteForwardReplayPage, getLatestAgentPlan, getRecentEvents, getEventsBefore, getRecentSubagentEvents, getSubagentEventsBefore, listSessionsPageByDaemon } from '../db.js'
 
 // Reusable mocks (mirror router.test.ts patterns)
 function createMockPool() {
@@ -110,6 +110,43 @@ describe('db - backward pagination queries (session-history-pagination 1.4)', ()
       ['sess-1', 'agent-a', 10, 20]
     )
     expect(result).toHaveLength(1)
+  })
+})
+
+describe('db - session list activity ordering', () => {
+  test('falls back to created_at instead of metadata updated_at', async () => {
+    const queries: string[] = []
+    const pool: any = {
+      query: vi.fn(async (sql: string) => {
+        queries.push(sql)
+        return { rows: [] }
+      }),
+    }
+
+    await listSessionsPageByDaemon(pool, { daemonId: 'daemon-1', limit: 20 })
+
+    expect(queries[0]).toContain('COALESCE(s.last_activity_at, s.created_at)')
+    expect(queries[0]).not.toContain('COALESCE(s.last_activity_at, s.updated_at)')
+  })
+
+  test('rejects pre-v2 cursors after the activity sort key changes', async () => {
+    const calls: any[][] = []
+    const pool: any = {
+      query: vi.fn(async (_sql: string, params: any[]) => {
+        calls.push(params)
+        return { rows: [] }
+      }),
+    }
+    const oldCursor = Buffer.from(JSON.stringify({
+      pinned: 0,
+      pinnedAt: '1970-01-01T00:00:00.000Z',
+      activityAt: '2026-09-04T04:22:00.000Z',
+      sessionId: 'old-session',
+    }), 'utf8').toString('base64url')
+
+    await listSessionsPageByDaemon(pool, { daemonId: 'daemon-1', limit: 20, cursor: oldCursor })
+
+    expect(calls[0]).toEqual(['daemon-1', 21])
   })
 })
 
@@ -637,5 +674,54 @@ describe('Router - replay pagination (session-history-pagination 6.3)', () => {
       .toEqual(Array.from({ length: 178 }, (_, index) => index))
     const end = clientWs._sent.find((message: any) => message.type === 'replay_end')
     expect(end).toMatchObject({ count: 178, logical_count: 1, last_seq: 923, has_more: false, req_id: 9 })
+  })
+
+  test('observes an oversized initial page without splitting its logical stream', async () => {
+    const chunks = Array.from({ length: 220 }, (_, index) => {
+      const chunkSeq = 219 - index
+      return {
+        id: chunkSeq + 1,
+        payload: {
+          type: 'agent_text', session_id: 'sess-1', stream_id: 'oversized-stream',
+          chunk_seq: chunkSeq, byte_offset: chunkSeq * 6_000,
+          final: chunkSeq === 219, text: 'x'.repeat(6_000),
+        },
+      }
+    })
+    const scans = [chunks.slice(0, 100), chunks.slice(100, 200), chunks.slice(200)]
+    const completePagePool = {
+      query: vi.fn((sql: string) => {
+        if (sql.includes('SELECT 1 FROM sessions')) return Promise.resolve({ rows: [{ '?column?': 1 }], rowCount: 1 })
+        if (sql.includes('SELECT status, turn_started_at, last_activity_at FROM sessions')) {
+          return Promise.resolve({ rows: [{ status: 'completed', turn_started_at: null, last_activity_at: null }] })
+        }
+        if (sql.includes('SELECT 1 FROM events')) return Promise.resolve({ rows: [] })
+        if (sql.includes('FROM events')) return Promise.resolve({ rows: scans.shift() ?? [] })
+        return Promise.resolve({ rows: [] })
+      }),
+    } as any
+    const observedRouter = new Router(completePagePool)
+    const clientWs = createMockWs()
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+    observedRouter.registerClient(clientWs, 1)
+
+    observedRouter.handleClientMessage(clientWs, {
+      type: 'replay', session_id: 'sess-1', direction: 'backward', limit: 1, req_id: 10,
+    })
+    await new Promise(resolve => setTimeout(resolve, 50))
+
+    const events = clientWs._sent
+      .filter((message: any) => message.type === 'replay_batch')
+      .flatMap((message: any) => message.events)
+    expect(events).toHaveLength(220)
+    expect(events[0].chunk_seq).toBe(0)
+    expect(events.at(-1).chunk_seq).toBe(219)
+    expect(warn).toHaveBeenCalledWith(
+      '[history-replay] initial page threshold exceeded',
+      expect.objectContaining({ sessionId: 'sess-1', eventCount: 220, logicalCount: 1 }),
+    )
+    expect(warn.mock.calls[0][1].payloadBytes).toBeGreaterThanOrEqual(1_048_576)
+    expect(warn.mock.calls[0][1].durationMs).toEqual(expect.any(Number))
+    warn.mockRestore()
   })
 })

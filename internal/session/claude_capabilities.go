@@ -37,6 +37,11 @@ func (sm *SessionManager) sessionCapabilitiesLocked(state *ProcessState) []strin
 		return nil
 	}
 	switch state.Agent {
+	case adapter.AgentCodexDesktop:
+		if state.Source == "observer" && state.ControlMode == protocol.ControlLegacyReadOnly {
+			return []string{ClaudeCapabilityHistorySync}
+		}
+		return nil
 	case adapter.AgentClaude:
 		return sm.claudeCapabilitiesLocked(state)
 	case adapter.AgentOpencode:
