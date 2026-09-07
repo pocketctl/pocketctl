@@ -1,0 +1,46 @@
+name: CodeQL
+
+on:
+  push:
+    branches: [master]
+  schedule:
+    # Weekly, Monday 02:32 UTC (off the hour to avoid load spikes).
+    - cron: '32 2 * * 1'
+  workflow_dispatch:
+
+jobs:
+  analyze:
+    name: Analyze (${{ matrix.language }})
+    runs-on: ubuntu-latest
+    permissions:
+      # Required for all workflows.
+      security-events: write
+      # Required to fetch internal or private CodeQL packs.
+      packages: read
+      # Actions and contents below are not strictly required by CodeQL,
+      # but simplify downstream permission grants in the job.
+      contents: read
+      actions: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - language: go
+            build-mode: autobuild
+          - language: javascript-typescript
+            build-mode: none
+          - language: actions
+            build-mode: none
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v3
+        with:
+          languages: ${{ matrix.language }}
+          build-mode: ${{ matrix.build-mode }}
+          queries: security-and-quality
+      - name: Perform CodeQL Analysis
+        uses: github/codeql-action/analyze@v3
+        with:
+          category: /language:${{ matrix.language }}
