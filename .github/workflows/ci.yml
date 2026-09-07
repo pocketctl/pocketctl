@@ -5,6 +5,9 @@ on:
   push:
     branches: [develop, master]
 
+permissions:
+  contents: read
+
 jobs:
   public-fact-contract:
     runs-on: ubuntu-latest
