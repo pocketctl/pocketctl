@@ -424,3 +424,43 @@ func mustExec(ctx context.Context, db *sql.DB, query string, args ...any) {
 		panic(err)
 	}
 }
+
+func TestListParts_CarriesMessageScope(t *testing.T) {
+	ctx := context.Background()
+	storage := testdb(t, withSeed(func(ctx context.Context, db *sql.DB) {
+		now := nowMillis()
+		insertSession(ctx, db, "ses1", "t", "/d", now, now, 0)
+		insertMessage(ctx, db, "m1", "ses1", 1, now, now, `{"role":"user"}`)
+		insertPart(ctx, db, "p1", "m1", "ses1", 1, now, now, `{"type":"text","text":"hi"}`)
+		insertMessage(ctx, db, "m2", "ses1", 2, now, now, `{"role":"assistant","hidden":true,"visibility":"hidden"}`)
+		insertPart(ctx, db, "p2", "m2", "ses1", 1, now, now, `{"type":"text","text":"secret"}`)
+		insertMessage(ctx, db, "m3", "ses1", 3, now, now, `{"role":"assistant","synthetic":true,"system":{"x":1}}`)
+		insertPart(ctx, db, "p3", "m3", "ses1", 1, now, now, `{"type":"text","text":"sys"}`)
+		insertMessage(ctx, db, "m4", "ses1", 4, now, now, `{"role":"tool"}`)
+		insertPart(ctx, db, "p4", "m4", "ses1", 1, now, now, `{"type":"text","text":"x"}`)
+	}))
+	s, _ := Open(storage)
+	defer s.Close()
+	page, err := s.ListParts(ctx, "ses1", nil, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(page.Parts) != 4 {
+		t.Fatalf("want 4 parts, got %d", len(page.Parts))
+	}
+	if got := page.Parts[0].Msg.Role; got != "user" {
+		t.Fatalf("p1 role = %q, want user", got)
+	}
+	if !page.Parts[0].Msg.Visible() {
+		t.Fatalf("p1 (plain user message) must be visible: %+v", page.Parts[0].Msg)
+	}
+	if page.Parts[1].Msg.Visible() {
+		t.Fatalf("p2 (hidden assistant) must not be visible: %+v", page.Parts[1].Msg)
+	}
+	if page.Parts[2].Msg.Visible() {
+		t.Fatalf("p3 (synthetic+system) must not be visible: %+v", page.Parts[2].Msg)
+	}
+	if page.Parts[3].Msg.Visible() {
+		t.Fatalf("p4 (role=tool) must not be visible: %+v", page.Parts[3].Msg)
+	}
+}

@@ -430,12 +430,35 @@ func (z *ZcodeSync) stampTurn(ev *protocol.DaemonEvent) {
 
 // PreviewPart previews a content event for a part if it is new or its semantic
 // hash changed. SkipReason carries the filter reason when no event is produced
-// ("skip" for unchanged/empty, "step-start" for status-only, "unknown" for
-// unmapped types).
-func (z *ZcodeSync) PreviewPart(nativePartID, wireMessageID string, part ZcodePartData, model string) (DiffBatch, error) {
-	ev, reason := z.mapper.MapPart(z.wireID, wireMessageID, nativePartID, part, model, z.state.lastEventID, 0)
-	if reason != "" {
-		return DiffBatch{SkipReason: reason}, nil
+// ("skip" for unchanged/empty, "filtered_role" when the owning message fails
+// the §5.5 filter, "step-start" for status-only, "unknown" for unmapped
+// types).
+//
+// The owning message's scope (role + visibility) comes from the part query's
+// JOIN: a part of a filtered message never leaks as agent content, and a text
+// part of a visible user message maps to user_text (the message stream's
+// extractUserText may find nothing when message.data embeds no parts). The
+// user_text event id follows MapUserText's rule, so dual-stream emission of
+// the same text dedupes at the relay; when the message stream already
+// committed this message the part is skipped instead.
+func (z *ZcodeSync) PreviewPart(nativePartID, nativeMessageID, wireMessageID string, part ZcodePartData, model string, scope MessageScope) (DiffBatch, error) {
+	if !scope.Visible() {
+		return DiffBatch{SkipReason: "filtered_role"}, nil
+	}
+	var ev protocol.DaemonEvent
+	var reason string
+	var started *protocol.DaemonEvent
+	if scope.Role == "user" && part.Type == "text" && strings.TrimSpace(part.Text) != "" {
+		if _, handled := z.state.msgs[wireMessageID]; handled {
+			return DiffBatch{SkipReason: "skip"}, nil
+		}
+		ev = z.mapper.MapUserTextPart(z.wireID, wireMessageID, nativeMessageID, part, z.state.lastEventID, 0)
+		started, _ = z.beginTurn(nativeMessageID)
+	} else {
+		ev, reason = z.mapper.MapPart(z.wireID, wireMessageID, nativePartID, part, model, z.state.lastEventID, 0)
+		if reason != "" {
+			return DiffBatch{SkipReason: reason}, nil
+		}
 	}
 	z.stampTurn(&ev)
 	semantic := ev.ContentHash
@@ -456,12 +479,19 @@ func (z *ZcodeSync) PreviewPart(nativePartID, wireMessageID string, part ZcodePa
 		ev.PreviousEventID = prev.eventID
 	}
 	ev.Replace = true
+	events := []protocol.DaemonEvent{ev}
+	if started != nil {
+		events = append([]protocol.DaemonEvent{*started}, events...)
+	}
 	batch := DiffBatch{
-		Events: []protocol.DaemonEvent{ev},
+		Events: events,
 		Commit: SyncCommit{
 			Part:        &PartCommit{WirePartID: wirePart, EventID: ev.EventID, Revision: revision, SemanticHash: semantic},
 			LastEventID: ev.EventID,
 		},
+	}
+	if started != nil {
+		batch.Commit.Turn = &TurnCommit{Anchor: nativeMessageID, State: protocol.TurnStateRunning}
 	}
 	return batch, nil
 }
@@ -603,6 +633,29 @@ func (z *ZcodeSync) applyCommit(commit SyncCommit) error {
 }
 
 // --- todos -------------------------------------------------------------------
+
+// PreviewTodo previews an agent_todo event when the snapshot hash changes,
+// including the transition from non-empty to empty (a clear). A session that
+// never had todos emits nothing. Unlike DiffTodos this carries a SyncCommit so
+// the emission rides the standard pending/ACK pipeline.
+func (z *ZcodeSync) PreviewTodo(todos []TodoRow) (DiffBatch, error) {
+	items := make([]protocol.TodoItem, 0, len(todos))
+	for _, t := range todos {
+		items = append(items, protocol.TodoItem{Content: t.Content, Status: t.Status, Priority: t.Priority})
+	}
+	h := semanticHash(string(canonicalJSON(items)))
+	if h == z.state.todoHash && z.state.todoEventID != "" {
+		return DiffBatch{}, nil
+	}
+	if len(items) == 0 && z.state.todoEventID == "" {
+		return DiffBatch{}, nil
+	}
+	ev := z.mapper.MapTodo(z.wireID, todos, z.state.lastEventID)
+	return DiffBatch{
+		Events: []protocol.DaemonEvent{ev},
+		Commit: SyncCommit{Todo: &NamedCommit{EventID: ev.EventID, Hash: h}, LastEventID: ev.EventID},
+	}, nil
+}
 
 // DiffTodos emits an agent_todo event when the snapshot hash changes, including
 // the transition from non-empty to empty (a clear).

@@ -182,9 +182,19 @@ func (o *Observer) scanSession(ctx context.Context, wireID string, sr SessionRow
 		sr.TimeUpdated,
 	)
 	_, st = o.runPage(ctx, wireID, PositionMetadata, func(sess SessionCursor) (pagePlan, error) {
-		return o.planStatusPage(wireID, sess, derived)
+		return o.planStatusPage(wireID, sess, sr, derived)
 	})
 	total.merge(st, 0)
+	if !total.deferred && !o.isRecoveryBlocked(wireID) {
+		if todos, err := o.store.ListTodos(ctx, sr.ID); err == nil {
+			_, st = o.runPage(ctx, wireID, PositionMetadata, func(sess SessionCursor) (pagePlan, error) {
+				return o.planTodoPage(wireID, sess, todos)
+			})
+			total.merge(st, 0)
+		} else {
+			o.log.Warn("zcode poll: list todos", "error", err)
+		}
+	}
 	if sr.ParentID != "" {
 		_, st = o.runPage(ctx, wireID, PositionMetadata, func(sess SessionCursor) (pagePlan, error) {
 			return o.planSubagentPage(ctx, sess, sr)
@@ -242,11 +252,28 @@ func (o *Observer) runPage(ctx context.Context, wireID string, kind PositionKind
 				// an orphan from a failed/conflicted earlier attempt (new
 				// record ids are never cursor-referenced yet): discard it and
 				// retry once; recorded payloads are never replaced.
-				journalSessionID := newEvents[0].SessionID
-				if err := o.prepareEvents(journalSessionID, newEvents); err != nil {
-					o.log.Warn("zcode poll: prepare event journal", "error", err)
-					st.deferred = true
-					return plan, st
+				//
+				// Journal batches are keyed by the events' own session id (the
+				// replay validator enforces WireSessionID == Payload.SessionID
+				// per event). A page may mix sessions — parent-scoped subagent
+				// lifecycle rows ride a child session's page — so group by
+				// SessionID and journal each group under its own id. Groups
+				// journaled before a later group fails are harmless: PrepareBatch
+				// treats identical live payloads as an idempotent no-op.
+				grouped := map[string][]protocol.DaemonEvent{}
+				var groupOrder []string
+				for _, ev := range newEvents {
+					if _, seen := grouped[ev.SessionID]; !seen {
+						groupOrder = append(groupOrder, ev.SessionID)
+					}
+					grouped[ev.SessionID] = append(grouped[ev.SessionID], ev)
+				}
+				for _, sid := range groupOrder {
+					if err := o.prepareEvents(sid, grouped[sid]); err != nil {
+						o.log.Warn("zcode poll: prepare event journal", "error", err)
+						st.deferred = true
+						return plan, st
+					}
 				}
 				for i := range plan.newRecords {
 					if len(plan.newRecords[i].ExpectedEventIDs) > 0 {
@@ -556,7 +583,7 @@ func (o *Observer) planPartPage(ctx context.Context, wireID, nativeSessionID str
 			if err := walk.applyUpTo(entry.Commit.CommitOrder); err != nil {
 				return plan, err
 			}
-			batch, err := walk.scratch.PreviewPart(p.ID, WireMessageID(o.cfg.SourceID, p.MessageID), part, "")
+			batch, err := walk.scratch.PreviewPart(p.ID, p.MessageID, WireMessageID(o.cfg.SourceID, p.MessageID), part, "", p.Msg)
 			if err != nil {
 				return plan, err
 			}
@@ -569,7 +596,7 @@ func (o *Observer) planPartPage(ctx context.Context, wireID, nativeSessionID str
 		if err := walk.applyUpTo(noOrderLimit); err != nil {
 			return plan, err
 		}
-		batch, err := walk.scratch.PreviewPart(p.ID, WireMessageID(o.cfg.SourceID, p.MessageID), part, "")
+		batch, err := walk.scratch.PreviewPart(p.ID, p.MessageID, WireMessageID(o.cfg.SourceID, p.MessageID), part, "", p.Msg)
 		if err != nil {
 			return plan, err
 		}
@@ -629,11 +656,26 @@ func (o *Observer) planMetaPage(wireID string, sess SessionCursor, sr SessionRow
 	return plan, nil
 }
 
-// planStatusPage prepares the derived session_status page.
-func (o *Observer) planStatusPage(wireID string, sess SessionCursor, derived string) (pagePlan, error) {
+// planStatusPage prepares the derived session_status page. For a subagent
+// child session (sr.ParentID != "") every status flip additionally carries a
+// parent-scoped turn_status with AgentID set, so Relay's materializeSubagent
+// advances the subagents row — without it the row stays at its INSERT default
+// 'running' forever.
+func (o *Observer) planStatusPage(wireID string, sess SessionCursor, sr SessionRow, derived string) (pagePlan, error) {
 	var plan pagePlan
 	pos := SourcePosition{Kind: PositionMetadata, NativeIDHash: hashID(wireID)}
 	walk := newTimelineWalk(o.cfg.SourceID, wireID, sess)
+	appendParentTurn := func(batch DiffBatch) DiffBatch {
+		if sr.ParentID == "" || len(batch.Events) == 0 {
+			return batch
+		}
+		wireParentID := WireSessionID(o.cfg.SourceID, sr.ParentID)
+		statusEv := batch.Events[len(batch.Events)-1]
+		turnEv := NewMapper(o.cfg.SourceID).SubagentTurnStatus(wireParentID, wireID, derived, statusEv.PreviousEventID)
+		batch.Events = append(batch.Events, turnEv)
+		batch.Commit.LastEventID = turnEv.EventID
+		return batch
+	}
 	for _, entry := range pendingMetadataEntries(sess.Pending, hashID(wireID)) {
 		if entry.Commit.Title != nil || entry.Commit.Model != nil || entry.Commit.SubagentEventID != "" {
 			continue // discovered/title/model entries regenerate via the meta page
@@ -651,6 +693,7 @@ func (o *Observer) planStatusPage(wireID string, sess SessionCursor, derived str
 		if err != nil {
 			return plan, err
 		}
+		batch = appendParentTurn(batch)
 		if !samePendingEvents(entry, batch) {
 			return plan, legacyUnrecoverable("session status pending entry")
 		}
@@ -667,7 +710,28 @@ func (o *Observer) planStatusPage(wireID string, sess SessionCursor, derived str
 	if err != nil {
 		return plan, err
 	}
+	batch = appendParentTurn(batch)
 	if len(batch.Events) > 0 {
+		plan.addPreviewRow(wireID, sess, pos, batch)
+	}
+	return plan, nil
+}
+
+// planTodoPage prepares the derived agent_todo page from the session's current
+// todo snapshot. The pending position is keyed apart from the status page's
+// (its own NativeIDHash), so both can ride PositionMetadata independently.
+func (o *Observer) planTodoPage(wireID string, sess SessionCursor, todos []TodoRow) (pagePlan, error) {
+	var plan pagePlan
+	walk := newTimelineWalk(o.cfg.SourceID, wireID, sess)
+	if err := walk.applyUpTo(noOrderLimit); err != nil {
+		return plan, err
+	}
+	batch, err := walk.scratch.PreviewTodo(todos)
+	if err != nil {
+		return plan, err
+	}
+	if len(batch.Events) > 0 {
+		pos := SourcePosition{Kind: PositionMetadata, NativeIDHash: hashID(wireID + ":todo")}
 		plan.addPreviewRow(wireID, sess, pos, batch)
 	}
 	return plan, nil
@@ -1170,7 +1234,7 @@ func (o *Observer) planPartMutationPage(ctx context.Context, wireID, nativeSessi
 				if err := walk.applyUpTo(noOrderLimit); err != nil {
 					return plan, err
 				}
-				batch, err := walk.scratch.PreviewPart(p.ID, WireMessageID(o.cfg.SourceID, p.MessageID), part, "")
+				batch, err := walk.scratch.PreviewPart(p.ID, p.MessageID, WireMessageID(o.cfg.SourceID, p.MessageID), part, "", p.Msg)
 				if err != nil {
 					return plan, err
 				}
@@ -1188,7 +1252,7 @@ func (o *Observer) planPartMutationPage(ctx context.Context, wireID, nativeSessi
 			if err := walk.applyUpTo(entry.Commit.CommitOrder); err != nil {
 				return plan, err
 			}
-			batch, err := walk.scratch.PreviewPart(p.ID, WireMessageID(o.cfg.SourceID, p.MessageID), part, "")
+			batch, err := walk.scratch.PreviewPart(p.ID, p.MessageID, WireMessageID(o.cfg.SourceID, p.MessageID), part, "", p.Msg)
 			if err != nil {
 				return plan, err
 			}
@@ -1201,7 +1265,7 @@ func (o *Observer) planPartMutationPage(ctx context.Context, wireID, nativeSessi
 		if err := walk.applyUpTo(noOrderLimit); err != nil {
 			return plan, err
 		}
-		batch, err := walk.scratch.PreviewPart(p.ID, WireMessageID(o.cfg.SourceID, p.MessageID), part, "")
+		batch, err := walk.scratch.PreviewPart(p.ID, p.MessageID, WireMessageID(o.cfg.SourceID, p.MessageID), part, "", p.Msg)
 		if err != nil {
 			return plan, err
 		}

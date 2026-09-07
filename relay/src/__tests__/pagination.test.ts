@@ -11,9 +11,13 @@ function createMockPool() {
   // replay payload via _setReplayRows instead.
   let replayRows: any[] = []
   let latestTypedRow: any | undefined
+  let childSessionHit = false
   const mockPool = {
     query: vi.fn((sql: string, params?: any[]) => {
       queries.push({ sql, params: params || [] })
+      if (sql.includes('is_subagent') && sql.includes('parent_session_id')) {
+        return Promise.resolve({ rows: childSessionHit ? [{ session_id: params ? params[0] : '' }] : [], rowCount: childSessionHit ? 1 : 0 })
+      }
       if (sql.includes('SELECT 1 FROM sessions')) return Promise.resolve({ rows: [{ '?column?': 1 }], rowCount: 1 })
       if (sql.includes('SELECT 1 FROM events')) return Promise.resolve({ rows: [] })
       if (sql.includes("event_type = 'agent_plan'")) return Promise.resolve({ rows: latestTypedRow ? [latestTypedRow] : [] })
@@ -22,6 +26,7 @@ function createMockPool() {
     }),
     _queries: queries,
     _setReplayRows: (rows: any[]) => { replayRows = rows },
+    _setChildSession: (hit: boolean) => { childSessionHit = hit },
     _setLatestTypedRow: (row: any | undefined) => { latestTypedRow = row },
     connect: vi.fn(),
     end: vi.fn(),
@@ -723,5 +728,64 @@ describe('Router - replay pagination (session-history-pagination 6.3)', () => {
     expect(warn.mock.calls[0][1].payloadBytes).toBeGreaterThanOrEqual(1_048_576)
     expect(warn.mock.calls[0][1].durationMs).toEqual(expect.any(Number))
     warn.mockRestore()
+  })
+})
+
+
+// --- zcode independent child-session model: replay_subagent fallback ---
+describe('replay_subagent independent child sessions (zcode model)', () => {
+  let pool: any
+  let router: Router
+  beforeEach(() => { pool = createMockPool(); router = new Router(pool) })
+
+  test('falls back to the child session events when agent_id is an independent session', async () => {
+    const clientWs = createMockWs()
+    router.registerClient(clientWs, 1)
+    pool._setChildSession(true)
+    pool._setReplayRows([
+      { id: 12, event_type: 'agent_text', payload: { type: 'agent_text', session_id: 'zcode-child', text: 'work' } },
+      { id: 11, event_type: 'session_discovered', payload: { type: 'session_discovered', session_id: 'zcode-child' } },
+      { id: 10, event_type: 'tool_call', payload: { type: 'tool_call', session_id: 'zcode-child', tool: 'Bash' } },
+      { id: 9, event_type: 'user_text', payload: { type: 'user_text', session_id: 'zcode-child', text: 'go' } },
+    ])
+
+    await router.handleClientMessage(clientWs, { type: 'replay_subagent', session_id: 'zcode-parent', agent_id: 'zcode-child', limit: 20 })
+    await new Promise(r => setTimeout(r, 50))
+
+    const batch = clientWs._sent.find((m: any) => m.type === 'replay_batch')
+    const end = clientWs._sent.find((m: any) => m.type === 'replay_end')
+    expect(batch).toBeDefined()
+    // Lifecycle noise (session_discovered) is filtered; content events carry
+    // the injected agent_id so the web routes them into the subagent bucket.
+    expect(batch.events.map((e: any) => e.type)).toEqual(['user_text', 'tool_call', 'agent_text'])
+    for (const ev of batch.events) expect(ev.agent_id).toBe('zcode-child')
+    expect(batch.agent_id).toBe('zcode-child')
+    expect(end).toMatchObject({ agent_id: 'zcode-child', count: 3, has_more: false })
+    // The events query ran against the child session without the agent filter.
+    const agentFilterCalls = pool.query.mock.calls.filter(([sql]: [string]) => sql.includes("payload->>'agent_id'"))
+    expect(agentFilterCalls).toHaveLength(0)
+    expect(pool.query.mock.calls.some(([sql, params]: [string, any[]]) =>
+      sql.includes('FROM events') && params && params[0] === 'zcode-child'
+    )).toBe(true)
+  })
+
+  test('keeps the parent-bucket path when agent_id is not an independent session', async () => {
+    const clientWs = createMockWs()
+    router.registerClient(clientWs, 1)
+    pool._setChildSession(false)
+    pool._setReplayRows([
+      { id: 5, payload: { type: 'agent_text', session_id: 'sess-1', agent_id: 'agent-a', text: 'bucketed' } },
+    ])
+
+    await router.handleClientMessage(clientWs, { type: 'replay_subagent', session_id: 'sess-1', agent_id: 'agent-a', limit: 20 })
+    await new Promise(r => setTimeout(r, 50))
+
+    const batch = clientWs._sent.find((m: any) => m.type === 'replay_batch')
+    expect(batch).toBeDefined()
+    expect(batch.events).toHaveLength(1)
+    expect(batch.events[0].agent_id).toBe('agent-a')
+    expect(pool.query.mock.calls.some(([sql, params]: [string, any[]]) =>
+      sql.includes("payload->>'agent_id' = $2") && params.includes('agent-a')
+    )).toBe(true)
   })
 })

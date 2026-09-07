@@ -152,3 +152,12 @@ func insertPart(ctx context.Context, db *sql.DB, id, messageID, sessionID string
 		panic(fmt.Sprintf("insert part: %v", err))
 	}
 }
+
+func insertTodo(ctx context.Context, db *sql.DB, sessionID, content, status, priority string, position int64) {
+	_, err := db.ExecContext(ctx, `INSERT INTO todo (session_id, content, status, priority, position, time_created, time_updated)
+		VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		sessionID, content, status, priority, position, 1, 1)
+	if err != nil {
+		panic(fmt.Sprintf("insert todo: %v", err))
+	}
+}
