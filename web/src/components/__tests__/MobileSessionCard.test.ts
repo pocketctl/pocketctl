@@ -63,7 +63,8 @@ describe('MobileSessionCard', () => {
     expect(wrapper.get('.mobile-card-context').text()).not.toContain('Codex CLI')
   })
 
-  test('keeps observer pin/delete access without offering mobile resume', () => {
+  test('keeps observer long-press access without offering mobile resume', async () => {
+    vi.useFakeTimers()
     const wrapper = mount(MobileSessionCard, {
       props: {
         session: { ...session, agent: 'codex-desktop', status: 'exited' },
@@ -73,9 +74,13 @@ describe('MobileSessionCard', () => {
       },
     })
 
-    expect(wrapper.find('.mobile-action-pin').exists()).toBe(true)
-    expect(wrapper.find('.mobile-action-delete').exists()).toBe(true)
+    await wrapper.get('.mobile-session-card').trigger('pointerdown', { clientX: 10, clientY: 10 })
+    vi.advanceTimersByTime(460)
+    await Promise.resolve()
+
+    expect(wrapper.emitted('long-press')?.[0]?.[0]).toMatchObject({ agent: 'codex-desktop', status: 'exited' })
     expect(wrapper.find('.mobile-resume').exists()).toBe(false)
+    vi.useRealTimers()
   })
 
   test('uses a neutral navigation affordance when inline children are unavailable', () => {
@@ -92,7 +97,7 @@ describe('MobileSessionCard', () => {
     expect(wrapper.find('.mobile-navigation-chevron').exists()).toBe(true)
   })
 
-  test('long press copies the full session id and shows iOS feedback', async () => {
+  test('long press emits long-press for the parent context sheet and suppresses open', async () => {
     vi.useFakeTimers()
     const wrapper = mount(MobileSessionCard, {
       props: {
@@ -103,16 +108,43 @@ describe('MobileSessionCard', () => {
       },
     })
 
-    await wrapper.get('.mobile-session-card').trigger('pointerdown', { clientX: 10, clientY: 10 })
-    vi.advanceTimersByTime(520)
+    const card = wrapper.get('.mobile-session-card')
+    await card.trigger('pointerdown', { clientX: 10, clientY: 10 })
+    vi.advanceTimersByTime(460)
     await Promise.resolve()
+    await card.trigger('pointerup', { clientX: 10, clientY: 10 })
+    await card.trigger('click')
 
-    expect(navigator.clipboard.writeText).toHaveBeenCalledWith('session-1234')
-    expect(wrapper.get('.mobile-copy-feedback').text()).toBe('已复制会话 ID')
+    expect(wrapper.emitted('long-press')).toHaveLength(1)
+    expect(wrapper.emitted('long-press')?.[0]?.[0]).toMatchObject({ session_id: 'session-1234' })
+    expect(navigator.clipboard.writeText).not.toHaveBeenCalled()
+    expect(wrapper.emitted('open')).toBeUndefined()
     vi.useRealTimers()
   })
 
-  test('reveals iOS-style trailing pin and terminal delete actions after a left swipe', async () => {
+  test('cancels the long press when the pointer moves beyond the tolerance', async () => {
+    vi.useFakeTimers()
+    const wrapper = mount(MobileSessionCard, {
+      props: {
+        session,
+        effectiveStatus: 'running',
+        relativeTime: '刚刚',
+        expanded: false,
+      },
+    })
+
+    const card = wrapper.get('.mobile-session-card')
+    await card.trigger('pointerdown', { clientX: 10, clientY: 10 })
+    await card.trigger('pointermove', { clientX: 30, clientY: 12 })
+    vi.advanceTimersByTime(460)
+    await Promise.resolve()
+    await card.trigger('pointerup', { clientX: 30, clientY: 12 })
+
+    expect(wrapper.emitted('long-press')).toBeUndefined()
+    vi.useRealTimers()
+  })
+
+  test('no longer carries swipe action buttons or clipboard feedback', () => {
     const wrapper = mount(MobileSessionCard, {
       props: {
         session: { ...session, status: 'completed' },
@@ -122,15 +154,10 @@ describe('MobileSessionCard', () => {
       },
     })
 
-    const card = wrapper.get('.mobile-session-card')
-    await card.trigger('pointerdown', { clientX: 180, clientY: 20, pointerId: 1 })
-    await card.trigger('pointermove', { clientX: 60, clientY: 22, pointerId: 1 })
-    await card.trigger('pointerup', { clientX: 60, clientY: 22, pointerId: 1 })
-
-    expect(wrapper.get('.mobile-card-actions').classes()).toContain('revealed')
-    expect(wrapper.find('.mobile-action-delete').exists()).toBe(true)
-    await wrapper.get('.mobile-action-pin').trigger('click')
-    expect(wrapper.emitted('toggle-pin')?.[0]?.[0]).toMatchObject({ session_id: session.session_id, status: 'completed' })
+    expect(wrapper.find('.mobile-card-actions').exists()).toBe(false)
+    expect(wrapper.find('.mobile-action-pin').exists()).toBe(false)
+    expect(wrapper.find('.mobile-action-delete').exists()).toBe(false)
+    expect(wrapper.find('.mobile-copy-feedback').exists()).toBe(false)
   })
 
   test('opens the session from the card and expands subagents independently', async () => {

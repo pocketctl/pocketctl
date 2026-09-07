@@ -1,0 +1,807 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>pocketctl · 移动端会话操作重设计</title>
+<style>
+/* ============================================
+   pocketctl design tokens (synced from web-shared.css)
+   ============================================ */
+:root, [data-theme="dark"] {
+  --bg: #0d1117;  --bg-secondary: #010409;
+  --surface: #161b22;  --surface-hover: #1c2129;  --surface-active: #21262d;
+  --border: #21262d;  --border-light: #30363d;
+  --accent: #58a6ff;  --accent-hover: #79c0ff;
+  --accent-muted: rgba(88,166,255,.15);  --accent-subtle: rgba(88,166,255,.08);
+  --fg: #e6edf3;  --fg-secondary: #8b949e;  --fg-tertiary: #484f58;
+  --error: #f85149;  --error-muted: rgba(248,81,73,.15);
+  --success: #3fb950;  --warning: #d29922;
+  --radius-md: 8px;  --radius-lg: 12px;  --radius-full: 9999px;
+  --font-display: 'SF Pro Display', -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+  --font-mono: ui-monospace, 'SF Mono', Menlo, monospace;
+  --ease-out: cubic-bezier(.2,.8,.2,1);
+}
+[data-theme="light"] {
+  --bg: #ffffff;  --bg-secondary: #f6f8fa;
+  --surface: #ffffff;  --surface-hover: #f3f4f6;  --surface-active: #eaeef2;
+  --border: #d0d7de;  --border-light: #e1e4e8;
+  --accent: #1f6feb;  --accent-hover: #388bfd;
+  --accent-muted: rgba(31,111,235,.12);  --accent-subtle: rgba(31,111,235,.06);
+  --fg: #1f2328;  --fg-secondary: #656d76;  --fg-tertiary: #8b949e;
+  --error: #cf222e;  --error-muted: rgba(207,34,46,.1);
+}
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+html { font-size: 16px; -webkit-font-smoothing: antialiased; }
+body {
+  font-family: var(--font-display);
+  background: var(--bg); color: var(--fg);
+  padding: 40px 32px 80px;
+  transition: background .2s ease, color .2s ease;
+}
+.page { max-width: 1180px; margin: 0 auto; }
+
+/* ---- page chrome ---- */
+.page-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; margin-bottom: 36px; }
+h1 { font-size: 24px; font-weight: 700; letter-spacing: -.02em; }
+h1 .tag { font-size: 11px; font-weight: 600; color: var(--accent); background: var(--accent-muted); padding: 3px 9px; border-radius: var(--radius-full); vertical-align: 3px; margin-left: 10px; }
+.subtitle { margin-top: 8px; font-size: 13.5px; color: var(--fg-secondary); line-height: 1.7; max-width: 720px; }
+.theme-toggle {
+  flex-shrink: 0; display: inline-flex; align-items: center; gap: 7px;
+  padding: 8px 14px; font-size: 12.5px; font-weight: 600; font-family: inherit;
+  color: var(--fg-secondary); background: var(--surface);
+  border: 1px solid var(--border); border-radius: var(--radius-md); cursor: pointer;
+}
+.theme-toggle:hover { background: var(--surface-hover); color: var(--fg); }
+.section-title { font-size: 13px; font-weight: 700; text-transform: uppercase; letter-spacing: .08em; color: var(--fg-tertiary); margin: 44px 0 16px; }
+.section-title .no { font-family: var(--font-mono); color: var(--accent); margin-right: 8px; }
+code.inline { font-family: var(--font-mono); font-size: 12px; background: var(--surface); border: 1px solid var(--border); border-radius: 5px; padding: 1px 6px; }
+
+/* ---- problem cards ---- */
+.problem-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 12px; }
+.problem-card {
+  padding: 16px 18px; background: var(--surface);
+  border: 1px solid var(--border); border-radius: var(--radius-lg);
+}
+.problem-card .pc-no { font-family: var(--font-mono); font-size: 11px; color: var(--error); font-weight: 700; }
+.problem-card h3 { margin-top: 6px; font-size: 14px; font-weight: 650; }
+.problem-card p { margin-top: 7px; font-size: 12.5px; line-height: 1.65; color: var(--fg-secondary); }
+.problem-card .pc-file { display: inline-block; margin-top: 10px; font-family: var(--font-mono); font-size: 10.5px; color: var(--fg-tertiary); }
+
+/* ---- gesture map ---- */
+.gesture-map {
+  display: grid; grid-template-columns: 1.15fr .85fr; gap: 20px; align-items: stretch;
+}
+@media (max-width: 860px) { .gesture-map { grid-template-columns: 1fr; } }
+.gm-card { padding: 22px; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-lg); }
+.gm-card h3 { font-size: 13.5px; font-weight: 650; margin-bottom: 16px; }
+.gm-track { position: relative; }
+.gm-lane { display: flex; align-items: center; gap: 12px; }
+.gm-lane + .gm-lane { margin-top: 14px; }
+.gm-chip {
+  flex-shrink: 0; width: 118px; padding: 7px 10px; text-align: center;
+  font-family: var(--font-mono); font-size: 11px; font-weight: 600;
+  border: 1px solid var(--border-light); border-radius: 7px; background: var(--bg-secondary);
+  color: var(--fg-secondary);
+}
+.gm-chip.hi { border-color: color-mix(in srgb, var(--accent) 45%, transparent); background: var(--accent-subtle); color: var(--accent); }
+.gm-chip.dg { border-color: color-mix(in srgb, var(--error) 45%, transparent); background: var(--error-muted); color: var(--error); }
+.gm-desc { font-size: 12.5px; line-height: 1.6; color: var(--fg-secondary); }
+.gm-desc b { color: var(--fg); font-weight: 600; }
+.gm-rule { margin-top: 18px; padding-top: 14px; border-top: 1px dashed var(--border-light); font-family: var(--font-mono); font-size: 11px; line-height: 1.9; color: var(--fg-tertiary); }
+.gm-diagram { position: relative; padding: 18px 14px 8px; }
+.gd-lanes { display: flex; flex-direction: column; gap: 8px; }
+.gd-seg { display: flex; align-items: center; height: 54px; border-radius: 10px; font-family: var(--font-mono); font-size: 10.5px; }
+.gd-seg .lbl { flex: 1; text-align: center; letter-spacing: .04em; }
+.gd-edge  { background: repeating-linear-gradient(45deg, var(--surface-hover), var(--surface-hover) 6px, var(--surface) 6px, var(--surface) 12px); border: 1px dashed var(--border-light); color: var(--fg-tertiary); }
+.gd-rest  { background: var(--accent-subtle); border: 1px solid color-mix(in srgb, var(--accent) 40%, transparent); color: var(--accent); }
+.gd-swipe { background: linear-gradient(90deg, color-mix(in srgb, var(--accent) 26%, transparent), color-mix(in srgb, var(--accent) 10%, transparent)); border: 1px solid color-mix(in srgb, var(--accent) 40%, transparent); color: var(--fg); }
+.gd-danger{ background: var(--error-muted); border: 1px solid color-mix(in srgb, var(--error) 40%, transparent); color: var(--error); }
+.gd-axis { display: flex; margin-top: 10px; font-family: var(--font-mono); font-size: 10px; color: var(--fg-tertiary); }
+.gd-axis span { flex: 1; text-align: center; }
+.gd-axis .w { flex: 2.4; }
+
+/* ---- phone demo ---- */
+.demo-row { display: flex; gap: 24px; flex-wrap: wrap; align-items: flex-start; }
+.demo-block { }
+.demo-caption { max-width: 375px; margin-top: 12px; font-size: 12.5px; line-height: 1.7; color: var(--fg-secondary); }
+.demo-caption b { color: var(--fg); font-weight: 600; }
+.phone {
+  width: 375px; max-width: 100%;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border-light); border-radius: 34px;
+  padding: 10px;
+  box-shadow: 0 12px 36px rgba(0,0,0,.32);
+  user-select: none; -webkit-user-select: none;
+}
+.phone-screen {
+  position: relative; overflow: hidden;
+  background: var(--bg); border-radius: 26px;
+  height: 560px; display: flex; flex-direction: column;
+}
+.phone-status { display: flex; justify-content: space-between; padding: 12px 20px 6px; font-family: var(--font-mono); font-size: 11px; color: var(--fg-secondary); }
+.phone-appbar { display: flex; align-items: center; gap: 10px; padding: 6px 16px 10px; }
+.phone-appbar .back { width: 30px; height: 30px; display: grid; place-items: center; color: var(--accent); font-size: 17px; }
+.phone-appbar h2 { flex: 1; min-width: 0; font-size: 15px; font-weight: 650; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.phone-appbar .new-btn { width: 30px; height: 30px; display: grid; place-items: center; border-radius: 50%; background: var(--accent-muted); color: var(--accent); font-size: 16px; font-weight: 600; }
+.phone-list { flex: 1; overflow-y: auto; padding: 4px 12px 18px; overscroll-behavior: contain; }
+.group-label { display: flex; align-items: center; gap: 7px; margin: 12px 2px 8px; font-size: 10.5px; font-weight: 700; letter-spacing: .09em; color: var(--fg-tertiary); }
+.group-label .cnt { font-family: var(--font-mono); font-weight: 500; color: var(--fg-tertiary); }
+
+/* ---- mobile session card (faithful to MobileSessionCard.vue) ---- */
+.mcard { position: relative; overflow: hidden; border-radius: 12px; margin-bottom: 8px; }
+.mcard.removing { transition: height .28s var(--ease-out), opacity .2s ease, margin .28s var(--ease-out); opacity: 0; margin-bottom: 0; }
+.mcard-actions { position: absolute; inset: 0 0 auto auto; display: flex; height: 100%; opacity: 0; transition: opacity .16s ease; }
+.mcard-actions.revealed { opacity: 1; }
+.mcard-actions .act {
+  width: 72px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 4px;
+  border: 0; color: #fff; font-size: 10px; font-weight: 600; font-family: inherit; cursor: pointer;
+}
+.mcard-actions .act svg { width: 17px; height: 17px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+.act-pin { background: var(--accent); }
+.act-del { background: var(--error); }
+.mcard-face {
+  position: relative; z-index: 1;
+  display: flex; min-height: 73px; align-items: flex-start; gap: 10px;
+  padding: 12px 10px 12px 14px;
+  border: 1px solid var(--border); border-radius: 12px;
+  background: var(--surface); cursor: pointer;
+  touch-action: pan-y;
+  transition: transform .18s var(--ease-out), border-color .15s, background .15s;
+}
+.mcard-face.pressing { transform: scale(.98); background: var(--surface-active); transition: transform .12s ease, background .12s ease; }
+.mcard-face:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.mcard-face.dragging { transition: background .15s; }
+.dot { position: relative; flex: 0 0 8px; width: 8px; height: 8px; margin-top: 6px; border-radius: 50%; background: #6b7280; }
+.dot.running { background: #22c55e; } .dot.busy, .dot.retry { background: #d29922; }
+.dot.idle { background: #eab308; } .dot.completed { background: #9ca3af; }
+.dot.exited { background: #6b7280; } .dot.error { background: #ef4444; }
+.pulse { position: absolute; inset: -3px; border: 1.5px solid #22c55e; border-radius: 50%; animation: mpulse 1.5s infinite; }
+@keyframes mpulse { 0% { opacity: .8; transform: scale(1); } 100% { opacity: 0; transform: scale(1.6); } }
+.mcard-body { flex: 1; min-width: 0; padding-top: 1px; }
+.mcard-titlerow { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.mcard-title { min-width: 0; overflow: hidden; font-size: 14px; font-weight: 600; line-height: 18px; text-overflow: ellipsis; white-space: nowrap; }
+.pin-ico { flex: 0 0 11px; width: 11px; height: 11px; fill: color-mix(in srgb, var(--fg-secondary) 80%, transparent); }
+.mcard-ctx { display: flex; align-items: center; gap: 6px; margin-top: 8px; overflow: hidden; font-size: 11px; line-height: 14px; white-space: nowrap; color: var(--fg-secondary); }
+.mcard-ctx .sep { width: 3px; height: 3px; border-radius: 50%; background: var(--fg-tertiary); flex: 0 0 3px; }
+.mcard-ctx .model { font-family: var(--font-mono); }
+.mcard-ctx .exited-lbl { color: var(--warning); }
+.mcard-tail { flex: 0 0 42px; width: 42px; display: flex; flex-direction: column; align-items: flex-end; gap: 5px; }
+.mcard-time { font-size: 11px; line-height: 14px; white-space: nowrap; color: var(--fg-tertiary); }
+.mcard-chev { width: 12px; height: 12px; margin-right: 10px; fill: none; stroke: var(--fg-secondary); stroke-width: 1.7; stroke-linecap: round; }
+.swipe-hint {
+  position: absolute; z-index: 2; top: 50%; right: 6px; transform: translateY(-50%);
+  display: flex; align-items: center; gap: 5px; padding: 5px 9px;
+  border-radius: var(--radius-full); background: var(--accent-muted); color: var(--accent);
+  font-size: 10.5px; font-weight: 600; pointer-events: none;
+  animation: hint-nudge 1.8s ease-in-out infinite;
+}
+.swipe-hint.gone { display: none; }
+@keyframes hint-nudge { 0%, 100% { transform: translate(0, -50%); } 50% { transform: translate(-7px, -50%); } }
+@media (prefers-reduced-motion: reduce) {
+  .swipe-hint { animation: none; } .pulse { animation: none; }
+  .mcard-face, .mcard-actions { transition: none; }
+}
+
+/* ---- bottom sheet ---- */
+.sheet-scrim {
+  position: absolute; inset: 0; z-index: 40; display: none;
+  background: rgba(1,4,9,.62); backdrop-filter: blur(2px);
+}
+.sheet-scrim.open { display: block; animation: fade-in .18s ease; }
+@keyframes fade-in { from { opacity: 0; } to { opacity: 1; } }
+.sheet {
+  position: absolute; inset: auto 0 0 0; z-index: 41;
+  background: var(--surface); border-top: 1px solid var(--border-light);
+  border-radius: 16px 16px 0 0; padding: 8px 14px calc(14px + env(safe-area-inset-bottom, 0px));
+  transform: translateY(102%); transition: transform .26s var(--ease-out);
+  box-shadow: 0 -8px 30px rgba(0,0,0,.35);
+}
+.sheet.open { transform: translateY(0); }
+.sheet-grab { width: 36px; height: 4px; margin: 4px auto 10px; border-radius: 2px; background: var(--border-light); }
+.sheet-title { font-size: 13.5px; font-weight: 650; text-align: center; }
+.sheet-sub { margin-top: 4px; font-size: 11.5px; line-height: 1.6; text-align: center; color: var(--fg-secondary); }
+.sheet-item {
+  display: flex; align-items: center; gap: 12px; width: 100%;
+  margin-top: 8px; padding: 13px 14px;
+  border: 0; border-radius: 10px; background: var(--surface-hover);
+  color: var(--fg); font-size: 13.5px; font-weight: 550; font-family: inherit; cursor: pointer;
+}
+.sheet-item:active { background: var(--surface-active); }
+.sheet-item svg { width: 16px; height: 16px; flex: 0 0 16px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+.sheet-item.danger { color: var(--error); }
+.sheet-cancel { margin-top: 10px; text-align: center; padding: 12px; border-radius: 10px; background: var(--bg-secondary); font-size: 13px; font-weight: 600; color: var(--fg-secondary); cursor: pointer; }
+.sheet-row { display: flex; gap: 10px; margin-top: 12px; }
+.sheet-row .btn { flex: 1; padding: 12px; border: 0; border-radius: 10px; font-size: 13.5px; font-weight: 650; font-family: inherit; cursor: pointer; }
+.btn-cancel { background: var(--surface-hover); color: var(--fg); }
+.btn-danger { background: var(--error); color: #fff; }
+.toast {
+  position: absolute; z-index: 50; inset: auto 0 18px; margin: 0 auto; width: max-content; max-width: 86%;
+  padding: 9px 16px; border-radius: var(--radius-full);
+  background: color-mix(in srgb, var(--accent) 88%, #000); color: #fff;
+  font-size: 12.5px; font-weight: 600; box-shadow: 0 6px 18px rgba(0,0,0,.35);
+  transform: translateY(16px); opacity: 0; transition: transform .22s var(--ease-out), opacity .22s ease;
+  pointer-events: none;
+}
+.toast.show { transform: translateY(0); opacity: 1; }
+
+/* ---- spec table ---- */
+.spec-table { width: 100%; border-collapse: collapse; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-lg); overflow: hidden; font-size: 12.5px; }
+.spec-table th { padding: 10px 14px; text-align: left; font-size: 11px; font-weight: 700; letter-spacing: .06em; text-transform: uppercase; color: var(--fg-tertiary); background: var(--bg-secondary); }
+.spec-table td { padding: 10px 14px; border-top: 1px solid var(--border); color: var(--fg-secondary); vertical-align: top; }
+.spec-table td:first-child { color: var(--fg); font-weight: 600; white-space: nowrap; }
+.spec-table .m { font-family: var(--font-mono); font-size: 11.5px; }
+
+/* ---- implementation notes ---- */
+.impl-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 12px; }
+.impl-card { padding: 16px 18px; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-lg); }
+.impl-card h3 { font-size: 13.5px; font-weight: 650; margin-bottom: 10px; }
+.impl-card ul { list-style: none; }
+.impl-card li { position: relative; padding-left: 18px; font-size: 12.5px; line-height: 1.7; color: var(--fg-secondary); }
+.impl-card li + li { margin-top: 6px; }
+.impl-card li::before { content: '▸'; position: absolute; left: 0; color: var(--accent); }
+.impl-card code { font-family: var(--font-mono); font-size: 11px; background: var(--bg-secondary); border: 1px solid var(--border); border-radius: 4px; padding: 0 5px; color: var(--fg); }
+
+.footer { margin-top: 56px; padding-top: 18px; border-top: 1px solid var(--border); font-size: 11.5px; color: var(--fg-tertiary); line-height: 1.8; }
+</style>
+</head>
+<body>
+<div class="page">
+
+  <header class="page-header">
+    <div>
+      <h1>移动端会话操作重设计<span class="tag">设计方案</span></h1>
+      <p class="subtitle">针对手机浏览器场景,重构 m 端会话列表「置顶 / 删除」的布局与交互。
+      交互总纲:<b>半滑露出快捷操作 · 全滑直达置顶 · 长按呼出完整菜单 · 删除走底部确认 sheet</b>,
+      并以一次性滑动提示与置顶 FLIP 动画补齐可发现性与操作反馈。下方原型可直接操作体验。</p>
+    </div>
+    <button class="theme-toggle" type="button" data-theme-toggle>◐ 切换主题</button>
+  </header>
+
+  <!-- ================= 01 现状诊断 ================= -->
+  <div class="section-title"><span class="no">01</span>现状诊断</div>
+  <div class="problem-grid">
+    <div class="problem-card">
+      <div class="pc-no">P1</div>
+      <h3>功能不可发现</h3>
+      <p>置顶与删除完全藏在左滑手势之后,界面没有任何提示。新用户在手机上几乎不可能自己找到这两个操作,功能等于不存在。</p>
+      <span class="pc-file">MobileSessionCard.vue — 无 hint 元素</span>
+    </div>
+    <div class="problem-card">
+      <div class="pc-no">P2</div>
+      <h3>长按语义被低频操作占用</h3>
+      <p>450ms 长按被绑定到「复制会话 ID」,与 iOS / Android「长按呼出菜单」的系统惯例相悖。复制 ID 是低频动作,却占据了移动端最高频的长按入口。</p>
+      <span class="pc-file">copySessionId() — setTimeout 500ms</span>
+    </div>
+    <div class="problem-card">
+      <div class="pc-no">P3</div>
+      <h3>展开态不互斥</h3>
+      <p>每张卡片独立维护 <code class="inline">actionsRevealed</code>,连续滑动多张卡片时界面上会同时残留多个展开的操作区,进入会话前需要先逐个收起。</p>
+      <span class="pc-file">actionsRevealed = ref(false) — 卡片局部状态</span>
+    </div>
+    <div class="problem-card">
+      <div class="pc-no">P4</div>
+      <h3>删除确认可达性差</h3>
+      <p>删除确认使用居中 alertdialog,「删除」按钮落在单手拇指热区之外;5.5 英寸屏上误触「取消」与「删除」相邻的风险也高。</p>
+      <span class="pc-file">mobile-delete-overlay — 居中 dialog</span>
+    </div>
+    <div class="problem-card">
+      <div class="pc-no">P5</div>
+      <h3>置顶缺少结果反馈</h3>
+      <p>点击「置顶」后列表瞬间重排,卡片去向没有任何动画或说明,用户无法确认操作是否生效、卡片去了哪里。</p>
+      <span class="pc-file">togglePin() — 仅收起操作区 + emit</span>
+    </div>
+  </div>
+
+  <!-- ================= 02 交互总纲 ================= -->
+  <div class="section-title"><span class="no">02</span>交互总纲 · 手势地图</div>
+  <div class="gesture-map">
+    <div class="gm-card">
+      <h3>一张卡片上的四种手势</h3>
+      <div class="gm-track">
+        <div class="gm-lane">
+          <div class="gm-chip">半滑 · 露出</div>
+          <div class="gm-desc">水平拖拽 <b>0 → 64px</b> 卡片跟手左移,右侧渐显快捷操作(置顶 / 删除)。松手时位移 <b>≥ 40px</b> 驻留展开,否则回弹。驻留态全局互斥:滑开新卡片自动收起上一张。</div>
+        </div>
+        <div class="gm-lane">
+          <div class="gm-chip hi">全滑 · 置顶</div>
+          <div class="gm-desc">拖拽超过 <b>150px</b> 或快速甩动(速度 &gt; 0.5px/ms)后松手,不再驻留,直接执行置顶 / 取消置顶:卡片弹回原位并以 FLIP 动画飞向置顶分组。高频操作一势完成。</div>
+        </div>
+        <div class="gm-lane">
+          <div class="gm-chip hi">长按 · 菜单</div>
+          <div class="gm-desc">按住 <b>450ms</b>(位移 &lt; 8px)呼出底部上下文菜单:置顶、复制会话 ID、删除(仅终态会话)。替代现有「长按复制 ID」,对齐桌面端 SessionActions 的能力集。</div>
+        </div>
+        <div class="gm-lane">
+          <div class="gm-chip dg">删除 · 确认</div>
+          <div class="gm-desc">菜单或快捷区中的「删除」均先弹出<b>底部确认 sheet</b>:会话标题 + 影响说明 + 取消 / 删除按钮,全部落在拇指热区内。确认后卡片原地收合消失。</div>
+        </div>
+        <div class="gm-rule">
+boundary  ╴ touch-action: pan-y → 垂直滚动始终优先
+         ╴ 距屏幕左缘 ≤ 20px 不启动手势 → 留给 iOS 系统返回
+         ╴ navigator.vibrate(10/15) → 驻留 / 菜单弹出触觉反馈
+         ╴ prefers-reduced-motion → 关闭 FLIP、回弹、脉冲动画
+        </div>
+      </div>
+    </div>
+    <div class="gm-card gm-diagram">
+      <h3>触控分区(375pt 视口)</h3>
+      <div class="gd-lanes">
+        <div class="gd-seg gd-edge"><span class="lbl">≤20px 系统返回保留区(手势不启动)</span></div>
+        <div class="gd-seg gd-swipe"><span class="lbl">卡片主体 · 水平拖拽 = 快捷操作</span></div>
+        <div class="gd-seg gd-rest"><span class="lbl">操作露出区 72 / 144px</span></div>
+        <div class="gd-seg gd-edge"><span class="lbl">右缘 · 一次性滑动提示(首次)</span></div>
+        <div class="gd-seg gd-danger"><span class="lbl">删除按钮热区 ≥ 44 × 44pt(放大到整高)</span></div>
+      </div>
+      <div class="gd-axis"><span>左缘</span><span class="w">列表卡片(垂直滚动优先)</span><span>右缘</span></div>
+    </div>
+  </div>
+
+  <!-- ================= 03 可交互原型 ================= -->
+  <div class="section-title"><span class="no">03</span>可交互原型</div>
+  <div class="demo-row">
+
+    <!-- ============ Demo A: 滑动 ============ -->
+    <div class="demo-block">
+      <div class="phone" data-demo="swipe">
+        <div class="phone-screen">
+          <div class="phone-status"><span>9:41</span><span>●●● Wi-Fi</span></div>
+          <div class="phone-appbar">
+            <span class="back">‹</span>
+            <h2>muwenbin 的主机</h2>
+            <span class="new-btn">＋</span>
+          </div>
+          <div class="phone-list" data-list></div>
+        </div>
+      </div>
+      <p class="demo-caption"><b>原型 A · 滑动操作与置顶</b> — 在卡片上向左拖拽:半滑露出操作区(注意驻留互斥),继续拉满或快速甩动直接置顶 / 取消置顶,卡片以 FLIP 动画换组。首卡片右缘的滑动提示在首次成功滑动后消失。</p>
+    </div>
+
+    <!-- ============ Demo B: 长按与删除 ============ -->
+    <div class="demo-block">
+      <div class="phone" data-demo="press">
+        <div class="phone-screen">
+          <div class="phone-status"><span>9:41</span><span>●●● Wi-Fi</span></div>
+          <div class="phone-appbar">
+            <span class="back">‹</span>
+            <h2>muwenbin 的主机</h2>
+            <span class="new-btn">＋</span>
+          </div>
+          <div class="phone-list" data-list></div>
+
+          <div class="sheet-scrim" data-scrim></div>
+          <div class="sheet" data-menu-sheet>
+            <div class="sheet-grab"></div>
+            <div class="sheet-title" data-menu-title>会话操作</div>
+            <button class="sheet-item" type="button" data-m-pin>
+              <svg viewBox="0 0 24 24"><path d="M12 17v5M9 10.8V4h6v6.8l3 3.2v2H6v-2l3-3.2z"/></svg>
+              <span data-m-pin-label>置顶</span>
+            </button>
+            <button class="sheet-item" type="button" data-m-copy>
+              <svg viewBox="0 0 24 24"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"/></svg>
+              <span>复制会话 ID</span>
+            </button>
+            <button class="sheet-item danger" type="button" data-m-del>
+              <svg viewBox="0 0 24 24"><path d="M3 6h18M8 6V4h8v2m3 0-1 14H6L5 6"/></svg>
+              <span>删除会话</span>
+            </button>
+            <div class="sheet-cancel" data-m-cancel>取消</div>
+          </div>
+
+          <div class="sheet" data-confirm-sheet>
+            <div class="sheet-grab"></div>
+            <div class="sheet-title">删除会话</div>
+            <div class="sheet-sub" data-c-title></div>
+            <div class="sheet-sub">会话消息与文件变更将从 daemon 删除,且无法恢复。</div>
+            <div class="sheet-row">
+              <button class="btn btn-cancel" type="button" data-c-cancel>取消</button>
+              <button class="btn btn-danger" type="button" data-c-confirm>删除</button>
+            </div>
+          </div>
+
+          <div class="toast" data-toast></div>
+        </div>
+      </div>
+      <p class="demo-caption"><b>原型 B · 长按菜单与删除确认</b> — 长按任意卡片 450ms(卡片按压高亮)呼出底部菜单;点击「删除会话」弹出确认 sheet,确认后卡片原地收合消失。终态(已退出 / 完成)会话才有删除项。</p>
+    </div>
+
+  </div>
+
+  <!-- ================= 04 交互规格 ================= -->
+  <div class="section-title"><span class="no">04</span>交互规格</div>
+  <table class="spec-table">
+    <thead><tr><th>参数</th><th>取值</th><th>说明</th></tr></thead>
+    <tbody>
+      <tr><td>操作按钮热区</td><td class="m">≥ 44 × 44pt</td><td>iOS HIG 44pt / Material 48dp 下限;露出区按钮放大到卡片整高,宽 72px。</td></tr>
+      <tr><td>驻留阈值</td><td class="m">40px(≈62% 操作区宽)</td><td>松手位移超过即驻留展开,否则回弹;与现有 36px 阈值接近,肌肉记忆兼容。</td></tr>
+      <tr><td>全滑阈值</td><td class="m">150px ∥ 速度 &gt; 0.5px/ms</td><td>满足其一即判定全滑,松手直接执行置顶 / 取消置顶,不经驻留态。</td></tr>
+      <tr><td>长按判定</td><td class="m">450ms · 容差 8px</td><td>与系统长按节奏一致;触发时卡片 scale(.98) 高亮 + 触觉反馈。</td></tr>
+      <tr><td>sheet 动效</td><td class="m">260ms ease-out · 遮罩 62%</td><td>底部滑入;遮罩点击 / 下拉关闭;进入后焦点锁定首个可操作项。</td></tr>
+      <tr><td>FLIP 换组</td><td class="m">350ms · translateY</td><td>置顶后卡片从原位置飞向置顶分组;取消置顶飞回全部分组按时间序位置。</td></tr>
+      <tr><td>删除收合</td><td class="m">280ms height→0</td><td>确认后卡片高度收合 + 相邻卡片上移填补,列表无跳变。</td></tr>
+      <tr><td>触觉反馈</td><td class="m">vibrate(10) / (15)</td><td>驻留展开 10ms、菜单弹出 15ms;不支持 vibrate 的浏览器静默降级。</td></tr>
+      <tr><td>滑动提示</td><td class="m">一次性 · localStorage</td><td>首次进入列表时首卡片右缘显示「‹‹ 左滑操作」微动提示,首次成功滑动后永久隐藏。</td></tr>
+      <tr><td>状态矩阵</td><td class="m">见下</td><td>running / busy / retry / idle:仅置顶;exited / completed / killed / error:置顶 + 删除。与现有 <code class="inline">isTerminal</code> 判定一致。</td></tr>
+    </tbody>
+  </table>
+
+  <!-- ================= 05 落地要点 ================= -->
+  <div class="section-title"><span class="no">05</span>落地要点</div>
+  <div class="impl-grid">
+    <div class="impl-card">
+      <h3>MobileSessionCard.vue 改造</h3>
+      <ul>
+        <li><code>actionsRevealed</code> 提升为父级管理(provide / inject 或 props + emit),实现全局 single-open 互斥。</li>
+        <li><code>onPointerUp</code> 增加速度判定(记录最近两次 move 的时间差),命中全滑直接 <code>emit('toggle-pin')</code>。</li>
+        <li>长按分支从「复制 ID」改为 <code>emit('long-press')</code>,复制 ID 移入菜单;保留 <code>copySessionId</code> 供菜单调用。</li>
+        <li>操作露出区高度由 <code>73px</code> 改为卡片整高(<code>inset: 0</code>),满足 44pt 热区。</li>
+      </ul>
+    </div>
+    <div class="impl-card">
+      <h3>SessionList.vue 改造</h3>
+      <ul>
+        <li>新增底部 sheet 组件(菜单 + 删除确认两个实例),替代现有 <code>mobile-delete-overlay</code> 居中弹窗。</li>
+        <li>置顶分组标签「置顶 · N」;<code>toggleMobilePin</code> 后触发 FLIP 动画(记录 first rect → 重排 → 反演 transform)。</li>
+        <li>滑动提示状态:<code>localStorage['m.swipe-hint.done']</code>,首卡渲染时未标记则显示。</li>
+        <li>删除确认后走现有 <code>confirmMobileDelete</code>,补充卡片收合动画与列表空态兜底。</li>
+      </ul>
+    </div>
+    <div class="impl-card">
+      <h3>边界与无障碍</h3>
+      <ul>
+        <li>保留 <code>touch-action: pan-y</code>;pointerdown 时 <code>setPointerCapture</code>,pointercancel 全量复位。</li>
+        <li>卡片左缘 20px 内不启动水平拖拽,让位 iOS 边缘返回。</li>
+        <li>sheet:<code>role="dialog"</code> + <code>aria-modal</code>,焦点圈定;菜单项 <code>role="menuitem"</code>。</li>
+        <li><code>prefers-reduced-motion</code> 下 FLIP / 回弹 / 脉冲全部禁用,操作瞬时完成。</li>
+        <li>键盘与桌面端不受影响:桌面继续走 SessionActions「···」菜单。</li>
+      </ul>
+    </div>
+  </div>
+
+  <div class="footer">
+    pocketctl · 移动端会话操作重设计方案 · 2026-09 · 交互模型:半滑露出 / 全滑置顶 / 长按菜单 / 删除 sheet<br>
+    原型基于 MobileSessionCard.vue 现有样式与数据结构还原;落地时以本页 §04 规格为准。
+  </div>
+</div>
+
+<script>
+/* ============================================================
+   theme toggle
+   ============================================================ */
+(function () {
+  var btn = document.querySelector('[data-theme-toggle]');
+  btn.addEventListener('click', function () {
+    var root = document.documentElement;
+    root.dataset.theme = root.dataset.theme === 'dark' ? 'light' : 'dark';
+  });
+})();
+
+/* ============================================================
+   shared: session card markup + data
+   ============================================================ */
+var CARDS = [
+  { id: 'pin-prod-pg', title: '修复生产 PG13 聚合 SQL', status: 'running', agent: 'claude-code', model: 'sonnet', time: '3 分钟前', pinned: true, terminal: false },
+  { id: 'pin-relay-rl', title: 'relay 限流阶梯压测', status: 'completed', agent: 'codex', model: 'gpt-5.4', time: '1 小时前', pinned: true, terminal: true },
+  { id: 'conpty', title: 'Windows ConPTY 适配', status: 'busy', agent: 'claude-code', model: 'sonnet', time: '12 分钟前', pinned: false, terminal: false },
+  { id: 'desktop-obs', title: 'codex-desktop observer 接入', status: 'exited', agent: 'codex-desktop', model: '—', time: '2 小时前', pinned: false, terminal: true },
+  { id: 'memory-p2', title: 'memory Phase 2 迁移', status: 'idle', agent: 'opencode', model: 'cl-4.6', time: '昨天', pinned: false, terminal: false },
+  { id: 'release-rc', title: '发布链候选构建契约', status: 'completed', agent: 'claude-code', model: 'haiku', time: '2 天前', pinned: false, terminal: true }
+];
+
+function buzz(ms) { if (navigator.vibrate) navigator.vibrate(ms); }
+function reduced() { return matchMedia('(prefers-reduced-motion: reduce)').matches; }
+
+function cardHTML(c) {
+  return '' +
+    '<div class="mcard" data-id="' + c.id + '">' +
+      '<div class="mcard-actions">' +
+        '<button class="act act-pin" type="button"><svg viewBox="0 0 24 24"><path d="M12 17v5M9 10.8V4h6v6.8l3 3.2v2H6v-2l3-3.2z"/></svg><span>' + (c.pinned ? '取消置顶' : '置顶') + '</span></button>' +
+        (c.terminal ? '<button class="act act-del" type="button"><svg viewBox="0 0 24 24"><path d="M3 6h18M8 6V4h8v2m3 0-1 14H6L5 6"/></svg><span>删除</span></button>' : '') +
+      '</div>' +
+      '<article class="mcard-face" tabindex="0">' +
+        '<span class="dot ' + c.status + '">' + (c.status === 'running' ? '<span class="pulse"></span>' : '') + '</span>' +
+        '<div class="mcard-body">' +
+          '<div class="mcard-titlerow"><span class="mcard-title">' + c.title + '</span>' +
+            (c.pinned ? '<svg class="pin-ico" viewBox="0 0 16 16"><path d="M10.8 1.6 14.4 5.2l-2 1.2-.8 3.2-1 1-2.2-2.2-4.8 4.8-.8-.8 4.8-4.8-2.2-2.2 1-1 3.2-.8 1.2-2Z"/></svg>' : '') +
+          '</div>' +
+          '<div class="mcard-ctx"><span>' + c.agent + '</span><span class="sep"></span><span class="model">' + c.model + '</span>' +
+            (c.status === 'exited' ? '<span class="sep"></span><span class="exited-lbl">已退出</span>' : '') +
+          '</div>' +
+        '</div>' +
+        '<div class="mcard-tail"><span class="mcard-time">' + c.time + '</span>' +
+          '<svg class="mcard-chev" viewBox="0 0 16 16"><path d="m6 3.5 4.5 4.5L6 12.5"/></svg>' +
+        '</div>' +
+      '</article>' +
+    '</div>';
+}
+
+function renderList(listEl, hint) {
+  listEl.innerHTML = '';
+  var pinned = CARDS.filter(function (c) { return c.pinned; });
+  var rest = CARDS.filter(function (c) { return !c.pinned; });
+  if (pinned.length) {
+    var g1 = document.createElement('div');
+    g1.innerHTML = '<div class="group-label">置顶 <span class="cnt">' + pinned.length + '</span></div>';
+    g1.dataset.group = 'pinned';
+    pinned.forEach(function (c) { g1.insertAdjacentHTML('beforeend', cardHTML(c)); });
+    listEl.appendChild(g1);
+  }
+  var g2 = document.createElement('div');
+  g2.innerHTML = '<div class="group-label">全部 <span class="cnt">' + rest.length + '</span></div>';
+  g2.dataset.group = 'all';
+  rest.forEach(function (c) { g2.insertAdjacentHTML('beforeend', cardHTML(c)); });
+  listEl.appendChild(g2);
+  if (hint) {
+    var firstCard = listEl.querySelector('.mcard');
+    if (firstCard) {
+      var h = document.createElement('span');
+      h.className = 'swipe-hint'; h.textContent = '‹‹ 左滑操作';
+      firstCard.appendChild(h); // sits on the stack, does not travel with the swipe
+    }
+  }
+}
+
+function findCard(id) { return CARDS.filter(function (c) { return c.id === id; })[0]; }
+
+/* Keep the pinned group present when needed and drop it when empty. */
+function ensureGroups(listEl) {
+  var pg = listEl.querySelector('[data-group="pinned"]');
+  var hasPinned = pg && pg.querySelector('.mcard');
+  if (pg && !hasPinned) pg.remove();
+  if (!hasPinned && CARDS.some(function (c) { return c.pinned; })) {
+    var g = document.createElement('div');
+    g.dataset.group = 'pinned';
+    g.innerHTML = '<div class="group-label">置顶 <span class="cnt">0</span></div>';
+    listEl.insertBefore(g, listEl.firstChild);
+  }
+  listEl.querySelectorAll('[data-group]').forEach(function (g) {
+    var cnt = g.querySelector('.cnt');
+    if (cnt) cnt.textContent = g.querySelectorAll('.mcard').length;
+  });
+}
+
+/* FLIP: move a card element between groups with translateY animation */
+function flipTo(cardEl, targetGroup) {
+  var first = cardEl.getBoundingClientRect();
+  targetGroup.appendChild(cardEl);
+  var last = cardEl.getBoundingClientRect();
+  if (reduced()) return;
+  cardEl.style.transition = 'none';
+  cardEl.style.transform = 'translateY(' + (first.top - last.top) + 'px)';
+  requestAnimationFrame(function () {
+    cardEl.style.transition = 'transform .35s cubic-bezier(.2,.8,.2,1)';
+    cardEl.style.transform = '';
+    setTimeout(function () { cardEl.style.transition = ''; }, 360);
+  });
+}
+
+/* ============================================================
+   Demo A — swipe: reveal, full-swipe pin, mutual exclusion, hint
+   ============================================================ */
+(function () {
+  var phone = document.querySelector('[data-demo="swipe"]');
+  if (!phone) return;
+  var list = phone.querySelector('[data-list]');
+  renderList(list, true);
+
+  var revealedCard = null;   // single-open mutual exclusion
+  var hintDone = false;
+  var suppressClick = false; // a finished drag must not collapse via click
+
+  function bound(card) {
+    return card.terminal ? 144 : 72;
+  }
+  function collapse(face) {
+    face.style.transform = '';
+    face.parentElement.querySelector('.mcard-actions').classList.remove('revealed');
+    if (revealedCard === face) revealedCard = null;
+  }
+  function setRevealed(face) {
+    if (revealedCard && revealedCard !== face) collapse(revealedCard);
+    revealedCard = face;
+    face.parentElement.querySelector('.mcard-actions').classList.add('revealed');
+  }
+
+  function togglePin(card, cardEl) {
+    card.pinned = !card.pinned;
+    buzz(10);
+    ensureGroups(list); // pinned group may need to be (re)created before FLIP targets it
+    var target = card.pinned ? list.querySelector('[data-group="pinned"]') : list.querySelector('[data-group="all"]');
+    // rebuild the card DOM (pin icon / action label / delete button change)
+    cardEl.insertAdjacentHTML('beforebegin', cardHTML(card));
+    var fresh = cardEl.previousElementSibling;
+    cardEl.remove();
+    flipTo(fresh, target);
+    ensureGroups(list);
+  }
+
+  list.addEventListener('pointerdown', function (ev) {
+    if (ev.button !== undefined && ev.button !== 0) return;
+    var face = ev.target.closest('.mcard-face');
+    if (!face) return;
+    var rect = face.getBoundingClientRect();
+    if (ev.clientX - rect.left <= 20) return;          // iOS back-gesture reserve
+    var cardEl = face.parentElement;
+    var card = findCard(cardEl.dataset.id);
+    var startX = ev.clientX, startY = ev.clientY;
+    var lastX = ev.clientX, lastT = performance.now();
+    var dx = 0, dy = 0, dragged = false, w = bound(card);
+    var origin = (revealedCard === face) ? -w : 0;
+    var timer = null;
+
+    function onMove(e) {
+      dx = e.clientX - startX; dy = e.clientY - startY;
+      if (!dragged) {
+        if (Math.abs(dy) > Math.abs(dx) && Math.abs(dy) > 8) { cleanup(); return; }
+        if (Math.abs(dx) < 6) return;
+        dragged = true;
+        face.classList.add('dragging');
+        face.setPointerCapture(e.pointerId);
+      }
+      lastX = e.clientX; lastT = performance.now();
+      var nx = Math.max(-w * 1.18, Math.min(0, origin + dx));
+      face.style.transform = 'translateX(' + nx + 'px)';
+      var over = Math.min(1, Math.max(0, -nx / w));
+      face.parentElement.querySelector('.mcard-actions').style.opacity = over;
+    }
+    function onUp(e) {
+      if (timer) clearTimeout(timer);
+      if (!dragged) { cleanup(); return; }
+      suppressClick = true;
+      var now = performance.now();
+      var vx = Math.abs(e.clientX - lastX) / Math.max(1, now - lastT); // px per ms
+      var off = origin + dx;
+      if (off < -150 || (vx > 0.5 && off < -60)) {
+        // full swipe → pin / unpin directly
+        face.style.transform = '';
+        face.parentElement.querySelector('.mcard-actions').style.opacity = '';
+        if (revealedCard === face) revealedCard = null;
+        if (!hintDone) { hintDone = true; var h = face.querySelector('.swipe-hint'); if (h) h.classList.add('gone'); }
+        togglePin(card, cardEl);
+        cleanup(); return;
+      }
+      var stay = off < -40;
+      face.classList.remove('dragging');
+      face.style.transform = stay ? 'translateX(' + -w + 'px)' : '';
+      face.parentElement.querySelector('.mcard-actions').style.opacity = '';
+      if (stay) { setRevealed(face); buzz(10); }
+      else if (revealedCard === face) { face.parentElement.querySelector('.mcard-actions').classList.remove('revealed'); revealedCard = null; }
+      if (!hintDone && dragged) { hintDone = true; var hh = face.querySelector('.swipe-hint'); if (hh) hh.classList.add('gone'); }
+      cleanup();
+    }
+    function cleanup() {
+      face.removeEventListener('pointermove', onMove);
+      face.removeEventListener('pointerup', onUp);
+      face.removeEventListener('pointercancel', cleanup);
+      face.classList.remove('dragging');
+    }
+    face.addEventListener('pointermove', onMove);
+    face.addEventListener('pointerup', onUp);
+    face.addEventListener('pointercancel', cleanup);
+  });
+
+  // taps: action buttons / collapse / open (no-op toast-less)
+  list.addEventListener('click', function (ev) {
+    if (suppressClick) { suppressClick = false; return; } // gesture just ended
+    var pinBtn = ev.target.closest('.act-pin');
+    var delBtn = ev.target.closest('.act-del');
+    var face = ev.target.closest('.mcard-face');
+    if (pinBtn) {
+      var cardEl = pinBtn.closest('.mcard');
+      togglePin(findCard(cardEl.dataset.id), cardEl);
+      return;
+    }
+    if (delBtn) { collapse(face); return; } // demo A: delete lives in demo B
+    if (face && revealedCard === face) collapse(face);
+  });
+})();
+
+/* ============================================================
+   Demo B — long-press menu + delete confirm sheet + collapse
+   ============================================================ */
+(function () {
+  var phone = document.querySelector('[data-demo="press"]');
+  if (!phone) return;
+  var list = phone.querySelector('[data-list]');
+  var scrim = phone.querySelector('[data-scrim]');
+  var menu = phone.querySelector('[data-menu-sheet]');
+  var confirmS = phone.querySelector('[data-confirm-sheet]');
+  var toast = phone.querySelector('[data-toast]');
+  renderList(list, false);
+
+  var activeCard = null, activeEl = null, timer = null, toasted = null;
+
+  function showToast(text) {
+    toast.textContent = text;
+    toast.classList.add('show');
+    if (toasted) clearTimeout(toasted);
+    toasted = setTimeout(function () { toast.classList.remove('show'); }, 1800);
+  }
+  function closeSheets() {
+    scrim.classList.remove('open');
+    menu.classList.remove('open');
+    confirmS.classList.remove('open');
+  }
+  function openMenu(card, cardEl, face) {
+    activeCard = card; activeEl = cardEl;
+    menu.querySelector('[data-m-pin-label]').textContent = card.pinned ? '取消置顶' : '置顶';
+    menu.querySelector('[data-m-del]').style.display = card.terminal ? '' : 'none';
+    menu.querySelector('[data-menu-title]').textContent = card.title;
+    scrim.classList.add('open');
+    menu.classList.add('open');
+    buzz(15);
+    face.classList.remove('pressing');
+  }
+  function collapseCard(cardEl) {
+    cardEl.style.height = cardEl.offsetHeight + 'px';
+    void cardEl.offsetHeight; // reflow
+    cardEl.classList.add('removing');
+    cardEl.style.height = '0px';
+    setTimeout(function () {
+      cardEl.remove();
+      ensureGroups(list);
+    }, 300);
+  }
+
+  /* long-press detection */
+  list.addEventListener('pointerdown', function (ev) {
+    if (ev.button !== undefined && ev.button !== 0) return;
+    var face = ev.target.closest('.mcard-face');
+    if (!face) return;
+    var sx = ev.clientX, sy = ev.clientY;
+    timer = setTimeout(function () {
+      var cardEl = face.parentElement;
+      face.classList.add('pressing');
+      openMenu(findCard(cardEl.dataset.id), cardEl, face);
+    }, 450);
+    function cancel(e) {
+      if (Math.abs(e.clientX - sx) > 8 || Math.abs(e.clientY - sy) > 8 || e.type === 'pointerup') {
+        clearTimeout(timer);
+        face.classList.remove('pressing');
+        face.removeEventListener('pointermove', cancel);
+        face.removeEventListener('pointerup', cancel);
+        face.removeEventListener('pointercancel', cancel);
+      }
+    }
+    face.addEventListener('pointermove', cancel);
+    face.addEventListener('pointerup', cancel);
+    face.addEventListener('pointercancel', cancel);
+  });
+
+  /* menu actions */
+  menu.querySelector('[data-m-pin]').addEventListener('click', function () {
+    if (!activeCard) return;
+    activeCard.pinned = !activeCard.pinned;
+    ensureGroups(list);
+    var target = activeCard.pinned ? list.querySelector('[data-group="pinned"]') : list.querySelector('[data-group="all"]');
+    activeEl.insertAdjacentHTML('beforebegin', cardHTML(activeCard));
+    var fresh = activeEl.previousElementSibling;
+    activeEl.remove();
+    flipTo(fresh, target);
+    ensureGroups(list);
+    closeSheets();
+    showToast(activeCard.pinned ? '已置顶' : '已取消置顶');
+  });
+  menu.querySelector('[data-m-copy]').addEventListener('click', function () {
+    closeSheets();
+    showToast('已复制会话 ID');
+  });
+  menu.querySelector('[data-m-del]').addEventListener('click', function () {
+    if (!activeCard) return;
+    confirmS.querySelector('[data-c-title]').textContent = '「' + activeCard.title + '」';
+    menu.classList.remove('open');
+    confirmS.classList.add('open');
+  });
+  menu.querySelector('[data-m-cancel]').addEventListener('click', closeSheets);
+
+  confirmS.querySelector('[data-c-cancel]').addEventListener('click', closeSheets);
+  confirmS.querySelector('[data-c-confirm]').addEventListener('click', function () {
+    closeSheets();
+    if (activeCard) CARDS.splice(CARDS.indexOf(activeCard), 1); // keep data in sync for ensureGroups
+    if (activeEl) collapseCard(activeEl);
+    showToast('会话已删除');
+  });
+  scrim.addEventListener('click', closeSheets);
+})();
+</script>
+</body>
+</html>

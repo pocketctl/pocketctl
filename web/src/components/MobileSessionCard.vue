@@ -1,20 +1,8 @@
 <template>
-  <div class="mobile-card-stack" :class="{ 'actions-open': actionsRevealed }">
-    <div class="mobile-card-actions" :class="{ revealed: actionsRevealed }" :aria-hidden="!actionsRevealed">
-      <button class="mobile-action-pin" type="button" :tabindex="actionsRevealed ? 0 : -1" @click.stop="togglePin">
-        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 17v5M9 10.8V4h6v6.8l3 3.2v2H6v-2l3-3.2z" /></svg>
-        <span>{{ session.pinned ? '取消置顶' : '置顶' }}</span>
-      </button>
-      <button v-if="isTerminal" class="mobile-action-delete" type="button" :tabindex="actionsRevealed ? 0 : -1" @click.stop="requestDelete">
-        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 6h18M8 6V4h8v2m3 0-1 14H6L5 6" /></svg>
-        <span>删除</span>
-      </button>
-    </div>
-
+  <div class="mobile-card-stack">
     <article
       class="mobile-session-card"
-      :class="{ 'pending-delete': session.__pendingDelete }"
-      :style="{ transform: `translateX(${swipeOffset}px)` }"
+      :class="{ 'pending-delete': session.__pendingDelete, pressing: longPressing }"
       role="button"
       tabindex="0"
       @click="openSession"
@@ -24,6 +12,7 @@
       @pointermove="onPointerMove"
       @pointerup="onPointerUp"
       @pointercancel="cancelPointer"
+      @contextmenu.prevent
     >
       <span class="mobile-status-dot" :class="effectiveStatus" aria-hidden="true">
         <span v-if="isActive" class="pulse-ring"></span>
@@ -69,7 +58,6 @@
         </span>
       </div>
 
-      <span v-if="copied" class="mobile-copy-feedback" role="status">已复制会话 ID</span>
     </article>
 
     <div v-if="isExited" class="mobile-exit-card">
@@ -98,22 +86,22 @@ const props = defineProps<{
 const emit = defineEmits<{
   open: []
   'toggle-subagents': []
-  'toggle-pin': [session: any]
-  delete: [session: any]
+  'long-press': [session: any]
 }>()
 
-const swipeOffset = ref(0)
-const actionsRevealed = ref(false)
-const copied = ref(false)
+// Long-press (450ms, 8px move tolerance) opens the mobile context sheet.
+// Pin / delete / copy-id all live in that sheet (see SessionList), so the
+// card itself no longer carries swipe actions or clipboard logic.
+const LONG_PRESS_MS = 450
+const MOVE_TOLERANCE = 8
+
+const longPressing = ref(false)
 let pointerStart: { x: number; y: number } | null = null
-let dragged = false
 let longPressed = false
 let longPressTimer: ReturnType<typeof setTimeout> | null = null
-let copiedTimer: ReturnType<typeof setTimeout> | null = null
 
 const isActive = computed(() => ['running', 'busy', 'retry'].includes(props.effectiveStatus))
 const isExited = computed(() => props.session.status === 'exited' || props.effectiveStatus === 'exited')
-const isTerminal = computed(() => ['exited', 'completed', 'killed', 'error'].includes(props.session.status))
 const hasChildren = computed(() => Boolean(props.session.children?.length))
 // Children mix real subagents and SDK-spawned system sessions (kind
 // sdk_session); badges count them separately, falling back to the scalar
@@ -127,7 +115,6 @@ const subagentBadgeCount = computed(() => {
 const sdkChildCount = computed(() => (props.session.children || []).filter((c: any) => c.kind === 'sdk_session').length)
 const canInlineExpand = computed(() => hasChildren.value && !isExited.value)
 const hasContext = computed(() => Boolean(agentLabel.value || props.session.model || props.session.subagent_count > 0 || isExited.value))
-const actionWidth = computed(() => isTerminal.value ? 144 : 72)
 const normalizedAgent = computed(() => props.session.agent === 'claude' ? 'claude-code' : props.session.agent || '')
 const isReadOnlyObserver = computed(() => isReadOnlyObserverAgent(normalizedAgent.value))
 const agentLabel = computed(() => agentDisplayName(normalizedAgent.value))
@@ -146,110 +133,55 @@ function clearLongPress() {
 function onPointerDown(event: PointerEvent) {
   if (event.button !== undefined && event.button !== 0) return
   pointerStart = { x: event.clientX, y: event.clientY }
-  dragged = false
   longPressed = false
+  longPressing.value = true
   clearLongPress()
-  longPressTimer = setTimeout(copySessionId, 500)
+  longPressTimer = setTimeout(fireLongPress, LONG_PRESS_MS)
 }
 
 function onPointerMove(event: PointerEvent) {
   if (!pointerStart) return
   const dx = event.clientX - pointerStart.x
   const dy = event.clientY - pointerStart.y
-  if (Math.abs(dy) > Math.abs(dx) && Math.abs(dy) > 8) {
+  if (Math.abs(dx) > MOVE_TOLERANCE || Math.abs(dy) > MOVE_TOLERANCE) {
     cancelPointer()
-    return
   }
-  if (Math.abs(dx) < 6) return
-  dragged = true
-  clearLongPress()
-  const origin = actionsRevealed.value ? -actionWidth.value : 0
-  swipeOffset.value = Math.max(-actionWidth.value, Math.min(0, origin + dx))
 }
 
 function onPointerUp() {
   clearLongPress()
-  if (dragged) {
-    actionsRevealed.value = swipeOffset.value < -36
-    swipeOffset.value = actionsRevealed.value ? -actionWidth.value : 0
-  }
+  longPressing.value = false
   pointerStart = null
 }
 
 function cancelPointer() {
   clearLongPress()
+  longPressing.value = false
   pointerStart = null
-  if (!dragged) return
-  swipeOffset.value = actionsRevealed.value ? -actionWidth.value : 0
+}
+
+function fireLongPress() {
+  if (!pointerStart) return
+  longPressed = true
+  longPressing.value = false
+  pointerStart = null
+  if (navigator.vibrate) navigator.vibrate(15)
+  emit('long-press', props.session)
 }
 
 function openSession() {
-  if (props.session.__pendingDelete || dragged || longPressed) {
-    dragged = false
+  if (props.session.__pendingDelete || longPressed) {
     longPressed = false
-    return
-  }
-  if (actionsRevealed.value) {
-    actionsRevealed.value = false
-    swipeOffset.value = 0
     return
   }
   emit('open')
 }
 
-function copySessionId() {
-  if (!props.session.session_id) return
-  longPressed = true
-  clearLongPress()
-  navigator.clipboard?.writeText(props.session.session_id).catch(() => undefined)
-  copied.value = true
-  if (copiedTimer) clearTimeout(copiedTimer)
-  copiedTimer = setTimeout(() => { copied.value = false }, 1200)
-}
-
-function togglePin() {
-  actionsRevealed.value = false
-  swipeOffset.value = 0
-  emit('toggle-pin', props.session)
-}
-
-function requestDelete() {
-  actionsRevealed.value = false
-  swipeOffset.value = 0
-  emit('delete', props.session)
-}
-
-onBeforeUnmount(() => {
-  clearLongPress()
-  if (copiedTimer) clearTimeout(copiedTimer)
-})
+onBeforeUnmount(clearLongPress)
 </script>
 
 <style scoped>
 .mobile-card-stack { position: relative; overflow: hidden; border-radius: 12px; }
-.mobile-card-actions {
-  position: absolute;
-  inset: 0 0 auto auto;
-  display: flex;
-  height: 73px;
-  opacity: 0;
-  transition: opacity .16s ease;
-}
-.mobile-card-actions.revealed { opacity: 1; }
-.mobile-card-actions button {
-  width: 72px;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  gap: 3px;
-  border: 0;
-  color: #fff;
-  font-size: 10px;
-}
-.mobile-card-actions svg { width: 17px; height: 17px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
-.mobile-action-pin { background: var(--accent, #58a6ff); }
-.mobile-action-delete { background: var(--error, #f85149); }
 .mobile-session-card {
   position: relative;
   z-index: 1;
@@ -266,6 +198,7 @@ onBeforeUnmount(() => {
   transition: transform .18s ease, border-color .15s, background .15s, opacity .25s;
 }
 .mobile-session-card:active { background: var(--surface-hover, #1c2129); }
+.mobile-session-card.pressing { transform: scale(.98); background: var(--surface-active, #21262d); }
 .mobile-session-card:focus-visible { outline: 2px solid var(--accent, #58a6ff); outline-offset: -2px; }
 .mobile-session-card.pending-delete { pointer-events: none; opacity: .35; }
 .mobile-status-dot {
@@ -329,7 +262,6 @@ onBeforeUnmount(() => {
 .mobile-subagent-toggle svg, .mobile-navigation-chevron svg { z-index: 1; grid-area: 1 / 1; width: 12px; height: 12px; fill: none; stroke: var(--accent, #58a6ff); stroke-linecap: round; stroke-linejoin: round; stroke-width: 1.7; transition: transform .22s ease; }
 .mobile-navigation-chevron svg { stroke: var(--fg-secondary, #c9d1d9); }
 .mobile-subagent-toggle svg.expanded { transform: rotate(90deg); }
-.mobile-copy-feedback { position: absolute; inset: 50% auto auto 50%; z-index: 3; transform: translate(-50%, -50%); padding: 6px 10px; border-radius: 6px; color: var(--fg, #e6edf3); background: var(--accent, #58a6ff); font-size: 12px; font-weight: 600; white-space: nowrap; }
 .mobile-exit-card {
   position: relative;
   z-index: 0;
