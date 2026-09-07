@@ -116,7 +116,7 @@
           <div class="agents">
             <span v-for="agent in getActiveAgents(d.daemon_id)" :key="agent" :class="['chip', d.daemon_online ? 'chip-terminal' : 'chip-offline']">{{ agentLabel(agent) }}</span>
           </div>
-          <span>{{ d.daemon_online ? t('dashboard.online') : (d.last_seen_at ? formatOfflineTime(d.last_seen_at) : t('dashboard.offline')) }}</span>
+          <span class="meta-time">{{ d.daemon_online ? t('dashboard.online') : (d.last_seen_at ? formatOfflineTime(d.last_seen_at) : t('dashboard.offline')) }}</span>
         </div>
       </div>
     </div>
@@ -455,8 +455,9 @@ function onPinned(sessionId: string, pinned: boolean) { const s = sessions.value
 .daemon-card .stat .stat-value { font-size: 20px; font-weight: 700; color: var(--fg); font-family: var(--font-display); }
 .daemon-card .stat .stat-value.accent { color: var(--accent); }
 .daemon-card .stat .stat-label { font-size: 12px; color: var(--fg-tertiary); }
-.daemon-card .card-meta { display: flex; align-items: center; justify-content: space-between; font-size: 12px; color: var(--fg-tertiary); }
-.daemon-card .card-meta .agents { display: flex; gap: 6px; }
+.daemon-card .card-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 8px; font-size: 12px; color: var(--fg-tertiary); }
+.daemon-card .card-meta .agents { display: flex; flex-wrap: wrap; gap: 4px 6px; min-width: 0; }
+.daemon-card .card-meta .meta-time { margin-left: auto; flex-shrink: 0; white-space: nowrap; }
 /* Dashboard sessions — design 02: quiet hierarchy. */
 .dashboard-session-list { display: grid; gap: 8px; }
 .dashboard-session-group { min-width: 0; }

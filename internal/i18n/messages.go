@@ -25,7 +25,7 @@ Usage:
 Commands:
   login          Login via browser (OAuth 2.0 Device Flow) or email code
   agent opencode enable|disable|status   Manage transparent OpenCode terminal control
-  agent codex enable|disable|status      Manage official Codex TUI terminal control
+  agent codex enable|disable|status      Manage Codex CLI terminal control (Desktop is read-only)
   agent zcode sync enable|disable|status Sync ZCode sessions read-only (view in Web/iOS)
   daemon start   Start the daemon (connects to relay)
   daemon stop    Stop the running daemon
@@ -72,11 +72,18 @@ OpenCode terminal control:
   pocketctl agent opencode status     Show detection and launcher state
   opencode --native                   Bypass Pocketctl for one invocation
 
-Codex terminal control (requires Codex 0.144.1+):
+Codex CLI terminal control (requires Codex CLI 0.144.1+):
   pocketctl agent codex enable        Enable once; daemon restart is not required
   pocketctl agent codex disable       Remove the Pocketctl launcher without uninstalling Codex
   pocketctl agent codex status        Show desired/effective state and capability diagnostics
   codex --native                      Bypass Pocketctl for one invocation
+
+Codex Desktop (read-only observer, no setup needed):
+  The daemon automatically discovers Codex Desktop rollouts and syncs them to
+  Web/iOS as the separate "codex-desktop" agent: history, status, model, token
+  usage, tools, plans, and file changes. Read-only: no remote input, approval,
+  interrupt, kill, resume, or Desktop session creation. New PocketCtl sessions
+  always start a Codex CLI session.
 
 ZCode session content sync (read-only):
   pocketctl agent zcode sync enable   Sync recent ZCode sessions to Web/iOS (read-only; restart daemon to take effect)
@@ -98,7 +105,7 @@ const helpZh = `pocketctl - 远程 AI 编程代理控制
 命令:
   login          通过浏览器（OAuth 2.0 Device Flow）或邮箱验证码登录
   agent opencode enable|disable|status   管理透明 OpenCode 终端控制
-  agent codex enable|disable|status      管理 Codex 官方 TUI 终端控制
+  agent codex enable|disable|status      管理 Codex CLI 终端控制（Desktop 只读）
   agent zcode sync enable|disable|status 只读同步 ZCode 会话（在 Web/iOS 查看）
   daemon start   启动 daemon（连接 relay）
   daemon stop    停止运行中的 daemon
@@ -145,11 +152,17 @@ OpenCode 终端控制:
   pocketctl agent opencode status     查看检测与 launcher 状态
   opencode --native                   单次绕过 Pocketctl
 
-Codex 终端控制（要求 Codex 0.144.1+）:
+Codex CLI 终端控制（要求 Codex CLI 0.144.1+）:
   pocketctl agent codex enable        启用一次，无需重启 daemon
   pocketctl agent codex disable       移除 Pocketctl launcher，不卸载 Codex
   pocketctl agent codex status        查看期望/实际状态与能力诊断
   codex --native                      单次绕过 Pocketctl
+
+Codex Desktop（只读观察，无需配置）:
+  daemon 会自动发现 Codex Desktop 创建的 rollout，并以独立的 codex-desktop Agent
+  类型同步到 Web/iOS：历史、状态、模型、token 用量、工具、计划与文件变更。只读：
+  不支持远程输入、审批、中断、终止、恢复或创建 Desktop 会话。Pocketctl 的新建会话
+  入口始终创建 Codex CLI 会话。
 
 ZCode 会话内容同步（只读）:
   pocketctl agent zcode sync enable   只读同步最近 ZCode 会话到 Web/iOS（重启 daemon 后生效）
@@ -177,16 +190,16 @@ var messages = map[string]msg{
 
 	// ---- agent.* ---------------------------------------------------------
 	"agent.help": {
-		"Agent control:\n  pocketctl agent opencode enable\n  pocketctl agent opencode disable\n  pocketctl agent opencode status\n  pocketctl agent opencode help\n  pocketctl agent codex enable\n  pocketctl agent codex disable\n  pocketctl agent codex status\n  pocketctl agent codex help\n  pocketctl agent claude-code enable\n  pocketctl agent claude-code disable\n  pocketctl agent claude-code status\n  pocketctl agent claude-code help\n  pocketctl agent zcode sync enable [--history recent|all] [--lookback-days N]\n  pocketctl agent zcode sync disable\n  pocketctl agent zcode sync status\n  pocketctl agent zcode sync help\n\nManaged agents (opencode/codex): enable does not require a daemon restart. Reload your login shell if PATH is not active. Use `opencode --native` or `codex --native` to bypass Pocketctl once.\nClaude Code (claude-code): installs a Terminal shim that injects the Pocketctl Channel permission relay for interactive Claude sessions. The native Claude terminal approval is always preserved; use `claude --native` to bypass once. Requires Claude Code >= 2.1.211 and the POCKETCTL_CLAUDE_CHANNEL_APPROVAL rollout flag.\nZCode sync is read-only: it surfaces local ZCode session content in Web/iOS. Enable requires a daemon restart to take effect. No remote send/approve/resume/control.",
-		"Agent 控制:\n  pocketctl agent opencode enable\n  pocketctl agent opencode disable\n  pocketctl agent opencode status\n  pocketctl agent opencode help\n  pocketctl agent codex enable\n  pocketctl agent codex disable\n  pocketctl agent codex status\n  pocketctl agent codex help\n  pocketctl agent claude-code enable\n  pocketctl agent claude-code disable\n  pocketctl agent claude-code status\n  pocketctl agent claude-code help\n  pocketctl agent zcode sync enable [--history recent|all] [--lookback-days N]\n  pocketctl agent zcode sync disable\n  pocketctl agent zcode sync status\n  pocketctl agent zcode sync help\n\n托管型 Agent（opencode/codex）：启用后无需重启 daemon；若 PATH 尚未生效，请重新载入登录 shell。可用 `opencode --native` 或 `codex --native` 单次绕过 Pocketctl。\nClaude Code（claude-code）：安装终端 shim，为交互式 Claude 会话注入 Pocketctl Channel 权限中继。Claude 原生终端审批始终保留；可用 `claude --native` 单次绕过。需要 Claude Code >= 2.1.211 与 POCKETCTL_CLAUDE_CHANNEL_APPROVAL 灰度开关。\nZCode 同步为只读：将本地 ZCode 会话内容展示到 Web/iOS。启用后需重启 daemon 生效。不支持远程发送/审批/恢复/控制。",
+		"Agent control:\n  pocketctl agent opencode enable\n  pocketctl agent opencode disable\n  pocketctl agent opencode status\n  pocketctl agent opencode help\n  pocketctl agent codex enable\n  pocketctl agent codex disable\n  pocketctl agent codex status\n  pocketctl agent codex help\n  pocketctl agent claude-code enable\n  pocketctl agent claude-code disable\n  pocketctl agent claude-code status\n  pocketctl agent claude-code help\n  pocketctl agent zcode sync enable [--history recent|all] [--lookback-days N]\n  pocketctl agent zcode sync disable\n  pocketctl agent zcode sync status\n  pocketctl agent zcode sync help\n\nManaged agents (opencode/codex CLI): enable does not require a daemon restart. Reload your login shell if PATH is not active. Use `opencode --native` or `codex --native` to bypass Pocketctl once.\nCodex Desktop is a read-only observer discovered automatically by the daemon (agent type codex-desktop): Web/iOS can view rollout history and increments, but there is no remote input, approval, interrupt, kill, resume, or Desktop session creation. New PocketCtl sessions always start a Codex CLI session.\nClaude Code (claude-code): installs a Terminal shim that injects the Pocketctl Channel permission relay for interactive Claude sessions. The native Claude terminal approval is always preserved; use `claude --native` to bypass once. Requires Claude Code >= 2.1.211 and the POCKETCTL_CLAUDE_CHANNEL_APPROVAL rollout flag.\nZCode sync is read-only: it surfaces local ZCode session content in Web/iOS. Enable requires a daemon restart to take effect. No remote send/approve/resume/control.",
+		"Agent 控制:\n  pocketctl agent opencode enable\n  pocketctl agent opencode disable\n  pocketctl agent opencode status\n  pocketctl agent opencode help\n  pocketctl agent codex enable\n  pocketctl agent codex disable\n  pocketctl agent codex status\n  pocketctl agent codex help\n  pocketctl agent claude-code enable\n  pocketctl agent claude-code disable\n  pocketctl agent claude-code status\n  pocketctl agent claude-code help\n  pocketctl agent zcode sync enable [--history recent|all] [--lookback-days N]\n  pocketctl agent zcode sync disable\n  pocketctl agent zcode sync status\n  pocketctl agent zcode sync help\n\n托管型 Agent（opencode/codex CLI）：启用后无需重启 daemon；若 PATH 尚未生效，请重新载入登录 shell。可用 `opencode --native` 或 `codex --native` 单次绕过 Pocketctl。\nCodex Desktop 为 daemon 自动发现的只读观察者（Agent 类型 codex-desktop）：Web/iOS 可查看 rollout 历史与增量，不支持远程输入、审批、中断、终止、恢复或创建 Desktop 会话。新建会话入口始终创建 Codex CLI 会话。\nClaude Code（claude-code）：安装终端 shim，为交互式 Claude 会话注入 Pocketctl Channel 权限中继。Claude 原生终端审批始终保留；可用 `claude --native` 单次绕过。需要 Claude Code >= 2.1.211 与 POCKETCTL_CLAUDE_CHANNEL_APPROVAL 灰度开关。\nZCode 同步为只读：将本地 ZCode 会话内容展示到 Web/iOS。启用后需重启 daemon 生效。不支持远程发送/审批/恢复/控制。",
 	},
 	"agent.opencode_help": {
 		"usage: pocketctl agent opencode <enable|disable|status|help>",
 		"用法: pocketctl agent opencode <enable|disable|status|help>",
 	},
 	"agent.codex_help": {
-		"usage: pocketctl agent codex <enable|disable|status|help>",
-		"用法: pocketctl agent codex <enable|disable|status|help>",
+		"usage: pocketctl agent codex <enable|disable|status|help>\n\nManages Codex CLI terminal control (requires Codex CLI 0.144.1+). Codex Desktop sessions are auto-discovered by the daemon and read-only; no command is needed for them.",
+		"用法: pocketctl agent codex <enable|disable|status|help>\n\n管理 Codex CLI 终端控制（要求 Codex CLI 0.144.1+）。Codex Desktop 会话由 daemon 自动发现且只读，无需任何命令。",
 	},
 	"agent.claude-code_help": {
 		"usage: pocketctl agent claude-code <enable|disable|status|help>",

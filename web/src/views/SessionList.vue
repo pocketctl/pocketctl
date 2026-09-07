@@ -91,8 +91,7 @@
         :expanded="!!folded[s.session_id]"
         @open="$router.push(`/session/${s.session_id}`)"
         @toggle-subagents="toggleFold(s.session_id)"
-        @toggle-pin="toggleMobilePin"
-        @delete="pendingDeleteSession = $event"
+        @long-press="openMobileMenu"
       />
       <div v-else :class="['session-row', { 'pending-delete': s.__pendingDelete }]" @click="!s.__pendingDelete && $router.push(`/session/${s.session_id}`)">
         <span class="status-indicator" :class="getEffectiveStatus(s)">
@@ -153,13 +152,40 @@
         {{ isLoadingPage ? '正在加载…' : '加载更多会话' }}
       </button>
     </div>
-    <div v-if="pendingDeleteSession" class="mobile-delete-overlay" role="presentation" @click.self="pendingDeleteSession = null">
-      <div class="mobile-delete-dialog" role="alertdialog" aria-modal="true" aria-labelledby="mobile-delete-title">
-        <h2 id="mobile-delete-title">删除会话</h2>
-        <p>删除后将无法恢复该会话的历史记录，确定删除？</p>
-        <div><button type="button" @click="pendingDeleteSession = null">取消</button><button class="danger" type="button" @click="confirmMobileDelete">删除</button></div>
+    <!-- m 端长按上下文菜单(方案 B:置顶/复制/删除统一入口) -->
+    <div v-if="mobileMenuSession" class="mobile-sheet-scrim" @click="closeMobileMenu"></div>
+    <div v-if="mobileMenuSession" class="mobile-sheet" role="dialog" aria-modal="true" aria-labelledby="mobile-menu-title">
+      <div class="mobile-sheet-grab" aria-hidden="true"></div>
+      <h2 id="mobile-menu-title" class="mobile-sheet-title">{{ mobileMenuSession.title || mobileMenuSession.session_id.slice(0, 8) }}</h2>
+      <button type="button" class="mobile-sheet-item" @click="menuTogglePin">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 17v5M9 10.8V4h6v6.8l3 3.2v2H6v-2l3-3.2z"/></svg>
+        <span>{{ mobileMenuSession.pinned ? '取消置顶' : '置顶' }}</span>
+      </button>
+      <button type="button" class="mobile-sheet-item" @click="menuCopyId">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"/></svg>
+        <span>复制会话 ID</span>
+      </button>
+      <button v-if="mobileMenuSessionTerminal" type="button" class="mobile-sheet-item danger" @click="menuRequestDelete">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 6h18M8 6V4h8v2m3 0-1 14H6L5 6"/></svg>
+        <span>删除会话</span>
+      </button>
+      <div class="mobile-sheet-cancel" role="button" tabindex="0" @click="closeMobileMenu" @keydown.enter="closeMobileMenu">取消</div>
+    </div>
+
+    <!-- m 端删除确认(底部 sheet,拇指可达) -->
+    <div v-if="pendingDeleteSession" class="mobile-sheet-scrim" @click="pendingDeleteSession = null"></div>
+    <div v-if="pendingDeleteSession" class="mobile-sheet" role="alertdialog" aria-modal="true" aria-labelledby="mobile-delete-title">
+      <div class="mobile-sheet-grab" aria-hidden="true"></div>
+      <h2 id="mobile-delete-title" class="mobile-sheet-title">删除会话</h2>
+      <p class="mobile-sheet-desc">「{{ pendingDeleteSession.title || pendingDeleteSession.session_id.slice(0, 8) }}」</p>
+      <p class="mobile-sheet-desc">删除后将无法恢复该会话的历史记录,确定删除?</p>
+      <div class="mobile-sheet-row">
+        <button type="button" class="mobile-sheet-btn" @click="pendingDeleteSession = null">取消</button>
+        <button type="button" class="mobile-sheet-btn danger" @click="confirmMobileDelete">删除</button>
       </div>
     </div>
+
+    <div v-if="mobileToast" class="mobile-toast" role="status">{{ mobileToast }}</div>
     <NewSessionDialog v-if="showNewSession" :daemons="daemons" @close="showNewSession = false" @create="handleCreate" />
   </div>
 </template>
@@ -220,6 +246,9 @@ const searchPresented = ref(false)
 const searchQuery = ref('')
 const searchField = ref<HTMLInputElement | null>(null)
 const pendingDeleteSession = ref<any | null>(null)
+const mobileMenuSession = ref<any | null>(null)
+const mobileToast = ref('')
+let mobileToastTimer: ReturnType<typeof setTimeout> | null = null
 let normalScrollY: number | null = null
 watch(triggerNewSession, (value) => {
   if (value > 0) showNewSession.value = true
@@ -371,6 +400,55 @@ function toggleMobilePin(session: any) {
   onPinned(session.session_id, pinned)
 }
 
+// ---- m 端长按上下文菜单(方案 B) ----
+const mobileMenuSessionTerminal = computed(() =>
+  mobileMenuSession.value && ['exited', 'completed', 'killed', 'error'].includes(mobileMenuSession.value.status)
+)
+
+function openMobileMenu(session: any) {
+  mobileMenuSession.value = session
+}
+
+function closeMobileMenu() {
+  mobileMenuSession.value = null
+}
+
+function showMobileToast(text: string) {
+  mobileToast.value = text
+  if (mobileToastTimer) clearTimeout(mobileToastTimer)
+  mobileToastTimer = setTimeout(() => { mobileToast.value = '' }, 1800)
+}
+
+function menuTogglePin() {
+  const session = mobileMenuSession.value
+  if (!session) return
+  toggleMobilePin(session)
+  closeMobileMenu()
+  showMobileToast(session.pinned ? '已置顶' : '已取消置顶')
+}
+
+function menuCopyId() {
+  const session = mobileMenuSession.value
+  if (!session) return
+  navigator.clipboard?.writeText(session.session_id).catch(() => undefined)
+  closeMobileMenu()
+  showMobileToast('已复制会话 ID')
+}
+
+function menuRequestDelete() {
+  pendingDeleteSession.value = mobileMenuSession.value
+  closeMobileMenu()
+}
+
+function onMobileSheetKeydown(event: KeyboardEvent) {
+  if (event.key !== 'Escape') return
+  if (pendingDeleteSession.value) pendingDeleteSession.value = null
+  else closeMobileMenu()
+}
+
+onMounted(() => window.addEventListener('keydown', onMobileSheetKeydown))
+onBeforeUnmount(() => window.removeEventListener('keydown', onMobileSheetKeydown))
+
 function confirmMobileDelete() {
   const session = pendingDeleteSession.value
   if (!session) return
@@ -378,6 +456,7 @@ function confirmMobileDelete() {
   send({ type: 'session_delete', session_id: session.session_id })
   onDeleted(session.session_id)
   pendingDeleteSession.value = null
+  showMobileToast('会话已删除')
 }
 
 onMounted(() => {
@@ -660,24 +739,73 @@ function handleLogout() {
 .mobile-search-summary,
 .mobile-search-empty { display: none; }
 
-.mobile-delete-overlay {
+/* m 端底部 sheet:长按菜单 + 删除确认(方案 B) */
+.mobile-sheet-scrim {
   position: fixed;
   inset: 0;
   z-index: 240;
+  background: rgba(1, 4, 9, .62);
+  backdrop-filter: blur(2px);
+  animation: mobile-sheet-fade .18s ease;
+}
+.mobile-sheet {
+  position: fixed;
+  inset: auto 0 0 0;
+  z-index: 241;
+  padding: 8px 14px calc(14px + env(safe-area-inset-bottom, 0px));
+  border-top: 1px solid var(--border-light);
+  border-radius: 16px 16px 0 0;
+  background: var(--surface);
+  box-shadow: 0 -8px 30px rgba(0, 0, 0, .35);
+  animation: mobile-sheet-up .26s cubic-bezier(.2, .8, .2, 1);
+}
+.mobile-sheet-grab { width: 36px; height: 4px; margin: 4px auto 10px; border-radius: 2px; background: var(--border-light); }
+.mobile-sheet-title { margin-bottom: 4px; overflow: hidden; color: var(--fg); font-size: 13.5px; font-weight: 650; text-align: center; text-overflow: ellipsis; white-space: nowrap; }
+.mobile-sheet-desc { margin-top: 2px; color: var(--fg-secondary); font-size: 12px; line-height: 1.6; text-align: center; }
+.mobile-sheet-item {
   display: flex;
   align-items: center;
-  justify-content: center;
-  padding: 20px;
-  background: rgba(1, 4, 9, .56);
-  backdrop-filter: blur(4px);
+  gap: 12px;
+  width: 100%;
+  margin-top: 8px;
+  min-height: 46px;
+  padding: 12px 14px;
+  border: 0;
+  border-radius: 10px;
+  background: var(--surface-hover);
+  color: var(--fg);
+  font-size: 13.5px;
+  font-weight: 550;
 }
-.mobile-delete-dialog { width: min(310px, 100%); overflow: hidden; border: 1px solid var(--border-light); border-radius: 14px; background: color-mix(in srgb, var(--surface) 96%, transparent); box-shadow: var(--shadow-lg); text-align: center; }
-.mobile-delete-dialog h2 { margin: 20px 20px 7px; color: var(--fg); font-size: 17px; }
-.mobile-delete-dialog p { margin: 0 20px 18px; color: var(--fg-secondary); font-size: 13px; line-height: 1.45; }
-.mobile-delete-dialog > div { display: grid; grid-template-columns: 1fr 1fr; border-top: 1px solid var(--border); }
-.mobile-delete-dialog button { min-height: 46px; border: 0; color: var(--accent); background: transparent; font-size: 15px; }
-.mobile-delete-dialog button + button { border-left: 1px solid var(--border); }
-.mobile-delete-dialog button.danger { color: var(--error); font-weight: 600; }
+.mobile-sheet-item:active { background: var(--surface-active); }
+.mobile-sheet-item svg { width: 16px; height: 16px; flex: 0 0 16px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+.mobile-sheet-item.danger { color: var(--error); }
+.mobile-sheet-cancel { margin-top: 10px; padding: 12px; border-radius: 10px; background: var(--bg-secondary); color: var(--fg-secondary); font-size: 13px; font-weight: 600; text-align: center; cursor: pointer; }
+.mobile-sheet-row { display: flex; gap: 10px; margin-top: 12px; }
+.mobile-sheet-btn { flex: 1; min-height: 46px; padding: 12px; border: 0; border-radius: 10px; background: var(--surface-hover); color: var(--fg); font-size: 13.5px; font-weight: 650; }
+.mobile-sheet-btn.danger { background: var(--error); color: #fff; }
+.mobile-toast {
+  position: fixed;
+  inset: auto 0 18px;
+  z-index: 250;
+  margin: 0 auto;
+  width: max-content;
+  max-width: 86%;
+  padding: 9px 16px;
+  border-radius: var(--radius-full, 9999px);
+  background: color-mix(in srgb, var(--accent) 88%, #000);
+  color: #fff;
+  font-size: 12.5px;
+  font-weight: 600;
+  box-shadow: 0 6px 18px rgba(0, 0, 0, .35);
+  animation: mobile-toast-in .22s cubic-bezier(.2, .8, .2, 1);
+}
+@keyframes mobile-sheet-fade { from { opacity: 0; } to { opacity: 1; } }
+@keyframes mobile-sheet-up { from { transform: translateY(102%); } to { transform: translateY(0); } }
+@keyframes mobile-toast-in { from { transform: translateY(16px); opacity: 0; } to { transform: translateY(0); opacity: 1; } }
+@media (prefers-reduced-motion: reduce) {
+  .mobile-sheet, .mobile-sheet-scrim, .mobile-toast { animation: none; }
+}
 
 /* Mobile */
 @media (max-width: 768px) {
