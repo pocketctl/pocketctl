@@ -66,6 +66,13 @@ const openCodeFallbackCategories = new Set([
 ]);
 const INITIAL_REPLAY_PAYLOAD_WARNING_BYTES = 1_048_576;
 const INITIAL_REPLAY_DURATION_WARNING_MS = 1_000;
+/** Event types forwarded to a subagent detail view when replaying an
+ * independent child session (zcode model). Lifecycle noise (discovered/
+ * status/meta) belongs to the child session itself, not the bucket view. */
+const SUBAGENT_CHILD_REPLAY_TYPES = new Set([
+  'user_text', 'agent_text', 'agent_reasoning',
+  'tool_call', 'tool_result', 'agent_file', 'agent_todo', 'error',
+]);
 
 function nonNegativeCounter(value: unknown): number {
   return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0 ? value : 0;
@@ -2838,20 +2845,33 @@ export class Router {
       return;
     }
     try {
+      // ZCode children are independent sessions: when the agent_id is itself a
+      // child session of this parent, replay the child's own events instead of
+      // filtering the parent's bucket by payload agent_id (which would return
+      // nothing). Content events are agent_id-tagged so the web routes them
+      // into the subagent bucket; lifecycle noise is dropped.
+      const independentChild = await db.isIndependentChildSession(this.pool, sessionId, agentId);
+      const querySessionId = independentChild ? agentId : sessionId;
+      const queryAgentId = independentChild ? undefined : agentId;
       const page = isPagedForward
-        ? await db.getCompleteForwardReplayPage(this.pool, sessionId, lastSeq ?? 0, lim, agentId)
+        ? await db.getCompleteForwardReplayPage(this.pool, querySessionId, lastSeq ?? 0, lim, queryAgentId)
         : await db.getCompleteBackwardReplayPage(
             this.pool,
-            sessionId,
+            querySessionId,
             lastSeq && lastSeq > 0 ? lastSeq : undefined,
             lim,
-            agentId,
+            queryAgentId,
           );
-      const events = page.events;
+      let events = page.events;
+      if (independentChild) {
+        events = events
+          .filter(e => SUBAGENT_CHILD_REPLAY_TYPES.has(e.event_type))
+          .map(e => ({ ...e, payload: { ...e.payload, agent_id: agentId } }));
+      }
       const pageOldestId = page.oldestId;
       const pageNewestId = 'newestId' in page
         ? page.newestId
-        : (events.length > 0 ? events[events.length - 1].id : (lastSeq ?? 0));
+        : (page.events.length > 0 ? page.events[page.events.length - 1].id : (lastSeq ?? 0));
       if (events.length === 0) {
         this.send(clientWs, withReq({ type: 'replay_end', session_id: sessionId, agent_id: agentId, count: 0, logical_count: 0, last_seq: isPagedForward ? pageNewestId : pageOldestId, newest_seq: pageNewestId, has_more: page.hasMore }));
         return;
@@ -2872,7 +2892,7 @@ export class Router {
         session_id: sessionId,
         agent_id: agentId,
         count: events.length,
-        logical_count: page.logicalCount,
+        logical_count: independentChild ? events.length : page.logicalCount,
         last_seq: isPagedForward ? pageNewestId : pageOldestId,
         newest_seq: pageNewestId,
         has_more: page.hasMore,

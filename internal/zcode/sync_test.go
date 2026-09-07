@@ -9,10 +9,12 @@ import (
 	"github.com/pocketctl/pocketctl/internal/protocol"
 )
 
+var assistantScope = MessageScope{Role: "assistant"}
+
 func TestZcodeSync_PreviewPartRevisionOnContentChange(t *testing.T) {
 	z := NewZcodeSync(testSourceID, "zcode-wire1")
 	// first emission
-	b1, _ := z.PreviewPart("p1", "m1", ZcodePartData{Type: "text", Text: "v1"}, "")
+	b1, _ := z.PreviewPart("p1", "m1", "m1", ZcodePartData{Type: "text", Text: "v1"}, "", assistantScope)
 	if b1.SkipReason != "" || b1.Events[0].Revision != 1 {
 		t.Fatalf("first emit: reason=%q rev=%d %+v", b1.SkipReason, b1.Events[0].Revision, b1.Events)
 	}
@@ -25,11 +27,11 @@ func TestZcodeSync_PreviewPartRevisionOnContentChange(t *testing.T) {
 		t.Fatal(err)
 	}
 	// identical content → skipped
-	if b, _ := z.PreviewPart("p1", "m1", ZcodePartData{Type: "text", Text: "v1"}, ""); b.SkipReason != "skip" {
+	if b, _ := z.PreviewPart("p1", "m1", "m1", ZcodePartData{Type: "text", Text: "v1"}, "", assistantScope); b.SkipReason != "skip" {
 		t.Fatal("identical content should be skipped")
 	}
 	// changed content → revision 2, PreviousEventID chained
-	b2, _ := z.PreviewPart("p1", "m1", ZcodePartData{Type: "text", Text: "v2"}, "")
+	b2, _ := z.PreviewPart("p1", "m1", "m1", ZcodePartData{Type: "text", Text: "v2"}, "", assistantScope)
 	if b2.Events[0].Revision != 2 {
 		t.Fatalf("changed emit: rev=%d", b2.Events[0].Revision)
 	}
@@ -132,7 +134,7 @@ func TestZcodeSync_DoesNotImportOpencode(t *testing.T) {
 	// differ/mapper. The real guard is the absence of the import (verified by
 	// the build). We assert our mapper namespace is isolated.
 	z := NewZcodeSync(testSourceID, "zcode-wire1")
-	b, _ := z.PreviewPart("p1", "m1", ZcodePartData{Type: "text", Text: "x"}, "")
+	b, _ := z.PreviewPart("p1", "m1", "m1", ZcodePartData{Type: "text", Text: "x"}, "", assistantScope)
 	if len(b.Events) != 1 || b.Events[0].EventID[:6] != "zcode:" {
 		t.Fatalf("event id not zcode-namespaced: %q", b.Events[0].EventID)
 	}
@@ -201,7 +203,7 @@ func TestZcodeSync_PreviewStatusRetryKeepsEventID(t *testing.T) {
 
 func acceptPart(t *testing.T, z *ZcodeSync, nativePartID string, part ZcodePartData, order uint64) DiffBatch {
 	t.Helper()
-	b, err := z.PreviewPart(nativePartID, "m1", part, "")
+	b, err := z.PreviewPart(nativePartID, "m1", "m1", part, "", assistantScope)
 	if err != nil {
 		t.Fatalf("PreviewPart: %v", err)
 	}
@@ -219,7 +221,7 @@ func acceptPart(t *testing.T, z *ZcodeSync, nativePartID string, part ZcodePartD
 func TestZcodeSync_PreviewRetryKeepsEventID(t *testing.T) {
 	z := NewZcodeSync(testSourceID, "zcode-wire1")
 	part := ZcodePartData{Type: "text", Text: "v1"}
-	b1, err := z.PreviewPart("p1", "m1", part, "")
+	b1, err := z.PreviewPart("p1", "m1", "m1", part, "", assistantScope)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -228,7 +230,7 @@ func TestZcodeSync_PreviewRetryKeepsEventID(t *testing.T) {
 	}
 	// The receiver was not mutated: an identical retry must produce the same
 	// event identity and revision.
-	b2, err := z.PreviewPart("p1", "m1", part, "")
+	b2, err := z.PreviewPart("p1", "m1", "m1", part, "", assistantScope)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -250,7 +252,7 @@ func TestZcodeSync_AcceptedPreviewSuppressesDuplicate(t *testing.T) {
 	z := NewZcodeSync(testSourceID, "zcode-wire1")
 	part := ZcodePartData{Type: "text", Text: "v1"}
 	acceptPart(t, z, "p1", part, 1)
-	again, err := z.PreviewPart("p1", "m1", part, "")
+	again, err := z.PreviewPart("p1", "m1", "m1", part, "", assistantScope)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -283,7 +285,7 @@ func TestZcodeSync_RestartContinuesPartRevision(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	b, err := z2.PreviewPart("p1", "m1", ZcodePartData{Type: "text", Text: "v2"}, "")
+	b, err := z2.PreviewPart("p1", "m1", "m1", ZcodePartData{Type: "text", Text: "v2"}, "", assistantScope)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -299,7 +301,7 @@ func TestZcodeSync_RestartPreservesPreviousEventID(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	b2, err := z2.PreviewPart("p1", "m1", ZcodePartData{Type: "text", Text: "v2"}, "")
+	b2, err := z2.PreviewPart("p1", "m1", "m1", ZcodePartData{Type: "text", Text: "v2"}, "", assistantScope)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -333,7 +335,7 @@ func TestZcodeSync_RestartReplaysPendingCommitsInOrder(t *testing.T) {
 		t.Fatalf("speculative last event = %q, want e3", cp.LastEventID)
 	}
 	// The next mutation must continue the speculative chain.
-	b, err := z.PreviewPart("p1", "m1", ZcodePartData{Type: "text", Text: "v4"}, "")
+	b, err := z.PreviewPart("p1", "m1", "m1", ZcodePartData{Type: "text", Text: "v4"}, "", assistantScope)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -349,14 +351,14 @@ func TestZcodeSync_SpeculativePageChainsPartRevisions(t *testing.T) {
 	base := NewZcodeSync(testSourceID, "zcode-wire1")
 	acceptPart(t, base, "p1", ZcodePartData{Type: "text", Text: "v1"}, 1)
 	scratch := base.Clone()
-	b1, err := scratch.PreviewPart("p1", "m1", ZcodePartData{Type: "text", Text: "v2"}, "")
+	b1, err := scratch.PreviewPart("p1", "m1", "m1", ZcodePartData{Type: "text", Text: "v2"}, "", assistantScope)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if err := scratch.applyProvisional(b1.Commit); err != nil {
 		t.Fatalf("applyProvisional: %v", err)
 	}
-	b2, err := scratch.PreviewPart("p1", "m1", ZcodePartData{Type: "text", Text: "v3"}, "")
+	b2, err := scratch.PreviewPart("p1", "m1", "m1", ZcodePartData{Type: "text", Text: "v3"}, "", assistantScope)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -367,7 +369,7 @@ func TestZcodeSync_SpeculativePageChainsPartRevisions(t *testing.T) {
 		t.Fatalf("second page row PreviousEventID = %q, want %q", got, b1.Events[0].EventID)
 	}
 	// The authoritative receiver is untouched by scratch paging.
-	bb, err := base.PreviewPart("p1", "m1", ZcodePartData{Type: "text", Text: "v2"}, "")
+	bb, err := base.PreviewPart("p1", "m1", "m1", ZcodePartData{Type: "text", Text: "v2"}, "", assistantScope)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -506,5 +508,68 @@ func TestZcodeSync_MessageCheckpointCommitOrderRules(t *testing.T) {
 	}
 	if got := hydrated.Checkpoint().Messages["wm1"]; got.EventID != "e1" || got.CommitOrder != 1 {
 		t.Fatalf("non-zero commit must supersede the zero-order legacy checkpoint: %+v", got)
+	}
+}
+
+func TestZcodeSync_PreviewPartFiltersInvisibleMessage(t *testing.T) {
+	z := NewZcodeSync(testSourceID, "zcode-wire1")
+	b, err := z.PreviewPart("p1", "m1", "m1", ZcodePartData{Type: "text", Text: "leak"}, "", MessageScope{Role: "assistant", Hidden: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if b.SkipReason != "filtered_role" || len(b.Events) != 0 {
+		t.Fatalf("hidden message part must be filtered: %+v", b)
+	}
+}
+
+func TestZcodeSync_PreviewPartUserText(t *testing.T) {
+	z := NewZcodeSync(testSourceID, "zcode-wire1")
+	b, err := z.PreviewPart("p1", "m1", "wm1", ZcodePartData{Type: "text", Text: "hello"}, "", MessageScope{Role: "user"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if b.SkipReason != "" || len(b.Events) == 0 {
+		t.Fatalf("user text part should emit: %+v", b)
+	}
+	var hasTurnStart, hasUserText bool
+	for _, ev := range b.Events {
+		if ev.Type == protocol.EventTypeTurnStatus && ev.TurnStatus == protocol.TurnStateRunning {
+			hasTurnStart = true
+		}
+		if ev.Type == "user_text" && ev.Text == "hello" {
+			hasUserText = true
+		}
+	}
+	if !hasUserText {
+		t.Fatalf("want user_text event, got %+v", b.Events)
+	}
+	if !hasTurnStart {
+		t.Fatalf("user text part must anchor a turn (turn_status running), got %+v", b.Events)
+	}
+	if b.Commit.Turn == nil {
+		t.Fatalf("commit must carry the turn transition: %+v", b.Commit)
+	}
+	// Once accepted, retry with identical content must be idempotent (skip).
+	commit := b.Commit
+	commit.CommitOrder = 1
+	if err := z.ApplyAccepted(commit); err != nil {
+		t.Fatal(err)
+	}
+	if b2, _ := z.PreviewPart("p1", "m1", "wm1", ZcodePartData{Type: "text", Text: "hello"}, "", MessageScope{Role: "user"}); b2.SkipReason != "skip" {
+		t.Fatalf("identical retry should skip: %+v", b2)
+	}
+}
+
+func TestZcodeSync_PreviewPartUserTextSkipsWhenMessageStreamEmitted(t *testing.T) {
+	z := NewZcodeSync(testSourceID, "zcode-wire1")
+	// Simulate the message stream having already emitted user_text for this
+	// message (its MessageCommit is applied).
+	z.state.msgs["wm1"] = msgCheckpoint{eventID: "e1", semantic: "h1"}
+	b, err := z.PreviewPart("p1", "m1", "wm1", ZcodePartData{Type: "text", Text: "hello"}, "", MessageScope{Role: "user"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if b.SkipReason != "skip" || len(b.Events) != 0 {
+		t.Fatalf("message-stream-handled user part must skip: %+v", b)
 	}
 }

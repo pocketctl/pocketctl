@@ -697,10 +697,12 @@ func TestObserver_AckedInsertDoesNotRescanFromZero(t *testing.T) {
 
 func seedSessionWithParts(t *testing.T, parts [][2]string) string {
 	t.Helper() // parts: {id, text} all attached to message msg1 at sequence 1
+	// msg1 is an assistant message so the parts map to agent_text; user-message
+	// part mapping (user_text via the part stream) has dedicated sync tests.
 	return testdb(t, withSeed(func(ctx context.Context, db *sql.DB) {
 		now := nowMillis()
 		insertSession(ctx, db, "ses1", "t", "/c", now, now, 0)
-		insertMessage(ctx, db, "msg1", "ses1", 1, now, now, userMsgJSON("q"))
+		insertMessage(ctx, db, "msg1", "ses1", 1, now, now, assistantMsgJSON("q"))
 		for _, p := range parts {
 			insertPart(ctx, db, p[0], "msg1", "ses1", 1, now, now, textPartJSON(p[1]))
 		}
@@ -1080,7 +1082,7 @@ func TestObserver_PartMutationPagesPastFiveHundredSameTimestamp(t *testing.T) {
 	const n = 501
 	storage := testdb(t, withSeed(func(ctx context.Context, db *sql.DB) {
 		insertSession(ctx, db, "ses1", "t", "/c", 1, 1, 0)
-		insertMessage(ctx, db, "msg1", "ses1", 1, 0, 0, userMsgJSON("q"))
+		insertMessage(ctx, db, "msg1", "ses1", 1, 0, 0, assistantMsgJSON("q"))
 		for i := 1; i <= n; i++ {
 			insertPart(ctx, db, fmt.Sprintf("p%03d", i), "msg1", "ses1", i, 0, 0, textPartJSON(fmt.Sprintf("v1-%d", i)))
 		}
@@ -1128,7 +1130,7 @@ func TestObserver_PartMutationPagesPastFiveHundredSameTimestamp(t *testing.T) {
 func TestObserver_MutationOverlapDoesNotRegressHighWater(t *testing.T) {
 	storage := testdb(t, withSeed(func(ctx context.Context, db *sql.DB) {
 		insertSession(ctx, db, "ses1", "t", "/c", 1, 1, 0)
-		insertMessage(ctx, db, "msg1", "ses1", 1, 0, 0, userMsgJSON("q"))
+		insertMessage(ctx, db, "msg1", "ses1", 1, 0, 0, assistantMsgJSON("q"))
 		for i := 1; i <= 3; i++ {
 			insertPart(ctx, db, fmt.Sprintf("p%d", i), "msg1", "ses1", i, 0, 0, textPartJSON(fmt.Sprintf("v1-%d", i)))
 		}
@@ -1165,7 +1167,7 @@ func TestObserver_MutationOverlapDoesNotRegressHighWater(t *testing.T) {
 func TestObserver_UnchangedOverlapCreatesNoPending(t *testing.T) {
 	storage := testdb(t, withSeed(func(ctx context.Context, db *sql.DB) {
 		insertSession(ctx, db, "ses1", "t", "/c", 1, 1, 0)
-		insertMessage(ctx, db, "msg1", "ses1", 1, 0, 0, userMsgJSON("q"))
+		insertMessage(ctx, db, "msg1", "ses1", 1, 0, 0, assistantMsgJSON("q"))
 		for i := 1; i <= 3; i++ {
 			insertPart(ctx, db, fmt.Sprintf("p%d", i), "msg1", "ses1", i, 0, 0, textPartJSON(fmt.Sprintf("v1-%d", i)))
 		}
@@ -1203,7 +1205,7 @@ func TestObserver_UnchangedOverlapCreatesNoPending(t *testing.T) {
 func TestObserver_UnmappedPartInsideMutationOverlapConverges(t *testing.T) {
 	storage := testdb(t, withSeed(func(ctx context.Context, db *sql.DB) {
 		insertSession(ctx, db, "ses1", "t", "/c", 1, 1, 0)
-		insertMessage(ctx, db, "msg1", "ses1", 1, 0, 0, userMsgJSON("q"))
+		insertMessage(ctx, db, "msg1", "ses1", 1, 0, 0, assistantMsgJSON("q"))
 		insertPart(ctx, db, "p1", "msg1", "ses1", 1, 0, 0, textPartJSON("one"))
 		insertPart(ctx, db, "p2", "msg1", "ses1", 2, 0, 0, textPartJSON("two"))
 	}))
@@ -1267,7 +1269,7 @@ func TestObserver_MutationPaginationRejectsNonAdvancingCursor(t *testing.T) {
 func TestObserver_TwoPartMutationsBeforeFirstAckRemainDistinct(t *testing.T) {
 	storage := testdb(t, withSeed(func(ctx context.Context, db *sql.DB) {
 		insertSession(ctx, db, "ses1", "t", "/c", 1, 1, 0)
-		insertMessage(ctx, db, "msg1", "ses1", 1, 0, 0, userMsgJSON("q"))
+		insertMessage(ctx, db, "msg1", "ses1", 1, 0, 0, assistantMsgJSON("q"))
 		insertPart(ctx, db, "p1", "msg1", "ses1", 1, 0, 0, textPartJSON("v1"))
 	}))
 	cs := NewCursorStoreAt(storage + "/cursor.json")
@@ -1338,7 +1340,7 @@ func TestObserver_TwoPartMutationsBeforeFirstAckRemainDistinct(t *testing.T) {
 func TestObserver_PartMutationRestartKeepsRevisionAndEventID(t *testing.T) {
 	storage := testdb(t, withSeed(func(ctx context.Context, db *sql.DB) {
 		insertSession(ctx, db, "ses1", "t", "/c", 1, 1, 0)
-		insertMessage(ctx, db, "msg1", "ses1", 1, 0, 0, userMsgJSON("q"))
+		insertMessage(ctx, db, "msg1", "ses1", 1, 0, 0, assistantMsgJSON("q"))
 		insertPart(ctx, db, "p1", "msg1", "ses1", 1, 0, 0, textPartJSON("v1"))
 	}))
 	cs := NewCursorStoreAt(storage + "/cursor.json")
@@ -1495,7 +1497,7 @@ func convergePolls(t *testing.T, o *Observer, cs *CursorStore, rec *emitRecorder
 func TestObserver_UnchangedOverlapUsesIdleInterval(t *testing.T) {
 	storage := testdb(t, withSeed(func(ctx context.Context, db *sql.DB) {
 		insertSession(ctx, db, "ses1", "t", "/c", 1, 1, 0)
-		insertMessage(ctx, db, "msg1", "ses1", 1, 0, 0, userMsgJSON("q"))
+		insertMessage(ctx, db, "msg1", "ses1", 1, 0, 0, assistantMsgJSON("q"))
 		for i := 1; i <= 3; i++ {
 			insertPart(ctx, db, fmt.Sprintf("p%d", i), "msg1", "ses1", i, 0, 0, textPartJSON(fmt.Sprintf("v1-%d", i)))
 		}
@@ -1597,7 +1599,7 @@ func TestObserver_StopDoesNotLeakTimerOrGoroutine(t *testing.T) {
 func TestObserver_EmptyIdlePollDoesNotPersistEveryFiveSeconds(t *testing.T) {
 	storage := testdb(t, withSeed(func(ctx context.Context, db *sql.DB) {
 		insertSession(ctx, db, "ses1", "t", "/c", 1, 1, 0)
-		insertMessage(ctx, db, "msg1", "ses1", 1, 0, 0, userMsgJSON("q"))
+		insertMessage(ctx, db, "msg1", "ses1", 1, 0, 0, assistantMsgJSON("q"))
 		insertPart(ctx, db, "p1", "msg1", "ses1", 1, 0, 0, textPartJSON("v1"))
 	}))
 	cs := NewCursorStoreAt(storage + "/cursor.json")
@@ -1823,7 +1825,7 @@ func TestObserver_SpeculativeCommitConflictFailsPage(t *testing.T) {
 func TestObserver_RestartReplaysExactJournalPayload(t *testing.T) {
 	storage := testdb(t, withSeed(func(ctx context.Context, db *sql.DB) {
 		insertSession(ctx, db, "ses1", "t", "/c", 1, 1, 0)
-		insertMessage(ctx, db, "msg1", "ses1", 1, 0, 0, userMsgJSON("q"))
+		insertMessage(ctx, db, "msg1", "ses1", 1, 0, 0, assistantMsgJSON("q"))
 		insertPart(ctx, db, "p1", "msg1", "ses1", 1, 0, 0, textPartJSON("v1"))
 	}))
 	cs := NewCursorStoreAt(storage + "/cursor.json")
@@ -2110,5 +2112,124 @@ func TestObserver_StartResetsIdentityBeforeJournalReconcile(t *testing.T) {
 	}
 	if got := len(mustSnapshot(t, cs).Sessions); got != 0 {
 		t.Fatalf("identity reset left %d stale sessions before recovery", got)
+	}
+}
+
+func assistantMsgJSON(text string) string {
+	return `{"role":"assistant","parts":[{"type":"text","text":"` + text + `"}]}`
+}
+
+func TestObserver_ChildStatusFlipsEmitParentTurnStatus(t *testing.T) {
+	seed := func() string {
+		return testdb(t, withSeed(func(ctx context.Context, db *sql.DB) {
+			insertSession(ctx, db, "parent", "parent", "/c", 1, 1, 0)
+			insertSession(ctx, db, "child", "child", "/c", 2, 2, 0)
+			if _, err := db.ExecContext(ctx, "UPDATE session SET parent_id = ?, task_type = ? WHERE id = ?", "parent", "subagent_child", "child"); err != nil {
+				t.Fatalf("mark child session: %v", err)
+			}
+			insertMessage(ctx, db, "cm1", "child", 1, 2, 2, `{"role":"assistant"}`)
+			insertPart(ctx, db, "cp1", "cm1", "child", 1, 2, 2, `{"type":"tool","callId":"c1","tool":"Bash","state":{"status":"running","input":"{}"}}`)
+		}))
+	}
+	storage := seed()
+	cs := NewCursorStoreAt(storage + "/cursor.json")
+	rec := newEmitRecorder()
+	o := testObserver(t, storage, cs, rec.fn())
+
+	o.pollOnce(context.Background())
+	// Child's derived status flips completed(seed)→running(tool running):
+	// besides its own session_status, a parent-scoped turn_status carrying
+	// agent_id must be emitted so Relay advances the subagents row.
+	findTurn := func(status string) *protocol.DaemonEvent {
+		wireParent := WireSessionID(testSourceID, "parent")
+		wireChild := WireSessionID(testSourceID, "child")
+		for _, ev := range rec.snapshot() {
+			if ev.Type == "turn_status" && ev.SessionID == wireParent && ev.AgentID == wireChild && (status == "" || ev.TurnStatus == status) {
+				return &ev
+			}
+		}
+		return nil
+	}
+	found := findTurn("running")
+	if found == nil {
+		t.Fatalf("parent-scoped turn_status with agent_id not emitted: %v", rec.ids())
+	}
+	if found.TurnStatus != "running" {
+		t.Fatalf("turn_status = %q, want running", found.TurnStatus)
+	}
+	firstTurnID := found.EventID
+	ackAllEmitted(t, cs, rec)
+
+	// Flip the child's tool to completed: a NEW turn_status event id must
+	// reach the parent (relay dedup must not swallow the flip).
+	wdb, err := sql.Open("sqlite", "file:"+storage+"/db/db.sqlite?_pragma=journal_mode(WAL)")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer wdb.Close()
+	if _, err := wdb.ExecContext(context.Background(), "UPDATE part SET data = ?, time_updated = ? WHERE id = ?",
+		`{"type":"tool","callId":"c1","tool":"Bash","state":{"status":"completed","output":"ok"}}`, nowMillis(), "cp1"); err != nil {
+		t.Fatal(err)
+	}
+	o.pollOnce(context.Background())
+	flipped := findTurn("completed")
+	if flipped == nil {
+		t.Fatalf("completed turn_status not emitted after flip: %v", rec.ids())
+	}
+	if flipped.EventID == firstTurnID {
+		t.Fatal("status flip must produce a new event id (relay stable-id dedup would swallow it)")
+	}
+}
+
+func TestObserver_TodoSnapshotEmitsAgentTodo(t *testing.T) {
+	storage := testdb(t, withSeed(func(ctx context.Context, db *sql.DB) {
+		insertSession(ctx, db, "ses1", "t", "/c", 1, 1, 0)
+		insertMessage(ctx, db, "m1", "ses1", 1, 1, 1, assistantMsgJSON("hi"))
+		insertTodo(ctx, db, "ses1", "task a", "pending", "high", 0)
+	}))
+	cs := NewCursorStoreAt(storage + "/cursor.json")
+	rec := newEmitRecorder()
+	o := testObserver(t, storage, cs, rec.fn())
+
+	o.pollOnce(context.Background())
+	if got := rec.countType("agent_todo"); got != 1 {
+		t.Fatalf("initial agent_todo = %d, want 1", got)
+	}
+	ackAllEmitted(t, cs, rec)
+	// Unchanged snapshot must not re-emit.
+	o.pollOnce(context.Background())
+	if got := rec.countType("agent_todo"); got != 1 {
+		t.Fatalf("unchanged todo snapshot re-emitted: %d", got)
+	}
+	// Mutating the snapshot emits a new event.
+	wdb, err := sql.Open("sqlite", "file:"+storage+"/db/db.sqlite?_pragma=journal_mode(WAL)")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer wdb.Close()
+	if _, err := wdb.ExecContext(context.Background(), "UPDATE todo SET status = ? WHERE session_id = ? AND content = ?", "completed", "ses1", "task a"); err != nil {
+		t.Fatal(err)
+	}
+	o.pollOnce(context.Background())
+	if got := rec.countType("agent_todo"); got != 2 {
+		t.Fatalf("changed todo snapshot must re-emit, got %d total", got)
+	}
+	last := rec.snapshot()[len(rec.snapshot())-1]
+	if last.Type != "agent_todo" || len(last.Todos) != 1 || last.Todos[0].Status != "completed" {
+		t.Fatalf("mutated agent_todo payload wrong: %+v", last.Todos)
+	}
+}
+
+func TestObserver_NoTodosEmitsNothing(t *testing.T) {
+	storage := testdb(t, withSeed(func(ctx context.Context, db *sql.DB) {
+		insertSession(ctx, db, "ses1", "t", "/c", 1, 1, 0)
+		insertMessage(ctx, db, "m1", "ses1", 1, 1, 1, assistantMsgJSON("hi"))
+	}))
+	cs := NewCursorStoreAt(storage + "/cursor.json")
+	rec := newEmitRecorder()
+	o := testObserver(t, storage, cs, rec.fn())
+	o.pollOnce(context.Background())
+	if got := rec.countType("agent_todo"); got != 0 {
+		t.Fatalf("empty todo table must emit nothing, got %d", got)
 	}
 }

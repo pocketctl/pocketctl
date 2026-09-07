@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/url"
@@ -303,7 +304,10 @@ type PartCursor struct {
 
 // PartRow is the whitelisted projection of a part row, augmented with its
 // parent message's sequence (needed for the composite cursor and stable
-// ordering).
+// ordering) and the parent message's content-filter scope. The scope lets the
+// part stream apply the same §5.5 message filter as the message stream: parts
+// of a filtered message must not leak as agent content, and text parts of a
+// visible user message map to user_text instead.
 type PartRow struct {
 	ID              string
 	MessageID       string
@@ -312,6 +316,62 @@ type PartRow struct {
 	MessageSequence int64
 	TimeUpdated     int64
 	DataJSON        string
+	Msg             MessageScope
+}
+
+// MessageScope is the whitelisted content-filter projection of the message a
+// part belongs to (same fields MessageVisible evaluates, extracted via SQL so
+// the part stream never needs the full message row).
+type MessageScope struct {
+	Role       string
+	Synthetic  bool
+	System     string // raw JSON text of $.system; "" when absent/null
+	Hidden     bool
+	Internal   bool
+	Visibility string
+}
+
+// Visible reports whether the owning message passes the design §5.5 filter.
+func (ms MessageScope) Visible() bool {
+	return MessageVisible(ZcodeMessageData{
+		Role:       ms.Role,
+		Synthetic:  ms.Synthetic,
+		System:     json.RawMessage(ms.System),
+		Hidden:     ms.Hidden,
+		Internal:   ms.Internal,
+		Visibility: ms.Visibility,
+	})
+}
+
+// messageScopeColumns are the json_extract expressions appended to the part
+// queries' SELECT list; every expression is CAST to TEXT so SQLite's dynamic
+// typing (bools surface as integers, objects as JSON text) scans into
+// sql.NullString uniformly.
+const messageScopeColumns = `, CAST(json_extract(m.data, '$.role') AS TEXT),
+	CAST(json_extract(m.data, '$.synthetic') AS TEXT),
+	CAST(json_extract(m.data, '$.system') AS TEXT),
+	CAST(json_extract(m.data, '$.hidden') AS TEXT),
+	CAST(json_extract(m.data, '$.internal') AS TEXT),
+	CAST(json_extract(m.data, '$.visibility') AS TEXT)`
+
+// scanPartScope turns the six scope columns into a MessageScope.
+func scanPartScope(role, synthetic, system, hidden, internal, visibility sql.NullString) MessageScope {
+	truthy := func(v sql.NullString) bool { return v.Valid && (v.String == "1" || v.String == "true") }
+	return MessageScope{
+		Role:       nullString(role),
+		Synthetic:  truthy(synthetic),
+		System:     nullString(system),
+		Hidden:     truthy(hidden),
+		Internal:   truthy(internal),
+		Visibility: nullString(visibility),
+	}
+}
+
+func nullString(v sql.NullString) string {
+	if !v.Valid {
+		return ""
+	}
+	return v.String
 }
 
 // PartPage is one page of parts.
@@ -452,7 +512,7 @@ func (s *Store) ListParts(ctx context.Context, sessionID string, after *PartCurs
 		ctx, cancel = context.WithTimeout(ctx, s.queryTimeout)
 		defer cancel()
 	}
-	query := `SELECT p.id, p.message_id, p.session_id, p.sequence, m.sequence, p.time_updated, p.data
+	query := `SELECT p.id, p.message_id, p.session_id, p.sequence, m.sequence, p.time_updated, p.data` + messageScopeColumns + `
 		FROM part p JOIN message m ON p.message_id = m.id
 		WHERE p.session_id = ?`
 	args := []any{sessionID}
@@ -474,9 +534,12 @@ func (s *Store) ListParts(ctx context.Context, sessionID string, after *PartCurs
 	var page PartPage
 	for rows.Next() {
 		var r PartRow
-		if err := rows.Scan(&r.ID, &r.MessageID, &r.SessionID, &r.Sequence, &r.MessageSequence, &r.TimeUpdated, &r.DataJSON); err != nil {
+		var role, synthetic, system, hidden, internal, visibility sql.NullString
+		if err := rows.Scan(&r.ID, &r.MessageID, &r.SessionID, &r.Sequence, &r.MessageSequence, &r.TimeUpdated, &r.DataJSON,
+			&role, &synthetic, &system, &hidden, &internal, &visibility); err != nil {
 			return PartPage{}, classifyQueryErr(err)
 		}
+		r.Msg = scanPartScope(role, synthetic, system, hidden, internal, visibility)
 		page.Parts = append(page.Parts, r)
 	}
 	if err := rows.Err(); err != nil {
@@ -538,7 +601,7 @@ func (s *Store) ListChangedParts(ctx context.Context, sessionID string, after Mu
 		ctx, cancel = context.WithTimeout(ctx, s.queryTimeout)
 		defer cancel()
 	}
-	query := `SELECT p.id, p.message_id, p.session_id, p.sequence, m.sequence, p.time_updated, p.data
+	query := `SELECT p.id, p.message_id, p.session_id, p.sequence, m.sequence, p.time_updated, p.data` + messageScopeColumns + `
 		FROM part p JOIN message m ON p.message_id = m.id
 		WHERE p.session_id = ? AND (p.time_updated > ? OR (p.time_updated = ? AND p.id > ?))
 		ORDER BY p.time_updated ASC, p.id ASC LIMIT ?`
@@ -550,9 +613,12 @@ func (s *Store) ListChangedParts(ctx context.Context, sessionID string, after Mu
 	var page PartPage
 	for rows.Next() {
 		var r PartRow
-		if err := rows.Scan(&r.ID, &r.MessageID, &r.SessionID, &r.Sequence, &r.MessageSequence, &r.TimeUpdated, &r.DataJSON); err != nil {
+		var role, synthetic, system, hidden, internal, visibility sql.NullString
+		if err := rows.Scan(&r.ID, &r.MessageID, &r.SessionID, &r.Sequence, &r.MessageSequence, &r.TimeUpdated, &r.DataJSON,
+			&role, &synthetic, &system, &hidden, &internal, &visibility); err != nil {
 			return PartPage{}, classifyQueryErr(err)
 		}
+		r.Msg = scanPartScope(role, synthetic, system, hidden, internal, visibility)
 		page.Parts = append(page.Parts, r)
 	}
 	if err := rows.Err(); err != nil {

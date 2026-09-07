@@ -1,6 +1,7 @@
 package zcode
 
 import (
+	"github.com/pocketctl/pocketctl/internal/protocol"
 	"strings"
 	"testing"
 )
@@ -232,5 +233,60 @@ func TestMapper_SubagentDiscovered(t *testing.T) {
 	ev2 := mp.SubagentDiscovered("zcode-parent1", "zcode-child1", "zcode-explore", "Explore task", "")
 	if ev2.EventID != ev.EventID {
 		t.Fatalf("same parent+child must yield same event id: %q vs %q", ev.EventID, ev2.EventID)
+	}
+}
+
+func TestMapper_StatusEventIDIncludesPrevFactor(t *testing.T) {
+	mp := NewMapper(testSourceID)
+	ev1 := mp.SessionStatus("zcode-wire1", "completed", "prev-a")
+	ev2 := mp.SessionStatus("zcode-wire1", "completed", "prev-b")
+	if ev1.EventID == ev2.EventID {
+		t.Fatal("same status with different prev event ids must produce different event ids (relay dedup would swallow status flips)")
+	}
+	ev3 := mp.SessionStatus("zcode-wire1", "completed", "prev-a")
+	if ev1.EventID != ev3.EventID {
+		t.Fatal("same status and prev must be stable across retries")
+	}
+}
+
+func TestMapper_MapUserTextPart(t *testing.T) {
+	mp := NewMapper(testSourceID)
+	part := ZcodePartData{Type: "text", Text: "user says hi"}
+	ev := mp.MapUserTextPart("zcode-wire1", "zcodem-1", "native-msg-1", part, "prev-1", 1)
+	if ev.Type != "user_text" || ev.Text != "user says hi" || !ev.Replace || ev.Snapshot != "user says hi" {
+		t.Fatalf("user text part: %+v", ev)
+	}
+	if ev.MessageID != "zcodem-1" || ev.PreviousEventID != "prev-1" || ev.Revision != 1 {
+		t.Fatalf("identity fields: %+v", ev)
+	}
+	// Event id must match MapUserText's rule so dual-stream emission (message
+	// stream + part stream) dedupes at the relay.
+	same := mp.MapUserText("zcode-wire1", "zcodem-1", "native-msg-1", "user says hi", "prev-1")
+	if ev.EventID != same.EventID {
+		t.Fatalf("event id must match MapUserText rule: %q vs %q", ev.EventID, same.EventID)
+	}
+}
+
+func TestMapper_SubagentTurnStatus(t *testing.T) {
+	mp := NewMapper(testSourceID)
+	ev := mp.SubagentTurnStatus("zcode-parent", "zcode-child", "completed", "prev-1")
+	if ev.Type != protocol.EventTypeTurnStatus || ev.SessionID != "zcode-parent" || ev.AgentID != "zcode-child" {
+		t.Fatalf("fields: %+v", ev)
+	}
+	if ev.TurnStatus != "completed" || !ev.IsSubagent || ev.ActorScope != protocol.ActorScopeSubagent {
+		t.Fatalf("subagent scoping: %+v", ev)
+	}
+	if ev.ParentSessionID != "zcode-parent" {
+		t.Fatalf("parent session id: %+v", ev)
+	}
+	// Status flips must change the event id, otherwise the relay's
+	// stable-event-id dedup swallows re-materialization (completed→running→…).
+	ev2 := mp.SubagentTurnStatus("zcode-parent", "zcode-child", "completed", "prev-2")
+	if ev.EventID == ev2.EventID {
+		t.Fatal("different prev event ids must produce different event ids")
+	}
+	ev3 := mp.SubagentTurnStatus("zcode-parent", "zcode-child", "completed", "prev-1")
+	if ev.EventID != ev3.EventID {
+		t.Fatal("same inputs must be stable across retries")
 	}
 }

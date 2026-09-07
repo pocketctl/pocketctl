@@ -116,6 +116,14 @@ func (mp *Mapper) ModelChanged(wireSessionID, model, prevEventID string) protoco
 // assistant finish) — never from a live process signal. Only running/completed
 // are produced; waiting_approval/waiting_question are intentionally never
 // derived (design §6.5).
+//
+// The event id includes the previous event id: a session may legitimately flip
+// back to a previously-held status (completed→running→completed), and each flip
+// must reach the relay as a fresh row. With a status-only id the relay's
+// stable-event-id dedup would swallow every flip after the first, freezing the
+// session at its earliest terminal state. Including the previous event id
+// keeps retries idempotent (same chain position → same id) because a status
+// flip is always driven by new content that advanced the event chain.
 func (mp *Mapper) SessionStatus(wireSessionID, status, prevEventID string) protocol.DaemonEvent {
 	return protocol.DaemonEvent{
 		Type:            "session_status",
@@ -124,7 +132,35 @@ func (mp *Mapper) SessionStatus(wireSessionID, status, prevEventID string) proto
 		Source:          "observer",
 		Agent:           "zcode",
 		PreviousEventID: prevEventID,
-		EventID:         mp.statusEventID(wireSessionID, status),
+		EventID:         mp.statusEventID(wireSessionID, status, prevEventID),
+	}
+}
+
+// SubagentTurnStatus builds a turn_status event scoped to a ZCode child
+// session but delivered under the parent's session id with AgentID set, so
+// Relay's materializeSubagent branch advances the subagents row status. The
+// event id carries the child projection's previous event id as a flip factor:
+// a child that flips completed→running→completed must re-materialize each
+// time instead of being swallowed by the relay's stable-event-id dedup.
+func (mp *Mapper) SubagentTurnStatus(wireParentID, wireChildID, status, prevEventID string) protocol.DaemonEvent {
+	return protocol.DaemonEvent{
+		Type:              protocol.EventTypeTurnStatus,
+		SessionID:         wireParentID,
+		AgentID:           wireChildID,
+		ParentSessionID:   wireParentID,
+		IsSubagent:        true,
+		TurnStatus:        status,
+		TurnReason:        "child_session_status",
+		TurnOrigin:        protocol.TurnOriginSourceMessage,
+		TurnConfidence:    protocol.TurnConfidenceDerived,
+		ActorScope:        protocol.ActorScopeSubagent,
+		FlowScope:         protocol.FlowScopeAuxiliary,
+		ContentClass:      protocol.ContentClassLifecycle,
+		ClassifierVersion: protocol.ClassifierVersionV1,
+		Source:            "observer",
+		Agent:             "zcode",
+		PreviousEventID:   prevEventID,
+		EventID:           mp.subagentTurnEventID(wireChildID, status, prevEventID),
 	}
 }
 
@@ -296,6 +332,26 @@ func (mp *Mapper) MapUserText(wireSessionID, wireMessageID, nativeMessageID, tex
 	}
 }
 
+// MapUserTextPart builds a user_text event from a single text part of a user
+// message discovered via the part stream. Some ZCode storages keep user text
+// only in the part table (message.data embeds no parts), so the message
+// stream's extractUserText finds nothing; this mapping closes that gap. The
+// event id follows MapUserText's rule (native message id + text), so when
+// both streams do emit the same text the relay dedupes them into one row.
+func (mp *Mapper) MapUserTextPart(wireSessionID, wireMessageID, nativeMessageID string, part ZcodePartData, prevEventID string, revision int) protocol.DaemonEvent {
+	return protocol.DaemonEvent{
+		Type:            "user_text",
+		SessionID:       wireSessionID,
+		MessageID:       wireMessageID,
+		Text:            part.Text,
+		Snapshot:        part.Text,
+		Replace:         true,
+		PreviousEventID: prevEventID,
+		Revision:        revision,
+		EventID:         mp.userTextEventID(nativeMessageID, part.Text),
+	}
+}
+
 // TurnStatus builds a turn_status lifecycle event for the read-only observer
 // projection. The turn anchor is the native user-message id (source_message
 // origin, derived confidence) — never content, never a remote control signal.
@@ -387,8 +443,12 @@ func (mp *Mapper) modelEventID(wireSessionID, model string) string {
 	return fmt.Sprintf("zcode:%s:model:%s:%s", mp.sourceIDHex, hashID(wireSessionID), semanticHash(model))
 }
 
-func (mp *Mapper) statusEventID(wireSessionID, status string) string {
-	return fmt.Sprintf("zcode:%s:status:%s:%s", mp.sourceIDHex, hashID(wireSessionID), semanticHash(status))
+func (mp *Mapper) statusEventID(wireSessionID, status, prevEventID string) string {
+	return fmt.Sprintf("zcode:%s:status:%s:%s:%s", mp.sourceIDHex, hashID(wireSessionID), semanticHash(status), semanticHash(prevEventID))
+}
+
+func (mp *Mapper) subagentTurnEventID(wireChildID, status, prevEventID string) string {
+	return fmt.Sprintf("zcode:%s:subturn:%s:%s:%s", mp.sourceIDHex, hashID(wireChildID), semanticHash(status), semanticHash(prevEventID))
 }
 
 func (mp *Mapper) subagentEventID(wireParentID, wireChildID string) string {

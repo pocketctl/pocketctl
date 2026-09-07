@@ -2266,6 +2266,24 @@ async function hasOlderReplayEvent(
  * content stream. The database is scanned newest-first for efficient cursor
  * pagination, then the selected contiguous interval is returned oldest-first.
  */
+/** ZCode uploads subagent children as independent sessions: a replay_subagent
+ * agent_id may BE a child session id rather than an agent bucket inside the
+ * parent's events. Detect that storage shape so the router can replay the
+ * child session directly. Claude/Codex agent ids never match a session row,
+ * so they keep the parent-bucket path unchanged. */
+export async function isIndependentChildSession(
+  pool: pg.Pool,
+  parentSessionId: string,
+  agentId: string,
+): Promise<boolean> {
+  const result = await pool.query(
+    `SELECT session_id FROM sessions
+     WHERE session_id = $1 AND is_subagent = true AND parent_session_id = $2 LIMIT 1`,
+    [agentId, parentSessionId]
+  )
+  return (result.rowCount ?? 0) > 0
+}
+
 export async function getCompleteBackwardReplayPage(
   pool: pg.Pool,
   sessionId: string,
