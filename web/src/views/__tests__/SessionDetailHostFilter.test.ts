@@ -49,6 +49,36 @@ beforeEach(() => { mocks.handlers.clear(); vi.clearAllMocks() })
 afterEach(() => { wrapper?.unmount() })
 
 describe('SessionDetail host filtering', () => {
+  test('uses Relay host connectivity and keeps live updates across session refreshes', async () => {
+    await openPage()
+    mocks.handlers.get('daemon_list')!({ daemons: [
+      { daemon_id: 'h1', hostname: 'MacBook', daemon_online: true },
+      { daemon_id: 'h2', hostname: 'Server', daemon_online: false },
+      { daemon_id: 'h3', hostname: 'Empty host', status: 'online' },
+    ] })
+    await wrapper.get('.host-filter-trigger').trigger('click')
+    const online = (id: string) => wrapper.get(`[data-host-filter="${id}"] .status-dot`).classes().includes('online')
+    expect(online('h1')).toBe(true)
+    expect(online('h2')).toBe(false)
+    expect(online('h3')).toBe(true)
+    mocks.handlers.get('daemon_status')!({ daemon_id: 'h1', status: 'offline' })
+    mocks.handlers.get('daemon_status')!({ daemon_id: 'h2', status: 'online' })
+    await flushPromises()
+    expect(online('h1')).toBe(false)
+    expect(online('h2')).toBe(true)
+    mocks.handlers.get('session_list')!({ sessions: sessions.map(s => ({ ...s, daemon_online: s.daemon_id === 'h1' })) })
+    await flushPromises()
+    expect(online('h1')).toBe(false)
+    expect(online('h2')).toBe(true)
+    mocks.handlers.get('daemon_list')!({ daemons: [
+      { daemon_id: 'h1', hostname: 'MacBook', daemon_online: true },
+      { daemon_id: 'h2', hostname: 'Server', daemon_online: false },
+    ] })
+    await flushPromises()
+    expect(online('h1')).toBe(true)
+    expect(online('h2')).toBe(false)
+  })
+
   test('filters the list without changing the current host, connectivity, or replay', async () => {
     await openPage()
     expect(wrapper.findAll('.session-list-item')).toHaveLength(2)
