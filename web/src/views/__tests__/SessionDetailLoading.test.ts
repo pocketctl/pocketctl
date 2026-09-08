@@ -11,11 +11,11 @@ const websocketMock = vi.hoisted(() => ({
     return true
   }),
 }))
-const routeMock = vi.hoisted(() => ({ current: null as any }))
+const routeMock = vi.hoisted(() => ({ current: null as any, replace: vi.fn() }))
 
 vi.mock('vue-router', () => ({
   useRoute: () => routeMock.current,
-  useRouter: () => ({ push: vi.fn(), replace: vi.fn() }),
+  useRouter: () => ({ push: vi.fn(), replace: routeMock.replace }),
 }))
 
 vi.mock('../../composables/useWebSocket', () => ({
@@ -48,6 +48,7 @@ describe('SessionDetail history loading', () => {
   beforeEach(() => {
     routeMock.current = reactive({ params: { id: 'session-http-lan' }, query: {} as Record<string, string> })
     websocketMock.handlers.clear()
+    routeMock.replace.mockClear()
     websocketMock.operations.length = 0
     websocketMock.send.mockClear()
     websocketMock.send.mockImplementation((message: Record<string, unknown>) => {
@@ -59,6 +60,37 @@ describe('SessionDetail history loading', () => {
   afterEach(() => {
     vi.useRealTimers()
     vi.unstubAllGlobals()
+  })
+
+  test('resolves default from the arriving list without requesting a placeholder session', async () => {
+    routeMock.current.params.id = 'default'
+    const wrapper = shallowMount(SessionDetail)
+    await flushPromises()
+    expect(websocketMock.send.mock.calls.some(([msg]) => msg.session_id === 'default')).toBe(false)
+    websocketMock.handlers.get('session_list')?.({ sessions: [] })
+    await flushPromises()
+    expect(routeMock.replace).not.toHaveBeenCalled()
+    expect((wrapper.vm as any).isLoading).toBe(false)
+    websocketMock.handlers.get('session_list')?.({ sessions: [{ session_id: 'real-session', daemon_id: 'd1' }] })
+    await flushPromises()
+    expect(routeMock.replace).toHaveBeenCalledWith({ path: '/session/real-session' })
+    routeMock.current.params.id = 'real-session'
+    await flushPromises()
+    expect(websocketMock.send).toHaveBeenCalledWith(expect.objectContaining({ type: 'replay', session_id: 'real-session' }))
+    expect(websocketMock.send.mock.calls.some(([msg]) => msg.session_id === 'default')).toBe(false)
+    wrapper.unmount()
+  })
+
+  test('resolves a reused detail route from cached sessions without replaying default', async () => {
+    const wrapper = shallowMount(SessionDetail)
+    websocketMock.handlers.get('session_list')?.({ sessions: [{ session_id: 'session-http-lan', daemon_id: 'd1' }] })
+    await flushPromises()
+    websocketMock.send.mockClear()
+    routeMock.current.params.id = 'default'
+    await flushPromises()
+    expect(routeMock.replace).toHaveBeenCalledWith({ path: '/session/session-http-lan' })
+    expect(websocketMock.send.mock.calls.some(([msg]) => msg.session_id === 'default')).toBe(false)
+    wrapper.unmount()
   })
 
   test('registers replay handlers and loads history without crypto on an HTTP LAN origin', async () => {

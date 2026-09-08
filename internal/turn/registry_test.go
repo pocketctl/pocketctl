@@ -215,6 +215,22 @@ func TestTerminalizeValidatesTransitionsAndIsIdempotent(t *testing.T) {
 	}
 }
 
+func TestNativeInterruptionWithoutLocalRequest(t *testing.T) {
+	r := newTestRegistry(t)
+	key := ActorKey{SessionID: "sess-1"}
+	rec, _ := r.Start(startInput("sess-1", "req-1"))
+	if _, err := r.Terminalize(key, "stale", protocol.TurnStateInterrupted, "native", protocol.TurnConfidenceNative); !errors.Is(err, ErrStaleTurn) {
+		t.Fatalf("stale interrupt: %v", err)
+	}
+	done, err := r.Terminalize(key, rec.TurnID, protocol.TurnStateInterrupted, "native", protocol.TurnConfidenceNative)
+	if err != nil || done.State != protocol.TurnStateInterrupted {
+		t.Fatalf("native interruption: %+v %v", done, err)
+	}
+	if _, ok := r.Active(key); ok {
+		t.Fatal("native interruption left a running turn")
+	}
+}
+
 func TestTerminalizeStaleTurnReferenceIsRejected(t *testing.T) {
 	r := newTestRegistry(t)
 	key := ActorKey{SessionID: "sess-1"}

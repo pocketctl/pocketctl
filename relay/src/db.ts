@@ -3749,7 +3749,7 @@ export async function hasDefaultTitle(pool: pg.Pool, sessionId: string): Promise
     // NULL 也算默认: terminal session 的默认标题因时序竞争可能未写入 (session_discovered
     // 不带 title → INSERT NULL)。若不把 NULL 当默认，这类 session 会被判为「已有自定义标题」
     // 而永久跳过 AI 生成 (2fec2498 案例)。
-    `SELECT 1 FROM sessions WHERE session_id = $1 AND COALESCE(title_source, '') NOT IN ('manual', 'codex-desktop') AND (title LIKE 'Terminal Session-%' OR title IS NULL)`,
+    `SELECT 1 FROM sessions WHERE session_id = $1 AND COALESCE(title_source, '') NOT IN ('manual', 'codex-desktop', 'codex', 'claude-code', 'claude-code-manual') AND (title LIKE 'Terminal Session-%' OR title IS NULL OR BTRIM(title) = '')`,
     [sessionId]
   );
   return (result.rowCount ?? 0) > 0;
@@ -3758,7 +3758,7 @@ export async function hasDefaultTitle(pool: pg.Pool, sessionId: string): Promise
 /** Update session title only if it still has the default pattern. Returns true if updated. */
 export async function updateTitleIfDefault(pool: pg.Pool, sessionId: string, newTitle: string): Promise<boolean> {
   const result = await pool.query(
-    `UPDATE sessions SET title = $1, title_source = 'ai', updated_at = NOW() WHERE session_id = $2 AND COALESCE(title_source, '') NOT IN ('manual', 'codex-desktop') AND (title LIKE 'Terminal Session-%' OR title IS NULL)`,
+    `UPDATE sessions SET title = $1, title_source = 'ai', updated_at = NOW() WHERE session_id = $2 AND COALESCE(title_source, '') NOT IN ('manual', 'codex-desktop', 'codex', 'claude-code', 'claude-code-manual') AND (title LIKE 'Terminal Session-%' OR title IS NULL OR BTRIM(title) = '')`,
     [newTitle, sessionId]
   );
   return (result.rowCount ?? 0) > 0;
@@ -3793,6 +3793,25 @@ export async function updateCodexDesktopTitle(pool: pg.Pool, sessionId: string, 
        AND (title_source_updated_at IS NULL OR title_source_updated_at < $3::timestamptz
          OR (title_source_updated_at = $3::timestamptz AND title IS DISTINCT FROM $1))`,
     [title.trim(), sessionId, updatedAt],
+  );
+  return (result.rowCount ?? 0) > 0;
+}
+
+/** Native CLI names outrank fallback, but never Web renames or Claude custom names. */
+export async function updateNativeCLITitle(pool: pg.Pool, sessionId: string, title: string, source: string, updatedAt?: string): Promise<boolean> {
+  if (!title.trim() || !['codex', 'claude-code', 'claude-code-manual'].includes(source)) return false;
+  if (source === 'codex' && (!updatedAt || !Number.isFinite(Date.parse(updatedAt)))) return false;
+  const result = await pool.query(
+    `UPDATE sessions SET title = $1, title_source = $3, updated_at = NOW(), title_source_updated_at = $4::timestamptz
+     WHERE session_id = $2 AND title_source IS DISTINCT FROM 'manual'
+       AND agent_type = CASE WHEN $3 = 'codex' THEN 'codex' ELSE 'claude-code' END
+       AND (title IS NULL OR BTRIM(title) = '' OR title LIKE 'Terminal Session-%'
+         OR title_source IN ('ai', 'codex', 'claude-code', 'claude-code-manual'))
+       AND (title_source IS DISTINCT FROM 'claude-code-manual' OR $3 = 'claude-code-manual')
+       AND ($3 <> 'codex' OR title_source_updated_at IS NULL OR title_source_updated_at <= $4::timestamptz)
+       AND (title IS DISTINCT FROM $1 OR title_source IS DISTINCT FROM $3
+         OR ($3 = 'codex' AND title_source_updated_at IS DISTINCT FROM $4::timestamptz))`,
+    [title.trim(), sessionId, source, source === 'codex' ? updatedAt : null],
   );
   return (result.rowCount ?? 0) > 0;
 }

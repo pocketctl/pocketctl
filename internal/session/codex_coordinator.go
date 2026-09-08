@@ -79,6 +79,10 @@ type codexCoordinator struct {
 	shuttingDown    bool
 	pumpWG          sync.WaitGroup
 	subscriptionWG  sync.WaitGroup
+
+	// Keep classifications across event-pump reconnects.
+	ephemeralMu      sync.Mutex
+	ephemeralThreads map[string]bool
 }
 
 var errCodexRuntimeUpgradeDeferred = errors.New("Codex managed runtime upgrade is deferred while an active terminal lease uses the current generation")
@@ -405,6 +409,8 @@ func (c *codexCoordinator) consumeEvents(ctx context.Context, inbound <-chan cod
 }
 
 func (c *codexCoordinator) consumeEventsWithInteractions(ctx context.Context, inbound <-chan codexapp.Inbound, projector *codexProjection, interactions *codexInteractions) {
+	// Native ephemeral threads are UI helpers (titles, recaps, etc.), not
+	// resumable user sessions. Filter before subscription and interactions too.
 	for {
 		select {
 		case <-ctx.Done():
@@ -415,6 +421,27 @@ func (c *codexCoordinator) consumeEventsWithInteractions(ctx context.Context, in
 					go c.reconnectClient(projector.generation)
 				}
 				return
+			}
+			var identity struct {
+				ThreadID string `json:"threadId"`
+				Thread   struct {
+					ID        string `json:"id"`
+					Ephemeral bool   `json:"ephemeral"`
+				} `json:"thread"`
+			}
+			if json.Unmarshal(message.Params, &identity) == nil {
+				c.ephemeralMu.Lock()
+				if message.Method == "thread/started" && identity.Thread.ID != "" && identity.Thread.Ephemeral {
+					if c.ephemeralThreads == nil {
+						c.ephemeralThreads = make(map[string]bool)
+					}
+					c.ephemeralThreads[identity.Thread.ID] = true
+				}
+				ignored := c.ephemeralThreads[identity.ThreadID] || c.ephemeralThreads[identity.Thread.ID]
+				c.ephemeralMu.Unlock()
+				if ignored {
+					continue
+				}
 			}
 			if interactions != nil {
 				interactions.Handle(message)
@@ -630,12 +657,13 @@ func (c *codexCoordinator) observeTitleEvent(event protocol.DaemonEvent) {
 	if titleTurn.assistant == "" {
 		titleTurn.assistant = strings.TrimSpace(event.Text)
 	}
-	// The pair is kept pending until the turn completes (flushTitleOnTurnEnd,
-	// review P1-5): firing at the final agent_text raced the turn terminal —
-	// the completion guard dropped the first turn's title and never retried,
-	// while later turns leaked the previous completed turn's approval.
+	// A final text is sufficient to label the task, independently of whether
+	// its turn subsequently completes or is interrupted. Generation is queued.
 	c.titleTurns[event.SessionID] = titleTurn
 	c.titleMu.Unlock()
+	if (event.Final || !event.Streaming) && titleTurn.user != "" && titleTurn.assistant != "" {
+		c.sm.GenerateTitle(event.SessionID, titleTurn.user, titleTurn.assistant)
+	}
 }
 
 // flushTitleOnTurnEnd generates the pending title after a turn reached a

@@ -59,6 +59,17 @@ describe('Router - session_title_update broadcasts to unsubscribed same-user cli
     vi.mocked(generateTitle).mockReset()
   })
 
+  test.each(['codex', 'claude-code', 'claude-code-manual'])('native %s titles broadcast without calling the provider', async (source) => {
+    const pool = createMockPool()
+    const router = new Router(pool)
+    await router.registerDaemon(createMockWs(), { type: 'register', daemon_id: 'd1', hostname: 'h', agents: [] }, 1)
+    const clientWs = createMockWs()
+    router.registerClient(clientWs, 1)
+    router.handleDaemonMessage('d1', { type: 'session_title_update', session_id: 'sess-1', title: 'Native name', title_source: source, title_updated_at: '2026-09-08T10:00:00Z', seq: 1 })
+    await vi.waitFor(() => expect(clientWs._sent).toEqual(expect.arrayContaining([expect.objectContaining({ type: 'session_title_update', title: 'Native name' })])))
+    expect(generateTitle).not.toHaveBeenCalled()
+  })
+
   test('generate_title_request 成功 → 未订阅的同用户 client 收到 session_title_update', async () => {
     vi.mocked(generateTitle).mockResolvedValue('AI标题')
     const router = new Router(createMockPool())

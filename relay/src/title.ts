@@ -7,9 +7,8 @@
  * 次后仍失败 —— 都返回「空串」，而不是 fallback 截断串。
  *
  * 空串让 relay（router.ts 的 `if (!title) return`）跳过写库，title 保持默认占位
- * 状态（hasDefaultTitle 仍为 true），于是下次 daemon 有新消息再触发
- * generate_title_request 时，relay 会重新生成。配合 title.ts 内部的重试 + daemon
- * 侧的每轮重触发（上限 5 次），偶发故障能自愈。
+ * 状态（hasDefaultTitle 仍为 true），由 daemon 的定时退避任务重新触发，
+ * 不再依赖新消息。配合内部重试及 daemon 上限 5 次请求处理偶发故障。
  */
 
 const DEEPSEEK_API_URL = 'https://api.deepseek.com/chat/completions';
@@ -47,10 +46,11 @@ const LOCALE_HINT = (locale: string) => `The user's UI language is ${locale}.
  * @param locale - Optional UI locale for language preference (e.g. "zh", "en")
  * @returns A cleaned title string (≤15 chars), or '' on any failure
  */
-export async function generateTitle(userMessage: string, assistantMessage: string, locale?: string): Promise<string> {
+export async function generateTitle(userMessage: string, assistantMessage: string, locale?: string, sessionId?: string): Promise<string> {
+  const context = sessionId ? { sessionId } : {};
   const apiKey = process.env.DEEPSEEK_API_KEY;
   if (!apiKey) {
-    console.log('[title] DEEPSEEK_API_KEY not set, skipping LLM title generation');
+    console.log('[title] DEEPSEEK_API_KEY not set, skipping LLM title generation', context);
     return '';
   }
 
@@ -61,16 +61,16 @@ export async function generateTitle(userMessage: string, assistantMessage: strin
       const raw = await callDeepSeekOnce(apiKey, systemContent, `User message: ${userMessage}\n\nAssistant reply: ${assistantMessage}`, MAX_TITLE_LEN);
       if (raw) return cleanTitle(raw);
       // DeepSeek 200 但 content 为空（thinking 模式下 reasoning 可能占满 max_tokens）—— 当作瞬时故障重试
-      console.warn(`[title] DeepSeek returned empty content (${label})`);
+      console.warn(`[title] DeepSeek returned empty content (${label})`, context);
     } catch (err: any) {
       const msg = err?.message || String(err);
       // 不可重试，或已用尽重试次数：放弃，返回空串
       if (!err?.retryable || attempt >= MAX_RETRIES) {
-        console.error(`[title] DeepSeek API call failed (${label}): ${msg}`);
+        console.error(`[title] DeepSeek API call failed (${label}): ${msg}`, context);
         break;
       }
       const delay = err.retryAfterMs ?? backoffMs(attempt);
-      console.warn(`[title] ${label} failed (${msg}), retrying in ${delay}ms`);
+      console.warn(`[title] ${label} failed (${msg}), retrying in ${delay}ms`, context);
       await sleep(delay);
       continue;
     }

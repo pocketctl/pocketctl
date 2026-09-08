@@ -29,13 +29,17 @@ type ProcessState struct {
 	TurnStartedAt        time.Time // start of the current turn; zero while idle
 	Cwd                  string
 	Agent                string
-	Source               string               // "daemon", "terminal", or "observer"
-	SlashCommands        []string             // slash commands the agent reported as available (init event)
-	Pid                  int                  // terminal session's original PID
-	ProcessStartIdentity string               // OS process-birth identity; prevents PID-reuse binding
-	TTY                  string               // terminal session's TTY device (e.g. /dev/ttys002)
-	ExitReason           string               // reason for process exit (terminal sessions only)
-	TitleAttempts        int                  // 已触发 generate_title_request 次数（上限 MaxTitleAttempts）
+	Source               string   // "daemon", "terminal", or "observer"
+	SlashCommands        []string // slash commands the agent reported as available (init event)
+	Pid                  int      // terminal session's original PID
+	ProcessStartIdentity string   // OS process-birth identity; prevents PID-reuse binding
+	TTY                  string   // terminal session's TTY device (e.g. /dev/ttys002)
+	ExitReason           string   // reason for process exit (terminal sessions only)
+	TitleAttempts        int      // 已触发 generate_title_request 次数（上限 MaxTitleAttempts）
+	TitleUser            string
+	TitleAssistant       string
+	TitleNextAttempt     time.Time
+	NativeTitle          *protocol.DaemonEvent
 	Tailer               *watcher.JSONLTailer // terminal session 的 JSONL tailer（D2: sendToIdleTerminal 期间 pause）
 	PTY                  platform.PTY         // interactive-web-session D1: daemon session 的 PTY master（写 stdin 驱动 interactive claude）。PR2: platform.PTY interface (was *os.File)
 	PTYScanner           *ptyscan.Scanner     // daemon session 的 PTY 菜单扫描器（捕获 TUI 选择提示，转成 interactive_prompt 事件）

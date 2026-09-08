@@ -1718,6 +1718,7 @@ func cmdDaemonStart(args []string) {
 	// session_model_changed event so the relay + Web/iOS clients reflect the
 	// /model switch in real time.
 	client.OnEvent = func(evt protocol.DaemonEvent) []protocol.DaemonEvent {
+		sm.ObserveNativeTitle(evt)
 		enrichRepositoryFacts(context.Background(), &evt)
 		// Turn lifecycle chokepoint: registry sync + single (turn, state)
 		// emission dedup for every producer (codex projection, claude JSONL
@@ -1777,6 +1778,7 @@ func cmdDaemonStart(args []string) {
 
 	// Context with signal handling
 	ctx, cancel := context.WithCancel(context.Background())
+	go sm.RunTitleMaintenance(ctx)
 	defer cancel()
 
 	// Start the ZCode observer now that the daemon ctx exists. Fail-closed: if
@@ -3214,9 +3216,8 @@ func handleWatcherEvents(ctx context.Context, events <-chan watcher.SessionEvent
 								outputCh <- events[i]
 							}
 							// Check for title generation trigger (user + assistant messages
-							// ready). Re-fires each new conversation round; GenerateTitle caps
-							// total attempts at MaxTitleAttempts and the relay skips once an AI
-							// title is written, so re-evaluating per tick is safe.
+							// ready). GenerateTitle queues the first usable pair; the maintenance
+							// loop retries without new lines and Relay skips existing titles.
 							hasNativeTitle := false
 							if publishedAgent == adapter.AgentCodexDesktop {
 								if title, ok := codexTitles.Lookup(sessionSnapshot.SessionID); ok {

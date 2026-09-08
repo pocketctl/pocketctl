@@ -7,56 +7,61 @@ import (
 	"github.com/pocketctl/pocketctl/internal/protocol"
 )
 
-// TestGenerateTitleAttemptCap verifies the re-triggerable semantics: each call
-// up to MaxTitleAttempts emits a generate_title_request (so a new conversation
-// round can re-ask after a transient GLM failure), and anything past the cap
-// is silently dropped (bounds cost/429-risk during a sustained outage).
 func TestGenerateTitleAttemptCap(t *testing.T) {
-	outputCh := make(chan protocol.DaemonEvent, 32)
-	sm := NewSessionManager(outputCh)
-	sm.RegisterTerminalSession("sid", "/tmp", 1, "/dev/ttys001", protocol.StatusRunning, "")
-	drainDiscovered(t, outputCh)
-
-	// 前 MaxTitleAttempts 次每次都应发一个 generate_title_request（每轮可重触发）
+	sm := NewSessionManager(make(chan protocol.DaemonEvent, 32))
+	sm.sessions["sid"] = &ProcessState{SessionID: "sid"}
+	sm.GenerateTitle("sid", "u", "a")
+	if events := sm.pendingTitleEvents(time.Now()); len(events) != 0 {
+		t.Fatal("native title grace period must delay fallback")
+	}
 	for i := 0; i < MaxTitleAttempts; i++ {
-		sm.GenerateTitle("sid", "u", "a")
-		select {
-		case evt := <-outputCh:
-			if evt.Type != "generate_title_request" {
-				t.Fatalf("attempt %d: expected generate_title_request, got %q", i, evt.Type)
-			}
-		case <-time.After(time.Second):
-			t.Fatalf("attempt %d: expected an event, none sent", i)
+		now := sm.sessions["sid"].TitleNextAttempt
+		events := sm.pendingTitleEvents(now)
+		if len(events) != 1 || events[0].Type != "generate_title_request" || events[0].UserMessage != "u" || events[0].AssistantMessage != "a" {
+			t.Fatalf("attempt %d: %+v", i, events)
+		}
+		if events := sm.pendingTitleEvents(now); len(events) != 0 {
+			t.Fatal("retry must respect backoff")
+		}
+		if got := sm.sessions["sid"].TitleNextAttempt.Sub(now); got != time.Minute<<i {
+			t.Fatalf("backoff = %v", got)
 		}
 	}
-
-	// 计数正好到上限
-	sm.mu.RLock()
-	got := sm.sessions["sid"].TitleAttempts
-	sm.mu.RUnlock()
-	if got != MaxTitleAttempts {
-		t.Fatalf("expected TitleAttempts=%d, got %d", MaxTitleAttempts, got)
-	}
-
-	// 上限之后不再发送
-	sm.GenerateTitle("sid", "u", "a")
-	select {
-	case evt := <-outputCh:
-		t.Fatalf("expected no event after cap, got %q", evt.Type)
-	default:
-		// good
+	sm.GenerateTitle("sid", "new user", "new answer")
+	if events := sm.pendingTitleEvents(time.Now().Add(24 * time.Hour)); len(events) != 0 {
+		t.Fatal("new messages must not bypass retry cap")
 	}
 }
 
-// TestGenerateTitleUnknownSession ensures a non-registered id emits nothing
-// rather than blocking or erroring on the output channel.
-func TestGenerateTitleUnknownSession(t *testing.T) {
-	outputCh := make(chan protocol.DaemonEvent, 4)
-	sm := NewSessionManager(outputCh)
+func TestGenerateTitleUnknownOrMissingContent(t *testing.T) {
+	sm := NewSessionManager(make(chan protocol.DaemonEvent, 4))
+	sm.sessions["sid"] = &ProcessState{SessionID: "sid"}
 	sm.GenerateTitle("unknown", "u", "a")
-	select {
-	case evt := <-outputCh:
-		t.Fatalf("unknown session should not emit, got %q", evt.Type)
-	default:
+	sm.GenerateTitle("sid", "u", "")
+	if events := sm.pendingTitleEvents(time.Now().Add(time.Hour)); len(events) != 0 {
+		t.Fatalf("invalid request emitted: %+v", events)
+	}
+}
+
+func TestNativeTitleCancelsFallbackAndProtectsCustomName(t *testing.T) {
+	sm := NewSessionManager(make(chan protocol.DaemonEvent, 4))
+	sm.sessions["sid"] = &ProcessState{SessionID: "sid"}
+	sm.GenerateTitle("sid", "u", "a")
+	sm.ObserveNativeTitle(protocol.DaemonEvent{Type: "session_title_update", SessionID: "sid", Title: "custom", TitleSource: "claude-code-manual", Seq: 9, EventID: "old"})
+	sm.ObserveNativeTitle(protocol.DaemonEvent{Type: "session_title_update", SessionID: "sid", Title: "ai", TitleSource: "claude-code"})
+	events := sm.pendingTitleEvents(time.Now().Add(time.Hour))
+	if len(events) != 1 || events[0].Title != "custom" || events[0].Seq != 0 || events[0].EventID != "" || sm.sessions["sid"].TitleUser != "" {
+		t.Fatalf("native priority/retry envelope: %+v", events)
+	}
+}
+
+func TestCodexNativeTitleIgnoresStaleIndex(t *testing.T) {
+	sm := NewSessionManager(make(chan protocol.DaemonEvent, 4))
+	sm.sessions["sid"] = &ProcessState{SessionID: "sid"}
+	for i, stamp := range []string{"2026-09-08T10:00:00Z", "2026-09-08T09:00:00Z"} {
+		sm.ObserveNativeTitle(protocol.DaemonEvent{Type: "session_title_update", SessionID: "sid", Title: []string{"new", "old"}[i], TitleSource: "codex", TitleUpdatedAt: stamp})
+	}
+	if got := sm.sessions["sid"].NativeTitle.Title; got != "new" {
+		t.Fatalf("stale index replaced name: %s", got)
 	}
 }

@@ -127,6 +127,10 @@ func (sm *SessionManager) RegisterTerminalSession(sessionID, cwd string, pid int
 
 	// Check if session already exists
 	if ps, ok := sm.sessions[sessionID]; ok {
+		// Rollout creation/modification is not native execution evidence.
+		if ps.Agent == adapter.AgentCodex && ps.Source == "terminal" && ps.ControlMode == protocol.ControlManaged {
+			return false
+		}
 		// App-server managed Codex sessions share one long-lived backend and have
 		// no per-thread PID. Their rollout is still visible to the native watcher,
 		// but starting a JSONL tailer would project every event a second time.

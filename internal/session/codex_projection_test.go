@@ -14,6 +14,17 @@ func codexNotification(method, params string) codexapp.Inbound {
 	return codexapp.Inbound{Method: method, Params: json.RawMessage(params)}
 }
 
+func TestCodexProjectionNativeName(t *testing.T) {
+	p := newCodexProjection(7)
+	events := p.Project(codexNotification("thread/name/updated", `{"threadId":"sid","threadName":" native title "}`))
+	if len(events) != 1 || events[0].Title != "native title" || events[0].TitleSource != "codex" || events[0].SessionID != "sid" || events[0].TitleUpdatedAt == "" {
+		t.Fatalf("native name: %+v", events)
+	}
+	if events := p.Project(codexNotification("thread/name/updated", `{"threadId":"sid","threadName":null}`)); len(events) != 0 {
+		t.Fatal("cleared native name must not erase a saved title")
+	}
+}
+
 func TestCodexProjectionThreadAndTurnLifecycle(t *testing.T) {
 	p := newCodexProjection(7)
 

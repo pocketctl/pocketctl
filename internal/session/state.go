@@ -26,40 +26,21 @@ func (sm *SessionManager) UpdateSessionTitle(sessionID, title string) {
 }
 
 // MaxTitleAttempts caps how many times a session will ask the relay to generate
-// an AI title. Each new user+assistant round in the tailer re-triggers until the
-// relay succeeds (relay returns empty on failure and keeps the default title, so
-// re-generation is harmless and self-healing). 5 bounds cost/429-risk during a
-// sustained GLM outage while still letting transient failures recover.
+// an AI title. Maintenance retries the first usable pair without requiring
+// another message; the relay skips generation once a title has been saved.
 const MaxTitleAttempts = 5
 
-// GenerateTitle sends a generate_title_request event to the relay for LLM-based
-// title generation. Re-triggerable up to MaxTitleAttempts per session so a transient
-// GLM failure (429/timeout) self-heals on the next conversation round. Only a
-// completed turn counts as success — interrupted/failed/abandoned turns never
-// trigger title generation (plan stage 2).
+// GenerateTitle queues a bounded retry task. A task label does not imply that
+// the conversation completed successfully. Native titles get a grace period.
 func (sm *SessionManager) GenerateTitle(sessionID, userMessage, assistantMessage string) {
-	if !sm.turnAllowsCompletionSideEffects(sessionID) {
-		return
-	}
 	sm.mu.Lock()
+	defer sm.mu.Unlock()
 	ps, ok := sm.sessions[sessionID]
-	if !ok {
-		sm.mu.Unlock()
+	if !ok || ps.NativeTitle != nil || ps.TitleUser != "" || userMessage == "" || assistantMessage == "" {
 		return
 	}
-	if ps.TitleAttempts >= MaxTitleAttempts {
-		sm.mu.Unlock()
-		return
-	}
-	ps.TitleAttempts++
-	sm.mu.Unlock()
-
-	sm.outputCh <- protocol.DaemonEvent{
-		Type:             "generate_title_request",
-		SessionID:        sessionID,
-		UserMessage:      userMessage,
-		AssistantMessage: assistantMessage,
-	}
+	ps.TitleUser, ps.TitleAssistant = userMessage, assistantMessage
+	ps.TitleNextAttempt = time.Now().Add(10 * time.Second)
 }
 
 func (sm *SessionManager) SetSessionExited(sessionID string, exitReason string) {
@@ -226,6 +207,10 @@ func (sm *SessionManager) SyncRediscoveredTerminalStatus(sessionID, status strin
 	sm.mu.Lock()
 	ps, ok := sm.sessions[sessionID]
 	if !ok || ps.Source != "terminal" {
+		sm.mu.Unlock()
+		return false
+	}
+	if ps.Agent == adapter.AgentCodex && ps.ControlMode == protocol.ControlManaged {
 		sm.mu.Unlock()
 		return false
 	}

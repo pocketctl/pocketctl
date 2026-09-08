@@ -449,9 +449,14 @@ export class Router {
     const sessionId = input.sessionId ?? '';
     const userMessage = typeof input.payload.user_message === 'string' ? input.payload.user_message : '';
     const assistantMessage = typeof input.payload.assistant_message === 'string' ? input.payload.assistant_message : '';
-    if (!userMessage || !assistantMessage || !await db.hasDefaultTitle(this.pool, sessionId)) return null;
-    const title = await generateTitle(userMessage, assistantMessage, this.ownerLocale(sessionId));
-    if (!title || !await db.updateTitleIfDefault(this.pool, sessionId, title)) return null;
+    if (!userMessage || !assistantMessage || !await db.hasDefaultTitle(this.pool, sessionId)) {
+      console.info('[title] skipped', { sessionId, reason: !userMessage || !assistantMessage ? 'missing_content' : 'title_already_present' });
+      return null;
+    }
+    const title = await generateTitle(userMessage, assistantMessage, this.ownerLocale(sessionId), sessionId);
+    if (!title) { console.warn('[title] generation failed', { sessionId }); return null; }
+    if (!await db.updateTitleIfDefault(this.pool, sessionId, title)) { console.info('[title] update superseded', { sessionId }); return null; }
+    console.info('[title] generated and saved', { sessionId });
     return { type: 'session_title_update', session_id: sessionId, title };
   }
 
@@ -2059,11 +2064,14 @@ export class Router {
         if (msg.title_source === 'codex-desktop') {
           if (typeof msg.title !== 'string' || typeof msg.title_updated_at !== 'string' ||
             !await db.updateCodexDesktopTitle(this.pool, sessionId, msg.title, msg.title_updated_at)) return;
+        } else if (['codex', 'claude-code', 'claude-code-manual'].includes(msg.title_source)) {
+          if (typeof msg.title !== 'string' || !msg.title.trim()) return;
+          if (!await db.updateNativeCLITitle(this.pool, sessionId, msg.title, msg.title_source, msg.title_updated_at)) return;
         } else {
           const result = await this.pool.query(
             `UPDATE sessions SET title = $1
-             WHERE session_id = $2 AND COALESCE(title_source, '') NOT IN ('manual', 'codex-desktop')
-               AND (title LIKE 'Terminal Session-%' OR title IS NULL)`,
+             WHERE session_id = $2 AND COALESCE(title_source, '') NOT IN ('manual', 'codex-desktop', 'codex', 'claude-code', 'claude-code-manual')
+               AND (title LIKE 'Terminal Session-%' OR title IS NULL OR BTRIM(title) = '')`,
             [String(msg.title ?? ''), sessionId],
           );
           if (!(result.rowCount ?? 0)) return;
