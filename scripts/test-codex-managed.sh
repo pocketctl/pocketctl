@@ -61,8 +61,16 @@ if [[ -d ios ]] && command -v swift >/dev/null 2>&1 && command -v swiftc >/dev/n
       ios/Tests/SessionEventRegressionTests.swift \
       -o "$swift_test_dir/SessionEventRegressionTests"
     "$swift_test_dir/SessionEventRegressionTests"
-    swiftc \
+    swiftc -D POCKETCTL_REAL_SESSION_MODELS \
       ios/Pocketctl/Models/AgentFileChange.swift \
+      ios/Pocketctl/Models/ChatMessage.swift \
+      ios/Pocketctl/Models/AgentPlan.swift \
+      ios/Pocketctl/Models/AgentPermissionConfig.swift \
+      ios/Pocketctl/Models/OpenCodeInteraction.swift \
+      ios/Pocketctl/Models/Session.swift \
+      ios/Pocketctl/Models/SubAgent.swift \
+      ios/Pocketctl/Models/User.swift \
+      ios/Pocketctl/Models/WebSocketEvent.swift \
       ios/Pocketctl/Utils/UnifiedDiffParser.swift \
       ios/Pocketctl/Utils/SessionEventPolicy.swift \
       ios/Tests/AgentFileChangeRegressionTests.swift \

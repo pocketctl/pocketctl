@@ -228,6 +228,25 @@ func ParseJWTExpiry(tokenStr string) (time.Time, error) {
 	return time.Unix(claims.Exp, 0), nil
 }
 
+// ParseJWTAccountID decodes the stable server account ID for local state
+// namespacing. This is not authorization; the Relay verifies the token.
+func ParseJWTAccountID(tokenStr string) (string, error) {
+	payload, err := jwtPayload(tokenStr)
+	if err != nil {
+		return "", err
+	}
+	var claims struct {
+		UserID int64 `json:"userId"`
+	}
+	if err := json.Unmarshal(payload, &claims); err != nil {
+		return "", fmt.Errorf("parse account claim: %w", err)
+	}
+	if claims.UserID <= 0 {
+		return "", fmt.Errorf("no valid userId claim in token")
+	}
+	return fmt.Sprintf("%d", claims.UserID), nil
+}
+
 // ParseJWTEmail returns the authenticated account email embedded in a JWT.
 // Like ParseJWTExpiry, it only decodes the locally held token; the relay
 // remains authoritative for token signature validation and account identity.

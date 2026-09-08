@@ -39,6 +39,8 @@ type EmitFunc func(protocol.DaemonEvent) bool
 // ObserverConfig parameterizes an Observer (mainly so tests can inject a
 // synthetic store, cursor store and fast poll intervals).
 type ObserverConfig struct {
+	RelayURL     string // production must scope both cursor and journal to this destination
+	AccountID    string // stable account identity, never an access/refresh token
 	SourceID     string
 	StorageDir   string
 	History      string
@@ -81,6 +83,10 @@ type Observer struct {
 	// recovery; it is never silently resolved by clearing pending.
 	recoveryMu      sync.Mutex
 	recoveryBlocked map[string]time.Time // wireID → last warn
+	// Owned by the poll loop. Continue session keyset pages across ticks so
+	// old sessions and metadata retries cannot be starved by the first page.
+	sessionAfter *SessionPageCursor
+	resyncActive bool
 }
 
 // pollTimer is the resettable timer boundary used by the observer loop.
@@ -147,6 +153,16 @@ func (o *Observer) Start(ctx context.Context) error {
 		return err
 	}
 	o.store = store
+	if o.cfg.CursorStore == nil && o.cfg.RelayURL != "" {
+		cs, journal, err := destinationStores(o.cfg.RelayURL, o.cfg.AccountID)
+		if err != nil {
+			store.Close()
+			return err
+		}
+		o.cfg.CursorStore = cs
+		o.journal = journal
+		o.resyncActive = true
+	}
 	if o.cfg.CursorStore == nil {
 		cs, err := NewCursorStore()
 		if err != nil {
@@ -369,20 +385,10 @@ func (o *Observer) pollAndReschedule(ctx context.Context, timer pollTimer) {
 // handleResync re-emits a session_discovered (Resync=true) for each known
 // session through the low-priority gate. It does NOT burst-send content.
 func (o *Observer) handleResync() {
-	if o.cfg.Emit == nil || o.cursor == nil {
-		return
-	}
-	snap, err := o.cursor.Snapshot()
-	if err != nil {
-		return
-	}
-	mp := NewMapper(o.cfg.SourceID)
-	for wireID := range snap.File.Sessions {
-		ev := mp.SessionDiscovered(wireID, "", "", "", "completed")
-		ev.Resync = true
-		// Low-priority gate: if rejected, keep trying on subsequent ticks.
-		o.cfg.Emit(ev)
-	}
+	// Hydrate one source page per poll, retrying rejected metadata on the next
+	// tick. Cursor-only IDs whose source rows no longer exist are never emitted.
+	o.resyncActive = true
+	o.sessionAfter = nil
 }
 
 // emitEvent delivers one event. session_status is a tiny metadata event that
