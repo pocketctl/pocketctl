@@ -1134,6 +1134,8 @@ func TestDaemonRestartChildDeathAfterSecondHeartbeatIsRejected(t *testing.T) {
 }
 
 func TestDaemonRestartHeartbeatCannotOverwriteChallenge(t *testing.T) {
+	// A real daemon's explicit-stop marker must not affect this handshake.
+	t.Setenv("HOME", t.TempDir())
 	base := filepath.Join(t.TempDir(), "ready")
 	childDone := make(chan error, 1)
 	go func() {

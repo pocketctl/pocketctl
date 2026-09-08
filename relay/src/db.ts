@@ -1415,6 +1415,12 @@ export async function consolidateOfflineMachineDaemons(
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
+    // Historical usage rebinding can exceed the control pool's 1s statement
+    // budget. Keep the override transaction-local so COMMIT/ROLLBACK restores
+    // the pooled connection, and retain a short wait for contended locks.
+    // The existing machine identity fence still serializes same-host merges.
+    await client.query(`SET LOCAL statement_timeout = '30s'`);
+    await client.query(`SET LOCAL lock_timeout = '1s'`);
     await client.query('SELECT id FROM users WHERE id = $1 FOR KEY SHARE',[input.userId]);
     await lockMachineIdentityFence(client, input.userId, input.machineId);
     const current = await client.query(

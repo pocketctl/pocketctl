@@ -154,6 +154,57 @@ suite('durable session message admission PostgreSQL', () => {
     expect((await pool.query('SELECT count(*)::int AS n FROM session_message_admissions')).rows[0].n).toBe(0)
   })
 
+  test.each([false, true])('slow machine consolidation restores control budgets after rollback=%s', async (fail) => {
+    const machine = 'machine-' + 'c'.repeat(32)
+    await pool.query("UPDATE daemons SET status='offline',machine_id=$1 WHERE daemon_id='admission-daemon'", [machine])
+    await pool.query("INSERT INTO daemons(daemon_id,hostname,status,user_id,machine_id) VALUES('new-daemon','test','online',$1,$2)", [userId, machine])
+    // A real SQL statement exceeding the production control pool's 1s budget.
+    await pool.query(`CREATE OR REPLACE FUNCTION test_slow_consolidation() RETURNS trigger LANGUAGE plpgsql AS $$
+      BEGIN
+        PERFORM pg_sleep(1.2);
+        ${fail ? "RAISE EXCEPTION 'test consolidation failure';" : 'RETURN NULL;'}
+      END $$`)
+    await pool.query('CREATE TRIGGER test_slow_consolidation AFTER UPDATE ON token_usage_facts FOR EACH STATEMENT EXECUTE FUNCTION test_slow_consolidation()')
+    const control = new pg.Pool({ connectionString: process.env.TEST_DATABASE_URL, max: 1, statement_timeout: 1000 })
+    try {
+      const migration = consolidateOfflineMachineDaemons(control, { userId, daemonId: 'new-daemon', machineId: machine })
+      if (fail) {
+        await expect(migration).rejects.toThrow('test consolidation failure')
+      } else {
+        await expect(migration).resolves.toEqual({ mergedDaemonIds: ['admission-daemon'] })
+      }
+      expect((await pool.query("SELECT daemon_id FROM sessions WHERE session_id='admission-session'")).rows[0].daemon_id)
+        .toBe(fail ? 'admission-daemon' : 'new-daemon')
+      expect((await pool.query("SELECT count(*)::int n FROM daemons WHERE daemon_id='admission-daemon'")).rows[0].n).toBe(fail ? 1 : 0)
+      // max=1 ensures this checks the very connection returned by consolidation.
+      expect((await control.query('SHOW statement_timeout')).rows[0].statement_timeout).toBe('1s')
+      expect((await control.query('SHOW lock_timeout')).rows[0].lock_timeout).toBe('0')
+      await expect(control.query('SELECT pg_sleep(1.2)')).rejects.toMatchObject({ code: '57014' })
+    } finally {
+      await control.end()
+      await pool.query('DROP TRIGGER test_slow_consolidation ON token_usage_facts')
+      await pool.query('DROP FUNCTION test_slow_consolidation()')
+    }
+  }, 10000)
+
+  test('contended machine consolidation rolls back promptly without leaking its lock budget', async () => {
+    const machine = 'machine-' + 'd'.repeat(32)
+    const blocker = await pool.connect()
+    const control = new pg.Pool({ connectionString: process.env.TEST_DATABASE_URL, max: 1, statement_timeout: 1000 })
+    try {
+      await blocker.query('BEGIN')
+      await blocker.query("SELECT daemon_id FROM daemons WHERE daemon_id='admission-daemon' FOR UPDATE")
+      await expect(consolidateOfflineMachineDaemons(control, { userId, daemonId: 'admission-daemon', machineId: machine }))
+        .rejects.toMatchObject({ code: '55P03' })
+      expect((await control.query('SHOW statement_timeout')).rows[0].statement_timeout).toBe('1s')
+      expect((await control.query('SHOW lock_timeout')).rows[0].lock_timeout).toBe('0')
+    } finally {
+      await blocker.query('ROLLBACK')
+      blocker.release()
+      await control.end()
+    }
+  }, 10000)
+
   test('deferred opposite outcomes cannot both persist before first effect runs', async () => {
     await admit('deferred-conflict')
     const materializer = new EventMaterializer({pool})

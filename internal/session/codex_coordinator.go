@@ -766,7 +766,15 @@ func (c *codexCoordinator) beginSubscription(threadID string) bool {
 	return true
 }
 
-func (c *codexCoordinator) finishSubscription(threadID string, success bool) {
+func (c *codexCoordinator) finishSubscription(threadID string, success bool, client codexRuntimeClient, generation uint64) {
+	// A reconnect keeps the runtime generation but replaces the connection.
+	// Validate both while holding the same lock as startEventPumpLocked, so a
+	// retired task cannot mark new work complete or erase its in-flight marker.
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.runtime == nil || c.runtime.Client != client || c.generation != generation {
+		return
+	}
 	c.subscribeMu.Lock()
 	delete(c.subscribing, threadID)
 	if success {
@@ -775,7 +783,7 @@ func (c *codexCoordinator) finishSubscription(threadID string, success bool) {
 	}
 	c.subscribeMu.Unlock()
 	if success && c.sm != nil {
-		if err := c.persist(); err != nil {
+		if err := c.persistLocked(); err != nil {
 			slog.Default().Warn("persist Codex managed thread registry", "thread", threadID, "error", err)
 		}
 	}
@@ -908,7 +916,7 @@ func (c *codexCoordinator) subscribeTerminalThread(parent context.Context, clien
 	}
 	c.projectionMu.Unlock()
 	if err != nil {
-		c.finishSubscription(threadID, false)
+		c.finishSubscription(threadID, false, client, generation)
 		slog.Default().Warn("Codex terminal thread subscription failed", "thread", threadID, "generation", generation, "error", err)
 		return
 	}
@@ -952,11 +960,12 @@ func (c *codexCoordinator) subscribeTerminalThread(parent context.Context, clien
 	// A reconnect can replace the daemon client while an old resume/hydration
 	// call is still completing. Never attach a backend that writes through the
 	// stale connection or mutate the new connection's subscription bookkeeping.
-	currentClient, currentGeneration, current := c.backendClient()
-	if !current || currentGeneration != generation || currentClient != client {
+	if c.rejectCodexDesktopManagedThread(threadID) {
 		return
 	}
-	if c.rejectCodexDesktopManagedThread(threadID) {
+	c.mu.Lock()
+	if c.runtime == nil || c.generation != generation || c.runtime.Client != client {
+		c.mu.Unlock()
 		return
 	}
 	backend := newCodexAppServerBackend(c.sm, c, client, generation)
@@ -975,10 +984,11 @@ func (c *codexCoordinator) subscribeTerminalThread(parent context.Context, clien
 		}
 	}
 	c.sm.mu.Unlock()
+	c.mu.Unlock()
 	if resumed.Model != "" {
 		c.sm.outputCh <- protocol.DaemonEvent{Type: "session_meta", SessionID: threadID, Model: resumed.Model, Resync: true}
 	}
-	c.finishSubscription(threadID, true)
+	c.finishSubscription(threadID, true, client, generation)
 }
 
 func (c *codexCoordinator) hydrateTurns(threadID string, turns []json.RawMessage, activeTurn string, projector *codexProjection) string {

@@ -733,12 +733,49 @@ func TestCodexCoordinatorReconnectsDaemonClientAfterSocketDisconnect(t *testing.
 			break
 		}
 		if time.Now().After(deadline) {
+			coord.subscribeMu.Lock()
+			t.Logf("subscription state: subscribed=%v subscribing=%v managed=%v", coord.subscribed, coord.subscribing, coord.managedThreads)
+			coord.subscribeMu.Unlock()
+			oldClient.mu.Lock()
+			t.Logf("old client calls=%v", oldClient.calls)
+			oldClient.mu.Unlock()
 			t.Fatalf("client was not reconnected and resumed: ok=%t generation=%d adopts=%d calls=%d", ok, generation, adopts.Load(), calls)
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
 	if err := coord.shutdown(); err != nil {
 		t.Fatalf("shutdown reconnected coordinator: %v", err)
+	}
+}
+
+func TestCodexCoordinatorRetiredSubscriptionCannotCompleteNewClientWork(t *testing.T) {
+	for _, success := range []bool{false, true} {
+		t.Run(fmt.Sprintf("success=%t", success), func(t *testing.T) {
+			coord := newCodexCoordinator(nil)
+			oldClient, newClient := newFakeCodexRuntimeClient(), newFakeCodexRuntimeClient()
+			coord.runtime = &codexAppServerRuntime{Client: oldClient}
+			coord.generation = 4
+			if !coord.beginSubscription("thread") {
+				t.Fatal("old subscription not admitted")
+			}
+			// Reconnect replaces the client, but preserves the runtime generation.
+			coord.runtime = &codexAppServerRuntime{Client: newClient}
+			coord.resetSubscriptionsForNewClient()
+			if !coord.beginSubscription("thread") {
+				t.Fatal("replacement subscription not admitted")
+			}
+			coord.finishSubscription("thread", success, oldClient, 4)
+			if coord.beginSubscription("thread") {
+				t.Fatal("retired completion removed the replacement's in-flight subscription")
+			}
+			coord.subscribeMu.Lock()
+			_, inFlight := coord.subscribing["thread"]
+			_, complete := coord.subscribed["thread"]
+			coord.subscribeMu.Unlock()
+			if !inFlight || complete {
+				t.Fatalf("retired completion changed replacement state: inFlight=%t complete=%t", inFlight, complete)
+			}
+		})
 	}
 }
 
