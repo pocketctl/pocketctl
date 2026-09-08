@@ -11,13 +11,36 @@
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M12 5v14M5 12h14"/></svg>
         </button>
       </div>
+      <div v-if="uniqueHosts.length > 1 || selectedHostId" ref="hostFilterEl" class="host-filter-popover">
+        <button ref="hostFilterTrigger" type="button" class="agent-filter-trigger host-filter-trigger"
+          :aria-expanded="hostFilterOpen" aria-controls="session-host-filter" @click.stop="toggleHostFilter">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="3" width="18" height="13" rx="2"/><path d="M8 21h8M12 16v5"/></svg>
+          <span class="host-filter-copy"><small>{{ t('session.host_filter_label') }}</small><span>{{ selectedHostLabel }}</span></span>
+          <svg class="agent-filter-chevron" viewBox="0 0 24 24" aria-hidden="true"><path d="m7 10 5 5 5-5"/></svg>
+        </button>
+        <div v-if="hostFilterOpen" id="session-host-filter" class="agent-filter-menu host-filter-menu">
+          <input ref="hostFilterSearch" v-model="hostSearch" class="host-filter-search" type="search"
+            :placeholder="t('session.host_filter_search')" :aria-label="t('session.host_filter_search')" />
+          <div class="host-filter-options">
+            <button v-for="host in filteredHostOptions" :key="host.daemon_id" type="button"
+              class="agent-filter-option host-filter-option" :data-host-filter="host.daemon_id"
+              :aria-pressed="selectedHostId === host.daemon_id" @click="selectHostFilter(host.daemon_id)">
+              <span :class="['status-dot', { online: host.online }]" aria-hidden="true"></span>
+              <span class="host-filter-copy"><span>{{ host.name }}</span><small>{{ host.daemon_id ? `${host.online ? t('dashboard.online') : t('dashboard.offline')} · ${host.daemon_id}` : t('session.host_filter_all_hint') }}</small></span>
+              <span class="agent-filter-count">{{ host.count }}</span>
+              <span class="host-filter-check" aria-hidden="true">{{ selectedHostId === host.daemon_id ? '✓' : '' }}</span>
+            </button>
+            <p v-if="!filteredHostOptions.length" class="host-filter-empty">{{ t('session.host_filter_no_match') }}</p>
+          </div>
+        </div>
+      </div>
       <div v-if="!hasNoSessions" ref="agentFilterEl" class="agent-filter-popover">
         <button
           type="button"
           class="agent-filter-trigger"
           aria-haspopup="menu"
           :aria-expanded="agentFilterOpen"
-          @click.stop="agentFilterOpen = !agentFilterOpen"
+          @click.stop="hostFilterOpen = false; agentFilterOpen = !agentFilterOpen"
         >
           <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h16M7 12h10M10 18h4"/></svg>
           <span class="agent-filter-trigger-label">{{ activeAgentFilter.label }}（{{ activeAgentFilter.count }}）</span>
@@ -41,8 +64,8 @@
         </div>
       </div>
       <div v-if="!hasNoSessions" class="session-panel-presence">
-        <span :class="['status-dot', { online: isDaemonOnline }]"></span>
-        <span class="session-panel-presence-copy">{{ isDaemonOnline ? t('dashboard.online') : t('dashboard.offline') }} · {{ statusSubtext }}</span>
+        <span :class="['status-dot', { online: scopedOnlineHostCount > 0 }]"></span>
+        <span class="session-panel-presence-copy">{{ t('session.host_filter_presence', { online: scopedOnlineHostCount, total: scopedHostCount }) }}</span>
       </div>
       <div class="session-list">
         <template v-for="s in visibleSessions" :key="s.session_id">
@@ -57,7 +80,7 @@
                   @click.stop @keydown.enter="commitRename(s)" @keydown.escape="cancelRename" @blur="commitRename(s)" />
                 <template v-else>{{ s.title || s.session_id.slice(0, 8) }}</template>
               </div>
-              <div class="sl-meta"><AgentBadge :agent="s.agent_type" size="sm" />{{ formatRelativeTime(s.last_activity_at || s.created_at) }}<span v-if="s.subagent_count > 0"> · {{ t('session.sub_agents', { n: s.subagent_count }) }}</span></div>
+              <div class="sl-meta"><AgentBadge :agent="s.agent_type" size="sm" />{{ formatRelativeTime(s.last_activity_at || s.created_at) }}<span v-if="!selectedHostId && uniqueHosts.length > 1" :title="sessionHostName(s)"> · {{ sessionHostName(s) }}</span><span v-if="s.subagent_count > 0"> · {{ t('session.sub_agents', { n: s.subagent_count }) }}</span></div>
             </div>
             <SessionActions :session="s" @startRename="startRename" @deleted="onDeleted" @pinned="onPinned" />
           </div>
@@ -72,11 +95,19 @@
             </div>
           </div>
         </template>
+        <div v-if="!hasNoSessions && !visibleSessions.length" class="host-filter-empty" role="status">
+          <p>{{ t('session.host_filter_empty') }}</p>
+          <button type="button" @click="selectedHostId = ''; selectedAgentType = 'all'">{{ t('session.host_filter_reset') }}</button>
+        </div>
       </div>
     </div>
 
     <!-- Chat Main Area -->
     <div class="chat-area">
+      <div v-if="currentSessionOutsideFilter" class="session-filter-notice" role="status">
+        <span>{{ t('session.host_filter_retained') }}</span>
+        <button type="button" @click="showCurrentSessionInList">{{ t('session.host_filter_show_current') }}</button>
+      </div>
       <!-- The session list can arrive after the replay request on a direct URL. -->
       <div
         v-if="hasNoSessions && isLoading"
@@ -705,6 +736,11 @@ const toolbarOverflowOpen = ref(false)
 const toolbarOverflowEl = ref<HTMLElement | null>(null)
 const agentFilterOpen = ref(false)
 const agentFilterEl = ref<HTMLElement | null>(null)
+const hostFilterOpen = ref(false)
+const hostFilterEl = ref<HTMLElement | null>(null)
+const hostFilterTrigger = ref<HTMLButtonElement | null>(null)
+const hostFilterSearch = ref<HTMLInputElement | null>(null)
+const hostSearch = ref('')
 const selectedAgentType = ref('all')
 const planCompleted = computed(() => currentPlan.value ? completedPlanItemCount(currentPlan.value) : 0)
 const planButtonLabel = computed(() => currentPlan.value
@@ -743,6 +779,10 @@ function toggleFileChangeFromOverflow() {
 }
 function closeFileChangePanel() { setFileChangePanelOpen(false) }
 function onFileChangePanelKeydown(event: KeyboardEvent) {
+  if (event.key === 'Escape' && hostFilterOpen.value) {
+    hostFilterOpen.value = false
+    hostFilterTrigger.value?.focus()
+  }
   if (event.key === 'Escape' && fileChangePanelOpen.value) closeFileChangePanel()
   if (event.key === 'Escape' && toolbarOverflowOpen.value) toolbarOverflowOpen.value = false
   if (event.key === 'Escape' && agentFilterOpen.value) agentFilterOpen.value = false
@@ -924,22 +964,58 @@ function setDaemonConnectivity(daemonId: string, online: boolean, update: any = 
 }
 // Local host selection state (initialized from URL ?host= for backward compat)
 const selectedHostId = ref((route.query.host as string) || '')
-// Unique hosts derived from sessions that have arrived
+// Include connected hosts with no sessions as well as offline session hosts.
 const uniqueHosts = computed(() => {
-  const seen = new Set<string>()
-  const hosts: { daemon_id: string; name: string; online: boolean }[] = []
+  const hosts = new Map<string, { daemon_id: string; name: string; online: boolean; count: number }>()
+  for (const [id, d] of Object.entries(daemons.value)) {
+    hosts.set(id, { daemon_id: id, name: d.daemon_alias || d.hostname || id.slice(0, 8), online: !!d.online, count: 0 })
+  }
   for (const s of allSessions.value) {
-    if (seen.has(s.daemon_id)) continue
-    seen.add(s.daemon_id)
-    const d = daemons.value[s.daemon_id]
-    hosts.push({
+    if (!s.daemon_id) continue
+    const existing = hosts.get(s.daemon_id)
+    if (existing) {
+      existing.count++
+      if (!daemons.value[s.daemon_id]) existing.online ||= !!s.daemon_online
+      continue
+    }
+    hosts.set(s.daemon_id, {
       daemon_id: s.daemon_id,
-      name: d?.daemon_alias || d?.hostname || s.daemon_alias || s.hostname || s.daemon_id?.slice(0, 8) || '',
-      online: s.daemon_online ?? d?.online ?? false,
+      name: s.daemon_alias || s.hostname || s.daemon_id.slice(0, 8),
+      online: !!s.daemon_online,
+      count: 1,
     })
   }
-  return hosts
+  return [...hosts.values()]
 })
+const selectedHostLabel = computed(() => selectedHostId.value
+  ? uniqueHosts.value.find(host => host.daemon_id === selectedHostId.value)?.name || selectedHostId.value.slice(0, 8)
+  : t('session.host_filter_all'))
+const filteredHostOptions = computed(() => {
+  const query = hostSearch.value.trim().toLocaleLowerCase()
+  return [{ daemon_id: '', name: t('session.host_filter_all'), online: uniqueHosts.value.some(host => host.online), count: allSessions.value.length }, ...uniqueHosts.value]
+    .filter(host => `${host.name} ${host.daemon_id}`.toLocaleLowerCase().includes(query))
+})
+const scopedHosts = computed(() => uniqueHosts.value.filter(host => !selectedHostId.value || host.daemon_id === selectedHostId.value))
+const scopedHostCount = computed(() => scopedHosts.value.length)
+const scopedOnlineHostCount = computed(() => scopedHosts.value.filter(host => host.online).length)
+async function toggleHostFilter() {
+  hostFilterOpen.value = !hostFilterOpen.value
+  agentFilterOpen.value = false
+  if (hostFilterOpen.value) {
+    hostSearch.value = ''
+    await nextTick()
+    hostFilterSearch.value?.focus()
+  }
+}
+function selectHostFilter(id: string) {
+  selectedHostId.value = id
+  hostFilterOpen.value = false
+  hostFilterTrigger.value?.focus()
+}
+function sessionHostName(session: any): string {
+  const d = daemons.value[session.daemon_id]
+  return d?.daemon_alias || d?.hostname || session.daemon_alias || session.hostname || session.daemon_id?.slice(0, 8) || t('session.unknown_host')
+}
 const hostScopedSessions = computed(() => {
   if (!selectedHostId.value) return allSessions.value
   return allSessions.value.filter((s: any) => s.daemon_id === selectedHostId.value)
@@ -973,6 +1049,11 @@ const visibleSessions = computed(() => {
   if (selectedAgentType.value === 'all') return hostScopedSessions.value
   return hostScopedSessions.value.filter((session: any) => normalizedAgentType(session) === selectedAgentType.value)
 })
+const currentSessionOutsideFilter = computed(() => !!currentSession.value && !visibleSessions.value.some(s => s.session_id === sessionId.value))
+function showCurrentSessionInList() {
+  selectedHostId.value = currentSession.value?.daemon_id || ''
+  selectedAgentType.value = 'all'
+}
 const runningSessionCount = computed(() => hostScopedSessions.value.filter((session: any) => ['running', 'busy', 'retry'].includes(session.statusEffective || session.status)).length)
 function selectAgentFilter(agent: string) {
   selectedAgentType.value = agent
@@ -983,13 +1064,6 @@ function selectAgentFilter(agent: string) {
 const folded = ref<Record<string, boolean>>({})
 function toggleFold(id: string) { folded.value[id] = !folded.value[id] }
 
-// Auto-select the first host when sessions first arrive and nothing is selected
-watch(uniqueHosts, (hosts) => {
-  if (hosts.length > 0 && !selectedHostId.value) {
-    selectedHostId.value = hosts[0].daemon_id
-  }
-}, { immediate: true })
-
 watch(agentFilterOptions, (options) => {
   if (!options.some(option => option.value === selectedAgentType.value)) selectedAgentType.value = 'all'
 })
@@ -998,7 +1072,7 @@ watch(agentFilterOptions, (options) => {
 watch(() => sessionId.value, (sid) => {
   if (!sid || sid.startsWith('pending-')) return
   const s = allSessions.value.find((s: any) => s.session_id === sid)
-  if (s?.daemon_id && s.daemon_id !== selectedHostId.value) {
+  if (selectedHostId.value && s?.daemon_id && s.daemon_id !== selectedHostId.value) {
     selectedHostId.value = s.daemon_id
   }
   if (s && selectedAgentType.value !== 'all' && normalizedAgentType(s) !== selectedAgentType.value) {
@@ -1016,11 +1090,13 @@ const statusLabel = computed(() => {
   return t(STATUS_KEYS[status.value] || 'session.status.running')
 })
 
+// Conversation connectivity must not follow the list filter.
+const currentHostId = computed(() => currentSession.value?.daemon_id || '')
 const isDaemonOnline = computed(() => {
-  if (selectedHostId.value) {
-    const d = daemons.value[selectedHostId.value]
+  if (currentHostId.value) {
+    const d = daemons.value[currentHostId.value]
     if (d?.online !== undefined) return d.online
-    return allSessions.value.some((s: any) => s.daemon_id === selectedHostId.value && s.daemon_online)
+    return !!currentSession.value?.daemon_online
   }
   const s = allSessions.value.find((s: any) => s.session_id === sessionId.value)
   return s?.daemon_online ?? true
@@ -1350,7 +1426,7 @@ function retryLastPrompt() {
 }
 
 const daemonName = computed(() => {
-  const id = selectedHostId.value
+  const id = currentHostId.value
   if (id) {
     const d = daemons.value[id]
     if (d) return d.daemon_alias || d.hostname || id.slice(0, 8)
@@ -1377,11 +1453,11 @@ const mobileSessionTitle = computed(() => focusedSubAgentId.value
   ? focusedSubAgentInfo.value?.title || focusedSubAgentId.value.slice(0, 8)
   : sessionTitle.value || sessionId.value?.slice(0, 8) || '')
 
-watch([mobileSessionTitle, daemonName, selectedHostId, status, statusLabel], () => {
+watch([mobileSessionTitle, daemonName, currentHostId, status, statusLabel], () => {
   setSessionHeader({
     title: mobileSessionTitle.value,
     host: daemonName.value,
-    hostId: selectedHostId.value,
+    hostId: currentHostId.value,
     status: status.value,
     statusLabel: statusLabel.value,
   })
@@ -3583,6 +3659,9 @@ onUnmounted(() => {
 })
 
 function closePermMenu(e: MouseEvent) {
+  if (hostFilterEl.value && !hostFilterEl.value.contains(e.target as Node)) {
+    hostFilterOpen.value = false
+  }
   if (permDropdownEl.value && !permDropdownEl.value.contains(e.target as Node)) {
     showPermMenu.value = false
   }
@@ -3611,6 +3690,24 @@ onMounted(() => {
 .session-new-button { width: 32px; height: 32px; flex: 0 0 auto; border-color: var(--border); background: var(--surface); color: var(--accent); box-shadow: none; }
 .session-new-button:hover { border-color: var(--border-light); background: var(--surface-hover); color: var(--accent-hover); }
 .agent-filter-popover { position: relative; padding: 8px 10px; border-bottom: 1px solid var(--sidebar-border); }
+.host-filter-popover { position: relative; padding: 10px 10px 0; }
+.host-filter-trigger.agent-filter-trigger { height: 52px; text-align: left; }
+.host-filter-copy { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.host-filter-copy > span, .host-filter-copy > small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.host-filter-copy > span { color: var(--fg); font-size: 12px; }
+.host-filter-copy > small { color: var(--fg-tertiary); font-size: 10px; font-weight: 400; }
+.host-filter-menu.agent-filter-menu { top: calc(100% + 5px); padding: 7px; }
+.host-filter-search { width: 100%; min-width: 0; padding: 9px; border: 1px solid var(--border-light); border-radius: var(--radius-sm); background: var(--bg); color: var(--fg); font: 12px var(--font-body); }
+.host-filter-search:focus-visible { outline: 2px solid var(--accent); outline-offset: -1px; }
+.host-filter-options { max-height: min(360px, 45dvh); overflow-y: auto; margin-top: 5px; }
+.host-filter-option.agent-filter-option { grid-template-columns: 7px minmax(0, 1fr) auto 12px; min-height: 53px; }
+.host-filter-option[aria-pressed="true"] { background: var(--accent-muted); }
+.host-filter-option:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.host-filter-option .status-dot { width: 6px; height: 6px; }
+.host-filter-check { color: var(--accent); }
+.host-filter-empty { padding: 20px 10px; color: var(--fg-secondary); text-align: center; font-size: 12px; }
+.host-filter-empty button, .session-filter-notice button { border: 0; background: transparent; color: var(--accent); cursor: pointer; font: inherit; padding: 5px; }
+.session-filter-notice { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; flex-shrink: 0; padding: 7px 18px; border-bottom: 1px solid var(--border); background: var(--accent-subtle); color: var(--fg-secondary); font-size: 11px; }
 .agent-filter-trigger { width: 100%; min-width: 0; height: 34px; display: grid; grid-template-columns: 18px minmax(0, 1fr) 18px; align-items: center; gap: 8px; padding: 0 10px; overflow: hidden; border: 1px solid var(--border); border-radius: var(--radius-md); color: var(--fg-secondary); background: var(--surface); cursor: pointer; transition: color .15s, border-color .15s, background .15s; }
 .agent-filter-trigger:hover, .agent-filter-trigger[aria-expanded="true"] { border-color: var(--border-light); color: var(--fg); background: var(--surface-hover); }
 .agent-filter-trigger:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }

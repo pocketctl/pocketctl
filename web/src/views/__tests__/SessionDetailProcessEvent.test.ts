@@ -23,6 +23,7 @@ vi.mock('vue-router', () => ({
 
 vi.mock('../../composables/useWebSocket', () => ({
   useWebSocket: () => ({
+    connected: ref(true), reconnecting: ref(false),
     connect: vi.fn(), send: vi.fn(() => true), sendUserMessage: vi.fn(() => true),
     onEvent: vi.fn((typeOrHandler: string | ((message: any) => void), handler?: (message: any) => void) => {
       if (typeof typeOrHandler === 'function') {
@@ -73,7 +74,7 @@ describe('SessionDetail processEvent integration', () => {
     expect(wrapper.find('.host-tabs').exists()).toBe(false)
     expect(wrapper.findAll('.session-list-item')).toHaveLength(6)
 
-    const trigger = wrapper.get('.agent-filter-trigger')
+    const trigger = wrapper.get('.agent-filter-popover .agent-filter-trigger')
     expect(trigger.attributes('aria-expanded')).toBe('false')
     await trigger.trigger('click')
 

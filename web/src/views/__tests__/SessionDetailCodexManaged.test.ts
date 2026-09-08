@@ -351,12 +351,12 @@ describe('SessionDetail managed Codex terminal control', () => {
       capabilities: ['message_acceptance_receipt'],
     })
     await nextTick()
-    expect(wrapper.text()).toContain('dashboard.online')
+    expect(wrapper.get('.session-panel-presence .status-dot').classes()).toContain('online')
 
     websocketMock.handlers.get('daemon_status')?.({ type: 'daemon_status', daemon_id: 'd1', status: 'offline' })
     await nextTick()
 
-    expect(wrapper.text()).toContain('dashboard.offline')
+    expect(wrapper.get('.session-panel-presence .status-dot').classes()).not.toContain('online')
     expect(wrapper.find('.chat-input-container').exists()).toBe(true)
     expect(wrapper.find('.send-btn').attributes('disabled')).toBeDefined()
     expect(wrapper.find('.ended-text').exists()).toBe(false)
