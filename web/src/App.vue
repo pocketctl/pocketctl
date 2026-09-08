@@ -23,7 +23,7 @@
           <span class="link-text">{{ t('dashboard.title') }}</span>
         </router-link>
 
-        <router-link to="/session/default" class="sidebar-link" active-class="active" v-slot="{ isActive }">
+        <router-link :to="isSessionRoute ? route.fullPath : '/session/default'" class="sidebar-link" active-class="active" v-slot="{ isActive }">
           <span class="link-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 9a2 2 0 0 1-2 2H6l-4 4V4a2 2 0 0 1 2-2h8a2 2 0 0 1 2 2z"/><path d="M18 9h2a2 2 0 0 1 2 2v11l-4-4h-6a2 2 0 0 1-2-2v-1"/></svg></span>
           <span class="link-text">{{ t('nav.sessions') }}</span>
           <span class="badge" v-if="sessionCount > 0">{{ sessionCount }}</span>
@@ -93,9 +93,9 @@
     <PwaUpdateBanner />
 
     <!-- Main Content -->
-    <main class="main-content" :class="{ 'no-sidebar': !isLoggedIn || showMobileShell }">
+    <main class="main-content" :class="{ 'no-sidebar': !isLoggedIn || showMobileShell, 'session-detail-route': isSessionRoute && !showMobileShell }">
       <!-- Topbar (only when logged in) -->
-      <header class="topbar" v-if="isLoggedIn && !showMobileShell">
+      <header class="topbar" v-if="isLoggedIn && !showMobileShell && !isSessionRoute">
         <div class="topbar-breadcrumb">
           <span class="current">{{ pageTitle }}</span>
         </div>
@@ -297,6 +297,7 @@ if (typeof window !== 'undefined') {
   background: var(--surface-hover);
 }
 .main-content { transition: margin-left 0.2s ease; }
+.main-content.session-detail-route { --topbar-h: 0px; }
 
 :root {
   --mobile-topbar-h: calc(56px + env(safe-area-inset-top));

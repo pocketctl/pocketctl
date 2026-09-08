@@ -3,15 +3,13 @@ package session
 import (
 	"encoding/json"
 	"testing"
+	"time"
 
 	"github.com/pocketctl/pocketctl/internal/codexapp"
 	"github.com/pocketctl/pocketctl/internal/protocol"
 )
 
-// Review P1-5: the user/assistant title pair is flushed only when the turn
-// reaches completed — never at the final agent_text (which raced the terminal
-// and dropped the first turn's title) and never while another turn is still
-// in flight.
+// A final assistant text queues a title without implying turn completion.
 func TestCodexTitleFlushesOnTurnCompletion(t *testing.T) {
 	output := make(chan protocol.DaemonEvent, 32)
 	sm := NewSessionManager(output)
@@ -31,10 +29,14 @@ func TestCodexTitleFlushesOnTurnCompletion(t *testing.T) {
 	if sm.turnAllowsCompletionSideEffects("thr_title") {
 		t.Fatal("in-flight turn must block completion side effects")
 	}
+	if sm.sessions["thr_title"].TitleUser != "fixture question" {
+		t.Fatal("final text must queue a task title before turn completion")
+	}
 
-	// Turn completes: the pending pair flushes into a generate_title_request.
+	// Completion must not lose the queued pair; maintenance emits it later.
 	publish("turn/completed", `{"threadId":"thr_title","turn":{"id":"t1","status":"completed","items":[]}}`)
-	events := drainEvents(output)
+	drainEvents(output)
+	events := sm.pendingTitleEvents(time.Now().Add(time.Minute))
 	var title *protocol.DaemonEvent
 	for i, ev := range events {
 		if ev.Type == "generate_title_request" {
@@ -50,8 +52,8 @@ func TestCodexTitleFlushesOnTurnCompletion(t *testing.T) {
 	}
 }
 
-// Interrupted turns never flush a title.
-func TestCodexTitleNotFlushedForInterruptedTurn(t *testing.T) {
+// Interrupted tasks still have meaningful labels, without counting as success.
+func TestCodexTitleQueuedForInterruptedTurn(t *testing.T) {
 	output := make(chan protocol.DaemonEvent, 32)
 	sm := NewSessionManager(output)
 	sm.sessions["thr_int"] = &ProcessState{SessionID: "thr_int", Agent: "codex", Source: "terminal", Status: protocol.StatusIdle}
@@ -70,8 +72,14 @@ func TestCodexTitleNotFlushedForInterruptedTurn(t *testing.T) {
 			t.Fatal("interrupted turn must not generate a title")
 		}
 	}
-	// But the pair stays cached: a later completed turn does not leak it —
-	// interrupted pairs are dropped with the turn.
+	events := sm.pendingTitleEvents(time.Now().Add(time.Minute))
+	if len(events) != 1 || events[0].UserMessage != "fixture q" || events[0].AssistantMessage != "fixture a" {
+		t.Fatalf("interrupted task title missing: %+v", events)
+	}
+	if sm.turnAllowsCompletionSideEffects("thr_int") {
+		t.Fatal("title must not turn interruption into completion")
+	}
+	// A later assistant-only turn must not replace the original task label.
 	publish("turn/started", `{"threadId":"thr_int","turn":{"id":"t2","status":"inProgress","items":[]}}`)
 	publish("item/completed", `{"threadId":"thr_int","turnId":"t2","item":{"id":"i3","type":"agentMessage","text":"fixture only-assistant"}}`)
 	publish("turn/completed", `{"threadId":"thr_int","turn":{"id":"t2","status":"completed","items":[]}}`)

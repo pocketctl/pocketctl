@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/pocketctl/pocketctl/internal/adapter"
 	"github.com/pocketctl/pocketctl/internal/codexapp"
@@ -131,6 +132,15 @@ func (p *codexProjection) project(in codexapp.Inbound, historical bool) []protoc
 		return nil
 	}
 	switch in.Method {
+	case "thread/name/updated":
+		var params struct {
+			ThreadID   string `json:"threadId"`
+			ThreadName string `json:"threadName"`
+		}
+		if json.Unmarshal(in.Params, &params) != nil || params.ThreadID == "" || strings.TrimSpace(params.ThreadName) == "" {
+			return nil
+		}
+		return []protocol.DaemonEvent{{Type: "session_title_update", SessionID: params.ThreadID, Title: strings.TrimSpace(params.ThreadName), TitleSource: "codex", TitleUpdatedAt: time.Now().UTC().Format(time.RFC3339Nano)}}
 	case "thread/started":
 		return p.projectThreadStarted(in.Params)
 	case "thread/status/changed":

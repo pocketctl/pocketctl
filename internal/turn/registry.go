@@ -312,6 +312,14 @@ func (r *Registry) Terminalize(key ActorKey, turnID, state, reason, confidence s
 	if rec.State == state {
 		return *rec, nil // idempotent terminal
 	}
+	// A native interruption can originate in the CLI, without a PocketCtl
+	// interrupt request. The matching turn ID was checked above; never apply
+	// this shortcut to inferred interruptions or stale turns.
+	if rec.State == protocol.TurnStateRunning && state == protocol.TurnStateInterrupted && confidence == protocol.TurnConfidenceNative {
+		if err := r.transitionLocked(rec, protocol.TurnStateInterruptRequested, reason, confidence); err != nil {
+			return TurnRecord{}, err
+		}
+	}
 	if err := r.transitionLocked(rec, state, reason, confidence); err != nil {
 		return TurnRecord{}, err
 	}

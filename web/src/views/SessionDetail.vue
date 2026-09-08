@@ -1623,9 +1623,23 @@ function replaySessionTrustContext(): ReplaySessionTrustContext {
 // filters events by agent_id); otherwise the regular parent-session `replay`.
 // Shared by onMounted and the loadKey watcher so every entry/exit/switch path
 // is consistent.
+function resolveDefaultSession() {
+  const first = visibleSessions.value[0]
+  if (first) router.replace({ path: `/session/${first.session_id}` })
+  return !!first
+}
+
 function loadHistory() {
   clearHistorySlowTimer()
   isSlowLoading.value = false
+  if (sessionId.value === 'default') {
+    isLoading.value = false
+    isLoadingBackward.value = false
+    hasMore.value = false
+    sessionSwitching = false
+    if (!resolveDefaultSession()) send({ type: 'list_sessions' })
+    return
+  }
   replayReqId.value++
   isLoading.value = true
   historySlowTimer = setTimeout(() => {
@@ -1658,6 +1672,7 @@ function retryHistory() {
 }
 
 function requestSessionMeta() {
+  if (sessionId.value === 'default') return false
   try {
     return send({
       type: 'get_session_meta',
@@ -3058,10 +3073,7 @@ onMounted(() => {
     // 落定后 daemonName 按当前 sessionId 解析，session-panel-header 与 chat-toolbar
     // 都会显示这个会话所属的主机名。
     if (sessionId.value === 'default') {
-      const first = visibleSessions.value[0]
-      if (first) {
-        router.replace({ path: `/session/${first.session_id}` })
-      }
+      resolveDefaultSession()
     }
   }))
   // session_created: 新建会话到达时立即加入左侧列表（乐观插入），并补刷一次

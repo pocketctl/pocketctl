@@ -1,9 +1,9 @@
 package adapter
 
 import (
-	"github.com/pocketctl/pocketctl/internal/memorycontext"
 	"encoding/json"
 	"fmt"
+	"github.com/pocketctl/pocketctl/internal/memorycontext"
 	"strings"
 
 	"github.com/google/uuid"
@@ -30,7 +30,10 @@ type ClaudeStreamEvent struct {
 	// Content carries the payload of system local_command events
 	// (<local-command-stdout>...</local-command-stdout>) — the real format of
 	// local command feedback on --resume sessions.
-	Content string `json:"content,omitempty"`
+	Content        string `json:"content,omitempty"`
+	AITitle        string `json:"aiTitle,omitempty"`
+	CustomTitle    string `json:"customTitle,omitempty"`
+	TitleSessionID string `json:"sessionId,omitempty"`
 }
 
 type ClaudeMessage struct {
@@ -130,6 +133,18 @@ func (a *ClaudeAdapter) SlashCommands() []string {
 func (a *ClaudeAdapter) convertEvent(raw ClaudeStreamEvent) ([]protocol.DaemonEvent, error) {
 	sid := a.sessionID
 	switch raw.Type {
+	case "ai-title", "custom-title":
+		title, source := strings.TrimSpace(raw.AITitle), "claude-code"
+		if raw.Type == "custom-title" {
+			title, source = strings.TrimSpace(raw.CustomTitle), "claude-code-manual"
+		}
+		if title == "" {
+			return nil, nil
+		}
+		if raw.TitleSessionID != "" {
+			sid = raw.TitleSessionID
+		}
+		return []protocol.DaemonEvent{{Type: "session_title_update", SessionID: sid, Title: title, TitleSource: source}}, nil
 	case "system":
 		return a.convertSystem(raw, sid)
 	case "assistant":
