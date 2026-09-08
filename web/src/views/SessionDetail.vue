@@ -3184,7 +3184,15 @@ onMounted(() => {
   }))
   cleanups.push(onEvent('daemon_list', (msg: any) => {
     const map: Record<string, any> = {}
-    for (const d of (msg.daemons || [])) map[d.daemon_id] = d
+    for (const d of (msg.daemons || [])) {
+      // Relay snapshots expose daemon_online, while live updates use status.
+      // Normalize here so host filters do not mistake a missing online field
+      // for an offline host. Keep explicit false authoritative over fallbacks.
+      map[d.daemon_id] = {
+        ...d,
+        online: d.daemon_online ?? d.online ?? (d.status === 'online'),
+      }
+    }
     daemons.value = map
   }))
   cleanups.push(onEvent('daemon_status', (msg: any) => {
