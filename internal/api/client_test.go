@@ -1,6 +1,7 @@
 package api
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -8,6 +9,22 @@ import (
 	"strings"
 	"testing"
 )
+
+func TestParseJWTAccountIDStableAcrossRefreshAndPhoneLogin(t *testing.T) {
+	for _, claims := range []string{`{"userId":7,"email":"user@example.com","jti":"old"}`, `{"userId":7,"email":"","phone":"123","jti":"new"}`} {
+		token := "header." + base64.RawURLEncoding.EncodeToString([]byte(claims)) + ".signature"
+		id, err := ParseJWTAccountID(token)
+		if err != nil || id != "7" {
+			t.Fatalf("account identity=(%q,%v), want 7", id, err)
+		}
+	}
+	for _, claims := range []string{`{}`, `{"userId":0}`, `{"userId":-1}`, `{"userId":"7"}`} {
+		token := "header." + base64.RawURLEncoding.EncodeToString([]byte(claims)) + ".signature"
+		if _, err := ParseJWTAccountID(token); err == nil {
+			t.Fatal("accepted missing or malformed account identity")
+		}
+	}
+}
 
 func TestSendEmailCodeIncludesLanguage(t *testing.T) {
 	want := map[string]string{"email": "user@example.com", "lang": "zh"}

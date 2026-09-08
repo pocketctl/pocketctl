@@ -2,6 +2,7 @@ package zcode
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"math"
@@ -105,11 +106,14 @@ func (o *Observer) pollOnce(ctx context.Context) pollResult {
 	if reset {
 		o.reconcileRecovery()
 	}
-	scope := HistoryScopeAll
-	if o.cfg.History == HistoryRecent {
-		scope = HistoryScopeRecent
+	snap, err := o.cursor.Snapshot()
+	if err != nil {
+		return res
 	}
-	page, err := o.store.ListSessions(ctx, scope, o.cfg.LookbackDays, nil, sessionPageSize)
+	// Scan source keys in bounded pages. History limits apply to newly
+	// selected sessions; previously selected historical sessions must remain
+	// reachable for migration, pending recovery and reconnect hydration.
+	page, err := o.store.ListSessions(ctx, HistoryScopeAll, 0, o.sessionAfter, sessionPageSize)
 	if err != nil {
 		o.log.Warn("zcode poll: list sessions", "error", err)
 		return res
@@ -124,6 +128,12 @@ func (o *Observer) pollOnce(ctx context.Context) pollResult {
 			break
 		}
 		wireID := WireSessionID(o.cfg.SourceID, sr.ID)
+		_, known := snap.File.Sessions[wireID]
+		cutoff := time.Now().UnixMilli() - int64(o.cfg.LookbackDays)*24*60*60*1000
+		if !known && o.cfg.History == HistoryRecent && o.cfg.LookbackDays > 0 && sr.TimeUpdated < cutoff {
+			o.sessionAfter = &SessionPageCursor{TimeUpdated: sr.TimeUpdated, ID: sr.ID}
+			continue
+		}
 		if o.isRecoveryBlocked(wireID) {
 			// Recovery-blocked sessions never spin: re-assert the
 			// rate-limited warning and contribute no outcomes so the poll
@@ -131,17 +141,68 @@ func (o *Observer) pollOnce(ctx context.Context) pollResult {
 			o.markRecoveryBlocked(wireID, ErrPreparedPayloadMissing)
 			continue
 		}
+		if o.resyncActive {
+			if !o.emitResyncSession(ctx, wireID, sr) {
+				res.Deferred = true
+				return res
+			}
+		}
 		st := o.scanSession(ctx, wireID, sr)
 		res.NewPending += st.newPending
 		res.Emitted += st.emitted
 		res.ConflictRetries += st.conflicts
 		if st.deferred {
 			res.Deferred = true
-			break
+			return res
 		}
+		o.sessionAfter = &SessionPageCursor{TimeUpdated: sr.TimeUpdated, ID: sr.ID}
+	}
+	o.sessionAfter = page.NextCursor
+	if page.NextCursor == nil {
+		o.resyncActive = false
+	} else {
+		res.Deferred = true
 	}
 	_ = o.cursor.TouchLastScan(time.Now().UnixMilli())
 	return res
+}
+
+// Reconnect metadata uses a separate, content-addressed identity: a previous
+// empty discovery with the legacy ID may already be completed in the Relay's
+// effect ledger. Never reuse that ID for a corrected payload. A rejected
+// batch retains the source page cursor and is hydrated again on the next tick.
+func (o *Observer) emitResyncDiscovery(ctx context.Context, wireID string, sr SessionRow) bool {
+	mp := NewMapper(o.cfg.SourceID)
+	status := deriveSessionStatus(o.store.QueryLastAssistantFinish(ctx, sr.ID), o.store.QueryLastToolStatus(ctx, sr.ID), sr.TimeUpdated)
+	ev := mp.SessionDiscovered(wireID, sr.Title, sr.Directory, "", status)
+	ev.Resync = true
+	ev.EventID = mp.sessionEventID(wireID, "resync-v2:"+semanticHash(sr.Title+"\x00"+sr.Directory+"\x00"+sr.ParentID+"\x00"+status))
+	return o.emitEvent(ev)
+}
+
+func (o *Observer) emitResyncSession(ctx context.Context, wireID string, sr SessionRow) bool {
+	if !o.emitResyncDiscovery(ctx, wireID, sr) {
+		return false
+	}
+	if sr.ParentID != "" {
+		parent := WireSessionID(o.cfg.SourceID, sr.ParentID)
+		parentRow, err := o.store.GetSession(ctx, sr.ParentID)
+		if errors.Is(err, sql.ErrNoRows) {
+			return true
+		}
+		if err != nil || !o.emitResyncDiscovery(ctx, parent, parentRow) {
+			return false
+		}
+		mp := NewMapper(o.cfg.SourceID)
+		relation := mp.SubagentDiscovered(parent, wireID, "", sr.Title, "")
+		// Do not let a completed legacy relation prevent reclassification of
+		// a recreated child. Keep repair payloads separate from content sync.
+		relation.EventID += ":resync-v2:" + semanticHash(sr.Title)
+		if !o.emitEvent(relation) {
+			return false
+		}
+	}
+	return true
 }
 
 // scanSession runs the page pipelines for one session: discovered/title/model

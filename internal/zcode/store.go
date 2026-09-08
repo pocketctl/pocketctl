@@ -463,6 +463,20 @@ func (s *Store) ListSessions(ctx context.Context, scope HistoryScope, lookbackDa
 	return page, nil
 }
 
+// GetSession resolves a parent directly so its discovery can precede the
+// child relation even when time ordering places it on a later source page.
+// A missing source parent is not replaced by an invented empty session.
+func (s *Store) GetSession(ctx context.Context, id string) (SessionRow, error) {
+	ctx, cancel := context.WithTimeout(ctx, s.queryTimeout)
+	defer cancel()
+	var r SessionRow
+	err := s.db.QueryRowContext(ctx, `SELECT id, title, directory, time_created, time_updated,
+		COALESCE(time_archived, 0), COALESCE(parent_id, ''), COALESCE(task_type, '')
+		FROM session WHERE id = ?`, id).Scan(&r.ID, &r.Title, &r.Directory, &r.TimeCreated,
+		&r.TimeUpdated, &r.TimeArchived, &r.ParentID, &r.TaskType)
+	return r, err
+}
+
 // ListMessages returns messages for a session ordered by sequence ASC, paged
 // after afterSequence.
 func (s *Store) ListMessages(ctx context.Context, sessionID string, afterSequence int64, limit int) (MessagePage, error) {

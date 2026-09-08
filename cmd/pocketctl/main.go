@@ -1038,6 +1038,7 @@ func cmdDaemonStart(args []string) {
 	// auth.json later: a subsequent `pocketctl login` may replace those tokens
 	// while this daemon is still connected as the original account.
 	accountEmail, _ := api.ParseJWTEmail(tok)
+	accountID, _ := api.ParseJWTAccountID(tok)
 
 	restartReadyFile := consumeRestartReadyEnv()
 	observedIntent, observedIntentExists, intentErr := daemon.ObserveStopIntent()
@@ -1380,6 +1381,8 @@ func cmdDaemonStart(args []string) {
 			}
 		}
 		zcodeObserver = zcode.NewObserver(zcode.ObserverConfig{
+			RelayURL:     url,
+			AccountID:    accountID,
 			SourceID:     zcCfg.SourceID,
 			StorageDir:   storage,
 			History:      zcCfg.History,
