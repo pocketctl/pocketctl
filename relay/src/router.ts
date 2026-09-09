@@ -11,6 +11,7 @@ import {
 import type pg from 'pg';
 import type { RelayPools } from './db-pools.js';
 import { randomUUID } from 'crypto';
+import { MessageRequestLog, logMessageReceipt } from './message-request-log.js';
 import { admitSessionMessage, resolveMessageSessionId, type MessageAdmissionDecision } from './session-message-admissions.js';
 import { isAppReviewDemoDaemon, isAppReviewDemoSession } from './config/app-review-demo.js';
 import * as db from './db.js';
@@ -222,6 +223,7 @@ function isRelayPools(value: RelayPools | pg.Pool): value is RelayPools {
 }
 
 export class Router {
+  private readonly messageRequestLog = new MessageRequestLog();
   private daemons = new Map<string, DaemonConnection>();
   private daemonMetrics = new Map<string, DaemonMetrics>();
   private memoryMcpGrantBroker?: MemoryMcpGrantBroker;
@@ -1892,6 +1894,9 @@ export class Router {
       }
     }
     msg = sanitizeJSONBPayload(msg);
+    if (msg.type === 'user_message_receipt') {
+      logMessageReceipt(this.daemons.get(daemonId)?.userId ?? null, daemonId, msg);
+    }
     if (this.writeTokenUsageFacts
       && msg.type === 'agent_text'
       && msg.usage != null
@@ -2125,12 +2130,21 @@ export class Router {
   }
 
   async handleClientMessage(clientWs: WebSocket, msg: any): Promise<void> {
+    if (msg?.type === 'user_message') {
+      return this.messageRequestLog.run(clientWs, this.clients.get(clientWs)?.userId ?? null, msg,
+        () => this.handleClientMessageLogged(clientWs, msg));
+    }
+    return this.handleClientMessageLogged(clientWs, msg);
+  }
+
+  private async handleClientMessageLogged(clientWs: WebSocket, msg: any): Promise<void> {
     const client = this.clients.get(clientWs);
     if (!client) return;
     if (msg.type === 'user_message' && client.userId !== null) {
       try {
         const canonical = await resolveMessageSessionId(this.pool,client.userId,msg);
         if (canonical && canonical !== msg.session_id) msg = {...msg,session_id:canonical};
+        this.messageRequestLog.route(msg.session_id);
       } catch {
         this.send(clientWs,{type:'user_message_nack',msg_id:msg.msg_id,request_id:msg.request_id ?? msg.msg_id,
           reason:'quota_check_failed',retryable:true});
@@ -2552,6 +2566,7 @@ export class Router {
         }
       }
       if (daemonId) {
+        this.messageRequestLog.route(msg.session_id, daemonId);
         const daemon = this.daemons.get(daemonId);
         if (daemon && daemon.ws.readyState === 1) {
           let outbound = msg;
@@ -2559,6 +2574,7 @@ export class Router {
             const requestId = typeof msg.request_id === 'string' && msg.request_id
               ? msg.request_id
               : (typeof msg.msg_id === 'string' && msg.msg_id ? msg.msg_id : randomUUID());
+            this.messageRequestLog.route(msg.session_id, daemonId, requestId);
             const { plan, whitelist } = await db.getUserPlanAndWhitelist(this.pool, client.userId);
             const entitlements = resolveEntitlements(plan, whitelist);
             let admitted: MessageAdmissionDecision;
@@ -2595,11 +2611,13 @@ export class Router {
             }
             client.subscribedSessions.add(msg.session_id);
             if (decision.reused) {
+              this.messageRequestLog.record('admitted', { reused: true, admission_kind: admitted.kind });
               // A durable admission proves acceptance, never permission to resend.
               this.send(clientWs, { type: 'user_message_ack', msg_id: msg.msg_id,
                 request_id: requestId, reason: 'request_in_progress' });
               return;
             }
+            this.messageRequestLog.record('admitted', { reused: false, admission_kind: admitted.kind });
             if (admitted.kind === 'resume') {
               if (quotaEnforcementMode() === 'observe' && entitlements.maxConcurrentSessions !== null) {
                 const snapshot = await getQuotaSnapshot(this.pool, client.userId, entitlements);
@@ -3241,7 +3259,11 @@ export class Router {
   }
 
   private send(ws: WebSocket, data: any): void {
-    if (ws.readyState !== 1) return;
+    if (ws.readyState !== 1) {
+      this.messageRequestLog.sent(ws, data, false);
+      return;
+    }
     ws.send(JSON.stringify(data));
+    this.messageRequestLog.sent(ws, data, true);
   }
 }
