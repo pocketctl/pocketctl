@@ -151,6 +151,12 @@ export class EventMaterializer {
   }
 
   private async recoverQuotaContext(input: MaterializationInput): Promise<MaterializationInput> {
+    // A late receipt for a deleted session must not fail quota recovery first
+    // and turn a harmless stale event into a daemon-wide policy disconnect.
+    if (input.eventType === 'user_message_receipt' && input.sessionId
+      && await db.isSessionDeleted(this.effectPool, input.sessionId)) {
+      throw new db.DeletedDaemonSessionError()
+    }
     if (input.eventType === 'user_message_receipt' && input.userId !== null && input.sessionId
       && typeof input.payload.request_id === 'string'
       && ['accepted','rejected'].includes(String(input.payload.status))) {
@@ -170,7 +176,7 @@ export class EventMaterializer {
     // binding cannot mask the permanent unknown-session outcome. The fenced
     // check remains the authoritative TOCTOU guard before persistence.
     if (input.sessionId && await db.isSessionDeleted(this.effectPool, input.sessionId)) {
-      throw new db.UnknownDaemonSessionError()
+      throw new db.DeletedDaemonSessionError()
     }
     const requestId = typeof input.context?.requestId === 'string' && input.context.requestId
       ? input.context.requestId
@@ -932,7 +938,7 @@ export class EventMaterializer {
       // daemon event for one as permanently unknown instead of persisting an
       // unauthorizable canonical event. The transport layer classifies this
       // error as permanent so ACK/dead-letter progress remains possible.
-      throw new db.UnknownDaemonSessionError()
+      throw new db.DeletedDaemonSessionError()
     }
     if (input.context?.admission) {
       await claimContinueAdmissionOutcome(this.options.pool,input.context.admission,
@@ -1007,6 +1013,11 @@ export class EventMaterializer {
         writeTokenUsageFacts: this.writeTokenUsageFacts,
       })
       result.applyEffects = async (): Promise<void> => {
+        // Deletion may commit between the fenced event write and deferred effects.
+        // Do not recreate session metadata or broadcast this stale event.
+        if (input.sessionId && await db.isSessionDeleted(lateEffectPool, input.sessionId)) {
+          throw new db.DeletedDaemonSessionError()
+        }
         const latest = await db.getEventEffectState(latePool, event.rowID)
         if (latest?.completed) return
         const nextStep = latest?.nextStep ?? event.nextStep

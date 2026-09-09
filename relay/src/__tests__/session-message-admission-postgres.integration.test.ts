@@ -47,6 +47,27 @@ suite('durable session message admission PostgreSQL', () => {
     expect(daemon.close).not.toHaveBeenCalled()
     expect((await pool.query('SELECT count(*)::int AS n FROM quota_reservations')).rows[0].n).toBe(0)
   })
+  test('deleted session resync cannot disconnect other sessions on the same daemon', async () => {
+    const { router, daemon, client } = await route()
+    await deleteSession(pool, 'admission-session')
+    const warnings = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    try {
+      for (let index = 0; index < 3; index++) {
+        router.handleDaemonMessage('admission-daemon', {
+          type: 'session_discovered', session_id: 'admission-session', agent: 'codex', status: 'idle',
+        })
+      }
+      await vi.waitFor(() => expect(warnings.mock.calls.filter(call => call[0] === '[router] deleted session event discarded')).toHaveLength(3))
+      expect(daemon.close).not.toHaveBeenCalled()
+      expect((await pool.query("SELECT count(*)::int AS n FROM sessions WHERE session_id='admission-session'")).rows[0].n).toBe(0)
+      expect((await pool.query("SELECT count(*)::int AS n FROM events WHERE session_id='admission-session'")).rows[0].n).toBe(0)
+      expect((await pool.query("SELECT count(*)::int AS n FROM deleted_sessions WHERE session_id='admission-session'")).rows[0].n).toBe(1)
+      await router.handleClientMessage(client, { type: 'user_message', session_id: 'other-active', msg_id: 'healthy-after-delete', content: 'continue healthy session' })
+      expect(daemon._sent).toContainEqual(expect.objectContaining({ type: 'user_message', session_id: 'other-active', msg_id: 'healthy-after-delete' }))
+      expect(client._sent).toContainEqual(expect.objectContaining({ type: 'user_message_ack', msg_id: 'healthy-after-delete' }))
+    } finally { warnings.mockRestore() }
+  })
+
   test('legacy ordinary message needs no lifecycle receipt and duplicate must not forward twice', async () => {
     const { router, client, daemon, command } = await route()
     await router.handleClientMessage(client, command)

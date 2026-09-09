@@ -1518,6 +1518,16 @@ export class Router {
           try {
             await durableEffect();
           } catch (e) {
+            if (e instanceof db.DeletedDaemonSessionError) {
+              // Deletion won the race with a deferred effect. Consume only this
+              // contiguous event and continue draining other sessions.
+              console.warn('[router] deleted session effect discarded', { daemonId, seq });
+              st.pending.delete(seq);
+              st.effects.delete(seq);
+              st.persistedHigh = seq;
+              st.inflight.delete(seq);
+              continue;
+            }
             if (e instanceof QuotaReservationBindingError
               || e instanceof db.SessionOwnershipViolationError
               || e instanceof db.UnknownDaemonSessionError) {
@@ -1606,6 +1616,16 @@ export class Router {
       this.markPersisted(daemonId, seq, applyAndDeliver, state);
     };
     const failWith = (e: unknown): void => {
+      if (e instanceof db.DeletedDaemonSessionError) {
+        console.warn('[router] deleted session event discarded', {
+          daemonId, event_type: type, session_id: sessionId, seq: seq ?? null,
+        });
+        // A tombstone is already durable. Consume a sequenced stale event via
+        // the normal contiguous cursor; an unsequenced resync needs no ACK.
+        // Never close the shared connection or reveal deletion to the daemon.
+        this.markPersisted(daemonId, seq, undefined, state);
+        return;
+      }
       if (e instanceof ExecutorOverloadedError) {
         this.sendRetryableDisconnect(daemonId, 'relay_overloaded', 500);
         return;
@@ -1652,7 +1672,7 @@ export class Router {
     this.trackPersistInflight(daemonId, seq, first);
     first.then(settle, (e) => {
       if (seq) state?.inflight.delete(seq);
-      if (e instanceof db.UnknownDaemonSessionError && seq) {
+      if (e instanceof db.UnknownDaemonSessionError && !(e instanceof db.DeletedDaemonSessionError) && seq) {
         // The legacy inline path materializes same-daemon events concurrently,
         // so a lower-seq lifecycle event (e.g. session_created) can still be
         // in flight when this event probes the session. Wait for it and retry

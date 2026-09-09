@@ -1,4 +1,4 @@
-import { describe, test, expect, vi, beforeEach } from 'vitest'
+import { describe, test, expect, vi, beforeEach, afterEach } from 'vitest'
 // Short the offline grace window so debounce tests run fast. Read by the Router
 // constructor, so this must be set before any `new Router(...)`.
 process.env.DAEMON_OFFLINE_GRACE_MS = '20'
@@ -3885,4 +3885,83 @@ describe('Router - legacy null-user identity fail-closed (H-3)', () => {
     const reply = clientWs._sent.at(-1)
     expect(reply?.type).toBe('error')
   })
+})
+
+
+describe('Router - deleted session isolation', () => {
+  afterEach(() => vi.restoreAllMocks())
+
+  test('repeated unsequenced deleted discoveries preserve the connection and another session can send', async () => {
+    const pool = createMockPool(), router = new Router(pool), daemon = createMockWs(), client = createMockWs()
+    await router.registerDaemon(daemon, { type: 'register', daemon_id: 'daemon-1', hostname: 'h', agents: [] }, 1)
+    router.registerClient(client, 1)
+    vi.spyOn(db, 'isSessionDeleted').mockImplementation(async (_pool, id) => id === 'deleted-session')
+    for (let i = 0; i < 3; i++) {
+      router.handleDaemonMessage('daemon-1', { type: 'session_discovered', session_id: 'deleted-session', agent: 'codex' })
+      await tick()
+    }
+    expect(daemon.close).not.toHaveBeenCalled()
+    expect(pool._queries.filter((q: any) => /INSERT INTO (sessions|events)/.test(q.sql) && q.params[0] === 'deleted-session')).toHaveLength(0)
+    expect(client._sent.some((m: any) => m.session_id === 'deleted-session')).toBe(false)
+    vi.spyOn(db, 'getSessionRuntimePolicy').mockResolvedValue({ daemonId: 'daemon-1', agentType: 'codex', status: 'idle' } as any)
+    vi.spyOn(db, 'getUserPlanAndWhitelist').mockResolvedValue({ plan: 'free', whitelist: false } as any)
+    const admissions = await import('../session-message-admissions.js')
+    vi.spyOn(admissions, 'resolveMessageSessionId').mockResolvedValue(null)
+    vi.spyOn(admissions, 'admitSessionMessage').mockResolvedValue({ kind: 'continue', reused: false, admission: { id: 'grant', expiresAt: new Date(Date.now() + 20000) } } as any)
+    vi.spyOn(router as any, 'broadcastQuotaStatus').mockResolvedValue(undefined)
+    ;(router as any).sessionToDaemon.set('healthy-session', 'daemon-1')
+    await router.handleClientMessage(client, { type: 'user_message', session_id: 'healthy-session', msg_id: 'new-request', content: 'hello' })
+    expect(daemon._sent).toContainEqual(expect.objectContaining({ type: 'user_message', session_id: 'healthy-session' }))
+    expect(client._sent).toContainEqual(expect.objectContaining({ type: 'user_message_ack', msg_id: 'new-request' }))
+  })
+
+  test('deleted seq waits for lower effects and allows higher seq to drain without closing', async () => {
+    const pool = createMockPool(), router = new Router(pool), daemon = createMockWs()
+    await router.registerDaemon(daemon, { type: 'register', daemon_id: 'daemon-1', hostname: 'h', agents: [], started_at: 1 }, 1)
+    const gate = deferred<void>()
+    vi.spyOn(db, 'isSessionDeleted').mockImplementation(async (_pool, id) => id === 'deleted-session')
+    const original = pool.query.getMockImplementation()
+    pool.query.mockImplementation(async (sql: string, params?: any[]) => {
+      if (sql.includes('INSERT INTO events') && params?.[0] === 'slow-session') await gate.promise
+      return original(sql, params)
+    })
+    router.handleDaemonMessage('daemon-1', { type: 'agent_text', session_id: 'slow-session', text: 'first', seq: 1 })
+    await tick()
+    router.handleDaemonMessage('daemon-1', { type: 'session_discovered', session_id: 'deleted-session', agent: 'codex', seq: 2 })
+    router.handleDaemonMessage('daemon-1', { type: 'agent_text', session_id: 'healthy-session', text: 'third', seq: 3 })
+    await tick()
+    router.handleDaemonMessage('daemon-1', { type: 'ping' })
+    expect(daemon._sent.some((m: any) => m.type === 'event_ack' && m.up_to_seq >= 2)).toBe(false)
+    gate.resolve()
+    await tick(); await tick()
+    router.handleDaemonMessage('daemon-1', { type: 'ping' })
+    expect(daemon.close).not.toHaveBeenCalled()
+    expect(daemon._sent).toContainEqual(expect.objectContaining({ type: 'event_ack', up_to_seq: 3 }))
+    expect(pool._queries.filter((q: any) => q.sql.includes('INSERT INTO events') && q.params[0] === 'deleted-session')).toHaveLength(0)
+  })
+  test('deletion during deferred effects discards only that session and preserves the ACK cursor', async () => {
+    const pool = createMockPool(), router = new Router(pool), daemon = createMockWs(), client = createMockWs()
+    await router.registerDaemon(daemon, { type: 'register', daemon_id: 'daemon-1', hostname: 'h', agents: [], started_at: 1 }, 1)
+    router.registerClient(client, 1)
+    ;(router as any).clients.get(client).subscribedSessions.add('deleted-later')
+    let deleted = false
+    vi.spyOn(db, 'isSessionDeleted').mockImplementation(async (_pool, id) => deleted && id === 'deleted-later')
+    const gate = deferred<void>(), original = pool.query.getMockImplementation()
+    pool.query.mockImplementation(async (sql: string, params?: any[]) => {
+      if (sql.includes('INSERT INTO events') && params?.[0] === 'slow-session') await gate.promise
+      return original(sql, params)
+    })
+    router.handleDaemonMessage('daemon-1', { type: 'agent_text', session_id: 'slow-session', text: 'first', seq: 1 })
+    router.handleDaemonMessage('daemon-1', { type: 'agent_text', session_id: 'deleted-later', text: 'must not broadcast', seq: 2 })
+    await tick()
+    expect(pool._queries.some((q: any) => q.sql.includes('INSERT INTO events') && q.params[0] === 'deleted-later')).toBe(true)
+    deleted = true
+    gate.resolve()
+    await tick(); await tick()
+    router.handleDaemonMessage('daemon-1', { type: 'ping' })
+    expect(daemon.close).not.toHaveBeenCalled()
+    expect(daemon._sent).toContainEqual(expect.objectContaining({ type: 'event_ack', up_to_seq: 2 }))
+    expect(client._sent.some((m: any) => m.type === 'agent_text' && m.session_id === 'deleted-later')).toBe(false)
+  })
+
 })

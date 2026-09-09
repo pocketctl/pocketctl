@@ -2,6 +2,7 @@ package agentcontrol
 
 import (
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -22,11 +23,41 @@ func TestPlanCodexManagedOfficialTUIShapes(t *testing.T) {
 			if plan.Mode != LaunchManaged || plan.Intent != tt.intent || plan.SessionID != tt.sessionID {
 				t.Fatalf("plan=%+v", plan)
 			}
-			wantArgs := append(append([]string(nil), tt.args...), "--remote", "unix:///tmp/pocketctl-codex.sock")
+			wantArgs := append([]string(nil), tt.args...)
+			if tt.intent == IntentNew {
+				wantArgs = append(wantArgs, "--cd", "/repo")
+			}
+			wantArgs = append(wantArgs, "--remote", "unix:///tmp/pocketctl-codex.sock")
 			if got := plan.ManagedArgs("unix:///tmp/pocketctl-codex.sock"); !reflect.DeepEqual(got, wantArgs) {
 				t.Fatalf("managed args=%v want %v", got, wantArgs)
 			}
 		})
+	}
+}
+
+func TestCodexManagedDirectoryOverridesAndArgumentBoundary(t *testing.T) {
+	const remote = "unix:///tmp/codex.sock"
+	for _, args := range [][]string{
+		{"--cd", "/other repo", "hello"},
+		{"--cd=../other", "hello"},
+		{"-C", "../other", "hello"},
+		{"-C../other", "hello"},
+		{"-C=../other", "hello"},
+		{"resume", "thread-1"},
+		{"resume", "thread-1", "--cd", "/other repo"},
+	} {
+		t.Run(strings.Join(args, " "), func(t *testing.T) {
+			plan := PlanCodex(args, "/launch repo")
+			want := append(append([]string(nil), args...), "--remote", remote)
+			if got := plan.ManagedArgs(remote); !reflect.DeepEqual(got, want) {
+				t.Fatalf("args=%v want=%v", got, want)
+			}
+		})
+	}
+	plan := PlanCodex([]string{"--", "--cd=prompt-text"}, "/launch repo")
+	want := []string{"--cd", "/launch repo", "--remote", remote, "--", "--cd=prompt-text"}
+	if got := plan.ManagedArgs(remote); !reflect.DeepEqual(got, want) {
+		t.Fatalf("args=%v want=%v", got, want)
 	}
 }
 

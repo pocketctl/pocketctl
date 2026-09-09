@@ -55,6 +55,23 @@ func PlanCodex(args []string, cwd string) CodexLaunchPlan {
 }
 
 func (p CodexLaunchPlan) ManagedArgs(remoteURI string) []string {
-	args := append([]string(nil), p.TUIArgs...)
-	return append(args, "--remote", remoteURI)
+	// Remote thread/start does not inherit the TUI process cwd. Preserve
+	// explicit directories and resume semantics; put flags before --.
+	boundary := len(p.TUIArgs)
+	hasCWD := false
+	for i, arg := range p.TUIArgs {
+		if arg == "--" {
+			boundary = i
+			break
+		}
+		if arg == "--cd" || strings.HasPrefix(arg, "--cd=") || strings.HasPrefix(arg, "-C") {
+			hasCWD = true
+		}
+	}
+	args := append([]string(nil), p.TUIArgs[:boundary]...)
+	if p.Intent == IntentNew && !hasCWD {
+		args = append(args, "--cd", p.CWD)
+	}
+	args = append(args, "--remote", remoteURI)
+	return append(args, p.TUIArgs[boundary:]...)
 }

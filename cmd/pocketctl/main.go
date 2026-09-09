@@ -235,7 +235,7 @@ func cmdDaemon(args []string) {
 	case "stop":
 		cmdDaemonStop()
 	case "status":
-		cmdDaemonStatus()
+		cmdDaemonStatus(args[1:]...)
 	case "logs":
 		cmdDaemonLogs()
 	case "doctor":
@@ -2403,23 +2403,33 @@ func cmdDaemonKeepAwake(args []string) {
 
 // ---------- daemon status ----------
 
-func cmdDaemonStatus() {
+func cmdDaemonStatus(args ...string) {
+	options, err := parseDaemonStatusOptions(args, os.Stderr)
+	if errors.Is(err, flag.ErrHelp) {
+		return
+	}
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(2)
+	}
+	var output strings.Builder
+	defer func() { writeDaemonStatusOutput(output.String(), options.pager) }()
 	pid, running, runtimeErr := daemon.RuntimeStatus()
 	if runtimeErr != nil {
-		renderDaemonStatusUncertainty(os.Stdout, runtimeErr)
+		renderDaemonStatusUncertainty(&output, runtimeErr)
 		return
 	}
 	if !running {
-		fmt.Println(i18n.T("daemon.not_running"))
+		fmt.Fprintln(&output, i18n.T("daemon.not_running"))
 		return
 	}
 
 	state, err := daemon.ReadState()
 	if err != nil {
-		fmt.Println(i18n.T("daemon.running_no_state", pid))
+		fmt.Fprintln(&output, i18n.T("daemon.running_no_state", pid))
 		return
 	}
-	renderVerifiedDaemonStatus(os.Stdout, *state, pid, daemon.VerifyRuntimeIdentity)
+	renderVerifiedDaemonStatus(&output, *state, pid, daemon.VerifyRuntimeIdentity, options.limit)
 }
 
 func renderDaemonStatusUncertainty(out io.Writer, err error) {
@@ -2532,6 +2542,7 @@ func renderVerifiedDaemonStatus(
 	state daemon.DaemonState,
 	pidfilePID int,
 	verify func(int, string) (bool, error),
+	limits ...int,
 ) {
 	running, err := verify(state.PID, state.RuntimeInstanceToken)
 	if err != nil {
@@ -2554,10 +2565,10 @@ func renderVerifiedDaemonStatus(
 		)
 		return
 	}
-	renderDaemonStatus(out, state, pidfilePID, func(int) bool { return true })
+	renderDaemonStatus(out, state, pidfilePID, func(int) bool { return true }, limits...)
 }
 
-func renderDaemonStatus(out io.Writer, state daemon.DaemonState, pidfilePID int, isAlive func(int) bool) {
+func renderDaemonStatus(out io.Writer, state daemon.DaemonState, pidfilePID int, isAlive func(int) bool, limits ...int) {
 	if pidfilePID <= 0 || state.PID != pidfilePID || !isAlive(pidfilePID) {
 		fmt.Fprintln(out, i18n.T("daemon.not_running"))
 		return
@@ -2601,12 +2612,11 @@ func renderDaemonStatus(out io.Writer, state daemon.DaemonState, pidfilePID int,
 	}
 	fmt.Fprintln(out, "Backpressure duration:", backpressureDuration.Round(time.Millisecond))
 
-	if len(state.Sessions) > 0 {
-		fmt.Fprintln(out, i18n.T("status.sessions", len(state.Sessions)))
-		for _, s := range state.Sessions {
-			fmt.Fprintln(out, i18n.T("status.session_row", s.SessionID[:8], s.Status, s.Cwd))
-		}
+	limit := 10
+	if len(limits) > 0 {
+		limit = limits[0]
 	}
+	renderDaemonStatusSessions(out, state.Sessions, limit)
 }
 
 func diagnosticCount(value int) string {

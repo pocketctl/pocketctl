@@ -29,7 +29,7 @@ Commands:
   agent zcode sync enable|disable|status Sync ZCode sessions read-only (view in Web/iOS)
   daemon start   Start the daemon (connects to relay)
   daemon stop    Stop the running daemon
-  daemon status  Show daemon status
+  daemon status  Show daemon status and 10 recent sessions [--limit N | --all | --pager]
   daemon logs    Show daemon logs
   daemon doctor  Diagnose connection and configuration issues
   daemon update  Update daemon to the latest version
@@ -109,7 +109,7 @@ const helpZh = `pocketctl - 远程 AI 编程代理控制
   agent zcode sync enable|disable|status 只读同步 ZCode 会话（在 Web/iOS 查看）
   daemon start   启动 daemon（连接 relay）
   daemon stop    停止运行中的 daemon
-  daemon status  查看 daemon 状态
+  daemon status  查看 daemon 状态及最近 10 个会话 [--limit N | --all | --pager]
   daemon logs    查看 daemon 日志
   daemon doctor  诊断连接和配置问题
   daemon update  更新到最新版本
@@ -442,10 +442,11 @@ var messages = map[string]msg{
 		"unknown (%s)",
 		"未知 (%s)",
 	},
-	"status.reason":      {"Reason: %s", "原因: %s"},
-	"status.updated":     {"Updated: %s", "更新时间: %s"},
-	"status.sessions":    {"\nSessions (%d):", "\n会话 (%d):"},
-	"status.session_row": {"  %s  %-10s  %s", "  %s  %-10s  %s"},
+	"status.reason":             {"Reason: %s", "原因: %s"},
+	"status.updated":            {"Updated: %s", "更新时间: %s"},
+	"status.sessions":           {"\nSessions (%d):", "\n会话 (%d):"},
+	"status.sessions_truncated": {"  Showing %d of %d sessions; use pocketctl daemon status --pager to browse all.", "  显示 %d / %d 个会话；使用 pocketctl daemon status --pager 浏览全部。"},
+	"status.session_row":        {"  %s  %-10s  %s", "  %s  %-10s  %s"},
 
 	// ---- error.* (stderr) ------------------------------------------------
 	"error.generic":         {"error: %v", "错误: %v"},

@@ -1259,6 +1259,16 @@ export class UnknownDaemonSessionError extends Error {
   }
 }
 
+/** A persisted tombstone is a terminal event discard, not a connection violation.
+ * Keep the unknown-session wire code: tombstones deliberately have no owner metadata.
+ */
+export class DeletedDaemonSessionError extends UnknownDaemonSessionError {
+  constructor() {
+    super();
+    this.name = 'DeletedDaemonSessionError';
+  }
+}
+
 export type { DaemonSessionPolicy, DaemonSessionAccess } from './materialization/types.js';
 
 interface DaemonSessionRow {
