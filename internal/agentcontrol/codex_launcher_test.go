@@ -10,6 +10,29 @@ import (
 	"time"
 )
 
+func TestCodexLauncherNewSessionsForwardEachCallingDirectory(t *testing.T) {
+	binary := validatedTestExecutable(t, "managed-codex")
+	remote := "unix:///tmp/shared-codex.sock"
+	var executed ExecSpec
+	var acquired AcquirePayload
+	launcher := CodexLauncher{
+		Acquire: func(_ context.Context, payload AcquirePayload) (AcquireResult, error) {
+			acquired = payload
+			return AcquireResult{Mode: string(LaunchManaged), RemoteURI: remote, RealBinary: binary}, nil
+		},
+		Execute: func(spec ExecSpec) error { executed = spec; return nil },
+	}
+	for _, cwd := range []string{t.TempDir(), t.TempDir()} {
+		if err := launcher.Run(context.Background(), nil, cwd); err != nil {
+			t.Fatal(err)
+		}
+		want := []string{"--cd", cwd, "--remote", remote}
+		if acquired.CWD != cwd || acquired.Intent != IntentNew || executed.Dir != cwd || !reflect.DeepEqual(executed.Args, want) {
+			t.Fatalf("cwd=%s acquire=%+v exec=%+v", cwd, acquired, executed)
+		}
+	}
+}
+
 func TestCodexLauncherAppendsOfficialRemoteAndUsesCodexAcquire(t *testing.T) {
 	repo := t.TempDir()
 	daemonBinary := validatedTestExecutable(t, "daemon-codex")
