@@ -84,7 +84,9 @@ export class MessageRequestLog {
       if (message.type === 'user_message_nack' || message.type === 'error') {
         attempt.outcome = 'rejected';
         this.record('rejected', {
-          reason: identifier(message.reason) ?? identifier(message.code) ?? 'routing_denied',
+          reason: identifier(message.reason) ?? identifier(message.code)
+            ?? (message.error === 'forbidden' ? 'forbidden'
+              : message.error === 'session not found or not owned' ? 'session_not_found_or_not_owned' : 'routing_denied'),
           retryable: typeof message.retryable === 'boolean' ? message.retryable : null, transport,
         });
       } else if (message.type === 'user_message_ack') {

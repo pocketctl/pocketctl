@@ -71,7 +71,7 @@ test('disconnected daemon, authorization denial and canonical lookup errors are 
   expect(records).toContainEqual(expect.objectContaining({ stage: 'rejected', reason: 'daemon_offline' }));
   vi.mocked(db.getSessionRuntimePolicy).mockResolvedValueOnce(null);
   await router.handleClientMessage(client, command);
-  expect(records).toContainEqual(expect.objectContaining({ stage: 'rejected', reason: 'routing_denied' }));
+  expect(records).toContainEqual(expect.objectContaining({ stage: 'rejected', reason: 'session_not_found_or_not_owned' }));
   vi.mocked(resolveMessageSessionId).mockRejectedValueOnce(new Error('lookup failure'));
   await router.handleClientMessage(client, command);
   expect(records).toContainEqual(expect.objectContaining({ stage: 'rejected', reason: 'quota_check_failed' }));
@@ -109,4 +109,16 @@ test('does not log unrelated client commands', async () => {
   const { router, client } = setup();
   await router.handleClientMessage(client, { type: 'set_locale', locale: 'zh' });
   expect(records).toEqual([]);
+});
+
+test('four conflicting sends count as four received attempts, not one business request', async () => {
+  const { router, client, daemon } = setup();
+  vi.mocked(admitSessionMessage).mockResolvedValue({ kind: 'conflict' });
+  await Promise.all(Array.from({ length: 4 }, () => router.handleClientMessage(client, { ...command })));
+  const received = records.filter(r => r.stage === 'received');
+  expect(received).toHaveLength(4);
+  expect(new Set(received.map(r => r.attempt_id)).size).toBe(4);
+  expect(new Set(received.map(r => r.request_id))).toEqual(new Set(['m-u16']));
+  expect(records.filter(r => r.stage === 'rejected' && r.reason === 'quota_reservation_binding_conflict')).toHaveLength(4);
+  expect(daemon.send).not.toHaveBeenCalled();
 });
