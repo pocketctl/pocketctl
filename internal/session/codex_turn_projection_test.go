@@ -88,7 +88,7 @@ func TestCodexTurnIDStableAcrossLiveReplayAndHistory(t *testing.T) {
 func TestCodexLateCompletionDoesNotCloseNewTurn(t *testing.T) {
 	output := make(chan protocol.DaemonEvent, 16)
 	sm := NewSessionManager(output)
-	coord := newCodexCoordinator(sm)
+	coord := newVerifiedTestCodexCoordinator(sm)
 	projector := newCodexProjection(51)
 
 	coord.publishProjected(projector.Project(codexNotification("turn/started",
@@ -127,7 +127,7 @@ done:
 // and non-retryable instead of guessing the most recent one.
 func TestCodexBackendInterruptRequiresActiveTurn(t *testing.T) {
 	sm := NewSessionManager(make(chan protocol.DaemonEvent, 8))
-	coord := newCodexCoordinator(sm)
+	coord := newVerifiedTestCodexCoordinator(sm)
 	rpc := newFakeCodexRuntimeClient()
 	backend := newCodexAppServerBackend(sm, coord, rpc, 1)
 
@@ -162,7 +162,7 @@ func TestCodexBackendInterruptRequiresActiveTurn(t *testing.T) {
 // arrive; steer stays in the same turn.
 func TestCodexBackendReserveAndSteer(t *testing.T) {
 	sm := NewSessionManager(make(chan protocol.DaemonEvent, 8))
-	coord := newCodexCoordinator(sm)
+	coord := newVerifiedTestCodexCoordinator(sm)
 	rpc := newFakeCodexRuntimeClient()
 	rpc.results["turn/start"] = json.RawMessage(`{"turn":{"id":"turn_r","status":"inProgress","items":[]}}`)
 	backend := newCodexAppServerBackend(sm, coord, rpc, 1)
@@ -193,7 +193,7 @@ func TestCodexBackendReserveAndSteer(t *testing.T) {
 func TestCodexChildTurnIsolation(t *testing.T) {
 	output := make(chan protocol.DaemonEvent, 16)
 	sm := NewSessionManager(output)
-	coord := newCodexCoordinator(sm)
+	coord := newVerifiedTestCodexCoordinator(sm)
 	projector := newCodexProjection(61)
 
 	coord.publishProjected(projector.Project(codexNotification("turn/started",
@@ -223,7 +223,7 @@ func TestCodexChildTurnIsolation(t *testing.T) {
 func TestCodexDuplicateNotificationSingleEmission(t *testing.T) {
 	output := make(chan protocol.DaemonEvent, 8)
 	sm := NewSessionManager(output)
-	coord := newCodexCoordinator(sm)
+	coord := newVerifiedTestCodexCoordinator(sm)
 	projector := newCodexProjection(71)
 	notification := codexapp.Inbound{Method: "turn/started", Params: json.RawMessage(
 		`{"threadId":"thr_d","turn":{"id":"turn_d","status":"inProgress","items":[]}}`)}

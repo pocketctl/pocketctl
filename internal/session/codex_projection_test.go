@@ -233,11 +233,11 @@ func TestCodexProjectionAgentDeltaAndAuthoritativeCompletion(t *testing.T) {
 	first := p.Project(codexNotification("item/agentMessage/delta", `{
 		"threadId":"thr_1","turnId":"turn_1","itemId":"item_1","delta":"Hel"
 	}`))
-	if len(first) != 2 || first[0].Type != "session_status" || first[0].Status != protocol.StatusRunning {
+	if len(first) != 3 || first[0].Type != protocol.EventTypeTurnStatus || first[0].TurnStatus != protocol.TurnStateRunning || first[1].Status != protocol.StatusRunning {
 		t.Fatalf("late subscription synthesis=%+v", first)
 	}
-	assertCodexTextEvent(t, first[1], "Hel", "Hel", 1, false)
-	streamID := first[1].StreamID
+	assertCodexTextEvent(t, first[2], "Hel", "Hel", 1, false)
+	streamID := first[2].StreamID
 	if streamID == "" {
 		t.Fatal("agent delta did not declare a stable stream")
 	}
@@ -281,7 +281,7 @@ func TestCodexProjectionUserCommandFileAndUsage(t *testing.T) {
 		"threadId":"thr_1","turnId":"turn_1","completedAtMs":1,
 		"item":{"id":"user_1","type":"userMessage","content":[{"type":"text","text":"fix it"},{"type":"localImage","path":"/tmp/a.png"}]}
 	}`))
-	if len(user) != 2 || user[1].Type != "user_text" || user[1].Text != "fix it" || user[1].PartID != "user_1" {
+	if len(user) != 3 || user[0].Type != protocol.EventTypeTurnStatus || user[2].Type != "user_text" || user[2].Text != "fix it" || user[2].PartID != "user_1" {
 		t.Fatalf("user=%+v", user)
 	}
 

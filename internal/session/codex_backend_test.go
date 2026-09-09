@@ -75,7 +75,7 @@ func (f *fakeCodexRuntimeClient) lastCall(t *testing.T, method string) fakeCodex
 func TestCodexAppServerBackendStartSendSteerInterruptAndResume(t *testing.T) {
 	output := make(chan protocol.DaemonEvent, 16)
 	sm := NewSessionManager(output)
-	coord := newCodexCoordinator(sm)
+	coord := newVerifiedTestCodexCoordinator(sm)
 	rpc := newFakeCodexRuntimeClient()
 	rpc.results["thread/start"] = json.RawMessage(`{"thread":{"id":"thr_1","cwd":"/repo","status":{"type":"idle"},"turns":[]}}`)
 	rpc.results["turn/start"] = json.RawMessage(`{"turn":{"id":"turn_1","status":"inProgress","items":[]}}`)
@@ -133,7 +133,7 @@ func TestCodexAppServerBackendStartSendSteerInterruptAndResume(t *testing.T) {
 
 func TestCodexAppServerBackendStartsNewTurnWhenIdle(t *testing.T) {
 	sm := NewSessionManager(make(chan protocol.DaemonEvent, 4))
-	coord := newCodexCoordinator(sm)
+	coord := newVerifiedTestCodexCoordinator(sm)
 	rpc := newFakeCodexRuntimeClient()
 	rpc.results["turn/start"] = json.RawMessage(`{"turn":{"id":"turn_new","status":"inProgress","items":[]}}`)
 	backend := newCodexAppServerBackend(sm, coord, rpc, 1)
@@ -145,7 +145,7 @@ func TestCodexAppServerBackendStartsNewTurnWhenIdle(t *testing.T) {
 
 func TestCodexAppServerBackendAppliesCurrentPermissionToNextTurn(t *testing.T) {
 	sm := NewSessionManager(make(chan protocol.DaemonEvent, 4))
-	coord := newCodexCoordinator(sm)
+	coord := newVerifiedTestCodexCoordinator(sm)
 	rpc := newFakeCodexRuntimeClient()
 	rpc.results["turn/start"] = json.RawMessage(`{"turn":{"id":"turn_new","status":"inProgress","items":[]}}`)
 	backend := newCodexAppServerBackend(sm, coord, rpc, 1)
@@ -169,7 +169,7 @@ func TestCodexAppServerBackendAppliesCurrentPermissionToNextTurn(t *testing.T) {
 func TestSendMessageManagedCodexWaitsForNativeUserItem(t *testing.T) {
 	output := make(chan protocol.DaemonEvent, 2)
 	sm := NewSessionManager(output)
-	coord := newCodexCoordinator(sm)
+	coord := newVerifiedTestCodexCoordinator(sm)
 	rpc := newFakeCodexRuntimeClient()
 	rpc.results["turn/start"] = json.RawMessage(`{"turn":{"id":"turn_new","status":"inProgress","items":[]}}`)
 	backend := newCodexAppServerBackend(sm, coord, rpc, 1)
@@ -192,7 +192,7 @@ func TestSendMessageManagedCodexWaitsForNativeUserItem(t *testing.T) {
 func TestKillSessionClosesManagedCodexWithoutWaitingForProcess(t *testing.T) {
 	output := make(chan protocol.DaemonEvent, 2)
 	sm := NewSessionManager(output)
-	coord := newCodexCoordinator(sm)
+	coord := newVerifiedTestCodexCoordinator(sm)
 	backend := newCodexAppServerBackend(sm, coord, newFakeCodexRuntimeClient(), 1)
 	cwd := t.TempDir()
 	sm.sessions["thr_1"] = &ProcessState{SessionID: "thr_1", Agent: "codex", Source: "daemon", Cwd: cwd, Status: protocol.StatusIdle, Backend: backend}
@@ -219,7 +219,7 @@ func TestCodexAppServerBackendReturnsDisconnect(t *testing.T) {
 	sm := NewSessionManager(make(chan protocol.DaemonEvent, 1))
 	rpc := newFakeCodexRuntimeClient()
 	rpc.errs["thread/start"] = errors.New("closed")
-	backend := newCodexAppServerBackend(sm, newCodexCoordinator(sm), rpc, 1)
+	backend := newCodexAppServerBackend(sm, newVerifiedTestCodexCoordinator(sm), rpc, 1)
 	if _, err := backend.Start(context.Background(), protocol.SessionConfig{Agent: "codex", Cwd: "/repo"}); err == nil {
 		t.Fatal("expected app-server disconnect")
 	}

@@ -948,7 +948,7 @@ func TestRegisterTerminalSessionCodexWatcherDoesNotTakeOverDaemonSessionWithoutP
 func TestRegisterTerminalSessionCodexWatcherDoesNotTailAppServerManagedSessionWithoutPID(t *testing.T) {
 	outputCh := make(chan protocol.DaemonEvent, 16)
 	sm := NewSessionManager(outputCh)
-	backend := newCodexAppServerBackend(sm, newCodexCoordinator(sm), newFakeCodexRuntimeClient(), 1)
+	backend := newCodexAppServerBackend(sm, newVerifiedTestCodexCoordinator(sm), newFakeCodexRuntimeClient(), 1)
 	sm.mu.Lock()
 	sm.sessions["codex-managed"] = &ProcessState{
 		SessionID:   "codex-managed",
@@ -1044,7 +1044,7 @@ func TestRegisterObservedSessionCodexDesktopReclassifiesExistingStateWithoutNewT
 func TestRegisterObservedSessionCodexDesktopDoesNotDowngradeManagedCodexOwnership(t *testing.T) {
 	output := make(chan protocol.DaemonEvent, 8)
 	sm := NewSessionManager(output)
-	backend := newCodexAppServerBackend(sm, newCodexCoordinator(sm), newFakeCodexRuntimeClient(), 1)
+	backend := newCodexAppServerBackend(sm, newVerifiedTestCodexCoordinator(sm), newFakeCodexRuntimeClient(), 1)
 	existingTailer := &watcher.JSONLTailer{}
 	activity := time.Date(2025, time.September, 4, 10, 11, 12, 0, time.UTC)
 	sm.mu.Lock()

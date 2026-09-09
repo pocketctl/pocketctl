@@ -24,7 +24,7 @@ import (
 func TestCodexCoordinatorProjectsRuntimeEventsIntoSessionManager(t *testing.T) {
 	output := make(chan protocol.DaemonEvent, 8)
 	sm := NewSessionManager(output)
-	coord := newCodexCoordinator(sm)
+	coord := newVerifiedTestCodexCoordinator(sm)
 	events := make(chan codexapp.Inbound, 4)
 	done := make(chan struct{})
 	go func() {
@@ -55,7 +55,7 @@ func TestCodexCoordinatorProjectsRuntimeEventsIntoSessionManager(t *testing.T) {
 func TestCodexCoordinatorHistoricalProjectionDoesNotAdvanceActivity(t *testing.T) {
 	output := make(chan protocol.DaemonEvent, 4)
 	sm := NewSessionManager(output)
-	coord := newCodexCoordinator(sm)
+	coord := newVerifiedTestCodexCoordinator(sm)
 	oldActivity := time.Date(2026, time.August, 1, 12, 0, 0, 0, time.UTC)
 	sm.sessions["thr_1"] = &ProcessState{
 		SessionID: "thr_1", Agent: "codex", LastActivityAt: oldActivity,
@@ -79,7 +79,7 @@ func TestCodexCoordinatorHistoricalProjectionDoesNotAdvanceActivity(t *testing.T
 func TestCodexCoordinatorDoesNotTimestampReplayedStatusAsLive(t *testing.T) {
 	output := make(chan protocol.DaemonEvent, 4)
 	sm := NewSessionManager(output)
-	coord := newCodexCoordinator(sm)
+	coord := newVerifiedTestCodexCoordinator(sm)
 	oldActivity := time.Date(2026, time.August, 1, 12, 0, 0, 0, time.UTC)
 	sm.sessions["thr_1"] = &ProcessState{
 		SessionID: "thr_1", Agent: "codex", LastActivityAt: oldActivity,
@@ -101,7 +101,7 @@ func TestCodexCoordinatorDoesNotTimestampReplayedStatusAsLive(t *testing.T) {
 func TestCodexCoordinatorDisconnectedStatusDoesNotAdvanceActivity(t *testing.T) {
 	output := make(chan protocol.DaemonEvent, 4)
 	sm := NewSessionManager(output)
-	coord := newCodexCoordinator(sm)
+	coord := newVerifiedTestCodexCoordinator(sm)
 	oldActivity := time.Date(2026, time.August, 1, 12, 0, 0, 0, time.UTC)
 	sm.sessions["thr_1"] = &ProcessState{
 		SessionID: "thr_1", Agent: "codex", LastActivityAt: oldActivity,
@@ -127,7 +127,7 @@ func TestCodexCoordinatorDisconnectedStatusDoesNotAdvanceActivity(t *testing.T) 
 func TestCodexCoordinatorDisconnectedUnknownThreadHasNoSyntheticActivity(t *testing.T) {
 	output := make(chan protocol.DaemonEvent, 4)
 	sm := NewSessionManager(output)
-	coord := newCodexCoordinator(sm)
+	coord := newVerifiedTestCodexCoordinator(sm)
 
 	coord.projectLive(
 		newCodexProjection(1),
@@ -162,7 +162,7 @@ func TestCodexCoordinatorIdleAndTurnCompletionOrderAlwaysSettlesIdle(t *testing.
 		t.Run(fmt.Sprintf("order_%d", i+1), func(t *testing.T) {
 			output := make(chan protocol.DaemonEvent, 8)
 			sm := NewSessionManager(output)
-			coord := newCodexCoordinator(sm)
+			coord := newVerifiedTestCodexCoordinator(sm)
 			projector := newCodexProjection(uint64(i + 1))
 			for _, notification := range order {
 				coord.publishProjected(projector.Project(notification))
@@ -181,7 +181,7 @@ func TestCodexCoordinatorIdleAndTurnCompletionOrderAlwaysSettlesIdle(t *testing.
 func TestCodexCoordinatorProjectsTerminalStatusWithEndTime(t *testing.T) {
 	output := make(chan protocol.DaemonEvent, 8)
 	sm := NewSessionManager(output)
-	coord := newCodexCoordinator(sm)
+	coord := newVerifiedTestCodexCoordinator(sm)
 	coord.projectLive(newCodexProjection(1), codexNotification("turn/completed", `{"threadId":"thr_completed","turn":{"id":"turn_1","status":"completed"}}`))
 
 	deadline := time.After(time.Second)
@@ -203,7 +203,7 @@ func TestCodexCoordinatorProjectsTerminalStatusWithEndTime(t *testing.T) {
 func TestCodexCoordinatorReportsManagedModelChangeAtNextTurnStart(t *testing.T) {
 	output := make(chan protocol.DaemonEvent, 8)
 	sm := NewSessionManager(output)
-	coord := newCodexCoordinator(sm)
+	coord := newVerifiedTestCodexCoordinator(sm)
 	rpc := newFakeCodexRuntimeClient()
 	rpc.results["thread/resume"] = json.RawMessage(`{"model":"gpt-5.6","thread":{"id":"thr_model"}}`)
 	coord.runtime = &codexAppServerRuntime{Client: rpc}
@@ -234,7 +234,7 @@ func TestCodexCoordinatorReportsManagedModelChangeAtNextTurnStart(t *testing.T) 
 func TestCodexCoordinatorResumesAndHydratesTerminalThread(t *testing.T) {
 	output := make(chan protocol.DaemonEvent, 16)
 	sm := NewSessionManager(output)
-	coord := newCodexCoordinator(sm)
+	coord := newVerifiedTestCodexCoordinator(sm)
 	rpc := newFakeCodexRuntimeClient()
 	rpc.results["thread/resume"] = json.RawMessage(`{"model":"gpt-5.6","cwd":"/repo","thread":{"id":"thr_terminal","cwd":"/repo","name":"Terminal","status":{"type":"active"},"turns":[]}}`)
 	rpc.results["thread/turns/list"] = json.RawMessage(`{"data":[{"id":"turn_1","status":"inProgress","items":[{"id":"user_1","type":"userMessage","content":[{"type":"text","text":"hello"}]}]}]}`)
@@ -308,7 +308,7 @@ func TestCodexCoordinatorResumedThreadStatusWinsHistoricalHydration(t *testing.T
 				Status:         protocol.StatusExited,
 				LastActivityAt: restoredActivity,
 			}
-			coord := newCodexCoordinator(sm)
+			coord := newVerifiedTestCodexCoordinator(sm)
 			rpc := newFakeCodexRuntimeClient()
 			rpc.results["thread/resume"] = json.RawMessage(`{"model":"gpt-5.6","cwd":"/repo","thread":{"id":"thr_terminal","cwd":"/repo","status":{"type":"` + tt.native + `"},"turns":[]}}`)
 			rpc.results["thread/turns/list"] = json.RawMessage(`{"data":[{"id":"turn_active","status":"inProgress","items":[{"id":"agent_1","type":"agentMessage","text":"historical"}]}]}`)
@@ -387,7 +387,7 @@ func TestCodexCoordinatorLiveStatusWinsBlockedHistoricalHydration(t *testing.T) 
 	base.results["thread/resume"] = json.RawMessage(`{"thread":{"id":"thr_race","cwd":"/repo","status":{"type":"idle"}}}`)
 	base.results["thread/turns/list"] = json.RawMessage(`{"data":[{"id":"turn_stale","status":"inProgress","items":[]}]}`)
 	client := &blockingTurnsListClient{fakeCodexRuntimeClient: base, entered: make(chan struct{}), release: make(chan struct{})}
-	coord := newCodexCoordinator(sm)
+	coord := newVerifiedTestCodexCoordinator(sm)
 	coord.runtime = &codexAppServerRuntime{PID: 123, Client: client}
 	coord.generation = 9
 	projector := newCodexProjection(9)
@@ -416,7 +416,7 @@ func TestCodexCoordinatorLiveTurnWinsBlockedHistoricalHydration(t *testing.T) {
 	base.results["thread/resume"] = json.RawMessage(`{"thread":{"id":"thr_live_turn","cwd":"/repo","status":{"type":"idle"}}}`)
 	base.results["thread/turns/list"] = json.RawMessage(`{"data":[{"id":"turn_stale","status":"inProgress","items":[]}]}`)
 	client := &blockingTurnsListClient{fakeCodexRuntimeClient: base, entered: make(chan struct{}), release: make(chan struct{})}
-	coord := newCodexCoordinator(sm)
+	coord := newVerifiedTestCodexCoordinator(sm)
 	coord.runtime = &codexAppServerRuntime{PID: 123, Client: client}
 	coord.generation = 15
 	projector := newCodexProjection(15)
@@ -478,7 +478,7 @@ func TestCodexCoordinatorBlockedResumeDoesNotBlockOtherThreadProjectionOrSubscri
 			"thr_fast": json.RawMessage(`{"thread":{"id":"thr_fast","status":{"type":"active"}}}`),
 		},
 	}
-	coord := newCodexCoordinator(sm)
+	coord := newVerifiedTestCodexCoordinator(sm)
 	coord.runtime = &codexAppServerRuntime{PID: 123, Client: client}
 	coord.generation = 16
 	projector := newCodexProjection(16)
@@ -523,7 +523,7 @@ func TestCodexCoordinatorLiveTurnDuringBlockedResumeWinsResumedIdle(t *testing.T
 			"thr_resume_turn": json.RawMessage(`{"thread":{"id":"thr_resume_turn","status":{"type":"idle"}}}`),
 		},
 	}
-	coord := newCodexCoordinator(sm)
+	coord := newVerifiedTestCodexCoordinator(sm)
 	coord.runtime = &codexAppServerRuntime{PID: 123, Client: client}
 	coord.generation = 20
 	projector := newCodexProjection(20)
@@ -556,7 +556,7 @@ func TestCodexCoordinatorDuplicateLiveStatusDuringResumeOrdersSnapshotWithoutDup
 			"thr_duplicate": json.RawMessage(`{"thread":{"id":"thr_duplicate","status":{"type":"idle"}}}`),
 		},
 	}
-	coord := newCodexCoordinator(sm)
+	coord := newVerifiedTestCodexCoordinator(sm)
 	coord.runtime = &codexAppServerRuntime{PID: 123, Client: client}
 	coord.generation = 21
 	projector := newCodexProjection(21)
@@ -614,7 +614,7 @@ func TestCodexCoordinatorHydratesAllTurnPagesAndLatestActiveTurn(t *testing.T) {
 		"":       json.RawMessage(`{"data":[{"id":"turn_1","status":"completed","items":[{"id":"agent_1","type":"agentMessage","text":"first page"}]}],"nextCursor":"page-2"}`),
 		"page-2": json.RawMessage(`{"data":[{"id":"turn_2","status":"inProgress","items":[{"id":"agent_2","type":"agentMessage","text":"second page"}]}],"nextCursor":null}`),
 	}}
-	coord := newCodexCoordinator(sm)
+	coord := newVerifiedTestCodexCoordinator(sm)
 	coord.runtime = &codexAppServerRuntime{PID: 123, Client: client}
 	coord.generation = 10
 	coord.subscribeTerminalThread(context.Background(), client, 10, "thr_pages", newCodexProjection(10))
@@ -655,7 +655,7 @@ func TestCodexCoordinatorTurnPaginationStopsOnCursorCycle(t *testing.T) {
 		"A": json.RawMessage(`{"data":[],"nextCursor":"B"}`),
 		"B": json.RawMessage(`{"data":[],"nextCursor":"A"}`),
 	}}
-	coord := newCodexCoordinator(sm)
+	coord := newVerifiedTestCodexCoordinator(sm)
 	coord.runtime = &codexAppServerRuntime{PID: 123, Client: client}
 	coord.generation = 17
 	coord.subscribeTerminalThread(context.Background(), client, 17, "thr_cycle", newCodexProjection(17))
@@ -675,7 +675,7 @@ func TestCodexCoordinatorTurnPaginationStopsOnCursorCycle(t *testing.T) {
 func TestCodexCoordinatorEventPumpRoutesServerRequests(t *testing.T) {
 	output := make(chan protocol.DaemonEvent, 8)
 	sm := NewSessionManager(output)
-	coord := newCodexCoordinator(sm)
+	coord := newVerifiedTestCodexCoordinator(sm)
 	rpc := newInteractionCodexClient()
 	coord.runtime = &codexAppServerRuntime{PID: 123, Endpoint: "/tmp/codex.sock", RemoteURI: "unix:///tmp/codex.sock", Client: rpc}
 	coord.generation = 6
@@ -702,7 +702,7 @@ func TestCodexCoordinatorEventPumpRoutesServerRequests(t *testing.T) {
 func TestCodexCoordinatorReconnectsDaemonClientAfterSocketDisconnect(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	sm := NewSessionManager(make(chan protocol.DaemonEvent, 8))
-	coord := newCodexCoordinator(sm)
+	coord := newVerifiedTestCodexCoordinator(sm)
 	oldClient := newFakeCodexRuntimeClient()
 	newClient := newFakeCodexRuntimeClient()
 	newClient.results["thread/resume"] = json.RawMessage(`{"thread":{"id":"thr_reconnect","cwd":"/repo","status":{"type":"idle"},"turns":[]}}`)
@@ -751,7 +751,7 @@ func TestCodexCoordinatorReconnectsDaemonClientAfterSocketDisconnect(t *testing.
 func TestCodexCoordinatorRetiredSubscriptionCannotCompleteNewClientWork(t *testing.T) {
 	for _, success := range []bool{false, true} {
 		t.Run(fmt.Sprintf("success=%t", success), func(t *testing.T) {
-			coord := newCodexCoordinator(nil)
+			coord := newVerifiedTestCodexCoordinator(nil)
 			oldClient, newClient := newFakeCodexRuntimeClient(), newFakeCodexRuntimeClient()
 			coord.runtime = &codexAppServerRuntime{Client: oldClient}
 			coord.generation = 4
@@ -782,7 +782,7 @@ func TestCodexCoordinatorRetiredSubscriptionCannotCompleteNewClientWork(t *testi
 func TestCodexCoordinatorStartsOneRuntimeForConcurrentAcquire(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	var starts atomic.Int32
-	coord := newCodexCoordinator(nil)
+	coord := newVerifiedTestCodexCoordinator(nil)
 	coord.probe = func(context.Context, *codexAppServerRuntime) error { return nil }
 	coord.start = func(context.Context, string, string, uint64) (*codexAppServerRuntime, error) {
 		starts.Add(1)
@@ -816,7 +816,7 @@ func TestCodexCoordinatorStartsOneRuntimeForConcurrentAcquire(t *testing.T) {
 }
 
 func TestCodexCoordinatorReplacesRuntimeWhenEndpointIsMissing(t *testing.T) {
-	coord := newCodexCoordinator(nil)
+	coord := newVerifiedTestCodexCoordinator(nil)
 	stopped := false
 	coord.runtime = &codexAppServerRuntime{
 		PID:       123,
@@ -858,7 +858,7 @@ func TestCodexCoordinatorReplacesHealthyIncompatibleRuntimeWhenIdle(t *testing.T
 		t.Run(tt.name, func(t *testing.T) {
 			t.Setenv("HOME", t.TempDir())
 			stopped := false
-			coord := newCodexCoordinator(nil)
+			coord := newVerifiedTestCodexCoordinator(nil)
 			coord.runtime = &codexAppServerRuntime{
 				PID:       123,
 				Endpoint:  "/tmp/codex-old.sock",
@@ -897,7 +897,7 @@ func TestCodexCoordinatorReplacesHealthyIncompatibleRuntimeWhenIdle(t *testing.T
 func TestCodexCoordinatorDefersHealthyIncompatibleRuntimeWithActiveLease(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	sm := NewSessionManager(make(chan protocol.DaemonEvent, 1))
-	coord := newCodexCoordinator(sm)
+	coord := newVerifiedTestCodexCoordinator(sm)
 	stopped := false
 	coord.runtime = &codexAppServerRuntime{
 		PID:       123,
@@ -936,7 +936,7 @@ func TestCodexCoordinatorDefersHealthyIncompatibleRuntimeWithActiveLease(t *test
 
 func TestCodexCoordinatorKeepsRuntimeWhenEndpointIsMissingAndTerminalIsActive(t *testing.T) {
 	sm := NewSessionManager(make(chan protocol.DaemonEvent, 1))
-	coord := newCodexCoordinator(sm)
+	coord := newVerifiedTestCodexCoordinator(sm)
 	stopped := false
 	coord.runtime = &codexAppServerRuntime{
 		PID:       123,
@@ -980,7 +980,7 @@ func TestCodexCoordinatorReplacesUnadoptableHandoffWithoutActiveTerminal(t *test
 	if err := daemon.WriteCodexAppServerState(state); err != nil {
 		t.Fatal(err)
 	}
-	coord := newCodexCoordinator(nil)
+	coord := newVerifiedTestCodexCoordinator(nil)
 	coord.adopt = func(context.Context, *daemon.CodexAppServerState) (*codexAppServerRuntime, error) {
 		return nil, errors.New("missing app-server socket")
 	}
@@ -1013,7 +1013,7 @@ func TestCodexCoordinatorAdoptsHealthyHandoffWithoutCompetingStart(t *testing.T)
 	if err := daemon.WriteCodexAppServerState(state); err != nil {
 		t.Fatal(err)
 	}
-	coord := newCodexCoordinator(nil)
+	coord := newVerifiedTestCodexCoordinator(nil)
 	coord.adopt = func(context.Context, *daemon.CodexAppServerState) (*codexAppServerRuntime, error) {
 		return &codexAppServerRuntime{PID: os.Getpid(), Endpoint: state.Endpoint, RemoteURI: state.RemoteURI}, nil
 	}
@@ -1044,7 +1044,7 @@ func TestCodexCoordinatorAdoptionResumesPersistedManagedThreads(t *testing.T) {
 	if err := daemon.WriteCodexAppServerState(state); err != nil {
 		t.Fatal(err)
 	}
-	coord := newCodexCoordinator(sm)
+	coord := newVerifiedTestCodexCoordinator(sm)
 	coord.adopt = func(context.Context, *daemon.CodexAppServerState) (*codexAppServerRuntime, error) {
 		return &codexAppServerRuntime{PID: os.Getpid(), Endpoint: state.Endpoint, RemoteURI: state.RemoteURI, Client: rpc}, nil
 	}
@@ -1131,7 +1131,7 @@ func TestCodexCoordinatorDesktopObserverWinsLateAppServerSubscription(t *testing
 	rpc := newFakeCodexRuntimeClient()
 	rpc.results["thread/resume"] = json.RawMessage(`{"model":"gpt-5.6","cwd":"/work/desktop","thread":{"id":"` + threadID + `","cwd":"/work/desktop","status":{"type":"active"},"turns":[]}}`)
 	rpc.results["thread/turns/list"] = json.RawMessage(`{"data":[]}`)
-	coord := newCodexCoordinator(sm)
+	coord := newVerifiedTestCodexCoordinator(sm)
 	coord.runtime = &codexAppServerRuntime{
 		PID: 123, Endpoint: "/tmp/codex.sock", RemoteURI: "unix:///tmp/codex.sock", Client: rpc,
 	}
@@ -1183,7 +1183,7 @@ func TestCodexCoordinatorDesktopObserverWinsInFlightAppServerSubscription(t *tes
 			threadID: json.RawMessage(`{"model":"gpt-5.6","cwd":"/work/desktop","thread":{"id":"` + threadID + `","cwd":"/work/desktop","status":{"type":"active"},"turns":[]}}`),
 		},
 	}
-	coord := newCodexCoordinator(sm)
+	coord := newVerifiedTestCodexCoordinator(sm)
 	coord.runtime = &codexAppServerRuntime{
 		PID: 123, Endpoint: "/tmp/codex.sock", RemoteURI: "unix:///tmp/codex.sock", Client: rpc,
 	}
@@ -1240,7 +1240,7 @@ func TestCodexCoordinatorPersistedRegistryDropsDesktopOriginBeforeRecovery(t *te
 	writeCodexCoordinatorRollout(t, codexHome, "desktop-persisted", "Codex Desktop")
 	writeCodexCoordinatorRollout(t, codexHome, "cli-persisted", "pocketctl")
 
-	coord := newCodexCoordinator(NewSessionManager(make(chan protocol.DaemonEvent, 8)))
+	coord := newVerifiedTestCodexCoordinator(NewSessionManager(make(chan protocol.DaemonEvent, 8)))
 	coord.restoreManagedThreads([]string{"desktop-persisted", "cli-persisted"})
 
 	threads := coord.managedThreadSnapshot()
@@ -1280,7 +1280,7 @@ func TestCodexCoordinatorStaleHandoffAdvancesGeneration(t *testing.T) {
 	if err := daemon.WriteCodexAppServerState(state); err != nil {
 		t.Fatal(err)
 	}
-	coord := newCodexCoordinator(nil)
+	coord := newVerifiedTestCodexCoordinator(nil)
 	var startedGeneration uint64
 	coord.start = func(_ context.Context, _, _ string, generation uint64) (*codexAppServerRuntime, error) {
 		startedGeneration = generation
@@ -1297,7 +1297,7 @@ func TestCodexCoordinatorStaleHandoffAdvancesGeneration(t *testing.T) {
 func TestCodexCoordinatorShutdownRelinquishesRuntimeWithActiveLease(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	sm := NewSessionManager(make(chan protocol.DaemonEvent, 1))
-	coord := newCodexCoordinator(sm)
+	coord := newVerifiedTestCodexCoordinator(sm)
 	stopped := false
 	coord.start = func(context.Context, string, string, uint64) (*codexAppServerRuntime, error) {
 		return &codexAppServerRuntime{PID: os.Getpid(), Endpoint: "/tmp/live.sock", RemoteURI: "unix:///tmp/live.sock", Stop: func() error { stopped = true; return nil }}, nil
@@ -1330,7 +1330,7 @@ func TestCodexCoordinatorShutdownRelinquishesRuntimeWithActiveLease(t *testing.T
 func TestCodexCoordinatorShutdownIgnoresActiveOpenCodeLease(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	sm := NewSessionManager(make(chan protocol.DaemonEvent, 1))
-	coord := newCodexCoordinator(sm)
+	coord := newVerifiedTestCodexCoordinator(sm)
 	stopped := false
 	coord.start = func(context.Context, string, string, uint64) (*codexAppServerRuntime, error) {
 		return &codexAppServerRuntime{

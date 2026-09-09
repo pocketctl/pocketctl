@@ -457,6 +457,7 @@ async function initDBUnlocked(pool: pg.Pool): Promise<void> {
   // sessions.model — resolved model for the session (from session_created). Drives
   // model-dimension aggregation (donut / top-model) on the token dashboard.
   await pool.query(`ALTER TABLE sessions ADD COLUMN IF NOT EXISTS model VARCHAR(64)`);
+  await pool.query(`ALTER TABLE sessions ADD COLUMN IF NOT EXISTS effort VARCHAR(32)`);
 
   // token_daily_stats — immutable per-day/per-model rollup. Powers the token
   // dashboard's time-series/model/host aggregates without scanning events, and
@@ -2560,7 +2561,7 @@ export async function listSessionsWithChildren(pool: pg.Pool, whereUser?: number
     `SELECT s.session_id, s.daemon_id, s.agent_type, s.active_agent, s.cwd, s.title, s.source, s.status,
             s.control_mode, s.capabilities,
             s.created_at, s.updated_at, s.last_activity_at, s.turn_started_at, s.exit_reason, s.subagent_count, s.pinned,
-            s.model, s.parent_session_id, s.is_subagent, s.root_session_id,
+            s.model, s.effort, s.parent_session_id, s.is_subagent, s.root_session_id,
             s.total_tokens, s.tok_input, s.tok_output, s.tok_cache_read, s.tok_cache_create,
             d.status AS daemon_status, d.hostname AS hostname, d.alias AS daemon_alias
      FROM sessions s
@@ -2686,7 +2687,7 @@ export async function listSessionsPageByDaemon(pool: pg.Pool, opts: {
     `SELECT s.session_id, s.daemon_id, s.agent_type, s.active_agent, s.cwd, s.title, s.source, s.status,
             s.control_mode, s.capabilities,
             s.created_at, s.updated_at, s.last_activity_at, s.exit_reason, s.subagent_count, s.pinned,
-            s.model, s.parent_session_id, s.is_subagent, s.root_session_id,
+            s.model, s.effort, s.parent_session_id, s.is_subagent, s.root_session_id,
             s.total_tokens, s.tok_input, s.tok_output, s.tok_cache_read, s.tok_cache_create,
             d.status AS daemon_status, d.hostname AS hostname, d.alias AS daemon_alias,
             CASE WHEN s.pinned THEN 1 ELSE 0 END AS sort_pinned,
@@ -4231,6 +4232,14 @@ export async function updateSessionModel(pool: pg.Pool, sessionId: string, model
   await pool.query(`UPDATE sessions SET model = $1, updated_at = NOW() WHERE session_id = $2`, [model, sessionId]);
 }
 
+/** Sparse metadata must not erase fields omitted by a model-only refresh. */
+export async function updateSessionMetadata(pool: pg.Pool, sessionId: string, model?: string, effort?: string): Promise<void> {
+  await pool.query(
+    `UPDATE sessions SET model = COALESCE($2, model), effort = COALESCE($3, effort) WHERE session_id = $1`,
+    [sessionId, model?.trim() || null, effort?.trim() || null],
+  );
+}
+
 /** Persist an OpenCode agent switch only after the daemon confirms it. */
 export async function updateSessionActiveAgent(pool: pg.Pool, sessionId: string, activeAgent: string): Promise<void> {
   await pool.query(
@@ -4315,12 +4324,24 @@ export async function backfillSessionTokens(pool: pg.Pool): Promise<number> {
  *  in priority order:
  *   1. session_created events (daemon-spawned sessions announce their model at create time)
  *   2. session_model_changed events (a mid-session /model switch — authoritative for the
- *      current model, and the ONLY signal for terminal sessions that never went through
- *      session_created, since session_discovered carries no model)
+ *      current model) and session_meta (initial or refreshed native metadata;
+ *      session_discovered may carry no model)
  *   3. agent_text events (last resort: the model id on the most recent assistant turn —
  *      covers terminal sessions whose model was never explicitly announced)
  *  Idempotent. Run on startup. */
 export async function backfillSessionModel(pool: pg.Pool): Promise<number> {
+  // Existing sessions can already have metadata events even though older
+  // Relay versions never copied them into the list projection.
+  await pool.query(`
+    WITH latest AS (
+      SELECT DISTINCT ON (session_id) session_id, payload->>'effort' AS effort
+      FROM events WHERE event_type = 'session_meta'
+        AND NULLIF(BTRIM(payload->>'effort'), '') IS NOT NULL
+      ORDER BY session_id, id DESC
+    )
+    UPDATE sessions s SET effort = latest.effort FROM latest
+    WHERE s.session_id = latest.session_id AND s.effort IS NULL
+  `);
   const result = await pool.query(`
     WITH candidates AS (
       SELECT session_id, model,
@@ -4329,6 +4350,7 @@ export async function backfillSessionModel(pool: pg.Pool): Promise<number> {
                ORDER BY CASE source
                           WHEN 'session_created'        THEN 1
                           WHEN 'session_model_changed'   THEN 2
+                          WHEN 'session_meta'            THEN 2
                           WHEN 'agent_text'              THEN 3
                         END,
                         created_at DESC
@@ -4336,7 +4358,7 @@ export async function backfillSessionModel(pool: pg.Pool): Promise<number> {
       FROM (
         SELECT session_id, payload->>'model' AS model, event_type AS source, created_at
         FROM events
-        WHERE event_type IN ('session_created', 'session_model_changed', 'agent_text')
+        WHERE event_type IN ('session_created', 'session_model_changed', 'session_meta', 'agent_text')
           AND payload ? 'model' AND payload->>'model' <> ''
       ) e
     )

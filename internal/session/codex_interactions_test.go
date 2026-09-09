@@ -276,7 +276,7 @@ func TestCodexInteractionsFinalResolutionReconcilesDeferredTerminalStatus(t *tes
 	output := make(chan protocol.DaemonEvent, 16)
 	sm := NewSessionManager(output)
 	client := newInteractionCodexClient()
-	coord := newCodexCoordinator(sm)
+	coord := newVerifiedTestCodexCoordinator(sm)
 	interactions := newCodexInteractions(sm, 3, client)
 	coord.interactions = interactions
 
@@ -321,7 +321,7 @@ func TestCodexInteractionsDelayedFinalResolutionRestoresDeferredIdle(t *testing.
 	output := make(chan protocol.DaemonEvent, 32)
 	sm := NewSessionManager(output)
 	client := &blockingInteractionClient{interactionCodexClient: newInteractionCodexClient(), started: make(chan struct{}, 1), release: make(chan struct{})}
-	coord := newCodexCoordinator(sm)
+	coord := newVerifiedTestCodexCoordinator(sm)
 	interactions := newCodexInteractions(sm, 13, client)
 	coord.interactions = interactions
 	interactions.Handle(codexServerRequest(t, `1`, "item/commandExecution/requestApproval", `{
@@ -352,7 +352,7 @@ func TestCodexInteractionsTicketedFinalizersAndLaterStatusPublishFIFO(t *testing
 	output := make(chan protocol.DaemonEvent, 64)
 	sm := NewSessionManager(output)
 	client := newInteractionCodexClient()
-	coord := newCodexCoordinator(sm)
+	coord := newVerifiedTestCodexCoordinator(sm)
 	interactions := newCodexInteractions(sm, 14, client)
 	coord.interactions = interactions
 	requestIDs := make([]string, 0, 2)
@@ -547,7 +547,7 @@ func TestCodexInteractionsNewerStatusWinsPostSelectionRace(t *testing.T) {
 	output := make(chan protocol.DaemonEvent, 32)
 	sm := NewSessionManager(output)
 	client := newInteractionCodexClient()
-	coord := newCodexCoordinator(sm)
+	coord := newVerifiedTestCodexCoordinator(sm)
 	interactions := newCodexInteractions(sm, 18, client)
 	coord.interactions = interactions
 	selected := make(chan struct{})
@@ -596,7 +596,7 @@ func TestCodexInteractionsNewPendingWinsPostSelectionRace(t *testing.T) {
 	output := make(chan protocol.DaemonEvent, 48)
 	sm := NewSessionManager(output)
 	client := newInteractionCodexClient()
-	coord := newCodexCoordinator(sm)
+	coord := newVerifiedTestCodexCoordinator(sm)
 	interactions := newCodexInteractions(sm, 19, client)
 	coord.interactions = interactions
 	selected := make(chan struct{})
@@ -653,7 +653,7 @@ func TestCodexInteractionsNewPendingWinsPostSelectionRace(t *testing.T) {
 func TestCodexInteractionsClosedBrokerCannotPublishAfterReplacement(t *testing.T) {
 	output := make(chan protocol.DaemonEvent, 16)
 	sm := NewSessionManager(output)
-	coord := newCodexCoordinator(sm)
+	coord := newVerifiedTestCodexCoordinator(sm)
 	oldBroker := newCodexInteractions(sm, 24, newInteractionCodexClient())
 	newBroker := newCodexInteractions(sm, 25, newInteractionCodexClient())
 	coord.interactions = oldBroker
@@ -678,7 +678,7 @@ func TestCodexInteractionsClosedBrokerCannotPublishAfterReplacement(t *testing.T
 }
 
 func TestCodexCoordinatorReplaceInteractionsWithNilClosesBroker(t *testing.T) {
-	coord := newCodexCoordinator(NewSessionManager(make(chan protocol.DaemonEvent, 1)))
+	coord := newVerifiedTestCodexCoordinator(NewSessionManager(make(chan protocol.DaemonEvent, 1)))
 	broker := newCodexInteractions(coord.sm, 28, newInteractionCodexClient())
 	coord.interactions = broker
 	coord.replaceInteractionsLocked(nil)
@@ -735,7 +735,7 @@ func TestSessionManagerRoutesCodexApprovalAndQuestionResponses(t *testing.T) {
 	output := make(chan protocol.DaemonEvent, 16)
 	sm := NewSessionManager(output)
 	client := newInteractionCodexClient()
-	coord := newCodexCoordinator(sm)
+	coord := newVerifiedTestCodexCoordinator(sm)
 	interactions := newCodexInteractions(sm, 4, client)
 	coord.interactions = interactions
 	sm.codexProvider = &CodexRuntimeProvider{sm: sm, coordinator: coord}
@@ -853,7 +853,7 @@ func TestSessionManagerRoutesMcpElicitationDecline(t *testing.T) {
 	output := make(chan protocol.DaemonEvent, 8)
 	sm := NewSessionManager(output)
 	client := newInteractionCodexClient()
-	coord := newCodexCoordinator(sm)
+	coord := newVerifiedTestCodexCoordinator(sm)
 	interactions := newCodexInteractions(sm, 10, client)
 	coord.interactions = interactions
 	sm.codexProvider = &CodexRuntimeProvider{sm: sm, coordinator: coord}

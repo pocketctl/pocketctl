@@ -12,6 +12,8 @@ import (
 )
 
 func TestCodexEphemeralThreadsNeverBecomeSessions(t *testing.T) {
+	t.Setenv("CODEX_HOME", t.TempDir())
+	writeAdmissionRollout(t, "real-no-rollout", "codex-tui")
 	output := make(chan protocol.DaemonEvent, 32)
 	sm := NewSessionManager(output)
 	coord := newCodexCoordinator(sm)
@@ -23,7 +25,7 @@ func TestCodexEphemeralThreadsNeverBecomeSessions(t *testing.T) {
 		{"item/agentMessage/delta", `{"threadId":"helper","turnId":"turn-helper","itemId":"i","delta":"title"}`},
 		{"thread/status/changed", `{"threadId":"helper","status":{"type":"idle"}}`},
 		{"thread/status/changed", `{"threadId":"helper","status":{"type":"notLoaded"}}`},
-		// A real thread is allowed even before its rollout exists.
+		// A persisted empty user thread remains visible without any items.
 		{"thread/started", `{"thread":{"id":"real-no-rollout","ephemeral":false,"cwd":"/repo","status":{"type":"idle"}}}`},
 	} {
 		inbound <- codexapp.Inbound{Method: raw.method, Params: json.RawMessage(raw.params)}

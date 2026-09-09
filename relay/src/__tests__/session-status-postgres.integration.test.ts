@@ -1,6 +1,6 @@
 import pg from 'pg'
 import { afterAll, beforeAll, beforeEach, describe, expect, test } from 'vitest'
-import { initDB, SESSION_STATUS_SUPPRESSED_EFFECT_STEP, updateSessionStatus } from '../db.js'
+import { initDB, SESSION_STATUS_SUPPRESSED_EFFECT_STEP, updateSessionStatus, updateSessionMetadata, backfillSessionModel, listSessionsWithChildren } from '../db.js'
 import { EventMaterializer } from '../materialization/event-materializer.js'
 
 const databaseUrl = process.env.TEST_DATABASE_URL
@@ -81,6 +81,22 @@ describeWithDatabase('session status PostgreSQL integration', () => {
       `SELECT status, turn_started_at FROM sessions WHERE session_id = 'session-status-test'`,
     )
     expect(row.rows[0]).toEqual({ status: 'completed', turn_started_at: null })
+  })
+
+  test('metadata survives sparse updates and list reload, and backfills existing sessions', async () => {
+    const sid = 'session-status-test'
+    await updateSessionMetadata(pool, sid, 'gpt-6-astra', 'medium')
+    await updateSessionMetadata(pool, sid, 'gpt-6-astra')
+    await updateSessionMetadata(pool, sid, ' ', '')
+    let sessions = await listSessionsWithChildren(pool)
+    expect(sessions.find(s => s.session_id === sid)).toMatchObject({ model: 'gpt-6-astra', effort: 'medium' })
+    await pool.query(`UPDATE sessions SET model = NULL, effort = NULL WHERE session_id = $1`, [sid])
+    await pool.query(`INSERT INTO events (session_id,event_type,payload) VALUES ($1,'session_meta',$2)`,
+      [sid, { model: 'gpt-6-astra', effort: 'medium' }])
+    await backfillSessionModel(pool)
+    await backfillSessionModel(pool)
+    sessions = await listSessionsWithChildren(pool)
+    expect(sessions.find(s => s.session_id === sid)).toMatchObject({ model: 'gpt-6-astra', effort: 'medium' })
   })
 
   test('clears exit_reason when a verified continuation becomes live again', async () => {
