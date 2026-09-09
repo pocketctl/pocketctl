@@ -486,6 +486,22 @@ describe('EventMaterializer', () => {
     upsert.mockRestore()
   })
 
+  test.each(['session_discovered', 'session_status', 'user_message_receipt'])(
+    'classifies tombstoned %s as an isolated discard before quota or canonical writes', async type => {
+      const pool = pools()
+      vi.spyOn(db, 'isSessionDeleted').mockResolvedValue(true)
+      const materializer = new EventMaterializer({ pool: pool as never })
+      await expect(materializer.materialize(inputFor({
+        type, session_id: 'deleted-session', request_id: 'old-request',
+        msg_id: 'old-message', status: type === 'user_message_receipt' ? 'accepted' : 'running',
+      }))).rejects.toMatchObject({ name: 'DeletedDaemonSessionError', code: 'unknown_daemon_session', permanent: true })
+      const sql = pool.query.mock.calls.map(call => String(call[0])).join('\n')
+      expect(sql).not.toContain('INSERT INTO events')
+      expect(sql).not.toContain('INSERT INTO sessions')
+      expect(sql).not.toContain('FROM session_message_admissions')
+    },
+  )
+
   test('rejects a tombstoned session before any canonical event write', async () => {
     const pool = pools()
     const deleted = vi.spyOn(db, 'isSessionDeleted').mockResolvedValue(true)
