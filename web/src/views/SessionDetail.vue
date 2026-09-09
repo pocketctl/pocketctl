@@ -2121,8 +2121,8 @@ function sendMessage() {
 function sendPromptText(text: string): boolean {
   if (isReadOnlyObserverSession.value) return false
   // C (web-post-send-feedback): optimistic echo — push user bubble immediately.
-  // Relay's user_text echo is deduped by isDuplicate (same pattern as
-  // handleLocalCommand), so no double bubble.
+  // processEvent reconciles the authoritative echo with this local bubble,
+  // including when lifecycle rows arrive before an uncorrelated Claude echo.
   const bubbleId = nextId('u')
   const msgId = `m-${bubbleId}`  // L2: correlate ack/nack with this optimistic bubble
   messages.value.push({
@@ -2577,6 +2577,21 @@ function processEvent(evt: any, target: any[] = messages.value, subagentOverride
     if (correlated) {
       preserveTurnMetadata(correlated, evt)
       applyCanonicalCorrelation(correlated, correlation)
+      correlated.__echo_reconciled = true
+      return
+    }
+    // Native Claude JSONL echoes may omit both request_id and msg_id. A
+    // turn_status/model row can separate them from the optimistic bubble.
+    // Only consume the latest local user message once, never a historical
+    // same-text message or an explicitly conflicting request.
+    const latestUser = [...target].reverse().find((message: any) => message.type === 'user_text')
+    if (latestUser?.__msg_id && !latestUser.__echo_reconciled
+      && latestUser.deliveryStatus !== 'failed'
+      && latestUser.content === text
+      && !correlationsConflict(correlation, messageCorrelation(latestUser))) {
+      preserveTurnMetadata(latestUser, evt)
+      applyCanonicalCorrelation(latestUser, correlation)
+      latestUser.__echo_reconciled = true
       return
     }
     const last = target[target.length - 1]
@@ -2585,6 +2600,7 @@ function processEvent(evt: any, target: any[] = messages.value, subagentOverride
       const existing = last
       preserveTurnMetadata(existing, evt)
       applyCanonicalCorrelation(existing, correlation)
+      existing.__echo_reconciled = true
       return
     }
     target.push({
