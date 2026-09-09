@@ -75,7 +75,7 @@
             <span :class="['status-dot', s.statusEffective || s.status]" style="width:7px;height:7px;"></span>
             <div class="sl-info">
               <div :class="['sl-title', { mono: !s.title || s.title.startsWith('Terminal Session') }]">
-                <svg v-if="s.pinned" class="pin-icon" width="12" height="12" viewBox="0 0 24 24" fill="currentColor" style="margin-right: 4px;"><path d="M16 3l5 5-3 1-3 3-1 5-2-2-5 5-1-1 5-5-2-2 5-1 3-3z"/></svg>
+                <SessionPinBadge v-if="s.pinned" />
                 <input v-if="renamingId === s.session_id" class="ss-rename-input" v-model="renameInput" maxlength="60"
                   @click.stop @keydown.enter="commitRename(s)" @keydown.escape="cancelRename" @blur="commitRename(s)" />
                 <template v-else>{{ s.title || s.session_id.slice(0, 8) }}</template>
@@ -665,6 +665,7 @@ import { mergeRevisionedPart } from '../utils/opencodePartMerge'
 import { mergeStructuredPart, type OpenCodeStructuredType } from '../utils/opencodeStructuredMerge'
 import { reconcileUnresolvedTools } from '../utils/toolState'
 import SessionActions from '../components/SessionActions.vue'
+import SessionPinBadge from '../components/SessionPinBadge.vue'
 import AgentBadge from '../components/AgentBadge.vue'
 import CommandPopover from '../components/CommandPopover.vue'
 import SessionAgentPicker from '../components/SessionAgentPicker.vue'
@@ -2120,8 +2121,8 @@ function sendMessage() {
 function sendPromptText(text: string): boolean {
   if (isReadOnlyObserverSession.value) return false
   // C (web-post-send-feedback): optimistic echo — push user bubble immediately.
-  // Relay's user_text echo is deduped by isDuplicate (same pattern as
-  // handleLocalCommand), so no double bubble.
+  // processEvent reconciles the authoritative echo with this local bubble,
+  // including when lifecycle rows arrive before an uncorrelated Claude echo.
   const bubbleId = nextId('u')
   const msgId = `m-${bubbleId}`  // L2: correlate ack/nack with this optimistic bubble
   messages.value.push({
@@ -2576,6 +2577,21 @@ function processEvent(evt: any, target: any[] = messages.value, subagentOverride
     if (correlated) {
       preserveTurnMetadata(correlated, evt)
       applyCanonicalCorrelation(correlated, correlation)
+      correlated.__echo_reconciled = true
+      return
+    }
+    // Native Claude JSONL echoes may omit both request_id and msg_id. A
+    // turn_status/model row can separate them from the optimistic bubble.
+    // Only consume the latest local user message once, never a historical
+    // same-text message or an explicitly conflicting request.
+    const latestUser = [...target].reverse().find((message: any) => message.type === 'user_text')
+    if (latestUser?.__msg_id && !latestUser.__echo_reconciled
+      && latestUser.deliveryStatus !== 'failed'
+      && latestUser.content === text
+      && !correlationsConflict(correlation, messageCorrelation(latestUser))) {
+      preserveTurnMetadata(latestUser, evt)
+      applyCanonicalCorrelation(latestUser, correlation)
+      latestUser.__echo_reconciled = true
       return
     }
     const last = target[target.length - 1]
@@ -2584,6 +2600,7 @@ function processEvent(evt: any, target: any[] = messages.value, subagentOverride
       const existing = last
       preserveTurnMetadata(existing, evt)
       applyCanonicalCorrelation(existing, correlation)
+      existing.__echo_reconciled = true
       return
     }
     target.push({
@@ -3749,7 +3766,7 @@ onMounted(() => {
 .session-list-item.active { border-color: color-mix(in srgb, var(--accent) 28%, transparent); background: var(--sidebar-active); box-shadow: inset 2px 0 0 var(--accent); }
 .session-list-item .sl-info { flex: 1; min-width: 0; }
 .session-list-item .sl-title { overflow: hidden; color: var(--fg); font-size: 13px; font-weight: 600; line-height: 18px; text-overflow: ellipsis; white-space: nowrap; }
-.session-list-item .pin-icon { color: var(--accent); flex-shrink: 0; vertical-align: middle; }
+.session-list-item .session-pin-badge { margin-right: 5px; }
 .session-list-item .ss-rename-input { background: var(--bg); border: 1px solid var(--accent); border-radius: var(--radius-sm); box-shadow: 0 0 0 3px var(--accent-muted); color: var(--fg); font-family: var(--font-body); font-size: 13px; font-weight: 500; padding: 3px 6px; outline: none; width: 100%; }
 .session-list-item .sl-title.mono { font-family: var(--font-mono); font-size: 12px; color: var(--accent); }
 .session-list-item .sl-meta { display: flex; align-items: center; gap: 6px; min-width: 0; margin-top: 3px; overflow: hidden; color: var(--fg-tertiary); font-size: 11px; line-height: 15px; text-overflow: ellipsis; white-space: nowrap; }
@@ -4051,6 +4068,10 @@ onMounted(() => {
 @keyframes fade-in { from { opacity: 0; } to { opacity: 1; } }
 @keyframes bar-in { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: translateY(0); } }
 
+@media (min-width: 769px) {
+  .session-panel-header,
+  .chat-toolbar { box-sizing: border-box; height: 66px; min-height: 66px; flex-shrink: 0; }
+}
 @media (max-width: 1024px) {
   .session-layout { height: calc(100dvh - var(--topbar-h)); }
   .session-panel { width: 260px; }

@@ -23,9 +23,7 @@
       <div class="mobile-card-content">
         <div class="mobile-card-title-row">
           <span class="mobile-card-title">{{ session.title || session.session_id.slice(0, 8) }}</span>
-          <svg v-if="session.pinned" class="mobile-pin" viewBox="0 0 16 16" aria-label="已置顶">
-            <path d="M10.8 1.6 14.4 5.2l-2 1.2-.8 3.2-1 1-2.2-2.2-4.8 4.8-.8-.8 4.8-4.8-2.2-2.2 1-1 3.2-.8 1.2-2Z" />
-          </svg>
+          <SessionPinBadge v-if="session.pinned" />
         </div>
 
         <div v-if="hasContext" class="mobile-card-context">
@@ -73,6 +71,7 @@
 
 <script setup lang="ts">
 import { computed, onBeforeUnmount, ref } from 'vue'
+import SessionPinBadge from './SessionPinBadge.vue'
 import { agentDisplayName } from '../utils/agentDisplay'
 import { isReadOnlyObserverAgent } from '../utils/observerSession'
 
@@ -228,7 +227,6 @@ onBeforeUnmount(clearLongPress)
 .mobile-card-content { min-width: 0; flex: 1; padding-top: 1px; }
 .mobile-card-title-row { display: flex; min-width: 0; align-items: center; gap: 6px; }
 .mobile-card-title { min-width: 0; overflow: hidden; color: var(--fg, #e6edf3); font-size: 14px; font-weight: 600; line-height: 18px; text-overflow: ellipsis; white-space: nowrap; }
-.mobile-pin { width: 11px; height: 11px; flex: 0 0 11px; fill: color-mix(in srgb, var(--fg-secondary, #c9d1d9) 80%, transparent); }
 .mobile-card-context {
   display: flex;
   min-width: 0;

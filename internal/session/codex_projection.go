@@ -229,6 +229,15 @@ func (p *codexProjection) projectTurn(method string, raw json.RawMessage, histor
 		return nil
 	}
 	if method == "turn/started" {
+		var events []protocol.DaemonEvent
+		if previous := p.activeTurn[params.ThreadID]; !historical && previous != "" && previous != params.Turn.ID {
+			// A new native turn supersedes a turn whose interrupted completion
+			// was missed. Close that identity before admitting the new one.
+			p.completedTurn[params.ThreadID+"\x00"+previous] = struct{}{}
+			previousEnd := p.turnStatusEvent(params.ThreadID, previous, protocol.TurnStateAbandoned, "superseded_by_native_turn")
+			previousEnd.TurnConfidence = protocol.TurnConfidenceDerived
+			events = append(events, previousEnd)
+		}
 		p.activeTurn[params.ThreadID] = params.Turn.ID
 		delete(p.completedTurn, params.ThreadID+"\x00"+params.Turn.ID)
 		if historical {
@@ -237,10 +246,21 @@ func (p *codexProjection) projectTurn(method string, raw json.RawMessage, histor
 		// The turn_status lifecycle event precedes the session status on the
 		// wire (plan §3.3) and carries the full native identity.
 		statusEvent := p.turnStatusEvent(params.ThreadID, params.Turn.ID, protocol.TurnStateRunning, "")
-		return []protocol.DaemonEvent{
+		p.mark(p.key("synthesized-turn", "live", params.ThreadID, params.Turn.ID))
+		return append(events, []protocol.DaemonEvent{
 			statusEvent,
 			{Type: "session_status", SessionID: params.ThreadID, Status: protocol.StatusRunning},
-		}
+		}...)
+	}
+	if active := p.activeTurn[params.ThreadID]; !historical && active != "" && active != params.Turn.ID {
+		// Late completion of an older turn must not idle the new turn.
+		return nil
+	}
+	var recovered []protocol.DaemonEvent
+	if !historical && p.activeTurn[params.ThreadID] == params.Turn.ID {
+		// Hydration may have supplied all content before the first live frame.
+		// A native completion still needs its matching registry identity.
+		recovered = p.synthesizeActiveTurn(params.ThreadID, params.Turn.ID, false)
 	}
 	delete(p.activeTurn, params.ThreadID)
 	p.completedTurn[params.ThreadID+"\x00"+params.Turn.ID] = struct{}{}
@@ -251,15 +271,15 @@ func (p *codexProjection) projectTurn(method string, raw json.RawMessage, histor
 	terminal := p.turnStatusEvent(params.ThreadID, params.Turn.ID, turnState, turnReason)
 	switch params.Turn.Status {
 	case "inProgress":
-		return []protocol.DaemonEvent{terminal, {Type: "session_status", SessionID: params.ThreadID, Status: protocol.StatusRunning}}
+		return append(recovered, terminal, protocol.DaemonEvent{Type: "session_status", SessionID: params.ThreadID, Status: protocol.StatusRunning})
 	case "failed":
-		return []protocol.DaemonEvent{
+		return append(recovered, []protocol.DaemonEvent{
 			terminal,
 			{Type: "error", SessionID: params.ThreadID, Error: "Codex turn failed"},
 			{Type: "session_status", SessionID: params.ThreadID, Status: protocol.StatusIdle},
-		}
+		}...)
 	default:
-		return []protocol.DaemonEvent{terminal, {Type: "session_status", SessionID: params.ThreadID, Status: protocol.StatusIdle}}
+		return append(recovered, terminal, protocol.DaemonEvent{Type: "session_status", SessionID: params.ThreadID, Status: protocol.StatusIdle})
 	}
 }
 
@@ -592,9 +612,6 @@ func (p *codexProjection) synthesizeActiveTurn(threadID, turnID string, historic
 	if _, completed := p.completedTurn[threadID+"\x00"+turnID]; completed {
 		return nil
 	}
-	if p.activeTurn[threadID] == turnID {
-		return nil
-	}
 	p.activeTurn[threadID] = turnID
 	provenance := "live"
 	if historical {
@@ -607,7 +624,10 @@ func (p *codexProjection) synthesizeActiveTurn(threadID, turnID string, historic
 	if provenance == "historical" {
 		return nil
 	}
-	return []protocol.DaemonEvent{{Type: "session_status", SessionID: threadID, Status: protocol.StatusRunning}}
+	return []protocol.DaemonEvent{
+		p.turnStatusEvent(threadID, turnID, protocol.TurnStateRunning, ""),
+		{Type: "session_status", SessionID: threadID, Status: protocol.StatusRunning},
+	}
 }
 
 func (p *codexProjection) CurrentThreadStatus(threadID string) string {

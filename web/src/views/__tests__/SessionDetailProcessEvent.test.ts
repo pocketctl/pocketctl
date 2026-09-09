@@ -719,6 +719,39 @@ describe('SessionDetail processEvent integration', () => {
     expect(wrapper.find('.turn-unknown-event').exists()).toBe(false)
   })
 
+  test.each([false, true])('reconciles an uncorrelated live echo across lifecycle rows (mobile=%s)', async (mobile) => {
+    responsiveMock.isMobile.value = mobile
+    const wrapper = shallowMount(SessionDetail)
+    const vm = wrapper.vm as any
+    vm.sendPromptText('1+1？')
+    vm.processEvent({ type: 'turn_status', turn_id: 'turn-live', turn_status: 'running' })
+    vm.processEvent({ type: 'user_text', text: '1+1？', turn_id: 'turn-live', flow_scope: 'main' })
+    await wrapper.vm.$nextTick()
+    expect(vm.messages.filter((m: any) => m.type === 'user_text')).toHaveLength(1)
+    expect(vm.messages.find((m: any) => m.type === 'user_text')).toMatchObject({ turn_id: 'turn-live', flow_scope: 'main' })
+    // A later identical prompt is a new message, not another optimistic echo.
+    vm.processEvent({ type: 'turn_status', turn_id: 'turn-next', turn_status: 'running' })
+    vm.processEvent({ type: 'user_text', text: '1+1？', turn_id: 'turn-next' })
+    expect(vm.messages.filter((m: any) => m.type === 'user_text')).toHaveLength(2)
+    wrapper.unmount()
+  })
+
+  test('does not reconcile conflicting, failed or historical user messages across lifecycle rows', () => {
+    const wrapper = shallowMount(SessionDetail)
+    const vm = wrapper.vm as any
+    for (const candidate of [
+      { __msg_id: 'local', deliveryStatus: 'pending' },
+      { __msg_id: 'local', deliveryStatus: 'failed' },
+      {},
+    ]) {
+      vm.messages = [{ id: 'old', type: 'user_text', content: 'same', ...candidate }]
+      vm.processEvent({ type: 'turn_status', turn_id: 'next', turn_status: 'running' })
+      vm.processEvent({ type: 'user_text', text: 'same', msg_id: candidate.deliveryStatus === 'pending' ? 'other' : undefined, turn_id: 'next' })
+      expect(vm.messages.filter((m: any) => m.type === 'user_text')).toHaveLength(2)
+    }
+    wrapper.unmount()
+  })
+
   test('preserves metadata on authoritative user echoes and early agent-text paths', () => {
     const wrapper = shallowMount(SessionDetail)
     const vm = wrapper.vm as any

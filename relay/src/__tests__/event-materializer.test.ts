@@ -38,6 +38,16 @@ function pools() {
 }
 
 describe('EventMaterializer', () => {
+  test('session metadata persists model and effort, including sparse refreshes', async () => {
+    const update = vi.spyOn(db, 'updateSessionMetadata').mockResolvedValue(undefined)
+    const materializer = new EventMaterializer({ pool: pools() as never })
+    await materializer.materialize(inputFor({ type: 'session_meta', session_id: 'ses-1', model: 'gpt-6-astra', effort: 'medium' }))
+    expect(update).toHaveBeenLastCalledWith(expect.anything(), 'ses-1', 'gpt-6-astra', 'medium')
+    await materializer.materialize(inputFor({ type: 'session_meta', session_id: 'ses-1', model: 'gpt-6-astra' }))
+    expect(update).toHaveBeenLastCalledWith(expect.anything(), 'ses-1', 'gpt-6-astra', undefined)
+    update.mockRestore()
+  })
+
   test('a mismatched real reservation cannot fall through to a continue admission', async () => {
     const pool = {query:vi.fn(async (sql:string) => {
       if (sql.includes('FROM quota_reservations reservation')) return {rows:[{id:'real-reservation',resource:'concurrent_session',operation:'resume',daemon_id:'wrong-daemon',session_id:'ses-1',state:'pending'}]}

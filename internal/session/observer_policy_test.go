@@ -740,7 +740,7 @@ func newObserverInteractionHarness(t *testing.T, tc observerInteractionCase) (*S
 	output := make(chan protocol.DaemonEvent, 32)
 	sm := NewSessionManager(output)
 	client := newInteractionCodexClient()
-	coord := newCodexCoordinator(sm)
+	coord := newVerifiedTestCodexCoordinator(sm)
 	interactions := newCodexInteractions(sm, 51, client)
 	coord.interactions = interactions
 	sm.codexProvider = &CodexRuntimeProvider{sm: sm, coordinator: coord}

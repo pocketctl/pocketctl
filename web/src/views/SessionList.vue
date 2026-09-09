@@ -102,7 +102,7 @@
         <div class="session-info">
           <div class="session-title">
             <span v-if="s.children && s.children.length" class="fold-toggle" @click.stop="toggleFold(s.session_id)">{{ folded[s.session_id] ? '▾' : '▸' }}</span>
-            <span v-if="s.pinned" class="pin-mark" style="color: var(--accent); margin-right: 4px;">📌</span>
+            <SessionPinBadge v-if="s.pinned" />
             <input v-if="renamingId === s.session_id" class="ss-rename-input" v-model="renameInput" maxlength="60"
               @click.stop @keydown.enter="commitRename(s)" @keydown.escape="cancelRename" @blur="commitRename(s)" />
             <span v-else class="session-title-copy">{{ s.title || s.session_id.slice(0, 8) }}</span>
@@ -201,6 +201,7 @@ import NewSessionDialog from '../components/NewSessionDialog.vue'
 import SessionActions from '../components/SessionActions.vue'
 import AgentBadge from '../components/AgentBadge.vue'
 import MobileSessionCard from '../components/MobileSessionCard.vue'
+import SessionPinBadge from '../components/SessionPinBadge.vue'
 import DaemonInstallGuide from '../components/DaemonInstallGuide.vue'
 import { getInstallCommand } from '../composables/useEnv'
 import { formatTokenCount, childAgentTokenTotal } from '../utils/tokenFormat'
@@ -708,6 +709,7 @@ function handleLogout() {
 .session-time { margin-left: auto; color: #8b949e; font-size: 13px; white-space: nowrap; }
 .session-info { flex: 1; min-width: 0; }
 .session-title { font-size: 14px; color: #e6edf3; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin-bottom: 2px; }
+.session-title :deep(.session-pin-badge) { margin-right: 5px; }
 .ss-rename-input { background: var(--bg, #0d1117); border: 1px solid #58a6ff; border-radius: 6px; box-shadow: 0 0 0 3px rgba(88,166,255,0.15); color: #e6edf3; font-family: inherit; font-size: 14px; font-weight: 500; padding: 4px 8px; outline: none; width: 100%; max-width: 200px; }
 .session-meta { display: flex; align-items: center; gap: 8px; }
 .source-badge { font-size: 11px; padding: 1px 6px; border-radius: 8px; }

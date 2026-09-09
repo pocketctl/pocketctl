@@ -80,9 +80,14 @@ type codexCoordinator struct {
 	pumpWG          sync.WaitGroup
 	subscriptionWG  sync.WaitGroup
 
-	// Keep classifications across event-pump reconnects.
-	ephemeralMu      sync.Mutex
-	ephemeralThreads map[string]bool
+	admissionMu         sync.Mutex
+	admissionGeneration uint64
+	admissionPending    map[string]*codexAdmissionPending
+	admissionIgnored    map[string]time.Time
+	admissionBytes      int
+	admitted            map[string]bool
+	admissionDisabled   bool
+	admissionProbe      func(string) bool // deterministic persistence seam for tests
 }
 
 var errCodexRuntimeUpgradeDeferred = errors.New("Codex managed runtime upgrade is deferred while an active terminal lease uses the current generation")
@@ -96,6 +101,7 @@ func newCodexCoordinator(sm *SessionManager) *codexCoordinator {
 	return &codexCoordinator{
 		sm: sm, start: startCodexAppServer, adopt: adoptCodexAppServer, probe: probeCodexAppServer,
 		activeTurn: make(map[string]string), turnRevision: make(map[string]uint64), subscribed: make(map[string]struct{}), subscribing: make(map[string]struct{}), managedThreads: make(map[string]struct{}),
+		admissionDisabled: os.Getenv("POCKETCTL_CODEX_ADMISSION") == "off",
 	}
 }
 
@@ -411,10 +417,14 @@ func (c *codexCoordinator) consumeEvents(ctx context.Context, inbound <-chan cod
 func (c *codexCoordinator) consumeEventsWithInteractions(ctx context.Context, inbound <-chan codexapp.Inbound, projector *codexProjection, interactions *codexInteractions) {
 	// Native ephemeral threads are UI helpers (titles, recaps, etc.), not
 	// resumable user sessions. Filter before subscription and interactions too.
+	ticker := time.NewTicker(time.Second)
+	defer ticker.Stop()
 	for {
 		select {
 		case <-ctx.Done():
 			return
+		case now := <-ticker.C:
+			c.retryAdmissions(ctx, projector, interactions, now)
 		case message, ok := <-inbound:
 			if !ok {
 				if ctx.Err() == nil {
@@ -422,32 +432,7 @@ func (c *codexCoordinator) consumeEventsWithInteractions(ctx context.Context, in
 				}
 				return
 			}
-			var identity struct {
-				ThreadID string `json:"threadId"`
-				Thread   struct {
-					ID        string `json:"id"`
-					Ephemeral bool   `json:"ephemeral"`
-				} `json:"thread"`
-			}
-			if json.Unmarshal(message.Params, &identity) == nil {
-				c.ephemeralMu.Lock()
-				if message.Method == "thread/started" && identity.Thread.ID != "" && identity.Thread.Ephemeral {
-					if c.ephemeralThreads == nil {
-						c.ephemeralThreads = make(map[string]bool)
-					}
-					c.ephemeralThreads[identity.Thread.ID] = true
-				}
-				ignored := c.ephemeralThreads[identity.ThreadID] || c.ephemeralThreads[identity.Thread.ID]
-				c.ephemeralMu.Unlock()
-				if ignored {
-					continue
-				}
-			}
-			if interactions != nil {
-				interactions.Handle(message)
-			}
-			c.maybeSubscribeTerminalThread(ctx, message, projector)
-			c.projectLive(projector, message)
+			c.handleAdmissionMessage(ctx, message, projector, interactions, time.Now())
 		}
 	}
 }
@@ -539,12 +524,19 @@ func (c *codexCoordinator) interactionBroker() *codexInteractions {
 }
 
 func (c *codexCoordinator) publishProjected(events []protocol.DaemonEvent) {
+	c.publishProjectedAt(events, time.Now())
+}
+
+func (c *codexCoordinator) publishProjectedAt(events []protocol.DaemonEvent, received time.Time) {
 	for _, event := range events {
+		if !c.admissionAllowed(event.SessionID) {
+			continue
+		}
 		// Codex app-server lifecycle notifications have no timestamp field. Stamp
 		// the daemon's receipt time before fan-out so clients can present the
 		// actual response end time instead of their local WebSocket arrival time.
-		if event.Type == "session_status" && event.LastActivityAt == "" && !event.Resync && event.Status != protocol.StatusDisconnected {
-			event.LastActivityAt = time.Now().UTC().Format(time.RFC3339Nano)
+		if (event.Type == "session_status" || event.Type == protocol.EventTypeTurnStatus) && event.LastActivityAt == "" && !event.Resync && event.Status != protocol.StatusDisconnected {
+			event.LastActivityAt = received.UTC().Format(time.RFC3339Nano)
 		}
 		if event.Type == protocol.EventTypeTurnStatus {
 			// Registry sync happens here; emission dedup and forwarding are
@@ -587,6 +579,10 @@ func (c *codexCoordinator) syncProjectedTurnStatus(event protocol.DaemonEvent) {
 			return // a different turn owns this actor — stale fact
 		}
 		if _, ok := c.sm.turns.Active(key); !ok {
+			startedAt, err := time.Parse(time.RFC3339Nano, event.LastActivityAt)
+			if err != nil {
+				startedAt = time.Now()
+			}
 			c.sm.turns.Reconcile(turn.TurnRecord{
 				Actor:        key,
 				Agent:        adapter.AgentCodex,
@@ -595,10 +591,18 @@ func (c *codexCoordinator) syncProjectedTurnStatus(event protocol.DaemonEvent) {
 				State:        event.TurnStatus,
 				Origin:       event.TurnOrigin,
 				Confidence:   event.TurnConfidence,
-				StartedAt:    time.Now(),
+				StartedAt:    startedAt,
 			})
 		}
 	} else if active, ok := c.sm.turns.Active(key); ok && active.TurnID == event.TurnID {
+		// Native UI/CLI interruption can bypass PocketCtl's interrupt request.
+		// Correlate the confirmed native terminal to this exact turn, then
+		// traverse the registry's required intermediate state locally.
+		if event.TurnStatus == protocol.TurnStateInterrupted && active.State == protocol.TurnStateRunning {
+			if _, err := c.sm.turns.RequestInterrupt(key, "native_interrupt_confirmed"); err != nil {
+				return
+			}
+		}
 		if _, err := c.sm.turns.Terminalize(key, event.TurnID, event.TurnStatus, event.TurnReason, event.TurnConfidence); err == nil {
 			if event.TurnStatus == protocol.TurnStateCompleted {
 				c.flushTitleOnTurnEnd(event.SessionID)
@@ -627,7 +631,10 @@ func (c *codexCoordinator) decorateTurnLifecycle(event *protocol.DaemonEvent) {
 	}
 	if active {
 		if ps.TurnStartedAt.IsZero() {
-			ps.TurnStartedAt = time.Now()
+			ps.TurnStartedAt, _ = time.Parse(time.RFC3339Nano, event.LastActivityAt)
+			if ps.TurnStartedAt.IsZero() {
+				ps.TurnStartedAt = time.Now()
+			}
 		}
 		event.TurnStartedAt = ps.TurnStartedAt.UTC().Format(time.RFC3339Nano)
 	} else {
@@ -685,13 +692,21 @@ func (c *codexCoordinator) flushTitleOnTurnEnd(sessionID string) {
 }
 
 func (c *codexCoordinator) projectLive(projector *codexProjection, message codexapp.Inbound) {
+	c.projectLiveAt(projector, message, time.Now())
+}
+
+func (c *codexCoordinator) projectLiveAt(projector *codexProjection, message codexapp.Inbound, received time.Time) {
+	id, _ := codexAdmissionIdentity(message)
+	if !c.admissionGenerationCurrent(projector.generation) || !c.admissionAllowed(id) {
+		return
+	}
 	c.projectionMu.Lock()
 	defer c.projectionMu.Unlock()
 	c.observeTurnNotification(message)
 	if threadID, status, ok := codexThreadStatusNotification(message); ok {
 		c.reconcileActiveTurnStatus(threadID, status)
 	}
-	c.publishProjected(projector.Project(message))
+	c.publishProjectedAt(projector.Project(message), received)
 	if threadID := codexTurnStartedThreadID(message); threadID != "" {
 		c.refreshManagedThreadModelAsync(threadID)
 	}
@@ -749,6 +764,10 @@ func (c *codexCoordinator) refreshManagedThreadModelAsync(threadID string) {
 }
 
 func (c *codexCoordinator) projectHistorical(projector *codexProjection, message codexapp.Inbound) {
+	id, _ := codexAdmissionIdentity(message)
+	if !c.admissionGenerationCurrent(projector.generation) || !c.admissionAllowed(id) {
+		return
+	}
 	c.projectionMu.Lock()
 	c.publishProjected(projector.ProjectHistorical(message))
 	c.projectionMu.Unlock()
@@ -766,6 +785,9 @@ func (c *codexCoordinator) maybeSubscribeTerminalThread(parent context.Context, 
 		ThreadID string `json:"threadId"`
 	}
 	if json.Unmarshal(message.Params, &params) != nil || params.ThreadID == "" {
+		return
+	}
+	if !c.admissionAllowed(params.ThreadID) {
 		return
 	}
 	if c.rejectCodexDesktopManagedThread(params.ThreadID) {
@@ -904,6 +926,20 @@ func (c *codexCoordinator) managedThreadSnapshot() []string {
 }
 
 func (c *codexCoordinator) subscribeTerminalThread(parent context.Context, client codexRuntimeClient, generation uint64, threadID string, projector *codexProjection) {
+	current := func() bool {
+		if parent.Err() != nil || !c.admissionGenerationCurrent(generation) {
+			return false
+		}
+		active, gen, ok := c.backendClient()
+		return ok && gen == generation && active == client
+	}
+	if !current() {
+		return
+	}
+	if !c.admissionAllowed(threadID) {
+		c.finishSubscription(threadID, false, client, generation)
+		return
+	}
 	if c.rejectCodexDesktopManagedThread(threadID) {
 		return
 	}
@@ -919,6 +955,9 @@ func (c *codexCoordinator) subscribeTerminalThread(parent context.Context, clien
 	statusRevision := projector.ThreadStatusRevision(threadID)
 	_, turnRevision := c.turnSnapshot(threadID)
 	err := client.Call(ctx, "thread/resume", map[string]any{"threadId": threadID, "excludeTurns": true}, &resumed)
+	if !current() {
+		return
+	}
 	if c.rejectCodexDesktopManagedThread(threadID) {
 		return
 	}
@@ -970,6 +1009,9 @@ func (c *codexCoordinator) subscribeTerminalThread(parent context.Context, clien
 			slog.Default().Warn("Codex terminal thread hydration failed", "thread", threadID, "generation", generation, "error", err)
 			break
 		}
+		if !current() {
+			return
+		}
 		historicalActiveTurn = c.hydrateTurns(threadID, page.Data, historicalActiveTurn, projector)
 		if page.NextCursor == "" {
 			hydrationComplete = true
@@ -981,6 +1023,9 @@ func (c *codexCoordinator) subscribeTerminalThread(parent context.Context, clien
 		}
 		visitedCursors[page.NextCursor] = struct{}{}
 		cursor = page.NextCursor
+	}
+	if !current() {
+		return
 	}
 	c.projectionMu.Lock()
 	c.reconcileHydratedActiveTurn(threadID, projector.CurrentThreadStatus(threadID), historicalActiveTurn, turnRevision, hydrationComplete)
@@ -1138,6 +1183,9 @@ func (c *codexCoordinator) currentTurn(threadID string) string {
 // before thread/started, which is normal when a daemon joins an active TUI.
 func (c *codexCoordinator) applyProjectedEvent(event protocol.DaemonEvent) (protocol.DaemonEvent, bool) {
 	if c.sm == nil || event.SessionID == "" {
+		return protocol.DaemonEvent{}, false
+	}
+	if !c.admissionAllowed(event.SessionID) {
 		return protocol.DaemonEvent{}, false
 	}
 	now := time.Now()

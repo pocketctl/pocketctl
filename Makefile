@@ -132,7 +132,7 @@ ios-archive:
 
 ## iOS 上传到 TestFlight
 ios-beta:
-	bash scripts/ios-beta.sh
+	bash scripts/ios-build.sh upload
 
 ## iOS 版本管理
 ios-version:
