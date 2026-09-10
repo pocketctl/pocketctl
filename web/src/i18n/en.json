@@ -260,6 +260,8 @@
   "session.input_creating": "Session creating…",
   "session.input_resume": "Resume session (history restored)...",
   "session.input_send": "Type a message... (⌥+Enter for newline)",
+  "session.input_send_mobile": "Message…",
+  "session.send_mobile": "Send",
   "session.send_enter": "Send (Enter)",
   "session.stop_gen": "Stop generating",
   "session.context_usage": "Context Usage",

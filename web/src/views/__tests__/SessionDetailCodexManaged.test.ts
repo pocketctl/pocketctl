@@ -116,7 +116,7 @@ describe('SessionDetail managed Codex terminal control', () => {
     expect(wrapper.get('.sl-meta').text()).toBe(before)
   })
 
-  test('keeps the mobile composer compact and caps wrapped input at five lines', async () => {
+  test('keeps the mobile composer compact and caps wrapped input at six lines', async () => {
     useMobileViewport()
     const wrapper = mountSession()
     setTerminalSession({
@@ -127,23 +127,46 @@ describe('SessionDetail managed Codex terminal control', () => {
 
     const textarea = wrapper.get('.chat-textarea')
     expect(textarea.attributes('rows')).toBe('1')
-    expect((textarea.element as HTMLTextAreaElement).style.height).toBe('50px')
+    expect((textarea.element as HTMLTextAreaElement).style.height).toBe('48px')
 
     await textarea.trigger('focus')
     await nextTick()
     expect(wrapper.get('.chat-input-area').classes()).toContain('composer-focused')
-    expect((textarea.element as HTMLTextAreaElement).style.height).toBe('46px')
+    expect((textarea.element as HTMLTextAreaElement).style.height).toBe('48px')
 
     Object.defineProperty(textarea.element, 'scrollHeight', { configurable: true, value: 160 })
     await textarea.setValue('A wrapped mobile prompt that needs several visible lines before scrolling.')
     await nextTick()
 
-    expect((textarea.element as HTMLTextAreaElement).style.height).toBe('112px')
+    expect((textarea.element as HTMLTextAreaElement).style.height).toBe('158px')
 
     Object.defineProperty(textarea.element, 'scrollHeight', { configurable: true, value: 180 })
     await textarea.setValue('A still longer wrapped mobile prompt that must remain internally scrollable.')
     await nextTick()
-    expect((textarea.element as HTMLTextAreaElement).style.height).toBe('112px')
+    expect((textarea.element as HTMLTextAreaElement).style.height).toBe('158px')
+  })
+
+  test('keeps mobile focus on action presses and remeasures after the width animation', async () => {
+    useMobileViewport()
+    const wrapper = mountSession()
+    setTerminalSession({ control_mode: 'managed', capabilities: ['message_acceptance_receipt'] })
+    await nextTick()
+    const textarea = wrapper.get('.chat-textarea')
+    await textarea.setValue('A message')
+    await textarea.trigger('focus')
+    const press = new Event('pointerdown', { bubbles: true, cancelable: true })
+    Object.defineProperty(press, 'button', { value: 0 })
+    wrapper.get('.send-btn').element.dispatchEvent(press)
+    expect(press.defaultPrevented).toBe(true)
+    expect(wrapper.get('.chat-input-area').classes()).toContain('composer-focused')
+    Object.defineProperty(textarea.element, 'scrollHeight', { configurable: true, value: 70 })
+    await wrapper.get('.chat-input-container').trigger('transitionend', { propertyName: 'grid-template-columns' })
+    expect((textarea.element as HTMLTextAreaElement).style.height).toBe('70px')
+    Object.defineProperty(textarea.element, 'scrollHeight', { configurable: true, value: 48 })
+    await textarea.setValue('')
+    await textarea.trigger('blur')
+    expect(wrapper.get('.chat-input-area').classes()).not.toContain('composer-focused')
+    expect((textarea.element as HTMLTextAreaElement).style.height).toBe('48px')
   })
 
   test('collapses adjacent historical Codex replies that differ only by a memory citation', async () => {

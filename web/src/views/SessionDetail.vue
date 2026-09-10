@@ -473,7 +473,7 @@
           </button>
         </Transition>
         <template v-if="composerState.visible">
-          <div class="chat-input-container" :class="{ focused: isInputFocused }">
+          <div class="chat-input-container" :class="{ focused: isInputFocused }" @transitionend.self="handleComposerTransitionEnd">
             <!-- Slash command popover -->
             <CommandPopover
               v-if="showPopover"
@@ -490,8 +490,9 @@
             <textarea
               v-model="messageInput"
               class="chat-textarea"
+              :aria-label="t(isMobile ? 'session.input_send_mobile' : 'session.input_send')"
               :style="{ height: composerTextareaHeight + 'px' }"
-              :placeholder="isPendingSession ? t('session.input_creating') : (isDaemonSession && isTerminalStatus ? t('session.input_resume') : t('session.input_send'))"
+              :placeholder="isPendingSession ? t('session.input_creating') : (isDaemonSession && isTerminalStatus ? t('session.input_resume') : t(isMobile ? 'session.input_send_mobile' : 'session.input_send'))"
               @keydown="onInputKeydown"
               @focus="handleComposerFocus"
               @blur="handleComposerBlur"
@@ -550,9 +551,11 @@
               <div class="input-actions">
                 <!-- Send button (idle) -->
                 <button v-if="!isExecuting" class="action-btn send-btn"
+                  @pointerdown="preserveComposerFocus"
                   @click="sendMessage"
+                  :aria-label="t(isMobile ? 'session.send_mobile' : 'session.send_enter')"
                   :disabled="!composerState.sendEnabled || isPendingSession || !messageInput.trim()"
-                  :title="t('session.send_enter')">
+                  :title="t(isMobile ? 'session.send_mobile' : 'session.send_enter')">
                   <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5"/><path d="M5 12l7-7 7 7"/></svg>
                 </button>
 
@@ -562,7 +565,9 @@
                      (relay restart / daemon offline with no status echo) can't
                      trigger an unroutable session_interrupt that errors out. -->
                 <button v-else class="action-btn stop-btn" :class="{ escalated: stopEscalated }"
+                  @pointerdown="preserveComposerFocus"
                   @click="interruptSession"
+                  :aria-label="t('session.stop_gen')"
                   :disabled="isDisconnected"
                   :title="isDisconnected ? t('session.daemon_offline') : (stopEscalated ? t('session.force_stop') : t('session.stop_gen'))">
                   <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="6" width="12" height="12" rx="2"/></svg>
@@ -940,9 +945,9 @@ const isInputFocused = ref(false)
 const DEFAULT_TEXTAREA_HEIGHT = 72  // ~3 rows
 const MIN_TEXTAREA_HEIGHT = 60
 const MAX_TEXTAREA_HEIGHT = 400
-const MOBILE_MIN_TEXTAREA_HEIGHT = 50
-const MOBILE_FOCUSED_MIN_TEXTAREA_HEIGHT = 46
-const MOBILE_MAX_TEXTAREA_HEIGHT = 112
+const MOBILE_MIN_TEXTAREA_HEIGHT = 48
+// Six 22px lines plus 13px vertical padding on each edge.
+const MOBILE_MAX_TEXTAREA_HEIGHT = 158
 const textareaHeight = ref(DEFAULT_TEXTAREA_HEIGHT)
 const mobileTextareaHeight = ref(MOBILE_MIN_TEXTAREA_HEIGHT)
 const composerTextareaHeight = computed(() => isMobile.value ? mobileTextareaHeight.value : textareaHeight.value)
@@ -1674,12 +1679,12 @@ function prependOlderReplayEvents(events: any[]) {
   }
   if (tempMsgs.length) {
     const existingPartKeys = new Set(messages.value.map((message: any) => message.partKey).filter(Boolean))
-    const uniqueTemp = tempMsgs.filter((message: any) => !message.partKey || !existingPartKeys.has(message.partKey))
+    const uniqueTemp = withoutExistingUserMessages(tempMsgs, messages.value).filter((message: any) => !message.partKey || !existingPartKeys.has(message.partKey))
     messages.value = [...uniqueTemp, ...messages.value]
   }
   for (const [agentId, bucket] of Object.entries(tempSubagent)) {
     if (!subagentMessages.value[agentId]) subagentMessages.value[agentId] = []
-    subagentMessages.value[agentId] = [...bucket, ...subagentMessages.value[agentId]]
+    subagentMessages.value[agentId] = [...withoutExistingUserMessages(bucket, subagentMessages.value[agentId]), ...subagentMessages.value[agentId]]
   }
   nextTick(() => {
     if (!messagesEl.value) return
@@ -2337,9 +2342,7 @@ function resizeMobileComposerTextarea() {
   const element = inputEl.value
   if (!isMobile.value || !element) return
   element.style.height = 'auto'
-  const minimumHeight = isInputFocused.value
-    ? MOBILE_FOCUSED_MIN_TEXTAREA_HEIGHT
-    : MOBILE_MIN_TEXTAREA_HEIGHT
+  const minimumHeight = MOBILE_MIN_TEXTAREA_HEIGHT
   const nextHeight = Math.min(
     MOBILE_MAX_TEXTAREA_HEIGHT,
     Math.max(minimumHeight, element.scrollHeight),
@@ -2358,6 +2361,16 @@ function handleComposerFocus() {
 function handleComposerBlur() {
   isInputFocused.value = false
   nextTick(resizeMobileComposerTextarea)
+}
+
+// A touch on the action must not dismiss the keyboard and move the button
+// before click dispatch. Keyboard focus navigation remains unchanged.
+function preserveComposerFocus(event: PointerEvent) {
+  if (isMobile.value && isInputFocused.value && event.button === 0) event.preventDefault()
+}
+
+function handleComposerTransitionEnd(event: TransitionEvent) {
+  if (event.propertyName === 'grid-template-columns') resizeMobileComposerTextarea()
 }
 
 // --- Textarea resize via drag handle ---
@@ -2508,6 +2521,40 @@ function applyCanonicalCorrelation(message: any, correlation: ReturnType<typeof 
   if (correlation.msgId) message.msg_id = correlation.msgId
 }
 
+// Keep native identity on the bubble itself: a later replay may arrive after
+// arbitrary live events, or be reduced into a separate backward-page buffer.
+function userMessageIdentity(evt: any) {
+  const payload = evt.payload && typeof evt.payload === 'object' ? evt.payload : {}
+  const value = (key: string) => evt[key] || payload[key] || ''
+  const scope = [value('session_id') || sessionId.value, value('agent_id')]
+  return {
+    userEventKey: value('event_id') ? JSON.stringify([...scope, value('event_id')]) : '',
+    userPartKey: value('part_id') ? JSON.stringify([...scope, value('source_turn_id') || value('turn_id'), value('part_id')]) : '',
+  }
+}
+
+function sameUserMessage(left: any, right: any): boolean {
+  return Boolean(
+    (left.userEventKey && left.userEventKey === right.userEventKey)
+    || (left.userPartKey && left.userPartKey === right.userPartKey),
+  )
+}
+
+function userIdentitiesConflict(left: any, right: any): boolean {
+  return Boolean((left.userEventKey || left.userPartKey)
+    && (right.userEventKey || right.userPartKey) && !sameUserMessage(left, right))
+}
+
+function preserveUserIdentity(message: any, identity: ReturnType<typeof userMessageIdentity>) {
+  if (identity.userEventKey) message.userEventKey = identity.userEventKey
+  if (identity.userPartKey) message.userPartKey = identity.userPartKey
+}
+
+function withoutExistingUserMessages(page: any[], existing: any[]): any[] {
+  return page.filter(message => message.type !== 'user_text'
+    || !existing.some(candidate => candidate.type === 'user_text' && sameUserMessage(candidate, message)))
+}
+
 const turnMetadataKeys = ['turn_id', 'source_turn_id', 'turn_status', 'turn_reason', 'turn_origin', 'turn_confidence', 'previous_turn_id', 'continuation_reason', 'actor_scope', 'flow_scope', 'content_class', 'classifier_version'] as const
 function eventWithTurnMetadata(evt: any): Record<string, unknown> {
   const payload = evt.payload && typeof evt.payload === 'object' ? evt.payload : {}
@@ -2572,9 +2619,18 @@ function processEvent(evt: any, target: any[] = messages.value, subagentOverride
   } else if (type === 'user_text') {
     const text = evt.text || evt.content || evt.payload?.text || evt.payload?.content || ''
     if (!text) return
+    const identity = userMessageIdentity(evt)
+    const existingByIdentity = target.find((message: any) => message.type === 'user_text' && sameUserMessage(message, identity))
+    if (existingByIdentity) {
+      preserveTurnMetadata(existingByIdentity, evt)
+      preserveUserIdentity(existingByIdentity, identity)
+      applyCanonicalCorrelation(existingByIdentity, eventCorrelation(evt))
+      return
+    }
     const correlation = eventCorrelation(evt)
     const correlated = findMessageByCorrelation(correlation, target)
     if (correlated) {
+      preserveUserIdentity(correlated, identity)
       preserveTurnMetadata(correlated, evt)
       applyCanonicalCorrelation(correlated, correlation)
       correlated.__echo_reconciled = true
@@ -2588,7 +2644,9 @@ function processEvent(evt: any, target: any[] = messages.value, subagentOverride
     if (latestUser?.__msg_id && !latestUser.__echo_reconciled
       && latestUser.deliveryStatus !== 'failed'
       && latestUser.content === text
+      && !userIdentitiesConflict(latestUser, identity)
       && !correlationsConflict(correlation, messageCorrelation(latestUser))) {
+      preserveUserIdentity(latestUser, identity)
       preserveTurnMetadata(latestUser, evt)
       applyCanonicalCorrelation(latestUser, correlation)
       latestUser.__echo_reconciled = true
@@ -2596,8 +2654,10 @@ function processEvent(evt: any, target: any[] = messages.value, subagentOverride
     }
     const last = target[target.length - 1]
     if (last?.type === 'user_text' && (last.content || '') === text
+      && !userIdentitiesConflict(last, identity)
       && !correlationsConflict(correlation, messageCorrelation(last))) {
       const existing = last
+      preserveUserIdentity(existing, identity)
       preserveTurnMetadata(existing, evt)
       applyCanonicalCorrelation(existing, correlation)
       existing.__echo_reconciled = true
@@ -2605,6 +2665,7 @@ function processEvent(evt: any, target: any[] = messages.value, subagentOverride
     }
     target.push({
       id: nextId('u'), type: 'user_text', role: 'user', content: text,
+      ...identity,
       request_id: correlation.requestId,
       msg_id: correlation.msgId,
       ...eventWithTurnMetadata(evt),
@@ -4143,66 +4204,83 @@ onMounted(() => {
   .file-change-panel-list { padding: 10px 10px max(18px, env(safe-area-inset-bottom)); }
   .chat-messages { padding: 14px var(--session-content-gutter) calc(14px + var(--composer-float-clearance)); gap: 12px; }
   .chat-input-area {
-    padding: 0 10px max(10px, env(safe-area-inset-bottom));
+    padding: 4px 0 calc(4px + env(safe-area-inset-bottom));
   }
-  .chat-input-area.composer-focused { padding-bottom: 7px; }
+  .chat-input-area.composer-focused { padding-bottom: 4px; }
   .unmanaged-readonly-notice { grid-template-columns: 34px minmax(0, 1fr); gap: 10px; padding: 10px; border-radius: var(--radius-md); }
   .unmanaged-readonly-icon { width: 34px; height: 34px; border-radius: 10px; }
   .unmanaged-readonly-agent { display: none; }
   .unmanaged-readonly-description { white-space: normal; }
   .textarea-resize-handle { display: none; }
+  /* The top row is a separate utility strip. Only row two is the iOS
+     capsule; its side insets animate with focus without scaling the text. */
   .chat-input-container {
     display: grid;
-    grid-template-columns: minmax(0, 1fr) 44px;
-    grid-template-rows: minmax(31px, auto) auto;
-    column-gap: 6px;
+    grid-template-columns: 12% minmax(0, 1fr) 46px 12%;
+    grid-template-rows: auto minmax(48px, auto);
+    row-gap: 4px;
+    isolation: isolate;
     overflow: visible;
-    padding: 0 6px 6px 11px;
-    border-radius: 15px;
-    background: color-mix(in srgb, var(--surface) 96%, transparent);
-    box-shadow: 0 12px 32px rgba(0, 0, 0, .38);
-    backdrop-filter: blur(18px);
-    -webkit-backdrop-filter: blur(18px);
+    padding: 0;
+    border: 0;
+    border-radius: 0;
+    background: transparent;
+    box-shadow: none;
+    transition: grid-template-columns 250ms ease-out;
+  }
+  .chat-input-container::before {
+    content: '';
+    grid-column: 2 / 4;
+    grid-row: 2;
+    z-index: -1;
+    pointer-events: none;
+    border: 1px solid var(--border);
+    border-radius: 24px;
+    background: color-mix(in srgb, var(--surface) 94%, var(--fg) 6%);
+    box-shadow: 0 4px 10px rgba(0, 0, 0, .22);
   }
   .chat-input-container.focused {
-    border-color: var(--border-light);
-    box-shadow: 0 12px 32px rgba(0, 0, 0, .38);
+    grid-template-columns: 12px minmax(0, 1fr) 46px 12px;
+    border-color: transparent;
+    box-shadow: none;
   }
   .chat-textarea {
-    grid-column: 1;
+    grid-column: 2;
     grid-row: 2;
     min-width: 0;
-    min-height: 50px;
-    max-height: 112px;
+    min-height: 48px;
+    max-height: 158px;
     display: block;
     overflow-y: auto;
+    overscroll-behavior: contain;
     resize: none;
-    padding: 8px 2px 7px;
+    padding: 13px 4px 13px 16px;
+    /* 16px prevents Safari's focus zoom; native iOS uses 15pt. */
     font-size: 16px;
-    line-height: 1.45;
+    line-height: 22px;
     caret-color: var(--accent);
   }
-  .chat-input-container.focused .chat-textarea { min-height: 46px; }
+  .chat-textarea::placeholder { color: var(--fg-secondary); }
   .input-controls { display: contents; }
   .perm-dropdown {
-    grid-column: 1;
+    grid-column: 1 / 3;
     grid-row: 1;
     align-self: center;
     justify-self: start;
     min-width: 0;
-    margin-left: -3px;
+    margin-left: 12px;
     z-index: 2;
   }
   .perm-trigger {
-    min-width: 0;
-    height: 25px;
+    min-width: 44px;
+    min-height: 44px;
     gap: 4px;
-    padding: 0 7px;
-    border-radius: 7px;
-    font-size: 10px;
+    padding: 0 8px;
+    border-radius: 12px;
+    font-size: 11px;
     white-space: nowrap;
   }
-  .perm-trigger > svg:first-child { width: 12px; height: 12px; flex: 0 0 auto; }
+  .perm-trigger > svg:first-child { width: 13px; height: 13px; flex: 0 0 auto; }
   .perm-label { overflow: hidden; text-overflow: ellipsis; }
   .perm-menu {
     bottom: calc(100% + 7px);
@@ -4216,13 +4294,13 @@ onMounted(() => {
   .perm-menu-item { min-height: 48px; padding: 7px 9px; border-radius: 8px; }
   .perm-menu-copy small { margin-top: 2px; font-size: 10px; }
   .input-meta {
-    grid-column: 1 / 3;
+    grid-column: 1 / 5;
     grid-row: 1;
     align-self: center;
     justify-self: end;
     max-width: calc(100% - 112px);
     gap: 5px;
-    margin-right: 2px;
+    margin-right: 12px;
     overflow: hidden;
   }
   .input-meta .model-pill {
@@ -4243,9 +4321,9 @@ onMounted(() => {
     white-space: nowrap;
   }
   .ctx-indicator svg { width: 12px; height: 12px; }
-  .chat-input-container.focused .ctx-indicator { display: none; }
+
   .input-actions {
-    grid-column: 2;
+    grid-column: 3;
     grid-row: 2;
     align-self: end;
     justify-self: end;
@@ -4253,18 +4331,38 @@ onMounted(() => {
     display: grid;
     place-items: center;
     gap: 0;
-    padding-bottom: 1px;
+    padding: 0 2px 2px 0;
   }
   .action-btn {
-    width: 42px;
-    height: 42px;
-    border-radius: 12px;
-    transition: transform 100ms ease, opacity 100ms ease, background 100ms ease;
+    position: relative;
+    isolation: isolate;
+    width: 44px;
+    height: 44px;
+    border-radius: 50%;
+    background: transparent;
+    color: var(--bg);
+    touch-action: manipulation;
+    -webkit-tap-highlight-color: transparent;
+    transition: transform 150ms ease-out, opacity 150ms ease-out;
   }
-  .action-btn:active:not(:disabled) { transform: scale(.94); }
-  .send-btn:disabled,
-  .stop-btn:disabled { color: var(--fg-tertiary); background: var(--surface-active); }
-  .stop-btn { color: var(--error); background: var(--error-bg); }
+  .action-btn::before {
+    content: '';
+    position: absolute;
+    inset: 6px;
+    z-index: -1;
+    border-radius: 50%;
+    background: var(--accent);
+    transition: background 150ms ease-out;
+  }
+  .action-btn:active:not(:disabled) { transform: scale(.92); }
+  .action-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+  .send-btn:hover:not(:disabled), .stop-btn:hover:not(:disabled) { background: transparent; }
+  .send-btn:disabled, .stop-btn:disabled { background: transparent; color: var(--bg); opacity: .35; }
+  .stop-btn.escalated { background: transparent; animation: none; }
+  .stop-btn.escalated::before { background: var(--error); }
+  .send-btn > svg { width: 16px; height: 16px; }
+  .stop-btn > svg { width: 20px; height: 20px; }
+  .input-actions > .action-btn > svg { animation: composer-symbol-in 180ms ease-out; }
   .stop-error-hint {
     position: absolute;
     right: 0;
@@ -4279,7 +4377,14 @@ onMounted(() => {
     text-overflow: ellipsis;
   }
 }
+@keyframes composer-symbol-in {
+  from { opacity: 0; transform: scale(.72); }
+  to { opacity: 1; transform: scale(1); }
+}
 @media (prefers-reduced-motion: reduce) {
+  .chat-input-container, .action-btn, .action-btn::before { transition: none; }
+  .input-actions > .action-btn > svg { animation: none; }
+  .action-btn:active:not(:disabled) { transform: none; }
   .session-history-spinner { animation-duration: 1.8s; }
   .request-deep-link-target { animation: none; outline: 2px solid var(--warning); }
 }
