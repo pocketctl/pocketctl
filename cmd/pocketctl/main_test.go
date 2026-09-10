@@ -2477,3 +2477,63 @@ func TestWSLOpenArgsNeverUseCmdExeOrShell(t *testing.T) {
 		}
 	}
 }
+
+func TestDaemonCwdPolicyDefaultsToUserHome(t *testing.T) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	home, err = filepath.EvalSymlinks(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, roots := range [][]string{nil, {}} {
+		policy, err := newDaemonCwdPolicy(roots)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !reflect.DeepEqual(policy.Roots(), []string{home}) {
+			t.Fatalf("default roots = %v, want [%s]", policy.Roots(), home)
+		}
+		if _, err := policy.AuthorizeProposed(filepath.Join(home, "pocketctl-default-policy-test", "project")); err != nil {
+			t.Fatalf("home subdirectory not authorized: %v", err)
+		}
+	}
+}
+
+func TestDaemonCwdPolicyExplicitRootsReplaceDefault(t *testing.T) {
+	root := t.TempDir()
+	policy, err := newDaemonCwdPolicy([]string{root})
+	if err != nil {
+		t.Fatal(err)
+	}
+	canonical, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(policy.Roots(), []string{canonical}) {
+		t.Fatalf("roots = %v", policy.Roots())
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := policy.Allows(home); err == nil {
+		t.Fatal("explicit root must not also authorize home")
+	}
+}
+
+func TestDaemonCwdPolicyInvalidExplicitRootDoesNotFallBack(t *testing.T) {
+	for _, roots := range [][]string{{"relative/path"}, {filepath.Join(t.TempDir(), "missing")}} {
+		if _, err := newDaemonCwdPolicy(roots); err == nil {
+			t.Fatalf("invalid roots accepted: %v", roots)
+		}
+	}
+	policy, err := newDaemonCwdPolicy([]string{""})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(policy.Roots()) != 0 {
+		t.Fatal("explicit empty root unexpectedly authorized home")
+	}
+}

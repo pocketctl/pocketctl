@@ -1,24 +1,30 @@
 <template>
-  <div class="modal-overlay" @click.self="$emit('close')">
-    <div class="modal-dialog">
+  <div class="modal-overlay" @click.self="showDirectory ? showDirectory = false : $emit('close')">
+    <DirectoryPicker v-if="showDirectory" :key="form.daemonId" :daemon-id="form.daemonId" :host-name="selectedDaemonName" :initial-path="form.cwd" :online="selectedHostOnline" @close="showDirectory = false" @select="selectDirectory" />
+    <div v-else class="modal-dialog">
       <div class="modal-header">
         <h2 class="modal-title">{{ t('new_session.title') }}</h2>
         <button class="modal-close" @click="$emit('close')" :title="t('common.close')">
           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M18 6L6 18M6 6l12 12"/></svg>
         </button>
       </div>
-      <div class="modal-body">
-        <div v-if="concurrentSessions" :class="['quota-banner', { reached: sessionQuotaReached, over: concurrentSessions.over_limit }]">
+        <div :class="['quota-banner', { reached: sessionQuotaReached, over: concurrentSessions?.over_limit }]" role="status">
           <span>{{ t('quota.concurrent_sessions') }}</span>
-          <strong>{{ concurrentSessions.used + (concurrentSessions.reserved || 0) }}/{{ concurrentSessions.limit ?? '∞' }}</strong>
+          <strong v-if="concurrentSessions">{{ concurrentSessions.used + (concurrentSessions.reserved || 0) }}/{{ concurrentSessions.limit ?? '∞' }}</strong>
+          <span v-else>{{ t(quotaLoading ? 'common.loading' : 'quota.load_failed') }}</span>
+          <button v-if="quotaLoadFailed" class="quota-retry" :disabled="quotaLoading" @click="refreshQuota">{{ t('directory.retry') }}</button>
           <span v-if="sessionQuotaReached">{{ t('quota.session_reached_hint') }}</span>
         </div>
+      <div class="modal-body">
         <!-- Host Selector -->
         <div class="field-label">
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="2" width="20" height="20" rx="3"/><path d="M7 2v20"/></svg>
           {{ t('new_session.select_host') }}
         </div>
-        <div class="host-selector">
+        <button class="host-summary" :aria-expanded="showHosts" @click="showHosts = !showHosts">
+          <span>{{ selectedDaemonName }}</span><span :class="selectedHostOnline ? 'host-online' : 'host-unavailable'">{{ form.daemonId ? t(selectedHostOnline ? 'dashboard.online' : 'directory.error.daemon_offline') : t('new_session.select_host') }} ⌄</span>
+        </button>
+        <div v-show="showHosts || !form.daemonId" class="host-selector">
           <div v-if="!daemons || daemons.length === 0" class="host-empty">{{ t('new_session.no_hosts') }}</div>
           <div v-for="d in daemons" :key="d.daemon_id"
             :class="['host-option', { selected: form.daemonId === d.daemon_id, disabled: !d.daemon_online }]"
@@ -52,8 +58,22 @@
           <button :class="['agent-pill', { selected: form.agent === 'opencode' }]" @click="selectAgent('opencode')">OpenCode</button>
         </div>
 
+        <div class="configuration-grid">
+        <!-- Model (dynamic: host's available models). All agents — including
+             opencode — surface their models via list_models → model_list. -->
+        <div class="model-field">
+          <div class="field-label">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5M2 12l10 5 10-5"/></svg>
+            {{ t('new_session.model_label') }}
+          </div>
+          <select v-model="form.model" class="model-select">
+            <option value="">{{ !modelsLoaded ? t('new_session.model_loading') : (models.length ? t('new_session.model_default') : t('new_session.model_none')) }}</option>
+            <option v-for="m in models" :key="m.alias" :value="m.alias">{{ m.name }}</option>
+          </select>
+        </div>
+
         <!-- Working Directory -->
-        <div class="form-group">
+        <div class="form-group cwd-field">
           <div class="field-label">
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 19a2 2 0 01-2 2H4a2 2 0 01-2-2V5a2 2 0 012-2h5l2 3h9a2 2 0 012 2z"/></svg>
             {{ t('new_session.cwd_label') }}
@@ -61,11 +81,12 @@
           <div class="dir-input">
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 19a2 2 0 01-2 2H4a2 2 0 01-2-2V5a2 2 0 012-2h5l2 3h9a2 2 0 012 2z"/></svg>
             <input type="text" v-model="form.cwd" :placeholder="t('new_session.cwd_placeholder')" />
+            <button class="browse-directory" :disabled="!selectedHostOnline || creating" @click="showDirectory = true" :aria-label="t('directory.browse')">▱ <span>{{ t('directory.browse') }}</span></button>
           </div>
         </div>
 
         <!-- Agent-specific native permission configuration -->
-        <div v-if="form.agent !== 'opencode'" class="form-group">
+        <div v-if="form.agent !== 'opencode'" class="form-group permission-field">
           <div class="field-label">
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
             {{ t('new_session.permission_label') }}
@@ -89,17 +110,6 @@
           </div>
         </div>
 
-        <!-- Model (dynamic: host's available models). All agents — including
-             opencode — surface their models via list_models → model_list. -->
-        <div>
-          <div class="field-label">
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5M2 12l10 5 10-5"/></svg>
-            {{ t('new_session.model_label') }}
-          </div>
-          <select v-model="form.model" class="model-select">
-            <option value="">{{ !modelsLoaded ? t('new_session.model_loading') : (models.length ? t('new_session.model_default') : t('new_session.model_none')) }}</option>
-            <option v-for="m in models" :key="m.alias" :value="m.alias">{{ m.name }}</option>
-          </select>
         </div>
 
         <!-- Initial Prompt -->
@@ -183,6 +193,8 @@
 
 <script setup lang="ts">
 import { ref, reactive, computed, onMounted, onUnmounted, watch } from 'vue'
+import DirectoryPicker from './DirectoryPicker.vue'
+import { useAuth } from '../composables/useAuth'
 import { useRouter } from 'vue-router'
 import { useWebSocket } from '../composables/useWebSocket'
 import { useLocale } from '../composables/useLocale'
@@ -196,13 +208,31 @@ const emit = defineEmits<{ close: [] }>()
 const router = useRouter()
 const { connect, send, onEvent } = useWebSocket()
 const { t } = useLocale()
-const { concurrentSessions, quotaReached } = useQuota()
+const { concurrentSessions, quotaReached, applyQuotaPayload } = useQuota()
+const { apiGetAuth } = useAuth()
+const quotaLoading = ref(false)
+const quotaLoadFailed = ref(false)
+let quotaDisposed = false
+async function refreshQuota() {
+  if (quotaLoading.value) return
+  quotaLoading.value = true; quotaLoadFailed.value = false
+  try {
+    const { ok, data } = await apiGetAuth('/api/user/profile')
+    if (quotaDisposed) return
+    if (ok && data?.quota?.resources?.concurrent_sessions && data.quota.resources.bound_hosts) applyQuotaPayload(data)
+    else quotaLoadFailed.value = true
+  } catch {
+    if (!quotaDisposed) quotaLoadFailed.value = true
+  } finally {
+    if (!quotaDisposed) quotaLoading.value = false
+  }
+}
 const sessionQuotaReached = computed(() => quotaReached('concurrent_sessions'))
 
 const form = reactive({
   daemonId: '',
   agent: 'claude-code',
-  cwd: localStorage.getItem('pocketctl_default_cwd') || '~/',
+  cwd: '~/',
   prompt: '',
   permission: defaultPermission('claude-code') as PermissionConfig | undefined,
   model: '',  // '' = follow host default | opus | sonnet | haiku alias
@@ -211,6 +241,17 @@ const form = reactive({
   worktree: false,       // Git worktree 隔离（默认关）
   force: false,          // 明知 cwd 被占用仍强制创建（cwd_in_use 错误后出现）
 })
+const showDirectory = ref(false)
+const showHosts = ref(false)
+const selectedHostOnline = computed(() => !!props.daemons?.find(d => d.daemon_id === form.daemonId && d.daemon_online))
+function cwdKey(host: string, agent: string) { return `pocketctl_cwd:${host}:${agent}` }
+function selectDirectory(path: string) { form.cwd = path; showDirectory.value = false }
+let modelRequestId = ''
+function requestModels() {
+  models.value = []; modelsLoaded.value = false; form.model = ''
+  modelRequestId = createClientId()
+  if (form.daemonId && selectedHostOnline.value) send({ type: 'list_models', daemon_id: form.daemonId, agent: form.agent, request_id: modelRequestId })
+}
 const showAdvanced = ref(false)  // 高级选项折叠状态
 const cwdInUse = ref(false)      // 是否处于 cwd_in_use 确认状态
 // Available models for the selected host (populated by list_models → model_list)
@@ -231,7 +272,7 @@ function isCreateCapableAgent(agent: string): agent is AgentType {
   return CREATE_CAPABLE_AGENTS.has(agent as AgentType)
 }
 
-const canStart = computed(() => !!form.daemonId && isCreateCapableAgent(form.agent))
+const canStart = computed(() => selectedHostOnline.value && isCreateCapableAgent(form.agent))
 const creationPermissionOptions = computed(() => permissionOptions(form.agent as AgentType, true))
 const codexPermission = computed(() => form.permission?.agent === 'codex' ? form.permission : undefined)
 const permissionValue = computed({
@@ -243,22 +284,24 @@ const permissionValue = computed({
   },
 })
 function selectHost(d: any) {
-  if (!d.daemon_online) return
-  form.daemonId = form.daemonId === d.daemon_id ? '' : d.daemon_id
+  if (creating.value || !d.daemon_online) return
+  form.daemonId = d.daemon_id
+  showHosts.value = false
 }
 
 // selectAgent switches agent and re-queries that agent's available models for the
-// selected host (Claude/Codex). opencode models come from its serve API and are
-// not yet surfaced, so its picker stays hidden.
+// selected host. OpenCode models come from its serve API.
 function selectAgent(agent: string) {
-  if (!isCreateCapableAgent(agent)) return
+  if (creating.value || !isCreateCapableAgent(agent)) return
   if (form.agent === agent) return
   form.agent = agent
   form.permission = defaultPermission(agent)
   models.value = []
   modelsLoaded.value = false
   form.model = ''
-  if (form.daemonId) send({ type: 'list_models', daemon_id: form.daemonId, agent })
+  if (agent === 'opencode') form.worktree = false
+  form.cwd = localStorage.getItem(cwdKey(form.daemonId, agent)) || '~/'
+  requestModels()
 }
 
 function updateCharCount() {
@@ -312,7 +355,7 @@ function startSession() {
   done = false
 
   // Save working directory for next time
-  if (form.cwd) localStorage.setItem('pocketctl_default_cwd', form.cwd)
+  if (form.cwd) localStorage.setItem(cwdKey(form.daemonId, form.agent), form.cwd)
 
   // ① session_created: redirect immediately, SessionDetail loading handles the wait
   cleanupFns.push(onEvent('session_created', (msg: any) => {
@@ -407,28 +450,33 @@ watch([() => props.daemons, () => props.preSelectedDaemonId], ([daemons, preId])
 }, { immediate: true })
 
 // Fetch available models whenever the selected host changes
+watch(() => form.cwd, () => { form.force = false; cwdInUse.value = false })
 watch(() => form.daemonId, (id) => {
-  models.value = []
-  modelsLoaded.value = false
-  form.model = ''
-  if (id) send({ type: 'list_models', daemon_id: id, agent: form.agent })
+  showDirectory.value = false
+  form.cwd = localStorage.getItem(cwdKey(id, form.agent)) || '~/'
+  requestModels()
 })
 
 onMounted(() => {
+  void refreshQuota()
   connect()
   // Receive available models for the selected host (model picker)
   cleanupFns.push(onEvent('model_list', (msg: any) => {
+    if (msg.daemon_id !== form.daemonId || msg.agent !== form.agent) return
+    if (msg.request_id && msg.request_id !== modelRequestId) return
     models.value = msg.models || []
     modelsLoaded.value = true
   }))
-  if (form.daemonId) send({ type: 'list_models', daemon_id: form.daemonId, agent: form.agent })
+  form.cwd = localStorage.getItem(cwdKey(form.daemonId, form.agent)) || '~/'
+  requestModels()
   // Close on Escape
-  const escHandler = (e: KeyboardEvent) => { if (e.key === 'Escape') emit('close') }
+  const escHandler = (e: KeyboardEvent) => { if (e.key === 'Escape' && !showDirectory.value) emit('close') }
   document.addEventListener('keydown', escHandler)
   cleanupFns.push(() => document.removeEventListener('keydown', escHandler))
 })
 
 onUnmounted(() => {
+  quotaDisposed = true
   for (const fn of cleanupFns) fn()
   if (timeoutTimer) clearTimeout(timeoutTimer)
 })
@@ -454,8 +502,8 @@ onUnmounted(() => {
   background: var(--surface);
   border: 1px solid var(--border);
   border-radius: var(--radius-2xl, 16px);
-  width: 100%; max-width: 520px; max-height: 90vh;
-  overflow-y: auto;
+  width: 100%; max-width: 560px; max-height: 90dvh;
+  overflow: hidden; display: flex; flex-direction: column;
   animation: slide-up 0.25s ease;
   box-shadow: var(--shadow-lg);
   transition: background var(--transition), border-color var(--transition);
@@ -475,7 +523,7 @@ onUnmounted(() => {
 .modal-close:hover { background: var(--surface-active); color: var(--fg); }
 
 /* Body */
-.modal-body { padding: 14px 20px 18px; }
+.modal-body { padding: 14px 20px 18px; overflow-y: auto; }
 
 /* Labels */
 .field-label {
@@ -550,7 +598,7 @@ onUnmounted(() => {
 .dir-input:focus-within { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-muted); }
 .dir-input svg { flex-shrink: 0; color: var(--fg-tertiary); }
 .dir-input input {
-  flex: 1; background: none; border: none; color: var(--fg);
+  flex: 1; min-width: 0; background: none; border: none; color: var(--fg);
   font-family: var(--font-mono); font-size: 13px; padding: 9px 0; outline: none;
 }
 .dir-input input::placeholder { color: var(--fg-tertiary); }
@@ -566,7 +614,8 @@ onUnmounted(() => {
 .prompt-area::placeholder { color: var(--fg-tertiary); }
 .char-count { text-align: right; font-size: 11px; color: var(--fg-tertiary); margin-top: 4px; }
 .permission-custom-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 8px; }
-.quota-banner { display: flex; align-items: center; gap: 8px; padding: 9px 12px; margin-bottom: 14px; border: 1px solid var(--border); border-radius: var(--radius-md); background: var(--bg); color: var(--fg-secondary); font-size: 12px; }
+.quota-banner { display: flex; flex-wrap: wrap; flex-shrink: 0; align-items: center; gap: 8px; padding: 9px 12px; margin: 14px 20px 0; border: 1px solid var(--border); border-radius: var(--radius-md); background: var(--bg); color: var(--fg-secondary); font-size: 12px; }
+.quota-retry{border:0;background:none;color:var(--accent);cursor:pointer;padding:0;font:inherit}
 .quota-banner strong { color: var(--fg); font-family: var(--font-mono); }
 .quota-banner.reached { border-color: var(--warning); background: var(--warning-bg); }
 .quota-banner.over { border-color: var(--error); background: var(--error-bg); }
@@ -635,12 +684,22 @@ onUnmounted(() => {
 .spinner { width: 16px; height: 16px; border: 2px solid rgba(255,255,255,0.35); border-top-color: #fff; border-radius: 50%; animation: spin 0.7s linear infinite; display: inline-block; }
 @keyframes spin { to { transform: rotate(360deg); } }
 
+.configuration-grid{display:grid;grid-template-columns:1fr 1fr;gap:0 14px;grid-template-areas:"model permission" "cwd cwd"}.model-field{grid-area:model;min-width:0}.permission-field{grid-area:permission;min-width:0}.cwd-field{grid-area:cwd;min-width:0}
+.host-summary { display:flex; justify-content:space-between; gap:12px; width:100%; margin-bottom:16px; padding:10px 12px; border:1px solid var(--border); border-radius:8px; background:var(--bg); color:var(--fg); cursor:pointer; text-align:left; }
+.host-online {color:var(--success);font-size:12px}.host-unavailable {color:var(--fg-secondary);font-size:12px}
+.browse-directory {align-self:stretch;border:0;border-left:1px solid var(--border);padding:0 12px;background:none;color:var(--accent);cursor:pointer;white-space:nowrap}.browse-directory:disabled{opacity:.4;cursor:not-allowed}
+.modal-footer{position:sticky;bottom:-18px;background:var(--surface);padding:12px 0;margin-top:4px;z-index:1}
+@media(prefers-reduced-motion:reduce){.modal-overlay,.modal-dialog{animation:none!important}}
 /* Mobile */
 @media (max-width: 768px) {
   .modal-overlay { padding: 0; align-items: flex-end; }
   .modal-dialog { max-width: 100%; border-radius: 16px 16px 0 0; padding-bottom: env(safe-area-inset-bottom); animation: slide-up-mobile 0.3s ease; }
   @keyframes slide-up-mobile { from { transform: translateY(100%); } to { transform: translateY(0); } }
-  .modal-footer { flex-direction: column; }
+  .modal-footer { flex-direction: row; }
+  .configuration-grid{display:flex;flex-direction:column}
+  .browse-directory{min-width:44px;min-height:44px;padding:0 8px}.browse-directory span{display:none}
+  .dir-input input,.model-select,.prompt-area{font-size:16px}
+  .agent-pill{border-radius:999px;padding:9px 6px}.agent-pill.selected{background:var(--accent);color:var(--bg)}
 }
 
 </style>

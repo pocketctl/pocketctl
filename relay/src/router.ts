@@ -56,7 +56,7 @@ import {
   OBSERVER_READ_ONLY_CODE,
 } from './session-observer-policy.js';
 
-interface DaemonConnection { ws: WebSocket; daemonId: string; hostname: string; agents: any[]; userId: number | null; os?: string; ip?: string; port?: string; arch?: string; version?: string; startedAt?: number; registrationId: string; tokenJti?: string; lastHeartbeatAt: number }
+interface DaemonConnection { supportsDirectoryBrowse?: boolean; ws: WebSocket; daemonId: string; hostname: string; agents: any[]; userId: number | null; os?: string; ip?: string; port?: string; arch?: string; version?: string; startedAt?: number; registrationId: string; tokenJti?: string; lastHeartbeatAt: number }
 interface ClientConnection { ws: WebSocket; subscribedSessions: Set<string>; userId: number | null; locale: string }
 interface OpenCodeRuntimeTelemetry { fallbackReasons: Record<string, number>; healthOK: number; healthFailed: number }
 interface DaemonMetrics { cpuPct: number; memPct: number; diskPct: number; updatedAt: number; openCodeRuntime?: OpenCodeRuntimeTelemetry }
@@ -231,6 +231,7 @@ export class Router {
   private memoryCodegraphGrantBroker?: MemoryCodegraphGrantBroker;
   private clients = new Map<WebSocket, ClientConnection>();
   private sessionToDaemon = new Map<string, string>();
+  private directoryRequests = new Map<string, { client: WebSocket; daemonId: string; daemonWs: WebSocket; requestId: string; timer: ReturnType<typeof setTimeout> }>();
   private pendingSessionCreate = new Map<string, WebSocket>();
   private pendingSessionMeta = new Map<string, { agent_type: string; cwd: string }>();
   private pendingSessionOperations = new Map<string, PendingSessionOperation>();
@@ -1201,7 +1202,7 @@ export class Router {
     if (previousDaemon && previousDaemon.ws !== ws) {
       this.cancelDaemonRevocationGate(previousDaemon.registrationId);
     }
-    this.daemons.set(daemonId, { ws, daemonId, hostname, agents, userId, os: daemonOS, ip: daemonIP, port: daemonPort, arch: daemonArch, version: daemonVersion, startedAt: daemonStartedAt, registrationId, tokenJti, lastHeartbeatAt: Date.now() });
+    this.daemons.set(daemonId, { supportsDirectoryBrowse: msg.supports_directory_browse === true, ws, daemonId, hostname, agents, userId, os: daemonOS, ip: daemonIP, port: daemonPort, arch: daemonArch, version: daemonVersion, startedAt: daemonStartedAt, registrationId, tokenJti, lastHeartbeatAt: Date.now() });
     if (tokenJti) this.authLeases.confirm(registrationId);
     console.log('[ws] daemon registered', daemonId, 'agents:', JSON.stringify(agents), 'userId:', userId);
     if (previousDaemon && previousDaemon.ws !== ws) {
@@ -1495,7 +1496,14 @@ export class Router {
       locale: existing?.locale ?? 'zh',
     });
   }
-  unregisterClient(ws: WebSocket): void { this.clients.delete(ws); }
+  unregisterClient(ws: WebSocket): void {
+    this.clients.delete(ws);
+    for (const [id, pending] of this.directoryRequests) {
+      if (pending.client !== ws) continue;
+      clearTimeout(pending.timer); this.directoryRequests.delete(id);
+      if (pending.daemonWs.readyState === 1) this.send(pending.daemonWs, { type: 'cancel_directory', request_id: id });
+    }
+  }
 
   /**
    * Advance the per-daemon ack water-mark to the highest *contiguous* persisted
@@ -2144,6 +2152,20 @@ export class Router {
         this.persistAndAck(daemonId, msg.seq, '', msg.type, msg, messageState, receivedAt);
         return;
       }
+      if (msg.type === 'directory_result') {
+        const pending = this.directoryRequests.get(msg.request_id);
+        const daemon = this.daemons.get(daemonId);
+        if (pending && pending.daemonId === daemonId && pending.daemonWs === daemon?.ws) {
+          clearTimeout(pending.timer);
+          this.directoryRequests.delete(msg.request_id);
+          const client = this.clients.get(pending.client);
+          if (client && daemon && this.sameUser(client.userId, daemon.userId)) {
+            this.send(pending.client, { ...msg, daemon_id: daemonId, request_id: pending.requestId });
+          }
+        }
+        if (!durableIngressOwnsAck) this.markPersisted(daemonId, msg.seq);
+        return;
+      }
       // model_list (host-level response, no session_id): broadcast to the daemon owner's clients
       if (msg.type === 'model_list') {
         const daemon = this.daemons.get(daemonId);
@@ -2407,6 +2429,40 @@ export class Router {
       return;
     }
 
+    if (['list_directories', 'validate_directory', 'cancel_directory'].includes(msg.type)) {
+      const requestId = msg.request_id;
+      const daemonId = msg.daemon_id;
+      const reject = (reason: string) => this.send(clientWs, { type: 'directory_result', request_id: requestId, daemon_id: daemonId, reason });
+      if (typeof requestId !== 'string' || !requestId || requestId.length > 128 || typeof daemonId !== 'string') { reject('invalid_request'); return; }
+      // Cancel/replace only this client's own request; relay-generated IDs keep
+      // two tabs with colliding request IDs isolated at the daemon too.
+      for (const [id, pending] of this.directoryRequests) {
+        if (pending.client === clientWs && pending.requestId === requestId) {
+          clearTimeout(pending.timer); this.directoryRequests.delete(id);
+          if (pending.daemonWs.readyState === 1) this.send(pending.daemonWs, { type: 'cancel_directory', request_id: id });
+        }
+      }
+      if (msg.type === 'cancel_directory') return;
+      const daemon = this.daemons.get(daemonId);
+      if (!daemon || daemon.ws.readyState !== 1 || !this.sameUser(daemon.userId, client.userId)) { reject('daemon_offline'); return; }
+      if (!daemon.supportsDirectoryBrowse) { reject('unsupported'); return; }
+      if (typeof msg.path !== 'string' || msg.path.length > 8192
+        || (msg.query != null && (typeof msg.query !== 'string' || msg.query.length > 256))
+        || (msg.cursor != null && (typeof msg.cursor !== 'string' || msg.cursor.length > 16384))
+        || (msg.limit != null && (!Number.isInteger(msg.limit) || msg.limit < 1 || msg.limit > 200))) { reject('invalid_request'); return; }
+      if ([...this.directoryRequests.values()].filter(p => p.client === clientWs).length >= 4 || this.directoryRequests.size >= 1024) { reject('busy'); return; }
+      const id = randomUUID();
+      const timer = setTimeout(() => {
+        this.directoryRequests.delete(id);
+        if (daemon.ws.readyState === 1) this.send(daemon.ws, { type: 'cancel_directory', request_id: id });
+        if (clientWs.readyState === 1) reject('timeout');
+      }, 10_000);
+      timer.unref?.();
+      this.directoryRequests.set(id, { client: clientWs, daemonId, daemonWs: daemon.ws, requestId, timer });
+      this.send(daemon.ws, { type: msg.type, request_id: id, path: msg.path, query: msg.query, cursor: msg.cursor, limit: msg.limit, fallback: msg.fallback === true });
+      return;
+    }
+
     if (msg.type === 'list_models') {
       // Host-level query (no session_id): route to the target daemon by daemon_id.
       // The reply (model_list) is broadcast back to the owner's clients below.
@@ -2455,7 +2511,7 @@ export class Router {
         });
         return;
       }
-      // Precise routing: prefer msg.daemon_id, validate ownership; fallback to first online same-user daemon
+      // An explicit host is binding. Only legacy clients without a host may auto-route.
       let targetDaemon: { id: string; daemon: DaemonConnection } | null = null;
       if (msg.daemon_id) {
         const d = this.daemons.get(msg.daemon_id);
@@ -2463,7 +2519,7 @@ export class Router {
           targetDaemon = { id: msg.daemon_id, daemon: d };
         }
       }
-      if (!targetDaemon) {
+      if (!targetDaemon && !msg.daemon_id) {
         for (const [dId, d] of this.daemons) {
           if (d.ws.readyState === 1 && this.sameUser(client.userId, d.userId)) {
             targetDaemon = { id: dId, daemon: d };
@@ -2539,6 +2595,16 @@ export class Router {
         reservationId = decision.reservationId;
         expiresAt = decision.expiresAt;
         reusedReservation = decision.reused;
+      }
+      // Quota admission awaits DB work. Recheck the exact connection before
+      // sending; a replacement or disconnected host must never receive it.
+      const currentTarget = this.daemons.get(daemonId);
+      if (!reusedReservation && (currentTarget !== targetDaemon.daemon || currentTarget.ws.readyState !== 1 || !this.sameUser(currentTarget.userId, client.userId))) {
+        if (reservationId && client.userId !== null) {
+          await settleQuotaReservation(this.pool, { reservationId, userId: client.userId, daemonId, requestId, operation: 'create', sessionId: null }, 'session_create_failed');
+        }
+        this.send(clientWs, { type: 'session_create_failed', request_id: requestId, reason: 'daemon_offline', error: 'selected daemon unavailable' });
+        return;
       }
       this.trackPendingSessionOperation({
         requestId,

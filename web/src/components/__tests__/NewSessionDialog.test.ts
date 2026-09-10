@@ -1,7 +1,10 @@
-import { mount } from '@vue/test-utils'
+import { mount, flushPromises } from '@vue/test-utils'
 import { nextTick } from 'vue'
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest'
 import NewSessionDialog from '../NewSessionDialog.vue'
+
+const quota = vi.hoisted(() => ({ value: undefined as any, current: undefined as any, api: vi.fn(async () => ({ ok: false, data: null as any })) }))
+vi.mock('../../composables/useAuth', () => ({ useAuth: () => ({ apiGetAuth: quota.api }) }))
 
 const ws = vi.hoisted(() => ({
   send: vi.fn(),
@@ -27,10 +30,13 @@ vi.mock('../../composables/useLocale', () => ({
 vi.mock('../../composables/useQuota', async () => {
   const { ref } = await import('vue')
   return {
-    useQuota: () => ({
-      concurrentSessions: ref(undefined),
-      quotaReached: () => false,
-    }),
+    useQuota: () => {
+      quota.current = ref(quota.value)
+      return {
+      concurrentSessions: quota.current,
+      applyQuotaPayload: (data: any) => { quota.current.value = data.quota.resources.concurrent_sessions },
+      quotaReached: () => !!quota.current.value && quota.current.value.limit !== null && quota.current.value.used + (quota.current.value.reserved || 0) >= quota.current.value.limit,
+    } },
   }
 })
 
@@ -41,6 +47,7 @@ vi.mock('vue-router', () => ({
 
 describe('NewSessionDialog permission serialization', () => {
   beforeEach(() => {
+    quota.value = undefined
     localStorage.clear()
     ws.send.mockClear()
     ws.connect.mockClear()
@@ -134,6 +141,7 @@ describe('NewSessionDialog permission serialization', () => {
 
     await agentButtons[2].trigger('click')
     ws.handlers.get('model_list')?.({
+      daemon_id: 'daemon-1', agent: 'opencode',
       models: [{ alias: 'opencode/deepseek-v4-flash-free', name: 'DeepSeek V4 Flash Free' }],
     })
     await nextTick()
@@ -148,4 +156,63 @@ describe('NewSessionDialog permission serialization', () => {
 
     wrapper.unmount()
   })
+})
+
+test('host and agent model replies cannot cross tabs; host-scoped cwd and offline creation', async () => {
+ localStorage.clear();ws.handlers.clear();ws.send.mockClear()
+ const hosts=[{daemon_id:'d1',daemon_online:true},{daemon_id:'d2',daemon_online:true}]
+ const w=mount(NewSessionDialog,{props:{daemons:hosts,preSelectedDaemonId:'d1'}})
+ const vm=w.vm as any
+ ws.handlers.get('model_list')?.({daemon_id:'d2',agent:'claude-code',models:[{alias:'wrong',name:'Wrong'}]})
+ await nextTick();expect(w.text()).not.toContain('Wrong')
+ vm.form.cwd='/home/one';vm.startSession()
+ expect(localStorage.getItem('pocketctl_cwd:d1:claude-code')).toBe('/home/one')
+ ws.handlers.get('session_create_failed')?.({reason:'start_fail'});await nextTick()
+ vm.selectHost(hosts[1]);await nextTick();expect(vm.form.cwd).toBe('~/');expect(vm.form.model).toBe('')
+ await w.setProps({daemons:[hosts[0],{...hosts[1],daemon_online:false}]})
+ expect(w.get('button.btn-start').attributes('disabled')).toBeDefined();w.unmount()
+})
+
+
+test.each([
+  [{ used: 1, reserved: 1, limit: 3, over_limit: false }, '2/3', false],
+  [{ used: 2, reserved: 1, limit: 3, over_limit: false }, '3/3', true],
+  [{ used: 4, reserved: 2, limit: null, over_limit: false }, '6/∞', false],
+])('preserves concurrent quota outside the scrolling form: %j', async (value, count, reached) => {
+  quota.value = value
+  const w = mount(NewSessionDialog, { props: { daemons: [{ daemon_id: 'quota-host', daemon_online: true }] } })
+  const banner = w.get('.quota-banner')
+  expect(banner.get('strong').text()).toBe(count)
+  expect(banner.text().includes('quota.session_reached_hint')).toBe(reached)
+  expect(banner.element.closest('.modal-body')).toBeNull()
+  expect(banner.element.closest('.modal-dialog')).not.toBeNull()
+  if (reached) {
+    ws.send.mockClear()
+    await w.get('button.btn-start').trigger('click')
+    expect(ws.send.mock.calls.some(([m]) => m.type === 'session_create')).toBe(false)
+  }
+  w.unmount(); quota.value = undefined
+})
+
+
+test('fetches quota when opening a fresh dialog instead of hiding an empty banner', async () => {
+  quota.value = undefined
+  quota.api.mockResolvedValueOnce({ ok: true, data: { quota: { resources: {
+    bound_hosts: { used: 1, limit: 2 }, concurrent_sessions: { used: 1, reserved: 1, limit: 4, over_limit: false },
+  } } } })
+  const w = mount(NewSessionDialog, { props: { daemons: [] } })
+  expect(w.find('.quota-banner').exists()).toBe(true)
+  await flushPromises()
+  expect(quota.api).toHaveBeenCalledWith('/api/user/profile')
+  expect(w.get('.quota-banner strong').text()).toBe('2/4')
+  w.unmount()
+})
+test('shows an unavailable state and retry when quota cannot be loaded', async () => {
+  quota.value = undefined
+  const w = mount(NewSessionDialog, { props: { daemons: [] } })
+  await flushPromises()
+  expect(w.get('.quota-banner').text()).toContain('quota.load_failed')
+  expect(w.find('.quota-banner strong').exists()).toBe(false)
+  expect(w.find('.quota-retry').exists()).toBe(true)
+  w.unmount()
 })

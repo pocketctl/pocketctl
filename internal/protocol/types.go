@@ -78,6 +78,11 @@ const (
 
 // Client → Daemon commands
 type ClientMessage struct {
+	Path       string      `json:"path,omitempty"`
+	Query      string      `json:"query,omitempty"`
+	Cursor     string      `json:"cursor,omitempty"`
+	Limit      int         `json:"limit,omitempty"`
+	Fallback   bool        `json:"fallback,omitempty"`
 	Type       string      `json:"type"`
 	Status     string      `json:"status,omitempty"`
 	SessionID  string      `json:"session_id,omitempty"`
@@ -141,7 +146,8 @@ type ApprovalSecurityContext struct {
 
 // Daemon → Client events
 type DaemonEvent struct {
-	Type string `json:"type"`
+	Directory *DirectoryResult `json:"directory,omitempty"`
+	Type      string           `json:"type"`
 	// Seq is a monotonically increasing per-connection sequence number stamped
 	// by the ws.Client just before the event is sent to the relay. It enables
 	// at-least-once delivery: the relay dedups by (daemon_id, seq) and acks the
@@ -478,8 +484,9 @@ type RegisterMessage struct {
 	// Always emitted (no omitempty): an explicit empty list lets the relay
 	// distinguish "daemon has zero live sessions" (reconcile/close all its
 	// lingering running/busy rows) from a legacy daemon that never reports it.
-	ActiveSessionIDs   []string `json:"active_session_ids"`
-	SupportsQuotaGrant bool     `json:"supports_quota_grant,omitempty"`
+	ActiveSessionIDs        []string `json:"active_session_ids"`
+	SupportsQuotaGrant      bool     `json:"supports_quota_grant,omitempty"`
+	SupportsDirectoryBrowse bool     `json:"supports_directory_browse,omitempty"`
 }
 
 type QuotaGrant struct {

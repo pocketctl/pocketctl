@@ -54,10 +54,10 @@ Relay Connection (default: production wss://www.pocketctl.me/ws):
   # Production (explicit; reads prod_relay_url written by install --prod):
   pocketctl daemon start --prod
 
-Options:
+Options (daemon start unless noted):
   --relay <url>  Relay WebSocket URL (overrides default production relay)
   --prod         Use production relay from config (prod_relay_url)
-  --email        Login via email verification code (headless servers)
+  --email        login: use email verification code (headless servers)
   --foreground   Run daemon in foreground (don't daemonize)
   --debug        Verbose debug logs streamed to console (implies --foreground)
   --token <t>    JWT token (or POCKETCTL_TOKEN env)
@@ -65,6 +65,25 @@ Options:
   --trusted-action-policy <off|observe|on>  Trusted approval policy; daemon service install persists it
   --no-agent-auto-enable  Skip optional managed-agent detection and auto-enable
   --no-agent-prompt       Deprecated alias for --no-agent-auto-enable
+  --allowed-cwd-root <dir>  Allow remote sessions in this existing absolute directory and its subdirectories; repeatable
+  --allow-dangerous-remote-permissions  Allow remote sessions to request bypassPermissions / dontAsk / approval never / danger-full-access
+
+Remote working directories:
+  Without --allowed-cwd-root, the daemon user's home directory (~/) and its subdirectories are authorized.
+  Explicit --allowed-cwd-root values replace this default; home is not added automatically.
+  Directory authorization does not grant filesystem permissions; the daemon user's access still applies.
+  Both directory and dangerous-permission options also work with daemon service install,
+  which persists them in the service's startup arguments.
+
+  # Allow multiple development directories:
+  pocketctl daemon start --allowed-cwd-root "$HOME/projects" --allowed-cwd-root "/Volumes/DevDisc/shared/repos"
+
+  # Persist the allowed directory for service-managed starts:
+  pocketctl daemon service install --allowed-cwd-root "$HOME/projects"
+
+  # Show subcommand options:
+  pocketctl daemon start --help
+  pocketctl daemon service install --help
 
 OpenCode terminal control:
   pocketctl agent opencode enable     Enable once; then continue using the normal opencode command
@@ -134,10 +153,10 @@ Relay 连接（默认: 生产环境 wss://www.pocketctl.me/ws）:
   # 生产环境（显式指定；读取 install --prod 写入的 prod_relay_url）:
   pocketctl daemon start --prod
 
-选项:
+选项（未特别注明时用于 daemon start）:
   --relay <url>  Relay WebSocket URL（覆盖默认生产 relay）
   --prod         使用配置中的生产 relay（prod_relay_url）
-  --email        通过邮箱验证码登录（无浏览器环境）
+  --email        login：通过邮箱验证码登录（无浏览器环境）
   --foreground   前台运行 daemon（不后台化）
   --debug        调试日志实时输出到控制台（隐含 --foreground）
   --token <t>    JWT 令牌（或 POCKETCTL_TOKEN 环境变量）
@@ -145,6 +164,24 @@ Relay 连接（默认: 生产环境 wss://www.pocketctl.me/ws）:
   --trusted-action-policy <off|observe|on>  可信审批策略；daemon service install 会持久化
   --no-agent-auto-enable  daemon 启动时跳过可选的 Agent 检测与自动启用
   --no-agent-prompt       --no-agent-auto-enable 的兼容别名（已弃用）
+  --allowed-cwd-root <目录>  允许在此目录及子目录远程创建会话；必须是已存在的绝对路径，可重复指定
+  --allow-dangerous-remote-permissions  允许远程会话请求 bypassPermissions / dontAsk / approval never / danger-full-access 等高权限模式
+
+远程工作目录:
+  未指定 --allowed-cwd-root 时，默认授权 daemon 运行用户的主目录（~/）及其子目录。
+  显式指定 --allowed-cwd-root 时，仅授权指定目录，覆盖默认范围，不额外包含 ~/。
+  目录授权不会赋予文件系统权限，仍受 daemon 运行用户的实际访问权限限制。
+  目录授权和高权限开关也适用于 daemon service install，会写入服务的启动参数。
+
+  # 允许多个开发目录:
+  pocketctl daemon start --allowed-cwd-root "$HOME/projects" --allowed-cwd-root "/Volumes/DevDisc/shared/repos"
+
+  # 为系统服务保存允许目录:
+  pocketctl daemon service install --allowed-cwd-root "$HOME/projects"
+
+  # 查看子命令参数:
+  pocketctl daemon start --help
+  pocketctl daemon service install --help
 
 OpenCode 终端控制:
   pocketctl agent opencode enable     启用一次，之后仍直接使用普通 opencode 命令

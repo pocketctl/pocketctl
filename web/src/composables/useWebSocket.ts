@@ -281,6 +281,8 @@ function send(data: Record<string, unknown>): boolean {
       ws.value.send(JSON.stringify(data))
       return true
     }
+    // Browsing is ephemeral: never execute an abandoned query after reconnect.
+    if (['list_directories', 'validate_directory', 'cancel_directory'].includes(String(data.type))) return false
     // 连接流程进行中（含 connect 前的 token 刷新）或正在握手：buffer 到 onopen flush
     if (connecting || (ws.value && ws.value.readyState === WebSocket.CONNECTING)) {
       pendingMessages.push(data)

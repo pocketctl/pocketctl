@@ -283,7 +283,7 @@ func cmdServiceInstall(args []string) {
 	noAgentAutoEnable := fs.Bool("no-agent-auto-enable", false, "Skip optional managed-agent auto-enable")
 	noAgentPrompt := fs.Bool("no-agent-prompt", false, "Deprecated alias for --no-agent-auto-enable")
 	allowedCwdRoots := multiFlag{}
-	fs.Var(&allowedCwdRoots, "allowed-cwd-root", "Absolute directory that remote sessions may use as cwd (repeatable; baked into the service argv)")
+	fs.Var(&allowedCwdRoots, "allowed-cwd-root", "Allowed remote cwd root (repeatable; default: current user home ~/; explicit roots replace the default; persisted in service argv)")
 	allowDangerousRemotePermissions := fs.Bool("allow-dangerous-remote-permissions", false, "Bake the dangerous remote permission switch into the supervised daemon")
 	fs.Parse(args)
 	normalizedTrustedActionPolicy, policyErr := validateTrustedActionPolicyFlag(*trustedActionPolicy)
@@ -293,7 +293,7 @@ func cmdServiceInstall(args []string) {
 	}
 	// Validate + canonicalize roots now so the installed unit never bakes a
 	// broken path (and no secret ever lands in argv — roots are paths only).
-	policyForService, rootsErr := session.NewCwdPolicy(allowedCwdRoots)
+	policyForService, rootsErr := newDaemonCwdPolicy(allowedCwdRoots)
 	if rootsErr != nil {
 		fmt.Fprintln(os.Stderr, rootsErr)
 		os.Exit(2)
@@ -979,10 +979,10 @@ func cmdDaemonStart(args []string) {
 	noAgentAutoEnable := fs.Bool("no-agent-auto-enable", false, "Skip optional managed-agent auto-enable")
 	noAgentPrompt := fs.Bool("no-agent-prompt", false, "Deprecated alias for --no-agent-auto-enable")
 	allowedCwdRoots := multiFlag{}
-	fs.Var(&allowedCwdRoots, "allowed-cwd-root", "Absolute directory that remote sessions may use as cwd (repeatable; required for remote session creation)")
+	fs.Var(&allowedCwdRoots, "allowed-cwd-root", "Allowed remote cwd root (repeatable; default: current user home ~/; explicit roots replace the default)")
 	allowDangerousRemotePermissions := fs.Bool("allow-dangerous-remote-permissions", false, "Allow remote sessions to request bypassPermissions / dangerous bypass / approval never / danger-full-access")
 	fs.Parse(args)
-	cwdPolicy, cwdPolicyErr := session.NewCwdPolicy(allowedCwdRoots)
+	cwdPolicy, cwdPolicyErr := newDaemonCwdPolicy(allowedCwdRoots)
 	if cwdPolicyErr != nil {
 		fmt.Fprintln(os.Stderr, cwdPolicyErr)
 		os.Exit(2)
@@ -3603,6 +3603,8 @@ func deliverDeferredInitialPrompt(
 
 func handleCommands(ctx context.Context, client *ws.Client, sm *session.SessionManager, logger *slog.Logger, stateDirty *atomic.Bool, memoryMcpBroker *memorymcp.WsBroker, memoryContextGrants *memorycontext.GrantClient) {
 	quotaGrants := session.NewQuotaGrantValidator()
+	directorySlots := make(chan struct{}, 2)
+	var directoryRequests sync.Map
 	for {
 		select {
 		case <-ctx.Done():
@@ -3866,14 +3868,31 @@ func handleCommands(ctx context.Context, client *ws.Client, sm *session.SessionM
 					client.SendMsg(evt)
 				}
 
+			case "cancel_directory":
+				if cancel, ok := directoryRequests.Load(cmd.RequestID); ok {
+					cancel.(context.CancelFunc)()
+				}
+			case "list_directories", "validate_directory":
+				select {
+				case directorySlots <- struct{}{}:
+					queryCtx, cancel := context.WithTimeout(ctx, 8*time.Second)
+					directoryRequests.Store(cmd.RequestID, cancel)
+					daemon.Go("directory-query", logger, func() {
+						defer func() { cancel(); directoryRequests.Delete(cmd.RequestID); <-directorySlots }()
+						client.SendMsg(sm.DirectoryQuery(queryCtx, cmd))
+					})
+				default:
+					client.SendMsg(protocol.DaemonEvent{Type: "directory_result", RequestID: cmd.RequestID, Reason: "busy"})
+				}
 			case "list_models":
 				// Web client queries the host's available models to populate the
 				// session-creation picker. Claude reads ~/.claude/settings.json;
 				// codex returns its own model list.
 				client.SendMsg(protocol.DaemonEvent{
-					Type:   "model_list",
-					Agent:  cmd.Agent,
-					Models: sm.ModelsForAgent(cmd.Agent),
+					Type:      "model_list",
+					RequestID: cmd.RequestID,
+					Agent:     cmd.Agent,
+					Models:    sm.ModelsForAgent(cmd.Agent),
 				})
 
 			case "upgrade_agent":
@@ -4366,4 +4385,21 @@ func (m *multiFlag) String() string { return strings.Join(*m, ",") }
 func (m *multiFlag) Set(v string) error {
 	*m = append(*m, v)
 	return nil
+}
+
+// newDaemonCwdPolicy applies the CLI default for both manual and service starts.
+// Keep the underlying session policy fail-closed: only omission at the CLI
+// boundary grants home, and explicit roots never implicitly add home.
+func newDaemonCwdPolicy(roots []string) (*session.CwdPolicy, error) {
+	if len(roots) == 0 {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return nil, fmt.Errorf("resolve default allowed cwd root: %w", err)
+		}
+		if home == "" {
+			return nil, fmt.Errorf("default allowed cwd root: user home is empty")
+		}
+		roots = []string{home}
+	}
+	return session.NewCwdPolicy(roots)
 }

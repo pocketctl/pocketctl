@@ -732,4 +732,20 @@ describe('Router unresolved quota grants fail closed (M-4)', () => {
     ))
     expect(daemon._sent).toContainEqual({ type: 'event_ack', up_to_seq: 2 })
   })
+  test('a selected host disconnecting during quota admission is not sent a create command', async () => {
+    const router = new Router(pool())
+    const daemon = ws(), client = ws()
+    await router.registerDaemon(daemon, { type: 'register', daemon_id: 'd1', hostname: 'host', agents: [], supports_quota_grant: true }, 7)
+    router.registerClient(client, 7)
+    daemon._sent.length = 0
+    vi.mocked(reserveConcurrentSession).mockImplementationOnce(async () => {
+      daemon.readyState = 3
+      return { allowed: true, reservationId: 'reservation-disconnect', expiresAt: Date.now() + 60000, reused: false }
+    })
+    await router.handleClientMessage(client, { type: 'session_create', daemon_id: 'd1', request_id: 'disconnect-race', agent: 'codex', cwd: '/repo' })
+    expect(daemon._sent.some((m: any) => m.type === 'session_create')).toBe(false)
+    expect(client._sent.at(-1)).toMatchObject({ type: 'session_create_failed', reason: 'daemon_offline' })
+    expect(settleQuotaReservation).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ reservationId: 'reservation-disconnect' }), 'session_create_failed')
+  })
+
 })

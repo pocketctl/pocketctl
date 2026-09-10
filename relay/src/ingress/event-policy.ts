@@ -17,7 +17,7 @@ const aggregate = new Set([
 ]);
 const ephemeralControl = new Set([
   'ping', 'daemon_shutdown', 'cancel_takeover',
-  'model_list', 'upgrade_result',
+  'model_list', 'directory_result', 'upgrade_result',
 ]);
 const ephemeralAggregate = new Set([
   'generate_title_request', 'generate_subagent_title_request', 'session_title_update',
