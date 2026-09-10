@@ -736,6 +736,54 @@ describe('SessionDetail processEvent integration', () => {
     wrapper.unmount()
   })
 
+  test.each([false, true])('deduplicates durable user messages across live and replay (mobile=%s)', async (mobile) => {
+    responsiveMock.isMobile.value = mobile
+    const wrapper = shallowMount(SessionDetail)
+    const vm = wrapper.vm as any
+    const event = { type: 'user_text', session_id: 'ses_1', event_id: 'codex:3:user:original', part_id: 'native-user', source_turn_id: 'native-turn', turn_id: 'turn-original', text: '刚发现两个处理都是异步，能否只异步处理后面的逻辑。' }
+    websocketMock.handlers.get('user_text')!(event)
+    vm.processEvent({ type: 'turn_status', event_id: 'interrupted', turn_id: 'turn-original', turn_status: 'interrupted' })
+    websocketMock.handlers.get('connection_restored')!({ type: 'connection_restored' })
+    websocketMock.handlers.get('replay_batch')!({ session_id: 'ses_1', direction: 'backward', events: [event] })
+    websocketMock.handlers.get('replay_end')!({ session_id: 'ses_1', has_more: false })
+    await wrapper.vm.$nextTick()
+    expect(vm.messages.filter((m: any) => m.type === 'user_text')).toHaveLength(1)
+    wrapper.unmount()
+  })
+
+  test('keeps separate native user messages with identical adjacent text', () => {
+    const wrapper = shallowMount(SessionDetail)
+    const vm = wrapper.vm as any
+    for (const id of ['one', 'two']) vm.processEvent({ type: 'user_text', event_id: id, part_id: id, source_turn_id: id, text: '继续' })
+    expect(vm.messages.filter((m: any) => m.type === 'user_text')).toHaveLength(2)
+    wrapper.unmount()
+  })
+
+  test('binds durable identity to an optimistic echo before non-adjacent replay', () => {
+    const wrapper = shallowMount(SessionDetail)
+    const vm = wrapper.vm as any
+    vm.sendPromptText('继续')
+    const event = { type: 'user_text', event_id: 'original', text: '继续' }
+    vm.processEvent(event)
+    vm.processEvent({ type: 'agent_text', text: '收到' })
+    vm.processEvent({ type: 'user_text', payload: event })
+    expect(vm.messages.filter((m: any) => m.type === 'user_text')).toHaveLength(1)
+    wrapper.unmount()
+  })
+
+  test.each([undefined, 'child'])('deduplicates overlapping backward user pages (agent=%s)', (agentId) => {
+    const wrapper = shallowMount(SessionDetail)
+    const vm = wrapper.vm as any
+    const event = { type: 'user_text', session_id: 'ses_1', agent_id: agentId, event_id: 'old-generation', part_id: 'native-user', source_turn_id: 'native-turn', text: '继续' }
+    vm.processEvent(event)
+    vm.isLoadingBackward = true
+    websocketMock.handlers.get('replay_batch')!({ session_id: 'ses_1', direction: 'backward', events: [{ ...event, event_id: 'new-generation' }] })
+    websocketMock.handlers.get('replay_end')!({ session_id: 'ses_1', has_more: false })
+    const bucket = agentId ? vm.subagentMessages[agentId] : vm.messages
+    expect(bucket.filter((m: any) => m.type === 'user_text')).toHaveLength(1)
+    wrapper.unmount()
+  })
+
   test('does not reconcile conflicting, failed or historical user messages across lifecycle rows', () => {
     const wrapper = shallowMount(SessionDetail)
     const vm = wrapper.vm as any

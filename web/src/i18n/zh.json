@@ -260,6 +260,8 @@
   "session.input_creating": "会话创建中…",
   "session.input_resume": "继续会话（将恢复历史上下文）...",
   "session.input_send": "发送消息... (⌥+Enter 换行)",
+  "session.input_send_mobile": "发送消息…",
+  "session.send_mobile": "发送",
   "session.send_enter": "发送 (Enter)",
   "session.stop_gen": "停止生成",
   "session.context_usage": "Context 用量",
