@@ -1523,6 +1523,7 @@ func cmdDaemonStart(args []string) {
 
 	// Create WebSocket client
 	client := ws.NewClient(url, tok, id, agentTypes, agentVersions, agentLatests, outputCh, logger)
+	client.HostAwake = platform.HostAwake
 	memoryContextGrants := wireMemoryContext(sm, client)
 	client.OnControlMessage = sm.DispatchMemoryContextControl
 	client.SetAgentManageable(agentManageable)

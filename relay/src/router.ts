@@ -56,7 +56,7 @@ import {
   OBSERVER_READ_ONLY_CODE,
 } from './session-observer-policy.js';
 
-interface DaemonConnection { ws: WebSocket; daemonId: string; hostname: string; agents: any[]; userId: number | null; os?: string; ip?: string; port?: string; arch?: string; version?: string; startedAt?: number; registrationId: string; tokenJti?: string }
+interface DaemonConnection { ws: WebSocket; daemonId: string; hostname: string; agents: any[]; userId: number | null; os?: string; ip?: string; port?: string; arch?: string; version?: string; startedAt?: number; registrationId: string; tokenJti?: string; lastHeartbeatAt: number }
 interface ClientConnection { ws: WebSocket; subscribedSessions: Set<string>; userId: number | null; locale: string }
 interface OpenCodeRuntimeTelemetry { fallbackReasons: Record<string, number>; healthOK: number; healthFailed: number }
 interface DaemonMetrics { cpuPct: number; memPct: number; diskPct: number; updatedAt: number; openCodeRuntime?: OpenCodeRuntimeTelemetry }
@@ -245,6 +245,8 @@ export class Router {
   // Set during graceful shutdown to suppress offline pushes (the daemons are
   // about to reconnect to the new process — not genuinely offline).
   private shuttingDown = false;
+  private readonly heartbeatTimeoutMs = positiveInteger(process.env.DAEMON_HEARTBEAT_TIMEOUT_MS, 45_000);
+  private heartbeatTimer?: ReturnType<typeof setInterval>;
   // Per-daemon event delivery cursor for at-least-once delivery. `persistedHigh`
   // is the highest *contiguous* seq that has been durably persisted; it is what
   // event_ack reports, so the daemon only trims its outbound buffer/spool once an
@@ -432,6 +434,22 @@ export class Router {
       disconnectRetryable: (target, reason, retryAfterMs) => this.disconnectDurableIngress(target, reason, retryAfterMs),
     });
     this.pushDeduper.startSweeping();
+    this.heartbeatTimer = setInterval(() => {
+      const now = Date.now();
+      for (const [daemonId, daemon] of this.daemons) {
+        if (now - daemon.lastHeartbeatAt < this.heartbeatTimeoutMs) continue;
+        console.info('[daemon] heartbeat expired', { daemonId, lastHeartbeatAt: daemon.lastHeartbeatAt });
+        // Fence/remove this registration synchronously before terminating its socket.
+        // A late close or reconnect must never evict a newer registration.
+        this.unregisterDaemon(daemonId, daemon.ws);
+        const timer = this.pendingOfflineTimers.get(daemonId);
+        if (timer) clearTimeout(timer);
+        this.pendingOfflineTimers.delete(daemonId);
+        void this.finalizeDaemonOffline(daemonId, daemon).catch(console.error);
+        daemon.ws.terminate();
+      }
+    }, 5_000);
+    this.heartbeatTimer.unref?.();
   }
 
   private positiveTransportOption(value: number | undefined, fallback: number): number {
@@ -826,7 +844,12 @@ export class Router {
   }
 
   /** Release background resources (push dedup sweeper). Call on shutdown. */
-  stop(): void { this.pushDeduper.stop(); }
+  stop(): void {
+    this.pushDeduper.stop();
+    if (this.heartbeatTimer) clearInterval(this.heartbeatTimer);
+    for (const timer of this.pendingOfflineTimers.values()) clearTimeout(timer);
+    this.pendingOfflineTimers.clear();
+  }
 
   /**
    * Push only to Pro/whitelisted users. Reads plan and skips free users.
@@ -1178,7 +1201,7 @@ export class Router {
     if (previousDaemon && previousDaemon.ws !== ws) {
       this.cancelDaemonRevocationGate(previousDaemon.registrationId);
     }
-    this.daemons.set(daemonId, { ws, daemonId, hostname, agents, userId, os: daemonOS, ip: daemonIP, port: daemonPort, arch: daemonArch, version: daemonVersion, startedAt: daemonStartedAt, registrationId, tokenJti });
+    this.daemons.set(daemonId, { ws, daemonId, hostname, agents, userId, os: daemonOS, ip: daemonIP, port: daemonPort, arch: daemonArch, version: daemonVersion, startedAt: daemonStartedAt, registrationId, tokenJti, lastHeartbeatAt: Date.now() });
     if (tokenJti) this.authLeases.confirm(registrationId);
     console.log('[ws] daemon registered', daemonId, 'agents:', JSON.stringify(agents), 'userId:', userId);
     if (previousDaemon && previousDaemon.ws !== ws) {
@@ -1862,6 +1885,7 @@ export class Router {
     const current = this.daemons.get(daemonId);
     const cursor = this.daemonSeq.get(daemonId);
     if (!current || current.ws !== daemon.ws || current.registrationId !== daemon.registrationId || !cursor?.accepting) return;
+    daemon.lastHeartbeatAt = Date.now();
     this.send(daemon.ws, { type: 'pong' });
     db.updateHeartbeat(this.controlPool, daemonId).catch(console.error);
     const openCodeRuntime = sanitizeOpenCodeRuntimeTelemetry(msg.opencode_runtime);
@@ -3071,7 +3095,7 @@ export class Router {
         arch: conn.arch || '',
         version: conn.version || '',
         started_at: conn.startedAt || 0,
-        last_heartbeat: Date.now(),
+        last_heartbeat: conn.lastHeartbeatAt,
         cpu_pct: metrics?.cpuPct ?? null,
         mem_pct: metrics?.memPct ?? null,
         disk_pct: metrics?.diskPct ?? null,
@@ -3103,7 +3127,7 @@ export class Router {
       const inStartupWindow = (Date.now() - this.startedAt) < this.listGraceMs;
       const optimisticOnline = optimistic && inStartupWindow;
       // 非乐观模式下以 DB 记录的 status 为准;乐观模式下被乐观值覆盖。
-      const dbOnline = row.status === 'online';
+      const dbOnline = row.status === 'online' && Date.now() - new Date(row.last_heartbeat).getTime() < this.heartbeatTimeoutMs;
       const demoOnline = isAppReviewDemoDaemon(row.daemon_id);
       const isOnline = demoOnline || optimisticOnline || (!optimistic && dbOnline);
       return {
