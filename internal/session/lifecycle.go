@@ -158,6 +158,9 @@ func (sm *SessionManager) CreateSession(ctx context.Context, config protocol.Ses
 				return managedID, managedErr
 			}
 		}
+		if config.ForkFrom != "" {
+			return "", fmt.Errorf("Codex fork requires an available managed project runtime")
+		}
 		if config.Permission != nil && config.Permission.ApprovalPolicy != "" && config.Permission.ApprovalPolicy != "never" {
 			return "", fmt.Errorf("codex remote approval requires the managed app-server backend")
 		}

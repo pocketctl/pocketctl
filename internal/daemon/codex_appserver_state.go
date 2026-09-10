@@ -14,6 +14,7 @@ import (
 )
 
 type CodexAppServerState struct {
+	Cwd        string                        `json:"cwd,omitempty"`
 	PID        int                           `json:"pid"`
 	OwnerPID   int                           `json:"owner_pid"`
 	Endpoint   string                        `json:"endpoint"`
@@ -33,10 +34,13 @@ func CodexAppServerStatePath() string {
 }
 
 func WriteCodexAppServerState(state *CodexAppServerState) error {
+	return WriteCodexAppServerStateAt(CodexAppServerStatePath(), state)
+}
+
+func WriteCodexAppServerStateAt(path string, state *CodexAppServerState) error {
 	if state == nil {
 		return fmt.Errorf("codex app-server state is nil")
 	}
-	path := CodexAppServerStatePath()
 	dir := filepath.Dir(path)
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return err
@@ -76,7 +80,10 @@ func WriteCodexAppServerState(state *CodexAppServerState) error {
 }
 
 func ReadCodexAppServerState() (*CodexAppServerState, error) {
-	path := CodexAppServerStatePath()
+	return ReadCodexAppServerStateAt(CodexAppServerStatePath())
+}
+
+func ReadCodexAppServerStateAt(path string) (*CodexAppServerState, error) {
 	lstat, err := os.Lstat(path)
 	if err != nil {
 		return nil, err

@@ -101,7 +101,21 @@ func newCodexInteractions(sm *SessionManager, generation uint64, client codexRun
 	}
 }
 
-func (sm *SessionManager) codexInteractionBroker() *codexInteractions {
+func (sm *SessionManager) codexInteractionBroker(sessionIDs ...string) *codexInteractions {
+	if len(sessionIDs) > 0 {
+		sm.mu.RLock()
+		ps := sm.sessions[sessionIDs[0]]
+		var coord *codexCoordinator
+		if ps != nil {
+			if b, ok := ps.Backend.(*CodexAppServerBackend); ok {
+				coord = b.coord
+			}
+		}
+		sm.mu.RUnlock()
+		if coord != nil {
+			return coord.interactionBroker()
+		}
+	}
 	sm.mu.RLock()
 	provider := sm.codexProvider
 	sm.mu.RUnlock()

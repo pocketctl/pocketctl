@@ -412,7 +412,7 @@ func (sm *SessionManager) ResolveApproval(sessionID, requestID string, approved 
 		return err
 	}
 	defer release()
-	if broker := sm.codexInteractionBroker(); broker != nil && broker.KnowsApproval(sessionID, requestID) {
+	if broker := sm.codexInteractionBroker(sessionID); broker != nil && broker.KnowsApproval(sessionID, requestID) {
 		action := "reject"
 		if approved {
 			action = "once"
@@ -483,7 +483,7 @@ func (sm *SessionManager) ResolveApprovalAction(sessionID, requestID, action str
 }
 
 func (sm *SessionManager) resolveApprovalAction(ctx context.Context, sessionID, requestID, action string) error {
-	if broker := sm.codexInteractionBroker(); broker != nil && broker.KnowsApproval(sessionID, requestID) {
+	if broker := sm.codexInteractionBroker(sessionID); broker != nil && broker.KnowsApproval(sessionID, requestID) {
 		return broker.ResolveApproval(ctx, sessionID, requestID, action)
 	}
 	if !protocol.ValidApprovalAction(action) {
@@ -602,7 +602,7 @@ func (sm *SessionManager) ResolveQuestion(sessionID, requestID string, answers [
 		return err
 	}
 	defer release()
-	if broker := sm.codexInteractionBroker(); broker != nil && broker.KnowsQuestion(sessionID, requestID) {
+	if broker := sm.codexInteractionBroker(sessionID); broker != nil && broker.KnowsQuestion(sessionID, requestID) {
 		return broker.ResolveQuestion(ctx, sessionID, requestID, answers)
 	}
 	b := sm.opencodeBackendFor(sessionID)
@@ -704,7 +704,7 @@ func (sm *SessionManager) RejectQuestion(sessionID, requestID string) error {
 		return err
 	}
 	defer release()
-	if broker := sm.codexInteractionBroker(); broker != nil && broker.KnowsQuestion(sessionID, requestID) {
+	if broker := sm.codexInteractionBroker(sessionID); broker != nil && broker.KnowsQuestion(sessionID, requestID) {
 		return broker.RejectQuestion(ctx, sessionID, requestID)
 	}
 	b := sm.opencodeBackendFor(sessionID)
@@ -764,7 +764,7 @@ func (sm *SessionManager) ResolveMcpElicitation(sessionID, requestID, action str
 		return err
 	}
 	defer release()
-	broker := sm.codexInteractionBroker()
+	broker := sm.codexInteractionBroker(sessionID)
 	if broker == nil || !broker.KnowsMcpElicitation(sessionID, requestID) {
 		return fmt.Errorf("Codex MCP elicitation is not pending")
 	}

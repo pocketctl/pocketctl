@@ -50,6 +50,9 @@ type codexRuntimeStarter func(context.Context, string, string, uint64) (*codexAp
 type codexRuntimeProbe func(context.Context, *codexAppServerRuntime) error
 
 type codexCoordinator struct {
+	projectCwd string
+	statePath  string
+	skillsMu   sync.Mutex
 	titleMu    sync.Mutex
 	titleTurns map[string]codexTitleTurn
 	sm         *SessionManager
@@ -133,11 +136,11 @@ func (c *codexCoordinator) ensureStarted(ctx context.Context, binary, version st
 			}
 		}
 		c.runtime = nil
-		if removeErr := daemon.RemoveCodexAppServerState(); removeErr != nil && !os.IsNotExist(removeErr) {
+		if removeErr := c.removeState(); removeErr != nil && !os.IsNotExist(removeErr) {
 			return codexRuntimeSnapshot{}, removeErr
 		}
 	}
-	state, stateErr := daemon.ReadCodexAppServerState()
+	state, stateErr := c.readState()
 	if stateErr == nil {
 		c.generation = state.Generation
 		restoredThreads = append(restoredThreads, state.Threads...)
@@ -153,7 +156,7 @@ func (c *codexCoordinator) ensureStarted(ctx context.Context, binary, version st
 				if err := stopPersistedCodexAppServer(state); err != nil {
 					return codexRuntimeSnapshot{}, fmt.Errorf("stop incompatible Codex app-server handoff: %w", err)
 				}
-				if err := daemon.RemoveCodexAppServerState(); err != nil {
+				if err := c.removeState(); err != nil {
 					return codexRuntimeSnapshot{}, err
 				}
 			} else {
@@ -165,15 +168,24 @@ func (c *codexCoordinator) ensureStarted(ctx context.Context, binary, version st
 					if stopErr := stopPersistedCodexAppServer(state); stopErr != nil {
 						return codexRuntimeSnapshot{}, fmt.Errorf("stop unavailable persisted Codex app-server: %w", stopErr)
 					}
-					if removeErr := daemon.RemoveCodexAppServerState(); removeErr != nil {
+					if removeErr := c.removeState(); removeErr != nil {
 						return codexRuntimeSnapshot{}, removeErr
 					}
 				} else {
 					c.runtime, c.binary, c.version, c.schemaHash = runtime, state.Binary, state.Version, state.SchemaHash
+					if c.projectCwd != "" {
+						if err := c.configureProjectSkills(ctx, runtime.Client); err != nil {
+							_ = runtime.Client.Close()
+							c.runtime = nil
+							return codexRuntimeSnapshot{}, err
+						}
+					}
 					c.restoreManagedThreads(state.Threads)
 					c.startEventPumpLocked()
 					if c.sm != nil {
-						c.sm.leases.Restore(state.Leases)
+						if c.projectCwd == "" {
+							c.sm.leases.Restore(state.Leases)
+						}
 						if err := c.persistLocked(); err != nil {
 							return codexRuntimeSnapshot{}, err
 						}
@@ -185,7 +197,7 @@ func (c *codexCoordinator) ensureStarted(ctx context.Context, binary, version st
 					return snapshot, nil
 				}
 			}
-		} else if err := daemon.RemoveCodexAppServerState(); err != nil {
+		} else if err := c.removeState(); err != nil {
 			return codexRuntimeSnapshot{}, err
 		}
 	} else if !os.IsNotExist(stateErr) {
@@ -198,6 +210,14 @@ func (c *codexCoordinator) ensureStarted(ctx context.Context, binary, version st
 	}
 	if runtime == nil || runtime.PID <= 0 || runtime.Endpoint == "" || runtime.RemoteURI == "" {
 		return codexRuntimeSnapshot{}, errors.New("Codex app-server starter returned incomplete runtime")
+	}
+	if c.projectCwd != "" {
+		if err := c.configureProjectSkills(ctx, runtime.Client); err != nil {
+			if runtime.Stop != nil {
+				_ = runtime.Stop()
+			}
+			return codexRuntimeSnapshot{}, err
+		}
 	}
 	c.runtime = runtime
 	c.binary = binary
@@ -277,11 +297,12 @@ func (c *codexCoordinator) persistOwnerLocked(ownerPID int) error {
 	}
 	leases := c.sm.leases.Snapshot()
 	for id, lease := range leases {
-		if lease.Agent != agentcontrol.AgentCodex {
+		if lease.Agent != agentcontrol.AgentCodex || lease.Generation != c.generation {
 			delete(leases, id)
 		}
 	}
-	return daemon.WriteCodexAppServerState(&daemon.CodexAppServerState{
+	return daemon.WriteCodexAppServerStateAt(c.runtimeStatePath(), &daemon.CodexAppServerState{
+		Cwd: c.projectCwd,
 		PID: c.runtime.PID, OwnerPID: ownerPID, Endpoint: c.runtime.Endpoint,
 		RemoteURI: c.runtime.RemoteURI, Binary: c.binary, Version: c.version,
 		SchemaHash: c.schemaHash, Generation: c.generation, Leases: leases,
@@ -333,12 +354,17 @@ func (c *codexCoordinator) shutdown() error {
 		}
 	}
 	var err error
+	if c.projectCwd != "" {
+		err = c.persistOwnerLocked(0)
+	}
 	if c.runtime.Stop != nil {
-		err = c.runtime.Stop()
+		err = errors.Join(err, c.runtime.Stop())
 	}
 	c.runtime = nil
-	if removeErr := daemon.RemoveCodexAppServerState(); err == nil {
-		err = removeErr
+	if c.projectCwd == "" {
+		if removeErr := c.removeState(); err == nil {
+			err = removeErr
+		}
 	}
 	c.mu.Unlock()
 	c.waitForBackgroundWork(reconnectDone)
@@ -462,7 +488,7 @@ func (c *codexCoordinator) reconnectClient(generation uint64) {
 	delay := 100 * time.Millisecond
 	for attempt := 1; attempt <= 5; attempt++ {
 		ctx, cancel := context.WithTimeout(reconnectCtx, 5*time.Second)
-		state, stateErr := daemon.ReadCodexAppServerState()
+		state, stateErr := c.readState()
 		var runtime *codexAppServerRuntime
 		var err error
 		if stateErr != nil {

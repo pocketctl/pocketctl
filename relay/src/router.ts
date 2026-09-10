@@ -231,6 +231,7 @@ export class Router {
   private memoryCodegraphGrantBroker?: MemoryCodegraphGrantBroker;
   private clients = new Map<WebSocket, ClientConnection>();
   private sessionToDaemon = new Map<string, string>();
+  private invocationRequests = new Map<string, { client: WebSocket; daemonId: string; daemonWs: WebSocket; sessionId: string; requestId: string; fingerprint: string; reply?: any; timer: ReturnType<typeof setTimeout> }>();
   private directoryRequests = new Map<string, { client: WebSocket; daemonId: string; daemonWs: WebSocket; requestId: string; timer: ReturnType<typeof setTimeout> }>();
   private pendingSessionCreate = new Map<string, WebSocket>();
   private pendingSessionMeta = new Map<string, { agent_type: string; cwd: string }>();
@@ -1498,6 +1499,7 @@ export class Router {
   }
   unregisterClient(ws: WebSocket): void {
     this.clients.delete(ws);
+    for (const [id,pending] of this.invocationRequests) { if(pending.client === ws) {clearTimeout(pending.timer);this.invocationRequests.delete(id);} }
     for (const [id, pending] of this.directoryRequests) {
       if (pending.client !== ws) continue;
       clearTimeout(pending.timer); this.directoryRequests.delete(id);
@@ -2147,6 +2149,22 @@ export class Router {
       }).catch((error) => this.logBestEffortFailure('session_title_update authorization', error));
       return;
     }
+    if (msg.type === 'invocation_result') {
+      const pending = this.invocationRequests.get(msg.request_id);
+      const daemon = this.daemons.get(daemonId);
+      if (pending && pending.daemonId === daemonId && pending.daemonWs === daemon?.ws && pending.sessionId === sessionId && !pending.reply) {
+        const client = this.clients.get(pending.client);
+        if (client && daemon && this.sameUser(client.userId, daemon.userId)) {
+          clearTimeout(pending.timer);
+          pending.reply = { ...msg, request_id: pending.requestId };
+          this.send(pending.client, pending.reply);
+          pending.timer = setTimeout(() => this.invocationRequests.delete(msg.request_id), 60_000);
+          pending.timer.unref?.();
+        }
+      }
+      if (!durableIngressOwnsAck) this.markPersisted(daemonId, msg.seq);
+      return;
+    }
     if (!sessionId) {
       if (msg.type === 'session_create_failed') {
         this.persistAndAck(daemonId, msg.seq, '', msg.type, msg, messageState, receivedAt);
@@ -2268,14 +2286,14 @@ export class Router {
       if (client.userId == null) {
         // Anonymous/API-key connections (userId=null) may not act on a specific
         // session. Real clients always carry a userId (prod requires a token).
-        this.send(clientWs, { type: 'error', session_id: msg.session_id, error: 'forbidden' });
+        this.send(clientWs, { type: ['list_invocations','invoke_command'].includes(msg.type) ? 'invocation_result' : 'error', session_id: msg.session_id, request_id: msg.request_id, error: 'forbidden' });
         return;
       }
       sessionRuntimePolicy = sessionRuntimePolicy ?? await db.getSessionRuntimePolicy(
         this.pool, msg.session_id, client.userId,
       ).catch(() => null);
       if (!sessionRuntimePolicy) {
-        this.send(clientWs, { type: 'error', session_id: msg.session_id, error: 'session not found or not owned' });
+        this.send(clientWs, { type: ['list_invocations','invoke_command'].includes(msg.type) ? 'invocation_result' : 'error', session_id: msg.session_id, request_id: msg.request_id, error: 'session not found or not owned' });
         return;
       }
       if (isObserverAgentType(sessionRuntimePolicy.agentType)
@@ -2476,6 +2494,14 @@ export class Router {
     }
 
     if (msg.type === 'session_create') {
+      if (msg.fork_from != null) {
+        const source = typeof msg.fork_from === 'string' && client.userId != null
+          ? await db.getSessionRuntimePolicy(this.pool,msg.fork_from,client.userId).catch(() => null) : null;
+        if (!source || source.agentType !== 'codex' || source.daemonId !== msg.daemon_id) {
+          this.send(clientWs,{type:'session_create_failed',request_id:msg.request_id,reason:'invalid_fork_source',error:'fork source not owned by selected host'});return;
+        }
+      }
+
       const requestId = typeof msg.request_id === 'string' && msg.request_id
         ? msg.request_id
         : randomUUID();
@@ -2752,6 +2778,19 @@ export class Router {
           if (['approval_response', 'question_response', 'question_reject'].includes(msg.type) && typeof msg.request_id === 'string') {
             this.trackInteractionClient(msg.session_id, msg.request_id, msg.type, clientWs);
           }
+          if (['list_invocations', 'invoke_command'].includes(msg.type)) {
+            const reject = (error: string) => this.send(clientWs, {type:'invocation_result', session_id:msg.session_id, request_id:msg.request_id, error});
+            if (typeof msg.request_id !== 'string' || !msg.request_id || msg.request_id.length > 128 || (msg.type === 'invoke_command' && (typeof msg.content !== 'string' || msg.content.length > 32768)) || (msg.invocation_id != null && (typeof msg.invocation_id !== 'string' || msg.invocation_id.length > 128))) { reject('invalid_request'); return; }
+            const fingerprint = JSON.stringify([msg.type,msg.session_id,msg.content,msg.invocation_id]);
+            const existing = [...this.invocationRequests.values()].find(p => p.client === clientWs && p.requestId === msg.request_id);
+            if (existing) { if (existing.fingerprint !== fingerprint) reject('request_id_conflict'); else if (existing.reply) this.send(clientWs,existing.reply); return; }
+            if (this.invocationRequests.size >= 2048 || [...this.invocationRequests.values()].filter(p => p.client === clientWs && !p.reply).length >= 4) { reject('busy'); return; }
+            const id = randomUUID();
+            const timer = setTimeout(() => { this.invocationRequests.delete(id); reject('调用超时，请刷新后确认状态'); },20_000); timer.unref?.();
+            this.invocationRequests.set(id,{client:clientWs,daemonId,daemonWs:daemon.ws,sessionId:msg.session_id,requestId:msg.request_id,fingerprint,timer});
+            this.send(daemon.ws,{type:msg.type,session_id:msg.session_id,request_id:id,content:msg.content,invocation_id:msg.invocation_id});
+            return;
+          }
           this.send(daemon.ws, outbound);
           // L2 (web-post-send-feedback): ack so the web client clears its ack-timeout.
           if (msg.type === 'user_message' && msg.msg_id) {
@@ -2765,7 +2804,7 @@ export class Router {
           this.send(clientWs, { type: 'user_message_nack', msg_id: msg.msg_id, reason: 'daemon_offline' });
         } else {
           this.send(clientWs, {
-            type: 'error', session_id: msg.session_id,
+            type: ['list_invocations','invoke_command'].includes(msg.type) ? 'invocation_result' : 'error', session_id: msg.session_id, request_id: msg.request_id,
             code: 'daemon_unreachable',
             error: 'daemon offline or reconnecting',
           });
@@ -2777,7 +2816,7 @@ export class Router {
         this.send(clientWs, { type: 'user_message_nack', msg_id: msg.msg_id, reason: 'session_not_found' });
       } else {
         this.send(clientWs, {
-          type: 'error', session_id: msg.session_id,
+          type: ['list_invocations','invoke_command'].includes(msg.type) ? 'invocation_result' : 'error', session_id: msg.session_id, request_id: msg.request_id,
           code: 'session_not_found',
           error: 'session not found',
         });

@@ -472,6 +472,9 @@
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14"/><path d="M19 12l-7 7-7-7"/></svg>
           </button>
         </Transition>
+        <InvocationDialog :value="invocationDialog" @close="invocationDialog=null" @choose="chooseInvocation" />
+        <div v-if="invocationError" class="invocation-hint" role="status">{{ invocationError }} <button @click="requestInvocations">刷新</button></div>
+        <div v-if="invocationSelection" class="invocation-hint">/{{ invocationSelection.name }} · {{ invocationSelection.display_path || invocationSelection.source }} <button aria-label="清除选择" @click="invocationSelection=null">×</button></div>
         <template v-if="composerState.visible">
           <div class="chat-input-container" :class="{ focused: isInputFocused }" @transitionend.self="handleComposerTransitionEnd">
             <!-- Slash command popover -->
@@ -479,6 +482,9 @@
               v-if="showPopover"
               :commands="filteredCommands"
               :active-index="selectedIndex"
+              :filter="invocationEnabled ? invocationFilter : undefined"
+              @filter="invocationFilter=$event;selectedIndex=0"
+              @refresh="requestInvocations"
               @select="applyCommand"
               @hover="selectedIndex = $event"
             />
@@ -659,6 +665,8 @@
 </template>
 
 <script setup lang="ts">
+import InvocationDialog from '../components/InvocationDialog.vue'
+import { searchInvocations, completeInvocation } from '../utils/invocations'
 import { ref, computed, onMounted, onUnmounted, nextTick, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { normalizeEffort, shouldShowEffort } from '../utils/effort'
@@ -814,7 +822,7 @@ function isOpenCodeStructuredType(type: string): type is OpenCodeStructuredType 
 const explicitlyRoutedLiveEventTypes = new Set<string>([
   ...knownNonTimelineControlEventTypes,
   'connection_restored', 'session_list', 'session_created', 'daemon_list',
-  'daemon_status', 'command_list', 'session_agent_list', 'session_agent_changed',
+  'daemon_status', 'invocation_result', 'command_list', 'session_agent_list', 'session_agent_changed',
   'session_meta', 'session_model_changed', 'replay_batch', 'replay_end',
   'user_message_ack', 'user_message_nack', 'user_message_receipt',
   'user_text', 'agent_text', 'agent_plan', 'agent_reasoning', 'agent_retry',
@@ -832,6 +840,57 @@ const allSessions = ref<any[]>([])
 const subagentMessages = ref<Record<string, any[]>>({})
 // P1a: children token map keyed by agentId
 const childrenToken = ref<Record<string, { tokenIn: number; tokenOut: number; tokenCache: number; tokenCacheCreate: number }>>({})
+const invocationEnabled = ref(false)
+const invocationFilter = ref('all')
+const invocationError = ref('')
+const invocationSelection = ref<CommandItem | null>(null)
+const invocationDialog = ref<any>(null)
+let invocationDraft = '', invocationName = '', invocationRequest = '', invocationCatalogRequest = '', invocationCreateRequest = ''
+const nativeCommandMessages = new Map<string, {draft:string;timer:ReturnType<typeof setTimeout>}>()
+function finishNativeCommand(id: string, error = '') {
+  const pending=nativeCommandMessages.get(id);if(!pending)return false
+  clearTimeout(pending.timer);nativeCommandMessages.delete(id)
+  if(error){invocationError.value=error;if(!messageInput.value.trim())messageInput.value=pending.draft}
+  return true
+}
+let invocationTimer: ReturnType<typeof setTimeout> | undefined
+function requestInvocations() {
+  if(currentSessionAgent.value !== 'codex') return
+  invocationCatalogRequest = crypto.randomUUID()
+  send({type:'list_invocations',session_id:sessionId.value,request_id:invocationCatalogRequest})
+}
+function invokeDraft(text: string, id?: string) {
+  if (invocationRequest) return
+  invocationDraft = text; invocationName = text.slice(1).split(/\s/)[0]; invocationError.value = ''
+  invocationRequest = crypto.randomUUID()
+  if (!send({type:'invoke_command',session_id:sessionId.value,request_id:invocationRequest,content:text,invocation_id:id})) { invocationRequest='';invocationError.value='连接不可用，草稿已保留';return }
+  invocationTimer = setTimeout(() => { invocationRequest='';invocationError.value='调用超时，请确认状态后重试' },22000)
+}
+function chooseInvocation(args: string) { invocationDialog.value=null;messageInput.value='/'+invocationName+(args?' '+args:'');invokeDraft(messageInput.value, invocationSelection.value?.id) }
+function handleInvocationResult(msg: any) {
+  if (msg.session_id!==sessionId.value) return
+  if (msg.request_id===invocationCatalogRequest) {
+    if(msg.error){invocationError.value=msg.error;return}
+    if (!msg.error && msg.invocation?.kind==='catalog') { invocationEnabled.value=true;invocationError.value='';commandsCache.value=msg.invocation.commands||[] }
+    return
+  }
+  if (!invocationRequest || msg.request_id!==invocationRequest) return
+  clearTimeout(invocationTimer);invocationRequest=''
+  if(msg.error){invocationError.value=msg.error;return}
+  const result=msg.invocation||{}
+  if(result.kind==='skill'||result.kind==='turn_command') { if(messageInput.value!==invocationDraft){invocationError.value='草稿已修改，请重新发送';return};if(sendPromptText(invocationDraft,result.entry_id)){messageInput.value='';invocationSelection.value=null};return }
+  if(result.kind==='skills'){invocationFilter.value='skill';commandsCache.value=result.commands||[];messageInput.value='/'+(result.query||'');popoverDismissed.value=false;invocationSelection.value=null;return}
+  if(result.kind==='navigate'){router.push('/session/'+result.session_id);return}
+  if(result.kind==='create'){
+    const host=allSessions.value.find((s:any)=>s.session_id===sessionId.value)?.daemon_id
+    if(!host){invocationError.value='当前主机不可用';return}
+    invocationCreateRequest=crypto.randomUUID()
+    send({type:'session_create',request_id:invocationCreateRequest,daemon_id:host,agent:'codex',cwd:result.cwd,force:result.force===true,prompt:'',model:currentModel.value,...(result.fork_from?{fork_from:result.fork_from}:{})});return
+  }
+  invocationDialog.value=result
+  if(!['choose','input'].includes(result.kind)&&messageInput.value===invocationDraft) {messageInput.value='';invocationSelection.value=null}
+}
+watch(sessionId,()=>{for(const pending of nativeCommandMessages.values())clearTimeout(pending.timer);nativeCommandMessages.clear();invocationEnabled.value=false;invocationFilter.value='all';invocationSelection.value=null;invocationDialog.value=null;invocationRequest='';invocationError.value='';clearTimeout(invocationTimer)})
 const messageInput = ref('')
 const commandsCache = ref<CommandItem[]>([])
 const currentModel = ref('')            // resolved model name from session_meta event
@@ -870,6 +929,7 @@ const daemonList = computed(() => Object.values(daemons.value))
 const currentSession = computed(() => allSessions.value.find((x: any) => x.session_id === sessionId.value))
 const isManagedSession = computed(() => currentSession.value?.control_mode === 'managed')
 const currentSessionAgent = computed(() => { const s: any = currentSession.value; return s?.agent_type || s?.agent || '' })
+watch(currentSessionAgent, agent => { if(agent==='codex') requestInvocations() })
 const currentSessionCapabilities = computed(() => interactionCapabilities.value.length > 0
   ? interactionCapabilities.value
   : (Array.isArray(currentSession.value?.capabilities) ? currentSession.value.capabilities : []))
@@ -1736,7 +1796,7 @@ function loadHistory() {
   } else {
     send({ type: 'replay', session_id: sessionId.value, direction: 'backward', limit: pageSize.value, req_id: replayReqId.value })
     try {
-      send({ type: 'list_commands', session_id: sessionId.value })
+      send({ type: 'list_commands', session_id: sessionId.value }); requestInvocations()
     } catch (error) {
       console.warn('[session-history] auxiliary request failed', { operation: 'list_commands', error })
     }
@@ -2112,6 +2172,7 @@ function sendMessage() {
   if (isPendingSession.value) return // D3: pending-id 窗口期不发命令（--resume pending-xxx 必失败）
   // Local command interception: /cost /status /help /model are answered from
   // in-memory/relay data rather than the claude PTY (where they're unavailable).
+  if (invocationEnabled.value && text.startsWith('/') && (invocationSelection.value?.id || !['help','cost'].includes(text.slice(1).split(/\s/)[0]))) {invokeDraft(text,invocationSelection.value?.id);return}
   if (text.startsWith('/')) {
     const cmdName = text.slice(1).split(/\s/)[0]
     if (LOCAL_COMMANDS.includes(cmdName)) {
@@ -2123,7 +2184,15 @@ function sendMessage() {
   if (sendPromptText(text)) messageInput.value = ''
 }
 
-function sendPromptText(text: string): boolean {
+function sendPromptText(text: string, invocationID?: string): boolean {
+  if (invocationID?.startsWith('command:')) {
+    const msgId=crypto.randomUUID()
+    const sent=sendUserMessage({session_id:sessionId.value,content:text,msg_id:msgId,invocation_id:invocationID})
+    if(!sent){invocationError.value='连接不可用，草稿已保留';return false}
+    nativeCommandMessages.set(msgId,{draft:text,timer:setTimeout(()=>finishNativeCommand(msgId,'尚未收到执行回执，请确认状态后重试'),22000)})
+    return true
+  }
+
   if (isReadOnlyObserverSession.value) return false
   // C (web-post-send-feedback): optimistic echo — push user bubble immediately.
   // processEvent reconciles the authoritative echo with this local bubble,
@@ -2140,7 +2209,7 @@ function sendPromptText(text: string): boolean {
     deliveryStatus: 'pending',
   })
   nextTick(scrollToBottom)
-  const sent = sendUserMessage({ session_id: sessionId.value, content: text, msg_id: msgId, input_mode: 'auto' })
+  const sent = sendUserMessage({ session_id: sessionId.value, content: text, msg_id: msgId, input_mode: 'auto', ...(invocationID?{invocation_id:invocationID}:{}) })
   if (!sent) {
     failOrRollbackOptimistic(msgId)  // L1: WebSocket not open
     return false
@@ -2316,19 +2385,13 @@ function buildModelMessage(arg: string): string {
 }
 
 // Slash command autocompletion
-const filteredCommands = computed(() => {
-  const input = messageInput.value
-  if (!input.startsWith('/')) return []
-  const prefix = input.slice(1).toLowerCase()
-  const pool = availableCommands.value
-  if (prefix === '') return pool.slice(0, 50)
-  return pool.filter(c => c.name.toLowerCase().startsWith(prefix)).slice(0, 50)
-})
-const availableCommands = computed(() => mergeLocalCommands(commandsCache.value))
-const showPopover = computed(() => !popoverDismissed.value && filteredCommands.value.length > 0)
+const filteredCommands = computed(() => searchInvocations(availableCommands.value.filter(c=>!invocationEnabled.value || invocationFilter.value==='all' || c.kind===invocationFilter.value),messageInput.value))
+const availableCommands = computed(() => invocationEnabled.value ? [...commandsCache.value,...mergeLocalCommands([]).filter(c=>!commandsCache.value.some(n=>n.name===c.name))] : mergeLocalCommands(commandsCache.value))
+const showPopover = computed(() => !popoverDismissed.value && (filteredCommands.value.length > 0 || (invocationEnabled.value && messageInput.value.startsWith('/'))))
 
 // Reset selection/dismissal whenever the input changes
 watch(messageInput, () => {
+  if(invocationSelection.value && messageInput.value.slice(1).split(/\s/)[0]!==invocationSelection.value.name)invocationSelection.value=null
   selectedIndex.value = 0
   popoverDismissed.value = false
   if (isMobile.value) nextTick(resizeMobileComposerTextarea)
@@ -2416,7 +2479,7 @@ function onInputKeydown(e: KeyboardEvent) {
     return
   }
 
-  if (showPopover.value) {
+  if (showPopover.value && filteredCommands.value.length > 0) {
     if (e.key === 'ArrowDown') {
       e.preventDefault()
       selectedIndex.value = (selectedIndex.value + 1) % filteredCommands.value.length
@@ -2449,7 +2512,9 @@ function onInputKeydown(e: KeyboardEvent) {
 
 function applyCommand(item: CommandItem) {
   if (!item) return
-  messageInput.value = '/' + item.name + ' '
+  if(item.unavailable){invocationError.value=item.unavailable;return}
+  invocationSelection.value=item.id?item:null
+  messageInput.value = completeInvocation(item,messageInput.value)
   popoverDismissed.value = true
   nextTick(() => { inputEl.value?.focus() })
 }
@@ -3277,9 +3342,12 @@ onMounted(() => {
     if (!msg.daemon_id) return
     setDaemonConnectivity(msg.daemon_id, msg.status === 'online', msg)
   }))
+  cleanups.push(onEvent('invocation_result',handleInvocationResult))
+  cleanups.push(onEvent('session_created',(msg:any)=>{if(msg.request_id===invocationCreateRequest&&msg.session_id){invocationCreateRequest='';router.push('/session/'+msg.session_id)}}))
+  cleanups.push(onEvent('session_create_failed',(msg:any)=>{if(msg.request_id===invocationCreateRequest){invocationError.value=msg.error||msg.reason;invocationCreateRequest=''}}))
   cleanups.push(onEvent('command_list', (msg: any) => {
     if (msg.session_id !== sessionId.value) return // discard stale responses from other sessions
-    commandsCache.value = msg.commands || []
+    if(!invocationEnabled.value) commandsCache.value = msg.commands || []
   }))
   cleanups.push(onEvent('session_agent_list', (msg: any) => {
     if (msg.session_id !== sessionId.value) return
@@ -3419,9 +3487,11 @@ onMounted(() => {
   }))
   cleanups.push(onEvent('user_message_nack', (msg: any) => {
     if (!msg.msg_id) return
+    if(finishNativeCommand(msg.msg_id,msg.reason||'调用被拒绝'))return
     failOrRollbackOptimistic(msg.msg_id, msg.reason || '')
   }))
   cleanups.push(onEvent('user_message_receipt', (msg: any) => {
+    if(msg.session_id===sessionId.value && finishNativeCommand(msg.msg_id,msg.status==='accepted'?'':(msg.reason||'调用失败')))return
     if (msg.session_id !== sessionId.value || (!msg.msg_id && !msg.request_id)) return
     if (msg.msg_id) clearAckTimeout(msg.msg_id)
       const message = findMessageByCorrelation(eventCorrelation(msg))
@@ -3722,6 +3792,9 @@ function onPinned(sessionId: string, pinned: boolean) {
 }
 
 onUnmounted(() => {
+  clearTimeout(invocationTimer)
+  for(const pending of nativeCommandMessages.values())clearTimeout(pending.timer)
+  nativeCommandMessages.clear()
   clearHistorySlowTimer()
   composerResizeObserver?.disconnect()
   composerResizeObserver = null
@@ -4388,4 +4461,8 @@ onMounted(() => {
   .session-history-spinner { animation-duration: 1.8s; }
   .request-deep-link-target { animation: none; outline: 2px solid var(--warning); }
 }
+</style>
+
+<style scoped>
+.invocation-hint{pointer-events:auto;font-size:12px;color:var(--fg-secondary);margin:0 12px 6px;overflow-wrap:anywhere}.invocation-hint button{background:none;border:0;color:var(--accent);cursor:pointer}
 </style>

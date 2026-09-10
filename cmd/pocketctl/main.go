@@ -3436,11 +3436,12 @@ func deliverUserMessage(
 	agent, exists := sm.GetSessionAgent(cmd.SessionID)
 	emitsReceipt := exists && agent != "" && cmd.MsgID != ""
 	err := sm.SendMessageWithInput(ctx, session.UserMessageInput{
-		SessionID: cmd.SessionID,
-		Content:   cmd.Content,
-		RequestID: cmd.RequestID,
-		MsgID:     cmd.MsgID,
-		InputMode: protocol.InputModeAuto,
+		SessionID:    cmd.SessionID,
+		InvocationID: cmd.InvocationID,
+		Content:      cmd.Content,
+		RequestID:    cmd.RequestID,
+		MsgID:        cmd.MsgID,
+		InputMode:    protocol.InputModeAuto,
 	})
 	if errors.Is(err, adapter.ErrObserverReadOnly) {
 		send(session.ObserverReadOnlyEvent("user_message", cmd.SessionID, cmd.RequestID, cmd.MsgID, err))
@@ -3641,6 +3642,7 @@ func handleCommands(ctx context.Context, client *ws.Client, sm *session.SessionM
 					"worktree", cmd.Worktree, "auto_create_dir", cmd.AutoCreateDir, "force", cmd.Force)
 				stateDirty.Store(true)
 				config := protocol.SessionConfig{
+					ForkFrom:      cmd.ForkFrom,
 					Agent:         cmd.Agent,
 					Cwd:           cmd.Cwd,
 					Prompt:        cmd.Prompt,
@@ -3793,6 +3795,24 @@ func handleCommands(ctx context.Context, client *ws.Client, sm *session.SessionM
 					logger.Error("set effort failed", "error", err)
 					client.SendMsg(controlCommandErrorEvent("set_effort", cmd.SessionID, cmd.RequestID, err))
 				}
+
+			case "list_invocations", "invoke_command":
+				invocationCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+				var result map[string]any
+				var invocationErr error
+				if cmd.Type == "list_invocations" {
+					var items []protocol.CommandItem
+					items, invocationErr = sm.CodexInvocations(invocationCtx, cmd.SessionID)
+					result = map[string]any{"kind": "catalog", "commands": items}
+				} else {
+					result, invocationErr = sm.InvokeCodexCommand(invocationCtx, cmd.SessionID, cmd.Content, cmd.InvocationID)
+				}
+				cancel()
+				event := protocol.DaemonEvent{Type: "invocation_result", SessionID: cmd.SessionID, RequestID: cmd.RequestID, Invocation: result}
+				if invocationErr != nil {
+					event.Error = invocationErr.Error()
+				}
+				client.SendMsg(event)
 
 			case "list_commands":
 				logger.Debug("list commands", "session", cmd.SessionID)

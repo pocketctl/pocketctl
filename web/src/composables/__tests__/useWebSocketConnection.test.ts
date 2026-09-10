@@ -185,3 +185,20 @@ describe('useWebSocket — onclose 4001 刷新重连', () => {
     expect(capturedUrls.length).toBe(firstCount) // refresh 失败，不重连
   })
 })
+
+
+test('concurrent callers share authentication and one connecting socket', async () => {
+  let release!: (value: boolean) => void
+  mockRefresh.mockImplementation(() => new Promise<boolean>(resolve => { release = resolve }))
+  vi.resetModules()
+  const { useWebSocket } = await import('../useWebSocket')
+  const socket = useWebSocket()
+  const first = socket.connect()
+  const second = socket.connect()
+  expect(mockRefresh).toHaveBeenCalledTimes(1)
+  release(true)
+  await Promise.all([first, second])
+  expect(capturedUrls).toHaveLength(1)
+  await socket.connect()
+  expect(capturedUrls).toHaveLength(1)
+})

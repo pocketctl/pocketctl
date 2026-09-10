@@ -59,11 +59,12 @@ func (sm *SessionManager) turnEnabled() bool { return sm.turnMode != turnEnrichm
 // callers keep the SendMessage wrapper; the relay daemon handler populates
 // RequestID/MsgID so the daemon actually uses the relay-guaranteed ids.
 type UserMessageInput struct {
-	SessionID string
-	Content   string
-	RequestID string
-	MsgID     string
-	InputMode string // auto|new_turn|steer; empty = auto
+	InvocationID string
+	SessionID    string
+	Content      string
+	RequestID    string
+	MsgID        string
+	InputMode    string // auto|new_turn|steer; empty = auto
 	// HiddenContext is the Phase 2 native hidden-context payload for this
 	// new turn. Content stays the exact user input for echo, receipts,
 	// titles, Relay events and turn identity.
@@ -313,13 +314,18 @@ func (sm *SessionManager) SendMessageWithInput(ctx context.Context, in UserMessa
 	if err != nil {
 		return err
 	}
+	ctx = context.WithValue(ctx, codexInvocationKey{}, in.InvocationID)
 	ctx = withUserMessageCorrelation(ctx, userMessageCorrelation{RequestID: in.RequestID, MsgID: in.MsgID})
+	if agent == adapter.AgentCodex && (in.InvocationID == "command:review" || in.InvocationID == "command:compact") {
+		_, err := sm.invokeCodexCommand(ctx, in.SessionID, in.Content, in.InvocationID, true)
+		return err
+	}
 	if !sm.turnEnabled() {
 		return sm.dispatchUserMessage(ctx, in.SessionID, in.Content)
 	}
 	// Native slash commands are control operations rather than model turns. They
 	// must not reserve a canonical turn or compile/consume a hidden context pack.
-	if _, _, ok := parseOpenCodeSlashCommand(in.Content); ok {
+	if _, _, ok := parseOpenCodeSlashCommand(in.Content); ok && agent != adapter.AgentCodex {
 		return sm.dispatchUserMessage(ctx, in.SessionID, in.Content)
 	}
 	key := turn.ActorKey{SessionID: in.SessionID}

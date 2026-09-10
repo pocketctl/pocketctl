@@ -62,6 +62,7 @@ export type InputMode = 'new_turn' | 'steer' | 'auto'
 
 /** The only browser-originated command that carries user-provided turn input. */
 export interface UserMessageCommand {
+  invocation_id?: string
   type: 'user_message'
   session_id: string
   content: string
@@ -71,6 +72,9 @@ export interface UserMessageCommand {
 
 // CommandItem represents a slash command or skill available for autocompletion.
 export interface CommandItem {
+  id?: string
+  display_path?: string
+  unavailable?: string
   name: string
   source: 'builtin' | 'project' | 'user' | 'plugin' | 'pocketctl' | 'command' | 'skill' | string
   kind: 'command' | 'skill'
@@ -164,7 +168,7 @@ async function ensureFreshToken(): Promise<boolean> {
 }
 
 async function connect(url?: string) {
-  if (ws.value && ws.value.readyState === WebSocket.OPEN) return
+  if (connecting || (ws.value && ws.value.readyState === WebSocket.OPEN)) return
   connecting = true
   reconnecting.value = true
   try {
