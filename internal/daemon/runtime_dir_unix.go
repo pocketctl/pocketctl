@@ -8,13 +8,15 @@ import (
 	"path/filepath"
 	"strconv"
 	"syscall"
+
+	"github.com/pocketctl/pocketctl/internal/config"
 )
 
 const legacyDefaultRuntimeDir = "/tmp/pocketctl"
 
 // secureRuntimeDir resolves or creates this user's private daemon runtime
-// directory. H-6 invariants: per-UID default under the OS temp dir (never the
-// shared /tmp/pocketctl), absolute overrides only, 0700 mode, owned by the
+// directory. Identity files live outside OS temporary storage so age-based
+// cleanup cannot remove them. Absolute overrides only, 0700 mode, owned by the
 // current effective UID, and never resolved through a symlink.
 func secureRuntimeDir() (string, error) {
 	if configured := os.Getenv("POCKETCTL_RUNTIME_DIR"); configured != "" {
@@ -23,7 +25,14 @@ func secureRuntimeDir() (string, error) {
 		}
 		return ensurePrivateDir(configured)
 	}
-	return ensurePrivateDir(filepath.Join(os.TempDir(), "pocketctl-"+strconv.Itoa(os.Getuid())))
+	home, err := config.HomeDir()
+	if err != nil {
+		return "", fmt.Errorf("resolve daemon runtime home: %w", err)
+	}
+	if !filepath.IsAbs(home) {
+		return "", fmt.Errorf("daemon runtime home must be absolute")
+	}
+	return ensurePrivateDir(filepath.Join(home, ".pocketctl", "run"))
 }
 
 // ensurePrivateDir guarantees dir is a real directory (no symlink anywhere at
@@ -104,19 +113,6 @@ func OwnedByCurrentUser(path string) bool {
 	return stat.Uid == uint32(os.Geteuid())
 }
 
-func legacyRuntimeDirCandidate() (string, error) {
-	if os.Getenv("POCKETCTL_RUNTIME_DIR") != "" {
-		return "", nil
-	}
-	if err := validateLegacyRuntimeDir(legacyDefaultRuntimeDir); err != nil {
-		if os.IsNotExist(err) {
-			return "", nil
-		}
-		return "", err
-	}
-	return legacyDefaultRuntimeDir, nil
-}
-
 func validateLegacyRuntimeDir(dir string) error {
 	info, err := os.Lstat(dir)
 	if err != nil {
@@ -133,4 +129,34 @@ func validateLegacyRuntimeDir(dir string) error {
 		return fmt.Errorf("legacy runtime dir %s is writable by group or others", dir)
 	}
 	return nil
+}
+
+// legacyRuntimeDirs includes the former per-user temp directory and the
+// original shared location. Never create or change permissions while discovering
+// legacy state; an unsafe directory must fail closed.
+func legacyRuntimeDirs() ([]string, error) {
+	if os.Getenv("POCKETCTL_RUNTIME_DIR") != "" {
+		return nil, nil
+	}
+	var dirs []string
+	for _, dir := range []string{filepath.Join(os.TempDir(), "pocketctl-"+strconv.Itoa(os.Getuid())), legacyDefaultRuntimeDir} {
+		if err := validateLegacyRuntimeDir(dir); err != nil {
+			if os.IsNotExist(err) {
+				continue
+			}
+			return nil, err
+		}
+		dirs = append(dirs, dir)
+	}
+	return dirs, nil
+}
+
+// Reserve the previous per-user location even on a fresh installation so an
+// older binary using the same temp root cannot start alongside the new daemon.
+func prepareLegacyRuntimeLockDir() error {
+	if os.Getenv("POCKETCTL_RUNTIME_DIR") != "" {
+		return nil
+	}
+	_, err := ensurePrivateDir(filepath.Join(os.TempDir(), "pocketctl-"+strconv.Itoa(os.Getuid())))
+	return err
 }

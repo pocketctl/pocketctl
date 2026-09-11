@@ -56,4 +56,6 @@ func OwnedByCurrentUser(path string) bool {
 	return err == nil && info.IsDir() && info.Mode()&os.ModeSymlink == 0
 }
 
-func legacyRuntimeDirCandidate() (string, error) { return "", nil }
+func legacyRuntimeDirs() ([]string, error) { return nil, nil }
+
+func prepareLegacyRuntimeLockDir() error { return nil }
