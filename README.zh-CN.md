@@ -16,6 +16,8 @@ PocketCtl 是面向 Claude Code、Codex、OpenCode 和 ZCode 的跨设备控制�
   Sub-agent 活动。
 - **在 Runtime 支持时直接处理** — 从 Web 或 iOS 发送后续消息、回答问题、
   处理审批、调整任务方向或中断当前 Turn。
+- **可视化选择项目目录** — 在 Web 或 iOS 上新建会话时直接浏览并选择工作
+  目录，无需手动输入路径。
 - **保留原生终端体验** — 受管 Codex 和 OpenCode 会话继续使用官方 TUI，
   同时与 PocketCtl 共享同一个 Runtime。
 - **断线后恢复上下文** — Relay 持久化规范化事件用于重放，Daemon 重启后会
@@ -32,7 +34,7 @@ PocketCtl 按真实能力开放控制。发现一个会话，并不代表它会�
 | Agent | 查看能力 | 远程交互 | 集成方式 |
 |---|---|---|---|
 | **Claude Code** | 实时历史与输出 | 用户独立启动的终端会话可在空闲或退出后通过 `--resume` 接力；PocketCtl 创建的 PTY 支持 Web/iOS 审批，独立终端会话仍以原生终端为权威。 | 自动发现，不宣称共享 Runtime。详见 [Claude 跨端控制](docs/claude-cross-device-control.md)。 |
-| **Codex CLI 0.144.1+** | Thread、Turn、Item、计划与交互 | 受管会话支持共享输入、Steer/Interrupt、审批、问题和标准 MCP Elicitation。 | 可选 Launcher 将官方 TUI 和 Daemon 连接到同一个 App Server。详见 [Codex 受管终端控制](docs/codex-managed-terminal.md)。 |
+| **Codex CLI 0.144.1+** | Thread、Turn、Item、计划与交互 | 受管会话支持共享输入、Steer/Interrupt、审批、问题、标准 MCP Elicitation，以及带自动补全的 `/` 命令与技能显式调用。 | 可选 Launcher 将官方 TUI 和 Daemon 连接到同一个 App Server。详见 [Codex 受管终端控制](docs/codex-managed-terminal.md)。 |
 | **Codex Desktop** | 增量同步 rollout 历史、状态、模型、Token、工具、计划和文件改动 | 只读，不支持远程输入、审批、中断、终止、恢复或创建会话。 | 自动发现的 Observer；以 `codex-desktop` 与 Codex CLI 分开显示。 |
 | **OpenCode 1.17.11+** | 会话、内容、状态、命令与交互 | 受管会话支持共享输入、Permission 和 Question；已独立运行的进程保持只读，直到通过 Launcher 安全恢复。 | 可选 Launcher 将官方 TUI 和 Daemon 连接到同一个共享 Server。详见 [OpenCode 受管终端控制](docs/opencode-managed-terminal.md)。 |
 | **ZCode** | 从本地 SQLite 增量同步历史 | 只读，不支持远程输入、审批、恢复或控制。 | 显式启用的 Observer。 |

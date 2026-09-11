@@ -17,6 +17,8 @@ off your development machine.
   edited files, plans, and sub-agent activity in real time.
 - **Act when the runtime supports it** — send follow-up messages, answer
   questions, handle approvals, steer work, or interrupt a turn from Web or iOS.
+- **Start sessions from a directory picker** — browse and select the working
+  directory for a new session on Web or iOS instead of typing paths by hand.
 - **Keep the native terminal experience** — managed Codex and OpenCode sessions
   continue to use their official TUI while sharing one runtime with PocketCtl.
 - **Recover context after a disconnect** — the Relay persists normalized events
@@ -35,7 +37,7 @@ automatically advertised as remotely controllable.
 | Agent | Observe | Remote interaction | Integration model |
 |---|---|---|---|
 | **Claude Code** | Live history and output | Independently started terminal sessions can continue through an idle/exited `--resume` handoff. PocketCtl-created PTYs support Web/iOS approvals; the native terminal remains authoritative for independently started sessions. | Automatic discovery; no shared runtime claim. See [Claude cross-device control](docs/claude-cross-device-control.md). |
-| **Codex CLI 0.144.1+** | Threads, turns, items, plans, and interactions | Managed sessions support shared input, steer/interrupt, approvals, questions, and standard MCP elicitation. | Optional launcher connects the official TUI and daemon to one app-server. See [Codex managed terminal control](docs/codex-managed-terminal.md). |
+| **Codex CLI 0.144.1+** | Threads, turns, items, plans, and interactions | Managed sessions support shared input, steer/interrupt, approvals, questions, standard MCP elicitation, and explicit `/` command/skill invocation with autocomplete. | Optional launcher connects the official TUI and daemon to one app-server. See [Codex managed terminal control](docs/codex-managed-terminal.md). |
 | **Codex Desktop** | Incremental rollout history, status, model, token usage, tools, plans, and file changes | Read-only: no remote input, approval, interrupt, kill, resume, or session creation. | Automatically discovered observer; displayed separately from Codex CLI as `codex-desktop`. |
 | **OpenCode 1.17.11+** | Sessions, content, status, commands, and interactions | Managed sessions support shared input, permissions, and questions. Existing independent processes stay read-only until safely resumed through the launcher. | Optional launcher connects the official TUI and daemon to one shared server. See [OpenCode managed terminal control](docs/opencode-managed-terminal.md). |
 | **ZCode** | Incremental history sync from the local SQLite store | Read-only: no remote input, approval, resume, or control. | Explicit opt-in observer. |
