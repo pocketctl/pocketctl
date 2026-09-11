@@ -2121,6 +2121,24 @@ func TestTerminalHydrationEventsOmitsMissingStatus(t *testing.T) {
 	}
 }
 
+func TestTerminalHydrationStatusDefersManagedCodexToAppServer(t *testing.T) {
+	tests := []struct {
+		name, agent, mode, status, want string
+	}{
+		{"managed Codex", adapter.AgentCodex, protocol.ControlManaged, protocol.StatusBusy, ""},
+		{"terminal Codex", adapter.AgentCodex, protocol.ControlLegacyReadOnly, protocol.StatusBusy, protocol.StatusBusy},
+		{"managed OpenCode", adapter.AgentOpencode, protocol.ControlManaged, protocol.StatusBusy, protocol.StatusBusy},
+		{"Claude", adapter.AgentClaude, protocol.ControlManaged, protocol.StatusBusy, protocol.StatusBusy},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := terminalHydrationStatus(tt.agent, tt.mode, tt.status); got != tt.want {
+				t.Fatalf("terminalHydrationStatus(%q, %q, %q)=%q, want %q", tt.agent, tt.mode, tt.status, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestNormalizeClaudeWatcherSessionStatus(t *testing.T) {
 	session := watcher.DiscoveredSession{Pid: 1234}
 	normalizeWatcherSessionStatus(adapter.AgentClaude, &session)

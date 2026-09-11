@@ -1054,7 +1054,11 @@ func (c *codexCoordinator) subscribeTerminalThread(parent context.Context, clien
 		return
 	}
 	c.projectionMu.Lock()
-	c.reconcileHydratedActiveTurn(threadID, projector.CurrentThreadStatus(threadID), historicalActiveTurn, turnRevision, hydrationComplete)
+	if c.reconcileHydratedActiveTurn(threadID, projector.CurrentThreadStatus(threadID), historicalActiveTurn, turnRevision, hydrationComplete) {
+		c.publishProjected([]protocol.DaemonEvent{{
+			Type: "session_status", SessionID: threadID, Status: protocol.StatusIdle, Resync: true,
+		}})
+	}
 	c.projectionMu.Unlock()
 	// A reconnect can replace the daemon client while an old resume/hydration
 	// call is still completing. Never attach a backend that writes through the
@@ -1168,18 +1172,24 @@ func (c *codexCoordinator) reconcileActiveTurnStatus(threadID, status string) {
 	}
 }
 
-func (c *codexCoordinator) reconcileHydratedActiveTurn(threadID, status, historicalTurn string, baseline uint64, hydrationComplete bool) {
+func (c *codexCoordinator) reconcileHydratedActiveTurn(threadID, status, historicalTurn string, baseline uint64, hydrationComplete bool) bool {
 	_, revision := c.turnSnapshot(threadID)
 	if revision != baseline {
-		return
+		return false
 	}
 	if status != "active" {
 		c.setActiveTurn(threadID, "")
-		return
+		return false
 	}
 	if hydrationComplete {
 		c.setActiveTurn(threadID, historicalTurn)
+		// A native active status can arrive during thread/resume even though the
+		// authoritative paginated history contains no in-progress turn. Publish
+		// the missing terminal convergence so Relay and clients do not retain a
+		// stale busy state after daemon restart.
+		return historicalTurn == ""
 	}
+	return false
 }
 
 func (c *codexCoordinator) turnSnapshot(threadID string) (string, uint64) {

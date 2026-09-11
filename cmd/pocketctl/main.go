@@ -2261,6 +2261,17 @@ func terminalHydrationEvents(events []protocol.DaemonEvent, sessionID, currentSt
 	return projected
 }
 
+// Managed Codex lifecycle is recovered from the live app-server. Its JSONL
+// tailer still hydrates durable content, but a process snapshot captured before
+// app-server reconciliation must not overwrite the authoritative idle/running
+// result after daemon restart.
+func terminalHydrationStatus(agentType, controlMode, snapshotStatus string) string {
+	if agentType == adapter.AgentCodex && controlMode == protocol.ControlManaged {
+		return ""
+	}
+	return snapshotStatus
+}
+
 // Desktop discovery only knows that a rollout is recent. Unlike a process
 // watcher, its default busy status is not authoritative. Restore the latest
 // native lifecycle in the initial read, then publish a single resync snapshot.
@@ -3205,7 +3216,9 @@ func handleWatcherEvents(ctx context.Context, events <-chan watcher.SessionEvent
 									events = codexObserverHydrationEvents(sm, events, sessionSnapshot.SessionID, sessionSnapshot.Status)
 									stateDirty.Store(true)
 								} else {
-									events = terminalHydrationEvents(events, sessionSnapshot.SessionID, sessionSnapshot.Status)
+									events = terminalHydrationEvents(events, sessionSnapshot.SessionID, terminalHydrationStatus(
+										publishedAgent, sm.SessionControlMode(sessionSnapshot.SessionID), sessionSnapshot.Status,
+									))
 								}
 								hydrating = false
 							}
