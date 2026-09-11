@@ -15,6 +15,8 @@ item/commandExecution/requestApproval item/fileChange/requestApproval
 item/permissions/requestApproval item/tool/requestUserInput
 mcpServer/elicitation/request serverRequest/resolved`
 
+const emptyThreadPersistenceMethod = `thread/inject_items`
+
 func TestCodexProbeReportsGranularCapabilities(t *testing.T) {
 	probe := CodexProbe{
 		Timeout: time.Second,
@@ -30,18 +32,34 @@ func TestCodexProbeReportsGranularCapabilities(t *testing.T) {
 			}
 		},
 		GenerateSchema: func(context.Context, string) ([]byte, error) {
-			return []byte(completeCodexSchema), nil
+			return []byte(completeCodexSchema + " " + emptyThreadPersistenceMethod), nil
 		},
 	}
 	caps, err := probe.Probe(context.Background(), "/opt/codex", "0.144.1")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !caps.Managed() || !caps.Core || !caps.TerminalRemote || !caps.Steer || !caps.Approvals || !caps.UserInput || !caps.MCPElicitation {
+	if !caps.Managed() || !caps.Core || !caps.TerminalRemote || !caps.Steer || !caps.Approvals || !caps.UserInput || !caps.MCPElicitation || !caps.ThreadInjection {
 		t.Fatalf("incomplete capabilities: %+v", caps)
 	}
 	if caps.SchemaHash == "" {
 		t.Fatal("schema hash is empty")
+	}
+}
+
+func TestCodexProbeKeepsManagedCapabilityWithoutEmptyThreadPersistence(t *testing.T) {
+	probe := CodexProbe{
+		Run: func(_ context.Context, _ string, args ...string) ([]byte, error) {
+			if len(args) == 1 {
+				return []byte("--remote <ADDR>"), nil
+			}
+			return []byte("--listen <URL> unix://"), nil
+		},
+		GenerateSchema: func(context.Context, string) ([]byte, error) { return []byte(completeCodexSchema), nil },
+	}
+	caps, err := probe.Probe(context.Background(), "/opt/codex", "0.144.1")
+	if err != nil || !caps.Managed() || caps.ThreadInjection {
+		t.Fatalf("caps=%+v error=%v", caps, err)
 	}
 }
 

@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/pocketctl/pocketctl/internal/adapter"
 	"github.com/pocketctl/pocketctl/internal/codexapp"
 	"github.com/pocketctl/pocketctl/internal/protocol"
 )
@@ -99,6 +100,30 @@ func TestCodexAppServerBackendStartSendSteerInterruptAndResume(t *testing.T) {
 	if startParams["cwd"] != "/repo" || startParams["model"] != "gpt-5" || startParams["approvalPolicy"] != "never" || startParams["sandbox"] != "workspace-write" {
 		t.Fatalf("thread/start params=%v", startParams)
 	}
+	var injected map[string]any
+	if err := json.Unmarshal(rpc.lastCall(t, "thread/inject_items").params, &injected); err != nil {
+		t.Fatal(err)
+	}
+	items := injected["items"].([]any)
+	message := items[0].(map[string]any)
+	content := message["content"].([]any)[0].(map[string]any)
+	if injected["threadId"] != "thr_1" || message["role"] != "developer" || content["text"] != codexEmptySessionInitializer {
+		t.Fatalf("empty session initializer=%v", injected)
+	}
+	var startIndex, injectIndex, turnIndex = -1, -1, -1
+	for index, call := range rpc.calls {
+		switch call.method {
+		case "thread/start":
+			startIndex = index
+		case "thread/inject_items":
+			injectIndex = index
+		case "turn/start":
+			turnIndex = index
+		}
+	}
+	if !(startIndex >= 0 && startIndex < injectIndex && injectIndex < turnIndex) {
+		t.Fatalf("initializer ordering start=%d inject=%d turn=%d", startIndex, injectIndex, turnIndex)
+	}
 	var initialTurn map[string]any
 	_ = json.Unmarshal(rpc.lastCall(t, "turn/start").params, &initialTurn)
 	if initialTurn["threadId"] != "thr_1" || initialTurn["input"].([]any)[0].(map[string]any)["text"] != "hello" {
@@ -128,6 +153,38 @@ func TestCodexAppServerBackendStartSendSteerInterruptAndResume(t *testing.T) {
 	}
 	if call := rpc.lastCall(t, "thread/resume"); string(call.params) != `{"threadId":"thr_2"}` {
 		t.Fatalf("resume params=%s", call.params)
+	}
+}
+
+func TestCodexAppServerBackendDoesNotAnnounceUnpersistedEmptyThread(t *testing.T) {
+	sm := NewSessionManager(make(chan protocol.DaemonEvent, 1))
+	coord := newVerifiedTestCodexCoordinator(sm)
+	rpc := newFakeCodexRuntimeClient()
+	rpc.results["thread/start"] = json.RawMessage(`{"thread":{"id":"thr_empty"}}`)
+	rpc.errs["thread/inject_items"] = errors.New("unsupported")
+	backend := newCodexAppServerBackend(sm, coord, rpc, 1)
+	if _, err := backend.Start(context.Background(), protocol.SessionConfig{Agent: "codex", Cwd: "/repo"}); err == nil || !strings.Contains(err.Error(), "persist empty Codex thread") {
+		t.Fatalf("error=%v", err)
+	}
+	if coord.ownsInvocationThread("thr_empty") {
+		t.Fatal("unpersisted empty thread was registered")
+	}
+}
+
+func TestCodexAppServerBackendForkDoesNotInjectInitializer(t *testing.T) {
+	sm := NewSessionManager(make(chan protocol.DaemonEvent, 1))
+	coord := newVerifiedTestCodexCoordinator(sm)
+	rpc := newFakeCodexRuntimeClient()
+	rpc.results["thread/fork"] = json.RawMessage(`{"thread":{"id":"thr_fork"}}`)
+	backend := newCodexAppServerBackend(sm, coord, rpc, 1)
+	sm.sessions["thr_source"] = &ProcessState{SessionID: "thr_source", Agent: adapter.AgentCodex, Backend: backend, ControlMode: protocol.ControlManaged}
+	if _, err := backend.Start(context.Background(), protocol.SessionConfig{Agent: "codex", Cwd: "/repo", ForkFrom: "thr_source"}); err != nil {
+		t.Fatal(err)
+	}
+	for _, call := range rpc.calls {
+		if call.method == "thread/inject_items" {
+			t.Fatal("fork received an empty-session initializer")
+		}
 	}
 }
 

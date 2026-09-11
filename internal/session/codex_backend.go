@@ -25,6 +25,8 @@ type CodexAppServerBackend struct {
 	generation uint64
 }
 
+const codexEmptySessionInitializer = "Pocketctl initialized this session."
+
 func newCodexAppServerBackend(sm *SessionManager, coord *codexCoordinator, client codexRuntimeClient, generation uint64) *CodexAppServerBackend {
 	return &CodexAppServerBackend{sm: sm, coord: coord, client: client, generation: generation}
 }
@@ -62,6 +64,9 @@ func (sm *SessionManager) tryCreateManagedCodexSession(ctx context.Context, conf
 		_ = agentcontrol.RecordCodexFallback(agentcontrol.CodexFallbackCapabilities)
 		logCodexManagedFallback(binary, version, err)
 		return "", false, nil
+	}
+	if !capabilities.ThreadInjection {
+		return "", true, fmt.Errorf("Codex %s 不支持空会话持久化，请升级 Codex 后重试", version)
 	}
 	coord, err := provider.projectCoordinator(cwd)
 	if err != nil {
@@ -142,6 +147,20 @@ func (b *CodexAppServerBackend) Start(ctx context.Context, config protocol.Sessi
 	}
 	if response.Thread.ID == "" {
 		return "", fmt.Errorf("Codex thread/start returned no thread id")
+	}
+	// Codex does not create a rollout for thread/start alone. Persist a fixed,
+	// non-task developer item before announcing the session so an empty /new
+	// thread can be resumed after daemon or host restart. Codex omits injected
+	// items from thread/turns/list and thread/items/list, keeping remote history
+	// visually empty until the user sends the first message.
+	if method == "thread/start" {
+		items := []any{map[string]any{
+			"type": "message", "role": "developer",
+			"content": []any{map[string]any{"type": "input_text", "text": codexEmptySessionInitializer}},
+		}}
+		if err := b.client.Call(ctx, "thread/inject_items", map[string]any{"threadId": response.Thread.ID, "items": items}, nil); err != nil {
+			return "", fmt.Errorf("persist empty Codex thread: %w", err)
+		}
 	}
 	b.coord.markSubscribed(response.Thread.ID)
 	if config.Prompt != "" {
