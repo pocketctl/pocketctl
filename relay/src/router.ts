@@ -56,7 +56,7 @@ import {
   OBSERVER_READ_ONLY_CODE,
 } from './session-observer-policy.js';
 
-interface DaemonConnection { ws: WebSocket; daemonId: string; hostname: string; agents: any[]; userId: number | null; os?: string; ip?: string; port?: string; arch?: string; version?: string; startedAt?: number; registrationId: string; tokenJti?: string }
+interface DaemonConnection { supportsDirectoryBrowse?: boolean; ws: WebSocket; daemonId: string; hostname: string; agents: any[]; userId: number | null; os?: string; ip?: string; port?: string; arch?: string; version?: string; startedAt?: number; registrationId: string; tokenJti?: string; lastHeartbeatAt: number }
 interface ClientConnection { ws: WebSocket; subscribedSessions: Set<string>; userId: number | null; locale: string }
 interface OpenCodeRuntimeTelemetry { fallbackReasons: Record<string, number>; healthOK: number; healthFailed: number }
 interface DaemonMetrics { cpuPct: number; memPct: number; diskPct: number; updatedAt: number; openCodeRuntime?: OpenCodeRuntimeTelemetry }
@@ -231,6 +231,8 @@ export class Router {
   private memoryCodegraphGrantBroker?: MemoryCodegraphGrantBroker;
   private clients = new Map<WebSocket, ClientConnection>();
   private sessionToDaemon = new Map<string, string>();
+  private invocationRequests = new Map<string, { client: WebSocket; daemonId: string; daemonWs: WebSocket; sessionId: string; requestId: string; fingerprint: string; reply?: any; timer: ReturnType<typeof setTimeout> }>();
+  private directoryRequests = new Map<string, { client: WebSocket; daemonId: string; daemonWs: WebSocket; requestId: string; timer: ReturnType<typeof setTimeout> }>();
   private pendingSessionCreate = new Map<string, WebSocket>();
   private pendingSessionMeta = new Map<string, { agent_type: string; cwd: string }>();
   private pendingSessionOperations = new Map<string, PendingSessionOperation>();
@@ -245,6 +247,8 @@ export class Router {
   // Set during graceful shutdown to suppress offline pushes (the daemons are
   // about to reconnect to the new process — not genuinely offline).
   private shuttingDown = false;
+  private readonly heartbeatTimeoutMs = positiveInteger(process.env.DAEMON_HEARTBEAT_TIMEOUT_MS, 45_000);
+  private heartbeatTimer?: ReturnType<typeof setInterval>;
   // Per-daemon event delivery cursor for at-least-once delivery. `persistedHigh`
   // is the highest *contiguous* seq that has been durably persisted; it is what
   // event_ack reports, so the daemon only trims its outbound buffer/spool once an
@@ -432,6 +436,22 @@ export class Router {
       disconnectRetryable: (target, reason, retryAfterMs) => this.disconnectDurableIngress(target, reason, retryAfterMs),
     });
     this.pushDeduper.startSweeping();
+    this.heartbeatTimer = setInterval(() => {
+      const now = Date.now();
+      for (const [daemonId, daemon] of this.daemons) {
+        if (now - daemon.lastHeartbeatAt < this.heartbeatTimeoutMs) continue;
+        console.info('[daemon] heartbeat expired', { daemonId, lastHeartbeatAt: daemon.lastHeartbeatAt });
+        // Fence/remove this registration synchronously before terminating its socket.
+        // A late close or reconnect must never evict a newer registration.
+        this.unregisterDaemon(daemonId, daemon.ws);
+        const timer = this.pendingOfflineTimers.get(daemonId);
+        if (timer) clearTimeout(timer);
+        this.pendingOfflineTimers.delete(daemonId);
+        void this.finalizeDaemonOffline(daemonId, daemon).catch(console.error);
+        daemon.ws.terminate();
+      }
+    }, 5_000);
+    this.heartbeatTimer.unref?.();
   }
 
   private positiveTransportOption(value: number | undefined, fallback: number): number {
@@ -826,7 +846,12 @@ export class Router {
   }
 
   /** Release background resources (push dedup sweeper). Call on shutdown. */
-  stop(): void { this.pushDeduper.stop(); }
+  stop(): void {
+    this.pushDeduper.stop();
+    if (this.heartbeatTimer) clearInterval(this.heartbeatTimer);
+    for (const timer of this.pendingOfflineTimers.values()) clearTimeout(timer);
+    this.pendingOfflineTimers.clear();
+  }
 
   /**
    * Push only to Pro/whitelisted users. Reads plan and skips free users.
@@ -1178,7 +1203,7 @@ export class Router {
     if (previousDaemon && previousDaemon.ws !== ws) {
       this.cancelDaemonRevocationGate(previousDaemon.registrationId);
     }
-    this.daemons.set(daemonId, { ws, daemonId, hostname, agents, userId, os: daemonOS, ip: daemonIP, port: daemonPort, arch: daemonArch, version: daemonVersion, startedAt: daemonStartedAt, registrationId, tokenJti });
+    this.daemons.set(daemonId, { supportsDirectoryBrowse: msg.supports_directory_browse === true, ws, daemonId, hostname, agents, userId, os: daemonOS, ip: daemonIP, port: daemonPort, arch: daemonArch, version: daemonVersion, startedAt: daemonStartedAt, registrationId, tokenJti, lastHeartbeatAt: Date.now() });
     if (tokenJti) this.authLeases.confirm(registrationId);
     console.log('[ws] daemon registered', daemonId, 'agents:', JSON.stringify(agents), 'userId:', userId);
     if (previousDaemon && previousDaemon.ws !== ws) {
@@ -1472,7 +1497,15 @@ export class Router {
       locale: existing?.locale ?? 'zh',
     });
   }
-  unregisterClient(ws: WebSocket): void { this.clients.delete(ws); }
+  unregisterClient(ws: WebSocket): void {
+    this.clients.delete(ws);
+    for (const [id,pending] of this.invocationRequests) { if(pending.client === ws) {clearTimeout(pending.timer);this.invocationRequests.delete(id);} }
+    for (const [id, pending] of this.directoryRequests) {
+      if (pending.client !== ws) continue;
+      clearTimeout(pending.timer); this.directoryRequests.delete(id);
+      if (pending.daemonWs.readyState === 1) this.send(pending.daemonWs, { type: 'cancel_directory', request_id: id });
+    }
+  }
 
   /**
    * Advance the per-daemon ack water-mark to the highest *contiguous* persisted
@@ -1862,6 +1895,7 @@ export class Router {
     const current = this.daemons.get(daemonId);
     const cursor = this.daemonSeq.get(daemonId);
     if (!current || current.ws !== daemon.ws || current.registrationId !== daemon.registrationId || !cursor?.accepting) return;
+    daemon.lastHeartbeatAt = Date.now();
     this.send(daemon.ws, { type: 'pong' });
     db.updateHeartbeat(this.controlPool, daemonId).catch(console.error);
     const openCodeRuntime = sanitizeOpenCodeRuntimeTelemetry(msg.opencode_runtime);
@@ -2115,9 +2149,39 @@ export class Router {
       }).catch((error) => this.logBestEffortFailure('session_title_update authorization', error));
       return;
     }
+    if (msg.type === 'invocation_result') {
+      const pending = this.invocationRequests.get(msg.request_id);
+      const daemon = this.daemons.get(daemonId);
+      if (pending && pending.daemonId === daemonId && pending.daemonWs === daemon?.ws && pending.sessionId === sessionId && !pending.reply) {
+        const client = this.clients.get(pending.client);
+        if (client && daemon && this.sameUser(client.userId, daemon.userId)) {
+          clearTimeout(pending.timer);
+          pending.reply = { ...msg, request_id: pending.requestId };
+          this.send(pending.client, pending.reply);
+          pending.timer = setTimeout(() => this.invocationRequests.delete(msg.request_id), 60_000);
+          pending.timer.unref?.();
+        }
+      }
+      if (!durableIngressOwnsAck) this.markPersisted(daemonId, msg.seq);
+      return;
+    }
     if (!sessionId) {
       if (msg.type === 'session_create_failed') {
         this.persistAndAck(daemonId, msg.seq, '', msg.type, msg, messageState, receivedAt);
+        return;
+      }
+      if (msg.type === 'directory_result') {
+        const pending = this.directoryRequests.get(msg.request_id);
+        const daemon = this.daemons.get(daemonId);
+        if (pending && pending.daemonId === daemonId && pending.daemonWs === daemon?.ws) {
+          clearTimeout(pending.timer);
+          this.directoryRequests.delete(msg.request_id);
+          const client = this.clients.get(pending.client);
+          if (client && daemon && this.sameUser(client.userId, daemon.userId)) {
+            this.send(pending.client, { ...msg, daemon_id: daemonId, request_id: pending.requestId });
+          }
+        }
+        if (!durableIngressOwnsAck) this.markPersisted(daemonId, msg.seq);
         return;
       }
       // model_list (host-level response, no session_id): broadcast to the daemon owner's clients
@@ -2222,14 +2286,14 @@ export class Router {
       if (client.userId == null) {
         // Anonymous/API-key connections (userId=null) may not act on a specific
         // session. Real clients always carry a userId (prod requires a token).
-        this.send(clientWs, { type: 'error', session_id: msg.session_id, error: 'forbidden' });
+        this.send(clientWs, { type: ['list_invocations','invoke_command'].includes(msg.type) ? 'invocation_result' : 'error', session_id: msg.session_id, request_id: msg.request_id, error: 'forbidden' });
         return;
       }
       sessionRuntimePolicy = sessionRuntimePolicy ?? await db.getSessionRuntimePolicy(
         this.pool, msg.session_id, client.userId,
       ).catch(() => null);
       if (!sessionRuntimePolicy) {
-        this.send(clientWs, { type: 'error', session_id: msg.session_id, error: 'session not found or not owned' });
+        this.send(clientWs, { type: ['list_invocations','invoke_command'].includes(msg.type) ? 'invocation_result' : 'error', session_id: msg.session_id, request_id: msg.request_id, error: 'session not found or not owned' });
         return;
       }
       if (isObserverAgentType(sessionRuntimePolicy.agentType)
@@ -2383,6 +2447,40 @@ export class Router {
       return;
     }
 
+    if (['list_directories', 'validate_directory', 'cancel_directory'].includes(msg.type)) {
+      const requestId = msg.request_id;
+      const daemonId = msg.daemon_id;
+      const reject = (reason: string) => this.send(clientWs, { type: 'directory_result', request_id: requestId, daemon_id: daemonId, reason });
+      if (typeof requestId !== 'string' || !requestId || requestId.length > 128 || typeof daemonId !== 'string') { reject('invalid_request'); return; }
+      // Cancel/replace only this client's own request; relay-generated IDs keep
+      // two tabs with colliding request IDs isolated at the daemon too.
+      for (const [id, pending] of this.directoryRequests) {
+        if (pending.client === clientWs && pending.requestId === requestId) {
+          clearTimeout(pending.timer); this.directoryRequests.delete(id);
+          if (pending.daemonWs.readyState === 1) this.send(pending.daemonWs, { type: 'cancel_directory', request_id: id });
+        }
+      }
+      if (msg.type === 'cancel_directory') return;
+      const daemon = this.daemons.get(daemonId);
+      if (!daemon || daemon.ws.readyState !== 1 || !this.sameUser(daemon.userId, client.userId)) { reject('daemon_offline'); return; }
+      if (!daemon.supportsDirectoryBrowse) { reject('unsupported'); return; }
+      if (typeof msg.path !== 'string' || msg.path.length > 8192
+        || (msg.query != null && (typeof msg.query !== 'string' || msg.query.length > 256))
+        || (msg.cursor != null && (typeof msg.cursor !== 'string' || msg.cursor.length > 16384))
+        || (msg.limit != null && (!Number.isInteger(msg.limit) || msg.limit < 1 || msg.limit > 200))) { reject('invalid_request'); return; }
+      if ([...this.directoryRequests.values()].filter(p => p.client === clientWs).length >= 4 || this.directoryRequests.size >= 1024) { reject('busy'); return; }
+      const id = randomUUID();
+      const timer = setTimeout(() => {
+        this.directoryRequests.delete(id);
+        if (daemon.ws.readyState === 1) this.send(daemon.ws, { type: 'cancel_directory', request_id: id });
+        if (clientWs.readyState === 1) reject('timeout');
+      }, 10_000);
+      timer.unref?.();
+      this.directoryRequests.set(id, { client: clientWs, daemonId, daemonWs: daemon.ws, requestId, timer });
+      this.send(daemon.ws, { type: msg.type, request_id: id, path: msg.path, query: msg.query, cursor: msg.cursor, limit: msg.limit, fallback: msg.fallback === true });
+      return;
+    }
+
     if (msg.type === 'list_models') {
       // Host-level query (no session_id): route to the target daemon by daemon_id.
       // The reply (model_list) is broadcast back to the owner's clients below.
@@ -2396,6 +2494,14 @@ export class Router {
     }
 
     if (msg.type === 'session_create') {
+      if (msg.fork_from != null) {
+        const source = typeof msg.fork_from === 'string' && client.userId != null
+          ? await db.getSessionRuntimePolicy(this.pool,msg.fork_from,client.userId).catch(() => null) : null;
+        if (!source || source.agentType !== 'codex' || source.daemonId !== msg.daemon_id) {
+          this.send(clientWs,{type:'session_create_failed',request_id:msg.request_id,reason:'invalid_fork_source',error:'fork source not owned by selected host'});return;
+        }
+      }
+
       const requestId = typeof msg.request_id === 'string' && msg.request_id
         ? msg.request_id
         : randomUUID();
@@ -2431,7 +2537,7 @@ export class Router {
         });
         return;
       }
-      // Precise routing: prefer msg.daemon_id, validate ownership; fallback to first online same-user daemon
+      // An explicit host is binding. Only legacy clients without a host may auto-route.
       let targetDaemon: { id: string; daemon: DaemonConnection } | null = null;
       if (msg.daemon_id) {
         const d = this.daemons.get(msg.daemon_id);
@@ -2439,7 +2545,7 @@ export class Router {
           targetDaemon = { id: msg.daemon_id, daemon: d };
         }
       }
-      if (!targetDaemon) {
+      if (!targetDaemon && !msg.daemon_id) {
         for (const [dId, d] of this.daemons) {
           if (d.ws.readyState === 1 && this.sameUser(client.userId, d.userId)) {
             targetDaemon = { id: dId, daemon: d };
@@ -2515,6 +2621,16 @@ export class Router {
         reservationId = decision.reservationId;
         expiresAt = decision.expiresAt;
         reusedReservation = decision.reused;
+      }
+      // Quota admission awaits DB work. Recheck the exact connection before
+      // sending; a replacement or disconnected host must never receive it.
+      const currentTarget = this.daemons.get(daemonId);
+      if (!reusedReservation && (currentTarget !== targetDaemon.daemon || currentTarget.ws.readyState !== 1 || !this.sameUser(currentTarget.userId, client.userId))) {
+        if (reservationId && client.userId !== null) {
+          await settleQuotaReservation(this.pool, { reservationId, userId: client.userId, daemonId, requestId, operation: 'create', sessionId: null }, 'session_create_failed');
+        }
+        this.send(clientWs, { type: 'session_create_failed', request_id: requestId, reason: 'daemon_offline', error: 'selected daemon unavailable' });
+        return;
       }
       this.trackPendingSessionOperation({
         requestId,
@@ -2662,6 +2778,19 @@ export class Router {
           if (['approval_response', 'question_response', 'question_reject'].includes(msg.type) && typeof msg.request_id === 'string') {
             this.trackInteractionClient(msg.session_id, msg.request_id, msg.type, clientWs);
           }
+          if (['list_invocations', 'invoke_command'].includes(msg.type)) {
+            const reject = (error: string) => this.send(clientWs, {type:'invocation_result', session_id:msg.session_id, request_id:msg.request_id, error});
+            if (typeof msg.request_id !== 'string' || !msg.request_id || msg.request_id.length > 128 || (msg.type === 'invoke_command' && (typeof msg.content !== 'string' || msg.content.length > 32768)) || (msg.invocation_id != null && (typeof msg.invocation_id !== 'string' || msg.invocation_id.length > 128))) { reject('invalid_request'); return; }
+            const fingerprint = JSON.stringify([msg.type,msg.session_id,msg.content,msg.invocation_id]);
+            const existing = [...this.invocationRequests.values()].find(p => p.client === clientWs && p.requestId === msg.request_id);
+            if (existing) { if (existing.fingerprint !== fingerprint) reject('request_id_conflict'); else if (existing.reply) this.send(clientWs,existing.reply); return; }
+            if (this.invocationRequests.size >= 2048 || [...this.invocationRequests.values()].filter(p => p.client === clientWs && !p.reply).length >= 4) { reject('busy'); return; }
+            const id = randomUUID();
+            const timer = setTimeout(() => { this.invocationRequests.delete(id); reject('调用超时，请刷新后确认状态'); },20_000); timer.unref?.();
+            this.invocationRequests.set(id,{client:clientWs,daemonId,daemonWs:daemon.ws,sessionId:msg.session_id,requestId:msg.request_id,fingerprint,timer});
+            this.send(daemon.ws,{type:msg.type,session_id:msg.session_id,request_id:id,content:msg.content,invocation_id:msg.invocation_id});
+            return;
+          }
           this.send(daemon.ws, outbound);
           // L2 (web-post-send-feedback): ack so the web client clears its ack-timeout.
           if (msg.type === 'user_message' && msg.msg_id) {
@@ -2675,7 +2804,7 @@ export class Router {
           this.send(clientWs, { type: 'user_message_nack', msg_id: msg.msg_id, reason: 'daemon_offline' });
         } else {
           this.send(clientWs, {
-            type: 'error', session_id: msg.session_id,
+            type: ['list_invocations','invoke_command'].includes(msg.type) ? 'invocation_result' : 'error', session_id: msg.session_id, request_id: msg.request_id,
             code: 'daemon_unreachable',
             error: 'daemon offline or reconnecting',
           });
@@ -2687,7 +2816,7 @@ export class Router {
         this.send(clientWs, { type: 'user_message_nack', msg_id: msg.msg_id, reason: 'session_not_found' });
       } else {
         this.send(clientWs, {
-          type: 'error', session_id: msg.session_id,
+          type: ['list_invocations','invoke_command'].includes(msg.type) ? 'invocation_result' : 'error', session_id: msg.session_id, request_id: msg.request_id,
           code: 'session_not_found',
           error: 'session not found',
         });
@@ -3071,7 +3200,7 @@ export class Router {
         arch: conn.arch || '',
         version: conn.version || '',
         started_at: conn.startedAt || 0,
-        last_heartbeat: Date.now(),
+        last_heartbeat: conn.lastHeartbeatAt,
         cpu_pct: metrics?.cpuPct ?? null,
         mem_pct: metrics?.memPct ?? null,
         disk_pct: metrics?.diskPct ?? null,
@@ -3103,7 +3232,7 @@ export class Router {
       const inStartupWindow = (Date.now() - this.startedAt) < this.listGraceMs;
       const optimisticOnline = optimistic && inStartupWindow;
       // 非乐观模式下以 DB 记录的 status 为准;乐观模式下被乐观值覆盖。
-      const dbOnline = row.status === 'online';
+      const dbOnline = row.status === 'online' && Date.now() - new Date(row.last_heartbeat).getTime() < this.heartbeatTimeoutMs;
       const demoOnline = isAppReviewDemoDaemon(row.daemon_id);
       const isOnline = demoOnline || optimisticOnline || (!optimistic && dbOnline);
       return {

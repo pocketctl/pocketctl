@@ -544,7 +544,7 @@ func TestCodexCoordinatorLiveTurnDuringBlockedResumeWinsResumedIdle(t *testing.T
 	}
 }
 
-func TestCodexCoordinatorDuplicateLiveStatusDuringResumeOrdersSnapshotWithoutDuplicateOutput(t *testing.T) {
+func TestCodexCoordinatorDuplicateActiveStatusWithoutTurnConvergesToIdle(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	output := make(chan protocol.DaemonEvent, 32)
 	sm := NewSessionManager(output)
@@ -570,8 +570,8 @@ func TestCodexCoordinatorDuplicateLiveStatusDuringResumeOrdersSnapshotWithoutDup
 	coord.projectLive(projector, codexNotification("thread/status/changed", `{"threadId":"thr_duplicate","status":{"type":"active"}}`))
 	close(client.release)
 	<-done
-	if got := sessionStatus(sm, "thr_duplicate"); got != protocol.StatusRunning {
-		t.Fatalf("status=%q, want duplicate live active to order ahead of resumed idle", got)
+	if got := sessionStatus(sm, "thr_duplicate"); got != protocol.StatusIdle {
+		t.Fatalf("status=%q, want completed hydration to override active without a turn", got)
 	}
 	statusEvents := 0
 	for len(output) > 0 {
@@ -579,8 +579,8 @@ func TestCodexCoordinatorDuplicateLiveStatusDuringResumeOrdersSnapshotWithoutDup
 			statusEvents++
 		}
 	}
-	if statusEvents != 1 {
-		t.Fatalf("session_status events=%d, want duplicate output deduplicated", statusEvents)
+	if statusEvents != 2 {
+		t.Fatalf("session_status events=%d, want one active event and one idle convergence", statusEvents)
 	}
 }
 
@@ -1111,6 +1111,54 @@ drained:
 	coord.mu.Lock()
 	coord.stopEventPumpLocked()
 	coord.mu.Unlock()
+}
+
+func TestCodexCoordinatorHydrationConvergesStaleActiveStatusToIdle(t *testing.T) {
+	output := make(chan protocol.DaemonEvent, 16)
+	sm := NewSessionManager(output)
+	const threadID = "thr_stale_active"
+	sm.sessions[threadID] = &ProcessState{
+		SessionID: threadID, Agent: adapter.AgentCodex, Source: "terminal",
+		ControlMode: protocol.ControlManaged, Status: protocol.StatusBusy, Cwd: "/repo",
+	}
+	rpc := newFakeCodexRuntimeClient()
+	rpc.results["thread/resume"] = json.RawMessage(`{"model":"gpt-5.6","cwd":"/repo","thread":{"id":"thr_stale_active","cwd":"/repo","status":{"type":"active"},"turns":[]}}`)
+	rpc.results["thread/turns/list"] = json.RawMessage(`{"data":[{"id":"turn_done","status":"completed","items":[]}]}`)
+	coord := newVerifiedTestCodexCoordinator(sm)
+	coord.runtime = &codexAppServerRuntime{Client: rpc}
+	coord.generation = 9
+	projector := newCodexProjection(coord.generation)
+	projector.Project(codexNotification("thread/status/changed", `{"threadId":"thr_stale_active","status":{"type":"active"}}`))
+
+	coord.subscribeTerminalThread(context.Background(), rpc, coord.generation, threadID, projector)
+
+	if got := sessionStatus(sm, threadID); got != protocol.StatusIdle {
+		t.Fatalf("recovered status=%q, want idle after completed history", got)
+	}
+	foundIdle := false
+	for len(output) > 0 {
+		event := <-output
+		if event.Type == "session_status" && event.SessionID == threadID && event.Status == protocol.StatusIdle && event.Resync {
+			foundIdle = true
+		}
+	}
+	if !foundIdle {
+		t.Fatal("recovery did not publish an idle convergence event")
+	}
+}
+
+func TestCodexCoordinatorHydrationDoesNotIdleConcurrentNewTurn(t *testing.T) {
+	coord := newVerifiedTestCodexCoordinator(NewSessionManager(make(chan protocol.DaemonEvent, 1)))
+	const threadID = "thr_concurrent_turn"
+	baseline := uint64(0)
+	coord.observeTurnNotification(codexNotification("turn/started", `{"threadId":"thr_concurrent_turn","turn":{"id":"turn_live"}}`))
+
+	if coord.reconcileHydratedActiveTurn(threadID, "active", "", baseline, true) {
+		t.Fatal("stale hydration attempted to idle a concurrent live turn")
+	}
+	if got := coord.currentTurn(threadID); got != "turn_live" {
+		t.Fatalf("active turn=%q, want turn_live", got)
+	}
 }
 
 func TestCodexCoordinatorDesktopObserverWinsLateAppServerSubscription(t *testing.T) {

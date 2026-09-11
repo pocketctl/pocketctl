@@ -119,6 +119,10 @@ func validateCwd(cwd string) error {
 	if !info.IsDir() {
 		return fmt.Errorf("工作目录不是目录: %s", cwd)
 	}
+	// Remote session creation requires write/traverse permission, including ACLs.
+	if _, writable := directoryAccess(cwd); !writable {
+		return fmt.Errorf("工作目录不可写: %s", cwd)
+	}
 	// Test read access by opening the directory
 	f, err := os.Open(cwd)
 	if err != nil {

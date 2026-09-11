@@ -5,12 +5,15 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"sync"
 
 	"github.com/pocketctl/pocketctl/internal/agentcontrol"
 	"github.com/pocketctl/pocketctl/internal/daemon"
 )
 
 type CodexRuntimeProvider struct {
+	projectsMu  sync.Mutex
+	projects    map[string]*codexCoordinator
 	sm          *SessionManager
 	coordinator *codexCoordinator
 	resolve     func() (string, string, error)
@@ -21,6 +24,10 @@ type CodexRuntimeProvider struct {
 // It is deliberately lazy when no handoff file exists, so normal daemon start
 // does not spawn Codex until a terminal or managed Web session needs it.
 func (p *CodexRuntimeProvider) Recover(ctx context.Context) error {
+	projectErr := p.recoverProjects(ctx)
+	return errors.Join(projectErr, p.recoverLegacy(ctx))
+}
+func (p *CodexRuntimeProvider) recoverLegacy(ctx context.Context) error {
 	cfg, err := agentcontrol.LoadConfig()
 	if err != nil {
 		return err
@@ -166,5 +173,5 @@ func (sm *SessionManager) ShutdownCodex() error {
 	if provider == nil {
 		return nil
 	}
-	return provider.coordinator.shutdown()
+	return provider.shutdownAll()
 }

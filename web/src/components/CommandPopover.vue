@@ -1,17 +1,25 @@
 <template>
-  <div class="cmd-popover" v-if="commands.length">
+  <div class="cmd-popover" v-if="commands.length || filter !== undefined">
+    <div v-if="filter !== undefined" class="cmd-filters" @mousedown.prevent>
+      <button v-for="tab in filters" :key="tab.id" :aria-pressed="filter === tab.id" @click="$emit('filter',tab.id)">{{ tab.label }}</button>
+      <button aria-label="刷新命令与技能" @click="$emit('refresh')">刷新</button>
+    </div>
+    <p v-if="!commands.length" class="cmd-empty">没有匹配的命令或技能</p>
     <div
       v-for="(c, i) in commands"
-      :key="c.name"
+      :key="c.id || c.name"
       :class="['cmd-item', { active: i === activeIndex }]"
+      role="option" :aria-selected="i === activeIndex" :aria-disabled="!!c.unavailable"
+      @mousedown.prevent
       @click="$emit('select', c)"
       @mouseenter="$emit('hover', i)"
     >
       <span class="cmd-icon" v-html="commandIcon(c)"></span>
-      <span class="cmd-name">/{{ c.name }}</span>
+      <span class="cmd-copy"><span class="cmd-name">/{{ c.name }}</span>
       <span class="cmd-arg" v-if="commandHint(c)">{{ commandHint(c) }}</span>
       <span class="cmd-desc" v-if="c.description">{{ c.description }}</span>
-      <span class="cmd-source" v-if="c.source === 'plugin' || c.source === 'skill'">{{ c.source === 'plugin' ? c.namespace : 'skill' }}</span>
+      <small v-if="c.display_path" class="cmd-path">{{ c.display_path }}</small><small v-if="c.unavailable" class="cmd-path">{{ c.unavailable }}</small></span>
+      <span class="cmd-source" v-if="c.id || c.source === 'plugin' || c.source === 'skill'">{{ c.id ? ((c.kind === 'skill' ? 'Skill' : '命令') + ' · ' + c.source) : (c.source === 'plugin' ? c.namespace : 'skill') }}</span>
     </div>
   </div>
 </template>
@@ -22,12 +30,17 @@ import type { CommandItem } from '../composables/useWebSocket'
 defineProps<{
   commands: CommandItem[]
   activeIndex: number
+  filter?: string
 }>()
 
 defineEmits<{
   (e: 'select', item: CommandItem): void
   (e: 'hover', index: number): void
+  (e: 'filter', value: string): void
+  (e: 'refresh'): void
 }>()
+
+const filters = [{id:'all',label:'全部'},{id:'command',label:'命令'},{id:'skill',label:'Skills'}]
 
 // SVG icon paths (lucide/feather, stroke-width 2, 14×14) — slash-command-icons design
 const ICONS: Record<string, string> = {
@@ -55,6 +68,7 @@ function commandHint(c: CommandItem): string {
 </script>
 
 <style scoped>
+.cmd-filters{display:flex;gap:6px;padding:6px;position:sticky;top:0;background:var(--surface);z-index:1}.cmd-filters button{color:var(--fg-secondary);font:inherit;font-size:12px;background:transparent;border:0;border-radius:6px;padding:6px;cursor:pointer}.cmd-filters button[aria-pressed="true"]{color:var(--accent);background:var(--surface-hover)}.cmd-empty{font-size:12px;padding:8px 12px;color:var(--fg-secondary)}
 .cmd-popover {
   position: absolute;
   bottom: 100%;
@@ -116,3 +130,4 @@ function commandHint(c: CommandItem): string {
   flex-shrink: 0;
 }
 </style>
+<style scoped>.cmd-item{min-height:44px}.cmd-copy{display:flex;flex:1;min-width:0;flex-direction:column;gap:3px}.cmd-path{font-size:10px;color:var(--fg-secondary);overflow-wrap:anywhere}.cmd-desc{white-space:normal;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical}</style>

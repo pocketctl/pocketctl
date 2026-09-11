@@ -62,6 +62,11 @@ func (sm *SessionManager) CreateSession(ctx context.Context, config protocol.Ses
 		return "", err
 	}
 	config.Cwd = authorizedCwd
+	if _, statErr := os.Stat(authorizedCwd); statErr == nil {
+		if err := validateCwd(authorizedCwd); err != nil {
+			return "", err
+		}
+	}
 
 	cliPath, err := sm.createDeps.resolveAgentCLI(config)
 	if err != nil {
@@ -111,6 +116,9 @@ func (sm *SessionManager) CreateSession(ctx context.Context, config protocol.Ses
 		}
 	}
 
+	if err := cwdPolicy.Allows(resolvedCwd); err != nil {
+		return "", err
+	}
 	if err := validateCwd(resolvedCwd); err != nil {
 		return "", err
 	}
@@ -149,6 +157,9 @@ func (sm *SessionManager) CreateSession(ctx context.Context, config protocol.Ses
 			if managedID, handled, managedErr := sm.createDeps.startCodexManaged(sm, ctx, config, cliPath, resolvedCwd, displayModel, worktreePath, worktreeBranch); handled {
 				return managedID, managedErr
 			}
+		}
+		if config.ForkFrom != "" {
+			return "", fmt.Errorf("Codex fork requires an available managed project runtime")
 		}
 		if config.Permission != nil && config.Permission.ApprovalPolicy != "" && config.Permission.ApprovalPolicy != "never" {
 			return "", fmt.Errorf("codex remote approval requires the managed app-server backend")

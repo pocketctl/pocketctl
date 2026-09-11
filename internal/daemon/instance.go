@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sync"
 
 	"github.com/pocketctl/pocketctl/internal/platform"
 )
@@ -210,11 +211,57 @@ func CurrentInstanceToken() (string, error) {
 // modification. Replaces the former instance_unix.go / instance_windows.go
 // build-tag split (platform now owns the platform split).
 func AcquireInstanceLock() (io.Closer, error) {
-	dir, err := secureRuntimeDir()
+	if err := prepareLegacyRuntimeLockDir(); err != nil {
+		return nil, err
+	}
+	dirs, err := runtimeDirectories()
 	if err != nil {
 		return nil, err
 	}
-	return AcquireInstanceLockAt(filepath.Join(dir, "daemon.lock"))
+	return acquireRuntimeLocks(dirs)
+}
+
+// Keep compatibility locks for the entire lifetime of the new daemon. Merely
+// probing old locks before startup leaves a race with an older binary. All
+// aliases carry the same identity and status coalesces them into one instance.
+func acquireRuntimeLocks(dirs []string) (io.Closer, error) {
+	locks := &runtimeLocks{}
+	for _, dir := range dirs {
+		lock, err := defaultLocker.Acquire(filepath.Join(dir, "daemon.lock"))
+		if err != nil {
+			_ = locks.Close()
+			return nil, err
+		}
+		locks.held = append(locks.held, lock)
+	}
+	owner, err := newInstanceOwner()
+	if err != nil {
+		_ = locks.Close()
+		return nil, err
+	}
+	for _, dir := range dirs {
+		if err := writeInstanceOwner(filepath.Join(dir, "daemon.lock"), owner); err != nil {
+			_ = locks.Close()
+			return nil, fmt.Errorf("write daemon instance owner: %w", err)
+		}
+	}
+	return locks, nil
+}
+
+type runtimeLocks struct {
+	held []io.Closer
+	once sync.Once
+	err  error
+}
+
+func (l *runtimeLocks) Close() error {
+	l.once.Do(func() {
+		// Release the primary authority last.
+		for i := len(l.held) - 1; i >= 0; i-- {
+			l.err = errors.Join(l.err, l.held[i].Close())
+		}
+	})
+	return l.err
 }
 
 // AcquireInstanceLockAt is the path-selectable form used by restart ownership
@@ -230,29 +277,31 @@ func AcquireInstanceLockAt(path string) (io.Closer, error) {
 	if err != nil {
 		return nil, err // platform 已包装 "another pocketctl daemon is already running..."
 	}
-	startIdentity, err := processStartIdentity(os.Getpid())
+	owner, err := newInstanceOwner()
 	if err != nil {
 		_ = lock.Close()
-		return nil, fmt.Errorf("read current process start identity: %w", err)
+		return nil, err
 	}
-	if startIdentity == "" {
-		_ = lock.Close()
-		return nil, fmt.Errorf("read current process start identity: empty identity")
-	}
-	token, err := newRuntimeInstanceToken()
-	if err != nil {
-		_ = lock.Close()
-		return nil, fmt.Errorf("generate daemon runtime token: %w", err)
-	}
-	if err := writeInstanceOwner(path, instanceOwner{
-		PID:                  os.Getpid(),
-		RuntimeToken:         token,
-		ProcessStartIdentity: startIdentity,
-	}); err != nil {
+	if err := writeInstanceOwner(path, owner); err != nil {
 		_ = lock.Close()
 		return nil, fmt.Errorf("write daemon instance owner: %w", err)
 	}
 	return lock, nil
+}
+
+func newInstanceOwner() (instanceOwner, error) {
+	startIdentity, err := processStartIdentity(os.Getpid())
+	if err != nil {
+		return instanceOwner{}, fmt.Errorf("read current process start identity: %w", err)
+	}
+	if startIdentity == "" {
+		return instanceOwner{}, fmt.Errorf("read current process start identity: empty identity")
+	}
+	token, err := newRuntimeInstanceToken()
+	if err != nil {
+		return instanceOwner{}, fmt.Errorf("generate daemon runtime token: %w", err)
+	}
+	return instanceOwner{PID: os.Getpid(), RuntimeToken: token, ProcessStartIdentity: startIdentity}, nil
 }
 
 func newRuntimeInstanceToken() (string, error) {

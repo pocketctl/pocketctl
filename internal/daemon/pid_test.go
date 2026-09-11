@@ -6,7 +6,6 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
-	"strings"
 	"testing"
 	"time"
 
@@ -426,46 +425,6 @@ func TestAcquireInstanceLockRequiresCurrentProcessStartIdentityBeforePublishing(
 	}
 }
 
-func TestRuntimeStatusMissingPIDUsesInstanceAuthority(t *testing.T) {
-	tests := []struct {
-		name     string
-		snapshot func() (instanceOwner, bool, error)
-		wantErr  bool
-	}{
-		{
-			name: "free lock is stopped",
-			snapshot: func() (instanceOwner, bool, error) {
-				return instanceOwner{}, false, nil
-			},
-		},
-		{
-			name: "held lock is startup uncertainty",
-			snapshot: func() (instanceOwner, bool, error) {
-				return instanceOwner{PID: 101, RuntimeToken: "runtime-a"}, true, nil
-			},
-			wantErr: true,
-		},
-		{
-			name: "probe failure is uncertainty",
-			snapshot: func() (instanceOwner, bool, error) {
-				return instanceOwner{}, false, errors.New("permission denied")
-			},
-			wantErr: true,
-		},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			running, err := runtimeStatusWhenPIDMissing(tt.snapshot)
-			if running || (err != nil) != tt.wantErr {
-				t.Fatalf("running=%v err=%v", running, err)
-			}
-			if tt.wantErr && !errors.Is(err, ErrRuntimeStatusUncertain) {
-				t.Fatalf("error=%v is not runtime uncertainty", err)
-			}
-		})
-	}
-}
-
 func TestRuntimeStatusStartupPublicationSequenceNeverLooksStopped(t *testing.T) {
 	t.Setenv("POCKETCTL_RUNTIME_DIR", t.TempDir())
 
@@ -768,17 +727,27 @@ func TestStopFallbackKillRequiresSameRuntimeIdentity(t *testing.T) {
 
 // --- H-6: per-UID private runtime directory ---
 
-func TestDefaultRuntimeDirIsUIDScoped(t *testing.T) {
+func TestDefaultRuntimeDirSurvivesTemporaryDirectoryCleanup(t *testing.T) {
 	t.Setenv("POCKETCTL_RUNTIME_DIR", "")
 	if runtime.GOOS == "windows" {
 		t.Skip("unix-scoped default path")
 	}
-	want := filepath.Join(os.TempDir(), fmt.Sprintf("pocketctl-%d", os.Getuid()))
-	if PIDPath() != filepath.Join(want, "daemon.pid") {
-		t.Fatalf("PIDPath()=%q want %q", PIDPath(), filepath.Join(want, "daemon.pid"))
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	temp := t.TempDir()
+	t.Setenv("TMPDIR", temp)
+	if err := WritePID(4242); err != nil {
+		t.Fatal(err)
 	}
-	if dir := PIDPath(); strings.Contains(filepath.Dir(dir), "pocketctl") && filepath.Dir(dir) == "/tmp/pocketctl" {
-		t.Fatal("runtime dir must not be the shared legacy /tmp/pocketctl")
+	if err := os.RemoveAll(temp); err != nil {
+		t.Fatal(err)
+	}
+	if pid, err := ReadPID(); err != nil || pid != 4242 {
+		t.Fatalf("PID lost after temporary directory cleanup: pid=%d err=%v", pid, err)
+	}
+	want := filepath.Join(home, ".pocketctl", "run", "daemon.pid")
+	if PIDPath() != want {
+		t.Fatalf("PIDPath()=%q want %q", PIDPath(), want)
 	}
 }
 
@@ -825,6 +794,7 @@ func TestRuntimeDirRejectsPlainFileOverride(t *testing.T) {
 }
 
 func TestRuntimeDirEnforcesPrivateModeAndOwner(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
 	if runtime.GOOS == "windows" {
 		t.Skip("unix permission bits")
 	}
@@ -851,4 +821,82 @@ func TestRuntimeDirEnforcesPrivateModeAndOwner(t *testing.T) {
 		t.Fatalf("pid file mode = %o, want 0600", pidInfo.Mode().Perm())
 	}
 	assertRuntimeDirOwner(t, info)
+}
+
+func TestRuntimeStatusRecoversDeletedPIDFile(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	dir := t.TempDir()
+	t.Setenv("POCKETCTL_RUNTIME_DIR", dir)
+	lock, token := writeHeldRuntimeIdentity(t, dir)
+	defer lock.Close()
+	if err := WriteState(&DaemonState{PID: os.Getpid(), RuntimeInstanceToken: token}); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(PIDPath()); err != nil {
+		t.Fatal(err)
+	}
+	if pid, running, err := RuntimeStatus(); err != nil || !running || pid != os.Getpid() {
+		t.Fatalf("status after PID deletion=(%d, %v, %v)", pid, running, err)
+	}
+	if ok, err := VerifyRuntimeIdentity(os.Getpid(), token); err != nil || !ok {
+		t.Fatalf("identity after deletion=(%v, %v)", ok, err)
+	}
+	if ok, err := VerifyRuntimeIdentity(os.Getpid(), "stale-token"); ok || !errors.Is(err, ErrInstanceOwnerMismatch) {
+		t.Fatalf("stale identity=(%v, %v)", ok, err)
+	}
+	if _, err := os.Stat(PIDPath()); !os.IsNotExist(err) {
+		t.Fatalf("status must not republish another process's PID: %v", err)
+	}
+}
+
+func TestRuntimeStatusMissingPIDRejectsUnverifiedState(t *testing.T) {
+	for _, kind := range []string{"missing", "wrong-pid", "wrong-token", "wrong-process-start", "released-lock"} {
+		t.Run(kind, func(t *testing.T) {
+			t.Setenv("HOME", t.TempDir())
+			dir := t.TempDir()
+			t.Setenv("POCKETCTL_RUNTIME_DIR", dir)
+			lock, token := writeHeldRuntimeIdentity(t, dir)
+			defer lock.Close()
+			state := &DaemonState{PID: os.Getpid(), RuntimeInstanceToken: token}
+			if kind == "wrong-pid" {
+				state.PID++
+			}
+			if kind == "wrong-token" {
+				state.RuntimeInstanceToken = "stale"
+			}
+			if kind != "missing" {
+				if err := WriteState(state); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if kind == "wrong-process-start" {
+				path := filepath.Join(dir, "daemon.lock")
+				owner, err := readInstanceOwner(path)
+				if err != nil {
+					t.Fatal(err)
+				}
+				owner.ProcessStartIdentity = "stale-process"
+				if err := writeInstanceOwner(path, owner); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := os.Remove(PIDPath()); err != nil {
+				t.Fatal(err)
+			}
+			if kind == "released-lock" {
+				_ = lock.Close()
+			}
+			pid, running, err := RuntimeStatus()
+			if running || pid != 0 {
+				t.Fatalf("accepted unverified runtime: (%d, %v, %v)", pid, running, err)
+			}
+			if kind == "released-lock" {
+				if err != nil {
+					t.Fatal(err)
+				}
+			} else if !errors.Is(err, ErrRuntimeStatusUncertain) {
+				t.Fatalf("want uncertainty, got %v", err)
+			}
+		})
+	}
 }

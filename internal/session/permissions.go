@@ -160,7 +160,11 @@ func (sm *SessionManager) InterruptSession(sessionID string) error {
 }
 
 func (sm *SessionManager) SetPermissionConfig(sessionID string, cfg *protocol.PermissionConfig) error {
-	_, release, err := sm.acquireObserverDrive(context.Background(), sessionID)
+	return sm.setPermissionConfig(context.Background(), sessionID, cfg)
+}
+
+func (sm *SessionManager) setPermissionConfig(ctx context.Context, sessionID string, cfg *protocol.PermissionConfig) error {
+	_, release, err := sm.acquireObserverDrive(ctx, sessionID)
 	if err != nil {
 		return err
 	}

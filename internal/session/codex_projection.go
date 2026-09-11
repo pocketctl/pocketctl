@@ -408,6 +408,11 @@ func (p *codexProjection) projectItem(method string, raw json.RawMessage, histor
 
 func (p *codexProjection) convertItem(method, threadID, turnID string, item codexThreadItem) (protocol.DaemonEvent, bool) {
 	switch item.Type {
+	case "contextCompaction":
+		if method != "item/completed" {
+			return protocol.DaemonEvent{}, false
+		}
+		return protocol.DaemonEvent{Type: "agent_compaction", SessionID: threadID, PartID: item.ID, Status: "completed", EventID: p.key("compaction", threadID, turnID, item.ID)}, true
 	case "userMessage":
 		if method != "item/completed" {
 			return protocol.DaemonEvent{}, false

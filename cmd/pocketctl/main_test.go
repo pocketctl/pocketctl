@@ -2121,6 +2121,24 @@ func TestTerminalHydrationEventsOmitsMissingStatus(t *testing.T) {
 	}
 }
 
+func TestTerminalHydrationStatusDefersManagedCodexToAppServer(t *testing.T) {
+	tests := []struct {
+		name, agent, mode, status, want string
+	}{
+		{"managed Codex", adapter.AgentCodex, protocol.ControlManaged, protocol.StatusBusy, ""},
+		{"terminal Codex", adapter.AgentCodex, protocol.ControlLegacyReadOnly, protocol.StatusBusy, protocol.StatusBusy},
+		{"managed OpenCode", adapter.AgentOpencode, protocol.ControlManaged, protocol.StatusBusy, protocol.StatusBusy},
+		{"Claude", adapter.AgentClaude, protocol.ControlManaged, protocol.StatusBusy, protocol.StatusBusy},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := terminalHydrationStatus(tt.agent, tt.mode, tt.status); got != tt.want {
+				t.Fatalf("terminalHydrationStatus(%q, %q, %q)=%q, want %q", tt.agent, tt.mode, tt.status, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestNormalizeClaudeWatcherSessionStatus(t *testing.T) {
 	session := watcher.DiscoveredSession{Pid: 1234}
 	normalizeWatcherSessionStatus(adapter.AgentClaude, &session)
@@ -2475,5 +2493,65 @@ func TestWSLOpenArgsNeverUseCmdExeOrShell(t *testing.T) {
 		if opener == "/mnt/c/Windows/System32/rundll32.exe" && args[1] != "url.dll,FileProtocolHandler" {
 			t.Fatalf("rundll32 argv must pass FileProtocolHandler as a direct argument, got %v", args)
 		}
+	}
+}
+
+func TestDaemonCwdPolicyDefaultsToUserHome(t *testing.T) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	home, err = filepath.EvalSymlinks(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, roots := range [][]string{nil, {}} {
+		policy, err := newDaemonCwdPolicy(roots)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !reflect.DeepEqual(policy.Roots(), []string{home}) {
+			t.Fatalf("default roots = %v, want [%s]", policy.Roots(), home)
+		}
+		if _, err := policy.AuthorizeProposed(filepath.Join(home, "pocketctl-default-policy-test", "project")); err != nil {
+			t.Fatalf("home subdirectory not authorized: %v", err)
+		}
+	}
+}
+
+func TestDaemonCwdPolicyExplicitRootsReplaceDefault(t *testing.T) {
+	root := t.TempDir()
+	policy, err := newDaemonCwdPolicy([]string{root})
+	if err != nil {
+		t.Fatal(err)
+	}
+	canonical, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(policy.Roots(), []string{canonical}) {
+		t.Fatalf("roots = %v", policy.Roots())
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := policy.Allows(home); err == nil {
+		t.Fatal("explicit root must not also authorize home")
+	}
+}
+
+func TestDaemonCwdPolicyInvalidExplicitRootDoesNotFallBack(t *testing.T) {
+	for _, roots := range [][]string{{"relative/path"}, {filepath.Join(t.TempDir(), "missing")}} {
+		if _, err := newDaemonCwdPolicy(roots); err == nil {
+			t.Fatalf("invalid roots accepted: %v", roots)
+		}
+	}
+	policy, err := newDaemonCwdPolicy([]string{""})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(policy.Roots()) != 0 {
+		t.Fatal("explicit empty root unexpectedly authorized home")
 	}
 }

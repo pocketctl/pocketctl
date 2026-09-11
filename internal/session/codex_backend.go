@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"github.com/pocketctl/pocketctl/internal/memorycontext"
 	"log/slog"
+	"strings"
 	"time"
 
 	"github.com/pocketctl/pocketctl/internal/adapter"
@@ -23,6 +24,8 @@ type CodexAppServerBackend struct {
 	client     codexRuntimeClient
 	generation uint64
 }
+
+const codexEmptySessionInitializer = "Pocketctl initialized this session."
 
 func newCodexAppServerBackend(sm *SessionManager, coord *codexCoordinator, client codexRuntimeClient, generation uint64) *CodexAppServerBackend {
 	return &CodexAppServerBackend{sm: sm, coord: coord, client: client, generation: generation}
@@ -62,18 +65,22 @@ func (sm *SessionManager) tryCreateManagedCodexSession(ctx context.Context, conf
 		logCodexManagedFallback(binary, version, err)
 		return "", false, nil
 	}
-	snapshot, err := provider.coordinator.ensureStarted(ctx, binary, version, capabilities)
+	if !capabilities.ThreadInjection {
+		return "", true, fmt.Errorf("Codex %s 不支持空会话持久化，请升级 Codex 后重试", version)
+	}
+	coord, err := provider.projectCoordinator(cwd)
 	if err != nil {
-		_ = agentcontrol.RecordCodexFallback(agentcontrol.CodexFallbackRuntime)
-		logCodexManagedFallback(binary, version, err)
-		return "", false, nil
+		return "", true, err
 	}
-	client, generation, ok := provider.coordinator.backendClient()
+	snapshot, err := coord.ensureStarted(ctx, binary, version, capabilities)
+	if err != nil {
+		return "", true, err
+	}
+	client, generation, ok := coord.backendClient()
 	if !ok || generation != snapshot.Generation {
-		logCodexManagedFallback(binary, version, fmt.Errorf("runtime client unavailable"))
-		return "", false, nil
+		return "", true, fmt.Errorf("Codex project runtime unavailable")
 	}
-	backend := newCodexAppServerBackend(sm, provider.coordinator, client, generation)
+	backend := newCodexAppServerBackend(sm, coord, client, generation)
 	managedConfig := config
 	managedConfig.Cwd = cwd
 	managedConfig.Model = model
@@ -88,7 +95,7 @@ func (sm *SessionManager) tryCreateManagedCodexSession(ctx context.Context, conf
 	}
 	now := time.Now()
 	status := protocol.StatusIdle
-	if provider.coordinator.currentTurn(sessionID) != "" {
+	if coord.currentTurn(sessionID) != "" {
 		status = protocol.StatusRunning
 	}
 	ps := &ProcessState{
@@ -127,11 +134,33 @@ func (b *CodexAppServerBackend) Start(ctx context.Context, config protocol.Sessi
 			ID string `json:"id"`
 		} `json:"thread"`
 	}
-	if err := b.client.Call(ctx, "thread/start", params, &response); err != nil {
+	method := "thread/start"
+	if config.ForkFrom != "" {
+		if !b.coord.ownsInvocationThread(config.ForkFrom) {
+			return "", fmt.Errorf("fork source is not owned by this project runtime")
+		}
+		method = "thread/fork"
+		params["threadId"] = config.ForkFrom
+	}
+	if err := b.client.Call(ctx, method, params, &response); err != nil {
 		return "", fmt.Errorf("Codex thread/start: %w", err)
 	}
 	if response.Thread.ID == "" {
 		return "", fmt.Errorf("Codex thread/start returned no thread id")
+	}
+	// Codex does not create a rollout for thread/start alone. Persist a fixed,
+	// non-task developer item before announcing the session so an empty /new
+	// thread can be resumed after daemon or host restart. Codex omits injected
+	// items from thread/turns/list and thread/items/list, keeping remote history
+	// visually empty until the user sends the first message.
+	if method == "thread/start" {
+		items := []any{map[string]any{
+			"type": "message", "role": "developer",
+			"content": []any{map[string]any{"type": "input_text", "text": codexEmptySessionInitializer}},
+		}}
+		if err := b.client.Call(ctx, "thread/inject_items", map[string]any{"threadId": response.Thread.ID, "items": items}, nil); err != nil {
+			return "", fmt.Errorf("persist empty Codex thread: %w", err)
+		}
 	}
 	b.coord.markSubscribed(response.Thread.ID)
 	if config.Prompt != "" {
@@ -165,6 +194,7 @@ func (b *CodexAppServerBackend) SendWithContext(ctx context.Context, sessionID, 
 	if ps := b.sm.sessions[sessionID]; ps != nil {
 		config.Cwd = ps.Cwd
 		config.Model = ps.Model
+		config.Effort = ps.Effort
 		config.Permission = clonePermission(ps.Permission)
 	}
 	b.sm.mu.RUnlock()
@@ -172,6 +202,9 @@ func (b *CodexAppServerBackend) SendWithContext(ctx context.Context, sessionID, 
 }
 
 func (b *CodexAppServerBackend) Send(ctx context.Context, sessionID, content string) error {
+	if b.coord.projectCwd != "" && strings.HasPrefix(strings.TrimSpace(content), "/") && b.coord.currentTurn(sessionID) != "" {
+		return fmt.Errorf("本轮结束后可调用命令或技能")
+	}
 	input := []map[string]string{{"type": "text", "text": content}}
 	if turnID := b.coord.currentTurn(sessionID); turnID != "" {
 		params := map[string]any{"threadId": sessionID, "expectedTurnId": turnID, "input": input}
@@ -189,6 +222,7 @@ func (b *CodexAppServerBackend) Send(ctx context.Context, sessionID, content str
 	if ps := b.sm.sessions[sessionID]; ps != nil {
 		config.Cwd = ps.Cwd
 		config.Model = ps.Model
+		config.Effort = ps.Effort
 		config.Permission = clonePermission(ps.Permission)
 	}
 	b.sm.mu.RUnlock()
@@ -209,10 +243,22 @@ func (b *CodexAppServerBackend) startTurnWithContext(ctx context.Context, thread
 	} else {
 		input = []map[string]any{{"type": "text", "text": content}}
 	}
-	params := map[string]any{
-		"threadId": threadID,
-		"input":    input,
+	if b.coord.projectCwd != "" && strings.HasPrefix(strings.TrimSpace(content), "/") {
+		id, _ := ctx.Value(codexInvocationKey{}).(string)
+		skill, err := b.sm.resolveCodexSkill(ctx, threadID, content, id)
+		if err != nil {
+			return err
+		}
+		input = append(input, map[string]any{"type": "skill", "name": skill.Name, "path": skill.Path})
 	}
+	params := map[string]any{"threadId": threadID, "input": input}
+	if config.Effort != "" {
+		params["effort"] = config.Effort
+	}
+	if correlation := userMessageCorrelationFrom(ctx); correlation.MsgID != "" {
+		params["clientUserMessageId"] = correlation.MsgID
+	}
+
 	if config.Cwd != "" {
 		params["cwd"] = config.Cwd
 	}
@@ -220,6 +266,22 @@ func (b *CodexAppServerBackend) startTurnWithContext(ctx context.Context, thread
 		params["model"] = config.Model
 	}
 	applyCodexPermissionParams(params, config.Permission)
+	if b.coord.projectCwd != "" && config.Permission != nil {
+		delete(params, "sandbox")
+		mode := config.Permission.SandboxMode
+		if config.Permission.DangerousBypass {
+			mode = "danger-full-access"
+		}
+		switch mode {
+		case "read-only":
+			params["sandboxPolicy"] = map[string]any{"type": "readOnly"}
+		case "workspace-write":
+			params["sandboxPolicy"] = map[string]any{"type": "workspaceWrite", "writableRoots": []string{config.Cwd}}
+		case "danger-full-access":
+			params["sandboxPolicy"] = map[string]any{"type": "dangerFullAccess"}
+		}
+	}
+
 	var response struct {
 		Turn struct {
 			ID string `json:"id"`

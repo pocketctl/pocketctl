@@ -126,6 +126,9 @@ type connectionStatusEvent struct {
 type OnEvent func(evt protocol.DaemonEvent) []protocol.DaemonEvent
 
 type Client struct {
+	// HostAwake reports full system wake, not display activity. Set before Run.
+	HostAwake func() (bool, error)
+
 	relayURL string
 	token    string
 	tokenMu  sync.Mutex // protects token (refreshable at runtime via UpdateToken)
@@ -392,7 +395,8 @@ func (c *Client) ResendRegister() {
 		AgentLatests:    c.agentLatests,
 		AgentManageable: c.agentManageable,
 		OS:              c.osName, IP: c.localIP, Arch: c.arch, Version: c.version, StartedAt: c.startedAt,
-		SupportsQuotaGrant: true,
+		SupportsQuotaGrant:      true,
+		SupportsDirectoryBrowse: true,
 	}
 	if c.activeSessionIDsFn != nil {
 		register.ActiveSessionIDs = c.activeSessionIDsFn()
@@ -553,6 +557,10 @@ func (c *Client) Run(ctx context.Context) error {
 			return nil
 		}
 
+		if err := c.waitHostAwake(ctx); err != nil {
+			return err
+		}
+
 		// If the relay rejected our access token (4001), try to refresh it before
 		// anything else: a remote daemon whose 24h access token simply expired must
 		// self-heal via its refresh token — the user can't be expected to reach the
@@ -600,6 +608,9 @@ func (c *Client) Run(ctx context.Context) error {
 }
 
 func (c *Client) connectAndServe(ctx context.Context) error {
+	if err := c.waitHostAwake(ctx); err != nil {
+		return err
+	}
 	// New connection attempt — clear the "last close was auth reject" flag so a
 	// non-4001 close on this attempt isn't mistaken for an auth failure.
 	c.lastCloseAuthReject.Store(false)
@@ -630,6 +641,9 @@ func (c *Client) connectAndServe(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("dial: %w", err)
 	}
+	powerDone := make(chan struct{})
+	defer close(powerDone)
+	go c.watchHostPower(ctx, conn, powerDone)
 	c.connMu.Lock()
 	c.conn = conn
 	c.connMu.Unlock()
@@ -671,7 +685,8 @@ func (c *Client) connectAndServe(ctx context.Context) error {
 		AgentLatests:    c.agentLatests,
 		AgentManageable: c.agentManageable,
 		OS:              c.osName, IP: c.localIP, Arch: c.arch, Version: c.version, StartedAt: c.startedAt,
-		SupportsQuotaGrant: true,
+		SupportsQuotaGrant:      true,
+		SupportsDirectoryBrowse: true,
 	}
 	if c.activeSessionIDsFn != nil {
 		register.ActiveSessionIDs = c.activeSessionIDsFn()
@@ -718,6 +733,9 @@ func (c *Client) connectAndServe(ctx context.Context) error {
 	// Re-announce current authoritative session snapshots only after every
 	// durable event from the previous connection has been replayed. Otherwise a
 	// historical status in the backlog can overwrite the fresh resync state.
+	if err := c.requireHostAwake(); err != nil {
+		return err
+	}
 	if c.OnReconnected != nil {
 		c.OnReconnected()
 	}
@@ -764,6 +782,23 @@ func (c *Client) readPump(ctx context.Context, done chan struct{}, readErr chan<
 	conn := c.conn
 	c.connMu.Unlock()
 
+	// Gorilla handles control frames inside ReadMessage, before our application
+	// message guard. Gate its automatic replies too during sleep/DarkWake.
+	defaultPingHandler := conn.PingHandler()
+	conn.SetPingHandler(func(data string) error {
+		if err := c.requireHostAwake(); err != nil {
+			return err
+		}
+		return defaultPingHandler(data)
+	})
+	defaultCloseHandler := conn.CloseHandler()
+	conn.SetCloseHandler(func(code int, text string) error {
+		if err := c.requireHostAwake(); err != nil {
+			return err
+		}
+		return defaultCloseHandler(code, text)
+	})
+
 	// Liveness: require some inbound traffic within pongWait. The relay replies
 	// to our 10s app-level ping with a pong, so a healthy idle link delivers a
 	// message every ~10s — well inside the 30s deadline. If the socket dies
@@ -787,6 +822,10 @@ func (c *Client) readPump(ctx context.Context, done chan struct{}, readErr chan<
 			if ce, ok := err.(*websocket.CloseError); ok {
 				c.handleWebSocketClose(ce)
 			}
+			report(err)
+			return
+		}
+		if err := c.requireHostAwake(); err != nil {
 			report(err)
 			return
 		}
@@ -944,6 +983,9 @@ func (c *Client) heartbeatInitialDelay() time.Duration {
 }
 
 func (c *Client) sendHeartbeat() {
+	if c.requireHostAwake() != nil {
+		return
+	}
 	ping := protocol.PingMessage{Type: "ping"}
 	if c.metricsFn != nil {
 		ping.CpuPct, ping.MemPct, ping.DiskPct = c.metricsFn()
@@ -971,6 +1013,9 @@ func (c *Client) SendControlPayload(data []byte) error {
 }
 
 func (c *Client) sendMsg(v any) error {
+	if err := c.requireHostAwake(); err != nil {
+		return err
+	}
 	data, err := json.Marshal(v)
 	if err != nil {
 		return fmt.Errorf("marshal: %w", err)
@@ -983,6 +1028,9 @@ func (c *Client) sendMsg(v any) error {
 	}
 	c.writeMu.Lock()
 	defer c.writeMu.Unlock()
+	if err := c.requireHostAwake(); err != nil {
+		return err
+	}
 	_ = conn.SetWriteDeadline(time.Now().Add(c.writeWait))
 	if err := conn.WriteMessage(websocket.TextMessage, data); err != nil {
 		// On a half-open socket a write fails (TCP eventually gives up) while the
@@ -1164,6 +1212,10 @@ func (c *Client) writeBufferedTo(
 	data []byte,
 	stop <-chan struct{},
 ) bool {
+	if c.requireHostAwake() != nil {
+		_ = conn.Close()
+		return false
+	}
 	c.outMu.Lock()
 	if !c.waitTransmitPermitLocked(ctx, seq, stop) {
 		c.outMu.Unlock()
@@ -1177,6 +1229,12 @@ func (c *Client) writeBufferedTo(
 	// installation and transmission a total order and preserves a single lock
 	// direction (outMu -> writeMu); no writer holds writeMu while taking outMu.
 	c.writeMu.Lock()
+	if c.requireHostAwake() != nil {
+		c.writeMu.Unlock()
+		c.outMu.Unlock()
+		_ = conn.Close()
+		return false
+	}
 	_ = conn.SetWriteDeadline(time.Now().Add(c.writeWait))
 	err := conn.WriteMessage(websocket.TextMessage, data)
 	c.writeMu.Unlock()

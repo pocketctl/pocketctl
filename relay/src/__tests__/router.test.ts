@@ -3965,3 +3965,59 @@ describe('Router - deleted session isolation', () => {
   })
 
 })
+
+test('silent daemon expires without socket close and snapshot keeps actual heartbeat time', async () => {
+  vi.useFakeTimers()
+  const router = new Router(createMockPool())
+  const ws = createMockWs()
+  const appWs = createMockWs()
+  const webWs = createMockWs()
+  router.registerClient(appWs, 1)
+  router.registerClient(webWs, 1)
+  try {
+    await router.registerDaemon(ws, { type: 'register', daemon_id: 'sleeping-host', hostname: 'm3', agents: [] }, 1)
+    const registeredAt = Date.now()
+    await vi.advanceTimersByTimeAsync(20_000)
+    const snapshot = await router.buildDaemonForUser('sleeping-host', 1)
+    expect(snapshot.last_heartbeat).toBe(registeredAt)
+    await vi.advanceTimersByTimeAsync(35_000)
+    expect(ws.terminate).toHaveBeenCalled()
+    expect((router as any).daemons.has('sleeping-host')).toBe(false)
+    for (const client of [appWs, webWs]) {
+      expect(client._sent).toContainEqual(expect.objectContaining({
+        type: 'daemon_status', daemon_id: 'sleeping-host', status: 'offline',
+      }))
+    }
+  } finally { router.stop(); vi.useRealTimers() }
+})
+
+test('fresh heartbeat keeps daemon alive beyond registration timeout', async () => {
+  vi.useFakeTimers()
+  const router = new Router(createMockPool())
+  const ws = createMockWs()
+  try {
+    await router.registerDaemon(ws, { type: 'register', daemon_id: 'awake-host', hostname: 'm3', agents: [], started_at: 100 }, 1)
+    await vi.advanceTimersByTimeAsync(30_000)
+    router.handleDaemonMessage('awake-host', { type: 'ping' }, ws, 100)
+    const heartbeatAt = Date.now()
+    await vi.advanceTimersByTimeAsync(25_000)
+    expect(ws.terminate).not.toHaveBeenCalled()
+    expect((await router.buildDaemonForUser('awake-host', 1)).last_heartbeat).toBe(heartbeatAt)
+  } finally { router.stop(); vi.useRealTimers() }
+})
+
+test('heartbeat expiry never terminates a replacement registration or lets its old close evict it', async () => {
+  vi.useFakeTimers()
+  const router = new Router(createMockPool())
+  const oldWs = createMockWs()
+  const newWs = createMockWs()
+  try {
+    await router.registerDaemon(oldWs, { type: 'register', daemon_id: 'wake-host', hostname: 'm3', agents: [], started_at: 1 }, 1)
+    await vi.advanceTimersByTimeAsync(40_000)
+    await router.registerDaemon(newWs, { type: 'register', daemon_id: 'wake-host', hostname: 'm3', agents: [], started_at: 2 }, 1)
+    router.unregisterDaemon('wake-host', oldWs)
+    await vi.advanceTimersByTimeAsync(20_000)
+    expect(newWs.terminate).not.toHaveBeenCalled()
+    expect((await router.buildDaemonForUser('wake-host', 1)).daemon_online).toBe(true)
+  } finally { router.stop(); vi.useRealTimers() }
+})

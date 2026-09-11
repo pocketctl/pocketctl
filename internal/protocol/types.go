@@ -78,17 +78,24 @@ const (
 
 // Client → Daemon commands
 type ClientMessage struct {
-	Type       string      `json:"type"`
-	Status     string      `json:"status,omitempty"`
-	SessionID  string      `json:"session_id,omitempty"`
-	Content    string      `json:"content,omitempty"`
-	Agent      string      `json:"agent,omitempty"`
-	Cwd        string      `json:"cwd,omitempty"`
-	Prompt     string      `json:"prompt,omitempty"`
-	RequestID  string      `json:"request_id,omitempty"`
-	MsgID      string      `json:"msg_id,omitempty"`
-	QuotaGrant *QuotaGrant `json:"quota_grant,omitempty"`
-	Approved   bool        `json:"approved,omitempty"`
+	ForkFrom     string      `json:"fork_from,omitempty"`
+	InvocationID string      `json:"invocation_id,omitempty"`
+	Path         string      `json:"path,omitempty"`
+	Query        string      `json:"query,omitempty"`
+	Cursor       string      `json:"cursor,omitempty"`
+	Limit        int         `json:"limit,omitempty"`
+	Fallback     bool        `json:"fallback,omitempty"`
+	Type         string      `json:"type"`
+	Status       string      `json:"status,omitempty"`
+	SessionID    string      `json:"session_id,omitempty"`
+	Content      string      `json:"content,omitempty"`
+	Agent        string      `json:"agent,omitempty"`
+	Cwd          string      `json:"cwd,omitempty"`
+	Prompt       string      `json:"prompt,omitempty"`
+	RequestID    string      `json:"request_id,omitempty"`
+	MsgID        string      `json:"msg_id,omitempty"`
+	QuotaGrant   *QuotaGrant `json:"quota_grant,omitempty"`
+	Approved     bool        `json:"approved,omitempty"`
 	// Action upgrades OpenCode permission replies to once/always/reject. Empty
 	// keeps the legacy Approved boolean contract for older clients.
 	Action string `json:"action,omitempty"`
@@ -141,7 +148,9 @@ type ApprovalSecurityContext struct {
 
 // Daemon → Client events
 type DaemonEvent struct {
-	Type string `json:"type"`
+	Invocation map[string]any   `json:"invocation,omitempty"`
+	Directory  *DirectoryResult `json:"directory,omitempty"`
+	Type       string           `json:"type"`
 	// Seq is a monotonically increasing per-connection sequence number stamped
 	// by the ws.Client just before the event is sent to the relay. It enables
 	// at-least-once delivery: the relay dedups by (daemon_id, seq) and acks the
@@ -320,6 +329,9 @@ type PermissionConfig struct {
 // CommandItem represents a slash command or skill available in a session,
 // surfaced to the web client for input autocompletion.
 type CommandItem struct {
+	ID          string   `json:"id,omitempty"`
+	DisplayPath string   `json:"display_path,omitempty"`
+	Unavailable string   `json:"unavailable,omitempty"`
 	Name        string   `json:"name"`   // trigger name, e.g. "clear", "pocket-release", "codex:rescue"
 	Source      string   `json:"source"` // builtin | project | user | plugin
 	Kind        string   `json:"kind"`   // command | skill
@@ -478,8 +490,9 @@ type RegisterMessage struct {
 	// Always emitted (no omitempty): an explicit empty list lets the relay
 	// distinguish "daemon has zero live sessions" (reconcile/close all its
 	// lingering running/busy rows) from a legacy daemon that never reports it.
-	ActiveSessionIDs   []string `json:"active_session_ids"`
-	SupportsQuotaGrant bool     `json:"supports_quota_grant,omitempty"`
+	ActiveSessionIDs        []string `json:"active_session_ids"`
+	SupportsQuotaGrant      bool     `json:"supports_quota_grant,omitempty"`
+	SupportsDirectoryBrowse bool     `json:"supports_directory_browse,omitempty"`
 }
 
 type QuotaGrant struct {
@@ -587,6 +600,8 @@ type ReplayMessage struct {
 
 // Session config
 type SessionConfig struct {
+	ForkFrom      string            `json:"fork_from,omitempty"`
+	Effort        string            `json:"effort,omitempty"`
 	Agent         string            `json:"agent"`
 	Cwd           string            `json:"cwd"`
 	Prompt        string            `json:"prompt"`

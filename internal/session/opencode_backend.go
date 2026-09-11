@@ -2104,7 +2104,17 @@ func (sm *SessionManager) RegisterOpencodeTerminalSession(sessionID, cwd string)
 func (sm *SessionManager) createOpencodeSession(ctx context.Context, config protocol.SessionConfig) (string, error) {
 	resolvedCwd := resolveCwd(config.Cwd)
 	if config.AutoCreateDir {
-		_ = os.MkdirAll(resolvedCwd, 0o755)
+		if err := os.MkdirAll(resolvedCwd, 0o755); err != nil {
+			return "", fmt.Errorf("工作目录创建失败: %w", err)
+		}
+	}
+	sm.mu.RLock()
+	policy := sm.cwdPolicy
+	sm.mu.RUnlock()
+	if policy != nil {
+		if err := policy.Allows(resolvedCwd); err != nil {
+			return "", err
+		}
 	}
 	if err := validateCwd(resolvedCwd); err != nil {
 		return "", err
