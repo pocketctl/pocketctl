@@ -125,6 +125,35 @@ describe('temporary session share links', () => {
     expect(response.body).not.toMatch(/<script|<form|<iframe/i)
   })
 
+  test('public viewer excludes document protocol events, metadata, and bodies', async () => {
+    const app = makeApp({
+      events: [
+        { event_type: 'user_text', payload: { type: 'user_text', text: 'visible-message' } },
+        {
+          event_type: 'session_document_begin',
+          payload: { type: 'session_document_begin', document_id: 'private-document', display_name: 'private.md' },
+        },
+        {
+          event_type: 'session_document_chunk',
+          payload: { type: 'session_document_chunk', chunk_data: 'private-body' },
+        },
+        {
+          event_type: 'session_documents_changed',
+          payload: { type: 'session_documents_changed', document_id: 'private-document' },
+        },
+      ],
+    })
+    const token = signSessionShareToken(7, 'ses_1')
+    const response = await app.inject({ method: 'GET', url: `/share/session/${token}` })
+
+    expect(response.statusCode).toBe(200)
+    expect(response.body).toContain('visible-message')
+    expect(response.body).not.toContain('private-document')
+    expect(response.body).not.toContain('private.md')
+    expect(response.body).not.toContain('private-body')
+    expect(response.body).not.toContain('session_document')
+  })
+
   test('all invalid, expired, wrong-type, and mismatched share tokens return one generic unavailable page', async () => {
     const app = makeApp()
     const malformed = await app.inject({ method: 'GET', url: '/share/session/not-a-token' })

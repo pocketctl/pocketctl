@@ -27,6 +27,6 @@ export interface AckCheckpoint {
 export interface FlowControlState {
   window: number;
   retryAfterMs: number;
-  reason: 'normal' | 'ingest_backpressure' | 'worker_backlog' | 'relay_overloaded' | 'event_too_large';
+  reason: 'normal' | 'ingest_backpressure' | 'artifact_backpressure' | 'worker_backlog' | 'relay_overloaded' | 'event_too_large';
   blockedSeq?: number;
 }

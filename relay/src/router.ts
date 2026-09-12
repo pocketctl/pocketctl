@@ -39,6 +39,12 @@ import type { AuthLeaseOptions } from './ingress/auth-lease.js';
 import { InboxRepository } from './ingress/inbox-repository.js';
 import { IngressController, type IngressTarget } from './ingress/controller.js';
 import { EventMaterializer } from './materialization/event-materializer.js';
+import {
+  isSessionDocumentArtifactEvent,
+  SessionDocumentArtifactMaterializer,
+  SessionDocumentProtocolError,
+  type SessionDocumentObservation,
+} from './session-documents/materializer.js';
 import { createExtensionJournalSinkFromEnv, type ExtensionJournalSink } from './extensions/journal.js';
 import type {
   MaterializationContext,
@@ -67,6 +73,9 @@ const openCodeFallbackCategories = new Set([
 ]);
 const INITIAL_REPLAY_PAYLOAD_WARNING_BYTES = 1_048_576;
 const INITIAL_REPLAY_DURATION_WARNING_MS = 1_000;
+const SESSION_DOCUMENT_UNAVAILABLE_REASONS = new Set([
+  'too_large', 'invalid_encoding', 'path_outside_root', 'unsupported', 'read_failed',
+]);
 /** Event types forwarded to a subagent detail view when replaying an
  * independent child session (zcode model). Lifecycle noise (discovered/
  * status/meta) belongs to the child session itself, not the bucket view. */
@@ -171,6 +180,14 @@ export interface RouterOptions {
     eventWindow?: number;
     controller?: IngressController;
     repository?: Pick<InboxRepository, 'persistBatch' | 'seedCheckpoint'>;
+  };
+  sessionDocuments?: {
+    /** `shadow` validates and observes records without durable body storage. */
+    mode?: 'off' | 'shadow' | 'on';
+    /** Backwards-compatible test/config shorthand for on/off. */
+    enabled?: boolean;
+    maxDocumentBytes?: number;
+    observeShadow?: (observation: SessionDocumentObservation) => void;
   };
 }
 
@@ -277,6 +294,8 @@ export class Router {
   private readonly maxChunkBytes: number;
   private readonly replayBatchMaxEvents: number;
   private readonly replayBatchMaxBytes: number;
+  private readonly sessionDocumentsMode: 'off' | 'shadow' | 'on';
+  private readonly sessionDocumentShadow?: SessionDocumentArtifactMaterializer;
   private legacyPersist = new BoundedExecutor({
     maxConcurrent: positiveInteger(process.env.RELAY_LEGACY_PERSIST_CONCURRENCY, 8),
     maxPending: nonNegativeInteger(process.env.RELAY_LEGACY_PERSIST_QUEUE_MAX, 1_024),
@@ -363,6 +382,30 @@ export class Router {
     this.replayBatchMaxBytes = this.positiveTransportOption(
       options.transport?.replayBatchMaxBytes, 524_288,
     );
+    this.sessionDocumentsMode = options.sessionDocuments?.mode
+      ?? (options.sessionDocuments?.enabled === true ? 'on' : 'off');
+    if (this.sessionDocumentsMode === 'shadow') {
+      this.sessionDocumentShadow = new SessionDocumentArtifactMaterializer(
+        {
+          beginUpload: async () => ({ status: 'shadow' }),
+          recordUnavailable: async (input) => {
+            if (!SESSION_DOCUMENT_UNAVAILABLE_REASONS.has(input.reasonCode)) {
+              throw new SessionDocumentProtocolError('document_reason is unsupported');
+            }
+            return { status: 'shadow' };
+          },
+          storeChunk: async () => ({ status: 'shadow' }),
+          commitUpload: async (input) => ({ status: 'shadow', versionId: input.versionId }),
+        },
+        {
+          maxDocumentBytes: this.positiveTransportOption(
+            options.sessionDocuments?.maxDocumentBytes, 2 * 1024 * 1024,
+          ),
+          maxChunkBytes: this.maxChunkBytes,
+        },
+        options.sessionDocuments?.observeShadow,
+      );
+    }
     this.extensionJournalSink = options.extensionJournalSink !== undefined
       ? options.extensionJournalSink
       : createExtensionJournalSinkFromEnv();
@@ -1219,17 +1262,20 @@ export class Router {
       max_event_bytes: this.maxEventBytes,
       max_chunk_bytes: this.maxChunkBytes,
     };
+    const documentCapabilities = this.sessionDocumentsMode !== 'off' && durableIngressEnabled
+      ? ['session_document_snapshot_v1']
+      : [];
     this.send(ws, durableIngressEnabled
       ? {
         type: 'register_ack', status: 'ok', connection_id: daemonId, supports_event_ack: true,
-        capabilities: ['durable_inbox', 'ack_watermark', 'flow_control', 'tool_output_stream_v1'],
+        capabilities: ['durable_inbox', 'ack_watermark', 'flow_control', 'tool_output_stream_v1', ...documentCapabilities],
         event_window: this.durableIngressEventWindow,
         daemon_generation: Math.max(0, Number(daemonStartedAt) || 0),
         ...streamTransport,
       }
       : {
         type: 'register_ack', status: 'ok', connection_id: daemonId, supports_event_ack: true,
-        capabilities: ['tool_output_stream_v1'],
+        capabilities: ['tool_output_stream_v1', ...documentCapabilities],
         ...streamTransport,
       });
     if (userId) this.broadcastQuotaStatus(userId).catch(console.error);
@@ -1959,7 +2005,53 @@ export class Router {
       return;
     }
     const policy = classifyDaemonEvent(msg);
+    const documentArtifact = isSessionDocumentArtifactEvent(String(msg.type ?? ''));
     let durableIngressOwnsAck = false;
+    if (documentArtifact && this.sessionDocumentsMode === 'shadow' && this.sessionDocumentShadow) {
+      const daemon = originDaemon ?? this.daemons.get(daemonId);
+      if (msg.seq && daemon) {
+        const target: IngressTarget = {
+          daemonId,
+          registrationId: daemon.registrationId,
+          userId: daemon.userId,
+          daemonGeneration: Math.max(0, Number(daemon.startedAt) || 0),
+        };
+        // Persist only a transport receipt. The document body and capture
+        // metadata are deliberately excluded from the durable envelope while
+        // the normal checkpoint remains contiguous across shadow records.
+        const receiptPayload = {
+          type: String(msg.type ?? ''),
+          session_id: normalizeSessionId(msg.session_id),
+          event_id: typeof msg.event_id === 'string' ? msg.event_id : undefined,
+          seq: msg.seq,
+        };
+        const accepted = this.durableIngress.accept(target, receiptPayload, {}, { receiptOnly: true });
+        if (accepted.kind === 'backpressured') {
+          this.sendDurableFlowControl(target, accepted.state);
+          if (accepted.state.reason !== 'event_too_large') {
+            this.disconnectDurableIngress(target, accepted.state.reason, accepted.state.retryAfterMs);
+          }
+          return;
+        }
+      }
+      void this.sessionDocumentShadow.materialize({
+        inboxId: 0,
+        userId: daemon?.userId ?? null,
+        daemonId,
+        daemonGeneration: Math.max(0, Number(daemon?.startedAt) || 0),
+        sessionId: normalizeSessionId(msg.session_id),
+        eventType: String(msg.type ?? ''),
+        payload: msg,
+        receivedAt,
+        context: this.materializationContext(daemonId, msg),
+      }).catch((error) => {
+        console.warn('[session-document] shadow record rejected', {
+          recordType: String(msg.type ?? ''),
+          errorName: error instanceof Error ? error.name : typeof error,
+        });
+      });
+      return;
+    }
     if (msg.seq) {
       try {
         this.observeIngressClass?.(daemonId, policy.priority);
@@ -1996,6 +2088,13 @@ export class Router {
           }
         }
       }
+    }
+    // Never let an unsupported document body fall through to ordinary event
+    // persistence, replay, exports, or broadcasts. A sequenced record is a
+    // terminal no-op on a legacy/disabled Relay so later traffic can advance.
+    if (documentArtifact) {
+      if (msg.seq && !durableIngressOwnsAck) this.markPersisted(daemonId, msg.seq);
+      return;
     }
     // At-least-once dedup keyed on the *persisted* water-mark: a seq at or below
     // it has already been durably stored, so a reconnect replay of it is a

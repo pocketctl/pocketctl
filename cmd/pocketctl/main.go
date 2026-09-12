@@ -43,6 +43,7 @@ import (
 	"github.com/pocketctl/pocketctl/internal/protocol"
 	"github.com/pocketctl/pocketctl/internal/repositoryidentity"
 	"github.com/pocketctl/pocketctl/internal/session"
+	"github.com/pocketctl/pocketctl/internal/sessiondocument"
 	"github.com/pocketctl/pocketctl/internal/sysinfo"
 	"github.com/pocketctl/pocketctl/internal/turn"
 	"github.com/pocketctl/pocketctl/internal/update"
@@ -51,7 +52,7 @@ import (
 	"github.com/pocketctl/pocketctl/internal/zcode"
 )
 
-var version = "0.4.6"
+var version = "0.4.10"
 
 // PR2 platform defaults for the daemon entry: daemonize + service via platform
 // interface (was direct syscall.SysProcAttr{Setsid} + internal/service).
@@ -1718,6 +1719,7 @@ func cmdDaemonStart(args []string) {
 	// from the session's cached model, update the cache and emit a
 	// session_model_changed event so the relay + Web/iOS clients reflect the
 	// /model switch in real time.
+	var documentCaptureQueue *sessiondocument.CaptureQueue
 	client.OnEvent = func(evt protocol.DaemonEvent) []protocol.DaemonEvent {
 		sm.ObserveNativeTitle(evt)
 		enrichRepositoryFacts(context.Background(), &evt)
@@ -1734,6 +1736,27 @@ func cmdDaemonStart(args []string) {
 		// Central outgoing classifier: metadata-only enrichment (actor/flow/
 		// content class + unassigned-event counter), never filtering.
 		sm.EnrichOutgoingEvent(&evt)
+		if documentCaptureQueue != nil {
+			if enabled, maxEventBytes, maxChunkBytes := client.SessionDocumentTransport(); enabled {
+				if _, eligible := sessiondocument.CandidateFromEvent(evt); eligible {
+					accepted := documentCaptureQueue.SubmitEventWithLimits(evt, sessiondocument.TransportLimits{
+						MaxEventBytes: maxEventBytes, MaxChunkBytes: maxChunkBytes,
+					})
+					state := "backpressured"
+					if accepted {
+						state = "accepted"
+					}
+					diagnostics := documentCaptureQueue.Diagnostics()
+					logger.Info("session document candidate observed",
+						"state", state,
+						"queue_depth", diagnostics.QueueDepth,
+						"pending_candidates", diagnostics.PendingCandidates,
+						"max_queue_depth", diagnostics.MaxQueueDepth,
+						"rejected_backpressure", diagnostics.RejectedBackpressure,
+					)
+				}
+			}
+		}
 		if evt.Type == "session_model_changed" && evt.Model != "" && evt.SessionID != "" {
 			current, _ := sm.GetSessionModel(evt.SessionID)
 			if evt.Model == current {
@@ -1781,6 +1804,67 @@ func cmdDaemonStart(args []string) {
 	ctx, cancel := context.WithCancel(context.Background())
 	go sm.RunTitleMaintenance(ctx)
 	defer cancel()
+	if enabled, captureErr := sessiondocument.CaptureEnabled(os.Getenv("POCKETCTL_SESSION_DOCUMENT_CAPTURE")); captureErr != nil {
+		logger.Warn("session document capture disabled", "reason", "invalid_configuration")
+	} else if enabled {
+		documentRecordPump := sessiondocument.NewRecordPump(sessiondocument.RecordPumpOptions{
+			BatchDepth: 16,
+			CanEmit: func() bool {
+				return len(outputCh) <= outputCap/4
+			},
+			Emit: func(record protocol.DaemonEvent) bool {
+				select {
+				case outputCh <- record:
+					return true
+				case <-ctx.Done():
+					return false
+				default:
+					return false
+				}
+			},
+		})
+		defer documentRecordPump.Stop()
+		documentCaptureQueue = sessiondocument.NewCaptureQueue(sessiondocument.CaptureQueueOptions{
+			MaxDocumentBytes: 2 << 20,
+			PerSessionDepth:  4,
+			MaxSessions:      256,
+			ResolveRoot: func(sessionID string) (string, string) {
+				if root, ok := sm.GetDocumentCaptureRoot(sessionID); ok {
+					return root, ""
+				}
+				return "", protocol.SessionDocumentReasonPathOutsideRoot
+			},
+			OnResult: func(result sessiondocument.CaptureResult) {
+				diagnostics := sessiondocument.QueueDiagnostics{}
+				if documentCaptureQueue != nil {
+					diagnostics = documentCaptureQueue.Diagnostics()
+				}
+				state := "available"
+				if result.Reason != "" {
+					state = "unavailable"
+				}
+				logger.Info("session document capture observed",
+					"state", state,
+					"reason", result.Reason,
+					"byte_size", len(result.Bytes),
+					"queue_depth", diagnostics.QueueDepth,
+					"pending_candidates", diagnostics.PendingCandidates,
+					"max_queue_depth", diagnostics.MaxQueueDepth,
+					"rejected_backpressure", diagnostics.RejectedBackpressure,
+				)
+				records, recordErr := sessiondocument.BuildRecords(result.SessionID, result, result.Transport)
+				if recordErr != nil {
+					logger.Warn("session document snapshot discarded", "reason", "transport_limit")
+					return
+				}
+				if !documentRecordPump.Submit(records) {
+					logger.Warn("session document snapshot discarded", "reason", "document_backpressure")
+				}
+			},
+		})
+		defer documentCaptureQueue.Stop()
+		logger.Info("session document capture enabled", "max_document_bytes", 2<<20)
+	}
 
 	// Start the ZCode observer now that the daemon ctx exists. Fail-closed: if
 	// the storage/schema probe fails the observer is dropped but the daemon's

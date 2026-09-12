@@ -267,6 +267,9 @@ type Client struct {
 	ackSupported             bool // relay advertised supports_event_ack (else legacy trim-on-write)
 	flowControlSupported     bool // register_ack advertised the durable flow-control capability
 	streamTransportSupported bool
+	sessionDocumentSupported bool // register_ack advertised session_document_snapshot_v1
+	sessionDocumentMaxEvent  int
+	sessionDocumentMaxChunk  int
 	maxEventBytes            int
 	maxChunkBytes            int
 	outboundStreams          map[string]outboundContentStream
@@ -321,6 +324,16 @@ func NewClient(relayURL, token, daemonID string, agents []string, agentVersions 
 	c.eventWindow = c.maxOutCount
 	c.outCond = sync.NewCond(&c.outMu)
 	return c
+}
+
+// SessionDocumentTransport returns the current connection's negotiated
+// document capability and frame bounds. Callers must treat false as a hard
+// no-read/no-send gate; the values reset on every reconnect.
+func (c *Client) SessionDocumentTransport() (enabled bool, maxEventBytes, maxChunkBytes int) {
+	c.outMu.Lock()
+	defer c.outMu.Unlock()
+	return c.sessionDocumentSupported && c.sessionDocumentMaxEvent > 0 && c.sessionDocumentMaxChunk > 0,
+		c.sessionDocumentMaxEvent, c.sessionDocumentMaxChunk
 }
 
 // InitSpool enables disk-backed durability for the unacked outbound buffer at
@@ -655,6 +668,9 @@ func (c *Client) connectAndServe(ctx context.Context) error {
 	c.ackSupported = false
 	c.flowControlSupported = false
 	c.streamTransportSupported = false
+	c.sessionDocumentSupported = false
+	c.sessionDocumentMaxEvent = 0
+	c.sessionDocumentMaxChunk = 0
 	c.maxEventBytes = 0
 	c.maxChunkBytes = 0
 	c.eventWindow = c.maxOutCount
@@ -1054,6 +1070,15 @@ func (c *Client) sendEvent(evt protocol.DaemonEvent) {
 }
 
 func (c *Client) sendEventUntil(evt protocol.DaemonEvent, stop <-chan struct{}) bool {
+	if protocol.IsSessionDocumentUploadEvent(evt.Type) {
+		c.outMu.Lock()
+		supported := c.sessionDocumentSupported
+		c.outMu.Unlock()
+		if !supported {
+			c.logger.Debug("document snapshot event suppressed for incompatible relay", "type", evt.Type)
+			return true
+		}
+	}
 	frames, ok := c.appendPreparedOutboundUntil(&evt, stop)
 	if !ok {
 		return false
@@ -1384,6 +1409,14 @@ func (c *Client) onRegisterAck(msg protocol.RegisterAckMessage) {
 	c.ackSupported = msg.SupportsEventAck
 	c.ackKnown = true
 	c.flowControlSupported = containsCapability(msg.Capabilities, "flow_control")
+	c.sessionDocumentSupported = containsCapability(msg.Capabilities, protocol.SessionDocumentSnapshotCapability)
+	if c.sessionDocumentSupported && msg.MaxEventBytes > 0 && msg.MaxChunkBytes > 0 && msg.MaxChunkBytes <= msg.MaxEventBytes {
+		c.sessionDocumentMaxEvent = msg.MaxEventBytes
+		c.sessionDocumentMaxChunk = msg.MaxChunkBytes
+	} else {
+		c.sessionDocumentMaxEvent = 0
+		c.sessionDocumentMaxChunk = 0
+	}
 	c.streamTransportSupported = containsCapability(msg.Capabilities, toolOutputStreamCapability) &&
 		msg.MaxEventBytes > 0 && msg.MaxChunkBytes > 0 && msg.MaxChunkBytes <= msg.MaxEventBytes
 	if c.streamTransportSupported {

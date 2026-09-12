@@ -1,4 +1,5 @@
 import { describe, test, expect, vi, beforeEach, afterEach } from 'vitest'
+import { createHash } from 'node:crypto'
 // Short the offline grace window so debounce tests run fast. Read by the Router
 // constructor, so this must be set before any `new Router(...)`.
 process.env.DAEMON_OFFLINE_GRACE_MS = '20'
@@ -1491,6 +1492,110 @@ describe('Router - event delivery dedup + ack', () => {
       max_event_bytes: 900_000,
       max_chunk_bytes: 96_000,
     }))
+  })
+
+  test('register_ack advertises document snapshots only when the subsystem is enabled', async () => {
+    const disabledWs = createMockWs()
+    await router.registerDaemon(disabledWs, { type: 'register', daemon_id: 'daemon-disabled', hostname: 'h', agents: [], started_at: 100 }, 1)
+    const disabledAck = disabledWs._sent.find((m: any) => m.type === 'register_ack')
+    expect(disabledAck.capabilities).not.toContain('session_document_snapshot_v1')
+
+    const repository = {
+      seedCheckpoint: vi.fn(async () => ({ daemonId: 'daemon-enabled', daemonGeneration: 100, ackSeq: 0 })),
+      persistBatch: vi.fn(async () => new Map()),
+    }
+    const enabledRouter = new Router(pool, {
+      durableIngress: { mode: 'on', repository },
+      sessionDocuments: { enabled: true },
+    })
+    const enabledWs = createMockWs()
+    await enabledRouter.registerDaemon(enabledWs, { type: 'register', daemon_id: 'daemon-enabled', hostname: 'h', agents: [], started_at: 100 }, 1)
+    const enabledAck = enabledWs._sent.find((m: any) => m.type === 'register_ack')
+    expect(enabledAck.capabilities).toContain('session_document_snapshot_v1')
+    enabledRouter.stop()
+  })
+
+  test('shadow document mode advertises capture but observes metadata without durable persistence', async () => {
+    const observations: Array<Record<string, unknown>> = []
+    const repository = {
+      seedCheckpoint: vi.fn(async () => ({ daemonId: 'daemon-shadow', daemonGeneration: 100, ackSeq: 0 })),
+      persistBatch: vi.fn(async (events: Array<Record<string, any>>) => new Map([[
+        'daemon-shadow\0' + String(100),
+        {
+          daemonId: 'daemon-shadow', daemonGeneration: 100,
+          ackSeq: Math.max(...events.map((event) => Number(event.seq))),
+        },
+      ]])),
+    }
+    const shadowRouter = new Router(pool, {
+      durableIngress: { mode: 'on', repository },
+      sessionDocuments: {
+        mode: 'shadow',
+        maxDocumentBytes: 2 * 1024 * 1024,
+        observeShadow: (observation) => observations.push(observation as unknown as Record<string, unknown>),
+      },
+    })
+    const daemonWs = createMockWs()
+    await shadowRouter.registerDaemon(daemonWs, {
+      type: 'register', daemon_id: 'daemon-shadow', hostname: 'h', agents: [], started_at: 100,
+    }, 1)
+    expect(daemonWs._sent.find((message: any) => message.type === 'register_ack')?.capabilities)
+      .toContain('session_document_snapshot_v1')
+    pool._queries.length = 0
+
+    const body = Buffer.from('shadow-private-body')
+    const hash = createHash('sha256').update(body).digest('hex')
+    shadowRouter.handleDaemonMessage('daemon-shadow', {
+      type: 'session_document_begin', session_id: 'session-1', document_id: 'document-1',
+      version_id: 'version-1', event_id: 'begin-1', display_name: 'report.md',
+      document_format: 'markdown', turn_id: 'turn-1', source_event_id: 'source-1',
+      captured_at: '2026-09-12T00:00:00Z', total_bytes: body.length,
+      content_hash: hash, chunk_count: 1, seq: 522,
+    })
+    shadowRouter.handleDaemonMessage('daemon-shadow', {
+      type: 'session_document_chunk', session_id: 'session-1', document_id: 'document-1',
+      version_id: 'version-1', event_id: 'chunk-1', chunk_index: 0, byte_offset: 0,
+      chunk_data: body.toString('base64'), chunk_hash: hash, seq: 523,
+    })
+    shadowRouter.handleDaemonMessage('daemon-shadow', {
+      type: 'session_document_commit', session_id: 'session-1', document_id: 'document-1',
+      version_id: 'version-1', event_id: 'commit-1', total_bytes: body.length,
+      content_hash: hash, seq: 524,
+    })
+    await tick()
+
+    expect(observations.map(({ type, state, byteCount }) => ({ type, state, byteCount }))).toEqual([
+      { type: 'begin', state: 'shadow', byteCount: body.length },
+      { type: 'chunk', state: 'shadow', byteCount: body.length },
+      { type: 'commit', state: 'shadow', byteCount: body.length },
+    ])
+    expect(JSON.stringify(observations)).not.toContain('shadow-private-body')
+    expect(repository.persistBatch).toHaveBeenCalled()
+    const receiptEnvelopes = repository.persistBatch.mock.calls.flatMap(([events]) => events)
+    expect(receiptEnvelopes).toHaveLength(3)
+    expect(receiptEnvelopes.every((event) => event.receiptOnly === true)).toBe(true)
+    expect(receiptEnvelopes.map((event) => event.payload)).toEqual([
+      { type: 'session_document_begin', session_id: 'session-1', event_id: 'begin-1', seq: 522 },
+      { type: 'session_document_chunk', session_id: 'session-1', event_id: 'chunk-1', seq: 523 },
+      { type: 'session_document_commit', session_id: 'session-1', event_id: 'commit-1', seq: 524 },
+    ])
+    expect(JSON.stringify(repository.persistBatch.mock.calls)).not.toContain('shadow-private-body')
+    expect(pool._queries.some((query: any) => /INSERT INTO (?:events|event_inbox|session_document)/.test(query.sql))).toBe(false)
+    expect(daemonWs._sent.some((message: any) => message.type === 'event_ack' && message.up_to_seq === 524)).toBe(true)
+
+    shadowRouter.handleDaemonMessage('daemon-shadow', {
+      type: 'session_document_begin', session_id: 'session-1', document_id: 'document-invalid',
+      event_id: 'unavailable-invalid', display_name: 'invalid.md', document_format: 'markdown',
+      turn_id: 'turn-1', source_event_id: 'source-invalid', captured_at: '2026-09-12T00:00:00Z',
+      document_state: 'unavailable', document_reason: 'attacker-controlled-metric-label', seq: 525,
+    })
+    await tick()
+    expect(observations).toHaveLength(3)
+    expect(repository.persistBatch.mock.calls.flatMap(([events]) => events).at(-1)?.payload).toEqual({
+      type: 'session_document_begin', session_id: 'session-1', event_id: 'unavailable-invalid', seq: 525,
+    })
+    expect(daemonWs._sent.some((message: any) => message.type === 'event_ack' && message.up_to_seq === 525)).toBe(true)
+    shadowRouter.stop()
   })
 
   test('an already-persisted seq is dropped on replay; a new seq is forwarded', async () => {

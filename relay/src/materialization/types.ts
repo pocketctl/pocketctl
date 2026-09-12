@@ -31,6 +31,7 @@ export interface MaterializationInput {
   inboxId: number;
   userId: number | null;
   daemonId: string;
+  daemonGeneration?: number;
   sessionId: string | null;
   eventType: string;
   payload: Record<string, unknown>;

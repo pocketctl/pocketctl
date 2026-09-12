@@ -24,6 +24,60 @@ function deferred<T>() {
 }
 
 describe('inbox worker', () => {
+  test('routes document records only to the artifact materializer and emits no realtime delivery', async () => {
+    const documentRow = row({
+      eventType: 'session_document_chunk',
+      payload: { type: 'session_document_chunk', chunk_data: 'c2VjcmV0' },
+    })
+    const repository = {
+      resetStaleClaims: vi.fn().mockResolvedValue(0),
+      claimBatch: vi.fn().mockResolvedValueOnce([documentRow]).mockResolvedValue([]),
+      renewClaims: vi.fn(), complete: vi.fn(), reschedule: vi.fn(), deadLetter: vi.fn(),
+    }
+    const materializer = { materialize: vi.fn() }
+    const artifactMaterializer = {
+      materialize: vi.fn().mockResolvedValue({ eventId: null, inserted: true, completed: true, deliveries: [] }),
+    }
+    const worker = createInboxWorker({
+      repository, materializer: materializer as never, artifactMaterializer,
+      workerId: 'worker', shardCount: 1, shardIndex: 0,
+    })
+
+    await worker.runOnce()
+
+    expect(artifactMaterializer.materialize).toHaveBeenCalledOnce()
+    expect(materializer.materialize).not.toHaveBeenCalled()
+    expect(repository.complete).toHaveBeenCalledWith(1, null, 'worker', 1)
+  })
+
+  test('terminally handles a late tombstoned document record without stalling the next row', async () => {
+    const documentRow = row({ inboxId: 1, seq: 1, eventType: 'session_document_commit' })
+    const ordinaryRow = row({ inboxId: 2, seq: 2, dedupKey: 'event-2' })
+    const repository = {
+      resetStaleClaims: vi.fn().mockResolvedValue(0),
+      claimBatch: vi.fn().mockResolvedValueOnce([documentRow, ordinaryRow]).mockResolvedValue([]),
+      renewClaims: vi.fn(), complete: vi.fn(), reschedule: vi.fn(), deadLetter: vi.fn(),
+    }
+    const notFound = Object.assign(new Error('session document not found'), {
+      name: 'SessionDocumentNotFoundError',
+    })
+    const materializer = {
+      materialize: vi.fn().mockResolvedValue({ eventId: 22, inserted: true, completed: true, deliveries: [] }),
+    }
+    const artifactMaterializer = { materialize: vi.fn().mockRejectedValue(notFound) }
+    const worker = createInboxWorker({
+      repository, materializer: materializer as never, artifactMaterializer,
+      workerId: 'worker', shardCount: 1, shardIndex: 0,
+    })
+
+    await worker.runOnce()
+
+    expect(repository.deadLetter).toHaveBeenCalledWith(1, 1, 'document_session_not_found', 'worker')
+    expect(repository.reschedule).not.toHaveBeenCalled()
+    expect(materializer.materialize).toHaveBeenCalledOnce()
+    expect(repository.complete).toHaveBeenCalledWith(2, 22, 'worker', 1)
+  })
+
   test('catches up a controlled ten-minute accepted backlog through outbox without duplicate materialization', async () => {
     let now = new Date('2026-07-29T00:00:00.000Z')
     const backlog = [row({ receivedAt: now })]
@@ -172,6 +226,7 @@ describe('inbox worker', () => {
   test('classifies unsafe errors without retaining user data', () => {
     expect(safeMaterializationError(new Error('Bearer token and command text'))).toBe('materialization_failed')
     expect(safeMaterializationError(Object.assign(new Error('x'), { name: 'OwnershipError' }))).toBe('ownership_mismatch')
+    expect(safeMaterializationError(Object.assign(new Error('contains secret body'), { name: 'SessionDocumentProtocolError' }))).toBe('document_integrity')
   })
 
   test('passes claimed_by and attempts as the completion fence', async () => {

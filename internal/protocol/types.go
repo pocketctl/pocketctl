@@ -175,6 +175,18 @@ type DaemonEvent struct {
 	Truncated              bool                     `json:"truncated,omitempty"`
 	OriginalType           string                   `json:"original_type,omitempty"`
 	OriginalBytes          int                      `json:"original_bytes,omitempty"`
+	DocumentID             string                   `json:"document_id,omitempty"`
+	VersionID              string                   `json:"version_id,omitempty"`
+	DisplayName            string                   `json:"display_name,omitempty"`
+	DocumentFormat         string                   `json:"document_format,omitempty"`
+	DocumentState          string                   `json:"document_state,omitempty"`
+	DocumentReason         string                   `json:"document_reason,omitempty"`
+	SourceEventID          string                   `json:"source_event_id,omitempty"`
+	CapturedAt             string                   `json:"captured_at,omitempty"`
+	ChunkCount             int                      `json:"chunk_count,omitempty"`
+	ChunkIndex             *int                     `json:"chunk_index,omitempty"`
+	ChunkData              string                   `json:"chunk_data,omitempty"`
+	ChunkHash              string                   `json:"chunk_hash,omitempty"`
 	MessageID              string                   `json:"message_id,omitempty"` // source message identity (OpenCode revisioned Parts)
 	PartID                 string                   `json:"part_id,omitempty"`    // source Part identity for client-side upsert
 	Revision               int                      `json:"revision,omitempty"`   // monotonically increasing per Part

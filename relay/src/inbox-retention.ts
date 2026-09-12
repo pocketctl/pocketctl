@@ -1,4 +1,5 @@
 import type pg from 'pg'
+import { sessionDocumentUploadsExpired } from './metrics.js'
 
 const COMPLETED_RETENTION_HOURS = 6
 const DELETE_BATCH_LIMIT = 1_000
@@ -81,7 +82,19 @@ export class InboxRetention {
          WHERE r.receipt_id = expired.receipt_id`,
         [DELETE_BATCH_LIMIT],
       )
+      const expiredUploads = await client.query(
+        `DELETE FROM session_document_uploads
+         WHERE version_id IN (
+           SELECT version_id FROM session_document_uploads
+           WHERE expires_at <= NOW()
+           ORDER BY expires_at, version_id
+           FOR UPDATE SKIP LOCKED
+           LIMIT $1
+         )`,
+        [DELETE_BATCH_LIMIT],
+      )
       await client.query('COMMIT')
+      sessionDocumentUploadsExpired.inc(expiredUploads.rowCount ?? 0)
       return {
         deletedCompleted: deleted.rowCount ?? 0,
         blockedUndelivered: Number(blocked.rows[0]?.blocked_undelivered ?? 0),

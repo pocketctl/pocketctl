@@ -27,6 +27,26 @@ describe('session deletion token accounting', () => {
     expect(statements.some((sql) => sql.includes('DELETE FROM events'))).toBe(true)
   })
 
+  test('explicitly purges document ingress, assemblies, versions, and projections before the session row', async () => {
+    const { pool, statements } = poolWithQueries()
+
+    await deleteSession(pool, 'session-1', { usageFactsAuthoritative: true })
+
+    const indexOf = (fragment: string) => statements.findIndex(sql => sql.includes(fragment))
+    for (const fragment of [
+      'DELETE FROM realtime_outbox',
+      'DELETE FROM event_inbox',
+      'DELETE FROM session_document_upload_chunks',
+      'DELETE FROM session_document_uploads',
+      'DELETE FROM session_document_versions',
+      'DELETE FROM session_documents',
+    ]) {
+      expect(indexOf(fragment), fragment).toBeGreaterThan(0)
+      expect(indexOf(fragment), fragment).toBeLessThan(indexOf('DELETE FROM sessions WHERE session_id'))
+    }
+    expect(indexOf('INSERT INTO deleted_sessions')).toBeGreaterThan(indexOf('DELETE FROM sessions WHERE session_id'))
+  })
+
   test('projects pending durable usage to idempotent inbox facts before deleting session content', async () => {
     const { pool, statements } = poolWithQueries()
 

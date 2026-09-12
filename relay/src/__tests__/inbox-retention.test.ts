@@ -40,6 +40,8 @@ describe('InboxRetention', () => {
     expect(sql).toContain('FOR UPDATE OF i SKIP LOCKED')
     expect(sql).toContain('r.inbox_id IS NULL')
     expect(sql).toContain('c.ack_seq >= r.seq')
+    expect(sql).toContain('DELETE FROM session_document_uploads')
+    expect(sql).toContain('FOR UPDATE SKIP LOCKED')
     expect(sql).not.toContain('resetStaleClaims')
     expect(client.release).toHaveBeenCalledOnce()
   })

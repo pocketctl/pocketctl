@@ -51,6 +51,8 @@ type codexProjection struct {
 	threadStatus   map[string]string
 	threadRevision map[string]uint64
 	parts          map[string]codexProjectedPart
+	turnDiff       map[string]string
+	fileChangePath map[string]map[string]struct{}
 }
 
 type codexProjectedPart struct {
@@ -108,6 +110,8 @@ func newCodexProjection(generation uint64) *codexProjection {
 		threadStatus:   make(map[string]string),
 		threadRevision: make(map[string]uint64),
 		parts:          make(map[string]codexProjectedPart),
+		turnDiff:       make(map[string]string),
+		fileChangePath: make(map[string]map[string]struct{}),
 	}
 }
 
@@ -147,6 +151,8 @@ func (p *codexProjection) project(in codexapp.Inbound, historical bool) []protoc
 		return p.projectThreadStatus(in.Params)
 	case "turn/started", "turn/completed":
 		return p.projectTurn(in.Method, in.Params, historical)
+	case "turn/diff/updated":
+		return p.projectTurnDiff(in.Params, historical)
 	case "item/started", "item/completed":
 		return p.projectItem(in.Method, in.Params, historical)
 	case "item/agentMessage/delta":
@@ -237,9 +243,11 @@ func (p *codexProjection) projectTurn(method string, raw json.RawMessage, histor
 			previousEnd := p.turnStatusEvent(params.ThreadID, previous, protocol.TurnStateAbandoned, "superseded_by_native_turn")
 			previousEnd.TurnConfidence = protocol.TurnConfidenceDerived
 			events = append(events, previousEnd)
+			p.clearManagedTurnDiff(params.ThreadID, previous)
 		}
 		p.activeTurn[params.ThreadID] = params.Turn.ID
 		delete(p.completedTurn, params.ThreadID+"\x00"+params.Turn.ID)
+		p.clearManagedTurnDiff(params.ThreadID, params.Turn.ID)
 		if historical {
 			return nil
 		}
@@ -262,8 +270,13 @@ func (p *codexProjection) projectTurn(method string, raw json.RawMessage, histor
 		// A native completion still needs its matching registry identity.
 		recovered = p.synthesizeActiveTurn(params.ThreadID, params.Turn.ID, false)
 	}
+	var managedFileChanges []protocol.DaemonEvent
+	if !historical && managedTurnCompletedSuccessfully(params.Turn.Status) {
+		managedFileChanges = p.projectManagedTurnDiff(params.ThreadID, params.Turn.ID)
+	}
 	delete(p.activeTurn, params.ThreadID)
 	p.completedTurn[params.ThreadID+"\x00"+params.Turn.ID] = struct{}{}
+	p.clearManagedTurnDiff(params.ThreadID, params.Turn.ID)
 	if historical {
 		return nil
 	}
@@ -271,15 +284,15 @@ func (p *codexProjection) projectTurn(method string, raw json.RawMessage, histor
 	terminal := p.turnStatusEvent(params.ThreadID, params.Turn.ID, turnState, turnReason)
 	switch params.Turn.Status {
 	case "inProgress":
-		return append(recovered, terminal, protocol.DaemonEvent{Type: "session_status", SessionID: params.ThreadID, Status: protocol.StatusRunning})
+		return append(append(recovered, managedFileChanges...), terminal, protocol.DaemonEvent{Type: "session_status", SessionID: params.ThreadID, Status: protocol.StatusRunning})
 	case "failed":
-		return append(recovered, []protocol.DaemonEvent{
+		return append(append(recovered, managedFileChanges...), []protocol.DaemonEvent{
 			terminal,
 			{Type: "error", SessionID: params.ThreadID, Error: "Codex turn failed"},
 			{Type: "session_status", SessionID: params.ThreadID, Status: protocol.StatusIdle},
 		}...)
 	default:
-		return append(recovered, terminal, protocol.DaemonEvent{Type: "session_status", SessionID: params.ThreadID, Status: protocol.StatusIdle})
+		return append(append(recovered, managedFileChanges...), terminal, protocol.DaemonEvent{Type: "session_status", SessionID: params.ThreadID, Status: protocol.StatusIdle})
 	}
 }
 
@@ -398,9 +411,11 @@ func (p *codexProjection) projectItem(method string, raw json.RawMessage, histor
 		stampTurnIdentity(&event, params.ThreadID, params.TurnID, "")
 		events = append(events, event)
 		if method == "item/completed" && params.Item.Type == "fileChange" {
-			events = append(events, p.projectManagedFileChanges(
+			fileChanges := p.projectManagedFileChanges(
 				params.ThreadID, params.TurnID, params.Item,
-			)...)
+			)
+			p.rememberManagedFileChangePaths(params.ThreadID, params.TurnID, fileChanges)
+			events = append(events, fileChanges...)
 		}
 	}
 	return events

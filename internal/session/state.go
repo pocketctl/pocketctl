@@ -1,6 +1,8 @@
 package session
 
 import (
+	"os"
+	"path/filepath"
 	"sort"
 	"time"
 
@@ -403,6 +405,36 @@ func (sm *SessionManager) GetWorktreeInfo(sessionID string) (string, string, boo
 		return "", "", false
 	}
 	return ps.WorktreePath, ps.WorktreeBranch, true
+}
+
+// GetDocumentCaptureRoot returns the canonical, locally authorized workspace
+// root for generation-time document capture. Isolated sessions always bind to
+// their worktree rather than the same-named file in the original cwd.
+func (sm *SessionManager) GetDocumentCaptureRoot(sessionID string) (string, bool) {
+	sm.mu.RLock()
+	ps, ok := sm.sessions[sessionID]
+	policy := sm.cwdPolicy
+	if !ok {
+		sm.mu.RUnlock()
+		return "", false
+	}
+	root := ps.Cwd
+	if ps.WorktreePath != "" {
+		root = ps.WorktreePath
+	}
+	sm.mu.RUnlock()
+	if root == "" || policy == nil || policy.Allows(root) != nil {
+		return "", false
+	}
+	canonical, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		return "", false
+	}
+	info, err := os.Stat(canonical)
+	if err != nil || !info.IsDir() {
+		return "", false
+	}
+	return canonical, true
 }
 
 // GetSessionAgent returns the agent type for a session (e.g. "claude-code",

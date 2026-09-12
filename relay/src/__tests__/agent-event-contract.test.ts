@@ -37,6 +37,26 @@ describe('agent event compatibility contract', () => {
 });
 
 describe('daemon event ingress policy', () => {
+  test('a legacy Relay terminally ignores document bodies instead of persisting them as chat events', async () => {
+    const pool = createRouterPool();
+    const router = new Router(pool);
+    const ws = createDaemonWs();
+    await router.registerDaemon(ws, {
+      type: 'register', daemon_id: 'legacy-doc-daemon', hostname: 'host', agents: [], started_at: 7,
+    }, 1);
+    pool.query.mockClear();
+
+    router.handleDaemonMessage('legacy-doc-daemon', {
+      type: 'session_document_chunk', session_id: 'session-1', document_id: 'document-1',
+      version_id: 'version-1', chunk_data: 'c2VjcmV0', seq: 1,
+    });
+    await tick();
+
+    expect(pool.query.mock.calls.some(([sql]: [unknown]) => String(sql).includes('INSERT INTO events'))).toBe(false);
+    expect(ws._sent.some((message: any) => JSON.stringify(message).includes('c2VjcmV0'))).toBe(false);
+    router.stop();
+  });
+
   test.each([
     { name: 'ping is ephemeral control', payload: { type: 'ping' }, durable: false, priority: 'control' },
     { name: 'title generation is ephemeral aggregate', payload: { type: 'generate_title_request' }, durable: false, priority: 'aggregate' },

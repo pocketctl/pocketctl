@@ -461,6 +461,12 @@
             </span>
           </template>
         </div>
+        <SessionDocumentShelf
+          v-if="!focusedSubAgentId"
+          :documents="sessionDocuments"
+          :list-status="sessionDocumentListStatus"
+          @open="openSessionDocument"
+        />
       </div>
 
       <!-- Chat Input — unified container with embedded controls -->
@@ -662,6 +668,14 @@
     :commands="availableCommands"
     @close="showHelpModal = false"
   />
+  <SessionDocumentViewer
+    :viewer="sessionDocumentViewer"
+    :html-rendering="sessionDocumentHtmlRendering"
+    :compact="isMobile"
+    :return-focus-to="sessionDocumentOpener"
+    @close="closeSessionDocument"
+    @download="downloadSessionDocument"
+  />
 </template>
 
 <script setup lang="ts">
@@ -731,6 +745,10 @@ import { createAgentFileChangeReducer, type AgentFileChangeMessage } from '../ut
 import { projectTurns, TurnSegmentCollapseRegistry, TurnSegmentIdentityRegistry } from '../utils/turnProjection'
 import { isKnownNonTimelineControlEvent, knownNonTimelineControlEventTypes, unknownTimelineEventIdentity } from '../utils/timelineEventRegistry'
 import { createClientId } from '../utils/clientId'
+import SessionDocumentShelf from '../components/session-documents/SessionDocumentShelf.vue'
+import SessionDocumentViewer from '../components/session-documents/SessionDocumentViewer.vue'
+import { useSessionDocuments } from '../composables/useSessionDocuments'
+import { fetchSessionDocumentDownload, type SessionDocumentMetadata } from '../services/sessionDocuments'
 
 const { renamingId, renameInput, startRename, commitRename, cancelRename } = useSessionRename()
 
@@ -743,6 +761,39 @@ const { connect, send, sendUserMessage, onEvent, connected, reconnecting } = use
 const { t } = useLocale()
 
 const sessionId = computed(() => route.params.id as string)
+const sessionDocumentState = useSessionDocuments(sessionId)
+const {
+  documents: sessionDocuments,
+  htmlRendering: sessionDocumentHtmlRendering,
+  listStatus: sessionDocumentListStatus,
+  viewer: sessionDocumentViewer,
+  refresh: refreshSessionDocuments,
+} = sessionDocumentState
+const sessionDocumentOpener = ref<HTMLElement | null>(null)
+
+function openSessionDocument(document: SessionDocumentMetadata, opener: HTMLButtonElement): void {
+  sessionDocumentOpener.value = opener
+  void sessionDocumentState.open(document)
+}
+function closeSessionDocument(): void {
+  sessionDocumentState.close()
+  sessionDocumentOpener.value = null
+}
+async function downloadSessionDocument(document: SessionDocumentMetadata): Promise<void> {
+  try {
+    const blob = await fetchSessionDocumentDownload(sessionId.value, document)
+    const url = URL.createObjectURL(blob)
+    const anchor = window.document.createElement('a')
+    anchor.href = url
+    anchor.download = document.format === 'html'
+      ? `${document.displayName.replace(/\.html?$/i, '')}.static.html`
+      : document.displayName
+    anchor.click()
+    setTimeout(() => URL.revokeObjectURL(url), 0)
+  } catch {
+    // Keep the already verified preview readable if a download request fails.
+  }
+}
 const { acceptAgentPlan, planForSession } = useAgentPlanProgress()
 const currentPlan = planForSession(sessionId)
 const planPanelOpen = ref(localStorage.getItem('pocketctl_plan_panel_open') === 'true')
@@ -833,7 +884,7 @@ const explicitlyRoutedLiveEventTypes = new Set<string>([
   'command_receipt', 'interaction_result', 'subagent_discovered',
   'subagent_title_update', 'subagent_usage', 'permission_config_changed',
   'session_status', 'session_title_update', 'session_deleted', 'session_pinned',
-  'session_id_changed',
+  'session_id_changed', 'session_documents_changed',
 ])
 const allSessions = ref<any[]>([])
 // P2: per-agent message buckets for sub-agent events (keyed by agentId)
@@ -3246,6 +3297,7 @@ watch(loadKey, (newKey, oldKey) => {
     if (sessionAgentListTimer) { clearTimeout(sessionAgentListTimer); sessionAgentListTimer = null }
     if (sessionAgentSwitchTimer) { clearTimeout(sessionAgentSwitchTimer); sessionAgentSwitchTimer = null }
     loadHistory()
+    void refreshSessionDocuments()
   }
 })
 
@@ -3256,6 +3308,11 @@ onMounted(() => {
 		send({ type: 'list_sessions' })
 		send({ type: 'list_daemons' })
 		loadHistory()
+		void refreshSessionDocuments()
+	}))
+
+	cleanups.push(onEvent('session_documents_changed', (msg: any) => {
+		sessionDocumentState.notify(msg)
 	}))
 
 	cleanups.push(onEvent('session_list', (msg: any) => {
@@ -3755,6 +3812,7 @@ onMounted(() => {
   }))
 
   cleanups.push(onEvent('session_deleted', (msg: any) => {
+    sessionDocumentState.sessionDeleted(msg.session_id)
     allSessions.value = allSessions.value.filter((s: any) => s.session_id !== msg.session_id)
     if (msg.session_id === sessionId.value) {
       const next = allSessions.value[0]
@@ -3782,6 +3840,7 @@ onMounted(() => {
   // until replay/session metadata supplies the authoritative state.
   sessionSwitching = true
   loadHistory()
+  void refreshSessionDocuments()
 })
 
 // SessionActions handlers (optimistic local updates)
@@ -3798,6 +3857,7 @@ onUnmounted(() => {
   clearHistorySlowTimer()
   composerResizeObserver?.disconnect()
   composerResizeObserver = null
+  sessionDocumentState.dispose()
   for (const fn of cleanups) fn()
   cleanups.length = 0
   liveContentBatcher.dispose()

@@ -15,6 +15,10 @@ export interface FairIngressQueueConfig {
   maxBytes?: number;
   maxEventBytes?: number;
   quantumBytes?: number;
+  maxArtifactEventsPerDaemon?: number;
+  maxArtifactBytesPerDaemon?: number;
+  maxArtifactEvents?: number;
+  maxArtifactBytes?: number;
 }
 
 export interface BatchLimits {
@@ -43,6 +47,16 @@ interface DaemonQueue {
 interface DaemonUsage {
   count: number;
   bytes: number;
+  artifactCount: number;
+  artifactBytes: number;
+}
+
+const documentArtifactEventTypes = new Set([
+  'session_document_begin', 'session_document_chunk', 'session_document_commit',
+])
+
+function isDocumentArtifact(event: IngressEnvelope): boolean {
+  return documentArtifactEventTypes.has(event.eventType)
 }
 
 function positiveInteger(value: number | undefined, fallback: number): number {
@@ -65,6 +79,10 @@ export class FairIngressQueue {
   private readonly maxBytes: number;
   private readonly maxEventBytes: number;
   private readonly quantumBytes: number;
+  private readonly maxArtifactEventsPerDaemon: number;
+  private readonly maxArtifactBytesPerDaemon: number;
+  private readonly maxArtifactEvents: number;
+  private readonly maxArtifactBytes: number;
   private readonly daemons = new Map<string, DaemonQueue>();
   private readonly usage = new Map<string, DaemonUsage>();
   private readonly activeDaemonIds: string[] = [];
@@ -75,6 +93,8 @@ export class FairIngressQueue {
   private queuedCount = 0;
   private totalCount = 0;
   private totalBytes = 0;
+  private totalArtifactCount = 0;
+  private totalArtifactBytes = 0;
 
   constructor(config: FairIngressQueueConfig = {}) {
     this.maxEventsPerDaemon = positiveInteger(config.maxEventsPerDaemon, 1_024);
@@ -83,6 +103,10 @@ export class FairIngressQueue {
     this.maxBytes = positiveInteger(config.maxBytes, 64 << 20);
     this.maxEventBytes = positiveInteger(config.maxEventBytes, 1 << 20);
     this.quantumBytes = positiveInteger(config.quantumBytes, 64 << 10);
+    this.maxArtifactEventsPerDaemon = positiveInteger(config.maxArtifactEventsPerDaemon, 256);
+    this.maxArtifactBytesPerDaemon = positiveInteger(config.maxArtifactBytesPerDaemon, 8 << 20);
+    this.maxArtifactEvents = positiveInteger(config.maxArtifactEvents, 10_000);
+    this.maxArtifactBytes = positiveInteger(config.maxArtifactBytes, 32 << 20);
   }
 
   enqueue(event: IngressEnvelope): EnqueueResult {
@@ -94,6 +118,12 @@ export class FairIngressQueue {
       };
     }
     const daemonUsage = this.usage.get(event.daemonId);
+    if (isDocumentArtifact(event) && (
+      (daemonUsage?.artifactCount ?? 0) >= this.maxArtifactEventsPerDaemon
+      || (daemonUsage?.artifactBytes ?? 0) + queued.payloadBytes > this.maxArtifactBytesPerDaemon
+      || this.totalArtifactCount >= this.maxArtifactEvents
+      || this.totalArtifactBytes + queued.payloadBytes > this.maxArtifactBytes
+    )) return { kind: 'backpressured', state: this.backpressureState('artifact_backpressure') };
     if (
       (daemonUsage?.count ?? 0) >= this.maxEventsPerDaemon
       || (daemonUsage?.bytes ?? 0) + queued.payloadBytes > this.maxBytesPerDaemon
@@ -125,6 +155,12 @@ export class FairIngressQueue {
       if (!usage) throw new Error('ingress usage invariant violated');
       usage.count--;
       usage.bytes -= queued.payloadBytes;
+      if (isDocumentArtifact(event)) {
+        usage.artifactCount--;
+        usage.artifactBytes -= queued.payloadBytes;
+        this.totalArtifactCount--;
+        this.totalArtifactBytes -= queued.payloadBytes;
+      }
       this.totalCount--;
       this.totalBytes -= queued.payloadBytes;
       if (usage.count === 0) this.usage.delete(event.daemonId);
@@ -233,9 +269,17 @@ export class FairIngressQueue {
     const daemon = this.ensureDaemon(queued.event.daemonId);
     daemon.byPriority[queued.event.priority].push(queued);
     this.accountQueuedAdd(daemon, queued.payloadBytes);
-    const usage = this.usage.get(queued.event.daemonId) ?? { count: 0, bytes: 0 };
+    const usage = this.usage.get(queued.event.daemonId) ?? {
+      count: 0, bytes: 0, artifactCount: 0, artifactBytes: 0,
+    };
     usage.count++;
     usage.bytes += queued.payloadBytes;
+    if (isDocumentArtifact(queued.event)) {
+      usage.artifactCount++;
+      usage.artifactBytes += queued.payloadBytes;
+      this.totalArtifactCount++;
+      this.totalArtifactBytes += queued.payloadBytes;
+    }
     this.usage.set(queued.event.daemonId, usage);
     this.totalCount++;
     this.totalBytes += queued.payloadBytes;

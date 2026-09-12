@@ -72,6 +72,11 @@ func startCodexAppServerWithFactory(ctx context.Context, binary, _ string, gener
 		return nil, err
 	}
 	cmd := factory(binary, socketPath)
+	// Pin the app-server to the stable runtime dir instead of inheriting the
+	// daemon's cwd: a daemon started inside a worktree (or any directory later
+	// removed) leaves the app-server with a dead cwd, and Codex rejects turns
+	// with "invalid cwd: No such file or directory" once that happens.
+	cmd.Dir = dir
 	cmd.Env = append(cmd.Env, os.Environ()...)
 	cmd.Env = codexAppServerEnv(cmd.Env)
 	cmd.Env = append(cmd.Env, "POCKETCTL_CODEX_SOCKET="+socketPath)

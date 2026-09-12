@@ -5,7 +5,9 @@ import {
   type InboxRow,
 } from './ingress/inbox-repository.js'
 import type { EventMaterializer } from './materialization/event-materializer.js'
+import type { MaterializationInput, MaterializationResult } from './materialization/types.js'
 import type { RealtimeOutboxWriter } from './materialization/realtime-outbox.js'
+import { isSessionDocumentArtifactEvent } from './session-documents/materializer.js'
 import { observeInboxOldest, workerBacklog, workerBatchSize, workerClaimedRows, workerDrainPasses, workerRetries } from './metrics.js'
 
 const MAX_ATTEMPTS = 12
@@ -18,6 +20,7 @@ const DEFAULT_DRAIN_PASSES = 32
 export interface InboxWorkerDeps {
   repository: Pick<InboxRepository, 'claimBatch' | 'complete' | 'reschedule' | 'deadLetter' | 'resetStaleClaims' | 'renewClaims'>
   materializer: Pick<EventMaterializer, 'materialize'>
+  artifactMaterializer?: { materialize(input: MaterializationInput): Promise<MaterializationResult> }
   outboxWriter?: Pick<RealtimeOutboxWriter, 'complete'>
   workerId: string
   shardCount: number
@@ -48,6 +51,10 @@ export function safeMaterializationError(error: unknown): string {
   // defect, not a transient failure.
   if (name === 'ExtensionJournalOwnerMissingError') return 'extension_journal_owner_missing'
   if (name === 'ClientEventOwnershipError') return 'client_event_ownership_mismatch'
+  if (name === 'SessionDocumentProtocolError' || name === 'SessionDocumentIntegrityError') return 'document_integrity'
+  if (name === 'SessionDocumentNotFoundError') return 'document_session_not_found'
+  if (name === 'SessionDocumentExpiredError') return 'document_upload_expired'
+  if (name === 'SessionDocumentMaterializerUnavailableError') return 'document_materializer_unavailable'
   const code = error && typeof error === 'object' && 'code' in error ? String(error.code) : ''
   if (code === 'session_ownership_violation' || code === 'unknown_daemon_session'
     || code === 'quota_reservation_binding_mismatch') return code
@@ -69,6 +76,9 @@ export function isPermanentMaterializationError(error: unknown): boolean {
   // currently rejects synchronously on the WebSocket path; the entry stays
   // so future inbox ingestion of client events keeps the same semantics.
   return name === 'ExtensionJournalOwnerMissingError' || name === 'ClientEventOwnershipError'
+    || name === 'SessionDocumentProtocolError' || name === 'SessionDocumentIntegrityError'
+    || name === 'SessionDocumentNotFoundError' || name === 'SessionDocumentExpiredError'
+    || name === 'SessionDocumentMaterializerUnavailableError'
 }
 
 export function retryDelayMs(attempts: number, random: () => number): number {
@@ -97,10 +107,19 @@ export function createInboxWorker(deps: InboxWorkerDeps) {
   async function processRow(row: InboxRow, assertClaim: () => Promise<void>): Promise<void> {
     try {
       await assertClaim()
-      const result = await deps.materializer.materialize({
+      const materializer = isSessionDocumentArtifactEvent(row.eventType)
+        ? deps.artifactMaterializer
+        : deps.materializer
+      if (!materializer) {
+        const error = new Error('session document artifact materializer unavailable')
+        error.name = 'SessionDocumentMaterializerUnavailableError'
+        throw error
+      }
+      const result = await materializer.materialize({
         inboxId: row.inboxId,
         userId: row.userId,
         daemonId: row.daemonId,
+        daemonGeneration: row.daemonGeneration,
         sessionId: row.sessionId,
         eventType: row.eventType,
         payload: row.payload,

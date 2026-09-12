@@ -1,6 +1,7 @@
 package session
 
 import (
+	"encoding/json"
 	"reflect"
 	"strings"
 	"testing"
@@ -206,6 +207,122 @@ func TestCodexProjectionFileChangeKillSwitchKeepsLegacyOnly(t *testing.T) {
 		"--- a/z.go\n+++ b/z.go\n@@ -1 +1 @@\n-old\n+new\n\n"+
 			"first\nsecond\n\n"+
 			"--- a/old.go\n+++ b/new.go\n@@ -1 +1 @@\n-old name\n+new name\n")
+}
+
+func TestCodexProjectionEmitsCompletedFileChangesFromFinalTurnDiff(t *testing.T) {
+	t.Setenv("POCKETCTL_CODEX_EDITED_FILES", "1")
+	p := newCodexProjection(29)
+	startManagedFileChangeTurn(t, p)
+
+	diff := "diff --git a/document-e2e.md b/document-e2e.md\n" +
+		"index 1111111..2222222 100644\n" +
+		"--- a/document-e2e.md\n" +
+		"+++ b/document-e2e.md\n" +
+		"@@ -1 +1,2 @@\n" +
+		" # Report\n" +
+		"+Agent finalized Markdown snapshot.\n" +
+		"diff --git a/document-e2e.html b/document-e2e.html\n" +
+		"index 3333333..4444444 100644\n" +
+		"--- a/document-e2e.html\n" +
+		"+++ b/document-e2e.html\n" +
+		"@@ -1 +1,2 @@\n" +
+		" <h1>Report</h1>\n" +
+		"+<p>Agent finalized HTML snapshot.</p>\n"
+	updated := codexNotification("turn/diff/updated", `{
+		"threadId":"thr_1","turnId":"turn_1","diff":`+mustJSONTestString(t, diff)+`
+	}`)
+	if events := p.Project(updated); len(events) != 0 {
+		t.Fatalf("turn diff update emitted before completion: %+v", events)
+	}
+
+	events := p.Project(codexNotification("turn/completed", `{
+		"threadId":"thr_1","turn":{"id":"turn_1","status":"completed","items":[]}
+	}`))
+	if len(events) != 4 {
+		t.Fatalf("events=%+v, want two file changes before terminal and idle", events)
+	}
+	for index, wantPath := range []string{"document-e2e.md", "document-e2e.html"} {
+		got := events[index]
+		if got.Type != "agent_file_change" || got.SessionID != "thr_1" ||
+			got.TurnID != logicalCodexTurnID("thr_1", "turn_1") || got.SourceTurnID != "turn_1" ||
+			got.ChangeSetID != "managed-turn-diff:turn_1" || got.CallID != "turn-diff:turn_1" ||
+			got.ChangeIndex != index || got.ChangeTotal != 2 || got.Path != wantPath ||
+			got.ChangeKind != protocol.FileChangeUpdate || got.Status != "completed" ||
+			got.Additions != 1 || got.Deletions != 0 || got.Diff == "" || got.EventID == "" {
+			t.Fatalf("file change %d=%+v", index, got)
+		}
+	}
+	if events[2].Type != protocol.EventTypeTurnStatus || events[3].Type != "session_status" {
+		t.Fatalf("terminal ordering=%+v", events)
+	}
+}
+
+func TestCodexProjectionTurnDiffDoesNotDuplicateCompletedFileChangeItem(t *testing.T) {
+	t.Setenv("POCKETCTL_CODEX_EDITED_FILES", "1")
+	p := newCodexProjection(30)
+	startManagedFileChangeTurn(t, p)
+	p.Project(codexNotification("item/completed", `{
+		"threadId":"thr_1","turnId":"turn_1",
+		"item":{"id":"patch_1","type":"fileChange","status":"completed","changes":[
+			{"path":"report.md","kind":{"type":"update"},"diff":"--- a/report.md\n+++ b/report.md\n@@ -1 +1 @@\n-old\n+new\n"}
+		]}
+	}`))
+	diff := "diff --git a/report.md b/report.md\n--- a/report.md\n+++ b/report.md\n@@ -1 +1 @@\n-old\n+new\n" +
+		"diff --git a/preview.html b/preview.html\n--- a/preview.html\n+++ b/preview.html\n@@ -1 +1 @@\n-old\n+new\n"
+	p.Project(codexNotification("turn/diff/updated", `{
+		"threadId":"thr_1","turnId":"turn_1","diff":`+mustJSONTestString(t, diff)+`
+	}`))
+
+	events := p.Project(codexNotification("turn/completed", `{
+		"threadId":"thr_1","turn":{"id":"turn_1","status":"completed"}
+	}`))
+	if len(events) != 3 || events[0].Type != "agent_file_change" || events[0].Path != "preview.html" ||
+		events[0].ChangeIndex != 0 || events[0].ChangeTotal != 1 {
+		t.Fatalf("turn completion=%+v, want only non-duplicate preview.html plus lifecycle", events)
+	}
+}
+
+func TestCodexProjectionRejectsUnsafeOrUnsuccessfulTurnDiff(t *testing.T) {
+	t.Setenv("POCKETCTL_CODEX_EDITED_FILES", "1")
+	unsafeDiff := "diff --git a/report.md b/report.md\n--- a/report.md\n+++ /tmp/escaped.md\n@@ -1 +1 @@\n-old\n+new\n" +
+		"diff --git a/ok.md b/../../escaped.md\n--- a/ok.md\n+++ b/../../escaped.md\n@@ -1 +1 @@\n-old\n+new\n" +
+		"diff --git a/malformed.md b/malformed.md\n@@ -1 +1 @@\n-old\n+new\n"
+
+	p := newCodexProjection(31)
+	startManagedFileChangeTurn(t, p)
+	p.Project(codexNotification("turn/diff/updated", `{
+		"threadId":"thr_1","turnId":"turn_1","diff":`+mustJSONTestString(t, unsafeDiff)+`
+	}`))
+	events := p.Project(codexNotification("turn/completed", `{
+		"threadId":"thr_1","turn":{"id":"turn_1","status":"completed"}
+	}`))
+	if len(events) != 2 || events[0].Type != protocol.EventTypeTurnStatus || events[1].Type != "session_status" {
+		t.Fatalf("unsafe turn diff emitted file changes: %+v", events)
+	}
+
+	p = newCodexProjection(32)
+	startManagedFileChangeTurn(t, p)
+	validDiff := "diff --git a/report.md b/report.md\n--- a/report.md\n+++ b/report.md\n@@ -1 +1 @@\n-old\n+new\n"
+	p.Project(codexNotification("turn/diff/updated", `{
+		"threadId":"thr_1","turnId":"turn_1","diff":`+mustJSONTestString(t, validDiff)+`
+	}`))
+	events = p.Project(codexNotification("turn/completed", `{
+		"threadId":"thr_1","turn":{"id":"turn_1","status":"failed"}
+	}`))
+	for _, event := range events {
+		if event.Type == "agent_file_change" {
+			t.Fatalf("failed turn emitted file change: %+v", events)
+		}
+	}
+}
+
+func mustJSONTestString(t *testing.T, value string) string {
+	t.Helper()
+	raw, err := json.Marshal(value)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(raw)
 }
 
 func startManagedFileChangeTurn(t *testing.T, p *codexProjection) {
