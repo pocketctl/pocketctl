@@ -22,6 +22,8 @@ PocketCtl 是面向 Claude Code、Codex、OpenCode 和 ZCode 的跨设备控制�
   同时与 PocketCtl 共享同一个 Runtime。
 - **断线后恢复上下文** — Relay 持久化规范化事件用于重放，Daemon 重启后会
   重新协调受支持的受管会话。
+- **远程查看会话文档** — 以安全快照形式捕获会话关键文档，在 Web 或 iOS
+  查看与下载。
 - **只关注真正需要处理的事项** — 可选的 Attention Inbox 会聚合待回答问题、
   审批、高风险操作和恢复信号，并保留对应会话上下文。
 - **沉淀受治理的项目知识** — 可选的 Memory 工作台将仓库源码转化为经评审

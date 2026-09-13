@@ -23,6 +23,8 @@ off your development machine.
   continue to use their official TUI while sharing one runtime with PocketCtl.
 - **Recover context after a disconnect** — the Relay persists normalized events
   for replay, and the daemon reconciles supported managed sessions after restart.
+- **Browse session documents remotely** — capture secure snapshots of a
+  session's key documents and view or download them from Web or iOS.
 - **Focus attention** — the optional Attention Inbox groups pending questions,
   approvals, high-risk actions, and recovery signals with their session context.
 - **Grow governed project knowledge** — the optional Memory workbench turns
