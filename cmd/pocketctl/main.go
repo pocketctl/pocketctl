@@ -3908,6 +3908,10 @@ func handleCommands(ctx context.Context, client *ws.Client, sm *session.SessionM
 				event := protocol.DaemonEvent{Type: "invocation_result", SessionID: cmd.SessionID, RequestID: cmd.RequestID, Invocation: result}
 				if invocationErr != nil {
 					event.Error = invocationErr.Error()
+					if errors.Is(invocationErr, session.ErrCodexInvocationsUnsupported) {
+						// Deterministic failure: clients use this code to drop the retry button.
+						event.Code = "invocations_unsupported"
+					}
 				}
 				client.SendMsg(event)
 

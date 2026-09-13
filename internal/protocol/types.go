@@ -197,6 +197,7 @@ type DaemonEvent struct {
 	Output                 string                   `json:"output,omitempty"`
 	Status                 string                   `json:"status,omitempty"`
 	Error                  string                   `json:"error,omitempty"`
+	Code                   string                   `json:"code,omitempty"`     // stable machine-readable error code (e.g. invocation_result replies); empty for display-only errors
 	Attempt                int                      `json:"attempt,omitempty"`  // retry attempt number (OpenCode retry Part)
 	RetryAt                int64                    `json:"retry_at,omitempty"` // retry creation time in source milliseconds
 	Auto                   bool                     `json:"auto,omitempty"`     // compaction was automatically triggered

@@ -22,6 +22,11 @@ import (
 
 type codexInvocationKey struct{}
 
+// ErrCodexInvocationsUnsupported marks sessions that can never serve remote
+// invocations (terminal/observer sessions without a project runtime backend).
+// Deterministic, so clients hide their retry affordances for this code.
+var ErrCodexInvocationsUnsupported = errors.New("此会话未启用 Codex 远程调用，请通过 iOS/Web 的新建会话入口远程创建 Codex 会话后使用")
+
 var codexCommandDescriptions = [][2]string{
 	{"skills", "浏览当前项目技能"}, {"model", "选择模型与推理强度"}, {"permissions", "调整当前会话权限"}, {"review", "审查代码修改"}, {"compact", "压缩会话上下文"}, {"rename", "重命名当前会话"}, {"new", "在当前主机和目录新建会话"}, {"resume", "继续本项目已有会话"}, {"fork", "从当前会话创建分支"}, {"status", "查看会话模型、权限与状态"}, {"pwd", "查看工作目录"}, {"usage", "查看 Codex 账户额度"}, {"copy", "复制最近一条完整回复"}, {"export", "导出完整会话 Markdown"},
 }
@@ -35,7 +40,7 @@ func (sm *SessionManager) invocationBackend(id string) (*CodexAppServerBackend, 
 	}
 	b, ok := ps.Backend.(*CodexAppServerBackend)
 	if !ok || b.coord.projectCwd == "" {
-		return nil, errors.New("此会话未启用 Codex 远程调用，请在新版中创建会话")
+		return nil, ErrCodexInvocationsUnsupported
 	}
 	return b, nil
 }
