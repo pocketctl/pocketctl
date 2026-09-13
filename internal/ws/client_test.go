@@ -2,6 +2,7 @@ package ws
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -20,6 +21,7 @@ import (
 
 	"github.com/gorilla/websocket"
 	"github.com/pocketctl/pocketctl/internal/protocol"
+	"github.com/pocketctl/pocketctl/internal/sessiondocument"
 )
 
 func TestKickedTokenCheckUnavailableDoesNotExitAndReconnects(t *testing.T) {
@@ -1426,6 +1428,116 @@ func TestOnRegisterAckSupportedKeepsBuffer(t *testing.T) {
 	}
 }
 
+func TestSessionDocumentCapabilityFiltersLegacyRelay(t *testing.T) {
+	tests := []struct {
+		name         string
+		capabilities []string
+		wantTypes    []string
+	}{
+		{
+			name:      "legacy relay",
+			wantTypes: []string{"agent_text"},
+		},
+		{
+			name:         "document capable relay",
+			capabilities: []string{protocol.SessionDocumentSnapshotCapability},
+			wantTypes: []string{
+				protocol.EventTypeSessionDocumentBegin,
+				protocol.EventTypeSessionDocumentChunk,
+				protocol.EventTypeSessionDocumentCommit,
+				"agent_text",
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			received := make(chan string, 8)
+			upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				conn, err := upgrader.Upgrade(w, r, nil)
+				if err != nil {
+					return
+				}
+				defer conn.Close()
+				for {
+					_, raw, err := conn.ReadMessage()
+					if err != nil {
+						return
+					}
+					var msg map[string]any
+					if json.Unmarshal(raw, &msg) != nil {
+						continue
+					}
+					typeName, _ := msg["type"].(string)
+					switch typeName {
+					case "register":
+						_ = conn.WriteJSON(protocol.RegisterAckMessage{
+							Type:             "register_ack",
+							SupportsEventAck: true,
+							Capabilities:     tt.capabilities,
+						})
+					case "ping":
+					default:
+						received <- typeName
+					}
+				}
+			}))
+			defer server.Close()
+
+			out := make(chan protocol.DaemonEvent, 4)
+			client := NewClient(wsURL(server.URL), "tok", "daemon-doc-capability", nil, nil, nil, out,
+				slog.New(slog.NewTextHandler(io.Discard, nil)))
+			client.pingInterval = time.Second
+			client.pongWait = 3 * time.Second
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			go client.Run(ctx)
+
+			out <- protocol.DaemonEvent{Type: protocol.EventTypeSessionDocumentBegin, SessionID: "s", DocumentID: "d"}
+			out <- protocol.DaemonEvent{Type: protocol.EventTypeSessionDocumentChunk, SessionID: "s", DocumentID: "d"}
+			out <- protocol.DaemonEvent{Type: protocol.EventTypeSessionDocumentCommit, SessionID: "s", DocumentID: "d"}
+			out <- protocol.DaemonEvent{Type: "agent_text", SessionID: "s", Text: "still delivered"}
+
+			for i, want := range tt.wantTypes {
+				select {
+				case got := <-received:
+					if got != want {
+						t.Fatalf("event %d = %q, want %q", i, got, want)
+					}
+				case <-time.After(2 * time.Second):
+					t.Fatalf("timed out waiting for event %d (%q)", i, want)
+				}
+			}
+			select {
+			case extra := <-received:
+				t.Fatalf("unexpected event sent to relay: %q", extra)
+			case <-time.After(100 * time.Millisecond):
+			}
+		})
+	}
+}
+
+func TestSessionDocumentTransportRequiresCurrentCapabilityAndNegotiatedBounds(t *testing.T) {
+	c := newTestClient("ws://example")
+	if enabled, _, _ := c.SessionDocumentTransport(); enabled {
+		t.Fatal("document transport enabled before register ack")
+	}
+	c.onRegisterAck(protocol.RegisterAckMessage{
+		Capabilities:  []string{protocol.SessionDocumentSnapshotCapability},
+		MaxEventBytes: 64 << 10, MaxChunkBytes: 16 << 10,
+	})
+	if enabled, eventBytes, chunkBytes := c.SessionDocumentTransport(); !enabled || eventBytes != 64<<10 || chunkBytes != 16<<10 {
+		t.Fatalf("transport = %v, %d, %d", enabled, eventBytes, chunkBytes)
+	}
+	c.outMu.Lock()
+	c.sessionDocumentSupported = false
+	c.outMu.Unlock()
+	if enabled, _, _ := c.SessionDocumentTransport(); enabled {
+		t.Fatal("document transport remained enabled after capability reset")
+	}
+}
+
 func TestDurableWindowBlocksNthPlusOneUntilAck(t *testing.T) {
 	c := newTestClient("ws://example")
 	c.maxOutCount = 8
@@ -1816,6 +1928,135 @@ func TestReplaysUnackedEventsOnReconnect(t *testing.T) {
 	}
 	if atomic.LoadInt32(&connCount) < 2 {
 		t.Fatalf("expected a reconnect, got %d connections", connCount)
+	}
+}
+
+func TestSessionDocumentRecordsReplayAcrossInterruptionPoints(t *testing.T) {
+	content := []byte("0123456789")
+	digest := fmt.Sprintf("%x", sha256.Sum256(content))
+	records, err := sessiondocument.BuildRecords("session-1", sessiondocument.CaptureResult{
+		SessionID: "session-1", DocumentID: "doc-1", VersionID: "ver-1", DisplayName: "report.md",
+		Format: protocol.SessionDocumentFormatMarkdown, SourceTurnID: "turn-1", SourceEventID: "source-1",
+		CapturedAt: time.Now().UTC(), ByteSize: len(content), SHA256: digest, Bytes: content,
+	}, sessiondocument.TransportLimits{MaxEventBytes: 4096, MaxChunkBytes: 4})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, testCase := range []struct {
+		name      string
+		dropAfter int
+	}{
+		{name: "before begin acknowledgement", dropAfter: 1},
+		{name: "between chunks", dropAfter: 2},
+		{name: "before commit acknowledgement", dropAfter: len(records)},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			type observed struct {
+				connection int32
+				typeName   string
+				eventID    string
+				seq        int64
+			}
+			received := make(chan observed, 32)
+			completed := make(chan struct{}, 1)
+			var connections int32
+			upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				conn, upgradeErr := upgrader.Upgrade(w, r, nil)
+				if upgradeErr != nil {
+					return
+				}
+				defer conn.Close()
+				connection := atomic.AddInt32(&connections, 1)
+				documentCount := 0
+				for {
+					_, raw, readErr := conn.ReadMessage()
+					if readErr != nil {
+						return
+					}
+					var message map[string]any
+					if json.Unmarshal(raw, &message) != nil {
+						continue
+					}
+					typeName, _ := message["type"].(string)
+					if typeName == "register" {
+						_ = conn.WriteJSON(protocol.RegisterAckMessage{
+							Type: "register_ack", SupportsEventAck: true,
+							Capabilities:  []string{protocol.SessionDocumentSnapshotCapability},
+							MaxEventBytes: 4096, MaxChunkBytes: 4,
+						})
+						continue
+					}
+					if !protocol.IsSessionDocumentUploadEvent(typeName) {
+						continue
+					}
+					documentCount++
+					eventID, _ := message["event_id"].(string)
+					seqFloat, _ := message["seq"].(float64)
+					received <- observed{connection: connection, typeName: typeName, eventID: eventID, seq: int64(seqFloat)}
+					if connection == 1 && documentCount == testCase.dropAfter {
+						conn.Close()
+						return
+					}
+					if connection >= 2 && typeName == protocol.EventTypeSessionDocumentCommit {
+						_ = conn.WriteJSON(protocol.EventAckMessage{Type: "event_ack", UpToSeq: int64(seqFloat)})
+						select {
+						case completed <- struct{}{}:
+						default:
+						}
+					}
+				}
+			}))
+			defer server.Close()
+
+			out := make(chan protocol.DaemonEvent, len(records))
+			client := NewClient(wsURL(server.URL), "token", "daemon-document-replay", nil, nil, nil, out,
+				slog.New(slog.NewTextHandler(io.Discard, nil)))
+			client.pingInterval = 30 * time.Millisecond
+			client.pongWait = 250 * time.Millisecond
+			client.writeWait = 250 * time.Millisecond
+			client.reconnectJitter = func(time.Duration) time.Duration { return 0 }
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			go client.Run(ctx)
+			for _, record := range records {
+				out <- record
+			}
+			select {
+			case <-completed:
+			case <-time.After(4 * time.Second):
+				t.Fatal("document replay did not reach commit")
+			}
+			cancel()
+
+			byConnection := map[int32][]observed{}
+			drain := true
+			for drain {
+				select {
+				case item := <-received:
+					byConnection[item.connection] = append(byConnection[item.connection], item)
+				default:
+					drain = false
+				}
+			}
+			second := byConnection[2]
+			if len(second) != len(records) {
+				t.Fatalf("replayed records=%d, want %d; observations=%v", len(second), len(records), byConnection)
+			}
+			firstSeq := map[string]int64{}
+			for _, item := range byConnection[1] {
+				firstSeq[item.eventID] = item.seq
+			}
+			for index, item := range second {
+				if item.eventID != records[index].EventID {
+					t.Fatalf("record %d replay id=%q want=%q", index, item.eventID, records[index].EventID)
+				}
+				if original, duplicated := firstSeq[item.eventID]; duplicated && original != item.seq {
+					t.Fatalf("event %q changed seq from %d to %d", item.eventID, original, item.seq)
+				}
+			}
+		})
 	}
 }
 

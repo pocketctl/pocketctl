@@ -461,6 +461,12 @@
             </span>
           </template>
         </div>
+        <SessionDocumentShelf
+          v-if="!focusedSubAgentId"
+          :documents="sessionDocuments"
+          :list-status="sessionDocumentListStatus"
+          @open="openSessionDocument"
+        />
       </div>
 
       <!-- Chat Input — unified container with embedded controls -->
@@ -473,7 +479,7 @@
           </button>
         </Transition>
         <InvocationDialog :value="invocationDialog" @close="invocationDialog=null" @choose="chooseInvocation" />
-        <div v-if="invocationError" class="invocation-hint" role="status">{{ invocationError }} <button @click="requestInvocations">刷新</button></div>
+        <div v-if="invocationError" class="invocation-hint" role="status">{{ invocationError }} <button v-if="invocationErrorCode !== 'invocations_unsupported'" @click="requestInvocations">刷新</button></div>
         <div v-if="invocationSelection" class="invocation-hint">/{{ invocationSelection.name }} · {{ invocationSelection.display_path || invocationSelection.source }} <button aria-label="清除选择" @click="invocationSelection=null">×</button></div>
         <template v-if="composerState.visible">
           <div class="chat-input-container" :class="{ focused: isInputFocused }" @transitionend.self="handleComposerTransitionEnd">
@@ -662,6 +668,14 @@
     :commands="availableCommands"
     @close="showHelpModal = false"
   />
+  <SessionDocumentViewer
+    :viewer="sessionDocumentViewer"
+    :html-rendering="sessionDocumentHtmlRendering"
+    :compact="isMobile"
+    :return-focus-to="sessionDocumentOpener"
+    @close="closeSessionDocument"
+    @download="downloadSessionDocument"
+  />
 </template>
 
 <script setup lang="ts">
@@ -731,6 +745,10 @@ import { createAgentFileChangeReducer, type AgentFileChangeMessage } from '../ut
 import { projectTurns, TurnSegmentCollapseRegistry, TurnSegmentIdentityRegistry } from '../utils/turnProjection'
 import { isKnownNonTimelineControlEvent, knownNonTimelineControlEventTypes, unknownTimelineEventIdentity } from '../utils/timelineEventRegistry'
 import { createClientId } from '../utils/clientId'
+import SessionDocumentShelf from '../components/session-documents/SessionDocumentShelf.vue'
+import SessionDocumentViewer from '../components/session-documents/SessionDocumentViewer.vue'
+import { useSessionDocuments } from '../composables/useSessionDocuments'
+import { fetchSessionDocumentDownload, type SessionDocumentMetadata } from '../services/sessionDocuments'
 
 const { renamingId, renameInput, startRename, commitRename, cancelRename } = useSessionRename()
 
@@ -743,6 +761,39 @@ const { connect, send, sendUserMessage, onEvent, connected, reconnecting } = use
 const { t } = useLocale()
 
 const sessionId = computed(() => route.params.id as string)
+const sessionDocumentState = useSessionDocuments(sessionId)
+const {
+  documents: sessionDocuments,
+  htmlRendering: sessionDocumentHtmlRendering,
+  listStatus: sessionDocumentListStatus,
+  viewer: sessionDocumentViewer,
+  refresh: refreshSessionDocuments,
+} = sessionDocumentState
+const sessionDocumentOpener = ref<HTMLElement | null>(null)
+
+function openSessionDocument(document: SessionDocumentMetadata, opener: HTMLButtonElement): void {
+  sessionDocumentOpener.value = opener
+  void sessionDocumentState.open(document)
+}
+function closeSessionDocument(): void {
+  sessionDocumentState.close()
+  sessionDocumentOpener.value = null
+}
+async function downloadSessionDocument(document: SessionDocumentMetadata): Promise<void> {
+  try {
+    const blob = await fetchSessionDocumentDownload(sessionId.value, document)
+    const url = URL.createObjectURL(blob)
+    const anchor = window.document.createElement('a')
+    anchor.href = url
+    anchor.download = document.format === 'html'
+      ? `${document.displayName.replace(/\.html?$/i, '')}.static.html`
+      : document.displayName
+    anchor.click()
+    setTimeout(() => URL.revokeObjectURL(url), 0)
+  } catch {
+    // Keep the already verified preview readable if a download request fails.
+  }
+}
 const { acceptAgentPlan, planForSession } = useAgentPlanProgress()
 const currentPlan = planForSession(sessionId)
 const planPanelOpen = ref(localStorage.getItem('pocketctl_plan_panel_open') === 'true')
@@ -833,7 +884,7 @@ const explicitlyRoutedLiveEventTypes = new Set<string>([
   'command_receipt', 'interaction_result', 'subagent_discovered',
   'subagent_title_update', 'subagent_usage', 'permission_config_changed',
   'session_status', 'session_title_update', 'session_deleted', 'session_pinned',
-  'session_id_changed',
+  'session_id_changed', 'session_documents_changed',
 ])
 const allSessions = ref<any[]>([])
 // P2: per-agent message buckets for sub-agent events (keyed by agentId)
@@ -843,6 +894,7 @@ const childrenToken = ref<Record<string, { tokenIn: number; tokenOut: number; to
 const invocationEnabled = ref(false)
 const invocationFilter = ref('all')
 const invocationError = ref('')
+const invocationErrorCode = ref('')
 const invocationSelection = ref<CommandItem | null>(null)
 const invocationDialog = ref<any>(null)
 let invocationDraft = '', invocationName = '', invocationRequest = '', invocationCatalogRequest = '', invocationCreateRequest = ''
@@ -856,12 +908,14 @@ function finishNativeCommand(id: string, error = '') {
 let invocationTimer: ReturnType<typeof setTimeout> | undefined
 function requestInvocations() {
   if(currentSessionAgent.value !== 'codex') return
+  // Read-only (observed terminal) sessions never support invocations; skip the doomed request.
+  if(currentSession.value?.control_mode === 'legacy_read_only') return
   invocationCatalogRequest = crypto.randomUUID()
   send({type:'list_invocations',session_id:sessionId.value,request_id:invocationCatalogRequest})
 }
 function invokeDraft(text: string, id?: string) {
   if (invocationRequest) return
-  invocationDraft = text; invocationName = text.slice(1).split(/\s/)[0]; invocationError.value = ''
+  invocationDraft = text; invocationName = text.slice(1).split(/\s/)[0]; invocationError.value = ''; invocationErrorCode.value = ''
   invocationRequest = crypto.randomUUID()
   if (!send({type:'invoke_command',session_id:sessionId.value,request_id:invocationRequest,content:text,invocation_id:id})) { invocationRequest='';invocationError.value='连接不可用，草稿已保留';return }
   invocationTimer = setTimeout(() => { invocationRequest='';invocationError.value='调用超时，请确认状态后重试' },22000)
@@ -870,13 +924,14 @@ function chooseInvocation(args: string) { invocationDialog.value=null;messageInp
 function handleInvocationResult(msg: any) {
   if (msg.session_id!==sessionId.value) return
   if (msg.request_id===invocationCatalogRequest) {
-    if(msg.error){invocationError.value=msg.error;return}
-    if (!msg.error && msg.invocation?.kind==='catalog') { invocationEnabled.value=true;invocationError.value='';commandsCache.value=msg.invocation.commands||[] }
+    // Read-only sessions can never serve invocations; the deterministic error is noise — drop it.
+    if(msg.error){ if(msg.code==='invocations_unsupported') return; invocationError.value=msg.error;invocationErrorCode.value=msg.code||'';return}
+    if (!msg.error && msg.invocation?.kind==='catalog') { invocationEnabled.value=true;invocationError.value='';invocationErrorCode.value='';commandsCache.value=msg.invocation.commands||[] }
     return
   }
   if (!invocationRequest || msg.request_id!==invocationRequest) return
   clearTimeout(invocationTimer);invocationRequest=''
-  if(msg.error){invocationError.value=msg.error;return}
+  if(msg.error){ if(msg.code==='invocations_unsupported') return; invocationError.value=msg.error;invocationErrorCode.value=msg.code||'';return}
   const result=msg.invocation||{}
   if(result.kind==='skill'||result.kind==='turn_command') { if(messageInput.value!==invocationDraft){invocationError.value='草稿已修改，请重新发送';return};if(sendPromptText(invocationDraft,result.entry_id)){messageInput.value='';invocationSelection.value=null};return }
   if(result.kind==='skills'){invocationFilter.value='skill';commandsCache.value=result.commands||[];messageInput.value='/'+(result.query||'');popoverDismissed.value=false;invocationSelection.value=null;return}
@@ -3246,6 +3301,7 @@ watch(loadKey, (newKey, oldKey) => {
     if (sessionAgentListTimer) { clearTimeout(sessionAgentListTimer); sessionAgentListTimer = null }
     if (sessionAgentSwitchTimer) { clearTimeout(sessionAgentSwitchTimer); sessionAgentSwitchTimer = null }
     loadHistory()
+    void refreshSessionDocuments()
   }
 })
 
@@ -3256,6 +3312,11 @@ onMounted(() => {
 		send({ type: 'list_sessions' })
 		send({ type: 'list_daemons' })
 		loadHistory()
+		void refreshSessionDocuments()
+	}))
+
+	cleanups.push(onEvent('session_documents_changed', (msg: any) => {
+		sessionDocumentState.notify(msg)
 	}))
 
 	cleanups.push(onEvent('session_list', (msg: any) => {
@@ -3755,6 +3816,7 @@ onMounted(() => {
   }))
 
   cleanups.push(onEvent('session_deleted', (msg: any) => {
+    sessionDocumentState.sessionDeleted(msg.session_id)
     allSessions.value = allSessions.value.filter((s: any) => s.session_id !== msg.session_id)
     if (msg.session_id === sessionId.value) {
       const next = allSessions.value[0]
@@ -3782,6 +3844,7 @@ onMounted(() => {
   // until replay/session metadata supplies the authoritative state.
   sessionSwitching = true
   loadHistory()
+  void refreshSessionDocuments()
 })
 
 // SessionActions handlers (optimistic local updates)
@@ -3798,6 +3861,7 @@ onUnmounted(() => {
   clearHistorySlowTimer()
   composerResizeObserver?.disconnect()
   composerResizeObserver = null
+  sessionDocumentState.dispose()
   for (const fn of cleanups) fn()
   cleanups.length = 0
   liveContentBatcher.dispose()

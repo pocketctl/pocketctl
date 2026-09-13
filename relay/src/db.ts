@@ -5,6 +5,7 @@ import { sanitizeJSONBPayload } from './jsonb-payload.js';
 import { initDurableIngressSchema } from './schema/durable-ingress.js';
 import { initAttentionInboxSchema } from './attention-inbox/schema.js';
 import { initExtensionSchema } from './extensions/schema.js';
+import { initSessionDocumentSchema } from './session-documents/schema.js';
 import { extensionModeFromEnv } from './extensions/config.js';
 import type { ExtensionMode } from './extensions/types.js';
 import {
@@ -790,6 +791,7 @@ async function initDBUnlocked(pool: pg.Pool): Promise<void> {
 
   await initDurableIngressSchema(pool);
   await initAttentionInboxSchema(pool);
+  await initSessionDocumentSchema(pool);
   // ADR-0003: extension tables exist in every flag mode so flipping
   // RELAY_EXTENSIONS never needs a schema deployment window.
   await initExtensionSchema(pool);
@@ -1194,7 +1196,7 @@ async function lockTokenRevocationFence(client: pg.PoolClient, jti: string): Pro
 }
 
 export async function lockSessionMaterializationFence(
-  client: Pick<pg.PoolClient, 'query'>,
+  client: { query(sql: string, params?: any[]): Promise<unknown> },
   sessionId: string,
 ): Promise<void> {
   await client.query(
@@ -3413,6 +3415,9 @@ export async function deleteUserAccount(pool: pg.Pool, userId: number): Promise<
     );
     const sessionIds = sessions.rows.map((row: any) => row.session_id as string);
     const daemonIds = daemons.rows.map((row: any) => row.daemon_id as string);
+    for (const sessionId of [...sessionIds].sort()) {
+      await lockSessionMaterializationFence(client, sessionId);
+    }
     const quotaFailureLedgerIds = daemonIds.map((daemonId) => {
       const namespace = createHash('sha256')
         .update(JSON.stringify([userId, daemonId]))
@@ -3427,6 +3432,16 @@ export async function deleteUserAccount(pool: pg.Pool, userId: number): Promise<
       [userId],
     );
     await client.query(`DELETE FROM event_inbox WHERE user_id = $1`, [userId]);
+    await client.query(
+      `DELETE FROM session_document_upload_chunks
+       WHERE version_id IN (
+         SELECT version_id FROM session_document_uploads WHERE user_id = $1
+       )`,
+      [userId],
+    );
+    await client.query(`DELETE FROM session_document_uploads WHERE user_id = $1`, [userId]);
+    await client.query(`DELETE FROM session_document_versions WHERE user_id = $1`, [userId]);
+    await client.query(`DELETE FROM session_documents WHERE user_id = $1`, [userId]);
     await client.query(
       `DELETE FROM events WHERE session_id = ANY($1::varchar[])`,
       [[...sessionIds, ...quotaFailureLedgerIds]],
@@ -3711,6 +3726,16 @@ export async function deleteSession(
       [sessionId],
     );
     await client.query(`DELETE FROM event_inbox WHERE session_id = $1 AND status <> 3`, [sessionId]);
+    await client.query(
+      `DELETE FROM session_document_upload_chunks
+       WHERE version_id IN (
+         SELECT version_id FROM session_document_uploads WHERE session_id = $1
+       )`,
+      [sessionId],
+    );
+    await client.query(`DELETE FROM session_document_uploads WHERE session_id = $1`, [sessionId]);
+    await client.query(`DELETE FROM session_document_versions WHERE session_id = $1`, [sessionId]);
+    await client.query(`DELETE FROM session_documents WHERE session_id = $1`, [sessionId]);
     await client.query(`DELETE FROM events WHERE session_id = $1`, [sessionId]);
     // ADR-0003: extension content is purged in the same fenced transaction;
     // shadow/enabled additionally journal a generic provider tombstone.

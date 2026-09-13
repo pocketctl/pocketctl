@@ -67,6 +67,7 @@ export class IngressController {
     connection: IngressConnection,
     payload: Record<string, unknown>,
     materializationContext: MaterializationContext = {},
+    options: { receiptOnly?: boolean } = {},
   ): AcceptResult {
     const policy = classifyDaemonEvent(payload);
     const seq = Number(payload.seq);
@@ -82,7 +83,7 @@ export class IngressController {
       sessionId: normalizeSessionId(payload.session_id),
       eventType: String(payload.type ?? ''),
       priority: policy.priority,
-      receiptOnly: !policy.durable,
+      receiptOnly: options.receiptOnly ?? !policy.durable,
       payload,
       materializationContext,
       receivedAt: this.now(),

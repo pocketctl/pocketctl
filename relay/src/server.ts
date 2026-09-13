@@ -5,6 +5,12 @@ import type pg from 'pg';
 import { initDB, parseDBUrl, getUserByEmail, getUserById, getUserPlanAndWhitelist, getUserProfile, userExists, deleteUserAccount, registerDevice, removeDevice, cleanStaleTombstones, upsertDaemonAlias, updateDisplayName, addToIOSWaitlist, revokeToken, isTokenRevoked, cleanRevokedTokens, insertAuditLog, bindTokenToDaemon, updateSessionTitle, isSessionOwnedByUser, getSessionAllEvents, getTokenSummary, getTokensByDaemon, backfillSessionTokens, backfillSessionModel, backfillTokenDailyStats, aggregateDayIntoStats, cleanStaleEvents, getTokenDailySeries, getTokenByModel, getTokenByDaemon, getSessionTokenTrend, listProUserIds, getUserDailyTokens, getUserWeeklyTokens, markReportSent, handleRefreshReuse, consumeEmailChallenge, upsertEmailChallenge, cleanExpiredEmailChallenges, cleanStaleAuthRateLimits, bindUserEmailWithChallenge } from './db.js';
 import { closeRelayPools, createRelayPools } from './db-pools.js';
 import { Router, parseDurableIngressFlag, type FlagConfig } from './router.js';
+import {
+  resolveSessionDocumentConfig,
+  type SessionDocumentConfig,
+} from './session-documents/config.js';
+import { SessionDocumentRepository } from './session-documents/repository.js';
+import { registerSessionDocumentRoutes } from './session-documents/routes.js';
 import { signAccessToken, signRefreshToken, verifyRefreshToken, decodeToken, resolveRefreshMachineId, stableMachineId, verifyAccessTokenWithRevocation, verifyTokenForRevocation } from './auth.js';
 import { notifyUser, sessionStatusPush, daemonOfflinePush, dailyReportPush, weeklyReportPush } from './push.js';
 import { sendEmailCode } from './config/email.js';
@@ -42,6 +48,8 @@ import {
   attentionRecoveryOpen,
   attentionRecoveryQuickResolutions,
   attentionRecoveryTransitions,
+  sessionDocumentBytes,
+  sessionDocumentRecords,
   tokenUsageDayClosures,
   tokenUsageShadowComparisons,
 } from './metrics.js';
@@ -140,6 +148,7 @@ export interface RelayRuntimeConfig {
   preAuthMaxMessages: number;
   /** M-3: max total bytes buffered per connection before authentication resolves. */
   preAuthMaxBytes: number;
+  sessionDocuments: SessionDocumentConfig;
 }
 
 export function resolveRelayRuntimeConfig(
@@ -167,6 +176,7 @@ export function resolveRelayRuntimeConfig(
   const replayBatchMaxBytes = strictPositiveConfig(env, 'REPLAY_BATCH_MAX_BYTES', 524_288);
   const preAuthMaxMessages = strictPositiveConfig(env, 'RELAY_PREAUTH_MAX_MESSAGES', 4);
   const preAuthMaxBytes = strictPositiveConfig(env, 'RELAY_PREAUTH_MAX_BYTES', 2 * maxEventBytes);
+  const sessionDocuments = resolveSessionDocumentConfig(env);
   if (eventWindow > 65_536) {
     throw new Error('RELAY_DURABLE_INGRESS_WINDOW must be at most 65536');
   }
@@ -192,6 +202,7 @@ export function resolveRelayRuntimeConfig(
     replayBatchMaxBytes,
     preAuthMaxMessages,
     preAuthMaxBytes,
+    sessionDocuments,
   };
 }
 
@@ -960,6 +971,19 @@ async function main() {
       canaryDaemonIds: runtimeConfig.durableIngress.daemonIds,
       eventWindow: runtimeConfig.eventWindow,
     },
+    sessionDocuments: {
+      mode: runtimeConfig.durableIngress.mode === 'off'
+        ? 'off'
+        : runtimeConfig.sessionDocuments.captureMode === 'on'
+          ? (runtimeConfig.materializationMode === 'worker' ? 'on' : 'off')
+          : runtimeConfig.sessionDocuments.captureMode,
+      maxDocumentBytes: runtimeConfig.sessionDocuments.maxDocumentBytes,
+      observeShadow: (observation) => {
+        sessionDocumentRecords.inc({ record_type: observation.type, state: observation.state })
+        sessionDocumentBytes.observe({ record_type: observation.type }, observation.byteCount)
+        console.info('[session-document] shadow observed', observation)
+      },
+    },
     tokenUsageFactsAuthoritative: useFactAuthoritativeSessionDeletion(tokenFeatures),
     writeTokenUsageFacts: tokenFeatures.writeFacts,
     recoveryObserver,
@@ -1119,6 +1143,12 @@ async function main() {
     options: { maxPayload: runtimeConfig.maxEventBytes },
   });
   registerSessionShareRoutes(app, { pool, publicIssuer });
+  registerSessionDocumentRoutes(app, {
+    pool,
+    repository: new SessionDocumentRepository(pool, runtimeConfig.sessionDocuments),
+    config: runtimeConfig.sessionDocuments,
+    verifyAccessToken: (token, authPool) => verifyAccessTokenWithRevocation(token, authPool),
+  });
   registerAttentionInboxRoutes(app, {
     pool,
     config: attentionConfig,

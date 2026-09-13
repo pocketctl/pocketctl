@@ -25,6 +25,10 @@ var codexWebSocketListenRE = regexp.MustCompile(`listening on:\s*(ws://127\.0\.0
 
 func startCodexAppServer(ctx context.Context, binary, _ string, _ uint64) (*codexAppServerRuntime, error) {
 	cmd := exec.Command(binary, "app-server", "--listen", "ws://127.0.0.1:0")
+	// Pin the app-server to a stable dir instead of inheriting the daemon's
+	// cwd: a removed start directory leaves Codex rejecting turns with
+	// "invalid cwd: No such file or directory".
+	cmd.Dir = os.TempDir()
 	cmd.Env = codexAppServerEnv(os.Environ())
 	cmd.SysProcAttr = &syscall.SysProcAttr{CreationFlags: windows.CREATE_NO_WINDOW}
 	reader, writer := io.Pipe()

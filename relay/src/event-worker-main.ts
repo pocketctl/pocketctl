@@ -18,6 +18,11 @@ import { assertExtensionSchema } from './extensions/schema.js'
 import { projectFeedBatch, observeProjectorBacklog, recordProjectorRetry } from './extensions/feed-projector.js'
 import { runFeedRetentionOnce } from './extensions/retention.js'
 import { createExtensionProjectorRuntime } from './extensions/runtime.js'
+import { resolveSessionDocumentConfig } from './session-documents/config.js'
+import { SessionDocumentArtifactMaterializer } from './session-documents/materializer.js'
+import { SessionDocumentRepository } from './session-documents/repository.js'
+import { assertSessionDocumentSchema } from './session-documents/schema.js'
+import { sessionDocumentBytes, sessionDocumentRecords } from './metrics.js'
 
 const EXTENSION_PROJECTOR_INTERVAL_MS = 500
 
@@ -218,6 +223,7 @@ export async function main(): Promise<void> {
   // ADR-0003: the worker owns the feed projector, so its extension flag and
   // numeric bounds must validate at startup like the API server's.
   const extensionConfig = resolveExtensionConfig(process.env)
+  const sessionDocumentConfig = resolveSessionDocumentConfig(process.env)
   const pool = createPool(parseDBUrl(databaseUrl), {
     name: 'event-worker',
     max: strictPositiveEnvInt('DB_WORKER_POOL_MAX', 8),
@@ -232,6 +238,20 @@ export async function main(): Promise<void> {
       hooks: createStandaloneMaterializationHooks(),
       writeTokenUsageFacts: tokenFeatures.writeFacts,
     }),
+    ...(sessionDocumentConfig.captureMode === 'on' ? {
+      artifactMaterializer: new SessionDocumentArtifactMaterializer(
+        new SessionDocumentRepository(pool, sessionDocumentConfig),
+        {
+          maxDocumentBytes: sessionDocumentConfig.maxDocumentBytes,
+          maxChunkBytes: strictPositiveEnvInt('MAX_CHUNK_BYTES', 131_072),
+        },
+        (observation) => {
+          sessionDocumentRecords.inc({ record_type: observation.type, state: observation.state })
+          sessionDocumentBytes.observe({ record_type: observation.type }, observation.byteCount)
+          console.info('[session-document] artifact materialized', observation)
+        },
+      ),
+    } : {}),
     outboxWriter: new RealtimeOutboxWriter(pool),
     workerId: process.env.RELAY_WORKER_ID || `${hostname()}:${process.pid}`,
     shardCount,
@@ -271,6 +291,7 @@ export async function main(): Promise<void> {
     assertSchemaReady: async () => {
       await assertDurableIngressSchema(pool)
       await assertTokenUsageWriteContinuity(pool, tokenFeatures)
+      if (sessionDocumentConfig.captureMode === 'on') await assertSessionDocumentSchema(pool)
       if (extensionConfig.mode !== 'off') await assertExtensionSchema(pool)
     },
     worker,

@@ -175,6 +175,18 @@ type DaemonEvent struct {
 	Truncated              bool                     `json:"truncated,omitempty"`
 	OriginalType           string                   `json:"original_type,omitempty"`
 	OriginalBytes          int                      `json:"original_bytes,omitempty"`
+	DocumentID             string                   `json:"document_id,omitempty"`
+	VersionID              string                   `json:"version_id,omitempty"`
+	DisplayName            string                   `json:"display_name,omitempty"`
+	DocumentFormat         string                   `json:"document_format,omitempty"`
+	DocumentState          string                   `json:"document_state,omitempty"`
+	DocumentReason         string                   `json:"document_reason,omitempty"`
+	SourceEventID          string                   `json:"source_event_id,omitempty"`
+	CapturedAt             string                   `json:"captured_at,omitempty"`
+	ChunkCount             int                      `json:"chunk_count,omitempty"`
+	ChunkIndex             *int                     `json:"chunk_index,omitempty"`
+	ChunkData              string                   `json:"chunk_data,omitempty"`
+	ChunkHash              string                   `json:"chunk_hash,omitempty"`
 	MessageID              string                   `json:"message_id,omitempty"` // source message identity (OpenCode revisioned Parts)
 	PartID                 string                   `json:"part_id,omitempty"`    // source Part identity for client-side upsert
 	Revision               int                      `json:"revision,omitempty"`   // monotonically increasing per Part
@@ -185,6 +197,7 @@ type DaemonEvent struct {
 	Output                 string                   `json:"output,omitempty"`
 	Status                 string                   `json:"status,omitempty"`
 	Error                  string                   `json:"error,omitempty"`
+	Code                   string                   `json:"code,omitempty"`     // stable machine-readable error code (e.g. invocation_result replies); empty for display-only errors
 	Attempt                int                      `json:"attempt,omitempty"`  // retry attempt number (OpenCode retry Part)
 	RetryAt                int64                    `json:"retry_at,omitempty"` // retry creation time in source milliseconds
 	Auto                   bool                     `json:"auto,omitempty"`     // compaction was automatically triggered

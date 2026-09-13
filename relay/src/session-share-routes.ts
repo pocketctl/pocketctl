@@ -12,6 +12,12 @@ import {
 
 const SHARE_DURATION_MS = 15 * 60 * 1000;
 const SHARE_CSP = "default-src 'none'; style-src 'unsafe-inline'; img-src data:; base-uri 'none'; form-action 'none'; frame-ancestors 'none'";
+const PRIVATE_DOCUMENT_EVENT_TYPES = new Set([
+  'session_document_begin',
+  'session_document_chunk',
+  'session_document_commit',
+  'session_documents_changed',
+]);
 
 interface SessionShareRouteDependencies {
   pool: Pool;
@@ -71,7 +77,11 @@ function payloadText(payload: unknown): string {
 }
 
 function shareViewerPage(events: any[]): string {
-  const renderedEvents = events.map((event, index) => {
+  const publicEvents = events.filter((event) => {
+    const eventType = event?.event_type ?? event?.payload?.type;
+    return typeof eventType !== 'string' || !PRIVATE_DOCUMENT_EVENT_TYPES.has(eventType);
+  });
+  const renderedEvents = publicEvents.map((event, index) => {
     const eventType = escapeHtml(String(event?.event_type ?? event?.payload?.type ?? 'event'));
     const createdAt = escapeHtml(String(event?.created_at ?? ''));
     const payload = escapeHtml(payloadText(event?.payload));

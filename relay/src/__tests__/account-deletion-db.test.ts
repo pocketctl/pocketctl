@@ -10,6 +10,9 @@ function transactionPool(handler?: (sql: string, params?: any[]) => any) {
       if (/SELECT id FROM users WHERE id = \$1 FOR UPDATE/i.test(sql)) {
         return { rows: [{ id: 7 }], rowCount: 1 }
       }
+      if (/SELECT session_id FROM sessions WHERE user_id = \$1/i.test(sql)) {
+        return { rows: [{ session_id: 'session-1' }], rowCount: 1 }
+      }
       return { rows: [], rowCount: 1 }
     }),
     release: vi.fn(),
@@ -40,11 +43,27 @@ describe('account deletion persistence', () => {
       'DELETE FROM revoked_tokens WHERE user_id = $1',
       'DELETE FROM realtime_outbox',
       'DELETE FROM event_inbox',
+      'DELETE FROM session_document_upload_chunks',
+      'DELETE FROM session_document_uploads WHERE user_id = $1',
+      'DELETE FROM session_document_versions WHERE user_id = $1',
+      'DELETE FROM session_documents WHERE user_id = $1',
       'DELETE FROM sessions WHERE user_id = $1',
       'DELETE FROM daemons WHERE user_id = $1',
       'DELETE FROM users WHERE id = $1',
     ]) {
       expect(joinedSQL).toContain(required)
+    }
+    const sessionDelete = calls.findIndex(({ sql }) => sql.includes('DELETE FROM sessions WHERE user_id = $1'))
+    const sessionFence = calls.findIndex(({ sql }) => sql.includes('pg_advisory_xact_lock') && sql.includes('hashtext'))
+    expect(sessionFence).toBeGreaterThan(0)
+    expect(sessionFence).toBeLessThan(sessionDelete)
+    for (const fragment of [
+      'DELETE FROM session_document_upload_chunks',
+      'DELETE FROM session_document_uploads WHERE user_id = $1',
+      'DELETE FROM session_document_versions WHERE user_id = $1',
+      'DELETE FROM session_documents WHERE user_id = $1',
+    ]) {
+      expect(calls.findIndex(({ sql }) => sql.includes(fragment))).toBeLessThan(sessionDelete)
     }
     expect(calls.at(-1)?.sql).toBe('COMMIT')
     expect(client.release).toHaveBeenCalledOnce()

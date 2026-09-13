@@ -38,6 +38,30 @@ test('rejects per-daemon and global capacity before enqueueing', () => {
   expect(queue.enqueue(eventFor('d3', 1))).toMatchObject({ kind: 'backpressured' })
 })
 
+test('document artifacts have an independent budget that cannot block control traffic', () => {
+  const queue = new FairIngressQueue({
+    maxEventsPerDaemon: 10,
+    maxBytesPerDaemon: 4096,
+    maxArtifactEventsPerDaemon: 1,
+    maxArtifactBytesPerDaemon: 1024,
+    maxArtifactEvents: 1,
+    maxArtifactBytes: 1024,
+  })
+  const artifact = (seq: number) => eventFor('d1', seq, 'live', {
+    type: 'session_document_chunk', seq, chunk_data: 'eA==',
+  })
+  const first = artifact(1)
+  first.eventType = 'session_document_chunk'
+  const second = artifact(2)
+  second.eventType = 'session_document_chunk'
+
+  expect(queue.enqueue(first).kind).toBe('accepted')
+  expect(queue.enqueue(second)).toMatchObject({
+    kind: 'backpressured', state: { reason: 'artifact_backpressure' },
+  })
+  expect(queue.enqueue(eventFor('d1', 3, 'control'))).toEqual({ kind: 'accepted' })
+})
+
 test('no daemon contributes more than 25 percent while peers are ready', () => {
   const queue = new FairIngressQueue()
   for (let i = 0; i < 1000; i++) queue.enqueue(eventFor('noisy', i))

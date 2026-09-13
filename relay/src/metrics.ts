@@ -92,6 +92,27 @@ export const workerDrainPasses = new Histogram({
   registers: [registry],
 })
 
+export const sessionDocumentRecords = new Counter({
+  name: 'pocketctl_session_document_records_total',
+  help: 'Document artifact records by bounded record type and outcome',
+  labelNames: ['record_type', 'state'] as const,
+  registers: [registry],
+})
+
+export const sessionDocumentBytes = new Histogram({
+  name: 'pocketctl_session_document_record_bytes',
+  help: 'Declared or decoded bytes in document artifact records',
+  labelNames: ['record_type'] as const,
+  buckets: [0, 1024, 4096, 16384, 65536, 262144, 1048576, 2097152],
+  registers: [registry],
+})
+
+export const sessionDocumentUploadsExpired = new Counter({
+  name: 'pocketctl_session_document_uploads_expired_total',
+  help: 'Expired incomplete or failed document upload assemblies removed',
+  registers: [registry],
+})
+
 export const tokenUsageShadowComparisons = new Counter({
   name: 'pocketctl_token_usage_shadow_comparisons_total',
   help: 'Token dashboard shadow comparisons by aggregate result',
