@@ -1,3 +1,4 @@
+import { createHash } from 'crypto'
 import pg from 'pg'
 import { afterAll, beforeAll, beforeEach, describe, expect, test } from 'vitest'
 import { applyMemorySchema } from '../schema.js'
@@ -193,11 +194,14 @@ describeWithDatabase('governance publication transaction (PostgreSQL)', () => {
     expect(version.rows[0].source_promotion_candidate_id).toBe(candidateId)
 
     const evidence = await pool.query(`
-      SELECT visibility, source_evidence_hash, contributor_membership_id FROM knowledge_evidence
+      SELECT excerpt, excerpt_hash, visibility, source_evidence_hash, contributor_membership_id FROM knowledge_evidence
       WHERE installation_id = $1 AND version_id = $2
     `, [TEAM, result.versionId])
     expect(evidence.rows[0].visibility).toBe('shared')
     expect(evidence.rows[0].contributor_membership_id).toBe(PROPOSER)
+    expect(evidence.rows[0].excerpt_hash).toEqual(
+      createHash('sha256').update(evidence.rows[0].excerpt, 'utf8').digest(),
+    )
 
     const authority = await pool.query(`
       SELECT counted_decision_ids, publisher_membership_id, source_scope_kind
