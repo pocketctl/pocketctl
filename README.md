@@ -27,9 +27,10 @@ off your development machine.
   session's key documents and view or download them from Web or iOS.
 - **Focus attention** — the optional Attention Inbox groups pending questions,
   approvals, high-risk actions, and recovery signals with their session context.
-- **Grow governed project knowledge** — the optional Memory workbench turns
-  repository sources into a review-gated wiki and a dependency code graph with
-  impact analysis, and keeps skill documents under explicit governance.
+- **Grow governed project knowledge (experimental)** — the optional Memory
+  workbench turns repository sources into a review-gated wiki and a dependency
+  code graph with impact analysis, and keeps skill documents under explicit
+  governance.
 
 ## Agent support
 
@@ -132,6 +133,34 @@ opencode
 Use `opencode --native ...` for a one-off bypass, or
 `pocketctl agent opencode disable` to remove the PocketCtl launcher.
 
+## Memory (experimental)
+
+Memory turns what agents learn about a repository into durable, reviewed
+knowledge instead of context that vanishes with the session. It is optional
+and managed from the Memory workbench in the Web app.
+
+- **Knowledge ledger** — candidate knowledge extracted from repository sources
+  enters an immutable, versioned ledger with evidence and confidence. Nothing
+  is accepted until you review it; corrections create new versions instead of
+  overwriting history.
+- **Dependency code graph** — see how components depend on each other and run
+  impact analysis before changing one.
+- **Skill document governance** — operational skill documents (trigger,
+  preconditions, steps, validation, rollback) follow an explicit candidate →
+  review → approve/publish workflow instead of silent edits.
+- **Pre-turn context injection** — on each new turn the daemon compiles the
+  relevant knowledge into a hidden context pack and delivers it through the
+  agent's native channel within a hard 750ms budget. Delivery is fail-open —
+  any failure never delays or blocks your turn — and the daemon never
+  persists or logs pack contents.
+- **MCP access** — hosting agents can query the same knowledge through an MCP
+  bridge, so tools and the workbench share one source of truth.
+
+Model-assisted extraction runs on the server and requires a configured
+provider; without one the workbench stays unavailable instead of running
+degraded. See [Security and data boundary](#security-and-data-boundary) for
+what leaves the development host.
+
 ## Essential commands
 
 | Command | Purpose |
@@ -160,6 +189,10 @@ that does **not** mean session content stays local.
 - If `DEEPSEEK_API_KEY` is configured on the Relay, the text needed to generate a
   session title may be sent to DeepSeek. Without the key, title generation is
   skipped.
+- If Memory is enabled, model-assisted knowledge extraction sends the relevant
+  repository text to the configured server-side provider. Pre-turn context
+  packs travel through the authenticated Relay like other session content;
+  the daemon never persists or logs them.
 - Managed Codex/OpenCode endpoints and local runtime credentials remain on the
   development host; clients communicate through the authenticated Relay.
 
