@@ -99,9 +99,16 @@ func TestOpenCodeReserveMessageIDIsMonotonicAndDispatchSafe(t *testing.T) {
 
 func TestOpenCodeReserveMessageIDClassifiesCrossEpochHistory(t *testing.T) {
 	const timestampMask = int64(1<<36) - 1
+	nowMilli := time.Now().UnixMilli()
+	if nowMilli&timestampMask >= timestampMask-1000 {
+		t.Skip("wall clock too close to epoch tail for a stable cross-epoch fixture")
+	}
 	oldCycle := OpencodeMessageWithParts{}
 	oldCycle.Info.ID = fmt.Sprintf("msg_%012x00000000000000", ((timestampMask-1000)<<12)|1)
-	oldCycle.Info.Time.Created = time.Now().Add(-30 * 24 * time.Hour).UnixMilli()
+	// Anchor the fixture one epoch behind the wall clock: a fixed 30-day
+	// offset only lands in a previous epoch within 30 days after a boundary
+	// (the 36-bit epoch is ~2.18y; this test silently broke on 2026-09-13).
+	oldCycle.Info.Time.Created = (nowMilli >> 36 << 36) - 1
 
 	_, err := ReserveOpencodeMessageID(context.Background(), []OpencodeMessageWithParts{oldCycle})
 	if err == nil || !strings.Contains(err.Error(), "crosses the 36-bit message-id epoch") {
