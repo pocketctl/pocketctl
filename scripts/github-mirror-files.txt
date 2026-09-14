@@ -7,6 +7,7 @@ relay
 web
 testdata/contracts
 testdata/turn_projection_golden.json
+testdata/session-documents
 .github
 docker-compose.prod.yml
 docker-compose.yml
