@@ -465,13 +465,14 @@ describe('EventMaterializer', () => {
     const input = inputFor({
       type: 'session_created', session_id: 'ses-new', request_id: 'req-1',
       title: 'Created', model: 'gpt-5', control_mode: 'managed', capabilities: ['approval'],
+      codex_home_id: 'codex-home-account-a', codex_home_label: '~/.codex-a',
     })
     input.context!.quotaOperation = 'create'
     const result = await materializer.materialize(input)
 
     expect(upsert).toHaveBeenCalledWith(
       pool, 'ses-new', 'daemon-1', 'codex', '/repo', 'running', 'Created', 'daemon',
-      undefined, 42, 'gpt-5', 'managed', ['approval'],
+      undefined, 42, 'gpt-5', 'managed', ['approval'], 'codex-home-account-a', '~/.codex-a',
     )
     expect(bindSession).toHaveBeenCalledWith('ses-new', 'daemon-1')
     expect(releasePendingOperation).toHaveBeenCalledWith({
@@ -573,7 +574,7 @@ describe('EventMaterializer', () => {
 
     expect(upsert).toHaveBeenCalledWith(
       pool, 'ses-restarted', 'daemon-1', 'opencode', '/persisted', 'running',
-      undefined, 'daemon', undefined, 42, undefined, undefined, undefined,
+      undefined, 'daemon', undefined, 42, undefined, undefined, undefined, undefined, undefined,
     )
     expect(settleQuotaReservationHook).toHaveBeenCalledWith({
       reservationId: 'reservation-restarted',

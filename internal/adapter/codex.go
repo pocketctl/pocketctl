@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/pocketctl/pocketctl/internal/codexhome"
 	"github.com/pocketctl/pocketctl/internal/config"
 	"github.com/pocketctl/pocketctl/internal/protocol"
 )
@@ -77,6 +78,61 @@ func CodexSessionsDirs() []string {
 		dirs = append(dirs, filepath.Join(home, "sessions"))
 	}
 	return dirs
+}
+
+type CodexHomeProfile struct {
+	ID      string
+	Home    string
+	Label   string
+	Primary bool
+}
+
+// CodexHomeProfiles is the daemon-authoritative account/runtime allowlist.
+// IDs are safe to send over local/Relay protocols; raw home paths stay local.
+func CodexHomeProfiles() []CodexHomeProfile {
+	userHome, _ := config.HomeDir()
+	homes := append([]string{CodexHome()}, AdditionalCodexHomes()...)
+	profiles := make([]CodexHomeProfile, 0, len(homes))
+	seen := make(map[string]struct{}, len(homes))
+	for _, home := range homes {
+		resolved, err := codexhome.Resolve(home, userHome)
+		if err != nil || resolved == "" {
+			continue
+		}
+		id := codexhome.ID(resolved)
+		if _, exists := seen[id]; exists {
+			continue
+		}
+		seen[id] = struct{}{}
+		label := filepath.Base(resolved)
+		if userHome != "" {
+			if rel, err := filepath.Rel(userHome, resolved); err == nil && rel != "." && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+				label = filepath.Join("~", rel)
+			}
+		}
+		profiles = append(profiles, CodexHomeProfile{ID: id, Home: resolved, Label: label, Primary: len(profiles) == 0})
+	}
+	return profiles
+}
+
+// CodexHomeProfileForPath maps a rollout or sessions path back to its
+// configured Codex home without exposing that local path to clients.
+func CodexHomeProfileForPath(path string) (CodexHomeProfile, bool) {
+	canonical, err := filepath.Abs(path)
+	if err != nil {
+		return CodexHomeProfile{}, false
+	}
+	if resolved, resolveErr := filepath.EvalSymlinks(canonical); resolveErr == nil {
+		canonical = resolved
+	}
+	for _, profile := range CodexHomeProfiles() {
+		sessionsDir := filepath.Join(profile.Home, "sessions")
+		rel, err := filepath.Rel(sessionsDir, canonical)
+		if err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+			return profile, true
+		}
+	}
+	return CodexHomeProfile{}, false
 }
 
 // expandCodexHomeTilde expands a leading "~" or "~/" to the user home

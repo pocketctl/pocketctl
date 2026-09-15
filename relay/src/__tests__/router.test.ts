@@ -320,7 +320,7 @@ test.each([
   const repository = {
     seedCheckpoint: vi.fn(async () => ({ daemonId: 'durable-controls', daemonGeneration: 17, ackSeq: 0 })),
     persistBatch: vi.fn(async () => new Map([[checkpointKey('durable-controls', 17), {
-      daemonId: 'durable-controls', daemonGeneration: 17, ackSeq: 2,
+      daemonId: 'durable-controls', daemonGeneration: 17, ackSeq: 3,
     }]])),
   }
   const router = new Router(createMockPool(), {
@@ -338,18 +338,26 @@ test.each([
     type: 'model_list', models: ['gpt-5'], seq: 1,
   })
   router.handleDaemonMessage('durable-controls', {
-    type: 'upgrade_result', ok: true, seq: 2,
+    type: 'codex_home_list', codex_homes: [{ id: 'home-a', label: '~/.codex-a' }], seq: 2,
+  })
+  router.handleDaemonMessage('durable-controls', {
+    type: 'upgrade_result', ok: true, seq: 3,
   })
   await tick()
 
   expect(repository.persistBatch).toHaveBeenCalledWith([
     expect.objectContaining({ eventType: 'model_list', receiptOnly: true }),
+    expect.objectContaining({ eventType: 'codex_home_list', receiptOnly: true }),
     expect.objectContaining({ eventType: 'upgrade_result', receiptOnly: true }),
   ])
   expect(clientWs._sent).toContainEqual({
     type: 'model_list', models: ['gpt-5'], seq: 1, daemon_id: 'durable-controls',
   })
-  expect(clientWs._sent).toContainEqual({ type: 'upgrade_result', ok: true, seq: 2 })
+  expect(clientWs._sent).toContainEqual({
+    type: 'codex_home_list', codex_homes: [{ id: 'home-a', label: '~/.codex-a' }], seq: 2,
+    daemon_id: 'durable-controls',
+  })
+  expect(clientWs._sent).toContainEqual({ type: 'upgrade_result', ok: true, seq: 3 })
 })
 
 describe.each([

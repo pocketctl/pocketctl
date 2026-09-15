@@ -99,6 +99,35 @@ Codex CLI terminal control (requires Codex CLI 0.144.1+):
   pocketctl agent codex status        Show desired/effective state and capability diagnostics
   codex --native                      Bypass Pocketctl for one invocation
 
+Multiple Codex accounts:
+  The default ~/.codex account is watched automatically. Give every other account
+  its own CODEX_HOME and register that directory when starting the daemon:
+
+  pocketctl daemon start --codex-home ~/.codex-a --codex-home ~/.codex-proxy
+
+  For an auto-start service, persist the same directories during installation:
+
+  pocketctl daemon service install --codex-home ~/.codex-a --codex-home ~/.codex-proxy
+
+  Alternatively, POCKETCTL_CODEX_HOMES accepts a PATH-style list of additional
+  directories. Each shell command, alias, or script must still set its account's
+  CODEX_HOME, for example:
+
+  CODEX_HOME="$HOME/.codex-a" codex
+  CODEX_HOME="$HOME/.codex-proxy" codex
+
+  To keep short account-specific commands, add aliases like these to your shell config:
+
+  alias codex-a='CODEX_HOME="$HOME/.codex-a" codex'
+  alias codex-proxy='CODEX_HOME="$HOME/.codex-proxy" codex'
+
+  Different command names alone do not select different accounts when CODEX_HOME
+  is unchanged. Pocketctl runs an isolated app-server, socket, and runtime state
+  for every configured home. This does not create multiple hosts in Dashboard:
+  one daemon remains one host. New Codex CLI sessions use an account selector
+  (automatically selected and hidden for one account); the session list displays
+  account labels and supports account filtering.
+
 Codex Desktop (read-only observer, no setup needed):
   The daemon automatically discovers Codex Desktop rollouts and syncs them to
   Web/iOS as the separate "codex-desktop" agent: history, status, model, token
@@ -200,6 +229,33 @@ Codex CLI 终端控制（要求 Codex CLI 0.144.1+）:
   pocketctl agent codex disable       移除 Pocketctl launcher，不卸载 Codex
   pocketctl agent codex status        查看期望/实际状态与能力诊断
   codex --native                      单次绕过 Pocketctl
+
+多 Codex 账号:
+  默认账号 ~/.codex 会自动监听。其它账号必须分别使用独立的 CODEX_HOME，
+  并在启动 daemon 时登记对应目录:
+
+  pocketctl daemon start --codex-home ~/.codex-a --codex-home ~/.codex-proxy
+
+  使用开机自启服务时，在安装服务时持久化相同目录:
+
+  pocketctl daemon service install --codex-home ~/.codex-a --codex-home ~/.codex-proxy
+
+  也可通过 POCKETCTL_CODEX_HOMES 以 PATH 风格列表传入额外目录。每个 shell
+  命令、别名或脚本仍必须设置该账号自己的 CODEX_HOME，例如:
+
+  CODEX_HOME="$HOME/.codex-a" codex
+  CODEX_HOME="$HOME/.codex-proxy" codex
+
+  如需固定的账号命令，可在 shell 配置中加入以下别名:
+
+  alias codex-a='CODEX_HOME="$HOME/.codex-a" codex'
+  alias codex-proxy='CODEX_HOME="$HOME/.codex-proxy" codex'
+
+  如果 CODEX_HOME 相同，仅修改命令名称不能区分账号。Pocketctl 会为每个
+  已配置目录运行相互隔离的 app-server、socket 和运行状态，但不会创建多台主机；
+  Dashboard 中一个 daemon 仍只显示为一台主机。新建 Codex CLI 会话时通过
+  账号选择器选择账号（只有一个账号时自动选择并隐藏）；会话列表显示账号标签，
+  并支持按账号筛选。
 
 Codex Desktop（只读观察，无需配置）:
   daemon 会自动发现 Codex Desktop 创建的 rollout，并以独立的 codex-desktop Agent

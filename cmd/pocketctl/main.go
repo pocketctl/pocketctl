@@ -2259,16 +2259,18 @@ func reconnectDiscoveryEvent(s session.SessionInfo) protocol.DaemonEvent {
 		source = "terminal"
 	}
 	event := protocol.DaemonEvent{
-		Type:         "session_discovered",
-		SessionID:    s.SessionID,
-		Cwd:          s.Cwd,
-		Status:       s.Status,
-		Source:       source,
-		Agent:        s.Agent,
-		Model:        s.Model,
-		ControlMode:  s.ControlMode,
-		Capabilities: s.Capabilities,
-		Resync:       true,
+		Type:           "session_discovered",
+		SessionID:      s.SessionID,
+		Cwd:            s.Cwd,
+		Status:         s.Status,
+		Source:         source,
+		Agent:          s.Agent,
+		Model:          s.Model,
+		ControlMode:    s.ControlMode,
+		Capabilities:   s.Capabilities,
+		CodexHomeID:    s.CodexHomeID,
+		CodexHomeLabel: s.CodexHomeLabel,
+		Resync:         true,
 	}
 	if !s.LastActivityAt.IsZero() {
 		event.LastActivityAt = s.LastActivityAt.UTC().Format(time.RFC3339Nano)
@@ -3139,6 +3141,9 @@ func handleWatcherEvents(ctx context.Context, events <-chan watcher.SessionEvent
 						evt.Session.SessionID, evt.Session.Cwd, evt.Session.Pid, "", evt.Session.Status, publishedAgent,
 					)
 				}
+				if evt.Session.CodexHomeID != "" {
+					sm.SetSessionCodexHome(evt.Session.SessionID, evt.Session.CodexHomeID, evt.Session.CodexHomeLabel)
+				}
 				// Register with process monitor
 				if evt.Session.Pid > 0 {
 					pm.Register(evt.Session.Pid, evt.Session.SessionID)
@@ -3154,15 +3159,17 @@ func handleWatcherEvents(ctx context.Context, events <-chan watcher.SessionEvent
 				if reclassified {
 					model, _ := sm.GetSessionModel(evt.Session.SessionID)
 					discoveryEvent := protocol.DaemonEvent{
-						Type:         "session_discovered",
-						SessionID:    evt.Session.SessionID,
-						Cwd:          evt.Session.Cwd,
-						Status:       evt.Session.Status,
-						Source:       "observer",
-						Agent:        publishedAgent,
-						Model:        model,
-						ControlMode:  sm.SessionControlMode(evt.Session.SessionID),
-						Capabilities: sm.SessionCapabilities(evt.Session.SessionID),
+						Type:           "session_discovered",
+						SessionID:      evt.Session.SessionID,
+						Cwd:            evt.Session.Cwd,
+						Status:         evt.Session.Status,
+						Source:         "observer",
+						Agent:          publishedAgent,
+						Model:          model,
+						ControlMode:    sm.SessionControlMode(evt.Session.SessionID),
+						Capabilities:   sm.SessionCapabilities(evt.Session.SessionID),
+						CodexHomeID:    evt.Session.CodexHomeID,
+						CodexHomeLabel: evt.Session.CodexHomeLabel,
 					}
 					if activity, ok := sm.SessionActivityAt(evt.Session.SessionID); ok && !activity.IsZero() {
 						discoveryEvent.LastActivityAt = activity.UTC().Format(time.RFC3339Nano)
@@ -3252,16 +3259,18 @@ func handleWatcherEvents(ctx context.Context, events <-chan watcher.SessionEvent
 					sm.SetTailer(sessionSnapshot.SessionID, tailer)
 					// Tailer started successfully — now emit session_discovered
 					discoveryEvent := protocol.DaemonEvent{
-						Type:         "session_discovered",
-						SessionID:    sessionSnapshot.SessionID,
-						Cwd:          sessionSnapshot.Cwd,
-						Status:       sessionSnapshot.Status,
-						Source:       source,
-						Agent:        publishedAgent,
-						Title:        defaultTitle,
-						Model:        model,
-						ControlMode:  sm.SessionControlMode(sessionSnapshot.SessionID),
-						Capabilities: sm.SessionCapabilities(sessionSnapshot.SessionID),
+						Type:           "session_discovered",
+						SessionID:      sessionSnapshot.SessionID,
+						Cwd:            sessionSnapshot.Cwd,
+						Status:         sessionSnapshot.Status,
+						Source:         source,
+						Agent:          publishedAgent,
+						Title:          defaultTitle,
+						Model:          model,
+						ControlMode:    sm.SessionControlMode(sessionSnapshot.SessionID),
+						Capabilities:   sm.SessionCapabilities(sessionSnapshot.SessionID),
+						CodexHomeID:    sessionSnapshot.CodexHomeID,
+						CodexHomeLabel: sessionSnapshot.CodexHomeLabel,
 					}
 					if !jsonlActivityAt.IsZero() {
 						discoveryEvent.LastActivityAt = jsonlActivityAt.UTC().Format(time.RFC3339Nano)
@@ -3514,6 +3523,10 @@ func buildSessionMeta(ctx context.Context, sm *session.SessionManager, sessionID
 		Model:     model,
 		Effort:    effort,
 	}
+	if homeID, homeLabel, ok := sm.GetSessionCodexHome(sessionID); ok {
+		meta.CodexHomeID = homeID
+		meta.CodexHomeLabel = homeLabel
+	}
 	if parserAgent == adapter.AgentCodex {
 		meta.Capabilities = sm.SessionCapabilities(sessionID)
 		meta.ControlMode = sm.SessionControlMode(sessionID)
@@ -3761,6 +3774,7 @@ func handleCommands(ctx context.Context, client *ws.Client, sm *session.SessionM
 					Worktree:      cmd.Worktree,
 					AutoCreateDir: cmd.AutoCreateDir,
 					Force:         cmd.Force,
+					CodexHomeID:   cmd.CodexHomeID,
 				}
 				if config.Agent == "" {
 					config.Agent = "claude-code"
@@ -3806,6 +3820,10 @@ func handleCommands(ctx context.Context, client *ws.Client, sm *session.SessionM
 				if cwd, ok := sm.GetSessionCwd(sessionID); ok {
 					evt.Cwd = cwd
 					evt.CwdSessions = sm.CwdSessionCount(cwd)
+				}
+				if homeID, label, ok := sm.GetSessionCodexHome(sessionID); ok {
+					evt.CodexHomeID = homeID
+					evt.CodexHomeLabel = label
 				}
 				enrichRepositoryFacts(ctx, &evt)
 				client.SendMsg(evt)
@@ -4023,10 +4041,22 @@ func handleCommands(ctx context.Context, client *ws.Client, sm *session.SessionM
 				// session-creation picker. Claude reads ~/.claude/settings.json;
 				// codex returns its own model list.
 				client.SendMsg(protocol.DaemonEvent{
-					Type:      "model_list",
-					RequestID: cmd.RequestID,
-					Agent:     cmd.Agent,
-					Models:    sm.ModelsForAgent(cmd.Agent),
+					Type:        "model_list",
+					RequestID:   cmd.RequestID,
+					Agent:       cmd.Agent,
+					Models:      sm.ModelsForAgentHome(cmd.Agent, cmd.CodexHomeID),
+					CodexHomeID: cmd.CodexHomeID,
+				})
+			case "list_codex_homes":
+				profiles := adapter.CodexHomeProfiles()
+				options := make([]protocol.CodexHomeOption, 0, len(profiles))
+				for _, profile := range profiles {
+					options = append(options, protocol.CodexHomeOption{
+						ID: profile.ID, Label: profile.Label, Primary: profile.Primary,
+					})
+				}
+				client.SendMsg(protocol.DaemonEvent{
+					Type: "codex_home_list", RequestID: cmd.RequestID, CodexHomes: options,
 				})
 
 			case "upgrade_agent":

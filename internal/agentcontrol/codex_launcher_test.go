@@ -3,12 +3,50 @@ package agentcontrol
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"reflect"
 	"testing"
 	"time"
 )
+
+func TestCodexLauncherAcquireScopesManagedRuntimeByCallingHome(t *testing.T) {
+	binary := validatedTestExecutable(t, "managed-codex")
+	callingHome := ""
+	var acquired []map[string]any
+	launcher := CodexLauncher{
+		Acquire: func(_ context.Context, payload AcquirePayload) (AcquireResult, error) {
+			raw, err := json.Marshal(payload)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var wire map[string]any
+			if err := json.Unmarshal(raw, &wire); err != nil {
+				t.Fatal(err)
+			}
+			acquired = append(acquired, wire)
+			return AcquireResult{Mode: string(LaunchManaged), RemoteURI: "unix:///tmp/codex.sock", RealBinary: binary}, nil
+		},
+		Execute: func(ExecSpec) error { return nil },
+		Environ: func() []string {
+			return []string{"HOME=/Users/tester", "CODEX_HOME=" + callingHome}
+		},
+	}
+
+	for _, home := range []string{"/Users/tester/.codex-a", "/Users/tester/.codex-proxy"} {
+		callingHome = home
+		if err := launcher.Run(context.Background(), nil, "/repo"); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	first, firstOK := acquired[0]["codex_home_id"].(string)
+	second, secondOK := acquired[1]["codex_home_id"].(string)
+	if !firstOK || !secondOK || first == "" || second == "" || first == second {
+		t.Fatalf("acquire payloads did not preserve distinct CODEX_HOME identities: %#v", acquired)
+	}
+}
 
 func TestCodexLauncherNewSessionsForwardEachCallingDirectory(t *testing.T) {
 	binary := validatedTestExecutable(t, "managed-codex")

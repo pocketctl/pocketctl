@@ -376,6 +376,8 @@ export class EventMaterializer {
       typeof payload.model === 'string' ? payload.model : undefined,
       controlMode,
       capabilities,
+      typeof payload.codex_home_id === 'string' ? payload.codex_home_id : undefined,
+      typeof payload.codex_home_label === 'string' ? payload.codex_home_label : undefined,
     )
     if (agentType === 'codex-desktop' && input.userId !== null) {
       await db.reclassifyCodexDesktopTokenUsageFacts(
@@ -496,6 +498,8 @@ export class EventMaterializer {
           typeof payload.model === 'string' ? payload.model : undefined,
           typeof payload.control_mode === 'string' ? payload.control_mode : undefined,
           Array.isArray(payload.capabilities) ? payload.capabilities as string[] : undefined,
+          typeof payload.codex_home_id === 'string' ? payload.codex_home_id : undefined,
+          typeof payload.codex_home_label === 'string' ? payload.codex_home_label : undefined,
         )
         this.options.hooks?.bindSession?.(sessionId, input.daemonId)
       })

@@ -68,7 +68,7 @@ func (sm *SessionManager) tryCreateManagedCodexSession(ctx context.Context, conf
 	if !capabilities.ThreadInjection {
 		return "", true, fmt.Errorf("Codex %s 不支持空会话持久化，请升级 Codex 后重试", version)
 	}
-	coord, err := provider.projectCoordinator(cwd)
+	coord, err := provider.projectCoordinatorForHome(cwd, config.CodexHomeID)
 	if err != nil {
 		return "", true, err
 	}
@@ -103,6 +103,7 @@ func (sm *SessionManager) tryCreateManagedCodexSession(ctx context.Context, conf
 		Cwd: cwd, Agent: adapter.AgentCodex, Source: "daemon", Permission: clonePermission(config.Permission),
 		Model: model, WorktreePath: worktreePath, WorktreeBranch: worktreeBranch,
 		Backend: backend, ControlMode: protocol.ControlManaged,
+		CodexHomeID: coord.codexHomeID, CodexHomeLabel: coord.codexHomeLabel,
 	}
 	if config.DeferInitialPrompt {
 		ps.DeferredInitialPrompt = config.Prompt

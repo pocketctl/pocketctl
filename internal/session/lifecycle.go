@@ -51,6 +51,13 @@ func (sm *SessionManager) CreateSession(ctx context.Context, config protocol.Ses
 		return "", err
 	}
 	config.Permission = clonePermission(config.Permission)
+	if config.Agent == adapter.AgentCodex {
+		profile, err := sm.CodexRuntimeProvider().profileForHomeID(config.CodexHomeID)
+		if err != nil {
+			return "", err
+		}
+		config.CodexHomeID = profile.ID
+	}
 
 	// --- Working directory authorization (H-7) -----------------------------
 	// The policy gate runs BEFORE any side effect (worktree creation,
@@ -281,6 +288,10 @@ func (sm *SessionManager) CreateSession(ctx context.Context, config protocol.Ses
 }
 
 func (sm *SessionManager) createCodexExecSession(ctx context.Context, sessionID, cliPath, resolvedCwd string, config protocol.SessionConfig, displayModel, worktreePath, worktreeBranch string) (string, error) {
+	profile, err := sm.CodexRuntimeProvider().profileForHomeID(config.CodexHomeID)
+	if err != nil {
+		return "", err
+	}
 	args := []string{"exec", "--json", "--skip-git-repo-check", "-C", resolvedCwd}
 	permissionArgs, err := adapter.PermissionArgs(adapter.AgentCodex, config.Permission, adapter.CommandCreate)
 	if err != nil {
@@ -298,6 +309,7 @@ func (sm *SessionManager) createCodexExecSession(ctx context.Context, sessionID,
 	cmd := exec.CommandContext(ctx, cliPath, args...)
 	cmd.Dir = resolvedCwd
 	env := sanitizePTYEnv(os.Environ(), adapter.AgentCodex)
+	env = codexCommandEnvironment(env, []string{"CODEX_HOME=" + profile.Home})
 	env = ensureTERM(env, "xterm-256color")
 	env = ensureCodexTerminfo(env)
 	env = ensureEnvDefault(env, "COLORTERM", "truecolor")
@@ -331,6 +343,8 @@ func (sm *SessionManager) createCodexExecSession(ctx context.Context, sessionID,
 		WorktreePath:   worktreePath,
 		WorktreeBranch: worktreeBranch,
 		CodexPlanState: adapter.NewCodexPlanState(),
+		CodexHomeID:    profile.ID,
+		CodexHomeLabel: profile.Label,
 	}
 	sm.mu.Lock()
 	sm.sessions[sessionID] = ps

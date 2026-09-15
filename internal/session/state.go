@@ -249,6 +249,8 @@ func (sm *SessionManager) ListSessions() []SessionInfo {
 			Cwd:            ps.Cwd,
 			Model:          ps.Model,
 			ControlMode:    ps.ControlMode,
+			CodexHomeID:    ps.CodexHomeID,
+			CodexHomeLabel: ps.CodexHomeLabel,
 		}
 		info.Capabilities = sm.sessionCapabilitiesLocked(ps)
 		if ps.Status == protocol.StatusExited || ps.Status == protocol.StatusCompleted ||
@@ -395,6 +397,28 @@ func (sm *SessionManager) GetSessionCwd(sessionID string) (string, bool) {
 	return ps.Cwd, true
 }
 
+func (sm *SessionManager) GetSessionCodexHome(sessionID string) (string, string, bool) {
+	sm.mu.RLock()
+	defer sm.mu.RUnlock()
+	state, ok := sm.sessions[sessionID]
+	if !ok || state.CodexHomeID == "" {
+		return "", "", false
+	}
+	return state.CodexHomeID, state.CodexHomeLabel, true
+}
+
+func (sm *SessionManager) SetSessionCodexHome(sessionID, homeID, label string) bool {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+	state, ok := sm.sessions[sessionID]
+	if !ok {
+		return false
+	}
+	state.CodexHomeID = homeID
+	state.CodexHomeLabel = label
+	return true
+}
+
 // GetWorktreeInfo returns the (path, branch) of a session's worktree (Scheme D).
 // The bool is false for non-worktree sessions or unknown session ids.
 func (sm *SessionManager) GetWorktreeInfo(sessionID string) (string, string, bool) {
@@ -503,6 +527,8 @@ type SessionInfo struct {
 	Model          string    `json:"model,omitempty"`
 	ControlMode    string    `json:"control_mode,omitempty"`
 	Capabilities   []string  `json:"capabilities,omitempty"`
+	CodexHomeID    string    `json:"codex_home_id,omitempty"`
+	CodexHomeLabel string    `json:"codex_home_label,omitempty"`
 }
 
 func (sm *SessionManager) SessionControlMode(sessionID string) string {

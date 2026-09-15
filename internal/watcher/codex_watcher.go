@@ -288,7 +288,7 @@ func (cw *CodexSessionWatcher) projectSession(path string, meta adapter.CodexRol
 			pid = NativeCodexTerminalPID(processes, meta.Cwd)
 		}
 	}
-	return DiscoveredSession{
+	session := DiscoveredSession{
 		SessionID:       meta.ID,
 		Cwd:             meta.Cwd,
 		Pid:             pid,
@@ -303,4 +303,9 @@ func (cw *CodexSessionWatcher) projectSession(path string, meta adapter.CodexRol
 		ControlMode:     "legacy_read_only",
 		Capabilities:    []string{"history_sync"},
 	}
+	if profile, ok := adapter.CodexHomeProfileForPath(path); ok {
+		session.CodexHomeID = profile.ID
+		session.CodexHomeLabel = profile.Label
+	}
+	return session
 }

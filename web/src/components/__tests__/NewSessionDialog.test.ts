@@ -70,6 +70,18 @@ describe('NewSessionDialog permission serialization', () => {
     expect(wrapper.text()).not.toContain('Codex Desktop')
 
     await agentButtons[1].trigger('click')
+    const homeRequest = ws.send.mock.calls.map(([message]) => message)
+      .find(message => message.type === 'list_codex_homes')
+    expect(homeRequest).toBeTruthy()
+    ws.handlers.get('codex_home_list')?.({
+      type: 'codex_home_list', daemon_id: 'daemon-1', request_id: homeRequest!.request_id,
+      codex_homes: [
+        { id: 'codex-home-primary', label: '~/.codex', primary: true },
+        { id: 'codex-home-a', label: '~/.codex-a' },
+      ],
+    })
+    await nextTick()
+    expect(wrapper.find('select.input-field').exists()).toBe(true)
     await wrapper.find('button.btn-start').trigger('click')
 
     const createMessages = ws.send.mock.calls
@@ -77,6 +89,7 @@ describe('NewSessionDialog permission serialization', () => {
       .filter(message => message.type === 'session_create')
     expect(createMessages).toHaveLength(1)
     expect(createMessages[0].agent).toBe('codex')
+    expect(createMessages[0].codex_home_id).toBe('codex-home-primary')
     expect(createMessages.some(message => message.agent === 'codex-desktop')).toBe(false)
     wrapper.unmount()
   })

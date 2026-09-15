@@ -63,6 +63,29 @@ func TestStartCodexAppServerStripsInheritedDesktopOrigin(t *testing.T) {
 	defer runtime.Stop()
 }
 
+func TestStartCodexAppServerPreservesSelectedCodexHome(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("CODEX_HOME", "/tmp/codex-primary")
+	t.Setenv("POCKETCTL_CODEX_RUNTIME_DIR", shortCodexRuntimeDir(t))
+	selectedHome := "/tmp/codex-proxy"
+	factory := func(string, string) *exec.Cmd {
+		cmd := exec.Command(os.Args[0], "-test.run=^TestCodexAppServerHelperProcess$")
+		cmd.Env = []string{
+			"POCKETCTL_CODEX_HELPER=1",
+			"POCKETCTL_EXPECT_CODEX_HOME=" + selectedHome,
+		}
+		return cmd
+	}
+
+	runtime, err := startCodexAppServerWithFactoryForHome(
+		context.Background(), "/fake/codex", "0.144.1", 5, "codex-home-proxy", selectedHome, 2*time.Second, factory,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer runtime.Stop()
+}
+
 func TestCodexInitializeDoesNotOptIntoUnsupportedOpenAIForm(t *testing.T) {
 	capabilities := codexInitializeParams()["capabilities"].(map[string]any)
 	if capabilities["experimentalApi"] != true {
@@ -117,6 +140,9 @@ func TestCodexAppServerHelperProcess(t *testing.T) {
 	if os.Getenv("POCKETCTL_EXPECT_CODEX_ORIGIN_CLEARED") == "1" &&
 		os.Getenv("CODEX_INTERNAL_ORIGINATOR_OVERRIDE") != "" {
 		os.Exit(3)
+	}
+	if expected := os.Getenv("POCKETCTL_EXPECT_CODEX_HOME"); expected != "" && os.Getenv("CODEX_HOME") != expected {
+		os.Exit(4)
 	}
 	socketPath := os.Getenv("POCKETCTL_CODEX_SOCKET")
 	if err := os.MkdirAll(filepath.Dir(socketPath), 0o700); err != nil {

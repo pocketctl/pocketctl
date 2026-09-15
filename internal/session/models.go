@@ -131,8 +131,12 @@ func ListModelsForAgent(agentType string) []protocol.ModelOption {
 // sync with the local Codex install instead of maintaining a version-coupled
 // hard-coded list.
 func listCodexModels() []protocol.ModelOption {
-	preferred := codexConfigModel()
-	if out := readCodexModelCatalog(preferred); len(out) > 0 {
+	return listCodexModelsAt(adapter.CodexHome())
+}
+
+func listCodexModelsAt(home string) []protocol.ModelOption {
+	preferred := codexConfigModelAt(home)
+	if out := readCodexModelCatalogAt(home, preferred); len(out) > 0 {
 		return out
 	}
 	return codexFallbackModels(preferred)
@@ -148,12 +152,12 @@ func codexFallbackModels(preferred string) []protocol.ModelOption {
 }
 
 func readCodexModelCatalog(preferred string) []protocol.ModelOption {
-	home, err := config.HomeDir()
-	if err != nil {
-		return nil
-	}
+	return readCodexModelCatalogAt(adapter.CodexHome(), preferred)
+}
+
+func readCodexModelCatalogAt(home, preferred string) []protocol.ModelOption {
 	for _, name := range []string{"models_cache.json", "models_catalog.json"} {
-		models := readCodexModelCatalogFile(filepath.Join(home, ".codex", name))
+		models := readCodexModelCatalogFile(filepath.Join(home, name))
 		if len(models) > 0 {
 			return movePreferredFirst(models, preferred)
 		}
@@ -215,11 +219,11 @@ func movePreferredFirst(models []protocol.ModelOption, preferred string) []proto
 // returning "" if not set or unreadable. Codex uses TOML, not JSON; we do a
 // lightweight scan rather than pulling a TOML dependency for one field.
 func codexConfigModel() string {
-	home, err := config.HomeDir()
-	if err != nil {
-		return ""
-	}
-	data, err := os.ReadFile(filepath.Join(home, ".codex", "config.toml"))
+	return codexConfigModelAt(adapter.CodexHome())
+}
+
+func codexConfigModelAt(home string) string {
+	data, err := os.ReadFile(filepath.Join(home, "config.toml"))
 	if err != nil {
 		return ""
 	}

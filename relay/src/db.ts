@@ -119,6 +119,8 @@ async function initDBUnlocked(pool: pg.Pool): Promise<void> {
       status VARCHAR(32) DEFAULT 'running',
       control_mode VARCHAR(32),
       capabilities JSONB,
+      codex_home_id VARCHAR(64),
+      codex_home_label TEXT,
       created_at TIMESTAMPTZ DEFAULT NOW(),
       updated_at TIMESTAMPTZ DEFAULT NOW()
     );
@@ -150,6 +152,8 @@ async function initDBUnlocked(pool: pg.Pool): Promise<void> {
   // nullable so historical rows remain safely distinguishable from managed.
   await pool.query(`ALTER TABLE sessions ADD COLUMN IF NOT EXISTS control_mode VARCHAR(32)`);
   await pool.query(`ALTER TABLE sessions ADD COLUMN IF NOT EXISTS capabilities JSONB`);
+  await pool.query(`ALTER TABLE sessions ADD COLUMN IF NOT EXISTS codex_home_id VARCHAR(64)`);
+  await pool.query(`ALTER TABLE sessions ADD COLUMN IF NOT EXISTS codex_home_label TEXT`);
   // Migration: add last_activity_at and exit_reason columns
   await pool.query(`ALTER TABLE sessions ADD COLUMN IF NOT EXISTS last_activity_at TIMESTAMPTZ`);
   await pool.query(`ALTER TABLE sessions ADD COLUMN IF NOT EXISTS turn_started_at TIMESTAMPTZ`);
@@ -2571,7 +2575,7 @@ export async function listSessionsWithChildren(pool: pg.Pool, whereUser?: number
   if (whereUser !== undefined) baseParams.push(whereUser);
   const result = await pool.query(
     `SELECT s.session_id, s.daemon_id, s.agent_type, s.active_agent, s.cwd, s.title, s.source, s.status,
-            s.control_mode, s.capabilities,
+            s.control_mode, s.capabilities, s.codex_home_id, s.codex_home_label,
             s.created_at, s.updated_at, s.last_activity_at, s.turn_started_at, s.exit_reason, s.subagent_count, s.pinned,
             s.model, s.effort, s.parent_session_id, s.is_subagent, s.root_session_id,
             s.total_tokens, s.tok_input, s.tok_output, s.tok_cache_read, s.tok_cache_create,
@@ -2697,7 +2701,7 @@ export async function listSessionsPageByDaemon(pool: pg.Pool, opts: {
   const queryStartedAt = Date.now();
   const result = await pool.query(
     `SELECT s.session_id, s.daemon_id, s.agent_type, s.active_agent, s.cwd, s.title, s.source, s.status,
-            s.control_mode, s.capabilities,
+            s.control_mode, s.capabilities, s.codex_home_id, s.codex_home_label,
             s.created_at, s.updated_at, s.last_activity_at, s.exit_reason, s.subagent_count, s.pinned,
             s.model, s.effort, s.parent_session_id, s.is_subagent, s.root_session_id,
             s.total_tokens, s.tok_input, s.tok_output, s.tok_cache_read, s.tok_cache_create,
@@ -2790,10 +2794,10 @@ export async function getSessionTokenBreakdown(pool: pg.Pool, userId: number, se
   };
 }
 
-export async function upsertSession(pool: pg.Pool, sessionId: string, daemonId: string, agentType: string, cwd: string, status: string, title?: string, source?: string, exitReason?: string, userId?: number, model?: string, controlMode?: string, capabilities?: string[]): Promise<void> {
+export async function upsertSession(pool: pg.Pool, sessionId: string, daemonId: string, agentType: string, cwd: string, status: string, title?: string, source?: string, exitReason?: string, userId?: number, model?: string, controlMode?: string, capabilities?: string[], codexHomeId?: string, codexHomeLabel?: string): Promise<void> {
   const result = await pool.query(
-    `INSERT INTO sessions (session_id, daemon_id, agent_type, cwd, title, source, status, exit_reason, user_id, model, control_mode, capabilities, created_at, updated_at)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12::jsonb, NOW(), NOW())
+    `INSERT INTO sessions (session_id, daemon_id, agent_type, cwd, title, source, status, exit_reason, user_id, model, control_mode, capabilities, codex_home_id, codex_home_label, created_at, updated_at)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12::jsonb, $13, $14, NOW(), NOW())
      ON CONFLICT (session_id) DO UPDATE SET
        daemon_id = $2,
        status = $7,
@@ -2813,11 +2817,13 @@ export async function upsertSession(pool: pg.Pool, sessionId: string, daemonId: 
        model = COALESCE($10, sessions.model),
        control_mode = COALESCE($11, sessions.control_mode),
        capabilities = COALESCE($12::jsonb, sessions.capabilities),
+       codex_home_id = COALESCE($13, sessions.codex_home_id),
+       codex_home_label = COALESCE($14, sessions.codex_home_label),
        updated_at = NOW()
      WHERE sessions.user_id = EXCLUDED.user_id
         OR (sessions.user_id IS NULL AND sessions.daemon_id = EXCLUDED.daemon_id)
      RETURNING session_id`,
-    [sessionId, daemonId, agentType, cwd, title || null, source || 'daemon', status, exitReason || null, userId || null, model || null, controlMode || null, capabilities ? JSON.stringify(capabilities) : null]
+    [sessionId, daemonId, agentType, cwd, title || null, source || 'daemon', status, exitReason || null, userId || null, model || null, controlMode || null, capabilities ? JSON.stringify(capabilities) : null, codexHomeId || null, codexHomeLabel || null]
   );
   // A conflict update refused by the ownership guard returns zero rows. That
   // is a permanent security rejection, never a silent success.

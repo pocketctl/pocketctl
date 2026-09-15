@@ -80,7 +80,7 @@ describe('Codex managed lifecycle relay contract', () => {
 
     await vi.waitFor(() => {
       expect(queriesMatching(pool, 'INSERT INTO sessions')).toContainEqual(expect.objectContaining({
-        params: ['thr_1', 'daemon-1', 'codex', '', null, 'terminal', 'running', null, 1, null, 'managed', null],
+        params: ['thr_1', 'daemon-1', 'codex', '', null, 'terminal', 'running', null, 1, null, 'managed', null, null, null],
       }))
       expect(queriesMatching(pool, 'INSERT INTO events')).toContainEqual(expect.objectContaining({
         params: [

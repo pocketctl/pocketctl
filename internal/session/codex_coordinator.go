@@ -50,12 +50,16 @@ type codexRuntimeStarter func(context.Context, string, string, uint64) (*codexAp
 type codexRuntimeProbe func(context.Context, *codexAppServerRuntime) error
 
 type codexCoordinator struct {
-	projectCwd string
-	statePath  string
-	skillsMu   sync.Mutex
-	titleMu    sync.Mutex
-	titleTurns map[string]codexTitleTurn
-	sm         *SessionManager
+	projectCwd       string
+	statePath        string
+	codexHomeID      string
+	codexHome        string
+	codexHomeLabel   string
+	codexHomePrimary bool
+	skillsMu         sync.Mutex
+	titleMu          sync.Mutex
+	titleTurns       map[string]codexTitleTurn
+	sm               *SessionManager
 
 	mu              sync.Mutex
 	runtime         *codexAppServerRuntime
@@ -108,6 +112,13 @@ func newCodexCoordinator(sm *SessionManager) *codexCoordinator {
 	}
 }
 
+func (c *codexCoordinator) configureCodexHome(profile adapter.CodexHomeProfile) {
+	c.codexHomeID = profile.ID
+	c.codexHome = profile.Home
+	c.codexHomeLabel = profile.Label
+	c.codexHomePrimary = profile.Primary
+}
+
 func (c *codexCoordinator) ensureStarted(ctx context.Context, binary, version string, capabilities agentcontrol.CodexCapabilities) (codexRuntimeSnapshot, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -142,6 +153,11 @@ func (c *codexCoordinator) ensureStarted(ctx context.Context, binary, version st
 	}
 	state, stateErr := c.readState()
 	if stateErr == nil {
+		if (state.CodexHomeID != "" && state.CodexHomeID != c.codexHomeID) ||
+			(!c.codexHomePrimary && state.CodexHomeID != c.codexHomeID) ||
+			(state.CodexHome != "" && state.CodexHome != c.codexHome) {
+			return codexRuntimeSnapshot{}, errors.New("Codex app-server handoff belongs to a different Codex home")
+		}
 		c.generation = state.Generation
 		restoredThreads = append(restoredThreads, state.Threads...)
 		alive := platform.NewProcessController().IsAlive(state.PID)
@@ -302,7 +318,7 @@ func (c *codexCoordinator) persistOwnerLocked(ownerPID int) error {
 		}
 	}
 	return daemon.WriteCodexAppServerStateAt(c.runtimeStatePath(), &daemon.CodexAppServerState{
-		Cwd: c.projectCwd,
+		Cwd: c.projectCwd, CodexHomeID: c.codexHomeID, CodexHome: c.codexHome,
 		PID: c.runtime.PID, OwnerPID: ownerPID, Endpoint: c.runtime.Endpoint,
 		RemoteURI: c.runtime.RemoteURI, Binary: c.binary, Version: c.version,
 		SchemaHash: c.schemaHash, Generation: c.generation, Leases: leases,
@@ -558,6 +574,8 @@ func (c *codexCoordinator) publishProjectedAt(events []protocol.DaemonEvent, rec
 		if !c.admissionAllowed(event.SessionID) {
 			continue
 		}
+		event.CodexHomeID = c.codexHomeID
+		event.CodexHomeLabel = c.codexHomeLabel
 		// Codex app-server lifecycle notifications have no timestamp field. Stamp
 		// the daemon's receipt time before fan-out so clients can present the
 		// actual response end time instead of their local WebSocket arrival time.
@@ -1242,10 +1260,13 @@ func (c *codexCoordinator) applyProjectedEvent(event protocol.DaemonEvent) (prot
 				SessionID: event.SessionID, Status: event.Status, StartedAt: now, LastActivityAt: activityAt,
 				Cwd: event.Cwd, Agent: adapter.AgentCodex, Source: event.Source,
 				ControlMode: protocol.ControlManaged,
+				CodexHomeID: c.codexHomeID, CodexHomeLabel: c.codexHomeLabel,
 			}
 			c.sm.sessions[event.SessionID] = ps
 			c.registerProjectedCwdLocked(event.SessionID, "", event.Cwd)
 		} else {
+			ps.CodexHomeID = c.codexHomeID
+			ps.CodexHomeLabel = c.codexHomeLabel
 			if event.Cwd != "" {
 				oldCwd := ps.Cwd
 				ps.Cwd = event.Cwd
@@ -1264,11 +1285,13 @@ func (c *codexCoordinator) applyProjectedEvent(event protocol.DaemonEvent) (prot
 		ps = &ProcessState{
 			SessionID: event.SessionID, Status: protocol.StatusIdle, StartedAt: now, LastActivityAt: activityAt,
 			Agent: adapter.AgentCodex, Source: "terminal", ControlMode: protocol.ControlManaged,
+			CodexHomeID: c.codexHomeID, CodexHomeLabel: c.codexHomeLabel,
 		}
 		c.sm.sessions[event.SessionID] = ps
 		discovered := protocol.DaemonEvent{
 			Type: "session_discovered", SessionID: event.SessionID, Status: ps.Status,
 			Agent: adapter.AgentCodex, Source: ps.Source, ControlMode: ps.ControlMode,
+			CodexHomeID: c.codexHomeID, CodexHomeLabel: c.codexHomeLabel,
 		}
 		if event.Type == "session_status" && event.Status != "" {
 			ps.Status = event.Status

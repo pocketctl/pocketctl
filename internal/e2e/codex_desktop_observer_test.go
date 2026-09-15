@@ -50,6 +50,10 @@ func TestCodexDesktopRolloutProjectsObserverHistoryWithoutRestartDuplicates(t *t
 		AgentType: adapter.AgentCodexDesktop, Source: "observer",
 		ControlMode: protocol.ControlLegacyReadOnly, Capabilities: []string{"history_sync"},
 	}
+	if profiles := adapter.CodexHomeProfiles(); len(profiles) > 0 {
+		wantSession.CodexHomeID = profiles[0].ID
+		wantSession.CodexHomeLabel = profiles[0].Label
+	}
 	if !reflect.DeepEqual(discovered.Session, wantSession) {
 		t.Fatalf("Desktop watcher projection = %+v, want %+v", discovered.Session, wantSession)
 	}

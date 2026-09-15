@@ -2014,7 +2014,18 @@ func (sm *SessionManager) SetSessionAgent(ctx context.Context, sessionID, agentN
 // come from its serve API (requires the shared serve running); other agents use
 // the stateless ListModelsForAgent.
 func (sm *SessionManager) ModelsForAgent(agentType string) []protocol.ModelOption {
+	return sm.ModelsForAgentHome(agentType, "")
+}
+
+func (sm *SessionManager) ModelsForAgentHome(agentType, homeID string) []protocol.ModelOption {
 	if agentType != adapter.AgentOpencode {
+		if agentType == adapter.AgentCodex {
+			profile, err := sm.CodexRuntimeProvider().profileForHomeID(homeID)
+			if err != nil {
+				return nil
+			}
+			return listCodexModelsAt(profile.Home)
+		}
 		return ListModelsForAgent(agentType)
 	}
 	if _, _, err := resolveOpenCodeCLI(); err != nil {

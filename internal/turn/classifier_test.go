@@ -57,6 +57,7 @@ func TestClassifyGoldenTable(t *testing.T) {
 		"generate_subagent_title_request": lifecycleAux,
 		"upgrade_result":                  lifecycleAux,
 		"model_list":                      lifecycleAux,
+		"codex_home_list":                 lifecycleAux,
 		"permission_config_changed":       lifecycleAux,
 		"agent_retry":                     lifecycleAux,
 		"agent_compaction":                lifecycleAux,

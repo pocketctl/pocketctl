@@ -61,6 +61,8 @@ type ProcessState struct {
 	Backend                 SessionBackend      // non-nil only for server-kind agents (opencode); subprocess agents drive via the fields above
 	ControlMode             string              // managed | unmanaged_active | legacy_read_only
 	CodexPlanState          *adapter.CodexPlanState
+	CodexHomeID             string
+	CodexHomeLabel          string
 	ClaudeChannelInstanceID string
 }
 
@@ -306,16 +308,18 @@ func (sm *SessionManager) ResyncSessions() {
 	defer sm.mu.RUnlock()
 	for sessionID, ps := range sm.sessions {
 		event := protocol.DaemonEvent{
-			Type:         "session_discovered",
-			SessionID:    sessionID,
-			Cwd:          ps.Cwd,
-			Status:       ps.Status,
-			Source:       ps.Source,
-			Agent:        ps.Agent,
-			Model:        ps.Model,
-			ControlMode:  ps.ControlMode,
-			Capabilities: sm.sessionCapabilitiesLocked(ps),
-			Resync:       true,
+			Type:           "session_discovered",
+			SessionID:      sessionID,
+			Cwd:            ps.Cwd,
+			Status:         ps.Status,
+			Source:         ps.Source,
+			Agent:          ps.Agent,
+			Model:          ps.Model,
+			ControlMode:    ps.ControlMode,
+			Capabilities:   sm.sessionCapabilitiesLocked(ps),
+			CodexHomeID:    ps.CodexHomeID,
+			CodexHomeLabel: ps.CodexHomeLabel,
+			Resync:         true,
 		}
 		if !ps.LastActivityAt.IsZero() {
 			event.LastActivityAt = ps.LastActivityAt.UTC().Format(time.RFC3339Nano)
