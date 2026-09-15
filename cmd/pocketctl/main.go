@@ -286,6 +286,8 @@ func cmdServiceInstall(args []string) {
 	allowedCwdRoots := multiFlag{}
 	fs.Var(&allowedCwdRoots, "allowed-cwd-root", "Allowed remote cwd root (repeatable; default: current user home ~/; explicit roots replace the default; persisted in service argv)")
 	allowDangerousRemotePermissions := fs.Bool("allow-dangerous-remote-permissions", false, "Bake the dangerous remote permission switch into the supervised daemon")
+	codexHomes := multiFlag{}
+	fs.Var(&codexHomes, "codex-home", "Additional Codex home directory to watch (repeatable; baked into the supervised daemon)")
 	fs.Parse(args)
 	normalizedTrustedActionPolicy, policyErr := validateTrustedActionPolicyFlag(*trustedActionPolicy)
 	if policyErr != nil {
@@ -326,6 +328,11 @@ func cmdServiceInstall(args []string) {
 	}
 	if *allowDangerousRemotePermissions {
 		policyArgs = append(policyArgs, "--allow-dangerous-remote-permissions")
+	}
+	for _, home := range codexHomes {
+		if home = strings.TrimSpace(home); home != "" {
+			policyArgs = append(policyArgs, "--codex-home", home)
+		}
 	}
 	daemonArgs := serviceDaemonArgs(*production, *relayURL, normalizedTrustedActionPolicy, policyArgs...)
 
@@ -982,7 +989,13 @@ func cmdDaemonStart(args []string) {
 	allowedCwdRoots := multiFlag{}
 	fs.Var(&allowedCwdRoots, "allowed-cwd-root", "Allowed remote cwd root (repeatable; default: current user home ~/; explicit roots replace the default)")
 	allowDangerousRemotePermissions := fs.Bool("allow-dangerous-remote-permissions", false, "Allow remote sessions to request bypassPermissions / dangerous bypass / approval never / danger-full-access")
+	codexHomes := multiFlag{}
+	fs.Var(&codexHomes, "codex-home", "Additional Codex home directory to watch (repeatable; merged with POCKETCTL_CODEX_HOMES env, PATH-style list)")
 	fs.Parse(args)
+	mergeCodexHomeArgs(codexHomes)
+	if extra := strings.TrimSpace(os.Getenv("POCKETCTL_CODEX_HOMES")); extra != "" {
+		fmt.Printf("[daemon] additional codex homes: %s\n", extra)
+	}
 	cwdPolicy, cwdPolicyErr := newDaemonCwdPolicy(allowedCwdRoots)
 	if cwdPolicyErr != nil {
 		fmt.Fprintln(os.Stderr, cwdPolicyErr)
@@ -4506,6 +4519,27 @@ func (m *multiFlag) String() string { return strings.Join(*m, ",") }
 func (m *multiFlag) Set(v string) error {
 	*m = append(*m, v)
 	return nil
+}
+
+// mergeCodexHomeArgs folds --codex-home values into POCKETCTL_CODEX_HOMES so
+// the codex watcher, storage resolvers, and title index — plus any re-exec'd
+// daemon child — all observe one home set. The adapter layer performs tilde
+// expansion, list splitting, and deduplication when reading the variable back.
+func mergeCodexHomeArgs(homes multiFlag) {
+	var entries []string
+	for _, home := range homes {
+		if home = strings.TrimSpace(home); home != "" {
+			entries = append(entries, home)
+		}
+	}
+	if existing := strings.TrimSpace(os.Getenv("POCKETCTL_CODEX_HOMES")); existing != "" {
+		entries = append(entries, existing)
+	}
+	if len(entries) > 0 {
+		// Join with the platform list separator so the value round-trips
+		// through filepath.SplitList (Windows uses ';' rather than ':').
+		os.Setenv("POCKETCTL_CODEX_HOMES", strings.Join(entries, string(filepath.ListSeparator)))
+	}
 }
 
 // newDaemonCwdPolicy applies the CLI default for both manual and service starts.

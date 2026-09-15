@@ -67,6 +67,8 @@ Options (daemon start unless noted):
   --no-agent-prompt       Deprecated alias for --no-agent-auto-enable
   --allowed-cwd-root <dir>  Allow remote sessions in this existing absolute directory and its subdirectories; repeatable
   --allow-dangerous-remote-permissions  Allow remote sessions to request bypassPermissions / dontAsk / approval never / danger-full-access
+  --codex-home <dir>  Watch an additional Codex home directory besides the default
+                      (repeatable, e.g. ~/.codex-a); merged with POCKETCTL_CODEX_HOMES
 
 Remote working directories:
   Without --allowed-cwd-root, the daemon user's home directory (~/) and its subdirectories are authorized.
@@ -114,7 +116,9 @@ ZCode session content sync (read-only):
 
 Environment:
   POCKETCTL_RELAY_URL   Relay WebSocket URL (e.g. ws://localhost:8080/ws, wss://relay.example.com/ws)
-  POCKETCTL_TOKEN       JWT token for authentication`
+  POCKETCTL_TOKEN       JWT token for authentication
+  POCKETCTL_CODEX_HOMES  Additional Codex home directories to watch, PATH-style list
+                         (e.g. ~/.codex-a:~/.codex-proxy); combined with --codex-home flags`
 
 const helpZh = `pocketctl - 远程 AI 编程代理控制
 
@@ -166,6 +170,8 @@ Relay 连接（默认: 生产环境 wss://www.pocketctl.me/ws）:
   --no-agent-prompt       --no-agent-auto-enable 的兼容别名（已弃用）
   --allowed-cwd-root <目录>  允许在此目录及子目录远程创建会话；必须是已存在的绝对路径，可重复指定
   --allow-dangerous-remote-permissions  允许远程会话请求 bypassPermissions / dontAsk / approval never / danger-full-access 等高权限模式
+  --codex-home <目录>  额外监听一个 Codex 配置目录（可重复指定，如 ~/.codex-a）；
+                      与 POCKETCTL_CODEX_HOMES 合并生效
 
 远程工作目录:
   未指定 --allowed-cwd-root 时，默认授权 daemon 运行用户的主目录（~/）及其子目录。
@@ -211,6 +217,8 @@ ZCode 会话内容同步（只读）:
 
 环境变量:
   POCKETCTL_RELAY_URL   Relay WebSocket URL（如 ws://localhost:8080/ws, wss://relay.example.com/ws）
+  POCKETCTL_CODEX_HOMES  额外监听的 Codex 配置目录，PATH 风格列表（如 ~/.codex-a:~/.codex-proxy）；
+                         与 --codex-home 参数合并生效
   POCKETCTL_TOKEN       JWT 认证令牌`
 
 // configDirDisplay is the user-facing name of the profile directory shown in

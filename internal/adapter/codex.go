@@ -36,6 +36,69 @@ func CodexSessionsDir() string {
 	return filepath.Join(h, "sessions")
 }
 
+// AdditionalCodexHomes returns extra Codex home directories configured via
+// POCKETCTL_CODEX_HOMES (colon-separated, PATH-style). Entries are
+// tilde-expanded and deduplicated against the primary CodexHome().
+func AdditionalCodexHomes() []string {
+	raw := strings.TrimSpace(os.Getenv("POCKETCTL_CODEX_HOMES"))
+	if raw == "" {
+		return nil
+	}
+	seen := map[string]bool{}
+	if primary := CodexHome(); primary != "" {
+		seen[filepath.Clean(primary)] = true
+	}
+	var homes []string
+	for _, entry := range filepath.SplitList(raw) {
+		entry = strings.TrimSpace(entry)
+		if entry == "" {
+			continue
+		}
+		clean := filepath.Clean(expandCodexHomeTilde(entry))
+		if seen[clean] {
+			continue
+		}
+		seen[clean] = true
+		homes = append(homes, clean)
+	}
+	return homes
+}
+
+// CodexSessionsDirs returns every rollout sessions directory to watch and
+// resolve: the primary home plus any additional homes from
+// POCKETCTL_CODEX_HOMES. Additional homes stay effective even when the
+// primary home cannot be resolved.
+func CodexSessionsDirs() []string {
+	var dirs []string
+	for _, home := range append([]string{CodexHome()}, AdditionalCodexHomes()...) {
+		if home == "" {
+			continue
+		}
+		dirs = append(dirs, filepath.Join(home, "sessions"))
+	}
+	return dirs
+}
+
+// expandCodexHomeTilde expands a leading "~" or "~/" to the user home
+// directory. "~user" style paths and unexpandable homes pass through
+// unchanged.
+func expandCodexHomeTilde(path string) string {
+	if !strings.HasPrefix(path, "~") {
+		return path
+	}
+	home, err := config.HomeDir()
+	if err != nil {
+		return path
+	}
+	if path == "~" {
+		return home
+	}
+	if rest := strings.TrimPrefix(path, "~"); len(rest) > 0 && (rest[0] == '/' || rest[0] == '\\') {
+		return filepath.Join(home, rest[1:])
+	}
+	return path
+}
+
 // CodexRolloutMetadata is the relationship metadata stored in a rollout's
 // leading session_meta record. RootSessionID is the root conversation ID;
 // ParentThreadID is the immediate parent for nested subagents.
@@ -609,18 +672,23 @@ func (CodexLauncher) BuildResumeArgs(prompt, sessionID string, config protocol.S
 // for *<sessionID>.jsonl across the sessions tree.
 type CodexSessionStorage struct{}
 
-func (CodexSessionStorage) ResolveJSONLPath(sessionID, cwd string) (string, error) {
-	sessionsDir := CodexSessionsDir()
-	if sessionsDir == "" {
-		return "", fmt.Errorf("codex home not resolved")
+// forEachCodexRolloutRoot invokes fn for each existing sessions root in
+// priority order (primary home first, then additional homes). It returns the
+// configured roots that are missing on disk so callers can report them.
+func forEachCodexRolloutRoot(fn func(sessionsDir string)) (missing []string) {
+	for _, sessionsDir := range CodexSessionsDirs() {
+		if _, err := os.Stat(sessionsDir); err != nil {
+			missing = append(missing, sessionsDir)
+			continue
+		}
+		fn(sessionsDir)
 	}
-	if _, err := os.Stat(sessionsDir); err != nil {
-		return "", fmt.Errorf("codex sessions dir: %w", err)
-	}
+	return missing
+}
 
-	// Glob for any rollout file whose name ends with the session id.
-	var found string
-	var foundMtime time.Time
+// walkCodexRolloutsIn walks one sessions root and invokes fn for every
+// rollout-*.jsonl file.
+func walkCodexRolloutsIn(sessionsDir string, fn func(path string, info os.FileInfo)) {
 	_ = filepath.Walk(sessionsDir, func(path string, info os.FileInfo, err error) error {
 		if err != nil || info.IsDir() {
 			return nil
@@ -629,17 +697,42 @@ func (CodexSessionStorage) ResolveJSONLPath(sessionID, cwd string) (string, erro
 		if !strings.HasPrefix(name, "rollout-") || !strings.HasSuffix(name, ".jsonl") {
 			return nil
 		}
-		// rollout-<timestamp>-<sessionID>.jsonl → match by suffix.
-		if strings.HasSuffix(name, "-"+sessionID+".jsonl") {
-			// Prefer the most recent match (in case of forks/archives).
-			if found == "" || info.ModTime().After(foundMtime) {
-				found = path
-				foundMtime = info.ModTime()
-			}
-		}
+		fn(path, info)
 		return nil
 	})
+}
+
+func (CodexSessionStorage) ResolveJSONLPath(sessionID, cwd string) (string, error) {
+	roots := CodexSessionsDirs()
+	if len(roots) == 0 {
+		return "", fmt.Errorf("codex home not resolved")
+	}
+
+	// Glob for any rollout file whose name ends with the session id. Homes
+	// are searched in priority order (primary first): once an earlier home
+	// has a match, later homes are skipped, so a mirrored or archived copy
+	// with a newer mtime never steals the binding from the live rollout.
+	var found string
+	var foundMtime time.Time
+	missing := forEachCodexRolloutRoot(func(sessionsDir string) {
+		if found != "" {
+			return
+		}
+		walkCodexRolloutsIn(sessionsDir, func(path string, info os.FileInfo) {
+			// rollout-<timestamp>-<sessionID>.jsonl → match by suffix.
+			if strings.HasSuffix(info.Name(), "-"+sessionID+".jsonl") {
+				// Prefer the most recent match (in case of forks/archives).
+				if found == "" || info.ModTime().After(foundMtime) {
+					found = path
+					foundMtime = info.ModTime()
+				}
+			}
+		})
+	})
 	if found == "" {
+		if len(missing) == len(roots) {
+			return "", fmt.Errorf("codex sessions dirs not found: %s", strings.Join(missing, ", "))
+		}
 		return "", fmt.Errorf("codex jsonl not found for session %s", sessionID)
 	}
 	return found, nil
@@ -653,46 +746,42 @@ func (s CodexSessionStorage) ResolveJSONLPathForPTY(sessionID, cwd string, hints
 }
 
 func (CodexSessionStorage) findNewestRolloutByCwdSince(cwd string, hints PTYResolveHints) (string, string, error) {
-	sessionsDir := CodexSessionsDir()
-	if sessionsDir == "" {
+	if len(CodexSessionsDirs()) == 0 {
 		return "", "", fmt.Errorf("codex home not resolved")
 	}
-	if _, err := os.Stat(sessionsDir); err != nil {
-		return "", "", fmt.Errorf("codex sessions dir: %w", err)
-	}
 
+	// Homes are searched in priority order (primary first); once an earlier
+	// home has a match, later homes are skipped so mirrored copies with a
+	// newer mtime never win the binding.
 	var foundPath string
 	var foundID string
 	var foundMtime time.Time
 	cutoff := hints.StartedAt.Add(-2 * time.Second)
 	initialPrompt := strings.TrimSpace(hints.InitialPrompt)
-	_ = filepath.Walk(sessionsDir, func(path string, info os.FileInfo, err error) error {
-		if err != nil || info.IsDir() {
-			return nil
+	forEachCodexRolloutRoot(func(sessionsDir string) {
+		if foundPath != "" {
+			return
 		}
-		name := info.Name()
-		if !strings.HasPrefix(name, "rollout-") || !strings.HasSuffix(name, ".jsonl") {
-			return nil
-		}
-		if !hints.StartedAt.IsZero() && info.ModTime().Before(cutoff) {
-			return nil
-		}
-		sessionID, metaCwd, ok := CodexRolloutMeta(path)
-		if !ok || sessionID == "" || !sameCodexCwd(metaCwd, cwd) {
-			return nil
-		}
-		if _, excluded := hints.ExcludeSessionIDs[sessionID]; excluded {
-			return nil
-		}
-		if initialPrompt != "" && !CodexRolloutHasUserMessage(path, initialPrompt) {
-			return nil
-		}
-		if foundPath == "" || info.ModTime().After(foundMtime) {
-			foundPath = path
-			foundID = sessionID
-			foundMtime = info.ModTime()
-		}
-		return nil
+		walkCodexRolloutsIn(sessionsDir, func(path string, info os.FileInfo) {
+			if !hints.StartedAt.IsZero() && info.ModTime().Before(cutoff) {
+				return
+			}
+			sessionID, metaCwd, ok := CodexRolloutMeta(path)
+			if !ok || sessionID == "" || !sameCodexCwd(metaCwd, cwd) {
+				return
+			}
+			if _, excluded := hints.ExcludeSessionIDs[sessionID]; excluded {
+				return
+			}
+			if initialPrompt != "" && !CodexRolloutHasUserMessage(path, initialPrompt) {
+				return
+			}
+			if foundPath == "" || info.ModTime().After(foundMtime) {
+				foundPath = path
+				foundID = sessionID
+				foundMtime = info.ModTime()
+			}
+		})
 	})
 	if foundPath == "" {
 		return "", "", fmt.Errorf("codex jsonl not found for cwd %s since %s", cwd, hints.StartedAt.Format(time.RFC3339))
@@ -702,23 +791,13 @@ func (CodexSessionStorage) findNewestRolloutByCwdSince(cwd string, hints PTYReso
 
 func CodexRolloutSessionIDsForCwd(cwd string) map[string]struct{} {
 	ids := make(map[string]struct{})
-	sessionsDir := CodexSessionsDir()
-	if sessionsDir == "" {
-		return ids
-	}
-	_ = filepath.Walk(sessionsDir, func(path string, info os.FileInfo, err error) error {
-		if err != nil || info.IsDir() {
-			return nil
-		}
-		name := info.Name()
-		if !strings.HasPrefix(name, "rollout-") || !strings.HasSuffix(name, ".jsonl") {
-			return nil
-		}
-		sessionID, metaCwd, ok := CodexRolloutMeta(path)
-		if ok && sessionID != "" && sameCodexCwd(metaCwd, cwd) {
-			ids[sessionID] = struct{}{}
-		}
-		return nil
+	forEachCodexRolloutRoot(func(sessionsDir string) {
+		walkCodexRolloutsIn(sessionsDir, func(path string, info os.FileInfo) {
+			sessionID, metaCwd, ok := CodexRolloutMeta(path)
+			if ok && sessionID != "" && sameCodexCwd(metaCwd, cwd) {
+				ids[sessionID] = struct{}{}
+			}
+		})
 	})
 	return ids
 }
