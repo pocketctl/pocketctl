@@ -122,6 +122,12 @@ codex
 Use `codex --native ...` for a one-off bypass, or
 `pocketctl agent codex disable` to remove the PocketCtl launcher.
 
+**Multiple Codex accounts on one machine.** Isolated Codex homes
+(`~/.codex-a`, `~/.codex-proxy`, …) can all be watched at once — pass extra
+homes with repeatable `--codex-home <dir>` flags or the
+`POCKETCTL_CODEX_HOMES` environment variable, then pick the account when
+starting a session from Web or iOS.
+
 ### OpenCode
 
 ```bash
