@@ -14,18 +14,20 @@ import (
 )
 
 type CodexAppServerState struct {
-	Cwd        string                        `json:"cwd,omitempty"`
-	PID        int                           `json:"pid"`
-	OwnerPID   int                           `json:"owner_pid"`
-	Endpoint   string                        `json:"endpoint"`
-	RemoteURI  string                        `json:"remote_uri"`
-	Binary     string                        `json:"binary"`
-	Version    string                        `json:"version"`
-	SchemaHash string                        `json:"schema_hash,omitempty"`
-	Generation uint64                        `json:"generation"`
-	Leases     map[string]agentcontrol.Lease `json:"leases,omitempty"`
-	Threads    []string                      `json:"threads,omitempty"`
-	UpdatedAt  time.Time                     `json:"updated_at"`
+	Cwd         string                        `json:"cwd,omitempty"`
+	CodexHomeID string                        `json:"codex_home_id,omitempty"`
+	CodexHome   string                        `json:"codex_home,omitempty"`
+	PID         int                           `json:"pid"`
+	OwnerPID    int                           `json:"owner_pid"`
+	Endpoint    string                        `json:"endpoint"`
+	RemoteURI   string                        `json:"remote_uri"`
+	Binary      string                        `json:"binary"`
+	Version     string                        `json:"version"`
+	SchemaHash  string                        `json:"schema_hash,omitempty"`
+	Generation  uint64                        `json:"generation"`
+	Leases      map[string]agentcontrol.Lease `json:"leases,omitempty"`
+	Threads     []string                      `json:"threads,omitempty"`
+	UpdatedAt   time.Time                     `json:"updated_at"`
 }
 
 func CodexAppServerStatePath() string {

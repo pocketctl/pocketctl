@@ -5,6 +5,9 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
+	"runtime"
+	"strings"
 	"testing"
 	"time"
 
@@ -618,4 +621,191 @@ func writeCodexRollout(t *testing.T, codexHome, sessionID, cwd, userMessage stri
 		t.Fatal(err)
 	}
 	return path
+}
+
+func TestAdditionalCodexHomesParsesEnv(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("CODEX_HOME", filepath.Join(home, "primary"))
+	t.Setenv("POCKETCTL_CODEX_HOMES",
+		filepath.Join(home, "primary")+":"+
+			filepath.Join(home, "b")+"::"+
+			filepath.Join(home, "a"))
+
+	homes := AdditionalCodexHomes()
+	want := []string{filepath.Join(home, "b"), filepath.Join(home, "a")}
+	if !reflect.DeepEqual(homes, want) {
+		t.Fatalf("AdditionalCodexHomes() = %v, want %v", homes, want)
+	}
+}
+
+func TestAdditionalCodexHomesExpandsTilde(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("CODEX_HOME", filepath.Join(home, "primary"))
+	t.Setenv("POCKETCTL_CODEX_HOMES", "~/codex-a")
+
+	homes := AdditionalCodexHomes()
+	want := []string{filepath.Join(home, "codex-a")}
+	if !reflect.DeepEqual(homes, want) {
+		t.Fatalf("AdditionalCodexHomes() = %v, want %v", homes, want)
+	}
+}
+
+func TestCodexSessionsDirsMergesPrimaryAndAdditional(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("CODEX_HOME", filepath.Join(home, "primary"))
+	t.Setenv("POCKETCTL_CODEX_HOMES", filepath.Join(home, "b"))
+
+	dirs := CodexSessionsDirs()
+	want := []string{
+		filepath.Join(home, "primary", "sessions"),
+		filepath.Join(home, "b", "sessions"),
+	}
+	if !reflect.DeepEqual(dirs, want) {
+		t.Fatalf("CodexSessionsDirs() = %v, want %v", dirs, want)
+	}
+}
+
+func TestCodexSessionsDirsPrimaryOnlyWithoutEnv(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("CODEX_HOME", filepath.Join(home, "only"))
+
+	dirs := CodexSessionsDirs()
+	want := []string{filepath.Join(home, "only", "sessions")}
+	if !reflect.DeepEqual(dirs, want) {
+		t.Fatalf("CodexSessionsDirs() = %v, want %v", dirs, want)
+	}
+}
+
+func TestCodexSessionStorageResolvesAcrossAdditionalHomes(t *testing.T) {
+	primaryHome := t.TempDir()
+	extraHome := t.TempDir()
+	t.Setenv("HOME", primaryHome)
+	t.Setenv("CODEX_HOME", filepath.Join(primaryHome, "codex"))
+	t.Setenv("POCKETCTL_CODEX_HOMES", extraHome)
+
+	dayDir := filepath.Join(extraHome, "sessions", "2026", "09", "14")
+	if err := os.MkdirAll(dayDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dayDir, "rollout-2026-09-14T10-00-00-e0f1a2b3c4d5.jsonl")
+	if err := os.WriteFile(path, []byte("{}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	storage := CodexSessionStorage{}
+	got, err := storage.ResolveJSONLPath("e0f1a2b3c4d5", "/repo")
+	if err != nil {
+		t.Fatalf("ResolveJSONLPath across additional homes: %v", err)
+	}
+	if got != path {
+		t.Fatalf("ResolveJSONLPath() = %q, want %q", got, path)
+	}
+}
+
+func TestCodexRolloutSessionIDsForCwdSpansAdditionalHomes(t *testing.T) {
+	primaryHome := t.TempDir()
+	extraHome := t.TempDir()
+	primaryCodex := filepath.Join(primaryHome, "codex")
+	t.Setenv("HOME", primaryHome)
+	t.Setenv("CODEX_HOME", primaryCodex)
+	t.Setenv("POCKETCTL_CODEX_HOMES", extraHome)
+
+	write := func(root, id string) {
+		dayDir := filepath.Join(root, "sessions", "2026", "09", "14")
+		if err := os.MkdirAll(dayDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		content := fmt.Sprintf(`{"type":"session_meta","payload":{"id":%q,"cwd":"/repo","thread_source":"user"}}`+"\n", id)
+		if err := os.WriteFile(filepath.Join(dayDir, "rollout-2026-09-14T10-00-00-"+id+".jsonl"), []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write(primaryCodex, "aaaa1111")
+	write(extraHome, "bbbb2222")
+
+	ids := CodexRolloutSessionIDsForCwd("/repo")
+	if _, ok := ids["aaaa1111"]; !ok {
+		t.Fatalf("primary home session missing from ids: %v", ids)
+	}
+	if _, ok := ids["bbbb2222"]; !ok {
+		t.Fatalf("additional home session missing from ids: %v", ids)
+	}
+}
+
+func TestCodexSessionsDirsWorksWithoutPrimaryHome(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("relies on unix HOME semantics")
+	}
+	extra := t.TempDir()
+	t.Setenv("HOME", "")
+	t.Setenv("CODEX_HOME", "")
+	t.Setenv("POCKETCTL_CODEX_HOMES", extra)
+
+	dirs := CodexSessionsDirs()
+	want := []string{filepath.Join(extra, "sessions")}
+	if !reflect.DeepEqual(dirs, want) {
+		t.Fatalf("CodexSessionsDirs() without primary = %v, want %v", dirs, want)
+	}
+}
+
+func TestAdditionalCodexHomesTildeBoundaries(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("CODEX_HOME", "")
+	t.Setenv("POCKETCTL_CODEX_HOMES", "~:~/a:~literal")
+
+	homes := AdditionalCodexHomes()
+	want := []string{home, filepath.Join(home, "a"), "~literal"}
+	if !reflect.DeepEqual(homes, want) {
+		t.Fatalf("AdditionalCodexHomes() = %v, want %v", homes, want)
+	}
+}
+
+func TestResolveJSONLPathReportsMissingSessionsRoots(t *testing.T) {
+	t.Setenv("CODEX_HOME", filepath.Join(t.TempDir(), "none"))
+	t.Setenv("POCKETCTL_CODEX_HOMES", "")
+
+	_, err := CodexSessionStorage{}.ResolveJSONLPath("sess", "/repo")
+	if err == nil || !strings.Contains(err.Error(), "codex sessions dirs") {
+		t.Fatalf("want missing-roots diagnostic, got %v", err)
+	}
+}
+
+func TestResolveJSONLPathPrefersPrimaryHomeOverNewerCopy(t *testing.T) {
+	primaryHome := t.TempDir()
+	extraHome := t.TempDir()
+	primaryCodex := filepath.Join(primaryHome, "codex")
+	t.Setenv("HOME", primaryHome)
+	t.Setenv("CODEX_HOME", primaryCodex)
+	t.Setenv("POCKETCTL_CODEX_HOMES", extraHome)
+
+	now := time.Now()
+	write := func(root string, mtime time.Time) string {
+		dayDir := filepath.Join(root, "sessions", now.Format("2006"), now.Format("01"), now.Format("02"))
+		if err := os.MkdirAll(dayDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		p := filepath.Join(dayDir, "rollout-2026-09-14T10-00-00-e0f1a2b3c4d5.jsonl")
+		if err := os.WriteFile(p, []byte("{}\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chtimes(p, mtime, mtime); err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+	primaryPath := write(primaryCodex, now.Add(-time.Hour))
+	write(extraHome, now) // newer copy of the same session id in an additional home
+
+	got, err := CodexSessionStorage{}.ResolveJSONLPath("e0f1a2b3c4d5", "/repo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != primaryPath {
+		t.Fatalf("ResolveJSONLPath() = %q, want primary-home path %q", got, primaryPath)
+	}
 }

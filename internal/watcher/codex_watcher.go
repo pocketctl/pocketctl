@@ -31,28 +31,32 @@ const (
 )
 
 type CodexSessionWatcher struct {
-	sessionsDir     string
+	sessionsDirs    []string
 	eventsCh        chan SessionEvent
 	seen            map[string]bool // rollout path → already processed
+	seenSubagentIDs map[string]bool // subagent session id → discovery emitted (dedupes mirrored homes)
 	replayCursor    *CodexReplayCursorStore
 	replayNotBefore time.Time
 	readMetadata    func(string) (adapter.CodexRolloutMetadata, bool)
 	listProcesses   func() ([]platform.ProcessSnapshot, error)
 }
 
-// NewCodexSessionWatcher creates a watcher over the CODEX_HOME-aware sessions dir.
+// NewCodexSessionWatcher creates a watcher over the CODEX_HOME-aware sessions
+// dirs: the primary home plus every additional home from
+// POCKETCTL_CODEX_HOMES.
 func NewCodexSessionWatcher() *CodexSessionWatcher {
 	return NewCodexSessionWatcherWithReplayCursor(nil)
 }
 
 func NewCodexSessionWatcherWithReplayCursor(cursor *CodexReplayCursorStore) *CodexSessionWatcher {
 	return &CodexSessionWatcher{
-		sessionsDir:   adapter.CodexSessionsDir(),
-		eventsCh:      make(chan SessionEvent, 32),
-		seen:          make(map[string]bool),
-		replayCursor:  cursor,
-		readMetadata:  adapter.ReadCodexRolloutMetadata,
-		listProcesses: platform.NewProcessInspector().List,
+		sessionsDirs:    adapter.CodexSessionsDirs(),
+		eventsCh:        make(chan SessionEvent, 32),
+		seen:            make(map[string]bool),
+		seenSubagentIDs: make(map[string]bool),
+		replayCursor:    cursor,
+		readMetadata:    adapter.ReadCodexRolloutMetadata,
+		listProcesses:   platform.NewProcessInspector().List,
 	}
 }
 
@@ -64,7 +68,7 @@ func (cw *CodexSessionWatcher) Events() <-chan SessionEvent { return cw.eventsCh
 // dir need not exist yet — scans tolerate a missing directory and pick sessions
 // up once codex creates it.
 func (cw *CodexSessionWatcher) Start(ctx context.Context) error {
-	if cw.sessionsDir == "" {
+	if len(cw.sessionsDirs) == 0 {
 		return fmt.Errorf("codex sessions dir not resolved")
 	}
 	go func() {
@@ -102,11 +106,18 @@ func (cw *CodexSessionWatcher) scan(now time.Time) {
 	})
 }
 
-// forEachRollout enumerates only valid Codex date leaves. It intentionally
-// does not use a session index: a fresh rollout can remain under an older
-// directory after midnight or after its original creation date.
+// forEachRollout enumerates only valid Codex date leaves across every watched
+// home. It intentionally does not use a session index: a fresh rollout can
+// remain under an older directory after midnight or after its original
+// creation date.
 func (cw *CodexSessionWatcher) forEachRollout(fn func(string)) {
-	years, err := os.ReadDir(cw.sessionsDir)
+	for _, sessionsDir := range cw.sessionsDirs {
+		cw.forEachRolloutIn(sessionsDir, fn)
+	}
+}
+
+func (cw *CodexSessionWatcher) forEachRolloutIn(sessionsDir string, fn func(string)) {
+	years, err := os.ReadDir(sessionsDir)
 	if err != nil {
 		return
 	}
@@ -114,7 +125,7 @@ func (cw *CodexSessionWatcher) forEachRollout(fn func(string)) {
 		if !year.IsDir() || len(year.Name()) != len("2006") {
 			continue
 		}
-		months, err := os.ReadDir(filepath.Join(cw.sessionsDir, year.Name()))
+		months, err := os.ReadDir(filepath.Join(sessionsDir, year.Name()))
 		if err != nil {
 			continue
 		}
@@ -122,7 +133,7 @@ func (cw *CodexSessionWatcher) forEachRollout(fn func(string)) {
 			if !month.IsDir() || len(month.Name()) != len("01") {
 				continue
 			}
-			days, err := os.ReadDir(filepath.Join(cw.sessionsDir, year.Name(), month.Name()))
+			days, err := os.ReadDir(filepath.Join(sessionsDir, year.Name(), month.Name()))
 			if err != nil {
 				continue
 			}
@@ -133,7 +144,7 @@ func (cw *CodexSessionWatcher) forEachRollout(fn func(string)) {
 				if _, err := time.Parse("2006/01/02", year.Name()+"/"+month.Name()+"/"+day.Name()); err != nil {
 					continue
 				}
-				dir := filepath.Join(cw.sessionsDir, year.Name(), month.Name(), day.Name())
+				dir := filepath.Join(sessionsDir, year.Name(), month.Name(), day.Name())
 				entries, err := os.ReadDir(dir)
 				if err != nil {
 					continue
@@ -160,8 +171,14 @@ func (cw *CodexSessionWatcher) scanHistoricalSubagents() {
 	now := time.Now()
 	firstDay := now.Add(-lookback)
 	cw.replayNotBefore = firstDay
+	for _, root := range cw.sessionsDirs {
+		cw.scanHistoricalSubagentsIn(root, firstDay, now)
+	}
+}
+
+func (cw *CodexSessionWatcher) scanHistoricalSubagentsIn(root string, firstDay, now time.Time) {
 	for day := firstDay; !day.After(now); day = day.AddDate(0, 0, 1) {
-		dir := filepath.Join(cw.sessionsDir, day.Format("2006"), day.Format("01"), day.Format("02"))
+		dir := filepath.Join(root, day.Format("2006"), day.Format("01"), day.Format("02"))
 		entries, err := os.ReadDir(dir)
 		if err != nil {
 			continue
@@ -207,6 +224,13 @@ func (cw *CodexSessionWatcher) inspectRollout(path string, fresh bool) {
 		return
 	}
 	if meta.IsSubagent {
+		// The same subagent id can exist in several homes (mirrored or
+		// archived copies via POCKETCTL_CODEX_HOMES). Deduping on the session
+		// id prevents replaying its full history once per home.
+		cw.seen[path] = true
+		if cw.seenSubagentIDs[meta.ID] {
+			return
+		}
 		session := cw.projectSession(path, meta)
 		replayStartLine := int64(0)
 		replayNotBefore := time.Time{}
@@ -223,6 +247,7 @@ func (cw *CodexSessionWatcher) inspectRollout(path string, fresh bool) {
 			ReplayStartLine: replayStartLine,
 		}
 		cw.seen[path] = true
+		cw.seenSubagentIDs[meta.ID] = true
 		return
 	}
 	if !fresh {
@@ -263,7 +288,7 @@ func (cw *CodexSessionWatcher) projectSession(path string, meta adapter.CodexRol
 			pid = NativeCodexTerminalPID(processes, meta.Cwd)
 		}
 	}
-	return DiscoveredSession{
+	session := DiscoveredSession{
 		SessionID:       meta.ID,
 		Cwd:             meta.Cwd,
 		Pid:             pid,
@@ -278,4 +303,9 @@ func (cw *CodexSessionWatcher) projectSession(path string, meta adapter.CodexRol
 		ControlMode:     "legacy_read_only",
 		Capabilities:    []string{"history_sync"},
 	}
+	if profile, ok := adapter.CodexHomeProfileForPath(path); ok {
+		session.CodexHomeID = profile.ID
+		session.CodexHomeLabel = profile.Label
+	}
+	return session
 }

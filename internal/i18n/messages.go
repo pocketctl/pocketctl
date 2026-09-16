@@ -67,6 +67,8 @@ Options (daemon start unless noted):
   --no-agent-prompt       Deprecated alias for --no-agent-auto-enable
   --allowed-cwd-root <dir>  Allow remote sessions in this existing absolute directory and its subdirectories; repeatable
   --allow-dangerous-remote-permissions  Allow remote sessions to request bypassPermissions / dontAsk / approval never / danger-full-access
+  --codex-home <dir>  Watch an additional Codex home directory besides the default
+                      (repeatable, e.g. ~/.codex-a); merged with POCKETCTL_CODEX_HOMES
 
 Remote working directories:
   Without --allowed-cwd-root, the daemon user's home directory (~/) and its subdirectories are authorized.
@@ -97,6 +99,35 @@ Codex CLI terminal control (requires Codex CLI 0.144.1+):
   pocketctl agent codex status        Show desired/effective state and capability diagnostics
   codex --native                      Bypass Pocketctl for one invocation
 
+Multiple Codex accounts:
+  The default ~/.codex account is watched automatically. Give every other account
+  its own CODEX_HOME and register that directory when starting the daemon:
+
+  pocketctl daemon start --codex-home ~/.codex-a --codex-home ~/.codex-proxy
+
+  For an auto-start service, persist the same directories during installation:
+
+  pocketctl daemon service install --codex-home ~/.codex-a --codex-home ~/.codex-proxy
+
+  Alternatively, POCKETCTL_CODEX_HOMES accepts a PATH-style list of additional
+  directories. Each shell command, alias, or script must still set its account's
+  CODEX_HOME, for example:
+
+  CODEX_HOME="$HOME/.codex-a" codex
+  CODEX_HOME="$HOME/.codex-proxy" codex
+
+  To keep short account-specific commands, add aliases like these to your shell config:
+
+  alias codex-a='CODEX_HOME="$HOME/.codex-a" codex'
+  alias codex-proxy='CODEX_HOME="$HOME/.codex-proxy" codex'
+
+  Different command names alone do not select different accounts when CODEX_HOME
+  is unchanged. Pocketctl runs an isolated app-server, socket, and runtime state
+  for every configured home. This does not create multiple hosts in Dashboard:
+  one daemon remains one host. New Codex CLI sessions use an account selector
+  (automatically selected and hidden for one account); the session list displays
+  account labels and supports account filtering.
+
 Codex Desktop (read-only observer, no setup needed):
   The daemon automatically discovers Codex Desktop rollouts and syncs them to
   Web/iOS as the separate "codex-desktop" agent: history, status, model, token
@@ -114,7 +145,9 @@ ZCode session content sync (read-only):
 
 Environment:
   POCKETCTL_RELAY_URL   Relay WebSocket URL (e.g. ws://localhost:8080/ws, wss://relay.example.com/ws)
-  POCKETCTL_TOKEN       JWT token for authentication`
+  POCKETCTL_TOKEN       JWT token for authentication
+  POCKETCTL_CODEX_HOMES  Additional Codex home directories to watch, PATH-style list
+                         (e.g. ~/.codex-a:~/.codex-proxy); combined with --codex-home flags`
 
 const helpZh = `pocketctl - 远程 AI 编程代理控制
 
@@ -166,6 +199,8 @@ Relay 连接（默认: 生产环境 wss://www.pocketctl.me/ws）:
   --no-agent-prompt       --no-agent-auto-enable 的兼容别名（已弃用）
   --allowed-cwd-root <目录>  允许在此目录及子目录远程创建会话；必须是已存在的绝对路径，可重复指定
   --allow-dangerous-remote-permissions  允许远程会话请求 bypassPermissions / dontAsk / approval never / danger-full-access 等高权限模式
+  --codex-home <目录>  额外监听一个 Codex 配置目录（可重复指定，如 ~/.codex-a）；
+                      与 POCKETCTL_CODEX_HOMES 合并生效
 
 远程工作目录:
   未指定 --allowed-cwd-root 时，默认授权 daemon 运行用户的主目录（~/）及其子目录。
@@ -195,6 +230,33 @@ Codex CLI 终端控制（要求 Codex CLI 0.144.1+）:
   pocketctl agent codex status        查看期望/实际状态与能力诊断
   codex --native                      单次绕过 Pocketctl
 
+多 Codex 账号:
+  默认账号 ~/.codex 会自动监听。其它账号必须分别使用独立的 CODEX_HOME，
+  并在启动 daemon 时登记对应目录:
+
+  pocketctl daemon start --codex-home ~/.codex-a --codex-home ~/.codex-proxy
+
+  使用开机自启服务时，在安装服务时持久化相同目录:
+
+  pocketctl daemon service install --codex-home ~/.codex-a --codex-home ~/.codex-proxy
+
+  也可通过 POCKETCTL_CODEX_HOMES 以 PATH 风格列表传入额外目录。每个 shell
+  命令、别名或脚本仍必须设置该账号自己的 CODEX_HOME，例如:
+
+  CODEX_HOME="$HOME/.codex-a" codex
+  CODEX_HOME="$HOME/.codex-proxy" codex
+
+  如需固定的账号命令，可在 shell 配置中加入以下别名:
+
+  alias codex-a='CODEX_HOME="$HOME/.codex-a" codex'
+  alias codex-proxy='CODEX_HOME="$HOME/.codex-proxy" codex'
+
+  如果 CODEX_HOME 相同，仅修改命令名称不能区分账号。Pocketctl 会为每个
+  已配置目录运行相互隔离的 app-server、socket 和运行状态，但不会创建多台主机；
+  Dashboard 中一个 daemon 仍只显示为一台主机。新建 Codex CLI 会话时通过
+  账号选择器选择账号（只有一个账号时自动选择并隐藏）；会话列表显示账号标签，
+  并支持按账号筛选。
+
 Codex Desktop（只读观察，无需配置）:
   daemon 会自动发现 Codex Desktop 创建的 rollout，并以独立的 codex-desktop Agent
   类型同步到 Web/iOS：历史、状态、模型、token 用量、工具、计划与文件变更。只读：
@@ -211,6 +273,8 @@ ZCode 会话内容同步（只读）:
 
 环境变量:
   POCKETCTL_RELAY_URL   Relay WebSocket URL（如 ws://localhost:8080/ws, wss://relay.example.com/ws）
+  POCKETCTL_CODEX_HOMES  额外监听的 Codex 配置目录，PATH 风格列表（如 ~/.codex-a:~/.codex-proxy）；
+                         与 --codex-home 参数合并生效
   POCKETCTL_TOKEN       JWT 认证令牌`
 
 // configDirDisplay is the user-facing name of the profile directory shown in

@@ -127,10 +127,16 @@
         <h2 class="page-title">{{ selectedDaemon ? t('dashboard.host_sessions', { name: getDisplayName(selectedDaemonObj) }) : t('dashboard.recent_sessions') }}</h2>
         <div class="page-subtitle">{{ selectedDaemon ? t('dashboard.host_sessions', { name: getDisplayName(selectedDaemonObj) }) : t('dashboard.all_sessions_desc') }}</div>
       </div>
-      <button v-if="selectedDaemon" class="btn btn-secondary" @click="clearDaemonFilter">
-        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6L6 18M6 6l12 12"/></svg>
-        {{ t('dashboard.clear_filter') }}
-      </button>
+      <div class="session-filter-actions">
+        <select v-if="codexAccountOptions.length > 1" v-model="selectedCodexHome" class="page-size-select" :aria-label="t('dashboard.codex_account_filter')">
+          <option value="">{{ t('dashboard.all_codex_accounts') }}</option>
+          <option v-for="account in codexAccountOptions" :key="account.id" :value="account.id">{{ account.label }}</option>
+        </select>
+        <button v-if="selectedDaemon" class="btn btn-secondary" @click="clearDaemonFilter">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6L6 18M6 6l12 12"/></svg>
+          {{ t('dashboard.clear_filter') }}
+        </button>
+      </div>
     </div>
 
     <div class="dashboard-session-list" v-if="filteredSessions.length > 0">
@@ -165,6 +171,10 @@
 
           <div class="dashboard-session-context">
             <span class="dashboard-session-agent">{{ agentLabel(s.agent_type) }}</span>
+            <span v-if="s.codex_home_label" class="dashboard-session-segment account-segment">
+              <i class="dashboard-session-dot"></i>
+              <span class="dashboard-session-account">{{ s.codex_home_label }}</span>
+            </span>
             <span v-if="s.daemon_alias || s.hostname || s.daemon_id" class="dashboard-session-segment host-segment">
               <i class="dashboard-session-dot"></i>
               <span class="dashboard-session-host">{{ s.daemon_alias || s.hostname || s.daemon_id?.slice(0, 8) }}</span>
@@ -263,6 +273,7 @@ const renameIndex = ref<number | null>(null)
 const renameInput = ref('')
 const aliases = ref<Record<string, string>>({})
 const selectedDaemon = ref<string | null>(null)
+const selectedCodexHome = ref('')
 
 // Token cost summary
 const tokenSummary = ref({ total: 0, today: 0, week: 0, month: 0 })
@@ -297,8 +308,17 @@ const folded = ref<Record<string, boolean>>({})
 function toggleFold(id: string) { folded.value[id] = !folded.value[id] }
 
 const filteredSessions = computed(() => {
-  if (!selectedDaemon.value) return sortedSessions.value
-  return sortedSessions.value.filter(s => s.daemon_id === selectedDaemon.value)
+  return sortedSessions.value.filter(s =>
+    (!selectedDaemon.value || s.daemon_id === selectedDaemon.value)
+    && (!selectedCodexHome.value || s.codex_home_id === selectedCodexHome.value))
+})
+const codexAccountOptions = computed(() => {
+  const accounts = new Map<string, string>()
+  for (const session of sortedSessions.value) {
+    if (selectedDaemon.value && session.daemon_id !== selectedDaemon.value) continue
+    if (session.codex_home_id) accounts.set(session.codex_home_id, session.codex_home_label || session.codex_home_id.slice(0, 12))
+  }
+  return [...accounts].map(([id, label]) => ({ id, label }))
 })
 
 const pageSize = ref(10)
@@ -309,7 +329,8 @@ const paginatedSessions = computed(() => {
   const start = (currentPage.value - 1) * pageSize.value
   return filteredSessions.value.slice(start, start + pageSize.value)
 })
-watch(selectedDaemon, () => { currentPage.value = 1 })
+watch(selectedDaemon, () => { currentPage.value = 1; selectedCodexHome.value = '' })
+watch(selectedCodexHome, () => { currentPage.value = 1 })
 
 const selectedDaemonObj = computed(() => daemons.value.find(d => d.daemon_id === selectedDaemon.value))
 
@@ -507,6 +528,9 @@ function onPinned(sessionId: string, pinned: boolean) { const s = sessions.value
 .host-segment { min-width: 48px; }
 .model-segment { min-width: 0; }
 .dashboard-session-model { font-family: var(--font-mono); }
+.dashboard-session-account { min-width: 0; overflow: hidden; color: var(--accent); font-family: var(--font-mono); text-overflow: ellipsis; white-space: nowrap; }
+.account-segment { min-width: 0; }
+.session-filter-actions { display: flex; align-items: center; gap: 8px; }
 .subagent-segment { flex: 0 0 auto; white-space: nowrap; }
 .dashboard-session-side { grid-area: side; display: grid; grid-template-columns: auto 28px; align-self: start; align-items: start; gap: 5px; }
 .dashboard-session-time { padding: 5px 5px 0 0; color: var(--fg-secondary); font-size: 11px; font-variant-numeric: tabular-nums; white-space: nowrap; }

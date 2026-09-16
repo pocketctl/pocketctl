@@ -204,3 +204,38 @@ func TestHelpDocumentsOpenCodeAgentControl(t *testing.T) {
 		}
 	}
 }
+
+func TestHelpDocumentsMultipleCodexAccounts(t *testing.T) {
+	t.Cleanup(func() { Set(English) })
+	tests := []struct {
+		lang Lang
+		want []string
+	}{
+		{English, []string{
+			"Multiple Codex accounts",
+			`--codex-home ~/.codex-a --codex-home ~/.codex-proxy`,
+			`CODEX_HOME="$HOME/.codex-a" codex`,
+			`alias codex-a='CODEX_HOME="$HOME/.codex-a" codex'`,
+			"does not create multiple hosts",
+			"account selector",
+		}},
+		{Chinese, []string{
+			"多 Codex 账号",
+			`--codex-home ~/.codex-a --codex-home ~/.codex-proxy`,
+			`CODEX_HOME="$HOME/.codex-a" codex`,
+			`alias codex-a='CODEX_HOME="$HOME/.codex-a" codex'`,
+			"不会创建多台主机",
+			"账号选择器",
+		}},
+	}
+
+	for _, tt := range tests {
+		Set(tt.lang)
+		help := T("help.body")
+		for _, want := range tt.want {
+			if !strings.Contains(help, want) {
+				t.Fatalf("lang=%v help missing %q", tt.lang, want)
+			}
+		}
+	}
+}

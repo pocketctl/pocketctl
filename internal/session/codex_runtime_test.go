@@ -2,12 +2,14 @@ package session
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/pocketctl/pocketctl/internal/adapter"
 	"github.com/pocketctl/pocketctl/internal/agentcontrol"
 	"github.com/pocketctl/pocketctl/internal/daemon"
 	"github.com/pocketctl/pocketctl/internal/protocol"
@@ -48,6 +50,124 @@ func TestCodexRuntimeAcquireReturnsManagedRemoteAndLease(t *testing.T) {
 	}
 	if active := sm.leases.Active(result.Generation); len(active) != 0 {
 		t.Fatalf("leases=%+v", active)
+	}
+}
+
+func TestCodexRuntimeAcquireSeparatesConfiguredHomes(t *testing.T) {
+	userHome := t.TempDir()
+	primaryHome := filepath.Join(userHome, ".codex")
+	extraHome := filepath.Join(userHome, ".codex-proxy")
+	for _, home := range []string{primaryHome, extraHome} {
+		if err := os.MkdirAll(home, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Setenv("HOME", userHome)
+	t.Setenv("CODEX_HOME", primaryHome)
+	t.Setenv("POCKETCTL_CODEX_HOMES", extraHome)
+	cfg := agentcontrol.DefaultConfig()
+	cfg.Codex.State = agentcontrol.StateEnabled
+	cfg.Codex.RealBinary = "/opt/codex"
+	if err := agentcontrol.SaveConfig(cfg); err != nil {
+		t.Fatal(err)
+	}
+
+	sm := NewSessionManager(make(chan protocol.DaemonEvent, 1))
+	provider := newCodexRuntimeProvider(sm)
+	provider.resolve = func() (string, string, error) { return "/opt/codex", "0.144.1", nil }
+	provider.probe = func(context.Context, string, string) (agentcontrol.CodexCapabilities, error) {
+		return agentcontrol.CodexCapabilities{Core: true, TerminalRemote: true, SchemaHash: "abc"}, nil
+	}
+	provider.coordinator.start = func(context.Context, string, string, uint64) (*codexAppServerRuntime, error) {
+		return &codexAppServerRuntime{PID: 101, Endpoint: "/tmp/codex-primary.sock", RemoteURI: "unix:///tmp/codex-primary.sock"}, nil
+	}
+	provider.coordinator.probe = func(context.Context, *codexAppServerRuntime) error { return nil }
+	provider.coordinatorFactory = func(adapter.CodexHomeProfile) *codexCoordinator {
+		coord := newCodexCoordinator(sm)
+		coord.start = func(context.Context, string, string, uint64) (*codexAppServerRuntime, error) {
+			return &codexAppServerRuntime{PID: 202, Endpoint: "/tmp/codex-proxy.sock", RemoteURI: "unix:///tmp/codex-proxy.sock"}, nil
+		}
+		coord.probe = func(context.Context, *codexAppServerRuntime) error { return nil }
+		return coord
+	}
+
+	resolvedPrimary, err := agentcontrol.ResolveCodexHome(primaryHome, userHome)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resolvedExtra, err := agentcontrol.ResolveCodexHome(extraHome, userHome)
+	if err != nil {
+		t.Fatal(err)
+	}
+	primaryID := agentcontrol.CodexHomeID(resolvedPrimary)
+	extraID := agentcontrol.CodexHomeID(resolvedExtra)
+	acquire := func(operationID, homeID string) agentcontrol.AcquireResult {
+		result, err := provider.Acquire(context.Background(), agentcontrol.AcquireRequest{
+			Agent: agentcontrol.AgentCodex, ClientPID: os.Getpid(),
+			Payload: agentcontrol.AcquirePayload{
+				CWD: "/repo", Intent: agentcontrol.IntentNew, OperationID: operationID, CodexHomeID: homeID,
+			},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return result
+	}
+
+	primary := acquire("primary", primaryID)
+	extra := acquire("proxy", extraID)
+	if primary.RemoteURI != "unix:///tmp/codex-primary.sock" || extra.RemoteURI != "unix:///tmp/codex-proxy.sock" || primary.RemoteURI == extra.RemoteURI {
+		t.Fatalf("configured homes shared one runtime: primary=%+v extra=%+v", primary, extra)
+	}
+	primaryState, err := daemon.ReadCodexAppServerState()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if primaryState.Endpoint != "/tmp/codex-primary.sock" {
+		t.Fatalf("additional home overwrote primary runtime state: %+v", primaryState)
+	}
+	extraStates, err := filepath.Glob(filepath.Join(userHome, ".pocketctl", "codex-home-runtimes", "*.state"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(extraStates) != 1 {
+		t.Fatalf("additional home runtime state files=%v, want one isolated state", extraStates)
+	}
+	extraState, err := daemon.ReadCodexAppServerStateAt(extraStates[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if extraState.Endpoint != "/tmp/codex-proxy.sock" {
+		t.Fatalf("additional home state=%+v", extraState)
+	}
+	for path, wantID := range map[string]string{
+		daemon.CodexAppServerStatePath(): primaryID,
+		extraStates[0]:                   extraID,
+	} {
+		raw, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var wire map[string]any
+		if err := json.Unmarshal(raw, &wire); err != nil {
+			t.Fatal(err)
+		}
+		if wire["codex_home_id"] != wantID {
+			t.Fatalf("runtime state %s has codex_home_id=%v, want %s", path, wire["codex_home_id"], wantID)
+		}
+	}
+	if err := provider.Release(context.Background(), agentcontrol.ReleaseRequest{
+		Agent:   agentcontrol.AgentCodex,
+		Payload: agentcontrol.ReleasePayload{LeaseID: extra.LeaseID},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	extraState, err = daemon.ReadCodexAppServerStateAt(extraStates[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(extraState.Leases) != 0 {
+		t.Fatalf("released additional-home lease remained persisted: %+v", extraState.Leases)
 	}
 }
 

@@ -331,6 +331,36 @@ func TestPermissionConfigJSON(t *testing.T) {
 	}
 }
 
+func TestCodexHomeSelectionProtocolRoundTrip(t *testing.T) {
+	clientRaw := []byte(`{"type":"session_create","agent":"codex","codex_home_id":"codex-home-a"}`)
+	var client ClientMessage
+	if err := json.Unmarshal(clientRaw, &client); err != nil {
+		t.Fatal(err)
+	}
+	clientRoundTrip, err := json.Marshal(client)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(clientRoundTrip), `"codex_home_id":"codex-home-a"`) {
+		t.Fatalf("Codex home selection was dropped from client protocol: %s", clientRoundTrip)
+	}
+
+	eventRaw := []byte(`{"type":"codex_home_list","request_id":"req-1","codex_homes":[{"id":"codex-home-a","label":"~/.codex-a","primary":false}]}`)
+	var event DaemonEvent
+	if err := json.Unmarshal(eventRaw, &event); err != nil {
+		t.Fatal(err)
+	}
+	eventRoundTrip, err := json.Marshal(event)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{`"codex_homes"`, `"id":"codex-home-a"`, `"label":"~/.codex-a"`} {
+		if !strings.Contains(string(eventRoundTrip), want) {
+			t.Fatalf("Codex home catalog was dropped from daemon protocol: %s", eventRoundTrip)
+		}
+	}
+}
+
 func TestQuotaGrantProtocolRoundTrip(t *testing.T) {
 	msg := ClientMessage{
 		Type:      "session_create",
@@ -725,9 +755,9 @@ func TestPhase4CodegraphGrantMessagesRoundTrip(t *testing.T) {
 	result := MemoryCodegraphGrantResult{
 		Type: "memory_codegraph_grant_result", RequestID: "corr-4",
 		Grant: "token", ExpiresIn: 60, TokenType: "extension_capability_v2",
-		InstallationID: "22222222-2222-4222-8222-222222222222",
+		InstallationID:       "22222222-2222-4222-8222-222222222222",
 		ProviderPublicOrigin: "https://memory.example",
-		Services: []string{MemoryCodegraphWriteService},
+		Services:             []string{MemoryCodegraphWriteService},
 	}
 	encodedResult, err := json.Marshal(result)
 	if err != nil {

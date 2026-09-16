@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strconv"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -23,7 +24,11 @@ import (
 type codexCommandFactory func(binary, socketPath string) *exec.Cmd
 
 func startCodexAppServer(ctx context.Context, binary, version string, generation uint64) (*codexAppServerRuntime, error) {
-	return startCodexAppServerWithFactory(ctx, binary, version, generation, 10*time.Second, func(binary, socketPath string) *exec.Cmd {
+	return startCodexAppServerForHome(ctx, binary, version, generation, "", "")
+}
+
+func startCodexAppServerForHome(ctx context.Context, binary, version string, generation uint64, homeID, home string) (*codexAppServerRuntime, error) {
+	return startCodexAppServerWithFactoryForHome(ctx, binary, version, generation, homeID, home, 10*time.Second, func(binary, socketPath string) *exec.Cmd {
 		return exec.Command(binary, "app-server", "--listen", "unix://"+socketPath)
 	})
 }
@@ -63,21 +68,36 @@ func stopPersistedCodexAppServer(state *daemon.CodexAppServerState) error {
 }
 
 func startCodexAppServerWithFactory(ctx context.Context, binary, _ string, generation uint64, timeout time.Duration, factory codexCommandFactory) (*codexAppServerRuntime, error) {
+	return startCodexAppServerWithFactoryForHome(ctx, binary, "", generation, "", "", timeout, factory)
+}
+
+func startCodexAppServerWithFactoryForHome(ctx context.Context, binary, _ string, generation uint64, homeID, home string, timeout time.Duration, factory codexCommandFactory) (*codexAppServerRuntime, error) {
 	dir, err := codexRuntimeDir()
 	if err != nil {
 		return nil, err
 	}
-	socketPath := filepath.Join(dir, fmt.Sprintf("app-%d.sock", generation))
+	name := fmt.Sprintf("app-%d.sock", generation)
+	if homeID != "" {
+		suffix := strings.TrimPrefix(homeID, "codex-home-")
+		if len(suffix) > 12 {
+			suffix = suffix[:12]
+		}
+		name = fmt.Sprintf("app-%s-%d.sock", suffix, generation)
+	}
+	socketPath := filepath.Join(dir, name)
 	if err := os.Remove(socketPath); err != nil && !os.IsNotExist(err) {
 		return nil, err
 	}
 	cmd := factory(binary, socketPath)
+	if home != "" {
+		cmd.Env = append(cmd.Env, "CODEX_HOME="+home)
+	}
 	// Pin the app-server to the stable runtime dir instead of inheriting the
 	// daemon's cwd: a daemon started inside a worktree (or any directory later
 	// removed) leaves the app-server with a dead cwd, and Codex rejects turns
 	// with "invalid cwd: No such file or directory" once that happens.
 	cmd.Dir = dir
-	cmd.Env = append(cmd.Env, os.Environ()...)
+	cmd.Env = codexCommandEnvironment(os.Environ(), cmd.Env)
 	cmd.Env = codexAppServerEnv(cmd.Env)
 	cmd.Env = append(cmd.Env, "POCKETCTL_CODEX_SOCKET="+socketPath)
 	cmd.Stdout, cmd.Stderr = io.Discard, io.Discard

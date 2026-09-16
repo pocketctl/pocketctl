@@ -433,7 +433,8 @@ export function createPublicationService(pool: pg.Pool) {
               VALUES ($1, $2, $3, $4, $5, 'episode', $6, $7, $8, 'shared', $9, $10)
             `, [
               randomUUID(), input.targetInstallationId, versionId,
-              sharedEpisodeId, item.ordinal, item.excerpt, item.excerpt_hash, item.occurred_at,
+              sharedEpisodeId, item.ordinal, item.excerpt,
+              Buffer.from(item.excerpt_hash, 'hex'), item.occurred_at,
               item.source_evidence_hash, candidate.created_by_membership_id,
             ])
           }

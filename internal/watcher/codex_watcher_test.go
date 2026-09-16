@@ -336,3 +336,69 @@ func TestCodexReplayLookbackConfiguration(t *testing.T) {
 		}
 	})
 }
+
+func TestCodexWatcher_DiscoversAcrossAdditionalHomes(t *testing.T) {
+	primaryHome := t.TempDir()
+	extraHome := t.TempDir()
+	primaryCodex := filepath.Join(primaryHome, "codex")
+	t.Setenv("HOME", primaryHome)
+	t.Setenv("CODEX_HOME", primaryCodex)
+	t.Setenv("POCKETCTL_CODEX_HOMES", extraHome)
+
+	now := time.Now()
+	primaryDir := filepath.Join(primaryCodex, "sessions", now.Format("2006"), now.Format("01"), now.Format("02"))
+	extraDir := filepath.Join(extraHome, "sessions", now.Format("2006"), now.Format("01"), now.Format("02"))
+
+	writeRollout(t, primaryDir, "rollout-primary.jsonl",
+		`{"type":"session_meta","payload":{"id":"sess-primary","cwd":"/work/p"}}`+"\n", now)
+	writeRollout(t, extraDir, "rollout-extra.jsonl",
+		`{"type":"session_meta","payload":{"id":"sess-extra","cwd":"/work/x"}}`+"\n", now)
+	// Stale rollout in the additional home must stay invisible.
+	writeRollout(t, extraDir, "rollout-stale.jsonl",
+		`{"type":"session_meta","payload":{"id":"sess-stale","cwd":"/work/x"}}`+"\n", now.Add(-10*time.Minute))
+
+	cw := NewCodexSessionWatcher()
+	cw.scan(now)
+
+	got := drainEvents(cw.eventsCh)
+	ids := map[string]bool{}
+	for _, ev := range got {
+		if ev.Action != "discovered" {
+			t.Fatalf("unexpected action %q for %s", ev.Action, ev.Session.SessionID)
+		}
+		ids[ev.Session.SessionID] = true
+	}
+	if !ids["sess-primary"] || !ids["sess-extra"] {
+		t.Fatalf("want sessions from both homes discovered, got %v", ids)
+	}
+	if ids["sess-stale"] {
+		t.Fatalf("stale rollout in additional home must stay invisible, got %v", ids)
+	}
+}
+
+func TestCodexWatcherSubagentDedupedAcrossHomes(t *testing.T) {
+	primaryHome := t.TempDir()
+	extraHome := t.TempDir()
+	primaryCodex := filepath.Join(primaryHome, "codex")
+	t.Setenv("HOME", primaryHome)
+	t.Setenv("CODEX_HOME", primaryCodex)
+	t.Setenv("POCKETCTL_CODEX_HOMES", extraHome)
+
+	now := time.Now()
+	content := `{"type":"session_meta","payload":{"id":"sub-1","session_id":"root","parent_thread_id":"root","thread_source":"subagent","cwd":"/repo"}}` + "\n"
+	primaryDir := filepath.Join(primaryCodex, "sessions", now.Format("2006"), now.Format("01"), now.Format("02"))
+	extraDir := filepath.Join(extraHome, "sessions", now.Format("2006"), now.Format("01"), now.Format("02"))
+	writeRollout(t, primaryDir, "rollout-p-sub.jsonl", content, now.Add(-10*time.Minute))
+	writeRollout(t, extraDir, "rollout-x-sub.jsonl", content, now.Add(-10*time.Minute))
+
+	cw := NewCodexSessionWatcher()
+	cw.scanHistoricalSubagents()
+
+	got := drainEvents(cw.eventsCh)
+	if len(got) != 1 {
+		t.Fatalf("want 1 subagent_discovered (deduped across homes), got %d: %+v", len(got), got)
+	}
+	if got[0].Action != "subagent_discovered" || got[0].Session.SessionID != "sub-1" {
+		t.Fatalf("unexpected event: %+v", got[0])
+	}
+}

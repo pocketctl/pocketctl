@@ -41,10 +41,22 @@ func projectRuntimeKey(cwd string) string {
 	sum := sha256.Sum256([]byte(cwd))
 	return hex.EncodeToString(sum[:16])
 }
+
+func projectRuntimeKeyForHome(cwd, homeID string, primary bool) string {
+	if primary || homeID == "" {
+		return projectRuntimeKey(cwd)
+	}
+	sum := sha256.Sum256([]byte(homeID + "\x00" + cwd))
+	return hex.EncodeToString(sum[:16])
+}
 func projectStateDir() string {
 	return filepath.Join(filepath.Dir(daemon.CodexAppServerStatePath()), "codex-project-runtimes")
 }
 func (p *CodexRuntimeProvider) projectCoordinator(cwd string) (*codexCoordinator, error) {
+	return p.projectCoordinatorForHome(cwd, "")
+}
+
+func (p *CodexRuntimeProvider) projectCoordinatorForHome(cwd, homeID string) (*codexCoordinator, error) {
 	canonical, err := filepath.EvalSymlinks(cwd)
 	if err != nil {
 		return nil, err
@@ -53,7 +65,11 @@ func (p *CodexRuntimeProvider) projectCoordinator(cwd string) (*codexCoordinator
 	if err != nil {
 		return nil, err
 	}
-	key := projectRuntimeKey(canonical)
+	profile, err := p.profileForHomeID(homeID)
+	if err != nil {
+		return nil, err
+	}
+	key := projectRuntimeKeyForHome(canonical, profile.ID, profile.Primary)
 	p.projectsMu.Lock()
 	defer p.projectsMu.Unlock()
 	if c := p.projects[key]; c != nil {
@@ -65,7 +81,8 @@ func (p *CodexRuntimeProvider) projectCoordinator(cwd string) (*codexCoordinator
 	if p.projects == nil {
 		p.projects = make(map[string]*codexCoordinator)
 	}
-	c := newCodexCoordinator(p.sm)
+	c := p.coordinatorFactory(profile)
+	c.configureCodexHome(profile)
 	c.projectCwd = canonical
 	c.statePath = filepath.Join(projectStateDir(), key+".state")
 	// Safe JSON integer, distinct from the legacy generation and other projects.
@@ -106,11 +123,12 @@ func (p *CodexRuntimeProvider) recoverProjects(ctx context.Context) error {
 			recoveryErrors = append(recoveryErrors, fmt.Errorf("%s: %w", filepath.Base(file), err))
 			continue
 		}
-		if state.Cwd == "" || filepath.Base(file) != projectRuntimeKey(state.Cwd)+".state" {
+		profile, profileErr := p.profileForHomeID(state.CodexHomeID)
+		if profileErr != nil || state.Cwd == "" || filepath.Base(file) != projectRuntimeKeyForHome(state.Cwd, profile.ID, profile.Primary)+".state" {
 			recoveryErrors = append(recoveryErrors, errors.New("invalid Codex project runtime identity"))
 			continue
 		}
-		coord, err := p.projectCoordinator(state.Cwd)
+		coord, err := p.projectCoordinatorForHome(state.Cwd, profile.ID)
 		if err == nil {
 			_, err = coord.ensureStarted(ctx, binary, version, caps)
 		}
@@ -129,6 +147,15 @@ func (p *CodexRuntimeProvider) shutdownAll() error {
 	p.projectsMu.Unlock()
 	var errs []error
 	for _, c := range coords {
+		errs = append(errs, c.shutdown())
+	}
+	p.homesMu.Lock()
+	homeCoords := make([]*codexCoordinator, 0, len(p.homeCoordinators))
+	for _, c := range p.homeCoordinators {
+		homeCoords = append(homeCoords, c)
+	}
+	p.homesMu.Unlock()
+	for _, c := range homeCoords {
 		errs = append(errs, c.shutdown())
 	}
 	errs = append(errs, p.coordinator.shutdown())

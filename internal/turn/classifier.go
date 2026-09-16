@@ -70,6 +70,7 @@ var eventRules = map[string]Classification{
 	"generate_subagent_title_request": {protocol.ActorScopeRoot, protocol.FlowScopeAuxiliary, protocol.ContentClassLifecycle},
 	"upgrade_result":                  {protocol.ActorScopeRoot, protocol.FlowScopeAuxiliary, protocol.ContentClassLifecycle},
 	"model_list":                      {protocol.ActorScopeRoot, protocol.FlowScopeAuxiliary, protocol.ContentClassLifecycle},
+	"codex_home_list":                 {protocol.ActorScopeRoot, protocol.FlowScopeAuxiliary, protocol.ContentClassLifecycle},
 	"permission_config_changed":       {protocol.ActorScopeRoot, protocol.FlowScopeAuxiliary, protocol.ContentClassLifecycle},
 	"agent_retry":                     {protocol.ActorScopeRoot, protocol.FlowScopeAuxiliary, protocol.ContentClassLifecycle},
 	"agent_compaction":                {protocol.ActorScopeRoot, protocol.FlowScopeAuxiliary, protocol.ContentClassLifecycle},

@@ -133,6 +133,15 @@ type ClientMessage struct {
 	// Force overrides a cwd_in_use warning — create the session even though the
 	// cwd already has other active sessions. (Scheme A: informed consent.)
 	Force bool `json:"force,omitempty"`
+	// CodexHomeID selects one daemon-configured Codex account/runtime. It is an
+	// opaque allowlisted identity, never a client-supplied filesystem path.
+	CodexHomeID string `json:"codex_home_id,omitempty"`
+}
+
+type CodexHomeOption struct {
+	ID      string `json:"id"`
+	Label   string `json:"label"`
+	Primary bool   `json:"primary,omitempty"`
 }
 
 // ApprovalSecurityContext is the daemon-authored, versioned authorization
@@ -263,9 +272,12 @@ type DaemonEvent struct {
 	PermissionEffective    string                   `json:"permission_effective,omitempty"`
 	PermissionMutable      bool                     `json:"permission_mutable,omitempty"`
 	PermissionMutableModes []string                 `json:"permission_mutable_modes,omitempty"`
-	Model                  string                   `json:"model,omitempty"`           // resolved model name (session_meta event)
-	Effort                 string                   `json:"effort,omitempty"`          // current thinking-effort level (session_meta event)
-	Models                 []ModelOption            `json:"models,omitempty"`          // available models (model_list event)
+	Model                  string                   `json:"model,omitempty"`  // resolved model name (session_meta event)
+	Effort                 string                   `json:"effort,omitempty"` // current thinking-effort level (session_meta event)
+	Models                 []ModelOption            `json:"models,omitempty"` // available models (model_list event)
+	CodexHomeID            string                   `json:"codex_home_id,omitempty"`
+	CodexHomeLabel         string                   `json:"codex_home_label,omitempty"`
+	CodexHomes             []CodexHomeOption        `json:"codex_homes,omitempty"`
 	CwdSessions            int                      `json:"cwd_sessions,omitempty"`    // active session count on the same cwd (cwd_in_use/session_created)
 	WorktreePath           string                   `json:"worktree_path,omitempty"`   // worktree absolute path when the session is isolated (Scheme D)
 	WorktreeBranch         string                   `json:"worktree_branch,omitempty"` // git branch backing the worktree (Scheme D)
@@ -624,6 +636,7 @@ type SessionConfig struct {
 	Worktree      bool              `json:"worktree,omitempty"`
 	AutoCreateDir bool              `json:"auto_create_dir,omitempty"`
 	Force         bool              `json:"force,omitempty"`
+	CodexHomeID   string            `json:"codex_home_id,omitempty"`
 	// DeferInitialPrompt is an internal daemon orchestration flag. Managed
 	// runtimes create their native session first; Relay registration completes
 	// before the exact prompt enters the ordinary turn path. Never wire-visible.

@@ -54,6 +54,23 @@ func TestListCodexModelsFallback(t *testing.T) {
 	}
 }
 
+func TestListCodexModelsUsesSelectedHome(t *testing.T) {
+	primary := t.TempDir()
+	extra := t.TempDir()
+	for home, model := range map[string]string{primary: "gpt-primary", extra: "gpt-account-a"} {
+		if err := os.WriteFile(filepath.Join(home, "config.toml"), []byte(`model = "`+model+`"`), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		cache := `{"models":[{"slug":"` + model + `","visibility":"list"}]}`
+		if err := os.WriteFile(filepath.Join(home, "models_cache.json"), []byte(cache), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got := gotAliases(listCodexModelsAt(extra)); !reflect.DeepEqual(got, []string{"gpt-account-a"}) {
+		t.Fatalf("selected home models = %v", got)
+	}
+}
+
 func gotAliases(models []protocol.ModelOption) []string {
 	aliases := make([]string, 0, len(models))
 	for _, model := range models {

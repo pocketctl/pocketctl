@@ -58,6 +58,16 @@
           <button :class="['agent-pill', { selected: form.agent === 'opencode' }]" @click="selectAgent('opencode')">OpenCode</button>
         </div>
 
+        <div v-if="form.agent === 'codex' && codexHomes.length > 1" class="form-group">
+          <div class="field-label">{{ t('new_session.codex_account_label') }}</div>
+          <select v-model="form.codexHomeId" class="input-field" @change="selectCodexHome">
+            <option v-for="home in codexHomes" :key="home.id" :value="home.id">
+              {{ home.label }}{{ home.primary ? ` · ${t('new_session.codex_account_primary')}` : '' }}
+            </option>
+          </select>
+          <div class="field-hint">{{ t('new_session.codex_account_hint') }}</div>
+        </div>
+
         <div class="configuration-grid">
         <!-- Model (dynamic: host's available models). All agents — including
              opencode — surface their models via list_models → model_list. -->
@@ -236,6 +246,7 @@ const form = reactive({
   prompt: '',
   permission: defaultPermission('claude-code') as PermissionConfig | undefined,
   model: '',  // '' = follow host default | opus | sonnet | haiku alias
+	 codexHomeId: '',
   // Scheme A/C/D advanced options
   autoCreateDir: false,  // 目录不存在时自动创建（默认关，H-7：需操作者显式选择）
   worktree: false,       // Git worktree 隔离（默认关）
@@ -245,12 +256,29 @@ const showDirectory = ref(false)
 const showHosts = ref(false)
 const selectedHostOnline = computed(() => !!props.daemons?.find(d => d.daemon_id === form.daemonId && d.daemon_online))
 function cwdKey(host: string, agent: string) { return `pocketctl_cwd:${host}:${agent}` }
+function codexHomeKey(host: string) { return `pocketctl_codex_home:${host}` }
 function selectDirectory(path: string) { form.cwd = path; showDirectory.value = false }
 let modelRequestId = ''
 function requestModels() {
   models.value = []; modelsLoaded.value = false; form.model = ''
   modelRequestId = createClientId()
-  if (form.daemonId && selectedHostOnline.value) send({ type: 'list_models', daemon_id: form.daemonId, agent: form.agent, request_id: modelRequestId })
+  if (form.daemonId && selectedHostOnline.value) send({ type: 'list_models', daemon_id: form.daemonId, agent: form.agent, codex_home_id: form.agent === 'codex' ? form.codexHomeId || undefined : undefined, request_id: modelRequestId })
+}
+type CodexHomeOption = { id: string; label: string; primary?: boolean }
+const codexHomes = ref<CodexHomeOption[]>([])
+const codexHomesLoaded = ref(false)
+let codexHomeRequestId = ''
+function requestCodexHomes() {
+  codexHomes.value = []
+  codexHomesLoaded.value = false
+  form.codexHomeId = ''
+  if (!form.daemonId || !selectedHostOnline.value || form.agent !== 'codex') return
+  codexHomeRequestId = createClientId()
+  send({ type: 'list_codex_homes', daemon_id: form.daemonId, request_id: codexHomeRequestId })
+}
+function selectCodexHome() {
+  if (form.codexHomeId) localStorage.setItem(codexHomeKey(form.daemonId), form.codexHomeId)
+  requestModels()
 }
 const showAdvanced = ref(false)  // 高级选项折叠状态
 const cwdInUse = ref(false)      // 是否处于 cwd_in_use 确认状态
@@ -272,7 +300,8 @@ function isCreateCapableAgent(agent: string): agent is AgentType {
   return CREATE_CAPABLE_AGENTS.has(agent as AgentType)
 }
 
-const canStart = computed(() => selectedHostOnline.value && isCreateCapableAgent(form.agent))
+const canStart = computed(() => selectedHostOnline.value && isCreateCapableAgent(form.agent)
+  && (form.agent !== 'codex' || (codexHomesLoaded.value && !!form.codexHomeId)))
 const creationPermissionOptions = computed(() => permissionOptions(form.agent as AgentType, true))
 const codexPermission = computed(() => form.permission?.agent === 'codex' ? form.permission : undefined)
 const permissionValue = computed({
@@ -301,7 +330,8 @@ function selectAgent(agent: string) {
   form.model = ''
   if (agent === 'opencode') form.worktree = false
   form.cwd = localStorage.getItem(cwdKey(form.daemonId, agent)) || '~/'
-  requestModels()
+  if (agent === 'codex') requestCodexHomes()
+  else requestModels()
 }
 
 function updateCharCount() {
@@ -415,6 +445,7 @@ function startSession() {
     prompt: form.prompt || undefined,
     permission: form.permission,
     model: form.model || undefined,
+    codex_home_id: form.agent === 'codex' ? form.codexHomeId : undefined,
     worktree: form.worktree || undefined,
     auto_create_dir: form.autoCreateDir || undefined,
     force: form.force || undefined,
@@ -454,7 +485,8 @@ watch(() => form.cwd, () => { form.force = false; cwdInUse.value = false })
 watch(() => form.daemonId, (id) => {
   showDirectory.value = false
   form.cwd = localStorage.getItem(cwdKey(id, form.agent)) || '~/'
-  requestModels()
+  if (form.agent === 'codex') requestCodexHomes()
+  else requestModels()
 })
 
 onMounted(() => {
@@ -467,8 +499,21 @@ onMounted(() => {
     models.value = msg.models || []
     modelsLoaded.value = true
   }))
+  cleanupFns.push(onEvent('codex_home_list', (msg: any) => {
+    if (msg.daemon_id !== form.daemonId) return
+    if (msg.request_id && msg.request_id !== codexHomeRequestId) return
+    codexHomes.value = Array.isArray(msg.codex_homes) ? msg.codex_homes : []
+    const remembered = localStorage.getItem(codexHomeKey(form.daemonId))
+    form.codexHomeId = codexHomes.value.find(home => home.id === remembered)?.id
+      || codexHomes.value.find(home => home.primary)?.id
+      || codexHomes.value[0]?.id
+      || ''
+    codexHomesLoaded.value = true
+    requestModels()
+  }))
   form.cwd = localStorage.getItem(cwdKey(form.daemonId, form.agent)) || '~/'
-  requestModels()
+  if (form.agent === 'codex') requestCodexHomes()
+  else requestModels()
   // Close on Escape
   const escHandler = (e: KeyboardEvent) => { if (e.key === 'Escape' && !showDirectory.value) emit('close') }
   document.addEventListener('keydown', escHandler)

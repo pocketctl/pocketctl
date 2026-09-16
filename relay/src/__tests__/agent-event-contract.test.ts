@@ -66,6 +66,7 @@ describe('daemon event ingress policy', () => {
     { name: 'takeover cancellation is ephemeral control', payload: { type: 'cancel_takeover' }, durable: false, priority: 'control' },
     { name: 'session create failure is durable control', payload: { type: 'session_create_failed' }, durable: true, priority: 'control' },
     { name: 'model list is ephemeral control', payload: { type: 'model_list' }, durable: false, priority: 'control' },
+    { name: 'Codex home list is ephemeral control', payload: { type: 'codex_home_list' }, durable: false, priority: 'control' },
     { name: 'upgrade result is ephemeral control', payload: { type: 'upgrade_result' }, durable: false, priority: 'control' },
     { name: 'host-level error is ephemeral control', payload: { type: 'error' }, durable: false, priority: 'control' },
     { name: 'session error remains durable live data', payload: { type: 'error', session_id: 'session-1' }, durable: true, priority: 'live' },

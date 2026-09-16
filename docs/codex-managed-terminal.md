@@ -51,6 +51,24 @@ codex resume <thread-id> --remote unix:///private/path/pocketctl-codex.sock
 
 这部分参数由 launcher 自动追加，用户不需要先执行“连接 App Server”命令，也不需要手工维护 socket。
 
+### 多 Codex 账号
+
+每个 Codex 账号应使用独立的 `CODEX_HOME`，并把额外目录加入 daemon 的 allowlist。前台 daemon 可这样启动：
+
+```bash
+pocketctl daemon start --codex-home ~/.codex-a --codex-home ~/.codex-proxy
+```
+
+使用系统托管服务时，在安装服务时固化相同参数：
+
+```bash
+pocketctl daemon service install --codex-home ~/.codex-a --codex-home ~/.codex-proxy
+```
+
+也可用 PATH 风格的 `POCKETCTL_CODEX_HOMES` 配置额外目录。每个 shell 别名或脚本仍需设置它自己的 `CODEX_HOME`，例如 `CODEX_HOME="$HOME/.codex-a" codex`；只有命令名不同、环境相同的别名无法区分账号。
+
+Pocketctl 为每个 allowlist home 分配不暴露本机绝对路径的 ID，并启动独立 app-server、socket、generation、lease 与恢复状态。未配置的 home 不会静默接入默认账号。Dashboard 仍只显示一台真实主机；Web/iOS 的新建会话在选择 Codex CLI 后显示账号选择器（单账号时自动选择并隐藏），会话列表显示账号标签并支持筛选。
+
 `exec`、`review`、`login`、`logout`、`mcp`、`plugin`、`app-server`、`completion`、`update`、`doctor`、`sandbox` 等非交互或管理命令保持 Codex 原生执行；用户已明确传入 `--remote` 时也不会重写。
 
 单次绕过 Pocketctl：
@@ -64,7 +82,7 @@ codex --native resume <thread-id>
 
 ```text
 Official Codex TUI ── --remote ──┐
-                                 ├── one Pocketctl-managed codex app-server
+                                 ├── one app-server per configured CODEX_HOME
 Pocketctl daemon client ─────────┘                │
                                                   └── Codex thread / turn / item authority
 

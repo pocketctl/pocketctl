@@ -2283,8 +2283,9 @@ export class Router {
         if (!durableIngressOwnsAck) this.markPersisted(daemonId, msg.seq);
         return;
       }
-      // model_list (host-level response, no session_id): broadcast to the daemon owner's clients
-      if (msg.type === 'model_list') {
+      // Host-level selector responses have no session_id; request_id lets the
+      // originating dialog correlate the broadcast response.
+      if (msg.type === 'model_list' || msg.type === 'codex_home_list') {
         const daemon = this.daemons.get(daemonId);
         if (daemon?.userId) this.broadcastToUser(daemon.userId, { ...msg, daemon_id: daemonId });
         this.markPersisted(daemonId, msg.seq);
@@ -2580,7 +2581,7 @@ export class Router {
       return;
     }
 
-    if (msg.type === 'list_models') {
+    if (msg.type === 'list_models' || msg.type === 'list_codex_homes') {
       // Host-level query (no session_id): route to the target daemon by daemon_id.
       // The reply (model_list) is broadcast back to the owner's clients below.
       const daemonId = msg.daemon_id;

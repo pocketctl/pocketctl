@@ -73,6 +73,7 @@ type AcquirePayload struct {
 	SessionID   string `json:"session_id,omitempty"`
 	Fork        bool   `json:"fork,omitempty"`
 	OperationID string `json:"operation_id"`
+	CodexHomeID string `json:"codex_home_id,omitempty"`
 }
 
 type AcquireResult struct {

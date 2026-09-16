@@ -39,4 +39,6 @@ export interface Session {
   created_at?: string
   control_mode?: SessionControlMode | null
   capabilities?: string[]
+  codex_home_id?: string
+  codex_home_label?: string
 }

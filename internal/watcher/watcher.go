@@ -32,6 +32,8 @@ type DiscoveredSession struct {
 	Source          string   `json:"source,omitempty"`
 	ControlMode     string   `json:"controlMode,omitempty"`
 	Capabilities    []string `json:"capabilities,omitempty"`
+	CodexHomeID     string   `json:"codexHomeId,omitempty"`
+	CodexHomeLabel  string   `json:"codexHomeLabel,omitempty"`
 }
 
 // SessionEvent is emitted when a session is discovered or changes

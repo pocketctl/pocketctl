@@ -64,13 +64,16 @@ func (l CodexLauncher) Run(ctx context.Context, args []string, cwd string) error
 	if l.AcquireTimeout <= 0 {
 		l.AcquireTimeout = l.Timeout
 	}
-
 	if plan.Mode == LaunchNative {
 		binary, err := l.ResolveBinary()
 		if err != nil {
 			return err
 		}
 		return l.Execute(ExecSpec{Path: binary, Args: plan.NativeArgs, Env: codexCLIEnvironment(l.Environ()), Dir: plan.CWD})
+	}
+	codexHomeID, homeErr := CodexHomeIDFromEnvironment(l.Environ())
+	if homeErr != nil {
+		return homeErr
 	}
 
 	acquire := l.Acquire
@@ -79,7 +82,7 @@ func (l CodexLauncher) Run(ctx context.Context, args []string, cwd string) error
 	}
 	requestCtx, cancel := context.WithTimeout(ctx, l.AcquireTimeout)
 	result, err := acquire(requestCtx, AcquirePayload{
-		CWD: plan.CWD, Intent: plan.Intent, SessionID: plan.SessionID, OperationID: newOperationID(),
+		CWD: plan.CWD, Intent: plan.Intent, SessionID: plan.SessionID, OperationID: newOperationID(), CodexHomeID: codexHomeID,
 	})
 	cancel()
 	if err != nil || result.Mode != string(LaunchManaged) {
