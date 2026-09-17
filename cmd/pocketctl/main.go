@@ -3406,8 +3406,8 @@ func handleWatcherEvents(ctx context.Context, events <-chan watcher.SessionEvent
 
 			case "removed":
 				logger.Info("session removed", "session", evt.Session.SessionID)
-				sm.SetSessionExited(evt.Session.SessionID, protocol.ExitReasonNormalExit)
 				stateDirty.Store(true)
+				sm.SetSessionExited(evt.Session.SessionID, protocol.ExitReasonNormalExit)
 				if evt.Session.Pid > 0 {
 					pm.Unregister(evt.Session.Pid)
 				}
