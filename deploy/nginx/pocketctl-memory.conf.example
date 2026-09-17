@@ -13,11 +13,13 @@ location = /metrics {
 # Relay keeps ownership of /health. Memory uses explicit operations paths.
 location = /memory-health {
     proxy_pass http://127.0.0.1:8090/health;
+    proxy_set_header Host $host;
     access_log off;
 }
 
 location = /memory-ready {
     proxy_pass http://127.0.0.1:8090/ready;
+    proxy_set_header Host $host;
     access_log off;
 }
 
