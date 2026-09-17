@@ -26,6 +26,10 @@ describe('Memory workspace toolbar layout', () => {
 
     const toolbarStyle = getComputedStyle(toolbar)
     const tabsStyle = getComputedStyle(toolbar.querySelector('.memory-tabs')!)
+    const tab = document.createElement('button')
+    tab.className = 'memory-tab'
+    toolbar.querySelector('.memory-tabs')!.append(tab)
+    const tabStyle = getComputedStyle(tab)
 
     expect({
       maxWidth: toolbarStyle.maxWidth,
@@ -47,5 +51,6 @@ describe('Memory workspace toolbar layout', () => {
       overflowX: 'auto',
       overflowY: 'hidden',
     })
+    expect(tabStyle.flexShrink).toBe('0')
   })
 })

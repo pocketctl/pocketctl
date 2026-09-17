@@ -167,6 +167,7 @@
   width: auto;
   min-height: 40px;
   display: inline-grid;
+  flex: 0 0 auto;
   grid-template-columns: 25px minmax(0, auto) auto;
   align-items: center;
   gap: 7px;
