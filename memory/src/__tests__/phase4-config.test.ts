@@ -6,6 +6,17 @@ import { loadMemoryConfig, phase4ModeForScope } from '../config.js'
 
 const REPOSITORY_ROOT = resolve(__dirname, '../../..')
 
+function dockerComposeAvailable(): boolean {
+  try {
+    execFileSync('docker', ['compose', 'version'], { stdio: 'ignore' })
+    return true
+  } catch {
+    return false
+  }
+}
+
+const composeContractTest = dockerComposeAvailable() ? test : test.skip
+
 function baseEnv(overrides: Record<string, string> = {}): Record<string, string> {
   return {
     NODE_ENV: 'test',
@@ -131,7 +142,7 @@ describe('phase4 configuration', () => {
     expect(() => loadMemoryConfig(production)).not.toThrow()
   })
 
-  test.each(['docker-compose.yml', 'docker-compose.prod.yml'])('%s propagates all Phase 4 settings to API and worker', file => {
+  composeContractTest.each(['docker-compose.yml', 'docker-compose.prod.yml'])('%s propagates all Phase 4 settings to API and worker', file => {
     const output = execFileSync('docker', ['compose', '-f', file, 'config', '--format', 'json'], {
       cwd: REPOSITORY_ROOT,
       encoding: 'utf8',

@@ -14,6 +14,17 @@ const bounds = {
   MEMORY_SKILL_MAX_CANDIDATE_CHARS: '32000',
 }
 
+function dockerComposeAvailable(): boolean {
+  try {
+    execFileSync('docker', ['compose', 'version'], { stdio: 'ignore' })
+    return true
+  } catch {
+    return false
+  }
+}
+
+const composeContractTest = dockerComposeAvailable() ? test : test.skip
+
 describe('Phase 5 configuration', () => {
   test('main config exposes an independent default-off skill config', () => {
     const config = loadMemoryConfig({ MEMORY_MODE: 'enabled' })
@@ -77,7 +88,7 @@ describe('Phase 5 configuration', () => {
     }
   })
 
-  test.each(['docker-compose.yml', 'docker-compose.prod.yml'])('%s forwards default-off settings to API and worker', file => {
+  composeContractTest.each(['docker-compose.yml', 'docker-compose.prod.yml'])('%s forwards default-off settings to API and worker', file => {
     // Explicit fixture vars: never load a developer's .env or emit resolved credentials.
     const settings = { ...budget, ...bounds, MEMORY_SKILL_MODE: 'shadow',
       MEMORY_SKILL_AUTO_PUBLISH_MODE: 'shadow', MEMORY_SKILL_CANARY_MODE: 'shadow' }
