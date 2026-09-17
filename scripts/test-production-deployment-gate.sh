@@ -37,6 +37,7 @@ if [[ "$with_docker" == true ]]; then
   bash deploy/tests/relay-production-env.integration.test.sh
   env -u JWT_SECRET bash scripts/test-postgres-role-separation.sh
   bash scripts/test-postgres-existing-volume-gate.sh
+  bash scripts/test-pocketctl-memory-pg13-schema.sh
   bash scripts/tests/nginx-online-bootstrap.test.sh
 fi
 

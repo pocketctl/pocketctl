@@ -177,7 +177,8 @@ export const GIT_LEDGER_MIGRATION = {
       UNIQUE(installation_id,connection_id,run_id), UNIQUE(installation_id,connection_id,generation,request_hash), ${connectionRef},
       FOREIGN KEY(installation_id,connection_id,export_id) REFERENCES memory_git_snapshots(installation_id,connection_id,export_id) ON DELETE CASCADE,
       FOREIGN KEY(installation_id,membership_id) REFERENCES memory_scope_memberships(installation_id,membership_id) ON DELETE CASCADE,
-      FOREIGN KEY(installation_id,job_id) REFERENCES memory_jobs(installation_id,job_id) ON DELETE SET NULL (job_id)
+      FOREIGN KEY(installation_id,job_id) REFERENCES memory_jobs(installation_id,job_id) DEFERRABLE INITIALLY DEFERRED,
+      FOREIGN KEY(job_id) REFERENCES memory_jobs(job_id) ON DELETE SET NULL
     )`,
     `CREATE UNIQUE INDEX memory_git_one_dispatch ON memory_git_runs(installation_id,connection_id) WHERE state IN('dispatching','reconciling')`,
     `CREATE TABLE memory_git_inbox (
@@ -187,7 +188,8 @@ export const GIT_LEDGER_MIGRATION = {
       run_id UUID, job_id UUID, received_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
       UNIQUE(installation_id,connection_id,event_id), ${connectionRef},
       FOREIGN KEY(installation_id,connection_id,run_id) REFERENCES memory_git_runs(installation_id,connection_id,run_id) ON DELETE CASCADE,
-      FOREIGN KEY(installation_id,job_id) REFERENCES memory_jobs(installation_id,job_id) ON DELETE SET NULL (job_id)
+      FOREIGN KEY(installation_id,job_id) REFERENCES memory_jobs(installation_id,job_id) DEFERRABLE INITIALLY DEFERRED,
+      FOREIGN KEY(job_id) REFERENCES memory_jobs(job_id) ON DELETE SET NULL
     )`,
     `CREATE TABLE memory_git_outbox (
       outbox_id UUID PRIMARY KEY, installation_id UUID NOT NULL, connection_id UUID NOT NULL, run_id UUID NOT NULL, export_id UUID NOT NULL,
