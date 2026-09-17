@@ -62,8 +62,9 @@ for conf in "${configs[@]}"; do
 done
 
 # Memory business requests intentionally bypass Relay and connect directly to
-# the provider origin delivered by the extension catalog. Keep the static
-# local and canonical-production entrypoints in sync with that contract.
+# the provider origin delivered by the extension catalog. Local deployments
+# need explicit loopback origins; production shares the Web origin, so 'self'
+# is sufficient and the retired memory subdomain must not return.
 for conf in web/nginx.conf landing/nginx.conf landing/nginx-docker.conf; do
   grep -q "connect-src[^;]*http://127.0.0.1:8090" "$conf" \
     || fail "$conf: CSP blocks the local Memory provider"
@@ -71,8 +72,11 @@ for conf in web/nginx.conf landing/nginx.conf landing/nginx-docker.conf; do
     || fail "$conf: CSP blocks the localhost Memory provider"
 done
 for conf in landing/nginx-online.conf deploy/nginx/pocketctl.conf nginx/nginx.conf; do
-  grep -q "connect-src[^;]*https://memory.pocketctl.me" "$conf" \
-    || fail "$conf: CSP blocks the canonical Memory provider"
+  grep -q "connect-src[^;]*'self'" "$conf" \
+    || fail "$conf: CSP blocks the shared-origin Memory provider"
+  if grep -q 'https://memory\.pocketctl\.me' "$conf"; then
+    fail "$conf: CSP still references the retired Memory subdomain"
+  fi
 done
 grep -q 'EXTENSION_PROVIDER_CONNECT_SOURCES' deploy/deploy.sh \
   || fail "deploy/deploy.sh: generated CSP ignores configured provider origins"
