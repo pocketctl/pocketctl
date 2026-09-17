@@ -116,6 +116,11 @@ codex
 单次绕过 PocketCtl 可使用 `codex --native ...`；执行
 `pocketctl agent codex disable` 可移除 PocketCtl Launcher。
 
+**单机多 Codex 账号。** 隔离的 Codex home（`~/.codex-a`、`~/.codex-proxy`
+等）可以同时监听——通过可重复的 `--codex-home <目录>` 参数或
+`POCKETCTL_CODEX_HOMES` 环境变量添加额外 home，之后在 Web 或 iOS 新建
+会话时即可选择对应账号。
+
 ### OpenCode
 
 ```bash
