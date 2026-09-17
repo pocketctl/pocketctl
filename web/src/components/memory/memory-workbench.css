@@ -133,11 +133,13 @@
 .memory-workspace { min-height: 0; }
 
 .memory-workspace-toolbar {
+  max-width: 100%;
   min-height: 54px;
   display: flex;
   align-items: center;
   gap: 10px;
   margin-bottom: 10px;
+  overflow: hidden;
   padding: 6px;
   border: 1px solid var(--border);
   border-radius: 11px;
@@ -151,8 +153,15 @@
   display: flex;
   align-items: center;
   gap: 4px;
-  flex: 0 0 auto;
+  flex: 1 1 auto;
+  overflow-x: auto;
+  overflow-y: hidden;
+  overscroll-behavior-x: contain;
+  scrollbar-width: thin;
 }
+
+.memory-tabs::-webkit-scrollbar { height: 4px; }
+.memory-tabs::-webkit-scrollbar-thumb { border-radius: var(--radius-full); background: var(--border-light); }
 
 .memory-tab {
   width: auto;
@@ -891,7 +900,7 @@
     scrollbar-width: none;
   }
   .memory-workspace-toolbar::-webkit-scrollbar { display: none; }
-  .memory-tabs { flex: 0 0 auto; }
+  .memory-tabs { flex: 0 0 auto; overflow: visible; }
   .memory-tab { width: auto; min-width: max-content; min-height: 36px; display: inline-flex; padding: 0 10px; }
   .memory-tab-icon { width: 21px; height: 21px; }
   .memory-tab-badge { margin-left: 2px; }
