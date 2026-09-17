@@ -1388,14 +1388,18 @@ func stableEventIDs(events []bufferedEvent) []string {
 // (no support) gets best-effort delivery: the current buffer is trimmed and
 // subsequent events are trimmed on successful write.
 func (c *Client) onRegisterAck(msg protocol.RegisterAckMessage) {
-	// Signal connectAndServe that the relay has confirmed registration and
-	// finished its registerDaemon bookkeeping — it may now safely replay the
-	// unacked buffer. Non-blocking: the channel is buffered(1) and recreated
-	// per connection, so this never blocks readPump.
-	select {
-	case c.registerAckCh <- struct{}{}:
-	default:
-	}
+	// Publish readiness only after every capability and flow-control field below
+	// is installed. connectAndServe starts replay/live delivery when it receives
+	// this signal; publishing it earlier can make the first document event race
+	// with sessionDocumentSupported and be silently suppressed.
+	defer func() {
+		// Non-blocking: the channel is buffered(1) and recreated per connection,
+		// so this never blocks readPump.
+		select {
+		case c.registerAckCh <- struct{}{}:
+		default:
+		}
+	}()
 	// The relay confirmed our registration — this connection is genuinely usable
 	// (token valid, routes rebuilt), so reset the backoff. Until this point the
 	// connection could still be torn down with 4001 on a bad token, which must
