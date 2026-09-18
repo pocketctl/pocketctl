@@ -52,6 +52,19 @@ for (const match of workflowText.matchAll(/\bmake\s+([A-Za-z0-9._-]+)/g)) {
   }
 }
 
+const dependencyQueue = [...requiredScripts]
+for (let index = 0; index < dependencyQueue.length; index += 1) {
+  const script = dependencyQueue[index]
+  const scriptPath = path.join(repoRoot, script)
+  if (!fs.existsSync(scriptPath)) continue
+  const scriptText = fs.readFileSync(scriptPath, 'utf8')
+  for (const match of scriptText.matchAll(/(?:\.\/)?(scripts\/[A-Za-z0-9._/-]+)/g)) {
+    if (requiredScripts.has(match[1])) continue
+    requiredScripts.add(match[1])
+    dependencyQueue.push(match[1])
+  }
+}
+
 for (const script of requiredScripts) {
   assert.ok(mirrored.has(script), `workflow dependency is absent from public mirror: ${script}`)
 }

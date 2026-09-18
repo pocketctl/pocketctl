@@ -31,7 +31,8 @@ export const SKILL_PUBLICATION_MIGRATION = {
       CHECK(state<>'active' OR current_version_id IS NOT NULL),
       FOREIGN KEY(installation_id,skill_id) REFERENCES memory_skills(installation_id,skill_id) ON DELETE CASCADE,
       FOREIGN KEY(installation_id,skill_id,current_version_id) REFERENCES memory_skill_versions(installation_id,skill_id,version_id) ON DELETE CASCADE,
-      FOREIGN KEY(installation_id,skill_id,previous_version_id) REFERENCES memory_skill_versions(installation_id,skill_id,version_id) ON DELETE SET NULL(previous_version_id),
+      FOREIGN KEY(installation_id,skill_id,previous_version_id) REFERENCES memory_skill_versions(installation_id,skill_id,version_id) DEFERRABLE INITIALLY DEFERRED,
+      FOREIGN KEY(previous_version_id) REFERENCES memory_skill_versions(version_id) ON DELETE SET NULL,
       FOREIGN KEY(installation_id,publication_event_id) REFERENCES memory_skill_publication_events(installation_id,event_id))`,
     `CREATE TABLE memory_skill_version_revocations (
       installation_id UUID NOT NULL REFERENCES memory_installations(installation_id) ON DELETE CASCADE,

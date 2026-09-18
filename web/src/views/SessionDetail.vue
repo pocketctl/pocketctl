@@ -745,6 +745,7 @@ import { createAgentFileChangeReducer, type AgentFileChangeMessage } from '../ut
 import { projectTurns, TurnSegmentCollapseRegistry, TurnSegmentIdentityRegistry } from '../utils/turnProjection'
 import { isKnownNonTimelineControlEvent, knownNonTimelineControlEventTypes, unknownTimelineEventIdentity } from '../utils/timelineEventRegistry'
 import { createClientId } from '../utils/clientId'
+import { HistoryViewportFillCoordinator, shouldStartHistoryResizeFill } from '../utils/historyViewportFill'
 import SessionDocumentShelf from '../components/session-documents/SessionDocumentShelf.vue'
 import SessionDocumentViewer from '../components/session-documents/SessionDocumentViewer.vue'
 import { useSessionDocuments } from '../composables/useSessionDocuments'
@@ -967,6 +968,10 @@ const pageSize = computed(() => 50)  // session-history-pagination: 一次加载
 const loadedMinId = ref(0)      // oldest loaded event id (backward cursor)
 const isLoadingBackward = ref(false)  // a pagination (scroll-up) request in flight
 const hasMore = ref(false)      // relay signaled older events exist
+const historyViewportFill = new HistoryViewportFillCoordinator()
+let historyViewportResizeObserver: ResizeObserver | null = null
+let historyViewportResizeTimer: ReturnType<typeof setTimeout> | null = null
+let settledHistoryViewportHeight = 0
 // One trust buffer spans every sequential replay page for this load. Pages do
 // not overlap, so sharing it also carries explicit session-ID aliases from the
 // newest page into older history without mixing event ordering.
@@ -978,6 +983,16 @@ function resetReplayTrustBuffers() {
 }
 let olderReplayScrollHeight = 0
 let olderReplayScrollTop = 0
+
+// PostgreSQL bigint values arrive from the Relay as JSON strings. Keep the
+// component's pagination state numeric so cursor comparisons and the viewport
+// fill coordinator behave the same in tests and against the live protocol.
+function normalizeReplayCursor(value: unknown): number | undefined {
+  if (typeof value !== 'number' && typeof value !== 'string') return undefined
+  const cursor = typeof value === 'number' ? value : Number(value)
+  return Number.isSafeInteger(cursor) && cursor > 0 ? cursor : undefined
+}
+
 const resumeCopied = ref(false)  // session-resume-command: 复制恢复命令反馈
 const showNewSession = ref(false)
 const daemonList = computed(() => Object.values(daemons.value))
@@ -1830,6 +1845,7 @@ function loadHistory() {
   clearHistorySlowTimer()
   isSlowLoading.value = false
   if (sessionId.value === 'default') {
+    historyViewportFill.cancel()
     isLoading.value = false
     isLoadingBackward.value = false
     hasMore.value = false
@@ -1846,6 +1862,7 @@ function loadHistory() {
   isLoadingBackward.value = false
   hasMore.value = false
   resetReplayTrustBuffers()
+  historyViewportFill.begin({ mode: 'initial', baselineContentHeight: 0 })
   if (focusedSubAgentId.value) {
     send({ type: 'replay_subagent', session_id: sessionId.value, agent_id: focusedSubAgentId.value, limit: pageSize.value, req_id: replayReqId.value })
   } else {
@@ -1868,6 +1885,102 @@ function retryHistory() {
   loadHistory()
 }
 
+function finishHistoryViewportFill(mode = historyViewportFill.mode): void {
+  historyViewportFill.cancel()
+  isLoading.value = false
+  isLoadingBackward.value = false
+  clearHistorySlowTimer()
+  isSlowLoading.value = false
+  if (mode === 'initial' || mode === 'resize') nextTick(scrollToBottom)
+}
+
+function requestOlderHistoryPage(cursor: number): boolean {
+  const element = messagesEl.value
+  if (element) {
+    olderReplayScrollHeight = element.scrollHeight
+    olderReplayScrollTop = element.scrollTop
+  }
+  isLoadingBackward.value = true
+  replayReqId.value++
+  const sent = focusedSubAgentId.value
+    ? send({
+        type: 'replay_subagent', session_id: sessionId.value, agent_id: focusedSubAgentId.value,
+        last_seq: cursor, limit: pageSize.value, req_id: replayReqId.value,
+      })
+    : send({
+        type: 'replay', session_id: sessionId.value, direction: 'backward',
+        last_seq: cursor, limit: pageSize.value, req_id: replayReqId.value,
+      })
+  if (!sent) finishHistoryViewportFill()
+  return sent
+}
+
+function nextHistoryLayoutFrame(): Promise<void> {
+  return new Promise(resolve => requestAnimationFrame(() => resolve()))
+}
+
+async function settleHistoryReplayPage(msg: any): Promise<void> {
+  const requestId = replayReqId.value
+  const context = loadKey.value
+  const mode = historyViewportFill.mode
+  await nextTick()
+  await nextHistoryLayoutFrame()
+  await nextHistoryLayoutFrame()
+  if (requestId !== replayReqId.value || context !== loadKey.value) return
+
+  const element = messagesEl.value
+  const replayCursor = normalizeReplayCursor(msg.last_seq)
+  const decision = historyViewportFill.recordPage({
+    viewportHeight: element?.clientHeight ?? 0,
+    contentHeight: element?.scrollHeight ?? 0,
+    hasMore: hasMore.value,
+    cursor: replayCursor,
+  })
+  if (decision.kind === 'continue') {
+    requestOlderHistoryPage(decision.cursor)
+    return
+  }
+  finishHistoryViewportFill(mode)
+}
+
+watch(messagesEl, (element) => {
+  historyViewportResizeObserver?.disconnect()
+  historyViewportResizeObserver = null
+  if (historyViewportResizeTimer) clearTimeout(historyViewportResizeTimer)
+  historyViewportResizeTimer = null
+  settledHistoryViewportHeight = 0
+  if (!element || typeof ResizeObserver === 'undefined') return
+
+  historyViewportResizeObserver = new ResizeObserver((entries) => {
+    const observedHeight = entries[0]?.contentRect.height ?? element.clientHeight
+    if (!Number.isFinite(observedHeight) || observedHeight <= 0) return
+    if (historyViewportResizeTimer) clearTimeout(historyViewportResizeTimer)
+    historyViewportResizeTimer = setTimeout(() => {
+      historyViewportResizeTimer = null
+      if (messagesEl.value !== element) return
+      const previousViewportHeight = settledHistoryViewportHeight
+      settledHistoryViewportHeight = element.clientHeight
+      const eligible = shouldStartHistoryResizeFill({
+        previousViewportHeight,
+        viewportHeight: element.clientHeight,
+        contentHeight: element.scrollHeight,
+        scrollTop: element.scrollTop,
+        hasMore: hasMore.value,
+        hasCursor: loadedMinId.value > 0,
+        isLoading: isLoading.value || isLoadingBackward.value,
+      })
+      if (!eligible) return
+      historyViewportFill.begin({
+        mode: 'resize',
+        baselineContentHeight: element.scrollHeight,
+        requestedCursor: loadedMinId.value,
+      })
+      requestOlderHistoryPage(loadedMinId.value)
+    }, 400)
+  })
+  historyViewportResizeObserver.observe(element)
+}, { flush: 'post' })
+
 function requestSessionMeta() {
   if (sessionId.value === 'default') return false
   try {
@@ -1888,15 +2001,12 @@ function onMessagesScroll() {
   autoScroll.value = scrollHeight - scrollTop - clientHeight < 60
   // session-history-pagination: scrolled to top → fetch older page (backward)
   if (scrollTop < 60 && hasMore.value && !isLoadingBackward.value && !isLoading.value && loadedMinId.value > 0) {
-    isLoadingBackward.value = true
-    replayReqId.value++
-    olderReplayScrollHeight = scrollHeight
-    olderReplayScrollTop = scrollTop
-    if (focusedSubAgentId.value) {
-      send({ type: 'replay_subagent', session_id: sessionId.value, agent_id: focusedSubAgentId.value, last_seq: loadedMinId.value, limit: pageSize.value, req_id: replayReqId.value })
-    } else {
-      send({ type: 'replay', session_id: sessionId.value, direction: 'backward', last_seq: loadedMinId.value, limit: pageSize.value, req_id: replayReqId.value })
-    }
+    historyViewportFill.begin({
+      mode: 'older',
+      baselineContentHeight: scrollHeight,
+      requestedCursor: loadedMinId.value,
+    })
+    requestOlderHistoryPage(loadedMinId.value)
   }
 }
 
@@ -3487,13 +3597,12 @@ onMounted(() => {
       for (const evt of progressiveReplayEvents.takeFinal(replayContext)) processEvent(evt)
       nextTick(scrollToBottom)
     }
-    isLoading.value = false
-    clearHistorySlowTimer()
-    isSlowLoading.value = false
-    isLoadingBackward.value = false
     if (msg.has_more !== undefined) hasMore.value = !!msg.has_more
     // backward: last_seq is the oldest id of the returned page → next page cursor
-    if (msg.last_seq && (!loadedMinId.value || msg.last_seq < loadedMinId.value)) loadedMinId.value = msg.last_seq
+    const replayCursor = normalizeReplayCursor(msg.last_seq)
+    if (replayCursor !== undefined && (!loadedMinId.value || replayCursor < loadedMinId.value)) {
+      loadedMinId.value = replayCursor
+    }
     // Session switch complete: ungate the timer watch. If the target session is
     // executing, resume timing from the recovered turn start (last executing
     // session_status's turn_started_at) so elapsed isn't reset to zero.
@@ -3535,6 +3644,8 @@ onMounted(() => {
       }
     }
     reconcileVisibleUnresolvedTools(status.value)
+    if (hasMore.value) void settleHistoryReplayPage(msg)
+    else finishHistoryViewportFill(historyViewportFill.mode)
   }))
 
   cleanups.push(onEvent('user_message_ack', (msg: any) => {
@@ -3859,6 +3970,10 @@ onUnmounted(() => {
   for(const pending of nativeCommandMessages.values())clearTimeout(pending.timer)
   nativeCommandMessages.clear()
   clearHistorySlowTimer()
+  if (historyViewportResizeTimer) clearTimeout(historyViewportResizeTimer)
+  historyViewportResizeTimer = null
+  historyViewportResizeObserver?.disconnect()
+  historyViewportResizeObserver = null
   composerResizeObserver?.disconnect()
   composerResizeObserver = null
   sessionDocumentState.dispose()

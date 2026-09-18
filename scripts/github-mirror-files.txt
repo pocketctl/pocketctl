@@ -28,6 +28,7 @@ scripts/test-production-deployment-gate.sh
 scripts/test-csp-contract.sh
 scripts/test-postgres-role-separation.sh
 scripts/test-postgres-existing-volume-gate.sh
+scripts/test-pocketctl-memory-pg13-schema.sh
 scripts/secret-scan.sh
 scripts/deploy.sh
 scripts/package-release-candidate.sh

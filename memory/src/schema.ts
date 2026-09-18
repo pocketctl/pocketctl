@@ -270,8 +270,12 @@ export const MEMORY_MIGRATIONS: readonly Migration[] = [
         last_error_code    TEXT,
         created_at         TIMESTAMPTZ NOT NULL DEFAULT NOW(),
         completed_at       TIMESTAMPTZ,
-        UNIQUE NULLS NOT DISTINCT (installation_id, job_type, idempotency_key)
+        UNIQUE (installation_id, job_type, idempotency_key)
       )`,
+      `
+      CREATE UNIQUE INDEX IF NOT EXISTS uq_memory_jobs_global_idempotency
+        ON memory_jobs (job_type, idempotency_key)
+        WHERE installation_id IS NULL`,
       `
       CREATE INDEX IF NOT EXISTS idx_memory_jobs_claim
         ON memory_jobs (priority, available_at, created_at)
@@ -615,7 +619,9 @@ export const MEMORY_MIGRATIONS: readonly Migration[] = [
           REFERENCES knowledge_claims(installation_id, claim_id) ON DELETE CASCADE,
         FOREIGN KEY (installation_id, source_candidate_id)
           REFERENCES memory_candidates(installation_id, candidate_id)
-          ON DELETE SET NULL (source_candidate_id),
+          DEFERRABLE INITIALLY DEFERRED,
+        FOREIGN KEY (source_candidate_id)
+          REFERENCES memory_candidates(candidate_id) ON DELETE SET NULL,
         FOREIGN KEY (installation_id, repository_id)
           REFERENCES repositories(installation_id, repository_id),
         FOREIGN KEY (installation_id, repo_snapshot_id)
@@ -626,7 +632,12 @@ export const MEMORY_MIGRATIONS: readonly Migration[] = [
         ADD CONSTRAINT memory_candidates_duplicate_claim_fk
         FOREIGN KEY (installation_id, duplicate_of_claim_id)
         REFERENCES knowledge_claims(installation_id, claim_id)
-        ON DELETE SET NULL (duplicate_of_claim_id)`,
+        DEFERRABLE INITIALLY DEFERRED`,
+      `
+      ALTER TABLE memory_candidates
+        ADD CONSTRAINT memory_candidates_duplicate_claim_delete_fk
+        FOREIGN KEY (duplicate_of_claim_id)
+        REFERENCES knowledge_claims(claim_id) ON DELETE SET NULL`,
       `
       ALTER TABLE knowledge_claims
         ADD CONSTRAINT knowledge_claims_current_version_fk
@@ -638,7 +649,12 @@ export const MEMORY_MIGRATIONS: readonly Migration[] = [
         ADD CONSTRAINT knowledge_claims_superseded_by_fk
         FOREIGN KEY (installation_id, superseded_by_claim_id)
         REFERENCES knowledge_claims(installation_id, claim_id)
-        ON DELETE SET NULL (superseded_by_claim_id)`,
+        DEFERRABLE INITIALLY DEFERRED`,
+      `
+      ALTER TABLE knowledge_claims
+        ADD CONSTRAINT knowledge_claims_superseded_by_delete_fk
+        FOREIGN KEY (superseded_by_claim_id)
+        REFERENCES knowledge_claims(claim_id) ON DELETE SET NULL`,
       `
       CREATE TABLE knowledge_evidence (
         evidence_id UUID PRIMARY KEY,
@@ -714,13 +730,19 @@ export const MEMORY_MIGRATIONS: readonly Migration[] = [
         created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
         FOREIGN KEY (installation_id, candidate_id)
           REFERENCES memory_candidates(installation_id, candidate_id)
-          ON DELETE SET NULL (candidate_id),
+          DEFERRABLE INITIALLY DEFERRED,
+        FOREIGN KEY (candidate_id)
+          REFERENCES memory_candidates(candidate_id) ON DELETE SET NULL,
         FOREIGN KEY (installation_id, claim_id)
           REFERENCES knowledge_claims(installation_id, claim_id)
-          ON DELETE SET NULL (claim_id),
+          DEFERRABLE INITIALLY DEFERRED,
+        FOREIGN KEY (claim_id)
+          REFERENCES knowledge_claims(claim_id) ON DELETE SET NULL,
         FOREIGN KEY (installation_id, version_id)
           REFERENCES knowledge_versions(installation_id, version_id)
-          ON DELETE SET NULL (version_id)
+          DEFERRABLE INITIALLY DEFERRED,
+        FOREIGN KEY (version_id)
+          REFERENCES knowledge_versions(version_id) ON DELETE SET NULL
       )`,
       `
       CREATE TABLE memory_idempotency_keys (
@@ -830,8 +852,11 @@ export const MEMORY_MIGRATIONS: readonly Migration[] = [
          layer TEXT NOT NULL CHECK (layer IN ('system','organization','team','repository','user')),
          scope_key TEXT NOT NULL,
          created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-         UNIQUE NULLS NOT DISTINCT (installation_id, policy_kind, layer, scope_key)
+         UNIQUE (installation_id, policy_kind, layer, scope_key)
        )`,
+      `CREATE UNIQUE INDEX uq_memory_policy_sets_global_scope
+         ON memory_policy_sets (policy_kind, layer, scope_key)
+         WHERE installation_id IS NULL`,
       `CREATE TABLE memory_policy_versions (
          policy_version_id UUID PRIMARY KEY,
          policy_id UUID NOT NULL REFERENCES memory_policy_sets(policy_id) ON DELETE CASCADE,
@@ -940,8 +965,11 @@ export const MEMORY_MIGRATIONS: readonly Migration[] = [
          max_tokens INTEGER CHECK (max_tokens BETWEEN 1 AND 2000),
          revision BIGINT NOT NULL DEFAULT 1 CHECK (revision > 0),
          updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-         UNIQUE NULLS NOT DISTINCT (installation_id, scope_kind, scope_key, agent)
+         UNIQUE (installation_id, scope_kind, scope_key, agent)
        )`,
+      `CREATE UNIQUE INDEX uq_memory_context_settings_default_agent
+         ON memory_context_settings (installation_id, scope_kind, scope_key)
+         WHERE agent IS NULL`,
       `CREATE TABLE memory_context_loadouts (
          loadout_id UUID PRIMARY KEY,
          installation_id UUID NOT NULL REFERENCES memory_installations(installation_id) ON DELETE CASCADE,
@@ -949,11 +977,20 @@ export const MEMORY_MIGRATIONS: readonly Migration[] = [
          agent TEXT,
          revision BIGINT NOT NULL DEFAULT 1 CHECK (revision > 0),
          updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-         UNIQUE NULLS NOT DISTINCT (installation_id, repository_id, agent),
+         UNIQUE (installation_id, repository_id, agent),
          UNIQUE (loadout_id, installation_id),
          FOREIGN KEY (installation_id, repository_id)
            REFERENCES repositories(installation_id, repository_id)
        )`,
+      `CREATE UNIQUE INDEX uq_memory_context_loadouts_default_agent
+         ON memory_context_loadouts (installation_id, repository_id)
+         WHERE repository_id IS NOT NULL AND agent IS NULL`,
+      `CREATE UNIQUE INDEX uq_memory_context_loadouts_default_repository
+         ON memory_context_loadouts (installation_id, agent)
+         WHERE repository_id IS NULL AND agent IS NOT NULL`,
+      `CREATE UNIQUE INDEX uq_memory_context_loadouts_defaults
+         ON memory_context_loadouts (installation_id)
+         WHERE repository_id IS NULL AND agent IS NULL`,
       `CREATE TABLE memory_context_loadout_items (
          loadout_id UUID NOT NULL,
          item_id UUID NOT NULL,
@@ -966,7 +1003,6 @@ export const MEMORY_MIGRATIONS: readonly Migration[] = [
            ('summary','on_demand','reference')),
          priority SMALLINT NOT NULL CHECK (priority BETWEEN 0 AND 100),
          PRIMARY KEY (loadout_id, item_id),
-         UNIQUE NULLS NOT DISTINCT (loadout_id, asset_kind, claim_id, external_asset_ref),
          CHECK (
            (asset_kind IN ('claim','persona','runbook')
              AND claim_id IS NOT NULL AND external_asset_ref IS NULL)
@@ -979,6 +1015,12 @@ export const MEMORY_MIGRATIONS: readonly Migration[] = [
          FOREIGN KEY (installation_id, claim_id)
            REFERENCES knowledge_claims(installation_id, claim_id) ON DELETE CASCADE
        )`,
+      `CREATE UNIQUE INDEX uq_memory_context_loadout_items_claim
+         ON memory_context_loadout_items (loadout_id, asset_kind, claim_id)
+         WHERE claim_id IS NOT NULL`,
+      `CREATE UNIQUE INDEX uq_memory_context_loadout_items_external
+         ON memory_context_loadout_items (loadout_id, asset_kind, external_asset_ref)
+         WHERE external_asset_ref IS NOT NULL`,
       `CREATE TABLE memory_retrieval_trajectories (
          trajectory_id UUID PRIMARY KEY,
          installation_id UUID NOT NULL REFERENCES memory_installations(installation_id) ON DELETE CASCADE,

@@ -12,7 +12,11 @@ import FileChangeCard from '../../components/messages/FileChangeCard.vue'
 import FileChangeBottomSheet from '../../components/messages/FileChangeBottomSheet.vue'
 import ToolCallGroup from '../../components/messages/ToolCallGroup.vue'
 
-const websocketMock = vi.hoisted(() => ({ handlers: new Map<string, (message: any) => void>(), allHandlers: new Set<(message: any) => void>() }))
+const websocketMock = vi.hoisted(() => ({
+  handlers: new Map<string, (message: any) => void>(),
+  allHandlers: new Set<(message: any) => void>(),
+  send: vi.fn(() => true),
+}))
 const routeMock = vi.hoisted(() => ({ current: null as any }))
 const responsiveMock = vi.hoisted(() => ({ isMobile: { __v_isRef: true, value: false } }))
 
@@ -24,7 +28,7 @@ vi.mock('vue-router', () => ({
 vi.mock('../../composables/useWebSocket', () => ({
   useWebSocket: () => ({
     connected: ref(true), reconnecting: ref(false),
-    connect: vi.fn(), send: vi.fn(() => true), sendUserMessage: vi.fn(() => true),
+    connect: vi.fn(), send: websocketMock.send, sendUserMessage: vi.fn(() => true),
     onEvent: vi.fn((typeOrHandler: string | ((message: any) => void), handler?: (message: any) => void) => {
       if (typeof typeOrHandler === 'function') {
         websocketMock.allHandlers.add(typeOrHandler)
@@ -54,6 +58,204 @@ describe('SessionDetail processEvent integration', () => {
   beforeEach(() => {
     routeMock.current = reactive({ params: { id: 'ses_1' }, query: {} as Record<string, string> })
     responsiveMock.isMobile.value = false
+    websocketMock.send.mockClear()
+  })
+
+  test('continues initial replay when the rendered timeline underfills the current viewport', async () => {
+    vi.stubGlobal('requestAnimationFrame', (callback: FrameRequestCallback) => {
+      callback(performance.now())
+      return 1
+    })
+    const wrapper = shallowMount(SessionDetail)
+    ;(wrapper.vm as any).allSessions = [{ session_id: 'ses_1', daemon_id: 'daemon-1', status: 'idle' }]
+    await wrapper.vm.$nextTick()
+    const messages = wrapper.get('.chat-messages').element as HTMLDivElement
+    Object.defineProperties(messages, {
+      clientHeight: { configurable: true, get: () => 800 },
+      scrollHeight: { configurable: true, get: () => 850 },
+      scrollTop: { configurable: true, writable: true, value: 50 },
+    })
+    websocketMock.send.mockClear()
+
+    websocketMock.handlers.get('replay_end')!({
+      // PostgreSQL bigint cursors are serialized as strings by the live Relay.
+      type: 'replay_end', session_id: 'ses_1', req_id: 1, has_more: true, last_seq: '900',
+    })
+    await wrapper.vm.$nextTick()
+    await Promise.resolve()
+    await Promise.resolve()
+
+    expect(websocketMock.send).toHaveBeenCalledWith({
+      type: 'replay', session_id: 'ses_1', direction: 'backward', last_seq: 900, limit: 50, req_id: 2,
+    })
+    wrapper.unmount()
+    vi.unstubAllGlobals()
+  })
+
+  test('continues one older-history gesture when the rendered page adds too little height', async () => {
+    vi.stubGlobal('requestAnimationFrame', (callback: FrameRequestCallback) => {
+      callback(performance.now())
+      return 1
+    })
+    let scrollHeight = 1_600
+    const wrapper = shallowMount(SessionDetail)
+    const vm = wrapper.vm as any
+    vm.allSessions = [{ session_id: 'ses_1', daemon_id: 'daemon-1', status: 'idle' }]
+    await wrapper.vm.$nextTick()
+    const messages = wrapper.get('.chat-messages').element as HTMLDivElement
+    Object.defineProperties(messages, {
+      clientHeight: { configurable: true, get: () => 800 },
+      scrollHeight: { configurable: true, get: () => scrollHeight },
+      scrollTop: { configurable: true, writable: true, value: 0 },
+    })
+    vm.hasMore = true
+    vm.loadedMinId = 1_000
+    vm.isLoading = false
+    websocketMock.send.mockClear()
+
+    await wrapper.get('.chat-messages').trigger('scroll')
+    expect(websocketMock.send).toHaveBeenCalledWith({
+      type: 'replay', session_id: 'ses_1', direction: 'backward', last_seq: 1_000, limit: 50, req_id: 2,
+    })
+    websocketMock.send.mockClear()
+
+    scrollHeight = 1_680
+    websocketMock.handlers.get('replay_end')!({
+      type: 'replay_end', session_id: 'ses_1', req_id: 2, direction: 'backward', has_more: true, last_seq: 900,
+    })
+    await wrapper.vm.$nextTick()
+    await Promise.resolve()
+    await Promise.resolve()
+
+    expect(websocketMock.send).toHaveBeenCalledWith({
+      type: 'replay', session_id: 'ses_1', direction: 'backward', last_seq: 900, limit: 50, req_id: 3,
+    })
+    wrapper.unmount()
+    vi.unstubAllGlobals()
+  })
+
+  test('refills after meaningful viewport growth when the user remains at the bottom', async () => {
+    vi.useFakeTimers()
+    let onResize: ResizeObserverCallback | undefined
+    vi.stubGlobal('ResizeObserver', class {
+      private callback: ResizeObserverCallback
+      constructor(callback: ResizeObserverCallback) { this.callback = callback }
+      observe(element: Element) { if (element.classList.contains('chat-messages')) onResize = this.callback }
+      disconnect() {}
+      unobserve() {}
+    })
+    let clientHeight = 600
+    const wrapper = shallowMount(SessionDetail)
+    const vm = wrapper.vm as any
+    vm.allSessions = [{ session_id: 'ses_1', daemon_id: 'daemon-1', status: 'idle' }]
+    await wrapper.vm.$nextTick()
+    const messages = wrapper.get('.chat-messages').element as HTMLDivElement
+    Object.defineProperties(messages, {
+      clientHeight: { configurable: true, get: () => clientHeight },
+      scrollHeight: { configurable: true, get: () => 850 },
+      scrollTop: { configurable: true, writable: true, value: 50 },
+    })
+    vm.hasMore = true
+    vm.loadedMinId = 900
+    vm.isLoading = false
+    vm.isLoadingBackward = false
+    websocketMock.send.mockClear()
+
+    onResize?.([{ contentRect: { height: 600 } } as ResizeObserverEntry], {} as ResizeObserver)
+    clientHeight = 800
+    onResize?.([{ contentRect: { height: 800 } } as ResizeObserverEntry], {} as ResizeObserver)
+    await vi.advanceTimersByTimeAsync(400)
+
+    expect(websocketMock.send).toHaveBeenCalledWith({
+      type: 'replay', session_id: 'ses_1', direction: 'backward', last_seq: 900, limit: 50, req_id: 2,
+    })
+    wrapper.unmount()
+    vi.unstubAllGlobals()
+    vi.useRealTimers()
+  })
+
+  test('does not refill on viewport growth while the user is reading older history', async () => {
+    vi.useFakeTimers()
+    let onResize: ResizeObserverCallback | undefined
+    vi.stubGlobal('ResizeObserver', class {
+      private callback: ResizeObserverCallback
+      constructor(callback: ResizeObserverCallback) { this.callback = callback }
+      observe(element: Element) { if (element.classList.contains('chat-messages')) onResize = this.callback }
+      disconnect() {}
+      unobserve() {}
+    })
+    let clientHeight = 600
+    const wrapper = shallowMount(SessionDetail)
+    const vm = wrapper.vm as any
+    vm.allSessions = [{ session_id: 'ses_1', daemon_id: 'daemon-1', status: 'idle' }]
+    await wrapper.vm.$nextTick()
+    const messages = wrapper.get('.chat-messages').element as HTMLDivElement
+    Object.defineProperties(messages, {
+      clientHeight: { configurable: true, get: () => clientHeight },
+      scrollHeight: { configurable: true, get: () => 1_400 },
+      scrollTop: { configurable: true, writable: true, value: 0 },
+    })
+    vm.hasMore = true
+    vm.loadedMinId = 900
+    vm.isLoading = false
+    vm.isLoadingBackward = false
+    websocketMock.send.mockClear()
+
+    onResize?.([{ contentRect: { height: 600 } } as ResizeObserverEntry], {} as ResizeObserver)
+    clientHeight = 800
+    onResize?.([{ contentRect: { height: 800 } } as ResizeObserverEntry], {} as ResizeObserver)
+    await vi.advanceTimersByTimeAsync(400)
+
+    expect(websocketMock.send).not.toHaveBeenCalledWith(expect.objectContaining({
+      type: 'replay', last_seq: 900,
+    }))
+    wrapper.unmount()
+    vi.unstubAllGlobals()
+    vi.useRealTimers()
+  })
+
+  test('refills when the message viewport appears after replay completed without layout geometry', async () => {
+    vi.useFakeTimers()
+    let onResize: ResizeObserverCallback | undefined
+    vi.stubGlobal('requestAnimationFrame', (callback: FrameRequestCallback) => {
+      callback(performance.now())
+      return 1
+    })
+    vi.stubGlobal('ResizeObserver', class {
+      private callback: ResizeObserverCallback
+      constructor(callback: ResizeObserverCallback) { this.callback = callback }
+      observe(element: Element) { if (element.classList.contains('chat-messages')) onResize = this.callback }
+      disconnect() {}
+      unobserve() {}
+    })
+    const wrapper = shallowMount(SessionDetail)
+    websocketMock.send.mockClear()
+
+    websocketMock.handlers.get('replay_end')!({
+      type: 'replay_end', session_id: 'ses_1', req_id: 1, has_more: true, last_seq: 900,
+    })
+    await wrapper.vm.$nextTick()
+    await Promise.resolve()
+    await Promise.resolve()
+    expect((wrapper.vm as any).isLoading).toBe(false)
+
+    ;(wrapper.vm as any).allSessions = [{ session_id: 'ses_1', daemon_id: 'daemon-1', status: 'idle' }]
+    await wrapper.vm.$nextTick()
+    const messages = wrapper.get('.chat-messages').element as HTMLDivElement
+    Object.defineProperties(messages, {
+      clientHeight: { configurable: true, get: () => 800 },
+      scrollHeight: { configurable: true, get: () => 850 },
+      scrollTop: { configurable: true, writable: true, value: 50 },
+    })
+    onResize?.([{ contentRect: { height: 800 } } as ResizeObserverEntry], {} as ResizeObserver)
+    await vi.advanceTimersByTimeAsync(400)
+
+    expect(websocketMock.send).toHaveBeenCalledWith({
+      type: 'replay', session_id: 'ses_1', direction: 'backward', last_seq: 900, limit: 50, req_id: 2,
+    })
+    wrapper.unmount()
+    vi.unstubAllGlobals()
+    vi.useRealTimers()
   })
 
   test('filters the current host session rail with the scheme A agent popover', async () => {

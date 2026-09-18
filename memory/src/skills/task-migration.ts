@@ -17,7 +17,10 @@ export const SKILL_TASK_MIGRATION = {
       UNIQUE(installation_id,run_id)`,
     `ALTER TABLE memory_jobs ADD CONSTRAINT memory_jobs_installation_job_unique UNIQUE(installation_id,job_id)`,
     `ALTER TABLE memory_generation_runs ADD CONSTRAINT memory_generation_runs_installation_job_fk
-      FOREIGN KEY(installation_id,job_id) REFERENCES memory_jobs(installation_id,job_id) ON DELETE SET NULL (job_id)`,
+      FOREIGN KEY(installation_id,job_id) REFERENCES memory_jobs(installation_id,job_id)
+      DEFERRABLE INITIALLY DEFERRED`,
+    `ALTER TABLE memory_generation_runs ADD CONSTRAINT memory_generation_runs_job_delete_fk
+      FOREIGN KEY(job_id) REFERENCES memory_jobs(job_id) ON DELETE SET NULL`,
     `CREATE TABLE memory_skill_tasks (
       task_id UUID PRIMARY KEY,
       installation_id UUID NOT NULL REFERENCES memory_installations(installation_id) ON DELETE CASCADE,
