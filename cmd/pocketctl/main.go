@@ -1773,6 +1773,11 @@ func cmdDaemonStart(args []string) {
 		if evt.Type == "session_model_changed" && evt.Model != "" && evt.SessionID != "" {
 			current, _ := sm.GetSessionModel(evt.SessionID)
 			if evt.Model == current {
+				// Explicit remote switches update the in-memory selection before
+				// publishing the confirmation event. Keep that correlated event.
+				if evt.Reason == protocol.TurnReasonUserRequested {
+					return []protocol.DaemonEvent{evt}
+				}
 				return nil
 			}
 			sm.SetSessionModel(evt.SessionID, evt.Model)
@@ -3558,6 +3563,7 @@ func deliverUserMessage(
 ) error {
 	agent, exists := sm.GetSessionAgent(cmd.SessionID)
 	emitsReceipt := exists && agent != "" && cmd.MsgID != ""
+	defersReceipt := agent == adapter.AgentOpencode && sm.SessionControlMode(cmd.SessionID) == protocol.ControlManaged
 	err := sm.SendMessageWithInput(ctx, session.UserMessageInput{
 		SessionID:    cmd.SessionID,
 		InvocationID: cmd.InvocationID,
@@ -3587,6 +3593,15 @@ func deliverUserMessage(
 		})
 		return err
 	}
+	if errors.Is(err, session.ErrOpenCodeSessionBusy) && cmd.MsgID != "" {
+		retryable := true
+		send(protocol.DaemonEvent{
+			Type: "user_message_receipt", SessionID: cmd.SessionID,
+			MsgID: cmd.MsgID, RequestID: cmd.RequestID,
+			Status: "rejected", Reason: protocol.ReasonSessionBusy, Retryable: &retryable,
+		})
+		return err
+	}
 	if err != nil && cmd.MsgID != "" {
 		reason := "dispatch_failed"
 		if errors.Is(err, session.ErrSessionExecutionIdentityUnavailable) {
@@ -3601,6 +3616,9 @@ func deliverUserMessage(
 	}
 	if !emitsReceipt {
 		return err
+	}
+	if defersReceipt && err == nil {
+		return nil
 	}
 	status := "accepted"
 	reason := ""
@@ -3661,6 +3679,10 @@ func handleUserMessageCommand(
 		if err := deliverUserMessage(driveCtx, sm, cmd, send); err != nil {
 			if errors.Is(err, adapter.ErrObserverReadOnly) {
 				return nil // deliverUserMessage already sent the single typed nack.
+			}
+			var pending *turn.InterruptPendingError
+			if errors.As(err, &pending) || errors.Is(err, session.ErrOpenCodeSessionBusy) {
+				return nil // correlated retryable receipt is the complete client response
 			}
 			logger.Error("send message failed", "error", err)
 			reason := "dispatch_failed"
@@ -3999,6 +4021,15 @@ func handleCommands(ctx context.Context, client *ws.Client, sm *session.SessionM
 				if err != nil {
 					logger.Error("set session agent failed", "session", cmd.SessionID, "agent", cmd.AgentName, "error", err)
 					client.SendMsg(controlCommandErrorEvent("set_session_agent", cmd.SessionID, cmd.RequestID, err))
+				}
+
+			case "set_session_model":
+				modelCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+				err := sm.SwitchSessionModel(modelCtx, cmd.SessionID, cmd.Model, cmd.RequestID)
+				cancel()
+				if err != nil {
+					logger.Error("set session model failed", "session", cmd.SessionID, "model", cmd.Model, "error", err)
+					client.SendMsg(controlCommandErrorEvent("set_session_model", cmd.SessionID, cmd.RequestID, err))
 				}
 
 			case "get_session_meta":

@@ -393,6 +393,7 @@ describe('Codex Desktop observer Relay boundary', () => {
       'set_permission_config',
       'set_effort',
       'set_session_agent',
+      'set_session_model',
       'approval_response',
       'question_response',
       'question_reject',

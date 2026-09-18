@@ -21,6 +21,7 @@ export const OBSERVER_NATIVE_DRIVE_MESSAGE_TYPES: ReadonlySet<string> = new Set(
   'set_permission_config',
   'set_effort',
   'set_session_agent',
+  'set_session_model',
   'approval_response',
   'question_response',
   'question_reject',

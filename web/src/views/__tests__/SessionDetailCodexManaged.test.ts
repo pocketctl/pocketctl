@@ -667,4 +667,44 @@ describe('SessionDetail managed Codex terminal control', () => {
     focusWrapper.unmount()
     expect(websocketMock.handlers.has('user_message_receipt')).toBe(false)
   })
+
+  test('managed OpenCode waits for native acceptance and restores a busy draft', async () => {
+    const wrapper = mountSession()
+    setTerminalSession({
+      agent_type: 'opencode', source: 'daemon', status: 'running', control_mode: 'managed',
+      capabilities: ['shared_runtime', 'message_acceptance_receipt'],
+    })
+    websocketMock.handlers.get('session_status')?.({ session_id: 'thr_1', status: 'running' })
+    await nextTick()
+
+    const msgId = await sendPrompt(wrapper, 'keep this input')
+    websocketMock.handlers.get('user_message_ack')?.({ session_id: 'thr_1', msg_id: msgId })
+    await nextTick()
+    expect(deliveryStatus(wrapper, 'keep this input')).toBe('forwarded')
+
+    websocketMock.handlers.get('user_message_receipt')?.({
+      type: 'user_message_receipt', session_id: 'thr_1', msg_id: msgId,
+      status: 'rejected', reason: 'session_busy', retryable: true,
+    })
+    await nextTick()
+    expect(deliveryStatus(wrapper, 'keep this input')).toBeUndefined()
+    expect((wrapper.find('.chat-textarea').element as HTMLTextAreaElement).value).toBe('keep this input')
+    expect(wrapper.text()).toContain('session.session_busy')
+  })
+
+  test('managed OpenCode routes /model arguments to the daemon', async () => {
+    const wrapper = mountSession()
+    setTerminalSession({
+      agent_type: 'opencode', source: 'daemon', control_mode: 'managed',
+      capabilities: ['shared_runtime', 'message_acceptance_receipt'],
+    })
+    await nextTick()
+    await wrapper.find('.chat-textarea').setValue('/model anthropic/claude-sonnet')
+    await wrapper.find('.send-btn').trigger('click')
+
+    expect(websocketMock.send.mock.calls.map(([payload]) => payload)).toContainEqual(expect.objectContaining({
+      type: 'set_session_model', session_id: 'thr_1', model: 'anthropic/claude-sonnet',
+    }))
+    expect(websocketMock.send.mock.calls.map(([payload]) => payload).some((payload: any) => payload.type === 'user_message')).toBe(false)
+  })
 })

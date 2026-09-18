@@ -12,6 +12,7 @@ func TestOpenCodeInteractionClientRoundTrip(t *testing.T) {
 		{Type: "question_response", SessionID: "ses_1", RequestID: "que_1", Answers: [][]string{{"A"}, {"B", "custom"}}},
 		{Type: "mcp_elicitation_response", SessionID: "ses_1", RequestID: "mcp_1", ElicitationAction: "accept", ElicitationContent: json.RawMessage(`{"project":"pocketctl"}`)},
 		{Type: "set_session_agent", SessionID: "ses_1", AgentName: "build"},
+		{Type: "set_session_model", SessionID: "ses_1", RequestID: "model_1", Model: "openai/gpt-5"},
 	}
 	for _, want := range tests {
 		raw, err := json.Marshal(want)
@@ -22,7 +23,7 @@ func TestOpenCodeInteractionClientRoundTrip(t *testing.T) {
 		if err := json.Unmarshal(raw, &got); err != nil {
 			t.Fatal(err)
 		}
-		if got.Type != want.Type || got.Action != want.Action || got.AgentName != want.AgentName {
+		if got.Type != want.Type || got.Action != want.Action || got.AgentName != want.AgentName || got.Model != want.Model {
 			t.Fatalf("bad client round trip: got %+v want %+v", got, want)
 		}
 		if len(got.Answers) != len(want.Answers) {

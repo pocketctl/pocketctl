@@ -195,6 +195,7 @@ describe('read-only observer session fail-closed gate', () => {
       'user_message', 'session_interrupt', 'session_kill', 'set_permission_config',
       'approval_response', 'question_response', 'question_reject', 'interactive_response',
       'mcp_elicitation_response', 'list_session_agents', 'set_session_agent',
+      'set_session_model',
     ]))
   })
 

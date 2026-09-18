@@ -74,6 +74,9 @@ const (
 
 	// Typed nack reason for input arriving while a turn is interrupt_pending.
 	ReasonTurnInterruptPending = "turn_interrupt_pending"
+	// Typed nack reason for backends that cannot accept another input while the
+	// current native turn is still generating.
+	ReasonSessionBusy = "session_busy"
 )
 
 // Client → Daemon commands
