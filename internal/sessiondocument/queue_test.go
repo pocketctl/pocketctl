@@ -2,6 +2,8 @@ package sessiondocument
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"sync"
 	"testing"
 	"time"
@@ -137,4 +139,32 @@ func TestCaptureQueueIgnoresUntrustedProducerShapes(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
 	defer cancel()
 	<-ctx.Done()
+}
+
+func TestCaptureQueueAcceptsExplicitCandidateWithAuthorizedRoot(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "report.md"), []byte("# report\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	candidate, ok := CandidateFromPath("zcode-session", "zcode-turn", "zcode-change", "zcode-source", "report.md")
+	if !ok {
+		t.Fatal("candidate rejected")
+	}
+	results := make(chan CaptureResult, 1)
+	queue := NewCaptureQueue(CaptureQueueOptions{
+		MaxDocumentBytes: 100,
+		OnResult:         func(result CaptureResult) { results <- result },
+	})
+	defer queue.Stop()
+	if !queue.SubmitCandidateWithRoot(root, candidate, TransportLimits{}) {
+		t.Fatal("explicit candidate rejected")
+	}
+	select {
+	case result := <-results:
+		if result.Reason != "" || string(result.Bytes) != "# report\n" {
+			t.Fatalf("unexpected capture result: %+v", result)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for capture")
+	}
 }

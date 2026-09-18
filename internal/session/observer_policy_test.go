@@ -918,11 +918,17 @@ func TestUserMessageRejectsEmptyAndUnsupportedExecutionIdentityBeforeTurnStart(t
 				return nil, errors.New("must not start")
 			})
 			err := sm.SendMessageWithInput(context.Background(), UserMessageInput{SessionID: "identity-session", Content: "do not run", RequestID: "req-id", MsgID: "msg-id"})
-			if err == nil || !strings.Contains(err.Error(), "execution identity") { t.Fatalf("error=%v", err) }
-			if started { t.Fatal("invalid identity reached launcher") }
+			if err == nil || !strings.Contains(err.Error(), "execution identity") {
+				t.Fatalf("error=%v", err)
+			}
+			if started {
+				t.Fatal("invalid identity reached launcher")
+			}
 			select {
 			case event := <-output:
-				if event.Type == protocol.EventTypeTurnStatus { t.Fatalf("invalid identity created turn: %+v", event) }
+				if event.Type == protocol.EventTypeTurnStatus {
+					t.Fatalf("invalid identity created turn: %+v", event)
+				}
 			default:
 			}
 		})
@@ -938,6 +944,7 @@ func TestObserverPolicyCommandMatrixPreservesReadOnlyAndRelayOnlyOperations(t *t
 		"set_permission_config",
 		"set_effort",
 		"set_session_agent",
+		"set_session_model",
 		"approval_response",
 		"question_response",
 		"question_reject",

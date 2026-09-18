@@ -48,6 +48,13 @@ func TestOpenCodeP1IntegrationFlow(t *testing.T) {
 				{"name": "build", "description": "Build", "mode": "primary", "model": map[string]any{"providerID": "openai", "modelID": "gpt-5"}},
 				{"name": "explore", "mode": "subagent"},
 			})
+		case r.Method == http.MethodGet && r.URL.Path == "/api/model":
+			json.NewEncoder(w).Encode(map[string]any{"data": []map[string]any{
+				{"providerID": "openai", "id": "gpt-5"},
+				{"providerID": "anthropic", "id": "claude-sonnet"},
+			}})
+		case r.Method == http.MethodGet && r.URL.Path == "/config":
+			json.NewEncoder(w).Encode(map[string]any{"model": "openai/gpt-5"})
 		case r.Method == http.MethodGet && r.URL.Path == "/api/session/ses_1":
 			json.NewEncoder(w).Encode(map[string]any{"data": map[string]any{"id": "ses_1", "agent": "build"}})
 		case r.Method == http.MethodPost && r.URL.Path == "/api/session/ses_1/agent":
@@ -144,6 +151,15 @@ func TestOpenCodeP1IntegrationFlow(t *testing.T) {
 	}
 	if event := waitDaemonEvent(t, out, "session_agent_changed", ""); event.CurrentAgent != "build" {
 		t.Fatalf("agent event=%+v", event)
+	}
+	if err := sm.SwitchSessionModel(context.Background(), "ses_1", "anthropic/claude-sonnet", "req-model"); err != nil {
+		t.Fatal(err)
+	}
+	if event := waitDaemonEvent(t, out, "session_model_changed", ""); event.Model != "anthropic/claude-sonnet" || event.RequestID != "req-model" || event.Reason != protocol.TurnReasonUserRequested {
+		t.Fatalf("model event=%+v", event)
+	}
+	if model, _ := sm.GetSessionModel("ses_1"); model != "anthropic/claude-sonnet" {
+		t.Fatalf("model=%q", model)
 	}
 
 	if err := backend.Send(context.Background(), "ses_1", "/review abc def"); err != nil {

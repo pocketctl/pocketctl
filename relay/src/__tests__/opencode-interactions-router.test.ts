@@ -46,11 +46,13 @@ describe('OpenCode interaction router', () => {
     daemon._sent.length = 0
 
     await router.handleClientMessage(client, { type: 'set_session_agent', session_id: 'ses_1', agent_name: 'build' })
+    await router.handleClientMessage(client, { type: 'set_session_model', session_id: 'ses_1', model: 'openai/gpt-5', request_id: 'model_1' })
     await router.handleClientMessage(client, { type: 'question_response', session_id: 'ses_1', request_id: 'que_1', answers: [['A']] })
     await router.handleClientMessage(client, { type: 'approval_response', session_id: 'ses_1', request_id: 'per_1', action: 'always' })
 
     expect(daemon._sent).toEqual(expect.arrayContaining([
       expect.objectContaining({ type: 'set_session_agent', session_id: 'ses_1', agent_name: 'build' }),
+      expect.objectContaining({ type: 'set_session_model', session_id: 'ses_1', model: 'openai/gpt-5', request_id: 'model_1' }),
       expect.objectContaining({ type: 'question_response', request_id: 'que_1', answers: [['A']] }),
       expect.objectContaining({ type: 'approval_response', request_id: 'per_1', action: 'always' }),
     ]))

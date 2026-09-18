@@ -55,6 +55,8 @@ type ObserverConfig struct {
 	DisablePoll          time.Duration // default 5s (config-disable check interval)
 	Emit                 EmitFunc      // low-priority gate (content events)
 	EmitDirect           EmitFunc      // bypass-gate for critical metadata (session_status)
+	DocumentCaptureReady func() bool
+	CaptureDocument      DocumentCaptureFunc
 	Logger               *slog.Logger
 }
 
@@ -82,7 +84,8 @@ type Observer struct {
 	// skipped at idle cadence with a rate-limited warning until manual
 	// recovery; it is never silently resolved by clearing pending.
 	recoveryMu      sync.Mutex
-	recoveryBlocked map[string]time.Time // wireID → last warn
+	recoveryBlocked map[string]time.Time         // wireID → last warn
+	documentSeen    map[string]map[string]string // wireID → source path → latest submitted event ID
 	// Owned by the poll loop. Continue session keyset pages across ticks so
 	// old sessions and metadata retries cannot be starved by the first page.
 	sessionAfter *SessionPageCursor
@@ -133,7 +136,17 @@ func NewObserver(cfg ObserverConfig) *Observer {
 	}
 	o.journal = cfg.PreparedEventJournal
 	o.recoveryBlocked = map[string]time.Time{}
+	o.documentSeen = map[string]map[string]string{}
 	return o
+}
+
+// SetDocumentCapture installs the optional local document snapshot callbacks.
+// Production calls this after the WebSocket client exists and before Start.
+func (o *Observer) SetDocumentCapture(ready func() bool, capture DocumentCaptureFunc) {
+	o.mu.Lock()
+	o.cfg.DocumentCaptureReady = ready
+	o.cfg.CaptureDocument = capture
+	o.mu.Unlock()
 }
 
 // Start opens the store and begins the poll loop. It returns an error if the

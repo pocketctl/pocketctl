@@ -109,7 +109,7 @@ func TestOpenCodeAdoptContinueAndResumeAfterNativeProcessExits(t *testing.T) {
 				t.Fatalf("mode=%q", got)
 			}
 			caps := sm.OpenCodeInteractionCapabilities("ses_adopt")
-			if !containsCapability(caps, "shared_runtime") || !containsCapability(caps, "terminal_coapproval") || !containsCapability(caps, "questions") {
+			if !containsCapability(caps, "shared_runtime") || !containsCapability(caps, "terminal_coapproval") || !containsCapability(caps, "questions") || !containsCapability(caps, MessageAcceptanceReceiptCapability) {
 				t.Fatalf("capabilities=%v", caps)
 			}
 		})

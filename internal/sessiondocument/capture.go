@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"io"
+	"os"
 	"path"
 	"path/filepath"
 	"strings"
@@ -59,6 +60,17 @@ func CandidateFromEvent(event protocol.DaemonEvent) (Candidate, bool) {
 	if event.ChangeKind == protocol.FileChangeMove {
 		candidatePath = event.MovePath
 	}
+	return CandidateFromPath(event.SessionID, event.TurnID, event.ChangeSetID, event.EventID, candidatePath)
+}
+
+// CandidateFromPath builds a validated document candidate from an already
+// authorized relative path. Observer integrations use this only after binding
+// an agent-native file path to a canonical session root with
+// ResolvePathWithinRoot.
+func CandidateFromPath(sessionID, turnID, changeSetID, sourceEventID, candidatePath string) (Candidate, bool) {
+	if sessionID == "" || turnID == "" || changeSetID == "" || sourceEventID == "" {
+		return Candidate{}, false
+	}
 	normalized, ok := normalizeRelativePath(candidatePath)
 	if !ok {
 		return Candidate{}, false
@@ -72,9 +84,50 @@ func CandidateFromEvent(event protocol.DaemonEvent) (Candidate, bool) {
 		return Candidate{}, false
 	}
 	return Candidate{
-		SessionID: event.SessionID, TurnID: event.TurnID, ChangeSetID: event.ChangeSetID,
-		SourceEventID: event.EventID, RelativePath: normalized, DisplayName: displayName, Format: format,
+		SessionID: sessionID, TurnID: turnID, ChangeSetID: changeSetID,
+		SourceEventID: sourceEventID, RelativePath: normalized, DisplayName: displayName, Format: format,
 	}, true
+}
+
+// ResolvePathWithinRoot converts an absolute or relative agent-native path to
+// a normalized relative path under an existing canonical session root. It is
+// only a lexical/root binding step; Capture still performs the secure open and
+// rejects symlinks, non-regular files, and races.
+func ResolvePathWithinRoot(root, candidatePath string) (canonicalRoot, relativePath string, ok bool) {
+	if root == "" || candidatePath == "" || len(candidatePath) > 4096 || strings.ContainsRune(candidatePath, '\x00') {
+		return "", "", false
+	}
+	canonicalRoot, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		return "", "", false
+	}
+	rootInfo, err := os.Stat(canonicalRoot)
+	if err != nil || !rootInfo.IsDir() {
+		return "", "", false
+	}
+
+	nativePath := filepath.FromSlash(strings.ReplaceAll(candidatePath, `\`, "/"))
+	relative := nativePath
+	if filepath.IsAbs(nativePath) {
+		originalRoot, absErr := filepath.Abs(root)
+		if absErr != nil {
+			return "", "", false
+		}
+		relative, err = filepath.Rel(originalRoot, filepath.Clean(nativePath))
+		if err != nil || filepath.IsAbs(relative) || relative == ".." ||
+			strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
+			relative, err = filepath.Rel(canonicalRoot, filepath.Clean(nativePath))
+		}
+	}
+	if err != nil || filepath.IsAbs(relative) || relative == ".." ||
+		strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
+		return "", "", false
+	}
+	normalized, ok := normalizeRelativePath(filepath.ToSlash(relative))
+	if !ok {
+		return "", "", false
+	}
+	return canonicalRoot, normalized, true
 }
 
 func normalizeRelativePath(value string) (string, bool) {

@@ -644,6 +644,77 @@ func (s *Store) ListChangedParts(ctx context.Context, sessionID string, after Mu
 	return page, nil
 }
 
+// ListDocumentToolParts returns the newest successful Write/Edit operations
+// that target Markdown or HTML paths. It returns metadata and the existing
+// whitelisted part JSON only; file contents are never read from SQLite here.
+// The query keeps only the latest operation for each exact source path and
+// returns at most the configured number of document identities per session.
+func (s *Store) ListDocumentToolParts(ctx context.Context, sessionID string, limit int) ([]PartRow, error) {
+	if limit <= 0 || limit > documentToolQueryLimit {
+		limit = documentToolQueryLimit
+	}
+	if _, ok := ctx.Deadline(); !ok {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, s.queryTimeout)
+		defer cancel()
+	}
+	const jsonText = `CASE WHEN json_valid(p.data) THEN CAST(json_extract(p.data, '%s') AS TEXT) END`
+	filePathExpr := fmt.Sprintf(jsonText, `$.state.input.file_path`)
+	typeExpr := fmt.Sprintf(jsonText, `$.type`)
+	toolExpr := fmt.Sprintf(jsonText, `$.tool`)
+	statusExpr := fmt.Sprintf(jsonText, `$.state.status`)
+	query := `WITH candidates AS (
+		SELECT p.id, p.message_id, p.session_id, p.sequence AS part_sequence,
+			m.sequence AS message_sequence, p.time_updated, p.data,
+			CASE WHEN json_valid(m.data) THEN CAST(json_extract(m.data, '$.role') AS TEXT) END AS role,
+			CASE WHEN json_valid(m.data) THEN CAST(json_extract(m.data, '$.synthetic') AS TEXT) END AS synthetic,
+			CASE WHEN json_valid(m.data) THEN CAST(json_extract(m.data, '$.system') AS TEXT) END AS system,
+			CASE WHEN json_valid(m.data) THEN CAST(json_extract(m.data, '$.hidden') AS TEXT) END AS hidden,
+			CASE WHEN json_valid(m.data) THEN CAST(json_extract(m.data, '$.internal') AS TEXT) END AS internal,
+			CASE WHEN json_valid(m.data) THEN CAST(json_extract(m.data, '$.visibility') AS TEXT) END AS visibility,
+			` + filePathExpr + ` AS file_path,
+			ROW_NUMBER() OVER (
+				PARTITION BY ` + filePathExpr + `
+				ORDER BY m.sequence DESC, p.sequence DESC, p.id DESC
+			) AS path_rank
+		FROM part p JOIN message m ON p.message_id = m.id
+		WHERE p.session_id = ?
+		  AND ` + typeExpr + ` = 'tool'
+		  AND ` + toolExpr + ` IN ('Write', 'Edit')
+		  AND ` + statusExpr + ` = 'completed'
+		  AND (` + filePathExpr + ` LIKE '%.md' COLLATE NOCASE
+		       OR ` + filePathExpr + ` LIKE '%.markdown' COLLATE NOCASE
+		       OR ` + filePathExpr + ` LIKE '%.html' COLLATE NOCASE
+		       OR ` + filePathExpr + ` LIKE '%.htm' COLLATE NOCASE)
+	)
+	SELECT id, message_id, session_id, part_sequence, message_sequence, time_updated, data,
+		role, synthetic, system, hidden, internal, visibility
+	FROM candidates
+	WHERE path_rank = 1
+	ORDER BY message_sequence DESC, part_sequence DESC, id DESC
+	LIMIT ?`
+	rows, err := s.db.QueryContext(ctx, query, sessionID, limit)
+	if err != nil {
+		return nil, classifyQueryErr(err)
+	}
+	defer rows.Close()
+	result := make([]PartRow, 0, limit)
+	for rows.Next() {
+		var row PartRow
+		var role, synthetic, system, hidden, internal, visibility sql.NullString
+		if err := rows.Scan(&row.ID, &row.MessageID, &row.SessionID, &row.Sequence, &row.MessageSequence,
+			&row.TimeUpdated, &row.DataJSON, &role, &synthetic, &system, &hidden, &internal, &visibility); err != nil {
+			return nil, classifyQueryErr(err)
+		}
+		row.Msg = scanPartScope(role, synthetic, system, hidden, internal, visibility)
+		result = append(result, row)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, classifyQueryErr(err)
+	}
+	return result, nil
+}
+
 // ListTodos returns the current todo snapshot for a session.
 func (s *Store) ListTodos(ctx context.Context, sessionID string) ([]TodoRow, error) {
 	if _, ok := ctx.Deadline(); !ok {

@@ -69,26 +69,28 @@ type pagePlan struct {
 // are deliberately absent: they are not outcomes and must not influence
 // interval selection.
 type pollResult struct {
-	NewPending      int
-	Emitted         int
-	Deferred        bool
-	ConflictRetries int
-	PersistCalls    int
+	NewPending       int
+	Emitted          int
+	DocumentCaptures int
+	Deferred         bool
+	ConflictRetries  int
+	PersistCalls     int
 }
 
 // HasActiveWork reports whether the poll produced outcome-level work: newly
 // recorded pending entries, emitted events, or deferred retryable work.
 func (r pollResult) HasActiveWork() bool {
-	return r.NewPending > 0 || r.Emitted > 0 || r.Deferred
+	return r.NewPending > 0 || r.Emitted > 0 || r.DocumentCaptures > 0 || r.Deferred
 }
 
 // streamStats aggregates one stream (or session) within a poll.
 type streamStats struct {
-	scanned    int
-	newPending int
-	emitted    int
-	deferred   bool
-	conflicts  int
+	scanned          int
+	newPending       int
+	emitted          int
+	documentCaptures int
+	deferred         bool
+	conflicts        int
 }
 
 // pollOnce runs one bounded scan: discover sessions, and for each run the
@@ -150,6 +152,7 @@ func (o *Observer) pollOnce(ctx context.Context) pollResult {
 		st := o.scanSession(ctx, wireID, sr)
 		res.NewPending += st.newPending
 		res.Emitted += st.emitted
+		res.DocumentCaptures += st.documentCaptures
 		res.ConflictRetries += st.conflicts
 		if st.deferred {
 			res.Deferred = true
@@ -262,7 +265,59 @@ func (o *Observer) scanSession(ctx context.Context, wireID string, sr SessionRow
 		})
 		total.merge(st, 0)
 	}
+	documentCaptureReady := o.cfg.DocumentCaptureReady == nil || o.cfg.DocumentCaptureReady()
+	if !total.deferred && documentCaptureReady && o.cfg.CaptureDocument != nil {
+		captured, deferred := o.captureSessionDocuments(ctx, wireID, sr)
+		total.documentCaptures += captured
+		total.deferred = deferred
+	}
 	return total
+}
+
+func (o *Observer) captureSessionDocuments(ctx context.Context, wireID string, session SessionRow) (int, bool) {
+	rows, err := o.store.ListDocumentToolParts(ctx, session.ID, documentToolQueryLimit)
+	if err != nil {
+		o.log.Warn("zcode poll: list document candidates", "error", err)
+		return 0, true
+	}
+	seenPaths := make(map[string]struct{}, maxDocumentCandidatesPerSession)
+	candidates := make([]DocumentCandidate, 0, len(rows))
+	for _, row := range rows {
+		candidate, ok := documentCandidateFromRow(o.cfg.SourceID, wireID, session.Directory, row)
+		if !ok {
+			continue
+		}
+		if _, duplicatePath := seenPaths[candidate.FilePath]; duplicatePath {
+			continue
+		}
+		seenPaths[candidate.FilePath] = struct{}{}
+		if len(seenPaths) > maxDocumentCandidatesPerSession {
+			break
+		}
+		candidates = append(candidates, candidate)
+	}
+	latestByPath := o.documentSeen[wireID]
+	if latestByPath == nil {
+		latestByPath = map[string]string{}
+		o.documentSeen[wireID] = latestByPath
+	}
+	for filePath := range latestByPath {
+		if _, stillActive := seenPaths[filePath]; !stillActive {
+			delete(latestByPath, filePath)
+		}
+	}
+	captured := 0
+	for _, candidate := range candidates {
+		if latestByPath[candidate.FilePath] == candidate.SourceEventID {
+			continue
+		}
+		if !o.cfg.CaptureDocument(candidate) {
+			return captured, true
+		}
+		latestByPath[candidate.FilePath] = candidate.SourceEventID
+		captured++
+	}
+	return captured, false
 }
 
 // runPage runs one prepare→persist→emit cycle with bounded conflict rebuilds.
@@ -899,6 +954,7 @@ func (s *streamStats) merge(st streamStats, scanned int) {
 	s.scanned += scanned
 	s.newPending += st.newPending
 	s.emitted += st.emitted
+	s.documentCaptures += st.documentCaptures
 	s.deferred = s.deferred || st.deferred
 	s.conflicts += st.conflicts
 }

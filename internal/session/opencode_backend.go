@@ -51,6 +51,8 @@ const (
 	opencodeSeenEventLimit     = 4096
 )
 
+var ErrOpenCodeSessionBusy = errors.New("opencode session is generating a response")
+
 type opencodeCoordinator struct {
 	sm *SessionManager
 
@@ -1240,6 +1242,7 @@ func (c *opencodeCoordinator) startSync(sessionID string, emitUser bool) {
 
 func (c *opencodeCoordinator) syncLoop(ctx context.Context, sessionID string, emitUser bool) {
 	sync := adapter.NewOpencodeSync(sessionID, emitUser)
+	acceptedDocuments := make(map[string]string)
 	ticker := time.NewTicker(opencodeSyncInterval)
 	defer ticker.Stop()
 	lastTitle := ""
@@ -1265,6 +1268,7 @@ func (c *opencodeCoordinator) syncLoop(ctx context.Context, sessionID string, em
 			}
 			msgs, err := s.GetMessages(ctx, sessionID, cwd)
 			if err == nil {
+				c.sm.captureOpencodeDocuments(sessionID, msgs, nativeStatus, acceptedDocuments)
 				if evs := sync.DiffWithNativeStatus(msgs, nativeStatus); len(evs) > 0 {
 					for _, ev := range evs {
 						if ev.Type == "session_status" {
@@ -1449,7 +1453,18 @@ func (b *serverBackend) send(ctx context.Context, sessionID, content string, hid
 		messages, historyErr = s.GetMessages(bctx, sessionID, cwd)
 		cancel()
 		if historyErr == nil && adapter.OpencodeMessagesRunning(messages) {
-			return fmt.Errorf("会话正在生成回复，请等当前回合结束后再发送")
+			return ErrOpenCodeSessionBusy
+		}
+	}
+	correlation := userMessageCorrelationFrom(ctx)
+	emitAcceptanceReceipt := func(status, reason string, retryable bool) {
+		if correlation.MsgID == "" {
+			return
+		}
+		b.coord.sm.outputCh <- protocol.DaemonEvent{
+			Type: "user_message_receipt", SessionID: sessionID,
+			MsgID: correlation.MsgID, RequestID: correlation.RequestID,
+			Status: status, Reason: reason, Retryable: &retryable,
 		}
 	}
 	if name, arguments, isSlash := parseOpenCodeSlashCommand(content); isSlash {
@@ -1460,6 +1475,7 @@ func (b *serverBackend) send(ctx context.Context, sessionID, content string, hid
 				Type: "command_receipt", SessionID: sessionID, Command: "/" + name,
 				ReceiptStatus: "failed", Message: "无法加载 OpenCode 命令列表: " + err.Error(),
 			}
+			emitAcceptanceReceipt("rejected", "dispatch_failed", false)
 			return nil
 		}
 		known := false
@@ -1474,6 +1490,9 @@ func (b *serverBackend) send(ctx context.Context, sessionID, content string, hid
 				status, message := "success", ""
 				if err := b.coord.srv().ExecuteCommand(context.Background(), sessionID, cwd, name, arguments); err != nil {
 					status, message = "failed", err.Error()
+					emitAcceptanceReceipt("rejected", "dispatch_failed", false)
+				} else {
+					emitAcceptanceReceipt("accepted", "", false)
 				}
 				b.coord.sm.outputCh <- protocol.DaemonEvent{
 					Type: "command_receipt", SessionID: sessionID, Command: "/" + name,
@@ -1534,15 +1553,25 @@ func (b *serverBackend) send(ctx context.Context, sessionID, content string, hid
 	}
 	cwd, _ := b.coord.sm.GetSessionCwd(sessionID)
 	go func() {
-		var receiptOnce sync.Once
-		recordReceipt := func(delivered bool, code string) {
-			receiptOnce.Do(func() {
+		var memoryReceiptOnce sync.Once
+		recordMemoryReceipt := func(delivered bool, code string) {
+			memoryReceiptOnce.Do(func() {
 				b.coord.sm.recordMemoryContextReceipt(context.Background(), hidden, delivered, code)
+			})
+		}
+		var acceptanceReceiptOnce sync.Once
+		recordAcceptanceReceipt := func(delivered bool, code string) {
+			acceptanceReceiptOnce.Do(func() {
+				if delivered {
+					emitAcceptanceReceipt("accepted", "", false)
+				} else {
+					emitAcceptanceReceipt("rejected", code, false)
+				}
 			})
 		}
 		acceptanceCtx, cancelAcceptance := context.WithCancel(context.Background())
 		defer cancelAcceptance()
-		if hidden != nil {
+		if hidden != nil || correlation.MsgID != "" {
 			go func() {
 				ticker := time.NewTicker(25 * time.Millisecond)
 				defer ticker.Stop()
@@ -1561,7 +1590,8 @@ func (b *serverBackend) send(ctx context.Context, sessionID, content string, hid
 						if pollErr == nil && opencodeUserMessageAccepted(
 							observed, sourceMessageID, baselineMessageIDs, content,
 						) {
-							recordReceipt(true, "accepted")
+							recordMemoryReceipt(true, "accepted")
+							recordAcceptanceReceipt(true, "accepted")
 							return
 						}
 					}
@@ -1583,9 +1613,11 @@ func (b *serverBackend) send(ctx context.Context, sessionID, content string, hid
 			if pollErr == nil && opencodeUserMessageAccepted(
 				observed, sourceMessageID, baselineMessageIDs, content,
 			) {
-				recordReceipt(true, "accepted")
+				recordMemoryReceipt(true, "accepted")
+				recordAcceptanceReceipt(true, "accepted")
 			} else {
-				recordReceipt(false, "dispatch_failed")
+				recordMemoryReceipt(false, "dispatch_failed")
+				recordAcceptanceReceipt(false, "dispatch_failed")
 			}
 			slog.Default().Error("opencode prompt POST failed", "session", sessionID, "error", err)
 			if !b.coord.sm.finishOpenCodePromptDispatch(sessionID, sourceMessageID, adapter.OpencodeMessageWithParts{}, err) {
@@ -1598,7 +1630,8 @@ func (b *serverBackend) send(ctx context.Context, sessionID, content string, hid
 		} else {
 			// A successful blocking response is a final acceptance proof if the
 			// message poll could not observe the user row sooner.
-			recordReceipt(true, "accepted")
+			recordMemoryReceipt(true, "accepted")
+			recordAcceptanceReceipt(true, "accepted")
 			b.coord.sm.finishOpenCodePromptDispatch(sessionID, sourceMessageID, result, nil)
 			slog.Default().Info("opencode prompt POST ok", "session", sessionID)
 		}
@@ -1882,7 +1915,7 @@ func registerCwdKeyLocked(sm *SessionManager, sessionID, cwdKey string) {
 }
 
 var opencodeInteractionCapabilities = []string{
-	"dynamic_commands", "agent_switch", "permission_actions", "questions", "shared_runtime", "terminal_coapproval",
+	"dynamic_commands", "agent_switch", MessageAcceptanceReceiptCapability, "permission_actions", "questions", "shared_runtime", "terminal_coapproval",
 }
 
 func (sm *SessionManager) OpenCodeInteractionCapabilities(sessionID string) []string {
@@ -2007,6 +2040,70 @@ func (sm *SessionManager) SetSessionAgent(ctx context.Context, sessionID, agentN
 	}
 	sm.mu.Unlock()
 	sm.outputCh <- protocol.DaemonEvent{Type: "session_agent_changed", SessionID: sessionID, CurrentAgent: agentName}
+	return nil
+}
+
+// SwitchSessionModel validates a remotely selected OpenCode model and applies
+// it to subsequent native prompt requests. OpenCode accepts model identity per
+// prompt, so the manager cache is the authoritative selection for this managed
+// session rather than a terminal-only /model interaction.
+func (sm *SessionManager) SwitchSessionModel(ctx context.Context, sessionID, model, requestID string) error {
+	ctx, release, err := sm.acquireObserverDrive(ctx, sessionID)
+	if err != nil {
+		return err
+	}
+	defer release()
+
+	model = strings.TrimSpace(model)
+	if model == "" {
+		return fmt.Errorf("model is required")
+	}
+	b := sm.opencodeBackendFor(sessionID)
+	if b == nil || b.coord == nil {
+		return fmt.Errorf("not an opencode session")
+	}
+	if err := b.coord.ensureStarted(); err != nil {
+		return err
+	}
+	sm.mu.RLock()
+	state := sm.sessions[sessionID]
+	if state == nil || state.ControlMode != protocol.ControlManaged {
+		sm.mu.RUnlock()
+		return fmt.Errorf("opencode session is not remotely managed")
+	}
+	if err := validateOpenCodeAgentSwitchState(state); err != nil {
+		sm.mu.RUnlock()
+		return err
+	}
+	cwd := state.Cwd
+	sm.mu.RUnlock()
+	messages, err := b.coord.srv().GetMessages(ctx, sessionID, cwd)
+	if err != nil {
+		return err
+	}
+	if adapter.OpencodeMessagesRunning(messages) {
+		return ErrOpenCodeSessionBusy
+	}
+
+	models, err := b.coord.srv().ListModels(ctx)
+	if err != nil {
+		return err
+	}
+	found := false
+	for _, option := range models {
+		if option.Alias == model {
+			found = true
+			break
+		}
+	}
+	if !found {
+		return fmt.Errorf("unknown opencode model %q", model)
+	}
+	sm.SetSessionModel(sessionID, model)
+	sm.outputCh <- protocol.DaemonEvent{
+		Type: "session_model_changed", SessionID: sessionID, Model: model,
+		RequestID: requestID, Reason: protocol.TurnReasonUserRequested,
+	}
 	return nil
 }
 

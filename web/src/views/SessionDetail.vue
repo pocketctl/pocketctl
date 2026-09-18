@@ -562,7 +562,7 @@
 
               <div class="input-actions">
                 <!-- Send button (idle) -->
-                <button v-if="!isExecuting" class="action-btn send-btn"
+                <button v-if="!isExecuting || (isManagedOpenCode && messageInput.trim())" class="action-btn send-btn"
                   @pointerdown="preserveComposerFocus"
                   @click="sendMessage"
                   :aria-label="t(isMobile ? 'session.send_mobile' : 'session.send_enter')"
@@ -2335,6 +2335,20 @@ function sendMessage() {
   const text = messageInput.value.trim()
   if (!text || !composerState.value.sendEnabled) return
   if (isPendingSession.value) return // D3: pending-id 窗口期不发命令（--resume pending-xxx 必失败）
+  // Managed OpenCode can apply its next-prompt model remotely. Keep /model
+  // without an argument as the local status query below.
+  if (isManagedOpenCode.value && /^\/model\s+\S/.test(text)) {
+    const model = text.replace(/^\/model\s+/, '').trim()
+    const requestId = crypto.randomUUID()
+    if (!send({ type: 'set_session_model', session_id: sessionId.value, request_id: requestId, model })) {
+      showSendFailure()
+      return
+    }
+    messages.value.push({ id: nextId('u'), type: 'user_text', role: 'user', content: text })
+    messageInput.value = ''
+    nextTick(scrollToBottom)
+    return
+  }
   // Local command interception: /cost /status /help /model are answered from
   // in-memory/relay data rather than the claude PTY (where they're unavailable).
   if (invocationEnabled.value && text.startsWith('/') && (invocationSelection.value?.id || !['help','cost'].includes(text.slice(1).split(/\s/)[0]))) {invokeDraft(text,invocationSelection.value?.id);return}
@@ -3653,7 +3667,7 @@ onMounted(() => {
     clearAckTimeout(msg.msg_id)
     const message = messages.value.find((item: any) => item.__msg_id === msg.msg_id)
     if (!message || message.deliveryStatus === 'accepted' || message.deliveryStatus === 'failed') return
-    // Managed Codex waits for its app-server receipt. Sessions without the
+    // Managed native runtimes wait for their backend acceptance receipt. Sessions without the
     // capability retain the legacy ACK-as-final behavior.
     message.deliveryStatus = message.__expects_receipt ? 'forwarded' : 'accepted'
   }))
@@ -3670,13 +3684,13 @@ onMounted(() => {
     // An input received while interrupt confirmation is outstanding did not
     // enter the old turn. Remove the optimistic echo and restore the draft so
     // the user can retry after the terminal lifecycle event arrives.
-    if (msg.status === 'rejected' && msg.reason === 'turn_interrupt_pending' && msg.retryable === true && message) {
+    if (msg.status === 'rejected' && ['turn_interrupt_pending', 'session_busy'].includes(msg.reason) && msg.retryable === true && message) {
       const rejectedText = message.content || ''
       if (messageInput.value.trim()) interruptPendingDraft.value = rejectedText
       else messageInput.value = rejectedText
       const index = messages.value.indexOf(message)
       if (index >= 0) messages.value.splice(index, 1)
-      showSendFailure()
+      showSendFailure(msg.reason === 'session_busy' ? 'session.session_busy' : '')
       return
     }
     if (!message) return

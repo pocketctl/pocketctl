@@ -102,7 +102,8 @@ func TestOpenCodeBackendRecordsReceiptAfterNativeUserMessageIsAccepted(t *testin
 		t.Fatalf("prepare: %+v", out)
 	}
 
-	sm := NewSessionManager(make(chan protocol.DaemonEvent, 16))
+	output := make(chan protocol.DaemonEvent, 16)
+	sm := NewSessionManager(output)
 	coord := newOpencodeCoordinator(sm)
 	coord.server = server
 	coord.started = true
@@ -114,7 +115,8 @@ func TestOpenCodeBackendRecordsReceiptAfterNativeUserMessageIsAccepted(t *testin
 	}
 	sm.SetMemoryContext(memoryCoordinator, func() bool { return true }, nil)
 
-	if err := backend.SendWithContext(context.Background(), "ses_1", "unchanged", pack); err != nil {
+	ctx := withUserMessageCorrelation(context.Background(), userMessageCorrelation{RequestID: "req-1", MsgID: "msg-1"})
+	if err := backend.SendWithContext(ctx, "ses_1", "unchanged", pack); err != nil {
 		t.Fatal(err)
 	}
 	select {
@@ -129,6 +131,15 @@ func TestOpenCodeBackendRecordsReceiptAfterNativeUserMessageIsAccepted(t *testin
 		}
 	case <-time.After(time.Second):
 		t.Fatal("native user-message acceptance did not record receipt before model completion")
+	}
+	select {
+	case receipt := <-output:
+		if receipt.Type != "user_message_receipt" || receipt.Status != "accepted" ||
+			receipt.RequestID != "req-1" || receipt.MsgID != "msg-1" {
+			t.Fatalf("acceptance receipt = %+v", receipt)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("native user-message acceptance did not reach the client before model completion")
 	}
 	close(releaseResponse)
 }

@@ -62,6 +62,33 @@ func TestCandidateFromEventAcceptsOnlyCompletedAttributedDocuments(t *testing.T)
 	}
 }
 
+func TestResolvePathWithinRootAcceptsAbsoluteAndRelativeDocuments(t *testing.T) {
+	root := t.TempDir()
+	for _, input := range []string{"docs/report.md", filepath.Join(root, "docs", "report.md")} {
+		canonical, relative, ok := ResolvePathWithinRoot(root, input)
+		if !ok || canonical == "" || relative != "docs/report.md" {
+			t.Fatalf("ResolvePathWithinRoot(%q) = %q, %q, %v", input, canonical, relative, ok)
+		}
+		candidate, accepted := CandidateFromPath("session-1", "turn-1", "changes-1", "event-1", relative)
+		if !accepted || candidate.DisplayName != "report.md" || candidate.Format != protocol.SessionDocumentFormatMarkdown {
+			t.Fatalf("CandidateFromPath rejected resolved path: %+v %v", candidate, accepted)
+		}
+	}
+}
+
+func TestResolvePathWithinRootRejectsEscapesAndUnsupportedDocuments(t *testing.T) {
+	root := t.TempDir()
+	outside := filepath.Join(filepath.Dir(root), "outside.md")
+	for _, input := range []string{"../outside.md", outside, "notes.txt", ""} {
+		_, relative, ok := ResolvePathWithinRoot(root, input)
+		if ok {
+			if _, accepted := CandidateFromPath("session-1", "turn-1", "changes-1", "event-1", relative); accepted {
+				t.Fatalf("unsafe/unsupported path accepted: input=%q relative=%q", input, relative)
+			}
+		}
+	}
+}
+
 func TestCaptureAcceptsRootBasenameAndComputesStableMetadata(t *testing.T) {
 	root := t.TempDir()
 	content := []byte("# report\n你好\n")

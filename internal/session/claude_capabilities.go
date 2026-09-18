@@ -6,12 +6,14 @@ import (
 )
 
 const (
-	ClaudeCapabilityHistorySync      = "history_sync"
-	ClaudeCapabilityResumeAfterExit  = "resume_after_exit"
-	ClaudeCapabilityRemoteApproval   = "remote_approval"
-	ClaudeCapabilityChannelApproval  = "claude_channel_approval"
-	ClaudeCapabilityTerminalParallel = "terminal_approval_parallel"
-	CodexCapabilityMessageAcceptance = "message_acceptance_receipt"
+	ClaudeCapabilityHistorySync        = "history_sync"
+	ClaudeCapabilityResumeAfterExit    = "resume_after_exit"
+	ClaudeCapabilityRemoteApproval     = "remote_approval"
+	ClaudeCapabilityChannelApproval    = "claude_channel_approval"
+	ClaudeCapabilityTerminalParallel   = "terminal_approval_parallel"
+	MessageAcceptanceReceiptCapability = "message_acceptance_receipt"
+	// Kept as an alias for older Codex-specific call sites and tests.
+	CodexCapabilityMessageAcceptance = MessageAcceptanceReceiptCapability
 	TrustedActionPolicyCapability    = "trusted_action_policy_v1"
 )
 

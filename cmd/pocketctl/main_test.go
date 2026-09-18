@@ -134,12 +134,11 @@ func TestDeliverUserMessageScopesAcceptanceReceiptToManagedCodex(t *testing.T) {
 			wantReason:  "dispatch_failed",
 		},
 		{
-			name: "managed OpenCode accepted",
+			name: "managed OpenCode defers native acceptance",
 			session: promptReceiptSessionStub{
 				agent: adapter.AgentOpencode, controlMode: protocol.ControlManaged,
 			},
-			wantReceipt: true,
-			wantStatus:  "accepted",
+			wantReceipt: false,
 		},
 		{
 			name: "Claude accepted",
@@ -202,6 +201,25 @@ func TestDeliverUserMessageRejectsUnknownIdentityWithStableCorrelation(t *testin
 	if len(events) != 1 || events[0].Type != "user_message_receipt" || events[0].Status != "rejected" ||
 		events[0].RequestID != "req-missing" || events[0].MsgID != "msg-missing" || events[0].Reason != "session_identity_unavailable" {
 		t.Fatalf("events=%+v, want stable correlated identity rejection", events)
+	}
+}
+
+func TestDeliverUserMessageRejectsBusyOpenCodeWithRetryableReceipt(t *testing.T) {
+	sm := promptReceiptSessionStub{
+		agent: adapter.AgentOpencode, controlMode: protocol.ControlManaged,
+		sendErr: session.ErrOpenCodeSessionBusy,
+	}
+	var events []protocol.DaemonEvent
+	err := deliverUserMessage(context.Background(), sm, protocol.ClientMessage{
+		Type: "user_message", SessionID: "ses_busy", Content: "next",
+		RequestID: "req-busy", MsgID: "msg-busy",
+	}, func(event protocol.DaemonEvent) { events = append(events, event) })
+	if !errors.Is(err, session.ErrOpenCodeSessionBusy) {
+		t.Fatalf("error=%v", err)
+	}
+	if len(events) != 1 || events[0].Status != "rejected" ||
+		events[0].Reason != protocol.ReasonSessionBusy || events[0].Retryable == nil || !*events[0].Retryable {
+		t.Fatalf("events=%+v", events)
 	}
 }
 
@@ -405,6 +423,7 @@ func TestObserverCommandRejectionLoadsHistoricalDesktopForEverySessionControl(t 
 	for _, commandType := range []string{
 		"user_message", "abort_create", "session_kill", "session_interrupt", "set_permission_config",
 		"set_effort", "set_session_agent", "approval_response", "question_response", "question_reject",
+		"set_session_model",
 		"mcp_elicitation_response", "interactive_response",
 	} {
 		t.Run(commandType, func(t *testing.T) {

@@ -179,7 +179,8 @@ func (sm *SessionManager) RejectObserverUserMessage(sessionID string) error {
 
 // IsObserverDriveCommand identifies daemon-native writes. Read-only metadata,
 // replay/list operations, pinning, and Relay-only deletion are deliberately
-// absent. Model/slash changes travel through user_message.
+// absent. Managed OpenCode model changes are explicit drive commands; other
+// slash commands continue to travel through user_message.
 func IsObserverDriveCommand(commandType string) bool {
 	switch commandType {
 	case "user_message",
@@ -189,6 +190,7 @@ func IsObserverDriveCommand(commandType string) bool {
 		"set_permission_config",
 		"set_effort",
 		"set_session_agent",
+		"set_session_model",
 		"approval_response",
 		"question_response",
 		"question_reject",
