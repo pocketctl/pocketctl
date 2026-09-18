@@ -107,6 +107,8 @@ var (
 )
 
 type SessionManager struct {
+	opencodeDocumentCapture func(adapter.OpencodeDocumentCandidate) bool
+
 	mu                   sync.RWMutex
 	sessions             map[string]*ProcessState
 	observerDriveGatesMu sync.Mutex

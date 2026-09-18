@@ -24,6 +24,7 @@ type captureSessionQueue struct {
 type captureWork struct {
 	candidate Candidate
 	transport TransportLimits
+	root      string
 }
 
 type CaptureQueue struct {
@@ -94,6 +95,25 @@ func (q *CaptureQueue) SubmitEventWithLimits(event protocol.DaemonEvent, limits 
 	if !ok {
 		return false
 	}
+	return q.submitCandidate(captureWork{candidate: candidate, transport: limits})
+}
+
+// SubmitCandidateWithRoot admits a typed observer candidate whose native path
+// has already been bound to an operator-authorized canonical session root.
+// Unlike SubmitEvent, this does not broaden which observer events can trigger
+// reads: callers must explicitly construct the candidate through
+// CandidateFromPath and supply its root.
+func (q *CaptureQueue) SubmitCandidateWithRoot(root string, candidate Candidate, limits TransportLimits) bool {
+	validated, ok := CandidateFromPath(candidate.SessionID, candidate.TurnID, candidate.ChangeSetID,
+		candidate.SourceEventID, candidate.RelativePath)
+	if !ok || root == "" {
+		return false
+	}
+	return q.submitCandidate(captureWork{candidate: validated, transport: limits, root: root})
+}
+
+func (q *CaptureQueue) submitCandidate(work captureWork) bool {
+	candidate := work.candidate
 	key := candidateQueueKey(candidate)
 	q.mu.Lock()
 	defer q.mu.Unlock()
@@ -117,7 +137,7 @@ func (q *CaptureQueue) SubmitEventWithLimits(event protocol.DaemonEvent, limits 
 		return true
 	}
 	select {
-	case sessionQueue.candidates <- captureWork{candidate: candidate, transport: limits}:
+	case sessionQueue.candidates <- work:
 		sessionQueue.pending[key] = struct{}{}
 		q.queueDepth++
 		if q.queueDepth > q.maxQueueDepth {
@@ -143,7 +163,11 @@ func (q *CaptureQueue) runSession(sessionQueue *captureSessionQueue) {
 			}
 			q.mu.Unlock()
 			candidate := work.candidate
-			root, reason := q.resolveRoot(candidate.SessionID)
+			root := work.root
+			reason := ""
+			if root == "" {
+				root, reason = q.resolveRoot(candidate.SessionID)
+			}
 			var result CaptureResult
 			if root == "" || reason != "" {
 				if reason == "" {

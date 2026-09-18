@@ -61,6 +61,7 @@ type OpencodeMessage struct {
 	ID        string            `json:"id"`
 	SessionID string            `json:"sessionID"`
 	ParentID  string            `json:"parentID,omitempty"`
+	Finish    string            `json:"finish,omitempty"`
 	Role      string            `json:"role"` // "user" | "assistant"
 	Error     json.RawMessage   `json:"error,omitempty"`
 	Model     *OpencodeModelRef `json:"model,omitempty"`
@@ -135,10 +136,11 @@ func (m *OpencodeModelRef) Display() string {
 
 // OpencodeToolState is the tool part's evolving state (pending→running→completed/error).
 type OpencodeToolState struct {
-	Status string          `json:"status"` // pending | running | completed | error
-	Input  json.RawMessage `json:"input,omitempty"`
-	Output string          `json:"output,omitempty"`
-	Error  string          `json:"error,omitempty"`
+	Metadata json.RawMessage `json:"metadata,omitempty"`
+	Status   string          `json:"status"` // pending | running | completed | error
+	Input    json.RawMessage `json:"input,omitempty"`
+	Output   string          `json:"output,omitempty"`
+	Error    string          `json:"error,omitempty"`
 }
 
 // OpencodeTokens is the step-finish token accounting.

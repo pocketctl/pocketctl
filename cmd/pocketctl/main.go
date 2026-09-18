@@ -1358,6 +1358,8 @@ func cmdDaemonStart(args []string) {
 	// the local operator only; relay clients cannot extend them.
 	sm.SetCwdPolicy(cwdPolicy)
 	sm.SetRemotePermissionPolicy(adapter.RemotePermissionPolicy{AllowDangerous: *allowDangerousRemotePermissions})
+	documentCaptureEnabled, documentCaptureConfigErr := sessiondocument.CaptureEnabled(os.Getenv("POCKETCTL_SESSION_DOCUMENT_CAPTURE"))
+	var documentCaptureQueue *sessiondocument.CaptureQueue
 
 	// ZCode read-only observer (only when the user has explicitly enabled the
 	// sync). It is fully isolated from the SessionManager: it never enters
@@ -1543,6 +1545,60 @@ func cmdDaemonStart(args []string) {
 	client.SetAgentManageable(agentManageable)
 	client.SetVersion(version)
 	client.SetStartedAt(time.Now().Unix())
+	if zcodeObserver != nil && documentCaptureEnabled && documentCaptureConfigErr == nil {
+		zcodeObserver.SetDocumentCapture(func() bool {
+			if documentCaptureQueue == nil {
+				return false
+			}
+			transportEnabled, _, _ := client.SessionDocumentTransport()
+			return transportEnabled
+		}, func(source zcode.DocumentCandidate) bool {
+			if documentCaptureQueue == nil {
+				return false
+			}
+			transportEnabled, maxEventBytes, maxChunkBytes := client.SessionDocumentTransport()
+			if !transportEnabled {
+				return false
+			}
+			if cwdPolicy.Allows(source.SessionDirectory) != nil {
+				logger.Info("zcode document candidate rejected", "reason", "cwd_not_authorized")
+				return true
+			}
+			root, relativePath, ok := sessiondocument.ResolvePathWithinRoot(source.SessionDirectory, source.FilePath)
+			if !ok {
+				logger.Info("zcode document candidate rejected", "reason", "path_outside_root")
+				return true
+			}
+			candidate, ok := sessiondocument.CandidateFromPath(
+				source.SessionID,
+				source.TurnID,
+				source.ChangeSetID,
+				source.SourceEventID,
+				relativePath,
+			)
+			if !ok {
+				logger.Info("zcode document candidate rejected", "reason", "unsupported_document")
+				return true
+			}
+			accepted := documentCaptureQueue.SubmitCandidateWithRoot(root, candidate, sessiondocument.TransportLimits{
+				MaxEventBytes: maxEventBytes,
+				MaxChunkBytes: maxChunkBytes,
+			})
+			state := "backpressured"
+			if accepted {
+				state = "accepted"
+			}
+			diagnostics := documentCaptureQueue.Diagnostics()
+			logger.Info("zcode document candidate observed",
+				"state", state,
+				"queue_depth", diagnostics.QueueDepth,
+				"pending_candidates", diagnostics.PendingCandidates,
+				"max_queue_depth", diagnostics.MaxQueueDepth,
+				"rejected_backpressure", diagnostics.RejectedBackpressure,
+			)
+			return accepted
+		})
+	}
 	var codexReplayCursor *watcher.CodexReplayCursorStore
 	if cfgDir, cfgErr := config.ConfigDir(); cfgErr == nil {
 		cursorPath := filepath.Join(cfgDir, "codex-replay-cursors.json")
@@ -1732,7 +1788,6 @@ func cmdDaemonStart(args []string) {
 	// from the session's cached model, update the cache and emit a
 	// session_model_changed event so the relay + Web/iOS clients reflect the
 	// /model switch in real time.
-	var documentCaptureQueue *sessiondocument.CaptureQueue
 	client.OnEvent = func(evt protocol.DaemonEvent) []protocol.DaemonEvent {
 		sm.ObserveNativeTitle(evt)
 		enrichRepositoryFacts(context.Background(), &evt)
@@ -1822,9 +1877,9 @@ func cmdDaemonStart(args []string) {
 	ctx, cancel := context.WithCancel(context.Background())
 	go sm.RunTitleMaintenance(ctx)
 	defer cancel()
-	if enabled, captureErr := sessiondocument.CaptureEnabled(os.Getenv("POCKETCTL_SESSION_DOCUMENT_CAPTURE")); captureErr != nil {
+	if documentCaptureConfigErr != nil {
 		logger.Warn("session document capture disabled", "reason", "invalid_configuration")
-	} else if enabled {
+	} else if documentCaptureEnabled {
 		documentRecordPump := sessiondocument.NewRecordPump(sessiondocument.RecordPumpOptions{
 			BatchDepth: 16,
 			CanEmit: func() bool {
@@ -1881,6 +1936,19 @@ func cmdDaemonStart(args []string) {
 			},
 		})
 		defer documentCaptureQueue.Stop()
+		sm.SetOpencodeDocumentCapture(func(source adapter.OpencodeDocumentCandidate) bool {
+			enabled, maxEventBytes, maxChunkBytes := client.SessionDocumentTransport()
+			if !enabled {
+				return false
+			}
+			root, candidate, ok := sm.ResolveOpencodeDocumentCandidate(source)
+			if !ok {
+				return true
+			}
+			return documentCaptureQueue.SubmitCandidateWithRoot(root, candidate, sessiondocument.TransportLimits{
+				MaxEventBytes: maxEventBytes, MaxChunkBytes: maxChunkBytes,
+			})
+		})
 		logger.Info("session document capture enabled", "max_document_bytes", 2<<20)
 	}
 

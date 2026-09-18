@@ -1242,6 +1242,7 @@ func (c *opencodeCoordinator) startSync(sessionID string, emitUser bool) {
 
 func (c *opencodeCoordinator) syncLoop(ctx context.Context, sessionID string, emitUser bool) {
 	sync := adapter.NewOpencodeSync(sessionID, emitUser)
+	acceptedDocuments := make(map[string]string)
 	ticker := time.NewTicker(opencodeSyncInterval)
 	defer ticker.Stop()
 	lastTitle := ""
@@ -1267,6 +1268,7 @@ func (c *opencodeCoordinator) syncLoop(ctx context.Context, sessionID string, em
 			}
 			msgs, err := s.GetMessages(ctx, sessionID, cwd)
 			if err == nil {
+				c.sm.captureOpencodeDocuments(sessionID, msgs, nativeStatus, acceptedDocuments)
 				if evs := sync.DiffWithNativeStatus(msgs, nativeStatus); len(evs) > 0 {
 					for _, ev := range evs {
 						if ev.Type == "session_status" {
