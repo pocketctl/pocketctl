@@ -14,7 +14,7 @@ import {
   sanitizeText,
 } from './content-policy.js'
 
-export const EPISODE_PACKET_COMPILER_VERSION = 'memory-episode-packet-v4'
+export const EPISODE_PACKET_COMPILER_VERSION = 'memory-episode-packet-v5'
 export const PACKET_SCHEMA_VERSION = 1 as const
 
 export interface EvidenceStatement {
@@ -60,6 +60,7 @@ export interface EvidenceManifestEntry {
   kind: EvidenceKind
   source_event_id?: string
   artifact_id?: string
+  occurred_at?: string
   excerpt_hash: string
   excerpt_length: number
   truncated: boolean
@@ -174,6 +175,7 @@ export function buildEpisodePacket(input: {
   const budget = input.budget ?? DEFAULT_PACKET_BUDGET
   const manifest: EvidenceManifest = {}
   const statements: EvidenceStatement[] = []
+  const eventTimes = new Map(input.events.map(event => [event.source_event_id, event.occurred_at.toISOString()]))
 
   const register = (
     sanitized: { text: string; truncated: boolean; originalLength: number; originalHash: string },
@@ -188,6 +190,7 @@ export function buildEpisodePacket(input: {
       kind,
       ...(refs.source_event_id ? { source_event_id: refs.source_event_id } : {}),
       ...(refs.artifact_id ? { artifact_id: refs.artifact_id } : {}),
+      ...(refs.source_event_id ? { occurred_at: eventTimes.get(refs.source_event_id) } : {}),
       excerpt_hash: sanitized.originalHash,
       excerpt_length: sanitized.originalLength,
       truncated: sanitized.truncated,
@@ -225,14 +228,31 @@ export function buildEpisodePacket(input: {
   const failures: EvidenceStatement[] = []
   const incomplete: EvidenceStatement[] = []
 
-  for (const event of orderedEvents) {
+  // Reserve timeline capacity for the latest assistant conclusion and for
+  // goals/corrections/verification, then restore chronological order. Empty
+  // or usage-only events cannot affect selection or the extraction digest.
+  const visibleEvents = orderedEvents.filter(event => describeEvent(event.event_type, event.payload, budget.statementChars).text)
+  const lastAnswer = [...visibleEvents].reverse().find(event => event.event_type === 'agent_text')
+  const priority = (event: PacketSourceEvent): number => {
+    if (event === lastAnswer) return 0
     const kind = timelineKindFor(event.event_type, event.payload)
-    const sanitized = describeEvent(event.event_type, event.payload, budget.statementChars)
+    if (['user_goal', 'correction', 'test', 'ci', 'failure', 'final'].includes(kind)) return 1
+    return event.event_type === 'tool_call' || event.event_type === 'tool_result' ? 3 : 2
+  }
+  const selectedEvents = new Set([...visibleEvents]
+    .sort((a, b) => priority(a) - priority(b) || b.occurred_at.getTime() - a.occurred_at.getTime()
+      || a.source_event_id.localeCompare(b.source_event_id))
+    .slice(0, budget.timelineEntries))
+
+  for (const event of orderedEvents) {
+    const kind = event === lastAnswer ? 'final' : timelineKindFor(event.event_type, event.payload)
+    const sanitized = describeEvent(event.event_type, event.payload,
+      event === lastAnswer ? Math.min(4000, budget.statementChars * 8) : budget.statementChars)
     if (sanitized.text.length === 0) continue
     const status = typeof event.payload?.status === 'string'
       ? event.payload.status
       : (typeof event.payload?.turn_status === 'string' ? event.payload.turn_status : null)
-    if (timeline.length < budget.timelineEntries) {
+    if (selectedEvents.has(event)) {
       const statement = register(sanitized, 'event', { source_event_id: event.source_event_id })
       timeline.push({
         kind,
@@ -259,6 +279,17 @@ export function buildEpisodePacket(input: {
     if (event.event_type === 'code_symbol' && symbols.length < budget.sectionEntries) {
       symbols.push(register(sanitized, 'event', { source_event_id: event.source_event_id }))
     }
+  }
+
+  const omittedEvents = visibleEvents.length - selectedEvents.size
+  const truncatedCount = Object.values(manifest).filter(entry => entry.truncated).length
+  if (omittedEvents > 0 || truncatedCount > 0) {
+    const notice = register(sanitizeText(
+      `packet limits: ${omittedEvents} timeline events omitted; ${truncatedCount} excerpts truncated; do not infer missing conclusions`,
+      budget.statementChars,
+    ), 'episode', {})
+    manifest[notice.evidence_handle].omitted = true
+    incomplete.push(notice)
   }
 
   for (const artifact of input.artifacts) {
@@ -320,11 +351,13 @@ export function buildEpisodePacket(input: {
 
   enforceTotalDocumentBudget(document, manifest, budget)
 
-  const sourceDigest = computeSourceDigest({
-    installationId: input.installationId,
-    events: sourceEvents,
-    artifacts: input.artifacts,
-  })
+  // The raw event ledger retains audit history. This revision identifies the
+  // effective bounded evidence, not accounting fields discarded by policy.
+  const sourceDigest = createHash('sha256').update(canonicalPacketJson({
+    installationId: input.installationId, turnId: input.turnId,
+    compiler: EPISODE_PACKET_COMPILER_VERSION, policy: PACKET_POLICY_VERSION,
+    document, manifest,
+  })).digest()
 
   return {
     document,
@@ -372,7 +405,9 @@ function enforceTotalDocumentBudget(
   }
 
   const popTimeline = (preferredKind?: TimelineKind): boolean => {
-    let index = document.timeline.length - 1
+    if (document.timeline.length === 0) return false
+    let index = document.timeline.findIndex(item => item.kind !== 'final')
+    if (index < 0) index = 0
     if (preferredKind) {
       index = -1
       for (let candidate = document.timeline.length - 1; candidate >= 0; candidate--) {

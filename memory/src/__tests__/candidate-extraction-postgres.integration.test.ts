@@ -6,6 +6,7 @@ import { createExtractionRepository } from '../extraction/repository.js'
 import { createJobRepository } from '../jobs/repository.js'
 import { StaleJobFenceError } from '../generation/fence.js'
 import { createCandidateExtractor } from '../extraction/extractor.js'
+import { createCandidateDeduper } from '../extraction/deduper.js'
 import { canonicalPayloadHash } from '../inbox/canonical-json.js'
 import type { ModelJsonResult } from '../ports/text-generator.js'
 
@@ -178,6 +179,46 @@ describeWithDatabase('candidate extraction (PostgreSQL)', () => {
     `)
     expect(usage.rows[0].operation).toBe('candidate_extract')
     expect(Number(usage.rows[0].input_tokens)).toBe(12)
+  })
+
+  test('zero candidates is a durable successful result and is not called again', async () => {
+    const fn = generator([okResult({ candidates: [] })])
+    const extractor = extractorWith(fn)
+    const input = { installationId: INSTALLATION, turnId: 'turn-1', signal: new AbortController().signal }
+    expect(await extractor.extract(input)).toMatchObject({ kind: 'succeeded', candidateCount: 0 })
+    expect(await extractor.extract(input)).toMatchObject({ kind: 'skipped_existing', state: 'succeeded' })
+    expect(fn).toHaveBeenCalledTimes(1)
+    expect((await pool.query(`SELECT candidate_count::int, state FROM memory_extraction_runs`)).rows[0])
+      .toMatchObject({ candidate_count: 0, state: 'succeeded' })
+    expect((await pool.query(`SELECT count(*)::int AS count FROM memory_usage_outbox`)).rows[0].count).toBe(1)
+  })
+
+  test('model output from an old revision is retained for audit but cannot enter review', async () => {
+    const fn = vi.fn(async () => {
+      await pool.query(`UPDATE work_episodes SET source_digest = 'new-revision'::bytea WHERE installation_id = $1`, [INSTALLATION])
+      return okResult(validOutput())
+    })
+    const extractor = createCandidateExtractor({ store, textGenerator: { generateJson: fn as never },
+      provider: 'test', model: 'm', timeoutMs: 5000, deduper: createCandidateDeduper(pool),
+    })
+    await extractor.extract({ installationId: INSTALLATION, turnId: 'turn-1', signal: new AbortController().signal })
+    const rows = (await pool.query(`SELECT status, validation FROM memory_candidates`)).rows
+    expect(rows).toHaveLength(2)
+    for (const row of rows) expect(row).toMatchObject({ status: 'rejected_by_validator', validation: { codes: ['obsolete_source_digest'] } })
+    expect((await pool.query(`SELECT count(*)::int AS count FROM memory_usage_outbox`)).rows[0].count).toBe(1)
+  })
+
+  test('different model runs do not accumulate exact duplicates in the pending queue', async () => {
+    for (const model of ['first-model', 'second-model']) {
+      const extractor = createCandidateExtractor({ store, textGenerator: { generateJson: generator([okResult(validOutput())]) as never },
+        provider: 'test', model, timeoutMs: 5000, deduper: createCandidateDeduper(pool),
+      })
+      await extractor.extract({ installationId: INSTALLATION, turnId: 'turn-1', signal: new AbortController().signal })
+    }
+    const rows = (await pool.query(`SELECT status, count(*)::int AS count FROM memory_candidates GROUP BY status ORDER BY status`)).rows
+    expect(rows).toEqual([{ status: 'duplicate', count: 2 }, { status: 'validated', count: 2 }])
+    const duplicate = (await pool.query(`SELECT validation FROM memory_candidates WHERE status = 'duplicate' LIMIT 1`)).rows[0]
+    expect(duplicate.validation).toMatchObject({ codes: ['duplicate_pending_candidate'], duplicate_of_candidate_id: expect.any(String) })
   })
 
   test('repeated extraction of identical input never calls the model twice', async () => {

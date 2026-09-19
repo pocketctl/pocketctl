@@ -56,6 +56,11 @@ export const ExtractionCandidateSchema = z.strictObject({
   statement: z.string().min(1).max(4000),
   structured_content: StructuredContentSchema.optional(),
   confidence: z.number().min(0).max(1),
+  value_assessment: z.strictObject({
+    utility: z.number().min(0).max(1),
+    repeatability: z.number().min(0).max(1),
+    friction: z.number().min(0).max(1),
+  }).optional(),
   scope_kind: z.enum(SCOPE_KINDS),
   scope_key: z.string().min(1).max(512),
   repository_id: z.string().uuid().nullable().optional(),
@@ -68,7 +73,7 @@ export const ExtractionCandidateSchema = z.strictObject({
 })
 
 export const ExtractionOutputSchema = z.strictObject({
-  candidates: z.array(ExtractionCandidateSchema).min(1).max(16),
+  candidates: z.array(ExtractionCandidateSchema).max(16),
 })
 
 export type ExtractionCandidate = z.output<typeof ExtractionCandidateSchema>

@@ -96,8 +96,8 @@ export const SYSTEM_EXTRACTION_POLICY_V1: ExtractionPolicyDocument = {
   value_filter: { min_utility: 0, min_repeatability: 0, max_friction: 1 },
   evidence: { min_items: 1, require_terminal_outcome: false, require_distinct_turns: 1 },
   versions: {
-    prompt: 'extraction-prompt-v3',
-    extractor: 'extraction-v3',
+    prompt: 'extraction-prompt-v6',
+    extractor: 'extraction-v5',
     content_policy: 'extraction-content-v1',
     model_profile: 'default',
   },

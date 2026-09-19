@@ -7,6 +7,8 @@ import type {
 } from './types.js'
 import { resolvePacketEvidence } from './evidence-resolver.js'
 import { normalizedClaimKey } from '../retrieval/query-normalizer.js'
+import type { TombstoneHmacKey } from '../config.js'
+import { findTombstonedNormalizedKeys } from './tombstones.js'
 
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
 
@@ -22,6 +24,8 @@ const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3
 export type LedgerError =
   | { code: 'candidate_not_found' }
   | { code: 'candidate_not_reviewable' }
+  | { code: 'candidate_evidence_stale' }
+  | { code: 'tombstoned_identity' }
   | { code: 'revision_conflict'; currentRevision: number; state: string }
   | { code: 'claim_not_found' }
   | { code: 'claim_not_active' }
@@ -45,7 +49,7 @@ export interface CorrectInput {
   evidence: readonly EvidenceInput[]
 }
 
-export function createClaimRepository(pool: pg.Pool) {
+export function createClaimRepository(pool: pg.Pool, options: { tombstoneHmacKeys?: readonly TombstoneHmacKey[] } = {}) {
   return {
     /**
      * Explicitly accept a validated or conflict candidate. Locks the candidate
@@ -76,6 +80,7 @@ export function createClaimRepository(pool: pg.Pool) {
           const candidate = await client.query<{
             candidate_id: string
             episode_id: string
+            run_id: string
             claim_type: ClaimType
             statement: string
             structured_content: Record<string, unknown>
@@ -93,7 +98,7 @@ export function createClaimRepository(pool: pg.Pool) {
             status: string
             revision: string
           }>(`
-            SELECT candidate_id::text, episode_id::text, claim_type, statement, structured_content,
+            SELECT candidate_id::text, episode_id::text, run_id::text, claim_type, statement, structured_content,
                    normalized_key, scope_kind, scope_key, repository_id::text, repo_snapshot_id::text,
                    branch, confidence::text, freshness_at, valid_from, valid_until,
                    evidence_handles, status, revision::text
@@ -115,8 +120,24 @@ export function createClaimRepository(pool: pg.Pool) {
             return { ok: false, error: { code: 'revision_conflict', currentRevision: Number(row.revision), state: row.status } }
           }
 
-          // Exact identity maps to one claim; an existing active claim under
-          // the same identity means this acceptance corrects it instead.
+          const evidenceRevision = await client.query<{ current: boolean }>(`
+            SELECT e.source_digest = r.episode_source_digest AS current
+            FROM work_episodes e
+            JOIN memory_extraction_runs r ON r.installation_id = e.installation_id AND r.episode_id = e.episode_id
+            WHERE e.installation_id = $1 AND e.episode_id = $2 AND r.run_id = $3
+            FOR SHARE OF e
+          `, [input.installationId, row.episode_id, row.run_id])
+          if (!evidenceRevision.rows[0]?.current) {
+            await client.query('ROLLBACK')
+            return { ok: false, error: { code: 'candidate_evidence_stale' } }
+          }
+          if (row.valid_until && row.valid_until.getTime() <= Date.now()) {
+            await client.query('ROLLBACK')
+            return { ok: false, error: { code: 'invalid_input', detail: 'validity window expired' } }
+          }
+
+          // Exact identity maps to one claim. Acceptance never silently
+          // corrects an existing claim; that needs its own revision token.
           const statement = input.editedStatement?.trim() || row.statement
           if (statement.length === 0 || statement.length > 4000) {
             await client.query('ROLLBACK')
@@ -136,6 +157,15 @@ export function createClaimRepository(pool: pg.Pool) {
             WHERE installation_id = $1 AND claim_type = $2 AND scope_key = $3 AND normalized_key = $4
             FOR UPDATE
           `, [input.installationId, row.claim_type, row.scope_key, finalNormalizedKey])
+
+          const tombstoned = await findTombstonedNormalizedKeys(client, {
+            installationId: input.installationId, normalizedKeys: [finalNormalizedKey],
+            keys: options.tombstoneHmacKeys ?? [],
+          })
+          if (tombstoned.has(finalNormalizedKey)) {
+            await client.query('ROLLBACK')
+            return { ok: false, error: { code: 'tombstoned_identity' } }
+          }
 
           if (existingClaim.rows[0]) {
             await client.query('ROLLBACK')

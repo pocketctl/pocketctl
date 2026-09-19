@@ -7,6 +7,7 @@ import { canonicalPayloadHash } from '../inbox/canonical-json.js'
 import { createPurgeRepository } from '../purge/repository.js'
 import { createJobRepository } from '../jobs/repository.js'
 import { createEpisodeRepository } from '../episodes/repository.js'
+import { EPISODE_PACKET_COMPILER_VERSION } from '../episodes/packet.js'
 
 const databaseUrl = process.env.MEMORY_TEST_DATABASE_URL
 const integrationEnabled = Boolean(
@@ -575,7 +576,7 @@ describeWithDatabase('episode packet persistence (PostgreSQL)', () => {
     expect((document.timeline?.length ?? 0)).toBeGreaterThanOrEqual(3)
     expect(Object.keys(row.evidence_manifest).length).toBeGreaterThan(0)
     expect(row.source_digest).not.toBeNull()
-    expect(row.document_compiler_version).toBe('memory-episode-packet-v3')
+    expect(row.document_compiler_version).toBe(EPISODE_PACKET_COMPILER_VERSION)
     expect(row.compiled_at).not.toBeNull()
     expect(await extractionJobs()).toBe(1)
   })

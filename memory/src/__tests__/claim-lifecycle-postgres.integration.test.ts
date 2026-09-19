@@ -60,9 +60,9 @@ describeWithDatabase('claim lifecycle transactions (PostgreSQL)', () => {
     const episode = await pool.query<{ episode_id: string }>(`
       INSERT INTO work_episodes
         (installation_id, episode_id, session_id, turn_id, state, compiler_version,
-         document, evidence_manifest, compiled_at)
+         document, evidence_manifest, compiled_at, source_digest)
       VALUES ($1, gen_random_uuid(), 'ses-1', 'turn-1', 'ready', 'v1',
-              $2::jsonb, $3::jsonb, NOW())
+              $2::jsonb, $3::jsonb, NOW(), 'x'::bytea)
       RETURNING episode_id::text
     `, [INSTALLATION,
       JSON.stringify({ final_outcome: { text: 'Vitest files live next to sources', evidence_handle: EVIDENCE_HANDLE } }),

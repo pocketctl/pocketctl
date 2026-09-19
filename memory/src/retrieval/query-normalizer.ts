@@ -21,7 +21,10 @@ function boundedIdentityKey(value: string): string {
 export function tokenize(text: string): string[] {
   return text
     .replace(/([a-z0-9])([A-Z])/g, '$1 $2')
-    .split(/[^$$$\w]+/)
+    // Han has no whitespace word boundaries. Retain characters for recall;
+    // lexical overlap alone must never establish semantic equivalence.
+    .replace(/(\p{Script=Han})/gu, ' $1 ')
+    .split(/[^$\p{L}\p{N}_]+/u)
     .map(token => token.trim())
     .filter(token => token.length > 0)
 }

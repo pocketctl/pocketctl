@@ -60,7 +60,7 @@ interface ReplyLike {
 }
 
 export function registerManageRoutes(app: FastifyInstance, deps: ManageRouteDeps): void {
-  const claims = createClaimRepository(deps.pool)
+  const claims = createClaimRepository(deps.pool, { tombstoneHmacKeys: deps.tombstoneHmacKeys })
   const review = createReviewService(deps.pool, claims)
   const idempotency = createIdempotencyStore(deps.pool)
   const settings = createSettingsRepository(deps.pool, {
@@ -319,6 +319,16 @@ export function registerManageRoutes(app: FastifyInstance, deps: ManageRouteDeps
         reply.code(404).send(errorBody(new MemoryApiError('not_found', 'resource not found')))
         return undefined
       }
+      if (error?.code === 'candidate_evidence_stale' || error?.code === 'tombstoned_identity') {
+        reply.code(409).send({ error: {
+          code: 'revision_conflict',
+          reason_code: error.code,
+          message: error.code === 'candidate_evidence_stale'
+            ? 'candidate evidence changed; refresh the review queue'
+            : 'deleted knowledge cannot be restored by accepting a candidate',
+        } })
+        return undefined
+      }
       if (error?.code === 'candidate_not_reviewable' || error?.code === 'claim_not_active') {
         reply.code(409).send({
           error: {
@@ -354,7 +364,7 @@ export function registerManageRoutes(app: FastifyInstance, deps: ManageRouteDeps
       return
     }
     const result = await mutation(request, reply, 'accept_candidate', async (grant, transactionPool) => {
-      const transactionClaims = createClaimRepository(transactionPool)
+      const transactionClaims = createClaimRepository(transactionPool, { tombstoneHmacKeys: deps.tombstoneHmacKeys })
       const transactionReview = createReviewService(transactionPool, transactionClaims)
       const accepted = await transactionReview.acceptCandidate({
         installationId: grant.installationId,
@@ -507,6 +517,9 @@ export function registerManageRoutes(app: FastifyInstance, deps: ManageRouteDeps
       return
     }
     const result = await mutation(request, reply, 'delete_claim', async (grant, transactionPool, client) => {
+      // Acceptance/purge share this lock. Acquire before claim rows so an
+      // acceptance cannot race past a privacy tombstone or deadlock on identity.
+      await client.query(`SELECT pg_advisory_xact_lock(hashtextextended('purge:installation:' || $1, 0))`, [grant.installationId])
       const claim = await client.query<{
         claim_type: string
         scope_key: string

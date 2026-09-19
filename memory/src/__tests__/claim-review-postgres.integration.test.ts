@@ -6,6 +6,8 @@ import { createClaimRepository } from '../claims/repository.js'
 import { createReviewService } from '../claims/review-service.js'
 import { createIdempotencyStore } from '../api/idempotency.js'
 import { createTransactionBoundPool } from '../api/transaction-bound-pool.js'
+import { insertKnowledgeTombstones } from '../claims/tombstones.js'
+import { normalizedClaimKey } from '../retrieval/query-normalizer.js'
 
 const databaseUrl = process.env.MEMORY_TEST_DATABASE_URL
 const integrationEnabled = Boolean(
@@ -15,6 +17,7 @@ const describeWithDatabase = integrationEnabled ? describe : describe.skip
 
 const INSTALLATION = '77777777-7777-4777-8777-777777777777'
 const EVIDENCE_HANDLE = 'h0-aaaaaaaa'
+const TOMBSTONE_KEY = { version: 'test-v1', key: 'candidate-review-test-key'.repeat(2) }
 const EPISODE_DOCUMENT = {
   final_outcome: { text: 'Vitest files live next to sources', evidence_handle: EVIDENCE_HANDLE },
 }
@@ -34,7 +37,7 @@ describeWithDatabase('candidate review ledger transactions (PostgreSQL)', () => 
     pool = new pg.Pool({ connectionString: databaseUrl, max: 4 })
     await assertMemoryTestDatabase(pool, databaseUrl!)
     await applyMemorySchema(pool)
-    claims = createClaimRepository(pool)
+    claims = createClaimRepository(pool, { tombstoneHmacKeys: [TOMBSTONE_KEY] })
     review = createReviewService(pool, claims)
     idempotency = createIdempotencyStore(pool)
   }, 60_000)
@@ -69,8 +72,8 @@ describeWithDatabase('candidate review ledger transactions (PostgreSQL)', () => 
     const episode = await pool.query<{ episode_id: string }>(`
       INSERT INTO work_episodes
         (installation_id, episode_id, session_id, turn_id, state, compiler_version,
-         document, evidence_manifest, compiled_at)
-      VALUES ($1, gen_random_uuid(), 'ses-1', 'turn-1', 'ready', 'v1', $2::jsonb, $3::jsonb, NOW())
+         document, evidence_manifest, compiled_at, source_digest)
+      VALUES ($1, gen_random_uuid(), 'ses-1', 'turn-1', 'ready', 'v1', $2::jsonb, $3::jsonb, NOW(), 'x'::bytea)
       RETURNING episode_id::text
     `, [INSTALLATION, JSON.stringify(EPISODE_DOCUMENT), JSON.stringify(EVIDENCE_MANIFEST)])
     episodeId = episode.rows[0].episode_id
@@ -125,6 +128,31 @@ describeWithDatabase('candidate review ledger transactions (PostgreSQL)', () => 
       SELECT status FROM memory_candidates WHERE candidate_id = $1
     `, [candidateId])
     expect(candidate.rows[0].status).toBe('accepted')
+  })
+
+  test('a replaced evidence revision disappears from review and cannot be accepted', async () => {
+    await pool.query(`UPDATE work_episodes SET source_digest = 'new'::bytea WHERE episode_id = $1`, [episodeId])
+    expect(await review.reviewQueue({ installationId: INSTALLATION })).toEqual([])
+    expect(await review.acceptCandidate({ installationId: INSTALLATION, candidateId, expectedRevision: 1 }))
+      .toMatchObject({ ok: false, error: { code: 'candidate_evidence_stale' } })
+    expect((await pool.query(`SELECT count(*)::int AS count FROM knowledge_claims`)).rows[0].count).toBe(0)
+  })
+
+  test('acceptance checks tombstones against the final edited identity', async () => {
+    const statement = 'Privacy deleted knowledge must not return'
+    await insertKnowledgeTombstones(pool, { installationId: INSTALLATION,
+      normalizedKeys: [normalizedClaimKey({ claimType: 'repository_convention', scopeKey: 'global', statement })],
+      reason: 'privacy_delete', keys: [TOMBSTONE_KEY],
+    })
+    expect(await review.acceptCandidate({ installationId: INSTALLATION, candidateId, expectedRevision: 1, editedStatement: statement }))
+      .toMatchObject({ ok: false, error: { code: 'tombstoned_identity' } })
+    expect((await pool.query(`SELECT count(*)::int AS count FROM knowledge_claims`)).rows[0].count).toBe(0)
+  })
+
+  test('a candidate that expires while waiting for review cannot enter active knowledge', async () => {
+    await pool.query(`UPDATE memory_candidates SET valid_until = NOW() - INTERVAL '1 second' WHERE candidate_id = $1`, [candidateId])
+    expect(await review.acceptCandidate({ installationId: INSTALLATION, candidateId, expectedRevision: 1 }))
+      .toMatchObject({ ok: false, error: { code: 'invalid_input' } })
   })
 
   test('explicit acceptance resolves a conflict candidate into active knowledge', async () => {

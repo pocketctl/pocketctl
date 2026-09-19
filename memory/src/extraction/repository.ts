@@ -35,6 +35,8 @@ export interface EpisodeForExtraction {
   branch: string | null
   sessionFirstRecordedAt: Date
   hasPriorRunOnOldDigest: boolean
+  terminalAt: Date | null
+  outcome: string | null
 }
 
 export interface CandidateRow {
@@ -76,11 +78,13 @@ export function createExtractionRepository(pool: pg.Pool) {
         branch: string | null
         first_recorded_at: Date
         has_prior_run_on_old_digest: boolean
+        terminal_at: Date | null
+        outcome: string | null
       }>(`
         SELECT e.episode_id::text, e.turn_id, e.source_digest, e.document,
                e.evidence_manifest, COALESCE(f.extraction_mode, 'off') AS extraction_mode,
                e.repository_id::text, e.repo_snapshot_id::text, e.branch,
-               s.first_recorded_at,
+               s.first_recorded_at, e.terminal_at, e.outcome,
                EXISTS (
                  SELECT 1 FROM memory_extraction_runs previous
                  WHERE previous.installation_id = e.installation_id
@@ -110,6 +114,8 @@ export function createExtractionRepository(pool: pg.Pool) {
         branch: row.branch,
         sessionFirstRecordedAt: row.first_recorded_at,
         hasPriorRunOnOldDigest: row.has_prior_run_on_old_digest,
+        terminalAt: row.terminal_at,
+        outcome: row.outcome,
       }
     },
 
@@ -313,8 +319,60 @@ export function createExtractionRepository(pool: pg.Pool) {
       try {
         await client.query('BEGIN')
         try {
+          // Same advisory-before-rows ordering as compile, acceptance and
+          // purge. No provider result may publish against a replaced packet.
+          const source = await client.query<{ session_id: string }>(`
+            SELECT session_id FROM work_episodes WHERE installation_id = $1 AND episode_id = $2
+          `, [input.installationId, input.episodeId])
+          if (source.rows[0]) {
+            await client.query(`
+              SELECT pg_advisory_xact_lock(hashtextextended('purge:session:' || $1 || ':' || $2, 0)),
+                     pg_advisory_xact_lock(hashtextextended('purge:installation:' || $1, 0))
+            `, [input.installationId, source.rows[0].session_id])
+          }
           if (input.fence) await assertJobFence(client, input.fence)
+          const revision = await client.query<{ current: boolean }>(`
+            SELECT e.source_digest = r.episode_source_digest AS current
+            FROM work_episodes e
+            JOIN memory_extraction_runs r ON r.installation_id = e.installation_id AND r.episode_id = e.episode_id
+            WHERE e.installation_id = $1 AND e.episode_id = $2 AND r.run_id = $3
+            FOR SHARE OF e
+          `, [input.installationId, input.episodeId, input.runId])
+          // A source purge has already removed the run; do not resurrect it.
+          if (!revision.rows[0]) {
+            await client.query('COMMIT')
+            return
+          }
           for (const candidate of input.candidates) {
+            let status = candidate.status
+            let validation = candidate.validation
+            if (!revision.rows[0].current) {
+              status = 'rejected_by_validator'
+              validation = { ...validation, codes: ['obsolete_source_digest'] }
+            } else if (status === 'validated' || status === 'conflict') {
+              const pending = await client.query<{ candidate_id: string }>(`
+                SELECT c.candidate_id::text FROM memory_candidates c
+                JOIN memory_extraction_runs r ON r.run_id = c.run_id AND r.installation_id = c.installation_id
+                JOIN work_episodes e ON e.episode_id = c.episode_id AND e.installation_id = c.installation_id
+                WHERE c.installation_id = $1 AND c.normalized_key = $2 AND c.scope_kind = $3
+                  AND c.structured_content = $4::jsonb
+                  AND c.repository_id IS NOT DISTINCT FROM $5::uuid
+                  AND c.repo_snapshot_id IS NOT DISTINCT FROM $6::uuid
+                  AND c.branch IS NOT DISTINCT FROM $7::text
+                  AND c.valid_from IS NOT DISTINCT FROM $8::timestamptz
+                  AND c.valid_until IS NOT DISTINCT FROM $9::timestamptz
+                  AND c.status IN ('validated', 'conflict')
+                  AND r.episode_source_digest = e.source_digest
+                  AND NOT (c.run_id = $10 AND c.ordinal = $11)
+                ORDER BY c.created_at, c.candidate_id LIMIT 1
+              `, [input.installationId, candidate.normalizedKey, candidate.scopeKind,
+                JSON.stringify(candidate.structuredContent), candidate.repositoryId, candidate.repoSnapshotId,
+                candidate.branch, candidate.validFrom, candidate.validUntil, input.runId, candidate.ordinal])
+              if (pending.rows[0]) {
+                status = 'duplicate'
+                validation = { ...validation, codes: ['duplicate_pending_candidate'], duplicate_of_candidate_id: pending.rows[0].candidate_id }
+              }
+            }
             await client.query(`
               INSERT INTO memory_candidates
                 (candidate_id, installation_id, run_id, episode_id, ordinal, claim_type,
@@ -333,7 +391,7 @@ export function createExtractionRepository(pool: pg.Pool) {
               candidate.repositoryId, candidate.repoSnapshotId, candidate.branch,
               JSON.stringify(candidate.evidenceHandles), candidate.confidence,
               candidate.freshnessAt, candidate.validFrom, candidate.validUntil,
-              candidate.status, JSON.stringify(candidate.validation ?? {}),
+              status, JSON.stringify(validation ?? {}),
               candidate.duplicateOfClaimId,
             ])
           }
