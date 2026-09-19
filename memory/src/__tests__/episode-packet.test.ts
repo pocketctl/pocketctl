@@ -8,6 +8,7 @@ import {
   type PacketSourceEvent,
 } from '../episodes/packet.js'
 import { redactSecrets, sanitizeText, describeEvent, basenameOnly } from '../episodes/content-policy.js'
+import { resolvePacketEvidence } from '../claims/evidence-resolver.js'
 
 function event(index: number, type: string, payload: Record<string, unknown>, at = index): PacketSourceEvent {
   return {
@@ -63,6 +64,70 @@ const FULL_ARTIFACTS: readonly PacketSourceArtifact[] = Object.freeze([
     details: { lines_added: 12, lines_removed: 4 }, source_event_id: 'ev-004',
   }),
 ])
+
+describe('stream evidence', () => {
+  const build = (events: PacketSourceEvent[]) => buildEpisodePacket({
+    ...BASE, events, artifacts: [], repository: null,
+  })
+
+  test('collapses more than 200 deltas before budgeting and anchors the final snapshot', () => {
+    const events = Array.from({ length: 250 }, (_, i) => event(i + 1, 'agent_text', {
+      text: '字', snapshot: '字'.repeat(i + 1), streaming: true,
+      stream_id: 's', part_id: 'p', revision: i + 1,
+    }))
+    events.push(event(251, 'agent_text', {
+      text: '增量不应显示', snapshot: '完整结论：输入流应在编译前聚合。',
+      streaming: true, final: true, stream_id: 's-correction', part_id: 'p', revision: 251,
+    }))
+    events.push(event(252, 'agent_text', { usage: { total_tokens: 1000 } }))
+    const packet = build(events)
+    expect(packet.document.timeline).toHaveLength(1)
+    const entry = packet.document.timeline[0]!
+    expect(entry.summary).toBe('agent_text text=完整结论：输入流应在编译前聚合。')
+    expect(packet.manifest[entry.evidence_handle]!.source_event_id).toBe('ev-251')
+    expect(resolvePacketEvidence(packet.document, packet.manifest, [entry.evidence_handle])).toEqual([
+      expect.objectContaining({
+        excerpt: entry.summary,
+        manifest: expect.objectContaining({ source_event_id: 'ev-251' }),
+      }),
+    ])
+    expect(build([...events].reverse())).toEqual(packet)
+    expect(events[0]!.payload.text).toBe('字')
+    const changed = events.map(e => ({ ...e }))
+    changed[0] = { ...changed[0]!, payload_hash: Buffer.from('changed') }
+    expect(build(changed).sourceDigest).not.toEqual(packet.sourceDigest)
+  })
+
+  test('uses revision order at tied timestamps without merging different actors or parts', () => {
+    const packet = build([
+      event(1, 'agent_text', { part_id: 'p', revision: 3, final: true, snapshot: '最新完整消息' }, 0),
+      event(9, 'agent_text', { part_id: 'p', revision: 2, streaming: true, snapshot: '旧' }, 0),
+      event(2, 'agent_text', { part_id: 'p', agent_id: 'child', final: true, text: '子代理完整消息' }, 0),
+      event(3, 'agent_text', { part_id: 'other', final: true, text: '另一条完整消息' }, 0),
+    ])
+    expect(packet.document.timeline.map(e => e.summary)).toEqual([
+      'agent_text text=最新完整消息', 'agent_text text=子代理完整消息', 'agent_text text=另一条完整消息',
+    ])
+  })
+
+  test('keeps legacy text and final text without snapshot; drops unfinished streams and empty events', () => {
+    const packet = build([
+      event(1, 'user_text', { text: '用户请求' }),
+      event(2, 'agent_text', { text: '旧协议完整文本' }),
+      event(3, 'agent_text', { stream_id: 's', streaming: true, final: true, text: '最终完整文本' }),
+      event(4, 'agent_text', { stream_id: 'unfinished', streaming: true, snapshot: '半句话' }),
+      event(5, 'agent_text', { streaming: true, text: '碎' }),
+      event(6, 'agent_text', { text: '   ', usage: {} }),
+      event(7, 'unknown', { text: '不可引用' }),
+      event(8, 'tool_result', { stream_id: 'tool', streaming: true, call_id: 'c', output: 'secret' }),
+      event(9, 'tool_result', { stream_id: 'tool', streaming: true, final: true, call_id: 'c', status: 'ok', output: 'secret' }),
+    ])
+    expect(packet.document.objective[0]!.text).toBe('用户请求')
+    expect(packet.document.timeline).toHaveLength(4)
+    expect(packet.document.timeline[3]!.summary).toBe('tool_result call_id=c status=ok')
+    expect(JSON.stringify(packet.document)).not.toContain('secret')
+  })
+})
 
 describe('episode packet golden fixtures', () => {
   test('captures goal, repository, files, symbols, tools, tests, CI, approvals, corrections, retries, failures, final and incomplete', () => {

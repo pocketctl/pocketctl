@@ -6,6 +6,7 @@
  */
 
 import { createHash } from 'crypto'
+import { collapseStreamEvents } from './stream-events.js'
 import {
   PACKET_POLICY_VERSION,
   basenameOnly,
@@ -13,7 +14,7 @@ import {
   sanitizeText,
 } from './content-policy.js'
 
-export const EPISODE_PACKET_COMPILER_VERSION = 'memory-episode-packet-v3'
+export const EPISODE_PACKET_COMPILER_VERSION = 'memory-episode-packet-v4'
 export const PACKET_SCHEMA_VERSION = 1 as const
 
 export interface EvidenceStatement {
@@ -136,7 +137,7 @@ function sortKeysDeep(value: unknown): unknown {
 }
 
 function timelineKindFor(eventType: string, data: Record<string, unknown>): TimelineKind {
-  if (eventType === 'user_goal' || eventType === 'user_message') return 'user_goal'
+  if (eventType === 'user_goal' || eventType === 'user_message' || eventType === 'user_text') return 'user_goal'
   if (eventType === 'tool_call' || eventType === 'command') return 'tool_call'
   if (eventType === 'file_change' || eventType === 'diff') return 'file_change'
   if (eventType === 'test_result' || eventType.includes('test')) return 'test'
@@ -196,10 +197,11 @@ export function buildEpisodePacket(input: {
     return statement
   }
 
-  const orderedEvents = [...input.events].sort((a, b) =>
+  const sourceEvents = [...input.events].sort((a, b) =>
     a.occurred_at.getTime() - b.occurred_at.getTime()
     || (a.source_event_id < b.source_event_id ? -1 : 1),
   )
+  const orderedEvents = collapseStreamEvents(sourceEvents)
 
   // Objective: the first user-authored statement, redacted and bounded.
   const objective: EvidenceStatement[] = []
@@ -320,7 +322,7 @@ export function buildEpisodePacket(input: {
 
   const sourceDigest = computeSourceDigest({
     installationId: input.installationId,
-    events: orderedEvents,
+    events: sourceEvents,
     artifacts: input.artifacts,
   })
 

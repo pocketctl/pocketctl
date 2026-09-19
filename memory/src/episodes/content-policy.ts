@@ -8,7 +8,7 @@
 
 import { createHash } from 'crypto'
 
-export const PACKET_POLICY_VERSION = 'episode-packet-policy-v2'
+export const PACKET_POLICY_VERSION = 'episode-packet-policy-v3'
 /** ADR-P3-06: per-item cap for re-redacted shared evidence copies. */
 export const SHARED_EVIDENCE_MAX_CHARS = 4000
 
@@ -93,6 +93,7 @@ export function minimizeAbsolutePaths(text: string): string {
  */
 const EVENT_FIELD_ALLOWLIST: Readonly<Record<string, readonly string[]>> = Object.freeze({
   user_message: ['text'],
+  user_text: ['text'],
   agent_text: ['text'],
   user_goal: ['text'],
   tool_call: ['tool', 'call_id', 'status', 'summary'],
@@ -126,7 +127,7 @@ export function describeEvent(
   const parts: string[] = [eventType]
   for (const field of allowed) {
     const value = data?.[field]
-    if (value === undefined || value === null || value === '') continue
+    if (value === undefined || value === null || (typeof value === 'string' && !value.trim())) continue
     if (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') {
       // Path-like fields are basename-only: the packet may leave PocketCtl,
       // so absolute layouts must not travel with it.
@@ -136,7 +137,7 @@ export function describeEvent(
       parts.push(`${field}=${rendered}`)
     }
   }
-  return sanitizeText(parts.join(' '), maxChars)
+  return sanitizeText(parts.length > 1 ? parts.join(' ') : '', maxChars)
 }
 
 /** Bases for absolute paths: display only, never repository identity. */
