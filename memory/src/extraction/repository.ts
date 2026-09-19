@@ -34,6 +34,7 @@ export interface EpisodeForExtraction {
   repoSnapshotId: string | null
   branch: string | null
   sessionFirstRecordedAt: Date
+  hasPriorRunOnOldDigest: boolean
 }
 
 export interface CandidateRow {
@@ -74,11 +75,19 @@ export function createExtractionRepository(pool: pg.Pool) {
         repo_snapshot_id: string | null
         branch: string | null
         first_recorded_at: Date
+        has_prior_run_on_old_digest: boolean
       }>(`
         SELECT e.episode_id::text, e.turn_id, e.source_digest, e.document,
                e.evidence_manifest, COALESCE(f.extraction_mode, 'off') AS extraction_mode,
                e.repository_id::text, e.repo_snapshot_id::text, e.branch,
-               s.first_recorded_at
+               s.first_recorded_at,
+               EXISTS (
+                 SELECT 1 FROM memory_extraction_runs previous
+                 WHERE previous.installation_id = e.installation_id
+                   AND previous.episode_id = e.episode_id
+                   AND previous.episode_source_digest <> e.source_digest
+                   AND previous.state = 'succeeded'
+               ) AS has_prior_run_on_old_digest
         FROM work_episodes e
         JOIN source_sessions s
           ON s.installation_id = e.installation_id AND s.session_id = e.session_id
@@ -100,6 +109,7 @@ export function createExtractionRepository(pool: pg.Pool) {
         repoSnapshotId: row.repo_snapshot_id,
         branch: row.branch,
         sessionFirstRecordedAt: row.first_recorded_at,
+        hasPriorRunOnOldDigest: row.has_prior_run_on_old_digest,
       }
     },
 
@@ -131,16 +141,6 @@ export function createExtractionRepository(pool: pg.Pool) {
           await client.query(`SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`, [
             `extraction-run:${input.installationId}:${input.episodeId}`,
           ])
-          if (input.maxRunsPerEpisode !== undefined) {
-            const count = await client.query<{ count: string }>(`
-              SELECT COUNT(*)::text AS count FROM memory_extraction_runs
-              WHERE installation_id = $1 AND episode_id = $2
-            `, [input.installationId, input.episodeId])
-            if (Number(count.rows[0]?.count ?? 0) >= input.maxRunsPerEpisode) {
-              await client.query('COMMIT')
-              return { runId: '', owner: false, existingState: null, limitReached: true }
-            }
-          }
           await client.query(`
             DELETE FROM memory_extraction_runs
             WHERE installation_id = $1 AND episode_id = $2
@@ -153,6 +153,32 @@ export function createExtractionRepository(pool: pg.Pool) {
           `, [input.installationId, input.episodeId, input.sourceDigest,
             input.extractorVersion, input.modelConfigHash, effectivePolicyHashValue,
             Math.max(60_000, input.staleAfterMs)])
+          const existing = await client.query<{ run_id: string; state: ExtractionRunState }>(`
+            SELECT run_id::text, state FROM memory_extraction_runs
+            WHERE installation_id = $1 AND episode_id = $2
+              AND episode_source_digest = $3
+              AND extractor_version = $4 AND model_config_hash = $5
+              AND effective_policy_hash = $6
+          `, [input.installationId, input.episodeId, input.sourceDigest,
+            input.extractorVersion, input.modelConfigHash, effectivePolicyHashValue])
+          if (existing.rows[0]) {
+            await client.query('COMMIT')
+            return { runId: existing.rows[0].run_id, owner: false,
+              existingState: existing.rows[0].state }
+          }
+          if (input.maxRunsPerEpisode !== undefined) {
+            // Bound provider calls for this packet revision. A compiler or
+            // source revision gets a fresh allowance without erasing history.
+            const count = await client.query<{ count: string }>(`
+              SELECT COUNT(*)::text AS count FROM memory_extraction_runs
+              WHERE installation_id = $1 AND episode_id = $2
+                AND episode_source_digest = $3
+            `, [input.installationId, input.episodeId, input.sourceDigest])
+            if (Number(count.rows[0]?.count ?? 0) >= input.maxRunsPerEpisode) {
+              await client.query('COMMIT')
+              return { runId: '', owner: false, existingState: null, limitReached: true }
+            }
+          }
           const inserted = await client.query<{ run_id: string }>(`
             INSERT INTO memory_extraction_runs
               (run_id, installation_id, episode_id, episode_source_digest, extractor_version,
@@ -171,7 +197,7 @@ export function createExtractionRepository(pool: pg.Pool) {
             await client.query('COMMIT')
             return { runId: inserted.rows[0].run_id, owner: true, existingState: null }
           }
-          const existing = await client.query<{ run_id: string; state: ExtractionRunState }>(`
+          const conflicted = await client.query<{ run_id: string; state: ExtractionRunState }>(`
             SELECT run_id::text, state FROM memory_extraction_runs
             WHERE installation_id = $1 AND episode_id = $2
               AND episode_source_digest = $3
@@ -179,7 +205,7 @@ export function createExtractionRepository(pool: pg.Pool) {
               AND effective_policy_hash = $6
           `, [input.installationId, input.episodeId, input.sourceDigest, input.extractorVersion, input.modelConfigHash, effectivePolicyHashValue])
           await client.query('COMMIT')
-          const row = existing.rows[0]
+          const row = conflicted.rows[0]
           return {
             runId: row?.run_id ?? '',
             owner: false,

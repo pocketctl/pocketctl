@@ -26,6 +26,7 @@ function fakeStore(episodeOverrides: Partial<Parameters<ExtractionRepository['lo
       },
       extractionMode: 'enabled',
       sessionFirstRecordedAt: new Date('2026-08-31T00:00:00.000Z'),
+      hasPriorRunOnOldDigest: false,
       ...episodeOverrides,
     })),
     reserveRun: vi.fn(async () => ({ runId: 'run-1', owner: true, existingState: null })),
@@ -176,6 +177,24 @@ describe('candidate extractor orchestration', () => {
     })).resolves.toEqual({ kind: 'skipped_before_cutoff' })
     expect(store.reserveRun).not.toHaveBeenCalled()
     expect(fn).not.toHaveBeenCalled()
+  })
+
+  test('allows a previously extracted episode to rebuild after the cutoff', async () => {
+    const store = fakeStore({
+      sessionFirstRecordedAt: new Date('2026-08-30T23:59:59.999Z'),
+      hasPriorRunOnOldDigest: true,
+    })
+    const { fn } = generator([{
+      ok: true, value: okOutput(), usage: { inputTokens: 1, outputTokens: 1, model: 'm' },
+    }])
+    const extractor = createCandidateExtractor({
+      store, textGenerator: { generateJson: fn as never }, ...DEPS_BASE,
+      extractionNotBefore: new Date('2026-08-31T00:00:00.000Z'),
+    })
+    await expect(extractor.extract({
+      installationId: INSTALLATION, turnId: 'turn-1', signal: new AbortController().signal,
+    })).resolves.toMatchObject({ kind: 'succeeded', candidateCount: 1 })
+    expect(fn).toHaveBeenCalledTimes(1)
   })
 
   test('stops before the provider when the per-episode run ceiling is reached', async () => {

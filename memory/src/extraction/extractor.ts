@@ -72,7 +72,8 @@ export function createCandidateExtractor(deps: CandidateExtractorDeps) {
       if (!episode) return { kind: 'episode_missing' }
       if (episode.extractionMode === 'off') return { kind: 'skipped_mode_off' }
       if (deps.extractionNotBefore
-        && episode.sessionFirstRecordedAt.getTime() < deps.extractionNotBefore.getTime()) {
+        && episode.sessionFirstRecordedAt.getTime() < deps.extractionNotBefore.getTime()
+        && !episode.hasPriorRunOnOldDigest) {
         return { kind: 'skipped_before_cutoff' }
       }
 
