@@ -198,6 +198,33 @@ describeWithDatabase('candidate extraction (PostgreSQL)', () => {
     expect(candidates.rows[0].count).toBe(2)
   })
 
+  test('a rebuilt packet gets a fresh run even when the prior packet used its allowance', async () => {
+    const firstFn = generator([okResult(validOutput())])
+    const secondFn = generator([okResult(validOutput())])
+    expect((await store.loadEpisodeForExtraction(INSTALLATION, 'turn-1'))?.hasPriorRunOnOldDigest).toBe(false)
+    const first = await extractorWith(firstFn, undefined, 1).extract({
+      installationId: INSTALLATION, turnId: 'turn-1', signal: new AbortController().signal,
+    })
+    expect(first.kind).toBe('succeeded')
+    const repeated = await extractorWith(firstFn, undefined, 1).extract({
+      installationId: INSTALLATION, turnId: 'turn-1', signal: new AbortController().signal,
+    })
+    expect(repeated).toMatchObject({ kind: 'skipped_existing', state: 'succeeded' })
+
+    await pool.query(`UPDATE work_episodes SET source_digest = $2 WHERE installation_id = $1`, [
+      INSTALLATION, Buffer.alloc(32, 8),
+    ])
+    expect((await store.loadEpisodeForExtraction(INSTALLATION, 'turn-1'))?.hasPriorRunOnOldDigest).toBe(true)
+    const rebuilt = await extractorWith(secondFn, undefined, 1).extract({
+      installationId: INSTALLATION, turnId: 'turn-1', signal: new AbortController().signal,
+    })
+    expect(rebuilt.kind).toBe('succeeded')
+    expect(firstFn).toHaveBeenCalledTimes(1)
+    expect(secondFn).toHaveBeenCalledTimes(1)
+    const runs = await pool.query(`SELECT COUNT(*)::int AS count FROM memory_extraction_runs`)
+    expect(runs.rows[0].count).toBe(2)
+  })
+
   test('provider configuration fingerprint change creates a fresh extraction run', async () => {
     const firstFn = generator([okResult(validOutput())])
     const secondFn = generator([okResult(validOutput())])
@@ -239,7 +266,7 @@ describeWithDatabase('candidate extraction (PostgreSQL)', () => {
       { ok: false, code: 'http_error', retryable: true, detail: 'server_error' },
       okResult(validOutput()),
     ])
-    const extractor = extractorWith(fn)
+    const extractor = extractorWith(fn, undefined, 1)
     const first = await extractor.extract({
       installationId: INSTALLATION, turnId: 'turn-1', signal: new AbortController().signal,
     })

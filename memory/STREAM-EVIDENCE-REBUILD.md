@@ -56,8 +56,11 @@ ON CONFLICT (installation_id, job_type, idempotency_key) DO UPDATE SET
 COMMIT;
 ```
 
-4. 恢复 worker。编译器版本与 source digest 变化会触发现有提取队列，
-   生成新的提取 run 和候选。等待编译与提取完成后，再恢复审核操作。
+4. 恢复 worker。编译器版本与 source digest 变化会触发现有提取队列；
+   提取次数上限按当前 source digest 计算，已成功提取过的旧 Episode 可在重编译后
+   越过首次安装时间门槛。生产模型预算仍是独立限制，额度不足时需先按既定变更流程
+   配置新预算，再对目标安装的旧 Episode 定向重排 `extract_candidates` 任务。
+   等待新提取 run 和候选生成后，再恢复审核操作。
    检查目标 Episode 的 document_compiler_version、任务失败状态，以及新候选
    evidence excerpt 是否为完整消息（超长消息仍受脱敏、截断策略约束）。
    已接受的旧知识需单独人工复核，本流程不会自动撤销它们。
