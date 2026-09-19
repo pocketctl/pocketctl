@@ -226,7 +226,7 @@
         :style="{ '--composer-float-clearance': `${messageBottomClearance}px` }"
         @scroll="onMessagesScroll"
       >
-        <div v-if="!composerState.visible" class="messages-bottom-spacer" aria-hidden="true"></div>
+        <div v-if="!isComposerVisible" class="messages-bottom-spacer" aria-hidden="true"></div>
         <!-- Exit Banner -->
         <div v-if="status === 'exited'" class="banner banner-info" style="flex-shrink:0;">
           <svg class="banner-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><path d="M16 17l5-5-5-5"/><path d="M21 12H9"/></svg>
@@ -470,7 +470,7 @@
       </div>
 
       <!-- Chat Input — unified container with embedded controls -->
-      <div ref="composerEl" class="chat-input-area" :class="{ ended: !composerState.visible, 'composer-focused': isInputFocused }">
+      <div ref="composerEl" class="chat-input-area" :class="{ ended: !isComposerVisible, 'composer-focused': isInputFocused }">
         <!-- Scroll-to-bottom: absolute child of chat-input-area, floats above
              its top edge. Doesn't take up flex space in chat-messages. -->
         <Transition name="scroll-btn">
@@ -481,7 +481,7 @@
         <InvocationDialog :value="invocationDialog" @close="invocationDialog=null" @choose="chooseInvocation" />
         <div v-if="invocationError" class="invocation-hint" role="status">{{ invocationError }} <button v-if="invocationErrorCode !== 'invocations_unsupported'" @click="requestInvocations">刷新</button></div>
         <div v-if="invocationSelection" class="invocation-hint">/{{ invocationSelection.name }} · {{ invocationSelection.display_path || invocationSelection.source }} <button aria-label="清除选择" @click="invocationSelection=null">×</button></div>
-        <template v-if="composerState.visible">
+        <template v-if="isComposerVisible">
           <div class="chat-input-container" :class="{ focused: isInputFocused }" @transitionend.self="handleComposerTransitionEnd">
             <!-- Slash command popover -->
             <CommandPopover
@@ -593,6 +593,10 @@
             </div>
           </div>
         </template>
+        <div v-else-if="isDisconnected" class="host-offline-notice" role="status" aria-live="polite">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M10.29 3.86 1.82 18A2 2 0 0 0 3.53 21h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0Z"/><path d="M12 9v4M12 17h.01"/></svg>
+          <span>{{ t('session.host_offline_notice') }}</span>
+        </div>
         <div v-else-if="isSubagent || focusedSubAgentId" class="readonly-hint">{{ t('session.subagent_readonly') }}</div>
         <div v-else-if="isUnmanagedReadOnlySession" class="unmanaged-readonly-notice" role="note">
           <span class="unmanaged-readonly-icon" aria-hidden="true">
@@ -1232,7 +1236,10 @@ const isDaemonOnline = computed(() => {
   if (currentHostId.value) {
     const d = daemons.value[currentHostId.value]
     if (d?.online !== undefined) return d.online
-    return !!currentSession.value?.daemon_online
+    // Missing connectivity data is not an offline signal. Only an explicit
+    // false may hide the composer; a later daemon snapshot/status event will
+    // resolve the unknown state authoritatively.
+    return currentSession.value?.daemon_online !== false
   }
   const s = allSessions.value.find((s: any) => s.session_id === sessionId.value)
   return s?.daemon_online ?? true
@@ -1408,6 +1415,10 @@ const composerState = computed(() => resolveSessionComposerState(
   canWriteWhenConnected.value,
   interactionConnectivity.value,
 ))
+// An explicit daemon-offline signal applies to every session on that host.
+// Keep any draft in memory, but replace the composer with a persistent notice
+// until the host reconnects.
+const isComposerVisible = computed(() => composerState.value.visible && !isDisconnected.value)
 const isUnmanagedReadOnlySession = computed(() => !!currentSession.value
   && (isReadOnlyObserverSession.value || currentSession.value?.source !== 'daemon')
   && !canWriteWhenConnected.value
@@ -1419,9 +1430,9 @@ const unmanagedReadOnlyDescription = computed(() => {
   if (currentSessionAgent.value === 'zcode') return t('session.zcode_observer_readonly')
   return t('session.unmanaged_readonly_description', { agent: unmanagedReadOnlyAgent.value })
 })
-const messageBottomClearance = computed(() => composerState.value.visible
+const messageBottomClearance = computed(() => isComposerVisible.value
   ? composerFloatClearance.value
-  : (isUnmanagedReadOnlySession.value ? (isMobile.value ? 128 : 96) : 52))
+  : (isDisconnected.value || isUnmanagedReadOnlySession.value ? (isMobile.value ? 128 : 96) : 52))
 const canInput = computed(() => composerState.value.sendEnabled)
 // Agent is actively generating (send button → stop button)
 // Agent is actively working — includes 'waiting' (tool execution in progress),
@@ -4251,6 +4262,8 @@ onMounted(() => {
 .chat-input-area.ended { display: flex; align-items: center; justify-content: center; padding: 0 var(--session-content-gutter) 20px; }
 .ended-text { color: var(--fg-tertiary); font-size: 13px; }
 .readonly-hint { color: var(--fg-tertiary); font-size: 13px; font-style: italic; }
+.host-offline-notice { width: min(760px, 100%); min-height: 52px; display: flex; align-items: center; justify-content: center; gap: 9px; padding: 12px 16px; border: 1px solid color-mix(in srgb, var(--warning) 34%, var(--border)); border-radius: var(--radius-lg); color: var(--warning); background: color-mix(in srgb, var(--surface) 94%, transparent); box-shadow: var(--shadow-md), inset 3px 0 0 color-mix(in srgb, var(--warning) 72%, transparent); backdrop-filter: blur(14px); -webkit-backdrop-filter: blur(14px); font-size: 13px; font-weight: 600; text-align: center; pointer-events: auto; animation: bar-in .18s ease-out; }
+.host-offline-notice svg { width: 17px; height: 17px; flex: 0 0 auto; fill: none; stroke: currentColor; stroke-width: 1.9; stroke-linecap: round; stroke-linejoin: round; }
 .unmanaged-readonly-notice { width: min(760px, 100%); display: grid; grid-template-columns: 38px minmax(0, 1fr) auto; align-items: center; gap: 12px; padding: 11px 12px; border: 1px solid color-mix(in srgb, var(--accent) 22%, var(--border)); border-radius: var(--radius-lg); color: var(--fg-secondary); background: color-mix(in srgb, var(--surface) 94%, transparent); box-shadow: var(--shadow-md), inset 3px 0 0 color-mix(in srgb, var(--accent) 70%, transparent); backdrop-filter: blur(14px); -webkit-backdrop-filter: blur(14px); animation: bar-in .18s ease-out; }
 .unmanaged-readonly-icon { width: 38px; height: 38px; display: grid; place-items: center; border: 1px solid color-mix(in srgb, var(--accent) 28%, var(--border)); border-radius: 11px; color: var(--accent); background: var(--accent-muted); }
 .unmanaged-readonly-icon svg { width: 19px; height: 19px; fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; }
