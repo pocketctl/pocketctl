@@ -4,6 +4,10 @@ import { applyMemorySchema } from '../schema.js'
 import { assertMemoryTestDatabase } from '../testing/test-db.js'
 import { createEpisodeRepository } from '../episodes/repository.js'
 import { createPurgeRepository } from '../purge/repository.js'
+import { createCandidateExtractor } from '../extraction/extractor.js'
+import { createExtractionRepository } from '../extraction/repository.js'
+import { createCandidateDeduper } from '../extraction/deduper.js'
+import { createClaimRepository } from '../claims/repository.js'
 
 const databaseUrl = process.env.MEMORY_TEST_DATABASE_URL
 const integrationEnabled = Boolean(
@@ -77,6 +81,40 @@ describeWithDatabase('episode compilation purge fence (PostgreSQL)', () => {
     await seedTerminalTurn(pool)
     await episodes.compileTurn(INSTALLATION, 'turn-1')
     expect(await episodeCount(pool)).toBe(1)
+  })
+
+  test('no-op compile preserves review items; changed evidence retires only pending candidates', async () => {
+    await seedTerminalTurn(pool)
+    await pool.query(`INSERT INTO memory_feature_settings (installation_id, extraction_mode) VALUES ($1, 'enabled')`, [INSTALLATION])
+    await episodes.compileTurn(INSTALLATION, 'turn-1')
+    const store = createExtractionRepository(pool)
+    const packet = await store.loadEpisodeForExtraction(INSTALLATION, 'turn-1')
+    const handle = Object.keys(packet!.manifest)[0]
+    const extractor = createCandidateExtractor({ store, provider: 'test', model: 'm', timeoutMs: 5000,
+      deduper: createCandidateDeduper(pool), textGenerator: { generateJson: (async () => ({ ok: true,
+        value: { candidates: ['Pending learning', 'Accepted learning'].map(statement => ({
+          claim_type: 'work_method', statement, confidence: 0.9, scope_kind: 'installation', scope_key: 'global', evidence_handles: [handle],
+        })) }, usage: { inputTokens: 1, outputTokens: 1, model: 'm' },
+      })) as never },
+    })
+    await extractor.extract({ installationId: INSTALLATION, turnId: 'turn-1', signal: new AbortController().signal })
+    const acceptedId = (await pool.query(`SELECT candidate_id::text FROM memory_candidates WHERE statement = 'Accepted learning'`)).rows[0].candidate_id
+    expect((await createClaimRepository(pool).acceptCandidate({ installationId: INSTALLATION, candidateId: acceptedId, expectedRevision: 1 })).ok).toBe(true)
+    await pool.query(`INSERT INTO source_events
+      (source_event_id, installation_id, origin, origin_position, session_id, turn_id, event_type, occurred_at, payload, payload_hash)
+      VALUES (gen_random_uuid(), $1, 'feed', 'usage-only', 'ses-1', 'turn-1', 'agent_text', NOW(), '{"usage":{"tokens":10}}'::jsonb, 'usage'::bytea)`, [INSTALLATION])
+    await episodes.compileTurn(INSTALLATION, 'turn-1')
+    expect((await store.loadEpisodeForExtraction(INSTALLATION, 'turn-1'))!.sourceDigest).toEqual(packet!.sourceDigest)
+    expect((await pool.query(`SELECT status FROM memory_candidates WHERE statement = 'Pending learning'`)).rows[0].status).toBe('validated')
+    await pool.query(`UPDATE source_events SET payload = '{"text":"corrected evidence"}'::jsonb
+      WHERE installation_id = $1 AND origin_position = 'pos-turn-1'`, [INSTALLATION])
+    await episodes.compileTurn(INSTALLATION, 'turn-1')
+    expect((await pool.query(`SELECT statement, status FROM memory_candidates ORDER BY statement`)).rows).toEqual([
+      { statement: 'Accepted learning', status: 'accepted' }, { statement: 'Pending learning', status: 'rejected_by_validator' },
+    ])
+    const evidence = (await pool.query(`SELECT excerpt FROM knowledge_evidence`)).rows
+    expect(evidence[0].excerpt).toContain('redacted')
+    expect(evidence[0].excerpt).not.toContain('corrected evidence')
   })
 
   test('a visible session tombstone blocks episode compilation', async () => {

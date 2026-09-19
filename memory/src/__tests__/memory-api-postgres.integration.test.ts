@@ -135,9 +135,9 @@ describeWithDatabase('memory api under real capability grants (PostgreSQL)', () 
     const episode = await pool.query<{ episode_id: string }>(`
       INSERT INTO work_episodes
         (installation_id, episode_id, session_id, turn_id, state, compiler_version,
-         document, evidence_manifest, compiled_at)
+         document, evidence_manifest, compiled_at, source_digest)
       VALUES ($1, gen_random_uuid(), 'ses-1', 'turn-1', 'ready', 'v1',
-              $2::jsonb, $3::jsonb, NOW())
+              $2::jsonb, $3::jsonb, NOW(), 'x'::bytea)
       RETURNING episode_id::text
     `, [INSTALLATION,
       JSON.stringify({ final_outcome: { text: 'Prefer trunk-based development for this repo', evidence_handle: EVIDENCE_HANDLE } }),
@@ -347,6 +347,31 @@ describeWithDatabase('memory api under real capability grants (PostgreSQL)', () 
     expect(body.error.current_revision).toBe(1)
     expect(body.error.state).toBe('validated')
     expect(JSON.stringify(body).length).toBeLessThan(512)
+  })
+
+  test('a pending duplicate cannot restore a privacy-deleted claim through the API', async () => {
+    const copy = await pool.query<{ candidate_id: string }>(`
+      INSERT INTO memory_candidates
+        (candidate_id, installation_id, run_id, episode_id, ordinal, claim_type, statement,
+         normalized_key, scope_kind, scope_key, confidence, freshness_at, evidence_handles, status)
+      SELECT gen_random_uuid(), installation_id, run_id, episode_id, 1, claim_type, statement,
+             normalized_key, scope_kind, scope_key, confidence, freshness_at, evidence_handles, 'validated'
+      FROM memory_candidates WHERE candidate_id = $1 RETURNING candidate_id::text
+    `, [candidateId])
+    const accepted = await app.inject({ method: 'POST', url: `/api/v1/memory/candidates/${candidateId}/accept`,
+      headers: { ...authHeaders(['memory.manage']), 'idempotency-key': 'accept-before-delete' }, payload: { expected_revision: 1 },
+    })
+    expect(accepted.statusCode).toBe(200)
+    const deleted = await app.inject({ method: 'DELETE', url: `/api/v1/memory/claims/${accepted.json().claim_id}`,
+      headers: { ...authHeaders(['memory.manage']), 'idempotency-key': 'delete-before-duplicate' }, payload: { expected_revision: 1 },
+    })
+    expect(deleted.statusCode).toBe(200)
+    const restored = await app.inject({ method: 'POST', url: `/api/v1/memory/candidates/${copy.rows[0].candidate_id}/accept`,
+      headers: { ...authHeaders(['memory.manage']), 'idempotency-key': 'accept-deleted-duplicate' }, payload: { expected_revision: 1 },
+    })
+    expect(restored.statusCode).toBe(409)
+    expect(restored.json().error.reason_code).toBe('tombstoned_identity')
+    expect((await pool.query(`SELECT count(*)::int AS count FROM knowledge_claims`)).rows[0].count).toBe(0)
   })
 
   test('settings refuse shadow modes while adapters are unconfigured', async () => {

@@ -283,6 +283,20 @@ export function createEpisodeRepository(
           `, [installationId])
           const extractionMode = settings.rows[0]?.extraction_mode ?? 'off'
 
+          if (packetWrite.rows[0]) {
+            // Retain the audit ledger, but never review old output against
+            // newly compiled evidence. Accepted/rejected decisions stay intact.
+            await client.query(`
+              UPDATE memory_candidates c SET status = 'rejected_by_validator', revision = revision + 1,
+                validation = COALESCE(c.validation, '{}'::jsonb) || '{"codes":["obsolete_source_digest"]}'::jsonb
+              FROM memory_extraction_runs r
+              WHERE c.installation_id = $1 AND c.episode_id = $2
+                AND r.run_id = c.run_id AND r.installation_id = c.installation_id
+                AND r.episode_source_digest <> $3
+                AND c.status IN ('shadow', 'validated', 'conflict')
+            `, [installationId, packetWrite.rows[0].episode_id, packet.sourceDigest])
+          }
+
           // One job per turn coalesces late packet revisions. Each revision
           // pushes availability beyond the extraction quiet window; if the
           // job is already running it is rerun once against the latest packet.

@@ -70,6 +70,28 @@ describe('stream evidence', () => {
     ...BASE, events, artifacts: [], repository: null,
   })
 
+  test('usage-only updates and unknown payload fields do not trigger new extraction inputs', () => {
+    const events = [event(1, 'user_goal', { text: '检查缓存' }), event(2, 'agent_text', { text: '验证结果：缓存未命中。' })]
+    const first = build(events)
+    expect(build([...events, event(3, 'agent_text', { usage: { total_tokens: 100 } })])).toEqual(first)
+    expect(build(events.map(e => ({ ...e, payload: { ...e.payload, usage: { tokens: 3 } }, payload_hash: Buffer.from('different') })))).toEqual(first)
+    const changed = build([events[0], event(2, 'agent_text', { text: '验证结果：缓存命中。' })])
+    expect(changed.sourceDigest).not.toEqual(first.sourceDigest)
+  })
+
+  test('long tool-heavy turns retain final conclusions and explicitly disclose omissions', () => {
+    const events = [event(1, 'user_goal', { text: '查明缓存问题' }),
+      ...Array.from({ length: 205 }, (_, i) => event(i + 2, 'tool_result', { call_id: `c${i}`, summary: '读取文件', status: 'ok' })),
+      event(208, 'agent_text', { text: '已验证：缓存键遗漏租户标识，补齐后隔离测试通过。' }),
+    ]
+    const packet = build(events)
+    expect(packet.document.timeline).toHaveLength(200)
+    expect(packet.document.timeline.at(-1)?.summary).toContain('缓存键遗漏租户标识')
+    expect(packet.document.incomplete.some(item => item.text.includes('timeline events omitted'))).toBe(true)
+    const final = packet.document.timeline.at(-1)!
+    expect(packet.manifest[final.evidence_handle].occurred_at).toBe(events.at(-1)!.occurred_at.toISOString())
+  })
+
   test('collapses more than 200 deltas before budgeting and anchors the final snapshot', () => {
     const events = Array.from({ length: 250 }, (_, i) => event(i + 1, 'agent_text', {
       text: '字', snapshot: '字'.repeat(i + 1), streaming: true,
@@ -95,7 +117,7 @@ describe('stream evidence', () => {
     expect(events[0]!.payload.text).toBe('字')
     const changed = events.map(e => ({ ...e }))
     changed[0] = { ...changed[0]!, payload_hash: Buffer.from('changed') }
-    expect(build(changed).sourceDigest).not.toEqual(packet.sourceDigest)
+    expect(build(changed).sourceDigest).toEqual(packet.sourceDigest)
   })
 
   test('uses revision order at tied timestamps without merging different actors or parts', () => {

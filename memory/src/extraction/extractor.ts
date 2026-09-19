@@ -11,9 +11,9 @@ import {
   buildExtractionSystemPromptFromPolicy,
   buildRepairSystemPrompt,
 } from './prompt.js'
+import { canonicalPacketJson } from '../episodes/packet.js'
 import { canonicalPolicyHash, SYSTEM_EXTRACTION_POLICY_V1 } from '../policies/schemas.js'
 import {
-  normalizedKeyForCandidate,
   validateExtractionOutput,
   type ExtractionCandidate,
 } from './schema.js'
@@ -91,8 +91,10 @@ export function createCandidateExtractor(deps: CandidateExtractorDeps) {
         episodeId: episode.episodeId,
         sourceDigest: episode.sourceDigest,
         extractorVersion: EXTRACTION_EXTRACTOR_VERSION,
-        promptVersion: policy.document.versions.prompt,
-        modelConfigHash,
+        promptVersion: EXTRACTION_PROMPT_VERSION,
+        modelConfigHash: createHash('sha256').update(modelConfigHash)
+          .update(buildExtractionSystemPromptFromPolicy(policy.document, [], ''))
+          .update(buildRepairSystemPrompt([], [], '', policy.document)).digest(),
         mode: extractionMode,
         provider: deps.provider,
         model: deps.model,
@@ -170,7 +172,7 @@ export function createCandidateExtractor(deps: CandidateExtractorDeps) {
         const failureCodes = outcome.errorCode.slice('invalid_output:'.length).split('|')
         outcome = await attempt(
           'candidate_repair',
-          buildRepairSystemPrompt(failureCodes, manifestHandles, episode.turnId),
+          buildRepairSystemPrompt(failureCodes, manifestHandles, episode.turnId, policy.document),
         )
       }
 
@@ -199,7 +201,28 @@ export function createCandidateExtractor(deps: CandidateExtractorDeps) {
       }
 
       const manifestHandleSet = new Set(manifestHandles)
-      const baseRows = outcome.candidates.map((candidate, index) => {
+      const evidenceSourceKeys = new Map(manifestHandles.map(handle => {
+        const raw = episode.manifest[handle]
+        const entry = raw && typeof raw === 'object' ? raw as Record<string, unknown> : {}
+        return [handle, typeof entry.source_event_id === 'string' ? `event:${entry.source_event_id}`
+          : typeof entry.artifact_id === 'string' ? `artifact:${entry.artifact_id}` : `episode:${episode.episodeId}`]
+      }))
+      const seen = new Set<string>()
+      const baseRows = outcome.candidates.filter(candidate => {
+        // Do not collapse differing validity/structured facts just because
+        // their prose matches. Exact repeats need only one review item.
+        const key = canonicalPacketJson({
+          claimType: candidate.claim_type, statement: candidate.statement.trim().replace(/\s+/g, ' '),
+          scopeKind: candidate.scope_kind, scopeKey: candidate.scope_key,
+          repositoryId: candidate.repository_id ?? null, repoSnapshotId: candidate.repo_snapshot_id ?? null,
+          branch: candidate.branch ?? null, content: candidate.structured_content ?? {},
+          validFrom: candidate.valid_from ?? null, validUntil: candidate.valid_until ?? null,
+          evidence: [...candidate.evidence_handles].sort(), value: candidate.value_assessment ?? null,
+        })
+        if (seen.has(key)) return false
+        seen.add(key)
+        return true
+      }).map((candidate, index) => {
         const normalizedKey = normalizedClaimKey({
           claimType: candidate.claim_type,
           scopeKey: candidate.scope_key,
@@ -217,21 +240,20 @@ export function createCandidateExtractor(deps: CandidateExtractorDeps) {
         }
       })
 
-      // Enabled mode runs deterministic validation and duplicate/conflict
-      // classification; shadow mode keeps raw shadow candidates for metrics.
+      // Validate in both modes for diagnostics; shadow never enters review.
       const verdicts = new Map<number, ReturnType<typeof validateCandidate>>()
-      if (extractionMode === 'enabled' && deps.deduper) {
-        const tombstonedKeys = await deps.deduper.tombstonedKeys({
+      {
+        const tombstonedKeys = deps.deduper ? await deps.deduper.tombstonedKeys({
           installationId: input.installationId,
           candidateKeys: baseRows.map(row => row.normalizedKey),
-        })
+        }) : new Set<string>()
         for (const row of baseRows) {
-          const family = await deps.deduper.activeFamilyFor({
+          const family = deps.deduper ? await deps.deduper.activeFamilyFor({
             installationId: input.installationId,
             claimType: row.candidate.claim_type,
             scopeKey: row.candidate.scope_key,
             statement: row.candidate.statement,
-          })
+          }) : { exactClaimId: null, family: [] }
           const context: ValidationContext = {
             manifestHandles: manifestHandleSet,
             episode: {
@@ -239,7 +261,11 @@ export function createCandidateExtractor(deps: CandidateExtractorDeps) {
               repositoryId: episode.repositoryId,
               repoSnapshotId: episode.repoSnapshotId,
               branch: episode.branch,
+              terminalOutcome: Boolean(episode.terminalAt && episode.outcome
+                && ['completed', 'failed', 'interrupted', 'abandoned'].includes(episode.outcome)),
             },
+            policy: policy.document,
+            evidenceSourceKeys,
             now: new Date(),
             tombstonedKeys,
             activeFamily: family.exactClaimId
@@ -255,6 +281,8 @@ export function createCandidateExtractor(deps: CandidateExtractorDeps) {
             repoSnapshotId: row.repoSnapshotId,
             branch: row.branch,
             validUntil: row.validUntil,
+            validFrom: row.validFrom,
+            valueAssessment: row.candidate.value_assessment,
             evidenceHandles: row.candidate.evidence_handles,
             normalizedKey: row.normalizedKey,
           }, context))
@@ -279,11 +307,14 @@ export function createCandidateExtractor(deps: CandidateExtractorDeps) {
           branch: row.branch,
           evidenceHandles: row.candidate.evidence_handles,
           confidence: row.candidate.confidence.toFixed(4),
-          freshnessAt: row.candidate.freshness_at ? new Date(row.candidate.freshness_at) : new Date(),
+          freshnessAt: evidenceFreshness(row.candidate.evidence_handles, episode),
           validFrom: row.validFrom,
           validUntil: row.validUntil,
-          status: (verdict ? verdict.status : candidateStatus) as 'shadow' | 'validated' | 'duplicate' | 'conflict' | 'rejected_by_validator',
-          validation: verdict ? verdict.validation : {},
+          status: (candidateStatus === 'shadow' ? 'shadow' : verdict!.status) as 'shadow' | 'validated' | 'duplicate' | 'conflict' | 'rejected_by_validator',
+          validation: {
+            ...verdict?.validation,
+            ...(row.candidate.value_assessment ? { value_assessment: row.candidate.value_assessment } : {}),
+          },
           duplicateOfClaimId: verdict && 'duplicateOfClaimId' in verdict && verdict.duplicateOfClaimId
             ? verdict.duplicateOfClaimId
             : null,
@@ -301,6 +332,19 @@ export function createCandidateExtractor(deps: CandidateExtractorDeps) {
       return { kind: 'succeeded', runId: reserved.runId, candidateCount: rows.length }
     },
   }
+}
+
+function evidenceFreshness(
+  handles: readonly string[],
+  episode: import('./repository.js').EpisodeForExtraction,
+): Date {
+  const times = handles.flatMap(handle => {
+    const entry = episode.manifest[handle] as Record<string, unknown> | undefined
+    const at = typeof entry?.occurred_at === 'string' ? Date.parse(entry.occurred_at) : NaN
+    return Number.isFinite(at) ? [at] : []
+  })
+  return times.length ? new Date(Math.max(...times))
+    : episode.terminalAt ?? episode.sessionFirstRecordedAt
 }
 
 function candidatesReferenceKnownHandles(

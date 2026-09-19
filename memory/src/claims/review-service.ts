@@ -35,12 +35,15 @@ export function createReviewService(pool: pg.Pool, claims: ClaimRepository) {
                c.scope_kind, c.scope_key,
                c.confidence::text, c.freshness_at, c.status, c.revision::text, c.episode_id::text,
                c.repository_id::text, c.repo_snapshot_id::text, c.branch, c.evidence_handles,
-               c.duplicate_of_claim_id::text, c.created_at,
+               c.duplicate_of_claim_id::text, c.created_at, c.validation,
                e.document AS episode_document, e.evidence_manifest
         FROM memory_candidates c
         JOIN work_episodes e
           ON e.installation_id = c.installation_id AND e.episode_id = c.episode_id
+        JOIN memory_extraction_runs r
+          ON r.installation_id = c.installation_id AND r.run_id = c.run_id
         WHERE c.installation_id = $1 AND c.status IN ('validated', 'conflict')
+          AND r.episode_source_digest = e.source_digest
         ORDER BY c.created_at DESC, c.candidate_id
         LIMIT $2
       `, [input.installationId, limit])

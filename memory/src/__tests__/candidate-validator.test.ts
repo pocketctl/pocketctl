@@ -1,5 +1,6 @@
 import { describe, expect, test } from 'vitest'
 import { validateCandidate, type ValidationContext } from '../extraction/validator.js'
+import { SYSTEM_EXTRACTION_POLICY_V1 } from '../policies/schemas.js'
 import {
   caseInsensitiveClaimKey,
   normalizedClaimKey,
@@ -43,9 +44,71 @@ function candidate(overrides: CandidateOverrides = {}) {
 }
 
 describe('candidate validator', () => {
+  test('CJK antonyms are not discarded as duplicates', () => {
+    const verdict = validateCandidate(candidate({ statement: 'Memory 应关闭缓存' }), context({
+      activeFamily: [{ claimId: 'opposite', statement: 'Memory 应开启缓存' }],
+    }))
+    expect(verdict.status).toBe('conflict')
+    expect(tokenSimilarity('Memory 应关闭缓存', 'Memory 应开启缓存')).toBeLessThan(1)
+    expect(tokenSimilarity('应开启缓存', '应开启缓存')).toBe(1)
+  })
+
+  test('an exact match wins over earlier weaker family matches', () => {
+    expect(validateCandidate(candidate(), context({ activeFamily: [
+      { claimId: 'weaker', statement: 'Vitest files live next to sources and cover every module' },
+      { claimId: 'exact', statement: candidate().statement },
+    ] }))).toMatchObject({ status: 'duplicate', duplicateOfClaimId: 'exact' })
+  })
+
+  test('policy counts independent sources, not multiple handles for the same event', () => {
+    const verdict = validateCandidate(candidate({ evidenceHandles: [...HANDLES] }), context({
+      policy: { ...SYSTEM_EXTRACTION_POLICY_V1, evidence: { min_items: 2, require_terminal_outcome: true, require_distinct_turns: 2 } },
+      evidenceSourceKeys: new Map([...HANDLES].map(handle => [handle, 'same-event'])),
+    }))
+    expect(verdict.validation.codes).toEqual(expect.arrayContaining([
+      'policy_evidence_min_items', 'policy_terminal_outcome_required', 'policy_distinct_turns_unavailable',
+    ]))
+  })
+
+  test('value thresholds are independent of confidence and fail closed without assessments', () => {
+    const ctx = context({ policy: { ...SYSTEM_EXTRACTION_POLICY_V1,
+      value_filter: { min_utility: 0.8, min_repeatability: 0.8, max_friction: 0.2 },
+    } })
+    expect(validateCandidate(candidate(), ctx).validation.codes).toContain('policy_value_assessment_required')
+    expect(validateCandidate(candidate({ valueAssessment: { utility: 0.4, repeatability: 0.5, friction: 0.9 } }), ctx)
+      .validation.codes).toEqual(expect.arrayContaining(['policy_utility_below_minimum', 'policy_repeatability_below_minimum', 'policy_friction_above_maximum']))
+    expect(validateCandidate(candidate({ valueAssessment: { utility: 0.9, repeatability: 0.9, friction: 0.1 } }), ctx).status).toBe('validated')
+  })
+
+  test('task and installation scopes cannot attach invented repository metadata', () => {
+    expect(validateCandidate(candidate({ scopeKind: 'task', scopeKey: 'turn-1', repositoryId: 'unknown' }), context()).validation.codes)
+      .toContain('scope_repository_mismatch')
+    expect(validateCandidate(candidate({ scopeKey: 'not-global' }), context()).status).toBe('rejected_by_validator')
+  })
+
   test('a clean candidate validates', () => {
     const verdict = validateCandidate(candidate(), context())
     expect(verdict).toMatchObject({ status: 'validated' })
+  })
+
+  test.each([
+    '代码已提交为 5fd4c4c9，并推送到 develop 后合并到 master，本次跳过 tag。',
+    'Committed 5fd4c4c9, pushed develop, and successfully merged it into master without a tag.',
+    '当前工作区 clean，分支已推送。',
+  ])('rejects routine version-control audit events: %s', statement => {
+    const verdict = validateCandidate(candidate({ statement }), context())
+    expect(verdict).toMatchObject({
+      status: 'rejected_by_validator',
+      validation: { codes: expect.arrayContaining(['ephemeral_vcs_operation']) },
+    })
+  })
+
+  test.each([
+    ['repository_convention', '发布必须先将 develop 合并到 master，并且只有发布构建通过后才能创建 tag。'],
+    ['operational_runbook', 'When a git push fails because the remote is not a fast-forward, fetch and rebase before retrying.'],
+    ['bug_root_cause', '合并失败的根因是远端 master 已包含本地缺失的提交，rebase 后问题解决。'],
+  ])('keeps durable version-control knowledge reviewable for %s', (claimType, statement) => {
+    expect(validateCandidate(candidate({ claimType, statement }), context()).status).toBe('validated')
   })
 
   test('evidence handles must resolve inside the episode manifest', () => {
@@ -137,11 +200,11 @@ describe('candidate validator', () => {
     expect(verdict.validation).toMatchObject({ codes: ['tombstoned_identity'] })
   })
 
-  test('near duplicates are marked duplicate and point at the active claim', () => {
+  test('near matches stay reviewable because lexical overlap does not establish equivalence', () => {
     const verdict = validateCandidate(candidate(), context({
       activeFamily: [{ claimId: 'claim-1', statement: 'Vitest files live next to the sources' }],
     }))
-    expect(verdict).toMatchObject({ status: 'duplicate', duplicateOfClaimId: 'claim-1' })
+    expect(verdict).toMatchObject({ status: 'conflict', duplicateOfClaimId: 'claim-1' })
   })
 
   test('mid-band similarity becomes a conflict, never an automatic supersede', () => {

@@ -10,6 +10,8 @@ import {
   normalizedKeyForCandidate,
 } from '../extraction/schema.js'
 import type { ModelJsonResult, TextGenerator } from '../ports/text-generator.js'
+import { SYSTEM_EXTRACTION_POLICY_V1, canonicalPolicyHash } from '../policies/schemas.js'
+import { EXTRACTION_PROMPT_VERSION } from '../extraction/prompt.js'
 
 const INSTALLATION = '11111111-1111-4111-8111-111111111111'
 
@@ -27,6 +29,9 @@ function fakeStore(episodeOverrides: Partial<Parameters<ExtractionRepository['lo
       extractionMode: 'enabled',
       sessionFirstRecordedAt: new Date('2026-08-31T00:00:00.000Z'),
       hasPriorRunOnOldDigest: false,
+      terminalAt: new Date('2026-09-01T00:00:00Z'),
+      outcome: 'completed',
+      repositoryId: null, repoSnapshotId: null, branch: null,
       ...episodeOverrides,
     })),
     reserveRun: vi.fn(async () => ({ runId: 'run-1', owner: true, existingState: null })),
@@ -85,7 +90,7 @@ describe('candidate extraction schema', () => {
     expect(validateExtractionOutput(output).ok).toBe(true)
   })
 
-  test('rejects unknown keys, bad handles, out-of-range confidence, empty sets and >16 candidates', () => {
+  test('accepts empty results but rejects unknown keys, bad handles, invalid confidence and >16 candidates', () => {
     expect(validateExtractionOutput({ candidates: okOutput().candidates, extra: 1 }).ok).toBe(false)
     expect(validateExtractionOutput({
       candidates: [{ ...okOutput().candidates[0], evidence_handles: ['not-a-handle'] }],
@@ -93,7 +98,7 @@ describe('candidate extraction schema', () => {
     expect(validateExtractionOutput({
       candidates: [{ ...okOutput().candidates[0], confidence: 1.5 }],
     }).ok).toBe(false)
-    expect(validateExtractionOutput({ candidates: [] }).ok).toBe(false)
+    expect(validateExtractionOutput({ candidates: [] }).ok).toBe(true)
     expect(validateExtractionOutput({
       candidates: Array.from({ length: 17 }, () => okOutput().candidates[0]),
     }).ok).toBe(false)
@@ -134,6 +139,9 @@ describe('extraction prompts', () => {
     expect(prompt).toContain('h0-aaaaaaaa')
     expect(prompt).toContain('h1-bbbbbbbb')
     expect(prompt).toContain('For task scope, scope_key MUST be exactly turn-synthetic-123')
+    expect(prompt).toContain('routine version-control activity')
+    expect(prompt).toContain('commit hashes')
+    expect(prompt).toContain('durable repository convention')
   })
 
   test('the system prompt gives JSON-only models the exact claim and scope literals', () => {
@@ -165,6 +173,73 @@ describe('extraction prompts', () => {
 })
 
 describe('candidate extractor orchestration', () => {
+  const deduper = {
+    tombstonedKeys: async () => new Set<string>(),
+    activeFamilyFor: async () => ({ exactClaimId: null, family: [] }),
+  }
+
+  test('zero candidates succeeds once, records usage and never repairs', async () => {
+    const store = fakeStore()
+    const { fn } = generator([{ ok: true, value: { candidates: [] }, usage: { inputTokens: 10, outputTokens: 2, model: 'm' } }])
+    const result = await createCandidateExtractor({ store, textGenerator: { generateJson: fn as never }, ...DEPS_BASE, deduper })
+      .extract({ installationId: INSTALLATION, turnId: 'turn-1', signal: new AbortController().signal })
+    expect(result).toMatchObject({ kind: 'succeeded', candidateCount: 0 })
+    expect(fn).toHaveBeenCalledTimes(1)
+    expect(store.markRun).not.toHaveBeenCalled()
+    expect(store.persistCandidates).toHaveBeenCalledWith(expect.objectContaining({ candidates: [], usage: expect.objectContaining({ inputTokens: 10 }) }))
+  })
+
+  test('repair retains policy and disallowed output never becomes reviewable', async () => {
+    const store = fakeStore()
+    const document = { ...SYSTEM_EXTRACTION_POLICY_V1,
+      focus: { ...SYSTEM_EXTRACTION_POLICY_V1.focus, claim_types: ['bug_root_cause'], exclude_topics: ['frontend'] },
+      evidence: { ...SYSTEM_EXTRACTION_POLICY_V1.evidence, min_items: 2 },
+    }
+    const { fn, calls } = generator([
+      { ok: false, code: 'invalid_json', retryable: false },
+      { ok: true, value: okOutput(), usage: { inputTokens: 1, outputTokens: 1, model: 'm' } },
+    ])
+    await createCandidateExtractor({ store, textGenerator: { generateJson: fn as never }, ...DEPS_BASE, deduper,
+      resolvePolicy: async () => ({ document, effectivePolicyHash: canonicalPolicyHash(document) }),
+    }).extract({ installationId: INSTALLATION, turnId: 'turn-1', signal: new AbortController().signal })
+    for (const call of calls) {
+      expect(call.system).toContain('Restrict claim_type to exactly these values: ["bug_root_cause"]')
+      expect(call.system).toContain('frontend')
+    }
+    expect(store.persistCandidates.mock.calls[0][0].candidates[0]).toMatchObject({
+      status: 'rejected_by_validator',
+      validation: { codes: expect.arrayContaining(['policy_claim_type_excluded', 'policy_evidence_min_items']) },
+    })
+  })
+
+  test('identical candidates collapse and freshness comes from evidence, not the model', async () => {
+    const store = fakeStore({ manifest: { 'h0-aaaaaaaa': { kind: 'event', source_event_id: 'ev-1', occurred_at: '2026-08-30T12:00:00Z' } } })
+    const proposal = { ...okOutput().candidates[0], freshness_at: '2099-01-01T00:00:00Z' }
+    const { fn } = generator([{ ok: true, value: { candidates: [proposal, proposal] }, usage: { inputTokens: 1, outputTokens: 1, model: 'm' } }])
+    const result = await createCandidateExtractor({ store, textGenerator: { generateJson: fn as never }, ...DEPS_BASE, deduper })
+      .extract({ installationId: INSTALLATION, turnId: 'turn-1', signal: new AbortController().signal })
+    expect(result).toMatchObject({ candidateCount: 1 })
+    expect(store.persistCandidates.mock.calls[0][0].candidates[0]).toMatchObject({ status: 'validated', freshnessAt: new Date('2026-08-30T12:00:00Z') })
+  })
+
+  test('old policy labels cannot mislabel the actual prompt; template constraints change run identity', async () => {
+    const hashes: Buffer[] = []
+    for (const topics of [[], ['testing']]) {
+      const store = fakeStore()
+      const document = { ...SYSTEM_EXTRACTION_POLICY_V1,
+        versions: { ...SYSTEM_EXTRACTION_POLICY_V1.versions, prompt: 'legacy-v3' },
+        focus: { ...SYSTEM_EXTRACTION_POLICY_V1.focus, include_topics: topics },
+      }
+      const { fn } = generator([{ ok: true, value: { candidates: [] }, usage: { inputTokens: 1, outputTokens: 1, model: 'm' } }])
+      await createCandidateExtractor({ store, textGenerator: { generateJson: fn as never }, ...DEPS_BASE,
+        resolvePolicy: async () => ({ document, effectivePolicyHash: Buffer.from('same') }),
+      }).extract({ installationId: INSTALLATION, turnId: 'turn-1', signal: new AbortController().signal })
+      expect(store.reserveRun.mock.calls[0][0].promptVersion).toBe(EXTRACTION_PROMPT_VERSION)
+      hashes.push(store.reserveRun.mock.calls[0][0].modelConfigHash)
+    }
+    expect(hashes[0]).not.toEqual(hashes[1])
+  })
+
   test('skips episodes before the configured cutoff without reserving or calling the provider', async () => {
     const store = fakeStore({ sessionFirstRecordedAt: new Date('2026-08-30T23:59:59.999Z') })
     const { fn } = generator([{ ok: true, value: okOutput(), usage: { inputTokens: 1, outputTokens: 1, model: 'm' } }])
